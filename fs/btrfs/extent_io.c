@@ -2010,10 +2010,6 @@ int repair_io_failure(struct btrfs_inode *inode, u64 start, u64 length,
 	ASSERT(!(fs_info->sb->s_flags & MS_RDONLY));
 	BUG_ON(!mirror_num);
 
-	/* we can't repair anything in raid56 yet */
-	if (btrfs_is_parity_mirror(map_tree, logical, length, mirror_num))
-		return 0;
-
 	bio = btrfs_io_bio_alloc(GFP_NOFS, 1);
 	if (!bio)
 		return -EIO;
@@ -2026,17 +2022,30 @@ int repair_io_failure(struct btrfs_inode *inode, u64 start, u64 length,
 	 * read repair operation.
 	 */
 	btrfs_bio_counter_inc_blocked(fs_info);
-	ret = btrfs_map_block(fs_info, BTRFS_MAP_WRITE, logical,
-			      &map_length, &bbio, mirror_num);
-	if (ret) {
-		btrfs_bio_counter_dec(fs_info);
-		bio_put(bio);
-		return -EIO;
+	if (btrfs_is_parity_mirror(map_tree, logical, length, mirror_num)) {
+		/* use BTRFS_MAP_READ to get the phy dev and sector */
+		ret = btrfs_map_block(fs_info, BTRFS_MAP_READ, logical,
+				      &map_length, &bbio, 0);
+		if (ret) {
+			btrfs_bio_counter_dec(fs_info);
+			bio_put(bio);
+			return -EIO;
+		}
+		ASSERT(bbio->mirror_num == 1);
+	} else {
+		ret = btrfs_map_block(fs_info, BTRFS_MAP_WRITE, logical,
+				      &map_length, &bbio, mirror_num);
+		if (ret) {
+			btrfs_bio_counter_dec(fs_info);
+			bio_put(bio);
+			return -EIO;
+		}
+		BUG_ON(mirror_num != bbio->mirror_num);
 	}
-	BUG_ON(mirror_num != bbio->mirror_num);
-	sector = bbio->stripes[mirror_num-1].physical >> 9;
+
+	sector = bbio->stripes[bbio->mirror_num - 1].physical >> 9;
 	bio->bi_iter.bi_sector = sector;
-	dev = bbio->stripes[mirror_num-1].dev;
+	dev = bbio->stripes[bbio->mirror_num - 1].dev;
 	btrfs_put_bbio(bbio);
 	if (!dev || !dev->bdev || !dev->writeable) {
 		btrfs_bio_counter_dec(fs_info);
