@@ -6197,6 +6197,7 @@ int btrfs_map_bio(struct btrfs_fs_info *fs_info, struct bio *bio,
 		} else {
 			ret = raid56_parity_recover(fs_info, bio, bbio,
 						    map_length, mirror_num, 1);
+			btrfs_io_bio(bio)->mirror_num = mirror_num;
 		}
 
 		btrfs_bio_counter_dec(fs_info);

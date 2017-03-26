@@ -2010,10 +2010,6 @@ int repair_io_failure(struct btrfs_inode *inode, u64 start, u64 length,
 	ASSERT(!(fs_info->sb->s_flags & MS_RDONLY));
 	BUG_ON(!mirror_num);
 
-	/* we can't repair anything in raid56 yet */
-	if (btrfs_is_parity_mirror(map_tree, logical, length, mirror_num))
-		return 0;
-
 	bio = btrfs_io_bio_alloc(GFP_NOFS, 1);
 	if (!bio)
 		return -EIO;
@@ -2026,17 +2022,30 @@ int repair_io_failure(struct btrfs_inode *inode, u64 start, u64 length,
 	 * read repair operation.
 	 */
 	btrfs_bio_counter_inc_blocked(fs_info);
-	ret = btrfs_map_block(fs_info, BTRFS_MAP_WRITE, logical,
-			      &map_length, &bbio, mirror_num);
-	if (ret) {
-		btrfs_bio_counter_dec(fs_info);
-		bio_put(bio);
-		return -EIO;
+	if (btrfs_is_parity_mirror(map_tree, logical, length, mirror_num)) {
+		/* use BTRFS_MAP_READ to get the phy dev and sector */
+		ret = btrfs_map_block(fs_info, BTRFS_MAP_READ, logical,
+				      &map_length, &bbio, 0);
+		if (ret) {
+			btrfs_bio_counter_dec(fs_info);
+			bio_put(bio);
+			return -EIO;
+		}
+		ASSERT(bbio->mirror_num == 1);
+	} else {
+		ret = btrfs_map_block(fs_info, BTRFS_MAP_WRITE, logical,
+				      &map_length, &bbio, mirror_num);
+		if (ret) {
+			btrfs_bio_counter_dec(fs_info);
+			bio_put(bio);
+			return -EIO;
+		}
+		BUG_ON(mirror_num != bbio->mirror_num);
 	}
-	BUG_ON(mirror_num != bbio->mirror_num);
-	sector = bbio->stripes[mirror_num-1].physical >> 9;
+
+	sector = bbio->stripes[bbio->mirror_num - 1].physical >> 9;
 	bio->bi_iter.bi_sector = sector;
-	dev = bbio->stripes[mirror_num-1].dev;
+	dev = bbio->stripes[bbio->mirror_num - 1].dev;
 	btrfs_put_bbio(bbio);
 	if (!dev || !dev->bdev || !dev->writeable) {
 		btrfs_bio_counter_dec(fs_info);
@@ -2584,26 +2593,36 @@ static void end_bio_extent_readpage(struct bio *bio)
 
 		if (tree->ops) {
 			ret = tree->ops->readpage_io_failed_hook(page, mirror);
-			if (!ret && !bio->bi_error)
-				uptodate = 1;
-		} else {
-			/*
-			 * The generic bio_readpage_error handles errors the
-			 * following way: If possible, new read requests are
-			 * created and submitted and will end up in
-			 * end_bio_extent_readpage as well (if we're lucky, not
-			 * in the !uptodate case). In that case it returns 0 and
-			 * we just go on with the next page in our bio. If it
-			 * can't handle the error it will return -EIO and we
-			 * remain responsible for that page.
-			 */
-			ret = bio_readpage_error(bio, offset, page, start, end,
-						 mirror);
-			if (ret == 0) {
-				uptodate = !bio->bi_error;
-				offset += len;
-				continue;
+			if (ret == -EAGAIN) {
+				/*
+				 * Data inode's readpage_io_failed_hook() always
+				 * returns -EAGAIN.
+				 *
+				 * The generic bio_readpage_error handles errors
+				 * the following way: If possible, new read
+				 * requests are created and submitted and will
+				 * end up in end_bio_extent_readpage as well (if
+				 * we're lucky, not in the !uptodate case). In
+				 * that case it returns 0 and we just go on with
+				 * the next page in our bio. If it can't handle
+				 * the error it will return -EIO and we remain
+				 * responsible for that page.
+				 */
+				ret = bio_readpage_error(bio, offset, page,
+							 start, end, mirror);
+				if (ret == 0) {
+					uptodate = !bio->bi_error;
+					offset += len;
+					continue;
+				}
 			}
+
+			/*
+			 * metadata's readpage_io_failed_hook() always returns
+			 * -EIO and fixes nothing.  -EIO is also returned if
+			 * data inode error could not be fixed.
+			 */
+			ASSERT(ret == -EIO);
 		}
 readpage_ok:
 		if (likely(uptodate)) {
