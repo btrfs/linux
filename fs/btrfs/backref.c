@@ -1012,7 +1012,11 @@ static int __add_inline_refs(struct btrfs_path *path, u64 bytenr,
 		int type;
 
 		iref = (struct btrfs_extent_inline_ref *)ptr;
-		type = btrfs_extent_inline_ref_type(leaf, iref);
+		type = btrfs_get_extent_inline_ref_type(leaf, iref,
+							BTRFS_REF_TYPE_ANY);
+		if (type == BTRFS_REF_TYPE_INVALID)
+			return -EINVAL;
+
 		offset = btrfs_extent_inline_ref_offset(leaf, iref);
 
 		switch (type) {
@@ -1908,7 +1912,10 @@ static int __get_extent_inline_ref(unsigned long *ptr, struct extent_buffer *eb,
 
 	end = (unsigned long)ei + item_size;
 	*out_eiref = (struct btrfs_extent_inline_ref *)(*ptr);
-	*out_type = btrfs_extent_inline_ref_type(eb, *out_eiref);
+	*out_type = btrfs_get_extent_inline_ref_type(eb, *out_eiref,
+						     BTRFS_REF_TYPE_ANY);
+	if (*out_type == BTRFS_REF_TYPE_INVALID)
+		return -EINVAL;
 
 	*ptr += btrfs_extent_inline_ref_size(*out_type);
 	WARN_ON(*ptr > end);
