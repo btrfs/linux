@@ -32,6 +32,7 @@
 #include "free-space-cache.h"
 #include "inode-map.h"
 #include "qgroup.h"
+#include "print-tree.h"
 
 /*
  * backref_node, mapping_node and tree_block start with this
@@ -3485,7 +3486,16 @@ again:
 			goto again;
 		}
 	}
-	BUG_ON(ret);
+	if (ret) {
+		ASSERT(ret == 1);
+		btrfs_print_leaf(rc->extent_root->fs_info, path->nodes[0]);
+		btrfs_err(fs_info,
+	     "tree block extent item (%llu) is not found in extent tree",
+		     bytenr);
+		WARN_ON(1);
+		ret = -EINVAL;
+		goto out;
+	}
 
 	ret = add_tree_block(rc, &key, path, blocks);
 out:
