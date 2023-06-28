@@ -126,6 +126,7 @@ static int btrfs_setsize(struct inode *inode, struct iattr *attr);
 static int btrfs_truncate(struct btrfs_inode *inode, bool skip_writeback);
 
 #define CFR_KEEP_LOCKED		(1 << 0)
+#define CFR_NOINLINE		(1 << 1)
 static noinline int cow_file_range(struct btrfs_inode *inode,
 				   struct page *locked_page,
 				   u64 start, u64 end, int *page_started,
@@ -1426,7 +1427,8 @@ static noinline int cow_file_range(struct btrfs_inode *inode,
 	 * This means we can trigger inline extent even if we didn't want to.
 	 * So here we skip inline extent creation completely.
 	 */
-	if (start == 0 && fs_info->sectorsize == PAGE_SIZE) {
+	if (start == 0 && fs_info->sectorsize == PAGE_SIZE &&
+	    !(flags & CFR_NOINLINE)) {
 		u64 actual_end = min_t(u64, i_size_read(&inode->vfs_inode),
 				       end + 1);
 
@@ -1889,15 +1891,17 @@ static noinline int csum_exist_in_range(struct btrfs_fs_info *fs_info,
 }
 
 static int fallback_to_cow(struct btrfs_inode *inode, struct page *locked_page,
-			   const u64 start, const u64 end,
-			   int *page_started, unsigned long *nr_written)
+			   const u64 start, const u64 end)
 {
 	const bool is_space_ino = btrfs_is_free_space_inode(inode);
 	const bool is_reloc_ino = btrfs_is_data_reloc_root(inode->root);
 	const u64 range_bytes = end + 1 - start;
 	struct extent_io_tree *io_tree = &inode->io_tree;
+	int page_started = 0;
+	unsigned long nr_written;
 	u64 range_start = start;
 	u64 count;
+	int ret;
 
 	/*
 	 * If EXTENT_NORESERVE is set it means that when the buffered write was
@@ -1950,8 +1954,15 @@ static int fallback_to_cow(struct btrfs_inode *inode, struct page *locked_page,
 					 NULL);
 	}
 
-	return cow_file_range(inode, locked_page, start, end, page_started,
-			      nr_written, NULL, 0);
+	/*
+	 * Don't try to create inline extents, as a mix of inline extent that
+	 * is written out and unlocked directly and a normal nocow extent
+	 * doesn't work.
+	 */
+	ret = cow_file_range(inode, locked_page, start, end, &page_started,
+			     &nr_written, NULL, CFR_NOINLINE);
+	ASSERT(!page_started);
+	return ret;
 }
 
 struct can_nocow_file_extent_args {
@@ -2100,9 +2111,7 @@ static int can_nocow_file_extent(struct btrfs_path *path,
  */
 static noinline int run_delalloc_nocow(struct btrfs_inode *inode,
 				       struct page *locked_page,
-				       const u64 start, const u64 end,
-				       int *page_started,
-				       unsigned long *nr_written)
+				       const u64 start, const u64 end)
 {
 	struct btrfs_fs_info *fs_info = inode->root->fs_info;
 	struct btrfs_root *root = inode->root;
@@ -2270,8 +2279,7 @@ out_check:
 		 */
 		if (cow_start != (u64)-1) {
 			ret = fallback_to_cow(inode, locked_page,
-					      cow_start, found_key.offset - 1,
-					      page_started, nr_written);
+					      cow_start, found_key.offset - 1);
 			if (ret)
 				goto error;
 			cow_start = (u64)-1;
@@ -2352,8 +2360,7 @@ out_check:
 
 	if (cow_start != (u64)-1) {
 		cur_offset = end;
-		ret = fallback_to_cow(inode, locked_page, cow_start, end,
-				      page_started, nr_written);
+		ret = fallback_to_cow(inode, locked_page, cow_start, end);
 		if (ret)
 			goto error;
 	}
@@ -2412,8 +2419,7 @@ int btrfs_run_delalloc_range(struct btrfs_inode *inode, struct page *locked_page
 		 * preallocated inodes.
 		 */
 		ASSERT(!zoned || btrfs_is_data_reloc_root(inode->root));
-		ret = run_delalloc_nocow(inode, locked_page, start, end,
-					 page_started, nr_written);
+		ret = run_delalloc_nocow(inode, locked_page, start, end);
 		goto out;
 	}
 
