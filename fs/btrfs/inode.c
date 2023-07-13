@@ -1074,6 +1074,7 @@ static void submit_uncompressed_range(struct btrfs_inode *inode,
 	wbc_detach_inode(&wbc);
 	if (ret < 0) {
 		btrfs_cleanup_ordered_extents(inode, locked_page, start, end - start + 1);
+		mapping_set_error(inode->vfs_inode.i_mapping, ret);
 		if (locked_page) {
 			const u64 page_start = page_offset(locked_page);
 
@@ -1085,7 +1086,6 @@ static void submit_uncompressed_range(struct btrfs_inode *inode,
 			btrfs_page_clear_uptodate(inode->root->fs_info,
 						  locked_page, page_start,
 						  PAGE_SIZE);
-			mapping_set_error(locked_page->mapping, ret);
 			unlock_page(locked_page);
 		}
 	}
@@ -1525,8 +1525,6 @@ out_unlock:
 	 * pages (except @locked_page) to ensure all the pages are unlocked.
 	 */
 	if ((flags & CFR_KEEP_LOCKED) && orig_start < start) {
-		if (!locked_page)
-			mapping_set_error(inode->vfs_inode.i_mapping, ret);
 		extent_clear_unlock_delalloc(inode, orig_start, start - 1,
 					     locked_page, 0, page_ops);
 	}
