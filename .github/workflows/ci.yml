@@ -1,0 +1,102 @@
+name: CI
+
+on:
+  push:
+    branches: [ "master", "ci" ]
+  pull_request:
+    branches: [ "master", "ci" ]
+
+concurrency: one_at_a_time_gents
+
+permissions:
+    contents: read
+    checks: write
+
+jobs:
+  build:
+    runs-on: [self-hosted, linux, x64, vmhost]
+    steps:
+    - uses: actions/checkout@v3
+    - name: copy system config
+      run: copy-config.sh ${{ github.workspace }}
+    - name: make olddefconfig
+      run: make olddefconfig
+    - name: make
+      run: make -j32
+
+  build-arm:
+    runs-on: [self-hosted, linux, ARM64, vmhost]
+    steps:
+    - uses: actions/checkout@v3
+    - name: copy system config
+      run: copy-config.sh ${{ github.workspace }}
+    - name: make olddefconfig
+      run: make olddefconfig
+    - name: make
+      run: make -j32
+
+  deploy:
+    runs-on: [self-hosted, linux, x64, vmhost]
+    needs: build
+    strategy:
+      matrix:
+        vm: [xfstests5, xfstests6, xfstests7, xfstests8, xfstests9, xfstests10]
+    steps:
+    - name: update btrfs-progs
+      run: update-btrfs-progs.sh ${{ matrix.vm }}
+    - name: update xfstests
+      run: update-xfstests.sh ${{ matrix.vm }}
+    - name: update kernel
+      run: update-kernel.sh ${{ matrix.vm }} ${{ github.workspace }}
+
+  deploy-arm:
+    runs-on: [self-hosted, linux, ARM64, vmhost]
+    needs: build-arm
+    strategy:
+      matrix:
+        vm: [xfstests11, xfstests12]
+    steps:
+    - name: update btrfs-progs
+      run: update-btrfs-progs.sh ${{ matrix.vm }}
+    - name: update xfstests
+      run: update-xfstests.sh ${{ matrix.vm }}
+    - name: update vms
+      run: update-kernel.sh ${{ matrix.vm }} ${{ github.workspace }}
+
+  test:
+    runs-on: [self-hosted, linux, x64, vm]
+    needs: deploy
+    defaults:
+      run:
+        working-directory: /root/fstests
+    strategy:
+      fail-fast: false
+      matrix:
+        config_name: [btrfs_normal, btrfs_compress, btrfs_holes_spacecache, btrfs_holes_spacecache_compress, btrfs_block_group_tree]
+    steps:
+    - name: run xfstests
+      run: ./unfuck-signal ./check -E EXCLUDE -R xunit -s ${{ matrix.config_name }} -g auto
+    - name: generate report
+      uses: mikepenz/action-junit-report@v3
+      if: success() || failure()
+      with:
+        report_paths: /root/fstests/results/${{ matrix.config_name }}/result.xml
+
+  test-arm:
+    runs-on: [self-hosted, linux, ARM64, vm]
+    needs: deploy-arm
+    defaults:
+      run:
+        working-directory: /root/fstests
+    strategy:
+      fail-fast: false
+      matrix:
+        config_name: [btrfs_subpage_normal, btrfs_subpage_compress]
+    steps:
+    - name: run xfstests
+      run: ./unfuck-signal ./check -E EXCLUDE -E EXCLUDE.arm -R xunit -s ${{ matrix.config_name }} -g auto
+    - name: generate report
+      uses: mikepenz/action-junit-report@v3
+      if: success() || failure()
+      with:
+        report_paths: /root/fstests/results/${{ matrix.config_name }}/result.xml
