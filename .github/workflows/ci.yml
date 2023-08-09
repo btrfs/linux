@@ -63,6 +63,23 @@ jobs:
     - name: update vms
       run: update-kernel.sh ${{ matrix.vm }} ${{ github.workspace }}
 
+  test-zoned:
+    runs-on: [self-hosted, linux, x64, zoned]
+    needs: deploy
+    defaults:
+      run:
+        working-directory: /root/fstests
+    strategy:
+      fail-fast: false
+    steps:
+    - name: run xfstests
+      run: ./unfuck-signal ./check -E EXCLUDE -R xunit -s btrfs_zoned -g auto
+    - name: generate report
+      uses: mikepenz/action-junit-report@v3
+      if: success() || failure()
+      with:
+        report_paths: /root/fstests/results/btrfs_zoned/result.xml
+
   test:
     runs-on: [self-hosted, linux, x64, vm]
     needs: deploy
