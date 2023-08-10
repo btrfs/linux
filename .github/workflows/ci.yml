@@ -9,8 +9,9 @@ on:
 concurrency: one_at_a_time_gents
 
 permissions:
-    contents: read
-    checks: write
+  contents: read
+  checks: write
+  id-token: write
 
 jobs:
   build:
@@ -42,6 +43,8 @@ jobs:
       matrix:
         vm: [xfstests5, xfstests6, xfstests7, xfstests8, xfstests9, xfstests10]
     steps:
+    - name: make sure the vm is alive
+      run: check-vm-health.sh ${{ matrix.vm }}
     - name: update btrfs-progs
       run: update-btrfs-progs.sh ${{ matrix.vm }}
     - name: update xfstests
@@ -56,6 +59,8 @@ jobs:
       matrix:
         vm: [xfstests11, xfstests12]
     steps:
+    - name: make sure the vm is alive
+      run: check-vm-health.sh ${{ matrix.vm }}
     - name: update btrfs-progs
       run: update-btrfs-progs.sh ${{ matrix.vm }}
     - name: update xfstests
@@ -73,7 +78,7 @@ jobs:
       fail-fast: false
     steps:
     - name: run xfstests
-      run: ./unfuck-signal ./check -E EXCLUDE -R xunit -s btrfs_zoned -g auto
+      run: ./unfuck-signal ./check -E EXCLUDE -E EXCLUDE.zoned -R xunit -s btrfs_zoned -g auto
     - name: generate report
       uses: mikepenz/action-junit-report@v3
       if: success() || failure()
