@@ -30,6 +30,8 @@
 #include "root-tree.h"
 #include "tree-checker.h"
 
+#define QG_LIST_ARR_MAX 8
+
 /*
  * Helpers to access qgroup reservation
  *
@@ -154,6 +156,341 @@ static inline u64 qgroup_to_aux(struct btrfs_qgroup *qg)
 static inline struct btrfs_qgroup* unode_aux_to_qgroup(struct ulist_node *n)
 {
 	return (struct btrfs_qgroup *)(uintptr_t)n->aux;
+}
+
+
+/*
+ * A data structure that abstracts the qgroup ulist and adds a
+ * "small string" style optimization with a fixed size array. This allows
+ * us to avoid any allocations as long as qgroup hierarchies are small.
+ *
+ * qg_list supports taking a user-supplied ulist for the large hierarchy
+ * case. In that case, the caller is responsible for allocating the ulist
+ * beforehand and freeing it afterwards. If no ulist is provided, then when
+ * qg_list needs a ulist it will allocate it. In either case a single ulist
+ * can be re-used across multiple calls to qg_list_collect with qg_list_reinit
+ *
+ * The only API for populating the qg_list is qg_list_collect. It can be called
+ * once per call to qg_list_init or qg_list_reinit. i.e.,
+ * GOOD:
+ * qg_list_init(&qgl, NULL);
+ * qg_list_collect(&qgl, qg, gfp);
+ * qg_list_reinit(&qgl);
+ * qg_list_collect(&qgl, qg, gfp);
+ *
+ * BAD:
+ * qg_list_init(&qgl, NULL);
+ * qg_list_collect(&qgl, qg, gfp);
+ * qg_list_collect(&qgl, qg, gfp);
+ *
+ * Full sample usage:
+ * struct qg_list qgl;
+ * struct qg_list_iter qiter;
+ * struct btrfs_qgroup *qg = get_qgroup_from_somewhere();
+ *
+ * qg_list_init(&qgl, NULL);
+ *again:
+ * ret = qg_list_collect(&qgl, qg, gfp);
+ * if (ret) {
+ *	qg_list_free(&qgl);
+ *	handle_error(ret);
+ * }
+ *
+ * qg_list_iter_init(&qiter, &qgl);
+ * while ((qg = qg_list_iter_next(&qiter))) {
+ *	ret = do_stuff(qg);
+ *	if (ret) {
+ *		qg_list_free(&qgl);
+ *		handle_error(ret);
+ *	}
+ * }
+ * if (!done) {
+ *	qg_list_reinit(&qgl);
+ *	goto again;
+ * }
+ * qg_list_free(&qgl);
+ *
+ */
+struct qg_list {
+	/*
+	 * Behaves like a tagged union, except we don't use a union so that
+	 * we can re-use the ulist between invocations of qg_list_collect
+	 * without allocating a fresh one.
+	 */
+	struct btrfs_qgroup *arr[QG_LIST_ARR_MAX];
+	struct ulist *ul;
+	int count;
+	bool small;
+	bool owns_ul;
+};
+
+/*
+ * Initialize a qg_list
+ *
+ * @qgl: the qg_list to initialized
+ * @ul: optional ulist to use for the qg_list's ulist
+ *
+ * If ul is passed in, the caller *retains* ownership of the ul and is
+ * responsible for freeing it. qg_list will re-init it and destroy the
+ * contents, though.
+ */
+static void qg_list_init(struct qg_list *qgl, struct ulist *ul)
+{
+	memset(qgl, 0, sizeof(*qgl));
+	qgl->small = true;
+	if (ul)
+		qgl->ul = ul;
+}
+
+/*
+ * Re-initialize a qg_list for a new qg_list_collect
+ *
+ * @qgl: the qg_list to re-init
+ *
+ * reset the internal structures to do a fresh qg_list_collect
+ */
+static void qg_list_reinit(struct qg_list *qgl)
+{
+	qgl->small = true;
+	qgl->count = 0;
+	memset(qgl->arr, 0, sizeof(qgl->arr));
+	ulist_reinit(qgl->ul);
+}
+
+/*
+ * Allocate a ulist for this qg_list
+ *
+ * @qgl: the qgl to allocate a ulist for
+ * @gfp: the gfp mask to use for the ulist allocation
+ *
+ * Called at most once per qg_list; sets the ulist to use when the qgroups
+ * don't fit in the fixed size array. A ulist allocated this way is owned
+ * by the qg_list and will be freed on qg_list_free
+ *
+ * Returns: 0 on success, -ENOMEM on ulist allocation failure
+ */
+static int qg_list_alloc_ul(struct qg_list *qgl, gfp_t gfp)
+{
+	ASSERT(!qgl->owns_ul);
+	ASSERT(!qgl->ul);
+
+	qgl->ul = ulist_alloc(gfp);
+	if (!qgl->ul)
+		return -ENOMEM;
+	qgl->owns_ul = true;
+	return 0;
+}
+
+/*
+ * Free a qg_list
+ *
+ * @qgl: the qg_list to free
+ *
+ * If the qg_list owns its backing ulist, free it with ulist_free
+ */
+static void qg_list_free(struct qg_list *qgl)
+{
+	if (qgl->owns_ul)
+		ulist_free(qgl->ul);
+}
+
+/*
+ * Do not use!
+ * Helper function for qg_list_arr_collect.
+ */
+static int qg_list_arr_add(struct qg_list *qgl, struct btrfs_qgroup *qg)
+{
+	int i;
+
+	ASSERT(qgl->small);
+
+	if (qgl->count >= QG_LIST_ARR_MAX)
+		return -ENOMEM;
+
+	for (i = 0; i < qgl->count; i++) {
+		ASSERT(qgl->arr[i]);
+		if (qgl->arr[i]->qgroupid == qg->qgroupid)
+			return 0;
+	}
+	ASSERT(!qgl->arr[i]);
+
+	qgl->arr[i] = qg;
+	qgl->count++;
+	return 1;
+}
+
+/*
+ * Do not use!
+ * Helper function for qg_list_collect.
+ */
+static int qg_list_arr_collect(struct qg_list *qgl, struct btrfs_qgroup *qg)
+{
+	int ret;
+	int pos = 0;
+	struct btrfs_qgroup_list *glist;
+
+	ASSERT(qgl->small);
+	ASSERT(qgl->count == 0);
+
+	ret = qg_list_arr_add(qgl, qg);
+	if (ret < 0)
+		return ret;
+
+	while (pos < QG_LIST_ARR_MAX) {
+		qg = qgl->arr[pos];
+		if (!qg)
+			break;
+		list_for_each_entry(glist, &qg->groups, next_group) {
+			ret = qg_list_arr_add(qgl, glist->group);
+			if (ret < 0)
+				return ret;
+		}
+		pos++;
+	}
+
+	return 0;
+}
+
+/*
+ * Do not use!
+ * Helper function for qg_list_ul_collect.
+ */
+static int qg_list_ul_add(struct qg_list *qgl, struct btrfs_qgroup *qg, gfp_t gfp)
+{
+	int ret;
+
+	ASSERT(!qgl->small);
+
+	ret = ulist_add(qgl->ul, qg->qgroupid, qgroup_to_aux(qg), gfp);
+	if (ret > 0)
+		qgl->count++;
+	return ret;
+}
+
+/*
+ * Do not use!
+ * Helper function for qg_list_collect.
+ */
+static int qg_list_ul_collect(struct qg_list *qgl, struct btrfs_qgroup *qgroup, gfp_t gfp)
+{
+	struct ulist_iterator uiter;
+	struct ulist_node *unode;
+	struct btrfs_qgroup_list *glist;
+	int ret = 0;
+
+	ASSERT(!qgl->small);
+
+	ret = qg_list_ul_add(qgl, qgroup, gfp);
+	if (ret < 0)
+		return ret;
+
+	ULIST_ITER_INIT(&uiter);
+	while ((unode = ulist_next(qgl->ul, &uiter))) {
+		qgroup = unode_aux_to_qgroup(unode);
+		list_for_each_entry(glist, &qgroup->groups, next_group) {
+			ret = qg_list_ul_add(qgl, glist->group, gfp);
+			if (ret < 0)
+				return ret;
+		}
+	}
+	return 0;
+}
+
+/*
+ * Collect the qgroup hierarchy for a qgroup into a qglist.
+ *
+ * @qgl: the qg_list to fill
+ * @qg: the qgroup whose hierarchy to collect
+ * @gfp: allocator flags if we need to use the ulist
+ *
+ * First, try to fill the array in the qg_list with the hierarchy.
+ * If that overflows, fall back to using a ulist. If the qg_list has no ulist,
+ * allocates a new ulist and takes ownership of it (free-ing the qg_list will
+ * free the ulist). Otherwise, use the existing ulist.
+ *
+ * After this is called, the caller must call qg_list_free when finished
+ * to ensure that if we did make any ulist allocations, they can be freed.
+ *
+ * Must be preceded by either qg_list_init or qg_list_reinit for each call.
+ * i.e., do not call qg_list_collect twice without calling qg_list_reinit.
+ *
+ * Returns: 0 on success, -ENOMEM on allocation failure
+ */
+static int qg_list_collect(struct qg_list *qgl, struct btrfs_qgroup *qg, gfp_t gfp)
+{
+	int ret;
+
+	ret = qg_list_arr_collect(qgl, qg);
+	/* Success or a failure other than full means we're done */
+	if (!ret || ret != -ENOMEM)
+		return ret;
+
+	/*
+	 * Now try with a ulist.
+	 * Either re-use one we already have, or allocate a new one.
+	 */
+	if (!qgl->ul) {
+		ret = qg_list_alloc_ul(qgl, gfp);
+		if (ret)
+			return ret;
+	}
+
+	qg_list_reinit(qgl);
+	ret = qg_list_ul_collect(qgl, qg, gfp);
+	if (ret)
+		qg_list_free(qgl);
+	return ret;
+}
+
+/*
+ * An iterator over a qg_list that does the right thing based on which
+ * storage the qg_list is using.
+ *
+ * Sample usage included above with the struct qg_list documentation.
+ */
+struct qg_list_iter {
+	struct qg_list *qgl;
+	union {
+		int arr_iter;
+		struct ulist_iterator ulist_iter;
+	};
+};
+
+/*
+ * Initialize a qg_list iterator
+ *
+ * @qiter: the iterator to initialize
+ * @qgl: the qg_list to iterate
+ */
+static void qg_list_iter_init(struct qg_list_iter *qiter, struct qg_list *qgl)
+{
+	memset(qiter, 0, sizeof(*qiter));
+	qiter->qgl = qgl;
+	if (!qgl->small)
+		ULIST_ITER_INIT(&qiter->ulist_iter);
+}
+
+/*
+ * Step through a qg_list iterator
+ *
+ * @qiter: the qg_list iterator to advance
+ *
+ * Returns: the next btrfs_qgroup* in the iterator, or NULL when it is exhausted.
+ */
+static struct btrfs_qgroup *qg_list_iter_next(struct qg_list_iter *qiter)
+{
+	struct qg_list *qgl = qiter->qgl;
+	struct ulist_node *unode;
+
+	if (qgl->small) {
+		if (qiter->arr_iter < qgl->count)
+			return qgl->arr[qiter->arr_iter++];
+		return NULL;
+	}
+	unode = ulist_next(qgl->ul, &qiter->ulist_iter);
+	if (!unode)
+		return NULL;
+	return unode_aux_to_qgroup(unode);
 }
 
 static int
