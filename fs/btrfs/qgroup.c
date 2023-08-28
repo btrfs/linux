@@ -1698,42 +1698,24 @@ static int __qgroup_excl_accounting(struct btrfs_fs_info *fs_info,
 				    struct btrfs_qgroup *src, int sign)
 {
 	struct btrfs_qgroup *qgroup;
-	struct btrfs_qgroup_list *glist;
-	struct ulist_node *unode;
-	struct ulist_iterator uiter;
+	struct qg_list qgl;
+	struct qg_list_iter qiter;
 	u64 num_bytes = src->excl;
-	int ret = 0;
+	int ret;
 
 	qgroup = find_qgroup_rb(fs_info, ref_root);
-	if (!qgroup)
+	if (!qgroup) {
+		ret = 0;
 		goto out;
-
-	qgroup->rfer += sign * num_bytes;
-	qgroup->rfer_cmpr += sign * num_bytes;
-
-	WARN_ON(sign < 0 && qgroup->excl < num_bytes);
-	qgroup->excl += sign * num_bytes;
-	qgroup->excl_cmpr += sign * num_bytes;
-
-	if (sign > 0)
-		qgroup_rsv_add_by_qgroup(fs_info, qgroup, src);
-	else
-		qgroup_rsv_release_by_qgroup(fs_info, qgroup, src);
-
-	qgroup_dirty(fs_info, qgroup);
-
-	/* Get all of the parent groups that contain this qgroup */
-	list_for_each_entry(glist, &qgroup->groups, next_group) {
-		ret = ulist_add(tmp, glist->group->qgroupid,
-				qgroup_to_aux(glist->group), GFP_ATOMIC);
-		if (ret < 0)
-			goto out;
 	}
 
-	/* Iterate all of the parents and adjust their reference counts */
-	ULIST_ITER_INIT(&uiter);
-	while ((unode = ulist_next(tmp, &uiter))) {
-		qgroup = unode_aux_to_qgroup(unode);
+	/* Iterate all of the qgroups and adjust their reference counts */
+	qg_list_init(&qgl, tmp);
+	ret = qg_list_collect(&qgl, qgroup, GFP_ATOMIC);
+	if (ret)
+		goto free_qg_list;
+	qg_list_iter_init(&qiter, &qgl);
+	while ((qgroup = qg_list_iter_next(&qiter))) {
 		qgroup->rfer += sign * num_bytes;
 		qgroup->rfer_cmpr += sign * num_bytes;
 		WARN_ON(sign < 0 && qgroup->excl < num_bytes);
@@ -1744,16 +1726,10 @@ static int __qgroup_excl_accounting(struct btrfs_fs_info *fs_info,
 			qgroup_rsv_release_by_qgroup(fs_info, qgroup, src);
 		qgroup->excl_cmpr += sign * num_bytes;
 		qgroup_dirty(fs_info, qgroup);
-
-		/* Add any parents of the parents */
-		list_for_each_entry(glist, &qgroup->groups, next_group) {
-			ret = ulist_add(tmp, glist->group->qgroupid,
-					qgroup_to_aux(glist->group), GFP_ATOMIC);
-			if (ret < 0)
-				goto out;
-		}
 	}
 	ret = 0;
+free_qg_list:
+	qg_list_free(&qgl);
 out:
 	return ret;
 }
@@ -3459,11 +3435,11 @@ static int qgroup_reserve(struct btrfs_root *root, u64 num_bytes, bool enforce,
 			  enum btrfs_qgroup_rsv_type type)
 {
 	struct btrfs_qgroup *qgroup;
+	struct qg_list qgl;
+	struct qg_list_iter qiter;
 	struct btrfs_fs_info *fs_info = root->fs_info;
 	u64 ref_root = root->root_key.objectid;
 	int ret = 0;
-	struct ulist_node *unode;
-	struct ulist_iterator uiter;
 
 	if (!is_fstree(ref_root))
 		return 0;
@@ -3477,55 +3453,29 @@ static int qgroup_reserve(struct btrfs_root *root, u64 num_bytes, bool enforce,
 
 	spin_lock(&fs_info->qgroup_lock);
 	if (!fs_info->quota_root)
-		goto out;
+		goto unlock;
 
 	qgroup = find_qgroup_rb(fs_info, ref_root);
 	if (!qgroup)
-		goto out;
+		goto unlock;
 
-	/*
-	 * in a first step, we check all affected qgroups if any limits would
-	 * be exceeded
-	 */
-	ulist_reinit(fs_info->qgroup_ulist);
-	ret = ulist_add(fs_info->qgroup_ulist, qgroup->qgroupid,
-			qgroup_to_aux(qgroup), GFP_ATOMIC);
-	if (ret < 0)
-		goto out;
-	ULIST_ITER_INIT(&uiter);
-	while ((unode = ulist_next(fs_info->qgroup_ulist, &uiter))) {
-		struct btrfs_qgroup *qg;
-		struct btrfs_qgroup_list *glist;
-
-		qg = unode_aux_to_qgroup(unode);
-
-		if (enforce && !qgroup_check_limits(qg, num_bytes)) {
+	qg_list_init(&qgl, fs_info->qgroup_ulist);
+	ret = qg_list_collect(&qgl, qgroup, GFP_ATOMIC);
+	if (ret)
+		goto free_list;
+	qg_list_iter_init(&qiter, &qgl);
+	while ((qgroup = qg_list_iter_next(&qiter))) {
+		if (enforce && !qgroup_check_limits(qgroup, num_bytes)) {
 			ret = -EDQUOT;
-			goto out;
-		}
-
-		list_for_each_entry(glist, &qg->groups, next_group) {
-			ret = ulist_add(fs_info->qgroup_ulist,
-					glist->group->qgroupid,
-					qgroup_to_aux(glist->group), GFP_ATOMIC);
-			if (ret < 0)
-				goto out;
+			goto free_list;
 		}
 	}
-	ret = 0;
-	/*
-	 * no limits exceeded, now record the reservation into all qgroups
-	 */
-	ULIST_ITER_INIT(&uiter);
-	while ((unode = ulist_next(fs_info->qgroup_ulist, &uiter))) {
-		struct btrfs_qgroup *qg;
-
-		qg = unode_aux_to_qgroup(unode);
-
-		qgroup_rsv_add(fs_info, qg, num_bytes, type);
-	}
-
-out:
+	qg_list_iter_init(&qiter, &qgl);
+	while ((qgroup = qg_list_iter_next(&qiter)))
+		qgroup_rsv_add(fs_info, qgroup, num_bytes, type);
+free_list:
+	qg_list_free(&qgl);
+unlock:
 	spin_unlock(&fs_info->qgroup_lock);
 	return ret;
 }
@@ -3544,8 +3494,8 @@ void btrfs_qgroup_free_refroot(struct btrfs_fs_info *fs_info,
 			       enum btrfs_qgroup_rsv_type type)
 {
 	struct btrfs_qgroup *qgroup;
-	struct ulist_node *unode;
-	struct ulist_iterator uiter;
+	struct qg_list qgl;
+	struct qg_list_iter qiter;
 	int ret = 0;
 
 	if (!is_fstree(ref_root))
@@ -3561,11 +3511,11 @@ void btrfs_qgroup_free_refroot(struct btrfs_fs_info *fs_info,
 	spin_lock(&fs_info->qgroup_lock);
 
 	if (!fs_info->quota_root)
-		goto out;
+		goto unlock;
 
 	qgroup = find_qgroup_rb(fs_info, ref_root);
 	if (!qgroup)
-		goto out;
+		goto unlock;
 
 	if (num_bytes == (u64)-1)
 		/*
@@ -3574,30 +3524,17 @@ void btrfs_qgroup_free_refroot(struct btrfs_fs_info *fs_info,
 		 */
 		num_bytes = qgroup->rsv.values[type];
 
-	ulist_reinit(fs_info->qgroup_ulist);
-	ret = ulist_add(fs_info->qgroup_ulist, qgroup->qgroupid,
-			qgroup_to_aux(qgroup), GFP_ATOMIC);
-	if (ret < 0)
-		goto out;
-	ULIST_ITER_INIT(&uiter);
-	while ((unode = ulist_next(fs_info->qgroup_ulist, &uiter))) {
-		struct btrfs_qgroup *qg;
-		struct btrfs_qgroup_list *glist;
+	qg_list_init(&qgl, fs_info->qgroup_ulist);
+	ret = qg_list_collect(&qgl, qgroup, GFP_ATOMIC);
+	if (ret)
+		goto free_list;
+	qg_list_iter_init(&qiter, &qgl);
+	while ((qgroup = qg_list_iter_next(&qiter)))
+		qgroup_rsv_release(fs_info, qgroup, num_bytes, type);
 
-		qg = unode_aux_to_qgroup(unode);
-
-		qgroup_rsv_release(fs_info, qg, num_bytes, type);
-
-		list_for_each_entry(glist, &qg->groups, next_group) {
-			ret = ulist_add(fs_info->qgroup_ulist,
-					glist->group->qgroupid,
-					qgroup_to_aux(glist->group), GFP_ATOMIC);
-			if (ret < 0)
-				goto out;
-		}
-	}
-
-out:
+free_list:
+	qg_list_free(&qgl);
+unlock:
 	spin_unlock(&fs_info->qgroup_lock);
 }
 
@@ -4441,8 +4378,8 @@ static void qgroup_convert_meta(struct btrfs_fs_info *fs_info, u64 ref_root,
 				int num_bytes)
 {
 	struct btrfs_qgroup *qgroup;
-	struct ulist_node *unode;
-	struct ulist_iterator uiter;
+	struct qg_list qgl;
+	struct qg_list_iter qiter;
 	int ret = 0;
 
 	if (num_bytes == 0)
@@ -4453,32 +4390,20 @@ static void qgroup_convert_meta(struct btrfs_fs_info *fs_info, u64 ref_root,
 	spin_lock(&fs_info->qgroup_lock);
 	qgroup = find_qgroup_rb(fs_info, ref_root);
 	if (!qgroup)
-		goto out;
-	ulist_reinit(fs_info->qgroup_ulist);
-	ret = ulist_add(fs_info->qgroup_ulist, qgroup->qgroupid,
-		       qgroup_to_aux(qgroup), GFP_ATOMIC);
-	if (ret < 0)
-		goto out;
-	ULIST_ITER_INIT(&uiter);
-	while ((unode = ulist_next(fs_info->qgroup_ulist, &uiter))) {
-		struct btrfs_qgroup *qg;
-		struct btrfs_qgroup_list *glist;
-
-		qg = unode_aux_to_qgroup(unode);
-
-		qgroup_rsv_release(fs_info, qg, num_bytes,
+		goto unlock;
+	qg_list_init(&qgl, fs_info->qgroup_ulist);
+	ret = qg_list_collect(&qgl, qgroup, GFP_ATOMIC);
+	if (ret)
+		goto free_qg_list;
+	while ((qgroup = qg_list_iter_next(&qiter))) {
+		qgroup_rsv_release(fs_info, qgroup, num_bytes,
 				BTRFS_QGROUP_RSV_META_PREALLOC);
-		qgroup_rsv_add(fs_info, qg, num_bytes,
+		qgroup_rsv_add(fs_info, qgroup, num_bytes,
 				BTRFS_QGROUP_RSV_META_PERTRANS);
-		list_for_each_entry(glist, &qg->groups, next_group) {
-			ret = ulist_add(fs_info->qgroup_ulist,
-					glist->group->qgroupid,
-					qgroup_to_aux(glist->group), GFP_ATOMIC);
-			if (ret < 0)
-				goto out;
-		}
 	}
-out:
+free_qg_list:
+	qg_list_free(&qgl);
+unlock:
 	spin_unlock(&fs_info->qgroup_lock);
 }
 
