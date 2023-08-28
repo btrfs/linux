@@ -2769,51 +2769,41 @@ static int qgroup_update_refcnt(struct btrfs_fs_info *fs_info,
 {
 	struct ulist_node *unode;
 	struct ulist_iterator uiter;
-	struct ulist_node *tmp_unode;
-	struct ulist_iterator tmp_uiter;
 	struct btrfs_qgroup *qg;
+	struct qg_list qgl;
+	struct qg_list_iter qiter;
 	int ret = 0;
 
 	if (!roots)
 		return 0;
+	qg_list_init(&qgl, tmp);
 	ULIST_ITER_INIT(&uiter);
 	while ((unode = ulist_next(roots, &uiter))) {
 		qg = find_qgroup_rb(fs_info, unode->val);
 		if (!qg)
 			continue;
 
-		ulist_reinit(tmp);
-		ret = ulist_add(qgroups, qg->qgroupid, qgroup_to_aux(qg),
-				GFP_ATOMIC);
+		qg_list_reinit(&qgl);
+		ret = qg_list_collect(&qgl, qg, GFP_ATOMIC);
 		if (ret < 0)
-			return ret;
-		ret = ulist_add(tmp, qg->qgroupid, qgroup_to_aux(qg), GFP_ATOMIC);
-		if (ret < 0)
-			return ret;
-		ULIST_ITER_INIT(&tmp_uiter);
-		while ((tmp_unode = ulist_next(tmp, &tmp_uiter))) {
-			struct btrfs_qgroup_list *glist;
-
-			qg = unode_aux_to_qgroup(tmp_unode);
+			goto out;
+		qg_list_iter_init(&qiter, &qgl);
+		while ((qg = qg_list_iter_next(&qiter))) {
 			if (update_old)
 				btrfs_qgroup_update_old_refcnt(qg, seq, 1);
 			else
 				btrfs_qgroup_update_new_refcnt(qg, seq, 1);
-			list_for_each_entry(glist, &qg->groups, next_group) {
-				ret = ulist_add(qgroups, glist->group->qgroupid,
-						qgroup_to_aux(glist->group),
-						GFP_ATOMIC);
-				if (ret < 0)
-					return ret;
-				ret = ulist_add(tmp, glist->group->qgroupid,
-						qgroup_to_aux(glist->group),
-						GFP_ATOMIC);
-				if (ret < 0)
-					return ret;
-			}
+			ret = ulist_add(qgroups, qg->qgroupid,
+					qgroup_to_aux(qg),
+					GFP_ATOMIC);
+			if (ret < 0)
+				goto out;
 		}
 	}
-	return 0;
+	ret = 0;
+out:
+	qg_list_free(&qgl);
+	return ret;
 }
 
 /*
