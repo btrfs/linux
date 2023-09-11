@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [ "master", "ci" ]
+    branches: [ "master", "ci**" ]
   pull_request:
-    branches: [ "master", "ci" ]
+    branches: [ "master", "ci**" ]
 
 concurrency: one_at_a_time_gents
 
