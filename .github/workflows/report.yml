@@ -1,0 +1,27 @@
+name: report
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+
+permissions:
+  checks: write
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        config_name: [btrfs_nromal, btrfs_compress, btrfs_holes_spacecache, btrfs_holes_spacecache_compress, btrfs_block_group_tree, btrfs_zoned, btrfs_subpage_normal, btrfs_subpage_compress]
+    steps:
+      - name: Download test report
+        uses: dawidd6/action-download-artifact@v2
+          with: junit-test-results-${{ matrix.config_name }}
+          workflow: ${{ github.event.workflow.id }}
+          run_id: ${{ github.event.workflow_run.id }}
+    - name: Publish Test Report
+      uses: mikepenz/action-junit-report@v3
+      with:
+        commit: ${{github.event.workflow_run.head_sha}}
+        report_paths: "**/root/fstests/results/*/result.xml"
+
