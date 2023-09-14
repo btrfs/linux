@@ -308,24 +308,6 @@ int btrfs_insert_raid_extent(struct btrfs_trans_handle *trans,
 	return ret;
 }
 
-static bool btrfs_check_for_extent(struct btrfs_fs_info *fs_info, u64 logical,
-				   u64 length, struct btrfs_path *path)
-{
-	struct btrfs_root *extent_root = btrfs_extent_root(fs_info, logical);
-	struct btrfs_key key;
-	int ret;
-
-	btrfs_release_path(path);
-
-	key.objectid = logical;
-	key.type = BTRFS_EXTENT_ITEM_KEY;
-	key.offset = length;
-
-	ret = btrfs_search_slot(NULL, extent_root, &key, path, 0, 0);
-
-	return ret;
-}
-
 int btrfs_get_raid_extent_offset(struct btrfs_fs_info *fs_info,
 				 u64 logical, u64 *length, u64 map_type,
 				 u32 stripe_index,
@@ -355,6 +337,11 @@ int btrfs_get_raid_extent_offset(struct btrfs_fs_info *fs_info,
 	path = btrfs_alloc_path();
 	if (!path)
 		return -ENOMEM;
+
+	if (stripe->is_scrub) {
+		path->skip_locking = 1;
+		path->search_commit_root = 1;
+	}
 
 	ret = btrfs_search_slot(NULL, stripe_root, &stripe_key, path, 0, 0);
 	if (ret < 0)
@@ -446,20 +433,7 @@ int btrfs_get_raid_extent_offset(struct btrfs_fs_info *fs_info,
 out:
 	if (ret > 0)
 		ret = -ENOENT;
-	if (ret && ret != -EIO) {
-		/*
-		 * Check if the range we're looking for is actually backed by
-		 * an extent. This can happen, e.g. when scrub is running on a
-		 * block-group and the extent it is trying to scrub get's
-		 * deleted in the meantime. Although scrub is setting the
-		 * block-group to read-only, deletion of extents are still
-		 * allowed. If the extent is gone, simply return ENOENT and be
-		 * good.
-		 */
-		if (btrfs_check_for_extent(fs_info, logical, *length, path)) {
-			ret = -ENOENT;
-			goto free_path;
-		}
+	if (ret && ret != -EIO && !stripe->is_scrub) {
 
 		if (IS_ENABLED(CONFIG_BTRFS_DEBUG))
 			btrfs_print_tree(leaf, 1);
