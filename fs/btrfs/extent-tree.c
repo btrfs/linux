@@ -5440,30 +5440,32 @@ static noinline int do_walk_down(struct btrfs_trans_handle *trans,
 	}
 	*lookup_info = 0;
 
-	if (wc->stage == DROP_REFERENCE) {
-		if (wc->refs[level - 1] > 1) {
-			need_account = true;
+	if (btrfs_qgroup_mode(fs_info) != BTRFS_QGROUP_MODE_SIMPLE) {
+		if (wc->stage == DROP_REFERENCE) {
+			if (wc->refs[level - 1] > 1) {
+				need_account = true;
+				if (level == 1 &&
+				(wc->flags[0] & BTRFS_BLOCK_FLAG_FULL_BACKREF))
+					goto skip;
+
+				if (!wc->update_ref ||
+				generation <= root->root_key.offset)
+					goto skip;
+
+				btrfs_node_key_to_cpu(path->nodes[level], &key,
+						path->slots[level]);
+				ret = btrfs_comp_cpu_keys(&key, &wc->update_progress);
+				if (ret < 0)
+					goto skip;
+
+				wc->stage = UPDATE_BACKREF;
+				wc->shared_level = level - 1;
+			}
+		} else {
 			if (level == 1 &&
-			    (wc->flags[0] & BTRFS_BLOCK_FLAG_FULL_BACKREF))
+			(wc->flags[0] & BTRFS_BLOCK_FLAG_FULL_BACKREF))
 				goto skip;
-
-			if (!wc->update_ref ||
-			    generation <= root->root_key.offset)
-				goto skip;
-
-			btrfs_node_key_to_cpu(path->nodes[level], &key,
-					      path->slots[level]);
-			ret = btrfs_comp_cpu_keys(&key, &wc->update_progress);
-			if (ret < 0)
-				goto skip;
-
-			wc->stage = UPDATE_BACKREF;
-			wc->shared_level = level - 1;
 		}
-	} else {
-		if (level == 1 &&
-		    (wc->flags[0] & BTRFS_BLOCK_FLAG_FULL_BACKREF))
-			goto skip;
 	}
 
 	if (!btrfs_buffer_uptodate(next, generation, 0)) {
