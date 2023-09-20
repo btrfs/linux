@@ -1577,6 +1577,8 @@ static int run_delayed_data_ref(struct btrfs_trans_handle *trans,
 						 node->ref_mod, href->owning_root);
 		if (!ret)
 			ret = btrfs_record_squota_delta(trans->fs_info, &delta);
+		else
+			btrfs_qgroup_free_refroot(trans->fs_info, delta.root, delta.rsv_bytes, BTRFS_QGROUP_RSV_DATA);
 	} else if (node->action == BTRFS_ADD_DELAYED_REF) {
 		ret = __btrfs_inc_extent_ref(trans, node, parent, ref->root,
 					     ref->objectid, ref->offset,
