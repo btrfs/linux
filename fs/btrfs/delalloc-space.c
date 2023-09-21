@@ -151,13 +151,15 @@ int btrfs_check_data_free_space(struct btrfs_inode *inode,
 		return ret;
 
 	/* Use new btrfs_qgroup_reserve_data to reserve precious data space. */
-	ret = btrfs_qgroup_reserve_data(inode, reserved, start, len);
-	if (ret < 0) {
-		btrfs_free_reserved_data_space_noquota(fs_info, len);
-		extent_changeset_free(*reserved);
-		*reserved = NULL;
-	} else {
-		ret = 0;
+	if (!(inode->flags & (BTRFS_INODE_NODATACOW | BTRFS_INODE_PREALLOC))) {
+		ret = btrfs_qgroup_reserve_data(inode, reserved, start, len);
+		if (ret < 0) {
+			btrfs_free_reserved_data_space_noquota(fs_info, len);
+			extent_changeset_free(*reserved);
+			*reserved = NULL;
+		} else {
+			ret = 0;
+		}
 	}
 	return ret;
 }
