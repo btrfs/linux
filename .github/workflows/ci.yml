@@ -129,6 +129,7 @@ jobs:
   collect-vmcore:
     runs-on: [self-hosted, linux, x64, vmhost]
     needs: [test, test-zoned]
+    if: always()
     strategy:
       matrix:
         vm: [xfstests5, xfstests6, xfstests7, xfstests8, xfstests9, xfstests10]
@@ -145,6 +146,7 @@ jobs:
   collect-vmcore-arm:
     runs-on: [self-hosted, linux, ARM64, vmhost]
     needs: test-arm
+    if: always()
     strategy:
       matrix:
         vm: [xfstests11, xfstests12]
