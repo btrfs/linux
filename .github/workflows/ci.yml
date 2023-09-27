@@ -140,7 +140,7 @@ jobs:
         uses: actions/upload-artifact@v3
         with:
           name: dmesg-${{ matrix.vm }}
-          path: ${{ github.workspace }}
+          path: ${{ github.workspace }}/${{ matrix.vm }}-dmesg.txt
           if-no-files-found: ignore
 
   collect-vmcore-arm:
@@ -157,5 +157,5 @@ jobs:
         uses: actions/upload-artifact@v3
         with:
           name: dmesg-${{ matrix.vm }}
-          path: ${{ github.workspace }}
+          path: ${{ github.workspace }}/${{ matrix.vm }}-dmesg.txt
           if-no-files-found: ignore
