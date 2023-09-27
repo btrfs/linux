@@ -125,3 +125,35 @@ jobs:
       with:
         annotate_only: true
         report_paths: /root/fstests/results/${{ matrix.config_name }}/result.xml
+
+  collect-vmcore:
+    runs-on: [self-hosted, linux, x64, vmhost]
+    needs: [test, test-zoned]
+    strategy:
+      matrix:
+        vm: [xfstests5, xfstests6, xfstests7, xfstests8, xfstests9, xfstests10]
+    steps:
+      - name: collect vmcore-dmesg
+        run: collect-vmcore-dmesg.sh ${{ matrix.vm }}
+      - name: upload the vmcore-dmesg if it exists
+        uses: actions/upload-artifact@v3
+        with:
+          name: dmesg-${{ matrix.vm }}
+          path: ${{ github.workspace }}
+          if-no-files-found: ignore
+
+  collect-vmcore-arm:
+    runs-on: [self-hosted, linux, ARM64, vmhost]
+    needs: test-arm
+    strategy:
+      matrix:
+        vm: [xfstests11, xfstests12]
+    steps:
+      - name: collect vmcore-dmesg
+        run: collect-vmcore-dmesg.sh ${{ matrix.vm }}
+      - name: upload the vmcore-dmesg if it exists
+        uses: actions/upload-artifact@v3
+        with:
+          name: dmesg-${{ matrix.vm }}
+          path: ${{ github.workspace }}
+          if-no-files-found: ignore
