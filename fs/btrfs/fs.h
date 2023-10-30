@@ -365,6 +365,19 @@ struct btrfs_commit_stats {
 	u64 total_commit_dur;
 };
 
+/* Store the mount/runtime related information. */
+struct btrfs_fs_context {
+	char *subvol_name;
+	u64 subvol_objectid;
+	u64 max_inline;
+	u32 commit_interval;
+	u32 metadata_ratio;
+	u32 thread_pool_size;
+	unsigned long mount_opt;
+	unsigned long compress_type:4;
+	unsigned int compress_level;
+};
+
 struct btrfs_fs_info {
 	u8 chunk_tree_uuid[BTRFS_UUID_SIZE];
 	unsigned long flags;
