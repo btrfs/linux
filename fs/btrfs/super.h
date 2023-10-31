@@ -3,6 +3,11 @@
 #ifndef BTRFS_SUPER_H
 #define BTRFS_SUPER_H
 
+struct btrfs_fs_context;
+
+bool btrfs_check_options(struct btrfs_fs_info *fs_info,
+			 struct btrfs_fs_context *ctx,
+			 unsigned long flags);
 int btrfs_parse_options(struct btrfs_fs_info *info, char *options,
 			unsigned long new_flags);
 int btrfs_sync_fs(struct super_block *sb, int wait);
