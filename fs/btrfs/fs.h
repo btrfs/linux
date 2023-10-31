@@ -376,6 +376,7 @@ struct btrfs_fs_context {
 	unsigned long mount_opt;
 	unsigned long compress_type:4;
 	unsigned int compress_level;
+	refcount_t refs;
 };
 
 struct btrfs_fs_info {
