@@ -4101,17 +4101,34 @@ bool btrfs_free_space_cache_v1_active(struct btrfs_fs_info *fs_info)
 
 void btrfs_set_free_space_cache_settings(struct btrfs_fs_info *fs_info)
 {
+	/*
+	 * At this point our mount options are populated, so we only mess with
+	 * these settings if we don't have any settings already.
+	 */
+	if (btrfs_test_opt(fs_info, FREE_SPACE_TREE))
+		return;
+
+	if (btrfs_is_zoned(fs_info) &&
+	    btrfs_free_space_cache_v1_active(fs_info)) {
+		btrfs_info(fs_info, "zoned: clearing existing space cache");
+		btrfs_set_super_cache_generation(fs_info->super_copy, 0);
+		return;
+	}
+
+	if (btrfs_test_opt(fs_info, SPACE_CACHE))
+		return;
+
+	if (btrfs_test_opt(fs_info, NOSPACECACHE))
+		return;
+
+	/*
+	 * At this point we don't have explicit options set by the user, set
+	 * them ourselves based on the state of the file system.
+	 */
 	if (btrfs_fs_compat_ro(fs_info, FREE_SPACE_TREE))
 		btrfs_set_opt(fs_info->mount_opt, FREE_SPACE_TREE);
-	else if (btrfs_free_space_cache_v1_active(fs_info)) {
-		if (btrfs_is_zoned(fs_info)) {
-			btrfs_info(fs_info,
-			"zoned: clearing existing space cache");
-			btrfs_set_super_cache_generation(fs_info->super_copy, 0);
-		} else {
-			btrfs_set_opt(fs_info->mount_opt, SPACE_CACHE);
-		}
-	}
+	else if (btrfs_free_space_cache_v1_active(fs_info))
+		btrfs_set_opt(fs_info->mount_opt, SPACE_CACHE);
 }
 
 static int cleanup_free_space_cache_v1(struct btrfs_fs_info *fs_info,

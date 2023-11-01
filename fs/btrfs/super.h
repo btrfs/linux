@@ -3,10 +3,7 @@
 #ifndef BTRFS_SUPER_H
 #define BTRFS_SUPER_H
 
-struct btrfs_fs_context;
-
-bool btrfs_check_options(struct btrfs_fs_info *fs_info,
-			 struct btrfs_fs_context *ctx,
+bool btrfs_check_options(struct btrfs_fs_info *info, unsigned long *mount_opt,
 			 unsigned long flags);
 int btrfs_parse_options(struct btrfs_fs_info *info, char *options,
 			unsigned long new_flags);
