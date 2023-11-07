@@ -1715,7 +1715,7 @@ void btrfs_calc_zone_unusable(struct btrfs_block_group *cache)
 	cache->zone_unusable = unusable;
 }
 
-void btrfs_redirty_list_add(struct btrfs_transaction *trans,
+void btrfs_redirty_extent_buffer(struct btrfs_transaction *trans,
 			    struct extent_buffer *eb)
 {
 	if (!btrfs_is_zoned(eb->fs_info) ||

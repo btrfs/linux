@@ -59,7 +59,7 @@ int btrfs_reset_device_zone(struct btrfs_device *device, u64 physical,
 int btrfs_ensure_empty_zones(struct btrfs_device *device, u64 start, u64 size);
 int btrfs_load_block_group_zone_info(struct btrfs_block_group *cache, bool new);
 void btrfs_calc_zone_unusable(struct btrfs_block_group *cache);
-void btrfs_redirty_list_add(struct btrfs_transaction *trans,
+void btrfs_redirty_extent_buffer(struct btrfs_transaction *trans,
 			    struct extent_buffer *eb);
 bool btrfs_use_zone_append(struct btrfs_bio *bbio);
 void btrfs_record_physical_zoned(struct btrfs_bio *bbio);
@@ -180,7 +180,7 @@ static inline int btrfs_load_block_group_zone_info(
 
 static inline void btrfs_calc_zone_unusable(struct btrfs_block_group *cache) { }
 
-static inline void btrfs_redirty_list_add(struct btrfs_transaction *trans,
+static inline void btrfs_redirty_extent_buffer(struct btrfs_transaction *trans,
 					  struct extent_buffer *eb) { }
 
 static inline bool btrfs_use_zone_append(struct btrfs_bio *bbio)

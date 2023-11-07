@@ -3446,7 +3446,7 @@ void btrfs_free_tree_block(struct btrfs_trans_handle *trans,
 		if (root_id != BTRFS_TREE_LOG_OBJECTID) {
 			ret = check_ref_cleanup(trans, buf->start);
 			if (!ret) {
-				btrfs_redirty_list_add(trans->transaction, buf);
+				btrfs_redirty_extent_buffer(trans->transaction, buf);
 				goto out;
 			}
 		}
@@ -3479,7 +3479,7 @@ void btrfs_free_tree_block(struct btrfs_trans_handle *trans,
 			must_pin = true;
 
 		if (must_pin || btrfs_is_zoned(fs_info)) {
-			btrfs_redirty_list_add(trans->transaction, buf);
+			btrfs_redirty_extent_buffer(trans->transaction, buf);
 			pin_down_extent(trans, cache, buf->start, buf->len, 1);
 			btrfs_put_block_group(cache);
 			goto out;

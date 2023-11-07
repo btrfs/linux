@@ -3798,6 +3798,9 @@ void set_extent_buffer_dirty(struct extent_buffer *eb)
 		 * Thankfully, clear_subpage_extent_buffer_dirty() has locked
 		 * its page for other reasons, we can use page lock to prevent
 		 * the above race.
+		 *
+		 * For the zoned case a similar race can happen, because we have
+		 * to re-diry the extent buffer.
 		 */
 		if (subpage || zoned)
 			lock_page(eb->pages[0]);
