@@ -3786,6 +3786,7 @@ void set_extent_buffer_dirty(struct extent_buffer *eb)
 
 	if (!was_dirty) {
 		bool subpage = eb->fs_info->nodesize < PAGE_SIZE;
+		bool zoned = btrfs_is_zoned(eb->fs_info);
 
 		/*
 		 * For subpage case, we can have other extent buffers in the
@@ -3798,12 +3799,12 @@ void set_extent_buffer_dirty(struct extent_buffer *eb)
 		 * its page for other reasons, we can use page lock to prevent
 		 * the above race.
 		 */
-		if (subpage)
+		if (subpage || zoned)
 			lock_page(eb->pages[0]);
 		for (i = 0; i < num_pages; i++)
 			btrfs_page_set_dirty(eb->fs_info, eb->pages[i],
 					     eb->start, eb->len);
-		if (subpage)
+		if (subpage || zoned)
 			unlock_page(eb->pages[0]);
 		percpu_counter_add_batch(&eb->fs_info->dirty_metadata_bytes,
 					 eb->len,
