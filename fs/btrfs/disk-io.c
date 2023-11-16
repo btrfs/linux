@@ -255,7 +255,7 @@ blk_status_t btree_csum_one_bio(struct btrfs_bio *bbio)
 		return BLK_STS_IOERR;
 
 	if (test_bit(EXTENT_BUFFER_CANCELLED, &eb->bflags)) {
-		WARN_ON_ONCE(found_start != 0);
+		memzero_extent_buffer(eb, 0, eb->len);
 		return BLK_STS_OK;
 	}
 

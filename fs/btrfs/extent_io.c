@@ -3748,6 +3748,11 @@ void btrfs_clear_buffer_dirty(struct btrfs_trans_handle *trans,
 	if (trans && btrfs_header_generation(eb) != trans->transid)
 		return;
 
+	if (btrfs_is_zoned(fs_info)) {
+		set_bit(EXTENT_BUFFER_CANCELLED, &eb->bflags);
+		return;
+	}
+
 	if (!test_and_clear_bit(EXTENT_BUFFER_DIRTY, &eb->bflags))
 		return;
 
@@ -4138,8 +4143,6 @@ static void __write_extent_buffer(const struct extent_buffer *eb,
 	unsigned long i = get_eb_page_index(start);
 	/* For unmapped (dummy) ebs, no need to check their uptodate status. */
 	const bool check_uptodate = !test_bit(EXTENT_BUFFER_UNMAPPED, &eb->bflags);
-
-	WARN_ON(test_bit(EXTENT_BUFFER_CANCELLED, &eb->bflags));
 
 	if (check_eb_range(eb, start, len))
 		return;
