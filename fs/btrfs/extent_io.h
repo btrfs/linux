@@ -28,7 +28,8 @@ enum {
 	EXTENT_BUFFER_IN_TREE,
 	/* write IO error */
 	EXTENT_BUFFER_WRITE_ERR,
-	EXTENT_BUFFER_NO_CHECK,
+	/* Indicate the extent buffer write out is cancelled (for zoned) */
+	EXTENT_BUFFER_CANCELLED,
 	/* Indicate that extent buffer pages a being read */
 	EXTENT_BUFFER_READING,
 };
