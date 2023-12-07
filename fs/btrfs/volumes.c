@@ -6326,17 +6326,19 @@ static u64 btrfs_max_io_len(struct btrfs_chunk_map *map, enum btrfs_map_op op,
 
 static int set_io_stripe(struct btrfs_fs_info *fs_info, enum btrfs_map_op op,
 			 u64 logical, u64 *length, struct btrfs_io_stripe *dst,
-			 struct btrfs_chunk_map *map, u32 stripe_index,
-			 u64 stripe_offset, u64 stripe_nr)
+			 struct btrfs_chunk_map *map,
+			 struct btrfs_io_geometry *io_geom)
 {
-	dst->dev = map->stripes[stripe_index].dev;
+	dst->dev = map->stripes[io_geom->stripe_index].dev;
 
 	if (op == BTRFS_MAP_READ && btrfs_need_stripe_tree_update(fs_info, map->type))
 		return btrfs_get_raid_extent_offset(fs_info, logical, length,
-						    map->type, stripe_index, dst);
+						    map->type,
+						    io_geom->stripe_index, dst);
 
-	dst->physical = map->stripes[stripe_index].physical +
-			stripe_offset + btrfs_stripe_nr_to_offset(stripe_nr);
+	dst->physical = map->stripes[io_geom->stripe_index].physical +
+			io_geom->stripe_offset +
+			btrfs_stripe_nr_to_offset(io_geom->stripe_nr);
 	return 0;
 }
 
@@ -6634,8 +6636,7 @@ int btrfs_map_block(struct btrfs_fs_info *fs_info, enum btrfs_map_op op,
 	if (is_single_device_io(fs_info, smap, map, num_alloc_stripes, op,
 			      io_geom.mirror_num)) {
 		ret = set_io_stripe(fs_info, op, logical, length, smap, map,
-				    io_geom.stripe_index, io_geom.stripe_offset,
-				    io_geom.stripe_nr);
+				    &io_geom);
 		if (mirror_num_ret)
 			*mirror_num_ret = io_geom.mirror_num;
 		*bioc_ret = NULL;
@@ -6688,10 +6689,7 @@ int btrfs_map_block(struct btrfs_fs_info *fs_info, enum btrfs_map_op op,
 		 */
 		for (i = 0; i < io_geom.num_stripes; i++) {
 			ret = set_io_stripe(fs_info, op, logical, length,
-					    &bioc->stripes[i], map,
-					    io_geom.stripe_index,
-					    io_geom.stripe_offset,
-					    io_geom.stripe_nr);
+					    &bioc->stripes[i], map, &io_geom);
 			if (ret < 0)
 				break;
 			io_geom.stripe_index++;
