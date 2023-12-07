@@ -6372,6 +6372,25 @@ static void map_blocks_for_raid0(struct btrfs_chunk_map *map,
 		io_geom->mirror_num = 1;
 }
 
+static void map_blocks_for_raid1(struct btrfs_fs_info *fs_info,
+				 struct btrfs_chunk_map *map,
+				 enum btrfs_map_op op,
+				 struct btrfs_io_geometry *io_geom, int replace)
+{
+	if (op != BTRFS_MAP_READ) {
+		io_geom->num_stripes = map->num_stripes;
+		return;
+	}
+
+	if (io_geom->mirror_num) {
+		io_geom->stripe_index = io_geom->mirror_num - 1;
+		return;
+	}
+
+	io_geom->stripe_index = find_live_mirror(fs_info, map, 0, replace);
+	io_geom->mirror_num = io_geom->stripe_index + 1;
+}
+
 /*
  * Map one logical range to one or more physical ranges.
  *
@@ -6459,16 +6478,8 @@ int btrfs_map_block(struct btrfs_fs_info *fs_info, enum btrfs_map_op op,
 	if (map->type & BTRFS_BLOCK_GROUP_RAID0) {
 		map_blocks_for_raid0(map, op, &io_geom);
 	} else if (map->type & BTRFS_BLOCK_GROUP_RAID1_MASK) {
-		if (op != BTRFS_MAP_READ) {
-			io_geom.num_stripes = map->num_stripes;
-		} else if (io_geom.mirror_num) {
-			io_geom.stripe_index = io_geom.mirror_num - 1;
-		} else {
-			io_geom.stripe_index = find_live_mirror(fs_info, map, 0,
-					    dev_replace_is_ongoing);
-			io_geom.mirror_num = io_geom.stripe_index + 1;
-		}
-
+		map_blocks_for_raid1(fs_info, map, op, &io_geom,
+				     dev_replace_is_ongoing);
 	} else if (map->type & BTRFS_BLOCK_GROUP_DUP) {
 		if (op != BTRFS_MAP_READ) {
 			io_geom.num_stripes = map->num_stripes;
