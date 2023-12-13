@@ -4808,6 +4808,7 @@ static void btrfs_free_all_qgroup_pertrans(struct btrfs_fs_info *fs_info)
 			radix_tree_tag_clear(&fs_info->fs_roots_radix,
 					(unsigned long)root->root_key.objectid,
 					BTRFS_ROOT_TRANS_TAG);
+			clear_bit(BTRFS_ROOT_RECORDED, &root->state);
 		}
 	}
 	spin_unlock(&fs_info->fs_roots_radix_lock);

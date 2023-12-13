@@ -90,12 +90,13 @@ struct btrfs_path {
  */
 enum {
 	/*
-	 * btrfs_record_root_in_trans is a multi-step process, and it can race
-	 * with the balancing code.   But the race is very small, and only the
-	 * first time the root is added to each transaction.  So IN_TRANS_SETUP
-	 * is used to tell us when more checks are required
+	 * We set this after we've recorded the root in the transaction.  This
+	 * is used to avoid taking the reloc_mutex every time we call
+	 * btrfs_start_transaction(root).  Once the root has been recorded we
+	 * don't have to do the setup work again, and this is cleared on
+	 * transaction commit once we're done with the root.
 	 */
-	BTRFS_ROOT_IN_TRANS_SETUP,
+	BTRFS_ROOT_RECORDED,
 
 	/*
 	 * Set if tree blocks of this root can be shared by other roots.
