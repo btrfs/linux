@@ -1070,6 +1070,17 @@ static int defrag_collect_targets(struct btrfs_inode *inode,
 		if (!next_mergeable) {
 			struct defrag_target_range *last;
 
+			/*
+			 * Special entry point utilization ratio under 1/16 (only
+			 * referring 1/16 of an on-disk extent).
+			 * This can happen for a truncated large extent.
+			 * If we don't add them, then for a truncated file
+			 * (may be the last 4K of a 128M extent) it will never
+			 * be defraged.
+			 */
+			if (em->ram_bytes < em->orig_block_len / 16)
+				goto add;
+
 			/* Empty target list, no way to merge with last entry */
 			if (list_empty(target_list))
 				goto next;
