@@ -7862,13 +7862,12 @@ static void btrfs_readahead(struct readahead_control *rac)
  * for subpage spinlock.  So this function is to spin and wait for subpage
  * spinlock.
  */
-static void wait_subpage_spinlock(struct page *page)
+static void wait_subpage_spinlock(struct folio *folio)
 {
-	struct btrfs_fs_info *fs_info = btrfs_sb(page->mapping->host->i_sb);
-	struct folio *folio = page_folio(page);
+	struct btrfs_fs_info *fs_info = btrfs_sb(folio->mapping->host->i_sb);
 	struct btrfs_subpage *subpage;
 
-	if (!btrfs_is_subpage(fs_info, page->mapping))
+	if (!btrfs_is_subpage(fs_info, folio->mapping))
 		return;
 
 	ASSERT(folio_test_private(folio) && folio_get_private(folio));
@@ -7894,7 +7893,7 @@ static bool __btrfs_release_folio(struct folio *folio, gfp_t gfp_flags)
 	int ret = try_release_extent_mapping(&folio->page, gfp_flags);
 
 	if (ret == 1) {
-		wait_subpage_spinlock(&folio->page);
+		wait_subpage_spinlock(folio);
 		clear_page_extent_mapped(&folio->page);
 	}
 	return ret;
@@ -7954,7 +7953,7 @@ static void btrfs_invalidate_folio(struct folio *folio, size_t offset,
 	 * do double ordered extent accounting on the same folio.
 	 */
 	folio_wait_writeback(folio);
-	wait_subpage_spinlock(&folio->page);
+	wait_subpage_spinlock(folio);
 
 	/*
 	 * For subpage case, we have call sites like
