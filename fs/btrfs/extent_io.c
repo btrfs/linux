@@ -984,7 +984,7 @@ void btrfs_clear_data_folio_managed(struct folio *folio)
 }
 
 static struct extent_map *
-__get_extent_map(struct inode *inode, struct page *page, size_t pg_offset,
+__get_extent_map(struct inode *inode, struct page *page,
 		 u64 start, u64 len, struct extent_map **em_cached)
 {
 	struct extent_map *em;
@@ -1001,7 +1001,7 @@ __get_extent_map(struct inode *inode, struct page *page, size_t pg_offset,
 		*em_cached = NULL;
 	}
 
-	em = btrfs_get_extent(BTRFS_I(inode), page, pg_offset, start, len);
+	em = btrfs_get_extent(BTRFS_I(inode), page, start, len);
 	if (em_cached && !IS_ERR(em)) {
 		BUG_ON(*em_cached);
 		refcount_inc(&em->refs);
@@ -1064,7 +1064,7 @@ static int btrfs_do_readpage(struct page *page, struct extent_map **em_cached,
 			end_page_read(page, true, cur, iosize);
 			break;
 		}
-		em = __get_extent_map(inode, page, pg_offset, cur,
+		em = __get_extent_map(inode, page, cur,
 				      end - cur + 1, em_cached);
 		if (IS_ERR(em)) {
 			unlock_extent(tree, cur, end, NULL);
@@ -1384,7 +1384,7 @@ static noinline_for_stack int __extent_writepage_io(struct btrfs_inode *inode,
 			continue;
 		}
 
-		em = btrfs_get_extent(inode, NULL, 0, cur, len);
+		em = btrfs_get_extent(inode, NULL, cur, len);
 		if (IS_ERR(em)) {
 			ret = PTR_ERR_OR_ZERO(em);
 			goto out_error;
