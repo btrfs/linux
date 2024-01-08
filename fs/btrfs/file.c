@@ -933,7 +933,7 @@ again:
 			goto fail;
 		}
 
-		err = set_page_extent_mapped(pages[i]);
+		err = btrfs_set_data_folio_managed(page_folio(pages[i]));
 		if (err < 0) {
 			faili = i;
 			goto fail;

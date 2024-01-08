@@ -90,7 +90,7 @@ static int copy_inline_to_page(struct btrfs_inode *inode,
 		goto out_unlock;
 	}
 
-	ret = set_page_extent_mapped(page);
+	ret = btrfs_set_data_folio_managed(page_folio(page));
 	if (ret < 0)
 		goto out_unlock;
 

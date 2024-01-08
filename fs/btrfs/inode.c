@@ -4737,7 +4737,7 @@ again:
 	 * folio private, but left the page in the mapping.  Set the page mapped
 	 * here to make sure it's properly set for the subpage stuff.
 	 */
-	ret = set_page_extent_mapped(page);
+	ret = btrfs_set_data_folio_managed(page_folio(page));
 	if (ret < 0)
 		goto out_unlock;
 
@@ -7894,7 +7894,7 @@ static bool __btrfs_release_folio(struct folio *folio, gfp_t gfp_flags)
 
 	if (ret == 1) {
 		wait_subpage_spinlock(folio);
-		clear_page_extent_mapped(&folio->page);
+		btrfs_clear_data_folio_managed(folio);
 	}
 	return ret;
 }
@@ -8091,7 +8091,7 @@ next:
 	btrfs_folio_clear_checked(fs_info, folio, folio_pos(folio), folio_size(folio));
 	if (!inode_evicting)
 		__btrfs_release_folio(folio, GFP_NOFS);
-	clear_page_extent_mapped(&folio->page);
+	btrfs_clear_data_folio_managed(folio);
 }
 
 /*
@@ -8173,7 +8173,7 @@ again:
 	wait_on_page_writeback(page);
 
 	lock_extent(io_tree, page_start, page_end, &cached_state);
-	ret2 = set_page_extent_mapped(page);
+	ret2 = btrfs_set_data_folio_managed(folio);
 	if (ret2 < 0) {
 		ret = vmf_error(ret2);
 		unlock_extent(io_tree, page_start, page_end, &cached_state);

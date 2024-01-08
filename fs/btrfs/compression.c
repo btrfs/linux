@@ -488,7 +488,7 @@ static noinline int add_ra_bio_pages(struct inode *inode,
 			*memstall = 1;
 		}
 
-		ret = set_page_extent_mapped(page);
+		ret = btrfs_set_data_folio_managed(page_folio(page));
 		if (ret < 0) {
 			unlock_page(page);
 			put_page(page);

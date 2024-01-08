@@ -231,8 +231,8 @@ int btree_write_cache_pages(struct address_space *mapping,
 void extent_readahead(struct readahead_control *rac);
 int extent_fiemap(struct btrfs_inode *inode, struct fiemap_extent_info *fieinfo,
 		  u64 start, u64 len);
-int set_page_extent_mapped(struct page *page);
-void clear_page_extent_mapped(struct page *page);
+int btrfs_set_data_folio_managed(struct folio *folio);
+void btrfs_clear_data_folio_managed(struct folio *folio);
 
 struct extent_buffer *alloc_extent_buffer(struct btrfs_fs_info *fs_info,
 					  u64 start, u64 owner_root, int level);

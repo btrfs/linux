@@ -947,37 +947,37 @@ static int attach_extent_buffer_folio(struct extent_buffer *eb,
 	return ret;
 }
 
-int set_page_extent_mapped(struct page *page)
+/* Mark a data folio to be managed by btrfs. */
+int btrfs_set_data_folio_managed(struct folio *folio)
 {
-	struct folio *folio = page_folio(page);
 	struct btrfs_fs_info *fs_info;
 
-	ASSERT(page->mapping);
+	ASSERT(folio->mapping);
 
 	if (folio_test_private(folio))
 		return 0;
 
-	fs_info = btrfs_sb(page->mapping->host->i_sb);
+	fs_info = btrfs_sb(folio->mapping->host->i_sb);
 
-	if (btrfs_is_subpage(fs_info, page->mapping))
+	if (btrfs_is_subpage(fs_info, folio->mapping))
 		return btrfs_attach_subpage(fs_info, folio, BTRFS_SUBPAGE_DATA);
 
 	folio_attach_private(folio, (void *)EXTENT_FOLIO_PRIVATE);
 	return 0;
 }
 
-void clear_page_extent_mapped(struct page *page)
+/* Clear a data folio from managed by btrfs. */
+void btrfs_clear_data_folio_managed(struct folio *folio)
 {
-	struct folio *folio = page_folio(page);
 	struct btrfs_fs_info *fs_info;
 
-	ASSERT(page->mapping);
+	ASSERT(folio->mapping);
 
 	if (!folio_test_private(folio))
 		return;
 
-	fs_info = btrfs_sb(page->mapping->host->i_sb);
-	if (btrfs_is_subpage(fs_info, page->mapping))
+	fs_info = btrfs_sb(folio->mapping->host->i_sb);
+	if (btrfs_is_subpage(fs_info, folio->mapping))
 		return btrfs_detach_subpage(fs_info, folio);
 
 	folio_detach_private(folio);
@@ -1034,7 +1034,7 @@ static int btrfs_do_readpage(struct page *page, struct extent_map **em_cached,
 	size_t blocksize = inode->i_sb->s_blocksize;
 	struct extent_io_tree *tree = &BTRFS_I(inode)->io_tree;
 
-	ret = set_page_extent_mapped(page);
+	ret = btrfs_set_data_folio_managed(page_folio(page));
 	if (ret < 0) {
 		unlock_extent(tree, start, end, NULL);
 		unlock_page(page);
@@ -1481,7 +1481,7 @@ static int __extent_writepage(struct page *page, struct btrfs_bio_ctrl *bio_ctrl
 	if (page->index == end_index)
 		memzero_page(page, pg_offset, PAGE_SIZE - pg_offset);
 
-	ret = set_page_extent_mapped(page);
+	ret = btrfs_set_data_folio_managed(page_folio(page));
 	if (ret < 0)
 		goto done;
 
