@@ -463,6 +463,9 @@ btrfs_get_bdev_and_sb(const char *device_path, blk_mode_t flags, void *holder,
 	struct block_device *bdev;
 	int ret;
 
+	/* No support for restricting writes to btrfs devices yet... */
+	flags &= ~BLK_OPEN_RESTRICT_WRITES;
+
 	*bdev_handle = bdev_open_by_path(device_path, flags, holder, NULL);
 
 	if (IS_ERR(*bdev_handle)) {
@@ -1310,6 +1313,9 @@ struct btrfs_device *btrfs_scan_one_device(const char *path, blk_mode_t flags,
 	int ret;
 
 	lockdep_assert_held(&uuid_mutex);
+
+	/* No support for restricting writes to btrfs devices yet... */
+	flags &= ~BLK_OPEN_RESTRICT_WRITES;
 
 	/*
 	 * we would like to check all the supers, but that would make
