@@ -259,6 +259,12 @@ static const struct fs_parameter_spec btrfs_fs_parameters[] = {
 	{}
 };
 
+/* No support for restricting writes to btrfs devices yet... */
+static inline blk_mode_t btrfs_open_mode(struct fs_context *fc)
+{
+	return sb_open_mode(fc->sb_flags) & ~BLK_OPEN_RESTRICT_WRITES;
+}
+
 static int btrfs_parse_param(struct fs_context *fc, struct fs_parameter *param)
 {
 	struct btrfs_fs_context *ctx = fc->fs_private;
@@ -295,7 +301,7 @@ static int btrfs_parse_param(struct fs_context *fc, struct fs_parameter *param)
 		break;
 	case Opt_device: {
 		struct btrfs_device *device;
-		blk_mode_t mode = sb_open_mode(fc->sb_flags);
+		blk_mode_t mode = btrfs_open_mode(fc);
 
 		mutex_lock(&uuid_mutex);
 		device = btrfs_scan_one_device(param->string, mode, false);
@@ -1794,7 +1800,7 @@ static int btrfs_get_tree_super(struct fs_context *fc)
 	struct block_device *bdev;
 	struct btrfs_device *device;
 	struct super_block *sb;
-	blk_mode_t mode = sb_open_mode(fc->sb_flags);
+	blk_mode_t mode = btrfs_open_mode(fc);
 	int ret;
 
 	btrfs_ctx_to_info(fs_info, ctx);
