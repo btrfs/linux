@@ -1,0 +1,28 @@
+# Build checks on various config option combinations
+#
+
+name: Build
+
+on:
+  push:
+    branches: [ "build" ]
+  pull_request:
+    branches: [ "build" ]
+
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    continue-on-error: false
+    env:
+      CCACHE_DIR: ".ccache"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          create-symlink: true
+      - run: sudo apt-get install -y gcc coreutils build-essential bc kmod cpio bison flex libelf-dev libssl-dev
+      - run: cp .github/workflows/.config-mini .config
+      - run: yes '' | make oldconfig
+      - run: .github/workflows/build-test-config
+      - run: .github/workflows/build-test-config --single
+      - run: .github/workflows/build-test-config --combine

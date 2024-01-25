@@ -1,0 +1,146 @@
+#!/bin/bash
+
+single=false
+combine=false
+jobs=4
+dirs="lib/ fs/"
+
+declare -a args
+args=("$@")
+
+[[ " ${args[@]} " =~ " --single " ]] && single=true
+[[ " ${args[@]} " =~ " --combine " ]] && combine=true
+
+# Kconfig
+declare -a our
+our=(
+CONFIG_BTRFS_ASSERT
+CONFIG_BTRFS_DEBUG
+CONFIG_BTRFS_FS_REF_VERIFY
+CONFIG_BTRFS_FS_RUN_SANITY_TESTS
+CONFIG_BTRFS_FS_POSIX_ACL
+)
+
+# Major features
+declare -a ext
+ext=(
+CONFIG_BLK_DEV_ZONED
+CONFIG_FS_VERITY
+CONFIG_SECURITY
+CONFIG_SWAP
+)
+
+do_rand_sample() {
+	echo "${our[@]}" "${ext[@]}" | tr ' ' '\n' |
+		shuf | head -n ${1:-3} | tr '\n' ' '
+}
+
+do_disable_all() {
+	do_disable_our
+	do_disable_ext
+}
+
+do_enable_our() {
+	echo "ENABLE OUR"
+	for opt in "${our[@]}"; do
+		scripts/config --enable "$opt"
+	done
+	yes '' | make oldconfig
+}
+
+do_disable_our() {
+	echo "DISABLE OUR"
+	for opt in "${our[@]}"; do
+		scripts/config --disable "$opt"
+	done
+	yes '' | make oldconfig
+}
+
+do_enable_ext() {
+	echo "ENABLE EXT"
+	for opt in "${ext[@]}"; do
+		scripts/config --enable "$opt"
+	done
+	yes '' | make oldconfig
+}
+
+do_disable_ext() {
+	echo "DISABLE EXT"
+	for opt in "${ext[@]}"; do
+		scripts/config --disable "$opt"
+	done
+	yes '' | make oldconfig
+}
+
+do_round_enable() {
+	echo "ENABLE: $@"
+	scripts/config --enable "$@"
+	yes '' | make oldconfig
+	make -j $jobs $dirs
+}
+
+do_round_disable() {
+	echo "DISABLE: $@"
+	scripts/config --disable "$@"
+	yes '' | make oldconfig
+	make -j $jobs $dirs
+}
+
+################################################################
+#
+type -p scripts/config || exit 1
+echo "::group::Module and config setup"
+scripts/config --module CONFIG_BTRFS_FS
+do_enable_ext
+do_enable_our
+echo "::endgroup::"
+
+if ! $single && ! $combine; then
+	echo "::group::Quick build only"
+	make -j $jobs $dirs
+	echo "::endgroup::"
+	exit 0
+fi
+
+if $single; then
+	result='RESULT:'
+
+	# Assume all enabled
+	for opt in "${our[@]}" "${ext[@]}"; do
+		echo "::group::Single $opt, build"
+		do_round_disable "$opt"
+		result="$result -$opt"
+		echo "$result"
+		echo "::endgroup::"
+
+		echo "::group::Single $opt, cleanup"
+		scripts/config --enable "$opt"
+		yes '' | make oldconfig
+		echo "::endgroup::"
+	done
+
+	echo "$result"
+fi
+
+if $combine; then
+	result='RESULT:'
+	for sample in {2..6}; do
+		for i in `seq 30`; do
+			echo "::group::Combined $opts, setup"
+			opts=$(do_rand_sample $sample)
+			do_disable_all
+			echo "::endgroup::"
+
+			echo "::group::Combined $opts, build"
+			echo "RANDOM: $opts"
+			do_round_enable "$opt"
+			result="$result +($opts)"
+			echo "$result"
+			echo "::endgroup::"
+		done
+		echo "::group::Combined, group of $sample"
+		echo "FINAL (SAMPLE: $sample)"
+		echo "$result" | tr '+' '\n'
+		echo "::endgroup::"
+	done
+fi
