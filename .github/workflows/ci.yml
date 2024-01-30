@@ -17,7 +17,7 @@ jobs:
   build:
     runs-on: [self-hosted, linux, x64, vmhost]
     steps:
-    - uses: actions/checkout@v3
+    - uses: actions/checkout@v4
     - name: copy system config
       run: copy-config.sh ${{ github.workspace }}
     - name: make olddefconfig
@@ -28,7 +28,7 @@ jobs:
   build-arm:
     runs-on: [self-hosted, linux, ARM64, vmhost]
     steps:
-    - uses: actions/checkout@v3
+    - uses: actions/checkout@v4
     - name: copy system config
       run: copy-config.sh ${{ github.workspace }}
     - name: make olddefconfig
@@ -80,7 +80,7 @@ jobs:
     - name: run xfstests
       run: ./unfuck-signal ./check -E EXCLUDE -E EXCLUDE.zoned -R xunit -s btrfs_zoned -g auto
     - name: generate report
-      uses: mikepenz/action-junit-report@v3
+      uses: mikepenz/action-junit-report@v4
       if: success() || failure()
       with:
         annotate_only: true
@@ -100,7 +100,7 @@ jobs:
     - name: run xfstests
       run: ./unfuck-signal ./check -E EXCLUDE -R xunit -s ${{ matrix.config_name }} -g auto
     - name: generate report
-      uses: mikepenz/action-junit-report@v3
+      uses: mikepenz/action-junit-report@v4
       if: success() || failure()
       with:
         annotate_only: true
@@ -120,7 +120,7 @@ jobs:
     - name: run xfstests
       run: ./unfuck-signal ./check -E EXCLUDE -E EXCLUDE.arm -R xunit -s ${{ matrix.config_name }} -g auto
     - name: generate report
-      uses: mikepenz/action-junit-report@v3
+      uses: mikepenz/action-junit-report@v4
       if: success() || failure()
       with:
         annotate_only: true
@@ -137,7 +137,7 @@ jobs:
       - name: collect vmcore-dmesg
         run: collect-vmcore-dmesg.sh ${{ matrix.vm }}
       - name: upload the vmcore-dmesg if it exists
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: dmesg-${{ matrix.vm }}
           path: ${{ github.workspace }}/${{ matrix.vm }}-dmesg.txt
