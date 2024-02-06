@@ -85,6 +85,12 @@ jobs:
       with:
         annotate_only: true
         report_paths: /root/fstests/results/btrfs_zoned/result.xml
+    - name: Save results/ as artifacts
+      uses: actions/upload-artifact@v4
+      if: success() || failure()
+      with:
+        name: results-zoned
+        path: "/root/fstests/results/**"
 
   test:
     runs-on: [self-hosted, linux, x64, vm]
@@ -105,6 +111,12 @@ jobs:
       with:
         annotate_only: true
         report_paths: /root/fstests/results/${{ matrix.config_name }}/result.xml
+    - name: Save results/ as artifacts
+      uses: actions/upload-artifact@v4
+      if: success() || failure()
+      with:
+        name: results-${{ matrix.config_name }}
+        path: "/root/fstests/results/**"
 
   test-arm:
     runs-on: [self-hosted, linux, ARM64, vm]
@@ -125,6 +137,12 @@ jobs:
       with:
         annotate_only: true
         report_paths: /root/fstests/results/${{ matrix.config_name }}/result.xml
+    - name: Save results/ as artifacts
+      uses: actions/upload-artifact@v4
+      if: success() || failure()
+      with:
+        name: results-${{ matrix.config_name }}
+        path: "/root/fstests/results/**"
 
   collect-vmcore:
     runs-on: [self-hosted, linux, x64, vmhost]
