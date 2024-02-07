@@ -1727,7 +1727,7 @@ static void scrub_submit_initial_read(struct scrub_ctx *sctx,
 	ASSERT(stripe->mirror_num > 0);
 	ASSERT(test_bit(SCRUB_STRIPE_FLAG_INITIALIZED, &stripe->state));
 
-	if (btrfs_need_stripe_tree_update(fs_info, stripe->bg->flags)) {
+	if (btrfs_use_stripe_tree(fs_info, stripe->bg->flags)) {
 		scrub_submit_extent_sector_read(sctx, stripe);
 		return;
 	}

@@ -23,8 +23,8 @@ int btrfs_get_raid_extent_offset(struct btrfs_fs_info *fs_info,
 int btrfs_insert_raid_extent(struct btrfs_trans_handle *trans,
 			     struct btrfs_ordered_extent *ordered_extent);
 
-static inline bool btrfs_need_stripe_tree_update(struct btrfs_fs_info *fs_info,
-						 u64 map_type)
+static inline bool btrfs_use_stripe_tree(struct btrfs_fs_info *fs_info,
+					 u64 map_type)
 {
 	u64 type = map_type & BTRFS_BLOCK_GROUP_TYPE_MASK;
 	u64 profile = map_type & BTRFS_BLOCK_GROUP_PROFILE_MASK;

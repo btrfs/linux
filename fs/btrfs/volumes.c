@@ -6366,7 +6366,7 @@ static int set_io_stripe(struct btrfs_fs_info *fs_info, u64 logical,
 	dst->dev = map->stripes[io_geom->stripe_index].dev;
 
 	if (io_geom->op == BTRFS_MAP_READ &&
-	    btrfs_need_stripe_tree_update(fs_info, map->type))
+	    btrfs_use_stripe_tree(fs_info, map->type))
 		return btrfs_get_raid_extent_offset(fs_info, logical, length,
 						    map->type,
 						    io_geom->stripe_index, dst);
@@ -6389,7 +6389,7 @@ static bool is_single_device_io(struct btrfs_fs_info *fs_info,
 	if (num_alloc_stripes != 1)
 		return false;
 
-	if (btrfs_need_stripe_tree_update(fs_info, map->type) && op != BTRFS_MAP_READ)
+	if (btrfs_use_stripe_tree(fs_info, map->type) && op != BTRFS_MAP_READ)
 		return false;
 
 	if ((map->type & BTRFS_BLOCK_GROUP_RAID56_MASK) && mirror_num > 1)

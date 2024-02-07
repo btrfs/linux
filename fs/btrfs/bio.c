@@ -704,7 +704,7 @@ static bool btrfs_submit_chunk(struct btrfs_bio *bbio, int mirror_num)
 		}
 
 		if (is_data_bbio(bbio) && bioc &&
-		    btrfs_need_stripe_tree_update(bioc->fs_info, bioc->map_type)) {
+		    btrfs_use_stripe_tree(bioc->fs_info, bioc->map_type)) {
 			/*
 			 * No locking for the list update, as we only add to
 			 * the list in the I/O submission path, and list
