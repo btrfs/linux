@@ -116,7 +116,7 @@ jobs:
       if: success() || failure()
       with:
         name: results-${{ matrix.config_name }}
-        path: "/root/fstests/results/**"
+        path: "/root/fstests/results/${{ matrix.config_name }}"
 
   test-arm:
     runs-on: [self-hosted, linux, ARM64, vm]
@@ -142,7 +142,7 @@ jobs:
       if: success() || failure()
       with:
         name: results-${{ matrix.config_name }}
-        path: "/root/fstests/results/**"
+        path: "/root/fstests/results/${{ matrix.config_name }}"
 
   collect-vmcore:
     runs-on: [self-hosted, linux, x64, vmhost]
