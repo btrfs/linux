@@ -4126,20 +4126,18 @@ static inline bool validate_convert_profile_zoned(struct btrfs_fs_info *fs_info,
 	if (!btrfs_is_zoned(fs_info))
 		return true;
 
+	/*
+	 * System and metadata profiles support all profiles but RAID56, for
+	 * data profile it depends if RAID stripe tree is supported or not.
+	 */
+	if (bargs->target & BTRFS_BLOCK_GROUP_RAID56_MASK)
+		return false;
+
 	if (bargs->target & BTRFS_BLOCK_GROUP_DATA) {
-		/*
-		 * Currently zoned filesystems only support SINGLE as data
-		 * profile
-		 */
-		if (!(bargs->target & BTRFS_BLOCK_GROUP_PROFILE_MASK))
+		if (btrfs_fs_incompat(fs_info, RAID_STRIPE_TREE) &&
+		    bargs->target & BTRFS_RST_SUPP_BLOCK_GROUP_MASK)
 			return true;
-	} else {
-		/*
-		 * The system and metadata profiles support both SINGLE and
-		 * DUP but no RAID.
-		 */
-		if (bargs->target & BTRFS_BLOCK_GROUP_DUP)
-			return true;
+
 		if (!(bargs->target & BTRFS_BLOCK_GROUP_PROFILE_MASK))
 			return true;
 	}
