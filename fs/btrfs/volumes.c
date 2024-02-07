@@ -4120,6 +4120,33 @@ static int alloc_profile_is_valid(u64 flags, int extended)
 	return has_single_bit_set(flags);
 }
 
+static inline bool validate_convert_profile_zoned(struct btrfs_fs_info *fs_info,
+						  const struct btrfs_balance_args *bargs)
+{
+	if (!btrfs_is_zoned(fs_info))
+		return true;
+
+	if (bargs->target & BTRFS_BLOCK_GROUP_DATA) {
+		/*
+		 * Currently zoned filesystems only support SINGLE as data
+		 * profile
+		 */
+		if (!(bargs->target & BTRFS_BLOCK_GROUP_PROFILE_MASK))
+			return true;
+	} else {
+		/*
+		 * The system and metadata profiles support both SINGLE and
+		 * DUP but no RAID.
+		 */
+		if (bargs->target & BTRFS_BLOCK_GROUP_DUP)
+			return true;
+		if (!(bargs->target & BTRFS_BLOCK_GROUP_PROFILE_MASK))
+			return true;
+	}
+
+	return false;
+}
+
 /*
  * Validate target profile against allowed profiles and return true if it's OK.
  * Otherwise print the error message and return false.
@@ -4130,6 +4157,10 @@ static inline int validate_convert_profile(struct btrfs_fs_info *fs_info,
 {
 	if (!(bargs->flags & BTRFS_BALANCE_ARGS_CONVERT))
 		return true;
+
+	if (!validate_convert_profile_zoned(fs_info, bargs))
+		btrfs_err(fs_info, "balance: cannot convert zoned %s to profile %s",
+			  type, btrfs_bg_type_to_raid_name(bargs->target));
 
 	/* Profile is valid and does not have bits outside of the allowed set */
 	if (alloc_profile_is_valid(bargs->target, 1) &&
