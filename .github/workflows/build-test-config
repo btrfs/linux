@@ -2,6 +2,7 @@
 
 single=false
 combine=false
+clang=false
 jobs=4
 dirs="lib/ fs/"
 
@@ -10,6 +11,7 @@ args=("$@")
 
 [[ " ${args[@]} " =~ " --single " ]] && single=true
 [[ " ${args[@]} " =~ " --combine " ]] && combine=true
+[[ " ${args[@]} " =~ " --clang " ]] && clang=true
 
 # Kconfig
 declare -a our
@@ -30,6 +32,10 @@ CONFIG_SECURITY
 CONFIG_SWAP
 )
 
+if $clang; then
+	CLANG='LLVM=1 CC=clang'
+fi
+
 do_rand_sample() {
 	echo "${our[@]}" "${ext[@]}" | tr ' ' '\n' |
 		shuf | head -n ${1:-3} | tr '\n' ' '
@@ -45,7 +51,7 @@ do_enable_our() {
 	for opt in "${our[@]}"; do
 		scripts/config --enable "$opt"
 	done
-	yes '' | make oldconfig
+	yes '' | make $CLANG oldconfig
 }
 
 do_disable_our() {
@@ -53,7 +59,7 @@ do_disable_our() {
 	for opt in "${our[@]}"; do
 		scripts/config --disable "$opt"
 	done
-	yes '' | make oldconfig
+	yes '' | make $CLANG oldconfig
 }
 
 do_enable_ext() {
@@ -61,7 +67,7 @@ do_enable_ext() {
 	for opt in "${ext[@]}"; do
 		scripts/config --enable "$opt"
 	done
-	yes '' | make oldconfig
+	yes '' | make $CLANG oldconfig
 }
 
 do_disable_ext() {
@@ -69,21 +75,21 @@ do_disable_ext() {
 	for opt in "${ext[@]}"; do
 		scripts/config --disable "$opt"
 	done
-	yes '' | make oldconfig
+	yes '' | make $CLANG oldconfig
 }
 
 do_round_enable() {
 	echo "ENABLE: $@"
 	scripts/config --enable "$@"
-	yes '' | make oldconfig
-	make -j $jobs $dirs
+	yes '' | make $CLANG oldconfig
+	make $CLANG -j $jobs $dirs
 }
 
 do_round_disable() {
 	echo "DISABLE: $@"
 	scripts/config --disable "$@"
-	yes '' | make oldconfig
-	make -j $jobs $dirs
+	yes '' | make $CLANG oldconfig
+	make $CLANG -j $jobs $dirs
 }
 
 ################################################################
@@ -97,7 +103,7 @@ echo "::endgroup::"
 
 if ! $single && ! $combine; then
 	echo "::group::Quick build only"
-	make -j $jobs $dirs
+	make $CLANG -j $jobs $dirs
 	echo "::endgroup::"
 	exit 0
 fi
@@ -115,7 +121,7 @@ if $single; then
 
 		echo "::group::Single $opt, cleanup"
 		scripts/config --enable "$opt"
-		yes '' | make oldconfig
+		yes '' | make $CLANG oldconfig
 		echo "::endgroup::"
 	done
 

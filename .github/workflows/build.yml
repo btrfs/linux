@@ -10,7 +10,8 @@ on:
     branches: [ "build" ]
 
 jobs:
-  setup:
+  build-gcc:
+    name: Build configs (gcc)
     runs-on: ubuntu-latest
     continue-on-error: false
     env:
@@ -26,3 +27,21 @@ jobs:
       - run: .github/workflows/build-test-config
       - run: .github/workflows/build-test-config --single
       - run: .github/workflows/build-test-config --combine
+  build-clang:
+    name: Build configs (clang)
+    runs-on: ubuntu-latest
+    continue-on-error: false
+    env:
+      CCACHE_DIR: ".ccache"
+      V: 1
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          create-symlink: true
+      - run: sudo apt-get install -y clang llvm lld coreutils build-essential bc kmod cpio bison flex libelf-dev libssl-dev
+      - run: cp .github/workflows/.config-mini .config
+      - run: yes '' | make LLVM=1 CC=clang oldconfig
+      - run: .github/workflows/build-test-config --clang
+      - run: .github/workflows/build-test-config --clang --single
+      - run: .github/workflows/build-test-config --clang --combine
