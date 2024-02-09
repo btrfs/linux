@@ -1369,8 +1369,10 @@ static int btrfs_load_block_group_single(struct btrfs_block_group *bg,
 		return -EIO;
 	}
 
-	bg->alloc_offset = info->alloc_offset;
-	bg->zone_capacity = info->capacity;
+	if (info->alloc_offset != WP_CONVENTIONAL) {
+		bg->alloc_offset = info->alloc_offset;
+		bg->zone_capacity = info->capacity;
+	}
 	if (test_bit(0, active))
 		set_bit(BLOCK_GROUP_FLAG_ZONE_IS_ACTIVE, &bg->runtime_flags);
 	return 0;
@@ -1404,6 +1406,16 @@ static int btrfs_load_block_group_dup(struct btrfs_block_group *bg,
 		btrfs_err(bg->fs_info,
 			  "zoned: write pointer offset mismatch of zones in DUP profile");
 		return -EIO;
+	}
+
+	if (zone_info[0].alloc_offset == WP_CONVENTIONAL) {
+		zone_info[0].alloc_offset = bg->alloc_offset;
+		zone_info[0].capacity = bg->length;
+	}
+
+	if (zone_info[1].alloc_offset == WP_CONVENTIONAL) {
+		zone_info[1].alloc_offset = bg->alloc_offset;
+		zone_info[1].capacity = bg->length;
 	}
 
 	if (test_bit(0, active) != test_bit(1, active)) {
@@ -1458,6 +1470,9 @@ static int btrfs_load_block_group_raid1(struct btrfs_block_group *bg,
 						 zone_info[1].capacity);
 	}
 
+	if (zone_info[0].alloc_offset == WP_CONVENTIONAL)
+		zone_info[0].alloc_offset = bg->alloc_offset;
+
 	if (zone_info[0].alloc_offset != WP_MISSING_DEV)
 		bg->alloc_offset = zone_info[0].alloc_offset;
 	else
@@ -1477,6 +1492,11 @@ static int btrfs_load_block_group_raid0(struct btrfs_block_group *bg,
 		btrfs_err(fs_info, "zoned: data %s needs raid-stripe-tree",
 			  btrfs_bg_type_to_raid_name(map->type));
 		return -EINVAL;
+	}
+
+	for (int i = 0; i < map->num_stripes; i++) {
+		if (zone_info[i].alloc_offset == WP_CONVENTIONAL)
+			zone_info[i].alloc_offset = bg->alloc_offset;
 	}
 
 	for (int i = 0; i < map->num_stripes; i++) {
@@ -1509,6 +1529,11 @@ static int btrfs_load_block_group_raid10(struct btrfs_block_group *bg,
 		btrfs_err(fs_info, "zoned: data %s needs raid-stripe-tree",
 			  btrfs_bg_type_to_raid_name(map->type));
 		return -EINVAL;
+	}
+
+	for (int i = 0; i < map->num_stripes; i++) {
+		if (zone_info[i].alloc_offset == WP_CONVENTIONAL)
+			zone_info[i].alloc_offset = bg->alloc_offset;
 	}
 
 	for (int i = 0; i < map->num_stripes; i++) {
@@ -1605,7 +1630,6 @@ int btrfs_load_block_group_zone_info(struct btrfs_block_group *cache, bool new)
 		} else if (map->num_stripes == num_conventional) {
 			cache->alloc_offset = last_alloc;
 			set_bit(BLOCK_GROUP_FLAG_ZONE_IS_ACTIVE, &cache->runtime_flags);
-			goto out;
 		}
 	}
 
