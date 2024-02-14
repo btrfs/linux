@@ -1924,6 +1924,8 @@ void btrfs_reclaim_bgs_work(struct work_struct *work)
 				  bg->start);
 			spin_lock(&space_info->lock);
 			space_info->reclaim_count++;
+			if (READ_ONCE(space_info->periodic_reclaim))
+				space_info->periodic_reclaim_ready = false;
 			spin_unlock(&space_info->lock);
 		} else {
 			spin_lock(&space_info->lock);
@@ -1933,7 +1935,7 @@ void btrfs_reclaim_bgs_work(struct work_struct *work)
 		}
 
 next:
-		if (ret)
+		if (ret && !READ_ONCE(space_info->periodic_reclaim))
 			btrfs_mark_bg_to_reclaim(bg);
 		btrfs_put_block_group(bg);
 
@@ -3663,6 +3665,8 @@ int btrfs_update_block_group(struct btrfs_trans_handle *trans,
 		space_info->bytes_reserved -= num_bytes;
 		space_info->bytes_used += num_bytes;
 		space_info->disk_used += num_bytes * factor;
+		if (READ_ONCE(space_info->periodic_reclaim))
+			btrfs_space_info_update_reclaimable(space_info, -num_bytes);
 		spin_unlock(&cache->lock);
 		spin_unlock(&space_info->lock);
 	} else {
@@ -3672,8 +3676,10 @@ int btrfs_update_block_group(struct btrfs_trans_handle *trans,
 		btrfs_space_info_update_bytes_pinned(info, space_info, num_bytes);
 		space_info->bytes_used -= num_bytes;
 		space_info->disk_used -= num_bytes * factor;
-
-		reclaim = should_reclaim_block_group(cache, num_bytes);
+		if (READ_ONCE(space_info->periodic_reclaim))
+			btrfs_space_info_update_reclaimable(space_info, num_bytes);
+		else
+			reclaim = should_reclaim_block_group(cache, num_bytes);
 
 		spin_unlock(&cache->lock);
 		spin_unlock(&space_info->lock);
