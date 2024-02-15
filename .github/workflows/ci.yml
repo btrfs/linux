@@ -172,7 +172,7 @@ jobs:
       - name: collect vmcore-dmesg
         run: collect-vmcore-dmesg.sh ${{ matrix.vm }}
       - name: upload the vmcore-dmesg if it exists
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: dmesg-${{ matrix.vm }}
           path: ${{ github.workspace }}/${{ matrix.vm }}-dmesg.txt
