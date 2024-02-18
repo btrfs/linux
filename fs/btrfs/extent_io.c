@@ -1192,6 +1192,101 @@ static inline void contiguous_readpages(struct page *pages[], int nr_pages,
 	}
 }
 
+struct locked_delalloc_range {
+	struct list_head list;
+	u64 delalloc_start;
+	u32 delalloc_len;
+};
+
+/*
+ * Save the locked delalloc range.
+ *
+ * This is for subpage only, as for regular sectorsize, there will be at most
+ * one locked delalloc range for a page.
+ */
+struct locked_delalloc_list {
+	u64 last_delalloc_start;
+	u32 last_delalloc_len;
+	struct list_head head;
+};
+
+static void init_locked_delalloc_list(struct locked_delalloc_list *locked_list)
+{
+	INIT_LIST_HEAD(&locked_list->head);
+	locked_list->last_delalloc_start = 0;
+	locked_list->last_delalloc_len = 0;
+}
+
+static void release_locked_delalloc_list(struct locked_delalloc_list *locked_list)
+{
+	while (!list_empty(&locked_list->head)) {
+		struct locked_delalloc_range *entry;
+
+		entry = list_entry(locked_list->head.next,
+				   struct locked_delalloc_range, list);
+
+		list_del_init(&entry->list);
+		kfree(entry);
+	}
+}
+
+static int add_locked_delalloc_range(struct btrfs_fs_info *fs_info,
+				     struct locked_delalloc_list *locked_list,
+				     u64 start, u32 len)
+{
+	struct locked_delalloc_range *entry;
+
+	entry = kmalloc(sizeof(*entry), GFP_NOFS);
+	if (!entry)
+		return -ENOMEM;
+
+	if (locked_list->last_delalloc_len == 0) {
+		locked_list->last_delalloc_start = start;
+		locked_list->last_delalloc_len = len;
+		return 0;
+	}
+	/* The new entry must be beyond the current one. */
+	ASSERT(start >= locked_list->last_delalloc_start +
+			locked_list->last_delalloc_len);
+
+	/* Only subpage case can have more than one delalloc ranges inside a page. */
+	ASSERT(fs_info->sectorsize < PAGE_SIZE);
+
+	entry->delalloc_start = locked_list->last_delalloc_start;
+	entry->delalloc_len = locked_list->last_delalloc_len;
+	locked_list->last_delalloc_start = start;
+	locked_list->last_delalloc_len = len;
+	list_add_tail(&entry->list, &locked_list->head);
+	return 0;
+}
+
+static void __cold unlock_one_locked_delalloc_range(struct btrfs_inode *binode,
+						    struct page *locked_page,
+						    u64 start, u32 len)
+{
+	u64 delalloc_end = start + len - 1;
+
+	unlock_extent(&binode->io_tree, start, delalloc_end, NULL);
+	__unlock_for_delalloc(&binode->vfs_inode, locked_page, start,
+			      delalloc_end);
+}
+
+static void unlock_locked_delalloc_list(struct btrfs_inode *binode,
+					struct page *locked_page,
+					struct locked_delalloc_list *locked_list)
+{
+	struct locked_delalloc_range *entry;
+
+	list_for_each_entry(entry, &locked_list->head, list)
+		unlock_one_locked_delalloc_range(binode, locked_page,
+				entry->delalloc_start, entry->delalloc_len);
+	if (locked_list->last_delalloc_len) {
+		unlock_one_locked_delalloc_range(binode, locked_page,
+				locked_list->last_delalloc_start,
+				locked_list->last_delalloc_len);
+	}
+}
+
 /*
  * helper for __extent_writepage, doing all of the delayed allocation setup.
  *
@@ -1205,13 +1300,17 @@ static inline void contiguous_readpages(struct page *pages[], int nr_pages,
 static noinline_for_stack int writepage_delalloc(struct btrfs_inode *inode,
 		struct page *page, struct writeback_control *wbc)
 {
+	struct btrfs_fs_info *fs_info = inode_to_fs_info(&inode->vfs_inode);
 	const u64 page_start = page_offset(page);
 	const u64 page_end = page_start + PAGE_SIZE - 1;
+	struct locked_delalloc_list locked_list;
+	struct locked_delalloc_range *entry;
 	u64 delalloc_start = page_start;
 	u64 delalloc_end = page_end;
 	u64 delalloc_to_write = 0;
 	int ret = 0;
 
+	init_locked_delalloc_list(&locked_list);
 	while (delalloc_start < page_end) {
 		delalloc_end = page_end;
 		if (!find_lock_delalloc_range(&inode->vfs_inode, page,
@@ -1219,14 +1318,47 @@ static noinline_for_stack int writepage_delalloc(struct btrfs_inode *inode,
 			delalloc_start = delalloc_end + 1;
 			continue;
 		}
-
-		ret = btrfs_run_delalloc_range(inode, page, delalloc_start,
-					       delalloc_end, wbc);
-		if (ret < 0)
+		ret = add_locked_delalloc_range(fs_info, &locked_list,
+				delalloc_start, delalloc_end + 1 - delalloc_start);
+		if (ret < 0) {
+			unlock_locked_delalloc_list(inode, page, &locked_list);
+			release_locked_delalloc_list(&locked_list);
 			return ret;
+		}
 
 		delalloc_start = delalloc_end + 1;
 	}
+	list_for_each_entry(entry, &locked_list.head, list) {
+		delalloc_end = entry->delalloc_start + entry->delalloc_len - 1;
+
+		/*
+		 * Hit error in the previous run, cleanup the locked
+		 * extents/pages.
+		 */
+		if (ret < 0) {
+			unlock_one_locked_delalloc_range(inode, page,
+					entry->delalloc_start, entry->delalloc_len);
+			continue;
+		}
+		ret = btrfs_run_delalloc_range(inode, page, entry->delalloc_start,
+					       delalloc_end, wbc);
+	}
+	if (locked_list.last_delalloc_len) {
+		delalloc_end = locked_list.last_delalloc_start +
+			       locked_list.last_delalloc_len - 1;
+
+		if (ret < 0)
+			unlock_one_locked_delalloc_range(inode, page,
+					locked_list.last_delalloc_start,
+					locked_list.last_delalloc_len);
+		else
+			ret = btrfs_run_delalloc_range(inode, page,
+					locked_list.last_delalloc_start,
+					delalloc_end, wbc);
+	}
+	release_locked_delalloc_list(&locked_list);
+	if (ret < 0)
+		return ret;
 
 	/*
 	 * delalloc_end is already one less than the total length, so
