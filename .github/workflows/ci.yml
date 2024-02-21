@@ -91,6 +91,9 @@ jobs:
       with:
         name: results-zoned
         path: "/root/fstests/results/**"
+    - name: Collect not run tests to summary
+      if: success() || failure()
+      run: /root/fstests/collect-notrun-to-summary.sh /root/fstests ${{ matrix.config_name }} >> $GITHUB_STEP_SUMMARY
 
   test:
     runs-on: [self-hosted, linux, x64, vm]
@@ -117,6 +120,9 @@ jobs:
       with:
         name: results-${{ matrix.config_name }}
         path: "/root/fstests/results/${{ matrix.config_name }}"
+    - name: Collect not run tests to summary
+      if: success() || failure()
+      run: /root/fstests/collect-notrun-to-summary.sh /root/fstests ${{ matrix.config_name }} >> $GITHUB_STEP_SUMMARY
 
   test-arm:
     runs-on: [self-hosted, linux, ARM64, vm]
@@ -143,6 +149,9 @@ jobs:
       with:
         name: results-${{ matrix.config_name }}
         path: "/root/fstests/results/${{ matrix.config_name }}"
+    - name: Collect not run tests to summary
+      if: success() || failure()
+      run: /root/fstests/collect-notrun-to-summary.sh /root/fstests ${{ matrix.config_name }} >> $GITHUB_STEP_SUMMARY
 
   collect-vmcore:
     runs-on: [self-hosted, linux, x64, vmhost]
