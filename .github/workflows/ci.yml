@@ -104,7 +104,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        config_name: [btrfs_normal, btrfs_compress, btrfs_holes_spacecache, btrfs_holes_spacecache_compress, btrfs_block_group_tree]
+        config_name: [btrfs_normal, btrfs_compress, btrfs_block_group_tree, btrfs_raid_stripe_tree, btrfs_squota]
     steps:
     - name: run xfstests
       run: ./unfuck-signal ./check -E EXCLUDE -R xunit -s ${{ matrix.config_name }} -g auto
