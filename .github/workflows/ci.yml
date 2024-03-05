@@ -74,6 +74,9 @@ jobs:
     defaults:
       run:
         working-directory: /root/fstests
+    env:
+      # Override if missing in configs
+      FSTYP: "btrfs"
     strategy:
       fail-fast: false
     steps:
