@@ -1500,6 +1500,15 @@ void btrfs_delete_unused_bgs(struct btrfs_fs_info *fs_info)
 			btrfs_put_block_group(block_group);
 			continue;
 		}
+
+		spin_lock(&fs_info->relocation_bg_lock);
+		if (block_group->start == fs_info->data_reloc_bg) {
+			btrfs_put_block_group(block_group);
+			spin_unlock(&fs_info->relocation_bg_lock);
+			continue;
+		}
+		spin_unlock(&fs_info->relocation_bg_lock);
+
 		spin_unlock(&fs_info->unused_bgs_lock);
 
 		btrfs_discard_cancel_work(&fs_info->discard_ctl, block_group);
@@ -1834,6 +1843,14 @@ void btrfs_reclaim_bgs_work(struct work_struct *work)
 				      struct btrfs_block_group,
 				      bg_list);
 		list_del_init(&bg->bg_list);
+
+		spin_lock(&fs_info->relocation_bg_lock);
+		if (bg->start == fs_info->data_reloc_bg) {
+			btrfs_put_block_group(bg);
+			spin_unlock(&fs_info->relocation_bg_lock);
+			continue;
+		}
+		spin_unlock(&fs_info->relocation_bg_lock);
 
 		space_info = bg->space_info;
 		spin_unlock(&fs_info->unused_bgs_lock);
