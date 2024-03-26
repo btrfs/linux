@@ -1,0 +1,193 @@
+name: CI
+
+on:
+  push:
+    branches: [ "master", "ci**" ]
+  pull_request:
+    branches: [ "master", "ci**" ]
+
+concurrency: one_at_a_time_gents
+
+permissions:
+  contents: read
+  checks: write
+  id-token: write
+
+jobs:
+  build:
+    runs-on: [self-hosted, linux, x64, vmhost]
+    steps:
+    - uses: actions/checkout@v4
+    - name: copy system config
+      run: copy-config.sh ${{ github.workspace }}
+    - name: make olddefconfig
+      run: make olddefconfig
+    - name: make
+      run: make -j32
+
+  build-arm:
+    runs-on: [self-hosted, linux, ARM64, vmhost]
+    steps:
+    - uses: actions/checkout@v4
+    - name: copy system config
+      run: copy-config.sh ${{ github.workspace }}
+    - name: make olddefconfig
+      run: make olddefconfig
+    - name: make
+      run: make -j32
+
+  deploy:
+    runs-on: [self-hosted, linux, x64, vmhost]
+    needs: build
+    strategy:
+      matrix:
+        vm: [xfstests5, xfstests6, xfstests7, xfstests8, xfstests9, xfstests10]
+    steps:
+    - name: make sure the vm is alive
+      run: check-vm-health.sh ${{ matrix.vm }}
+    - name: update btrfs-progs
+      run: update-btrfs-progs.sh ${{ matrix.vm }}
+    - name: update xfstests
+      run: update-xfstests.sh ${{ matrix.vm }}
+    - name: update kernel
+      run: update-kernel.sh ${{ matrix.vm }} ${{ github.workspace }}
+
+  deploy-arm:
+    runs-on: [self-hosted, linux, ARM64, vmhost]
+    needs: build-arm
+    strategy:
+      matrix:
+        vm: [xfstests11, xfstests12]
+    steps:
+    - name: make sure the vm is alive
+      run: check-vm-health.sh ${{ matrix.vm }}
+    - name: update btrfs-progs
+      run: update-btrfs-progs.sh ${{ matrix.vm }}
+    - name: update xfstests
+      run: update-xfstests.sh ${{ matrix.vm }}
+    - name: update vms
+      run: update-kernel.sh ${{ matrix.vm }} ${{ github.workspace }}
+
+  test-zoned:
+    runs-on: [self-hosted, linux, x64, zoned]
+    needs: deploy
+    defaults:
+      run:
+        working-directory: /root/fstests
+    env:
+      # Override if missing in configs
+      FSTYP: "btrfs"
+    strategy:
+      fail-fast: false
+    steps:
+    - name: run xfstests
+      run: ./unfuck-signal ./check -E EXCLUDE -E EXCLUDE.zoned -R xunit -s btrfs_zoned -g auto
+    - name: generate report
+      uses: mikepenz/action-junit-report@v4
+      if: success() || failure()
+      with:
+        annotate_only: true
+        report_paths: /root/fstests/results/btrfs_zoned/result.xml
+    - name: Save results/ as artifacts
+      uses: actions/upload-artifact@v4
+      if: success() || failure()
+      with:
+        name: results-zoned
+        path: "/root/fstests/results/**"
+    - name: Collect not run tests to summary
+      if: success() || failure()
+      run: /root/fstests/collect-notrun-to-summary.sh /root/fstests ${{ matrix.config_name }} >> $GITHUB_STEP_SUMMARY
+
+  test:
+    runs-on: [self-hosted, linux, x64, vm]
+    needs: deploy
+    defaults:
+      run:
+        working-directory: /root/fstests
+    strategy:
+      fail-fast: false
+      matrix:
+        config_name: [btrfs_normal, btrfs_compress, btrfs_block_group_tree, btrfs_raid_stripe_tree, btrfs_squota]
+    steps:
+    - name: run xfstests
+      run: ./unfuck-signal ./check -E EXCLUDE -R xunit -s ${{ matrix.config_name }} -g auto
+    - name: generate report
+      uses: mikepenz/action-junit-report@v4
+      if: success() || failure()
+      with:
+        annotate_only: true
+        report_paths: /root/fstests/results/${{ matrix.config_name }}/result.xml
+    - name: Save results/ as artifacts
+      uses: actions/upload-artifact@v4
+      if: success() || failure()
+      with:
+        name: results-${{ matrix.config_name }}
+        path: "/root/fstests/results/${{ matrix.config_name }}"
+    - name: Collect not run tests to summary
+      if: success() || failure()
+      run: /root/fstests/collect-notrun-to-summary.sh /root/fstests ${{ matrix.config_name }} >> $GITHUB_STEP_SUMMARY
+
+  test-arm:
+    runs-on: [self-hosted, linux, ARM64, vm]
+    needs: deploy-arm
+    defaults:
+      run:
+        working-directory: /root/fstests
+    strategy:
+      fail-fast: false
+      matrix:
+        config_name: [btrfs_subpage_normal, btrfs_subpage_compress]
+    steps:
+    - name: run xfstests
+      run: ./unfuck-signal ./check -E EXCLUDE -E EXCLUDE.arm -R xunit -s ${{ matrix.config_name }} -g auto
+    - name: generate report
+      uses: mikepenz/action-junit-report@v4
+      if: success() || failure()
+      with:
+        annotate_only: true
+        report_paths: /root/fstests/results/${{ matrix.config_name }}/result.xml
+    - name: Save results/ as artifacts
+      uses: actions/upload-artifact@v4
+      if: success() || failure()
+      with:
+        name: results-${{ matrix.config_name }}
+        path: "/root/fstests/results/${{ matrix.config_name }}"
+    - name: Collect not run tests to summary
+      if: success() || failure()
+      run: /root/fstests/collect-notrun-to-summary.sh /root/fstests ${{ matrix.config_name }} >> $GITHUB_STEP_SUMMARY
+
+  collect-vmcore:
+    runs-on: [self-hosted, linux, x64, vmhost]
+    needs: [test, test-zoned]
+    # Do not collect core when cancelled
+    if: success() || failure()
+    strategy:
+      matrix:
+        vm: [xfstests5, xfstests6, xfstests7, xfstests8, xfstests9, xfstests10]
+    steps:
+      - name: collect vmcore-dmesg
+        run: collect-vmcore-dmesg.sh ${{ matrix.vm }}
+      - name: upload the vmcore-dmesg if it exists
+        uses: actions/upload-artifact@v4
+        with:
+          name: dmesg-${{ matrix.vm }}
+          path: ${{ github.workspace }}/${{ matrix.vm }}-dmesg.txt
+          if-no-files-found: ignore
+
+  collect-vmcore-arm:
+    runs-on: [self-hosted, linux, ARM64, vmhost]
+    needs: test-arm
+    # Do not collect core when cancelled
+    if: success() || failure()
+    strategy:
+      matrix:
+        vm: [xfstests11, xfstests12]
+    steps:
+      - name: collect vmcore-dmesg
+        run: collect-vmcore-dmesg.sh ${{ matrix.vm }}
+      - name: upload the vmcore-dmesg if it exists
+        uses: actions/upload-artifact@v4
+        with:
+          name: dmesg-${{ matrix.vm }}
+          path: ${{ github.workspace }}/${{ matrix.vm }}-dmesg.txt
+          if-no-files-found: ignore
