@@ -667,6 +667,37 @@ static void end_bbio_data_read(struct btrfs_bio *bbio)
 }
 
 /*
+ * Populate every free slot in a provided array with folios.
+ *
+ * @nr_folios:   number of folios to allocate
+ * @folio_array: the array to fill with folios; any existing non-NULL entries in
+ *		 the array will be skipped
+ * @extra_gfp:	 the extra GFP flags for the allocation
+ *
+ * Return: 0        if all folios were able to be allocated;
+ *         -ENOMEM  otherwise, the partially allocated folios would be freed and
+ *                  the array slots zeroed
+ */
+int btrfs_alloc_folio_array(unsigned int nr_folios, struct folio **folio_array,
+			    gfp_t extra_gfp)
+{
+	for (int i = 0; i < nr_folios; i++) {
+		if (folio_array[i])
+			continue;
+		folio_array[i] = folio_alloc(GFP_NOFS | extra_gfp, 0);
+		if (!folio_array[i])
+			goto error;
+	}
+	return 0;
+error:
+	for (int i = 0; i < nr_folios; i++) {
+		if (folio_array[i])
+			folio_put(folio_array[i]);
+	}
+	return -ENOMEM;
+}
+
+/*
  * Populate every free slot in a provided array with pages.
  *
  * @nr_pages:   number of pages to allocate
@@ -681,31 +712,21 @@ static void end_bbio_data_read(struct btrfs_bio *bbio)
 int btrfs_alloc_page_array(unsigned int nr_pages, struct page **page_array,
 			   gfp_t extra_gfp)
 {
+	const gfp_t gfp = GFP_NOFS | extra_gfp;
 	unsigned int allocated;
 
 	for (allocated = 0; allocated < nr_pages;) {
 		unsigned int last = allocated;
 
-		allocated = alloc_pages_bulk_array(GFP_NOFS | extra_gfp,
-						   nr_pages, page_array);
-
-		if (allocated == nr_pages)
-			return 0;
-
-		/*
-		 * During this iteration, no page could be allocated, even
-		 * though alloc_pages_bulk_array() falls back to alloc_page()
-		 * if  it could not bulk-allocate. So we must be out of memory.
-		 */
-		if (allocated == last) {
+		allocated = alloc_pages_bulk_array(gfp, nr_pages, page_array);
+		if (unlikely(allocated == last)) {
+			/* No progress, fail and do cleanup. */
 			for (int i = 0; i < allocated; i++) {
 				__free_page(page_array[i]);
 				page_array[i] = NULL;
 			}
 			return -ENOMEM;
 		}
-
-		memalloc_retry_wait(GFP_NOFS);
 	}
 	return 0;
 }
@@ -2256,8 +2277,7 @@ next_page:
 	submit_write_bio(&bio_ctrl, found_error ? ret : 0);
 }
 
-int extent_writepages(struct address_space *mapping,
-		      struct writeback_control *wbc)
+int btrfs_writepages(struct address_space *mapping, struct writeback_control *wbc)
 {
 	struct inode *inode = mapping->host;
 	int ret = 0;
@@ -2277,7 +2297,7 @@ int extent_writepages(struct address_space *mapping,
 	return ret;
 }
 
-void extent_readahead(struct readahead_control *rac)
+void btrfs_readahead(struct readahead_control *rac)
 {
 	struct btrfs_bio_ctrl bio_ctrl = { .opf = REQ_OP_READ | REQ_RAHEAD };
 	struct page *pagepool[16];
@@ -2437,7 +2457,7 @@ remove_em:
 			 * hurts the fsync performance for workloads with a data
 			 * size that exceeds or is close to the system's memory).
 			 */
-			remove_extent_mapping(map, em);
+			remove_extent_mapping(btrfs_inode, em);
 			/* once for the rb tree */
 			free_extent_map(em);
 next:
@@ -2783,13 +2803,19 @@ static int fiemap_next_leaf_item(struct btrfs_inode *inode, struct btrfs_path *p
 		goto out;
 	}
 
-	/* See the comment at fiemap_search_slot() about why we clone. */
-	copy_extent_buffer_full(clone, path->nodes[0]);
 	/*
 	 * Important to preserve the start field, for the optimizations when
 	 * checking if extents are shared (see extent_fiemap()).
+	 *
+	 * We must set ->start before calling copy_extent_buffer_full().  If we
+	 * are on sub-pagesize blocksize, we use ->start to determine the offset
+	 * into the folio where our eb exists, and if we update ->start after
+	 * the fact then any subsequent reads of the eb may read from a
+	 * different offset in the folio than where we originally copied into.
 	 */
 	clone->start = path->nodes[0]->start;
+	/* See the comment at fiemap_search_slot() about why we clone. */
+	copy_extent_buffer_full(clone, path->nodes[0]);
 
 	slot = path->slots[0];
 	btrfs_release_path(path);
@@ -4154,7 +4180,7 @@ void btrfs_clear_buffer_dirty(struct btrfs_trans_handle *trans,
 	 * The actual zeroout of the buffer will happen later in
 	 * btree_csum_one_bio.
 	 */
-	if (btrfs_is_zoned(fs_info)) {
+	if (btrfs_is_zoned(fs_info) && test_bit(EXTENT_BUFFER_DIRTY, &eb->bflags)) {
 		set_bit(EXTENT_BUFFER_ZONED_ZEROOUT, &eb->bflags);
 		return;
 	}
@@ -4193,6 +4219,7 @@ void set_extent_buffer_dirty(struct extent_buffer *eb)
 	num_folios = num_extent_folios(eb);
 	WARN_ON(atomic_read(&eb->refs) == 0);
 	WARN_ON(!test_bit(EXTENT_BUFFER_TREE_REF, &eb->bflags));
+	WARN_ON(test_bit(EXTENT_BUFFER_ZONED_ZEROOUT, &eb->bflags));
 
 	if (!was_dirty) {
 		bool subpage = eb->fs_info->nodesize < PAGE_SIZE;
@@ -4270,6 +4297,13 @@ void set_extent_buffer_uptodate(struct extent_buffer *eb)
 	}
 }
 
+static void clear_extent_buffer_reading(struct extent_buffer *eb)
+{
+	clear_bit(EXTENT_BUFFER_READING, &eb->bflags);
+	smp_mb__after_atomic();
+	wake_up_bit(&eb->bflags, EXTENT_BUFFER_READING);
+}
+
 static void end_bbio_meta_read(struct btrfs_bio *bbio)
 {
 	struct extent_buffer *eb = bbio->private;
@@ -4277,6 +4311,13 @@ static void end_bbio_meta_read(struct btrfs_bio *bbio)
 	bool uptodate = !bbio->bio.bi_status;
 	struct folio_iter fi;
 	u32 bio_offset = 0;
+
+	/*
+	 * If the extent buffer is marked UPTODATE before the read operation
+	 * completes, other calls to read_extent_buffer_pages() will return
+	 * early without waiting for the read to finish, causing data races.
+	 */
+	WARN_ON(test_bit(EXTENT_BUFFER_UPTODATE, &eb->bflags));
 
 	eb->read_mirror = bbio->mirror_num;
 
@@ -4304,9 +4345,7 @@ static void end_bbio_meta_read(struct btrfs_bio *bbio)
 		bio_offset += len;
 	}
 
-	clear_bit(EXTENT_BUFFER_READING, &eb->bflags);
-	smp_mb__after_atomic();
-	wake_up_bit(&eb->bflags, EXTENT_BUFFER_READING);
+	clear_extent_buffer_reading(eb);
 	free_extent_buffer(eb);
 
 	bio_put(&bbio->bio);
@@ -4340,9 +4379,7 @@ int read_extent_buffer_pages(struct extent_buffer *eb, int wait, int mirror_num,
 	 * will now be set, and we shouldn't read it in again.
 	 */
 	if (unlikely(test_bit(EXTENT_BUFFER_UPTODATE, &eb->bflags))) {
-		clear_bit(EXTENT_BUFFER_READING, &eb->bflags);
-		smp_mb__after_atomic();
-		wake_up_bit(&eb->bflags, EXTENT_BUFFER_READING);
+		clear_extent_buffer_reading(eb);
 		return 0;
 	}
 
