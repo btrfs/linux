@@ -630,6 +630,10 @@ struct btrfs_fs_info {
 	s32 dirty_metadata_batch;
 	s32 delalloc_batch;
 
+	struct percpu_counter evictable_extent_maps;
+	u64 extent_map_shrinker_last_root;
+	u64 extent_map_shrinker_last_ino;
+
 	/* Protected by 'trans_lock'. */
 	struct list_head dirty_cowonly_roots;
 
