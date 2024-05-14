@@ -3808,9 +3808,13 @@ restart:
 		err = PTR_ERR(trans);
 		goto out_free;
 	}
+
 	ret = btrfs_commit_transaction(trans);
 	if (ret && !err)
 		err = ret;
+
+	/* We know we have just freed space, set it as hint for the next relocation */
+	btrfs_reserve_relocation_zone(fs_info);
 out_free:
 	ret = clean_dirty_subvols(rc);
 	if (ret < 0 && !err)
