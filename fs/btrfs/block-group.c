@@ -418,7 +418,7 @@ struct btrfs_caching_control *btrfs_get_caching_control(
 	return ctl;
 }
 
-void btrfs_put_caching_control(struct btrfs_caching_control *ctl)
+static void btrfs_put_caching_control(struct btrfs_caching_control *ctl)
 {
 	if (refcount_dec_and_test(&ctl->count))
 		kfree(ctl);
@@ -1022,6 +1022,13 @@ static void clear_incompat_bg_bits(struct btrfs_fs_info *fs_info, u64 flags)
 	}
 }
 
+static struct btrfs_root *btrfs_block_group_root(struct btrfs_fs_info *fs_info)
+{
+	if (btrfs_fs_compat_ro(fs_info, BLOCK_GROUP_TREE))
+		return fs_info->block_group_root;
+	return btrfs_extent_root(fs_info, 0);
+}
+
 static int remove_block_group_item(struct btrfs_trans_handle *trans,
 				   struct btrfs_path *path,
 				   struct btrfs_block_group *block_group)
@@ -1063,7 +1070,9 @@ int btrfs_remove_block_group(struct btrfs_trans_handle *trans,
 	bool remove_rsv = false;
 
 	block_group = btrfs_lookup_block_group(fs_info, map->start);
-	BUG_ON(!block_group);
+	if (!block_group)
+		return -ENOENT;
+
 	BUG_ON(!block_group->ro);
 
 	trace_btrfs_remove_block_group(block_group);
@@ -1429,7 +1438,7 @@ static bool clean_pinned_extents(struct btrfs_trans_handle *trans,
 	 * group in pinned_extents before we were able to clear the whole block
 	 * group range from pinned_extents. This means that task can lookup for
 	 * the block group after we unpinned it from pinned_extents and removed
-	 * it, leading to a BUG_ON() at unpin_extent_range().
+	 * it, leading to an error at unpin_extent_range().
 	 */
 	mutex_lock(&fs_info->unused_bg_unpin_mutex);
 	if (prev_trans) {
@@ -1491,6 +1500,15 @@ void btrfs_delete_unused_bgs(struct btrfs_fs_info *fs_info)
 			btrfs_put_block_group(block_group);
 			continue;
 		}
+
+		spin_lock(&fs_info->relocation_bg_lock);
+		if (block_group->start == fs_info->data_reloc_bg) {
+			btrfs_put_block_group(block_group);
+			spin_unlock(&fs_info->relocation_bg_lock);
+			continue;
+		}
+		spin_unlock(&fs_info->relocation_bg_lock);
+
 		spin_unlock(&fs_info->unused_bgs_lock);
 
 		btrfs_discard_cancel_work(&fs_info->discard_ctl, block_group);
@@ -1522,6 +1540,13 @@ void btrfs_delete_unused_bgs(struct btrfs_fs_info *fs_info)
 			 * outstanding allocations in this block group.  We do
 			 * the ro check in case balance is currently acting on
 			 * this block group.
+			 *
+			 * Also bail out if this is the only block group for its
+			 * type, because otherwise we would lose profile
+			 * information from fs_info->avail_*_alloc_bits and the
+			 * next block group of this type would be created with a
+			 * "single" profile (even if we're in a raid fs) because
+			 * fs_info->avail_*_alloc_bits would be 0.
 			 */
 			trace_btrfs_skip_unused_block_group(block_group);
 			spin_unlock(&block_group->lock);
@@ -1550,7 +1575,8 @@ void btrfs_delete_unused_bgs(struct btrfs_fs_info *fs_info)
 		 * needing to allocate extents from the block group.
 		 */
 		used = btrfs_space_info_used(space_info, true);
-		if (space_info->total_bytes - block_group->length < used) {
+		if (space_info->total_bytes - block_group->length < used &&
+		    block_group->zone_unusable < block_group->length) {
 			/*
 			 * Add a reference for the list, compensate for the ref
 			 * drop under the "next" label for the
@@ -1817,6 +1843,14 @@ void btrfs_reclaim_bgs_work(struct work_struct *work)
 				      struct btrfs_block_group,
 				      bg_list);
 		list_del_init(&bg->bg_list);
+
+		spin_lock(&fs_info->relocation_bg_lock);
+		if (bg->start == fs_info->data_reloc_bg) {
+			btrfs_put_block_group(bg);
+			spin_unlock(&fs_info->relocation_bg_lock);
+			continue;
+		}
+		spin_unlock(&fs_info->relocation_bg_lock);
 
 		space_info = bg->space_info;
 		spin_unlock(&fs_info->unused_bgs_lock);

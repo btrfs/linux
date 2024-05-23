@@ -28,11 +28,7 @@ static struct kmem_cache *delayed_node_cache;
 
 int __init btrfs_delayed_inode_init(void)
 {
-	delayed_node_cache = kmem_cache_create("btrfs_delayed_node",
-					sizeof(struct btrfs_delayed_node),
-					0,
-					SLAB_MEM_SPREAD,
-					NULL);
+	delayed_node_cache = KMEM_CACHE(btrfs_delayed_node, 0);
 	if (!delayed_node_cache)
 		return -ENOMEM;
 	return 0;
@@ -41,6 +37,17 @@ int __init btrfs_delayed_inode_init(void)
 void __cold btrfs_delayed_inode_exit(void)
 {
 	kmem_cache_destroy(delayed_node_cache);
+}
+
+void btrfs_init_delayed_root(struct btrfs_delayed_root *delayed_root)
+{
+	atomic_set(&delayed_root->items, 0);
+	atomic_set(&delayed_root->items_seq, 0);
+	delayed_root->nodes = 0;
+	spin_lock_init(&delayed_root->lock);
+	init_waitqueue_head(&delayed_root->wait);
+	INIT_LIST_HEAD(&delayed_root->node_list);
+	INIT_LIST_HEAD(&delayed_root->prepare_list);
 }
 
 static inline void btrfs_init_delayed_node(
@@ -70,14 +77,14 @@ static struct btrfs_delayed_node *btrfs_get_delayed_node(
 		return node;
 	}
 
-	spin_lock(&root->inode_lock);
+	xa_lock(&root->delayed_nodes);
 	node = xa_load(&root->delayed_nodes, ino);
 
 	if (node) {
 		if (btrfs_inode->delayed_node) {
 			refcount_inc(&node->refs);	/* can be accessed */
 			BUG_ON(btrfs_inode->delayed_node != node);
-			spin_unlock(&root->inode_lock);
+			xa_unlock(&root->delayed_nodes);
 			return node;
 		}
 
@@ -104,10 +111,10 @@ static struct btrfs_delayed_node *btrfs_get_delayed_node(
 			node = NULL;
 		}
 
-		spin_unlock(&root->inode_lock);
+		xa_unlock(&root->delayed_nodes);
 		return node;
 	}
-	spin_unlock(&root->inode_lock);
+	xa_unlock(&root->delayed_nodes);
 
 	return NULL;
 }
@@ -141,21 +148,21 @@ again:
 		kmem_cache_free(delayed_node_cache, node);
 		return ERR_PTR(-ENOMEM);
 	}
-	spin_lock(&root->inode_lock);
+	xa_lock(&root->delayed_nodes);
 	ptr = xa_load(&root->delayed_nodes, ino);
 	if (ptr) {
 		/* Somebody inserted it, go back and read it. */
-		spin_unlock(&root->inode_lock);
+		xa_unlock(&root->delayed_nodes);
 		kmem_cache_free(delayed_node_cache, node);
 		node = NULL;
 		goto again;
 	}
-	ptr = xa_store(&root->delayed_nodes, ino, node, GFP_ATOMIC);
+	ptr = __xa_store(&root->delayed_nodes, ino, node, GFP_ATOMIC);
 	ASSERT(xa_err(ptr) != -EINVAL);
 	ASSERT(xa_err(ptr) != -ENOMEM);
 	ASSERT(ptr == NULL);
 	btrfs_inode->delayed_node = node;
-	spin_unlock(&root->inode_lock);
+	xa_unlock(&root->delayed_nodes);
 
 	return node;
 }
@@ -268,14 +275,12 @@ static void __btrfs_release_delayed_node(
 	if (refcount_dec_and_test(&delayed_node->refs)) {
 		struct btrfs_root *root = delayed_node->root;
 
-		spin_lock(&root->inode_lock);
+		xa_erase(&root->delayed_nodes, delayed_node->inode_id);
 		/*
 		 * Once our refcount goes to zero, nobody is allowed to bump it
 		 * back up.  We can delete it now.
 		 */
 		ASSERT(refcount_read(&delayed_node->refs) == 0);
-		xa_erase(&root->delayed_nodes, delayed_node->inode_id);
-		spin_unlock(&root->inode_lock);
 		kmem_cache_free(delayed_node_cache, delayed_node);
 	}
 }
@@ -429,8 +434,6 @@ static void __btrfs_remove_delayed_item(struct btrfs_delayed_item *delayed_item)
 	lockdep_assert_held(&delayed_node->mutex);
 
 	delayed_root = delayed_node->root->fs_info->delayed_root;
-
-	BUG_ON(!delayed_root);
 
 	if (delayed_item->type == BTRFS_DELAYED_INSERTION_ITEM)
 		root = &delayed_node->ins_root;
@@ -980,7 +983,7 @@ static void btrfs_release_delayed_inode(struct btrfs_delayed_node *delayed_node)
 
 	if (delayed_node &&
 	    test_bit(BTRFS_DELAYED_NODE_INODE_DIRTY, &delayed_node->flags)) {
-		BUG_ON(!delayed_node->root);
+		ASSERT(delayed_node->root);
 		clear_bit(BTRFS_DELAYED_NODE_INODE_DIRTY, &delayed_node->flags);
 		delayed_node->count--;
 
@@ -1128,6 +1131,9 @@ __btrfs_commit_inode_delayed_items(struct btrfs_trans_handle *trans,
 	if (ret)
 		return ret;
 
+	ret = btrfs_record_root_in_trans(trans, node->root);
+	if (ret)
+		return ret;
 	ret = btrfs_update_delayed_inode(trans, node->root, path, node);
 	return ret;
 }
@@ -1643,7 +1649,7 @@ int btrfs_delete_delayed_dir_index(struct btrfs_trans_handle *trans,
 	if (unlikely(ret)) {
 		btrfs_err(trans->fs_info,
 			  "err add delayed dir index item(index: %llu) into the deletion tree of the delayed node(root id: %llu, inode id: %llu, errno: %d)",
-			  index, node->root->root_key.objectid,
+			  index, btrfs_root_id(node->root),
 			  node->inode_id, ret);
 		btrfs_delayed_item_release_metadata(dir->root, item);
 		btrfs_release_delayed_item(item);
@@ -1908,7 +1914,8 @@ int btrfs_fill_inode(struct inode *inode, u32 *rdev)
 	BTRFS_I(inode)->i_otime_nsec = btrfs_stack_timespec_nsec(&inode_item->otime);
 
 	inode->i_generation = BTRFS_I(inode)->generation;
-	BTRFS_I(inode)->index_cnt = (u64)-1;
+	if (S_ISDIR(inode->i_mode))
+		BTRFS_I(inode)->index_cnt = (u64)-1;
 
 	mutex_unlock(&delayed_node->mutex);
 	btrfs_release_delayed_node(delayed_node);
@@ -2049,9 +2056,9 @@ void btrfs_kill_all_delayed_nodes(struct btrfs_root *root)
 		struct btrfs_delayed_node *node;
 		int count;
 
-		spin_lock(&root->inode_lock);
+		xa_lock(&root->delayed_nodes);
 		if (xa_empty(&root->delayed_nodes)) {
-			spin_unlock(&root->inode_lock);
+			xa_unlock(&root->delayed_nodes);
 			return;
 		}
 
@@ -2068,7 +2075,7 @@ void btrfs_kill_all_delayed_nodes(struct btrfs_root *root)
 			if (count >= ARRAY_SIZE(delayed_nodes))
 				break;
 		}
-		spin_unlock(&root->inode_lock);
+		xa_unlock(&root->delayed_nodes);
 		index++;
 
 		for (int i = 0; i < count; i++) {
