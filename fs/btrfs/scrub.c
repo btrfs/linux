@@ -1012,6 +1012,7 @@ static void scrub_stripe_read_repair_worker(struct work_struct *work)
 	struct btrfs_fs_info *fs_info = sctx->fs_info;
 	int num_copies = btrfs_num_copies(fs_info, stripe->bg->start,
 					  stripe->bg->length);
+	unsigned long repaired;
 	int mirror;
 	int i;
 
@@ -1078,16 +1079,15 @@ out:
 	 * Submit the repaired sectors.  For zoned case, we cannot do repair
 	 * in-place, but queue the bg to be relocated.
 	 */
-	if (btrfs_is_zoned(fs_info)) {
-		if (!bitmap_empty(&stripe->error_bitmap, stripe->nr_sectors))
+	bitmap_andnot(&repaired, &stripe->init_error_bitmap, &stripe->error_bitmap,
+		      stripe->nr_sectors);
+	if (!sctx->readonly && !bitmap_empty(&repaired, stripe->nr_sectors)) {
+		if (btrfs_is_zoned(fs_info)) {
 			btrfs_repair_one_zone(fs_info, sctx->stripes[0].bg->start);
-	} else if (!sctx->readonly) {
-		unsigned long repaired;
-
-		bitmap_andnot(&repaired, &stripe->init_error_bitmap,
-			      &stripe->error_bitmap, stripe->nr_sectors);
-		scrub_write_sectors(sctx, stripe, repaired, false);
-		wait_scrub_stripe_io(stripe);
+		} else {
+			scrub_write_sectors(sctx, stripe, repaired, false);
+			wait_scrub_stripe_io(stripe);
+		}
 	}
 
 	scrub_stripe_report_errors(sctx, stripe);
@@ -1390,8 +1390,15 @@ static int find_first_extent_item(struct btrfs_root *extent_root,
 	ret = btrfs_search_slot(NULL, extent_root, &key, path, 0, 0);
 	if (ret < 0)
 		return ret;
+	if (ret == 0) {
+		/*
+		 * Key with offset -1 found, there would have to exist an extent
+		 * item with such offset, but this is out of the valid range.
+		 */
+		btrfs_release_path(path);
+		return -EUCLEAN;
+	}
 
-	ASSERT(ret > 0);
 	/*
 	 * Here we intentionally pass 0 as @min_objectid, as there could be
 	 * an extent item starting before @search_start.
@@ -2093,7 +2100,7 @@ static int scrub_simple_mirror(struct scrub_ctx *sctx,
 	struct btrfs_fs_info *fs_info = sctx->fs_info;
 	const u64 logical_end = logical_start + logical_length;
 	u64 cur_logical = logical_start;
-	int ret;
+	int ret = 0;
 
 	/* The range must be inside the bg */
 	ASSERT(logical_start >= bg->start && logical_end <= bg->start + bg->length);
@@ -2430,19 +2437,15 @@ static int finish_extent_writes_for_zoned(struct btrfs_root *root,
 					  struct btrfs_block_group *cache)
 {
 	struct btrfs_fs_info *fs_info = cache->fs_info;
-	struct btrfs_trans_handle *trans;
 
 	if (!btrfs_is_zoned(fs_info))
 		return 0;
 
 	btrfs_wait_block_group_reservations(cache);
 	btrfs_wait_nocow_writers(cache);
-	btrfs_wait_ordered_roots(fs_info, U64_MAX, cache->start, cache->length);
+	btrfs_wait_ordered_roots(fs_info, U64_MAX, cache);
 
-	trans = btrfs_join_transaction(root);
-	if (IS_ERR(trans))
-		return PTR_ERR(trans);
-	return btrfs_commit_transaction(trans);
+	return btrfs_commit_current_transaction(root);
 }
 
 static noinline_for_stack
@@ -2673,8 +2676,7 @@ int scrub_enumerate_chunks(struct scrub_ctx *sctx,
 		 */
 		if (sctx->is_dev_replace) {
 			btrfs_wait_nocow_writers(cache);
-			btrfs_wait_ordered_roots(fs_info, U64_MAX, cache->start,
-					cache->length);
+			btrfs_wait_ordered_roots(fs_info, U64_MAX, cache);
 		}
 
 		scrub_pause_off(fs_info);
@@ -2805,7 +2807,17 @@ static noinline_for_stack int scrub_supers(struct scrub_ctx *sctx,
 		gen = btrfs_get_last_trans_committed(fs_info);
 
 	for (i = 0; i < BTRFS_SUPER_MIRROR_MAX; i++) {
-		bytenr = btrfs_sb_offset(i);
+		ret = btrfs_sb_log_location(scrub_dev, i, 0, &bytenr);
+		if (ret == -ENOENT)
+			break;
+
+		if (ret) {
+			spin_lock(&sctx->stat_lock);
+			sctx->stat.super_errors++;
+			spin_unlock(&sctx->stat_lock);
+			continue;
+		}
+
 		if (bytenr + BTRFS_SUPER_INFO_SIZE >
 		    scrub_dev->commit_total_bytes)
 			break;
