@@ -772,7 +772,7 @@ int f2fs_inline_data_fiemap(struct inode *inode,
 {
 	__u64 byteaddr, ilen;
 	__u32 flags = FIEMAP_EXTENT_DATA_INLINE | FIEMAP_EXTENT_NOT_ALIGNED |
-		FIEMAP_EXTENT_LAST;
+		FIEMAP_EXTENT_HAS_PHYS_LEN | FIEMAP_EXTENT_LAST;
 	struct node_info ni;
 	struct page *ipage;
 	int err = 0;
@@ -806,8 +806,9 @@ int f2fs_inline_data_fiemap(struct inode *inode,
 	byteaddr = (__u64)ni.blk_addr << inode->i_sb->s_blocksize_bits;
 	byteaddr += (char *)inline_data_addr(inode, ipage) -
 					(char *)F2FS_INODE(ipage);
-	err = fiemap_fill_next_extent(fieinfo, start, byteaddr, ilen, flags);
-	trace_f2fs_fiemap(inode, start, byteaddr, ilen, flags, err);
+	err = fiemap_fill_next_extent(
+			fieinfo, start, byteaddr, ilen, 0, flags);
+	trace_f2fs_fiemap(inode, start, byteaddr, ilen, 0, flags, err);
 out:
 	f2fs_put_page(ipage, 1);
 	return err;

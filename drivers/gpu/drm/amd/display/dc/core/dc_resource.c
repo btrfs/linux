@@ -73,6 +73,7 @@
 #include "dcn32/dcn32_resource.h"
 #include "dcn321/dcn321_resource.h"
 #include "dcn35/dcn35_resource.h"
+#include "dcn351/dcn351_resource.h"
 
 #define VISUAL_CONFIRM_BASE_DEFAULT 3
 #define VISUAL_CONFIRM_BASE_MIN 1
@@ -195,6 +196,8 @@ enum dce_version resource_parse_asic_id(struct hw_asic_id asic_id)
 		break;
 	case AMDGPU_FAMILY_GC_11_5_0:
 		dc_version = DCN_VERSION_3_5;
+		if (ASICREV_IS_GC_11_0_4(asic_id.hw_internal_rev))
+			dc_version = DCN_VERSION_3_51;
 		break;
 	default:
 		dc_version = DCE_VERSION_UNKNOWN;
@@ -303,6 +306,9 @@ struct resource_pool *dc_create_resource_pool(struct dc  *dc,
 	case DCN_VERSION_3_5:
 		res_pool = dcn35_create_resource_pool(init_data, dc);
 		break;
+	case DCN_VERSION_3_51:
+		res_pool = dcn351_create_resource_pool(init_data, dc);
+		break;
 #endif /* CONFIG_DRM_AMD_DC_FP */
 	default:
 		break;
@@ -334,7 +340,7 @@ struct resource_pool *dc_create_resource_pool(struct dc  *dc,
 	return res_pool;
 }
 
-void dc_destroy_resource_pool(struct dc  *dc)
+void dc_destroy_resource_pool(struct dc *dc)
 {
 	if (dc) {
 		if (dc->res_pool)
@@ -1479,6 +1485,7 @@ bool resource_build_scaling_params(struct pipe_ctx *pipe_ctx)
 	struct dc_crtc_timing *timing = &pipe_ctx->stream->timing;
 	const struct rect odm_slice_rec = calculate_odm_slice_in_timing_active(pipe_ctx);
 	bool res = false;
+
 	DC_LOGGER_INIT(pipe_ctx->stream->ctx->logger);
 
 	/* Invalid input */
@@ -1788,6 +1795,30 @@ int recource_find_free_pipe_used_as_otg_master_in_cur_res_ctx(
 	return free_pipe_idx;
 }
 
+int resource_find_free_pipe_used_as_cur_sec_dpp(
+		const struct resource_context *cur_res_ctx,
+		struct resource_context *new_res_ctx,
+		const struct resource_pool *pool)
+{
+	int free_pipe_idx = FREE_PIPE_INDEX_NOT_FOUND;
+	const struct pipe_ctx *new_pipe, *cur_pipe;
+	int i;
+
+	for (i = 0; i < pool->pipe_count; i++) {
+		cur_pipe = &cur_res_ctx->pipe_ctx[i];
+		new_pipe = &new_res_ctx->pipe_ctx[i];
+
+		if (resource_is_pipe_type(cur_pipe, DPP_PIPE) &&
+				!resource_is_pipe_type(cur_pipe, OPP_HEAD) &&
+				resource_is_pipe_type(new_pipe, FREE_PIPE)) {
+			free_pipe_idx = i;
+			break;
+		}
+	}
+
+	return free_pipe_idx;
+}
+
 int resource_find_free_pipe_used_as_cur_sec_dpp_in_mpcc_combine(
 		const struct resource_context *cur_res_ctx,
 		struct resource_context *new_res_ctx,
@@ -1834,23 +1865,6 @@ int resource_find_any_free_pipe(struct resource_context *new_res_ctx,
 
 bool resource_is_pipe_type(const struct pipe_ctx *pipe_ctx, enum pipe_type type)
 {
-#ifdef DBG
-	if (pipe_ctx->stream == NULL) {
-		/* a free pipe with dangling states */
-		ASSERT(!pipe_ctx->plane_state);
-		ASSERT(!pipe_ctx->prev_odm_pipe);
-		ASSERT(!pipe_ctx->next_odm_pipe);
-		ASSERT(!pipe_ctx->top_pipe);
-		ASSERT(!pipe_ctx->bottom_pipe);
-	} else if (pipe_ctx->top_pipe) {
-		/* a secondary DPP pipe must be signed to a plane */
-		ASSERT(pipe_ctx->plane_state)
-	}
-	/* Add more checks here to prevent corrupted pipe ctx. It is very hard
-	 * to debug this issue afterwards because we can't pinpoint the code
-	 * location causing inconsistent pipe context states.
-	 */
-#endif
 	switch (type) {
 	case OTG_MASTER:
 		return !pipe_ctx->prev_odm_pipe &&
@@ -2635,13 +2649,19 @@ bool resource_append_dpp_pipes_for_plane_composition(
 		struct pipe_ctx *otg_master_pipe,
 		struct dc_plane_state *plane_state)
 {
+	bool success;
 	if (otg_master_pipe->plane_state == NULL)
-		return add_plane_to_opp_head_pipes(otg_master_pipe,
+		success = add_plane_to_opp_head_pipes(otg_master_pipe,
 				plane_state, new_ctx);
 	else
-		return acquire_secondary_dpp_pipes_and_add_plane(
+		success = acquire_secondary_dpp_pipes_and_add_plane(
 				otg_master_pipe, plane_state, new_ctx,
 				cur_ctx, pool);
+	if (success)
+		/* when appending a plane mpc slice count changes from 0 to 1 */
+		success = update_pipe_params_after_mpc_slice_count_change(
+				plane_state, new_ctx, pool);
+	return success;
 }
 
 void resource_remove_dpp_pipes_for_plane_composition(
@@ -3382,10 +3402,30 @@ static bool acquire_otg_master_pipe_for_stream(
 	 * any free pipes already used in current context as this could tear
 	 * down exiting ODM/MPC/MPO configuration unnecessarily.
 	 */
+
+	/*
+	 * Try to acquire the same OTG master already in use. This is not
+	 * optimal because resetting an enabled OTG master pipe for a new stream
+	 * requires an extra frame of wait. However there are test automation
+	 * and eDP assumptions that rely on reusing the same OTG master pipe
+	 * during mode change. We have to keep this logic as is for now.
+	 */
 	pipe_idx = recource_find_free_pipe_used_as_otg_master_in_cur_res_ctx(
 			&cur_ctx->res_ctx, &new_ctx->res_ctx, pool);
+	/*
+	 * Try to acquire a pipe not used in current resource context to avoid
+	 * pipe swapping.
+	 */
 	if (pipe_idx == FREE_PIPE_INDEX_NOT_FOUND)
 		pipe_idx = recource_find_free_pipe_not_used_in_cur_res_ctx(
+				&cur_ctx->res_ctx, &new_ctx->res_ctx, pool);
+	/*
+	 * If pipe swapping is unavoidable, try to acquire pipe used as
+	 * secondary DPP pipe in current state as we prioritize to support more
+	 * streams over supporting MPO planes.
+	 */
+	if (pipe_idx == FREE_PIPE_INDEX_NOT_FOUND)
+		pipe_idx = resource_find_free_pipe_used_as_cur_sec_dpp(
 				&cur_ctx->res_ctx, &new_ctx->res_ctx, pool);
 	if (pipe_idx == FREE_PIPE_INDEX_NOT_FOUND)
 		pipe_idx = resource_find_any_free_pipe(&new_ctx->res_ctx, pool);
@@ -4001,7 +4041,7 @@ static void set_avi_info_frame(
 	}
 
 	if (pixel_encoding && color_space == COLOR_SPACE_2020_YCBCR &&
-			stream->out_transfer_func->tf == TRANSFER_FUNCTION_GAMMA22) {
+			stream->out_transfer_func.tf == TRANSFER_FUNCTION_GAMMA22) {
 		hdmi_info.bits.EC0_EC2 = 0;
 		hdmi_info.bits.C0_C1 = COLORIMETRY_ITU709;
 	}
@@ -5002,4 +5042,37 @@ bool check_subvp_sw_cursor_fallback_req(const struct dc *dc, struct dc_stream_st
 		return true;
 
 	return false;
+}
+
+void resource_init_common_dml2_callbacks(struct dc *dc, struct dml2_configuration_options *dml2_options)
+{
+	dml2_options->callbacks.dc = dc;
+	dml2_options->callbacks.build_scaling_params = &resource_build_scaling_params;
+	dml2_options->callbacks.acquire_secondary_pipe_for_mpc_odm = &dc_resource_acquire_secondary_pipe_for_mpc_odm_legacy;
+	dml2_options->callbacks.update_pipes_for_stream_with_slice_count = &resource_update_pipes_for_stream_with_slice_count;
+	dml2_options->callbacks.update_pipes_for_plane_with_slice_count = &resource_update_pipes_for_plane_with_slice_count;
+	dml2_options->callbacks.get_mpc_slice_index = &resource_get_mpc_slice_index;
+	dml2_options->callbacks.get_odm_slice_index = &resource_get_odm_slice_index;
+	dml2_options->callbacks.get_opp_head = &resource_get_opp_head;
+	dml2_options->callbacks.get_otg_master_for_stream = &resource_get_otg_master_for_stream;
+	dml2_options->callbacks.get_opp_heads_for_otg_master = &resource_get_opp_heads_for_otg_master;
+	dml2_options->callbacks.get_dpp_pipes_for_plane = &resource_get_dpp_pipes_for_plane;
+	dml2_options->callbacks.get_stream_status = &dc_state_get_stream_status;
+	dml2_options->callbacks.get_stream_from_id = &dc_state_get_stream_from_id;
+
+	dml2_options->svp_pstate.callbacks.dc = dc;
+	dml2_options->svp_pstate.callbacks.add_phantom_plane = &dc_state_add_phantom_plane;
+	dml2_options->svp_pstate.callbacks.add_phantom_stream = &dc_state_add_phantom_stream;
+	dml2_options->svp_pstate.callbacks.build_scaling_params = &resource_build_scaling_params;
+	dml2_options->svp_pstate.callbacks.create_phantom_plane = &dc_state_create_phantom_plane;
+	dml2_options->svp_pstate.callbacks.remove_phantom_plane = &dc_state_remove_phantom_plane;
+	dml2_options->svp_pstate.callbacks.remove_phantom_stream = &dc_state_remove_phantom_stream;
+	dml2_options->svp_pstate.callbacks.create_phantom_stream = &dc_state_create_phantom_stream;
+	dml2_options->svp_pstate.callbacks.release_phantom_plane = &dc_state_release_phantom_plane;
+	dml2_options->svp_pstate.callbacks.release_phantom_stream = &dc_state_release_phantom_stream;
+	dml2_options->svp_pstate.callbacks.get_pipe_subvp_type = &dc_state_get_pipe_subvp_type;
+	dml2_options->svp_pstate.callbacks.get_stream_subvp_type = &dc_state_get_stream_subvp_type;
+	dml2_options->svp_pstate.callbacks.get_paired_subvp_stream = &dc_state_get_paired_subvp_stream;
+	dml2_options->svp_pstate.callbacks.remove_phantom_streams_and_planes = &dc_state_remove_phantom_streams_and_planes;
+	dml2_options->svp_pstate.callbacks.release_phantom_streams_and_planes = &dc_state_release_phantom_streams_and_planes;
 }

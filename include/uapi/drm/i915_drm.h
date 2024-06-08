@@ -2623,19 +2623,29 @@ struct drm_i915_reg_read {
  *
  */
 
+/*
+ * struct drm_i915_reset_stats - Return global reset and other context stats
+ *
+ * Driver keeps few stats for each contexts and also global reset count.
+ * This struct can be used to query those stats.
+ */
 struct drm_i915_reset_stats {
+	/** @ctx_id: ID of the requested context */
 	__u32 ctx_id;
+
+	/** @flags: MBZ */
 	__u32 flags;
 
-	/* All resets since boot/module reload, for all contexts */
+	/** @reset_count: All resets since boot/module reload, for all contexts */
 	__u32 reset_count;
 
-	/* Number of batches lost when active in GPU, for this context */
+	/** @batch_active: Number of batches lost when active in GPU, for this context */
 	__u32 batch_active;
 
-	/* Number of batches lost pending for execution, for this context */
+	/** @batch_pending: Number of batches lost pending for execution, for this context */
 	__u32 batch_pending;
 
+	/** @pad: MBZ */
 	__u32 pad;
 };
 
@@ -3013,6 +3023,7 @@ struct drm_i915_query_item {
 	 *  - %DRM_I915_QUERY_MEMORY_REGIONS (see struct drm_i915_query_memory_regions)
 	 *  - %DRM_I915_QUERY_HWCONFIG_BLOB (see `GuC HWCONFIG blob uAPI`)
 	 *  - %DRM_I915_QUERY_GEOMETRY_SUBSLICES (see struct drm_i915_query_topology_info)
+	 *  - %DRM_I915_QUERY_GUC_SUBMISSION_VERSION (see struct drm_i915_query_guc_submission_version)
 	 */
 	__u64 query_id;
 #define DRM_I915_QUERY_TOPOLOGY_INFO		1
@@ -3021,6 +3032,7 @@ struct drm_i915_query_item {
 #define DRM_I915_QUERY_MEMORY_REGIONS		4
 #define DRM_I915_QUERY_HWCONFIG_BLOB		5
 #define DRM_I915_QUERY_GEOMETRY_SUBSLICES	6
+#define DRM_I915_QUERY_GUC_SUBMISSION_VERSION	7
 /* Must be kept compact -- no holes and well documented */
 
 	/**
@@ -3564,6 +3576,20 @@ struct drm_i915_query_memory_regions {
 
 	/** @regions: Info about each supported region */
 	struct drm_i915_memory_region_info regions[];
+};
+
+/**
+ * struct drm_i915_query_guc_submission_version - query GuC submission interface version
+ */
+struct drm_i915_query_guc_submission_version {
+	/** @branch: Firmware branch version. */
+	__u32 branch;
+	/** @major: Firmware major version. */
+	__u32 major;
+	/** @minor: Firmware minor version. */
+	__u32 minor;
+	/** @patch: Firmware patch version. */
+	__u32 patch;
 };
 
 /**

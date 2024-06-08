@@ -79,7 +79,7 @@ static void cleanup_netns(struct nstoken *nstoken)
 	if (nstoken)
 		close_netns(nstoken);
 
-	SYS_NOFAIL("ip netns del %s &> /dev/null", NS_TEST);
+	SYS_NOFAIL("ip netns del %s", NS_TEST);
 }
 
 static int verify_tsk(int map_fd, int client_fd)
@@ -272,6 +272,8 @@ static int run_mptcpify(int cgroup_fd)
 	mptcpify_skel = mptcpify__open_and_load();
 	if (!ASSERT_OK_PTR(mptcpify_skel, "skel_open_load"))
 		return libbpf_get_error(mptcpify_skel);
+
+	mptcpify_skel->bss->pid = getpid();
 
 	err = mptcpify__attach(mptcpify_skel);
 	if (!ASSERT_OK(err, "skel_attach"))

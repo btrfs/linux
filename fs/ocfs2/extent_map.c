@@ -705,7 +705,9 @@ static int ocfs2_fiemap_inline(struct inode *inode, struct buffer_head *di_bh,
 	unsigned int id_count;
 	struct ocfs2_dinode *di;
 	u64 phys;
-	u32 flags = FIEMAP_EXTENT_DATA_INLINE|FIEMAP_EXTENT_LAST;
+	u32 flags = (FIEMAP_EXTENT_DATA_INLINE|
+		     FIEMAP_EXTENT_HAS_PHYS_LEN|
+		     FIEMAP_EXTENT_LAST);
 	struct ocfs2_inode_info *oi = OCFS2_I(inode);
 
 	di = (struct ocfs2_dinode *)di_bh->b_data;
@@ -723,7 +725,7 @@ static int ocfs2_fiemap_inline(struct inode *inode, struct buffer_head *di_bh,
 					 id2.i_data.id_data);
 
 		ret = fiemap_fill_next_extent(fieinfo, 0, phys, id_count,
-					      flags);
+					      0, flags);
 		if (ret < 0)
 			return ret;
 	}
@@ -782,7 +784,7 @@ int ocfs2_fiemap(struct inode *inode, struct fiemap_extent_info *fieinfo,
 			continue;
 		}
 
-		fe_flags = 0;
+		fe_flags = FIEMAP_EXTENT_HAS_PHYS_LEN;
 		if (rec.e_flags & OCFS2_EXT_UNWRITTEN)
 			fe_flags |= FIEMAP_EXTENT_UNWRITTEN;
 		if (rec.e_flags & OCFS2_EXT_REFCOUNTED)
@@ -794,7 +796,7 @@ int ocfs2_fiemap(struct inode *inode, struct fiemap_extent_info *fieinfo,
 		virt_bytes = (u64)le32_to_cpu(rec.e_cpos) << osb->s_clustersize_bits;
 
 		ret = fiemap_fill_next_extent(fieinfo, virt_bytes, phys_bytes,
-					      len_bytes, fe_flags);
+					      len_bytes, 0, fe_flags);
 		if (ret)
 			break;
 

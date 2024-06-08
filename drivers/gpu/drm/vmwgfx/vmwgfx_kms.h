@@ -217,21 +217,11 @@ struct vmw_kms_dirty {
 struct vmw_framebuffer {
 	struct drm_framebuffer base;
 	bool bo;
-	uint32_t user_handle;
-};
-
-/*
- * Clip rectangle
- */
-struct vmw_clip_rect {
-	int x1, x2, y1, y2;
 };
 
 struct vmw_framebuffer_surface {
 	struct vmw_framebuffer base;
 	struct vmw_surface *surface;
-	struct vmw_bo *buffer;
-	struct list_head head;
 	bool is_bo_proxy;  /* true if this is proxy surface for DMA buf */
 };
 
@@ -359,7 +349,6 @@ struct vmw_display_unit {
 	struct vmw_cursor_plane cursor;
 
 	struct vmw_surface *cursor_surface;
-	struct vmw_bo *cursor_bo;
 	size_t cursor_age;
 
 	int cursor_x;
@@ -378,7 +367,6 @@ struct vmw_display_unit {
 	unsigned pref_width;
 	unsigned pref_height;
 	bool pref_active;
-	struct drm_display_mode *pref_mode;
 
 	/*
 	 * Gui positioning
@@ -388,11 +376,6 @@ struct vmw_display_unit {
 	bool is_implicit;
 	int set_gui_x;
 	int set_gui_y;
-};
-
-struct vmw_validation_ctx {
-	struct vmw_resource *res;
-	struct vmw_bo *buf;
 };
 
 #define vmw_crtc_to_du(x) \
@@ -428,8 +411,6 @@ void vmw_du_connector_save(struct drm_connector *connector);
 void vmw_du_connector_restore(struct drm_connector *connector);
 enum drm_connector_status
 vmw_du_connector_detect(struct drm_connector *connector, bool force);
-int vmw_du_connector_fill_modes(struct drm_connector *connector,
-				uint32_t max_width, uint32_t max_height);
 int vmw_kms_helper_dirty(struct vmw_private *dev_priv,
 			 struct vmw_framebuffer *framebuffer,
 			 const struct drm_clip_rect *clips,
@@ -438,6 +419,9 @@ int vmw_kms_helper_dirty(struct vmw_private *dev_priv,
 			 int num_clips,
 			 int increment,
 			 struct vmw_kms_dirty *dirty);
+enum drm_mode_status vmw_connector_mode_valid(struct drm_connector *connector,
+					      struct drm_display_mode *mode);
+int vmw_connector_get_modes(struct drm_connector *connector);
 
 void vmw_kms_helper_validation_finish(struct vmw_private *dev_priv,
 				      struct drm_file *file_priv,

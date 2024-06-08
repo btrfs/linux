@@ -18,7 +18,7 @@ static const struct snd_soc_dapm_widget sof_widgets[] = {
 	SND_SOC_DAPM_SPK("Speakers", NULL),
 };
 
-static int cs_spk_init(struct snd_soc_pcm_runtime *rtd)
+int cs_spk_rtd_init(struct snd_soc_pcm_runtime *rtd)
 {
 	const char *dai_name = rtd->dai_link->codecs->dai_name;
 	struct snd_soc_card *card = rtd->card;
@@ -57,7 +57,6 @@ static int cs_spk_init(struct snd_soc_pcm_runtime *rtd)
 }
 
 int sof_sdw_cs_amp_init(struct snd_soc_card *card,
-			const struct snd_soc_acpi_link_adr *link,
 			struct snd_soc_dai_link *dai_links,
 			struct sof_sdw_codec_info *info,
 			bool playback)
@@ -67,7 +66,6 @@ int sof_sdw_cs_amp_init(struct snd_soc_card *card,
 		return 0;
 
 	info->amp_num++;
-	dai_links->init = cs_spk_init;
 
 	return 0;
 }

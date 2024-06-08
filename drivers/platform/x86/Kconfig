@@ -56,8 +56,6 @@ config HUAWEI_WMI
 	depends on INPUT
 	select INPUT_SPARSEKMAP
 	select LEDS_CLASS
-	select LEDS_TRIGGERS
-	select LEDS_TRIGGER_AUDIO
 	select NEW_LEDS
 	help
 	  This driver provides support for Huawei WMI hotkeys, battery charge
@@ -269,8 +267,6 @@ config ASUS_WMI
 	select INPUT_SPARSEKMAP
 	select LEDS_CLASS
 	select NEW_LEDS
-	select LEDS_TRIGGERS
-	select LEDS_TRIGGER_AUDIO
 	select ACPI_PLATFORM_PROFILE
 	help
 	  Say Y here if you have a WMI aware Asus laptop (like Eee PCs or new
@@ -374,6 +370,7 @@ config FUJITSU_LAPTOP
 	depends on ACPI
 	depends on INPUT
 	depends on BACKLIGHT_CLASS_DEVICE
+	depends on ACPI_BATTERY
 	depends on ACPI_VIDEO || ACPI_VIDEO = n
 	select INPUT_SPARSEKMAP
 	select NEW_LEDS
@@ -507,8 +504,6 @@ config THINKPAD_ACPI
 	select NVRAM
 	select NEW_LEDS
 	select LEDS_CLASS
-	select LEDS_TRIGGERS
-	select LEDS_TRIGGER_AUDIO
 	help
 	  This is a driver for the IBM and Lenovo ThinkPad laptops. It adds
 	  support for Fn-Fx key combinations, Bluetooth control, video
@@ -646,6 +641,19 @@ config THINKPAD_LMI
 	  be called think-lmi.
 
 source "drivers/platform/x86/intel/Kconfig"
+
+config ACPI_QUICKSTART
+	tristate "ACPI Quickstart button driver"
+	depends on ACPI
+	depends on INPUT
+	select INPUT_SPARSE_KEYMAP
+	help
+	  This driver adds support for ACPI quickstart button (PNP0C32) devices.
+	  The button emits a manufacturer-specific key value when pressed, so
+	  userspace has to map this value to a standard key code.
+
+	  To compile this driver as a module, choose M here: the module will be
+	  called quickstart.
 
 config MSI_EC
 	tristate "MSI EC Extras"
@@ -1000,6 +1008,18 @@ config INSPUR_PLATFORM_PROFILE
 
 	To compile this driver as a module, choose M here: the module
 	will be called inspur-platform-profile.
+
+config LENOVO_WMI_CAMERA
+	tristate "Lenovo WMI Camera Button driver"
+	depends on ACPI_WMI
+	depends on INPUT
+	help
+	  This driver provides support for Lenovo camera button. The Camera
+	  button is a GPIO device. This driver receives ACPI notify when the
+	  camera button is switched on/off.
+
+	  To compile this driver as a module, choose M here: the module
+	  will be called lenovo-wmi-camera.
 
 source "drivers/platform/x86/x86-android-tablets/Kconfig"
 

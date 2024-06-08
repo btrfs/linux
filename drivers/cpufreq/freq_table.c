@@ -40,7 +40,7 @@ int cpufreq_frequency_table_cpuinfo(struct cpufreq_policy *policy,
 	cpufreq_for_each_valid_entry(pos, table) {
 		freq = pos->frequency;
 
-		if (!cpufreq_boost_enabled()
+		if ((!cpufreq_boost_enabled() || !policy->boost_enabled)
 		    && (pos->flags & CPUFREQ_BOOST_FREQ))
 			continue;
 
@@ -70,7 +70,7 @@ int cpufreq_frequency_table_verify(struct cpufreq_policy_data *policy,
 				   struct cpufreq_frequency_table *table)
 {
 	struct cpufreq_frequency_table *pos;
-	unsigned int freq, next_larger = ~0;
+	unsigned int freq, prev_smaller = 0;
 	bool found = false;
 
 	pr_debug("request for verification of policy (%u - %u kHz) for cpu %u\n",
@@ -86,12 +86,12 @@ int cpufreq_frequency_table_verify(struct cpufreq_policy_data *policy,
 			break;
 		}
 
-		if ((next_larger > freq) && (freq > policy->max))
-			next_larger = freq;
+		if ((prev_smaller < freq) && (freq <= policy->max))
+			prev_smaller = freq;
 	}
 
 	if (!found) {
-		policy->max = next_larger;
+		policy->max = prev_smaller;
 		cpufreq_verify_within_cpu_limits(policy);
 	}
 

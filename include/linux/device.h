@@ -1207,17 +1207,6 @@ int __must_check devm_device_add_group(struct device *dev,
 				       const struct attribute_group *grp);
 
 /*
- * Platform "fixup" functions - allow the platform to have their say
- * about devices and actions that the general device layer doesn't
- * know about.
- */
-/* Notify platform of device discovery */
-extern int (*platform_notify)(struct device *dev);
-
-extern int (*platform_notify_remove)(struct device *dev);
-
-
-/*
  * get_device - atomically increment the reference count for the device.
  *
  */
@@ -1247,6 +1236,7 @@ void device_link_del(struct device_link *link);
 void device_link_remove(void *consumer, struct device *supplier);
 void device_links_supplier_sync_state_pause(void);
 void device_links_supplier_sync_state_resume(void);
+void device_link_wait_removal(void);
 
 /* Create alias, so I can be autoloaded. */
 #define MODULE_ALIAS_CHARDEV(major,minor) \

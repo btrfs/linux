@@ -8,8 +8,8 @@
 
 #include <linux/bug.h>
 
-#include <asm/barrier.h>
 #include <asm/fence.h>
+#include <linux/cmpxchg-emu.h>
 
 #define __xchg_relaxed(ptr, new, size)					\
 ({									\
@@ -171,6 +171,12 @@
 	__typeof__(*(ptr)) __ret;					\
 	register unsigned int __rc;					\
 	switch (size) {							\
+	case 1:								\
+		__ret = cmpxchg_emu_u8((volatile u8 *)__ptr, __old, __new); \
+		break;							\
+	case 2:								\
+		break;							\
+		__ret = cmpxchg_emu_u16((volatile u16 *)__ptr, __old, __new); \
 	case 4:								\
 		__asm__ __volatile__ (					\
 			"0:	lr.w %0, %2\n"				\
@@ -215,6 +221,12 @@
 	__typeof__(*(ptr)) __ret;					\
 	register unsigned int __rc;					\
 	switch (size) {							\
+	case 1:								\
+		__ret = cmpxchg_emu_u8((volatile u8 *)__ptr, __old, __new); \
+		break;							\
+	case 2:								\
+		break;							\
+		__ret = cmpxchg_emu_u16((volatile u16 *)__ptr, __old, __new); \
 	case 4:								\
 		__asm__ __volatile__ (					\
 			"0:	lr.w %0, %2\n"				\
@@ -261,6 +273,12 @@
 	__typeof__(*(ptr)) __ret;					\
 	register unsigned int __rc;					\
 	switch (size) {							\
+	case 1:								\
+		__ret = cmpxchg_emu_u8((volatile u8 *)__ptr, __old, __new); \
+		break;							\
+	case 2:								\
+		break;							\
+		__ret = cmpxchg_emu_u16((volatile u16 *)__ptr, __old, __new); \
 	case 4:								\
 		__asm__ __volatile__ (					\
 			RISCV_RELEASE_BARRIER				\
@@ -307,13 +325,19 @@
 	__typeof__(*(ptr)) __ret;					\
 	register unsigned int __rc;					\
 	switch (size) {							\
+	case 1:								\
+		__ret = cmpxchg_emu_u8((volatile u8 *)__ptr, __old, __new); \
+		break;							\
+	case 2:								\
+		break;							\
+		__ret = cmpxchg_emu_u16((volatile u16 *)__ptr, __old, __new); \
 	case 4:								\
 		__asm__ __volatile__ (					\
 			"0:	lr.w %0, %2\n"				\
 			"	bne  %0, %z3, 1f\n"			\
 			"	sc.w.rl %1, %z4, %2\n"			\
 			"	bnez %1, 0b\n"				\
-			"	fence rw, rw\n"				\
+			RISCV_FULL_BARRIER				\
 			"1:\n"						\
 			: "=&r" (__ret), "=&r" (__rc), "+A" (*__ptr)	\
 			: "rJ" ((long)__old), "rJ" (__new)		\
@@ -325,7 +349,7 @@
 			"	bne %0, %z3, 1f\n"			\
 			"	sc.d.rl %1, %z4, %2\n"			\
 			"	bnez %1, 0b\n"				\
-			"	fence rw, rw\n"				\
+			RISCV_FULL_BARRIER				\
 			"1:\n"						\
 			: "=&r" (__ret), "=&r" (__rc), "+A" (*__ptr)	\
 			: "rJ" (__old), "rJ" (__new)			\

@@ -89,12 +89,28 @@ static void umc_v12_0_reset_error_count(struct amdgpu_device *adev)
 		umc_v12_0_reset_error_count_per_channel, NULL);
 }
 
+bool umc_v12_0_is_deferred_error(struct amdgpu_device *adev, uint64_t mc_umc_status)
+{
+	dev_info(adev->dev,
+		"MCA_UMC_STATUS(0x%llx): Val:%llu, Poison:%llu, Deferred:%llu, PCC:%llu, UC:%llu, TCC:%llu\n",
+		mc_umc_status,
+		REG_GET_FIELD(mc_umc_status, MCA_UMC_UMC0_MCUMC_STATUST0, Val),
+		REG_GET_FIELD(mc_umc_status, MCA_UMC_UMC0_MCUMC_STATUST0, Poison),
+		REG_GET_FIELD(mc_umc_status, MCA_UMC_UMC0_MCUMC_STATUST0, Deferred),
+		REG_GET_FIELD(mc_umc_status, MCA_UMC_UMC0_MCUMC_STATUST0, PCC),
+		REG_GET_FIELD(mc_umc_status, MCA_UMC_UMC0_MCUMC_STATUST0, UC),
+		REG_GET_FIELD(mc_umc_status, MCA_UMC_UMC0_MCUMC_STATUST0, TCC)
+	);
+
+	return (amdgpu_ras_is_poison_mode_supported(adev) &&
+		(REG_GET_FIELD(mc_umc_status, MCA_UMC_UMC0_MCUMC_STATUST0, Val) == 1) &&
+		(REG_GET_FIELD(mc_umc_status, MCA_UMC_UMC0_MCUMC_STATUST0, Deferred) == 1));
+}
+
 bool umc_v12_0_is_uncorrectable_error(struct amdgpu_device *adev, uint64_t mc_umc_status)
 {
-	if (amdgpu_ras_is_poison_mode_supported(adev) &&
-	    (REG_GET_FIELD(mc_umc_status, MCA_UMC_UMC0_MCUMC_STATUST0, Val) == 1) &&
-	    (REG_GET_FIELD(mc_umc_status, MCA_UMC_UMC0_MCUMC_STATUST0, Deferred) == 1))
-		return true;
+	if (umc_v12_0_is_deferred_error(adev, mc_umc_status))
+		return false;
 
 	return ((REG_GET_FIELD(mc_umc_status, MCA_UMC_UMC0_MCUMC_STATUST0, Val) == 1) &&
 		(REG_GET_FIELD(mc_umc_status, MCA_UMC_UMC0_MCUMC_STATUST0, PCC) == 1 ||
@@ -104,9 +120,7 @@ bool umc_v12_0_is_uncorrectable_error(struct amdgpu_device *adev, uint64_t mc_um
 
 bool umc_v12_0_is_correctable_error(struct amdgpu_device *adev, uint64_t mc_umc_status)
 {
-	if (amdgpu_ras_is_poison_mode_supported(adev) &&
-	    (REG_GET_FIELD(mc_umc_status, MCA_UMC_UMC0_MCUMC_STATUST0, Val) == 1) &&
-	    (REG_GET_FIELD(mc_umc_status, MCA_UMC_UMC0_MCUMC_STATUST0, Deferred) == 1))
+	if (umc_v12_0_is_deferred_error(adev, mc_umc_status))
 		return false;
 
 	return (REG_GET_FIELD(mc_umc_status, MCA_UMC_UMC0_MCUMC_STATUST0, Val) == 1 &&
@@ -119,9 +133,10 @@ bool umc_v12_0_is_correctable_error(struct amdgpu_device *adev, uint64_t mc_umc_
 		!(umc_v12_0_is_uncorrectable_error(adev, mc_umc_status)))));
 }
 
-static void umc_v12_0_query_correctable_error_count(struct amdgpu_device *adev,
+static void umc_v12_0_query_error_count_per_type(struct amdgpu_device *adev,
 						   uint64_t umc_reg_offset,
-						   unsigned long *error_count)
+						   unsigned long *error_count,
+						   check_error_type_func error_type_func)
 {
 	uint64_t mc_umc_status;
 	uint64_t mc_umc_status_addr;
@@ -129,31 +144,11 @@ static void umc_v12_0_query_correctable_error_count(struct amdgpu_device *adev,
 	mc_umc_status_addr =
 		SOC15_REG_OFFSET(UMC, 0, regMCA_UMC_UMC0_MCUMC_STATUST0);
 
-	/* Rely on MCUMC_STATUS for correctable error counter
-	 * MCUMC_STATUS is a 64 bit register
-	 */
+	/* Check MCUMC_STATUS */
 	mc_umc_status =
 		RREG64_PCIE_EXT((mc_umc_status_addr + umc_reg_offset) * 4);
 
-	if (umc_v12_0_is_correctable_error(adev, mc_umc_status))
-		*error_count += 1;
-}
-
-static void umc_v12_0_query_uncorrectable_error_count(struct amdgpu_device *adev,
-						      uint64_t umc_reg_offset,
-						      unsigned long *error_count)
-{
-	uint64_t mc_umc_status;
-	uint64_t mc_umc_status_addr;
-
-	mc_umc_status_addr =
-		SOC15_REG_OFFSET(UMC, 0, regMCA_UMC_UMC0_MCUMC_STATUST0);
-
-	/* Check the MCUMC_STATUS. */
-	mc_umc_status =
-		RREG64_PCIE_EXT((mc_umc_status_addr + umc_reg_offset) * 4);
-
-	if (umc_v12_0_is_uncorrectable_error(adev, mc_umc_status))
+	if (error_type_func(adev, mc_umc_status))
 		*error_count += 1;
 }
 
@@ -162,7 +157,7 @@ static int umc_v12_0_query_error_count(struct amdgpu_device *adev,
 					uint32_t ch_inst, void *data)
 {
 	struct ras_err_data *err_data = (struct ras_err_data *)data;
-	unsigned long ue_count = 0, ce_count = 0;
+	unsigned long ue_count = 0, ce_count = 0, de_count = 0;
 
 	/* NOTE: node_inst is converted by adev->umc.active_mask and the range is [0-3],
 	 * which can be used as die ID directly */
@@ -174,11 +169,16 @@ static int umc_v12_0_query_error_count(struct amdgpu_device *adev,
 	uint64_t umc_reg_offset =
 		get_umc_v12_0_reg_offset(adev, node_inst, umc_inst, ch_inst);
 
-	umc_v12_0_query_correctable_error_count(adev, umc_reg_offset, &ce_count);
-	umc_v12_0_query_uncorrectable_error_count(adev, umc_reg_offset, &ue_count);
+	umc_v12_0_query_error_count_per_type(adev, umc_reg_offset,
+					    &ce_count, umc_v12_0_is_correctable_error);
+	umc_v12_0_query_error_count_per_type(adev, umc_reg_offset,
+					    &ue_count, umc_v12_0_is_uncorrectable_error);
+	umc_v12_0_query_error_count_per_type(adev, umc_reg_offset,
+					    &de_count, umc_v12_0_is_deferred_error);
 
 	amdgpu_ras_error_statistic_ue_count(err_data, &mcm_info, NULL, ue_count);
 	amdgpu_ras_error_statistic_ce_count(err_data, &mcm_info, NULL, ce_count);
+	amdgpu_ras_error_statistic_de_count(err_data, &mcm_info, NULL, de_count);
 
 	return 0;
 }
@@ -203,14 +203,14 @@ static bool umc_v12_0_bit_wise_xor(uint32_t val)
 	return result;
 }
 
-static void umc_v12_0_convert_error_address(struct amdgpu_device *adev,
-					    struct ras_err_data *err_data, uint64_t err_addr,
-					    uint32_t ch_inst, uint32_t umc_inst,
-					    uint32_t node_inst)
+static void umc_v12_0_mca_addr_to_pa(struct amdgpu_device *adev,
+					uint64_t err_addr, uint32_t ch_inst, uint32_t umc_inst,
+					uint32_t node_inst,
+					struct ta_ras_query_address_output *addr_out)
 {
 	uint32_t channel_index, i;
-	uint64_t soc_pa, na, retired_page, column;
-	uint32_t bank_hash0, bank_hash1, bank_hash2, bank_hash3, col, row, row_xor;
+	uint64_t na, soc_pa;
+	uint32_t bank_hash0, bank_hash1, bank_hash2, bank_hash3, col, row;
 	uint32_t bank0, bank1, bank2, bank3, bank;
 
 	bank_hash0 = (err_addr >> UMC_V12_0_MCA_B0_BIT) & 0x1ULL;
@@ -260,12 +260,38 @@ static void umc_v12_0_convert_error_address(struct amdgpu_device *adev,
 	/* the umc channel bits are not original values, they are hashed */
 	UMC_V12_0_SET_CHANNEL_HASH(channel_index, soc_pa);
 
+	addr_out->pa.pa = soc_pa;
+	addr_out->pa.bank = bank;
+	addr_out->pa.channel_idx = channel_index;
+}
+
+static void umc_v12_0_convert_error_address(struct amdgpu_device *adev,
+					struct ras_err_data *err_data,
+					struct ta_ras_query_address_input *addr_in)
+{
+	uint32_t col, row, row_xor, bank, channel_index;
+	uint64_t soc_pa, retired_page, column, err_addr;
+	struct ta_ras_query_address_output addr_out;
+
+	err_addr = addr_in->ma.err_addr;
+	addr_in->addr_type = TA_RAS_MCA_TO_PA;
+	if (psp_ras_query_address(&adev->psp, addr_in, &addr_out))
+		/* fallback to old path if fail to get pa from psp */
+		umc_v12_0_mca_addr_to_pa(adev, err_addr, addr_in->ma.ch_inst,
+				addr_in->ma.umc_inst, addr_in->ma.node_inst, &addr_out);
+
+	soc_pa = addr_out.pa.pa;
+	bank = addr_out.pa.bank;
+	channel_index = addr_out.pa.channel_idx;
+
+	col = (err_addr >> 1) & 0x1fULL;
+	row = (err_addr >> 10) & 0x3fffULL;
+	row_xor = row ^ (0x1ULL << 13);
 	/* clear [C3 C2] in soc physical address */
 	soc_pa &= ~(0x3ULL << UMC_V12_0_PA_C2_BIT);
 	/* clear [C4] in soc physical address */
 	soc_pa &= ~(0x1ULL << UMC_V12_0_PA_C4_BIT);
 
-	row_xor = row ^ (0x1ULL << 13);
 	/* loop for all possibilities of [C4 C3 C2] */
 	for (column = 0; column < UMC_V12_0_NA_MAP_PA_NUM; column++) {
 		retired_page = soc_pa | ((column & 0x3) << UMC_V12_0_PA_C2_BIT);
@@ -277,7 +303,7 @@ static void umc_v12_0_convert_error_address(struct amdgpu_device *adev,
 			"Error Address(PA):0x%-10llx Row:0x%-4x Col:0x%-2x Bank:0x%x Channel:0x%x\n",
 			retired_page, row, col, bank, channel_index);
 		amdgpu_umc_fill_error_record(err_data, err_addr,
-			retired_page, channel_index, umc_inst);
+			retired_page, channel_index, addr_in->ma.umc_inst);
 
 		/* shift R13 bit */
 		retired_page ^= (0x1ULL << UMC_V12_0_PA_R13_BIT);
@@ -285,7 +311,7 @@ static void umc_v12_0_convert_error_address(struct amdgpu_device *adev,
 			"Error Address(PA):0x%-10llx Row:0x%-4x Col:0x%-2x Bank:0x%x Channel:0x%x\n",
 			retired_page, row_xor, col, bank, channel_index);
 		amdgpu_umc_fill_error_record(err_data, err_addr,
-			retired_page, channel_index, umc_inst);
+			retired_page, channel_index, addr_in->ma.umc_inst);
 	}
 }
 
@@ -293,10 +319,11 @@ static int umc_v12_0_query_error_address(struct amdgpu_device *adev,
 					uint32_t node_inst, uint32_t umc_inst,
 					uint32_t ch_inst, void *data)
 {
+	struct ras_err_data *err_data = (struct ras_err_data *)data;
+	struct ta_ras_query_address_input addr_in;
 	uint64_t mc_umc_status_addr;
 	uint64_t mc_umc_status, err_addr;
 	uint64_t mc_umc_addrt0;
-	struct ras_err_data *err_data = (struct ras_err_data *)data;
 	uint64_t umc_reg_offset =
 		get_umc_v12_0_reg_offset(adev, node_inst, umc_inst, ch_inst);
 
@@ -316,10 +343,8 @@ static int umc_v12_0_query_error_address(struct amdgpu_device *adev,
 	}
 
 	/* calculate error address if ue error is detected */
-	if (REG_GET_FIELD(mc_umc_status, MCA_UMC_UMC0_MCUMC_STATUST0, Val) == 1 &&
-	    REG_GET_FIELD(mc_umc_status, MCA_UMC_UMC0_MCUMC_STATUST0, AddrV) == 1 &&
-	    REG_GET_FIELD(mc_umc_status, MCA_UMC_UMC0_MCUMC_STATUST0, UC) == 1) {
-
+	if (umc_v12_0_is_uncorrectable_error(adev, mc_umc_status) ||
+	    umc_v12_0_is_deferred_error(adev, mc_umc_status)) {
 		mc_umc_addrt0 =
 			SOC15_REG_OFFSET(UMC, 0, regMCA_UMC_UMC0_MCUMC_ADDRT0);
 
@@ -327,8 +352,19 @@ static int umc_v12_0_query_error_address(struct amdgpu_device *adev,
 
 		err_addr = REG_GET_FIELD(err_addr, MCA_UMC_UMC0_MCUMC_ADDRT0, ErrorAddr);
 
-		umc_v12_0_convert_error_address(adev, err_data, err_addr,
-					ch_inst, umc_inst, node_inst);
+		if (!adev->aid_mask &&
+		    adev->smuio.funcs &&
+		    adev->smuio.funcs->get_socket_id)
+			addr_in.ma.socket_id = adev->smuio.funcs->get_socket_id(adev);
+		else
+			addr_in.ma.socket_id = 0;
+
+		addr_in.ma.err_addr = err_addr;
+		addr_in.ma.ch_inst = ch_inst;
+		addr_in.ma.umc_inst = umc_inst;
+		addr_in.ma.node_inst = node_inst;
+
+		umc_v12_0_convert_error_address(adev, err_data, &addr_in);
 	}
 
 	/* clear umc status */
@@ -374,10 +410,16 @@ static int umc_v12_0_err_cnt_init_per_channel(struct amdgpu_device *adev,
 static void umc_v12_0_ecc_info_query_ras_error_count(struct amdgpu_device *adev,
 					void *ras_error_status)
 {
+	struct ras_query_context qctx;
+
+	memset(&qctx, 0, sizeof(qctx));
+	qctx.event_id = amdgpu_ras_acquire_event_id(adev, amdgpu_ras_intr_triggered() ?
+						    RAS_EVENT_TYPE_ISR : RAS_EVENT_TYPE_INVALID);
+
 	amdgpu_mca_smu_log_ras_error(adev,
-		AMDGPU_RAS_BLOCK__UMC, AMDGPU_MCA_ERROR_TYPE_CE, ras_error_status);
+		AMDGPU_RAS_BLOCK__UMC, AMDGPU_MCA_ERROR_TYPE_CE, ras_error_status, &qctx);
 	amdgpu_mca_smu_log_ras_error(adev,
-		AMDGPU_RAS_BLOCK__UMC, AMDGPU_MCA_ERROR_TYPE_UE, ras_error_status);
+		AMDGPU_RAS_BLOCK__UMC, AMDGPU_MCA_ERROR_TYPE_UE, ras_error_status, &qctx);
 }
 
 static void umc_v12_0_ecc_info_query_ras_error_address(struct amdgpu_device *adev,
@@ -385,43 +427,72 @@ static void umc_v12_0_ecc_info_query_ras_error_address(struct amdgpu_device *ade
 {
 	struct ras_err_node *err_node;
 	uint64_t mc_umc_status;
+	struct ras_err_info *err_info;
+	struct ras_err_addr *mca_err_addr, *tmp;
 	struct ras_err_data *err_data = (struct ras_err_data *)ras_error_status;
+	struct ta_ras_query_address_input addr_in;
 
 	for_each_ras_error(err_node, err_data) {
-		mc_umc_status = err_node->err_info.err_addr.err_status;
-		if (!mc_umc_status)
+		err_info = &err_node->err_info;
+		if (list_empty(&err_info->err_addr_list))
 			continue;
 
-		if (umc_v12_0_is_uncorrectable_error(adev, mc_umc_status)) {
-			uint64_t mca_addr, err_addr, mca_ipid;
-			uint32_t InstanceIdLo;
-			struct amdgpu_smuio_mcm_config_info *mcm_info;
+		addr_in.ma.node_inst = err_info->mcm_info.die_id;
+		addr_in.ma.socket_id = err_info->mcm_info.socket_id;
 
-			mcm_info = &err_node->err_info.mcm_info;
-			mca_addr = err_node->err_info.err_addr.err_addr;
-			mca_ipid = err_node->err_info.err_addr.err_ipid;
+		list_for_each_entry_safe(mca_err_addr, tmp, &err_info->err_addr_list, node) {
+			mc_umc_status = mca_err_addr->err_status;
+			if (mc_umc_status &&
+				(umc_v12_0_is_uncorrectable_error(adev, mc_umc_status) ||
+				 umc_v12_0_is_deferred_error(adev, mc_umc_status))) {
+				uint64_t mca_addr, err_addr, mca_ipid;
+				uint32_t InstanceIdLo;
 
-			err_addr =  REG_GET_FIELD(mca_addr, MCA_UMC_UMC0_MCUMC_ADDRT0, ErrorAddr);
-			InstanceIdLo = REG_GET_FIELD(mca_ipid, MCMP1_IPIDT0, InstanceIdLo);
+				mca_addr = mca_err_addr->err_addr;
+				mca_ipid = mca_err_addr->err_ipid;
 
-			dev_info(adev->dev, "UMC:IPID:0x%llx, aid:%d, inst:%d, ch:%d, err_addr:0x%llx\n",
-				mca_ipid,
-				mcm_info->die_id,
-				MCA_IPID_LO_2_UMC_INST(InstanceIdLo),
-				MCA_IPID_LO_2_UMC_CH(InstanceIdLo),
-				err_addr);
+				err_addr = REG_GET_FIELD(mca_addr,
+							MCA_UMC_UMC0_MCUMC_ADDRT0, ErrorAddr);
+				InstanceIdLo = REG_GET_FIELD(mca_ipid, MCMP1_IPIDT0, InstanceIdLo);
 
-			umc_v12_0_convert_error_address(adev,
-				err_data, err_addr,
-				MCA_IPID_LO_2_UMC_CH(InstanceIdLo),
-				MCA_IPID_LO_2_UMC_INST(InstanceIdLo),
-				mcm_info->die_id);
+				addr_in.ma.err_addr = err_addr;
+				addr_in.ma.ch_inst = MCA_IPID_LO_2_UMC_CH(InstanceIdLo);
+				addr_in.ma.umc_inst = MCA_IPID_LO_2_UMC_INST(InstanceIdLo);
 
-			/* Clear umc error address content */
-			memset(&err_node->err_info.err_addr,
-				0, sizeof(err_node->err_info.err_addr));
+				dev_info(adev->dev, "UMC:IPID:0x%llx, aid:%d, inst:%d, ch:%d, err_addr:0x%llx\n",
+					mca_ipid,
+					err_info->mcm_info.die_id,
+					MCA_IPID_LO_2_UMC_INST(InstanceIdLo),
+					MCA_IPID_LO_2_UMC_CH(InstanceIdLo),
+					err_addr);
+
+				umc_v12_0_convert_error_address(adev,
+					err_data, &addr_in);
+			}
+
+			/* Delete error address node from list and free memory */
+			amdgpu_ras_del_mca_err_addr(err_info, mca_err_addr);
 		}
 	}
+}
+
+static bool umc_v12_0_check_ecc_err_status(struct amdgpu_device *adev,
+			enum amdgpu_mca_error_type type, void *ras_error_status)
+{
+	uint64_t mc_umc_status = *(uint64_t *)ras_error_status;
+
+	switch (type) {
+	case AMDGPU_MCA_ERROR_TYPE_UE:
+		return umc_v12_0_is_uncorrectable_error(adev, mc_umc_status);
+	case AMDGPU_MCA_ERROR_TYPE_CE:
+		return umc_v12_0_is_correctable_error(adev, mc_umc_status);
+	case AMDGPU_MCA_ERROR_TYPE_DE:
+		return umc_v12_0_is_deferred_error(adev, mc_umc_status);
+	default:
+		return false;
+	}
+
+	return false;
 }
 
 static void umc_v12_0_err_cnt_init(struct amdgpu_device *adev)
@@ -444,12 +515,72 @@ const struct amdgpu_ras_block_hw_ops umc_v12_0_ras_hw_ops = {
 	.query_ras_error_address = umc_v12_0_query_ras_error_address,
 };
 
+static int umc_v12_0_aca_bank_parser(struct aca_handle *handle, struct aca_bank *bank,
+				     enum aca_smu_type type, void *data)
+{
+	struct amdgpu_device *adev = handle->adev;
+	struct aca_bank_info info;
+	enum aca_error_type err_type;
+	u64 status, count;
+	u32 ext_error_code;
+	int ret;
+
+	status = bank->regs[ACA_REG_IDX_STATUS];
+	if (umc_v12_0_is_deferred_error(adev, status))
+		err_type = ACA_ERROR_TYPE_DEFERRED;
+	else if (umc_v12_0_is_uncorrectable_error(adev, status))
+		err_type = ACA_ERROR_TYPE_UE;
+	else if (umc_v12_0_is_correctable_error(adev, status))
+		err_type = ACA_ERROR_TYPE_CE;
+	else
+		return 0;
+
+	ret = aca_bank_info_decode(bank, &info);
+	if (ret)
+		return ret;
+
+	ext_error_code = ACA_REG__STATUS__ERRORCODEEXT(status);
+	count = ext_error_code == 0 ?
+		ACA_REG__MISC0__ERRCNT(bank->regs[ACA_REG_IDX_MISC0]) : 1ULL;
+
+	return aca_error_cache_log_bank_error(handle, &info, err_type, count);
+}
+
+static const struct aca_bank_ops umc_v12_0_aca_bank_ops = {
+	.aca_bank_parser = umc_v12_0_aca_bank_parser,
+};
+
+const struct aca_info umc_v12_0_aca_info = {
+	.hwip = ACA_HWIP_TYPE_UMC,
+	.mask = ACA_ERROR_UE_MASK | ACA_ERROR_CE_MASK | ACA_ERROR_DEFERRED_MASK,
+	.bank_ops = &umc_v12_0_aca_bank_ops,
+};
+
+static int umc_v12_0_ras_late_init(struct amdgpu_device *adev, struct ras_common_if *ras_block)
+{
+	int ret;
+
+	ret = amdgpu_umc_ras_late_init(adev, ras_block);
+	if (ret)
+		return ret;
+
+	ret = amdgpu_ras_bind_aca(adev, AMDGPU_RAS_BLOCK__UMC,
+				  &umc_v12_0_aca_info, NULL);
+	if (ret)
+		return ret;
+
+	return 0;
+}
+
 struct amdgpu_umc_ras umc_v12_0_ras = {
 	.ras_block = {
 		.hw_ops = &umc_v12_0_ras_hw_ops,
+		.ras_late_init = umc_v12_0_ras_late_init,
 	},
 	.err_cnt_init = umc_v12_0_err_cnt_init,
 	.query_ras_poison_mode = umc_v12_0_query_ras_poison_mode,
 	.ecc_info_query_ras_error_count = umc_v12_0_ecc_info_query_ras_error_count,
 	.ecc_info_query_ras_error_address = umc_v12_0_ecc_info_query_ras_error_address,
+	.check_ecc_err_status = umc_v12_0_check_ecc_err_status,
 };
+

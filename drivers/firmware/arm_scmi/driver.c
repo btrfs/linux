@@ -86,6 +86,12 @@ struct scmi_xfers_info {
  * @users: A refcount to track effective users of this protocol.
  * @priv: Reference for optional protocol private data.
  * @version: Protocol version supported by the platform as detected at runtime.
+ * @negotiated_version: When the platform supports a newer protocol version,
+ *			the agent will try to negotiate with the platform the
+ *			usage of the newest version known to it, since
+ *			backward compatibility is NOT automatically assured.
+ *			This field is NON-zero when a successful negotiation
+ *			has completed.
  * @ph: An embedded protocol handle that will be passed down to protocol
  *	initialization code to identify this instance.
  *
@@ -99,6 +105,7 @@ struct scmi_protocol_instance {
 	refcount_t			users;
 	void				*priv;
 	unsigned int			version;
+	unsigned int			negotiated_version;
 	struct scmi_protocol_handle	ph;
 };
 
@@ -690,6 +697,45 @@ scmi_xfer_lookup_unlocked(struct scmi_xfers_info *minfo, u16 xfer_id)
 }
 
 /**
+ * scmi_bad_message_trace  - A helper to trace weird messages
+ *
+ * @cinfo: A reference to the channel descriptor on which the message was
+ *	   received
+ * @msg_hdr: Message header to track
+ * @err: A specific error code used as a status value in traces.
+ *
+ * This helper can be used to trace any kind of weird, incomplete, unexpected,
+ * timed-out message that arrives and as such, can be traced only referring to
+ * the header content, since the payload is missing/unreliable.
+ */
+void scmi_bad_message_trace(struct scmi_chan_info *cinfo, u32 msg_hdr,
+			    enum scmi_bad_msg err)
+{
+	char *tag;
+	struct scmi_info *info = handle_to_scmi_info(cinfo->handle);
+
+	switch (MSG_XTRACT_TYPE(msg_hdr)) {
+	case MSG_TYPE_COMMAND:
+		tag = "!RESP";
+		break;
+	case MSG_TYPE_DELAYED_RESP:
+		tag = "!DLYD";
+		break;
+	case MSG_TYPE_NOTIFICATION:
+		tag = "!NOTI";
+		break;
+	default:
+		tag = "!UNKN";
+		break;
+	}
+
+	trace_scmi_msg_dump(info->id, cinfo->id,
+			    MSG_XTRACT_PROT_ID(msg_hdr),
+			    MSG_XTRACT_ID(msg_hdr), tag,
+			    MSG_XTRACT_TOKEN(msg_hdr), err, NULL, 0);
+}
+
+/**
  * scmi_msg_response_validate  - Validate message type against state of related
  * xfer
  *
@@ -815,6 +861,9 @@ scmi_xfer_command_acquire(struct scmi_chan_info *cinfo, u32 msg_hdr)
 			"Message for %d type %d is not expected!\n",
 			xfer_id, msg_type);
 		spin_unlock_irqrestore(&minfo->xfer_lock, flags);
+
+		scmi_bad_message_trace(cinfo, msg_hdr, MSG_UNEXPECTED);
+
 		return xfer;
 	}
 	refcount_inc(&xfer->users);
@@ -839,6 +888,9 @@ scmi_xfer_command_acquire(struct scmi_chan_info *cinfo, u32 msg_hdr)
 		dev_err(cinfo->dev,
 			"Invalid message type:%d for %d - HDR:0x%X  state:%d\n",
 			msg_type, xfer_id, msg_hdr, xfer->state);
+
+		scmi_bad_message_trace(cinfo, msg_hdr, MSG_INVALID);
+
 		/* On error the refcount incremented above has to be dropped */
 		__scmi_xfer_put(minfo, xfer);
 		xfer = ERR_PTR(-EINVAL);
@@ -875,6 +927,9 @@ static void scmi_handle_notification(struct scmi_chan_info *cinfo,
 	if (IS_ERR(xfer)) {
 		dev_err(dev, "failed to get free message slot (%ld)\n",
 			PTR_ERR(xfer));
+
+		scmi_bad_message_trace(cinfo, msg_hdr, MSG_NOMEM);
+
 		scmi_clear_channel(info, cinfo);
 		return;
 	}
@@ -994,6 +1049,7 @@ void scmi_rx_callback(struct scmi_chan_info *cinfo, u32 msg_hdr, void *priv)
 		break;
 	default:
 		WARN_ONCE(1, "received unknown msg_type:%d\n", msg_type);
+		scmi_bad_message_trace(cinfo, msg_hdr, MSG_UNKNOWN);
 		break;
 	}
 }
@@ -1617,7 +1673,7 @@ static void
 scmi_common_fastchannel_init(const struct scmi_protocol_handle *ph,
 			     u8 describe_id, u32 message_id, u32 valid_size,
 			     u32 domain, void __iomem **p_addr,
-			     struct scmi_fc_db_info **p_db)
+			     struct scmi_fc_db_info **p_db, u32 *rate_limit)
 {
 	int ret;
 	u32 flags;
@@ -1660,6 +1716,9 @@ scmi_common_fastchannel_init(const struct scmi_protocol_handle *ph,
 		ret = -EINVAL;
 		goto err_xfer;
 	}
+
+	if (rate_limit)
+		*rate_limit = le32_to_cpu(resp->rate_limit) & GENMASK(19, 0);
 
 	phys_addr = le32_to_cpu(resp->chan_addr_low);
 	phys_addr |= (u64)le32_to_cpu(resp->chan_addr_high) << 32;
@@ -1754,10 +1813,44 @@ static void scmi_common_fastchannel_db_ring(struct scmi_fc_db_info *db)
 #endif
 }
 
+/**
+ * scmi_protocol_msg_check  - Check protocol message attributes
+ *
+ * @ph: A reference to the protocol handle.
+ * @message_id: The ID of the message to check.
+ * @attributes: A parameter to optionally return the retrieved message
+ *		attributes, in case of Success.
+ *
+ * An helper to check protocol message attributes for a specific protocol
+ * and message pair.
+ *
+ * Return: 0 on SUCCESS
+ */
+static int scmi_protocol_msg_check(const struct scmi_protocol_handle *ph,
+				   u32 message_id, u32 *attributes)
+{
+	int ret;
+	struct scmi_xfer *t;
+
+	ret = xfer_get_init(ph, PROTOCOL_MESSAGE_ATTRIBUTES,
+			    sizeof(__le32), 0, &t);
+	if (ret)
+		return ret;
+
+	put_unaligned_le32(message_id, t->tx.buf);
+	ret = do_xfer(ph, t);
+	if (!ret && attributes)
+		*attributes = get_unaligned_le32(t->rx.buf);
+	xfer_put(ph, t);
+
+	return ret;
+}
+
 static const struct scmi_proto_helpers_ops helpers_ops = {
 	.extended_name_get = scmi_common_extended_name_get,
 	.iter_response_init = scmi_iterator_init,
 	.iter_response_run = scmi_iterator_run,
+	.protocol_msg_check = scmi_protocol_msg_check,
 	.fastchannel_init = scmi_common_fastchannel_init,
 	.fastchannel_db_ring = scmi_common_fastchannel_db_ring,
 };
@@ -1779,6 +1872,44 @@ scmi_revision_area_get(const struct scmi_protocol_handle *ph)
 	const struct scmi_protocol_instance *pi = ph_to_pi(ph);
 
 	return pi->handle->version;
+}
+
+/**
+ * scmi_protocol_version_negotiate  - Negotiate protocol version
+ *
+ * @ph: A reference to the protocol handle.
+ *
+ * An helper to negotiate a protocol version different from the latest
+ * advertised as supported from the platform: on Success backward
+ * compatibility is assured by the platform.
+ *
+ * Return: 0 on Success
+ */
+static int scmi_protocol_version_negotiate(struct scmi_protocol_handle *ph)
+{
+	int ret;
+	struct scmi_xfer *t;
+	struct scmi_protocol_instance *pi = ph_to_pi(ph);
+
+	/* At first check if NEGOTIATE_PROTOCOL_VERSION is supported ... */
+	ret = scmi_protocol_msg_check(ph, NEGOTIATE_PROTOCOL_VERSION, NULL);
+	if (ret)
+		return ret;
+
+	/* ... then attempt protocol version negotiation */
+	ret = xfer_get_init(ph, NEGOTIATE_PROTOCOL_VERSION,
+			    sizeof(__le32), 0, &t);
+	if (ret)
+		return ret;
+
+	put_unaligned_le32(pi->proto->supported_version, t->tx.buf);
+	ret = do_xfer(ph, t);
+	if (!ret)
+		pi->negotiated_version = pi->proto->supported_version;
+
+	xfer_put(ph, t);
+
+	return ret;
 }
 
 /**
@@ -1853,11 +1984,21 @@ scmi_alloc_init_protocol_instance(struct scmi_info *info,
 	devres_close_group(handle->dev, pi->gid);
 	dev_dbg(handle->dev, "Initialized protocol: 0x%X\n", pi->proto->id);
 
-	if (pi->version > proto->supported_version)
-		dev_warn(handle->dev,
-			 "Detected UNSUPPORTED higher version 0x%X for protocol 0x%X."
-			 "Backward compatibility is NOT assured.\n",
-			 pi->version, pi->proto->id);
+	if (pi->version > proto->supported_version) {
+		ret = scmi_protocol_version_negotiate(&pi->ph);
+		if (!ret) {
+			dev_info(handle->dev,
+				 "Protocol 0x%X successfully negotiated version 0x%X\n",
+				 proto->id, pi->negotiated_version);
+		} else {
+			dev_warn(handle->dev,
+				 "Detected UNSUPPORTED higher version 0x%X for protocol 0x%X.\n",
+				 pi->version, pi->proto->id);
+			dev_warn(handle->dev,
+				 "Trying version 0x%X. Backward compatibility is NOT assured.\n",
+				 pi->proto->supported_version);
+		}
+	}
 
 	return pi;
 
@@ -2399,6 +2540,10 @@ scmi_txrx_setup(struct scmi_info *info, struct device_node *of_node,
 			ret = 0;
 	}
 
+	if (ret)
+		dev_err(info->dev,
+			"failed to setup channel for protocol:0x%X\n", prot_id);
+
 	return ret;
 }
 
@@ -2668,6 +2813,7 @@ static int scmi_debugfs_raw_mode_setup(struct scmi_info *info)
 static int scmi_probe(struct platform_device *pdev)
 {
 	int ret;
+	char *err_str = "probe failure\n";
 	struct scmi_handle *handle;
 	const struct scmi_desc *desc;
 	struct scmi_info *info;
@@ -2718,27 +2864,37 @@ static int scmi_probe(struct platform_device *pdev)
 
 	if (desc->ops->link_supplier) {
 		ret = desc->ops->link_supplier(dev);
-		if (ret)
+		if (ret) {
+			err_str = "transport not ready\n";
 			goto clear_ida;
+		}
 	}
 
 	/* Setup all channels described in the DT at first */
 	ret = scmi_channels_setup(info);
-	if (ret)
+	if (ret) {
+		err_str = "failed to setup channels\n";
 		goto clear_ida;
+	}
 
 	ret = bus_register_notifier(&scmi_bus_type, &info->bus_nb);
-	if (ret)
+	if (ret) {
+		err_str = "failed to register bus notifier\n";
 		goto clear_txrx_setup;
+	}
 
 	ret = blocking_notifier_chain_register(&scmi_requested_devices_nh,
 					       &info->dev_req_nb);
-	if (ret)
+	if (ret) {
+		err_str = "failed to register device notifier\n";
 		goto clear_bus_notifier;
+	}
 
 	ret = scmi_xfer_info_init(info);
-	if (ret)
+	if (ret) {
+		err_str = "failed to init xfers pool\n";
 		goto clear_dev_req_notifier;
+	}
 
 	if (scmi_top_dentry) {
 		info->dbg = scmi_debugfs_common_setup(info);
@@ -2775,9 +2931,11 @@ static int scmi_probe(struct platform_device *pdev)
 	 */
 	ret = scmi_protocol_acquire(handle, SCMI_PROTOCOL_BASE);
 	if (ret) {
-		dev_err(dev, "unable to communicate with SCMI\n");
-		if (coex)
+		err_str = "unable to communicate with SCMI\n";
+		if (coex) {
+			dev_err(dev, err_str);
 			return 0;
+		}
 		goto notification_exit;
 	}
 
@@ -2831,7 +2989,8 @@ clear_txrx_setup:
 	scmi_cleanup_txrx_channels(info);
 clear_ida:
 	ida_free(&scmi_id, info->id);
-	return ret;
+
+	return dev_err_probe(dev, ret, err_str);
 }
 
 static void scmi_remove(struct platform_device *pdev)

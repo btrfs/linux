@@ -377,8 +377,13 @@ static int guc_mmio_regset_init(struct temp_regset *regset,
 	    CCS_MASK(engine->gt))
 		ret |= GUC_MMIO_REG_ADD(gt, regset, GEN12_RCU_MODE, true);
 
+	/*
+	 * some of the WA registers are MCR registers. As it is safe to
+	 * use MCR form for non-MCR registers, for code simplicity, all
+	 * WA registers are added with MCR form.
+	 */
 	for (i = 0, wa = wal->list; i < wal->count; i++, wa++)
-		ret |= GUC_MMIO_REG_ADD(gt, regset, wa->reg, wa->masked_reg);
+		ret |= GUC_MCR_REG_ADD(gt, regset, wa->mcr_reg, wa->masked_reg);
 
 	/* Be extra paranoid and include all whitelist registers. */
 	for (i = 0; i < RING_MAX_NONPRIV_SLOTS; i++)
@@ -388,19 +393,19 @@ static int guc_mmio_regset_init(struct temp_regset *regset,
 
 	/* add in local MOCS registers */
 	for (i = 0; i < LNCFCMOCS_REG_COUNT; i++)
-		if (GRAPHICS_VER_FULL(engine->i915) >= IP_VER(12, 50))
+		if (GRAPHICS_VER_FULL(engine->i915) >= IP_VER(12, 55))
 			ret |= GUC_MCR_REG_ADD(gt, regset, XEHP_LNCFCMOCS(i), false);
 		else
 			ret |= GUC_MMIO_REG_ADD(gt, regset, GEN9_LNCFCMOCS(i), false);
 
 	if (GRAPHICS_VER(engine->i915) >= 12) {
-		ret |= GUC_MMIO_REG_ADD(gt, regset, EU_PERF_CNTL0, false);
-		ret |= GUC_MMIO_REG_ADD(gt, regset, EU_PERF_CNTL1, false);
-		ret |= GUC_MMIO_REG_ADD(gt, regset, EU_PERF_CNTL2, false);
-		ret |= GUC_MMIO_REG_ADD(gt, regset, EU_PERF_CNTL3, false);
-		ret |= GUC_MMIO_REG_ADD(gt, regset, EU_PERF_CNTL4, false);
-		ret |= GUC_MMIO_REG_ADD(gt, regset, EU_PERF_CNTL5, false);
-		ret |= GUC_MMIO_REG_ADD(gt, regset, EU_PERF_CNTL6, false);
+		ret |= GUC_MCR_REG_ADD(gt, regset, MCR_REG(i915_mmio_reg_offset(EU_PERF_CNTL0)), false);
+		ret |= GUC_MCR_REG_ADD(gt, regset, MCR_REG(i915_mmio_reg_offset(EU_PERF_CNTL1)), false);
+		ret |= GUC_MCR_REG_ADD(gt, regset, MCR_REG(i915_mmio_reg_offset(EU_PERF_CNTL2)), false);
+		ret |= GUC_MCR_REG_ADD(gt, regset, MCR_REG(i915_mmio_reg_offset(EU_PERF_CNTL3)), false);
+		ret |= GUC_MCR_REG_ADD(gt, regset, MCR_REG(i915_mmio_reg_offset(EU_PERF_CNTL4)), false);
+		ret |= GUC_MCR_REG_ADD(gt, regset, MCR_REG(i915_mmio_reg_offset(EU_PERF_CNTL5)), false);
+		ret |= GUC_MCR_REG_ADD(gt, regset, MCR_REG(i915_mmio_reg_offset(EU_PERF_CNTL6)), false);
 	}
 
 	return ret ? -1 : 0;
@@ -498,7 +503,7 @@ static void fill_engine_enable_masks(struct intel_gt *gt,
 
 #define LR_HW_CONTEXT_SIZE (80 * sizeof(u32))
 #define XEHP_LR_HW_CONTEXT_SIZE (96 * sizeof(u32))
-#define LR_HW_CONTEXT_SZ(i915) (GRAPHICS_VER_FULL(i915) >= IP_VER(12, 50) ? \
+#define LR_HW_CONTEXT_SZ(i915) (GRAPHICS_VER_FULL(i915) >= IP_VER(12, 55) ? \
 				    XEHP_LR_HW_CONTEXT_SIZE : \
 				    LR_HW_CONTEXT_SIZE)
 #define LRC_SKIP_SIZE(i915) (LRC_PPHWSP_SZ * PAGE_SIZE + LR_HW_CONTEXT_SZ(i915))

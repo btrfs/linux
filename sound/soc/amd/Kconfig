@@ -132,9 +132,25 @@ config SND_SOC_AMD_RPL_ACP6x
           Say m if you have such a device.
           If unsure select "N".
 
+config SND_SOC_AMD_SOUNDWIRE_LINK_BASELINE
+	tristate
+	select SND_AMD_SOUNDWIRE_ACPI if ACPI
+
+config SND_SOC_AMD_SOUNDWIRE
+	tristate "Support for SoundWire based AMD platforms"
+	default SND_SOC_AMD_SOUNDWIRE_LINK_BASELINE
+	depends on SND_SOC_AMD_SOUNDWIRE_LINK_BASELINE
+	depends on ACPI
+	depends on SOUNDWIRE_AMD
+	help
+	  This adds support for SoundWire for AMD platforms.
+	  Say Y if you want to enable SoundWire links with SOF.
+	  If unsure select "N".
+
 config SND_SOC_AMD_PS
         tristate "AMD Audio Coprocessor-v6.3 Pink Sardine support"
 	select SND_AMD_ACP_CONFIG
+	select SND_SOC_AMD_SOUNDWIRE_LINK_BASELINE
         depends on X86 && PCI && ACPI
         help
           This option enables Audio Coprocessor i.e ACP v6.3 support on

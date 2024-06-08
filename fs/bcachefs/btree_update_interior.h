@@ -10,6 +10,8 @@
 
 #define BTREE_UPDATE_JOURNAL_RES	(BTREE_UPDATE_NODES_MAX * (BKEY_BTREE_PTR_U64s_MAX + 1))
 
+int bch2_btree_node_check_topology(struct btree_trans *, struct btree *);
+
 /*
  * Tracks an in progress split/rewrite of a btree node and the update to the
  * parent node:
@@ -32,6 +34,7 @@ struct btree_update {
 	struct closure			cl;
 	struct bch_fs			*c;
 	u64				start_time;
+	unsigned long			ip_started;
 
 	struct list_head		list;
 	struct list_head		unwritten_list;
@@ -118,6 +121,8 @@ struct btree *__bch2_btree_node_alloc_replacement(struct btree_update *,
 						  struct bkey_format);
 
 int bch2_btree_split_leaf(struct btree_trans *, btree_path_idx_t, unsigned);
+
+int bch2_btree_increase_depth(struct btree_trans *, btree_path_idx_t, unsigned);
 
 int __bch2_foreground_maybe_merge(struct btree_trans *, btree_path_idx_t,
 				  unsigned, unsigned, enum btree_node_sibling);

@@ -24,12 +24,14 @@
 #include <linux/soundwire/sdw_intel.h>
 #include <sound/intel-dsp-config.h>
 #include <sound/intel-nhlt.h>
+#include <sound/soc-acpi-intel-ssp-common.h>
 #include <sound/sof.h>
 #include <sound/sof/xtensa.h>
 #include <sound/hda-mlink.h>
 #include "../sof-audio.h"
 #include "../sof-pci-dev.h"
 #include "../ops.h"
+#include "../ipc4-topology.h"
 #include "hda.h"
 #include "telemetry.h"
 
@@ -46,42 +48,81 @@
 #define EXCEPT_MAX_HDR_SIZE	0x400
 #define HDA_EXT_ROM_STATUS_SIZE 8
 
-static u32 hda_get_interface_mask(struct snd_sof_dev *sdev)
+static void hda_get_interfaces(struct snd_sof_dev *sdev, u32 *interface_mask)
 {
 	const struct sof_intel_dsp_desc *chip;
-	u32 interface_mask[2] = { 0 };
 
 	chip = get_chip_info(sdev->pdata);
 	switch (chip->hw_ip_version) {
 	case SOF_INTEL_TANGIER:
 	case SOF_INTEL_BAYTRAIL:
 	case SOF_INTEL_BROADWELL:
-		interface_mask[0] =  BIT(SOF_DAI_INTEL_SSP);
+		interface_mask[SOF_DAI_DSP_ACCESS] =  BIT(SOF_DAI_INTEL_SSP);
 		break;
 	case SOF_INTEL_CAVS_1_5:
 	case SOF_INTEL_CAVS_1_5_PLUS:
-		interface_mask[0] = BIT(SOF_DAI_INTEL_SSP) | BIT(SOF_DAI_INTEL_DMIC) |
-				    BIT(SOF_DAI_INTEL_HDA);
-		interface_mask[1] = BIT(SOF_DAI_INTEL_HDA);
+		interface_mask[SOF_DAI_DSP_ACCESS] =
+			BIT(SOF_DAI_INTEL_SSP) | BIT(SOF_DAI_INTEL_DMIC) | BIT(SOF_DAI_INTEL_HDA);
+		interface_mask[SOF_DAI_HOST_ACCESS] = BIT(SOF_DAI_INTEL_HDA);
 		break;
 	case SOF_INTEL_CAVS_1_8:
 	case SOF_INTEL_CAVS_2_0:
 	case SOF_INTEL_CAVS_2_5:
 	case SOF_INTEL_ACE_1_0:
-		interface_mask[0] = BIT(SOF_DAI_INTEL_SSP) | BIT(SOF_DAI_INTEL_DMIC) |
-				    BIT(SOF_DAI_INTEL_HDA) | BIT(SOF_DAI_INTEL_ALH);
-		interface_mask[1] = BIT(SOF_DAI_INTEL_HDA);
+		interface_mask[SOF_DAI_DSP_ACCESS] =
+			BIT(SOF_DAI_INTEL_SSP) | BIT(SOF_DAI_INTEL_DMIC) |
+			BIT(SOF_DAI_INTEL_HDA) | BIT(SOF_DAI_INTEL_ALH);
+		interface_mask[SOF_DAI_HOST_ACCESS] = BIT(SOF_DAI_INTEL_HDA);
 		break;
 	case SOF_INTEL_ACE_2_0:
-		interface_mask[0] = BIT(SOF_DAI_INTEL_SSP) | BIT(SOF_DAI_INTEL_DMIC) |
-				    BIT(SOF_DAI_INTEL_HDA) | BIT(SOF_DAI_INTEL_ALH);
-		interface_mask[1] = interface_mask[0]; /* all interfaces accessible without DSP */
+		interface_mask[SOF_DAI_DSP_ACCESS] =
+			BIT(SOF_DAI_INTEL_SSP) | BIT(SOF_DAI_INTEL_DMIC) |
+			BIT(SOF_DAI_INTEL_HDA) | BIT(SOF_DAI_INTEL_ALH);
+		 /* all interfaces accessible without DSP */
+		interface_mask[SOF_DAI_HOST_ACCESS] =
+			interface_mask[SOF_DAI_DSP_ACCESS];
 		break;
 	default:
 		break;
 	}
+}
+
+static u32 hda_get_interface_mask(struct snd_sof_dev *sdev)
+{
+	u32 interface_mask[SOF_DAI_ACCESS_NUM] = { 0 };
+
+	hda_get_interfaces(sdev, interface_mask);
 
 	return interface_mask[sdev->dspless_mode_selected];
+}
+
+bool hda_is_chain_dma_supported(struct snd_sof_dev *sdev, u32 dai_type)
+{
+	u32 interface_mask[SOF_DAI_ACCESS_NUM] = { 0 };
+	const struct sof_intel_dsp_desc *chip;
+
+	if (sdev->dspless_mode_selected)
+		return false;
+
+	hda_get_interfaces(sdev, interface_mask);
+
+	if (!(interface_mask[SOF_DAI_DSP_ACCESS] & BIT(dai_type)))
+		return false;
+
+	if (dai_type == SOF_DAI_INTEL_HDA)
+		return true;
+
+	switch (dai_type) {
+	case SOF_DAI_INTEL_SSP:
+	case SOF_DAI_INTEL_DMIC:
+	case SOF_DAI_INTEL_ALH:
+		chip = get_chip_info(sdev->pdata);
+		if (chip->hw_ip_version < SOF_INTEL_ACE_2_0)
+			return false;
+		return true;
+	default:
+		return false;
+	}
 }
 
 #if IS_ENABLED(CONFIG_SND_SOC_SOF_INTEL_SOUNDWIRE)
@@ -105,12 +146,37 @@ static int sdw_params_stream(struct device *dev,
 
 	data.dai_index = (params_data->link_id << 8) | d->id;
 	data.dai_data = params_data->alh_stream_id;
+	data.dai_node_id = data.dai_data;
 
 	return hda_dai_config(w, SOF_DAI_CONFIG_FLAGS_HW_PARAMS, &data);
 }
 
+static int sdw_params_free(struct device *dev, struct sdw_intel_stream_free_data *free_data)
+{
+	struct snd_soc_dai *d = free_data->dai;
+	struct snd_soc_dapm_widget *w = snd_soc_dai_get_widget(d, free_data->substream->stream);
+	struct snd_sof_dev *sdev = widget_to_sdev(w);
+
+	if (sdev->pdata->ipc_type == SOF_IPC_TYPE_4) {
+		struct snd_sof_widget *swidget = w->dobj.private;
+		struct snd_sof_dai *dai = swidget->private;
+		struct sof_ipc4_copier_data *copier_data;
+		struct sof_ipc4_copier *ipc4_copier;
+
+		ipc4_copier = dai->private;
+		ipc4_copier->dai_index = 0;
+		copier_data = &ipc4_copier->data;
+
+		/* clear the node ID */
+		copier_data->gtw_cfg.node_id &= ~SOF_IPC4_NODE_INDEX_MASK;
+	}
+
+	return 0;
+}
+
 struct sdw_intel_ops sdw_callback = {
 	.params_stream = sdw_params_stream,
+	.free_stream = sdw_params_free,
 };
 
 static int sdw_ace2x_params_stream(struct device *dev,
@@ -119,7 +185,8 @@ static int sdw_ace2x_params_stream(struct device *dev,
 	return sdw_hda_dai_hw_params(params_data->substream,
 				     params_data->hw_params,
 				     params_data->dai,
-				     params_data->link_id);
+				     params_data->link_id,
+				     params_data->alh_stream_id);
 }
 
 static int sdw_ace2x_free_stream(struct device *dev,
@@ -1192,6 +1259,7 @@ int hda_dsp_probe(struct snd_sof_dev *sdev)
 {
 	struct pci_dev *pci = to_pci_dev(sdev->dev);
 	struct sof_intel_hda_dev *hdev = sdev->pdata->hw_pdata;
+	const struct sof_intel_dsp_desc *chip;
 	int ret = 0;
 
 	hdev->dmic_dev = platform_device_register_data(sdev->dev, "dmic-codec",
@@ -1305,12 +1373,28 @@ skip_dsp_setup:
 		INIT_DELAYED_WORK(&hdev->d0i3_work, hda_dsp_d0i3_work);
 	}
 
+	chip = get_chip_info(sdev->pdata);
+	if (chip && chip->hw_ip_version >= SOF_INTEL_ACE_2_0) {
+		ret = hda_sdw_startup(sdev);
+		if (ret < 0) {
+			dev_err(sdev->dev, "could not startup SoundWire links\n");
+			goto disable_pp_cap;
+		}
+
+		hda_sdw_int_enable(sdev, true);
+	}
+
 	init_waitqueue_head(&hdev->waitq);
 
 	hdev->nhlt = intel_nhlt_init(sdev->dev);
 
 	return 0;
 
+disable_pp_cap:
+	if (!sdev->dspless_mode_selected) {
+		hda_dsp_ctrl_ppcap_int_enable(sdev, false);
+		hda_dsp_ctrl_ppcap_enable(sdev, false);
+	}
 free_ipc_irq:
 	free_irq(sdev->ipc_irq, sdev);
 free_irq_vector:
@@ -1620,13 +1704,36 @@ void hda_set_mach_params(struct snd_soc_acpi_mach *mach,
 	mach_params->dai_drivers = desc->ops->drv;
 }
 
+static int check_tplg_quirk_mask(struct snd_soc_acpi_mach *mach)
+{
+	u32 dmic_ssp_quirk;
+	u32 codec_amp_name_quirk;
+
+	/*
+	 * In current implementation dmic and ssp quirks are designed for es8336
+	 * machine driver and could not be mixed with codec name and amp name
+	 * quirks.
+	 */
+	dmic_ssp_quirk = mach->tplg_quirk_mask &
+			 (SND_SOC_ACPI_TPLG_INTEL_DMIC_NUMBER | SND_SOC_ACPI_TPLG_INTEL_SSP_NUMBER);
+	codec_amp_name_quirk = mach->tplg_quirk_mask &
+			 (SND_SOC_ACPI_TPLG_INTEL_AMP_NAME | SND_SOC_ACPI_TPLG_INTEL_CODEC_NAME);
+
+	if (dmic_ssp_quirk && codec_amp_name_quirk)
+		return -EINVAL;
+
+	return 0;
+}
+
 struct snd_soc_acpi_mach *hda_machine_select(struct snd_sof_dev *sdev)
 {
 	u32 interface_mask = hda_get_interface_mask(sdev);
 	struct snd_sof_pdata *sof_pdata = sdev->pdata;
 	const struct sof_dev_desc *desc = sof_pdata->desc;
 	struct snd_soc_acpi_mach *mach = NULL;
+	enum snd_soc_acpi_intel_codec codec_type;
 	const char *tplg_filename;
+	const char *tplg_suffix;
 
 	/* Try I2S or DMIC if it is supported */
 	if (interface_mask & (BIT(SOF_DAI_INTEL_SSP) | BIT(SOF_DAI_INTEL_DMIC)))
@@ -1643,6 +1750,17 @@ struct snd_soc_acpi_mach *hda_machine_select(struct snd_sof_dev *sdev)
 		if (!sof_pdata->tplg_filename) {
 			sof_pdata->tplg_filename = mach->sof_tplg_filename;
 			tplg_fixup = true;
+		}
+
+		/*
+		 * Checking quirk mask integrity; some quirk flags could not be
+		 * set concurrently.
+		 */
+		if (tplg_fixup &&
+		    check_tplg_quirk_mask(mach)) {
+			dev_err(sdev->dev, "Invalid tplg quirk mask 0x%x\n",
+				mach->tplg_quirk_mask);
+			return NULL;
 		}
 
 		/* report to machine driver if any DMICs are found */
@@ -1719,6 +1837,52 @@ struct snd_soc_acpi_mach *hda_machine_select(struct snd_sof_dev *sdev)
 			}
 		}
 
+		codec_type = snd_soc_acpi_intel_detect_amp_type(sdev->dev);
+
+		if (tplg_fixup &&
+		    mach->tplg_quirk_mask & SND_SOC_ACPI_TPLG_INTEL_AMP_NAME &&
+		    codec_type != CODEC_NONE) {
+			tplg_suffix = snd_soc_acpi_intel_get_amp_tplg_suffix(codec_type);
+			if (!tplg_suffix) {
+				dev_err(sdev->dev, "no tplg suffix found, amp %d\n",
+					codec_type);
+				return NULL;
+			}
+
+			tplg_filename = devm_kasprintf(sdev->dev, GFP_KERNEL,
+						       "%s-%s",
+						       sof_pdata->tplg_filename,
+						       tplg_suffix);
+			if (!tplg_filename)
+				return NULL;
+
+			sof_pdata->tplg_filename = tplg_filename;
+			add_extension = true;
+		}
+
+		codec_type = snd_soc_acpi_intel_detect_codec_type(sdev->dev);
+
+		if (tplg_fixup &&
+		    mach->tplg_quirk_mask & SND_SOC_ACPI_TPLG_INTEL_CODEC_NAME &&
+		    codec_type != CODEC_NONE) {
+			tplg_suffix = snd_soc_acpi_intel_get_codec_tplg_suffix(codec_type);
+			if (!tplg_suffix) {
+				dev_err(sdev->dev, "no tplg suffix found, codec %d\n",
+					codec_type);
+				return NULL;
+			}
+
+			tplg_filename = devm_kasprintf(sdev->dev, GFP_KERNEL,
+						       "%s-%s",
+						       sof_pdata->tplg_filename,
+						       tplg_suffix);
+			if (!tplg_filename)
+				return NULL;
+
+			sof_pdata->tplg_filename = tplg_filename;
+			add_extension = true;
+		}
+
 		if (tplg_fixup && add_extension) {
 			tplg_filename = devm_kasprintf(sdev->dev, GFP_KERNEL,
 						       "%s%s",
@@ -1786,3 +1950,4 @@ MODULE_IMPORT_NS(SND_INTEL_SOUNDWIRE_ACPI);
 MODULE_IMPORT_NS(SOUNDWIRE_INTEL_INIT);
 MODULE_IMPORT_NS(SOUNDWIRE_INTEL);
 MODULE_IMPORT_NS(SND_SOC_SOF_HDA_MLINK);
+MODULE_IMPORT_NS(SND_SOC_ACPI_INTEL_MATCH);

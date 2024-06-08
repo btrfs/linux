@@ -85,9 +85,7 @@ static inline struct drm_i915_private *kdev_to_i915(struct device *kdev)
 #define IS_DG1(dev_priv)        IS_PLATFORM(dev_priv, XE_DG1)
 #define IS_ALDERLAKE_S(dev_priv) IS_PLATFORM(dev_priv, XE_ALDERLAKE_S)
 #define IS_ALDERLAKE_P(dev_priv) IS_PLATFORM(dev_priv, XE_ALDERLAKE_P)
-#define IS_XEHPSDV(dev_priv) (dev_priv && 0)
 #define IS_DG2(dev_priv)	IS_PLATFORM(dev_priv, XE_DG2)
-#define IS_PONTEVECCHIO(dev_priv) IS_PLATFORM(dev_priv, XE_PVC)
 #define IS_METEORLAKE(dev_priv) IS_PLATFORM(dev_priv, XE_METEORLAKE)
 #define IS_LUNARLAKE(dev_priv) IS_PLATFORM(dev_priv, XE_LUNARLAKE)
 
@@ -130,10 +128,6 @@ static inline struct drm_i915_private *kdev_to_i915(struct device *kdev)
 #define IS_DG2_GRAPHICS_STEP(xe, variant, first, last) \
 	((xe)->info.subplatform == XE_SUBPLATFORM_DG2_ ## variant && \
 	 IS_GRAPHICS_STEP(xe, first, last))
-#define IS_XEHPSDV_GRAPHICS_STEP(xe, first, last) (IS_XEHPSDV(xe) && IS_GRAPHICS_STEP(xe, first, last))
-
-/* XXX: No basedie stepping support yet */
-#define IS_PVC_BD_STEP(xe, first, last) (!WARN_ON(1) && IS_PONTEVECCHIO(xe))
 
 #define IS_TIGERLAKE_DISPLAY_STEP(xe, first, last) (IS_TIGERLAKE(xe) && IS_DISPLAY_STEP(xe, first, last))
 #define IS_ROCKETLAKE_DISPLAY_STEP(xe, first, last) (IS_ROCKETLAKE(xe) && IS_DISPLAY_STEP(xe, first, last))
@@ -162,22 +156,18 @@ static inline struct drm_i915_private *kdev_to_i915(struct device *kdev)
 
 #include "intel_wakeref.h"
 
-static inline bool intel_runtime_pm_get(struct xe_runtime_pm *pm)
+static inline intel_wakeref_t intel_runtime_pm_get(struct xe_runtime_pm *pm)
 {
 	struct xe_device *xe = container_of(pm, struct xe_device, runtime_pm);
 
-	if (xe_pm_runtime_get(xe) < 0) {
-		xe_pm_runtime_put(xe);
-		return false;
-	}
-	return true;
+	return xe_pm_runtime_resume_and_get(xe);
 }
 
-static inline bool intel_runtime_pm_get_if_in_use(struct xe_runtime_pm *pm)
+static inline intel_wakeref_t intel_runtime_pm_get_if_in_use(struct xe_runtime_pm *pm)
 {
 	struct xe_device *xe = container_of(pm, struct xe_device, runtime_pm);
 
-	return xe_pm_runtime_get_if_active(xe);
+	return xe_pm_runtime_get_if_in_use(xe);
 }
 
 static inline void intel_runtime_pm_put_unchecked(struct xe_runtime_pm *pm)
@@ -187,7 +177,7 @@ static inline void intel_runtime_pm_put_unchecked(struct xe_runtime_pm *pm)
 	xe_pm_runtime_put(xe);
 }
 
-static inline void intel_runtime_pm_put(struct xe_runtime_pm *pm, bool wakeref)
+static inline void intel_runtime_pm_put(struct xe_runtime_pm *pm, intel_wakeref_t wakeref)
 {
 	if (wakeref)
 		intel_runtime_pm_put_unchecked(pm);

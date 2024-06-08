@@ -1098,7 +1098,7 @@ static int throtl_dispatch_tg(struct throtl_grp *tg)
 	while ((bio = throtl_peek_queued(&sq->queued[READ])) &&
 	       tg_may_dispatch(tg, bio, NULL)) {
 
-		tg_dispatch_one_bio(tg, bio_data_dir(bio));
+		tg_dispatch_one_bio(tg, READ);
 		nr_reads++;
 
 		if (nr_reads >= max_nr_reads)
@@ -1108,7 +1108,7 @@ static int throtl_dispatch_tg(struct throtl_grp *tg)
 	while ((bio = throtl_peek_queued(&sq->queued[WRITE])) &&
 	       tg_may_dispatch(tg, bio, NULL)) {
 
-		tg_dispatch_one_bio(tg, bio_data_dir(bio));
+		tg_dispatch_one_bio(tg, WRITE);
 		nr_writes++;
 
 		if (nr_writes >= max_nr_writes)
@@ -1494,11 +1494,8 @@ static u64 tg_prfill_limit(struct seq_file *sf, struct blkg_policy_data *pd,
 {
 	struct throtl_grp *tg = pd_to_tg(pd);
 	const char *dname = blkg_dev_name(pd->blkg);
-	char bufs[4][21] = { "max", "max", "max", "max" };
 	u64 bps_dft;
 	unsigned int iops_dft;
-	char idle_time[26] = "";
-	char latency_time[26] = "";
 
 	if (!dname)
 		return 0;
@@ -1520,35 +1517,39 @@ static u64 tg_prfill_limit(struct seq_file *sf, struct blkg_policy_data *pd,
 	      tg->latency_target_conf == DFL_LATENCY_TARGET)))
 		return 0;
 
-	if (tg->bps_conf[READ][off] != U64_MAX)
-		snprintf(bufs[0], sizeof(bufs[0]), "%llu",
-			tg->bps_conf[READ][off]);
-	if (tg->bps_conf[WRITE][off] != U64_MAX)
-		snprintf(bufs[1], sizeof(bufs[1]), "%llu",
-			tg->bps_conf[WRITE][off]);
-	if (tg->iops_conf[READ][off] != UINT_MAX)
-		snprintf(bufs[2], sizeof(bufs[2]), "%u",
-			tg->iops_conf[READ][off]);
-	if (tg->iops_conf[WRITE][off] != UINT_MAX)
-		snprintf(bufs[3], sizeof(bufs[3]), "%u",
-			tg->iops_conf[WRITE][off]);
+	seq_printf(sf, "%s", dname);
+	if (tg->bps_conf[READ][off] == U64_MAX)
+		seq_printf(sf, " rbps=max");
+	else
+		seq_printf(sf, " rbps=%llu", tg->bps_conf[READ][off]);
+
+	if (tg->bps_conf[WRITE][off] == U64_MAX)
+		seq_printf(sf, " wbps=max");
+	else
+		seq_printf(sf, " wbps=%llu", tg->bps_conf[WRITE][off]);
+
+	if (tg->iops_conf[READ][off] == UINT_MAX)
+		seq_printf(sf, " riops=max");
+	else
+		seq_printf(sf, " riops=%u", tg->iops_conf[READ][off]);
+
+	if (tg->iops_conf[WRITE][off] == UINT_MAX)
+		seq_printf(sf, " wiops=max");
+	else
+		seq_printf(sf, " wiops=%u", tg->iops_conf[WRITE][off]);
+
 	if (off == LIMIT_LOW) {
 		if (tg->idletime_threshold_conf == ULONG_MAX)
-			strcpy(idle_time, " idle=max");
+			seq_printf(sf, " idle=max");
 		else
-			snprintf(idle_time, sizeof(idle_time), " idle=%lu",
-				tg->idletime_threshold_conf);
+			seq_printf(sf, " idle=%lu", tg->idletime_threshold_conf);
 
 		if (tg->latency_target_conf == ULONG_MAX)
-			strcpy(latency_time, " latency=max");
+			seq_printf(sf, " latency=max");
 		else
-			snprintf(latency_time, sizeof(latency_time),
-				" latency=%lu", tg->latency_target_conf);
+			seq_printf(sf, " latency=%lu", tg->latency_target_conf);
 	}
-
-	seq_printf(sf, "%s rbps=%s wbps=%s riops=%s wiops=%s%s%s\n",
-		   dname, bufs[0], bufs[1], bufs[2], bufs[3], idle_time,
-		   latency_time);
+	seq_printf(sf, "\n");
 	return 0;
 }
 
@@ -1815,7 +1816,7 @@ static bool throtl_tg_is_idle(struct throtl_grp *tg)
 	time = min_t(unsigned long, MAX_IDLE_TIME, 4 * tg->idletime_threshold);
 	ret = tg->latency_target == DFL_LATENCY_TARGET ||
 	      tg->idletime_threshold == DFL_IDLE_THRESHOLD ||
-	      (ktime_get_ns() >> 10) - tg->last_finish_time > time ||
+	      (blk_time_get_ns() >> 10) - tg->last_finish_time > time ||
 	      tg->avg_idletime > tg->idletime_threshold ||
 	      (tg->latency_target && tg->bio_cnt &&
 		tg->bad_bio_cnt * 5 < tg->bio_cnt);
@@ -2060,7 +2061,7 @@ static void blk_throtl_update_idletime(struct throtl_grp *tg)
 	if (last_finish_time == 0)
 		return;
 
-	now = ktime_get_ns() >> 10;
+	now = blk_time_get_ns() >> 10;
 	if (now <= last_finish_time ||
 	    last_finish_time == tg->checked_last_finish_time)
 		return;
@@ -2327,7 +2328,7 @@ void blk_throtl_bio_endio(struct bio *bio)
 	if (!tg->td->limit_valid[LIMIT_LOW])
 		return;
 
-	finish_time_ns = ktime_get_ns();
+	finish_time_ns = blk_time_get_ns();
 	tg->last_finish_time = finish_time_ns >> 10;
 
 	start_time = bio_issue_time(&bio->bi_issue) >> 10;

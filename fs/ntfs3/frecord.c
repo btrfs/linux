@@ -1947,7 +1947,7 @@ int ni_fiemap(struct ntfs_inode *ni, struct fiemap_extent_info *fieinfo,
 	if (!attr || !attr->non_res) {
 		err = fiemap_fill_next_extent(
 			fieinfo, 0, 0,
-			attr ? le32_to_cpu(attr->res.data_size) : 0,
+			attr ? le32_to_cpu(attr->res.data_size) : 0, 0,
 			FIEMAP_EXTENT_DATA_INLINE | FIEMAP_EXTENT_LAST |
 				FIEMAP_EXTENT_MERGED);
 		goto out;
@@ -2042,7 +2042,7 @@ int ni_fiemap(struct ntfs_inode *ni, struct fiemap_extent_info *fieinfo,
 				flags |= FIEMAP_EXTENT_LAST;
 
 			err = fiemap_fill_next_extent(fieinfo, vbo, lbo, dlen,
-						      flags);
+						      0, flags);
 			if (err < 0)
 				break;
 			if (err == 1) {
@@ -2062,7 +2062,8 @@ int ni_fiemap(struct ntfs_inode *ni, struct fiemap_extent_info *fieinfo,
 		if (vbo + bytes >= end)
 			flags |= FIEMAP_EXTENT_LAST;
 
-		err = fiemap_fill_next_extent(fieinfo, vbo, lbo, bytes, flags);
+		err = fiemap_fill_next_extent(fieinfo, vbo, lbo, bytes, 0,
+					      flags);
 		if (err < 0)
 			break;
 		if (err == 1) {

@@ -1058,12 +1058,15 @@ cpufreq governor about the minimum desired frequency which should always be
 provided by a CPU, as well as the maximum desired frequency, which should not
 be exceeded by a CPU.
 
-WARNING: cgroup2 doesn't yet support control of realtime processes and
-the cpu controller can only be enabled when all RT processes are in
-the root cgroup.  Be aware that system management software may already
-have placed RT processes into nonroot cgroups during the system boot
-process, and these processes may need to be moved to the root cgroup
-before the cpu controller can be enabled.
+WARNING: cgroup2 doesn't yet support control of realtime processes. For
+a kernel built with the CONFIG_RT_GROUP_SCHED option enabled for group
+scheduling of realtime processes, the cpu controller can only be enabled
+when all RT processes are in the root cgroup.  This limitation does
+not apply if CONFIG_RT_GROUP_SCHED is disabled.  Be aware that system
+management software may already have placed RT processes into nonroot
+cgroups during the system boot process, and these processes may need
+to be moved to the root cgroup before the cpu controller can be enabled
+with a CONFIG_RT_GROUP_SCHED enabled kernel.
 
 
 CPU Interface Files
@@ -1296,16 +1299,9 @@ PAGE_SIZE multiple when read back.
 	This is a simple interface to trigger memory reclaim in the
 	target cgroup.
 
-	This file accepts a single key, the number of bytes to reclaim.
-	No nested keys are currently supported.
-
 	Example::
 
 	  echo "1G" > memory.reclaim
-
-	The interface can be later extended with nested keys to
-	configure the reclaim behavior. For example, specify the
-	type of memory to reclaim from (anon, file, ..).
 
 	Please note that the kernel can over or under reclaim from
 	the target cgroup. If less bytes are reclaimed than the
@@ -1317,6 +1313,17 @@ PAGE_SIZE multiple when read back.
 	the memory reclaim normally is not exercised in this case.
 	This means that the networking layer will not adapt based on
 	reclaim induced by memory.reclaim.
+
+The following nested keys are defined.
+
+	  ==========            ================================
+	  swappiness            Swappiness value to reclaim with
+	  ==========            ================================
+
+	Specifying a swappiness value instructs the kernel to perform
+	the reclaim with that swappiness value. Note that this has the
+	same semantics as vm.swappiness applied to memcg reclaim with
+	all the existing limitations and potential future extensions.
 
   memory.peak
 	A read-only single value file which exists on non-root

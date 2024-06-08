@@ -2,7 +2,7 @@
 /*
  * MLO link handling
  *
- * Copyright (C) 2022-2023 Intel Corporation
+ * Copyright (C) 2022-2024 Intel Corporation
  */
 #include <linux/slab.h>
 #include <linux/kernel.h>
@@ -73,6 +73,8 @@ void ieee80211_link_stop(struct ieee80211_link_data *link)
 		ieee80211_mgd_stop_link(link);
 
 	cancel_delayed_work_sync(&link->color_collision_detect_work);
+	wiphy_work_cancel(link->sdata->local->hw.wiphy,
+			  &link->csa_finalize_work);
 	ieee80211_link_release_channel(link);
 }
 
@@ -354,9 +356,9 @@ static int _ieee80211_set_active_links(struct ieee80211_sub_if_data *sdata,
 
 		link = sdata_dereference(sdata->link[link_id], sdata);
 
-		/* FIXME: kill TDLS connections on the link */
+		ieee80211_teardown_tdls_peers(link);
 
-		ieee80211_link_release_channel(link);
+		__ieee80211_link_release_channel(link, true);
 	}
 
 	list_for_each_entry(sta, &local->sta_list, list) {
@@ -402,7 +404,8 @@ static int _ieee80211_set_active_links(struct ieee80211_sub_if_data *sdata,
 
 		link = sdata_dereference(sdata->link[link_id], sdata);
 
-		ret = ieee80211_link_use_channel(link, &link->conf->chandef,
+		ret = ieee80211_link_use_channel(link,
+						 &link->conf->chanreq,
 						 IEEE80211_CHANCTX_SHARED);
 		WARN_ON_ONCE(ret);
 
@@ -444,10 +447,16 @@ int ieee80211_set_active_links(struct ieee80211_vif *vif, u16 active_links)
 
 	lockdep_assert_wiphy(local->hw.wiphy);
 
-	if (!drv_can_activate_links(local, sdata, active_links))
+	if (WARN_ON(!active_links))
 		return -EINVAL;
 
 	old_active = sdata->vif.active_links;
+	if (old_active == active_links)
+		return 0;
+
+	if (!drv_can_activate_links(local, sdata, active_links))
+		return -EINVAL;
+
 	if (old_active & active_links) {
 		/*
 		 * if there's at least one link that stays active across
@@ -471,6 +480,9 @@ void ieee80211_set_active_links_async(struct ieee80211_vif *vif,
 				      u16 active_links)
 {
 	struct ieee80211_sub_if_data *sdata = vif_to_sdata(vif);
+
+	if (WARN_ON(!active_links))
+		return;
 
 	if (!ieee80211_sdata_running(sdata))
 		return;

@@ -80,4 +80,14 @@ struct gpi_i2c_config {
 	bool multi_msg;
 };
 
+/**
+ * struct gpi_i2c_result - i2c transfer status result in GSI mode
+ *
+ * @status: store txfer status value as part of callback
+ *
+ */
+struct gpi_i2c_result {
+	u32 status;
+};
+
 #endif /* QCOM_GPI_DMA_H */

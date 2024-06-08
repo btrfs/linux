@@ -1076,7 +1076,17 @@ static void gpi_process_xfer_compl_event(struct gchan *gchan,
 	dev_dbg(gpii->gpi_dev->dev, "Residue %d\n", result.residue);
 
 	dma_cookie_complete(&vd->tx);
-	dmaengine_desc_get_callback_invoke(&vd->tx, &result);
+	if (gchan->protocol == QCOM_GPI_I2C) {
+		struct dmaengine_desc_callback cb;
+		struct gpi_i2c_result *i2c;
+
+		dmaengine_desc_get_callback(&vd->tx, &cb);
+		i2c = cb.callback_param;
+		i2c->status = compl_event->status;
+		dmaengine_desc_callback_invoke(&cb, &result);
+	} else {
+		dmaengine_desc_get_callback_invoke(&vd->tx, &result);
+	}
 
 gpi_free_desc:
 	spin_lock_irqsave(&gchan->vc.lock, flags);

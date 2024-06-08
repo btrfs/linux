@@ -2276,9 +2276,10 @@ TRACE_EVENT(f2fs_bmap,
 TRACE_EVENT(f2fs_fiemap,
 
 	TP_PROTO(struct inode *inode, sector_t lblock, sector_t pblock,
-		unsigned long long len, unsigned int flags, int ret),
+		unsigned long long len, unsigned long long phys_len,
+		unsigned int flags, int ret),
 
-	TP_ARGS(inode, lblock, pblock, len, flags, ret),
+	TP_ARGS(inode, lblock, pblock, len, phys_len, flags, ret),
 
 	TP_STRUCT__entry(
 		__field(dev_t, dev)
@@ -2286,6 +2287,7 @@ TRACE_EVENT(f2fs_fiemap,
 		__field(sector_t, lblock)
 		__field(sector_t, pblock)
 		__field(unsigned long long, len)
+		__field(unsigned long long, phys_len)
 		__field(unsigned int, flags)
 		__field(int, ret)
 	),
@@ -2296,16 +2298,18 @@ TRACE_EVENT(f2fs_fiemap,
 		__entry->lblock		= lblock;
 		__entry->pblock		= pblock;
 		__entry->len		= len;
+		__entry->phys_len	= phys_len;
 		__entry->flags		= flags;
 		__entry->ret		= ret;
 	),
 
 	TP_printk("dev = (%d,%d), ino = %lu, lblock:%lld, pblock:%lld, "
-		"len:%llu, flags:%u, ret:%d",
+		"len:%llu, plen:%llu, flags:%u, ret:%d",
 		show_dev_ino(__entry),
 		(unsigned long long)__entry->lblock,
 		(unsigned long long)__entry->pblock,
 		__entry->len,
+		__entry->phys_len,
 		__entry->flags,
 		__entry->ret)
 );

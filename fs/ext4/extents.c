@@ -2194,7 +2194,7 @@ static int ext4_fill_es_cache_info(struct inode *inode,
 
 	while (block <= end) {
 		next = 0;
-		flags = 0;
+		flags = FIEMAP_EXTENT_HAS_PHYS_LEN;
 		if (!ext4_es_lookup_extent(inode, block, &next, &es))
 			break;
 		if (ext4_es_is_unwritten(&es))
@@ -2215,6 +2215,7 @@ static int ext4_fill_es_cache_info(struct inode *inode,
 				(__u64)es.es_lblk << blksize_bits,
 				(__u64)es.es_pblk << blksize_bits,
 				(__u64)es.es_len << blksize_bits,
+				0,
 				flags);
 		if (next == 0)
 			break;
@@ -4111,10 +4112,10 @@ insert_hole:
  *
  * Need to be called with
  * down_read(&EXT4_I(inode)->i_data_sem) if not allocating file system block
- * (ie, create is zero). Otherwise down_write(&EXT4_I(inode)->i_data_sem)
+ * (ie, flags is zero). Otherwise down_write(&EXT4_I(inode)->i_data_sem)
  *
  * return > 0, number of blocks already mapped/allocated
- *          if create == 0 and these are pre-allocated blocks
+ *          if flags doesn't contain EXT4_GET_BLOCKS_CREATE and these are pre-allocated blocks
  *          	buffer head is unmapped
  *          otherwise blocks are mapped
  *
@@ -4218,7 +4219,7 @@ int ext4_ext_map_blocks(handle_t *handle, struct inode *inode,
 
 	/*
 	 * requested block isn't allocated yet;
-	 * we couldn't try to create block if create flag is zero
+	 * we couldn't try to create block if flags doesn't contain EXT4_GET_BLOCKS_CREATE
 	 */
 	if ((flags & EXT4_GET_BLOCKS_CREATE) == 0) {
 		ext4_lblk_t len;

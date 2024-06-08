@@ -310,7 +310,6 @@ void dc_state_destruct(struct dc_state *state)
 	memset(state->dc_dmub_cmd, 0, sizeof(state->dc_dmub_cmd));
 	state->dmub_cmd_count = 0;
 	memset(&state->perf_params, 0, sizeof(state->perf_params));
-	memset(&state->scratch, 0, sizeof(state->scratch));
 }
 
 void dc_state_retain(struct dc_state *state)
@@ -334,13 +333,14 @@ static void dc_state_free(struct kref *kref)
 
 void dc_state_release(struct dc_state *state)
 {
-	kref_put(&state->refcount, dc_state_free);
+	if (state != NULL)
+		kref_put(&state->refcount, dc_state_free);
 }
 /*
  * dc_state_add_stream() - Add a new dc_stream_state to a dc_state.
  */
 enum dc_status dc_state_add_stream(
-		struct dc *dc,
+		const struct dc *dc,
 		struct dc_state *state,
 		struct dc_stream_state *stream)
 {
@@ -369,7 +369,7 @@ enum dc_status dc_state_add_stream(
  * dc_state_remove_stream() - Remove a stream from a dc_state.
  */
 enum dc_status dc_state_remove_stream(
-		struct dc *dc,
+		const struct dc *dc,
 		struct dc_state *state,
 		struct dc_stream_state *stream)
 {
@@ -585,7 +585,7 @@ bool dc_state_add_all_planes_for_stream(
  */
 struct dc_stream_status *dc_state_get_stream_status(
 		struct dc_state *state,
-		struct dc_stream_state *stream)
+		const struct dc_stream_state *stream)
 {
 	uint8_t i;
 
@@ -679,7 +679,7 @@ void dc_state_release_phantom_stream(const struct dc *dc,
 	dc_stream_release(phantom_stream);
 }
 
-struct dc_plane_state *dc_state_create_phantom_plane(struct dc *dc,
+struct dc_plane_state *dc_state_create_phantom_plane(const struct dc *dc,
 		struct dc_state *state,
 		struct dc_plane_state *main_plane)
 {
@@ -715,7 +715,7 @@ void dc_state_release_phantom_plane(const struct dc *dc,
 }
 
 /* add phantom streams to context and generate correct meta inside dc_state */
-enum dc_status dc_state_add_phantom_stream(struct dc *dc,
+enum dc_status dc_state_add_phantom_stream(const struct dc *dc,
 		struct dc_state *state,
 		struct dc_stream_state *phantom_stream,
 		struct dc_stream_state *main_stream)
@@ -741,7 +741,7 @@ enum dc_status dc_state_add_phantom_stream(struct dc *dc,
 	return res;
 }
 
-enum dc_status dc_state_remove_phantom_stream(struct dc *dc,
+enum dc_status dc_state_remove_phantom_stream(const struct dc *dc,
 		struct dc_state *state,
 		struct dc_stream_state *phantom_stream)
 {
@@ -835,7 +835,7 @@ bool dc_state_add_all_phantom_planes_for_stream(
 }
 
 bool dc_state_remove_phantom_streams_and_planes(
-	struct dc *dc,
+	const struct dc *dc,
 	struct dc_state *state)
 {
 	int i;
@@ -857,7 +857,7 @@ bool dc_state_remove_phantom_streams_and_planes(
 }
 
 void dc_state_release_phantom_streams_and_planes(
-		struct dc *dc,
+		const struct dc *dc,
 		struct dc_state *state)
 {
 	int i;
@@ -867,4 +867,19 @@ void dc_state_release_phantom_streams_and_planes(
 
 	for (i = 0; i < state->phantom_plane_count; i++)
 		dc_state_release_phantom_plane(dc, state, state->phantom_planes[i]);
+}
+
+struct dc_stream_state *dc_state_get_stream_from_id(const struct dc_state *state, unsigned int id)
+{
+	struct dc_stream_state *stream = NULL;
+	int i;
+
+	for (i = 0; i < state->stream_count; i++) {
+		if (state->streams[i] && state->streams[i]->stream_id == id) {
+			stream = state->streams[i];
+			break;
+		}
+	}
+
+	return stream;
 }

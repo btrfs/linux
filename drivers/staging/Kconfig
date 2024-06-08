@@ -24,8 +24,6 @@ menuconfig STAGING
 
 if STAGING
 
-source "drivers/staging/wlan-ng/Kconfig"
-
 source "drivers/staging/olpc_dcon/Kconfig"
 
 source "drivers/staging/rtl8192e/Kconfig"
@@ -46,13 +44,9 @@ source "drivers/staging/iio/Kconfig"
 
 source "drivers/staging/sm750fb/Kconfig"
 
-source "drivers/staging/emxx_udc/Kconfig"
-
 source "drivers/staging/nvec/Kconfig"
 
 source "drivers/staging/media/Kconfig"
-
-source "drivers/staging/board/Kconfig"
 
 source "drivers/staging/gdm724x/Kconfig"
 

@@ -141,14 +141,33 @@ static unsigned int find_pipes_assigned_to_plane(struct dml2_context *ctx,
 {
 	int i;
 	unsigned int num_found = 0;
-	unsigned int plane_id_assigned_to_pipe;
+	unsigned int plane_id_assigned_to_pipe = -1;
 
 	for (i = 0; i < ctx->config.dcn_pipe_count; i++) {
-		if (state->res_ctx.pipe_ctx[i].plane_state && get_plane_id(ctx, state, state->res_ctx.pipe_ctx[i].plane_state,
-			state->res_ctx.pipe_ctx[i].stream->stream_id,
-			ctx->v20.scratch.dml_to_dc_pipe_mapping.dml_pipe_idx_to_plane_index[state->res_ctx.pipe_ctx[i].pipe_idx], &plane_id_assigned_to_pipe)) {
-			if (plane_id_assigned_to_pipe == plane_id)
-				pipes[num_found++] = i;
+		struct pipe_ctx *pipe = &state->res_ctx.pipe_ctx[i];
+
+		if (!pipe->plane_state || !pipe->stream)
+			continue;
+
+		get_plane_id(ctx, state, pipe->plane_state, pipe->stream->stream_id,
+					ctx->v20.scratch.dml_to_dc_pipe_mapping.dml_pipe_idx_to_plane_index[pipe->pipe_idx],
+					&plane_id_assigned_to_pipe);
+		if (plane_id_assigned_to_pipe == plane_id && !pipe->prev_odm_pipe
+				&& (!pipe->top_pipe || pipe->top_pipe->plane_state != pipe->plane_state)) {
+			while (pipe) {
+				struct pipe_ctx *mpc_pipe = pipe;
+
+				while (mpc_pipe) {
+					pipes[num_found++] = mpc_pipe->pipe_idx;
+					mpc_pipe = mpc_pipe->bottom_pipe;
+					if (!mpc_pipe)
+						break;
+					if (mpc_pipe->plane_state != pipe->plane_state)
+						mpc_pipe = NULL;
+				}
+				pipe = pipe->next_odm_pipe;
+			}
+			break;
 		}
 	}
 
@@ -566,8 +585,14 @@ static unsigned int find_pipes_assigned_to_stream(struct dml2_context *ctx, stru
 	unsigned int num_found = 0;
 
 	for (i = 0; i < ctx->config.dcn_pipe_count; i++) {
-		if (state->res_ctx.pipe_ctx[i].stream && state->res_ctx.pipe_ctx[i].stream->stream_id == stream_id) {
-			pipes[num_found++] = i;
+		struct pipe_ctx *pipe = &state->res_ctx.pipe_ctx[i];
+
+		if (pipe->stream && pipe->stream->stream_id == stream_id && !pipe->top_pipe && !pipe->prev_odm_pipe) {
+			while (pipe) {
+				pipes[num_found++] = pipe->pipe_idx;
+				pipe = pipe->next_odm_pipe;
+			}
+			break;
 		}
 	}
 
@@ -769,7 +794,7 @@ static void map_pipes_for_plane(struct dml2_context *ctx, struct dc_state *state
 }
 
 static unsigned int get_mpc_factor(struct dml2_context *ctx,
-		const struct dc_state *state,
+		struct dc_state *state,
 		const struct dml_display_cfg_st *disp_cfg,
 		struct dml2_dml_to_dc_pipe_mapping *mapping,
 		const struct dc_stream_status *status,
@@ -780,10 +805,10 @@ static unsigned int get_mpc_factor(struct dml2_context *ctx,
 	unsigned int cfg_idx;
 	unsigned int mpc_factor;
 
-	get_plane_id(ctx, state, status->plane_states[plane_idx],
-			stream->stream_id, plane_idx, &plane_id);
-	cfg_idx = find_disp_cfg_idx_by_plane_id(mapping, plane_id);
 	if (ctx->architecture == dml2_architecture_20) {
+		get_plane_id(ctx, state, status->plane_states[plane_idx],
+				stream->stream_id, plane_idx, &plane_id);
+		cfg_idx = find_disp_cfg_idx_by_plane_id(mapping, plane_id);
 		mpc_factor = (unsigned int)disp_cfg->hw.DPPPerSurface[cfg_idx];
 	} else {
 		mpc_factor = 1;
@@ -799,14 +824,16 @@ static unsigned int get_mpc_factor(struct dml2_context *ctx,
 
 static unsigned int get_odm_factor(
 		const struct dml2_context *ctx,
+		struct dc_state *state,
 		const struct dml_display_cfg_st *disp_cfg,
 		struct dml2_dml_to_dc_pipe_mapping *mapping,
 		const struct dc_stream_state *stream)
 {
-	unsigned int cfg_idx = find_disp_cfg_idx_by_stream_id(
-			mapping, stream->stream_id);
+	unsigned int cfg_idx;
 
-	if (ctx->architecture == dml2_architecture_20)
+	if (ctx->architecture == dml2_architecture_20) {
+		cfg_idx = find_disp_cfg_idx_by_stream_id(
+				mapping, stream->stream_id);
 		switch (disp_cfg->hw.ODMMode[cfg_idx]) {
 		case dml_odm_mode_bypass:
 			return 1;
@@ -817,6 +844,7 @@ static unsigned int get_odm_factor(
 		default:
 			break;
 		}
+	}
 	ASSERT(false);
 	return 1;
 }
@@ -825,7 +853,7 @@ static void populate_mpc_factors_for_stream(
 		struct dml2_context *ctx,
 		const struct dml_display_cfg_st *disp_cfg,
 		struct dml2_dml_to_dc_pipe_mapping *mapping,
-		const struct dc_state *state,
+		struct dc_state *state,
 		unsigned int stream_idx,
 		unsigned int odm_factor,
 		unsigned int mpc_factors[MAX_PIPES])
@@ -845,14 +873,14 @@ static void populate_mpc_factors_for_stream(
 static void populate_odm_factors(const struct dml2_context *ctx,
 		const struct dml_display_cfg_st *disp_cfg,
 		struct dml2_dml_to_dc_pipe_mapping *mapping,
-		const struct dc_state *state,
+		struct dc_state *state,
 		unsigned int odm_factors[MAX_PIPES])
 {
 	int i;
 
 	for (i = 0; i < state->stream_count; i++)
 		odm_factors[i] = get_odm_factor(
-				ctx, disp_cfg, mapping, state->streams[i]);
+				ctx, state, disp_cfg, mapping, state->streams[i]);
 }
 
 static bool map_dc_pipes_for_stream(struct dml2_context *ctx,

@@ -66,9 +66,13 @@ obj-$(CONFIG_SENSORS_HDAPS)	+= hdaps.o
 obj-$(CONFIG_THINKPAD_ACPI)	+= thinkpad_acpi.o
 obj-$(CONFIG_THINKPAD_LMI)	+= think-lmi.o
 obj-$(CONFIG_YOGABOOK)		+= lenovo-yogabook.o
+obj-$(CONFIG_LENOVO_WMI_CAMERA)	+= lenovo-wmi-camera.o
 
 # Intel
 obj-y				+= intel/
+
+# Microsoft
+obj-$(CONFIG_ACPI_QUICKSTART)  += quickstart.o
 
 # MSI
 obj-$(CONFIG_MSI_EC)		+= msi-ec.o

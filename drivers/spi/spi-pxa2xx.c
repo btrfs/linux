@@ -19,7 +19,6 @@
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/mod_devicetable.h>
-#include <linux/of.h>
 #include <linux/platform_device.h>
 #include <linux/pm_runtime.h>
 #include <linux/property.h>
@@ -944,7 +943,6 @@ static int pxa2xx_spi_transfer_one(struct spi_controller *controller,
 				   struct spi_transfer *transfer)
 {
 	struct driver_data *drv_data = spi_controller_get_devdata(controller);
-	struct spi_message *message = controller->cur_msg;
 	struct chip_data *chip = spi_get_ctldata(spi);
 	u32 dma_thresh = chip->dma_threshold;
 	u32 dma_burst = chip->dma_burst_size;
@@ -959,16 +957,6 @@ static int pxa2xx_spi_transfer_one(struct spi_controller *controller,
 
 	/* Check if we can DMA this transfer */
 	if (transfer->len > MAX_DMA_LEN && chip->enable_dma) {
-
-		/* Reject already-mapped transfers; PIO won't always work */
-		if (message->is_dma_mapped
-				|| transfer->rx_dma || transfer->tx_dma) {
-			dev_err(&spi->dev,
-				"Mapped transfer length of %u is greater than %d\n",
-				transfer->len, MAX_DMA_LEN);
-			return -EINVAL;
-		}
-
 		/* Warn ... we force this to PIO mode */
 		dev_warn_ratelimited(&spi->dev,
 				     "DMA disabled for transfer length %u greater than %d\n",
@@ -1326,19 +1314,51 @@ static bool pxa2xx_spi_idma_filter(struct dma_chan *chan, void *param)
 	return param == chan->device->dev;
 }
 
+static int
+pxa2xx_spi_init_ssp(struct platform_device *pdev, struct ssp_device *ssp, enum pxa_ssp_type type)
+{
+	struct device *dev = &pdev->dev;
+	struct resource *res;
+	int status;
+	u64 uid;
+
+	ssp->mmio_base = devm_platform_get_and_ioremap_resource(pdev, 0, &res);
+	if (IS_ERR(ssp->mmio_base))
+		return PTR_ERR(ssp->mmio_base);
+
+	ssp->phys_base = res->start;
+
+	ssp->clk = devm_clk_get(dev, NULL);
+	if (IS_ERR(ssp->clk))
+		return PTR_ERR(ssp->clk);
+
+	ssp->irq = platform_get_irq(pdev, 0);
+	if (ssp->irq < 0)
+		return ssp->irq;
+
+	ssp->type = type;
+	ssp->dev = dev;
+
+	status = acpi_dev_uid_to_integer(ACPI_COMPANION(dev), &uid);
+	if (status)
+		ssp->port_id = -1;
+	else
+		ssp->port_id = uid;
+
+	return 0;
+}
+
 static struct pxa2xx_spi_controller *
 pxa2xx_spi_init_pdata(struct platform_device *pdev)
 {
 	struct pxa2xx_spi_controller *pdata;
 	struct device *dev = &pdev->dev;
 	struct device *parent = dev->parent;
-	struct ssp_device *ssp;
-	struct resource *res;
 	enum pxa_ssp_type type = SSP_UNDEFINED;
+	struct ssp_device *ssp = NULL;
 	const void *match;
 	bool is_lpss_priv;
 	int status;
-	u64 uid;
 
 	is_lpss_priv = platform_get_resource_byname(pdev, IORESOURCE_MEM, "lpss_priv");
 
@@ -1353,6 +1373,12 @@ pxa2xx_spi_init_pdata(struct platform_device *pdev)
 			return ERR_PTR(status);
 
 		type = (enum pxa_ssp_type)value;
+	} else {
+		ssp = pxa_ssp_request(pdev->id, pdev->name);
+		if (ssp) {
+			type = ssp->type;
+			pxa_ssp_free(ssp);
+		}
 	}
 
 	/* Validate the SSP type correctness */
@@ -1363,14 +1389,6 @@ pxa2xx_spi_init_pdata(struct platform_device *pdev)
 	if (!pdata)
 		return ERR_PTR(-ENOMEM);
 
-	ssp = &pdata->ssp;
-
-	ssp->mmio_base = devm_platform_get_and_ioremap_resource(pdev, 0, &res);
-	if (IS_ERR(ssp->mmio_base))
-		return ERR_CAST(ssp->mmio_base);
-
-	ssp->phys_base = res->start;
-
 	/* Platforms with iDMA 64-bit */
 	if (is_lpss_priv) {
 		pdata->tx_param = parent;
@@ -1378,27 +1396,18 @@ pxa2xx_spi_init_pdata(struct platform_device *pdev)
 		pdata->dma_filter = pxa2xx_spi_idma_filter;
 	}
 
-	ssp->clk = devm_clk_get(dev, NULL);
-	if (IS_ERR(ssp->clk))
-		return ERR_CAST(ssp->clk);
-
-	ssp->irq = platform_get_irq(pdev, 0);
-	if (ssp->irq < 0)
-		return ERR_PTR(ssp->irq);
-
-	ssp->type = type;
-	ssp->dev = dev;
-
-	status = acpi_dev_uid_to_integer(ACPI_COMPANION(dev), &uid);
-	if (status)
-		ssp->port_id = -1;
-	else
-		ssp->port_id = uid;
-
 	pdata->is_target = device_property_read_bool(dev, "spi-slave");
 	pdata->num_chipselect = 1;
 	pdata->enable_dma = true;
 	pdata->dma_burst_size = 1;
+
+	/* If SSP has been already enumerated, use it */
+	if (ssp)
+		return pdata;
+
+	status = pxa2xx_spi_init_ssp(pdev, &pdata->ssp, type);
+	if (status)
+		return ERR_PTR(status);
 
 	return pdata;
 }
@@ -1446,20 +1455,16 @@ static int pxa2xx_spi_probe(struct platform_device *pdev)
 	platform_info = dev_get_platdata(dev);
 	if (!platform_info) {
 		platform_info = pxa2xx_spi_init_pdata(pdev);
-		if (IS_ERR(platform_info)) {
-			dev_err(&pdev->dev, "missing platform data\n");
-			return PTR_ERR(platform_info);
-		}
+		if (IS_ERR(platform_info))
+			return dev_err_probe(dev, PTR_ERR(platform_info), "missing platform data\n");
 	}
 
 	ssp = pxa_ssp_request(pdev->id, pdev->name);
 	if (!ssp)
 		ssp = &platform_info->ssp;
 
-	if (!ssp->mmio_base) {
-		dev_err(&pdev->dev, "failed to get SSP\n");
-		return -ENODEV;
-	}
+	if (!ssp->mmio_base)
+		return dev_err_probe(dev, -ENODEV, "failed to get SSP\n");
 
 	if (platform_info->is_target)
 		controller = devm_spi_alloc_target(dev, sizeof(*drv_data));
@@ -1467,8 +1472,7 @@ static int pxa2xx_spi_probe(struct platform_device *pdev)
 		controller = devm_spi_alloc_host(dev, sizeof(*drv_data));
 
 	if (!controller) {
-		dev_err(&pdev->dev, "cannot alloc spi_controller\n");
-		status = -ENOMEM;
+		status = dev_err_probe(dev, -ENOMEM, "cannot alloc spi_controller\n");
 		goto out_error_controller_alloc;
 	}
 	drv_data = spi_controller_get_devdata(controller);
@@ -1522,7 +1526,7 @@ static int pxa2xx_spi_probe(struct platform_device *pdev)
 	status = request_irq(ssp->irq, ssp_int, IRQF_SHARED, dev_name(dev),
 			drv_data);
 	if (status < 0) {
-		dev_err(&pdev->dev, "cannot get IRQ %d\n", ssp->irq);
+		dev_err_probe(dev, status, "cannot get IRQ %d\n", ssp->irq);
 		goto out_error_controller_alloc;
 	}
 
@@ -1638,7 +1642,7 @@ static int pxa2xx_spi_probe(struct platform_device *pdev)
 	platform_set_drvdata(pdev, drv_data);
 	status = spi_register_controller(controller);
 	if (status) {
-		dev_err(&pdev->dev, "problem registering SPI controller\n");
+		dev_err_probe(dev, status, "problem registering SPI controller\n");
 		goto out_error_pm_runtime_enabled;
 	}
 
@@ -1741,7 +1745,6 @@ static const struct dev_pm_ops pxa2xx_spi_pm_ops = {
 	RUNTIME_PM_OPS(pxa2xx_spi_runtime_suspend, pxa2xx_spi_runtime_resume, NULL)
 };
 
-#ifdef CONFIG_ACPI
 static const struct acpi_device_id pxa2xx_spi_acpi_match[] = {
 	{ "80860F0E", LPSS_BYT_SSP },
 	{ "8086228E", LPSS_BSW_SSP },
@@ -1752,9 +1755,8 @@ static const struct acpi_device_id pxa2xx_spi_acpi_match[] = {
 	{}
 };
 MODULE_DEVICE_TABLE(acpi, pxa2xx_spi_acpi_match);
-#endif
 
-static const struct of_device_id pxa2xx_spi_of_match[] __maybe_unused = {
+static const struct of_device_id pxa2xx_spi_of_match[] = {
 	{ .compatible = "marvell,mmp2-ssp", .data = (void *)MMP2_SSP },
 	{}
 };
@@ -1764,8 +1766,8 @@ static struct platform_driver driver = {
 	.driver = {
 		.name	= "pxa2xx-spi",
 		.pm	= pm_ptr(&pxa2xx_spi_pm_ops),
-		.acpi_match_table = ACPI_PTR(pxa2xx_spi_acpi_match),
-		.of_match_table = of_match_ptr(pxa2xx_spi_of_match),
+		.acpi_match_table = pxa2xx_spi_acpi_match,
+		.of_match_table = pxa2xx_spi_of_match,
 	},
 	.probe = pxa2xx_spi_probe,
 	.remove_new = pxa2xx_spi_remove,

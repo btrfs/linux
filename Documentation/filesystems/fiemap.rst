@@ -80,14 +80,24 @@ Each extent is described by a single fiemap_extent structure as
 returned in fm_extents::
 
     struct fiemap_extent {
-	    __u64	fe_logical;  /* logical offset in bytes for the start of
-				* the extent */
-	    __u64	fe_physical; /* physical offset in bytes for the start
-				* of the extent */
-	    __u64	fe_length;   /* length in bytes for the extent */
-	    __u64	fe_reserved64[2];
-	    __u32	fe_flags;    /* FIEMAP_EXTENT_* flags for this extent */
-	    __u32	fe_reserved[3];
+            /*
+             * logical offset in bytes for the start of
+             * the extent from the beginning of the file
+             */
+            __u64 fe_logical;
+            /*
+             * physical offset in bytes for the start
+             * of the extent from the beginning of the disk
+             */
+            __u64 fe_physical;
+            /* logical length in bytes for this extent */
+            __u64 fe_logical_length;
+            /* physical length in bytes for this extent */
+            __u64 fe_physical_length;
+            __u64 fe_reserved64[1];
+            /* FIEMAP_EXTENT_* flags for this extent */
+            __u32 fe_flags;
+            __u32 fe_reserved[3];
     };
 
 All offsets and lengths are in bytes and mirror those on disk.  It is valid
@@ -152,6 +162,10 @@ FIEMAP_EXTENT_DATA_ENCRYPTED
   This will also set FIEMAP_EXTENT_ENCODED
   The data in this extent has been encrypted by the file system.
 
+FIEMAP_EXTENT_DATA_COMPRESSED
+  This will also set FIEMAP_EXTENT_ENCODED
+  The data in this extent is compressed by the file system.
+
 FIEMAP_EXTENT_NOT_ALIGNED
   Extent offsets and length are not guaranteed to be block aligned.
 
@@ -175,6 +189,8 @@ FIEMAP_EXTENT_MERGED
   userspace would be highly inefficient, the kernel will try to merge most
   adjacent blocks into 'extents'.
 
+FIEMAP_EXTENT_HAS_PHYS_LEN
+  This will be set if the file system populated the physical length field.
 
 VFS -> File System Implementation
 ---------------------------------
@@ -224,7 +240,8 @@ For each extent in the request range, the file system should call
 the helper function, fiemap_fill_next_extent()::
 
   int fiemap_fill_next_extent(struct fiemap_extent_info *info, u64 logical,
-			      u64 phys, u64 len, u32 flags, u32 dev);
+			      u64 phys, u64 log_len, u64 phys_len, u32 flags,
+                              u32 dev);
 
 fiemap_fill_next_extent() will use the passed values to populate the
 next free extent in the fm_extents array. 'General' extent flags will

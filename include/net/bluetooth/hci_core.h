@@ -1,7 +1,7 @@
 /*
    BlueZ - Bluetooth protocol stack for Linux
    Copyright (c) 2000-2001, 2010, Code Aurora Forum. All rights reserved.
-   Copyright 2023 NXP
+   Copyright 2023-2024 NXP
 
    Written 2000,2001 by Maxim Krasnyansky <maxk@qualcomm.com>
 
@@ -265,6 +265,12 @@ struct adv_info {
 	bdaddr_t	random_addr;
 	bool 		rpa_expired;
 	struct delayed_work	rpa_expired_cb;
+};
+
+struct tx_queue {
+	struct sk_buff_head queue;
+	unsigned int extra;
+	unsigned int tracked;
 };
 
 #define HCI_MAX_ADV_INSTANCES		5
@@ -552,6 +558,7 @@ struct hci_dev {
 	__u32			req_status;
 	__u32			req_result;
 	struct sk_buff		*req_skb;
+	struct sk_buff		*req_rsp;
 
 	void			*smp_data;
 	void			*smp_bredr_data;
@@ -734,8 +741,9 @@ struct hci_conn {
 	__u16		le_supv_timeout;
 	__u8		le_adv_data[HCI_MAX_EXT_AD_LENGTH];
 	__u8		le_adv_data_len;
-	__u8		le_per_adv_data[HCI_MAX_PER_AD_LENGTH];
-	__u8		le_per_adv_data_len;
+	__u8		le_per_adv_data[HCI_MAX_PER_AD_TOT_LEN];
+	__u16		le_per_adv_data_len;
+	__u16		le_per_adv_data_offset;
 	__u8		le_tx_phy;
 	__u8		le_rx_phy;
 	__s8		rssi;
@@ -760,6 +768,8 @@ struct hci_conn {
 
 	struct sk_buff_head data_q;
 	struct list_head chan_list;
+
+	struct tx_queue tx_q;
 
 	struct delayed_work disc_work;
 	struct delayed_work auto_accept_work;
@@ -1083,6 +1093,24 @@ static inline unsigned int hci_conn_count(struct hci_dev *hdev)
 	return c->acl_num + c->amp_num + c->sco_num + c->le_num + c->iso_num;
 }
 
+static inline bool hci_conn_valid(struct hci_dev *hdev, struct hci_conn *conn)
+{
+	struct hci_conn_hash *h = &hdev->conn_hash;
+	struct hci_conn  *c;
+
+	rcu_read_lock();
+
+	list_for_each_entry_rcu(c, &h->list, list) {
+		if (c == conn) {
+			rcu_read_unlock();
+			return true;
+		}
+	}
+	rcu_read_unlock();
+
+	return false;
+}
+
 static inline __u8 hci_conn_lookup_type(struct hci_dev *hdev, __u16 handle)
 {
 	struct hci_conn_hash *h = &hdev->conn_hash;
@@ -1351,8 +1379,7 @@ hci_conn_hash_lookup_pa_sync_handle(struct hci_dev *hdev, __u16 sync_handle)
 	rcu_read_lock();
 
 	list_for_each_entry_rcu(c, &h->list, list) {
-		if (c->type != ISO_LINK ||
-			!test_bit(HCI_CONN_PA_SYNC, &c->flags))
+		if (c->type != ISO_LINK)
 			continue;
 
 		if (c->sync_handle == sync_handle) {
@@ -1480,7 +1507,6 @@ struct hci_conn *hci_conn_add_unset(struct hci_dev *hdev, int type,
 				    bdaddr_t *dst, u8 role);
 void hci_conn_del(struct hci_conn *conn);
 void hci_conn_hash_flush(struct hci_dev *hdev);
-void hci_conn_check_pending(struct hci_dev *hdev);
 
 struct hci_chan *hci_chan_create(struct hci_conn *conn);
 void hci_chan_del(struct hci_chan *chan);
@@ -1494,11 +1520,13 @@ struct hci_conn *hci_connect_le_scan(struct hci_dev *hdev, bdaddr_t *dst,
 struct hci_conn *hci_connect_le(struct hci_dev *hdev, bdaddr_t *dst,
 				u8 dst_type, bool dst_resolved, u8 sec_level,
 				u16 conn_timeout, u8 role);
+void hci_connect_le_scan_cleanup(struct hci_conn *conn, u8 status);
 struct hci_conn *hci_connect_acl(struct hci_dev *hdev, bdaddr_t *dst,
 				 u8 sec_level, u8 auth_type,
-				 enum conn_reasons conn_reason);
+				 enum conn_reasons conn_reason, u16 timeout);
 struct hci_conn *hci_connect_sco(struct hci_dev *hdev, int type, bdaddr_t *dst,
-				 __u16 setting, struct bt_codec *codec);
+				 __u16 setting, struct bt_codec *codec,
+				 u16 timeout);
 struct hci_conn *hci_bind_cis(struct hci_dev *hdev, bdaddr_t *dst,
 			      __u8 dst_type, struct bt_iso_qos *qos);
 struct hci_conn *hci_bind_bis(struct hci_dev *hdev, bdaddr_t *dst,
@@ -1509,8 +1537,8 @@ struct hci_conn *hci_connect_cis(struct hci_dev *hdev, bdaddr_t *dst,
 struct hci_conn *hci_connect_bis(struct hci_dev *hdev, bdaddr_t *dst,
 				 __u8 dst_type, struct bt_iso_qos *qos,
 				 __u8 data_len, __u8 *data);
-int hci_pa_create_sync(struct hci_dev *hdev, bdaddr_t *dst, __u8 dst_type,
-		       __u8 sid, struct bt_iso_qos *qos);
+struct hci_conn *hci_pa_create_sync(struct hci_dev *hdev, bdaddr_t *dst,
+		       __u8 dst_type, __u8 sid, struct bt_iso_qos *qos);
 int hci_le_big_create_sync(struct hci_dev *hdev, struct hci_conn *hcon,
 			   struct bt_iso_qos *qos,
 			   __u16 sync_handle, __u8 num_bis, __u8 bis[]);
@@ -1524,6 +1552,10 @@ void hci_conn_enter_active_mode(struct hci_conn *conn, __u8 force_active);
 
 void hci_conn_failed(struct hci_conn *conn, u8 status);
 u8 hci_conn_set_handle(struct hci_conn *conn, u16 handle);
+
+void hci_conn_tx_queue(struct hci_conn *conn, struct sk_buff *skb);
+void hci_conn_tx_dequeue(struct hci_conn *conn);
+void hci_tx_timestamp(struct sk_buff *skb, const struct sockcm_cookie *sockc);
 
 /*
  * hci_conn_get() and hci_conn_put() are used to control the life-time of an
@@ -2208,8 +2240,22 @@ void hci_mgmt_chan_unregister(struct hci_mgmt_chan *c);
 /* These LE scan and inquiry parameters were chosen according to LE General
  * Discovery Procedure specification.
  */
-#define DISCOV_LE_SCAN_WIN		0x12
-#define DISCOV_LE_SCAN_INT		0x12
+#define DISCOV_LE_SCAN_WIN		0x0012 /* 11.25 msec */
+#define DISCOV_LE_SCAN_INT		0x0012 /* 11.25 msec */
+#define DISCOV_LE_SCAN_INT_FAST		0x0060 /* 60 msec */
+#define DISCOV_LE_SCAN_WIN_FAST		0x0030 /* 30 msec */
+#define DISCOV_LE_SCAN_INT_CONN		0x0060 /* 60 msec */
+#define DISCOV_LE_SCAN_WIN_CONN		0x0060 /* 60 msec */
+#define DISCOV_LE_SCAN_INT_SLOW1	0x0800 /* 1.28 sec */
+#define DISCOV_LE_SCAN_WIN_SLOW1	0x0012 /* 11.25 msec */
+#define DISCOV_LE_SCAN_INT_SLOW2	0x1000 /* 2.56 sec */
+#define DISCOV_LE_SCAN_WIN_SLOW2	0x0024 /* 22.5 msec */
+#define DISCOV_CODED_SCAN_INT_FAST	0x0120 /* 180 msec */
+#define DISCOV_CODED_SCAN_WIN_FAST	0x0090 /* 90 msec */
+#define DISCOV_CODED_SCAN_INT_SLOW1	0x1800 /* 3.84 sec */
+#define DISCOV_CODED_SCAN_WIN_SLOW1	0x0036 /* 33.75 msec */
+#define DISCOV_CODED_SCAN_INT_SLOW2	0x3000 /* 7.68 sec */
+#define DISCOV_CODED_SCAN_WIN_SLOW2	0x006c /* 67.5 msec */
 #define DISCOV_LE_TIMEOUT		10240	/* msec */
 #define DISCOV_INTERLEAVED_TIMEOUT	5120	/* msec */
 #define DISCOV_INTERLEAVED_INQUIRY_LEN	0x04

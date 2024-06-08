@@ -37,6 +37,8 @@
 #include "util/sharded_mutex.h"
 #include "arch/common.h"
 #include "namespaces.h"
+#include "thread.h"
+#include "hashmap.h"
 #include <regex.h>
 #include <linux/bitops.h>
 #include <linux/kernel.h>
@@ -92,6 +94,7 @@ struct arch {
 		char skip_functions_char;
 		char register_char;
 		char memory_ref_char;
+		char imm_char;
 	} objdump;
 };
 
@@ -106,6 +109,21 @@ static struct ins_ops ret_ops;
 /* Data type collection debug statistics */
 struct annotated_data_stat ann_data_stat;
 LIST_HEAD(ann_insn_stat);
+
+/* Pseudo data types */
+struct annotated_data_type stackop_type = {
+	.self = {
+		.type_name = (char *)"(stack operation)",
+		.children = LIST_HEAD_INIT(stackop_type.self.children),
+	},
+};
+
+struct annotated_data_type canary_type = {
+	.self = {
+		.type_name = (char *)"(stack canary)",
+		.children = LIST_HEAD_INIT(canary_type.self.children),
+	},
+};
 
 static int arch__grow_instructions(struct arch *arch)
 {
@@ -201,6 +219,7 @@ static struct arch architectures[] = {
 			.comment_char = '#',
 			.register_char = '%',
 			.memory_ref_char = '(',
+			.imm_char = '$',
 		},
 	},
 	{
@@ -854,6 +873,17 @@ bool arch__is(struct arch *arch, const char *name)
 	return !strcmp(arch->name, name);
 }
 
+/* symbol histogram: key = offset << 16 | evsel->core.idx */
+static size_t sym_hist_hash(long key, void *ctx __maybe_unused)
+{
+	return (key >> 16) + (key & 0xffff);
+}
+
+static bool sym_hist_equal(long key1, long key2, void *ctx __maybe_unused)
+{
+	return key1 == key2;
+}
+
 static struct annotated_source *annotated_source__new(void)
 {
 	struct annotated_source *src = zalloc(sizeof(*src));
@@ -868,38 +898,25 @@ static __maybe_unused void annotated_source__delete(struct annotated_source *src
 {
 	if (src == NULL)
 		return;
+
+	hashmap__free(src->samples);
 	zfree(&src->histograms);
 	free(src);
 }
 
 static int annotated_source__alloc_histograms(struct annotated_source *src,
-					      size_t size, int nr_hists)
+					      int nr_hists)
 {
-	size_t sizeof_sym_hist;
-
-	/*
-	 * Add buffer of one element for zero length symbol.
-	 * When sample is taken from first instruction of
-	 * zero length symbol, perf still resolves it and
-	 * shows symbol name in perf report and allows to
-	 * annotate it.
-	 */
-	if (size == 0)
-		size = 1;
-
-	/* Check for overflow when calculating sizeof_sym_hist */
-	if (size > (SIZE_MAX - sizeof(struct sym_hist)) / sizeof(struct sym_hist_entry))
-		return -1;
-
-	sizeof_sym_hist = (sizeof(struct sym_hist) + size * sizeof(struct sym_hist_entry));
-
-	/* Check for overflow in zalloc argument */
-	if (sizeof_sym_hist > SIZE_MAX / nr_hists)
-		return -1;
-
-	src->sizeof_sym_hist = sizeof_sym_hist;
 	src->nr_histograms   = nr_hists;
-	src->histograms	     = calloc(nr_hists, sizeof_sym_hist) ;
+	src->histograms	     = calloc(nr_hists, sizeof(*src->histograms));
+
+	if (src->histograms == NULL)
+		return -1;
+
+	src->samples = hashmap__new(sym_hist_hash, sym_hist_equal, NULL);
+	if (src->samples == NULL)
+		zfree(&src->histograms);
+
 	return src->histograms ? 0 : -1;
 }
 
@@ -910,7 +927,8 @@ void symbol__annotate_zero_histograms(struct symbol *sym)
 	annotation__lock(notes);
 	if (notes->src != NULL) {
 		memset(notes->src->histograms, 0,
-		       notes->src->nr_histograms * notes->src->sizeof_sym_hist);
+		       notes->src->nr_histograms * sizeof(*notes->src->histograms));
+		hashmap__clear(notes->src->samples);
 	}
 	if (notes->branch && notes->branch->cycles_hist) {
 		memset(notes->branch->cycles_hist, 0,
@@ -974,8 +992,10 @@ static int __symbol__inc_addr_samples(struct map_symbol *ms,
 				      struct perf_sample *sample)
 {
 	struct symbol *sym = ms->sym;
-	unsigned offset;
+	long hash_key;
+	u64 offset;
 	struct sym_hist *h;
+	struct sym_hist_entry *entry;
 
 	pr_debug3("%s: addr=%#" PRIx64 "\n", __func__, map__unmap_ip(ms->map, addr));
 
@@ -993,15 +1013,26 @@ static int __symbol__inc_addr_samples(struct map_symbol *ms,
 			 __func__, __LINE__, sym->name, sym->start, addr, sym->end, sym->type == STT_FUNC);
 		return -ENOMEM;
 	}
+
+	hash_key = offset << 16 | evidx;
+	if (!hashmap__find(src->samples, hash_key, &entry)) {
+		entry = zalloc(sizeof(*entry));
+		if (entry == NULL)
+			return -ENOMEM;
+
+		if (hashmap__add(src->samples, hash_key, entry) < 0)
+			return -ENOMEM;
+	}
+
 	h->nr_samples++;
-	h->addr[offset].nr_samples++;
 	h->period += sample->period;
-	h->addr[offset].period += sample->period;
+	entry->nr_samples++;
+	entry->period += sample->period;
 
 	pr_debug3("%#" PRIx64 " %s: period++ [addr: %#" PRIx64 ", %#" PRIx64
 		  ", evidx=%d] => nr_samples: %" PRIu64 ", period: %" PRIu64 "\n",
 		  sym->start, sym->name, addr, addr - sym->start, evidx,
-		  h->addr[offset].nr_samples, h->addr[offset].period);
+		  entry->nr_samples, entry->period);
 	return 0;
 }
 
@@ -1047,8 +1078,7 @@ struct annotated_source *symbol__hists(struct symbol *sym, int nr_hists)
 
 	if (notes->src->histograms == NULL) {
 alloc_histograms:
-		annotated_source__alloc_histograms(notes->src, symbol__size(sym),
-						   nr_hists);
+		annotated_source__alloc_histograms(notes->src, nr_hists);
 	}
 
 	return notes->src;
@@ -2321,17 +2351,25 @@ out_remove_tmp:
 	return err;
 }
 
-static void calc_percent(struct sym_hist *sym_hist,
-			 struct hists *hists,
+static void calc_percent(struct annotation *notes,
+			 struct evsel *evsel,
 			 struct annotation_data *data,
 			 s64 offset, s64 end)
 {
+	struct hists *hists = evsel__hists(evsel);
+	int evidx = evsel->core.idx;
+	struct sym_hist *sym_hist = annotation__histogram(notes, evidx);
 	unsigned int hits = 0;
 	u64 period = 0;
 
 	while (offset < end) {
-		hits   += sym_hist->addr[offset].nr_samples;
-		period += sym_hist->addr[offset].period;
+		struct sym_hist_entry *entry;
+
+		entry = annotated_source__hist_entry(notes->src, evidx, offset);
+		if (entry) {
+			hits   += entry->nr_samples;
+			period += entry->period;
+		}
 		++offset;
 	}
 
@@ -2368,16 +2406,13 @@ static void annotation__calc_percent(struct annotation *notes,
 		end  = next ? next->offset : len;
 
 		for_each_group_evsel(evsel, leader) {
-			struct hists *hists = evsel__hists(evsel);
 			struct annotation_data *data;
-			struct sym_hist *sym_hist;
 
 			BUG_ON(i >= al->data_nr);
 
-			sym_hist = annotation__histogram(notes, evsel->core.idx);
 			data = &al->data[i++];
 
-			calc_percent(sym_hist, hists, data, al->offset, end);
+			calc_percent(notes, evsel, data, al->offset, end);
 		}
 	}
 }
@@ -2572,14 +2607,19 @@ static void print_summary(struct rb_root *root, const char *filename)
 
 static void symbol__annotate_hits(struct symbol *sym, struct evsel *evsel)
 {
+	int evidx = evsel->core.idx;
 	struct annotation *notes = symbol__annotation(sym);
-	struct sym_hist *h = annotation__histogram(notes, evsel->core.idx);
+	struct sym_hist *h = annotation__histogram(notes, evidx);
 	u64 len = symbol__size(sym), offset;
 
-	for (offset = 0; offset < len; ++offset)
-		if (h->addr[offset].nr_samples != 0)
+	for (offset = 0; offset < len; ++offset) {
+		struct sym_hist_entry *entry;
+
+		entry = annotated_source__hist_entry(notes->src, evidx, offset);
+		if (entry && entry->nr_samples != 0)
 			printf("%*" PRIx64 ": %" PRIu64 "\n", BITS_PER_LONG / 2,
-			       sym->start + offset, h->addr[offset].nr_samples);
+			       sym->start + offset, entry->nr_samples);
+	}
 	printf("%*s: %" PRIu64 "\n", BITS_PER_LONG / 2, "h->nr_samples", h->nr_samples);
 }
 
@@ -2797,7 +2837,7 @@ void symbol__annotate_zero_histogram(struct symbol *sym, int evidx)
 	struct annotation *notes = symbol__annotation(sym);
 	struct sym_hist *h = annotation__histogram(notes, evidx);
 
-	memset(h, 0, notes->src->sizeof_sym_hist);
+	memset(h, 0, sizeof(*notes->src->histograms) * notes->src->nr_histograms);
 }
 
 void symbol__annotate_decay_histogram(struct symbol *sym, int evidx)
@@ -2808,8 +2848,14 @@ void symbol__annotate_decay_histogram(struct symbol *sym, int evidx)
 
 	h->nr_samples = 0;
 	for (offset = 0; offset < len; ++offset) {
-		h->addr[offset].nr_samples = h->addr[offset].nr_samples * 7 / 8;
-		h->nr_samples += h->addr[offset].nr_samples;
+		struct sym_hist_entry *entry;
+
+		entry = annotated_source__hist_entry(notes->src, evidx, offset);
+		if (entry == NULL)
+			continue;
+
+		entry->nr_samples = entry->nr_samples * 7 / 8;
+		h->nr_samples += entry->nr_samples;
 	}
 }
 
@@ -3548,6 +3594,12 @@ static int extract_reg_offset(struct arch *arch, const char *str,
 	 * %gs:0x18(%rbx).  In that case it should skip the part.
 	 */
 	if (*str == arch->objdump.register_char) {
+		if (arch__is(arch, "x86")) {
+			/* FIXME: Handle other segment registers */
+			if (!strncmp(str, "%gs:", 4))
+				op_loc->segment = INSN_SEG_X86_GS;
+		}
+
 		while (*str && !isdigit(*str) &&
 		       *str != arch->objdump.memory_ref_char)
 			str++;
@@ -3563,8 +3615,22 @@ static int extract_reg_offset(struct arch *arch, const char *str,
 	if (regname == NULL)
 		return -1;
 
-	op_loc->reg = get_dwarf_regnum(regname, 0);
+	op_loc->reg1 = get_dwarf_regnum(regname, 0);
 	free(regname);
+
+	/* Get the second register */
+	if (op_loc->multi_regs) {
+		p = strchr(p + 1, arch->objdump.register_char);
+		if (p == NULL)
+			return -1;
+
+		regname = strdup(p);
+		if (regname == NULL)
+			return -1;
+
+		op_loc->reg2 = get_dwarf_regnum(regname, 0);
+		free(regname);
+	}
 	return 0;
 }
 
@@ -3577,14 +3643,20 @@ static int extract_reg_offset(struct arch *arch, const char *str,
  * Get detailed location info (register and offset) in the instruction.
  * It needs both source and target operand and whether it accesses a
  * memory location.  The offset field is meaningful only when the
- * corresponding mem flag is set.
+ * corresponding mem flag is set.  The reg2 field is meaningful only
+ * when multi_regs flag is set.
  *
  * Some examples on x86:
  *
- *   mov  (%rax), %rcx   # src_reg = rax, src_mem = 1, src_offset = 0
- *                       # dst_reg = rcx, dst_mem = 0
+ *   mov  (%rax), %rcx   # src_reg1 = rax, src_mem = 1, src_offset = 0
+ *                       # dst_reg1 = rcx, dst_mem = 0
  *
- *   mov  0x18, %r8      # src_reg = -1, dst_reg = r8
+ *   mov  0x18, %r8      # src_reg1 = -1, src_mem = 0
+ *                       # dst_reg1 = r8, dst_mem = 0
+ *
+ *   mov  %rsi, 8(%rbx,%rcx,4)  # src_reg1 = rsi, src_mem = 0, dst_multi_regs = 0
+ *                              # dst_reg1 = rbx, dst_reg2 = rcx, dst_mem = 1
+ *                              # dst_multi_regs = 1, dst_offset = 8
  */
 int annotate_get_insn_location(struct arch *arch, struct disasm_line *dl,
 			       struct annotated_insn_loc *loc)
@@ -3605,26 +3677,51 @@ int annotate_get_insn_location(struct arch *arch, struct disasm_line *dl,
 
 	for_each_insn_op_loc(loc, i, op_loc) {
 		const char *insn_str = ops->source.raw;
+		bool multi_regs = ops->source.multi_regs;
 
-		if (i == INSN_OP_TARGET)
+		if (i == INSN_OP_TARGET) {
 			insn_str = ops->target.raw;
+			multi_regs = ops->target.multi_regs;
+		}
 
 		/* Invalidate the register by default */
-		op_loc->reg = -1;
+		op_loc->reg1 = -1;
+		op_loc->reg2 = -1;
 
 		if (insn_str == NULL)
 			continue;
 
 		if (strchr(insn_str, arch->objdump.memory_ref_char)) {
 			op_loc->mem_ref = true;
+			op_loc->multi_regs = multi_regs;
 			extract_reg_offset(arch, insn_str, op_loc);
 		} else {
-			char *s = strdup(insn_str);
+			char *s, *p = NULL;
 
-			if (s) {
-				op_loc->reg = get_dwarf_regnum(s, 0);
-				free(s);
+			if (arch__is(arch, "x86")) {
+				/* FIXME: Handle other segment registers */
+				if (!strncmp(insn_str, "%gs:", 4)) {
+					op_loc->segment = INSN_SEG_X86_GS;
+					op_loc->offset = strtol(insn_str + 4,
+								&p, 0);
+					if (p && p != insn_str + 4)
+						op_loc->imm = true;
+					continue;
+				}
 			}
+
+			s = strdup(insn_str);
+			if (s == NULL)
+				return -1;
+
+			if (*s == arch->objdump.register_char)
+				op_loc->reg1 = get_dwarf_regnum(s, 0);
+			else if (*s == arch->objdump.imm_char) {
+				op_loc->offset = strtol(s + 1, &p, 0);
+				if (p && p != s + 1)
+					op_loc->imm = true;
+			}
+			free(s);
 		}
 	}
 
@@ -3652,7 +3749,8 @@ static void symbol__ensure_annotate(struct map_symbol *ms, struct evsel *evsel)
 	}
 }
 
-static struct disasm_line *find_disasm_line(struct symbol *sym, u64 ip)
+static struct disasm_line *find_disasm_line(struct symbol *sym, u64 ip,
+					    bool allow_update)
 {
 	struct disasm_line *dl;
 	struct annotation *notes;
@@ -3660,8 +3758,18 @@ static struct disasm_line *find_disasm_line(struct symbol *sym, u64 ip)
 	notes = symbol__annotation(sym);
 
 	list_for_each_entry(dl, &notes->src->source, al.node) {
-		if (sym->start + dl->al.offset == ip)
+		if (sym->start + dl->al.offset == ip) {
+			/*
+			 * llvm-objdump places "lock" in a separate line and
+			 * in that case, we want to get the next line.
+			 */
+			if (!strcmp(dl->ins.name, "lock") &&
+			    *dl->ops.raw == '\0' && allow_update) {
+				ip++;
+				continue;
+			}
 			return dl;
+		}
 	}
 	return NULL;
 }
@@ -3688,6 +3796,54 @@ static struct annotated_item_stat *annotate_data_stat(struct list_head *head,
 
 	list_add_tail(&istat->list, head);
 	return istat;
+}
+
+static bool is_stack_operation(struct arch *arch, struct disasm_line *dl)
+{
+	if (arch__is(arch, "x86")) {
+		if (!strncmp(dl->ins.name, "push", 4) ||
+		    !strncmp(dl->ins.name, "pop", 3) ||
+		    !strncmp(dl->ins.name, "ret", 3))
+			return true;
+	}
+
+	return false;
+}
+
+static bool is_stack_canary(struct arch *arch, struct annotated_op_loc *loc)
+{
+	/* On x86_64, %gs:40 is used for stack canary */
+	if (arch__is(arch, "x86")) {
+		if (loc->segment == INSN_SEG_X86_GS && loc->imm &&
+		    loc->offset == 40)
+			return true;
+	}
+
+	return false;
+}
+
+u64 annotate_calc_pcrel(struct map_symbol *ms, u64 ip, int offset,
+			struct disasm_line *dl)
+{
+	struct annotation *notes;
+	struct disasm_line *next;
+	u64 addr;
+
+	notes = symbol__annotation(ms->sym);
+	/*
+	 * PC-relative addressing starts from the next instruction address
+	 * But the IP is for the current instruction.  Since disasm_line
+	 * doesn't have the instruction size, calculate it using the next
+	 * disasm_line.  If it's the last one, we can use symbol's end
+	 * address directly.
+	 */
+	if (&dl->al.node == notes->src->source.prev)
+		addr = ms->sym->end + offset;
+	else {
+		next = list_next_entry(dl, al.node);
+		addr = ip + (next->al.offset - dl->al.offset) + offset;
+	}
+	return map__rip_2objdump(ms->map, addr);
 }
 
 /**
@@ -3736,12 +3892,13 @@ struct annotated_data_type *hist_entry__get_data_type(struct hist_entry *he)
 	 * Get a disasm to extract the location from the insn.
 	 * This is too slow...
 	 */
-	dl = find_disasm_line(ms->sym, ip);
+	dl = find_disasm_line(ms->sym, ip, /*allow_update=*/true);
 	if (dl == NULL) {
 		ann_data_stat.no_insn++;
 		return NULL;
 	}
 
+retry:
 	istat = annotate_data_stat(&ann_insn_stat, dl->ins.name);
 	if (istat == NULL) {
 		ann_data_stat.no_insn++;
@@ -3754,11 +3911,49 @@ struct annotated_data_type *hist_entry__get_data_type(struct hist_entry *he)
 		return NULL;
 	}
 
+	if (is_stack_operation(arch, dl)) {
+		istat->good++;
+		he->mem_type_off = 0;
+		return &stackop_type;
+	}
+
 	for_each_insn_op_loc(&loc, i, op_loc) {
-		if (!op_loc->mem_ref)
+		struct data_loc_info dloc = {
+			.arch = arch,
+			.thread = he->thread,
+			.ms = ms,
+			/* Recalculate IP for LOCK prefix or insn fusion */
+			.ip = ms->sym->start + dl->al.offset,
+			.cpumode = he->cpumode,
+			.op = op_loc,
+		};
+
+		if (!op_loc->mem_ref && op_loc->segment == INSN_SEG_NONE)
 			continue;
 
-		mem_type = find_data_type(ms, ip, op_loc->reg, op_loc->offset);
+		/* Recalculate IP because of LOCK prefix or insn fusion */
+		ip = ms->sym->start + dl->al.offset;
+
+		/* PC-relative addressing */
+		if (op_loc->reg1 == DWARF_REG_PC) {
+			dloc.var_addr = annotate_calc_pcrel(ms, dloc.ip,
+							    op_loc->offset, dl);
+		}
+
+		/* This CPU access in kernel - pretend PC-relative addressing */
+		if (map__dso(ms->map)->kernel && arch__is(arch, "x86") &&
+		    op_loc->segment == INSN_SEG_X86_GS && op_loc->imm) {
+			dloc.var_addr = op_loc->offset;
+			op_loc->reg1 = DWARF_REG_PC;
+		}
+
+		mem_type = find_data_type(&dloc);
+
+		if (mem_type == NULL && is_stack_canary(arch, op_loc)) {
+			mem_type = &canary_type;
+			dloc.type_offset = 0;
+		}
+
 		if (mem_type)
 			istat->good++;
 		else
@@ -3766,15 +3961,243 @@ struct annotated_data_type *hist_entry__get_data_type(struct hist_entry *he)
 
 		if (symbol_conf.annotate_data_sample) {
 			annotated_data_type__update_samples(mem_type, evsel,
-							    op_loc->offset,
+							    dloc.type_offset,
 							    he->stat.nr_events,
 							    he->stat.period);
 		}
-		he->mem_type_off = op_loc->offset;
+		he->mem_type_off = dloc.type_offset;
 		return mem_type;
+	}
+
+	/*
+	 * Some instructions can be fused and the actual memory access came
+	 * from the previous instruction.
+	 */
+	if (dl->al.offset > 0) {
+		struct disasm_line *prev_dl;
+
+		prev_dl = list_prev_entry(dl, al.node);
+		if (ins__is_fused(arch, prev_dl->ins.name, dl->ins.name)) {
+			dl = prev_dl;
+			goto retry;
+		}
 	}
 
 	ann_data_stat.no_mem_ops++;
 	istat->bad++;
 	return NULL;
+}
+
+/* Basic block traversal (BFS) data structure */
+struct basic_block_data {
+	struct list_head queue;
+	struct list_head visited;
+};
+
+/*
+ * During the traversal, it needs to know the parent block where the current
+ * block block started from.  Note that single basic block can be parent of
+ * two child basic blocks (in case of condition jump).
+ */
+struct basic_block_link {
+	struct list_head node;
+	struct basic_block_link *parent;
+	struct annotated_basic_block *bb;
+};
+
+/* Check any of basic block in the list already has the offset */
+static bool basic_block_has_offset(struct list_head *head, s64 offset)
+{
+	struct basic_block_link *link;
+
+	list_for_each_entry(link, head, node) {
+		s64 begin_offset = link->bb->begin->al.offset;
+		s64 end_offset = link->bb->end->al.offset;
+
+		if (begin_offset <= offset && offset <= end_offset)
+			return true;
+	}
+	return false;
+}
+
+static bool is_new_basic_block(struct basic_block_data *bb_data,
+			       struct disasm_line *dl)
+{
+	s64 offset = dl->al.offset;
+
+	if (basic_block_has_offset(&bb_data->visited, offset))
+		return false;
+	if (basic_block_has_offset(&bb_data->queue, offset))
+		return false;
+	return true;
+}
+
+/* Add a basic block starting from dl and link it to the parent */
+static int add_basic_block(struct basic_block_data *bb_data,
+			   struct basic_block_link *parent,
+			   struct disasm_line *dl)
+{
+	struct annotated_basic_block *bb;
+	struct basic_block_link *link;
+
+	if (dl == NULL)
+		return -1;
+
+	if (!is_new_basic_block(bb_data, dl))
+		return 0;
+
+	bb = zalloc(sizeof(*bb));
+	if (bb == NULL)
+		return -1;
+
+	bb->begin = dl;
+	bb->end = dl;
+	INIT_LIST_HEAD(&bb->list);
+
+	link = malloc(sizeof(*link));
+	if (link == NULL) {
+		free(bb);
+		return -1;
+	}
+
+	link->bb = bb;
+	link->parent = parent;
+	list_add_tail(&link->node, &bb_data->queue);
+	return 0;
+}
+
+/* Returns true when it finds the target in the current basic block */
+static bool process_basic_block(struct basic_block_data *bb_data,
+				struct basic_block_link *link,
+				struct symbol *sym, u64 target)
+{
+	struct disasm_line *dl, *next_dl, *last_dl;
+	struct annotation *notes = symbol__annotation(sym);
+	bool found = false;
+
+	dl = link->bb->begin;
+	/* Check if it's already visited */
+	if (basic_block_has_offset(&bb_data->visited, dl->al.offset))
+		return false;
+
+	last_dl = list_last_entry(&notes->src->source,
+				  struct disasm_line, al.node);
+
+	list_for_each_entry_from(dl, &notes->src->source, al.node) {
+		/* Found the target instruction */
+		if (sym->start + dl->al.offset == target) {
+			found = true;
+			break;
+		}
+		/* End of the function, finish the block */
+		if (dl == last_dl)
+			break;
+		/* 'return' instruction finishes the block */
+		if (dl->ins.ops == &ret_ops)
+			break;
+		/* normal instructions are part of the basic block */
+		if (dl->ins.ops != &jump_ops)
+			continue;
+		/* jump to a different function, tail call or return */
+		if (dl->ops.target.outside)
+			break;
+		/* jump instruction creates new basic block(s) */
+		next_dl = find_disasm_line(sym, sym->start + dl->ops.target.offset,
+					   /*allow_update=*/false);
+		add_basic_block(bb_data, link, next_dl);
+
+		/*
+		 * FIXME: determine conditional jumps properly.
+		 * Conditional jumps create another basic block with the
+		 * next disasm line.
+		 */
+		if (!strstr(dl->ins.name, "jmp")) {
+			next_dl = list_next_entry(dl, al.node);
+			add_basic_block(bb_data, link, next_dl);
+		}
+		break;
+
+	}
+	link->bb->end = dl;
+	return found;
+}
+
+/*
+ * It founds a target basic block, build a proper linked list of basic blocks
+ * by following the link recursively.
+ */
+static void link_found_basic_blocks(struct basic_block_link *link,
+				    struct list_head *head)
+{
+	while (link) {
+		struct basic_block_link *parent = link->parent;
+
+		list_move(&link->bb->list, head);
+		list_del(&link->node);
+		free(link);
+
+		link = parent;
+	}
+}
+
+static void delete_basic_blocks(struct basic_block_data *bb_data)
+{
+	struct basic_block_link *link, *tmp;
+
+	list_for_each_entry_safe(link, tmp, &bb_data->queue, node) {
+		list_del(&link->node);
+		free(link->bb);
+		free(link);
+	}
+
+	list_for_each_entry_safe(link, tmp, &bb_data->visited, node) {
+		list_del(&link->node);
+		free(link->bb);
+		free(link);
+	}
+}
+
+/**
+ * annotate_get_basic_blocks - Get basic blocks for given address range
+ * @sym: symbol to annotate
+ * @src: source address
+ * @dst: destination address
+ * @head: list head to save basic blocks
+ *
+ * This function traverses disasm_lines from @src to @dst and save them in a
+ * list of annotated_basic_block to @head.  It uses BFS to find the shortest
+ * path between two.  The basic_block_link is to maintain parent links so
+ * that it can build a list of blocks from the start.
+ */
+int annotate_get_basic_blocks(struct symbol *sym, s64 src, s64 dst,
+			      struct list_head *head)
+{
+	struct basic_block_data bb_data = {
+		.queue = LIST_HEAD_INIT(bb_data.queue),
+		.visited = LIST_HEAD_INIT(bb_data.visited),
+	};
+	struct basic_block_link *link;
+	struct disasm_line *dl;
+	int ret = -1;
+
+	dl = find_disasm_line(sym, src, /*allow_update=*/false);
+	if (dl == NULL)
+		return -1;
+
+	if (add_basic_block(&bb_data, /*parent=*/NULL, dl) < 0)
+		return -1;
+
+	/* Find shortest path from src to dst using BFS */
+	while (!list_empty(&bb_data.queue)) {
+		link = list_first_entry(&bb_data.queue, struct basic_block_link, node);
+
+		if (process_basic_block(&bb_data, link, sym, dst)) {
+			link_found_basic_blocks(link, head);
+			ret = 0;
+			break;
+		}
+		list_move(&link->node, &bb_data.visited);
+	}
+	delete_basic_blocks(&bb_data);
+	return ret;
 }

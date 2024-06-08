@@ -43,6 +43,11 @@ enum bkey_invalid_flags;
 #define extent_entry_next(_entry)					\
 	((typeof(_entry)) ((void *) (_entry) + extent_entry_bytes(_entry)))
 
+#define extent_entry_next_safe(_entry, _end)				\
+	(likely(__extent_entry_type(_entry) < BCH_EXTENT_ENTRY_MAX)	\
+	 ? extent_entry_next(_entry)					\
+	 : _end)
+
 static inline unsigned
 __extent_entry_type(const union bch_extent_entry *e)
 {
@@ -103,17 +108,17 @@ static inline void extent_entry_drop(struct bkey_s k, union bch_extent_entry *en
 
 static inline bool extent_entry_is_ptr(const union bch_extent_entry *e)
 {
-	return extent_entry_type(e) == BCH_EXTENT_ENTRY_ptr;
+	return __extent_entry_type(e) == BCH_EXTENT_ENTRY_ptr;
 }
 
 static inline bool extent_entry_is_stripe_ptr(const union bch_extent_entry *e)
 {
-	return extent_entry_type(e) == BCH_EXTENT_ENTRY_stripe_ptr;
+	return __extent_entry_type(e) == BCH_EXTENT_ENTRY_stripe_ptr;
 }
 
 static inline bool extent_entry_is_crc(const union bch_extent_entry *e)
 {
-	switch (extent_entry_type(e)) {
+	switch (__extent_entry_type(e)) {
 	case BCH_EXTENT_ENTRY_crc32:
 	case BCH_EXTENT_ENTRY_crc64:
 	case BCH_EXTENT_ENTRY_crc128:
@@ -280,7 +285,7 @@ static inline struct bkey_ptrs bch2_bkey_ptrs(struct bkey_s k)
 #define __bkey_extent_entry_for_each_from(_start, _end, _entry)		\
 	for ((_entry) = (_start);					\
 	     (_entry) < (_end);						\
-	     (_entry) = extent_entry_next(_entry))
+	     (_entry) = extent_entry_next_safe(_entry, _end))
 
 #define __bkey_ptr_next(_ptr, _end)					\
 ({									\
@@ -318,7 +323,7 @@ static inline struct bkey_ptrs bch2_bkey_ptrs(struct bkey_s k)
 	(_ptr).has_ec	= false;					\
 									\
 	__bkey_extent_entry_for_each_from(_entry, _end, _entry)		\
-		switch (extent_entry_type(_entry)) {			\
+		switch (__extent_entry_type(_entry)) {			\
 		case BCH_EXTENT_ENTRY_ptr:				\
 			(_ptr).ptr		= _entry->ptr;		\
 			goto out;					\
@@ -344,7 +349,7 @@ out:									\
 	for ((_ptr).crc = bch2_extent_crc_unpack(_k, NULL),		\
 	     (_entry) = _start;						\
 	     __bkey_ptr_next_decode(_k, _end, _ptr, _entry);		\
-	     (_entry) = extent_entry_next(_entry))
+	     (_entry) = extent_entry_next_safe(_entry, _end))
 
 #define bkey_for_each_ptr_decode(_k, _p, _ptr, _entry)			\
 	__bkey_for_each_ptr_decode(_k, (_p).start, (_p).end,		\
@@ -589,30 +594,6 @@ static inline struct bch_devs_list bch2_bkey_cached_devs(struct bkey_s_c k)
 			ret.data[ret.nr++] = ptr->dev;
 
 	return ret;
-}
-
-static inline unsigned bch2_bkey_ptr_data_type(struct bkey_s_c k, const struct bch_extent_ptr *ptr)
-{
-	switch (k.k->type) {
-	case KEY_TYPE_btree_ptr:
-	case KEY_TYPE_btree_ptr_v2:
-		return BCH_DATA_btree;
-	case KEY_TYPE_extent:
-	case KEY_TYPE_reflink_v:
-		return BCH_DATA_user;
-	case KEY_TYPE_stripe: {
-		struct bkey_s_c_stripe s = bkey_s_c_to_stripe(k);
-
-		BUG_ON(ptr < s.v->ptrs ||
-		       ptr >= s.v->ptrs + s.v->nr_blocks);
-
-		return ptr >= s.v->ptrs + s.v->nr_blocks - s.v->nr_redundant
-			? BCH_DATA_parity
-			: BCH_DATA_user;
-	}
-	default:
-		BUG();
-	}
 }
 
 unsigned bch2_bkey_nr_ptrs(struct bkey_s_c);

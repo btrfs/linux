@@ -89,7 +89,6 @@ struct vmw_kms_sou_define_gmrfb {
 struct vmw_screen_object_unit {
 	struct vmw_display_unit base;
 
-	unsigned long buffer_size; /**< Size of allocated buffer */
 	struct vmw_bo *buffer; /**< Backing store buffer */
 
 	bool defined;
@@ -240,7 +239,6 @@ static void vmw_sou_crtc_mode_set_nofb(struct drm_crtc *crtc)
 		int x, y;
 
 		sou->buffer = vps->bo;
-		sou->buffer_size = vps->bo_size;
 
 		conn_state = sou->base.connector.state;
 		vmw_conn_state = vmw_connector_state_to_vcs(conn_state);
@@ -255,7 +253,6 @@ static void vmw_sou_crtc_mode_set_nofb(struct drm_crtc *crtc)
 
 	} else {
 		sou->buffer = NULL;
-		sou->buffer_size = 0;
 	}
 }
 
@@ -347,7 +344,7 @@ static void vmw_sou_connector_destroy(struct drm_connector *connector)
 static const struct drm_connector_funcs vmw_sou_connector_funcs = {
 	.dpms = vmw_du_connector_dpms,
 	.detect = vmw_du_connector_detect,
-	.fill_modes = vmw_du_connector_fill_modes,
+	.fill_modes = drm_helper_probe_single_connector_modes,
 	.destroy = vmw_sou_connector_destroy,
 	.reset = vmw_du_connector_reset,
 	.atomic_duplicate_state = vmw_du_connector_duplicate_state,
@@ -357,6 +354,8 @@ static const struct drm_connector_funcs vmw_sou_connector_funcs = {
 
 static const struct
 drm_connector_helper_funcs vmw_sou_connector_helper_funcs = {
+	.get_modes = vmw_connector_get_modes,
+	.mode_valid = vmw_connector_mode_valid
 };
 
 
@@ -826,7 +825,6 @@ static int vmw_sou_init(struct vmw_private *dev_priv, unsigned unit)
 	sou->base.pref_active = (unit == 0);
 	sou->base.pref_width = dev_priv->initial_width;
 	sou->base.pref_height = dev_priv->initial_height;
-	sou->base.pref_mode = NULL;
 
 	/*
 	 * Remove this after enabling atomic because property values can

@@ -61,6 +61,12 @@
 	__typeof__(old) __old = (old);				\
 	__typeof__(*(ptr)) __ret;				\
 	switch (size) {						\
+	case 1:							\
+		__ret = cmpxchg_emu_u8((volatile u8 *)__ptr, __old, __new); \
+		break;						\
+	case 2:							\
+		__ret = cmpxchg_emu_u16((volatile u16 *)__ptr, __old, __new); \
+		break;						\
 	case 4:							\
 		asm volatile (					\
 		"1:	ldex.w		%0, (%3) \n"		\
@@ -91,6 +97,12 @@
 	__typeof__(old) __old = (old);				\
 	__typeof__(*(ptr)) __ret;				\
 	switch (size) {						\
+	case 1:							\
+		__ret = cmpxchg_emu_u8((volatile u8 *)__ptr, __old, __new); \
+		break;						\
+	case 2:							\
+		__ret = cmpxchg_emu_u16((volatile u16 *)__ptr, __old, __new); \
+		break;						\
 	case 4:							\
 		asm volatile (					\
 		"1:	ldex.w		%0, (%3) \n"		\
@@ -122,6 +134,12 @@
 	__typeof__(old) __old = (old);				\
 	__typeof__(*(ptr)) __ret;				\
 	switch (size) {						\
+	case 1:							\
+		__ret = cmpxchg_emu_u8((volatile u8 *)__ptr, __old, __new); \
+		break;						\
+	case 2:							\
+		__ret = cmpxchg_emu_u16((volatile u16 *)__ptr, __old, __new); \
+		break;						\
 	case 4:							\
 		asm volatile (					\
 		RELEASE_FENCE					\

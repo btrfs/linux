@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause-Clear
 /*
  * Copyright (c) 2018-2021 The Linux Foundation. All rights reserved.
- * Copyright (c) 2021-2023 Qualcomm Innovation Center, Inc. All rights reserved.
+ * Copyright (c) 2021-2024 Qualcomm Innovation Center, Inc. All rights reserved.
  */
 
 #include <crypto/hash.h>
@@ -960,8 +960,9 @@ int ath12k_dp_service_srng(struct ath12k_base *ab,
 	if (ab->hw_params->ring_mask->host2rxdma[grp_id]) {
 		struct ath12k_dp *dp = &ab->dp;
 		struct dp_rxdma_ring *rx_ring = &dp->rx_refill_buf_ring;
+		LIST_HEAD(list);
 
-		ath12k_dp_rx_bufs_replenish(ab, rx_ring, 0);
+		ath12k_dp_rx_bufs_replenish(ab, rx_ring, &list, 0);
 	}
 
 	/* TODO: Implement handler for other interrupts */
@@ -995,6 +996,29 @@ void ath12k_dp_pdev_pre_alloc(struct ath12k_base *ab)
 
 		/* TODO: Add any RXDMA setup required per pdev */
 	}
+}
+
+bool ath12k_dp_wmask_compaction_rx_tlv_supported(struct ath12k_base *ab)
+{
+	if (test_bit(WMI_TLV_SERVICE_WMSK_COMPACTION_RX_TLVS, ab->wmi_ab.svc_map) &&
+	    ab->hw_params->hal_ops->rxdma_ring_wmask_rx_mpdu_start &&
+	    ab->hw_params->hal_ops->rxdma_ring_wmask_rx_msdu_end &&
+	    ab->hw_params->hal_ops->get_hal_rx_compact_ops) {
+		return true;
+	}
+	return false;
+}
+
+void ath12k_dp_hal_rx_desc_init(struct ath12k_base *ab)
+{
+	if (ath12k_dp_wmask_compaction_rx_tlv_supported(ab)) {
+		/* RX TLVS compaction is supported, hence change the hal_rx_ops
+		 * to compact hal_rx_ops.
+		 */
+		ab->hal_rx_ops = ab->hw_params->hal_ops->get_hal_rx_compact_ops();
+	}
+	ab->hal.hal_desc_sz =
+		ab->hal_rx_ops->rx_desc_get_desc_size();
 }
 
 static void ath12k_dp_service_mon_ring(struct timer_list *t)
@@ -1123,11 +1147,11 @@ void ath12k_dp_vdev_tx_attach(struct ath12k *ar, struct ath12k_vif *arvif)
 
 static void ath12k_dp_cc_cleanup(struct ath12k_base *ab)
 {
-	struct ath12k_rx_desc_info *desc_info, *tmp;
+	struct ath12k_rx_desc_info *desc_info;
 	struct ath12k_tx_desc_info *tx_desc_info, *tmp1;
 	struct ath12k_dp *dp = &ab->dp;
 	struct sk_buff *skb;
-	int i;
+	int i, j;
 	u32 pool_id, tx_spt_page;
 
 	if (!dp->spt_info)
@@ -1136,16 +1160,23 @@ static void ath12k_dp_cc_cleanup(struct ath12k_base *ab)
 	/* RX Descriptor cleanup */
 	spin_lock_bh(&dp->rx_desc_lock);
 
-	list_for_each_entry_safe(desc_info, tmp, &dp->rx_desc_used_list, list) {
-		list_del(&desc_info->list);
-		skb = desc_info->skb;
+	for (i = 0; i < ATH12K_NUM_RX_SPT_PAGES; i++) {
+		desc_info = dp->spt_info->rxbaddr[i];
 
-		if (!skb)
-			continue;
+		for (j = 0; j < ATH12K_MAX_SPT_ENTRIES; j++) {
+			if (!desc_info[j].in_use) {
+				list_del(&desc_info[j].list);
+				continue;
+			}
 
-		dma_unmap_single(ab->dev, ATH12K_SKB_RXCB(skb)->paddr,
-				 skb->len + skb_tailroom(skb), DMA_FROM_DEVICE);
-		dev_kfree_skb_any(skb);
+			skb = desc_info[j].skb;
+			if (!skb)
+				continue;
+
+			dma_unmap_single(ab->dev, ATH12K_SKB_RXCB(skb)->paddr,
+					 skb->len + skb_tailroom(skb), DMA_FROM_DEVICE);
+			dev_kfree_skb_any(skb);
+		}
 	}
 
 	for (i = 0; i < ATH12K_NUM_RX_SPT_PAGES; i++) {
@@ -1421,7 +1452,6 @@ static int ath12k_dp_cc_init(struct ath12k_base *ab)
 	u32 cmem_base;
 
 	INIT_LIST_HEAD(&dp->rx_desc_free_list);
-	INIT_LIST_HEAD(&dp->rx_desc_used_list);
 	spin_lock_init(&dp->rx_desc_lock);
 
 	for (i = 0; i < ATH12K_HW_MAX_QUEUES; i++) {

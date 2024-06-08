@@ -14,14 +14,30 @@
 
 #include <linux/types.h>
 
+/*
+ * For backward compatibility, where the member of the struct was called
+ * fe_length instead of fe_logical_length.
+ */
+#define fe_length fe_logical_length
+
 struct fiemap_extent {
-	__u64 fe_logical;  /* logical offset in bytes for the start of
-			    * the extent from the beginning of the file */
-	__u64 fe_physical; /* physical offset in bytes for the start
-			    * of the extent from the beginning of the disk */
-	__u64 fe_length;   /* length in bytes for this extent */
-	__u64 fe_reserved64[2];
-	__u32 fe_flags;    /* FIEMAP_EXTENT_* flags for this extent */
+	/*
+	 * logical offset in bytes for the start of
+	 * the extent from the beginning of the file
+	 */
+	__u64 fe_logical;
+	/*
+	 * physical offset in bytes for the start
+	 * of the extent from the beginning of the disk
+	 */
+	__u64 fe_physical;
+	/* logical length in bytes for this extent */
+	__u64 fe_logical_length;
+	/* physical length in bytes for this extent */
+	__u64 fe_physical_length;
+	__u64 fe_reserved64[1];
+	/* FIEMAP_EXTENT_* flags for this extent */
+	__u32 fe_flags;
 	__u32 fe_reserved[3];
 };
 
@@ -51,6 +67,8 @@ struct fiemap {
 						    * Sets EXTENT_UNKNOWN. */
 #define FIEMAP_EXTENT_ENCODED		0x00000008 /* Data can not be read
 						    * while fs is unmounted */
+#define FIEMAP_EXTENT_DATA_COMPRESSED	0x00000040 /* Data is compressed by fs.
+						    * Sets EXTENT_ENCODED. */
 #define FIEMAP_EXTENT_DATA_ENCRYPTED	0x00000080 /* Data is encrypted by fs.
 						    * Sets EXTENT_NO_BYPASS. */
 #define FIEMAP_EXTENT_NOT_ALIGNED	0x00000100 /* Extent offsets may not be
@@ -66,5 +84,7 @@ struct fiemap {
 						    * merged for efficiency. */
 #define FIEMAP_EXTENT_SHARED		0x00002000 /* Space shared with other
 						    * files. */
+#define FIEMAP_EXTENT_HAS_PHYS_LEN	0x00004000 /* Physical length is valid
+						    * and set by FS. */
 
 #endif /* _UAPI_LINUX_FIEMAP_H */

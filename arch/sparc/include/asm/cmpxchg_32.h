@@ -41,11 +41,17 @@ void __cmpxchg_called_with_bad_pointer(void);
 /* we only need to support cmpxchg of a u32 on sparc */
 unsigned long __cmpxchg_u32(volatile u32 *m, u32 old, u32 new_);
 
+#include <linux/cmpxchg-emu.h>
+
 /* don't worry...optimizer will get rid of most of this */
 static inline unsigned long
 __cmpxchg(volatile void *ptr, unsigned long old, unsigned long new_, int size)
 {
 	switch (size) {
+	case 1:
+		return cmpxchg_emu_u8((volatile u8 *)ptr, old, new_);
+	case 2:
+		return cmpxchg_emu_u16((volatile u16 *)ptr, old, new_);
 	case 4:
 		return __cmpxchg_u32((u32 *)ptr, (u32)old, (u32)new_);
 	default:

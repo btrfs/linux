@@ -49,6 +49,7 @@
 #include "intel_cx0_phy.h"
 #include "intel_ddi.h"
 #include "intel_de.h"
+#include "intel_display_driver.h"
 #include "intel_display_types.h"
 #include "intel_dp.h"
 #include "intel_gmbus.h"
@@ -523,10 +524,12 @@ void hsw_write_infoframe(struct intel_encoder *encoder,
 			       0);
 
 	/* Wa_14013475917 */
-	if (IS_DISPLAY_VER(dev_priv, 13, 14) && crtc_state->has_psr && type == DP_SDP_VSC)
-		return;
+	if (!(IS_DISPLAY_VER(dev_priv, 13, 14) && crtc_state->has_psr && type == DP_SDP_VSC))
+		val |= hsw_infoframe_enable(type);
 
-	val |= hsw_infoframe_enable(type);
+	if (type == DP_SDP_VSC)
+		val |= VSC_DIP_HW_DATA_SW_HEA;
+
 	intel_de_write(dev_priv, ctl_reg, val);
 	intel_de_posting_read(dev_priv, ctl_reg);
 }
@@ -1729,8 +1732,8 @@ int intel_hdmi_hdcp2_check_link(struct intel_digital_port *dig_port,
 }
 
 static
-int intel_hdmi_hdcp2_capable(struct intel_connector *connector,
-			     bool *capable)
+int intel_hdmi_hdcp2_get_capability(struct intel_connector *connector,
+				    bool *capable)
 {
 	struct intel_digital_port *dig_port = intel_attached_dig_port(connector);
 	u8 hdcp2_version;
@@ -1759,7 +1762,7 @@ static const struct intel_hdcp_shim intel_hdmi_hdcp_shim = {
 	.write_2_2_msg = intel_hdmi_hdcp2_write_msg,
 	.read_2_2_msg = intel_hdmi_hdcp2_read_msg,
 	.check_2_2_link	= intel_hdmi_hdcp2_check_link,
-	.hdcp_2_2_capable = intel_hdmi_hdcp2_capable,
+	.hdcp_2_2_get_capability = intel_hdmi_hdcp2_get_capability,
 	.protocol = HDCP_PROTOCOL_HDMI,
 };
 
@@ -1829,7 +1832,7 @@ hdmi_port_clock_valid(struct intel_hdmi *hdmi,
 		      bool has_hdmi_sink)
 {
 	struct drm_i915_private *dev_priv = intel_hdmi_to_i915(hdmi);
-	enum phy phy = intel_port_to_phy(dev_priv, hdmi_to_dig_port(hdmi)->base.port);
+	struct intel_encoder *encoder = &hdmi_to_dig_port(hdmi)->base;
 
 	if (clock < 25000)
 		return MODE_CLOCK_LOW;
@@ -1851,11 +1854,11 @@ hdmi_port_clock_valid(struct intel_hdmi *hdmi,
 		return MODE_CLOCK_RANGE;
 
 	/* ICL+ combo PHY PLL can't generate 500-533.2 MHz */
-	if (intel_phy_is_combo(dev_priv, phy) && clock > 500000 && clock < 533200)
+	if (intel_encoder_is_combo(encoder) && clock > 500000 && clock < 533200)
 		return MODE_CLOCK_RANGE;
 
 	/* ICL+ TC PHY PLL can't generate 500-532.8 MHz */
-	if (intel_phy_is_tc(dev_priv, phy) && clock > 500000 && clock < 532800)
+	if (intel_encoder_is_tc(encoder) && clock > 500000 && clock < 532800)
 		return MODE_CLOCK_RANGE;
 
 	/*
@@ -2503,6 +2506,9 @@ intel_hdmi_detect(struct drm_connector *connector, bool force)
 	if (!intel_display_device_enabled(dev_priv))
 		return connector_status_disconnected;
 
+	if (!intel_display_driver_check_access(dev_priv))
+		return connector->status;
+
 	wakeref = intel_display_power_get(dev_priv, POWER_DOMAIN_GMBUS);
 
 	if (DISPLAY_VER(dev_priv) >= 11 &&
@@ -2530,6 +2536,9 @@ intel_hdmi_force(struct drm_connector *connector)
 
 	drm_dbg_kms(&i915->drm, "[CONNECTOR:%d:%s]\n",
 		    connector->base.id, connector->name);
+
+	if (!intel_display_driver_check_access(i915))
+		return;
 
 	intel_hdmi_unset_edid(connector);
 
@@ -2655,8 +2664,9 @@ bool intel_hdmi_handle_sink_scrambling(struct intel_encoder *encoder,
 		drm_scdc_set_scrambling(connector, scrambling);
 }
 
-static u8 chv_port_to_ddc_pin(struct drm_i915_private *dev_priv, enum port port)
+static u8 chv_encoder_to_ddc_pin(struct intel_encoder *encoder)
 {
+	enum port port = encoder->port;
 	u8 ddc_pin;
 
 	switch (port) {
@@ -2677,8 +2687,9 @@ static u8 chv_port_to_ddc_pin(struct drm_i915_private *dev_priv, enum port port)
 	return ddc_pin;
 }
 
-static u8 bxt_port_to_ddc_pin(struct drm_i915_private *dev_priv, enum port port)
+static u8 bxt_encoder_to_ddc_pin(struct intel_encoder *encoder)
 {
+	enum port port = encoder->port;
 	u8 ddc_pin;
 
 	switch (port) {
@@ -2696,9 +2707,9 @@ static u8 bxt_port_to_ddc_pin(struct drm_i915_private *dev_priv, enum port port)
 	return ddc_pin;
 }
 
-static u8 cnp_port_to_ddc_pin(struct drm_i915_private *dev_priv,
-			      enum port port)
+static u8 cnp_encoder_to_ddc_pin(struct intel_encoder *encoder)
 {
+	enum port port = encoder->port;
 	u8 ddc_pin;
 
 	switch (port) {
@@ -2722,22 +2733,23 @@ static u8 cnp_port_to_ddc_pin(struct drm_i915_private *dev_priv,
 	return ddc_pin;
 }
 
-static u8 icl_port_to_ddc_pin(struct drm_i915_private *dev_priv, enum port port)
+static u8 icl_encoder_to_ddc_pin(struct intel_encoder *encoder)
 {
-	enum phy phy = intel_port_to_phy(dev_priv, port);
+	struct drm_i915_private *dev_priv = to_i915(encoder->base.dev);
+	enum port port = encoder->port;
 
-	if (intel_phy_is_combo(dev_priv, phy))
+	if (intel_encoder_is_combo(encoder))
 		return GMBUS_PIN_1_BXT + port;
-	else if (intel_phy_is_tc(dev_priv, phy))
-		return GMBUS_PIN_9_TC1_ICP + intel_port_to_tc(dev_priv, port);
+	else if (intel_encoder_is_tc(encoder))
+		return GMBUS_PIN_9_TC1_ICP + intel_encoder_to_tc(encoder);
 
 	drm_WARN(&dev_priv->drm, 1, "Unknown port:%c\n", port_name(port));
 	return GMBUS_PIN_2_BXT;
 }
 
-static u8 mcc_port_to_ddc_pin(struct drm_i915_private *dev_priv, enum port port)
+static u8 mcc_encoder_to_ddc_pin(struct intel_encoder *encoder)
 {
-	enum phy phy = intel_port_to_phy(dev_priv, port);
+	enum phy phy = intel_encoder_to_phy(encoder);
 	u8 ddc_pin;
 
 	switch (phy) {
@@ -2758,11 +2770,12 @@ static u8 mcc_port_to_ddc_pin(struct drm_i915_private *dev_priv, enum port port)
 	return ddc_pin;
 }
 
-static u8 rkl_port_to_ddc_pin(struct drm_i915_private *dev_priv, enum port port)
+static u8 rkl_encoder_to_ddc_pin(struct intel_encoder *encoder)
 {
-	enum phy phy = intel_port_to_phy(dev_priv, port);
+	struct drm_i915_private *dev_priv = to_i915(encoder->base.dev);
+	enum phy phy = intel_encoder_to_phy(encoder);
 
-	WARN_ON(port == PORT_C);
+	WARN_ON(encoder->port == PORT_C);
 
 	/*
 	 * Pin mapping for RKL depends on which PCH is present.  With TGP, the
@@ -2776,11 +2789,12 @@ static u8 rkl_port_to_ddc_pin(struct drm_i915_private *dev_priv, enum port port)
 	return GMBUS_PIN_1_BXT + phy;
 }
 
-static u8 gen9bc_tgp_port_to_ddc_pin(struct drm_i915_private *i915, enum port port)
+static u8 gen9bc_tgp_encoder_to_ddc_pin(struct intel_encoder *encoder)
 {
-	enum phy phy = intel_port_to_phy(i915, port);
+	struct drm_i915_private *i915 = to_i915(encoder->base.dev);
+	enum phy phy = intel_encoder_to_phy(encoder);
 
-	drm_WARN_ON(&i915->drm, port == PORT_A);
+	drm_WARN_ON(&i915->drm, encoder->port == PORT_A);
 
 	/*
 	 * Pin mapping for GEN9 BC depends on which PCH is present.  With TGP,
@@ -2794,16 +2808,16 @@ static u8 gen9bc_tgp_port_to_ddc_pin(struct drm_i915_private *i915, enum port po
 	return GMBUS_PIN_1_BXT + phy;
 }
 
-static u8 dg1_port_to_ddc_pin(struct drm_i915_private *dev_priv, enum port port)
+static u8 dg1_encoder_to_ddc_pin(struct intel_encoder *encoder)
 {
-	return intel_port_to_phy(dev_priv, port) + 1;
+	return intel_encoder_to_phy(encoder) + 1;
 }
 
-static u8 adls_port_to_ddc_pin(struct drm_i915_private *dev_priv, enum port port)
+static u8 adls_encoder_to_ddc_pin(struct intel_encoder *encoder)
 {
-	enum phy phy = intel_port_to_phy(dev_priv, port);
+	enum phy phy = intel_encoder_to_phy(encoder);
 
-	WARN_ON(port == PORT_B || port == PORT_C);
+	WARN_ON(encoder->port == PORT_B || encoder->port == PORT_C);
 
 	/*
 	 * Pin mapping for ADL-S requires TC pins for all combo phy outputs
@@ -2815,9 +2829,9 @@ static u8 adls_port_to_ddc_pin(struct drm_i915_private *dev_priv, enum port port
 	return GMBUS_PIN_9_TC1_ICP + phy - PHY_B;
 }
 
-static u8 g4x_port_to_ddc_pin(struct drm_i915_private *dev_priv,
-			      enum port port)
+static u8 g4x_encoder_to_ddc_pin(struct intel_encoder *encoder)
 {
+	enum port port = encoder->port;
 	u8 ddc_pin;
 
 	switch (port) {
@@ -2841,30 +2855,29 @@ static u8 g4x_port_to_ddc_pin(struct drm_i915_private *dev_priv,
 static u8 intel_hdmi_default_ddc_pin(struct intel_encoder *encoder)
 {
 	struct drm_i915_private *dev_priv = to_i915(encoder->base.dev);
-	enum port port = encoder->port;
 	u8 ddc_pin;
 
 	if (IS_ALDERLAKE_S(dev_priv))
-		ddc_pin = adls_port_to_ddc_pin(dev_priv, port);
+		ddc_pin = adls_encoder_to_ddc_pin(encoder);
 	else if (INTEL_PCH_TYPE(dev_priv) >= PCH_DG1)
-		ddc_pin = dg1_port_to_ddc_pin(dev_priv, port);
+		ddc_pin = dg1_encoder_to_ddc_pin(encoder);
 	else if (IS_ROCKETLAKE(dev_priv))
-		ddc_pin = rkl_port_to_ddc_pin(dev_priv, port);
+		ddc_pin = rkl_encoder_to_ddc_pin(encoder);
 	else if (DISPLAY_VER(dev_priv) == 9 && HAS_PCH_TGP(dev_priv))
-		ddc_pin = gen9bc_tgp_port_to_ddc_pin(dev_priv, port);
+		ddc_pin = gen9bc_tgp_encoder_to_ddc_pin(encoder);
 	else if ((IS_JASPERLAKE(dev_priv) || IS_ELKHARTLAKE(dev_priv)) &&
 		 HAS_PCH_TGP(dev_priv))
-		ddc_pin = mcc_port_to_ddc_pin(dev_priv, port);
+		ddc_pin = mcc_encoder_to_ddc_pin(encoder);
 	else if (INTEL_PCH_TYPE(dev_priv) >= PCH_ICP)
-		ddc_pin = icl_port_to_ddc_pin(dev_priv, port);
+		ddc_pin = icl_encoder_to_ddc_pin(encoder);
 	else if (HAS_PCH_CNP(dev_priv))
-		ddc_pin = cnp_port_to_ddc_pin(dev_priv, port);
+		ddc_pin = cnp_encoder_to_ddc_pin(encoder);
 	else if (IS_GEMINILAKE(dev_priv) || IS_BROXTON(dev_priv))
-		ddc_pin = bxt_port_to_ddc_pin(dev_priv, port);
+		ddc_pin = bxt_encoder_to_ddc_pin(encoder);
 	else if (IS_CHERRYVIEW(dev_priv))
-		ddc_pin = chv_port_to_ddc_pin(dev_priv, port);
+		ddc_pin = chv_encoder_to_ddc_pin(encoder);
 	else
-		ddc_pin = g4x_port_to_ddc_pin(dev_priv, port);
+		ddc_pin = g4x_encoder_to_ddc_pin(encoder);
 
 	return ddc_pin;
 }
@@ -3015,6 +3028,7 @@ void intel_hdmi_init_connector(struct intel_digital_port *dig_port,
 		connector->ycbcr_420_allowed = true;
 
 	intel_connector->polled = DRM_CONNECTOR_POLL_HPD;
+	intel_connector->base.polled = intel_connector->polled;
 
 	if (HAS_DDI(dev_priv))
 		intel_connector->get_hw_state = intel_ddi_connector_get_hw_state;

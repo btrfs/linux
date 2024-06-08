@@ -189,9 +189,6 @@ static bool gen12_needs_ccs_aux_inv(struct intel_engine_cs *engine)
 {
 	i915_reg_t reg = gen12_get_aux_inv_reg(engine);
 
-	if (IS_PONTEVECCHIO(engine->i915))
-		return false;
-
 	/*
 	 * So far platforms supported by i915 having flat ccs do not require
 	 * AUX invalidation. Check also whether the engine requires it.
@@ -226,7 +223,7 @@ u32 *gen12_emit_aux_table_inv(struct intel_engine_cs *engine, u32 *cs)
 static int mtl_dummy_pipe_control(struct i915_request *rq)
 {
 	/* Wa_14016712196 */
-	if (IS_GFX_GT_IP_RANGE(rq->engine->gt, IP_VER(12, 70), IP_VER(12, 71)) ||
+	if (IS_GFX_GT_IP_RANGE(rq->engine->gt, IP_VER(12, 70), IP_VER(12, 74)) ||
 	    IS_DG2(rq->i915)) {
 		u32 *cs;
 
@@ -822,12 +819,12 @@ u32 *gen12_emit_fini_breadcrumb_rcs(struct i915_request *rq, u32 *cs)
 		flags |= PIPE_CONTROL_FLUSH_L3;
 
 	/* Wa_14016712196 */
-	if (IS_GFX_GT_IP_RANGE(gt, IP_VER(12, 70), IP_VER(12, 71)) || IS_DG2(i915))
+	if (IS_GFX_GT_IP_RANGE(gt, IP_VER(12, 70), IP_VER(12, 74)) || IS_DG2(i915))
 		/* dummy PIPE_CONTROL + depth flush */
 		cs = gen12_emit_pipe_control(cs, 0,
 					     PIPE_CONTROL_DEPTH_CACHE_FLUSH, 0);
 
-	if (GRAPHICS_VER(i915) == 12 && GRAPHICS_VER_FULL(i915) < IP_VER(12, 50))
+	if (GRAPHICS_VER(i915) == 12 && GRAPHICS_VER_FULL(i915) < IP_VER(12, 55))
 		/* Wa_1409600907 */
 		flags |= PIPE_CONTROL_DEPTH_STALL;
 
