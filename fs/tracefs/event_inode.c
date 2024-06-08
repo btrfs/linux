@@ -35,6 +35,17 @@ static DEFINE_MUTEX(eventfs_mutex);
 /* Choose something "unique" ;-) */
 #define EVENTFS_FILE_INODE_INO		0x12c4e37
 
+struct eventfs_root_inode {
+	struct eventfs_inode		ei;
+	struct dentry			*events_dir;
+};
+
+static struct eventfs_root_inode *get_root_inode(struct eventfs_inode *ei)
+{
+	WARN_ON_ONCE(!ei->is_events);
+	return container_of(ei, struct eventfs_root_inode, ei);
+}
+
 /* Just try to make something consistent and unique */
 static int eventfs_dir_ino(struct eventfs_inode *ei)
 {
@@ -73,12 +84,18 @@ enum {
 static void release_ei(struct kref *ref)
 {
 	struct eventfs_inode *ei = container_of(ref, struct eventfs_inode, kref);
+	struct eventfs_root_inode *rei;
 
 	WARN_ON_ONCE(!ei->is_freed);
 
 	kfree(ei->entry_attrs);
 	kfree_const(ei->name);
-	kfree_rcu(ei, rcu);
+	if (ei->is_events) {
+		rei = get_root_inode(ei);
+		kfree_rcu(rei, ei.rcu);
+	} else {
+		kfree_rcu(ei, rcu);
+	}
 }
 
 static inline void put_ei(struct eventfs_inode *ei)
@@ -319,6 +336,7 @@ static void update_inode_attr(struct dentry *dentry, struct inode *inode,
 
 /**
  * lookup_file - look up a file in the tracefs filesystem
+ * @parent_ei: Pointer to the eventfs_inode that represents parent of the file
  * @dentry: the dentry to look up
  * @mode: the permission that the file should have.
  * @attr: saved attributes changed by user
@@ -372,6 +390,7 @@ static struct dentry *lookup_file(struct eventfs_inode *parent_ei,
 /**
  * lookup_dir_entry - look up a dir in the tracefs filesystem
  * @dentry: the directory to look up
+ * @pei: Pointer to the parent eventfs_inode if available
  * @ei: the eventfs_inode that represents the directory to create
  *
  * This function will look up a dentry for a directory represented by
@@ -408,19 +427,43 @@ static struct dentry *lookup_dir_entry(struct dentry *dentry,
 	return NULL;
 }
 
+static inline struct eventfs_inode *init_ei(struct eventfs_inode *ei, const char *name)
+{
+	ei->name = kstrdup_const(name, GFP_KERNEL);
+	if (!ei->name)
+		return NULL;
+	kref_init(&ei->kref);
+	return ei;
+}
+
 static inline struct eventfs_inode *alloc_ei(const char *name)
 {
 	struct eventfs_inode *ei = kzalloc(sizeof(*ei), GFP_KERNEL);
+	struct eventfs_inode *result;
 
 	if (!ei)
 		return NULL;
 
-	ei->name = kstrdup_const(name, GFP_KERNEL);
-	if (!ei->name) {
+	result = init_ei(ei, name);
+	if (!result)
 		kfree(ei);
+
+	return result;
+}
+
+static inline struct eventfs_inode *alloc_root_ei(const char *name)
+{
+	struct eventfs_root_inode *rei = kzalloc(sizeof(*rei), GFP_KERNEL);
+	struct eventfs_inode *ei;
+
+	if (!rei)
 		return NULL;
-	}
-	kref_init(&ei->kref);
+
+	rei->ei.is_events = 1;
+	ei = init_ei(&rei->ei, name);
+	if (!ei)
+		kfree(rei);
+
 	return ei;
 }
 
@@ -437,16 +480,20 @@ void eventfs_d_release(struct dentry *dentry)
 
 /**
  * lookup_file_dentry - create a dentry for a file of an eventfs_inode
+ * @dentry: The parent dentry under which the new file's dentry will be created
  * @ei: the eventfs_inode that the file will be created under
  * @idx: the index into the entry_attrs[] of the @ei
- * @parent: The parent dentry of the created file.
- * @name: The name of the file to create
  * @mode: The mode of the file.
  * @data: The data to use to set the inode of the file with on open()
  * @fops: The fops of the file to be created.
  *
- * Create a dentry for a file of an eventfs_inode @ei and place it into the
- * address located at @e_dentry.
+ * This function creates a dentry for a file associated with an
+ * eventfs_inode @ei. It uses the entry attributes specified by @idx,
+ * if available. The file will have the specified @mode and its inode will be
+ * set up with @data upon open. The file operations will be set to @fops.
+ *
+ * Return: Returns a pointer to the newly created file's dentry or an error
+ * pointer.
  */
 static struct dentry *
 lookup_file_dentry(struct dentry *dentry,
@@ -483,7 +530,7 @@ static struct dentry *eventfs_root_lookup(struct inode *dir,
 	struct dentry *result = NULL;
 
 	ti = get_tracefs(dir);
-	if (!(ti->flags & TRACEFS_EVENT_INODE))
+	if (WARN_ON_ONCE(!(ti->flags & TRACEFS_EVENT_INODE)))
 		return ERR_PTR(-EIO);
 
 	mutex_lock(&eventfs_mutex);
@@ -495,7 +542,8 @@ static struct dentry *eventfs_root_lookup(struct inode *dir,
 	list_for_each_entry(ei_child, &ei->children, list) {
 		if (strcmp(ei_child->name, name) != 0)
 			continue;
-		if (ei_child->is_freed)
+		/* A child is freed and removed from the list at the same time */
+		if (WARN_ON_ONCE(ei_child->is_freed))
 			goto out;
 		result = lookup_dir_entry(dentry, ei, ei_child);
 		goto out;
@@ -709,6 +757,7 @@ struct eventfs_inode *eventfs_create_events_dir(const char *name, struct dentry 
 						int size, void *data)
 {
 	struct dentry *dentry = tracefs_start_creating(name, parent);
+	struct eventfs_root_inode *rei;
 	struct eventfs_inode *ei;
 	struct tracefs_inode *ti;
 	struct inode *inode;
@@ -721,7 +770,7 @@ struct eventfs_inode *eventfs_create_events_dir(const char *name, struct dentry 
 	if (IS_ERR(dentry))
 		return ERR_CAST(dentry);
 
-	ei = alloc_ei(name);
+	ei = alloc_root_ei(name);
 	if (!ei)
 		goto fail;
 
@@ -730,10 +779,11 @@ struct eventfs_inode *eventfs_create_events_dir(const char *name, struct dentry 
 		goto fail;
 
 	// Note: we have a ref to the dentry from tracefs_start_creating()
-	ei->events_dir = dentry;
+	rei = get_root_inode(ei);
+	rei->events_dir = dentry;
+
 	ei->entries = entries;
 	ei->nr_entries = size;
-	ei->is_events = 1;
 	ei->data = data;
 
 	/* Save the ownership of this directory */
@@ -844,13 +894,15 @@ void eventfs_remove_dir(struct eventfs_inode *ei)
  */
 void eventfs_remove_events_dir(struct eventfs_inode *ei)
 {
+	struct eventfs_root_inode *rei;
 	struct dentry *dentry;
 
-	dentry = ei->events_dir;
+	rei = get_root_inode(ei);
+	dentry = rei->events_dir;
 	if (!dentry)
 		return;
 
-	ei->events_dir = NULL;
+	rei->events_dir = NULL;
 	eventfs_remove_dir(ei);
 
 	/*
