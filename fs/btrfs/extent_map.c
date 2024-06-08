@@ -5,7 +5,6 @@
 #include <linux/spinlock.h>
 #include "messages.h"
 #include "ctree.h"
-#include "volumes.h"
 #include "extent_map.h"
 #include "compression.h"
 #include "btrfs_inode.h"
@@ -16,8 +15,7 @@ static struct kmem_cache *extent_map_cache;
 int __init extent_map_init(void)
 {
 	extent_map_cache = kmem_cache_create("btrfs_extent_map",
-			sizeof(struct extent_map), 0,
-			SLAB_MEM_SPREAD, NULL);
+					     sizeof(struct extent_map), 0, 0, NULL);
 	if (!extent_map_cache)
 		return -ENOMEM;
 	return 0;
@@ -254,8 +252,6 @@ static void try_merge_map(struct extent_map_tree *tree, struct extent_map *em)
 			em->len += merge->len;
 			em->block_len += merge->block_len;
 			em->block_start = merge->block_start;
-			em->mod_len = (em->mod_len + em->mod_start) - merge->mod_start;
-			em->mod_start = merge->mod_start;
 			em->generation = max(em->generation, merge->generation);
 			em->flags |= EXTENT_FLAG_MERGED;
 
@@ -273,7 +269,6 @@ static void try_merge_map(struct extent_map_tree *tree, struct extent_map *em)
 		em->block_len += merge->block_len;
 		rb_erase_cached(&merge->rb_node, &tree->map);
 		RB_CLEAR_NODE(&merge->rb_node);
-		em->mod_len = (merge->mod_start + merge->mod_len) - em->mod_start;
 		em->generation = max(em->generation, merge->generation);
 		em->flags |= EXTENT_FLAG_MERGED;
 		free_extent_map(merge);
@@ -291,6 +286,10 @@ static void try_merge_map(struct extent_map_tree *tree, struct extent_map *em)
  * Called after an extent has been written to disk properly.  Set the generation
  * to the generation that actually added the file item to the inode so we know
  * we need to sync this extent when we call fsync().
+ *
+ * Returns: 0	     on success
+ * 	    -ENOENT  when the extent is not found in the tree
+ * 	    -EUCLEAN if the found extent does not match the expected start
  */
 int unpin_extent_cache(struct btrfs_inode *inode, u64 start, u64 len, u64 gen)
 {
@@ -298,7 +297,6 @@ int unpin_extent_cache(struct btrfs_inode *inode, u64 start, u64 len, u64 gen)
 	struct extent_map_tree *tree = &inode->extent_tree;
 	int ret = 0;
 	struct extent_map *em;
-	bool prealloc = false;
 
 	write_lock(&tree->lock);
 	em = lookup_extent_mapping(tree, start, len);
@@ -307,36 +305,28 @@ int unpin_extent_cache(struct btrfs_inode *inode, u64 start, u64 len, u64 gen)
 		btrfs_warn(fs_info,
 "no extent map found for inode %llu (root %lld) when unpinning extent range [%llu, %llu), generation %llu",
 			   btrfs_ino(inode), btrfs_root_id(inode->root),
-			   start, len, gen);
+			   start, start + len, gen);
+		ret = -ENOENT;
 		goto out;
 	}
 
-	if (WARN_ON(em->start != start))
+	if (WARN_ON(em->start != start)) {
 		btrfs_warn(fs_info,
 "found extent map for inode %llu (root %lld) with unexpected start offset %llu when unpinning extent range [%llu, %llu), generation %llu",
 			   btrfs_ino(inode), btrfs_root_id(inode->root),
-			   em->start, start, len, gen);
+			   em->start, start, start + len, gen);
+		ret = -EUCLEAN;
+		goto out;
+	}
 
 	em->generation = gen;
 	em->flags &= ~EXTENT_FLAG_PINNED;
-	em->mod_start = em->start;
-	em->mod_len = em->len;
-
-	if (em->flags & EXTENT_FLAG_FILLING) {
-		prealloc = true;
-		em->flags &= ~EXTENT_FLAG_FILLING;
-	}
 
 	try_merge_map(tree, em);
 
-	if (prealloc) {
-		em->mod_start = em->start;
-		em->mod_len = em->len;
-	}
-
-	free_extent_map(em);
 out:
 	write_unlock(&tree->lock);
+	free_extent_map(em);
 	return ret;
 
 }
@@ -355,8 +345,6 @@ static inline void setup_extent_mapping(struct extent_map_tree *tree,
 					int modified)
 {
 	refcount_inc(&em->refs);
-	em->mod_start = em->start;
-	em->mod_len = em->len;
 
 	ASSERT(list_empty(&em->list));
 
@@ -531,7 +519,8 @@ static noinline int merge_extent_mapping(struct extent_map_tree *em_tree,
 	u64 end;
 	u64 start_diff;
 
-	BUG_ON(map_start < em->start || map_start >= extent_map_end(em));
+	if (map_start < em->start || map_start >= extent_map_end(em))
+		return -EINVAL;
 
 	if (existing->start > map_start) {
 		next = existing;
@@ -622,13 +611,13 @@ int btrfs_add_extent_mapping(struct btrfs_fs_info *fs_info,
 			 */
 			ret = merge_extent_mapping(em_tree, existing,
 						   em, start);
-			if (ret) {
+			if (WARN_ON(ret)) {
 				free_extent_map(em);
 				*em_in = NULL;
-				WARN_ONCE(ret,
-"unexpected error %d: merge existing(start %llu len %llu) with em(start %llu len %llu)\n",
-					  ret, existing->start, existing->len,
-					  orig_start, orig_len);
+				btrfs_warn(fs_info,
+"extent map merge error existing [%llu, %llu) with em [%llu, %llu) start %llu",
+					   existing->start, extent_map_end(existing),
+					   orig_start, orig_start + orig_len, start);
 			}
 			free_extent_map(existing);
 		}
