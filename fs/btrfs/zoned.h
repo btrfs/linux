@@ -4,12 +4,27 @@
 #define BTRFS_ZONED_H
 
 #include <linux/types.h>
+#include <linux/atomic.h>
 #include <linux/blkdev.h>
+#include <linux/blkzoned.h>
+#include <linux/errno.h>
+#include <linux/spinlock.h>
+#include <linux/mutex.h>
 #include "messages.h"
 #include "volumes.h"
 #include "disk-io.h"
 #include "block-group.h"
 #include "btrfs_inode.h"
+#include "fs.h"
+
+struct block_device;
+struct extent_buffer;
+struct btrfs_bio;
+struct btrfs_ordered_extent;
+struct btrfs_fs_info;
+struct btrfs_space_info;
+struct btrfs_eb_write_context;
+struct btrfs_fs_devices;
 
 #define BTRFS_DEFAULT_RECLAIM_THRESH           			(75)
 
@@ -82,6 +97,7 @@ int btrfs_zone_finish_one_bg(struct btrfs_fs_info *fs_info);
 int btrfs_zoned_activate_one_bg(struct btrfs_fs_info *fs_info,
 				struct btrfs_space_info *space_info, bool do_finish);
 void btrfs_check_active_zone_reservation(struct btrfs_fs_info *fs_info);
+void btrfs_reserve_relocation_zone(struct btrfs_fs_info *fs_info);
 #else /* CONFIG_BLK_DEV_ZONED */
 static inline int btrfs_get_dev_zone(struct btrfs_device *device, u64 pos,
 				     struct blk_zone *zone)
@@ -255,6 +271,8 @@ static inline int btrfs_zoned_activate_one_bg(struct btrfs_fs_info *fs_info,
 }
 
 static inline void btrfs_check_active_zone_reservation(struct btrfs_fs_info *fs_info) { }
+
+static inline void btrfs_reserve_relocation_zone(struct btrfs_fs_info *fs_info) { }
 
 #endif
 
