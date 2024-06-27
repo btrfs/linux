@@ -74,16 +74,15 @@ static int exynos_dp_get_modes(struct analogix_dp_plat_data *plat_data,
 {
 	struct exynos_dp_device *dp = to_dp(plat_data);
 	struct drm_display_mode *mode;
-	int num_modes = 0;
 
 	if (dp->plat_data.panel)
-		return num_modes;
+		return 0;
 
 	mode = drm_mode_create(connector->dev);
 	if (!mode) {
 		DRM_DEV_ERROR(dp->dev,
 			      "failed to create a new display mode.\n");
-		return num_modes;
+		return 0;
 	}
 
 	drm_display_mode_from_videomode(&dp->vm, mode);
@@ -94,7 +93,7 @@ static int exynos_dp_get_modes(struct analogix_dp_plat_data *plat_data,
 	drm_mode_set_name(mode);
 	drm_mode_probed_add(connector, mode);
 
-	return num_modes + 1;
+	return 1;
 }
 
 static int exynos_dp_bridge_attach(struct analogix_dp_plat_data *plat_data,
@@ -286,7 +285,6 @@ struct platform_driver dp_driver = {
 	.remove_new	= exynos_dp_remove,
 	.driver		= {
 		.name	= "exynos-dp",
-		.owner	= THIS_MODULE,
 		.pm	= pm_ptr(&exynos_dp_pm_ops),
 		.of_match_table = exynos_dp_match,
 	},
