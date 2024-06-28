@@ -77,7 +77,7 @@ static int nvme_sc_to_pr_err(int nvme_sc)
 	if (nvme_is_path_error(nvme_sc))
 		return PR_STS_PATH_FAILED;
 
-	switch (nvme_sc) {
+	switch (nvme_sc & 0x7ff) {
 	case NVME_SC_SUCCESS:
 		return PR_STS_SUCCESS;
 	case NVME_SC_RESERVATION_CONFLICT:
@@ -97,8 +97,7 @@ static int nvme_sc_to_pr_err(int nvme_sc)
 static int nvme_send_pr_command(struct block_device *bdev,
 		struct nvme_command *c, void *data, unsigned int data_len)
 {
-	if (IS_ENABLED(CONFIG_NVME_MULTIPATH) &&
-	    nvme_disk_is_ns_head(bdev->bd_disk))
+	if (nvme_disk_is_ns_head(bdev->bd_disk))
 		return nvme_send_ns_head_pr_command(bdev, c, data, data_len);
 
 	return nvme_send_ns_pr_command(bdev->bd_disk->private_data, c, data,

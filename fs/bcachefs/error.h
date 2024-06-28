@@ -30,7 +30,13 @@ struct work_struct;
 
 bool bch2_inconsistent_error(struct bch_fs *);
 
-void bch2_topology_error(struct bch_fs *);
+int bch2_topology_error(struct bch_fs *);
+
+#define bch2_fs_topology_error(c, ...)					\
+({									\
+	bch_err(c, "btree topology error: " __VA_ARGS__);		\
+	bch2_topology_error(c);						\
+})
 
 #define bch2_fs_inconsistent(c, ...)					\
 ({									\
@@ -100,13 +106,6 @@ struct fsck_err_state {
 	int			ret;
 	int			fix;
 	char			*last_msg;
-};
-
-enum bch_fsck_flags {
-	FSCK_CAN_FIX		= 1 << 0,
-	FSCK_CAN_IGNORE		= 1 << 1,
-	FSCK_NEED_FSCK		= 1 << 2,
-	FSCK_NO_RATELIMIT	= 1 << 3,
 };
 
 #define fsck_err_count(_c, _err)	bch2_sb_err_count(_c, BCH_FSCK_ERR_##_err)
@@ -191,9 +190,9 @@ do {									\
 
 void bch2_fatal_error(struct bch_fs *);
 
-#define bch2_fs_fatal_error(c, ...)					\
+#define bch2_fs_fatal_error(c, _msg, ...)				\
 do {									\
-	bch_err(c, __VA_ARGS__);					\
+	bch_err(c, "%s(): fatal error " _msg, __func__, ##__VA_ARGS__);	\
 	bch2_fatal_error(c);						\
 } while (0)
 
