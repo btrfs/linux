@@ -19,6 +19,7 @@
  */
 
 #include <linux/acpi.h>
+#include <linux/dmi.h>
 #include <linux/limits.h>
 #include <linux/list.h>
 #include <linux/module.h>
@@ -723,3 +724,83 @@ void acpi_mipi_crs_csi2_cleanup(void)
 	list_for_each_entry_safe(csi2, csi2_tmp, &acpi_mipi_crs_csi2_list, entry)
 		acpi_mipi_del_crs_csi2(csi2);
 }
+
+#ifdef CONFIG_X86
+#include <asm/cpu_device_id.h>
+#include <asm/intel-family.h>
+
+/* CPU matches for Dell generations with broken ACPI MIPI DISCO info */
+static const struct x86_cpu_id dell_broken_mipi_disco_cpu_gens[] = {
+	X86_MATCH_VFM(INTEL_TIGERLAKE, NULL),
+	X86_MATCH_VFM(INTEL_TIGERLAKE_L, NULL),
+	X86_MATCH_VFM(INTEL_ALDERLAKE, NULL),
+	X86_MATCH_VFM(INTEL_ALDERLAKE_L, NULL),
+	X86_MATCH_VFM(INTEL_RAPTORLAKE, NULL),
+	X86_MATCH_VFM(INTEL_RAPTORLAKE_P, NULL),
+	X86_MATCH_VFM(INTEL_RAPTORLAKE_S, NULL),
+	{}
+};
+
+static const char *strnext(const char *s1, const char *s2)
+{
+	s1 = strstr(s1, s2);
+
+	if (!s1)
+		return NULL;
+
+	return s1 + strlen(s2);
+}
+
+/**
+ * acpi_graph_ignore_port - Tell whether a port node should be ignored
+ * @handle: The ACPI handle of the node (which may be a port node)
+ *
+ * Return: true if a port node should be ignored and the data to that should
+ * come from other sources instead (Windows ACPI definitions and
+ * ipu-bridge). This is currently used to ignore bad port nodes related to IPU6
+ * ("IPU?") and camera sensor devices ("LNK?") in certain Dell systems with
+ * Intel VSC.
+ */
+bool acpi_graph_ignore_port(acpi_handle handle)
+{
+	const char *path = NULL, *orig_path;
+	static bool dmi_tested, ignore_port;
+
+	if (!dmi_tested) {
+		if (dmi_name_in_vendors("Dell Inc.") &&
+		    x86_match_cpu(dell_broken_mipi_disco_cpu_gens))
+			ignore_port = true;
+
+		dmi_tested = true;
+	}
+
+	if (!ignore_port)
+		return false;
+
+	/* Check if the device is either "IPU" or "LNK" (sensor). */
+	orig_path = acpi_handle_path(handle);
+	if (!orig_path)
+		return false;
+	path = strnext(orig_path, "IPU");
+	if (!path)
+		path = strnext(orig_path, "LNK");
+	if (!path)
+		goto out_free;
+
+	if (!(isdigit(path[0]) && path[1] == '.'))
+		goto out_free;
+
+	/* Check if the node has a "PRT" prefix. */
+	path = strnext(path, "PRT");
+	if (path && isdigit(path[0]) && !path[1]) {
+		acpi_handle_debug(handle, "ignoring data node\n");
+
+		kfree(orig_path);
+		return true;
+	}
+
+out_free:
+	kfree(orig_path);
+	return false;
+}
+#endif

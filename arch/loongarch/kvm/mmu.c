@@ -494,38 +494,6 @@ bool kvm_unmap_gfn_range(struct kvm *kvm, struct kvm_gfn_range *range)
 			range->end << PAGE_SHIFT, &ctx);
 }
 
-bool kvm_set_spte_gfn(struct kvm *kvm, struct kvm_gfn_range *range)
-{
-	unsigned long prot_bits;
-	kvm_pte_t *ptep;
-	kvm_pfn_t pfn = pte_pfn(range->arg.pte);
-	gpa_t gpa = range->start << PAGE_SHIFT;
-
-	ptep = kvm_populate_gpa(kvm, NULL, gpa, 0);
-	if (!ptep)
-		return false;
-
-	/* Replacing an absent or old page doesn't need flushes */
-	if (!kvm_pte_present(NULL, ptep) || !kvm_pte_young(*ptep)) {
-		kvm_set_pte(ptep, 0);
-		return false;
-	}
-
-	/* Fill new pte if write protected or page migrated */
-	prot_bits = _PAGE_PRESENT | __READABLE;
-	prot_bits |= _CACHE_MASK & pte_val(range->arg.pte);
-
-	/*
-	 * Set _PAGE_WRITE or _PAGE_DIRTY iff old and new pte both support
-	 * _PAGE_WRITE for map_page_fast if next page write fault
-	 * _PAGE_DIRTY since gpa has already recorded as dirty page
-	 */
-	prot_bits |= __WRITEABLE & *ptep & pte_val(range->arg.pte);
-	kvm_set_pte(ptep, kvm_pfn_pte(pfn, __pgprot(prot_bits)));
-
-	return true;
-}
-
 bool kvm_age_gfn(struct kvm *kvm, struct kvm_gfn_range *range)
 {
 	kvm_ptw_ctx ctx;
@@ -675,7 +643,7 @@ static bool fault_supports_huge_mapping(struct kvm_memory_slot *memslot,
  *
  * There are several ways to safely use this helper:
  *
- * - Check mmu_invalidate_retry_hva() after grabbing the mapping level, before
+ * - Check mmu_invalidate_retry_gfn() after grabbing the mapping level, before
  *   consuming it.  In this case, mmu_lock doesn't need to be held during the
  *   lookup, but it does need to be held while checking the MMU notifier.
  *
@@ -723,7 +691,7 @@ static int host_pfn_mapping_level(struct kvm *kvm, gfn_t gfn,
 	/*
 	 * Read each entry once.  As above, a non-leaf entry can be promoted to
 	 * a huge page _during_ this walk.  Re-reading the entry could send the
-	 * walk into the weeks, e.g. p*d_large() returns false (sees the old
+	 * walk into the weeks, e.g. p*d_leaf() returns false (sees the old
 	 * value) and then p*d_offset() walks into the target huge page instead
 	 * of the old page table (sees the new value).
 	 */
@@ -855,7 +823,7 @@ retry:
 
 	/* Check if an invalidation has taken place since we got pfn */
 	spin_lock(&kvm->mmu_lock);
-	if (mmu_invalidate_retry_hva(kvm, mmu_seq, hva)) {
+	if (mmu_invalidate_retry_gfn(kvm, mmu_seq, gfn)) {
 		/*
 		 * This can happen when mappings are changed asynchronously, but
 		 * also synchronously if a COW is triggered by

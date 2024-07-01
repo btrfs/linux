@@ -316,32 +316,59 @@ static const struct cxl_root_ops acpi_root_ops = {
 	.qos_class = cxl_acpi_qos_class,
 };
 
-static int cxl_parse_cfmws(union acpi_subtable_headers *header, void *arg,
-			   const unsigned long end)
+static void del_cxl_resource(struct resource *res)
+{
+	if (!res)
+		return;
+	kfree(res->name);
+	kfree(res);
+}
+
+static struct resource *alloc_cxl_resource(resource_size_t base,
+					   resource_size_t n, int id)
+{
+	struct resource *res __free(kfree) = kzalloc(sizeof(*res), GFP_KERNEL);
+
+	if (!res)
+		return NULL;
+
+	res->start = base;
+	res->end = base + n - 1;
+	res->flags = IORESOURCE_MEM;
+	res->name = kasprintf(GFP_KERNEL, "CXL Window %d", id);
+	if (!res->name)
+		return NULL;
+
+	return no_free_ptr(res);
+}
+
+static int add_or_reset_cxl_resource(struct resource *parent, struct resource *res)
+{
+	int rc = insert_resource(parent, res);
+
+	if (rc)
+		del_cxl_resource(res);
+	return rc;
+}
+
+DEFINE_FREE(put_cxlrd, struct cxl_root_decoder *,
+	    if (!IS_ERR_OR_NULL(_T)) put_device(&_T->cxlsd.cxld.dev))
+DEFINE_FREE(del_cxl_resource, struct resource *, if (_T) del_cxl_resource(_T))
+static int __cxl_parse_cfmws(struct acpi_cedt_cfmws *cfmws,
+			     struct cxl_cfmws_context *ctx)
 {
 	int target_map[CXL_DECODER_MAX_INTERLEAVE];
-	struct cxl_cfmws_context *ctx = arg;
 	struct cxl_port *root_port = ctx->root_port;
-	struct resource *cxl_res = ctx->cxl_res;
 	struct cxl_cxims_context cxims_ctx;
-	struct cxl_root_decoder *cxlrd;
 	struct device *dev = ctx->dev;
-	struct acpi_cedt_cfmws *cfmws;
 	cxl_calc_hb_fn cxl_calc_hb;
 	struct cxl_decoder *cxld;
 	unsigned int ways, i, ig;
-	struct resource *res;
 	int rc;
 
-	cfmws = (struct acpi_cedt_cfmws *) header;
-
 	rc = cxl_acpi_cfmws_verify(dev, cfmws);
-	if (rc) {
-		dev_err(dev, "CFMWS range %#llx-%#llx not registered\n",
-			cfmws->base_hpa,
-			cfmws->base_hpa + cfmws->window_size - 1);
-		return 0;
-	}
+	if (rc)
+		return rc;
 
 	rc = eiw_to_ways(cfmws->interleave_ways, &ways);
 	if (rc)
@@ -352,38 +379,32 @@ static int cxl_parse_cfmws(union acpi_subtable_headers *header, void *arg,
 	for (i = 0; i < ways; i++)
 		target_map[i] = cfmws->interleave_targets[i];
 
-	res = kzalloc(sizeof(*res), GFP_KERNEL);
+	struct resource *res __free(del_cxl_resource) = alloc_cxl_resource(
+		cfmws->base_hpa, cfmws->window_size, ctx->id++);
 	if (!res)
 		return -ENOMEM;
 
-	res->name = kasprintf(GFP_KERNEL, "CXL Window %d", ctx->id++);
-	if (!res->name)
-		goto err_name;
-
-	res->start = cfmws->base_hpa;
-	res->end = cfmws->base_hpa + cfmws->window_size - 1;
-	res->flags = IORESOURCE_MEM;
-
 	/* add to the local resource tracking to establish a sort order */
-	rc = insert_resource(cxl_res, res);
+	rc = add_or_reset_cxl_resource(ctx->cxl_res, no_free_ptr(res));
 	if (rc)
-		goto err_insert;
+		return rc;
 
 	if (cfmws->interleave_arithmetic == ACPI_CEDT_CFMWS_ARITHMETIC_MODULO)
 		cxl_calc_hb = cxl_hb_modulo;
 	else
 		cxl_calc_hb = cxl_hb_xor;
 
-	cxlrd = cxl_root_decoder_alloc(root_port, ways, cxl_calc_hb);
+	struct cxl_root_decoder *cxlrd __free(put_cxlrd) =
+		cxl_root_decoder_alloc(root_port, ways, cxl_calc_hb);
 	if (IS_ERR(cxlrd))
-		return 0;
+		return PTR_ERR(cxlrd);
 
 	cxld = &cxlrd->cxlsd.cxld;
 	cxld->flags = cfmws_to_decoder_flags(cfmws->restrictions);
 	cxld->target_type = CXL_DECODER_HOSTONLYMEM;
 	cxld->hpa_range = (struct range) {
-		.start = res->start,
-		.end = res->end,
+		.start = cfmws->base_hpa,
+		.end = cfmws->base_hpa + cfmws->window_size - 1,
 	};
 	cxld->interleave_ways = ways;
 	/*
@@ -403,11 +424,10 @@ static int cxl_parse_cfmws(union acpi_subtable_headers *header, void *arg,
 			rc = acpi_table_parse_cedt(ACPI_CEDT_TYPE_CXIMS,
 						   cxl_parse_cxims, &cxims_ctx);
 			if (rc < 0)
-				goto err_xormap;
+				return rc;
 			if (!cxlrd->platform_data) {
 				dev_err(dev, "No CXIMS for HBIG %u\n", ig);
-				rc = -EINVAL;
-				goto err_xormap;
+				return -EINVAL;
 			}
 		}
 	}
@@ -415,27 +435,32 @@ static int cxl_parse_cfmws(union acpi_subtable_headers *header, void *arg,
 	cxlrd->qos_class = cfmws->qtg_id;
 
 	rc = cxl_decoder_add(cxld, target_map);
-err_xormap:
 	if (rc)
-		put_device(&cxld->dev);
-	else
-		rc = cxl_decoder_autoremove(dev, cxld);
-	if (rc) {
-		dev_err(dev, "Failed to add decode range: %pr", res);
 		return rc;
-	}
-	dev_dbg(dev, "add: %s node: %d range [%#llx - %#llx]\n",
-		dev_name(&cxld->dev),
-		phys_to_target_node(cxld->hpa_range.start),
-		cxld->hpa_range.start, cxld->hpa_range.end);
+	return cxl_root_decoder_autoremove(dev, no_free_ptr(cxlrd));
+}
 
+static int cxl_parse_cfmws(union acpi_subtable_headers *header, void *arg,
+			   const unsigned long end)
+{
+	struct acpi_cedt_cfmws *cfmws = (struct acpi_cedt_cfmws *)header;
+	struct cxl_cfmws_context *ctx = arg;
+	struct device *dev = ctx->dev;
+	int rc;
+
+	rc = __cxl_parse_cfmws(cfmws, ctx);
+	if (rc)
+		dev_err(dev,
+			"Failed to add decode range: [%#llx - %#llx] (%d)\n",
+			cfmws->base_hpa,
+			cfmws->base_hpa + cfmws->window_size - 1, rc);
+	else
+		dev_dbg(dev, "decode range: node: %d range [%#llx - %#llx]\n",
+			phys_to_target_node(cfmws->base_hpa), cfmws->base_hpa,
+			cfmws->base_hpa + cfmws->window_size - 1);
+
+	/* never fail cxl_acpi load for a single window failure */
 	return 0;
-
-err_insert:
-	kfree(res->name);
-err_name:
-	kfree(res);
-	return -ENOMEM;
 }
 
 __mock struct acpi_device *to_cxl_host_bridge(struct device *host,
@@ -515,20 +540,11 @@ static int get_genport_coordinates(struct device *dev, struct cxl_dport *dport)
 {
 	struct acpi_device *hb = to_cxl_host_bridge(NULL, dev);
 	u32 uid;
-	int rc;
 
 	if (kstrtou32(acpi_device_uid(hb), 0, &uid))
 		return -EINVAL;
 
-	rc = acpi_get_genport_coordinates(uid, &dport->hb_coord);
-	if (rc < 0)
-		return rc;
-
-	/* Adjust back to picoseconds from nanoseconds */
-	dport->hb_coord.read_latency *= 1000;
-	dport->hb_coord.write_latency *= 1000;
-
-	return 0;
+	return acpi_get_genport_coordinates(uid, dport->coord);
 }
 
 static int add_host_bridge_dport(struct device *match, void *arg)
@@ -680,12 +696,6 @@ static struct lock_class_key cxl_root_key;
 static void cxl_acpi_lock_reset_class(void *dev)
 {
 	device_lock_reset_class(dev);
-}
-
-static void del_cxl_resource(struct resource *res)
-{
-	kfree(res->name);
-	kfree(res);
 }
 
 static void cxl_set_public_resource(struct resource *priv, struct resource *pub)

@@ -175,9 +175,6 @@ MODULE_PARM_DESC(debug_support, "Enable debug command support");
 #define TLMI_SMP_PWD BIT(6) /* System Management */
 #define TLMI_CERT    BIT(7) /* Certificate Based */
 
-#define to_tlmi_pwd_setting(kobj)  container_of(kobj, struct tlmi_pwd_setting, kobj)
-#define to_tlmi_attr_setting(kobj)  container_of(kobj, struct tlmi_attr_setting, kobj)
-
 static const struct tlmi_err_codes tlmi_errs[] = {
 	{"Success", 0},
 	{"Not Supported", -EOPNOTSUPP},
@@ -195,8 +192,18 @@ static const char * const level_options[] = {
 	[TLMI_LEVEL_MASTER] = "master",
 };
 static struct think_lmi tlmi_priv;
-static struct class *fw_attr_class;
+static const struct class *fw_attr_class;
 static DEFINE_MUTEX(tlmi_mutex);
+
+static inline struct tlmi_pwd_setting *to_tlmi_pwd_setting(struct kobject *kobj)
+{
+	return container_of(kobj, struct tlmi_pwd_setting, kobj);
+}
+
+static inline struct tlmi_attr_setting *to_tlmi_attr_setting(struct kobject *kobj)
+{
+	return container_of(kobj, struct tlmi_attr_setting, kobj);
+}
 
 /* Convert BIOS WMI error string to suitable error code */
 static int tlmi_errstr_to_err(const char *errstr)
@@ -1009,7 +1016,16 @@ static ssize_t current_value_store(struct kobject *kobj,
 		 * Note - this sets the variable and then the password as separate
 		 * WMI calls. Function tlmi_save_bios_settings will error if the
 		 * password is incorrect.
+		 * Workstation's require the opcode to be set before changing the
+		 * attribute.
 		 */
+		if (tlmi_priv.pwd_admin->valid && tlmi_priv.pwd_admin->password[0]) {
+			ret = tlmi_opcode_setting("WmiOpcodePasswordAdmin",
+						  tlmi_priv.pwd_admin->password);
+			if (ret)
+				goto out;
+		}
+
 		set_str = kasprintf(GFP_KERNEL, "%s,%s;", setting->display_name,
 				    new_setting);
 		if (!set_str) {
@@ -1021,17 +1037,10 @@ static ssize_t current_value_store(struct kobject *kobj,
 		if (ret)
 			goto out;
 
-		if (tlmi_priv.save_mode == TLMI_SAVE_BULK) {
+		if (tlmi_priv.save_mode == TLMI_SAVE_BULK)
 			tlmi_priv.save_required = true;
-		} else {
-			if (tlmi_priv.pwd_admin->valid && tlmi_priv.pwd_admin->password[0]) {
-				ret = tlmi_opcode_setting("WmiOpcodePasswordAdmin",
-							  tlmi_priv.pwd_admin->password);
-				if (ret)
-					goto out;
-			}
+		else
 			ret = tlmi_save_bios_settings("");
-		}
 	} else { /* old non-opcode based authentication method (deprecated) */
 		if (tlmi_priv.pwd_admin->valid && tlmi_priv.pwd_admin->password[0]) {
 			auth_str = kasprintf(GFP_KERNEL, "%s,%s,%s;",

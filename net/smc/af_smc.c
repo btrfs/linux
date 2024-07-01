@@ -53,6 +53,7 @@
 #include "smc_stats.h"
 #include "smc_tracepoint.h"
 #include "smc_sysctl.h"
+#include "smc_loopback.h"
 
 static DEFINE_MUTEX(smc_server_lgr_pending);	/* serialize link group
 						 * creation on server
@@ -177,7 +178,7 @@ static struct smc_hashinfo smc_v6_hashinfo = {
 	.lock = __RW_LOCK_UNLOCKED(smc_v6_hashinfo.lock),
 };
 
-int smc_hash_sk(struct sock *sk)
+static int smc_hash_sk(struct sock *sk)
 {
 	struct smc_hashinfo *h = sk->sk_prot->h.smc_hash;
 	struct hlist_head *head;
@@ -191,9 +192,8 @@ int smc_hash_sk(struct sock *sk)
 
 	return 0;
 }
-EXPORT_SYMBOL_GPL(smc_hash_sk);
 
-void smc_unhash_sk(struct sock *sk)
+static void smc_unhash_sk(struct sock *sk)
 {
 	struct smc_hashinfo *h = sk->sk_prot->h.smc_hash;
 
@@ -202,7 +202,6 @@ void smc_unhash_sk(struct sock *sk)
 		sock_prot_inuse_add(sock_net(sk), sk->sk_prot, -1);
 	write_unlock_bh(&h->lock);
 }
-EXPORT_SYMBOL_GPL(smc_unhash_sk);
 
 /* This will be called before user really release sock_lock. So do the
  * work which we didn't do because of user hold the sock_lock in the
@@ -460,29 +459,11 @@ out:
 static void smc_adjust_sock_bufsizes(struct sock *nsk, struct sock *osk,
 				     unsigned long mask)
 {
-	struct net *nnet = sock_net(nsk);
-
 	nsk->sk_userlocks = osk->sk_userlocks;
-	if (osk->sk_userlocks & SOCK_SNDBUF_LOCK) {
+	if (osk->sk_userlocks & SOCK_SNDBUF_LOCK)
 		nsk->sk_sndbuf = osk->sk_sndbuf;
-	} else {
-		if (mask == SK_FLAGS_SMC_TO_CLC)
-			WRITE_ONCE(nsk->sk_sndbuf,
-				   READ_ONCE(nnet->ipv4.sysctl_tcp_wmem[1]));
-		else
-			WRITE_ONCE(nsk->sk_sndbuf,
-				   2 * READ_ONCE(nnet->smc.sysctl_wmem));
-	}
-	if (osk->sk_userlocks & SOCK_RCVBUF_LOCK) {
+	if (osk->sk_userlocks & SOCK_RCVBUF_LOCK)
 		nsk->sk_rcvbuf = osk->sk_rcvbuf;
-	} else {
-		if (mask == SK_FLAGS_SMC_TO_CLC)
-			WRITE_ONCE(nsk->sk_rcvbuf,
-				   READ_ONCE(nnet->ipv4.sysctl_tcp_rmem[1]));
-		else
-			WRITE_ONCE(nsk->sk_rcvbuf,
-				   2 * READ_ONCE(nnet->smc.sysctl_rmem));
-	}
 }
 
 static void smc_copy_sock_settings(struct sock *nsk, struct sock *osk,
@@ -924,6 +905,7 @@ static int smc_switch_to_fallback(struct smc_sock *smc, int reason_code)
 		smc->clcsock->file->private_data = smc->clcsock;
 		smc->clcsock->wq.fasync_list =
 			smc->sk.sk_socket->wq.fasync_list;
+		smc->sk.sk_socket->wq.fasync_list = NULL;
 
 		/* There might be some wait entries remaining
 		 * in smc sk->sk_wq and they should be woken up
@@ -1045,7 +1027,7 @@ static int smc_find_ism_v2_device_clnt(struct smc_sock *smc,
 	int rc = SMC_CLC_DECL_NOSMCDDEV;
 	struct smcd_dev *smcd;
 	int i = 1, entry = 1;
-	bool is_virtual;
+	bool is_emulated;
 	u16 chid;
 
 	if (smcd_indicated(ini->smc_type_v1))
@@ -1057,12 +1039,12 @@ static int smc_find_ism_v2_device_clnt(struct smc_sock *smc,
 		chid = smc_ism_get_chid(smcd);
 		if (!smc_find_ism_v2_is_unique_chid(chid, ini, i))
 			continue;
-		is_virtual = __smc_ism_is_virtual(chid);
+		is_emulated = __smc_ism_is_emulated(chid);
 		if (!smc_pnet_is_pnetid_set(smcd->pnetid) ||
 		    smc_pnet_is_ndev_pnetid(sock_net(&smc->sk), smcd->pnetid)) {
-			if (is_virtual && entry == SMCD_CLC_MAX_V2_GID_ENTRIES)
+			if (is_emulated && entry == SMCD_CLC_MAX_V2_GID_ENTRIES)
 				/* It's the last GID-CHID entry left in CLC
-				 * Proposal SMC-Dv2 extension, but a virtual
+				 * Proposal SMC-Dv2 extension, but an Emulated-
 				 * ISM device will take two entries. So give
 				 * up it and try the next potential ISM device.
 				 */
@@ -1072,7 +1054,7 @@ static int smc_find_ism_v2_device_clnt(struct smc_sock *smc,
 			ini->is_smcd = true;
 			rc = 0;
 			i++;
-			entry = is_virtual ? entry + 2 : entry + 1;
+			entry = is_emulated ? entry + 2 : entry + 1;
 			if (entry > SMCD_CLC_MAX_V2_GID_ENTRIES)
 				break;
 		}
@@ -1413,10 +1395,10 @@ static int smc_connect_ism(struct smc_sock *smc,
 		if (rc)
 			return rc;
 
-		if (__smc_ism_is_virtual(ini->ism_chid[ini->ism_selected]))
+		if (__smc_ism_is_emulated(ini->ism_chid[ini->ism_selected]))
 			ini->ism_peer_gid[ini->ism_selected].gid_ext =
 						ntohll(aclc->d1.gid_ext);
-		/* for non-virtual ISM devices, peer gid_ext remains 0. */
+		/* for non-Emulated-ISM devices, peer gid_ext remains 0. */
 	}
 	ini->ism_peer_gid[ini->ism_selected].gid = ntohll(aclc->d0.gid);
 
@@ -1436,6 +1418,14 @@ static int smc_connect_ism(struct smc_sock *smc,
 	}
 
 	smc_conn_save_peer_info(smc, aclc);
+
+	if (smc_ism_support_dmb_nocopy(smc->conn.lgr->smcd)) {
+		rc = smcd_buf_attach(smc);
+		if (rc) {
+			rc = SMC_CLC_DECL_MEM;	/* try to fallback */
+			goto connect_abort;
+		}
+	}
 	smc_close_init(smc);
 	smc_rx_init(smc);
 	smc_tx_init(smc);
@@ -2117,10 +2107,10 @@ static void smc_check_ism_v2_match(struct smc_init_info *ini,
 		if (smc_ism_get_chid(smcd) == proposed_chid &&
 		    !smc_ism_cantalk(proposed_gid, ISM_RESERVED_VLANID, smcd)) {
 			ini->ism_peer_gid[*matches].gid = proposed_gid->gid;
-			if (__smc_ism_is_virtual(proposed_chid))
+			if (__smc_ism_is_emulated(proposed_chid))
 				ini->ism_peer_gid[*matches].gid_ext =
 							proposed_gid->gid_ext;
-				/* non-virtual ISM's peer gid_ext remains 0. */
+				/* non-Emulated-ISM's peer gid_ext remains 0. */
 			ini->ism_dev[*matches] = smcd;
 			(*matches)++;
 			break;
@@ -2170,10 +2160,10 @@ static void smc_find_ism_v2_device_serv(struct smc_sock *new_smc,
 		smcd_gid.gid = ntohll(smcd_v2_ext->gidchid[i].gid);
 		smcd_gid.gid_ext = 0;
 		chid = ntohs(smcd_v2_ext->gidchid[i].chid);
-		if (__smc_ism_is_virtual(chid)) {
+		if (__smc_ism_is_emulated(chid)) {
 			if ((i + 1) == smc_v2_ext->hdr.ism_gid_cnt ||
 			    chid != ntohs(smcd_v2_ext->gidchid[i + 1].chid))
-				/* each virtual ISM device takes two GID-CHID
+				/* each Emulated-ISM device takes two GID-CHID
 				 * entries and CHID of the second entry repeats
 				 * that of the first entry.
 				 *
@@ -2540,6 +2530,14 @@ static void smc_listen_work(struct work_struct *work)
 		mutex_unlock(&smc_server_lgr_pending);
 	}
 	smc_conn_save_peer_info(new_smc, cclc);
+
+	if (ini->is_smcd &&
+	    smc_ism_support_dmb_nocopy(new_smc->conn.lgr->smcd)) {
+		rc = smcd_buf_attach(new_smc);
+		if (rc)
+			goto out_decl;
+	}
+
 	smc_listen_out_connected(new_smc);
 	SMC_STAT_SERV_SUCC_INC(sock_net(newclcsock->sk), ini);
 	goto out_free;
@@ -2673,7 +2671,7 @@ out:
 }
 
 static int smc_accept(struct socket *sock, struct socket *new_sock,
-		      int flags, bool kern)
+		      struct proto_accept_arg *arg)
 {
 	struct sock *sk = sock->sk, *nsk;
 	DECLARE_WAITQUEUE(wait, current);
@@ -2692,7 +2690,7 @@ static int smc_accept(struct socket *sock, struct socket *new_sock,
 	}
 
 	/* Wait for an incoming connection */
-	timeo = sock_rcvtimeo(sk, flags & O_NONBLOCK);
+	timeo = sock_rcvtimeo(sk, arg->flags & O_NONBLOCK);
 	add_wait_queue_exclusive(sk_sleep(sk), &wait);
 	while (!(nsk = smc_accept_dequeue(sk, new_sock))) {
 		set_current_state(TASK_INTERRUPTIBLE);
@@ -2719,7 +2717,7 @@ static int smc_accept(struct socket *sock, struct socket *new_sock,
 	if (rc)
 		goto out;
 
-	if (lsmc->sockopt_defer_accept && !(flags & O_NONBLOCK)) {
+	if (lsmc->sockopt_defer_accept && !(arg->flags & O_NONBLOCK)) {
 		/* wait till data arrives on the socket */
 		timeo = msecs_to_jiffies(lsmc->sockopt_defer_accept *
 								MSEC_PER_SEC);
@@ -3556,15 +3554,23 @@ static int __init smc_init(void)
 		goto out_sock;
 	}
 
+	rc = smc_loopback_init();
+	if (rc) {
+		pr_err("%s: smc_loopback_init fails with %d\n", __func__, rc);
+		goto out_ib;
+	}
+
 	rc = tcp_register_ulp(&smc_ulp_ops);
 	if (rc) {
 		pr_err("%s: tcp_ulp_register fails with %d\n", __func__, rc);
-		goto out_ib;
+		goto out_lo;
 	}
 
 	static_branch_enable(&tcp_have_smc);
 	return 0;
 
+out_lo:
+	smc_loopback_exit();
 out_ib:
 	smc_ib_unregister_client();
 out_sock:
@@ -3602,6 +3608,7 @@ static void __exit smc_exit(void)
 	tcp_unregister_ulp(&smc_ulp_ops);
 	sock_unregister(PF_SMC);
 	smc_core_exit();
+	smc_loopback_exit();
 	smc_ib_unregister_client();
 	smc_ism_exit();
 	destroy_workqueue(smc_close_wq);

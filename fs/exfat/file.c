@@ -35,32 +35,39 @@ static int exfat_cont_expand(struct inode *inode, loff_t size)
 	if (new_num_clusters == num_clusters)
 		goto out;
 
-	exfat_chain_set(&clu, ei->start_clu, num_clusters, ei->flags);
-	ret = exfat_find_last_cluster(sb, &clu, &last_clu);
-	if (ret)
-		return ret;
+	if (num_clusters) {
+		exfat_chain_set(&clu, ei->start_clu, num_clusters, ei->flags);
+		ret = exfat_find_last_cluster(sb, &clu, &last_clu);
+		if (ret)
+			return ret;
 
-	clu.dir = (last_clu == EXFAT_EOF_CLUSTER) ?
-			EXFAT_EOF_CLUSTER : last_clu + 1;
+		clu.dir = last_clu + 1;
+	} else {
+		last_clu = EXFAT_EOF_CLUSTER;
+		clu.dir = EXFAT_EOF_CLUSTER;
+	}
+
 	clu.size = 0;
 	clu.flags = ei->flags;
 
 	ret = exfat_alloc_cluster(inode, new_num_clusters - num_clusters,
-			&clu, IS_DIRSYNC(inode));
+			&clu, inode_needs_sync(inode));
 	if (ret)
 		return ret;
 
 	/* Append new clusters to chain */
-	if (clu.flags != ei->flags) {
-		exfat_chain_cont_cluster(sb, ei->start_clu, num_clusters);
-		ei->flags = ALLOC_FAT_CHAIN;
-	}
-	if (clu.flags == ALLOC_FAT_CHAIN)
-		if (exfat_ent_set(sb, last_clu, clu.dir))
-			goto free_clu;
+	if (num_clusters) {
+		if (clu.flags != ei->flags)
+			if (exfat_chain_cont_cluster(sb, ei->start_clu, num_clusters))
+				goto free_clu;
 
-	if (num_clusters == 0)
+		if (clu.flags == ALLOC_FAT_CHAIN)
+			if (exfat_ent_set(sb, last_clu, clu.dir))
+				goto free_clu;
+	} else
 		ei->start_clu = clu.dir;
+
+	ei->flags = clu.flags;
 
 out:
 	inode_set_mtime_to_ts(inode, inode_set_ctime_current(inode));
@@ -70,11 +77,10 @@ out:
 	ei->i_size_aligned = round_up(size, sb->s_blocksize);
 	ei->i_size_ondisk = ei->i_size_aligned;
 	inode->i_blocks = round_up(size, sbi->cluster_size) >> 9;
-
-	if (IS_DIRSYNC(inode))
-		return write_inode_now(inode, 1);
-
 	mark_inode_dirty(inode);
+
+	if (IS_SYNC(inode))
+		return write_inode_now(inode, 1);
 
 	return 0;
 

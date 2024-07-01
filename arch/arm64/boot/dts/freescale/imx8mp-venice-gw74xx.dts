@@ -196,7 +196,7 @@
 	status = "okay";
 
 	tpm@0 {
-		compatible = "tcg,tpm_tis-spi";
+		compatible = "atmel,attpm20p", "tcg,tpm_tis-spi";
 		reg = <0x0>;
 		spi-max-frequency = <36000000>;
 	};
@@ -402,6 +402,12 @@
 				gw,mode = <2>;
 				reg = <0x9c>;
 				label = "vdd_dram";
+			};
+
+			channel@9e {
+				gw,mode = <2>;
+				reg = <0x9e>;
+				label = "vdd_1p0";
 			};
 
 			channel@a2 {

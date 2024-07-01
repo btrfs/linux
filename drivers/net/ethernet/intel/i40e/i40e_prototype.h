@@ -371,13 +371,6 @@ void i40e_set_pci_config_data(struct i40e_hw *hw, u16 link_status);
 
 int i40e_set_mac_type(struct i40e_hw *hw);
 
-extern struct i40e_rx_ptype_decoded i40e_ptype_lookup[];
-
-static inline struct i40e_rx_ptype_decoded decode_rx_desc_ptype(u8 ptype)
-{
-	return i40e_ptype_lookup[ptype];
-}
-
 /**
  * i40e_virtchnl_link_speed - Convert AdminQ link_speed to virtchnl definition
  * @link_speed: the speed to convert
@@ -567,8 +560,7 @@ static inline bool i40e_is_fw_ver_lt(struct i40e_hw *hw, u16 maj, u16 min)
  **/
 static inline bool i40e_is_fw_ver_eq(struct i40e_hw *hw, u16 maj, u16 min)
 {
-	return (hw->aq.fw_maj_ver > maj ||
-		(hw->aq.fw_maj_ver == maj && hw->aq.fw_min_ver == min));
+	return (hw->aq.fw_maj_ver == maj && hw->aq.fw_min_ver == min);
 }
 
 #endif /* _I40E_PROTOTYPE_H_ */

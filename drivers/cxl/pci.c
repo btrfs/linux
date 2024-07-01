@@ -382,7 +382,7 @@ static int cxl_pci_mbox_send(struct cxl_memdev_state *mds,
 	return rc;
 }
 
-static int cxl_pci_setup_mailbox(struct cxl_memdev_state *mds)
+static int cxl_pci_setup_mailbox(struct cxl_memdev_state *mds, bool irq_avail)
 {
 	struct cxl_dev_state *cxlds = &mds->cxlds;
 	const int cap = readl(cxlds->regs.mbox + CXLDEV_MBOX_CAPS_OFFSET);
@@ -441,7 +441,7 @@ static int cxl_pci_setup_mailbox(struct cxl_memdev_state *mds)
 	INIT_DELAYED_WORK(&mds->security.poll_dwork, cxl_mbox_sanitize_work);
 
 	/* background command interrupts are optional */
-	if (!(cap & CXLDEV_MBOX_CAP_BG_CMD_IRQ))
+	if (!(cap & CXLDEV_MBOX_CAP_BG_CMD_IRQ) || !irq_avail)
 		return 0;
 
 	msgnum = FIELD_GET(CXLDEV_MBOX_CAP_IRQ_MSGNUM_MASK, cap);
@@ -588,7 +588,7 @@ static int cxl_mem_alloc_event_buf(struct cxl_memdev_state *mds)
 	return devm_add_action_or_reset(mds->cxlds.dev, free_event_buf, buf);
 }
 
-static int cxl_alloc_irq_vectors(struct pci_dev *pdev)
+static bool cxl_alloc_irq_vectors(struct pci_dev *pdev)
 {
 	int nvecs;
 
@@ -605,9 +605,9 @@ static int cxl_alloc_irq_vectors(struct pci_dev *pdev)
 				      PCI_IRQ_MSIX | PCI_IRQ_MSI);
 	if (nvecs < 1) {
 		dev_dbg(&pdev->dev, "Failed to alloc irq vectors: %d\n", nvecs);
-		return -ENXIO;
+		return false;
 	}
-	return 0;
+	return true;
 }
 
 static irqreturn_t cxl_event_thread(int irq, void *id)
@@ -743,7 +743,7 @@ static bool cxl_event_int_is_fw(u8 setting)
 }
 
 static int cxl_event_config(struct pci_host_bridge *host_bridge,
-			    struct cxl_memdev_state *mds)
+			    struct cxl_memdev_state *mds, bool irq_avail)
 {
 	struct cxl_event_interrupt_policy policy;
 	int rc;
@@ -754,6 +754,11 @@ static int cxl_event_config(struct pci_host_bridge *host_bridge,
 	 */
 	if (!host_bridge->native_cxl_error)
 		return 0;
+
+	if (!irq_avail) {
+		dev_info(mds->cxlds.dev, "No interrupt support, disable event processing.\n");
+		return 0;
+	}
 
 	rc = cxl_mem_alloc_event_buf(mds);
 	if (rc)
@@ -789,6 +794,7 @@ static int cxl_pci_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	struct cxl_register_map map;
 	struct cxl_memdev *cxlmd;
 	int i, rc, pmu_count;
+	bool irq_avail;
 
 	/*
 	 * Double check the anonymous union trickery in struct cxl_regs
@@ -811,7 +817,7 @@ static int cxl_pci_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	cxlds->rcd = is_cxl_restricted(pdev);
 	cxlds->serial = pci_get_dsn(pdev);
 	cxlds->cxl_dvsec = pci_find_dvsec_capability(
-		pdev, PCI_DVSEC_VENDOR_ID_CXL, CXL_DVSEC_PCIE_DEVICE);
+		pdev, PCI_VENDOR_ID_CXL, CXL_DVSEC_PCIE_DEVICE);
 	if (!cxlds->cxl_dvsec)
 		dev_warn(&pdev->dev,
 			 "Device DVSEC not present, skip CXL.mem init\n");
@@ -846,11 +852,9 @@ static int cxl_pci_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	else
 		dev_warn(&pdev->dev, "Media not active (%d)\n", rc);
 
-	rc = cxl_alloc_irq_vectors(pdev);
-	if (rc)
-		return rc;
+	irq_avail = cxl_alloc_irq_vectors(pdev);
 
-	rc = cxl_pci_setup_mailbox(mds);
+	rc = cxl_pci_setup_mailbox(mds, irq_avail);
 	if (rc)
 		return rc;
 
@@ -909,7 +913,7 @@ static int cxl_pci_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 		}
 	}
 
-	rc = cxl_event_config(host_bridge, mds);
+	rc = cxl_event_config(host_bridge, mds, irq_avail);
 	if (rc)
 		return rc;
 
@@ -953,11 +957,33 @@ static void cxl_error_resume(struct pci_dev *pdev)
 		 dev->driver ? "successful" : "failed");
 }
 
+static void cxl_reset_done(struct pci_dev *pdev)
+{
+	struct cxl_dev_state *cxlds = pci_get_drvdata(pdev);
+	struct cxl_memdev *cxlmd = cxlds->cxlmd;
+	struct device *dev = &pdev->dev;
+
+	/*
+	 * FLR does not expect to touch the HDM decoders and related
+	 * registers.  SBR, however, will wipe all device configurations.
+	 * Issue a warning if there was an active decoder before the reset
+	 * that no longer exists.
+	 */
+	guard(device)(&cxlmd->dev);
+	if (cxlmd->endpoint &&
+	    cxl_endpoint_decoder_reset_detected(cxlmd->endpoint)) {
+		dev_crit(dev, "SBR happened without memory regions removal.\n");
+		dev_crit(dev, "System may be unstable if regions hosted system memory.\n");
+		add_taint(TAINT_USER, LOCKDEP_STILL_OK);
+	}
+}
+
 static const struct pci_error_handlers cxl_error_handlers = {
 	.error_detected	= cxl_error_detected,
 	.slot_reset	= cxl_slot_reset,
 	.resume		= cxl_error_resume,
 	.cor_error_detected	= cxl_cor_error_detected,
+	.reset_done	= cxl_reset_done,
 };
 
 static struct pci_driver cxl_pci_driver = {
@@ -971,8 +997,8 @@ static struct pci_driver cxl_pci_driver = {
 };
 
 #define CXL_EVENT_HDR_FLAGS_REC_SEVERITY GENMASK(1, 0)
-static void cxl_cper_event_call(enum cxl_event_type ev_type,
-				struct cxl_cper_event_rec *rec)
+static void cxl_handle_cper_event(enum cxl_event_type ev_type,
+				  struct cxl_cper_event_rec *rec)
 {
 	struct cper_cxl_event_devid *device_id = &rec->hdr.device_id;
 	struct pci_dev *pdev __free(pci_dev_put) = NULL;
@@ -981,13 +1007,17 @@ static void cxl_cper_event_call(enum cxl_event_type ev_type,
 	unsigned int devfn;
 	u32 hdr_flags;
 
+	pr_debug("CPER event %d for device %u:%u:%u.%u\n", ev_type,
+		 device_id->segment_num, device_id->bus_num,
+		 device_id->device_num, device_id->func_num);
+
 	devfn = PCI_DEVFN(device_id->device_num, device_id->func_num);
 	pdev = pci_get_domain_bus_and_slot(device_id->segment_num,
 					   device_id->bus_num, devfn);
 	if (!pdev)
 		return;
 
-	guard(pci_dev)(pdev);
+	guard(device)(&pdev->dev);
 	if (pdev->driver != &cxl_pci_driver)
 		return;
 
@@ -1003,25 +1033,35 @@ static void cxl_cper_event_call(enum cxl_event_type ev_type,
 			       &uuid_null, &rec->event);
 }
 
+static void cxl_cper_work_fn(struct work_struct *work)
+{
+	struct cxl_cper_work_data wd;
+
+	while (cxl_cper_kfifo_get(&wd))
+		cxl_handle_cper_event(wd.event_type, &wd.rec);
+}
+static DECLARE_WORK(cxl_cper_work, cxl_cper_work_fn);
+
 static int __init cxl_pci_driver_init(void)
 {
 	int rc;
 
-	rc = cxl_cper_register_callback(cxl_cper_event_call);
+	rc = pci_register_driver(&cxl_pci_driver);
 	if (rc)
 		return rc;
 
-	rc = pci_register_driver(&cxl_pci_driver);
+	rc = cxl_cper_register_work(&cxl_cper_work);
 	if (rc)
-		cxl_cper_unregister_callback(cxl_cper_event_call);
+		pci_unregister_driver(&cxl_pci_driver);
 
 	return rc;
 }
 
 static void __exit cxl_pci_driver_exit(void)
 {
+	cxl_cper_unregister_work(&cxl_cper_work);
+	cancel_work_sync(&cxl_cper_work);
 	pci_unregister_driver(&cxl_pci_driver);
-	cxl_cper_unregister_callback(cxl_cper_event_call);
 }
 
 module_init(cxl_pci_driver_init);

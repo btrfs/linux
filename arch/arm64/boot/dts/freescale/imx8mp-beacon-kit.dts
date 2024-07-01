@@ -234,7 +234,7 @@
 	status = "okay";
 
 	tpm: tpm@0 {
-		compatible = "infineon,slb9670";
+		compatible = "infineon,slb9670", "tcg,tpm_tis-spi";
 		reg = <0>;
 		pinctrl-names = "default";
 		pinctrl-0 = <&pinctrl_tpm>;
@@ -340,7 +340,7 @@
 &i2c3 {
 	/* Connected to USB Hub */
 	usb-typec@52 {
-		compatible = "nxp,ptn5110";
+		compatible = "nxp,ptn5110", "tcpci";
 		reg = <0x52>;
 		pinctrl-names = "default";
 		pinctrl-0 = <&pinctrl_typec>;

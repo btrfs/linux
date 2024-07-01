@@ -98,7 +98,7 @@ struct nouveau_cli {
 		bool disabled;
 	} uvmm;
 
-	struct nouveau_sched sched;
+	struct nouveau_sched *sched;
 
 	const struct nvif_mclass *mem;
 
@@ -276,6 +276,7 @@ struct nouveau_drm {
 	/* modesetting */
 	struct nvbios vbios;
 	struct nouveau_display *display;
+	bool headless;
 	struct work_struct hpd_work;
 	spinlock_t hpd_lock;
 	u32 hpd_pending;

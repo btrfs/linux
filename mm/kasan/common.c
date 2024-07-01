@@ -55,7 +55,7 @@ void kasan_set_track(struct kasan_track *track, depot_stack_handle_t stack)
 	u64 ts_nsec = local_clock();
 
 	track->cpu = cpu;
-	track->timestamp = ts_nsec >> 3;
+	track->timestamp = ts_nsec >> 9;
 #endif /* CONFIG_KASAN_EXTRA_INFO */
 	track->pid = current->pid;
 	track->stack = stack;
@@ -65,8 +65,7 @@ void kasan_save_track(struct kasan_track *track, gfp_t flags)
 {
 	depot_stack_handle_t stack;
 
-	stack = kasan_save_stack(flags,
-			STACK_DEPOT_FLAG_CAN_ALLOC | STACK_DEPOT_FLAG_GET);
+	stack = kasan_save_stack(flags, STACK_DEPOT_FLAG_CAN_ALLOC);
 	kasan_set_track(track, stack);
 }
 
@@ -266,10 +265,9 @@ bool __kasan_slab_free(struct kmem_cache *cache, void *object,
 		return true;
 
 	/*
-	 * If the object is not put into quarantine, it will likely be quickly
-	 * reallocated. Thus, release its metadata now.
+	 * Note: Keep per-object metadata to allow KASAN print stack traces for
+	 * use-after-free-before-realloc bugs.
 	 */
-	kasan_release_object_meta(cache, object);
 
 	/* Let slab put the object onto the freelist. */
 	return false;
@@ -534,7 +532,7 @@ void __kasan_mempool_unpoison_object(void *ptr, size_t size, unsigned long ip)
 		return;
 
 	/* Unpoison the object and save alloc info for non-kmalloc() allocations. */
-	unpoison_slab_object(slab->slab_cache, ptr, size, flags);
+	unpoison_slab_object(slab->slab_cache, ptr, flags, false);
 
 	/* Poison the redzone and save alloc info for kmalloc() allocations. */
 	if (is_kmalloc_cache(slab->slab_cache))

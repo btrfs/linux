@@ -19,6 +19,7 @@ const struct _kvm_stats_desc kvm_vcpu_stats_desc[] = {
 	STATS_DESC_COUNTER(VCPU, idle_exits),
 	STATS_DESC_COUNTER(VCPU, cpucfg_exits),
 	STATS_DESC_COUNTER(VCPU, signal_exits),
+	STATS_DESC_COUNTER(VCPU, hypercall_exits)
 };
 
 const struct kvm_stats_header kvm_vcpu_stats_header = {
@@ -247,7 +248,101 @@ int kvm_arch_vcpu_ioctl_set_mpstate(struct kvm_vcpu *vcpu,
 int kvm_arch_vcpu_ioctl_set_guest_debug(struct kvm_vcpu *vcpu,
 					struct kvm_guest_debug *dbg)
 {
-	return -EINVAL;
+	if (dbg->control & ~KVM_GUESTDBG_VALID_MASK)
+		return -EINVAL;
+
+	if (dbg->control & KVM_GUESTDBG_ENABLE)
+		vcpu->guest_debug = dbg->control;
+	else
+		vcpu->guest_debug = 0;
+
+	return 0;
+}
+
+static inline int kvm_set_cpuid(struct kvm_vcpu *vcpu, u64 val)
+{
+	int cpuid;
+	struct kvm_phyid_map *map;
+	struct loongarch_csrs *csr = vcpu->arch.csr;
+
+	if (val >= KVM_MAX_PHYID)
+		return -EINVAL;
+
+	map = vcpu->kvm->arch.phyid_map;
+	cpuid = kvm_read_sw_gcsr(csr, LOONGARCH_CSR_CPUID);
+
+	spin_lock(&vcpu->kvm->arch.phyid_map_lock);
+	if ((cpuid < KVM_MAX_PHYID) && map->phys_map[cpuid].enabled) {
+		/* Discard duplicated CPUID set operation */
+		if (cpuid == val) {
+			spin_unlock(&vcpu->kvm->arch.phyid_map_lock);
+			return 0;
+		}
+
+		/*
+		 * CPUID is already set before
+		 * Forbid changing to a different CPUID at runtime
+		 */
+		spin_unlock(&vcpu->kvm->arch.phyid_map_lock);
+		return -EINVAL;
+	}
+
+	if (map->phys_map[val].enabled) {
+		/* Discard duplicated CPUID set operation */
+		if (vcpu == map->phys_map[val].vcpu) {
+			spin_unlock(&vcpu->kvm->arch.phyid_map_lock);
+			return 0;
+		}
+
+		/*
+		 * New CPUID is already set with other vcpu
+		 * Forbid sharing the same CPUID between different vcpus
+		 */
+		spin_unlock(&vcpu->kvm->arch.phyid_map_lock);
+		return -EINVAL;
+	}
+
+	kvm_write_sw_gcsr(csr, LOONGARCH_CSR_CPUID, val);
+	map->phys_map[val].enabled	= true;
+	map->phys_map[val].vcpu		= vcpu;
+	spin_unlock(&vcpu->kvm->arch.phyid_map_lock);
+
+	return 0;
+}
+
+static inline void kvm_drop_cpuid(struct kvm_vcpu *vcpu)
+{
+	int cpuid;
+	struct kvm_phyid_map *map;
+	struct loongarch_csrs *csr = vcpu->arch.csr;
+
+	map = vcpu->kvm->arch.phyid_map;
+	cpuid = kvm_read_sw_gcsr(csr, LOONGARCH_CSR_CPUID);
+
+	if (cpuid >= KVM_MAX_PHYID)
+		return;
+
+	spin_lock(&vcpu->kvm->arch.phyid_map_lock);
+	if (map->phys_map[cpuid].enabled) {
+		map->phys_map[cpuid].vcpu = NULL;
+		map->phys_map[cpuid].enabled = false;
+		kvm_write_sw_gcsr(csr, LOONGARCH_CSR_CPUID, KVM_MAX_PHYID);
+	}
+	spin_unlock(&vcpu->kvm->arch.phyid_map_lock);
+}
+
+struct kvm_vcpu *kvm_get_vcpu_by_cpuid(struct kvm *kvm, int cpuid)
+{
+	struct kvm_phyid_map *map;
+
+	if (cpuid >= KVM_MAX_PHYID)
+		return NULL;
+
+	map = kvm->arch.phyid_map;
+	if (!map->phys_map[cpuid].enabled)
+		return NULL;
+
+	return map->phys_map[cpuid].vcpu;
 }
 
 static int _kvm_getcsr(struct kvm_vcpu *vcpu, unsigned int id, u64 *val)
@@ -282,6 +377,9 @@ static int _kvm_setcsr(struct kvm_vcpu *vcpu, unsigned int id, u64 val)
 	if (get_gcsr_flag(id) & INVALID_GCSR)
 		return -EINVAL;
 
+	if (id == LOONGARCH_CSR_CPUID)
+		return kvm_set_cpuid(vcpu, val);
+
 	if (id == LOONGARCH_CSR_ESTAT) {
 		/* ESTAT IP0~IP7 inject through GINTC */
 		gintc = (val >> 2) & 0xff;
@@ -298,74 +396,92 @@ static int _kvm_setcsr(struct kvm_vcpu *vcpu, unsigned int id, u64 val)
 	return ret;
 }
 
-static int _kvm_get_cpucfg(int id, u64 *v)
+static int _kvm_get_cpucfg_mask(int id, u64 *v)
 {
-	int ret = 0;
-
-	if (id < 0 && id >= KVM_MAX_CPUCFG_REGS)
+	if (id < 0 || id >= KVM_MAX_CPUCFG_REGS)
 		return -EINVAL;
 
 	switch (id) {
-	case 2:
-		/* Return CPUCFG2 features which have been supported by KVM */
+	case LOONGARCH_CPUCFG0:
+		*v = GENMASK(31, 0);
+		return 0;
+	case LOONGARCH_CPUCFG1:
+		/* CPUCFG1_MSGINT is not supported by KVM */
+		*v = GENMASK(25, 0);
+		return 0;
+	case LOONGARCH_CPUCFG2:
+		/* CPUCFG2 features unconditionally supported by KVM */
 		*v = CPUCFG2_FP     | CPUCFG2_FPSP  | CPUCFG2_FPDP     |
 		     CPUCFG2_FPVERS | CPUCFG2_LLFTP | CPUCFG2_LLFTPREV |
-		     CPUCFG2_LAM;
+		     CPUCFG2_LSPW | CPUCFG2_LAM;
 		/*
-		 * If LSX is supported by CPU, it is also supported by KVM,
-		 * as we implement it.
+		 * For the ISA extensions listed below, if one is supported
+		 * by the host, then it is also supported by KVM.
 		 */
 		if (cpu_has_lsx)
 			*v |= CPUCFG2_LSX;
-		/*
-		 * if LASX is supported by CPU, it is also supported by KVM,
-		 * as we implement it.
-		 */
 		if (cpu_has_lasx)
 			*v |= CPUCFG2_LASX;
 
-		break;
+		return 0;
+	case LOONGARCH_CPUCFG3:
+		*v = GENMASK(16, 0);
+		return 0;
+	case LOONGARCH_CPUCFG4:
+	case LOONGARCH_CPUCFG5:
+		*v = GENMASK(31, 0);
+		return 0;
+	case LOONGARCH_CPUCFG16:
+		*v = GENMASK(16, 0);
+		return 0;
+	case LOONGARCH_CPUCFG17 ... LOONGARCH_CPUCFG20:
+		*v = GENMASK(30, 0);
+		return 0;
 	default:
-		ret = -EINVAL;
-		break;
+		/*
+		 * CPUCFG bits should be zero if reserved by HW or not
+		 * supported by KVM.
+		 */
+		*v = 0;
+		return 0;
 	}
-	return ret;
 }
 
 static int kvm_check_cpucfg(int id, u64 val)
 {
-	u64 mask;
-	int ret = 0;
+	int ret;
+	u64 mask = 0;
 
-	if (id < 0 && id >= KVM_MAX_CPUCFG_REGS)
-		return -EINVAL;
-
-	if (_kvm_get_cpucfg(id, &mask))
+	ret = _kvm_get_cpucfg_mask(id, &mask);
+	if (ret)
 		return ret;
 
+	if (val & ~mask)
+		/* Unsupported features and/or the higher 32 bits should not be set */
+		return -EINVAL;
+
 	switch (id) {
-	case 2:
-		/* CPUCFG2 features checking */
-		if (val & ~mask)
-			/* The unsupported features should not be set */
-			ret = -EINVAL;
-		else if (!(val & CPUCFG2_LLFTP))
-			/* The LLFTP must be set, as guest must has a constant timer */
-			ret = -EINVAL;
-		else if ((val & CPUCFG2_FP) && (!(val & CPUCFG2_FPSP) || !(val & CPUCFG2_FPDP)))
-			/* Single and double float point must both be set when enable FP */
-			ret = -EINVAL;
-		else if ((val & CPUCFG2_LSX) && !(val & CPUCFG2_FP))
-			/* FP should be set when enable LSX */
-			ret = -EINVAL;
-		else if ((val & CPUCFG2_LASX) && !(val & CPUCFG2_LSX))
-			/* LSX, FP should be set when enable LASX, and FP has been checked before. */
-			ret = -EINVAL;
-		break;
+	case LOONGARCH_CPUCFG2:
+		if (!(val & CPUCFG2_LLFTP))
+			/* Guests must have a constant timer */
+			return -EINVAL;
+		if ((val & CPUCFG2_FP) && (!(val & CPUCFG2_FPSP) || !(val & CPUCFG2_FPDP)))
+			/* Single and double float point must both be set when FP is enabled */
+			return -EINVAL;
+		if ((val & CPUCFG2_LSX) && !(val & CPUCFG2_FP))
+			/* LSX architecturally implies FP but val does not satisfy that */
+			return -EINVAL;
+		if ((val & CPUCFG2_LASX) && !(val & CPUCFG2_LSX))
+			/* LASX architecturally implies LSX and FP but val does not satisfy that */
+			return -EINVAL;
+		return 0;
 	default:
-		break;
+		/*
+		 * Values for the other CPUCFG IDs are not being further validated
+		 * besides the mask check above.
+		 */
+		return 0;
 	}
-	return ret;
 }
 
 static int kvm_get_one_reg(struct kvm_vcpu *vcpu,
@@ -390,6 +506,9 @@ static int kvm_get_one_reg(struct kvm_vcpu *vcpu,
 		switch (reg->id) {
 		case KVM_REG_LOONGARCH_COUNTER:
 			*v = drdtime() + vcpu->kvm->arch.time_offset;
+			break;
+		case KVM_REG_LOONGARCH_DEBUG_INST:
+			*v = INSN_HVCL | KVM_HCALL_SWDBG;
 			break;
 		default:
 			ret = -EINVAL;
@@ -566,7 +685,7 @@ static int kvm_loongarch_get_cpucfg_attr(struct kvm_vcpu *vcpu,
 	uint64_t val;
 	uint64_t __user *uaddr = (uint64_t __user *)attr->addr;
 
-	ret = _kvm_get_cpucfg(attr->attr, &val);
+	ret = _kvm_get_cpucfg_mask(attr->attr, &val);
 	if (ret)
 		return ret;
 
@@ -906,6 +1025,7 @@ int kvm_arch_vcpu_create(struct kvm_vcpu *vcpu)
 
 	/* Set cpuid */
 	kvm_write_sw_gcsr(csr, LOONGARCH_CSR_TMID, vcpu->vcpu_id);
+	kvm_write_sw_gcsr(csr, LOONGARCH_CSR_CPUID, KVM_MAX_PHYID);
 
 	/* Start with no pending virtual guest interrupts */
 	csr->csrs[LOONGARCH_CSR_GINTC] = 0;
@@ -924,6 +1044,7 @@ void kvm_arch_vcpu_destroy(struct kvm_vcpu *vcpu)
 
 	hrtimer_cancel(&vcpu->arch.swtimer);
 	kvm_mmu_free_memory_cache(&vcpu->arch.mmu_page_cache);
+	kvm_drop_cpuid(vcpu);
 	kfree(vcpu->arch.csr);
 
 	/*

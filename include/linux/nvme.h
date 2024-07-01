@@ -23,8 +23,6 @@
 
 #define NVME_DISC_SUBSYS_NAME	"nqn.2014-08.org.nvmexpress.discovery"
 
-#define NVME_RDMA_IP_PORT	4420
-
 #define NVME_NSID_ALL		0xffffffff
 
 enum nvme_subsys_type {
@@ -87,10 +85,11 @@ enum {
 enum {
 	NVMF_RDMA_QPTYPE_CONNECTED	= 1, /* Reliable Connected */
 	NVMF_RDMA_QPTYPE_DATAGRAM	= 2, /* Reliable Datagram */
+	NVMF_RDMA_QPTYPE_INVALID	= 0xff,
 };
 
-/* RDMA QP Service Type codes for Discovery Log Page entry TSAS
- * RDMA_QPTYPE field
+/* RDMA Provider Type codes for Discovery Log Page entry TSAS
+ * RDMA_PRTYPE field
  */
 enum {
 	NVMF_RDMA_PRTYPE_NOT_SPECIFIED	= 1, /* No Provider Specified */
@@ -112,6 +111,7 @@ enum {
 	NVMF_TCP_SECTYPE_NONE = 0, /* No Security */
 	NVMF_TCP_SECTYPE_TLS12 = 1, /* TLSv1.2, NVMe-oF 1.1 and NVMe-TCP 3.6.1.1 */
 	NVMF_TCP_SECTYPE_TLS13 = 2, /* TLSv1.3, NVMe-oF 1.1 and NVMe-TCP 3.6.1.1 */
+	NVMF_TCP_SECTYPE_INVALID = 0xff,
 };
 
 #define NVME_AQ_DEPTH		32
@@ -646,6 +646,7 @@ enum {
 	NVME_CMD_EFFECTS_NCC		= 1 << 2,
 	NVME_CMD_EFFECTS_NIC		= 1 << 3,
 	NVME_CMD_EFFECTS_CCC		= 1 << 4,
+	NVME_CMD_EFFECTS_CSER_MASK	= GENMASK(15, 14),
 	NVME_CMD_EFFECTS_CSE_MASK	= GENMASK(18, 16),
 	NVME_CMD_EFFECTS_UUID_SEL	= 1 << 19,
 	NVME_CMD_EFFECTS_SCOPE_MASK	= GENMASK(31, 20),
@@ -814,12 +815,6 @@ struct nvme_reservation_status_ext {
 	__u8	resv10[14];
 	__u8	rsvd24[40];
 	struct nvme_registered_ctrl_ext regctl_eds[];
-};
-
-enum nvme_async_event_type {
-	NVME_AER_TYPE_ERROR	= 0,
-	NVME_AER_TYPE_SMART	= 1,
-	NVME_AER_TYPE_NOTICE	= 2,
 };
 
 /* I/O commands */
@@ -1818,7 +1813,7 @@ struct nvme_command {
 	};
 };
 
-static inline bool nvme_is_fabrics(struct nvme_command *cmd)
+static inline bool nvme_is_fabrics(const struct nvme_command *cmd)
 {
 	return cmd->common.opcode == nvme_fabrics_command;
 }
@@ -1837,7 +1832,7 @@ struct nvme_error_slot {
 	__u8		resv2[24];
 };
 
-static inline bool nvme_is_write(struct nvme_command *cmd)
+static inline bool nvme_is_write(const struct nvme_command *cmd)
 {
 	/*
 	 * What a mess...

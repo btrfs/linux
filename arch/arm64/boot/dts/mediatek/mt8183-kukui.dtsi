@@ -433,7 +433,6 @@
 };
 
 &mt6358_vgpu_reg {
-	regulator-min-microvolt = <625000>;
 	regulator-max-microvolt = <900000>;
 
 	regulator-coupled-with = <&mt6358_vsram_gpu_reg>;
@@ -888,7 +887,7 @@
 	status = "okay";
 	cs-gpios = <&pio 86 GPIO_ACTIVE_LOW>;
 
-	cr50@0 {
+	tpm@0 {
 		compatible = "google,cr50";
 		reg = <0>;
 		spi-max-frequency = <1000000>;
@@ -924,6 +923,7 @@
 		interrupts-extended = <&pio 151 IRQ_TYPE_LEVEL_LOW>;
 		pinctrl-names = "default";
 		pinctrl-0 = <&ec_ap_int_odl>;
+		wakeup-source;
 
 		i2c_tunnel: i2c-tunnel {
 			compatible = "google,cros-ec-i2c-tunnel";
@@ -935,10 +935,6 @@
 		usbc_extcon: extcon0 {
 			compatible = "google,extcon-usbc-cros-ec";
 			google,usb-port-id = <0>;
-		};
-
-		cbas {
-			compatible = "google,cros-cbas";
 		};
 
 		typec {

@@ -130,7 +130,7 @@ void xe_hw_fence_ctx_init(struct xe_hw_fence_ctx *ctx, struct xe_gt *gt,
 	ctx->irq = irq;
 	ctx->dma_fence_ctx = dma_fence_context_alloc(1);
 	ctx->next_seqno = XE_FENCE_INITIAL_SEQNO;
-	sprintf(ctx->name, "%s", name);
+	snprintf(ctx->name, sizeof(ctx->name), "%s", name);
 }
 
 void xe_hw_fence_ctx_finish(struct xe_hw_fence_ctx *ctx)
@@ -217,12 +217,12 @@ struct xe_hw_fence *xe_hw_fence_create(struct xe_hw_fence_ctx *ctx,
 	if (!fence)
 		return ERR_PTR(-ENOMEM);
 
-	dma_fence_init(&fence->dma, &xe_hw_fence_ops, &ctx->irq->lock,
-		       ctx->dma_fence_ctx, ctx->next_seqno++);
-
 	fence->ctx = ctx;
 	fence->seqno_map = seqno_map;
 	INIT_LIST_HEAD(&fence->irq_link);
+
+	dma_fence_init(&fence->dma, &xe_hw_fence_ops, &ctx->irq->lock,
+		       ctx->dma_fence_ctx, ctx->next_seqno++);
 
 	trace_xe_hw_fence_create(fence);
 

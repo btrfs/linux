@@ -395,15 +395,13 @@ enum cxl_devtype {
 
 /**
  * struct cxl_dpa_perf - DPA performance property entry
- * @list - list entry
  * @dpa_range - range for DPA address
  * @coord - QoS performance data (i.e. latency, bandwidth)
  * @qos_class - QoS Class cookies
  */
 struct cxl_dpa_perf {
-	struct list_head list;
 	struct range dpa_range;
-	struct access_coordinate coord;
+	struct access_coordinate coord[ACCESS_COORDINATE_MAX];
 	int qos_class;
 };
 
@@ -471,8 +469,8 @@ struct cxl_dev_state {
  * @security: security driver state info
  * @fw: firmware upload / activation state
  * @mbox_send: @dev specific transport for transmitting mailbox commands
- * @ram_perf_list: performance data entries matched to RAM
- * @pmem_perf_list: performance data entries matched to PMEM
+ * @ram_perf: performance data entry matched to RAM partition
+ * @pmem_perf: performance data entry matched to PMEM partition
  *
  * See CXL 3.0 8.2.9.8.2 Capacity Configuration and Label Storage for
  * details on capacity parameters.
@@ -494,8 +492,8 @@ struct cxl_memdev_state {
 	u64 next_volatile_bytes;
 	u64 next_persistent_bytes;
 
-	struct list_head ram_perf_list;
-	struct list_head pmem_perf_list;
+	struct cxl_dpa_perf ram_perf;
+	struct cxl_dpa_perf pmem_perf;
 
 	struct cxl_event_state event;
 	struct cxl_poison_state poison;
@@ -529,6 +527,9 @@ enum cxl_opcode {
 	CXL_MBOX_OP_SET_TIMESTAMP	= 0x0301,
 	CXL_MBOX_OP_GET_SUPPORTED_LOGS	= 0x0400,
 	CXL_MBOX_OP_GET_LOG		= 0x0401,
+	CXL_MBOX_OP_GET_LOG_CAPS	= 0x0402,
+	CXL_MBOX_OP_CLEAR_LOG           = 0x0403,
+	CXL_MBOX_OP_GET_SUP_LOG_SUBLIST = 0x0405,
 	CXL_MBOX_OP_IDENTIFY		= 0x4000,
 	CXL_MBOX_OP_GET_PARTITION_INFO	= 0x4100,
 	CXL_MBOX_OP_SET_PARTITION_INFO	= 0x4101,

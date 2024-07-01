@@ -24,6 +24,7 @@
 
 #define VGBS_TABLET_MODE_FLAGS (VGBS_TABLET_MODE_FLAG | VGBS_TABLET_MODE_FLAG_ALT)
 
+MODULE_DESCRIPTION("Intel Virtual Button driver");
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("AceLan Kao");
 
@@ -136,8 +137,6 @@ static int intel_vbtn_input_setup(struct platform_device *device)
 	priv->switches_dev->id.bustype = BUS_HOST;
 
 	if (priv->has_switches) {
-		detect_tablet_mode(&device->dev);
-
 		ret = input_register_device(priv->switches_dev);
 		if (ret)
 			return ret;
@@ -158,7 +157,8 @@ static void notify_handler(acpi_handle handle, u32 event, void *context)
 
 	if ((ke = sparse_keymap_entry_from_scancode(priv->buttons_dev, event))) {
 		if (!priv->has_buttons) {
-			dev_warn(&device->dev, "Warning: received a button event on a device without buttons, please report this.\n");
+			dev_warn(&device->dev, "Warning: received 0x%02x button event on a device without buttons, please report this.\n",
+				 event);
 			return;
 		}
 		input_dev = priv->buttons_dev;
@@ -200,9 +200,6 @@ static void notify_handler(acpi_handle handle, u32 event, void *context)
 	autorelease = val && (!ke_rel || ke_rel->type == KE_IGNORE);
 
 	sparse_keymap_report_event(input_dev, event, val, autorelease);
-
-	/* Some devices need this to report further events */
-	acpi_evaluate_object(handle, "VBDL", NULL, NULL);
 }
 
 /*
@@ -261,9 +258,6 @@ static const struct dmi_system_id dmi_switches_allow_list[] = {
 
 static bool intel_vbtn_has_switches(acpi_handle handle, bool dual_accel)
 {
-	unsigned long long vgbs;
-	acpi_status status;
-
 	/* See dual_accel_detect.h for more info */
 	if (dual_accel)
 		return false;
@@ -271,8 +265,7 @@ static bool intel_vbtn_has_switches(acpi_handle handle, bool dual_accel)
 	if (!dmi_check_system(dmi_switches_allow_list))
 		return false;
 
-	status = acpi_evaluate_integer(handle, "VGBS", NULL, &vgbs);
-	return ACPI_SUCCESS(status);
+	return acpi_has_method(handle, "VGBS");
 }
 
 static int intel_vbtn_probe(struct platform_device *device)
@@ -319,6 +312,9 @@ static int intel_vbtn_probe(struct platform_device *device)
 		if (ACPI_FAILURE(status))
 			dev_err(&device->dev, "Error VBDL failed with ACPI status %d\n", status);
 	}
+	// Check switches after buttons since VBDL may have side effects.
+	if (has_switches)
+		detect_tablet_mode(&device->dev);
 
 	device_init_wakeup(&device->dev, true);
 	/*

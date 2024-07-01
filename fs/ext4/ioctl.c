@@ -467,7 +467,7 @@ static long swap_inode_boot_loader(struct super_block *sb,
 	ext4_reset_inode_seed(inode);
 	ext4_reset_inode_seed(inode_bl);
 
-	ext4_discard_preallocations(inode, 0);
+	ext4_discard_preallocations(inode);
 
 	err = ext4_mark_inode_dirty(handle, inode);
 	if (err < 0) {
@@ -1150,9 +1150,8 @@ static int ext4_ioctl_getlabel(struct ext4_sb_info *sbi, char __user *user_label
 	 */
 	BUILD_BUG_ON(EXT4_LABEL_MAX >= FSLABEL_MAX);
 
-	memset(label, 0, sizeof(label));
 	lock_buffer(sbi->s_sbh);
-	strncpy(label, sbi->s_es->s_volume_name, EXT4_LABEL_MAX);
+	strscpy_pad(label, sbi->s_es->s_volume_name);
 	unlock_buffer(sbi->s_sbh);
 
 	if (copy_to_user(user_label, label, sizeof(label)))

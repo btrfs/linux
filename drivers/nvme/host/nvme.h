@@ -162,6 +162,11 @@ enum nvme_quirks {
 	 * Disables simple suspend/resume path.
 	 */
 	NVME_QUIRK_FORCE_NO_SIMPLE_SUSPEND	= (1 << 20),
+
+	/*
+	 * MSI (but not MSI-X) interrupts are broken and never fire.
+	 */
+	NVME_QUIRK_BROKEN_MSI			= (1 << 21),
 };
 
 /*
@@ -263,6 +268,7 @@ enum nvme_ctrl_flags {
 struct nvme_ctrl {
 	bool comp_seen;
 	bool identified;
+	bool passthru_err_log_enabled;
 	enum nvme_ctrl_state state;
 	spinlock_t lock;
 	struct mutex scan_lock;
@@ -276,7 +282,8 @@ struct nvme_ctrl {
 	struct blk_mq_tag_set *tagset;
 	struct blk_mq_tag_set *admin_tagset;
 	struct list_head namespaces;
-	struct rw_semaphore namespaces_rwsem;
+	struct mutex namespaces_lock;
+	struct srcu_struct srcu;
 	struct device ctrl_device;
 	struct device *device;	/* char device */
 #ifdef CONFIG_NVME_HWMON
@@ -454,6 +461,7 @@ struct nvme_ns_head {
 	struct list_head	entry;
 	struct kref		ref;
 	bool			shared;
+	bool			passthru_err_log_enabled;
 	int			instance;
 	struct nvme_effects_log *effects;
 	u64			nuse;
@@ -462,9 +470,8 @@ struct nvme_ns_head {
 	u16			ms;
 	u16			pi_size;
 	u8			pi_type;
+	u8			pi_offset;
 	u8			guard_type;
-	u16			sgs;
-	u32			sws;
 #ifdef CONFIG_BLK_DEV_ZONED
 	u64			zsze;
 #endif
@@ -495,7 +502,7 @@ static inline bool nvme_ns_head_multipath(struct nvme_ns_head *head)
 enum nvme_ns_features {
 	NVME_NS_EXT_LBAS = 1 << 0, /* support extended LBA format */
 	NVME_NS_METADATA_SUPPORTED = 1 << 1, /* support getting generated md */
-	NVME_NS_DEAC,		/* DEAC bit in Write Zeores supported */
+	NVME_NS_DEAC = 1 << 2,		/* DEAC bit in Write Zeores supported */
 };
 
 struct nvme_ns {
@@ -522,7 +529,6 @@ struct nvme_ns {
 	struct device		cdev_device;
 
 	struct nvme_fault_inject fault_inject;
-
 };
 
 /* NVMe ns supports metadata actions by the controller (generate/strip) */
@@ -739,6 +745,28 @@ static inline bool nvme_is_aen_req(u16 qid, __u16 command_id)
 		nvme_tag_from_cid(command_id) >= NVME_AQ_BLK_MQ_DEPTH;
 }
 
+/*
+ * Returns true for sink states that can't ever transition back to live.
+ */
+static inline bool nvme_state_terminal(struct nvme_ctrl *ctrl)
+{
+	switch (nvme_ctrl_state(ctrl)) {
+	case NVME_CTRL_NEW:
+	case NVME_CTRL_LIVE:
+	case NVME_CTRL_RESETTING:
+	case NVME_CTRL_CONNECTING:
+		return false;
+	case NVME_CTRL_DELETING:
+	case NVME_CTRL_DELETING_NOIO:
+	case NVME_CTRL_DEAD:
+		return true;
+	default:
+		WARN_ONCE(1, "Unhandled ctrl state:%d", ctrl->state);
+		return true;
+	}
+}
+
+void nvme_end_req(struct request *req);
 void nvme_complete_rq(struct request *req);
 void nvme_complete_batch_req(struct request *req);
 
@@ -805,17 +833,18 @@ blk_status_t nvme_setup_cmd(struct nvme_ns *ns, struct request *req);
 blk_status_t nvme_fail_nonready_command(struct nvme_ctrl *ctrl,
 		struct request *req);
 bool __nvme_check_ready(struct nvme_ctrl *ctrl, struct request *rq,
-		bool queue_live);
+		bool queue_live, enum nvme_ctrl_state state);
 
 static inline bool nvme_check_ready(struct nvme_ctrl *ctrl, struct request *rq,
 		bool queue_live)
 {
-	if (likely(ctrl->state == NVME_CTRL_LIVE))
+	enum nvme_ctrl_state state = nvme_ctrl_state(ctrl);
+
+	if (likely(state == NVME_CTRL_LIVE))
 		return true;
-	if (ctrl->ops->flags & NVME_F_FABRICS &&
-	    ctrl->state == NVME_CTRL_DELETING)
+	if (ctrl->ops->flags & NVME_F_FABRICS && state == NVME_CTRL_DELETING)
 		return queue_live;
-	return __nvme_check_ready(ctrl, rq, queue_live);
+	return __nvme_check_ready(ctrl, rq, queue_live, state);
 }
 
 /*
@@ -836,12 +865,27 @@ static inline bool nvme_is_unique_nsid(struct nvme_ctrl *ctrl,
 		(ctrl->ctratt & NVME_CTRL_CTRATT_NVM_SETS);
 }
 
+/*
+ * Flags for __nvme_submit_sync_cmd()
+ */
+typedef __u32 __bitwise nvme_submit_flags_t;
+
+enum {
+	/* Insert request at the head of the queue */
+	NVME_SUBMIT_AT_HEAD  = (__force nvme_submit_flags_t)(1 << 0),
+	/* Set BLK_MQ_REQ_NOWAIT when allocating request */
+	NVME_SUBMIT_NOWAIT = (__force nvme_submit_flags_t)(1 << 1),
+	/* Set BLK_MQ_REQ_RESERVED when allocating request */
+	NVME_SUBMIT_RESERVED = (__force nvme_submit_flags_t)(1 << 2),
+	/* Retry command when NVME_SC_DNR is not set in the result */
+	NVME_SUBMIT_RETRY = (__force nvme_submit_flags_t)(1 << 3),
+};
+
 int nvme_submit_sync_cmd(struct request_queue *q, struct nvme_command *cmd,
 		void *buf, unsigned bufflen);
 int __nvme_submit_sync_cmd(struct request_queue *q, struct nvme_command *cmd,
 		union nvme_result *result, void *buffer, unsigned bufflen,
-		int qid, int at_head,
-		blk_mq_req_flags_t flags);
+		int qid, nvme_submit_flags_t flags);
 int nvme_set_features(struct nvme_ctrl *dev, unsigned int fid,
 		      unsigned int dword11, void *buffer, size_t buflen,
 		      u32 *result);
@@ -1018,11 +1062,19 @@ static inline bool nvme_disk_is_ns_head(struct gendisk *disk)
 }
 #endif /* CONFIG_NVME_MULTIPATH */
 
-int nvme_revalidate_zones(struct nvme_ns *ns);
+struct nvme_zone_info {
+	u64 zone_size;
+	unsigned int max_open_zones;
+	unsigned int max_active_zones;
+};
+
 int nvme_ns_report_zones(struct nvme_ns *ns, sector_t sector,
 		unsigned int nr_zones, report_zones_cb cb, void *data);
+int nvme_query_zone_info(struct nvme_ns *ns, unsigned lbaf,
+		struct nvme_zone_info *zi);
+void nvme_update_zone_info(struct nvme_ns *ns, struct queue_limits *lim,
+		struct nvme_zone_info *zi);
 #ifdef CONFIG_BLK_DEV_ZONED
-int nvme_update_zone_info(struct nvme_ns *ns, unsigned lbaf);
 blk_status_t nvme_setup_zone_mgmt_send(struct nvme_ns *ns, struct request *req,
 				       struct nvme_command *cmnd,
 				       enum nvme_zone_mgmt_action action);
@@ -1032,13 +1084,6 @@ static inline blk_status_t nvme_setup_zone_mgmt_send(struct nvme_ns *ns,
 		enum nvme_zone_mgmt_action action)
 {
 	return BLK_STS_NOTSUPP;
-}
-
-static inline int nvme_update_zone_info(struct nvme_ns *ns, unsigned lbaf)
-{
-	dev_warn(ns->ctrl->device,
-		 "Please enable CONFIG_BLK_DEV_ZONED to support ZNS devices\n");
-	return -EPROTONOSUPPORT;
 }
 #endif
 
@@ -1103,7 +1148,7 @@ static inline int nvme_auth_negotiate(struct nvme_ctrl *ctrl, int qid)
 }
 static inline int nvme_auth_wait(struct nvme_ctrl *ctrl, int qid)
 {
-	return NVME_SC_AUTH_REQUIRED;
+	return -EPROTONOSUPPORT;
 }
 static inline void nvme_auth_free(struct nvme_ctrl *ctrl) {};
 #endif
@@ -1116,6 +1161,7 @@ void nvme_passthru_end(struct nvme_ctrl *ctrl, struct nvme_ns *ns, u32 effects,
 		       struct nvme_command *cmd, int status);
 struct nvme_ctrl *nvme_ctrl_from_file(struct file *file);
 struct nvme_ns *nvme_find_get_ns(struct nvme_ctrl *ctrl, unsigned nsid);
+bool nvme_get_ns(struct nvme_ns *ns);
 void nvme_put_ns(struct nvme_ns *ns);
 
 static inline bool nvme_multi_css(struct nvme_ctrl *ctrl)
@@ -1124,35 +1170,42 @@ static inline bool nvme_multi_css(struct nvme_ctrl *ctrl)
 }
 
 #ifdef CONFIG_NVME_VERBOSE_ERRORS
-const unsigned char *nvme_get_error_status_str(u16 status);
-const unsigned char *nvme_get_opcode_str(u8 opcode);
-const unsigned char *nvme_get_admin_opcode_str(u8 opcode);
-const unsigned char *nvme_get_fabrics_opcode_str(u8 opcode);
+const char *nvme_get_error_status_str(u16 status);
+const char *nvme_get_opcode_str(u8 opcode);
+const char *nvme_get_admin_opcode_str(u8 opcode);
+const char *nvme_get_fabrics_opcode_str(u8 opcode);
 #else /* CONFIG_NVME_VERBOSE_ERRORS */
-static inline const unsigned char *nvme_get_error_status_str(u16 status)
+static inline const char *nvme_get_error_status_str(u16 status)
 {
 	return "I/O Error";
 }
-static inline const unsigned char *nvme_get_opcode_str(u8 opcode)
+static inline const char *nvme_get_opcode_str(u8 opcode)
 {
 	return "I/O Cmd";
 }
-static inline const unsigned char *nvme_get_admin_opcode_str(u8 opcode)
+static inline const char *nvme_get_admin_opcode_str(u8 opcode)
 {
 	return "Admin Cmd";
 }
 
-static inline const unsigned char *nvme_get_fabrics_opcode_str(u8 opcode)
+static inline const char *nvme_get_fabrics_opcode_str(u8 opcode)
 {
 	return "Fabrics Cmd";
 }
 #endif /* CONFIG_NVME_VERBOSE_ERRORS */
 
-static inline const unsigned char *nvme_opcode_str(int qid, u8 opcode, u8 fctype)
+static inline const char *nvme_opcode_str(int qid, u8 opcode)
 {
-	if (opcode == nvme_fabrics_command)
-		return nvme_get_fabrics_opcode_str(fctype);
 	return qid ? nvme_get_opcode_str(opcode) :
 		nvme_get_admin_opcode_str(opcode);
+}
+
+static inline const char *nvme_fabrics_opcode_str(
+		int qid, const struct nvme_command *cmd)
+{
+	if (nvme_is_fabrics(cmd))
+		return nvme_get_fabrics_opcode_str(cmd->fabrics.fctype);
+
+	return nvme_opcode_str(qid, cmd->common.opcode);
 }
 #endif /* _NVME_H */

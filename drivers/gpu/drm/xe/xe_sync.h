@@ -26,11 +26,19 @@ int xe_sync_entry_wait(struct xe_sync_entry *sync);
 int xe_sync_entry_add_deps(struct xe_sync_entry *sync,
 			   struct xe_sched_job *job);
 void xe_sync_entry_signal(struct xe_sync_entry *sync,
-			  struct xe_sched_job *job,
 			  struct dma_fence *fence);
 void xe_sync_entry_cleanup(struct xe_sync_entry *sync);
 struct dma_fence *
 xe_sync_in_fence_get(struct xe_sync_entry *sync, int num_sync,
 		     struct xe_exec_queue *q, struct xe_vm *vm);
+
+static inline bool xe_sync_is_ufence(struct xe_sync_entry *sync)
+{
+	return !!sync->ufence;
+}
+
+struct xe_user_fence *xe_sync_ufence_get(struct xe_sync_entry *sync);
+void xe_sync_ufence_put(struct xe_user_fence *ufence);
+int xe_sync_ufence_get_status(struct xe_user_fence *ufence);
 
 #endif

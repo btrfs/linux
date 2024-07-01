@@ -160,6 +160,18 @@ static inline bool xe_vma_is_userptr(struct xe_vma *vma)
 	return xe_vma_has_no_bo(vma) && !xe_vma_is_null(vma);
 }
 
+/**
+ * to_userptr_vma() - Return a pointer to an embedding userptr vma
+ * @vma: Pointer to the embedded struct xe_vma
+ *
+ * Return: Pointer to the embedding userptr vma
+ */
+static inline struct xe_userptr_vma *to_userptr_vma(struct xe_vma *vma)
+{
+	xe_assert(xe_vma_vm(vma)->xe, xe_vma_is_userptr(vma));
+	return container_of(vma, struct xe_userptr_vma, vma);
+}
+
 u64 xe_vm_pdp4_descriptor(struct xe_vm *vm, struct xe_tile *tile);
 
 int xe_vm_create_ioctl(struct drm_device *dev, void *data,
@@ -195,11 +207,9 @@ int __xe_vm_userptr_needs_repin(struct xe_vm *vm);
 
 int xe_vm_userptr_check_repin(struct xe_vm *vm);
 
-struct dma_fence *xe_vm_rebind(struct xe_vm *vm, bool rebind_worker);
+int xe_vm_rebind(struct xe_vm *vm, bool rebind_worker);
 
 int xe_vm_invalidate_vma(struct xe_vma *vma);
-
-extern struct ttm_device_funcs xe_ttm_funcs;
 
 static inline void xe_vm_queue_rebind_worker(struct xe_vm *vm)
 {
@@ -224,16 +234,18 @@ static inline void xe_vm_reactivate_rebind(struct xe_vm *vm)
 	}
 }
 
-int xe_vma_userptr_pin_pages(struct xe_vma *vma);
+int xe_vma_userptr_pin_pages(struct xe_userptr_vma *uvma);
 
-int xe_vma_userptr_check_repin(struct xe_vma *vma);
+int xe_vma_userptr_check_repin(struct xe_userptr_vma *uvma);
 
 bool xe_vm_validate_should_retry(struct drm_exec *exec, int err, ktime_t *end);
 
 int xe_analyze_vm(struct drm_printer *p, struct xe_vm *vm, int gt_id);
 
-int xe_vm_prepare_vma(struct drm_exec *exec, struct xe_vma *vma,
-		      unsigned int num_shared);
+int xe_vm_lock_vma(struct drm_exec *exec, struct xe_vma *vma);
+
+int xe_vm_validate_rebind(struct xe_vm *vm, struct drm_exec *exec,
+			  unsigned int num_fences);
 
 /**
  * xe_vm_resv() - Return's the vm's reservation object
@@ -261,3 +273,8 @@ static inline void vm_dbg(const struct drm_device *dev,
 { /* noop */ }
 #endif
 #endif
+
+struct xe_vm_snapshot *xe_vm_snapshot_capture(struct xe_vm *vm);
+void xe_vm_snapshot_capture_delayed(struct xe_vm_snapshot *snap);
+void xe_vm_snapshot_print(struct xe_vm_snapshot *snap, struct drm_printer *p);
+void xe_vm_snapshot_free(struct xe_vm_snapshot *snap);
