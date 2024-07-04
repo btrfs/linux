@@ -630,10 +630,14 @@ static int check_dir_item(struct extent_buffer *leaf,
 
 		/*
 		 * Special check for XATTR/DIR_ITEM, as key->offset is name
-		 * hash, should match its name
+		 * hash, should match its name.
+		 * But if it's METADUMP (btrfs-image dump) then we allow hash
+		 * mismatch since "-s" can generaete different names.
 		 */
-		if (key->type == BTRFS_DIR_ITEM_KEY ||
-		    key->type == BTRFS_XATTR_ITEM_KEY) {
+		if ((key->type == BTRFS_DIR_ITEM_KEY ||
+		     key->type == BTRFS_XATTR_ITEM_KEY) &&
+		    !(btrfs_super_flags(leaf->fs_info->super_copy) &
+		      (BTRFS_SUPER_FLAG_METADUMP | BTRFS_SUPER_FLAG_METADUMP_V2))) {
 			char namebuf[max(BTRFS_NAME_LEN, XATTR_NAME_MAX)];
 
 			read_extent_buffer(leaf, namebuf,
