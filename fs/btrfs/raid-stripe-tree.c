@@ -259,7 +259,7 @@ int btrfs_get_raid_extent_offset(struct btrfs_fs_info *fs_info,
 	if (!path)
 		return -ENOMEM;
 
-	if (stripe->is_scrub) {
+	if (stripe->commit_root) {
 		path->skip_locking = 1;
 		path->search_commit_root = 1;
 	}
