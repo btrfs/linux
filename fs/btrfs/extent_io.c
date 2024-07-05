@@ -2672,9 +2672,13 @@ static struct extent_buffer *
 __alloc_extent_buffer(struct btrfs_fs_info *fs_info, u64 start,
 		      unsigned long len)
 {
+	const bool debug = IS_ENABLED(CONFIG_BTRFS_DEBUG);
 	struct extent_buffer *eb = NULL;
 
-	eb = kmem_cache_zalloc(extent_buffer_cache, GFP_NOFS|__GFP_NOFAIL);
+	eb = kmem_cache_zalloc(extent_buffer_cache, GFP_NOFS |
+			       (!debug ? __GFP_NOFAIL : 0));
+	if (!eb)
+		return NULL;
 	eb->start = start;
 	eb->len = len;
 	eb->fs_info = fs_info;
