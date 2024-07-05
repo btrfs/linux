@@ -2966,6 +2966,7 @@ static int check_eb_alignment(struct btrfs_fs_info *fs_info, u64 start)
  * and @found_eb_ret would be updated.
  * Return -EAGAIN if the filemap has an existing folio but with different size
  * than @eb.
+ * Return -ENOMEM if the memory allocation failed.
  * The caller needs to free the existing folios and retry using the same order.
  */
 static int attach_eb_folio_to_filemap(struct extent_buffer *eb, int i,
@@ -2977,6 +2978,7 @@ static int attach_eb_folio_to_filemap(struct extent_buffer *eb, int i,
 	struct address_space *mapping = fs_info->btree_inode->i_mapping;
 	const unsigned long index = eb->start >> PAGE_SHIFT;
 	struct folio *existing_folio = NULL;
+	const bool debug = IS_ENABLED(CONFIG_BTRFS_DEBUG);
 	int ret;
 
 	ASSERT(found_eb_ret);
@@ -2986,10 +2988,13 @@ static int attach_eb_folio_to_filemap(struct extent_buffer *eb, int i,
 
 retry:
 	ret = filemap_add_folio(mapping, eb->folios[i], index + i,
-				GFP_NOFS | __GFP_NOFAIL);
+				GFP_NOFS | (!debug ? __GFP_NOFAIL : 0));
 	if (!ret)
 		goto finish;
+	if (unlikely(ret == -ENOMEM))
+		return ret;
 
+	ASSERT(ret == -EEXIST);
 	existing_folio = filemap_lock_folio(mapping, index + i);
 	/* The page cache only exists for a very short time, just retry. */
 	if (IS_ERR(existing_folio)) {
@@ -3126,6 +3131,8 @@ reallocate:
 			ASSERT(existing_eb);
 			goto out;
 		}
+		if (unlikely(ret == -ENOMEM))
+			goto out;
 
 		/*
 		 * TODO: Special handling for a corner case where the order of
