@@ -695,7 +695,8 @@ error:
 int btrfs_alloc_page_array(unsigned int nr_pages, struct page **page_array,
 			   bool nofail)
 {
-	const gfp_t gfp = nofail ? (GFP_NOFS | __GFP_NOFAIL) : GFP_NOFS;
+	const bool debug = IS_ENABLED(CONFIG_BTRFS_DEBUG);
+	const gfp_t gfp = GFP_NOFS | ((!debug && nofail) ? __GFP_NOFAIL : 0);
 	unsigned int allocated;
 
 	for (allocated = 0; allocated < nr_pages;) {
