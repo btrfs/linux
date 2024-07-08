@@ -73,6 +73,55 @@ int btrfs_delete_raid_extent(struct btrfs_trans_handle *trans, u64 start, u64 le
 	return ret;
 }
 
+static int update_raid_extent_item(struct btrfs_trans_handle *trans,
+				   struct btrfs_key *key,
+				   struct btrfs_io_context *bioc)
+{
+	struct btrfs_path *path;
+	struct extent_buffer *leaf;
+	struct btrfs_stripe_extent *stripe_extent;
+	int num_stripes;
+	int ret;
+	int slot;
+
+	path = btrfs_alloc_path();
+	if (!path)
+		return -ENOMEM;
+
+	ret = btrfs_search_slot(trans, trans->fs_info->stripe_root, key, path,
+				0, 1);
+	if (ret)
+		return ret == 1 ? ret : -EINVAL;
+
+	leaf = path->nodes[0];
+	slot = path->slots[0];
+
+	btrfs_item_key_to_cpu(leaf, key, slot);
+	num_stripes = btrfs_num_raid_stripes(btrfs_item_size(leaf, slot));
+	stripe_extent = btrfs_item_ptr(leaf, slot, struct btrfs_stripe_extent);
+
+	ASSERT(key->offset == bioc->size);
+
+	for (int i = 0; i < num_stripes; i++) {
+		u64 devid = bioc->stripes[i].dev->devid;
+		u64 physical = bioc->stripes[i].physical;
+		u64 length = bioc->stripes[i].length;
+		struct btrfs_raid_stride *raid_stride =
+			&stripe_extent->strides[i];
+
+		if (length == 0)
+			length = bioc->size;
+
+		btrfs_set_raid_stride_devid(leaf, raid_stride, devid);
+		btrfs_set_raid_stride_physical(leaf, raid_stride, physical);
+	}
+
+	btrfs_mark_buffer_dirty(trans, leaf);
+	btrfs_free_path(path);
+
+	return ret;
+}
+
 static int btrfs_insert_one_raid_extent(struct btrfs_trans_handle *trans,
 					struct btrfs_io_context *bioc)
 {
@@ -112,6 +161,8 @@ static int btrfs_insert_one_raid_extent(struct btrfs_trans_handle *trans,
 
 	ret = btrfs_insert_item(trans, stripe_root, &stripe_key, stripe_extent,
 				item_size);
+	if (ret == -EEXIST)
+		ret = update_raid_extent_item(trans, &stripe_key, bioc);
 	if (ret)
 		btrfs_abort_transaction(trans, ret);
 
