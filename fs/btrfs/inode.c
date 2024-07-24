@@ -1304,21 +1304,21 @@ u64 btrfs_get_extent_allocation_hint(struct btrfs_inode *inode, u64 start,
  * allocate extents on disk for the range, and create ordered data structs
  * in ram to track those extents.
  *
- * locked_page is the page that writepage had locked already.  We use
+ * locked_folio is the folio that writepage had locked already.  We use
  * it to make sure we don't do extra locks or unlocks.
  *
- * When this function fails, it unlocks all pages except @locked_page.
+ * When this function fails, it unlocks all pages except @locked_folio.
  *
  * When this function successfully creates an inline extent, it returns 1 and
- * unlocks all pages including locked_page and starts I/O on them.
- * (In reality inline extents are limited to a single page, so locked_page is
+ * unlocks all pages including locked_folio and starts I/O on them.
+ * (In reality inline extents are limited to a single page, so locked_folio is
  * the only page handled anyway).
  *
  * When this function succeed and creates a normal extent, the page locking
  * status depends on the passed in flags:
  *
  * - If @keep_locked is set, all pages are kept locked.
- * - Else all pages except for @locked_page are unlocked.
+ * - Else all pages except for @locked_folio are unlocked.
  *
  * When a failure happens in the second or later iteration of the
  * while-loop, the ordered extents created in previous iterations are kept
@@ -1327,8 +1327,8 @@ u64 btrfs_get_extent_allocation_hint(struct btrfs_inode *inode, u64 start,
  * example.
  */
 static noinline int cow_file_range(struct btrfs_inode *inode,
-				   struct page *locked_page, u64 start, u64 end,
-				   u64 *done_offset,
+				   struct folio *locked_folio, u64 start,
+				   u64 end, u64 *done_offset,
 				   bool keep_locked, bool no_inline)
 {
 	struct btrfs_root *root = inode->root;
@@ -1498,7 +1498,7 @@ static noinline int cow_file_range(struct btrfs_inode *inode,
 		page_ops |= PAGE_SET_ORDERED;
 
 		extent_clear_unlock_delalloc(inode, start, start + ram_size - 1,
-					     page_folio(locked_page), &cached,
+					     locked_folio, &cached,
 					     EXTENT_LOCKED | EXTENT_DELALLOC,
 					     page_ops);
 		if (num_bytes < cur_alloc_size)
@@ -1551,14 +1551,13 @@ out_unlock:
 	 * function.
 	 *
 	 * However, in case of @keep_locked, we still need to unlock the pages
-	 * (except @locked_page) to ensure all the pages are unlocked.
+	 * (except @locked_folio) to ensure all the pages are unlocked.
 	 */
 	if (keep_locked && orig_start < start) {
-		if (!locked_page)
+		if (!locked_folio)
 			mapping_set_error(inode->vfs_inode.i_mapping, ret);
 		extent_clear_unlock_delalloc(inode, orig_start, start - 1,
-					     page_folio(locked_page), NULL, 0,
-					     page_ops);
+					     locked_folio, NULL, 0, page_ops);
 	}
 
 	/*
@@ -1581,8 +1580,7 @@ out_unlock:
 	if (extent_reserved) {
 		extent_clear_unlock_delalloc(inode, start,
 					     start + cur_alloc_size - 1,
-					     page_folio(locked_page), &cached,
-					     clear_bits,
+					     locked_folio, &cached, clear_bits,
 					     page_ops);
 		start += cur_alloc_size;
 	}
@@ -1595,9 +1593,8 @@ out_unlock:
 	 */
 	if (start < end) {
 		clear_bits |= EXTENT_CLEAR_DATA_RESV;
-		extent_clear_unlock_delalloc(inode, start, end,
-					     page_folio(locked_page), &cached,
-					     clear_bits, page_ops);
+		extent_clear_unlock_delalloc(inode, start, end, locked_folio,
+					     &cached, clear_bits, page_ops);
 	}
 	return ret;
 }
@@ -1749,7 +1746,7 @@ static noinline int run_delalloc_cow(struct btrfs_inode *inode,
 	int ret;
 
 	while (start <= end) {
-		ret = cow_file_range(inode, &locked_folio->page, start, end,
+		ret = cow_file_range(inode, locked_folio, start, end,
 				     &done_offset, true, false);
 		if (ret)
 			return ret;
@@ -1831,7 +1828,8 @@ static int fallback_to_cow(struct btrfs_inode *inode, struct page *locked_page,
 	 * is written out and unlocked directly and a normal NOCOW extent
 	 * doesn't work.
 	 */
-	ret = cow_file_range(inode, locked_page, start, end, NULL, false, true);
+	ret = cow_file_range(inode, page_folio(locked_page), start, end, NULL,
+			     false, true);
 	ASSERT(ret != 1);
 	return ret;
 }
@@ -2307,8 +2305,8 @@ int btrfs_run_delalloc_range(struct btrfs_inode *inode, struct page *locked_page
 		ret = run_delalloc_cow(inode, page_folio(locked_page), start,
 				       end, wbc, true);
 	else
-		ret = cow_file_range(inode, locked_page, start, end, NULL,
-				     false, false);
+		ret = cow_file_range(inode, page_folio(locked_page), start, end,
+				     NULL, false, false);
 
 out:
 	if (ret < 0)
