@@ -1391,7 +1391,7 @@ static irqreturn_t bmi323_trigger_handler(int irq, void *p)
 				       &data->buffer.channels,
 				       ARRAY_SIZE(data->buffer.channels));
 		if (ret)
-			return IRQ_NONE;
+			goto out;
 	} else {
 		for_each_set_bit(bit, indio_dev->active_scan_mask,
 				 BMI323_CHAN_MAX) {
@@ -1400,13 +1400,14 @@ static irqreturn_t bmi323_trigger_handler(int irq, void *p)
 					      &data->buffer.channels[index++],
 					      BMI323_BYTES_PER_SAMPLE);
 			if (ret)
-				return IRQ_NONE;
+				goto out;
 		}
 	}
 
 	iio_push_to_buffers_with_timestamp(indio_dev, &data->buffer,
 					   iio_get_time_ns(indio_dev));
 
+out:
 	iio_trigger_notify_done(indio_dev->trig);
 
 	return IRQ_HANDLED;
@@ -1668,52 +1669,41 @@ static int bmi323_write_raw(struct iio_dev *indio_dev,
 			    int val2, long mask)
 {
 	struct bmi323_data *data = iio_priv(indio_dev);
-	int ret;
 
 	switch (mask) {
 	case IIO_CHAN_INFO_SAMP_FREQ:
-		ret = iio_device_claim_direct_mode(indio_dev);
-		if (ret)
-			return ret;
-
-		ret = bmi323_set_odr(data, bmi323_iio_to_sensor(chan->type),
-				     val, val2);
-		iio_device_release_direct_mode(indio_dev);
-		return ret;
+		iio_device_claim_direct_scoped(return -EBUSY, indio_dev)
+			return bmi323_set_odr(data,
+					      bmi323_iio_to_sensor(chan->type),
+					      val, val2);
+		unreachable();
 	case IIO_CHAN_INFO_SCALE:
-		ret = iio_device_claim_direct_mode(indio_dev);
-		if (ret)
-			return ret;
-
-		ret = bmi323_set_scale(data, bmi323_iio_to_sensor(chan->type),
-				       val, val2);
-		iio_device_release_direct_mode(indio_dev);
-		return ret;
+		iio_device_claim_direct_scoped(return -EBUSY, indio_dev)
+			return bmi323_set_scale(data,
+						bmi323_iio_to_sensor(chan->type),
+						val, val2);
+		unreachable();
 	case IIO_CHAN_INFO_OVERSAMPLING_RATIO:
-		ret = iio_device_claim_direct_mode(indio_dev);
-		if (ret)
-			return ret;
-
-		ret = bmi323_set_average(data, bmi323_iio_to_sensor(chan->type),
-					 val);
-
-		iio_device_release_direct_mode(indio_dev);
-		return ret;
+		iio_device_claim_direct_scoped(return -EBUSY, indio_dev)
+			return bmi323_set_average(data,
+						  bmi323_iio_to_sensor(chan->type),
+						  val);
+		unreachable();
 	case IIO_CHAN_INFO_ENABLE:
 		return bmi323_enable_steps(data, val);
-	case IIO_CHAN_INFO_PROCESSED:
-		scoped_guard(mutex, &data->mutex) {
-			if (val || !FIELD_GET(BMI323_FEAT_IO0_STP_CNT_MSK,
-					      data->feature_events))
-				return -EINVAL;
+	case IIO_CHAN_INFO_PROCESSED: {
+		guard(mutex)(&data->mutex);
 
-			/* Clear step counter value */
-			ret = bmi323_update_ext_reg(data, BMI323_STEP_SC1_REG,
-						    BMI323_STEP_SC1_RST_CNT_MSK,
-						    FIELD_PREP(BMI323_STEP_SC1_RST_CNT_MSK,
-							       1));
-		}
-		return ret;
+		if (val || !FIELD_GET(BMI323_FEAT_IO0_STP_CNT_MSK,
+				      data->feature_events))
+			return -EINVAL;
+
+		/* Clear step counter value */
+		return bmi323_update_ext_reg(data, BMI323_STEP_SC1_REG,
+					     BMI323_STEP_SC1_RST_CNT_MSK,
+					     FIELD_PREP(BMI323_STEP_SC1_RST_CNT_MSK,
+							1));
+	}
 	default:
 		return -EINVAL;
 	}
@@ -1724,7 +1714,6 @@ static int bmi323_read_raw(struct iio_dev *indio_dev,
 			   int *val2, long mask)
 {
 	struct bmi323_data *data = iio_priv(indio_dev);
-	int ret;
 
 	switch (mask) {
 	case IIO_CHAN_INFO_PROCESSED:
@@ -1733,14 +1722,10 @@ static int bmi323_read_raw(struct iio_dev *indio_dev,
 		switch (chan->type) {
 		case IIO_ACCEL:
 		case IIO_ANGL_VEL:
-			ret = iio_device_claim_direct_mode(indio_dev);
-			if (ret)
-				return ret;
-
-			ret = bmi323_read_axis(data, chan, val);
-
-			iio_device_release_direct_mode(indio_dev);
-			return ret;
+			iio_device_claim_direct_scoped(return -EBUSY,
+						       indio_dev)
+				return bmi323_read_axis(data, chan, val);
+			unreachable();
 		case IIO_TEMP:
 			return bmi323_get_temp_data(data, val);
 		default:
