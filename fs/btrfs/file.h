@@ -3,6 +3,21 @@
 #ifndef BTRFS_FILE_H
 #define BTRFS_FILE_H
 
+#include <linux/types.h>
+
+struct file;
+struct extent_state;
+struct kiocb;
+struct iov_iter;
+struct page;
+struct btrfs_ioctl_encoded_io_args;
+struct btrfs_drop_extents_args;
+struct btrfs_inode;
+struct btrfs_root;
+struct btrfs_path;
+struct btrfs_replace_extent_info;
+struct btrfs_trans_handle;
+
 extern const struct file_operations btrfs_file_operations;
 
 int btrfs_sync_file(struct file *file, loff_t start, loff_t end, int datasync);
@@ -22,7 +37,7 @@ int btrfs_release_file(struct inode *inode, struct file *file);
 int btrfs_dirty_pages(struct btrfs_inode *inode, struct page **pages,
 		      size_t num_pages, loff_t pos, size_t write_bytes,
 		      struct extent_state **cached, bool noreserve);
-int btrfs_fdatawrite_range(struct inode *inode, loff_t start, loff_t end);
+int btrfs_fdatawrite_range(struct btrfs_inode *inode, loff_t start, loff_t end);
 int btrfs_check_nocow_lock(struct btrfs_inode *inode, loff_t pos,
 			   size_t *write_bytes, bool nowait);
 void btrfs_check_nocow_unlock(struct btrfs_inode *inode);
