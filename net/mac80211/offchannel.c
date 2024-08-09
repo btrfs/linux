@@ -8,7 +8,7 @@
  * Copyright 2006-2007	Jiri Benc <jbenc@suse.cz>
  * Copyright 2007, Michael Wu <flamingice@sourmilk.net>
  * Copyright 2009	Johannes Berg <johannes@sipsolutions.net>
- * Copyright (C) 2019, 2022-2023 Intel Corporation
+ * Copyright (C) 2019, 2022-2024 Intel Corporation
  */
 #include <linux/export.h>
 #include <net/mac80211.h>
@@ -86,7 +86,7 @@ void ieee80211_offchannel_stop_vifs(struct ieee80211_local *local)
 
 	lockdep_assert_wiphy(local->hw.wiphy);
 
-	if (WARN_ON(local->use_chanctx))
+	if (WARN_ON(!local->emulate_chanctx))
 		return;
 
 	/*
@@ -136,7 +136,7 @@ void ieee80211_offchannel_return(struct ieee80211_local *local)
 
 	lockdep_assert_wiphy(local->hw.wiphy);
 
-	if (WARN_ON(local->use_chanctx))
+	if (WARN_ON(!local->emulate_chanctx))
 		return;
 
 	list_for_each_entry(sdata, &local->interfaces, list) {
@@ -351,10 +351,13 @@ static void _ieee80211_start_next_roc(struct ieee80211_local *local)
 		 * 20 MHz channel width) don't stop all the operations but still
 		 * treat it as though the ROC operation started properly, so
 		 * other ROC operations won't interfere with this one.
+		 *
+		 * Note: scan can't run, tmp_channel is what we use, so this
+		 * must be the currently active channel.
 		 */
-		roc->on_channel = roc->chan == local->_oper_chandef.chan &&
-				  local->_oper_chandef.width != NL80211_CHAN_WIDTH_5 &&
-				  local->_oper_chandef.width != NL80211_CHAN_WIDTH_10;
+		roc->on_channel = roc->chan == local->hw.conf.chandef.chan &&
+				  local->hw.conf.chandef.width != NL80211_CHAN_WIDTH_5 &&
+				  local->hw.conf.chandef.width != NL80211_CHAN_WIDTH_10;
 
 		/* start this ROC */
 		ieee80211_recalc_idle(local);
@@ -363,7 +366,7 @@ static void _ieee80211_start_next_roc(struct ieee80211_local *local)
 			ieee80211_offchannel_stop_vifs(local);
 
 			local->tmp_channel = roc->chan;
-			ieee80211_hw_config(local, 0);
+			ieee80211_hw_conf_chan(local);
 		}
 
 		wiphy_delayed_work_queue(local->hw.wiphy, &local->roc_work,
@@ -410,6 +413,39 @@ void ieee80211_start_next_roc(struct ieee80211_local *local)
 	}
 }
 
+void ieee80211_reconfig_roc(struct ieee80211_local *local)
+{
+	struct ieee80211_roc_work *roc, *tmp;
+
+	/*
+	 * In the software implementation can just continue with the
+	 * interruption due to reconfig, roc_work is still queued if
+	 * needed.
+	 */
+	if (!local->ops->remain_on_channel)
+		return;
+
+	/* flush work so nothing from the driver is still pending */
+	wiphy_work_flush(local->hw.wiphy, &local->hw_roc_start);
+	wiphy_work_flush(local->hw.wiphy, &local->hw_roc_done);
+
+	list_for_each_entry_safe(roc, tmp, &local->roc_list, list) {
+		if (!roc->started)
+			break;
+
+		if (!roc->hw_begun) {
+			/* it didn't start in HW yet, so we can restart it */
+			roc->started = false;
+			continue;
+		}
+
+		/* otherwise destroy it and tell userspace */
+		ieee80211_roc_notify_destroy(roc);
+	}
+
+	ieee80211_start_next_roc(local);
+}
+
 static void __ieee80211_roc_work(struct ieee80211_local *local)
 {
 	struct ieee80211_roc_work *roc;
@@ -426,7 +462,7 @@ static void __ieee80211_roc_work(struct ieee80211_local *local)
 		return;
 
 	if (!roc->started) {
-		WARN_ON(local->use_chanctx);
+		WARN_ON(!local->emulate_chanctx);
 		_ieee80211_start_next_roc(local);
 	} else {
 		on_channel = roc->on_channel;
@@ -439,7 +475,7 @@ static void __ieee80211_roc_work(struct ieee80211_local *local)
 			ieee80211_flush_queues(local, NULL, false);
 
 			local->tmp_channel = NULL;
-			ieee80211_hw_config(local, 0);
+			ieee80211_hw_conf_chan(local);
 
 			ieee80211_offchannel_return(local);
 		}
@@ -539,7 +575,7 @@ static int ieee80211_start_roc_work(struct ieee80211_local *local,
 		/* this may work, but is untested */
 		return -EOPNOTSUPP;
 
-	if (local->use_chanctx && !local->ops->remain_on_channel)
+	if (!local->emulate_chanctx && !local->ops->remain_on_channel)
 		return -EOPNOTSUPP;
 
 	roc = kzalloc(sizeof(*roc), GFP_KERNEL);
@@ -894,8 +930,18 @@ int ieee80211_mgmt_tx(struct wiphy *wiphy, struct wireless_dev *wdev,
 				break;
 			}
 
-			if (ether_addr_equal(conf->addr, mgmt->sa))
+			if (ether_addr_equal(conf->addr, mgmt->sa)) {
+				/* If userspace requested Tx on a specific link
+				 * use the same link id if the link bss is matching
+				 * the requested chan.
+				 */
+				if (sdata->vif.valid_links &&
+				    params->link_id >= 0 && params->link_id == i &&
+				    params->chan == chanctx_conf->def.chan)
+					link_id = i;
+
 				break;
+			}
 
 			chanctx_conf = NULL;
 		}

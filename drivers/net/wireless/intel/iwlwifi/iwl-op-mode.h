@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause */
 /*
- * Copyright (C) 2005-2014, 2018-2021 Intel Corporation
+ * Copyright (C) 2005-2014, 2018-2021, 2024 Intel Corporation
  * Copyright (C) 2013-2014 Intel Mobile Communications GmbH
  * Copyright (C) 2015 Intel Deutschland GmbH
  */
@@ -68,9 +68,11 @@ struct iwl_cfg;
  *	Must be atomic and called with BH disabled.
  * @queue_not_full: notifies that a HW queue is not full any more.
  *	Must be atomic and called with BH disabled.
- * @hw_rf_kill:notifies of a change in the HW rf kill switch. True means that
+ * @hw_rf_kill: notifies of a change in the HW rf kill switch. True means that
  *	the radio is killed. Return %true if the device should be stopped by
  *	the transport immediately after the call. May sleep.
+ *	Note that this must not return %true for newer devices using gen2 PCIe
+ *	transport.
  * @free_skb: allows the transport layer to free skbs that haven't been
  *	reclaimed by the op_mode. This can happen when the driver is freed and
  *	there are Tx packets pending in the transport layer.
@@ -183,7 +185,8 @@ static inline void iwl_op_mode_cmd_queue_full(struct iwl_op_mode *op_mode)
 static inline void iwl_op_mode_nic_config(struct iwl_op_mode *op_mode)
 {
 	might_sleep();
-	op_mode->ops->nic_config(op_mode);
+	if (op_mode->ops->nic_config)
+		op_mode->ops->nic_config(op_mode);
 }
 
 static inline void iwl_op_mode_wimax_active(struct iwl_op_mode *op_mode)

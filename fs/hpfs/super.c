@@ -255,7 +255,7 @@ static int init_inodecache(void)
 	hpfs_inode_cachep = kmem_cache_create("hpfs_inode_cache",
 					     sizeof(struct hpfs_inode_info),
 					     0, (SLAB_RECLAIM_ACCOUNT|
-						SLAB_MEM_SPREAD|SLAB_ACCOUNT),
+						SLAB_ACCOUNT),
 					     init_once);
 	if (hpfs_inode_cachep == NULL)
 		return -ENOMEM;
@@ -793,4 +793,5 @@ static void __exit exit_hpfs_fs(void)
 
 module_init(init_hpfs_fs)
 module_exit(exit_hpfs_fs)
+MODULE_DESCRIPTION("OS/2 HPFS file system support");
 MODULE_LICENSE("GPL");

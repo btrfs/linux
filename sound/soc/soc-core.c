@@ -238,8 +238,8 @@ static inline void snd_soc_debugfs_exit(void) { }
 
 #endif
 
-static int snd_soc_is_match_dai_args(struct of_phandle_args *args1,
-				     struct of_phandle_args *args2)
+static int snd_soc_is_match_dai_args(const struct of_phandle_args *args1,
+				     const struct of_phandle_args *args2)
 {
 	if (!args1 || !args2)
 		return 0;
@@ -283,11 +283,11 @@ static int snd_soc_is_matching_dai(const struct snd_soc_dai_link_component *dlc,
 
 	/* see snd_soc_dai_name_get() */
 
-	if (strcmp(dlc->dai_name, dai->name) == 0)
+	if (dai->driver->name &&
+	    strcmp(dlc->dai_name, dai->driver->name) == 0)
 		return 1;
 
-	if (dai->driver->name &&
-	    strcmp(dai->driver->name, dlc->dai_name) == 0)
+	if (strcmp(dlc->dai_name, dai->name) == 0)
 		return 1;
 
 	if (dai->component->name &&
@@ -297,14 +297,14 @@ static int snd_soc_is_matching_dai(const struct snd_soc_dai_link_component *dlc,
 	return 0;
 }
 
-const char *snd_soc_dai_name_get(struct snd_soc_dai *dai)
+const char *snd_soc_dai_name_get(const struct snd_soc_dai *dai)
 {
 	/* see snd_soc_is_matching_dai() */
-	if (dai->name)
-		return dai->name;
-
 	if (dai->driver->name)
 		return dai->driver->name;
+
+	if (dai->name)
+		return dai->name;
 
 	if (dai->component->name)
 		return dai->component->name;
@@ -831,7 +831,8 @@ static struct device_node
 	return of_node;
 }
 
-struct of_phandle_args *snd_soc_copy_dai_args(struct device *dev, struct of_phandle_args *args)
+struct of_phandle_args *snd_soc_copy_dai_args(struct device *dev,
+					      const struct of_phandle_args *args)
 {
 	struct of_phandle_args *ret = devm_kzalloc(dev, sizeof(*ret), GFP_KERNEL);
 
@@ -1216,6 +1217,9 @@ static int snd_soc_add_pcm_runtime(struct snd_soc_card *card,
 	for_each_link_platforms(dai_link, i, platform) {
 		for_each_component(component) {
 			if (!snd_soc_is_matching_component(platform, component))
+				continue;
+
+			if (snd_soc_component_is_dummy(component) && component->num_dai)
 				continue;
 
 			snd_soc_rtd_add_component(rtd, component);
@@ -2792,10 +2796,12 @@ int snd_soc_component_initialize(struct snd_soc_component *component,
 	INIT_LIST_HEAD(&component->list);
 	mutex_init(&component->io_mutex);
 
-	component->name = fmt_single_name(dev, &component->id);
 	if (!component->name) {
-		dev_err(dev, "ASoC: Failed to allocate name\n");
-		return -ENOMEM;
+		component->name = fmt_single_name(dev, &component->id);
+		if (!component->name) {
+			dev_err(dev, "ASoC: Failed to allocate name\n");
+			return -ENOMEM;
+		}
 	}
 
 	component->dev		= dev;
@@ -3424,7 +3430,7 @@ unsigned int snd_soc_daifmt_parse_clock_provider_raw(struct device_node *np,
 }
 EXPORT_SYMBOL_GPL(snd_soc_daifmt_parse_clock_provider_raw);
 
-int snd_soc_get_stream_cpu(struct snd_soc_dai_link *dai_link, int stream)
+int snd_soc_get_stream_cpu(const struct snd_soc_dai_link *dai_link, int stream)
 {
 	/*
 	 * [Normal]
@@ -3597,7 +3603,7 @@ int snd_soc_of_get_dai_name(struct device_node *of_node,
 }
 EXPORT_SYMBOL_GPL(snd_soc_of_get_dai_name);
 
-struct snd_soc_dai *snd_soc_get_dai_via_args(struct of_phandle_args *dai_args)
+struct snd_soc_dai *snd_soc_get_dai_via_args(const struct of_phandle_args *dai_args)
 {
 	struct snd_soc_dai *dai;
 	struct snd_soc_component *component;
