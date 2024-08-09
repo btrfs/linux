@@ -56,10 +56,15 @@
 static bool dump_vma_snapshot(struct coredump_params *cprm);
 static void free_vma_snapshot(struct coredump_params *cprm);
 
+#define CORE_FILE_NOTE_SIZE_DEFAULT (4*1024*1024)
+/* Define a reasonable max cap */
+#define CORE_FILE_NOTE_SIZE_MAX (16*1024*1024)
+
 static int core_uses_pid;
 static unsigned int core_pipe_limit;
 static char core_pattern[CORENAME_MAX_SIZE] = "core";
 static int core_name_size = CORENAME_MAX_SIZE;
+unsigned int core_file_note_size_limit = CORE_FILE_NOTE_SIZE_DEFAULT;
 
 struct core_name {
 	char *corename;
@@ -356,24 +361,21 @@ out:
 	return ispipe;
 }
 
-static int zap_process(struct task_struct *start, int exit_code)
+static int zap_process(struct signal_struct *signal, int exit_code)
 {
 	struct task_struct *t;
 	int nr = 0;
 
-	/* Allow SIGKILL, see prepare_signal() */
-	start->signal->flags = SIGNAL_GROUP_EXIT;
-	start->signal->group_exit_code = exit_code;
-	start->signal->group_stop_count = 0;
+	signal->flags = SIGNAL_GROUP_EXIT;
+	signal->group_exit_code = exit_code;
+	signal->group_stop_count = 0;
 
-	for_each_thread(start, t) {
+	__for_each_thread(signal, t) {
 		task_clear_jobctl_pending(t, JOBCTL_PENDING_MASK);
 		if (t != current && !(t->flags & PF_POSTCOREDUMP)) {
 			sigaddset(&t->pending.signal, SIGKILL);
 			signal_wake_up(t, 1);
-			/* The vhost_worker does not particpate in coredumps */
-			if ((t->flags & (PF_USER_WORKER | PF_IO_WORKER)) != PF_USER_WORKER)
-				nr++;
+			nr++;
 		}
 	}
 
@@ -388,8 +390,9 @@ static int zap_threads(struct task_struct *tsk,
 
 	spin_lock_irq(&tsk->sighand->siglock);
 	if (!(signal->flags & SIGNAL_GROUP_EXIT) && !signal->group_exec_task) {
+		/* Allow SIGKILL, see prepare_signal() */
 		signal->core_state = core_state;
-		nr = zap_process(tsk, exit_code);
+		nr = zap_process(signal, exit_code);
 		clear_tsk_thread_flag(tsk, TIF_SIGPENDING);
 		tsk->flags |= PF_DUMPCORE;
 		atomic_set(&core_state->nr_threads, nr);
@@ -872,6 +875,9 @@ static int dump_emit_page(struct coredump_params *cprm, struct page *page)
 	loff_t pos;
 	ssize_t n;
 
+	if (!page)
+		return 0;
+
 	if (cprm->to_skip) {
 		if (!__dump_skip(cprm, cprm->to_skip))
 			return 0;
@@ -884,7 +890,6 @@ static int dump_emit_page(struct coredump_params *cprm, struct page *page)
 	pos = file->f_pos;
 	bvec_set_page(&bvec, page, PAGE_SIZE, 0);
 	iov_iter_bvec(&iter, ITER_SOURCE, &bvec, 1, PAGE_SIZE);
-	iov_iter_set_copy_mc(&iter);
 	n = __kernel_write_iter(cprm->file, &iter, &pos);
 	if (n != PAGE_SIZE)
 		return 0;
@@ -895,10 +900,44 @@ static int dump_emit_page(struct coredump_params *cprm, struct page *page)
 	return 1;
 }
 
+/*
+ * If we might get machine checks from kernel accesses during the
+ * core dump, let's get those errors early rather than during the
+ * IO. This is not performance-critical enough to warrant having
+ * all the machine check logic in the iovec paths.
+ */
+#ifdef copy_mc_to_kernel
+
+#define dump_page_alloc() alloc_page(GFP_KERNEL)
+#define dump_page_free(x) __free_page(x)
+static struct page *dump_page_copy(struct page *src, struct page *dst)
+{
+	void *buf = kmap_local_page(src);
+	size_t left = copy_mc_to_kernel(page_address(dst), buf, PAGE_SIZE);
+	kunmap_local(buf);
+	return left ? NULL : dst;
+}
+
+#else
+
+/* We just want to return non-NULL; it's never used. */
+#define dump_page_alloc() ERR_PTR(-EINVAL)
+#define dump_page_free(x) ((void)(x))
+static inline struct page *dump_page_copy(struct page *src, struct page *dst)
+{
+	return src;
+}
+#endif
+
 int dump_user_range(struct coredump_params *cprm, unsigned long start,
 		    unsigned long len)
 {
 	unsigned long addr;
+	struct page *dump_page;
+
+	dump_page = dump_page_alloc();
+	if (!dump_page)
+		return 0;
 
 	for (addr = start; addr < start + len; addr += PAGE_SIZE) {
 		struct page *page;
@@ -912,14 +951,17 @@ int dump_user_range(struct coredump_params *cprm, unsigned long start,
 		 */
 		page = get_dump_page(addr);
 		if (page) {
-			int stop = !dump_emit_page(cprm, page);
+			int stop = !dump_emit_page(cprm, dump_page_copy(page, dump_page));
 			put_page(page);
-			if (stop)
+			if (stop) {
+				dump_page_free(dump_page);
 				return 0;
+			}
 		} else {
 			dump_skip(cprm, PAGE_SIZE);
 		}
 	}
+	dump_page_free(dump_page);
 	return 1;
 }
 #endif
@@ -949,7 +991,7 @@ void validate_coredump_safety(void)
 	}
 }
 
-static int proc_dostring_coredump(struct ctl_table *table, int write,
+static int proc_dostring_coredump(const struct ctl_table *table, int write,
 		  void *buffer, size_t *lenp, loff_t *ppos)
 {
 	int error = proc_dostring(table, write, buffer, lenp, ppos);
@@ -958,6 +1000,9 @@ static int proc_dostring_coredump(struct ctl_table *table, int write,
 		validate_coredump_safety();
 	return error;
 }
+
+static const unsigned int core_file_note_size_min = CORE_FILE_NOTE_SIZE_DEFAULT;
+static const unsigned int core_file_note_size_max = CORE_FILE_NOTE_SIZE_MAX;
 
 static struct ctl_table coredump_sysctls[] = {
 	{
@@ -980,6 +1025,15 @@ static struct ctl_table coredump_sysctls[] = {
 		.maxlen		= sizeof(unsigned int),
 		.mode		= 0644,
 		.proc_handler	= proc_dointvec,
+	},
+	{
+		.procname       = "core_file_note_size_limit",
+		.data           = &core_file_note_size_limit,
+		.maxlen         = sizeof(unsigned int),
+		.mode           = 0644,
+		.proc_handler	= proc_douintvec_minmax,
+		.extra1		= (unsigned int *)&core_file_note_size_min,
+		.extra2		= (unsigned int *)&core_file_note_size_max,
 	},
 };
 

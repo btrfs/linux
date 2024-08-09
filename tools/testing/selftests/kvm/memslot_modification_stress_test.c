@@ -6,9 +6,6 @@
  * Copyright (C) 2018, Red Hat, Inc.
  * Copyright (C) 2020, Google, Inc.
  */
-
-#define _GNU_SOURCE /* for program_invocation_name */
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/syscall.h>
@@ -45,7 +42,7 @@ static void vcpu_worker(struct memstress_vcpu_args *vcpu_args)
 	/* Let the guest access its memory until a stop signal is received */
 	while (!READ_ONCE(memstress_args.stop_vcpus)) {
 		ret = _vcpu_run(vcpu);
-		TEST_ASSERT(ret == 0, "vcpu_run failed: %d\n", ret);
+		TEST_ASSERT(ret == 0, "vcpu_run failed: %d", ret);
 
 		if (get_ucall(vcpu, NULL) == UCALL_SYNC)
 			continue;
@@ -55,12 +52,6 @@ static void vcpu_worker(struct memstress_vcpu_args *vcpu_args)
 			    exit_reason_str(run->exit_reason));
 	}
 }
-
-struct memslot_antagonist_args {
-	struct kvm_vm *vm;
-	useconds_t delay;
-	uint64_t nr_modifications;
-};
 
 static void add_remove_memslot(struct kvm_vm *vm, useconds_t delay,
 			       uint64_t nr_modifications)

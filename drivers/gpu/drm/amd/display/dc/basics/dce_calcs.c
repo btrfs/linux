@@ -23,8 +23,6 @@
  *
  */
 
-#include <linux/slab.h>
-
 #include "resource.h"
 #include "dm_services.h"
 #include "dce_calcs.h"
@@ -94,7 +92,7 @@ static void calculate_bandwidth(
 	const uint32_t s_high = 7;
 	const uint32_t dmif_chunk_buff_margin = 1;
 
-	uint32_t max_chunks_fbc_mode;
+	uint32_t max_chunks_fbc_mode = 0;
 	int32_t num_cursor_lines;
 
 	int32_t i, j, k;
@@ -1855,7 +1853,7 @@ static void calculate_bandwidth(
 	/*compute total time to request one chunk from each active display pipe*/
 	for (i = 0; i <= maximum_number_of_surfaces - 1; i++) {
 		if (data->enable[i]) {
-			data->chunk_request_time = bw_add(data->chunk_request_time, (bw_div((bw_div(bw_int_to_fixed(pixels_per_chunk * data->bytes_per_pixel[i]), data->useful_bytes_per_request[i])), bw_min2(sclk[data->sclk_level], bw_div(data->dispclk, bw_int_to_fixed(2))))));
+			data->chunk_request_time = bw_add(data->chunk_request_time, (bw_div((bw_div(bw_int_to_fixed(pixels_per_chunk * (int64_t)data->bytes_per_pixel[i]), data->useful_bytes_per_request[i])), bw_min2(sclk[data->sclk_level], bw_div(data->dispclk, bw_int_to_fixed(2))))));
 		}
 	}
 	/*compute total time to request cursor data*/

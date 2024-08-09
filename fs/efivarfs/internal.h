@@ -24,11 +24,8 @@ struct efivarfs_fs_info {
 struct efi_variable {
 	efi_char16_t  VariableName[EFI_VAR_NAME_LEN/sizeof(efi_char16_t)];
 	efi_guid_t    VendorGuid;
-	unsigned long DataSize;
-	__u8          Data[1024];
-	efi_status_t  Status;
 	__u32         Attributes;
-} __attribute__((packed));
+};
 
 struct efivar_entry {
 	struct efi_variable var;
@@ -38,7 +35,7 @@ struct efivar_entry {
 
 int efivar_init(int (*func)(efi_char16_t *, efi_guid_t, unsigned long, void *,
 			    struct list_head *),
-		void *data, bool duplicates, struct list_head *head);
+		void *data, struct list_head *head);
 
 int efivar_entry_add(struct efivar_entry *entry, struct list_head *head);
 void __efivar_entry_add(struct efivar_entry *entry, struct list_head *head);

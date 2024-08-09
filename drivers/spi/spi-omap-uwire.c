@@ -448,7 +448,7 @@ static void uwire_off(struct uwire_spi *uwire)
 {
 	uwire_write_reg(UWIRE_SR3, 0);
 	clk_disable_unprepare(uwire->ck);
-	spi_controller_put(uwire->bitbang.master);
+	spi_controller_put(uwire->bitbang.ctlr);
 }
 
 static int uwire_probe(struct platform_device *pdev)
@@ -493,7 +493,7 @@ static int uwire_probe(struct platform_device *pdev)
 	host->setup = uwire_setup;
 	host->cleanup = uwire_cleanup;
 
-	uwire->bitbang.master = host;
+	uwire->bitbang.ctlr = host;
 	uwire->bitbang.chipselect = uwire_chipselect;
 	uwire->bitbang.setup_transfer = uwire_setup_transfer;
 	uwire->bitbang.txrx_bufs = uwire_txrx;
@@ -541,5 +541,6 @@ static void __exit omap_uwire_exit(void)
 subsys_initcall(omap_uwire_init);
 module_exit(omap_uwire_exit);
 
+MODULE_DESCRIPTION("MicroWire interface driver for OMAP");
 MODULE_LICENSE("GPL");
 

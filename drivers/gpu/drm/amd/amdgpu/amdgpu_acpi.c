@@ -383,6 +383,8 @@ static int amdgpu_atif_query_backlight_caps(struct amdgpu_atif *atif)
 			characteristics.min_input_signal;
 	atif->backlight_caps.max_input_signal =
 			characteristics.max_input_signal;
+	atif->backlight_caps.ac_level = characteristics.ac_level;
+	atif->backlight_caps.dc_level = characteristics.dc_level;
 out:
 	kfree(info);
 	return err;
@@ -1268,6 +1270,8 @@ void amdgpu_acpi_get_backlight_caps(struct amdgpu_dm_backlight_caps *caps)
 	caps->caps_valid = atif->backlight_caps.caps_valid;
 	caps->min_input_signal = atif->backlight_caps.min_input_signal;
 	caps->max_input_signal = atif->backlight_caps.max_input_signal;
+	caps->ac_level = atif->backlight_caps.ac_level;
+	caps->dc_level = atif->backlight_caps.dc_level;
 }
 
 /**
@@ -1517,6 +1521,24 @@ bool amdgpu_acpi_is_s0ix_active(struct amdgpu_device *adev)
 #else
 	return true;
 #endif /* CONFIG_AMD_PMC */
+}
+
+/**
+ * amdgpu_choose_low_power_state
+ *
+ * @adev: amdgpu_device_pointer
+ *
+ * Choose the target low power state for the GPU
+ */
+void amdgpu_choose_low_power_state(struct amdgpu_device *adev)
+{
+	if (adev->in_runpm)
+		return;
+
+	if (amdgpu_acpi_is_s0ix_active(adev))
+		adev->in_s0ix = true;
+	else if (amdgpu_acpi_is_s3_active(adev))
+		adev->in_s3 = true;
 }
 
 #endif /* CONFIG_SUSPEND */

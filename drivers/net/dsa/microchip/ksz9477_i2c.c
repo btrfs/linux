@@ -72,8 +72,8 @@ static void ksz9477_i2c_shutdown(struct i2c_client *i2c)
 }
 
 static const struct i2c_device_id ksz9477_i2c_id[] = {
-	{ "ksz9477-switch", 0 },
-	{},
+	{ "ksz9477-switch" },
+	{}
 };
 
 MODULE_DEVICE_TABLE(i2c, ksz9477_i2c_id);
@@ -102,6 +102,10 @@ static const struct of_device_id ksz9477_dt_ids[] = {
 	{
 		.compatible = "microchip,ksz8563",
 		.data = &ksz_switch_chips[KSZ8563]
+	},
+	{
+		.compatible = "microchip,ksz8567",
+		.data = &ksz_switch_chips[KSZ8567]
 	},
 	{
 		.compatible = "microchip,ksz9567",

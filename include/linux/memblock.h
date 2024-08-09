@@ -121,6 +121,8 @@ int memblock_reserve(phys_addr_t base, phys_addr_t size);
 int memblock_physmem_add(phys_addr_t base, phys_addr_t size);
 #endif
 void memblock_trim_memory(phys_addr_t align);
+unsigned long memblock_addrs_overlap(phys_addr_t base1, phys_addr_t size1,
+				     phys_addr_t base2, phys_addr_t size2);
 bool memblock_overlaps_region(struct memblock_type *type,
 			      phys_addr_t base, phys_addr_t size);
 bool memblock_validate_numa_coverage(unsigned long threshold_bytes);
@@ -297,25 +299,6 @@ void __next_mem_pfn_range(int *idx, int nid, unsigned long *out_start_pfn,
 void __next_mem_pfn_range_in_zone(u64 *idx, struct zone *zone,
 				  unsigned long *out_spfn,
 				  unsigned long *out_epfn);
-/**
- * for_each_free_mem_pfn_range_in_zone - iterate through zone specific free
- * memblock areas
- * @i: u64 used as loop variable
- * @zone: zone in which all of the memory blocks reside
- * @p_start: ptr to phys_addr_t for start address of the range, can be %NULL
- * @p_end: ptr to phys_addr_t for end address of the range, can be %NULL
- *
- * Walks over free (memory && !reserved) areas of memblock in a specific
- * zone. Available once memblock and an empty zone is initialized. The main
- * assumption is that the zone start, end, and pgdat have been associated.
- * This way we can use the zone to determine NUMA node, and if a given part
- * of the memblock is valid for the zone.
- */
-#define for_each_free_mem_pfn_range_in_zone(i, zone, p_start, p_end)	\
-	for (i = 0,							\
-	     __next_mem_pfn_range_in_zone(&i, zone, p_start, p_end);	\
-	     i != U64_MAX;					\
-	     __next_mem_pfn_range_in_zone(&i, zone, p_start, p_end))
 
 /**
  * for_each_free_mem_pfn_range_in_zone_from - iterate through zone specific
@@ -332,8 +315,6 @@ void __next_mem_pfn_range_in_zone(u64 *idx, struct zone *zone,
 #define for_each_free_mem_pfn_range_in_zone_from(i, zone, p_start, p_end) \
 	for (; i != U64_MAX;					  \
 	     __next_mem_pfn_range_in_zone(&i, zone, p_start, p_end))
-
-int __init deferred_page_init_max_threads(const struct cpumask *node_cpumask);
 
 #endif /* CONFIG_DEFERRED_STRUCT_PAGE_INIT */
 
@@ -563,7 +544,7 @@ static inline unsigned long memblock_region_reserved_end_pfn(const struct memblo
 }
 
 /**
- * for_each_mem_region - itereate over memory regions
+ * for_each_mem_region - iterate over memory regions
  * @region: loop variable
  */
 #define for_each_mem_region(region)					\
