@@ -6459,6 +6459,7 @@ int btrfs_map_block(struct btrfs_fs_info *fs_info, enum btrfs_map_op op,
 	int dev_replace_is_ongoing = 0;
 	u16 num_alloc_stripes;
 	u64 max_len;
+	bool rst;
 
 	ASSERT(bioc_ret);
 
@@ -6474,6 +6475,8 @@ int btrfs_map_block(struct btrfs_fs_info *fs_info, enum btrfs_map_op op,
 	num_copies = btrfs_chunk_map_num_copies(map);
 	if (io_geom.mirror_num > num_copies)
 		return -EINVAL;
+
+	rst = btrfs_need_stripe_tree_update(fs_info, map->type);
 
 	map_offset = logical - map->start;
 	io_geom.raid56_full_stripe_start = (u64)-1;
@@ -6597,13 +6600,19 @@ int btrfs_map_block(struct btrfs_fs_info *fs_info, enum btrfs_map_op op,
 		 * For all other non-RAID56 profiles, just copy the target
 		 * stripe into the bioc.
 		 */
+		if (rst && dev_replace_is_ongoing)
+			up_read(&dev_replace->rwsem);
 		for (int i = 0; i < io_geom.num_stripes; i++) {
 			ret = set_io_stripe(fs_info, logical, length,
 					    &bioc->stripes[i], map, &io_geom);
+
 			if (ret < 0)
 				break;
 			io_geom.stripe_index++;
 		}
+		if (rst && dev_replace_is_ongoing)
+			down_read(&dev_replace->rwsem);
+
 	}
 
 	if (ret) {
