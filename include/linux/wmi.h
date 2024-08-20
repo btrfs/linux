@@ -16,12 +16,16 @@
  * struct wmi_device - WMI device structure
  * @dev: Device associated with this WMI device
  * @setable: True for devices implementing the Set Control Method
+ * @driver_override: Driver name to force a match; do not set directly,
+ *		     because core frees it; use driver_set_override() to
+ *		     set or clear it.
  *
  * This represents WMI devices discovered by the WMI driver core.
  */
 struct wmi_device {
 	struct device dev;
 	bool setable;
+	const char *driver_override;
 };
 
 /**
@@ -48,7 +52,8 @@ u8 wmidev_instance_count(struct wmi_device *wdev);
  * struct wmi_driver - WMI driver structure
  * @driver: Driver model structure
  * @id_table: List of WMI GUIDs supported by this driver
- * @no_notify_data: WMI events provide no event data
+ * @no_notify_data: Driver supports WMI events which provide no event data
+ * @no_singleton: Driver can be instantiated multiple times
  * @probe: Callback for device binding
  * @remove: Callback for device unbinding
  * @notify: Callback for receiving WMI events
@@ -59,6 +64,7 @@ struct wmi_driver {
 	struct device_driver driver;
 	const struct wmi_device_id *id_table;
 	bool no_notify_data;
+	bool no_singleton;
 
 	int (*probe)(struct wmi_device *wdev, const void *context);
 	void (*remove)(struct wmi_device *wdev);

@@ -3599,6 +3599,45 @@ static noinline void __init check_state_handling(struct maple_tree *mt)
 	mas_unlock(&mas);
 }
 
+static noinline void __init alloc_cyclic_testing(struct maple_tree *mt)
+{
+	unsigned long location;
+	unsigned long next;
+	int ret = 0;
+	MA_STATE(mas, mt, 0, 0);
+
+	next = 0;
+	mtree_lock(mt);
+	for (int i = 0; i < 100; i++) {
+		mas_alloc_cyclic(&mas, &location, mt, 2, ULONG_MAX, &next, GFP_KERNEL);
+		MAS_BUG_ON(&mas, i != location - 2);
+		MAS_BUG_ON(&mas, mas.index != location);
+		MAS_BUG_ON(&mas, mas.last != location);
+		MAS_BUG_ON(&mas, i != next - 3);
+	}
+
+	mtree_unlock(mt);
+	mtree_destroy(mt);
+	next = 0;
+	mt_init_flags(mt, MT_FLAGS_ALLOC_RANGE);
+	for (int i = 0; i < 100; i++) {
+		mtree_alloc_cyclic(mt, &location, mt, 2, ULONG_MAX, &next, GFP_KERNEL);
+		MT_BUG_ON(mt, i != location - 2);
+		MT_BUG_ON(mt, i != next - 3);
+		MT_BUG_ON(mt, mtree_load(mt, location) != mt);
+	}
+
+	mtree_destroy(mt);
+	/* Overflow test */
+	next = ULONG_MAX - 1;
+	ret = mtree_alloc_cyclic(mt, &location, mt, 2, ULONG_MAX, &next, GFP_KERNEL);
+	MT_BUG_ON(mt, ret != 0);
+	ret = mtree_alloc_cyclic(mt, &location, mt, 2, ULONG_MAX, &next, GFP_KERNEL);
+	MT_BUG_ON(mt, ret != 0);
+	ret = mtree_alloc_cyclic(mt, &location, mt, 2, ULONG_MAX, &next, GFP_KERNEL);
+	MT_BUG_ON(mt, ret != 1);
+}
+
 static DEFINE_MTREE(tree);
 static int __init maple_tree_seed(void)
 {
@@ -3880,6 +3919,11 @@ static int __init maple_tree_seed(void)
 	check_state_handling(&tree);
 	mtree_destroy(&tree);
 
+	mt_init_flags(&tree, MT_FLAGS_ALLOC_RANGE);
+	alloc_cyclic_testing(&tree);
+	mtree_destroy(&tree);
+
+
 #if defined(BENCH)
 skip:
 #endif
@@ -3902,4 +3946,5 @@ static void __exit maple_tree_harvest(void)
 module_init(maple_tree_seed);
 module_exit(maple_tree_harvest);
 MODULE_AUTHOR("Liam R. Howlett <Liam.Howlett@Oracle.com>");
+MODULE_DESCRIPTION("maple tree API test module");
 MODULE_LICENSE("GPL");
