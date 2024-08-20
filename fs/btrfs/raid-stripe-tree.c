@@ -61,7 +61,57 @@ int btrfs_delete_raid_extent(struct btrfs_trans_handle *trans, u64 start, u64 le
 		trace_btrfs_raid_extent_delete(fs_info, start, end,
 					       found_start, found_end);
 
-		ASSERT(found_start >= start && found_end <= end);
+		if (found_start < start) {
+			struct btrfs_key prev;
+			u64 diff = start - found_start;
+
+			ASSERT(slot > 0);
+
+			ret = btrfs_previous_item(stripe_root, path, start,
+						  BTRFS_RAID_STRIPE_KEY);
+			leaf = path->nodes[0];
+			slot = path->slots[0];
+			btrfs_item_key_to_cpu(leaf, &prev, slot);
+			prev.offset -= diff;
+
+			btrfs_mark_buffer_dirty(trans, leaf);
+
+			start += diff;
+			length -= diff;
+
+			btrfs_release_path(path);
+			continue;
+		}
+
+		if (end < found_end && found_end - end < key.offset) {
+			struct btrfs_stripe_extent *stripe_extent;
+			u64 diff = key.offset - length;
+			int num_stripes;
+
+			num_stripes = btrfs_num_raid_stripes(
+				btrfs_item_size(leaf, slot));
+			stripe_extent = btrfs_item_ptr(
+				leaf, slot, struct btrfs_stripe_extent);
+
+			for (int i = 0; i < num_stripes; i++) {
+				struct btrfs_raid_stride *stride =
+					&stripe_extent->strides[i];
+				u64 physical = btrfs_raid_stride_physical(
+					leaf, stride);
+
+				physical += diff;
+				btrfs_set_raid_stride_physical(leaf, stride,
+							       physical);
+			}
+
+			key.objectid += diff;
+			key.offset -= diff;
+
+			btrfs_mark_buffer_dirty(trans, leaf);
+			btrfs_release_path(path);
+			break;
+		}
+
 		ret = btrfs_del_item(trans, stripe_root, path);
 		if (ret)
 			break;
