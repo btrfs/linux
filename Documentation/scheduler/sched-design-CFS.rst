@@ -1,3 +1,5 @@
+.. _sched_design_CFS:
+
 =============
 CFS Scheduler
 =============
@@ -99,6 +101,9 @@ only one central tunable (you have to switch on CONFIG_SCHED_DEBUG):
 which can be used to tune the scheduler from "desktop" (i.e., low latencies) to
 "server" (i.e., good batching) workloads.  It defaults to a setting suitable
 for desktop workloads.  SCHED_BATCH is handled by the CFS scheduler module too.
+
+In case CONFIG_HZ results in base_slice_ns < TICK_NSEC, the value of
+base_slice_ns will have little to no impact on the workloads.
 
 Due to its design, the CFS scheduler is not prone to any of the "attacks" that
 exist today against the heuristics of the stock scheduler: fiftyp.c, thud.c,

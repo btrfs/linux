@@ -14,8 +14,11 @@
 #include "xe_device.h"
 #include "xe_execlist.h"
 #include "xe_force_wake.h"
+#include "xe_gsc.h"
 #include "xe_gt.h"
 #include "xe_gt_ccs_mode.h"
+#include "xe_gt_printk.h"
+#include "xe_gt_mcr.h"
 #include "xe_gt_topology.h"
 #include "xe_hw_fence.h"
 #include "xe_irq.h"
@@ -23,8 +26,10 @@
 #include "xe_macros.h"
 #include "xe_mmio.h"
 #include "xe_reg_sr.h"
+#include "xe_reg_whitelist.h"
 #include "xe_rtp.h"
 #include "xe_sched_job.h"
+#include "xe_sriov.h"
 #include "xe_tuning.h"
 #include "xe_uc_fw.h"
 #include "xe_wa.h"
@@ -34,6 +39,7 @@ struct engine_info {
 	const char *name;
 	unsigned int class : 8;
 	unsigned int instance : 8;
+	unsigned int irq_offset : 8;
 	enum xe_force_wake_domains domain;
 	u32 mmio_base;
 };
@@ -43,6 +49,7 @@ static const struct engine_info engine_infos[] = {
 		.name = "rcs0",
 		.class = XE_ENGINE_CLASS_RENDER,
 		.instance = 0,
+		.irq_offset = ilog2(INTR_RCS0),
 		.domain = XE_FW_RENDER,
 		.mmio_base = RENDER_RING_BASE,
 	},
@@ -50,6 +57,7 @@ static const struct engine_info engine_infos[] = {
 		.name = "bcs0",
 		.class = XE_ENGINE_CLASS_COPY,
 		.instance = 0,
+		.irq_offset = ilog2(INTR_BCS(0)),
 		.domain = XE_FW_RENDER,
 		.mmio_base = BLT_RING_BASE,
 	},
@@ -57,6 +65,7 @@ static const struct engine_info engine_infos[] = {
 		.name = "bcs1",
 		.class = XE_ENGINE_CLASS_COPY,
 		.instance = 1,
+		.irq_offset = ilog2(INTR_BCS(1)),
 		.domain = XE_FW_RENDER,
 		.mmio_base = XEHPC_BCS1_RING_BASE,
 	},
@@ -64,6 +73,7 @@ static const struct engine_info engine_infos[] = {
 		.name = "bcs2",
 		.class = XE_ENGINE_CLASS_COPY,
 		.instance = 2,
+		.irq_offset = ilog2(INTR_BCS(2)),
 		.domain = XE_FW_RENDER,
 		.mmio_base = XEHPC_BCS2_RING_BASE,
 	},
@@ -71,6 +81,7 @@ static const struct engine_info engine_infos[] = {
 		.name = "bcs3",
 		.class = XE_ENGINE_CLASS_COPY,
 		.instance = 3,
+		.irq_offset = ilog2(INTR_BCS(3)),
 		.domain = XE_FW_RENDER,
 		.mmio_base = XEHPC_BCS3_RING_BASE,
 	},
@@ -78,6 +89,7 @@ static const struct engine_info engine_infos[] = {
 		.name = "bcs4",
 		.class = XE_ENGINE_CLASS_COPY,
 		.instance = 4,
+		.irq_offset = ilog2(INTR_BCS(4)),
 		.domain = XE_FW_RENDER,
 		.mmio_base = XEHPC_BCS4_RING_BASE,
 	},
@@ -85,6 +97,7 @@ static const struct engine_info engine_infos[] = {
 		.name = "bcs5",
 		.class = XE_ENGINE_CLASS_COPY,
 		.instance = 5,
+		.irq_offset = ilog2(INTR_BCS(5)),
 		.domain = XE_FW_RENDER,
 		.mmio_base = XEHPC_BCS5_RING_BASE,
 	},
@@ -92,12 +105,14 @@ static const struct engine_info engine_infos[] = {
 		.name = "bcs6",
 		.class = XE_ENGINE_CLASS_COPY,
 		.instance = 6,
+		.irq_offset = ilog2(INTR_BCS(6)),
 		.domain = XE_FW_RENDER,
 		.mmio_base = XEHPC_BCS6_RING_BASE,
 	},
 	[XE_HW_ENGINE_BCS7] = {
 		.name = "bcs7",
 		.class = XE_ENGINE_CLASS_COPY,
+		.irq_offset = ilog2(INTR_BCS(7)),
 		.instance = 7,
 		.domain = XE_FW_RENDER,
 		.mmio_base = XEHPC_BCS7_RING_BASE,
@@ -106,6 +121,7 @@ static const struct engine_info engine_infos[] = {
 		.name = "bcs8",
 		.class = XE_ENGINE_CLASS_COPY,
 		.instance = 8,
+		.irq_offset = ilog2(INTR_BCS8),
 		.domain = XE_FW_RENDER,
 		.mmio_base = XEHPC_BCS8_RING_BASE,
 	},
@@ -114,6 +130,7 @@ static const struct engine_info engine_infos[] = {
 		.name = "vcs0",
 		.class = XE_ENGINE_CLASS_VIDEO_DECODE,
 		.instance = 0,
+		.irq_offset = 32 + ilog2(INTR_VCS(0)),
 		.domain = XE_FW_MEDIA_VDBOX0,
 		.mmio_base = BSD_RING_BASE,
 	},
@@ -121,6 +138,7 @@ static const struct engine_info engine_infos[] = {
 		.name = "vcs1",
 		.class = XE_ENGINE_CLASS_VIDEO_DECODE,
 		.instance = 1,
+		.irq_offset = 32 + ilog2(INTR_VCS(1)),
 		.domain = XE_FW_MEDIA_VDBOX1,
 		.mmio_base = BSD2_RING_BASE,
 	},
@@ -128,6 +146,7 @@ static const struct engine_info engine_infos[] = {
 		.name = "vcs2",
 		.class = XE_ENGINE_CLASS_VIDEO_DECODE,
 		.instance = 2,
+		.irq_offset = 32 + ilog2(INTR_VCS(2)),
 		.domain = XE_FW_MEDIA_VDBOX2,
 		.mmio_base = BSD3_RING_BASE,
 	},
@@ -135,6 +154,7 @@ static const struct engine_info engine_infos[] = {
 		.name = "vcs3",
 		.class = XE_ENGINE_CLASS_VIDEO_DECODE,
 		.instance = 3,
+		.irq_offset = 32 + ilog2(INTR_VCS(3)),
 		.domain = XE_FW_MEDIA_VDBOX3,
 		.mmio_base = BSD4_RING_BASE,
 	},
@@ -142,6 +162,7 @@ static const struct engine_info engine_infos[] = {
 		.name = "vcs4",
 		.class = XE_ENGINE_CLASS_VIDEO_DECODE,
 		.instance = 4,
+		.irq_offset = 32 + ilog2(INTR_VCS(4)),
 		.domain = XE_FW_MEDIA_VDBOX4,
 		.mmio_base = XEHP_BSD5_RING_BASE,
 	},
@@ -149,6 +170,7 @@ static const struct engine_info engine_infos[] = {
 		.name = "vcs5",
 		.class = XE_ENGINE_CLASS_VIDEO_DECODE,
 		.instance = 5,
+		.irq_offset = 32 + ilog2(INTR_VCS(5)),
 		.domain = XE_FW_MEDIA_VDBOX5,
 		.mmio_base = XEHP_BSD6_RING_BASE,
 	},
@@ -156,6 +178,7 @@ static const struct engine_info engine_infos[] = {
 		.name = "vcs6",
 		.class = XE_ENGINE_CLASS_VIDEO_DECODE,
 		.instance = 6,
+		.irq_offset = 32 + ilog2(INTR_VCS(6)),
 		.domain = XE_FW_MEDIA_VDBOX6,
 		.mmio_base = XEHP_BSD7_RING_BASE,
 	},
@@ -163,6 +186,7 @@ static const struct engine_info engine_infos[] = {
 		.name = "vcs7",
 		.class = XE_ENGINE_CLASS_VIDEO_DECODE,
 		.instance = 7,
+		.irq_offset = 32 + ilog2(INTR_VCS(7)),
 		.domain = XE_FW_MEDIA_VDBOX7,
 		.mmio_base = XEHP_BSD8_RING_BASE,
 	},
@@ -170,6 +194,7 @@ static const struct engine_info engine_infos[] = {
 		.name = "vecs0",
 		.class = XE_ENGINE_CLASS_VIDEO_ENHANCE,
 		.instance = 0,
+		.irq_offset = 32 + ilog2(INTR_VECS(0)),
 		.domain = XE_FW_MEDIA_VEBOX0,
 		.mmio_base = VEBOX_RING_BASE,
 	},
@@ -177,6 +202,7 @@ static const struct engine_info engine_infos[] = {
 		.name = "vecs1",
 		.class = XE_ENGINE_CLASS_VIDEO_ENHANCE,
 		.instance = 1,
+		.irq_offset = 32 + ilog2(INTR_VECS(1)),
 		.domain = XE_FW_MEDIA_VEBOX1,
 		.mmio_base = VEBOX2_RING_BASE,
 	},
@@ -184,6 +210,7 @@ static const struct engine_info engine_infos[] = {
 		.name = "vecs2",
 		.class = XE_ENGINE_CLASS_VIDEO_ENHANCE,
 		.instance = 2,
+		.irq_offset = 32 + ilog2(INTR_VECS(2)),
 		.domain = XE_FW_MEDIA_VEBOX2,
 		.mmio_base = XEHP_VEBOX3_RING_BASE,
 	},
@@ -191,6 +218,7 @@ static const struct engine_info engine_infos[] = {
 		.name = "vecs3",
 		.class = XE_ENGINE_CLASS_VIDEO_ENHANCE,
 		.instance = 3,
+		.irq_offset = 32 + ilog2(INTR_VECS(3)),
 		.domain = XE_FW_MEDIA_VEBOX3,
 		.mmio_base = XEHP_VEBOX4_RING_BASE,
 	},
@@ -198,6 +226,7 @@ static const struct engine_info engine_infos[] = {
 		.name = "ccs0",
 		.class = XE_ENGINE_CLASS_COMPUTE,
 		.instance = 0,
+		.irq_offset = ilog2(INTR_CCS(0)),
 		.domain = XE_FW_RENDER,
 		.mmio_base = COMPUTE0_RING_BASE,
 	},
@@ -205,6 +234,7 @@ static const struct engine_info engine_infos[] = {
 		.name = "ccs1",
 		.class = XE_ENGINE_CLASS_COMPUTE,
 		.instance = 1,
+		.irq_offset = ilog2(INTR_CCS(1)),
 		.domain = XE_FW_RENDER,
 		.mmio_base = COMPUTE1_RING_BASE,
 	},
@@ -212,6 +242,7 @@ static const struct engine_info engine_infos[] = {
 		.name = "ccs2",
 		.class = XE_ENGINE_CLASS_COMPUTE,
 		.instance = 2,
+		.irq_offset = ilog2(INTR_CCS(2)),
 		.domain = XE_FW_RENDER,
 		.mmio_base = COMPUTE2_RING_BASE,
 	},
@@ -219,6 +250,7 @@ static const struct engine_info engine_infos[] = {
 		.name = "ccs3",
 		.class = XE_ENGINE_CLASS_COMPUTE,
 		.instance = 3,
+		.irq_offset = ilog2(INTR_CCS(3)),
 		.domain = XE_FW_RENDER,
 		.mmio_base = COMPUTE3_RING_BASE,
 	},
@@ -237,7 +269,7 @@ static void hw_engine_fini(struct drm_device *drm, void *arg)
 
 	if (hwe->exl_port)
 		xe_execlist_port_destroy(hwe->exl_port);
-	xe_lrc_finish(&hwe->kernel_lrc);
+	xe_lrc_put(hwe->kernel_lrc);
 
 	hwe->gt = NULL;
 }
@@ -289,6 +321,19 @@ static bool xe_hw_engine_match_fixed_cslice_mode(const struct xe_gt *gt,
 	       xe_rtp_match_first_render_or_compute(gt, hwe);
 }
 
+static bool xe_rtp_cfeg_wmtp_disabled(const struct xe_gt *gt,
+				      const struct xe_hw_engine *hwe)
+{
+	if (GRAPHICS_VER(gt_to_xe(gt)) < 20)
+		return false;
+
+	if (hwe->class != XE_ENGINE_CLASS_COMPUTE &&
+	    hwe->class != XE_ENGINE_CLASS_RENDER)
+		return false;
+
+	return xe_mmio_read32(hwe->gt, XEHP_FUSE4) & CFEG_WMTP_DISABLE;
+}
+
 void
 xe_hw_engine_setup_default_lrc_state(struct xe_hw_engine *hwe)
 {
@@ -298,7 +343,7 @@ xe_hw_engine_setup_default_lrc_state(struct xe_hw_engine *hwe)
 	u32 blit_cctl_val = REG_FIELD_PREP(BLIT_CCTL_DST_MOCS_MASK, mocs_write_idx) |
 			    REG_FIELD_PREP(BLIT_CCTL_SRC_MOCS_MASK, mocs_read_idx);
 	struct xe_rtp_process_ctx ctx = XE_RTP_PROCESS_CTX_INITIALIZER(hwe);
-	const struct xe_rtp_entry_sr lrc_was[] = {
+	const struct xe_rtp_entry_sr lrc_setup[] = {
 		/*
 		 * Some blitter commands do not have a field for MOCS, those
 		 * commands will use MOCS index pointed by BLIT_CCTL.
@@ -319,10 +364,18 @@ xe_hw_engine_setup_default_lrc_state(struct xe_hw_engine *hwe)
 		  XE_RTP_ACTIONS(FIELD_SET(RCU_MODE, RCU_MODE_FIXED_SLICE_CCS_MODE,
 					   RCU_MODE_FIXED_SLICE_CCS_MODE))
 		},
+		/* Disable WMTP if HW doesn't support it */
+		{ XE_RTP_NAME("DISABLE_WMTP_ON_UNSUPPORTED_HW"),
+		  XE_RTP_RULES(FUNC(xe_rtp_cfeg_wmtp_disabled)),
+		  XE_RTP_ACTIONS(FIELD_SET(CS_CHICKEN1(0),
+					   PREEMPT_GPGPU_LEVEL_MASK,
+					   PREEMPT_GPGPU_THREAD_GROUP_LEVEL)),
+		  XE_RTP_ENTRY_FLAG(FOREACH_ENGINE)
+		},
 		{}
 	};
 
-	xe_rtp_process_to_sr(&ctx, lrc_was, &hwe->reg_lrc);
+	xe_rtp_process_to_sr(&ctx, lrc_setup, &hwe->reg_lrc);
 }
 
 static void
@@ -397,6 +450,7 @@ static void hw_engine_init_early(struct xe_gt *gt, struct xe_hw_engine *hwe,
 	hwe->class = info->class;
 	hwe->instance = info->instance;
 	hwe->mmio_base = info->mmio_base;
+	hwe->irq_offset = info->irq_offset;
 	hwe->domain = info->domain;
 	hwe->name = info->name;
 	hwe->fence_irq = &gt->fence_irq[info->class];
@@ -413,6 +467,32 @@ static void hw_engine_init_early(struct xe_gt *gt, struct xe_hw_engine *hwe,
 		hwe->eclass->sched_props.preempt_timeout_us = XE_HW_ENGINE_PREEMPT_TIMEOUT;
 		hwe->eclass->sched_props.preempt_timeout_min = XE_HW_ENGINE_PREEMPT_TIMEOUT_MIN;
 		hwe->eclass->sched_props.preempt_timeout_max = XE_HW_ENGINE_PREEMPT_TIMEOUT_MAX;
+
+		/*
+		 * The GSC engine can accept submissions while the GSC shim is
+		 * being reset, during which time the submission is stalled. In
+		 * the worst case, the shim reset can take up to the maximum GSC
+		 * command execution time (250ms), so the request start can be
+		 * delayed by that much; the request itself can take that long
+		 * without being preemptible, which means worst case it can
+		 * theoretically take up to 500ms for a preemption to go through
+		 * on the GSC engine. Adding to that an extra 100ms as a safety
+		 * margin, we get a minimum recommended timeout of 600ms.
+		 * The preempt_timeout value can't be tuned for OTHER_CLASS
+		 * because the class is reserved for kernel usage, so we just
+		 * need to make sure that the starting value is above that
+		 * threshold; since our default value (640ms) is greater than
+		 * 600ms, the only way we can go below is via a kconfig setting.
+		 * If that happens, log it in dmesg and update the value.
+		 */
+		if (hwe->class == XE_ENGINE_CLASS_OTHER) {
+			const u32 min_preempt_timeout = 600 * 1000;
+			if (hwe->eclass->sched_props.preempt_timeout_us < min_preempt_timeout) {
+				hwe->eclass->sched_props.preempt_timeout_us = min_preempt_timeout;
+				xe_gt_notice(gt, "Increasing preempt_timeout for GSC to 600ms\n");
+			}
+		}
+
 		/* Record default props */
 		hwe->eclass->defaults = hwe->eclass->sched_props;
 	}
@@ -440,16 +520,19 @@ static int hw_engine_init(struct xe_gt *gt, struct xe_hw_engine *hwe,
 	xe_reg_sr_apply_whitelist(hwe);
 
 	hwe->hwsp = xe_managed_bo_create_pin_map(xe, tile, SZ_4K,
-						 XE_BO_CREATE_VRAM_IF_DGFX(tile) |
-						 XE_BO_CREATE_GGTT_BIT);
+						 XE_BO_FLAG_VRAM_IF_DGFX(tile) |
+						 XE_BO_FLAG_GGTT |
+						 XE_BO_FLAG_GGTT_INVALIDATE);
 	if (IS_ERR(hwe->hwsp)) {
 		err = PTR_ERR(hwe->hwsp);
 		goto err_name;
 	}
 
-	err = xe_lrc_init(&hwe->kernel_lrc, hwe, NULL, NULL, SZ_16K);
-	if (err)
+	hwe->kernel_lrc = xe_lrc_create(hwe, NULL, SZ_16K);
+	if (IS_ERR(hwe->kernel_lrc)) {
+		err = PTR_ERR(hwe->kernel_lrc);
 		goto err_hwsp;
+	}
 
 	if (!xe_device_uc_enabled(xe)) {
 		hwe->exl_port = xe_execlist_port_create(xe, hwe);
@@ -459,21 +542,23 @@ static int hw_engine_init(struct xe_gt *gt, struct xe_hw_engine *hwe,
 		}
 	}
 
-	if (xe_device_uc_enabled(xe))
-		xe_hw_engine_enable_ring(hwe);
+	if (xe_device_uc_enabled(xe)) {
+		/* GSCCS has a special interrupt for reset */
+		if (hwe->class == XE_ENGINE_CLASS_OTHER)
+			hwe->irq_handler = xe_gsc_hwe_irq_handler;
+
+		if (!IS_SRIOV_VF(xe))
+			xe_hw_engine_enable_ring(hwe);
+	}
 
 	/* We reserve the highest BCS instance for USM */
 	if (xe->info.has_usm && hwe->class == XE_ENGINE_CLASS_COPY)
 		gt->usm.reserved_bcs_instance = hwe->instance;
 
-	err = drmm_add_action_or_reset(&xe->drm, hw_engine_fini, hwe);
-	if (err)
-		return err;
-
-	return 0;
+	return drmm_add_action_or_reset(&xe->drm, hw_engine_fini, hwe);
 
 err_kernel_lrc:
-	xe_lrc_finish(&hwe->kernel_lrc);
+	xe_lrc_put(hwe->kernel_lrc);
 err_hwsp:
 	xe_bo_unpin_map_no_vm(hwe->hwsp);
 err_name:
@@ -636,6 +721,11 @@ static void check_gsc_availability(struct xe_gt *gt)
 	 */
 	if (!xe_uc_fw_is_available(&gt->uc.gsc.fw)) {
 		gt->info.engine_mask &= ~BIT(XE_HW_ENGINE_GSCCS0);
+
+		/* interrupts where previously enabled, so turn them off */
+		xe_mmio_write32(gt, GUNIT_GSC_INTR_ENABLE, 0);
+		xe_mmio_write32(gt, GUNIT_GSC_INTR_MASK, ~0);
+
 		drm_info(&xe->drm, "gsccs disabled due to lack of FW\n");
 	}
 }
@@ -686,6 +776,57 @@ void xe_hw_engine_handle_irq(struct xe_hw_engine *hwe, u16 intr_vec)
 		xe_hw_fence_irq_run(hwe->fence_irq);
 }
 
+static bool
+is_slice_common_per_gslice(struct xe_device *xe)
+{
+	return GRAPHICS_VERx100(xe) >= 1255;
+}
+
+static void
+xe_hw_engine_snapshot_instdone_capture(struct xe_hw_engine *hwe,
+				       struct xe_hw_engine_snapshot *snapshot)
+{
+	struct xe_gt *gt = hwe->gt;
+	struct xe_device *xe = gt_to_xe(gt);
+	unsigned int dss;
+	u16 group, instance;
+
+	snapshot->reg.instdone.ring = hw_engine_mmio_read32(hwe, RING_INSTDONE(0));
+
+	if (snapshot->hwe->class != XE_ENGINE_CLASS_RENDER)
+		return;
+
+	if (is_slice_common_per_gslice(xe) == false) {
+		snapshot->reg.instdone.slice_common[0] =
+			xe_mmio_read32(gt, SC_INSTDONE);
+		snapshot->reg.instdone.slice_common_extra[0] =
+			xe_mmio_read32(gt, SC_INSTDONE_EXTRA);
+		snapshot->reg.instdone.slice_common_extra2[0] =
+			xe_mmio_read32(gt, SC_INSTDONE_EXTRA2);
+	} else {
+		for_each_geometry_dss(dss, gt, group, instance) {
+			snapshot->reg.instdone.slice_common[dss] =
+				xe_gt_mcr_unicast_read(gt, XEHPG_SC_INSTDONE, group, instance);
+			snapshot->reg.instdone.slice_common_extra[dss] =
+				xe_gt_mcr_unicast_read(gt, XEHPG_SC_INSTDONE_EXTRA, group, instance);
+			snapshot->reg.instdone.slice_common_extra2[dss] =
+				xe_gt_mcr_unicast_read(gt, XEHPG_SC_INSTDONE_EXTRA2, group, instance);
+		}
+	}
+
+	for_each_geometry_dss(dss, gt, group, instance) {
+		snapshot->reg.instdone.sampler[dss] =
+			xe_gt_mcr_unicast_read(gt, SAMPLER_INSTDONE, group, instance);
+		snapshot->reg.instdone.row[dss] =
+			xe_gt_mcr_unicast_read(gt, ROW_INSTDONE, group, instance);
+
+		if (GRAPHICS_VERx100(xe) >= 1255)
+			snapshot->reg.instdone.geom_svg[dss] =
+				xe_gt_mcr_unicast_read(gt, XEHPG_INSTDONE_GEOM_SVGUNIT,
+						       group, instance);
+	}
+}
+
 /**
  * xe_hw_engine_snapshot_capture - Take a quick snapshot of the HW Engine.
  * @hwe: Xe HW Engine.
@@ -700,7 +841,8 @@ struct xe_hw_engine_snapshot *
 xe_hw_engine_snapshot_capture(struct xe_hw_engine *hwe)
 {
 	struct xe_hw_engine_snapshot *snapshot;
-	int len;
+	size_t len;
+	u64 val;
 
 	if (!xe_hw_engine_is_valid(hwe))
 		return NULL;
@@ -710,32 +852,75 @@ xe_hw_engine_snapshot_capture(struct xe_hw_engine *hwe)
 	if (!snapshot)
 		return NULL;
 
-	len = strlen(hwe->name) + 1;
-	snapshot->name = kzalloc(len, GFP_ATOMIC);
-	if (snapshot->name)
-		strscpy(snapshot->name, hwe->name, len);
+	/* Because XE_MAX_DSS_FUSE_BITS is defined in xe_gt_types.h and it
+	 * includes xe_hw_engine_types.h the length of this 3 registers can't be
+	 * set in struct xe_hw_engine_snapshot, so here doing additional
+	 * allocations.
+	 */
+	len = (XE_MAX_DSS_FUSE_BITS * sizeof(u32));
+	snapshot->reg.instdone.slice_common = kzalloc(len, GFP_ATOMIC);
+	snapshot->reg.instdone.slice_common_extra = kzalloc(len, GFP_ATOMIC);
+	snapshot->reg.instdone.slice_common_extra2 = kzalloc(len, GFP_ATOMIC);
+	snapshot->reg.instdone.sampler = kzalloc(len, GFP_ATOMIC);
+	snapshot->reg.instdone.row = kzalloc(len, GFP_ATOMIC);
+	snapshot->reg.instdone.geom_svg = kzalloc(len, GFP_ATOMIC);
+	if (!snapshot->reg.instdone.slice_common ||
+	    !snapshot->reg.instdone.slice_common_extra ||
+	    !snapshot->reg.instdone.slice_common_extra2 ||
+	    !snapshot->reg.instdone.sampler ||
+	    !snapshot->reg.instdone.row ||
+	    !snapshot->reg.instdone.geom_svg) {
+		xe_hw_engine_snapshot_free(snapshot);
+		return NULL;
+	}
 
-	snapshot->class = hwe->class;
+	snapshot->name = kstrdup(hwe->name, GFP_ATOMIC);
+	snapshot->hwe = hwe;
 	snapshot->logical_instance = hwe->logical_instance;
 	snapshot->forcewake.domain = hwe->domain;
 	snapshot->forcewake.ref = xe_force_wake_ref(gt_to_fw(hwe->gt),
 						    hwe->domain);
 	snapshot->mmio_base = hwe->mmio_base;
 
-	snapshot->reg.ring_hwstam = hw_engine_mmio_read32(hwe, RING_HWSTAM(0));
-	snapshot->reg.ring_hws_pga = hw_engine_mmio_read32(hwe,
-							   RING_HWS_PGA(0));
-	snapshot->reg.ring_execlist_status_lo =
+	/* no more VF accessible data below this point */
+	if (IS_SRIOV_VF(gt_to_xe(hwe->gt)))
+		return snapshot;
+
+	snapshot->reg.ring_execlist_status =
 		hw_engine_mmio_read32(hwe, RING_EXECLIST_STATUS_LO(0));
-	snapshot->reg.ring_execlist_status_hi =
-		hw_engine_mmio_read32(hwe, RING_EXECLIST_STATUS_HI(0));
-	snapshot->reg.ring_execlist_sq_contents_lo =
-		hw_engine_mmio_read32(hwe,
-				      RING_EXECLIST_SQ_CONTENTS_LO(0));
-	snapshot->reg.ring_execlist_sq_contents_hi =
-		hw_engine_mmio_read32(hwe,
-				      RING_EXECLIST_SQ_CONTENTS_HI(0));
+	val = hw_engine_mmio_read32(hwe, RING_EXECLIST_STATUS_HI(0));
+	snapshot->reg.ring_execlist_status |= val << 32;
+
+	snapshot->reg.ring_execlist_sq_contents =
+		hw_engine_mmio_read32(hwe, RING_EXECLIST_SQ_CONTENTS_LO(0));
+	val = hw_engine_mmio_read32(hwe, RING_EXECLIST_SQ_CONTENTS_HI(0));
+	snapshot->reg.ring_execlist_sq_contents |= val << 32;
+
+	snapshot->reg.ring_acthd = hw_engine_mmio_read32(hwe, RING_ACTHD(0));
+	val = hw_engine_mmio_read32(hwe, RING_ACTHD_UDW(0));
+	snapshot->reg.ring_acthd |= val << 32;
+
+	snapshot->reg.ring_bbaddr = hw_engine_mmio_read32(hwe, RING_BBADDR(0));
+	val = hw_engine_mmio_read32(hwe, RING_BBADDR_UDW(0));
+	snapshot->reg.ring_bbaddr |= val << 32;
+
+	snapshot->reg.ring_dma_fadd =
+		hw_engine_mmio_read32(hwe, RING_DMA_FADD(0));
+	val = hw_engine_mmio_read32(hwe, RING_DMA_FADD_UDW(0));
+	snapshot->reg.ring_dma_fadd |= val << 32;
+
+	snapshot->reg.ring_hwstam = hw_engine_mmio_read32(hwe, RING_HWSTAM(0));
+	snapshot->reg.ring_hws_pga = hw_engine_mmio_read32(hwe, RING_HWS_PGA(0));
 	snapshot->reg.ring_start = hw_engine_mmio_read32(hwe, RING_START(0));
+	if (GRAPHICS_VERx100(hwe->gt->tile->xe) >= 2000) {
+		val = hw_engine_mmio_read32(hwe, RING_START_UDW(0));
+		snapshot->reg.ring_start |= val << 32;
+	}
+	if (xe_gt_has_indirect_ring_state(hwe->gt)) {
+		snapshot->reg.indirect_ring_state =
+			hw_engine_mmio_read32(hwe, INDIRECT_RING_STATE(0));
+	}
+
 	snapshot->reg.ring_head =
 		hw_engine_mmio_read32(hwe, RING_HEAD(0)) & HEAD_ADDR;
 	snapshot->reg.ring_tail =
@@ -748,22 +933,56 @@ xe_hw_engine_snapshot_capture(struct xe_hw_engine *hwe)
 	snapshot->reg.ring_esr = hw_engine_mmio_read32(hwe, RING_ESR(0));
 	snapshot->reg.ring_emr = hw_engine_mmio_read32(hwe, RING_EMR(0));
 	snapshot->reg.ring_eir = hw_engine_mmio_read32(hwe, RING_EIR(0));
-	snapshot->reg.ring_acthd_udw =
-		hw_engine_mmio_read32(hwe, RING_ACTHD_UDW(0));
-	snapshot->reg.ring_acthd = hw_engine_mmio_read32(hwe, RING_ACTHD(0));
-	snapshot->reg.ring_bbaddr_udw =
-		hw_engine_mmio_read32(hwe, RING_BBADDR_UDW(0));
-	snapshot->reg.ring_bbaddr = hw_engine_mmio_read32(hwe, RING_BBADDR(0));
-	snapshot->reg.ring_dma_fadd_udw =
-		hw_engine_mmio_read32(hwe, RING_DMA_FADD_UDW(0));
-	snapshot->reg.ring_dma_fadd =
-		hw_engine_mmio_read32(hwe, RING_DMA_FADD(0));
 	snapshot->reg.ipehr = hw_engine_mmio_read32(hwe, RING_IPEHR(0));
+	xe_hw_engine_snapshot_instdone_capture(hwe, snapshot);
 
-	if (snapshot->class == XE_ENGINE_CLASS_COMPUTE)
+	if (snapshot->hwe->class == XE_ENGINE_CLASS_COMPUTE)
 		snapshot->reg.rcu_mode = xe_mmio_read32(hwe->gt, RCU_MODE);
 
 	return snapshot;
+}
+
+static void
+xe_hw_engine_snapshot_instdone_print(struct xe_hw_engine_snapshot *snapshot, struct drm_printer *p)
+{
+	struct xe_gt *gt = snapshot->hwe->gt;
+	struct xe_device *xe = gt_to_xe(gt);
+	u16 group, instance;
+	unsigned int dss;
+
+	drm_printf(p, "\tRING_INSTDONE: 0x%08x\n", snapshot->reg.instdone.ring);
+
+	if (snapshot->hwe->class != XE_ENGINE_CLASS_RENDER)
+		return;
+
+	if (is_slice_common_per_gslice(xe) == false) {
+		drm_printf(p, "\tSC_INSTDONE[0]: 0x%08x\n",
+			   snapshot->reg.instdone.slice_common[0]);
+		drm_printf(p, "\tSC_INSTDONE_EXTRA[0]: 0x%08x\n",
+			   snapshot->reg.instdone.slice_common_extra[0]);
+		drm_printf(p, "\tSC_INSTDONE_EXTRA2[0]: 0x%08x\n",
+			   snapshot->reg.instdone.slice_common_extra2[0]);
+	} else {
+		for_each_geometry_dss(dss, gt, group, instance) {
+			drm_printf(p, "\tSC_INSTDONE[%u]: 0x%08x\n", dss,
+				   snapshot->reg.instdone.slice_common[dss]);
+			drm_printf(p, "\tSC_INSTDONE_EXTRA[%u]: 0x%08x\n", dss,
+				   snapshot->reg.instdone.slice_common_extra[dss]);
+			drm_printf(p, "\tSC_INSTDONE_EXTRA2[%u]: 0x%08x\n", dss,
+				   snapshot->reg.instdone.slice_common_extra2[dss]);
+		}
+	}
+
+	for_each_geometry_dss(dss, gt, group, instance) {
+		drm_printf(p, "\tSAMPLER_INSTDONE[%u]: 0x%08x\n", dss,
+			   snapshot->reg.instdone.sampler[dss]);
+		drm_printf(p, "\tROW_INSTDONE[%u]: 0x%08x\n", dss,
+			   snapshot->reg.instdone.row[dss]);
+
+		if (GRAPHICS_VERx100(xe) >= 1255)
+			drm_printf(p, "\tINSTDONE_GEOM_SVGUNIT[%u]: 0x%08x\n",
+				   dss, snapshot->reg.instdone.geom_svg[dss]);
+	}
 }
 
 /**
@@ -786,36 +1005,33 @@ void xe_hw_engine_snapshot_print(struct xe_hw_engine_snapshot *snapshot,
 		   snapshot->forcewake.domain, snapshot->forcewake.ref);
 	drm_printf(p, "\tHWSTAM: 0x%08x\n", snapshot->reg.ring_hwstam);
 	drm_printf(p, "\tRING_HWS_PGA: 0x%08x\n", snapshot->reg.ring_hws_pga);
-	drm_printf(p, "\tRING_EXECLIST_STATUS_LO: 0x%08x\n",
-		   snapshot->reg.ring_execlist_status_lo);
-	drm_printf(p, "\tRING_EXECLIST_STATUS_HI: 0x%08x\n",
-		   snapshot->reg.ring_execlist_status_hi);
-	drm_printf(p, "\tRING_EXECLIST_SQ_CONTENTS_LO: 0x%08x\n",
-		   snapshot->reg.ring_execlist_sq_contents_lo);
-	drm_printf(p, "\tRING_EXECLIST_SQ_CONTENTS_HI: 0x%08x\n",
-		   snapshot->reg.ring_execlist_sq_contents_hi);
-	drm_printf(p, "\tRING_START: 0x%08x\n", snapshot->reg.ring_start);
-	drm_printf(p, "\tRING_HEAD:  0x%08x\n", snapshot->reg.ring_head);
-	drm_printf(p, "\tRING_TAIL:  0x%08x\n", snapshot->reg.ring_tail);
+	drm_printf(p, "\tRING_EXECLIST_STATUS: 0x%016llx\n",
+		   snapshot->reg.ring_execlist_status);
+	drm_printf(p, "\tRING_EXECLIST_SQ_CONTENTS: 0x%016llx\n",
+		   snapshot->reg.ring_execlist_sq_contents);
+	drm_printf(p, "\tRING_START: 0x%016llx\n", snapshot->reg.ring_start);
+	drm_printf(p, "\tRING_HEAD: 0x%08x\n", snapshot->reg.ring_head);
+	drm_printf(p, "\tRING_TAIL: 0x%08x\n", snapshot->reg.ring_tail);
 	drm_printf(p, "\tRING_CTL: 0x%08x\n", snapshot->reg.ring_ctl);
 	drm_printf(p, "\tRING_MI_MODE: 0x%08x\n", snapshot->reg.ring_mi_mode);
 	drm_printf(p, "\tRING_MODE: 0x%08x\n",
 		   snapshot->reg.ring_mode);
-	drm_printf(p, "\tRING_IMR:   0x%08x\n", snapshot->reg.ring_imr);
-	drm_printf(p, "\tRING_ESR:   0x%08x\n", snapshot->reg.ring_esr);
-	drm_printf(p, "\tRING_EMR:   0x%08x\n", snapshot->reg.ring_emr);
-	drm_printf(p, "\tRING_EIR:   0x%08x\n", snapshot->reg.ring_eir);
-	drm_printf(p, "\tACTHD:  0x%08x_%08x\n", snapshot->reg.ring_acthd_udw,
-		   snapshot->reg.ring_acthd);
-	drm_printf(p, "\tBBADDR: 0x%08x_%08x\n", snapshot->reg.ring_bbaddr_udw,
-		   snapshot->reg.ring_bbaddr);
-	drm_printf(p, "\tDMA_FADDR: 0x%08x_%08x\n",
-		   snapshot->reg.ring_dma_fadd_udw,
-		   snapshot->reg.ring_dma_fadd);
-	drm_printf(p, "\tIPEHR: 0x%08x\n\n", snapshot->reg.ipehr);
-	if (snapshot->class == XE_ENGINE_CLASS_COMPUTE)
+	drm_printf(p, "\tRING_IMR: 0x%08x\n", snapshot->reg.ring_imr);
+	drm_printf(p, "\tRING_ESR: 0x%08x\n", snapshot->reg.ring_esr);
+	drm_printf(p, "\tRING_EMR: 0x%08x\n", snapshot->reg.ring_emr);
+	drm_printf(p, "\tRING_EIR: 0x%08x\n", snapshot->reg.ring_eir);
+	drm_printf(p, "\tACTHD: 0x%016llx\n", snapshot->reg.ring_acthd);
+	drm_printf(p, "\tBBADDR: 0x%016llx\n", snapshot->reg.ring_bbaddr);
+	drm_printf(p, "\tDMA_FADDR: 0x%016llx\n", snapshot->reg.ring_dma_fadd);
+	drm_printf(p, "\tINDIRECT_RING_STATE: 0x%08x\n",
+		   snapshot->reg.indirect_ring_state);
+	drm_printf(p, "\tIPEHR: 0x%08x\n", snapshot->reg.ipehr);
+	xe_hw_engine_snapshot_instdone_print(snapshot, p);
+
+	if (snapshot->hwe->class == XE_ENGINE_CLASS_COMPUTE)
 		drm_printf(p, "\tRCU_MODE: 0x%08x\n",
 			   snapshot->reg.rcu_mode);
+	drm_puts(p, "\n");
 }
 
 /**
@@ -830,6 +1046,12 @@ void xe_hw_engine_snapshot_free(struct xe_hw_engine_snapshot *snapshot)
 	if (!snapshot)
 		return;
 
+	kfree(snapshot->reg.instdone.slice_common);
+	kfree(snapshot->reg.instdone.slice_common_extra);
+	kfree(snapshot->reg.instdone.slice_common_extra2);
+	kfree(snapshot->reg.instdone.sampler);
+	kfree(snapshot->reg.instdone.row);
+	kfree(snapshot->reg.instdone.geom_svg);
 	kfree(snapshot->name);
 	kfree(snapshot);
 }
@@ -880,4 +1102,36 @@ bool xe_hw_engine_is_reserved(struct xe_hw_engine *hwe)
 
 	return xe->info.has_usm && hwe->class == XE_ENGINE_CLASS_COPY &&
 		hwe->instance == gt->usm.reserved_bcs_instance;
+}
+
+const char *xe_hw_engine_class_to_str(enum xe_engine_class class)
+{
+	switch (class) {
+	case XE_ENGINE_CLASS_RENDER:
+		return "rcs";
+	case XE_ENGINE_CLASS_VIDEO_DECODE:
+		return "vcs";
+	case XE_ENGINE_CLASS_VIDEO_ENHANCE:
+		return "vecs";
+	case XE_ENGINE_CLASS_COPY:
+		return "bcs";
+	case XE_ENGINE_CLASS_OTHER:
+		return "other";
+	case XE_ENGINE_CLASS_COMPUTE:
+		return "ccs";
+	case XE_ENGINE_CLASS_MAX:
+		break;
+	}
+
+	return NULL;
+}
+
+u64 xe_hw_engine_read_timestamp(struct xe_hw_engine *hwe)
+{
+	return xe_mmio_read64_2x32(hwe->gt, RING_TIMESTAMP(hwe->mmio_base));
+}
+
+enum xe_force_wake_domains xe_hw_engine_to_fw_domain(struct xe_hw_engine *hwe)
+{
+	return engine_infos[hwe->engine_id].domain;
 }

@@ -98,6 +98,7 @@ static int watchdog = 1000;
 module_param(watchdog, int, 0400);
 MODULE_PARM_DESC(watchdog, "transmit timeout in milliseconds");
 
+MODULE_DESCRIPTION("SMC 91C9x/91C1xxx Ethernet driver");
 MODULE_LICENSE("GPL");
 MODULE_ALIAS("platform:smc91x");
 
@@ -1573,11 +1574,7 @@ smc_ethtool_set_link_ksettings(struct net_device *dev,
 		    (cmd->base.port != PORT_TP && cmd->base.port != PORT_AUI))
 			return -EINVAL;
 
-//		lp->port = cmd->base.port;
 		lp->ctl_rfduplx = cmd->base.duplex == DUPLEX_FULL;
-
-//		if (netif_running(dev))
-//			smc_set_port(dev);
 
 		ret = 0;
 	}

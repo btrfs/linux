@@ -69,29 +69,6 @@
 #define FN(reg_name, field_name) \
 	hws->shifts->field_name, hws->masks->field_name
 
-static int calc_mpc_flow_ctrl_cnt(const struct dc_stream_state *stream,
-		int opp_cnt)
-{
-	bool hblank_halved = optc2_is_two_pixels_per_containter(&stream->timing);
-	int flow_ctrl_cnt;
-
-	if (opp_cnt >= 2)
-		hblank_halved = true;
-
-	flow_ctrl_cnt = stream->timing.h_total - stream->timing.h_addressable -
-			stream->timing.h_border_left -
-			stream->timing.h_border_right;
-
-	if (hblank_halved)
-		flow_ctrl_cnt /= 2;
-
-	/* ODM combine 4:1 case */
-	if (opp_cnt == 4)
-		flow_ctrl_cnt /= 2;
-
-	return flow_ctrl_cnt;
-}
-
 static void update_dsc_on_stream(struct pipe_ctx *pipe_ctx, bool enable)
 {
 	struct display_stream_compressor *dsc = pipe_ctx->stream_res.dsc;
@@ -105,7 +82,7 @@ static void update_dsc_on_stream(struct pipe_ctx *pipe_ctx, bool enable)
 
 	if (enable) {
 		struct dsc_config dsc_cfg;
-		struct dsc_optc_config dsc_optc_cfg;
+		struct dsc_optc_config dsc_optc_cfg = {0};
 		enum optc_dsc_mode optc_dsc_mode;
 
 		/* Enable DSC hw block */
@@ -183,10 +160,8 @@ void dcn314_update_odm(struct dc *dc, struct dc_state *context, struct pipe_ctx 
 	struct pipe_ctx *odm_pipe;
 	int opp_cnt = 0;
 	int opp_inst[MAX_PIPES] = {0};
-	bool rate_control_2x_pclk = (pipe_ctx->stream->timing.flags.INTERLACE || optc2_is_two_pixels_per_containter(&pipe_ctx->stream->timing));
-	struct mpc_dwb_flow_control flow_control;
-	struct mpc *mpc = dc->res_pool->mpc;
-	int i;
+	int odm_slice_width = resource_get_odm_slice_dst_width(pipe_ctx, false);
+	int last_odm_slice_width = resource_get_odm_slice_dst_width(pipe_ctx, true);
 
 	opp_cnt = get_odm_config(pipe_ctx, opp_inst);
 
@@ -194,24 +169,10 @@ void dcn314_update_odm(struct dc *dc, struct dc_state *context, struct pipe_ctx 
 		pipe_ctx->stream_res.tg->funcs->set_odm_combine(
 				pipe_ctx->stream_res.tg,
 				opp_inst, opp_cnt,
-				&pipe_ctx->stream->timing);
+				odm_slice_width, last_odm_slice_width);
 	else
 		pipe_ctx->stream_res.tg->funcs->set_odm_bypass(
 				pipe_ctx->stream_res.tg, &pipe_ctx->stream->timing);
-
-	rate_control_2x_pclk = rate_control_2x_pclk || opp_cnt > 1;
-	flow_control.flow_ctrl_mode = 0;
-	flow_control.flow_ctrl_cnt0 = 0x80;
-	flow_control.flow_ctrl_cnt1 = calc_mpc_flow_ctrl_cnt(pipe_ctx->stream, opp_cnt);
-	if (mpc->funcs->set_out_rate_control) {
-		for (i = 0; i < opp_cnt; ++i) {
-			mpc->funcs->set_out_rate_control(
-					mpc, opp_inst[i],
-					true,
-					rate_control_2x_pclk,
-					&flow_control);
-		}
-	}
 
 	for (odm_pipe = pipe_ctx->next_odm_pipe; odm_pipe; odm_pipe = odm_pipe->next_odm_pipe) {
 		odm_pipe->stream_res.opp->funcs->opp_pipe_clock_control(
@@ -343,7 +304,7 @@ unsigned int dcn314_calculate_dccg_k1_k2_values(struct pipe_ctx *pipe_ctx, unsig
 	unsigned int odm_combine_factor = 0;
 	bool two_pix_per_container = false;
 
-	two_pix_per_container = optc2_is_two_pixels_per_containter(&stream->timing);
+	two_pix_per_container = pipe_ctx->stream_res.tg->funcs->is_two_pixels_per_container(&stream->timing);
 	odm_combine_factor = get_odm_config(pipe_ctx, NULL);
 
 	if (stream->ctx->dc->link_srv->dp_is_128b_132b_signal(pipe_ctx)) {
@@ -373,21 +334,25 @@ unsigned int dcn314_calculate_dccg_k1_k2_values(struct pipe_ctx *pipe_ctx, unsig
 	return odm_combine_factor;
 }
 
-void dcn314_set_pixels_per_cycle(struct pipe_ctx *pipe_ctx)
+void dcn314_calculate_pix_rate_divider(
+		struct dc *dc,
+		struct dc_state *context,
+		const struct dc_stream_state *stream)
 {
-	uint32_t pix_per_cycle = 1;
-	uint32_t odm_combine_factor = 1;
+	struct dce_hwseq *hws = dc->hwseq;
+	struct pipe_ctx *pipe_ctx = NULL;
+	unsigned int k1_div = PIXEL_RATE_DIV_NA;
+	unsigned int k2_div = PIXEL_RATE_DIV_NA;
 
-	if (!pipe_ctx || !pipe_ctx->stream || !pipe_ctx->stream_res.stream_enc)
-		return;
+	pipe_ctx = resource_get_otg_master_for_stream(&context->res_ctx, stream);
 
-	odm_combine_factor = get_odm_config(pipe_ctx, NULL);
-	if (optc2_is_two_pixels_per_containter(&pipe_ctx->stream->timing) || odm_combine_factor > 1)
-		pix_per_cycle = 2;
+	if (pipe_ctx) {
+		if (hws->funcs.calculate_dccg_k1_k2_values)
+			hws->funcs.calculate_dccg_k1_k2_values(pipe_ctx, &k1_div, &k2_div);
 
-	if (pipe_ctx->stream_res.stream_enc->funcs->set_input_mode)
-		pipe_ctx->stream_res.stream_enc->funcs->set_input_mode(pipe_ctx->stream_res.stream_enc,
-				pix_per_cycle);
+		pipe_ctx->pixel_rate_divider.div_factor1 = k1_div;
+		pipe_ctx->pixel_rate_divider.div_factor2 = k2_div;
+	}
 }
 
 void dcn314_resync_fifo_dccg_dio(struct dce_hwseq *hws, struct dc *dc, struct dc_state *context)
@@ -414,8 +379,25 @@ void dcn314_resync_fifo_dccg_dio(struct dce_hwseq *hws, struct dc *dc, struct dc
 	for (i = 0; i < dc->res_pool->pipe_count; i++) {
 		pipe = &dc->current_state->res_ctx.pipe_ctx[i];
 
-		if (otg_disabled[i])
+		if (otg_disabled[i]) {
+			int opp_inst[MAX_PIPES] = { pipe->stream_res.opp->inst };
+			int opp_cnt = 1;
+			int last_odm_slice_width = resource_get_odm_slice_dst_width(pipe, true);
+			int odm_slice_width = resource_get_odm_slice_dst_width(pipe, false);
+			struct pipe_ctx *odm_pipe;
+
+			for (odm_pipe = pipe->next_odm_pipe; odm_pipe; odm_pipe = odm_pipe->next_odm_pipe) {
+				opp_inst[opp_cnt] = odm_pipe->stream_res.opp->inst;
+				opp_cnt++;
+			}
+			if (opp_cnt > 1)
+				pipe->stream_res.tg->funcs->set_odm_combine(
+						pipe->stream_res.tg,
+						opp_inst, opp_cnt,
+						odm_slice_width,
+						last_odm_slice_width);
 			pipe->stream_res.tg->funcs->enable_crtc(pipe->stream_res.tg);
+		}
 	}
 }
 

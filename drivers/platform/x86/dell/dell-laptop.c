@@ -353,29 +353,6 @@ static const struct dmi_system_id dell_quirks[] __initconst = {
 	{ }
 };
 
-static void dell_fill_request(struct calling_interface_buffer *buffer,
-			       u32 arg0, u32 arg1, u32 arg2, u32 arg3)
-{
-	memset(buffer, 0, sizeof(struct calling_interface_buffer));
-	buffer->input[0] = arg0;
-	buffer->input[1] = arg1;
-	buffer->input[2] = arg2;
-	buffer->input[3] = arg3;
-}
-
-static int dell_send_request(struct calling_interface_buffer *buffer,
-			     u16 class, u16 select)
-{
-	int ret;
-
-	buffer->cmd_class = class;
-	buffer->cmd_select = select;
-	ret = dell_smbios_call(buffer);
-	if (ret != 0)
-		return ret;
-	return dell_smbios_error(buffer->output[0]);
-}
-
 /*
  * Derived from information in smbios-wireless-ctl:
  *
@@ -2252,7 +2229,6 @@ static int __init dell_init(void)
 	if (dell_smbios_find_token(GLOBAL_MIC_MUTE_DISABLE) &&
 	    dell_smbios_find_token(GLOBAL_MIC_MUTE_ENABLE) &&
 	    !dell_privacy_has_mic_mute()) {
-		micmute_led_cdev.brightness = ledtrig_audio_get(LED_AUDIO_MICMUTE);
 		ret = led_classdev_register(&platform_device->dev, &micmute_led_cdev);
 		if (ret < 0)
 			goto fail_led;
@@ -2261,7 +2237,6 @@ static int __init dell_init(void)
 
 	if (dell_smbios_find_token(GLOBAL_MUTE_DISABLE) &&
 	    dell_smbios_find_token(GLOBAL_MUTE_ENABLE)) {
-		mute_led_cdev.brightness = ledtrig_audio_get(LED_AUDIO_MUTE);
 		ret = led_classdev_register(&platform_device->dev, &mute_led_cdev);
 		if (ret < 0)
 			goto fail_backlight;

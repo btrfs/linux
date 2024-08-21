@@ -29,10 +29,14 @@
 #include "dc.h"
 #include "amdgpu.h"
 #include "amdgpu_dm_psr.h"
+#include "amdgpu_dm_replay.h"
 #include "amdgpu_dm_crtc.h"
 #include "amdgpu_dm_plane.h"
 #include "amdgpu_dm_trace.h"
 #include "amdgpu_dm_debugfs.h"
+
+#define HPD_DETECTION_PERIOD_uS 5000000
+#define HPD_DETECTION_TIME_uS 1000
 
 void amdgpu_dm_crtc_handle_vblank(struct amdgpu_crtc *acrtc)
 {
@@ -95,6 +99,145 @@ bool amdgpu_dm_crtc_vrr_active(struct dm_crtc_state *dm_state)
 	       dm_state->freesync_config.state == VRR_STATE_ACTIVE_FIXED;
 }
 
+/**
+ * amdgpu_dm_crtc_set_panel_sr_feature() - Manage panel self-refresh features.
+ *
+ * @vblank_work:    is a pointer to a struct vblank_control_work object.
+ * @vblank_enabled: indicates whether the DRM vblank counter is currently
+ *                  enabled (true) or disabled (false).
+ * @allow_sr_entry: represents whether entry into the self-refresh mode is
+ *                  allowed (true) or not allowed (false).
+ *
+ * The DRM vblank counter enable/disable action is used as the trigger to enable
+ * or disable various panel self-refresh features:
+ *
+ * Panel Replay and PSR SU
+ * - Enable when:
+ *      - vblank counter is disabled
+ *      - entry is allowed: usermode demonstrates an adequate number of fast
+ *        commits)
+ *     - CRC capture window isn't active
+ * - Keep enabled even when vblank counter gets enabled
+ *
+ * PSR1
+ * - Enable condition same as above
+ * - Disable when vblank counter is enabled
+ */
+static void amdgpu_dm_crtc_set_panel_sr_feature(
+	struct vblank_control_work *vblank_work,
+	bool vblank_enabled, bool allow_sr_entry)
+{
+	struct dc_link *link = vblank_work->stream->link;
+	bool is_sr_active = (link->replay_settings.replay_allow_active ||
+				 link->psr_settings.psr_allow_active);
+	bool is_crc_window_active = false;
+
+#ifdef CONFIG_DRM_AMD_SECURE_DISPLAY
+	is_crc_window_active =
+		amdgpu_dm_crc_window_is_activated(&vblank_work->acrtc->base);
+#endif
+
+	if (link->replay_settings.replay_feature_enabled &&
+		allow_sr_entry && !is_sr_active && !is_crc_window_active) {
+		amdgpu_dm_replay_enable(vblank_work->stream, true);
+	} else if (vblank_enabled) {
+		if (link->psr_settings.psr_version < DC_PSR_VERSION_SU_1 && is_sr_active)
+			amdgpu_dm_psr_disable(vblank_work->stream);
+	} else if (link->psr_settings.psr_feature_enabled &&
+		allow_sr_entry && !is_sr_active && !is_crc_window_active) {
+
+		struct amdgpu_dm_connector *aconn =
+			(struct amdgpu_dm_connector *) vblank_work->stream->dm_stream_context;
+
+		if (!aconn->disallow_edp_enter_psr) {
+			struct amdgpu_display_manager *dm = vblank_work->dm;
+
+			amdgpu_dm_psr_enable(vblank_work->stream);
+			if (dm->idle_workqueue &&
+			    dm->dc->idle_optimizations_allowed &&
+			    dm->idle_workqueue->enable &&
+			    !dm->idle_workqueue->running)
+				schedule_work(&dm->idle_workqueue->work);
+		}
+	}
+}
+
+bool amdgpu_dm_is_headless(struct amdgpu_device *adev)
+{
+	struct drm_connector *connector;
+	struct drm_connector_list_iter iter;
+	struct drm_device *dev;
+	bool is_headless = true;
+
+	if (adev == NULL)
+		return true;
+
+	dev = adev->dm.ddev;
+
+	drm_connector_list_iter_begin(dev, &iter);
+	drm_for_each_connector_iter(connector, &iter) {
+
+		if (connector->connector_type == DRM_MODE_CONNECTOR_WRITEBACK)
+			continue;
+
+		if (connector->status == connector_status_connected) {
+			is_headless = false;
+			break;
+		}
+	}
+	drm_connector_list_iter_end(&iter);
+	return is_headless;
+}
+
+static void amdgpu_dm_idle_worker(struct work_struct *work)
+{
+	struct idle_workqueue *idle_work;
+
+	idle_work = container_of(work, struct idle_workqueue, work);
+	idle_work->dm->idle_workqueue->running = true;
+
+	while (idle_work->enable) {
+		fsleep(HPD_DETECTION_PERIOD_uS);
+		mutex_lock(&idle_work->dm->dc_lock);
+		if (!idle_work->dm->dc->idle_optimizations_allowed) {
+			mutex_unlock(&idle_work->dm->dc_lock);
+			break;
+		}
+		dc_allow_idle_optimizations(idle_work->dm->dc, false);
+
+		mutex_unlock(&idle_work->dm->dc_lock);
+		fsleep(HPD_DETECTION_TIME_uS);
+		mutex_lock(&idle_work->dm->dc_lock);
+
+		if (!amdgpu_dm_is_headless(idle_work->dm->adev) &&
+		    !amdgpu_dm_psr_is_active_allowed(idle_work->dm)) {
+			mutex_unlock(&idle_work->dm->dc_lock);
+			break;
+		}
+
+		if (idle_work->enable)
+			dc_allow_idle_optimizations(idle_work->dm->dc, true);
+		mutex_unlock(&idle_work->dm->dc_lock);
+	}
+	idle_work->dm->idle_workqueue->running = false;
+}
+
+struct idle_workqueue *idle_create_workqueue(struct amdgpu_device *adev)
+{
+	struct idle_workqueue *idle_work;
+
+	idle_work = kzalloc(sizeof(*idle_work), GFP_KERNEL);
+	if (ZERO_OR_NULL_PTR(idle_work))
+		return NULL;
+
+	idle_work->dm = &adev->dm;
+	idle_work->enable = false;
+	idle_work->running = false;
+	INIT_WORK(&idle_work->work, amdgpu_dm_idle_worker);
+
+	return idle_work;
+}
+
 static void amdgpu_dm_crtc_vblank_control_worker(struct work_struct *work)
 {
 	struct vblank_control_work *vblank_work =
@@ -123,18 +266,10 @@ static void amdgpu_dm_crtc_vblank_control_worker(struct work_struct *work)
 	 * fill_dc_dirty_rects().
 	 */
 	if (vblank_work->stream && vblank_work->stream->link) {
-		if (vblank_work->enable) {
-			if (vblank_work->stream->link->psr_settings.psr_version < DC_PSR_VERSION_SU_1 &&
-			    vblank_work->stream->link->psr_settings.psr_allow_active)
-				amdgpu_dm_psr_disable(vblank_work->stream);
-		} else if (vblank_work->stream->link->psr_settings.psr_feature_enabled &&
-			   !vblank_work->stream->link->psr_settings.psr_allow_active &&
-#ifdef CONFIG_DRM_AMD_SECURE_DISPLAY
-			   !amdgpu_dm_crc_window_is_activated(&vblank_work->acrtc->base) &&
-#endif
-			   vblank_work->acrtc->dm_irq_params.allow_psr_entry) {
-			amdgpu_dm_psr_enable(vblank_work->stream);
-		}
+		amdgpu_dm_crtc_set_panel_sr_feature(
+			vblank_work, vblank_work->enable,
+			vblank_work->acrtc->dm_irq_params.allow_psr_entry ||
+			vblank_work->stream->link->replay_settings.replay_feature_enabled);
 	}
 
 	mutex_unlock(&dm->dc_lock);
@@ -256,6 +391,7 @@ static struct drm_crtc_state *amdgpu_dm_crtc_duplicate_state(struct drm_crtc *cr
 	state->regamma_tf = cur->regamma_tf;
 	state->crc_skip_count = cur->crc_skip_count;
 	state->mpo_requested = cur->mpo_requested;
+	state->cursor_mode = cur->cursor_mode;
 	/* TODO Duplicate dc_stream after objects are stream object is flattened */
 
 	return &state->base;

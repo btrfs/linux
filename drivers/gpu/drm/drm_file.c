@@ -469,14 +469,12 @@ void drm_file_update_pid(struct drm_file *filp)
 
 	dev = filp->minor->dev;
 	mutex_lock(&dev->filelist_mutex);
+	get_pid(pid);
 	old = rcu_replace_pointer(filp->pid, pid, 1);
 	mutex_unlock(&dev->filelist_mutex);
 
-	if (pid != old) {
-		get_pid(pid);
-		synchronize_rcu();
-		put_pid(old);
-	}
+	synchronize_rcu();
+	put_pid(old);
 }
 
 /**
@@ -913,7 +911,7 @@ void drm_show_memory_stats(struct drm_printer *p, struct drm_file *file)
 					DRM_GEM_OBJECT_PURGEABLE;
 		}
 
-		if (obj->handle_count > 1) {
+		if (drm_gem_object_is_shared_for_memory_stats(obj)) {
 			status.shared += obj->size;
 		} else {
 			status.private += obj->size;

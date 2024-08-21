@@ -4,6 +4,12 @@
 #define BTRFS_SUBPAGE_H
 
 #include <linux/spinlock.h>
+#include <linux/atomic.h>
+#include <linux/sizes.h>
+
+struct address_space;
+struct folio;
+struct btrfs_fs_info;
 
 /*
  * Extra info for subpapge bitmap.
@@ -28,7 +34,7 @@ struct btrfs_subpage_info {
 	unsigned int total_nr_bits;
 
 	/*
-	 * *_start indicates where the bitmap starts, the length is always
+	 * *_offset indicates where the bitmap starts, the length is always
 	 * @bitmap_size, which is calculated from PAGE_SIZE / sectorsize.
 	 */
 	unsigned int uptodate_offset;
@@ -36,6 +42,16 @@ struct btrfs_subpage_info {
 	unsigned int writeback_offset;
 	unsigned int ordered_offset;
 	unsigned int checked_offset;
+
+	/*
+	 * For locked bitmaps, normally it's subpage representation for folio
+	 * Locked flag, but metadata is different:
+	 *
+	 * - Metadata doesn't really lock the folio
+	 *   It's just to prevent page::private get cleared before the last
+	 *   end_page_read().
+	 */
+	unsigned int locked_offset;
 };
 
 /*
@@ -73,7 +89,15 @@ enum btrfs_subpage_type {
 	BTRFS_SUBPAGE_DATA,
 };
 
+#if PAGE_SIZE > SZ_4K
 bool btrfs_is_subpage(const struct btrfs_fs_info *fs_info, struct address_space *mapping);
+#else
+static inline bool btrfs_is_subpage(const struct btrfs_fs_info *fs_info,
+				    struct address_space *mapping)
+{
+	return false;
+}
+#endif
 
 void btrfs_init_subpage_info(struct btrfs_subpage_info *subpage_info, u32 sectorsize);
 int btrfs_attach_subpage(const struct btrfs_fs_info *fs_info,
@@ -93,14 +117,16 @@ void btrfs_subpage_start_reader(const struct btrfs_fs_info *fs_info,
 void btrfs_subpage_end_reader(const struct btrfs_fs_info *fs_info,
 			      struct folio *folio, u64 start, u32 len);
 
-void btrfs_subpage_start_writer(const struct btrfs_fs_info *fs_info,
-				struct folio *folio, u64 start, u32 len);
-bool btrfs_subpage_end_and_test_writer(const struct btrfs_fs_info *fs_info,
-				       struct folio *folio, u64 start, u32 len);
 int btrfs_folio_start_writer_lock(const struct btrfs_fs_info *fs_info,
 				  struct folio *folio, u64 start, u32 len);
 void btrfs_folio_end_writer_lock(const struct btrfs_fs_info *fs_info,
 				 struct folio *folio, u64 start, u32 len);
+void btrfs_folio_set_writer_lock(const struct btrfs_fs_info *fs_info,
+				 struct folio *folio, u64 start, u32 len);
+bool btrfs_subpage_find_writer_locked(const struct btrfs_fs_info *fs_info,
+				      struct folio *folio, u64 search_start,
+				      u64 *found_start_ret, u32 *found_len_ret);
+void btrfs_folio_end_all_writers(const struct btrfs_fs_info *fs_info, struct folio *folio);
 
 /*
  * Template for subpage related operations.
@@ -145,9 +171,13 @@ DECLARE_BTRFS_SUBPAGE_OPS(checked);
 bool btrfs_subpage_clear_and_test_dirty(const struct btrfs_fs_info *fs_info,
 					struct folio *folio, u64 start, u32 len);
 
-void btrfs_folio_assert_not_dirty(const struct btrfs_fs_info *fs_info, struct folio *folio);
+void btrfs_folio_assert_not_dirty(const struct btrfs_fs_info *fs_info,
+				  struct folio *folio, u64 start, u32 len);
 void btrfs_folio_unlock_writer(struct btrfs_fs_info *fs_info,
 			       struct folio *folio, u64 start, u32 len);
+void btrfs_get_subpage_dirty_bitmap(struct btrfs_fs_info *fs_info,
+				    struct folio *folio,
+				    unsigned long *ret_bitmap);
 void __cold btrfs_subpage_dump_bitmap(const struct btrfs_fs_info *fs_info,
 				      struct folio *folio, u64 start, u32 len);
 

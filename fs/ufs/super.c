@@ -1470,8 +1470,7 @@ static int __init init_inodecache(void)
 {
 	ufs_inode_cachep = kmem_cache_create_usercopy("ufs_inode_cache",
 				sizeof(struct ufs_inode_info), 0,
-				(SLAB_RECLAIM_ACCOUNT|SLAB_MEM_SPREAD|
-					SLAB_ACCOUNT),
+				(SLAB_RECLAIM_ACCOUNT | SLAB_ACCOUNT),
 				offsetof(struct ufs_inode_info, i_u1.i_symlink),
 				sizeof_field(struct ufs_inode_info,
 					i_u1.i_symlink),
@@ -1541,4 +1540,5 @@ static void __exit exit_ufs_fs(void)
 
 module_init(init_ufs_fs)
 module_exit(exit_ufs_fs)
+MODULE_DESCRIPTION("UFS Filesystem");
 MODULE_LICENSE("GPL");

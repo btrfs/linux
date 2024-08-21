@@ -262,6 +262,36 @@ extern unsigned long __kernel_io_end;
 
 extern struct page *vmemmap;
 extern unsigned long pci_io_base;
+
+#define pmd_leaf pmd_leaf
+static inline bool pmd_leaf(pmd_t pmd)
+{
+	return !!(pmd_raw(pmd) & cpu_to_be64(_PAGE_PTE));
+}
+
+#define pud_leaf pud_leaf
+static inline bool pud_leaf(pud_t pud)
+{
+	return !!(pud_raw(pud) & cpu_to_be64(_PAGE_PTE));
+}
+
+#define pmd_leaf_size pmd_leaf_size
+static inline unsigned long pmd_leaf_size(pmd_t pmd)
+{
+	if (IS_ENABLED(CONFIG_PPC_4K_PAGES) && !radix_enabled())
+		return SZ_16M;
+	else
+		return PMD_SIZE;
+}
+
+#define pud_leaf_size pud_leaf_size
+static inline unsigned long pud_leaf_size(pud_t pud)
+{
+	if (IS_ENABLED(CONFIG_PPC_4K_PAGES) && !radix_enabled())
+		return SZ_16G;
+	else
+		return PUD_SIZE;
+}
 #endif /* __ASSEMBLY__ */
 
 #include <asm/book3s/64/hash.h>
@@ -273,11 +303,9 @@ extern unsigned long pci_io_base;
 #define  MAX_PHYSMEM_BITS	R_MAX_PHYSMEM_BITS
 #endif
 
-
+/* hash 4k can't share hugetlb and also doesn't support THP */
 #ifdef CONFIG_PPC_64K_PAGES
 #include <asm/book3s/64/pgtable-64k.h>
-#else
-#include <asm/book3s/64/pgtable-4k.h>
 #endif
 
 #include <asm/barrier.h>
@@ -1027,16 +1055,6 @@ static inline void vmemmap_remove_mapping(unsigned long start,
 }
 #endif
 
-#if defined(CONFIG_DEBUG_PAGEALLOC) || defined(CONFIG_KFENCE)
-static inline void __kernel_map_pages(struct page *page, int numpages, int enable)
-{
-	if (radix_enabled())
-		radix__kernel_map_pages(page, numpages, enable);
-	else
-		hash__kernel_map_pages(page, numpages, enable);
-}
-#endif
-
 static inline pte_t pmd_pte(pmd_t pmd)
 {
 	return __pte_raw(pmd_raw(pmd));
@@ -1155,20 +1173,6 @@ pud_hugepage_update(struct mm_struct *mm, unsigned long addr, pud_t *pudp,
 		return radix__pud_hugepage_update(mm, addr, pudp, clr, set);
 	BUG();
 	return pud_val(*pudp);
-}
-
-/*
- * returns true for pmd migration entries, THP, devmap, hugetlb
- * But compile time dependent on THP config
- */
-static inline int pmd_large(pmd_t pmd)
-{
-	return !!(pmd_raw(pmd) & cpu_to_be64(_PAGE_PTE));
-}
-
-static inline int pud_large(pud_t pud)
-{
-	return !!(pud_raw(pud) & cpu_to_be64(_PAGE_PTE));
 }
 
 /*
@@ -1448,23 +1452,6 @@ static inline bool is_pte_rw_upgrade(unsigned long old_val, unsigned long new_va
 		return true;
 
 	return false;
-}
-
-/*
- * Like pmd_huge() and pmd_large(), but works regardless of config options
- */
-#define pmd_is_leaf pmd_is_leaf
-#define pmd_leaf pmd_is_leaf
-static inline bool pmd_is_leaf(pmd_t pmd)
-{
-	return !!(pmd_raw(pmd) & cpu_to_be64(_PAGE_PTE));
-}
-
-#define pud_is_leaf pud_is_leaf
-#define pud_leaf pud_is_leaf
-static inline bool pud_is_leaf(pud_t pud)
-{
-	return !!(pud_raw(pud) & cpu_to_be64(_PAGE_PTE));
 }
 
 #endif /* __ASSEMBLY__ */

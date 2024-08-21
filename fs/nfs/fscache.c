@@ -265,6 +265,8 @@ static int nfs_netfs_init_request(struct netfs_io_request *rreq, struct file *fi
 {
 	rreq->netfs_priv = get_nfs_open_context(nfs_file_open_context(file));
 	rreq->debug_id = atomic_inc_return(&nfs_netfs_debug_id);
+	/* [DEPRECATED] Use PG_private_2 to mark folio being written to the cache. */
+	__set_bit(NETFS_RREQ_USE_PGPRIV2, &rreq->flags);
 
 	return 0;
 }
@@ -301,11 +303,11 @@ static void nfs_netfs_issue_read(struct netfs_io_subrequest *sreq)
 	struct inode *inode = sreq->rreq->inode;
 	struct nfs_open_context *ctx = sreq->rreq->netfs_priv;
 	struct page *page;
+	unsigned long idx;
 	int err;
 	pgoff_t start = (sreq->start + sreq->transferred) >> PAGE_SHIFT;
 	pgoff_t last = ((sreq->start + sreq->len -
 			 sreq->transferred - 1) >> PAGE_SHIFT);
-	XA_STATE(xas, &sreq->rreq->mapping->i_pages, start);
 
 	nfs_pageio_init_read(&pgio, inode, false,
 			     &nfs_async_read_completion_ops);
@@ -316,19 +318,14 @@ static void nfs_netfs_issue_read(struct netfs_io_subrequest *sreq)
 
 	pgio.pg_netfs = netfs; /* used in completion */
 
-	xas_lock(&xas);
-	xas_for_each(&xas, page, last) {
+	xa_for_each_range(&sreq->rreq->mapping->i_pages, idx, page, start, last) {
 		/* nfs_read_add_folio() may schedule() due to pNFS layout and other RPCs  */
-		xas_pause(&xas);
-		xas_unlock(&xas);
 		err = nfs_read_add_folio(&pgio, ctx, page_folio(page));
 		if (err < 0) {
 			netfs->error = err;
 			goto out;
 		}
-		xas_lock(&xas);
 	}
-	xas_unlock(&xas);
 out:
 	nfs_pageio_complete_read(&pgio);
 	nfs_netfs_put(netfs);
@@ -346,7 +343,7 @@ void nfs_netfs_initiate_read(struct nfs_pgio_header *hdr)
 
 int nfs_netfs_folio_unlock(struct folio *folio)
 {
-	struct inode *inode = folio_file_mapping(folio)->host;
+	struct inode *inode = folio->mapping->host;
 
 	/*
 	 * If fscache is enabled, netfs will unlock pages.
@@ -366,7 +363,8 @@ void nfs_netfs_read_completion(struct nfs_pgio_header *hdr)
 		return;
 
 	sreq = netfs->sreq;
-	if (test_bit(NFS_IOHDR_EOF, &hdr->flags))
+	if (test_bit(NFS_IOHDR_EOF, &hdr->flags) &&
+	    sreq->rreq->origin != NETFS_DIO_READ)
 		__set_bit(NETFS_SREQ_CLEAR_TAIL, &sreq->flags);
 
 	if (hdr->error)
