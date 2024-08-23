@@ -79,15 +79,18 @@ enum mt76_dma_wed_ind_reason {
 int mt76_dma_rx_poll(struct napi_struct *napi, int budget);
 void mt76_dma_attach(struct mt76_dev *dev);
 void mt76_dma_cleanup(struct mt76_dev *dev);
-int mt76_dma_wed_setup(struct mt76_dev *dev, struct mt76_queue *q, bool reset);
-void mt76_dma_wed_reset(struct mt76_dev *dev);
+int mt76_dma_rx_fill(struct mt76_dev *dev, struct mt76_queue *q,
+		     bool allow_direct);
+void __mt76_dma_queue_reset(struct mt76_dev *dev, struct mt76_queue *q,
+			    bool reset_idx);
+void mt76_dma_queue_reset(struct mt76_dev *dev, struct mt76_queue *q);
 
 static inline void
 mt76_dma_reset_tx_queue(struct mt76_dev *dev, struct mt76_queue *q)
 {
 	dev->queue_ops->reset_q(dev, q);
 	if (mtk_wed_device_active(&dev->mmio.wed))
-		mt76_dma_wed_setup(dev, q, true);
+		mt76_wed_dma_setup(dev, q, true);
 }
 
 static inline void
@@ -111,6 +114,15 @@ mt76_dma_should_drop_buf(bool *drop, u32 ctrl, u32 buf1, u32 info)
 		*drop = !!(ctrl & MT_DMA_CTL_PN_CHK_FAIL);
 		break;
 	}
+}
+
+static inline void *mt76_priv(struct net_device *dev)
+{
+	struct mt76_dev **priv;
+
+	priv = netdev_priv(dev);
+
+	return *priv;
 }
 
 #endif

@@ -517,6 +517,19 @@ static int usb_unbind_interface(struct device *dev)
 	return 0;
 }
 
+static void usb_shutdown_interface(struct device *dev)
+{
+	struct usb_interface *intf = to_usb_interface(dev);
+	struct usb_driver *driver;
+
+	if (!dev->driver)
+		return;
+
+	driver = to_usb_driver(dev->driver);
+	if (driver->shutdown)
+		driver->shutdown(intf);
+}
+
 /**
  * usb_driver_claim_interface - bind a driver to an interface
  * @driver: the driver to be bound
@@ -855,7 +868,7 @@ bool usb_driver_applicable(struct usb_device *udev,
 	return false;
 }
 
-static int usb_device_match(struct device *dev, struct device_driver *drv)
+static int usb_device_match(struct device *dev, const struct device_driver *drv)
 {
 	/* devices and interfaces are handled separately */
 	if (is_usb_device(dev)) {
@@ -1059,6 +1072,7 @@ int usb_register_driver(struct usb_driver *new_driver, struct module *owner,
 	new_driver->driver.bus = &usb_bus_type;
 	new_driver->driver.probe = usb_probe_interface;
 	new_driver->driver.remove = usb_unbind_interface;
+	new_driver->driver.shutdown = usb_shutdown_interface;
 	new_driver->driver.owner = owner;
 	new_driver->driver.mod_name = mod_name;
 	new_driver->driver.dev_groups = new_driver->dev_groups;
@@ -1710,9 +1724,7 @@ int usb_autoresume_device(struct usb_device *udev)
 {
 	int	status;
 
-	status = pm_runtime_get_sync(&udev->dev);
-	if (status < 0)
-		pm_runtime_put_sync(&udev->dev);
+	status = pm_runtime_resume_and_get(&udev->dev);
 	dev_vdbg(&udev->dev, "%s: cnt %d -> %d\n",
 			__func__, atomic_read(&udev->dev.power.usage_count),
 			status);
@@ -1818,9 +1830,7 @@ int usb_autopm_get_interface(struct usb_interface *intf)
 {
 	int	status;
 
-	status = pm_runtime_get_sync(&intf->dev);
-	if (status < 0)
-		pm_runtime_put_sync(&intf->dev);
+	status = pm_runtime_resume_and_get(&intf->dev);
 	dev_vdbg(&intf->dev, "%s: cnt %d -> %d\n",
 			__func__, atomic_read(&intf->dev.power.usage_count),
 			status);

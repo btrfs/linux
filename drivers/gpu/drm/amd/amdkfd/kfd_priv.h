@@ -99,11 +99,11 @@
 /*
  * Size of the per-process TBA+TMA buffer: 2 pages
  *
- * The first page is the TBA used for the CWSR ISA code. The second
- * page is used as TMA for user-mode trap handler setup in daisy-chain mode.
+ * The first chunk is the TBA used for the CWSR ISA code. The second
+ * chunk is used as TMA for user-mode trap handler setup in daisy-chain mode.
  */
 #define KFD_CWSR_TBA_TMA_SIZE (PAGE_SIZE * 2)
-#define KFD_CWSR_TMA_OFFSET PAGE_SIZE
+#define KFD_CWSR_TMA_OFFSET (PAGE_SIZE + 2048)
 
 #define KFD_MAX_NUM_OF_QUEUES_PER_DEVICE		\
 	(KFD_MAX_NUM_OF_PROCESSES *			\
@@ -206,7 +206,8 @@ enum cache_policy {
 #define KFD_IS_SOC15(dev)   ((KFD_GC_VERSION(dev)) >= (IP_VERSION(9, 0, 1)))
 #define KFD_SUPPORT_XNACK_PER_PROCESS(dev)\
 	((KFD_GC_VERSION(dev) == IP_VERSION(9, 4, 2)) ||	\
-	 (KFD_GC_VERSION(dev) == IP_VERSION(9, 4, 3)))
+	 (KFD_GC_VERSION(dev) == IP_VERSION(9, 4, 3)) ||	\
+	 (KFD_GC_VERSION(dev) == IP_VERSION(9, 4, 4)))
 
 struct kfd_node;
 
@@ -1128,7 +1129,8 @@ static inline struct kfd_node *kfd_node_by_irq_ids(struct amdgpu_device *adev,
 	struct kfd_dev *dev = adev->kfd.dev;
 	uint32_t i;
 
-	if (KFD_GC_VERSION(dev) != IP_VERSION(9, 4, 3))
+	if (KFD_GC_VERSION(dev) != IP_VERSION(9, 4, 3) &&
+	    KFD_GC_VERSION(dev) != IP_VERSION(9, 4, 4))
 		return dev->nodes[0];
 
 	for (i = 0; i < dev->num_nodes; i++)
@@ -1293,11 +1295,13 @@ struct mqd_manager *mqd_manager_init_v10(enum KFD_MQD_TYPE type,
 		struct kfd_node *dev);
 struct mqd_manager *mqd_manager_init_v11(enum KFD_MQD_TYPE type,
 		struct kfd_node *dev);
+struct mqd_manager *mqd_manager_init_v12(enum KFD_MQD_TYPE type,
+		struct kfd_node *dev);
 struct device_queue_manager *device_queue_manager_init(struct kfd_node *dev);
 void device_queue_manager_uninit(struct device_queue_manager *dqm);
 struct kernel_queue *kernel_queue_init(struct kfd_node *dev,
 					enum kfd_queue_type type);
-void kernel_queue_uninit(struct kernel_queue *kq, bool hanging);
+void kernel_queue_uninit(struct kernel_queue *kq);
 int kfd_dqm_evict_pasid(struct device_queue_manager *dqm, u32 pasid);
 
 /* Process Queue Manager */
@@ -1403,7 +1407,7 @@ extern const struct packet_manager_funcs kfd_v9_pm_funcs;
 extern const struct packet_manager_funcs kfd_aldebaran_pm_funcs;
 
 int pm_init(struct packet_manager *pm, struct device_queue_manager *dqm);
-void pm_uninit(struct packet_manager *pm, bool hanging);
+void pm_uninit(struct packet_manager *pm);
 int pm_send_set_resources(struct packet_manager *pm,
 				struct scheduling_resources *res);
 int pm_send_runlist(struct packet_manager *pm, struct list_head *dqm_queues);
@@ -1473,7 +1477,7 @@ static inline void kfd_flush_tlb(struct kfd_process_device *pdd,
 
 static inline bool kfd_flush_tlb_after_unmap(struct kfd_dev *dev)
 {
-	return KFD_GC_VERSION(dev) > IP_VERSION(9, 4, 2) ||
+	return KFD_GC_VERSION(dev) >= IP_VERSION(9, 4, 2) ||
 	       (KFD_GC_VERSION(dev) == IP_VERSION(9, 4, 1) && dev->sdma_fw_version >= 18) ||
 	       KFD_GC_VERSION(dev) == IP_VERSION(9, 4, 0);
 }

@@ -96,7 +96,7 @@
 #define INA238_BUS_VOLTAGE_LSB		3125 /* 3.125 mV/lsb */
 #define INA238_DIE_TEMP_LSB		125 /* 125 mC/lsb */
 
-static struct regmap_config ina238_regmap_config = {
+static const struct regmap_config ina238_regmap_config = {
 	.max_register = INA238_REGISTERS,
 	.reg_bits = 8,
 	.val_bits = 16,
@@ -616,7 +616,7 @@ static int ina238_probe(struct i2c_client *client)
 }
 
 static const struct i2c_device_id ina238_id[] = {
-	{ "ina238", 0 },
+	{ "ina238" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, ina238_id);
@@ -629,7 +629,6 @@ static const struct of_device_id __maybe_unused ina238_of_match[] = {
 MODULE_DEVICE_TABLE(of, ina238_of_match);
 
 static struct i2c_driver ina238_driver = {
-	.class		= I2C_CLASS_HWMON,
 	.driver = {
 		.name	= "ina238",
 		.of_match_table = of_match_ptr(ina238_of_match),

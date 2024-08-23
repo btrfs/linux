@@ -16,6 +16,7 @@
 #include <linux/notifier.h>
 
 struct clk;
+struct cpufreq_frequency_table;
 struct regulator;
 struct dev_pm_opp;
 struct device;
@@ -87,12 +88,14 @@ struct dev_pm_opp_config {
 
 /**
  * struct dev_pm_opp_data - The data to use to initialize an OPP.
+ * @turbo: Flag to indicate whether the OPP is to be marked turbo or not.
  * @level: The performance level for the OPP. Set level to OPP_LEVEL_UNSET if
  * level field isn't used.
  * @freq: The clock rate in Hz for the OPP.
  * @u_volt: The voltage in uV for the OPP.
  */
 struct dev_pm_opp_data {
+	bool turbo;
 	unsigned int level;
 	unsigned long freq;
 	unsigned long u_volt;
@@ -444,6 +447,21 @@ static inline int dev_pm_opp_sync_regulators(struct device *dev)
 
 #endif		/* CONFIG_PM_OPP */
 
+#if defined(CONFIG_CPU_FREQ) && defined(CONFIG_PM_OPP)
+int dev_pm_opp_init_cpufreq_table(struct device *dev, struct cpufreq_frequency_table **table);
+void dev_pm_opp_free_cpufreq_table(struct device *dev, struct cpufreq_frequency_table **table);
+#else
+static inline int dev_pm_opp_init_cpufreq_table(struct device *dev, struct cpufreq_frequency_table **table)
+{
+	return -EINVAL;
+}
+
+static inline void dev_pm_opp_free_cpufreq_table(struct device *dev, struct cpufreq_frequency_table **table)
+{
+}
+#endif
+
+
 #if defined(CONFIG_PM_OPP) && defined(CONFIG_OF)
 int dev_pm_opp_of_add_table(struct device *dev);
 int dev_pm_opp_of_add_table_indexed(struct device *dev, int index);
@@ -456,8 +474,11 @@ int dev_pm_opp_of_get_sharing_cpus(struct device *cpu_dev, struct cpumask *cpuma
 struct device_node *dev_pm_opp_of_get_opp_desc_node(struct device *dev);
 struct device_node *dev_pm_opp_get_of_node(struct dev_pm_opp *opp);
 int of_get_required_opp_performance_state(struct device_node *np, int index);
+bool dev_pm_opp_of_has_required_opp(struct device *dev);
 int dev_pm_opp_of_find_icc_paths(struct device *dev, struct opp_table *opp_table);
 int dev_pm_opp_of_register_em(struct device *dev, struct cpumask *cpus);
+int dev_pm_opp_calc_power(struct device *dev, unsigned long *uW,
+			  unsigned long *kHz);
 static inline void dev_pm_opp_of_unregister_em(struct device *dev)
 {
 	em_dev_unregister_perf_domain(dev);
@@ -521,9 +542,20 @@ static inline void dev_pm_opp_of_unregister_em(struct device *dev)
 {
 }
 
+static inline int dev_pm_opp_calc_power(struct device *dev, unsigned long *uW,
+					unsigned long *kHz)
+{
+	return -EOPNOTSUPP;
+}
+
 static inline int of_get_required_opp_performance_state(struct device_node *np, int index)
 {
 	return -EOPNOTSUPP;
+}
+
+static inline bool dev_pm_opp_of_has_required_opp(struct device *dev)
+{
+	return false;
 }
 
 static inline int dev_pm_opp_of_find_icc_paths(struct device *dev, struct opp_table *opp_table)

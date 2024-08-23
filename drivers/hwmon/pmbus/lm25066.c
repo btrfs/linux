@@ -17,7 +17,7 @@
 #include <linux/of.h>
 #include "pmbus.h"
 
-enum chips { lm25056 = 1, lm25066, lm5064, lm5066, lm5066i };
+enum chips { lm25056, lm25066, lm5064, lm5066, lm5066i };
 
 #define LM25066_READ_VAUX		0xd0
 #define LM25066_MFR_READ_IIN		0xd1
@@ -437,7 +437,7 @@ static int lm25066_write_word_data(struct i2c_client *client, int page, int reg,
 
 #if IS_ENABLED(CONFIG_SENSORS_LM25066_REGULATOR)
 static const struct regulator_desc lm25066_reg_desc[] = {
-	PMBUS_REGULATOR("vout", 0),
+	PMBUS_REGULATOR_ONE("vout"),
 };
 #endif
 

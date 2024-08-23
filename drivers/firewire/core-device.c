@@ -190,10 +190,10 @@ static bool match_ids(const struct ieee1394_device_id *id_table, int *id)
 }
 
 static const struct ieee1394_device_id *unit_match(struct device *dev,
-						   struct device_driver *drv)
+						   const struct device_driver *drv)
 {
 	const struct ieee1394_device_id *id_table =
-			container_of(drv, struct fw_driver, driver)->id_table;
+			container_of_const(drv, struct fw_driver, driver)->id_table;
 	int id[] = {0, 0, 0, 0};
 
 	get_modalias_ids(fw_unit(dev), id);
@@ -207,7 +207,7 @@ static const struct ieee1394_device_id *unit_match(struct device *dev,
 
 static bool is_fw_unit(const struct device *dev);
 
-static int fw_unit_match(struct device *dev, struct device_driver *drv)
+static int fw_unit_match(struct device *dev, const struct device_driver *drv)
 {
 	/* We only allow binding to fw_units. */
 	return is_fw_unit(dev) && unit_match(dev, drv) != NULL;
@@ -322,7 +322,8 @@ static ssize_t show_immediate(struct device *dev,
 	if (value < 0)
 		return -ENOENT;
 
-	return snprintf(buf, buf ? PAGE_SIZE : 0, "0x%06x\n", value);
+	// Note that this function is also called by init_fw_attribute_group() with NULL pointer.
+	return buf ? sysfs_emit(buf, "0x%06x\n", value) : 0;
 }
 
 #define IMMEDIATE_ATTR(name, key)				\
@@ -357,6 +358,7 @@ static ssize_t show_text_leaf(struct device *dev,
 		}
 	}
 
+	// Note that this function is also called by init_fw_attribute_group() with NULL pointer.
 	if (buf) {
 		bufsize = PAGE_SIZE - 1;
 	} else {
@@ -490,7 +492,7 @@ static ssize_t is_local_show(struct device *dev,
 {
 	struct fw_device *device = fw_device(dev);
 
-	return sprintf(buf, "%u\n", device->is_local);
+	return sysfs_emit(buf, "%u\n", device->is_local);
 }
 
 static int units_sprintf(char *buf, const u32 *directory)
