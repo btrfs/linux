@@ -4,7 +4,7 @@
 
 #include <linux/atomic.h>
 #include <linux/cache.h>
-#include <linux/kernel.h>
+#include <linux/limits.h>
 #include <asm/page.h>
 
 struct page_counter {
@@ -80,5 +80,9 @@ static inline void page_counter_reset_watermark(struct page_counter *counter)
 {
 	counter->watermark = page_counter_read(counter);
 }
+
+void page_counter_calculate_protection(struct page_counter *root,
+				       struct page_counter *counter,
+				       bool recursive_protection);
 
 #endif /* _LINUX_PAGE_COUNTER_H */

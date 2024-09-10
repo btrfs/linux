@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause */
 /*
- * Copyright (C) 2018-2023 Intel Corporation
+ * Copyright (C) 2018-2024 Intel Corporation
  */
 #ifndef __iwl_fw_dbg_tlv_h__
 #define __iwl_fw_dbg_tlv_h__
@@ -147,32 +147,34 @@ struct iwl_fw_ini_region_internal_buffer {
  * Configures parameters for region data collection
  *
  * @hdr: debug header
- * @id: region id. Max id is &IWL_FW_INI_MAX_REGION_ID
+ * @id: region id. Max id is %IWL_FW_INI_MAX_REGION_ID
  * @type: region type. One of &enum iwl_fw_ini_region_type
  * @sub_type: region sub type
  * @sub_type_ver: region sub type version
  * @reserved: not in use
  * @name: region name
  * @dev_addr: device address configuration. Used by
- *	&IWL_FW_INI_REGION_DEVICE_MEMORY, &IWL_FW_INI_REGION_PERIPHERY_MAC,
- *	&IWL_FW_INI_REGION_PERIPHERY_PHY, &IWL_FW_INI_REGION_PERIPHERY_AUX,
- *	&IWL_FW_INI_REGION_PAGING, &IWL_FW_INI_REGION_CSR,
- *	&IWL_FW_INI_REGION_DRAM_IMR and &IWL_FW_INI_REGION_PCI_IOSF_CONFIG
- *	&IWL_FW_INI_REGION_DBGI_SRAM, &FW_TLV_DEBUG_REGION_TYPE_DBGI_SRAM,
- *	&IWL_FW_INI_REGION_PERIPHERY_SNPS_DPHYIP,
+ *	%IWL_FW_INI_REGION_DEVICE_MEMORY, %IWL_FW_INI_REGION_PERIPHERY_MAC,
+ *	%IWL_FW_INI_REGION_PERIPHERY_PHY, %IWL_FW_INI_REGION_PERIPHERY_AUX,
+ *	%IWL_FW_INI_REGION_PAGING, %IWL_FW_INI_REGION_CSR,
+ *	%IWL_FW_INI_REGION_DRAM_IMR and %IWL_FW_INI_REGION_PCI_IOSF_CONFIG
+ *	%IWL_FW_INI_REGION_DBGI_SRAM, %FW_TLV_DEBUG_REGION_TYPE_DBGI_SRAM,
+ *	%IWL_FW_INI_REGION_PERIPHERY_SNPS_DPHYIP,
  * @dev_addr_range: device address range configuration. Used by
- *	&IWL_FW_INI_REGION_PERIPHERY_MAC_RANGE and
- *	&IWL_FW_INI_REGION_PERIPHERY_PHY_RANGE
- * @fifos: fifos configuration. Used by &IWL_FW_INI_REGION_TXF and
- *	&IWL_FW_INI_REGION_RXF
+ *	%IWL_FW_INI_REGION_PERIPHERY_MAC_RANGE and
+ *	%IWL_FW_INI_REGION_PERIPHERY_PHY_RANGE
+ * @fifos: fifos configuration. Used by %IWL_FW_INI_REGION_TXF and
+ *	%IWL_FW_INI_REGION_RXF
  * @err_table: error table configuration. Used by
- *	IWL_FW_INI_REGION_LMAC_ERROR_TABLE and
- *	IWL_FW_INI_REGION_UMAC_ERROR_TABLE
+ *	%IWL_FW_INI_REGION_LMAC_ERROR_TABLE and
+ *	%IWL_FW_INI_REGION_UMAC_ERROR_TABLE
  * @internal_buffer: internal monitor buffer configuration. Used by
- *	&IWL_FW_INI_REGION_INTERNAL_BUFFER
+ *	%IWL_FW_INI_REGION_INTERNAL_BUFFER
+ * @special_mem: special device memory region, used by
+ *	%IWL_FW_INI_REGION_SPECIAL_DEVICE_MEMORY
  * @dram_alloc_id: dram allocation id. One of &enum iwl_fw_ini_allocation_id.
- *	Used by &IWL_FW_INI_REGION_DRAM_BUFFER
- * @tlv_mask: tlv collection mask. Used by &IWL_FW_INI_REGION_TLV
+ *	Used by %IWL_FW_INI_REGION_DRAM_BUFFER
+ * @tlv_mask: tlv collection mask. Used by %IWL_FW_INI_REGION_TLV
  * @addrs: array of addresses attached to the end of the region tlv
  */
 struct iwl_fw_ini_region_tlv {
@@ -291,7 +293,7 @@ struct iwl_fw_ini_addr_val {
 } __packed; /* FW_TLV_DEBUG_ADDR_VALUE_VER_1 */
 
 /**
- * struct iwl_fw_ini_conf_tlv - configuration TLV to set register/memory.
+ * struct iwl_fw_ini_conf_set_tlv - configuration TLV to set register/memory.
  *
  * @hdr: debug header
  * @time_point: time point to apply config. One of &enum iwl_fw_ini_time_point
@@ -319,7 +321,7 @@ struct iwl_fw_ini_conf_set_tlv {
  * @IWL_FW_INI_CONFIG_SET_TYPE_CSR: for CSR configuration
  * @IWL_FW_INI_CONFIG_SET_TYPE_DBGC_DRAM_ADDR: for DBGC_DRAM_ADDR configuration
  * @IWL_FW_INI_CONFIG_SET_TYPE_PERIPH_SCRATCH_HWM: for PERIPH SCRATCH HWM configuration
- * @IWL_FW_INI_ALLOCATION_NUM: max number of configuration supported
+ * @IWL_FW_INI_CONFIG_SET_TYPE_MAX_NUM: max number of configuration supported
 */
 
 enum iwl_fw_ini_config_set_type {
@@ -360,6 +362,7 @@ enum iwl_fw_ini_allocation_id {
  * @IWL_FW_INI_LOCATION_SRAM_PATH: SRAM location
  * @IWL_FW_INI_LOCATION_DRAM_PATH: DRAM location
  * @IWL_FW_INI_LOCATION_NPK_PATH: NPK location
+ * @IWL_FW_INI_LOCATION_NUM: number of valid locations
  */
 enum iwl_fw_ini_buffer_location {
 	IWL_FW_INI_LOCATION_INVALID,
@@ -439,6 +442,7 @@ enum iwl_fw_ini_region_device_memory_subtype {
  * Hard coded time points in which the driver can send hcmd or perform dump
  * collection
  *
+ * @IWL_FW_INI_TIME_POINT_INVALID: invalid timepoint
  * @IWL_FW_INI_TIME_POINT_EARLY: pre loading the FW
  * @IWL_FW_INI_TIME_POINT_AFTER_ALIVE: first cmd from host after alive notif
  * @IWL_FW_INI_TIME_POINT_POST_INIT: last cmd in series of init sequence
@@ -468,6 +472,10 @@ enum iwl_fw_ini_region_device_memory_subtype {
  * @IWL_FW_INI_TIME_POINT_EAPOL_FAILED: EAPOL failed
  * @IWL_FW_INI_TIME_POINT_FAKE_TX: fake Tx
  * @IWL_FW_INI_TIME_POINT_DEASSOC: de association
+ * @IWL_FW_INI_TIME_POINT_PRESET_OVERRIDE_EXT_REQ: request to override preset
+ * @IWL_FW_INI_TIME_POINT_PRESET_OVERRIDE_START: start handling override preset
+ *	request
+ * @IWL_FW_INI_TIME_SCAN_FAILURE: failed scan channel list
  * @IWL_FW_INI_TIME_POINT_NUM: number of time points
  */
 enum iwl_fw_ini_time_point {
@@ -498,6 +506,9 @@ enum iwl_fw_ini_time_point {
 	IWL_FW_INI_TIME_POINT_EAPOL_FAILED,
 	IWL_FW_INI_TIME_POINT_FAKE_TX,
 	IWL_FW_INI_TIME_POINT_DEASSOC,
+	IWL_FW_INI_TIME_POINT_PRESET_OVERRIDE_EXT_REQ,
+	IWL_FW_INI_TIME_POINT_PRESET_OVERRIDE_START,
+	IWL_FW_INI_TIME_SCAN_FAILURE,
 	IWL_FW_INI_TIME_POINT_NUM,
 }; /* FW_TLV_DEBUG_TIME_POINT_API_E */
 
@@ -553,7 +564,7 @@ enum iwl_fw_ini_dump_policy {
  * enum iwl_fw_ini_dump_type - Determines dump type based on size defined by FW.
  *
  * @IWL_FW_INI_DUMP_BRIEF : only dump the most important regions
- * @IWL_FW_INI_DEBUG_MEDIUM: dump more regions than "brief", but not all regions
+ * @IWL_FW_INI_DUMP_MEDIUM: dump more regions than "brief", but not all regions
  * @IWL_FW_INI_DUMP_VERBOSE : dump all regions
  */
 enum iwl_fw_ini_dump_type {

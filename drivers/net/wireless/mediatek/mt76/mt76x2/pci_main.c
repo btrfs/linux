@@ -24,7 +24,7 @@ mt76x2_start(struct ieee80211_hw *hw)
 }
 
 static void
-mt76x2_stop(struct ieee80211_hw *hw)
+mt76x2_stop(struct ieee80211_hw *hw, bool suspend)
 {
 	struct mt76x02_dev *dev = hw->priv;
 
@@ -132,6 +132,10 @@ static int mt76x2_set_antenna(struct ieee80211_hw *hw, u32 tx_ant,
 }
 
 const struct ieee80211_ops mt76x2_ops = {
+	.add_chanctx = ieee80211_emulate_add_chanctx,
+	.remove_chanctx = ieee80211_emulate_remove_chanctx,
+	.change_chanctx = ieee80211_emulate_change_chanctx,
+	.switch_vif_chanctx = ieee80211_emulate_switch_vif_chanctx,
 	.tx = mt76x02_tx,
 	.start = mt76x2_start,
 	.stop = mt76x2_stop,

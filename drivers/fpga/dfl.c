@@ -257,10 +257,10 @@ dfl_match_one_device(const struct dfl_device_id *id, struct dfl_device *ddev)
 	return NULL;
 }
 
-static int dfl_bus_match(struct device *dev, struct device_driver *drv)
+static int dfl_bus_match(struct device *dev, const struct device_driver *drv)
 {
 	struct dfl_device *ddev = to_dfl_dev(dev);
-	struct dfl_driver *ddrv = to_dfl_drv(drv);
+	const struct dfl_driver *ddrv = to_dfl_drv(drv);
 	const struct dfl_device_id *id_entry;
 
 	id_entry = ddrv->id_table;
@@ -327,7 +327,7 @@ static struct attribute *dfl_dev_attrs[] = {
 };
 ATTRIBUTE_GROUPS(dfl_dev);
 
-static struct bus_type dfl_bus_type = {
+static const struct bus_type dfl_bus_type = {
 	.name		= "dfl",
 	.match		= dfl_bus_match,
 	.probe		= dfl_bus_probe,

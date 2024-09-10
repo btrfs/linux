@@ -357,62 +357,55 @@ static int max1363_read_single_chan(struct iio_dev *indio_dev,
 				    int *val,
 				    long m)
 {
-	int ret = 0;
-	s32 data;
-	u8 rxbuf[2];
-	struct max1363_state *st = iio_priv(indio_dev);
-	struct i2c_client *client = st->client;
+	iio_device_claim_direct_scoped(return -EBUSY, indio_dev) {
+		s32 data;
+		u8 rxbuf[2];
+		struct max1363_state *st = iio_priv(indio_dev);
+		struct i2c_client *client = st->client;
 
-	ret = iio_device_claim_direct_mode(indio_dev);
-	if (ret)
-		return ret;
-	mutex_lock(&st->lock);
+		guard(mutex)(&st->lock);
 
-	/*
-	 * If monitor mode is enabled, the method for reading a single
-	 * channel will have to be rather different and has not yet
-	 * been implemented.
-	 *
-	 * Also, cannot read directly if buffered capture enabled.
-	 */
-	if (st->monitor_on) {
-		ret = -EBUSY;
-		goto error_ret;
-	}
+		/*
+		 * If monitor mode is enabled, the method for reading a single
+		 * channel will have to be rather different and has not yet
+		 * been implemented.
+		 *
+		 * Also, cannot read directly if buffered capture enabled.
+		 */
+		if (st->monitor_on)
+			return -EBUSY;
 
-	/* Check to see if current scan mode is correct */
-	if (st->current_mode != &max1363_mode_table[chan->address]) {
-		/* Update scan mode if needed */
-		st->current_mode = &max1363_mode_table[chan->address];
-		ret = max1363_set_scan_mode(st);
-		if (ret < 0)
-			goto error_ret;
-	}
-	if (st->chip_info->bits != 8) {
-		/* Get reading */
-		data = st->recv(client, rxbuf, 2);
-		if (data < 0) {
-			ret = data;
-			goto error_ret;
+		/* Check to see if current scan mode is correct */
+		if (st->current_mode != &max1363_mode_table[chan->address]) {
+			int ret;
+
+			/* Update scan mode if needed */
+			st->current_mode = &max1363_mode_table[chan->address];
+			ret = max1363_set_scan_mode(st);
+			if (ret < 0)
+				return ret;
 		}
-		data = (rxbuf[1] | rxbuf[0] << 8) &
-		  ((1 << st->chip_info->bits) - 1);
-	} else {
-		/* Get reading */
-		data = st->recv(client, rxbuf, 1);
-		if (data < 0) {
-			ret = data;
-			goto error_ret;
+		if (st->chip_info->bits != 8) {
+			/* Get reading */
+			data = st->recv(client, rxbuf, 2);
+			if (data < 0)
+				return data;
+
+			data = (rxbuf[1] | rxbuf[0] << 8) &
+				((1 << st->chip_info->bits) - 1);
+		} else {
+			/* Get reading */
+			data = st->recv(client, rxbuf, 1);
+			if (data < 0)
+				return data;
+
+			data = rxbuf[0];
 		}
-		data = rxbuf[0];
+		*val = data;
+
+		return 0;
 	}
-	*val = data;
-
-error_ret:
-	mutex_unlock(&st->lock);
-	iio_device_release_direct_mode(indio_dev);
-	return ret;
-
+	unreachable();
 }
 
 static int max1363_read_raw(struct iio_dev *indio_dev,
@@ -710,9 +703,8 @@ static ssize_t max1363_monitor_store_freq(struct device *dev,
 	if (!found)
 		return -EINVAL;
 
-	mutex_lock(&st->lock);
-	st->monitor_speed = i;
-	mutex_unlock(&st->lock);
+	scoped_guard(mutex, &st->lock)
+		st->monitor_speed = i;
 
 	return 0;
 }
@@ -815,12 +807,11 @@ static int max1363_read_event_config(struct iio_dev *indio_dev,
 	int val;
 	int number = chan->channel;
 
-	mutex_lock(&st->lock);
+	guard(mutex)(&st->lock);
 	if (dir == IIO_EV_DIR_FALLING)
 		val = (1 << number) & st->mask_low;
 	else
 		val = (1 << number) & st->mask_high;
-	mutex_unlock(&st->lock);
 
 	return val;
 }
@@ -962,46 +953,42 @@ static int max1363_write_event_config(struct iio_dev *indio_dev,
 	const struct iio_chan_spec *chan, enum iio_event_type type,
 	enum iio_event_direction dir, int state)
 {
-	int ret = 0;
 	struct max1363_state *st = iio_priv(indio_dev);
-	u16 unifiedmask;
-	int number = chan->channel;
 
-	ret = iio_device_claim_direct_mode(indio_dev);
-	if (ret)
-		return ret;
-	mutex_lock(&st->lock);
+	iio_device_claim_direct_scoped(return -EBUSY, indio_dev) {
+		int number = chan->channel;
+		u16 unifiedmask;
+		int ret;
 
-	unifiedmask = st->mask_low | st->mask_high;
-	if (dir == IIO_EV_DIR_FALLING) {
+		guard(mutex)(&st->lock);
 
-		if (state == 0)
-			st->mask_low &= ~(1 << number);
-		else {
-			ret = __max1363_check_event_mask((1 << number),
-							 unifiedmask);
-			if (ret)
-				goto error_ret;
-			st->mask_low |= (1 << number);
-		}
-	} else {
-		if (state == 0)
-			st->mask_high &= ~(1 << number);
-		else {
-			ret = __max1363_check_event_mask((1 << number),
-							 unifiedmask);
-			if (ret)
-				goto error_ret;
-			st->mask_high |= (1 << number);
+		unifiedmask = st->mask_low | st->mask_high;
+		if (dir == IIO_EV_DIR_FALLING) {
+
+			if (state == 0)
+				st->mask_low &= ~(1 << number);
+			else {
+				ret = __max1363_check_event_mask((1 << number),
+								 unifiedmask);
+				if (ret)
+					return ret;
+				st->mask_low |= (1 << number);
+			}
+		} else {
+			if (state == 0)
+				st->mask_high &= ~(1 << number);
+			else {
+				ret = __max1363_check_event_mask((1 << number),
+								 unifiedmask);
+				if (ret)
+					return ret;
+				st->mask_high |= (1 << number);
+			}
 		}
 	}
-
 	max1363_monitor_mode_update(st, !!(st->mask_high | st->mask_low));
-error_ret:
-	mutex_unlock(&st->lock);
-	iio_device_release_direct_mode(indio_dev);
 
-	return ret;
+	return 0;
 }
 
 /*
@@ -1574,18 +1561,12 @@ static const struct of_device_id max1363_of_match[] = {
 };
 MODULE_DEVICE_TABLE(of, max1363_of_match);
 
-static void max1363_reg_disable(void *reg)
-{
-	regulator_disable(reg);
-}
-
 static int max1363_probe(struct i2c_client *client)
 {
 	const struct i2c_device_id *id = i2c_client_get_device_id(client);
 	int ret;
 	struct max1363_state *st;
 	struct iio_dev *indio_dev;
-	struct regulator *vref;
 
 	indio_dev = devm_iio_device_alloc(&client->dev,
 					  sizeof(struct max1363_state));
@@ -1602,26 +1583,12 @@ static int max1363_probe(struct i2c_client *client)
 	st->chip_info = i2c_get_match_data(client);
 	st->client = client;
 
-	st->vref_uv = st->chip_info->int_vref_mv * 1000;
-	vref = devm_regulator_get_optional(&client->dev, "vref");
-	if (!IS_ERR(vref)) {
-		int vref_uv;
+	ret = devm_regulator_get_enable_read_voltage(&client->dev, "vref");
+	if (ret < 0 && ret != -ENODEV)
+		return ret;
 
-		ret = regulator_enable(vref);
-		if (ret)
-			return ret;
 
-		ret = devm_add_action_or_reset(&client->dev, max1363_reg_disable, vref);
-		if (ret)
-			return ret;
-
-		st->vref = vref;
-		vref_uv = regulator_get_voltage(vref);
-		if (vref_uv <= 0)
-			return -EINVAL;
-
-		st->vref_uv = vref_uv;
-	}
+	st->vref_uv = ret == -ENODEV ? st->chip_info->int_vref_mv * 1000 : ret;
 
 	if (i2c_check_functionality(client->adapter, I2C_FUNC_I2C)) {
 		st->send = i2c_master_send;

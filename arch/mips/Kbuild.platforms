@@ -8,6 +8,7 @@ platform-$(CONFIG_BCM47XX)		+= bcm47xx/
 platform-$(CONFIG_BCM63XX)		+= bcm63xx/
 platform-$(CONFIG_BMIPS_GENERIC)	+= bmips/
 platform-$(CONFIG_CAVIUM_OCTEON_SOC)	+= cavium-octeon/
+platform-$(CONFIG_EYEQ)			+= mobileye/
 platform-$(CONFIG_MIPS_COBALT)		+= cobalt/
 platform-$(CONFIG_MACH_DECSTATION)	+= dec/
 platform-$(CONFIG_MIPS_GENERIC)		+= generic/

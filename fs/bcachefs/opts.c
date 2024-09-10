@@ -7,6 +7,7 @@
 #include "disk_groups.h"
 #include "error.h"
 #include "opts.h"
+#include "recovery_passes.h"
 #include "super-io.h"
 #include "util.h"
 
@@ -42,7 +43,7 @@ const char * const __bch2_btree_ids[] = {
 	NULL
 };
 
-const char * const bch2_csum_types[] = {
+static const char * const __bch2_csum_types[] = {
 	BCH_CSUM_TYPES()
 	NULL
 };
@@ -52,7 +53,7 @@ const char * const bch2_csum_opts[] = {
 	NULL
 };
 
-const char * const __bch2_compression_types[] = {
+static const char * const __bch2_compression_types[] = {
 	BCH_COMPRESSION_TYPES()
 	NULL
 };
@@ -82,17 +83,38 @@ const char * const bch2_member_states[] = {
 	NULL
 };
 
-const char * const bch2_jset_entry_types[] = {
+static const char * const __bch2_jset_entry_types[] = {
 	BCH_JSET_ENTRY_TYPES()
 	NULL
 };
 
-const char * const bch2_fs_usage_types[] = {
+static const char * const __bch2_fs_usage_types[] = {
 	BCH_FS_USAGE_TYPES()
 	NULL
 };
 
 #undef x
+
+static void prt_str_opt_boundscheck(struct printbuf *out, const char * const opts[],
+				    unsigned nr, const char *type, unsigned idx)
+{
+	if (idx < nr)
+		prt_str(out, opts[idx]);
+	else
+		prt_printf(out, "(unknown %s %u)", type, idx);
+}
+
+#define PRT_STR_OPT_BOUNDSCHECKED(name, type)					\
+void bch2_prt_##name(struct printbuf *out, type t)				\
+{										\
+	prt_str_opt_boundscheck(out, __bch2_##name##s, ARRAY_SIZE(__bch2_##name##s) - 1, #name, t);\
+}
+
+PRT_STR_OPT_BOUNDSCHECKED(jset_entry_type,	enum bch_jset_entry_type);
+PRT_STR_OPT_BOUNDSCHECKED(fs_usage_type,	enum bch_fs_usage_type);
+PRT_STR_OPT_BOUNDSCHECKED(data_type,		enum bch_data_type);
+PRT_STR_OPT_BOUNDSCHECKED(csum_type,		enum bch_csum_type);
+PRT_STR_OPT_BOUNDSCHECKED(compression_type,	enum bch_compression_type);
 
 static int bch2_opt_fix_errors_parse(struct bch_fs *c, const char *val, u64 *res,
 				     struct printbuf *err)
@@ -205,6 +227,9 @@ const struct bch_option bch2_opt_table[] = {
 #define OPT_STR(_choices)	.type = BCH_OPT_STR,			\
 				.min = 0, .max = ARRAY_SIZE(_choices),	\
 				.choices = _choices
+#define OPT_STR_NOLIMIT(_choices)	.type = BCH_OPT_STR,		\
+				.min = 0, .max = U64_MAX,		\
+				.choices = _choices
 #define OPT_FN(_fn)		.type = BCH_OPT_FN, .fn	= _fn
 
 #define x(_name, _bits, _flags, _type, _sb_opt, _default, _hint, _help)	\
@@ -314,7 +339,7 @@ int bch2_opt_parse(struct bch_fs *c,
 		if (ret < 0 || (*res != 0 && *res != 1)) {
 			if (err)
 				prt_printf(err, "%s: must be bool", opt->attr.name);
-			return ret;
+			return ret < 0 ? ret : -BCH_ERR_option_not_bool;
 		}
 		break;
 	case BCH_OPT_UINT:
@@ -353,6 +378,10 @@ int bch2_opt_parse(struct bch_fs *c,
 		break;
 	case BCH_OPT_FN:
 		ret = opt->fn.parse(c, val, res, err);
+
+		if (ret == -BCH_ERR_option_needs_open_fs)
+			return ret;
+
 		if (ret < 0) {
 			if (err)
 				prt_printf(err, "%s: parse error",
@@ -435,14 +464,81 @@ int bch2_opts_check_may_set(struct bch_fs *c)
 	return 0;
 }
 
+int bch2_parse_one_mount_opt(struct bch_fs *c, struct bch_opts *opts,
+			     struct printbuf *parse_later,
+			     const char *name, const char *val)
+{
+	struct printbuf err = PRINTBUF;
+	u64 v;
+	int ret, id;
+
+	id = bch2_mount_opt_lookup(name);
+
+	/* Check for the form "noopt", negation of a boolean opt: */
+	if (id < 0 &&
+	    !val &&
+	    !strncmp("no", name, 2)) {
+		id = bch2_mount_opt_lookup(name + 2);
+		val = "0";
+	}
+
+	/* Unknown options are ignored: */
+	if (id < 0)
+		return 0;
+
+	if (!(bch2_opt_table[id].flags & OPT_MOUNT))
+		goto bad_opt;
+
+	if (id == Opt_acl &&
+	    !IS_ENABLED(CONFIG_BCACHEFS_POSIX_ACL))
+		goto bad_opt;
+
+	if ((id == Opt_usrquota ||
+	     id == Opt_grpquota) &&
+	    !IS_ENABLED(CONFIG_BCACHEFS_QUOTA))
+		goto bad_opt;
+
+	ret = bch2_opt_parse(c, &bch2_opt_table[id], val, &v, &err);
+	if (ret == -BCH_ERR_option_needs_open_fs && parse_later) {
+		prt_printf(parse_later, "%s=%s,", name, val);
+		if (parse_later->allocation_failure) {
+			ret = -ENOMEM;
+			goto out;
+		}
+
+		ret = 0;
+		goto out;
+	}
+
+	if (ret < 0)
+		goto bad_val;
+
+	if (opts)
+		bch2_opt_set_by_id(opts, id, v);
+
+	ret = 0;
+	goto out;
+
+bad_opt:
+	pr_err("Bad mount option %s", name);
+	ret = -BCH_ERR_option_name;
+	goto out;
+
+bad_val:
+	pr_err("Invalid mount option %s", err.buf);
+	ret = -BCH_ERR_option_value;
+
+out:
+	printbuf_exit(&err);
+	return ret;
+}
+
 int bch2_parse_mount_opts(struct bch_fs *c, struct bch_opts *opts,
-			  char *options)
+			  struct printbuf *parse_later, char *options)
 {
 	char *copied_opts, *copied_opts_start;
 	char *opt, *name, *val;
-	int ret, id;
-	struct printbuf err = PRINTBUF;
-	u64 v;
+	int ret;
 
 	if (!options)
 		return 0;
@@ -456,60 +552,23 @@ int bch2_parse_mount_opts(struct bch_fs *c, struct bch_opts *opts,
 
 	copied_opts = kstrdup(options, GFP_KERNEL);
 	if (!copied_opts)
-		return -1;
+		return -ENOMEM;
 	copied_opts_start = copied_opts;
 
 	while ((opt = strsep(&copied_opts, ",")) != NULL) {
 		name	= strsep(&opt, "=");
 		val	= opt;
 
-		id = bch2_mount_opt_lookup(name);
-
-		/* Check for the form "noopt", negation of a boolean opt: */
-		if (id < 0 &&
-		    !val &&
-		    !strncmp("no", name, 2)) {
-			id = bch2_mount_opt_lookup(name + 2);
-			val = "0";
-		}
-
-		/* Unknown options are ignored: */
-		if (id < 0)
-			continue;
-
-		if (!(bch2_opt_table[id].flags & OPT_MOUNT))
-			goto bad_opt;
-
-		if (id == Opt_acl &&
-		    !IS_ENABLED(CONFIG_BCACHEFS_POSIX_ACL))
-			goto bad_opt;
-
-		if ((id == Opt_usrquota ||
-		     id == Opt_grpquota) &&
-		    !IS_ENABLED(CONFIG_BCACHEFS_QUOTA))
-			goto bad_opt;
-
-		ret = bch2_opt_parse(c, &bch2_opt_table[id], val, &v, &err);
+		ret = bch2_parse_one_mount_opt(c, opts, parse_later, name, val);
 		if (ret < 0)
-			goto bad_val;
-
-		bch2_opt_set_by_id(opts, id, v);
+			goto out;
 	}
 
 	ret = 0;
 	goto out;
 
-bad_opt:
-	pr_err("Bad mount option %s", name);
-	ret = -1;
-	goto out;
-bad_val:
-	pr_err("Invalid mount option %s", err.buf);
-	ret = -1;
-	goto out;
 out:
 	kfree(copied_opts_start);
-	printbuf_exit(&err);
 	return ret;
 }
 

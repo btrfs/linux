@@ -128,6 +128,7 @@ int amdgpu_vpe_configure_dpm(struct amdgpu_vpe *vpe)
 		struct dpm_clock *VPEClks;
 		struct dpm_clock *SOCClks;
 		uint32_t idx;
+		uint32_t vpeclk_enalbled_num = 0;
 		uint32_t pratio_vmax_vnorm = 0, pratio_vnorm_vmid = 0, pratio_vmid_vmin = 0;
 		uint16_t pratio_vmin_freq = 0, pratio_vmid_freq = 0, pratio_vnorm_freq = 0, pratio_vmax_freq = 0;
 
@@ -144,6 +145,14 @@ int amdgpu_vpe_configure_dpm(struct amdgpu_vpe *vpe)
 		SOCClks = clock_table.SocClocks;
 		VPEClks = clock_table.VPEClocks;
 
+		/* Comfirm enabled vpe clk num
+		 * Enabled VPE clocks are ordered from low to high in VPEClks
+		 * The highest valid clock index+1 is the number of VPEClks
+		 */
+		for (idx = PP_SMU_NUM_VPECLK_DPM_LEVELS; idx && !vpeclk_enalbled_num; idx--)
+			if (VPEClks[idx-1].Freq)
+				vpeclk_enalbled_num = idx;
+
 		/* vpe dpm only cares 4 levels. */
 		for (idx = 0; idx < VPE_MAX_DPM_LEVEL; idx++) {
 			uint32_t soc_dpm_level;
@@ -155,8 +164,8 @@ int amdgpu_vpe_configure_dpm(struct amdgpu_vpe *vpe)
 				soc_dpm_level = (idx * 2) + 1;
 
 			/* clamp the max level */
-			if (soc_dpm_level > PP_SMU_NUM_VPECLK_DPM_LEVELS - 1)
-				soc_dpm_level = PP_SMU_NUM_VPECLK_DPM_LEVELS - 1;
+			if (soc_dpm_level > vpeclk_enalbled_num - 1)
+				soc_dpm_level = vpeclk_enalbled_num - 1;
 
 			min_freq = (SOCClks[soc_dpm_level].Freq < VPEClks[soc_dpm_level].Freq) ?
 				   SOCClks[soc_dpm_level].Freq : VPEClks[soc_dpm_level].Freq;
@@ -205,7 +214,7 @@ disable_dpm:
 	dpm_ctl &= 0xfffffffe; /* Disable DPM */
 	WREG32(vpe_get_reg_offset(vpe, 0, vpe->regs.dpm_enable), dpm_ctl);
 	dev_dbg(adev->dev, "%s: disable vpe dpm\n", __func__);
-	return 0;
+	return -EINVAL;
 }
 
 int amdgpu_vpe_psp_update_sram(struct amdgpu_device *adev)
@@ -223,13 +232,11 @@ int amdgpu_vpe_init_microcode(struct amdgpu_vpe *vpe)
 {
 	struct amdgpu_device *adev = vpe->ring.adev;
 	const struct vpe_firmware_header_v1_0 *vpe_hdr;
-	char fw_prefix[32], fw_name[64];
+	char fw_prefix[32];
 	int ret;
 
 	amdgpu_ucode_ip_version_decode(adev, VPE_HWIP, fw_prefix, sizeof(fw_prefix));
-	snprintf(fw_name, sizeof(fw_name), "amdgpu/%s.bin", fw_prefix);
-
-	ret = amdgpu_ucode_request(adev, &adev->vpe.fw, fw_name);
+	ret = amdgpu_ucode_request(adev, &adev->vpe.fw, "amdgpu/%s.bin", fw_prefix);
 	if (ret)
 		goto out;
 
@@ -295,7 +302,12 @@ static int vpe_early_init(void *handle)
 
 	switch (amdgpu_ip_version(adev, VPE_HWIP, 0)) {
 	case IP_VERSION(6, 1, 0):
+	case IP_VERSION(6, 1, 3):
 		vpe_v6_1_set_funcs(vpe);
+		break;
+	case IP_VERSION(6, 1, 1):
+		vpe_v6_1_set_funcs(vpe);
+		vpe->collaborate_mode = true;
 		break;
 	default:
 		return -EINVAL;
@@ -303,6 +315,8 @@ static int vpe_early_init(void *handle)
 
 	vpe_set_ring_funcs(adev);
 	vpe_set_regs(vpe);
+
+	dev_info(adev->dev, "VPE: collaborate mode %s", vpe->collaborate_mode ? "true" : "false");
 
 	return 0;
 }
@@ -390,6 +404,12 @@ static int vpe_hw_init(void *handle)
 	struct amdgpu_vpe *vpe = &adev->vpe;
 	int ret;
 
+	/* Power on VPE */
+	ret = amdgpu_device_ip_set_powergating_state(adev, AMD_IP_BLOCK_TYPE_VPE,
+						     AMD_PG_STATE_UNGATE);
+	if (ret)
+		return ret;
+
 	ret = vpe_load_microcode(vpe);
 	if (ret)
 		return ret;
@@ -457,6 +477,18 @@ static uint64_t vpe_get_csa_mc_addr(struct amdgpu_ring *ring, uint32_t vmid)
 	return csa_mc_addr;
 }
 
+static void vpe_ring_emit_pred_exec(struct amdgpu_ring *ring,
+				    uint32_t device_select,
+				    uint32_t exec_count)
+{
+	if (!ring->adev->vpe.collaborate_mode)
+		return;
+
+	amdgpu_ring_write(ring, VPE_CMD_HEADER(VPE_CMD_OPCODE_PRED_EXE, 0) |
+				(device_select << 16));
+	amdgpu_ring_write(ring, exec_count & 0x1fff);
+}
+
 static void vpe_ring_emit_ib(struct amdgpu_ring *ring,
 			     struct amdgpu_job *job,
 			     struct amdgpu_ib *ib,
@@ -505,6 +537,8 @@ static void vpe_ring_emit_pipeline_sync(struct amdgpu_ring *ring)
 	uint32_t seq = ring->fence_drv.sync_seq;
 	uint64_t addr = ring->fence_drv.gpu_addr;
 
+	vpe_ring_emit_pred_exec(ring, 0, 6);
+
 	/* wait for idle */
 	amdgpu_ring_write(ring, VPE_CMD_HEADER(VPE_CMD_OPCODE_POLL_REGMEM,
 				VPE_POLL_REGMEM_SUBOP_REGMEM) |
@@ -520,6 +554,8 @@ static void vpe_ring_emit_pipeline_sync(struct amdgpu_ring *ring)
 
 static void vpe_ring_emit_wreg(struct amdgpu_ring *ring, uint32_t reg, uint32_t val)
 {
+	vpe_ring_emit_pred_exec(ring, 0, 3);
+
 	amdgpu_ring_write(ring, VPE_CMD_HEADER(VPE_CMD_OPCODE_REG_WRITE, 0));
 	amdgpu_ring_write(ring,	reg << 2);
 	amdgpu_ring_write(ring, val);
@@ -528,6 +564,8 @@ static void vpe_ring_emit_wreg(struct amdgpu_ring *ring, uint32_t reg, uint32_t 
 static void vpe_ring_emit_reg_wait(struct amdgpu_ring *ring, uint32_t reg,
 				   uint32_t val, uint32_t mask)
 {
+	vpe_ring_emit_pred_exec(ring, 0, 6);
+
 	amdgpu_ring_write(ring, VPE_CMD_HEADER(VPE_CMD_OPCODE_POLL_REGMEM,
 				VPE_POLL_REGMEM_SUBOP_REGMEM) |
 				VPE_CMD_POLL_REGMEM_HEADER_FUNC(3) | /* equal */
@@ -546,32 +584,19 @@ static void vpe_ring_emit_vm_flush(struct amdgpu_ring *ring, unsigned int vmid,
 	amdgpu_gmc_emit_flush_gpu_tlb(ring, vmid, pd_addr);
 }
 
-static unsigned int vpe_ring_init_cond_exec(struct amdgpu_ring *ring)
+static unsigned int vpe_ring_init_cond_exec(struct amdgpu_ring *ring,
+					    uint64_t addr)
 {
 	unsigned int ret;
 
 	amdgpu_ring_write(ring, VPE_CMD_HEADER(VPE_CMD_OPCODE_COND_EXE, 0));
-	amdgpu_ring_write(ring, lower_32_bits(ring->cond_exe_gpu_addr));
-	amdgpu_ring_write(ring, upper_32_bits(ring->cond_exe_gpu_addr));
+	amdgpu_ring_write(ring, lower_32_bits(addr));
+	amdgpu_ring_write(ring, upper_32_bits(addr));
 	amdgpu_ring_write(ring, 1);
-	ret = ring->wptr & ring->buf_mask;/* this is the offset we need patch later */
-	amdgpu_ring_write(ring, 0x55aa55aa);/* insert dummy here and patch it later */
+	ret = ring->wptr & ring->buf_mask;
+	amdgpu_ring_write(ring, 0);
 
 	return ret;
-}
-
-static void vpe_ring_patch_cond_exec(struct amdgpu_ring *ring, unsigned int offset)
-{
-	unsigned int cur;
-
-	WARN_ON_ONCE(offset > ring->buf_mask);
-	WARN_ON_ONCE(ring->ring[offset] != 0x55aa55aa);
-
-	cur = (ring->wptr - 1) & ring->buf_mask;
-	if (cur > offset)
-		ring->ring[offset] = cur - offset;
-	else
-		ring->ring[offset] = (ring->buf_mask + 1) - offset + cur;
 }
 
 static int vpe_ring_preempt_ib(struct amdgpu_ring *ring)
@@ -695,16 +720,22 @@ static void vpe_ring_set_wptr(struct amdgpu_ring *ring)
 			upper_32_bits(ring->wptr << 2));
 		atomic64_set((atomic64_t *)ring->wptr_cpu_addr, ring->wptr << 2);
 		WDOORBELL64(ring->doorbell_index, ring->wptr << 2);
+		if (vpe->collaborate_mode)
+			WDOORBELL64(ring->doorbell_index + 4, ring->wptr << 2);
 	} else {
-		dev_dbg(adev->dev, "Not using doorbell, \
-			regVPEC_QUEUE0_RB_WPTR == 0x%08x, \
-			regVPEC_QUEUE0_RB_WPTR_HI == 0x%08x\n",
-			lower_32_bits(ring->wptr << 2),
-			upper_32_bits(ring->wptr << 2));
-		WREG32(vpe_get_reg_offset(vpe, ring->me, vpe->regs.queue0_rb_wptr_lo),
-		       lower_32_bits(ring->wptr << 2));
-		WREG32(vpe_get_reg_offset(vpe, ring->me, vpe->regs.queue0_rb_wptr_hi),
-		       upper_32_bits(ring->wptr << 2));
+		int i;
+
+		for (i = 0; i < vpe->num_instances; i++) {
+			dev_dbg(adev->dev, "Not using doorbell, \
+				regVPEC_QUEUE0_RB_WPTR == 0x%08x, \
+				regVPEC_QUEUE0_RB_WPTR_HI == 0x%08x\n",
+				lower_32_bits(ring->wptr << 2),
+				upper_32_bits(ring->wptr << 2));
+			WREG32(vpe_get_reg_offset(vpe, i, vpe->regs.queue0_rb_wptr_lo),
+			       lower_32_bits(ring->wptr << 2));
+			WREG32(vpe_get_reg_offset(vpe, i, vpe->regs.queue0_rb_wptr_hi),
+			       upper_32_bits(ring->wptr << 2));
+		}
 	}
 }
 
@@ -864,7 +895,6 @@ static const struct amdgpu_ring_funcs vpe_ring_funcs = {
 	.test_ring = vpe_ring_test_ring,
 	.test_ib = vpe_ring_test_ib,
 	.init_cond_exec = vpe_ring_init_cond_exec,
-	.patch_cond_exec = vpe_ring_patch_cond_exec,
 	.preempt_ib = vpe_ring_preempt_ib,
 	.begin_use = vpe_ring_begin_use,
 	.end_use = vpe_ring_end_use,

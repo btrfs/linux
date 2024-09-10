@@ -91,7 +91,7 @@ static int iblock_configure_device(struct se_device *dev)
 {
 	struct iblock_dev *ib_dev = IBLOCK_DEV(dev);
 	struct request_queue *q;
-	struct bdev_handle *bdev_handle;
+	struct file *bdev_file;
 	struct block_device *bd;
 	struct blk_integrity *bi;
 	blk_mode_t mode = BLK_OPEN_READ;
@@ -117,14 +117,14 @@ static int iblock_configure_device(struct se_device *dev)
 	else
 		dev->dev_flags |= DF_READ_ONLY;
 
-	bdev_handle = bdev_open_by_path(ib_dev->ibd_udev_path, mode, ib_dev,
+	bdev_file = bdev_file_open_by_path(ib_dev->ibd_udev_path, mode, ib_dev,
 					NULL);
-	if (IS_ERR(bdev_handle)) {
-		ret = PTR_ERR(bdev_handle);
+	if (IS_ERR(bdev_file)) {
+		ret = PTR_ERR(bdev_file);
 		goto out_free_bioset;
 	}
-	ib_dev->ibd_bdev_handle = bdev_handle;
-	ib_dev->ibd_bd = bd = bdev_handle->bdev;
+	ib_dev->ibd_bdev_file = bdev_file;
+	ib_dev->ibd_bd = bd = file_bdev(bdev_file);
 
 	q = bdev_get_queue(bd);
 
@@ -148,39 +148,42 @@ static int iblock_configure_device(struct se_device *dev)
 		dev->dev_attrib.is_nonrot = 1;
 
 	bi = bdev_get_integrity(bd);
-	if (bi) {
-		struct bio_set *bs = &ib_dev->ibd_bio_set;
+	if (!bi)
+		return 0;
 
-		if (!strcmp(bi->profile->name, "T10-DIF-TYPE3-IP") ||
-		    !strcmp(bi->profile->name, "T10-DIF-TYPE1-IP")) {
-			pr_err("IBLOCK export of blk_integrity: %s not"
-			       " supported\n", bi->profile->name);
-			ret = -ENOSYS;
-			goto out_blkdev_put;
-		}
-
-		if (!strcmp(bi->profile->name, "T10-DIF-TYPE3-CRC")) {
-			dev->dev_attrib.pi_prot_type = TARGET_DIF_TYPE3_PROT;
-		} else if (!strcmp(bi->profile->name, "T10-DIF-TYPE1-CRC")) {
+	switch (bi->csum_type) {
+	case BLK_INTEGRITY_CSUM_IP:
+		pr_err("IBLOCK export of blk_integrity: %s not supported\n",
+			blk_integrity_profile_name(bi));
+		ret = -ENOSYS;
+		goto out_blkdev_put;
+	case BLK_INTEGRITY_CSUM_CRC:
+		if (bi->flags & BLK_INTEGRITY_REF_TAG)
 			dev->dev_attrib.pi_prot_type = TARGET_DIF_TYPE1_PROT;
-		}
-
-		if (dev->dev_attrib.pi_prot_type) {
-			if (bioset_integrity_create(bs, IBLOCK_BIO_POOL_SIZE) < 0) {
-				pr_err("Unable to allocate bioset for PI\n");
-				ret = -ENOMEM;
-				goto out_blkdev_put;
-			}
-			pr_debug("IBLOCK setup BIP bs->bio_integrity_pool: %p\n",
-				 &bs->bio_integrity_pool);
-		}
-		dev->dev_attrib.hw_pi_prot_type = dev->dev_attrib.pi_prot_type;
+		else
+			dev->dev_attrib.pi_prot_type = TARGET_DIF_TYPE3_PROT;
+		break;
+	default:
+		break;
 	}
 
+	if (dev->dev_attrib.pi_prot_type) {
+		struct bio_set *bs = &ib_dev->ibd_bio_set;
+
+		if (bioset_integrity_create(bs, IBLOCK_BIO_POOL_SIZE) < 0) {
+			pr_err("Unable to allocate bioset for PI\n");
+			ret = -ENOMEM;
+			goto out_blkdev_put;
+		}
+		pr_debug("IBLOCK setup BIP bs->bio_integrity_pool: %p\n",
+			 &bs->bio_integrity_pool);
+	}
+
+	dev->dev_attrib.hw_pi_prot_type = dev->dev_attrib.pi_prot_type;
 	return 0;
 
 out_blkdev_put:
-	bdev_release(ib_dev->ibd_bdev_handle);
+	fput(ib_dev->ibd_bdev_file);
 out_free_bioset:
 	bioset_exit(&ib_dev->ibd_bio_set);
 out:
@@ -205,8 +208,8 @@ static void iblock_destroy_device(struct se_device *dev)
 {
 	struct iblock_dev *ib_dev = IBLOCK_DEV(dev);
 
-	if (ib_dev->ibd_bdev_handle)
-		bdev_release(ib_dev->ibd_bdev_handle);
+	if (ib_dev->ibd_bdev_file)
+		fput(ib_dev->ibd_bdev_file);
 	bioset_exit(&ib_dev->ibd_bio_set);
 }
 

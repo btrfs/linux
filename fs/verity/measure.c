@@ -111,14 +111,15 @@ __bpf_kfunc_start_defs();
 /**
  * bpf_get_fsverity_digest: read fsverity digest of file
  * @file: file to get digest from
- * @digest_ptr: (out) dynptr for struct fsverity_digest
+ * @digest_p: (out) dynptr for struct fsverity_digest
  *
  * Read fsverity_digest of *file* into *digest_ptr*.
  *
  * Return: 0 on success, a negative value on error.
  */
-__bpf_kfunc int bpf_get_fsverity_digest(struct file *file, struct bpf_dynptr_kern *digest_ptr)
+__bpf_kfunc int bpf_get_fsverity_digest(struct file *file, struct bpf_dynptr *digest_p)
 {
+	struct bpf_dynptr_kern *digest_ptr = (struct bpf_dynptr_kern *)digest_p;
 	const struct inode *inode = file_inode(file);
 	u32 dynptr_sz = __bpf_dynptr_size(digest_ptr);
 	struct fsverity_digest *arg;
@@ -159,9 +160,9 @@ __bpf_kfunc int bpf_get_fsverity_digest(struct file *file, struct bpf_dynptr_ker
 
 __bpf_kfunc_end_defs();
 
-BTF_SET8_START(fsverity_set_ids)
+BTF_KFUNCS_START(fsverity_set_ids)
 BTF_ID_FLAGS(func, bpf_get_fsverity_digest, KF_TRUSTED_ARGS)
-BTF_SET8_END(fsverity_set_ids)
+BTF_KFUNCS_END(fsverity_set_ids)
 
 static int bpf_get_fsverity_digest_filter(const struct bpf_prog *prog, u32 kfunc_id)
 {

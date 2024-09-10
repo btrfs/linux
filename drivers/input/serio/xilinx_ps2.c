@@ -219,8 +219,7 @@ static void sxps2_close(struct serio *pserio)
 
 /**
  * xps2_of_probe - probe method for the PS/2 device.
- * @of_dev:	pointer to OF device structure
- * @match:	pointer to the structure used for matching a device
+ * @ofdev:	pointer to OF device structure
  *
  * This function probes the PS/2 device in the device tree.
  * It initializes the driver data structure and the hardware.
@@ -253,8 +252,8 @@ static int xps2_of_probe(struct platform_device *ofdev)
 		return -ENODEV;
 	}
 
-	drvdata = kzalloc(sizeof(struct xps2data), GFP_KERNEL);
-	serio = kzalloc(sizeof(struct serio), GFP_KERNEL);
+	drvdata = kzalloc(sizeof(*drvdata), GFP_KERNEL);
+	serio = kzalloc(sizeof(*serio), GFP_KERNEL);
 	if (!drvdata || !serio) {
 		error = -ENOMEM;
 		goto failed1;

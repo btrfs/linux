@@ -79,23 +79,23 @@ struct xe_hw_engine_class_intf {
 	 * @defaults: default scheduling properties
 	 */
 	struct {
-		/** @set_job_timeout: Set job timeout in ms for engine */
+		/** @sched_props.set_job_timeout: Set job timeout in ms for engine */
 		u32 job_timeout_ms;
-		/** @job_timeout_min: Min job timeout in ms for engine */
+		/** @sched_props.job_timeout_min: Min job timeout in ms for engine */
 		u32 job_timeout_min;
-		/** @job_timeout_max: Max job timeout in ms for engine */
+		/** @sched_props.job_timeout_max: Max job timeout in ms for engine */
 		u32 job_timeout_max;
-		/** @timeslice_us: timeslice period in micro-seconds */
+		/** @sched_props.timeslice_us: timeslice period in micro-seconds */
 		u32 timeslice_us;
-		/** @timeslice_min: min timeslice period in micro-seconds */
+		/** @sched_props.timeslice_min: min timeslice period in micro-seconds */
 		u32 timeslice_min;
-		/** @timeslice_max: max timeslice period in micro-seconds */
+		/** @sched_props.timeslice_max: max timeslice period in micro-seconds */
 		u32 timeslice_max;
-		/** @preempt_timeout_us: preemption timeout in micro-seconds */
+		/** @sched_props.preempt_timeout_us: preemption timeout in micro-seconds */
 		u32 preempt_timeout_us;
-		/** @preempt_timeout_min: min preemption timeout in micro-seconds */
+		/** @sched_props.preempt_timeout_min: min preemption timeout in micro-seconds */
 		u32 preempt_timeout_min;
-		/** @preempt_timeout_max: max preemption timeout in micro-seconds */
+		/** @sched_props.preempt_timeout_max: max preemption timeout in micro-seconds */
 		u32 preempt_timeout_max;
 	} sched_props, defaults;
 };
@@ -116,6 +116,8 @@ struct xe_hw_engine {
 	u16 instance;
 	/** @logical_instance: logical instance of this hw engine */
 	u16 logical_instance;
+	/** @irq_offset: IRQ offset of this hw engine */
+	u16 irq_offset;
 	/** @mmio_base: MMIO base address of this hw engine*/
 	u32 mmio_base;
 	/**
@@ -135,7 +137,7 @@ struct xe_hw_engine {
 	/** @hwsp: hardware status page buffer object */
 	struct xe_bo *hwsp;
 	/** @kernel_lrc: Kernel LRC (should be replaced /w an xe_engine) */
-	struct xe_lrc kernel_lrc;
+	struct xe_lrc *kernel_lrc;
 	/** @exl_port: execlists port */
 	struct xe_execlist_port *exl_port;
 	/** @fence_irq: fence IRQ to run when a hw engine IRQ is received */
@@ -146,6 +148,8 @@ struct xe_hw_engine {
 	enum xe_hw_engine_id engine_id;
 	/** @eclass: pointer to per hw engine class interface */
 	struct xe_hw_engine_class_intf *eclass;
+	/** @oa_unit: oa unit for this hw engine */
+	struct xe_oa_unit *oa_unit;
 };
 
 /**
@@ -156,69 +160,77 @@ struct xe_hw_engine {
 struct xe_hw_engine_snapshot {
 	/** @name: name of the hw engine */
 	char *name;
-	/** @class: class of this hw engine */
-	enum xe_engine_class class;
+	/** @hwe: hw engine */
+	struct xe_hw_engine *hwe;
 	/** @logical_instance: logical instance of this hw engine */
 	u16 logical_instance;
 	/** @forcewake: Force Wake information snapshot */
 	struct {
-		/** @domain: force wake domain of this hw engine */
+		/** @forcewake.domain: force wake domain of this hw engine */
 		enum xe_force_wake_domains domain;
-		/** @ref: Forcewake ref for the above domain */
+		/** @forcewake.ref: Forcewake ref for the above domain */
 		int ref;
 	} forcewake;
 	/** @mmio_base: MMIO base address of this hw engine*/
 	u32 mmio_base;
 	/** @reg: Useful MMIO register snapshot */
 	struct {
-		/** @ring_hwstam: RING_HWSTAM */
+		/** @reg.ring_execlist_status: RING_EXECLIST_STATUS */
+		u64 ring_execlist_status;
+		/** @reg.ring_execlist_sq_contents: RING_EXECLIST_SQ_CONTENTS */
+		u64 ring_execlist_sq_contents;
+		/** @reg.ring_acthd: RING_ACTHD */
+		u64 ring_acthd;
+		/** @reg.ring_bbaddr: RING_BBADDR */
+		u64 ring_bbaddr;
+		/** @reg.ring_dma_fadd: RING_DMA_FADD */
+		u64 ring_dma_fadd;
+		/** @reg.ring_hwstam: RING_HWSTAM */
 		u32 ring_hwstam;
-		/** @ring_hws_pga: RING_HWS_PGA */
+		/** @reg.ring_hws_pga: RING_HWS_PGA */
 		u32 ring_hws_pga;
-		/** @ring_execlist_status_lo: RING_EXECLIST_STATUS_LO */
-		u32 ring_execlist_status_lo;
-		/** @ring_execlist_status_hi: RING_EXECLIST_STATUS_HI */
-		u32 ring_execlist_status_hi;
-		/** @ring_execlist_sq_contents_lo: RING_EXECLIST_SQ_CONTENTS */
-		u32 ring_execlist_sq_contents_lo;
-		/** @ring_execlist_sq_contents_hi: RING_EXECLIST_SQ_CONTENTS + 4 */
-		u32 ring_execlist_sq_contents_hi;
-		/** @ring_start: RING_START */
-		u32 ring_start;
-		/** @ring_head: RING_HEAD */
+		/** @reg.ring_start: RING_START */
+		u64 ring_start;
+		/** @reg.ring_head: RING_HEAD */
 		u32 ring_head;
-		/** @ring_tail: RING_TAIL */
+		/** @reg.ring_tail: RING_TAIL */
 		u32 ring_tail;
-		/** @ring_ctl: RING_CTL */
+		/** @reg.ring_ctl: RING_CTL */
 		u32 ring_ctl;
-		/** @ring_mi_mode: RING_MI_MODE */
+		/** @reg.ring_mi_mode: RING_MI_MODE */
 		u32 ring_mi_mode;
-		/** @ring_mode: RING_MODE */
+		/** @reg.ring_mode: RING_MODE */
 		u32 ring_mode;
-		/** @ring_imr: RING_IMR */
+		/** @reg.ring_imr: RING_IMR */
 		u32 ring_imr;
-		/** @ring_esr: RING_ESR */
+		/** @reg.ring_esr: RING_ESR */
 		u32 ring_esr;
-		/** @ring_emr: RING_EMR */
+		/** @reg.ring_emr: RING_EMR */
 		u32 ring_emr;
-		/** @ring_eir: RING_EIR */
+		/** @reg.ring_eir: RING_EIR */
 		u32 ring_eir;
-		/** @ring_acthd_udw: RING_ACTHD_UDW */
-		u32 ring_acthd_udw;
-		/** @ring_acthd: RING_ACTHD */
-		u32 ring_acthd;
-		/** @ring_bbaddr_udw: RING_BBADDR_UDW */
-		u32 ring_bbaddr_udw;
-		/** @ring_bbaddr: RING_BBADDR */
-		u32 ring_bbaddr;
-		/** @ring_dma_fadd_udw: RING_DMA_FADD_UDW */
-		u32 ring_dma_fadd_udw;
-		/** @ring_dma_fadd: RING_DMA_FADD */
-		u32 ring_dma_fadd;
-		/** @ipehr: IPEHR */
+		/** @reg.indirect_ring_state: INDIRECT_RING_STATE */
+		u32 indirect_ring_state;
+		/** @reg.ipehr: IPEHR */
 		u32 ipehr;
-		/** @rcu_mode: RCU_MODE */
+		/** @reg.rcu_mode: RCU_MODE */
 		u32 rcu_mode;
+		struct {
+			/** @reg.instdone.ring: RING_INSTDONE */
+			u32 ring;
+			/** @reg.instdone.slice_common: SC_INSTDONE */
+			u32 *slice_common;
+			/** @reg.instdone.slice_common_extra: SC_INSTDONE_EXTRA */
+			u32 *slice_common_extra;
+			/** @reg.instdone.slice_common_extra2: SC_INSTDONE_EXTRA2 */
+			u32 *slice_common_extra2;
+			/** @reg.instdone.sampler: SAMPLER_INSTDONE */
+			u32 *sampler;
+			/** @reg.instdone.row: ROW_INSTDONE */
+			u32 *row;
+			/** @reg.instdone.geom_svg: INSTDONE_GEOM_SVGUNIT */
+			u32 *geom_svg;
+		} instdone;
 	} reg;
 };
 

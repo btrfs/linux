@@ -597,10 +597,10 @@ static const struct attribute_group *fcoe_fcf_attr_groups[] = {
 	NULL,
 };
 
-static struct bus_type fcoe_bus_type;
+static const struct bus_type fcoe_bus_type;
 
 static int fcoe_bus_match(struct device *dev,
-			  struct device_driver *drv)
+			  const struct device_driver *drv)
 {
 	if (dev->bus == &fcoe_bus_type)
 		return 1;
@@ -664,7 +664,7 @@ static struct attribute *fcoe_bus_attrs[] = {
 };
 ATTRIBUTE_GROUPS(fcoe_bus);
 
-static struct bus_type fcoe_bus_type = {
+static const struct bus_type fcoe_bus_type = {
 	.name = "fcoe",
 	.match = &fcoe_bus_match,
 	.bus_groups = fcoe_bus_groups,

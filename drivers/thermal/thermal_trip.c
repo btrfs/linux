@@ -9,15 +9,30 @@
  */
 #include "thermal_core.h"
 
+static const char *trip_type_names[] = {
+	[THERMAL_TRIP_ACTIVE] = "active",
+	[THERMAL_TRIP_PASSIVE] = "passive",
+	[THERMAL_TRIP_HOT] = "hot",
+	[THERMAL_TRIP_CRITICAL] = "critical",
+};
+
+const char *thermal_trip_type_name(enum thermal_trip_type trip_type)
+{
+	if (trip_type < THERMAL_TRIP_ACTIVE || trip_type > THERMAL_TRIP_CRITICAL)
+		return "unknown";
+
+	return trip_type_names[trip_type];
+}
+
 int for_each_thermal_trip(struct thermal_zone_device *tz,
 			  int (*cb)(struct thermal_trip *, void *),
 			  void *data)
 {
-	struct thermal_trip *trip;
+	struct thermal_trip_desc *td;
 	int ret;
 
-	for_each_trip(tz, trip) {
-		ret = cb(trip, data);
+	for_each_trip_desc(tz, td) {
+		ret = cb(&td->trip, data);
 		if (ret)
 			return ret;
 	}
@@ -47,7 +62,7 @@ int thermal_zone_get_num_trips(struct thermal_zone_device *tz)
 EXPORT_SYMBOL_GPL(thermal_zone_get_num_trips);
 
 /**
- * __thermal_zone_set_trips - Computes the next trip points for the driver
+ * thermal_zone_set_trips - Computes the next trip points for the driver
  * @tz: a pointer to a thermal zone device structure
  *
  * The function computes the next temperature boundaries by browsing
@@ -61,47 +76,27 @@ EXPORT_SYMBOL_GPL(thermal_zone_get_num_trips);
  *
  * It does not return a value
  */
-void __thermal_zone_set_trips(struct thermal_zone_device *tz)
+void thermal_zone_set_trips(struct thermal_zone_device *tz)
 {
-	const struct thermal_trip *trip;
+	const struct thermal_trip_desc *td;
 	int low = -INT_MAX, high = INT_MAX;
-	bool same_trip = false;
 	int ret;
 
 	lockdep_assert_held(&tz->lock);
 
-	if (!tz->ops->set_trips)
+	if (!tz->ops.set_trips)
 		return;
 
-	for_each_trip(tz, trip) {
-		bool low_set = false;
-		int trip_low;
+	for_each_trip_desc(tz, td) {
+		if (td->threshold <= tz->temperature && td->threshold > low)
+			low = td->threshold;
 
-		trip_low = trip->temperature - trip->hysteresis;
-
-		if (trip_low < tz->temperature && trip_low > low) {
-			low = trip_low;
-			low_set = true;
-			same_trip = false;
-		}
-
-		if (trip->temperature > tz->temperature &&
-		    trip->temperature < high) {
-			high = trip->temperature;
-			same_trip = low_set;
-		}
+		if (td->threshold >= tz->temperature && td->threshold < high)
+			high = td->threshold;
 	}
 
 	/* No need to change trip points */
 	if (tz->prev_low_trip == low && tz->prev_high_trip == high)
-		return;
-
-	/*
-	 * If "high" and "low" are the same, skip the change unless this is the
-	 * first time.
-	 */
-	if (same_trip && (tz->prev_low_trip != -INT_MAX ||
-	    tz->prev_high_trip != INT_MAX))
 		return;
 
 	tz->prev_low_trip = low;
@@ -114,32 +109,22 @@ void __thermal_zone_set_trips(struct thermal_zone_device *tz)
 	 * Set a temperature window. When this window is left the driver
 	 * must inform the thermal core via thermal_zone_device_update.
 	 */
-	ret = tz->ops->set_trips(tz, low, high);
+	ret = tz->ops.set_trips(tz, low, high);
 	if (ret)
 		dev_err(&tz->device, "Failed to set trips: %d\n", ret);
 }
 
-int __thermal_zone_get_trip(struct thermal_zone_device *tz, int trip_id,
-			    struct thermal_trip *trip)
-{
-	if (!tz || !tz->trips || trip_id < 0 || trip_id >= tz->num_trips || !trip)
-		return -EINVAL;
-
-	*trip = tz->trips[trip_id];
-	return 0;
-}
-EXPORT_SYMBOL_GPL(__thermal_zone_get_trip);
-
 int thermal_zone_get_trip(struct thermal_zone_device *tz, int trip_id,
 			  struct thermal_trip *trip)
 {
-	int ret;
+	if (!tz || !trip || trip_id < 0 || trip_id >= tz->num_trips)
+		return -EINVAL;
 
 	mutex_lock(&tz->lock);
-	ret = __thermal_zone_get_trip(tz, trip_id, trip);
+	*trip = tz->trips[trip_id].trip;
 	mutex_unlock(&tz->lock);
 
-	return ret;
+	return 0;
 }
 EXPORT_SYMBOL_GPL(thermal_zone_get_trip);
 
@@ -150,8 +135,9 @@ int thermal_zone_trip_id(const struct thermal_zone_device *tz,
 	 * Assume the trip to be located within the bounds of the thermal
 	 * zone's trips[] table.
 	 */
-	return trip - tz->trips;
+	return trip_to_trip_desc(trip) - tz->trips;
 }
+
 void thermal_zone_trip_updated(struct thermal_zone_device *tz,
 			       const struct thermal_trip *trip)
 {
@@ -165,7 +151,29 @@ void thermal_zone_set_trip_temp(struct thermal_zone_device *tz,
 	if (trip->temperature == temp)
 		return;
 
-	trip->temperature = temp;
+	WRITE_ONCE(trip->temperature, temp);
 	thermal_notify_tz_trip_change(tz, trip);
+
+	if (temp == THERMAL_TEMP_INVALID) {
+		struct thermal_trip_desc *td = trip_to_trip_desc(trip);
+
+		if (tz->temperature >= td->threshold) {
+			/*
+			 * The trip has been crossed on the way up, so some
+			 * adjustments are needed to compensate for the lack
+			 * of it going forward.
+			 */
+			if (trip->type == THERMAL_TRIP_PASSIVE) {
+				tz->passive--;
+				WARN_ON_ONCE(tz->passive < 0);
+			}
+			thermal_zone_trip_down(tz, trip);
+		}
+		/*
+		 * Invalidate the threshold to avoid triggering a spurious
+		 * trip crossing notification when the trip becomes valid.
+		 */
+		td->threshold = INT_MAX;
+	}
 }
 EXPORT_SYMBOL_GPL(thermal_zone_set_trip_temp);
