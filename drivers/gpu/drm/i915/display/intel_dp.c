@@ -36,6 +36,7 @@
 #include <asm/byteorder.h>
 
 #include <drm/display/drm_dp_helper.h>
+#include <drm/display/drm_dp_tunnel.h>
 #include <drm/display/drm_dsc_helper.h>
 #include <drm/display/drm_hdmi_helper.h>
 #include <drm/drm_atomic_helper.h>
@@ -47,6 +48,7 @@
 #include "i915_drv.h"
 #include "i915_irq.h"
 #include "i915_reg.h"
+#include "intel_alpm.h"
 #include "intel_atomic.h"
 #include "intel_audio.h"
 #include "intel_backlight.h"
@@ -56,14 +58,18 @@
 #include "intel_cx0_phy.h"
 #include "intel_ddi.h"
 #include "intel_de.h"
+#include "intel_display_driver.h"
 #include "intel_display_types.h"
 #include "intel_dp.h"
 #include "intel_dp_aux.h"
 #include "intel_dp_hdcp.h"
 #include "intel_dp_link_training.h"
 #include "intel_dp_mst.h"
+#include "intel_dp_tunnel.h"
 #include "intel_dpio_phy.h"
 #include "intel_dpll.h"
+#include "intel_drrs.h"
+#include "intel_encoder.h"
 #include "intel_fifo_underrun.h"
 #include "intel_hdcp.h"
 #include "intel_hdmi.h"
@@ -71,10 +77,12 @@
 #include "intel_hotplug_irq.h"
 #include "intel_lspcon.h"
 #include "intel_lvds.h"
+#include "intel_modeset_lock.h"
 #include "intel_panel.h"
 #include "intel_pch_display.h"
 #include "intel_pps.h"
 #include "intel_psr.h"
+#include "intel_quirks.h"
 #include "intel_tc.h"
 #include "intel_vdsc.h"
 #include "intel_vrr.h"
@@ -84,6 +92,9 @@
 #define DP_DSC_PEAK_PIXEL_RATE			2720000
 #define DP_DSC_MAX_ENC_THROUGHPUT_0		340000
 #define DP_DSC_MAX_ENC_THROUGHPUT_1		400000
+
+/* Max DSC line buffer depth supported by HW. */
+#define INTEL_DP_DSC_MAX_LINE_BUF_DEPTH		13
 
 /* DP DSC FEC Overhead factor in ppm = 1/(0.972261) = 1.028530 */
 #define DP_DSC_FEC_OVERHEAD_FACTOR		1028530
@@ -119,6 +130,14 @@ bool intel_dp_is_edp(struct intel_dp *intel_dp)
 	return dig_port->base.type == INTEL_OUTPUT_EDP;
 }
 
+bool intel_dp_as_sdp_supported(struct intel_dp *intel_dp)
+{
+	struct drm_i915_private *i915 = dp_to_i915(intel_dp);
+
+	return HAS_AS_SDP(i915) &&
+		drm_dp_as_sdp_supported(&intel_dp->aux, intel_dp->dpcd);
+}
+
 static void intel_dp_unset_edid(struct intel_dp *intel_dp);
 
 /* Is link rate UHBR and thus 128b/132b? */
@@ -151,6 +170,22 @@ int intel_dp_link_symbol_clock(int rate)
 	return DIV_ROUND_CLOSEST(rate * 10, intel_dp_link_symbol_size(rate));
 }
 
+static int max_dprx_rate(struct intel_dp *intel_dp)
+{
+	if (intel_dp_tunnel_bw_alloc_is_enabled(intel_dp))
+		return drm_dp_tunnel_max_dprx_rate(intel_dp->tunnel);
+
+	return drm_dp_bw_code_to_link_rate(intel_dp->dpcd[DP_MAX_LINK_RATE]);
+}
+
+static int max_dprx_lane_count(struct intel_dp *intel_dp)
+{
+	if (intel_dp_tunnel_bw_alloc_is_enabled(intel_dp))
+		return drm_dp_tunnel_max_dprx_lane_count(intel_dp->tunnel);
+
+	return drm_dp_max_lane_count(intel_dp->dpcd);
+}
+
 static void intel_dp_set_default_sink_rates(struct intel_dp *intel_dp)
 {
 	intel_dp->sink_rates[0] = 162000;
@@ -179,7 +214,7 @@ static void intel_dp_set_dpcd_sink_rates(struct intel_dp *intel_dp)
 	/*
 	 * Sink rates for 8b/10b.
 	 */
-	max_rate = drm_dp_bw_code_to_link_rate(intel_dp->dpcd[DP_MAX_LINK_RATE]);
+	max_rate = max_dprx_rate(intel_dp);
 	max_lttpr_rate = drm_dp_lttpr_max_link_rate(intel_dp->lttpr_common_caps);
 	if (max_lttpr_rate)
 		max_rate = min(max_rate, max_lttpr_rate);
@@ -194,7 +229,7 @@ static void intel_dp_set_dpcd_sink_rates(struct intel_dp *intel_dp)
 	 * Sink rates for 128b/132b. If set, sink should support all 8b/10b
 	 * rates and 10 Gbps.
 	 */
-	if (intel_dp->dpcd[DP_MAIN_LINK_CHANNEL_CODING] & DP_CAP_ANSI_128B132B) {
+	if (drm_dp_128b132b_supported(intel_dp->dpcd)) {
 		u8 uhbr_rates = 0;
 
 		BUILD_BUG_ON(ARRAY_SIZE(intel_dp->sink_rates) < ARRAY_SIZE(dp_rates) + 3);
@@ -258,7 +293,7 @@ static void intel_dp_set_max_sink_lane_count(struct intel_dp *intel_dp)
 	struct intel_digital_port *intel_dig_port = dp_to_dig_port(intel_dp);
 	struct intel_encoder *encoder = &intel_dig_port->base;
 
-	intel_dp->max_sink_lane_count = drm_dp_max_lane_count(intel_dp->dpcd);
+	intel_dp->max_sink_lane_count = max_dprx_lane_count(intel_dp);
 
 	switch (intel_dp->max_sink_lane_count) {
 	case 1:
@@ -298,7 +333,7 @@ static int intel_dp_common_len_rate_limit(const struct intel_dp *intel_dp,
 				       intel_dp->num_common_rates, max_rate);
 }
 
-static int intel_dp_common_rate(struct intel_dp *intel_dp, int index)
+int intel_dp_common_rate(struct intel_dp *intel_dp, int index)
 {
 	if (drm_WARN_ON(&dp_to_i915(intel_dp)->drm,
 			index < 0 || index >= intel_dp->num_common_rates))
@@ -308,12 +343,12 @@ static int intel_dp_common_rate(struct intel_dp *intel_dp, int index)
 }
 
 /* Theoretical max between source and sink */
-static int intel_dp_max_common_rate(struct intel_dp *intel_dp)
+int intel_dp_max_common_rate(struct intel_dp *intel_dp)
 {
 	return intel_dp_common_rate(intel_dp, intel_dp->num_common_rates - 1);
 }
 
-static int intel_dp_max_source_lane_count(struct intel_digital_port *dig_port)
+int intel_dp_max_source_lane_count(struct intel_digital_port *dig_port)
 {
 	int vbt_max_lanes = intel_bios_dp_max_lane_count(dig_port->base.devdata);
 	int max_lanes = dig_port->max_lanes;
@@ -325,7 +360,7 @@ static int intel_dp_max_source_lane_count(struct intel_digital_port *dig_port)
 }
 
 /* Theoretical max between source and sink */
-static int intel_dp_max_common_lane_count(struct intel_dp *intel_dp)
+int intel_dp_max_common_lane_count(struct intel_dp *intel_dp)
 {
 	struct intel_digital_port *dig_port = dp_to_dig_port(intel_dp);
 	int source_max = intel_dp_max_source_lane_count(dig_port);
@@ -339,17 +374,37 @@ static int intel_dp_max_common_lane_count(struct intel_dp *intel_dp)
 	return min3(source_max, sink_max, lane_max);
 }
 
+static int forced_lane_count(struct intel_dp *intel_dp)
+{
+	return clamp(intel_dp->link.force_lane_count, 1, intel_dp_max_common_lane_count(intel_dp));
+}
+
 int intel_dp_max_lane_count(struct intel_dp *intel_dp)
 {
-	switch (intel_dp->max_link_lane_count) {
+	int lane_count;
+
+	if (intel_dp->link.force_lane_count)
+		lane_count = forced_lane_count(intel_dp);
+	else
+		lane_count = intel_dp->link.max_lane_count;
+
+	switch (lane_count) {
 	case 1:
 	case 2:
 	case 4:
-		return intel_dp->max_link_lane_count;
+		return lane_count;
 	default:
-		MISSING_CASE(intel_dp->max_link_lane_count);
+		MISSING_CASE(lane_count);
 		return 1;
 	}
+}
+
+static int intel_dp_min_lane_count(struct intel_dp *intel_dp)
+{
+	if (intel_dp->link.force_lane_count)
+		return forced_lane_count(intel_dp);
+
+	return 1;
 }
 
 /*
@@ -382,57 +437,38 @@ int intel_dp_effective_data_rate(int pixel_clock, int bpp_x16,
 				1000000 * 16 * 8);
 }
 
-/*
- * Given a link rate and lanes, get the data bandwidth.
+/**
+ * intel_dp_max_link_data_rate: Calculate the maximum rate for the given link params
+ * @intel_dp: Intel DP object
+ * @max_dprx_rate: Maximum data rate of the DPRX
+ * @max_dprx_lanes: Maximum lane count of the DPRX
  *
- * Data bandwidth is the actual payload rate, which depends on the data
- * bandwidth efficiency and the link rate.
+ * Calculate the maximum data rate for the provided link parameters taking into
+ * account any BW limitations by a DP tunnel attached to @intel_dp.
  *
- * For 8b/10b channel encoding, SST and non-FEC, the data bandwidth efficiency
- * is 80%. For example, for a 1.62 Gbps link, 1.62*10^9 bps * 0.80 * (1/8) =
- * 162000 kBps. With 8-bit symbols, we have 162000 kHz symbol clock. Just by
- * coincidence, the port clock in kHz matches the data bandwidth in kBps, and
- * they equal the link bit rate in Gbps multiplied by 100000. (Note that this no
- * longer holds for data bandwidth as soon as FEC or MST is taken into account!)
- *
- * For 128b/132b channel encoding, the data bandwidth efficiency is 96.71%. For
- * example, for a 10 Gbps link, 10*10^9 bps * 0.9671 * (1/8) = 1208875
- * kBps. With 32-bit symbols, we have 312500 kHz symbol clock. The value 1000000
- * does not match the symbol clock, the port clock (not even if you think in
- * terms of a byte clock), nor the data bandwidth. It only matches the link bit
- * rate in units of 10000 bps.
+ * Returns the maximum data rate in kBps units.
  */
-int
-intel_dp_max_data_rate(int max_link_rate, int max_lanes)
+int intel_dp_max_link_data_rate(struct intel_dp *intel_dp,
+				int max_dprx_rate, int max_dprx_lanes)
 {
-	int ch_coding_efficiency =
-		drm_dp_bw_channel_coding_efficiency(drm_dp_is_uhbr_rate(max_link_rate));
-	int max_link_rate_kbps = max_link_rate * 10;
+	int max_rate = drm_dp_max_dprx_data_rate(max_dprx_rate, max_dprx_lanes);
 
-	/*
-	 * UHBR rates always use 128b/132b channel encoding, and have
-	 * 97.71% data bandwidth efficiency. Consider max_link_rate the
-	 * link bit rate in units of 10000 bps.
-	 */
-	/*
-	 * Lower than UHBR rates always use 8b/10b channel encoding, and have
-	 * 80% data bandwidth efficiency for SST non-FEC. However, this turns
-	 * out to be a nop by coincidence:
-	 *
-	 *	int max_link_rate_kbps = max_link_rate * 10;
-	 *	max_link_rate_kbps = DIV_ROUND_DOWN_ULL(max_link_rate_kbps * 8, 10);
-	 *	max_link_rate = max_link_rate_kbps / 8;
-	 */
-	return DIV_ROUND_DOWN_ULL(mul_u32_u32(max_link_rate_kbps * max_lanes,
-					      ch_coding_efficiency),
-				  1000000 * 8);
+	if (intel_dp_tunnel_bw_alloc_is_enabled(intel_dp))
+		max_rate = min(max_rate,
+			       drm_dp_tunnel_available_bw(intel_dp->tunnel));
+
+	return max_rate;
 }
 
-bool intel_dp_can_bigjoiner(struct intel_dp *intel_dp)
+bool intel_dp_has_joiner(struct intel_dp *intel_dp)
 {
 	struct intel_digital_port *intel_dig_port = dp_to_dig_port(intel_dp);
 	struct intel_encoder *encoder = &intel_dig_port->base;
 	struct drm_i915_private *dev_priv = to_i915(encoder->base.dev);
+
+	/* eDP MSO is not compatible with joiner */
+	if (intel_dp->mso_link_count)
+		return false;
 
 	return DISPLAY_VER(dev_priv) >= 12 ||
 		(DISPLAY_VER(dev_priv) == 11 &&
@@ -446,11 +482,9 @@ static int dg2_max_source_rate(struct intel_dp *intel_dp)
 
 static int icl_max_source_rate(struct intel_dp *intel_dp)
 {
-	struct intel_digital_port *dig_port = dp_to_dig_port(intel_dp);
-	struct drm_i915_private *dev_priv = to_i915(dig_port->base.base.dev);
-	enum phy phy = intel_port_to_phy(dev_priv, dig_port->base.port);
+	struct intel_encoder *encoder = &dp_to_dig_port(intel_dp)->base;
 
-	if (intel_phy_is_combo(dev_priv, phy) && !intel_dp_is_edp(intel_dp))
+	if (intel_encoder_is_combo(encoder) && !intel_dp_is_edp(intel_dp))
 		return 540000;
 
 	return 810000;
@@ -466,12 +500,13 @@ static int ehl_max_source_rate(struct intel_dp *intel_dp)
 
 static int mtl_max_source_rate(struct intel_dp *intel_dp)
 {
-	struct intel_digital_port *dig_port = dp_to_dig_port(intel_dp);
-	struct drm_i915_private *i915 = to_i915(dig_port->base.base.dev);
-	enum phy phy = intel_port_to_phy(i915, dig_port->base.port);
+	struct intel_encoder *encoder = &dp_to_dig_port(intel_dp)->base;
 
-	if (intel_is_c10phy(i915, phy))
+	if (intel_encoder_is_c10phy(encoder))
 		return 810000;
+
+	if (DISPLAY_VER_FULL(to_i915(encoder->base.dev)) == IP_VER(14, 1))
+		return 1350000;
 
 	return 2000000;
 }
@@ -502,7 +537,7 @@ intel_dp_set_source_rates(struct intel_dp *intel_dp)
 	/* The values must be in increasing order */
 	static const int mtl_rates[] = {
 		162000, 216000, 243000, 270000, 324000, 432000, 540000, 675000,
-		810000,	1000000, 1350000, 2000000,
+		810000,	1000000, 2000000,
 	};
 	static const int icl_rates[] = {
 		162000, 216000, 270000, 324000, 432000, 540000, 648000, 810000,
@@ -597,7 +632,7 @@ static int intersect_rates(const int *source_rates, int source_len,
 }
 
 /* return index of rate in rates array, or -1 if not found */
-static int intel_dp_rate_index(const int *rates, int len, int rate)
+int intel_dp_rate_index(const int *rates, int len, int rate)
 {
 	int i;
 
@@ -637,7 +672,7 @@ static bool intel_dp_link_params_valid(struct intel_dp *intel_dp, int link_rate,
 	 * boot-up.
 	 */
 	if (link_rate == 0 ||
-	    link_rate > intel_dp->max_link_rate)
+	    link_rate > intel_dp->link.max_rate)
 		return false;
 
 	if (lane_count == 0 ||
@@ -645,78 +680,6 @@ static bool intel_dp_link_params_valid(struct intel_dp *intel_dp, int link_rate,
 		return false;
 
 	return true;
-}
-
-static bool intel_dp_can_link_train_fallback_for_edp(struct intel_dp *intel_dp,
-						     int link_rate,
-						     u8 lane_count)
-{
-	/* FIXME figure out what we actually want here */
-	const struct drm_display_mode *fixed_mode =
-		intel_panel_preferred_fixed_mode(intel_dp->attached_connector);
-	int mode_rate, max_rate;
-
-	mode_rate = intel_dp_link_required(fixed_mode->clock, 18);
-	max_rate = intel_dp_max_data_rate(link_rate, lane_count);
-	if (mode_rate > max_rate)
-		return false;
-
-	return true;
-}
-
-int intel_dp_get_link_train_fallback_values(struct intel_dp *intel_dp,
-					    int link_rate, u8 lane_count)
-{
-	struct drm_i915_private *i915 = dp_to_i915(intel_dp);
-	int index;
-
-	/*
-	 * TODO: Enable fallback on MST links once MST link compute can handle
-	 * the fallback params.
-	 */
-	if (intel_dp->is_mst) {
-		drm_err(&i915->drm, "Link Training Unsuccessful\n");
-		return -1;
-	}
-
-	if (intel_dp_is_edp(intel_dp) && !intel_dp->use_max_params) {
-		drm_dbg_kms(&i915->drm,
-			    "Retrying Link training for eDP with max parameters\n");
-		intel_dp->use_max_params = true;
-		return 0;
-	}
-
-	index = intel_dp_rate_index(intel_dp->common_rates,
-				    intel_dp->num_common_rates,
-				    link_rate);
-	if (index > 0) {
-		if (intel_dp_is_edp(intel_dp) &&
-		    !intel_dp_can_link_train_fallback_for_edp(intel_dp,
-							      intel_dp_common_rate(intel_dp, index - 1),
-							      lane_count)) {
-			drm_dbg_kms(&i915->drm,
-				    "Retrying Link training for eDP with same parameters\n");
-			return 0;
-		}
-		intel_dp->max_link_rate = intel_dp_common_rate(intel_dp, index - 1);
-		intel_dp->max_link_lane_count = lane_count;
-	} else if (lane_count > 1) {
-		if (intel_dp_is_edp(intel_dp) &&
-		    !intel_dp_can_link_train_fallback_for_edp(intel_dp,
-							      intel_dp_max_common_rate(intel_dp),
-							      lane_count >> 1)) {
-			drm_dbg_kms(&i915->drm,
-				    "Retrying Link training for eDP with same parameters\n");
-			return 0;
-		}
-		intel_dp->max_link_rate = intel_dp_max_common_rate(intel_dp);
-		intel_dp->max_link_lane_count = lane_count >> 1;
-	} else {
-		drm_err(&i915->drm, "Link Training Unsuccessful\n");
-		return -1;
-	}
-
-	return 0;
 }
 
 u32 intel_dp_mode_to_fec_clock(u32 mode_clock)
@@ -1200,15 +1163,37 @@ intel_dp_mode_valid_downstream(struct intel_connector *connector,
 	return MODE_OK;
 }
 
-bool intel_dp_need_bigjoiner(struct intel_dp *intel_dp,
-			     int hdisplay, int clock)
+bool intel_dp_need_joiner(struct intel_dp *intel_dp,
+			  struct intel_connector *connector,
+			  int hdisplay, int clock)
 {
 	struct drm_i915_private *i915 = dp_to_i915(intel_dp);
 
-	if (!intel_dp_can_bigjoiner(intel_dp))
+	if (!intel_dp_has_joiner(intel_dp))
 		return false;
 
-	return clock > i915->max_dotclk_freq || hdisplay > 5120;
+	return clock > i915->display.cdclk.max_dotclk_freq || hdisplay > 5120 ||
+	       connector->force_bigjoiner_enable;
+}
+
+bool intel_dp_has_dsc(const struct intel_connector *connector)
+{
+	struct drm_i915_private *i915 = to_i915(connector->base.dev);
+
+	if (!HAS_DSC(i915))
+		return false;
+
+	if (connector->mst_port && !HAS_DSC_MST(i915))
+		return false;
+
+	if (connector->base.connector_type == DRM_MODE_CONNECTOR_eDP &&
+	    connector->panel.vbt.edp.dsc_disable)
+		return false;
+
+	if (!drm_dp_sink_supports_dsc(connector->dp.dsc_dpcd))
+		return false;
+
+	return true;
 }
 
 static enum drm_mode_status
@@ -1221,11 +1206,11 @@ intel_dp_mode_valid(struct drm_connector *_connector,
 	const struct drm_display_mode *fixed_mode;
 	int target_clock = mode->clock;
 	int max_rate, mode_rate, max_lanes, max_link_clock;
-	int max_dotclk = dev_priv->max_dotclk_freq;
+	int max_dotclk = dev_priv->display.cdclk.max_dotclk_freq;
 	u16 dsc_max_compressed_bpp = 0;
 	u8 dsc_slice_count = 0;
 	enum drm_mode_status status;
-	bool dsc = false, bigjoiner = false;
+	bool dsc = false, joiner = false;
 
 	status = intel_cpu_transcoder_mode_valid(dev_priv, mode);
 	if (status != MODE_OK)
@@ -1233,6 +1218,9 @@ intel_dp_mode_valid(struct drm_connector *_connector,
 
 	if (mode->flags & DRM_MODE_FLAG_DBLCLK)
 		return MODE_H_ILLEGAL;
+
+	if (mode->clock < 10000)
+		return MODE_CLOCK_LOW;
 
 	fixed_mode = intel_panel_fixed_mode(connector, mode);
 	if (intel_dp_is_edp(intel_dp) && fixed_mode) {
@@ -1243,11 +1231,9 @@ intel_dp_mode_valid(struct drm_connector *_connector,
 		target_clock = fixed_mode->clock;
 	}
 
-	if (mode->clock < 10000)
-		return MODE_CLOCK_LOW;
-
-	if (intel_dp_need_bigjoiner(intel_dp, mode->hdisplay, target_clock)) {
-		bigjoiner = true;
+	if (intel_dp_need_joiner(intel_dp, connector,
+				 mode->hdisplay, target_clock)) {
+		joiner = true;
 		max_dotclk *= 2;
 	}
 	if (target_clock > max_dotclk)
@@ -1259,12 +1245,12 @@ intel_dp_mode_valid(struct drm_connector *_connector,
 	max_link_clock = intel_dp_max_link_rate(intel_dp);
 	max_lanes = intel_dp_max_lane_count(intel_dp);
 
-	max_rate = intel_dp_max_data_rate(max_link_clock, max_lanes);
+	max_rate = intel_dp_max_link_data_rate(intel_dp, max_link_clock, max_lanes);
+
 	mode_rate = intel_dp_link_required(target_clock,
 					   intel_dp_mode_min_output_bpp(connector, mode));
 
-	if (HAS_DSC(dev_priv) &&
-	    drm_dp_sink_supports_dsc(connector->dp.dsc_dpcd)) {
+	if (intel_dp_has_dsc(connector)) {
 		enum intel_output_format sink_format, output_format;
 		int pipe_bpp;
 
@@ -1293,24 +1279,20 @@ intel_dp_mode_valid(struct drm_connector *_connector,
 								    max_lanes,
 								    target_clock,
 								    mode->hdisplay,
-								    bigjoiner,
+								    joiner,
 								    output_format,
 								    pipe_bpp, 64);
 			dsc_slice_count =
 				intel_dp_dsc_get_slice_count(connector,
 							     target_clock,
 							     mode->hdisplay,
-							     bigjoiner);
+							     joiner);
 		}
 
 		dsc = dsc_max_compressed_bpp && dsc_slice_count;
 	}
 
-	/*
-	 * Big joiner configuration needs DSC for TGL which is not true for
-	 * XE_LPD where uncompressed joiner is supported.
-	 */
-	if (DISPLAY_VER(dev_priv) < 13 && bigjoiner && !dsc)
+	if (intel_dp_joiner_needs_dsc(dev_priv, joiner) && !dsc)
 		return MODE_CLOCK_HIGH;
 
 	if (mode_rate > max_rate && !dsc)
@@ -1320,7 +1302,7 @@ intel_dp_mode_valid(struct drm_connector *_connector,
 	if (status != MODE_OK)
 		return status;
 
-	return intel_mode_valid_max_plane_size(dev_priv, mode, bigjoiner);
+	return intel_mode_valid_max_plane_size(dev_priv, mode, joiner);
 }
 
 bool intel_dp_source_supports_tps3(struct drm_i915_private *i915)
@@ -1370,14 +1352,36 @@ static void intel_dp_print_rates(struct intel_dp *intel_dp)
 	drm_dbg_kms(&i915->drm, "common rates: %s\n", str);
 }
 
+static int forced_link_rate(struct intel_dp *intel_dp)
+{
+	int len = intel_dp_common_len_rate_limit(intel_dp, intel_dp->link.force_rate);
+
+	if (len == 0)
+		return intel_dp_common_rate(intel_dp, 0);
+
+	return intel_dp_common_rate(intel_dp, len - 1);
+}
+
 int
 intel_dp_max_link_rate(struct intel_dp *intel_dp)
 {
 	int len;
 
-	len = intel_dp_common_len_rate_limit(intel_dp, intel_dp->max_link_rate);
+	if (intel_dp->link.force_rate)
+		return forced_link_rate(intel_dp);
+
+	len = intel_dp_common_len_rate_limit(intel_dp, intel_dp->link.max_rate);
 
 	return intel_dp_common_rate(intel_dp, len - 1);
+}
+
+static int
+intel_dp_min_link_rate(struct intel_dp *intel_dp)
+{
+	if (intel_dp->link.force_rate)
+		return forced_link_rate(intel_dp);
+
+	return intel_dp_common_rate(intel_dp, 0);
 }
 
 int intel_dp_rate_select(struct intel_dp *intel_dp, int rate)
@@ -1422,7 +1426,8 @@ static bool intel_dp_source_supports_fec(struct intel_dp *intel_dp,
 	if (DISPLAY_VER(dev_priv) >= 12)
 		return true;
 
-	if (DISPLAY_VER(dev_priv) == 11 && encoder->port != PORT_A)
+	if (DISPLAY_VER(dev_priv) == 11 && encoder->port != PORT_A &&
+	    !intel_crtc_has_type(pipe_config, INTEL_OUTPUT_DP_MST))
 		return true;
 
 	return false;
@@ -1436,15 +1441,16 @@ bool intel_dp_supports_fec(struct intel_dp *intel_dp,
 		drm_dp_sink_supports_fec(connector->dp.fec_capability);
 }
 
-static bool intel_dp_supports_dsc(const struct intel_connector *connector,
-				  const struct intel_crtc_state *crtc_state)
+bool intel_dp_supports_dsc(const struct intel_connector *connector,
+			   const struct intel_crtc_state *crtc_state)
 {
+	if (!intel_dp_has_dsc(connector))
+		return false;
+
 	if (intel_crtc_has_type(crtc_state, INTEL_OUTPUT_DP) && !crtc_state->fec_enable)
 		return false;
 
-	return intel_dsc_source_support(crtc_state) &&
-		connector->dp.dsc_decompression_aux &&
-		drm_dp_sink_supports_dsc(connector->dp.dsc_dpcd);
+	return intel_dsc_source_support(crtc_state);
 }
 
 static int intel_dp_hdmi_compute_bpc(struct intel_dp *intel_dp,
@@ -1609,8 +1615,10 @@ intel_dp_compute_link_config_wide(struct intel_dp *intel_dp,
 			for (lane_count = limits->min_lane_count;
 			     lane_count <= limits->max_lane_count;
 			     lane_count <<= 1) {
-				link_avail = intel_dp_max_data_rate(link_rate,
-								    lane_count);
+				link_avail = intel_dp_max_link_data_rate(intel_dp,
+									 link_rate,
+									 lane_count);
+
 
 				if (mode_rate <= link_avail) {
 					pipe_config->lane_count = lane_count;
@@ -1701,7 +1709,6 @@ static int intel_dp_dsc_compute_params(const struct intel_connector *connector,
 {
 	struct drm_i915_private *i915 = to_i915(connector->base.dev);
 	struct drm_dsc_config *vdsc_cfg = &crtc_state->dsc.config;
-	u8 line_buf_depth;
 	int ret;
 
 	/*
@@ -1730,19 +1737,13 @@ static int intel_dp_dsc_compute_params(const struct intel_connector *connector,
 			connector->dp.dsc_dpcd[DP_DSC_DEC_COLOR_FORMAT_CAP - DP_DSC_SUPPORT] &
 			DP_DSC_RGB;
 
-	line_buf_depth = drm_dp_dsc_sink_line_buf_depth(connector->dp.dsc_dpcd);
-	if (!line_buf_depth) {
+	vdsc_cfg->line_buf_depth = min(INTEL_DP_DSC_MAX_LINE_BUF_DEPTH,
+				       drm_dp_dsc_sink_line_buf_depth(connector->dp.dsc_dpcd));
+	if (!vdsc_cfg->line_buf_depth) {
 		drm_dbg_kms(&i915->drm,
 			    "DSC Sink Line Buffer Depth invalid\n");
 		return -EINVAL;
 	}
-
-	if (vdsc_cfg->dsc_version_minor == 2)
-		vdsc_cfg->line_buf_depth = (line_buf_depth == DSC_1_2_MAX_LINEBUF_DEPTH_BITS) ?
-			DSC_1_2_MAX_LINEBUF_DEPTH_VAL : line_buf_depth;
-	else
-		vdsc_cfg->line_buf_depth = (line_buf_depth > DSC_1_1_MAX_LINEBUF_DEPTH_BITS) ?
-			DSC_1_1_MAX_LINEBUF_DEPTH_BITS : line_buf_depth;
 
 	vdsc_cfg->block_pred_enable =
 		connector->dp.dsc_dpcd[DP_DSC_BLK_PREDICTION_SUPPORT - DP_DSC_SUPPORT] &
@@ -1915,8 +1916,9 @@ icl_dsc_compute_link_config(struct intel_dp *intel_dp,
 	dsc_max_bpp = min(dsc_max_bpp, pipe_bpp - 1);
 
 	for (i = 0; i < ARRAY_SIZE(valid_dsc_bpp); i++) {
-		if (valid_dsc_bpp[i] < dsc_min_bpp ||
-		    valid_dsc_bpp[i] > dsc_max_bpp)
+		if (valid_dsc_bpp[i] < dsc_min_bpp)
+			continue;
+		if (valid_dsc_bpp[i] > dsc_max_bpp)
 			break;
 
 		ret = dsc_compute_link_config(intel_dp,
@@ -2014,7 +2016,7 @@ static int dsc_compute_compressed_bpp(struct intel_dp *intel_dp,
 
 	dsc_joiner_max_bpp = get_max_compressed_bpp_with_joiner(i915, adjusted_mode->clock,
 								adjusted_mode->hdisplay,
-								pipe_config->bigjoiner_pipes);
+								pipe_config->joiner_pipes);
 	dsc_max_bpp = min(dsc_max_bpp, dsc_joiner_max_bpp);
 	dsc_max_bpp = min(dsc_max_bpp, to_bpp_int(limits->link.max_bpp_x16));
 
@@ -2248,7 +2250,7 @@ int intel_dp_dsc_compute_config(struct intel_dp *intel_dp,
 			intel_dp_dsc_get_slice_count(connector,
 						     adjusted_mode->crtc_clock,
 						     adjusted_mode->crtc_hdisplay,
-						     pipe_config->bigjoiner_pipes);
+						     pipe_config->joiner_pipes);
 		if (!dsc_dp_slice_count) {
 			drm_dbg_kms(&dev_priv->drm,
 				    "Compressed Slice Count not supported\n");
@@ -2262,7 +2264,7 @@ int intel_dp_dsc_compute_config(struct intel_dp *intel_dp,
 	 * is greater than the maximum Cdclock and if slice count is even
 	 * then we need to use 2 VDSC instances.
 	 */
-	if (pipe_config->bigjoiner_pipes || pipe_config->dsc.slice_count > 1)
+	if (pipe_config->joiner_pipes || pipe_config->dsc.slice_count > 1)
 		pipe_config->dsc.dsc_split = true;
 
 	ret = intel_dp_dsc_compute_params(connector, pipe_config);
@@ -2352,13 +2354,14 @@ intel_dp_compute_config_limits(struct intel_dp *intel_dp,
 			       bool dsc,
 			       struct link_config_limits *limits)
 {
-	limits->min_rate = intel_dp_common_rate(intel_dp, 0);
+	limits->min_rate = intel_dp_min_link_rate(intel_dp);
 	limits->max_rate = intel_dp_max_link_rate(intel_dp);
 
 	/* FIXME 128b/132b SST support missing */
 	limits->max_rate = min(limits->max_rate, 810000);
+	limits->min_rate = min(limits->min_rate, limits->max_rate);
 
-	limits->min_lane_count = 1;
+	limits->min_lane_count = intel_dp_min_lane_count(intel_dp);
 	limits->max_lane_count = intel_dp_max_lane_count(intel_dp);
 
 	limits->pipe.min_bpp = intel_dp_min_bpp(crtc_state->output_format);
@@ -2386,6 +2389,27 @@ intel_dp_compute_config_limits(struct intel_dp *intel_dp,
 						       limits);
 }
 
+int intel_dp_config_required_rate(const struct intel_crtc_state *crtc_state)
+{
+	const struct drm_display_mode *adjusted_mode =
+		&crtc_state->hw.adjusted_mode;
+	int bpp = crtc_state->dsc.compression_enable ?
+		to_bpp_int_roundup(crtc_state->dsc.compressed_bpp_x16) :
+		crtc_state->pipe_bpp;
+
+	return intel_dp_link_required(adjusted_mode->crtc_clock, bpp);
+}
+
+bool intel_dp_joiner_needs_dsc(struct drm_i915_private *i915, bool use_joiner)
+{
+	/*
+	 * Pipe joiner needs compression up to display 12 due to bandwidth
+	 * limitation. DG2 onwards pipe joiner can be enabled without
+	 * compression.
+	 */
+	return DISPLAY_VER(i915) < 13 && use_joiner;
+}
+
 static int
 intel_dp_compute_link_config(struct intel_encoder *encoder,
 			     struct intel_crtc_state *pipe_config,
@@ -2394,30 +2418,25 @@ intel_dp_compute_link_config(struct intel_encoder *encoder,
 {
 	struct drm_i915_private *i915 = to_i915(encoder->base.dev);
 	struct intel_crtc *crtc = to_intel_crtc(pipe_config->uapi.crtc);
-	const struct intel_connector *connector =
+	struct intel_connector *connector =
 		to_intel_connector(conn_state->connector);
 	const struct drm_display_mode *adjusted_mode =
 		&pipe_config->hw.adjusted_mode;
 	struct intel_dp *intel_dp = enc_to_intel_dp(encoder);
 	struct link_config_limits limits;
-	bool joiner_needs_dsc = false;
-	bool dsc_needed;
+	bool dsc_needed, joiner_needs_dsc;
 	int ret = 0;
 
 	if (pipe_config->fec_enable &&
 	    !intel_dp_supports_fec(intel_dp, connector, pipe_config))
 		return -EINVAL;
 
-	if (intel_dp_need_bigjoiner(intel_dp, adjusted_mode->crtc_hdisplay,
-				    adjusted_mode->crtc_clock))
-		pipe_config->bigjoiner_pipes = GENMASK(crtc->pipe + 1, crtc->pipe);
+	if (intel_dp_need_joiner(intel_dp, connector,
+				 adjusted_mode->crtc_hdisplay,
+				 adjusted_mode->crtc_clock))
+		pipe_config->joiner_pipes = GENMASK(crtc->pipe + 1, crtc->pipe);
 
-	/*
-	 * Pipe joiner needs compression up to display 12 due to bandwidth
-	 * limitation. DG2 onwards pipe joiner can be enabled without
-	 * compression.
-	 */
-	joiner_needs_dsc = DISPLAY_VER(i915) < 13 && pipe_config->bigjoiner_pipes;
+	joiner_needs_dsc = intel_dp_joiner_needs_dsc(i915, pipe_config->joiner_pipes);
 
 	dsc_needed = joiner_needs_dsc || intel_dp->force_dsc_en ||
 		     !intel_dp_compute_config_limits(intel_dp, pipe_config,
@@ -2453,31 +2472,16 @@ intel_dp_compute_link_config(struct intel_encoder *encoder,
 			return ret;
 	}
 
-	if (pipe_config->dsc.compression_enable) {
-		drm_dbg_kms(&i915->drm,
-			    "DP lane count %d clock %d Input bpp %d Compressed bpp " BPP_X16_FMT "\n",
-			    pipe_config->lane_count, pipe_config->port_clock,
-			    pipe_config->pipe_bpp,
-			    BPP_X16_ARGS(pipe_config->dsc.compressed_bpp_x16));
+	drm_dbg_kms(&i915->drm,
+		    "DP lane count %d clock %d bpp input %d compressed " BPP_X16_FMT " link rate required %d available %d\n",
+		    pipe_config->lane_count, pipe_config->port_clock,
+		    pipe_config->pipe_bpp,
+		    BPP_X16_ARGS(pipe_config->dsc.compressed_bpp_x16),
+		    intel_dp_config_required_rate(pipe_config),
+		    intel_dp_max_link_data_rate(intel_dp,
+						pipe_config->port_clock,
+						pipe_config->lane_count));
 
-		drm_dbg_kms(&i915->drm,
-			    "DP link rate required %i available %i\n",
-			    intel_dp_link_required(adjusted_mode->crtc_clock,
-						   to_bpp_int_roundup(pipe_config->dsc.compressed_bpp_x16)),
-			    intel_dp_max_data_rate(pipe_config->port_clock,
-						   pipe_config->lane_count));
-	} else {
-		drm_dbg_kms(&i915->drm, "DP lane count %d clock %d bpp %d\n",
-			    pipe_config->lane_count, pipe_config->port_clock,
-			    pipe_config->pipe_bpp);
-
-		drm_dbg_kms(&i915->drm,
-			    "DP link rate required %i available %i\n",
-			    intel_dp_link_required(adjusted_mode->crtc_clock,
-						   pipe_config->pipe_bpp),
-			    intel_dp_max_data_rate(pipe_config->port_clock,
-						   pipe_config->lane_count));
-	}
 	return 0;
 }
 
@@ -2615,62 +2619,73 @@ static void intel_dp_compute_vsc_colorimetry(const struct intel_crtc_state *crtc
 	vsc->content_type = DP_CONTENT_TYPE_NOT_DEFINED;
 }
 
+static void intel_dp_compute_as_sdp(struct intel_dp *intel_dp,
+				    struct intel_crtc_state *crtc_state)
+{
+	struct drm_dp_as_sdp *as_sdp = &crtc_state->infoframes.as_sdp;
+	const struct drm_display_mode *adjusted_mode =
+		&crtc_state->hw.adjusted_mode;
+
+	if (!crtc_state->vrr.enable ||
+	    !intel_dp_as_sdp_supported(intel_dp))
+		return;
+
+	crtc_state->infoframes.enable |= intel_hdmi_infoframe_enable(DP_SDP_ADAPTIVE_SYNC);
+
+	/* Currently only DP_AS_SDP_AVT_FIXED_VTOTAL mode supported */
+	as_sdp->sdp_type = DP_SDP_ADAPTIVE_SYNC;
+	as_sdp->length = 0x9;
+	as_sdp->duration_incr_ms = 0;
+	as_sdp->duration_incr_ms = 0;
+
+	if (crtc_state->cmrr.enable) {
+		as_sdp->mode = DP_AS_SDP_FAVT_TRR_REACHED;
+		as_sdp->vtotal = adjusted_mode->vtotal;
+		as_sdp->target_rr = drm_mode_vrefresh(adjusted_mode);
+		as_sdp->target_rr_divider = true;
+	} else {
+		as_sdp->mode = DP_AS_SDP_AVT_FIXED_VTOTAL;
+		as_sdp->vtotal = adjusted_mode->vtotal;
+		as_sdp->target_rr = 0;
+	}
+}
+
 static void intel_dp_compute_vsc_sdp(struct intel_dp *intel_dp,
 				     struct intel_crtc_state *crtc_state,
 				     const struct drm_connector_state *conn_state)
 {
-	struct drm_dp_vsc_sdp *vsc = &crtc_state->infoframes.vsc;
+	struct drm_dp_vsc_sdp *vsc;
 
-	/* When a crtc state has PSR, VSC SDP will be handled by PSR routine */
-	if (crtc_state->has_psr)
+	if ((!intel_dp->colorimetry_support ||
+	     !intel_dp_needs_vsc_sdp(crtc_state, conn_state)) &&
+	    !crtc_state->has_psr)
 		return;
 
-	if (!intel_dp_needs_vsc_sdp(crtc_state, conn_state))
-		return;
+	vsc = &crtc_state->infoframes.vsc;
 
 	crtc_state->infoframes.enable |= intel_hdmi_infoframe_enable(DP_SDP_VSC);
 	vsc->sdp_type = DP_SDP_VSC;
-	intel_dp_compute_vsc_colorimetry(crtc_state, conn_state,
-					 &crtc_state->infoframes.vsc);
-}
 
-void intel_dp_compute_psr_vsc_sdp(struct intel_dp *intel_dp,
-				  const struct intel_crtc_state *crtc_state,
-				  const struct drm_connector_state *conn_state,
-				  struct drm_dp_vsc_sdp *vsc)
-{
-	vsc->sdp_type = DP_SDP_VSC;
-
-	if (crtc_state->has_psr2) {
-		if (intel_dp->psr.colorimetry_support &&
-		    intel_dp_needs_vsc_sdp(crtc_state, conn_state)) {
-			/* [PSR2, +Colorimetry] */
-			intel_dp_compute_vsc_colorimetry(crtc_state, conn_state,
-							 vsc);
-		} else {
-			/*
-			 * [PSR2, -Colorimetry]
-			 * Prepare VSC Header for SU as per eDP 1.4 spec, Table 6-11
-			 * 3D stereo + PSR/PSR2 + Y-coordinate.
-			 */
-			vsc->revision = 0x4;
-			vsc->length = 0xe;
-		}
+	/* Needs colorimetry */
+	if (intel_dp_needs_vsc_sdp(crtc_state, conn_state)) {
+		intel_dp_compute_vsc_colorimetry(crtc_state, conn_state,
+						 vsc);
 	} else if (crtc_state->has_panel_replay) {
-		if (intel_dp->psr.colorimetry_support &&
-		    intel_dp_needs_vsc_sdp(crtc_state, conn_state)) {
-			/* [Panel Replay with colorimetry info] */
-			intel_dp_compute_vsc_colorimetry(crtc_state, conn_state,
-							 vsc);
-		} else {
-			/*
-			 * [Panel Replay without colorimetry info]
-			 * Prepare VSC Header for SU as per DP 2.0 spec, Table 2-223
-			 * VSC SDP supporting 3D stereo + Panel Replay.
-			 */
-			vsc->revision = 0x6;
-			vsc->length = 0x10;
-		}
+		/*
+		 * [Panel Replay without colorimetry info]
+		 * Prepare VSC Header for SU as per DP 2.0 spec, Table 2-223
+		 * VSC SDP supporting 3D stereo + Panel Replay.
+		 */
+		vsc->revision = 0x6;
+		vsc->length = 0x10;
+	} else if (crtc_state->has_sel_update) {
+		/*
+		 * [PSR2 without colorimetry]
+		 * Prepare VSC Header for SU as per eDP 1.4 spec, Table 6-11
+		 * 3D stereo + PSR/PSR2 + Y-coordinate.
+		 */
+		vsc->revision = 0x4;
+		vsc->length = 0xe;
 	} else {
 		/*
 		 * [PSR1]
@@ -2706,15 +2721,6 @@ intel_dp_compute_hdr_metadata_infoframe_sdp(struct intel_dp *intel_dp,
 		intel_hdmi_infoframe_enable(HDMI_PACKET_TYPE_GAMUT_METADATA);
 }
 
-static bool cpu_transcoder_has_drrs(struct drm_i915_private *i915,
-				    enum transcoder cpu_transcoder)
-{
-	if (HAS_DOUBLE_BUFFERED_M_N(i915))
-		return true;
-
-	return intel_cpu_transcoder_has_m2_n2(i915, cpu_transcoder);
-}
-
 static bool can_enable_drrs(struct intel_connector *connector,
 			    const struct intel_crtc_state *pipe_config,
 			    const struct drm_display_mode *downclock_mode)
@@ -2737,7 +2743,7 @@ static bool can_enable_drrs(struct intel_connector *connector,
 	if (pipe_config->has_pch_encoder)
 		return false;
 
-	if (!cpu_transcoder_has_drrs(i915, pipe_config->cpu_transcoder))
+	if (!intel_cpu_transcoder_has_drrs(i915, pipe_config->cpu_transcoder))
 		return false;
 
 	return downclock_mode &&
@@ -2754,7 +2760,11 @@ intel_dp_drrs_compute_config(struct intel_connector *connector,
 		intel_panel_downclock_mode(connector, &pipe_config->hw.adjusted_mode);
 	int pixel_clock;
 
-	if (has_seamless_m_n(connector))
+	/*
+	 * FIXME all joined pipes share the same transcoder.
+	 * Need to account for that when updating M/N live.
+	 */
+	if (has_seamless_m_n(connector) && !pipe_config->joiner_pipes)
 		pipe_config->update_m_n = true;
 
 	if (!can_enable_drrs(connector, pipe_config, downclock_mode)) {
@@ -2783,7 +2793,6 @@ intel_dp_drrs_compute_config(struct intel_connector *connector,
 }
 
 static bool intel_dp_has_audio(struct intel_encoder *encoder,
-			       struct intel_crtc_state *crtc_state,
 			       const struct drm_connector_state *conn_state)
 {
 	struct drm_i915_private *i915 = to_i915(encoder->base.dev);
@@ -2792,8 +2801,7 @@ static bool intel_dp_has_audio(struct intel_encoder *encoder,
 	struct intel_connector *connector =
 		to_intel_connector(conn_state->connector);
 
-	if (!intel_crtc_has_type(crtc_state, INTEL_OUTPUT_DP_MST) &&
-	    !intel_dp_port_has_audio(i915, encoder->port))
+	if (!intel_dp_port_has_audio(i915, encoder->port))
 		return false;
 
 	if (intel_conn_state->force_audio == HDMI_AUDIO_AUTO)
@@ -2852,11 +2860,50 @@ intel_dp_audio_compute_config(struct intel_encoder *encoder,
 			      struct drm_connector_state *conn_state)
 {
 	pipe_config->has_audio =
-		intel_dp_has_audio(encoder, pipe_config, conn_state) &&
+		intel_dp_has_audio(encoder, conn_state) &&
 		intel_audio_compute_config(encoder, pipe_config, conn_state);
 
 	pipe_config->sdp_split_enable = pipe_config->has_audio &&
 					intel_dp_is_uhbr(pipe_config);
+}
+
+static void intel_dp_queue_modeset_retry_work(struct intel_connector *connector)
+{
+	struct drm_i915_private *i915 = to_i915(connector->base.dev);
+
+	drm_connector_get(&connector->base);
+	if (!queue_work(i915->unordered_wq, &connector->modeset_retry_work))
+		drm_connector_put(&connector->base);
+}
+
+/* NOTE: @state is only valid for MST links and can be %NULL for SST. */
+void
+intel_dp_queue_modeset_retry_for_link(struct intel_atomic_state *state,
+				      struct intel_encoder *encoder,
+				      const struct intel_crtc_state *crtc_state)
+{
+	struct intel_connector *connector;
+	struct intel_digital_connector_state *conn_state;
+	struct intel_dp *intel_dp = enc_to_intel_dp(encoder);
+	struct drm_i915_private *i915 = dp_to_i915(intel_dp);
+	int i;
+
+	if (!intel_crtc_has_type(crtc_state, INTEL_OUTPUT_DP_MST)) {
+		intel_dp_queue_modeset_retry_work(intel_dp->attached_connector);
+
+		return;
+	}
+
+	if (drm_WARN_ON(&i915->drm, !state))
+		return;
+
+	for_each_new_intel_connector_in_state(state, connector, conn_state, i) {
+		if (!conn_state->base.crtc)
+			continue;
+
+		if (connector->mst_port == intel_dp)
+			intel_dp_queue_modeset_retry_work(connector);
+	}
 }
 
 int
@@ -2865,6 +2912,7 @@ intel_dp_compute_config(struct intel_encoder *encoder,
 			struct drm_connector_state *conn_state)
 {
 	struct drm_i915_private *dev_priv = to_i915(encoder->base.dev);
+	struct intel_atomic_state *state = to_intel_atomic_state(conn_state->state);
 	struct drm_display_mode *adjusted_mode = &pipe_config->hw.adjusted_mode;
 	struct intel_dp *intel_dp = enc_to_intel_dp(encoder);
 	const struct drm_display_mode *fixed_mode;
@@ -2960,12 +3008,15 @@ intel_dp_compute_config(struct intel_encoder *encoder,
 		g4x_dp_set_clock(encoder, pipe_config);
 
 	intel_vrr_compute_config(pipe_config, conn_state);
+	intel_dp_compute_as_sdp(intel_dp, pipe_config);
 	intel_psr_compute_config(intel_dp, pipe_config, conn_state);
+	intel_alpm_lobf_compute_config(intel_dp, pipe_config, conn_state);
 	intel_dp_drrs_compute_config(connector, pipe_config, link_bpp_x16);
 	intel_dp_compute_vsc_sdp(intel_dp, pipe_config, conn_state);
 	intel_dp_compute_hdr_metadata_infoframe_sdp(intel_dp, pipe_config, conn_state);
 
-	return 0;
+	return intel_dp_tunnel_atomic_compute_stream_bw(state, intel_dp, connector,
+							pipe_config);
 }
 
 void intel_dp_set_link_params(struct intel_dp *intel_dp,
@@ -2977,10 +3028,12 @@ void intel_dp_set_link_params(struct intel_dp *intel_dp,
 	intel_dp->lane_count = lane_count;
 }
 
-static void intel_dp_reset_max_link_params(struct intel_dp *intel_dp)
+void intel_dp_reset_link_params(struct intel_dp *intel_dp)
 {
-	intel_dp->max_link_lane_count = intel_dp_max_common_lane_count(intel_dp);
-	intel_dp->max_link_rate = intel_dp_max_common_rate(intel_dp);
+	intel_dp->link.max_lane_count = intel_dp_max_common_lane_count(intel_dp);
+	intel_dp->link.max_rate = intel_dp_max_common_rate(intel_dp);
+	intel_dp->link.retrain_disabled = false;
+	intel_dp->link.seq_train_failures = 0;
 }
 
 /* Enable backlight PWM and backlight PP control. */
@@ -3301,18 +3354,21 @@ void intel_dp_sync_state(struct intel_encoder *encoder,
 			 const struct intel_crtc_state *crtc_state)
 {
 	struct intel_dp *intel_dp = enc_to_intel_dp(encoder);
-
-	if (!crtc_state)
-		return;
+	bool dpcd_updated = false;
 
 	/*
 	 * Don't clobber DPCD if it's been already read out during output
 	 * setup (eDP) or detect.
 	 */
-	if (intel_dp->dpcd[DP_DPCD_REV] == 0)
+	if (crtc_state && intel_dp->dpcd[DP_DPCD_REV] == 0) {
 		intel_dp_get_dpcd(intel_dp);
+		dpcd_updated = true;
+	}
 
-	intel_dp_reset_max_link_params(intel_dp);
+	intel_dp_tunnel_resume(intel_dp, crtc_state, dpcd_updated);
+
+	if (crtc_state)
+		intel_dp_reset_link_params(intel_dp);
 }
 
 bool intel_dp_initial_fastset_check(struct intel_encoder *encoder,
@@ -3348,8 +3404,9 @@ bool intel_dp_initial_fastset_check(struct intel_encoder *encoder,
 		fastset = false;
 	}
 
-	if (CAN_PSR(intel_dp)) {
-		drm_dbg_kms(&i915->drm, "[ENCODER:%d:%s] Forcing full modeset to compute PSR state\n",
+	if (CAN_PANEL_REPLAY(intel_dp)) {
+		drm_dbg_kms(&i915->drm,
+			    "[ENCODER:%d:%s] Forcing full modeset to compute panel replay state\n",
 			    encoder->base.base.id, encoder->base.name);
 		crtc_state->uapi.mode_changed = true;
 		fastset = false;
@@ -3896,6 +3953,7 @@ intel_edp_init_dpcd(struct intel_dp *intel_dp, struct intel_connector *connector
 
 	drm_dp_read_desc(&intel_dp->aux, &intel_dp->desc,
 			 drm_dp_is_branch(intel_dp->dpcd));
+	intel_init_dpcd_quirks(intel_dp, &intel_dp->desc.ident);
 
 	/*
 	 * Read the eDP display control registers.
@@ -3985,6 +4043,13 @@ intel_dp_has_sink_count(struct intel_dp *intel_dp)
 					  &intel_dp->desc);
 }
 
+void intel_dp_update_sink_caps(struct intel_dp *intel_dp)
+{
+	intel_dp_set_sink_rates(intel_dp);
+	intel_dp_set_max_sink_lane_count(intel_dp);
+	intel_dp_set_common_rates(intel_dp);
+}
+
 static bool
 intel_dp_get_dpcd(struct intel_dp *intel_dp)
 {
@@ -4001,9 +4066,9 @@ intel_dp_get_dpcd(struct intel_dp *intel_dp)
 		drm_dp_read_desc(&intel_dp->aux, &intel_dp->desc,
 				 drm_dp_is_branch(intel_dp->dpcd));
 
-		intel_dp_set_sink_rates(intel_dp);
-		intel_dp_set_max_sink_lane_count(intel_dp);
-		intel_dp_set_common_rates(intel_dp);
+		intel_init_dpcd_quirks(intel_dp, &intel_dp->desc.ident);
+
+		intel_dp_update_sink_caps(intel_dp);
 	}
 
 	if (intel_dp_has_sink_count(intel_dp)) {
@@ -4033,39 +4098,84 @@ intel_dp_get_dpcd(struct intel_dp *intel_dp)
 					   intel_dp->downstream_ports) == 0;
 }
 
-static bool
-intel_dp_can_mst(struct intel_dp *intel_dp)
+static const char *intel_dp_mst_mode_str(enum drm_dp_mst_mode mst_mode)
+{
+	if (mst_mode == DRM_DP_MST)
+		return "MST";
+	else if (mst_mode == DRM_DP_SST_SIDEBAND_MSG)
+		return "SST w/ sideband messaging";
+	else
+		return "SST";
+}
+
+static enum drm_dp_mst_mode
+intel_dp_mst_mode_choose(struct intel_dp *intel_dp,
+			 enum drm_dp_mst_mode sink_mst_mode)
 {
 	struct drm_i915_private *i915 = dp_to_i915(intel_dp);
 
-	return i915->display.params.enable_dp_mst &&
-		intel_dp_mst_source_support(intel_dp) &&
-		drm_dp_read_mst_cap(&intel_dp->aux, intel_dp->dpcd);
+	if (!i915->display.params.enable_dp_mst)
+		return DRM_DP_SST;
+
+	if (!intel_dp_mst_source_support(intel_dp))
+		return DRM_DP_SST;
+
+	if (sink_mst_mode == DRM_DP_SST_SIDEBAND_MSG &&
+	    !(intel_dp->dpcd[DP_MAIN_LINK_CHANNEL_CODING] & DP_CAP_ANSI_128B132B))
+		return DRM_DP_SST;
+
+	return sink_mst_mode;
+}
+
+static enum drm_dp_mst_mode
+intel_dp_mst_detect(struct intel_dp *intel_dp)
+{
+	struct drm_i915_private *i915 = dp_to_i915(intel_dp);
+	struct intel_encoder *encoder = &dp_to_dig_port(intel_dp)->base;
+	enum drm_dp_mst_mode sink_mst_mode;
+	enum drm_dp_mst_mode mst_detect;
+
+	sink_mst_mode = drm_dp_read_mst_cap(&intel_dp->aux, intel_dp->dpcd);
+
+	mst_detect = intel_dp_mst_mode_choose(intel_dp, sink_mst_mode);
+
+	drm_dbg_kms(&i915->drm,
+		    "[ENCODER:%d:%s] MST support: port: %s, sink: %s, modparam: %s -> enable: %s\n",
+		    encoder->base.base.id, encoder->base.name,
+		    str_yes_no(intel_dp_mst_source_support(intel_dp)),
+		    intel_dp_mst_mode_str(sink_mst_mode),
+		    str_yes_no(i915->display.params.enable_dp_mst),
+		    intel_dp_mst_mode_str(mst_detect));
+
+	return mst_detect;
 }
 
 static void
-intel_dp_configure_mst(struct intel_dp *intel_dp)
+intel_dp_mst_configure(struct intel_dp *intel_dp)
 {
-	struct drm_i915_private *i915 = dp_to_i915(intel_dp);
-	struct intel_encoder *encoder =
-		&dp_to_dig_port(intel_dp)->base;
-	bool sink_can_mst = drm_dp_read_mst_cap(&intel_dp->aux, intel_dp->dpcd);
-
-	drm_dbg_kms(&i915->drm,
-		    "[ENCODER:%d:%s] MST support: port: %s, sink: %s, modparam: %s\n",
-		    encoder->base.base.id, encoder->base.name,
-		    str_yes_no(intel_dp_mst_source_support(intel_dp)),
-		    str_yes_no(sink_can_mst),
-		    str_yes_no(i915->display.params.enable_dp_mst));
-
 	if (!intel_dp_mst_source_support(intel_dp))
 		return;
 
-	intel_dp->is_mst = sink_can_mst &&
-		i915->display.params.enable_dp_mst;
+	intel_dp->is_mst = intel_dp->mst_detect != DRM_DP_SST;
 
-	drm_dp_mst_topology_mgr_set_mst(&intel_dp->mst_mgr,
-					intel_dp->is_mst);
+	drm_dp_mst_topology_mgr_set_mst(&intel_dp->mst_mgr, intel_dp->is_mst);
+
+	/* Avoid stale info on the next detect cycle. */
+	intel_dp->mst_detect = DRM_DP_SST;
+}
+
+static void
+intel_dp_mst_disconnect(struct intel_dp *intel_dp)
+{
+	struct drm_i915_private *i915 = dp_to_i915(intel_dp);
+
+	if (!intel_dp->is_mst)
+		return;
+
+	drm_dbg_kms(&i915->drm, "MST device may have disappeared %d vs %d\n",
+		    intel_dp->is_mst, intel_dp->mst_mgr.mst_state);
+	intel_dp->is_mst = false;
+	drm_dp_mst_topology_mgr_set_mst(&intel_dp->mst_mgr, intel_dp->is_mst);
 }
 
 static bool
@@ -4113,8 +4223,8 @@ intel_dp_needs_vsc_sdp(const struct intel_crtc_state *crtc_state,
 	return false;
 }
 
-static ssize_t intel_dp_vsc_sdp_pack(const struct drm_dp_vsc_sdp *vsc,
-				     struct dp_sdp *sdp, size_t size)
+static ssize_t intel_dp_as_sdp_pack(const struct drm_dp_as_sdp *as_sdp,
+				    struct dp_sdp *sdp, size_t size)
 {
 	size_t length = sizeof(struct dp_sdp);
 
@@ -4123,60 +4233,22 @@ static ssize_t intel_dp_vsc_sdp_pack(const struct drm_dp_vsc_sdp *vsc,
 
 	memset(sdp, 0, size);
 
-	/*
-	 * Prepare VSC Header for SU as per DP 1.4a spec, Table 2-119
-	 * VSC SDP Header Bytes
-	 */
-	sdp->sdp_header.HB0 = 0; /* Secondary-Data Packet ID = 0 */
-	sdp->sdp_header.HB1 = vsc->sdp_type; /* Secondary-data Packet Type */
-	sdp->sdp_header.HB2 = vsc->revision; /* Revision Number */
-	sdp->sdp_header.HB3 = vsc->length; /* Number of Valid Data Bytes */
+	/* Prepare AS (Adaptive Sync) SDP Header */
+	sdp->sdp_header.HB0 = 0;
+	sdp->sdp_header.HB1 = as_sdp->sdp_type;
+	sdp->sdp_header.HB2 = 0x02;
+	sdp->sdp_header.HB3 = as_sdp->length;
 
-	if (vsc->revision == 0x6) {
-		sdp->db[0] = 1;
-		sdp->db[3] = 1;
-	}
+	/* Fill AS (Adaptive Sync) SDP Payload */
+	sdp->db[0] = as_sdp->mode;
+	sdp->db[1] = as_sdp->vtotal & 0xFF;
+	sdp->db[2] = (as_sdp->vtotal >> 8) & 0xFF;
+	sdp->db[3] = as_sdp->target_rr & 0xFF;
+	sdp->db[4] = (as_sdp->target_rr >> 8) & 0x3;
 
-	/*
-	 * Revision 0x5 and revision 0x7 supports Pixel Encoding/Colorimetry
-	 * Format as per DP 1.4a spec and DP 2.0 respectively.
-	 */
-	if (!(vsc->revision == 0x5 || vsc->revision == 0x7))
-		goto out;
+	if (as_sdp->target_rr_divider)
+		sdp->db[4] |= 0x20;
 
-	/* VSC SDP Payload for DB16 through DB18 */
-	/* Pixel Encoding and Colorimetry Formats  */
-	sdp->db[16] = (vsc->pixelformat & 0xf) << 4; /* DB16[7:4] */
-	sdp->db[16] |= vsc->colorimetry & 0xf; /* DB16[3:0] */
-
-	switch (vsc->bpc) {
-	case 6:
-		/* 6bpc: 0x0 */
-		break;
-	case 8:
-		sdp->db[17] = 0x1; /* DB17[3:0] */
-		break;
-	case 10:
-		sdp->db[17] = 0x2;
-		break;
-	case 12:
-		sdp->db[17] = 0x3;
-		break;
-	case 16:
-		sdp->db[17] = 0x4;
-		break;
-	default:
-		MISSING_CASE(vsc->bpc);
-		break;
-	}
-	/* Dynamic Range and Component Bit Depth */
-	if (vsc->dynamic_range == DP_DYNAMIC_RANGE_CTA)
-		sdp->db[17] |= 0x80;  /* DB17[7] */
-
-	/* Content Type */
-	sdp->db[18] = vsc->content_type & 0x7;
-
-out:
 	return length;
 }
 
@@ -4272,13 +4344,16 @@ static void intel_write_dp_sdp(struct intel_encoder *encoder,
 
 	switch (type) {
 	case DP_SDP_VSC:
-		len = intel_dp_vsc_sdp_pack(&crtc_state->infoframes.vsc, &sdp,
-					    sizeof(sdp));
+		len = drm_dp_vsc_sdp_pack(&crtc_state->infoframes.vsc, &sdp);
 		break;
 	case HDMI_PACKET_TYPE_GAMUT_METADATA:
 		len = intel_dp_hdr_metadata_infoframe_sdp_pack(dev_priv,
 							       &crtc_state->infoframes.drm.drm,
 							       &sdp, sizeof(sdp));
+		break;
+	case DP_SDP_ADAPTIVE_SYNC:
+		len = intel_dp_as_sdp_pack(&crtc_state->infoframes.as_sdp, &sdp,
+					   sizeof(sdp));
 		break;
 	default:
 		MISSING_CASE(type);
@@ -4291,34 +4366,21 @@ static void intel_write_dp_sdp(struct intel_encoder *encoder,
 	dig_port->write_infoframe(encoder, crtc_state, type, &sdp, len);
 }
 
-void intel_write_dp_vsc_sdp(struct intel_encoder *encoder,
-			    const struct intel_crtc_state *crtc_state,
-			    const struct drm_dp_vsc_sdp *vsc)
-{
-	struct intel_digital_port *dig_port = enc_to_dig_port(encoder);
-	struct drm_i915_private *dev_priv = to_i915(encoder->base.dev);
-	struct dp_sdp sdp = {};
-	ssize_t len;
-
-	len = intel_dp_vsc_sdp_pack(vsc, &sdp, sizeof(sdp));
-
-	if (drm_WARN_ON(&dev_priv->drm, len < 0))
-		return;
-
-	dig_port->write_infoframe(encoder, crtc_state, DP_SDP_VSC,
-					&sdp, len);
-}
-
 void intel_dp_set_infoframes(struct intel_encoder *encoder,
 			     bool enable,
 			     const struct intel_crtc_state *crtc_state,
 			     const struct drm_connector_state *conn_state)
 {
 	struct drm_i915_private *dev_priv = to_i915(encoder->base.dev);
-	i915_reg_t reg = HSW_TVIDEO_DIP_CTL(crtc_state->cpu_transcoder);
+	i915_reg_t reg = HSW_TVIDEO_DIP_CTL(dev_priv,
+					    crtc_state->cpu_transcoder);
 	u32 dip_enable = VIDEO_DIP_ENABLE_AVI_HSW | VIDEO_DIP_ENABLE_GCP_HSW |
 			 VIDEO_DIP_ENABLE_VS_HSW | VIDEO_DIP_ENABLE_GMP_HSW |
 			 VIDEO_DIP_ENABLE_SPD_HSW | VIDEO_DIP_ENABLE_DRM_GLK;
+
+	if (HAS_AS_SDP(dev_priv))
+		dip_enable |= VIDEO_DIP_ENABLE_AS_ADL;
+
 	u32 val = intel_de_read(dev_priv, reg) & ~dip_enable;
 
 	/* TODO: Sanitize DSC enabling wrt. intel_dsc_dp_pps_write(). */
@@ -4335,11 +4397,42 @@ void intel_dp_set_infoframes(struct intel_encoder *encoder,
 	if (!enable)
 		return;
 
-	/* When PSR is enabled, VSC SDP is handled by PSR routine */
-	if (!crtc_state->has_psr)
-		intel_write_dp_sdp(encoder, crtc_state, DP_SDP_VSC);
+	intel_write_dp_sdp(encoder, crtc_state, DP_SDP_VSC);
+	intel_write_dp_sdp(encoder, crtc_state, DP_SDP_ADAPTIVE_SYNC);
 
 	intel_write_dp_sdp(encoder, crtc_state, HDMI_PACKET_TYPE_GAMUT_METADATA);
+}
+
+static
+int intel_dp_as_sdp_unpack(struct drm_dp_as_sdp *as_sdp,
+			   const void *buffer, size_t size)
+{
+	const struct dp_sdp *sdp = buffer;
+
+	if (size < sizeof(struct dp_sdp))
+		return -EINVAL;
+
+	memset(as_sdp, 0, sizeof(*as_sdp));
+
+	if (sdp->sdp_header.HB0 != 0)
+		return -EINVAL;
+
+	if (sdp->sdp_header.HB1 != DP_SDP_ADAPTIVE_SYNC)
+		return -EINVAL;
+
+	if (sdp->sdp_header.HB2 != 0x02)
+		return -EINVAL;
+
+	if ((sdp->sdp_header.HB3 & 0x3F) != 9)
+		return -EINVAL;
+
+	as_sdp->length = sdp->sdp_header.HB3 & DP_ADAPTIVE_SYNC_SDP_LENGTH;
+	as_sdp->mode = sdp->db[0] & DP_ADAPTIVE_SYNC_SDP_OPERATION_MODE;
+	as_sdp->vtotal = (sdp->db[2] << 8) | sdp->db[1];
+	as_sdp->target_rr = (u64)sdp->db[3] | ((u64)sdp->db[4] & 0x3);
+	as_sdp->target_rr_divider = sdp->db[4] & 0x20 ? true : false;
+
+	return 0;
 }
 
 static int intel_dp_vsc_sdp_unpack(struct drm_dp_vsc_sdp *vsc,
@@ -4363,7 +4456,8 @@ static int intel_dp_vsc_sdp_unpack(struct drm_dp_vsc_sdp *vsc,
 	vsc->length = sdp->sdp_header.HB3;
 
 	if ((sdp->sdp_header.HB2 == 0x2 && sdp->sdp_header.HB3 == 0x8) ||
-	    (sdp->sdp_header.HB2 == 0x4 && sdp->sdp_header.HB3 == 0xe)) {
+	    (sdp->sdp_header.HB2 == 0x4 && sdp->sdp_header.HB3 == 0xe) ||
+	    (sdp->sdp_header.HB2 == 0x6 && sdp->sdp_header.HB3 == 0x10)) {
 		/*
 		 * - HB2 = 0x2, HB3 = 0x8
 		 *   VSC SDP supporting 3D stereo + PSR
@@ -4371,6 +4465,8 @@ static int intel_dp_vsc_sdp_unpack(struct drm_dp_vsc_sdp *vsc,
 		 *   VSC SDP supporting 3D stereo + PSR2 with Y-coordinate of
 		 *   first scan line of the SU region (applies to eDP v1.4b
 		 *   and higher).
+		 * - HB2 = 0x6, HB3 = 0x10
+		 *   VSC SDP supporting 3D stereo + Panel Replay.
 		 */
 		return 0;
 	} else if (sdp->sdp_header.HB2 == 0x5 && sdp->sdp_header.HB3 == 0x13) {
@@ -4410,6 +4506,29 @@ static int intel_dp_vsc_sdp_unpack(struct drm_dp_vsc_sdp *vsc,
 	}
 
 	return 0;
+}
+
+static void
+intel_read_dp_as_sdp(struct intel_encoder *encoder,
+		     struct intel_crtc_state *crtc_state,
+		     struct drm_dp_as_sdp *as_sdp)
+{
+	struct intel_digital_port *dig_port = enc_to_dig_port(encoder);
+	struct drm_i915_private *dev_priv = to_i915(encoder->base.dev);
+	unsigned int type = DP_SDP_ADAPTIVE_SYNC;
+	struct dp_sdp sdp = {};
+	int ret;
+
+	if ((crtc_state->infoframes.enable &
+	     intel_hdmi_infoframe_enable(type)) == 0)
+		return;
+
+	dig_port->read_infoframe(encoder, crtc_state, type, &sdp,
+				 sizeof(sdp));
+
+	ret = intel_dp_as_sdp_unpack(as_sdp, &sdp, sizeof(sdp));
+	if (ret)
+		drm_dbg_kms(&dev_priv->drm, "Failed to unpack DP AS SDP\n");
 }
 
 static int
@@ -4468,10 +4587,6 @@ static void intel_read_dp_vsc_sdp(struct intel_encoder *encoder,
 	struct dp_sdp sdp = {};
 	int ret;
 
-	/* When PSR is enabled, VSC SDP is handled by PSR routine */
-	if (crtc_state->has_psr)
-		return;
-
 	if ((crtc_state->infoframes.enable &
 	     intel_hdmi_infoframe_enable(type)) == 0)
 		return;
@@ -4521,6 +4636,10 @@ void intel_read_dp_sdp(struct intel_encoder *encoder,
 	case HDMI_PACKET_TYPE_GAMUT_METADATA:
 		intel_read_dp_hdr_metadata_infoframe_sdp(encoder, crtc_state,
 							 &crtc_state->infoframes.drm.drm);
+		break;
+	case DP_SDP_ADAPTIVE_SYNC:
+		intel_read_dp_as_sdp(encoder, crtc_state,
+				     &crtc_state->infoframes.as_sdp);
 		break;
 	default:
 		MISSING_CASE(type);
@@ -4682,31 +4801,36 @@ static void intel_dp_phy_pattern_update(struct intel_dp *intel_dp,
 	struct drm_dp_phy_test_params *data =
 			&intel_dp->compliance.test_data.phytest;
 	struct intel_crtc *crtc = to_intel_crtc(crtc_state->uapi.crtc);
+	struct intel_encoder *encoder = &dp_to_dig_port(intel_dp)->base;
 	enum pipe pipe = crtc->pipe;
 	u32 pattern_val;
 
 	switch (data->phy_pattern) {
-	case DP_PHY_TEST_PATTERN_NONE:
+	case DP_LINK_QUAL_PATTERN_DISABLE:
 		drm_dbg_kms(&dev_priv->drm, "Disable Phy Test Pattern\n");
 		intel_de_write(dev_priv, DDI_DP_COMP_CTL(pipe), 0x0);
+		if (DISPLAY_VER(dev_priv) >= 10)
+			intel_de_rmw(dev_priv, dp_tp_ctl_reg(encoder, crtc_state),
+				     DP_TP_CTL_TRAIN_PAT4_SEL_MASK | DP_TP_CTL_LINK_TRAIN_MASK,
+				     DP_TP_CTL_LINK_TRAIN_NORMAL);
 		break;
-	case DP_PHY_TEST_PATTERN_D10_2:
+	case DP_LINK_QUAL_PATTERN_D10_2:
 		drm_dbg_kms(&dev_priv->drm, "Set D10.2 Phy Test Pattern\n");
 		intel_de_write(dev_priv, DDI_DP_COMP_CTL(pipe),
 			       DDI_DP_COMP_CTL_ENABLE | DDI_DP_COMP_CTL_D10_2);
 		break;
-	case DP_PHY_TEST_PATTERN_ERROR_COUNT:
+	case DP_LINK_QUAL_PATTERN_ERROR_RATE:
 		drm_dbg_kms(&dev_priv->drm, "Set Error Count Phy Test Pattern\n");
 		intel_de_write(dev_priv, DDI_DP_COMP_CTL(pipe),
 			       DDI_DP_COMP_CTL_ENABLE |
 			       DDI_DP_COMP_CTL_SCRAMBLED_0);
 		break;
-	case DP_PHY_TEST_PATTERN_PRBS7:
+	case DP_LINK_QUAL_PATTERN_PRBS7:
 		drm_dbg_kms(&dev_priv->drm, "Set PRBS7 Phy Test Pattern\n");
 		intel_de_write(dev_priv, DDI_DP_COMP_CTL(pipe),
 			       DDI_DP_COMP_CTL_ENABLE | DDI_DP_COMP_CTL_PRBS7);
 		break;
-	case DP_PHY_TEST_PATTERN_80BIT_CUSTOM:
+	case DP_LINK_QUAL_PATTERN_80BIT_CUSTOM:
 		/*
 		 * FIXME: Ideally pattern should come from DPCD 0x250. As
 		 * current firmware of DPR-100 could not set it, so hardcoding
@@ -4724,7 +4848,7 @@ static void intel_dp_phy_pattern_update(struct intel_dp *intel_dp,
 			       DDI_DP_COMP_CTL_ENABLE |
 			       DDI_DP_COMP_CTL_CUSTOM80);
 		break;
-	case DP_PHY_TEST_PATTERN_CP2520:
+	case DP_LINK_QUAL_PATTERN_CP2520_PAT_1:
 		/*
 		 * FIXME: Ideally pattern should come from DPCD 0x24A. As
 		 * current firmware of DPR-100 could not set it, so hardcoding
@@ -4736,8 +4860,19 @@ static void intel_dp_phy_pattern_update(struct intel_dp *intel_dp,
 			       DDI_DP_COMP_CTL_ENABLE | DDI_DP_COMP_CTL_HBR2 |
 			       pattern_val);
 		break;
+	case DP_LINK_QUAL_PATTERN_CP2520_PAT_3:
+		if (DISPLAY_VER(dev_priv) < 10)  {
+			drm_warn(&dev_priv->drm, "Platform does not support TPS4\n");
+			break;
+		}
+		drm_dbg_kms(&dev_priv->drm, "Set TPS4 compliance Phy Test Pattern\n");
+		intel_de_write(dev_priv, DDI_DP_COMP_CTL(pipe), 0x0);
+		intel_de_rmw(dev_priv, dp_tp_ctl_reg(encoder, crtc_state),
+			     DP_TP_CTL_TRAIN_PAT4_SEL_MASK | DP_TP_CTL_LINK_TRAIN_MASK,
+			     DP_TP_CTL_TRAIN_PAT4_SEL_TP4A | DP_TP_CTL_LINK_TRAIN_PAT4);
+		break;
 	default:
-		WARN(1, "Invalid Phy Test Pattern\n");
+		drm_warn(&dev_priv->drm, "Invalid Phy Test Pattern\n");
 	}
 }
 
@@ -4902,13 +5037,17 @@ static bool intel_dp_mst_link_status(struct intel_dp *intel_dp)
  * - %true if pending interrupts were serviced (or no interrupts were
  *   pending) w/o detecting an error condition.
  * - %false if an error condition - like AUX failure or a loss of link - is
- *   detected, which needs servicing from the hotplug work.
+ *   detected, or another condition - like a DP tunnel BW state change - needs
+ *   servicing from the hotplug work.
  */
 static bool
 intel_dp_check_mst_status(struct intel_dp *intel_dp)
 {
 	struct drm_i915_private *i915 = dp_to_i915(intel_dp);
+	struct intel_digital_port *dig_port = dp_to_dig_port(intel_dp);
+	struct intel_encoder *encoder = &dig_port->base;
 	bool link_ok = true;
+	bool reprobe_needed = false;
 
 	drm_WARN_ON_ONCE(&i915->drm, intel_dp->active_mst_links < 0);
 
@@ -4935,6 +5074,13 @@ intel_dp_check_mst_status(struct intel_dp *intel_dp)
 
 		intel_dp_mst_hpd_irq(intel_dp, esi, ack);
 
+		if (esi[3] & DP_TUNNELING_IRQ) {
+			if (drm_dp_tunnel_handle_irq(i915->display.dp_tunnel_mgr,
+						     &intel_dp->aux))
+				reprobe_needed = true;
+			ack[3] |= DP_TUNNELING_IRQ;
+		}
+
 		if (!memchr_inv(ack, 0, sizeof(ack)))
 			break;
 
@@ -4945,7 +5091,10 @@ intel_dp_check_mst_status(struct intel_dp *intel_dp)
 			drm_dp_mst_hpd_irq_send_new_request(&intel_dp->mst_mgr);
 	}
 
-	return link_ok;
+	if (!link_ok || intel_dp->link.force_retrain)
+		intel_encoder_link_check_queue_work(encoder, 0);
+
+	return !reprobe_needed;
 }
 
 static void
@@ -4991,6 +5140,9 @@ intel_dp_needs_link_retrain(struct intel_dp *intel_dp)
 	if (intel_psr_enabled(intel_dp))
 		return false;
 
+	if (intel_dp->link.force_retrain)
+		return true;
+
 	if (drm_dp_dpcd_read_phy_link_status(&intel_dp->aux, DP_PHY_DPRX,
 					     link_status) < 0)
 		return false;
@@ -5006,6 +5158,12 @@ intel_dp_needs_link_retrain(struct intel_dp *intel_dp)
 	if (!intel_dp_link_params_valid(intel_dp, intel_dp->link_rate,
 					intel_dp->lane_count))
 		return false;
+
+	if (intel_dp->link.retrain_disabled)
+		return false;
+
+	if (intel_dp->link.seq_train_failures)
+		return true;
 
 	/* Retrain if link not ok */
 	return !intel_dp_link_ok(intel_dp, link_status);
@@ -5072,9 +5230,10 @@ int intel_dp_get_active_pipes(struct intel_dp *intel_dp,
 		if (!crtc_state->hw.active)
 			continue;
 
-		if (conn_state->commit &&
-		    !try_wait_for_completion(&conn_state->commit->hw_done))
-			continue;
+		if (conn_state->commit)
+			drm_WARN_ON(&i915->drm,
+				    !wait_for_completion_timeout(&conn_state->commit->hw_done,
+								 msecs_to_jiffies(5000)));
 
 		*pipe_mask |= BIT(crtc->pipe);
 	}
@@ -5091,12 +5250,13 @@ static bool intel_dp_is_connected(struct intel_dp *intel_dp)
 		intel_dp->is_mst;
 }
 
-int intel_dp_retrain_link(struct intel_encoder *encoder,
-			  struct drm_modeset_acquire_ctx *ctx)
+static int intel_dp_retrain_link(struct intel_encoder *encoder,
+				 struct drm_modeset_acquire_ctx *ctx)
 {
 	struct drm_i915_private *dev_priv = to_i915(encoder->base.dev);
 	struct intel_dp *intel_dp = enc_to_intel_dp(encoder);
 	struct intel_crtc *crtc;
+	bool mst_output = false;
 	u8 pipe_mask;
 	int ret;
 
@@ -5121,12 +5281,18 @@ int intel_dp_retrain_link(struct intel_encoder *encoder,
 	if (!intel_dp_needs_link_retrain(intel_dp))
 		return 0;
 
-	drm_dbg_kms(&dev_priv->drm, "[ENCODER:%d:%s] retraining link\n",
-		    encoder->base.base.id, encoder->base.name);
+	drm_dbg_kms(&dev_priv->drm, "[ENCODER:%d:%s] retraining link (forced %s)\n",
+		    encoder->base.base.id, encoder->base.name,
+		    str_yes_no(intel_dp->link.force_retrain));
 
 	for_each_intel_crtc_in_pipe_mask(&dev_priv->drm, crtc, pipe_mask) {
 		const struct intel_crtc_state *crtc_state =
 			to_intel_crtc_state(crtc->base.state);
+
+		if (intel_crtc_has_type(crtc_state, INTEL_OUTPUT_DP_MST)) {
+			mst_output = true;
+			break;
+		}
 
 		/* Suppress underruns caused by re-training */
 		intel_set_cpu_fifo_underrun_reporting(dev_priv, crtc->pipe, false);
@@ -5135,19 +5301,28 @@ int intel_dp_retrain_link(struct intel_encoder *encoder,
 							      intel_crtc_pch_transcoder(crtc), false);
 	}
 
+	/* TODO: use a modeset for SST as well. */
+	if (mst_output) {
+		ret = intel_modeset_commit_pipes(dev_priv, pipe_mask, ctx);
+
+		if (ret && ret != -EDEADLK)
+			drm_dbg_kms(&dev_priv->drm,
+				    "[ENCODER:%d:%s] link retraining failed: %pe\n",
+				    encoder->base.base.id, encoder->base.name,
+				    ERR_PTR(ret));
+
+		goto out;
+	}
+
 	for_each_intel_crtc_in_pipe_mask(&dev_priv->drm, crtc, pipe_mask) {
 		const struct intel_crtc_state *crtc_state =
 			to_intel_crtc_state(crtc->base.state);
 
-		/* retrain on the MST master transcoder */
-		if (DISPLAY_VER(dev_priv) >= 12 &&
-		    intel_crtc_has_type(crtc_state, INTEL_OUTPUT_DP_MST) &&
-		    !intel_dp_mst_is_master_trans(crtc_state))
-			continue;
+		intel_dp->link_trained = false;
 
 		intel_dp_check_frl_training(intel_dp);
 		intel_dp_pcon_dsc_configure(intel_dp, crtc_state);
-		intel_dp_start_link_train(intel_dp, crtc_state);
+		intel_dp_start_link_train(NULL, intel_dp, crtc_state);
 		intel_dp_stop_link_train(intel_dp, crtc_state);
 		break;
 	}
@@ -5165,7 +5340,37 @@ int intel_dp_retrain_link(struct intel_encoder *encoder,
 							      intel_crtc_pch_transcoder(crtc), true);
 	}
 
-	return 0;
+out:
+	if (ret != -EDEADLK)
+		intel_dp->link.force_retrain = false;
+
+	return ret;
+}
+
+void intel_dp_link_check(struct intel_encoder *encoder)
+{
+	struct drm_i915_private *i915 = to_i915(encoder->base.dev);
+	struct drm_modeset_acquire_ctx ctx;
+	int ret;
+
+	intel_modeset_lock_ctx_retry(&ctx, NULL, 0, ret)
+		ret = intel_dp_retrain_link(encoder, &ctx);
+
+	drm_WARN_ON(&i915->drm, ret);
+}
+
+void intel_dp_check_link_state(struct intel_dp *intel_dp)
+{
+	struct intel_digital_port *dig_port = dp_to_dig_port(intel_dp);
+	struct intel_encoder *encoder = &dig_port->base;
+
+	if (!intel_dp_is_connected(intel_dp))
+		return;
+
+	if (!intel_dp_needs_link_retrain(intel_dp))
+		return;
+
+	intel_encoder_link_check_queue_work(encoder, 0);
 }
 
 static int intel_dp_prep_phy_test(struct intel_dp *intel_dp,
@@ -5304,23 +5509,32 @@ static void intel_dp_check_device_service_irq(struct intel_dp *intel_dp)
 		drm_dbg_kms(&i915->drm, "Sink specific irq unhandled\n");
 }
 
-static void intel_dp_check_link_service_irq(struct intel_dp *intel_dp)
+static bool intel_dp_check_link_service_irq(struct intel_dp *intel_dp)
 {
+	struct drm_i915_private *i915 = dp_to_i915(intel_dp);
+	bool reprobe_needed = false;
 	u8 val;
 
 	if (intel_dp->dpcd[DP_DPCD_REV] < 0x11)
-		return;
+		return false;
 
 	if (drm_dp_dpcd_readb(&intel_dp->aux,
 			      DP_LINK_SERVICE_IRQ_VECTOR_ESI0, &val) != 1 || !val)
-		return;
+		return false;
+
+	if ((val & DP_TUNNELING_IRQ) &&
+	    drm_dp_tunnel_handle_irq(i915->display.dp_tunnel_mgr,
+				     &intel_dp->aux))
+		reprobe_needed = true;
 
 	if (drm_dp_dpcd_writeb(&intel_dp->aux,
 			       DP_LINK_SERVICE_IRQ_VECTOR_ESI0, val) != 1)
-		return;
+		return reprobe_needed;
 
 	if (val & HDMI_LINK_STATUS_CHANGED)
 		intel_dp_handle_hdmi_link_status_change(intel_dp);
+
+	return reprobe_needed;
 }
 
 /*
@@ -5341,6 +5555,7 @@ intel_dp_short_pulse(struct intel_dp *intel_dp)
 {
 	struct drm_i915_private *dev_priv = dp_to_i915(intel_dp);
 	u8 old_sink_count = intel_dp->sink_count;
+	bool reprobe_needed = false;
 	bool ret;
 
 	/*
@@ -5363,14 +5578,12 @@ intel_dp_short_pulse(struct intel_dp *intel_dp)
 	}
 
 	intel_dp_check_device_service_irq(intel_dp);
-	intel_dp_check_link_service_irq(intel_dp);
+	reprobe_needed = intel_dp_check_link_service_irq(intel_dp);
 
 	/* Handle CEC interrupts, if any */
 	drm_dp_cec_irq(&intel_dp->aux);
 
-	/* defer to the hotplug work for link retraining if needed */
-	if (intel_dp_needs_link_retrain(intel_dp))
-		return false;
+	intel_dp_check_link_state(intel_dp);
 
 	intel_psr_short_pulse(intel_dp);
 
@@ -5390,10 +5603,10 @@ intel_dp_short_pulse(struct intel_dp *intel_dp)
 		 * FIXME get rid of the ad-hoc phy test modeset code
 		 * and properly incorporate it into the normal modeset.
 		 */
-		return false;
+		reprobe_needed = true;
 	}
 
-	return true;
+	return !reprobe_needed;
 }
 
 /* XXX this is probably wrong for multiple downstream ports */
@@ -5413,6 +5626,8 @@ intel_dp_detect_dpcd(struct intel_dp *intel_dp)
 	if (!intel_dp_get_dpcd(intel_dp))
 		return connector_status_disconnected;
 
+	intel_dp->mst_detect = intel_dp_mst_detect(intel_dp);
+
 	/* if there's no downstream port, we're done */
 	if (!drm_dp_is_branch(dpcd))
 		return connector_status_connected;
@@ -5424,7 +5639,7 @@ intel_dp_detect_dpcd(struct intel_dp *intel_dp)
 		connector_status_connected : connector_status_disconnected;
 	}
 
-	if (intel_dp_can_mst(intel_dp))
+	if (intel_dp->mst_detect == DRM_DP_MST)
 		return connector_status_connected;
 
 	/* If no HPD, poke DDC gently */
@@ -5456,8 +5671,24 @@ edp_detect(struct intel_dp *intel_dp)
 	return connector_status_connected;
 }
 
+void intel_digital_port_lock(struct intel_encoder *encoder)
+{
+	struct intel_digital_port *dig_port = enc_to_dig_port(encoder);
+
+	if (dig_port->lock)
+		dig_port->lock(dig_port);
+}
+
+void intel_digital_port_unlock(struct intel_encoder *encoder)
+{
+	struct intel_digital_port *dig_port = enc_to_dig_port(encoder);
+
+	if (dig_port->unlock)
+		dig_port->unlock(dig_port);
+}
+
 /*
- * intel_digital_port_connected - is the specified port connected?
+ * intel_digital_port_connected_locked - is the specified port connected?
  * @encoder: intel_encoder
  *
  * In cases where there's a connector physically connected but it can't be used
@@ -5465,19 +5696,42 @@ edp_detect(struct intel_dp *intel_dp)
  * pretty much treat the port as disconnected. This is relevant for type-C
  * (starting on ICL) where there's ownership involved.
  *
+ * The caller must hold the lock acquired by calling intel_digital_port_lock()
+ * when calling this function.
+ *
  * Return %true if port is connected, %false otherwise.
  */
-bool intel_digital_port_connected(struct intel_encoder *encoder)
+bool intel_digital_port_connected_locked(struct intel_encoder *encoder)
 {
 	struct drm_i915_private *dev_priv = to_i915(encoder->base.dev);
 	struct intel_digital_port *dig_port = enc_to_dig_port(encoder);
+	bool is_glitch_free = intel_tc_port_handles_hpd_glitches(dig_port);
 	bool is_connected = false;
 	intel_wakeref_t wakeref;
 
-	with_intel_display_power(dev_priv, POWER_DOMAIN_DISPLAY_CORE, wakeref)
-		is_connected = dig_port->connected(encoder);
+	with_intel_display_power(dev_priv, POWER_DOMAIN_DISPLAY_CORE, wakeref) {
+		unsigned long wait_expires = jiffies + msecs_to_jiffies_timeout(4);
+
+		do {
+			is_connected = dig_port->connected(encoder);
+			if (is_connected || is_glitch_free)
+				break;
+			usleep_range(10, 30);
+		} while (time_before(jiffies, wait_expires));
+	}
 
 	return is_connected;
+}
+
+bool intel_digital_port_connected(struct intel_encoder *encoder)
+{
+	bool ret;
+
+	intel_digital_port_lock(encoder);
+	ret = intel_digital_port_connected_locked(encoder);
+	intel_digital_port_unlock(encoder);
+
+	return ret;
 }
 
 static const struct drm_edid *
@@ -5664,6 +5918,7 @@ intel_dp_detect(struct drm_connector *connector,
 	struct intel_digital_port *dig_port = dp_to_dig_port(intel_dp);
 	struct intel_encoder *encoder = &dig_port->base;
 	enum drm_connector_status status;
+	int ret;
 
 	drm_dbg_kms(&dev_priv->drm, "[CONNECTOR:%d:%s]\n",
 		    connector->base.id, connector->name);
@@ -5673,6 +5928,9 @@ intel_dp_detect(struct drm_connector *connector,
 	if (!intel_display_device_enabled(dev_priv))
 		return connector_status_disconnected;
 
+	if (!intel_display_driver_check_access(dev_priv))
+		return connector->status;
+
 	/* Can't disconnect eDP */
 	if (intel_dp_is_edp(intel_dp))
 		status = edp_detect(intel_dp);
@@ -5681,37 +5939,47 @@ intel_dp_detect(struct drm_connector *connector,
 	else
 		status = connector_status_disconnected;
 
+	if (status != connector_status_disconnected &&
+	    !intel_dp_mst_verify_dpcd_state(intel_dp))
+		/*
+		 * This requires retrying detection for instance to re-enable
+		 * the MST mode that got reset via a long HPD pulse. The retry
+		 * will happen either via the hotplug handler's retry logic,
+		 * ensured by setting the connector here to SST/disconnected,
+		 * or via a userspace connector probing in response to the
+		 * hotplug uevent sent when removing the MST connectors.
+		 */
+		status = connector_status_disconnected;
+
 	if (status == connector_status_disconnected) {
 		memset(&intel_dp->compliance, 0, sizeof(intel_dp->compliance));
 		memset(intel_connector->dp.dsc_dpcd, 0, sizeof(intel_connector->dp.dsc_dpcd));
 		intel_dp->psr.sink_panel_replay_support = false;
+		intel_dp->psr.sink_panel_replay_su_support = false;
 
-		if (intel_dp->is_mst) {
-			drm_dbg_kms(&dev_priv->drm,
-				    "MST device may have disappeared %d vs %d\n",
-				    intel_dp->is_mst,
-				    intel_dp->mst_mgr.mst_state);
-			intel_dp->is_mst = false;
-			drm_dp_mst_topology_mgr_set_mst(&intel_dp->mst_mgr,
-							intel_dp->is_mst);
-		}
+		intel_dp_mst_disconnect(intel_dp);
+
+		intel_dp_tunnel_disconnect(intel_dp);
 
 		goto out;
 	}
+
+	ret = intel_dp_tunnel_detect(intel_dp, ctx);
+	if (ret == -EDEADLK)
+		return ret;
+
+	if (ret == 1)
+		intel_connector->base.epoch_counter++;
 
 	if (!intel_dp_is_edp(intel_dp))
 		intel_psr_init_dpcd(intel_dp);
 
 	intel_dp_detect_dsc_caps(intel_dp, intel_connector);
 
-	intel_dp_configure_mst(intel_dp);
+	intel_dp_mst_configure(intel_dp);
 
-	/*
-	 * TODO: Reset link params when switching to MST mode, until MST
-	 * supports link training fallback params.
-	 */
-	if (intel_dp->reset_link_params || intel_dp->is_mst) {
-		intel_dp_reset_max_link_params(intel_dp);
+	if (intel_dp->reset_link_params) {
+		intel_dp_reset_link_params(intel_dp);
 		intel_dp->reset_link_params = false;
 	}
 
@@ -5730,14 +5998,13 @@ intel_dp_detect(struct drm_connector *connector,
 	/*
 	 * Some external monitors do not signal loss of link synchronization
 	 * with an IRQ_HPD, so force a link status check.
+	 *
+	 * TODO: this probably became redundant, so remove it: the link state
+	 * is rechecked/recovered now after modesets, where the loss of
+	 * synchronization tends to occur.
 	 */
-	if (!intel_dp_is_edp(intel_dp)) {
-		int ret;
-
-		ret = intel_dp_retrain_link(encoder, ctx);
-		if (ret)
-			return ret;
-	}
+	if (!intel_dp_is_edp(intel_dp))
+		intel_dp_check_link_state(intel_dp);
 
 	/*
 	 * Clearing NACK and defer counts to get their exact values
@@ -5776,6 +6043,10 @@ intel_dp_force(struct drm_connector *connector)
 
 	drm_dbg_kms(&dev_priv->drm, "[CONNECTOR:%d:%s]\n",
 		    connector->base.id, connector->name);
+
+	if (!intel_display_driver_check_access(dev_priv))
+		return;
+
 	intel_dp_unset_edid(intel_dp);
 
 	if (connector->status != connector_status_connected)
@@ -5875,12 +6146,17 @@ void intel_dp_connector_sync_state(struct intel_connector *connector,
 	}
 }
 
-void intel_dp_encoder_flush_work(struct drm_encoder *encoder)
+void intel_dp_encoder_flush_work(struct drm_encoder *_encoder)
 {
-	struct intel_digital_port *dig_port = enc_to_dig_port(to_intel_encoder(encoder));
+	struct intel_encoder *encoder = to_intel_encoder(_encoder);
+	struct intel_digital_port *dig_port = enc_to_dig_port(encoder);
 	struct intel_dp *intel_dp = &dig_port->dp;
 
+	intel_encoder_link_check_flush_work(encoder);
+
 	intel_dp_mst_encoder_cleanup(dig_port);
+
+	intel_dp_tunnel_destroy(intel_dp);
 
 	intel_pps_vdd_off_sync(intel_dp);
 
@@ -5898,6 +6174,8 @@ void intel_dp_encoder_suspend(struct intel_encoder *intel_encoder)
 	struct intel_dp *intel_dp = enc_to_intel_dp(intel_encoder);
 
 	intel_pps_vdd_off_sync(intel_dp);
+
+	intel_dp_tunnel_suspend(intel_dp);
 }
 
 void intel_dp_encoder_shutdown(struct intel_encoder *intel_encoder)
@@ -6035,14 +6313,20 @@ static int intel_dp_connector_atomic_check(struct drm_connector *conn,
 			return ret;
 	}
 
+	if (!intel_connector_needs_modeset(state, conn))
+		return 0;
+
+	ret = intel_dp_tunnel_atomic_check_state(state,
+						 intel_dp,
+						 intel_conn);
+	if (ret)
+		return ret;
+
 	/*
 	 * We don't enable port sync on BDW due to missing w/as and
 	 * due to not having adjusted the modeset sequence appropriately.
 	 */
 	if (DISPLAY_VER(dev_priv) < 9)
-		return 0;
-
-	if (!intel_connector_needs_modeset(state, conn))
 		return 0;
 
 	if (conn->has_tile) {
@@ -6073,7 +6357,7 @@ static void intel_dp_oob_hotplug_event(struct drm_connector *connector,
 	spin_unlock_irq(&i915->irq_lock);
 
 	if (need_work)
-		queue_delayed_work(i915->unordered_wq, &i915->display.hotplug.hotplug_work, 0);
+		intel_hpd_schedule_detection(i915);
 }
 
 static const struct drm_connector_funcs intel_dp_connector_funcs = {
@@ -6101,6 +6385,7 @@ intel_dp_hpd_pulse(struct intel_digital_port *dig_port, bool long_hpd)
 {
 	struct drm_i915_private *i915 = to_i915(dig_port->base.base.dev);
 	struct intel_dp *intel_dp = &dig_port->dp;
+	u8 dpcd[DP_RECEIVER_CAP_SIZE];
 
 	if (dig_port->base.type == INTEL_OUTPUT_EDP &&
 	    (long_hpd || !intel_pps_have_panel_power_or_vdd(intel_dp))) {
@@ -6122,6 +6407,17 @@ intel_dp_hpd_pulse(struct intel_digital_port *dig_port, bool long_hpd)
 		    dig_port->base.base.base.id,
 		    dig_port->base.base.name,
 		    long_hpd ? "long" : "short");
+
+	/*
+	 * TBT DP tunnels require the GFX driver to read out the DPRX caps in
+	 * response to long HPD pulses. The DP hotplug handler does that,
+	 * however the hotplug handler may be blocked by another
+	 * connector's/encoder's hotplug handler. Since the TBT CM may not
+	 * complete the DP tunnel BW request for the latter connector/encoder
+	 * waiting for this encoder's DPRX read, perform a dummy read here.
+	 */
+	if (long_hpd)
+		intel_dp_read_dprx_caps(intel_dp, dpcd);
 
 	if (long_hpd) {
 		intel_dp->reset_link_params = true;
@@ -6163,8 +6459,8 @@ bool intel_dp_is_port_edp(struct drm_i915_private *i915, enum port port)
 	return _intel_dp_is_port_edp(i915, devdata, port);
 }
 
-static bool
-has_gamut_metadata_dip(struct intel_encoder *encoder)
+bool
+intel_dp_has_gamut_metadata_dip(struct intel_encoder *encoder)
 {
 	struct drm_i915_private *i915 = to_i915(encoder->base.dev);
 	enum port port = encoder->port;
@@ -6211,7 +6507,7 @@ intel_dp_add_properties(struct intel_dp *intel_dp, struct drm_connector *connect
 		intel_attach_dp_colorspace_property(connector);
 	}
 
-	if (has_gamut_metadata_dip(&dp_to_dig_port(intel_dp)->base))
+	if (intel_dp_has_gamut_metadata_dip(&dp_to_dig_port(intel_dp)->base))
 		drm_connector_attach_hdr_output_metadata_property(connector);
 
 	if (HAS_VRR(dev_priv))
@@ -6309,6 +6605,8 @@ static bool intel_edp_init_connector(struct intel_dp *intel_dp,
 	 * The DPCD probe below will make sure VDD is on.
 	 */
 	intel_hpd_enable_detection(encoder);
+
+	intel_alpm_init_dpcd(intel_dp);
 
 	/* Cache DPCD and EDID for edp. */
 	has_dpcd = intel_edp_init_dpcd(intel_dp, intel_connector);
@@ -6443,6 +6741,14 @@ static void intel_dp_modeset_retry_work_fn(struct work_struct *work)
 	mutex_unlock(&connector->dev->mode_config.mutex);
 	/* Send Hotplug uevent so userspace can reprobe */
 	drm_kms_helper_connector_hotplug_event(connector);
+
+	drm_connector_put(connector);
+}
+
+void intel_dp_init_modeset_retry_work(struct intel_connector *connector)
+{
+	INIT_WORK(&connector->modeset_retry_work,
+		  intel_dp_modeset_retry_work_fn);
 }
 
 bool
@@ -6455,12 +6761,10 @@ intel_dp_init_connector(struct intel_digital_port *dig_port,
 	struct drm_device *dev = intel_encoder->base.dev;
 	struct drm_i915_private *dev_priv = to_i915(dev);
 	enum port port = intel_encoder->port;
-	enum phy phy = intel_port_to_phy(dev_priv, port);
 	int type;
 
 	/* Initialize the work for modeset in case of link train failure */
-	INIT_WORK(&intel_connector->modeset_retry_work,
-		  intel_dp_modeset_retry_work_fn);
+	intel_dp_init_modeset_retry_work(intel_connector);
 
 	if (drm_WARN(dev, dig_port->max_lanes < 1,
 		     "Not enough lanes (%d) for DP on [ENCODER:%d:%s]\n",
@@ -6481,7 +6785,7 @@ intel_dp_init_connector(struct intel_digital_port *dig_port,
 		 * Currently we don't support eDP on TypeC ports, although in
 		 * theory it could work on TypeC legacy ports.
 		 */
-		drm_WARN_ON(dev, intel_phy_is_tc(dev_priv, phy));
+		drm_WARN_ON(dev, intel_encoder_is_tc(intel_encoder));
 		type = DRM_MODE_CONNECTOR_eDP;
 		intel_encoder->type = INTEL_OUTPUT_EDP;
 
@@ -6516,6 +6820,7 @@ intel_dp_init_connector(struct intel_digital_port *dig_port,
 		connector->interlace_allowed = true;
 
 	intel_connector->polled = DRM_CONNECTOR_POLL_HPD;
+	intel_connector->base.polled = intel_connector->polled;
 
 	intel_connector_attach_encoder(intel_connector, intel_encoder);
 
@@ -6523,6 +6828,7 @@ intel_dp_init_connector(struct intel_digital_port *dig_port,
 		intel_connector->get_hw_state = intel_ddi_connector_get_hw_state;
 	else
 		intel_connector->get_hw_state = intel_connector_get_hw_state;
+	intel_connector->sync_state = intel_dp_connector_sync_state;
 
 	if (!intel_edp_init_connector(intel_dp, intel_connector)) {
 		intel_dp_aux_fini(intel_dp);
@@ -6531,7 +6837,7 @@ intel_dp_init_connector(struct intel_digital_port *dig_port,
 
 	intel_dp_set_source_rates(intel_dp);
 	intel_dp_set_common_rates(intel_dp);
-	intel_dp_reset_max_link_params(intel_dp);
+	intel_dp_reset_link_params(intel_dp);
 
 	/* init MST on ports that can support it */
 	intel_dp_mst_encoder_init(dig_port,
@@ -6545,6 +6851,9 @@ intel_dp_init_connector(struct intel_digital_port *dig_port,
 			drm_dbg_kms(&dev_priv->drm,
 				    "HDCP init failed, skipping.\n");
 	}
+
+	intel_dp->colorimetry_support =
+		intel_dp_get_colorimetry_status(intel_dp);
 
 	intel_dp->frl.is_trained = false;
 	intel_dp->frl.trained_rate_gbps = 0;

@@ -26,6 +26,7 @@
 #include "host.h"
 #include "bus.h"
 #include "mmc_ops.h"
+#include "quirks.h"
 #include "sd.h"
 #include "sd_ops.h"
 
@@ -805,7 +806,7 @@ static const struct attribute_group sd_std_group = {
 };
 __ATTRIBUTE_GROUPS(sd_std);
 
-struct device_type sd_type = {
+const struct device_type sd_type = {
 	.groups = sd_std_groups,
 };
 
@@ -1474,6 +1475,9 @@ retry:
 		if (err)
 			goto free_card;
 	}
+
+	/* Apply quirks prior to card setup */
+	mmc_fixup_device(card, mmc_sd_fixups);
 
 	err = mmc_sd_setup_card(host, card, oldcard != NULL);
 	if (err)
