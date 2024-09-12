@@ -1703,9 +1703,20 @@ static void scrub_submit_extent_sector_read(struct scrub_ctx *sctx,
 			err = btrfs_map_block(fs_info, BTRFS_MAP_READ, logical,
 					      &stripe_len, &bioc, &io_stripe, &mirror);
 			btrfs_put_bioc(bioc);
-			if (err < 0) {
+			if (err < 0 && err != -ENOENT) {
 				set_bit(i, &stripe->io_error_bitmap);
 				set_bit(i, &stripe->error_bitmap);
+				continue;
+			} else if (err == -ENOENT) {
+				/*
+				 * btrfs_map_block() returns -ENOENT if it can't
+				 * find the logical  address in the RAID stripe
+				 * tree. This can happens on PREALLOC  extents.
+				 * As we know the extent tree  has an extent
+				 * recorded there, we can be sure this is a
+				 * PREALLOC  extent, so skip this sector and
+				 * continue to the next.
+				 */
 				continue;
 			}
 
