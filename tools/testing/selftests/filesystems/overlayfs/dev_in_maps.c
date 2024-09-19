@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 #define _GNU_SOURCE
+#define __SANE_USERSPACE_TYPES__ // Use ll64
 
 #include <inttypes.h>
 #include <unistd.h>
@@ -10,7 +11,6 @@
 #include <linux/mount.h>
 #include <sys/syscall.h>
 #include <sys/stat.h>
-#include <sys/mount.h>
 #include <sys/mman.h>
 #include <sched.h>
 #include <fcntl.h>
@@ -32,7 +32,11 @@ static int sys_fsmount(int fd, unsigned int flags, unsigned int attr_flags)
 {
 	return syscall(__NR_fsmount, fd, flags, attr_flags);
 }
-
+static int sys_mount(const char *src, const char *tgt, const char *fst,
+		unsigned long flags, const void *data)
+{
+	return syscall(__NR_mount, src, tgt, fst, flags, data);
+}
 static int sys_move_mount(int from_dfd, const char *from_pathname,
 			  int to_dfd, const char *to_pathname,
 			  unsigned int flags)
@@ -166,8 +170,7 @@ int main(int argc, char **argv)
 		ksft_test_result_skip("unable to create a new mount namespace\n");
 		return 1;
 	}
-
-	if (mount(NULL, "/", NULL, MS_SLAVE | MS_REC, NULL) == -1) {
+	if (sys_mount(NULL, "/", NULL, MS_SLAVE | MS_REC, NULL) == -1) {
 		pr_perror("mount");
 		return 1;
 	}

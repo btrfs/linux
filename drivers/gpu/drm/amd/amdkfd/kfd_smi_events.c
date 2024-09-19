@@ -29,6 +29,7 @@
 #include "amdgpu_vm.h"
 #include "kfd_priv.h"
 #include "kfd_smi_events.h"
+#include "amdgpu_reset.h"
 
 struct kfd_smi_client {
 	struct list_head list;
@@ -215,9 +216,11 @@ static void kfd_smi_event_add(pid_t pid, struct kfd_node *dev,
 	add_event_to_kfifo(pid, dev, event, fifo_in, len);
 }
 
-void kfd_smi_event_update_gpu_reset(struct kfd_node *dev, bool post_reset)
+void kfd_smi_event_update_gpu_reset(struct kfd_node *dev, bool post_reset,
+				    struct amdgpu_reset_context *reset_context)
 {
 	unsigned int event;
+	char reset_cause[64];
 
 	if (post_reset) {
 		event = KFD_SMI_EVENT_GPU_POST_RESET;
@@ -225,7 +228,16 @@ void kfd_smi_event_update_gpu_reset(struct kfd_node *dev, bool post_reset)
 		event = KFD_SMI_EVENT_GPU_PRE_RESET;
 		++(dev->reset_seq_num);
 	}
-	kfd_smi_event_add(0, dev, event, "%x\n", dev->reset_seq_num);
+
+	memset(reset_cause, 0, sizeof(reset_cause));
+
+	if (reset_context)
+		amdgpu_reset_get_desc(reset_context, reset_cause,
+				      sizeof(reset_cause));
+
+	kfd_smi_event_add(0, dev, event, "%x %s\n",
+			  dev->reset_seq_num,
+			  reset_cause);
 }
 
 void kfd_smi_event_update_thermal_throttling(struct kfd_node *dev,
@@ -238,16 +250,16 @@ void kfd_smi_event_update_thermal_throttling(struct kfd_node *dev,
 
 void kfd_smi_event_update_vmfault(struct kfd_node *dev, uint16_t pasid)
 {
-	struct amdgpu_task_info task_info;
+	struct amdgpu_task_info *task_info;
 
-	memset(&task_info, 0, sizeof(struct amdgpu_task_info));
-	amdgpu_vm_get_task_info(dev->adev, pasid, &task_info);
-	/* Report VM faults from user applications, not retry from kernel */
-	if (!task_info.pid)
-		return;
-
-	kfd_smi_event_add(0, dev, KFD_SMI_EVENT_VMFAULT, "%x:%s\n",
-			  task_info.pid, task_info.task_name);
+	task_info = amdgpu_vm_get_task_info_pasid(dev->adev, pasid);
+	if (task_info) {
+		/* Report VM faults from user applications, not retry from kernel */
+		if (task_info->pid)
+			kfd_smi_event_add(0, dev, KFD_SMI_EVENT_VMFAULT, "%x:%s\n",
+					 task_info->pid, task_info->task_name);
+		amdgpu_vm_put_task_info(task_info);
+	}
 }
 
 void kfd_smi_event_page_fault_start(struct kfd_node *node, pid_t pid,

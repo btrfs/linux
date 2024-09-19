@@ -15,6 +15,7 @@
 #include "regs/xe_reg_defs.h"
 #include "xe_device.h"
 #include "xe_device_types.h"
+#include "xe_kunit_helpers.h"
 #include "xe_pci_test.h"
 #include "xe_reg_sr.h"
 #include "xe_rtp.h"
@@ -85,6 +86,59 @@ static const struct rtp_test_case cases[] = {
 			{ XE_RTP_NAME("basic-2"),
 			  XE_RTP_RULES(FUNC(match_no)),
 			  XE_RTP_ACTIONS(SET(REGULAR_REG1, REG_BIT(1)))
+			},
+			{}
+		},
+	},
+	{
+		.name = "match-or",
+		.expected_reg = REGULAR_REG1,
+		.expected_set_bits = REG_BIT(0) | REG_BIT(1) | REG_BIT(2),
+		.expected_clr_bits = REG_BIT(0) | REG_BIT(1) | REG_BIT(2),
+		.expected_count = 1,
+		.entries = (const struct xe_rtp_entry_sr[]) {
+			{ XE_RTP_NAME("first"),
+			  XE_RTP_RULES(FUNC(match_yes), OR, FUNC(match_no)),
+			  XE_RTP_ACTIONS(SET(REGULAR_REG1, REG_BIT(0)))
+			},
+			{ XE_RTP_NAME("middle"),
+			  XE_RTP_RULES(FUNC(match_no), FUNC(match_no), OR,
+				       FUNC(match_yes), OR,
+				       FUNC(match_no)),
+			  XE_RTP_ACTIONS(SET(REGULAR_REG1, REG_BIT(1)))
+			},
+			{ XE_RTP_NAME("last"),
+			  XE_RTP_RULES(FUNC(match_no), OR, FUNC(match_yes)),
+			  XE_RTP_ACTIONS(SET(REGULAR_REG1, REG_BIT(2)))
+			},
+			{ XE_RTP_NAME("no-match"),
+			  XE_RTP_RULES(FUNC(match_no), OR, FUNC(match_no)),
+			  XE_RTP_ACTIONS(SET(REGULAR_REG1, REG_BIT(3)))
+			},
+			{}
+		},
+	},
+	{
+		.name = "match-or-xfail",
+		.expected_reg = REGULAR_REG1,
+		.expected_count = 0,
+		.entries = (const struct xe_rtp_entry_sr[]) {
+			{ XE_RTP_NAME("leading-or"),
+			  XE_RTP_RULES(OR, FUNC(match_yes)),
+			  XE_RTP_ACTIONS(SET(REGULAR_REG1, REG_BIT(0)))
+			},
+			{ XE_RTP_NAME("trailing-or"),
+			  /*
+			   * First condition is match_no, otherwise the failure
+			   * wouldn't really trigger as RTP stops processing as
+			   * soon as it has a matching set of rules
+			   */
+			  XE_RTP_RULES(FUNC(match_no), OR),
+			  XE_RTP_ACTIONS(SET(REGULAR_REG1, REG_BIT(1)))
+			},
+			{ XE_RTP_NAME("no-or-or-yes"),
+			  XE_RTP_RULES(FUNC(match_no), OR, OR, FUNC(match_yes)),
+			  XE_RTP_ACTIONS(SET(REGULAR_REG1, REG_BIT(2)))
 			},
 			{}
 		},
@@ -254,9 +308,14 @@ static void xe_rtp_process_tests(struct kunit *test)
 	}
 
 	KUNIT_EXPECT_EQ(test, count, param->expected_count);
-	KUNIT_EXPECT_EQ(test, sr_entry->clr_bits, param->expected_clr_bits);
-	KUNIT_EXPECT_EQ(test, sr_entry->set_bits, param->expected_set_bits);
-	KUNIT_EXPECT_EQ(test, sr_entry->reg.raw, param->expected_reg.raw);
+	if (count) {
+		KUNIT_EXPECT_EQ(test, sr_entry->clr_bits, param->expected_clr_bits);
+		KUNIT_EXPECT_EQ(test, sr_entry->set_bits, param->expected_set_bits);
+		KUNIT_EXPECT_EQ(test, sr_entry->reg.raw, param->expected_reg.raw);
+	} else {
+		KUNIT_EXPECT_NULL(test, sr_entry);
+	}
+
 	KUNIT_EXPECT_EQ(test, reg_sr->errors, param->expected_sr_errors);
 }
 
@@ -276,9 +335,7 @@ static int xe_rtp_test_init(struct kunit *test)
 	dev = drm_kunit_helper_alloc_device(test);
 	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, dev);
 
-	xe = drm_kunit_helper_alloc_drm_device(test, dev,
-					       struct xe_device,
-					       drm, DRIVER_GEM);
+	xe = xe_kunit_helper_alloc_xe_device(test, dev);
 	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, xe);
 
 	/* Initialize an empty device */
@@ -312,8 +369,3 @@ static struct kunit_suite xe_rtp_test_suite = {
 };
 
 kunit_test_suite(xe_rtp_test_suite);
-
-MODULE_AUTHOR("Intel Corporation");
-MODULE_LICENSE("GPL");
-MODULE_DESCRIPTION("xe_rtp kunit test");
-MODULE_IMPORT_NS(EXPORTED_FOR_KUNIT_TESTING);

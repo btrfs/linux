@@ -896,7 +896,7 @@ static int __init numa_setup_drmem_lmb(struct drmem_lmb *lmb,
 
 static int __init parse_numa_properties(void)
 {
-	struct device_node *memory;
+	struct device_node *memory, *pci;
 	int default_nid = 0;
 	unsigned long i;
 	const __be32 *associativity;
@@ -1010,6 +1010,18 @@ new_range:
 			goto new_range;
 	}
 
+	for_each_node_by_name(pci, "pci") {
+		int nid = NUMA_NO_NODE;
+
+		associativity = of_get_associativity(pci);
+		if (associativity) {
+			nid = associativity_to_nid(associativity);
+			initialize_form1_numa_distance(associativity);
+		}
+		if (likely(nid >= 0) && !node_online(nid))
+			node_set_online(nid);
+	}
+
 	/*
 	 * Now do the same thing for each MEMBLOCK listed in the
 	 * ibm,dynamic-memory property in the
@@ -1111,7 +1123,7 @@ static void __init setup_node_data(int nid, u64 start_pfn, u64 end_pfn)
 
 static void __init find_possible_nodes(void)
 {
-	struct device_node *rtas;
+	struct device_node *rtas, *root;
 	const __be32 *domains = NULL;
 	int prop_length, max_nodes;
 	u32 i;
@@ -1132,10 +1144,12 @@ static void __init find_possible_nodes(void)
 	 * If the LPAR is migratable, new nodes might be activated after a LPM,
 	 * so we should consider the max number in that case.
 	 */
-	if (!of_get_property(of_root, "ibm,migratable-partition", NULL))
+	root = of_find_node_by_path("/");
+	if (!of_get_property(root, "ibm,migratable-partition", NULL))
 		domains = of_get_property(rtas,
 					  "ibm,current-associativity-domains",
 					  &prop_length);
+	of_node_put(root);
 	if (!domains) {
 		domains = of_get_property(rtas, "ibm,max-associativity-domains",
 					&prop_length);
