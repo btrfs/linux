@@ -412,6 +412,10 @@ static int pinctrl_get_device_gpio_range(struct gpio_chip *gc,
  * @pctldev: pin controller device to add the range to
  * @range: the GPIO range to add
  *
+ * DEPRECATED: Don't use this function in new code.  See section 2 of
+ * Documentation/devicetree/bindings/gpio/gpio.txt on how to bind pinctrl and
+ * gpio drivers.
+ *
  * This adds a range of GPIOs to be handled by a certain pin controller. Call
  * this to register handled ranges after registering your pin controller.
  */
@@ -1102,8 +1106,8 @@ static struct pinctrl *create_pinctrl(struct device *dev,
 		 * an -EPROBE_DEFER later, as that is the worst case.
 		 */
 		if (ret == -EPROBE_DEFER) {
-			pinctrl_free(p, false);
 			mutex_unlock(&pinctrl_maps_mutex);
+			pinctrl_free(p, false);
 			return ERR_PTR(ret);
 		}
 	}
@@ -2120,13 +2124,7 @@ int pinctrl_enable(struct pinctrl_dev *pctldev)
 
 	error = pinctrl_claim_hogs(pctldev);
 	if (error) {
-		dev_err(pctldev->dev, "could not claim hogs: %i\n",
-			error);
-		pinctrl_free_pindescs(pctldev, pctldev->desc->pins,
-				      pctldev->desc->npins);
-		mutex_destroy(&pctldev->mutex);
-		kfree(pctldev);
-
+		dev_err(pctldev->dev, "could not claim hogs: %i\n", error);
 		return error;
 	}
 
