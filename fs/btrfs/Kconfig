@@ -78,6 +78,15 @@ config BTRFS_ASSERT
 
 	  If unsure, say N.
 
+config BTRFS_EXPERIMENTAL
+	bool "Btrfs experimental features"
+	depends on BTRFS_FS
+	help
+	  Enable experimental features.  These features may not be stable enough
+	  for end users.  This is meant for btrfs developers only.
+
+	  If unsure, say N.
+
 config BTRFS_FS_REF_VERIFY
 	bool "Btrfs with the ref verify tool compiled in"
 	depends on BTRFS_FS

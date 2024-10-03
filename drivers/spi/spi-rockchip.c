@@ -160,8 +160,7 @@
  */
 #define ROCKCHIP_SPI_MAX_TRANLEN		0xffff
 
-/* 2 for native cs, 2 for cs-gpio */
-#define ROCKCHIP_SPI_MAX_CS_NUM			4
+#define ROCKCHIP_SPI_MAX_NATIVE_CS_NUM		2
 #define ROCKCHIP_SPI_VER2_TYPE1			0x05EC0002
 #define ROCKCHIP_SPI_VER2_TYPE2			0x00110002
 
@@ -191,8 +190,6 @@ struct rockchip_spi {
 
 	u8 n_bytes;
 	u8 rsd;
-
-	bool cs_asserted[ROCKCHIP_SPI_MAX_CS_NUM];
 
 	bool target_abort;
 	bool cs_inactive; /* spi target tansmition stop when cs inactive */
@@ -245,10 +242,6 @@ static void rockchip_spi_set_cs(struct spi_device *spi, bool enable)
 	struct rockchip_spi *rs = spi_controller_get_devdata(ctlr);
 	bool cs_asserted = spi->mode & SPI_CS_HIGH ? enable : !enable;
 
-	/* Return immediately for no-op */
-	if (cs_asserted == rs->cs_asserted[spi_get_chipselect(spi, 0)])
-		return;
-
 	if (cs_asserted) {
 		/* Keep things powered as long as CS is asserted */
 		pm_runtime_get_sync(rs->dev);
@@ -268,8 +261,6 @@ static void rockchip_spi_set_cs(struct spi_device *spi, bool enable)
 		/* Drop reference from when we first asserted CS */
 		pm_runtime_put(rs->dev);
 	}
-
-	rs->cs_asserted[spi_get_chipselect(spi, 0)] = cs_asserted;
 }
 
 static void rockchip_spi_handle_err(struct spi_controller *ctlr,
@@ -847,7 +838,7 @@ static int rockchip_spi_probe(struct platform_device *pdev)
 		ctlr->target_abort = rockchip_spi_target_abort;
 	} else {
 		ctlr->flags = SPI_CONTROLLER_GPIO_SS;
-		ctlr->max_native_cs = ROCKCHIP_SPI_MAX_CS_NUM;
+		ctlr->max_native_cs = ROCKCHIP_SPI_MAX_NATIVE_CS_NUM;
 		/*
 		 * rk spi0 has two native cs, spi1..5 one cs only
 		 * if num-cs is missing in the dts, default to 1
@@ -954,14 +945,16 @@ static int rockchip_spi_suspend(struct device *dev)
 {
 	int ret;
 	struct spi_controller *ctlr = dev_get_drvdata(dev);
-	struct rockchip_spi *rs = spi_controller_get_devdata(ctlr);
 
 	ret = spi_controller_suspend(ctlr);
 	if (ret < 0)
 		return ret;
 
-	clk_disable_unprepare(rs->spiclk);
-	clk_disable_unprepare(rs->apb_pclk);
+	ret = pm_runtime_force_suspend(dev);
+	if (ret < 0) {
+		spi_controller_resume(ctlr);
+		return ret;
+	}
 
 	pinctrl_pm_select_sleep_state(dev);
 
@@ -972,25 +965,14 @@ static int rockchip_spi_resume(struct device *dev)
 {
 	int ret;
 	struct spi_controller *ctlr = dev_get_drvdata(dev);
-	struct rockchip_spi *rs = spi_controller_get_devdata(ctlr);
 
 	pinctrl_pm_select_default_state(dev);
 
-	ret = clk_prepare_enable(rs->apb_pclk);
+	ret = pm_runtime_force_resume(dev);
 	if (ret < 0)
 		return ret;
 
-	ret = clk_prepare_enable(rs->spiclk);
-	if (ret < 0)
-		clk_disable_unprepare(rs->apb_pclk);
-
-	ret = spi_controller_resume(ctlr);
-	if (ret < 0) {
-		clk_disable_unprepare(rs->spiclk);
-		clk_disable_unprepare(rs->apb_pclk);
-	}
-
-	return 0;
+	return spi_controller_resume(ctlr);
 }
 #endif /* CONFIG_PM_SLEEP */
 
