@@ -53,7 +53,7 @@
 #include <linux/exportfs.h>
 #include <linux/hashtable.h>
 
-#include <asm/unaligned.h>
+#include <linux/unaligned.h>
 
 #include "orangefs-dev-proto.h"
 
@@ -92,16 +92,6 @@ enum orangefs_vfs_op_states {
 	OP_VFS_STATE_PURGED = 8,
 	OP_VFS_STATE_GIVEN_UP = 16,
 };
-
-/*
- * orangefs kernel memory related flags
- */
-
-#if (defined CONFIG_DEBUG_SLAB)
-#define ORANGEFS_CACHE_CREATE_FLAGS SLAB_RED_ZONE
-#else
-#define ORANGEFS_CACHE_CREATE_FLAGS 0
-#endif
 
 extern const struct xattr_handler * const orangefs_xattr_handlers[];
 

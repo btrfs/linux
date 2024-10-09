@@ -28,9 +28,9 @@ static const struct mcb_device_id *mcb_match_id(const struct mcb_device_id *ids,
 	return NULL;
 }
 
-static int mcb_match(struct device *dev, struct device_driver *drv)
+static int mcb_match(struct device *dev, const struct device_driver *drv)
 {
-	struct mcb_driver *mdrv = to_mcb_driver(drv);
+	const struct mcb_driver *mdrv = to_mcb_driver(drv);
 	struct mcb_device *mdev = to_mcb_device(dev);
 	const struct mcb_device_id *found_id;
 
@@ -156,7 +156,7 @@ static const struct attribute_group *mcb_carrier_groups[] = {
 };
 
 
-static struct bus_type mcb_bus_type = {
+static const struct bus_type mcb_bus_type = {
 	.name = "mcb",
 	.match = mcb_match,
 	.uevent = mcb_uevent,
@@ -165,7 +165,7 @@ static struct bus_type mcb_bus_type = {
 	.shutdown = mcb_shutdown,
 };
 
-static struct device_type mcb_carrier_device_type = {
+static const struct device_type mcb_carrier_device_type = {
 	.name = "mcb-carrier",
 	.groups = mcb_carrier_groups,
 };

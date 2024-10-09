@@ -13,6 +13,7 @@ struct drm_printer;
 int xe_guc_ct_init(struct xe_guc_ct *ct);
 int xe_guc_ct_enable(struct xe_guc_ct *ct);
 void xe_guc_ct_disable(struct xe_guc_ct *ct);
+void xe_guc_ct_stop(struct xe_guc_ct *ct);
 void xe_guc_ct_fast_path(struct xe_guc_ct *ct);
 
 struct xe_guc_ct_snapshot *
@@ -22,11 +23,18 @@ void xe_guc_ct_snapshot_print(struct xe_guc_ct_snapshot *snapshot,
 void xe_guc_ct_snapshot_free(struct xe_guc_ct_snapshot *snapshot);
 void xe_guc_ct_print(struct xe_guc_ct *ct, struct drm_printer *p, bool atomic);
 
+static inline bool xe_guc_ct_enabled(struct xe_guc_ct *ct)
+{
+	return ct->state == XE_GUC_CT_STATE_ENABLED;
+}
+
 static inline void xe_guc_ct_irq_handler(struct xe_guc_ct *ct)
 {
+	if (!xe_guc_ct_enabled(ct))
+		return;
+
 	wake_up_all(&ct->wq);
-	if (ct->enabled)
-		queue_work(system_unbound_wq, &ct->g2h_worker);
+	queue_work(ct->g2h_wq, &ct->g2h_worker);
 	xe_guc_ct_fast_path(ct);
 }
 
@@ -55,5 +63,7 @@ xe_guc_ct_send_block_no_fail(struct xe_guc_ct *ct, const u32 *action, u32 len)
 {
 	return xe_guc_ct_send_recv_no_fail(ct, action, len, NULL);
 }
+
+long xe_guc_ct_queue_proc_time_jiffies(struct xe_guc_ct *ct);
 
 #endif

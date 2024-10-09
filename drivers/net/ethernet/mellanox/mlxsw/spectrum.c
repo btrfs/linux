@@ -176,13 +176,15 @@ MLXSW_ITEM32(tx, hdr, fid, 0x08, 16, 16);
 MLXSW_ITEM32(tx, hdr, type, 0x0C, 0, 4);
 
 int mlxsw_sp_flow_counter_get(struct mlxsw_sp *mlxsw_sp,
-			      unsigned int counter_index, u64 *packets,
-			      u64 *bytes)
+			      unsigned int counter_index, bool clear,
+			      u64 *packets, u64 *bytes)
 {
+	enum mlxsw_reg_mgpc_opcode op = clear ? MLXSW_REG_MGPC_OPCODE_CLEAR :
+						MLXSW_REG_MGPC_OPCODE_NOP;
 	char mgpc_pl[MLXSW_REG_MGPC_LEN];
 	int err;
 
-	mlxsw_reg_mgpc_pack(mgpc_pl, counter_index, MLXSW_REG_MGPC_OPCODE_NOP,
+	mlxsw_reg_mgpc_pack(mgpc_pl, counter_index, op,
 			    MLXSW_REG_FLOW_COUNTER_SET_TYPE_PACKETS_BYTES);
 	err = mlxsw_reg_query(mlxsw_sp->core, MLXSW_REG(mgpc), mgpc_pl);
 	if (err)
@@ -403,29 +405,12 @@ static int mlxsw_sp_port_dev_addr_init(struct mlxsw_sp_port *mlxsw_sp_port)
 					  mlxsw_sp_port->dev->dev_addr);
 }
 
-static int mlxsw_sp_port_max_mtu_get(struct mlxsw_sp_port *mlxsw_sp_port, int *p_max_mtu)
-{
-	struct mlxsw_sp *mlxsw_sp = mlxsw_sp_port->mlxsw_sp;
-	char pmtu_pl[MLXSW_REG_PMTU_LEN];
-	int err;
-
-	mlxsw_reg_pmtu_pack(pmtu_pl, mlxsw_sp_port->local_port, 0);
-	err = mlxsw_reg_query(mlxsw_sp->core, MLXSW_REG(pmtu), pmtu_pl);
-	if (err)
-		return err;
-
-	*p_max_mtu = mlxsw_reg_pmtu_max_mtu_get(pmtu_pl);
-	return 0;
-}
-
 static int mlxsw_sp_port_mtu_set(struct mlxsw_sp_port *mlxsw_sp_port, u16 mtu)
 {
 	struct mlxsw_sp *mlxsw_sp = mlxsw_sp_port->mlxsw_sp;
 	char pmtu_pl[MLXSW_REG_PMTU_LEN];
 
-	mtu += MLXSW_TXHDR_LEN + ETH_HLEN;
-	if (mtu > mlxsw_sp_port->max_mtu)
-		return -EINVAL;
+	mtu += MLXSW_PORT_ETH_FRAME_HDR;
 
 	mlxsw_reg_pmtu_pack(pmtu_pl, mlxsw_sp_port->local_port, mtu);
 	return mlxsw_reg_write(mlxsw_sp->core, MLXSW_REG(pmtu), pmtu_pl);
@@ -823,7 +808,7 @@ static int mlxsw_sp_port_change_mtu(struct net_device *dev, int mtu)
 	err = mlxsw_sp_port_mtu_set(mlxsw_sp_port, mtu);
 	if (err)
 		goto err_port_mtu_set;
-	dev->mtu = mtu;
+	WRITE_ONCE(dev->mtu, mtu);
 	return 0;
 
 err_port_mtu_set:
@@ -1691,12 +1676,14 @@ static int mlxsw_sp_port_create(struct mlxsw_sp *mlxsw_sp, u16 local_port,
 
 	netif_carrier_off(dev);
 
-	dev->features |= NETIF_F_NETNS_LOCAL | NETIF_F_LLTX | NETIF_F_SG |
-			 NETIF_F_HW_VLAN_CTAG_FILTER | NETIF_F_HW_TC;
+	dev->features |= NETIF_F_SG | NETIF_F_HW_VLAN_CTAG_FILTER |
+			 NETIF_F_HW_TC;
 	dev->hw_features |= NETIF_F_HW_TC | NETIF_F_LOOPBACK;
+	dev->lltx = true;
+	dev->netns_local = true;
 
-	dev->min_mtu = 0;
-	dev->max_mtu = ETH_MAX_MTU;
+	dev->min_mtu = ETH_MIN_MTU;
+	dev->max_mtu = MLXSW_PORT_MAX_MTU - MLXSW_PORT_ETH_FRAME_HDR;
 
 	/* Each packet needs to have a Tx header (metadata) on top all other
 	 * headers.
@@ -1723,13 +1710,6 @@ static int mlxsw_sp_port_create(struct mlxsw_sp *mlxsw_sp, u16 local_port,
 		dev_err(mlxsw_sp->bus_info->dev, "Port %d: Failed to get maximum speed\n",
 			mlxsw_sp_port->local_port);
 		goto err_max_speed_get;
-	}
-
-	err = mlxsw_sp_port_max_mtu_get(mlxsw_sp_port, &mlxsw_sp_port->max_mtu);
-	if (err) {
-		dev_err(mlxsw_sp->bus_info->dev, "Port %d: Failed to get maximum MTU\n",
-			mlxsw_sp_port->local_port);
-		goto err_port_max_mtu_get;
 	}
 
 	err = mlxsw_sp_port_mtu_set(mlxsw_sp_port, ETH_DATA_LEN);
@@ -1875,7 +1855,6 @@ err_port_ets_init:
 err_port_buffers_init:
 err_port_admin_status_set:
 err_port_mtu_set:
-err_port_max_mtu_get:
 err_max_speed_get:
 err_port_speed_by_width_set:
 err_port_system_port_mapping_set:
@@ -2695,23 +2674,18 @@ static void mlxsw_sp_traps_fini(struct mlxsw_sp *mlxsw_sp)
 static int mlxsw_sp_lag_pgt_init(struct mlxsw_sp *mlxsw_sp)
 {
 	char sgcr_pl[MLXSW_REG_SGCR_LEN];
-	u16 max_lag;
 	int err;
 
 	if (mlxsw_core_lag_mode(mlxsw_sp->core) !=
 	    MLXSW_CMD_MBOX_CONFIG_PROFILE_LAG_MODE_SW)
 		return 0;
 
-	err = mlxsw_core_max_lag(mlxsw_sp->core, &max_lag);
-	if (err)
-		return err;
-
 	/* In DDD mode, which we by default use, each LAG entry is 8 PGT
 	 * entries. The LAG table address needs to be 8-aligned, but that ought
 	 * to be the case, since the LAG table is allocated first.
 	 */
 	err = mlxsw_sp_pgt_mid_alloc_range(mlxsw_sp, &mlxsw_sp->lag_pgt_base,
-					   max_lag * 8);
+					   mlxsw_sp->max_lag * 8);
 	if (err)
 		return err;
 	if (WARN_ON_ONCE(mlxsw_sp->lag_pgt_base % 8)) {
@@ -2728,33 +2702,31 @@ static int mlxsw_sp_lag_pgt_init(struct mlxsw_sp *mlxsw_sp)
 
 err_mid_alloc_range:
 	mlxsw_sp_pgt_mid_free_range(mlxsw_sp, mlxsw_sp->lag_pgt_base,
-				    max_lag * 8);
+				    mlxsw_sp->max_lag * 8);
 	return err;
 }
 
 static void mlxsw_sp_lag_pgt_fini(struct mlxsw_sp *mlxsw_sp)
 {
-	u16 max_lag;
-	int err;
-
 	if (mlxsw_core_lag_mode(mlxsw_sp->core) !=
 	    MLXSW_CMD_MBOX_CONFIG_PROFILE_LAG_MODE_SW)
 		return;
 
-	err = mlxsw_core_max_lag(mlxsw_sp->core, &max_lag);
-	if (err)
-		return;
-
 	mlxsw_sp_pgt_mid_free_range(mlxsw_sp, mlxsw_sp->lag_pgt_base,
-				    max_lag * 8);
+				    mlxsw_sp->max_lag * 8);
 }
 
 #define MLXSW_SP_LAG_SEED_INIT 0xcafecafe
 
+struct mlxsw_sp_lag {
+	struct net_device *dev;
+	refcount_t ref_count;
+	u16 lag_id;
+};
+
 static int mlxsw_sp_lag_init(struct mlxsw_sp *mlxsw_sp)
 {
 	char slcr_pl[MLXSW_REG_SLCR_LEN];
-	u16 max_lag;
 	u32 seed;
 	int err;
 
@@ -2773,7 +2745,7 @@ static int mlxsw_sp_lag_init(struct mlxsw_sp *mlxsw_sp)
 	if (err)
 		return err;
 
-	err = mlxsw_core_max_lag(mlxsw_sp->core, &max_lag);
+	err = mlxsw_core_max_lag(mlxsw_sp->core, &mlxsw_sp->max_lag);
 	if (err)
 		return err;
 
@@ -2784,7 +2756,7 @@ static int mlxsw_sp_lag_init(struct mlxsw_sp *mlxsw_sp)
 	if (err)
 		return err;
 
-	mlxsw_sp->lags = kcalloc(max_lag, sizeof(struct mlxsw_sp_upper),
+	mlxsw_sp->lags = kcalloc(mlxsw_sp->max_lag, sizeof(struct mlxsw_sp_lag),
 				 GFP_KERNEL);
 	if (!mlxsw_sp->lags) {
 		err = -ENOMEM;
@@ -2814,7 +2786,9 @@ static const struct mlxsw_sp_ptp_ops mlxsw_sp1_ptp_ops = {
 	.hwtstamp_get	= mlxsw_sp1_ptp_hwtstamp_get,
 	.hwtstamp_set	= mlxsw_sp1_ptp_hwtstamp_set,
 	.shaper_work	= mlxsw_sp1_ptp_shaper_work,
+#if IS_REACHABLE(CONFIG_PTP_1588_CLOCK)
 	.get_ts_info	= mlxsw_sp1_ptp_get_ts_info,
+#endif
 	.get_stats_count = mlxsw_sp1_get_stats_count,
 	.get_stats_strings = mlxsw_sp1_get_stats_strings,
 	.get_stats	= mlxsw_sp1_get_stats,
@@ -2831,7 +2805,9 @@ static const struct mlxsw_sp_ptp_ops mlxsw_sp2_ptp_ops = {
 	.hwtstamp_get	= mlxsw_sp2_ptp_hwtstamp_get,
 	.hwtstamp_set	= mlxsw_sp2_ptp_hwtstamp_set,
 	.shaper_work	= mlxsw_sp2_ptp_shaper_work,
+#if IS_REACHABLE(CONFIG_PTP_1588_CLOCK)
 	.get_ts_info	= mlxsw_sp2_ptp_get_ts_info,
+#endif
 	.get_stats_count = mlxsw_sp2_get_stats_count,
 	.get_stats_strings = mlxsw_sp2_get_stats_strings,
 	.get_stats	= mlxsw_sp2_get_stats,
@@ -2848,7 +2824,9 @@ static const struct mlxsw_sp_ptp_ops mlxsw_sp4_ptp_ops = {
 	.hwtstamp_get	= mlxsw_sp2_ptp_hwtstamp_get,
 	.hwtstamp_set	= mlxsw_sp2_ptp_hwtstamp_set,
 	.shaper_work	= mlxsw_sp2_ptp_shaper_work,
+#if IS_REACHABLE(CONFIG_PTP_1588_CLOCK)
 	.get_ts_info	= mlxsw_sp2_ptp_get_ts_info,
+#endif
 	.get_stats_count = mlxsw_sp2_get_stats_count,
 	.get_stats_strings = mlxsw_sp2_get_stats_strings,
 	.get_stats	= mlxsw_sp2_get_stats,
@@ -4269,19 +4247,48 @@ mlxsw_sp_port_lag_uppers_cleanup(struct mlxsw_sp_port *mlxsw_sp_port,
 	}
 }
 
-static int mlxsw_sp_lag_create(struct mlxsw_sp *mlxsw_sp, u16 lag_id)
+static struct mlxsw_sp_lag *
+mlxsw_sp_lag_create(struct mlxsw_sp *mlxsw_sp, struct net_device *lag_dev,
+		    struct netlink_ext_ack *extack)
 {
 	char sldr_pl[MLXSW_REG_SLDR_LEN];
+	struct mlxsw_sp_lag *lag;
+	u16 lag_id;
+	int i, err;
 
+	for (i = 0; i < mlxsw_sp->max_lag; i++) {
+		if (!mlxsw_sp->lags[i].dev)
+			break;
+	}
+
+	if (i == mlxsw_sp->max_lag) {
+		NL_SET_ERR_MSG_MOD(extack,
+				   "Exceeded number of supported LAG devices");
+		return ERR_PTR(-EBUSY);
+	}
+
+	lag_id = i;
 	mlxsw_reg_sldr_lag_create_pack(sldr_pl, lag_id);
-	return mlxsw_reg_write(mlxsw_sp->core, MLXSW_REG(sldr), sldr_pl);
+	err = mlxsw_reg_write(mlxsw_sp->core, MLXSW_REG(sldr), sldr_pl);
+	if (err)
+		return ERR_PTR(err);
+
+	lag = &mlxsw_sp->lags[lag_id];
+	lag->lag_id = lag_id;
+	lag->dev = lag_dev;
+	refcount_set(&lag->ref_count, 1);
+
+	return lag;
 }
 
-static int mlxsw_sp_lag_destroy(struct mlxsw_sp *mlxsw_sp, u16 lag_id)
+static int
+mlxsw_sp_lag_destroy(struct mlxsw_sp *mlxsw_sp, struct mlxsw_sp_lag *lag)
 {
 	char sldr_pl[MLXSW_REG_SLDR_LEN];
 
-	mlxsw_reg_sldr_lag_destroy_pack(sldr_pl, lag_id);
+	lag->dev = NULL;
+
+	mlxsw_reg_sldr_lag_destroy_pack(sldr_pl, lag->lag_id);
 	return mlxsw_reg_write(mlxsw_sp->core, MLXSW_REG(sldr), sldr_pl);
 }
 
@@ -4329,34 +4336,44 @@ static int mlxsw_sp_lag_col_port_disable(struct mlxsw_sp_port *mlxsw_sp_port,
 	return mlxsw_reg_write(mlxsw_sp->core, MLXSW_REG(slcor), slcor_pl);
 }
 
-static int mlxsw_sp_lag_index_get(struct mlxsw_sp *mlxsw_sp,
-				  struct net_device *lag_dev,
-				  u16 *p_lag_id)
+static struct mlxsw_sp_lag *
+mlxsw_sp_lag_find(struct mlxsw_sp *mlxsw_sp, struct net_device *lag_dev)
 {
-	struct mlxsw_sp_upper *lag;
-	int free_lag_id = -1;
-	u16 max_lag;
-	int err, i;
+	int i;
 
-	err = mlxsw_core_max_lag(mlxsw_sp->core, &max_lag);
-	if (err)
-		return err;
+	for (i = 0; i < mlxsw_sp->max_lag; i++) {
+		if (!mlxsw_sp->lags[i].dev)
+			continue;
 
-	for (i = 0; i < max_lag; i++) {
-		lag = mlxsw_sp_lag_get(mlxsw_sp, i);
-		if (lag->ref_count) {
-			if (lag->dev == lag_dev) {
-				*p_lag_id = i;
-				return 0;
-			}
-		} else if (free_lag_id < 0) {
-			free_lag_id = i;
-		}
+		if (mlxsw_sp->lags[i].dev == lag_dev)
+			return &mlxsw_sp->lags[i];
 	}
-	if (free_lag_id < 0)
-		return -EBUSY;
-	*p_lag_id = free_lag_id;
-	return 0;
+
+	return NULL;
+}
+
+static struct mlxsw_sp_lag *
+mlxsw_sp_lag_get(struct mlxsw_sp *mlxsw_sp, struct net_device *lag_dev,
+		 struct netlink_ext_ack *extack)
+{
+	struct mlxsw_sp_lag *lag;
+
+	lag = mlxsw_sp_lag_find(mlxsw_sp, lag_dev);
+	if (lag) {
+		refcount_inc(&lag->ref_count);
+		return lag;
+	}
+
+	return mlxsw_sp_lag_create(mlxsw_sp, lag_dev, extack);
+}
+
+static void
+mlxsw_sp_lag_put(struct mlxsw_sp *mlxsw_sp, struct mlxsw_sp_lag *lag)
+{
+	if (!refcount_dec_and_test(&lag->ref_count))
+		return;
+
+	mlxsw_sp_lag_destroy(mlxsw_sp, lag);
 }
 
 static bool
@@ -4365,12 +4382,6 @@ mlxsw_sp_master_lag_check(struct mlxsw_sp *mlxsw_sp,
 			  struct netdev_lag_upper_info *lag_upper_info,
 			  struct netlink_ext_ack *extack)
 {
-	u16 lag_id;
-
-	if (mlxsw_sp_lag_index_get(mlxsw_sp, lag_dev, &lag_id) != 0) {
-		NL_SET_ERR_MSG_MOD(extack, "Exceeded number of supported LAG devices");
-		return false;
-	}
 	if (lag_upper_info->tx_type != NETDEV_LAG_TX_TYPE_HASH) {
 		NL_SET_ERR_MSG_MOD(extack, "LAG device using unsupported Tx type");
 		return false;
@@ -4482,22 +4493,16 @@ static int mlxsw_sp_port_lag_join(struct mlxsw_sp_port *mlxsw_sp_port,
 				  struct netlink_ext_ack *extack)
 {
 	struct mlxsw_sp *mlxsw_sp = mlxsw_sp_port->mlxsw_sp;
-	struct mlxsw_sp_upper *lag;
+	struct mlxsw_sp_lag *lag;
 	u16 lag_id;
 	u8 port_index;
 	int err;
 
-	err = mlxsw_sp_lag_index_get(mlxsw_sp, lag_dev, &lag_id);
-	if (err)
-		return err;
-	lag = mlxsw_sp_lag_get(mlxsw_sp, lag_id);
-	if (!lag->ref_count) {
-		err = mlxsw_sp_lag_create(mlxsw_sp, lag_id);
-		if (err)
-			return err;
-		lag->dev = lag_dev;
-	}
+	lag = mlxsw_sp_lag_get(mlxsw_sp, lag_dev, extack);
+	if (IS_ERR(lag))
+		return PTR_ERR(lag);
 
+	lag_id = lag->lag_id;
 	err = mlxsw_sp_port_lag_index_get(mlxsw_sp, lag_id, &port_index);
 	if (err)
 		return err;
@@ -4515,7 +4520,6 @@ static int mlxsw_sp_port_lag_join(struct mlxsw_sp_port *mlxsw_sp_port,
 				   mlxsw_sp_port->local_port);
 	mlxsw_sp_port->lag_id = lag_id;
 	mlxsw_sp_port->lagged = 1;
-	lag->ref_count++;
 
 	err = mlxsw_sp_fid_port_join_lag(mlxsw_sp_port);
 	if (err)
@@ -4542,7 +4546,6 @@ err_replay:
 err_router_join:
 	mlxsw_sp_fid_port_leave_lag(mlxsw_sp_port);
 err_fid_port_join_lag:
-	lag->ref_count--;
 	mlxsw_sp_port->lagged = 0;
 	mlxsw_core_lag_mapping_clear(mlxsw_sp->core, lag_id,
 				     mlxsw_sp_port->local_port);
@@ -4550,8 +4553,7 @@ err_fid_port_join_lag:
 err_col_port_add:
 	mlxsw_sp_lag_uppers_bridge_leave(mlxsw_sp_port, lag_dev);
 err_lag_uppers_bridge_join:
-	if (!lag->ref_count)
-		mlxsw_sp_lag_destroy(mlxsw_sp, lag_id);
+	mlxsw_sp_lag_put(mlxsw_sp, lag);
 	return err;
 }
 
@@ -4560,12 +4562,11 @@ static void mlxsw_sp_port_lag_leave(struct mlxsw_sp_port *mlxsw_sp_port,
 {
 	struct mlxsw_sp *mlxsw_sp = mlxsw_sp_port->mlxsw_sp;
 	u16 lag_id = mlxsw_sp_port->lag_id;
-	struct mlxsw_sp_upper *lag;
+	struct mlxsw_sp_lag *lag;
 
 	if (!mlxsw_sp_port->lagged)
 		return;
-	lag = mlxsw_sp_lag_get(mlxsw_sp, lag_id);
-	WARN_ON(lag->ref_count == 0);
+	lag = &mlxsw_sp->lags[lag_id];
 
 	mlxsw_sp_lag_col_port_remove(mlxsw_sp_port, lag_id);
 
@@ -4579,13 +4580,11 @@ static void mlxsw_sp_port_lag_leave(struct mlxsw_sp_port *mlxsw_sp_port,
 
 	mlxsw_sp_fid_port_leave_lag(mlxsw_sp_port);
 
-	if (lag->ref_count == 1)
-		mlxsw_sp_lag_destroy(mlxsw_sp, lag_id);
+	mlxsw_sp_lag_put(mlxsw_sp, lag);
 
 	mlxsw_core_lag_mapping_clear(mlxsw_sp->core, lag_id,
 				     mlxsw_sp_port->local_port);
 	mlxsw_sp_port->lagged = 0;
-	lag->ref_count--;
 
 	/* Make sure untagged frames are allowed to ingress */
 	mlxsw_sp_port_pvid_set(mlxsw_sp_port, MLXSW_SP_DEFAULT_VID,

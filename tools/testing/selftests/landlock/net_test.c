@@ -36,30 +36,6 @@ enum sandbox_type {
 	TCP_SANDBOX,
 };
 
-struct protocol_variant {
-	int domain;
-	int type;
-};
-
-struct service_fixture {
-	struct protocol_variant protocol;
-	/* port is also stored in ipv4_addr.sin_port or ipv6_addr.sin6_port */
-	unsigned short port;
-	union {
-		struct sockaddr_in ipv4_addr;
-		struct sockaddr_in6 ipv6_addr;
-		struct {
-			struct sockaddr_un unix_addr;
-			socklen_t unix_addr_len;
-		};
-	};
-};
-
-static pid_t sys_gettid(void)
-{
-	return syscall(__NR_gettid);
-}
-
 static int set_service(struct service_fixture *const srv,
 		       const struct protocol_variant prot,
 		       const unsigned short index)
@@ -92,12 +68,7 @@ static int set_service(struct service_fixture *const srv,
 		return 0;
 
 	case AF_UNIX:
-		srv->unix_addr.sun_family = prot.domain;
-		sprintf(srv->unix_addr.sun_path,
-			"_selftests-landlock-net-tid%d-index%d", sys_gettid(),
-			index);
-		srv->unix_addr_len = SUN_LEN(&srv->unix_addr);
-		srv->unix_addr.sun_path[0] = '\0';
+		set_unix_address(srv, index);
 		return 0;
 	}
 	return 1;
@@ -539,7 +510,7 @@ static void test_bind_and_connect(struct __test_metadata *const _metadata,
 		}
 
 		EXPECT_EQ(0, close(connect_fd));
-		_exit(_metadata->passed ? EXIT_SUCCESS : EXIT_FAILURE);
+		_exit(_metadata->exit_code);
 		return;
 	}
 
@@ -834,7 +805,7 @@ TEST_F(protocol, connect_unspec)
 		}
 
 		EXPECT_EQ(0, close(connect_fd));
-		_exit(_metadata->passed ? EXIT_SUCCESS : EXIT_FAILURE);
+		_exit(_metadata->exit_code);
 		return;
 	}
 
