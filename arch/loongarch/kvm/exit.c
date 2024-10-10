@@ -9,6 +9,7 @@
 #include <linux/module.h>
 #include <linux/preempt.h>
 #include <linux/vmalloc.h>
+#include <trace/events/kvm.h>
 #include <asm/fpu.h>
 #include <asm/inst.h>
 #include <asm/loongarch.h>
@@ -19,6 +20,47 @@
 #include <asm/kvm_csr.h>
 #include <asm/kvm_vcpu.h>
 #include "trace.h"
+
+static int kvm_emu_cpucfg(struct kvm_vcpu *vcpu, larch_inst inst)
+{
+	int rd, rj;
+	unsigned int index, ret;
+
+	if (inst.reg2_format.opcode != cpucfg_op)
+		return EMULATE_FAIL;
+
+	rd = inst.reg2_format.rd;
+	rj = inst.reg2_format.rj;
+	++vcpu->stat.cpucfg_exits;
+	index = vcpu->arch.gprs[rj];
+
+	/*
+	 * By LoongArch Reference Manual 2.2.10.5
+	 * Return value is 0 for undefined CPUCFG index
+	 *
+	 * Disable preemption since hw gcsr is accessed
+	 */
+	preempt_disable();
+	switch (index) {
+	case 0 ... (KVM_MAX_CPUCFG_REGS - 1):
+		vcpu->arch.gprs[rd] = vcpu->arch.cpucfg[index];
+		break;
+	case CPUCFG_KVM_SIG:
+		/* CPUCFG emulation between 0x40000000 -- 0x400000ff */
+		vcpu->arch.gprs[rd] = *(unsigned int *)KVM_SIGNATURE;
+		break;
+	case CPUCFG_KVM_FEATURE:
+		ret = vcpu->kvm->arch.pv_features & LOONGARCH_PV_FEAT_MASK;
+		vcpu->arch.gprs[rd] = ret;
+		break;
+	default:
+		vcpu->arch.gprs[rd] = 0;
+		break;
+	}
+	preempt_enable();
+
+	return EMULATE_DONE;
+}
 
 static unsigned long kvm_emu_read_csr(struct kvm_vcpu *vcpu, int csrid)
 {
@@ -82,6 +124,14 @@ static int kvm_handle_csr(struct kvm_vcpu *vcpu, larch_inst inst)
 	rd = inst.reg2csr_format.rd;
 	rj = inst.reg2csr_format.rj;
 	csrid = inst.reg2csr_format.csr;
+
+	if (csrid >= LOONGARCH_CSR_PERFCTRL0 && csrid <= vcpu->arch.max_pmu_csrid) {
+		if (kvm_guest_has_pmu(&vcpu->arch)) {
+			vcpu->arch.pc -= 4;
+			kvm_make_request(KVM_REQ_PMU, vcpu);
+			return EMULATE_DONE;
+		}
+	}
 
 	/* Process CSR ops */
 	switch (rj) {
@@ -208,8 +258,6 @@ int kvm_emu_idle(struct kvm_vcpu *vcpu)
 
 static int kvm_trap_handle_gspr(struct kvm_vcpu *vcpu)
 {
-	int rd, rj;
-	unsigned int index;
 	unsigned long curr_pc;
 	larch_inst inst;
 	enum emulation_result er = EMULATE_DONE;
@@ -224,21 +272,7 @@ static int kvm_trap_handle_gspr(struct kvm_vcpu *vcpu)
 	er = EMULATE_FAIL;
 	switch (((inst.word >> 24) & 0xff)) {
 	case 0x0: /* CPUCFG GSPR */
-		if (inst.reg2_format.opcode == 0x1B) {
-			rd = inst.reg2_format.rd;
-			rj = inst.reg2_format.rj;
-			++vcpu->stat.cpucfg_exits;
-			index = vcpu->arch.gprs[rj];
-			er = EMULATE_DONE;
-			/*
-			 * By LoongArch Reference Manual 2.2.10.5
-			 * return value is 0 for undefined cpucfg index
-			 */
-			if (index < KVM_MAX_CPUCFG_REGS)
-				vcpu->arch.gprs[rd] = vcpu->arch.cpucfg[index];
-			else
-				vcpu->arch.gprs[rd] = 0;
-		}
+		er = kvm_emu_cpucfg(vcpu, inst);
 		break;
 	case 0x4: /* CSR{RD,WR,XCHG} GSPR */
 		er = kvm_handle_csr(vcpu, inst);
@@ -417,6 +451,8 @@ int kvm_emu_mmio_read(struct kvm_vcpu *vcpu, larch_inst inst)
 		vcpu->arch.io_gpr = rd;
 		run->mmio.is_write = 0;
 		vcpu->mmio_is_write = 0;
+		trace_kvm_mmio(KVM_TRACE_MMIO_READ_UNSATISFIED, run->mmio.len,
+				run->mmio.phys_addr, NULL);
 	} else {
 		kvm_err("Read not supported Inst=0x%08x @%lx BadVaddr:%#lx\n",
 			inst.word, vcpu->arch.pc, vcpu->arch.badv);
@@ -462,6 +498,9 @@ int kvm_complete_mmio_read(struct kvm_vcpu *vcpu, struct kvm_run *run)
 		er = EMULATE_FAIL;
 		break;
 	}
+
+	trace_kvm_mmio(KVM_TRACE_MMIO_READ, run->mmio.len,
+			run->mmio.phys_addr, run->mmio.data);
 
 	return er;
 }
@@ -564,6 +603,8 @@ int kvm_emu_mmio_write(struct kvm_vcpu *vcpu, larch_inst inst)
 		run->mmio.is_write = 1;
 		vcpu->mmio_needed = 1;
 		vcpu->mmio_is_write = 1;
+		trace_kvm_mmio(KVM_TRACE_MMIO_WRITE, run->mmio.len,
+				run->mmio.phys_addr, data);
 	} else {
 		vcpu->arch.pc = curr_pc;
 		kvm_err("Write not supported Inst=0x%08x @%lx BadVaddr:%#lx\n",
@@ -655,6 +696,31 @@ static int kvm_handle_fpu_disabled(struct kvm_vcpu *vcpu)
 	return RESUME_GUEST;
 }
 
+static long kvm_save_notify(struct kvm_vcpu *vcpu)
+{
+	unsigned long id, data;
+
+	id   = kvm_read_reg(vcpu, LOONGARCH_GPR_A1);
+	data = kvm_read_reg(vcpu, LOONGARCH_GPR_A2);
+	switch (id) {
+	case BIT(KVM_FEATURE_STEAL_TIME):
+		if (data & ~(KVM_STEAL_PHYS_MASK | KVM_STEAL_PHYS_VALID))
+			return KVM_HCALL_INVALID_PARAMETER;
+
+		vcpu->arch.st.guest_addr = data;
+		if (!(data & KVM_STEAL_PHYS_VALID))
+			return 0;
+
+		vcpu->arch.st.last_steal = current->sched_info.run_delay;
+		kvm_make_request(KVM_REQ_STEAL_UPDATE, vcpu);
+		return 0;
+	default:
+		return KVM_HCALL_INVALID_CODE;
+	};
+
+	return KVM_HCALL_INVALID_CODE;
+};
+
 /*
  * kvm_handle_lsx_disabled() - Guest used LSX while disabled in root.
  * @vcpu:      Virtual CPU context.
@@ -683,6 +749,103 @@ static int kvm_handle_lasx_disabled(struct kvm_vcpu *vcpu)
 		kvm_queue_exception(vcpu, EXCCODE_INE, 0);
 
 	return RESUME_GUEST;
+}
+
+static int kvm_handle_lbt_disabled(struct kvm_vcpu *vcpu)
+{
+	if (kvm_own_lbt(vcpu))
+		kvm_queue_exception(vcpu, EXCCODE_INE, 0);
+
+	return RESUME_GUEST;
+}
+
+static int kvm_send_pv_ipi(struct kvm_vcpu *vcpu)
+{
+	unsigned int min, cpu, i;
+	unsigned long ipi_bitmap;
+	struct kvm_vcpu *dest;
+
+	min = kvm_read_reg(vcpu, LOONGARCH_GPR_A3);
+	for (i = 0; i < 2; i++, min += BITS_PER_LONG) {
+		ipi_bitmap = kvm_read_reg(vcpu, LOONGARCH_GPR_A1 + i);
+		if (!ipi_bitmap)
+			continue;
+
+		cpu = find_first_bit((void *)&ipi_bitmap, BITS_PER_LONG);
+		while (cpu < BITS_PER_LONG) {
+			dest = kvm_get_vcpu_by_cpuid(vcpu->kvm, cpu + min);
+			cpu = find_next_bit((void *)&ipi_bitmap, BITS_PER_LONG, cpu + 1);
+			if (!dest)
+				continue;
+
+			/* Send SWI0 to dest vcpu to emulate IPI interrupt */
+			kvm_queue_irq(dest, INT_SWI0);
+			kvm_vcpu_kick(dest);
+		}
+	}
+
+	return 0;
+}
+
+/*
+ * Hypercall emulation always return to guest, Caller should check retval.
+ */
+static void kvm_handle_service(struct kvm_vcpu *vcpu)
+{
+	long ret = KVM_HCALL_INVALID_CODE;
+	unsigned long func = kvm_read_reg(vcpu, LOONGARCH_GPR_A0);
+
+	switch (func) {
+	case KVM_HCALL_FUNC_IPI:
+		if (kvm_guest_has_pv_feature(vcpu, KVM_FEATURE_IPI)) {
+			kvm_send_pv_ipi(vcpu);
+			ret = KVM_HCALL_SUCCESS;
+		}
+		break;
+	case KVM_HCALL_FUNC_NOTIFY:
+		if (kvm_guest_has_pv_feature(vcpu, KVM_FEATURE_STEAL_TIME))
+			ret = kvm_save_notify(vcpu);
+		break;
+	default:
+		break;
+	}
+
+	kvm_write_reg(vcpu, LOONGARCH_GPR_A0, ret);
+}
+
+static int kvm_handle_hypercall(struct kvm_vcpu *vcpu)
+{
+	int ret;
+	larch_inst inst;
+	unsigned int code;
+
+	inst.word = vcpu->arch.badi;
+	code = inst.reg0i15_format.immediate;
+	ret = RESUME_GUEST;
+
+	switch (code) {
+	case KVM_HCALL_SERVICE:
+		vcpu->stat.hypercall_exits++;
+		kvm_handle_service(vcpu);
+		break;
+	case KVM_HCALL_SWDBG:
+		/* KVM_HCALL_SWDBG only in effective when SW_BP is enabled */
+		if (vcpu->guest_debug & KVM_GUESTDBG_SW_BP_MASK) {
+			vcpu->run->exit_reason = KVM_EXIT_DEBUG;
+			ret = RESUME_HOST;
+			break;
+		}
+		fallthrough;
+	default:
+		/* Treat it as noop intruction, only set return value */
+		kvm_write_reg(vcpu, LOONGARCH_GPR_A0, KVM_HCALL_INVALID_CODE);
+		break;
+	}
+
+	if (ret == RESUME_GUEST)
+		update_pc(&vcpu->arch);
+
+	return ret;
 }
 
 /*
@@ -715,7 +878,9 @@ static exit_handle_fn kvm_fault_tables[EXCCODE_INT_START] = {
 	[EXCCODE_FPDIS]			= kvm_handle_fpu_disabled,
 	[EXCCODE_LSXDIS]		= kvm_handle_lsx_disabled,
 	[EXCCODE_LASXDIS]		= kvm_handle_lasx_disabled,
+	[EXCCODE_BTDIS]			= kvm_handle_lbt_disabled,
 	[EXCCODE_GSPR]			= kvm_handle_gspr,
+	[EXCCODE_HVC]			= kvm_handle_hypercall,
 };
 
 int kvm_handle_fault(struct kvm_vcpu *vcpu, int fault)

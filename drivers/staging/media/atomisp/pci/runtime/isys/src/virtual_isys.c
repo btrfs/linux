@@ -13,6 +13,8 @@
  * more details.
  */
 
+#include <linux/bitops.h>
+#include <linux/math.h>
 #include <linux/string.h> /* for memcpy() */
 
 #include "system_global.h"
@@ -20,7 +22,6 @@
 
 #include "ia_css_isys.h"
 #include "ia_css_debug.h"
-#include "math_support.h"
 #include "virtual_isys.h"
 #include "isp.h"
 #include "sh_css_defs.h"
@@ -95,12 +96,6 @@ static void release_be_lut_entry(
     csi_rx_backend_ID_t		backend,
     csi_mipi_packet_type_t		packet_type,
     csi_rx_backend_lut_entry_t	*entry);
-
-static bool calculate_tpg_cfg(
-    input_system_channel_t		*channel,
-    input_system_input_port_t	*input_port,
-    isp2401_input_system_cfg_t		*isys_cfg,
-    pixelgen_tpg_cfg_t		*cfg);
 
 static bool calculate_prbs_cfg(
     input_system_channel_t		*channel,
@@ -517,13 +512,6 @@ static bool calculate_input_system_input_port_cfg(
 			rc &= calculate_be_cfg(input_port, isys_cfg, true,
 					       &input_port_cfg->csi_rx_cfg.md_backend_cfg);
 		break;
-	case INPUT_SYSTEM_SOURCE_TYPE_TPG:
-		rc = calculate_tpg_cfg(
-			 channel,
-			 input_port,
-			 isys_cfg,
-			 &input_port_cfg->pixelgen_cfg.tpg_cfg);
-		break;
 	case INPUT_SYSTEM_SOURCE_TYPE_PRBS:
 		rc = calculate_prbs_cfg(
 			 channel,
@@ -571,7 +559,7 @@ static int32_t calculate_stride(
 		bits_per_pixel = CEIL_MUL(bits_per_pixel, 8);
 
 	pixels_per_word = HIVE_ISP_DDR_WORD_BITS / bits_per_pixel;
-	words_per_line  = ceil_div(pixels_per_line_padded, pixels_per_word);
+	words_per_line  = DIV_ROUND_UP(pixels_per_line_padded, pixels_per_word);
 	bytes_per_line  = HIVE_ISP_DDR_WORD_BYTES * words_per_line;
 
 	return bytes_per_line;
@@ -633,17 +621,6 @@ static void release_be_lut_entry(
 	ia_css_isys_csi_rx_lut_rmgr_release(backend, packet_type, entry);
 }
 
-static bool calculate_tpg_cfg(
-    input_system_channel_t		*channel,
-    input_system_input_port_t	*input_port,
-    isp2401_input_system_cfg_t		*isys_cfg,
-    pixelgen_tpg_cfg_t		*cfg)
-{
-	memcpy(cfg, &isys_cfg->tpg_port_attr, sizeof(pixelgen_tpg_cfg_t));
-
-	return true;
-}
-
 static bool calculate_prbs_cfg(
     input_system_channel_t		*channel,
     input_system_input_port_t	*input_port,
@@ -703,9 +680,7 @@ static bool calculate_stream2mmio_cfg(
 	cfg->bits_per_pixel = metadata ? isys_cfg->metadata.bits_per_pixel :
 			      isys_cfg->input_port_resolution.bits_per_pixel;
 
-	cfg->enable_blocking =
-	    ((isys_cfg->mode == INPUT_SYSTEM_SOURCE_TYPE_TPG) ||
-	     (isys_cfg->mode == INPUT_SYSTEM_SOURCE_TYPE_PRBS));
+	cfg->enable_blocking = isys_cfg->mode == INPUT_SYSTEM_SOURCE_TYPE_PRBS;
 
 	return true;
 }
@@ -716,7 +691,6 @@ static bool calculate_ibuf_ctrl_cfg(
     const isp2401_input_system_cfg_t	*isys_cfg,
     ibuf_ctrl_cfg_t			*cfg)
 {
-	const s32 bits_per_byte = 8;
 	s32 bits_per_pixel;
 	s32 bytes_per_pixel;
 	s32 left_padding;
@@ -724,7 +698,7 @@ static bool calculate_ibuf_ctrl_cfg(
 	(void)input_port;
 
 	bits_per_pixel = isys_cfg->input_port_resolution.bits_per_pixel;
-	bytes_per_pixel = ceil_div(bits_per_pixel, bits_per_byte);
+	bytes_per_pixel = BITS_TO_BYTES(bits_per_pixel);
 
 	left_padding = CEIL_MUL(isys_cfg->output_port_attr.left_padding, ISP_VEC_NELEMS)
 		       * bytes_per_pixel;

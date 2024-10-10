@@ -130,7 +130,7 @@ void rtl92e_set_reg(struct net_device *dev, u8 variable, u8 *val)
 			 &priv->rtllib->current_network.qos_data.parameters;
 
 		u1bAIFS = qop->aifs[pAcParam] *
-			  ((mode & (WIRELESS_MODE_G | WIRELESS_MODE_N_24G)) ? 9 : 20) + aSifsTime;
+			  ((mode & (WIRELESS_MODE_G | WIRELESS_MODE_N_24G)) ? 9 : 20) + asifs_time;
 
 		rtl92e_dm_init_edca_turbo(dev);
 
@@ -164,7 +164,7 @@ void rtl92e_set_reg(struct net_device *dev, u8 variable, u8 *val)
 				    eACI);
 			break;
 		}
-		priv->rtllib->SetHwRegHandler(dev, HW_VAR_ACM_CTRL,
+		priv->rtllib->set_hw_reg_handler(dev, HW_VAR_ACM_CTRL,
 					      &pAcParam);
 		break;
 	}
@@ -289,7 +289,7 @@ static void _rtl92e_read_eeprom_info(struct net_device *dev)
 
 		for (i = 0; i < 6; i += 2) {
 			usValue = rtl92e_eeprom_read(dev,
-				 (EEPROM_NODE_ADDRESS_BYTE_0 + i) >> 1);
+						     (EEPROM_NODE_ADDRESS_BYTE_0 + i) >> 1);
 			*(u16 *)(&addr[i]) = usValue;
 		}
 		eth_hw_addr_set(dev, addr);
@@ -693,27 +693,26 @@ void rtl92e_link_change(struct net_device *dev)
 		u32 reg;
 
 		reg = rtl92e_readl(dev, RCR);
-		if (priv->rtllib->link_state == MAC80211_LINKED) {
+		if (priv->rtllib->link_state == MAC80211_LINKED)
 			priv->receive_config = reg |= RCR_CBSSID;
-		} else {
+		else
 			priv->receive_config = reg &= ~RCR_CBSSID;
-		}
 
 		rtl92e_writel(dev, RCR, reg);
 	}
 }
 
-void rtl92e_set_monitor_mode(struct net_device *dev, bool bAllowAllDA,
-			     bool WriteIntoReg)
+void rtl92e_set_monitor_mode(struct net_device *dev, bool allow_all_da,
+			     bool write_into_reg)
 {
 	struct r8192_priv *priv = rtllib_priv(dev);
 
-	if (bAllowAllDA)
+	if (allow_all_da)
 		priv->receive_config |= RCR_AAP;
 	else
 		priv->receive_config &= ~RCR_AAP;
 
-	if (WriteIntoReg)
+	if (write_into_reg)
 		rtl92e_writel(dev, RCR, priv->receive_config);
 }
 
@@ -860,8 +859,8 @@ static u8 _rtl92e_query_is_short(u8 TxHT, u8 TxRate, struct cb_desc *tcb_desc)
 {
 	u8   tmp_Short;
 
-	tmp_Short = (TxHT == 1) ? ((tcb_desc->bUseShortGI) ? 1 : 0) :
-			((tcb_desc->bUseShortPreamble) ? 1 : 0);
+	tmp_Short = (TxHT == 1) ? ((tcb_desc->use_short_gi) ? 1 : 0) :
+			((tcb_desc->use_short_preamble) ? 1 : 0);
 	if (TxHT == 1 && TxRate != DESC90_RATEMCS15)
 		tmp_Short = 0;
 
@@ -893,18 +892,18 @@ void  rtl92e_fill_tx_desc(struct net_device *dev, struct tx_desc *pdesc,
 		pTxFwInfo->RxAMD = 0;
 	}
 
-	pTxFwInfo->RtsEnable =	(cb_desc->bRTSEnable) ? 1 : 0;
-	pTxFwInfo->CtsEnable = (cb_desc->bCTSEnable) ? 1 : 0;
-	pTxFwInfo->RtsSTBC = (cb_desc->bRTSSTBC) ? 1 : 0;
+	pTxFwInfo->RtsEnable =	(cb_desc->rts_enable) ? 1 : 0;
+	pTxFwInfo->CtsEnable = (cb_desc->cts_enable) ? 1 : 0;
+	pTxFwInfo->RtsSTBC = (cb_desc->rtsstbc) ? 1 : 0;
 	pTxFwInfo->RtsHT = (cb_desc->rts_rate & 0x80) ? 1 : 0;
 	pTxFwInfo->RtsRate = _rtl92e_rate_mgn_to_hw(cb_desc->rts_rate);
 	pTxFwInfo->RtsBandwidth = 0;
 	pTxFwInfo->RtsSubcarrier = cb_desc->RTSSC;
 	pTxFwInfo->RtsShort = (pTxFwInfo->RtsHT == 0) ?
-			  (cb_desc->bRTSUseShortPreamble ? 1 : 0) :
-			  (cb_desc->bRTSUseShortGI ? 1 : 0);
+			  (cb_desc->rts_use_short_preamble ? 1 : 0) :
+			  (cb_desc->rts_use_short_gi ? 1 : 0);
 	if (priv->current_chnl_bw == HT_CHANNEL_WIDTH_20_40) {
-		if (cb_desc->bPacketBW) {
+		if (cb_desc->packet_bw) {
 			pTxFwInfo->TxBandwidth = 1;
 			pTxFwInfo->TxSubCarrier = 0;
 		} else {
@@ -935,7 +934,7 @@ void  rtl92e_fill_tx_desc(struct net_device *dev, struct tx_desc *pdesc,
 
 	pdesc->NoEnc = 1;
 	pdesc->SecType = 0x0;
-	if (cb_desc->bHwSec) {
+	if (cb_desc->hw_sec) {
 		static u8 tmp;
 
 		if (!tmp)
@@ -988,10 +987,10 @@ void  rtl92e_fill_tx_cmd_desc(struct net_device *dev, struct tx_desc_cmd *entry,
 	if (dma_mapping_error(&priv->pdev->dev, mapping))
 		netdev_err(dev, "%s(): DMA Mapping error\n", __func__);
 	memset(entry, 0, 12);
-	entry->LINIP = cb_desc->bLastIniPkt;
+	entry->LINIP = cb_desc->last_ini_pkt;
 	entry->FirstSeg = 1;
 	entry->LastSeg = 1;
-	if (cb_desc->bCmdOrInit == DESC_PACKET_TYPE_INIT) {
+	if (cb_desc->cmd_or_init == DESC_PACKET_TYPE_INIT) {
 		entry->CmdInit = DESC_PACKET_TYPE_INIT;
 	} else {
 		struct tx_desc *entry_tmp = (struct tx_desc *)entry;
@@ -1146,23 +1145,21 @@ static long _rtl92e_signal_scale_mapping(struct r8192_priv *priv, long currsig)
 			_pdrvinfo->RxRate == DESC90_RATE11M) &&\
 			!_pdrvinfo->RxHT)
 
-static void _rtl92e_query_rxphystatus(
-	struct r8192_priv *priv,
-	struct rtllib_rx_stats *pstats,
-	struct rx_desc  *pdesc,
-	struct rx_fwinfo   *pdrvinfo,
-	struct rtllib_rx_stats *precord_stats,
-	bool bpacket_match_bssid,
-	bool bpacket_toself,
-	bool bPacketBeacon,
-	bool bToSelfBA
-	)
+static void _rtl92e_query_rxphystatus(struct r8192_priv *priv,
+				      struct rtllib_rx_stats *pstats,
+				      struct rx_desc  *pdesc,
+				      struct rx_fwinfo   *pdrvinfo,
+				      struct rtllib_rx_stats *precord_stats,
+				      bool bpacket_match_bssid,
+				      bool bpacket_toself,
+				      bool bPacketBeacon,
+				      bool bToSelfBA)
 {
 	struct phy_sts_ofdm_819xpci *pofdm_buf;
 	struct phy_sts_cck_819xpci *pcck_buf;
 	u8 *prxpkt;
 	u8 i, max_spatial_stream, tmp_rxevm;
-	s8 rx_pwr[4], rx_pwr_all = 0;
+	s8 rx_pwr[RF90_PATH_MAX], rx_pwr_all = 0;
 	s8 rx_evmX;
 	u8 evm, pwdb_all;
 	u32 RSSI, total_rssi = 0;
@@ -1175,7 +1172,7 @@ static void _rtl92e_query_rxphystatus(
 	memset(precord_stats, 0, sizeof(struct rtllib_rx_stats));
 	pstats->bPacketMatchBSSID = precord_stats->bPacketMatchBSSID =
 				    bpacket_match_bssid;
-	pstats->bPacketToSelf = precord_stats->bPacketToSelf = bpacket_toself;
+	pstats->packet_to_self = precord_stats->packet_to_self = bpacket_toself;
 	pstats->bIsCCK = precord_stats->bIsCCK = is_cck_rate;
 	pstats->bPacketBeacon = precord_stats->bPacketBeacon = bPacketBeacon;
 	pstats->bToSelfBA = precord_stats->bToSelfBA = bToSelfBA;
@@ -1267,8 +1264,8 @@ static void _rtl92e_query_rxphystatus(
 				else
 					sq = ((64 - sq) * 100) / 44;
 			}
-			pstats->SignalQuality = sq;
-			precord_stats->SignalQuality = sq;
+			pstats->signal_quality = sq;
+			precord_stats->signal_quality = sq;
 			pstats->RxMIMOSignalQuality[0] = sq;
 			precord_stats->RxMIMOSignalQuality[0] = sq;
 			pstats->RxMIMOSignalQuality[1] = -1;
@@ -1296,7 +1293,6 @@ static void _rtl92e_query_rxphystatus(
 		pwdb_all = rtl92e_rx_db_to_percent(rx_pwr_all);
 
 		pstats->RxPWDBAll = precord_stats->RxPWDBAll = pwdb_all;
-		pstats->RxPower = precord_stats->RxPower =	rx_pwr_all;
 		pstats->RecvSignalPower = rx_pwr_all;
 		if (pdrvinfo->RxHT && pdrvinfo->RxRate >= DESC90_RATEMCS8 &&
 		    pdrvinfo->RxRate <= DESC90_RATEMCS15)
@@ -1313,8 +1309,8 @@ static void _rtl92e_query_rxphystatus(
 			evm = rtl92e_evm_db_to_percent(rx_evmX);
 			if (bpacket_match_bssid) {
 				if (i == 0) {
-					pstats->SignalQuality = evm & 0xff;
-					precord_stats->SignalQuality = evm & 0xff;
+					pstats->signal_quality = evm & 0xff;
+					precord_stats->signal_quality = evm & 0xff;
 				}
 				pstats->RxMIMOSignalQuality[i] = evm & 0xff;
 				precord_stats->RxMIMOSignalQuality[i] = evm & 0xff;
@@ -1323,13 +1319,12 @@ static void _rtl92e_query_rxphystatus(
 	}
 
 	if (is_cck_rate) {
-		pstats->SignalStrength = precord_stats->SignalStrength =
-					 _rtl92e_signal_scale_mapping(priv,
-					 (long)pwdb_all);
+		pstats->signal_strength = precord_stats->signal_strength =
+					 _rtl92e_signal_scale_mapping(priv, (long)pwdb_all);
 
 	} else {
 		if (rf_rx_num != 0)
-			pstats->SignalStrength = precord_stats->SignalStrength =
+			pstats->signal_strength = precord_stats->signal_strength =
 					 _rtl92e_signal_scale_mapping(priv,
 					 (long)(total_rssi /= rf_rx_num));
 	}
@@ -1348,14 +1343,7 @@ static void _rtl92e_process_phyinfo(struct r8192_priv *priv, u8 *buffer,
 	static u32 slide_beacon_adc_pwdb_index;
 	static u32 slide_beacon_adc_pwdb_statistics;
 	static u32 last_beacon_adc_pwdb;
-	struct ieee80211_hdr_3addr *hdr;
-	u16 sc;
-	unsigned int seq;
 
-	hdr = (struct ieee80211_hdr_3addr *)buffer;
-	sc = le16_to_cpu(hdr->seq_ctrl);
-	seq = WLAN_GET_SEQ_SEQ(sc);
-	curr_st->Seq_Num = seq;
 	if (!prev_st->bIsAMPDU)
 		bcheck = true;
 
@@ -1364,10 +1352,10 @@ static void _rtl92e_process_phyinfo(struct r8192_priv *priv, u8 *buffer,
 		last_rssi = priv->stats.slide_signal_strength[slide_rssi_index];
 		priv->stats.slide_rssi_total -= last_rssi;
 	}
-	priv->stats.slide_rssi_total += prev_st->SignalStrength;
+	priv->stats.slide_rssi_total += prev_st->signal_strength;
 
 	priv->stats.slide_signal_strength[slide_rssi_index++] =
-					 prev_st->SignalStrength;
+					 prev_st->signal_strength;
 	if (slide_rssi_index >= PHY_RSSI_SLID_WIN_MAX)
 		slide_rssi_index = 0;
 
@@ -1382,7 +1370,7 @@ static void _rtl92e_process_phyinfo(struct r8192_priv *priv, u8 *buffer,
 	if (!bcheck)
 		return;
 
-	if (!prev_st->bIsCCK && prev_st->bPacketToSelf) {
+	if (!prev_st->bIsCCK && prev_st->packet_to_self) {
 		for (rfpath = RF90_PATH_A; rfpath < priv->num_total_rf_path; rfpath++) {
 			if (priv->stats.rx_rssi_percentage[rfpath] == 0) {
 				priv->stats.rx_rssi_percentage[rfpath] =
@@ -1428,7 +1416,7 @@ static void _rtl92e_process_phyinfo(struct r8192_priv *priv, u8 *buffer,
 		if (prev_st->RxPWDBAll >= 3)
 			prev_st->RxPWDBAll -= 3;
 	}
-	if (prev_st->bPacketToSelf || prev_st->bPacketBeacon ||
+	if (prev_st->packet_to_self || prev_st->bPacketBeacon ||
 	    prev_st->bToSelfBA) {
 		if (priv->undecorated_smoothed_pwdb < 0)
 			priv->undecorated_smoothed_pwdb = prev_st->RxPWDBAll;
@@ -1448,8 +1436,8 @@ static void _rtl92e_process_phyinfo(struct r8192_priv *priv, u8 *buffer,
 		rtl92e_update_rx_statistics(priv, prev_st);
 	}
 
-	if (prev_st->SignalQuality != 0) {
-		if (prev_st->bPacketToSelf || prev_st->bPacketBeacon ||
+	if (prev_st->signal_quality != 0) {
+		if (prev_st->packet_to_self || prev_st->bPacketBeacon ||
 		    prev_st->bToSelfBA) {
 			if (slide_evm_statistics++ >= PHY_RSSI_SLID_WIN_MAX) {
 				slide_evm_statistics = PHY_RSSI_SLID_WIN_MAX;
@@ -1458,10 +1446,10 @@ static void _rtl92e_process_phyinfo(struct r8192_priv *priv, u8 *buffer,
 				priv->stats.slide_evm_total -= last_evm;
 			}
 
-			priv->stats.slide_evm_total += prev_st->SignalQuality;
+			priv->stats.slide_evm_total += prev_st->signal_quality;
 
 			priv->stats.slide_evm[slide_evm_index++] =
-						 prev_st->SignalQuality;
+						 prev_st->signal_quality;
 			if (slide_evm_index >= PHY_RSSI_SLID_WIN_MAX)
 				slide_evm_index = 0;
 
@@ -1470,7 +1458,7 @@ static void _rtl92e_process_phyinfo(struct r8192_priv *priv, u8 *buffer,
 			priv->stats.last_signal_strength_inpercent = tmp_val;
 		}
 
-		if (prev_st->bPacketToSelf ||
+		if (prev_st->packet_to_self ||
 		    prev_st->bPacketBeacon ||
 		    prev_st->bToSelfBA) {
 			for (ij = 0; ij < 2; ij++) {
@@ -1505,7 +1493,7 @@ static void _rtl92e_translate_rx_signal_stats(struct net_device *dev,
 	u8 *tmp_buf;
 	u8 *praddr;
 
-	tmp_buf = skb->data + pstats->RxDrvInfoSize + pstats->RxBufShift;
+	tmp_buf = skb->data + pstats->rx_drv_info_size + pstats->rx_buf_shift;
 
 	hdr = (struct ieee80211_hdr_3addr *)tmp_buf;
 	fc = le16_to_cpu(hdr->frame_control);
@@ -1518,7 +1506,7 @@ static void _rtl92e_translate_rx_signal_stats(struct net_device *dev,
 				  (fc & IEEE80211_FCTL_TODS) ? hdr->addr1 :
 				  (fc & IEEE80211_FCTL_FROMDS) ? hdr->addr2 :
 				  hdr->addr3) &&
-		 (!pstats->bHwError) && (!pstats->bCRC) && (!pstats->bICV));
+		 (!pstats->hw_error) && (!pstats->bCRC) && (!pstats->bICV));
 	bpacket_toself = bpacket_match_bssid &&		/* check this */
 			 ether_addr_equal(praddr, priv->rtllib->dev->dev_addr);
 	if (ieee80211_is_beacon(hdr->frame_control))
@@ -1530,13 +1518,12 @@ static void _rtl92e_translate_rx_signal_stats(struct net_device *dev,
 	rtl92e_copy_mpdu_stats(pstats, &previous_stats);
 }
 
-static void _rtl92e_update_received_rate_histogram_stats(
-					   struct net_device *dev,
-					   struct rtllib_rx_stats *pstats)
+static void _rtl92e_update_received_rate_histogram_stats(struct net_device *dev,
+							 struct rtllib_rx_stats *pstats)
 {
 	struct r8192_priv *priv = (struct r8192_priv *)rtllib_priv(dev);
 	u32 rcvType = 1;
-	u32 rateIndex;
+	u32 rate_index;
 
 	if (pstats->bCRC)
 		rcvType = 2;
@@ -1545,95 +1532,95 @@ static void _rtl92e_update_received_rate_histogram_stats(
 
 	switch (pstats->rate) {
 	case MGN_1M:
-		rateIndex = 0;
+		rate_index = 0;
 		break;
 	case MGN_2M:
-		rateIndex = 1;
+		rate_index = 1;
 		break;
 	case MGN_5_5M:
-		rateIndex = 2;
+		rate_index = 2;
 		break;
 	case MGN_11M:
-		rateIndex = 3;
+		rate_index = 3;
 		break;
 	case MGN_6M:
-		rateIndex = 4;
+		rate_index = 4;
 		break;
 	case MGN_9M:
-		rateIndex = 5;
+		rate_index = 5;
 		break;
 	case MGN_12M:
-		rateIndex = 6;
+		rate_index = 6;
 		break;
 	case MGN_18M:
-		rateIndex = 7;
+		rate_index = 7;
 		break;
 	case MGN_24M:
-		rateIndex = 8;
+		rate_index = 8;
 		break;
 	case MGN_36M:
-		rateIndex = 9;
+		rate_index = 9;
 		break;
 	case MGN_48M:
-		rateIndex = 10;
+		rate_index = 10;
 		break;
 	case MGN_54M:
-		rateIndex = 11;
+		rate_index = 11;
 		break;
 	case MGN_MCS0:
-		rateIndex = 12;
+		rate_index = 12;
 		break;
 	case MGN_MCS1:
-		rateIndex = 13;
+		rate_index = 13;
 		break;
 	case MGN_MCS2:
-		rateIndex = 14;
+		rate_index = 14;
 		break;
 	case MGN_MCS3:
-		rateIndex = 15;
+		rate_index = 15;
 		break;
 	case MGN_MCS4:
-		rateIndex = 16;
+		rate_index = 16;
 		break;
 	case MGN_MCS5:
-		rateIndex = 17;
+		rate_index = 17;
 		break;
 	case MGN_MCS6:
-		rateIndex = 18;
+		rate_index = 18;
 		break;
 	case MGN_MCS7:
-		rateIndex = 19;
+		rate_index = 19;
 		break;
 	case MGN_MCS8:
-		rateIndex = 20;
+		rate_index = 20;
 		break;
 	case MGN_MCS9:
-		rateIndex = 21;
+		rate_index = 21;
 		break;
 	case MGN_MCS10:
-		rateIndex = 22;
+		rate_index = 22;
 		break;
 	case MGN_MCS11:
-		rateIndex = 23;
+		rate_index = 23;
 		break;
 	case MGN_MCS12:
-		rateIndex = 24;
+		rate_index = 24;
 		break;
 	case MGN_MCS13:
-		rateIndex = 25;
+		rate_index = 25;
 		break;
 	case MGN_MCS14:
-		rateIndex = 26;
+		rate_index = 26;
 		break;
 	case MGN_MCS15:
-		rateIndex = 27;
+		rate_index = 27;
 		break;
 	default:
-		rateIndex = 28;
+		rate_index = 28;
 		break;
 	}
-	priv->stats.received_rate_histogram[0][rateIndex]++;
-	priv->stats.received_rate_histogram[rcvType][rateIndex]++;
+	priv->stats.received_rate_histogram[0][rate_index]++;
+	priv->stats.received_rate_histogram[rcvType][rate_index]++;
 }
 
 bool rtl92e_get_rx_stats(struct net_device *dev, struct rtllib_rx_stats *stats,
@@ -1643,26 +1630,23 @@ bool rtl92e_get_rx_stats(struct net_device *dev, struct rtllib_rx_stats *stats,
 
 	stats->bICV = pdesc->ICV;
 	stats->bCRC = pdesc->CRC32;
-	stats->bHwError = pdesc->CRC32 | pdesc->ICV;
+	stats->hw_error = pdesc->CRC32 | pdesc->ICV;
 
 	stats->Length = pdesc->Length;
 	if (stats->Length < 24)
-		stats->bHwError |= 1;
+		stats->hw_error |= 1;
 
-	if (stats->bHwError) {
-		stats->bShift = false;
+	if (stats->hw_error)
 		return false;
-	}
 
-	stats->RxDrvInfoSize = pdesc->RxDrvInfoSize;
-	stats->RxBufShift = (pdesc->Shift) & 0x03;
-	stats->Decrypted = !pdesc->SWDec;
+	stats->rx_drv_info_size = pdesc->rx_drv_info_size;
+	stats->rx_buf_shift = (pdesc->Shift) & 0x03;
+	stats->decrypted = !pdesc->SWDec;
 
-	pDrvInfo = (struct rx_fwinfo *)(skb->data + stats->RxBufShift);
+	pDrvInfo = (struct rx_fwinfo *)(skb->data + stats->rx_buf_shift);
 
 	stats->rate = _rtl92e_rate_hw_to_mgn((bool)pDrvInfo->RxHT,
 					     pDrvInfo->RxRate);
-	stats->bShortPreamble = pDrvInfo->SPLCP;
 
 	_rtl92e_update_received_rate_histogram_stats(dev, stats);
 
@@ -1670,22 +1654,12 @@ bool rtl92e_get_rx_stats(struct net_device *dev, struct rtllib_rx_stats *stats,
 	stats->bFirstMPDU = (pDrvInfo->PartAggr == 1) &&
 			    (pDrvInfo->FirstAGGR == 1);
 
-	stats->TimeStampLow = pDrvInfo->TSFL;
-	stats->TimeStampHigh = rtl92e_readl(dev, TSFR + 4);
-
-	if ((stats->RxBufShift + stats->RxDrvInfoSize) > 0)
-		stats->bShift = 1;
-
-	stats->RxIs40MHzPacket = pDrvInfo->BW;
+	stats->time_stamp_low = pDrvInfo->TSFL;
+	stats->time_stamp_high = rtl92e_readl(dev, TSFR + 4);
 
 	_rtl92e_translate_rx_signal_stats(dev, skb, stats, pdesc, pDrvInfo);
 	skb_trim(skb, skb->len - S_CRC_LEN);
 
-
-	stats->packetlength = stats->Length - 4;
-	stats->fraglength = stats->packetlength;
-	stats->fragoffset = 0;
-	stats->ntotalfrag = 1;
 	return true;
 }
 
@@ -1698,7 +1672,7 @@ void rtl92e_stop_adapter(struct net_device *dev, bool reset)
 	u32	ulRegRead;
 
 	op_mode = RT_OP_MODE_NO_LINK;
-	priv->rtllib->SetHwRegHandler(dev, HW_VAR_MEDIA_STATUS, &op_mode);
+	priv->rtllib->set_hw_reg_handler(dev, HW_VAR_MEDIA_STATUS, &op_mode);
 
 	if (!priv->rtllib->bSupportRemoteWakeUp) {
 		u1bTmp = 0x0;
@@ -1852,15 +1826,15 @@ bool rtl92e_is_rx_stuck(struct net_device *dev)
 	u16		  RegRxCounter = rtl92e_readw(dev, 0x130);
 	bool		  bStuck = false;
 	static u8	  rx_chk_cnt;
-	u32		SlotIndex = 0, TotalRxStuckCount = 0;
+	u32		slot_index = 0, TotalRxStuckCount = 0;
 	u8		i;
 	u8		SilentResetRxSoltNum = 4;
 
 	rx_chk_cnt++;
 	if (priv->undecorated_smoothed_pwdb >= (RATE_ADAPTIVE_TH_HIGH + 5)) {
 		rx_chk_cnt = 0;
-	} else if ((priv->undecorated_smoothed_pwdb < (RATE_ADAPTIVE_TH_HIGH + 5))
-	  && (((priv->current_chnl_bw != HT_CHANNEL_WIDTH_20) &&
+	} else if ((priv->undecorated_smoothed_pwdb < (RATE_ADAPTIVE_TH_HIGH + 5)) &&
+	  (((priv->current_chnl_bw != HT_CHANNEL_WIDTH_20) &&
 	  (priv->undecorated_smoothed_pwdb >= RATE_ADAPTIVE_TH_LOW_40M))
 	  || ((priv->current_chnl_bw == HT_CHANNEL_WIDTH_20) &&
 	  (priv->undecorated_smoothed_pwdb >= RATE_ADAPTIVE_TH_LOW_20M)))) {
@@ -1881,11 +1855,10 @@ bool rtl92e_is_rx_stuck(struct net_device *dev)
 		rx_chk_cnt = 0;
 	}
 
-
-	SlotIndex = (priv->silent_reset_rx_slot_index++) % SilentResetRxSoltNum;
+	slot_index = (priv->silent_reset_rx_slot_index++) % SilentResetRxSoltNum;
 
 	if (priv->rx_ctr == RegRxCounter) {
-		priv->silent_reset_rx_stuck_event[SlotIndex] = 1;
+		priv->silent_reset_rx_stuck_event[slot_index] = 1;
 
 		for (i = 0; i < SilentResetRxSoltNum; i++)
 			TotalRxStuckCount += priv->silent_reset_rx_stuck_event[i];
@@ -1897,7 +1870,7 @@ bool rtl92e_is_rx_stuck(struct net_device *dev)
 					 priv->silent_reset_rx_stuck_event[i];
 		}
 	} else {
-		priv->silent_reset_rx_stuck_event[SlotIndex] = 0;
+		priv->silent_reset_rx_stuck_event[slot_index] = 0;
 	}
 
 	priv->rx_ctr = RegRxCounter;
@@ -1938,5 +1911,5 @@ bool rtl92e_is_halfn_supported_by_ap(struct net_device *dev)
 	struct r8192_priv *priv = rtllib_priv(dev);
 	struct rtllib_device *ieee = priv->rtllib;
 
-	return ieee->bHalfWirelessN24GMode;
+	return ieee->half_wireless_n24g_mode;
 }

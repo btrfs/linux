@@ -16,7 +16,6 @@
 #include <linux/init.h>
 #include <linux/types.h>
 #include <linux/dmi.h>
-#include <linux/fb.h>
 #include <linux/backlight.h>
 #include <linux/leds.h>
 #include <linux/platform_device.h>
@@ -276,6 +275,7 @@ static bool has_type_aa;
 static u16 commun_func_bitmap;
 static u8 commun_fn_key_number;
 static bool cycle_gaming_thermal_profile = true;
+static bool predator_v4;
 
 module_param(mailled, int, 0444);
 module_param(brightness, int, 0444);
@@ -284,6 +284,7 @@ module_param(force_series, int, 0444);
 module_param(force_caps, int, 0444);
 module_param(ec_raw_mode, bool, 0444);
 module_param(cycle_gaming_thermal_profile, bool, 0644);
+module_param(predator_v4, bool, 0444);
 MODULE_PARM_DESC(mailled, "Set initial state of Mail LED");
 MODULE_PARM_DESC(brightness, "Set initial LCD backlight brightness");
 MODULE_PARM_DESC(threeg, "Set initial state of 3G hardware");
@@ -292,6 +293,8 @@ MODULE_PARM_DESC(force_caps, "Force the capability bitmask to this value");
 MODULE_PARM_DESC(ec_raw_mode, "Enable EC raw mode");
 MODULE_PARM_DESC(cycle_gaming_thermal_profile,
 	"Set thermal mode key in cycle mode. Disabling it sets the mode key in turbo toggle mode");
+MODULE_PARM_DESC(predator_v4,
+	"Enable features for predator laptops that use predator sense v4");
 
 struct acer_data {
 	int mailled;
@@ -585,6 +588,24 @@ static const struct dmi_system_id acer_quirks[] __initconst = {
 		.driver_data = &quirk_acer_predator_v4,
 	},
 	{
+		.callback = dmi_matched,
+		.ident = "Acer Predator PH16-71",
+		.matches = {
+			DMI_MATCH(DMI_SYS_VENDOR, "Acer"),
+			DMI_MATCH(DMI_PRODUCT_NAME, "Predator PH16-71"),
+		},
+		.driver_data = &quirk_acer_predator_v4,
+	},
+	{
+		.callback = dmi_matched,
+		.ident = "Acer Predator PH18-71",
+		.matches = {
+			DMI_MATCH(DMI_SYS_VENDOR, "Acer"),
+			DMI_MATCH(DMI_PRODUCT_NAME, "Predator PH18-71"),
+		},
+		.driver_data = &quirk_acer_predator_v4,
+	},
+	{
 		.callback = set_force_caps,
 		.ident = "Acer Aspire Switch 10E SW3-016",
 		.matches = {
@@ -725,7 +746,9 @@ enum acer_predator_v4_thermal_profile_wmi {
 /* Find which quirks are needed for a particular vendor/ model pair */
 static void __init find_quirks(void)
 {
-	if (!force_series) {
+	if (predator_v4) {
+		quirks = &quirk_acer_predator_v4;
+	} else if (!force_series) {
 		dmi_check_system(acer_quirks);
 		dmi_check_system(non_acer_quirks);
 	} else if (force_series == 2490) {
@@ -1661,7 +1684,7 @@ static int acer_backlight_init(struct device *dev)
 
 	acer_backlight_device = bd;
 
-	bd->props.power = FB_BLANK_UNBLANK;
+	bd->props.power = BACKLIGHT_POWER_ON;
 	bd->props.brightness = read_brightness(bd);
 	backlight_update_status(bd);
 	return 0;
@@ -2200,39 +2223,25 @@ static void acer_rfkill_exit(void)
 	}
 }
 
-static void acer_wmi_notify(u32 value, void *context)
+static void acer_wmi_notify(union acpi_object *obj, void *context)
 {
-	struct acpi_buffer response = { ACPI_ALLOCATE_BUFFER, NULL };
-	union acpi_object *obj;
 	struct event_return_value return_value;
-	acpi_status status;
 	u16 device_state;
 	const struct key_entry *key;
 	u32 scancode;
-
-	status = wmi_get_event_data(value, &response);
-	if (status != AE_OK) {
-		pr_warn("bad event status 0x%x\n", status);
-		return;
-	}
-
-	obj = (union acpi_object *)response.pointer;
 
 	if (!obj)
 		return;
 	if (obj->type != ACPI_TYPE_BUFFER) {
 		pr_warn("Unknown response received %d\n", obj->type);
-		kfree(obj);
 		return;
 	}
 	if (obj->buffer.length != 8) {
 		pr_warn("Unknown buffer length %d\n", obj->buffer.length);
-		kfree(obj);
 		return;
 	}
 
 	return_value = *((struct event_return_value *)obj->buffer.pointer);
-	kfree(obj);
 
 	switch (return_value.function) {
 	case WMID_HOTKEY_EVENT:

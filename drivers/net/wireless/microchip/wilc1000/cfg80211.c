@@ -356,7 +356,7 @@ static int connect(struct wiphy *wiphy, struct net_device *dev,
 			memcpy(vif->auth.ssid.ssid, sme->ssid, sme->ssid_len);
 			vif->auth.ssid.ssid_len = sme->ssid_len;
 		}
-		vif->auth.key_mgmt_suite = cpu_to_be32(sme->crypto.akm_suites[0]);
+		vif->auth.key_mgmt_suite = sme->crypto.akm_suites[0];
 		ether_addr_copy(vif->auth.bssid, sme->bssid);
 		break;
 
@@ -1518,7 +1518,7 @@ static struct wilc_vif *wilc_get_vif_from_type(struct wilc *wl, int type)
 {
 	struct wilc_vif *vif;
 
-	list_for_each_entry_rcu(vif, &wl->vif_list, list) {
+	wilc_for_each_vif(wl, vif) {
 		if (vif->iftype == type)
 			return vif;
 	}
@@ -1609,29 +1609,11 @@ static int del_virtual_intf(struct wiphy *wiphy, struct wireless_dev *wdev)
 	cfg80211_unregister_netdevice(vif->ndev);
 	vif->monitor_flag = 0;
 
-	wilc_set_operation_mode(vif, 0, 0, 0);
 	mutex_lock(&wl->vif_mutex);
 	list_del_rcu(&vif->list);
 	wl->vif_num--;
 	mutex_unlock(&wl->vif_mutex);
 	synchronize_srcu(&wl->srcu);
-	return 0;
-}
-
-static int wilc_suspend(struct wiphy *wiphy, struct cfg80211_wowlan *wow)
-{
-	struct wilc *wl = wiphy_priv(wiphy);
-
-	if (!wow && wilc_wlan_get_num_conn_ifcs(wl))
-		wl->suspend_event = true;
-	else
-		wl->suspend_event = false;
-
-	return 0;
-}
-
-static int wilc_resume(struct wiphy *wiphy)
-{
 	return 0;
 }
 
@@ -1740,8 +1722,6 @@ static const struct cfg80211_ops wilc_cfg80211_ops = {
 	.set_power_mgmt = set_power_mgmt,
 	.set_cqm_rssi_config = set_cqm_rssi_config,
 
-	.suspend = wilc_suspend,
-	.resume = wilc_resume,
 	.set_wakeup = wilc_set_wakeup,
 	.set_tx_power = set_tx_power,
 	.get_tx_power = get_tx_power,
@@ -1781,7 +1761,6 @@ int wilc_cfg80211_init(struct wilc **wilc, struct device *dev, int io_type,
 		       const struct wilc_hif_func *ops)
 {
 	struct wilc *wl;
-	struct wilc_vif *vif;
 	int ret, i;
 
 	wl = wilc_create_wiphy(dev);
@@ -1804,10 +1783,10 @@ int wilc_cfg80211_init(struct wilc **wilc, struct device *dev, int io_type,
 	INIT_LIST_HEAD(&wl->rxq_head.list);
 	INIT_LIST_HEAD(&wl->vif_list);
 
-	vif = wilc_netdev_ifc_init(wl, "wlan%d", WILC_STATION_MODE,
-				   NL80211_IFTYPE_STATION, false);
-	if (IS_ERR(vif)) {
-		ret = PTR_ERR(vif);
+	wl->hif_workqueue = alloc_ordered_workqueue("%s", WQ_MEM_RECLAIM,
+						    wiphy_name(wl->wiphy));
+	if (!wl->hif_workqueue) {
+		ret = -ENOMEM;
 		goto free_cfg;
 	}
 

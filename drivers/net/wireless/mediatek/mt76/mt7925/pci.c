@@ -254,7 +254,7 @@ static int mt7925_dma_init(struct mt792x_dev *dev)
 	if (ret < 0)
 		return ret;
 
-	netif_napi_add_tx(&dev->mt76.tx_napi_dev, &dev->mt76.tx_napi,
+	netif_napi_add_tx(dev->mt76.tx_napi_dev, &dev->mt76.tx_napi,
 			  mt792x_poll_tx);
 	napi_enable(&dev->mt76.tx_napi);
 
@@ -279,7 +279,7 @@ static int mt7925_pci_probe(struct pci_dev *pdev,
 		.rx_skb = mt7925_queue_rx_skb,
 		.rx_poll_complete = mt792x_rx_poll_complete,
 		.sta_add = mt7925_mac_sta_add,
-		.sta_assoc = mt7925_mac_sta_assoc,
+		.sta_event = mt7925_mac_sta_event,
 		.sta_remove = mt7925_mac_sta_remove,
 		.update_survey = mt792x_update_channel,
 	};
@@ -373,6 +373,9 @@ static int mt7925_pci_probe(struct pci_dev *pdev,
 	bus_ops->rmw = mt7925_rmw;
 	dev->mt76.bus = bus_ops;
 
+	if (!mt7925_disable_aspm && mt76_pci_aspm_supported(pdev))
+		dev->aspm_supported = true;
+
 	ret = __mt792x_mcu_fw_pmctrl(dev);
 	if (ret)
 		goto err_free_dev;
@@ -385,6 +388,8 @@ static int mt7925_pci_probe(struct pci_dev *pdev,
 		    (mt76_rr(dev, MT_HW_REV) & 0xff);
 
 	dev_info(mdev->dev, "ASIC revision: %04x\n", mdev->rev);
+
+	mt76_rmw_field(dev, MT_HW_EMI_CTL, MT_HW_EMI_CTL_SLPPROT_EN, 1);
 
 	ret = mt792x_wfsys_reset(dev);
 	if (ret)
@@ -425,6 +430,7 @@ static void mt7925_pci_remove(struct pci_dev *pdev)
 	struct mt792x_dev *dev = container_of(mdev, struct mt792x_dev, mt76);
 
 	mt7925e_unregister_device(dev);
+	set_bit(MT76_REMOVED, &mdev->phy.state);
 	devm_free_irq(&pdev->dev, pdev->irq, dev);
 	mt76_free_device(&dev->mt76);
 	pci_free_irq_vectors(pdev);
@@ -442,6 +448,8 @@ static int mt7925_pci_suspend(struct device *device)
 	flush_work(&dev->reset_work);
 	cancel_delayed_work_sync(&pm->ps_work);
 	cancel_work_sync(&pm->wake_work);
+
+	mt7925_roc_abort_sync(dev);
 
 	err = mt792x_mcu_drv_pmctrl(dev);
 	if (err < 0)

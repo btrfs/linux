@@ -22,6 +22,7 @@
 #include "smb2proto.h"
 #include "fs_context.h"
 #include "cached_dir.h"
+#include "reparse.h"
 
 /*
  * To be safe - for UCS to UTF-8 with strings loaded with the rare long
@@ -54,23 +55,6 @@ static inline void dump_cifs_file_struct(struct file *file, char *label)
 {
 }
 #endif /* DEBUG2 */
-
-/*
- * Match a reparse point inode if reparse tag and ctime haven't changed.
- *
- * Windows Server updates ctime of reparse points when their data have changed.
- * The server doesn't allow changing reparse tags from existing reparse points,
- * though it's worth checking.
- */
-static inline bool reparse_inode_match(struct inode *inode,
-				       struct cifs_fattr *fattr)
-{
-	struct timespec64 ctime = inode_get_ctime(inode);
-
-	return (CIFS_I(inode)->cifsAttrs & ATTR_REPARSE) &&
-		CIFS_I(inode)->reparse_tag == fattr->cf_cifstag &&
-		timespec64_equal(&ctime, &fattr->cf_ctime);
-}
 
 /*
  * Attempt to preload the dcache with the results from the FIND_FIRST/NEXT
@@ -141,6 +125,8 @@ retry:
 					if (likely(reparse_inode_match(inode, fattr))) {
 						fattr->cf_mode = inode->i_mode;
 						fattr->cf_rdev = inode->i_rdev;
+						fattr->cf_uid = inode->i_uid;
+						fattr->cf_gid = inode->i_gid;
 						fattr->cf_eof = CIFS_I(inode)->netfs.remote_i_size;
 						fattr->cf_symlink_target = NULL;
 					} else {
@@ -148,7 +134,7 @@ retry:
 						rc = -ESTALE;
 					}
 				}
-				if (!rc && !cifs_fattr_to_inode(inode, fattr)) {
+				if (!rc && !cifs_fattr_to_inode(inode, fattr, true)) {
 					dput(dentry);
 					return;
 				}
@@ -567,7 +553,7 @@ static void cifs_fill_dirent_std(struct cifs_dirent *de,
 		const FIND_FILE_STANDARD_INFO *info)
 {
 	de->name = &info->FileName[0];
-	/* one byte length, no endianess conversion */
+	/* one byte length, no endianness conversion */
 	de->namelen = info->FileNameLength;
 	de->resume_key = info->ResumeKey;
 }
@@ -829,7 +815,7 @@ static bool emit_cached_dirents(struct cached_dirents *cde,
 		 * However, this sequence of ->pos values may have holes
 		 * in it, for example dot-dirs returned from the server
 		 * are suppressed.
-		 * Handle this bu forcing ctx->pos to be the same as the
+		 * Handle this by forcing ctx->pos to be the same as the
 		 * ->pos of the current dirent we emit from the cache.
 		 * This means that when we emit these entries from the cache
 		 * we now emit them with the same ->pos value as in the

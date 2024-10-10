@@ -10,7 +10,7 @@
  *	Safe accesses to vmalloc/direct-mapped discontiguous areas, Kanoj Sarcar <kanoj@sgi.com>
  */
 
-#include <linux/crash_core.h>
+#include <linux/vmcore_info.h>
 #include <linux/mm.h>
 #include <linux/proc_fs.h>
 #include <linux/kcore.h>
@@ -235,7 +235,7 @@ static int kcore_ram_list(struct list_head *list)
 	int nid, ret;
 	unsigned long end_pfn;
 
-	/* Not inialized....update now */
+	/* Not initialized....update now */
 	/* find out "max pfn" */
 	end_pfn = 0;
 	for_each_node_state(nid, N_MEMORY) {

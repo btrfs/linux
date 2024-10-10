@@ -3,11 +3,13 @@
 
 #include <linux/platform_device.h>
 #include <linux/mod_devicetable.h>
+#include <linux/vmalloc.h>
 #include <linux/module.h>
 #include <linux/delay.h>
 #include <linux/sizes.h>
 #include <linux/bits.h>
-#include <asm/unaligned.h>
+#include <cxl/mailbox.h>
+#include <linux/unaligned.h>
 #include <crypto/sha2.h>
 #include <cxlmem.h>
 
@@ -127,7 +129,7 @@ static struct {
 #define CXL_TEST_EVENT_CNT_MAX 15
 
 /* Set a number of events to return at a time for simulation.  */
-#define CXL_TEST_EVENT_CNT 3
+#define CXL_TEST_EVENT_RET_MAX 4
 
 struct mock_event_log {
 	u16 clear_idx;
@@ -222,6 +224,12 @@ static void mes_add_event(struct mock_event_store *mes,
 	log->nr_events++;
 }
 
+/*
+ * Vary the number of events returned to simulate events occuring while the
+ * logs are being read.
+ */
+static int ret_limit = 0;
+
 static int mock_get_event(struct device *dev, struct cxl_mbox_cmd *cmd)
 {
 	struct cxl_get_event_payload *pl;
@@ -233,14 +241,18 @@ static int mock_get_event(struct device *dev, struct cxl_mbox_cmd *cmd)
 	if (cmd->size_in != sizeof(log_type))
 		return -EINVAL;
 
-	if (cmd->size_out < struct_size(pl, records, CXL_TEST_EVENT_CNT))
+	ret_limit = (ret_limit + 1) % CXL_TEST_EVENT_RET_MAX;
+	if (!ret_limit)
+		ret_limit = 1;
+
+	if (cmd->size_out < struct_size(pl, records, ret_limit))
 		return -EINVAL;
 
 	log_type = *((u8 *)cmd->payload_in);
 	if (log_type >= CXL_EVENT_TYPE_MAX)
 		return -EINVAL;
 
-	memset(cmd->payload_out, 0, cmd->size_out);
+	memset(cmd->payload_out, 0, struct_size(pl, records, 0));
 
 	log = event_find_log(dev, log_type);
 	if (!log || event_log_empty(log))
@@ -248,7 +260,7 @@ static int mock_get_event(struct device *dev, struct cxl_mbox_cmd *cmd)
 
 	pl = cmd->payload_out;
 
-	for (i = 0; i < CXL_TEST_EVENT_CNT && !event_log_empty(log); i++) {
+	for (i = 0; i < ret_limit && !event_log_empty(log); i++) {
 		memcpy(&pl->records[i], event_get_current(log),
 		       sizeof(pl->records[i]));
 		pl->records[i].event.generic.hdr.handle =
@@ -256,6 +268,7 @@ static int mock_get_event(struct device *dev, struct cxl_mbox_cmd *cmd)
 		log->cur_idx++;
 	}
 
+	cmd->size_out = struct_size(pl, records, i);
 	pl->record_count = cpu_to_le16(i);
 	if (!event_log_empty(log))
 		pl->flags |= CXL_GET_EVENT_FLAG_MORE_RECORDS;
@@ -373,19 +386,21 @@ struct cxl_test_gen_media {
 struct cxl_test_gen_media gen_media = {
 	.id = CXL_EVENT_GEN_MEDIA_UUID,
 	.rec = {
-		.hdr = {
-			.length = sizeof(struct cxl_test_gen_media),
-			.flags[0] = CXL_EVENT_RECORD_FLAG_PERMANENT,
-			/* .handle = Set dynamically */
-			.related_handle = cpu_to_le16(0),
+		.media_hdr = {
+			.hdr = {
+				.length = sizeof(struct cxl_test_gen_media),
+				.flags[0] = CXL_EVENT_RECORD_FLAG_PERMANENT,
+				/* .handle = Set dynamically */
+				.related_handle = cpu_to_le16(0),
+			},
+			.phys_addr = cpu_to_le64(0x2000),
+			.descriptor = CXL_GMER_EVT_DESC_UNCORECTABLE_EVENT,
+			.type = CXL_GMER_MEM_EVT_TYPE_DATA_PATH_ERROR,
+			.transaction_type = CXL_GMER_TRANS_HOST_WRITE,
+			/* .validity_flags = <set below> */
+			.channel = 1,
+			.rank = 30,
 		},
-		.phys_addr = cpu_to_le64(0x2000),
-		.descriptor = CXL_GMER_EVT_DESC_UNCORECTABLE_EVENT,
-		.type = CXL_GMER_MEM_EVT_TYPE_DATA_PATH_ERROR,
-		.transaction_type = CXL_GMER_TRANS_HOST_WRITE,
-		/* .validity_flags = <set below> */
-		.channel = 1,
-		.rank = 30
 	},
 };
 
@@ -397,18 +412,20 @@ struct cxl_test_dram {
 struct cxl_test_dram dram = {
 	.id = CXL_EVENT_DRAM_UUID,
 	.rec = {
-		.hdr = {
-			.length = sizeof(struct cxl_test_dram),
-			.flags[0] = CXL_EVENT_RECORD_FLAG_PERF_DEGRADED,
-			/* .handle = Set dynamically */
-			.related_handle = cpu_to_le16(0),
+		.media_hdr = {
+			.hdr = {
+				.length = sizeof(struct cxl_test_dram),
+				.flags[0] = CXL_EVENT_RECORD_FLAG_PERF_DEGRADED,
+				/* .handle = Set dynamically */
+				.related_handle = cpu_to_le16(0),
+			},
+			.phys_addr = cpu_to_le64(0x8000),
+			.descriptor = CXL_GMER_EVT_DESC_THRESHOLD_EVENT,
+			.type = CXL_GMER_MEM_EVT_TYPE_INV_ADDR,
+			.transaction_type = CXL_GMER_TRANS_INTERNAL_MEDIA_SCRUB,
+			/* .validity_flags = <set below> */
+			.channel = 1,
 		},
-		.phys_addr = cpu_to_le64(0x8000),
-		.descriptor = CXL_GMER_EVT_DESC_THRESHOLD_EVENT,
-		.type = CXL_GMER_MEM_EVT_TYPE_INV_ADDR,
-		.transaction_type = CXL_GMER_TRANS_INTERNAL_MEDIA_SCRUB,
-		/* .validity_flags = <set below> */
-		.channel = 1,
 		.bank_group = 5,
 		.bank = 2,
 		.column = {0xDE, 0xAD},
@@ -462,11 +479,11 @@ static int mock_set_timestamp(struct cxl_dev_state *cxlds,
 static void cxl_mock_add_event_logs(struct mock_event_store *mes)
 {
 	put_unaligned_le16(CXL_GMER_VALID_CHANNEL | CXL_GMER_VALID_RANK,
-			   &gen_media.rec.validity_flags);
+			   &gen_media.rec.media_hdr.validity_flags);
 
 	put_unaligned_le16(CXL_DER_VALID_CHANNEL | CXL_DER_VALID_BANK_GROUP |
 			   CXL_DER_VALID_BANK | CXL_DER_VALID_COLUMN,
-			   &dram.rec.validity_flags);
+			   &dram.rec.media_hdr.validity_flags);
 
 	mes_add_event(mes, CXL_EVENT_TYPE_INFO, &maint_needed);
 	mes_add_event(mes, CXL_EVENT_TYPE_INFO,
@@ -518,6 +535,7 @@ static int mock_gsl(struct cxl_mbox_cmd *cmd)
 
 static int mock_get_log(struct cxl_memdev_state *mds, struct cxl_mbox_cmd *cmd)
 {
+	struct cxl_mailbox *cxl_mbox = &mds->cxlds.cxl_mbox;
 	struct cxl_mbox_get_log *gl = cmd->payload_in;
 	u32 offset = le32_to_cpu(gl->offset);
 	u32 length = le32_to_cpu(gl->length);
@@ -526,7 +544,7 @@ static int mock_get_log(struct cxl_memdev_state *mds, struct cxl_mbox_cmd *cmd)
 
 	if (cmd->size_in < sizeof(*gl))
 		return -EINVAL;
-	if (length > mds->payload_size)
+	if (length > cxl_mbox->payload_size)
 		return -EINVAL;
 	if (offset + length > sizeof(mock_cel))
 		return -EINVAL;
@@ -601,12 +619,13 @@ void cxl_mockmem_sanitize_work(struct work_struct *work)
 {
 	struct cxl_memdev_state *mds =
 		container_of(work, typeof(*mds), security.poll_dwork.work);
+	struct cxl_mailbox *cxl_mbox = &mds->cxlds.cxl_mbox;
 
-	mutex_lock(&mds->mbox_mutex);
+	mutex_lock(&cxl_mbox->mbox_mutex);
 	if (mds->security.sanitize_node)
 		sysfs_notify_dirent(mds->security.sanitize_node);
 	mds->security.sanitize_active = false;
-	mutex_unlock(&mds->mbox_mutex);
+	mutex_unlock(&cxl_mbox->mbox_mutex);
 
 	dev_dbg(mds->cxlds.dev, "sanitize complete\n");
 }
@@ -615,6 +634,7 @@ static int mock_sanitize(struct cxl_mockmem_data *mdata,
 			 struct cxl_mbox_cmd *cmd)
 {
 	struct cxl_memdev_state *mds = mdata->mds;
+	struct cxl_mailbox *cxl_mbox = &mds->cxlds.cxl_mbox;
 	int rc = 0;
 
 	if (cmd->size_in != 0)
@@ -632,14 +652,14 @@ static int mock_sanitize(struct cxl_mockmem_data *mdata,
 		return -ENXIO;
 	}
 
-	mutex_lock(&mds->mbox_mutex);
+	mutex_lock(&cxl_mbox->mbox_mutex);
 	if (schedule_delayed_work(&mds->security.poll_dwork,
 				  msecs_to_jiffies(mdata->sanitize_timeout))) {
 		mds->security.sanitize_active = true;
 		dev_dbg(mds->cxlds.dev, "sanitize issued\n");
 	} else
 		rc = -EBUSY;
-	mutex_unlock(&mds->mbox_mutex);
+	mutex_unlock(&cxl_mbox->mbox_mutex);
 
 	return rc;
 }
@@ -1119,27 +1139,28 @@ static bool mock_poison_dev_max_injected(struct cxl_dev_state *cxlds)
 	return (count >= poison_inject_dev_max);
 }
 
-static bool mock_poison_add(struct cxl_dev_state *cxlds, u64 dpa)
+static int mock_poison_add(struct cxl_dev_state *cxlds, u64 dpa)
 {
+	/* Return EBUSY to match the CXL driver handling */
 	if (mock_poison_dev_max_injected(cxlds)) {
 		dev_dbg(cxlds->dev,
 			"Device poison injection limit has been reached: %d\n",
-			MOCK_INJECT_DEV_MAX);
-		return false;
+			poison_inject_dev_max);
+		return -EBUSY;
 	}
 
 	for (int i = 0; i < MOCK_INJECT_TEST_MAX; i++) {
 		if (!mock_poison_list[i].cxlds) {
 			mock_poison_list[i].cxlds = cxlds;
 			mock_poison_list[i].dpa = dpa;
-			return true;
+			return 0;
 		}
 	}
 	dev_dbg(cxlds->dev,
 		"Mock test poison injection limit has been reached: %d\n",
 		MOCK_INJECT_TEST_MAX);
 
-	return false;
+	return -ENXIO;
 }
 
 static bool mock_poison_found(struct cxl_dev_state *cxlds, u64 dpa)
@@ -1163,10 +1184,8 @@ static int mock_inject_poison(struct cxl_dev_state *cxlds,
 		dev_dbg(cxlds->dev, "DPA: 0x%llx already poisoned\n", dpa);
 		return 0;
 	}
-	if (!mock_poison_add(cxlds, dpa))
-		return -ENXIO;
 
-	return 0;
+	return mock_poison_add(cxlds, dpa);
 }
 
 static bool mock_poison_del(struct cxl_dev_state *cxlds, u64 dpa)
@@ -1318,12 +1337,13 @@ static int mock_activate_fw(struct cxl_mockmem_data *mdata,
 	return -EINVAL;
 }
 
-static int cxl_mock_mbox_send(struct cxl_memdev_state *mds,
+static int cxl_mock_mbox_send(struct cxl_mailbox *cxl_mbox,
 			      struct cxl_mbox_cmd *cmd)
 {
-	struct cxl_dev_state *cxlds = &mds->cxlds;
-	struct device *dev = cxlds->dev;
+	struct device *dev = cxl_mbox->host;
 	struct cxl_mockmem_data *mdata = dev_get_drvdata(dev);
+	struct cxl_memdev_state *mds = mdata->mds;
+	struct cxl_dev_state *cxlds = &mds->cxlds;
 	int rc = -EIO;
 
 	switch (cmd->opcode) {
@@ -1438,6 +1458,17 @@ static ssize_t event_trigger_store(struct device *dev,
 }
 static DEVICE_ATTR_WO(event_trigger);
 
+static int cxl_mock_mailbox_create(struct cxl_dev_state *cxlds)
+{
+	int rc;
+
+	rc = cxl_mailbox_init(&cxlds->cxl_mbox, cxlds->dev);
+	if (rc)
+		return rc;
+
+	return 0;
+}
+
 static int cxl_mock_mem_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
@@ -1445,6 +1476,7 @@ static int cxl_mock_mem_probe(struct platform_device *pdev)
 	struct cxl_memdev_state *mds;
 	struct cxl_dev_state *cxlds;
 	struct cxl_mockmem_data *mdata;
+	struct cxl_mailbox *cxl_mbox;
 	int rc;
 
 	mdata = devm_kzalloc(dev, sizeof(*mdata), GFP_KERNEL);
@@ -1472,13 +1504,18 @@ static int cxl_mock_mem_probe(struct platform_device *pdev)
 	if (IS_ERR(mds))
 		return PTR_ERR(mds);
 
+	cxlds = &mds->cxlds;
+	rc = cxl_mock_mailbox_create(cxlds);
+	if (rc)
+		return rc;
+
+	cxl_mbox = &mds->cxlds.cxl_mbox;
 	mdata->mds = mds;
-	mds->mbox_send = cxl_mock_mbox_send;
-	mds->payload_size = SZ_4K;
+	cxl_mbox->mbox_send = cxl_mock_mbox_send;
+	cxl_mbox->payload_size = SZ_4K;
 	mds->event.buf = (struct cxl_get_event_payload *) mdata->event_buf;
 	INIT_DELAYED_WORK(&mds->security.poll_dwork, cxl_mockmem_sanitize_work);
 
-	cxlds = &mds->cxlds;
 	cxlds->serial = pdev->id;
 	if (is_rcd(pdev))
 		cxlds->rcd = true;
