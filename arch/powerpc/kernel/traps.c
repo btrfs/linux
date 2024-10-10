@@ -121,7 +121,7 @@ static void pmac_backlight_unblank(void)
 
 		props = &pmac_backlight->props;
 		props->brightness = props->max_brightness;
-		props->power = FB_BLANK_UNBLANK;
+		props->power = BACKLIGHT_POWER_ON;
 		backlight_update_status(pmac_backlight);
 	}
 	mutex_unlock(&pmac_backlight_mutex);
@@ -404,7 +404,7 @@ noinstr void hv_nmi_check_nonrecoverable(struct pt_regs *regs)
 		return;
 	if (!(regs->msr & MSR_HV))
 		return;
-	if (regs->msr & MSR_PR)
+	if (user_mode(regs))
 		return;
 
 	/*
@@ -1510,7 +1510,7 @@ static void do_program_check(struct pt_regs *regs)
 		if (!is_kernel_addr(bugaddr) && !(regs->msr & MSR_IR))
 			bugaddr += PAGE_OFFSET;
 
-		if (!(regs->msr & MSR_PR) &&  /* not user-mode */
+		if (!user_mode(regs) &&
 		    report_bug(bugaddr, regs) == BUG_TRAP_TYPE_WARN) {
 			regs_add_return_ip(regs, 4);
 			return;
@@ -2244,7 +2244,7 @@ void __noreturn unrecoverable_exception(struct pt_regs *regs)
 		;
 }
 
-#if defined(CONFIG_BOOKE_WDT) || defined(CONFIG_40x)
+#ifdef CONFIG_BOOKE_WDT
 DEFINE_INTERRUPT_HANDLER_NMI(WatchdogException)
 {
 	printk (KERN_EMERG "PowerPC Book-E Watchdog Exception\n");

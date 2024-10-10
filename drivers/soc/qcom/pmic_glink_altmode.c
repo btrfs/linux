@@ -20,7 +20,7 @@
 
 #include <linux/soc/qcom/pmic_glink.h>
 
-#define PMIC_GLINK_MAX_PORTS	2
+#define PMIC_GLINK_MAX_PORTS	3
 
 #define USBC_SC8180X_NOTIFY_IND	0x13
 #define USBC_CMD_WRITE_REQ      0x15
@@ -76,7 +76,7 @@ struct pmic_glink_altmode_port {
 
 	struct work_struct work;
 
-	struct device *bridge;
+	struct auxiliary_device *bridge;
 
 	enum typec_orientation orientation;
 	u16 svid;
@@ -230,7 +230,7 @@ static void pmic_glink_altmode_worker(struct work_struct *work)
 	else
 		pmic_glink_altmode_enable_usb(altmode, alt_port);
 
-	drm_aux_hpd_bridge_notify(alt_port->bridge,
+	drm_aux_hpd_bridge_notify(&alt_port->bridge->dev,
 				  alt_port->hpd_state ?
 				  connector_status_connected :
 				  connector_status_disconnected);
@@ -454,7 +454,7 @@ static int pmic_glink_altmode_probe(struct auxiliary_device *adev,
 		alt_port->index = port;
 		INIT_WORK(&alt_port->work, pmic_glink_altmode_worker);
 
-		alt_port->bridge = drm_dp_hpd_bridge_register(dev, to_of_node(fwnode));
+		alt_port->bridge = devm_drm_dp_hpd_bridge_alloc(dev, to_of_node(fwnode));
 		if (IS_ERR(alt_port->bridge)) {
 			fwnode_handle_put(fwnode);
 			return PTR_ERR(alt_port->bridge);
@@ -510,12 +510,27 @@ static int pmic_glink_altmode_probe(struct auxiliary_device *adev,
 		}
 	}
 
-	altmode->client = devm_pmic_glink_register_client(dev,
-							  altmode->owner_id,
-							  pmic_glink_altmode_callback,
-							  pmic_glink_altmode_pdr_notify,
-							  altmode);
-	return PTR_ERR_OR_ZERO(altmode->client);
+	for (port = 0; port < ARRAY_SIZE(altmode->ports); port++) {
+		alt_port = &altmode->ports[port];
+		if (!alt_port->bridge)
+			continue;
+
+		ret = devm_drm_dp_hpd_bridge_add(dev, alt_port->bridge);
+		if (ret)
+			return ret;
+	}
+
+	altmode->client = devm_pmic_glink_client_alloc(dev,
+						       altmode->owner_id,
+						       pmic_glink_altmode_callback,
+						       pmic_glink_altmode_pdr_notify,
+						       altmode);
+	if (IS_ERR(altmode->client))
+		return PTR_ERR(altmode->client);
+
+	pmic_glink_client_register(altmode->client);
+
+	return 0;
 }
 
 static const struct auxiliary_device_id pmic_glink_altmode_id_table[] = {

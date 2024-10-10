@@ -4,7 +4,7 @@
  * Copyright (C) 2023 Ideas on Board Oy
  */
 
-#include <asm/unaligned.h>
+#include <linux/unaligned.h>
 
 #include <linux/clk.h>
 #include <linux/delay.h>
@@ -1052,7 +1052,7 @@ static int thp7312_s_ctrl(struct v4l2_ctrl *ctrl)
 	if (ctrl->flags & V4L2_CTRL_FLAG_INACTIVE)
 		return -EINVAL;
 
-	if (!pm_runtime_get_if_active(thp7312->dev, true))
+	if (!pm_runtime_get_if_active(thp7312->dev))
 		return 0;
 
 	switch (ctrl->id) {
@@ -1503,7 +1503,7 @@ static int __thp7312_flash_reg_read(struct thp7312_device *thp7312,
 
 	msgs[0].addr = client->addr;
 	msgs[0].flags = 0;
-	msgs[0].len = sizeof(thp7312_cmd_read_reg),
+	msgs[0].len = sizeof(thp7312_cmd_read_reg);
 	msgs[0].buf = (u8 *)thp7312_cmd_read_reg;
 
 	msgs[1].addr = client->addr;

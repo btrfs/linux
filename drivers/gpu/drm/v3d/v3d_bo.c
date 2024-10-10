@@ -21,9 +21,21 @@
 
 #include <linux/dma-buf.h>
 #include <linux/pfn_t.h>
+#include <linux/vmalloc.h>
 
 #include "v3d_drv.h"
 #include "uapi/drm/v3d_drm.h"
+
+static enum drm_gem_object_status v3d_gem_status(struct drm_gem_object *obj)
+{
+	struct v3d_bo *bo = to_v3d_bo(obj);
+	enum drm_gem_object_status res = 0;
+
+	if (bo->base.pages)
+		res |= DRM_GEM_OBJECT_RESIDENT;
+
+	return res;
+}
 
 /* Called DRM core on the last userspace/kernel unreference of the
  * BO.
@@ -40,7 +52,7 @@ void v3d_free_object(struct drm_gem_object *obj)
 
 	mutex_lock(&v3d->bo_lock);
 	v3d->bo_stats.num_allocated--;
-	v3d->bo_stats.pages_allocated -= obj->size >> PAGE_SHIFT;
+	v3d->bo_stats.pages_allocated -= obj->size >> V3D_MMU_PAGE_SHIFT;
 	mutex_unlock(&v3d->bo_lock);
 
 	spin_lock(&v3d->mm_lock);
@@ -62,6 +74,7 @@ static const struct drm_gem_object_funcs v3d_gem_funcs = {
 	.vmap = drm_gem_shmem_object_vmap,
 	.vunmap = drm_gem_shmem_object_vunmap,
 	.mmap = drm_gem_shmem_object_mmap,
+	.status = v3d_gem_status,
 	.vm_ops = &drm_gem_shmem_vm_ops,
 };
 
@@ -109,8 +122,8 @@ v3d_bo_create_finish(struct drm_gem_object *obj)
 	 * lifetime of the BO.
 	 */
 	ret = drm_mm_insert_node_generic(&v3d->mm, &bo->node,
-					 obj->size >> PAGE_SHIFT,
-					 GMP_GRANULARITY >> PAGE_SHIFT, 0, 0);
+					 obj->size >> V3D_MMU_PAGE_SHIFT,
+					 GMP_GRANULARITY >> V3D_MMU_PAGE_SHIFT, 0, 0);
 	spin_unlock(&v3d->mm_lock);
 	if (ret)
 		return ret;
@@ -118,7 +131,7 @@ v3d_bo_create_finish(struct drm_gem_object *obj)
 	/* Track stats for /debug/dri/n/bo_stats. */
 	mutex_lock(&v3d->bo_lock);
 	v3d->bo_stats.num_allocated++;
-	v3d->bo_stats.pages_allocated += obj->size >> PAGE_SHIFT;
+	v3d->bo_stats.pages_allocated += obj->size >> V3D_MMU_PAGE_SHIFT;
 	mutex_unlock(&v3d->bo_lock);
 
 	v3d_mmu_insert_ptes(bo);
@@ -201,7 +214,7 @@ int v3d_create_bo_ioctl(struct drm_device *dev, void *data,
 	if (IS_ERR(bo))
 		return PTR_ERR(bo);
 
-	args->offset = bo->node.start << PAGE_SHIFT;
+	args->offset = bo->node.start << V3D_MMU_PAGE_SHIFT;
 
 	ret = drm_gem_handle_create(file_priv, &bo->base.base, &args->handle);
 	drm_gem_object_put(&bo->base.base);
@@ -246,7 +259,7 @@ int v3d_get_bo_offset_ioctl(struct drm_device *dev, void *data,
 	}
 	bo = to_v3d_bo(gem_obj);
 
-	args->offset = bo->node.start << PAGE_SHIFT;
+	args->offset = bo->node.start << V3D_MMU_PAGE_SHIFT;
 
 	drm_gem_object_put(gem_obj);
 	return 0;
@@ -278,7 +291,7 @@ v3d_wait_bo_ioctl(struct drm_device *dev, void *data,
 	else
 		args->timeout_ns = 0;
 
-	/* Asked to wait beyond the jiffie/scheduler precision? */
+	/* Asked to wait beyond the jiffy/scheduler precision? */
 	if (ret == -ETIME && args->timeout_ns)
 		ret = -EAGAIN;
 

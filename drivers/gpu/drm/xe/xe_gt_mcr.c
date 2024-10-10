@@ -6,10 +6,14 @@
 #include "xe_gt_mcr.h"
 
 #include "regs/xe_gt_regs.h"
+#include "xe_assert.h"
 #include "xe_gt.h"
+#include "xe_gt_printk.h"
 #include "xe_gt_topology.h"
 #include "xe_gt_types.h"
+#include "xe_guc_hwconfig.h"
 #include "xe_mmio.h"
+#include "xe_sriov.h"
 
 /**
  * DOC: GT Multicast/Replicated (MCR) Register Support
@@ -38,6 +42,8 @@
  * ``init_steering_*()`` functions is to apply the platform-specific rules for
  * each MCR register type to identify a steering target that will select a
  * non-terminated instance.
+ *
+ * MCR registers are not available on Virtual Function (VF).
  */
 
 #define STEER_SEMAPHORE		XE_REG(0xFD0)
@@ -291,14 +297,70 @@ static void init_steering_mslice(struct xe_gt *gt)
 	gt->steering[LNCF].instance_target = 0;		/* unused */
 }
 
+static unsigned int dss_per_group(struct xe_gt *gt)
+{
+	struct xe_guc *guc = &gt->uc.guc;
+	u32 max_slices = 0, max_subslices = 0;
+	int ret;
+
+	/*
+	 * Try to query the GuC's hwconfig table for the maximum number of
+	 * slices and subslices.  These don't reflect the platform's actual
+	 * slice/DSS counts, just the physical layout by which we should
+	 * determine the steering targets.  On older platforms with older GuC
+	 * firmware releases it's possible that these attributes may not be
+	 * included in the table, so we can always fall back to the old
+	 * hardcoded layouts.
+	 */
+#define HWCONFIG_ATTR_MAX_SLICES	1
+#define HWCONFIG_ATTR_MAX_SUBSLICES	70
+
+	ret = xe_guc_hwconfig_lookup_u32(guc, HWCONFIG_ATTR_MAX_SLICES,
+					 &max_slices);
+	if (ret < 0 || max_slices == 0)
+		goto fallback;
+
+	ret = xe_guc_hwconfig_lookup_u32(guc, HWCONFIG_ATTR_MAX_SUBSLICES,
+					 &max_subslices);
+	if (ret < 0 || max_subslices == 0)
+		goto fallback;
+
+	return DIV_ROUND_UP(max_subslices, max_slices);
+
+fallback:
+	xe_gt_dbg(gt, "GuC hwconfig cannot provide dss/slice; using typical fallback values\n");
+	if (gt_to_xe(gt)->info.platform == XE_PVC)
+		return 8;
+	else if (GRAPHICS_VERx100(gt_to_xe(gt)) >= 1250)
+		return 4;
+	else
+		return 6;
+}
+
+/**
+ * xe_gt_mcr_get_dss_steering - Get the group/instance steering for a DSS
+ * @gt: GT structure
+ * @dss: DSS ID to obtain steering for
+ * @group: pointer to storage for steering group ID
+ * @instance: pointer to storage for steering instance ID
+ */
+void xe_gt_mcr_get_dss_steering(struct xe_gt *gt, unsigned int dss, u16 *group, u16 *instance)
+{
+	xe_gt_assert(gt, dss < XE_MAX_DSS_FUSE_BITS);
+
+	*group = dss / gt->steering_dss_per_grp;
+	*instance = dss % gt->steering_dss_per_grp;
+}
+
 static void init_steering_dss(struct xe_gt *gt)
 {
-	unsigned int dss = min(xe_dss_mask_group_ffs(gt->fuse_topo.g_dss_mask, 0, 0),
-			       xe_dss_mask_group_ffs(gt->fuse_topo.c_dss_mask, 0, 0));
-	unsigned int dss_per_grp = gt_to_xe(gt)->info.platform == XE_PVC ? 8 : 4;
+	gt->steering_dss_per_grp = dss_per_group(gt);
 
-	gt->steering[DSS].group_target = dss / dss_per_grp;
-	gt->steering[DSS].instance_target = dss % dss_per_grp;
+	xe_gt_mcr_get_dss_steering(gt,
+				   min(xe_dss_mask_group_ffs(gt->fuse_topo.g_dss_mask, 0, 0),
+				       xe_dss_mask_group_ffs(gt->fuse_topo.c_dss_mask, 0, 0)),
+				   &gt->steering[DSS].group_target,
+				   &gt->steering[DSS].instance_target);
 }
 
 static void init_steering_oaddrm(struct xe_gt *gt)
@@ -312,7 +374,7 @@ static void init_steering_oaddrm(struct xe_gt *gt)
 	else
 		gt->steering[OADDRM].group_target = 1;
 
-	gt->steering[DSS].instance_target = 0;		/* unused */
+	gt->steering[OADDRM].instance_target = 0;	/* unused */
 }
 
 static void init_steering_sqidi_psmi(struct xe_gt *gt)
@@ -327,8 +389,8 @@ static void init_steering_sqidi_psmi(struct xe_gt *gt)
 
 static void init_steering_inst0(struct xe_gt *gt)
 {
-	gt->steering[DSS].group_target = 0;		/* unused */
-	gt->steering[DSS].instance_target = 0;		/* unused */
+	gt->steering[INSTANCE0].group_target = 0;	/* unused */
+	gt->steering[INSTANCE0].instance_target = 0;	/* unused */
 }
 
 static const struct {
@@ -345,19 +407,39 @@ static const struct {
 	[IMPLICIT_STEERING] = { "IMPLICIT", NULL },
 };
 
-void xe_gt_mcr_init(struct xe_gt *gt)
+/**
+ * xe_gt_mcr_init_early - Early initialization of the MCR support
+ * @gt: GT structure
+ *
+ * Perform early software only initialization of the MCR lock to allow
+ * the synchronization on accessing the STEER_SEMAPHORE register and
+ * use the xe_gt_mcr_multicast_write() function.
+ */
+void xe_gt_mcr_init_early(struct xe_gt *gt)
 {
-	struct xe_device *xe = gt_to_xe(gt);
-
 	BUILD_BUG_ON(IMPLICIT_STEERING + 1 != NUM_STEERING_TYPES);
 	BUILD_BUG_ON(ARRAY_SIZE(xe_steering_types) != NUM_STEERING_TYPES);
 
 	spin_lock_init(&gt->mcr_lock);
+}
+
+/**
+ * xe_gt_mcr_init - Normal initialization of the MCR support
+ * @gt: GT structure
+ *
+ * Perform normal initialization of the MCR for all usages.
+ */
+void xe_gt_mcr_init(struct xe_gt *gt)
+{
+	struct xe_device *xe = gt_to_xe(gt);
+
+	if (IS_SRIOV_VF(xe))
+		return;
 
 	if (gt->info.type == XE_GT_TYPE_MEDIA) {
 		drm_WARN_ON(&xe->drm, MEDIA_VER(xe) < 13);
 
-		if (MEDIA_VER(xe) >= 20) {
+		if (MEDIA_VERx100(xe) >= 1301) {
 			gt->steering[OADDRM].ranges = xe2lpm_gpmxmt_steering_table;
 			gt->steering[INSTANCE0].ranges = xe2lpm_instance0_steering_table;
 		} else {
@@ -404,6 +486,9 @@ void xe_gt_mcr_init(struct xe_gt *gt)
 void xe_gt_mcr_set_implicit_defaults(struct xe_gt *gt)
 {
 	struct xe_device *xe = gt_to_xe(gt);
+
+	if (IS_SRIOV_VF(xe))
+		return;
 
 	if (xe->info.platform == XE_DG2) {
 		u32 steer_val = REG_FIELD_PREP(MCR_SLICE_MASK, 0) |
@@ -480,7 +565,7 @@ static bool xe_gt_mcr_get_nonterminated_steering(struct xe_gt *gt,
  * to synchronize with external clients (e.g., firmware), so a semaphore
  * register will also need to be taken.
  */
-static void mcr_lock(struct xe_gt *gt)
+static void mcr_lock(struct xe_gt *gt) __acquires(&gt->mcr_lock)
 {
 	struct xe_device *xe = gt_to_xe(gt);
 	int ret = 0;
@@ -500,7 +585,7 @@ static void mcr_lock(struct xe_gt *gt)
 	drm_WARN_ON_ONCE(&xe->drm, ret == -ETIMEDOUT);
 }
 
-static void mcr_unlock(struct xe_gt *gt)
+static void mcr_unlock(struct xe_gt *gt) __releases(&gt->mcr_lock)
 {
 	/* Release hardware semaphore - this is done by writing 1 to the register */
 	if (GRAPHICS_VERx100(gt_to_xe(gt)) >= 1270)
@@ -588,6 +673,8 @@ u32 xe_gt_mcr_unicast_read_any(struct xe_gt *gt, struct xe_reg_mcr reg_mcr)
 	u32 val;
 	bool steer;
 
+	xe_gt_assert(gt, !IS_SRIOV_VF(gt_to_xe(gt)));
+
 	steer = xe_gt_mcr_get_nonterminated_steering(gt, reg_mcr,
 						     &group, &instance);
 
@@ -619,6 +706,8 @@ u32 xe_gt_mcr_unicast_read(struct xe_gt *gt,
 {
 	u32 val;
 
+	xe_gt_assert(gt, !IS_SRIOV_VF(gt_to_xe(gt)));
+
 	mcr_lock(gt);
 	val = rw_with_mcr_steering(gt, reg_mcr, MCR_OP_READ, group, instance, 0);
 	mcr_unlock(gt);
@@ -640,6 +729,8 @@ u32 xe_gt_mcr_unicast_read(struct xe_gt *gt,
 void xe_gt_mcr_unicast_write(struct xe_gt *gt, struct xe_reg_mcr reg_mcr,
 			     u32 value, int group, int instance)
 {
+	xe_gt_assert(gt, !IS_SRIOV_VF(gt_to_xe(gt)));
+
 	mcr_lock(gt);
 	rw_with_mcr_steering(gt, reg_mcr, MCR_OP_WRITE, group, instance, value);
 	mcr_unlock(gt);
@@ -657,6 +748,8 @@ void xe_gt_mcr_multicast_write(struct xe_gt *gt, struct xe_reg_mcr reg_mcr,
 			       u32 value)
 {
 	struct xe_reg reg = to_xe_reg(reg_mcr);
+
+	xe_gt_assert(gt, !IS_SRIOV_VF(gt_to_xe(gt)));
 
 	/*
 	 * Synchronize with any unicast operations.  Once we have exclusive

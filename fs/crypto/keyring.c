@@ -18,7 +18,7 @@
  * information about these ioctls.
  */
 
-#include <asm/unaligned.h>
+#include <linux/unaligned.h>
 #include <crypto/skcipher.h>
 #include <linux/key-type.h>
 #include <linux/random.h>
@@ -74,8 +74,12 @@ void fscrypt_put_master_key(struct fscrypt_master_key *mk)
 	 * that concurrent keyring lookups can no longer find it.
 	 */
 	WARN_ON_ONCE(refcount_read(&mk->mk_active_refs) != 0);
-	key_put(mk->mk_users);
-	mk->mk_users = NULL;
+	if (mk->mk_users) {
+		/* Clear the keyring so the quota gets released right away. */
+		keyring_clear(mk->mk_users);
+		key_put(mk->mk_users);
+		mk->mk_users = NULL;
+	}
 	call_rcu(&mk->mk_rcu_head, fscrypt_free_master_key);
 }
 

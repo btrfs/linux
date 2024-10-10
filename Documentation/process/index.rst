@@ -81,6 +81,7 @@ of special classes of bugs: regressions and security problems.
 
    handling-regressions
    security-bugs
+   cve
    embargoed-hardware-issues
 
 Maintainer information
@@ -105,17 +106,6 @@ developers:
 
    kernel-docs
    deprecated
-
-These are some overall technical guides that have been put here for now for
-lack of a better place.
-
-.. toctree::
-   :maxdepth: 1
-
-   magic-number
-   clang-format
-   ../arch/riscv/patch-acceptance
-   ../core-api/unaligned-memory-access
 
 .. only::  subproject and html
 

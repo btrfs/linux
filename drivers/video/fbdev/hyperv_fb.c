@@ -1010,8 +1010,6 @@ static int hvfb_getmem(struct hv_device *hdev, struct fb_info *info)
 			goto getmem_done;
 		}
 		pr_info("Unable to allocate enough contiguous physical memory on Gen 1 VM. Using MMIO instead.\n");
-	} else {
-		goto err1;
 	}
 
 	/*
@@ -1191,7 +1189,7 @@ static int hvfb_probe(struct hv_device *hdev,
 	 * which is almost at the end of list, with priority = INT_MIN + 1.
 	 */
 	par->hvfb_panic_nb.notifier_call = hvfb_on_panic;
-	par->hvfb_panic_nb.priority = INT_MIN + 10,
+	par->hvfb_panic_nb.priority = INT_MIN + 10;
 	atomic_notifier_chain_register(&panic_notifier_list,
 				       &par->hvfb_panic_nb);
 

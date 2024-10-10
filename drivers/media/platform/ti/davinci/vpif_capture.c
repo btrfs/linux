@@ -1132,7 +1132,7 @@ vpif_query_dv_timings(struct file *file, void *priv,
 	if (input.capabilities != V4L2_IN_CAP_DV_TIMINGS)
 		return -ENODATA;
 
-	ret = v4l2_subdev_call(ch->sd, video, query_dv_timings, timings);
+	ret = v4l2_subdev_call(ch->sd, pad, query_dv_timings, 0, timings);
 	if (ret == -ENOIOCTLCMD || ret == -ENODEV)
 		return -ENODATA;
 
@@ -1177,7 +1177,7 @@ static int vpif_s_dv_timings(struct file *file, void *priv,
 		return -EBUSY;
 
 	/* Configure subdevice timings, if any */
-	ret = v4l2_subdev_call(ch->sd, video, s_dv_timings, timings);
+	ret = v4l2_subdev_call(ch->sd, pad, s_dv_timings, 0, timings);
 	if (ret == -ENOIOCTLCMD || ret == -ENODEV)
 		ret = 0;
 	if (ret < 0) {
@@ -1487,7 +1487,7 @@ static struct vpif_capture_config *
 vpif_capture_get_pdata(struct platform_device *pdev,
 		       struct v4l2_device *v4l2_dev)
 {
-	struct device_node *endpoint = NULL;
+	struct device_node *endpoint;
 	struct device_node *rem = NULL;
 	struct vpif_capture_config *pdata;
 	struct vpif_subdev_info *sdinfo;
@@ -1517,15 +1517,11 @@ vpif_capture_get_pdata(struct platform_device *pdev,
 	if (!pdata->subdev_info)
 		return NULL;
 
-	for (i = 0; i < VPIF_CAPTURE_NUM_CHANNELS; i++) {
+	i = 0;
+	for_each_endpoint_of_node(pdev->dev.of_node, endpoint) {
 		struct v4l2_fwnode_endpoint bus_cfg = { .bus_type = 0 };
 		unsigned int flags;
 		int err;
-
-		endpoint = of_graph_get_next_endpoint(pdev->dev.of_node,
-						      endpoint);
-		if (!endpoint)
-			break;
 
 		rem = of_graph_get_remote_port_parent(endpoint);
 		if (!rem) {
@@ -1577,6 +1573,10 @@ vpif_capture_get_pdata(struct platform_device *pdev,
 			goto err_cleanup;
 
 		of_node_put(rem);
+
+		i++;
+		if (i >= VPIF_CAPTURE_NUM_CHANNELS)
+			break;
 	}
 
 done:

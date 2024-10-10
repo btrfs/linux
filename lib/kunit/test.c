@@ -17,6 +17,7 @@
 #include <linux/panic.h>
 #include <linux/sched/debug.h>
 #include <linux/sched.h>
+#include <linux/mm.h>
 
 #include "debugfs.h"
 #include "device-impl.h"
@@ -711,6 +712,9 @@ int __kunit_test_suites_init(struct kunit_suite * const * const suites, int num_
 {
 	unsigned int i;
 
+	if (num_suites == 0)
+		return 0;
+
 	if (!kunit_enabled() && num_suites > 0) {
 		pr_info("kunit: disabled\n");
 		return 0;
@@ -801,12 +805,19 @@ static void kunit_module_exit(struct module *mod)
 	};
 	const char *action = kunit_action();
 
+	/*
+	 * Check if the start address is a valid virtual address to detect
+	 * if the module load sequence has failed and the suite set has not
+	 * been initialized and filtered.
+	 */
+	if (!suite_set.start || !virt_addr_valid(suite_set.start))
+		return;
+
 	if (!action)
 		__kunit_test_suites_exit(mod->kunit_suites,
 					 mod->num_kunit_suites);
 
-	if (suite_set.start)
-		kunit_free_suite_set(suite_set);
+	kunit_free_suite_set(suite_set);
 }
 
 static int kunit_module_notify(struct notifier_block *nb, unsigned long val,
@@ -816,12 +827,12 @@ static int kunit_module_notify(struct notifier_block *nb, unsigned long val,
 
 	switch (val) {
 	case MODULE_STATE_LIVE:
+		kunit_module_init(mod);
 		break;
 	case MODULE_STATE_GOING:
 		kunit_module_exit(mod);
 		break;
 	case MODULE_STATE_COMING:
-		kunit_module_init(mod);
 		break;
 	case MODULE_STATE_UNFORMED:
 		break;
@@ -862,6 +873,25 @@ void kunit_kfree(struct kunit *test, const void *ptr)
 	kunit_release_action(test, kfree_action_wrapper, (void *)ptr);
 }
 EXPORT_SYMBOL_GPL(kunit_kfree);
+
+void kunit_kfree_const(struct kunit *test, const void *x)
+{
+#if !IS_MODULE(CONFIG_KUNIT)
+	if (!is_kernel_rodata((unsigned long)x))
+#endif
+		kunit_kfree(test, x);
+}
+EXPORT_SYMBOL_GPL(kunit_kfree_const);
+
+const char *kunit_kstrdup_const(struct kunit *test, const char *str, gfp_t gfp)
+{
+#if !IS_MODULE(CONFIG_KUNIT)
+	if (is_kernel_rodata((unsigned long)str))
+		return str;
+#endif
+	return kunit_kstrdup(test, str, gfp);
+}
+EXPORT_SYMBOL_GPL(kunit_kstrdup_const);
 
 void kunit_cleanup(struct kunit *test)
 {
@@ -920,8 +950,12 @@ static void __exit kunit_exit(void)
 #ifdef CONFIG_MODULES
 	unregister_module_notifier(&kunit_mod_nb);
 #endif
+
+	kunit_bus_shutdown();
+
 	kunit_debugfs_cleanup();
 }
 module_exit(kunit_exit);
 
+MODULE_DESCRIPTION("Base unit test (KUnit) API");
 MODULE_LICENSE("GPL v2");

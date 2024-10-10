@@ -150,7 +150,8 @@ static inline bool inet_bound_dev_eq(bool l3mdev_accept, int bound_dev_if,
 	return bound_dev_if == dif || bound_dev_if == sdif;
 }
 
-static inline bool inet_sk_bound_dev_eq(struct net *net, int bound_dev_if,
+static inline bool inet_sk_bound_dev_eq(const struct net *net,
+					int bound_dev_if,
 					int dif, int sdif)
 {
 #if IS_ENABLED(CONFIG_NET_L3_MASTER_DEV)
@@ -274,6 +275,7 @@ enum {
 	INET_FLAGS_REPFLOW	= 27,
 	INET_FLAGS_RTALERT_ISOLATE = 28,
 	INET_FLAGS_SNDFLOW	= 29,
+	INET_FLAGS_RTALERT	= 30,
 };
 
 /* cmsg flags for inet */
@@ -306,11 +308,6 @@ static inline unsigned long inet_cmsg_flags(const struct inet_sock *inet)
 	clear_bit(INET_FLAGS_##nr, &inet_sk(sk)->inet_flags)
 #define inet_assign_bit(nr, sk, val)		\
 	assign_bit(INET_FLAGS_##nr, &inet_sk(sk)->inet_flags, val)
-
-static inline bool sk_is_inet(struct sock *sk)
-{
-	return sk->sk_family == AF_INET || sk->sk_family == AF_INET6;
-}
 
 /**
  * sk_to_full_sk - Access to a full socket

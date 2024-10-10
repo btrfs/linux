@@ -18,10 +18,12 @@
 #include <linux/jiffies.h>
 #include <linux/kernel.h>
 #include <linux/leds.h>
+#include <linux/linkmode.h>
 #include <linux/list.h>
 #include <linux/module.h>
 #include <linux/netdevice.h>
 #include <linux/mutex.h>
+#include <linux/phy.h>
 #include <linux/rtnetlink.h>
 #include <linux/timer.h>
 #include "../leds.h"
@@ -37,6 +39,8 @@
  *         (has carrier) or not
  * tx -  LED blinks on transmitted data
  * rx -  LED blinks on receive data
+ * tx_err -  LED blinks on transmit error
+ * rx_err -  LED blinks on receive error
  *
  * Note: If the user selects a mode that is not supported by hw, default
  * behavior is to fall back to software control of the LED. However not every
@@ -65,11 +69,14 @@ struct led_netdev_data {
 
 	unsigned long mode;
 	int link_speed;
+	__ETHTOOL_DECLARE_LINK_MODE_MASK(supported_link_modes);
 	u8 duplex;
 
 	bool carrier_link_up;
 	bool hw_control;
 };
+
+static const struct attribute_group netdev_trig_link_speed_attrs_group;
 
 static void set_baseline_state(struct led_netdev_data *trigger_data)
 {
@@ -139,7 +146,9 @@ static void set_baseline_state(struct led_netdev_data *trigger_data)
 		 * checking stats
 		 */
 		if (test_bit(TRIGGER_NETDEV_TX, &trigger_data->mode) ||
-		    test_bit(TRIGGER_NETDEV_RX, &trigger_data->mode))
+		    test_bit(TRIGGER_NETDEV_RX, &trigger_data->mode) ||
+		    test_bit(TRIGGER_NETDEV_TX_ERR, &trigger_data->mode) ||
+		    test_bit(TRIGGER_NETDEV_RX_ERR, &trigger_data->mode))
 			schedule_delayed_work(&trigger_data->work, 0);
 	}
 }
@@ -218,13 +227,20 @@ static void get_device_state(struct led_netdev_data *trigger_data)
 	struct ethtool_link_ksettings cmd;
 
 	trigger_data->carrier_link_up = netif_carrier_ok(trigger_data->net_dev);
-	if (!trigger_data->carrier_link_up)
+
+	if (__ethtool_get_link_ksettings(trigger_data->net_dev, &cmd))
 		return;
 
-	if (!__ethtool_get_link_ksettings(trigger_data->net_dev, &cmd)) {
+	if (trigger_data->carrier_link_up) {
 		trigger_data->link_speed = cmd.base.speed;
 		trigger_data->duplex = cmd.base.duplex;
 	}
+
+	/*
+	 * Have a local copy of the link speed supported to avoid rtnl lock every time
+	 * modes are refreshed on any change event
+	 */
+	linkmode_copy(trigger_data->supported_link_modes, cmd.link_modes.supported);
 }
 
 static ssize_t device_name_show(struct device *dev,
@@ -277,7 +293,10 @@ static int set_device_name(struct led_netdev_data *trigger_data,
 
 	trigger_data->last_activity = 0;
 
-	set_baseline_state(trigger_data);
+	/* Skip if we're called from netdev_trig_activate() and hw_control is true */
+	if (!trigger_data->hw_control || led_get_trigger_data(trigger_data->led_cdev))
+		set_baseline_state(trigger_data);
+
 	mutex_unlock(&trigger_data->lock);
 	rtnl_unlock();
 
@@ -295,6 +314,10 @@ static ssize_t device_name_store(struct device *dev,
 
 	if (ret < 0)
 		return ret;
+
+	/* Refresh link_speed visibility */
+	sysfs_update_group(&dev->kobj, &netdev_trig_link_speed_attrs_group);
+
 	return size;
 }
 
@@ -318,6 +341,8 @@ static ssize_t netdev_led_attr_show(struct device *dev, char *buf,
 	case TRIGGER_NETDEV_FULL_DUPLEX:
 	case TRIGGER_NETDEV_TX:
 	case TRIGGER_NETDEV_RX:
+	case TRIGGER_NETDEV_TX_ERR:
+	case TRIGGER_NETDEV_RX_ERR:
 		bit = attr;
 		break;
 	default:
@@ -352,6 +377,8 @@ static ssize_t netdev_led_attr_store(struct device *dev, const char *buf,
 	case TRIGGER_NETDEV_FULL_DUPLEX:
 	case TRIGGER_NETDEV_TX:
 	case TRIGGER_NETDEV_RX:
+	case TRIGGER_NETDEV_TX_ERR:
+	case TRIGGER_NETDEV_RX_ERR:
 		bit = attr;
 		break;
 	default:
@@ -410,6 +437,8 @@ DEFINE_NETDEV_TRIGGER(half_duplex, TRIGGER_NETDEV_HALF_DUPLEX);
 DEFINE_NETDEV_TRIGGER(full_duplex, TRIGGER_NETDEV_FULL_DUPLEX);
 DEFINE_NETDEV_TRIGGER(tx, TRIGGER_NETDEV_TX);
 DEFINE_NETDEV_TRIGGER(rx, TRIGGER_NETDEV_RX);
+DEFINE_NETDEV_TRIGGER(tx_err, TRIGGER_NETDEV_TX_ERR);
+DEFINE_NETDEV_TRIGGER(rx_err, TRIGGER_NETDEV_RX_ERR);
 
 static ssize_t interval_show(struct device *dev,
 			     struct device_attribute *attr, char *buf)
@@ -458,24 +487,83 @@ static ssize_t offloaded_show(struct device *dev,
 
 static DEVICE_ATTR_RO(offloaded);
 
-static struct attribute *netdev_trig_attrs[] = {
-	&dev_attr_device_name.attr,
-	&dev_attr_link.attr,
+#define CHECK_LINK_MODE_ATTR(link_speed) \
+	do { \
+		if (attr == &dev_attr_link_##link_speed.attr && \
+		    link_ksettings.base.speed == SPEED_##link_speed) \
+			return attr->mode; \
+	} while (0)
+
+static umode_t netdev_trig_link_speed_visible(struct kobject *kobj,
+					      struct attribute *attr, int n)
+{
+	struct device *dev = kobj_to_dev(kobj);
+	struct led_netdev_data *trigger_data;
+	unsigned long *supported_link_modes;
+	u32 mode;
+
+	trigger_data = led_trigger_get_drvdata(dev);
+	supported_link_modes = trigger_data->supported_link_modes;
+
+	/*
+	 * Search in the supported link mode mask a matching supported mode.
+	 * Stop at the first matching entry as we care only to check if a particular
+	 * speed is supported and not the kind.
+	 */
+	for_each_set_bit(mode, supported_link_modes, __ETHTOOL_LINK_MODE_MASK_NBITS) {
+		struct ethtool_link_ksettings link_ksettings;
+
+		ethtool_params_from_link_mode(&link_ksettings, mode);
+
+		CHECK_LINK_MODE_ATTR(10);
+		CHECK_LINK_MODE_ATTR(100);
+		CHECK_LINK_MODE_ATTR(1000);
+		CHECK_LINK_MODE_ATTR(2500);
+		CHECK_LINK_MODE_ATTR(5000);
+		CHECK_LINK_MODE_ATTR(10000);
+	}
+
+	return 0;
+}
+
+static struct attribute *netdev_trig_link_speed_attrs[] = {
 	&dev_attr_link_10.attr,
 	&dev_attr_link_100.attr,
 	&dev_attr_link_1000.attr,
 	&dev_attr_link_2500.attr,
 	&dev_attr_link_5000.attr,
 	&dev_attr_link_10000.attr,
+	NULL
+};
+
+static const struct attribute_group netdev_trig_link_speed_attrs_group = {
+	.attrs = netdev_trig_link_speed_attrs,
+	.is_visible = netdev_trig_link_speed_visible,
+};
+
+static struct attribute *netdev_trig_attrs[] = {
+	&dev_attr_device_name.attr,
+	&dev_attr_link.attr,
 	&dev_attr_full_duplex.attr,
 	&dev_attr_half_duplex.attr,
 	&dev_attr_rx.attr,
 	&dev_attr_tx.attr,
+	&dev_attr_rx_err.attr,
+	&dev_attr_tx_err.attr,
 	&dev_attr_interval.attr,
 	&dev_attr_offloaded.attr,
 	NULL
 };
-ATTRIBUTE_GROUPS(netdev_trig);
+
+static const struct attribute_group netdev_trig_attrs_group = {
+	.attrs = netdev_trig_attrs,
+};
+
+static const struct attribute_group *netdev_trig_groups[] = {
+	&netdev_trig_attrs_group,
+	&netdev_trig_link_speed_attrs_group,
+	NULL,
+};
 
 static int netdev_trig_notify(struct notifier_block *nb,
 			      unsigned long evt, void *dv)
@@ -484,6 +572,7 @@ static int netdev_trig_notify(struct notifier_block *nb,
 		netdev_notifier_info_to_dev((struct netdev_notifier_info *)dv);
 	struct led_netdev_data *trigger_data =
 		container_of(nb, struct led_netdev_data, notifier);
+	struct led_classdev *led_cdev = trigger_data->led_cdev;
 
 	if (evt != NETDEV_UP && evt != NETDEV_DOWN && evt != NETDEV_CHANGE
 	    && evt != NETDEV_REGISTER && evt != NETDEV_UNREGISTER
@@ -504,12 +593,12 @@ static int netdev_trig_notify(struct notifier_block *nb,
 	trigger_data->duplex = DUPLEX_UNKNOWN;
 	switch (evt) {
 	case NETDEV_CHANGENAME:
-		get_device_state(trigger_data);
-		fallthrough;
 	case NETDEV_REGISTER:
 		dev_put(trigger_data->net_dev);
 		dev_hold(dev);
 		trigger_data->net_dev = dev;
+		if (evt == NETDEV_CHANGENAME)
+			get_device_state(trigger_data);
 		break;
 	case NETDEV_UNREGISTER:
 		dev_put(trigger_data->net_dev);
@@ -518,6 +607,10 @@ static int netdev_trig_notify(struct notifier_block *nb,
 	case NETDEV_UP:
 	case NETDEV_CHANGE:
 		get_device_state(trigger_data);
+		/* Refresh link_speed visibility */
+		if (evt == NETDEV_CHANGE)
+			sysfs_update_group(&led_cdev->dev->kobj,
+					   &netdev_trig_link_speed_attrs_group);
 		break;
 	}
 
@@ -547,7 +640,9 @@ static void netdev_trig_work(struct work_struct *work)
 
 	/* If we are not looking for RX/TX then return  */
 	if (!test_bit(TRIGGER_NETDEV_TX, &trigger_data->mode) &&
-	    !test_bit(TRIGGER_NETDEV_RX, &trigger_data->mode))
+	    !test_bit(TRIGGER_NETDEV_RX, &trigger_data->mode) &&
+	    !test_bit(TRIGGER_NETDEV_TX_ERR, &trigger_data->mode) &&
+	    !test_bit(TRIGGER_NETDEV_RX_ERR, &trigger_data->mode))
 		return;
 
 	dev_stats = dev_get_stats(trigger_data->net_dev, &temp);
@@ -555,7 +650,11 @@ static void netdev_trig_work(struct work_struct *work)
 	    (test_bit(TRIGGER_NETDEV_TX, &trigger_data->mode) ?
 		dev_stats->tx_packets : 0) +
 	    (test_bit(TRIGGER_NETDEV_RX, &trigger_data->mode) ?
-		dev_stats->rx_packets : 0);
+		dev_stats->rx_packets : 0) +
+	    (test_bit(TRIGGER_NETDEV_TX_ERR, &trigger_data->mode) ?
+		dev_stats->tx_errors : 0) +
+	    (test_bit(TRIGGER_NETDEV_RX_ERR, &trigger_data->mode) ?
+		dev_stats->rx_errors : 0);
 
 	if (trigger_data->last_activity != new_activity) {
 		led_stop_software_blink(trigger_data->led_cdev);
@@ -617,8 +716,8 @@ static int netdev_trig_activate(struct led_classdev *led_cdev)
 		if (dev) {
 			const char *name = dev_name(dev);
 
-			set_device_name(trigger_data, name, strlen(name));
 			trigger_data->hw_control = true;
+			set_device_name(trigger_data, name, strlen(name));
 
 			rc = led_cdev->hw_control_get(led_cdev, &mode);
 			if (!rc)
@@ -643,8 +742,6 @@ static void netdev_trig_deactivate(struct led_classdev *led_cdev)
 
 	cancel_delayed_work_sync(&trigger_data->work);
 
-	led_set_brightness(led_cdev, LED_OFF);
-
 	dev_put(trigger_data->net_dev);
 
 	kfree(trigger_data);
@@ -663,3 +760,4 @@ MODULE_AUTHOR("Ben Whitten <ben.whitten@gmail.com>");
 MODULE_AUTHOR("Oliver Jowett <oliver@opencloud.com>");
 MODULE_DESCRIPTION("Netdev LED trigger");
 MODULE_LICENSE("GPL v2");
+MODULE_ALIAS("ledtrig:netdev");

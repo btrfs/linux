@@ -38,7 +38,7 @@
 #include <linux/wmi.h>
 
 #include <linux/i8k.h>
-#include <asm/unaligned.h>
+#include <linux/unaligned.h>
 
 #define I8K_SMM_FN_STATUS	0x0025
 #define I8K_SMM_POWER_STATUS	0x0069
@@ -108,7 +108,7 @@ struct dell_smm_cooling_data {
 	struct dell_smm_data *data;
 };
 
-MODULE_AUTHOR("Massimo Dal Zotto (dz@debian.org)");
+MODULE_AUTHOR("Massimo Dal Zotto <dz@debian.org>");
 MODULE_AUTHOR("Pali Rohár <pali@kernel.org>");
 MODULE_DESCRIPTION("Dell laptop SMM BIOS hwmon driver");
 MODULE_LICENSE("GPL");
@@ -1215,6 +1215,13 @@ static const struct dmi_system_id i8k_dmi_table[] __initconst = {
 		},
 	},
 	{
+		.ident = "Dell G5 5505",
+		.matches = {
+			DMI_MATCH(DMI_SYS_VENDOR, "Dell Inc."),
+			DMI_EXACT_MATCH(DMI_PRODUCT_NAME, "G5 5505"),
+		},
+	},
+	{
 		.ident = "Dell Inspiron",
 		.matches = {
 			DMI_MATCH(DMI_SYS_VENDOR, "Dell Computer"),
@@ -1254,6 +1261,13 @@ static const struct dmi_system_id i8k_dmi_table[] __initconst = {
 		.matches = {
 			DMI_MATCH(DMI_SYS_VENDOR, "Dell Inc."),
 			DMI_MATCH(DMI_PRODUCT_NAME, "MP061"),
+		},
+	},
+	{
+		.ident = "Dell OptiPlex 7060",
+		.matches = {
+			DMI_MATCH(DMI_SYS_VENDOR, "Dell Inc."),
+			DMI_EXACT_MATCH(DMI_PRODUCT_NAME, "OptiPlex 7060"),
 		},
 	},
 	{
@@ -1450,10 +1464,15 @@ struct i8k_fan_control_data {
 };
 
 enum i8k_fan_controls {
+	I8K_FAN_30A3_31A3,
 	I8K_FAN_34A3_35A3,
 };
 
 static const struct i8k_fan_control_data i8k_fan_control_data[] __initconst = {
+	[I8K_FAN_30A3_31A3] = {
+		.manual_fan = 0x30a3,
+		.auto_fan = 0x31a3,
+	},
 	[I8K_FAN_34A3_35A3] = {
 		.manual_fan = 0x34a3,
 		.auto_fan = 0x35a3,
@@ -1468,6 +1487,14 @@ static const struct dmi_system_id i8k_whitelist_fan_control[] __initconst = {
 			DMI_EXACT_MATCH(DMI_PRODUCT_NAME, "Latitude 5480"),
 		},
 		.driver_data = (void *)&i8k_fan_control_data[I8K_FAN_34A3_35A3],
+	},
+	{
+		.ident = "Dell Latitude 7320",
+		.matches = {
+			DMI_MATCH(DMI_SYS_VENDOR, "Dell Inc."),
+			DMI_EXACT_MATCH(DMI_PRODUCT_NAME, "Latitude 7320"),
+		},
+		.driver_data = (void *)&i8k_fan_control_data[I8K_FAN_30A3_31A3],
 	},
 	{
 		.ident = "Dell Latitude E6440",
@@ -1502,6 +1529,14 @@ static const struct dmi_system_id i8k_whitelist_fan_control[] __initconst = {
 		.driver_data = (void *)&i8k_fan_control_data[I8K_FAN_34A3_35A3],
 	},
 	{
+		.ident = "Dell Precision 7540",
+		.matches = {
+			DMI_MATCH(DMI_SYS_VENDOR, "Dell Inc."),
+			DMI_EXACT_MATCH(DMI_PRODUCT_NAME, "Precision 7540"),
+		},
+		.driver_data = (void *)&i8k_fan_control_data[I8K_FAN_34A3_35A3],
+	},
+	{
 		.ident = "Dell XPS 13 7390",
 		.matches = {
 			DMI_MATCH(DMI_SYS_VENDOR, "Dell Inc."),
@@ -1516,6 +1551,22 @@ static const struct dmi_system_id i8k_whitelist_fan_control[] __initconst = {
 			DMI_EXACT_MATCH(DMI_PRODUCT_NAME, "OptiPlex 7000"),
 		},
 		.driver_data = (void *)&i8k_fan_control_data[I8K_FAN_34A3_35A3],
+	},
+	{
+		.ident = "Dell XPS 9315",
+		.matches = {
+			DMI_MATCH(DMI_SYS_VENDOR, "Dell Inc."),
+			DMI_EXACT_MATCH(DMI_PRODUCT_NAME, "XPS 9315"),
+		},
+		.driver_data = (void *)&i8k_fan_control_data[I8K_FAN_30A3_31A3],
+	},
+	{
+		.ident = "Dell G15 5511",
+		.matches = {
+			DMI_MATCH(DMI_SYS_VENDOR, "Dell Inc."),
+			DMI_EXACT_MATCH(DMI_PRODUCT_NAME, "Dell G15 5511"),
+		},
+		.driver_data = (void *)&i8k_fan_control_data[I8K_FAN_30A3_31A3],
 	},
 	{ }
 };
@@ -1587,6 +1638,7 @@ static struct wmi_driver dell_smm_wmi_driver = {
 	},
 	.id_table = dell_smm_wmi_id_table,
 	.probe = dell_smm_wmi_probe,
+	.no_singleton = true,
 };
 
 /*

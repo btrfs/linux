@@ -9,8 +9,13 @@
 #ifndef __ACPI_BUS_H__
 #define __ACPI_BUS_H__
 
+#include <linux/completion.h>
+#include <linux/container_of.h>
 #include <linux/device.h>
+#include <linux/kobject.h>
+#include <linux/mutex.h>
 #include <linux/property.h>
+#include <linux/types.h>
 
 struct acpi_handle_list {
 	u32 count;
@@ -124,11 +129,12 @@ static inline struct acpi_hotplug_profile *to_acpi_hotplug_profile(
 }
 
 struct acpi_scan_handler {
-	const struct acpi_device_id *ids;
 	struct list_head list_node;
+	const struct acpi_device_id *ids;
 	bool (*match)(const char *idstr, const struct acpi_device_id **matchid);
 	int (*attach)(struct acpi_device *dev, const struct acpi_device_id *id);
 	void (*detach)(struct acpi_device *dev);
+	void (*post_eject)(struct acpi_device *dev);
 	void (*bind)(struct device *phys_dev);
 	void (*unbind)(struct device *phys_dev);
 	struct acpi_hotplug_profile hotplug;
@@ -139,11 +145,15 @@ struct acpi_scan_handler {
  * --------------------
  */
 
+typedef int (*acpi_hp_notify) (struct acpi_device *, u32);
+typedef void (*acpi_hp_uevent) (struct acpi_device *, u32);
+typedef void (*acpi_hp_fixup) (struct acpi_device *);
+
 struct acpi_hotplug_context {
 	struct acpi_device *self;
-	int (*notify)(struct acpi_device *, u32);
-	void (*uevent)(struct acpi_device *, u32);
-	void (*fixup)(struct acpi_device *);
+	acpi_hp_notify notify;
+	acpi_hp_uevent uevent;
+	acpi_hp_fixup fixup;
 };
 
 /*
@@ -170,7 +180,6 @@ struct acpi_driver {
 	unsigned int flags;
 	struct acpi_device_ops ops;
 	struct device_driver drv;
-	struct module *owner;
 };
 
 /*
@@ -219,10 +228,12 @@ struct acpi_device_dir {
 
 /* Plug and Play */
 
+#define MAX_ACPI_DEVICE_NAME_LEN	40
+#define MAX_ACPI_CLASS_NAME_LEN		20
 typedef char acpi_bus_id[8];
 typedef u64 acpi_bus_address;
-typedef char acpi_device_name[40];
-typedef char acpi_device_class[20];
+typedef char acpi_device_name[MAX_ACPI_DEVICE_NAME_LEN];
+typedef char acpi_device_class[MAX_ACPI_CLASS_NAME_LEN];
 
 struct acpi_hardware_id {
 	struct list_head list;
@@ -246,7 +257,6 @@ struct acpi_device_pnp {
 	struct list_head ids;		/* _HID and _CIDs */
 	acpi_device_name device_name;	/* Driver-determined */
 	acpi_device_class device_class;	/*        "          */
-	union acpi_object *str_obj;	/* unicode string for _STR method */
 };
 
 #define acpi_device_bid(d)	((d)->pnp.bus_id)
@@ -269,6 +279,7 @@ struct acpi_device_power_flags {
 };
 
 struct acpi_device_power_state {
+	struct list_head resources;	/* Power resources referenced */
 	struct {
 		u8 valid:1;
 		u8 explicit_set:1;	/* _PSx present? */
@@ -276,7 +287,6 @@ struct acpi_device_power_state {
 	} flags;
 	int power;		/* % Power (compared to D0) */
 	int latency;		/* Dx->D0 time (microseconds) */
-	struct list_head resources;	/* Power resources referenced */
 };
 
 struct acpi_device_power {
@@ -342,16 +352,16 @@ struct acpi_device_wakeup {
 };
 
 struct acpi_device_physical_node {
-	unsigned int node_id;
 	struct list_head node;
 	struct device *dev;
+	unsigned int node_id;
 	bool put_online:1;
 };
 
 struct acpi_device_properties {
+	struct list_head list;
 	const guid_t *guid;
 	union acpi_object *properties;
-	struct list_head list;
 	void **bufs;
 };
 
@@ -488,12 +498,12 @@ struct acpi_device {
 
 /* Non-device subnode */
 struct acpi_data_node {
+	struct list_head sibling;
 	const char *name;
 	acpi_handle handle;
 	struct fwnode_handle fwnode;
 	struct fwnode_handle *parent;
 	struct acpi_device_data data;
-	struct list_head sibling;
 	struct kobject kobj;
 	struct completion kobj_done;
 };
@@ -554,7 +564,7 @@ static inline void *acpi_driver_data(struct acpi_device *d)
 }
 
 #define to_acpi_device(d)	container_of(d, struct acpi_device, dev)
-#define to_acpi_driver(d)	container_of(d, struct acpi_driver, drv)
+#define to_acpi_driver(d)	container_of_const(d, struct acpi_driver, drv)
 
 static inline struct acpi_device *acpi_dev_parent(struct acpi_device *adev)
 {
@@ -578,11 +588,10 @@ static inline void acpi_set_hp_context(struct acpi_device *adev,
 
 void acpi_initialize_hp_context(struct acpi_device *adev,
 				struct acpi_hotplug_context *hp,
-				int (*notify)(struct acpi_device *, u32),
-				void (*uevent)(struct acpi_device *, u32));
+				acpi_hp_notify notify, acpi_hp_uevent uevent);
 
 /* acpi_device.dev.bus == &acpi_bus_type */
-extern struct bus_type acpi_bus_type;
+extern const struct bus_type acpi_bus_type;
 
 int acpi_bus_for_each_dev(int (*fn)(struct device *, void *), void *data);
 int acpi_dev_for_each_child(struct acpi_device *adev,
@@ -656,7 +665,12 @@ void acpi_scan_lock_release(void);
 void acpi_lock_hp_context(void);
 void acpi_unlock_hp_context(void);
 int acpi_scan_add_handler(struct acpi_scan_handler *handler);
-int acpi_bus_register_driver(struct acpi_driver *driver);
+/*
+ * use a macro to avoid include chaining to get THIS_MODULE
+ */
+#define acpi_bus_register_driver(drv) \
+	__acpi_bus_register_driver(drv, THIS_MODULE)
+int __acpi_bus_register_driver(struct acpi_driver *driver, struct module *owner);
 void acpi_bus_unregister_driver(struct acpi_driver *driver);
 int acpi_bus_scan(acpi_handle handle);
 void acpi_bus_trim(struct acpi_device *start);
@@ -724,8 +738,7 @@ struct iommu_ops;
 bool acpi_dma_supported(const struct acpi_device *adev);
 enum dev_dma_attr acpi_get_dma_attr(struct acpi_device *adev);
 int acpi_iommu_fwspec_init(struct device *dev, u32 id,
-			   struct fwnode_handle *fwnode,
-			   const struct iommu_ops *ops);
+			   struct fwnode_handle *fwnode);
 int acpi_dma_get_range(struct device *dev, const struct bus_dma_region **map);
 int acpi_dma_configure_id(struct device *dev, enum dev_dma_attr attr,
 			   const u32 *input_id);
@@ -749,6 +762,7 @@ bool acpi_device_override_status(struct acpi_device *adev, unsigned long long *s
 bool acpi_quirk_skip_acpi_ac_and_battery(void);
 int acpi_install_cmos_rtc_space_handler(acpi_handle handle);
 void acpi_remove_cmos_rtc_space_handler(acpi_handle handle);
+int acpi_quirk_skip_serdev_enumeration(struct device *controller_parent, bool *skip);
 #else
 static inline bool acpi_device_override_status(struct acpi_device *adev,
 					       unsigned long long *status)
@@ -766,22 +780,21 @@ static inline int acpi_install_cmos_rtc_space_handler(acpi_handle handle)
 static inline void acpi_remove_cmos_rtc_space_handler(acpi_handle handle)
 {
 }
-#endif
-
-#if IS_ENABLED(CONFIG_X86_ANDROID_TABLETS)
-bool acpi_quirk_skip_i2c_client_enumeration(struct acpi_device *adev);
-int acpi_quirk_skip_serdev_enumeration(struct device *controller_parent, bool *skip);
-bool acpi_quirk_skip_gpio_event_handlers(void);
-#else
-static inline bool acpi_quirk_skip_i2c_client_enumeration(struct acpi_device *adev)
-{
-	return false;
-}
 static inline int
 acpi_quirk_skip_serdev_enumeration(struct device *controller_parent, bool *skip)
 {
 	*skip = false;
 	return 0;
+}
+#endif
+
+#if IS_ENABLED(CONFIG_X86_ANDROID_TABLETS)
+bool acpi_quirk_skip_i2c_client_enumeration(struct acpi_device *adev);
+bool acpi_quirk_skip_gpio_event_handlers(void);
+#else
+static inline bool acpi_quirk_skip_i2c_client_enumeration(struct acpi_device *adev)
+{
+	return false;
 }
 static inline bool acpi_quirk_skip_gpio_event_handlers(void)
 {
@@ -911,17 +924,19 @@ static inline bool acpi_int_uid_match(struct acpi_device *adev, u64 uid2)
  * acpi_dev_hid_uid_match - Match device by supplied HID and UID
  * @adev: ACPI device to match.
  * @hid2: Hardware ID of the device.
- * @uid2: Unique ID of the device, pass 0 or NULL to not check _UID.
+ * @uid2: Unique ID of the device, pass NULL to not check _UID.
  *
  * Matches HID and UID in @adev with given @hid2 and @uid2. Absence of @uid2
  * will be treated as a match. If user wants to validate @uid2, it should be
  * done before calling this function.
  *
- * Returns: %true if matches or @uid2 is 0 or NULL, %false otherwise.
+ * Returns: %true if matches or @uid2 is NULL, %false otherwise.
  */
 #define acpi_dev_hid_uid_match(adev, hid2, uid2)			\
 	(acpi_dev_hid_match(adev, hid2) &&				\
-		(!(uid2) || acpi_dev_uid_match(adev, uid2)))
+		/* Distinguish integer 0 from NULL @uid2 */		\
+		(_Generic(uid2,	ACPI_STR_TYPES(!(uid2)), default: 0) ||	\
+		acpi_dev_uid_match(adev, uid2)))
 
 void acpi_dev_clear_dependencies(struct acpi_device *supplier);
 bool acpi_dev_ready_for_enumeration(const struct acpi_device *device);
@@ -976,10 +991,17 @@ static inline void acpi_put_acpi_dev(struct acpi_device *adev)
 {
 	acpi_dev_put(adev);
 }
+
+int acpi_wait_for_acpi_ipmi(void);
+
+int acpi_scan_add_dep(acpi_handle handle, struct acpi_handle_list *dep_devices);
+u32 arch_acpi_add_auto_dep(acpi_handle handle);
 #else	/* CONFIG_ACPI */
 
 static inline int register_acpi_bus_type(void *bus) { return 0; }
 static inline int unregister_acpi_bus_type(void *bus) { return 0; }
+
+static inline int acpi_wait_for_acpi_ipmi(void) { return 0; }
 
 #endif				/* CONFIG_ACPI */
 

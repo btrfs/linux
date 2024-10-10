@@ -11,6 +11,8 @@
 #include <drm/drm_gem_shmem_helper.h>
 #include <drm/gpu_scheduler.h>
 
+#include "v3d_performance_counters.h"
+
 #include "uapi/drm/v3d_drm.h"
 
 struct clk;
@@ -18,6 +20,8 @@ struct platform_device;
 struct reset_control;
 
 #define GMP_GRANULARITY (128 * 1024)
+
+#define V3D_MMU_PAGE_SHIFT 12
 
 #define V3D_MAX_QUEUES (V3D_CPU + 1)
 
@@ -34,15 +38,27 @@ static inline char *v3d_queue_to_string(enum v3d_queue queue)
 	return "UNKNOWN";
 }
 
+struct v3d_stats {
+	u64 start_ns;
+	u64 enabled_ns;
+	u64 jobs_completed;
+
+	/*
+	 * This seqcount is used to protect the access to the GPU stats
+	 * variables. It must be used as, while we are reading the stats,
+	 * IRQs can happen and the stats can be updated.
+	 */
+	seqcount_t lock;
+};
+
 struct v3d_queue_state {
 	struct drm_gpu_scheduler sched;
 
 	u64 fence_context;
 	u64 emit_seqno;
 
-	u64 start_ns;
-	u64 enabled_ns;
-	u64 jobs_sent;
+	/* Stores the GPU stats for this queue in the global context. */
+	struct v3d_stats stats;
 };
 
 /* Performance monitor object. The perform lifetime is controlled by userspace
@@ -82,11 +98,15 @@ struct v3d_perfmon {
 struct v3d_dev {
 	struct drm_device drm;
 
-	/* Short representation (e.g. 33, 41) of the V3D tech version
-	 * and revision.
-	 */
+	/* Short representation (e.g. 33, 41) of the V3D tech version */
 	int ver;
+
+	/* Short representation (e.g. 5, 6) of the V3D tech revision */
+	int rev;
+
 	bool single_irq_line;
+
+	struct v3d_perfmon_info perfmon_info;
 
 	void __iomem *hub_regs;
 	void __iomem *core_regs[3];
@@ -186,11 +206,8 @@ struct v3d_file_priv {
 
 	struct drm_sched_entity sched_entity[V3D_MAX_QUEUES];
 
-	u64 start_ns[V3D_MAX_QUEUES];
-
-	u64 enabled_ns[V3D_MAX_QUEUES];
-
-	u64 jobs_sent[V3D_MAX_QUEUES];
+	/* Stores the GPU stats for a specific queue for this fd. */
+	struct v3d_stats stats[V3D_MAX_QUEUES];
 };
 
 struct v3d_bo {
@@ -333,13 +350,9 @@ struct v3d_timestamp_query {
 	struct drm_syncobj *syncobj;
 };
 
-/* Number of perfmons required to handle all supported performance counters */
-#define V3D_MAX_PERFMONS DIV_ROUND_UP(V3D_PERFCNT_NUM, \
-				      DRM_V3D_MAX_PERF_COUNTERS)
-
 struct v3d_performance_query {
 	/* Performance monitor IDs for this query */
-	u32 kperfmon_ids[V3D_MAX_PERFMONS];
+	u32 *kperfmon_ids;
 
 	/* Syncobj that indicates the query availability */
 	struct drm_syncobj *syncobj;
@@ -506,6 +519,10 @@ struct drm_gem_object *v3d_prime_import_sg_table(struct drm_device *dev,
 /* v3d_debugfs.c */
 void v3d_debugfs_init(struct drm_minor *minor);
 
+/* v3d_drv.c */
+void v3d_get_stats(const struct v3d_stats *stats, u64 timestamp,
+		   u64 *active_runtime, u64 *jobs_completed);
+
 /* v3d_fence.c */
 extern const struct dma_fence_ops v3d_fence_ops;
 struct dma_fence *v3d_fence_create(struct v3d_dev *v3d, enum v3d_queue queue);
@@ -541,10 +558,16 @@ void v3d_mmu_insert_ptes(struct v3d_bo *bo);
 void v3d_mmu_remove_ptes(struct v3d_bo *bo);
 
 /* v3d_sched.c */
+void v3d_timestamp_query_info_free(struct v3d_timestamp_query_info *query_info,
+				   unsigned int count);
+void v3d_performance_query_info_free(struct v3d_performance_query_info *query_info,
+				     unsigned int count);
+void v3d_job_update_stats(struct v3d_job *job, enum v3d_queue queue);
 int v3d_sched_init(struct v3d_dev *v3d);
 void v3d_sched_fini(struct v3d_dev *v3d);
 
 /* v3d_perfmon.c */
+void v3d_perfmon_init(struct v3d_dev *v3d);
 void v3d_perfmon_get(struct v3d_perfmon *perfmon);
 void v3d_perfmon_put(struct v3d_perfmon *perfmon);
 void v3d_perfmon_start(struct v3d_dev *v3d, struct v3d_perfmon *perfmon);
@@ -559,6 +582,8 @@ int v3d_perfmon_destroy_ioctl(struct drm_device *dev, void *data,
 			      struct drm_file *file_priv);
 int v3d_perfmon_get_values_ioctl(struct drm_device *dev, void *data,
 				 struct drm_file *file_priv);
+int v3d_perfmon_get_counter_ioctl(struct drm_device *dev, void *data,
+				  struct drm_file *file_priv);
 
 /* v3d_sysfs.c */
 int v3d_sysfs_init(struct device *dev);

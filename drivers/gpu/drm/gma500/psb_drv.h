@@ -162,7 +162,6 @@
 #define PSB_NUM_VBLANKS 2
 
 #define PSB_WATCHDOG_DELAY (HZ * 2)
-#define PSB_LID_DELAY (HZ / 10)
 
 #define PSB_MAX_BRIGHTNESS		100
 
@@ -203,7 +202,7 @@ struct psb_intel_opregion {
 struct sdvo_device_mapping {
 	u8 initialized;
 	u8 dvo_port;
-	u8 slave_addr;
+	u8 target_addr;
 	u8 dvo_wiring;
 	u8 i2c_pin;
 	u8 i2c_speed;
@@ -491,11 +490,7 @@ struct drm_psb_private {
 	/* Hotplug handling */
 	struct work_struct hotplug_work;
 
-	/* LID-Switch */
-	spinlock_t lid_lock;
-	struct timer_list lid_timer;
 	struct psb_intel_opregion opregion;
-	u32 lid_last_state;
 
 	/* Watchdog */
 	uint32_t apm_reg;
@@ -590,10 +585,6 @@ struct psb_ops {
 
 	int i2c_bus;		/* I2C bus identifier for Moorestown */
 };
-
-/* psb_lid.c */
-extern void psb_lid_timer_init(struct drm_psb_private *dev_priv);
-extern void psb_lid_timer_takedown(struct drm_psb_private *dev_priv);
 
 /* modesetting */
 extern void psb_modeset_init(struct drm_device *dev);
