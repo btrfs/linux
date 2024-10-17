@@ -435,8 +435,7 @@ befs_init_inodecache(void)
 {
 	befs_inode_cachep = kmem_cache_create_usercopy("befs_inode_cache",
 				sizeof(struct befs_inode_info), 0,
-				(SLAB_RECLAIM_ACCOUNT|SLAB_MEM_SPREAD|
-					SLAB_ACCOUNT),
+				SLAB_RECLAIM_ACCOUNT | SLAB_ACCOUNT,
 				offsetof(struct befs_inode_info,
 					i_data.symlink),
 				sizeof_field(struct befs_inode_info,
@@ -476,6 +475,7 @@ static int befs_symlink_read_folio(struct file *unused, struct folio *folio)
 	befs_data_stream *data = &befs_ino->i_data.ds;
 	befs_off_t len = data->size;
 	char *link = folio_address(folio);
+	int err = -EIO;
 
 	if (len == 0 || len > PAGE_SIZE) {
 		befs_error(sb, "Long symlink with illegal length");
@@ -488,13 +488,10 @@ static int befs_symlink_read_folio(struct file *unused, struct folio *folio)
 		goto fail;
 	}
 	link[len - 1] = '\0';
-	folio_mark_uptodate(folio);
-	folio_unlock(folio);
-	return 0;
+	err = 0;
 fail:
-	folio_set_error(folio);
-	folio_unlock(folio);
-	return -EIO;
+	folio_end_read(folio, err == 0);
+	return err;
 }
 
 /*

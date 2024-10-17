@@ -96,7 +96,7 @@ void *dst_alloc(struct dst_ops *ops, struct net_device *dev,
 }
 EXPORT_SYMBOL(dst_alloc);
 
-struct dst_entry *dst_destroy(struct dst_entry * dst)
+static void dst_destroy(struct dst_entry *dst)
 {
 	struct dst_entry *child = NULL;
 
@@ -109,9 +109,6 @@ struct dst_entry *dst_destroy(struct dst_entry * dst)
 		child = xdst->child;
 	}
 #endif
-	if (!(dst->flags & DST_NOCOUNT))
-		dst_entries_add(dst->ops, -1);
-
 	if (dst->ops->destroy)
 		dst->ops->destroy(dst);
 	netdev_put(dst->dev, &dst->dev_tracker);
@@ -126,15 +123,13 @@ struct dst_entry *dst_destroy(struct dst_entry * dst)
 	dst = child;
 	if (dst)
 		dst_release_immediate(dst);
-	return NULL;
 }
-EXPORT_SYMBOL(dst_destroy);
 
 static void dst_destroy_rcu(struct rcu_head *head)
 {
 	struct dst_entry *dst = container_of(head, struct dst_entry, rcu_head);
 
-	dst = dst_destroy(dst);
+	dst_destroy(dst);
 }
 
 /* Operations to mark dst as DEAD and clean up the net device referenced
@@ -161,17 +156,27 @@ void dst_dev_put(struct dst_entry *dst)
 }
 EXPORT_SYMBOL(dst_dev_put);
 
+static void dst_count_dec(struct dst_entry *dst)
+{
+	if (!(dst->flags & DST_NOCOUNT))
+		dst_entries_add(dst->ops, -1);
+}
+
 void dst_release(struct dst_entry *dst)
 {
-	if (dst && rcuref_put(&dst->__rcuref))
+	if (dst && rcuref_put(&dst->__rcuref)) {
+		dst_count_dec(dst);
 		call_rcu_hurry(&dst->rcu_head, dst_destroy_rcu);
+	}
 }
 EXPORT_SYMBOL(dst_release);
 
 void dst_release_immediate(struct dst_entry *dst)
 {
-	if (dst && rcuref_put(&dst->__rcuref))
+	if (dst && rcuref_put(&dst->__rcuref)) {
+		dst_count_dec(dst);
 		dst_destroy(dst);
+	}
 }
 EXPORT_SYMBOL(dst_release_immediate);
 

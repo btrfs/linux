@@ -16,16 +16,16 @@
 DAMON 爲不同的用戶提供了下面這些接口。
 
 - *DAMON用戶空間工具。*
-  `這 <https://github.com/awslabs/damo>`_ 爲有這特權的人， 如系統管理員，希望有一個剛好
+  `這 <https://github.com/damonitor/damo>`_ 爲有這特權的人， 如系統管理員，希望有一個剛好
   可以工作的人性化界面。
   使用它，用戶可以以人性化的方式使用DAMON的主要功能。不過，它可能不會爲特殊情況進行高度調整。
   它同時支持虛擬和物理地址空間的監測。更多細節，請參考它的 `使用文檔
-  <https://github.com/awslabs/damo/blob/next/USAGE.md>`_。
+  <https://github.com/damonitor/damo/blob/next/USAGE.md>`_。
 - *sysfs接口。*
   :ref:`這 <sysfs_interface>` 是爲那些希望更高級的使用DAMON的特權用戶空間程序員準備的。
   使用它，用戶可以通過讀取和寫入特殊的sysfs文件來使用DAMON的主要功能。因此，你可以編寫和使
   用你個性化的DAMON sysfs包裝程序，代替你讀/寫sysfs文件。  `DAMON用戶空間工具
-  <https://github.com/awslabs/damo>`_ 就是這種程序的一個例子  它同時支持虛擬和物理地址
+  <https://github.com/damonitor/damo>`_ 就是這種程序的一個例子  它同時支持虛擬和物理地址
   空間的監測。注意，這個界面只提供簡單的監測結果 :ref:`統計 <damos_stats>`。對於詳細的監測
   結果，DAMON提供了一個:ref:`跟蹤點 <tracepoint>`。
 - *debugfs interface.*
@@ -332,7 +332,7 @@ tried_regions/<N>/
     # echo 500 > watermarks/mid
     # echo 300 > watermarks/low
 
-請注意，我們強烈建議使用用戶空間的工具，如 `damo <https://github.com/awslabs/damo>`_ ，
+請注意，我們強烈建議使用用戶空間的工具，如 `damo <https://github.com/damonitor/damo>`_ ，
 而不是像上面那樣手動讀寫文件。以上只是一個例子。
 
 debugfs接口
@@ -344,7 +344,7 @@ debugfs接口
   :ref:`sysfs接口<sysfs_interface>`。
 
 DAMON導出了八個文件, ``attrs``, ``target_ids``, ``init_regions``,
-``schemes``, ``monitor_on``, ``kdamond_pid``, ``mk_contexts`` 和
+``schemes``, ``monitor_on_DEPRECATED``, ``kdamond_pid``, ``mk_contexts`` 和
 ``rm_contexts`` under its debugfs directory, ``<debugfs>/damon/``.
 
 
@@ -521,15 +521,15 @@ DAMON導出了八個文件, ``attrs``, ``target_ids``, ``init_regions``,
 開關
 ----
 
-除非你明確地啓動監測，否則如上所述的文件設置不會產生效果。你可以通過寫入和讀取 ``monitor_on``
+除非你明確地啓動監測，否則如上所述的文件設置不會產生效果。你可以通過寫入和讀取 ``monitor_on_DEPRECATED``
 文件來啓動、停止和檢查監測的當前狀態。寫入 ``on`` 該文件可以啓動對有屬性的目標的監測。寫入
 ``off`` 該文件則停止這些目標。如果每個目標進程被終止，DAMON也會停止。下面的示例命令開啓、關
 閉和檢查DAMON的狀態::
 
     # cd <debugfs>/damon
-    # echo on > monitor_on
-    # echo off > monitor_on
-    # cat monitor_on
+    # echo on > monitor_on_DEPRECATED
+    # echo off > monitor_on_DEPRECATED
+    # cat monitor_on_DEPRECATED
     off
 
 請注意，當監測開啓時，你不能寫到上述的debugfs文件。如果你在DAMON運行時寫到這些文件，將會返
@@ -543,11 +543,11 @@ DAMON通過一個叫做kdamond的內核線程來進行請求監測。你可以�
 得該線程的 ``pid`` 。當監測被 ``關閉`` 時，讀取該文件不會返回任何信息::
 
     # cd <debugfs>/damon
-    # cat monitor_on
+    # cat monitor_on_DEPRECATED
     off
     # cat kdamond_pid
     none
-    # echo on > monitor_on
+    # echo on > monitor_on_DEPRECATED
     # cat kdamond_pid
     18594
 
@@ -574,7 +574,7 @@ DAMON通過一個叫做kdamond的內核線程來進行請求監測。你可以�
     # ls foo
     # ls: cannot access 'foo': No such file or directory
 
-注意， ``mk_contexts`` 、 ``rm_contexts`` 和 ``monitor_on`` 文件只在根目錄下。
+注意， ``mk_contexts`` 、 ``rm_contexts`` 和 ``monitor_on_DEPRECATED`` 文件只在根目錄下。
 
 
 監測結果的監測點
@@ -583,10 +583,10 @@ DAMON通過一個叫做kdamond的內核線程來進行請求監測。你可以�
 DAMON通過一個tracepoint ``damon:damon_aggregated`` 提供監測結果.  當監測開啓時，你可
 以記錄追蹤點事件，並使用追蹤點支持工具如perf顯示結果。比如說::
 
-    # echo on > monitor_on
+    # echo on > monitor_on_DEPRECATED
     # perf record -e damon:damon_aggregated &
     # sleep 5
     # kill 9 $(pidof perf)
-    # echo off > monitor_on
+    # echo off > monitor_on_DEPRECATED
     # perf script
 

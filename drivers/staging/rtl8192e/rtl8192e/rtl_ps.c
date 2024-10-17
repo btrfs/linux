@@ -204,16 +204,15 @@ void rtl92e_leisure_ps_enter(struct net_device *dev)
 					&priv->rtllib->pwr_save_ctrl;
 
 	if (!((priv->rtllib->iw_mode == IW_MODE_INFRA) &&
-	    (priv->rtllib->link_state == MAC80211_LINKED)))
+	      (priv->rtllib->link_state == MAC80211_LINKED)))
 		return;
 
 	if (psc->bLeisurePs) {
-		if (psc->LpsIdleCount >= RT_CHECK_FOR_HANG_PERIOD) {
-
+		if (psc->lps_idle_count >= RT_CHECK_FOR_HANG_PERIOD) {
 			if (priv->rtllib->ps == RTLLIB_PS_DISABLED)
 				_rtl92e_ps_set_mode(dev, RTLLIB_PS_MBCAST | RTLLIB_PS_UNICAST);
 		} else {
-			psc->LpsIdleCount++;
+			psc->lps_idle_count++;
 		}
 	}
 }

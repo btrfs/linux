@@ -250,6 +250,8 @@ static int cifs_debug_files_proc_show(struct seq_file *m, void *v)
 	spin_lock(&cifs_tcp_ses_lock);
 	list_for_each_entry(server, &cifs_tcp_ses_list, tcp_ses_list) {
 		list_for_each_entry(ses, &server->smb_ses_list, smb_ses_list) {
+			if (cifs_ses_exiting(ses))
+				continue;
 			list_for_each_entry(tcon, &ses->tcon_list, tcon_list) {
 				spin_lock(&tcon->open_file_lock);
 				list_for_each_entry(cfile, &tcon->openFileList, tlist) {
@@ -276,6 +278,24 @@ static int cifs_debug_files_proc_show(struct seq_file *m, void *v)
 	spin_unlock(&cifs_tcp_ses_lock);
 	seq_putc(m, '\n');
 	return 0;
+}
+
+static __always_inline const char *compression_alg_str(__le16 alg)
+{
+	switch (alg) {
+	case SMB3_COMPRESS_NONE:
+		return "NONE";
+	case SMB3_COMPRESS_LZNT1:
+		return "LZNT1";
+	case SMB3_COMPRESS_LZ77:
+		return "LZ77";
+	case SMB3_COMPRESS_LZ77_HUFF:
+		return "LZ77-Huffman";
+	case SMB3_COMPRESS_PATTERN:
+		return "Pattern_V1";
+	default:
+		return "invalid";
+	}
 }
 
 static int cifs_debug_data_proc_show(struct seq_file *m, void *v)
@@ -329,6 +349,9 @@ static int cifs_debug_data_proc_show(struct seq_file *m, void *v)
 	seq_printf(m, ",ACL");
 #ifdef CONFIG_CIFS_SWN_UPCALL
 	seq_puts(m, ",WITNESS");
+#endif
+#ifdef CONFIG_CIFS_COMPRESSION
+	seq_puts(m, ",COMPRESSION");
 #endif
 	seq_putc(m, '\n');
 	seq_printf(m, "CIFSMaxBufSize: %d\n", CIFSMaxBufSize);
@@ -423,12 +446,6 @@ skip_rdma:
 			server->echo_credits,
 			server->oplock_credits,
 			server->dialect);
-		if (server->compress_algorithm == SMB3_COMPRESS_LZNT1)
-			seq_printf(m, " COMPRESS_LZNT1");
-		else if (server->compress_algorithm == SMB3_COMPRESS_LZ77)
-			seq_printf(m, " COMPRESS_LZ77");
-		else if (server->compress_algorithm == SMB3_COMPRESS_LZ77_HUFF)
-			seq_printf(m, " COMPRESS_LZ77_HUFF");
 		if (server->sign)
 			seq_printf(m, " signed");
 		if (server->posix_ext_supported)
@@ -460,6 +477,16 @@ skip_rdma:
 				   server->leaf_fullpath);
 		}
 
+		seq_puts(m, "\nCompression: ");
+		if (!IS_ENABLED(CONFIG_CIFS_COMPRESSION))
+			seq_puts(m, "no built-in support");
+		else if (!server->compression.requested)
+			seq_puts(m, "disabled on mount");
+		else if (server->compression.enabled)
+			seq_printf(m, "enabled (%s)", compression_alg_str(server->compression.alg));
+		else
+			seq_puts(m, "disabled (not supported by this server)");
+
 		seq_printf(m, "\n\n\tSessions: ");
 		i = 0;
 		list_for_each_entry(ses, &server->smb_ses_list, smb_ses_list) {
@@ -488,6 +515,8 @@ skip_rdma:
 				ses->ses_count, ses->serverOS, ses->serverNOS,
 				ses->capabilities, ses->ses_status);
 			}
+			if (ses->expired_pwd)
+				seq_puts(m, "password no longer valid ");
 			spin_unlock(&ses->ses_lock);
 
 			seq_printf(m, "\n\tSecurity type: %s ",
@@ -654,6 +683,8 @@ static ssize_t cifs_stats_proc_write(struct file *file,
 			}
 #endif /* CONFIG_CIFS_STATS2 */
 			list_for_each_entry(ses, &server->smb_ses_list, smb_ses_list) {
+				if (cifs_ses_exiting(ses))
+					continue;
 				list_for_each_entry(tcon, &ses->tcon_list, tcon_list) {
 					atomic_set(&tcon->num_smbs_sent, 0);
 					spin_lock(&tcon->stat_lock);
@@ -733,6 +764,8 @@ static int cifs_stats_proc_show(struct seq_file *m, void *v)
 			}
 #endif /* STATS2 */
 		list_for_each_entry(ses, &server->smb_ses_list, smb_ses_list) {
+			if (cifs_ses_exiting(ses))
+				continue;
 			list_for_each_entry(tcon, &ses->tcon_list, tcon_list) {
 				i++;
 				seq_printf(m, "\n%d) %s", i, tcon->tree_name);
@@ -1044,7 +1077,7 @@ static int cifs_security_flags_proc_open(struct inode *inode, struct file *file)
 static void
 cifs_security_flags_handle_must_flags(unsigned int *flags)
 {
-	unsigned int signflags = *flags & CIFSSEC_MUST_SIGN;
+	unsigned int signflags = *flags & (CIFSSEC_MUST_SIGN | CIFSSEC_MUST_SEAL);
 
 	if ((*flags & CIFSSEC_MUST_KRB5) == CIFSSEC_MUST_KRB5)
 		*flags = CIFSSEC_MUST_KRB5;

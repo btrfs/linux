@@ -188,7 +188,7 @@ nouveau_exec_job_timeout(struct nouveau_job *job)
 	return DRM_GPU_SCHED_STAT_NOMINAL;
 }
 
-static struct nouveau_job_ops nouveau_exec_job_ops = {
+static const struct nouveau_job_ops nouveau_exec_job_ops = {
 	.submit = nouveau_exec_job_submit,
 	.armed_submit = nouveau_exec_job_armed_submit,
 	.run = nouveau_exec_job_run,
@@ -389,7 +389,7 @@ nouveau_exec_ioctl_exec(struct drm_device *dev,
 	if (ret)
 		goto out;
 
-	args.sched = &chan16->sched;
+	args.sched = chan16->sched;
 	args.file_priv = file_priv;
 	args.chan = chan;
 

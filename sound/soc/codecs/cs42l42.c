@@ -11,7 +11,6 @@
 
 #include <linux/module.h>
 #include <linux/moduleparam.h>
-#include <linux/version.h>
 #include <linux/types.h>
 #include <linux/init.h>
 #include <linux/delay.h>
@@ -2195,7 +2194,6 @@ int cs42l42_suspend(struct device *dev)
 	/* Discharge FILT+ */
 	regmap_update_bits(cs42l42->regmap, CS42L42_PWR_CTL2,
 			   CS42L42_DISCHARGE_FILT_MASK, CS42L42_DISCHARGE_FILT_MASK);
-	msleep(CS42L42_FILT_DISCHARGE_TIME_MS);
 
 	regcache_cache_only(cs42l42->regmap, true);
 	gpiod_set_value_cansleep(cs42l42->reset_gpio, 0);

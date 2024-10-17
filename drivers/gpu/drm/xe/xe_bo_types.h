@@ -8,11 +8,12 @@
 
 #include <linux/iosys-map.h>
 
-#include <drm/drm_mm.h>
 #include <drm/ttm/ttm_bo.h>
 #include <drm/ttm/ttm_device.h>
 #include <drm/ttm/ttm_execbuf_util.h>
 #include <drm/ttm/ttm_placement.h>
+
+#include "xe_ggtt_types.h"
 
 struct xe_device;
 struct xe_vm;
@@ -39,7 +40,7 @@ struct xe_bo {
 	/** @placement: current placement for this BO */
 	struct ttm_placement placement;
 	/** @ggtt_node: GGTT node if this BO is mapped in the GGTT */
-	struct drm_mm_node ggtt_node;
+	struct xe_ggtt_node *ggtt_node;
 	/** @vmap: iosys map of this buffer */
 	struct iosys_map vmap;
 	/** @ttm_kmap: TTM bo kmap object for internal use only. Keep off. */
@@ -56,27 +57,10 @@ struct xe_bo {
 	 */
 	struct list_head client_link;
 #endif
-	/** @props: BO user controlled properties */
-	struct {
-		/** @preferred_mem: preferred memory class for this BO */
-		s16 preferred_mem_class;
-		/** @prefered_gt: preferred GT for this BO */
-		s16 preferred_gt;
-		/** @preferred_mem_type: preferred memory type */
-		s32 preferred_mem_type;
-		/**
-		 * @cpu_atomic: the CPU expects to do atomics operations to
-		 * this BO
-		 */
-		bool cpu_atomic;
-		/**
-		 * @device_atomic: the device expects to do atomics operations
-		 * to this BO
-		 */
-		bool device_atomic;
-	} props;
 	/** @freed: List node for delayed put. */
 	struct llist_node freed;
+	/** @update_index: Update index if PT BO */
+	int update_index;
 	/** @created: Whether the bo has passed initial creation */
 	bool created;
 
@@ -85,9 +69,13 @@ struct xe_bo {
 
 	/**
 	 * @cpu_caching: CPU caching mode. Currently only used for userspace
-	 * objects.
+	 * objects. Exceptions are system memory on DGFX, which is always
+	 * WB.
 	 */
 	u16 cpu_caching;
+
+	/** @vram_userfault_link: Link into @mem_access.vram_userfault.list */
+		struct list_head vram_userfault_link;
 };
 
 #define intel_bo_to_drm_bo(bo) (&(bo)->ttm.base)

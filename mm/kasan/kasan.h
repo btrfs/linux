@@ -6,7 +6,6 @@
 #include <linux/kasan.h>
 #include <linux/kasan-tags.h>
 #include <linux/kfence.h>
-#include <linux/spinlock.h>
 #include <linux/stackdepot.h>
 
 #if defined(CONFIG_KASAN_SW_TAGS) || defined(CONFIG_KASAN_HW_TAGS)
@@ -265,13 +264,6 @@ struct kasan_global {
 struct kasan_alloc_meta {
 	struct kasan_track alloc_track;
 	/* Free track is stored in kasan_free_meta. */
-	/*
-	 * aux_lock protects aux_stack from accesses from concurrent
-	 * kasan_record_aux_stack calls. It is a raw spinlock to avoid sleeping
-	 * on RT kernels, as kasan_record_aux_stack_noalloc can be called from
-	 * non-sleepable contexts.
-	 */
-	raw_spinlock_t aux_lock;
 	depot_stack_handle_t aux_stack[2];
 };
 
@@ -398,10 +390,8 @@ struct kasan_alloc_meta *kasan_get_alloc_meta(struct kmem_cache *cache,
 struct kasan_free_meta *kasan_get_free_meta(struct kmem_cache *cache,
 						const void *object);
 void kasan_init_object_meta(struct kmem_cache *cache, const void *object);
-void kasan_release_object_meta(struct kmem_cache *cache, const void *object);
 #else
 static inline void kasan_init_object_meta(struct kmem_cache *cache, const void *object) { }
-static inline void kasan_release_object_meta(struct kmem_cache *cache, const void *object) { }
 #endif
 
 depot_stack_handle_t kasan_save_stack(gfp_t flags, depot_flags_t depot_flags);
@@ -564,6 +554,12 @@ static inline bool kasan_arch_is_ready(void)	{ return true; }
 
 void kasan_kunit_test_suite_start(void);
 void kasan_kunit_test_suite_end(void);
+
+#ifdef CONFIG_RUST
+char kasan_test_rust_uaf(void);
+#else
+static inline char kasan_test_rust_uaf(void) { return '\0'; }
+#endif
 
 #else /* CONFIG_KASAN_KUNIT_TEST */
 

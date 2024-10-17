@@ -400,7 +400,7 @@ static void nvme_loop_shutdown_ctrl(struct nvme_loop_ctrl *ctrl)
 	}
 
 	nvme_quiesce_admin_queue(&ctrl->ctrl);
-	if (ctrl->ctrl.state == NVME_CTRL_LIVE)
+	if (nvme_ctrl_state(&ctrl->ctrl) == NVME_CTRL_LIVE)
 		nvme_disable_ctrl(&ctrl->ctrl, true);
 
 	nvme_cancel_admin_tagset(&ctrl->ctrl);
@@ -434,8 +434,10 @@ static void nvme_loop_reset_ctrl_work(struct work_struct *work)
 	nvme_loop_shutdown_ctrl(ctrl);
 
 	if (!nvme_change_ctrl_state(&ctrl->ctrl, NVME_CTRL_CONNECTING)) {
-		if (ctrl->ctrl.state != NVME_CTRL_DELETING &&
-		    ctrl->ctrl.state != NVME_CTRL_DELETING_NOIO)
+		enum nvme_ctrl_state state = nvme_ctrl_state(&ctrl->ctrl);
+
+		if (state != NVME_CTRL_DELETING &&
+		    state != NVME_CTRL_DELETING_NOIO)
 			/* state change failure for non-deleted ctrl? */
 			WARN_ON_ONCE(1);
 		return;
@@ -553,6 +555,10 @@ static struct nvme_ctrl *nvme_loop_create_ctrl(struct device *dev,
 		goto out;
 	}
 
+	ret = nvme_add_ctrl(&ctrl->ctrl);
+	if (ret)
+		goto out_put_ctrl;
+
 	if (!nvme_change_ctrl_state(&ctrl->ctrl, NVME_CTRL_CONNECTING))
 		WARN_ON_ONCE(1);
 
@@ -609,6 +615,7 @@ out_free_queues:
 	kfree(ctrl->queues);
 out_uninit_ctrl:
 	nvme_uninit_ctrl(&ctrl->ctrl);
+out_put_ctrl:
 	nvme_put_ctrl(&ctrl->ctrl);
 out:
 	if (ret > 0)
@@ -688,5 +695,6 @@ static void __exit nvme_loop_cleanup_module(void)
 module_init(nvme_loop_init_module);
 module_exit(nvme_loop_cleanup_module);
 
+MODULE_DESCRIPTION("NVMe target loop transport driver");
 MODULE_LICENSE("GPL v2");
 MODULE_ALIAS("nvmet-transport-254"); /* 254 == NVMF_TRTYPE_LOOP */

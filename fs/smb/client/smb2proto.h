@@ -61,7 +61,9 @@ struct inode *smb2_get_reparse_inode(struct cifs_open_info_data *data,
 				     const unsigned int xid,
 				     struct cifs_tcon *tcon,
 				     const char *full_path,
-				     struct kvec *iov);
+				     bool directory,
+				     struct kvec *reparse_iov,
+				     struct kvec *xattr_iov);
 int smb2_query_reparse_point(const unsigned int xid,
 			     struct cifs_tcon *tcon,
 			     struct cifs_sb_info *cifs_sb,
@@ -75,7 +77,8 @@ int smb2_query_path_info(const unsigned int xid,
 			 struct cifs_open_info_data *data);
 extern int smb2_set_path_size(const unsigned int xid, struct cifs_tcon *tcon,
 			      const char *full_path, __u64 size,
-			      struct cifs_sb_info *cifs_sb, bool set_alloc);
+			      struct cifs_sb_info *cifs_sb, bool set_alloc,
+				  struct dentry *dentry);
 extern int smb2_set_file_info(struct inode *inode, const char *full_path,
 			      FILE_BASIC_INFO *buf, const unsigned int xid);
 extern int smb311_posix_mkdir(const unsigned int xid, struct inode *inode,
@@ -91,7 +94,8 @@ extern void smb2_mkdir_setinfo(struct inode *inode, const char *full_path,
 extern int smb2_rmdir(const unsigned int xid, struct cifs_tcon *tcon,
 		      const char *name, struct cifs_sb_info *cifs_sb);
 extern int smb2_unlink(const unsigned int xid, struct cifs_tcon *tcon,
-		       const char *name, struct cifs_sb_info *cifs_sb);
+		       const char *name, struct cifs_sb_info *cifs_sb,
+			   struct dentry *dentry);
 int smb2_rename_path(const unsigned int xid,
 		     struct cifs_tcon *tcon,
 		     struct dentry *source_dentry,
@@ -122,6 +126,11 @@ extern unsigned long smb_rqst_len(struct TCP_Server_Info *server,
 extern void smb2_set_next_command(struct cifs_tcon *tcon,
 				  struct smb_rqst *rqst);
 extern void smb2_set_related(struct smb_rqst *rqst);
+extern void smb2_set_replay(struct TCP_Server_Info *server,
+			    struct smb_rqst *rqst);
+extern bool smb2_should_replay(struct cifs_tcon *tcon,
+			  int *pretries,
+			  int *pcur_sleep);
 
 /*
  * SMB2 Worker functions - most of protocol specific implementation details
@@ -202,11 +211,10 @@ extern int SMB2_query_acl(const unsigned int xid, struct cifs_tcon *tcon,
 extern int SMB2_get_srv_num(const unsigned int xid, struct cifs_tcon *tcon,
 			    u64 persistent_fid, u64 volatile_fid,
 			    __le64 *uniqueid);
-extern int smb2_async_readv(struct cifs_readdata *rdata);
+extern int smb2_async_readv(struct cifs_io_subrequest *rdata);
 extern int SMB2_read(const unsigned int xid, struct cifs_io_parms *io_parms,
 		     unsigned int *nbytes, char **buf, int *buf_type);
-extern int smb2_async_writev(struct cifs_writedata *wdata,
-			     void (*release)(struct kref *kref));
+extern void smb2_async_writev(struct cifs_io_subrequest *wdata);
 extern int SMB2_write(const unsigned int xid, struct cifs_io_parms *io_parms,
 		      unsigned int *nbytes, struct kvec *iov, int n_vec);
 extern int SMB2_echo(struct TCP_Server_Info *server);
@@ -231,7 +239,7 @@ extern int SMB2_set_info_init(struct cifs_tcon *tcon,
 extern void SMB2_set_info_free(struct smb_rqst *rqst);
 extern int SMB2_set_acl(const unsigned int xid, struct cifs_tcon *tcon,
 			u64 persistent_fid, u64 volatile_fid,
-			struct cifs_ntsd *pnntsd, int pacllen, int aclflag);
+			struct smb_ntsd *pnntsd, int pacllen, int aclflag);
 extern int SMB2_set_ea(const unsigned int xid, struct cifs_tcon *tcon,
 		       u64 persistent_fid, u64 volatile_fid,
 		       struct smb2_file_full_ea_info *buf, int len);
@@ -303,5 +311,11 @@ int smb311_posix_query_path_info(const unsigned int xid,
 int posix_info_parse(const void *beg, const void *end,
 		     struct smb2_posix_info_parsed *out);
 int posix_info_sid_size(const void *beg, const void *end);
+int smb2_create_reparse_symlink(const unsigned int xid, struct inode *inode,
+				struct dentry *dentry, struct cifs_tcon *tcon,
+				const char *full_path, const char *symname);
+int smb2_make_nfs_node(unsigned int xid, struct inode *inode,
+		       struct dentry *dentry, struct cifs_tcon *tcon,
+		       const char *full_path, umode_t mode, dev_t dev);
 
 #endif			/* _SMB2PROTO_H */

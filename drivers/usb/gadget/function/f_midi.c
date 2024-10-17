@@ -30,14 +30,15 @@
 #include <sound/rawmidi.h>
 
 #include <linux/usb/ch9.h>
+#include <linux/usb/func_utils.h>
 #include <linux/usb/gadget.h>
 #include <linux/usb/audio.h>
 #include <linux/usb/midi.h>
 
-#include "u_f.h"
 #include "u_midi.h"
 
 MODULE_AUTHOR("Ben Williamson");
+MODULE_DESCRIPTION("USB MIDI class function driver");
 MODULE_LICENSE("GPL v2");
 
 static const char f_midi_shortname[] = "f_midi";

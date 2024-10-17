@@ -3,7 +3,7 @@
 #include <linux/bitops.h>
 #include <linux/math.h>
 #include <linux/string.h>
-#include <asm/unaligned.h>
+#include <linux/unaligned.h>
 
 #ifdef CONFIG_VALGRIND
 #include <valgrind/memcheck.h>
@@ -85,7 +85,7 @@ int bch2_varint_encode_fast(u8 *out, u64 v)
 
 	if (likely(bytes < 9)) {
 		v <<= bytes;
-		v |= ~(~0 << (bytes - 1));
+		v |= ~(~0U << (bytes - 1));
 	} else {
 		*out++ = 255;
 		bytes = 9;
