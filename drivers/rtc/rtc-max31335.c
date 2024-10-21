@@ -8,7 +8,7 @@
  *
  */
 
-#include <asm-generic/unaligned.h>
+#include <linux/unaligned.h>
 #include <linux/bcd.h>
 #include <linux/bitfield.h>
 #include <linux/bitops.h>
@@ -204,7 +204,7 @@ static bool max31335_volatile_reg(struct device *dev, unsigned int reg)
 		return true;
 
 	/* interrupt status register */
-	if (reg == MAX31335_INT_EN1_A1IE)
+	if (reg == MAX31335_STATUS1)
 		return true;
 
 	/* temperature registers */
@@ -669,7 +669,7 @@ static int max31335_probe(struct i2c_client *client)
 }
 
 static const struct i2c_device_id max31335_id[] = {
-	{ "max31335", 0 },
+	{ "max31335" },
 	{ }
 };
 

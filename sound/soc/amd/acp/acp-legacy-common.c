@@ -113,40 +113,40 @@ static int set_acp_i2s_dma_fifo(struct snd_pcm_substream *substream,
 	switch (dai->driver->id) {
 	case I2S_SP_INSTANCE:
 		if (dir == SNDRV_PCM_STREAM_PLAYBACK) {
-			reg_dma_size = ACP_I2S_TX_DMA_SIZE;
+			reg_dma_size = ACP_I2S_TX_DMA_SIZE(adata);
 			acp_fifo_addr = rsrc->sram_pte_offset +
 					SP_PB_FIFO_ADDR_OFFSET;
-			reg_fifo_addr = ACP_I2S_TX_FIFOADDR;
-			reg_fifo_size = ACP_I2S_TX_FIFOSIZE;
+			reg_fifo_addr = ACP_I2S_TX_FIFOADDR(adata);
+			reg_fifo_size = ACP_I2S_TX_FIFOSIZE(adata);
 			phy_addr = I2S_SP_TX_MEM_WINDOW_START + stream->reg_offset;
-			writel(phy_addr, adata->acp_base + ACP_I2S_TX_RINGBUFADDR);
+			writel(phy_addr, adata->acp_base + ACP_I2S_TX_RINGBUFADDR(adata));
 		} else {
-			reg_dma_size = ACP_I2S_RX_DMA_SIZE;
+			reg_dma_size = ACP_I2S_RX_DMA_SIZE(adata);
 			acp_fifo_addr = rsrc->sram_pte_offset +
 					SP_CAPT_FIFO_ADDR_OFFSET;
-			reg_fifo_addr = ACP_I2S_RX_FIFOADDR;
-			reg_fifo_size = ACP_I2S_RX_FIFOSIZE;
+			reg_fifo_addr = ACP_I2S_RX_FIFOADDR(adata);
+			reg_fifo_size = ACP_I2S_RX_FIFOSIZE(adata);
 			phy_addr = I2S_SP_RX_MEM_WINDOW_START + stream->reg_offset;
-			writel(phy_addr, adata->acp_base + ACP_I2S_RX_RINGBUFADDR);
+			writel(phy_addr, adata->acp_base + ACP_I2S_RX_RINGBUFADDR(adata));
 		}
 		break;
 	case I2S_BT_INSTANCE:
 		if (dir == SNDRV_PCM_STREAM_PLAYBACK) {
-			reg_dma_size = ACP_BT_TX_DMA_SIZE;
+			reg_dma_size = ACP_BT_TX_DMA_SIZE(adata);
 			acp_fifo_addr = rsrc->sram_pte_offset +
 					BT_PB_FIFO_ADDR_OFFSET;
-			reg_fifo_addr = ACP_BT_TX_FIFOADDR;
-			reg_fifo_size = ACP_BT_TX_FIFOSIZE;
+			reg_fifo_addr = ACP_BT_TX_FIFOADDR(adata);
+			reg_fifo_size = ACP_BT_TX_FIFOSIZE(adata);
 			phy_addr = I2S_BT_TX_MEM_WINDOW_START + stream->reg_offset;
-			writel(phy_addr, adata->acp_base + ACP_BT_TX_RINGBUFADDR);
+			writel(phy_addr, adata->acp_base + ACP_BT_TX_RINGBUFADDR(adata));
 		} else {
-			reg_dma_size = ACP_BT_RX_DMA_SIZE;
+			reg_dma_size = ACP_BT_RX_DMA_SIZE(adata);
 			acp_fifo_addr = rsrc->sram_pte_offset +
 					BT_CAPT_FIFO_ADDR_OFFSET;
-			reg_fifo_addr = ACP_BT_RX_FIFOADDR;
-			reg_fifo_size = ACP_BT_RX_FIFOSIZE;
+			reg_fifo_addr = ACP_BT_RX_FIFOADDR(adata);
+			reg_fifo_size = ACP_BT_RX_FIFOSIZE(adata);
 			phy_addr = I2S_BT_TX_MEM_WINDOW_START + stream->reg_offset;
-			writel(phy_addr, adata->acp_base + ACP_BT_RX_RINGBUFADDR);
+			writel(phy_addr, adata->acp_base + ACP_BT_RX_RINGBUFADDR(adata));
 		}
 		break;
 	case I2S_HS_INSTANCE:
@@ -270,6 +270,7 @@ static int acp_power_on(struct acp_chip_info *chip)
 		acp_pgfsm_ctrl_reg = ACP63_PGFSM_CONTROL;
 		break;
 	case ACP70_DEV:
+	case ACP71_DEV:
 		acp_pgfsm_stat_reg = ACP70_PGFSM_STATUS;
 		acp_pgfsm_ctrl_reg = ACP70_PGFSM_CONTROL;
 		break;
@@ -321,6 +322,8 @@ int acp_init(struct acp_chip_info *chip)
 		pr_err("ACP reset failed\n");
 		return ret;
 	}
+	if (chip->acp_rev >= ACP70_DEV)
+		writel(0, chip->base + ACP_ZSC_DSP_CTRL);
 	return 0;
 }
 EXPORT_SYMBOL_NS_GPL(acp_init, SND_SOC_ACP_COMMON);
@@ -334,8 +337,10 @@ int acp_deinit(struct acp_chip_info *chip)
 	if (ret)
 		return ret;
 
-	if (chip->acp_rev != ACP70_DEV)
+	if (chip->acp_rev < ACP70_DEV)
 		writel(0, chip->base + ACP_CONTROL);
+	else
+		writel(0x01, chip->base + ACP_ZSC_DSP_CTRL);
 	return 0;
 }
 EXPORT_SYMBOL_NS_GPL(acp_deinit, SND_SOC_ACP_COMMON);
@@ -358,11 +363,25 @@ int smn_read(struct pci_dev *dev, u32 smn_addr)
 }
 EXPORT_SYMBOL_NS_GPL(smn_read, SND_SOC_ACP_COMMON);
 
-int check_acp_pdm(struct pci_dev *pci, struct acp_chip_info *chip)
+static void check_acp3x_config(struct acp_chip_info *chip)
 {
-	struct acpi_device *pdm_dev;
-	const union acpi_object *obj;
-	u32 pdm_addr, val;
+	u32 val;
+
+	val = readl(chip->base + ACP3X_PIN_CONFIG);
+	switch (val) {
+	case ACP_CONFIG_4:
+		chip->is_i2s_config = true;
+		chip->is_pdm_config = true;
+		break;
+	default:
+		chip->is_pdm_config = true;
+		break;
+	}
+}
+
+static void check_acp6x_config(struct acp_chip_info *chip)
+{
+	u32 val;
 
 	val = readl(chip->base + ACP_PIN_CONFIG);
 	switch (val) {
@@ -371,42 +390,96 @@ int check_acp_pdm(struct pci_dev *pci, struct acp_chip_info *chip)
 	case ACP_CONFIG_6:
 	case ACP_CONFIG_7:
 	case ACP_CONFIG_8:
-	case ACP_CONFIG_10:
 	case ACP_CONFIG_11:
+	case ACP_CONFIG_14:
+		chip->is_pdm_config = true;
+		break;
+	case ACP_CONFIG_9:
+		chip->is_i2s_config = true;
+		break;
+	case ACP_CONFIG_10:
 	case ACP_CONFIG_12:
 	case ACP_CONFIG_13:
-	case ACP_CONFIG_14:
+		chip->is_i2s_config = true;
+		chip->is_pdm_config = true;
 		break;
 	default:
-		return -EINVAL;
+		break;
 	}
+}
+
+static void check_acp70_config(struct acp_chip_info *chip)
+{
+	u32 val;
+
+	val = readl(chip->base + ACP_PIN_CONFIG);
+	switch (val) {
+	case ACP_CONFIG_4:
+	case ACP_CONFIG_5:
+	case ACP_CONFIG_6:
+	case ACP_CONFIG_7:
+	case ACP_CONFIG_8:
+	case ACP_CONFIG_11:
+	case ACP_CONFIG_14:
+	case ACP_CONFIG_17:
+	case ACP_CONFIG_18:
+		chip->is_pdm_config = true;
+		break;
+	case ACP_CONFIG_9:
+		chip->is_i2s_config = true;
+		break;
+	case ACP_CONFIG_10:
+	case ACP_CONFIG_12:
+	case ACP_CONFIG_13:
+	case ACP_CONFIG_19:
+	case ACP_CONFIG_20:
+		chip->is_i2s_config = true;
+		chip->is_pdm_config = true;
+		break;
+	default:
+		break;
+	}
+}
+
+void check_acp_config(struct pci_dev *pci, struct acp_chip_info *chip)
+{
+	struct acpi_device *pdm_dev;
+	const union acpi_object *obj;
+	u32 pdm_addr;
 
 	switch (chip->acp_rev) {
 	case ACP3X_DEV:
 		pdm_addr = ACP_RENOIR_PDM_ADDR;
+		check_acp3x_config(chip);
 		break;
 	case ACP6X_DEV:
 		pdm_addr = ACP_REMBRANDT_PDM_ADDR;
+		check_acp6x_config(chip);
 		break;
 	case ACP63_DEV:
 		pdm_addr = ACP63_PDM_ADDR;
+		check_acp6x_config(chip);
 		break;
 	case ACP70_DEV:
+	case ACP71_DEV:
 		pdm_addr = ACP70_PDM_ADDR;
+		check_acp70_config(chip);
 		break;
 	default:
-		return -EINVAL;
+		break;
 	}
 
-	pdm_dev = acpi_find_child_device(ACPI_COMPANION(&pci->dev), pdm_addr, 0);
-	if (pdm_dev) {
-		if (!acpi_dev_get_property(pdm_dev, "acp-audio-device-type",
-					   ACPI_TYPE_INTEGER, &obj) &&
-					   obj->integer.value == pdm_addr)
-			return 0;
+	if (chip->is_pdm_config) {
+		pdm_dev = acpi_find_child_device(ACPI_COMPANION(&pci->dev), pdm_addr, 0);
+		if (pdm_dev) {
+			if (!acpi_dev_get_property(pdm_dev, "acp-audio-device-type",
+						   ACPI_TYPE_INTEGER, &obj) &&
+						   obj->integer.value == pdm_addr)
+				chip->is_pdm_dev = true;
+		}
 	}
-	return -ENODEV;
 }
-EXPORT_SYMBOL_NS_GPL(check_acp_pdm, SND_SOC_ACP_COMMON);
+EXPORT_SYMBOL_NS_GPL(check_acp_config, SND_SOC_ACP_COMMON);
 
+MODULE_DESCRIPTION("AMD ACP legacy common features");
 MODULE_LICENSE("Dual BSD/GPL");

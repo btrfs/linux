@@ -16,6 +16,7 @@
 #include <linux/mm.h>
 #include <linux/swap.h>
 #include <linux/netfs.h>
+#include <trace/events/netfs.h>
 #include "internal.h"
 
 static int afs_file_mmap(struct file *file, struct vm_area_struct *vma);
@@ -54,7 +55,6 @@ const struct address_space_operations afs_file_aops = {
 	.read_folio	= netfs_read_folio,
 	.readahead	= netfs_readahead,
 	.dirty_folio	= netfs_dirty_folio,
-	.launder_folio	= netfs_launder_folio,
 	.release_folio	= netfs_release_folio,
 	.invalidate_folio = netfs_invalidate_folio,
 	.migrate_folio	= filemap_migrate_folio,
@@ -243,8 +243,10 @@ static void afs_fetch_data_notify(struct afs_operation *op)
 
 	req->error = error;
 	if (subreq) {
-		__set_bit(NETFS_SREQ_CLEAR_TAIL, &subreq->flags);
-		netfs_subreq_terminated(subreq, error ?: req->actual_len, false);
+		subreq->rreq->i_size = req->file_size;
+		if (req->pos + req->actual_len >= req->file_size)
+			__set_bit(NETFS_SREQ_HIT_EOF, &subreq->flags);
+		netfs_read_subreq_terminated(subreq, error, false);
 		req->subreq = NULL;
 	} else if (req->done) {
 		req->done(req);
@@ -262,6 +264,12 @@ static void afs_fetch_data_success(struct afs_operation *op)
 	afs_fetch_data_notify(op);
 }
 
+static void afs_fetch_data_aborted(struct afs_operation *op)
+{
+	afs_check_for_remote_deletion(op);
+	afs_fetch_data_notify(op);
+}
+
 static void afs_fetch_data_put(struct afs_operation *op)
 {
 	op->fetch.req->error = afs_op_error(op);
@@ -272,7 +280,7 @@ static const struct afs_operation_ops afs_fetch_data_operation = {
 	.issue_afs_rpc	= afs_fs_fetch_data,
 	.issue_yfs_rpc	= yfs_fs_fetch_data,
 	.success	= afs_fetch_data_success,
-	.aborted	= afs_check_for_remote_deletion,
+	.aborted	= afs_fetch_data_aborted,
 	.failed		= afs_fetch_data_notify,
 	.put		= afs_fetch_data_put,
 };
@@ -294,7 +302,7 @@ int afs_fetch_data(struct afs_vnode *vnode, struct afs_read *req)
 	op = afs_alloc_operation(req->key, vnode->volume);
 	if (IS_ERR(op)) {
 		if (req->subreq)
-			netfs_subreq_terminated(req->subreq, PTR_ERR(op), false);
+			netfs_read_subreq_terminated(req->subreq, PTR_ERR(op), false);
 		return PTR_ERR(op);
 	}
 
@@ -305,14 +313,15 @@ int afs_fetch_data(struct afs_vnode *vnode, struct afs_read *req)
 	return afs_do_sync_operation(op);
 }
 
-static void afs_issue_read(struct netfs_io_subrequest *subreq)
+static void afs_read_worker(struct work_struct *work)
 {
+	struct netfs_io_subrequest *subreq = container_of(work, struct netfs_io_subrequest, work);
 	struct afs_vnode *vnode = AFS_FS_I(subreq->rreq->inode);
 	struct afs_read *fsreq;
 
 	fsreq = afs_alloc_read(GFP_NOFS);
 	if (!fsreq)
-		return netfs_subreq_terminated(subreq, -ENOMEM, false);
+		return netfs_read_subreq_terminated(subreq, -ENOMEM, false);
 
 	fsreq->subreq	= subreq;
 	fsreq->pos	= subreq->start + subreq->transferred;
@@ -321,8 +330,15 @@ static void afs_issue_read(struct netfs_io_subrequest *subreq)
 	fsreq->vnode	= vnode;
 	fsreq->iter	= &subreq->io_iter;
 
+	trace_netfs_sreq(subreq, netfs_sreq_trace_submit);
 	afs_fetch_data(fsreq->vnode, fsreq);
 	afs_put_read(fsreq);
+}
+
+static void afs_issue_read(struct netfs_io_subrequest *subreq)
+{
+	INIT_WORK(&subreq->work, afs_read_worker);
+	queue_work(system_long_wq, &subreq->work);
 }
 
 static int afs_symlink_read_folio(struct file *file, struct folio *folio)
@@ -354,7 +370,7 @@ static int afs_init_request(struct netfs_io_request *rreq, struct file *file)
 	if (file)
 		rreq->netfs_priv = key_get(afs_file_key(file));
 	rreq->rsize = 256 * 1024;
-	rreq->wsize = 256 * 1024;
+	rreq->wsize = 256 * 1024 * 1024;
 	return 0;
 }
 
@@ -369,6 +385,7 @@ static int afs_check_write_begin(struct file *file, loff_t pos, unsigned len,
 static void afs_free_request(struct netfs_io_request *rreq)
 {
 	key_put(rreq->netfs_priv);
+	afs_put_wb_key(rreq->netfs_priv2);
 }
 
 static void afs_update_i_size(struct inode *inode, loff_t new_i_size)
@@ -400,7 +417,10 @@ const struct netfs_request_ops afs_req_ops = {
 	.issue_read		= afs_issue_read,
 	.update_i_size		= afs_update_i_size,
 	.invalidate_cache	= afs_netfs_invalidate_cache,
-	.create_write_requests	= afs_create_write_requests,
+	.begin_writeback	= afs_begin_writeback,
+	.prepare_write		= afs_prepare_write,
+	.issue_write		= afs_issue_write,
+	.retry_request		= afs_retry_request,
 };
 
 static void afs_add_open_mmap(struct afs_vnode *vnode)

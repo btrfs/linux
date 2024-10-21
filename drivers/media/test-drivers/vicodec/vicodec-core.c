@@ -1215,8 +1215,7 @@ static int vicodec_encoder_cmd(struct file *file, void *fh,
 	if (ret < 0)
 		return ret;
 
-	if (!vb2_is_streaming(&ctx->fh.m2m_ctx->cap_q_ctx.q) ||
-	    !vb2_is_streaming(&ctx->fh.m2m_ctx->out_q_ctx.q))
+	if (!vb2_is_streaming(&ctx->fh.m2m_ctx->out_q_ctx.q))
 		return 0;
 
 	ret = v4l2_m2m_ioctl_encoder_cmd(file, fh, ec);
@@ -1250,8 +1249,7 @@ static int vicodec_decoder_cmd(struct file *file, void *fh,
 	if (ret < 0)
 		return ret;
 
-	if (!vb2_is_streaming(&ctx->fh.m2m_ctx->cap_q_ctx.q) ||
-	    !vb2_is_streaming(&ctx->fh.m2m_ctx->out_q_ctx.q))
+	if (!vb2_is_streaming(&ctx->fh.m2m_ctx->out_q_ctx.q))
 		return 0;
 
 	ret = v4l2_m2m_ioctl_decoder_cmd(file, fh, dc);
@@ -1345,6 +1343,7 @@ static const struct v4l2_ioctl_ops vicodec_ioctl_ops = {
 	.vidioc_prepare_buf	= v4l2_m2m_ioctl_prepare_buf,
 	.vidioc_create_bufs	= v4l2_m2m_ioctl_create_bufs,
 	.vidioc_expbuf		= v4l2_m2m_ioctl_expbuf,
+	.vidioc_remove_bufs	= v4l2_m2m_ioctl_remove_bufs,
 
 	.vidioc_streamon	= v4l2_m2m_ioctl_streamon,
 	.vidioc_streamoff	= v4l2_m2m_ioctl_streamoff,

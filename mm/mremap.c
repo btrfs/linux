@@ -198,14 +198,14 @@ static int move_ptes(struct vm_area_struct *vma, pmd_t *old_pmd,
 		 * PTE.
 		 *
 		 * NOTE! Both old and new PTL matter: the old one
-		 * for racing with page_mkclean(), the new one to
+		 * for racing with folio_mkclean(), the new one to
 		 * make sure the physical page stays valid until
 		 * the TLB entry for the old mapping has been
 		 * flushed.
 		 */
 		if (pte_present(pte))
 			force_flush = true;
-		pte = move_pte(pte, new_vma->vm_page_prot, old_addr, new_addr);
+		pte = move_pte(pte, old_addr, new_addr);
 		pte = move_soft_dirty_pte(pte);
 		set_pte_at(mm, new_addr, new_pte, pte);
 	}
@@ -903,6 +903,11 @@ static unsigned long mremap_to(unsigned long addr, unsigned long old_len,
 		return -ENOMEM;
 
 	if (flags & MREMAP_FIXED) {
+		/*
+		 * In mremap_to().
+		 * VMA is moved to dst address, and munmap dst first.
+		 * do_munmap will check if dst is sealed.
+		 */
 		ret = do_munmap(mm, new_addr, new_len, uf_unmap_early);
 		if (ret)
 			goto out;
@@ -1031,6 +1036,12 @@ SYSCALL_DEFINE5(mremap, unsigned long, addr, unsigned long, old_len,
 	vma = vma_lookup(mm, addr);
 	if (!vma) {
 		ret = -EFAULT;
+		goto out;
+	}
+
+	/* Don't allow remapping vmas when they have already been sealed */
+	if (!can_modify_vma(vma)) {
+		ret = -EPERM;
 		goto out;
 	}
 

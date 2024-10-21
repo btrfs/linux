@@ -18,7 +18,7 @@
 #include <linux/pm_runtime.h>
 #include <linux/regmap.h>
 #include <linux/slab.h>
-#include <asm/unaligned.h>
+#include <linux/unaligned.h>
 
 #include "bmi088-accel.h"
 
@@ -112,11 +112,6 @@ enum bmi088_odr_modes {
 	BMI088_ACCEL_MODE_ODR_400 = 0xa,
 	BMI088_ACCEL_MODE_ODR_800 = 0xb,
 	BMI088_ACCEL_MODE_ODR_1600 = 0xc,
-};
-
-struct bmi088_scale_info {
-	int scale;
-	u8 reg_range;
 };
 
 struct bmi088_accel_chip_info {

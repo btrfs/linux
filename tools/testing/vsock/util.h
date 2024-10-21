@@ -12,10 +12,13 @@ enum test_mode {
 	TEST_MODE_SERVER
 };
 
+#define DEFAULT_PEER_PORT	1234
+
 /* Test runner options */
 struct test_opts {
 	enum test_mode mode;
 	unsigned int peer_cid;
+	unsigned int peer_port;
 };
 
 /* A test case definition.  Test functions must print failures to stderr and
@@ -35,6 +38,10 @@ struct test_case {
 
 void init_signals(void);
 unsigned int parse_cid(const char *str);
+unsigned int parse_port(const char *str);
+int vsock_connect(unsigned int cid, unsigned int port, int type);
+int vsock_accept(unsigned int cid, unsigned int port,
+		 struct sockaddr_vm *clientaddrp, int type);
 int vsock_stream_connect(unsigned int cid, unsigned int port);
 int vsock_bind_connect(unsigned int cid, unsigned int port,
 		       unsigned int bind_port, int type);

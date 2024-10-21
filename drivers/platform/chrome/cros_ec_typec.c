@@ -24,6 +24,23 @@
 #define DP_PORT_VDO	(DP_CONF_SET_PIN_ASSIGN(BIT(DP_PIN_ASSIGN_C) | BIT(DP_PIN_ASSIGN_D)) | \
 				DP_CAP_DFP_D | DP_CAP_RECEPTACLE)
 
+static void cros_typec_role_switch_quirk(struct fwnode_handle *fwnode)
+{
+#ifdef CONFIG_ACPI
+	struct fwnode_handle *switch_fwnode;
+
+	/* Supply the USB role switch with the correct pld_crc if it's missing. */
+	switch_fwnode = fwnode_find_reference(fwnode, "usb-role-switch", 0);
+	if (!IS_ERR_OR_NULL(switch_fwnode)) {
+		struct acpi_device *adev = to_acpi_device_node(switch_fwnode);
+
+		if (adev && !adev->pld_crc)
+			adev->pld_crc = to_acpi_device_node(fwnode)->pld_crc;
+		fwnode_handle_put(switch_fwnode);
+	}
+#endif
+}
+
 static int cros_typec_parse_port_props(struct typec_capability *cap,
 				       struct fwnode_handle *fwnode,
 				       struct device *dev)
@@ -65,6 +82,8 @@ static int cros_typec_parse_port_props(struct typec_capability *cap,
 			return ret;
 		cap->prefer_role = ret;
 	}
+
+	cros_typec_role_switch_quirk(fwnode);
 
 	cap->fwnode = fwnode;
 
@@ -1266,6 +1285,15 @@ unregister_ports:
 	return ret;
 }
 
+static void cros_typec_remove(struct platform_device *pdev)
+{
+	struct cros_typec_data *typec = platform_get_drvdata(pdev);
+
+	cros_usbpd_unregister_notify(&typec->nb);
+	cancel_work_sync(&typec->port_work);
+	cros_unregister_ports(typec);
+}
+
 static int __maybe_unused cros_typec_suspend(struct device *dev)
 {
 	struct cros_typec_data *typec = dev_get_drvdata(dev);
@@ -1297,6 +1325,7 @@ static struct platform_driver cros_typec_driver = {
 		.pm = &cros_typec_pm_ops,
 	},
 	.probe = cros_typec_probe,
+	.remove_new = cros_typec_remove,
 };
 
 module_platform_driver(cros_typec_driver);

@@ -498,7 +498,7 @@ static int clk_wzrd_dynamic_all_nolock(struct clk_hw *hw, unsigned long rate,
 {
 	struct clk_wzrd_divider *divider = to_clk_wzrd_divider(hw);
 	unsigned long vco_freq, rate_div, clockout0_div;
-	void __iomem *div_addr = divider->base;
+	void __iomem *div_addr;
 	u32 reg, pre, f;
 	int err;
 
@@ -1257,7 +1257,7 @@ static struct platform_driver clk_wzrd_driver = {
 		.pm = &clk_wzrd_dev_pm_ops,
 	},
 	.probe = clk_wzrd_probe,
-	.remove_new = clk_wzrd_remove,
+	.remove = clk_wzrd_remove,
 };
 module_platform_driver(clk_wzrd_driver);
 

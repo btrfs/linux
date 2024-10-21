@@ -25,7 +25,7 @@
 int hwwep = 1;
 static char *ifname = "wlan%d";
 
-static struct pci_device_id rtl8192_pci_id_tbl[] = {
+static const struct pci_device_id rtl8192_pci_id_tbl[] = {
 	{PCI_DEVICE(0x10ec, 0x8192)},
 	{PCI_DEVICE(0x07aa, 0x0044)},
 	{PCI_DEVICE(0x07aa, 0x0047)},
@@ -172,8 +172,8 @@ bool rtl92e_set_rf_state(struct net_device *dev,
 					priv->blinked_ingpio = true;
 				else
 					priv->blinked_ingpio = false;
-				rtllib_MgntDisconnect(priv->rtllib,
-						      WLAN_REASON_DISASSOC_STA_HAS_LEFT);
+				rtllib_mgnt_disconnect(priv->rtllib,
+						       WLAN_REASON_DISASSOC_STA_HAS_LEFT);
 			}
 		}
 		if ((change_source == RF_CHANGE_BY_HW) && !priv->hw_radio_off)
@@ -236,14 +236,14 @@ static void _rtl92e_update_cap(struct net_device *dev, u16 cap)
 		if (priv->dot11_current_preamble_mode != PREAMBLE_SHORT) {
 			ShortPreamble = true;
 			priv->dot11_current_preamble_mode = PREAMBLE_SHORT;
-			priv->rtllib->SetHwRegHandler(dev, HW_VAR_ACK_PREAMBLE,
+			priv->rtllib->set_hw_reg_handler(dev, HW_VAR_ACK_PREAMBLE,
 					(unsigned char *)&ShortPreamble);
 		}
 	} else {
 		if (priv->dot11_current_preamble_mode != PREAMBLE_LONG) {
 			ShortPreamble = false;
 			priv->dot11_current_preamble_mode = PREAMBLE_LONG;
-			priv->rtllib->SetHwRegHandler(dev, HW_VAR_ACK_PREAMBLE,
+			priv->rtllib->set_hw_reg_handler(dev, HW_VAR_ACK_PREAMBLE,
 					      (unsigned char *)&ShortPreamble);
 		}
 	}
@@ -256,13 +256,13 @@ static void _rtl92e_update_cap(struct net_device *dev, u16 cap)
 		   (!priv->rtllib->ht_info->current_rt2rt_long_slot_time)) {
 			if (cur_slot_time != SHORT_SLOT_TIME) {
 				slot_time_val = SHORT_SLOT_TIME;
-				priv->rtllib->SetHwRegHandler(dev,
+				priv->rtllib->set_hw_reg_handler(dev,
 					 HW_VAR_SLOT_TIME, &slot_time_val);
 			}
 		} else {
 			if (cur_slot_time != NON_SHORT_SLOT_TIME) {
 				slot_time_val = NON_SHORT_SLOT_TIME;
-				priv->rtllib->SetHwRegHandler(dev,
+				priv->rtllib->set_hw_reg_handler(dev,
 					 HW_VAR_SLOT_TIME, &slot_time_val);
 			}
 		}
@@ -301,7 +301,7 @@ static void _rtl92e_qos_activate(void *data)
 		goto success;
 
 	for (i = 0; i <  QOS_QUEUE_NUM; i++)
-		priv->rtllib->SetHwRegHandler(dev, HW_VAR_AC_PARAM, (u8 *)(&i));
+		priv->rtllib->set_hw_reg_handler(dev, HW_VAR_AC_PARAM, (u8 *)(&i));
 
 success:
 	mutex_unlock(&priv->mutex);
@@ -322,7 +322,7 @@ static int _rtl92e_qos_handle_probe_response(struct r8192_priv *priv,
 
 	if (network->flags & NETWORK_HAS_QOS_MASK) {
 		if (active_network &&
-				(network->flags & NETWORK_HAS_QOS_PARAMETERS))
+		    (network->flags & NETWORK_HAS_QOS_PARAMETERS))
 			network->qos_data.active = network->qos_data.supported;
 
 		if ((network->qos_data.active == 1) && (active_network == 1) &&
@@ -656,16 +656,16 @@ static void _rtl92e_init_priv_handler(struct net_device *dev)
 	priv->rtllib->enter_sleep_state = rtl92e_enter_sleep;
 	priv->rtllib->ps_is_queue_empty = _rtl92e_is_tx_queue_empty;
 
-	priv->rtllib->GetNmodeSupportBySecCfg = rtl92e_get_nmode_support_by_sec;
-	priv->rtllib->GetHalfNmodeSupportByAPsHandler =
+	priv->rtllib->get_nmode_support_by_sec_cfg = rtl92e_get_nmode_support_by_sec;
+	priv->rtllib->get_half_nmode_support_by_aps_handler =
 						rtl92e_is_halfn_supported_by_ap;
 
-	priv->rtllib->SetHwRegHandler = rtl92e_set_reg;
-	priv->rtllib->AllowAllDestAddrHandler = rtl92e_set_monitor_mode;
+	priv->rtllib->set_hw_reg_handler = rtl92e_set_reg;
+	priv->rtllib->allow_all_dest_addr_handler = rtl92e_set_monitor_mode;
 	priv->rtllib->init_gain_handler = rtl92e_init_gain;
 	priv->rtllib->rtllib_ips_leave_wq = rtl92e_rtllib_ips_leave_wq;
 	priv->rtllib->rtllib_ips_leave = rtl92e_rtllib_ips_leave;
-	priv->rtllib->ScanOperationBackupHandler = rtl92e_scan_op_backup;
+	priv->rtllib->scan_operation_backup_handler = rtl92e_scan_op_backup;
 }
 
 static void _rtl92e_init_priv_variable(struct net_device *dev)
@@ -705,7 +705,7 @@ static void _rtl92e_init_priv_variable(struct net_device *dev)
 	priv->hw_rf_off_action = 0;
 	priv->set_rf_pwr_state_in_progress = false;
 	priv->rtllib->pwr_save_ctrl.bLeisurePs = true;
-	priv->rtllib->LPSDelayCnt = 0;
+	priv->rtllib->lps_delay_cnt = 0;
 	priv->rtllib->sta_sleep = LPS_IS_WAKE;
 	priv->rtllib->rf_power_state = rf_on;
 
@@ -860,13 +860,13 @@ static enum reset_type _rtl92e_tx_check_stuck(struct net_device *dev)
 			skb = __skb_peek(&ring->queue);
 			tcb_desc = (struct cb_desc *)(skb->cb +
 				    MAX_DEV_ADDR_SIZE);
-			tcb_desc->nStuckCount++;
+			tcb_desc->stuck_count++;
 			bCheckFwTxCnt = true;
-			if (tcb_desc->nStuckCount > 1)
+			if (tcb_desc->stuck_count > 1)
 				netdev_info(dev,
-					    "%s: QueueID=%d tcb_desc->nStuckCount=%d\n",
+					    "%s: QueueID=%d tcb_desc->stuck_count=%d\n",
 					    __func__, QueueID,
-					    tcb_desc->nStuckCount);
+					    tcb_desc->stuck_count);
 		}
 	}
 	spin_unlock_irqrestore(&priv->irq_th_lock, flags);
@@ -909,25 +909,24 @@ static void _rtl92e_if_check_reset(struct net_device *dev)
 		netdev_info(dev, "%s(): TxResetType is %d, RxResetType is %d\n",
 			    __func__, TxResetType, RxResetType);
 	}
-	return;
 }
 
 static void _rtl92e_update_rxcounts(struct r8192_priv *priv, u32 *TotalRxBcnNum,
 				    u32 *TotalRxDataNum)
 {
-	u16	SlotIndex;
+	u16	slot_index;
 	u8	i;
 
 	*TotalRxBcnNum = 0;
 	*TotalRxDataNum = 0;
 
-	SlotIndex = (priv->rtllib->link_detect_info.SlotIndex++) %
-			(priv->rtllib->link_detect_info.SlotNum);
-	priv->rtllib->link_detect_info.RxBcnNum[SlotIndex] =
-			priv->rtllib->link_detect_info.NumRecvBcnInPeriod;
-	priv->rtllib->link_detect_info.RxDataNum[SlotIndex] =
-			priv->rtllib->link_detect_info.NumRecvDataInPeriod;
-	for (i = 0; i < priv->rtllib->link_detect_info.SlotNum; i++) {
+	slot_index = (priv->rtllib->link_detect_info.slot_index++) %
+			(priv->rtllib->link_detect_info.slot_num);
+	priv->rtllib->link_detect_info.RxBcnNum[slot_index] =
+			priv->rtllib->link_detect_info.num_recv_bcn_in_period;
+	priv->rtllib->link_detect_info.RxDataNum[slot_index] =
+			priv->rtllib->link_detect_info.num_recv_data_in_period;
+	for (i = 0; i < priv->rtllib->link_detect_info.slot_num; i++) {
 		*TotalRxBcnNum += priv->rtllib->link_detect_info.RxBcnNum[i];
 		*TotalRxDataNum += priv->rtllib->link_detect_info.RxDataNum[i];
 	}
@@ -943,7 +942,7 @@ static void _rtl92e_watchdog_wq_cb(void *data)
 	unsigned long flags;
 	struct rt_pwr_save_ctrl *psc = (struct rt_pwr_save_ctrl *)
 					(&priv->rtllib->pwr_save_ctrl);
-	bool bBusyTraffic = false;
+	bool busy_traffic = false;
 	bool	bHigherBusyTraffic = false;
 	bool	bHigherBusyRxTraffic = false;
 	bool bEnterPS = false;
@@ -952,10 +951,10 @@ static void _rtl92e_watchdog_wq_cb(void *data)
 		return;
 
 	if (priv->rtllib->link_state >= MAC80211_LINKED) {
-		if (priv->rtllib->CntAfterLink < 2)
-			priv->rtllib->CntAfterLink++;
+		if (priv->rtllib->cnt_after_link < 2)
+			priv->rtllib->cnt_after_link++;
 	} else {
-		priv->rtllib->CntAfterLink = 0;
+		priv->rtllib->cnt_after_link = 0;
 	}
 
 	rtl92e_dm_watchdog(dev);
@@ -965,15 +964,14 @@ static void _rtl92e_watchdog_wq_cb(void *data)
 		     MAC80211_NOLINK) &&
 		     (ieee->rf_power_state == rf_on) && !ieee->is_set_key &&
 		     (!ieee->proto_stoppping) && !ieee->wx_set_enc) {
-			if (ieee->pwr_save_ctrl.ReturnPoint == IPS_CALLBACK_NONE) {
+			if (ieee->pwr_save_ctrl.return_point == IPS_CALLBACK_NONE)
 				rtl92e_ips_enter(dev);
-			}
 		}
 	}
 	if ((ieee->link_state == MAC80211_LINKED) && (ieee->iw_mode == IW_MODE_INFRA)) {
 		if (ieee->link_detect_info.num_rx_ok_in_period > 100 ||
 		ieee->link_detect_info.num_tx_ok_in_period > 100)
-			bBusyTraffic = true;
+			busy_traffic = true;
 
 		if (ieee->link_detect_info.num_rx_ok_in_period > 4000 ||
 		    ieee->link_detect_info.num_tx_ok_in_period > 4000) {
@@ -984,9 +982,9 @@ static void _rtl92e_watchdog_wq_cb(void *data)
 				bHigherBusyRxTraffic = false;
 		}
 
-		if (((ieee->link_detect_info.NumRxUnicastOkInPeriod +
+		if (((ieee->link_detect_info.num_rx_unicast_ok_in_period +
 		    ieee->link_detect_info.num_tx_ok_in_period) > 8) ||
-		    (ieee->link_detect_info.NumRxUnicastOkInPeriod > 2))
+		    (ieee->link_detect_info.num_rx_unicast_ok_in_period > 2))
 			bEnterPS = false;
 		else
 			bEnterPS = true;
@@ -1005,8 +1003,8 @@ static void _rtl92e_watchdog_wq_cb(void *data)
 
 	ieee->link_detect_info.num_rx_ok_in_period = 0;
 	ieee->link_detect_info.num_tx_ok_in_period = 0;
-	ieee->link_detect_info.NumRxUnicastOkInPeriod = 0;
-	ieee->link_detect_info.bBusyTraffic = bBusyTraffic;
+	ieee->link_detect_info.num_rx_unicast_ok_in_period = 0;
+	ieee->link_detect_info.busy_traffic = busy_traffic;
 
 	ieee->link_detect_info.bHigherBusyTraffic = bHigherBusyTraffic;
 	ieee->link_detect_info.bHigherBusyRxTraffic = bHigherBusyRxTraffic;
@@ -1032,7 +1030,7 @@ static void _rtl92e_watchdog_wq_cb(void *data)
 
 			ieee->link_state = RTLLIB_ASSOCIATING;
 
-			RemovePeerTS(priv->rtllib,
+			remove_peer_ts(priv->rtllib,
 				     priv->rtllib->current_network.bssid);
 			ieee->is_roaming = true;
 			ieee->is_set_key = false;
@@ -1046,8 +1044,8 @@ static void _rtl92e_watchdog_wq_cb(void *data)
 
 			priv->check_roaming_cnt = 0;
 		}
-		ieee->link_detect_info.NumRecvBcnInPeriod = 0;
-		ieee->link_detect_info.NumRecvDataInPeriod = 0;
+		ieee->link_detect_info.num_recv_bcn_in_period = 0;
+		ieee->link_detect_info.num_recv_data_in_period = 0;
 	}
 
 	spin_lock_irqsave(&priv->tx_lock, flags);
@@ -1257,7 +1255,7 @@ static short _rtl92e_tx(struct net_device *dev, struct sk_buff *skb)
 	int   idx;
 	u32 fwinfo_size = 0;
 
-	priv->rtllib->bAwakePktSent = true;
+	priv->rtllib->awake_pkt_sent = true;
 
 	fwinfo_size = sizeof(struct tx_fwinfo_8190pci);
 
@@ -1502,8 +1500,6 @@ static void _rtl92e_rx_normal(struct net_device *dev)
 	};
 	unsigned int count = priv->rxringcount;
 
-	stats.nic_type = NIC_8192E;
-
 	while (count--) {
 		struct rx_desc *pdesc = &priv->rx_ring
 					[priv->rx_idx];
@@ -1526,8 +1522,8 @@ static void _rtl92e_rx_normal(struct net_device *dev)
 				 priv->rxbuffersize, DMA_FROM_DEVICE);
 
 		skb_put(skb, pdesc->Length);
-		skb_reserve(skb, stats.RxDrvInfoSize +
-			stats.RxBufShift);
+		skb_reserve(skb, stats.rx_drv_info_size +
+			stats.rx_buf_shift);
 		skb_trim(skb, skb->len - S_CRC_LEN);
 		rtllib_hdr = (struct ieee80211_hdr *)skb->data;
 		if (!is_multicast_ether_addr(rtllib_hdr->addr1)) {

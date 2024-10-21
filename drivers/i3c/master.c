@@ -13,6 +13,7 @@
 #include <linux/kernel.h>
 #include <linux/list.h>
 #include <linux/of.h>
+#include <linux/pm_runtime.h>
 #include <linux/slab.h>
 #include <linux/spinlock.h>
 #include <linux/workqueue.h>
@@ -300,10 +301,10 @@ static const struct device_type i3c_device_type = {
 	.uevent = i3c_device_uevent,
 };
 
-static int i3c_device_match(struct device *dev, struct device_driver *drv)
+static int i3c_device_match(struct device *dev, const struct device_driver *drv)
 {
 	struct i3c_device *i3cdev;
-	struct i3c_driver *i3cdrv;
+	const struct i3c_driver *i3cdrv;
 
 	if (dev->type != &i3c_device_type)
 		return 0;
@@ -335,12 +336,13 @@ static void i3c_device_remove(struct device *dev)
 	i3c_device_free_ibi(i3cdev);
 }
 
-struct bus_type i3c_bus_type = {
+const struct bus_type i3c_bus_type = {
 	.name = "i3c",
 	.match = i3c_device_match,
 	.probe = i3c_device_probe,
 	.remove = i3c_device_remove,
 };
+EXPORT_SYMBOL_GPL(i3c_bus_type);
 
 static enum i3c_addr_slot_status
 i3c_bus_get_addr_slot_status(struct i3c_bus *bus, u16 addr)
@@ -1866,6 +1868,12 @@ static int i3c_master_bus_init(struct i3c_master_controller *master)
 		goto err_bus_cleanup;
 	}
 
+	if (master->ops->set_speed) {
+		ret = master->ops->set_speed(master, I3C_OPEN_DRAIN_SLOW_SPEED);
+		if (ret)
+			goto err_bus_cleanup;
+	}
+
 	/*
 	 * Reset all dynamic address that may have been assigned before
 	 * (assigned by the bootloader for example).
@@ -1873,6 +1881,12 @@ static int i3c_master_bus_init(struct i3c_master_controller *master)
 	ret = i3c_master_rstdaa_locked(master, I3C_BROADCAST_ADDR);
 	if (ret && ret != I3C_ERROR_M2)
 		goto err_bus_cleanup;
+
+	if (master->ops->set_speed) {
+		master->ops->set_speed(master, I3C_OPEN_DRAIN_NORMAL_SPEED);
+		if (ret)
+			goto err_bus_cleanup;
+	}
 
 	/* Disable all slave events before starting DAA. */
 	ret = i3c_master_disec_locked(master, I3C_BROADCAST_ADDR,
@@ -2812,6 +2826,10 @@ int i3c_master_register(struct i3c_master_controller *master,
 
 	i3c_bus_notify(i3cbus, I3C_NOTIFY_BUS_ADD);
 
+	pm_runtime_no_callbacks(&master->dev);
+	pm_suspend_ignore_children(&master->dev, true);
+	pm_runtime_enable(&master->dev);
+
 	/*
 	 * We're done initializing the bus and the controller, we can now
 	 * register I3C devices discovered during the initial DAA.
@@ -2849,6 +2867,7 @@ void i3c_master_unregister(struct i3c_master_controller *master)
 	i3c_master_i2c_adapter_cleanup(master);
 	i3c_master_unregister_i3c_devs(master);
 	i3c_master_bus_cleanup(master);
+	pm_runtime_disable(&master->dev);
 	device_unregister(&master->dev);
 }
 EXPORT_SYMBOL_GPL(i3c_master_unregister);

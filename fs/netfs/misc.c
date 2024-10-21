@@ -9,84 +9,129 @@
 #include "internal.h"
 
 /*
- * Attach a folio to the buffer and maybe set marks on it to say that we need
- * to put the folio later and twiddle the pagecache flags.
+ * Make sure there's space in the rolling queue.
  */
-int netfs_xa_store_and_mark(struct xarray *xa, unsigned long index,
-			    struct folio *folio, unsigned int flags,
-			    gfp_t gfp_mask)
+struct folio_queue *netfs_buffer_make_space(struct netfs_io_request *rreq)
 {
-	XA_STATE_ORDER(xas, xa, index, folio_order(folio));
+	struct folio_queue *tail = rreq->buffer_tail, *prev;
+	unsigned int prev_nr_slots = 0;
 
-retry:
-	xas_lock(&xas);
-	for (;;) {
-		xas_store(&xas, folio);
-		if (!xas_error(&xas))
-			break;
-		xas_unlock(&xas);
-		if (!xas_nomem(&xas, gfp_mask))
-			return xas_error(&xas);
-		goto retry;
+	if (WARN_ON_ONCE(!rreq->buffer && tail) ||
+	    WARN_ON_ONCE(rreq->buffer && !tail))
+		return ERR_PTR(-EIO);
+
+	prev = tail;
+	if (prev) {
+		if (!folioq_full(tail))
+			return tail;
+		prev_nr_slots = folioq_nr_slots(tail);
 	}
 
-	if (flags & NETFS_FLAG_PUT_MARK)
-		xas_set_mark(&xas, NETFS_BUF_PUT_MARK);
-	if (flags & NETFS_FLAG_PAGECACHE_MARK)
-		xas_set_mark(&xas, NETFS_BUF_PAGECACHE_MARK);
-	xas_unlock(&xas);
-	return xas_error(&xas);
+	tail = kmalloc(sizeof(*tail), GFP_NOFS);
+	if (!tail)
+		return ERR_PTR(-ENOMEM);
+	netfs_stat(&netfs_n_folioq);
+	folioq_init(tail);
+	tail->prev = prev;
+	if (prev)
+		/* [!] NOTE: After we set prev->next, the consumer is entirely
+		 * at liberty to delete prev.
+		 */
+		WRITE_ONCE(prev->next, tail);
+
+	rreq->buffer_tail = tail;
+	if (!rreq->buffer) {
+		rreq->buffer = tail;
+		iov_iter_folio_queue(&rreq->io_iter, ITER_SOURCE, tail, 0, 0, 0);
+	} else {
+		/* Make sure we don't leave the master iterator pointing to a
+		 * block that might get immediately consumed.
+		 */
+		if (rreq->io_iter.folioq == prev &&
+		    rreq->io_iter.folioq_slot == prev_nr_slots) {
+			rreq->io_iter.folioq = tail;
+			rreq->io_iter.folioq_slot = 0;
+		}
+	}
+	rreq->buffer_tail_slot = 0;
+	return tail;
 }
 
 /*
- * Create the specified range of folios in the buffer attached to the read
- * request.  The folios are marked with NETFS_BUF_PUT_MARK so that we know that
- * these need freeing later.
+ * Append a folio to the rolling queue.
  */
-int netfs_add_folios_to_buffer(struct xarray *buffer,
-			       struct address_space *mapping,
-			       pgoff_t index, pgoff_t to, gfp_t gfp_mask)
+int netfs_buffer_append_folio(struct netfs_io_request *rreq, struct folio *folio,
+			      bool needs_put)
 {
-	struct folio *folio;
-	int ret;
+	struct folio_queue *tail;
+	unsigned int slot, order = folio_order(folio);
 
-	if (to + 1 == index) /* Page range is inclusive */
-		return 0;
+	tail = netfs_buffer_make_space(rreq);
+	if (IS_ERR(tail))
+		return PTR_ERR(tail);
 
-	do {
-		/* TODO: Figure out what order folio can be allocated here */
-		folio = filemap_alloc_folio(readahead_gfp_mask(mapping), 0);
-		if (!folio)
-			return -ENOMEM;
-		folio->index = index;
-		ret = netfs_xa_store_and_mark(buffer, index, folio,
-					      NETFS_FLAG_PUT_MARK, gfp_mask);
-		if (ret < 0) {
-			folio_put(folio);
-			return ret;
-		}
+	rreq->io_iter.count += PAGE_SIZE << order;
 
-		index += folio_nr_pages(folio);
-	} while (index <= to && index != 0);
-
+	slot = folioq_append(tail, folio);
+	/* Store the counter after setting the slot. */
+	smp_store_release(&rreq->buffer_tail_slot, slot);
 	return 0;
 }
 
 /*
- * Clear an xarray buffer, putting a ref on the folios that have
- * NETFS_BUF_PUT_MARK set.
+ * Delete the head of a rolling queue.
  */
-void netfs_clear_buffer(struct xarray *buffer)
+struct folio_queue *netfs_delete_buffer_head(struct netfs_io_request *wreq)
 {
-	struct folio *folio;
-	XA_STATE(xas, buffer, 0);
+	struct folio_queue *head = wreq->buffer, *next = head->next;
 
-	rcu_read_lock();
-	xas_for_each_marked(&xas, folio, ULONG_MAX, NETFS_BUF_PUT_MARK) {
-		folio_put(folio);
+	if (next)
+		next->prev = NULL;
+	netfs_stat_d(&netfs_n_folioq);
+	kfree(head);
+	wreq->buffer = next;
+	return next;
+}
+
+/*
+ * Clear out a rolling queue.
+ */
+void netfs_clear_buffer(struct netfs_io_request *rreq)
+{
+	struct folio_queue *p;
+
+	while ((p = rreq->buffer)) {
+		rreq->buffer = p->next;
+		for (int slot = 0; slot < folioq_count(p); slot++) {
+			struct folio *folio = folioq_folio(p, slot);
+			if (!folio)
+				continue;
+			if (folioq_is_marked(p, slot)) {
+				trace_netfs_folio(folio, netfs_folio_trace_put);
+				folio_put(folio);
+			}
+		}
+		netfs_stat_d(&netfs_n_folioq);
+		kfree(p);
 	}
-	rcu_read_unlock();
-	xa_destroy(buffer);
+}
+
+/*
+ * Reset the subrequest iterator to refer just to the region remaining to be
+ * read.  The iterator may or may not have been advanced by socket ops or
+ * extraction ops to an extent that may or may not match the amount actually
+ * read.
+ */
+void netfs_reset_iter(struct netfs_io_subrequest *subreq)
+{
+	struct iov_iter *io_iter = &subreq->io_iter;
+	size_t remain = subreq->len - subreq->transferred;
+
+	if (io_iter->count > remain)
+		iov_iter_advance(io_iter, io_iter->count - remain);
+	else if (io_iter->count < remain)
+		iov_iter_revert(io_iter, remain - io_iter->count);
+	iov_iter_truncate(&subreq->io_iter, remain);
 }
 
 /**
@@ -177,12 +222,22 @@ EXPORT_SYMBOL(netfs_clear_inode_writeback);
  */
 void netfs_invalidate_folio(struct folio *folio, size_t offset, size_t length)
 {
-	struct netfs_folio *finfo = NULL;
+	struct netfs_folio *finfo;
+	struct netfs_inode *ctx = netfs_inode(folio_inode(folio));
 	size_t flen = folio_size(folio);
 
 	_enter("{%lx},%zx,%zx", folio->index, offset, length);
 
-	folio_wait_fscache(folio);
+	if (offset == 0 && length == flen) {
+		unsigned long long i_size = i_size_read(&ctx->inode);
+		unsigned long long fpos = folio_pos(folio), end;
+
+		end = umin(fpos + flen, i_size);
+		if (fpos < i_size && end > ctx->zero_point)
+			ctx->zero_point = end;
+	}
+
+	folio_wait_private_2(folio); /* [DEPRECATED] */
 
 	if (!folio_test_private(folio))
 		return;
@@ -196,18 +251,34 @@ void netfs_invalidate_folio(struct folio *folio, size_t offset, size_t length)
 		/* We have a partially uptodate page from a streaming write. */
 		unsigned int fstart = finfo->dirty_offset;
 		unsigned int fend = fstart + finfo->dirty_len;
-		unsigned int end = offset + length;
+		unsigned int iend = offset + length;
 
 		if (offset >= fend)
 			return;
-		if (end <= fstart)
+		if (iend <= fstart)
 			return;
-		if (offset <= fstart && end >= fend)
-			goto erase_completely;
-		if (offset <= fstart && end > fstart)
-			goto reduce_len;
-		if (offset > fstart && end >= fend)
-			goto move_start;
+
+		/* The invalidation region overlaps the data.  If the region
+		 * covers the start of the data, we either move along the start
+		 * or just erase the data entirely.
+		 */
+		if (offset <= fstart) {
+			if (iend >= fend)
+				goto erase_completely;
+			/* Move the start of the data. */
+			finfo->dirty_len = fend - iend;
+			finfo->dirty_offset = offset;
+			return;
+		}
+
+		/* Reduce the length of the data if the invalidation region
+		 * covers the tail part.
+		 */
+		if (iend >= fend) {
+			finfo->dirty_len = offset - fstart;
+			return;
+		}
+
 		/* A partial write was split.  The caller has already zeroed
 		 * it, so just absorb the hole.
 		 */
@@ -220,12 +291,6 @@ erase_completely:
 	folio_clear_uptodate(folio);
 	kfree(finfo);
 	return;
-reduce_len:
-	finfo->dirty_len = offset + length - finfo->dirty_offset;
-	return;
-move_start:
-	finfo->dirty_len -= offset - finfo->dirty_offset;
-	finfo->dirty_offset = offset;
 }
 EXPORT_SYMBOL(netfs_invalidate_folio);
 
@@ -242,18 +307,20 @@ bool netfs_release_folio(struct folio *folio, gfp_t gfp)
 	struct netfs_inode *ctx = netfs_inode(folio_inode(folio));
 	unsigned long long end;
 
-	end = folio_pos(folio) + folio_size(folio);
+	if (folio_test_dirty(folio))
+		return false;
+
+	end = umin(folio_pos(folio) + folio_size(folio), i_size_read(&ctx->inode));
 	if (end > ctx->zero_point)
 		ctx->zero_point = end;
 
 	if (folio_test_private(folio))
 		return false;
-	if (folio_test_fscache(folio)) {
+	if (unlikely(folio_test_private_2(folio))) { /* [DEPRECATED] */
 		if (current_is_kswapd() || !(gfp & __GFP_FS))
 			return false;
-		folio_wait_fscache(folio);
+		folio_wait_private_2(folio);
 	}
-
 	fscache_note_page_release(netfs_i_cookie(ctx));
 	return true;
 }

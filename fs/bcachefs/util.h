@@ -8,6 +8,7 @@
 #include <linux/errno.h>
 #include <linux/freezer.h>
 #include <linux/kernel.h>
+#include <linux/min_heap.h>
 #include <linux/sched/clock.h>
 #include <linux/llist.h>
 #include <linux/log2.h>
@@ -21,6 +22,7 @@
 #include "mean_and_variance.h"
 
 #include "darray.h"
+#include "time_stats.h"
 
 struct closure;
 
@@ -53,165 +55,18 @@ static inline size_t buf_pages(void *p, size_t len)
 			    PAGE_SIZE);
 }
 
-static inline void vpfree(void *p, size_t size)
-{
-	if (is_vmalloc_addr(p))
-		vfree(p);
-	else
-		free_pages((unsigned long) p, get_order(size));
-}
-
-static inline void *vpmalloc(size_t size, gfp_t gfp_mask)
-{
-	return (void *) __get_free_pages(gfp_mask|__GFP_NOWARN,
-					 get_order(size)) ?:
-		__vmalloc(size, gfp_mask);
-}
-
-static inline void kvpfree(void *p, size_t size)
-{
-	if (size < PAGE_SIZE)
-		kfree(p);
-	else
-		vpfree(p, size);
-}
-
-static inline void *kvpmalloc(size_t size, gfp_t gfp_mask)
-{
-	return size < PAGE_SIZE
-		? kmalloc(size, gfp_mask)
-		: vpmalloc(size, gfp_mask);
-}
-
-int mempool_init_kvpmalloc_pool(mempool_t *, int, size_t);
-
-#define HEAP(type)							\
-struct {								\
-	size_t size, used;						\
-	type *data;							\
-}
-
-#define DECLARE_HEAP(type, name) HEAP(type) name
-
 #define init_heap(heap, _size, gfp)					\
 ({									\
-	(heap)->used = 0;						\
+	(heap)->nr = 0;						\
 	(heap)->size = (_size);						\
-	(heap)->data = kvpmalloc((heap)->size * sizeof((heap)->data[0]),\
+	(heap)->data = kvmalloc((heap)->size * sizeof((heap)->data[0]),\
 				 (gfp));				\
 })
 
 #define free_heap(heap)							\
 do {									\
-	kvpfree((heap)->data, (heap)->size * sizeof((heap)->data[0]));	\
+	kvfree((heap)->data);						\
 	(heap)->data = NULL;						\
-} while (0)
-
-#define heap_set_backpointer(h, i, _fn)					\
-do {									\
-	void (*fn)(typeof(h), size_t) = _fn;				\
-	if (fn)								\
-		fn(h, i);						\
-} while (0)
-
-#define heap_swap(h, i, j, set_backpointer)				\
-do {									\
-	swap((h)->data[i], (h)->data[j]);				\
-	heap_set_backpointer(h, i, set_backpointer);			\
-	heap_set_backpointer(h, j, set_backpointer);			\
-} while (0)
-
-#define heap_peek(h)							\
-({									\
-	EBUG_ON(!(h)->used);						\
-	(h)->data[0];							\
-})
-
-#define heap_full(h)	((h)->used == (h)->size)
-
-#define heap_sift_down(h, i, cmp, set_backpointer)			\
-do {									\
-	size_t _c, _j = i;						\
-									\
-	for (; _j * 2 + 1 < (h)->used; _j = _c) {			\
-		_c = _j * 2 + 1;					\
-		if (_c + 1 < (h)->used &&				\
-		    cmp(h, (h)->data[_c], (h)->data[_c + 1]) >= 0)	\
-			_c++;						\
-									\
-		if (cmp(h, (h)->data[_c], (h)->data[_j]) >= 0)		\
-			break;						\
-		heap_swap(h, _c, _j, set_backpointer);			\
-	}								\
-} while (0)
-
-#define heap_sift_up(h, i, cmp, set_backpointer)			\
-do {									\
-	while (i) {							\
-		size_t p = (i - 1) / 2;					\
-		if (cmp(h, (h)->data[i], (h)->data[p]) >= 0)		\
-			break;						\
-		heap_swap(h, i, p, set_backpointer);			\
-		i = p;							\
-	}								\
-} while (0)
-
-#define __heap_add(h, d, cmp, set_backpointer)				\
-({									\
-	size_t _i = (h)->used++;					\
-	(h)->data[_i] = d;						\
-	heap_set_backpointer(h, _i, set_backpointer);			\
-									\
-	heap_sift_up(h, _i, cmp, set_backpointer);			\
-	_i;								\
-})
-
-#define heap_add(h, d, cmp, set_backpointer)				\
-({									\
-	bool _r = !heap_full(h);					\
-	if (_r)								\
-		__heap_add(h, d, cmp, set_backpointer);			\
-	_r;								\
-})
-
-#define heap_add_or_replace(h, new, cmp, set_backpointer)		\
-do {									\
-	if (!heap_add(h, new, cmp, set_backpointer) &&			\
-	    cmp(h, new, heap_peek(h)) >= 0) {				\
-		(h)->data[0] = new;					\
-		heap_set_backpointer(h, 0, set_backpointer);		\
-		heap_sift_down(h, 0, cmp, set_backpointer);		\
-	}								\
-} while (0)
-
-#define heap_del(h, i, cmp, set_backpointer)				\
-do {									\
-	size_t _i = (i);						\
-									\
-	BUG_ON(_i >= (h)->used);					\
-	(h)->used--;							\
-	if ((_i) < (h)->used) {						\
-		heap_swap(h, _i, (h)->used, set_backpointer);		\
-		heap_sift_up(h, _i, cmp, set_backpointer);		\
-		heap_sift_down(h, _i, cmp, set_backpointer);		\
-	}								\
-} while (0)
-
-#define heap_pop(h, d, cmp, set_backpointer)				\
-({									\
-	bool _r = (h)->used;						\
-	if (_r) {							\
-		(d) = (h)->data[0];					\
-		heap_del(h, 0, cmp, set_backpointer);			\
-	}								\
-	_r;								\
-})
-
-#define heap_resort(heap, cmp, set_backpointer)				\
-do {									\
-	ssize_t _i;							\
-	for (_i = (ssize_t) (heap)->used / 2 -  1; _i >= 0; --_i)	\
-		heap_sift_down(heap, _i, cmp, set_backpointer);		\
 } while (0)
 
 #define ANYSINT_MAX(t)							\
@@ -340,12 +195,13 @@ static inline int bch2_strtoul_h(const char *cp, long *res)
 
 bool bch2_is_zero(const void *, size_t);
 
-u64 bch2_read_flag_list(char *, const char * const[]);
+u64 bch2_read_flag_list(const char *, const char * const[]);
 
 void bch2_prt_u64_base2_nbits(struct printbuf *, u64, unsigned);
 void bch2_prt_u64_base2(struct printbuf *, u64);
 
 void bch2_print_string_as_lines(const char *prefix, const char *lines);
+void bch2_print_string_as_lines_nonblocking(const char *prefix, const char *lines);
 
 typedef DARRAY(unsigned long) bch_stacktrace;
 int bch2_save_backtrace(bch_stacktrace *stack, struct task_struct *, unsigned, gfp_t);
@@ -361,83 +217,7 @@ static inline void prt_bdevname(struct printbuf *out, struct block_device *bdev)
 #endif
 }
 
-#define NR_QUANTILES	15
-#define QUANTILE_IDX(i)	inorder_to_eytzinger0(i, NR_QUANTILES)
-#define QUANTILE_FIRST	eytzinger0_first(NR_QUANTILES)
-#define QUANTILE_LAST	eytzinger0_last(NR_QUANTILES)
-
-struct bch2_quantiles {
-	struct bch2_quantile_entry {
-		u64	m;
-		u64	step;
-	}		entries[NR_QUANTILES];
-};
-
-struct bch2_time_stat_buffer {
-	unsigned	nr;
-	struct bch2_time_stat_buffer_entry {
-		u64	start;
-		u64	end;
-	}		entries[32];
-};
-
-struct bch2_time_stats {
-	spinlock_t	lock;
-	/* all fields are in nanoseconds */
-	u64             min_duration;
-	u64		max_duration;
-	u64		total_duration;
-	u64             max_freq;
-	u64             min_freq;
-	u64		last_event;
-	struct bch2_quantiles quantiles;
-
-	struct mean_and_variance	  duration_stats;
-	struct mean_and_variance_weighted duration_stats_weighted;
-	struct mean_and_variance	  freq_stats;
-	struct mean_and_variance_weighted freq_stats_weighted;
-	struct bch2_time_stat_buffer __percpu *buffer;
-};
-
-#ifndef CONFIG_BCACHEFS_NO_LATENCY_ACCT
-void __bch2_time_stats_update(struct bch2_time_stats *stats, u64, u64);
-
-static inline void bch2_time_stats_update(struct bch2_time_stats *stats, u64 start)
-{
-	__bch2_time_stats_update(stats, start, local_clock());
-}
-
-static inline bool track_event_change(struct bch2_time_stats *stats,
-				      u64 *start, bool v)
-{
-	if (v != !!*start) {
-		if (!v) {
-			bch2_time_stats_update(stats, *start);
-			*start = 0;
-		} else {
-			*start = local_clock() ?: 1;
-			return true;
-		}
-	}
-
-	return false;
-}
-#else
-static inline void __bch2_time_stats_update(struct bch2_time_stats *stats, u64 start, u64 end) {}
-static inline void bch2_time_stats_update(struct bch2_time_stats *stats, u64 start) {}
-static inline bool track_event_change(struct bch2_time_stats *stats,
-				      u64 *start, bool v)
-{
-	bool ret = v && !*start;
-	*start = v;
-	return ret;
-}
-#endif
-
 void bch2_time_stats_to_text(struct printbuf *, struct bch2_time_stats *);
-
-void bch2_time_stats_exit(struct bch2_time_stats *);
-void bch2_time_stats_init(struct bch2_time_stats *);
 
 #define ewma_add(ewma, val, weight)					\
 ({									\
@@ -551,11 +331,6 @@ static inline unsigned fract_exp_two(unsigned x, unsigned fract_bits)
 
 void bch2_bio_map(struct bio *bio, void *base, size_t);
 int bch2_bio_alloc_pages(struct bio *, size_t, gfp_t);
-
-static inline sector_t bdev_sectors(struct block_device *bdev)
-{
-	return bdev->bd_inode->i_size >> 9;
-}
 
 #define closure_bio_submit(bio, cl)					\
 do {									\
@@ -738,10 +513,6 @@ static inline void memset_u64s_tail(void *s, int c, unsigned bytes)
 	memset(s + bytes, c, rem);
 }
 
-void sort_cmp_size(void *base, size_t num, size_t size,
-	  int (*cmp_func)(const void *, const void *, size_t),
-	  void (*swap_func)(void *, void *, size_t));
-
 /* just the memmove, doesn't update @_nr */
 #define __array_insert_item(_array, _nr, _pos)				\
 	memmove(&(_array)[(_pos) + 1],					\
@@ -788,8 +559,15 @@ static inline void __move_gap(void *array, size_t element_size,
 }
 
 /* Move the gap in a gap buffer: */
-#define move_gap(_array, _nr, _size, _old_gap, _new_gap)	\
-	__move_gap(_array, sizeof(_array[0]), _nr, _size, _old_gap, _new_gap)
+#define move_gap(_d, _new_gap)						\
+do {									\
+	BUG_ON(_new_gap > (_d)->nr);					\
+	BUG_ON((_d)->gap > (_d)->nr);					\
+									\
+	__move_gap((_d)->data, sizeof((_d)->data[0]),			\
+		   (_d)->nr, (_d)->size, (_d)->gap, _new_gap);		\
+	(_d)->gap = _new_gap;						\
+} while (0)
 
 #define bubble_sort(_base, _nr, _cmp)					\
 do {									\
@@ -806,14 +584,19 @@ do {									\
 	}								\
 } while (0)
 
+#define per_cpu_sum(_p)							\
+({									\
+	typeof(*_p) _ret = 0;						\
+									\
+	int cpu;							\
+	for_each_possible_cpu(cpu)					\
+		_ret += *per_cpu_ptr(_p, cpu);				\
+	_ret;								\
+})
+
 static inline u64 percpu_u64_get(u64 __percpu *src)
 {
-	u64 ret = 0;
-	int cpu;
-
-	for_each_possible_cpu(cpu)
-		ret += *per_cpu_ptr(src, cpu);
-	return ret;
+	return per_cpu_sum(src);
 }
 
 static inline void percpu_u64_set(u64 __percpu *dst, u64 src)
@@ -827,9 +610,7 @@ static inline void percpu_u64_set(u64 __percpu *dst, u64 src)
 
 static inline void acc_u64s(u64 *acc, const u64 *src, unsigned nr)
 {
-	unsigned i;
-
-	for (i = 0; i < nr; i++)
+	for (unsigned i = 0; i < nr; i++)
 		acc[i] += src[i];
 }
 
@@ -875,5 +656,44 @@ static inline bool qstr_eq(const struct qstr l, const struct qstr r)
 
 void bch2_darray_str_exit(darray_str *);
 int bch2_split_devs(const char *, darray_str *);
+
+#ifdef __KERNEL__
+
+__must_check
+static inline int copy_to_user_errcode(void __user *to, const void *from, unsigned long n)
+{
+	return copy_to_user(to, from, n) ? -EFAULT : 0;
+}
+
+__must_check
+static inline int copy_from_user_errcode(void *to, const void __user *from, unsigned long n)
+{
+	return copy_from_user(to, from, n) ? -EFAULT : 0;
+}
+
+#endif
+
+static inline void mod_bit(long nr, volatile unsigned long *addr, bool v)
+{
+	if (v)
+		set_bit(nr, addr);
+	else
+		clear_bit(nr, addr);
+}
+
+static inline void __set_bit_le64(size_t bit, __le64 *addr)
+{
+	addr[bit / 64] |= cpu_to_le64(BIT_ULL(bit % 64));
+}
+
+static inline void __clear_bit_le64(size_t bit, __le64 *addr)
+{
+	addr[bit / 64] &= ~cpu_to_le64(BIT_ULL(bit % 64));
+}
+
+static inline bool test_bit_le64(size_t bit, __le64 *addr)
+{
+	return (addr[bit / 64] & cpu_to_le64(BIT_ULL(bit % 64))) != 0;
+}
 
 #endif /* _BCACHEFS_UTIL_H */
