@@ -8,7 +8,7 @@
 #include <drm/drm_device.h>
 #include <drm/drm_file.h>
 #include <drm/drm_utils.h>
-#include <drm/xe_drm.h>
+#include <uapi/drm/xe_drm.h>
 
 #include "xe_device.h"
 #include "xe_gt.h"
@@ -148,7 +148,7 @@ int xe_wait_user_fence_ioctl(struct drm_device *dev, void *data,
 
 		if (q) {
 			if (q->ops->reset_status(q)) {
-				drm_info(&xe->drm, "exec gueue reset detected\n");
+				drm_info(&xe->drm, "exec queue reset detected\n");
 				err = -EIO;
 				break;
 			}
@@ -168,9 +168,6 @@ int xe_wait_user_fence_ioctl(struct drm_device *dev, void *data,
 		if (args->timeout < 0)
 			args->timeout = 0;
 	}
-
-	if (!timeout && !(err < 0))
-		err = -ETIME;
 
 	if (q)
 		xe_exec_queue_put(q);

@@ -372,7 +372,6 @@ static const struct xoadc_channel pm8921_xoadc_channels[] = {
  * @name: name of this channel
  * @hwchan: pointer to hardware channel information (muxing & scaling settings)
  * @calibration: whether to use absolute or ratiometric calibration
- * @scale_fn_type: scaling function type
  * @decimation: 0,1,2,3
  * @amux_ip_rsv: ratiometric scale value if using ratiometric
  * calibration: 0, 1, 2, 4, 5.
@@ -1007,7 +1006,7 @@ static const struct of_device_id pm8xxx_xoadc_id_table[] = {
 		.compatible = "qcom,pm8921-adc",
 		.data = &pm8921_variant,
 	},
-	{ },
+	{ }
 };
 MODULE_DEVICE_TABLE(of, pm8xxx_xoadc_id_table);
 

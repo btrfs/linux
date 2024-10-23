@@ -33,6 +33,7 @@
 #include <net/flow_dissector.h>
 #include <net/netns/hash.h>
 #include <net/lwtunnel.h>
+#include <net/inet_dscp.h>
 
 #define IPV4_MAX_PMTU		65535U		/* RFC 2675, Section 5.1 */
 #define IPV4_MIN_MTU		68			/* RFC 791 */
@@ -258,7 +259,9 @@ static inline u8 ip_sendmsg_scope(const struct inet_sock *inet,
 
 static inline __u8 get_rttos(struct ipcm_cookie* ipc, struct inet_sock *inet)
 {
-	return (ipc->tos != -1) ? RT_TOS(ipc->tos) : RT_TOS(READ_ONCE(inet->tos));
+	u8 dsfield = ipc->tos != -1 ? ipc->tos : READ_ONCE(inet->tos);
+
+	return dsfield & INET_DSCP_MASK;
 }
 
 /* datagram.c */
@@ -423,7 +426,7 @@ int ip_decrease_ttl(struct iphdr *iph)
 
 static inline int ip_mtu_locked(const struct dst_entry *dst)
 {
-	const struct rtable *rt = (const struct rtable *)dst;
+	const struct rtable *rt = dst_rtable(dst);
 
 	return rt->rt_mtu_locked || dst_metric_locked(dst, RTAX_MTU);
 }
@@ -461,7 +464,7 @@ static inline bool ip_sk_ignore_df(const struct sock *sk)
 static inline unsigned int ip_dst_mtu_maybe_forward(const struct dst_entry *dst,
 						    bool forwarding)
 {
-	const struct rtable *rt = container_of(dst, struct rtable, dst);
+	const struct rtable *rt = dst_rtable(dst);
 	struct net *net = dev_net(dst->dev);
 	unsigned int mtu;
 
@@ -506,8 +509,7 @@ static inline unsigned int ip_skb_dst_mtu(struct sock *sk,
 	return mtu - lwtunnel_headroom(skb_dst(skb)->lwtstate, mtu);
 }
 
-struct dst_metrics *ip_fib_metrics_init(struct net *net, struct nlattr *fc_mx,
-					int fc_mx_len,
+struct dst_metrics *ip_fib_metrics_init(struct nlattr *fc_mx, int fc_mx_len,
 					struct netlink_ext_ack *extack);
 static inline void ip_fib_metrics_put(struct dst_metrics *fib_metrics)
 {
@@ -795,9 +797,8 @@ static inline void ip_cmsg_recv(struct msghdr *msg, struct sk_buff *skb)
 	ip_cmsg_recv_offset(msg, skb->sk, skb, 0, 0);
 }
 
-bool icmp_global_allow(void);
-extern int sysctl_icmp_msgs_per_sec;
-extern int sysctl_icmp_msgs_burst;
+bool icmp_global_allow(struct net *net);
+void icmp_global_consume(struct net *net);
 
 #ifdef CONFIG_PROC_FS
 int ip_misc_proc_init(void);

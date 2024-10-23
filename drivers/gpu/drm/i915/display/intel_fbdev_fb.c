@@ -11,8 +11,8 @@
 #include "intel_display_types.h"
 #include "intel_fbdev_fb.h"
 
-struct drm_framebuffer *intel_fbdev_fb_alloc(struct drm_fb_helper *helper,
-					     struct drm_fb_helper_surface_size *sizes)
+struct intel_framebuffer *intel_fbdev_fb_alloc(struct drm_fb_helper *helper,
+					       struct drm_fb_helper_surface_size *sizes)
 {
 	struct drm_framebuffer *fb;
 	struct drm_device *dev = helper->dev;
@@ -63,7 +63,7 @@ struct drm_framebuffer *intel_fbdev_fb_alloc(struct drm_fb_helper *helper,
 	fb = intel_framebuffer_create(obj, &mode_cmd);
 	i915_gem_object_put(obj);
 
-	return fb;
+	return to_intel_framebuffer(fb);
 }
 
 int intel_fbdev_fb_fill_info(struct drm_i915_private *i915, struct fb_info *info,
@@ -78,8 +78,9 @@ int intel_fbdev_fb_fill_info(struct drm_i915_private *i915, struct fb_info *info
 
 		/* Use fbdev's framebuffer from lmem for discrete */
 		info->fix.smem_start =
-			(unsigned long)(mem->io_start +
-					i915_gem_object_get_dma_address(obj, 0));
+			(unsigned long)(mem->io.start +
+					i915_gem_object_get_dma_address(obj, 0) -
+					mem->region.start);
 		info->fix.smem_len = obj->base.size;
 	} else {
 		struct i915_ggtt *ggtt = to_gt(i915)->ggtt;

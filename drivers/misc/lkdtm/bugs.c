@@ -286,6 +286,35 @@ static void lkdtm_HARDLOCKUP(void)
 		cpu_relax();
 }
 
+static void __lkdtm_SMP_CALL_LOCKUP(void *unused)
+{
+	for (;;)
+		cpu_relax();
+}
+
+static void lkdtm_SMP_CALL_LOCKUP(void)
+{
+	unsigned int cpu, target;
+
+	cpus_read_lock();
+
+	cpu = get_cpu();
+	target = cpumask_any_but(cpu_online_mask, cpu);
+
+	if (target >= nr_cpu_ids) {
+		pr_err("FAIL: no other online CPUs\n");
+		goto out_put_cpus;
+	}
+
+	smp_call_function_single(target, __lkdtm_SMP_CALL_LOCKUP, NULL, 1);
+
+	pr_err("FAIL: did not hang\n");
+
+out_put_cpus:
+	put_cpu();
+	cpus_read_unlock();
+}
+
 static void lkdtm_SPINLOCKUP(void)
 {
 	/* Must be called twice to trigger. */
@@ -294,10 +323,11 @@ static void lkdtm_SPINLOCKUP(void)
 	__release(&lock_me_up);
 }
 
-static void lkdtm_HUNG_TASK(void)
+static void __noreturn lkdtm_HUNG_TASK(void)
 {
 	set_current_state(TASK_UNINTERRUPTIBLE);
 	schedule();
+	BUG();
 }
 
 static volatile unsigned int huge = INT_MAX - 2;
@@ -416,7 +446,7 @@ static void lkdtm_FAM_BOUNDS(void)
 	pr_err("FAIL: survived access of invalid flexible array member index!\n");
 
 	if (!__has_attribute(__counted_by__))
-		pr_warn("This is expected since this %s was built a compiler supporting __counted_by\n",
+		pr_warn("This is expected since this %s was built with a compiler that does not support __counted_by\n",
 			lkdtm_kernel_info);
 	else if (IS_ENABLED(CONFIG_UBSAN_BOUNDS))
 		pr_expected_config(CONFIG_UBSAN_TRAP);
@@ -679,6 +709,7 @@ static struct crashtype crashtypes[] = {
 	CRASHTYPE(UNALIGNED_LOAD_STORE_WRITE),
 	CRASHTYPE(SOFTLOCKUP),
 	CRASHTYPE(HARDLOCKUP),
+	CRASHTYPE(SMP_CALL_LOCKUP),
 	CRASHTYPE(SPINLOCKUP),
 	CRASHTYPE(HUNG_TASK),
 	CRASHTYPE(OVERFLOW_SIGNED),

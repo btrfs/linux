@@ -534,13 +534,15 @@ static inline int ipv6_hopopt_jumbo_remove(struct sk_buff *skb)
 	return 0;
 }
 
-static inline bool ipv6_accept_ra(struct inet6_dev *idev)
+static inline bool ipv6_accept_ra(const struct inet6_dev *idev)
 {
+	s32 accept_ra = READ_ONCE(idev->cnf.accept_ra);
+
 	/* If forwarding is enabled, RA are not accepted unless the special
 	 * hybrid mode (accept_ra=2) is enabled.
 	 */
-	return idev->cnf.forwarding ? idev->cnf.accept_ra == 2 :
-	    idev->cnf.accept_ra;
+	return READ_ONCE(idev->cnf.forwarding) ? accept_ra == 2 :
+		accept_ra;
 }
 
 #define IPV6_FRAG_HIGH_THRESH	(4 * 1024*1024)	/* 4194304 */
@@ -849,7 +851,7 @@ static inline int __ipv6_addr_diff32(const void *token1, const void *token2, int
 	 *	we should *never* get to this point since that
 	 *	would mean the addrs are equal
 	 *
-	 *	However, we do get to it 8) And exacly, when
+	 *	However, we do get to it 8) And exactly, when
 	 *	addresses are equal 8)
 	 *
 	 *	ip route add 1111::/128 via ...
@@ -971,7 +973,7 @@ static inline __be32 ip6_make_flowlabel(struct net *net, struct sk_buff *skb,
 	hash = skb_get_hash_flowi6(skb, fl6);
 
 	/* Since this is being sent on the wire obfuscate hash a bit
-	 * to minimize possbility that any useful information to an
+	 * to minimize possibility that any useful information to an
 	 * attacker is leaked. Only lower 20 bits are relevant.
 	 */
 	hash = rol32(hash, 16);
@@ -1361,6 +1363,18 @@ static inline void ip6_sock_set_recvpktinfo(struct sock *sk)
 	lock_sock(sk);
 	inet6_sk(sk)->rxopt.bits.rxinfo = true;
 	release_sock(sk);
+}
+
+#define IPV6_ADDR_WORDS 4
+
+static inline void ipv6_addr_cpu_to_be32(__be32 *dst, const u32 *src)
+{
+	cpu_to_be32_array(dst, src, IPV6_ADDR_WORDS);
+}
+
+static inline void ipv6_addr_be32_to_cpu(u32 *dst, const __be32 *src)
+{
+	be32_to_cpu_array(dst, src, IPV6_ADDR_WORDS);
 }
 
 #endif /* _NET_IPV6_H */

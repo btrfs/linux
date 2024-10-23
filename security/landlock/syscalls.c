@@ -33,6 +33,18 @@
 #include "ruleset.h"
 #include "setup.h"
 
+static bool is_initialized(void)
+{
+	if (likely(landlock_initialized))
+		return true;
+
+	pr_warn_once(
+		"Disabled but requested by user space. "
+		"You should enable Landlock at boot time: "
+		"https://docs.kernel.org/userspace-api/landlock.html#boot-time-configuration\n");
+	return false;
+}
+
 /**
  * copy_min_struct_from_user - Safe future-proof argument copying
  *
@@ -85,8 +97,9 @@ static void build_check_abi(void)
 	 */
 	ruleset_size = sizeof(ruleset_attr.handled_access_fs);
 	ruleset_size += sizeof(ruleset_attr.handled_access_net);
+	ruleset_size += sizeof(ruleset_attr.scoped);
 	BUILD_BUG_ON(sizeof(ruleset_attr) != ruleset_size);
-	BUILD_BUG_ON(sizeof(ruleset_attr) != 16);
+	BUILD_BUG_ON(sizeof(ruleset_attr) != 24);
 
 	path_beneath_size = sizeof(path_beneath_attr.allowed_access);
 	path_beneath_size += sizeof(path_beneath_attr.parent_fd);
@@ -137,7 +150,7 @@ static const struct file_operations ruleset_fops = {
 	.write = fop_dummy_write,
 };
 
-#define LANDLOCK_ABI_VERSION 4
+#define LANDLOCK_ABI_VERSION 6
 
 /**
  * sys_landlock_create_ruleset - Create a new ruleset
@@ -158,8 +171,9 @@ static const struct file_operations ruleset_fops = {
  * Possible returned errors are:
  *
  * - %EOPNOTSUPP: Landlock is supported by the kernel but disabled at boot time;
- * - %EINVAL: unknown @flags, or unknown access, or too small @size;
- * - %E2BIG or %EFAULT: @attr or @size inconsistencies;
+ * - %EINVAL: unknown @flags, or unknown access, or unknown scope, or too small @size;
+ * - %E2BIG: @attr or @size inconsistencies;
+ * - %EFAULT: @attr or @size inconsistencies;
  * - %ENOMSG: empty &landlock_ruleset_attr.handled_access_fs.
  */
 SYSCALL_DEFINE3(landlock_create_ruleset,
@@ -173,7 +187,7 @@ SYSCALL_DEFINE3(landlock_create_ruleset,
 	/* Build-time checks. */
 	build_check_abi();
 
-	if (!landlock_initialized)
+	if (!is_initialized())
 		return -EOPNOTSUPP;
 
 	if (flags) {
@@ -201,9 +215,14 @@ SYSCALL_DEFINE3(landlock_create_ruleset,
 	    LANDLOCK_MASK_ACCESS_NET)
 		return -EINVAL;
 
+	/* Checks IPC scoping content (and 32-bits cast). */
+	if ((ruleset_attr.scoped | LANDLOCK_MASK_SCOPE) != LANDLOCK_MASK_SCOPE)
+		return -EINVAL;
+
 	/* Checks arguments and transforms to kernel struct. */
 	ruleset = landlock_create_ruleset(ruleset_attr.handled_access_fs,
-					  ruleset_attr.handled_access_net);
+					  ruleset_attr.handled_access_net,
+					  ruleset_attr.scoped);
 	if (IS_ERR(ruleset))
 		return PTR_ERR(ruleset);
 
@@ -226,19 +245,19 @@ static struct landlock_ruleset *get_ruleset_from_fd(const int fd,
 	struct landlock_ruleset *ruleset;
 
 	ruleset_f = fdget(fd);
-	if (!ruleset_f.file)
+	if (!fd_file(ruleset_f))
 		return ERR_PTR(-EBADF);
 
 	/* Checks FD type and access right. */
-	if (ruleset_f.file->f_op != &ruleset_fops) {
+	if (fd_file(ruleset_f)->f_op != &ruleset_fops) {
 		ruleset = ERR_PTR(-EBADFD);
 		goto out_fdput;
 	}
-	if (!(ruleset_f.file->f_mode & mode)) {
+	if (!(fd_file(ruleset_f)->f_mode & mode)) {
 		ruleset = ERR_PTR(-EPERM);
 		goto out_fdput;
 	}
-	ruleset = ruleset_f.file->private_data;
+	ruleset = fd_file(ruleset_f)->private_data;
 	if (WARN_ON_ONCE(ruleset->num_layers != 1)) {
 		ruleset = ERR_PTR(-EINVAL);
 		goto out_fdput;
@@ -265,22 +284,22 @@ static int get_path_from_fd(const s32 fd, struct path *const path)
 
 	/* Handles O_PATH. */
 	f = fdget_raw(fd);
-	if (!f.file)
+	if (!fd_file(f))
 		return -EBADF;
 	/*
 	 * Forbids ruleset FDs, internal filesystems (e.g. nsfs), including
 	 * pseudo filesystems that will never be mountable (e.g. sockfs,
 	 * pipefs).
 	 */
-	if ((f.file->f_op == &ruleset_fops) ||
-	    (f.file->f_path.mnt->mnt_flags & MNT_INTERNAL) ||
-	    (f.file->f_path.dentry->d_sb->s_flags & SB_NOUSER) ||
-	    d_is_negative(f.file->f_path.dentry) ||
-	    IS_PRIVATE(d_backing_inode(f.file->f_path.dentry))) {
+	if ((fd_file(f)->f_op == &ruleset_fops) ||
+	    (fd_file(f)->f_path.mnt->mnt_flags & MNT_INTERNAL) ||
+	    (fd_file(f)->f_path.dentry->d_sb->s_flags & SB_NOUSER) ||
+	    d_is_negative(fd_file(f)->f_path.dentry) ||
+	    IS_PRIVATE(d_backing_inode(fd_file(f)->f_path.dentry))) {
 		err = -EBADFD;
 		goto out_fdput;
 	}
-	*path = f.file->f_path;
+	*path = fd_file(f)->f_path;
 	path_get(path);
 
 out_fdput:
@@ -366,8 +385,7 @@ static int add_rule_net_port(struct landlock_ruleset *ruleset,
  *		with the new rule.
  * @rule_type: Identify the structure type pointed to by @rule_attr:
  *             %LANDLOCK_RULE_PATH_BENEATH or %LANDLOCK_RULE_NET_PORT.
- * @rule_attr: Pointer to a rule (only of type &struct
- *             landlock_path_beneath_attr for now).
+ * @rule_attr: Pointer to a rule (matching the @rule_type).
  * @flags: Must be 0.
  *
  * This system call enables to define a new rule and add it to an existing
@@ -378,18 +396,20 @@ static int add_rule_net_port(struct landlock_ruleset *ruleset,
  * - %EOPNOTSUPP: Landlock is supported by the kernel but disabled at boot time;
  * - %EAFNOSUPPORT: @rule_type is %LANDLOCK_RULE_NET_PORT but TCP/IP is not
  *   supported by the running kernel;
- * - %EINVAL: @flags is not 0, or inconsistent access in the rule (i.e.
+ * - %EINVAL: @flags is not 0;
+ * - %EINVAL: The rule accesses are inconsistent (i.e.
  *   &landlock_path_beneath_attr.allowed_access or
- *   &landlock_net_port_attr.allowed_access is not a subset of the
- *   ruleset handled accesses), or &landlock_net_port_attr.port is
- *   greater than 65535;
- * - %ENOMSG: Empty accesses (e.g. &landlock_path_beneath_attr.allowed_access);
+ *   &landlock_net_port_attr.allowed_access is not a subset of the ruleset
+ *   handled accesses)
+ * - %EINVAL: &landlock_net_port_attr.port is greater than 65535;
+ * - %ENOMSG: Empty accesses (e.g. &landlock_path_beneath_attr.allowed_access is
+ *   0);
  * - %EBADF: @ruleset_fd is not a file descriptor for the current thread, or a
  *   member of @rule_attr is not a file descriptor as expected;
  * - %EBADFD: @ruleset_fd is not a ruleset file descriptor, or a member of
  *   @rule_attr is not the expected file descriptor type;
  * - %EPERM: @ruleset_fd has no write access to the underlying ruleset;
- * - %EFAULT: @rule_attr inconsistency.
+ * - %EFAULT: @rule_attr was not a valid address.
  */
 SYSCALL_DEFINE4(landlock_add_rule, const int, ruleset_fd,
 		const enum landlock_rule_type, rule_type,
@@ -398,7 +418,7 @@ SYSCALL_DEFINE4(landlock_add_rule, const int, ruleset_fd,
 	struct landlock_ruleset *ruleset;
 	int err;
 
-	if (!landlock_initialized)
+	if (!is_initialized())
 		return -EOPNOTSUPP;
 
 	/* No flag for now. */
@@ -458,7 +478,7 @@ SYSCALL_DEFINE2(landlock_restrict_self, const int, ruleset_fd, const __u32,
 	struct landlock_cred_security *new_llcred;
 	int err;
 
-	if (!landlock_initialized)
+	if (!is_initialized())
 		return -EOPNOTSUPP;
 
 	/*

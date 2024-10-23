@@ -1419,10 +1419,7 @@ void dcn30_set_mcif_arb_params(
 			if (dwb_pipe >= MAX_DWB_PIPES)
 				return;
 		}
-		if (dwb_pipe >= MAX_DWB_PIPES)
-			return;
 	}
-
 }
 
 static struct dc_cap_funcs cap_funcs = {
@@ -1639,7 +1636,7 @@ noinline bool dcn30_internal_validate_bw(
 	int split[MAX_PIPES] = { 0 };
 	bool merge[MAX_PIPES] = { false };
 	bool newly_split[MAX_PIPES] = { false };
-	int pipe_cnt, i, pipe_idx, vlevel;
+	int pipe_cnt, i, pipe_idx, vlevel = 0;
 	struct vba_vars_st *vba = &context->bw_ctx.dml.vba;
 
 	ASSERT(pipes);
@@ -1966,6 +1963,7 @@ bool dcn30_can_support_mclk_switch_using_fw_based_vblank_stretch(struct dc *dc, 
 {
 	int refresh_rate = 0;
 	const int minimum_refreshrate_supported = 120;
+	struct dc_stream_status *stream_status = NULL;
 
 	if (context == NULL || context->streams[0] == NULL)
 		return false;
@@ -1996,10 +1994,15 @@ bool dcn30_can_support_mclk_switch_using_fw_based_vblank_stretch(struct dc *dc, 
 	if (!context->streams[0]->allow_freesync)
 		return false;
 
-	if (context->streams[0]->vrr_active_variable && dc->debug.disable_fams_gaming)
+	if (context->streams[0]->vrr_active_variable && (dc->debug.disable_fams_gaming == INGAME_FAMS_DISABLE))
 		return false;
 
-	context->streams[0]->fpo_in_use = true;
+	stream_status = dc_state_get_stream_status(context, context->streams[0]);
+
+	if (!stream_status)
+		return false;
+
+	stream_status->fpo_in_use = true;
 
 	return true;
 }
@@ -2049,6 +2052,9 @@ bool dcn30_validate_bandwidth(struct dc *dc,
 	DC_LOGGER_INIT(dc->ctx->logger);
 
 	BW_VAL_TRACE_COUNT();
+
+	if (!pipes)
+		goto validate_fail;
 
 	DC_FP_START();
 	out = dcn30_internal_validate_bw(dc, context, pipes, &pipe_cnt, &vlevel, fast_validate, true);
@@ -2169,6 +2175,17 @@ void dcn30_update_bw_bounding_box(struct dc *dc, struct clk_bw_params *bw_params
 					optimal_uclk_for_dcfclk_sta_targets[i] =
 							bw_params->clk_table.entries[j].memclk_mhz * 16;
 					break;
+				} else {
+					/* condition where (dcfclk_sta_targets[i] >= optimal_dcfclk_for_uclk[j]):
+					 * If it just so happens that the memory bandwidth is low enough such that
+					 * all the optimal DCFCLK for each UCLK is lower than the smallest DCFCLK STA
+					 * target, we need to populate the optimal UCLK for each DCFCLK STA target to
+					 * be the max UCLK.
+					 */
+					if (j == num_uclk_states - 1) {
+						optimal_uclk_for_dcfclk_sta_targets[i] =
+								bw_params->clk_table.entries[j].memclk_mhz * 16;
+					}
 				}
 			}
 		}
@@ -2556,7 +2573,7 @@ static bool dcn30_resource_construct(
 		pool->base.sw_i2cs[i] = NULL;
 	}
 
-	/* Audio, Stream Encoders including DIG and virtual, MPC 3D LUTs */
+	/* Audio, Stream Encoders including HPO and virtual, MPC 3D LUTs */
 	if (!resource_construct(num_virtual_links, dc, &pool->base,
 			&res_create_funcs))
 		goto create_fail;

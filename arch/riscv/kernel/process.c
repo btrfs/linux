@@ -15,6 +15,7 @@
 #include <linux/tick.h>
 #include <linux/ptrace.h>
 #include <linux/uaccess.h>
+#include <linux/personality.h>
 
 #include <asm/unistd.h>
 #include <asm/processor.h>
@@ -26,8 +27,7 @@
 #include <asm/cpuidle.h>
 #include <asm/vector.h>
 #include <asm/cpufeature.h>
-
-register unsigned long gp_in_global __asm__("gp");
+#include <asm/exec.h>
 
 #if defined(CONFIG_STACKPROTECTOR) && !defined(CONFIG_STACKPROTECTOR_PER_TASK)
 #include <linux/stackprotector.h>
@@ -37,7 +37,7 @@ EXPORT_SYMBOL(__stack_chk_guard);
 
 extern asmlinkage void ret_from_fork(void);
 
-void arch_cpu_idle(void)
+void noinstr arch_cpu_idle(void)
 {
 	cpu_do_idle();
 }
@@ -99,6 +99,13 @@ void show_regs(struct pt_regs *regs)
 	__show_regs(regs);
 	if (!user_mode(regs))
 		dump_backtrace(regs, NULL, KERN_DEFAULT);
+}
+
+unsigned long arch_align_stack(unsigned long sp)
+{
+	if (!(current->personality & ADDR_NO_RANDOMIZE) && randomize_va_space)
+		sp -= get_random_u32_below(PAGE_SIZE);
+	return sp & ~0xf;
 }
 
 #ifdef CONFIG_COMPAT
@@ -207,7 +214,6 @@ int copy_thread(struct task_struct *p, const struct kernel_clone_args *args)
 	if (unlikely(args->fn)) {
 		/* Kernel thread */
 		memset(childregs, 0, sizeof(struct pt_regs));
-		childregs->gp = gp_in_global;
 		/* Supervisor/Machine, irqs on: */
 		childregs->status = SR_PP | SR_PIE;
 

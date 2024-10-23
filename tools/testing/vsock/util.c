@@ -33,8 +33,7 @@ void init_signals(void)
 	signal(SIGPIPE, SIG_IGN);
 }
 
-/* Parse a CID in string representation */
-unsigned int parse_cid(const char *str)
+static unsigned int parse_uint(const char *str, const char *err_str)
 {
 	char *endptr = NULL;
 	unsigned long n;
@@ -42,10 +41,22 @@ unsigned int parse_cid(const char *str)
 	errno = 0;
 	n = strtoul(str, &endptr, 10);
 	if (errno || *endptr != '\0') {
-		fprintf(stderr, "malformed CID \"%s\"\n", str);
+		fprintf(stderr, "malformed %s \"%s\"\n", err_str, str);
 		exit(EXIT_FAILURE);
 	}
 	return n;
+}
+
+/* Parse a CID in string representation */
+unsigned int parse_cid(const char *str)
+{
+	return parse_uint(str, "CID");
+}
+
+/* Parse a port in string representation */
+unsigned int parse_port(const char *str)
+{
+	return parse_uint(str, "port");
 }
 
 /* Wait for the remote to close the connection */
@@ -128,7 +139,7 @@ int vsock_bind_connect(unsigned int cid, unsigned int port, unsigned int bind_po
 }
 
 /* Connect to <cid, port> and return the file descriptor. */
-static int vsock_connect(unsigned int cid, unsigned int port, int type)
+int vsock_connect(unsigned int cid, unsigned int port, int type)
 {
 	union {
 		struct sockaddr sa;
@@ -215,8 +226,8 @@ static int vsock_listen(unsigned int cid, unsigned int port, int type)
 /* Listen on <cid, port> and return the first incoming connection.  The remote
  * address is stored to clientaddrp.  clientaddrp may be NULL.
  */
-static int vsock_accept(unsigned int cid, unsigned int port,
-			struct sockaddr_vm *clientaddrp, int type)
+int vsock_accept(unsigned int cid, unsigned int port,
+		 struct sockaddr_vm *clientaddrp, int type)
 {
 	union {
 		struct sockaddr sa;

@@ -3,6 +3,7 @@
  * Copyright (c) 2011-2014, Intel Corporation.
  * Copyright (c) 2017-2021 Christoph Hellwig.
  */
+#include <linux/blk-integrity.h>
 #include <linux/ptrace.h>	/* for force_successful_syscall_return */
 #include <linux/nvme_ioctl.h>
 #include <linux/io_uring/cmd.h>
@@ -118,8 +119,13 @@ static int nvme_map_user_request(struct request *req, u64 ubuffer,
 	struct request_queue *q = req->q;
 	struct nvme_ns *ns = q->queuedata;
 	struct block_device *bdev = ns ? ns->disk->part0 : NULL;
+	bool supports_metadata = bdev && blk_get_integrity(bdev->bd_disk);
+	bool has_metadata = meta_buffer && meta_len;
 	struct bio *bio = NULL;
 	int ret;
+
+	if (has_metadata && !supports_metadata)
+		return -EINVAL;
 
 	if (ioucmd && (ioucmd->flags & IORING_URING_CMD_FIXED)) {
 		struct iov_iter iter;
@@ -142,15 +148,14 @@ static int nvme_map_user_request(struct request *req, u64 ubuffer,
 		goto out;
 
 	bio = req->bio;
-	if (bdev) {
+	if (bdev)
 		bio_set_dev(bio, bdev);
-		if (meta_buffer && meta_len) {
-			ret = bio_integrity_map_user(bio, meta_buffer, meta_len,
-						     meta_seed);
-			if (ret)
-				goto out_unmap;
-			req->cmd_flags |= REQ_INTEGRITY;
-		}
+
+	if (has_metadata) {
+		ret = blk_rq_integrity_map_user(req, meta_buffer, meta_len,
+						meta_seed);
+		if (ret)
+			goto out_unmap;
 	}
 
 	return ret;
@@ -259,8 +264,8 @@ static int nvme_submit_io(struct nvme_ns *ns, struct nvme_user_io __user *uio)
 	c.rw.control = cpu_to_le16(io.control);
 	c.rw.dsmgmt = cpu_to_le32(io.dsmgmt);
 	c.rw.reftag = cpu_to_le32(io.reftag);
-	c.rw.apptag = cpu_to_le16(io.apptag);
-	c.rw.appmask = cpu_to_le16(io.appmask);
+	c.rw.lbat = cpu_to_le16(io.apptag);
+	c.rw.lbatm = cpu_to_le16(io.appmask);
 
 	return nvme_submit_user_cmd(ns->queue, &c, io.addr, length, metadata,
 			meta_len, lower_32_bits(io.slba), NULL, 0, 0);
@@ -423,13 +428,20 @@ static enum rq_end_io_ret nvme_uring_cmd_end_io(struct request *req,
 	pdu->result = le64_to_cpu(nvme_req(req)->result.u64);
 
 	/*
-	 * For iopoll, complete it directly.
+	 * For iopoll, complete it directly. Note that using the uring_cmd
+	 * helper for this is safe only because we check blk_rq_is_poll().
+	 * As that returns false if we're NOT on a polled queue, then it's
+	 * safe to use the polled completion helper.
+	 *
 	 * Otherwise, move the completion to task work.
 	 */
-	if (blk_rq_is_poll(req))
-		nvme_uring_task_cb(ioucmd, IO_URING_F_UNLOCKED);
-	else
+	if (blk_rq_is_poll(req)) {
+		if (pdu->bio)
+			blk_rq_unmap_user(pdu->bio);
+		io_uring_cmd_iopoll_done(ioucmd, pdu->result, pdu->status);
+	} else {
 		io_uring_cmd_do_in_task_lazy(ioucmd, nvme_uring_task_cb);
+	}
 
 	return RQ_END_IO_FREE;
 }
@@ -782,15 +794,15 @@ static int nvme_dev_user_cmd(struct nvme_ctrl *ctrl, void __user *argp,
 		bool open_for_write)
 {
 	struct nvme_ns *ns;
-	int ret;
+	int ret, srcu_idx;
 
-	down_read(&ctrl->namespaces_rwsem);
+	srcu_idx = srcu_read_lock(&ctrl->srcu);
 	if (list_empty(&ctrl->namespaces)) {
 		ret = -ENOTTY;
 		goto out_unlock;
 	}
 
-	ns = list_first_entry(&ctrl->namespaces, struct nvme_ns, list);
+	ns = list_first_or_null_rcu(&ctrl->namespaces, struct nvme_ns, list);
 	if (ns != list_last_entry(&ctrl->namespaces, struct nvme_ns, list)) {
 		dev_warn(ctrl->device,
 			"NVME_IOCTL_IO_CMD not supported when multiple namespaces present!\n");
@@ -800,15 +812,18 @@ static int nvme_dev_user_cmd(struct nvme_ctrl *ctrl, void __user *argp,
 
 	dev_warn(ctrl->device,
 		"using deprecated NVME_IOCTL_IO_CMD ioctl on the char device!\n");
-	kref_get(&ns->kref);
-	up_read(&ctrl->namespaces_rwsem);
+	if (!nvme_get_ns(ns)) {
+		ret = -ENXIO;
+		goto out_unlock;
+	}
+	srcu_read_unlock(&ctrl->srcu, srcu_idx);
 
 	ret = nvme_user_cmd(ctrl, ns, argp, 0, open_for_write);
 	nvme_put_ns(ns);
 	return ret;
 
 out_unlock:
-	up_read(&ctrl->namespaces_rwsem);
+	srcu_read_unlock(&ctrl->srcu, srcu_idx);
 	return ret;
 }
 

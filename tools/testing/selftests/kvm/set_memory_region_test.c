@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: GPL-2.0
-#define _GNU_SOURCE /* for program_invocation_short_name */
 #include <fcntl.h>
 #include <pthread.h>
 #include <sched.h>
@@ -176,7 +175,7 @@ static void guest_code_move_memory_region(void)
 	GUEST_DONE();
 }
 
-static void test_move_memory_region(void)
+static void test_move_memory_region(bool disable_slot_zap_quirk)
 {
 	pthread_t vcpu_thread;
 	struct kvm_vcpu *vcpu;
@@ -184,6 +183,9 @@ static void test_move_memory_region(void)
 	uint64_t *hva;
 
 	vm = spawn_vm(&vcpu, &vcpu_thread, guest_code_move_memory_region);
+
+	if (disable_slot_zap_quirk)
+		vm_enable_cap(vm, KVM_CAP_DISABLE_QUIRKS2, KVM_X86_QUIRK_SLOT_ZAP_ALL);
 
 	hva = addr_gpa2hva(vm, MEM_REGION_GPA);
 
@@ -221,7 +223,19 @@ static void test_move_memory_region(void)
 
 static void guest_code_delete_memory_region(void)
 {
+	struct desc_ptr idt;
 	uint64_t val;
+
+	/*
+	 * Clobber the IDT so that a #PF due to the memory region being deleted
+	 * escalates to triple-fault shutdown.  Because the memory region is
+	 * deleted, there will be no valid mappings.  As a result, KVM will
+	 * repeatedly intercepts the state-2 page fault that occurs when trying
+	 * to vector the guest's #PF.  I.e. trying to actually handle the #PF
+	 * in the guest will never succeed, and so isn't an option.
+	 */
+	memset(&idt, 0, sizeof(idt));
+	__asm__ __volatile__("lidt %0" :: "m"(idt));
 
 	GUEST_SYNC(0);
 
@@ -255,7 +269,7 @@ static void guest_code_delete_memory_region(void)
 	GUEST_ASSERT(0);
 }
 
-static void test_delete_memory_region(void)
+static void test_delete_memory_region(bool disable_slot_zap_quirk)
 {
 	pthread_t vcpu_thread;
 	struct kvm_vcpu *vcpu;
@@ -264,6 +278,9 @@ static void test_delete_memory_region(void)
 	struct kvm_vm *vm;
 
 	vm = spawn_vm(&vcpu, &vcpu_thread, guest_code_delete_memory_region);
+
+	if (disable_slot_zap_quirk)
+		vm_enable_cap(vm, KVM_CAP_DISABLE_QUIRKS2, KVM_X86_QUIRK_SLOT_ZAP_ALL);
 
 	/* Delete the memory region, the guest should not die. */
 	vm_mem_region_delete(vm, MEM_REGION_SLOT);
@@ -333,13 +350,13 @@ static void test_invalid_memory_region_flags(void)
 	struct kvm_vm *vm;
 	int r, i;
 
-#if defined __aarch64__ || defined __x86_64__
+#if defined __aarch64__ || defined __riscv || defined __x86_64__
 	supported_flags |= KVM_MEM_READONLY;
 #endif
 
 #ifdef __x86_64__
 	if (kvm_check_cap(KVM_CAP_VM_TYPES) & BIT(KVM_X86_SW_PROTECTED_VM))
-		vm = vm_create_barebones_protected_vm();
+		vm = vm_create_barebones_type(KVM_X86_SW_PROTECTED_VM);
 	else
 #endif
 		vm = vm_create_barebones();
@@ -462,7 +479,7 @@ static void test_add_private_memory_region(void)
 
 	pr_info("Testing ADD of KVM_MEM_GUEST_MEMFD memory regions\n");
 
-	vm = vm_create_barebones_protected_vm();
+	vm = vm_create_barebones_type(KVM_X86_SW_PROTECTED_VM);
 
 	test_invalid_guest_memfd(vm, vm->kvm_fd, 0, "KVM fd should fail");
 	test_invalid_guest_memfd(vm, vm->fd, 0, "VM's fd should fail");
@@ -471,7 +488,7 @@ static void test_add_private_memory_region(void)
 	test_invalid_guest_memfd(vm, memfd, 0, "Regular memfd() should fail");
 	close(memfd);
 
-	vm2 = vm_create_barebones_protected_vm();
+	vm2 = vm_create_barebones_type(KVM_X86_SW_PROTECTED_VM);
 	memfd = vm_create_guest_memfd(vm2, MEM_REGION_SIZE, 0);
 	test_invalid_guest_memfd(vm, memfd, 0, "Other VM's guest_memfd() should fail");
 
@@ -499,7 +516,7 @@ static void test_add_overlapping_private_memory_regions(void)
 
 	pr_info("Testing ADD of overlapping KVM_MEM_GUEST_MEMFD memory regions\n");
 
-	vm = vm_create_barebones_protected_vm();
+	vm = vm_create_barebones_type(KVM_X86_SW_PROTECTED_VM);
 
 	memfd = vm_create_guest_memfd(vm, MEM_REGION_SIZE * 4, 0);
 
@@ -542,7 +559,10 @@ int main(int argc, char *argv[])
 {
 #ifdef __x86_64__
 	int i, loops;
+	int j, disable_slot_zap_quirk = 0;
 
+	if (kvm_check_cap(KVM_CAP_DISABLE_QUIRKS2) & KVM_X86_QUIRK_SLOT_ZAP_ALL)
+		disable_slot_zap_quirk = 1;
 	/*
 	 * FIXME: the zero-memslot test fails on aarch64 and s390x because
 	 * KVM_RUN fails with ENOEXEC or EFAULT.
@@ -568,13 +588,17 @@ int main(int argc, char *argv[])
 	else
 		loops = 10;
 
-	pr_info("Testing MOVE of in-use region, %d loops\n", loops);
-	for (i = 0; i < loops; i++)
-		test_move_memory_region();
+	for (j = 0; j <= disable_slot_zap_quirk; j++) {
+		pr_info("Testing MOVE of in-use region, %d loops, slot zap quirk %s\n",
+			loops, j ? "disabled" : "enabled");
+		for (i = 0; i < loops; i++)
+			test_move_memory_region(!!j);
 
-	pr_info("Testing DELETE of in-use region, %d loops\n", loops);
-	for (i = 0; i < loops; i++)
-		test_delete_memory_region();
+		pr_info("Testing DELETE of in-use region, %d loops, slot zap quirk %s\n",
+			loops, j ? "disabled" : "enabled");
+		for (i = 0; i < loops; i++)
+			test_delete_memory_region(!!j);
+	}
 #endif
 
 	return 0;

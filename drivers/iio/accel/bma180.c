@@ -13,10 +13,10 @@
  */
 
 #include <linux/module.h>
+#include <linux/mod_devicetable.h>
 #include <linux/i2c.h>
 #include <linux/interrupt.h>
 #include <linux/delay.h>
-#include <linux/of.h>
 #include <linux/bitops.h>
 #include <linux/regulator/consumer.h>
 #include <linux/slab.h>
@@ -876,8 +876,7 @@ static irqreturn_t bma180_trigger_handler(int irq, void *p)
 
 	mutex_lock(&data->mutex);
 
-	for_each_set_bit(bit, indio_dev->active_scan_mask,
-			 indio_dev->masklength) {
+	iio_for_each_active_channel(indio_dev, bit) {
 		ret = bma180_get_data_reg(data, bit);
 		if (ret < 0) {
 			mutex_unlock(&data->mutex);

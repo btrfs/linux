@@ -11,7 +11,6 @@
 #include <linux/kernel.h>
 #include <linux/log2.h>
 #include <linux/moduleloader.h>
-#include <linux/vmalloc.h>
 #include <linux/sizes.h>
 #include <linux/pgtable.h>
 #include <asm/alternative.h>
@@ -788,16 +787,14 @@ int apply_relocate_add(Elf_Shdr *sechdrs, const char *strtab,
 	int res;
 	unsigned int num_relocations = sechdrs[relsec].sh_size / sizeof(*rel);
 	struct hlist_head *relocation_hashtable;
-	struct list_head used_buckets_list;
 	unsigned int hashtable_bits;
+	LIST_HEAD(used_buckets_list);
 
 	hashtable_bits = initialize_relocation_hashtable(num_relocations,
 							 &relocation_hashtable);
 
 	if (!relocation_hashtable)
 		return -ENOMEM;
-
-	INIT_LIST_HEAD(&used_buckets_list);
 
 	pr_debug("Applying relocate section %u to %u\n", relsec,
 	       sechdrs[relsec].sh_info);
@@ -904,17 +901,6 @@ int apply_relocate_add(Elf_Shdr *sechdrs, const char *strtab,
 
 	return 0;
 }
-
-#if defined(CONFIG_MMU) && defined(CONFIG_64BIT)
-void *module_alloc(unsigned long size)
-{
-	return __vmalloc_node_range(size, 1, MODULES_VADDR,
-				    MODULES_END, GFP_KERNEL,
-				    PAGE_KERNEL, VM_FLUSH_RESET_PERMS,
-				    NUMA_NO_NODE,
-				    __builtin_return_address(0));
-}
-#endif
 
 int module_finalize(const Elf_Ehdr *hdr,
 		    const Elf_Shdr *sechdrs,
