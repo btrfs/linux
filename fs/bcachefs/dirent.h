@@ -4,15 +4,14 @@
 
 #include "str_hash.h"
 
-enum bkey_invalid_flags;
+enum bch_validate_flags;
 extern const struct bch_hash_desc bch2_dirent_hash_desc;
 
-int bch2_dirent_invalid(struct bch_fs *, struct bkey_s_c,
-			enum bkey_invalid_flags, struct printbuf *);
+int bch2_dirent_validate(struct bch_fs *, struct bkey_s_c, enum bch_validate_flags);
 void bch2_dirent_to_text(struct printbuf *, struct bch_fs *, struct bkey_s_c);
 
 #define bch2_bkey_ops_dirent ((struct bkey_ops) {	\
-	.key_invalid	= bch2_dirent_invalid,		\
+	.key_validate	= bch2_dirent_validate,		\
 	.val_to_text	= bch2_dirent_to_text,		\
 	.min_val_size	= 16,				\
 })
@@ -35,14 +34,21 @@ static inline unsigned dirent_val_u64s(unsigned len)
 int bch2_dirent_read_target(struct btree_trans *, subvol_inum,
 			    struct bkey_s_c_dirent, subvol_inum *);
 
-int bch2_dirent_create_snapshot(struct btree_trans *, u64, u32,
+static inline void dirent_copy_target(struct bkey_i_dirent *dst,
+				      struct bkey_s_c_dirent src)
+{
+	dst->v.d_inum = src.v->d_inum;
+	dst->v.d_type = src.v->d_type;
+}
+
+int bch2_dirent_create_snapshot(struct btree_trans *, u32, u64, u32,
 			const struct bch_hash_info *, u8,
 			const struct qstr *, u64, u64 *,
-			bch_str_hash_flags_t);
+			enum btree_iter_update_trigger_flags);
 int bch2_dirent_create(struct btree_trans *, subvol_inum,
 		       const struct bch_hash_info *, u8,
 		       const struct qstr *, u64, u64 *,
-		       bch_str_hash_flags_t);
+		       enum btree_iter_update_trigger_flags);
 
 static inline unsigned vfs_d_type(unsigned type)
 {
@@ -62,14 +68,14 @@ int bch2_dirent_rename(struct btree_trans *,
 		       const struct qstr *, subvol_inum *, u64 *,
 		       enum bch_rename_mode);
 
-int __bch2_dirent_lookup_trans(struct btree_trans *, struct btree_iter *,
+int bch2_dirent_lookup_trans(struct btree_trans *, struct btree_iter *,
 			       subvol_inum, const struct bch_hash_info *,
 			       const struct qstr *, subvol_inum *, unsigned);
 u64 bch2_dirent_lookup(struct bch_fs *, subvol_inum,
 		       const struct bch_hash_info *,
 		       const struct qstr *, subvol_inum *);
 
-int bch2_empty_dir_snapshot(struct btree_trans *, u64, u32);
+int bch2_empty_dir_snapshot(struct btree_trans *, u64, u32, u32);
 int bch2_empty_dir_trans(struct btree_trans *, subvol_inum);
 int bch2_readdir(struct bch_fs *, subvol_inum, struct dir_context *);
 

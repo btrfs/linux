@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * Copyright (C) 2020-2023 Intel Corporation
+ * Copyright (C) 2020-2024 Intel Corporation
  */
 
 #include <linux/circ_buf.h>
 #include <linux/highmem.h>
 
 #include "ivpu_drv.h"
+#include "ivpu_hw.h"
 #include "ivpu_hw_reg_io.h"
 #include "ivpu_mmu.h"
 #include "ivpu_mmu_context.h"
@@ -71,10 +72,10 @@
 
 #define IVPU_MMU_Q_COUNT_LOG2		4 /* 16 entries */
 #define IVPU_MMU_Q_COUNT		((u32)1 << IVPU_MMU_Q_COUNT_LOG2)
-#define IVPU_MMU_Q_WRAP_BIT		(IVPU_MMU_Q_COUNT << 1)
-#define IVPU_MMU_Q_WRAP_MASK		(IVPU_MMU_Q_WRAP_BIT - 1)
-#define IVPU_MMU_Q_IDX_MASK		(IVPU_MMU_Q_COUNT - 1)
+#define IVPU_MMU_Q_WRAP_MASK            GENMASK(IVPU_MMU_Q_COUNT_LOG2, 0)
+#define IVPU_MMU_Q_IDX_MASK             (IVPU_MMU_Q_COUNT - 1)
 #define IVPU_MMU_Q_IDX(val)		((val) & IVPU_MMU_Q_IDX_MASK)
+#define IVPU_MMU_Q_WRP(val)             ((val) & IVPU_MMU_Q_COUNT)
 
 #define IVPU_MMU_CMDQ_CMD_SIZE		16
 #define IVPU_MMU_CMDQ_SIZE		(IVPU_MMU_Q_COUNT * IVPU_MMU_CMDQ_CMD_SIZE)
@@ -277,7 +278,7 @@ static const char *ivpu_mmu_event_to_str(u32 cmd)
 	case IVPU_MMU_EVT_F_VMS_FETCH:
 		return "Fetch of VMS caused external abort";
 	default:
-		return "Unknown CMDQ command";
+		return "Unknown event";
 	}
 }
 
@@ -285,15 +286,15 @@ static const char *ivpu_mmu_cmdq_err_to_str(u32 err)
 {
 	switch (err) {
 	case IVPU_MMU_CERROR_NONE:
-		return "No CMDQ Error";
+		return "No error";
 	case IVPU_MMU_CERROR_ILL:
 		return "Illegal command";
 	case IVPU_MMU_CERROR_ABT:
-		return "External abort on CMDQ read";
+		return "External abort on command queue read";
 	case IVPU_MMU_CERROR_ATC_INV_SYNC:
 		return "Sync failed to complete ATS invalidation";
 	default:
-		return "Unknown CMDQ Error";
+		return "Unknown error";
 	}
 }
 
@@ -474,20 +475,32 @@ static int ivpu_mmu_cmdq_wait_for_cons(struct ivpu_device *vdev)
 	return 0;
 }
 
+static bool ivpu_mmu_queue_is_full(struct ivpu_mmu_queue *q)
+{
+	return ((IVPU_MMU_Q_IDX(q->prod) == IVPU_MMU_Q_IDX(q->cons)) &&
+		(IVPU_MMU_Q_WRP(q->prod) != IVPU_MMU_Q_WRP(q->cons)));
+}
+
+static bool ivpu_mmu_queue_is_empty(struct ivpu_mmu_queue *q)
+{
+	return ((IVPU_MMU_Q_IDX(q->prod) == IVPU_MMU_Q_IDX(q->cons)) &&
+		(IVPU_MMU_Q_WRP(q->prod) == IVPU_MMU_Q_WRP(q->cons)));
+}
+
 static int ivpu_mmu_cmdq_cmd_write(struct ivpu_device *vdev, const char *name, u64 data0, u64 data1)
 {
-	struct ivpu_mmu_queue *q = &vdev->mmu->cmdq;
-	u64 *queue_buffer = q->base;
-	int idx = IVPU_MMU_Q_IDX(q->prod) * (IVPU_MMU_CMDQ_CMD_SIZE / sizeof(*queue_buffer));
+	struct ivpu_mmu_queue *cmdq = &vdev->mmu->cmdq;
+	u64 *queue_buffer = cmdq->base;
+	int idx = IVPU_MMU_Q_IDX(cmdq->prod) * (IVPU_MMU_CMDQ_CMD_SIZE / sizeof(*queue_buffer));
 
-	if (!CIRC_SPACE(IVPU_MMU_Q_IDX(q->prod), IVPU_MMU_Q_IDX(q->cons), IVPU_MMU_Q_COUNT)) {
+	if (ivpu_mmu_queue_is_full(cmdq)) {
 		ivpu_err(vdev, "Failed to write MMU CMD %s\n", name);
 		return -EBUSY;
 	}
 
 	queue_buffer[idx] = data0;
 	queue_buffer[idx + 1] = data1;
-	q->prod = (q->prod + 1) & IVPU_MMU_Q_WRAP_MASK;
+	cmdq->prod = (cmdq->prod + 1) & IVPU_MMU_Q_WRAP_MASK;
 
 	ivpu_dbg(vdev, MMU, "CMD write: %s data: 0x%llx 0x%llx\n", name, data0, data1);
 
@@ -506,7 +519,8 @@ static int ivpu_mmu_cmdq_sync(struct ivpu_device *vdev)
 	if (ret)
 		return ret;
 
-	clflush_cache_range(q->base, IVPU_MMU_CMDQ_SIZE);
+	if (!ivpu_is_force_snoop_enabled(vdev))
+		clflush_cache_range(q->base, IVPU_MMU_CMDQ_SIZE);
 	REGV_WR32(IVPU_MMU_REG_CMDQ_PROD, q->prod);
 
 	ret = ivpu_mmu_cmdq_wait_for_cons(vdev);
@@ -518,6 +532,7 @@ static int ivpu_mmu_cmdq_sync(struct ivpu_device *vdev)
 
 		ivpu_err(vdev, "Timed out waiting for MMU consumer: %d, error: %s\n", ret,
 			 ivpu_mmu_cmdq_err_to_str(err));
+		ivpu_hw_diagnose_failure(vdev);
 	}
 
 	return ret;
@@ -553,12 +568,12 @@ static int ivpu_mmu_reset(struct ivpu_device *vdev)
 	int ret;
 
 	memset(mmu->cmdq.base, 0, IVPU_MMU_CMDQ_SIZE);
-	clflush_cache_range(mmu->cmdq.base, IVPU_MMU_CMDQ_SIZE);
+	if (!ivpu_is_force_snoop_enabled(vdev))
+		clflush_cache_range(mmu->cmdq.base, IVPU_MMU_CMDQ_SIZE);
 	mmu->cmdq.prod = 0;
 	mmu->cmdq.cons = 0;
 
 	memset(mmu->evtq.base, 0, IVPU_MMU_EVTQ_SIZE);
-	clflush_cache_range(mmu->evtq.base, IVPU_MMU_EVTQ_SIZE);
 	mmu->evtq.prod = 0;
 	mmu->evtq.cons = 0;
 
@@ -648,7 +663,8 @@ static void ivpu_mmu_strtab_link_cd(struct ivpu_device *vdev, u32 sid)
 	WRITE_ONCE(entry[1], str[1]);
 	WRITE_ONCE(entry[0], str[0]);
 
-	clflush_cache_range(entry, IVPU_MMU_STRTAB_ENT_SIZE);
+	if (!ivpu_is_force_snoop_enabled(vdev))
+		clflush_cache_range(entry, IVPU_MMU_STRTAB_ENT_SIZE);
 
 	ivpu_dbg(vdev, MMU, "STRTAB write entry (SSID=%u): 0x%llx, 0x%llx\n", sid, str[0], str[1]);
 }
@@ -722,7 +738,8 @@ static int ivpu_mmu_cd_add(struct ivpu_device *vdev, u32 ssid, u64 cd_dma)
 	WRITE_ONCE(entry[3], cd[3]);
 	WRITE_ONCE(entry[0], cd[0]);
 
-	clflush_cache_range(entry, IVPU_MMU_CDTAB_ENT_SIZE);
+	if (!ivpu_is_force_snoop_enabled(vdev))
+		clflush_cache_range(entry, IVPU_MMU_CDTAB_ENT_SIZE);
 
 	ivpu_dbg(vdev, MMU, "CDTAB %s entry (SSID=%u, dma=%pad): 0x%llx, 0x%llx, 0x%llx, 0x%llx\n",
 		 cd_dma ? "write" : "clear", ssid, &cd_dma, cd[0], cd[1], cd[2], cd[3]);
@@ -861,8 +878,9 @@ static void ivpu_mmu_dump_event(struct ivpu_device *vdev, u32 *event)
 	u64 in_addr = ((u64)event[5]) << 32 | event[4];
 	u32 sid = event[1];
 
-	ivpu_err(vdev, "MMU EVTQ: 0x%x (%s) SSID: %d SID: %d, e[2] %08x, e[3] %08x, in addr: 0x%llx, fetch addr: 0x%llx\n",
-		 op, ivpu_mmu_event_to_str(op), ssid, sid, event[2], event[3], in_addr, fetch_addr);
+	ivpu_err_ratelimited(vdev, "MMU EVTQ: 0x%x (%s) SSID: %d SID: %d, e[2] %08x, e[3] %08x, in addr: 0x%llx, fetch addr: 0x%llx\n",
+			     op, ivpu_mmu_event_to_str(op), ssid, sid,
+			     event[2], event[3], in_addr, fetch_addr);
 }
 
 static u32 *ivpu_mmu_get_event(struct ivpu_device *vdev)
@@ -872,20 +890,15 @@ static u32 *ivpu_mmu_get_event(struct ivpu_device *vdev)
 	u32 *evt = evtq->base + (idx * IVPU_MMU_EVTQ_CMD_SIZE);
 
 	evtq->prod = REGV_RD32(IVPU_MMU_REG_EVTQ_PROD_SEC);
-	if (!CIRC_CNT(IVPU_MMU_Q_IDX(evtq->prod), IVPU_MMU_Q_IDX(evtq->cons), IVPU_MMU_Q_COUNT))
+	if (ivpu_mmu_queue_is_empty(evtq))
 		return NULL;
 
-	clflush_cache_range(evt, IVPU_MMU_EVTQ_CMD_SIZE);
-
 	evtq->cons = (evtq->cons + 1) & IVPU_MMU_Q_WRAP_MASK;
-	REGV_WR32(IVPU_MMU_REG_EVTQ_CONS_SEC, evtq->cons);
-
 	return evt;
 }
 
 void ivpu_mmu_irq_evtq_handler(struct ivpu_device *vdev)
 {
-	bool schedule_recovery = false;
 	u32 *event;
 	u32 ssid;
 
@@ -895,14 +908,25 @@ void ivpu_mmu_irq_evtq_handler(struct ivpu_device *vdev)
 		ivpu_mmu_dump_event(vdev, event);
 
 		ssid = FIELD_GET(IVPU_MMU_EVT_SSID_MASK, event[0]);
-		if (ssid == IVPU_GLOBAL_CONTEXT_MMU_SSID)
-			schedule_recovery = true;
-		else
-			ivpu_mmu_user_context_mark_invalid(vdev, ssid);
+		if (ssid == IVPU_GLOBAL_CONTEXT_MMU_SSID) {
+			ivpu_pm_trigger_recovery(vdev, "MMU event");
+			return;
+		}
+
+		ivpu_mmu_user_context_mark_invalid(vdev, ssid);
+		REGV_WR32(IVPU_MMU_REG_EVTQ_CONS_SEC, vdev->mmu->evtq.cons);
 	}
 
-	if (schedule_recovery)
-		ivpu_pm_schedule_recovery(vdev);
+	if (!kfifo_put(&vdev->hw->irq.fifo, IVPU_HW_IRQ_SRC_MMU_EVTQ))
+		ivpu_err_ratelimited(vdev, "IRQ FIFO full\n");
+}
+
+void ivpu_mmu_evtq_dump(struct ivpu_device *vdev)
+{
+	u32 *event;
+
+	while ((event = ivpu_mmu_get_event(vdev)) != NULL)
+		ivpu_mmu_dump_event(vdev, event);
 }
 
 void ivpu_mmu_irq_gerr_handler(struct ivpu_device *vdev)

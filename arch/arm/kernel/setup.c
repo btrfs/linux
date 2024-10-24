@@ -979,7 +979,7 @@ static int __init init_machine_late(void)
 }
 late_initcall(init_machine_late);
 
-#ifdef CONFIG_KEXEC
+#ifdef CONFIG_CRASH_RESERVE
 /*
  * The crash region must be aligned to 128MB to avoid
  * zImage relocating below the reserved region.
@@ -1066,7 +1066,7 @@ static void __init reserve_crashkernel(void)
 }
 #else
 static inline void reserve_crashkernel(void) {}
-#endif /* CONFIG_KEXEC */
+#endif /* CONFIG_CRASH_RESERVE*/
 
 void __init hyp_mode_check(void)
 {
@@ -1201,20 +1201,10 @@ void __init setup_arch(char **cmdline_p)
 		mdesc->init_early();
 }
 
-
-static int __init topology_init(void)
+bool arch_cpu_is_hotpluggable(int num)
 {
-	int cpu;
-
-	for_each_possible_cpu(cpu) {
-		struct cpuinfo_arm *cpuinfo = &per_cpu(cpu_data, cpu);
-		cpuinfo->cpu.hotpluggable = platform_can_hotplug_cpu(cpu);
-		register_cpu(&cpuinfo->cpu, cpu);
-	}
-
-	return 0;
+	return platform_can_hotplug_cpu(num);
 }
-subsys_initcall(topology_init);
 
 #ifdef CONFIG_HAVE_PROC_CPU
 static int __init proc_cpu_init(void)

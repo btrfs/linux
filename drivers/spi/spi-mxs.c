@@ -39,6 +39,7 @@
 #include <linux/spi/spi.h>
 #include <linux/spi/mxs-spi.h>
 #include <trace/events/spi.h>
+#include <linux/dma/mxs-dma.h>
 
 #define DRIVER_NAME		"mxs-spi"
 
@@ -252,7 +253,7 @@ static int mxs_spi_txrx_dma(struct mxs_spi *spi,
 		desc = dmaengine_prep_slave_sg(ssp->dmach,
 				&dma_xfer[sg_count].sg, 1,
 				(flags & TXRX_WRITE) ? DMA_MEM_TO_DEV : DMA_DEV_TO_MEM,
-				DMA_PREP_INTERRUPT | DMA_CTRL_ACK);
+				DMA_PREP_INTERRUPT | MXS_DMA_CTRL_WAIT4END);
 
 		if (!desc) {
 			dev_err(ssp->dev,
@@ -476,7 +477,7 @@ static int mxs_spi_runtime_resume(struct device *dev)
 	return ret;
 }
 
-static int __maybe_unused mxs_spi_suspend(struct device *dev)
+static int mxs_spi_suspend(struct device *dev)
 {
 	struct spi_controller *host = dev_get_drvdata(dev);
 	int ret;
@@ -491,7 +492,7 @@ static int __maybe_unused mxs_spi_suspend(struct device *dev)
 		return 0;
 }
 
-static int __maybe_unused mxs_spi_resume(struct device *dev)
+static int mxs_spi_resume(struct device *dev)
 {
 	struct spi_controller *host = dev_get_drvdata(dev);
 	int ret;
@@ -511,9 +512,8 @@ static int __maybe_unused mxs_spi_resume(struct device *dev)
 }
 
 static const struct dev_pm_ops mxs_spi_pm = {
-	SET_RUNTIME_PM_OPS(mxs_spi_runtime_suspend,
-			   mxs_spi_runtime_resume, NULL)
-	SET_SYSTEM_SLEEP_PM_OPS(mxs_spi_suspend, mxs_spi_resume)
+	RUNTIME_PM_OPS(mxs_spi_runtime_suspend, mxs_spi_runtime_resume, NULL)
+	SYSTEM_SLEEP_PM_OPS(mxs_spi_suspend, mxs_spi_resume)
 };
 
 static const struct of_device_id mxs_spi_dt_ids[] = {
@@ -661,7 +661,7 @@ static struct platform_driver mxs_spi_driver = {
 	.driver	= {
 		.name	= DRIVER_NAME,
 		.of_match_table = mxs_spi_dt_ids,
-		.pm = &mxs_spi_pm,
+		.pm = pm_ptr(&mxs_spi_pm),
 	},
 };
 

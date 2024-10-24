@@ -10,7 +10,8 @@
 
 #include <drm/drm_managed.h>
 
-#include "xe_gt.h"
+#include "xe_assert.h"
+#include "xe_device.h"
 #include "xe_mmio.h"
 #include "xe_pcode_api.h"
 
@@ -28,7 +29,7 @@
  * - PCODE for display operations
  */
 
-static int pcode_mailbox_status(struct xe_gt *gt)
+static int pcode_mailbox_status(struct xe_tile *tile)
 {
 	u32 err;
 	static const struct pcode_err_decode err_decode[] = {
@@ -43,11 +44,9 @@ static int pcode_mailbox_status(struct xe_gt *gt)
 		[PCODE_ERROR_MASK] = {-EPROTO, "Unknown"},
 	};
 
-	lockdep_assert_held(&gt->pcode.lock);
-
-	err = xe_mmio_read32(gt, PCODE_MAILBOX) & PCODE_ERROR_MASK;
+	err = xe_mmio_read32(tile->primary_gt, PCODE_MAILBOX) & PCODE_ERROR_MASK;
 	if (err) {
-		drm_err(&gt_to_xe(gt)->drm, "PCODE Mailbox failed: %d %s", err,
+		drm_err(&tile_to_xe(tile)->drm, "PCODE Mailbox failed: %d %s", err,
 			err_decode[err].str ?: "Unknown");
 		return err_decode[err].errno ?: -EPROTO;
 	}
@@ -55,69 +54,86 @@ static int pcode_mailbox_status(struct xe_gt *gt)
 	return 0;
 }
 
-static int pcode_mailbox_rw(struct xe_gt *gt, u32 mbox, u32 *data0, u32 *data1,
-			    unsigned int timeout_ms, bool return_data,
-			    bool atomic)
+static int __pcode_mailbox_rw(struct xe_tile *tile, u32 mbox, u32 *data0, u32 *data1,
+			      unsigned int timeout_ms, bool return_data,
+			      bool atomic)
 {
+	struct xe_gt *mmio = tile->primary_gt;
 	int err;
 
-	if (gt_to_xe(gt)->info.skip_pcode)
+	if (tile_to_xe(tile)->info.skip_pcode)
 		return 0;
 
-	lockdep_assert_held(&gt->pcode.lock);
-
-	if ((xe_mmio_read32(gt, PCODE_MAILBOX) & PCODE_READY) != 0)
+	if ((xe_mmio_read32(mmio, PCODE_MAILBOX) & PCODE_READY) != 0)
 		return -EAGAIN;
 
-	xe_mmio_write32(gt, PCODE_DATA0, *data0);
-	xe_mmio_write32(gt, PCODE_DATA1, data1 ? *data1 : 0);
-	xe_mmio_write32(gt, PCODE_MAILBOX, PCODE_READY | mbox);
+	xe_mmio_write32(mmio, PCODE_DATA0, *data0);
+	xe_mmio_write32(mmio, PCODE_DATA1, data1 ? *data1 : 0);
+	xe_mmio_write32(mmio, PCODE_MAILBOX, PCODE_READY | mbox);
 
-	err = xe_mmio_wait32(gt, PCODE_MAILBOX, PCODE_READY, 0,
-			     timeout_ms * 1000, NULL, atomic);
+	err = xe_mmio_wait32(mmio, PCODE_MAILBOX, PCODE_READY, 0,
+			     timeout_ms * USEC_PER_MSEC, NULL, atomic);
 	if (err)
 		return err;
 
 	if (return_data) {
-		*data0 = xe_mmio_read32(gt, PCODE_DATA0);
+		*data0 = xe_mmio_read32(mmio, PCODE_DATA0);
 		if (data1)
-			*data1 = xe_mmio_read32(gt, PCODE_DATA1);
+			*data1 = xe_mmio_read32(mmio, PCODE_DATA1);
 	}
 
-	return pcode_mailbox_status(gt);
+	return pcode_mailbox_status(tile);
 }
 
-int xe_pcode_write_timeout(struct xe_gt *gt, u32 mbox, u32 data, int timeout)
+static int pcode_mailbox_rw(struct xe_tile *tile, u32 mbox, u32 *data0, u32 *data1,
+			    unsigned int timeout_ms, bool return_data,
+			    bool atomic)
+{
+	if (tile_to_xe(tile)->info.skip_pcode)
+		return 0;
+
+	lockdep_assert_held(&tile->pcode.lock);
+
+	return __pcode_mailbox_rw(tile, mbox, data0, data1, timeout_ms, return_data, atomic);
+}
+
+int xe_pcode_write_timeout(struct xe_tile *tile, u32 mbox, u32 data, int timeout)
 {
 	int err;
 
-	mutex_lock(&gt->pcode.lock);
-	err = pcode_mailbox_rw(gt, mbox, &data, NULL, timeout, false, false);
-	mutex_unlock(&gt->pcode.lock);
+	mutex_lock(&tile->pcode.lock);
+	err = pcode_mailbox_rw(tile, mbox, &data, NULL, timeout, false, false);
+	mutex_unlock(&tile->pcode.lock);
 
 	return err;
 }
 
-int xe_pcode_read(struct xe_gt *gt, u32 mbox, u32 *val, u32 *val1)
+int xe_pcode_read(struct xe_tile *tile, u32 mbox, u32 *val, u32 *val1)
 {
 	int err;
 
-	mutex_lock(&gt->pcode.lock);
-	err = pcode_mailbox_rw(gt, mbox, val, val1, 1, true, false);
-	mutex_unlock(&gt->pcode.lock);
+	mutex_lock(&tile->pcode.lock);
+	err = pcode_mailbox_rw(tile, mbox, val, val1, 1, true, false);
+	mutex_unlock(&tile->pcode.lock);
 
 	return err;
 }
 
-static int xe_pcode_try_request(struct xe_gt *gt, u32 mbox,
-				u32 request, u32 reply_mask, u32 reply,
-				u32 *status, bool atomic, int timeout_us)
+static int pcode_try_request(struct xe_tile *tile, u32 mbox,
+			     u32 request, u32 reply_mask, u32 reply,
+			     u32 *status, bool atomic, int timeout_us, bool locked)
 {
 	int slept, wait = 10;
 
+	xe_tile_assert(tile, timeout_us > 0);
+
 	for (slept = 0; slept < timeout_us; slept += wait) {
-		*status = pcode_mailbox_rw(gt, mbox, &request, NULL, 1, true,
-					   atomic);
+		if (locked)
+			*status = pcode_mailbox_rw(tile, mbox, &request, NULL, 1, true,
+						   atomic);
+		else
+			*status = __pcode_mailbox_rw(tile, mbox, &request, NULL, 1, true,
+						     atomic);
 		if ((*status == 0) && ((request & reply_mask) == reply))
 			return 0;
 
@@ -133,7 +149,7 @@ static int xe_pcode_try_request(struct xe_gt *gt, u32 mbox,
 
 /**
  * xe_pcode_request - send PCODE request until acknowledgment
- * @gt: gt
+ * @tile: tile
  * @mbox: PCODE mailbox ID the request is targeted for
  * @request: request ID
  * @reply_mask: mask used to check for request acknowledgment
@@ -150,16 +166,18 @@ static int xe_pcode_try_request(struct xe_gt *gt, u32 mbox,
  * Returns 0 on success, %-ETIMEDOUT in case of a timeout, <0 in case of some
  * other error as reported by PCODE.
  */
-int xe_pcode_request(struct xe_gt *gt, u32 mbox, u32 request,
-		      u32 reply_mask, u32 reply, int timeout_base_ms)
+int xe_pcode_request(struct xe_tile *tile, u32 mbox, u32 request,
+		     u32 reply_mask, u32 reply, int timeout_base_ms)
 {
 	u32 status;
 	int ret;
 
-	mutex_lock(&gt->pcode.lock);
+	xe_tile_assert(tile, timeout_base_ms <= 3);
 
-	ret = xe_pcode_try_request(gt, mbox, request, reply_mask, reply, &status,
-				   false, timeout_base_ms * 1000);
+	mutex_lock(&tile->pcode.lock);
+
+	ret = pcode_try_request(tile, mbox, request, reply_mask, reply, &status,
+				false, timeout_base_ms * 1000, true);
 	if (!ret)
 		goto out;
 
@@ -173,21 +191,20 @@ int xe_pcode_request(struct xe_gt *gt, u32 mbox, u32 request,
 	 * requests, and for any quirks of the PCODE firmware that delays
 	 * the request completion.
 	 */
-	drm_err(&gt_to_xe(gt)->drm,
+	drm_err(&tile_to_xe(tile)->drm,
 		"PCODE timeout, retrying with preemption disabled\n");
-	drm_WARN_ON_ONCE(&gt_to_xe(gt)->drm, timeout_base_ms > 1);
 	preempt_disable();
-	ret = xe_pcode_try_request(gt, mbox, request, reply_mask, reply, &status,
-				   true, timeout_base_ms * 1000);
+	ret = pcode_try_request(tile, mbox, request, reply_mask, reply, &status,
+				true, 50 * 1000, true);
 	preempt_enable();
 
 out:
-	mutex_unlock(&gt->pcode.lock);
+	mutex_unlock(&tile->pcode.lock);
 	return status ? status : ret;
 }
 /**
  * xe_pcode_init_min_freq_table - Initialize PCODE's QOS frequency table
- * @gt: gt instance
+ * @tile: tile instance
  * @min_gt_freq: Minimal (RPn) GT frequency in units of 50MHz.
  * @max_gt_freq: Maximal (RP0) GT frequency in units of 50MHz.
  *
@@ -210,87 +227,99 @@ out:
  * - -EACCES, "PCODE Rejected"
  * - -EPROTO, "Unknown"
  */
-int xe_pcode_init_min_freq_table(struct xe_gt *gt, u32 min_gt_freq,
+int xe_pcode_init_min_freq_table(struct xe_tile *tile, u32 min_gt_freq,
 				 u32 max_gt_freq)
 {
 	int ret;
 	u32 freq;
 
-	if (!gt_to_xe(gt)->info.has_llc)
+	if (!tile_to_xe(tile)->info.has_llc)
 		return 0;
 
 	if (max_gt_freq <= min_gt_freq)
 		return -EINVAL;
 
-	mutex_lock(&gt->pcode.lock);
+	mutex_lock(&tile->pcode.lock);
 	for (freq = min_gt_freq; freq <= max_gt_freq; freq++) {
 		u32 data = freq << PCODE_FREQ_RING_RATIO_SHIFT | freq;
 
-		ret = pcode_mailbox_rw(gt, PCODE_WRITE_MIN_FREQ_TABLE,
+		ret = pcode_mailbox_rw(tile, PCODE_WRITE_MIN_FREQ_TABLE,
 				       &data, NULL, 1, false, false);
 		if (ret)
 			goto unlock;
 	}
 
 unlock:
-	mutex_unlock(&gt->pcode.lock);
+	mutex_unlock(&tile->pcode.lock);
 	return ret;
 }
 
 /**
- * xe_pcode_init - Ensure PCODE is initialized
- * @gt: gt instance
+ * xe_pcode_ready - Ensure PCODE is initialized
+ * @xe: xe instance
+ * @locked: true if lock held, false otherwise
  *
- * This function ensures that PCODE is properly initialized. To be called during
- * probe and resume paths.
+ * PCODE init mailbox is polled only on root gt of root tile
+ * as the root tile provides the initialization is complete only
+ * after all the tiles have completed the initialization.
+ * Called only on early probe without locks and with locks in
+ * resume path.
  *
- * It returns 0 on success, and -error number on failure.
+ * Returns 0 on success, and -error number on failure.
  */
-int xe_pcode_init(struct xe_gt *gt)
+int xe_pcode_ready(struct xe_device *xe, bool locked)
 {
 	u32 status, request = DGFX_GET_INIT_STATUS;
+	struct xe_tile *tile = xe_device_get_root_tile(xe);
 	int timeout_us = 180000000; /* 3 min */
 	int ret;
 
-	if (gt_to_xe(gt)->info.skip_pcode)
+	if (xe->info.skip_pcode)
 		return 0;
 
-	if (!IS_DGFX(gt_to_xe(gt)))
+	if (!IS_DGFX(xe))
 		return 0;
 
-	mutex_lock(&gt->pcode.lock);
-	ret = xe_pcode_try_request(gt, DGFX_PCODE_STATUS, request,
-				   DGFX_INIT_STATUS_COMPLETE,
-				   DGFX_INIT_STATUS_COMPLETE,
-				   &status, false, timeout_us);
-	mutex_unlock(&gt->pcode.lock);
+	if (locked)
+		mutex_lock(&tile->pcode.lock);
+
+	ret = pcode_try_request(tile, DGFX_PCODE_STATUS, request,
+				DGFX_INIT_STATUS_COMPLETE,
+				DGFX_INIT_STATUS_COMPLETE,
+				&status, false, timeout_us, locked);
+
+	if (locked)
+		mutex_unlock(&tile->pcode.lock);
 
 	if (ret)
-		drm_err(&gt_to_xe(gt)->drm,
+		drm_err(&xe->drm,
 			"PCODE initialization timedout after: 3 min\n");
 
 	return ret;
 }
 
 /**
- * xe_pcode_probe - Prepare xe_pcode and also ensure PCODE is initialized.
- * @gt: gt instance
+ * xe_pcode_init: initialize components of PCODE
+ * @tile: tile instance
  *
- * This function initializes the xe_pcode component, and when needed, it ensures
- * that PCODE has properly performed its initialization and it is really ready
- * to go. To be called once only during probe.
- *
- * It returns 0 on success, and -error number on failure.
+ * This function initializes the xe_pcode component.
+ * To be called once only during probe.
  */
-int xe_pcode_probe(struct xe_gt *gt)
+void xe_pcode_init(struct xe_tile *tile)
 {
-	drmm_mutex_init(&gt_to_xe(gt)->drm, &gt->pcode.lock);
+	drmm_mutex_init(&tile_to_xe(tile)->drm, &tile->pcode.lock);
+}
 
-	if (gt_to_xe(gt)->info.skip_pcode)
-		return 0;
-
-	if (!IS_DGFX(gt_to_xe(gt)))
-		return 0;
-
-	return xe_pcode_init(gt);
+/**
+ * xe_pcode_probe_early: initializes PCODE
+ * @xe: xe instance
+ *
+ * This function checks the initialization status of PCODE
+ * To be called once only during early probe without locks.
+ *
+ * Returns 0 on success, error code otherwise
+ */
+int xe_pcode_probe_early(struct xe_device *xe)
+{
+	return xe_pcode_ready(xe, false);
 }

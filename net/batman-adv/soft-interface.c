@@ -159,7 +159,7 @@ static int batadv_interface_change_mtu(struct net_device *dev, int new_mtu)
 	if (new_mtu < ETH_MIN_MTU || new_mtu > batadv_hardif_min_mtu(dev))
 		return -EINVAL;
 
-	dev->mtu = new_mtu;
+	WRITE_ONCE(dev->mtu, new_mtu);
 	bat_priv->mtu_set_by_user = new_mtu;
 
 	return 0;
@@ -1020,9 +1020,10 @@ static void batadv_softif_init_early(struct net_device *dev)
 	dev->netdev_ops = &batadv_netdev_ops;
 	dev->needs_free_netdev = true;
 	dev->priv_destructor = batadv_softif_free;
-	dev->features |= NETIF_F_HW_VLAN_CTAG_FILTER | NETIF_F_NETNS_LOCAL;
-	dev->features |= NETIF_F_LLTX;
+	dev->features |= NETIF_F_HW_VLAN_CTAG_FILTER;
 	dev->priv_flags |= IFF_NO_QUEUE;
+	dev->lltx = true;
+	dev->netns_local = true;
 
 	/* can't call min_mtu, because the needed variables
 	 * have not been initialized yet

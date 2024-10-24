@@ -379,7 +379,7 @@ nouveau_sched_timedout_job(struct drm_sched_job *sched_job)
 	else
 		NV_PRINTK(warn, job->cli, "Generic job timeout.\n");
 
-	drm_sched_start(sched, true);
+	drm_sched_start(sched);
 
 	return stat;
 }
@@ -398,13 +398,13 @@ static const struct drm_sched_backend_ops nouveau_sched_ops = {
 	.free_job = nouveau_sched_free_job,
 };
 
-int
+static int
 nouveau_sched_init(struct nouveau_sched *sched, struct nouveau_drm *drm,
 		   struct workqueue_struct *wq, u32 credit_limit)
 {
 	struct drm_gpu_scheduler *drm_sched = &sched->base;
 	struct drm_sched_entity *entity = &sched->entity;
-	long job_hang_limit = msecs_to_jiffies(NOUVEAU_SCHED_JOB_TIMEOUT_MS);
+	const long timeout = msecs_to_jiffies(NOUVEAU_SCHED_JOB_TIMEOUT_MS);
 	int ret;
 
 	if (!wq) {
@@ -418,7 +418,7 @@ nouveau_sched_init(struct nouveau_sched *sched, struct nouveau_drm *drm,
 
 	ret = drm_sched_init(drm_sched, &nouveau_sched_ops, wq,
 			     NOUVEAU_SCHED_PRIORITY_COUNT,
-			     credit_limit, 0, job_hang_limit,
+			     credit_limit, 0, timeout,
 			     NULL, NULL, "nouveau_sched", drm->dev->dev);
 	if (ret)
 		goto fail_wq;
@@ -453,7 +453,30 @@ fail_wq:
 	return ret;
 }
 
-void
+int
+nouveau_sched_create(struct nouveau_sched **psched, struct nouveau_drm *drm,
+		     struct workqueue_struct *wq, u32 credit_limit)
+{
+	struct nouveau_sched *sched;
+	int ret;
+
+	sched = kzalloc(sizeof(*sched), GFP_KERNEL);
+	if (!sched)
+		return -ENOMEM;
+
+	ret = nouveau_sched_init(sched, drm, wq, credit_limit);
+	if (ret) {
+		kfree(sched);
+		return ret;
+	}
+
+	*psched = sched;
+
+	return 0;
+}
+
+
+static void
 nouveau_sched_fini(struct nouveau_sched *sched)
 {
 	struct drm_gpu_scheduler *drm_sched = &sched->base;
@@ -470,4 +493,15 @@ nouveau_sched_fini(struct nouveau_sched *sched)
 	 */
 	if (sched->wq)
 		destroy_workqueue(sched->wq);
+}
+
+void
+nouveau_sched_destroy(struct nouveau_sched **psched)
+{
+	struct nouveau_sched *sched = *psched;
+
+	nouveau_sched_fini(sched);
+	kfree(sched);
+
+	*psched = NULL;
 }

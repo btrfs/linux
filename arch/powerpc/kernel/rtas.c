@@ -19,6 +19,7 @@
 #include <linux/lockdep.h>
 #include <linux/memblock.h>
 #include <linux/mutex.h>
+#include <linux/nospec.h>
 #include <linux/of.h>
 #include <linux/of_fdt.h>
 #include <linux/reboot.h>
@@ -375,8 +376,13 @@ static struct rtas_function rtas_function_table[] __ro_after_init = {
 	[RTAS_FNIDX__IBM_REMOVE_PE_DMA_WINDOW] = {
 		.name = "ibm,remove-pe-dma-window",
 	},
-	[RTAS_FNIDX__IBM_RESET_PE_DMA_WINDOWS] = {
-		.name = "ibm,reset-pe-dma-windows",
+	[RTAS_FNIDX__IBM_RESET_PE_DMA_WINDOW] = {
+		/*
+		 * Note: PAPR+ v2.13 7.3.31.4.1 spells this as
+		 * "ibm,reset-pe-dma-windows" (plural), but RTAS
+		 * implementations use the singular form in practice.
+		 */
+		.name = "ibm,reset-pe-dma-window",
 	},
 	[RTAS_FNIDX__IBM_SCAN_LOG_DUMP] = {
 		.name = "ibm,scan-log-dump",
@@ -1910,6 +1916,9 @@ SYSCALL_DEFINE1(rtas, struct rtas_args __user *, uargs)
 	    || nret > ARRAY_SIZE(args.args)
 	    || nargs + nret > ARRAY_SIZE(args.args))
 		return -EINVAL;
+
+	nargs = array_index_nospec(nargs, ARRAY_SIZE(args.args));
+	nret = array_index_nospec(nret, ARRAY_SIZE(args.args) - nargs);
 
 	/* Copy in args. */
 	if (copy_from_user(args.args, uargs->args,

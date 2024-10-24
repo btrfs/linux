@@ -159,7 +159,7 @@ static int ad7091r_regmap_bus_reg_write(void *context, unsigned int reg,
 	return spi_write(spi, &st->tx_buf, 2);
 }
 
-static struct regmap_bus ad7091r8_regmap_bus = {
+static const struct regmap_bus ad7091r8_regmap_bus = {
 	.reg_read = ad7091r_regmap_bus_reg_read,
 	.reg_write = ad7091r_regmap_bus_reg_write,
 	.reg_format_endian_default = REGMAP_ENDIAN_BIG,
@@ -195,7 +195,7 @@ static int ad7091r8_gpio_setup(struct ad7091r_state *st)
 	st->reset_gpio = devm_gpiod_get_optional(st->dev, "reset",
 						 GPIOD_OUT_HIGH);
 	if (IS_ERR(st->reset_gpio))
-		return dev_err_probe(st->dev, PTR_ERR(st->convst_gpio),
+		return dev_err_probe(st->dev, PTR_ERR(st->reset_gpio),
 				     "Error on requesting reset GPIO\n");
 
 	if (st->reset_gpio) {
