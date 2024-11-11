@@ -4984,15 +4984,14 @@ static int btrfs_uring_encoded_read(struct io_uring_cmd *cmd, unsigned int issue
 		 * undo this.
 		 */
 		if (!iov) {
-			iov = kmalloc(sizeof(struct iovec) * args.iovcnt, GFP_NOFS);
+			iov = kmemdup(iovstack, sizeof(struct iovec) * args.iovcnt,
+				      GFP_NOFS);
 			if (!iov) {
 				unlock_extent(io_tree, start, lockend, &cached_state);
 				btrfs_inode_unlock(inode, BTRFS_ILOCK_SHARED);
 				ret = -ENOMEM;
 				goto out_acct;
 			}
-
-			memcpy(iov, iovstack, sizeof(struct iovec) * args.iovcnt);
 		}
 
 		count = min_t(u64, iov_iter_count(&iter), disk_io_size);
