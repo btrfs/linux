@@ -652,7 +652,7 @@ IMPLEMENT_BTRFS_PAGE_OPS(checked, folio_set_checked, folio_clear_checked,
 									\
 	GET_SUBPAGE_BITMAP(subpage, fs_info, name, &bitmap);		\
 	btrfs_warn(fs_info,						\
-	"dumpping bitmap start=%llu len=%u folio=%llu" #name "_bitmap=%*pbl", \
+	"dumpping bitmap start=%llu len=%u folio=%llu " #name "_bitmap=%*pbl", \
 		   start, len, folio_pos(folio),			\
 		   fs_info->sectors_per_page, &bitmap);			\
 }
@@ -717,6 +717,7 @@ void btrfs_folio_set_lock(const struct btrfs_fs_info *fs_info,
 	/* Target range should not yet be locked. */
 	if (unlikely(!bitmap_test_range_all_zero(subpage->bitmaps, start_bit, nbits))) {
 		subpage_dump_bitmap(fs_info, folio, locked, start, len);
+		btrfs_warn(fs_info, "nr_locked=%u\n", atomic_read(&subpage->nr_locked));
 		ASSERT(bitmap_test_range_all_zero(subpage->bitmaps, start_bit, nbits));
 	}
 	bitmap_set(subpage->bitmaps, start_bit, nbits);
