@@ -81,14 +81,18 @@ int btrfs_delete_raid_extent(struct btrfs_trans_handle *trans, u64 start, u64 le
 	while (1) {
 		key.objectid = start;
 		key.type = BTRFS_RAID_STRIPE_KEY;
-		key.offset = 0;
+		key.offset = (u64)-1;
 
 		ret = btrfs_search_slot(trans, stripe_root, &key, path, -1, 1);
 		if (ret < 0)
 			break;
 
-		if (path->slots[0] == btrfs_header_nritems(path->nodes[0]))
-			path->slots[0]--;
+		if (ret == 1) {
+			ret = 0;
+			if (path->slots[0] ==
+			    btrfs_header_nritems(path->nodes[0]))
+				path->slots[0]--;
+		}
 
 		leaf = path->nodes[0];
 		slot = path->slots[0];
