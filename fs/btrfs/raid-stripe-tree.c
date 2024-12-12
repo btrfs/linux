@@ -89,8 +89,12 @@ int btrfs_delete_raid_extent(struct btrfs_trans_handle *trans, u64 start, u64 le
 		if (ret < 0)
 			break;
 
-		if (path->slots[0] == btrfs_header_nritems(path->nodes[0]))
-			path->slots[0]--;
+		if (ret == 1) {
+			ret = 0;
+			if (path->slots[0] ==
+			    btrfs_header_nritems(path->nodes[0]))
+				path->slots[0]--;
+		}
 
 		leaf = path->nodes[0];
 		slot = path->slots[0];
