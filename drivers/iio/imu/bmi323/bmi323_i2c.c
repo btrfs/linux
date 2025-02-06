@@ -61,7 +61,7 @@ static int bmi323_regmap_i2c_write(void *context, const void *data,
 					      data + sizeof(u8));
 }
 
-static struct regmap_bus bmi323_regmap_bus = {
+static const struct regmap_bus bmi323_regmap_bus = {
 	.read = bmi323_regmap_i2c_read,
 	.write = bmi323_regmap_i2c_write,
 };
@@ -93,6 +93,26 @@ static int bmi323_i2c_probe(struct i2c_client *i2c)
 	return bmi323_core_probe(dev);
 }
 
+static const struct acpi_device_id bmi323_acpi_match[] = {
+	/*
+	 * The "BOSC0200" identifier used here is not unique to bmi323 devices.
+	 * The same "BOSC0200" identifier is found in the ACPI tables of devices
+	 * using the bmc150 chip. This creates a conflict with duplicate ACPI
+	 * identifiers which multiple drivers want to use. If a non-bmi323
+	 * device starts to load with this "BOSC0200" ACPI match here, then the
+	 * chip ID check portion should fail because the chip IDs received (via
+	 * i2c) are unique between bmc150 and bmi323 and the driver should
+	 * relinquish the device. If and when a different driver (such as
+	 * bmc150) starts to load with the "BOSC0200" ACPI match, a short reset
+	 * should ensure that the device is not in a bad state during that
+	 * driver initialization. This device reset does occur in both the
+	 * bmi323 and bmc150 init sequences.
+	 */
+	{ "BOSC0200" },
+	{ }
+};
+MODULE_DEVICE_TABLE(acpi, bmi323_acpi_match);
+
 static const struct i2c_device_id bmi323_i2c_ids[] = {
 	{ "bmi323" },
 	{ }
@@ -108,7 +128,9 @@ MODULE_DEVICE_TABLE(of, bmi323_of_i2c_match);
 static struct i2c_driver bmi323_i2c_driver = {
 	.driver = {
 		.name = "bmi323",
+		.pm = pm_ptr(&bmi323_core_pm_ops),
 		.of_match_table = bmi323_of_i2c_match,
+		.acpi_match_table = bmi323_acpi_match,
 	},
 	.probe = bmi323_i2c_probe,
 	.id_table = bmi323_i2c_ids,
@@ -118,4 +140,4 @@ module_i2c_driver(bmi323_i2c_driver);
 MODULE_DESCRIPTION("Bosch BMI323 IMU driver");
 MODULE_AUTHOR("Jagath Jog J <jagathjog1996@gmail.com>");
 MODULE_LICENSE("GPL");
-MODULE_IMPORT_NS(IIO_BMI323);
+MODULE_IMPORT_NS("IIO_BMI323");

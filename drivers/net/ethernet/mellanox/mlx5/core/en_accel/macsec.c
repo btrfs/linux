@@ -339,8 +339,12 @@ static int mlx5e_macsec_init_sa_fs(struct macsec_context *ctx,
 {
 	struct mlx5e_priv *priv = macsec_netdev_priv(ctx->netdev);
 	struct mlx5_macsec_fs *macsec_fs = priv->mdev->macsec_fs;
+	const struct macsec_tx_sc *tx_sc = &ctx->secy->tx_sc;
 	struct mlx5_macsec_rule_attrs rule_attrs;
 	union mlx5_macsec_rule *macsec_rule;
+
+	if (is_tx && tx_sc->encoding_sa != sa->assoc_num)
+		return 0;
 
 	rule_attrs.macsec_obj_id = sa->macsec_obj_id;
 	rule_attrs.sci = sa->sci;
@@ -1640,6 +1644,7 @@ static const struct macsec_ops macsec_offload_ops = {
 	.mdo_add_secy = mlx5e_macsec_add_secy,
 	.mdo_upd_secy = mlx5e_macsec_upd_secy,
 	.mdo_del_secy = mlx5e_macsec_del_secy,
+	.rx_uses_md_dst = true,
 };
 
 bool mlx5e_macsec_handle_tx_skb(struct mlx5e_macsec *macsec, struct sk_buff *skb)

@@ -40,7 +40,7 @@ static int isp_video_capture_queue_setup(struct vb2_queue *vq,
 			unsigned int sizes[], struct device *alloc_devs[])
 {
 	struct fimc_isp *isp = vb2_get_drv_priv(vq);
-	struct v4l2_pix_format_mplane *vid_fmt = &isp->video_capture.pixfmt;
+	const struct v4l2_pix_format_mplane *vid_fmt = &isp->video_capture.pixfmt;
 	const struct fimc_fmt *fmt = isp->video_capture.format;
 	unsigned int wh, i;
 
@@ -255,8 +255,6 @@ static const struct vb2_ops isp_video_capture_qops = {
 	.queue_setup	 = isp_video_capture_queue_setup,
 	.buf_prepare	 = isp_video_capture_buffer_prepare,
 	.buf_queue	 = isp_video_capture_buffer_queue,
-	.wait_prepare	 = vb2_ops_wait_prepare,
-	.wait_finish	 = vb2_ops_wait_finish,
 	.start_streaming = isp_video_capture_start_streaming,
 	.stop_streaming	 = isp_video_capture_stop_streaming,
 };

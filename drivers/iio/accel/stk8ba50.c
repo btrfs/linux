@@ -7,11 +7,12 @@
  * STK8BA50 7-bit I2C address: 0x18.
  */
 
-#include <linux/acpi.h>
 #include <linux/i2c.h>
 #include <linux/interrupt.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
+#include <linux/mod_devicetable.h>
+#include <linux/types.h>
 #include <linux/iio/buffer.h>
 #include <linux/iio/iio.h>
 #include <linux/iio/sysfs.h>
@@ -94,7 +95,7 @@ struct stk8ba50_data {
 	/* Ensure timestamp is naturally aligned */
 	struct {
 		s16 chans[3];
-		s64 timetamp __aligned(8);
+		aligned_s64 timetamp;
 	} scan;
 };
 
@@ -330,8 +331,7 @@ static irqreturn_t stk8ba50_trigger_handler(int irq, void *p)
 			goto err;
 		}
 	} else {
-		for_each_set_bit(bit, indio_dev->active_scan_mask,
-				 indio_dev->masklength) {
+		iio_for_each_active_channel(indio_dev, bit) {
 			ret = stk8ba50_read_accel(data,
 						  stk8ba50_channel_table[bit]);
 			if (ret < 0)
@@ -525,7 +525,7 @@ static DEFINE_SIMPLE_DEV_PM_OPS(stk8ba50_pm_ops, stk8ba50_suspend,
 				stk8ba50_resume);
 
 static const struct i2c_device_id stk8ba50_i2c_id[] = {
-	{"stk8ba50", 0},
+	{ "stk8ba50" },
 	{}
 };
 MODULE_DEVICE_TABLE(i2c, stk8ba50_i2c_id);
@@ -541,7 +541,7 @@ static struct i2c_driver stk8ba50_driver = {
 	.driver = {
 		.name = "stk8ba50",
 		.pm = pm_sleep_ptr(&stk8ba50_pm_ops),
-		.acpi_match_table = ACPI_PTR(stk8ba50_acpi_id),
+		.acpi_match_table = stk8ba50_acpi_id,
 	},
 	.probe =        stk8ba50_probe,
 	.remove =           stk8ba50_remove,

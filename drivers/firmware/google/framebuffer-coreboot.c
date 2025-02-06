@@ -15,6 +15,7 @@
 #include <linux/module.h>
 #include <linux/platform_data/simplefb.h>
 #include <linux/platform_device.h>
+#include <linux/sysfb.h>
 
 #include "coreboot_table.h"
 
@@ -35,6 +36,19 @@ static int framebuffer_probe(struct coreboot_device *dev)
 		.stride = fb->bytes_per_line,
 		.format = NULL,
 	};
+
+	/*
+	 * On coreboot systems, the advertised LB_TAG_FRAMEBUFFER entry
+	 * in the coreboot table should only be used if the payload did
+	 * not pass a framebuffer information to the Linux kernel.
+	 *
+	 * If the global screen_info data has been filled, the Generic
+	 * System Framebuffers (sysfb) will already register a platform
+	 * device and pass that screen_info as platform_data to a driver
+	 * that can scan-out using the system provided framebuffer.
+	 */
+	if (sysfb_handles_screen_info())
+		return -ENODEV;
 
 	if (!fb->physical_address)
 		return -ENODEV;
@@ -80,15 +94,22 @@ static void framebuffer_remove(struct coreboot_device *dev)
 	platform_device_unregister(pdev);
 }
 
+static const struct coreboot_device_id framebuffer_ids[] = {
+	{ .tag = CB_TAG_FRAMEBUFFER },
+	{ /* sentinel */ }
+};
+MODULE_DEVICE_TABLE(coreboot, framebuffer_ids);
+
 static struct coreboot_driver framebuffer_driver = {
 	.probe = framebuffer_probe,
 	.remove = framebuffer_remove,
 	.drv = {
 		.name = "framebuffer",
 	},
-	.tag = CB_TAG_FRAMEBUFFER,
+	.id_table = framebuffer_ids,
 };
 module_coreboot_driver(framebuffer_driver);
 
 MODULE_AUTHOR("Samuel Holland <samuel@sholland.org>");
+MODULE_DESCRIPTION("Memory based framebuffer accessed through coreboot table");
 MODULE_LICENSE("GPL");

@@ -3033,7 +3033,7 @@ struct tg3_napi {
 	dma_addr_t			rx_rcb_mapping;
 	dma_addr_t			tx_desc_mapping;
 
-	char				irq_lbl[IFNAMSIZ];
+	char				irq_lbl[IFNAMSIZ + 6 + 10]; /* name + "-txrx-" + %d */
 	unsigned int			irq_vec;
 };
 
@@ -3419,7 +3419,7 @@ struct tg3 {
 	unsigned int			irq_cnt;
 
 	struct ethtool_coalesce		coal;
-	struct ethtool_eee		eee;
+	struct ethtool_keee		eee;
 
 	/* firmware info */
 	const char			*fw_needed;

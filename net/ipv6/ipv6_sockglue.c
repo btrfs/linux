@@ -111,8 +111,7 @@ struct ipv6_txoptions *ipv6_update_options(struct sock *sk,
 			icsk->icsk_sync_mss(sk, icsk->icsk_pmtu_cookie);
 		}
 	}
-	opt = xchg((__force struct ipv6_txoptions **)&inet6_sk(sk)->opt,
-		   opt);
+	opt = unrcu_pointer(xchg(&inet6_sk(sk)->opt, RCU_INITIALIZER(opt)));
 	sk_dst_reset(sk);
 
 	return opt;
@@ -948,6 +947,8 @@ done:
 		if (optlen < sizeof(int))
 			goto e_inval;
 		retv = ip6_ra_control(sk, val);
+		if (retv == 0)
+			inet6_assign_bit(RTALERT, sk, valbool);
 		break;
 	case IPV6_FLOWLABEL_MGR:
 		retv = ipv6_flowlabel_opt(sk, optval, optlen);
@@ -984,7 +985,7 @@ int ipv6_setsockopt(struct sock *sk, int level, int optname, sockptr_t optval,
 	int err;
 
 	if (level == SOL_IP && sk->sk_type != SOCK_RAW)
-		return udp_prot.setsockopt(sk, level, optname, optval, optlen);
+		return ip_setsockopt(sk, level, optname, optval, optlen);
 
 	if (level != SOL_IPV6)
 		return -ENOPROTOOPT;
@@ -1346,7 +1347,7 @@ int do_ipv6_getsockopt(struct sock *sk, int level, int optname,
 		}
 
 		if (val < 0)
-			val = sock_net(sk)->ipv6.devconf_all->hop_limit;
+			val = READ_ONCE(sock_net(sk)->ipv6.devconf_all->hop_limit);
 		break;
 	}
 
@@ -1445,6 +1446,10 @@ int do_ipv6_getsockopt(struct sock *sk, int level, int optname,
 		val = np->rxopt.bits.recvfragsize;
 		break;
 
+	case IPV6_ROUTER_ALERT:
+		val = inet6_test_bit(RTALERT, sk);
+		break;
+
 	case IPV6_ROUTER_ALERT_ISOLATE:
 		val = inet6_test_bit(RTALERT_ISOLATE, sk);
 		break;
@@ -1470,7 +1475,7 @@ int ipv6_getsockopt(struct sock *sk, int level, int optname,
 	int err;
 
 	if (level == SOL_IP && sk->sk_type != SOCK_RAW)
-		return udp_prot.getsockopt(sk, level, optname, optval, optlen);
+		return ip_getsockopt(sk, level, optname, optval, optlen);
 
 	if (level != SOL_IPV6)
 		return -ENOPROTOOPT;

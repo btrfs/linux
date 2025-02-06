@@ -22,6 +22,7 @@
 #include "smb2proto.h"
 #include "fs_context.h"
 #include "cached_dir.h"
+#include "reparse.h"
 
 /*
  * To be safe - for UCS to UTF-8 with strings loaded with the rare long
@@ -56,23 +57,6 @@ static inline void dump_cifs_file_struct(struct file *file, char *label)
 #endif /* DEBUG2 */
 
 /*
- * Match a reparse point inode if reparse tag and ctime haven't changed.
- *
- * Windows Server updates ctime of reparse points when their data have changed.
- * The server doesn't allow changing reparse tags from existing reparse points,
- * though it's worth checking.
- */
-static inline bool reparse_inode_match(struct inode *inode,
-				       struct cifs_fattr *fattr)
-{
-	struct timespec64 ctime = inode_get_ctime(inode);
-
-	return (CIFS_I(inode)->cifsAttrs & ATTR_REPARSE) &&
-		CIFS_I(inode)->reparse_tag == fattr->cf_cifstag &&
-		timespec64_equal(&ctime, &fattr->cf_ctime);
-}
-
-/*
  * Attempt to preload the dcache with the results from the FIND_FIRST/NEXT
  *
  * Find the dentry that matches "name". If there isn't one, create one. If it's
@@ -87,6 +71,8 @@ cifs_prime_dcache(struct dentry *parent, struct qstr *name,
 	struct inode *inode;
 	struct super_block *sb = parent->d_sb;
 	struct cifs_sb_info *cifs_sb = CIFS_SB(sb);
+	bool posix = cifs_sb_master_tcon(cifs_sb)->posix_extensions;
+	bool reparse_need_reval = false;
 	DECLARE_WAIT_QUEUE_HEAD_ONSTACK(wq);
 	int rc;
 
@@ -101,7 +87,21 @@ cifs_prime_dcache(struct dentry *parent, struct qstr *name,
 		 * this spares us an invalidation.
 		 */
 retry:
-		if ((fattr->cf_cifsattrs & ATTR_REPARSE) ||
+		if (posix) {
+			switch (fattr->cf_mode & S_IFMT) {
+			case S_IFLNK:
+			case S_IFBLK:
+			case S_IFCHR:
+				reparse_need_reval = true;
+				break;
+			default:
+				break;
+			}
+		} else if (fattr->cf_cifsattrs & ATTR_REPARSE) {
+			reparse_need_reval = true;
+		}
+
+		if (reparse_need_reval ||
 		    (fattr->cf_flags & CIFS_FATTR_NEED_REVAL))
 			return;
 
@@ -141,6 +141,8 @@ retry:
 					if (likely(reparse_inode_match(inode, fattr))) {
 						fattr->cf_mode = inode->i_mode;
 						fattr->cf_rdev = inode->i_rdev;
+						fattr->cf_uid = inode->i_uid;
+						fattr->cf_gid = inode->i_gid;
 						fattr->cf_eof = CIFS_I(inode)->netfs.remote_i_size;
 						fattr->cf_symlink_target = NULL;
 					} else {
@@ -148,7 +150,7 @@ retry:
 						rc = -ESTALE;
 					}
 				}
-				if (!rc && !cifs_fattr_to_inode(inode, fattr)) {
+				if (!rc && !cifs_fattr_to_inode(inode, fattr, true)) {
 					dput(dentry);
 					return;
 				}
@@ -255,30 +257,28 @@ cifs_posix_to_fattr(struct cifs_fattr *fattr, struct smb2_posix_info *info,
 	fattr->cf_nlink = le32_to_cpu(info->HardLinks);
 	fattr->cf_cifsattrs = le32_to_cpu(info->DosAttributes);
 
-	/*
-	 * Since we set the inode type below we need to mask off
-	 * to avoid strange results if bits set above.
-	 * XXX: why not make server&client use the type bits?
-	 */
-	fattr->cf_mode = le32_to_cpu(info->Mode) & ~S_IFMT;
+	if (fattr->cf_cifsattrs & ATTR_REPARSE)
+		fattr->cf_cifstag = le32_to_cpu(info->ReparseTag);
+
+	/* The Mode field in the response can now include the file type as well */
+	fattr->cf_mode = wire_mode_to_posix(le32_to_cpu(info->Mode),
+					    fattr->cf_cifsattrs & ATTR_DIRECTORY);
+	fattr->cf_dtype = S_DT(le32_to_cpu(info->Mode));
+
+	switch (fattr->cf_mode & S_IFMT) {
+	case S_IFLNK:
+	case S_IFBLK:
+	case S_IFCHR:
+		fattr->cf_flags |= CIFS_FATTR_NEED_REVAL;
+		break;
+	default:
+		break;
+	}
 
 	cifs_dbg(FYI, "posix fattr: dev %d, reparse %d, mode %o\n",
 		 le32_to_cpu(info->DeviceId),
 		 le32_to_cpu(info->ReparseTag),
 		 le32_to_cpu(info->Mode));
-
-	if (fattr->cf_cifsattrs & ATTR_DIRECTORY) {
-		fattr->cf_mode |= S_IFDIR;
-		fattr->cf_dtype = DT_DIR;
-	} else {
-		/*
-		 * mark anything that is not a dir as regular
-		 * file. special files should have the REPARSE
-		 * attribute and will be marked as needing revaluation
-		 */
-		fattr->cf_mode |= S_IFREG;
-		fattr->cf_dtype = DT_REG;
-	}
 
 	sid_to_id(cifs_sb, &parsed.owner, fattr, SIDOWNER);
 	sid_to_id(cifs_sb, &parsed.group, fattr, SIDGROUP);
@@ -413,7 +413,7 @@ ffirst_retry:
 		cifsFile->invalidHandle = false;
 	} else if ((rc == -EOPNOTSUPP) &&
 		   (cifs_sb->mnt_cifs_flags & CIFS_MOUNT_SERVER_INUM)) {
-		cifs_sb->mnt_cifs_flags &= ~CIFS_MOUNT_SERVER_INUM;
+		cifs_autodisable_serverino(cifs_sb);
 		goto ffirst_retry;
 	}
 error_exit:
@@ -567,7 +567,7 @@ static void cifs_fill_dirent_std(struct cifs_dirent *de,
 		const FIND_FILE_STANDARD_INFO *info)
 {
 	de->name = &info->FileName[0];
-	/* one byte length, no endianess conversion */
+	/* one byte length, no endianness conversion */
 	de->namelen = info->FileNameLength;
 	de->resume_key = info->ResumeKey;
 }
@@ -829,7 +829,7 @@ static bool emit_cached_dirents(struct cached_dirents *cde,
 		 * However, this sequence of ->pos values may have holes
 		 * in it, for example dot-dirs returned from the server
 		 * are suppressed.
-		 * Handle this bu forcing ctx->pos to be the same as the
+		 * Handle this by forcing ctx->pos to be the same as the
 		 * ->pos of the current dirent we emit from the cache.
 		 * This means that when we emit these entries from the cache
 		 * we now emit them with the same ->pos value as in the

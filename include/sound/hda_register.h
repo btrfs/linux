@@ -131,6 +131,8 @@ enum { SDI0, SDI1, SDI2, SDI3, SDO0, SDO1, SDO2, SDO3 };
 #define AZX_REG_VS_SDXEFIFOS_XBASE	0x1094
 #define AZX_REG_VS_SDXEFIFOS_XINTERVAL	0x20
 
+#define AZX_REG_VS_LTRP_GB_MASK		GENMASK(6, 0)
+
 /* PCI space */
 #define AZX_PCIREG_TCSEL		0x44
 
@@ -178,7 +180,7 @@ enum { SDI0, SDI1, SDI2, SDI3, SDO0, SDO1, SDO2, SDO3 };
 #define SD_STS_FIFO_READY	0x20	/* FIFO ready */
 
 /* INTCTL and INTSTS */
-#define AZX_INT_ALL_STREAM	0xff	   /* all stream interrupts */
+#define AZX_INT_ALL_STREAM	0x3fffffff	   /* all stream interrupts */
 #define AZX_INT_CTRL_EN	0x40000000 /* controller interrupt enable bit */
 #define AZX_INT_GLOBAL_EN	0x80000000 /* global interrupt enable bit */
 

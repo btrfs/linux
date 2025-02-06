@@ -408,7 +408,7 @@ err_unmap:
 	return ret;
 }
 
-static int goldfish_tty_remove(struct platform_device *pdev)
+static void goldfish_tty_remove(struct platform_device *pdev)
 {
 	struct goldfish_tty *qtty = platform_get_drvdata(pdev);
 
@@ -424,7 +424,6 @@ static int goldfish_tty_remove(struct platform_device *pdev)
 	if (goldfish_tty_current_line_count == 0)
 		goldfish_tty_delete_driver();
 	mutex_unlock(&goldfish_tty_lock);
-	return 0;
 }
 
 #ifdef CONFIG_GOLDFISH_TTY_EARLY_CONSOLE
@@ -471,4 +470,5 @@ static struct platform_driver goldfish_tty_platform_driver = {
 
 module_platform_driver(goldfish_tty_platform_driver);
 
+MODULE_DESCRIPTION("Goldfish TTY Driver");
 MODULE_LICENSE("GPL v2");

@@ -28,6 +28,7 @@ properties:
       - maxim,max31725
       - maxim,max31726
       - maxim,mcp980x
+      - nxp,p3t1755
       - nxp,pct2075
       - st,stds75
       - st,stlm75
@@ -57,6 +58,7 @@ required:
   - reg
 
 allOf:
+  - $ref: hwmon-common.yaml#
   - if:
       not:
         properties:
@@ -71,7 +73,7 @@ allOf:
       properties:
         interrupts: false
 
-additionalProperties: false
+unevaluatedProperties: false
 
 examples:
   - |

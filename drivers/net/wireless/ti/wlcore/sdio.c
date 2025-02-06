@@ -16,7 +16,6 @@
 #include <linux/mmc/sdio_ids.h>
 #include <linux/mmc/card.h>
 #include <linux/mmc/host.h>
-#include <linux/gpio.h>
 #include <linux/pm_runtime.h>
 #include <linux/printk.h>
 #include <linux/of.h>
@@ -75,8 +74,8 @@ static int __must_check wl12xx_sdio_raw_read(struct device *child, int addr,
 
 	sdio_release_host(func);
 
-	if (WARN_ON(ret))
-		dev_err(child->parent, "sdio read failed (%d)\n", ret);
+	if (ret)
+		dev_err_ratelimited(child->parent, "sdio read failed (%d)\n", ret);
 
 	if (unlikely(dump)) {
 		printk(KERN_DEBUG "wlcore_sdio: READ from 0x%04x\n", addr);
@@ -120,8 +119,8 @@ static int __must_check wl12xx_sdio_raw_write(struct device *child, int addr,
 
 	sdio_release_host(func);
 
-	if (WARN_ON(ret))
-		dev_err(child->parent, "sdio write failed (%d)\n", ret);
+	if (ret)
+		dev_err_ratelimited(child->parent, "sdio write failed (%d)\n", ret);
 
 	return ret;
 }
@@ -324,17 +323,12 @@ static int wl1271_probe(struct sdio_func *func,
 
 	memset(res, 0x00, sizeof(res));
 
-	res[0].start = irq;
-	res[0].flags = IORESOURCE_IRQ |
-		       irqd_get_trigger_type(irq_get_irq_data(irq));
-	res[0].name = "irq";
-
+	res[0] = DEFINE_RES_IRQ_NAMED(irq, "irq");
+	res[0].flags |= irq_get_trigger_type(irq);
 
 	if (wakeirq > 0) {
-		res[1].start = wakeirq;
-		res[1].flags = IORESOURCE_IRQ |
-			       irqd_get_trigger_type(irq_get_irq_data(wakeirq));
-		res[1].name = "wakeirq";
+		res[1] = DEFINE_RES_IRQ_NAMED(wakeirq, "wakeirq");
+		res[1].flags |= irq_get_trigger_type(wakeirq);
 		num_irqs = 2;
 	} else {
 		num_irqs = 1;

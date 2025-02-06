@@ -5,6 +5,7 @@
 
 #include <linux/math.h>
 
+#include "i915_drv.h"
 #include "i915_reg.h"
 #include "intel_ddi.h"
 #include "intel_ddi_buf_trans.h"
@@ -44,12 +45,14 @@ void intel_snps_phy_wait_for_calibration(struct drm_i915_private *i915)
 	}
 }
 
-void intel_snps_phy_update_psr_power_state(struct drm_i915_private *i915,
-					   enum phy phy, bool enable)
+void intel_snps_phy_update_psr_power_state(struct intel_encoder *encoder,
+					   bool enable)
 {
+	struct drm_i915_private *i915 = to_i915(encoder->base.dev);
+	enum phy phy = intel_encoder_to_phy(encoder);
 	u32 val;
 
-	if (!intel_phy_is_snps(i915, phy))
+	if (!intel_encoder_is_snps(encoder))
 		return;
 
 	val = REG_FIELD_PREP(SNPS_PHY_TX_REQ_LN_DIS_PWR_STATE_PSR,
@@ -63,7 +66,7 @@ void intel_snps_phy_set_signal_levels(struct intel_encoder *encoder,
 {
 	struct drm_i915_private *dev_priv = to_i915(encoder->base.dev);
 	const struct intel_ddi_buf_trans *trans;
-	enum phy phy = intel_port_to_phy(dev_priv, encoder->port);
+	enum phy phy = intel_encoder_to_phy(encoder);
 	int n_entries, ln;
 
 	trans = encoder->get_buf_trans(encoder, crtc_state, &n_entries);
@@ -1809,7 +1812,7 @@ int intel_mpllb_calc_state(struct intel_crtc_state *crtc_state,
 
 	for (i = 0; tables[i]; i++) {
 		if (crtc_state->port_clock == tables[i]->clock) {
-			crtc_state->mpllb_state = *tables[i];
+			crtc_state->dpll_hw_state.mpllb = *tables[i];
 			return 0;
 		}
 	}
@@ -1821,8 +1824,8 @@ void intel_mpllb_enable(struct intel_encoder *encoder,
 			const struct intel_crtc_state *crtc_state)
 {
 	struct drm_i915_private *dev_priv = to_i915(encoder->base.dev);
-	const struct intel_mpllb_state *pll_state = &crtc_state->mpllb_state;
-	enum phy phy = intel_port_to_phy(dev_priv, encoder->port);
+	const struct intel_mpllb_state *pll_state = &crtc_state->dpll_hw_state.mpllb;
+	enum phy phy = intel_encoder_to_phy(encoder);
 	i915_reg_t enable_reg = (phy <= PHY_D ?
 				 DG2_PLL_ENABLE(phy) : MG_PLL_ENABLE(0));
 
@@ -1879,7 +1882,7 @@ void intel_mpllb_enable(struct intel_encoder *encoder,
 void intel_mpllb_disable(struct intel_encoder *encoder)
 {
 	struct drm_i915_private *i915 = to_i915(encoder->base.dev);
-	enum phy phy = intel_port_to_phy(i915, encoder->port);
+	enum phy phy = intel_encoder_to_phy(encoder);
 	i915_reg_t enable_reg = (phy <= PHY_D ?
 				 DG2_PLL_ENABLE(phy) : MG_PLL_ENABLE(0));
 
@@ -1951,7 +1954,7 @@ void intel_mpllb_readout_hw_state(struct intel_encoder *encoder,
 				  struct intel_mpllb_state *pll_state)
 {
 	struct drm_i915_private *dev_priv = to_i915(encoder->base.dev);
-	enum phy phy = intel_port_to_phy(dev_priv, encoder->port);
+	enum phy phy = intel_encoder_to_phy(encoder);
 
 	pll_state->mpllb_cp = intel_de_read(dev_priv, SNPS_PHY_MPLLB_CP(phy));
 	pll_state->mpllb_div = intel_de_read(dev_priv, SNPS_PHY_MPLLB_DIV(phy));
@@ -1995,11 +1998,12 @@ int intel_snps_phy_check_hdmi_link_rate(int clock)
 void intel_mpllb_state_verify(struct intel_atomic_state *state,
 			      struct intel_crtc *crtc)
 {
+	struct intel_display *display = to_intel_display(state);
 	struct drm_i915_private *i915 = to_i915(state->base.dev);
 	const struct intel_crtc_state *new_crtc_state =
 		intel_atomic_get_new_crtc_state(state, crtc);
 	struct intel_mpllb_state mpllb_hw_state = {};
-	const struct intel_mpllb_state *mpllb_sw_state = &new_crtc_state->mpllb_state;
+	const struct intel_mpllb_state *mpllb_sw_state = &new_crtc_state->dpll_hw_state.mpllb;
 	struct intel_encoder *encoder;
 
 	if (!IS_DG2(i915))
@@ -2017,11 +2021,11 @@ void intel_mpllb_state_verify(struct intel_atomic_state *state,
 	intel_mpllb_readout_hw_state(encoder, &mpllb_hw_state);
 
 #define MPLLB_CHECK(__name)						\
-	I915_STATE_WARN(i915, mpllb_sw_state->__name != mpllb_hw_state.__name, \
-			"[CRTC:%d:%s] mismatch in MPLLB: %s (expected 0x%08x, found 0x%08x)", \
-			crtc->base.base.id, crtc->base.name,		\
-			__stringify(__name),				\
-			mpllb_sw_state->__name, mpllb_hw_state.__name)
+	INTEL_DISPLAY_STATE_WARN(display, mpllb_sw_state->__name != mpllb_hw_state.__name, \
+				 "[CRTC:%d:%s] mismatch in MPLLB: %s (expected 0x%08x, found 0x%08x)", \
+				 crtc->base.base.id, crtc->base.name,	\
+				 __stringify(__name),			\
+				 mpllb_sw_state->__name, mpllb_hw_state.__name)
 
 	MPLLB_CHECK(mpllb_cp);
 	MPLLB_CHECK(mpllb_div);

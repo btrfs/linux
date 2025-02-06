@@ -523,7 +523,7 @@ int pwrdm_get_mem_bank_count(struct powerdomain *pwrdm)
  * Set the powerdomain @pwrdm's next power state to @pwrst.  The powerdomain
  * may not enter this state immediately if the preconditions for this state
  * have not been satisfied.  Returns -EINVAL if the powerdomain pointer is
- * null or if the power state is invalid for the powerdomin, or returns 0
+ * null or if the power state is invalid for the powerdomain, or returns 0
  * upon success.
  */
 int pwrdm_set_next_pwrst(struct powerdomain *pwrdm, u8 pwrst)
@@ -1162,7 +1162,7 @@ static int pwrdm_save_context(struct powerdomain *pwrdm, void *unused)
 }
 
 /**
- * pwrdm_save_context - restore powerdomain registers
+ * pwrdm_restore_context - restore powerdomain registers
  *
  * Restore powerdomain control registers after a suspend or resume
  * event.

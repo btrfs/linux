@@ -371,6 +371,11 @@ static int rk_crypto_probe(struct platform_device *pdev)
 	}
 
 	crypto_info->engine = crypto_engine_alloc_init(&pdev->dev, true);
+	if (!crypto_info->engine) {
+		err = -ENOMEM;
+		goto err_crypto;
+	}
+
 	crypto_engine_start(crypto_info->engine);
 	init_completion(&crypto_info->complete);
 
@@ -428,7 +433,7 @@ static void rk_crypto_remove(struct platform_device *pdev)
 
 static struct platform_driver crypto_driver = {
 	.probe		= rk_crypto_probe,
-	.remove_new	= rk_crypto_remove,
+	.remove		= rk_crypto_remove,
 	.driver		= {
 		.name	= "rk3288-crypto",
 		.pm		= &rk_crypto_pm_ops,

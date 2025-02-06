@@ -272,16 +272,14 @@ static void qede_get_strings_stats_txq(struct qede_dev *edev,
 {
 	int i;
 
-	for (i = 0; i < QEDE_NUM_TQSTATS; i++) {
+	for (i = 0; i < QEDE_NUM_TQSTATS; i++)
 		if (txq->is_xdp)
-			sprintf(*buf, "%d [XDP]: %s",
-				QEDE_TXQ_XDP_TO_IDX(edev, txq),
-				qede_tqstats_arr[i].string);
+			ethtool_sprintf(buf, "%d [XDP]: %s",
+					QEDE_TXQ_XDP_TO_IDX(edev, txq),
+					qede_tqstats_arr[i].string);
 		else
-			sprintf(*buf, "%d_%d: %s", txq->index, txq->cos,
-				qede_tqstats_arr[i].string);
-		*buf += ETH_GSTRING_LEN;
-	}
+			ethtool_sprintf(buf, "%d_%d: %s", txq->index, txq->cos,
+					qede_tqstats_arr[i].string);
 }
 
 static void qede_get_strings_stats_rxq(struct qede_dev *edev,
@@ -289,11 +287,9 @@ static void qede_get_strings_stats_rxq(struct qede_dev *edev,
 {
 	int i;
 
-	for (i = 0; i < QEDE_NUM_RQSTATS; i++) {
-		sprintf(*buf, "%d: %s", rxq->rxq_id,
-			qede_rqstats_arr[i].string);
-		*buf += ETH_GSTRING_LEN;
-	}
+	for (i = 0; i < QEDE_NUM_RQSTATS; i++)
+		ethtool_sprintf(buf, "%d: %s", rxq->rxq_id,
+				qede_rqstats_arr[i].string);
 }
 
 static bool qede_is_irrelevant_stat(struct qede_dev *edev, int stat_index)
@@ -331,26 +327,26 @@ static void qede_get_strings_stats(struct qede_dev *edev, u8 *buf)
 	for (i = 0; i < QEDE_NUM_STATS; i++) {
 		if (qede_is_irrelevant_stat(edev, i))
 			continue;
-		strcpy(buf, qede_stats_arr[i].string);
-		buf += ETH_GSTRING_LEN;
+		ethtool_puts(&buf, qede_stats_arr[i].string);
 	}
 }
 
 static void qede_get_strings(struct net_device *dev, u32 stringset, u8 *buf)
 {
 	struct qede_dev *edev = netdev_priv(dev);
+	int i;
 
 	switch (stringset) {
 	case ETH_SS_STATS:
 		qede_get_strings_stats(edev, buf);
 		break;
 	case ETH_SS_PRIV_FLAGS:
-		memcpy(buf, qede_private_arr,
-		       ETH_GSTRING_LEN * QEDE_PRI_FLAG_LEN);
+		for (i = 0; i < QEDE_PRI_FLAG_LEN; i++)
+			ethtool_puts(&buf, qede_private_arr[i]);
 		break;
 	case ETH_SS_TEST:
-		memcpy(buf, qede_tests_str_arr,
-		       ETH_GSTRING_LEN * QEDE_ETHTOOL_TEST_MAX);
+		for (i = 0; i < QEDE_ETHTOOL_TEST_MAX; i++)
+			ethtool_puts(&buf, qede_tests_str_arr[i]);
 		break;
 	default:
 		DP_VERBOSE(edev, QED_MSG_DEBUG,
@@ -1026,7 +1022,7 @@ static int qede_get_regs_len(struct net_device *ndev)
 static void qede_update_mtu(struct qede_dev *edev,
 			    struct qede_reload_args *args)
 {
-	edev->ndev->mtu = args->u.mtu;
+	WRITE_ONCE(edev->ndev->mtu, args->u.mtu);
 }
 
 /* Netdevice NDOs */
@@ -1137,7 +1133,7 @@ static int qede_set_channels(struct net_device *dev,
 }
 
 static int qede_get_ts_info(struct net_device *dev,
-			    struct ethtool_ts_info *info)
+			    struct kernel_ethtool_ts_info *info)
 {
 	struct qede_dev *edev = netdev_priv(dev);
 
@@ -1776,7 +1772,7 @@ static int qede_get_tunable(struct net_device *dev,
 	return 0;
 }
 
-static int qede_get_eee(struct net_device *dev, struct ethtool_eee *edata)
+static int qede_get_eee(struct net_device *dev, struct ethtool_keee *edata)
 {
 	struct qede_dev *edev = netdev_priv(dev);
 	struct qed_link_output current_link;
@@ -1789,18 +1785,26 @@ static int qede_get_eee(struct net_device *dev, struct ethtool_eee *edata)
 		return -EOPNOTSUPP;
 	}
 
-	if (current_link.eee.adv_caps & QED_EEE_1G_ADV)
-		edata->advertised = ADVERTISED_1000baseT_Full;
-	if (current_link.eee.adv_caps & QED_EEE_10G_ADV)
-		edata->advertised |= ADVERTISED_10000baseT_Full;
-	if (current_link.sup_caps & QED_EEE_1G_ADV)
-		edata->supported = ADVERTISED_1000baseT_Full;
-	if (current_link.sup_caps & QED_EEE_10G_ADV)
-		edata->supported |= ADVERTISED_10000baseT_Full;
-	if (current_link.eee.lp_adv_caps & QED_EEE_1G_ADV)
-		edata->lp_advertised = ADVERTISED_1000baseT_Full;
-	if (current_link.eee.lp_adv_caps & QED_EEE_10G_ADV)
-		edata->lp_advertised |= ADVERTISED_10000baseT_Full;
+	linkmode_mod_bit(ETHTOOL_LINK_MODE_1000baseT_Full_BIT,
+			 edata->advertised,
+			 current_link.eee.adv_caps & QED_EEE_1G_ADV);
+	linkmode_mod_bit(ETHTOOL_LINK_MODE_10000baseT_Full_BIT,
+			 edata->advertised,
+			 current_link.eee.adv_caps & QED_EEE_10G_ADV);
+
+	linkmode_mod_bit(ETHTOOL_LINK_MODE_1000baseT_Full_BIT,
+			 edata->supported,
+			 current_link.sup_caps & QED_EEE_1G_ADV);
+	linkmode_mod_bit(ETHTOOL_LINK_MODE_10000baseT_Full_BIT,
+			 edata->supported,
+			 current_link.sup_caps & QED_EEE_10G_ADV);
+
+	linkmode_mod_bit(ETHTOOL_LINK_MODE_1000baseT_Full_BIT,
+			 edata->lp_advertised,
+			 current_link.eee.lp_adv_caps & QED_EEE_1G_ADV);
+	linkmode_mod_bit(ETHTOOL_LINK_MODE_10000baseT_Full_BIT,
+			 edata->lp_advertised,
+			 current_link.eee.lp_adv_caps & QED_EEE_10G_ADV);
 
 	edata->tx_lpi_timer = current_link.eee.tx_lpi_timer;
 	edata->eee_enabled = current_link.eee.enable;
@@ -1810,11 +1814,14 @@ static int qede_get_eee(struct net_device *dev, struct ethtool_eee *edata)
 	return 0;
 }
 
-static int qede_set_eee(struct net_device *dev, struct ethtool_eee *edata)
+static int qede_set_eee(struct net_device *dev, struct ethtool_keee *edata)
 {
+	__ETHTOOL_DECLARE_LINK_MODE_MASK(supported) = {};
+	__ETHTOOL_DECLARE_LINK_MODE_MASK(tmp) = {};
 	struct qede_dev *edev = netdev_priv(dev);
 	struct qed_link_output current_link;
 	struct qed_link_params params;
+	bool unsupp;
 
 	if (!edev->ops->common->can_link_change(edev->cdev)) {
 		DP_INFO(edev, "Link settings are not allowed to be changed\n");
@@ -1832,21 +1839,26 @@ static int qede_set_eee(struct net_device *dev, struct ethtool_eee *edata)
 	memset(&params, 0, sizeof(params));
 	params.override_flags |= QED_LINK_OVERRIDE_EEE_CONFIG;
 
-	if (!(edata->advertised & (ADVERTISED_1000baseT_Full |
-				   ADVERTISED_10000baseT_Full)) ||
-	    ((edata->advertised & (ADVERTISED_1000baseT_Full |
-				   ADVERTISED_10000baseT_Full)) !=
-	     edata->advertised)) {
+	linkmode_set_bit(ETHTOOL_LINK_MODE_10000baseT_Full_BIT,
+			 supported);
+	linkmode_set_bit(ETHTOOL_LINK_MODE_1000baseT_Full_BIT,
+			 supported);
+
+	unsupp = linkmode_andnot(tmp, edata->advertised, supported);
+	if (unsupp) {
 		DP_VERBOSE(edev, QED_MSG_DEBUG,
-			   "Invalid advertised capabilities %d\n",
-			   edata->advertised);
+			   "Invalid advertised capabilities %*pb\n",
+			   __ETHTOOL_LINK_MODE_MASK_NBITS, edata->advertised);
 		return -EINVAL;
 	}
 
-	if (edata->advertised & ADVERTISED_1000baseT_Full)
+	if (linkmode_test_bit(ETHTOOL_LINK_MODE_1000baseT_Full_BIT,
+			      edata->advertised))
 		params.eee.adv_caps = QED_EEE_1G_ADV;
-	if (edata->advertised & ADVERTISED_10000baseT_Full)
-		params.eee.adv_caps |= QED_EEE_10G_ADV;
+	if (linkmode_test_bit(ETHTOOL_LINK_MODE_10000baseT_Full_BIT,
+			      edata->advertised))
+		params.eee.adv_caps = QED_EEE_10G_ADV;
+
 	params.eee.enable = edata->eee_enabled;
 	params.eee.tx_lpi_enable = edata->tx_lpi_enabled;
 	params.eee.tx_lpi_timer = edata->tx_lpi_timer;

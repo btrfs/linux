@@ -60,7 +60,7 @@
 	};
 
 	reserved-memory {
-		framebuffer_region@9d400000 {
+		framebuffer@9d400000 {
 			reg = <0x0 0x9d400000 0x0 (1080 * 2160 * 4)>;
 			no-map;
 		};
@@ -452,7 +452,6 @@
 		irq-gpio = <&tlmm 125 GPIO_TRANSITORY>;
 		touchscreen-size-x = <1080>;
 		touchscreen-size-y = <2160>;
-		focaltech,max-touch-number = <5>;
 	};
 };
 

@@ -108,10 +108,22 @@ int amdgpu_ring_alloc(struct amdgpu_ring *ring, unsigned int ndw)
  */
 void amdgpu_ring_insert_nop(struct amdgpu_ring *ring, uint32_t count)
 {
-	int i;
+	uint32_t occupied, chunk1, chunk2;
 
-	for (i = 0; i < count; i++)
-		amdgpu_ring_write(ring, ring->funcs->nop);
+	occupied = ring->wptr & ring->buf_mask;
+	chunk1 = ring->buf_mask + 1 - occupied;
+	chunk1 = (chunk1 >= count) ? count : chunk1;
+	chunk2 = count - chunk1;
+
+	if (chunk1)
+		memset32(&ring->ring[occupied], ring->funcs->nop, chunk1);
+
+	if (chunk2)
+		memset32(ring->ring, ring->funcs->nop, chunk2);
+
+	ring->wptr += count;
+	ring->wptr &= ring->ptr_mask;
+	ring->count_dw -= count;
 }
 
 /**
@@ -141,11 +153,16 @@ void amdgpu_ring_commit(struct amdgpu_ring *ring)
 {
 	uint32_t count;
 
+	if (ring->count_dw < 0)
+		DRM_ERROR("amdgpu: writing more dwords to the ring than expected!\n");
+
 	/* We pad to match fetch size */
 	count = ring->funcs->align_mask + 1 -
 		(ring->wptr & ring->funcs->align_mask);
-	count %= ring->funcs->align_mask + 1;
-	ring->funcs->insert_nop(ring, count);
+	count &= ring->funcs->align_mask;
+
+	if (count != 0)
+		ring->funcs->insert_nop(ring, count);
 
 	mb();
 	amdgpu_ring_set_wptr(ring);
@@ -212,6 +229,8 @@ int amdgpu_ring_init(struct amdgpu_device *adev, struct amdgpu_ring *ring,
 	 */
 	if (ring->funcs->type == AMDGPU_RING_TYPE_KIQ)
 		sched_hw_submission = max(sched_hw_submission, 256);
+	if (ring->funcs->type == AMDGPU_RING_TYPE_MES)
+		sched_hw_submission = 8;
 	else if (ring == &adev->sdma.instance[0].page)
 		sched_hw_submission = 256;
 
@@ -352,7 +371,7 @@ int amdgpu_ring_init(struct amdgpu_device *adev, struct amdgpu_ring *ring,
 	ring->max_dw = max_dw;
 	ring->hw_prio = hw_prio;
 
-	if (!ring->no_scheduler) {
+	if (!ring->no_scheduler && ring->funcs->type < AMDGPU_HW_IP_NUM) {
 		hw_ip = ring->funcs->type;
 		num_sched = &adev->gpu_sched[hw_ip][hw_prio].num_scheds;
 		adev->gpu_sched[hw_ip][hw_prio].sched[(*num_sched)++] =
@@ -473,8 +492,9 @@ static ssize_t amdgpu_debugfs_ring_read(struct file *f, char __user *buf,
 					size_t size, loff_t *pos)
 {
 	struct amdgpu_ring *ring = file_inode(f)->i_private;
-	int r, i;
 	uint32_t value, result, early[3];
+	loff_t i;
+	int r;
 
 	if (*pos & 3 || size & 3)
 		return -EINVAL;
@@ -524,46 +544,58 @@ static ssize_t amdgpu_debugfs_mqd_read(struct file *f, char __user *buf,
 {
 	struct amdgpu_ring *ring = file_inode(f)->i_private;
 	volatile u32 *mqd;
-	int r;
+	u32 *kbuf;
+	int r, i;
 	uint32_t value, result;
 
 	if (*pos & 3 || size & 3)
 		return -EINVAL;
 
-	result = 0;
+	kbuf = kmalloc(ring->mqd_size, GFP_KERNEL);
+	if (!kbuf)
+		return -ENOMEM;
 
 	r = amdgpu_bo_reserve(ring->mqd_obj, false);
 	if (unlikely(r != 0))
-		return r;
+		goto err_free;
 
 	r = amdgpu_bo_kmap(ring->mqd_obj, (void **)&mqd);
-	if (r) {
-		amdgpu_bo_unreserve(ring->mqd_obj);
-		return r;
-	}
+	if (r)
+		goto err_unreserve;
 
+	/*
+	 * Copy to local buffer to avoid put_user(), which might fault
+	 * and acquire mmap_sem, under reservation_ww_class_mutex.
+	 */
+	for (i = 0; i < ring->mqd_size/sizeof(u32); i++)
+		kbuf[i] = mqd[i];
+
+	amdgpu_bo_kunmap(ring->mqd_obj);
+	amdgpu_bo_unreserve(ring->mqd_obj);
+
+	result = 0;
 	while (size) {
 		if (*pos >= ring->mqd_size)
-			goto done;
+			break;
 
-		value = mqd[*pos/4];
+		value = kbuf[*pos/4];
 		r = put_user(value, (uint32_t *)buf);
 		if (r)
-			goto done;
+			goto err_free;
 		buf += 4;
 		result += 4;
 		size -= 4;
 		*pos += 4;
 	}
 
-done:
-	amdgpu_bo_kunmap(ring->mqd_obj);
-	mqd = NULL;
-	amdgpu_bo_unreserve(ring->mqd_obj);
-	if (r)
-		return r;
-
+	kfree(kbuf);
 	return result;
+
+err_unreserve:
+	amdgpu_bo_unreserve(ring->mqd_obj);
+err_free:
+	kfree(kbuf);
+	return r;
 }
 
 static const struct file_operations amdgpu_debugfs_mqd_fops = {

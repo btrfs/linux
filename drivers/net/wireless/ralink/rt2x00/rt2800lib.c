@@ -3607,7 +3607,7 @@ static void rt2800_config_channel_rf55xx(struct rt2x00_dev *rt2x00dev,
 			rt2800_rfcsr_write(rt2x00dev, 52, 0x0C);
 			rt2800_rfcsr_write(rt2x00dev, 54, 0xF8);
 			if (rf->channel <= 50) {
-				rt2800_rfcsr_write(rt2x00dev, 55, 0x06),
+				rt2800_rfcsr_write(rt2x00dev, 55, 0x06);
 				rt2800_rfcsr_write(rt2x00dev, 56, 0xD3);
 			} else if (rf->channel >= 52) {
 				rt2800_rfcsr_write(rt2x00dev, 55, 0x04);
@@ -8882,13 +8882,10 @@ static void rt2800_rxiq_calibration(struct rt2x00_dev *rt2x00dev)
 
 	for (ch_idx = 0; ch_idx < 2; ch_idx = ch_idx + 1) {
 		if (ch_idx == 0) {
-			rfval = rfb0r1 & (~0x3);
 			rfval = rfb0r1 | 0x1;
 			rt2800_rfcsr_write_bank(rt2x00dev, 0, 1, rfval);
-			rfval = rfb0r2 & (~0x33);
 			rfval = rfb0r2 | 0x11;
 			rt2800_rfcsr_write_bank(rt2x00dev, 0, 2, rfval);
-			rfval = rfb0r42 & (~0x50);
 			rfval = rfb0r42 | 0x10;
 			rt2800_rfcsr_write_bank(rt2x00dev, 0, 42, rfval);
 
@@ -8901,13 +8898,10 @@ static void rt2800_rxiq_calibration(struct rt2x00_dev *rt2x00dev)
 
 			rt2800_bbp_dcoc_write(rt2x00dev, 1, 0x00);
 		} else {
-			rfval = rfb0r1 & (~0x3);
 			rfval = rfb0r1 | 0x2;
 			rt2800_rfcsr_write_bank(rt2x00dev, 0, 1, rfval);
-			rfval = rfb0r2 & (~0x33);
 			rfval = rfb0r2 | 0x22;
 			rt2800_rfcsr_write_bank(rt2x00dev, 0, 2, rfval);
-			rfval = rfb0r42 & (~0x50);
 			rfval = rfb0r42 | 0x40;
 			rt2800_rfcsr_write_bank(rt2x00dev, 0, 42, rfval);
 
@@ -10946,13 +10940,13 @@ static void rt2800_efuse_read(struct rt2x00_dev *rt2x00dev, unsigned int i)
 	/* Apparently the data is read from end to start */
 	reg = rt2800_register_read_lock(rt2x00dev, efuse_data3_reg);
 	/* The returned value is in CPU order, but eeprom is le */
-	*(u32 *)&rt2x00dev->eeprom[i] = cpu_to_le32(reg);
+	*(__le32 *)&rt2x00dev->eeprom[i] = cpu_to_le32(reg);
 	reg = rt2800_register_read_lock(rt2x00dev, efuse_data2_reg);
-	*(u32 *)&rt2x00dev->eeprom[i + 2] = cpu_to_le32(reg);
+	*(__le32 *)&rt2x00dev->eeprom[i + 2] = cpu_to_le32(reg);
 	reg = rt2800_register_read_lock(rt2x00dev, efuse_data1_reg);
-	*(u32 *)&rt2x00dev->eeprom[i + 4] = cpu_to_le32(reg);
+	*(__le32 *)&rt2x00dev->eeprom[i + 4] = cpu_to_le32(reg);
 	reg = rt2800_register_read_lock(rt2x00dev, efuse_data0_reg);
-	*(u32 *)&rt2x00dev->eeprom[i + 6] = cpu_to_le32(reg);
+	*(__le32 *)&rt2x00dev->eeprom[i + 6] = cpu_to_le32(reg);
 
 	mutex_unlock(&rt2x00dev->csr_mutex);
 }

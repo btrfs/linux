@@ -26,7 +26,6 @@
 
 #define DRIVER_NAME "gma500"
 #define DRIVER_DESC "DRM driver for the Intel GMA500, GMA600, GMA3600, GMA3650"
-#define DRIVER_DATE "20140314"
 
 #define DRIVER_MAJOR 1
 #define DRIVER_MINOR 0
@@ -162,7 +161,6 @@
 #define PSB_NUM_VBLANKS 2
 
 #define PSB_WATCHDOG_DELAY (HZ * 2)
-#define PSB_LID_DELAY (HZ / 10)
 
 #define PSB_MAX_BRIGHTNESS		100
 
@@ -185,6 +183,9 @@
 #define KSEL_BYPASS_25 6
 #define KSEL_BYPASS_83_100 7
 
+struct drm_fb_helper;
+struct drm_fb_helper_surface_size;
+
 struct opregion_header;
 struct opregion_acpi;
 struct opregion_swsci;
@@ -203,7 +204,7 @@ struct psb_intel_opregion {
 struct sdvo_device_mapping {
 	u8 initialized;
 	u8 dvo_port;
-	u8 slave_addr;
+	u8 target_addr;
 	u8 dvo_wiring;
 	u8 i2c_pin;
 	u8 i2c_speed;
@@ -491,11 +492,7 @@ struct drm_psb_private {
 	/* Hotplug handling */
 	struct work_struct hotplug_work;
 
-	/* LID-Switch */
-	spinlock_t lid_lock;
-	struct timer_list lid_timer;
 	struct psb_intel_opregion opregion;
-	u32 lid_last_state;
 
 	/* Watchdog */
 	uint32_t apm_reg;
@@ -591,10 +588,6 @@ struct psb_ops {
 	int i2c_bus;		/* I2C bus identifier for Moorestown */
 };
 
-/* psb_lid.c */
-extern void psb_lid_timer_init(struct drm_psb_private *dev_priv);
-extern void psb_lid_timer_takedown(struct drm_psb_private *dev_priv);
-
 /* modesetting */
 extern void psb_modeset_init(struct drm_device *dev);
 extern void psb_modeset_cleanup(struct drm_device *dev);
@@ -606,10 +599,13 @@ struct drm_framebuffer *psb_framebuffer_create(struct drm_device *dev,
 
 /* fbdev */
 #if defined(CONFIG_DRM_FBDEV_EMULATION)
-void psb_fbdev_setup(struct drm_psb_private *dev_priv);
+int psb_fbdev_driver_fbdev_probe(struct drm_fb_helper *fb_helper,
+				 struct drm_fb_helper_surface_size *sizes);
+#define PSB_FBDEV_DRIVER_OPS \
+	.fbdev_probe = psb_fbdev_driver_fbdev_probe
 #else
-static inline void psb_fbdev_setup(struct drm_psb_private *dev_priv)
-{ }
+#define PSB_FBDEV_DRIVER_OPS \
+	.fbdev_probe = NULL
 #endif
 
 /* backlight.c */

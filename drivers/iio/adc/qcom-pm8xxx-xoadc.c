@@ -372,7 +372,6 @@ static const struct xoadc_channel pm8921_xoadc_channels[] = {
  * @name: name of this channel
  * @hwchan: pointer to hardware channel information (muxing & scaling settings)
  * @calibration: whether to use absolute or ratiometric calibration
- * @scale_fn_type: scaling function type
  * @decimation: 0,1,2,3
  * @amux_ip_rsv: ratiometric scale value if using ratiometric
  * calibration: 0, 1, 2, 4, 5.
@@ -822,7 +821,6 @@ static int pm8xxx_xoadc_parse_channel(struct device *dev,
 
 static int pm8xxx_xoadc_parse_channels(struct pm8xxx_xoadc *adc)
 {
-	struct fwnode_handle *child;
 	struct pm8xxx_chan_info *ch;
 	int ret;
 	int i;
@@ -845,16 +843,15 @@ static int pm8xxx_xoadc_parse_channels(struct pm8xxx_xoadc *adc)
 		return -ENOMEM;
 
 	i = 0;
-	device_for_each_child_node(adc->dev, child) {
+	device_for_each_child_node_scoped(adc->dev, child) {
 		ch = &adc->chans[i];
 		ret = pm8xxx_xoadc_parse_channel(adc->dev, child,
 						 adc->variant->channels,
 						 &adc->iio_chans[i],
 						 ch);
-		if (ret) {
-			fwnode_handle_put(child);
+		if (ret)
 			return ret;
-		}
+
 		i++;
 	}
 
@@ -1007,7 +1004,7 @@ static const struct of_device_id pm8xxx_xoadc_id_table[] = {
 		.compatible = "qcom,pm8921-adc",
 		.data = &pm8921_variant,
 	},
-	{ },
+	{ }
 };
 MODULE_DEVICE_TABLE(of, pm8xxx_xoadc_id_table);
 
@@ -1017,7 +1014,7 @@ static struct platform_driver pm8xxx_xoadc_driver = {
 		.of_match_table = pm8xxx_xoadc_id_table,
 	},
 	.probe		= pm8xxx_xoadc_probe,
-	.remove_new	= pm8xxx_xoadc_remove,
+	.remove		= pm8xxx_xoadc_remove,
 };
 module_platform_driver(pm8xxx_xoadc_driver);
 

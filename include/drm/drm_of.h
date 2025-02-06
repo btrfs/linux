@@ -2,6 +2,7 @@
 #ifndef __DRM_OF_H__
 #define __DRM_OF_H__
 
+#include <linux/err.h>
 #include <linux/of_graph.h>
 #if IS_ENABLED(CONFIG_OF) && IS_ENABLED(CONFIG_DRM_PANEL_BRIDGE)
 #include <drm/drm_bridge.h>
@@ -51,6 +52,8 @@ int drm_of_find_panel_or_bridge(const struct device_node *np,
 				struct drm_bridge **bridge);
 int drm_of_lvds_get_dual_link_pixel_order(const struct device_node *port1,
 					  const struct device_node *port2);
+int drm_of_lvds_get_dual_link_pixel_order_sink(struct device_node *port1,
+					       struct device_node *port2);
 int drm_of_lvds_get_data_mapping(const struct device_node *port);
 int drm_of_get_data_lanes_count(const struct device_node *endpoint,
 				const unsigned int min, const unsigned int max);
@@ -104,6 +107,13 @@ static inline int drm_of_find_panel_or_bridge(const struct device_node *np,
 static inline int
 drm_of_lvds_get_dual_link_pixel_order(const struct device_node *port1,
 				      const struct device_node *port2)
+{
+	return -EINVAL;
+}
+
+static inline int
+drm_of_lvds_get_dual_link_pixel_order_sink(struct device_node *port1,
+					   struct device_node *port2)
 {
 	return -EINVAL;
 }
