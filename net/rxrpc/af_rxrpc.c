@@ -65,7 +65,7 @@ static void rxrpc_write_space(struct sock *sk)
 
 		if (skwq_has_sleeper(wq))
 			wake_up_interruptible(&wq->wait);
-		sk_wake_async(sk, SOCK_WAKE_SPACE, POLL_OUT);
+		sk_wake_async_rcu(sk, SOCK_WAKE_SPACE, POLL_OUT);
 	}
 	rcu_read_unlock();
 }
@@ -408,9 +408,9 @@ void rxrpc_kernel_shutdown_call(struct socket *sock, struct rxrpc_call *call)
 
 		/* Make sure we're not going to call back into a kernel service */
 		if (call->notify_rx) {
-			spin_lock(&call->notify_lock);
+			spin_lock_irq(&call->notify_lock);
 			call->notify_rx = rxrpc_dummy_notify_rx;
-			spin_unlock(&call->notify_lock);
+			spin_unlock_irq(&call->notify_lock);
 		}
 	}
 	mutex_unlock(&call->user_mutex);
@@ -487,7 +487,7 @@ EXPORT_SYMBOL(rxrpc_kernel_new_call_notification);
  * rxrpc_kernel_set_max_life - Set maximum lifespan on a call
  * @sock: The socket the call is on
  * @call: The call to configure
- * @hard_timeout: The maximum lifespan of the call in jiffies
+ * @hard_timeout: The maximum lifespan of the call in ms
  *
  * Set the maximum lifespan of a call.  The call will end with ETIME or
  * ETIMEDOUT if it takes longer than this.
@@ -495,14 +495,14 @@ EXPORT_SYMBOL(rxrpc_kernel_new_call_notification);
 void rxrpc_kernel_set_max_life(struct socket *sock, struct rxrpc_call *call,
 			       unsigned long hard_timeout)
 {
-	unsigned long now;
+	ktime_t delay = ms_to_ktime(hard_timeout), expect_term_by;
 
 	mutex_lock(&call->user_mutex);
 
-	now = jiffies;
-	hard_timeout += now;
-	WRITE_ONCE(call->expect_term_by, hard_timeout);
-	rxrpc_reduce_call_timer(call, hard_timeout, now, rxrpc_timer_set_for_hard);
+	expect_term_by = ktime_add(ktime_get_real(), delay);
+	WRITE_ONCE(call->expect_term_by, expect_term_by);
+	trace_rxrpc_timer_set(call, delay, rxrpc_timer_trace_hard);
+	rxrpc_poke_call(call, rxrpc_call_poke_set_timeout);
 
 	mutex_unlock(&call->user_mutex);
 }
@@ -707,9 +707,10 @@ static int rxrpc_setsockopt(struct socket *sock, int level, int optname,
 			ret = -EISCONN;
 			if (rx->sk.sk_state != RXRPC_UNBOUND)
 				goto error;
-			ret = copy_from_sockptr(&min_sec_level, optval,
-				       sizeof(unsigned int));
-			if (ret < 0)
+			ret = copy_safe_from_sockptr(&min_sec_level,
+						     sizeof(min_sec_level),
+						     optval, optlen);
+			if (ret)
 				goto error;
 			ret = -EINVAL;
 			if (min_sec_level > RXRPC_SECURITY_MAX)

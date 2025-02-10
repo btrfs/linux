@@ -148,6 +148,8 @@
  * @pr_num: Maximum number of protected range registers
  * @chip0_size: Size of the first flash chip in bytes
  * @locked: Is SPI setting locked
+ * @protected: Whether the regions are write protected
+ * @bios_locked: Is BIOS region locked
  * @swseq_reg: Use SW sequencer in register reads/writes
  * @swseq_erase: Use SW sequencer in erase operation
  * @atomic_preopcode: Holds preopcode when atomic sequence is requested
@@ -166,6 +168,8 @@ struct intel_spi {
 	size_t pr_num;
 	size_t chip0_size;
 	bool locked;
+	bool protected;
+	bool bios_locked;
 	bool swseq_reg;
 	bool swseq_erase;
 	u8 atomic_preopcode;
@@ -1109,10 +1113,13 @@ static int intel_spi_init(struct intel_spi *ispi)
 		return -EINVAL;
 	}
 
-	/* Try to disable write protection if user asked to do so */
-	if (writeable && !intel_spi_set_writeable(ispi)) {
-		dev_warn(ispi->dev, "can't disable chip write protection\n");
-		writeable = false;
+	ispi->bios_locked = true;
+	/* Try to disable BIOS write protection if user asked to do so */
+	if (writeable) {
+		if (intel_spi_set_writeable(ispi))
+			ispi->bios_locked = false;
+		else
+			dev_warn(ispi->dev, "can't disable chip write protection\n");
 	}
 
 	/* Disable #SMI generation from HW sequencer */
@@ -1247,13 +1254,22 @@ static void intel_spi_fill_partition(struct intel_spi *ispi,
 		 * Also if the user did not ask the chip to be writeable
 		 * mask the bit too.
 		 */
-		if (!writeable || intel_spi_is_protected(ispi, base, limit))
+		if (!writeable || intel_spi_is_protected(ispi, base, limit)) {
 			part->mask_flags |= MTD_WRITEABLE;
+			ispi->protected = true;
+		}
 
 		end = (limit << 12) + 4096;
 		if (end > part->size)
 			part->size = end;
 	}
+
+	/*
+	 * Regions can refer to the second chip too so in this case we
+	 * just make the BIOS partition to occupy the whole chip.
+	 */
+	if (ispi->chip0_size && part->size > ispi->chip0_size)
+		part->size = MTDPART_SIZ_FULL;
 }
 
 static int intel_spi_read_desc(struct intel_spi *ispi)
@@ -1346,8 +1362,13 @@ static int intel_spi_read_desc(struct intel_spi *ispi)
 static int intel_spi_populate_chip(struct intel_spi *ispi)
 {
 	struct flash_platform_data *pdata;
+	struct mtd_partition *parts;
 	struct spi_board_info chip;
 	int ret;
+
+	ret = intel_spi_read_desc(ispi);
+	if (ret)
+		return ret;
 
 	pdata = devm_kzalloc(ispi->dev, sizeof(*pdata), GFP_KERNEL);
 	if (!pdata)
@@ -1368,21 +1389,80 @@ static int intel_spi_populate_chip(struct intel_spi *ispi)
 	if (!spi_new_device(ispi->host, &chip))
 		return -ENODEV;
 
-	ret = intel_spi_read_desc(ispi);
-	if (ret)
-		return ret;
-
 	/* Add the second chip if present */
 	if (ispi->host->num_chipselect < 2)
 		return 0;
 
-	chip.platform_data = NULL;
+	pdata = devm_kzalloc(ispi->dev, sizeof(*pdata), GFP_KERNEL);
+	if (!pdata)
+		return -ENOMEM;
+
+	pdata->name = devm_kasprintf(ispi->dev, GFP_KERNEL, "%s-chip1",
+				     dev_name(ispi->dev));
+	if (!pdata->name)
+		return -ENOMEM;
+
+	pdata->nr_parts = 1;
+	parts = devm_kcalloc(ispi->dev, pdata->nr_parts, sizeof(*parts),
+			     GFP_KERNEL);
+	if (!parts)
+		return -ENOMEM;
+
+	parts[0].size = MTDPART_SIZ_FULL;
+	parts[0].name = "BIOS1";
+	pdata->parts = parts;
+
+	chip.platform_data = pdata;
 	chip.chip_select = 1;
 
 	if (!spi_new_device(ispi->host, &chip))
 		return -ENODEV;
 	return 0;
 }
+
+static ssize_t intel_spi_protected_show(struct device *dev,
+					struct device_attribute *attr, char *buf)
+{
+	struct intel_spi *ispi = dev_get_drvdata(dev);
+
+	return sysfs_emit(buf, "%d\n", ispi->protected);
+}
+static DEVICE_ATTR_ADMIN_RO(intel_spi_protected);
+
+static ssize_t intel_spi_locked_show(struct device *dev,
+				     struct device_attribute *attr, char *buf)
+{
+	struct intel_spi *ispi = dev_get_drvdata(dev);
+
+	return sysfs_emit(buf, "%d\n", ispi->locked);
+}
+static DEVICE_ATTR_ADMIN_RO(intel_spi_locked);
+
+static ssize_t intel_spi_bios_locked_show(struct device *dev,
+					  struct device_attribute *attr, char *buf)
+{
+	struct intel_spi *ispi = dev_get_drvdata(dev);
+
+	return sysfs_emit(buf, "%d\n", ispi->bios_locked);
+}
+static DEVICE_ATTR_ADMIN_RO(intel_spi_bios_locked);
+
+static struct attribute *intel_spi_attrs[] = {
+	&dev_attr_intel_spi_protected.attr,
+	&dev_attr_intel_spi_locked.attr,
+	&dev_attr_intel_spi_bios_locked.attr,
+	NULL
+};
+
+static const struct attribute_group intel_spi_attr_group = {
+	.attrs = intel_spi_attrs,
+};
+
+const struct attribute_group *intel_spi_groups[] = {
+	&intel_spi_attr_group,
+	NULL
+};
+EXPORT_SYMBOL_GPL(intel_spi_groups);
 
 /**
  * intel_spi_probe() - Probe the Intel SPI flash controller
@@ -1424,6 +1504,7 @@ int intel_spi_probe(struct device *dev, struct resource *mem,
 	if (ret)
 		return ret;
 
+	dev_set_drvdata(dev, ispi);
 	return intel_spi_populate_chip(ispi);
 }
 EXPORT_SYMBOL_GPL(intel_spi_probe);

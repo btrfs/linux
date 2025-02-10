@@ -42,11 +42,11 @@ static pid_t gettid(void)
 
 #ifndef PR_SCHED_CORE
 #define PR_SCHED_CORE			62
-# define PR_SCHED_CORE_GET		0
-# define PR_SCHED_CORE_CREATE		1 /* create unique core_sched cookie */
-# define PR_SCHED_CORE_SHARE_TO		2 /* push core_sched cookie to pid */
-# define PR_SCHED_CORE_SHARE_FROM	3 /* pull core_sched cookie to pid */
-# define PR_SCHED_CORE_MAX		4
+#define PR_SCHED_CORE_GET		0
+#define PR_SCHED_CORE_CREATE		1 /* create unique core_sched cookie */
+#define PR_SCHED_CORE_SHARE_TO		2 /* push core_sched cookie to pid */
+#define PR_SCHED_CORE_SHARE_FROM	3 /* pull core_sched cookie to pid */
+#define PR_SCHED_CORE_MAX		4
 #endif
 
 #define MAX_PROCESSES 128
@@ -276,7 +276,7 @@ int main(int argc, char *argv[])
 	if (setpgid(0, 0) != 0)
 		handle_error("process group");
 
-	printf("\n## Create a thread/process/process group hiearchy\n");
+	printf("\n## Create a thread/process/process group hierarchy\n");
 	create_processes(num_processes, num_threads, procs);
 	need_cleanup = 1;
 	disp_processes(num_processes, procs);

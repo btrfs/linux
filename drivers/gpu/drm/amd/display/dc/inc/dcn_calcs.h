@@ -31,7 +31,7 @@
 #define __DCN_CALCS_H__
 
 #include "bw_fixed.h"
-#include "../dml/display_mode_lib.h"
+#include "dml/display_mode_lib.h"
 
 
 struct dc;
@@ -623,10 +623,6 @@ bool dcn_validate_bandwidth(
 		struct dc *dc,
 		struct dc_state *context,
 		bool fast_validate);
-
-unsigned int dcn_find_dcfclk_suits_all(
-	const struct dc *dc,
-	struct dc_clocks *clocks);
 
 void dcn_get_soc_clks(
 		struct dc *dc,

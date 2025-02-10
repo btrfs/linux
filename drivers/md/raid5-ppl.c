@@ -258,7 +258,7 @@ static struct ppl_io_unit *ppl_new_iounit(struct ppl_log *log,
 	memset(pplhdr->reserved, 0xff, PPL_HDR_RESERVED);
 	pplhdr->signature = cpu_to_le32(ppl_conf->signature);
 
-	io->seq = atomic64_add_return(1, &ppl_conf->seq);
+	io->seq = atomic64_inc_return(&ppl_conf->seq);
 	pplhdr->generation = cpu_to_le64(io->seq);
 
 	return io;
@@ -1393,7 +1393,8 @@ int ppl_init_log(struct r5conf *conf)
 		ppl_conf->signature = ~crc32c_le(~0, mddev->uuid, sizeof(mddev->uuid));
 		ppl_conf->block_size = 512;
 	} else {
-		ppl_conf->block_size = queue_logical_block_size(mddev->queue);
+		ppl_conf->block_size =
+			queue_logical_block_size(mddev->gendisk->queue);
 	}
 
 	for (i = 0; i < ppl_conf->count; i++) {

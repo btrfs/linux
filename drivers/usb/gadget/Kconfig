@@ -190,6 +190,7 @@ config USB_F_MASS_STORAGE
 	tristate
 
 config USB_F_FS
+	select DMA_SHARED_BUFFER
 	tristate
 
 config USB_F_UAC1
@@ -210,6 +211,8 @@ config USB_F_MIDI
 
 config USB_F_MIDI2
 	tristate
+	select SND_UMP
+	select SND_UMP_LEGACY_RAWMIDI
 
 config USB_F_HID
 	tristate
@@ -444,8 +447,6 @@ config USB_CONFIGFS_F_MIDI2
 	depends on USB_CONFIGFS
 	depends on SND
 	select USB_LIBCOMPOSITE
-	select SND_UMP
-	select SND_UMP_LEGACY_RAWMIDI
 	select USB_F_MIDI2
 	help
 	  The MIDI 2.0 function driver provides the generic emulated

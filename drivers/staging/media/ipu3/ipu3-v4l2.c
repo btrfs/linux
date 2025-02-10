@@ -535,31 +535,53 @@ static void imgu_vb2_stop_streaming(struct vb2_queue *vq)
 		container_of(vq, struct imgu_video_device, vbq);
 	int r;
 	unsigned int pipe;
+	bool stop_streaming = false;
 
+	/* Verify that the node had been setup with imgu_v4l2_node_setup() */
 	WARN_ON(!node->enabled);
 
 	pipe = node->pipe;
 	dev_dbg(dev, "Try to stream off node [%u][%u]", pipe, node->id);
-	imgu_pipe = &imgu->imgu_pipe[pipe];
-	r = v4l2_subdev_call(&imgu_pipe->imgu_sd.subdev, video, s_stream, 0);
-	if (r)
-		dev_err(&imgu->pci_dev->dev,
-			"failed to stop subdev streaming\n");
 
+	/*
+	 * When the first node of a streaming setup is stopped, the entire
+	 * pipeline needs to stop before individual nodes are disabled.
+	 * Perform the inverse of the initial setup.
+	 *
+	 * Part 1 - s_stream on the entire pipeline
+	 */
 	mutex_lock(&imgu->streaming_lock);
-	/* Was this the first node with streaming disabled? */
-	if (imgu->streaming && imgu_all_nodes_streaming(imgu, node)) {
+	if (imgu->streaming) {
 		/* Yes, really stop streaming now */
 		dev_dbg(dev, "IMGU streaming is ready to stop");
 		r = imgu_s_stream(imgu, false);
 		if (!r)
 			imgu->streaming = false;
+		stop_streaming = true;
 	}
-
-	imgu_return_all_buffers(imgu, node, VB2_BUF_STATE_ERROR);
 	mutex_unlock(&imgu->streaming_lock);
 
+	/* Part 2 - s_stream on subdevs
+	 *
+	 * If we call s_stream multiple times, Linux v6.7's call_s_stream()
+	 * WARNs and aborts. Thus, disable all pipes at once, and only once.
+	 */
+	if (stop_streaming) {
+		for_each_set_bit(pipe, imgu->css.enabled_pipes,
+				 IMGU_MAX_PIPE_NUM) {
+			imgu_pipe = &imgu->imgu_pipe[pipe];
+
+			r = v4l2_subdev_call(&imgu_pipe->imgu_sd.subdev,
+					     video, s_stream, 0);
+			if (r)
+				dev_err(&imgu->pci_dev->dev,
+					"failed to stop subdev streaming\n");
+		}
+	}
+
+	/* Part 3 - individual node teardown */
 	video_device_pipeline_stop(&node->vdev);
+	imgu_return_all_buffers(imgu, node, VB2_BUF_STATE_ERROR);
 }
 
 /******************** v4l2_ioctl_ops ********************/
@@ -915,8 +937,6 @@ static const struct vb2_ops imgu_vb2_ops = {
 	.queue_setup = imgu_vb2_queue_setup,
 	.start_streaming = imgu_vb2_start_streaming,
 	.stop_streaming = imgu_vb2_stop_streaming,
-	.wait_prepare = vb2_ops_wait_prepare,
-	.wait_finish = vb2_ops_wait_finish,
 };
 
 /****************** v4l2_file_operations *****************/
@@ -1069,17 +1089,17 @@ static int imgu_v4l2_subdev_register(struct imgu_device *imgu,
 	struct imgu_media_pipe *imgu_pipe = &imgu->imgu_pipe[pipe];
 
 	/* Initialize subdev media entity */
+	imgu_sd->subdev.entity.ops = &imgu_media_ops;
+	for (i = 0; i < IMGU_NODE_NUM; i++) {
+		imgu_sd->subdev_pads[i].flags = imgu_pipe->nodes[i].output ?
+			MEDIA_PAD_FL_SINK : MEDIA_PAD_FL_SOURCE;
+	}
 	r = media_entity_pads_init(&imgu_sd->subdev.entity, IMGU_NODE_NUM,
 				   imgu_sd->subdev_pads);
 	if (r) {
 		dev_err(&imgu->pci_dev->dev,
 			"failed initialize subdev media entity (%d)\n", r);
 		return r;
-	}
-	imgu_sd->subdev.entity.ops = &imgu_media_ops;
-	for (i = 0; i < IMGU_NODE_NUM; i++) {
-		imgu_sd->subdev_pads[i].flags = imgu_pipe->nodes[i].output ?
-			MEDIA_PAD_FL_SINK : MEDIA_PAD_FL_SOURCE;
 	}
 
 	/* Initialize subdev */
@@ -1177,15 +1197,15 @@ static int imgu_v4l2_node_setup(struct imgu_device *imgu, unsigned int pipe,
 	}
 
 	/* Initialize media entities */
+	node->vdev_pad.flags = node->output ?
+		MEDIA_PAD_FL_SOURCE : MEDIA_PAD_FL_SINK;
+	vdev->entity.ops = NULL;
 	r = media_entity_pads_init(&vdev->entity, 1, &node->vdev_pad);
 	if (r) {
 		dev_err(dev, "failed initialize media entity (%d)\n", r);
 		mutex_destroy(&node->lock);
 		return r;
 	}
-	node->vdev_pad.flags = node->output ?
-		MEDIA_PAD_FL_SOURCE : MEDIA_PAD_FL_SINK;
-	vdev->entity.ops = NULL;
 
 	/* Initialize vbq */
 	vbq->type = node->vdev_fmt.type;

@@ -50,6 +50,58 @@ enum dpll_lock_status {
 	DPLL_LOCK_STATUS_MAX = (__DPLL_LOCK_STATUS_MAX - 1)
 };
 
+/**
+ * enum dpll_lock_status_error - if previous status change was done due to a
+ *   failure, this provides information of dpll device lock status error. Valid
+ *   values for DPLL_A_LOCK_STATUS_ERROR attribute
+ * @DPLL_LOCK_STATUS_ERROR_NONE: dpll device lock status was changed without
+ *   any error
+ * @DPLL_LOCK_STATUS_ERROR_UNDEFINED: dpll device lock status was changed due
+ *   to undefined error. Driver fills this value up in case it is not able to
+ *   obtain suitable exact error type.
+ * @DPLL_LOCK_STATUS_ERROR_MEDIA_DOWN: dpll device lock status was changed
+ *   because of associated media got down. This may happen for example if dpll
+ *   device was previously locked on an input pin of type
+ *   PIN_TYPE_SYNCE_ETH_PORT.
+ * @DPLL_LOCK_STATUS_ERROR_FRACTIONAL_FREQUENCY_OFFSET_TOO_HIGH: the FFO
+ *   (Fractional Frequency Offset) between the RX and TX symbol rate on the
+ *   media got too high. This may happen for example if dpll device was
+ *   previously locked on an input pin of type PIN_TYPE_SYNCE_ETH_PORT.
+ */
+enum dpll_lock_status_error {
+	DPLL_LOCK_STATUS_ERROR_NONE = 1,
+	DPLL_LOCK_STATUS_ERROR_UNDEFINED,
+	DPLL_LOCK_STATUS_ERROR_MEDIA_DOWN,
+	DPLL_LOCK_STATUS_ERROR_FRACTIONAL_FREQUENCY_OFFSET_TOO_HIGH,
+
+	/* private: */
+	__DPLL_LOCK_STATUS_ERROR_MAX,
+	DPLL_LOCK_STATUS_ERROR_MAX = (__DPLL_LOCK_STATUS_ERROR_MAX - 1)
+};
+
+/*
+ * level of quality of a clock device. This mainly applies when the dpll
+ * lock-status is DPLL_LOCK_STATUS_HOLDOVER. The current list is defined
+ * according to the table 11-7 contained in ITU-T G.8264/Y.1364 document. One
+ * may extend this list freely by other ITU-T defined clock qualities, or
+ * different ones defined by another standardization body (for those, please
+ * use different prefix).
+ */
+enum dpll_clock_quality_level {
+	DPLL_CLOCK_QUALITY_LEVEL_ITU_OPT1_PRC = 1,
+	DPLL_CLOCK_QUALITY_LEVEL_ITU_OPT1_SSU_A,
+	DPLL_CLOCK_QUALITY_LEVEL_ITU_OPT1_SSU_B,
+	DPLL_CLOCK_QUALITY_LEVEL_ITU_OPT1_EEC1,
+	DPLL_CLOCK_QUALITY_LEVEL_ITU_OPT1_PRTC,
+	DPLL_CLOCK_QUALITY_LEVEL_ITU_OPT1_EPRTC,
+	DPLL_CLOCK_QUALITY_LEVEL_ITU_OPT1_EEEC,
+	DPLL_CLOCK_QUALITY_LEVEL_ITU_OPT1_EPRC,
+
+	/* private: */
+	__DPLL_CLOCK_QUALITY_LEVEL_MAX,
+	DPLL_CLOCK_QUALITY_LEVEL_MAX = (__DPLL_CLOCK_QUALITY_LEVEL_MAX - 1)
+};
+
 #define DPLL_TEMP_DIVIDER	1000
 
 /**
@@ -150,6 +202,8 @@ enum dpll_a {
 	DPLL_A_LOCK_STATUS,
 	DPLL_A_TEMP,
 	DPLL_A_TYPE,
+	DPLL_A_LOCK_STATUS_ERROR,
+	DPLL_A_CLOCK_QUALITY_LEVEL,
 
 	__DPLL_A_MAX,
 	DPLL_A_MAX = (__DPLL_A_MAX - 1)
@@ -180,6 +234,9 @@ enum dpll_a_pin {
 	DPLL_A_PIN_PHASE_ADJUST,
 	DPLL_A_PIN_PHASE_OFFSET,
 	DPLL_A_PIN_FRACTIONAL_FREQUENCY_OFFSET,
+	DPLL_A_PIN_ESYNC_FREQUENCY,
+	DPLL_A_PIN_ESYNC_FREQUENCY_SUPPORTED,
+	DPLL_A_PIN_ESYNC_PULSE,
 
 	__DPLL_A_PIN_MAX,
 	DPLL_A_PIN_MAX = (__DPLL_A_PIN_MAX - 1)

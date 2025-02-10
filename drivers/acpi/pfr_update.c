@@ -489,13 +489,11 @@ static const struct file_operations acpi_pfru_fops = {
 	.llseek		= noop_llseek,
 };
 
-static int acpi_pfru_remove(struct platform_device *pdev)
+static void acpi_pfru_remove(struct platform_device *pdev)
 {
 	struct pfru_device *pfru_dev = platform_get_drvdata(pdev);
 
 	misc_deregister(&pfru_dev->miscdev);
-
-	return 0;
 }
 
 static void pfru_put_idx(void *data)

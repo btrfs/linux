@@ -132,17 +132,16 @@ int
 xrep_setup_ag_allocbt(
 	struct xfs_scrub	*sc)
 {
+	struct xfs_group	*xg = pag_group(sc->sa.pag);
 	unsigned int		busy_gen;
 
 	/*
 	 * Make sure the busy extent list is clear because we can't put extents
 	 * on there twice.
 	 */
-	busy_gen = READ_ONCE(sc->sa.pag->pagb_gen);
-	if (xfs_extent_busy_list_empty(sc->sa.pag))
+	if (xfs_extent_busy_list_empty(xg, &busy_gen))
 		return 0;
-
-	return xfs_extent_busy_flush(sc->tp, sc->sa.pag, busy_gen, 0);
+	return xfs_extent_busy_flush(sc->tp, xg, busy_gen, 0);
 }
 
 /* Check for any obvious conflicts in the free extent. */
@@ -210,7 +209,7 @@ xrep_abt_stash(
 	if (error)
 		return error;
 
-	trace_xrep_abt_found(sc->mp, sc->sa.pag->pag_agno, &arec);
+	trace_xrep_abt_found(sc->sa.pag, &arec);
 
 	error = xfarray_append(ra->free_records, &arec);
 	if (error)
@@ -484,8 +483,8 @@ xrep_abt_reserve_space(
 		ASSERT(arec.ar_blockcount <= UINT_MAX);
 		len = min_t(unsigned int, arec.ar_blockcount, desired);
 
-		trace_xrep_newbt_alloc_ag_blocks(sc->mp, sc->sa.pag->pag_agno,
-				arec.ar_startblock, len, XFS_RMAP_OWN_AG);
+		trace_xrep_newbt_alloc_ag_blocks(sc->sa.pag, arec.ar_startblock,
+				len, XFS_RMAP_OWN_AG);
 
 		error = xrep_newbt_add_extent(&ra->new_bnobt, sc->sa.pag,
 				arec.ar_startblock, len);
@@ -543,8 +542,9 @@ xrep_abt_dispose_one(
 
 	/* Add a deferred rmap for each extent we used. */
 	if (resv->used > 0)
-		xfs_rmap_alloc_extent(sc->tp, pag->pag_agno, resv->agbno,
-				resv->used, XFS_RMAP_OWN_AG);
+		xfs_rmap_alloc_extent(sc->tp, false,
+				xfs_agbno_to_fsb(pag, resv->agbno), resv->used,
+				XFS_RMAP_OWN_AG);
 
 	/*
 	 * For each reserved btree block we didn't use, add it to the free
@@ -554,8 +554,8 @@ xrep_abt_dispose_one(
 	if (free_aglen == 0)
 		return 0;
 
-	trace_xrep_newbt_free_blocks(sc->mp, resv->pag->pag_agno, free_agbno,
-			free_aglen, ra->new_bnobt.oinfo.oi_owner);
+	trace_xrep_newbt_free_blocks(resv->pag, free_agbno, free_aglen,
+			ra->new_bnobt.oinfo.oi_owner);
 
 	error = __xfs_free_extent(sc->tp, resv->pag, free_agbno, free_aglen,
 			&ra->new_bnobt.oinfo, XFS_AG_RESV_IGNORE, true);
@@ -687,8 +687,8 @@ xrep_abt_reset_counters(
 	 * height values before re-initializing the perag info from the updated
 	 * AGF to capture all the new values.
 	 */
-	pag->pagf_repair_levels[XFS_BTNUM_BNOi] = pag->pagf_levels[XFS_BTNUM_BNOi];
-	pag->pagf_repair_levels[XFS_BTNUM_CNTi] = pag->pagf_levels[XFS_BTNUM_CNTi];
+	pag->pagf_repair_bno_level = pag->pagf_bno_level;
+	pag->pagf_repair_cnt_level = pag->pagf_cnt_level;
 
 	/* Reinitialize with the values we just logged. */
 	return xrep_reinit_pagf(sc);
@@ -735,10 +735,11 @@ xrep_abt_build_new_trees(
 	ra->new_cntbt.bload.claim_block = xrep_abt_claim_block;
 
 	/* Allocate cursors for the staged btrees. */
-	bno_cur = xfs_allocbt_stage_cursor(sc->mp, &ra->new_bnobt.afake,
-			pag, XFS_BTNUM_BNO);
-	cnt_cur = xfs_allocbt_stage_cursor(sc->mp, &ra->new_cntbt.afake,
-			pag, XFS_BTNUM_CNT);
+	bno_cur = xfs_bnobt_init_cursor(sc->mp, NULL, NULL, pag);
+	xfs_btree_stage_afakeroot(bno_cur, &ra->new_bnobt.afake);
+
+	cnt_cur = xfs_cntbt_init_cursor(sc->mp, NULL, NULL, pag);
+	xfs_btree_stage_afakeroot(cnt_cur, &ra->new_cntbt.afake);
 
 	/* Last chance to abort before we start committing fixes. */
 	if (xchk_should_terminate(sc, &error))
@@ -765,10 +766,8 @@ xrep_abt_build_new_trees(
 	 * height so that we don't trip the verifiers when writing the new
 	 * btree blocks to disk.
 	 */
-	pag->pagf_repair_levels[XFS_BTNUM_BNOi] =
-					ra->new_bnobt.bload.btree_height;
-	pag->pagf_repair_levels[XFS_BTNUM_CNTi] =
-					ra->new_cntbt.bload.btree_height;
+	pag->pagf_repair_bno_level = ra->new_bnobt.bload.btree_height;
+	pag->pagf_repair_cnt_level = ra->new_cntbt.bload.btree_height;
 
 	/* Load the free space by length tree. */
 	ra->array_cur = XFARRAY_CURSOR_INIT;
@@ -779,7 +778,7 @@ xrep_abt_build_new_trees(
 
 	error = xrep_bnobt_sort_records(ra);
 	if (error)
-		return error;
+		goto err_levels;
 
 	/* Load the free space by block number tree. */
 	ra->array_cur = XFARRAY_CURSOR_INIT;
@@ -807,8 +806,8 @@ xrep_abt_build_new_trees(
 	return xrep_roll_ag_trans(sc);
 
 err_levels:
-	pag->pagf_repair_levels[XFS_BTNUM_BNOi] = 0;
-	pag->pagf_repair_levels[XFS_BTNUM_CNTi] = 0;
+	pag->pagf_repair_bno_level = 0;
+	pag->pagf_repair_cnt_level = 0;
 err_cur:
 	xfs_btree_del_cursor(cnt_cur, error);
 	xfs_btree_del_cursor(bno_cur, error);
@@ -838,8 +837,8 @@ xrep_abt_remove_old_trees(
 	 * Now that we've zapped all the old allocbt blocks we can turn off
 	 * the alternate height mechanism.
 	 */
-	pag->pagf_repair_levels[XFS_BTNUM_BNOi] = 0;
-	pag->pagf_repair_levels[XFS_BTNUM_CNTi] = 0;
+	pag->pagf_repair_bno_level = 0;
+	pag->pagf_repair_cnt_level = 0;
 	return 0;
 }
 
@@ -850,6 +849,7 @@ xrep_allocbt(
 {
 	struct xrep_abt		*ra;
 	struct xfs_mount	*mp = sc->mp;
+	unsigned int		busy_gen;
 	char			*descr;
 	int			error;
 
@@ -870,7 +870,7 @@ xrep_allocbt(
 	 * on there twice.  In theory we cleared this before we started, but
 	 * let's not risk the filesystem.
 	 */
-	if (!xfs_extent_busy_list_empty(sc->sa.pag)) {
+	if (!xfs_extent_busy_list_empty(pag_group(sc->sa.pag), &busy_gen)) {
 		error = -EDEADLOCK;
 		goto out_ra;
 	}

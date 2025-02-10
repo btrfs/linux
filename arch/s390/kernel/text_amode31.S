@@ -18,8 +18,7 @@
  * affects a few functions that are not performance-relevant.
  */
 	.macro BR_EX_AMODE31_r14
-	larl	%r1,0f
-	ex	0,0(%r1)
+	exrl	0,0f
 	j	.
 0:	br	%r14
 	.endm
@@ -90,7 +89,7 @@ SYM_FUNC_START(_diag26c_amode31)
 SYM_FUNC_END(_diag26c_amode31)
 
 /*
- * void _diag0c_amode31(struct hypfs_diag0c_entry *entry)
+ * void _diag0c_amode31(unsigned long rx)
  */
 SYM_FUNC_START(_diag0c_amode31)
 	sam31

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 #define _GNU_SOURCE
+#define __SANE_USERSPACE_TYPES__ // Use ll64
 
 #include <inttypes.h>
 #include <unistd.h>
@@ -10,35 +11,13 @@
 #include <linux/mount.h>
 #include <sys/syscall.h>
 #include <sys/stat.h>
-#include <sys/mount.h>
 #include <sys/mman.h>
 #include <sched.h>
 #include <fcntl.h>
 
 #include "../../kselftest.h"
 #include "log.h"
-
-static int sys_fsopen(const char *fsname, unsigned int flags)
-{
-	return syscall(__NR_fsopen, fsname, flags);
-}
-
-static int sys_fsconfig(int fd, unsigned int cmd, const char *key, const char *value, int aux)
-{
-	return syscall(__NR_fsconfig, fd, cmd, key, value, aux);
-}
-
-static int sys_fsmount(int fd, unsigned int flags, unsigned int attr_flags)
-{
-	return syscall(__NR_fsmount, fd, flags, attr_flags);
-}
-
-static int sys_move_mount(int from_dfd, const char *from_pathname,
-			  int to_dfd, const char *to_pathname,
-			  unsigned int flags)
-{
-	return syscall(__NR_move_mount, from_dfd, from_pathname, to_dfd, to_pathname, flags);
-}
+#include "wrappers.h"
 
 static long get_file_dev_and_inode(void *addr, struct statx *stx)
 {
@@ -166,8 +145,7 @@ int main(int argc, char **argv)
 		ksft_test_result_skip("unable to create a new mount namespace\n");
 		return 1;
 	}
-
-	if (mount(NULL, "/", NULL, MS_SLAVE | MS_REC, NULL) == -1) {
+	if (sys_mount(NULL, "/", NULL, MS_SLAVE | MS_REC, NULL) == -1) {
 		pr_perror("mount");
 		return 1;
 	}
