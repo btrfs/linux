@@ -20,7 +20,7 @@ static unsigned int mhi_timeout_ms = 2000; /* 2 sec default */
 module_param(mhi_timeout_ms, uint, 0600);
 MODULE_PARM_DESC(mhi_timeout_ms, "MHI controller timeout value");
 
-static struct mhi_channel_config aic100_channels[] = {
+static const struct mhi_channel_config aic100_channels[] = {
 	{
 		.name = "QAIC_LOOPBACK",
 		.num = 0,
@@ -358,8 +358,8 @@ static struct mhi_channel_config aic100_channels[] = {
 		.wake_capable = false,
 	},
 	{
-		.num = 21,
 		.name = "QAIC_TIMESYNC",
+		.num = 21,
 		.num_elements = 32,
 		.local_elements = 0,
 		.event_ring = 0,
@@ -390,8 +390,8 @@ static struct mhi_channel_config aic100_channels[] = {
 		.wake_capable = false,
 	},
 	{
-		.num = 23,
 		.name = "QAIC_TIMESYNC_PERIODIC",
+		.num = 23,
 		.num_elements = 32,
 		.local_elements = 0,
 		.event_ring = 0,
@@ -403,6 +403,38 @@ static struct mhi_channel_config aic100_channels[] = {
 		.offload_channel = false,
 		.doorbell_mode_switch = false,
 		.auto_queue = false,
+		.wake_capable = false,
+	},
+	{
+		.name = "IPCR",
+		.num = 24,
+		.num_elements = 32,
+		.local_elements = 0,
+		.event_ring = 0,
+		.dir = DMA_TO_DEVICE,
+		.ee_mask = MHI_CH_EE_AMSS,
+		.pollcfg = 0,
+		.doorbell = MHI_DB_BRST_DISABLE,
+		.lpm_notify = false,
+		.offload_channel = false,
+		.doorbell_mode_switch = false,
+		.auto_queue = false,
+		.wake_capable = false,
+	},
+	{
+		.name = "IPCR",
+		.num = 25,
+		.num_elements = 32,
+		.local_elements = 0,
+		.event_ring = 0,
+		.dir = DMA_FROM_DEVICE,
+		.ee_mask = MHI_CH_EE_AMSS,
+		.pollcfg = 0,
+		.doorbell = MHI_DB_BRST_DISABLE,
+		.lpm_notify = false,
+		.offload_channel = false,
+		.doorbell_mode_switch = false,
+		.auto_queue = true,
 		.wake_capable = false,
 	},
 };

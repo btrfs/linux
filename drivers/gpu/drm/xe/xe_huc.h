@@ -6,9 +6,10 @@
 #ifndef _XE_HUC_H_
 #define _XE_HUC_H_
 
-#include "xe_huc_types.h"
+#include <linux/types.h>
 
 struct drm_printer;
+struct xe_huc;
 
 enum xe_huc_auth_types {
 	XE_HUC_AUTH_VIA_GUC = 0,
@@ -17,6 +18,7 @@ enum xe_huc_auth_types {
 };
 
 int xe_huc_init(struct xe_huc *huc);
+int xe_huc_init_post_hwconfig(struct xe_huc *huc);
 int xe_huc_upload(struct xe_huc *huc);
 int xe_huc_auth(struct xe_huc *huc, enum xe_huc_auth_types type);
 bool xe_huc_is_authenticated(struct xe_huc *huc, enum xe_huc_auth_types type);

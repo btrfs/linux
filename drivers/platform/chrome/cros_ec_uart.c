@@ -81,8 +81,8 @@ struct cros_ec_uart {
 	struct response_info response;
 };
 
-static ssize_t cros_ec_uart_rx_bytes(struct serdev_device *serdev,
-				     const u8 *data, size_t count)
+static size_t cros_ec_uart_rx_bytes(struct serdev_device *serdev,
+				    const u8 *data, size_t count)
 {
 	struct ec_host_response *host_response;
 	struct cros_ec_device *ec_dev = serdev_device_get_drvdata(serdev);
@@ -263,12 +263,6 @@ static int cros_ec_uart_probe(struct serdev_device *serdev)
 	if (!ec_dev)
 		return -ENOMEM;
 
-	ret = devm_serdev_device_open(dev, serdev);
-	if (ret) {
-		dev_err(dev, "Unable to open UART device");
-		return ret;
-	}
-
 	serdev_device_set_drvdata(serdev, ec_dev);
 	init_waitqueue_head(&ec_uart->response.wait_queue);
 
@@ -280,14 +274,6 @@ static int cros_ec_uart_probe(struct serdev_device *serdev)
 		return ret;
 	}
 
-	ret = serdev_device_set_baudrate(serdev, ec_uart->baudrate);
-	if (ret < 0) {
-		dev_err(dev, "Failed to set up host baud rate (%d)", ret);
-		return ret;
-	}
-
-	serdev_device_set_flow_control(serdev, ec_uart->flowcontrol);
-
 	/* Initialize ec_dev for cros_ec  */
 	ec_dev->phys_name = dev_name(dev);
 	ec_dev->dev = dev;
@@ -297,9 +283,23 @@ static int cros_ec_uart_probe(struct serdev_device *serdev)
 	ec_dev->pkt_xfer = cros_ec_uart_pkt_xfer;
 	ec_dev->din_size = sizeof(struct ec_host_response) +
 			   sizeof(struct ec_response_get_protocol_info);
-	ec_dev->dout_size = sizeof(struct ec_host_request);
+	ec_dev->dout_size = sizeof(struct ec_host_request) + sizeof(struct ec_params_rwsig_action);
 
 	serdev_device_set_client_ops(serdev, &cros_ec_uart_client_ops);
+
+	ret = devm_serdev_device_open(dev, serdev);
+	if (ret) {
+		dev_err(dev, "Unable to open UART device");
+		return ret;
+	}
+
+	ret = serdev_device_set_baudrate(serdev, ec_uart->baudrate);
+	if (ret < 0) {
+		dev_err(dev, "Failed to set up host baud rate (%d)", ret);
+		return ret;
+	}
+
+	serdev_device_set_flow_control(serdev, ec_uart->flowcontrol);
 
 	return cros_ec_register(ec_dev);
 }

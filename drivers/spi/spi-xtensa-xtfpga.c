@@ -93,7 +93,7 @@ static int xtfpga_spi_probe(struct platform_device *pdev)
 	host->dev.of_node = pdev->dev.of_node;
 
 	xspi = spi_controller_get_devdata(host);
-	xspi->bitbang.master = host;
+	xspi->bitbang.ctlr = host;
 	xspi->bitbang.chipselect = xtfpga_spi_chipselect;
 	xspi->bitbang.txrx_word[SPI_MODE_0] = xtfpga_spi_txrx_word;
 	xspi->regs = devm_platform_ioremap_resource(pdev, 0);
@@ -138,7 +138,7 @@ MODULE_DEVICE_TABLE(of, xtfpga_spi_of_match);
 
 static struct platform_driver xtfpga_spi_driver = {
 	.probe = xtfpga_spi_probe,
-	.remove_new = xtfpga_spi_remove,
+	.remove = xtfpga_spi_remove,
 	.driver = {
 		.name = XTFPGA_SPI_NAME,
 		.of_match_table = of_match_ptr(xtfpga_spi_of_match),

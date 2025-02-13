@@ -42,9 +42,8 @@ static int hl_debugfs_i2c_read(struct hl_device *hdev, u8 i2c_bus, u8 i2c_addr,
 	pkt.i2c_reg = i2c_reg;
 	pkt.i2c_len = i2c_len;
 
-	rc = hdev->asic_funcs->send_cpu_message(hdev, (u32 *) &pkt, sizeof(pkt),
-						0, val);
-	if (rc)
+	rc = hdev->asic_funcs->send_cpu_message(hdev, (u32 *) &pkt, sizeof(pkt), 0, val);
+	if (rc && rc != -EAGAIN)
 		dev_err(hdev->dev, "Failed to read from I2C, error %d\n", rc);
 
 	return rc;
@@ -75,10 +74,8 @@ static int hl_debugfs_i2c_write(struct hl_device *hdev, u8 i2c_bus, u8 i2c_addr,
 	pkt.i2c_len = i2c_len;
 	pkt.value = cpu_to_le64(val);
 
-	rc = hdev->asic_funcs->send_cpu_message(hdev, (u32 *) &pkt, sizeof(pkt),
-						0, NULL);
-
-	if (rc)
+	rc = hdev->asic_funcs->send_cpu_message(hdev, (u32 *) &pkt, sizeof(pkt), 0, NULL);
+	if (rc && rc != -EAGAIN)
 		dev_err(hdev->dev, "Failed to write to I2C, error %d\n", rc);
 
 	return rc;
@@ -99,10 +96,8 @@ static void hl_debugfs_led_set(struct hl_device *hdev, u8 led, u8 state)
 	pkt.led_index = cpu_to_le32(led);
 	pkt.value = cpu_to_le64(state);
 
-	rc = hdev->asic_funcs->send_cpu_message(hdev, (u32 *) &pkt, sizeof(pkt),
-						0, NULL);
-
-	if (rc)
+	rc = hdev->asic_funcs->send_cpu_message(hdev, (u32 *) &pkt, sizeof(pkt), 0, NULL);
+	if (rc && rc != -EAGAIN)
 		dev_err(hdev->dev, "Failed to set LED %d, error %d\n", led, rc);
 }
 
@@ -484,7 +479,7 @@ static ssize_t mmu_asid_va_write(struct file *file, const char __user *buf,
 	struct hl_debugfs_entry *entry = s->private;
 	struct hl_dbg_device_entry *dev_entry = entry->dev_entry;
 	struct hl_device *hdev = dev_entry->hdev;
-	char kbuf[MMU_KBUF_SIZE];
+	char kbuf[MMU_KBUF_SIZE] = {0};
 	char *c;
 	ssize_t rc;
 
@@ -546,7 +541,7 @@ static ssize_t mmu_ack_error_value_write(struct file *file,
 	struct hl_debugfs_entry *entry = s->private;
 	struct hl_dbg_device_entry *dev_entry = entry->dev_entry;
 	struct hl_device *hdev = dev_entry->hdev;
-	char kbuf[MMU_KBUF_SIZE];
+	char kbuf[MMU_KBUF_SIZE] = {0};
 	ssize_t rc;
 
 	if (count > sizeof(kbuf) - 1)
@@ -1643,19 +1638,19 @@ static void add_files_to_device(struct hl_device *hdev, struct hl_dbg_device_ent
 				&hl_data64b_fops);
 
 	debugfs_create_file("set_power_state",
-				0200,
+				0644,
 				root,
 				dev_entry,
 				&hl_power_fops);
 
 	debugfs_create_file("device",
-				0200,
+				0644,
 				root,
 				dev_entry,
 				&hl_device_fops);
 
 	debugfs_create_file("clk_gate",
-				0200,
+				0644,
 				root,
 				dev_entry,
 				&hl_clk_gate_fops);
@@ -1667,13 +1662,13 @@ static void add_files_to_device(struct hl_device *hdev, struct hl_dbg_device_ent
 				&hl_stop_on_err_fops);
 
 	debugfs_create_file("dump_security_violations",
-				0644,
+				0400,
 				root,
 				dev_entry,
 				&hl_security_violations_fops);
 
 	debugfs_create_file("dump_razwi_events",
-				0644,
+				0400,
 				root,
 				dev_entry,
 				&hl_razwi_check_fops);
@@ -1706,7 +1701,7 @@ static void add_files_to_device(struct hl_device *hdev, struct hl_dbg_device_ent
 				&hdev->reset_info.skip_reset_on_timeout);
 
 	debugfs_create_file("state_dump",
-				0600,
+				0644,
 				root,
 				dev_entry,
 				&hl_state_dump_fops);
@@ -1722,9 +1717,14 @@ static void add_files_to_device(struct hl_device *hdev, struct hl_dbg_device_ent
 				root,
 				&hdev->device_release_watchdog_timeout_sec);
 
+	debugfs_create_u16("server_type",
+				0444,
+				root,
+				&hdev->asic_prop.server_type);
+
 	for (i = 0, entry = dev_entry->entry_arr ; i < count ; i++, entry++) {
 		debugfs_create_file(hl_debugfs_list[i].name,
-					0444,
+					0644,
 					root,
 					entry,
 					&hl_debugfs_fops);

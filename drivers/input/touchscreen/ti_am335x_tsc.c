@@ -157,7 +157,6 @@ static void titsc_step_config(struct titsc *ts_dev)
 			     n++ == 0 ? STEPCONFIG_OPENDLY : 0);
 	}
 
-	config = 0;
 	config = STEPCONFIG_MODE_HWSYNC |
 			STEPCONFIG_AVG_16 | ts_dev->bit_yn |
 			STEPCONFIG_INM_ADCREFM;
@@ -551,9 +550,9 @@ MODULE_DEVICE_TABLE(of, ti_tsc_dt_ids);
 
 static struct platform_driver ti_tsc_driver = {
 	.probe	= titsc_probe,
-	.remove_new = titsc_remove,
+	.remove	= titsc_remove,
 	.driver	= {
-		.name   = "TI-am335x-tsc",
+		.name	= "TI-am335x-tsc",
 		.pm	= pm_sleep_ptr(&titsc_pm_ops),
 		.of_match_table = ti_tsc_dt_ids,
 	},

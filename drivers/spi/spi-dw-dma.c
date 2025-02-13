@@ -577,7 +577,7 @@ static int dw_spi_dma_transfer_one(struct dw_spi *dws,
 	sg_init_table(&tx_tmp, 1);
 	sg_init_table(&rx_tmp, 1);
 
-	for (base = 0, len = 0; base < xfer->len; base += len) {
+	for (base = 0; base < xfer->len; base += len) {
 		/* Fetch next Tx DMA data chunk */
 		if (!tx_len) {
 			tx_sg = !tx_sg ? &xfer->tx_sg.sgl[0] : sg_next(tx_sg);
@@ -693,7 +693,7 @@ void dw_spi_dma_setup_mfld(struct dw_spi *dws)
 {
 	dws->dma_ops = &dw_spi_dma_mfld_ops;
 }
-EXPORT_SYMBOL_NS_GPL(dw_spi_dma_setup_mfld, SPI_DW_CORE);
+EXPORT_SYMBOL_NS_GPL(dw_spi_dma_setup_mfld, "SPI_DW_CORE");
 
 static const struct dw_spi_dma_ops dw_spi_dma_generic_ops = {
 	.dma_init	= dw_spi_dma_init_generic,
@@ -708,4 +708,4 @@ void dw_spi_dma_setup_generic(struct dw_spi *dws)
 {
 	dws->dma_ops = &dw_spi_dma_generic_ops;
 }
-EXPORT_SYMBOL_NS_GPL(dw_spi_dma_setup_generic, SPI_DW_CORE);
+EXPORT_SYMBOL_NS_GPL(dw_spi_dma_setup_generic, "SPI_DW_CORE");

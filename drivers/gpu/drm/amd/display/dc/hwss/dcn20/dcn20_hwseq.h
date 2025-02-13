@@ -28,6 +28,8 @@
 
 #include "hw_sequencer_private.h"
 
+void dcn20_log_color_state(struct dc *dc,
+			   struct dc_log_buffer_ctx *log_ctx);
 bool dcn20_set_blend_lut(
 	struct pipe_ctx *pipe_ctx, const struct dc_plane_state *plane_state);
 bool dcn20_set_shaper_3dlut(
@@ -84,6 +86,10 @@ enum dc_status dcn20_enable_stream_timing(
 void dcn20_disable_stream_gating(struct dc *dc, struct pipe_ctx *pipe_ctx);
 void dcn20_enable_stream_gating(struct dc *dc, struct pipe_ctx *pipe_ctx);
 void dcn20_setup_vupdate_interrupt(struct dc *dc, struct pipe_ctx *pipe_ctx);
+void dcn20_reset_back_end_for_pipe(
+		struct dc *dc,
+		struct pipe_ctx *pipe_ctx,
+		struct dc_state *context);
 void dcn20_init_blank(
 		struct dc *dc,
 		struct timing_generator *tg);
@@ -148,6 +154,21 @@ void dcn20_setup_gsl_group_as_lock(
 		const struct dc *dc,
 		struct pipe_ctx *pipe_ctx,
 		bool enable);
-
+void dcn20_detect_pipe_changes(
+		struct dc_state *old_state,
+		struct dc_state *new_state,
+		struct pipe_ctx *old_pipe,
+		struct pipe_ctx *new_pipe);
+void dcn20_enable_plane(
+		struct dc *dc,
+		struct pipe_ctx *pipe_ctx,
+		struct dc_state *context);
+void dcn20_update_dchubp_dpp(
+		struct dc *dc,
+		struct pipe_ctx *pipe_ctx,
+		struct dc_state *context);
+void dcn20_post_unlock_reset_opp(
+		struct dc *dc,
+		struct pipe_ctx *opp_head);
 #endif /* __DC_HWSS_DCN20_H__ */
 

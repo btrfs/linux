@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Copyright (C) 2016 Chris Zhong <zyw@rock-chips.com>
- * Copyright (C) 2016 ROCKCHIP, Inc.
+ * Copyright (C) Rockchip Electronics Co., Ltd.
  */
 
 #ifndef _CDN_DP_CORE_H
@@ -70,7 +70,7 @@ struct cdn_dp_device {
 	struct drm_display_mode mode;
 	struct platform_device *audio_pdev;
 	struct work_struct event_work;
-	struct edid *edid;
+	const struct drm_edid *drm_edid;
 
 	struct mutex lock;
 	bool connected;

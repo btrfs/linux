@@ -23,8 +23,9 @@
 #include <linux/serial.h>
 #include <linux/tty.h>
 #include <linux/tty_flip.h>
-
 #include <linux/io.h>
+
+#include <asm/txx9/generic.h>
 
 #define PASS_LIMIT	256
 
@@ -1096,7 +1097,7 @@ static int serial_txx9_resume(struct platform_device *dev)
 
 static struct platform_driver serial_txx9_plat_driver = {
 	.probe		= serial_txx9_probe,
-	.remove_new	= serial_txx9_remove,
+	.remove		= serial_txx9_remove,
 #ifdef CONFIG_PM
 	.suspend	= serial_txx9_suspend,
 	.resume		= serial_txx9_resume,

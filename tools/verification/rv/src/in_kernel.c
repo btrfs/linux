@@ -210,9 +210,9 @@ static char *ikm_read_reactor(char *monitor_name)
 static char *ikm_get_current_reactor(char *monitor_name)
 {
 	char *reactors = ikm_read_reactor(monitor_name);
+	char *curr_reactor = NULL;
 	char *start;
 	char *end;
-	char *curr_reactor;
 
 	if (!reactors)
 		return NULL;
@@ -332,7 +332,7 @@ static void ikm_print_header(struct trace_seq *s)
  * ikm_event_handler - callback to handle event events
  *
  * Called any time a rv:"monitor"_event events is generated.
- * It parses and print event.
+ * It parses and prints event.
  */
 static int
 ikm_event_handler(struct trace_seq *s, struct tep_record *record,
@@ -384,7 +384,7 @@ ikm_event_handler(struct trace_seq *s, struct tep_record *record,
  * ikm_error_handler - callback to handle error events
  *
  * Called any time a rv:"monitor"_errors events is generated.
- * It parses and print event.
+ * It parses and prints event.
  */
 static int
 ikm_error_handler(struct trace_seq *s, struct tep_record *record,

@@ -13,6 +13,7 @@
 #include <generated/utsrelease.h>
 #include <linux/pci.h>
 #include <linux/of.h>
+#include <linux/seq_file.h>
 #include <asm/dma.h>
 #include <asm/time.h>
 #include <asm/machdep.h>
@@ -195,8 +196,10 @@ static void __init efika_setup_arch(void)
 
 static int __init efika_probe(void)
 {
-	const char *model = of_get_property(of_root, "model", NULL);
+	struct device_node *root = of_find_node_by_path("/");
+	const char *model = of_get_property(root, "model", NULL);
 
+	of_node_put(root);
 	if (model == NULL)
 		return 0;
 	if (strcmp(model, "EFIKA5K2"))

@@ -7,7 +7,7 @@
 #include <linux/memblock.h>
 #include <linux/sched/task.h>
 #include <asm/pgalloc.h>
-#include <asm/code-patching.h>
+#include <asm/text-patching.h>
 #include <mm/mmu_decl.h>
 
 static pgprot_t __init kasan_prot_ro(void)
@@ -64,6 +64,7 @@ int __init __weak kasan_init_region(void *start, size_t size)
 	if (ret)
 		return ret;
 
+	k_start = k_start & PAGE_MASK;
 	block = memblock_alloc(k_end - k_start, PAGE_SIZE);
 	if (!block)
 		return -ENOMEM;

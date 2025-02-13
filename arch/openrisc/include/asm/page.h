@@ -15,16 +15,7 @@
 #ifndef __ASM_OPENRISC_PAGE_H
 #define __ASM_OPENRISC_PAGE_H
 
-
-/* PAGE_SHIFT determines the page size */
-
-#define PAGE_SHIFT      13
-#ifdef __ASSEMBLY__
-#define PAGE_SIZE       (1 << PAGE_SHIFT)
-#else
-#define PAGE_SIZE       (1UL << PAGE_SHIFT)
-#endif
-#define PAGE_MASK       (~(PAGE_SIZE-1))
+#include <vdso/page.h>
 
 #define PAGE_OFFSET	0xc0000000
 #define KERNELBASE	PAGE_OFFSET
@@ -77,15 +68,8 @@ static inline unsigned long virt_to_pfn(const void *kaddr)
 	return __pa(kaddr) >> PAGE_SHIFT;
 }
 
-static inline void * pfn_to_virt(unsigned long pfn)
-{
-	return (void *)((unsigned long)__va(pfn) << PAGE_SHIFT);
-}
-
 #define virt_to_page(addr) \
 	(mem_map + (((unsigned long)(addr)-PAGE_OFFSET) >> PAGE_SHIFT))
-
-#define page_to_phys(page)      ((dma_addr_t)page_to_pfn(page) << PAGE_SHIFT)
 
 #define virt_addr_valid(kaddr)	(pfn_valid(virt_to_pfn(kaddr)))
 

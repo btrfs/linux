@@ -470,7 +470,7 @@ static int simplefb_attach_genpds(struct simplefb_par *par,
 		if (err == -ENOENT)
 			return 0;
 
-		dev_info(dev, "failed to parse power-domains: %d\n", err);
+		dev_err(dev, "failed to parse power-domains: %d\n", err);
 		return err;
 	}
 
@@ -677,7 +677,7 @@ static struct platform_driver simplefb_driver = {
 		.of_match_table = simplefb_of_match,
 	},
 	.probe = simplefb_probe,
-	.remove_new = simplefb_remove,
+	.remove = simplefb_remove,
 };
 
 module_platform_driver(simplefb_driver);

@@ -53,13 +53,15 @@ struct in_device {
 };
 
 #define IPV4_DEVCONF(cnf, attr) ((cnf).data[IPV4_DEVCONF_ ## attr - 1])
+#define IPV4_DEVCONF_RO(cnf, attr) READ_ONCE(IPV4_DEVCONF(cnf, attr))
 #define IPV4_DEVCONF_ALL(net, attr) \
 	IPV4_DEVCONF((*(net)->ipv4.devconf_all), attr)
+#define IPV4_DEVCONF_ALL_RO(net, attr) READ_ONCE(IPV4_DEVCONF_ALL(net, attr))
 
-static inline int ipv4_devconf_get(struct in_device *in_dev, int index)
+static inline int ipv4_devconf_get(const struct in_device *in_dev, int index)
 {
 	index--;
-	return in_dev->cnf.data[index];
+	return READ_ONCE(in_dev->cnf.data[index]);
 }
 
 static inline void ipv4_devconf_set(struct in_device *in_dev, int index,
@@ -67,7 +69,7 @@ static inline void ipv4_devconf_set(struct in_device *in_dev, int index,
 {
 	index--;
 	set_bit(index, in_dev->cnf.state);
-	in_dev->cnf.data[index] = val;
+	WRITE_ONCE(in_dev->cnf.data[index], val);
 }
 
 static inline void ipv4_devconf_setall(struct in_device *in_dev)
@@ -81,18 +83,18 @@ static inline void ipv4_devconf_setall(struct in_device *in_dev)
 	ipv4_devconf_set((in_dev), IPV4_DEVCONF_ ## attr, (val))
 
 #define IN_DEV_ANDCONF(in_dev, attr) \
-	(IPV4_DEVCONF_ALL(dev_net(in_dev->dev), attr) && \
+	(IPV4_DEVCONF_ALL_RO(dev_net(in_dev->dev), attr) && \
 	 IN_DEV_CONF_GET((in_dev), attr))
 
 #define IN_DEV_NET_ORCONF(in_dev, net, attr) \
-	(IPV4_DEVCONF_ALL(net, attr) || \
+	(IPV4_DEVCONF_ALL_RO(net, attr) || \
 	 IN_DEV_CONF_GET((in_dev), attr))
 
 #define IN_DEV_ORCONF(in_dev, attr) \
 	IN_DEV_NET_ORCONF(in_dev, dev_net(in_dev->dev), attr)
 
 #define IN_DEV_MAXCONF(in_dev, attr) \
-	(max(IPV4_DEVCONF_ALL(dev_net(in_dev->dev), attr), \
+	(max(IPV4_DEVCONF_ALL_RO(dev_net(in_dev->dev), attr), \
 	     IN_DEV_CONF_GET((in_dev), attr)))
 
 #define IN_DEV_FORWARD(in_dev)		IN_DEV_CONF_GET((in_dev), FORWARDING)
@@ -139,7 +141,7 @@ static inline void ipv4_devconf_setall(struct in_device *in_dev)
 							  ARP_EVICT_NOCARRIER)
 
 struct in_ifaddr {
-	struct hlist_node	hash;
+	struct hlist_node	addr_lst;
 	struct in_ifaddr	__rcu *ifa_next;
 	struct in_device	*ifa_dev;
 	struct rcu_head		rcu_head;
@@ -224,6 +226,10 @@ static __inline__ bool bad_mask(__be32 mask, __be32 addr)
 	for (ifa = rtnl_dereference((in_dev)->ifa_list); ifa;	\
 	     ifa = rtnl_dereference(ifa->ifa_next))
 
+#define in_dev_for_each_ifa_rtnl_net(net, ifa, in_dev)			\
+	for (ifa = rtnl_net_dereference(net, (in_dev)->ifa_list); ifa;	\
+	     ifa = rtnl_net_dereference(net, ifa->ifa_next))
+
 #define in_dev_for_each_ifa_rcu(ifa, in_dev)			\
 	for (ifa = rcu_dereference((in_dev)->ifa_list); ifa;	\
 	     ifa = rcu_dereference(ifa->ifa_next))
@@ -248,6 +254,11 @@ static inline struct in_device *in_dev_get(const struct net_device *dev)
 static inline struct in_device *__in_dev_get_rtnl(const struct net_device *dev)
 {
 	return rtnl_dereference(dev->ip_ptr);
+}
+
+static inline struct in_device *__in_dev_get_rtnl_net(const struct net_device *dev)
+{
+	return rtnl_net_dereference(dev_net(dev), dev->ip_ptr);
 }
 
 /* called with rcu_read_lock or rtnl held */

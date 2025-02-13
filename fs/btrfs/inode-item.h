@@ -6,14 +6,15 @@
 #include <linux/types.h>
 #include <linux/crc32c.h>
 
+struct fscrypt_str;
+struct extent_buffer;
 struct btrfs_trans_handle;
 struct btrfs_root;
 struct btrfs_path;
 struct btrfs_key;
 struct btrfs_inode_extref;
 struct btrfs_inode;
-struct extent_buffer;
-struct fscrypt_str;
+struct btrfs_truncate_control;
 
 /*
  * Return this if we need to call truncate_block for the last bit of the
@@ -108,11 +109,11 @@ struct btrfs_inode_extref *btrfs_lookup_inode_extref(
 			  u64 inode_objectid, u64 ref_objectid, int ins_len,
 			  int cow);
 
-struct btrfs_inode_ref *btrfs_find_name_in_backref(struct extent_buffer *leaf,
+struct btrfs_inode_ref *btrfs_find_name_in_backref(const struct extent_buffer *leaf,
 						   int slot,
 						   const struct fscrypt_str *name);
 struct btrfs_inode_extref *btrfs_find_name_in_ext_backref(
-		struct extent_buffer *leaf, int slot, u64 ref_objectid,
+		const struct extent_buffer *leaf, int slot, u64 ref_objectid,
 		const struct fscrypt_str *name);
 
 #endif

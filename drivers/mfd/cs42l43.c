@@ -6,51 +6,61 @@
  *                         Cirrus Logic International Semiconductor Ltd.
  */
 
+#include <linux/array_size.h>
 #include <linux/bitops.h>
 #include <linux/build_bug.h>
 #include <linux/delay.h>
+#include <linux/device.h>
 #include <linux/err.h>
-#include <linux/errno.h>
 #include <linux/firmware.h>
+#include <linux/gpio/consumer.h>
 #include <linux/jiffies.h>
 #include <linux/mfd/core.h>
+#include <linux/mfd/cs42l43.h>
 #include <linux/mfd/cs42l43-regs.h>
 #include <linux/module.h>
+#include <linux/pm.h>
 #include <linux/pm_runtime.h>
+#include <linux/regmap.h>
 #include <linux/soundwire/sdw.h>
+#include <linux/types.h>
 
 #include "cs42l43.h"
 
-#define CS42L43_RESET_DELAY			20
+#define CS42L43_RESET_DELAY_MS			20
 
-#define CS42L43_SDW_ATTACH_TIMEOUT		500
-#define CS42L43_SDW_DETACH_TIMEOUT		100
+#define CS42L43_SDW_ATTACH_TIMEOUT_MS		5000
+#define CS42L43_SDW_DETACH_TIMEOUT_MS		100
 
 #define CS42L43_MCU_BOOT_STAGE1			1
 #define CS42L43_MCU_BOOT_STAGE2			2
 #define CS42L43_MCU_BOOT_STAGE3			3
 #define CS42L43_MCU_BOOT_STAGE4			4
-#define CS42L43_MCU_POLL			5000
-#define CS42L43_MCU_CMD_TIMEOUT			20000
+#define CS42L43_MCU_POLL_US			5000
+#define CS42L43_MCU_CMD_TIMEOUT_US		20000
 #define CS42L43_MCU_UPDATE_FORMAT		3
 #define CS42L43_MCU_UPDATE_OFFSET		0x100000
-#define CS42L43_MCU_UPDATE_TIMEOUT		500000
+#define CS42L43_MCU_UPDATE_TIMEOUT_US		500000
 #define CS42L43_MCU_UPDATE_RETRIES		5
+
+#define CS42L43_MCU_ROM_REV			0x2001
+#define CS42L43_MCU_ROM_BIOS_REV		0x0000
 
 #define CS42L43_MCU_SUPPORTED_REV		0x2105
 #define CS42L43_MCU_SHADOW_REGS_REQUIRED_REV	0x2200
+#define CS42L43_BIOS_SHADOW_REGS_REQUIRED_REV	0x1002
 #define CS42L43_MCU_SUPPORTED_BIOS_REV		0x0001
 
-#define CS42L43_VDDP_DELAY			50
-#define CS42L43_VDDD_DELAY			1000
+#define CS42L43_VDDP_DELAY_US			50
+#define CS42L43_VDDD_DELAY_US			1000
 
-#define CS42L43_AUTOSUSPEND_TIME		250
+#define CS42L43_AUTOSUSPEND_TIME_MS		250
 
 struct cs42l43_patch_header {
 	__le16 version;
 	__le16 size;
-	u8 reserved;
-	u8 secure;
+	__u8 reserved;
+	__u8 secure;
 	__le16 bss_size;
 	__le32 apply_addr;
 	__le32 checksum;
@@ -84,7 +94,7 @@ const struct reg_default cs42l43_reg_default[CS42L43_N_DEFAULTS] = {
 	{ CS42L43_DRV_CTRL_5,				0x136C00C0 },
 	{ CS42L43_GPIO_CTRL1,				0x00000707 },
 	{ CS42L43_GPIO_CTRL2,				0x00000000 },
-	{ CS42L43_GPIO_FN_SEL,				0x00000000 },
+	{ CS42L43_GPIO_FN_SEL,				0x00000004 },
 	{ CS42L43_MCLK_SRC_SEL,				0x00000000 },
 	{ CS42L43_SAMPLE_RATE1,				0x00000003 },
 	{ CS42L43_SAMPLE_RATE2,				0x00000003 },
@@ -131,38 +141,38 @@ const struct reg_default cs42l43_reg_default[CS42L43_N_DEFAULTS] = {
 	{ CS42L43_ASP_TX_CH4_CTRL,			0x00170091 },
 	{ CS42L43_ASP_TX_CH5_CTRL,			0x001700C1 },
 	{ CS42L43_ASP_TX_CH6_CTRL,			0x001700F1 },
-	{ CS42L43_ASPTX1_INPUT,				0x00800000 },
-	{ CS42L43_ASPTX2_INPUT,				0x00800000 },
-	{ CS42L43_ASPTX3_INPUT,				0x00800000 },
-	{ CS42L43_ASPTX4_INPUT,				0x00800000 },
-	{ CS42L43_ASPTX5_INPUT,				0x00800000 },
-	{ CS42L43_ASPTX6_INPUT,				0x00800000 },
-	{ CS42L43_SWIRE_DP1_CH1_INPUT,			0x00800000 },
-	{ CS42L43_SWIRE_DP1_CH2_INPUT,			0x00800000 },
-	{ CS42L43_SWIRE_DP1_CH3_INPUT,			0x00800000 },
-	{ CS42L43_SWIRE_DP1_CH4_INPUT,			0x00800000 },
-	{ CS42L43_SWIRE_DP2_CH1_INPUT,			0x00800000 },
-	{ CS42L43_SWIRE_DP2_CH2_INPUT,			0x00800000 },
-	{ CS42L43_SWIRE_DP3_CH1_INPUT,			0x00800000 },
-	{ CS42L43_SWIRE_DP3_CH2_INPUT,			0x00800000 },
-	{ CS42L43_SWIRE_DP4_CH1_INPUT,			0x00800000 },
-	{ CS42L43_SWIRE_DP4_CH2_INPUT,			0x00800000 },
-	{ CS42L43_ASRC_INT1_INPUT1,			0x00800000 },
-	{ CS42L43_ASRC_INT2_INPUT1,			0x00800000 },
-	{ CS42L43_ASRC_INT3_INPUT1,			0x00800000 },
-	{ CS42L43_ASRC_INT4_INPUT1,			0x00800000 },
-	{ CS42L43_ASRC_DEC1_INPUT1,			0x00800000 },
-	{ CS42L43_ASRC_DEC2_INPUT1,			0x00800000 },
-	{ CS42L43_ASRC_DEC3_INPUT1,			0x00800000 },
-	{ CS42L43_ASRC_DEC4_INPUT1,			0x00800000 },
-	{ CS42L43_ISRC1INT1_INPUT1,			0x00800000 },
-	{ CS42L43_ISRC1INT2_INPUT1,			0x00800000 },
-	{ CS42L43_ISRC1DEC1_INPUT1,			0x00800000 },
-	{ CS42L43_ISRC1DEC2_INPUT1,			0x00800000 },
-	{ CS42L43_ISRC2INT1_INPUT1,			0x00800000 },
-	{ CS42L43_ISRC2INT2_INPUT1,			0x00800000 },
-	{ CS42L43_ISRC2DEC1_INPUT1,			0x00800000 },
-	{ CS42L43_ISRC2DEC2_INPUT1,			0x00800000 },
+	{ CS42L43_ASPTX1_INPUT,				0x00000000 },
+	{ CS42L43_ASPTX2_INPUT,				0x00000000 },
+	{ CS42L43_ASPTX3_INPUT,				0x00000000 },
+	{ CS42L43_ASPTX4_INPUT,				0x00000000 },
+	{ CS42L43_ASPTX5_INPUT,				0x00000000 },
+	{ CS42L43_ASPTX6_INPUT,				0x00000000 },
+	{ CS42L43_SWIRE_DP1_CH1_INPUT,			0x00000000 },
+	{ CS42L43_SWIRE_DP1_CH2_INPUT,			0x00000000 },
+	{ CS42L43_SWIRE_DP1_CH3_INPUT,			0x00000000 },
+	{ CS42L43_SWIRE_DP1_CH4_INPUT,			0x00000000 },
+	{ CS42L43_SWIRE_DP2_CH1_INPUT,			0x00000000 },
+	{ CS42L43_SWIRE_DP2_CH2_INPUT,			0x00000000 },
+	{ CS42L43_SWIRE_DP3_CH1_INPUT,			0x00000000 },
+	{ CS42L43_SWIRE_DP3_CH2_INPUT,			0x00000000 },
+	{ CS42L43_SWIRE_DP4_CH1_INPUT,			0x00000000 },
+	{ CS42L43_SWIRE_DP4_CH2_INPUT,			0x00000000 },
+	{ CS42L43_ASRC_INT1_INPUT1,			0x00000000 },
+	{ CS42L43_ASRC_INT2_INPUT1,			0x00000000 },
+	{ CS42L43_ASRC_INT3_INPUT1,			0x00000000 },
+	{ CS42L43_ASRC_INT4_INPUT1,			0x00000000 },
+	{ CS42L43_ASRC_DEC1_INPUT1,			0x00000000 },
+	{ CS42L43_ASRC_DEC2_INPUT1,			0x00000000 },
+	{ CS42L43_ASRC_DEC3_INPUT1,			0x00000000 },
+	{ CS42L43_ASRC_DEC4_INPUT1,			0x00000000 },
+	{ CS42L43_ISRC1INT1_INPUT1,			0x00000000 },
+	{ CS42L43_ISRC1INT2_INPUT1,			0x00000000 },
+	{ CS42L43_ISRC1DEC1_INPUT1,			0x00000000 },
+	{ CS42L43_ISRC1DEC2_INPUT1,			0x00000000 },
+	{ CS42L43_ISRC2INT1_INPUT1,			0x00000000 },
+	{ CS42L43_ISRC2INT2_INPUT1,			0x00000000 },
+	{ CS42L43_ISRC2DEC1_INPUT1,			0x00000000 },
+	{ CS42L43_ISRC2DEC2_INPUT1,			0x00000000 },
 	{ CS42L43_EQ1MIX_INPUT1,			0x00800000 },
 	{ CS42L43_EQ1MIX_INPUT2,			0x00800000 },
 	{ CS42L43_EQ1MIX_INPUT3,			0x00800000 },
@@ -171,8 +181,8 @@ const struct reg_default cs42l43_reg_default[CS42L43_N_DEFAULTS] = {
 	{ CS42L43_EQ2MIX_INPUT2,			0x00800000 },
 	{ CS42L43_EQ2MIX_INPUT3,			0x00800000 },
 	{ CS42L43_EQ2MIX_INPUT4,			0x00800000 },
-	{ CS42L43_SPDIF1_INPUT1,			0x00800000 },
-	{ CS42L43_SPDIF2_INPUT1,			0x00800000 },
+	{ CS42L43_SPDIF1_INPUT1,			0x00000000 },
+	{ CS42L43_SPDIF2_INPUT1,			0x00000000 },
 	{ CS42L43_AMP1MIX_INPUT1,			0x00800000 },
 	{ CS42L43_AMP1MIX_INPUT2,			0x00800000 },
 	{ CS42L43_AMP1MIX_INPUT3,			0x00800000 },
@@ -217,7 +227,7 @@ const struct reg_default cs42l43_reg_default[CS42L43_N_DEFAULTS] = {
 	{ CS42L43_CTRL_REG,				0x00000006 },
 	{ CS42L43_FDIV_FRAC,				0x40000000 },
 	{ CS42L43_CAL_RATIO,				0x00000080 },
-	{ CS42L43_SPI_CLK_CONFIG1,			0x00000000 },
+	{ CS42L43_SPI_CLK_CONFIG1,			0x00000001 },
 	{ CS42L43_SPI_CONFIG1,				0x00000000 },
 	{ CS42L43_SPI_CONFIG2,				0x00000000 },
 	{ CS42L43_SPI_CONFIG3,				0x00000001 },
@@ -255,7 +265,7 @@ const struct reg_default cs42l43_reg_default[CS42L43_N_DEFAULTS] = {
 	{ CS42L43_ASRC_MASK,				0x0000000F },
 	{ CS42L43_HPOUT_MASK,				0x00000003 },
 };
-EXPORT_SYMBOL_NS_GPL(cs42l43_reg_default, MFD_CS42L43);
+EXPORT_SYMBOL_NS_GPL(cs42l43_reg_default, "MFD_CS42L43");
 
 bool cs42l43_readable_register(struct device *dev, unsigned int reg)
 {
@@ -383,7 +393,7 @@ bool cs42l43_readable_register(struct device *dev, unsigned int reg)
 		return false;
 	}
 }
-EXPORT_SYMBOL_NS_GPL(cs42l43_readable_register, MFD_CS42L43);
+EXPORT_SYMBOL_NS_GPL(cs42l43_readable_register, "MFD_CS42L43");
 
 bool cs42l43_precious_register(struct device *dev, unsigned int reg)
 {
@@ -398,7 +408,7 @@ bool cs42l43_precious_register(struct device *dev, unsigned int reg)
 		return false;
 	}
 }
-EXPORT_SYMBOL_NS_GPL(cs42l43_precious_register, MFD_CS42L43);
+EXPORT_SYMBOL_NS_GPL(cs42l43_precious_register, "MFD_CS42L43");
 
 bool cs42l43_volatile_register(struct device *dev, unsigned int reg)
 {
@@ -426,7 +436,7 @@ bool cs42l43_volatile_register(struct device *dev, unsigned int reg)
 		return cs42l43_precious_register(dev, reg);
 	}
 }
-EXPORT_SYMBOL_NS_GPL(cs42l43_volatile_register, MFD_CS42L43);
+EXPORT_SYMBOL_NS_GPL(cs42l43_volatile_register, "MFD_CS42L43");
 
 #define CS42L43_IRQ_OFFSET(reg) ((CS42L43_##reg##_INT) - CS42L43_DECIM_INT)
 
@@ -532,10 +542,10 @@ static int cs42l43_soft_reset(struct cs42l43 *cs42l43)
 	regcache_cache_only(cs42l43->regmap, true);
 	regmap_multi_reg_write_bypassed(cs42l43->regmap, reset, ARRAY_SIZE(reset));
 
-	msleep(CS42L43_RESET_DELAY);
+	msleep(CS42L43_RESET_DELAY_MS);
 
 	if (cs42l43->sdw) {
-		unsigned long timeout = msecs_to_jiffies(CS42L43_SDW_DETACH_TIMEOUT);
+		unsigned long timeout = msecs_to_jiffies(CS42L43_SDW_DETACH_TIMEOUT_MS);
 		unsigned long time;
 
 		time = wait_for_completion_timeout(&cs42l43->device_detach, timeout);
@@ -555,7 +565,7 @@ static int cs42l43_soft_reset(struct cs42l43 *cs42l43)
 static int cs42l43_wait_for_attach(struct cs42l43 *cs42l43)
 {
 	if (!cs42l43->attached) {
-		unsigned long timeout = msecs_to_jiffies(CS42L43_SDW_ATTACH_TIMEOUT);
+		unsigned long timeout = msecs_to_jiffies(CS42L43_SDW_ATTACH_TIMEOUT_MS);
 		unsigned long time;
 
 		time = wait_for_completion_timeout(&cs42l43->device_attach, timeout);
@@ -597,7 +607,7 @@ static int cs42l43_mcu_stage_2_3(struct cs42l43 *cs42l43, bool shadow)
 
 	ret = regmap_read_poll_timeout(cs42l43->regmap, CS42L43_BOOT_STATUS,
 				       val, (val == CS42L43_MCU_BOOT_STAGE3),
-				       CS42L43_MCU_POLL, CS42L43_MCU_CMD_TIMEOUT);
+				       CS42L43_MCU_POLL_US, CS42L43_MCU_CMD_TIMEOUT_US);
 	if (ret) {
 		dev_err(cs42l43->dev, "Failed to move to stage 3: %d, 0x%x\n", ret, val);
 		return ret;
@@ -646,7 +656,7 @@ static int cs42l43_mcu_disable(struct cs42l43 *cs42l43)
 
 	ret = regmap_read_poll_timeout(cs42l43->regmap, CS42L43_SOFT_INT_SHADOW, val,
 				       (val & CS42L43_CONTROL_APPLIED_INT_MASK),
-				       CS42L43_MCU_POLL, CS42L43_MCU_CMD_TIMEOUT);
+				       CS42L43_MCU_POLL_US, CS42L43_MCU_CMD_TIMEOUT_US);
 	if (ret) {
 		dev_err(cs42l43->dev, "Failed to disable firmware: %d, 0x%x\n", ret, val);
 		return ret;
@@ -690,7 +700,7 @@ static void cs42l43_mcu_load_firmware(const struct firmware *firmware, void *con
 
 	ret = regmap_read_poll_timeout(cs42l43->regmap, CS42L43_SOFT_INT_SHADOW, val,
 				       (val & CS42L43_PATCH_APPLIED_INT_MASK),
-				       CS42L43_MCU_POLL, CS42L43_MCU_UPDATE_TIMEOUT);
+				       CS42L43_MCU_POLL_US, CS42L43_MCU_UPDATE_TIMEOUT_US);
 	if (ret) {
 		dev_err(cs42l43->dev, "Failed to update firmware: %d, 0x%x\n", ret, val);
 		cs42l43->firmware_error = ret;
@@ -701,6 +711,23 @@ err_release:
 	release_firmware(firmware);
 err:
 	complete(&cs42l43->firmware_download);
+}
+
+static int cs42l43_mcu_is_hw_compatible(struct cs42l43 *cs42l43,
+					unsigned int mcu_rev,
+					unsigned int bios_rev)
+{
+	/*
+	 * The firmware has two revision numbers bringing either of them up to a
+	 * supported version will provide the disable the driver requires.
+	 */
+	if (mcu_rev < CS42L43_MCU_SUPPORTED_REV &&
+	    bios_rev < CS42L43_MCU_SUPPORTED_BIOS_REV) {
+		dev_err(cs42l43->dev, "Firmware too old to support disable\n");
+		return -EINVAL;
+	}
+
+	return 0;
 }
 
 /*
@@ -739,16 +766,16 @@ static int cs42l43_mcu_update_step(struct cs42l43 *cs42l43)
 		  ((mcu_rev & CS42L43_FW_SUBMINOR_REV_MASK) >> 8);
 
 	/*
-	 * The firmware has two revision numbers bringing either of them up to a
-	 * supported version will provide the features the driver requires.
+	 * The firmware has two revision numbers both of them being at the ROM
+	 * revision indicates no patch has been applied.
 	 */
-	patched = mcu_rev >= CS42L43_MCU_SUPPORTED_REV ||
-		  bios_rev >= CS42L43_MCU_SUPPORTED_BIOS_REV;
+	patched = mcu_rev != CS42L43_MCU_ROM_REV || bios_rev != CS42L43_MCU_ROM_BIOS_REV;
 	/*
 	 * Later versions of the firmwware require the driver to access some
 	 * features through a set of shadow registers.
 	 */
-	shadow = mcu_rev >= CS42L43_MCU_SHADOW_REGS_REQUIRED_REV;
+	shadow = (mcu_rev >= CS42L43_MCU_SHADOW_REGS_REQUIRED_REV) ||
+		 (bios_rev >= CS42L43_BIOS_SHADOW_REGS_REQUIRED_REV);
 
 	ret = regmap_read(cs42l43->regmap, CS42L43_BOOT_CONTROL, &secure_cfg);
 	if (ret) {
@@ -788,10 +815,15 @@ static int cs42l43_mcu_update_step(struct cs42l43 *cs42l43)
 			return cs42l43_mcu_stage_2_3(cs42l43, shadow);
 		}
 	case CS42L43_MCU_BOOT_STAGE3:
-		if (patched)
+		if (patched) {
+			ret = cs42l43_mcu_is_hw_compatible(cs42l43, mcu_rev, bios_rev);
+			if (ret)
+				return ret;
+
 			return cs42l43_mcu_disable(cs42l43);
-		else
+		} else {
 			return cs42l43_mcu_stage_3_2(cs42l43);
+		}
 	case CS42L43_MCU_BOOT_STAGE4:
 		return 0;
 	default:
@@ -937,7 +969,6 @@ static void cs42l43_boot_work(struct work_struct *work)
 
 err:
 	pm_runtime_put_sync(cs42l43->dev);
-	cs42l43_dev_remove(cs42l43);
 }
 
 static int cs42l43_power_up(struct cs42l43 *cs42l43)
@@ -951,9 +982,9 @@ static int cs42l43_power_up(struct cs42l43 *cs42l43)
 	}
 
 	/* vdd-p must be on for 50uS before any other supply */
-	usleep_range(CS42L43_VDDP_DELAY, 2 * CS42L43_VDDP_DELAY);
+	usleep_range(CS42L43_VDDP_DELAY_US, 2 * CS42L43_VDDP_DELAY_US);
 
-	gpiod_set_value_cansleep(cs42l43->reset, 1);
+	gpiod_set_raw_value_cansleep(cs42l43->reset, 1);
 
 	ret = regulator_bulk_enable(CS42L43_N_SUPPLIES, cs42l43->core_supplies);
 	if (ret) {
@@ -967,14 +998,14 @@ static int cs42l43_power_up(struct cs42l43 *cs42l43)
 		goto err_core_supplies;
 	}
 
-	usleep_range(CS42L43_VDDD_DELAY, 2 * CS42L43_VDDD_DELAY);
+	usleep_range(CS42L43_VDDD_DELAY_US, 2 * CS42L43_VDDD_DELAY_US);
 
 	return 0;
 
 err_core_supplies:
 	regulator_bulk_disable(CS42L43_N_SUPPLIES, cs42l43->core_supplies);
 err_reset:
-	gpiod_set_value_cansleep(cs42l43->reset, 0);
+	gpiod_set_raw_value_cansleep(cs42l43->reset, 0);
 	regulator_disable(cs42l43->vdd_p);
 
 	return ret;
@@ -996,7 +1027,7 @@ static int cs42l43_power_down(struct cs42l43 *cs42l43)
 		return ret;
 	}
 
-	gpiod_set_value_cansleep(cs42l43->reset, 0);
+	gpiod_set_raw_value_cansleep(cs42l43->reset, 0);
 
 	ret = regulator_disable(cs42l43->vdd_p);
 	if (ret) {
@@ -1005,6 +1036,15 @@ static int cs42l43_power_down(struct cs42l43 *cs42l43)
 	}
 
 	return 0;
+}
+
+static void cs42l43_dev_remove(void *data)
+{
+	struct cs42l43 *cs42l43 = data;
+
+	cancel_work_sync(&cs42l43->boot_work);
+
+	cs42l43_power_down(cs42l43);
 }
 
 int cs42l43_dev_probe(struct cs42l43 *cs42l43)
@@ -1021,10 +1061,12 @@ int cs42l43_dev_probe(struct cs42l43 *cs42l43)
 
 	regcache_cache_only(cs42l43->regmap, true);
 
-	cs42l43->reset = devm_gpiod_get_optional(cs42l43->dev, "reset", GPIOD_OUT_LOW);
+	cs42l43->reset = devm_gpiod_get_optional(cs42l43->dev, "reset", GPIOD_OUT_HIGH);
 	if (IS_ERR(cs42l43->reset))
 		return dev_err_probe(cs42l43->dev, PTR_ERR(cs42l43->reset),
 				     "Failed to get reset\n");
+
+	gpiod_set_raw_value_cansleep(cs42l43->reset, 0);
 
 	cs42l43->vdd_p = devm_regulator_get(cs42l43->dev, "vdd-p");
 	if (IS_ERR(cs42l43->vdd_p))
@@ -1051,7 +1093,11 @@ int cs42l43_dev_probe(struct cs42l43 *cs42l43)
 	if (ret)
 		return ret;
 
-	pm_runtime_set_autosuspend_delay(cs42l43->dev, CS42L43_AUTOSUSPEND_TIME);
+	ret = devm_add_action_or_reset(cs42l43->dev, cs42l43_dev_remove, cs42l43);
+	if (ret)
+		return ret;
+
+	pm_runtime_set_autosuspend_delay(cs42l43->dev, CS42L43_AUTOSUSPEND_TIME_MS);
 	pm_runtime_use_autosuspend(cs42l43->dev);
 	pm_runtime_set_active(cs42l43->dev);
 	/*
@@ -1059,33 +1105,52 @@ int cs42l43_dev_probe(struct cs42l43 *cs42l43)
 	 * the boot work runs.
 	 */
 	pm_runtime_get_noresume(cs42l43->dev);
-	devm_pm_runtime_enable(cs42l43->dev);
+	ret = devm_pm_runtime_enable(cs42l43->dev);
+	if (ret)
+		return ret;
 
 	queue_work(system_long_wq, &cs42l43->boot_work);
 
 	return 0;
 }
-EXPORT_SYMBOL_NS_GPL(cs42l43_dev_probe, MFD_CS42L43);
-
-void cs42l43_dev_remove(struct cs42l43 *cs42l43)
-{
-	cs42l43_power_down(cs42l43);
-}
-EXPORT_SYMBOL_NS_GPL(cs42l43_dev_remove, MFD_CS42L43);
+EXPORT_SYMBOL_NS_GPL(cs42l43_dev_probe, "MFD_CS42L43");
 
 static int cs42l43_suspend(struct device *dev)
 {
 	struct cs42l43 *cs42l43 = dev_get_drvdata(dev);
+	static const struct reg_sequence mask_all[] = {
+		{ CS42L43_DECIM_MASK,			0xFFFFFFFF, },
+		{ CS42L43_EQ_MIX_MASK,			0xFFFFFFFF, },
+		{ CS42L43_ASP_MASK,			0xFFFFFFFF, },
+		{ CS42L43_PLL_MASK,			0xFFFFFFFF, },
+		{ CS42L43_SOFT_MASK,			0xFFFFFFFF, },
+		{ CS42L43_SWIRE_MASK,			0xFFFFFFFF, },
+		{ CS42L43_MSM_MASK,			0xFFFFFFFF, },
+		{ CS42L43_ACC_DET_MASK,			0xFFFFFFFF, },
+		{ CS42L43_I2C_TGT_MASK,			0xFFFFFFFF, },
+		{ CS42L43_SPI_MSTR_MASK,		0xFFFFFFFF, },
+		{ CS42L43_SW_TO_SPI_BRIDGE_MASK,	0xFFFFFFFF, },
+		{ CS42L43_OTP_MASK,			0xFFFFFFFF, },
+		{ CS42L43_CLASS_D_AMP_MASK,		0xFFFFFFFF, },
+		{ CS42L43_GPIO_INT_MASK,		0xFFFFFFFF, },
+		{ CS42L43_ASRC_MASK,			0xFFFFFFFF, },
+		{ CS42L43_HPOUT_MASK,			0xFFFFFFFF, },
+	};
 	int ret;
 
-	/*
-	 * Don't care about being resumed here, but the driver does want
-	 * force_resume to always trigger an actual resume, so that register
-	 * state for the MCU/GPIOs is returned as soon as possible after system
-	 * resume. force_resume will resume if the reference count is resumed on
-	 * suspend hence the get_noresume.
-	 */
-	pm_runtime_get_noresume(dev);
+	ret = pm_runtime_resume_and_get(dev);
+	if (ret) {
+		dev_err(cs42l43->dev, "Failed to resume for suspend: %d\n", ret);
+		return ret;
+	}
+
+	/* The IRQs will be re-enabled on resume by the cache sync */
+	ret = regmap_multi_reg_write_bypassed(cs42l43->regmap,
+					      mask_all, ARRAY_SIZE(mask_all));
+	if (ret) {
+		dev_err(cs42l43->dev, "Failed to mask IRQs: %d\n", ret);
+		return ret;
+	}
 
 	ret = pm_runtime_force_suspend(dev);
 	if (ret) {
@@ -1100,6 +1165,26 @@ static int cs42l43_suspend(struct device *dev)
 	if (ret)
 		return ret;
 
+	disable_irq(cs42l43->irq);
+
+	return 0;
+}
+
+static int cs42l43_suspend_noirq(struct device *dev)
+{
+	struct cs42l43 *cs42l43 = dev_get_drvdata(dev);
+
+	enable_irq(cs42l43->irq);
+
+	return 0;
+}
+
+static int cs42l43_resume_noirq(struct device *dev)
+{
+	struct cs42l43 *cs42l43 = dev_get_drvdata(dev);
+
+	disable_irq(cs42l43->irq);
+
 	return 0;
 }
 
@@ -1111,6 +1196,8 @@ static int cs42l43_resume(struct device *dev)
 	ret = cs42l43_power_up(cs42l43);
 	if (ret)
 		return ret;
+
+	enable_irq(cs42l43->irq);
 
 	ret = pm_runtime_force_resume(dev);
 	if (ret) {
@@ -1179,6 +1266,7 @@ err:
 
 EXPORT_NS_GPL_DEV_PM_OPS(cs42l43_pm_ops, MFD_CS42L43) = {
 	SYSTEM_SLEEP_PM_OPS(cs42l43_suspend, cs42l43_resume)
+	NOIRQ_SYSTEM_SLEEP_PM_OPS(cs42l43_suspend_noirq, cs42l43_resume_noirq)
 	RUNTIME_PM_OPS(cs42l43_runtime_suspend, cs42l43_runtime_resume, NULL)
 };
 

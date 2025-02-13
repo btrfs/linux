@@ -13,6 +13,7 @@
 
 static int cs35l56_hda_spi_probe(struct spi_device *spi)
 {
+	const struct spi_device_id *id = spi_get_device_id(spi);
 	struct cs35l56_hda *cs35l56;
 	int ret;
 
@@ -33,7 +34,7 @@ static int cs35l56_hda_spi_probe(struct spi_device *spi)
 		return ret;
 	}
 
-	ret = cs35l56_hda_common_probe(cs35l56, spi_get_chipselect(spi, 0));
+	ret = cs35l56_hda_common_probe(cs35l56, id->driver_data, spi_get_chipselect(spi, 0));
 	if (ret)
 		return ret;
 	ret = cs35l56_irq_request(&cs35l56->base, spi->irq);
@@ -49,14 +50,25 @@ static void cs35l56_hda_spi_remove(struct spi_device *spi)
 }
 
 static const struct spi_device_id cs35l56_hda_spi_id[] = {
-	{ "cs35l56-hda", 0 },
+	{ "cs35l54-hda", 0x3554 },
+	{ "cs35l56-hda", 0x3556 },
+	{ "cs35l57-hda", 0x3557 },
 	{}
 };
 
+static const struct acpi_device_id cs35l56_acpi_hda_match[] = {
+	{ "CSC3554", 0 },
+	{ "CSC3556", 0 },
+	{ "CSC3557", 0 },
+	{}
+};
+MODULE_DEVICE_TABLE(acpi, cs35l56_acpi_hda_match);
+
 static struct spi_driver cs35l56_hda_spi_driver = {
 	.driver = {
-		.name		= "cs35l56-hda",
-		.pm		= &cs35l56_hda_pm_ops,
+		.name		  = "cs35l56-hda",
+		.acpi_match_table = cs35l56_acpi_hda_match,
+		.pm		  = &cs35l56_hda_pm_ops,
 	},
 	.id_table	= cs35l56_hda_spi_id,
 	.probe		= cs35l56_hda_spi_probe,
@@ -65,8 +77,8 @@ static struct spi_driver cs35l56_hda_spi_driver = {
 module_spi_driver(cs35l56_hda_spi_driver);
 
 MODULE_DESCRIPTION("HDA CS35L56 SPI driver");
-MODULE_IMPORT_NS(SND_HDA_SCODEC_CS35L56);
-MODULE_IMPORT_NS(SND_SOC_CS35L56_SHARED);
+MODULE_IMPORT_NS("SND_HDA_SCODEC_CS35L56");
+MODULE_IMPORT_NS("SND_SOC_CS35L56_SHARED");
 MODULE_AUTHOR("Richard Fitzgerald <rf@opensource.cirrus.com>");
 MODULE_AUTHOR("Simon Trimmer <simont@opensource.cirrus.com>");
 MODULE_LICENSE("GPL");
