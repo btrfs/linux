@@ -25,6 +25,9 @@ static unsigned long get_entry_num_slots(efi_memory_desc_t *md,
 	if (md->type != EFI_CONVENTIONAL_MEMORY)
 		return 0;
 
+	if (md->attribute & EFI_MEMORY_HOT_PLUGGABLE)
+		return 0;
+
 	if (efi_soft_reserve_enabled() &&
 	    (md->attribute & EFI_MEMORY_SP))
 		return 0;
@@ -59,9 +62,9 @@ efi_status_t efi_random_alloc(unsigned long size,
 			      unsigned long alloc_min,
 			      unsigned long alloc_max)
 {
+	struct efi_boot_memmap *map __free(efi_pool) = NULL;
 	unsigned long total_slots = 0, target_slot;
 	unsigned long total_mirrored_slots = 0;
-	struct efi_boot_memmap *map;
 	efi_status_t status;
 	int map_offset;
 
@@ -120,7 +123,7 @@ efi_status_t efi_random_alloc(unsigned long size,
 			continue;
 		}
 
-		target = round_up(md->phys_addr, align) + target_slot * align;
+		target = round_up(max_t(u64, md->phys_addr, alloc_min), align) + target_slot * align;
 		pages = size / EFI_PAGE_SIZE;
 
 		status = efi_bs_call(allocate_pages, EFI_ALLOCATE_ADDRESS,
@@ -129,8 +132,6 @@ efi_status_t efi_random_alloc(unsigned long size,
 			*addr = target;
 		break;
 	}
-
-	efi_bs_call(free_pool, map);
 
 	return status;
 }

@@ -141,17 +141,10 @@ static int keystone_irq_probe(struct platform_device *pdev)
 	if (!kirq)
 		return -ENOMEM;
 
-	kirq->devctrl_regs =
-		syscon_regmap_lookup_by_phandle(np, "ti,syscon-dev");
+	kirq->devctrl_regs = syscon_regmap_lookup_by_phandle_args(np, "ti,syscon-dev",
+								  1, &kirq->devctrl_offset);
 	if (IS_ERR(kirq->devctrl_regs))
 		return PTR_ERR(kirq->devctrl_regs);
-
-	ret = of_property_read_u32_index(np, "ti,syscon-dev", 1,
-					 &kirq->devctrl_offset);
-	if (ret) {
-		dev_err(dev, "couldn't read the devctrl_offset offset!\n");
-		return ret;
-	}
 
 	kirq->irq = platform_get_irq(pdev, 0);
 	if (kirq->irq < 0)
@@ -190,7 +183,7 @@ static int keystone_irq_probe(struct platform_device *pdev)
 	return 0;
 }
 
-static int keystone_irq_remove(struct platform_device *pdev)
+static void keystone_irq_remove(struct platform_device *pdev)
 {
 	struct keystone_irq_device *kirq = platform_get_drvdata(pdev);
 	int hwirq;
@@ -201,7 +194,6 @@ static int keystone_irq_remove(struct platform_device *pdev)
 		irq_dispose_mapping(irq_find_mapping(kirq->irqd, hwirq));
 
 	irq_domain_remove(kirq->irqd);
-	return 0;
 }
 
 static const struct of_device_id keystone_irq_dt_ids[] = {

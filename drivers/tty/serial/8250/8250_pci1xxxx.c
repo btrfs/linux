@@ -7,23 +7,31 @@
  *  Copyright (C) 2022 Microchip Technology Inc., All Rights Reserved.
  */
 
+#include <linux/array_size.h>
 #include <linux/bitfield.h>
-#include <linux/bitops.h>
-#include <linux/delay.h>
+#include <linux/bits.h>
+#include <linux/circ_buf.h>
+#include <linux/device.h>
+#include <linux/errno.h>
+#include <linux/gfp_types.h>
 #include <linux/io.h>
 #include <linux/iopoll.h>
-#include <linux/kernel.h>
+#include <linux/minmax.h>
 #include <linux/module.h>
+#include <linux/mutex.h>
+#include <linux/overflow.h>
 #include <linux/pci.h>
+#include <linux/pm.h>
 #include <linux/serial_core.h>
 #include <linux/serial_reg.h>
 #include <linux/serial_8250.h>
-#include <linux/slab.h>
+#include <linux/spinlock.h>
 #include <linux/string.h>
-#include <linux/units.h>
+#include <linux/time.h>
 #include <linux/tty.h>
 #include <linux/tty_flip.h>
-#include <linux/8250_pci.h>
+#include <linux/types.h>
+#include <linux/units.h>
 
 #include <asm/byteorder.h>
 
@@ -67,7 +75,14 @@
 #define SYSLOCK_RETRY_CNT			1000
 
 #define UART_RX_BYTE_FIFO			0x00
+#define UART_TX_BYTE_FIFO			0x00
 #define UART_FIFO_CTL				0x02
+
+#define UART_MODEM_CTL_REG			0x04
+#define UART_MODEM_CTL_RTS_SET			BIT(1)
+
+#define UART_LINE_STAT_REG			0x05
+#define UART_LINE_XMIT_CHECK_MASK		GENMASK(6, 5)
 
 #define UART_ACTV_REG				0x11
 #define UART_BLOCK_SET_ACTIVE			BIT(0)
@@ -81,10 +96,11 @@
 #define ADCL_CFG_PIN_SEL			BIT(1)
 #define ADCL_CFG_EN				BIT(0)
 
-#define UART_BIT_SAMPLE_CNT			16
+#define UART_BIT_SAMPLE_CNT_8			8
+#define UART_BIT_SAMPLE_CNT_16			16
 #define BAUD_CLOCK_DIV_INT_MSK			GENMASK(31, 8)
 #define ADCL_CFG_RTS_DELAY_MASK			GENMASK(11, 8)
-#define UART_CLOCK_DEFAULT			(62500 * HZ_PER_KHZ)
+#define FRAC_DIV_TX_END_POINT_MASK		GENMASK(23, 20)
 
 #define UART_WAKE_REG				0x8C
 #define UART_WAKE_MASK_REG			0x90
@@ -95,12 +111,18 @@
 	(UART_WAKE_N_PIN | UART_WAKE_NCTS | UART_WAKE_INT)
 
 #define UART_BAUD_CLK_DIVISOR_REG		0x54
+#define FRAC_DIV_CFG_REG			0x58
 
 #define UART_RESET_REG				0x94
 #define UART_RESET_D3_RESET_DISABLE		BIT(16)
 
 #define UART_BURST_STATUS_REG			0x9C
+#define UART_TX_BURST_FIFO			0xA0
 #define UART_RX_BURST_FIFO			0xA4
+
+#define UART_BIT_DIVISOR_8			0x26731000
+#define UART_BIT_DIVISOR_16			0x6ef71000
+#define UART_BAUD_4MBPS				4000000
 
 #define MAX_PORTS				4
 #define PORT_OFFSET				0x100
@@ -109,6 +131,7 @@
 #define UART_BURST_SIZE				4
 
 #define UART_BST_STAT_RX_COUNT_MASK		0x00FF
+#define UART_BST_STAT_TX_COUNT_MASK		0xFF00
 #define UART_BST_STAT_IIR_INT_PEND		0x100000
 #define UART_LSR_OVERRUN_ERR_CLR		0x43
 #define UART_BST_STAT_LSR_RX_MASK		0x9F000000
@@ -116,6 +139,12 @@
 #define UART_BST_STAT_LSR_OVERRUN_ERR		0x2000000
 #define UART_BST_STAT_LSR_PARITY_ERR		0x4000000
 #define UART_BST_STAT_LSR_FRAME_ERR		0x8000000
+#define UART_BST_STAT_LSR_THRE			0x20000000
+
+#define GET_MODEM_CTL_RTS_STATUS(reg)		((reg) & UART_MODEM_CTL_RTS_SET)
+#define GET_RTS_PIN_STATUS(val)			(((val) & TIOCM_RTS) >> 1)
+#define RTS_TOGGLE_STATUS_MASK(val, reg)	(GET_MODEM_CTL_RTS_STATUS(reg) \
+						 != GET_RTS_PIN_STATUS(val))
 
 struct pci1xxxx_8250 {
 	unsigned int nr;
@@ -206,15 +235,21 @@ static int pci1xxxx_get_num_ports(struct pci_dev *dev)
 static unsigned int pci1xxxx_get_divisor(struct uart_port *port,
 					 unsigned int baud, unsigned int *frac)
 {
+	unsigned int uart_sample_cnt;
 	unsigned int quot;
+
+	if (baud >= UART_BAUD_4MBPS)
+		uart_sample_cnt = UART_BIT_SAMPLE_CNT_8;
+	else
+		uart_sample_cnt = UART_BIT_SAMPLE_CNT_16;
 
 	/*
 	 * Calculate baud rate sampling period in nanoseconds.
 	 * Fractional part x denotes x/255 parts of a nanosecond.
 	 */
-	quot = NSEC_PER_SEC / (baud * UART_BIT_SAMPLE_CNT);
-	*frac = (NSEC_PER_SEC - quot * baud * UART_BIT_SAMPLE_CNT) *
-		  255 / UART_BIT_SAMPLE_CNT / baud;
+	quot = NSEC_PER_SEC / (baud * uart_sample_cnt);
+	*frac = (NSEC_PER_SEC - quot * baud * uart_sample_cnt) *
+		  255 / uart_sample_cnt / baud;
 
 	return quot;
 }
@@ -222,8 +257,54 @@ static unsigned int pci1xxxx_get_divisor(struct uart_port *port,
 static void pci1xxxx_set_divisor(struct uart_port *port, unsigned int baud,
 				 unsigned int quot, unsigned int frac)
 {
+	if (baud >= UART_BAUD_4MBPS)
+		writel(UART_BIT_DIVISOR_8, port->membase + FRAC_DIV_CFG_REG);
+	else
+		writel(UART_BIT_DIVISOR_16, port->membase + FRAC_DIV_CFG_REG);
+
 	writel(FIELD_PREP(BAUD_CLOCK_DIV_INT_MSK, quot) | frac,
 	       port->membase + UART_BAUD_CLK_DIVISOR_REG);
+}
+
+static void pci1xxxx_set_mctrl(struct uart_port *port, unsigned int mctrl)
+{
+	u32 fract_div_cfg_reg;
+	u32 line_stat_reg;
+	u32 modem_ctl_reg;
+	u32 adcl_cfg_reg;
+
+	adcl_cfg_reg = readl(port->membase + ADCL_CFG_REG);
+
+	/* HW is responsible in ADCL_EN case */
+	if ((adcl_cfg_reg & (ADCL_CFG_EN | ADCL_CFG_PIN_SEL)))
+		return;
+
+	modem_ctl_reg = readl(port->membase + UART_MODEM_CTL_REG);
+
+	serial8250_do_set_mctrl(port, mctrl);
+
+	if (RTS_TOGGLE_STATUS_MASK(mctrl, modem_ctl_reg)) {
+		line_stat_reg = readl(port->membase + UART_LINE_STAT_REG);
+		if (line_stat_reg & UART_LINE_XMIT_CHECK_MASK) {
+			fract_div_cfg_reg = readl(port->membase +
+						  FRAC_DIV_CFG_REG);
+
+			writel((fract_div_cfg_reg &
+			       ~(FRAC_DIV_TX_END_POINT_MASK)),
+			       port->membase + FRAC_DIV_CFG_REG);
+
+			/* Enable ADC and set the nRTS pin */
+			writel((adcl_cfg_reg | (ADCL_CFG_EN |
+			       ADCL_CFG_PIN_SEL)),
+			       port->membase + ADCL_CFG_REG);
+
+			/* Revert to the original settings */
+			writel(adcl_cfg_reg, port->membase + ADCL_CFG_REG);
+
+			writel(fract_div_cfg_reg, port->membase +
+			       FRAC_DIV_CFG_REG);
+		}
+	}
 }
 
 static int pci1xxxx_rs485_config(struct uart_port *port,
@@ -233,7 +314,16 @@ static int pci1xxxx_rs485_config(struct uart_port *port,
 	u32 delay_in_baud_periods;
 	u32 baud_period_in_ns;
 	u32 mode_cfg = 0;
+	u32 sample_cnt;
 	u32 clock_div;
+	u32 frac_div;
+
+	frac_div = readl(port->membase + FRAC_DIV_CFG_REG);
+
+	if (frac_div == UART_BIT_DIVISOR_16)
+		sample_cnt = UART_BIT_SAMPLE_CNT_16;
+	else
+		sample_cnt = UART_BIT_SAMPLE_CNT_8;
 
 	/*
 	 * pci1xxxx's uart hardware supports only RTS delay after
@@ -249,7 +339,7 @@ static int pci1xxxx_rs485_config(struct uart_port *port,
 			clock_div = readl(port->membase + UART_BAUD_CLK_DIVISOR_REG);
 			baud_period_in_ns =
 				FIELD_GET(BAUD_CLOCK_DIV_INT_MSK, clock_div) *
-				UART_BIT_SAMPLE_CNT;
+				sample_cnt;
 			delay_in_baud_periods =
 				rs485->delay_rts_after_send * NSEC_PER_MSEC /
 				baud_period_in_ns;
@@ -344,6 +434,99 @@ static void pci1xxxx_rx_burst(struct uart_port *port, u32 uart_status)
 	}
 }
 
+static void pci1xxxx_process_write_data(struct uart_port *port,
+					int *data_empty_count,
+					u32 *valid_byte_count)
+{
+	struct tty_port *tport = &port->state->port;
+	u32 valid_burst_count = *valid_byte_count / UART_BURST_SIZE;
+
+	/*
+	 * Each transaction transfers data in DWORDs. If there are less than
+	 * four remaining valid_byte_count to transfer or if the circular
+	 * buffer has insufficient space for a DWORD, the data is transferred
+	 * one byte at a time.
+	 */
+	while (valid_burst_count) {
+		u32 c;
+
+		if (*data_empty_count - UART_BURST_SIZE < 0)
+			break;
+		if (kfifo_len(&tport->xmit_fifo) < UART_BURST_SIZE)
+			break;
+		if (WARN_ON(kfifo_out(&tport->xmit_fifo, (u8 *)&c, sizeof(c)) !=
+		    sizeof(c)))
+			break;
+		writel(c, port->membase + UART_TX_BURST_FIFO);
+		*valid_byte_count -= UART_BURST_SIZE;
+		*data_empty_count -= UART_BURST_SIZE;
+		valid_burst_count -= UART_BYTE_SIZE;
+	}
+
+	while (*valid_byte_count) {
+		u8 c;
+
+		if (!kfifo_get(&tport->xmit_fifo, &c))
+			break;
+		writeb(c, port->membase + UART_TX_BYTE_FIFO);
+		*data_empty_count -= UART_BYTE_SIZE;
+		*valid_byte_count -= UART_BYTE_SIZE;
+
+		/*
+		 * If there are any pending burst count, data is handled by
+		 * transmitting DWORDs at a time.
+		 */
+		if (valid_burst_count &&
+		    kfifo_len(&tport->xmit_fifo) >= UART_BURST_SIZE)
+			break;
+	}
+}
+
+static void pci1xxxx_tx_burst(struct uart_port *port, u32 uart_status)
+{
+	struct uart_8250_port *up = up_to_u8250p(port);
+	struct tty_port *tport = &port->state->port;
+	u32 valid_byte_count;
+	int data_empty_count;
+
+	if (port->x_char) {
+		writeb(port->x_char, port->membase + UART_TX);
+		port->icount.tx++;
+		port->x_char = 0;
+		return;
+	}
+
+	if ((uart_tx_stopped(port)) || kfifo_is_empty(&tport->xmit_fifo)) {
+		port->ops->stop_tx(port);
+	} else {
+		data_empty_count = (pci1xxxx_read_burst_status(port) &
+				    UART_BST_STAT_TX_COUNT_MASK) >> 8;
+		do {
+			valid_byte_count = kfifo_len(&tport->xmit_fifo);
+
+			pci1xxxx_process_write_data(port,
+						    &data_empty_count,
+						    &valid_byte_count);
+
+			port->icount.tx++;
+			if (kfifo_is_empty(&tport->xmit_fifo))
+				break;
+		} while (data_empty_count && valid_byte_count);
+	}
+
+	if (kfifo_len(&tport->xmit_fifo) < WAKEUP_CHARS)
+		uart_write_wakeup(port);
+
+	 /*
+	  * With RPM enabled, we have to wait until the FIFO is empty before
+	  * the HW can go idle. So we get here once again with empty FIFO and
+	  * disable the interrupt and RPM in __stop_tx()
+	  */
+	if (kfifo_is_empty(&tport->xmit_fifo) &&
+	    !(up->capabilities & UART_CAP_RPM))
+		port->ops->stop_tx(port);
+}
+
 static int pci1xxxx_handle_irq(struct uart_port *port)
 {
 	unsigned long flags;
@@ -358,6 +541,9 @@ static int pci1xxxx_handle_irq(struct uart_port *port)
 
 	if (status & UART_BST_STAT_LSR_RX_MASK)
 		pci1xxxx_rx_burst(port, status);
+
+	if (status & UART_BST_STAT_LSR_THRE)
+		pci1xxxx_tx_burst(port, status);
 
 	spin_unlock_irqrestore(&port->lock, flags);
 
@@ -481,15 +667,31 @@ static int pci1xxxx_setup(struct pci_dev *pdev,
 
 	port->port.flags |= UPF_FIXED_TYPE | UPF_SKIP_TEST;
 	port->port.type = PORT_MCHP16550A;
+	/*
+	 * 8250 core considers prescaller value to be always 16.
+	 * The MCHP ports support downscaled mode and hence the
+	 * functional UART clock can be lower, i.e. 62.5MHz, than
+	 * software expects in order to support higher baud rates.
+	 * Assign here 64MHz to support 4Mbps.
+	 *
+	 * The value itself is not really used anywhere except baud
+	 * rate calculations, so we can mangle it as we wish.
+	 */
+	port->port.uartclk = 64 * HZ_PER_MHZ;
 	port->port.set_termios = serial8250_do_set_termios;
 	port->port.get_divisor = pci1xxxx_get_divisor;
 	port->port.set_divisor = pci1xxxx_set_divisor;
 	port->port.rs485_config = pci1xxxx_rs485_config;
 	port->port.rs485_supported = pci1xxxx_rs485_supported;
 
-	/* From C0 rev Burst operation is supported */
+	/*
+	 * C0 and later revisions support Burst operation.
+	 * RTS workaround in mctrl is applicable only to B0.
+	 */
 	if (rev >= 0xC0)
 		port->port.handle_irq = pci1xxxx_handle_irq;
+	else if (rev == 0xB0)
+		port->port.set_mctrl = pci1xxxx_set_mctrl;
 
 	ret = serial8250_pci_setup_port(pdev, port, 0, PORT_OFFSET * port_idx, 0);
 	if (ret < 0)
@@ -594,7 +796,6 @@ static int pci1xxxx_serial_probe(struct pci_dev *pdev,
 
 	memset(&uart, 0, sizeof(uart));
 	uart.port.flags = UPF_SHARE_IRQ | UPF_FIXED_PORT;
-	uart.port.uartclk = UART_CLOCK_DEFAULT;
 	uart.port.dev = dev;
 
 	if (num_vectors == max_vec_reqd)
@@ -669,7 +870,7 @@ module_pci_driver(pci1xxxx_pci_driver);
 
 static_assert((ARRAY_SIZE(logical_to_physical_port_idx) == PCI_SUBDEVICE_ID_EFAR_PCI1XXXX_1p3 + 1));
 
-MODULE_IMPORT_NS(SERIAL_8250_PCI);
+MODULE_IMPORT_NS("SERIAL_8250_PCI");
 MODULE_DESCRIPTION("Microchip Technology Inc. PCIe to UART module");
 MODULE_AUTHOR("Kumaravel Thiagarajan <kumaravel.thiagarajan@microchip.com>");
 MODULE_AUTHOR("Tharun Kumar P <tharunkumar.pasumarthi@microchip.com>");

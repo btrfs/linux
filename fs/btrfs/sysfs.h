@@ -3,7 +3,17 @@
 #ifndef BTRFS_SYSFS_H
 #define BTRFS_SYSFS_H
 
+#include <linux/types.h>
+#include <linux/compiler_types.h>
 #include <linux/kobject.h>
+
+struct block_device;
+struct btrfs_fs_info;
+struct btrfs_device;
+struct btrfs_fs_devices;
+struct btrfs_block_group;
+struct btrfs_space_info;
+struct btrfs_qgroup;
 
 enum btrfs_feature_set {
 	FEAT_COMPAT,
@@ -38,5 +48,11 @@ void btrfs_sysfs_del_qgroups(struct btrfs_fs_info *fs_info);
 int btrfs_sysfs_add_qgroups(struct btrfs_fs_info *fs_info);
 void btrfs_sysfs_del_one_qgroup(struct btrfs_fs_info *fs_info,
 				struct btrfs_qgroup *qgroup);
+int btrfs_read_policy_to_enum(const char *str, s64 *value);
+
+#ifdef CONFIG_BTRFS_EXPERIMENTAL
+int __init btrfs_read_policy_init(void);
+char *btrfs_get_mod_read_policy(void);
+#endif
 
 #endif

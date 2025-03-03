@@ -20,28 +20,28 @@ static const struct stfcamss_format_info stf_wr_fmts[] = {
 		.pixelformat = V4L2_PIX_FMT_SRGGB10,
 		.planes = 1,
 		.vsub = { 1 },
-		.bpp = 10,
+		.bpp = 16,
 	},
 	{
 		.code = MEDIA_BUS_FMT_SGRBG10_1X10,
 		.pixelformat = V4L2_PIX_FMT_SGRBG10,
 		.planes = 1,
 		.vsub = { 1 },
-		.bpp = 10,
+		.bpp = 16,
 	},
 	{
 		.code = MEDIA_BUS_FMT_SGBRG10_1X10,
 		.pixelformat = V4L2_PIX_FMT_SGBRG10,
 		.planes = 1,
 		.vsub = { 1 },
-		.bpp = 10,
+		.bpp = 16,
 	},
 	{
 		.code = MEDIA_BUS_FMT_SBGGR10_1X10,
 		.pixelformat = V4L2_PIX_FMT_SBGGR10,
 		.planes = 1,
 		.vsub = { 1 },
-		.bpp = 10,
+		.bpp = 16,
 	},
 };
 
@@ -180,6 +180,8 @@ static void stf_channel_set(struct stfcamss_video *video)
 	u32 val;
 
 	if (cap->type == STF_CAPTURE_RAW) {
+		const struct v4l2_pix_format *pix = &video->active_fmt.fmt.pix;
+
 		val = stf_syscon_reg_read(stfcamss, VIN_CHANNEL_SEL_EN);
 		val &= ~U0_VIN_CHANNEL_SEL_MASK;
 		val |= CHANNEL(0);
@@ -193,7 +195,7 @@ static void stf_channel_set(struct stfcamss_video *video)
 		val |= PIXEL_HEIGH_BIT_SEL(0);
 
 		val &= ~U0_VIN_PIX_CNT_END_MASK;
-		val |= PIX_CNT_END(IMAGE_MAX_WIDTH / 4 - 1);
+		val |= PIX_CNT_END(pix->width / 4 - 1);
 
 		stf_syscon_reg_write(stfcamss, VIN_INRT_PIX_CFG, val);
 	} else if (cap->type == STF_CAPTURE_YUV) {

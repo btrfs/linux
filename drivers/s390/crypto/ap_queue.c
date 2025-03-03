@@ -22,6 +22,11 @@ static void __ap_flush_queue(struct ap_queue *aq);
  * some AP queue helper functions
  */
 
+static inline bool ap_q_supported_in_se(struct ap_queue *aq)
+{
+	return aq->card->hwinfo.ep11 || aq->card->hwinfo.accel;
+}
+
 static inline bool ap_q_supports_bind(struct ap_queue *aq)
 {
 	return aq->card->hwinfo.ep11 || aq->card->hwinfo.accel;
@@ -136,6 +141,8 @@ static struct ap_queue_status ap_sm_recv(struct ap_queue *aq)
 
 	switch (status.response_code) {
 	case AP_RESPONSE_NORMAL:
+		print_hex_dump_debug("aprpl: ", DUMP_PREFIX_ADDRESS, 16, 1,
+				     aq->reply->msg, aq->reply->len, false);
 		aq->queue_count = max_t(int, 0, aq->queue_count - 1);
 		if (!status.queue_empty && !aq->queue_count)
 			aq->queue_count++;
@@ -169,6 +176,9 @@ static struct ap_queue_status ap_sm_recv(struct ap_queue *aq)
 		aq->queue_count = 0;
 		list_splice_init(&aq->pendingq, &aq->requestq);
 		aq->requestq_count += aq->pendingq_count;
+		pr_debug("queue 0x%02x.%04x rescheduled %d reqs (new req %d)\n",
+			 AP_QID_CARD(aq->qid), AP_QID_QUEUE(aq->qid),
+			 aq->pendingq_count, aq->requestq_count);
 		aq->pendingq_count = 0;
 		break;
 	default:
@@ -243,6 +253,8 @@ static enum ap_sm_wait ap_sm_write(struct ap_queue *aq)
 
 	/* Start the next request on the queue. */
 	ap_msg = list_entry(aq->requestq.next, struct ap_message, list);
+	print_hex_dump_debug("apreq: ", DUMP_PREFIX_ADDRESS, 16, 1,
+			     ap_msg->msg, ap_msg->len, false);
 	status = __ap_send(qid, ap_msg->psmid,
 			   ap_msg->msg, ap_msg->len,
 			   ap_msg->flags & AP_MSG_FLAG_SPECIAL);
@@ -446,9 +458,9 @@ static enum ap_sm_wait ap_sm_assoc_wait(struct ap_queue *aq)
 	case AP_BS_Q_USABLE:
 		/* association is through */
 		aq->sm_state = AP_SM_STATE_IDLE;
-		AP_DBF_DBG("%s queue 0x%02x.%04x associated with %u\n",
-			   __func__, AP_QID_CARD(aq->qid),
-			   AP_QID_QUEUE(aq->qid), aq->assoc_idx);
+		pr_debug("queue 0x%02x.%04x associated with %u\n",
+			 AP_QID_CARD(aq->qid),
+			 AP_QID_QUEUE(aq->qid), aq->assoc_idx);
 		return AP_SM_WAIT_NONE;
 	case AP_BS_Q_USABLE_NO_SECURE_KEY:
 		/* association still pending */
@@ -690,9 +702,9 @@ static ssize_t ap_functions_show(struct device *dev,
 
 	status = ap_test_queue(aq->qid, 1, &hwinfo);
 	if (status.response_code > AP_RESPONSE_BUSY) {
-		AP_DBF_DBG("%s RC 0x%02x on tapq(0x%02x.%04x)\n",
-			   __func__, status.response_code,
-			   AP_QID_CARD(aq->qid), AP_QID_QUEUE(aq->qid));
+		pr_debug("RC 0x%02x on tapq(0x%02x.%04x)\n",
+			 status.response_code,
+			 AP_QID_CARD(aq->qid), AP_QID_QUEUE(aq->qid));
 		return -EIO;
 	}
 
@@ -701,7 +713,7 @@ static ssize_t ap_functions_show(struct device *dev,
 
 static DEVICE_ATTR_RO(ap_functions);
 
-#ifdef CONFIG_ZCRYPT_DEBUG
+#ifdef CONFIG_AP_DEBUG
 static ssize_t states_show(struct device *dev,
 			   struct device_attribute *attr, char *buf)
 {
@@ -813,7 +825,7 @@ static struct attribute *ap_queue_dev_attrs[] = {
 	&dev_attr_config.attr,
 	&dev_attr_chkstop.attr,
 	&dev_attr_ap_functions.attr,
-#ifdef CONFIG_ZCRYPT_DEBUG
+#ifdef CONFIG_AP_DEBUG
 	&dev_attr_states.attr,
 	&dev_attr_last_err_rc.attr,
 #endif
@@ -846,9 +858,9 @@ static ssize_t se_bind_show(struct device *dev,
 
 	status = ap_test_queue(aq->qid, 1, &hwinfo);
 	if (status.response_code > AP_RESPONSE_BUSY) {
-		AP_DBF_DBG("%s RC 0x%02x on tapq(0x%02x.%04x)\n",
-			   __func__, status.response_code,
-			   AP_QID_CARD(aq->qid), AP_QID_QUEUE(aq->qid));
+		pr_debug("RC 0x%02x on tapq(0x%02x.%04x)\n",
+			 status.response_code,
+			 AP_QID_CARD(aq->qid), AP_QID_QUEUE(aq->qid));
 		return -EIO;
 	}
 
@@ -974,9 +986,9 @@ static ssize_t se_associate_show(struct device *dev,
 
 	status = ap_test_queue(aq->qid, 1, &hwinfo);
 	if (status.response_code > AP_RESPONSE_BUSY) {
-		AP_DBF_DBG("%s RC 0x%02x on tapq(0x%02x.%04x)\n",
-			   __func__, status.response_code,
-			   AP_QID_CARD(aq->qid), AP_QID_QUEUE(aq->qid));
+		pr_debug("RC 0x%02x on tapq(0x%02x.%04x)\n",
+			 status.response_code,
+			 AP_QID_CARD(aq->qid), AP_QID_QUEUE(aq->qid));
 		return -EIO;
 	}
 
@@ -1097,18 +1109,19 @@ static void ap_queue_device_release(struct device *dev)
 	kfree(aq);
 }
 
-struct ap_queue *ap_queue_create(ap_qid_t qid, int device_type)
+struct ap_queue *ap_queue_create(ap_qid_t qid, struct ap_card *ac)
 {
 	struct ap_queue *aq;
 
 	aq = kzalloc(sizeof(*aq), GFP_KERNEL);
 	if (!aq)
 		return NULL;
+	aq->card = ac;
 	aq->ap_dev.device.release = ap_queue_device_release;
 	aq->ap_dev.device.type = &ap_queue_type;
-	aq->ap_dev.device_type = device_type;
-	// add optional SE secure binding attributes group
-	if (ap_sb_available() && is_prot_virt_guest())
+	aq->ap_dev.device_type = ac->ap_dev.device_type;
+	/* in SE environment add bind/associate attributes group */
+	if (ap_is_se_guest() && ap_q_supported_in_se(aq))
 		aq->ap_dev.device.groups = ap_queue_dev_sb_attr_groups;
 	aq->qid = qid;
 	spin_lock_init(&aq->lock);
@@ -1189,10 +1202,16 @@ bool ap_queue_usable(struct ap_queue *aq)
 	}
 
 	/* SE guest's queues additionally need to be bound */
-	if (ap_q_needs_bind(aq) &&
-	    !(aq->se_bstate == AP_BS_Q_USABLE ||
-	      aq->se_bstate == AP_BS_Q_USABLE_NO_SECURE_KEY))
-		rc = false;
+	if (ap_is_se_guest()) {
+		if (!ap_q_supported_in_se(aq)) {
+			rc = false;
+			goto unlock_and_out;
+		}
+		if (ap_q_needs_bind(aq) &&
+		    !(aq->se_bstate == AP_BS_Q_USABLE ||
+		      aq->se_bstate == AP_BS_Q_USABLE_NO_SECURE_KEY))
+			rc = false;
+	}
 
 unlock_and_out:
 	spin_unlock_bh(&aq->lock);

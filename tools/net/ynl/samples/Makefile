@@ -3,13 +3,13 @@
 include ../Makefile.deps
 
 CC=gcc
-CFLAGS=-std=gnu11 -O2 -W -Wall -Wextra -Wno-unused-parameter -Wshadow \
+CFLAGS += -std=gnu11 -O2 -W -Wall -Wextra -Wno-unused-parameter -Wshadow \
 	-I../lib/ -I../generated/ -idirafter $(UAPI_PATH)
 ifeq ("$(DEBUG)","1")
   CFLAGS += -g -fsanitize=address -fsanitize=leak -static-libasan
 endif
 
-LDLIBS=-lmnl ../lib/ynl.a ../generated/protos.a
+LDLIBS=../lib/ynl.a ../generated/protos.a
 
 SRCS=$(wildcard *.c)
 BINS=$(patsubst %.c,%,${SRCS})
@@ -28,8 +28,8 @@ $(BINS): ../lib/ynl.a ../generated/protos.a $(SRCS)
 clean:
 	rm -f *.o *.d *~
 
-hardclean: clean
+distclean: clean
 	rm -f $(BINS)
 
-.PHONY: all clean
+.PHONY: all clean distclean
 .DEFAULT_GOAL=all

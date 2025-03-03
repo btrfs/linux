@@ -37,10 +37,12 @@ static ssize_t bw_name_read(struct file *fp, char __user *userbuf,
 			    size_t count, loff_t *ppos)
 {
 	struct icc_path *path = fp->private_data;
+	const char *name = icc_get_name(path);
 	char buf[64];
-	int i;
+	int i = 0;
 
-	i = scnprintf(buf, sizeof(buf), "%.62s\n", icc_get_name(path));
+	if (name)
+		i = scnprintf(buf, sizeof(buf), "%.62s\n", name);
 
 	return simple_read_from_buffer(userbuf, count, ppos, buf, i);
 }
@@ -56,11 +58,11 @@ static void opp_debug_create_bw(struct dev_pm_opp *opp,
 				struct dentry *pdentry)
 {
 	struct dentry *d;
-	char name[20];
+	char name[] = "icc-path-XXXXXXXXXXX"; /* Integers can take 11 chars max */
 	int i;
 
 	for (i = 0; i < opp_table->path_count; i++) {
-		snprintf(name, sizeof(name), "icc-path-%.1d", i);
+		snprintf(name, sizeof(name), "icc-path-%d", i);
 
 		/* Create per-path directory */
 		d = debugfs_create_dir(name, pdentry);
@@ -78,7 +80,7 @@ static void opp_debug_create_clks(struct dev_pm_opp *opp,
 				  struct opp_table *opp_table,
 				  struct dentry *pdentry)
 {
-	char name[12];
+	char name[] = "rate_hz_XXXXXXXXXXX"; /* Integers can take 11 chars max */
 	int i;
 
 	if (opp_table->clk_count == 1) {
@@ -100,7 +102,7 @@ static void opp_debug_create_supplies(struct dev_pm_opp *opp,
 	int i;
 
 	for (i = 0; i < opp_table->regulator_count; i++) {
-		char name[15];
+		char name[] = "supply-XXXXXXXXXXX"; /* Integers can take 11 chars max */
 
 		snprintf(name, sizeof(name), "supply-%d", i);
 
@@ -215,7 +217,7 @@ static void opp_migrate_dentry(struct opp_device *opp_dev,
 {
 	struct opp_device *new_dev = NULL, *iter;
 	const struct device *dev;
-	struct dentry *dentry;
+	int err;
 
 	/* Look for next opp-dev */
 	list_for_each_entry(iter, &opp_table->dev_list, node)
@@ -232,16 +234,14 @@ static void opp_migrate_dentry(struct opp_device *opp_dev,
 
 	opp_set_dev_name(dev, opp_table->dentry_name);
 
-	dentry = debugfs_rename(rootdir, opp_dev->dentry, rootdir,
-				opp_table->dentry_name);
-	if (IS_ERR(dentry)) {
+	err = debugfs_change_name(opp_dev->dentry, "%s", opp_table->dentry_name);
+	if (err) {
 		dev_err(dev, "%s: Failed to rename link from: %s to %s\n",
 			__func__, dev_name(opp_dev->dev), dev_name(dev));
 		return;
 	}
 
-	new_dev->dentry = dentry;
-	opp_table->dentry = dentry;
+	new_dev->dentry = opp_table->dentry = opp_dev->dentry;
 }
 
 /**

@@ -2,7 +2,7 @@
 /*
  * Support for CompuLab CL-SOM-AM57x System-on-Module
  *
- * Copyright (C) 2015 CompuLab Ltd. - http://www.compulab.co.il/
+ * Copyright (C) 2015 CompuLab Ltd. - https://www.compulab.co.il/
  * Author: Dmitry Lifshitz <lifshitz@compulab.co.il>
  */
 
@@ -429,7 +429,7 @@
 		reg = <0x56>;
 	};
 
-	eeprom_module: atmel@50 {
+	eeprom_module: eeprom@50 {
 		compatible = "atmel,24c08";
 		reg = <0x50>;
 		pagesize = <16>;

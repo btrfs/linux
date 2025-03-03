@@ -31,6 +31,7 @@
 #include <linux/memory.h>
 #include "kfd_priv.h"
 #include "kfd_events.h"
+#include "kfd_device_queue_manager.h"
 #include <linux/device.h>
 
 /*
@@ -747,6 +748,16 @@ void kfd_signal_event_interrupt(u32 pasid, uint32_t partial_id,
 		uint64_t *slots = page_slots(p->signal_page);
 		uint32_t id;
 
+		/*
+		 * If id is valid but slot is not signaled, GPU may signal the same event twice
+		 * before driver have chance to process the first interrupt, then signal slot is
+		 * auto-reset after set_event wakeup the user space, just drop the second event as
+		 * the application only need wakeup once.
+		 */
+		if ((valid_id_bits > 31 || (1U << valid_id_bits) >= KFD_SIGNAL_EVENT_LIMIT) &&
+		    partial_id < KFD_SIGNAL_EVENT_LIMIT && slots[partial_id] == UNSIGNALED_EVENT_SLOT)
+			goto out_unlock;
+
 		if (valid_id_bits)
 			pr_debug_ratelimited("Partial ID invalid: %u (%u valid bits)\n",
 					     partial_id, valid_id_bits);
@@ -775,6 +786,7 @@ void kfd_signal_event_interrupt(u32 pasid, uint32_t partial_id,
 		}
 	}
 
+out_unlock:
 	rcu_read_unlock();
 	kfd_unref_process(p);
 }
@@ -1244,10 +1256,31 @@ void kfd_signal_reset_event(struct kfd_node *dev)
 	idx = srcu_read_lock(&kfd_processes_srcu);
 	hash_for_each_rcu(kfd_processes_table, temp, p, kfd_processes) {
 		int user_gpu_id = kfd_process_get_user_gpu_id(p, dev->id);
+		struct kfd_process_device *pdd = kfd_get_process_device_data(dev, p);
 
 		if (unlikely(user_gpu_id == -EINVAL)) {
 			WARN_ONCE(1, "Could not get user_gpu_id from dev->id:%x\n", dev->id);
 			continue;
+		}
+
+		if (unlikely(!pdd)) {
+			WARN_ONCE(1, "Could not get device data from pasid:0x%x\n", p->pasid);
+			continue;
+		}
+
+		if (dev->dqm->detect_hang_count && !pdd->has_reset_queue)
+			continue;
+
+		if (dev->dqm->detect_hang_count) {
+			struct amdgpu_task_info *ti;
+
+			ti = amdgpu_vm_get_task_info_pasid(dev->adev, p->pasid);
+			if (ti) {
+				dev_err(dev->adev->dev,
+					"Queues reset on process %s tid %d thread %s pid %d\n",
+					ti->process_name, ti->tgid, ti->task_name, ti->pid);
+				amdgpu_vm_put_task_info(ti);
+			}
 		}
 
 		rcu_read_lock();
@@ -1285,8 +1318,10 @@ void kfd_signal_poison_consumed_event(struct kfd_node *dev, u32 pasid)
 	uint32_t id = KFD_FIRST_NONSIGNAL_EVENT_ID;
 	int user_gpu_id;
 
-	if (!p)
+	if (!p) {
+		dev_warn(dev->adev->dev, "Not find process with pasid:%d\n", pasid);
 		return; /* Presumably process exited. */
+	}
 
 	user_gpu_id = kfd_process_get_user_gpu_id(p, dev->id);
 	if (unlikely(user_gpu_id == -EINVAL)) {
@@ -1322,6 +1357,8 @@ void kfd_signal_poison_consumed_event(struct kfd_node *dev, u32 pasid)
 		}
 	}
 
+	dev_warn(dev->adev->dev, "Send SIGBUS to process %s(pasid:%d)\n",
+		p->lead_thread->comm, pasid);
 	rcu_read_unlock();
 
 	/* user application will handle SIGBUS signal */
