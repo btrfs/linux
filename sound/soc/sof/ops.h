@@ -3,7 +3,7 @@
  * This file is provided under a dual BSD/GPLv2 license.  When using or
  * redistributing this file, you may do so under either license.
  *
- * Copyright(c) 2018 Intel Corporation. All rights reserved.
+ * Copyright(c) 2018 Intel Corporation
  *
  * Author: Liam Girdwood <liam.r.girdwood@linux.intel.com>
  */
@@ -523,12 +523,26 @@ static inline int snd_sof_pcm_platform_ack(struct snd_sof_dev *sdev,
 	return 0;
 }
 
-static inline u64 snd_sof_pcm_get_stream_position(struct snd_sof_dev *sdev,
-						  struct snd_soc_component *component,
-						  struct snd_pcm_substream *substream)
+static inline u64
+snd_sof_pcm_get_dai_frame_counter(struct snd_sof_dev *sdev,
+				  struct snd_soc_component *component,
+				  struct snd_pcm_substream *substream)
 {
-	if (sof_ops(sdev) && sof_ops(sdev)->get_stream_position)
-		return sof_ops(sdev)->get_stream_position(sdev, component, substream);
+	if (sof_ops(sdev) && sof_ops(sdev)->get_dai_frame_counter)
+		return sof_ops(sdev)->get_dai_frame_counter(sdev, component,
+							    substream);
+
+	return 0;
+}
+
+static inline u64
+snd_sof_pcm_get_host_byte_counter(struct snd_sof_dev *sdev,
+				  struct snd_soc_component *component,
+				  struct snd_pcm_substream *substream)
+{
+	if (sof_ops(sdev) && sof_ops(sdev)->get_host_byte_counter)
+		return sof_ops(sdev)->get_host_byte_counter(sdev, component,
+							    substream);
 
 	return 0;
 }
@@ -567,6 +581,15 @@ snd_sof_set_mach_params(struct snd_soc_acpi_mach *mach,
 		sof_ops(sdev)->set_mach_params(mach, sdev);
 }
 
+static inline bool
+snd_sof_is_chain_dma_supported(struct snd_sof_dev *sdev, u32 dai_type)
+{
+	if (sof_ops(sdev) && sof_ops(sdev)->is_chain_dma_supported)
+		return sof_ops(sdev)->is_chain_dma_supported(sdev, dai_type);
+
+	return false;
+}
+
 /**
  * snd_sof_dsp_register_poll_timeout - Periodically poll an address
  * until a condition is met or a timeout occurs
@@ -574,12 +597,12 @@ snd_sof_set_mach_params(struct snd_soc_acpi_mach *mach,
  * @addr: Address to poll
  * @val: Variable to read the value into
  * @cond: Break condition (usually involving @val)
- * @sleep_us: Maximum time to sleep between reads in us (0
- *            tight-loops).  Should be less than ~20ms since usleep_range
- *            is used (see Documentation/timers/timers-howto.rst).
+ * @sleep_us: Maximum time to sleep between reads in us (0 tight-loops). Please
+ *            read usleep_range() function description for details and
+ *            limitations.
  * @timeout_us: Timeout in us, 0 means never timeout
  *
- * Returns 0 on success and -ETIMEDOUT upon a timeout. In either
+ * Returns: 0 on success and -ETIMEDOUT upon a timeout. In either
  * case, the last read value at @addr is stored in @val. Must not
  * be called from atomic context if sleep_us or timeout_us are used.
  *

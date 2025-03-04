@@ -170,7 +170,7 @@ static int dpu_hw_cdm_setup_cdwn(struct dpu_hw_cdm *ctx, struct dpu_hw_cdm_cfg *
 static int dpu_hw_cdm_enable(struct dpu_hw_cdm *ctx, struct dpu_hw_cdm_cfg *cdm)
 {
 	struct dpu_hw_blk_reg_map *c = &ctx->hw;
-	const struct dpu_format *fmt;
+	const struct msm_format *fmt;
 	u32 opmode = 0;
 	u32 csc = 0;
 
@@ -179,14 +179,14 @@ static int dpu_hw_cdm_enable(struct dpu_hw_cdm *ctx, struct dpu_hw_cdm_cfg *cdm)
 
 	fmt = cdm->output_fmt;
 
-	if (!DPU_FORMAT_IS_YUV(fmt))
+	if (!MSM_FORMAT_IS_YUV(fmt))
 		return -EINVAL;
 
 	dpu_hw_csc_setup(&ctx->hw, CDM_CSC_10_MATRIX_COEFF_0, cdm->csc_cfg, true);
 	dpu_hw_cdm_setup_cdwn(ctx, cdm);
 
 	if (cdm->output_type == CDM_CDWN_OUTPUT_HDMI) {
-		if (fmt->chroma_sample != DPU_CHROMA_H1V2)
+		if (fmt->chroma_sample == CHROMA_H1V2)
 			return -EINVAL; /*unsupported format */
 		opmode = CDM_HDMI_PACK_OP_MODE_EN;
 		opmode |= (fmt->chroma_sample << 1);
@@ -222,6 +222,14 @@ static void dpu_hw_cdm_bind_pingpong_blk(struct dpu_hw_cdm *ctx, const enum dpu_
 	DPU_REG_WRITE(c, CDM_MUX, mux_cfg);
 }
 
+/**
+ * dpu_hw_cdm_init - initializes the cdm hw driver object.
+ * should be called once before accessing every cdm.
+ * @dev: DRM device handle
+ * @cfg: CDM catalog entry for which driver object is required
+ * @addr :   mapped register io address of MDSS
+ * @mdss_rev: mdss hw core revision
+ */
 struct dpu_hw_cdm *dpu_hw_cdm_init(struct drm_device *dev,
 				   const struct dpu_cdm_cfg *cfg, void __iomem *addr,
 				   const struct dpu_mdss_version *mdss_rev)

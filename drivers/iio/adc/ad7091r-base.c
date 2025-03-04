@@ -35,7 +35,7 @@ const struct iio_event_spec ad7091r_events[] = {
 		.mask_separate = BIT(IIO_EV_INFO_HYSTERESIS),
 	},
 };
-EXPORT_SYMBOL_NS_GPL(ad7091r_events, IIO_AD7091R);
+EXPORT_SYMBOL_NS_GPL(ad7091r_events, "IIO_AD7091R");
 
 static int ad7091r_set_channel(struct ad7091r_state *st, unsigned int channel)
 {
@@ -86,28 +86,25 @@ static int ad7091r_read_raw(struct iio_dev *iio_dev,
 	unsigned int read_val;
 	int ret;
 
-	mutex_lock(&st->lock);
+	guard(mutex)(&st->lock);
 
 	switch (m) {
 	case IIO_CHAN_INFO_RAW:
-		if (st->mode != AD7091R_MODE_COMMAND) {
-			ret = -EBUSY;
-			goto unlock;
-		}
+		if (st->mode != AD7091R_MODE_COMMAND)
+			return -EBUSY;
 
 		ret = ad7091r_read_one(iio_dev, chan->channel, &read_val);
 		if (ret)
-			goto unlock;
+			return ret;
 
 		*val = read_val;
-		ret = IIO_VAL_INT;
-		break;
+		return IIO_VAL_INT;
 
 	case IIO_CHAN_INFO_SCALE:
 		if (st->vref) {
 			ret = regulator_get_voltage(st->vref);
 			if (ret < 0)
-				goto unlock;
+				return ret;
 
 			*val = ret / 1000;
 		} else {
@@ -115,17 +112,11 @@ static int ad7091r_read_raw(struct iio_dev *iio_dev,
 		}
 
 		*val2 = chan->scan_type.realbits;
-		ret = IIO_VAL_FRACTIONAL_LOG2;
-		break;
+		return IIO_VAL_FRACTIONAL_LOG2;
 
 	default:
-		ret = -EINVAL;
-		break;
+		return -EINVAL;
 	}
-
-unlock:
-	mutex_unlock(&st->lock);
-	return ret;
 }
 
 static int ad7091r_read_event_config(struct iio_dev *indio_dev,
@@ -159,7 +150,8 @@ static int ad7091r_read_event_config(struct iio_dev *indio_dev,
 static int ad7091r_write_event_config(struct iio_dev *indio_dev,
 				      const struct iio_chan_spec *chan,
 				      enum iio_event_type type,
-				      enum iio_event_direction dir, int state)
+				      enum iio_event_direction dir,
+				      bool state)
 {
 	struct ad7091r_state *st = iio_priv(indio_dev);
 
@@ -378,7 +370,7 @@ int ad7091r_probe(struct device *dev, const struct ad7091r_init_info *init_info,
 
 	return devm_iio_device_register(dev, iio_dev);
 }
-EXPORT_SYMBOL_NS_GPL(ad7091r_probe, IIO_AD7091R);
+EXPORT_SYMBOL_NS_GPL(ad7091r_probe, "IIO_AD7091R");
 
 bool ad7091r_writeable_reg(struct device *dev, unsigned int reg)
 {
@@ -390,7 +382,7 @@ bool ad7091r_writeable_reg(struct device *dev, unsigned int reg)
 		return true;
 	}
 }
-EXPORT_SYMBOL_NS_GPL(ad7091r_writeable_reg, IIO_AD7091R);
+EXPORT_SYMBOL_NS_GPL(ad7091r_writeable_reg, "IIO_AD7091R");
 
 bool ad7091r_volatile_reg(struct device *dev, unsigned int reg)
 {
@@ -402,7 +394,7 @@ bool ad7091r_volatile_reg(struct device *dev, unsigned int reg)
 		return false;
 	}
 }
-EXPORT_SYMBOL_NS_GPL(ad7091r_volatile_reg, IIO_AD7091R);
+EXPORT_SYMBOL_NS_GPL(ad7091r_volatile_reg, "IIO_AD7091R");
 
 MODULE_AUTHOR("Beniamin Bia <beniamin.bia@analog.com>");
 MODULE_DESCRIPTION("Analog Devices AD7091Rx multi-channel converters");

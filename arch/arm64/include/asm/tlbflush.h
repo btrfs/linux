@@ -142,17 +142,24 @@ static inline unsigned long get_trans_granule(void)
  * EL1, Inner Shareable".
  *
  */
-#define __TLBI_VADDR_RANGE(baddr, asid, scale, num, ttl)			\
-	({									\
-		unsigned long __ta = (baddr);					\
-		unsigned long __ttl = (ttl >= 1 && ttl <= 3) ? ttl : 0;		\
-		__ta &= GENMASK_ULL(36, 0);					\
-		__ta |= __ttl << 37;						\
-		__ta |= (unsigned long)(num) << 39;				\
-		__ta |= (unsigned long)(scale) << 44;				\
-		__ta |= get_trans_granule() << 46;				\
-		__ta |= (unsigned long)(asid) << 48;				\
-		__ta;								\
+#define TLBIR_ASID_MASK		GENMASK_ULL(63, 48)
+#define TLBIR_TG_MASK		GENMASK_ULL(47, 46)
+#define TLBIR_SCALE_MASK	GENMASK_ULL(45, 44)
+#define TLBIR_NUM_MASK		GENMASK_ULL(43, 39)
+#define TLBIR_TTL_MASK		GENMASK_ULL(38, 37)
+#define TLBIR_BADDR_MASK	GENMASK_ULL(36,  0)
+
+#define __TLBI_VADDR_RANGE(baddr, asid, scale, num, ttl)		\
+	({								\
+		unsigned long __ta = 0;					\
+		unsigned long __ttl = (ttl >= 1 && ttl <= 3) ? ttl : 0;	\
+		__ta |= FIELD_PREP(TLBIR_BADDR_MASK, baddr);		\
+		__ta |= FIELD_PREP(TLBIR_TTL_MASK, __ttl);		\
+		__ta |= FIELD_PREP(TLBIR_NUM_MASK, num);		\
+		__ta |= FIELD_PREP(TLBIR_SCALE_MASK, scale);		\
+		__ta |= FIELD_PREP(TLBIR_TG_MASK, get_trans_granule());	\
+		__ta |= FIELD_PREP(TLBIR_ASID_MASK, asid);		\
+		__ta;							\
 	})
 
 /* These macros are used by the TLBI RANGE feature. */
@@ -161,12 +168,18 @@ static inline unsigned long get_trans_granule(void)
 #define MAX_TLBI_RANGE_PAGES		__TLBI_RANGE_PAGES(31, 3)
 
 /*
- * Generate 'num' values from -1 to 30 with -1 rejected by the
- * __flush_tlb_range() loop below.
+ * Generate 'num' values from -1 to 31 with -1 rejected by the
+ * __flush_tlb_range() loop below. Its return value is only
+ * significant for a maximum of MAX_TLBI_RANGE_PAGES pages. If
+ * 'pages' is more than that, you must iterate over the overall
+ * range.
  */
-#define TLBI_RANGE_MASK			GENMASK_ULL(4, 0)
-#define __TLBI_RANGE_NUM(pages, scale)	\
-	((((pages) >> (5 * (scale) + 1)) & TLBI_RANGE_MASK) - 1)
+#define __TLBI_RANGE_NUM(pages, scale)					\
+	({								\
+		int __pages = min((pages),				\
+				  __TLBI_RANGE_PAGES(31, (scale)));	\
+		(__pages >> (5 * (scale) + 1)) - 1;			\
+	})
 
 /*
  *	TLB Invalidation
@@ -379,10 +392,6 @@ static inline void arch_tlbbatch_flush(struct arch_tlbflush_unmap_batch *batch)
  * 3. If there is 1 page remaining, flush it through non-range operations. Range
  *    operations can only span an even number of pages. We save this for last to
  *    ensure 64KB start alignment is maintained for the LPA2 case.
- *
- * Note that certain ranges can be represented by either num = 31 and
- * scale or num = 0 and scale + 1. The loop below favours the latter
- * since num is limited to 30 by the __TLBI_RANGE_NUM() macro.
  */
 #define __flush_tlb_range_op(op, start, pages, stride,			\
 				asid, tlb_level, tlbi_user, lpa2)	\
@@ -422,7 +431,24 @@ do {									\
 #define __flush_s2_tlb_range_op(op, start, pages, stride, tlb_level) \
 	__flush_tlb_range_op(op, start, pages, stride, 0, tlb_level, false, kvm_lpa2_is_enabled());
 
-static inline void __flush_tlb_range(struct vm_area_struct *vma,
+static inline bool __flush_tlb_range_limit_excess(unsigned long start,
+		unsigned long end, unsigned long pages, unsigned long stride)
+{
+	/*
+	 * When the system does not support TLB range based flush
+	 * operation, (MAX_DVM_OPS - 1) pages can be handled. But
+	 * with TLB range based operation, MAX_TLBI_RANGE_PAGES
+	 * pages can be handled.
+	 */
+	if ((!system_supports_tlb_range() &&
+	     (end - start) >= (MAX_DVM_OPS * stride)) ||
+	    pages > MAX_TLBI_RANGE_PAGES)
+		return true;
+
+	return false;
+}
+
+static inline void __flush_tlb_range_nosync(struct vm_area_struct *vma,
 				     unsigned long start, unsigned long end,
 				     unsigned long stride, bool last_level,
 				     int tlb_level)
@@ -433,15 +459,7 @@ static inline void __flush_tlb_range(struct vm_area_struct *vma,
 	end = round_up(end, stride);
 	pages = (end - start) >> PAGE_SHIFT;
 
-	/*
-	 * When not uses TLB range ops, we can handle up to
-	 * (MAX_DVM_OPS - 1) pages;
-	 * When uses TLB range ops, we can handle up to
-	 * (MAX_TLBI_RANGE_PAGES - 1) pages.
-	 */
-	if ((!system_supports_tlb_range() &&
-	     (end - start) >= (MAX_DVM_OPS * stride)) ||
-	    pages >= MAX_TLBI_RANGE_PAGES) {
+	if (__flush_tlb_range_limit_excess(start, end, pages, stride)) {
 		flush_tlb_mm(vma->vm_mm);
 		return;
 	}
@@ -456,8 +474,17 @@ static inline void __flush_tlb_range(struct vm_area_struct *vma,
 		__flush_tlb_range_op(vae1is, start, pages, stride, asid,
 				     tlb_level, true, lpa2_is_enabled());
 
-	dsb(ish);
 	mmu_notifier_arch_invalidate_secondary_tlbs(vma->vm_mm, start, end);
+}
+
+static inline void __flush_tlb_range(struct vm_area_struct *vma,
+				     unsigned long start, unsigned long end,
+				     unsigned long stride, bool last_level,
+				     int tlb_level)
+{
+	__flush_tlb_range_nosync(vma, start, end, stride,
+				 last_level, tlb_level);
+	dsb(ish);
 }
 
 static inline void flush_tlb_range(struct vm_area_struct *vma,
@@ -474,19 +501,21 @@ static inline void flush_tlb_range(struct vm_area_struct *vma,
 
 static inline void flush_tlb_kernel_range(unsigned long start, unsigned long end)
 {
-	unsigned long addr;
+	const unsigned long stride = PAGE_SIZE;
+	unsigned long pages;
 
-	if ((end - start) > (MAX_DVM_OPS * PAGE_SIZE)) {
+	start = round_down(start, stride);
+	end = round_up(end, stride);
+	pages = (end - start) >> PAGE_SHIFT;
+
+	if (__flush_tlb_range_limit_excess(start, end, pages, stride)) {
 		flush_tlb_all();
 		return;
 	}
 
-	start = __TLBI_VADDR(start, 0);
-	end = __TLBI_VADDR(end, 0);
-
 	dsb(ishst);
-	for (addr = start; addr < end; addr += 1 << (PAGE_SHIFT - 12))
-		__tlbi(vaale1is, addr);
+	__flush_tlb_range_op(vaale1is, start, pages, stride, 0,
+			     TLBI_TTL_UNKNOWN, false, lpa2_is_enabled());
 	dsb(ish);
 	isb();
 }

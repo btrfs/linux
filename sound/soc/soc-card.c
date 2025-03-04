@@ -5,6 +5,9 @@
 // Copyright (C) 2019 Renesas Electronics Corp.
 // Kuninori Morimoto <kuninori.morimoto.gx@renesas.com>
 //
+
+#include <linux/lockdep.h>
+#include <linux/rwsem.h>
 #include <sound/soc.h>
 #include <sound/jack.h>
 
@@ -29,16 +32,10 @@ static inline int _soc_card_ret(struct snd_soc_card *card,
 struct snd_kcontrol *snd_soc_card_get_kcontrol(struct snd_soc_card *soc_card,
 					       const char *name)
 {
-	struct snd_card *card = soc_card->snd_card;
-	struct snd_kcontrol *kctl;
-
 	if (unlikely(!name))
 		return NULL;
 
-	list_for_each_entry(kctl, &card->controls, list)
-		if (!strncmp(kctl->id.name, name, sizeof(kctl->id.name)))
-			return kctl;
-	return NULL;
+	return snd_ctl_find_id_mixer(soc_card->snd_card, name);
 }
 EXPORT_SYMBOL_GPL(snd_soc_card_get_kcontrol);
 
@@ -222,7 +219,7 @@ int snd_soc_card_set_bias_level(struct snd_soc_card *card,
 {
 	int ret = 0;
 
-	if (card && card->set_bias_level)
+	if (card->set_bias_level)
 		ret = card->set_bias_level(card, dapm, level);
 
 	return soc_card_ret(card, ret);
@@ -234,7 +231,7 @@ int snd_soc_card_set_bias_level_post(struct snd_soc_card *card,
 {
 	int ret = 0;
 
-	if (card && card->set_bias_level_post)
+	if (card->set_bias_level_post)
 		ret = card->set_bias_level_post(card, dapm, level);
 
 	return soc_card_ret(card, ret);

@@ -209,7 +209,6 @@ int __init register_intc_controller(struct intc_desc *desc)
 		goto err0;
 
 	INIT_LIST_HEAD(&d->list);
-	list_add_tail(&d->list, &intc_list);
 
 	raw_spin_lock_init(&d->lock);
 	INIT_RADIX_TREE(&d->tree, GFP_ATOMIC);
@@ -369,6 +368,7 @@ int __init register_intc_controller(struct intc_desc *desc)
 
 	d->skip_suspend = desc->skip_syscore_suspend;
 
+	list_add_tail(&d->list, &intc_list);
 	nr_intc_controllers++;
 
 	return 0;
@@ -455,7 +455,7 @@ struct syscore_ops intc_syscore_ops = {
 	.resume		= intc_resume,
 };
 
-struct bus_type intc_subsys = {
+const struct bus_type intc_subsys = {
 	.name		= "intc",
 	.dev_name	= "intc",
 };

@@ -1849,7 +1849,7 @@ static int s5k5baf_parse_device_node(struct s5k5baf *state, struct device *dev)
 			 state->mclk_frequency);
 	}
 
-	node_ep = of_graph_get_next_endpoint(node, NULL);
+	node_ep = of_graph_get_endpoint_by_regs(node, 0, -1);
 	if (!node_ep) {
 		dev_err(dev, "no endpoint defined at node %pOF\n", node);
 		return -EINVAL;
@@ -2018,8 +2018,8 @@ static void s5k5baf_remove(struct i2c_client *c)
 }
 
 static const struct i2c_device_id s5k5baf_id[] = {
-	{ S5K5BAF_DRIVER_NAME, 0 },
-	{ },
+	{ S5K5BAF_DRIVER_NAME },
+	{ }
 };
 MODULE_DEVICE_TABLE(i2c, s5k5baf_id);
 

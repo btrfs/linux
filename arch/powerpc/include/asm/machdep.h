@@ -4,24 +4,29 @@
 #ifdef __KERNEL__
 
 #include <linux/compiler.h>
-#include <linux/seq_file.h>
 #include <linux/init.h>
-#include <linux/dma-mapping.h>
 #include <linux/export.h>
+#include <linux/time64.h>
+
+#include <asm/page.h>
 
 struct pt_regs;
 struct pci_bus;
+struct device;
 struct device_node;
 struct iommu_table;
 struct rtc_time;
 struct file;
+struct pci_dev;
 struct pci_controller;
 struct kimage;
 struct pci_host_bridge;
+struct seq_file;
 
 struct machdep_calls {
 	const char	*name;
 	const char	*compatible;
+	const char * const *compatibles;
 #ifdef CONFIG_PPC64
 #ifdef CONFIG_PM
 	void		(*iommu_restore)(void);

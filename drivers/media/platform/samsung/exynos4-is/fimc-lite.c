@@ -441,8 +441,6 @@ static const struct vb2_ops fimc_lite_qops = {
 	.queue_setup	 = queue_setup,
 	.buf_prepare	 = buffer_prepare,
 	.buf_queue	 = buffer_queue,
-	.wait_prepare	 = vb2_ops_wait_prepare,
-	.wait_finish	 = vb2_ops_wait_finish,
 	.start_streaming = start_streaming,
 	.stop_streaming	 = stop_streaming,
 };
@@ -738,7 +736,7 @@ static int fimc_lite_try_fmt_mplane(struct file *file, void *fh,
 static int fimc_lite_s_fmt_mplane(struct file *file, void *priv,
 				  struct v4l2_format *f)
 {
-	struct v4l2_pix_format_mplane *pixm = &f->fmt.pix_mp;
+	const struct v4l2_pix_format_mplane *pixm = &f->fmt.pix_mp;
 	struct fimc_lite *fimc = video_drvdata(file);
 	struct flite_frame *frame = &fimc->out_frame;
 	const struct fimc_fmt *fmt = NULL;
@@ -1654,7 +1652,7 @@ MODULE_DEVICE_TABLE(of, flite_of_match);
 
 static struct platform_driver fimc_lite_driver = {
 	.probe		= fimc_lite_probe,
-	.remove_new	= fimc_lite_remove,
+	.remove		= fimc_lite_remove,
 	.driver = {
 		.of_match_table = flite_of_match,
 		.name		= FIMC_LITE_DRV_NAME,
@@ -1662,5 +1660,6 @@ static struct platform_driver fimc_lite_driver = {
 	}
 };
 module_platform_driver(fimc_lite_driver);
+MODULE_DESCRIPTION("Samsung EXYNOS FIMC-LITE (camera host interface) driver");
 MODULE_LICENSE("GPL");
 MODULE_ALIAS("platform:" FIMC_LITE_DRV_NAME);

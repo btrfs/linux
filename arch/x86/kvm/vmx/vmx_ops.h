@@ -15,7 +15,7 @@ void vmwrite_error(unsigned long field, unsigned long value);
 void vmclear_error(struct vmcs *vmcs, u64 phys_addr);
 void vmptrld_error(struct vmcs *vmcs, u64 phys_addr);
 void invvpid_error(unsigned long ext, u16 vpid, gva_t gva);
-void invept_error(unsigned long ext, u64 eptp, gpa_t gpa);
+void invept_error(unsigned long ext, u64 eptp);
 
 #ifndef CONFIG_CC_HAS_ASM_GOTO_OUTPUT
 /*
@@ -47,7 +47,7 @@ static __always_inline void vmcs_check16(unsigned long field)
 	BUILD_BUG_ON_MSG(__builtin_constant_p(field) && ((field) & 0x6001) == 0x2001,
 			 "16-bit accessor invalid for 64-bit high field");
 	BUILD_BUG_ON_MSG(__builtin_constant_p(field) && ((field) & 0x6000) == 0x4000,
-			 "16-bit accessor invalid for 32-bit high field");
+			 "16-bit accessor invalid for 32-bit field");
 	BUILD_BUG_ON_MSG(__builtin_constant_p(field) && ((field) & 0x6000) == 0x6000,
 			 "16-bit accessor invalid for natural width field");
 }
@@ -94,7 +94,7 @@ static __always_inline unsigned long __vmcs_readl(unsigned long field)
 
 #ifdef CONFIG_CC_HAS_ASM_GOTO_OUTPUT
 
-	asm_volatile_goto("1: vmread %[field], %[output]\n\t"
+	asm_goto_output("1: vmread %[field], %[output]\n\t"
 			  "jna %l[do_fail]\n\t"
 
 			  _ASM_EXTABLE(1b, %l[do_exception])
@@ -188,7 +188,7 @@ static __always_inline unsigned long vmcs_readl(unsigned long field)
 
 #define vmx_asm1(insn, op1, error_args...)				\
 do {									\
-	asm_volatile_goto("1: " __stringify(insn) " %0\n\t"		\
+	asm goto("1: " __stringify(insn) " %0\n\t"			\
 			  ".byte 0x2e\n\t" /* branch not taken hint */	\
 			  "jna %l[error]\n\t"				\
 			  _ASM_EXTABLE(1b, %l[fault])			\
@@ -205,7 +205,7 @@ fault:									\
 
 #define vmx_asm2(insn, op1, op2, error_args...)				\
 do {									\
-	asm_volatile_goto("1: "  __stringify(insn) " %1, %0\n\t"	\
+	asm goto("1: "  __stringify(insn) " %1, %0\n\t"			\
 			  ".byte 0x2e\n\t" /* branch not taken hint */	\
 			  "jna %l[error]\n\t"				\
 			  _ASM_EXTABLE(1b, %l[fault])			\
@@ -312,13 +312,13 @@ static inline void __invvpid(unsigned long ext, u16 vpid, gva_t gva)
 	vmx_asm2(invvpid, "r"(ext), "m"(operand), ext, vpid, gva);
 }
 
-static inline void __invept(unsigned long ext, u64 eptp, gpa_t gpa)
+static inline void __invept(unsigned long ext, u64 eptp)
 {
 	struct {
-		u64 eptp, gpa;
-	} operand = {eptp, gpa};
-
-	vmx_asm2(invept, "r"(ext), "m"(operand), ext, eptp, gpa);
+		u64 eptp;
+		u64 reserved_0;
+	} operand = { eptp, 0 };
+	vmx_asm2(invept, "r"(ext), "m"(operand), ext, eptp);
 }
 
 static inline void vpid_sync_vcpu_single(int vpid)
@@ -355,13 +355,13 @@ static inline void vpid_sync_vcpu_addr(int vpid, gva_t addr)
 
 static inline void ept_sync_global(void)
 {
-	__invept(VMX_EPT_EXTENT_GLOBAL, 0, 0);
+	__invept(VMX_EPT_EXTENT_GLOBAL, 0);
 }
 
 static inline void ept_sync_context(u64 eptp)
 {
 	if (cpu_has_vmx_invept_context())
-		__invept(VMX_EPT_EXTENT_CONTEXT, eptp, 0);
+		__invept(VMX_EPT_EXTENT_CONTEXT, eptp);
 	else
 		ept_sync_global();
 }

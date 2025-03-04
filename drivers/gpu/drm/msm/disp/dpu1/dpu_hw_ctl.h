@@ -83,7 +83,8 @@ struct dpu_hw_ctl_ops {
 
 	/**
 	 * Clear the value of the cached pending_flush_mask
-	 * No effect on hardware
+	 * No effect on hardware.
+	 * Required to be implemented.
 	 * @ctx       : ctl path ctx pointer
 	 */
 	void (*clear_pending_flush)(struct dpu_hw_ctl *ctx);
@@ -121,6 +122,15 @@ struct dpu_hw_ctl_ops {
 	 */
 	void (*update_pending_flush_intf)(struct dpu_hw_ctl *ctx,
 		enum dpu_intf blk);
+
+	/**
+	 * OR in the given flushbits to the cached pending_(periph_)flush_mask
+	 * No effect on hardware
+	 * @ctx       : ctl path ctx pointer
+	 * @blk       : interface block index
+	 */
+	void (*update_pending_flush_periph)(struct dpu_hw_ctl *ctx,
+					    enum dpu_intf blk);
 
 	/**
 	 * OR in the given flushbits to the cached pending_(merge_3d_)flush_mask
@@ -264,6 +274,7 @@ struct dpu_hw_ctl {
 	u32 pending_flush_mask;
 	u32 pending_intf_flush_mask;
 	u32 pending_wb_flush_mask;
+	u32 pending_periph_flush_mask;
 	u32 pending_merge_3d_flush_mask;
 	u32 pending_dspp_flush_mask[DSPP_MAX - DSPP_0];
 	u32 pending_dsc_flush_mask;
@@ -283,15 +294,6 @@ static inline struct dpu_hw_ctl *to_dpu_hw_ctl(struct dpu_hw_blk *hw)
 	return container_of(hw, struct dpu_hw_ctl, base);
 }
 
-/**
- * dpu_hw_ctl_init() - Initializes the ctl_path hw driver object.
- * Should be called before accessing any ctl_path register.
- * @dev:  Corresponding device for devres management
- * @cfg:  ctl_path catalog entry for which driver object is required
- * @addr: mapped register io address of MDP
- * @mixer_count: Number of mixers in @mixer
- * @mixer: Pointer to an array of Layer Mixers defined in the catalog
- */
 struct dpu_hw_ctl *dpu_hw_ctl_init(struct drm_device *dev,
 				   const struct dpu_ctl_cfg *cfg,
 				   void __iomem *addr,
