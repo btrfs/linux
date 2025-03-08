@@ -30,7 +30,7 @@
 			compatible = "brcm,brahma-b53";
 			reg = <0x0>;
 			enable-method = "spin-table";
-			cpu-release-addr = <0x0 0xfff8>;
+			cpu-release-addr = <0x0 0xff8>;
 			next-level-cache = <&l2>;
 		};
 
@@ -39,7 +39,7 @@
 			compatible = "brcm,brahma-b53";
 			reg = <0x1>;
 			enable-method = "spin-table";
-			cpu-release-addr = <0x0 0xfff8>;
+			cpu-release-addr = <0x0 0xff8>;
 			next-level-cache = <&l2>;
 		};
 
@@ -48,7 +48,7 @@
 			compatible = "brcm,brahma-b53";
 			reg = <0x2>;
 			enable-method = "spin-table";
-			cpu-release-addr = <0x0 0xfff8>;
+			cpu-release-addr = <0x0 0xff8>;
 			next-level-cache = <&l2>;
 		};
 
@@ -57,7 +57,7 @@
 			compatible = "brcm,brahma-b53";
 			reg = <0x3>;
 			enable-method = "spin-table";
-			cpu-release-addr = <0x0 0xfff8>;
+			cpu-release-addr = <0x0 0xff8>;
 			next-level-cache = <&l2>;
 		};
 
@@ -65,6 +65,16 @@
 			compatible = "cache";
 			cache-level = <2>;
 			cache-unified;
+		};
+	};
+
+	reserved-memory {
+		#address-cells = <2>;
+		#size-cells = <2>;
+		ranges;
+
+		cfe-stub@0 {
+			reg = <0x0 0x0 0x0 0x1000>;
 		};
 	};
 
@@ -226,9 +236,6 @@
 					     <GIC_SPI 58 IRQ_TYPE_LEVEL_HIGH>;
 				brcm,num-gphy = <5>;
 				brcm,num-rgmii-ports = <2>;
-
-				#address-cells = <1>;
-				#size-cells = <0>;
 
 				ports: ports {
 					#address-cells = <1>;
@@ -589,7 +596,7 @@
 			status = "disabled";
 		};
 
-		nand-controller@1800 {
+		nand_controller: nand-controller@1800 {
 			#address-cells = <1>;
 			#size-cells = <0>;
 			compatible = "brcm,nand-bcm63138", "brcm,brcmnand-v7.1", "brcm,brcmnand";
@@ -597,7 +604,8 @@
 			reg-names = "nand", "nand-int-base";
 			interrupts = <GIC_SPI 37 IRQ_TYPE_LEVEL_HIGH>;
 			interrupt-names = "nand_ctlrdy";
-			status = "okay";
+			brcm,wp-not-connected;
+			status = "disabled";
 
 			nandcs: nand@0 {
 				compatible = "brcm,nandcs";

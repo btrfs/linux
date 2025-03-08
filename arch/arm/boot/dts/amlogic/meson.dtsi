@@ -23,7 +23,7 @@
 		#size-cells = <1>;
 		ranges;
 
-		cbus: cbus@c1100000 {
+		cbus: bus@c1100000 {
 			compatible = "simple-bus";
 			reg = <0xc1100000 0x200000>;
 			#address-cells = <1>;
@@ -206,7 +206,7 @@
 			};
 		};
 
-		aobus: aobus@c8100000 {
+		aobus: bus@c8100000 {
 			compatible = "simple-bus";
 			reg = <0xc8100000 0x100000>;
 			#address-cells = <1>;
@@ -255,8 +255,6 @@
 
 		usb0: usb@c9040000 {
 			compatible = "snps,dwc2";
-			#address-cells = <1>;
-			#size-cells = <0>;
 			reg = <0xc9040000 0x40000>;
 			interrupts = <GIC_SPI 30 IRQ_TYPE_LEVEL_HIGH>;
 			phys = <&usb0_phy>;
@@ -270,8 +268,6 @@
 
 		usb1: usb@c90c0000 {
 			compatible = "snps,dwc2";
-			#address-cells = <1>;
-			#size-cells = <0>;
 			reg = <0xc90c0000 0x40000>;
 			interrupts = <GIC_SPI 31 IRQ_TYPE_LEVEL_HIGH>;
 			phys = <&usb1_phy>;
@@ -302,7 +298,7 @@
 			reg = <0xd9040000 0x10000>;
 		};
 
-		secbus: secbus@da000000 {
+		secbus: bus@da000000 {
 			compatible = "simple-bus";
 			reg = <0xda000000 0x6000>;
 			#address-cells = <1>;

@@ -38,7 +38,7 @@ struct afs_server *afs_find_server(struct afs_net *net, const struct rxrpc_peer 
 		seq++; /* 2 on the 1st/lockless path, otherwise odd */
 		read_seqbegin_or_lock(&net->fs_addr_lock, &seq);
 
-		hlist_for_each_entry_rcu(server, &net->fs_addresses6, addr6_link) {
+		hlist_for_each_entry_rcu(server, &net->fs_addresses, addr_link) {
 			estate = rcu_dereference(server->endpoint_state);
 			alist = estate->addresses;
 			for (i = 0; i < alist->nr_addrs; i++)
@@ -163,6 +163,8 @@ static struct afs_server *afs_install_server(struct afs_cell *cell,
 	rb_insert_color(&server->uuid_rb, &net->fs_servers);
 	hlist_add_head_rcu(&server->proc_link, &net->fs_proc);
 
+	afs_get_cell(cell, afs_cell_trace_get_server);
+
 added_dup:
 	write_seqlock(&net->fs_addr_lock);
 	estate = rcu_dereference_protected(server->endpoint_state,
@@ -177,10 +179,8 @@ added_dup:
 	 * bit, but anything we might want to do gets messy and memory
 	 * intensive.
 	 */
-	if (alist->nr_ipv4 > 0)
-		hlist_add_head_rcu(&server->addr4_link, &net->fs_addresses4);
-	if (alist->nr_addrs > alist->nr_ipv4)
-		hlist_add_head_rcu(&server->addr6_link, &net->fs_addresses6);
+	if (alist->nr_addrs > 0)
+		hlist_add_head_rcu(&server->addr_link, &net->fs_addresses);
 
 	write_sequnlock(&net->fs_addr_lock);
 
@@ -444,6 +444,7 @@ static void afs_server_rcu(struct rcu_head *rcu)
 			 atomic_read(&server->active), afs_server_trace_free);
 	afs_put_endpoint_state(rcu_access_pointer(server->endpoint_state),
 			       afs_estate_trace_put_server);
+	afs_put_cell(server->cell, afs_cell_trace_put_server);
 	kfree(server);
 }
 
@@ -511,10 +512,8 @@ static void afs_gc_servers(struct afs_net *net, struct afs_server *gc_list)
 
 			list_del(&server->probe_link);
 			hlist_del_rcu(&server->proc_link);
-			if (!hlist_unhashed(&server->addr4_link))
-				hlist_del_rcu(&server->addr4_link);
-			if (!hlist_unhashed(&server->addr6_link))
-				hlist_del_rcu(&server->addr6_link);
+			if (!hlist_unhashed(&server->addr_link))
+				hlist_del_rcu(&server->addr_link);
 		}
 		write_sequnlock(&net->fs_lock);
 

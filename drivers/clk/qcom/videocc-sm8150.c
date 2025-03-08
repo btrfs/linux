@@ -24,7 +24,7 @@ enum {
 	P_VIDEO_PLL0_OUT_MAIN,
 };
 
-static struct pll_vco trion_vco[] = {
+static const struct pll_vco trion_vco[] = {
 	{ 249600000, 2000000000, 0 },
 };
 
@@ -215,7 +215,7 @@ static const struct regmap_config video_cc_sm8150_regmap_config = {
 };
 
 static const struct qcom_reset_map video_cc_sm8150_resets[] = {
-	[VIDEO_CC_MVSC_CORE_CLK_BCR] = { 0x850, 2 },
+	[VIDEO_CC_MVSC_CORE_CLK_BCR] = { .reg = 0x850, .bit = 2, .udelay = 150 },
 	[VIDEO_CC_INTERFACE_BCR] = { 0x8f0 },
 	[VIDEO_CC_MVS0_BCR] = { 0x870 },
 	[VIDEO_CC_MVS1_BCR] = { 0x8b0 },
@@ -262,7 +262,7 @@ static int video_cc_sm8150_probe(struct platform_device *pdev)
 	/* Keep VIDEO_CC_XO_CLK ALWAYS-ON */
 	regmap_update_bits(regmap, 0x984, 0x1, 0x1);
 
-	ret = qcom_cc_really_probe(pdev, &video_cc_sm8150_desc, regmap);
+	ret = qcom_cc_really_probe(&pdev->dev, &video_cc_sm8150_desc, regmap);
 
 	pm_runtime_put_sync(&pdev->dev);
 
@@ -277,17 +277,7 @@ static struct platform_driver video_cc_sm8150_driver = {
 	},
 };
 
-static int __init video_cc_sm8150_init(void)
-{
-	return platform_driver_register(&video_cc_sm8150_driver);
-}
-subsys_initcall(video_cc_sm8150_init);
-
-static void __exit video_cc_sm8150_exit(void)
-{
-	platform_driver_unregister(&video_cc_sm8150_driver);
-}
-module_exit(video_cc_sm8150_exit);
+module_platform_driver(video_cc_sm8150_driver);
 
 MODULE_LICENSE("GPL v2");
 MODULE_DESCRIPTION("QTI VIDEOCC SM8150 Driver");

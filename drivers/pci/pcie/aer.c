@@ -180,7 +180,8 @@ static int disable_ecrc_checking(struct pci_dev *dev)
 }
 
 /**
- * pcie_set_ecrc_checking - set/unset PCIe ECRC checking for a device based on global policy
+ * pcie_set_ecrc_checking - set/unset PCIe ECRC checking for a device based
+ * on global policy
  * @dev: the PCI device
  */
 void pcie_set_ecrc_checking(struct pci_dev *dev)
@@ -230,7 +231,7 @@ int pcie_aer_is_native(struct pci_dev *dev)
 
 	return pcie_ports_native || host->native_aer;
 }
-EXPORT_SYMBOL_NS_GPL(pcie_aer_is_native, CXL);
+EXPORT_SYMBOL_NS_GPL(pcie_aer_is_native, "CXL");
 
 static int pci_enable_pcie_error_reporting(struct pci_dev *dev)
 {
@@ -664,13 +665,6 @@ static void pci_rootport_aer_stats_incr(struct pci_dev *pdev,
 	}
 }
 
-static void __print_tlp_header(struct pci_dev *dev,
-			       struct aer_header_log_regs *t)
-{
-	pci_err(dev, "  TLP Header: %08x %08x %08x %08x\n",
-		t->dw0, t->dw1, t->dw2, t->dw3);
-}
-
 static void __aer_print_error(struct pci_dev *dev,
 			      struct aer_err_info *info)
 {
@@ -725,7 +719,7 @@ void aer_print_error(struct pci_dev *dev, struct aer_err_info *info)
 	__aer_print_error(dev, info);
 
 	if (info->tlp_header_valid)
-		__print_tlp_header(dev, &info->tlp);
+		pcie_print_tlp_log(dev, &info->tlp, dev_fmt("  "));
 
 out:
 	if (info->id && info->error_dev_num > 1 && info->id == id)
@@ -797,12 +791,12 @@ void pci_print_aer(struct pci_dev *dev, int aer_severity,
 			aer->uncor_severity);
 
 	if (tlp_header_valid)
-		__print_tlp_header(dev, &aer->header_log);
+		pcie_print_tlp_log(dev, &aer->header_log, dev_fmt("  "));
 
 	trace_aer_event(dev_name(&dev->dev), (status & ~mask),
 			aer_severity, tlp_header_valid, &aer->header_log);
 }
-EXPORT_SYMBOL_NS_GPL(pci_print_aer, CXL);
+EXPORT_SYMBOL_NS_GPL(pci_print_aer, "CXL");
 
 /**
  * add_error_device - list device to be handled
@@ -1149,14 +1143,16 @@ static void aer_recover_work_func(struct work_struct *work)
 			continue;
 		}
 		pci_print_aer(pdev, entry.severity, entry.regs);
+
 		/*
-		 * Memory for aer_capability_regs(entry.regs) is being allocated from the
-		 * ghes_estatus_pool to protect it from overwriting when multiple sections
-		 * are present in the error status. Thus free the same after processing
-		 * the data.
+		 * Memory for aer_capability_regs(entry.regs) is being
+		 * allocated from the ghes_estatus_pool to protect it from
+		 * overwriting when multiple sections are present in the
+		 * error status. Thus free the same after processing the
+		 * data.
 		 */
 		ghes_estatus_pool_region_free((unsigned long)entry.regs,
-					      sizeof(struct aer_capability_regs));
+					    sizeof(struct aer_capability_regs));
 
 		if (entry.severity == AER_NONFATAL)
 			pcie_do_recovery(pdev, pci_channel_io_normal,
@@ -1210,7 +1206,7 @@ int aer_get_device_error_info(struct pci_dev *dev, struct aer_err_info *info)
 {
 	int type = pci_pcie_type(dev);
 	int aer = dev->aer_cap;
-	int temp;
+	u32 aercc;
 
 	/* Must reset in this function */
 	info->status = 0;
@@ -1241,19 +1237,15 @@ int aer_get_device_error_info(struct pci_dev *dev, struct aer_err_info *info)
 			return 0;
 
 		/* Get First Error Pointer */
-		pci_read_config_dword(dev, aer + PCI_ERR_CAP, &temp);
-		info->first_error = PCI_ERR_CAP_FEP(temp);
+		pci_read_config_dword(dev, aer + PCI_ERR_CAP, &aercc);
+		info->first_error = PCI_ERR_CAP_FEP(aercc);
 
 		if (info->status & AER_LOG_TLP_MASKS) {
 			info->tlp_header_valid = 1;
-			pci_read_config_dword(dev,
-				aer + PCI_ERR_HEADER_LOG, &info->tlp.dw0);
-			pci_read_config_dword(dev,
-				aer + PCI_ERR_HEADER_LOG + 4, &info->tlp.dw1);
-			pci_read_config_dword(dev,
-				aer + PCI_ERR_HEADER_LOG + 8, &info->tlp.dw2);
-			pci_read_config_dword(dev,
-				aer + PCI_ERR_HEADER_LOG + 12, &info->tlp.dw3);
+			pcie_read_tlp_log(dev, aer + PCI_ERR_HEADER_LOG,
+					  aer + PCI_ERR_PREFIX_LOG,
+					  aer_tlp_log_len(dev, aercc),
+					  &info->tlp);
 		}
 	}
 
@@ -1505,6 +1497,22 @@ static int aer_probe(struct pcie_device *dev)
 	return 0;
 }
 
+static int aer_suspend(struct pcie_device *dev)
+{
+	struct aer_rpc *rpc = get_service_data(dev);
+
+	aer_disable_rootport(rpc);
+	return 0;
+}
+
+static int aer_resume(struct pcie_device *dev)
+{
+	struct aer_rpc *rpc = get_service_data(dev);
+
+	aer_enable_rootport(rpc);
+	return 0;
+}
+
 /**
  * aer_root_reset - reset Root Port hierarchy, RCEC, or RCiEP
  * @dev: pointer to Root Port, RCEC, or RCiEP
@@ -1569,6 +1577,8 @@ static struct pcie_port_service_driver aerdriver = {
 	.service	= PCIE_PORT_SERVICE_AER,
 
 	.probe		= aer_probe,
+	.suspend	= aer_suspend,
+	.resume		= aer_resume,
 	.remove		= aer_remove,
 };
 

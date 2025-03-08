@@ -358,9 +358,6 @@ fail:
 	return NULL;
 }
 
-extern int bbc_envctrl_init(struct bbc_i2c_bus *bp);
-extern void bbc_envctrl_cleanup(struct bbc_i2c_bus *bp);
-
 static int bbc_i2c_probe(struct platform_device *op)
 {
 	struct bbc_i2c_bus *bp;
@@ -385,7 +382,7 @@ static int bbc_i2c_probe(struct platform_device *op)
 	return err;
 }
 
-static int bbc_i2c_remove(struct platform_device *op)
+static void bbc_i2c_remove(struct platform_device *op)
 {
 	struct bbc_i2c_bus *bp = dev_get_drvdata(&op->dev);
 
@@ -399,8 +396,6 @@ static int bbc_i2c_remove(struct platform_device *op)
 		of_iounmap(&op->resource[1], bp->i2c_control_regs, 2);
 
 	kfree(bp);
-
-	return 0;
 }
 
 static const struct of_device_id bbc_i2c_match[] = {
@@ -423,4 +418,5 @@ static struct platform_driver bbc_i2c_driver = {
 
 module_platform_driver(bbc_i2c_driver);
 
+MODULE_DESCRIPTION("UltraSPARC-III bootbus i2c controller driver");
 MODULE_LICENSE("GPL");

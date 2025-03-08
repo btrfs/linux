@@ -166,7 +166,7 @@ static int afs_proc_addr_prefs_show(struct seq_file *m, void *v)
 
 	if (!preflist) {
 		seq_puts(m, "NO PREFS\n");
-		return 0;
+		goto out;
 	}
 
 	seq_printf(m, "PROT SUBNET                                      PRIOR (v=%u n=%u/%u/%u)\n",
@@ -191,7 +191,8 @@ static int afs_proc_addr_prefs_show(struct seq_file *m, void *v)
 		}
 	}
 
-	rcu_read_lock();
+out:
+	rcu_read_unlock();
 	return 0;
 }
 
@@ -239,7 +240,13 @@ static int afs_proc_rootcell_write(struct file *file, char *buf, size_t size)
 	/* determine command to perform */
 	_debug("rootcell=%s", buf);
 
-	ret = afs_cell_init(net, buf);
+	ret = -EEXIST;
+	inode_lock(file_inode(file));
+	if (!net->ws_cell)
+		ret = afs_cell_init(net, buf);
+	else
+		printk("busy\n");
+	inode_unlock(file_inode(file));
 
 out:
 	_leave(" = %d", ret);
