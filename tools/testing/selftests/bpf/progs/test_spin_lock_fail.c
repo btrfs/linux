@@ -28,8 +28,8 @@ struct {
 	},
 };
 
-SEC(".data.A") struct bpf_spin_lock lockA;
-SEC(".data.B") struct bpf_spin_lock lockB;
+static struct bpf_spin_lock lockA SEC(".data.A");
+static struct bpf_spin_lock lockB SEC(".data.B");
 
 SEC("?tc")
 int lock_id_kptr_preserve(void *ctx)
@@ -200,5 +200,49 @@ CHECK(innermapval_global, &iv->lock, &lockA);
 CHECK(innermapval_mapval, &iv->lock, &v->lock);
 
 #undef CHECK
+
+__noinline
+int global_subprog(struct __sk_buff *ctx)
+{
+	volatile int ret = 0;
+
+	if (ctx->protocol)
+		ret += ctx->protocol;
+	return ret + ctx->mark;
+}
+
+__noinline
+static int static_subprog_call_global(struct __sk_buff *ctx)
+{
+	volatile int ret = 0;
+
+	if (ctx->protocol)
+		return ret;
+	return ret + ctx->len + global_subprog(ctx);
+}
+
+SEC("?tc")
+int lock_global_subprog_call1(struct __sk_buff *ctx)
+{
+	int ret = 0;
+
+	bpf_spin_lock(&lockA);
+	if (ctx->mark == 42)
+		ret = global_subprog(ctx);
+	bpf_spin_unlock(&lockA);
+	return ret;
+}
+
+SEC("?tc")
+int lock_global_subprog_call2(struct __sk_buff *ctx)
+{
+	int ret = 0;
+
+	bpf_spin_lock(&lockA);
+	if (ctx->mark == 42)
+		ret = static_subprog_call_global(ctx);
+	bpf_spin_unlock(&lockA);
+	return ret;
+}
 
 char _license[] SEC("license") = "GPL";

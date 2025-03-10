@@ -15,15 +15,11 @@
 
 DIR="$(dirname $(readlink -f "$0"))"
 
-source "${DIR}"/ktap_helpers.sh
+source "${DIR}"/../kselftest/ktap_helpers.sh
 
 PDT=/proc/device-tree/
 COMPAT_LIST="${DIR}"/compatible_list
 IGNORE_LIST="${DIR}"/compatible_ignore_list
-
-KSFT_PASS=0
-KSFT_FAIL=1
-KSFT_SKIP=4
 
 ktap_print_header
 
@@ -38,8 +34,21 @@ nodes_compatible=$(
 		# Check if node is available
 		if [[ -e "${node}"/status ]]; then
 			status=$(tr -d '\000' < "${node}"/status)
-			[[ "${status}" != "okay" && "${status}" != "ok" ]] && continue
+			if [[ "${status}" != "okay" && "${status}" != "ok" ]]; then
+				if [ -n "${disabled_nodes_regex}" ]; then
+					disabled_nodes_regex="${disabled_nodes_regex}|${node}"
+				else
+					disabled_nodes_regex="${node}"
+				fi
+				continue
+			fi
 		fi
+
+		# Ignore this node if one of its ancestors was disabled
+		if [ -n "${disabled_nodes_regex}" ]; then
+			echo "${node}" | grep -q -E "${disabled_nodes_regex}" && continue
+		fi
+
 		echo "${node}" | sed -e 's|\/proc\/device-tree||'
 	done | sort
 	)

@@ -19,6 +19,7 @@ void mcck_int_handler(void);
 void restart_int_handler(void);
 void early_pgm_check_handler(void);
 
+struct task_struct *__switch_to_asm(struct task_struct *prev, struct task_struct *next);
 void __ret_from_fork(struct task_struct *prev, struct pt_regs *regs);
 void __do_pgm_check(struct pt_regs *regs);
 void __do_syscall(struct pt_regs *regs, int per_trap);
@@ -40,7 +41,6 @@ void do_restart(void *arg);
 void __init startup_init(void);
 void die(struct pt_regs *regs, const char *str);
 int setup_profiling_timer(unsigned int multiplier);
-unsigned long prepare_ftrace_return(unsigned long parent, unsigned long sp, unsigned long ip);
 
 struct s390_mmap_arg_struct;
 struct fadvise64_64_args;

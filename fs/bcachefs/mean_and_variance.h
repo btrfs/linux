@@ -111,11 +111,11 @@ static inline u128_u u128_shl(u128_u i, s8 shift)
 {
 	u128_u r;
 
-	r.lo = i.lo << shift;
+	r.lo = i.lo << (shift & 63);
 	if (shift < 64)
-		r.hi = (i.hi << shift) | (i.lo >> (64 - shift));
+		r.hi = (i.hi << (shift & 63)) | (i.lo >> (-shift & 63));
 	else {
-		r.hi = i.lo << (shift - 64);
+		r.hi = i.lo << (-shift & 63);
 		r.lo = 0;
 	}
 	return r;
@@ -154,8 +154,6 @@ struct mean_and_variance {
 
 /* expontentially weighted variant */
 struct mean_and_variance_weighted {
-	bool	init;
-	u8	weight;	/* base 2 logarithim */
 	s64	mean;
 	u64	variance;
 };
@@ -192,10 +190,14 @@ s64 mean_and_variance_get_mean(struct mean_and_variance s);
 u64 mean_and_variance_get_variance(struct mean_and_variance s1);
 u32 mean_and_variance_get_stddev(struct mean_and_variance s);
 
-void mean_and_variance_weighted_update(struct mean_and_variance_weighted *s, s64 v);
+void mean_and_variance_weighted_update(struct mean_and_variance_weighted *s,
+		s64 v, bool initted, u8 weight);
 
-s64 mean_and_variance_weighted_get_mean(struct mean_and_variance_weighted s);
-u64 mean_and_variance_weighted_get_variance(struct mean_and_variance_weighted s);
-u32 mean_and_variance_weighted_get_stddev(struct mean_and_variance_weighted s);
+s64 mean_and_variance_weighted_get_mean(struct mean_and_variance_weighted s,
+		u8 weight);
+u64 mean_and_variance_weighted_get_variance(struct mean_and_variance_weighted s,
+		u8 weight);
+u32 mean_and_variance_weighted_get_stddev(struct mean_and_variance_weighted s,
+		u8 weight);
 
 #endif // MEAN_AND_VAIRANCE_H_

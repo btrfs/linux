@@ -245,6 +245,108 @@ typec_altmode_get_partner(struct typec_altmode *adev)
 EXPORT_SYMBOL_GPL(typec_altmode_get_partner);
 
 /* -------------------------------------------------------------------------- */
+/* API for cable alternate modes */
+
+/**
+ * typec_cable_altmode_enter - Enter Mode
+ * @adev: The alternate mode
+ * @sop: Cable plug target for Enter Mode command
+ * @vdo: VDO for the Enter Mode command
+ *
+ * Alternate mode drivers use this function to enter mode on the cable plug.
+ * If the alternate mode does not require VDO, @vdo must be NULL.
+ */
+int typec_cable_altmode_enter(struct typec_altmode *adev, enum typec_plug_index sop, u32 *vdo)
+{
+	struct altmode *partner = to_altmode(adev)->partner;
+	struct typec_altmode *pdev;
+
+	if (!adev || adev->active)
+		return 0;
+
+	if (!partner)
+		return -ENODEV;
+
+	pdev = &partner->adev;
+
+	if (!pdev->active)
+		return -EPERM;
+
+	if (!pdev->cable_ops || !pdev->cable_ops->enter)
+		return -EOPNOTSUPP;
+
+	return pdev->cable_ops->enter(pdev, sop, vdo);
+}
+EXPORT_SYMBOL_GPL(typec_cable_altmode_enter);
+
+/**
+ * typec_cable_altmode_exit - Exit Mode
+ * @adev: The alternate mode
+ * @sop: Cable plug target for Exit Mode command
+ *
+ * The alternate mode drivers use this function to exit mode on the cable plug.
+ */
+int typec_cable_altmode_exit(struct typec_altmode *adev, enum typec_plug_index sop)
+{
+	struct altmode *partner = to_altmode(adev)->partner;
+	struct typec_altmode *pdev;
+
+	if (!adev || !adev->active)
+		return 0;
+
+	if (!partner)
+		return -ENODEV;
+
+	pdev = &partner->adev;
+
+	if (!pdev->cable_ops || !pdev->cable_ops->exit)
+		return -EOPNOTSUPP;
+
+	return pdev->cable_ops->exit(pdev, sop);
+}
+EXPORT_SYMBOL_GPL(typec_cable_altmode_exit);
+
+/**
+ * typec_cable_altmode_vdm - Send Vendor Defined Messages (VDM) between the cable plug and port.
+ * @adev: Alternate mode handle
+ * @sop: Cable plug target for VDM
+ * @header: VDM Header
+ * @vdo: Array of Vendor Defined Data Objects
+ * @count: Number of Data Objects
+ *
+ * The alternate mode drivers use this function for SVID specific communication
+ * with the cable plugs. The port drivers use it to deliver the Structured VDMs
+ * received from the cable plugs to the alternate mode drivers.
+ */
+int typec_cable_altmode_vdm(struct typec_altmode *adev, enum typec_plug_index sop,
+			    const u32 header, const u32 *vdo, int count)
+{
+	struct altmode *altmode;
+	struct typec_altmode *pdev;
+
+	if (!adev)
+		return 0;
+
+	altmode = to_altmode(adev);
+
+	if (is_typec_plug(adev->dev.parent)) {
+		if (!altmode->partner)
+			return -ENODEV;
+		pdev = &altmode->partner->adev;
+	} else {
+		if (!altmode->plug[sop])
+			return -ENODEV;
+		pdev = &altmode->plug[sop]->adev;
+	}
+
+	if (!pdev->cable_ops || !pdev->cable_ops->vdm)
+		return -EOPNOTSUPP;
+
+	return pdev->cable_ops->vdm(pdev, sop, header, vdo, count);
+}
+EXPORT_SYMBOL_GPL(typec_cable_altmode_vdm);
+
+/* -------------------------------------------------------------------------- */
 /* API for the alternate mode drivers */
 
 /**
@@ -345,15 +447,14 @@ static struct attribute *typec_attrs[] = {
 };
 ATTRIBUTE_GROUPS(typec);
 
-static int typec_match(struct device *dev, struct device_driver *driver)
+static int typec_match(struct device *dev, const struct device_driver *driver)
 {
 	struct typec_altmode_driver *drv = to_altmode_driver(driver);
 	struct typec_altmode *altmode = to_typec_altmode(dev);
 	const struct typec_device_id *id;
 
 	for (id = drv->id_table; id->svid; id++)
-		if (id->svid == altmode->svid &&
-		    (id->mode == TYPEC_ANY_MODE || id->mode == altmode->mode))
+		if (id->svid == altmode->svid)
 			return 1;
 	return 0;
 }
@@ -368,8 +469,7 @@ static int typec_uevent(const struct device *dev, struct kobj_uevent_env *env)
 	if (add_uevent_var(env, "MODE=%u", altmode->mode))
 		return -ENOMEM;
 
-	return add_uevent_var(env, "MODALIAS=typec:id%04Xm%02X",
-			      altmode->svid, altmode->mode);
+	return add_uevent_var(env, "MODALIAS=typec:id%04X", altmode->svid);
 }
 
 static int typec_altmode_create_links(struct altmode *alt)

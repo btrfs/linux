@@ -102,7 +102,7 @@ static atomic64_t dma_fence_context_counter = ATOMIC64_INIT(1);
  *
  * * Drivers are allowed to call dma_fence_wait() from their &mmu_notifier
  *   respectively &mmu_interval_notifier callbacks. This means any code required
- *   for fence completeion cannot allocate memory with GFP_NOFS or GFP_NOIO.
+ *   for fence completion cannot allocate memory with GFP_NOFS or GFP_NOIO.
  *   Only GFP_ATOMIC is permissible, which might fail.
  *
  * Note that only GPU drivers have a reasonable excuse for both requiring
@@ -309,8 +309,8 @@ bool dma_fence_begin_signalling(void)
 	if (in_atomic())
 		return true;
 
-	/* ... and non-recursive readlock */
-	lock_acquire(&dma_fence_lockdep_map, 0, 0, 1, 1, NULL, _RET_IP_);
+	/* ... and non-recursive successful read_trylock */
+	lock_acquire(&dma_fence_lockdep_map, 0, 1, 1, 1, NULL, _RET_IP_);
 
 	return false;
 }
@@ -341,7 +341,7 @@ void __dma_fence_might_wait(void)
 	lock_map_acquire(&dma_fence_lockdep_map);
 	lock_map_release(&dma_fence_lockdep_map);
 	if (tmp)
-		lock_acquire(&dma_fence_lockdep_map, 0, 0, 1, 1, NULL, _THIS_IP_);
+		lock_acquire(&dma_fence_lockdep_map, 0, 1, 1, 1, NULL, _THIS_IP_);
 }
 #endif
 
@@ -412,7 +412,7 @@ int dma_fence_signal_timestamp(struct dma_fence *fence, ktime_t timestamp)
 	unsigned long flags;
 	int ret;
 
-	if (!fence)
+	if (WARN_ON(!fence))
 		return -EINVAL;
 
 	spin_lock_irqsave(fence->lock, flags);
@@ -464,7 +464,7 @@ int dma_fence_signal(struct dma_fence *fence)
 	int ret;
 	bool tmp;
 
-	if (!fence)
+	if (WARN_ON(!fence))
 		return -EINVAL;
 
 	tmp = dma_fence_begin_signalling();
@@ -522,7 +522,7 @@ dma_fence_wait_timeout(struct dma_fence *fence, bool intr, signed long timeout)
 EXPORT_SYMBOL(dma_fence_wait_timeout);
 
 /**
- * dma_fence_release - default relese function for fences
+ * dma_fence_release - default release function for fences
  * @kref: &dma_fence.recfount
  *
  * This is the default release functions for &dma_fence. Drivers shouldn't call
@@ -974,8 +974,8 @@ void dma_fence_set_deadline(struct dma_fence *fence, ktime_t deadline)
 EXPORT_SYMBOL(dma_fence_set_deadline);
 
 /**
- * dma_fence_describe - Dump fence describtion into seq_file
- * @fence: the 6fence to describe
+ * dma_fence_describe - Dump fence description into seq_file
+ * @fence: the fence to describe
  * @seq: the seq_file to put the textual description into
  *
  * Dump a textual description of the fence and it's state into the seq_file.

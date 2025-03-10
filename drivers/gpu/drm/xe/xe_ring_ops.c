@@ -5,10 +5,11 @@
 
 #include "xe_ring_ops.h"
 
-#include "generated/xe_wa_oob.h"
+#include <generated/xe_wa_oob.h>
+
+#include "instructions/xe_gpu_commands.h"
 #include "instructions/xe_mi_commands.h"
 #include "regs/xe_engine_regs.h"
-#include "regs/xe_gpu_commands.h"
 #include "regs/xe_gt_regs.h"
 #include "regs/xe_lrc_layout.h"
 #include "xe_exec_queue_types.h"
@@ -16,6 +17,7 @@
 #include "xe_lrc.h"
 #include "xe_macros.h"
 #include "xe_sched_job.h"
+#include "xe_sriov.h"
 #include "xe_vm_types.h"
 #include "xe_vm.h"
 #include "xe_wa.h"
@@ -78,6 +80,16 @@ static int emit_store_imm_ggtt(u32 addr, u32 value, u32 *dw, int i)
 	return i;
 }
 
+static int emit_flush_dw(u32 *dw, int i)
+{
+	dw[i++] = MI_FLUSH_DW | MI_FLUSH_IMM_DW;
+	dw[i++] = 0;
+	dw[i++] = 0;
+	dw[i++] = 0;
+
+	return i;
+}
+
 static int emit_flush_imm_ggtt(u32 addr, u32 value, bool invalidate_tlb,
 			       u32 *dw, int i)
 {
@@ -113,6 +125,19 @@ static int emit_flush_invalidate(u32 flag, u32 *dw, int i)
 	return i;
 }
 
+static int
+emit_pipe_control(u32 *dw, int i, u32 bit_group_0, u32 bit_group_1, u32 offset, u32 value)
+{
+	dw[i++] = GFX_OP_PIPE_CONTROL(6) | bit_group_0;
+	dw[i++] = bit_group_1;
+	dw[i++] = offset;
+	dw[i++] = 0;
+	dw[i++] = value;
+	dw[i++] = 0;
+
+	return i;
+}
+
 static int emit_pipe_invalidate(u32 mask_flags, bool invalidate_tlb, u32 *dw,
 				int i)
 {
@@ -131,14 +156,7 @@ static int emit_pipe_invalidate(u32 mask_flags, bool invalidate_tlb, u32 *dw,
 
 	flags &= ~mask_flags;
 
-	dw[i++] = GFX_OP_PIPE_CONTROL(6);
-	dw[i++] = flags;
-	dw[i++] = LRC_PPHWSP_SCRATCH_ADDR;
-	dw[i++] = 0;
-	dw[i++] = 0;
-	dw[i++] = 0;
-
-	return i;
+	return emit_pipe_control(dw, i, 0, flags, LRC_PPHWSP_SCRATCH_ADDR, 0);
 }
 
 static int emit_store_imm_ppgtt_posted(u64 addr, u64 value,
@@ -174,14 +192,7 @@ static int emit_render_cache_flush(struct xe_sched_job *job, u32 *dw, int i)
 	else if (job->q->class == XE_ENGINE_CLASS_COMPUTE)
 		flags &= ~PIPE_CONTROL_3D_ENGINE_FLAGS;
 
-	dw[i++] = GFX_OP_PIPE_CONTROL(6) | PIPE_CONTROL0_HDC_PIPELINE_FLUSH;
-	dw[i++] = flags;
-	dw[i++] = 0;
-	dw[i++] = 0;
-	dw[i++] = 0;
-	dw[i++] = 0;
-
-	return i;
+	return emit_pipe_control(dw, i, PIPE_CONTROL0_HDC_PIPELINE_FLUSH, flags, 0, 0);
 }
 
 static int emit_pipe_control_to_ring_end(struct xe_hw_engine *hwe, u32 *dw, int i)
@@ -189,14 +200,9 @@ static int emit_pipe_control_to_ring_end(struct xe_hw_engine *hwe, u32 *dw, int 
 	if (hwe->class != XE_ENGINE_CLASS_RENDER)
 		return i;
 
-	if (XE_WA(hwe->gt, 16020292621)) {
-		dw[i++] = GFX_OP_PIPE_CONTROL(6);
-		dw[i++] = PIPE_CONTROL_LRI_POST_SYNC;
-		dw[i++] = RING_NOPID(hwe->mmio_base).addr;
-		dw[i++] = 0;
-		dw[i++] = 0;
-		dw[i++] = 0;
-	}
+	if (XE_WA(hwe->gt, 16020292621))
+		i = emit_pipe_control(dw, i, 0, PIPE_CONTROL_LRI_POST_SYNC,
+				      RING_NOPID(hwe->mmio_base).addr, 0);
 
 	return i;
 }
@@ -204,21 +210,34 @@ static int emit_pipe_control_to_ring_end(struct xe_hw_engine *hwe, u32 *dw, int 
 static int emit_pipe_imm_ggtt(u32 addr, u32 value, bool stall_only, u32 *dw,
 			      int i)
 {
-	dw[i++] = GFX_OP_PIPE_CONTROL(6);
-	dw[i++] = (stall_only ? PIPE_CONTROL_CS_STALL :
-		   PIPE_CONTROL_FLUSH_ENABLE | PIPE_CONTROL_CS_STALL) |
-		PIPE_CONTROL_GLOBAL_GTT_IVB | PIPE_CONTROL_QW_WRITE;
-	dw[i++] = addr;
-	dw[i++] = 0;
-	dw[i++] = value;
-	dw[i++] = 0; /* We're thrashing one extra dword. */
+	u32 flags = PIPE_CONTROL_CS_STALL | PIPE_CONTROL_GLOBAL_GTT_IVB |
+		    PIPE_CONTROL_QW_WRITE;
 
-	return i;
+	if (!stall_only)
+		flags |= PIPE_CONTROL_FLUSH_ENABLE;
+
+	return emit_pipe_control(dw, i, 0, flags, addr, value);
 }
 
 static u32 get_ppgtt_flag(struct xe_sched_job *job)
 {
-	return job->q->vm ? BIT(8) : 0;
+	if (job->q->vm && !job->ggtt)
+		return BIT(8);
+
+	return 0;
+}
+
+static int emit_copy_timestamp(struct xe_lrc *lrc, u32 *dw, int i)
+{
+	dw[i++] = MI_COPY_MEM_MEM | MI_COPY_MEM_MEM_SRC_GGTT |
+		MI_COPY_MEM_MEM_DST_GGTT;
+	dw[i++] = xe_lrc_ctx_job_timestamp_ggtt_addr(lrc);
+	dw[i++] = 0;
+	dw[i++] = xe_lrc_ctx_timestamp_ggtt_addr(lrc);
+	dw[i++] = 0;
+	dw[i++] = MI_NOOP;
+
+	return i;
 }
 
 /* for engines that don't require any special HW handling (no EUs, no aux inval, etc) */
@@ -227,10 +246,11 @@ static void __emit_job_gen12_simple(struct xe_sched_job *job, struct xe_lrc *lrc
 {
 	u32 dw[MAX_JOB_SIZE_DW], i = 0;
 	u32 ppgtt_flag = get_ppgtt_flag(job);
-	struct xe_vm *vm = job->q->vm;
 	struct xe_gt *gt = job->q->gt;
 
-	if (vm && vm->batch_invalidate_tlb) {
+	i = emit_copy_timestamp(lrc, dw, i);
+
+	if (job->ring_ops_flush_tlb) {
 		dw[i++] = preparser_disable(true);
 		i = emit_flush_imm_ggtt(xe_lrc_start_seqno_ggtt_addr(lrc),
 					seqno, true, dw, i);
@@ -242,10 +262,12 @@ static void __emit_job_gen12_simple(struct xe_sched_job *job, struct xe_lrc *lrc
 
 	i = emit_bb_start(batch_addr, ppgtt_flag, dw, i);
 
-	if (job->user_fence.used)
+	if (job->user_fence.used) {
+		i = emit_flush_dw(dw, i);
 		i = emit_store_imm_ppgtt_posted(job->user_fence.addr,
 						job->user_fence.value,
 						dw, i);
+	}
 
 	i = emit_flush_imm_ggtt(xe_lrc_seqno_ggtt_addr(lrc), seqno, false, dw, i);
 
@@ -278,7 +300,8 @@ static void __emit_job_gen12_video(struct xe_sched_job *job, struct xe_lrc *lrc,
 	struct xe_gt *gt = job->q->gt;
 	struct xe_device *xe = gt_to_xe(gt);
 	bool decode = job->q->class == XE_ENGINE_CLASS_VIDEO_DECODE;
-	struct xe_vm *vm = job->q->vm;
+
+	i = emit_copy_timestamp(lrc, dw, i);
 
 	dw[i++] = preparser_disable(true);
 
@@ -290,22 +313,24 @@ static void __emit_job_gen12_video(struct xe_sched_job *job, struct xe_lrc *lrc,
 			i = emit_aux_table_inv(gt, VE0_AUX_INV, dw, i);
 	}
 
-	if (vm && vm->batch_invalidate_tlb)
+	if (job->ring_ops_flush_tlb)
 		i = emit_flush_imm_ggtt(xe_lrc_start_seqno_ggtt_addr(lrc),
 					seqno, true, dw, i);
 
 	dw[i++] = preparser_disable(false);
 
-	if (!vm || !vm->batch_invalidate_tlb)
+	if (!job->ring_ops_flush_tlb)
 		i = emit_store_imm_ggtt(xe_lrc_start_seqno_ggtt_addr(lrc),
 					seqno, dw, i);
 
 	i = emit_bb_start(batch_addr, ppgtt_flag, dw, i);
 
-	if (job->user_fence.used)
+	if (job->user_fence.used) {
+		i = emit_flush_dw(dw, i);
 		i = emit_store_imm_ppgtt_posted(job->user_fence.addr,
 						job->user_fence.value,
 						dw, i);
+	}
 
 	i = emit_flush_imm_ggtt(xe_lrc_seqno_ggtt_addr(lrc), seqno, false, dw, i);
 
@@ -325,8 +350,9 @@ static void __emit_job_gen12_render_compute(struct xe_sched_job *job,
 	struct xe_gt *gt = job->q->gt;
 	struct xe_device *xe = gt_to_xe(gt);
 	bool lacks_render = !(gt->info.engine_mask & XE_HW_ENGINE_RCS_MASK);
-	struct xe_vm *vm = job->q->vm;
 	u32 mask_flags = 0;
+
+	i = emit_copy_timestamp(lrc, dw, i);
 
 	dw[i++] = preparser_disable(true);
 	if (lacks_render)
@@ -335,7 +361,7 @@ static void __emit_job_gen12_render_compute(struct xe_sched_job *job,
 		mask_flags = PIPE_CONTROL_3D_ENGINE_FLAGS;
 
 	/* See __xe_pt_bind_vma() for a discussion on TLB invalidations. */
-	i = emit_pipe_invalidate(mask_flags, vm && vm->batch_invalidate_tlb, dw, i);
+	i = emit_pipe_invalidate(mask_flags, job->ring_ops_flush_tlb, dw, i);
 
 	/* hsdes: 1809175790 */
 	if (has_aux_ccs(xe))
@@ -371,19 +397,23 @@ static void emit_migration_job_gen12(struct xe_sched_job *job,
 {
 	u32 dw[MAX_JOB_SIZE_DW], i = 0;
 
+	i = emit_copy_timestamp(lrc, dw, i);
+
 	i = emit_store_imm_ggtt(xe_lrc_start_seqno_ggtt_addr(lrc),
 				seqno, dw, i);
 
 	dw[i++] = MI_ARB_ON_OFF | MI_ARB_DISABLE; /* Enabled again below */
 
-	i = emit_bb_start(job->batch_addr[0], BIT(8), dw, i);
+	i = emit_bb_start(job->ptrs[0].batch_addr, BIT(8), dw, i);
 
-	/* XXX: Do we need this? Leaving for now. */
-	dw[i++] = preparser_disable(true);
-	i = emit_flush_invalidate(0, dw, i);
-	dw[i++] = preparser_disable(false);
+	if (!IS_SRIOV_VF(gt_to_xe(job->q->gt))) {
+		/* XXX: Do we need this? Leaving for now. */
+		dw[i++] = preparser_disable(true);
+		i = emit_flush_invalidate(0, dw, i);
+		dw[i++] = preparser_disable(false);
+	}
 
-	i = emit_bb_start(job->batch_addr[1], BIT(8), dw, i);
+	i = emit_bb_start(job->ptrs[1].batch_addr, BIT(8), dw, i);
 
 	dw[i++] = MI_FLUSH_DW | MI_INVALIDATE_TLB | job->migrate_flush_flags |
 		MI_FLUSH_DW_OP_STOREDW | MI_FLUSH_IMM_DW;
@@ -404,9 +434,9 @@ static void emit_job_gen12_gsc(struct xe_sched_job *job)
 
 	xe_gt_assert(gt, job->q->width <= 1); /* no parallel submission for GSCCS */
 
-	__emit_job_gen12_simple(job, job->q->lrc,
-				job->batch_addr[0],
-				xe_sched_job_seqno(job));
+	__emit_job_gen12_simple(job, job->q->lrc[0],
+				job->ptrs[0].batch_addr,
+				xe_sched_job_lrc_seqno(job));
 }
 
 static void emit_job_gen12_copy(struct xe_sched_job *job)
@@ -414,15 +444,15 @@ static void emit_job_gen12_copy(struct xe_sched_job *job)
 	int i;
 
 	if (xe_sched_job_is_migration(job->q)) {
-		emit_migration_job_gen12(job, job->q->lrc,
-					 xe_sched_job_seqno(job));
+		emit_migration_job_gen12(job, job->q->lrc[0],
+					 xe_sched_job_lrc_seqno(job));
 		return;
 	}
 
 	for (i = 0; i < job->q->width; ++i)
-		__emit_job_gen12_simple(job, job->q->lrc + i,
-				        job->batch_addr[i],
-				        xe_sched_job_seqno(job));
+		__emit_job_gen12_simple(job, job->q->lrc[i],
+					job->ptrs[i].batch_addr,
+					xe_sched_job_lrc_seqno(job));
 }
 
 static void emit_job_gen12_video(struct xe_sched_job *job)
@@ -431,9 +461,9 @@ static void emit_job_gen12_video(struct xe_sched_job *job)
 
 	/* FIXME: Not doing parallel handshake for now */
 	for (i = 0; i < job->q->width; ++i)
-		__emit_job_gen12_video(job, job->q->lrc + i,
-				       job->batch_addr[i],
-				       xe_sched_job_seqno(job));
+		__emit_job_gen12_video(job, job->q->lrc[i],
+				       job->ptrs[i].batch_addr,
+				       xe_sched_job_lrc_seqno(job));
 }
 
 static void emit_job_gen12_render_compute(struct xe_sched_job *job)
@@ -441,9 +471,9 @@ static void emit_job_gen12_render_compute(struct xe_sched_job *job)
 	int i;
 
 	for (i = 0; i < job->q->width; ++i)
-		__emit_job_gen12_render_compute(job, job->q->lrc + i,
-						job->batch_addr[i],
-						xe_sched_job_seqno(job));
+		__emit_job_gen12_render_compute(job, job->q->lrc[i],
+						job->ptrs[i].batch_addr,
+						xe_sched_job_lrc_seqno(job));
 }
 
 static const struct xe_ring_ops ring_ops_gen12_gsc = {

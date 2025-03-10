@@ -185,9 +185,10 @@ static inline void setindex(int index)
 /* Check if the video mode is supported by the driver */
 static inline int check_mode_supported(const struct screen_info *si)
 {
+	unsigned int type = screen_info_video_type(si);
+
 	/* only EGA and VGA in 16 color graphic mode are supported */
-	if (si->orig_video_isVGA != VIDEO_TYPE_EGAC &&
-	    si->orig_video_isVGA != VIDEO_TYPE_VGAC)
+	if (type != VIDEO_TYPE_EGAC && type != VIDEO_TYPE_VGAC)
 		return -ENODEV;
 
 	if (si->orig_video_mode != 0x0D &&	/* 320x200/4 (EGA) */
@@ -1338,7 +1339,7 @@ static int vga16fb_probe(struct platform_device *dev)
 	printk(KERN_INFO "vga16fb: mapped to 0x%p\n", info->screen_base);
 	par = info->par;
 
-	par->isVGA = si->orig_video_isVGA == VIDEO_TYPE_VGAC;
+	par->isVGA = screen_info_video_type(si) == VIDEO_TYPE_VGAC;
 	par->palette_blanked = 0;
 	par->vesa_blanked = 0;
 
@@ -1353,7 +1354,11 @@ static int vga16fb_probe(struct platform_device *dev)
 	info->var = vga16fb_defined;
 	info->fix = vga16fb_fix;
 	/* supports rectangles with widths of multiples of 8 */
-	info->pixmap.blit_x = 1 << 7 | 1 << 15 | 1 << 23 | 1 << 31;
+	bitmap_zero(info->pixmap.blit_x, FB_MAX_BLIT_WIDTH);
+	set_bit(8 - 1, info->pixmap.blit_x);
+	set_bit(16 - 1, info->pixmap.blit_x);
+	set_bit(24 - 1, info->pixmap.blit_x);
+	set_bit(32 - 1, info->pixmap.blit_x);
 	info->flags = FBINFO_HWACCEL_YPAN;
 
 	i = (info->var.bits_per_pixel == 8) ? 256 : 16;
@@ -1413,7 +1418,7 @@ MODULE_DEVICE_TABLE(platform, vga16fb_driver_id_table);
 
 static struct platform_driver vga16fb_driver = {
 	.probe = vga16fb_probe,
-	.remove_new = vga16fb_remove,
+	.remove = vga16fb_remove,
 	.driver = {
 		.name = "vga16fb",
 	},

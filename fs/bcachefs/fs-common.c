@@ -42,7 +42,8 @@ int bch2_create_trans(struct btree_trans *trans,
 	if (ret)
 		goto err;
 
-	ret = bch2_inode_peek(trans, &dir_iter, dir_u, dir, BTREE_ITER_INTENT);
+	ret = bch2_inode_peek(trans, &dir_iter, dir_u, dir,
+			      BTREE_ITER_intent|BTREE_ITER_with_updates);
 	if (ret)
 		goto err;
 
@@ -68,9 +69,7 @@ int bch2_create_trans(struct btree_trans *trans,
 		if (!snapshot_src.inum) {
 			/* Inode wasn't specified, just snapshot: */
 			struct bch_subvolume s;
-
-			ret = bch2_subvolume_get(trans, snapshot_src.subvol, true,
-						 BTREE_ITER_CACHED, &s);
+			ret = bch2_subvolume_get(trans, snapshot_src.subvol, true, &s);
 			if (ret)
 				goto err;
 
@@ -78,7 +77,7 @@ int bch2_create_trans(struct btree_trans *trans,
 		}
 
 		ret = bch2_inode_peek(trans, &inode_iter, new_inode, snapshot_src,
-				      BTREE_ITER_INTENT);
+				      BTREE_ITER_intent);
 		if (ret)
 			goto err;
 
@@ -107,6 +106,7 @@ int bch2_create_trans(struct btree_trans *trans,
 		u32 new_subvol, dir_snapshot;
 
 		ret = bch2_subvolume_create(trans, new_inode->bi_inum,
+					    dir.subvol,
 					    snapshot_src.subvol,
 					    &new_subvol, &snapshot,
 					    (flags & BCH_CREATE_SNAPSHOT_RO) != 0);
@@ -162,7 +162,7 @@ int bch2_create_trans(struct btree_trans *trans,
 					 name,
 					 dir_target,
 					 &dir_offset,
-					 BCH_HASH_SET_MUST_CREATE);
+					 STR_HASH_must_create|BTREE_ITER_with_updates);
 		if (ret)
 			goto err;
 
@@ -170,7 +170,11 @@ int bch2_create_trans(struct btree_trans *trans,
 		new_inode->bi_dir_offset	= dir_offset;
 	}
 
-	inode_iter.flags &= ~BTREE_ITER_ALL_SNAPSHOTS;
+	if (S_ISDIR(mode) &&
+	    !new_inode->bi_subvol)
+		new_inode->bi_depth = dir_u->bi_depth + 1;
+
+	inode_iter.flags &= ~BTREE_ITER_all_snapshots;
 	bch2_btree_iter_set_snapshot(&inode_iter, snapshot);
 
 	ret   = bch2_btree_iter_traverse(&inode_iter) ?:
@@ -197,16 +201,16 @@ int bch2_link_trans(struct btree_trans *trans,
 	if (dir.subvol != inum.subvol)
 		return -EXDEV;
 
-	ret = bch2_inode_peek(trans, &inode_iter, inode_u, inum, BTREE_ITER_INTENT);
+	ret = bch2_inode_peek(trans, &inode_iter, inode_u, inum, BTREE_ITER_intent);
 	if (ret)
-		goto err;
+		return ret;
 
 	inode_u->bi_ctime = now;
 	ret = bch2_inode_nlink_inc(inode_u);
 	if (ret)
-		return ret;
+		goto err;
 
-	ret = bch2_inode_peek(trans, &dir_iter, dir_u, dir, BTREE_ITER_INTENT);
+	ret = bch2_inode_peek(trans, &dir_iter, dir_u, dir, BTREE_ITER_intent);
 	if (ret)
 		goto err;
 
@@ -222,7 +226,7 @@ int bch2_link_trans(struct btree_trans *trans,
 	ret = bch2_dirent_create(trans, dir, &dir_hash,
 				 mode_to_type(inode_u->bi_mode),
 				 name, inum.inum, &dir_offset,
-				 BCH_HASH_SET_MUST_CREATE);
+				 STR_HASH_must_create);
 	if (ret)
 		goto err;
 
@@ -242,7 +246,7 @@ int bch2_unlink_trans(struct btree_trans *trans,
 		      struct bch_inode_unpacked *dir_u,
 		      struct bch_inode_unpacked *inode_u,
 		      const struct qstr *name,
-		      bool deleting_snapshot)
+		      bool deleting_subvol)
 {
 	struct bch_fs *c = trans->c;
 	struct btree_iter dir_iter = { NULL };
@@ -254,34 +258,41 @@ int bch2_unlink_trans(struct btree_trans *trans,
 	struct bkey_s_c k;
 	int ret;
 
-	ret = bch2_inode_peek(trans, &dir_iter, dir_u, dir, BTREE_ITER_INTENT);
+	ret = bch2_inode_peek(trans, &dir_iter, dir_u, dir, BTREE_ITER_intent);
 	if (ret)
 		goto err;
 
 	dir_hash = bch2_hash_info_init(c, dir_u);
 
-	ret = __bch2_dirent_lookup_trans(trans, &dirent_iter, dir, &dir_hash,
-					 name, &inum, BTREE_ITER_INTENT);
+	ret = bch2_dirent_lookup_trans(trans, &dirent_iter, dir, &dir_hash,
+				       name, &inum, BTREE_ITER_intent);
 	if (ret)
 		goto err;
 
 	ret = bch2_inode_peek(trans, &inode_iter, inode_u, inum,
-			      BTREE_ITER_INTENT);
+			      BTREE_ITER_intent);
 	if (ret)
 		goto err;
 
-	if (!deleting_snapshot && S_ISDIR(inode_u->bi_mode)) {
+	if (!deleting_subvol && S_ISDIR(inode_u->bi_mode)) {
 		ret = bch2_empty_dir_trans(trans, inum);
 		if (ret)
 			goto err;
 	}
 
-	if (deleting_snapshot && !inode_u->bi_subvol) {
+	if (deleting_subvol && !inode_u->bi_subvol) {
 		ret = -BCH_ERR_ENOENT_not_subvol;
 		goto err;
 	}
 
-	if (deleting_snapshot || inode_u->bi_subvol) {
+	if (inode_u->bi_subvol) {
+		/* Recursive subvolume destroy not allowed (yet?) */
+		ret = bch2_subvol_has_children(trans, inode_u->bi_subvol);
+		if (ret)
+			goto err;
+	}
+
+	if (deleting_subvol || inode_u->bi_subvol) {
 		ret = bch2_subvolume_unlink(trans, inode_u->bi_subvol);
 		if (ret)
 			goto err;
@@ -314,7 +325,7 @@ int bch2_unlink_trans(struct btree_trans *trans,
 
 	ret =   bch2_hash_delete_at(trans, bch2_dirent_hash_desc,
 				    &dir_hash, &dirent_iter,
-				    BTREE_UPDATE_INTERNAL_SNAPSHOT_NODE) ?:
+				    BTREE_UPDATE_internal_snapshot_node) ?:
 		bch2_inode_write(trans, &dir_iter, dir_u) ?:
 		bch2_inode_write(trans, &inode_iter, inode_u);
 err:
@@ -349,6 +360,22 @@ bool bch2_reinherit_attrs(struct bch_inode_unpacked *dst_u,
 	return ret;
 }
 
+static int subvol_update_parent(struct btree_trans *trans, u32 subvol, u32 new_parent)
+{
+	struct btree_iter iter;
+	struct bkey_i_subvolume *s =
+		bch2_bkey_get_mut_typed(trans, &iter,
+			BTREE_ID_subvolumes, POS(0, subvol),
+			BTREE_ITER_cached, subvolume);
+	int ret = PTR_ERR_OR_ZERO(s);
+	if (ret)
+		return ret;
+
+	s->v.fs_path_parent = cpu_to_le32(new_parent);
+	bch2_trans_iter_exit(trans, &iter);
+	return 0;
+}
+
 int bch2_rename_trans(struct btree_trans *trans,
 		      subvol_inum src_dir, struct bch_inode_unpacked *src_dir_u,
 		      subvol_inum dst_dir, struct bch_inode_unpacked *dst_dir_u,
@@ -370,7 +397,7 @@ int bch2_rename_trans(struct btree_trans *trans,
 	int ret;
 
 	ret = bch2_inode_peek(trans, &src_dir_iter, src_dir_u, src_dir,
-			      BTREE_ITER_INTENT);
+			      BTREE_ITER_intent);
 	if (ret)
 		goto err;
 
@@ -379,7 +406,7 @@ int bch2_rename_trans(struct btree_trans *trans,
 	if (dst_dir.inum	!= src_dir.inum ||
 	    dst_dir.subvol	!= src_dir.subvol) {
 		ret = bch2_inode_peek(trans, &dst_dir_iter, dst_dir_u, dst_dir,
-				      BTREE_ITER_INTENT);
+				      BTREE_ITER_intent);
 		if (ret)
 			goto err;
 
@@ -399,16 +426,46 @@ int bch2_rename_trans(struct btree_trans *trans,
 		goto err;
 
 	ret = bch2_inode_peek(trans, &src_inode_iter, src_inode_u, src_inum,
-			      BTREE_ITER_INTENT);
+			      BTREE_ITER_intent);
 	if (ret)
 		goto err;
 
 	if (dst_inum.inum) {
 		ret = bch2_inode_peek(trans, &dst_inode_iter, dst_inode_u, dst_inum,
-				      BTREE_ITER_INTENT);
+				      BTREE_ITER_intent);
 		if (ret)
 			goto err;
 	}
+
+	if (src_inode_u->bi_subvol &&
+	    dst_dir.subvol != src_inode_u->bi_parent_subvol) {
+		ret = subvol_update_parent(trans, src_inode_u->bi_subvol, dst_dir.subvol);
+		if (ret)
+			goto err;
+	}
+
+	if (mode == BCH_RENAME_EXCHANGE &&
+	    dst_inode_u->bi_subvol &&
+	    src_dir.subvol != dst_inode_u->bi_parent_subvol) {
+		ret = subvol_update_parent(trans, dst_inode_u->bi_subvol, src_dir.subvol);
+		if (ret)
+			goto err;
+	}
+
+	/* Can't move across subvolumes, unless it's a subvolume root: */
+	if (src_dir.subvol != dst_dir.subvol &&
+	    (!src_inode_u->bi_subvol ||
+	     (dst_inum.inum && !dst_inode_u->bi_subvol))) {
+		ret = -EXDEV;
+		goto err;
+	}
+
+	if (src_inode_u->bi_parent_subvol)
+		src_inode_u->bi_parent_subvol = dst_dir.subvol;
+
+	if ((mode == BCH_RENAME_EXCHANGE) &&
+	    dst_inode_u->bi_parent_subvol)
+		dst_inode_u->bi_parent_subvol = src_dir.subvol;
 
 	src_inode_u->bi_dir		= dst_dir_u->bi_inum;
 	src_inode_u->bi_dir_offset	= dst_offset;
@@ -432,10 +489,10 @@ int bch2_rename_trans(struct btree_trans *trans,
 			goto err;
 		}
 
-		if (S_ISDIR(dst_inode_u->bi_mode) &&
-		    bch2_empty_dir_trans(trans, dst_inum)) {
-			ret = -ENOTEMPTY;
-			goto err;
+		if (S_ISDIR(dst_inode_u->bi_mode)) {
+			ret = bch2_empty_dir_trans(trans, dst_inum);
+			if (ret)
+				goto err;
 		}
 	}
 
@@ -456,6 +513,15 @@ int bch2_rename_trans(struct btree_trans *trans,
 		src_dir_u->bi_nlink--;
 		dst_dir_u->bi_nlink++;
 	}
+
+	if (S_ISDIR(src_inode_u->bi_mode) &&
+	    !src_inode_u->bi_subvol)
+		src_inode_u->bi_depth = dst_dir_u->bi_depth + 1;
+
+	if (mode == BCH_RENAME_EXCHANGE &&
+	    S_ISDIR(dst_inode_u->bi_mode) &&
+	    !dst_inode_u->bi_subvol)
+		dst_inode_u->bi_depth = src_dir_u->bi_depth + 1;
 
 	if (dst_inum.inum && is_subdir_for_nlink(dst_inode_u)) {
 		dst_dir_u->bi_nlink--;
@@ -492,4 +558,95 @@ err:
 	bch2_trans_iter_exit(trans, &dst_dir_iter);
 	bch2_trans_iter_exit(trans, &src_dir_iter);
 	return ret;
+}
+
+static inline void prt_bytes_reversed(struct printbuf *out, const void *b, unsigned n)
+{
+	bch2_printbuf_make_room(out, n);
+
+	unsigned can_print = min(n, printbuf_remaining(out));
+
+	b += n;
+
+	for (unsigned i = 0; i < can_print; i++)
+		out->buf[out->pos++] = *((char *) --b);
+
+	printbuf_nul_terminate(out);
+}
+
+static inline void prt_str_reversed(struct printbuf *out, const char *s)
+{
+	prt_bytes_reversed(out, s, strlen(s));
+}
+
+static inline void reverse_bytes(void *b, size_t n)
+{
+	char *e = b + n, *s = b;
+
+	while (s < e) {
+		--e;
+		swap(*s, *e);
+		s++;
+	}
+}
+
+/* XXX: we don't yet attempt to print paths when we don't know the subvol */
+int bch2_inum_to_path(struct btree_trans *trans, subvol_inum inum, struct printbuf *path)
+{
+	unsigned orig_pos = path->pos;
+	int ret = 0;
+
+	while (!(inum.subvol == BCACHEFS_ROOT_SUBVOL &&
+		 inum.inum   == BCACHEFS_ROOT_INO)) {
+		struct bch_inode_unpacked inode;
+		ret = bch2_inode_find_by_inum_trans(trans, inum, &inode);
+		if (ret)
+			goto disconnected;
+
+		if (!inode.bi_dir && !inode.bi_dir_offset) {
+			ret = -BCH_ERR_ENOENT_inode_no_backpointer;
+			goto disconnected;
+		}
+
+		inum.subvol	= inode.bi_parent_subvol ?: inum.subvol;
+		inum.inum	= inode.bi_dir;
+
+		u32 snapshot;
+		ret = bch2_subvolume_get_snapshot(trans, inum.subvol, &snapshot);
+		if (ret)
+			goto disconnected;
+
+		struct btree_iter d_iter;
+		struct bkey_s_c_dirent d = bch2_bkey_get_iter_typed(trans, &d_iter,
+				BTREE_ID_dirents, SPOS(inode.bi_dir, inode.bi_dir_offset, snapshot),
+				0, dirent);
+		ret = bkey_err(d.s_c);
+		if (ret)
+			goto disconnected;
+
+		struct qstr dirent_name = bch2_dirent_get_name(d);
+		prt_bytes_reversed(path, dirent_name.name, dirent_name.len);
+
+		prt_char(path, '/');
+
+		bch2_trans_iter_exit(trans, &d_iter);
+	}
+
+	if (orig_pos == path->pos)
+		prt_char(path, '/');
+out:
+	ret = path->allocation_failure ? -ENOMEM : 0;
+	if (ret)
+		goto err;
+
+	reverse_bytes(path->buf + orig_pos, path->pos - orig_pos);
+	return 0;
+err:
+	return ret;
+disconnected:
+	if (bch2_err_matches(ret, BCH_ERR_transaction_restart))
+		goto err;
+
+	prt_str_reversed(path, "(disconnected)");
+	goto out;
 }

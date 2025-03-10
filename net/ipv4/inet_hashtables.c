@@ -24,6 +24,7 @@
 #include <net/inet6_hashtables.h>
 #endif
 #include <net/secure_seq.h>
+#include <net/hotdata.h>
 #include <net/ip.h>
 #include <net/tcp.h>
 #include <net/sock_reuseport.h>
@@ -32,8 +33,6 @@ u32 inet_ehashfn(const struct net *net, const __be32 laddr,
 		 const __u16 lport, const __be32 faddr,
 		 const __be16 fport)
 {
-	static u32 inet_ehash_secret __read_mostly;
-
 	net_get_random_once(&inet_ehash_secret, sizeof(inet_ehash_secret));
 
 	return __inet_ehashfn(laddr, lport, faddr, fport,
@@ -311,7 +310,7 @@ inet_lhash2_bucket_sk(struct inet_hashinfo *h, struct sock *sk)
 	return inet_lhash2_bucket(h, hash);
 }
 
-static inline int compute_score(struct sock *sk, struct net *net,
+static inline int compute_score(struct sock *sk, const struct net *net,
 				const unsigned short hnum, const __be32 daddr,
 				const int dif, const int sdif)
 {
@@ -349,7 +348,7 @@ static inline int compute_score(struct sock *sk, struct net *net,
  * Return: NULL if sk doesn't have SO_REUSEPORT set, otherwise a pointer to
  *         the selected sock or an error.
  */
-struct sock *inet_lookup_reuseport(struct net *net, struct sock *sk,
+struct sock *inet_lookup_reuseport(const struct net *net, struct sock *sk,
 				   struct sk_buff *skb, int doff,
 				   __be32 saddr, __be16 sport,
 				   __be32 daddr, unsigned short hnum,
@@ -375,7 +374,7 @@ EXPORT_SYMBOL_GPL(inet_lookup_reuseport);
  */
 
 /* called with rcu_read_lock() : No refcount taken on the socket */
-static struct sock *inet_lhash2_lookup(struct net *net,
+static struct sock *inet_lhash2_lookup(const struct net *net,
 				struct inet_listen_hashbucket *ilb2,
 				struct sk_buff *skb, int doff,
 				const __be32 saddr, __be16 sport,
@@ -402,7 +401,7 @@ static struct sock *inet_lhash2_lookup(struct net *net,
 	return result;
 }
 
-struct sock *inet_lookup_run_sk_lookup(struct net *net,
+struct sock *inet_lookup_run_sk_lookup(const struct net *net,
 				       int protocol,
 				       struct sk_buff *skb, int doff,
 				       __be32 saddr, __be16 sport,
@@ -424,7 +423,7 @@ struct sock *inet_lookup_run_sk_lookup(struct net *net,
 	return sk;
 }
 
-struct sock *__inet_lookup_listener(struct net *net,
+struct sock *__inet_lookup_listener(const struct net *net,
 				    struct inet_hashinfo *hashinfo,
 				    struct sk_buff *skb, int doff,
 				    const __be32 saddr, __be16 sport,
@@ -489,7 +488,7 @@ void sock_edemux(struct sk_buff *skb)
 }
 EXPORT_SYMBOL(sock_edemux);
 
-struct sock *__inet_lookup_established(struct net *net,
+struct sock *__inet_lookup_established(const struct net *net,
 				  struct inet_hashinfo *hashinfo,
 				  const __be32 saddr, const __be16 sport,
 				  const __be32 daddr, const u16 hnum,
@@ -566,7 +565,8 @@ static int __inet_check_established(struct inet_timewait_death_row *death_row,
 		if (likely(inet_match(net, sk2, acookie, ports, dif, sdif))) {
 			if (sk2->sk_state == TCP_TIME_WAIT) {
 				tw = inet_twsk(sk2);
-				if (twsk_unique(sk, sk2, twp))
+				if (sk->sk_protocol == IPPROTO_TCP &&
+				    tcp_twsk_unique(sk, sk2, twp))
 					break;
 			}
 			goto not_unique;
@@ -1136,7 +1136,7 @@ error:
 		sock_prot_inuse_add(net, sk->sk_prot, -1);
 
 		spin_lock(lock);
-		sk_nulls_del_node_init_rcu(sk);
+		__sk_nulls_del_node_init_rcu(sk);
 		spin_unlock(lock);
 
 		sk->sk_hash = 0;

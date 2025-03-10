@@ -6,10 +6,9 @@
 #include <linux/nmi.h>
 #include <linux/msi.h>
 #include <linux/io.h>
-#include <asm/hyperv-tlfs.h>
 #include <asm/nospec-branch.h>
 #include <asm/paravirt.h>
-#include <asm/mshyperv.h>
+#include <hyperv/hvhdk.h>
 
 /*
  * Hyper-V always provides a single IO-APIC at this MMIO address.
@@ -40,7 +39,6 @@ static inline unsigned char hv_get_nmi_reason(void)
 }
 
 #if IS_ENABLED(CONFIG_HYPERV)
-extern int hyperv_init_cpuhp;
 extern bool hyperv_paravisor_present;
 
 extern void *hv_hypercall_pg;
@@ -293,24 +291,24 @@ static inline void hv_ivm_msr_write(u64 msr, u64 value) {}
 static inline void hv_ivm_msr_read(u64 msr, u64 *value) {}
 #endif
 
-static inline bool hv_is_synic_reg(unsigned int reg)
+static inline bool hv_is_synic_msr(unsigned int reg)
 {
-	return (reg >= HV_REGISTER_SCONTROL) &&
-	       (reg <= HV_REGISTER_SINT15);
+	return (reg >= HV_X64_MSR_SCONTROL) &&
+	       (reg <= HV_X64_MSR_SINT15);
 }
 
-static inline bool hv_is_sint_reg(unsigned int reg)
+static inline bool hv_is_sint_msr(unsigned int reg)
 {
-	return (reg >= HV_REGISTER_SINT0) &&
-	       (reg <= HV_REGISTER_SINT15);
+	return (reg >= HV_X64_MSR_SINT0) &&
+	       (reg <= HV_X64_MSR_SINT15);
 }
 
-u64 hv_get_register(unsigned int reg);
-void hv_set_register(unsigned int reg, u64 value);
-u64 hv_get_non_nested_register(unsigned int reg);
-void hv_set_non_nested_register(unsigned int reg, u64 value);
+u64 hv_get_msr(unsigned int reg);
+void hv_set_msr(unsigned int reg, u64 value);
+u64 hv_get_non_nested_msr(unsigned int reg);
+void hv_set_non_nested_msr(unsigned int reg, u64 value);
 
-static __always_inline u64 hv_raw_get_register(unsigned int reg)
+static __always_inline u64 hv_raw_get_msr(unsigned int reg)
 {
 	return __rdmsr(reg);
 }
@@ -331,10 +329,10 @@ static inline int hyperv_flush_guest_mapping_range(u64 as,
 {
 	return -1;
 }
-static inline void hv_set_register(unsigned int reg, u64 value) { }
-static inline u64 hv_get_register(unsigned int reg) { return 0; }
-static inline void hv_set_non_nested_register(unsigned int reg, u64 value) { }
-static inline u64 hv_get_non_nested_register(unsigned int reg) { return 0; }
+static inline void hv_set_msr(unsigned int reg, u64 value) { }
+static inline u64 hv_get_msr(unsigned int reg) { return 0; }
+static inline void hv_set_non_nested_msr(unsigned int reg, u64 value) { }
+static inline u64 hv_get_non_nested_msr(unsigned int reg) { return 0; }
 #endif /* CONFIG_HYPERV */
 
 
