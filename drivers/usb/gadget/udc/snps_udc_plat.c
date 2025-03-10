@@ -8,7 +8,6 @@
 #include <linux/extcon.h>
 #include <linux/of_address.h>
 #include <linux/of_irq.h>
-#include <linux/of_gpio.h>
 #include <linux/platform_device.h>
 #include <linux/phy/phy.h>
 #include <linux/module.h>
@@ -310,7 +309,7 @@ MODULE_DEVICE_TABLE(of, of_udc_match);
 
 static struct platform_driver udc_plat_driver = {
 	.probe		= udc_plat_probe,
-	.remove_new	= udc_plat_remove,
+	.remove		= udc_plat_remove,
 	.driver		= {
 		.name	= "snps-udc-plat",
 		.of_match_table = of_udc_match,

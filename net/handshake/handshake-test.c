@@ -17,7 +17,7 @@
 #include <uapi/linux/handshake.h>
 #include "handshake.h"
 
-MODULE_IMPORT_NS(EXPORTED_FOR_KUNIT_TESTING);
+MODULE_IMPORT_NS("EXPORTED_FOR_KUNIT_TESTING");
 
 static int test_accept_func(struct handshake_req *req, struct genl_info *info,
 			    int fd)
@@ -471,7 +471,10 @@ static void handshake_req_destroy_test1(struct kunit *test)
 	handshake_req_cancel(sock->sk);
 
 	/* Act */
-	fput(filp);
+	/* Ensure the close/release/put process has run to
+	 * completion before checking the result.
+	 */
+	__fput_sync(filp);
 
 	/* Assert */
 	KUNIT_EXPECT_PTR_EQ(test, handshake_req_destroy_test, req);

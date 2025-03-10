@@ -148,6 +148,10 @@ struct link_service {
 			const struct dc_stream_state *stream,
 			const unsigned int num_streams);
 
+	uint32_t (*dp_required_hblank_size_bytes)(
+		const struct dc_link *link,
+		struct dp_audio_bandwidth_params *audio_params);
+
 
 	/*************************** DPMS *************************************/
 	void (*set_dpms_on)(struct dc_state *state, struct pipe_ctx *pipe_ctx);
@@ -248,8 +252,7 @@ struct link_service {
 			uint32_t *backlight_millinits_avg,
 			uint32_t *backlight_millinits_peak);
 	bool (*edp_set_backlight_level)(const struct dc_link *link,
-			uint32_t backlight_pwm_u16_16,
-			uint32_t frame_ramp);
+			struct set_backlight_level_params *backlight_level_params);
 	bool (*edp_set_backlight_level_nits)(struct dc_link *link,
 			bool isHDR,
 			uint32_t backlight_millinits,
@@ -272,7 +275,7 @@ struct link_service {
 			uint16_t psr_vtotal_idle,
 			uint16_t psr_vtotal_su);
 	void (*edp_get_psr_residency)(
-			const struct dc_link *link, uint32_t *residency);
+			const struct dc_link *link, uint32_t *residency, enum psr_residency_mode mode);
 
 	bool (*edp_get_replay_state)(
 			const struct dc_link *link, uint64_t *state);
@@ -285,12 +288,12 @@ struct link_service {
 			enum replay_FW_Message_type msg,
 			union dmub_replay_cmd_set *cmd_data);
 	bool (*edp_set_coasting_vtotal)(
-			struct dc_link *link, uint16_t coasting_vtotal);
+			struct dc_link *link, uint32_t coasting_vtotal);
 	bool (*edp_replay_residency)(const struct dc_link *link,
 			unsigned int *residency, const bool is_start,
-			const bool is_alpm);
+			const enum pr_residency_mode mode);
 	bool (*edp_set_replay_power_opt_and_coasting_vtotal)(struct dc_link *link,
-			const unsigned int *power_opts, uint16_t coasting_vtotal);
+			const unsigned int *power_opts, uint32_t coasting_vtotal);
 
 	bool (*edp_wait_for_t12)(struct dc_link *link);
 	bool (*edp_is_ilr_optimization_required)(struct dc_link *link,

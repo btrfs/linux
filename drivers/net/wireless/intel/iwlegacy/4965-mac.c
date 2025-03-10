@@ -1769,7 +1769,7 @@ il4965_tx_skb(struct il_priv *il,
 	/* Set up first empty entry in queue's array of Tx/cmd buffers */
 	out_cmd = txq->cmd[q->write_ptr];
 	out_meta = &txq->meta[q->write_ptr];
-	tx_cmd = &out_cmd->cmd.tx;
+	tx_cmd = container_of(&out_cmd->cmd.tx, struct il_tx_cmd, __hdr);
 	memset(&out_cmd->hdr, 0, sizeof(out_cmd->hdr));
 	memset(tx_cmd, 0, sizeof(struct il_tx_cmd));
 
@@ -5820,7 +5820,7 @@ out:
 }
 
 void
-il4965_mac_stop(struct ieee80211_hw *hw)
+il4965_mac_stop(struct ieee80211_hw *hw, bool suspend)
 {
 	struct il_priv *il = hw->priv;
 
@@ -6301,6 +6301,10 @@ il4965_tx_queue_set_status(struct il_priv *il, struct il_tx_queue *txq,
 }
 
 static const struct ieee80211_ops il4965_mac_ops = {
+	.add_chanctx = ieee80211_emulate_add_chanctx,
+	.remove_chanctx = ieee80211_emulate_remove_chanctx,
+	.change_chanctx = ieee80211_emulate_change_chanctx,
+	.switch_vif_chanctx = ieee80211_emulate_switch_vif_chanctx,
 	.tx = il4965_mac_tx,
 	.wake_tx_queue = ieee80211_handle_wake_tx_queue,
 	.start = il4965_mac_start,

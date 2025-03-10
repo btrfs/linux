@@ -24,6 +24,7 @@
  *  |   | 30:28 | **TYPE** - message type                                      |
  *  |   |       |   - _`GUC_HXG_TYPE_REQUEST` = 0                              |
  *  |   |       |   - _`GUC_HXG_TYPE_EVENT` = 1                                |
+ *  |   |       |   - _`GUC_HXG_TYPE_FAST_REQUEST` = 2                         |
  *  |   |       |   - _`GUC_HXG_TYPE_NO_RESPONSE_BUSY` = 3                     |
  *  |   |       |   - _`GUC_HXG_TYPE_NO_RESPONSE_RETRY` = 5                    |
  *  |   |       |   - _`GUC_HXG_TYPE_RESPONSE_FAILURE` = 6                     |
@@ -40,18 +41,19 @@
  */
 
 #define GUC_HXG_MSG_MIN_LEN			1u
-#define GUC_HXG_MSG_0_ORIGIN			(0x1 << 31)
+#define GUC_HXG_MSG_0_ORIGIN			(0x1u << 31)
 #define   GUC_HXG_ORIGIN_HOST			0u
 #define   GUC_HXG_ORIGIN_GUC			1u
-#define GUC_HXG_MSG_0_TYPE			(0x7 << 28)
+#define GUC_HXG_MSG_0_TYPE			(0x7u << 28)
 #define   GUC_HXG_TYPE_REQUEST			0u
 #define   GUC_HXG_TYPE_EVENT			1u
+#define   GUC_HXG_TYPE_FAST_REQUEST		2u
 #define   GUC_HXG_TYPE_NO_RESPONSE_BUSY		3u
 #define   GUC_HXG_TYPE_NO_RESPONSE_RETRY	5u
 #define   GUC_HXG_TYPE_RESPONSE_FAILURE		6u
 #define   GUC_HXG_TYPE_RESPONSE_SUCCESS		7u
-#define GUC_HXG_MSG_0_AUX			(0xfffffff << 0)
-#define GUC_HXG_MSG_n_PAYLOAD			(0xffffffff << 0)
+#define GUC_HXG_MSG_0_AUX			(0xfffffffu << 0)
+#define GUC_HXG_MSG_n_PAYLOAD			(0xffffffffu << 0)
 
 /**
  * DOC: HXG Request
@@ -85,9 +87,37 @@
  */
 
 #define GUC_HXG_REQUEST_MSG_MIN_LEN		GUC_HXG_MSG_MIN_LEN
-#define GUC_HXG_REQUEST_MSG_0_DATA0		(0xfff << 16)
-#define GUC_HXG_REQUEST_MSG_0_ACTION		(0xffff << 0)
+#define GUC_HXG_REQUEST_MSG_0_DATA0		(0xfffu << 16)
+#define GUC_HXG_REQUEST_MSG_0_ACTION		(0xffffu << 0)
 #define GUC_HXG_REQUEST_MSG_n_DATAn		GUC_HXG_MSG_n_PAYLOAD
+
+/**
+ * DOC: HXG Fast Request
+ *
+ * The `HXG Request`_ message should be used to initiate asynchronous activity
+ * for which confirmation or return data is not expected.
+ *
+ * If confirmation is required then `HXG Request`_ shall be used instead.
+ *
+ * The recipient of this message may only use `HXG Failure`_ message if it was
+ * unable to accept this request (like invalid data).
+ *
+ * Format of `HXG Fast Request`_ message is same as `HXG Request`_ except @TYPE.
+ *
+ *  +---+-------+--------------------------------------------------------------+
+ *  |   | Bits  | Description                                                  |
+ *  +===+=======+==============================================================+
+ *  | 0 |    31 | ORIGIN - see `HXG Message`_                                  |
+ *  |   +-------+--------------------------------------------------------------+
+ *  |   | 30:28 | TYPE = `GUC_HXG_TYPE_FAST_REQUEST`_                          |
+ *  |   +-------+--------------------------------------------------------------+
+ *  |   | 27:16 | DATA0 - see `HXG Request`_                                   |
+ *  |   +-------+--------------------------------------------------------------+
+ *  |   |  15:0 | ACTION - see `HXG Request`_                                  |
+ *  +---+-------+--------------------------------------------------------------+
+ *  |...|       | DATAn - see `HXG Request`_                                   |
+ *  +---+-------+--------------------------------------------------------------+
+ */
 
 /**
  * DOC: HXG Event
@@ -117,8 +147,8 @@
  */
 
 #define GUC_HXG_EVENT_MSG_MIN_LEN		GUC_HXG_MSG_MIN_LEN
-#define GUC_HXG_EVENT_MSG_0_DATA0		(0xfff << 16)
-#define GUC_HXG_EVENT_MSG_0_ACTION		(0xffff << 0)
+#define GUC_HXG_EVENT_MSG_0_DATA0		(0xfffu << 16)
+#define GUC_HXG_EVENT_MSG_0_ACTION		(0xffffu << 0)
 #define GUC_HXG_EVENT_MSG_n_DATAn		GUC_HXG_MSG_n_PAYLOAD
 
 /**
@@ -188,8 +218,8 @@
  */
 
 #define GUC_HXG_FAILURE_MSG_LEN			GUC_HXG_MSG_MIN_LEN
-#define GUC_HXG_FAILURE_MSG_0_HINT		(0xfff << 16)
-#define GUC_HXG_FAILURE_MSG_0_ERROR		(0xffff << 0)
+#define GUC_HXG_FAILURE_MSG_0_HINT		(0xfffu << 16)
+#define GUC_HXG_FAILURE_MSG_0_ERROR		(0xffffu << 0)
 
 /**
  * DOC: HXG Response
@@ -217,18 +247,5 @@
 #define GUC_HXG_RESPONSE_MSG_MIN_LEN		GUC_HXG_MSG_MIN_LEN
 #define GUC_HXG_RESPONSE_MSG_0_DATA0		GUC_HXG_MSG_0_AUX
 #define GUC_HXG_RESPONSE_MSG_n_DATAn		GUC_HXG_MSG_n_PAYLOAD
-
-/* deprecated */
-#define INTEL_GUC_MSG_TYPE_SHIFT	28
-#define INTEL_GUC_MSG_TYPE_MASK		(0xF << INTEL_GUC_MSG_TYPE_SHIFT)
-#define INTEL_GUC_MSG_DATA_SHIFT	16
-#define INTEL_GUC_MSG_DATA_MASK		(0xFFF << INTEL_GUC_MSG_DATA_SHIFT)
-#define INTEL_GUC_MSG_CODE_SHIFT	0
-#define INTEL_GUC_MSG_CODE_MASK		(0xFFFF << INTEL_GUC_MSG_CODE_SHIFT)
-
-enum intel_guc_msg_type {
-	INTEL_GUC_MSG_TYPE_REQUEST = 0x0,
-	INTEL_GUC_MSG_TYPE_RESPONSE = 0xF,
-};
 
 #endif

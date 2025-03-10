@@ -159,6 +159,12 @@ static const struct ti_csi2rx_fmt ti_csi2rx_formats[] = {
 		.bpp			= 8,
 		.size			= SHIM_DMACNTX_SIZE_8,
 	}, {
+		.fourcc			= V4L2_PIX_FMT_GREY,
+		.code			= MEDIA_BUS_FMT_Y8_1X8,
+		.csi_dt			= MIPI_CSI2_DT_RAW8,
+		.bpp			= 8,
+		.size			= SHIM_DMACNTX_SIZE_8,
+	}, {
 		.fourcc			= V4L2_PIX_FMT_SBGGR10,
 		.code			= MEDIA_BUS_FMT_SBGGR10_1X10,
 		.csi_dt			= MIPI_CSI2_DT_RAW10,
@@ -182,6 +188,24 @@ static const struct ti_csi2rx_fmt ti_csi2rx_formats[] = {
 		.csi_dt			= MIPI_CSI2_DT_RAW10,
 		.bpp			= 16,
 		.size			= SHIM_DMACNTX_SIZE_16,
+	}, {
+		.fourcc			= V4L2_PIX_FMT_RGB565X,
+		.code			= MEDIA_BUS_FMT_RGB565_1X16,
+		.csi_dt			= MIPI_CSI2_DT_RGB565,
+		.bpp			= 16,
+		.size			= SHIM_DMACNTX_SIZE_16,
+	}, {
+		.fourcc			= V4L2_PIX_FMT_XBGR32,
+		.code			= MEDIA_BUS_FMT_RGB888_1X24,
+		.csi_dt			= MIPI_CSI2_DT_RGB888,
+		.bpp			= 32,
+		.size			= SHIM_DMACNTX_SIZE_32,
+	}, {
+		.fourcc			= V4L2_PIX_FMT_RGBX32,
+		.code			= MEDIA_BUS_FMT_BGR888_1X24,
+		.csi_dt			= MIPI_CSI2_DT_RGB888,
+		.bpp			= 32,
+		.size			= SHIM_DMACNTX_SIZE_32,
 	},
 
 	/* More formats can be supported but they are not listed for now. */
@@ -762,15 +786,14 @@ static void ti_csi2rx_buffer_queue(struct vb2_buffer *vb)
 			dev_warn(csi->dev,
 				 "Failed to drain DMA. Next frame might be bogus\n");
 
+		spin_lock_irqsave(&dma->lock, flags);
 		ret = ti_csi2rx_start_dma(csi, buf);
 		if (ret) {
-			dev_err(csi->dev, "Failed to start DMA: %d\n", ret);
-			spin_lock_irqsave(&dma->lock, flags);
 			vb2_buffer_done(&buf->vb.vb2_buf, VB2_BUF_STATE_ERROR);
 			dma->state = TI_CSI2RX_DMA_IDLE;
 			spin_unlock_irqrestore(&dma->lock, flags);
+			dev_err(csi->dev, "Failed to start DMA: %d\n", ret);
 		} else {
-			spin_lock_irqsave(&dma->lock, flags);
 			list_add_tail(&buf->list, &dma->submitted);
 			spin_unlock_irqrestore(&dma->lock, flags);
 		}
@@ -855,8 +878,6 @@ static const struct vb2_ops csi_vb2_qops = {
 	.buf_queue = ti_csi2rx_buffer_queue,
 	.start_streaming = ti_csi2rx_start_streaming,
 	.stop_streaming = ti_csi2rx_stop_streaming,
-	.wait_prepare = vb2_ops_wait_prepare,
-	.wait_finish = vb2_ops_wait_finish,
 };
 
 static int ti_csi2rx_init_vb2q(struct ti_csi2rx_dev *csi)
@@ -991,9 +1012,9 @@ static int ti_csi2rx_v4l2_init(struct ti_csi2rx_dev *csi)
 	pix_fmt->height = 480;
 	pix_fmt->field = V4L2_FIELD_NONE;
 	pix_fmt->colorspace = V4L2_COLORSPACE_SRGB;
-	pix_fmt->ycbcr_enc = V4L2_YCBCR_ENC_601,
-	pix_fmt->quantization = V4L2_QUANTIZATION_LIM_RANGE,
-	pix_fmt->xfer_func = V4L2_XFER_FUNC_SRGB,
+	pix_fmt->ycbcr_enc = V4L2_YCBCR_ENC_601;
+	pix_fmt->quantization = V4L2_QUANTIZATION_LIM_RANGE;
+	pix_fmt->xfer_func = V4L2_XFER_FUNC_SRGB;
 
 	ti_csi2rx_fill_fmt(fmt, &csi->v_fmt);
 
@@ -1065,7 +1086,6 @@ static void ti_csi2rx_cleanup_vb2q(struct ti_csi2rx_dev *csi)
 static int ti_csi2rx_probe(struct platform_device *pdev)
 {
 	struct ti_csi2rx_dev *csi;
-	struct resource *res;
 	int ret;
 
 	csi = devm_kzalloc(&pdev->dev, sizeof(*csi), GFP_KERNEL);
@@ -1076,9 +1096,7 @@ static int ti_csi2rx_probe(struct platform_device *pdev)
 	platform_set_drvdata(pdev, csi);
 
 	mutex_init(&csi->mutex);
-
-	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
-	csi->shim = devm_ioremap_resource(&pdev->dev, res);
+	csi->shim = devm_platform_ioremap_resource(pdev, 0);
 	if (IS_ERR(csi->shim)) {
 		ret = PTR_ERR(csi->shim);
 		goto err_mutex;
@@ -1121,7 +1139,7 @@ err_mutex:
 	return ret;
 }
 
-static int ti_csi2rx_remove(struct platform_device *pdev)
+static void ti_csi2rx_remove(struct platform_device *pdev)
 {
 	struct ti_csi2rx_dev *csi = platform_get_drvdata(pdev);
 
@@ -1133,8 +1151,6 @@ static int ti_csi2rx_remove(struct platform_device *pdev)
 	ti_csi2rx_cleanup_dma(csi);
 
 	mutex_destroy(&csi->mutex);
-
-	return 0;
 }
 
 static const struct of_device_id ti_csi2rx_of_match[] = {

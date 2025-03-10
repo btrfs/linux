@@ -9,7 +9,7 @@
 
 #include <linux/kernel.h>
 #include <linux/module.h>
-#include <linux/acpi.h>
+#include <linux/mod_devicetable.h>
 #include <linux/delay.h>
 #include <linux/i2c.h>
 #include <linux/iio/events.h>
@@ -627,7 +627,7 @@ static int us5182d_read_event_config(struct iio_dev *indio_dev,
 
 static int us5182d_write_event_config(struct iio_dev *indio_dev,
 	const struct iio_chan_spec *chan, enum iio_event_type type,
-	enum iio_event_direction dir, int state)
+	enum iio_event_direction dir, bool state)
 {
 	struct us5182d_data *data = iio_priv(indio_dev);
 	int ret;
@@ -955,7 +955,7 @@ static const struct acpi_device_id us5182d_acpi_match[] = {
 MODULE_DEVICE_TABLE(acpi, us5182d_acpi_match);
 
 static const struct i2c_device_id us5182d_id[] = {
-	{ "usd5182", 0 },
+	{ "usd5182" },
 	{}
 };
 
@@ -972,7 +972,7 @@ static struct i2c_driver us5182d_driver = {
 		.name = US5182D_DRV_NAME,
 		.pm = pm_ptr(&us5182d_pm_ops),
 		.of_match_table = us5182d_of_match,
-		.acpi_match_table = ACPI_PTR(us5182d_acpi_match),
+		.acpi_match_table = us5182d_acpi_match,
 	},
 	.probe = us5182d_probe,
 	.remove = us5182d_remove,

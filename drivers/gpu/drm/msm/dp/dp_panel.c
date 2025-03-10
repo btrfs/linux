@@ -4,56 +4,62 @@
  */
 
 #include "dp_panel.h"
+#include "dp_utils.h"
 
 #include <drm/drm_connector.h>
 #include <drm/drm_edid.h>
+#include <drm/drm_of.h>
 #include <drm/drm_print.h>
 
-struct dp_panel_private {
+#define DP_MAX_NUM_DP_LANES	4
+#define DP_LINK_RATE_HBR2	540000 /* kbytes */
+
+struct msm_dp_panel_private {
 	struct device *dev;
 	struct drm_device *drm_dev;
-	struct dp_panel dp_panel;
+	struct msm_dp_panel msm_dp_panel;
 	struct drm_dp_aux *aux;
-	struct dp_link *link;
-	struct dp_catalog *catalog;
+	struct msm_dp_link *link;
+	struct msm_dp_catalog *catalog;
 	bool panel_on;
 };
 
-static void dp_panel_read_psr_cap(struct dp_panel_private *panel)
+static void msm_dp_panel_read_psr_cap(struct msm_dp_panel_private *panel)
 {
 	ssize_t rlen;
-	struct dp_panel *dp_panel;
+	struct msm_dp_panel *msm_dp_panel;
 
-	dp_panel = &panel->dp_panel;
+	msm_dp_panel = &panel->msm_dp_panel;
 
 	/* edp sink */
-	if (dp_panel->dpcd[DP_EDP_CONFIGURATION_CAP]) {
+	if (msm_dp_panel->dpcd[DP_EDP_CONFIGURATION_CAP]) {
 		rlen = drm_dp_dpcd_read(panel->aux, DP_PSR_SUPPORT,
-				&dp_panel->psr_cap, sizeof(dp_panel->psr_cap));
-		if (rlen == sizeof(dp_panel->psr_cap)) {
+				&msm_dp_panel->psr_cap, sizeof(msm_dp_panel->psr_cap));
+		if (rlen == sizeof(msm_dp_panel->psr_cap)) {
 			drm_dbg_dp(panel->drm_dev,
 				"psr version: 0x%x, psr_cap: 0x%x\n",
-				dp_panel->psr_cap.version,
-				dp_panel->psr_cap.capabilities);
+				msm_dp_panel->psr_cap.version,
+				msm_dp_panel->psr_cap.capabilities);
 		} else
 			DRM_ERROR("failed to read psr info, rlen=%zd\n", rlen);
 	}
 }
 
-static int dp_panel_read_dpcd(struct dp_panel *dp_panel)
+static int msm_dp_panel_read_dpcd(struct msm_dp_panel *msm_dp_panel)
 {
 	int rc;
-	struct dp_panel_private *panel;
-	struct dp_link_info *link_info;
+	struct msm_dp_panel_private *panel;
+	struct msm_dp_link_info *link_info;
 	u8 *dpcd, major, minor;
 
-	panel = container_of(dp_panel, struct dp_panel_private, dp_panel);
-	dpcd = dp_panel->dpcd;
+	panel = container_of(msm_dp_panel, struct msm_dp_panel_private, msm_dp_panel);
+	dpcd = msm_dp_panel->dpcd;
 	rc = drm_dp_read_dpcd_caps(panel->aux, dpcd);
 	if (rc)
 		return rc;
 
-	link_info = &dp_panel->link_info;
+	msm_dp_panel->vsc_sdp_supported = drm_dp_vsc_sdp_supported(panel->aux, dpcd);
+	link_info = &msm_dp_panel->link_info;
 	link_info->revision = dpcd[DP_DPCD_REV];
 	major = (link_info->revision >> 4) & 0x0f;
 	minor = link_info->revision & 0x0f;
@@ -62,12 +68,12 @@ static int dp_panel_read_dpcd(struct dp_panel *dp_panel)
 	link_info->num_lanes = drm_dp_max_lane_count(dpcd);
 
 	/* Limit data lanes from data-lanes of endpoint property of dtsi */
-	if (link_info->num_lanes > dp_panel->max_dp_lanes)
-		link_info->num_lanes = dp_panel->max_dp_lanes;
+	if (link_info->num_lanes > msm_dp_panel->max_dp_lanes)
+		link_info->num_lanes = msm_dp_panel->max_dp_lanes;
 
 	/* Limit link rate from link-frequencies of endpoint property of dtsi */
-	if (link_info->rate > dp_panel->max_dp_link_rate)
-		link_info->rate = dp_panel->max_dp_link_rate;
+	if (link_info->rate > msm_dp_panel->max_dp_link_rate)
+		link_info->rate = msm_dp_panel->max_dp_link_rate;
 
 	drm_dbg_dp(panel->drm_dev, "version: %d.%d\n", major, minor);
 	drm_dbg_dp(panel->drm_dev, "link_rate=%d\n", link_info->rate);
@@ -76,84 +82,65 @@ static int dp_panel_read_dpcd(struct dp_panel *dp_panel)
 	if (drm_dp_enhanced_frame_cap(dpcd))
 		link_info->capabilities |= DP_LINK_CAP_ENHANCED_FRAMING;
 
-	dp_panel_read_psr_cap(panel);
+	msm_dp_panel_read_psr_cap(panel);
 
 	return rc;
 }
 
-static u32 dp_panel_get_supported_bpp(struct dp_panel *dp_panel,
+static u32 msm_dp_panel_get_supported_bpp(struct msm_dp_panel *msm_dp_panel,
 		u32 mode_edid_bpp, u32 mode_pclk_khz)
 {
-	struct dp_link_info *link_info;
+	const struct msm_dp_link_info *link_info;
 	const u32 max_supported_bpp = 30, min_supported_bpp = 18;
-	u32 bpp = 0, data_rate_khz = 0;
+	u32 bpp, data_rate_khz;
 
-	bpp = min_t(u32, mode_edid_bpp, max_supported_bpp);
+	bpp = min(mode_edid_bpp, max_supported_bpp);
 
-	link_info = &dp_panel->link_info;
+	link_info = &msm_dp_panel->link_info;
 	data_rate_khz = link_info->num_lanes * link_info->rate * 8;
 
-	while (bpp > min_supported_bpp) {
+	do {
 		if (mode_pclk_khz * bpp <= data_rate_khz)
-			break;
+			return bpp;
 		bpp -= 6;
-	}
+	} while (bpp > min_supported_bpp);
 
-	return bpp;
+	return min_supported_bpp;
 }
 
-static int dp_panel_update_modes(struct drm_connector *connector,
-	struct edid *edid)
-{
-	int rc = 0;
-
-	if (edid) {
-		rc = drm_connector_update_edid_property(connector, edid);
-		if (rc) {
-			DRM_ERROR("failed to update edid property %d\n", rc);
-			return rc;
-		}
-		rc = drm_add_edid_modes(connector, edid);
-		return rc;
-	}
-
-	rc = drm_connector_update_edid_property(connector, NULL);
-	if (rc)
-		DRM_ERROR("failed to update edid property %d\n", rc);
-
-	return rc;
-}
-
-int dp_panel_read_sink_caps(struct dp_panel *dp_panel,
+int msm_dp_panel_read_sink_caps(struct msm_dp_panel *msm_dp_panel,
 	struct drm_connector *connector)
 {
 	int rc, bw_code;
 	int count;
-	struct dp_panel_private *panel;
+	struct msm_dp_panel_private *panel;
 
-	if (!dp_panel || !connector) {
+	if (!msm_dp_panel || !connector) {
 		DRM_ERROR("invalid input\n");
 		return -EINVAL;
 	}
 
-	panel = container_of(dp_panel, struct dp_panel_private, dp_panel);
+	panel = container_of(msm_dp_panel, struct msm_dp_panel_private, msm_dp_panel);
 
-	rc = dp_panel_read_dpcd(dp_panel);
+	drm_dbg_dp(panel->drm_dev, "max_lanes=%d max_link_rate=%d\n",
+		msm_dp_panel->max_dp_lanes, msm_dp_panel->max_dp_link_rate);
+
+	rc = msm_dp_panel_read_dpcd(msm_dp_panel);
 	if (rc) {
 		DRM_ERROR("read dpcd failed %d\n", rc);
 		return rc;
 	}
 
-	bw_code = drm_dp_link_rate_to_bw_code(dp_panel->link_info.rate);
+	bw_code = drm_dp_link_rate_to_bw_code(msm_dp_panel->link_info.rate);
 	if (!is_link_rate_valid(bw_code) ||
-			!is_lane_count_valid(dp_panel->link_info.num_lanes) ||
-			(bw_code > dp_panel->max_bw_code)) {
-		DRM_ERROR("Illegal link rate=%d lane=%d\n", dp_panel->link_info.rate,
-				dp_panel->link_info.num_lanes);
+			!is_lane_count_valid(msm_dp_panel->link_info.num_lanes) ||
+			(bw_code > msm_dp_panel->max_bw_code)) {
+		DRM_ERROR("Illegal link rate=%d lane=%d\n", msm_dp_panel->link_info.rate,
+				msm_dp_panel->link_info.num_lanes);
 		return -EINVAL;
 	}
 
-	if (drm_dp_is_branch(dp_panel->dpcd)) {
+	if (drm_dp_is_branch(msm_dp_panel->dpcd)) {
 		count = drm_dp_read_sink_count(panel->aux);
 		if (!count) {
 			panel->link->sink_count = 0;
@@ -161,20 +148,21 @@ int dp_panel_read_sink_caps(struct dp_panel *dp_panel,
 		}
 	}
 
-	rc = drm_dp_read_downstream_info(panel->aux, dp_panel->dpcd,
-					 dp_panel->downstream_ports);
+	rc = drm_dp_read_downstream_info(panel->aux, msm_dp_panel->dpcd,
+					 msm_dp_panel->downstream_ports);
 	if (rc)
 		return rc;
 
-	kfree(dp_panel->edid);
-	dp_panel->edid = NULL;
+	drm_edid_free(msm_dp_panel->drm_edid);
 
-	dp_panel->edid = drm_get_edid(connector,
-					      &panel->aux->ddc);
-	if (!dp_panel->edid) {
+	msm_dp_panel->drm_edid = drm_edid_read_ddc(connector, &panel->aux->ddc);
+
+	drm_edid_connector_update(connector, msm_dp_panel->drm_edid);
+
+	if (!msm_dp_panel->drm_edid) {
 		DRM_ERROR("panel edid read failed\n");
 		/* check edid read fail is due to unplug */
-		if (!dp_catalog_link_is_connected(panel->catalog)) {
+		if (!msm_dp_catalog_link_is_connected(panel->catalog)) {
 			rc = -ETIMEDOUT;
 			goto end;
 		}
@@ -184,85 +172,87 @@ end:
 	return rc;
 }
 
-u32 dp_panel_get_mode_bpp(struct dp_panel *dp_panel,
+u32 msm_dp_panel_get_mode_bpp(struct msm_dp_panel *msm_dp_panel,
 		u32 mode_edid_bpp, u32 mode_pclk_khz)
 {
-	struct dp_panel_private *panel;
+	struct msm_dp_panel_private *panel;
 	u32 bpp;
 
-	if (!dp_panel || !mode_edid_bpp || !mode_pclk_khz) {
+	if (!msm_dp_panel || !mode_edid_bpp || !mode_pclk_khz) {
 		DRM_ERROR("invalid input\n");
 		return 0;
 	}
 
-	panel = container_of(dp_panel, struct dp_panel_private, dp_panel);
+	panel = container_of(msm_dp_panel, struct msm_dp_panel_private, msm_dp_panel);
 
-	if (dp_panel->video_test)
-		bpp = dp_link_bit_depth_to_bpp(
+	if (msm_dp_panel->video_test)
+		bpp = msm_dp_link_bit_depth_to_bpp(
 				panel->link->test_video.test_bit_depth);
 	else
-		bpp = dp_panel_get_supported_bpp(dp_panel, mode_edid_bpp,
+		bpp = msm_dp_panel_get_supported_bpp(msm_dp_panel, mode_edid_bpp,
 				mode_pclk_khz);
 
 	return bpp;
 }
 
-int dp_panel_get_modes(struct dp_panel *dp_panel,
+int msm_dp_panel_get_modes(struct msm_dp_panel *msm_dp_panel,
 	struct drm_connector *connector)
 {
-	if (!dp_panel) {
+	if (!msm_dp_panel) {
 		DRM_ERROR("invalid input\n");
 		return -EINVAL;
 	}
 
-	if (dp_panel->edid)
-		return dp_panel_update_modes(connector, dp_panel->edid);
+	if (msm_dp_panel->drm_edid)
+		return drm_edid_connector_add_modes(connector);
 
 	return 0;
 }
 
-static u8 dp_panel_get_edid_checksum(struct edid *edid)
+static u8 msm_dp_panel_get_edid_checksum(const struct edid *edid)
 {
 	edid += edid->extensions;
 
 	return edid->checksum;
 }
 
-void dp_panel_handle_sink_request(struct dp_panel *dp_panel)
+void msm_dp_panel_handle_sink_request(struct msm_dp_panel *msm_dp_panel)
 {
-	struct dp_panel_private *panel;
+	struct msm_dp_panel_private *panel;
 
-	if (!dp_panel) {
+	if (!msm_dp_panel) {
 		DRM_ERROR("invalid input\n");
 		return;
 	}
 
-	panel = container_of(dp_panel, struct dp_panel_private, dp_panel);
+	panel = container_of(msm_dp_panel, struct msm_dp_panel_private, msm_dp_panel);
 
 	if (panel->link->sink_request & DP_TEST_LINK_EDID_READ) {
+		/* FIXME: get rid of drm_edid_raw() */
+		const struct edid *edid = drm_edid_raw(msm_dp_panel->drm_edid);
 		u8 checksum;
 
-		if (dp_panel->edid)
-			checksum = dp_panel_get_edid_checksum(dp_panel->edid);
+		if (edid)
+			checksum = msm_dp_panel_get_edid_checksum(edid);
 		else
-			checksum = dp_panel->connector->real_edid_checksum;
+			checksum = msm_dp_panel->connector->real_edid_checksum;
 
-		dp_link_send_edid_checksum(panel->link, checksum);
-		dp_link_send_test_response(panel->link);
+		msm_dp_link_send_edid_checksum(panel->link, checksum);
+		msm_dp_link_send_test_response(panel->link);
 	}
 }
 
-void dp_panel_tpg_config(struct dp_panel *dp_panel, bool enable)
+void msm_dp_panel_tpg_config(struct msm_dp_panel *msm_dp_panel, bool enable)
 {
-	struct dp_catalog *catalog;
-	struct dp_panel_private *panel;
+	struct msm_dp_catalog *catalog;
+	struct msm_dp_panel_private *panel;
 
-	if (!dp_panel) {
+	if (!msm_dp_panel) {
 		DRM_ERROR("invalid input\n");
 		return;
 	}
 
-	panel = container_of(dp_panel, struct dp_panel_private, dp_panel);
+	panel = container_of(msm_dp_panel, struct msm_dp_panel_private, msm_dp_panel);
 	catalog = panel->catalog;
 
 	if (!panel->panel_on) {
@@ -272,35 +262,75 @@ void dp_panel_tpg_config(struct dp_panel *dp_panel, bool enable)
 	}
 
 	if (!enable) {
-		dp_catalog_panel_tpg_disable(catalog);
+		msm_dp_catalog_panel_tpg_disable(catalog);
 		return;
 	}
 
 	drm_dbg_dp(panel->drm_dev, "calling catalog tpg_enable\n");
-	dp_catalog_panel_tpg_enable(catalog, &panel->dp_panel.dp_mode.drm_mode);
+	msm_dp_catalog_panel_tpg_enable(catalog, &panel->msm_dp_panel.msm_dp_mode.drm_mode);
 }
 
-void dp_panel_dump_regs(struct dp_panel *dp_panel)
+static int msm_dp_panel_setup_vsc_sdp_yuv_420(struct msm_dp_panel *msm_dp_panel)
 {
-	struct dp_catalog *catalog;
-	struct dp_panel_private *panel;
+	struct msm_dp_catalog *catalog;
+	struct msm_dp_panel_private *panel;
+	struct msm_dp_display_mode *msm_dp_mode;
+	struct drm_dp_vsc_sdp vsc_sdp_data;
+	struct dp_sdp vsc_sdp;
+	ssize_t len;
 
-	panel = container_of(dp_panel, struct dp_panel_private, dp_panel);
+	if (!msm_dp_panel) {
+		DRM_ERROR("invalid input\n");
+		return -EINVAL;
+	}
+
+	panel = container_of(msm_dp_panel, struct msm_dp_panel_private, msm_dp_panel);
 	catalog = panel->catalog;
+	msm_dp_mode = &msm_dp_panel->msm_dp_mode;
 
-	dp_catalog_dump_regs(catalog);
+	memset(&vsc_sdp_data, 0, sizeof(vsc_sdp_data));
+
+	/* VSC SDP header as per table 2-118 of DP 1.4 specification */
+	vsc_sdp_data.sdp_type = DP_SDP_VSC;
+	vsc_sdp_data.revision = 0x05;
+	vsc_sdp_data.length = 0x13;
+
+	/* VSC SDP Payload for DB16 */
+	vsc_sdp_data.pixelformat = DP_PIXELFORMAT_YUV420;
+	vsc_sdp_data.colorimetry = DP_COLORIMETRY_DEFAULT;
+
+	/* VSC SDP Payload for DB17 */
+	vsc_sdp_data.bpc = msm_dp_mode->bpp / 3;
+	vsc_sdp_data.dynamic_range = DP_DYNAMIC_RANGE_CTA;
+
+	/* VSC SDP Payload for DB18 */
+	vsc_sdp_data.content_type = DP_CONTENT_TYPE_GRAPHICS;
+
+	len = drm_dp_vsc_sdp_pack(&vsc_sdp_data, &vsc_sdp);
+	if (len < 0) {
+		DRM_ERROR("unable to pack vsc sdp\n");
+		return len;
+	}
+
+	msm_dp_catalog_panel_enable_vsc_sdp(catalog, &vsc_sdp);
+
+	return 0;
 }
 
-int dp_panel_timing_cfg(struct dp_panel *dp_panel)
+int msm_dp_panel_timing_cfg(struct msm_dp_panel *msm_dp_panel)
 {
 	u32 data, total_ver, total_hor;
-	struct dp_catalog *catalog;
-	struct dp_panel_private *panel;
+	struct msm_dp_catalog *catalog;
+	struct msm_dp_panel_private *panel;
 	struct drm_display_mode *drm_mode;
+	u32 width_blanking;
+	u32 sync_start;
+	u32 msm_dp_active;
+	u32 total;
 
-	panel = container_of(dp_panel, struct dp_panel_private, dp_panel);
+	panel = container_of(msm_dp_panel, struct msm_dp_panel_private, msm_dp_panel);
 	catalog = panel->catalog;
-	drm_mode = &panel->dp_panel.dp_mode.drm_mode;
+	drm_mode = &panel->msm_dp_panel.msm_dp_mode.drm_mode;
 
 	drm_dbg_dp(panel->drm_dev, "width=%d hporch= %d %d %d\n",
 		drm_mode->hdisplay, drm_mode->htotal - drm_mode->hsync_end,
@@ -320,42 +350,46 @@ int dp_panel_timing_cfg(struct dp_panel *dp_panel)
 	data <<= 16;
 	data |= total_hor;
 
-	catalog->total = data;
+	total = data;
 
 	data = (drm_mode->vtotal - drm_mode->vsync_start);
 	data <<= 16;
 	data |= (drm_mode->htotal - drm_mode->hsync_start);
 
-	catalog->sync_start = data;
+	sync_start = data;
 
 	data = drm_mode->vsync_end - drm_mode->vsync_start;
 	data <<= 16;
-	data |= (panel->dp_panel.dp_mode.v_active_low << 31);
+	data |= (panel->msm_dp_panel.msm_dp_mode.v_active_low << 31);
 	data |= drm_mode->hsync_end - drm_mode->hsync_start;
-	data |= (panel->dp_panel.dp_mode.h_active_low << 15);
+	data |= (panel->msm_dp_panel.msm_dp_mode.h_active_low << 15);
 
-	catalog->width_blanking = data;
+	width_blanking = data;
 
 	data = drm_mode->vdisplay;
 	data <<= 16;
 	data |= drm_mode->hdisplay;
 
-	catalog->dp_active = data;
+	msm_dp_active = data;
 
-	dp_catalog_panel_timing_cfg(catalog);
+	msm_dp_catalog_panel_timing_cfg(catalog, total, sync_start, width_blanking, msm_dp_active);
+
+	if (msm_dp_panel->msm_dp_mode.out_fmt_is_yuv_420)
+		msm_dp_panel_setup_vsc_sdp_yuv_420(msm_dp_panel);
+
 	panel->panel_on = true;
 
 	return 0;
 }
 
-int dp_panel_init_panel_info(struct dp_panel *dp_panel)
+int msm_dp_panel_init_panel_info(struct msm_dp_panel *msm_dp_panel)
 {
 	struct drm_display_mode *drm_mode;
-	struct dp_panel_private *panel;
+	struct msm_dp_panel_private *panel;
 
-	drm_mode = &dp_panel->dp_mode.drm_mode;
+	drm_mode = &msm_dp_panel->msm_dp_mode.drm_mode;
 
-	panel = container_of(dp_panel, struct dp_panel_private, dp_panel);
+	panel = container_of(msm_dp_panel, struct msm_dp_panel_private, msm_dp_panel);
 
 	/*
 	 * print resolution info as this is a result
@@ -376,45 +410,106 @@ int dp_panel_init_panel_info(struct dp_panel *dp_panel)
 			drm_mode->vsync_end - drm_mode->vsync_start);
 	drm_dbg_dp(panel->drm_dev, "pixel clock (KHz)=(%d)\n",
 				drm_mode->clock);
-	drm_dbg_dp(panel->drm_dev, "bpp = %d\n", dp_panel->dp_mode.bpp);
+	drm_dbg_dp(panel->drm_dev, "bpp = %d\n", msm_dp_panel->msm_dp_mode.bpp);
 
-	dp_panel->dp_mode.bpp = max_t(u32, 18,
-				min_t(u32, dp_panel->dp_mode.bpp, 30));
+	msm_dp_panel->msm_dp_mode.bpp = msm_dp_panel_get_mode_bpp(msm_dp_panel, msm_dp_panel->msm_dp_mode.bpp,
+						      msm_dp_panel->msm_dp_mode.drm_mode.clock);
+
 	drm_dbg_dp(panel->drm_dev, "updated bpp = %d\n",
-				dp_panel->dp_mode.bpp);
+				msm_dp_panel->msm_dp_mode.bpp);
 
 	return 0;
 }
 
-struct dp_panel *dp_panel_get(struct dp_panel_in *in)
+static u32 msm_dp_panel_link_frequencies(struct device_node *of_node)
 {
-	struct dp_panel_private *panel;
-	struct dp_panel *dp_panel;
+	struct device_node *endpoint;
+	u64 frequency = 0;
+	int cnt;
 
-	if (!in->dev || !in->catalog || !in->aux || !in->link) {
+	endpoint = of_graph_get_endpoint_by_regs(of_node, 1, 0); /* port@1 */
+	if (!endpoint)
+		return 0;
+
+	cnt = of_property_count_u64_elems(endpoint, "link-frequencies");
+
+	if (cnt > 0)
+		of_property_read_u64_index(endpoint, "link-frequencies",
+						cnt - 1, &frequency);
+	of_node_put(endpoint);
+
+	do_div(frequency,
+		10 * /* from symbol rate to link rate */
+		1000); /* kbytes */
+
+	return frequency;
+}
+
+static int msm_dp_panel_parse_dt(struct msm_dp_panel *msm_dp_panel)
+{
+	struct msm_dp_panel_private *panel;
+	struct device_node *of_node;
+	int cnt;
+
+	panel = container_of(msm_dp_panel, struct msm_dp_panel_private, msm_dp_panel);
+	of_node = panel->dev->of_node;
+
+	/*
+	 * data-lanes is the property of msm_dp_out endpoint
+	 */
+	cnt = drm_of_get_data_lanes_count_ep(of_node, 1, 0, 1, DP_MAX_NUM_DP_LANES);
+	if (cnt < 0) {
+		/* legacy code, data-lanes is the property of mdss_dp node */
+		cnt = drm_of_get_data_lanes_count(of_node, 1, DP_MAX_NUM_DP_LANES);
+	}
+
+	if (cnt > 0)
+		msm_dp_panel->max_dp_lanes = cnt;
+	else
+		msm_dp_panel->max_dp_lanes = DP_MAX_NUM_DP_LANES; /* 4 lanes */
+
+	msm_dp_panel->max_dp_link_rate = msm_dp_panel_link_frequencies(of_node);
+	if (!msm_dp_panel->max_dp_link_rate)
+		msm_dp_panel->max_dp_link_rate = DP_LINK_RATE_HBR2;
+
+	return 0;
+}
+
+struct msm_dp_panel *msm_dp_panel_get(struct device *dev, struct drm_dp_aux *aux,
+			      struct msm_dp_link *link, struct msm_dp_catalog *catalog)
+{
+	struct msm_dp_panel_private *panel;
+	struct msm_dp_panel *msm_dp_panel;
+	int ret;
+
+	if (!dev || !catalog || !aux || !link) {
 		DRM_ERROR("invalid input\n");
 		return ERR_PTR(-EINVAL);
 	}
 
-	panel = devm_kzalloc(in->dev, sizeof(*panel), GFP_KERNEL);
+	panel = devm_kzalloc(dev, sizeof(*panel), GFP_KERNEL);
 	if (!panel)
 		return ERR_PTR(-ENOMEM);
 
-	panel->dev = in->dev;
-	panel->aux = in->aux;
-	panel->catalog = in->catalog;
-	panel->link = in->link;
+	panel->dev = dev;
+	panel->aux = aux;
+	panel->catalog = catalog;
+	panel->link = link;
 
-	dp_panel = &panel->dp_panel;
-	dp_panel->max_bw_code = DP_LINK_BW_8_1;
+	msm_dp_panel = &panel->msm_dp_panel;
+	msm_dp_panel->max_bw_code = DP_LINK_BW_8_1;
 
-	return dp_panel;
+	ret = msm_dp_panel_parse_dt(msm_dp_panel);
+	if (ret)
+		return ERR_PTR(ret);
+
+	return msm_dp_panel;
 }
 
-void dp_panel_put(struct dp_panel *dp_panel)
+void msm_dp_panel_put(struct msm_dp_panel *msm_dp_panel)
 {
-	if (!dp_panel)
+	if (!msm_dp_panel)
 		return;
 
-	kfree(dp_panel->edid);
+	drm_edid_free(msm_dp_panel->drm_edid);
 }

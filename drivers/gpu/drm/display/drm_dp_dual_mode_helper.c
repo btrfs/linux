@@ -52,7 +52,7 @@
  * @adapter: I2C adapter for the DDC bus
  * @offset: register offset
  * @buffer: buffer for return data
- * @size: sizo of the buffer
+ * @size: size of the buffer
  *
  * Reads @size bytes from the DP dual mode adaptor registers
  * starting at @offset.
@@ -116,7 +116,7 @@ EXPORT_SYMBOL(drm_dp_dual_mode_read);
  * @adapter: I2C adapter for the DDC bus
  * @offset: register offset
  * @buffer: buffer for write data
- * @size: sizo of the buffer
+ * @size: size of the buffer
  *
  * Writes @size bytes to the DP dual mode adaptor registers
  * starting at @offset.
@@ -160,11 +160,11 @@ EXPORT_SYMBOL(drm_dp_dual_mode_write);
 
 static bool is_hdmi_adaptor(const char hdmi_id[DP_DUAL_MODE_HDMI_ID_LEN])
 {
-	static const char dp_dual_mode_hdmi_id[DP_DUAL_MODE_HDMI_ID_LEN] =
+	static const char dp_dual_mode_hdmi_id[DP_DUAL_MODE_HDMI_ID_LEN + 1] =
 		"DP-HDMI ADAPTOR\x04";
 
 	return memcmp(hdmi_id, dp_dual_mode_hdmi_id,
-		      sizeof(dp_dual_mode_hdmi_id)) == 0;
+		      DP_DUAL_MODE_HDMI_ID_LEN) == 0;
 }
 
 static bool is_type1_adaptor(uint8_t adaptor_id)

@@ -309,7 +309,7 @@ static void mips_ejtag_fdc_console_write(struct console *c, const char *s,
 	unsigned int i, buf_len, cpu;
 	bool done_cr = false;
 	char buf[4];
-	const char *buf_ptr = buf;
+	const u8 *buf_ptr = buf;
 	/* Number of bytes of input data encoded up to each byte in buf */
 	u8 inc[4];
 
@@ -1154,7 +1154,7 @@ static char kgdbfdc_rbuf[4];
 
 /* write buffer to allow compaction */
 static unsigned int kgdbfdc_wbuflen;
-static char kgdbfdc_wbuf[4];
+static u8 kgdbfdc_wbuf[4];
 
 static void __iomem *kgdbfdc_setup(void)
 {
@@ -1215,7 +1215,7 @@ static int kgdbfdc_read_char(void)
 /* push an FDC word from write buffer to TX FIFO */
 static void kgdbfdc_push_one(void)
 {
-	const char *bufs[1] = { kgdbfdc_wbuf };
+	const u8 *bufs[1] = { kgdbfdc_wbuf };
 	struct fdc_word word;
 	void __iomem *regs;
 	unsigned int i;

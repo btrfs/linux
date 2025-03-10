@@ -1337,7 +1337,7 @@ static const struct regmap_config isl7998x_regmap = {
 	.rd_table	= &isl7998x_readable_table,
 	.wr_table	= &isl7998x_writeable_table,
 	.volatile_table	= &isl7998x_volatile_table,
-	.cache_type	= REGCACHE_RBTREE,
+	.cache_type	= REGCACHE_MAPLE,
 };
 
 static int isl7998x_mc_init(struct isl7998x *isl7998x)
@@ -1561,8 +1561,8 @@ static const struct of_device_id isl7998x_of_match[] = {
 MODULE_DEVICE_TABLE(of, isl7998x_of_match);
 
 static const struct i2c_device_id isl7998x_id[] = {
-	{ "isl79987", 0 },
-	{ /* sentinel */ },
+	{ "isl79987" },
+	{ /* sentinel */ }
 };
 MODULE_DEVICE_TABLE(i2c, isl7998x_id);
 

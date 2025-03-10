@@ -201,6 +201,8 @@ int tcf_idr_release(struct tc_action *a, bool bind);
 int tcf_register_action(struct tc_action_ops *a, struct pernet_operations *ops);
 int tcf_unregister_action(struct tc_action_ops *a,
 			  struct pernet_operations *ops);
+#define NET_ACT_ALIAS_PREFIX "net-act-"
+#define MODULE_ALIAS_NET_ACT(kind)	MODULE_ALIAS(NET_ACT_ALIAS_PREFIX kind)
 int tcf_action_destroy(struct tc_action *actions[], int bind);
 int tcf_action_exec(struct sk_buff *skb, struct tc_action **actions,
 		    int nr_actions, struct tcf_result *res);
@@ -217,7 +219,6 @@ struct tc_action *tcf_action_init_1(struct net *net, struct tcf_proto *tp,
 int tcf_action_dump(struct sk_buff *skb, struct tc_action *actions[], int bind,
 		    int ref, bool terse);
 int tcf_action_dump_old(struct sk_buff *skb, struct tc_action *a, int, int);
-int tcf_action_dump_1(struct sk_buff *skb, struct tc_action *a, int, int);
 
 static inline void tcf_action_update_bstats(struct tc_action *a,
 					    struct sk_buff *skb)

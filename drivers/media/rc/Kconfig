@@ -184,6 +184,7 @@ config IR_GPIO_TX
 	tristate "GPIO IR Bit Banging Transmitter"
 	depends on LIRC
 	depends on (OF && GPIOLIB) || COMPILE_TEST
+	depends on !PREEMPT_RT
 	help
 	   Say Y if you want to a GPIO based IR transmitter. This is a
 	   bit banging driver.
@@ -319,6 +320,7 @@ config IR_PWM_TX
 	tristate "PWM IR transmitter"
 	depends on LIRC
 	depends on PWM
+	depends on HIGH_RES_TIMERS
 	depends on OF
 	help
 	   Say Y if you want to use a PWM based IR transmitter. This is
