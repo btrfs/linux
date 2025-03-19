@@ -21,7 +21,9 @@
 
 /**
  * gfs2_drevalidate - Check directory lookup consistency
- * @dentry: the mapping to check
+ * @dir: expected parent directory inode
+ * @name: expexted name
+ * @dentry: dentry to check
  * @flags: lookup flags
  *
  * Check to make sure the lookup necessary to arrive at this inode from its
@@ -30,55 +32,43 @@
  * Returns: 1 if the dentry is ok, 0 if it isn't
  */
 
-static int gfs2_drevalidate(struct dentry *dentry, unsigned int flags)
+static int gfs2_drevalidate(struct inode *dir, const struct qstr *name,
+			    struct dentry *dentry, unsigned int flags)
 {
-	struct dentry *parent = NULL;
-	struct gfs2_sbd *sdp;
-	struct gfs2_inode *dip;
-	struct inode *dinode, *inode;
+	struct gfs2_sbd *sdp = GFS2_SB(dir);
+	struct gfs2_inode *dip = GFS2_I(dir);
+	struct inode *inode;
 	struct gfs2_holder d_gh;
 	struct gfs2_inode *ip = NULL;
-	int error, valid = 0;
+	int error, valid;
 	int had_lock = 0;
 
-	if (flags & LOOKUP_RCU) {
-		dinode = d_inode_rcu(READ_ONCE(dentry->d_parent));
-		if (!dinode)
-			return -ECHILD;
-	} else {
-		parent = dget_parent(dentry);
-		dinode = d_inode(parent);
-	}
-	sdp = GFS2_SB(dinode);
-	dip = GFS2_I(dinode);
+	if (flags & LOOKUP_RCU)
+		return -ECHILD;
+
 	inode = d_inode(dentry);
 
 	if (inode) {
 		if (is_bad_inode(inode))
-			goto out;
+			return 0;
 		ip = GFS2_I(inode);
 	}
 
-	if (sdp->sd_lockstruct.ls_ops->lm_mount == NULL) {
-		valid = 1;
-		goto out;
-	}
+	if (sdp->sd_lockstruct.ls_ops->lm_mount == NULL)
+		return 1;
 
 	had_lock = (gfs2_glock_is_locked_by_me(dip->i_gl) != NULL);
 	if (!had_lock) {
-		error = gfs2_glock_nq_init(dip->i_gl, LM_ST_SHARED,
-					   flags & LOOKUP_RCU ? GL_NOBLOCK : 0, &d_gh);
+		error = gfs2_glock_nq_init(dip->i_gl, LM_ST_SHARED, 0, &d_gh);
 		if (error)
-			goto out;
+			return 0;
 	}
 
-	error = gfs2_dir_check(d_inode(parent), &dentry->d_name, ip);
+	error = gfs2_dir_check(dir, name, ip);
 	valid = inode ? !error : (error == -ENOENT);
 
 	if (!had_lock)
 		gfs2_glock_dq_uninit(&d_gh);
-out:
-	dput(parent);
 	return valid;
 }
 

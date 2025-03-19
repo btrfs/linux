@@ -230,7 +230,7 @@ static int hd44780_probe(struct platform_device *pdev)
 	if (!lcd)
 		goto fail1;
 
-	hd = kzalloc(sizeof(struct hd44780), GFP_KERNEL);
+	hd = kzalloc(sizeof(*hd), GFP_KERNEL);
 	if (!hd)
 		goto fail2;
 
@@ -319,7 +319,7 @@ fail1:
 	return ret;
 }
 
-static int hd44780_remove(struct platform_device *pdev)
+static void hd44780_remove(struct platform_device *pdev)
 {
 	struct charlcd *lcd = platform_get_drvdata(pdev);
 	struct hd44780_common *hdc = lcd->drvdata;
@@ -329,7 +329,6 @@ static int hd44780_remove(struct platform_device *pdev)
 	kfree(lcd->drvdata);
 
 	kfree(lcd);
-	return 0;
 }
 
 static const struct of_device_id hd44780_of_match[] = {

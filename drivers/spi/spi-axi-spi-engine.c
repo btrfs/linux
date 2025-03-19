@@ -6,20 +6,16 @@
  */
 
 #include <linux/clk.h>
-#include <linux/idr.h>
+#include <linux/completion.h>
+#include <linux/fpga/adi-axi-common.h>
 #include <linux/interrupt.h>
 #include <linux/io.h>
 #include <linux/of.h>
 #include <linux/module.h>
+#include <linux/overflow.h>
 #include <linux/platform_device.h>
 #include <linux/spi/spi.h>
-#include <linux/timer.h>
-
-#define SPI_ENGINE_VERSION_MAJOR(x)	((x >> 16) & 0xff)
-#define SPI_ENGINE_VERSION_MINOR(x)	((x >> 8) & 0xff)
-#define SPI_ENGINE_VERSION_PATCH(x)	(x & 0xff)
-
-#define SPI_ENGINE_REG_VERSION			0x00
+#include <trace/events/spi.h>
 
 #define SPI_ENGINE_REG_RESET			0x40
 
@@ -46,11 +42,13 @@
 #define SPI_ENGINE_CONFIG_CPHA			BIT(0)
 #define SPI_ENGINE_CONFIG_CPOL			BIT(1)
 #define SPI_ENGINE_CONFIG_3WIRE			BIT(2)
+#define SPI_ENGINE_CONFIG_SDO_IDLE_HIGH		BIT(3)
 
 #define SPI_ENGINE_INST_TRANSFER		0x0
 #define SPI_ENGINE_INST_ASSERT			0x1
 #define SPI_ENGINE_INST_WRITE			0x2
 #define SPI_ENGINE_INST_MISC			0x3
+#define SPI_ENGINE_INST_CS_INV			0x4
 
 #define SPI_ENGINE_CMD_REG_CLK_DIV		0x0
 #define SPI_ENGINE_CMD_REG_CONFIG		0x1
@@ -61,6 +59,9 @@
 
 #define SPI_ENGINE_TRANSFER_WRITE		0x1
 #define SPI_ENGINE_TRANSFER_READ		0x2
+
+/* Arbitrary sync ID for use by host->cur_msg */
+#define AXI_SPI_ENGINE_CUR_MSG_SYNC_ID		0x1
 
 #define SPI_ENGINE_CMD(inst, arg1, arg2) \
 	(((inst) << 12) | ((arg1) << 8) | (arg2))
@@ -75,18 +76,18 @@
 	SPI_ENGINE_CMD(SPI_ENGINE_INST_MISC, SPI_ENGINE_MISC_SLEEP, (delay))
 #define SPI_ENGINE_CMD_SYNC(id) \
 	SPI_ENGINE_CMD(SPI_ENGINE_INST_MISC, SPI_ENGINE_MISC_SYNC, (id))
+#define SPI_ENGINE_CMD_CS_INV(flags) \
+	SPI_ENGINE_CMD(SPI_ENGINE_INST_CS_INV, 0, (flags))
 
 struct spi_engine_program {
 	unsigned int length;
-	uint16_t instructions[];
+	uint16_t instructions[] __counted_by(length);
 };
 
 /**
  * struct spi_engine_message_state - SPI engine per-message state
  */
 struct spi_engine_message_state {
-	/** @p: Instructions for executing this message. */
-	struct spi_engine_program *p;
 	/** @cmd_length: Number of elements in cmd_buf array. */
 	unsigned cmd_length;
 	/** @cmd_buf: Array of commands not yet written to CMD FIFO. */
@@ -103,8 +104,6 @@ struct spi_engine_message_state {
 	unsigned int rx_length;
 	/** @rx_buf: Bytes not yet written to the RX FIFO. */
 	uint8_t *rx_buf;
-	/** @sync_id: ID to correlate SYNC interrupts with this message. */
-	u8 sync_id;
 };
 
 struct spi_engine {
@@ -114,19 +113,20 @@ struct spi_engine {
 	spinlock_t lock;
 
 	void __iomem *base;
-	struct ida sync_ida;
-	struct timer_list watchdog_timer;
-	struct spi_controller *controller;
-
+	struct spi_engine_message_state msg_state;
+	struct completion msg_complete;
 	unsigned int int_enable;
+	/* shadows hardware CS inversion flag state */
+	u8 cs_inv;
 };
 
 static void spi_engine_program_add_cmd(struct spi_engine_program *p,
 	bool dry, uint16_t cmd)
 {
-	if (!dry)
-		p->instructions[p->length] = cmd;
 	p->length++;
+
+	if (!dry)
+		p->instructions[p->length - 1] = cmd;
 }
 
 static unsigned int spi_engine_get_config(struct spi_device *spi)
@@ -139,6 +139,10 @@ static unsigned int spi_engine_get_config(struct spi_device *spi)
 		config |= SPI_ENGINE_CONFIG_CPHA;
 	if (spi->mode & SPI_3WIRE)
 		config |= SPI_ENGINE_CONFIG_3WIRE;
+	if (spi->mode & SPI_MOSI_IDLE_HIGH)
+		config |= SPI_ENGINE_CONFIG_SDO_IDLE_HIGH;
+	if (spi->mode & SPI_MOSI_IDLE_LOW)
+		config &= ~SPI_ENGINE_CONFIG_SDO_IDLE_HIGH;
 
 	return config;
 }
@@ -171,16 +175,20 @@ static void spi_engine_gen_xfer(struct spi_engine_program *p, bool dry,
 }
 
 static void spi_engine_gen_sleep(struct spi_engine_program *p, bool dry,
-				 int delay_ns, u32 sclk_hz)
+				 int delay_ns, int inst_ns, u32 sclk_hz)
 {
 	unsigned int t;
 
-	/* negative delay indicates error, e.g. from spi_delay_to_ns() */
-	if (delay_ns <= 0)
+	/*
+	 * Negative delay indicates error, e.g. from spi_delay_to_ns(). And if
+	 * delay is less that the instruction execution time, there is no need
+	 * for an extra sleep instruction since the instruction execution time
+	 * will already cover the required delay.
+	 */
+	if (delay_ns < 0 || delay_ns <= inst_ns)
 		return;
 
-	/* rounding down since executing the instruction adds a couple of ticks delay */
-	t = DIV_ROUND_DOWN_ULL((u64)delay_ns * sclk_hz, NSEC_PER_SEC);
+	t = DIV_ROUND_UP_ULL((u64)(delay_ns - inst_ns) * sclk_hz, NSEC_PER_SEC);
 	while (t) {
 		unsigned int n = min(t, 256U);
 
@@ -227,9 +235,15 @@ static void spi_engine_compile_message(struct spi_message *msg, bool dry,
 	struct spi_device *spi = msg->spi;
 	struct spi_controller *host = spi->controller;
 	struct spi_transfer *xfer;
-	int clk_div, new_clk_div;
+	int clk_div, new_clk_div, inst_ns;
 	bool keep_cs = false;
 	u8 bits_per_word = 0;
+
+	/*
+	 * Take into account instruction execution time for more accurate sleep
+	 * times, especially when the delay is small.
+	 */
+	inst_ns = DIV_ROUND_UP(NSEC_PER_SEC, host->max_speed_hz);
 
 	clk_div = 1;
 
@@ -250,7 +264,7 @@ static void spi_engine_compile_message(struct spi_message *msg, bool dry,
 					clk_div - 1));
 		}
 
-		if (bits_per_word != xfer->bits_per_word) {
+		if (bits_per_word != xfer->bits_per_word && xfer->len) {
 			bits_per_word = xfer->bits_per_word;
 			spi_engine_program_add_cmd(p, dry,
 				SPI_ENGINE_CMD_WRITE(SPI_ENGINE_CMD_REG_XFER_BITS,
@@ -259,7 +273,7 @@ static void spi_engine_compile_message(struct spi_message *msg, bool dry,
 
 		spi_engine_gen_xfer(p, dry, xfer);
 		spi_engine_gen_sleep(p, dry, spi_delay_to_ns(&xfer->delay, xfer),
-				     xfer->effective_speed_hz);
+				     inst_ns, xfer->effective_speed_hz);
 
 		if (xfer->cs_change) {
 			if (list_is_last(&xfer->transfer_list, &msg->transfers)) {
@@ -269,7 +283,7 @@ static void spi_engine_compile_message(struct spi_message *msg, bool dry,
 					spi_engine_gen_cs(p, dry, spi, false);
 
 				spi_engine_gen_sleep(p, dry, spi_delay_to_ns(
-					&xfer->cs_change_delay, xfer),
+					&xfer->cs_change_delay, xfer), inst_ns,
 					xfer->effective_speed_hz);
 
 				if (!list_next_entry(xfer, transfer_list)->cs_off)
@@ -488,14 +502,10 @@ static irqreturn_t spi_engine_irq(int irq, void *devid)
 	}
 
 	if (pending & SPI_ENGINE_INT_SYNC && msg) {
-		struct spi_engine_message_state *st = msg->state;
-
-		if (completed_id == st->sync_id) {
-			if (timer_delete_sync(&spi_engine->watchdog_timer)) {
-				msg->status = 0;
-				msg->actual_length = msg->frame_length;
-				spi_finalize_current_message(host);
-			}
+		if (completed_id == AXI_SPI_ENGINE_CUR_MSG_SYNC_ID) {
+			msg->status = 0;
+			msg->actual_length = msg->frame_length;
+			complete(&spi_engine->msg_complete);
 			disable_int |= SPI_ENGINE_INT_SYNC;
 		}
 	}
@@ -511,61 +521,55 @@ static irqreturn_t spi_engine_irq(int irq, void *devid)
 	return IRQ_HANDLED;
 }
 
-static int spi_engine_prepare_message(struct spi_controller *host,
-				      struct spi_message *msg)
+static int spi_engine_optimize_message(struct spi_message *msg)
 {
 	struct spi_engine_program p_dry, *p;
-	struct spi_engine *spi_engine = spi_controller_get_devdata(host);
-	struct spi_engine_message_state *st;
-	size_t size;
-	int ret;
-
-	st = kzalloc(sizeof(*st), GFP_KERNEL);
-	if (!st)
-		return -ENOMEM;
 
 	spi_engine_precompile_message(msg);
 
 	p_dry.length = 0;
 	spi_engine_compile_message(msg, true, &p_dry);
 
-	size = sizeof(*p->instructions) * (p_dry.length + 1);
-	p = kzalloc(sizeof(*p) + size, GFP_KERNEL);
-	if (!p) {
-		kfree(st);
+	p = kzalloc(struct_size(p, instructions, p_dry.length + 1), GFP_KERNEL);
+	if (!p)
 		return -ENOMEM;
-	}
-
-	ret = ida_alloc_range(&spi_engine->sync_ida, 0, U8_MAX, GFP_KERNEL);
-	if (ret < 0) {
-		kfree(p);
-		kfree(st);
-		return ret;
-	}
-
-	st->sync_id = ret;
 
 	spi_engine_compile_message(msg, false, p);
 
-	spi_engine_program_add_cmd(p, false, SPI_ENGINE_CMD_SYNC(st->sync_id));
+	spi_engine_program_add_cmd(p, false, SPI_ENGINE_CMD_SYNC(
+						AXI_SPI_ENGINE_CUR_MSG_SYNC_ID));
 
-	st->p = p;
-	st->cmd_buf = p->instructions;
-	st->cmd_length = p->length;
-	msg->state = st;
+	msg->opt_state = p;
 
 	return 0;
 }
 
-static int spi_engine_unprepare_message(struct spi_controller *host,
-					struct spi_message *msg)
+static int spi_engine_unoptimize_message(struct spi_message *msg)
 {
-	struct spi_engine *spi_engine = spi_controller_get_devdata(host);
-	struct spi_engine_message_state *st = msg->state;
+	kfree(msg->opt_state);
 
-	ida_free(&spi_engine->sync_ida, st->sync_id);
-	kfree(st->p);
-	kfree(st);
+	return 0;
+}
+
+static int spi_engine_setup(struct spi_device *device)
+{
+	struct spi_controller *host = device->controller;
+	struct spi_engine *spi_engine = spi_controller_get_devdata(host);
+
+	if (device->mode & SPI_CS_HIGH)
+		spi_engine->cs_inv |= BIT(spi_get_chipselect(device, 0));
+	else
+		spi_engine->cs_inv &= ~BIT(spi_get_chipselect(device, 0));
+
+	writel_relaxed(SPI_ENGINE_CMD_CS_INV(spi_engine->cs_inv),
+		       spi_engine->base + SPI_ENGINE_REG_CMD_FIFO);
+
+	/*
+	 * In addition to setting the flags, we have to do a CS assert command
+	 * to make the new setting actually take effect.
+	 */
+	writel_relaxed(SPI_ENGINE_CMD_ASSERT(0, 0xff),
+		       spi_engine->base + SPI_ENGINE_REG_CMD_FIFO);
 
 	return 0;
 }
@@ -574,11 +578,25 @@ static int spi_engine_transfer_one_message(struct spi_controller *host,
 	struct spi_message *msg)
 {
 	struct spi_engine *spi_engine = spi_controller_get_devdata(host);
-	struct spi_engine_message_state *st = msg->state;
+	struct spi_engine_message_state *st = &spi_engine->msg_state;
+	struct spi_engine_program *p = msg->opt_state;
 	unsigned int int_enable = 0;
 	unsigned long flags;
 
-	mod_timer(&spi_engine->watchdog_timer, jiffies + msecs_to_jiffies(5000));
+	/* reinitialize message state for this transfer */
+	memset(st, 0, sizeof(*st));
+	st->cmd_buf = p->instructions;
+	st->cmd_length = p->length;
+	msg->state = st;
+
+	reinit_completion(&spi_engine->msg_complete);
+
+	if (trace_spi_transfer_start_enabled()) {
+		struct spi_transfer *xfer;
+
+		list_for_each_entry(xfer, &msg->transfers, transfer_list)
+			trace_spi_transfer_start(msg, xfer);
+	}
 
 	spin_lock_irqsave(&spi_engine->lock, flags);
 
@@ -600,21 +618,23 @@ static int spi_engine_transfer_one_message(struct spi_controller *host,
 	spi_engine->int_enable = int_enable;
 	spin_unlock_irqrestore(&spi_engine->lock, flags);
 
-	return 0;
-}
+	if (!wait_for_completion_timeout(&spi_engine->msg_complete,
+					 msecs_to_jiffies(5000))) {
+		dev_err(&host->dev,
+			"Timeout occurred while waiting for transfer to complete. Hardware is probably broken.\n");
+		msg->status = -ETIMEDOUT;
+	}
 
-static void spi_engine_timeout(struct timer_list *timer)
-{
-	struct spi_engine *spi_engine = from_timer(spi_engine, timer, watchdog_timer);
-	struct spi_controller *host = spi_engine->controller;
+	if (trace_spi_transfer_stop_enabled()) {
+		struct spi_transfer *xfer;
 
-	if (WARN_ON(!host->cur_msg))
-		return;
+		list_for_each_entry(xfer, &msg->transfers, transfer_list)
+			trace_spi_transfer_stop(msg, xfer);
+	}
 
-	dev_err(&host->dev,
-		"Timeout occurred while waiting for transfer to complete. Hardware is probably broken.\n");
-	host->cur_msg->status = -ETIMEDOUT;
 	spi_finalize_current_message(host);
+
+	return msg->status;
 }
 
 static void spi_engine_release_hw(void *p)
@@ -645,9 +665,7 @@ static int spi_engine_probe(struct platform_device *pdev)
 	spi_engine = spi_controller_get_devdata(host);
 
 	spin_lock_init(&spi_engine->lock);
-	ida_init(&spi_engine->sync_ida);
-	timer_setup(&spi_engine->watchdog_timer, spi_engine_timeout, TIMER_IRQSAFE);
-	spi_engine->controller = host;
+	init_completion(&spi_engine->msg_complete);
 
 	spi_engine->clk = devm_clk_get_enabled(&pdev->dev, "s_axi_aclk");
 	if (IS_ERR(spi_engine->clk))
@@ -661,12 +679,12 @@ static int spi_engine_probe(struct platform_device *pdev)
 	if (IS_ERR(spi_engine->base))
 		return PTR_ERR(spi_engine->base);
 
-	version = readl(spi_engine->base + SPI_ENGINE_REG_VERSION);
-	if (SPI_ENGINE_VERSION_MAJOR(version) != 1) {
-		dev_err(&pdev->dev, "Unsupported peripheral version %u.%u.%c\n",
-			SPI_ENGINE_VERSION_MAJOR(version),
-			SPI_ENGINE_VERSION_MINOR(version),
-			SPI_ENGINE_VERSION_PATCH(version));
+	version = readl(spi_engine->base + ADI_AXI_REG_VERSION);
+	if (ADI_AXI_PCORE_VER_MAJOR(version) != 1) {
+		dev_err(&pdev->dev, "Unsupported peripheral version %u.%u.%u\n",
+			ADI_AXI_PCORE_VER_MAJOR(version),
+			ADI_AXI_PCORE_VER_MINOR(version),
+			ADI_AXI_PCORE_VER_PATCH(version));
 		return -ENODEV;
 	}
 
@@ -689,20 +707,24 @@ static int spi_engine_probe(struct platform_device *pdev)
 	host->bits_per_word_mask = SPI_BPW_RANGE_MASK(1, 32);
 	host->max_speed_hz = clk_get_rate(spi_engine->ref_clk) / 2;
 	host->transfer_one_message = spi_engine_transfer_one_message;
-	host->prepare_message = spi_engine_prepare_message;
-	host->unprepare_message = spi_engine_unprepare_message;
+	host->optimize_message = spi_engine_optimize_message;
+	host->unoptimize_message = spi_engine_unoptimize_message;
 	host->num_chipselect = 8;
+
+	/* Some features depend of the IP core version. */
+	if (ADI_AXI_PCORE_VER_MAJOR(version) >= 1) {
+		if (ADI_AXI_PCORE_VER_MINOR(version) >= 2) {
+			host->mode_bits |= SPI_CS_HIGH;
+			host->setup = spi_engine_setup;
+		}
+		if (ADI_AXI_PCORE_VER_MINOR(version) >= 3)
+			host->mode_bits |= SPI_MOSI_IDLE_LOW | SPI_MOSI_IDLE_HIGH;
+	}
 
 	if (host->max_speed_hz == 0)
 		return dev_err_probe(&pdev->dev, -EINVAL, "spi_clk rate is 0");
 
-	ret = devm_spi_register_controller(&pdev->dev, host);
-	if (ret)
-		return ret;
-
-	platform_set_drvdata(pdev, host);
-
-	return 0;
+	return devm_spi_register_controller(&pdev->dev, host);
 }
 
 static const struct of_device_id spi_engine_match_table[] = {

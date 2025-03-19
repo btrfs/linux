@@ -10,7 +10,6 @@
 #include <linux/shmem_fs.h>
 #include <linux/slab.h>
 #include <linux/vmalloc.h>
-#include <linux/module.h>
 
 #ifdef CONFIG_X86
 #include <asm/set_memory.h>
@@ -23,7 +22,7 @@
 #include <drm/drm_prime.h>
 #include <drm/drm_print.h>
 
-MODULE_IMPORT_NS(DMA_BUF);
+MODULE_IMPORT_NS("DMA_BUF");
 
 /**
  * DOC: overview
@@ -50,7 +49,8 @@ static const struct drm_gem_object_funcs drm_gem_shmem_funcs = {
 };
 
 static struct drm_gem_shmem_object *
-__drm_gem_shmem_create(struct drm_device *dev, size_t size, bool private)
+__drm_gem_shmem_create(struct drm_device *dev, size_t size, bool private,
+		       struct vfsmount *gemfs)
 {
 	struct drm_gem_shmem_object *shmem;
 	struct drm_gem_object *obj;
@@ -77,7 +77,7 @@ __drm_gem_shmem_create(struct drm_device *dev, size_t size, bool private)
 		drm_gem_private_object_init(dev, obj, size);
 		shmem->map_wc = false; /* dma-buf mappings use always writecombine */
 	} else {
-		ret = drm_gem_object_init(dev, obj, size);
+		ret = drm_gem_object_init_with_mnt(dev, obj, size, gemfs);
 	}
 	if (ret) {
 		drm_gem_private_object_fini(obj);
@@ -124,9 +124,30 @@ err_free:
  */
 struct drm_gem_shmem_object *drm_gem_shmem_create(struct drm_device *dev, size_t size)
 {
-	return __drm_gem_shmem_create(dev, size, false);
+	return __drm_gem_shmem_create(dev, size, false, NULL);
 }
 EXPORT_SYMBOL_GPL(drm_gem_shmem_create);
+
+/**
+ * drm_gem_shmem_create_with_mnt - Allocate an object with the given size in a
+ * given mountpoint
+ * @dev: DRM device
+ * @size: Size of the object to allocate
+ * @gemfs: tmpfs mount where the GEM object will be created
+ *
+ * This function creates a shmem GEM object in a given tmpfs mountpoint.
+ *
+ * Returns:
+ * A struct drm_gem_shmem_object * on success or an ERR_PTR()-encoded negative
+ * error code on failure.
+ */
+struct drm_gem_shmem_object *drm_gem_shmem_create_with_mnt(struct drm_device *dev,
+							   size_t size,
+							   struct vfsmount *gemfs)
+{
+	return __drm_gem_shmem_create(dev, size, false, gemfs);
+}
+EXPORT_SYMBOL_GPL(drm_gem_shmem_create_with_mnt);
 
 /**
  * drm_gem_shmem_free - Free resources associated with a shmem GEM object
@@ -228,23 +249,27 @@ void drm_gem_shmem_put_pages(struct drm_gem_shmem_object *shmem)
 }
 EXPORT_SYMBOL(drm_gem_shmem_put_pages);
 
-static int drm_gem_shmem_pin_locked(struct drm_gem_shmem_object *shmem)
+int drm_gem_shmem_pin_locked(struct drm_gem_shmem_object *shmem)
 {
 	int ret;
 
 	dma_resv_assert_held(shmem->base.resv);
 
+	drm_WARN_ON(shmem->base.dev, shmem->base.import_attach);
+
 	ret = drm_gem_shmem_get_pages(shmem);
 
 	return ret;
 }
+EXPORT_SYMBOL(drm_gem_shmem_pin_locked);
 
-static void drm_gem_shmem_unpin_locked(struct drm_gem_shmem_object *shmem)
+void drm_gem_shmem_unpin_locked(struct drm_gem_shmem_object *shmem)
 {
 	dma_resv_assert_held(shmem->base.resv);
 
 	drm_gem_shmem_put_pages(shmem);
 }
+EXPORT_SYMBOL(drm_gem_shmem_unpin_locked);
 
 /**
  * drm_gem_shmem_pin - Pin backing pages for a shmem GEM object
@@ -610,6 +635,9 @@ int drm_gem_shmem_mmap(struct drm_gem_shmem_object *shmem, struct vm_area_struct
 		return ret;
 	}
 
+	if (is_cow_mapping(vma->vm_flags))
+		return -EINVAL;
+
 	dma_resv_lock(shmem->base.resv, NULL);
 	ret = drm_gem_shmem_get_pages(shmem);
 	dma_resv_unlock(shmem->base.resv);
@@ -759,7 +787,7 @@ drm_gem_shmem_prime_import_sg_table(struct drm_device *dev,
 	size_t size = PAGE_ALIGN(attach->dmabuf->size);
 	struct drm_gem_shmem_object *shmem;
 
-	shmem = __drm_gem_shmem_create(dev, size, true);
+	shmem = __drm_gem_shmem_create(dev, size, true, NULL);
 	if (IS_ERR(shmem))
 		return ERR_CAST(shmem);
 
@@ -772,5 +800,5 @@ drm_gem_shmem_prime_import_sg_table(struct drm_device *dev,
 EXPORT_SYMBOL_GPL(drm_gem_shmem_prime_import_sg_table);
 
 MODULE_DESCRIPTION("DRM SHMEM memory-management helpers");
-MODULE_IMPORT_NS(DMA_BUF);
+MODULE_IMPORT_NS("DMA_BUF");
 MODULE_LICENSE("GPL v2");

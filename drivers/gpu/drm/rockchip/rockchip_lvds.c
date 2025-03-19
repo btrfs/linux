@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * Copyright (C) Fuzhou Rockchip Electronics Co.Ltd
+ * Copyright (C) Rockchip Electronics Co., Ltd.
  * Author:
  *      Mark Yao <mark.yao@rock-chips.com>
  *      Sandy Huang <hjc@rock-chips.com>
@@ -17,7 +17,6 @@
 #include <linux/regmap.h>
 #include <linux/reset.h>
 
-#include <drm/display/drm_dp_helper.h>
 #include <drm/drm_atomic_helper.h>
 #include <drm/drm_bridge.h>
 #include <drm/drm_bridge_connector.h>
@@ -576,8 +575,7 @@ static int rockchip_lvds_bind(struct device *dev, struct device *master,
 		ret = -EINVAL;
 		goto err_put_port;
 	} else if (ret) {
-		DRM_DEV_ERROR(dev, "failed to find panel and bridge node\n");
-		ret = -EPROBE_DEFER;
+		dev_err_probe(dev, ret, "failed to find panel and bridge node\n");
 		goto err_put_port;
 	}
 	if (lvds->panel)
@@ -748,7 +746,7 @@ static void rockchip_lvds_remove(struct platform_device *pdev)
 
 struct platform_driver rockchip_lvds_driver = {
 	.probe = rockchip_lvds_probe,
-	.remove_new = rockchip_lvds_remove,
+	.remove = rockchip_lvds_remove,
 	.driver = {
 		   .name = "rockchip-lvds",
 		   .of_match_table = rockchip_lvds_dt_ids,

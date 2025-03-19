@@ -78,12 +78,9 @@ temp_crit_show(struct device *dev, struct device_attribute *attr, char *buf)
 	int temperature;
 	int ret;
 
-	mutex_lock(&tz->lock);
+	guard(thermal_zone)(tz);
 
-	ret = tz->ops->get_crit_temp(tz, &temperature);
-
-	mutex_unlock(&tz->lock);
-
+	ret = tz->ops.get_crit_temp(tz, &temperature);
 	if (ret)
 		return ret;
 
@@ -132,7 +129,7 @@ thermal_hwmon_lookup_temp(const struct thermal_hwmon_device *hwmon,
 static bool thermal_zone_crit_temp_valid(struct thermal_zone_device *tz)
 {
 	int temp;
-	return tz->ops->get_crit_temp && !tz->ops->get_crit_temp(tz, &temp);
+	return tz->ops.get_crit_temp && !tz->ops.get_crit_temp(tz, &temp);
 }
 
 int thermal_add_hwmon_sysfs(struct thermal_zone_device *tz)
@@ -287,4 +284,4 @@ int devm_thermal_add_hwmon_sysfs(struct device *dev, struct thermal_zone_device 
 }
 EXPORT_SYMBOL_GPL(devm_thermal_add_hwmon_sysfs);
 
-MODULE_IMPORT_NS(HWMON_THERMAL);
+MODULE_IMPORT_NS("HWMON_THERMAL");

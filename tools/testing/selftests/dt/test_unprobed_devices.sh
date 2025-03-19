@@ -15,15 +15,11 @@
 
 DIR="$(dirname $(readlink -f "$0"))"
 
-source "${DIR}"/ktap_helpers.sh
+source "${DIR}"/../kselftest/ktap_helpers.sh
 
 PDT=/proc/device-tree/
 COMPAT_LIST="${DIR}"/compatible_list
 IGNORE_LIST="${DIR}"/compatible_ignore_list
-
-KSFT_PASS=0
-KSFT_FAIL=1
-KSFT_SKIP=4
 
 ktap_print_header
 
@@ -33,23 +29,37 @@ if [[ ! -d "${PDT}" ]]; then
 fi
 
 nodes_compatible=$(
-	for node_compat in $(find ${PDT} -name compatible); do
-		node=$(dirname "${node_compat}")
+	for node in $(find ${PDT} -type d); do
+		[ ! -f "${node}"/compatible ] && continue
 		# Check if node is available
 		if [[ -e "${node}"/status ]]; then
 			status=$(tr -d '\000' < "${node}"/status)
-			[[ "${status}" != "okay" && "${status}" != "ok" ]] && continue
+			if [[ "${status}" != "okay" && "${status}" != "ok" ]]; then
+				if [ -n "${disabled_nodes_regex}" ]; then
+					disabled_nodes_regex="${disabled_nodes_regex}|${node}"
+				else
+					disabled_nodes_regex="${node}"
+				fi
+				continue
+			fi
 		fi
+
+		# Ignore this node if one of its ancestors was disabled
+		if [ -n "${disabled_nodes_regex}" ]; then
+			echo "${node}" | grep -q -E "${disabled_nodes_regex}" && continue
+		fi
+
 		echo "${node}" | sed -e 's|\/proc\/device-tree||'
 	done | sort
 	)
 
 nodes_dev_bound=$(
 	IFS=$'\n'
-	for uevent in $(find /sys/devices -name uevent); do
-		if [[ -d "$(dirname "${uevent}")"/driver ]]; then
-			grep '^OF_FULLNAME=' "${uevent}" | sed -e 's|OF_FULLNAME=||'
-		fi
+	for dev_dir in $(find /sys/devices -type d); do
+		[ ! -f "${dev_dir}"/uevent ] && continue
+		[ ! -d "${dev_dir}"/driver ] && continue
+
+		grep '^OF_FULLNAME=' "${dev_dir}"/uevent | sed -e 's|OF_FULLNAME=||'
 	done
 	)
 

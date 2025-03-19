@@ -99,8 +99,7 @@ static int generic_remap_checks(struct file *file_in, loff_t pos_in,
 	return 0;
 }
 
-static int remap_verify_area(struct file *file, loff_t pos, loff_t len,
-			     bool write)
+int remap_verify_area(struct file *file, loff_t pos, loff_t len, bool write)
 {
 	int mask = write ? MAY_WRITE : MAY_READ;
 	loff_t tmp;
@@ -118,6 +117,7 @@ static int remap_verify_area(struct file *file, loff_t pos, loff_t len,
 
 	return fsnotify_file_area_perm(file, mask, &pos, len);
 }
+EXPORT_SYMBOL_GPL(remap_verify_area);
 
 /*
  * Ensure that we don't remap a partial EOF block in the middle of something
@@ -373,9 +373,9 @@ int generic_remap_file_range_prep(struct file *file_in, loff_t pos_in,
 }
 EXPORT_SYMBOL(generic_remap_file_range_prep);
 
-loff_t do_clone_file_range(struct file *file_in, loff_t pos_in,
-			   struct file *file_out, loff_t pos_out,
-			   loff_t len, unsigned int remap_flags)
+loff_t vfs_clone_file_range(struct file *file_in, loff_t pos_in,
+			    struct file *file_out, loff_t pos_out,
+			    loff_t len, unsigned int remap_flags)
 {
 	loff_t ret;
 
@@ -391,23 +391,6 @@ loff_t do_clone_file_range(struct file *file_in, loff_t pos_in,
 	if (!file_in->f_op->remap_file_range)
 		return -EOPNOTSUPP;
 
-	ret = file_in->f_op->remap_file_range(file_in, pos_in,
-			file_out, pos_out, len, remap_flags);
-	if (ret < 0)
-		return ret;
-
-	fsnotify_access(file_in);
-	fsnotify_modify(file_out);
-	return ret;
-}
-EXPORT_SYMBOL(do_clone_file_range);
-
-loff_t vfs_clone_file_range(struct file *file_in, loff_t pos_in,
-			    struct file *file_out, loff_t pos_out,
-			    loff_t len, unsigned int remap_flags)
-{
-	loff_t ret;
-
 	ret = remap_verify_area(file_in, pos_in, len, false);
 	if (ret)
 		return ret;
@@ -417,10 +400,14 @@ loff_t vfs_clone_file_range(struct file *file_in, loff_t pos_in,
 		return ret;
 
 	file_start_write(file_out);
-	ret = do_clone_file_range(file_in, pos_in, file_out, pos_out, len,
-				  remap_flags);
+	ret = file_in->f_op->remap_file_range(file_in, pos_in,
+			file_out, pos_out, len, remap_flags);
 	file_end_write(file_out);
+	if (ret < 0)
+		return ret;
 
+	fsnotify_access(file_in);
+	fsnotify_modify(file_out);
 	return ret;
 }
 EXPORT_SYMBOL(vfs_clone_file_range);
@@ -549,20 +536,19 @@ int vfs_dedupe_file_range(struct file *file, struct file_dedupe_range *same)
 	}
 
 	for (i = 0, info = same->info; i < count; i++, info++) {
-		struct fd dst_fd = fdget(info->dest_fd);
-		struct file *dst_file = dst_fd.file;
+		CLASS(fd, dst_fd)(info->dest_fd);
 
-		if (!dst_file) {
+		if (fd_empty(dst_fd)) {
 			info->status = -EBADF;
 			goto next_loop;
 		}
 
 		if (info->reserved) {
 			info->status = -EINVAL;
-			goto next_fdput;
+			goto next_loop;
 		}
 
-		deduped = vfs_dedupe_file_range_one(file, off, dst_file,
+		deduped = vfs_dedupe_file_range_one(file, off, fd_file(dst_fd),
 						    info->dest_offset, len,
 						    REMAP_FILE_CAN_SHORTEN);
 		if (deduped == -EBADE)
@@ -572,8 +558,6 @@ int vfs_dedupe_file_range(struct file *file, struct file_dedupe_range *same)
 		else
 			info->bytes_deduped = len;
 
-next_fdput:
-		fdput(dst_fd);
 next_loop:
 		if (fatal_signal_pending(current))
 			break;

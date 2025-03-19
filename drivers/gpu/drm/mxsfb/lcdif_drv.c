@@ -14,6 +14,7 @@
 #include <linux/platform_device.h>
 #include <linux/pm_runtime.h>
 
+#include <drm/clients/drm_client_setup.h>
 #include <drm/drm_atomic_helper.h>
 #include <drm/drm_bridge.h>
 #include <drm/drm_drv.h>
@@ -167,7 +168,11 @@ static int lcdif_load(struct drm_device *drm)
 		return ret;
 
 	/* Modeset init */
-	drm_mode_config_init(drm);
+	ret = drmm_mode_config_init(drm);
+	if (ret) {
+		dev_err(drm->dev, "Failed to initialize mode config\n");
+		return ret;
+	}
 
 	ret = lcdif_kms_init(lcdif);
 	if (ret < 0) {
@@ -227,7 +232,6 @@ static void lcdif_unload(struct drm_device *drm)
 	drm_crtc_vblank_off(&lcdif->crtc);
 
 	drm_kms_helper_poll_fini(drm);
-	drm_mode_config_cleanup(drm);
 
 	pm_runtime_put_sync(drm->dev);
 	pm_runtime_disable(drm->dev);
@@ -240,10 +244,10 @@ DEFINE_DRM_GEM_DMA_FOPS(fops);
 static const struct drm_driver lcdif_driver = {
 	.driver_features	= DRIVER_GEM | DRIVER_MODESET | DRIVER_ATOMIC,
 	DRM_GEM_DMA_DRIVER_OPS,
+	DRM_FBDEV_DMA_DRIVER_OPS,
 	.fops	= &fops,
 	.name	= "imx-lcdif",
 	.desc	= "i.MX LCDIF Controller DRM",
-	.date	= "20220417",
 	.major	= 1,
 	.minor	= 0,
 };
@@ -272,7 +276,7 @@ static int lcdif_probe(struct platform_device *pdev)
 	if (ret)
 		goto err_unload;
 
-	drm_fbdev_dma_setup(drm, 32);
+	drm_client_setup(drm, NULL);
 
 	return 0;
 
@@ -340,6 +344,9 @@ static int __maybe_unused lcdif_suspend(struct device *dev)
 	if (ret)
 		return ret;
 
+	if (pm_runtime_suspended(dev))
+		return 0;
+
 	return lcdif_rpm_suspend(dev);
 }
 
@@ -347,7 +354,8 @@ static int __maybe_unused lcdif_resume(struct device *dev)
 {
 	struct drm_device *drm = dev_get_drvdata(dev);
 
-	lcdif_rpm_resume(dev);
+	if (!pm_runtime_suspended(dev))
+		lcdif_rpm_resume(dev);
 
 	return drm_mode_config_helper_resume(drm);
 }
@@ -359,7 +367,7 @@ static const struct dev_pm_ops lcdif_pm_ops = {
 
 static struct platform_driver lcdif_platform_driver = {
 	.probe		= lcdif_probe,
-	.remove_new	= lcdif_remove,
+	.remove		= lcdif_remove,
 	.shutdown	= lcdif_shutdown,
 	.driver	= {
 		.name		= "imx-lcdif",

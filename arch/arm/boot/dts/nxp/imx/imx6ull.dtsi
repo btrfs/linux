@@ -75,7 +75,7 @@
 				clocks = <&clks IMX6UL_CLK_DUMMY>;
 			};
 
-			iomuxc_snvs: iomuxc-snvs@2290000 {
+			iomuxc_snvs: pinctrl@2290000 {
 				compatible = "fsl,imx6ull-iomuxc-snvs";
 				reg = <0x02290000 0x4000>;
 			};
@@ -88,6 +88,8 @@
 				clocks = <&clks IMX6UL_CLK_UART8_IPG>,
 					 <&clks IMX6UL_CLK_UART8_SERIAL>;
 				clock-names = "ipg", "per";
+				dmas = <&sdma 45 4 0>, <&sdma 46 4 0>;
+				dma-names = "rx", "tx";
 				status = "disabled";
 			};
 		};

@@ -14,25 +14,6 @@
 #include "hbm.h"
 #include "client.h"
 
-int ishtp_cl_get_tx_free_buffer_size(struct ishtp_cl *cl)
-{
-	unsigned long tx_free_flags;
-	int size;
-
-	spin_lock_irqsave(&cl->tx_free_list_spinlock, tx_free_flags);
-	size = cl->tx_ring_free_size * cl->device->fw_client->props.max_msg_length;
-	spin_unlock_irqrestore(&cl->tx_free_list_spinlock, tx_free_flags);
-
-	return size;
-}
-EXPORT_SYMBOL(ishtp_cl_get_tx_free_buffer_size);
-
-int ishtp_cl_get_tx_free_rings(struct ishtp_cl *cl)
-{
-	return cl->tx_ring_free_size;
-}
-EXPORT_SYMBOL(ishtp_cl_get_tx_free_rings);
-
 /**
  * ishtp_read_list_flush() - Flush read queue
  * @cl: ishtp client instance
@@ -49,7 +30,9 @@ static void ishtp_read_list_flush(struct ishtp_cl *cl)
 	list_for_each_entry_safe(rb, next, &cl->dev->read_list.list, list)
 		if (rb->cl && ishtp_cl_cmp_id(cl, rb->cl)) {
 			list_del(&rb->list);
-			ishtp_io_rb_free(rb);
+			spin_lock(&cl->free_list_spinlock);
+			list_add_tail(&rb->list, &cl->free_rb_list.list);
+			spin_unlock(&cl->free_list_spinlock);
 		}
 	spin_unlock_irqrestore(&cl->dev->read_list_spinlock, flags);
 }
@@ -861,7 +844,7 @@ static void ipc_tx_send(void *prm)
 			/* Send ipc fragment */
 			ishtp_hdr.length = dev->mtu;
 			ishtp_hdr.msg_complete = 0;
-			/* All fregments submitted to IPC queue with no callback */
+			/* All fragments submitted to IPC queue with no callback */
 			ishtp_write_message(dev, &ishtp_hdr, pmsg);
 			cl->tx_offs += dev->mtu;
 			rem = cl_msg->send_buf.size - cl->tx_offs;

@@ -417,9 +417,9 @@ struct test_key {
 		matches_vrf		: 1,
 		is_current		: 1,
 		is_rnext		: 1,
-		used_on_handshake	: 1,
-		used_after_accept	: 1,
-		used_on_client		: 1;
+		used_on_server_tx	: 1,
+		used_on_client_tx	: 1,
+		skip_counters_checks	: 1;
 };
 
 struct key_collection {
@@ -609,16 +609,14 @@ static int key_collection_socket(bool server, unsigned int port)
 				addr = &this_ip_dest;
 			sndid = key->client_keyid;
 			rcvid = key->server_keyid;
-			set_current = key->is_current;
-			set_rnext = key->is_rnext;
+			key->used_on_client_tx = set_current = key->is_current;
+			key->used_on_server_tx = set_rnext = key->is_rnext;
 		}
 
 		if (test_add_key_cr(sk, key->password, key->len,
 				    *addr, vrf, sndid, rcvid, key->maclen,
 				    key->alg, set_current, set_rnext))
 			test_key_error("setsockopt(TCP_AO_ADD_KEY)", key);
-		if (set_current || set_rnext)
-			key->used_on_handshake = 1;
 #ifdef DEBUG
 		test_print("%s [%u/%u] key: { %s, %u:%u, %u, %u:%u:%u:%u (%u)}",
 			   server ? "server" : "client", i, collection.nr_keys,
@@ -640,22 +638,22 @@ static void verify_counters(const char *tst_name, bool is_listen_sk, bool server
 	for (i = 0; i < collection.nr_keys; i++) {
 		struct test_key *key = &collection.keys[i];
 		uint8_t sndid, rcvid;
-		bool was_used;
+		bool rx_cnt_expected;
 
+		if (key->skip_counters_checks)
+			continue;
 		if (server) {
 			sndid = key->server_keyid;
 			rcvid = key->client_keyid;
-			if (is_listen_sk)
-				was_used = key->used_on_handshake;
-			else
-				was_used = key->used_after_accept;
+			rx_cnt_expected = key->used_on_client_tx;
 		} else {
 			sndid = key->client_keyid;
 			rcvid = key->server_keyid;
-			was_used = key->used_on_client;
+			rx_cnt_expected = key->used_on_server_tx;
 		}
 
-		test_tcp_ao_key_counters_cmp(tst_name, a, b, was_used,
+		test_tcp_ao_key_counters_cmp(tst_name, a, b,
+					     rx_cnt_expected ? TEST_CNT_KEY_GOOD : 0,
 					     sndid, rcvid);
 	}
 	test_tcp_ao_counters_free(a);
@@ -843,7 +841,7 @@ static void end_server(const char *tst_name, int sk,
 	synchronize_threads(); /* 4: verified => closed */
 	close(sk);
 
-	verify_counters(tst_name, true, false, begin, &end);
+	verify_counters(tst_name, false, true, begin, &end);
 	synchronize_threads(); /* 5: counters */
 }
 
@@ -916,9 +914,8 @@ static int run_client(const char *tst_name, unsigned int port,
 		current_index = nr_keys - 1;
 	if (rnext_index < 0)
 		rnext_index = nr_keys - 1;
-	collection.keys[current_index].used_on_handshake = 1;
-	collection.keys[rnext_index].used_after_accept = 1;
-	collection.keys[rnext_index].used_on_client = 1;
+	collection.keys[current_index].used_on_client_tx = 1;
+	collection.keys[rnext_index].used_on_server_tx = 1;
 
 	synchronize_threads(); /* 3: accepted => send data */
 	if (test_client_verify(sk, msg_sz, msg_nr, TEST_TIMEOUT_SEC)) {
@@ -968,7 +965,7 @@ static void end_client(const char *tst_name, int sk, unsigned int nr_keys,
 	synchronize_threads(); /* 5: counters */
 }
 
-static void try_unmatched_keys(int sk, int *rnext_index)
+static void try_unmatched_keys(int sk, int *rnext_index, unsigned int port)
 {
 	struct test_key *key;
 	unsigned int i = 0;
@@ -1016,6 +1013,9 @@ static void try_unmatched_keys(int sk, int *rnext_index)
 		test_error("all keys on server match the client");
 	if (test_set_key(sk, -1, key->server_keyid))
 		test_error("Can't change the current key");
+	trace_ao_event_expect(TCP_AO_RNEXT_REQUEST, this_ip_addr, this_ip_dest,
+			      -1, port, 0, -1, -1, -1, -1, -1,
+			      -1, key->server_keyid, -1);
 	if (test_client_verify(sk, msg_len, nr_packets, TEST_TIMEOUT_SEC))
 		test_fail("verify failed");
 	*rnext_index = i;
@@ -1057,9 +1057,22 @@ static void check_current_back(const char *tst_name, unsigned int port,
 		return;
 	if (test_set_key(sk, collection.keys[rotate_to_index].client_keyid, -1))
 		test_error("Can't change the current key");
+	trace_ao_event_expect(TCP_AO_RNEXT_REQUEST, this_ip_dest, this_ip_addr,
+			      port, -1, 0, -1, -1, -1, -1, -1,
+			      collection.keys[rotate_to_index].client_keyid,
+			      collection.keys[current_index].client_keyid, -1);
 	if (test_client_verify(sk, msg_len, nr_packets, TEST_TIMEOUT_SEC))
 		test_fail("verify failed");
-	collection.keys[rotate_to_index].used_after_accept = 1;
+	/* There is a race here: between setting the current_key with
+	 * setsockopt(TCP_AO_INFO) and starting to send some data - there
+	 * might have been a segment received with the desired
+	 * RNext_key set. In turn that would mean that the first outgoing
+	 * segment will have the desired current_key (flipped back).
+	 * Which is what the user/test wants. As it's racy, skip checking
+	 * the counters, yet check what are the resulting current/rnext
+	 * keys on both sides.
+	 */
+	collection.keys[rotate_to_index].skip_counters_checks = 1;
 
 	end_client(tst_name, sk, nr_keys, current_index, rnext_index, &tmp);
 }
@@ -1079,6 +1092,11 @@ static void roll_over_keys(const char *tst_name, unsigned int port,
 	for (i = rnext_index + 1; rotations > 0; i++, rotations--) {
 		if (i >= collection.nr_keys)
 			i = 0;
+		trace_ao_event_expect(TCP_AO_RNEXT_REQUEST,
+				this_ip_addr, this_ip_dest,
+				-1, port, 0, -1, -1, -1, -1, -1,
+				i == 0 ? -1 : collection.keys[i - 1].server_keyid,
+				collection.keys[i].server_keyid, -1);
 		if (test_set_key(sk, -1, collection.keys[i].server_keyid))
 			test_error("Can't change the Rnext key");
 		if (test_client_verify(sk, msg_len, nr_packets, TEST_TIMEOUT_SEC)) {
@@ -1089,7 +1107,7 @@ static void roll_over_keys(const char *tst_name, unsigned int port,
 		}
 		verify_current_rnext(tst_name, sk, -1,
 				     collection.keys[i].server_keyid);
-		collection.keys[i].used_on_client = 1;
+		collection.keys[i].used_on_server_tx = 1;
 		synchronize_threads(); /* verify current/rnext */
 	}
 	end_client(tst_name, sk, nr_keys, current_index, rnext_index, &tmp);
@@ -1118,7 +1136,7 @@ static void try_client_match(const char *tst_name, unsigned int port,
 				 rnext_index, msg_len, nr_packets);
 	if (sk < 0)
 		return;
-	try_unmatched_keys(sk, &rnext_index);
+	try_unmatched_keys(sk, &rnext_index, port);
 	end_client(tst_name, sk, nr_keys, current_index, rnext_index, NULL);
 }
 
@@ -1175,6 +1193,6 @@ static void *client_fn(void *arg)
 
 int main(int argc, char *argv[])
 {
-	test_init(120, server_fn, client_fn);
+	test_init(121, server_fn, client_fn);
 	return 0;
 }
