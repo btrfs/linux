@@ -73,14 +73,25 @@ static int __init adjust_protection_map(void)
 		protection_map[VM_EXEC | VM_SHARED] = PAGE_EXECONLY;
 	}
 
+	if (lpa2_is_enabled())
+		for (int i = 0; i < ARRAY_SIZE(protection_map); i++)
+			pgprot_val(protection_map[i]) &= ~PTE_SHARED;
+
 	return 0;
 }
 arch_initcall(adjust_protection_map);
 
 pgprot_t vm_get_page_prot(unsigned long vm_flags)
 {
-	pteval_t prot = pgprot_val(protection_map[vm_flags &
+	pteval_t prot;
+
+	/* Short circuit GCS to avoid bloating the table. */
+	if (system_supports_gcs() && (vm_flags & VM_SHADOW_STACK)) {
+		prot = _PAGE_GCS_RO;
+	} else {
+		prot = pgprot_val(protection_map[vm_flags &
 				   (VM_READ|VM_WRITE|VM_EXEC|VM_SHARED)]);
+	}
 
 	if (vm_flags & VM_ARM64_BTI)
 		prot |= PTE_GP;
@@ -97,6 +108,17 @@ pgprot_t vm_get_page_prot(unsigned long vm_flags)
 	 */
 	if (vm_flags & VM_MTE)
 		prot |= PTE_ATTRINDX(MT_NORMAL_TAGGED);
+
+#ifdef CONFIG_ARCH_HAS_PKEYS
+	if (system_supports_poe()) {
+		if (vm_flags & VM_PKEY_BIT0)
+			prot |= PTE_PO_IDX_0;
+		if (vm_flags & VM_PKEY_BIT1)
+			prot |= PTE_PO_IDX_1;
+		if (vm_flags & VM_PKEY_BIT2)
+			prot |= PTE_PO_IDX_2;
+	}
+#endif
 
 	return __pgprot(prot);
 }

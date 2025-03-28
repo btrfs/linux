@@ -12,6 +12,8 @@
 
 struct dpu_hw_sspp;
 
+#define DPU_SSPP_MAX_PITCH_SIZE		0xffff
+
 /**
  * Flags
  */
@@ -142,10 +144,12 @@ struct dpu_hw_pixel_ext {
  * @src_rect:  src ROI, caller takes into account the different operations
  *             such as decimation, flip etc to program this field
  * @dest_rect: destination ROI.
+ * @rotation: simplified drm rotation hint
  */
 struct dpu_sw_pipe_cfg {
 	struct drm_rect src_rect;
 	struct drm_rect dst_rect;
+	unsigned int rotation;
 };
 
 /**
@@ -183,7 +187,7 @@ struct dpu_hw_sspp_ops {
 	 * @flags: Extra flags for format config
 	 */
 	void (*setup_format)(struct dpu_sw_pipe *pipe,
-			     const struct dpu_format *fmt, u32 flags);
+			     const struct msm_format *fmt, u32 flags);
 
 	/**
 	 * setup_rects - setup pipe ROI rectangles
@@ -279,7 +283,7 @@ struct dpu_hw_sspp_ops {
 	 */
 	void (*setup_scaler)(struct dpu_hw_sspp *ctx,
 		struct dpu_hw_scaler3_cfg *scaler3_cfg,
-		const struct dpu_format *format);
+		const struct msm_format *format);
 
 	/**
 	 * setup_cdp - setup client driven prefetch
@@ -288,7 +292,7 @@ struct dpu_hw_sspp_ops {
 	 * @enable: whether the CDP should be enabled for this pipe
 	 */
 	void (*setup_cdp)(struct dpu_sw_pipe *pipe,
-			  const struct dpu_format *fmt,
+			  const struct msm_format *fmt,
 			  bool enable);
 };
 
@@ -315,15 +319,7 @@ struct dpu_hw_sspp {
 };
 
 struct dpu_kms;
-/**
- * dpu_hw_sspp_init() - Initializes the sspp hw driver object.
- * Should be called once before accessing every pipe.
- * @dev:  Corresponding device for devres management
- * @cfg:  Pipe catalog entry for which driver object is required
- * @addr: Mapped register io address of MDP
- * @mdss_data: UBWC / MDSS configuration data
- * @mdss_rev: dpu core's major and minor versions
- */
+
 struct dpu_hw_sspp *dpu_hw_sspp_init(struct drm_device *dev,
 				     const struct dpu_sspp_cfg *cfg,
 				     void __iomem *addr,

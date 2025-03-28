@@ -12,6 +12,7 @@
 #include <asm/xilinx_mb_manager.h>
 #include <linux/module.h>
 #include <linux/of.h>
+#include <linux/debugfs.h>
 #include <linux/platform_device.h>
 #include <linux/fault-inject.h>
 
@@ -143,11 +144,10 @@ static int xtmr_inject_probe(struct platform_device *pdev)
 	return 0;
 }
 
-static int xtmr_inject_remove(struct platform_device *pdev)
+static void xtmr_inject_remove(struct platform_device *pdev)
 {
 	debugfs_remove_recursive(dbgfs_root);
 	dbgfs_root = NULL;
-	return 0;
 }
 
 static const struct of_device_id xtmr_inject_of_match[] = {

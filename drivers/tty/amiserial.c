@@ -1566,7 +1566,7 @@ fail_tty_driver_kref_put:
 	return error;
 }
 
-static int __exit amiga_serial_remove(struct platform_device *pdev)
+static void __exit amiga_serial_remove(struct platform_device *pdev)
 {
 	struct serial_state *state = platform_get_drvdata(pdev);
 
@@ -1576,11 +1576,15 @@ static int __exit amiga_serial_remove(struct platform_device *pdev)
 
 	free_irq(IRQ_AMIGA_TBE, state);
 	free_irq(IRQ_AMIGA_RBF, state);
-
-	return 0;
 }
 
-static struct platform_driver amiga_serial_driver = {
+/*
+ * amiga_serial_remove() lives in .exit.text. For drivers registered via
+ * module_platform_driver_probe() this is ok because they cannot get unbound at
+ * runtime. So mark the driver struct with __refdata to prevent modpost
+ * triggering a section mismatch warning.
+ */
+static struct platform_driver amiga_serial_driver __refdata = {
 	.remove = __exit_p(amiga_serial_remove),
 	.driver   = {
 		.name	= "amiga-serial",
@@ -1656,5 +1660,6 @@ console_initcall(amiserial_console_init);
 
 #endif /* CONFIG_SERIAL_CONSOLE && !MODULE */
 
+MODULE_DESCRIPTION("Serial driver for the amiga builtin port");
 MODULE_LICENSE("GPL");
 MODULE_ALIAS("platform:amiga-serial");

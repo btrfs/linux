@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0
 /* Copyright (c) 2017-2018, The Linux Foundation. All rights reserved. */
 
+#include <linux/cleanup.h>
 #include <linux/err.h>
 #include <linux/init.h>
 #include <linux/kernel.h>
@@ -15,6 +16,8 @@
 #include <dt-bindings/power/qcom-rpmpd.h>
 
 #define domain_to_rpmpd(domain) container_of(domain, struct rpmpd, pd)
+
+static struct qcom_smd_rpm *rpmpd_smd_rpm;
 
 /* Resource types:
  * RPMPD_X is X encoded as a little-endian, lower-case, ASCII string */
@@ -54,7 +57,6 @@ struct rpmpd {
 	bool enabled;
 	const int res_type;
 	const int res_id;
-	struct qcom_smd_rpm *rpm;
 	unsigned int max_state;
 	__le32 key;
 	bool state_synced;
@@ -226,7 +228,46 @@ static struct rpmpd cx_s3a_vfl = {
 	.key = KEY_FLOOR_LEVEL,
 };
 
+static struct rpmpd cx_s2b_corner_ao;
+static struct rpmpd cx_s2b_corner = {
+	.pd = { .name = "cx", },
+	.peer = &cx_s2b_corner_ao,
+	.res_type = RPMPD_SMPB,
+	.res_id = 2,
+	.key = KEY_CORNER,
+};
+
+static struct rpmpd cx_s2b_corner_ao = {
+	.pd = { .name = "cx_ao", },
+	.peer = &cx_s2b_corner,
+	.active_only = true,
+	.res_type = RPMPD_SMPB,
+	.res_id = 2,
+	.key = KEY_CORNER,
+};
+
+static struct rpmpd cx_s2b_vfc = {
+	.pd = { .name = "cx_vfc", },
+	.res_type = RPMPD_SMPB,
+	.res_id = 2,
+	.key = KEY_FLOOR_CORNER,
+};
+
 /* G(F)X */
+static struct rpmpd gfx_s7a_corner = {
+	.pd = { .name = "gfx", },
+	.res_type = RPMPD_SMPA,
+	.res_id = 7,
+	.key = KEY_CORNER,
+};
+
+static struct rpmpd gfx_s7a_vfc = {
+	.pd = { .name = "gfx_vfc", },
+	.res_type = RPMPD_SMPA,
+	.res_id = 7,
+	.key = KEY_FLOOR_CORNER,
+};
+
 static struct rpmpd gfx_s2b_corner = {
 	.pd = { .name = "gfx", },
 	.res_type = RPMPD_SMPB,
@@ -238,6 +279,20 @@ static struct rpmpd gfx_s2b_vfc = {
 	.pd = { .name = "gfx_vfc", },
 	.res_type = RPMPD_SMPB,
 	.res_id = 2,
+	.key = KEY_FLOOR_CORNER,
+};
+
+static struct rpmpd gfx_s4b_corner = {
+	.pd = { .name = "gfx", },
+	.res_type = RPMPD_SMPB,
+	.res_id = 4,
+	.key = KEY_CORNER,
+};
+
+static struct rpmpd gfx_s4b_vfc = {
+	.pd = { .name = "gfx_vfc", },
+	.res_type = RPMPD_SMPB,
+	.res_id = 4,
 	.key = KEY_FLOOR_CORNER,
 };
 
@@ -663,6 +718,34 @@ static const struct rpmpd_desc msm8953_desc = {
 	.max_state = RPM_SMD_LEVEL_TURBO,
 };
 
+static struct rpmpd *msm8974_rpmpds[] = {
+	[MSM8974_VDDCX] =	&cx_s2b_corner,
+	[MSM8974_VDDCX_AO] =	&cx_s2b_corner_ao,
+	[MSM8974_VDDCX_VFC] =	&cx_s2b_vfc,
+	[MSM8974_VDDGFX] =	&gfx_s4b_corner,
+	[MSM8974_VDDGFX_VFC] =	&gfx_s4b_vfc,
+};
+
+static const struct rpmpd_desc msm8974_desc = {
+	.rpmpds = msm8974_rpmpds,
+	.num_pds = ARRAY_SIZE(msm8974_rpmpds),
+	.max_state = MAX_CORNER_RPMPD_STATE,
+};
+
+static struct rpmpd *msm8974pro_pma8084_rpmpds[] = {
+	[MSM8974_VDDCX] =	&cx_s2a_corner,
+	[MSM8974_VDDCX_AO] =	&cx_s2a_corner_ao,
+	[MSM8974_VDDCX_VFC] =	&cx_s2a_vfc,
+	[MSM8974_VDDGFX] =	&gfx_s7a_corner,
+	[MSM8974_VDDGFX_VFC] =	&gfx_s7a_vfc,
+};
+
+static const struct rpmpd_desc msm8974pro_pma8084_desc = {
+	.rpmpds = msm8974pro_pma8084_rpmpds,
+	.num_pds = ARRAY_SIZE(msm8974pro_pma8084_rpmpds),
+	.max_state = MAX_CORNER_RPMPD_STATE,
+};
+
 static struct rpmpd *msm8976_rpmpds[] = {
 	[MSM8976_VDDCX] =	&cx_s2a_lvl,
 	[MSM8976_VDDCX_AO] =	&cx_s2a_lvl_ao,
@@ -856,6 +939,8 @@ static const struct of_device_id rpmpd_match_table[] = {
 	{ .compatible = "qcom,msm8917-rpmpd", .data = &msm8917_desc },
 	{ .compatible = "qcom,msm8939-rpmpd", .data = &msm8939_desc },
 	{ .compatible = "qcom,msm8953-rpmpd", .data = &msm8953_desc },
+	{ .compatible = "qcom,msm8974-rpmpd", .data = &msm8974_desc },
+	{ .compatible = "qcom,msm8974pro-pma8084-rpmpd", .data = &msm8974pro_pma8084_desc },
 	{ .compatible = "qcom,msm8976-rpmpd", .data = &msm8976_desc },
 	{ .compatible = "qcom,msm8994-rpmpd", .data = &msm8994_desc },
 	{ .compatible = "qcom,msm8996-rpmpd", .data = &msm8996_desc },
@@ -879,7 +964,7 @@ static int rpmpd_send_enable(struct rpmpd *pd, bool enable)
 		.value = cpu_to_le32(enable),
 	};
 
-	return qcom_rpm_smd_write(pd->rpm, QCOM_SMD_RPM_ACTIVE_STATE,
+	return qcom_rpm_smd_write(rpmpd_smd_rpm, QCOM_SMD_RPM_ACTIVE_STATE,
 				  pd->res_type, pd->res_id, &req, sizeof(req));
 }
 
@@ -891,7 +976,7 @@ static int rpmpd_send_corner(struct rpmpd *pd, int state, unsigned int corner)
 		.value = cpu_to_le32(corner),
 	};
 
-	return qcom_rpm_smd_write(pd->rpm, state, pd->res_type, pd->res_id,
+	return qcom_rpm_smd_write(rpmpd_smd_rpm, state, pd->res_type, pd->res_id,
 				  &req, sizeof(req));
 };
 
@@ -940,19 +1025,16 @@ static int rpmpd_power_on(struct generic_pm_domain *domain)
 	int ret;
 	struct rpmpd *pd = domain_to_rpmpd(domain);
 
-	mutex_lock(&rpmpd_lock);
+	guard(mutex)(&rpmpd_lock);
 
 	ret = rpmpd_send_enable(pd, true);
 	if (ret)
-		goto out;
+		return ret;
 
 	pd->enabled = true;
 
 	if (pd->corner)
 		ret = rpmpd_aggregate_corner(pd);
-
-out:
-	mutex_unlock(&rpmpd_lock);
 
 	return ret;
 }
@@ -976,27 +1058,21 @@ static int rpmpd_power_off(struct generic_pm_domain *domain)
 static int rpmpd_set_performance(struct generic_pm_domain *domain,
 				 unsigned int state)
 {
-	int ret = 0;
 	struct rpmpd *pd = domain_to_rpmpd(domain);
 
 	if (state > pd->max_state)
 		state = pd->max_state;
 
-	mutex_lock(&rpmpd_lock);
+	guard(mutex)(&rpmpd_lock);
 
 	pd->corner = state;
 
 	/* Always send updates for vfc and vfl */
 	if (!pd->enabled && pd->key != cpu_to_le32(KEY_FLOOR_CORNER) &&
 	    pd->key != cpu_to_le32(KEY_FLOOR_LEVEL))
-		goto out;
+		return 0;
 
-	ret = rpmpd_aggregate_corner(pd);
-
-out:
-	mutex_unlock(&rpmpd_lock);
-
-	return ret;
+	return rpmpd_aggregate_corner(pd);
 }
 
 static int rpmpd_probe(struct platform_device *pdev)
@@ -1004,12 +1080,11 @@ static int rpmpd_probe(struct platform_device *pdev)
 	int i;
 	size_t num;
 	struct genpd_onecell_data *data;
-	struct qcom_smd_rpm *rpm;
 	struct rpmpd **rpmpds;
 	const struct rpmpd_desc *desc;
 
-	rpm = dev_get_drvdata(pdev->dev.parent);
-	if (!rpm) {
+	rpmpd_smd_rpm = dev_get_drvdata(pdev->dev.parent);
+	if (!rpmpd_smd_rpm) {
 		dev_err(&pdev->dev, "Unable to retrieve handle to RPM\n");
 		return -ENODEV;
 	}
@@ -1039,7 +1114,6 @@ static int rpmpd_probe(struct platform_device *pdev)
 			continue;
 		}
 
-		rpmpds[i]->rpm = rpm;
 		rpmpds[i]->max_state = desc->max_state;
 		rpmpds[i]->pd.power_off = rpmpd_power_off;
 		rpmpds[i]->pd.power_on = rpmpd_power_on;

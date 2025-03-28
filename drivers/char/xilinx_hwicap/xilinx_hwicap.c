@@ -636,11 +636,11 @@ static int hwicap_setup(struct platform_device *pdev, int id,
 		retval = -ENOMEM;
 		goto failed;
 	}
-	dev_set_drvdata(dev, (void *)drvdata);
+	dev_set_drvdata(dev, drvdata);
 
 	drvdata->base_address = devm_platform_ioremap_resource(pdev, 0);
-	if (!drvdata->base_address) {
-		retval = -ENODEV;
+	if (IS_ERR(drvdata->base_address)) {
+		retval = PTR_ERR(drvdata->base_address);
 		goto failed;
 	}
 
@@ -738,7 +738,7 @@ MODULE_DEVICE_TABLE(of, hwicap_of_match);
 
 static struct platform_driver hwicap_platform_driver = {
 	.probe = hwicap_drv_probe,
-	.remove_new = hwicap_drv_remove,
+	.remove = hwicap_drv_remove,
 	.driver = {
 		.name = DRIVER_NAME,
 		.of_match_table = hwicap_of_match,

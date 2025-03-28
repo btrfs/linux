@@ -80,7 +80,7 @@ static u64 _dpu_core_perf_calc_clk(const struct dpu_perf_cfg *perf_cfg,
 
 	mode = &state->adjusted_mode;
 
-	crtc_clk = mode->vtotal * mode->hdisplay * drm_mode_vrefresh(mode);
+	crtc_clk = (u64)mode->vtotal * mode->hdisplay * drm_mode_vrefresh(mode);
 
 	drm_atomic_crtc_for_each_plane(plane, crtc) {
 		pstate = to_dpu_plane_state(plane->state);
@@ -140,6 +140,12 @@ static void _dpu_core_perf_calc_crtc(const struct dpu_core_perf *core_perf,
 			perf->max_per_pipe_ib, perf->bw_ctl);
 }
 
+/**
+ * dpu_core_perf_crtc_check - validate performance of the given crtc state
+ * @crtc: Pointer to crtc
+ * @state: Pointer to new crtc state
+ * return: zero if success, or error code otherwise
+ */
 int dpu_core_perf_crtc_check(struct drm_crtc *crtc,
 		struct drm_crtc_state *state)
 {
@@ -301,6 +307,12 @@ static u64 _dpu_core_perf_get_core_clk_rate(struct dpu_kms *kms)
 	return clk_rate;
 }
 
+/**
+ * dpu_core_perf_crtc_update - update performance of the given crtc
+ * @crtc: Pointer to crtc
+ * @params_changed: true if crtc parameters are modified
+ * return: zero if success, or error code otherwise
+ */
 int dpu_core_perf_crtc_update(struct drm_crtc *crtc,
 			      int params_changed)
 {
@@ -446,6 +458,11 @@ static const struct file_operations dpu_core_perf_mode_fops = {
 	.write = _dpu_core_perf_mode_write,
 };
 
+/**
+ * dpu_core_perf_debugfs_init - initialize debugfs for core performance context
+ * @dpu_kms: Pointer to the dpu_kms struct
+ * @parent: Pointer to parent debugfs
+ */
 int dpu_core_perf_debugfs_init(struct dpu_kms *dpu_kms, struct dentry *parent)
 {
 	struct dpu_core_perf *perf = &dpu_kms->perf;
@@ -459,15 +476,15 @@ int dpu_core_perf_debugfs_init(struct dpu_kms *dpu_kms, struct dentry *parent)
 			&perf->core_clk_rate);
 	debugfs_create_u32("enable_bw_release", 0600, entry,
 			(u32 *)&perf->enable_bw_release);
-	debugfs_create_u32("threshold_low", 0600, entry,
+	debugfs_create_u32("threshold_low", 0400, entry,
 			(u32 *)&perf->perf_cfg->max_bw_low);
-	debugfs_create_u32("threshold_high", 0600, entry,
+	debugfs_create_u32("threshold_high", 0400, entry,
 			(u32 *)&perf->perf_cfg->max_bw_high);
-	debugfs_create_u32("min_core_ib", 0600, entry,
+	debugfs_create_u32("min_core_ib", 0400, entry,
 			(u32 *)&perf->perf_cfg->min_core_ib);
-	debugfs_create_u32("min_llcc_ib", 0600, entry,
+	debugfs_create_u32("min_llcc_ib", 0400, entry,
 			(u32 *)&perf->perf_cfg->min_llcc_ib);
-	debugfs_create_u32("min_dram_ib", 0600, entry,
+	debugfs_create_u32("min_dram_ib", 0400, entry,
 			(u32 *)&perf->perf_cfg->min_dram_ib);
 	debugfs_create_file("perf_mode", 0600, entry,
 			(u32 *)perf, &dpu_core_perf_mode_fops);
@@ -482,6 +499,12 @@ int dpu_core_perf_debugfs_init(struct dpu_kms *dpu_kms, struct dentry *parent)
 }
 #endif
 
+/**
+ * dpu_core_perf_init - initialize the given core performance context
+ * @perf: Pointer to core performance context
+ * @perf_cfg: Pointer to platform performance configuration
+ * @max_core_clk_rate: Maximum core clock rate
+ */
 int dpu_core_perf_init(struct dpu_core_perf *perf,
 		const struct dpu_perf_cfg *perf_cfg,
 		unsigned long max_core_clk_rate)

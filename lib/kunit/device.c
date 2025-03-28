@@ -10,6 +10,7 @@
  */
 
 #include <linux/device.h>
+#include <linux/dma-mapping.h>
 
 #include <kunit/test.h>
 #include <kunit/device.h>
@@ -35,7 +36,7 @@ struct kunit_device {
 
 #define to_kunit_device(d) container_of_const(d, struct kunit_device, dev)
 
-static struct bus_type kunit_bus_type = {
+static const struct bus_type kunit_bus_type = {
 	.name		= "kunit",
 };
 
@@ -45,13 +46,27 @@ int kunit_bus_init(void)
 	int error;
 
 	kunit_bus_device = root_device_register("kunit");
-	if (!kunit_bus_device)
-		return -ENOMEM;
+	if (IS_ERR(kunit_bus_device))
+		return PTR_ERR(kunit_bus_device);
 
 	error = bus_register(&kunit_bus_type);
 	if (error)
-		bus_unregister(&kunit_bus_type);
+		root_device_unregister(kunit_bus_device);
 	return error;
+}
+
+/* Unregister the 'kunit_bus' in case the KUnit module is unloaded. */
+void kunit_bus_shutdown(void)
+{
+	/* Make sure the bus exists before we unregister it. */
+	if (IS_ERR_OR_NULL(kunit_bus_device))
+		return;
+
+	bus_unregister(&kunit_bus_type);
+
+	root_device_unregister(kunit_bus_device);
+
+	kunit_bus_device = NULL;
 }
 
 /* Release a 'fake' KUnit device. */
@@ -74,7 +89,7 @@ struct device_driver *kunit_driver_create(struct kunit *test, const char *name)
 	if (!driver)
 		return ERR_PTR(err);
 
-	driver->name = name;
+	driver->name = kunit_kstrdup_const(test, name, GFP_KERNEL);
 	driver->bus = &kunit_bus_type;
 	driver->owner = THIS_MODULE;
 
@@ -118,6 +133,9 @@ static struct kunit_device *kunit_device_register_internal(struct kunit *test,
 		put_device(&kunit_dev->dev);
 		return ERR_PTR(err);
 	}
+
+	kunit_dev->dev.dma_mask = &kunit_dev->dev.coherent_dma_mask;
+	kunit_dev->dev.coherent_dma_mask = DMA_BIT_MASK(32);
 
 	kunit_add_action(test, device_unregister_wrapper, &kunit_dev->dev);
 
@@ -174,8 +192,11 @@ void kunit_device_unregister(struct kunit *test, struct device *dev)
 	const struct device_driver *driver = to_kunit_device(dev)->driver;
 
 	kunit_release_action(test, device_unregister_wrapper, dev);
-	if (driver)
+	if (driver) {
+		const char *driver_name = driver->name;
 		kunit_release_action(test, driver_unregister_wrapper, (void *)driver);
+		kunit_kfree_const(test, driver_name);
+	}
 }
 EXPORT_SYMBOL_GPL(kunit_device_unregister);
 

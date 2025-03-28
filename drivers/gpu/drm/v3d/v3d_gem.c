@@ -247,10 +247,11 @@ v3d_gem_init(struct drm_device *dev)
 	int ret, i;
 
 	for (i = 0; i < V3D_MAX_QUEUES; i++) {
-		v3d->queue[i].fence_context = dma_fence_context_alloc(1);
-		v3d->queue[i].start_ns = 0;
-		v3d->queue[i].enabled_ns = 0;
-		v3d->queue[i].jobs_sent = 0;
+		struct v3d_queue_state *queue = &v3d->queue[i];
+
+		queue->fence_context = dma_fence_context_alloc(1);
+		memset(&queue->stats, 0, sizeof(queue->stats));
+		seqcount_init(&queue->stats.lock);
 	}
 
 	spin_lock_init(&v3d->mm_lock);
@@ -287,11 +288,14 @@ v3d_gem_init(struct drm_device *dev)
 	v3d_init_hw_state(v3d);
 	v3d_mmu_set_page_table(v3d);
 
+	v3d_gemfs_init(v3d);
+
 	ret = v3d_sched_init(v3d);
 	if (ret) {
 		drm_mm_takedown(&v3d->mm);
-		dma_free_coherent(v3d->drm.dev, 4096 * 1024, (void *)v3d->pt,
+		dma_free_coherent(v3d->drm.dev, pt_size, (void *)v3d->pt,
 				  v3d->pt_paddr);
+		return ret;
 	}
 
 	return 0;
@@ -303,6 +307,7 @@ v3d_gem_destroy(struct drm_device *dev)
 	struct v3d_dev *v3d = to_v3d_dev(dev);
 
 	v3d_sched_fini(v3d);
+	v3d_gemfs_fini(v3d);
 
 	/* Waiting for jobs to finish would need to be done before
 	 * unregistering V3D.

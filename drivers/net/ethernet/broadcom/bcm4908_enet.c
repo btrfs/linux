@@ -789,9 +789,10 @@ static struct platform_driver bcm4908_enet_driver = {
 		.of_match_table = bcm4908_enet_of_match,
 	},
 	.probe	= bcm4908_enet_probe,
-	.remove_new = bcm4908_enet_remove,
+	.remove = bcm4908_enet_remove,
 };
 module_platform_driver(bcm4908_enet_driver);
 
+MODULE_DESCRIPTION("Broadcom BCM4908 Gigabit Ethernet driver");
 MODULE_LICENSE("GPL v2");
 MODULE_DEVICE_TABLE(of, bcm4908_enet_of_match);

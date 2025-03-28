@@ -21,13 +21,160 @@
  *
  */
 
-#include <linux/devcoredump.h>
-#include <generated/utsrelease.h>
-
 #include "amdgpu_reset.h"
 #include "aldebaran.h"
 #include "sienna_cichlid.h"
 #include "smu_v13_0_10.h"
+
+static int amdgpu_reset_xgmi_reset_on_init_suspend(struct amdgpu_device *adev)
+{
+	int i;
+
+	for (i = adev->num_ip_blocks - 1; i >= 0; i--) {
+		if (!adev->ip_blocks[i].status.valid)
+			continue;
+		if (!adev->ip_blocks[i].status.hw)
+			continue;
+		/* displays are handled in phase1 */
+		if (adev->ip_blocks[i].version->type == AMD_IP_BLOCK_TYPE_DCE)
+			continue;
+
+		/* XXX handle errors */
+		amdgpu_ip_block_suspend(&adev->ip_blocks[i]);
+		adev->ip_blocks[i].status.hw = false;
+	}
+
+	/* VCN FW shared region is in frambuffer, there are some flags
+	 * initialized in that region during sw_init. Make sure the region is
+	 * backed up.
+	 */
+	amdgpu_vcn_save_vcpu_bo(adev);
+
+	return 0;
+}
+
+static int amdgpu_reset_xgmi_reset_on_init_prep_hwctxt(
+	struct amdgpu_reset_control *reset_ctl,
+	struct amdgpu_reset_context *reset_context)
+{
+	struct list_head *reset_device_list = reset_context->reset_device_list;
+	struct amdgpu_device *tmp_adev;
+	int r;
+
+	list_for_each_entry(tmp_adev, reset_device_list, reset_list) {
+		amdgpu_unregister_gpu_instance(tmp_adev);
+		r = amdgpu_reset_xgmi_reset_on_init_suspend(tmp_adev);
+		if (r) {
+			dev_err(tmp_adev->dev,
+				"xgmi reset on init: prepare for reset failed");
+			return r;
+		}
+	}
+
+	return r;
+}
+
+static int amdgpu_reset_xgmi_reset_on_init_restore_hwctxt(
+	struct amdgpu_reset_control *reset_ctl,
+	struct amdgpu_reset_context *reset_context)
+{
+	struct list_head *reset_device_list = reset_context->reset_device_list;
+	struct amdgpu_device *tmp_adev = NULL;
+	int r;
+
+	r = amdgpu_device_reinit_after_reset(reset_context);
+	if (r)
+		return r;
+	list_for_each_entry(tmp_adev, reset_device_list, reset_list) {
+		if (!tmp_adev->kfd.init_complete) {
+			kgd2kfd_init_zone_device(tmp_adev);
+			amdgpu_amdkfd_device_init(tmp_adev);
+			amdgpu_amdkfd_drm_client_create(tmp_adev);
+		}
+	}
+
+	return r;
+}
+
+static int amdgpu_reset_xgmi_reset_on_init_perform_reset(
+	struct amdgpu_reset_control *reset_ctl,
+	struct amdgpu_reset_context *reset_context)
+{
+	struct amdgpu_device *adev = (struct amdgpu_device *)reset_ctl->handle;
+	struct list_head *reset_device_list = reset_context->reset_device_list;
+	struct amdgpu_device *tmp_adev = NULL;
+	int r;
+
+	dev_dbg(adev->dev, "xgmi roi - hw reset\n");
+
+	list_for_each_entry(tmp_adev, reset_device_list, reset_list) {
+		mutex_lock(&tmp_adev->reset_cntl->reset_lock);
+		tmp_adev->reset_cntl->active_reset =
+			amdgpu_asic_reset_method(adev);
+	}
+	r = 0;
+	/* Mode1 reset needs to be triggered on all devices together */
+	list_for_each_entry(tmp_adev, reset_device_list, reset_list) {
+		/* For XGMI run all resets in parallel to speed up the process */
+		if (!queue_work(system_unbound_wq, &tmp_adev->xgmi_reset_work))
+			r = -EALREADY;
+		if (r) {
+			dev_err(tmp_adev->dev,
+				"xgmi reset on init: reset failed with error, %d",
+				r);
+			break;
+		}
+	}
+
+	/* For XGMI wait for all resets to complete before proceed */
+	if (!r) {
+		list_for_each_entry(tmp_adev, reset_device_list, reset_list) {
+			flush_work(&tmp_adev->xgmi_reset_work);
+			r = tmp_adev->asic_reset_res;
+			if (r)
+				break;
+		}
+	}
+
+	list_for_each_entry(tmp_adev, reset_device_list, reset_list) {
+		mutex_unlock(&tmp_adev->reset_cntl->reset_lock);
+		tmp_adev->reset_cntl->active_reset = AMD_RESET_METHOD_NONE;
+	}
+
+	return r;
+}
+
+int amdgpu_reset_do_xgmi_reset_on_init(
+	struct amdgpu_reset_context *reset_context)
+{
+	struct list_head *reset_device_list = reset_context->reset_device_list;
+	struct amdgpu_device *adev;
+	int r;
+
+	if (!reset_device_list || list_empty(reset_device_list) ||
+	    list_is_singular(reset_device_list))
+		return -EINVAL;
+
+	adev = list_first_entry(reset_device_list, struct amdgpu_device,
+				reset_list);
+	r = amdgpu_reset_prepare_hwcontext(adev, reset_context);
+	if (r)
+		return r;
+
+	r = amdgpu_reset_perform_reset(adev, reset_context);
+
+	return r;
+}
+
+struct amdgpu_reset_handler xgmi_reset_on_init_handler = {
+	.reset_method = AMD_RESET_METHOD_ON_INIT,
+	.prepare_env = NULL,
+	.prepare_hwcontext = amdgpu_reset_xgmi_reset_on_init_prep_hwctxt,
+	.perform_reset = amdgpu_reset_xgmi_reset_on_init_perform_reset,
+	.restore_hwcontext = amdgpu_reset_xgmi_reset_on_init_restore_hwctxt,
+	.restore_env = NULL,
+	.do_reset = NULL,
+};
 
 int amdgpu_reset_init(struct amdgpu_device *adev)
 {
@@ -36,6 +183,8 @@ int amdgpu_reset_init(struct amdgpu_device *adev)
 	switch (amdgpu_ip_version(adev, MP1_HWIP, 0)) {
 	case IP_VERSION(13, 0, 2):
 	case IP_VERSION(13, 0, 6):
+	case IP_VERSION(13, 0, 12):
+	case IP_VERSION(13, 0, 14):
 		ret = aldebaran_reset_init(adev);
 		break;
 	case IP_VERSION(11, 0, 7):
@@ -58,6 +207,8 @@ int amdgpu_reset_fini(struct amdgpu_device *adev)
 	switch (amdgpu_ip_version(adev, MP1_HWIP, 0)) {
 	case IP_VERSION(13, 0, 2):
 	case IP_VERSION(13, 0, 6):
+	case IP_VERSION(13, 0, 12):
+	case IP_VERSION(13, 0, 14):
 		ret = aldebaran_reset_fini(adev);
 		break;
 	case IP_VERSION(11, 0, 7):
@@ -162,82 +313,39 @@ void amdgpu_device_unlock_reset_domain(struct amdgpu_reset_domain *reset_domain)
 	up_write(&reset_domain->sem);
 }
 
-#ifndef CONFIG_DEV_COREDUMP
-void amdgpu_coredump(struct amdgpu_device *adev, bool vram_lost,
-		     struct amdgpu_reset_context *reset_context)
+void amdgpu_reset_get_desc(struct amdgpu_reset_context *rst_ctxt, char *buf,
+			   size_t len)
 {
-}
-#else
-static ssize_t
-amdgpu_devcoredump_read(char *buffer, loff_t offset, size_t count,
-			void *data, size_t datalen)
-{
-	struct drm_printer p;
-	struct amdgpu_coredump_info *coredump = data;
-	struct drm_print_iterator iter;
-	int i;
-
-	iter.data = buffer;
-	iter.offset = 0;
-	iter.start = offset;
-	iter.remain = count;
-
-	p = drm_coredump_printer(&iter);
-
-	drm_printf(&p, "**** AMDGPU Device Coredump ****\n");
-	drm_printf(&p, "version: " AMDGPU_COREDUMP_VERSION "\n");
-	drm_printf(&p, "kernel: " UTS_RELEASE "\n");
-	drm_printf(&p, "module: " KBUILD_MODNAME "\n");
-	drm_printf(&p, "time: %lld.%09ld\n", coredump->reset_time.tv_sec,
-			coredump->reset_time.tv_nsec);
-
-	if (coredump->reset_task_info.pid)
-		drm_printf(&p, "process_name: %s PID: %d\n",
-			   coredump->reset_task_info.process_name,
-			   coredump->reset_task_info.pid);
-
-	if (coredump->reset_vram_lost)
-		drm_printf(&p, "VRAM is lost due to GPU reset!\n");
-	if (coredump->adev->reset_info.num_regs) {
-		drm_printf(&p, "AMDGPU register dumps:\nOffset:     Value:\n");
-
-		for (i = 0; i < coredump->adev->reset_info.num_regs; i++)
-			drm_printf(&p, "0x%08x: 0x%08x\n",
-				   coredump->adev->reset_info.reset_dump_reg_list[i],
-				   coredump->adev->reset_info.reset_dump_reg_value[i]);
-	}
-
-	return count - iter.remain;
-}
-
-static void amdgpu_devcoredump_free(void *data)
-{
-	kfree(data);
-}
-
-void amdgpu_coredump(struct amdgpu_device *adev, bool vram_lost,
-		     struct amdgpu_reset_context *reset_context)
-{
-	struct amdgpu_coredump_info *coredump;
-	struct drm_device *dev = adev_to_drm(adev);
-
-	coredump = kzalloc(sizeof(*coredump), GFP_NOWAIT);
-
-	if (!coredump) {
-		DRM_ERROR("%s: failed to allocate memory for coredump\n", __func__);
+	if (!buf || !len)
 		return;
+
+	switch (rst_ctxt->src) {
+	case AMDGPU_RESET_SRC_JOB:
+		if (rst_ctxt->job) {
+			snprintf(buf, len, "job hang on ring:%s",
+				 rst_ctxt->job->base.sched->name);
+		} else {
+			strscpy(buf, "job hang", len);
+		}
+		break;
+	case AMDGPU_RESET_SRC_RAS:
+		strscpy(buf, "RAS error", len);
+		break;
+	case AMDGPU_RESET_SRC_MES:
+		strscpy(buf, "MES hang", len);
+		break;
+	case AMDGPU_RESET_SRC_HWS:
+		strscpy(buf, "HWS hang", len);
+		break;
+	case AMDGPU_RESET_SRC_USER:
+		strscpy(buf, "user trigger", len);
+		break;
+	default:
+		strscpy(buf, "unknown", len);
 	}
-
-	coredump->reset_vram_lost = vram_lost;
-
-	if (reset_context->job && reset_context->job->vm)
-		coredump->reset_task_info = reset_context->job->vm->task_info;
-
-	coredump->adev = adev;
-
-	ktime_get_ts64(&coredump->reset_time);
-
-	dev_coredumpm(dev->dev, THIS_MODULE, coredump, 0, GFP_NOWAIT,
-		      amdgpu_devcoredump_read, amdgpu_devcoredump_free);
 }
-#endif
+
+bool amdgpu_reset_in_recovery(struct amdgpu_device *adev)
+{
+	return (adev->init_lvl->level == AMDGPU_INIT_LEVEL_RESET_RECOVERY);
+}

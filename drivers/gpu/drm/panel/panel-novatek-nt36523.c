@@ -933,8 +933,7 @@ static int j606f_boe_init_sequence(struct panel_info *pinfo)
 
 static const struct drm_display_mode elish_boe_modes[] = {
 	{
-		/* There is only one 120 Hz timing, but it doesn't work perfectly, 104 Hz preferred */
-		.clock = (1600 + 60 + 8 + 60) * (2560 + 26 + 4 + 168) * 104 / 1000,
+		.clock = (1600 + 60 + 8 + 60) * (2560 + 26 + 4 + 168) * 120 / 1000,
 		.hdisplay = 1600,
 		.hsync_start = 1600 + 60,
 		.hsync_end = 1600 + 60 + 8,
@@ -948,8 +947,7 @@ static const struct drm_display_mode elish_boe_modes[] = {
 
 static const struct drm_display_mode elish_csot_modes[] = {
 	{
-		/* There is only one 120 Hz timing, but it doesn't work perfectly, 104 Hz preferred */
-		.clock = (1600 + 200 + 40 + 52) * (2560 + 26 + 4 + 168) * 104 / 1000,
+		.clock = (1600 + 200 + 40 + 52) * (2560 + 26 + 4 + 168) * 120 / 1000,
 		.hdisplay = 1600,
 		.hsync_start = 1600 + 200,
 		.hsync_end = 1600 + 200 + 40,
@@ -1097,18 +1095,6 @@ static int nt36523_unprepare(struct drm_panel *panel)
 static void nt36523_remove(struct mipi_dsi_device *dsi)
 {
 	struct panel_info *pinfo = mipi_dsi_get_drvdata(dsi);
-	int ret;
-
-	ret = mipi_dsi_detach(pinfo->dsi[0]);
-	if (ret < 0)
-		dev_err(&dsi->dev, "failed to detach from DSI0 host: %d\n", ret);
-
-	if (pinfo->desc->is_dual_dsi) {
-		ret = mipi_dsi_detach(pinfo->dsi[1]);
-		if (ret < 0)
-			dev_err(&pinfo->dsi[1]->dev, "failed to detach from DSI1 host: %d\n", ret);
-		mipi_dsi_device_unregister(pinfo->dsi[1]);
-	}
 
 	drm_panel_remove(&pinfo->panel);
 }
@@ -1253,7 +1239,7 @@ static int nt36523_probe(struct mipi_dsi_device *dsi)
 		if (!dsi1_host)
 			return dev_err_probe(dev, -EPROBE_DEFER, "cannot get secondary DSI host\n");
 
-		pinfo->dsi[1] = mipi_dsi_device_register_full(dsi1_host, info);
+		pinfo->dsi[1] = devm_mipi_dsi_device_register_full(dev, dsi1_host, info);
 		if (IS_ERR(pinfo->dsi[1])) {
 			dev_err(dev, "cannot get secondary DSI device\n");
 			return PTR_ERR(pinfo->dsi[1]);
@@ -1269,6 +1255,8 @@ static int nt36523_probe(struct mipi_dsi_device *dsi)
 		dev_err(dev, "%pOF: failed to get orientation %d\n", dev->of_node, ret);
 		return ret;
 	}
+
+	pinfo->panel.prepare_prev_first = true;
 
 	if (pinfo->desc->has_dcs_backlight) {
 		pinfo->panel.backlight = nt36523_create_backlight(dsi);
@@ -1288,7 +1276,7 @@ static int nt36523_probe(struct mipi_dsi_device *dsi)
 		pinfo->dsi[i]->format = pinfo->desc->format;
 		pinfo->dsi[i]->mode_flags = pinfo->desc->mode_flags;
 
-		ret = mipi_dsi_attach(pinfo->dsi[i]);
+		ret = devm_mipi_dsi_attach(dev, pinfo->dsi[i]);
 		if (ret < 0)
 			return dev_err_probe(dev, ret, "cannot attach to DSI%d host.\n", i);
 	}

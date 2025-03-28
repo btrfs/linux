@@ -6,6 +6,8 @@
 #ifndef __XFS_SCRUB_NEWBT_H__
 #define __XFS_SCRUB_NEWBT_H__
 
+struct xfs_alloc_arg;
+
 struct xrep_newbt_resv {
 	/* Link to list of extents that we've reserved. */
 	struct list_head	list;
@@ -27,6 +29,11 @@ struct xrep_newbt_resv {
 
 struct xrep_newbt {
 	struct xfs_scrub	*sc;
+
+	/* Custom allocation function, or NULL for xfs_alloc_vextent */
+	int			(*alloc_vextent)(struct xfs_scrub *sc,
+						 struct xfs_alloc_arg *args,
+						 xfs_fsblock_t alloc_hint);
 
 	/* List of extents that we've reserved. */
 	struct list_head	resv_list;
@@ -56,6 +63,7 @@ void xrep_newbt_init_ag(struct xrep_newbt *xnr, struct xfs_scrub *sc,
 		enum xfs_ag_resv_type resv);
 int xrep_newbt_init_inode(struct xrep_newbt *xnr, struct xfs_scrub *sc,
 		int whichfork, const struct xfs_owner_info *oinfo);
+int xrep_newbt_init_metadir_inode(struct xrep_newbt *xnr, struct xfs_scrub *sc);
 int xrep_newbt_alloc_blocks(struct xrep_newbt *xnr, uint64_t nr_blocks);
 int xrep_newbt_add_extent(struct xrep_newbt *xnr, struct xfs_perag *pag,
 		xfs_agblock_t agbno, xfs_extlen_t len);

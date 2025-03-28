@@ -54,7 +54,7 @@
 #endif
 
 #ifdef CONFIG_PPC32
-#ifdef CONFIG_BOOKE_OR_40x
+#ifdef CONFIG_BOOKE
 #include "head_booke.h"
 #endif
 #endif
@@ -246,9 +246,7 @@ int main(void)
 	OFFSET(PACAHWCPUID, paca_struct, hw_cpu_id);
 	OFFSET(PACAKEXECSTATE, paca_struct, kexec_state);
 	OFFSET(PACA_DSCR_DEFAULT, paca_struct, dscr_default);
-#ifdef CONFIG_PPC64
 	OFFSET(PACA_EXIT_SAVE_R1, paca_struct, exit_save_r1);
-#endif
 #ifdef CONFIG_PPC_BOOK3E_64
 	OFFSET(PACA_TRAP_SAVE, paca_struct, trap_save);
 #endif
@@ -596,7 +594,6 @@ int main(void)
 	HSTATE_FIELD(HSTATE_DABR, dabr);
 	HSTATE_FIELD(HSTATE_DECEXP, dec_expires);
 	HSTATE_FIELD(HSTATE_SPLIT_MODE, kvm_split_mode);
-	DEFINE(IPI_PRIORITY, IPI_PRIORITY);
 	OFFSET(KVM_SPLIT_RPR, kvm_split_mode, rpr);
 	OFFSET(KVM_SPLIT_PMMAR, kvm_split_mode, pmmar);
 	OFFSET(KVM_SPLIT_LDBAR, kvm_split_mode, ldbar);
@@ -674,6 +671,17 @@ int main(void)
 
 #ifdef CONFIG_XMON
 	DEFINE(BPT_SIZE, BPT_SIZE);
+#endif
+
+#ifdef CONFIG_PPC_FTRACE_OUT_OF_LINE
+	DEFINE(FTRACE_OOL_STUB_SIZE, sizeof(struct ftrace_ool_stub));
+#endif
+
+#ifdef CONFIG_DYNAMIC_FTRACE_WITH_CALL_OPS
+	OFFSET(FTRACE_OPS_FUNC, ftrace_ops, func);
+#ifdef CONFIG_DYNAMIC_FTRACE_WITH_DIRECT_CALLS
+	OFFSET(FTRACE_OPS_DIRECT_CALL, ftrace_ops, direct_call);
+#endif
 #endif
 
 	return 0;

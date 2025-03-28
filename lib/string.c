@@ -15,19 +15,20 @@
  */
 
 #define __NO_FORTIFY
-#include <linux/types.h>
-#include <linux/string.h>
-#include <linux/ctype.h>
-#include <linux/kernel.h>
-#include <linux/export.h>
+#include <linux/bits.h>
 #include <linux/bug.h>
+#include <linux/ctype.h>
 #include <linux/errno.h>
-#include <linux/slab.h>
+#include <linux/limits.h>
+#include <linux/linkage.h>
+#include <linux/stddef.h>
+#include <linux/string.h>
+#include <linux/types.h>
 
-#include <asm/unaligned.h>
-#include <asm/byteorder.h>
-#include <asm/word-at-a-time.h>
 #include <asm/page.h>
+#include <asm/rwonce.h>
+#include <linux/unaligned.h>
+#include <asm/word-at-a-time.h>
 
 #ifndef __HAVE_ARCH_STRNCASECMP
 /**
@@ -103,8 +104,13 @@ char *strncpy(char *dest, const char *src, size_t count)
 EXPORT_SYMBOL(strncpy);
 #endif
 
-#ifndef __HAVE_ARCH_STRSCPY
-ssize_t strscpy(char *dest, const char *src, size_t count)
+#ifdef __BIG_ENDIAN
+# define ALLBUTLAST_BYTE_MASK (~255ul)
+#else
+# define ALLBUTLAST_BYTE_MASK (~0ul >> 8)
+#endif
+
+ssize_t sized_strscpy(char *dest, const char *src, size_t count)
 {
 	const struct word_at_a_time constants = WORD_AT_A_TIME_CONSTANTS;
 	size_t max = count;
@@ -147,13 +153,18 @@ ssize_t strscpy(char *dest, const char *src, size_t count)
 			*(unsigned long *)(dest+res) = c & zero_bytemask(data);
 			return res + find_zero(data);
 		}
+		count -= sizeof(unsigned long);
+		if (unlikely(!count)) {
+			c &= ALLBUTLAST_BYTE_MASK;
+			*(unsigned long *)(dest+res) = c;
+			return -E2BIG;
+		}
 		*(unsigned long *)(dest+res) = c;
 		res += sizeof(unsigned long);
-		count -= sizeof(unsigned long);
 		max -= sizeof(unsigned long);
 	}
 
-	while (count) {
+	while (count > 1) {
 		char c;
 
 		c = src[res];
@@ -164,14 +175,13 @@ ssize_t strscpy(char *dest, const char *src, size_t count)
 		count--;
 	}
 
-	/* Hit buffer length without finding a NUL; force NUL-termination. */
-	if (res)
-		dest[res-1] = '\0';
+	/* Force NUL-termination. */
+	dest[res] = '\0';
 
-	return -E2BIG;
+	/* Return E2BIG if the source didn't stop */
+	return src[res] ? -E2BIG : res;
 }
-EXPORT_SYMBOL(strscpy);
-#endif
+EXPORT_SYMBOL(sized_strscpy);
 
 /**
  * stpcpy - copy a string from src to dest returning a pointer to the new end

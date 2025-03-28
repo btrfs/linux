@@ -170,7 +170,7 @@ static int fimc_queue_setup(struct vb2_queue *vq,
 			    unsigned int sizes[], struct device *alloc_devs[])
 {
 	struct fimc_ctx *ctx = vb2_get_drv_priv(vq);
-	struct fimc_frame *f;
+	const struct fimc_frame *f;
 	int i;
 
 	f = ctx_get_frame(ctx, vq->type);
@@ -192,7 +192,7 @@ static int fimc_queue_setup(struct vb2_queue *vq,
 static int fimc_buf_prepare(struct vb2_buffer *vb)
 {
 	struct fimc_ctx *ctx = vb2_get_drv_priv(vb->vb2_queue);
-	struct fimc_frame *frame;
+	const struct fimc_frame *frame;
 	int i;
 
 	frame = ctx_get_frame(ctx, vb->vb2_queue->type);
@@ -216,8 +216,6 @@ static const struct vb2_ops fimc_qops = {
 	.queue_setup	 = fimc_queue_setup,
 	.buf_prepare	 = fimc_buf_prepare,
 	.buf_queue	 = fimc_buf_queue,
-	.wait_prepare	 = vb2_ops_wait_prepare,
-	.wait_finish	 = vb2_ops_wait_finish,
 	.stop_streaming	 = stop_streaming,
 	.start_streaming = start_streaming,
 };
@@ -237,7 +235,7 @@ static int fimc_m2m_querycap(struct file *file, void *fh,
 static int fimc_m2m_enum_fmt(struct file *file, void *priv,
 			     struct v4l2_fmtdesc *f)
 {
-	struct fimc_fmt *fmt;
+	const struct fimc_fmt *fmt;
 
 	fmt = fimc_find_format(NULL, NULL, get_m2m_fmt_flags(f->type),
 			       f->index);
@@ -252,7 +250,7 @@ static int fimc_m2m_g_fmt_mplane(struct file *file, void *fh,
 				 struct v4l2_format *f)
 {
 	struct fimc_ctx *ctx = fh_to_ctx(fh);
-	struct fimc_frame *frame = ctx_get_frame(ctx, f->type);
+	const struct fimc_frame *frame = ctx_get_frame(ctx, f->type);
 
 	if (IS_ERR(frame))
 		return PTR_ERR(frame);
@@ -266,7 +264,7 @@ static int fimc_try_fmt_mplane(struct fimc_ctx *ctx, struct v4l2_format *f)
 	struct fimc_dev *fimc = ctx->fimc_dev;
 	const struct fimc_variant *variant = fimc->variant;
 	struct v4l2_pix_format_mplane *pix = &f->fmt.pix_mp;
-	struct fimc_fmt *fmt;
+	const struct fimc_fmt *fmt;
 	u32 max_w, mod_x, mod_y;
 
 	if (!IS_M2M(f->type))
@@ -314,8 +312,9 @@ static int fimc_m2m_try_fmt_mplane(struct file *file, void *fh,
 	return fimc_try_fmt_mplane(ctx, f);
 }
 
-static void __set_frame_format(struct fimc_frame *frame, struct fimc_fmt *fmt,
-			       struct v4l2_pix_format_mplane *pixm)
+static void __set_frame_format(struct fimc_frame *frame,
+			       const struct fimc_fmt *fmt,
+			       const struct v4l2_pix_format_mplane *pixm)
 {
 	int i;
 
@@ -340,7 +339,7 @@ static int fimc_m2m_s_fmt_mplane(struct file *file, void *fh,
 {
 	struct fimc_ctx *ctx = fh_to_ctx(fh);
 	struct fimc_dev *fimc = ctx->fimc_dev;
-	struct fimc_fmt *fmt;
+	const struct fimc_fmt *fmt;
 	struct vb2_queue *vq;
 	struct fimc_frame *frame;
 	int ret;
@@ -378,7 +377,7 @@ static int fimc_m2m_g_selection(struct file *file, void *fh,
 				struct v4l2_selection *s)
 {
 	struct fimc_ctx *ctx = fh_to_ctx(fh);
-	struct fimc_frame *frame;
+	const struct fimc_frame *frame;
 
 	frame = ctx_get_frame(ctx, s->type);
 	if (IS_ERR(frame))
@@ -428,7 +427,7 @@ static int fimc_m2m_try_selection(struct fimc_ctx *ctx,
 				  struct v4l2_selection *s)
 {
 	struct fimc_dev *fimc = ctx->fimc_dev;
-	struct fimc_frame *f;
+	const struct fimc_frame *f;
 	u32 min_size, halign, depth = 0;
 	int i;
 
@@ -588,7 +587,7 @@ static int fimc_m2m_set_default_format(struct fimc_ctx *ctx)
 			.sizeimage = 800 * 4 * 600,
 		},
 	};
-	struct fimc_fmt *fmt;
+	const struct fimc_fmt *fmt;
 
 	fmt = fimc_find_format(&pixm.pixelformat, NULL, FMT_FLAGS_M2M, 0);
 	if (!fmt)

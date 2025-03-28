@@ -114,8 +114,11 @@ static int sgm3140_brightness_set(struct led_classdev *led_cdev,
 				"failed to enable regulator: %d\n", ret);
 			return ret;
 		}
+		gpiod_set_value_cansleep(priv->flash_gpio, 0);
 		gpiod_set_value_cansleep(priv->enable_gpio, 1);
 	} else {
+		del_timer_sync(&priv->powerdown_timer);
+		gpiod_set_value_cansleep(priv->flash_gpio, 0);
 		gpiod_set_value_cansleep(priv->enable_gpio, 0);
 		ret = regulator_disable(priv->vin_regulator);
 		if (ret) {
@@ -297,7 +300,7 @@ MODULE_DEVICE_TABLE(of, sgm3140_dt_match);
 
 static struct platform_driver sgm3140_driver = {
 	.probe	= sgm3140_probe,
-	.remove_new = sgm3140_remove,
+	.remove	= sgm3140_remove,
 	.driver	= {
 		.name	= "sgm3140",
 		.of_match_table = sgm3140_dt_match,

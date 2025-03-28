@@ -9,7 +9,7 @@
  * Some ideas are from marvell/cesa.c and s5p-sss.c driver.
  */
 
-#include <asm/unaligned.h>
+#include <linux/unaligned.h>
 #include <crypto/internal/hash.h>
 #include <linux/device.h>
 #include <linux/err.h>
@@ -332,11 +332,11 @@ static int rk_hash_run(struct crypto_engine *engine, void *breq)
 theend:
 	pm_runtime_put_autosuspend(rkc->dev);
 
+	rk_hash_unprepare(engine, breq);
+
 	local_bh_disable();
 	crypto_finalize_hash_request(engine, breq, err);
 	local_bh_enable();
-
-	rk_hash_unprepare(engine, breq);
 
 	return 0;
 }

@@ -334,7 +334,7 @@ static const struct phy_ops r8a779f0_eth_serdes_ops = {
 };
 
 static struct phy *r8a779f0_eth_serdes_xlate(struct device *dev,
-					     struct of_phandle_args *args)
+					     const struct of_phandle_args *args)
 {
 	struct r8a779f0_eth_serdes_drv_data *dd = dev_get_drvdata(dev);
 
@@ -404,7 +404,7 @@ static void r8a779f0_eth_serdes_remove(struct platform_device *pdev)
 
 static struct platform_driver r8a779f0_eth_serdes_driver_platform = {
 	.probe = r8a779f0_eth_serdes_probe,
-	.remove_new = r8a779f0_eth_serdes_remove,
+	.remove = r8a779f0_eth_serdes_remove,
 	.driver = {
 		.name = "r8a779f0_eth_serdes",
 		.of_match_table = r8a779f0_eth_serdes_of_table,

@@ -22,6 +22,7 @@
 #include <linux/of_irq.h>
 #include <linux/of_address.h>
 #include <linux/of_platform.h>
+#include <linux/platform_device.h>
 
 static int uhci_grlib_init(struct usb_hcd *hcd)
 {
@@ -183,7 +184,7 @@ MODULE_DEVICE_TABLE(of, uhci_hcd_grlib_of_match);
 
 static struct platform_driver uhci_grlib_driver = {
 	.probe		= uhci_hcd_grlib_probe,
-	.remove_new	= uhci_hcd_grlib_remove,
+	.remove		= uhci_hcd_grlib_remove,
 	.shutdown	= uhci_hcd_grlib_shutdown,
 	.driver = {
 		.name = "grlib-uhci",

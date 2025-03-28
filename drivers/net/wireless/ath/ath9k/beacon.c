@@ -293,7 +293,7 @@ void ath9k_beacon_ensure_primary_slot(struct ath_softc *sc)
 	/* Modify TSF as required and update the HW. */
 	avp->chanctx->tsf_val += tsfadjust;
 	if (sc->cur_chan == avp->chanctx) {
-		offset = ath9k_hw_get_tsf_offset(&avp->chanctx->tsf_ts, NULL);
+		offset = ath9k_hw_get_tsf_offset(avp->chanctx->tsf_ts, 0);
 		ath9k_hw_settsf64(sc->sc_ah, avp->chanctx->tsf_val + offset);
 	}
 
@@ -365,10 +365,10 @@ bool ath9k_csa_is_finished(struct ath_softc *sc, struct ieee80211_vif *vif)
 	if (!vif || !vif->bss_conf.csa_active)
 		return false;
 
-	if (!ieee80211_beacon_cntdwn_is_complete(vif))
+	if (!ieee80211_beacon_cntdwn_is_complete(vif, 0))
 		return false;
 
-	ieee80211_csa_finish(vif);
+	ieee80211_csa_finish(vif, 0);
 	return true;
 }
 

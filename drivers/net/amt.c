@@ -3063,15 +3063,10 @@ static int amt_dev_init(struct net_device *dev)
 	int err;
 
 	amt->dev = dev;
-	dev->tstats = netdev_alloc_pcpu_stats(struct pcpu_sw_netstats);
-	if (!dev->tstats)
-		return -ENOMEM;
 
 	err = gro_cells_init(&amt->gro_cells, dev);
-	if (err) {
-		free_percpu(dev->tstats);
+	if (err)
 		return err;
-	}
 
 	return 0;
 }
@@ -3081,7 +3076,6 @@ static void amt_dev_uninit(struct net_device *dev)
 	struct amt_dev *amt = netdev_priv(dev);
 
 	gro_cells_destroy(&amt->gro_cells);
-	free_percpu(dev->tstats);
 }
 
 static const struct net_device_ops amt_netdev_ops = {
@@ -3090,7 +3084,6 @@ static const struct net_device_ops amt_netdev_ops = {
 	.ndo_open		= amt_dev_open,
 	.ndo_stop		= amt_dev_stop,
 	.ndo_start_xmit         = amt_dev_xmit,
-	.ndo_get_stats64        = dev_get_tstats64,
 };
 
 static void amt_link_setup(struct net_device *dev)
@@ -3105,12 +3098,13 @@ static void amt_link_setup(struct net_device *dev)
 	dev->hard_header_len	= 0;
 	dev->addr_len		= 0;
 	dev->priv_flags		|= IFF_NO_QUEUE;
-	dev->features		|= NETIF_F_LLTX;
+	dev->lltx		= true;
+	dev->netns_local	= true;
 	dev->features		|= NETIF_F_GSO_SOFTWARE;
-	dev->features		|= NETIF_F_NETNS_LOCAL;
 	dev->hw_features	|= NETIF_F_SG | NETIF_F_HW_CSUM;
 	dev->hw_features	|= NETIF_F_FRAGLIST | NETIF_F_RXCSUM;
 	dev->hw_features	|= NETIF_F_GSO_SOFTWARE;
+	dev->pcpu_stat_type	= NETDEV_PCPU_STAT_TSTATS;
 	eth_hw_addr_random(dev);
 	eth_zero_addr(dev->broadcast);
 	ether_setup(dev);
@@ -3212,15 +3206,11 @@ static int amt_newlink(struct net *net, struct net_device *dev,
 		goto err;
 	}
 
-	if (data[IFLA_AMT_RELAY_PORT])
-		amt->relay_port = nla_get_be16(data[IFLA_AMT_RELAY_PORT]);
-	else
-		amt->relay_port = htons(IANA_AMT_UDP_PORT);
+	amt->relay_port = nla_get_be16_default(data[IFLA_AMT_RELAY_PORT],
+					       htons(IANA_AMT_UDP_PORT));
 
-	if (data[IFLA_AMT_GATEWAY_PORT])
-		amt->gw_port = nla_get_be16(data[IFLA_AMT_GATEWAY_PORT]);
-	else
-		amt->gw_port = htons(IANA_AMT_UDP_PORT);
+	amt->gw_port = nla_get_be16_default(data[IFLA_AMT_GATEWAY_PORT],
+					    htons(IANA_AMT_UDP_PORT));
 
 	if (!amt->relay_port) {
 		NL_SET_ERR_MSG_ATTR(extack, tb[IFLA_AMT_DISCOVERY_IP],

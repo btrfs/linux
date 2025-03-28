@@ -336,6 +336,10 @@ static int acpi_fan_probe(struct platform_device *pdev)
 		if (result)
 			return result;
 
+		result = devm_acpi_fan_create_hwmon(device);
+		if (result)
+			return result;
+
 		result = acpi_fan_create_attributes(device);
 		if (result)
 			return result;
@@ -367,19 +371,25 @@ static int acpi_fan_probe(struct platform_device *pdev)
 	result = sysfs_create_link(&pdev->dev.kobj,
 				   &cdev->device.kobj,
 				   "thermal_cooling");
-	if (result)
+	if (result) {
 		dev_err(&pdev->dev, "Failed to create sysfs link 'thermal_cooling'\n");
+		goto err_unregister;
+	}
 
 	result = sysfs_create_link(&cdev->device.kobj,
 				   &pdev->dev.kobj,
 				   "device");
 	if (result) {
 		dev_err(&pdev->dev, "Failed to create sysfs link 'device'\n");
-		goto err_end;
+		goto err_remove_link;
 	}
 
 	return 0;
 
+err_remove_link:
+	sysfs_remove_link(&pdev->dev.kobj, "thermal_cooling");
+err_unregister:
+	thermal_cooling_device_unregister(cdev);
 err_end:
 	if (fan->acpi4)
 		acpi_fan_delete_attributes(device);
@@ -387,7 +397,7 @@ err_end:
 	return result;
 }
 
-static int acpi_fan_remove(struct platform_device *pdev)
+static void acpi_fan_remove(struct platform_device *pdev)
 {
 	struct acpi_fan *fan = platform_get_drvdata(pdev);
 
@@ -399,8 +409,6 @@ static int acpi_fan_remove(struct platform_device *pdev)
 	sysfs_remove_link(&pdev->dev.kobj, "thermal_cooling");
 	sysfs_remove_link(&fan->cdev->device.kobj, "device");
 	thermal_cooling_device_unregister(fan->cdev);
-
-	return 0;
 }
 
 #ifdef CONFIG_PM_SLEEP

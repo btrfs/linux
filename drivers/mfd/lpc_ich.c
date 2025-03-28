@@ -38,6 +38,7 @@
 
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
+#include <linux/align.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/errno.h>
@@ -833,8 +834,9 @@ static const struct pci_device_id lpc_ich_ids[] = {
 	{ PCI_VDEVICE(INTEL, 0x2917), LPC_ICH9ME},
 	{ PCI_VDEVICE(INTEL, 0x2918), LPC_ICH9},
 	{ PCI_VDEVICE(INTEL, 0x2919), LPC_ICH9M},
-	{ PCI_VDEVICE(INTEL, 0x3197), LPC_GLK},
 	{ PCI_VDEVICE(INTEL, 0x2b9c), LPC_COUGARMOUNTAIN},
+	{ PCI_VDEVICE(INTEL, 0x3197), LPC_GLK},
+	{ PCI_VDEVICE(INTEL, 0x31e8), LPC_GLK},
 	{ PCI_VDEVICE(INTEL, 0x3a14), LPC_ICH10DO},
 	{ PCI_VDEVICE(INTEL, 0x3a16), LPC_ICH10R},
 	{ PCI_VDEVICE(INTEL, 0x3a18), LPC_ICH10},
@@ -1321,7 +1323,7 @@ static int lpc_ich_init_spi(struct pci_dev *dev)
 	case INTEL_SPI_BYT:
 		pci_read_config_dword(dev, SPIBASE_BYT, &spi_base);
 		if (spi_base & SPIBASE_BYT_EN) {
-			res->start = spi_base & ~(SPIBASE_BYT_SZ - 1);
+			res->start = ALIGN_DOWN(spi_base, SPIBASE_BYT_SZ);
 			res->end = res->start + SPIBASE_BYT_SZ - 1;
 
 			info->set_writeable = lpc_ich_byt_set_writeable;

@@ -30,6 +30,12 @@
 			};
 		};
 	};
+
+	sound_card {
+		compatible = "audio-graph-card";
+		label = "HDMI-Audio";
+		dais = <&i2s2_port>;
+	};
 };
 
 &cpu_dai {
@@ -40,17 +46,7 @@
 	status = "okay";
 
 	ports {
-		#address-cells = <1>;
-		#size-cells = <0>;
-
-		port@0 {
-			reg = <0>;
-			dsi0_in: endpoint {
-			};
-		};
-
 		port@1 {
-			reg = <1>;
 			dsi0_out: endpoint {
 				data-lanes = <1 2 3 4>;
 				remote-endpoint = <&adv7535_in>;
@@ -59,13 +55,16 @@
 	};
 };
 
+&du {
+	status = "okay";
+};
+
 &i2c1 {
 	adv7535: hdmi@3d {
 		compatible = "adi,adv7535";
 		reg = <0x3d>;
 
-		interrupt-parent = <&pinctrl>;
-		interrupts = <RZG2L_GPIO(2, 1) IRQ_TYPE_EDGE_FALLING>;
+		interrupts-extended = <&pinctrl RZG2L_GPIO(2, 1) IRQ_TYPE_EDGE_FALLING>;
 		clocks = <&osc1>;
 		clock-names = "cec";
 		avdd-supply = <&reg_1p8v>;
@@ -92,6 +91,13 @@
 				reg = <1>;
 				adv7535_out: endpoint {
 					remote-endpoint = <&hdmi_con_out>;
+				};
+			};
+
+			port@2 {
+				reg = <2>;
+				codec_endpoint: endpoint {
+					remote-endpoint = <&i2s2_cpu_endpoint>;
 				};
 			};
 		};
@@ -174,6 +180,23 @@
 	pinctrl-names = "default";
 
 	status = "okay";
+};
+
+&ssi1 {
+	pinctrl-0 = <&ssi1_pins>;
+	pinctrl-names = "default";
+
+	status = "okay";
+
+	i2s2_port: port {
+		i2s2_cpu_endpoint: endpoint {
+			remote-endpoint = <&codec_endpoint>;
+			dai-format = "i2s";
+
+			bitclock-master = <&i2s2_cpu_endpoint>;
+			frame-master = <&i2s2_cpu_endpoint>;
+		};
+	};
 };
 
 &vccq_sdhi1 {

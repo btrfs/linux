@@ -53,7 +53,7 @@ obj_meminfo(struct drm_i915_gem_object *obj,
 					obj->mm.region->id : INTEL_REGION_SMEM;
 	const u64 sz = obj->base.size;
 
-	if (obj->base.handle_count > 1)
+	if (drm_gem_object_is_shared_for_memory_stats(&obj->base))
 		stats[id].shared += sz;
 	else
 		stats[id].private += sz;
@@ -102,6 +102,7 @@ static void show_meminfo(struct drm_printer *p, struct drm_file *file)
 	for_each_memory_region(mr, i915, id)
 		drm_print_memory_stats(p,
 				       &stats[id],
+				       DRM_GEM_OBJECT_ACTIVE |
 				       DRM_GEM_OBJECT_RESIDENT |
 				       DRM_GEM_OBJECT_PURGEABLE,
 				       mr->uabi_name);

@@ -1218,7 +1218,7 @@ static int zfcp_fsf_setup_ct_els(struct zfcp_fsf_req *req,
 /**
  * zfcp_fsf_send_ct - initiate a Generic Service request (FC-GS)
  * @wka_port: pointer to zfcp WKA port to send CT/GS to
- * @ct: pointer to struct zfcp_send_ct with data for request
+ * @ct: pointer to struct zfcp_fsf_ct_els with data for CT request
  * @pool: if non-null this mempool is used to allocate struct zfcp_fsf_req
  * @timeout: timeout that hardware should use, and a later software timeout
  */
@@ -1316,7 +1316,7 @@ skip_fsfstatus:
  * zfcp_fsf_send_els - initiate an ELS command (FC-FS)
  * @adapter: pointer to zfcp adapter
  * @d_id: N_Port_ID to send ELS to
- * @els: pointer to struct zfcp_send_els with data for the command
+ * @els: pointer to struct zfcp_fsf_ct_els with data for the ELS command
  * @timeout: timeout that hardware should use, and a later software timeout
  */
 int zfcp_fsf_send_els(struct zfcp_adapter *adapter, u32 d_id,
@@ -2742,7 +2742,7 @@ void zfcp_fsf_reqid_check(struct zfcp_qdio *qdio, int sbal_idx)
 	for (idx = 0; idx < QDIO_MAX_ELEMENTS_PER_BUFFER; idx++) {
 
 		sbale = &sbal->element[idx];
-		req_id = sbale->addr;
+		req_id = dma64_to_u64(sbale->addr);
 		fsf_req = zfcp_reqlist_find_rm(adapter->req_list, req_id);
 
 		if (!fsf_req) {

@@ -696,7 +696,9 @@ snd_nm256_playback_copy(struct snd_pcm_substream *substream,
 	struct snd_pcm_runtime *runtime = substream->runtime;
 	struct nm256_stream *s = runtime->private_data;
 
-	return copy_from_iter_toio(s->bufptr + pos, src, count);
+	if (copy_from_iter_toio(s->bufptr + pos, count, src) != count)
+		return -EFAULT;
+	return 0;
 }
 
 /*
@@ -710,7 +712,9 @@ snd_nm256_capture_copy(struct snd_pcm_substream *substream,
 	struct snd_pcm_runtime *runtime = substream->runtime;
 	struct nm256_stream *s = runtime->private_data;
 
-	return copy_to_iter_fromio(dst, s->bufptr + pos, count);
+	if (copy_to_iter_fromio(s->bufptr + pos, count, dst) != count)
+		return -EFAULT;
+	return 0;
 }
 
 #endif /* !__i386__ */
@@ -1356,7 +1360,6 @@ snd_nm256_peek_for_sig(struct nm256 *chip)
 	return 0;
 }
 
-#ifdef CONFIG_PM_SLEEP
 /*
  * APM event handler, so the card is properly reinitialized after a power
  * event.
@@ -1400,11 +1403,7 @@ static int nm256_resume(struct device *dev)
 	return 0;
 }
 
-static SIMPLE_DEV_PM_OPS(nm256_pm, nm256_suspend, nm256_resume);
-#define NM256_PM_OPS	&nm256_pm
-#else
-#define NM256_PM_OPS	NULL
-#endif /* CONFIG_PM_SLEEP */
+static DEFINE_SIMPLE_DEV_PM_OPS(nm256_pm, nm256_suspend, nm256_resume);
 
 static void snd_nm256_free(struct snd_card *card)
 {
@@ -1660,7 +1659,7 @@ static struct pci_driver nm256_driver = {
 	.id_table = snd_nm256_ids,
 	.probe = snd_nm256_probe,
 	.driver = {
-		.pm = NM256_PM_OPS,
+		.pm = &nm256_pm,
 	},
 };
 

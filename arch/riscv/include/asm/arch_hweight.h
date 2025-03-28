@@ -20,15 +20,15 @@
 static __always_inline unsigned int __arch_hweight32(unsigned int w)
 {
 #ifdef CONFIG_RISCV_ISA_ZBB
-	asm_volatile_goto(ALTERNATIVE("j %l[legacy]", "nop", 0,
+	asm goto(ALTERNATIVE("j %l[legacy]", "nop", 0,
 				      RISCV_ISA_EXT_ZBB, 1)
 			  : : : : legacy);
 
 	asm (".option push\n"
 	     ".option arch,+zbb\n"
-	     CPOPW "%0, %0\n"
+	     CPOPW "%0, %1\n"
 	     ".option pop\n"
-	     : "+r" (w) : :);
+	     : "=r" (w) : "r" (w) :);
 
 	return w;
 
@@ -51,15 +51,15 @@ static inline unsigned int __arch_hweight8(unsigned int w)
 static __always_inline unsigned long __arch_hweight64(__u64 w)
 {
 # ifdef CONFIG_RISCV_ISA_ZBB
-	asm_volatile_goto(ALTERNATIVE("j %l[legacy]", "nop", 0,
+	asm goto(ALTERNATIVE("j %l[legacy]", "nop", 0,
 				      RISCV_ISA_EXT_ZBB, 1)
 			  : : : : legacy);
 
 	asm (".option push\n"
 	     ".option arch,+zbb\n"
-	     "cpop %0, %0\n"
+	     "cpop %0, %1\n"
 	     ".option pop\n"
-	     : "+r" (w) : :);
+	     : "=r" (w) : "r" (w) :);
 
 	return w;
 

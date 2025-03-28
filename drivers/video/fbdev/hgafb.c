@@ -629,7 +629,7 @@ static void hgafb_remove(struct platform_device *pdev)
 
 static struct platform_driver hgafb_driver = {
 	.probe = hgafb_probe,
-	.remove_new = hgafb_remove,
+	.remove = hgafb_remove,
 	.driver = {
 		.name = "hgafb",
 	},
@@ -670,7 +670,7 @@ static void __exit hgafb_exit(void)
  *
  * ------------------------------------------------------------------------- */
 
-MODULE_AUTHOR("Ferenc Bakonyi (fero@drama.obuda.kando.hu)");
+MODULE_AUTHOR("Ferenc Bakonyi <fero@drama.obuda.kando.hu>");
 MODULE_DESCRIPTION("FBDev driver for Hercules Graphics Adaptor");
 MODULE_LICENSE("GPL");
 

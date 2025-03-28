@@ -15,8 +15,10 @@ support corresponds to ``S`` values in the ``MAINTAINERS`` file.
 =============  ================  ==============================================
 Architecture   Level of support  Constraints
 =============  ================  ==============================================
-``loongarch``  Maintained        -
-``um``         Maintained        ``x86_64`` only.
+``arm64``      Maintained        Little Endian only.
+``loongarch``  Maintained        \-
+``riscv``      Maintained        ``riscv64`` and LLVM/Clang only.
+``um``         Maintained        \-
 ``x86``        Maintained        ``x86_64`` only.
 =============  ================  ==============================================
 

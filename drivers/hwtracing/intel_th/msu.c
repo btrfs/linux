@@ -61,6 +61,7 @@ enum lockout_state {
  * @lo_lock:	lockout state serialization
  * @nr_blocks:	number of blocks (pages) in this window
  * @nr_segs:	number of segments in this window (<= @nr_blocks)
+ * @msc:	pointer to the MSC device
  * @_sgt:	array of block descriptors
  * @sgt:	array of block descriptors
  */
@@ -104,24 +105,32 @@ struct msc_iter {
 
 /**
  * struct msc - MSC device representation
- * @reg_base:		register window base address
+ * @reg_base:		register window base address for the entire MSU
+ * @msu_base:		register window base address for this MSC
  * @thdev:		intel_th_device pointer
  * @mbuf:		MSU buffer, if assigned
- * @mbuf_priv		MSU buffer's private data, if @mbuf
+ * @mbuf_priv:		MSU buffer's private data, if @mbuf
+ * @work:		a work to stop the trace when the buffer is full
  * @win_list:		list of windows in multiblock mode
  * @single_sgt:		single mode buffer
  * @cur_win:		current window
+ * @switch_on_unlock:	window to switch to when it becomes available
  * @nr_pages:		total number of pages allocated for this buffer
  * @single_sz:		amount of data in single mode
  * @single_wrap:	single mode wrap occurred
  * @base:		buffer's base pointer
  * @base_addr:		buffer's base address
+ * @orig_addr:		MSC0 buffer's base address
+ * @orig_sz:		MSC0 buffer's size
  * @user_count:		number of users of the buffer
  * @mmap_count:		number of mappings
  * @buf_mutex:		mutex to serialize access to buffer-related bits
-
+ * @iter_list:		list of open file descriptor iterators
+ * @stop_on_full:	stop the trace if the current window is full
  * @enabled:		MSC is enabled
  * @wrap:		wrapping is enabled
+ * @do_irq:		IRQ resource is available, handle interrupts
+ * @multi_is_broken:	multiblock mode enabled (not disabled by PCI drvdata)
  * @mode:		MSC operating mode
  * @burst_len:		write burst length
  * @index:		number of this MSC in the MSU
@@ -755,6 +764,8 @@ unlock:
  * Program storage mode, wrapping, burst length and trace buffer address
  * into a given MSC. Then, enable tracing and set msc::enabled.
  * The latter is serialized on msc::buf_mutex, so make sure to hold it.
+ *
+ * Return:	%0 for success or a negative error code otherwise.
  */
 static int msc_configure(struct msc *msc)
 {
@@ -1291,7 +1302,8 @@ static void msc_buffer_free(struct msc *msc)
 /**
  * msc_buffer_alloc() - allocate a buffer for MSC
  * @msc:	MSC device
- * @size:	allocation size in bytes
+ * @nr_pages:	number of pages for each window
+ * @nr_wins:	number of windows
  *
  * Allocate a storage buffer for MSC, depending on the msc::mode, it will be
  * either done via msc_buffer_contig_alloc() for SINGLE operation mode or
@@ -1370,6 +1382,9 @@ static int msc_buffer_unlocked_free_unless_used(struct msc *msc)
  * @msc:	MSC device
  *
  * This is a locked version of msc_buffer_unlocked_free_unless_used().
+ *
+ * Return:	0 on successful deallocation or if there was no buffer to
+ *		deallocate, -EBUSY if there are active users.
  */
 static int msc_buffer_free_unless_used(struct msc *msc)
 {
@@ -1438,6 +1453,8 @@ struct msc_win_to_user_struct {
  * @data:	callback's private data
  * @src:	source buffer
  * @len:	amount of data to copy from the source buffer
+ *
+ * Return:	>= %0 for success or -errno for error.
  */
 static unsigned long msc_win_to_user(void *data, void *src, size_t len)
 {
@@ -1669,7 +1686,6 @@ static const struct file_operations intel_th_msc_fops = {
 	.release	= intel_th_msc_release,
 	.read		= intel_th_msc_read,
 	.mmap		= intel_th_msc_mmap,
-	.llseek		= no_llseek,
 	.owner		= THIS_MODULE,
 };
 

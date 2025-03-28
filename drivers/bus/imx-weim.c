@@ -120,7 +120,7 @@ static int imx_weim_gpr_setup(struct platform_device *pdev)
 		i++;
 	}
 
-	if (i == 0 || i % 4)
+	if (i == 0)
 		goto err;
 
 	for (i = 0; i < ARRAY_SIZE(gprvals); i++) {
@@ -282,22 +282,18 @@ static int weim_probe(struct platform_device *pdev)
 	dev_set_drvdata(&pdev->dev, priv);
 
 	/* get the clock */
-	clk = devm_clk_get(&pdev->dev, NULL);
+	clk = devm_clk_get_enabled(&pdev->dev, NULL);
 	if (IS_ERR(clk))
 		return PTR_ERR(clk);
-
-	ret = clk_prepare_enable(clk);
-	if (ret)
-		return ret;
 
 	/* parse the device node */
 	ret = weim_parse_dt(pdev);
 	if (ret)
-		clk_disable_unprepare(clk);
-	else
-		dev_info(&pdev->dev, "Driver registered.\n");
+		return ret;
 
-	return ret;
+	dev_info(&pdev->dev, "Driver registered.\n");
+
+	return 0;
 }
 
 #if IS_ENABLED(CONFIG_OF_DYNAMIC)

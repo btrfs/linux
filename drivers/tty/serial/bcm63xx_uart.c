@@ -285,9 +285,8 @@ static void bcm_uart_do_rx(struct uart_port *port)
 				flag = TTY_PARITY;
 		}
 
-		if (uart_handle_sysrq_char(port, c))
+		if (uart_prepare_sysrq_char(port, c))
 			continue;
-
 
 		if ((cstat & port->ignore_status_mask) == 0)
 			tty_insert_flip_char(tty_port, c, flag);
@@ -309,8 +308,8 @@ static void bcm_uart_do_tx(struct uart_port *port)
 
 	val = bcm_uart_readl(port, UART_MCTL_REG);
 	val = (val & UART_MCTL_TXFIFOFILL_MASK) >> UART_MCTL_TXFIFOFILL_SHIFT;
-
-	pending = uart_port_tx_limited(port, ch, port->fifosize - val,
+	pending = uart_port_tx_limited_flags(port, ch, UART_TX_NOSTOP,
+		port->fifosize - val,
 		true,
 		bcm_uart_writel(port, ch, UART_FIFO_REG),
 		({}));
@@ -321,6 +320,9 @@ static void bcm_uart_do_tx(struct uart_port *port)
 	val = bcm_uart_readl(port, UART_IR_REG);
 	val &= ~UART_TX_INT_MASK;
 	bcm_uart_writel(port, val, UART_IR_REG);
+
+	if (uart_tx_stopped(port))
+		bcm_uart_stop_tx(port);
 }
 
 /*
@@ -353,7 +355,7 @@ static irqreturn_t bcm_uart_interrupt(int irq, void *dev_id)
 					       estat & UART_EXTINP_DCD_MASK);
 	}
 
-	uart_port_unlock(port);
+	uart_unlock_and_check_sysrq(port);
 	return IRQ_HANDLED;
 }
 
@@ -703,20 +705,14 @@ static void bcm_console_write(struct console *co, const char *s,
 {
 	struct uart_port *port;
 	unsigned long flags;
-	int locked;
+	int locked = 1;
 
 	port = &ports[co->index];
 
-	local_irq_save(flags);
-	if (port->sysrq) {
-		/* bcm_uart_interrupt() already took the lock */
-		locked = 0;
-	} else if (oops_in_progress) {
-		locked = uart_port_trylock(port);
-	} else {
-		uart_port_lock(port);
-		locked = 1;
-	}
+	if (oops_in_progress)
+		locked = uart_port_trylock_irqsave(port, &flags);
+	else
+		uart_port_lock_irqsave(port, &flags);
 
 	/* call helper to deal with \r\n */
 	uart_console_write(port, s, count, bcm_console_putchar);
@@ -725,8 +721,7 @@ static void bcm_console_write(struct console *co, const char *s,
 	wait_for_xmitr(port);
 
 	if (locked)
-		uart_port_unlock(port);
-	local_irq_restore(flags);
+		uart_port_unlock_irqrestore(port, flags);
 }
 
 /*
@@ -889,7 +884,7 @@ MODULE_DEVICE_TABLE(of, bcm63xx_of_match);
  */
 static struct platform_driver bcm_uart_platform_driver = {
 	.probe	= bcm_uart_probe,
-	.remove_new = bcm_uart_remove,
+	.remove = bcm_uart_remove,
 	.driver	= {
 		.name  = "bcm63xx_uart",
 		.of_match_table = bcm63xx_of_match,

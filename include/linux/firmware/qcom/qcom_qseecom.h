@@ -10,6 +10,7 @@
 #define __QCOM_QSEECOM_H
 
 #include <linux/auxiliary_bus.h>
+#include <linux/dma-mapping.h>
 #include <linux/types.h>
 
 #include <linux/firmware/qcom/qcom_scm.h>
@@ -27,9 +28,9 @@ struct qseecom_client {
 /**
  * qcom_qseecom_app_send() - Send to and receive data from a given QSEE app.
  * @client:   The QSEECOM client associated with the target app.
- * @req:      Request buffer sent to the app (must be DMA-mappable).
+ * @req:      Request buffer sent to the app (must be TZ memory).
  * @req_size: Size of the request buffer.
- * @rsp:      Response buffer, written to by the app (must be DMA-mappable).
+ * @rsp:      Response buffer, written to by the app (must be TZ memory).
  * @rsp_size: Size of the response buffer.
  *
  * Sends a request to the QSEE app associated with the given client and read
@@ -43,7 +44,8 @@ struct qseecom_client {
  *
  * Return: Zero on success, nonzero on failure.
  */
-static inline int qcom_qseecom_app_send(struct qseecom_client *client, void *req, size_t req_size,
+static inline int qcom_qseecom_app_send(struct qseecom_client *client,
+					void *req, size_t req_size,
 					void *rsp, size_t rsp_size)
 {
 	return qcom_scm_qseecom_app_send(client->app_id, req, req_size, rsp, rsp_size);

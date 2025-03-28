@@ -16,7 +16,7 @@
 
 static void check_graphics_ip(const struct xe_graphics_desc *graphics)
 {
-	struct kunit *test = xe_cur_kunit();
+	struct kunit *test = kunit_get_current_test();
 	u64 mask = graphics->hw_engine_mask;
 
 	/* RCS, CCS, and BCS engines are allowed on the graphics IP */
@@ -30,7 +30,7 @@ static void check_graphics_ip(const struct xe_graphics_desc *graphics)
 
 static void check_media_ip(const struct xe_media_desc *media)
 {
-	struct kunit *test = xe_cur_kunit();
+	struct kunit *test = kunit_get_current_test();
 	u64 mask = media->hw_engine_mask;
 
 	/* VCS, VECS and GSCCS engines are allowed on the media IP */
@@ -64,8 +64,3 @@ static struct kunit_suite xe_pci_test_suite = {
 };
 
 kunit_test_suite(xe_pci_test_suite);
-
-MODULE_AUTHOR("Intel Corporation");
-MODULE_LICENSE("GPL");
-MODULE_DESCRIPTION("xe_pci kunit test");
-MODULE_IMPORT_NS(EXPORTED_FOR_KUNIT_TESTING);

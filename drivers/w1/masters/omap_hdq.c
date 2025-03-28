@@ -647,7 +647,7 @@ err_w1:
 	return ret;
 }
 
-static int omap_hdq_remove(struct platform_device *pdev)
+static void omap_hdq_remove(struct platform_device *pdev)
 {
 	int active;
 
@@ -661,8 +661,6 @@ static int omap_hdq_remove(struct platform_device *pdev)
 	if (active >= 0)
 		pm_runtime_put_sync(&pdev->dev);
 	pm_runtime_disable(&pdev->dev);
-
-	return 0;
 }
 
 static const struct of_device_id omap_hdq_dt_ids[] = {

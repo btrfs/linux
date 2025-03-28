@@ -1,8 +1,7 @@
-// SPDX-License-Identifier: GPL-2.0-only
+/* SPDX-License-Identifier: GPL-2.0-only */
 /* Authors: Karl MacMillan <kmacmillan@tresys.com>
  *	    Frank Mayer <mayerf@tresys.com>
- *
- * Copyright (C) 2003 - 2004 Tresys Technology, LLC
+ *          Copyright (C) 2003 - 2004 Tresys Technology, LLC
  */
 
 #include <linux/kernel.h>
@@ -166,11 +165,13 @@ void cond_policydb_destroy(struct policydb *p)
 int cond_init_bool_indexes(struct policydb *p)
 {
 	kfree(p->bool_val_to_struct);
-	p->bool_val_to_struct = kmalloc_array(p->p_bools.nprim,
-					      sizeof(*p->bool_val_to_struct),
-					      GFP_KERNEL);
+	p->bool_val_to_struct = kmalloc_array(
+		p->p_bools.nprim, sizeof(*p->bool_val_to_struct), GFP_KERNEL);
 	if (!p->bool_val_to_struct)
 		return -ENOMEM;
+
+	avtab_hash_eval(&p->te_cond_avtab, "conditional_rules");
+
 	return 0;
 }
 
@@ -205,7 +206,7 @@ static int bool_isvalid(struct cond_bool_datum *b)
 	return 1;
 }
 
-int cond_read_bool(struct policydb *p, struct symtab *s, void *fp)
+int cond_read_bool(struct policydb *p, struct symtab *s, struct policy_file *fp)
 {
 	char *key = NULL;
 	struct cond_bool_datum *booldatum;
@@ -229,17 +230,11 @@ int cond_read_bool(struct policydb *p, struct symtab *s, void *fp)
 		goto err;
 
 	len = le32_to_cpu(buf[2]);
-	if (((len == 0) || (len == (u32)-1)))
-		goto err;
 
-	rc = -ENOMEM;
-	key = kmalloc(len + 1, GFP_KERNEL);
-	if (!key)
-		goto err;
-	rc = next_entry(key, fp, len);
+	rc = str_read(&key, GFP_KERNEL, fp, len);
 	if (rc)
 		goto err;
-	key[len] = '\0';
+
 	rc = symtab_insert(s, key, booldatum);
 	if (rc)
 		goto err;
@@ -287,7 +282,8 @@ static int cond_insertf(struct avtab *a, const struct avtab_key *k,
 		if (other) {
 			node_ptr = avtab_search_node(&p->te_cond_avtab, k);
 			if (node_ptr) {
-				if (avtab_search_node_next(node_ptr, k->specified)) {
+				if (avtab_search_node_next(node_ptr,
+							   k->specified)) {
 					pr_err("SELinux: too many conflicting type rules.\n");
 					return -EINVAL;
 				}
@@ -321,7 +317,7 @@ static int cond_insertf(struct avtab *a, const struct avtab_key *k,
 	return 0;
 }
 
-static int cond_read_av_list(struct policydb *p, void *fp,
+static int cond_read_av_list(struct policydb *p, struct policy_file *fp,
 			     struct cond_av_list *list,
 			     struct cond_av_list *other)
 {
@@ -347,7 +343,7 @@ static int cond_read_av_list(struct policydb *p, void *fp,
 	for (i = 0; i < len; i++) {
 		data.dst = &list->nodes[i];
 		rc = avtab_read_item(&p->te_cond_avtab, fp, p, cond_insertf,
-				     &data);
+				     &data, true);
 		if (rc) {
 			kfree(list->nodes);
 			list->nodes = NULL;
@@ -373,7 +369,7 @@ static int expr_node_isvalid(struct policydb *p, struct cond_expr_node *expr)
 	return 1;
 }
 
-static int cond_read_node(struct policydb *p, struct cond_node *node, void *fp)
+static int cond_read_node(struct policydb *p, struct cond_node *node, struct policy_file *fp)
 {
 	__le32 buf[2];
 	u32 i, len;
@@ -413,7 +409,7 @@ static int cond_read_node(struct policydb *p, struct cond_node *node, void *fp)
 	return cond_read_av_list(p, fp, &node->false_list, &node->true_list);
 }
 
-int cond_read_list(struct policydb *p, void *fp)
+int cond_read_list(struct policydb *p, struct policy_file *fp)
 {
 	__le32 buf[1];
 	u32 i, len;
@@ -451,7 +447,7 @@ int cond_write_bool(void *vkey, void *datum, void *ptr)
 	char *key = vkey;
 	struct cond_bool_datum *booldatum = datum;
 	struct policy_data *pd = ptr;
-	void *fp = pd->fp;
+	struct policy_file *fp = pd->fp;
 	__le32 buf[3];
 	u32 len;
 	int rc;
@@ -478,8 +474,8 @@ int cond_write_bool(void *vkey, void *datum, void *ptr)
  * the conditional. This means that the avtab with the conditional
  * rules will not be saved but will be rebuilt on policy load.
  */
-static int cond_write_av_list(struct policydb *p,
-			      struct cond_av_list *list, struct policy_file *fp)
+static int cond_write_av_list(struct policydb *p, struct cond_av_list *list,
+			      struct policy_file *fp)
 {
 	__le32 buf[1];
 	u32 i;
@@ -500,7 +496,7 @@ static int cond_write_av_list(struct policydb *p,
 }
 
 static int cond_write_node(struct policydb *p, struct cond_node *node,
-		    struct policy_file *fp)
+			   struct policy_file *fp)
 {
 	__le32 buf[2];
 	int rc;
@@ -534,7 +530,7 @@ static int cond_write_node(struct policydb *p, struct cond_node *node,
 	return 0;
 }
 
-int cond_write_list(struct policydb *p, void *fp)
+int cond_write_list(struct policydb *p, struct policy_file *fp)
 {
 	u32 i;
 	__le32 buf[1];
@@ -555,7 +551,7 @@ int cond_write_list(struct policydb *p, void *fp)
 }
 
 void cond_compute_xperms(struct avtab *ctab, struct avtab_key *key,
-		struct extended_perms_decision *xpermd)
+			 struct extended_perms_decision *xpermd)
 {
 	struct avtab_node *node;
 
@@ -563,7 +559,7 @@ void cond_compute_xperms(struct avtab *ctab, struct avtab_key *key,
 		return;
 
 	for (node = avtab_search_node(ctab, key); node;
-			node = avtab_search_node_next(node, key->specified)) {
+	     node = avtab_search_node_next(node, key->specified)) {
 		if (node->key.specified & AVTAB_ENABLED)
 			services_compute_xperms_decision(xpermd, node);
 	}
@@ -572,7 +568,7 @@ void cond_compute_xperms(struct avtab *ctab, struct avtab_key *key,
  * av table, and if so, add them to the result
  */
 void cond_compute_av(struct avtab *ctab, struct avtab_key *key,
-		struct av_decision *avd, struct extended_perms *xperms)
+		     struct av_decision *avd, struct extended_perms *xperms)
 {
 	struct avtab_node *node;
 
@@ -580,30 +576,30 @@ void cond_compute_av(struct avtab *ctab, struct avtab_key *key,
 		return;
 
 	for (node = avtab_search_node(ctab, key); node;
-				node = avtab_search_node_next(node, key->specified)) {
-		if ((u16)(AVTAB_ALLOWED|AVTAB_ENABLED) ==
-		    (node->key.specified & (AVTAB_ALLOWED|AVTAB_ENABLED)))
+	     node = avtab_search_node_next(node, key->specified)) {
+		if ((u16)(AVTAB_ALLOWED | AVTAB_ENABLED) ==
+		    (node->key.specified & (AVTAB_ALLOWED | AVTAB_ENABLED)))
 			avd->allowed |= node->datum.u.data;
-		if ((u16)(AVTAB_AUDITDENY|AVTAB_ENABLED) ==
-		    (node->key.specified & (AVTAB_AUDITDENY|AVTAB_ENABLED)))
+		if ((u16)(AVTAB_AUDITDENY | AVTAB_ENABLED) ==
+		    (node->key.specified & (AVTAB_AUDITDENY | AVTAB_ENABLED)))
 			/* Since a '0' in an auditdeny mask represents a
 			 * permission we do NOT want to audit (dontaudit), we use
 			 * the '&' operand to ensure that all '0's in the mask
 			 * are retained (much unlike the allow and auditallow cases).
 			 */
 			avd->auditdeny &= node->datum.u.data;
-		if ((u16)(AVTAB_AUDITALLOW|AVTAB_ENABLED) ==
-		    (node->key.specified & (AVTAB_AUDITALLOW|AVTAB_ENABLED)))
+		if ((u16)(AVTAB_AUDITALLOW | AVTAB_ENABLED) ==
+		    (node->key.specified & (AVTAB_AUDITALLOW | AVTAB_ENABLED)))
 			avd->auditallow |= node->datum.u.data;
 		if (xperms && (node->key.specified & AVTAB_ENABLED) &&
-				(node->key.specified & AVTAB_XPERMS))
+		    (node->key.specified & AVTAB_XPERMS))
 			services_compute_xperms_drivers(xperms, node);
 	}
 }
 
 static int cond_dup_av_list(struct cond_av_list *new,
-			struct cond_av_list *orig,
-			struct avtab *avtab)
+			    const struct cond_av_list *orig,
+			    struct avtab *avtab)
 {
 	u32 i;
 
@@ -614,9 +610,8 @@ static int cond_dup_av_list(struct cond_av_list *new,
 		return -ENOMEM;
 
 	for (i = 0; i < orig->len; i++) {
-		new->nodes[i] = avtab_insert_nonunique(avtab,
-						       &orig->nodes[i]->key,
-						       &orig->nodes[i]->datum);
+		new->nodes[i] = avtab_insert_nonunique(
+			avtab, &orig->nodes[i]->key, &orig->nodes[i]->datum);
 		if (!new->nodes[i])
 			return -ENOMEM;
 		new->len++;
@@ -626,7 +621,7 @@ static int cond_dup_av_list(struct cond_av_list *new,
 }
 
 static int duplicate_policydb_cond_list(struct policydb *newp,
-					struct policydb *origp)
+					const struct policydb *origp)
 {
 	int rc;
 	u32 i;
@@ -637,19 +632,19 @@ static int duplicate_policydb_cond_list(struct policydb *newp,
 
 	newp->cond_list_len = 0;
 	newp->cond_list = kcalloc(origp->cond_list_len,
-				sizeof(*newp->cond_list),
-				GFP_KERNEL);
+				  sizeof(*newp->cond_list), GFP_KERNEL);
 	if (!newp->cond_list)
 		goto error;
 
 	for (i = 0; i < origp->cond_list_len; i++) {
 		struct cond_node *newn = &newp->cond_list[i];
-		struct cond_node *orign = &origp->cond_list[i];
+		const struct cond_node *orign = &origp->cond_list[i];
 
 		newp->cond_list_len++;
 
 		newn->cur_state = orign->cur_state;
-		newn->expr.nodes = kmemdup(orign->expr.nodes,
+		newn->expr.nodes =
+			kmemdup(orign->expr.nodes,
 				orign->expr.len * sizeof(*orign->expr.nodes),
 				GFP_KERNEL);
 		if (!newn->expr.nodes)
@@ -658,12 +653,12 @@ static int duplicate_policydb_cond_list(struct policydb *newp,
 		newn->expr.len = orign->expr.len;
 
 		rc = cond_dup_av_list(&newn->true_list, &orign->true_list,
-				&newp->te_cond_avtab);
+				      &newp->te_cond_avtab);
 		if (rc)
 			goto error;
 
 		rc = cond_dup_av_list(&newn->false_list, &orign->false_list,
-				&newp->te_cond_avtab);
+				      &newp->te_cond_avtab);
 		if (rc)
 			goto error;
 	}
@@ -683,7 +678,8 @@ static int cond_bools_destroy(void *key, void *datum, void *args)
 	return 0;
 }
 
-static int cond_bools_copy(struct hashtab_node *new, struct hashtab_node *orig, void *args)
+static int cond_bools_copy(struct hashtab_node *new,
+			   const struct hashtab_node *orig, void *args)
 {
 	struct cond_bool_datum *datum;
 
@@ -709,7 +705,7 @@ static int cond_bools_index(void *key, void *datum, void *args)
 }
 
 static int duplicate_policydb_bools(struct policydb *newdb,
-				struct policydb *orig)
+				    const struct policydb *orig)
 {
 	struct cond_bool_datum **cond_bool_array;
 	int rc;
@@ -721,7 +717,7 @@ static int duplicate_policydb_bools(struct policydb *newdb,
 		return -ENOMEM;
 
 	rc = hashtab_duplicate(&newdb->p_bools.table, &orig->p_bools.table,
-			cond_bools_copy, cond_bools_destroy, NULL);
+			       cond_bools_copy, cond_bools_destroy, NULL);
 	if (rc) {
 		kfree(cond_bool_array);
 		return -ENOMEM;
@@ -742,7 +738,7 @@ void cond_policydb_destroy_dup(struct policydb *p)
 	cond_policydb_destroy(p);
 }
 
-int cond_policydb_dup(struct policydb *new, struct policydb *orig)
+int cond_policydb_dup(struct policydb *new, const struct policydb *orig)
 {
 	cond_policydb_init(new);
 

@@ -122,7 +122,7 @@ void intel_gt_invalidate_tlb_full(struct intel_gt *gt, u32 seqno)
 {
 	intel_wakeref_t wakeref;
 
-	if (I915_SELFTEST_ONLY(gt->awake == -ENODEV))
+	if (is_mock_gt(gt))
 		return;
 
 	if (intel_gt_is_wedged(gt))
@@ -132,7 +132,7 @@ void intel_gt_invalidate_tlb_full(struct intel_gt *gt, u32 seqno)
 		return;
 
 	with_intel_gt_pm_if_awake(gt, wakeref) {
-		struct intel_guc *guc = &gt->uc.guc;
+		struct intel_guc *guc = gt_to_guc(gt);
 
 		mutex_lock(&gt->tlb.invalidate_lock);
 		if (tlb_seqno_passed(gt, seqno))

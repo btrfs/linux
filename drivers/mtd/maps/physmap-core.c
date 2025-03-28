@@ -518,7 +518,7 @@ static int physmap_flash_probe(struct platform_device *dev)
 		if (!info->maps[i].phys)
 			info->maps[i].phys = res->start;
 
-		info->win_order = get_bitmask_order(resource_size(res)) - 1;
+		info->win_order = fls64(resource_size(res)) - 1;
 		info->maps[i].size = BIT(info->win_order +
 					 (info->gpios ?
 					  info->gpios->ndescs : 0));
@@ -621,7 +621,7 @@ static void physmap_flash_shutdown(struct platform_device *dev)
 
 static struct platform_driver physmap_flash_driver = {
 	.probe		= physmap_flash_probe,
-	.remove_new	= physmap_flash_remove,
+	.remove		= physmap_flash_remove,
 	.shutdown	= physmap_flash_shutdown,
 	.driver		= {
 		.name	= "physmap-flash",

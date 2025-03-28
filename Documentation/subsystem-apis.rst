@@ -60,7 +60,10 @@ Storage interfaces
    cdrom/index
    scsi/index
    target/index
+   nvme/index
 
+Other subsystems
+----------------
 **Fixme**: much more organizational work is needed here.
 
 .. toctree::

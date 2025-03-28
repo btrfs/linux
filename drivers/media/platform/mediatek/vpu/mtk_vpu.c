@@ -635,7 +635,7 @@ OUT_LOAD_FW:
 }
 EXPORT_SYMBOL_GPL(vpu_load_firmware);
 
-static void vpu_init_ipi_handler(const void *data, unsigned int len, void *priv)
+static void vpu_init_ipi_handler(void *data, unsigned int len, void *priv)
 {
 	struct mtk_vpu *vpu = priv;
 	const struct vpu_run *run = data;
@@ -1041,7 +1041,7 @@ static const struct dev_pm_ops mtk_vpu_pm = {
 
 static struct platform_driver mtk_vpu_driver = {
 	.probe	= mtk_vpu_probe,
-	.remove_new = mtk_vpu_remove,
+	.remove = mtk_vpu_remove,
 	.driver	= {
 		.name	= "mtk_vpu",
 		.pm = &mtk_vpu_pm,
