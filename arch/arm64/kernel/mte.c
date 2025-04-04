@@ -38,7 +38,24 @@ EXPORT_SYMBOL_GPL(mte_async_or_asymm_mode);
 void mte_sync_tags(pte_t pte, unsigned int nr_pages)
 {
 	struct page *page = pte_page(pte);
-	unsigned int i;
+	struct folio *folio = page_folio(page);
+	unsigned long i;
+
+	if (folio_test_hugetlb(folio)) {
+		unsigned long nr = folio_nr_pages(folio);
+
+		/* Hugetlb MTE flags are set for head page only */
+		if (folio_try_hugetlb_mte_tagging(folio)) {
+			for (i = 0; i < nr; i++, page++)
+				mte_clear_page_tags(page_address(page));
+			folio_set_hugetlb_mte_tagged(folio);
+		}
+
+		/* ensure the tags are visible before the PTE is set */
+		smp_wmb();
+
+		return;
+	}
 
 	/* if PG_mte_tagged is set, tags have already been initialised */
 	for (i = 0; i < nr_pages; i++, page++) {
@@ -67,7 +84,7 @@ int memcmp_pages(struct page *page1, struct page *page2)
 	/*
 	 * If the page content is identical but at least one of the pages is
 	 * tagged, return non-zero to avoid KSM merging. If only one of the
-	 * pages is tagged, set_pte_at() may zero or change the tags of the
+	 * pages is tagged, __set_ptes() may zero or change the tags of the
 	 * other page via mte_sync_tags().
 	 */
 	if (page_mte_tagged(page1) || page_mte_tagged(page2))
@@ -410,6 +427,7 @@ static int __access_remote_tags(struct mm_struct *mm, unsigned long addr,
 		void *maddr;
 		struct page *page = get_user_page_vma_remote(mm, addr,
 							     gup_flags, &vma);
+		struct folio *folio;
 
 		if (IS_ERR(page)) {
 			err = PTR_ERR(page);
@@ -428,7 +446,12 @@ static int __access_remote_tags(struct mm_struct *mm, unsigned long addr,
 			put_page(page);
 			break;
 		}
-		WARN_ON_ONCE(!page_mte_tagged(page));
+
+		folio = page_folio(page);
+		if (folio_test_hugetlb(folio))
+			WARN_ON_ONCE(!folio_test_hugetlb_mte_tagged(folio));
+		else
+			WARN_ON_ONCE(!page_mte_tagged(page));
 
 		/* limit access to the end of the page */
 		offset = offset_in_page(addr);
@@ -582,12 +605,9 @@ subsys_initcall(register_mte_tcf_preferred_sysctl);
 size_t mte_probe_user_range(const char __user *uaddr, size_t size)
 {
 	const char __user *end = uaddr + size;
-	int err = 0;
 	char val;
 
-	__raw_get_user(val, uaddr, err);
-	if (err)
-		return size;
+	__raw_get_user(val, uaddr, efault);
 
 	uaddr = PTR_ALIGN(uaddr, MTE_GRANULE_SIZE);
 	while (uaddr < end) {
@@ -595,12 +615,13 @@ size_t mte_probe_user_range(const char __user *uaddr, size_t size)
 		 * A read is sufficient for mte, the caller should have probed
 		 * for the pte write permission if required.
 		 */
-		__raw_get_user(val, uaddr, err);
-		if (err)
-			return end - uaddr;
+		__raw_get_user(val, uaddr, efault);
 		uaddr += MTE_GRANULE_SIZE;
 	}
 	(void)val;
 
 	return 0;
+
+efault:
+	return end - uaddr;
 }

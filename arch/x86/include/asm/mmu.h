@@ -37,6 +37,8 @@ typedef struct {
 	 */
 	atomic64_t tlb_gen;
 
+	unsigned long next_trim_cpumask;
+
 #ifdef CONFIG_MODIFY_LDT_SYSCALL
 	struct rw_semaphore	ldt_usr_sem;
 	struct ldt_struct	*ldt;
@@ -75,7 +77,7 @@ typedef struct {
 		.lock = __MUTEX_INITIALIZER(mm.context.lock),		\
 	}
 
-void leave_mm(int cpu);
+void leave_mm(void);
 #define leave_mm leave_mm
 
 #endif /* _ASM_X86_MMU_H */

@@ -17,6 +17,7 @@ struct fs_context;
 struct pipe_inode_info;
 struct iov_iter;
 struct mnt_idmap;
+struct ns_common;
 
 /*
  * block/bdev.c
@@ -62,6 +63,9 @@ int do_mkdirat(int dfd, struct filename *name, umode_t mode);
 int do_symlinkat(struct filename *from, int newdfd, struct filename *to);
 int do_linkat(int olddfd, struct filename *old, int newdfd,
 			struct filename *new, int flags);
+int vfs_tmpfile(struct mnt_idmap *idmap,
+		const struct path *parentpath,
+		struct file *file, umode_t mode);
 
 /*
  * namespace.c
@@ -183,6 +187,7 @@ extern struct open_how build_open_how(int flags, umode_t mode);
 extern int build_open_flags(const struct open_how *how, struct open_flags *op);
 struct file *file_close_fd_locked(struct files_struct *files, unsigned fd);
 
+long do_ftruncate(struct file *file, loff_t length, int small);
 long do_sys_ftruncate(unsigned int fd, loff_t length, int small);
 int chmod_common(const struct path *path, umode_t mode);
 int do_fchownat(int dfd, const char __user *filename, uid_t user, gid_t group,
@@ -235,14 +240,16 @@ extern void mnt_pin_kill(struct mount *m);
  * fs/nsfs.c
  */
 extern const struct dentry_operations ns_dentry_operations;
+int open_namespace(struct ns_common *ns);
 
 /*
  * fs/stat.c:
  */
 
-int getname_statx_lookup_flags(int flags);
 int do_statx(int dfd, struct filename *filename, unsigned int flags,
 	     unsigned int mask, struct statx __user *buffer);
+int do_statx_fd(int fd, unsigned int flags, unsigned int mask,
+		struct statx __user *buffer);
 
 /*
  * fs/splice.c:
@@ -259,7 +266,7 @@ struct xattr_name {
 	char name[XATTR_NAME_MAX + 1];
 };
 
-struct xattr_ctx {
+struct kernel_xattr_ctx {
 	/* Value of attribute */
 	union {
 		const void __user *cvalue;
@@ -272,14 +279,15 @@ struct xattr_ctx {
 	unsigned int flags;
 };
 
+ssize_t file_getxattr(struct file *file, struct kernel_xattr_ctx *ctx);
+ssize_t filename_getxattr(int dfd, struct filename *filename,
+			  unsigned int lookup_flags, struct kernel_xattr_ctx *ctx);
+int file_setxattr(struct file *file, struct kernel_xattr_ctx *ctx);
+int filename_setxattr(int dfd, struct filename *filename,
+		      unsigned int lookup_flags, struct kernel_xattr_ctx *ctx);
+int setxattr_copy(const char __user *name, struct kernel_xattr_ctx *ctx);
+int import_xattr_name(struct xattr_name *kname, const char __user *name);
 
-ssize_t do_getxattr(struct mnt_idmap *idmap,
-		    struct dentry *d,
-		    struct xattr_ctx *ctx);
-
-int setxattr_copy(const char __user *name, struct xattr_ctx *ctx);
-int do_setxattr(struct mnt_idmap *idmap, struct dentry *dentry,
-		struct xattr_ctx *ctx);
 int may_write_xattr(struct mnt_idmap *idmap, struct inode *inode);
 
 #ifdef CONFIG_FS_POSIX_ACL
@@ -310,3 +318,23 @@ ssize_t __kernel_write_iter(struct file *file, struct iov_iter *from, loff_t *po
 struct mnt_idmap *alloc_mnt_idmap(struct user_namespace *mnt_userns);
 struct mnt_idmap *mnt_idmap_get(struct mnt_idmap *idmap);
 void mnt_idmap_put(struct mnt_idmap *idmap);
+struct stashed_operations {
+	void (*put_data)(void *data);
+	int (*init_inode)(struct inode *inode, void *data);
+};
+int path_from_stashed(struct dentry **stashed, struct vfsmount *mnt, void *data,
+		      struct path *path);
+void stashed_dentry_prune(struct dentry *dentry);
+/**
+ * path_mounted - check whether path is mounted
+ * @path: path to check
+ *
+ * Determine whether @path refers to the root of a mount.
+ *
+ * Return: true if @path is the root of a mount, false if not.
+ */
+static inline bool path_mounted(const struct path *path)
+{
+	return path->mnt->mnt_root == path->dentry;
+}
+void file_f_owner_release(struct file *file);

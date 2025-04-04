@@ -43,7 +43,6 @@ config FS_MBCACHE
 	default y if EXT4_FS=y
 	default m if EXT2_FS_XATTR || EXT4_FS
 
-source "fs/reiserfs/Kconfig"
 source "fs/jfs/Kconfig"
 
 source "fs/xfs/Kconfig"
@@ -60,7 +59,6 @@ endif # BLOCK
 config FS_DAX
 	bool "File system based Direct Access (DAX) support"
 	depends on MMU
-	depends on !(ARM || MIPS || SPARC)
 	depends on ZONE_DEVICE || FS_DAX_LIMITED
 	select FS_IOMAP
 	select DAX
@@ -162,7 +160,6 @@ menu "DOS/FAT/EXFAT/NT Filesystems"
 
 source "fs/fat/Kconfig"
 source "fs/exfat/Kconfig"
-source "fs/ntfs/Kconfig"
 source "fs/ntfs3/Kconfig"
 
 endmenu
@@ -262,6 +259,7 @@ menuconfig HUGETLBFS
 	depends on X86 || SPARC64 || ARCH_SUPPORTS_HUGETLBFS || BROKEN
 	depends on (SYSFS || SYSCTL)
 	select MEMFD_CREATE
+	select PADATA if SMP
 	help
 	  hugetlbfs is a filesystem backing for HugeTLB pages, based on
 	  ramfs. For architectures that support it, say Y here and read
@@ -288,6 +286,10 @@ config HUGETLB_PAGE_OPTIMIZE_VMEMMAP
 	def_bool HUGETLB_PAGE
 	depends on ARCH_WANT_OPTIMIZE_HUGETLB_VMEMMAP
 	depends on SPARSEMEM_VMEMMAP
+
+config HUGETLB_PMD_PAGE_TABLE_SHARING
+	def_bool HUGETLB_PAGE
+	depends on ARCH_WANT_HUGE_PMD_SHARE && SPLIT_PMD_PTLOCKS
 
 config ARCH_HAS_GIGANTIC_PAGE
 	bool
@@ -382,6 +384,29 @@ config NFS_COMMON
 	bool
 	depends on NFSD || NFS_FS || LOCKD
 	default y
+
+config NFS_COMMON_LOCALIO_SUPPORT
+	tristate
+	depends on NFS_LOCALIO
+	default y if NFSD=y || NFS_FS=y
+	default m if NFSD=m && NFS_FS=m
+	select SUNRPC
+
+config NFS_LOCALIO
+	bool "NFS client and server support for LOCALIO auxiliary protocol"
+	depends on NFSD && NFS_FS
+	select NFS_COMMON_LOCALIO_SUPPORT
+	default n
+	help
+	  Some NFS servers support an auxiliary NFS LOCALIO protocol
+	  that is not an official part of the NFS protocol.
+
+	  This option enables support for the LOCALIO protocol in the
+	  kernel's NFS server and client. Enable this to permit local
+	  NFS clients to bypass the network when issuing reads and
+	  writes to the local NFS server.
+
+	  If unsure, say N.
 
 config NFS_V4_2_SSC_HELPER
 	bool

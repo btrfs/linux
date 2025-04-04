@@ -63,6 +63,34 @@ struct drm_client_funcs {
 	 * This callback is optional.
 	 */
 	int (*hotplug)(struct drm_client_dev *client);
+
+	/**
+	 * @suspend:
+	 *
+	 * Called when suspending the device.
+	 *
+	 * This callback is optional.
+	 *
+	 * FIXME: Some callers hold the console lock when invoking this
+	 *        function. This interferes with fbdev emulation, which
+	 *        also tries to acquire the lock. Push the console lock
+	 *        into the callback and remove 'holds_console_lock'.
+	 */
+	int (*suspend)(struct drm_client_dev *client, bool holds_console_lock);
+
+	/**
+	 * @resume:
+	 *
+	 * Called when resuming the device from suspend.
+	 *
+	 * This callback is optional.
+	 *
+	 * FIXME: Some callers hold the console lock when invoking this
+	 *        function. This interferes with fbdev emulation, which
+	 *        also tries to acquire the lock. Push the console lock
+	 *        into the callback and remove 'holds_console_lock'.
+	 */
+	int (*resume)(struct drm_client_dev *client, bool holds_console_lock);
 };
 
 /**
@@ -108,6 +136,13 @@ struct drm_client_dev {
 	struct drm_mode_set *modesets;
 
 	/**
+	 * @suspended:
+	 *
+	 * The client has been suspended.
+	 */
+	bool suspended;
+
+	/**
 	 * @hotplug_failed:
 	 *
 	 * Set by client hotplug helpers if the hotplugging failed
@@ -120,10 +155,6 @@ int drm_client_init(struct drm_device *dev, struct drm_client_dev *client,
 		    const char *name, const struct drm_client_funcs *funcs);
 void drm_client_release(struct drm_client_dev *client);
 void drm_client_register(struct drm_client_dev *client);
-
-void drm_client_dev_unregister(struct drm_device *dev);
-void drm_client_dev_hotplug(struct drm_device *dev);
-void drm_client_dev_restore(struct drm_device *dev);
 
 /**
  * struct drm_client_buffer - DRM client buffer
@@ -141,6 +172,13 @@ struct drm_client_buffer {
 
 	/**
 	 * @gem: GEM object backing this buffer
+	 *
+	 * FIXME: The dependency on GEM here isn't required, we could
+	 * convert the driver handle to a dma-buf instead and use the
+	 * backend-agnostic dma-buf vmap support instead. This would
+	 * require that the handle2fd prime ioctl is reworked to pull the
+	 * fd_install step out of the driver backend hooks, to make that
+	 * final step optional for internal users.
 	 */
 	struct drm_gem_object *gem;
 
@@ -159,6 +197,9 @@ struct drm_client_buffer *
 drm_client_framebuffer_create(struct drm_client_dev *client, u32 width, u32 height, u32 format);
 void drm_client_framebuffer_delete(struct drm_client_buffer *buffer);
 int drm_client_framebuffer_flush(struct drm_client_buffer *buffer, struct drm_rect *rect);
+int drm_client_buffer_vmap_local(struct drm_client_buffer *buffer,
+				 struct iosys_map *map_copy);
+void drm_client_buffer_vunmap_local(struct drm_client_buffer *buffer);
 int drm_client_buffer_vmap(struct drm_client_buffer *buffer,
 			   struct iosys_map *map);
 void drm_client_buffer_vunmap(struct drm_client_buffer *buffer);
@@ -194,7 +235,5 @@ int drm_client_modeset_dpms(struct drm_client_dev *client, int mode);
 #define drm_client_for_each_connector_iter(connector, iter) \
 	drm_for_each_connector_iter(connector, iter) \
 		if (connector->connector_type != DRM_MODE_CONNECTOR_WRITEBACK)
-
-void drm_client_debugfs_init(struct drm_device *dev);
 
 #endif

@@ -90,8 +90,7 @@ static int __net_init afs_net_init(struct net *net_ns)
 	INIT_LIST_HEAD(&net->fs_probe_slow);
 	INIT_HLIST_HEAD(&net->fs_proc);
 
-	INIT_HLIST_HEAD(&net->fs_addresses4);
-	INIT_HLIST_HEAD(&net->fs_addresses6);
+	INIT_HLIST_HEAD(&net->fs_addresses);
 	seqlock_init(&net->fs_addr_lock);
 
 	INIT_WORK(&net->fs_manager, afs_manage_servers);
@@ -178,7 +177,7 @@ static int __init afs_init(void)
 	afs_wq = alloc_workqueue("afs", 0, 0);
 	if (!afs_wq)
 		goto error_afs_wq;
-	afs_async_calls = alloc_workqueue("kafsd", WQ_MEM_RECLAIM, 0);
+	afs_async_calls = alloc_workqueue("kafsd", WQ_MEM_RECLAIM | WQ_UNBOUND, 0);
 	if (!afs_async_calls)
 		goto error_async;
 	afs_lock_manager = alloc_workqueue("kafs_lockd", WQ_MEM_RECLAIM, 0);

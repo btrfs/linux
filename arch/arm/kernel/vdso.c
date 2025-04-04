@@ -14,14 +14,12 @@
 #include <linux/of.h>
 #include <linux/printk.h>
 #include <linux/slab.h>
-#include <linux/timekeeper_internal.h>
 #include <linux/vmalloc.h>
 #include <asm/arch_timer.h>
 #include <asm/barrier.h>
 #include <asm/cacheflush.h>
 #include <asm/page.h>
 #include <asm/vdso.h>
-#include <asm/vdso_datapage.h>
 #include <clocksource/arm_arch_timer.h>
 #include <vdso/helpers.h>
 #include <vdso/vsyscall.h>
@@ -35,9 +33,6 @@ extern char vdso_start[], vdso_end[];
 /* Total number of pages needed for the data and text portions of the VDSO. */
 unsigned int vdso_total_pages __ro_after_init;
 
-/*
- * The VDSO data page.
- */
 static union vdso_data_store vdso_data_store __page_aligned_data;
 struct vdso_data *vdso_data = vdso_data_store.data;
 

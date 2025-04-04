@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 //
-// Copyright(c) 2021-2022 Intel Corporation. All rights reserved.
+// Copyright(c) 2021-2022 Intel Corporation
 //
 // Authors: Cezary Rojewski <cezary.rojewski@intel.com>
 //          Amadeusz Slawinski <amadeuszx.slawinski@linux.intel.com>
@@ -381,6 +381,7 @@ int avs_ipc_set_d0ix(struct avs_dev *adev, bool enable_pg, bool streaming)
 
 	msg.ext.set_d0ix.wake = enable_pg;
 	msg.ext.set_d0ix.streaming = streaming;
+	msg.ext.set_d0ix.prevent_pg = !enable_pg;
 
 	request.header = msg.val;
 
@@ -399,10 +400,12 @@ int avs_ipc_get_fw_config(struct avs_dev *adev, struct avs_fw_cfg *cfg)
 				       AVS_BASEFW_FIRMWARE_CONFIG, NULL, 0,
 				       &payload, &payload_size);
 	if (ret)
-		return ret;
+		goto err;
 	/* Non-zero payload expected for FIRMWARE_CONFIG. */
-	if (!payload_size)
-		return -EREMOTEIO;
+	if (!payload_size) {
+		ret = -EREMOTEIO;
+		goto err;
+	}
 
 	while (offset < payload_size) {
 		tlv = (struct avs_tlv *)(payload + offset);
@@ -501,6 +504,9 @@ int avs_ipc_get_fw_config(struct avs_dev *adev, struct avs_fw_cfg *cfg)
 
 	/* No longer needed, free it as it's owned by the get_large_config() caller. */
 	kfree(payload);
+err:
+	if (ret)
+		dev_err(adev->dev, "get fw cfg failed: %d\n", ret);
 	return ret;
 }
 
@@ -516,10 +522,12 @@ int avs_ipc_get_hw_config(struct avs_dev *adev, struct avs_hw_cfg *cfg)
 				       AVS_BASEFW_HARDWARE_CONFIG, NULL, 0,
 				       &payload, &payload_size);
 	if (ret)
-		return ret;
+		goto err;
 	/* Non-zero payload expected for HARDWARE_CONFIG. */
-	if (!payload_size)
-		return -EREMOTEIO;
+	if (!payload_size) {
+		ret = -EREMOTEIO;
+		goto err;
+	}
 
 	while (offset < payload_size) {
 		tlv = (struct avs_tlv *)(payload + offset);
@@ -589,6 +597,9 @@ int avs_ipc_get_hw_config(struct avs_dev *adev, struct avs_hw_cfg *cfg)
 exit:
 	/* No longer needed, free it as it's owned by the get_large_config() caller. */
 	kfree(payload);
+err:
+	if (ret)
+		dev_err(adev->dev, "get hw cfg failed: %d\n", ret);
 	return ret;
 }
 

@@ -898,8 +898,6 @@ static const struct vb2_ops dcmi_video_qops = {
 	.buf_queue		= dcmi_buf_queue,
 	.start_streaming	= dcmi_start_streaming,
 	.stop_streaming		= dcmi_stop_streaming,
-	.wait_prepare		= vb2_ops_wait_prepare,
-	.wait_finish		= vb2_ops_wait_finish,
 };
 
 static int dcmi_g_fmt_vid_cap(struct file *file, void *priv,
@@ -1855,7 +1853,7 @@ static int dcmi_graph_init(struct stm32_dcmi *dcmi)
 	struct device_node *ep;
 	int ret;
 
-	ep = of_graph_get_next_endpoint(dcmi->dev->of_node, NULL);
+	ep = of_graph_get_endpoint_by_regs(dcmi->dev->of_node, 0, -1);
 	if (!ep) {
 		dev_err(dcmi->dev, "Failed to get next endpoint\n");
 		return -EINVAL;
@@ -1907,7 +1905,7 @@ static int dcmi_probe(struct platform_device *pdev)
 				     "Could not get reset control\n");
 
 	/* Get bus characteristics from devicetree */
-	np = of_graph_get_next_endpoint(np, NULL);
+	np = of_graph_get_endpoint_by_regs(np, 0, -1);
 	if (!np) {
 		dev_err(&pdev->dev, "Could not find the endpoint\n");
 		return -ENODEV;
@@ -2149,7 +2147,7 @@ static const struct dev_pm_ops dcmi_pm_ops = {
 
 static struct platform_driver stm32_dcmi_driver = {
 	.probe		= dcmi_probe,
-	.remove_new	= dcmi_remove,
+	.remove		= dcmi_remove,
 	.driver		= {
 		.name = DRV_NAME,
 		.of_match_table = of_match_ptr(stm32_dcmi_of_match),
