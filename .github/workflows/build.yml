@@ -21,6 +21,7 @@ jobs:
       - uses: hendrikmuhs/ccache-action@v1.2
         with:
           create-symlink: true
+      - run: sudo apt-get update -qqq
       - run: sudo apt-get install -y gcc coreutils build-essential bc kmod cpio bison flex libelf-dev libssl-dev
       - run: cp .github/workflows/.config-mini .config
       - run: yes '' | make oldconfig
@@ -39,6 +40,7 @@ jobs:
       - uses: hendrikmuhs/ccache-action@v1.2
         with:
           create-symlink: true
+      - run: sudo apt-get update -qqq
       - run: sudo apt-get install -y clang llvm lld coreutils build-essential bc kmod cpio bison flex libelf-dev libssl-dev
       - run: cp .github/workflows/.config-mini .config
       - run: yes '' | make LLVM=1 CC=clang oldconfig
