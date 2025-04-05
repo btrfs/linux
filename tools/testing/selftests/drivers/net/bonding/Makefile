@@ -10,12 +10,15 @@ TEST_PROGS := \
 	mode-2-recovery-updelay.sh \
 	bond_options.sh \
 	bond-eth-type-change.sh \
-	bond_macvlan.sh
+	bond_macvlan_ipvlan.sh
 
 TEST_FILES := \
 	lag_lib.sh \
 	bond_topo_2d1c.sh \
-	bond_topo_3d1c.sh \
-	net_forwarding_lib.sh
+	bond_topo_3d1c.sh
+
+TEST_INCLUDES := \
+	../../../net/forwarding/lib.sh \
+	../../../net/lib.sh
 
 include ../../../lib.mk

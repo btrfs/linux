@@ -1280,12 +1280,9 @@ static bool CalculatePrefetchSchedule(
 
 	if (MyError) {
 		*PrefetchBandwidth = 0;
-		TimeForFetchingMetaPTE = 0;
-		TimeForFetchingRowInVBlank = 0;
 		*DestinationLinesToRequestVMInVBlank = 0;
 		*DestinationLinesToRequestRowInVBlank = 0;
 		*DestinationLinesForPrefetch = 0;
-		LinesToRequestPrefetchPixelData = 0;
 		*VRatioPrefetchY = 0;
 		*VRatioPrefetchC = 0;
 		*RequiredPrefetchPixDataBWLuma = 0;
@@ -1775,15 +1772,6 @@ static unsigned int CalculateVMAndRowBytes(
 		*PixelPTEReqWidth = 32768.0 / BytePerPixel;
 		*PTERequestSize = 64;
 		FractionOfPTEReturnDrop = 0;
-	} else if (MacroTileSizeBytes == 4096) {
-		PixelPTEReqHeightPTEs = 1;
-		*PixelPTEReqHeight = MacroTileHeight;
-		*PixelPTEReqWidth = 8 * *MacroTileWidth;
-		*PTERequestSize = 64;
-		if (ScanDirection != dm_vert)
-			FractionOfPTEReturnDrop = 0;
-		else
-			FractionOfPTEReturnDrop = 7 / 8;
 	} else if (GPUVMMinPageSize == 4 && MacroTileSizeBytes > 4096) {
 		PixelPTEReqHeightPTEs = 16;
 		*PixelPTEReqHeight = 16 * BlockHeight256Bytes;
@@ -3535,7 +3523,6 @@ static double TruncToValidBPP(
 			return DesiredBPP;
 		}
 	}
-	return BPP_INVALID;
 }
 
 void dml30_ModeSupportAndSystemConfigurationFull(struct display_mode_lib *mode_lib)
@@ -4273,7 +4260,7 @@ void dml30_ModeSupportAndSystemConfigurationFull(struct display_mode_lib *mode_l
 
 	//Calculate Swath, DET Configuration, DCFCLKDeepSleep
 	//
-	for (i = 0; i < mode_lib->soc.num_states; ++i) {
+	for (i = start_state; i < mode_lib->soc.num_states; ++i) {
 		for (j = 0; j <= 1; ++j) {
 			for (k = 0; k < v->NumberOfActivePlanes; ++k) {
 				v->RequiredDPPCLKThisState[k] = v->RequiredDPPCLK[i][j][k];
@@ -4576,7 +4563,7 @@ void dml30_ModeSupportAndSystemConfigurationFull(struct display_mode_lib *mode_l
 
 	//Calculate Return BW
 
-	for (i = 0; i < mode_lib->soc.num_states; ++i) {
+	for (i = start_state; i < mode_lib->soc.num_states; ++i) {
 		for (j = 0; j <= 1; ++j) {
 			for (k = 0; k <= v->NumberOfActivePlanes - 1; k++) {
 				if (v->BlendingAndTiming[k] == k) {
@@ -4635,7 +4622,7 @@ void dml30_ModeSupportAndSystemConfigurationFull(struct display_mode_lib *mode_l
 					v->UrgentOutOfOrderReturnPerChannelVMDataOnly);
 	v->FinalDRAMClockChangeLatency = (v->DRAMClockChangeLatencyOverride > 0 ? v->DRAMClockChangeLatencyOverride : v->DRAMClockChangeLatency);
 
-	for (i = 0; i < mode_lib->soc.num_states; ++i) {
+	for (i = start_state; i < mode_lib->soc.num_states; ++i) {
 		for (j = 0; j <= 1; ++j) {
 			v->DCFCLKState[i][j] = v->DCFCLKPerState[i];
 		}
@@ -4646,7 +4633,7 @@ void dml30_ModeSupportAndSystemConfigurationFull(struct display_mode_lib *mode_l
 
 		if (v->ClampMinDCFCLK) {
 			/* Clamp calculated values to actual minimum */
-			for (i = 0; i < mode_lib->soc.num_states; ++i) {
+			for (i = start_state; i < mode_lib->soc.num_states; ++i) {
 				for (j = 0; j <= 1; ++j) {
 					if (v->DCFCLKState[i][j] < mode_lib->soc.min_dcfclk) {
 						v->DCFCLKState[i][j] = mode_lib->soc.min_dcfclk;
@@ -4656,7 +4643,7 @@ void dml30_ModeSupportAndSystemConfigurationFull(struct display_mode_lib *mode_l
 		}
 	}
 
-	for (i = 0; i < mode_lib->soc.num_states; ++i) {
+	for (i = start_state; i < mode_lib->soc.num_states; ++i) {
 		for (j = 0; j <= 1; ++j) {
 			v->IdealSDPPortBandwidthPerState[i][j] = dml_min3(
 					v->ReturnBusWidth * v->DCFCLKState[i][j],
@@ -4674,7 +4661,7 @@ void dml30_ModeSupportAndSystemConfigurationFull(struct display_mode_lib *mode_l
 
 	//Re-ordering Buffer Support Check
 
-	for (i = 0; i < mode_lib->soc.num_states; ++i) {
+	for (i = start_state; i < mode_lib->soc.num_states; ++i) {
 		for (j = 0; j <= 1; ++j) {
 			if ((v->ROBBufferSizeInKByte - v->PixelChunkSizeInKByte) * 1024 / v->ReturnBWPerState[i][j]
 					> (v->RoundTripPingLatencyCycles + 32) / v->DCFCLKState[i][j] + ReorderingBytes / v->ReturnBWPerState[i][j]) {
@@ -4692,7 +4679,7 @@ void dml30_ModeSupportAndSystemConfigurationFull(struct display_mode_lib *mode_l
 		MaxTotalVActiveRDBandwidth = MaxTotalVActiveRDBandwidth + v->ReadBandwidthLuma[k] + v->ReadBandwidthChroma[k];
 	}
 
-	for (i = 0; i < mode_lib->soc.num_states; ++i) {
+	for (i = start_state; i < mode_lib->soc.num_states; ++i) {
 		for (j = 0; j <= 1; ++j) {
 			v->MaxTotalVerticalActiveAvailableBandwidth[i][j] = dml_min(
 					v->IdealSDPPortBandwidthPerState[i][j] * v->MaxAveragePercentOfIdealSDPPortBWDisplayCanUseInNormalSystemOperation / 100,
@@ -4708,7 +4695,7 @@ void dml30_ModeSupportAndSystemConfigurationFull(struct display_mode_lib *mode_l
 
 	//Prefetch Check
 
-	for (i = 0; i < mode_lib->soc.num_states; ++i) {
+	for (i = start_state; i < mode_lib->soc.num_states; ++i) {
 		for (j = 0; j <= 1; ++j) {
 			int NextPrefetchModeState = MinPrefetchMode;
 

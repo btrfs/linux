@@ -29,11 +29,13 @@ struct mdp_cmdq_cmd {
 	struct cmdq_pkt pkt;
 	s32 *event;
 	struct mdp_dev *mdp;
+	struct cmdq_cb_data *data;
 	void (*user_cmdq_cb)(struct cmdq_cb_data data);
 	void *user_cb_data;
 	struct mdp_comp *comps;
 	void *mdp_ctx;
 	u8 num_comps;
+	u8 pp_idx;
 };
 
 struct mdp_dev;

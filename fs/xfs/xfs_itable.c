@@ -36,6 +36,14 @@ struct xfs_bstat_chunk {
 	struct xfs_bulkstat	*buf;
 };
 
+static inline bool
+want_metadir_file(
+	struct xfs_inode	*ip,
+	struct xfs_ibulk	*breq)
+{
+	return xfs_is_metadir_inode(ip) && (breq->flags & XFS_IBULK_METADIR);
+}
+
 /*
  * Fill out the bulkstat info for a single inode and report it somewhere.
  *
@@ -69,9 +77,6 @@ xfs_bulkstat_one_int(
 	vfsuid_t		vfsuid;
 	vfsgid_t		vfsgid;
 
-	if (xfs_internal_inum(mp, ino))
-		goto out_advance;
-
 	error = xfs_iget(mp, tp, ino,
 			 (XFS_IGET_DONTCACHE | XFS_IGET_UNTRUSTED),
 			 XFS_ILOCK_SHARED, &ip);
@@ -96,6 +101,34 @@ xfs_bulkstat_one_int(
 	inode = VFS_I(ip);
 	vfsuid = i_uid_into_vfsuid(idmap, inode);
 	vfsgid = i_gid_into_vfsgid(idmap, inode);
+
+	/*
+	 * If caller wants files from the metadata directories, push out the
+	 * bare minimum information for enabling scrub.
+	 */
+	if (want_metadir_file(ip, bc->breq)) {
+		memset(buf, 0, sizeof(*buf));
+		buf->bs_ino = ino;
+		buf->bs_gen = inode->i_generation;
+		buf->bs_mode = inode->i_mode & S_IFMT;
+		xfs_bulkstat_health(ip, buf);
+		buf->bs_version = XFS_BULKSTAT_VERSION_V5;
+		xfs_iunlock(ip, XFS_ILOCK_SHARED);
+		xfs_irele(ip);
+
+		error = bc->formatter(bc->breq, buf);
+		if (!error || error == -ECANCELED)
+			goto out_advance;
+		goto out;
+	}
+
+	/* If this is a private inode, don't leak its details to userspace. */
+	if (IS_PRIVATE(inode) || xfs_is_sb_inum(mp, ino)) {
+		xfs_iunlock(ip, XFS_ILOCK_SHARED);
+		xfs_irele(ip);
+		error = -EINVAL;
+		goto out_advance;
+	}
 
 	/* xfs_iget returns the following without needing
 	 * further change.
@@ -197,8 +230,8 @@ xfs_bulkstat_one(
 
 	ASSERT(breq->icount == 1);
 
-	bc.buf = kmem_zalloc(sizeof(struct xfs_bulkstat),
-			KM_MAYFAIL);
+	bc.buf = kzalloc(sizeof(struct xfs_bulkstat),
+			GFP_KERNEL | __GFP_RETRY_MAYFAIL);
 	if (!bc.buf)
 		return -ENOMEM;
 
@@ -214,7 +247,7 @@ xfs_bulkstat_one(
 			breq->startino, &bc);
 	xfs_trans_cancel(tp);
 out:
-	kmem_free(bc.buf);
+	kfree(bc.buf);
 
 	/*
 	 * If we reported one inode to userspace then we abort because we hit
@@ -289,8 +322,8 @@ xfs_bulkstat(
 	if (xfs_bulkstat_already_done(breq->mp, breq->startino))
 		return 0;
 
-	bc.buf = kmem_zalloc(sizeof(struct xfs_bulkstat),
-			KM_MAYFAIL);
+	bc.buf = kzalloc(sizeof(struct xfs_bulkstat),
+			GFP_KERNEL | __GFP_RETRY_MAYFAIL);
 	if (!bc.buf)
 		return -ENOMEM;
 
@@ -309,7 +342,7 @@ xfs_bulkstat(
 			xfs_bulkstat_iwalk, breq->icount, &bc);
 	xfs_trans_cancel(tp);
 out:
-	kmem_free(bc.buf);
+	kfree(bc.buf);
 
 	/*
 	 * We found some inodes, so clear the error status and return them.

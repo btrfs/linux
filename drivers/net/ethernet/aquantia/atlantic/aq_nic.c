@@ -127,7 +127,7 @@ void aq_nic_cfg_start(struct aq_nic_s *self)
 
 	cfg->irq_type = aq_pci_func_get_irq_type(self);
 
-	if ((cfg->irq_type == AQ_HW_IRQ_LEGACY) ||
+	if ((cfg->irq_type == AQ_HW_IRQ_INTX) ||
 	    (cfg->aq_hw_caps->vecs == 1U) ||
 	    (cfg->vecs == 1U)) {
 		cfg->is_rss = 0U;
@@ -1441,7 +1441,9 @@ void aq_nic_deinit(struct aq_nic_s *self, bool link_down)
 	aq_ptp_ring_free(self);
 	aq_ptp_free(self);
 
-	if (likely(self->aq_fw_ops->deinit) && link_down) {
+	/* May be invoked during hot unplug. */
+	if (pci_device_is_present(self->pdev) &&
+	    likely(self->aq_fw_ops->deinit) && link_down) {
 		mutex_lock(&self->fwreq_mutex);
 		self->aq_fw_ops->deinit(self->aq_hw);
 		mutex_unlock(&self->fwreq_mutex);

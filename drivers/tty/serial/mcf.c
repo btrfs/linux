@@ -462,39 +462,12 @@ static const struct uart_ops mcf_uart_ops = {
 	.verify_port	= mcf_verify_port,
 };
 
-static struct mcf_uart mcf_ports[4];
+static struct mcf_uart mcf_ports[10];
 
 #define	MCF_MAXPORTS	ARRAY_SIZE(mcf_ports)
 
 /****************************************************************************/
 #if defined(CONFIG_SERIAL_MCF_CONSOLE)
-/****************************************************************************/
-
-int __init early_mcf_setup(struct mcf_platform_uart *platp)
-{
-	struct uart_port *port;
-	int i;
-
-	for (i = 0; ((i < MCF_MAXPORTS) && (platp[i].mapbase)); i++) {
-		port = &mcf_ports[i].port;
-
-		port->line = i;
-		port->type = PORT_MCF;
-		port->mapbase = platp[i].mapbase;
-		port->membase = (platp[i].membase) ? platp[i].membase :
-			(unsigned char __iomem *) port->mapbase;
-		port->iotype = SERIAL_IO_MEM;
-		port->irq = platp[i].irq;
-		port->uartclk = MCF_BUSCLK;
-		port->flags = UPF_BOOT_AUTOCONF;
-		port->rs485_config = mcf_config_rs485;
-		port->rs485_supported = mcf_rs485_supported;
-		port->ops = &mcf_uart_ops;
-	}
-
-	return 0;
-}
-
 /****************************************************************************/
 
 static void mcf_console_putc(struct console *co, const char c)
@@ -643,7 +616,7 @@ static void mcf_remove(struct platform_device *pdev)
 
 static struct platform_driver mcf_platform_driver = {
 	.probe		= mcf_probe,
-	.remove_new	= mcf_remove,
+	.remove		= mcf_remove,
 	.driver		= {
 		.name	= "mcfuart",
 	},

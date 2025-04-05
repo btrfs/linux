@@ -869,7 +869,8 @@ static int fsl_elbc_nand_probe(struct platform_device *pdev)
 	struct mtd_info *mtd;
 
 	if (!fsl_lbc_ctrl_dev || !fsl_lbc_ctrl_dev->regs)
-		return -ENODEV;
+		return dev_err_probe(&pdev->dev, -EPROBE_DEFER, "lbc_ctrl_dev missing\n");
+
 	lbc = fsl_lbc_ctrl_dev->regs;
 	dev = fsl_lbc_ctrl_dev->dev;
 
@@ -998,7 +999,7 @@ static struct platform_driver fsl_elbc_nand_driver = {
 		.of_match_table = fsl_elbc_nand_match,
 	},
 	.probe = fsl_elbc_nand_probe,
-	.remove_new = fsl_elbc_nand_remove,
+	.remove = fsl_elbc_nand_remove,
 };
 
 module_platform_driver(fsl_elbc_nand_driver);

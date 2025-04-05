@@ -3,15 +3,22 @@
 #ifndef BTRFS_EXTENT_IO_TREE_H
 #define BTRFS_EXTENT_IO_TREE_H
 
+#include <linux/rbtree.h>
+#include <linux/spinlock.h>
+#include <linux/refcount.h>
+#include <linux/list.h>
+#include <linux/wait.h>
 #include "misc.h"
 
 struct extent_changeset;
+struct btrfs_fs_info;
+struct btrfs_inode;
 
 /* Bits for the extent state */
 enum {
 	ENUM_BIT(EXTENT_DIRTY),
-	ENUM_BIT(EXTENT_UPTODATE),
 	ENUM_BIT(EXTENT_LOCKED),
+	ENUM_BIT(EXTENT_DIO_LOCKED),
 	ENUM_BIT(EXTENT_NEW),
 	ENUM_BIT(EXTENT_DELALLOC),
 	ENUM_BIT(EXTENT_DEFRAG),
@@ -30,6 +37,11 @@ enum {
 	 * that is left for the ordered extent completion.
 	 */
 	ENUM_BIT(EXTENT_DELALLOC_NEW),
+	/*
+	 * Mark that a range is being locked for finishing an ordered extent.
+	 * Used together with EXTENT_LOCKED.
+	 */
+	ENUM_BIT(EXTENT_FINISHING_ORDERED),
 	/*
 	 * When an ordered extent successfully completes for a region marked as
 	 * a new delalloc range, use this flag when clearing a new delalloc
@@ -59,6 +71,8 @@ enum {
 #define EXTENT_CTLBITS		(EXTENT_DO_ACCOUNTING | \
 				 EXTENT_ADD_INODE_BYTES | \
 				 EXTENT_CLEAR_ALL_BITS)
+
+#define EXTENT_LOCK_BITS	(EXTENT_LOCKED | EXTENT_DIO_LOCKED)
 
 /*
  * Redefined bits above which are used only in the device allocation tree,
@@ -127,12 +141,22 @@ const struct btrfs_fs_info *extent_io_tree_to_fs_info(const struct extent_io_tre
 void extent_io_tree_init(struct btrfs_fs_info *fs_info,
 			 struct extent_io_tree *tree, unsigned int owner);
 void extent_io_tree_release(struct extent_io_tree *tree);
+int __lock_extent(struct extent_io_tree *tree, u64 start, u64 end, u32 bits,
+		  struct extent_state **cached);
+bool __try_lock_extent(struct extent_io_tree *tree, u64 start, u64 end, u32 bits,
+		       struct extent_state **cached);
 
-int lock_extent(struct extent_io_tree *tree, u64 start, u64 end,
-		struct extent_state **cached);
+static inline int lock_extent(struct extent_io_tree *tree, u64 start, u64 end,
+			      struct extent_state **cached)
+{
+	return __lock_extent(tree, start, end, EXTENT_LOCKED, cached);
+}
 
-int try_lock_extent(struct extent_io_tree *tree, u64 start, u64 end,
-		    struct extent_state **cached);
+static inline bool try_lock_extent(struct extent_io_tree *tree, u64 start,
+				   u64 end, struct extent_state **cached)
+{
+	return __try_lock_extent(tree, start, end, EXTENT_LOCKED, cached);
+}
 
 int __init extent_state_init_cachep(void);
 void __cold extent_state_free_cachep(void);
@@ -146,6 +170,8 @@ void free_extent_state(struct extent_state *state);
 bool test_range_bit(struct extent_io_tree *tree, u64 start, u64 end, u32 bit,
 		    struct extent_state *cached_state);
 bool test_range_bit_exists(struct extent_io_tree *tree, u64 start, u64 end, u32 bit);
+void get_range_bits(struct extent_io_tree *tree, u64 start, u64 end, u32 *bits,
+		    struct extent_state **cached_state);
 int clear_record_extent_bits(struct extent_io_tree *tree, u64 start, u64 end,
 			     u32 bits, struct extent_changeset *changeset);
 int __clear_extent_bit(struct extent_io_tree *tree, u64 start, u64 end,
@@ -176,13 +202,6 @@ int set_record_extent_bits(struct extent_io_tree *tree, u64 start, u64 end,
 int set_extent_bit(struct extent_io_tree *tree, u64 start, u64 end,
 		   u32 bits, struct extent_state **cached_state);
 
-static inline int clear_extent_uptodate(struct extent_io_tree *tree, u64 start,
-		u64 end, struct extent_state **cached_state)
-{
-	return __clear_extent_bit(tree, start, end, EXTENT_UPTODATE,
-				  cached_state, NULL);
-}
-
 static inline int clear_extent_dirty(struct extent_io_tree *tree, u64 start,
 				     u64 end, struct extent_state **cached)
 {
@@ -205,5 +224,22 @@ int find_contiguous_extent_bit(struct extent_io_tree *tree, u64 start,
 bool btrfs_find_delalloc_range(struct extent_io_tree *tree, u64 *start,
 			       u64 *end, u64 max_bytes,
 			       struct extent_state **cached_state);
+static inline int lock_dio_extent(struct extent_io_tree *tree, u64 start,
+				  u64 end, struct extent_state **cached)
+{
+	return __lock_extent(tree, start, end, EXTENT_DIO_LOCKED, cached);
+}
+
+static inline bool try_lock_dio_extent(struct extent_io_tree *tree, u64 start,
+				       u64 end, struct extent_state **cached)
+{
+	return __try_lock_extent(tree, start, end, EXTENT_DIO_LOCKED, cached);
+}
+
+static inline int unlock_dio_extent(struct extent_io_tree *tree, u64 start,
+				    u64 end, struct extent_state **cached)
+{
+	return __clear_extent_bit(tree, start, end, EXTENT_DIO_LOCKED, cached, NULL);
+}
 
 #endif /* BTRFS_EXTENT_IO_TREE_H */

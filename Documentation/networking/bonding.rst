@@ -444,6 +444,18 @@ arp_missed_max
 
 	The default value is 2, and the allowable range is 1 - 255.
 
+coupled_control
+
+    Specifies whether the LACP state machine's MUX in the 802.3ad mode
+    should have separate Collecting and Distributing states.
+
+    This is by implementing the independent control state machine per
+    IEEE 802.1AX-2008 5.4.15 in addition to the existing coupled control
+    state machine.
+
+    The default value is 1. This setting does not separate the Collecting
+    and Distributing states, maintaining the bond in coupled control.
+
 downdelay
 
 	Specifies the time, in milliseconds, to wait before disabling
@@ -1951,7 +1963,7 @@ obtain its hardware address from the first slave, which might not
 match the hardware address of the VLAN interfaces (which was
 ultimately copied from an earlier slave).
 
-There are two methods to insure that the VLAN device operates
+There are two methods to ensure that the VLAN device operates
 with the correct hardware address if all slaves are removed from a
 bond interface:
 
@@ -2066,7 +2078,7 @@ as an unsolicited ARP reply (because ARP matches replies on an
 interface basis), and is discarded.  The MII monitor is not affected
 by the state of the routing table.
 
-The solution here is simply to insure that slaves do not have
+The solution here is simply to ensure that slaves do not have
 routes of their own, and if for some reason they must, those routes do
 not supersede routes of their master.  This should generally be the
 case, but unusual configurations or errant manual or automatic static
@@ -2283,7 +2295,7 @@ active-backup:
 	the switches have an ISL and play together well.  If the
 	network configuration is such that one switch is specifically
 	a backup switch (e.g., has lower capacity, higher cost, etc),
-	then the primary option can be used to insure that the
+	then the primary option can be used to ensure that the
 	preferred link is always used when it is available.
 
 broadcast:
@@ -2310,7 +2322,7 @@ monitor can provide a higher level of reliability in detecting end to
 end connectivity failures (which may be caused by the failure of any
 individual component to pass traffic for any reason).  Additionally,
 the ARP monitor should be configured with multiple targets (at least
-one for each switch in the network).  This will insure that,
+one for each switch in the network).  This will ensure that,
 regardless of which switch is active, the ARP monitor has a suitable
 target to query.
 
@@ -2903,6 +2915,17 @@ To restore your slaves' MAC addresses, you need to detach them
 from the bond (``ifenslave -d bond0 eth0``). The bonding driver will
 then restore the MAC addresses that the slaves had before they were
 enslaved.
+
+9.  What bonding modes support native XDP?
+------------------------------------------
+
+  * balance-rr (0)
+  * active-backup (1)
+  * balance-xor (2)
+  * 802.3ad (4)
+
+Note that the vlan+srcmac hash policy does not support native XDP.
+For other bonding modes, the XDP program must be loaded with generic mode.
 
 16. Resources and Links
 =======================

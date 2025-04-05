@@ -10,8 +10,21 @@
 
 #include "kvm_util.h"
 #include "processor.h"
+#include "ucall_common.h"
 
 #define DEFAULT_RISCV_GUEST_STACK_VADDR_MIN	0xac0000
+
+static vm_vaddr_t exception_handlers;
+
+bool __vcpu_has_ext(struct kvm_vcpu *vcpu, uint64_t ext)
+{
+	unsigned long value = 0;
+	int ret;
+
+	ret = __vcpu_get_reg(vcpu, ext, &value);
+
+	return !ret && !!value;
+}
 
 static uint64_t page_align(struct kvm_vm *vm, uint64_t v)
 {
@@ -208,39 +221,39 @@ void vcpu_arch_dump(FILE *stream, struct kvm_vcpu *vcpu, uint8_t indent)
 {
 	struct kvm_riscv_core core;
 
-	vcpu_get_reg(vcpu, RISCV_CORE_REG(mode), &core.mode);
-	vcpu_get_reg(vcpu, RISCV_CORE_REG(regs.pc), &core.regs.pc);
-	vcpu_get_reg(vcpu, RISCV_CORE_REG(regs.ra), &core.regs.ra);
-	vcpu_get_reg(vcpu, RISCV_CORE_REG(regs.sp), &core.regs.sp);
-	vcpu_get_reg(vcpu, RISCV_CORE_REG(regs.gp), &core.regs.gp);
-	vcpu_get_reg(vcpu, RISCV_CORE_REG(regs.tp), &core.regs.tp);
-	vcpu_get_reg(vcpu, RISCV_CORE_REG(regs.t0), &core.regs.t0);
-	vcpu_get_reg(vcpu, RISCV_CORE_REG(regs.t1), &core.regs.t1);
-	vcpu_get_reg(vcpu, RISCV_CORE_REG(regs.t2), &core.regs.t2);
-	vcpu_get_reg(vcpu, RISCV_CORE_REG(regs.s0), &core.regs.s0);
-	vcpu_get_reg(vcpu, RISCV_CORE_REG(regs.s1), &core.regs.s1);
-	vcpu_get_reg(vcpu, RISCV_CORE_REG(regs.a0), &core.regs.a0);
-	vcpu_get_reg(vcpu, RISCV_CORE_REG(regs.a1), &core.regs.a1);
-	vcpu_get_reg(vcpu, RISCV_CORE_REG(regs.a2), &core.regs.a2);
-	vcpu_get_reg(vcpu, RISCV_CORE_REG(regs.a3), &core.regs.a3);
-	vcpu_get_reg(vcpu, RISCV_CORE_REG(regs.a4), &core.regs.a4);
-	vcpu_get_reg(vcpu, RISCV_CORE_REG(regs.a5), &core.regs.a5);
-	vcpu_get_reg(vcpu, RISCV_CORE_REG(regs.a6), &core.regs.a6);
-	vcpu_get_reg(vcpu, RISCV_CORE_REG(regs.a7), &core.regs.a7);
-	vcpu_get_reg(vcpu, RISCV_CORE_REG(regs.s2), &core.regs.s2);
-	vcpu_get_reg(vcpu, RISCV_CORE_REG(regs.s3), &core.regs.s3);
-	vcpu_get_reg(vcpu, RISCV_CORE_REG(regs.s4), &core.regs.s4);
-	vcpu_get_reg(vcpu, RISCV_CORE_REG(regs.s5), &core.regs.s5);
-	vcpu_get_reg(vcpu, RISCV_CORE_REG(regs.s6), &core.regs.s6);
-	vcpu_get_reg(vcpu, RISCV_CORE_REG(regs.s7), &core.regs.s7);
-	vcpu_get_reg(vcpu, RISCV_CORE_REG(regs.s8), &core.regs.s8);
-	vcpu_get_reg(vcpu, RISCV_CORE_REG(regs.s9), &core.regs.s9);
-	vcpu_get_reg(vcpu, RISCV_CORE_REG(regs.s10), &core.regs.s10);
-	vcpu_get_reg(vcpu, RISCV_CORE_REG(regs.s11), &core.regs.s11);
-	vcpu_get_reg(vcpu, RISCV_CORE_REG(regs.t3), &core.regs.t3);
-	vcpu_get_reg(vcpu, RISCV_CORE_REG(regs.t4), &core.regs.t4);
-	vcpu_get_reg(vcpu, RISCV_CORE_REG(regs.t5), &core.regs.t5);
-	vcpu_get_reg(vcpu, RISCV_CORE_REG(regs.t6), &core.regs.t6);
+	core.mode = vcpu_get_reg(vcpu, RISCV_CORE_REG(mode));
+	core.regs.pc = vcpu_get_reg(vcpu, RISCV_CORE_REG(regs.pc));
+	core.regs.ra = vcpu_get_reg(vcpu, RISCV_CORE_REG(regs.ra));
+	core.regs.sp = vcpu_get_reg(vcpu, RISCV_CORE_REG(regs.sp));
+	core.regs.gp = vcpu_get_reg(vcpu, RISCV_CORE_REG(regs.gp));
+	core.regs.tp = vcpu_get_reg(vcpu, RISCV_CORE_REG(regs.tp));
+	core.regs.t0 = vcpu_get_reg(vcpu, RISCV_CORE_REG(regs.t0));
+	core.regs.t1 = vcpu_get_reg(vcpu, RISCV_CORE_REG(regs.t1));
+	core.regs.t2 = vcpu_get_reg(vcpu, RISCV_CORE_REG(regs.t2));
+	core.regs.s0 = vcpu_get_reg(vcpu, RISCV_CORE_REG(regs.s0));
+	core.regs.s1 = vcpu_get_reg(vcpu, RISCV_CORE_REG(regs.s1));
+	core.regs.a0 = vcpu_get_reg(vcpu, RISCV_CORE_REG(regs.a0));
+	core.regs.a1 = vcpu_get_reg(vcpu, RISCV_CORE_REG(regs.a1));
+	core.regs.a2 = vcpu_get_reg(vcpu, RISCV_CORE_REG(regs.a2));
+	core.regs.a3 = vcpu_get_reg(vcpu, RISCV_CORE_REG(regs.a3));
+	core.regs.a4 = vcpu_get_reg(vcpu, RISCV_CORE_REG(regs.a4));
+	core.regs.a5 = vcpu_get_reg(vcpu, RISCV_CORE_REG(regs.a5));
+	core.regs.a6 = vcpu_get_reg(vcpu, RISCV_CORE_REG(regs.a6));
+	core.regs.a7 = vcpu_get_reg(vcpu, RISCV_CORE_REG(regs.a7));
+	core.regs.s2 = vcpu_get_reg(vcpu, RISCV_CORE_REG(regs.s2));
+	core.regs.s3 = vcpu_get_reg(vcpu, RISCV_CORE_REG(regs.s3));
+	core.regs.s4 = vcpu_get_reg(vcpu, RISCV_CORE_REG(regs.s4));
+	core.regs.s5 = vcpu_get_reg(vcpu, RISCV_CORE_REG(regs.s5));
+	core.regs.s6 = vcpu_get_reg(vcpu, RISCV_CORE_REG(regs.s6));
+	core.regs.s7 = vcpu_get_reg(vcpu, RISCV_CORE_REG(regs.s7));
+	core.regs.s8 = vcpu_get_reg(vcpu, RISCV_CORE_REG(regs.s8));
+	core.regs.s9 = vcpu_get_reg(vcpu, RISCV_CORE_REG(regs.s9));
+	core.regs.s10 = vcpu_get_reg(vcpu, RISCV_CORE_REG(regs.s10));
+	core.regs.s11 = vcpu_get_reg(vcpu, RISCV_CORE_REG(regs.s11));
+	core.regs.t3 = vcpu_get_reg(vcpu, RISCV_CORE_REG(regs.t3));
+	core.regs.t4 = vcpu_get_reg(vcpu, RISCV_CORE_REG(regs.t4));
+	core.regs.t5 = vcpu_get_reg(vcpu, RISCV_CORE_REG(regs.t5));
+	core.regs.t6 = vcpu_get_reg(vcpu, RISCV_CORE_REG(regs.t6));
 
 	fprintf(stream,
 		" MODE:  0x%lx\n", core.mode);
@@ -277,8 +290,12 @@ static void __aligned(16) guest_unexp_trap(void)
 		  0, 0, 0, 0, 0, 0);
 }
 
-struct kvm_vcpu *vm_arch_vcpu_add(struct kvm_vm *vm, uint32_t vcpu_id,
-				  void *guest_code)
+void vcpu_arch_set_entry_point(struct kvm_vcpu *vcpu, void *guest_code)
+{
+	vcpu_set_reg(vcpu, RISCV_CORE_REG(regs.pc), (unsigned long)guest_code);
+}
+
+struct kvm_vcpu *vm_arch_vcpu_add(struct kvm_vm *vm, uint32_t vcpu_id)
 {
 	int r;
 	size_t stack_size;
@@ -312,7 +329,9 @@ struct kvm_vcpu *vm_arch_vcpu_add(struct kvm_vm *vm, uint32_t vcpu_id,
 
 	/* Setup stack pointer and program counter of guest */
 	vcpu_set_reg(vcpu, RISCV_CORE_REG(regs.sp), stack_vaddr + stack_size);
-	vcpu_set_reg(vcpu, RISCV_CORE_REG(regs.pc), (unsigned long)guest_code);
+
+	/* Setup sscratch for guest_get_vcpuid() */
+	vcpu_set_reg(vcpu, RISCV_GENERAL_CSR_REG(sscratch), vcpu_id);
 
 	/* Setup default exception vector of guest */
 	vcpu_set_reg(vcpu, RISCV_GENERAL_CSR_REG(stvec), (unsigned long)guest_unexp_trap);
@@ -364,8 +383,80 @@ void vcpu_args_set(struct kvm_vcpu *vcpu, unsigned int num, ...)
 	va_end(ap);
 }
 
+void kvm_exit_unexpected_exception(int vector, int ec)
+{
+	ucall(UCALL_UNHANDLED, 2, vector, ec);
+}
+
 void assert_on_unhandled_exception(struct kvm_vcpu *vcpu)
 {
+	struct ucall uc;
+
+	if (get_ucall(vcpu, &uc) == UCALL_UNHANDLED) {
+		TEST_FAIL("Unexpected exception (vector:0x%lx, ec:0x%lx)",
+			uc.args[0], uc.args[1]);
+	}
+}
+
+struct handlers {
+	exception_handler_fn exception_handlers[NR_VECTORS][NR_EXCEPTIONS];
+};
+
+void route_exception(struct ex_regs *regs)
+{
+	struct handlers *handlers = (struct handlers *)exception_handlers;
+	int vector = 0, ec;
+
+	ec = regs->cause & ~CAUSE_IRQ_FLAG;
+	if (ec >= NR_EXCEPTIONS)
+		goto unexpected_exception;
+
+	/* Use the same handler for all the interrupts */
+	if (regs->cause & CAUSE_IRQ_FLAG) {
+		vector = 1;
+		ec = 0;
+	}
+
+	if (handlers && handlers->exception_handlers[vector][ec])
+		return handlers->exception_handlers[vector][ec](regs);
+
+unexpected_exception:
+	return kvm_exit_unexpected_exception(vector, ec);
+}
+
+void vcpu_init_vector_tables(struct kvm_vcpu *vcpu)
+{
+	extern char exception_vectors;
+
+	vcpu_set_reg(vcpu, RISCV_GENERAL_CSR_REG(stvec), (unsigned long)&exception_vectors);
+}
+
+void vm_init_vector_tables(struct kvm_vm *vm)
+{
+	vm->handlers = __vm_vaddr_alloc(vm, sizeof(struct handlers),
+				   vm->page_size, MEM_REGION_DATA);
+
+	*(vm_vaddr_t *)addr_gva2hva(vm, (vm_vaddr_t)(&exception_handlers)) = vm->handlers;
+}
+
+void vm_install_exception_handler(struct kvm_vm *vm, int vector, exception_handler_fn handler)
+{
+	struct handlers *handlers = addr_gva2hva(vm, vm->handlers);
+
+	assert(vector < NR_EXCEPTIONS);
+	handlers->exception_handlers[0][vector] = handler;
+}
+
+void vm_install_interrupt_handler(struct kvm_vm *vm, exception_handler_fn handler)
+{
+	struct handlers *handlers = addr_gva2hva(vm, vm->handlers);
+
+	handlers->exception_handlers[1][0] = handler;
+}
+
+uint32_t guest_get_vcpuid(void)
+{
+	return csr_read(CSR_SSCRATCH);
 }
 
 struct sbiret sbi_ecall(int ext, int fid, unsigned long arg0,
@@ -411,4 +502,16 @@ bool guest_sbi_probe_extension(int extid, long *out_val)
 		*out_val = ret.value;
 
 	return true;
+}
+
+unsigned long get_host_sbi_spec_version(void)
+{
+	struct sbiret ret;
+
+	ret = sbi_ecall(SBI_EXT_BASE, SBI_EXT_BASE_GET_SPEC_VERSION, 0,
+		       0, 0, 0, 0, 0);
+
+	GUEST_ASSERT(!ret.error);
+
+	return ret.value;
 }
