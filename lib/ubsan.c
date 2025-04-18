@@ -44,9 +44,10 @@ const char *report_ubsan_failure(struct pt_regs *regs, u32 check_type)
 	case ubsan_shift_out_of_bounds:
 		return "UBSAN: shift out of bounds";
 #endif
-#ifdef CONFIG_UBSAN_DIV_ZERO
+#if defined(CONFIG_UBSAN_DIV_ZERO) || defined(CONFIG_UBSAN_INTEGER_WRAP)
 	/*
-	 * SanitizerKind::IntegerDivideByZero emits
+	 * SanitizerKind::IntegerDivideByZero and
+	 * SanitizerKind::SignedIntegerOverflow emit
 	 * SanitizerHandler::DivremOverflow.
 	 */
 	case ubsan_divrem_overflow:
@@ -77,6 +78,19 @@ const char *report_ubsan_failure(struct pt_regs *regs, u32 check_type)
 		return "UBSAN: alignment assumption";
 	case ubsan_type_mismatch:
 		return "UBSAN: type mismatch";
+#endif
+#ifdef CONFIG_UBSAN_INTEGER_WRAP
+	/*
+	 * SanitizerKind::SignedIntegerOverflow emits
+	 * SanitizerHandler::AddOverflow, SanitizerHandler::SubOverflow,
+	 * or SanitizerHandler::MulOverflow.
+	 */
+	case ubsan_add_overflow:
+		return "UBSAN: integer addition overflow";
+	case ubsan_sub_overflow:
+		return "UBSAN: integer subtraction overflow";
+	case ubsan_mul_overflow:
+		return "UBSAN: integer multiplication overflow";
 #endif
 	default:
 		return "UBSAN: unrecognized failure code";
@@ -221,6 +235,98 @@ static void ubsan_epilogue(void)
 
 	check_panic_on_warn("UBSAN");
 }
+
+static void handle_overflow(struct overflow_data *data, void *lhs,
+			void *rhs, char op)
+{
+
+	struct type_descriptor *type = data->type;
+	char lhs_val_str[VALUE_LENGTH];
+	char rhs_val_str[VALUE_LENGTH];
+
+	if (suppress_report(&data->location))
+		return;
+
+	ubsan_prologue(&data->location, type_is_signed(type) ?
+			"signed-integer-overflow" :
+			"unsigned-integer-overflow");
+
+	val_to_string(lhs_val_str, sizeof(lhs_val_str), type, lhs);
+	val_to_string(rhs_val_str, sizeof(rhs_val_str), type, rhs);
+	pr_err("%s %c %s cannot be represented in type %s\n",
+		lhs_val_str,
+		op,
+		rhs_val_str,
+		type->type_name);
+
+	ubsan_epilogue();
+}
+
+void __ubsan_handle_add_overflow(void *data,
+				void *lhs, void *rhs)
+{
+
+	handle_overflow(data, lhs, rhs, '+');
+}
+EXPORT_SYMBOL(__ubsan_handle_add_overflow);
+
+void __ubsan_handle_sub_overflow(void *data,
+				void *lhs, void *rhs)
+{
+	handle_overflow(data, lhs, rhs, '-');
+}
+EXPORT_SYMBOL(__ubsan_handle_sub_overflow);
+
+void __ubsan_handle_mul_overflow(void *data,
+				void *lhs, void *rhs)
+{
+	handle_overflow(data, lhs, rhs, '*');
+}
+EXPORT_SYMBOL(__ubsan_handle_mul_overflow);
+
+void __ubsan_handle_negate_overflow(void *_data, void *old_val)
+{
+	struct overflow_data *data = _data;
+	char old_val_str[VALUE_LENGTH];
+
+	if (suppress_report(&data->location))
+		return;
+
+	ubsan_prologue(&data->location, "negation-overflow");
+
+	val_to_string(old_val_str, sizeof(old_val_str), data->type, old_val);
+
+	pr_err("negation of %s cannot be represented in type %s:\n",
+		old_val_str, data->type->type_name);
+
+	ubsan_epilogue();
+}
+EXPORT_SYMBOL(__ubsan_handle_negate_overflow);
+
+void __ubsan_handle_implicit_conversion(void *_data, void *from_val, void *to_val)
+{
+	struct implicit_conversion_data *data = _data;
+	char from_val_str[VALUE_LENGTH];
+	char to_val_str[VALUE_LENGTH];
+
+	if (suppress_report(&data->location))
+		return;
+
+	val_to_string(from_val_str, sizeof(from_val_str), data->from_type, from_val);
+	val_to_string(to_val_str, sizeof(to_val_str), data->to_type, to_val);
+
+	ubsan_prologue(&data->location, "implicit-conversion");
+
+	pr_err("cannot represent %s value %s during %s %s, truncated to %s\n",
+		data->from_type->type_name,
+		from_val_str,
+		type_check_kinds[data->type_check_kind],
+		data->to_type->type_name,
+		to_val_str);
+
+	ubsan_epilogue();
+}
+EXPORT_SYMBOL(__ubsan_handle_implicit_conversion);
 
 void __ubsan_handle_divrem_overflow(void *_data, void *lhs, void *rhs)
 {

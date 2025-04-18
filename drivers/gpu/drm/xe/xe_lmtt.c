@@ -7,7 +7,7 @@
 
 #include <drm/drm_managed.h>
 
-#include "regs/xe_sriov_regs.h"
+#include "regs/xe_gt_regs.h"
 
 #include "xe_assert.h"
 #include "xe_bo.h"
@@ -35,7 +35,7 @@
 
 static bool xe_has_multi_level_lmtt(struct xe_device *xe)
 {
-	return xe->info.platform == XE_PVC;
+	return GRAPHICS_VERx100(xe) >= 1260;
 }
 
 static struct xe_tile *lmtt_to_tile(struct xe_lmtt *lmtt)
@@ -70,8 +70,8 @@ static struct xe_lmtt_pt *lmtt_pt_alloc(struct xe_lmtt *lmtt, unsigned int level
 				  PAGE_ALIGN(lmtt->ops->lmtt_pte_size(level) *
 					     lmtt->ops->lmtt_pte_num(level)),
 				  ttm_bo_type_kernel,
-				  XE_BO_CREATE_VRAM_IF_DGFX(lmtt_to_tile(lmtt)) |
-				  XE_BO_CREATE_PINNED_BIT);
+				  XE_BO_FLAG_VRAM_IF_DGFX(lmtt_to_tile(lmtt)) |
+				  XE_BO_FLAG_NEEDS_64K | XE_BO_FLAG_PINNED);
 	if (IS_ERR(bo)) {
 		err = PTR_ERR(bo);
 		goto out_free_pt;
@@ -164,7 +164,7 @@ int xe_lmtt_init(struct xe_lmtt *lmtt)
 	lmtt_assert(lmtt, IS_SRIOV_PF(xe));
 	lmtt_assert(lmtt, !lmtt->ops);
 
-	if (!IS_DGFX(xe))
+	if (!xe_device_has_lmtt(xe))
 		return 0;
 
 	if (xe_has_multi_level_lmtt(xe))
@@ -193,7 +193,7 @@ static void lmtt_setup_dir_ptr(struct xe_lmtt *lmtt)
 	lmtt_assert(lmtt, xe_bo_is_vram(lmtt->pd->bo));
 	lmtt_assert(lmtt, IS_ALIGNED(offset, SZ_64K));
 
-	xe_mmio_write32(tile->primary_gt,
+	xe_mmio_write32(&tile->mmio,
 			GRAPHICS_VER(xe) >= 20 ? XE2_LMEM_CFG : LMEM_CFG,
 			LMEM_EN | REG_FIELD_PREP(LMTT_DIR_PTR, offset / SZ_64K));
 }
@@ -486,7 +486,7 @@ u64 xe_lmtt_estimate_pt_size(struct xe_lmtt *lmtt, u64 size)
 	u64 pt_size;
 
 	lmtt_assert(lmtt, IS_SRIOV_PF(lmtt_to_xe(lmtt)));
-	lmtt_assert(lmtt, IS_DGFX(lmtt_to_xe(lmtt)));
+	lmtt_assert(lmtt, xe_device_has_lmtt(lmtt_to_xe(lmtt)));
 	lmtt_assert(lmtt, lmtt->ops);
 
 	pt_size = PAGE_ALIGN(lmtt->ops->lmtt_pte_size(level) *

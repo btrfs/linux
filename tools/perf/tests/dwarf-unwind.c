@@ -37,7 +37,7 @@
 #define NO_TAIL_CALL_BARRIER __asm__ __volatile__("" : : : "memory");
 #endif
 
-static int mmap_handler(struct perf_tool *tool __maybe_unused,
+static int mmap_handler(const struct perf_tool *tool __maybe_unused,
 			union perf_event *event,
 			struct perf_sample *sample,
 			struct machine *machine)
@@ -115,8 +115,7 @@ NO_TAIL_CALL_ATTRIBUTE noinline int test_dwarf_unwind__thread(struct thread *thr
 	unsigned long cnt = 0;
 	int err = -1;
 
-	memset(&sample, 0, sizeof(sample));
-
+	perf_sample__init(&sample, /*all=*/true);
 	if (test__arch_unwind_sample(&sample, thread)) {
 		pr_debug("failed to get unwind sample\n");
 		goto out;
@@ -134,7 +133,8 @@ NO_TAIL_CALL_ATTRIBUTE noinline int test_dwarf_unwind__thread(struct thread *thr
 
  out:
 	zfree(&sample.user_stack.data);
-	zfree(&sample.user_regs.regs);
+	zfree(&sample.user_regs->regs);
+	perf_sample__exit(&sample);
 	return err;
 }
 

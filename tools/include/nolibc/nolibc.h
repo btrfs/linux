@@ -31,8 +31,7 @@
  *   - The third level is the libc call definition. It exposes the lower raw
  *     sys_<name>() calls in a way that looks like what a libc usually does,
  *     takes care of specific input values, and of setting errno upon error.
- *     There can be minor variations compared to standard libc calls. For
- *     example the open() call always takes 3 args here.
+ *     There can be minor variations compared to standard libc calls.
  *
  * The errno variable is declared static and unused. This way it can be
  * optimized away if not used. However this means that a program made of
@@ -74,7 +73,8 @@
  *            -I../nolibc -o hello hello.c -lgcc
  *
  * The available standard (but limited) include files are:
- *   ctype.h, errno.h, signal.h, stdarg.h, stdio.h, stdlib.h, string.h, time.h
+ *   ctype.h, errno.h, signal.h, stdarg.h, stdbool.h stdio.h, stdlib.h,
+ *   string.h, time.h
  *
  * In addition, the following ones are expected to be provided by the compiler:
  *   float.h, stddef.h
@@ -104,6 +104,7 @@
 #include "string.h"
 #include "time.h"
 #include "stackprotector.h"
+#include "dirent.h"
 
 /* Used by programs to avoid std includes */
 #define NOLIBC

@@ -41,6 +41,26 @@ enum {
 	Opt_cache_err
 };
 
+enum cifs_reparse_parm {
+	Opt_reparse_default,
+	Opt_reparse_none,
+	Opt_reparse_nfs,
+	Opt_reparse_wsl,
+	Opt_reparse_err
+};
+
+enum cifs_symlink_parm {
+	Opt_symlink_default,
+	Opt_symlink_none,
+	Opt_symlink_native,
+	Opt_symlink_unix,
+	Opt_symlink_mfsymlinks,
+	Opt_symlink_sfu,
+	Opt_symlink_nfs,
+	Opt_symlink_wsl,
+	Opt_symlink_err
+};
+
 enum cifs_sec_param {
 	Opt_sec_krb5,
 	Opt_sec_krb5i,
@@ -52,6 +72,12 @@ enum cifs_sec_param {
 	Opt_sec_none,
 
 	Opt_sec_err
+};
+
+enum cifs_upcall_target_param {
+	Opt_upcall_target_mount,
+	Opt_upcall_target_application,
+	Opt_upcall_target_err
 };
 
 enum cifs_param {
@@ -107,6 +133,9 @@ enum cifs_param {
 	Opt_multichannel,
 	Opt_compress,
 	Opt_witness,
+	Opt_is_upcall_target_mount,
+	Opt_is_upcall_target_application,
+	Opt_unicode,
 
 	/* Mount options which take numeric value */
 	Opt_backupuid,
@@ -138,16 +167,23 @@ enum cifs_param {
 	Opt_source,
 	Opt_user,
 	Opt_pass,
+	Opt_pass2,
 	Opt_ip,
 	Opt_domain,
 	Opt_srcaddr,
 	Opt_iocharset,
 	Opt_netbiosname,
 	Opt_servern,
+	Opt_nbsessinit,
 	Opt_ver,
 	Opt_vers,
 	Opt_sec,
 	Opt_cache,
+	Opt_reparse,
+	Opt_upcalltarget,
+	Opt_nativesocket,
+	Opt_symlink,
+	Opt_symlinkroot,
 
 	/* Mount options to be ignored */
 	Opt_ignore,
@@ -156,6 +192,8 @@ enum cifs_param {
 };
 
 struct smb3_fs_context {
+	bool forceuid_specified;
+	bool forcegid_specified;
 	bool uid_specified;
 	bool cruid_specified;
 	bool gid_specified;
@@ -169,6 +207,7 @@ struct smb3_fs_context {
 
 	char *username;
 	char *password;
+	char *password2;
 	char *domainname;
 	char *source;
 	char *server_hostname;
@@ -178,6 +217,7 @@ struct smb3_fs_context {
 	char *iocharset;  /* local code page for mapping to and from Unicode */
 	char source_rfc1001_name[RFC1001_NAME_LEN_WITH_NULL]; /* clnt nb name */
 	char target_rfc1001_name[RFC1001_NAME_LEN_WITH_NULL]; /* srvr nb name */
+	int rfc1001_sessinit;
 	kuid_t cred_uid;
 	kuid_t linux_uid;
 	kgid_t linux_gid;
@@ -186,6 +226,7 @@ struct smb3_fs_context {
 	umode_t file_mode;
 	umode_t dir_mode;
 	enum securityEnum sectype; /* sectype requested via mnt opts */
+	enum upcall_target_enum upcall_target; /* where to upcall for mount */
 	bool sign; /* was signing requested via mnt opts? */
 	bool ignore_signature:1;
 	bool retry:1;
@@ -241,6 +282,9 @@ struct smb3_fs_context {
 	bool use_client_guid:1;
 	/* reuse existing guid for multichannel */
 	u8 client_guid[SMB2_CLIENT_GUID_SIZE];
+	/* User-specified original r/wsize value */
+	unsigned int vol_rsize;
+	unsigned int vol_wsize;
 	unsigned int bsize;
 	unsigned int rasize;
 	unsigned int rsize;
@@ -248,7 +292,7 @@ struct smb3_fs_context {
 	unsigned int min_offload;
 	unsigned int retrans;
 	bool sockopt_tcp_nodelay:1;
-	/* attribute cache timemout for files and directories in jiffies */
+	/* attribute cache timeout for files and directories in jiffies */
 	unsigned long acregmax;
 	unsigned long acdirmax;
 	/* timeout for deferred close of files in jiffies */
@@ -265,15 +309,24 @@ struct smb3_fs_context {
 	unsigned int max_credits; /* smb3 max_credits 10 < credits < 60000 */
 	unsigned int max_channels;
 	unsigned int max_cached_dirs;
-	__u16 compression; /* compression algorithm 0xFFFF default 0=disabled */
+	bool compress; /* enable SMB2 messages (READ/WRITE) de/compression */
 	bool rootfs:1; /* if it's a SMB root file system */
 	bool witness:1; /* use witness protocol */
+	int unicode;
 	char *leaf_fullpath;
 	struct cifs_ses *dfs_root_ses;
 	bool dfs_automount:1; /* set for dfs automount only */
+	enum cifs_reparse_type reparse_type;
+	enum cifs_symlink_type symlink_type;
+	bool nonativesocket:1;
+	bool dfs_conn:1; /* set for dfs mounts */
+	char *dns_dom;
+	char *symlinkroot; /* top level directory for native SMB symlinks in absolute format */
 };
 
 extern const struct fs_parameter_spec smb3_fs_parameters[];
+
+extern enum cifs_symlink_type get_cifs_symlink_type(struct cifs_sb_info *cifs_sb);
 
 extern int smb3_init_fs_context(struct fs_context *fc);
 extern void smb3_cleanup_fs_context_contents(struct smb3_fs_context *ctx);
@@ -285,6 +338,7 @@ static inline struct smb3_fs_context *smb3_fc2context(const struct fs_context *f
 }
 
 extern int smb3_fs_context_dup(struct smb3_fs_context *new_ctx, struct smb3_fs_context *ctx);
+extern int smb3_sync_session_ctx_passwords(struct cifs_sb_info *cifs_sb, struct cifs_ses *ses);
 extern void smb3_update_mnt_flags(struct cifs_sb_info *cifs_sb);
 
 /*
@@ -294,5 +348,17 @@ extern void smb3_update_mnt_flags(struct cifs_sb_info *cifs_sb);
 #define SMB3_DEF_DCLOSETIMEO (1 * HZ) /* even 1 sec enough to help eg open/write/close/open/read */
 #define MAX_CACHED_FIDS 16
 extern char *cifs_sanitize_prepath(char *prepath, gfp_t gfp);
+
+extern struct mutex cifs_mount_mutex;
+
+static inline void cifs_mount_lock(void)
+{
+	mutex_lock(&cifs_mount_mutex);
+}
+
+static inline void cifs_mount_unlock(void)
+{
+	mutex_unlock(&cifs_mount_mutex);
+}
 
 #endif

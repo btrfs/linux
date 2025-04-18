@@ -341,10 +341,9 @@ static void hdmi4_bridge_mode_set(struct drm_bridge *bridge,
 }
 
 static void hdmi4_bridge_enable(struct drm_bridge *bridge,
-				struct drm_bridge_state *bridge_state)
+				struct drm_atomic_state *state)
 {
 	struct omap_hdmi *hdmi = drm_bridge_to_hdmi(bridge);
-	struct drm_atomic_state *state = bridge_state->base.state;
 	struct drm_connector_state *conn_state;
 	struct drm_connector *connector;
 	struct drm_crtc_state *crtc_state;
@@ -410,7 +409,7 @@ done:
 }
 
 static void hdmi4_bridge_disable(struct drm_bridge *bridge,
-				 struct drm_bridge_state *bridge_state)
+				 struct drm_atomic_state *state)
 {
 	struct omap_hdmi *hdmi = drm_bridge_to_hdmi(bridge);
 	unsigned long flags;
@@ -436,11 +435,11 @@ static void hdmi4_bridge_hpd_notify(struct drm_bridge *bridge,
 		hdmi4_cec_set_phys_addr(&hdmi->core, CEC_PHYS_ADDR_INVALID);
 }
 
-static struct edid *hdmi4_bridge_get_edid(struct drm_bridge *bridge,
-					  struct drm_connector *connector)
+static const struct drm_edid *hdmi4_bridge_edid_read(struct drm_bridge *bridge,
+						     struct drm_connector *connector)
 {
 	struct omap_hdmi *hdmi = drm_bridge_to_hdmi(bridge);
-	struct edid *edid = NULL;
+	const struct drm_edid *drm_edid = NULL;
 	unsigned int cec_addr;
 	bool need_enable;
 	int r;
@@ -461,13 +460,21 @@ static struct edid *hdmi4_bridge_get_edid(struct drm_bridge *bridge,
 	if (r)
 		goto done;
 
-	edid = drm_do_get_edid(connector, hdmi4_core_ddc_read, &hdmi->core);
+	drm_edid = drm_edid_read_custom(connector, hdmi4_core_ddc_read, &hdmi->core);
 
 done:
 	hdmi_runtime_put(hdmi);
 	mutex_unlock(&hdmi->lock);
 
-	if (edid && edid->extensions) {
+	if (drm_edid) {
+		/*
+		 * FIXME: The CEC physical address should be set using
+		 * hdmi4_cec_set_phys_addr(&hdmi->core,
+		 * connector->display_info.source_physical_address) from a path
+		 * that has read the EDID and called
+		 * drm_edid_connector_update().
+		 */
+		const struct edid *edid = drm_edid_raw(drm_edid);
 		unsigned int len = (edid->extensions + 1) * EDID_LENGTH;
 
 		cec_addr = cec_get_edid_phys_addr((u8 *)edid, len, NULL);
@@ -480,7 +487,7 @@ done:
 	if (need_enable)
 		hdmi4_core_disable(&hdmi->core);
 
-	return edid;
+	return drm_edid;
 }
 
 static const struct drm_bridge_funcs hdmi4_bridge_funcs = {
@@ -492,7 +499,7 @@ static const struct drm_bridge_funcs hdmi4_bridge_funcs = {
 	.atomic_enable = hdmi4_bridge_enable,
 	.atomic_disable = hdmi4_bridge_disable,
 	.hpd_notify = hdmi4_bridge_hpd_notify,
-	.get_edid = hdmi4_bridge_get_edid,
+	.edid_read = hdmi4_bridge_edid_read,
 };
 
 static void hdmi4_bridge_init(struct omap_hdmi *hdmi)
@@ -844,7 +851,7 @@ static const struct of_device_id hdmi_of_match[] = {
 
 struct platform_driver omapdss_hdmi4hw_driver = {
 	.probe		= hdmi4_probe,
-	.remove_new	= hdmi4_remove,
+	.remove		= hdmi4_remove,
 	.driver         = {
 		.name   = "omapdss_hdmi",
 		.of_match_table = hdmi_of_match,

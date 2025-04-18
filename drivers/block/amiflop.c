@@ -232,6 +232,7 @@ static DEFINE_MUTEX(amiflop_mutex);
 static unsigned long int fd_def_df0 = FD_DD_3;     /* default for df0 if it doesn't identify */
 
 module_param(fd_def_df0, ulong, 0);
+MODULE_DESCRIPTION("Amiga floppy driver");
 MODULE_LICENSE("GPL");
 
 /*
@@ -456,7 +457,7 @@ static int fd_motor_on(int nr)
 {
 	nr &= 3;
 
-	del_timer(motor_off_timer + nr);
+	timer_delete(motor_off_timer + nr);
 
 	if (!unit[nr].motor) {
 		unit[nr].motor = 1;
@@ -1392,7 +1393,7 @@ static int non_int_flush_track (unsigned long nr)
 
 	nr&=3;
 	writefromint = 0;
-	del_timer(&post_write_timer);
+	timer_delete(&post_write_timer);
 	get_fdc(nr);
 	if (!fd_motor_on(nr)) {
 		writepending = 0;
@@ -1434,7 +1435,7 @@ static int get_track(int drive, int track)
 	}
 
 	if (unit[drive].dirty == 1) {
-		del_timer (flush_track_timer + drive);
+		timer_delete(flush_track_timer + drive);
 		non_int_flush_track (drive);
 	}
 	errcnt = 0;
@@ -1590,7 +1591,7 @@ static int fd_locked_ioctl(struct block_device *bdev, blk_mode_t mode,
 	case FDDEFPRM:
 		return -EINVAL;
 	case FDFLUSH: /* unconditionally, even if not needed */
-		del_timer (flush_track_timer + drive);
+		timer_delete(flush_track_timer + drive);
 		non_int_flush_track(drive);
 		break;
 #ifdef RAW_IOCTL
@@ -1713,7 +1714,7 @@ static void floppy_release(struct gendisk *disk)
 
 	mutex_lock(&amiflop_mutex);
 	if (unit[drive].dirty == 1) {
-		del_timer (flush_track_timer + drive);
+		timer_delete(flush_track_timer + drive);
 		non_int_flush_track (drive);
 	}
   
@@ -1776,10 +1777,13 @@ static const struct blk_mq_ops amiflop_mq_ops = {
 
 static int fd_alloc_disk(int drive, int system)
 {
+	struct queue_limits lim = {
+		.features		= BLK_FEAT_ROTATIONAL,
+	};
 	struct gendisk *disk;
 	int err;
 
-	disk = blk_mq_alloc_disk(&unit[drive].tag_set, NULL);
+	disk = blk_mq_alloc_disk(&unit[drive].tag_set, &lim, NULL);
 	if (IS_ERR(disk))
 		return PTR_ERR(disk);
 
@@ -1815,7 +1819,6 @@ static int fd_alloc_drive(int drive)
 	unit[drive].tag_set.nr_maps = 1;
 	unit[drive].tag_set.queue_depth = 2;
 	unit[drive].tag_set.numa_node = NUMA_NO_NODE;
-	unit[drive].tag_set.flags = BLK_MQ_F_SHOULD_MERGE;
 	if (blk_mq_alloc_tag_set(&unit[drive].tag_set))
 		goto out_cleanup_trackbuf;
 

@@ -3,9 +3,13 @@
 #ifndef BTRFS_DELALLOC_SPACE_H
 #define BTRFS_DELALLOC_SPACE_H
 
-struct extent_changeset;
+#include <linux/types.h>
 
-int btrfs_alloc_data_chunk_ondemand(struct btrfs_inode *inode, u64 bytes);
+struct extent_changeset;
+struct btrfs_inode;
+struct btrfs_fs_info;
+
+int btrfs_alloc_data_chunk_ondemand(const struct btrfs_inode *inode, u64 bytes);
 int btrfs_check_data_free_space(struct btrfs_inode *inode,
 			struct extent_changeset **reserved, u64 start, u64 len,
 			bool noflush);
@@ -23,5 +27,6 @@ int btrfs_delalloc_reserve_space(struct btrfs_inode *inode,
 int btrfs_delalloc_reserve_metadata(struct btrfs_inode *inode, u64 num_bytes,
 				    u64 disk_num_bytes, bool noflush);
 void btrfs_delalloc_release_extents(struct btrfs_inode *inode, u64 num_bytes);
+void btrfs_delalloc_shrink_extents(struct btrfs_inode *inode, u64 reserved_len, u64 new_len);
 
 #endif /* BTRFS_DELALLOC_SPACE_H */

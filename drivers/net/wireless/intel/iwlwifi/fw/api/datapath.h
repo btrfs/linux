@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause */
 /*
+ * Copyright (C) 2024-2025 Intel Corporation
  * Copyright (C) 2012-2014, 2018-2022 Intel Corporation
  * Copyright (C) 2013-2015 Intel Mobile Communications GmbH
  * Copyright (C) 2016-2017 Intel Deutschland GmbH
@@ -90,6 +91,18 @@ enum iwl_data_path_subcmd_ids {
 	SEC_KEY_CMD = 0x18,
 
 	/**
+	 * @OMI_SEND_STATUS_NOTIF: notification after OMI was sent
+	 *	uses &struct iwl_omi_send_status_notif
+	 */
+	OMI_SEND_STATUS_NOTIF = 0xF2,
+
+	/**
+	 * @ESR_MODE_NOTIF: notification to recommend/force a wanted esr mode,
+	 *	uses &struct iwl_esr_mode_notif
+	 */
+	ESR_MODE_NOTIF = 0xF3,
+
+	/**
 	 * @MONITOR_NOTIF: Datapath monitoring notification, using
 	 *	&struct iwl_datapath_monitor_notif
 	 */
@@ -101,7 +114,7 @@ enum iwl_data_path_subcmd_ids {
 	RX_NO_DATA_NOTIF = 0xF5,
 
 	/**
-	 * @THERMAL_DUAL_CHAIN_DISABLE_REQ: firmware request for SMPS mode,
+	 * @THERMAL_DUAL_CHAIN_REQUEST: firmware request for SMPS mode,
 	 *	&struct iwl_thermal_dual_chain_request
 	 */
 	THERMAL_DUAL_CHAIN_REQUEST = 0xF6,
@@ -224,28 +237,33 @@ struct iwl_synced_time_rsp {
 #define PTP_CTX_MAX_DATA_SIZE   128
 
 /**
- * struct iwl_time_msmt_ptp_ctx - Vendor specific information element
+ * struct iwl_time_msmt_ptp_ctx - Vendor specific element
  * to allow a space for flexibility for the userspace App
  *
- * @element_id: element id of vendor specific ie
- * @length: length of vendor specific ie
- * @reserved: for alignment
- * @data: vendor specific data blob
+ * @ftm: FTM specific vendor element
+ * @ftm.element_id: element id of vendor specific ie
+ * @ftm.length: length of vendor specific ie
+ * @ftm.reserved: for alignment
+ * @ftm.data: vendor specific data blob
+ * @tm: TM specific vendor element
+ * @tm.element_id: element id of vendor specific ie
+ * @tm.length: length of vendor specific ie
+ * @tm.data: vendor specific data blob
  */
 struct iwl_time_msmt_ptp_ctx {
-	/* Differentiate between FTM and TM specific Vendor IEs */
+	/* Differentiate between FTM and TM specific Vendor elements */
 	union {
 		struct {
 			u8 element_id;
 			u8 length;
 			__le16 reserved;
 			u8 data[PTP_CTX_MAX_DATA_SIZE];
-		} ftm; /* FTM specific vendor IE */
+		} ftm;
 		struct {
 			u8 element_id;
 			u8 length;
 			u8 data[PTP_CTX_MAX_DATA_SIZE];
-		} tm; /* TM specific vendor IE */
+		} tm;
 	};
 } __packed /* PTP_CTX_VER_1 */;
 
@@ -379,7 +397,7 @@ enum iwl_datapath_monitor_notif_type {
 
 struct iwl_datapath_monitor_notif {
 	__le32 type;
-	u8 mac_id;
+	u8 link_id;
 	u8 reserved[3];
 } __packed; /* MONITOR_NTF_API_S_VER_1 */
 
@@ -524,6 +542,10 @@ struct iwl_rx_baid_cfg_cmd_remove {
 /**
  * struct iwl_rx_baid_cfg_cmd - BAID allocation/config command
  * @action: the action, from &enum iwl_rx_baid_action
+ * @alloc: allocation data
+ * @modify: modify data
+ * @remove_v1: remove data (version 1)
+ * @remove: remove data
  */
 struct iwl_rx_baid_cfg_cmd {
 	__le32 action;
@@ -558,6 +580,7 @@ enum iwl_scd_queue_cfg_operation {
 /**
  * struct iwl_scd_queue_cfg_cmd - scheduler queue allocation command
  * @operation: the operation, see &enum iwl_scd_queue_cfg_operation
+ * @u: union depending on command usage
  * @u.add.sta_mask: station mask
  * @u.add.tid: TID
  * @u.add.reserved: reserved
@@ -627,6 +650,7 @@ enum iwl_sec_key_flags {
 /**
  * struct iwl_sec_key_cmd - security key command
  * @action: action from &enum iwl_ctxt_action
+ * @u: union depending on command type
  * @u.add.sta_mask: station mask for the new key
  * @u.add.key_id: key ID (0-7) for the new key
  * @u.add.key_flags: key flags per &enum iwl_sec_key_flags
@@ -669,5 +693,14 @@ struct iwl_sec_key_cmd {
 		} __packed remove; /* SEC_KEY_REMOVE_CMD_API_S_VER_1 */
 	} __packed u; /* SEC_KEY_OPERATION_API_U_VER_1 */
 } __packed; /* SEC_KEY_CMD_API_S_VER_1 */
+
+/**
+ * struct iwl_omi_send_status_notif - OMI status notification
+ * @success: indicates that the OMI was sent successfully
+ *	(currently always set)
+ */
+struct iwl_omi_send_status_notif {
+	__le32 success;
+} __packed; /* OMI_SEND_STATUS_NTFY_API_S_VER_1 */
 
 #endif /* __iwl_fw_api_datapath_h__ */

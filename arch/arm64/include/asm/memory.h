@@ -30,8 +30,8 @@
  * keep a constant PAGE_OFFSET and "fallback" to using the higher end
  * of the VMEMMAP where 52-bit support is not available in hardware.
  */
-#define VMEMMAP_SHIFT	(PAGE_SHIFT - STRUCT_PAGE_MAX_SHIFT)
-#define VMEMMAP_SIZE	((_PAGE_END(VA_BITS_MIN) - PAGE_OFFSET) >> VMEMMAP_SHIFT)
+#define VMEMMAP_RANGE	(_PAGE_END(VA_BITS_MIN) - PAGE_OFFSET)
+#define VMEMMAP_SIZE	((VMEMMAP_RANGE >> PAGE_SHIFT) * sizeof(struct page))
 
 /*
  * PAGE_OFFSET - the virtual address of the start of the linear map, at the
@@ -47,14 +47,18 @@
 #define MODULES_END		(MODULES_VADDR + MODULES_VSIZE)
 #define MODULES_VADDR		(_PAGE_END(VA_BITS_MIN))
 #define MODULES_VSIZE		(SZ_2G)
-#define VMEMMAP_START		(-(UL(1) << (VA_BITS - VMEMMAP_SHIFT)))
-#define VMEMMAP_END		(VMEMMAP_START + VMEMMAP_SIZE)
-#define PCI_IO_END		(VMEMMAP_START - SZ_8M)
-#define PCI_IO_START		(PCI_IO_END - PCI_IO_SIZE)
-#define FIXADDR_TOP		(VMEMMAP_START - SZ_32M)
+#define VMEMMAP_START		(VMEMMAP_END - VMEMMAP_SIZE)
+#define VMEMMAP_END		(-UL(SZ_1G))
+#define PCI_IO_START		(VMEMMAP_END + SZ_8M)
+#define PCI_IO_END		(PCI_IO_START + PCI_IO_SIZE)
+#define FIXADDR_TOP		(-UL(SZ_8M))
 
 #if VA_BITS > 48
+#ifdef CONFIG_ARM64_16K_PAGES
+#define VA_BITS_MIN		(47)
+#else
 #define VA_BITS_MIN		(48)
+#endif
 #else
 #define VA_BITS_MIN		(VA_BITS)
 #endif
@@ -106,6 +110,8 @@
 #define PAGE_END		(_PAGE_END(VA_BITS_MIN))
 #endif /* CONFIG_KASAN */
 
+#define DIRECT_MAP_PHYSMEM_END	__pa(PAGE_END - 1)
+
 #define MIN_THREAD_SHIFT	(14 + KASAN_THREAD_SHIFT)
 
 /*
@@ -139,13 +145,16 @@
 
 #define OVERFLOW_STACK_SIZE	SZ_4K
 
+#define NVHE_STACK_SHIFT       PAGE_SHIFT
+#define NVHE_STACK_SIZE        (UL(1) << NVHE_STACK_SHIFT)
+
 /*
  * With the minimum frame size of [x29, x30], exactly half the combined
  * sizes of the hyp and overflow stacks is the maximum size needed to
  * save the unwinded stacktrace; plus an additional entry to delimit the
  * end.
  */
-#define NVHE_STACKTRACE_SIZE	((OVERFLOW_STACK_SIZE + PAGE_SIZE) / 2 + sizeof(long))
+#define NVHE_STACKTRACE_SIZE	((OVERFLOW_STACK_SIZE + NVHE_STACK_SIZE) / 2 + sizeof(long))
 
 /*
  * Alignment of kernel segments (e.g. .text, .data).
@@ -173,6 +182,7 @@
  * Memory types for Stage-2 translation
  */
 #define MT_S2_NORMAL		0xf
+#define MT_S2_NORMAL_NC		0x5
 #define MT_S2_DEVICE_nGnRE	0x1
 
 /*
@@ -180,6 +190,7 @@
  * Stage-2 enforces Normal-WB and Device-nGnRE
  */
 #define MT_S2_FWB_NORMAL	6
+#define MT_S2_FWB_NORMAL_NC	5
 #define MT_S2_FWB_DEVICE_nGnRE	1
 
 #ifdef CONFIG_ARM64_4K_PAGES
@@ -209,9 +220,20 @@
 #include <asm/boot.h>
 #include <asm/bug.h>
 #include <asm/sections.h>
+#include <asm/sysreg.h>
+
+static inline u64 __pure read_tcr(void)
+{
+	u64  tcr;
+
+	// read_sysreg() uses asm volatile, so avoid it here
+	asm("mrs %0, tcr_el1" : "=r"(tcr));
+	return tcr;
+}
 
 #if VA_BITS > 48
-extern u64			vabits_actual;
+// For reasons of #include hell, we can't use TCR_T1SZ_OFFSET/TCR_T1SZ_MASK here
+#define vabits_actual		(64 - ((read_tcr() >> 16) & 63))
 #else
 #define vabits_actual		((u64)VA_BITS)
 #endif
@@ -333,12 +355,6 @@ extern phys_addr_t __phys_addr_symbol(unsigned long x);
 
 #define __phys_to_virt(x)	((unsigned long)((x) - PHYS_OFFSET) | PAGE_OFFSET)
 #define __phys_to_kimg(x)	((unsigned long)((x) + kimage_voffset))
-
-/*
- * Convert a page to/from a physical address
- */
-#define page_to_phys(page)	(__pfn_to_phys(page_to_pfn(page)))
-#define phys_to_page(phys)	(pfn_to_page(__phys_to_pfn(phys)))
 
 /*
  * Note: Drivers should NOT use these.  They are the wrong

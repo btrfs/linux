@@ -947,7 +947,7 @@ static int pcnet_close(struct net_device *dev)
 
     link->open--;
     netif_stop_queue(dev);
-    del_timer_sync(&info->watchdog);
+    timer_delete_sync(&info->watchdog);
 
     return 0;
 } /* pcnet_close */
@@ -994,7 +994,7 @@ static int set_config(struct net_device *dev, struct ifmap *map)
 	    return -EOPNOTSUPP;
 	else if ((map->port < 1) || (map->port > 2))
 	    return -EINVAL;
-	dev->if_port = map->port;
+	WRITE_ONCE(dev->if_port, map->port);
 	netdev_info(dev, "switched to %s port\n", if_names[dev->if_port]);
 	NS8390_init(dev, 1);
     }

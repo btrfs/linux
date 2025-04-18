@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <linux/string.h>
@@ -23,6 +24,9 @@ static size_t callchain__fprintf_left_margin(FILE *fp, int left_margin)
 {
 	int i;
 	int ret = fprintf(fp, "            ");
+
+	if (left_margin > USHRT_MAX)
+		left_margin = USHRT_MAX;
 
 	for (i = 0; i < left_margin; i++)
 		ret += fprintf(fp, " ");
@@ -897,8 +901,7 @@ out:
 	return ret;
 }
 
-size_t events_stats__fprintf(struct events_stats *stats, FILE *fp,
-			     bool skip_empty)
+size_t events_stats__fprintf(struct events_stats *stats, FILE *fp)
 {
 	int i;
 	size_t ret = 0;
@@ -910,15 +913,15 @@ size_t events_stats__fprintf(struct events_stats *stats, FILE *fp,
 		name = perf_event__name(i);
 		if (!strcmp(name, "UNKNOWN"))
 			continue;
-		if (skip_empty && !stats->nr_events[i])
+		if (symbol_conf.skip_empty && !stats->nr_events[i])
 			continue;
 
 		if (i && total) {
-			ret += fprintf(fp, "%16s events: %10d  (%4.1f%%)\n",
+			ret += fprintf(fp, "%20s events: %10d  (%4.1f%%)\n",
 				       name, stats->nr_events[i],
 				       100.0 * stats->nr_events[i] / total);
 		} else {
-			ret += fprintf(fp, "%16s events: %10d\n",
+			ret += fprintf(fp, "%20s events: %10d\n",
 				       name, stats->nr_events[i]);
 		}
 	}

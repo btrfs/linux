@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * Copyright (C) Fuzhou Rockchip Electronics Co.Ltd
+ * Copyright (C) Rockchip Electronics Co., Ltd.
  *    Zheng Yang <zhengyang@rock-chips.com>
  */
 
@@ -466,25 +466,23 @@ rk3066_hdmi_connector_detect(struct drm_connector *connector, bool force)
 static int rk3066_hdmi_connector_get_modes(struct drm_connector *connector)
 {
 	struct rk3066_hdmi *hdmi = connector_to_rk3066_hdmi(connector);
-	struct edid *edid;
+	const struct drm_edid *drm_edid;
 	int ret = 0;
 
 	if (!hdmi->ddc)
 		return 0;
 
-	edid = drm_get_edid(connector, hdmi->ddc);
-	if (edid) {
-		drm_connector_update_edid_property(connector, edid);
-		ret = drm_add_edid_modes(connector, edid);
-		kfree(edid);
-	}
+	drm_edid = drm_edid_read_ddc(connector, hdmi->ddc);
+	drm_edid_connector_update(connector, drm_edid);
+	ret = drm_edid_connector_add_modes(connector);
+	drm_edid_free(drm_edid);
 
 	return ret;
 }
 
 static enum drm_mode_status
 rk3066_hdmi_connector_mode_valid(struct drm_connector *connector,
-				 struct drm_display_mode *mode)
+				 const struct drm_display_mode *mode)
 {
 	u32 vic = drm_match_cea_mode(mode);
 
@@ -860,7 +858,7 @@ MODULE_DEVICE_TABLE(of, rk3066_hdmi_dt_ids);
 
 struct platform_driver rk3066_hdmi_driver = {
 	.probe  = rk3066_hdmi_probe,
-	.remove_new = rk3066_hdmi_remove,
+	.remove = rk3066_hdmi_remove,
 	.driver = {
 		.name = "rockchip-rk3066-hdmi",
 		.of_match_table = rk3066_hdmi_dt_ids,

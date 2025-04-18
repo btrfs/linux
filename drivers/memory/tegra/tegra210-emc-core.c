@@ -583,7 +583,7 @@ static void tegra210_emc_training_start(struct tegra210_emc *emc)
 
 static void tegra210_emc_training_stop(struct tegra210_emc *emc)
 {
-	del_timer(&emc->training);
+	timer_delete(&emc->training);
 }
 
 static unsigned int tegra210_emc_get_temperature(struct tegra210_emc *emc)
@@ -666,7 +666,7 @@ reset:
 static void tegra210_emc_poll_refresh_stop(struct tegra210_emc *emc)
 {
 	atomic_set(&emc->refresh_poll, 0);
-	del_timer_sync(&emc->refresh_timer);
+	timer_delete_sync(&emc->refresh_timer);
 }
 
 static void tegra210_emc_poll_refresh_start(struct tegra210_emc *emc)
@@ -2051,7 +2051,7 @@ static struct platform_driver tegra210_emc_driver = {
 		.pm = &tegra210_emc_pm_ops,
 	},
 	.probe = tegra210_emc_probe,
-	.remove_new = tegra210_emc_remove,
+	.remove = tegra210_emc_remove,
 };
 
 module_platform_driver(tegra210_emc_driver);

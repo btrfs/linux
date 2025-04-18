@@ -5,8 +5,8 @@
 #include "chardev.h"
 #include "dirent.h"
 #include "fs.h"
-#include "fs-common.h"
 #include "fs-ioctl.h"
+#include "namei.h"
 #include "quota.h"
 
 #include <linux/compat.h>
@@ -54,6 +54,32 @@ static int bch2_inode_flags_set(struct btree_trans *trans,
 	    (newflags & (BCH_INODE_nodump|BCH_INODE_noatime)) != newflags)
 		return -EINVAL;
 
+	if ((newflags ^ oldflags) & BCH_INODE_casefolded) {
+#ifdef CONFIG_UNICODE
+		int ret = 0;
+		/* Not supported on individual files. */
+		if (!S_ISDIR(bi->bi_mode))
+			return -EOPNOTSUPP;
+
+		/*
+		 * Make sure the dir is empty, as otherwise we'd need to
+		 * rehash everything and update the dirent keys.
+		 */
+		ret = bch2_empty_dir_trans(trans, inode_inum(inode));
+		if (ret < 0)
+			return ret;
+
+		ret = bch2_request_incompat_feature(c, bcachefs_metadata_version_casefolding);
+		if (ret)
+			return ret;
+
+		bch2_check_set_feature(c, BCH_FEATURE_casefolding);
+#else
+		printk(KERN_ERR "Cannot use casefolding on a kernel without CONFIG_UNICODE\n");
+		return -EOPNOTSUPP;
+#endif
+	}
+
 	if (s->set_projinherit) {
 		bi->bi_fields_set &= ~(1 << Inode_opt_project);
 		bi->bi_fields_set |= ((int) s->projinherit << Inode_opt_project);
@@ -100,7 +126,7 @@ static int bch2_ioc_setflags(struct bch_fs *c,
 	}
 
 	mutex_lock(&inode->ei_update_lock);
-	ret   = bch2_subvol_is_ro(c, inode->ei_subvol) ?:
+	ret   = bch2_subvol_is_ro(c, inode->ei_inum.subvol) ?:
 		bch2_write_inode(c, inode, bch2_inode_flags_set, &s,
 			       ATTR_CTIME);
 	mutex_unlock(&inode->ei_update_lock);
@@ -184,7 +210,7 @@ static int bch2_ioc_fssetxattr(struct bch_fs *c,
 	}
 
 	mutex_lock(&inode->ei_update_lock);
-	ret   = bch2_subvol_is_ro(c, inode->ei_subvol) ?:
+	ret   = bch2_subvol_is_ro(c, inode->ei_inum.subvol) ?:
 		bch2_set_projid(c, inode, fa.fsx_projid) ?:
 		bch2_write_inode(c, inode, fssetxattr_inode_update_fn, &s,
 			       ATTR_CTIME);
@@ -218,7 +244,7 @@ static int bch2_ioc_reinherit_attrs(struct bch_fs *c,
 	int ret = 0;
 	subvol_inum inum;
 
-	kname = kmalloc(BCH_NAME_MAX + 1, GFP_KERNEL);
+	kname = kmalloc(BCH_NAME_MAX, GFP_KERNEL);
 	if (!kname)
 		return -ENOMEM;
 
@@ -272,6 +298,69 @@ err1:
 	return ret;
 }
 
+static int bch2_ioc_getversion(struct bch_inode_info *inode, u32 __user *arg)
+{
+	return put_user(inode->v.i_generation, arg);
+}
+
+static int bch2_ioc_getlabel(struct bch_fs *c, char __user *user_label)
+{
+	int ret;
+	size_t len;
+	char label[BCH_SB_LABEL_SIZE];
+
+	BUILD_BUG_ON(BCH_SB_LABEL_SIZE >= FSLABEL_MAX);
+
+	mutex_lock(&c->sb_lock);
+	memcpy(label, c->disk_sb.sb->label, BCH_SB_LABEL_SIZE);
+	mutex_unlock(&c->sb_lock);
+
+	len = strnlen(label, BCH_SB_LABEL_SIZE);
+	if (len == BCH_SB_LABEL_SIZE) {
+		bch_warn(c,
+			"label is too long, return the first %zu bytes",
+			--len);
+	}
+
+	ret = copy_to_user(user_label, label, len);
+
+	return ret ? -EFAULT : 0;
+}
+
+static int bch2_ioc_setlabel(struct bch_fs *c,
+			     struct file *file,
+			     struct bch_inode_info *inode,
+			     const char __user *user_label)
+{
+	int ret;
+	char label[BCH_SB_LABEL_SIZE];
+
+	if (!capable(CAP_SYS_ADMIN))
+		return -EPERM;
+
+	if (copy_from_user(label, user_label, sizeof(label)))
+		return -EFAULT;
+
+	if (strnlen(label, BCH_SB_LABEL_SIZE) == BCH_SB_LABEL_SIZE) {
+		bch_err(c,
+			"unable to set label with more than %d bytes",
+			BCH_SB_LABEL_SIZE - 1);
+		return -EINVAL;
+	}
+
+	ret = mnt_want_write_file(file);
+	if (ret)
+		return ret;
+
+	mutex_lock(&c->sb_lock);
+	strscpy(c->disk_sb.sb->label, label, BCH_SB_LABEL_SIZE);
+	ret = bch2_write_super(c);
+	mutex_unlock(&c->sb_lock);
+
+	mnt_drop_write_file(file);
+	return ret;
+}
+
 static int bch2_ioc_goingdown(struct bch_fs *c, u32 __user *arg)
 {
 	u32 flags;
@@ -308,8 +397,8 @@ static int bch2_ioc_goingdown(struct bch_fs *c, u32 __user *arg)
 	return ret;
 }
 
-static long __bch2_ioctl_subvolume_create(struct bch_fs *c, struct file *filp,
-					  struct bch_ioctl_subvolume arg)
+static long bch2_ioctl_subvolume_create(struct bch_fs *c, struct file *filp,
+					struct bch_ioctl_subvolume arg)
 {
 	struct inode *dir;
 	struct bch_inode_info *inode;
@@ -343,7 +432,7 @@ static long __bch2_ioctl_subvolume_create(struct bch_fs *c, struct file *filp,
 		sync_inodes_sb(c->vfs_sb);
 		up_read(&c->vfs_sb->s_umount);
 	}
-retry:
+
 	if (arg.src_ptr) {
 		error = user_path_at(arg.dirfd,
 				(const char __user *)(unsigned long)arg.src_ptr,
@@ -373,7 +462,7 @@ retry:
 	}
 
 	if (dst_dentry->d_inode) {
-		error = -EEXIST;
+		error = -BCH_ERR_EEXIST_subvolume_create;
 		goto err3;
 	}
 
@@ -406,9 +495,12 @@ retry:
 	    !arg.src_ptr)
 		snapshot_src.subvol = inode_inum(to_bch_ei(dir)).subvol;
 
+	down_write(&c->snapshot_create_lock);
 	inode = __bch2_create(file_mnt_idmap(filp), to_bch_ei(dir),
 			      dst_dentry, arg.mode|S_IFDIR,
 			      0, snapshot_src, create_flags);
+	up_write(&c->snapshot_create_lock);
+
 	error = PTR_ERR_OR_ZERO(inode);
 	if (error)
 		goto err3;
@@ -420,23 +512,8 @@ err3:
 err2:
 	if (arg.src_ptr)
 		path_put(&src_path);
-
-	if (retry_estale(error, lookup_flags)) {
-		lookup_flags |= LOOKUP_REVAL;
-		goto retry;
-	}
 err1:
 	return error;
-}
-
-static long bch2_ioctl_subvolume_create(struct bch_fs *c, struct file *filp,
-					struct bch_ioctl_subvolume arg)
-{
-	down_write(&c->snapshot_create_lock);
-	long ret = __bch2_ioctl_subvolume_create(c, filp, arg);
-	up_write(&c->snapshot_create_lock);
-
-	return ret;
 }
 
 static long bch2_ioctl_subvolume_destroy(struct bch_fs *c, struct file *filp,
@@ -455,22 +532,20 @@ static long bch2_ioctl_subvolume_destroy(struct bch_fs *c, struct file *filp,
 	if (IS_ERR(victim))
 		return PTR_ERR(victim);
 
+	dir = d_inode(path.dentry);
 	if (victim->d_sb->s_fs_info != c) {
 		ret = -EXDEV;
 		goto err;
 	}
-	if (!d_is_positive(victim)) {
-		ret = -ENOENT;
-		goto err;
-	}
-	dir = d_inode(path.dentry);
-	ret = __bch2_unlink(dir, victim, true);
+
+	ret =   inode_permission(file_mnt_idmap(filp), d_inode(victim), MAY_WRITE) ?:
+		__bch2_unlink(dir, victim, true);
 	if (!ret) {
 		fsnotify_rmdir(dir, victim);
-		d_delete(victim);
+		d_invalidate(victim);
 	}
-	inode_unlock(dir);
 err:
+	inode_unlock(dir);
 	dput(victim);
 	path_put(&path);
 	return ret;
@@ -506,11 +581,19 @@ long bch2_fs_file_ioctl(struct file *file, unsigned cmd, unsigned long arg)
 		break;
 
 	case FS_IOC_GETVERSION:
-		ret = -ENOTTY;
+		ret = bch2_ioc_getversion(inode, (u32 __user *) arg);
 		break;
 
 	case FS_IOC_SETVERSION:
 		ret = -ENOTTY;
+		break;
+
+	case FS_IOC_GETFSLABEL:
+		ret = bch2_ioc_getlabel(c, (void __user *) arg);
+		break;
+
+	case FS_IOC_SETFSLABEL:
+		ret = bch2_ioc_setlabel(c, file, inode, (const void __user *) arg);
 		break;
 
 	case FS_IOC_GOINGDOWN:
@@ -548,11 +631,17 @@ long bch2_compat_fs_ioctl(struct file *file, unsigned cmd, unsigned long arg)
 {
 	/* These are just misnamed, they actually get/put from/to user an int */
 	switch (cmd) {
-	case FS_IOC_GETFLAGS:
+	case FS_IOC32_GETFLAGS:
 		cmd = FS_IOC_GETFLAGS;
 		break;
 	case FS_IOC32_SETFLAGS:
 		cmd = FS_IOC_SETFLAGS;
+		break;
+	case FS_IOC32_GETVERSION:
+		cmd = FS_IOC_GETVERSION;
+		break;
+	case FS_IOC_GETFSLABEL:
+	case FS_IOC_SETFSLABEL:
 		break;
 	default:
 		return -ENOIOCTLCMD;

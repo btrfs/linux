@@ -97,6 +97,9 @@ struct drm_gem_shmem_object {
 	container_of(obj, struct drm_gem_shmem_object, base)
 
 struct drm_gem_shmem_object *drm_gem_shmem_create(struct drm_device *dev, size_t size);
+struct drm_gem_shmem_object *drm_gem_shmem_create_with_mnt(struct drm_device *dev,
+							   size_t size,
+							   struct vfsmount *gemfs);
 void drm_gem_shmem_free(struct drm_gem_shmem_object *shmem);
 
 void drm_gem_shmem_put_pages(struct drm_gem_shmem_object *shmem);
@@ -108,13 +111,16 @@ void drm_gem_shmem_vunmap(struct drm_gem_shmem_object *shmem,
 			  struct iosys_map *map);
 int drm_gem_shmem_mmap(struct drm_gem_shmem_object *shmem, struct vm_area_struct *vma);
 
+int drm_gem_shmem_pin_locked(struct drm_gem_shmem_object *shmem);
+void drm_gem_shmem_unpin_locked(struct drm_gem_shmem_object *shmem);
+
 int drm_gem_shmem_madvise(struct drm_gem_shmem_object *shmem, int madv);
 
 static inline bool drm_gem_shmem_is_purgeable(struct drm_gem_shmem_object *shmem)
 {
 	return (shmem->madv > 0) &&
 		!shmem->vmap_use_count && shmem->sgt &&
-		!shmem->base.dma_buf && !shmem->base.import_attach;
+		!shmem->base.dma_buf && !drm_gem_is_imported(&shmem->base);
 }
 
 void drm_gem_shmem_purge(struct drm_gem_shmem_object *shmem);
@@ -173,7 +179,7 @@ static inline int drm_gem_shmem_object_pin(struct drm_gem_object *obj)
 {
 	struct drm_gem_shmem_object *shmem = to_drm_gem_shmem_obj(obj);
 
-	return drm_gem_shmem_pin(shmem);
+	return drm_gem_shmem_pin_locked(shmem);
 }
 
 /**
@@ -187,7 +193,7 @@ static inline void drm_gem_shmem_object_unpin(struct drm_gem_object *obj)
 {
 	struct drm_gem_shmem_object *shmem = to_drm_gem_shmem_obj(obj);
 
-	drm_gem_shmem_unpin(shmem);
+	drm_gem_shmem_unpin_locked(shmem);
 }
 
 /**

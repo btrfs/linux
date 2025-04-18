@@ -163,7 +163,7 @@ static int tx_params[MAX_UNITS] = {-1, -1, -1, -1, -1, -1, -1, -1};
 #include <linux/uaccess.h>
 #include <asm/processor.h>	/* Processor type for cache alignment. */
 #include <asm/io.h>
-#include <asm/unaligned.h>
+#include <linux/unaligned.h>
 #include <asm/cache.h>
 
 static const char version[] =
@@ -1712,7 +1712,7 @@ static int hamachi_close(struct net_device *dev)
 
 	free_irq(hmp->pci_dev->irq, dev);
 
-	del_timer_sync(&hmp->timer);
+	timer_delete_sync(&hmp->timer);
 
 	/* Free all the skbuffs in the Rx queue. */
 	for (i = 0; i < RX_RING_SIZE; i++) {

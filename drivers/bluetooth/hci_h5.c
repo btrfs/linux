@@ -113,6 +113,7 @@ struct h5_vnd {
 	int (*suspend)(struct h5 *h5);
 	int (*resume)(struct h5 *h5);
 	const struct acpi_gpio_mapping *acpi_gpio_map;
+	int sizeof_priv;
 };
 
 struct h5_device_data {
@@ -196,7 +197,7 @@ static void h5_peer_reset(struct hci_uart *hu)
 
 	h5->state = H5_UNINITIALIZED;
 
-	del_timer(&h5->timer);
+	timer_delete(&h5->timer);
 
 	skb_queue_purge(&h5->rel);
 	skb_queue_purge(&h5->unrel);
@@ -253,7 +254,7 @@ static int h5_close(struct hci_uart *hu)
 {
 	struct h5 *h5 = hu->priv;
 
-	del_timer_sync(&h5->timer);
+	timer_delete_sync(&h5->timer);
 
 	skb_queue_purge(&h5->unack);
 	skb_queue_purge(&h5->rel);
@@ -317,7 +318,7 @@ static void h5_pkt_cull(struct h5 *h5)
 	}
 
 	if (skb_queue_empty(&h5->unack))
-		del_timer(&h5->timer);
+		timer_delete(&h5->timer);
 
 unlock:
 	spin_unlock_irqrestore(&h5->unack.lock, flags);
@@ -863,7 +864,8 @@ static int h5_serdev_probe(struct serdev_device *serdev)
 	if (IS_ERR(h5->device_wake_gpio))
 		return PTR_ERR(h5->device_wake_gpio);
 
-	return hci_uart_register_device(&h5->serdev_hu, &h5p);
+	return hci_uart_register_device_priv(&h5->serdev_hu, &h5p,
+					     h5->vnd->sizeof_priv);
 }
 
 static void h5_serdev_remove(struct serdev_device *serdev)
@@ -1070,6 +1072,7 @@ static struct h5_vnd rtl_vnd = {
 	.suspend	= h5_btrtl_suspend,
 	.resume		= h5_btrtl_resume,
 	.acpi_gpio_map	= acpi_btrtl_gpios,
+	.sizeof_priv    = sizeof(struct btrealtek_data),
 };
 
 static const struct h5_device_data h5_data_rtl8822cs = {

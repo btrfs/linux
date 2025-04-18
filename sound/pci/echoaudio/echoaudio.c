@@ -34,7 +34,6 @@ static int get_firmware(const struct firmware **fw_entry,
 	int err;
 	char name[30];
 
-#ifdef CONFIG_PM_SLEEP
 	if (chip->fw_cache[fw_index]) {
 		dev_dbg(chip->card->dev,
 			"firmware requested: %s is cached\n",
@@ -42,7 +41,6 @@ static int get_firmware(const struct firmware **fw_entry,
 		*fw_entry = chip->fw_cache[fw_index];
 		return 0;
 	}
-#endif
 
 	dev_dbg(chip->card->dev,
 		"firmware requested: %s\n", card_fw[fw_index].data);
@@ -51,10 +49,8 @@ static int get_firmware(const struct firmware **fw_entry,
 	if (err < 0)
 		dev_err(chip->card->dev,
 			"get_firmware(): Firmware not available (%d)\n", err);
-#ifdef CONFIG_PM_SLEEP
 	else
 		chip->fw_cache[fw_index] = *fw_entry;
-#endif
 	return err;
 }
 
@@ -63,18 +59,13 @@ static int get_firmware(const struct firmware **fw_entry,
 static void free_firmware(const struct firmware *fw_entry,
 			  struct echoaudio *chip)
 {
-#ifdef CONFIG_PM_SLEEP
 	dev_dbg(chip->card->dev, "firmware not released (kept in cache)\n");
-#else
-	release_firmware(fw_entry);
-#endif
 }
 
 
 
 static void free_firmware_cache(struct echoaudio *chip)
 {
-#ifdef CONFIG_PM_SLEEP
 	int i;
 
 	for (i = 0; i < 8 ; i++)
@@ -82,8 +73,6 @@ static void free_firmware_cache(struct echoaudio *chip)
 			release_firmware(chip->fw_cache[i]);
 			dev_dbg(chip->card->dev, "release_firmware(%d)\n", i);
 		}
-
-#endif
 }
 
 
@@ -1977,7 +1966,6 @@ static int __snd_echo_probe(struct pci_dev *pci,
 	struct snd_card *card;
 	struct echoaudio *chip;
 	char *dsp;
-	__maybe_unused int i;
 	int err;
 
 	if (dev >= SNDRV_CARDS)
@@ -1987,7 +1975,6 @@ static int __snd_echo_probe(struct pci_dev *pci,
 		return -ENOENT;
 	}
 
-	i = 0;
 	err = snd_devm_card_new(&pci->dev, index[dev], id[dev], THIS_MODULE,
 				sizeof(*chip), &card);
 	if (err < 0)
@@ -2091,7 +2078,7 @@ static int __snd_echo_probe(struct pci_dev *pci,
 #ifdef ECHOCARD_HAS_DIGITAL_MODE_SWITCH
 	/* Creates a list of available digital modes */
 	chip->num_digital_modes = 0;
-	for (i = 0; i < 6; i++)
+	for (int i = 0; i < 6; i++)
 		if (chip->digital_modes & (1 << i))
 			chip->digital_mode_list[chip->num_digital_modes++] = i;
 
@@ -2103,7 +2090,7 @@ static int __snd_echo_probe(struct pci_dev *pci,
 #ifdef ECHOCARD_HAS_EXTERNAL_CLOCK
 	/* Creates a list of available clock sources */
 	chip->num_clock_sources = 0;
-	for (i = 0; i < 10; i++)
+	for (int i = 0; i < 10; i++)
 		if (chip->input_clock_types & (1 << i))
 			chip->clock_source_list[chip->num_clock_sources++] = i;
 
@@ -2145,8 +2132,6 @@ static int snd_echo_probe(struct pci_dev *pci,
 	return snd_card_free_on_error(&pci->dev, __snd_echo_probe(pci, pci_id));
 }
 
-
-#if defined(CONFIG_PM_SLEEP)
 
 static int snd_echo_suspend(struct device *dev)
 {
@@ -2237,11 +2222,7 @@ static int snd_echo_resume(struct device *dev)
 	return 0;
 }
 
-static SIMPLE_DEV_PM_OPS(snd_echo_pm, snd_echo_suspend, snd_echo_resume);
-#define SND_ECHO_PM_OPS	&snd_echo_pm
-#else
-#define SND_ECHO_PM_OPS	NULL
-#endif /* CONFIG_PM_SLEEP */
+static DEFINE_SIMPLE_DEV_PM_OPS(snd_echo_pm, snd_echo_suspend, snd_echo_resume);
 
 /******************************************************************************
 	Everything starts and ends here
@@ -2253,7 +2234,7 @@ static struct pci_driver echo_driver = {
 	.id_table = snd_echo_ids,
 	.probe = snd_echo_probe,
 	.driver = {
-		.pm = SND_ECHO_PM_OPS,
+		.pm = &snd_echo_pm,
 	},
 };
 

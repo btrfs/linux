@@ -28,6 +28,7 @@ properties:
       - items:
           - enum:
               - fsl,imx93-gpio
+              - fsl,imx94-gpio
               - fsl,imx95-gpio
           - const: fsl,imx8ulp-gpio
 
@@ -50,6 +51,10 @@ properties:
     const: 2
 
   gpio-controller: true
+
+  gpio-line-names:
+    minItems: 1
+    maxItems: 32
 
   clocks:
     items:

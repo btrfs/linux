@@ -9,10 +9,9 @@
 #include <linux/stop_machine.h>
 
 #include <drm/drm_managed.h>
-#include <drm/i915_drm.h>
-#include <drm/intel-gtt.h>
+#include <drm/intel/i915_drm.h>
+#include <drm/intel/intel-gtt.h>
 
-#include "display/intel_display.h"
 #include "gem/i915_gem_lmem.h"
 
 #include "intel_context.h"
@@ -24,6 +23,7 @@
 #include "intel_ring.h"
 #include "i915_drv.h"
 #include "i915_pci.h"
+#include "i915_reg.h"
 #include "i915_request.h"
 #include "i915_scatterlist.h"
 #include "i915_utils.h"
@@ -107,11 +107,12 @@ int i915_ggtt_init_hw(struct drm_i915_private *i915)
 /**
  * i915_ggtt_suspend_vm - Suspend the memory mappings for a GGTT or DPT VM
  * @vm: The VM to suspend the mappings for
+ * @evict_all: Evict all VMAs
  *
  * Suspend the memory mappings for all objects mapped to HW via the GGTT or a
  * DPT page table.
  */
-void i915_ggtt_suspend_vm(struct i915_address_space *vm)
+void i915_ggtt_suspend_vm(struct i915_address_space *vm, bool evict_all)
 {
 	struct i915_vma *vma, *vn;
 	int save_skip_rewrite;
@@ -157,7 +158,7 @@ retry:
 			goto retry;
 		}
 
-		if (!i915_vma_is_bound(vma, I915_VMA_GLOBAL_BIND)) {
+		if (evict_all || !i915_vma_is_bound(vma, I915_VMA_GLOBAL_BIND)) {
 			i915_vma_wait_for_bind(vma);
 
 			__i915_vma_evict(vma, false);
@@ -172,13 +173,15 @@ retry:
 	vm->skip_pte_rewrite = save_skip_rewrite;
 
 	mutex_unlock(&vm->mutex);
+
+	drm_WARN_ON(&vm->i915->drm, evict_all && !list_empty(&vm->bound_list));
 }
 
 void i915_ggtt_suspend(struct i915_ggtt *ggtt)
 {
 	struct intel_gt *gt;
 
-	i915_ggtt_suspend_vm(&ggtt->vm);
+	i915_ggtt_suspend_vm(&ggtt->vm, false);
 	ggtt->invalidate(ggtt);
 
 	list_for_each_entry(gt, &ggtt->gt_list, ggtt_link)
@@ -230,11 +233,8 @@ static void guc_ggtt_ct_invalidate(struct intel_gt *gt)
 	struct intel_uncore *uncore = gt->uncore;
 	intel_wakeref_t wakeref;
 
-	with_intel_runtime_pm_if_active(uncore->rpm, wakeref) {
-		struct intel_guc *guc = &gt->uc.guc;
-
-		intel_guc_invalidate_tlb_guc(guc);
-	}
+	with_intel_runtime_pm_if_active(uncore->rpm, wakeref)
+		intel_guc_invalidate_tlb_guc(gt_to_guc(gt));
 }
 
 static void guc_ggtt_invalidate(struct i915_ggtt *ggtt)
@@ -245,7 +245,7 @@ static void guc_ggtt_invalidate(struct i915_ggtt *ggtt)
 	gen8_ggtt_invalidate(ggtt);
 
 	list_for_each_entry(gt, &ggtt->gt_list, ggtt_link) {
-		if (intel_guc_tlb_invalidation_is_available(&gt->uc.guc))
+		if (intel_guc_tlb_invalidation_is_available(gt_to_guc(gt)))
 			guc_ggtt_ct_invalidate(gt);
 		else if (GRAPHICS_VER(i915) >= 12)
 			intel_uncore_write_fw(gt->uncore,
@@ -1152,13 +1152,20 @@ static unsigned int gen6_gttadr_offset(struct drm_i915_private *i915)
 static int ggtt_probe_common(struct i915_ggtt *ggtt, u64 size)
 {
 	struct drm_i915_private *i915 = ggtt->vm.i915;
+	struct intel_uncore *uncore = ggtt->vm.gt->uncore;
 	struct pci_dev *pdev = to_pci_dev(i915->drm.dev);
 	phys_addr_t phys_addr;
 	u32 pte_flags;
 	int ret;
 
 	GEM_WARN_ON(pci_resource_len(pdev, GEN4_GTTMMADR_BAR) != gen6_gttmmadr_size(i915));
-	phys_addr = pci_resource_start(pdev, GEN4_GTTMMADR_BAR) + gen6_gttadr_offset(i915);
+
+	if (i915_direct_stolen_access(i915)) {
+		drm_dbg(&i915->drm, "Using direct GSM access\n");
+		phys_addr = intel_uncore_read64(uncore, GEN6_GSMBASE) & GEN11_BDSM_MASK;
+	} else {
+		phys_addr = pci_resource_start(pdev, GEN4_GTTMMADR_BAR) + gen6_gttadr_offset(i915);
+	}
 
 	if (needs_wc_ggtt_mapping(i915))
 		ggtt->gsm = ioremap_wc(phys_addr, size);
@@ -1541,6 +1548,7 @@ int i915_ggtt_enable_hw(struct drm_i915_private *i915)
 /**
  * i915_ggtt_resume_vm - Restore the memory mappings for a GGTT or DPT VM
  * @vm: The VM to restore the mappings for
+ * @all_evicted: Were all VMAs expected to be evicted on suspend?
  *
  * Restore the memory mappings for all objects mapped to HW via the GGTT or a
  * DPT page table.
@@ -1548,12 +1556,17 @@ int i915_ggtt_enable_hw(struct drm_i915_private *i915)
  * Returns %true if restoring the mapping for any object that was in a write
  * domain before suspend.
  */
-bool i915_ggtt_resume_vm(struct i915_address_space *vm)
+bool i915_ggtt_resume_vm(struct i915_address_space *vm, bool all_evicted)
 {
 	struct i915_vma *vma;
 	bool write_domain_objs = false;
 
 	drm_WARN_ON(&vm->i915->drm, !vm->is_ggtt && !vm->is_dpt);
+
+	if (all_evicted) {
+		drm_WARN_ON(&vm->i915->drm, !list_empty(&vm->bound_list));
+		return false;
+	}
 
 	/* First fill our portion of the GTT with scratch pages */
 	vm->clear_range(vm, 0, vm->total);
@@ -1594,7 +1607,7 @@ void i915_ggtt_resume(struct i915_ggtt *ggtt)
 	list_for_each_entry(gt, &ggtt->gt_list, ggtt_link)
 		intel_gt_check_and_clear_faults(gt);
 
-	flush = i915_ggtt_resume_vm(&ggtt->vm);
+	flush = i915_ggtt_resume_vm(&ggtt->vm, false);
 
 	if (drm_mm_node_allocated(&ggtt->error_capture))
 		ggtt->vm.scratch_range(&ggtt->vm, ggtt->error_capture.start,

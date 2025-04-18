@@ -156,10 +156,7 @@ static int vpd_blob_extend(struct vpd_blob *blob, const char *data, size_t len)
 	const char *old_ptr = blob->data;
 	char *new_ptr;
 
-	new_ptr = old_ptr ?
-		kvrealloc(old_ptr, old_len, new_len, GFP_KERNEL_ACCOUNT) :
-		kvmalloc(len, GFP_KERNEL_ACCOUNT);
-
+	new_ptr = kvrealloc(old_ptr, new_len, GFP_KERNEL_ACCOUNT);
 	if (!new_ptr)
 		return -ENOMEM;
 
@@ -485,14 +482,13 @@ static long papr_vpd_create_handle(struct papr_location_code __user *ulc)
 		goto free_blob;
 	}
 
-	file = anon_inode_getfile("[papr-vpd]", &papr_vpd_handle_ops,
-				  (void *)blob, O_RDONLY);
+	file = anon_inode_getfile_fmode("[papr-vpd]", &papr_vpd_handle_ops,
+				  (void *)blob, O_RDONLY,
+				  FMODE_LSEEK | FMODE_PREAD);
 	if (IS_ERR(file)) {
 		err = PTR_ERR(file);
 		goto put_fd;
 	}
-
-	file->f_mode |= FMODE_LSEEK | FMODE_PREAD;
 	fd_install(fd, file);
 	return fd;
 put_fd:

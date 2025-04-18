@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0 OR MIT */
 /**************************************************************************
  *
- * Copyright (c) 2009-2022 VMware, Inc., Palo Alto, CA., USA
+ * Copyright (c) 2009-2023 VMware, Inc., Palo Alto, CA., USA
  * All Rights Reserved.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a
@@ -54,7 +54,7 @@
 #include <linux/module.h>
 #include <linux/hashtable.h>
 
-MODULE_IMPORT_NS(DMA_BUF);
+MODULE_IMPORT_NS("DMA_BUF");
 
 #define VMW_TTM_OBJECT_REF_HT_ORDER 10
 
@@ -87,14 +87,11 @@ struct ttm_object_file {
  *
  * @object_lock: lock that protects idr.
  *
- * @object_count: Per device object count.
- *
  * This is the per-device data structure needed for ttm object management.
  */
 
 struct ttm_object_device {
 	spinlock_t object_lock;
-	atomic_t object_count;
 	struct dma_buf_ops ops;
 	void (*dmabuf_release)(struct dma_buf *dma_buf);
 	struct idr idr;
@@ -431,7 +428,6 @@ ttm_object_device_init(const struct dma_buf_ops *ops)
 		return NULL;
 
 	spin_lock_init(&tdev->object_lock);
-	atomic_set(&tdev->object_count, 0);
 
 	/*
 	 * Our base is at VMWGFX_NUM_MOB + 1 because we want to create
@@ -475,7 +471,7 @@ void ttm_object_device_release(struct ttm_object_device **p_tdev)
  */
 static bool __must_check get_dma_buf_unless_doomed(struct dma_buf *dmabuf)
 {
-	return atomic_long_inc_not_zero(&dmabuf->file->f_count) != 0L;
+	return file_ref_get(&dmabuf->file->f_ref);
 }
 
 /**
@@ -648,7 +644,6 @@ out_unref:
  * @tfile: struct ttm_object_file identifying the caller
  * @size: The size of the dma_bufs we export.
  * @prime: The object to be initialized.
- * @shareable: See ttm_base_object_init
  * @type: See ttm_base_object_init
  * @refcount_release: See ttm_base_object_init
  *
@@ -656,10 +651,11 @@ out_unref:
  * for data sharing between processes and devices.
  */
 int ttm_prime_object_init(struct ttm_object_file *tfile, size_t size,
-			  struct ttm_prime_object *prime, bool shareable,
+			  struct ttm_prime_object *prime,
 			  enum ttm_object_type type,
 			  void (*refcount_release) (struct ttm_base_object **))
 {
+	bool shareable = !!(type == VMW_RES_SURFACE);
 	mutex_init(&prime->mutex);
 	prime->size = PAGE_ALIGN(size);
 	prime->real_type = type;

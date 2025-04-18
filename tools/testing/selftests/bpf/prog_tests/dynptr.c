@@ -9,6 +9,8 @@
 enum test_setup_type {
 	SETUP_SYSCALL_SLEEP,
 	SETUP_SKB_PROG,
+	SETUP_SKB_PROG_TP,
+	SETUP_XDP_PROG,
 };
 
 static struct {
@@ -17,6 +19,8 @@ static struct {
 } success_tests[] = {
 	{"test_read_write", SETUP_SYSCALL_SLEEP},
 	{"test_dynptr_data", SETUP_SYSCALL_SLEEP},
+	{"test_dynptr_copy", SETUP_SYSCALL_SLEEP},
+	{"test_dynptr_copy_xdp", SETUP_XDP_PROG},
 	{"test_ringbuf", SETUP_SYSCALL_SLEEP},
 	{"test_skb_readonly", SETUP_SKB_PROG},
 	{"test_dynptr_skb_data", SETUP_SKB_PROG},
@@ -28,6 +32,7 @@ static struct {
 	{"test_dynptr_clone", SETUP_SKB_PROG},
 	{"test_dynptr_skb_no_buff", SETUP_SKB_PROG},
 	{"test_dynptr_skb_strcmp", SETUP_SKB_PROG},
+	{"test_dynptr_skb_tp_btf", SETUP_SKB_PROG_TP},
 };
 
 static void verify_success(const char *prog_name, enum test_setup_type setup_type)
@@ -35,7 +40,7 @@ static void verify_success(const char *prog_name, enum test_setup_type setup_typ
 	struct dynptr_success *skel;
 	struct bpf_program *prog;
 	struct bpf_link *link;
-       int err;
+	int err;
 
 	skel = dynptr_success__open();
 	if (!ASSERT_OK_PTR(skel, "dynptr_success__open"))
@@ -47,7 +52,7 @@ static void verify_success(const char *prog_name, enum test_setup_type setup_typ
 	if (!ASSERT_OK_PTR(prog, "bpf_object__find_program_by_name"))
 		goto cleanup;
 
-       bpf_program__set_autoload(prog, true);
+	bpf_program__set_autoload(prog, true);
 
 	err = dynptr_success__load(skel);
 	if (!ASSERT_OK(err, "dynptr_success__load"))
@@ -81,6 +86,55 @@ static void verify_success(const char *prog_name, enum test_setup_type setup_typ
 			goto cleanup;
 
 		err = bpf_prog_test_run_opts(prog_fd, &topts);
+
+		if (!ASSERT_OK(err, "test_run"))
+			goto cleanup;
+
+		break;
+	}
+	case SETUP_SKB_PROG_TP:
+	{
+		struct __sk_buff skb = {};
+		struct bpf_object *obj;
+		int aux_prog_fd;
+
+		/* Just use its test_run to trigger kfree_skb tracepoint */
+		err = bpf_prog_test_load("./test_pkt_access.bpf.o", BPF_PROG_TYPE_SCHED_CLS,
+					 &obj, &aux_prog_fd);
+		if (!ASSERT_OK(err, "prog_load sched cls"))
+			goto cleanup;
+
+		LIBBPF_OPTS(bpf_test_run_opts, topts,
+			    .data_in = &pkt_v4,
+			    .data_size_in = sizeof(pkt_v4),
+			    .ctx_in = &skb,
+			    .ctx_size_in = sizeof(skb),
+		);
+
+		link = bpf_program__attach(prog);
+		if (!ASSERT_OK_PTR(link, "bpf_program__attach"))
+			goto cleanup;
+
+		err = bpf_prog_test_run_opts(aux_prog_fd, &topts);
+		bpf_link__destroy(link);
+
+		if (!ASSERT_OK(err, "test_run"))
+			goto cleanup;
+
+		break;
+	}
+	case SETUP_XDP_PROG:
+	{
+		char data[5000];
+		int err, prog_fd;
+		LIBBPF_OPTS(bpf_test_run_opts, opts,
+			    .data_in = &data,
+			    .data_size_in = sizeof(data),
+			    .repeat = 1,
+		);
+
+		prog_fd = bpf_program__fd(prog);
+		err = bpf_prog_test_run_opts(prog_fd, &opts);
 
 		if (!ASSERT_OK(err, "test_run"))
 			goto cleanup;

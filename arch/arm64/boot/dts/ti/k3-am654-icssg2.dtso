@@ -1,8 +1,8 @@
-// SPDX-License-Identifier: GPL-2.0
+// SPDX-License-Identifier: GPL-2.0-only OR MIT
 /**
  * DT overlay for IDK application board on AM654 EVM
  *
- * Copyright (C) 2018-2023 Texas Instruments Incorporated - https://www.ti.com/
+ * Copyright (C) 2018-2024 Texas Instruments Incorporated - https://www.ti.com/
  */
 
 /dts-v1/;
@@ -41,6 +41,7 @@
 
 		ti,mii-g-rt = <&icssg2_mii_g_rt>;
 		ti,mii-rt = <&icssg2_mii_rt>;
+		ti,pa-stats = <&icssg2_pa_stats>;
 		ti,iep = <&icssg2_iep0>, <&icssg2_iep1>;
 
 		interrupt-parent = <&icssg2_intc>;
