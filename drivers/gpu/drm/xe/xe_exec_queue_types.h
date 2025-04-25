@@ -38,7 +38,10 @@ enum xe_exec_queue_priority {
  * a kernel object.
  */
 struct xe_exec_queue {
-	/** @gt: graphics tile this exec queue can submit to */
+	/** @xef: Back pointer to xe file if this is user created exec queue */
+	struct xe_file *xef;
+
+	/** @gt: GT structure this exec queue can submit to */
 	struct xe_gt *gt;
 	/**
 	 * @hwe: A hardware of the same class. May (physical engine) or may not
@@ -60,6 +63,8 @@ struct xe_exec_queue {
 	char name[MAX_FENCE_NAME_LEN];
 	/** @width: width (number BB submitted per exec) of this exec queue */
 	u16 width;
+	/** @msix_vec: MSI-X vector (for platforms that support it) */
+	u16 msix_vec;
 	/** @fence_irq: fence IRQ used to signal job completion */
 	struct xe_hw_fence_irq *fence_irq;
 
@@ -70,20 +75,18 @@ struct xe_exec_queue {
 	 */
 	struct dma_fence *last_fence;
 
-/* queue no longer allowed to submit */
-#define EXEC_QUEUE_FLAG_BANNED			BIT(0)
 /* queue used for kernel submission only */
-#define EXEC_QUEUE_FLAG_KERNEL			BIT(1)
+#define EXEC_QUEUE_FLAG_KERNEL			BIT(0)
 /* kernel engine only destroyed at driver unload */
-#define EXEC_QUEUE_FLAG_PERMANENT		BIT(2)
-/* queue keeps running pending jobs after destroy ioctl */
-#define EXEC_QUEUE_FLAG_PERSISTENT		BIT(3)
+#define EXEC_QUEUE_FLAG_PERMANENT		BIT(1)
 /* for VM jobs. Caller needs to hold rpm ref when creating queue with this flag */
-#define EXEC_QUEUE_FLAG_VM			BIT(4)
+#define EXEC_QUEUE_FLAG_VM			BIT(2)
 /* child of VM queue for multi-tile VM jobs */
-#define EXEC_QUEUE_FLAG_BIND_ENGINE_CHILD	BIT(5)
+#define EXEC_QUEUE_FLAG_BIND_ENGINE_CHILD	BIT(3)
 /* kernel exec_queue only, set priority to highest level */
-#define EXEC_QUEUE_FLAG_HIGH_PRIORITY		BIT(6)
+#define EXEC_QUEUE_FLAG_HIGH_PRIORITY		BIT(4)
+/* flag to indicate low latency hint to guc */
+#define EXEC_QUEUE_FLAG_LOW_LATENCY		BIT(5)
 
 	/**
 	 * @flags: flags for this exec queue, should statically setup aside from ban
@@ -105,50 +108,37 @@ struct xe_exec_queue {
 		struct xe_guc_exec_queue *guc;
 	};
 
-	union {
-		/**
-		 * @parallel: parallel submission state
-		 */
-		struct {
-			/** @composite_fence_ctx: context composite fence */
-			u64 composite_fence_ctx;
-			/** @composite_fence_seqno: seqno for composite fence */
-			u32 composite_fence_seqno;
-		} parallel;
-		/**
-		 * @bind: bind submission state
-		 */
-		struct {
-			/** @fence_ctx: context bind fence */
-			u64 fence_ctx;
-			/** @fence_seqno: seqno for bind fence */
-			u32 fence_seqno;
-		} bind;
-	};
-
 	/** @sched_props: scheduling properties */
 	struct {
-		/** @timeslice_us: timeslice period in micro-seconds */
+		/** @sched_props.timeslice_us: timeslice period in micro-seconds */
 		u32 timeslice_us;
-		/** @preempt_timeout_us: preemption timeout in micro-seconds */
+		/** @sched_props.preempt_timeout_us: preemption timeout in micro-seconds */
 		u32 preempt_timeout_us;
-		/** @priority: priority of this exec queue */
+		/** @sched_props.job_timeout_ms: job timeout in milliseconds */
+		u32 job_timeout_ms;
+		/** @sched_props.priority: priority of this exec queue */
 		enum xe_exec_queue_priority priority;
 	} sched_props;
 
-	/** @compute: compute exec queue state */
+	/** @lr: long-running exec queue state */
 	struct {
-		/** @pfence: preemption fence */
+		/** @lr.pfence: preemption fence */
 		struct dma_fence *pfence;
-		/** @context: preemption fence context */
+		/** @lr.context: preemption fence context */
 		u64 context;
-		/** @seqno: preemption fence seqno */
+		/** @lr.seqno: preemption fence seqno */
 		u32 seqno;
-		/** @link: link into VM's list of exec queues */
+		/** @lr.link: link into VM's list of exec queues */
 		struct list_head link;
-		/** @lock: preemption fences lock */
-		spinlock_t lock;
-	} compute;
+	} lr;
+
+	/** @pxp: PXP info tracking */
+	struct {
+		/** @pxp.type: PXP session type used by this queue */
+		u8 type;
+		/** @pxp.link: link into the list of PXP exec queues */
+		struct list_head link;
+	} pxp;
 
 	/** @ops: submission backend exec queue operations */
 	const struct xe_exec_queue_ops *ops;
@@ -157,8 +147,15 @@ struct xe_exec_queue {
 	const struct xe_ring_ops *ring_ops;
 	/** @entity: DRM sched entity for this exec queue (1 to 1 relationship) */
 	struct drm_sched_entity *entity;
+	/**
+	 * @tlb_flush_seqno: The seqno of the last rebind tlb flush performed
+	 * Protected by @vm's resv. Unused if @vm == NULL.
+	 */
+	u64 tlb_flush_seqno;
+	/** @hw_engine_group_link: link into exec queues in the same hw engine group */
+	struct list_head hw_engine_group_link;
 	/** @lrc: logical ring context for this exec queue */
-	struct xe_lrc lrc[];
+	struct xe_lrc *lrc[] __counted_by(width);
 };
 
 /**
@@ -178,8 +175,6 @@ struct xe_exec_queue_ops {
 	int (*set_timeslice)(struct xe_exec_queue *q, u32 timeslice_us);
 	/** @set_preempt_timeout: Set preemption timeout for exec queue */
 	int (*set_preempt_timeout)(struct xe_exec_queue *q, u32 preempt_timeout_us);
-	/** @set_job_timeout: Set job timeout for exec queue */
-	int (*set_job_timeout)(struct xe_exec_queue *q, u32 job_timeout_ms);
 	/**
 	 * @suspend: Suspend exec queue from executing, allowed to be called
 	 * multiple times in a row before resume with the caveat that
@@ -188,9 +183,11 @@ struct xe_exec_queue_ops {
 	int (*suspend)(struct xe_exec_queue *q);
 	/**
 	 * @suspend_wait: Wait for an exec queue to suspend executing, should be
-	 * call after suspend.
+	 * call after suspend. In dma-fencing path thus must return within a
+	 * reasonable amount of time. -ETIME return shall indicate an error
+	 * waiting for suspend resulting in associated VM getting killed.
 	 */
-	void (*suspend_wait)(struct xe_exec_queue *q);
+	int (*suspend_wait)(struct xe_exec_queue *q);
 	/**
 	 * @resume: Resume exec queue execution, exec queue must be in a suspended
 	 * state and dma fence returned from most recent suspend call must be

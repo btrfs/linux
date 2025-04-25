@@ -17,7 +17,6 @@ description:
 
 maintainers:
   - Michal Simek <michal.simek@amd.com>
-  - Mubin Sayyed <mubin.sayyed@amd.com>
   - Radhey Shyam Pandey <radhey.shyam.pandey@amd.com>
 
 properties:
@@ -72,8 +71,6 @@ allOf:
         i2c-bus: false
     else:
       $ref: /schemas/usb/usb-device.yaml
-      required:
-        - peer-hub
 
 additionalProperties: false
 

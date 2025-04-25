@@ -8,6 +8,8 @@
 #include <errno.h>
 #include <string.h>
 #include <limits.h>
+
+#include <xalloc.h>
 #include "modpost.h"
 
 /*
@@ -305,18 +307,13 @@ static int parse_source_files(const char *objfile, struct md4_ctx *md)
 	const char *base;
 	int dirlen, ret = 0, check_files = 0;
 
-	cmd = NOFAIL(malloc(strlen(objfile) + sizeof("..cmd")));
+	cmd = xmalloc(strlen(objfile) + sizeof("..cmd"));
 
-	base = strrchr(objfile, '/');
-	if (base) {
-		base++;
-		dirlen = base - objfile;
-		sprintf(cmd, "%.*s.%s.cmd", dirlen, objfile, base);
-	} else {
-		dirlen = 0;
-		sprintf(cmd, ".%s.cmd", objfile);
-	}
-	dir = NOFAIL(malloc(dirlen + 1));
+	base = get_basename(objfile);
+	dirlen = base - objfile;
+	sprintf(cmd, "%.*s.%s.cmd", dirlen, objfile, base);
+
+	dir = xmalloc(dirlen + 1);
 	strncpy(dir, objfile, dirlen);
 	dir[dirlen] = '\0';
 
@@ -333,7 +330,7 @@ static int parse_source_files(const char *objfile, struct md4_ctx *md)
 			line++;
 		p = line;
 
-		if (strncmp(line, "source_", sizeof("source_")-1) == 0) {
+		if (strstarts(line, "source_")) {
 			p = strrchr(line, ' ');
 			if (!p) {
 				warn("malformed line: %s\n", line);
@@ -347,7 +344,7 @@ static int parse_source_files(const char *objfile, struct md4_ctx *md)
 			}
 			continue;
 		}
-		if (strncmp(line, "deps_", sizeof("deps_")-1) == 0) {
+		if (strstarts(line, "deps_")) {
 			check_files = 1;
 			continue;
 		}
@@ -390,7 +387,7 @@ out_file:
 /* Calc and record src checksum. */
 void get_src_version(const char *modname, char sum[], unsigned sumlen)
 {
-	char *buf;
+	char *buf, *pos;
 	struct md4_ctx md;
 	char *fname;
 	char filelist[PATH_MAX + 1];
@@ -399,9 +396,10 @@ void get_src_version(const char *modname, char sum[], unsigned sumlen)
 	snprintf(filelist, sizeof(filelist), "%s.mod", modname);
 
 	buf = read_text_file(filelist);
+	pos = buf;
 
 	md4_init(&md);
-	while ((fname = strsep(&buf, "\n"))) {
+	while ((fname = strsep(&pos, "\n"))) {
 		if (!*fname)
 			continue;
 		if (!(is_static_library(fname)) &&

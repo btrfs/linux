@@ -19,7 +19,7 @@
 struct mmc_gpio {
 	struct gpio_desc *ro_gpio;
 	struct gpio_desc *cd_gpio;
-	irqreturn_t (*cd_gpio_isr)(int irq, void *dev_id);
+	irq_handler_t cd_gpio_isr;
 	char *ro_label;
 	char *cd_label;
 	u32 cd_debounce_delay_ms;
@@ -159,19 +159,6 @@ int mmc_gpio_set_cd_wake(struct mmc_host *host, bool on)
 }
 EXPORT_SYMBOL(mmc_gpio_set_cd_wake);
 
-/* Register an alternate interrupt service routine for
- * the card-detect GPIO.
- */
-void mmc_gpio_set_cd_isr(struct mmc_host *host,
-			 irqreturn_t (*isr)(int irq, void *dev_id))
-{
-	struct mmc_gpio *ctx = host->slot.handler_priv;
-
-	WARN_ON(ctx->cd_gpio_isr);
-	ctx->cd_gpio_isr = isr;
-}
-EXPORT_SYMBOL(mmc_gpio_set_cd_isr);
-
 /**
  * mmc_gpiod_request_cd - request a gpio descriptor for card-detection
  * @host: mmc host
@@ -220,6 +207,26 @@ int mmc_gpiod_request_cd(struct mmc_host *host, const char *con_id,
 	return 0;
 }
 EXPORT_SYMBOL(mmc_gpiod_request_cd);
+
+/**
+ * mmc_gpiod_set_cd_config - set config for card-detection GPIO
+ * @host: mmc host
+ * @config: Generic pinconf config (from pinconf_to_config_packed())
+ *
+ * This can be used by mmc host drivers to fixup a card-detection GPIO's config
+ * (e.g. set PIN_CONFIG_BIAS_PULL_UP) after acquiring the GPIO descriptor
+ * through mmc_gpiod_request_cd().
+ *
+ * Returns:
+ * 0 on success, or a negative errno value on error.
+ */
+int mmc_gpiod_set_cd_config(struct mmc_host *host, unsigned long config)
+{
+	struct mmc_gpio *ctx = host->slot.handler_priv;
+
+	return gpiod_set_config(ctx->cd_gpio, config);
+}
+EXPORT_SYMBOL(mmc_gpiod_set_cd_config);
 
 bool mmc_can_gpio_cd(struct mmc_host *host)
 {

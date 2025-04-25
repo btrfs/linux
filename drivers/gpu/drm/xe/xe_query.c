@@ -9,18 +9,25 @@
 #include <linux/sched/clock.h>
 
 #include <drm/ttm/ttm_placement.h>
-#include <drm/xe_drm.h>
+#include <generated/xe_wa_oob.h>
+#include <uapi/drm/xe_drm.h>
 
 #include "regs/xe_engine_regs.h"
+#include "regs/xe_gt_regs.h"
 #include "xe_bo.h"
 #include "xe_device.h"
+#include "xe_eu_stall.h"
 #include "xe_exec_queue.h"
+#include "xe_force_wake.h"
 #include "xe_ggtt.h"
 #include "xe_gt.h"
 #include "xe_guc_hwconfig.h"
 #include "xe_macros.h"
 #include "xe_mmio.h"
+#include "xe_oa.h"
+#include "xe_pxp.h"
 #include "xe_ttm_vram_mgr.h"
+#include "xe_wa.h"
 
 static const u16 xe_to_user_engine_class[] = {
 	[XE_ENGINE_CLASS_RENDER] = DRM_XE_ENGINE_CLASS_RENDER,
@@ -81,24 +88,22 @@ static __ktime_func_t __clock_id_to_func(clockid_t clk_id)
 }
 
 static void
-__read_timestamps(struct xe_gt *gt,
-		  struct xe_reg lower_reg,
-		  struct xe_reg upper_reg,
-		  u64 *engine_ts,
-		  u64 *cpu_ts,
-		  u64 *cpu_delta,
-		  __ktime_func_t cpu_clock)
+hwe_read_timestamp(struct xe_hw_engine *hwe, u64 *engine_ts, u64 *cpu_ts,
+		   u64 *cpu_delta, __ktime_func_t cpu_clock)
 {
+	struct xe_mmio *mmio = &hwe->gt->mmio;
 	u32 upper, lower, old_upper, loop = 0;
+	struct xe_reg upper_reg = RING_TIMESTAMP_UDW(hwe->mmio_base),
+		      lower_reg = RING_TIMESTAMP(hwe->mmio_base);
 
-	upper = xe_mmio_read32(gt, upper_reg);
+	upper = xe_mmio_read32(mmio, upper_reg);
 	do {
 		*cpu_delta = local_clock();
 		*cpu_ts = cpu_clock();
-		lower = xe_mmio_read32(gt, lower_reg);
+		lower = xe_mmio_read32(mmio, lower_reg);
 		*cpu_delta = local_clock() - *cpu_delta;
 		old_upper = upper;
-		upper = xe_mmio_read32(gt, upper_reg);
+		upper = xe_mmio_read32(mmio, upper_reg);
 	} while (upper != old_upper && loop++ < 2);
 
 	*engine_ts = (u64)upper << 32 | lower;
@@ -115,6 +120,10 @@ query_engine_cycles(struct xe_device *xe,
 	__ktime_func_t cpu_clock;
 	struct xe_hw_engine *hwe;
 	struct xe_gt *gt;
+	unsigned int fw_ref;
+
+	if (IS_SRIOV_VF(xe))
+		return -EOPNOTSUPP;
 
 	if (query->size == 0) {
 		query->size = size;
@@ -132,7 +141,7 @@ query_engine_cycles(struct xe_device *xe,
 		return -EINVAL;
 
 	eci = &resp.eci;
-	if (eci->gt_id > XE_MAX_GT_PER_TILE)
+	if (eci->gt_id >= XE_MAX_GT_PER_TILE)
 		return -EINVAL;
 
 	gt = xe_device_get_gt(xe, eci->gt_id);
@@ -147,32 +156,27 @@ query_engine_cycles(struct xe_device *xe,
 	if (!hwe)
 		return -EINVAL;
 
-	xe_device_mem_access_get(xe);
-	xe_force_wake_get(gt_to_fw(gt), XE_FORCEWAKE_ALL);
+	fw_ref = xe_force_wake_get(gt_to_fw(gt), XE_FORCEWAKE_ALL);
+	if (!xe_force_wake_ref_has_domain(fw_ref, XE_FORCEWAKE_ALL))  {
+		xe_force_wake_put(gt_to_fw(gt), fw_ref);
+		return -EIO;
+	}
 
-	__read_timestamps(gt,
-			  RING_TIMESTAMP(hwe->mmio_base),
-			  RING_TIMESTAMP_UDW(hwe->mmio_base),
-			  &resp.engine_cycles,
-			  &resp.cpu_timestamp,
-			  &resp.cpu_delta,
-			  cpu_clock);
+	hwe_read_timestamp(hwe, &resp.engine_cycles, &resp.cpu_timestamp,
+			   &resp.cpu_delta, cpu_clock);
 
-	xe_force_wake_put(gt_to_fw(gt), XE_FORCEWAKE_ALL);
-	xe_device_mem_access_put(xe);
-	resp.width = 36;
+	xe_force_wake_put(gt_to_fw(gt), fw_ref);
+
+	if (GRAPHICS_VER(xe) >= 20)
+		resp.width = 64;
+	else
+		resp.width = 36;
 
 	/* Only write to the output fields of user query */
-	if (put_user(resp.cpu_timestamp, &query_ptr->cpu_timestamp))
-		return -EFAULT;
-
-	if (put_user(resp.cpu_delta, &query_ptr->cpu_delta))
-		return -EFAULT;
-
-	if (put_user(resp.engine_cycles, &query_ptr->engine_cycles))
-		return -EFAULT;
-
-	if (put_user(resp.width, &query_ptr->width))
+	if (put_user(resp.cpu_timestamp, &query_ptr->cpu_timestamp) ||
+	    put_user(resp.cpu_delta, &query_ptr->cpu_delta) ||
+	    put_user(resp.engine_cycles, &query_ptr->engine_cycles) ||
+	    put_user(resp.width, &query_ptr->width))
 		return -EFAULT;
 
 	return 0;
@@ -198,7 +202,7 @@ static int query_engines(struct xe_device *xe,
 		return -EINVAL;
 	}
 
-	engines = kmalloc(size, GFP_KERNEL);
+	engines = kzalloc(size, GFP_KERNEL);
 	if (!engines)
 		return -ENOMEM;
 
@@ -212,14 +216,10 @@ static int query_engines(struct xe_device *xe,
 			engines->engines[i].instance.engine_instance =
 				hwe->logical_instance;
 			engines->engines[i].instance.gt_id = gt->info.id;
-			engines->engines[i].instance.pad = 0;
-			memset(engines->engines[i].reserved, 0,
-			       sizeof(engines->engines[i].reserved));
 
 			i++;
 		}
 
-	engines->pad = 0;
 	engines->num_engines = i;
 
 	if (copy_to_user(query_ptr, engines, size)) {
@@ -338,8 +338,13 @@ static int query_config(struct xe_device *xe, struct drm_xe_device_query *query)
 	config->info[DRM_XE_QUERY_CONFIG_REV_AND_DEVICE_ID] =
 		xe->info.devid | (xe->info.revid << 16);
 	if (xe_device_get_root_tile(xe)->mem.vram.usable_size)
-		config->info[DRM_XE_QUERY_CONFIG_FLAGS] =
+		config->info[DRM_XE_QUERY_CONFIG_FLAGS] |=
 			DRM_XE_QUERY_CONFIG_FLAG_HAS_VRAM;
+	if (xe->info.has_usm && IS_ENABLED(CONFIG_DRM_GPUSVM))
+		config->info[DRM_XE_QUERY_CONFIG_FLAGS] |=
+			DRM_XE_QUERY_CONFIG_FLAG_HAS_CPU_ADDR_MIRROR;
+	config->info[DRM_XE_QUERY_CONFIG_FLAGS] |=
+			DRM_XE_QUERY_CONFIG_FLAG_HAS_LOW_LATENCY;
 	config->info[DRM_XE_QUERY_CONFIG_MIN_ALIGNMENT] =
 		xe->info.vram_flags & XE_VRAM_FLAGS_NEED64K ? SZ_64K : SZ_4K;
 	config->info[DRM_XE_QUERY_CONFIG_VA_BITS] = xe->info.va_bits;
@@ -407,6 +412,13 @@ static int query_gt_list(struct xe_device *xe, struct drm_xe_device_query *query
 				BIT(gt_to_tile(gt)->id) << 1;
 		gt_list->gt_list[id].far_mem_regions = xe->info.mem_region_mask ^
 			gt_list->gt_list[id].near_mem_regions;
+
+		gt_list->gt_list[id].ip_ver_major =
+			REG_FIELD_GET(GMD_ID_ARCH_MASK, gt->info.gmdid);
+		gt_list->gt_list[id].ip_ver_minor =
+			REG_FIELD_GET(GMD_ID_RELEASE_MASK, gt->info.gmdid);
+		gt_list->gt_list[id].ip_ver_rev =
+			REG_FIELD_GET(GMD_ID_REVID, gt->info.gmdid);
 	}
 
 	if (copy_to_user(query_ptr, gt_list, size)) {
@@ -437,9 +449,7 @@ static int query_hwconfig(struct xe_device *xe,
 	if (!hwconfig)
 		return -ENOMEM;
 
-	xe_device_mem_access_get(xe);
 	xe_guc_hwconfig_copy(&gt->uc.guc, hwconfig);
-	xe_device_mem_access_put(xe);
 
 	if (copy_to_user(query_ptr, hwconfig, size)) {
 		kfree(hwconfig);
@@ -452,11 +462,23 @@ static int query_hwconfig(struct xe_device *xe,
 
 static size_t calc_topo_query_size(struct xe_device *xe)
 {
-	return xe->info.gt_count *
-		(3 * sizeof(struct drm_xe_query_topology_mask) +
-		 sizeof_field(struct xe_gt, fuse_topo.g_dss_mask) +
-		 sizeof_field(struct xe_gt, fuse_topo.c_dss_mask) +
-		 sizeof_field(struct xe_gt, fuse_topo.eu_mask_per_dss));
+	struct xe_gt *gt;
+	size_t query_size = 0;
+	int id;
+
+	for_each_gt(gt, xe, id) {
+		query_size += 3 * sizeof(struct drm_xe_query_topology_mask) +
+			sizeof_field(struct xe_gt, fuse_topo.g_dss_mask) +
+			sizeof_field(struct xe_gt, fuse_topo.c_dss_mask) +
+			sizeof_field(struct xe_gt, fuse_topo.eu_mask_per_dss);
+
+		/* L3bank mask may not be available for some GTs */
+		if (!XE_WA(gt, no_media_l3))
+			query_size += sizeof(struct drm_xe_query_topology_mask) +
+				sizeof_field(struct xe_gt, fuse_topo.l3_bank_mask);
+	}
+
+	return query_size;
 }
 
 static int copy_mask(void __user **ptr,
@@ -509,7 +531,22 @@ static int query_gt_topology(struct xe_device *xe,
 		if (err)
 			return err;
 
-		topo.type = DRM_XE_TOPO_EU_PER_DSS;
+		/*
+		 * If the kernel doesn't have a way to obtain a correct L3bank
+		 * mask, then it's better to omit L3 from the query rather than
+		 * reporting bogus or zeroed information to userspace.
+		 */
+		if (!XE_WA(gt, no_media_l3)) {
+			topo.type = DRM_XE_TOPO_L3_BANK;
+			err = copy_mask(&query_ptr, &topo, gt->fuse_topo.l3_bank_mask,
+					sizeof(gt->fuse_topo.l3_bank_mask));
+			if (err)
+				return err;
+		}
+
+		topo.type = gt->fuse_topo.eu_type == XE_GT_EU_TYPE_SIMD16 ?
+			DRM_XE_TOPO_SIMD16_EU_PER_DSS :
+			DRM_XE_TOPO_EU_PER_DSS;
 		err = copy_mask(&query_ptr, &topo,
 				gt->fuse_topo.eu_mask_per_dss,
 				sizeof(gt->fuse_topo.eu_mask_per_dss));
@@ -518,6 +555,225 @@ static int query_gt_topology(struct xe_device *xe,
 	}
 
 	return 0;
+}
+
+static int
+query_uc_fw_version(struct xe_device *xe, struct drm_xe_device_query *query)
+{
+	struct drm_xe_query_uc_fw_version __user *query_ptr = u64_to_user_ptr(query->data);
+	size_t size = sizeof(struct drm_xe_query_uc_fw_version);
+	struct drm_xe_query_uc_fw_version resp;
+	struct xe_uc_fw_version *version = NULL;
+
+	if (query->size == 0) {
+		query->size = size;
+		return 0;
+	} else if (XE_IOCTL_DBG(xe, query->size != size)) {
+		return -EINVAL;
+	}
+
+	if (copy_from_user(&resp, query_ptr, size))
+		return -EFAULT;
+
+	if (XE_IOCTL_DBG(xe, resp.pad || resp.pad2 || resp.reserved))
+		return -EINVAL;
+
+	switch (resp.uc_type) {
+	case XE_QUERY_UC_TYPE_GUC_SUBMISSION: {
+		struct xe_guc *guc = &xe->tiles[0].primary_gt->uc.guc;
+
+		version = &guc->fw.versions.found[XE_UC_FW_VER_COMPATIBILITY];
+		break;
+	}
+	case XE_QUERY_UC_TYPE_HUC: {
+		struct xe_gt *media_gt = NULL;
+		struct xe_huc *huc;
+
+		if (MEDIA_VER(xe) >= 13) {
+			struct xe_tile *tile;
+			u8 gt_id;
+
+			for_each_tile(tile, xe, gt_id) {
+				if (tile->media_gt) {
+					media_gt = tile->media_gt;
+					break;
+				}
+			}
+		} else {
+			media_gt = xe->tiles[0].primary_gt;
+		}
+
+		if (!media_gt)
+			break;
+
+		huc = &media_gt->uc.huc;
+		if (huc->fw.status == XE_UC_FIRMWARE_RUNNING)
+			version = &huc->fw.versions.found[XE_UC_FW_VER_RELEASE];
+		break;
+	}
+	default:
+		return -EINVAL;
+	}
+
+	if (version) {
+		resp.branch_ver = 0;
+		resp.major_ver = version->major;
+		resp.minor_ver = version->minor;
+		resp.patch_ver = version->patch;
+	} else {
+		return -ENODEV;
+	}
+
+	if (copy_to_user(query_ptr, &resp, size))
+		return -EFAULT;
+
+	return 0;
+}
+
+static size_t calc_oa_unit_query_size(struct xe_device *xe)
+{
+	size_t size = sizeof(struct drm_xe_query_oa_units);
+	struct xe_gt *gt;
+	int i, id;
+
+	for_each_gt(gt, xe, id) {
+		for (i = 0; i < gt->oa.num_oa_units; i++) {
+			size += sizeof(struct drm_xe_oa_unit);
+			size += gt->oa.oa_unit[i].num_engines *
+				sizeof(struct drm_xe_engine_class_instance);
+		}
+	}
+
+	return size;
+}
+
+static int query_oa_units(struct xe_device *xe,
+			  struct drm_xe_device_query *query)
+{
+	void __user *query_ptr = u64_to_user_ptr(query->data);
+	size_t size = calc_oa_unit_query_size(xe);
+	struct drm_xe_query_oa_units *qoa;
+	enum xe_hw_engine_id hwe_id;
+	struct drm_xe_oa_unit *du;
+	struct xe_hw_engine *hwe;
+	struct xe_oa_unit *u;
+	int gt_id, i, j, ret;
+	struct xe_gt *gt;
+	u8 *pdu;
+
+	if (query->size == 0) {
+		query->size = size;
+		return 0;
+	} else if (XE_IOCTL_DBG(xe, query->size != size)) {
+		return -EINVAL;
+	}
+
+	qoa = kzalloc(size, GFP_KERNEL);
+	if (!qoa)
+		return -ENOMEM;
+
+	pdu = (u8 *)&qoa->oa_units[0];
+	for_each_gt(gt, xe, gt_id) {
+		for (i = 0; i < gt->oa.num_oa_units; i++) {
+			u = &gt->oa.oa_unit[i];
+			du = (struct drm_xe_oa_unit *)pdu;
+
+			du->oa_unit_id = u->oa_unit_id;
+			du->oa_unit_type = u->type;
+			du->oa_timestamp_freq = xe_oa_timestamp_frequency(gt);
+			du->capabilities = DRM_XE_OA_CAPS_BASE | DRM_XE_OA_CAPS_SYNCS |
+					   DRM_XE_OA_CAPS_OA_BUFFER_SIZE |
+					   DRM_XE_OA_CAPS_WAIT_NUM_REPORTS;
+
+			j = 0;
+			for_each_hw_engine(hwe, gt, hwe_id) {
+				if (!xe_hw_engine_is_reserved(hwe) &&
+				    xe_oa_unit_id(hwe) == u->oa_unit_id) {
+					du->eci[j].engine_class =
+						xe_to_user_engine_class[hwe->class];
+					du->eci[j].engine_instance = hwe->logical_instance;
+					du->eci[j].gt_id = gt->info.id;
+					j++;
+				}
+			}
+			du->num_engines = j;
+			pdu += sizeof(*du) + j * sizeof(du->eci[0]);
+			qoa->num_oa_units++;
+		}
+	}
+
+	ret = copy_to_user(query_ptr, qoa, size);
+	kfree(qoa);
+
+	return ret ? -EFAULT : 0;
+}
+
+static int query_pxp_status(struct xe_device *xe, struct drm_xe_device_query *query)
+{
+	struct drm_xe_query_pxp_status __user *query_ptr = u64_to_user_ptr(query->data);
+	size_t size = sizeof(struct drm_xe_query_pxp_status);
+	struct drm_xe_query_pxp_status resp = { 0 };
+	int ret;
+
+	if (query->size == 0) {
+		query->size = size;
+		return 0;
+	} else if (XE_IOCTL_DBG(xe, query->size != size)) {
+		return -EINVAL;
+	}
+
+	ret = xe_pxp_get_readiness_status(xe->pxp);
+	if (ret < 0)
+		return ret;
+
+	resp.status = ret;
+	resp.supported_session_types = BIT(DRM_XE_PXP_TYPE_HWDRM);
+
+	if (copy_to_user(query_ptr, &resp, size))
+		return -EFAULT;
+
+	return 0;
+}
+
+static int query_eu_stall(struct xe_device *xe,
+			  struct drm_xe_device_query *query)
+{
+	void __user *query_ptr = u64_to_user_ptr(query->data);
+	struct drm_xe_query_eu_stall *info;
+	size_t size, array_size;
+	const u64 *rates;
+	u32 num_rates;
+	int ret;
+
+	if (!xe_eu_stall_supported_on_platform(xe)) {
+		drm_dbg(&xe->drm, "EU stall monitoring is not supported on this platform\n");
+		return -ENODEV;
+	}
+
+	array_size = xe_eu_stall_get_sampling_rates(&num_rates, &rates);
+	size = sizeof(struct drm_xe_query_eu_stall) + array_size;
+
+	if (query->size == 0) {
+		query->size = size;
+		return 0;
+	} else if (XE_IOCTL_DBG(xe, query->size != size)) {
+		return -EINVAL;
+	}
+
+	info = kzalloc(size, GFP_KERNEL);
+	if (!info)
+		return -ENOMEM;
+
+	info->num_sampling_rates = num_rates;
+	info->capabilities = DRM_XE_EU_STALL_CAPS_BASE;
+	info->record_size = xe_eu_stall_data_record_size(xe);
+	info->per_xecore_buf_size = xe_eu_stall_get_per_xecore_buf_size();
+	memcpy(info->sampling_rates, rates, array_size);
+
+	ret = copy_to_user(query_ptr, info, size);
+	kfree(info);
+
+	return ret ? -EFAULT : 0;
 }
 
 static int (* const xe_query_funcs[])(struct xe_device *xe,
@@ -529,6 +785,10 @@ static int (* const xe_query_funcs[])(struct xe_device *xe,
 	query_hwconfig,
 	query_gt_topology,
 	query_engine_cycles,
+	query_uc_fw_version,
+	query_oa_units,
+	query_pxp_status,
+	query_eu_stall,
 };
 
 int xe_query_ioctl(struct drm_device *dev, void *data, struct drm_file *file)

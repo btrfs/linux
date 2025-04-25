@@ -137,12 +137,14 @@ static int au1100fb_fb_blank(int blank_mode, struct fb_info *fbi)
 	 */
 int au1100fb_setmode(struct au1100fb_device *fbdev)
 {
-	struct fb_info *info = &fbdev->info;
+	struct fb_info *info;
 	u32 words;
 	int index;
 
 	if (!fbdev)
 		return -EINVAL;
+
+	info = &fbdev->info;
 
 	/* Update var-dependent FB info */
 	if (panel_is_active(fbdev->panel) || panel_is_color(fbdev->panel)) {
@@ -588,7 +590,7 @@ static struct platform_driver au1100fb_driver = {
 		.name		= "au1100-lcd",
 	},
 	.probe		= au1100fb_drv_probe,
-	.remove_new	= au1100fb_drv_remove,
+	.remove		= au1100fb_drv_remove,
 	.suspend	= au1100fb_drv_suspend,
 	.resume		= au1100fb_drv_resume,
 };

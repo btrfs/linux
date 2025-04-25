@@ -733,7 +733,7 @@ static void ar5523_data_tx_pkt_put(struct ar5523 *ar)
 {
 	atomic_dec(&ar->tx_nr_total);
 	if (!atomic_dec_return(&ar->tx_nr_pending)) {
-		del_timer(&ar->tx_wd_timer);
+		timer_delete(&ar->tx_wd_timer);
 		wake_up(&ar->tx_flush_waitq);
 	}
 
@@ -1061,7 +1061,7 @@ err:
 	return error;
 }
 
-static void ar5523_stop(struct ieee80211_hw *hw)
+static void ar5523_stop(struct ieee80211_hw *hw, bool suspend)
 {
 	struct ar5523 *ar = hw->priv;
 
@@ -1076,7 +1076,7 @@ static void ar5523_stop(struct ieee80211_hw *hw)
 
 	ar5523_cmd_write(ar, WDCMSG_TARGET_STOP, NULL, 0, 0);
 
-	del_timer_sync(&ar->tx_wd_timer);
+	timer_delete_sync(&ar->tx_wd_timer);
 	cancel_work_sync(&ar->tx_wd_work);
 	cancel_work_sync(&ar->rx_refill_work);
 	ar5523_cancel_rx_bufs(ar);
@@ -1358,6 +1358,10 @@ static void ar5523_configure_filter(struct ieee80211_hw *hw,
 }
 
 static const struct ieee80211_ops ar5523_ops = {
+	.add_chanctx = ieee80211_emulate_add_chanctx,
+	.remove_chanctx = ieee80211_emulate_remove_chanctx,
+	.change_chanctx = ieee80211_emulate_change_chanctx,
+	.switch_vif_chanctx = ieee80211_emulate_switch_vif_chanctx,
 	.start			= ar5523_start,
 	.stop			= ar5523_stop,
 	.tx			= ar5523_tx,
@@ -1589,6 +1593,20 @@ static int ar5523_probe(struct usb_interface *intf,
 	struct ieee80211_hw *hw;
 	struct ar5523 *ar;
 	int error = -ENOMEM;
+
+	static const u8 bulk_ep_addr[] = {
+		AR5523_CMD_TX_PIPE | USB_DIR_OUT,
+		AR5523_DATA_TX_PIPE | USB_DIR_OUT,
+		AR5523_CMD_RX_PIPE | USB_DIR_IN,
+		AR5523_DATA_RX_PIPE | USB_DIR_IN,
+		0};
+
+	if (!usb_check_bulk_endpoints(intf, bulk_ep_addr)) {
+		dev_err(&dev->dev,
+			"Could not find all expected endpoints\n");
+		error = -ENODEV;
+		goto out;
+	}
 
 	/*
 	 * Load firmware if the device requires it.  This will return

@@ -4,6 +4,7 @@
 #define _THINK_LMI_H_
 
 #include <linux/types.h>
+#include <linux/wmi.h>
 
 #define TLMI_SETTINGS_COUNT  256
 #define TLMI_SETTINGS_MAXLEN 512
@@ -41,6 +42,10 @@ enum save_mode {
 };
 
 /* password configuration details */
+#define TLMI_PWDCFG_MODE_LEGACY    0
+#define TLMI_PWDCFG_MODE_PASSWORD  1
+#define TLMI_PWDCFG_MODE_MULTICERT 3
+
 struct tlmi_pwdcfg_core {
 	uint32_t password_mode;
 	uint32_t password_state;
@@ -65,7 +70,7 @@ struct tlmi_pwdcfg {
 /* password setting details */
 struct tlmi_pwd_setting {
 	struct kobject kobj;
-	bool valid;
+	bool pwd_enabled;
 	char password[TLMI_PWD_BUFSIZE];
 	const char *pwd_type;
 	const char *role;
@@ -83,6 +88,7 @@ struct tlmi_pwd_setting {
 /* Attribute setting details */
 struct tlmi_attr_setting {
 	struct kobject kobj;
+	struct wmi_device *wdev;
 	int index;
 	char display_name[TLMI_SETTINGS_MAXLEN];
 	char *possible_values;

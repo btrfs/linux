@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * Loongson-2K/Loongson LS7A I2C master mode driver
+ * Loongson-2K/Loongson LS7A I2C controller mode driver
  *
  * Copyright (C) 2013 Loongson Technology Corporation Limited.
  * Copyright (C) 2014-2017 Lemote, Inc.
@@ -10,6 +10,7 @@
  * Rewritten for mainline by Binbin Zhou <zhoubinbin@loongson.cn>
  */
 
+#include <linux/bitfield.h>
 #include <linux/bits.h>
 #include <linux/completion.h>
 #include <linux/device.h>
@@ -26,7 +27,8 @@
 #include <linux/units.h>
 
 /* I2C Registers */
-#define I2C_LS2X_PRER		0x0 /* Freq Division Register(16 bits) */
+#define I2C_LS2X_PRER_LO	0x0 /* Freq Division Low Byte Register */
+#define I2C_LS2X_PRER_HI	0x1 /* Freq Division High Byte Register */
 #define I2C_LS2X_CTR		0x2 /* Control Register */
 #define I2C_LS2X_TXR		0x3 /* Transport Data Register */
 #define I2C_LS2X_RXR		0x3 /* Receive Data Register */
@@ -51,7 +53,7 @@
 /* Control Register Bit */
 #define LS2X_CTR_EN		BIT(7) /* 0: I2c frequency setting 1: Normal */
 #define LS2X_CTR_IEN		BIT(6) /* Enable i2c interrupt */
-#define LS2X_CTR_MST		BIT(5) /* 0: Slave mode 1: Master mode */
+#define LS2X_CTR_MST		BIT(5) /* 0: Target mode 1: Controller mode */
 #define CTR_FREQ_MASK		GENMASK(7, 6)
 #define CTR_READY_MASK		GENMASK(7, 5)
 
@@ -93,6 +95,7 @@ static irqreturn_t ls2x_i2c_isr(int this_irq, void *dev_id)
  */
 static void ls2x_i2c_adjust_bus_speed(struct ls2x_i2c_priv *priv)
 {
+	u16 val;
 	struct i2c_timings *t = &priv->i2c_t;
 	struct device *dev = priv->adapter.dev.parent;
 	u32 acpi_speed = i2c_acpi_find_bus_speed(dev);
@@ -104,9 +107,14 @@ static void ls2x_i2c_adjust_bus_speed(struct ls2x_i2c_priv *priv)
 	else
 		t->bus_freq_hz = LS2X_I2C_FREQ_STD;
 
-	/* Calculate and set i2c frequency. */
-	writew(LS2X_I2C_PCLK_FREQ / (5 * t->bus_freq_hz) - 1,
-	       priv->base + I2C_LS2X_PRER);
+	/*
+	 * According to the chip manual, we can only access the registers as bytes,
+	 * otherwise the high bits will be truncated.
+	 * So set the I2C frequency with a sequential writeb() instead of writew().
+	 */
+	val = LS2X_I2C_PCLK_FREQ / (5 * t->bus_freq_hz) - 1;
+	writeb(FIELD_GET(GENMASK(7, 0), val), priv->base + I2C_LS2X_PRER_LO);
+	writeb(FIELD_GET(GENMASK(15, 8), val), priv->base + I2C_LS2X_PRER_HI);
 }
 
 static void ls2x_i2c_init(struct ls2x_i2c_priv *priv)
@@ -251,8 +259,7 @@ static int ls2x_i2c_xfer_one(struct ls2x_i2c_priv *priv,
 	return ret;
 }
 
-static int ls2x_i2c_master_xfer(struct i2c_adapter *adap,
-				struct i2c_msg *msgs, int num)
+static int ls2x_i2c_xfer(struct i2c_adapter *adap, struct i2c_msg *msgs, int num)
 {
 	int ret;
 	struct i2c_msg *msg, *emsg = msgs + num;
@@ -273,8 +280,8 @@ static unsigned int ls2x_i2c_func(struct i2c_adapter *adap)
 }
 
 static const struct i2c_algorithm ls2x_i2c_algo = {
-	.master_xfer	= ls2x_i2c_master_xfer,
-	.functionality	= ls2x_i2c_func,
+	.xfer = ls2x_i2c_xfer,
+	.functionality = ls2x_i2c_func,
 };
 
 static int ls2x_i2c_probe(struct platform_device *pdev)

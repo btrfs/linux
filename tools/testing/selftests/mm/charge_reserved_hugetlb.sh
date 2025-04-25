@@ -11,6 +11,8 @@ if [[ $(id -u) -ne 0 ]]; then
   exit $ksft_skip
 fi
 
+nr_hugepgs=$(cat /proc/sys/vm/nr_hugepages)
+
 fault_limit_file=limit_in_bytes
 reservation_limit_file=rsvd.limit_in_bytes
 fault_usage_file=usage_in_bytes
@@ -27,7 +29,7 @@ fi
 if [[ $cgroup2 ]]; then
   cgroup_path=$(mount -t cgroup2 | head -1 | awk '{print $3}')
   if [[ -z "$cgroup_path" ]]; then
-    cgroup_path=/dev/cgroup/memory
+    cgroup_path=$(mktemp -d)
     mount -t cgroup2 none $cgroup_path
     do_umount=1
   fi
@@ -35,7 +37,7 @@ if [[ $cgroup2 ]]; then
 else
   cgroup_path=$(mount -t cgroup | grep ",hugetlb" | awk '{print $3}')
   if [[ -z "$cgroup_path" ]]; then
-    cgroup_path=/dev/cgroup/memory
+    cgroup_path=$(mktemp -d)
     mount -t cgroup memory,hugetlb $cgroup_path
     do_umount=1
   fi
@@ -252,7 +254,7 @@ function cleanup_hugetlb_memory() {
   local cgroup="$1"
   if [[ "$(pgrep -f write_to_hugetlbfs)" != "" ]]; then
     echo killing write_to_hugetlbfs
-    killall -2 write_to_hugetlbfs
+    killall -2 --wait write_to_hugetlbfs
     wait_for_hugetlb_memory_to_get_depleted $cgroup
   fi
   set -e
@@ -582,3 +584,5 @@ if [[ $do_umount ]]; then
   umount $cgroup_path
   rmdir $cgroup_path
 fi
+
+echo "$nr_hugepgs" > /proc/sys/vm/nr_hugepages

@@ -402,7 +402,7 @@ static ssize_t amdgpu_debugfs_gprwave_read(struct file *f, char __user *buf, siz
 	int r;
 	uint32_t *data, x;
 
-	if (size & 0x3 || *pos & 0x3)
+	if (size > 4096 || size & 0x3 || *pos & 0x3)
 		return -EINVAL;
 
 	r = pm_runtime_get_sync(adev_to_drm(adev)->dev);
@@ -918,7 +918,7 @@ static ssize_t amdgpu_debugfs_gca_config_read(struct file *f, char __user *buf,
 
 	/* rev==1 */
 	config[no_regs++] = adev->rev_id;
-	config[no_regs++] = lower_32_bits(adev->pg_flags);
+	config[no_regs++] = adev->pg_flags;
 	config[no_regs++] = lower_32_bits(adev->cg_flags);
 
 	/* rev==2 */
@@ -935,7 +935,7 @@ static ssize_t amdgpu_debugfs_gca_config_read(struct file *f, char __user *buf,
 	config[no_regs++] = adev->flags & AMD_IS_APU ? 1 : 0;
 
 	/* rev==5 PG/CG flag upper 32bit */
-	config[no_regs++] = upper_32_bits(adev->pg_flags);
+	config[no_regs++] = 0;
 	config[no_regs++] = upper_32_bits(adev->cg_flags);
 
 	while (size && (*pos < no_regs * 4)) {
@@ -1648,7 +1648,7 @@ int amdgpu_debugfs_regs_init(struct amdgpu_device *adev)
 
 	for (i = 0; i < ARRAY_SIZE(debugfs_regs); i++) {
 		ent = debugfs_create_file(debugfs_regs_names[i],
-					  S_IFREG | 0444, root,
+					  S_IFREG | 0400, root,
 					  adev, debugfs_regs[i]);
 		if (!i && !IS_ERR_OR_NULL(ent))
 			i_size_write(ent->d_inode, adev->rmmio_size);
@@ -1782,9 +1782,14 @@ static int amdgpu_debugfs_vm_info_show(struct seq_file *m, void *unused)
 	list_for_each_entry(file, &dev->filelist, lhead) {
 		struct amdgpu_fpriv *fpriv = file->driver_priv;
 		struct amdgpu_vm *vm = &fpriv->vm;
+		struct amdgpu_task_info *ti;
 
-		seq_printf(m, "pid:%d\tProcess:%s ----------\n",
-				vm->task_info.pid, vm->task_info.process_name);
+		ti = amdgpu_vm_get_task_info_vm(vm);
+		if (ti) {
+			seq_printf(m, "pid:%d\tProcess:%s ----------\n", ti->pid, ti->process_name);
+			amdgpu_vm_put_task_info(ti);
+		}
+
 		r = amdgpu_bo_reserve(vm->root.bo, true);
 		if (r)
 			break;
@@ -1985,7 +1990,7 @@ static int amdgpu_debugfs_sclk_set(void *data, u64 val)
 	uint32_t max_freq, min_freq;
 	struct amdgpu_device *adev = (struct amdgpu_device *)data;
 
-	if (amdgpu_sriov_vf(adev) && !amdgpu_sriov_is_pp_one_vf(adev))
+	if (amdgpu_sriov_multi_vf_mode(adev))
 		return -EINVAL;
 
 	ret = pm_runtime_get_sync(adev_to_drm(adev)->dev);
@@ -2020,99 +2025,6 @@ DEFINE_DEBUGFS_ATTRIBUTE(fops_ib_preempt, NULL,
 
 DEFINE_DEBUGFS_ATTRIBUTE(fops_sclk_set, NULL,
 			amdgpu_debugfs_sclk_set, "%llu\n");
-
-static ssize_t amdgpu_reset_dump_register_list_read(struct file *f,
-				char __user *buf, size_t size, loff_t *pos)
-{
-	struct amdgpu_device *adev = (struct amdgpu_device *)file_inode(f)->i_private;
-	char reg_offset[12];
-	int i, ret, len = 0;
-
-	if (*pos)
-		return 0;
-
-	memset(reg_offset, 0, 12);
-	ret = down_read_killable(&adev->reset_domain->sem);
-	if (ret)
-		return ret;
-
-	for (i = 0; i < adev->reset_info.num_regs; i++) {
-		sprintf(reg_offset, "0x%x\n", adev->reset_info.reset_dump_reg_list[i]);
-		up_read(&adev->reset_domain->sem);
-		if (copy_to_user(buf + len, reg_offset, strlen(reg_offset)))
-			return -EFAULT;
-
-		len += strlen(reg_offset);
-		ret = down_read_killable(&adev->reset_domain->sem);
-		if (ret)
-			return ret;
-	}
-
-	up_read(&adev->reset_domain->sem);
-	*pos += len;
-
-	return len;
-}
-
-static ssize_t amdgpu_reset_dump_register_list_write(struct file *f,
-			const char __user *buf, size_t size, loff_t *pos)
-{
-	struct amdgpu_device *adev = (struct amdgpu_device *)file_inode(f)->i_private;
-	char reg_offset[11];
-	uint32_t *new = NULL, *tmp = NULL;
-	int ret, i = 0, len = 0;
-
-	do {
-		memset(reg_offset, 0, 11);
-		if (copy_from_user(reg_offset, buf + len,
-					min(10, ((int)size-len)))) {
-			ret = -EFAULT;
-			goto error_free;
-		}
-
-		new = krealloc_array(tmp, i + 1, sizeof(uint32_t), GFP_KERNEL);
-		if (!new) {
-			ret = -ENOMEM;
-			goto error_free;
-		}
-		tmp = new;
-		if (sscanf(reg_offset, "%X %n", &tmp[i], &ret) != 1) {
-			ret = -EINVAL;
-			goto error_free;
-		}
-
-		len += ret;
-		i++;
-	} while (len < size);
-
-	new = kmalloc_array(i, sizeof(uint32_t), GFP_KERNEL);
-	if (!new) {
-		ret = -ENOMEM;
-		goto error_free;
-	}
-	ret = down_write_killable(&adev->reset_domain->sem);
-	if (ret)
-		goto error_free;
-
-	swap(adev->reset_info.reset_dump_reg_list, tmp);
-	swap(adev->reset_info.reset_dump_reg_value, new);
-	adev->reset_info.num_regs = i;
-	up_write(&adev->reset_domain->sem);
-	ret = size;
-
-error_free:
-	if (tmp != new)
-		kfree(tmp);
-	kfree(new);
-	return ret;
-}
-
-static const struct file_operations amdgpu_reset_dump_register_list = {
-	.owner = THIS_MODULE,
-	.read = amdgpu_reset_dump_register_list_read,
-	.write = amdgpu_reset_dump_register_list_write,
-	.llseek = default_llseek
-};
 
 int amdgpu_debugfs_init(struct amdgpu_device *adev)
 {
@@ -2180,23 +2092,30 @@ int amdgpu_debugfs_init(struct amdgpu_device *adev)
 		amdgpu_debugfs_vcn_fwlog_init(adev, i, &adev->vcn.inst[i]);
 	}
 
+	if (amdgpu_umsch_mm & amdgpu_umsch_mm_fwlog)
+		amdgpu_debugfs_umsch_fwlog_init(adev, &adev->umsch_mm);
+
+	amdgpu_debugfs_vcn_sched_mask_init(adev);
+	amdgpu_debugfs_jpeg_sched_mask_init(adev);
+	amdgpu_debugfs_gfx_sched_mask_init(adev);
+	amdgpu_debugfs_compute_sched_mask_init(adev);
+	amdgpu_debugfs_sdma_sched_mask_init(adev);
+
 	amdgpu_ras_debugfs_create_all(adev);
 	amdgpu_rap_debugfs_init(adev);
 	amdgpu_securedisplay_debugfs_init(adev);
 	amdgpu_fw_attestation_debugfs_init(adev);
 
-	debugfs_create_file("amdgpu_evict_vram", 0444, root, adev,
+	debugfs_create_file("amdgpu_evict_vram", 0400, root, adev,
 			    &amdgpu_evict_vram_fops);
-	debugfs_create_file("amdgpu_evict_gtt", 0444, root, adev,
+	debugfs_create_file("amdgpu_evict_gtt", 0400, root, adev,
 			    &amdgpu_evict_gtt_fops);
-	debugfs_create_file("amdgpu_test_ib", 0444, root, adev,
+	debugfs_create_file("amdgpu_test_ib", 0400, root, adev,
 			    &amdgpu_debugfs_test_ib_fops);
 	debugfs_create_file("amdgpu_vm_info", 0444, root, adev,
 			    &amdgpu_debugfs_vm_info_fops);
 	debugfs_create_file("amdgpu_benchmark", 0200, root, adev,
 			    &amdgpu_benchmark_fops);
-	debugfs_create_file("amdgpu_reset_dump_register_list", 0644, root, adev,
-			    &amdgpu_reset_dump_register_list);
 
 	adev->debugfs_vbios_blob.data = adev->bios;
 	adev->debugfs_vbios_blob.size = adev->bios_size;

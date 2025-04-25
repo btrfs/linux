@@ -412,7 +412,7 @@ static int gfx_v9_4_2_run_shader(struct amdgpu_device *adev,
 	r = amdgpu_ib_schedule(ring, 1, ib, NULL, fence_ptr);
 	if (r) {
 		dev_err(adev->dev, "ib submit failed (%d).\n", r);
-		amdgpu_ib_free(adev, ib, NULL);
+		amdgpu_ib_free(ib, NULL);
 	}
 	return r;
 }
@@ -611,16 +611,16 @@ static int gfx_v9_4_2_do_sgprs_init(struct amdgpu_device *adev)
 	}
 
 disp2_failed:
-	amdgpu_ib_free(adev, &disp_ibs[2], NULL);
+	amdgpu_ib_free(&disp_ibs[2], NULL);
 	dma_fence_put(fences[2]);
 disp1_failed:
-	amdgpu_ib_free(adev, &disp_ibs[1], NULL);
+	amdgpu_ib_free(&disp_ibs[1], NULL);
 	dma_fence_put(fences[1]);
 disp0_failed:
-	amdgpu_ib_free(adev, &disp_ibs[0], NULL);
+	amdgpu_ib_free(&disp_ibs[0], NULL);
 	dma_fence_put(fences[0]);
 pro_end:
-	amdgpu_ib_free(adev, &wb_ib, NULL);
+	amdgpu_ib_free(&wb_ib, NULL);
 
 	if (r)
 		dev_info(adev->dev, "Init SGPRS Failed\n");
@@ -687,10 +687,10 @@ static int gfx_v9_4_2_do_vgprs_init(struct amdgpu_device *adev)
 	}
 
 disp_failed:
-	amdgpu_ib_free(adev, &disp_ib, NULL);
+	amdgpu_ib_free(&disp_ib, NULL);
 	dma_fence_put(fence);
 pro_end:
-	amdgpu_ib_free(adev, &wb_ib, NULL);
+	amdgpu_ib_free(&wb_ib, NULL);
 
 	if (r)
 		dev_info(adev->dev, "Init VGPRS Failed\n");
@@ -1909,18 +1909,7 @@ static void gfx_v9_4_2_reset_sq_timeout_status(struct amdgpu_device *adev)
 	mutex_unlock(&adev->grbm_idx_mutex);
 }
 
-static bool gfx_v9_4_2_query_uctl2_poison_status(struct amdgpu_device *adev)
-{
-	u32 status = 0;
-	struct amdgpu_vmhub *hub;
 
-	hub = &adev->vmhub[AMDGPU_GFXHUB(0)];
-	status = RREG32(hub->vm_l2_pro_fault_status);
-	/* reset page fault status */
-	WREG32_P(hub->vm_l2_pro_fault_cntl, 1, ~1);
-
-	return REG_GET_FIELD(status, VM_L2_PROTECTION_FAULT_STATUS, FED);
-}
 
 struct amdgpu_ras_block_hw_ops  gfx_v9_4_2_ras_ops = {
 		.query_ras_error_count = &gfx_v9_4_2_query_ras_error_count,
@@ -1934,5 +1923,4 @@ struct amdgpu_gfx_ras gfx_v9_4_2_ras = {
 		.hw_ops = &gfx_v9_4_2_ras_ops,
 	},
 	.enable_watchdog_timer = &gfx_v9_4_2_enable_watchdog_timer,
-	.query_utcl2_poison_status = gfx_v9_4_2_query_uctl2_poison_status,
 };

@@ -2,7 +2,7 @@
 //
 // tegra210_ahub.c - Tegra210 AHUB driver
 //
-// Copyright (c) 2020-2022, NVIDIA CORPORATION.  All rights reserved.
+// Copyright (c) 2020-2024, NVIDIA CORPORATION.  All rights reserved.
 
 #include <linux/clk.h>
 #include <linux/device.h>
@@ -1319,7 +1319,7 @@ static const struct of_device_id tegra_ahub_of_match[] = {
 };
 MODULE_DEVICE_TABLE(of, tegra_ahub_of_match);
 
-static int __maybe_unused tegra_ahub_runtime_suspend(struct device *dev)
+static int tegra_ahub_runtime_suspend(struct device *dev)
 {
 	struct tegra_ahub *ahub = dev_get_drvdata(dev);
 
@@ -1331,7 +1331,7 @@ static int __maybe_unused tegra_ahub_runtime_suspend(struct device *dev)
 	return 0;
 }
 
-static int __maybe_unused tegra_ahub_runtime_resume(struct device *dev)
+static int tegra_ahub_runtime_resume(struct device *dev)
 {
 	struct tegra_ahub *ahub = dev_get_drvdata(dev);
 	int err;
@@ -1391,11 +1391,13 @@ static int tegra_ahub_probe(struct platform_device *pdev)
 		return err;
 	}
 
-	err = of_platform_populate(pdev->dev.of_node, NULL, NULL, &pdev->dev);
-	if (err)
-		return err;
-
 	pm_runtime_enable(&pdev->dev);
+
+	err = of_platform_populate(pdev->dev.of_node, NULL, NULL, &pdev->dev);
+	if (err) {
+		pm_runtime_disable(&pdev->dev);
+		return err;
+	}
 
 	return 0;
 }
@@ -1406,19 +1408,18 @@ static void tegra_ahub_remove(struct platform_device *pdev)
 }
 
 static const struct dev_pm_ops tegra_ahub_pm_ops = {
-	SET_RUNTIME_PM_OPS(tegra_ahub_runtime_suspend,
-			   tegra_ahub_runtime_resume, NULL)
-	SET_SYSTEM_SLEEP_PM_OPS(pm_runtime_force_suspend,
-				pm_runtime_force_resume)
+	RUNTIME_PM_OPS(tegra_ahub_runtime_suspend,
+		       tegra_ahub_runtime_resume, NULL)
+	SYSTEM_SLEEP_PM_OPS(pm_runtime_force_suspend, pm_runtime_force_resume)
 };
 
 static struct platform_driver tegra_ahub_driver = {
 	.probe = tegra_ahub_probe,
-	.remove_new = tegra_ahub_remove,
+	.remove = tegra_ahub_remove,
 	.driver = {
 		.name = "tegra210-ahub",
 		.of_match_table = tegra_ahub_of_match,
-		.pm = &tegra_ahub_pm_ops,
+		.pm = pm_ptr(&tegra_ahub_pm_ops),
 	},
 };
 module_platform_driver(tegra_ahub_driver);

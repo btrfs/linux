@@ -20,7 +20,6 @@
  * OTHER DEALINGS IN THE SOFTWARE.
  */
 #include <linux/module.h>
-#include <linux/fdtable.h>
 #include <linux/uaccess.h>
 #include <linux/firmware.h>
 #include "amdgpu.h"
@@ -300,7 +299,7 @@ static int suspend_resume_compute_scheduler(struct amdgpu_device *adev, bool sus
 			if (r)
 				goto out;
 		} else {
-			drm_sched_start(&ring->sched, false);
+			drm_sched_start(&ring->sched, 0);
 		}
 	}
 
@@ -416,7 +415,10 @@ const struct kfd2kgd_calls arcturus_kfd2kgd = {
 	.set_address_watch = kgd_gfx_v9_set_address_watch,
 	.clear_address_watch = kgd_gfx_v9_clear_address_watch,
 	.get_iq_wait_times = kgd_gfx_v9_get_iq_wait_times,
-	.build_grace_period_packet_info = kgd_gfx_v9_build_grace_period_packet_info,
+	.build_dequeue_wait_counts_packet_info = kgd_gfx_v9_build_dequeue_wait_counts_packet_info,
 	.get_cu_occupancy = kgd_gfx_v9_get_cu_occupancy,
-	.program_trap_handler_settings = kgd_gfx_v9_program_trap_handler_settings
+	.program_trap_handler_settings = kgd_gfx_v9_program_trap_handler_settings,
+	.hqd_get_pq_addr = kgd_gfx_v9_hqd_get_pq_addr,
+	.hqd_reset = kgd_gfx_v9_hqd_reset,
+	.hqd_sdma_get_doorbell = kgd_gfx_v9_hqd_sdma_get_doorbell
 };

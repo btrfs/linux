@@ -12,11 +12,12 @@
 #include <asm/hwcap.h>
 #include <asm/sysreg.h>
 
-#define MAX_CPU_FEATURES	128
+#define MAX_CPU_FEATURES	192
 #define cpu_feature(x)		KERNEL_HWCAP_ ## x
 
 #define ARM64_SW_FEATURE_OVERRIDE_NOKASLR	0
 #define ARM64_SW_FEATURE_OVERRIDE_HVHE		4
+#define ARM64_SW_FEATURE_OVERRIDE_RODATA_OFF	8
 
 #ifndef __ASSEMBLY__
 
@@ -363,6 +364,7 @@ struct arm64_cpu_capabilities {
 			u8 field_pos;
 			u8 field_width;
 			u8 min_field_value;
+			u8 max_field_value;
 			u8 hwcap_type;
 			bool sign;
 			unsigned long hwcap;
@@ -436,6 +438,7 @@ void cpu_set_feature(unsigned int num);
 bool cpu_have_feature(unsigned int num);
 unsigned long cpu_get_elf_hwcap(void);
 unsigned long cpu_get_elf_hwcap2(void);
+unsigned long cpu_get_elf_hwcap3(void);
 
 #define cpu_set_named_feature(name) cpu_set_feature(cpu_feature(name))
 #define cpu_have_named_feature(name) cpu_have_feature(cpu_feature(name))
@@ -522,29 +525,6 @@ cpuid_feature_extract_unsigned_field(u64 features, int field)
 	return cpuid_feature_extract_unsigned_field_width(features, field, 4);
 }
 
-/*
- * Fields that identify the version of the Performance Monitors Extension do
- * not follow the standard ID scheme. See ARM DDI 0487E.a page D13-2825,
- * "Alternative ID scheme used for the Performance Monitors Extension version".
- */
-static inline u64 __attribute_const__
-cpuid_feature_cap_perfmon_field(u64 features, int field, u64 cap)
-{
-	u64 val = cpuid_feature_extract_unsigned_field(features, field);
-	u64 mask = GENMASK_ULL(field + 3, field);
-
-	/* Treat IMPLEMENTATION DEFINED functionality as unimplemented */
-	if (val == ID_AA64DFR0_EL1_PMUVer_IMP_DEF)
-		val = 0;
-
-	if (val > cap) {
-		features &= ~mask;
-		features |= (cap << field) & mask;
-	}
-
-	return features;
-}
-
 static inline u64 arm64_ftr_mask(const struct arm64_ftr_bits *ftrp)
 {
 	return (u64)GENMASK(ftrp->shift + ftrp->width - 1, ftrp->shift);
@@ -586,14 +566,14 @@ static inline bool id_aa64pfr0_32bit_el1(u64 pfr0)
 {
 	u32 val = cpuid_feature_extract_unsigned_field(pfr0, ID_AA64PFR0_EL1_EL1_SHIFT);
 
-	return val == ID_AA64PFR0_EL1_ELx_32BIT_64BIT;
+	return val == ID_AA64PFR0_EL1_EL1_AARCH32;
 }
 
 static inline bool id_aa64pfr0_32bit_el0(u64 pfr0)
 {
 	u32 val = cpuid_feature_extract_unsigned_field(pfr0, ID_AA64PFR0_EL1_EL0_SHIFT);
 
-	return val == ID_AA64PFR0_EL1_ELx_32BIT_64BIT;
+	return val == ID_AA64PFR0_EL1_EL0_AARCH32;
 }
 
 static inline bool id_aa64pfr0_sve(u64 pfr0)
@@ -606,6 +586,13 @@ static inline bool id_aa64pfr0_sve(u64 pfr0)
 static inline bool id_aa64pfr1_sme(u64 pfr1)
 {
 	u32 val = cpuid_feature_extract_unsigned_field(pfr1, ID_AA64PFR1_EL1_SME_SHIFT);
+
+	return val > 0;
+}
+
+static inline bool id_aa64pfr0_mpam(u64 pfr0)
+{
+	u32 val = cpuid_feature_extract_unsigned_field(pfr0, ID_AA64PFR0_EL1_MPAM_SHIFT);
 
 	return val > 0;
 }
@@ -661,6 +648,7 @@ static inline bool supports_clearbhb(int scope)
 }
 
 const struct cpumask *system_32bit_el0_cpumask(void);
+const struct cpumask *fallback_32bit_el0_cpumask(void);
 DECLARE_STATIC_KEY_FALSE(arm64_mismatched_32bit_el0);
 
 static inline bool system_supports_32bit_el0(void)
@@ -768,6 +756,11 @@ static __always_inline bool system_supports_tpidr2(void)
 	return system_supports_sme();
 }
 
+static __always_inline bool system_supports_fpmr(void)
+{
+	return alternative_has_cap_unlikely(ARM64_HAS_FPMR);
+}
+
 static __always_inline bool system_supports_cnp(void)
 {
 	return alternative_has_cap_unlikely(ARM64_HAS_CNP);
@@ -823,6 +816,36 @@ static inline bool system_supports_tlb_range(void)
 static inline bool system_supports_lpa2(void)
 {
 	return cpus_have_final_cap(ARM64_HAS_LPA2);
+}
+
+static inline bool system_supports_poe(void)
+{
+	return alternative_has_cap_unlikely(ARM64_HAS_S1POE);
+}
+
+static inline bool system_supports_gcs(void)
+{
+	return alternative_has_cap_unlikely(ARM64_HAS_GCS);
+}
+
+static inline bool system_supports_haft(void)
+{
+	return cpus_have_final_cap(ARM64_HAFT);
+}
+
+static __always_inline bool system_supports_mpam(void)
+{
+	return alternative_has_cap_unlikely(ARM64_MPAM);
+}
+
+static __always_inline bool system_supports_mpam_hcr(void)
+{
+	return alternative_has_cap_unlikely(ARM64_MPAM_HCR);
+}
+
+static inline bool system_supports_pmuv3(void)
+{
+	return cpus_have_final_cap(ARM64_HAS_PMUV3);
 }
 
 int do_emulate_mrs(struct pt_regs *regs, u32 sys_reg, u32 rt);
@@ -905,7 +928,9 @@ static inline unsigned int get_vmid_bits(u64 mmfr1)
 s64 arm64_ftr_safe_value(const struct arm64_ftr_bits *ftrp, s64 new, s64 cur);
 struct arm64_ftr_reg *get_arm64_ftr_reg(u32 sys_id);
 
+extern struct arm64_ftr_override id_aa64mmfr0_override;
 extern struct arm64_ftr_override id_aa64mmfr1_override;
+extern struct arm64_ftr_override id_aa64mmfr2_override;
 extern struct arm64_ftr_override id_aa64pfr0_override;
 extern struct arm64_ftr_override id_aa64pfr1_override;
 extern struct arm64_ftr_override id_aa64zfr0_override;
@@ -915,8 +940,113 @@ extern struct arm64_ftr_override id_aa64isar2_override;
 
 extern struct arm64_ftr_override arm64_sw_feature_override;
 
+static inline
+u64 arm64_apply_feature_override(u64 val, int feat, int width,
+				 const struct arm64_ftr_override *override)
+{
+	u64 oval = override->val;
+
+	/*
+	 * When it encounters an invalid override (e.g., an override that
+	 * cannot be honoured due to a missing CPU feature), the early idreg
+	 * override code will set the mask to 0x0 and the value to non-zero for
+	 * the field in question. In order to determine whether the override is
+	 * valid or not for the field we are interested in, we first need to
+	 * disregard bits belonging to other fields.
+	 */
+	oval &= GENMASK_ULL(feat + width - 1, feat);
+
+	/*
+	 * The override is valid if all value bits are accounted for in the
+	 * mask. If so, replace the masked bits with the override value.
+	 */
+	if (oval == (oval & override->mask)) {
+		val &= ~override->mask;
+		val |= oval;
+	}
+
+	/* Extract the field from the updated value */
+	return cpuid_feature_extract_unsigned_field(val, feat);
+}
+
+static inline bool arm64_test_sw_feature_override(int feat)
+{
+	/*
+	 * Software features are pseudo CPU features that have no underlying
+	 * CPUID system register value to apply the override to.
+	 */
+	return arm64_apply_feature_override(0, feat, 4,
+					    &arm64_sw_feature_override);
+}
+
+static inline bool kaslr_disabled_cmdline(void)
+{
+	return arm64_test_sw_feature_override(ARM64_SW_FEATURE_OVERRIDE_NOKASLR);
+}
+
 u32 get_kvm_ipa_limit(void);
 void dump_cpu_features(void);
+
+static inline bool cpu_has_bti(void)
+{
+	if (!IS_ENABLED(CONFIG_ARM64_BTI))
+		return false;
+
+	return arm64_apply_feature_override(read_cpuid(ID_AA64PFR1_EL1),
+					    ID_AA64PFR1_EL1_BT_SHIFT, 4,
+					    &id_aa64pfr1_override);
+}
+
+static inline bool cpu_has_pac(void)
+{
+	u64 isar1, isar2;
+
+	if (!IS_ENABLED(CONFIG_ARM64_PTR_AUTH))
+		return false;
+
+	isar1 = read_cpuid(ID_AA64ISAR1_EL1);
+	isar2 = read_cpuid(ID_AA64ISAR2_EL1);
+
+	if (arm64_apply_feature_override(isar1, ID_AA64ISAR1_EL1_APA_SHIFT, 4,
+					 &id_aa64isar1_override))
+		return true;
+
+	if (arm64_apply_feature_override(isar1, ID_AA64ISAR1_EL1_API_SHIFT, 4,
+					 &id_aa64isar1_override))
+		return true;
+
+	return arm64_apply_feature_override(isar2, ID_AA64ISAR2_EL1_APA3_SHIFT, 4,
+					    &id_aa64isar2_override);
+}
+
+static inline bool cpu_has_lva(void)
+{
+	u64 mmfr2;
+
+	mmfr2 = read_sysreg_s(SYS_ID_AA64MMFR2_EL1);
+	mmfr2 &= ~id_aa64mmfr2_override.mask;
+	mmfr2 |= id_aa64mmfr2_override.val;
+	return cpuid_feature_extract_unsigned_field(mmfr2,
+						    ID_AA64MMFR2_EL1_VARange_SHIFT);
+}
+
+static inline bool cpu_has_lpa2(void)
+{
+#ifdef CONFIG_ARM64_LPA2
+	u64 mmfr0;
+	int feat;
+
+	mmfr0 = read_sysreg(id_aa64mmfr0_el1);
+	mmfr0 &= ~id_aa64mmfr0_override.mask;
+	mmfr0 |= id_aa64mmfr0_override.val;
+	feat = cpuid_feature_extract_signed_field(mmfr0,
+						  ID_AA64MMFR0_EL1_TGRAN_SHIFT);
+
+	return feat >= ID_AA64MMFR0_EL1_TGRAN_LPA2;
+#else
+	return false;
+#endif
+}
 
 #endif /* __ASSEMBLY__ */
 

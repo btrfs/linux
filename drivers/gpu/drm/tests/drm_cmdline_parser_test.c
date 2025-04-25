@@ -7,6 +7,7 @@
 #include <kunit/test.h>
 
 #include <drm/drm_connector.h>
+#include <drm/drm_kunit_helpers.h>
 #include <drm/drm_modes.h>
 
 static const struct drm_connector no_connector = {};
@@ -955,8 +956,15 @@ struct drm_cmdline_tv_option_test {
 static void drm_test_cmdline_tv_options(struct kunit *test)
 {
 	const struct drm_cmdline_tv_option_test *params = test->param_value;
-	const struct drm_display_mode *expected_mode = params->mode_fn(NULL);
+	struct drm_display_mode *expected_mode;
 	struct drm_cmdline_mode mode = { };
+	int ret;
+
+	expected_mode = params->mode_fn(NULL);
+	KUNIT_ASSERT_NOT_NULL(test, expected_mode);
+
+	ret = drm_kunit_add_mode_destroy_action(test, expected_mode);
+	KUNIT_ASSERT_EQ(test, ret, 0);
 
 	KUNIT_EXPECT_TRUE(test, drm_mode_parse_command_line_for_connector(params->cmdline,
 									  &no_connector, &mode));
@@ -992,6 +1000,17 @@ static const struct drm_cmdline_tv_option_test drm_cmdline_tv_option_tests[] = {
 	TV_OPT_TEST(PAL_M, "720x480i,tv_mode=PAL-M", drm_mode_analog_ntsc_480i),
 	TV_OPT_TEST(PAL_N, "720x576i,tv_mode=PAL-N", drm_mode_analog_pal_576i),
 	TV_OPT_TEST(SECAM, "720x576i,tv_mode=SECAM", drm_mode_analog_pal_576i),
+	{
+		.name = "MONO_525",
+		.cmdline = "720x480i,tv_mode=Mono",
+		.mode_fn = drm_mode_analog_ntsc_480i,
+		.tv_mode = DRM_MODE_TV_MODE_MONOCHROME,
+	}, {
+		.name = "MONO_625",
+		.cmdline = "720x576i,tv_mode=Mono",
+		.mode_fn = drm_mode_analog_pal_576i,
+		.tv_mode = DRM_MODE_TV_MODE_MONOCHROME,
+	},
 };
 
 static void drm_cmdline_tv_option_desc(const struct drm_cmdline_tv_option_test *t,
@@ -1056,4 +1075,5 @@ static struct kunit_suite drm_cmdline_parser_test_suite = {
 kunit_test_suite(drm_cmdline_parser_test_suite);
 
 MODULE_AUTHOR("Maxime Ripard <maxime.ripard@bootlin.com>");
+MODULE_DESCRIPTION("Kunit test for drm_cmdline_parser functions");
 MODULE_LICENSE("GPL");

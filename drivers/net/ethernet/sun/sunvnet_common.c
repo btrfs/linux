@@ -39,7 +39,7 @@
  */
 #define	VNET_MAX_RETRIES	10
 
-MODULE_AUTHOR("David S. Miller (davem@davemloft.net)");
+MODULE_AUTHOR("David S. Miller <davem@davemloft.net>");
 MODULE_DESCRIPTION("Sun LDOM virtual network support library");
 MODULE_LICENSE("GPL");
 MODULE_VERSION("1.1");
@@ -1058,7 +1058,7 @@ void sunvnet_clean_timer_expire_common(struct timer_list *t)
 		(void)mod_timer(&port->clean_timer,
 				jiffies + VNET_CLEAN_TIMEOUT);
 	 else
-		del_timer(&port->clean_timer);
+		timer_delete(&port->clean_timer);
 }
 EXPORT_SYMBOL_GPL(sunvnet_clean_timer_expire_common);
 
@@ -1144,9 +1144,9 @@ static inline struct sk_buff *vnet_skb_shape(struct sk_buff *skb, int ncookies)
 		nskb->protocol = skb->protocol;
 		offset = skb_mac_header(skb) - skb->data;
 		skb_set_mac_header(nskb, offset);
-		offset = skb_network_header(skb) - skb->data;
+		offset = skb_network_offset(skb);
 		skb_set_network_header(nskb, offset);
-		offset = skb_transport_header(skb) - skb->data;
+		offset = skb_transport_offset(skb);
 		skb_set_transport_header(nskb, offset);
 
 		offset = 0;
@@ -1513,7 +1513,7 @@ out_dropped:
 		(void)mod_timer(&port->clean_timer,
 				jiffies + VNET_CLEAN_TIMEOUT);
 	else if (port)
-		del_timer(&port->clean_timer);
+		timer_delete(&port->clean_timer);
 	rcu_read_unlock();
 	dev_kfree_skb(skb);
 	vnet_free_skbs(freeskbs);
@@ -1707,7 +1707,7 @@ EXPORT_SYMBOL_GPL(sunvnet_port_free_tx_bufs_common);
 
 void vnet_port_reset(struct vnet_port *port)
 {
-	del_timer(&port->clean_timer);
+	timer_delete(&port->clean_timer);
 	sunvnet_port_free_tx_bufs_common(port);
 	port->rmtu = 0;
 	port->tso = (port->vsw == 0);  /* no tso in vsw, misbehaves in bridge */

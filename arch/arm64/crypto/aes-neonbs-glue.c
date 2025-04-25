@@ -16,6 +16,7 @@
 #include <linux/module.h>
 
 MODULE_AUTHOR("Ard Biesheuvel <ard.biesheuvel@linaro.org>");
+MODULE_DESCRIPTION("Bit sliced AES using NEON instructions");
 MODULE_LICENSE("GPL v2");
 
 MODULE_ALIAS_CRYPTO("ecb(aes)");
@@ -286,7 +287,8 @@ static int __xts_crypt(struct skcipher_request *req, bool encrypt,
 	struct skcipher_walk walk;
 	int nbytes, err;
 	int first = 1;
-	u8 *out, *in;
+	const u8 *in;
+	u8 *out;
 
 	if (req->cryptlen < AES_BLOCK_SIZE)
 		return -EINVAL;

@@ -221,24 +221,25 @@ static void tsnep_phy_link_status_change(struct net_device *netdev)
 
 static int tsnep_phy_loopback(struct tsnep_adapter *adapter, bool enable)
 {
-	int retval;
+	int speed;
 
-	retval = phy_loopback(adapter->phydev, enable);
+	if (enable) {
+		if (adapter->phydev->autoneg == AUTONEG_DISABLE &&
+		    adapter->phydev->speed == SPEED_100)
+			speed = SPEED_100;
+		else
+			speed = SPEED_1000;
+	} else {
+		speed = 0;
+	}
 
-	/* PHY link state change is not signaled if loopback is enabled, it
-	 * would delay a working loopback anyway, let's ensure that loopback
-	 * is working immediately by setting link mode directly
-	 */
-	if (!retval && enable)
-		tsnep_set_link_mode(adapter);
-
-	return retval;
+	return phy_loopback(adapter->phydev, enable, speed);
 }
 
 static int tsnep_phy_open(struct tsnep_adapter *adapter)
 {
 	struct phy_device *phydev;
-	struct ethtool_eee ethtool_eee;
+	struct ethtool_keee ethtool_keee;
 	int retval;
 
 	retval = phy_connect_direct(adapter->netdev, adapter->phydev,
@@ -257,8 +258,8 @@ static int tsnep_phy_open(struct tsnep_adapter *adapter)
 	phy_remove_link_mode(phydev, ETHTOOL_LINK_MODE_1000baseT_Half_BIT);
 
 	/* disable EEE autoneg, EEE not supported by TSNEP */
-	memset(&ethtool_eee, 0, sizeof(ethtool_eee));
-	phy_ethtool_set_eee(adapter->phydev, &ethtool_eee);
+	memset(&ethtool_keee, 0, sizeof(ethtool_keee));
+	phy_ethtool_set_eee(adapter->phydev, &ethtool_keee);
 
 	adapter->phydev->irq = PHY_MAC_INTERRUPT;
 	phy_start(adapter->phydev);
@@ -850,8 +851,8 @@ static bool tsnep_tx_poll(struct tsnep_tx *tx, int napi_budget)
 			struct skb_shared_hwtstamps hwtstamps;
 			u64 timestamp;
 
-			if (skb_shinfo(entry->skb)->tx_flags &
-			    SKBTX_HW_TSTAMP_USE_CYCLES)
+			if (entry->skb->sk &&
+			    READ_ONCE(entry->skb->sk->sk_tsflags) & SOF_TIMESTAMPING_BIND_PHC)
 				timestamp =
 					__le64_to_cpu(entry->desc_wb->counter);
 			else
@@ -1266,6 +1267,14 @@ static int tsnep_rx_refill_zc(struct tsnep_rx *rx, int count, bool reuse)
 	return desc_refilled;
 }
 
+static void tsnep_xsk_rx_need_wakeup(struct tsnep_rx *rx, int desc_available)
+{
+	if (desc_available)
+		xsk_set_rx_need_wakeup(rx->xsk_pool);
+	else
+		xsk_clear_rx_need_wakeup(rx->xsk_pool);
+}
+
 static bool tsnep_xdp_run_prog(struct tsnep_rx *rx, struct bpf_prog *prog,
 			       struct xdp_buff *xdp, int *status,
 			       struct netdev_queue *tx_nq, struct tsnep_tx *tx)
@@ -1577,7 +1586,7 @@ static int tsnep_rx_poll_zc(struct tsnep_rx *rx, struct napi_struct *napi,
 		length = __le32_to_cpu(entry->desc_wb->properties) &
 			 TSNEP_DESC_LENGTH_MASK;
 		xsk_buff_set_size(entry->xdp, length - ETH_FCS_LEN);
-		xsk_buff_dma_sync_for_cpu(entry->xdp, rx->xsk_pool);
+		xsk_buff_dma_sync_for_cpu(entry->xdp);
 
 		/* RX metadata with timestamps is in front of actual data,
 		 * subtract metadata size to get length of actual data and
@@ -1627,10 +1636,7 @@ static int tsnep_rx_poll_zc(struct tsnep_rx *rx, struct napi_struct *napi,
 		desc_available -= tsnep_rx_refill_zc(rx, desc_available, false);
 
 	if (xsk_uses_need_wakeup(rx->xsk_pool)) {
-		if (desc_available)
-			xsk_set_rx_need_wakeup(rx->xsk_pool);
-		else
-			xsk_clear_rx_need_wakeup(rx->xsk_pool);
+		tsnep_xsk_rx_need_wakeup(rx, desc_available);
 
 		return done;
 	}
@@ -1775,14 +1781,8 @@ static void tsnep_rx_reopen_xsk(struct tsnep_rx *rx)
 	 * first polling would be too late as need wakeup signalisation would
 	 * be delayed for an indefinite time
 	 */
-	if (xsk_uses_need_wakeup(rx->xsk_pool)) {
-		int desc_available = tsnep_rx_desc_available(rx);
-
-		if (desc_available)
-			xsk_set_rx_need_wakeup(rx->xsk_pool);
-		else
-			xsk_clear_rx_need_wakeup(rx->xsk_pool);
-	}
+	if (xsk_uses_need_wakeup(rx->xsk_pool))
+		tsnep_xsk_rx_need_wakeup(rx, tsnep_rx_desc_available(rx));
 }
 
 static bool tsnep_pending(struct tsnep_queue *queue)
@@ -1965,23 +1965,41 @@ failed:
 
 static void tsnep_queue_enable(struct tsnep_queue *queue)
 {
+	struct tsnep_adapter *adapter = queue->adapter;
+
+	netif_napi_set_irq(&queue->napi, queue->irq);
 	napi_enable(&queue->napi);
-	tsnep_enable_irq(queue->adapter, queue->irq_mask);
+	tsnep_enable_irq(adapter, queue->irq_mask);
 
-	if (queue->tx)
+	if (queue->tx) {
+		netif_queue_set_napi(adapter->netdev, queue->tx->queue_index,
+				     NETDEV_QUEUE_TYPE_TX, &queue->napi);
 		tsnep_tx_enable(queue->tx);
+	}
 
-	if (queue->rx)
+	if (queue->rx) {
+		netif_queue_set_napi(adapter->netdev, queue->rx->queue_index,
+				     NETDEV_QUEUE_TYPE_RX, &queue->napi);
 		tsnep_rx_enable(queue->rx);
+	}
 }
 
 static void tsnep_queue_disable(struct tsnep_queue *queue)
 {
-	if (queue->tx)
+	struct tsnep_adapter *adapter = queue->adapter;
+
+	if (queue->rx)
+		netif_queue_set_napi(adapter->netdev, queue->rx->queue_index,
+				     NETDEV_QUEUE_TYPE_RX, NULL);
+
+	if (queue->tx) {
 		tsnep_tx_disable(queue->tx, &queue->napi);
+		netif_queue_set_napi(adapter->netdev, queue->tx->queue_index,
+				     NETDEV_QUEUE_TYPE_TX, NULL);
+	}
 
 	napi_disable(&queue->napi);
-	tsnep_disable_irq(queue->adapter, queue->irq_mask);
+	tsnep_disable_irq(adapter, queue->irq_mask);
 
 	/* disable RX after NAPI polling has been disabled, because RX can be
 	 * enabled during NAPI polling
@@ -2570,8 +2588,7 @@ static int tsnep_probe(struct platform_device *pdev)
 	mutex_init(&adapter->rxnfc_lock);
 	INIT_LIST_HEAD(&adapter->rxnfc_rules);
 
-	io = platform_get_resource(pdev, IORESOURCE_MEM, 0);
-	adapter->addr = devm_ioremap_resource(&pdev->dev, io);
+	adapter->addr = devm_platform_get_and_ioremap_resource(pdev, 0, &io);
 	if (IS_ERR(adapter->addr))
 		return PTR_ERR(adapter->addr);
 	netdev->mem_start = io->start;
@@ -2689,7 +2706,7 @@ static struct platform_driver tsnep_driver = {
 		.of_match_table = tsnep_of_match,
 	},
 	.probe = tsnep_probe,
-	.remove_new = tsnep_remove,
+	.remove = tsnep_remove,
 };
 module_platform_driver(tsnep_driver);
 

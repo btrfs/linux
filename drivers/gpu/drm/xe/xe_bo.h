@@ -13,47 +13,48 @@
 #include "xe_vm_types.h"
 #include "xe_vm.h"
 
-/**
- * xe_vm_assert_held(vm) - Assert that the vm's reservation object is held.
- * @vm: The vm
- */
-#define xe_vm_assert_held(vm) dma_resv_assert_held(xe_vm_resv(vm))
-
-
-
 #define XE_DEFAULT_GTT_SIZE_MB          3072ULL /* 3GB by default */
 
-#define XE_BO_CREATE_USER_BIT		BIT(0)
+#define XE_BO_FLAG_USER		BIT(0)
 /* The bits below need to be contiguous, or things break */
-#define XE_BO_CREATE_SYSTEM_BIT		BIT(1)
-#define XE_BO_CREATE_VRAM0_BIT		BIT(2)
-#define XE_BO_CREATE_VRAM1_BIT		BIT(3)
-#define XE_BO_CREATE_VRAM_MASK		(XE_BO_CREATE_VRAM0_BIT | \
-					 XE_BO_CREATE_VRAM1_BIT)
+#define XE_BO_FLAG_SYSTEM		BIT(1)
+#define XE_BO_FLAG_VRAM0		BIT(2)
+#define XE_BO_FLAG_VRAM1		BIT(3)
+#define XE_BO_FLAG_VRAM_MASK		(XE_BO_FLAG_VRAM0 | XE_BO_FLAG_VRAM1)
 /* -- */
-#define XE_BO_CREATE_STOLEN_BIT		BIT(4)
-#define XE_BO_CREATE_VRAM_IF_DGFX(tile) \
-	(IS_DGFX(tile_to_xe(tile)) ? XE_BO_CREATE_VRAM0_BIT << (tile)->id : \
-	 XE_BO_CREATE_SYSTEM_BIT)
-#define XE_BO_CREATE_GGTT_BIT		BIT(5)
-#define XE_BO_CREATE_IGNORE_MIN_PAGE_SIZE_BIT BIT(6)
-#define XE_BO_CREATE_PINNED_BIT		BIT(7)
-#define XE_BO_CREATE_NO_RESV_EVICT	BIT(8)
-#define XE_BO_DEFER_BACKING		BIT(9)
-#define XE_BO_SCANOUT_BIT		BIT(10)
-#define XE_BO_FIXED_PLACEMENT_BIT	BIT(11)
-#define XE_BO_PAGETABLE			BIT(12)
-#define XE_BO_NEEDS_CPU_ACCESS		BIT(13)
-/* this one is trigger internally only */
-#define XE_BO_INTERNAL_TEST		BIT(30)
-#define XE_BO_INTERNAL_64K		BIT(31)
+#define XE_BO_FLAG_STOLEN		BIT(4)
+#define XE_BO_FLAG_VRAM_IF_DGFX(tile)	(IS_DGFX(tile_to_xe(tile)) ? \
+					 XE_BO_FLAG_VRAM0 << (tile)->id : \
+					 XE_BO_FLAG_SYSTEM)
+#define XE_BO_FLAG_GGTT			BIT(5)
+#define XE_BO_FLAG_IGNORE_MIN_PAGE_SIZE BIT(6)
+#define XE_BO_FLAG_PINNED		BIT(7)
+#define XE_BO_FLAG_NO_RESV_EVICT	BIT(8)
+#define XE_BO_FLAG_DEFER_BACKING	BIT(9)
+#define XE_BO_FLAG_SCANOUT		BIT(10)
+#define XE_BO_FLAG_FIXED_PLACEMENT	BIT(11)
+#define XE_BO_FLAG_PAGETABLE		BIT(12)
+#define XE_BO_FLAG_NEEDS_CPU_ACCESS	BIT(13)
+#define XE_BO_FLAG_NEEDS_UC		BIT(14)
+#define XE_BO_FLAG_NEEDS_64K		BIT(15)
+#define XE_BO_FLAG_NEEDS_2M		BIT(16)
+#define XE_BO_FLAG_GGTT_INVALIDATE	BIT(17)
+#define XE_BO_FLAG_GGTT0                BIT(18)
+#define XE_BO_FLAG_GGTT1                BIT(19)
+#define XE_BO_FLAG_GGTT2                BIT(20)
+#define XE_BO_FLAG_GGTT3                BIT(21)
+#define XE_BO_FLAG_GGTT_ALL             (XE_BO_FLAG_GGTT0 | \
+					 XE_BO_FLAG_GGTT1 | \
+					 XE_BO_FLAG_GGTT2 | \
+					 XE_BO_FLAG_GGTT3)
+#define XE_BO_FLAG_CPU_ADDR_MIRROR	BIT(22)
 
-#define XELPG_PPGTT_PTE_PAT3		BIT_ULL(62)
-#define XE2_PPGTT_PTE_PAT4		BIT_ULL(61)
-#define XE_PPGTT_PDE_PDPE_PAT2		BIT_ULL(12)
-#define XE_PPGTT_PTE_PAT2		BIT_ULL(7)
-#define XE_PPGTT_PTE_PAT1		BIT_ULL(4)
-#define XE_PPGTT_PTE_PAT0		BIT_ULL(3)
+/* this one is trigger internally only */
+#define XE_BO_FLAG_INTERNAL_TEST	BIT(30)
+#define XE_BO_FLAG_INTERNAL_64K		BIT(31)
+
+#define XE_BO_FLAG_GGTTx(tile) \
+	(XE_BO_FLAG_GGTT0 << (tile)->id)
 
 #define XE_PTE_SHIFT			12
 #define XE_PAGE_SIZE			(1 << XE_PTE_SHIFT)
@@ -67,20 +68,6 @@
 #define XE_64K_PTE_MASK			(XE_64K_PAGE_SIZE - 1)
 #define XE_64K_PDE_MASK			(XE_PDE_MASK >> 4)
 
-#define XE_PDE_PS_2M			BIT_ULL(7)
-#define XE_PDPE_PS_1G			BIT_ULL(7)
-#define XE_PDE_IPS_64K			BIT_ULL(11)
-
-#define XE_GGTT_PTE_DM			BIT_ULL(1)
-#define XE_USM_PPGTT_PTE_AE		BIT_ULL(10)
-#define XE_PPGTT_PTE_DM			BIT_ULL(11)
-#define XE_PDE_64K			BIT_ULL(6)
-#define XE_PTE_PS64			BIT_ULL(8)
-#define XE_PTE_NULL			BIT_ULL(9)
-
-#define XE_PAGE_PRESENT			BIT_ULL(0)
-#define XE_PAGE_RW			BIT_ULL(1)
-
 #define XE_PL_SYSTEM		TTM_PL_SYSTEM
 #define XE_PL_TT		TTM_PL_TT
 #define XE_PL_VRAM0		TTM_PL_VRAM
@@ -88,6 +75,8 @@
 #define XE_PL_STOLEN		(TTM_NUM_MEM_TYPES - 1)
 
 #define XE_BO_PROPS_INVALID	(-1)
+
+#define XE_PCI_BARRIER_MMAP_OFFSET	(0x50 << XE_PTE_SHIFT)
 
 struct sg_table;
 
@@ -103,7 +92,7 @@ struct xe_bo *
 xe_bo_create_locked_range(struct xe_device *xe,
 			  struct xe_tile *tile, struct xe_vm *vm,
 			  size_t size, u64 start, u64 end,
-			  enum ttm_bo_type type, u32 flags);
+			  enum ttm_bo_type type, u32 flags, u64 alignment);
 struct xe_bo *xe_bo_create_locked(struct xe_device *xe, struct xe_tile *tile,
 				  struct xe_vm *vm, size_t size,
 				  enum ttm_bo_type type, u32 flags);
@@ -113,7 +102,6 @@ struct xe_bo *xe_bo_create(struct xe_device *xe, struct xe_tile *tile,
 struct xe_bo *xe_bo_create_user(struct xe_device *xe, struct xe_tile *tile,
 				struct xe_vm *vm, size_t size,
 				u16 cpu_caching,
-				enum ttm_bo_type type,
 				u32 flags);
 struct xe_bo *xe_bo_create_pin_map(struct xe_device *xe, struct xe_tile *tile,
 				   struct xe_vm *vm, size_t size,
@@ -121,6 +109,12 @@ struct xe_bo *xe_bo_create_pin_map(struct xe_device *xe, struct xe_tile *tile,
 struct xe_bo *xe_bo_create_pin_map_at(struct xe_device *xe, struct xe_tile *tile,
 				      struct xe_vm *vm, size_t size, u64 offset,
 				      enum ttm_bo_type type, u32 flags);
+struct xe_bo *xe_bo_create_pin_map_at_aligned(struct xe_device *xe,
+					      struct xe_tile *tile,
+					      struct xe_vm *vm,
+					      size_t size, u64 offset,
+					      enum ttm_bo_type type, u32 flags,
+					      u64 alignment);
 struct xe_bo *xe_bo_create_from_data(struct xe_device *xe, struct xe_tile *tile,
 				     const void *data, size_t size,
 				     enum ttm_bo_type type, u32 flags);
@@ -128,6 +122,7 @@ struct xe_bo *xe_managed_bo_create_pin_map(struct xe_device *xe, struct xe_tile 
 					   size_t size, u32 flags);
 struct xe_bo *xe_managed_bo_create_from_data(struct xe_device *xe, struct xe_tile *tile,
 					     const void *data, size_t size, u32 flags);
+int xe_managed_bo_reinit_in_vram(struct xe_device *xe, struct xe_tile *tile, struct xe_bo **src);
 
 int xe_bo_placement_for_flags(struct xe_device *xe, struct xe_bo *bo,
 			      u32 bo_flags);
@@ -152,10 +147,28 @@ static inline struct xe_bo *xe_bo_get(struct xe_bo *bo)
 	return bo;
 }
 
-static inline void xe_bo_put(struct xe_bo *bo)
+void xe_bo_put(struct xe_bo *bo);
+
+/*
+ * xe_bo_get_unless_zero() - Conditionally obtain a GEM object refcount on an
+ * xe bo
+ * @bo: The bo for which we want to obtain a refcount.
+ *
+ * There is a short window between where the bo's GEM object refcount reaches
+ * zero and where we put the final ttm_bo reference. Code in the eviction- and
+ * shrinking path should therefore attempt to grab a gem object reference before
+ * trying to use members outside of the base class ttm object. This function is
+ * intended for that purpose. On successful return, this function must be paired
+ * with an xe_bo_put().
+ *
+ * Return: @bo on success, NULL on failure.
+ */
+static inline __must_check struct xe_bo *xe_bo_get_unless_zero(struct xe_bo *bo)
 {
-	if (bo)
-		drm_gem_object_put(&bo->ttm.base);
+	if (!bo || !kref_get_unless_zero(&bo->ttm.base.refcount))
+		return NULL;
+
+	return bo;
 }
 
 static inline void __xe_bo_unset_bulk_move(struct xe_bo *bo)
@@ -196,6 +209,11 @@ static inline bool xe_bo_is_pinned(struct xe_bo *bo)
 	return bo->ttm.pin_count;
 }
 
+static inline bool xe_bo_is_protected(const struct xe_bo *bo)
+{
+	return bo->pxp_key_instance;
+}
+
 static inline void xe_bo_unpin_map_no_vm(struct xe_bo *bo)
 {
 	if (likely(bo)) {
@@ -218,20 +236,36 @@ xe_bo_main_addr(struct xe_bo *bo, size_t page_size)
 }
 
 static inline u32
+__xe_bo_ggtt_addr(struct xe_bo *bo, u8 tile_id)
+{
+	struct xe_ggtt_node *ggtt_node = bo->ggtt_node[tile_id];
+
+	if (XE_WARN_ON(!ggtt_node))
+		return 0;
+
+	XE_WARN_ON(ggtt_node->base.size > bo->size);
+	XE_WARN_ON(ggtt_node->base.start + ggtt_node->base.size > (1ull << 32));
+	return ggtt_node->base.start;
+}
+
+static inline u32
 xe_bo_ggtt_addr(struct xe_bo *bo)
 {
-	XE_WARN_ON(bo->ggtt_node.size > bo->size);
-	XE_WARN_ON(bo->ggtt_node.start + bo->ggtt_node.size > (1ull << 32));
-	return bo->ggtt_node.start;
+	xe_assert(xe_bo_device(bo), bo->tile);
+
+	return __xe_bo_ggtt_addr(bo, bo->tile->id);
 }
 
 int xe_bo_vmap(struct xe_bo *bo);
 void xe_bo_vunmap(struct xe_bo *bo);
+int xe_bo_read(struct xe_bo *bo, u64 offset, void *dst, int size);
 
 bool mem_type_is_vram(u32 mem_type);
 bool xe_bo_is_vram(struct xe_bo *bo);
 bool xe_bo_is_stolen(struct xe_bo *bo);
 bool xe_bo_is_stolen_devmem(struct xe_bo *bo);
+bool xe_bo_is_vm_bound(struct xe_bo *bo);
+bool xe_bo_has_single_placement(struct xe_bo *bo);
 uint64_t vram_region_gpu_offset(struct ttm_resource *res);
 
 bool xe_bo_can_migrate(struct xe_bo *bo, u32 mem_type);
@@ -242,13 +276,15 @@ int xe_bo_evict(struct xe_bo *bo, bool force_alloc);
 int xe_bo_evict_pinned(struct xe_bo *bo);
 int xe_bo_restore_pinned(struct xe_bo *bo);
 
-extern struct ttm_device_funcs xe_ttm_funcs;
+extern const struct ttm_device_funcs xe_ttm_funcs;
 extern const char *const xe_mem_type_to_name[];
 
 int xe_gem_create_ioctl(struct drm_device *dev, void *data,
 			struct drm_file *file);
 int xe_gem_mmap_offset_ioctl(struct drm_device *dev, void *data,
 			     struct drm_file *file);
+void xe_bo_runtime_pm_release_mmap_offset(struct xe_bo *bo);
+
 int xe_bo_dumb_create(struct drm_file *file_priv,
 		      struct drm_device *dev,
 		      struct drm_mode_create_dumb *args);
@@ -310,6 +346,25 @@ xe_bo_put_deferred(struct xe_bo *bo, struct llist_head *deferred)
 
 void xe_bo_put_commit(struct llist_head *deferred);
 
+/**
+ * xe_bo_put_async() - Put BO async
+ * @bo: The bo to put.
+ *
+ * Put BO async, the final put is deferred to a worker to exit an IRQ context.
+ */
+static inline void
+xe_bo_put_async(struct xe_bo *bo)
+{
+	struct xe_bo_dev *bo_device = &xe_bo_device(bo)->bo_device;
+
+	if (xe_bo_put_deferred(bo, &bo_device->async_list))
+		schedule_work(&bo_device->async_free);
+}
+
+void xe_bo_dev_init(struct xe_bo_dev *bo_device);
+
+void xe_bo_dev_fini(struct xe_bo_dev *bo_device);
+
 struct sg_table *xe_bo_sg(struct xe_bo *bo);
 
 /*
@@ -336,9 +391,20 @@ static inline unsigned int xe_sg_segment_size(struct device *dev)
 	return round_down(max / 2, PAGE_SIZE);
 }
 
-#define i915_gem_object_flush_if_display(obj)		((void)(obj))
+/**
+ * struct xe_bo_shrink_flags - flags governing the shrink behaviour.
+ * @purge: Only purging allowed. Don't shrink if bo not purgeable.
+ * @writeback: Attempt to immediately move content to swap.
+ */
+struct xe_bo_shrink_flags {
+	u32 purge : 1;
+	u32 writeback : 1;
+};
 
-#if IS_ENABLED(CONFIG_DRM_XE_KUNIT_TEST)
+long xe_bo_shrink(struct ttm_operation_ctx *ctx, struct ttm_buffer_object *bo,
+		  const struct xe_bo_shrink_flags flags,
+		  unsigned long *scanned);
+
 /**
  * xe_bo_is_mem_type - Whether the bo currently resides in the given
  * TTM memory type
@@ -352,5 +418,4 @@ static inline bool xe_bo_is_mem_type(struct xe_bo *bo, u32 mem_type)
 	xe_bo_assert_held(bo);
 	return bo->ttm.resource->mem_type == mem_type;
 }
-#endif
 #endif

@@ -25,7 +25,7 @@
 #include <linux/ioctl.h>
 #include <linux/skbuff.h>
 #include <linux/bitrev.h>
-#include <asm/unaligned.h>
+#include <linux/unaligned.h>
 
 #include <net/bluetooth/bluetooth.h>
 #include <net/bluetooth/hci_core.h>
@@ -382,7 +382,7 @@ static void bcsp_pkt_cull(struct bcsp_struct *bcsp)
 	}
 
 	if (skb_queue_empty(&bcsp->unack))
-		del_timer(&bcsp->tbcsp);
+		timer_delete(&bcsp->tbcsp);
 
 	spin_unlock_irqrestore(&bcsp->unack.lock, flags);
 

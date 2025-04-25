@@ -24,7 +24,6 @@
  *     David Airlie
  */
 
-#include <linux/async.h>
 #include <linux/console.h>
 #include <linux/delay.h>
 #include <linux/errno.h>
@@ -38,14 +37,19 @@
 #include <linux/tty.h>
 #include <linux/vga_switcheroo.h>
 
+#include <drm/clients/drm_client_setup.h>
 #include <drm/drm_crtc.h>
+#include <drm/drm_crtc_helper.h>
 #include <drm/drm_fb_helper.h>
 #include <drm/drm_fourcc.h>
+#include <drm/drm_gem.h>
 #include <drm/drm_gem_framebuffer_helper.h>
-
-#include "gem/i915_gem_mman.h"
+#include <drm/drm_managed.h>
+#include <drm/drm_print.h>
 
 #include "i915_drv.h"
+#include "i915_vma.h"
+#include "intel_bo.h"
 #include "intel_display_types.h"
 #include "intel_fb.h"
 #include "intel_fb_pin.h"
@@ -54,25 +58,16 @@
 #include "intel_frontbuffer.h"
 
 struct intel_fbdev {
-	struct drm_fb_helper helper;
 	struct intel_framebuffer *fb;
 	struct i915_vma *vma;
 	unsigned long vma_flags;
-	async_cookie_t cookie;
-	int preferred_bpp;
-
-	/* Whether or not fbdev hpd processing is temporarily suspended */
-	bool hpd_suspended: 1;
-	/* Set when a hotplug was received while HPD processing was suspended */
-	bool hpd_waiting: 1;
-
-	/* Protects hpd_suspended */
-	struct mutex hpd_lock;
 };
 
 static struct intel_fbdev *to_intel_fbdev(struct drm_fb_helper *fb_helper)
 {
-	return container_of(fb_helper, struct intel_fbdev, helper);
+	struct drm_i915_private *i915 = to_i915(fb_helper->client.dev);
+
+	return i915->display.fbdev.fbdev;
 }
 
 static struct intel_frontbuffer *to_frontbuffer(struct intel_fbdev *ifbdev)
@@ -128,12 +123,34 @@ static int intel_fbdev_pan_display(struct fb_var_screeninfo *var,
 
 static int intel_fbdev_mmap(struct fb_info *info, struct vm_area_struct *vma)
 {
-	struct intel_fbdev *fbdev = to_intel_fbdev(info->par);
-	struct drm_gem_object *bo = drm_gem_fb_get_obj(&fbdev->fb->base, 0);
-	struct drm_i915_gem_object *obj = to_intel_bo(bo);
+	struct drm_fb_helper *fb_helper = info->par;
+	struct drm_gem_object *obj = drm_gem_fb_get_obj(fb_helper->fb, 0);
 
-	return i915_gem_fb_mmap(obj, vma);
+	return intel_bo_fb_mmap(obj, vma);
 }
+
+static void intel_fbdev_fb_destroy(struct fb_info *info)
+{
+	struct drm_fb_helper *fb_helper = info->par;
+	struct intel_fbdev *ifbdev = to_intel_fbdev(fb_helper);
+
+	drm_fb_helper_fini(fb_helper);
+
+	/*
+	 * We rely on the object-free to release the VMA pinning for
+	 * the info->screen_base mmaping. Leaking the VMA is simpler than
+	 * trying to rectify all the possible error paths leading here.
+	 */
+	intel_fb_unpin_vma(ifbdev->vma, ifbdev->vma_flags);
+	drm_framebuffer_remove(fb_helper->fb);
+
+	drm_client_release(&fb_helper->client);
+	drm_fb_helper_unprepare(fb_helper);
+	kfree(fb_helper);
+}
+
+__diag_push();
+__diag_ignore_all("-Woverride-init", "Allow field initialization overrides for fb ops");
 
 static const struct fb_ops intelfb_ops = {
 	.owner = THIS_MODULE,
@@ -144,116 +161,10 @@ static const struct fb_ops intelfb_ops = {
 	.fb_pan_display = intel_fbdev_pan_display,
 	__FB_DEFAULT_DEFERRED_OPS_DRAW(intel_fbdev),
 	.fb_mmap = intel_fbdev_mmap,
+	.fb_destroy = intel_fbdev_fb_destroy,
 };
 
-static int intelfb_create(struct drm_fb_helper *helper,
-			  struct drm_fb_helper_surface_size *sizes)
-{
-	struct intel_fbdev *ifbdev = to_intel_fbdev(helper);
-	struct intel_framebuffer *intel_fb = ifbdev->fb;
-	struct drm_device *dev = helper->dev;
-	struct drm_i915_private *dev_priv = to_i915(dev);
-	struct pci_dev *pdev = to_pci_dev(dev_priv->drm.dev);
-	const struct i915_gtt_view view = {
-		.type = I915_GTT_VIEW_NORMAL,
-	};
-	intel_wakeref_t wakeref;
-	struct fb_info *info;
-	struct i915_vma *vma;
-	unsigned long flags = 0;
-	bool prealloc = false;
-	struct drm_i915_gem_object *obj;
-	int ret;
-
-	mutex_lock(&ifbdev->hpd_lock);
-	ret = ifbdev->hpd_suspended ? -EAGAIN : 0;
-	mutex_unlock(&ifbdev->hpd_lock);
-	if (ret)
-		return ret;
-
-	if (intel_fb &&
-	    (sizes->fb_width > intel_fb->base.width ||
-	     sizes->fb_height > intel_fb->base.height)) {
-		drm_dbg_kms(&dev_priv->drm,
-			    "BIOS fb too small (%dx%d), we require (%dx%d),"
-			    " releasing it\n",
-			    intel_fb->base.width, intel_fb->base.height,
-			    sizes->fb_width, sizes->fb_height);
-		drm_framebuffer_put(&intel_fb->base);
-		intel_fb = ifbdev->fb = NULL;
-	}
-	if (!intel_fb || drm_WARN_ON(dev, !intel_fb_obj(&intel_fb->base))) {
-		struct drm_framebuffer *fb;
-		drm_dbg_kms(&dev_priv->drm,
-			    "no BIOS fb, allocating a new one\n");
-		fb = intel_fbdev_fb_alloc(helper, sizes);
-		if (IS_ERR(fb))
-			return PTR_ERR(fb);
-		intel_fb = ifbdev->fb = to_intel_framebuffer(fb);
-	} else {
-		drm_dbg_kms(&dev_priv->drm, "re-using BIOS fb\n");
-		prealloc = true;
-		sizes->fb_width = intel_fb->base.width;
-		sizes->fb_height = intel_fb->base.height;
-	}
-
-	wakeref = intel_runtime_pm_get(&dev_priv->runtime_pm);
-
-	/* Pin the GGTT vma for our access via info->screen_base.
-	 * This also validates that any existing fb inherited from the
-	 * BIOS is suitable for own access.
-	 */
-	vma = intel_pin_and_fence_fb_obj(&ifbdev->fb->base, false,
-					 &view, false, &flags);
-	if (IS_ERR(vma)) {
-		ret = PTR_ERR(vma);
-		goto out_unlock;
-	}
-
-	info = drm_fb_helper_alloc_info(helper);
-	if (IS_ERR(info)) {
-		drm_err(&dev_priv->drm, "Failed to allocate fb_info (%pe)\n", info);
-		ret = PTR_ERR(info);
-		goto out_unpin;
-	}
-
-	ifbdev->helper.fb = &ifbdev->fb->base;
-
-	info->fbops = &intelfb_ops;
-
-	obj = intel_fb_obj(&intel_fb->base);
-
-	ret = intel_fbdev_fb_fill_info(dev_priv, info, obj, vma);
-	if (ret)
-		goto out_unpin;
-
-	drm_fb_helper_fill_info(info, &ifbdev->helper, sizes);
-
-	/* If the object is shmemfs backed, it will have given us zeroed pages.
-	 * If the object is stolen however, it will be full of whatever
-	 * garbage was left in there.
-	 */
-	if (!i915_gem_object_is_shmem(obj) && !prealloc)
-		memset_io(info->screen_base, 0, info->screen_size);
-
-	/* Use default scratch pixmap (info->pixmap.flags = FB_PIXMAP_SYSTEM) */
-
-	drm_dbg_kms(&dev_priv->drm, "allocated %dx%d fb: 0x%08x\n",
-		    ifbdev->fb->base.width, ifbdev->fb->base.height,
-		    i915_ggtt_offset(vma));
-	ifbdev->vma = vma;
-	ifbdev->vma_flags = flags;
-
-	intel_runtime_pm_put(&dev_priv->runtime_pm, wakeref);
-	vga_switcheroo_client_fb_set(pdev, info);
-	return 0;
-
-out_unpin:
-	intel_unpin_fb_vma(vma, flags);
-out_unlock:
-	intel_runtime_pm_put(&dev_priv->runtime_pm, wakeref);
-	return ret;
-}
+__diag_pop();
 
 static int intelfb_dirty(struct drm_fb_helper *helper, struct drm_clip_rect *clip)
 {
@@ -266,28 +177,137 @@ static int intelfb_dirty(struct drm_fb_helper *helper, struct drm_clip_rect *cli
 	return 0;
 }
 
+static void intelfb_restore(struct drm_fb_helper *fb_helper)
+{
+	struct intel_fbdev *ifbdev = to_intel_fbdev(fb_helper);
+
+	intel_fbdev_invalidate(ifbdev);
+}
+
+static void intelfb_set_suspend(struct drm_fb_helper *fb_helper, bool suspend)
+{
+	struct fb_info *info = fb_helper->info;
+
+	/*
+	 * When resuming from hibernation, Linux restores the object's
+	 * content from swap if the buffer is backed by shmemfs. If the
+	 * object is stolen however, it will be full of whatever garbage
+	 * was left in there. Clear it to zero in this case.
+	 */
+	if (!suspend && !intel_bo_is_shmem(intel_fb_bo(fb_helper->fb)))
+		memset_io(info->screen_base, 0, info->screen_size);
+
+	fb_set_suspend(info, suspend);
+}
+
 static const struct drm_fb_helper_funcs intel_fb_helper_funcs = {
-	.fb_probe = intelfb_create,
 	.fb_dirty = intelfb_dirty,
+	.fb_restore = intelfb_restore,
+	.fb_set_suspend = intelfb_set_suspend,
 };
 
-static void intel_fbdev_destroy(struct intel_fbdev *ifbdev)
+int intel_fbdev_driver_fbdev_probe(struct drm_fb_helper *helper,
+				   struct drm_fb_helper_surface_size *sizes)
 {
-	/* We rely on the object-free to release the VMA pinning for
-	 * the info->screen_base mmaping. Leaking the VMA is simpler than
-	 * trying to rectify all the possible error paths leading here.
+	struct intel_fbdev *ifbdev = to_intel_fbdev(helper);
+	struct intel_framebuffer *fb = ifbdev->fb;
+	struct drm_device *dev = helper->dev;
+	struct drm_i915_private *dev_priv = to_i915(dev);
+	intel_wakeref_t wakeref;
+	struct fb_info *info;
+	struct i915_vma *vma;
+	unsigned long flags = 0;
+	bool prealloc = false;
+	struct drm_gem_object *obj;
+	int ret;
+
+	ifbdev->fb = NULL;
+
+	if (fb &&
+	    (sizes->fb_width > fb->base.width ||
+	     sizes->fb_height > fb->base.height)) {
+		drm_dbg_kms(&dev_priv->drm,
+			    "BIOS fb too small (%dx%d), we require (%dx%d),"
+			    " releasing it\n",
+			    fb->base.width, fb->base.height,
+			    sizes->fb_width, sizes->fb_height);
+		drm_framebuffer_put(&fb->base);
+		fb = NULL;
+	}
+	if (!fb || drm_WARN_ON(dev, !intel_fb_bo(&fb->base))) {
+		drm_dbg_kms(&dev_priv->drm,
+			    "no BIOS fb, allocating a new one\n");
+		fb = intel_fbdev_fb_alloc(helper, sizes);
+		if (IS_ERR(fb))
+			return PTR_ERR(fb);
+	} else {
+		drm_dbg_kms(&dev_priv->drm, "re-using BIOS fb\n");
+		prealloc = true;
+		sizes->fb_width = fb->base.width;
+		sizes->fb_height = fb->base.height;
+	}
+
+	wakeref = intel_runtime_pm_get(&dev_priv->runtime_pm);
+
+	/* Pin the GGTT vma for our access via info->screen_base.
+	 * This also validates that any existing fb inherited from the
+	 * BIOS is suitable for own access.
 	 */
+	vma = intel_fb_pin_to_ggtt(&fb->base, &fb->normal_view.gtt,
+				   fb->min_alignment, 0,
+				   intel_fb_view_vtd_guard(&fb->base, &fb->normal_view,
+							   DRM_MODE_ROTATE_0),
+				   false, &flags);
+	if (IS_ERR(vma)) {
+		ret = PTR_ERR(vma);
+		goto out_unlock;
+	}
 
-	drm_fb_helper_fini(&ifbdev->helper);
+	info = drm_fb_helper_alloc_info(helper);
+	if (IS_ERR(info)) {
+		drm_err(&dev_priv->drm, "Failed to allocate fb_info (%pe)\n", info);
+		ret = PTR_ERR(info);
+		goto out_unpin;
+	}
 
-	if (ifbdev->vma)
-		intel_unpin_fb_vma(ifbdev->vma, ifbdev->vma_flags);
+	helper->funcs = &intel_fb_helper_funcs;
+	helper->fb = &fb->base;
 
-	if (ifbdev->fb)
-		drm_framebuffer_remove(&ifbdev->fb->base);
+	info->fbops = &intelfb_ops;
 
-	drm_fb_helper_unprepare(&ifbdev->helper);
-	kfree(ifbdev);
+	obj = intel_fb_bo(&fb->base);
+
+	ret = intel_fbdev_fb_fill_info(dev_priv, info, obj, vma);
+	if (ret)
+		goto out_unpin;
+
+	drm_fb_helper_fill_info(info, dev->fb_helper, sizes);
+
+	/* If the object is shmemfs backed, it will have given us zeroed pages.
+	 * If the object is stolen however, it will be full of whatever
+	 * garbage was left in there.
+	 */
+	if (!intel_bo_is_shmem(obj) && !prealloc)
+		memset_io(info->screen_base, 0, info->screen_size);
+
+	/* Use default scratch pixmap (info->pixmap.flags = FB_PIXMAP_SYSTEM) */
+
+	drm_dbg_kms(&dev_priv->drm, "allocated %dx%d fb: 0x%08x\n",
+		    fb->base.width, fb->base.height,
+		    i915_ggtt_offset(vma));
+	ifbdev->fb = fb;
+	ifbdev->vma = vma;
+	ifbdev->vma_flags = flags;
+
+	intel_runtime_pm_put(&dev_priv->runtime_pm, wakeref);
+
+	return 0;
+
+out_unpin:
+	intel_fb_unpin_vma(vma, flags);
+out_unlock:
+	intel_runtime_pm_put(&dev_priv->runtime_pm, wakeref);
+	return ret;
 }
 
 /*
@@ -315,8 +335,7 @@ static bool intel_fbdev_init_bios(struct drm_device *dev,
 			to_intel_plane(crtc->base.primary);
 		struct intel_plane_state *plane_state =
 			to_intel_plane_state(plane->base.state);
-		struct drm_i915_gem_object *obj =
-			intel_fb_obj(plane_state->uapi.fb);
+		struct drm_gem_object *obj = intel_fb_bo(plane_state->uapi.fb);
 
 		if (!crtc_state->uapi.active) {
 			drm_dbg_kms(&i915->drm,
@@ -332,12 +351,12 @@ static bool intel_fbdev_init_bios(struct drm_device *dev,
 			continue;
 		}
 
-		if (intel_bo_to_drm_bo(obj)->size > max_size) {
+		if (obj->size > max_size) {
 			drm_dbg_kms(&i915->drm,
 				    "found possible fb from [PLANE:%d:%s]\n",
 				    plane->base.base.id, plane->base.name);
 			fb = to_intel_framebuffer(plane_state->uapi.fb);
-			max_size = intel_bo_to_drm_bo(obj)->size;
+			max_size = obj->size;
 		}
 	}
 
@@ -413,7 +432,6 @@ static bool intel_fbdev_init_bios(struct drm_device *dev,
 		goto out;
 	}
 
-	ifbdev->preferred_bpp = fb->base.format->cpp[0] * 8;
 	ifbdev->fb = fb;
 
 	drm_framebuffer_get(&ifbdev->fb->base);
@@ -444,222 +462,54 @@ out:
 	return false;
 }
 
-static void intel_fbdev_suspend_worker(struct work_struct *work)
+static unsigned int intel_fbdev_color_mode(const struct drm_format_info *info)
 {
-	intel_fbdev_set_suspend(&container_of(work,
-					      struct drm_i915_private,
-					      display.fbdev.suspend_work)->drm,
-				FBINFO_STATE_RUNNING,
-				true);
+	unsigned int bpp;
+
+	if (!info->depth || info->num_planes != 1 || info->has_alpha || info->is_yuv)
+		return 0;
+
+	bpp = drm_format_info_bpp(info, 0);
+
+	switch (bpp) {
+	case 16:
+		return info->depth; // 15 or 16
+	default:
+		return bpp;
+	}
 }
 
-int intel_fbdev_init(struct drm_device *dev)
+void intel_fbdev_setup(struct drm_i915_private *i915)
 {
-	struct drm_i915_private *dev_priv = to_i915(dev);
+	struct drm_device *dev = &i915->drm;
 	struct intel_fbdev *ifbdev;
-	int ret;
+	unsigned int preferred_bpp = 0;
 
-	if (drm_WARN_ON(dev, !HAS_DISPLAY(dev_priv)))
-		return -ENODEV;
+	if (!HAS_DISPLAY(i915))
+		return;
 
-	ifbdev = kzalloc(sizeof(struct intel_fbdev), GFP_KERNEL);
-	if (ifbdev == NULL)
-		return -ENOMEM;
+	ifbdev = drmm_kzalloc(dev, sizeof(*ifbdev), GFP_KERNEL);
+	if (!ifbdev)
+		return;
 
-	mutex_init(&ifbdev->hpd_lock);
-	drm_fb_helper_prepare(dev, &ifbdev->helper, 32, &intel_fb_helper_funcs);
-
+	i915->display.fbdev.fbdev = ifbdev;
 	if (intel_fbdev_init_bios(dev, ifbdev))
-		ifbdev->helper.preferred_bpp = ifbdev->preferred_bpp;
-	else
-		ifbdev->preferred_bpp = ifbdev->helper.preferred_bpp;
+		preferred_bpp = intel_fbdev_color_mode(ifbdev->fb->base.format);
+	if (!preferred_bpp)
+		preferred_bpp = 32;
 
-	ret = drm_fb_helper_init(dev, &ifbdev->helper);
-	if (ret) {
-		kfree(ifbdev);
-		return ret;
-	}
-
-	dev_priv->display.fbdev.fbdev = ifbdev;
-	INIT_WORK(&dev_priv->display.fbdev.suspend_work, intel_fbdev_suspend_worker);
-
-	return 0;
-}
-
-static void intel_fbdev_initial_config(void *data, async_cookie_t cookie)
-{
-	struct intel_fbdev *ifbdev = data;
-
-	/* Due to peculiar init order wrt to hpd handling this is separate. */
-	if (drm_fb_helper_initial_config(&ifbdev->helper))
-		intel_fbdev_unregister(to_i915(ifbdev->helper.dev));
-}
-
-void intel_fbdev_initial_config_async(struct drm_i915_private *dev_priv)
-{
-	struct intel_fbdev *ifbdev = dev_priv->display.fbdev.fbdev;
-
-	if (!ifbdev)
-		return;
-
-	ifbdev->cookie = async_schedule(intel_fbdev_initial_config, ifbdev);
-}
-
-static void intel_fbdev_sync(struct intel_fbdev *ifbdev)
-{
-	if (!ifbdev->cookie)
-		return;
-
-	/* Only serialises with all preceding async calls, hence +1 */
-	async_synchronize_cookie(ifbdev->cookie + 1);
-	ifbdev->cookie = 0;
-}
-
-void intel_fbdev_unregister(struct drm_i915_private *dev_priv)
-{
-	struct intel_fbdev *ifbdev = dev_priv->display.fbdev.fbdev;
-
-	if (!ifbdev)
-		return;
-
-	intel_fbdev_set_suspend(&dev_priv->drm, FBINFO_STATE_SUSPENDED, true);
-
-	if (!current_is_async())
-		intel_fbdev_sync(ifbdev);
-
-	drm_fb_helper_unregister_info(&ifbdev->helper);
-}
-
-void intel_fbdev_fini(struct drm_i915_private *dev_priv)
-{
-	struct intel_fbdev *ifbdev = fetch_and_zero(&dev_priv->display.fbdev.fbdev);
-
-	if (!ifbdev)
-		return;
-
-	intel_fbdev_destroy(ifbdev);
-}
-
-/* Suspends/resumes fbdev processing of incoming HPD events. When resuming HPD
- * processing, fbdev will perform a full connector reprobe if a hotplug event
- * was received while HPD was suspended.
- */
-static void intel_fbdev_hpd_set_suspend(struct drm_i915_private *i915, int state)
-{
-	struct intel_fbdev *ifbdev = i915->display.fbdev.fbdev;
-	bool send_hpd = false;
-
-	mutex_lock(&ifbdev->hpd_lock);
-	ifbdev->hpd_suspended = state == FBINFO_STATE_SUSPENDED;
-	send_hpd = !ifbdev->hpd_suspended && ifbdev->hpd_waiting;
-	ifbdev->hpd_waiting = false;
-	mutex_unlock(&ifbdev->hpd_lock);
-
-	if (send_hpd) {
-		drm_dbg_kms(&i915->drm, "Handling delayed fbcon HPD event\n");
-		drm_fb_helper_hotplug_event(&ifbdev->helper);
-	}
-}
-
-void intel_fbdev_set_suspend(struct drm_device *dev, int state, bool synchronous)
-{
-	struct drm_i915_private *dev_priv = to_i915(dev);
-	struct intel_fbdev *ifbdev = dev_priv->display.fbdev.fbdev;
-	struct fb_info *info;
-
-	if (!ifbdev)
-		return;
-
-	if (drm_WARN_ON(&dev_priv->drm, !HAS_DISPLAY(dev_priv)))
-		return;
-
-	if (!ifbdev->vma)
-		goto set_suspend;
-
-	info = ifbdev->helper.info;
-
-	if (synchronous) {
-		/* Flush any pending work to turn the console on, and then
-		 * wait to turn it off. It must be synchronous as we are
-		 * about to suspend or unload the driver.
-		 *
-		 * Note that from within the work-handler, we cannot flush
-		 * ourselves, so only flush outstanding work upon suspend!
-		 */
-		if (state != FBINFO_STATE_RUNNING)
-			flush_work(&dev_priv->display.fbdev.suspend_work);
-
-		console_lock();
-	} else {
-		/*
-		 * The console lock can be pretty contented on resume due
-		 * to all the printk activity.  Try to keep it out of the hot
-		 * path of resume if possible.
-		 */
-		drm_WARN_ON(dev, state != FBINFO_STATE_RUNNING);
-		if (!console_trylock()) {
-			/* Don't block our own workqueue as this can
-			 * be run in parallel with other i915.ko tasks.
-			 */
-			queue_work(dev_priv->unordered_wq,
-				   &dev_priv->display.fbdev.suspend_work);
-			return;
-		}
-	}
-
-	/* On resume from hibernation: If the object is shmemfs backed, it has
-	 * been restored from swap. If the object is stolen however, it will be
-	 * full of whatever garbage was left in there.
-	 */
-	if (state == FBINFO_STATE_RUNNING &&
-	    !i915_gem_object_is_shmem(intel_fb_obj(&ifbdev->fb->base)))
-		memset_io(info->screen_base, 0, info->screen_size);
-
-	drm_fb_helper_set_suspend(&ifbdev->helper, state);
-	console_unlock();
-
-set_suspend:
-	intel_fbdev_hpd_set_suspend(dev_priv, state);
-}
-
-void intel_fbdev_output_poll_changed(struct drm_device *dev)
-{
-	struct intel_fbdev *ifbdev = to_i915(dev)->display.fbdev.fbdev;
-	bool send_hpd;
-
-	if (!ifbdev)
-		return;
-
-	intel_fbdev_sync(ifbdev);
-
-	mutex_lock(&ifbdev->hpd_lock);
-	send_hpd = !ifbdev->hpd_suspended;
-	ifbdev->hpd_waiting = true;
-	mutex_unlock(&ifbdev->hpd_lock);
-
-	if (send_hpd && (ifbdev->vma || ifbdev->helper.deferred_setup))
-		drm_fb_helper_hotplug_event(&ifbdev->helper);
-}
-
-void intel_fbdev_restore_mode(struct drm_i915_private *dev_priv)
-{
-	struct intel_fbdev *ifbdev = dev_priv->display.fbdev.fbdev;
-
-	if (!ifbdev)
-		return;
-
-	intel_fbdev_sync(ifbdev);
-	if (!ifbdev->vma)
-		return;
-
-	if (drm_fb_helper_restore_fbdev_mode_unlocked(&ifbdev->helper) == 0)
-		intel_fbdev_invalidate(ifbdev);
+	drm_client_setup_with_color_mode(dev, preferred_bpp);
 }
 
 struct intel_framebuffer *intel_fbdev_framebuffer(struct intel_fbdev *fbdev)
 {
-	if (!fbdev || !fbdev->helper.fb)
+	if (!fbdev)
 		return NULL;
 
-	return to_intel_framebuffer(fbdev->helper.fb);
+	return fbdev->fb;
+}
+
+struct i915_vma *intel_fbdev_vma_pointer(struct intel_fbdev *fbdev)
+{
+	return fbdev ? fbdev->vma : NULL;
 }

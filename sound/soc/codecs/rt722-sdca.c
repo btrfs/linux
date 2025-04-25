@@ -25,18 +25,20 @@
 
 #include "rt722-sdca.h"
 
+#define RT722_NID_ADDR(nid, reg) ((nid) << 20 | (reg))
+
 int rt722_sdca_index_write(struct rt722_sdca_priv *rt722,
 		unsigned int nid, unsigned int reg, unsigned int value)
 {
-	struct regmap *regmap = rt722->mbq_regmap;
-	unsigned int addr = (nid << 20) | reg;
+	struct regmap *regmap = rt722->regmap;
+	unsigned int addr = RT722_NID_ADDR(nid, reg);
 	int ret;
 
 	ret = regmap_write(regmap, addr, value);
 	if (ret < 0)
 		dev_err(&rt722->slave->dev,
-			"Failed to set private value: %06x <= %04x ret=%d\n",
-			addr, value, ret);
+			"%s: Failed to set private value: %06x <= %04x ret=%d\n",
+			__func__, addr, value, ret);
 
 	return ret;
 }
@@ -45,14 +47,14 @@ int rt722_sdca_index_read(struct rt722_sdca_priv *rt722,
 		unsigned int nid, unsigned int reg, unsigned int *value)
 {
 	int ret;
-	struct regmap *regmap = rt722->mbq_regmap;
-	unsigned int addr = (nid << 20) | reg;
+	struct regmap *regmap = rt722->regmap;
+	unsigned int addr = RT722_NID_ADDR(nid, reg);
 
 	ret = regmap_read(regmap, addr, value);
 	if (ret < 0)
 		dev_err(&rt722->slave->dev,
-			"Failed to get private value: %06x => %04x ret=%d\n",
-			addr, *value, ret);
+			"%s: Failed to get private value: %06x => %04x ret=%d\n",
+			__func__, addr, *value, ret);
 
 	return ret;
 }
@@ -190,8 +192,8 @@ static void rt722_sdca_jack_detect_handler(struct work_struct *work)
 	if (!rt722->component->card || !rt722->component->card->instantiated)
 		return;
 
-	/* SDW_SCP_SDCA_INT_SDCA_6 is used for jack detection */
-	if (rt722->scp_sdca_stat1 & SDW_SCP_SDCA_INT_SDCA_6) {
+	/* SDW_SCP_SDCA_INT_SDCA_0 is used for jack detection */
+	if (rt722->scp_sdca_stat1 & SDW_SCP_SDCA_INT_SDCA_0) {
 		ret = rt722_sdca_headset_detect(rt722);
 		if (ret < 0)
 			return;
@@ -294,7 +296,7 @@ static void rt722_sdca_jack_init(struct rt722_sdca_priv *rt722)
 	if (rt722->hs_jack) {
 		/* set SCP_SDCA_IntMask1[0]=1 */
 		sdw_write_no_pm(rt722->slave, SDW_SCP_SDCA_INTMASK1,
-			SDW_SCP_SDCA_INTMASK_SDCA_0 | SDW_SCP_SDCA_INTMASK_SDCA_6);
+			SDW_SCP_SDCA_INTMASK_SDCA_0);
 		/* set SCP_SDCA_IntMask2[0]=1 */
 		sdw_write_no_pm(rt722->slave, SDW_SCP_SDCA_INTMASK2,
 			SDW_SCP_SDCA_INTMASK_SDCA_8);
@@ -308,6 +310,7 @@ static void rt722_sdca_jack_init(struct rt722_sdca_priv *rt722)
 		regmap_write(rt722->regmap,
 			SDW_SDCA_CTL(FUNC_NUM_JACK_CODEC, RT722_SDCA_ENT_XU0D,
 				RT722_SDCA_CTL_SELECTED_MODE, 0), 0);
+		rt722_sdca_index_write(rt722, RT722_VENDOR_HDA_CTL, RT722_GE_RELATED_CTL1, 0x0000);
 		/* trigger GE interrupt */
 		rt722_sdca_index_update_bits(rt722, RT722_VENDOR_HDA_CTL,
 			RT722_GE_RELATED_CTL2, 0x4000, 0x4000);
@@ -360,8 +363,8 @@ static int rt722_sdca_set_gain_put(struct snd_kcontrol *kcontrol,
 		strstr(ucontrol->id.name, "FU0F Capture Volume"))
 		adc_vol_flag = 1;
 
-	regmap_read(rt722->mbq_regmap, mc->reg, &lvalue);
-	regmap_read(rt722->mbq_regmap, mc->rreg, &rvalue);
+	regmap_read(rt722->regmap, mc->reg, &lvalue);
+	regmap_read(rt722->regmap, mc->rreg, &rvalue);
 
 	/* L Channel */
 	gain_l_val = ucontrol->value.integer.value[0];
@@ -401,13 +404,13 @@ static int rt722_sdca_set_gain_put(struct snd_kcontrol *kcontrol,
 		return 0;
 
 	/* Lch*/
-	regmap_write(rt722->mbq_regmap, mc->reg, gain_l_val);
+	regmap_write(rt722->regmap, mc->reg, gain_l_val);
 
 	/* Rch */
-	regmap_write(rt722->mbq_regmap, mc->rreg, gain_r_val);
+	regmap_write(rt722->regmap, mc->rreg, gain_r_val);
 
-	regmap_read(rt722->mbq_regmap, mc->reg, &read_l);
-	regmap_read(rt722->mbq_regmap, mc->rreg, &read_r);
+	regmap_read(rt722->regmap, mc->reg, &read_l);
+	regmap_read(rt722->regmap, mc->rreg, &read_r);
 	if (read_r == gain_r_val && read_l == gain_l_val)
 		return changed;
 
@@ -430,8 +433,8 @@ static int rt722_sdca_set_gain_get(struct snd_kcontrol *kcontrol,
 		strstr(ucontrol->id.name, "FU0F Capture Volume"))
 		adc_vol_flag = 1;
 
-	regmap_read(rt722->mbq_regmap, mc->reg, &read_l);
-	regmap_read(rt722->mbq_regmap, mc->rreg, &read_r);
+	regmap_read(rt722->regmap, mc->reg, &read_l);
+	regmap_read(rt722->regmap, mc->rreg, &read_r);
 
 	if (mc->shift == 8) /* boost gain */
 		ctl_l = read_l / tendB;
@@ -603,16 +606,12 @@ static int rt722_sdca_dmic_set_gain_get(struct snd_kcontrol *kcontrol,
 
 	/* check all channels */
 	for (i = 0; i < p->count; i++) {
-		regmap_read(rt722->mbq_regmap, p->reg_base + i, &regvalue);
+		regmap_read(rt722->regmap, p->reg_base + i, &regvalue);
 
 		if (!adc_vol_flag) /* boost gain */
 			ctl = regvalue / boost_step;
-		else { /* ADC gain */
-			if (adc_vol_flag)
-				ctl = p->max - (((vol_max - regvalue) & 0xffff) / interval_offset);
-			else
-				ctl = p->max - (((0 - regvalue) & 0xffff) / interval_offset);
-		}
+		else /* ADC gain */
+			ctl = p->max - (((vol_max - regvalue) & 0xffff) / interval_offset);
 
 		ucontrol->value.integer.value[i] = ctl;
 	}
@@ -640,7 +639,7 @@ static int rt722_sdca_dmic_set_gain_put(struct snd_kcontrol *kcontrol,
 
 	/* check all channels */
 	for (i = 0; i < p->count; i++) {
-		regmap_read(rt722->mbq_regmap, p->reg_base + i, &regvalue[i]);
+		regmap_read(rt722->regmap, p->reg_base + i, &regvalue[i]);
 
 		gain_val[i] = ucontrol->value.integer.value[i];
 		if (gain_val[i] > p->max)
@@ -661,9 +660,10 @@ static int rt722_sdca_dmic_set_gain_put(struct snd_kcontrol *kcontrol,
 		return 0;
 
 	for (i = 0; i < p->count; i++) {
-		err = regmap_write(rt722->mbq_regmap, p->reg_base + i, gain_val[i]);
+		err = regmap_write(rt722->regmap, p->reg_base + i, gain_val[i]);
 		if (err < 0)
-			dev_err(&rt722->slave->dev, "%#08x can't be set\n", p->reg_base + i);
+			dev_err(&rt722->slave->dev, "%s: %#08x can't be set\n",
+				__func__, p->reg_base + i);
 	}
 
 	return changed;
@@ -741,77 +741,6 @@ static const struct snd_kcontrol_new rt722_sdca_controls[] = {
 			4, 3, boost_vol_tlv),
 };
 
-static int rt722_sdca_adc_mux_get(struct snd_kcontrol *kcontrol,
-			struct snd_ctl_elem_value *ucontrol)
-{
-	struct snd_soc_component *component =
-		snd_soc_dapm_kcontrol_component(kcontrol);
-	struct rt722_sdca_priv *rt722 = snd_soc_component_get_drvdata(component);
-	unsigned int val = 0, mask_sft;
-
-	if (strstr(ucontrol->id.name, "ADC 22 Mux"))
-		mask_sft = 12;
-	else if (strstr(ucontrol->id.name, "ADC 24 Mux"))
-		mask_sft = 4;
-	else if (strstr(ucontrol->id.name, "ADC 25 Mux"))
-		mask_sft = 0;
-	else
-		return -EINVAL;
-
-	rt722_sdca_index_read(rt722, RT722_VENDOR_HDA_CTL,
-		RT722_HDA_LEGACY_MUX_CTL0, &val);
-
-	ucontrol->value.enumerated.item[0] = (val >> mask_sft) & 0x7;
-
-	return 0;
-}
-
-static int rt722_sdca_adc_mux_put(struct snd_kcontrol *kcontrol,
-			struct snd_ctl_elem_value *ucontrol)
-{
-	struct snd_soc_component *component =
-		snd_soc_dapm_kcontrol_component(kcontrol);
-	struct snd_soc_dapm_context *dapm =
-		snd_soc_dapm_kcontrol_dapm(kcontrol);
-	struct rt722_sdca_priv *rt722 = snd_soc_component_get_drvdata(component);
-	struct soc_enum *e = (struct soc_enum *)kcontrol->private_value;
-	unsigned int *item = ucontrol->value.enumerated.item;
-	unsigned int val, val2 = 0, change, mask_sft;
-
-	if (item[0] >= e->items)
-		return -EINVAL;
-
-	if (strstr(ucontrol->id.name, "ADC 22 Mux"))
-		mask_sft = 12;
-	else if (strstr(ucontrol->id.name, "ADC 24 Mux"))
-		mask_sft = 4;
-	else if (strstr(ucontrol->id.name, "ADC 25 Mux"))
-		mask_sft = 0;
-	else
-		return -EINVAL;
-
-	val = snd_soc_enum_item_to_val(e, item[0]) << e->shift_l;
-
-	rt722_sdca_index_read(rt722, RT722_VENDOR_HDA_CTL,
-		RT722_HDA_LEGACY_MUX_CTL0, &val2);
-	val2 = (0x7 << mask_sft) & val2;
-
-	if (val == val2)
-		change = 0;
-	else
-		change = 1;
-
-	if (change)
-		rt722_sdca_index_update_bits(rt722, RT722_VENDOR_HDA_CTL,
-			RT722_HDA_LEGACY_MUX_CTL0, 0x7 << mask_sft,
-			val << mask_sft);
-
-	snd_soc_dapm_mux_update_power(dapm, kcontrol,
-		item[0], e, NULL);
-
-	return change;
-}
-
 static const char * const adc22_mux_text[] = {
 	"MIC2",
 	"LINE1",
@@ -823,26 +752,26 @@ static const char * const adc07_10_mux_text[] = {
 	"DMIC2",
 };
 
-static SOC_ENUM_SINGLE_DECL(
-	rt722_adc22_enum, SND_SOC_NOPM, 0, adc22_mux_text);
+static SOC_ENUM_SINGLE_DECL(rt722_adc22_enum,
+			    RT722_NID_ADDR(RT722_VENDOR_HDA_CTL, RT722_HDA_LEGACY_MUX_CTL0),
+			    12, adc22_mux_text);
 
-static SOC_ENUM_SINGLE_DECL(
-	rt722_adc24_enum, SND_SOC_NOPM, 0, adc07_10_mux_text);
+static SOC_ENUM_SINGLE_DECL(rt722_adc24_enum,
+			    RT722_NID_ADDR(RT722_VENDOR_HDA_CTL, RT722_HDA_LEGACY_MUX_CTL0),
+			    4, adc07_10_mux_text);
 
-static SOC_ENUM_SINGLE_DECL(
-	rt722_adc25_enum, SND_SOC_NOPM, 0, adc07_10_mux_text);
+static SOC_ENUM_SINGLE_DECL(rt722_adc25_enum,
+			    RT722_NID_ADDR(RT722_VENDOR_HDA_CTL, RT722_HDA_LEGACY_MUX_CTL0),
+			    0, adc07_10_mux_text);
 
 static const struct snd_kcontrol_new rt722_sdca_adc22_mux =
-	SOC_DAPM_ENUM_EXT("ADC 22 Mux", rt722_adc22_enum,
-			rt722_sdca_adc_mux_get, rt722_sdca_adc_mux_put);
+	SOC_DAPM_ENUM("ADC 22 Mux", rt722_adc22_enum);
 
 static const struct snd_kcontrol_new rt722_sdca_adc24_mux =
-	SOC_DAPM_ENUM_EXT("ADC 24 Mux", rt722_adc24_enum,
-			rt722_sdca_adc_mux_get, rt722_sdca_adc_mux_put);
+	SOC_DAPM_ENUM("ADC 24 Mux", rt722_adc24_enum);
 
 static const struct snd_kcontrol_new rt722_sdca_adc25_mux =
-	SOC_DAPM_ENUM_EXT("ADC 25 Mux", rt722_adc25_enum,
-			rt722_sdca_adc_mux_get, rt722_sdca_adc_mux_put);
+	SOC_DAPM_ENUM("ADC 25 Mux", rt722_adc25_enum);
 
 static int rt722_sdca_fu42_event(struct snd_soc_dapm_widget *w,
 	struct snd_kcontrol *kcontrol, int event)
@@ -1211,13 +1140,13 @@ static int rt722_sdca_pcm_hw_params(struct snd_pcm_substream *substream,
 	retval = sdw_stream_add_slave(rt722->slave, &stream_config,
 					&port_config, 1, sdw_stream);
 	if (retval) {
-		dev_err(dai->dev, "Unable to configure port\n");
+		dev_err(dai->dev, "%s: Unable to configure port\n", __func__);
 		return retval;
 	}
 
 	if (params_channels(params) > 16) {
-		dev_err(component->dev, "Unsupported channels %d\n",
-			params_channels(params));
+		dev_err(component->dev, "%s: Unsupported channels %d\n",
+			__func__, params_channels(params));
 		return -EINVAL;
 	}
 
@@ -1236,8 +1165,8 @@ static int rt722_sdca_pcm_hw_params(struct snd_pcm_substream *substream,
 		sampling_rate = RT722_SDCA_RATE_192000HZ;
 		break;
 	default:
-		dev_err(component->dev, "Rate %d is not supported\n",
-			params_rate(params));
+		dev_err(component->dev, "%s: Rate %d is not supported\n",
+			__func__, params_rate(params));
 		return -EINVAL;
 	}
 
@@ -1329,7 +1258,7 @@ static struct snd_soc_dai_driver rt722_sdca_dai[] = {
 		.capture = {
 			.stream_name = "DP6 DMic Capture",
 			.channels_min = 1,
-			.channels_max = 2,
+			.channels_max = 4,
 			.rates = RT722_STEREO_RATES,
 			.formats = RT722_FORMATS,
 		},
@@ -1337,8 +1266,7 @@ static struct snd_soc_dai_driver rt722_sdca_dai[] = {
 	}
 };
 
-int rt722_sdca_init(struct device *dev, struct regmap *regmap,
-			struct regmap *mbq_regmap, struct sdw_slave *slave)
+int rt722_sdca_init(struct device *dev, struct regmap *regmap, struct sdw_slave *slave)
 {
 	struct rt722_sdca_priv *rt722;
 
@@ -1349,7 +1277,6 @@ int rt722_sdca_init(struct device *dev, struct regmap *regmap,
 	dev_set_drvdata(dev, rt722);
 	rt722->slave = slave;
 	rt722->regmap = regmap;
-	rt722->mbq_regmap = mbq_regmap;
 
 	mutex_init(&rt722->calibrate_mutex);
 	mutex_init(&rt722->disable_irq_lock);
@@ -1438,9 +1365,12 @@ static void rt722_sdca_jack_preset(struct rt722_sdca_priv *rt722)
 	int loop_check, chk_cnt = 100, ret;
 	unsigned int calib_status = 0;
 
-	/* Read eFuse */
-	rt722_sdca_index_write(rt722, RT722_VENDOR_SPK_EFUSE, RT722_DC_CALIB_CTRL,
-		0x4808);
+	/* Config analog bias */
+	rt722_sdca_index_write(rt722, RT722_VENDOR_REG, RT722_ANALOG_BIAS_CTL3,
+		0xa081);
+	/* GE related settings */
+	rt722_sdca_index_write(rt722, RT722_VENDOR_HDA_CTL, RT722_GE_RELATED_CTL2,
+		0xa009);
 	/* Button A, B, C, D bypass mode */
 	rt722_sdca_index_write(rt722, RT722_VENDOR_HDA_CTL, RT722_UMP_HID_CTL4,
 		0xcf00);
@@ -1467,16 +1397,18 @@ static void rt722_sdca_jack_preset(struct rt722_sdca_priv *rt722)
 		0x008d);
 	/* check HP calibration FSM status */
 	for (loop_check = 0; loop_check < chk_cnt; loop_check++) {
+		usleep_range(10000, 11000);
 		ret = rt722_sdca_index_read(rt722, RT722_VENDOR_CALI,
 			RT722_DAC_DC_CALI_CTL3, &calib_status);
-		if (ret < 0 || loop_check == chk_cnt)
+		if (ret < 0)
 			dev_dbg(&rt722->slave->dev, "calibration failed!, ret=%d\n", ret);
 		if ((calib_status & 0x0040) == 0x0)
 			break;
 	}
-	/* Release HP-JD, EN_CBJ_TIE_GL/R open, en_osw gating auto done bit */
-	rt722_sdca_index_write(rt722, RT722_VENDOR_REG, RT722_DIGITAL_MISC_CTRL4,
-		0x0010);
+
+	if (loop_check == chk_cnt)
+		dev_dbg(&rt722->slave->dev, "%s, calibration time-out!\n", __func__);
+
 	/* Set ADC09 power entity floating control */
 	rt722_sdca_index_write(rt722, RT722_VENDOR_HDA_CTL, RT722_ADC0A_08_PDE_FLOAT_CTL,
 		0x2a12);
@@ -1489,8 +1421,21 @@ static void rt722_sdca_jack_preset(struct rt722_sdca_priv *rt722)
 	/* Set DAC03 and HP power entity floating control */
 	rt722_sdca_index_write(rt722, RT722_VENDOR_HDA_CTL, RT722_DAC03_HP_PDE_FLOAT_CTL,
 		0x4040);
+	rt722_sdca_index_write(rt722, RT722_VENDOR_HDA_CTL, RT722_ENT_FLOAT_CTRL_1,
+		0x4141);
+	rt722_sdca_index_write(rt722, RT722_VENDOR_HDA_CTL, RT722_FLOAT_CTRL_1,
+		0x0101);
 	/* Fine tune PDE40 latency */
 	regmap_write(rt722->regmap, 0x2f58, 0x07);
+	regmap_write(rt722->regmap, 0x2f03, 0x06);
+	/* MIC VRefo */
+	rt722_sdca_index_update_bits(rt722, RT722_VENDOR_REG,
+		RT722_COMBO_JACK_AUTO_CTL1, 0x0200, 0x0200);
+	rt722_sdca_index_update_bits(rt722, RT722_VENDOR_REG,
+		RT722_VREFO_GAT, 0x4000, 0x4000);
+	/* Release HP-JD, EN_CBJ_TIE_GL/R open, en_osw gating auto done bit */
+	rt722_sdca_index_write(rt722, RT722_VENDOR_REG, RT722_DIGITAL_MISC_CTRL4,
+		0x0010);
 }
 
 int rt722_sdca_io_init(struct device *dev, struct sdw_slave *slave)
@@ -1505,8 +1450,6 @@ int rt722_sdca_io_init(struct device *dev, struct sdw_slave *slave)
 	if (rt722->first_hw_init) {
 		regcache_cache_only(rt722->regmap, false);
 		regcache_cache_bypass(rt722->regmap, true);
-		regcache_cache_only(rt722->mbq_regmap, false);
-		regcache_cache_bypass(rt722->mbq_regmap, true);
 	} else {
 		/*
 		 * PM runtime is only enabled when a Slave reports as Attached
@@ -1534,8 +1477,6 @@ int rt722_sdca_io_init(struct device *dev, struct sdw_slave *slave)
 	if (rt722->first_hw_init) {
 		regcache_cache_bypass(rt722->regmap, false);
 		regcache_mark_dirty(rt722->regmap);
-		regcache_cache_bypass(rt722->mbq_regmap, false);
-		regcache_mark_dirty(rt722->mbq_regmap);
 	} else
 		rt722->first_hw_init = true;
 

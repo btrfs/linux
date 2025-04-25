@@ -64,6 +64,12 @@ struct drr_params {
 	bool immediate_flip;
 };
 
+struct long_vtotal_params {
+	uint32_t vertical_total_min;
+	uint32_t vertical_total_max;
+	uint32_t vertical_blank_start;
+};
+
 #define LEFT_EYE_3D_PRIMARY_SURFACE 1
 #define RIGHT_EYE_3D_PRIMARY_SURFACE 0
 
@@ -135,6 +141,38 @@ struct crc_params {
 
 	bool continuous_mode;
 	bool enable;
+
+	uint8_t crc_eng_inst;
+	bool reset;
+};
+
+struct dcn_otg_state {
+	uint32_t v_blank_start;
+	uint32_t v_blank_end;
+	uint32_t v_sync_a_pol;
+	uint32_t v_total;
+	uint32_t v_total_max;
+	uint32_t v_total_min;
+	uint32_t v_total_min_sel;
+	uint32_t v_total_max_sel;
+	uint32_t v_sync_a_start;
+	uint32_t v_sync_a_end;
+	uint32_t h_blank_start;
+	uint32_t h_blank_end;
+	uint32_t h_sync_a_start;
+	uint32_t h_sync_a_end;
+	uint32_t h_sync_a_pol;
+	uint32_t h_total;
+	uint32_t underflow_occurred_status;
+	uint32_t otg_enabled;
+	uint32_t blank_enabled;
+	uint32_t vertical_interrupt1_en;
+	uint32_t vertical_interrupt1_line;
+	uint32_t vertical_interrupt2_en;
+	uint32_t vertical_interrupt2_line;
+	uint32_t vertical_interrupt2_dest;
+	uint32_t otg_master_update_lock;
+	uint32_t otg_double_buffer_control;
 };
 
 /**
@@ -166,6 +204,7 @@ struct timing_generator_funcs {
 							int vstartup_start,
 							int vupdate_offset,
 							int vupdate_width,
+							int pstate_keepout,
 							const enum signal_type signal,
 							bool use_vbios
 	);
@@ -182,9 +221,7 @@ struct timing_generator_funcs {
 
 	bool (*enable_crtc)(struct timing_generator *tg);
 	bool (*disable_crtc)(struct timing_generator *tg);
-#ifdef CONFIG_DRM_AMD_DC_FP
 	void (*phantom_crtc_post_enable)(struct timing_generator *tg);
-#endif
 	void (*disable_phantom_crtc)(struct timing_generator *tg);
 	bool (*immediate_disable_crtc)(struct timing_generator *tg);
 	bool (*is_counter_moving)(struct timing_generator *tg);
@@ -252,7 +289,8 @@ struct timing_generator_funcs {
 			int vready_offset,
 			int vstartup_start,
 			int vupdate_offset,
-			int vupdate_width);
+			int vupdate_width,
+			int pstate_keepout);
 	void (*enable_optc_clock)(struct timing_generator *tg, bool enable);
 	void (*program_stereo)(struct timing_generator *tg,
 		const struct dc_crtc_timing *timing, struct crtc_stereo_flags *flags);
@@ -272,6 +310,7 @@ struct timing_generator_funcs {
 			uint32_t *num_of_input_segments,
 			uint32_t *seg0_src_sel,
 			uint32_t *seg1_src_sel);
+	bool (*is_two_pixels_per_container)(const struct dc_crtc_timing *timing);
 
 	/**
 	 * Configure CRCs for the given timing generator. Return false if TG is
@@ -284,7 +323,7 @@ struct timing_generator_funcs {
 	 * @get_crc: Get CRCs for the given timing generator. Return false if
 	 * CRCs are not enabled (via configure_crc).
 	 */
-	bool (*get_crc)(struct timing_generator *tg,
+	bool (*get_crc)(struct timing_generator *tg, uint8_t idx,
 			uint32_t *r_cr, uint32_t *g_y, uint32_t *b_cb);
 
 	void (*program_manual_trigger)(struct timing_generator *optc);
@@ -308,7 +347,7 @@ struct timing_generator_funcs {
 	 * OPP(s) and turn on/off ODM memory.
 	 */
 	void (*set_odm_combine)(struct timing_generator *optc, int *opp_id, int opp_cnt,
-			struct dc_crtc_timing *timing);
+			int segment_width, int last_segment_width);
 	void (*get_odm_combine_segments)(struct timing_generator *tg, int *odm_segments);
 	void (*set_h_timing_div_manual_mode)(struct timing_generator *optc, bool manual_mode);
 	void (*set_gsl)(struct timing_generator *optc, const struct gsl_params *params);
@@ -333,6 +372,14 @@ struct timing_generator_funcs {
 
 	void (*init_odm)(struct timing_generator *tg);
 	void (*wait_drr_doublebuffer_pending_clear)(struct timing_generator *tg);
+	void (*set_long_vtotal)(struct timing_generator *optc, const struct long_vtotal_params *params);
+	void (*wait_odm_doublebuffer_pending_clear)(struct timing_generator *tg);
+	bool (*get_optc_double_buffer_pending)(struct timing_generator *tg);
+	bool (*get_otg_double_buffer_pending)(struct timing_generator *tg);
+	bool (*get_pipe_update_pending)(struct timing_generator *tg);
+	void (*set_vupdate_keepout)(struct timing_generator *tg, bool enable);
+	bool (*wait_update_lock_status)(struct timing_generator *tg, bool locked);
+	void (*read_otg_state)(struct timing_generator *tg, struct dcn_otg_state *s);
 };
 
 #endif

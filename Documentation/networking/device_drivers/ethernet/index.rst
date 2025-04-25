@@ -42,7 +42,9 @@ Contents:
    intel/ice
    marvell/octeontx2
    marvell/octeon_ep
+   marvell/octeon_ep_vf
    mellanox/mlx5/index
+   meta/fbnic
    microsoft/netvsc
    neterion/s2io
    netronome/nfp
@@ -53,7 +55,6 @@ Contents:
    ti/cpsw_switchdev
    ti/am65_nuss_cpsw_switchdev
    ti/tlan
-   toshiba/spider_net
    wangxun/txgbe
    wangxun/ngbe
 

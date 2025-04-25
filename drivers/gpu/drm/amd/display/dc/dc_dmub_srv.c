@@ -23,6 +23,7 @@
  *
  */
 
+#include "dm_services.h"
 #include "dc.h"
 #include "dc_dmub_srv.h"
 #include "../dmub/dmub_srv.h"
@@ -34,6 +35,7 @@
 #include "resource.h"
 #include "clk_mgr.h"
 #include "dc_state_priv.h"
+#include "dc_plane_priv.h"
 
 #define CTX dc_dmub_srv->ctx
 #define DC_LOGGER CTX->logger
@@ -74,7 +76,10 @@ void dc_dmub_srv_wait_idle(struct dc_dmub_srv *dc_dmub_srv)
 	struct dc_context *dc_ctx = dc_dmub_srv->ctx;
 	enum dmub_status status;
 
-	status = dmub_srv_wait_for_idle(dmub, 100000);
+	do {
+		status = dmub_srv_wait_for_idle(dmub, 100000);
+	} while (dc_dmub_srv->ctx->dc->debug.disable_timeout && status != DMUB_STATUS_OK);
+
 	if (status != DMUB_STATUS_OK) {
 		DC_ERROR("Error waiting for DMUB idle: status=%d\n", status);
 		dc_dmub_srv_log_diagnostic_data(dc_dmub_srv);
@@ -146,7 +151,9 @@ bool dc_dmub_srv_cmd_list_queue_execute(struct dc_dmub_srv *dc_dmub_srv,
 			if (status == DMUB_STATUS_POWER_STATE_D3)
 				return false;
 
-			dmub_srv_wait_for_idle(dmub, 100000);
+			do {
+				status = dmub_srv_wait_for_idle(dmub, 100000);
+			} while (dc_dmub_srv->ctx->dc->debug.disable_timeout && status != DMUB_STATUS_OK);
 
 			/* Requeue the command. */
 			status = dmub_srv_cmd_queue(dmub, &cmd_list[i]);
@@ -187,10 +194,17 @@ bool dc_dmub_srv_wait_for_idle(struct dc_dmub_srv *dc_dmub_srv,
 
 	// Wait for DMUB to process command
 	if (wait_type != DM_DMUB_WAIT_TYPE_NO_WAIT) {
-		status = dmub_srv_wait_for_idle(dmub, 100000);
+		do {
+			status = dmub_srv_wait_for_idle(dmub, 100000);
+		} while (dc_dmub_srv->ctx->dc->debug.disable_timeout && status != DMUB_STATUS_OK);
 
 		if (status != DMUB_STATUS_OK) {
 			DC_LOG_DEBUG("No reply for DMUB command: status=%d\n", status);
+			if (!dmub->debug.timeout_info.timeout_occured) {
+				dmub->debug.timeout_info.timeout_occured = true;
+				dmub->debug.timeout_info.timeout_cmd = *cmd_list;
+				dmub->debug.timeout_info.timestamp = dm_get_timestamp(dc_dmub_srv->ctx);
+			}
 			dc_dmub_srv_log_diagnostic_data(dc_dmub_srv);
 			return false;
 		}
@@ -231,7 +245,9 @@ bool dc_dmub_srv_cmd_run_list(struct dc_dmub_srv *dc_dmub_srv, unsigned int coun
 			if (status == DMUB_STATUS_POWER_STATE_D3)
 				return false;
 
-			dmub_srv_wait_for_idle(dmub, 100000);
+			status = dmub_srv_wait_for_idle(dmub, 100000);
+			if (status != DMUB_STATUS_OK)
+				return false;
 
 			/* Requeue the command. */
 			status = dmub_srv_cmd_queue(dmub, &cmd_list[i]);
@@ -413,6 +429,7 @@ bool dc_dmub_srv_p_state_delegate(struct dc *dc, bool should_manage_pstate, stru
 	int ramp_up_num_steps = 1; // TODO: Ramp is currently disabled. Reenable it.
 	uint8_t visual_confirm_enabled;
 	int pipe_idx = 0;
+	struct dc_stream_status *stream_status = NULL;
 
 	if (dc == NULL)
 		return false;
@@ -436,7 +453,8 @@ bool dc_dmub_srv_p_state_delegate(struct dc *dc, bool should_manage_pstate, stru
 			 * that does not use FAMS, we are in an FPO + VActive scenario.
 			 * Assign vactive stretch margin in this case.
 			 */
-			if (!pipe->stream->fpo_in_use) {
+			stream_status = dc_state_get_stream_status(context, pipe->stream);
+			if (stream_status && !stream_status->fpo_in_use) {
 				cmd.fw_assisted_mclk_switch.config_data.vactive_stretch_margin_us = dc->debug.fpo_vactive_margin_us;
 				break;
 			}
@@ -447,7 +465,11 @@ bool dc_dmub_srv_p_state_delegate(struct dc *dc, bool should_manage_pstate, stru
 	for (i = 0, k = 0; context && i < dc->res_pool->pipe_count; i++) {
 		struct pipe_ctx *pipe = &context->res_ctx.pipe_ctx[i];
 
-		if (resource_is_pipe_type(pipe, OTG_MASTER) && pipe->stream->fpo_in_use) {
+		if (!resource_is_pipe_type(pipe, OTG_MASTER))
+			continue;
+
+		stream_status = dc_state_get_stream_status(context, pipe->stream);
+		if (stream_status && stream_status->fpo_in_use) {
 			struct pipe_ctx *pipe = &context->res_ctx.pipe_ctx[i];
 			uint8_t min_refresh_in_hz = (pipe->stream->timing.min_refresh_in_uhz + 999999) / 1000000;
 
@@ -497,7 +519,9 @@ void dc_dmub_srv_get_visual_confirm_color_cmd(struct dc *dc, struct pipe_ctx *pi
 	union dmub_rb_cmd cmd = { 0 };
 	unsigned int panel_inst = 0;
 
-	dc_get_edp_link_panel_inst(dc, pipe_ctx->stream->link, &panel_inst);
+	if (!dc_get_edp_link_panel_inst(dc, pipe_ctx->stream->link, &panel_inst) &&
+			dc->debug.visual_confirm == VISUAL_CONFIRM_DISABLE)
+		return;
 
 	memset(&cmd, 0, sizeof(cmd));
 
@@ -542,7 +566,7 @@ static void populate_subvp_cmd_drr_info(struct dc *dc,
 {
 	struct dc_stream_state *phantom_stream = dc_state_get_paired_subvp_stream(context, subvp_pipe->stream);
 	struct dc_crtc_timing *main_timing = &subvp_pipe->stream->timing;
-	struct dc_crtc_timing *phantom_timing = &phantom_stream->timing;
+	struct dc_crtc_timing *phantom_timing;
 	struct dc_crtc_timing *drr_timing = &vblank_pipe->stream->timing;
 	uint16_t drr_frame_us = 0;
 	uint16_t min_drr_supported_us = 0;
@@ -555,6 +579,11 @@ static void populate_subvp_cmd_drr_info(struct dc *dc,
 	uint16_t drr_active_us = 0;
 	uint16_t min_vtotal_supported = 0;
 	uint16_t max_vtotal_supported = 0;
+
+	if (!phantom_stream)
+		return;
+
+	phantom_timing = &phantom_stream->timing;
 
 	pipe_data->pipe_config.vblank_data.drr_info.drr_in_use = true;
 	pipe_data->pipe_config.vblank_data.drr_info.use_ramping = false; // for now don't use ramping
@@ -679,7 +708,13 @@ static void update_subvp_prefetch_end_to_mall_start(struct dc *dc,
 	struct dmub_cmd_fw_assisted_mclk_switch_pipe_data_v2 *pipe_data = NULL;
 
 	phantom_stream0 = dc_state_get_paired_subvp_stream(context, subvp_pipes[0]->stream);
+	if (!phantom_stream0)
+		return;
+
 	phantom_stream1 = dc_state_get_paired_subvp_stream(context, subvp_pipes[1]->stream);
+	if (!phantom_stream1)
+		return;
+
 	phantom_timing0 = &phantom_stream0->timing;
 	phantom_timing1 = &phantom_stream1->timing;
 
@@ -734,8 +769,13 @@ static void populate_subvp_cmd_pipe_info(struct dc *dc,
 			&cmd->fw_assisted_mclk_switch_v2.config_data.pipe_data[cmd_pipe_index];
 	struct dc_stream_state *phantom_stream = dc_state_get_paired_subvp_stream(context, subvp_pipe->stream);
 	struct dc_crtc_timing *main_timing = &subvp_pipe->stream->timing;
-	struct dc_crtc_timing *phantom_timing = &phantom_stream->timing;
+	struct dc_crtc_timing *phantom_timing;
 	uint32_t out_num_stream, out_den_stream, out_num_plane, out_den_plane, out_num, out_den;
+
+	if (!phantom_stream)
+		return;
+
+	phantom_timing = &phantom_stream->timing;
 
 	pipe_data->mode = SUBVP;
 	pipe_data->pipe_config.subvp_data.pix_clk_100hz = subvp_pipe->stream->timing.pix_clk_100hz;
@@ -781,21 +821,22 @@ static void populate_subvp_cmd_pipe_info(struct dc *dc,
 	} else if (subvp_pipe->next_odm_pipe) {
 		pipe_data->pipe_config.subvp_data.main_split_pipe_index = subvp_pipe->next_odm_pipe->pipe_idx;
 	} else {
-		pipe_data->pipe_config.subvp_data.main_split_pipe_index = 0;
+		pipe_data->pipe_config.subvp_data.main_split_pipe_index = 0xF;
 	}
 
 	// Find phantom pipe index based on phantom stream
 	for (j = 0; j < dc->res_pool->pipe_count; j++) {
 		struct pipe_ctx *phantom_pipe = &context->res_ctx.pipe_ctx[j];
 
-		if (phantom_pipe->stream == dc_state_get_paired_subvp_stream(context, subvp_pipe->stream)) {
+		if (resource_is_pipe_type(phantom_pipe, OTG_MASTER) &&
+				phantom_pipe->stream == dc_state_get_paired_subvp_stream(context, subvp_pipe->stream)) {
 			pipe_data->pipe_config.subvp_data.phantom_pipe_index = phantom_pipe->stream_res.tg->inst;
 			if (phantom_pipe->bottom_pipe) {
 				pipe_data->pipe_config.subvp_data.phantom_split_pipe_index = phantom_pipe->bottom_pipe->plane_res.hubp->inst;
 			} else if (phantom_pipe->next_odm_pipe) {
 				pipe_data->pipe_config.subvp_data.phantom_split_pipe_index = phantom_pipe->next_odm_pipe->plane_res.hubp->inst;
 			} else {
-				pipe_data->pipe_config.subvp_data.phantom_split_pipe_index = 0;
+				pipe_data->pipe_config.subvp_data.phantom_split_pipe_index = 0xF;
 			}
 			break;
 		}
@@ -886,115 +927,74 @@ void dc_dmub_setup_subvp_dmub_command(struct dc *dc,
 	dc_wake_and_execute_dmub_cmd(dc->ctx, &cmd, DM_DMUB_WAIT_TYPE_WAIT);
 }
 
-bool dc_dmub_srv_get_diagnostic_data(struct dc_dmub_srv *dc_dmub_srv, struct dmub_diagnostic_data *diag_data)
+bool dc_dmub_srv_get_diagnostic_data(struct dc_dmub_srv *dc_dmub_srv)
 {
-	if (!dc_dmub_srv || !dc_dmub_srv->dmub || !diag_data)
+	if (!dc_dmub_srv || !dc_dmub_srv->dmub)
 		return false;
-	return dmub_srv_get_diagnostic_data(dc_dmub_srv->dmub, diag_data);
+	return dmub_srv_get_diagnostic_data(dc_dmub_srv->dmub);
 }
 
 void dc_dmub_srv_log_diagnostic_data(struct dc_dmub_srv *dc_dmub_srv)
 {
-	struct dmub_diagnostic_data diag_data = {0};
+	uint32_t i;
 
 	if (!dc_dmub_srv || !dc_dmub_srv->dmub) {
 		DC_LOG_ERROR("%s: invalid parameters.", __func__);
 		return;
 	}
 
-	if (!dc_dmub_srv_get_diagnostic_data(dc_dmub_srv, &diag_data)) {
+	DC_LOG_ERROR("%s: DMCUB error - collecting diagnostic data\n", __func__);
+
+	if (!dc_dmub_srv_get_diagnostic_data(dc_dmub_srv)) {
 		DC_LOG_ERROR("%s: dc_dmub_srv_get_diagnostic_data failed.", __func__);
 		return;
 	}
 
 	DC_LOG_DEBUG("DMCUB STATE:");
-	DC_LOG_DEBUG("    dmcub_version      : %08x", diag_data.dmcub_version);
-	DC_LOG_DEBUG("    scratch  [0]       : %08x", diag_data.scratch[0]);
-	DC_LOG_DEBUG("    scratch  [1]       : %08x", diag_data.scratch[1]);
-	DC_LOG_DEBUG("    scratch  [2]       : %08x", diag_data.scratch[2]);
-	DC_LOG_DEBUG("    scratch  [3]       : %08x", diag_data.scratch[3]);
-	DC_LOG_DEBUG("    scratch  [4]       : %08x", diag_data.scratch[4]);
-	DC_LOG_DEBUG("    scratch  [5]       : %08x", diag_data.scratch[5]);
-	DC_LOG_DEBUG("    scratch  [6]       : %08x", diag_data.scratch[6]);
-	DC_LOG_DEBUG("    scratch  [7]       : %08x", diag_data.scratch[7]);
-	DC_LOG_DEBUG("    scratch  [8]       : %08x", diag_data.scratch[8]);
-	DC_LOG_DEBUG("    scratch  [9]       : %08x", diag_data.scratch[9]);
-	DC_LOG_DEBUG("    scratch [10]       : %08x", diag_data.scratch[10]);
-	DC_LOG_DEBUG("    scratch [11]       : %08x", diag_data.scratch[11]);
-	DC_LOG_DEBUG("    scratch [12]       : %08x", diag_data.scratch[12]);
-	DC_LOG_DEBUG("    scratch [13]       : %08x", diag_data.scratch[13]);
-	DC_LOG_DEBUG("    scratch [14]       : %08x", diag_data.scratch[14]);
-	DC_LOG_DEBUG("    scratch [15]       : %08x", diag_data.scratch[15]);
-	DC_LOG_DEBUG("    pc                 : %08x", diag_data.pc);
-	DC_LOG_DEBUG("    unk_fault_addr     : %08x", diag_data.undefined_address_fault_addr);
-	DC_LOG_DEBUG("    inst_fault_addr    : %08x", diag_data.inst_fetch_fault_addr);
-	DC_LOG_DEBUG("    data_fault_addr    : %08x", diag_data.data_write_fault_addr);
-	DC_LOG_DEBUG("    inbox1_rptr        : %08x", diag_data.inbox1_rptr);
-	DC_LOG_DEBUG("    inbox1_wptr        : %08x", diag_data.inbox1_wptr);
-	DC_LOG_DEBUG("    inbox1_size        : %08x", diag_data.inbox1_size);
-	DC_LOG_DEBUG("    inbox0_rptr        : %08x", diag_data.inbox0_rptr);
-	DC_LOG_DEBUG("    inbox0_wptr        : %08x", diag_data.inbox0_wptr);
-	DC_LOG_DEBUG("    inbox0_size        : %08x", diag_data.inbox0_size);
-	DC_LOG_DEBUG("    is_enabled         : %d", diag_data.is_dmcub_enabled);
-	DC_LOG_DEBUG("    is_soft_reset      : %d", diag_data.is_dmcub_soft_reset);
-	DC_LOG_DEBUG("    is_secure_reset    : %d", diag_data.is_dmcub_secure_reset);
-	DC_LOG_DEBUG("    is_traceport_en    : %d", diag_data.is_traceport_en);
-	DC_LOG_DEBUG("    is_cw0_en          : %d", diag_data.is_cw0_enabled);
-	DC_LOG_DEBUG("    is_cw6_en          : %d", diag_data.is_cw6_enabled);
-}
-
-static bool dc_can_pipe_disable_cursor(struct pipe_ctx *pipe_ctx)
-{
-	struct pipe_ctx *test_pipe, *split_pipe;
-	const struct scaler_data *scl_data = &pipe_ctx->plane_res.scl_data;
-	struct rect r1 = scl_data->recout, r2, r2_half;
-	int r1_r = r1.x + r1.width, r1_b = r1.y + r1.height, r2_r, r2_b;
-	int cur_layer = pipe_ctx->plane_state->layer_index;
-
-	/**
-	 * Disable the cursor if there's another pipe above this with a
-	 * plane that contains this pipe's viewport to prevent double cursor
-	 * and incorrect scaling artifacts.
-	 */
-	for (test_pipe = pipe_ctx->top_pipe; test_pipe;
-	     test_pipe = test_pipe->top_pipe) {
-		// Skip invisible layer and pipe-split plane on same layer
-		if (!test_pipe->plane_state->visible || test_pipe->plane_state->layer_index == cur_layer)
-			continue;
-
-		r2 = test_pipe->plane_res.scl_data.recout;
-		r2_r = r2.x + r2.width;
-		r2_b = r2.y + r2.height;
-		split_pipe = test_pipe;
-
-		/**
-		 * There is another half plane on same layer because of
-		 * pipe-split, merge together per same height.
-		 */
-		for (split_pipe = pipe_ctx->top_pipe; split_pipe;
-		     split_pipe = split_pipe->top_pipe)
-			if (split_pipe->plane_state->layer_index == test_pipe->plane_state->layer_index) {
-				r2_half = split_pipe->plane_res.scl_data.recout;
-				r2.x = (r2_half.x < r2.x) ? r2_half.x : r2.x;
-				r2.width = r2.width + r2_half.width;
-				r2_r = r2.x + r2.width;
-				break;
-			}
-
-		if (r1.x >= r2.x && r1.y >= r2.y && r1_r <= r2_r && r1_b <= r2_b)
-			return true;
-	}
-
-	return false;
+	DC_LOG_DEBUG("    dmcub_version      : %08x", dc_dmub_srv->dmub->debug.dmcub_version);
+	DC_LOG_DEBUG("    scratch  [0]       : %08x", dc_dmub_srv->dmub->debug.scratch[0]);
+	DC_LOG_DEBUG("    scratch  [1]       : %08x", dc_dmub_srv->dmub->debug.scratch[1]);
+	DC_LOG_DEBUG("    scratch  [2]       : %08x", dc_dmub_srv->dmub->debug.scratch[2]);
+	DC_LOG_DEBUG("    scratch  [3]       : %08x", dc_dmub_srv->dmub->debug.scratch[3]);
+	DC_LOG_DEBUG("    scratch  [4]       : %08x", dc_dmub_srv->dmub->debug.scratch[4]);
+	DC_LOG_DEBUG("    scratch  [5]       : %08x", dc_dmub_srv->dmub->debug.scratch[5]);
+	DC_LOG_DEBUG("    scratch  [6]       : %08x", dc_dmub_srv->dmub->debug.scratch[6]);
+	DC_LOG_DEBUG("    scratch  [7]       : %08x", dc_dmub_srv->dmub->debug.scratch[7]);
+	DC_LOG_DEBUG("    scratch  [8]       : %08x", dc_dmub_srv->dmub->debug.scratch[8]);
+	DC_LOG_DEBUG("    scratch  [9]       : %08x", dc_dmub_srv->dmub->debug.scratch[9]);
+	DC_LOG_DEBUG("    scratch [10]       : %08x", dc_dmub_srv->dmub->debug.scratch[10]);
+	DC_LOG_DEBUG("    scratch [11]       : %08x", dc_dmub_srv->dmub->debug.scratch[11]);
+	DC_LOG_DEBUG("    scratch [12]       : %08x", dc_dmub_srv->dmub->debug.scratch[12]);
+	DC_LOG_DEBUG("    scratch [13]       : %08x", dc_dmub_srv->dmub->debug.scratch[13]);
+	DC_LOG_DEBUG("    scratch [14]       : %08x", dc_dmub_srv->dmub->debug.scratch[14]);
+	DC_LOG_DEBUG("    scratch [15]       : %08x", dc_dmub_srv->dmub->debug.scratch[15]);
+	for (i = 0; i < DMUB_PC_SNAPSHOT_COUNT; i++)
+		DC_LOG_DEBUG("    pc[%d]             : %08x", i, dc_dmub_srv->dmub->debug.pc[i]);
+	DC_LOG_DEBUG("    unk_fault_addr     : %08x", dc_dmub_srv->dmub->debug.undefined_address_fault_addr);
+	DC_LOG_DEBUG("    inst_fault_addr    : %08x", dc_dmub_srv->dmub->debug.inst_fetch_fault_addr);
+	DC_LOG_DEBUG("    data_fault_addr    : %08x", dc_dmub_srv->dmub->debug.data_write_fault_addr);
+	DC_LOG_DEBUG("    inbox1_rptr        : %08x", dc_dmub_srv->dmub->debug.inbox1_rptr);
+	DC_LOG_DEBUG("    inbox1_wptr        : %08x", dc_dmub_srv->dmub->debug.inbox1_wptr);
+	DC_LOG_DEBUG("    inbox1_size        : %08x", dc_dmub_srv->dmub->debug.inbox1_size);
+	DC_LOG_DEBUG("    inbox0_rptr        : %08x", dc_dmub_srv->dmub->debug.inbox0_rptr);
+	DC_LOG_DEBUG("    inbox0_wptr        : %08x", dc_dmub_srv->dmub->debug.inbox0_wptr);
+	DC_LOG_DEBUG("    inbox0_size        : %08x", dc_dmub_srv->dmub->debug.inbox0_size);
+	DC_LOG_DEBUG("    outbox1_rptr       : %08x", dc_dmub_srv->dmub->debug.outbox1_rptr);
+	DC_LOG_DEBUG("    outbox1_wptr       : %08x", dc_dmub_srv->dmub->debug.outbox1_wptr);
+	DC_LOG_DEBUG("    outbox1_size       : %08x", dc_dmub_srv->dmub->debug.outbox1_size);
+	DC_LOG_DEBUG("    is_enabled         : %d", dc_dmub_srv->dmub->debug.is_dmcub_enabled);
+	DC_LOG_DEBUG("    is_soft_reset      : %d", dc_dmub_srv->dmub->debug.is_dmcub_soft_reset);
+	DC_LOG_DEBUG("    is_secure_reset    : %d", dc_dmub_srv->dmub->debug.is_dmcub_secure_reset);
+	DC_LOG_DEBUG("    is_traceport_en    : %d", dc_dmub_srv->dmub->debug.is_traceport_en);
+	DC_LOG_DEBUG("    is_cw0_en          : %d", dc_dmub_srv->dmub->debug.is_cw0_enabled);
+	DC_LOG_DEBUG("    is_cw6_en          : %d", dc_dmub_srv->dmub->debug.is_cw6_enabled);
 }
 
 static bool dc_dmub_should_update_cursor_data(struct pipe_ctx *pipe_ctx)
 {
 	if (pipe_ctx->plane_state != NULL) {
-		if (pipe_ctx->plane_state->address.type == PLN_ADDR_TYPE_VIDEO_PROGRESSIVE)
-			return false;
-
-		if (dc_can_pipe_disable_cursor(pipe_ctx))
+		if (pipe_ctx->plane_state->address.type == PLN_ADDR_TYPE_VIDEO_PROGRESSIVE ||
+			resource_can_pipe_disable_cursor(pipe_ctx))
 			return false;
 	}
 
@@ -1191,12 +1191,34 @@ bool dc_dmub_srv_is_hw_pwr_up(struct dc_dmub_srv *dc_dmub_srv, bool wait)
 	return true;
 }
 
+static int count_active_streams(const struct dc *dc)
+{
+	int i, count = 0;
+
+	for (i = 0; i < dc->current_state->stream_count; ++i) {
+		struct dc_stream_state *stream = dc->current_state->streams[i];
+
+		if (stream && (!stream->dpms_off || dc->config.disable_ips_in_dpms_off))
+			count += 1;
+	}
+
+	return count;
+}
+
 static void dc_dmub_srv_notify_idle(const struct dc *dc, bool allow_idle)
 {
+	volatile const struct dmub_shared_state_ips_fw *ips_fw;
+	struct dc_dmub_srv *dc_dmub_srv;
 	union dmub_rb_cmd cmd = {0};
 
 	if (dc->debug.dmcub_emulation)
 		return;
+
+	if (!dc->ctx->dmub_srv || !dc->ctx->dmub_srv->dmub)
+		return;
+
+	dc_dmub_srv = dc->ctx->dmub_srv;
+	ips_fw = &dc_dmub_srv->dmub->shared_state[DMUB_SHARED_SHARE_FEATURE__IPS_FW].data.ips_fw;
 
 	memset(&cmd, 0, sizeof(cmd));
 	cmd.idle_opt_notify_idle.header.type = DMUB_CMD__IDLE_OPT;
@@ -1207,20 +1229,82 @@ static void dc_dmub_srv_notify_idle(const struct dc *dc, bool allow_idle)
 
 	cmd.idle_opt_notify_idle.cntl_data.driver_idle = allow_idle;
 
+	if (dc->work_arounds.skip_psr_ips_crtc_disable)
+		cmd.idle_opt_notify_idle.cntl_data.skip_otg_disable = true;
+
 	if (allow_idle) {
-		if (dc->hwss.set_idle_state)
-			dc->hwss.set_idle_state(dc, true);
+		volatile struct dmub_shared_state_ips_driver *ips_driver =
+			&dc_dmub_srv->dmub->shared_state[DMUB_SHARED_SHARE_FEATURE__IPS_DRIVER].data.ips_driver;
+		union dmub_shared_state_ips_driver_signals new_signals;
+
+		DC_LOG_IPS(
+			"%s wait idle (ips1_commit=%u ips2_commit=%u)",
+			__func__,
+			ips_fw->signals.bits.ips1_commit,
+			ips_fw->signals.bits.ips2_commit);
+
+		dc_dmub_srv_wait_idle(dc->ctx->dmub_srv);
+
+		memset(&new_signals, 0, sizeof(new_signals));
+
+		new_signals.bits.allow_idle = 1; /* always set */
+
+		if (dc->config.disable_ips == DMUB_IPS_ENABLE ||
+		    dc->config.disable_ips == DMUB_IPS_DISABLE_DYNAMIC) {
+			new_signals.bits.allow_pg = 1;
+			new_signals.bits.allow_ips1 = 1;
+			new_signals.bits.allow_ips2 = 1;
+			new_signals.bits.allow_z10 = 1;
+		} else if (dc->config.disable_ips == DMUB_IPS_DISABLE_IPS1) {
+			new_signals.bits.allow_ips1 = 1;
+		} else if (dc->config.disable_ips == DMUB_IPS_DISABLE_IPS2) {
+			new_signals.bits.allow_pg = 1;
+			new_signals.bits.allow_ips1 = 1;
+		} else if (dc->config.disable_ips == DMUB_IPS_DISABLE_IPS2_Z10) {
+			new_signals.bits.allow_pg = 1;
+			new_signals.bits.allow_ips1 = 1;
+			new_signals.bits.allow_ips2 = 1;
+		} else if (dc->config.disable_ips == DMUB_IPS_RCG_IN_ACTIVE_IPS2_IN_OFF) {
+			/* TODO: Move this logic out to hwseq */
+			if (count_active_streams(dc) == 0) {
+				/* IPS2 - Display off */
+				new_signals.bits.allow_pg = 1;
+				new_signals.bits.allow_ips1 = 1;
+				new_signals.bits.allow_ips2 = 1;
+				new_signals.bits.allow_z10 = 1;
+			} else {
+				/* RCG only */
+				new_signals.bits.allow_pg = 0;
+				new_signals.bits.allow_ips1 = 1;
+				new_signals.bits.allow_ips2 = 0;
+				new_signals.bits.allow_z10 = 0;
+			}
+		}
+
+		ips_driver->signals = new_signals;
+		dc_dmub_srv->driver_signals = ips_driver->signals;
 	}
+
+	DC_LOG_IPS(
+		"%s send allow_idle=%d (ips1_commit=%u ips2_commit=%u)",
+		__func__,
+		allow_idle,
+		ips_fw->signals.bits.ips1_commit,
+		ips_fw->signals.bits.ips2_commit);
 
 	/* NOTE: This does not use the "wake" interface since this is part of the wake path. */
 	/* We also do not perform a wait since DMCUB could enter idle after the notification. */
-	dm_execute_dmub_cmd(dc->ctx, &cmd, DM_DMUB_WAIT_TYPE_NO_WAIT);
+	dm_execute_dmub_cmd(dc->ctx, &cmd, allow_idle ? DM_DMUB_WAIT_TYPE_NO_WAIT : DM_DMUB_WAIT_TYPE_WAIT);
+
+	/* Register access should stop at this point. */
+	if (allow_idle)
+		dc_dmub_srv->needs_idle_wake = true;
 }
 
 static void dc_dmub_srv_exit_low_power_state(const struct dc *dc)
 {
-	uint32_t allow_state = 0;
-	uint32_t commit_state = 0;
+	struct dc_dmub_srv *dc_dmub_srv;
+	uint32_t rcg_exit_count = 0, ips1_exit_count = 0, ips2_exit_count = 0;
 
 	if (dc->debug.dmcub_emulation)
 		return;
@@ -1228,69 +1312,126 @@ static void dc_dmub_srv_exit_low_power_state(const struct dc *dc)
 	if (!dc->ctx->dmub_srv || !dc->ctx->dmub_srv->dmub)
 		return;
 
-	if (dc->hwss.get_idle_state &&
-		dc->hwss.set_idle_state &&
-		dc->clk_mgr->funcs->exit_low_power_state) {
+	dc_dmub_srv = dc->ctx->dmub_srv;
 
-		allow_state = dc->hwss.get_idle_state(dc);
-		dc->hwss.set_idle_state(dc, false);
+	if (dc->clk_mgr->funcs->exit_low_power_state) {
+		volatile const struct dmub_shared_state_ips_fw *ips_fw =
+			&dc_dmub_srv->dmub->shared_state[DMUB_SHARED_SHARE_FEATURE__IPS_FW].data.ips_fw;
+		volatile struct dmub_shared_state_ips_driver *ips_driver =
+			&dc_dmub_srv->dmub->shared_state[DMUB_SHARED_SHARE_FEATURE__IPS_DRIVER].data.ips_driver;
+		union dmub_shared_state_ips_driver_signals prev_driver_signals = ips_driver->signals;
 
-		if (!(allow_state & DMUB_IPS2_ALLOW_MASK)) {
-			// Wait for evaluation time
-			for (;;) {
+		rcg_exit_count = ips_fw->rcg_exit_count;
+		ips1_exit_count = ips_fw->ips1_exit_count;
+		ips2_exit_count = ips_fw->ips2_exit_count;
+
+		ips_driver->signals.all = 0;
+		dc_dmub_srv->driver_signals = ips_driver->signals;
+
+		DC_LOG_IPS(
+			"%s (allow ips1=%u ips2=%u) (commit ips1=%u ips2=%u) (count rcg=%u ips1=%u ips2=%u)",
+			__func__,
+			ips_driver->signals.bits.allow_ips1,
+			ips_driver->signals.bits.allow_ips2,
+			ips_fw->signals.bits.ips1_commit,
+			ips_fw->signals.bits.ips2_commit,
+			ips_fw->rcg_entry_count,
+			ips_fw->ips1_entry_count,
+			ips_fw->ips2_entry_count);
+
+		/* Note: register access has technically not resumed for DCN here, but we
+		 * need to be message PMFW through our standard register interface.
+		 */
+		dc_dmub_srv->needs_idle_wake = false;
+
+		if ((prev_driver_signals.bits.allow_ips2 || prev_driver_signals.all == 0) &&
+		    (!dc->debug.optimize_ips_handshake ||
+		     ips_fw->signals.bits.ips2_commit || !ips_fw->signals.bits.in_idle)) {
+			DC_LOG_IPS(
+				"wait IPS2 eval (ips1_commit=%u ips2_commit=%u)",
+				ips_fw->signals.bits.ips1_commit,
+				ips_fw->signals.bits.ips2_commit);
+
+			if (!dc->debug.optimize_ips_handshake || !ips_fw->signals.bits.ips2_commit)
 				udelay(dc->debug.ips2_eval_delay_us);
-				commit_state = dc->hwss.get_idle_state(dc);
-				if (commit_state & DMUB_IPS2_ALLOW_MASK)
-					break;
 
-				/* allow was still set, retry eval delay */
-				dc->hwss.set_idle_state(dc, false);
-			}
+			if (ips_fw->signals.bits.ips2_commit) {
+				DC_LOG_IPS(
+					"exit IPS2 #1 (ips1_commit=%u ips2_commit=%u)",
+					ips_fw->signals.bits.ips1_commit,
+					ips_fw->signals.bits.ips2_commit);
 
-			if (!(commit_state & DMUB_IPS2_COMMIT_MASK)) {
 				// Tell PMFW to exit low power state
 				dc->clk_mgr->funcs->exit_low_power_state(dc->clk_mgr);
 
+				DC_LOG_IPS(
+					"wait IPS2 entry delay (ips1_commit=%u ips2_commit=%u)",
+					ips_fw->signals.bits.ips1_commit,
+					ips_fw->signals.bits.ips2_commit);
+
 				// Wait for IPS2 entry upper bound
 				udelay(dc->debug.ips2_entry_delay_us);
+
+				DC_LOG_IPS(
+					"exit IPS2 #2 (ips1_commit=%u ips2_commit=%u)",
+					ips_fw->signals.bits.ips1_commit,
+					ips_fw->signals.bits.ips2_commit);
+
 				dc->clk_mgr->funcs->exit_low_power_state(dc->clk_mgr);
 
-				for (;;) {
-					commit_state = dc->hwss.get_idle_state(dc);
-					if (commit_state & DMUB_IPS2_COMMIT_MASK)
-						break;
+				DC_LOG_IPS(
+					"wait IPS2 commit clear (ips1_commit=%u ips2_commit=%u)",
+					ips_fw->signals.bits.ips1_commit,
+					ips_fw->signals.bits.ips2_commit);
 
+				while (ips_fw->signals.bits.ips2_commit)
 					udelay(1);
-				}
+
+				DC_LOG_IPS(
+					"wait hw_pwr_up (ips1_commit=%u ips2_commit=%u)",
+					ips_fw->signals.bits.ips1_commit,
+					ips_fw->signals.bits.ips2_commit);
 
 				if (!dc_dmub_srv_is_hw_pwr_up(dc->ctx->dmub_srv, true))
 					ASSERT(0);
 
-				/* TODO: See if we can return early here - IPS2 should go
-				 * back directly to IPS0 and clear the flags, but it will
-				 * be safer to directly notify DMCUB of this.
-				 */
-				allow_state = dc->hwss.get_idle_state(dc);
+				DC_LOG_IPS(
+					"resync inbox1 (ips1_commit=%u ips2_commit=%u)",
+					ips_fw->signals.bits.ips1_commit,
+					ips_fw->signals.bits.ips2_commit);
+
+				dmub_srv_sync_inbox1(dc->ctx->dmub_srv->dmub);
 			}
 		}
 
 		dc_dmub_srv_notify_idle(dc, false);
-		if (!(allow_state & DMUB_IPS1_ALLOW_MASK)) {
-			for (;;) {
-				commit_state = dc->hwss.get_idle_state(dc);
-				if (commit_state & DMUB_IPS1_COMMIT_MASK)
-					break;
+		if (prev_driver_signals.bits.allow_ips1 || prev_driver_signals.all == 0) {
+			DC_LOG_IPS(
+				"wait for IPS1 commit clear (ips1_commit=%u ips2_commit=%u)",
+				ips_fw->signals.bits.ips1_commit,
+				ips_fw->signals.bits.ips2_commit);
 
+			while (ips_fw->signals.bits.ips1_commit)
 				udelay(1);
-			}
+
+			DC_LOG_IPS(
+				"wait for IPS1 commit clear done (ips1_commit=%u ips2_commit=%u)",
+				ips_fw->signals.bits.ips1_commit,
+				ips_fw->signals.bits.ips2_commit);
 		}
 	}
 
 	if (!dc_dmub_srv_is_hw_pwr_up(dc->ctx->dmub_srv, true))
 		ASSERT(0);
+
+	DC_LOG_IPS("%s exit (count rcg=%u ips1=%u ips2=%u)",
+		__func__,
+		rcg_exit_count,
+		ips1_exit_count,
+		ips2_exit_count);
 }
 
-void dc_dmub_srv_set_power_state(struct dc_dmub_srv *dc_dmub_srv, enum dc_acpi_cm_power_state powerState)
+void dc_dmub_srv_set_power_state(struct dc_dmub_srv *dc_dmub_srv, enum dc_acpi_cm_power_state power_state)
 {
 	struct dmub_srv *dmub;
 
@@ -1299,10 +1440,66 @@ void dc_dmub_srv_set_power_state(struct dc_dmub_srv *dc_dmub_srv, enum dc_acpi_c
 
 	dmub = dc_dmub_srv->dmub;
 
-	if (powerState == DC_ACPI_CM_POWER_STATE_D0)
+	if (power_state == DC_ACPI_CM_POWER_STATE_D0)
 		dmub_srv_set_power_state(dmub, DMUB_POWER_STATE_D0);
 	else
 		dmub_srv_set_power_state(dmub, DMUB_POWER_STATE_D3);
+}
+
+void dc_dmub_srv_notify_fw_dc_power_state(struct dc_dmub_srv *dc_dmub_srv,
+					  enum dc_acpi_cm_power_state power_state)
+{
+	union dmub_rb_cmd cmd;
+
+	if (!dc_dmub_srv)
+		return;
+
+	memset(&cmd, 0, sizeof(cmd));
+
+	cmd.idle_opt_set_dc_power_state.header.type = DMUB_CMD__IDLE_OPT;
+	cmd.idle_opt_set_dc_power_state.header.sub_type = DMUB_CMD__IDLE_OPT_SET_DC_POWER_STATE;
+	cmd.idle_opt_set_dc_power_state.header.payload_bytes =
+		sizeof(cmd.idle_opt_set_dc_power_state) - sizeof(cmd.idle_opt_set_dc_power_state.header);
+
+	if (power_state == DC_ACPI_CM_POWER_STATE_D0) {
+		cmd.idle_opt_set_dc_power_state.data.power_state = DMUB_IDLE_OPT_DC_POWER_STATE_D0;
+	} else if (power_state == DC_ACPI_CM_POWER_STATE_D3) {
+		cmd.idle_opt_set_dc_power_state.data.power_state = DMUB_IDLE_OPT_DC_POWER_STATE_D3;
+	} else {
+		cmd.idle_opt_set_dc_power_state.data.power_state = DMUB_IDLE_OPT_DC_POWER_STATE_UNKNOWN;
+	}
+
+	dc_wake_and_execute_dmub_cmd(dc_dmub_srv->ctx, &cmd, DM_DMUB_WAIT_TYPE_WAIT);
+}
+
+bool dc_dmub_srv_should_detect(struct dc_dmub_srv *dc_dmub_srv)
+{
+	volatile const struct dmub_shared_state_ips_fw *ips_fw;
+	bool reallow_idle = false, should_detect = false;
+
+	if (!dc_dmub_srv || !dc_dmub_srv->dmub)
+		return false;
+
+	if (dc_dmub_srv->dmub->shared_state &&
+	    dc_dmub_srv->dmub->meta_info.feature_bits.bits.shared_state_link_detection) {
+		ips_fw = &dc_dmub_srv->dmub->shared_state[DMUB_SHARED_SHARE_FEATURE__IPS_FW].data.ips_fw;
+		return ips_fw->signals.bits.detection_required;
+	}
+
+	/* Detection may require reading scratch 0 - exit out of idle prior to the read. */
+	if (dc_dmub_srv->idle_allowed) {
+		dc_dmub_srv_apply_idle_power_optimizations(dc_dmub_srv->ctx->dc, false);
+		reallow_idle = true;
+	}
+
+	should_detect = dmub_srv_should_detect(dc_dmub_srv->dmub);
+
+	/* Re-enter idle if we're not about to immediately redetect links. */
+	if (!should_detect && reallow_idle && dc_dmub_srv->idle_exit_counter == 0 &&
+	    !dc_dmub_srv->ctx->dc->debug.disable_dmub_reallow_idle)
+		dc_dmub_srv_apply_idle_power_optimizations(dc_dmub_srv->ctx->dc, true);
+
+	return should_detect;
 }
 
 void dc_dmub_srv_apply_idle_power_optimizations(const struct dc *dc, bool allow_idle)
@@ -1312,24 +1509,47 @@ void dc_dmub_srv_apply_idle_power_optimizations(const struct dc *dc, bool allow_
 	if (!dc_dmub_srv || !dc_dmub_srv->dmub)
 		return;
 
+	allow_idle &= (!dc->debug.ips_disallow_entry);
+
 	if (dc_dmub_srv->idle_allowed == allow_idle)
 		return;
+
+	DC_LOG_IPS("%s state change: old=%d new=%d", __func__, dc_dmub_srv->idle_allowed, allow_idle);
 
 	/*
 	 * Entering a low power state requires a driver notification.
 	 * Powering up the hardware requires notifying PMFW and DMCUB.
 	 * Clearing the driver idle allow requires a DMCUB command.
 	 * DMCUB commands requires the DMCUB to be powered up and restored.
-	 *
-	 * Exit out early to prevent an infinite loop of DMCUB commands
-	 * triggering exit low power - use software state to track this.
 	 */
-	dc_dmub_srv->idle_allowed = allow_idle;
 
-	if (!allow_idle)
+	if (!allow_idle) {
+		dc_dmub_srv->idle_exit_counter += 1;
+
 		dc_dmub_srv_exit_low_power_state(dc);
-	else
+		/*
+		 * Idle is considered fully exited only after the sequence above
+		 * fully completes. If we have a race of two threads exiting
+		 * at the same time then it's safe to perform the sequence
+		 * twice as long as we're not re-entering.
+		 *
+		 * Infinite command submission is avoided by using the
+		 * dm_execute_dmub_cmd submission instead of the "wake" helpers.
+		 */
+		dc_dmub_srv->idle_allowed = false;
+
+		dc_dmub_srv->idle_exit_counter -= 1;
+		if (dc_dmub_srv->idle_exit_counter < 0) {
+			ASSERT(0);
+			dc_dmub_srv->idle_exit_counter = 0;
+		}
+	} else {
+		/* Consider idle as notified prior to the actual submission to
+		 * prevent multiple entries. */
+		dc_dmub_srv->idle_allowed = true;
+
 		dc_dmub_srv_notify_idle(dc, allow_idle);
+	}
 }
 
 bool dc_wake_and_execute_dmub_cmd(const struct dc_context *ctx, union dmub_rb_cmd *cmd,
@@ -1364,7 +1584,8 @@ bool dc_wake_and_execute_dmub_cmd_list(const struct dc_context *ctx, unsigned in
 	else
 		result = dm_execute_dmub_cmd(ctx, cmd, wait_type);
 
-	if (result && reallow_idle)
+	if (result && reallow_idle && dc_dmub_srv->idle_exit_counter == 0 &&
+	    !ctx->dc->debug.disable_dmub_reallow_idle)
 		dc_dmub_srv_apply_idle_power_optimizations(ctx->dc, true);
 
 	return result;
@@ -1413,8 +1634,273 @@ bool dc_wake_and_execute_gpint(const struct dc_context *ctx, enum dmub_gpint_com
 
 	result = dc_dmub_execute_gpint(ctx, command_code, param, response, wait_type);
 
-	if (result && reallow_idle)
+	if (result && reallow_idle && dc_dmub_srv->idle_exit_counter == 0 &&
+	    !ctx->dc->debug.disable_dmub_reallow_idle)
 		dc_dmub_srv_apply_idle_power_optimizations(ctx->dc, true);
 
 	return result;
+}
+
+void dc_dmub_srv_fams2_update_config(struct dc *dc,
+		struct dc_state *context,
+		bool enable)
+{
+	uint8_t num_cmds = 1;
+	uint32_t i;
+	union dmub_rb_cmd cmd[2 * MAX_STREAMS + 1];
+	struct dmub_rb_cmd_fams2 *global_cmd = &cmd[0].fams2_config;
+
+	memset(cmd, 0, sizeof(union dmub_rb_cmd) * (2 * MAX_STREAMS + 1));
+	/* fill in generic command header */
+	global_cmd->header.type = DMUB_CMD__FW_ASSISTED_MCLK_SWITCH;
+	global_cmd->header.sub_type = DMUB_CMD__FAMS2_CONFIG;
+	global_cmd->header.payload_bytes = sizeof(struct dmub_rb_cmd_fams2) - sizeof(struct dmub_cmd_header);
+
+	if (enable) {
+		/* send global configuration parameters */
+		memcpy(&global_cmd->config.global, &context->bw_ctx.bw.dcn.fams2_global_config, sizeof(struct dmub_cmd_fams2_global_config));
+
+		/* copy static feature configuration overrides */
+		global_cmd->config.global.features.bits.enable_stall_recovery = dc->debug.fams2_config.bits.enable_stall_recovery;
+		global_cmd->config.global.features.bits.enable_debug = dc->debug.fams2_config.bits.enable_debug;
+		global_cmd->config.global.features.bits.enable_offload_flip = dc->debug.fams2_config.bits.enable_offload_flip;
+
+		/* construct per-stream configs */
+		for (i = 0; i < context->bw_ctx.bw.dcn.fams2_global_config.num_streams; i++) {
+			struct dmub_rb_cmd_fams2 *stream_base_cmd = &cmd[i+1].fams2_config;
+			struct dmub_rb_cmd_fams2 *stream_sub_state_cmd = &cmd[i+1+context->bw_ctx.bw.dcn.fams2_global_config.num_streams].fams2_config;
+
+			/* configure command header */
+			stream_base_cmd->header.type = DMUB_CMD__FW_ASSISTED_MCLK_SWITCH;
+			stream_base_cmd->header.sub_type = DMUB_CMD__FAMS2_CONFIG;
+			stream_base_cmd->header.payload_bytes = sizeof(struct dmub_rb_cmd_fams2) - sizeof(struct dmub_cmd_header);
+			stream_base_cmd->header.multi_cmd_pending = 1;
+			stream_sub_state_cmd->header.type = DMUB_CMD__FW_ASSISTED_MCLK_SWITCH;
+			stream_sub_state_cmd->header.sub_type = DMUB_CMD__FAMS2_CONFIG;
+			stream_sub_state_cmd->header.payload_bytes = sizeof(struct dmub_rb_cmd_fams2) - sizeof(struct dmub_cmd_header);
+			stream_sub_state_cmd->header.multi_cmd_pending = 1;
+			/* copy stream static base state */
+			memcpy(&stream_base_cmd->config,
+					&context->bw_ctx.bw.dcn.fams2_stream_base_params[i],
+					sizeof(union dmub_cmd_fams2_config));
+			/* copy stream static sub state */
+			memcpy(&stream_sub_state_cmd->config,
+					&context->bw_ctx.bw.dcn.fams2_stream_sub_params[i],
+					sizeof(union dmub_cmd_fams2_config));
+		}
+	}
+
+	/* apply feature configuration based on current driver state */
+	global_cmd->config.global.features.bits.enable_visual_confirm = dc->debug.visual_confirm == VISUAL_CONFIRM_FAMS2;
+	global_cmd->config.global.features.bits.enable = enable;
+
+	if (enable && context->bw_ctx.bw.dcn.fams2_global_config.features.bits.enable) {
+		/* set multi pending for global, and unset for last stream cmd */
+		global_cmd->header.multi_cmd_pending = 1;
+		cmd[2 * context->bw_ctx.bw.dcn.fams2_global_config.num_streams].fams2_config.header.multi_cmd_pending = 0;
+		num_cmds += 2 * context->bw_ctx.bw.dcn.fams2_global_config.num_streams;
+	}
+
+	dm_execute_dmub_cmd_list(dc->ctx, num_cmds, cmd, DM_DMUB_WAIT_TYPE_WAIT);
+}
+
+void dc_dmub_srv_fams2_drr_update(struct dc *dc,
+		uint32_t tg_inst,
+		uint32_t vtotal_min,
+		uint32_t vtotal_max,
+		uint32_t vtotal_mid,
+		uint32_t vtotal_mid_frame_num,
+		bool program_manual_trigger)
+{
+	union dmub_rb_cmd cmd = { 0 };
+
+	cmd.fams2_drr_update.header.type = DMUB_CMD__FW_ASSISTED_MCLK_SWITCH;
+	cmd.fams2_drr_update.header.sub_type = DMUB_CMD__FAMS2_DRR_UPDATE;
+	cmd.fams2_drr_update.dmub_optc_state_req.tg_inst = tg_inst;
+	cmd.fams2_drr_update.dmub_optc_state_req.v_total_max = vtotal_max;
+	cmd.fams2_drr_update.dmub_optc_state_req.v_total_min = vtotal_min;
+	cmd.fams2_drr_update.dmub_optc_state_req.v_total_mid = vtotal_mid;
+	cmd.fams2_drr_update.dmub_optc_state_req.v_total_mid_frame_num = vtotal_mid_frame_num;
+	cmd.fams2_drr_update.dmub_optc_state_req.program_manual_trigger = program_manual_trigger;
+
+	cmd.fams2_drr_update.header.payload_bytes = sizeof(cmd.fams2_drr_update) - sizeof(cmd.fams2_drr_update.header);
+
+	dm_execute_dmub_cmd(dc->ctx, &cmd, DM_DMUB_WAIT_TYPE_WAIT);
+}
+
+void dc_dmub_srv_fams2_passthrough_flip(
+		struct dc *dc,
+		struct dc_state *state,
+		struct dc_stream_state *stream,
+		struct dc_surface_update *srf_updates,
+		int surface_count)
+{
+	int plane_index;
+	union dmub_rb_cmd cmds[MAX_PLANES];
+	struct dc_plane_address *address;
+	struct dc_plane_state *plane_state;
+	int num_cmds = 0;
+	struct dc_stream_status *stream_status = dc_stream_get_status(stream);
+
+	if (surface_count <= 0 || stream_status == NULL)
+		return;
+
+	memset(cmds, 0, sizeof(union dmub_rb_cmd) * MAX_PLANES);
+
+	/* build command for each surface update */
+	for (plane_index = 0; plane_index < surface_count; plane_index++) {
+		plane_state = srf_updates[plane_index].surface;
+		address = &plane_state->address;
+
+		/* skip if there is no address update for plane */
+		if (!srf_updates[plane_index].flip_addr)
+			continue;
+
+		/* build command header */
+		cmds[num_cmds].fams2_flip.header.type = DMUB_CMD__FW_ASSISTED_MCLK_SWITCH;
+		cmds[num_cmds].fams2_flip.header.sub_type = DMUB_CMD__FAMS2_FLIP;
+		cmds[num_cmds].fams2_flip.header.payload_bytes = sizeof(struct dmub_rb_cmd_fams2_flip);
+
+		/* for chaining multiple commands, all but last command should set to 1 */
+		cmds[num_cmds].fams2_flip.header.multi_cmd_pending = 1;
+
+		/* set topology info */
+		cmds[num_cmds].fams2_flip.flip_info.pipe_mask = dc_plane_get_pipe_mask(state, plane_state);
+		if (stream_status)
+			cmds[num_cmds].fams2_flip.flip_info.otg_inst = stream_status->primary_otg_inst;
+
+		cmds[num_cmds].fams2_flip.flip_info.config.bits.is_immediate = plane_state->flip_immediate;
+
+		/* build address info for command */
+		switch (address->type) {
+		case PLN_ADDR_TYPE_GRAPHICS:
+			if (address->grph.addr.quad_part == 0) {
+				BREAK_TO_DEBUGGER();
+				break;
+			}
+
+			cmds[num_cmds].fams2_flip.flip_info.addr_info.meta_addr_lo =
+					address->grph.meta_addr.low_part;
+			cmds[num_cmds].fams2_flip.flip_info.addr_info.meta_addr_hi =
+					(uint16_t)address->grph.meta_addr.high_part;
+			cmds[num_cmds].fams2_flip.flip_info.addr_info.surf_addr_lo =
+					address->grph.addr.low_part;
+			cmds[num_cmds].fams2_flip.flip_info.addr_info.surf_addr_hi =
+					(uint16_t)address->grph.addr.high_part;
+			break;
+		case PLN_ADDR_TYPE_VIDEO_PROGRESSIVE:
+			if (address->video_progressive.luma_addr.quad_part == 0 ||
+				address->video_progressive.chroma_addr.quad_part == 0) {
+				BREAK_TO_DEBUGGER();
+				break;
+			}
+
+			cmds[num_cmds].fams2_flip.flip_info.addr_info.meta_addr_lo =
+					address->video_progressive.luma_meta_addr.low_part;
+			cmds[num_cmds].fams2_flip.flip_info.addr_info.meta_addr_hi =
+					(uint16_t)address->video_progressive.luma_meta_addr.high_part;
+			cmds[num_cmds].fams2_flip.flip_info.addr_info.meta_addr_c_lo =
+					address->video_progressive.chroma_meta_addr.low_part;
+			cmds[num_cmds].fams2_flip.flip_info.addr_info.meta_addr_c_hi =
+					(uint16_t)address->video_progressive.chroma_meta_addr.high_part;
+			cmds[num_cmds].fams2_flip.flip_info.addr_info.surf_addr_lo =
+					address->video_progressive.luma_addr.low_part;
+			cmds[num_cmds].fams2_flip.flip_info.addr_info.surf_addr_hi =
+					(uint16_t)address->video_progressive.luma_addr.high_part;
+			cmds[num_cmds].fams2_flip.flip_info.addr_info.surf_addr_c_lo =
+					address->video_progressive.chroma_addr.low_part;
+			cmds[num_cmds].fams2_flip.flip_info.addr_info.surf_addr_c_hi =
+					(uint16_t)address->video_progressive.chroma_addr.high_part;
+			break;
+		default:
+			// Should never be hit
+			BREAK_TO_DEBUGGER();
+			break;
+		}
+
+		num_cmds++;
+	}
+
+	if (num_cmds > 0)  {
+		cmds[num_cmds - 1].fams2_flip.header.multi_cmd_pending = 0;
+		dm_execute_dmub_cmd_list(dc->ctx, num_cmds, cmds, DM_DMUB_WAIT_TYPE_WAIT);
+	}
+}
+
+bool dc_dmub_srv_ips_residency_cntl(struct dc_dmub_srv *dc_dmub_srv, bool start_measurement)
+{
+	bool result;
+
+	if (!dc_dmub_srv || !dc_dmub_srv->dmub)
+		return false;
+
+	result = dc_wake_and_execute_gpint(dc_dmub_srv->ctx, DMUB_GPINT__IPS_RESIDENCY,
+					   start_measurement, NULL, DM_DMUB_WAIT_TYPE_WAIT);
+
+	return result;
+}
+
+void dc_dmub_srv_ips_query_residency_info(struct dc_dmub_srv *dc_dmub_srv, struct ips_residency_info *output)
+{
+	uint32_t i;
+	enum dmub_gpint_command command_code;
+
+	if (!dc_dmub_srv || !dc_dmub_srv->dmub)
+		return;
+
+	switch (output->ips_mode) {
+	case DMUB_IPS_MODE_IPS1_MAX:
+		command_code = DMUB_GPINT__GET_IPS1_HISTOGRAM_COUNTER;
+		break;
+	case DMUB_IPS_MODE_IPS2:
+		command_code = DMUB_GPINT__GET_IPS2_HISTOGRAM_COUNTER;
+		break;
+	case DMUB_IPS_MODE_IPS1_RCG:
+		command_code = DMUB_GPINT__GET_IPS1_RCG_HISTOGRAM_COUNTER;
+		break;
+	case DMUB_IPS_MODE_IPS1_ONO2_ON:
+		command_code = DMUB_GPINT__GET_IPS1_ONO2_ON_HISTOGRAM_COUNTER;
+		break;
+	default:
+		command_code = DMUB_GPINT__INVALID_COMMAND;
+		break;
+	}
+
+	if (command_code == DMUB_GPINT__INVALID_COMMAND)
+		return;
+
+	// send gpint commands and wait for ack
+	if (!dc_wake_and_execute_gpint(dc_dmub_srv->ctx, DMUB_GPINT__GET_IPS_RESIDENCY_PERCENT,
+				      (uint16_t)(output->ips_mode),
+				       &output->residency_percent, DM_DMUB_WAIT_TYPE_WAIT_WITH_REPLY))
+		output->residency_percent = 0;
+
+	if (!dc_wake_and_execute_gpint(dc_dmub_srv->ctx, DMUB_GPINT__GET_IPS_RESIDENCY_ENTRY_COUNTER,
+				      (uint16_t)(output->ips_mode),
+				       &output->entry_counter, DM_DMUB_WAIT_TYPE_WAIT_WITH_REPLY))
+		output->entry_counter = 0;
+
+	if (!dc_wake_and_execute_gpint(dc_dmub_srv->ctx, DMUB_GPINT__GET_IPS_RESIDENCY_DURATION_US_LO,
+				      (uint16_t)(output->ips_mode),
+				       &output->total_active_time_us[0], DM_DMUB_WAIT_TYPE_WAIT_WITH_REPLY))
+		output->total_active_time_us[0] = 0;
+	if (!dc_wake_and_execute_gpint(dc_dmub_srv->ctx, DMUB_GPINT__GET_IPS_RESIDENCY_DURATION_US_HI,
+				      (uint16_t)(output->ips_mode),
+				       &output->total_active_time_us[1], DM_DMUB_WAIT_TYPE_WAIT_WITH_REPLY))
+		output->total_active_time_us[1] = 0;
+
+	if (!dc_wake_and_execute_gpint(dc_dmub_srv->ctx, DMUB_GPINT__GET_IPS_INACTIVE_RESIDENCY_DURATION_US_LO,
+				      (uint16_t)(output->ips_mode),
+				       &output->total_inactive_time_us[0], DM_DMUB_WAIT_TYPE_WAIT_WITH_REPLY))
+		output->total_inactive_time_us[0] = 0;
+	if (!dc_wake_and_execute_gpint(dc_dmub_srv->ctx, DMUB_GPINT__GET_IPS_INACTIVE_RESIDENCY_DURATION_US_HI,
+				      (uint16_t)(output->ips_mode),
+				       &output->total_inactive_time_us[1], DM_DMUB_WAIT_TYPE_WAIT_WITH_REPLY))
+		output->total_inactive_time_us[1] = 0;
+
+	// NUM_IPS_HISTOGRAM_BUCKETS = 16
+	for (i = 0; i < 16; i++)
+		if (!dc_wake_and_execute_gpint(dc_dmub_srv->ctx, command_code, i, &output->histogram[i],
+					       DM_DMUB_WAIT_TYPE_WAIT_WITH_REPLY))
+			output->histogram[i] = 0;
 }

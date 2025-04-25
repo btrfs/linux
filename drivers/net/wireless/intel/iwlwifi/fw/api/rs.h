@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause */
 /*
- * Copyright (C) 2012-2014, 2018-2022 Intel Corporation
+ * Copyright (C) 2012-2014, 2018-2022, 2024 Intel Corporation
  * Copyright (C) 2017 Intel Deutschland GmbH
  */
 #ifndef __iwl_fw_api_rs_h__
@@ -9,7 +9,7 @@
 #include "mac.h"
 
 /**
- * enum iwl_tlc_mng_cfg_flags_enum - options for TLC config flags
+ * enum iwl_tlc_mng_cfg_flags - options for TLC config flags
  * @IWL_TLC_MNG_CFG_FLAGS_STBC_MSK: enable STBC. For HE this enables STBC for
  *				    bandwidths <= 80MHz
  * @IWL_TLC_MNG_CFG_FLAGS_LDPC_MSK: enable LDPC
@@ -226,6 +226,58 @@ struct iwl_tlc_update_notif {
 	__le32 amsdu_enabled;
 } __packed; /* TLC_MNG_UPDATE_NTFY_API_S_VER_2 */
 
+/**
+ * enum iwl_tlc_debug_types - debug options
+ */
+enum iwl_tlc_debug_types {
+	/**
+	 *  @IWL_TLC_DEBUG_FIXED_RATE: set fixed rate for rate scaling
+	 */
+	IWL_TLC_DEBUG_FIXED_RATE,
+	/**
+	 * @IWL_TLC_DEBUG_AGG_DURATION_LIM: time limit for a BA
+	 * session, in usec
+	 */
+	IWL_TLC_DEBUG_AGG_DURATION_LIM,
+	/**
+	 * @IWL_TLC_DEBUG_AGG_FRAME_CNT_LIM: set max number of frames
+	 * in an aggregation
+	 */
+	IWL_TLC_DEBUG_AGG_FRAME_CNT_LIM,
+	/**
+	 * @IWL_TLC_DEBUG_TPC_ENABLED: enable or disable tpc
+	 */
+	IWL_TLC_DEBUG_TPC_ENABLED,
+	/**
+	 * @IWL_TLC_DEBUG_TPC_STATS: get number of frames Tx'ed in each
+	 * tpc step
+	 */
+	IWL_TLC_DEBUG_TPC_STATS,
+	/**
+	 * @IWL_TLC_DEBUG_RTS_DISABLE: disable RTS (bool true/false).
+	 */
+	IWL_TLC_DEBUG_RTS_DISABLE,
+	/**
+	 * @IWL_TLC_DEBUG_PARTIAL_FIXED_RATE: set partial fixed rate to fw
+	 */
+	IWL_TLC_DEBUG_PARTIAL_FIXED_RATE,
+}; /* TLC_MNG_DEBUG_TYPES_API_E */
+
+#define MAX_DATA_IN_DHC_TLC_CMD 10
+
+/**
+ * struct iwl_dhc_tlc_cmd - fixed debug config
+ * @sta_id: bit 0 - enable/disable, bits 1 - 7 hold station id
+ * @reserved1: reserved
+ * @type: type id of %enum iwl_tlc_debug_types
+ * @data: data to send
+ */
+struct iwl_dhc_tlc_cmd {
+	u8 sta_id;
+	u8 reserved1[3];
+	__le32 type;
+	__le32 data[MAX_DATA_IN_DHC_TLC_CMD];
+} __packed; /* TLC_MNG_DEBUG_CMD_S */
 
 #define IWL_MAX_MCS_DISPLAY_SIZE        12
 

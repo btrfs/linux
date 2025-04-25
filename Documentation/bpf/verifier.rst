@@ -418,7 +418,7 @@ The rules for correspondence between registers / stack slots are as follows:
   linked to the registers and stack slots of the parent state with the same
   indices.
 
-* For the outer stack frames, only caller saved registers (r6-r9) and stack
+* For the outer stack frames, only callee saved registers (r6-r9) and stack
   slots are linked to the registers and stack slots of the parent state with the
   same indices.
 
@@ -507,7 +507,7 @@ Notes:
   from the parent state to the current state.
 
 * Details about REG_LIVE_READ32 are omitted.
-  
+
 * Function ``propagate_liveness()`` (see section :ref:`read_marks_for_cache_hits`)
   might override the first parent link. Please refer to the comments in the
   ``propagate_liveness()`` and ``mark_reg_read()`` source code for further
@@ -562,7 +562,7 @@ works::
   * ``checkpoint[0].r1`` is marked as read;
 
 * At instruction #5 exit is reached and ``checkpoint[0]`` can now be processed
-  by ``clean_live_states()``. After this processing ``checkpoint[0].r0`` has a
+  by ``clean_live_states()``. After this processing ``checkpoint[0].r1`` has a
   read mark and all other registers and stack slots are marked as ``NOT_INIT``
   or ``STACK_INVALID``
 
@@ -571,7 +571,7 @@ works::
   are considered equivalent.
 
 .. _read_marks_for_cache_hits:
-  
+
 Read marks propagation for cache hits
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 

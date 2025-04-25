@@ -3,7 +3,7 @@
 // This file is provided under a dual BSD/GPLv2 license.  When using or
 // redistributing this file, you may do so under either license.
 //
-// Copyright(c) 2023 Intel Corporation. All rights reserved.
+// Copyright(c) 2023 Intel Corporation
 //
 // Author: Ranjani Sridharan <ranjani.sridharan@linux.intel.com>
 //
@@ -18,7 +18,15 @@
 
 /* platform specific devices */
 #include "hda.h"
-#include "mtl.h"
+#include "lnl.h"
+
+/* LunarLake ops */
+static struct snd_sof_dsp_ops sof_lnl_ops;
+
+static int sof_lnl_ops_init(struct snd_sof_dev *sdev)
+{
+	return sof_lnl_set_ops(sdev, &sof_lnl_ops);
+}
 
 static const struct sof_dev_desc lnl_desc = {
 	.use_acpi_target_states	= true,
@@ -34,6 +42,9 @@ static const struct sof_dev_desc lnl_desc = {
 	.dspless_mode_supported	= true,
 	.default_fw_path = {
 		[SOF_IPC_TYPE_4] = "intel/sof-ipc4/lnl",
+	},
+	.default_lib_path = {
+		[SOF_IPC_TYPE_4] = "intel/sof-ipc4-lib/lnl",
 	},
 	.default_tplg_path = {
 		[SOF_IPC_TYPE_4] = "intel/sof-ipc4-tplg",
@@ -61,11 +72,13 @@ static struct pci_driver snd_sof_pci_intel_lnl_driver = {
 	.remove = sof_pci_remove,
 	.shutdown = sof_pci_shutdown,
 	.driver = {
-		.pm = &sof_pci_pm,
+		.pm = pm_ptr(&sof_pci_pm),
 	},
 };
 module_pci_driver(snd_sof_pci_intel_lnl_driver);
 
 MODULE_LICENSE("Dual BSD/GPL");
-MODULE_IMPORT_NS(SND_SOC_SOF_INTEL_HDA_COMMON);
-MODULE_IMPORT_NS(SND_SOC_SOF_PCI_DEV);
+MODULE_DESCRIPTION("SOF support for LunarLake platforms");
+MODULE_IMPORT_NS("SND_SOC_SOF_INTEL_HDA_GENERIC");
+MODULE_IMPORT_NS("SND_SOC_SOF_INTEL_HDA_COMMON");
+MODULE_IMPORT_NS("SND_SOC_SOF_PCI_DEV");

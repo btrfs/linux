@@ -531,7 +531,7 @@ static void ssd_commit_flushed(struct dm_writecache *wc, bool wait_for_ios)
 		req.notify.context = &endio;
 
 		/* writing via async dm-io (implied by notify.fn above) won't return an error */
-		(void) dm_io(&req, 1, &region, NULL);
+		(void) dm_io(&req, 1, &region, NULL, IOPRIO_DEFAULT);
 		i = j;
 	}
 
@@ -568,7 +568,7 @@ static void ssd_commit_superblock(struct dm_writecache *wc)
 	req.notify.fn = NULL;
 	req.notify.context = NULL;
 
-	r = dm_io(&req, 1, &region, NULL);
+	r = dm_io(&req, 1, &region, NULL, IOPRIO_DEFAULT);
 	if (unlikely(r))
 		writecache_error(wc, r, "error writing superblock");
 }
@@ -596,7 +596,7 @@ static void writecache_disk_flush(struct dm_writecache *wc, struct dm_dev *dev)
 	req.client = wc->dm_io;
 	req.notify.fn = NULL;
 
-	r = dm_io(&req, 1, &region, NULL);
+	r = dm_io(&req, 1, &region, NULL, IOPRIO_DEFAULT);
 	if (unlikely(r))
 		writecache_error(wc, r, "error flushing metadata: %d", r);
 }
@@ -797,7 +797,7 @@ static void writecache_flush(struct dm_writecache *wc)
 	bool need_flush_after_free;
 
 	wc->uncommitted_blocks = 0;
-	del_timer(&wc->autocommit_timer);
+	timer_delete(&wc->autocommit_timer);
 
 	if (list_empty(&wc->lru))
 		return;
@@ -927,8 +927,8 @@ static void writecache_suspend(struct dm_target *ti)
 	struct dm_writecache *wc = ti->private;
 	bool flush_on_suspend;
 
-	del_timer_sync(&wc->autocommit_timer);
-	del_timer_sync(&wc->max_age_timer);
+	timer_delete_sync(&wc->autocommit_timer);
+	timer_delete_sync(&wc->max_age_timer);
 
 	wc_lock(wc);
 	writecache_flush(wc);
@@ -990,7 +990,7 @@ static int writecache_read_metadata(struct dm_writecache *wc, sector_t n_sectors
 	req.client = wc->dm_io;
 	req.notify.fn = NULL;
 
-	return dm_io(&req, 1, &region, NULL);
+	return dm_io(&req, 1, &region, NULL, IOPRIO_DEFAULT);
 }
 
 static void writecache_resume(struct dm_target *ti)
@@ -2776,5 +2776,5 @@ static struct target_type writecache_target = {
 module_dm(writecache);
 
 MODULE_DESCRIPTION(DM_NAME " writecache target");
-MODULE_AUTHOR("Mikulas Patocka <dm-devel@redhat.com>");
+MODULE_AUTHOR("Mikulas Patocka <dm-devel@lists.linux.dev>");
 MODULE_LICENSE("GPL");

@@ -392,12 +392,10 @@ mwifiex_cmd_append_11n_tlv(struct mwifiex_private *priv,
 
 		chan_list =
 			(struct mwifiex_ie_types_chan_list_param_set *) *buffer;
-		memset(chan_list, 0,
-		       sizeof(struct mwifiex_ie_types_chan_list_param_set));
+		memset(chan_list, 0, struct_size(chan_list, chan_scan_param, 1));
 		chan_list->header.type = cpu_to_le16(TLV_TYPE_CHANLIST);
-		chan_list->header.len = cpu_to_le16(
-			sizeof(struct mwifiex_ie_types_chan_list_param_set) -
-			sizeof(struct mwifiex_ie_types_header));
+		chan_list->header.len =
+			cpu_to_le16(sizeof(struct mwifiex_chan_scan_param_set));
 		chan_list->chan_scan_param[0].chan_number =
 			bss_desc->bcn_ht_oper->primary_chan;
 		chan_list->chan_scan_param[0].radio_type =
@@ -405,14 +403,16 @@ mwifiex_cmd_append_11n_tlv(struct mwifiex_private *priv,
 
 		if (sband->ht_cap.cap & IEEE80211_HT_CAP_SUP_WIDTH_20_40 &&
 		    bss_desc->bcn_ht_oper->ht_param &
-		    IEEE80211_HT_PARAM_CHAN_WIDTH_ANY)
+		    IEEE80211_HT_PARAM_CHAN_WIDTH_ANY) {
+			chan_list->chan_scan_param[0].radio_type |=
+				CHAN_BW_40MHZ << 2;
 			SET_SECONDARYCHAN(chan_list->chan_scan_param[0].
 					  radio_type,
 					  (bss_desc->bcn_ht_oper->ht_param &
 					  IEEE80211_HT_PARAM_CHA_SEC_OFFSET));
-
-		*buffer += sizeof(struct mwifiex_ie_types_chan_list_param_set);
-		ret_len += sizeof(struct mwifiex_ie_types_chan_list_param_set);
+		}
+		*buffer += struct_size(chan_list, chan_scan_param, 1);
+		ret_len += struct_size(chan_list, chan_scan_param, 1);
 	}
 
 	if (bss_desc->bcn_bss_co_2040) {
@@ -883,8 +883,6 @@ void mwifiex_update_ampdu_txwinsize(struct mwifiex_adapter *adapter)
 	struct mwifiex_private *priv;
 
 	for (i = 0; i < adapter->priv_num; i++) {
-		if (!adapter->priv[i])
-			continue;
 		priv = adapter->priv[i];
 		tx_win_size = priv->add_ba_param.tx_win_size;
 

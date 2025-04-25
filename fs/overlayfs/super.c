@@ -28,41 +28,38 @@ MODULE_LICENSE("GPL");
 
 struct ovl_dir_cache;
 
-static struct dentry *ovl_d_real(struct dentry *dentry,
-				 const struct inode *inode)
+static struct dentry *ovl_d_real(struct dentry *dentry, enum d_real_type type)
 {
-	struct dentry *real = NULL, *lower;
+	struct dentry *upper, *lower;
 	int err;
 
-	/*
-	 * vfs is only expected to call d_real() with NULL from d_real_inode()
-	 * and with overlay inode from file_dentry() on an overlay file.
-	 *
-	 * TODO: remove @inode argument from d_real() API, remove code in this
-	 * function that deals with non-NULL @inode and remove d_real() call
-	 * from file_dentry().
-	 */
-	if (inode && d_inode(dentry) == inode)
-		return dentry;
-	else if (inode)
+	switch (type) {
+	case D_REAL_DATA:
+	case D_REAL_METADATA:
+		break;
+	default:
 		goto bug;
+	}
 
 	if (!d_is_reg(dentry)) {
 		/* d_real_inode() is only relevant for regular files */
 		return dentry;
 	}
 
-	real = ovl_dentry_upper(dentry);
-	if (real && (inode == d_inode(real)))
-		return real;
+	upper = ovl_dentry_upper(dentry);
+	if (upper && (type == D_REAL_METADATA ||
+		      ovl_has_upperdata(d_inode(dentry))))
+		return upper;
 
-	if (real && !inode && ovl_has_upperdata(d_inode(dentry)))
-		return real;
+	if (type == D_REAL_METADATA) {
+		lower = ovl_dentry_lower(dentry);
+		goto real_lower;
+	}
 
 	/*
-	 * Best effort lazy lookup of lowerdata for !inode case to return
+	 * Best effort lazy lookup of lowerdata for D_REAL_DATA case to return
 	 * the real lowerdata dentry.  The only current caller of d_real() with
-	 * NULL inode is d_real_inode() from trace_uprobe and this caller is
+	 * D_REAL_DATA is d_real_inode() from trace_uprobe and this caller is
 	 * likely going to be followed reading from the file, before placing
 	 * uprobes on offset within the file, so lowerdata should be available
 	 * when setting the uprobe.
@@ -73,18 +70,13 @@ static struct dentry *ovl_d_real(struct dentry *dentry,
 	lower = ovl_dentry_lowerdata(dentry);
 	if (!lower)
 		goto bug;
-	real = lower;
 
-	/* Handle recursion */
-	real = d_real(real, inode);
+real_lower:
+	/* Handle recursion into stacked lower fs */
+	return d_real(lower, type);
 
-	if (!inode || inode == d_inode(real))
-		return real;
 bug:
-	WARN(1, "%s(%pd4, %s:%lu): real dentry (%p/%lu) not found\n",
-	     __func__, dentry, inode ? inode->i_sb->s_id : "NULL",
-	     inode ? inode->i_ino : 0, real,
-	     real && d_inode(real) ? d_inode(real)->i_ino : 0);
+	WARN(1, "%s(%pd4, %d): real dentry not found\n", __func__, dentry, type);
 	return dentry;
 }
 
@@ -99,7 +91,24 @@ static int ovl_revalidate_real(struct dentry *d, unsigned int flags, bool weak)
 		if (d->d_flags & DCACHE_OP_WEAK_REVALIDATE)
 			ret =  d->d_op->d_weak_revalidate(d, flags);
 	} else if (d->d_flags & DCACHE_OP_REVALIDATE) {
-		ret = d->d_op->d_revalidate(d, flags);
+		struct dentry *parent;
+		struct inode *dir;
+		struct name_snapshot n;
+
+		if (flags & LOOKUP_RCU) {
+			parent = READ_ONCE(d->d_parent);
+			dir = d_inode_rcu(parent);
+			if (!dir)
+				return -ECHILD;
+		} else {
+			parent = dget_parent(d);
+			dir = d_inode(parent);
+		}
+		take_dentry_name_snapshot(&n, d);
+		ret = d->d_op->d_revalidate(dir, &n.name, d, flags);
+		release_dentry_name_snapshot(&n);
+		if (!(flags & LOOKUP_RCU))
+			dput(parent);
 		if (!ret) {
 			if (!(flags & LOOKUP_RCU))
 				d_invalidate(d);
@@ -135,7 +144,8 @@ static int ovl_dentry_revalidate_common(struct dentry *dentry,
 	return ret;
 }
 
-static int ovl_dentry_revalidate(struct dentry *dentry, unsigned int flags)
+static int ovl_dentry_revalidate(struct inode *dir, const struct qstr *name,
+				 struct dentry *dentry, unsigned int flags)
 {
 	return ovl_dentry_revalidate_common(dentry, flags, false);
 }
@@ -210,15 +220,9 @@ static int ovl_sync_fs(struct super_block *sb, int wait)
 	int ret;
 
 	ret = ovl_sync_status(ofs);
-	/*
-	 * We have to always set the err, because the return value isn't
-	 * checked in syncfs, and instead indirectly return an error via
-	 * the sb's writeback errseq, which VFS inspects after this call.
-	 */
-	if (ret < 0) {
-		errseq_set(&sb->s_wb_err, -EIO);
+
+	if (ret < 0)
 		return -EIO;
-	}
 
 	if (!ret)
 		return ret;
@@ -323,9 +327,10 @@ retry:
 			goto retry;
 		}
 
-		err = ovl_mkdir_real(ofs, dir, &work, attr.ia_mode);
-		if (err)
-			goto out_dput;
+		work = ovl_do_mkdir(ofs, dir, work, attr.ia_mode);
+		err = PTR_ERR(work);
+		if (IS_ERR(work))
+			goto out_err;
 
 		/* Weird filesystem returning with hashed negative (kernfs)? */
 		err = -EINVAL;
@@ -1133,6 +1138,11 @@ static struct ovl_entry *ovl_get_lowerstack(struct super_block *sb,
 		return ERR_PTR(-EINVAL);
 	}
 
+	if (ctx->nr == ctx->nr_data) {
+		pr_err("at least one non-data lowerdir is required\n");
+		return ERR_PTR(-EINVAL);
+	}
+
 	err = -EINVAL;
 	for (i = 0; i < ctx->nr; i++) {
 		l = &ctx->lower[i];
@@ -1301,6 +1311,7 @@ int ovl_fill_super(struct super_block *sb, struct fs_context *fc)
 {
 	struct ovl_fs *ofs = sb->s_fs_info;
 	struct ovl_fs_context *ctx = fc->fs_private;
+	const struct cred *old_cred = NULL;
 	struct dentry *root_dentry;
 	struct ovl_entry *oe;
 	struct ovl_layer *layers;
@@ -1314,9 +1325,14 @@ int ovl_fill_super(struct super_block *sb, struct fs_context *fc)
 	sb->s_d_op = &ovl_dentry_operations;
 
 	err = -ENOMEM;
-	ofs->creator_cred = cred = prepare_creds();
+	if (!ofs->creator_cred)
+		ofs->creator_cred = cred = prepare_creds();
+	else
+		cred = (struct cred *)ofs->creator_cred;
 	if (!cred)
 		goto out_err;
+
+	old_cred = ovl_override_creds(sb);
 
 	err = ovl_fs_params_verify(ctx, &ofs->config);
 	if (err)
@@ -1468,7 +1484,7 @@ int ovl_fill_super(struct super_block *sb, struct fs_context *fc)
 	 * lead to unexpected results.
 	 */
 	sb->s_iflags |= SB_I_NOUMASK;
-	sb->s_iflags |= SB_I_EVM_UNSUPPORTED;
+	sb->s_iflags |= SB_I_EVM_HMAC_UNSUPPORTED;
 
 	err = -ENOMEM;
 	root_dentry = ovl_get_root(sb, ctx->upper.dentry, oe);
@@ -1477,11 +1493,19 @@ int ovl_fill_super(struct super_block *sb, struct fs_context *fc)
 
 	sb->s_root = root_dentry;
 
+	ovl_revert_creds(old_cred);
 	return 0;
 
 out_free_oe:
 	ovl_free_entry(oe);
 out_err:
+	/*
+	 * Revert creds before calling ovl_free_fs() which will call
+	 * put_cred() and put_cred() requires that the cred's that are
+	 * put are not the caller's creds, i.e., current->cred.
+	 */
+	if (old_cred)
+		ovl_revert_creds(old_cred);
 	ovl_free_fs(ofs);
 	sb->s_fs_info = NULL;
 	return err;
@@ -1511,7 +1535,7 @@ static int __init ovl_init(void)
 	ovl_inode_cachep = kmem_cache_create("ovl_inode",
 					     sizeof(struct ovl_inode), 0,
 					     (SLAB_RECLAIM_ACCOUNT|
-					      SLAB_MEM_SPREAD|SLAB_ACCOUNT),
+					      SLAB_ACCOUNT),
 					     ovl_inode_init_once);
 	if (ovl_inode_cachep == NULL)
 		return -ENOMEM;
