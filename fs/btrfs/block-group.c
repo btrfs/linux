@@ -3829,9 +3829,9 @@ out:
 /*
  * Update the block_group and space info counters.
  *
- * @cache:      The cache we are manipulating
- * @num_bytes:  The number of bytes in question
- * @delalloc:   The blocks are allocated for the delalloc write
+ * @cache:       The cache we are manipulating.
+ * @num_bytes:   The number of bytes in question.
+ * @is_delalloc: Whether the blocks are allocated for a delalloc write.
  *
  * This is called by somebody who is freeing space that was never actually used
  * on disk.  For example if you reserve some space for a new leaf in transaction
@@ -3839,7 +3839,7 @@ out:
  * reserve set to 0 in order to clear the reservation.
  */
 void btrfs_free_reserved_bytes(struct btrfs_block_group *cache,
-			       u64 num_bytes, int delalloc)
+			       u64 num_bytes, bool is_delalloc)
 {
 	struct btrfs_space_info *space_info = cache->space_info;
 
@@ -3853,7 +3853,7 @@ void btrfs_free_reserved_bytes(struct btrfs_block_group *cache,
 	space_info->bytes_reserved -= num_bytes;
 	space_info->max_extent_size = 0;
 
-	if (delalloc)
+	if (is_delalloc)
 		cache->delalloc_bytes -= num_bytes;
 	spin_unlock(&cache->lock);
 
