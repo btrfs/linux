@@ -235,8 +235,8 @@ static u32 ec_i2c_functionality(struct i2c_adapter *adap)
 }
 
 static const struct i2c_algorithm ec_i2c_algorithm = {
-	.master_xfer	= ec_i2c_xfer,
-	.functionality	= ec_i2c_functionality,
+	.xfer = ec_i2c_xfer,
+	.functionality = ec_i2c_functionality,
 };
 
 static int ec_i2c_probe(struct platform_device *pdev)
@@ -246,6 +246,9 @@ static int ec_i2c_probe(struct platform_device *pdev)
 	struct ec_i2c_device *bus = NULL;
 	u32 remote_bus;
 	int err;
+
+	if (!ec)
+		return dev_err_probe(dev, -EPROBE_DEFER, "couldn't find parent EC device\n");
 
 	if (!ec->cmd_xfer) {
 		dev_err(dev, "Missing sendrecv\n");
@@ -304,7 +307,7 @@ MODULE_DEVICE_TABLE(acpi, cros_ec_i2c_tunnel_acpi_id);
 
 static struct platform_driver ec_i2c_tunnel_driver = {
 	.probe = ec_i2c_probe,
-	.remove_new = ec_i2c_remove,
+	.remove = ec_i2c_remove,
 	.driver = {
 		.name = "cros-ec-i2c-tunnel",
 		.acpi_match_table = ACPI_PTR(cros_ec_i2c_tunnel_acpi_id),

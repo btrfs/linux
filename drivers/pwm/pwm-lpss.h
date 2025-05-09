@@ -10,7 +10,6 @@
 #ifndef __PWM_LPSS_H
 #define __PWM_LPSS_H
 
-#include <linux/pwm.h>
 #include <linux/types.h>
 
 #include <linux/platform_data/x86/pwm-lpss.h>
@@ -18,7 +17,6 @@
 #define LPSS_MAX_PWMS			4
 
 struct pwm_lpss_chip {
-	struct pwm_chip chip;
 	void __iomem *regs;
 	const struct pwm_lpss_boardinfo *info;
 };

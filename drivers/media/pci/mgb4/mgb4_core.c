@@ -40,7 +40,9 @@
 #include "mgb4_trigger.h"
 #include "mgb4_core.h"
 
-#define MGB4_USER_IRQS 16
+#define MGB4_USER_IRQS  16
+#define MGB4_MGB4_BAR_ID 0
+#define MGB4_XDMA_BAR_ID 1
 
 #define DIGITEQ_VID 0x1ed8
 #define T100_DID    0x0101
@@ -123,7 +125,7 @@ static const struct hwmon_chip_info temp_chip_info = {
 };
 #endif
 
-static int match_i2c_adap(struct device *dev, void *data)
+static int match_i2c_adap(struct device *dev, const void *data)
 {
 	return i2c_verify_adapter(dev) ? 1 : 0;
 }
@@ -139,12 +141,12 @@ static struct i2c_adapter *get_i2c_adap(struct platform_device *pdev)
 	return dev ? to_i2c_adapter(dev) : NULL;
 }
 
-static int match_spi_adap(struct device *dev, void *data)
+static int match_spi_adap(struct device *dev, const void *data)
 {
 	return to_spi_device(dev) ? 1 : 0;
 }
 
-static struct spi_master *get_spi_adap(struct platform_device *pdev)
+static struct spi_controller *get_spi_adap(struct platform_device *pdev)
 {
 	struct device *dev;
 
@@ -152,7 +154,7 @@ static struct spi_master *get_spi_adap(struct platform_device *pdev)
 	dev = device_find_child(&pdev->dev, NULL, match_spi_adap);
 	mutex_unlock(&pdev->dev.mutex);
 
-	return dev ? container_of(dev, struct spi_master, dev) : NULL;
+	return dev ? container_of(dev, struct spi_controller, dev) : NULL;
 }
 
 static int init_spi(struct mgb4_dev *mgbdev, u32 devid)
@@ -179,7 +181,7 @@ static int init_spi(struct mgb4_dev *mgbdev, u32 devid)
 	};
 	struct pci_dev *pdev = mgbdev->pdev;
 	struct device *dev = &pdev->dev;
-	struct spi_master *master;
+	struct spi_controller *ctlr;
 	struct spi_device *spi_dev;
 	u32 irq;
 	int rv, id;
@@ -207,8 +209,8 @@ static int init_spi(struct mgb4_dev *mgbdev, u32 devid)
 		return PTR_ERR(mgbdev->spi_pdev);
 	}
 
-	master = get_spi_adap(mgbdev->spi_pdev);
-	if (!master) {
+	ctlr = get_spi_adap(mgbdev->spi_pdev);
+	if (!ctlr) {
 		dev_err(dev, "failed to get SPI adapter\n");
 		rv = -EINVAL;
 		goto err_pdev;
@@ -242,8 +244,8 @@ static int init_spi(struct mgb4_dev *mgbdev, u32 devid)
 
 	spi_info.platform_data = &mgbdev->flash_data;
 
-	spi_dev = spi_new_device(master, &spi_info);
-	put_device(&master->dev);
+	spi_dev = spi_new_device(ctlr, &spi_info);
+	put_device(&ctlr->dev);
 	if (!spi_dev) {
 		dev_err(dev, "failed to create MTD device\n");
 		rv = -EINVAL;
@@ -302,7 +304,7 @@ static int init_i2c(struct mgb4_dev *mgbdev)
 	/* create dummy clock required by the xiic-i2c adapter */
 	snprintf(clk_name, sizeof(clk_name), "xiic-i2c.%d", id);
 	mgbdev->i2c_clk = clk_hw_register_fixed_rate(NULL, clk_name, NULL,
-						     0, 125000000);
+						     0, MGB4_HW_FREQ);
 	if (IS_ERR(mgbdev->i2c_clk)) {
 		dev_err(dev, "failed to register I2C clock\n");
 		return PTR_ERR(mgbdev->i2c_clk);
@@ -404,8 +406,9 @@ static int get_module_version(struct mgb4_dev *mgbdev)
 		dev_err(dev, "unknown module type\n");
 		return -EINVAL;
 	}
-	fw_version = mgb4_read_reg(&mgbdev->video, 0xC4);
-	if (fw_version >> 24 != mgbdev->module_version >> 4) {
+	fw_version = mgb4_read_reg(&mgbdev->video, 0xC4) >> 24;
+	if ((MGB4_IS_FPDL3(mgbdev) && fw_version != 1) ||
+	    (MGB4_IS_GMSL(mgbdev) && fw_version != 2)) {
 		dev_err(dev, "module/firmware type mismatch\n");
 		return -EINVAL;
 	}
@@ -493,13 +496,13 @@ static int mgb4_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	struct mgb4_dev *mgbdev;
 	struct resource video = {
 		.start	= 0x0,
-		.end	= 0x100,
+		.end	= 0xff,
 		.flags	= IORESOURCE_MEM,
 		.name	= "mgb4-video",
 	};
 	struct resource cmt = {
 		.start	= 0x1000,
-		.end	= 0x1800,
+		.end	= 0x17ff,
 		.flags	= IORESOURCE_MEM,
 		.name	= "mgb4-cmt",
 	};
@@ -582,9 +585,7 @@ static int mgb4_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 							    NULL);
 #endif
 
-#ifdef CONFIG_DEBUG_FS
 	mgbdev->debugfs = debugfs_create_dir(dev_name(&pdev->dev), NULL);
-#endif
 
 	/* Get card serial number. On systems without MTD flash support we may
 	 * get an error thus ignore the return value. An invalid serial number
@@ -599,14 +600,18 @@ static int mgb4_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	rv = get_module_version(mgbdev);
 	if (rv < 0)
 		goto exit;
+	/* Propagate the module type(version) to the FPGA */
+	mgb4_write_reg(&mgbdev->video, 0xD4, mgbdev->module_version);
 
 	/* Video input v4l2 devices */
 	for (i = 0; i < MGB4_VIN_DEVICES; i++)
 		mgbdev->vin[i] = mgb4_vin_create(mgbdev, i);
 
 	/* Video output v4l2 devices */
-	for (i = 0; i < MGB4_VOUT_DEVICES; i++)
-		mgbdev->vout[i] = mgb4_vout_create(mgbdev, i);
+	if (MGB4_HAS_VOUT(mgbdev)) {
+		for (i = 0; i < MGB4_VOUT_DEVICES; i++)
+			mgbdev->vout[i] = mgb4_vout_create(mgbdev, i);
+	}
 
 	/* Triggers */
 	mgbdev->indio_dev = mgb4_trigger_create(mgbdev);
@@ -642,12 +647,11 @@ static void mgb4_remove(struct pci_dev *pdev)
 	struct mgb4_dev *mgbdev = pci_get_drvdata(pdev);
 	int i;
 
-#ifdef CONFIG_DEBUG_FS
-	debugfs_remove_recursive(mgbdev->debugfs);
-#endif
 #if IS_REACHABLE(CONFIG_HWMON)
 	hwmon_device_unregister(mgbdev->hwmon_dev);
 #endif
+
+	debugfs_remove_recursive(mgbdev->debugfs);
 
 	if (mgbdev->indio_dev)
 		mgb4_trigger_free(mgbdev->indio_dev);

@@ -14,11 +14,6 @@
 #include <asm/pgtable-bits.h>
 #include <asm/string.h>
 
-/*
- * Change "struct page" to physical address.
- */
-#define page_to_phys(page)	((phys_addr_t)page_to_pfn(page) << PAGE_SHIFT)
-
 extern void __init __iomem *early_ioremap(u64 phys_addr, unsigned long size);
 extern void __init early_iounmap(void __iomem *addr, unsigned long size);
 
@@ -28,16 +23,22 @@ extern void __init early_iounmap(void __iomem *addr, unsigned long size);
 #ifdef CONFIG_ARCH_IOREMAP
 
 static inline void __iomem *ioremap_prot(phys_addr_t offset, unsigned long size,
-					 unsigned long prot_val)
+					 pgprot_t prot)
 {
-	if (prot_val & _CACHE_CC)
+	switch (pgprot_val(prot) & _CACHE_MASK) {
+	case _CACHE_CC:
 		return (void __iomem *)(unsigned long)(CACHE_BASE + offset);
-	else
+	case _CACHE_SUC:
 		return (void __iomem *)(unsigned long)(UNCACHE_BASE + offset);
+	case _CACHE_WUC:
+		return (void __iomem *)(unsigned long)(WRITECOMBINE_BASE + offset);
+	default:
+		return NULL;
+	}
 }
 
 #define ioremap(offset, size)		\
-	ioremap_prot((offset), (size), pgprot_val(PAGE_KERNEL_SUC))
+	ioremap_prot((offset), (size), PAGE_KERNEL_SUC)
 
 #define iounmap(addr) 			((void)(addr))
 
@@ -54,22 +55,29 @@ static inline void __iomem *ioremap_prot(phys_addr_t offset, unsigned long size,
  */
 #define ioremap_wc(offset, size)	\
 	ioremap_prot((offset), (size),	\
-		pgprot_val(wc_enabled ? PAGE_KERNEL_WUC : PAGE_KERNEL_SUC))
+		     wc_enabled ? PAGE_KERNEL_WUC : PAGE_KERNEL_SUC)
 
 #define ioremap_cache(offset, size)	\
-	ioremap_prot((offset), (size), pgprot_val(PAGE_KERNEL))
+	ioremap_prot((offset), (size), PAGE_KERNEL)
 
 #define mmiowb() wmb()
 
-/*
- * String version of I/O memory access operations.
- */
-extern void __memset_io(volatile void __iomem *dst, int c, size_t count);
-extern void __memcpy_toio(volatile void __iomem *to, const void *from, size_t count);
-extern void __memcpy_fromio(void *to, const volatile void __iomem *from, size_t count);
-#define memset_io(c, v, l)     __memset_io((c), (v), (l))
-#define memcpy_fromio(a, c, l) __memcpy_fromio((a), (c), (l))
-#define memcpy_toio(c, a, l)   __memcpy_toio((c), (a), (l))
+#define __io_aw() mmiowb()
+
+#ifdef CONFIG_KFENCE
+#define virt_to_phys(kaddr)								\
+({											\
+	(likely((unsigned long)kaddr < vm_map_base)) ? __pa((unsigned long)kaddr) :	\
+	page_to_phys(tlb_virt_to_page((unsigned long)kaddr)) + offset_in_page((unsigned long)kaddr);\
+})
+
+#define phys_to_virt(paddr)								\
+({											\
+	extern char *__kfence_pool;							\
+	(unlikely(__kfence_pool == NULL)) ? __va((unsigned long)paddr) :		\
+	page_address(phys_to_page((unsigned long)paddr)) + offset_in_page((unsigned long)paddr);\
+})
+#endif
 
 #include <asm-generic/io.h>
 

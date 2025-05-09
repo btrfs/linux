@@ -2512,7 +2512,7 @@ static void qib_7322_mini_quiet_serdes(struct qib_pportdata *ppd)
 
 	ppd->cpspec->chase_end = 0;
 	if (ppd->cpspec->chase_timer.function) /* if initted */
-		del_timer_sync(&ppd->cpspec->chase_timer);
+		timer_delete_sync(&ppd->cpspec->chase_timer);
 
 	/*
 	 * Despite the name, actually disables IBC as well. Do it when
@@ -3471,8 +3471,7 @@ try_intx:
 				    pci_irq_vector(dd->pcidev, msixnum),
 				    ret);
 			qib_7322_free_irq(dd);
-			pci_alloc_irq_vectors(dd->pcidev, 1, 1,
-					      PCI_IRQ_LEGACY);
+			pci_alloc_irq_vectors(dd->pcidev, 1, 1, PCI_IRQ_INTX);
 			goto try_intx;
 		}
 		dd->cspec->msix_entries[msixnum].arg = arg;
@@ -4240,7 +4239,7 @@ static int qib_7322_set_ib_cfg(struct qib_pportdata *ppd, int which, u32 val)
 			 * wait forpending timer, but don't clear .data (ppd)!
 			 */
 			if (ppd->cpspec->chase_timer.expires) {
-				del_timer_sync(&ppd->cpspec->chase_timer);
+				timer_delete_sync(&ppd->cpspec->chase_timer);
 				ppd->cpspec->chase_timer.expires = 0;
 			}
 			break;
@@ -5143,7 +5142,7 @@ static int qib_7322_intr_fallback(struct qib_devdata *dd)
 	qib_devinfo(dd->pcidev,
 		"MSIx interrupt not detected, trying INTx interrupts\n");
 	qib_7322_free_irq(dd);
-	if (pci_alloc_irq_vectors(dd->pcidev, 1, 1, PCI_IRQ_LEGACY) < 0)
+	if (pci_alloc_irq_vectors(dd->pcidev, 1, 1, PCI_IRQ_INTX) < 0)
 		qib_dev_err(dd, "Failed to enable INTx\n");
 	qib_setup_7322_interrupt(dd, 0);
 	return 1;

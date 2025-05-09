@@ -22,6 +22,7 @@ struct telem_endpoint;
 
 #define PMC_BASE_ADDR_DEFAULT			0xFE000000
 #define MAX_NUM_PMC			3
+#define S0IX_BLK_SIZE			4
 
 /* Sunrise Point Power Management Controller PCI Device ID */
 #define SPT_PMC_PCI_DEVICE_ID			0x9d21
@@ -282,12 +283,22 @@ enum ppfear_regs {
 #define LNL_PMC_LTR_OSSE			0x1B88
 #define LNL_NUM_IP_IGN_ALLOWED			27
 #define LNL_PPFEAR_NUM_ENTRIES			12
+#define LNL_S0IX_BLOCKER_OFFSET			0x2004
+
+/* Panther Lake Power Management Controller register offsets */
+#define PTL_LPM_NUM_MAPS			14
+#define PTL_PMC_LTR_SATA2			0x1B90
+#define PTL_PMC_LTR_PMC				0x1BA8
+#define PTL_PMC_LTR_CUR_ASLT			0x1C28
+#define PTL_PMC_LTR_CUR_PLT			0x1C2C
+#define PTL_PCD_PMC_MMIO_REG_LEN		0x31A8
 
 extern const char *pmc_lpm_modes[];
 
 struct pmc_bit_map {
 	const char *name;
 	u32 bit_mask;
+	u8 blk;
 };
 
 /**
@@ -298,6 +309,7 @@ struct pmc_bit_map {
  * @pll_sts:		Maps name of PLL to corresponding bit status
  * @slps0_dbg_maps:	Array of SLP_S0_DBG* registers containing debug info
  * @ltr_show_sts:	Maps PCH IP Names to their MMIO register offsets
+ * @s0ix_blocker_maps:	Maps name of IP block to S0ix blocker counter
  * @slp_s0_offset:	PWRMBASE offset to read SLP_S0 residency
  * @ltr_ignore_offset:	PWRMBASE offset to read/write LTR ignore bit
  * @regmap_length:	Length of memory to map from PWRMBASE address to access
@@ -307,6 +319,7 @@ struct pmc_bit_map {
  * @pm_cfg_offset:	PWRMBASE offset to PM_CFG register
  * @pm_read_disable_bit: Bit index to read PMC_READ_DISABLE
  * @slps0_dbg_offset:	PWRMBASE offset to SLP_S0_DEBUG_REG*
+ * @s0ix_blocker_offset PWRMBASE offset to S0ix blocker counter
  *
  * Each PCH has unique set of register offsets and bit indexes. This structure
  * captures them to have a common implementation.
@@ -319,6 +332,7 @@ struct pmc_reg_map {
 	const struct pmc_bit_map *ltr_show_sts;
 	const struct pmc_bit_map *msr_sts;
 	const struct pmc_bit_map **lpm_sts;
+	const struct pmc_bit_map **s0ix_blocker_maps;
 	const u32 slp_s0_offset;
 	const int slp_s0_res_counter_step;
 	const u32 ltr_ignore_offset;
@@ -330,6 +344,7 @@ struct pmc_reg_map {
 	const u32 slps0_dbg_offset;
 	const u32 ltr_ignore_max;
 	const u32 pm_vric1_offset;
+	const u32 s0ix_blocker_offset;
 	/* Low Power Mode registers */
 	const int lpm_num_maps;
 	const int lpm_num_modes;
@@ -365,6 +380,7 @@ struct pmc_info {
  * @map:		pointer to pmc_reg_map struct that contains platform
  *			specific attributes
  * @lpm_req_regs:	List of substate requirements
+ * @ltr_ign:		Holds LTR ignore data while suspended
  *
  * pmc contains info about one power management controller device.
  */
@@ -373,6 +389,7 @@ struct pmc {
 	void __iomem *regbase;
 	const struct pmc_reg_map *map;
 	u32 *lpm_req_regs;
+	u32 ltr_ign;
 };
 
 /**
@@ -385,7 +402,8 @@ struct pmc {
  * @pmc_xram_read_bit:	flag to indicate whether PMC XRAM shadow registers
  *			used to read MPHY PG and PLL status are available
  * @mutex_lock:		mutex to complete one transcation
- * @pc10_counter:	PC10 residency counter
+ * @pkgc_res_cnt:	Array of PKGC residency counters
+ * @num_of_pkgc:	Number of PKGC
  * @s0ix_counter:	S0ix residency (step adjusted)
  * @num_lpm_modes:	Count of enabled modes
  * @lpm_en_modes:	Array of enabled modes from lowest to highest priority
@@ -403,12 +421,14 @@ struct pmc_dev {
 	int pmc_xram_read_bit;
 	struct mutex lock; /* generic mutex lock for PMC Core */
 
-	u64 pc10_counter;
 	u64 s0ix_counter;
 	int num_lpm_modes;
 	int lpm_en_modes[LPM_MAX_NUM_MODES];
 	void (*suspend)(struct pmc_dev *pmcdev);
 	int (*resume)(struct pmc_dev *pmcdev);
+
+	u64 *pkgc_res_cnt;
+	u8 num_of_pkgc;
 
 	bool has_die_c6;
 	u32 die_c6_offset;
@@ -418,184 +438,87 @@ struct pmc_dev {
 
 enum pmc_index {
 	PMC_IDX_MAIN,
-	PMC_IDX_SOC = PMC_IDX_MAIN,
 	PMC_IDX_IOE,
 	PMC_IDX_PCH,
 	PMC_IDX_MAX
 };
 
+/**
+ * struct pmc_dev_info - Structure to keep PMC device info
+ * @pci_func:		Function number of the primary PMC
+ * @dmu_guid:		Die Management Unit GUID
+ * @regmap_list:	Pointer to a list of pmc_info structure that could be
+ *			available for the platform. When set, this field implies
+ *			SSRAM support.
+ * @map:		Pointer to a pmc_reg_map struct that contains platform
+ *			specific attributes of the primary PMC
+ * @suspend:		Function to perform platform specific suspend
+ * @resume:		Function to perform platform specific resume
+ * @init:		Function to perform platform specific init action
+ */
+struct pmc_dev_info {
+	u8 pci_func;
+	u32 dmu_guid;
+	struct pmc_info *regmap_list;
+	const struct pmc_reg_map *map;
+	void (*suspend)(struct pmc_dev *pmcdev);
+	int (*resume)(struct pmc_dev *pmcdev);
+	int (*init)(struct pmc_dev *pmcdev, struct pmc_dev_info *pmc_dev_info);
+};
+
 extern const struct pmc_bit_map msr_map[];
-extern const struct pmc_bit_map spt_pll_map[];
-extern const struct pmc_bit_map spt_mphy_map[];
-extern const struct pmc_bit_map spt_pfear_map[];
-extern const struct pmc_bit_map *ext_spt_pfear_map[];
-extern const struct pmc_bit_map spt_ltr_show_map[];
-extern const struct pmc_reg_map spt_reg_map;
 extern const struct pmc_bit_map cnp_pfear_map[];
-extern const struct pmc_bit_map *ext_cnp_pfear_map[];
-extern const struct pmc_bit_map cnp_slps0_dbg0_map[];
-extern const struct pmc_bit_map cnp_slps0_dbg1_map[];
-extern const struct pmc_bit_map cnp_slps0_dbg2_map[];
 extern const struct pmc_bit_map *cnp_slps0_dbg_maps[];
 extern const struct pmc_bit_map cnp_ltr_show_map[];
 extern const struct pmc_reg_map cnp_reg_map;
-extern const struct pmc_bit_map icl_pfear_map[];
-extern const struct pmc_bit_map *ext_icl_pfear_map[];
-extern const struct pmc_reg_map icl_reg_map;
-extern const struct pmc_bit_map tgl_pfear_map[];
-extern const struct pmc_bit_map *ext_tgl_pfear_map[];
-extern const struct pmc_bit_map tgl_clocksource_status_map[];
-extern const struct pmc_bit_map tgl_power_gating_status_map[];
-extern const struct pmc_bit_map tgl_d3_status_map[];
-extern const struct pmc_bit_map tgl_vnn_req_status_map[];
-extern const struct pmc_bit_map tgl_vnn_misc_status_map[];
 extern const struct pmc_bit_map tgl_signal_status_map[];
-extern const struct pmc_bit_map *tgl_lpm_maps[];
-extern const struct pmc_reg_map tgl_reg_map;
-extern const struct pmc_reg_map tgl_h_reg_map;
-extern const struct pmc_bit_map adl_pfear_map[];
-extern const struct pmc_bit_map *ext_adl_pfear_map[];
-extern const struct pmc_bit_map adl_ltr_show_map[];
-extern const struct pmc_bit_map adl_clocksource_status_map[];
-extern const struct pmc_bit_map adl_power_gating_status_0_map[];
-extern const struct pmc_bit_map adl_power_gating_status_1_map[];
-extern const struct pmc_bit_map adl_power_gating_status_2_map[];
-extern const struct pmc_bit_map adl_d3_status_0_map[];
-extern const struct pmc_bit_map adl_d3_status_1_map[];
-extern const struct pmc_bit_map adl_d3_status_2_map[];
-extern const struct pmc_bit_map adl_d3_status_3_map[];
-extern const struct pmc_bit_map adl_vnn_req_status_0_map[];
-extern const struct pmc_bit_map adl_vnn_req_status_1_map[];
-extern const struct pmc_bit_map adl_vnn_req_status_2_map[];
-extern const struct pmc_bit_map adl_vnn_req_status_3_map[];
-extern const struct pmc_bit_map adl_vnn_misc_status_map[];
-extern const struct pmc_bit_map *adl_lpm_maps[];
 extern const struct pmc_reg_map adl_reg_map;
 extern const struct pmc_bit_map mtl_socm_pfear_map[];
-extern const struct pmc_bit_map *ext_mtl_socm_pfear_map[];
-extern const struct pmc_bit_map mtl_socm_ltr_show_map[];
-extern const struct pmc_bit_map mtl_socm_clocksource_status_map[];
-extern const struct pmc_bit_map mtl_socm_power_gating_status_0_map[];
-extern const struct pmc_bit_map mtl_socm_power_gating_status_1_map[];
-extern const struct pmc_bit_map mtl_socm_power_gating_status_2_map[];
 extern const struct pmc_bit_map mtl_socm_d3_status_0_map[];
 extern const struct pmc_bit_map mtl_socm_d3_status_1_map[];
-extern const struct pmc_bit_map mtl_socm_d3_status_2_map[];
-extern const struct pmc_bit_map mtl_socm_d3_status_3_map[];
 extern const struct pmc_bit_map mtl_socm_vnn_req_status_0_map[];
 extern const struct pmc_bit_map mtl_socm_vnn_req_status_1_map[];
 extern const struct pmc_bit_map mtl_socm_vnn_req_status_2_map[];
-extern const struct pmc_bit_map mtl_socm_vnn_req_status_3_map[];
 extern const struct pmc_bit_map mtl_socm_vnn_misc_status_map[];
 extern const struct pmc_bit_map mtl_socm_signal_status_map[];
-extern const struct pmc_bit_map *mtl_socm_lpm_maps[];
 extern const struct pmc_reg_map mtl_socm_reg_map;
-extern const struct pmc_bit_map mtl_ioep_pfear_map[];
-extern const struct pmc_bit_map *ext_mtl_ioep_pfear_map[];
-extern const struct pmc_bit_map mtl_ioep_ltr_show_map[];
-extern const struct pmc_bit_map mtl_ioep_clocksource_status_map[];
-extern const struct pmc_bit_map mtl_ioep_power_gating_status_0_map[];
-extern const struct pmc_bit_map mtl_ioep_power_gating_status_1_map[];
-extern const struct pmc_bit_map mtl_ioep_power_gating_status_2_map[];
-extern const struct pmc_bit_map mtl_ioep_d3_status_0_map[];
-extern const struct pmc_bit_map mtl_ioep_d3_status_1_map[];
-extern const struct pmc_bit_map mtl_ioep_d3_status_2_map[];
-extern const struct pmc_bit_map mtl_ioep_d3_status_3_map[];
-extern const struct pmc_bit_map mtl_ioep_vnn_req_status_0_map[];
-extern const struct pmc_bit_map mtl_ioep_vnn_req_status_1_map[];
-extern const struct pmc_bit_map mtl_ioep_vnn_req_status_2_map[];
-extern const struct pmc_bit_map mtl_ioep_vnn_req_status_3_map[];
-extern const struct pmc_bit_map mtl_ioep_vnn_misc_status_map[];
-extern const struct pmc_bit_map *mtl_ioep_lpm_maps[];
 extern const struct pmc_reg_map mtl_ioep_reg_map;
-extern const struct pmc_bit_map mtl_ioem_pfear_map[];
-extern const struct pmc_bit_map *ext_mtl_ioem_pfear_map[];
-extern const struct pmc_bit_map mtl_ioem_power_gating_status_1_map[];
-extern const struct pmc_bit_map mtl_ioem_vnn_req_status_1_map[];
-extern const struct pmc_bit_map *mtl_ioem_lpm_maps[];
-extern const struct pmc_reg_map mtl_ioem_reg_map;
-extern const struct pmc_reg_map lnl_socm_reg_map;
 
-/* LNL */
-extern const struct pmc_bit_map lnl_ltr_show_map[];
-extern const struct pmc_bit_map lnl_clocksource_status_map[];
-extern const struct pmc_bit_map lnl_power_gating_status_0_map[];
-extern const struct pmc_bit_map lnl_power_gating_status_1_map[];
-extern const struct pmc_bit_map lnl_power_gating_status_2_map[];
-extern const struct pmc_bit_map lnl_d3_status_0_map[];
-extern const struct pmc_bit_map lnl_d3_status_1_map[];
-extern const struct pmc_bit_map lnl_d3_status_2_map[];
-extern const struct pmc_bit_map lnl_d3_status_3_map[];
-extern const struct pmc_bit_map lnl_vnn_req_status_0_map[];
-extern const struct pmc_bit_map lnl_vnn_req_status_1_map[];
-extern const struct pmc_bit_map lnl_vnn_req_status_2_map[];
-extern const struct pmc_bit_map lnl_vnn_req_status_3_map[];
-extern const struct pmc_bit_map lnl_vnn_misc_status_map[];
-extern const struct pmc_bit_map *lnl_lpm_maps[];
-extern const struct pmc_bit_map lnl_pfear_map[];
-extern const struct pmc_bit_map *ext_lnl_pfear_map[];
-
-/* ARL */
-extern const struct pmc_bit_map arl_socs_ltr_show_map[];
-extern const struct pmc_bit_map arl_socs_clocksource_status_map[];
-extern const struct pmc_bit_map arl_socs_power_gating_status_0_map[];
-extern const struct pmc_bit_map arl_socs_power_gating_status_1_map[];
-extern const struct pmc_bit_map arl_socs_power_gating_status_2_map[];
-extern const struct pmc_bit_map arl_socs_d3_status_2_map[];
-extern const struct pmc_bit_map arl_socs_d3_status_3_map[];
-extern const struct pmc_bit_map arl_socs_vnn_req_status_3_map[];
-extern const struct pmc_bit_map *arl_socs_lpm_maps[];
-extern const struct pmc_bit_map arl_socs_pfear_map[];
-extern const struct pmc_bit_map *ext_arl_socs_pfear_map[];
-extern const struct pmc_reg_map arl_socs_reg_map;
-extern const struct pmc_bit_map arl_pchs_ltr_show_map[];
-extern const struct pmc_bit_map arl_pchs_clocksource_status_map[];
-extern const struct pmc_bit_map arl_pchs_power_gating_status_0_map[];
-extern const struct pmc_bit_map arl_pchs_power_gating_status_1_map[];
-extern const struct pmc_bit_map arl_pchs_power_gating_status_2_map[];
-extern const struct pmc_bit_map arl_pchs_d3_status_0_map[];
-extern const struct pmc_bit_map arl_pchs_d3_status_1_map[];
-extern const struct pmc_bit_map arl_pchs_d3_status_2_map[];
-extern const struct pmc_bit_map arl_pchs_d3_status_3_map[];
-extern const struct pmc_bit_map arl_pchs_vnn_req_status_0_map[];
-extern const struct pmc_bit_map arl_pchs_vnn_req_status_1_map[];
-extern const struct pmc_bit_map arl_pchs_vnn_req_status_2_map[];
-extern const struct pmc_bit_map arl_pchs_vnn_req_status_3_map[];
-extern const struct pmc_bit_map arl_pchs_vnn_misc_status_map[];
-extern const struct pmc_bit_map arl_pchs_signal_status_map[];
-extern const struct pmc_bit_map *arl_pchs_lpm_maps[];
-extern const struct pmc_reg_map arl_pchs_reg_map;
-
-extern void pmc_core_get_tgl_lpm_reqs(struct platform_device *pdev);
-extern int pmc_core_ssram_get_lpm_reqs(struct pmc_dev *pmcdev);
+void pmc_core_get_tgl_lpm_reqs(struct platform_device *pdev);
+int pmc_core_ssram_get_lpm_reqs(struct pmc_dev *pmcdev);
 int pmc_core_send_ltr_ignore(struct pmc_dev *pmcdev, u32 value, int ignore);
 
 int pmc_core_resume_common(struct pmc_dev *pmcdev);
 int get_primary_reg_base(struct pmc *pmc);
-extern void pmc_core_get_low_power_modes(struct pmc_dev *pmcdev);
-extern void pmc_core_punit_pmt_init(struct pmc_dev *pmcdev, u32 guid);
-extern void pmc_core_set_device_d3(unsigned int device);
+void pmc_core_get_low_power_modes(struct pmc_dev *pmcdev);
+void pmc_core_punit_pmt_init(struct pmc_dev *pmcdev, u32 guid);
+void pmc_core_set_device_d3(unsigned int device);
 
-extern int pmc_core_ssram_init(struct pmc_dev *pmcdev, int func);
+int pmc_core_ssram_init(struct pmc_dev *pmcdev, int func);
 
-int spt_core_init(struct pmc_dev *pmcdev);
-int cnp_core_init(struct pmc_dev *pmcdev);
-int icl_core_init(struct pmc_dev *pmcdev);
-int tgl_core_init(struct pmc_dev *pmcdev);
-int tgl_l_core_init(struct pmc_dev *pmcdev);
-int tgl_core_generic_init(struct pmc_dev *pmcdev, int pch_tp);
-int adl_core_init(struct pmc_dev *pmcdev);
-int mtl_core_init(struct pmc_dev *pmcdev);
-int arl_core_init(struct pmc_dev *pmcdev);
-int lnl_core_init(struct pmc_dev *pmcdev);
+int generic_core_init(struct pmc_dev *pmcdev, struct pmc_dev_info *pmc_dev_info);
+
+extern struct pmc_dev_info spt_pmc_dev;
+extern struct pmc_dev_info cnp_pmc_dev;
+extern struct pmc_dev_info icl_pmc_dev;
+extern struct pmc_dev_info tgl_l_pmc_dev;
+extern struct pmc_dev_info tgl_pmc_dev;
+extern struct pmc_dev_info adl_pmc_dev;
+extern struct pmc_dev_info mtl_pmc_dev;
+extern struct pmc_dev_info arl_pmc_dev;
+extern struct pmc_dev_info arl_h_pmc_dev;
+extern struct pmc_dev_info lnl_pmc_dev;
+extern struct pmc_dev_info ptl_pmc_dev;
 
 void cnl_suspend(struct pmc_dev *pmcdev);
 int cnl_resume(struct pmc_dev *pmcdev);
 
-#define pmc_for_each_mode(i, mode, pmcdev)		\
-	for (i = 0, mode = pmcdev->lpm_en_modes[i];	\
-	     i < pmcdev->num_lpm_modes;			\
-	     i++, mode = pmcdev->lpm_en_modes[i])
+#define pmc_for_each_mode(mode, pmcdev)						\
+	for (unsigned int __i = 0, __cond;					\
+	     __cond = __i < (pmcdev)->num_lpm_modes,				\
+	     __cond && ((mode) = (pmcdev)->lpm_en_modes[__i]),			\
+	     __cond;								\
+	     __i++)
 
 #define DEFINE_PMC_CORE_ATTR_WRITE(__name)				\
 static int __name ## _open(struct inode *inode, struct file *file)	\

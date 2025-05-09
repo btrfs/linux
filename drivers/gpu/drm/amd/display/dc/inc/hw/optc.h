@@ -65,37 +65,12 @@ struct optc {
 	int vupdate_offset;
 	int vupdate_width;
 	int vready_offset;
+	int pstate_keepout;
 	struct dc_crtc_timing orginal_patched_timing;
 	enum signal_type signal;
 };
 
-struct dcn_otg_state {
-	uint32_t v_blank_start;
-	uint32_t v_blank_end;
-	uint32_t v_sync_a_pol;
-	uint32_t v_total;
-	uint32_t v_total_max;
-	uint32_t v_total_min;
-	uint32_t v_total_min_sel;
-	uint32_t v_total_max_sel;
-	uint32_t v_sync_a_start;
-	uint32_t v_sync_a_end;
-	uint32_t h_blank_start;
-	uint32_t h_blank_end;
-	uint32_t h_sync_a_start;
-	uint32_t h_sync_a_end;
-	uint32_t h_sync_a_pol;
-	uint32_t h_total;
-	uint32_t underflow_occurred_status;
-	uint32_t otg_enabled;
-	uint32_t blank_enabled;
-	uint32_t vertical_interrupt1_en;
-	uint32_t vertical_interrupt1_line;
-	uint32_t vertical_interrupt2_en;
-	uint32_t vertical_interrupt2_line;
-};
-
-void optc1_read_otg_state(struct optc *optc1, struct dcn_otg_state *s);
+void optc1_read_otg_state(struct timing_generator *optc, struct dcn_otg_state *s);
 
 bool optc1_get_hw_timing(struct timing_generator *tg, struct dc_crtc_timing *hw_crtc_timing);
 
@@ -108,6 +83,7 @@ void optc1_program_timing(struct timing_generator *optc,
 			  int vstartup_start,
 			  int vupdate_offset,
 			  int vupdate_width,
+			  int pstate_keepout,
 			  const enum signal_type signal,
 			  bool use_vbios);
 
@@ -125,7 +101,8 @@ void optc1_program_global_sync(struct timing_generator *optc,
 			       int vready_offset,
 			       int vstartup_start,
 			       int vupdate_offset,
-			       int vupdate_width);
+			       int vupdate_width,
+				   int pstate_keepout);
 
 bool optc1_disable_crtc(struct timing_generator *optc);
 
@@ -205,15 +182,15 @@ void optc1_enable_crtc_reset(struct timing_generator *optc,
 
 bool optc1_configure_crc(struct timing_generator *optc, const struct crc_params *params);
 
-bool optc1_get_crc(struct timing_generator *optc,
+bool optc1_get_crc(struct timing_generator *optc, uint8_t idx,
 		   uint32_t *r_cr,
 		   uint32_t *g_y,
 		   uint32_t *b_cb);
 
-bool optc1_is_two_pixels_per_containter(const struct dc_crtc_timing *timing);
-
 void optc1_set_vtg_params(struct timing_generator *optc,
 			  const struct dc_crtc_timing *dc_crtc_timing,
 			  bool program_fp2);
+
+bool optc1_is_two_pixels_per_container(const struct dc_crtc_timing *timing);
 
 #endif

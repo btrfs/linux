@@ -6,12 +6,13 @@
 
 static int mlock2_(void *start, size_t len, int flags)
 {
-#ifdef __NR_mlock2
-	return syscall(__NR_mlock2, start, len, flags);
-#else
-	errno = ENOSYS;
-	return -1;
-#endif
+	int ret = syscall(__NR_mlock2, start, len, flags);
+
+	if (ret) {
+		errno = ret;
+		return -1;
+	}
+	return 0;
 }
 
 static FILE *seek_to_smaps_entry(unsigned long addr)
@@ -27,10 +28,8 @@ static FILE *seek_to_smaps_entry(unsigned long addr)
 	char path[BUFSIZ];
 
 	file = fopen("/proc/self/smaps", "r");
-	if (!file) {
-		perror("fopen smaps");
-		_exit(1);
-	}
+	if (!file)
+		ksft_exit_fail_msg("fopen smaps: %s\n", strerror(errno));
 
 	while (getline(&line, &size, file) > 0) {
 		if (sscanf(line, "%lx-%lx %s %lx %s %lu %s\n",

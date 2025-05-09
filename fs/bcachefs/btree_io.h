@@ -18,19 +18,19 @@ struct btree_node_read_all;
 static inline void set_btree_node_dirty_acct(struct bch_fs *c, struct btree *b)
 {
 	if (!test_and_set_bit(BTREE_NODE_dirty, &b->flags))
-		atomic_inc(&c->btree_cache.dirty);
+		atomic_long_inc(&c->btree_cache.nr_dirty);
 }
 
 static inline void clear_btree_node_dirty_acct(struct bch_fs *c, struct btree *b)
 {
 	if (test_and_clear_bit(BTREE_NODE_dirty, &b->flags))
-		atomic_dec(&c->btree_cache.dirty);
+		atomic_long_dec(&c->btree_cache.nr_dirty);
 }
 
-static inline unsigned btree_ptr_sectors_written(struct bkey_i *k)
+static inline unsigned btree_ptr_sectors_written(struct bkey_s_c k)
 {
-	return k->k.type == KEY_TYPE_btree_ptr_v2
-		? le16_to_cpu(bkey_i_to_btree_ptr_v2(k)->v.sectors_written)
+	return k.k->type == KEY_TYPE_btree_ptr_v2
+		? le16_to_cpu(bkey_s_c_to_btree_ptr_v2(k).v->sectors_written)
 		: 0;
 }
 
@@ -52,6 +52,7 @@ struct btree_write_bio {
 	void			*data;
 	unsigned		data_bytes;
 	unsigned		sector_offset;
+	u64			start_time;
 	struct bch_write_bio	wbio;
 };
 
@@ -81,8 +82,6 @@ static inline bool should_compact_bset_lazy(struct btree *b,
 
 static inline bool bch2_maybe_compact_whiteouts(struct bch_fs *c, struct btree *b)
 {
-	struct bset_tree *t;
-
 	for_each_bset(b, t)
 		if (should_compact_bset_lazy(b, t))
 			return bch2_compact_whiteouts(c, b, COMPACT_LAZY);
@@ -134,6 +133,9 @@ void bch2_btree_node_read(struct btree_trans *, struct btree *, bool);
 int bch2_btree_root_read(struct bch_fs *, enum btree_id,
 			 const struct bkey_i *, unsigned);
 
+int bch2_btree_node_scrub(struct btree_trans *, enum btree_id, unsigned,
+			  struct bkey_s_c, unsigned);
+
 bool bch2_btree_post_write_cleanup(struct bch_fs *, struct btree *);
 
 enum btree_write_flags {
@@ -146,11 +148,13 @@ enum btree_write_flags {
 void __bch2_btree_node_write(struct bch_fs *, struct btree *, unsigned);
 void bch2_btree_node_write(struct bch_fs *, struct btree *,
 			   enum six_lock_type, unsigned);
+void bch2_btree_node_write_trans(struct btree_trans *, struct btree *,
+				 enum six_lock_type, unsigned);
 
-static inline void btree_node_write_if_need(struct bch_fs *c, struct btree *b,
+static inline void btree_node_write_if_need(struct btree_trans *trans, struct btree *b,
 					    enum six_lock_type lock_held)
 {
-	bch2_btree_node_write(c, b, lock_held, BTREE_WRITE_ONLY_IF_NEED);
+	bch2_btree_node_write_trans(trans, b, lock_held, BTREE_WRITE_ONLY_IF_NEED);
 }
 
 bool bch2_btree_flush_all_reads(struct bch_fs *);

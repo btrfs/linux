@@ -16,13 +16,25 @@
 static DEFINE_SPINLOCK(mptcp_sched_list_lock);
 static LIST_HEAD(mptcp_sched_list);
 
-static int mptcp_sched_default_get_subflow(struct mptcp_sock *msk,
+static int mptcp_sched_default_get_send(struct mptcp_sock *msk,
+					struct mptcp_sched_data *data)
+{
+	struct sock *ssk;
+
+	ssk = mptcp_subflow_get_send(msk);
+	if (!ssk)
+		return -EINVAL;
+
+	mptcp_subflow_set_scheduled(mptcp_subflow_ctx(ssk), true);
+	return 0;
+}
+
+static int mptcp_sched_default_get_retrans(struct mptcp_sock *msk,
 					   struct mptcp_sched_data *data)
 {
 	struct sock *ssk;
 
-	ssk = data->reinject ? mptcp_subflow_get_retrans(msk) :
-			       mptcp_subflow_get_send(msk);
+	ssk = mptcp_subflow_get_retrans(msk);
 	if (!ssk)
 		return -EINVAL;
 
@@ -31,7 +43,8 @@ static int mptcp_sched_default_get_subflow(struct mptcp_sock *msk,
 }
 
 static struct mptcp_sched_ops mptcp_sched_default = {
-	.get_subflow	= mptcp_sched_default_get_subflow,
+	.get_send	= mptcp_sched_default_get_send,
+	.get_retrans	= mptcp_sched_default_get_retrans,
 	.name		= "default",
 	.owner		= THIS_MODULE,
 };
@@ -51,9 +64,29 @@ struct mptcp_sched_ops *mptcp_sched_find(const char *name)
 	return ret;
 }
 
+/* Build string with list of available scheduler values.
+ * Similar to tcp_get_available_congestion_control()
+ */
+void mptcp_get_available_schedulers(char *buf, size_t maxlen)
+{
+	struct mptcp_sched_ops *sched;
+	size_t offs = 0;
+
+	rcu_read_lock();
+	list_for_each_entry_rcu(sched, &mptcp_sched_list, list) {
+		offs += snprintf(buf + offs, maxlen - offs,
+				 "%s%s",
+				 offs == 0 ? "" : " ", sched->name);
+
+		if (WARN_ON_ONCE(offs >= maxlen))
+			break;
+	}
+	rcu_read_unlock();
+}
+
 int mptcp_register_scheduler(struct mptcp_sched_ops *sched)
 {
-	if (!sched->get_subflow)
+	if (!sched->get_send)
 		return -EINVAL;
 
 	spin_lock(&mptcp_sched_list_lock);
@@ -64,7 +97,7 @@ int mptcp_register_scheduler(struct mptcp_sched_ops *sched)
 	list_add_tail_rcu(&sched->list, &mptcp_sched_list);
 	spin_unlock(&mptcp_sched_list_lock);
 
-	pr_debug("%s registered", sched->name);
+	pr_debug("%s registered\n", sched->name);
 	return 0;
 }
 
@@ -96,7 +129,7 @@ int mptcp_init_sched(struct mptcp_sock *msk,
 	if (msk->sched->init)
 		msk->sched->init(msk);
 
-	pr_debug("sched=%s", msk->sched->name);
+	pr_debug("sched=%s\n", msk->sched->name);
 
 	return 0;
 }
@@ -124,7 +157,7 @@ void mptcp_subflow_set_scheduled(struct mptcp_subflow_context *subflow,
 int mptcp_sched_get_send(struct mptcp_sock *msk)
 {
 	struct mptcp_subflow_context *subflow;
-	struct mptcp_sched_data data;
+	struct mptcp_sched_data *data = NULL;
 
 	msk_owned_by_me(msk);
 
@@ -144,16 +177,15 @@ int mptcp_sched_get_send(struct mptcp_sock *msk)
 			return 0;
 	}
 
-	data.reinject = false;
 	if (msk->sched == &mptcp_sched_default || !msk->sched)
-		return mptcp_sched_default_get_subflow(msk, &data);
-	return msk->sched->get_subflow(msk, &data);
+		return mptcp_sched_default_get_send(msk, data);
+	return msk->sched->get_send(msk, data);
 }
 
 int mptcp_sched_get_retrans(struct mptcp_sock *msk)
 {
 	struct mptcp_subflow_context *subflow;
-	struct mptcp_sched_data data;
+	struct mptcp_sched_data *data = NULL;
 
 	msk_owned_by_me(msk);
 
@@ -166,8 +198,9 @@ int mptcp_sched_get_retrans(struct mptcp_sock *msk)
 			return 0;
 	}
 
-	data.reinject = true;
 	if (msk->sched == &mptcp_sched_default || !msk->sched)
-		return mptcp_sched_default_get_subflow(msk, &data);
-	return msk->sched->get_subflow(msk, &data);
+		return mptcp_sched_default_get_retrans(msk, data);
+	if (msk->sched->get_retrans)
+		return msk->sched->get_retrans(msk, data);
+	return msk->sched->get_send(msk, data);
 }

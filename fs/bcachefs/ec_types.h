@@ -16,26 +16,19 @@ struct stripe {
 	u8			nr_blocks;
 	u8			nr_redundant;
 	u8			blocks_nonempty;
+	u8			disk_label;
 };
 
 struct gc_stripe {
+	u8			lock;
+	unsigned		alive:1; /* does a corresponding key exist in stripes btree? */
 	u16			sectors;
-
 	u8			nr_blocks;
 	u8			nr_redundant;
-
-	unsigned		alive:1; /* does a corresponding key exist in stripes btree? */
 	u16			block_sectors[BCH_BKEY_PTRS_MAX];
 	struct bch_extent_ptr	ptrs[BCH_BKEY_PTRS_MAX];
 
 	struct bch_replicas_padded r;
 };
-
-struct ec_stripe_heap_entry {
-	size_t			idx;
-	unsigned		blocks_nonempty;
-};
-
-typedef HEAP(struct ec_stripe_heap_entry) ec_stripes_heap;
 
 #endif /* _BCACHEFS_EC_TYPES_H */

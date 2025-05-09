@@ -79,7 +79,7 @@ check_per_thread()
 		echo "[Skip] paranoid and not root"
 		return
 	fi
-	perf stat --per-thread -a $2 true
+	perf stat --per-thread -p $$ $2 true
 	commachecker --per-thread
 	echo "[Success]"
 }
@@ -94,6 +94,18 @@ check_per_cache_instance()
 	fi
 	perf stat --per-cache -a $2 true
 	commachecker --per-cache
+	echo "[Success]"
+}
+
+check_per_cluster()
+{
+	echo -n "Checking $1 output: per cluster "
+	if ParanoidAndNotRoot 0
+	then
+		echo "[Skip] paranoid and not root"
+		return
+	fi
+	perf stat --per-cluster -a $2 true
 	echo "[Success]"
 }
 
@@ -133,6 +145,14 @@ check_per_socket()
 	fi
 	perf stat --per-socket -a $2 true
 	commachecker --per-socket
+	echo "[Success]"
+}
+
+check_metric_only()
+{
+	echo -n "Checking $1 output: metric only "
+	perf stat --metric-only $2 -e instructions,cycles true
+	commachecker --metric-only
 	echo "[Success]"
 }
 

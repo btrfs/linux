@@ -28,8 +28,6 @@
 #ifndef __AST_DRV_H__
 #define __AST_DRV_H__
 
-#include <linux/i2c.h>
-#include <linux/i2c-algo-bit.h>
 #include <linux/io.h>
 #include <linux/types.h>
 
@@ -41,11 +39,12 @@
 
 #include "ast_reg.h"
 
+struct ast_vbios_enhtable;
+
 #define DRIVER_AUTHOR		"Dave Airlie"
 
 #define DRIVER_NAME		"ast"
 #define DRIVER_DESC		"AST"
-#define DRIVER_DATE		"20120228"
 
 #define DRIVER_MAJOR		0
 #define DRIVER_MINOR		1
@@ -93,11 +92,6 @@ enum ast_tx_chip {
 	AST_TX_ASTDP,
 };
 
-#define AST_TX_NONE_BIT		BIT(AST_TX_NONE)
-#define AST_TX_SIL164_BIT	BIT(AST_TX_SIL164)
-#define AST_TX_DP501_BIT	BIT(AST_TX_DP501)
-#define AST_TX_ASTDP_BIT	BIT(AST_TX_ASTDP)
-
 enum ast_config_mode {
 	ast_use_p2a,
 	ast_use_dt,
@@ -119,17 +113,10 @@ enum ast_config_mode {
 #define AST_MAX_HWC_WIDTH	64
 #define AST_MAX_HWC_HEIGHT	64
 
-#define AST_HWC_SIZE		(AST_MAX_HWC_WIDTH * AST_MAX_HWC_HEIGHT * 2)
-#define AST_HWC_SIGNATURE_SIZE	32
+#define AST_HWC_PITCH		(AST_MAX_HWC_WIDTH * SZ_2)
+#define AST_HWC_SIZE		(AST_MAX_HWC_HEIGHT * AST_HWC_PITCH)
 
-/* define for signature structure */
-#define AST_HWC_SIGNATURE_CHECKSUM	0x00
-#define AST_HWC_SIGNATURE_SizeX		0x04
-#define AST_HWC_SIGNATURE_SizeY		0x08
-#define AST_HWC_SIGNATURE_X		0x0C
-#define AST_HWC_SIGNATURE_Y		0x10
-#define AST_HWC_SIGNATURE_HOTSPOTX	0x14
-#define AST_HWC_SIGNATURE_HOTSPOTY	0x18
+#define AST_HWC_SIGNATURE_SIZE	32
 
 /*
  * Planes
@@ -148,47 +135,31 @@ static inline struct ast_plane *to_ast_plane(struct drm_plane *plane)
 	return container_of(plane, struct ast_plane, base);
 }
 
+struct ast_cursor_plane {
+	struct ast_plane base;
+
+	u8 argb4444[AST_HWC_SIZE];
+};
+
+static inline struct ast_cursor_plane *to_ast_cursor_plane(struct drm_plane *plane)
+{
+	return container_of(to_ast_plane(plane), struct ast_cursor_plane, base);
+}
+
 /*
- * Connector with i2c channel
+ * Connector
  */
 
-struct ast_i2c_chan {
-	struct i2c_adapter adapter;
-	struct drm_device *dev;
-	struct i2c_algo_bit_data bit;
-};
-
-struct ast_vga_connector {
+struct ast_connector {
 	struct drm_connector base;
-	struct ast_i2c_chan *i2c;
+
+	enum drm_connector_status physical_status;
 };
 
-static inline struct ast_vga_connector *
-to_ast_vga_connector(struct drm_connector *connector)
+static inline struct ast_connector *
+to_ast_connector(struct drm_connector *connector)
 {
-	return container_of(connector, struct ast_vga_connector, base);
-}
-
-struct ast_sil164_connector {
-	struct drm_connector base;
-	struct ast_i2c_chan *i2c;
-};
-
-static inline struct ast_sil164_connector *
-to_ast_sil164_connector(struct drm_connector *connector)
-{
-	return container_of(connector, struct ast_sil164_connector, base);
-}
-
-struct ast_bmc_connector {
-	struct drm_connector base;
-	struct drm_connector *physical_connector;
-};
-
-static inline struct ast_bmc_connector *
-to_ast_bmc_connector(struct drm_connector *connector)
-{
-	return container_of(connector, struct ast_bmc_connector, base);
+	return container_of(connector, struct ast_connector, base);
 }
 
 /*
@@ -216,35 +187,34 @@ struct ast_device {
 
 	struct mutex modeset_lock; /* Protects access to modeset I/O registers in ioregs */
 
+	enum ast_tx_chip tx_chip;
+
 	struct ast_plane primary_plane;
-	struct ast_plane cursor_plane;
+	struct ast_cursor_plane cursor_plane;
 	struct drm_crtc crtc;
-	struct {
+	union {
 		struct {
 			struct drm_encoder encoder;
-			struct ast_vga_connector vga_connector;
+			struct ast_connector connector;
 		} vga;
 		struct {
 			struct drm_encoder encoder;
-			struct ast_sil164_connector sil164_connector;
+			struct ast_connector connector;
 		} sil164;
 		struct {
 			struct drm_encoder encoder;
-			struct drm_connector connector;
+			struct ast_connector connector;
 		} dp501;
 		struct {
 			struct drm_encoder encoder;
-			struct drm_connector connector;
+			struct ast_connector connector;
 		} astdp;
-		struct {
-			struct drm_encoder encoder;
-			struct ast_bmc_connector bmc_connector;
-		} bmc;
 	} output;
 
-	bool support_wide_screen;
+	bool support_wsxga_p; /* 1680x1050 */
+	bool support_fullhd; /* 1920x1080 */
+	bool support_wuxga; /* 1920x1200 */
 
-	unsigned long tx_chip_types;		/* bitfield of enum ast_chip_type */
 	u8 *dp501_fw_addr;
 	const struct firmware *dp501_fw;	/* dp501 fw */
 };
@@ -386,31 +356,10 @@ struct ast_vbios_stdtable {
 	u8 gr[9];
 };
 
-struct ast_vbios_enhtable {
-	u32 ht;
-	u32 hde;
-	u32 hfp;
-	u32 hsync;
-	u32 vt;
-	u32 vde;
-	u32 vfp;
-	u32 vsync;
-	u32 dclk_index;
-	u32 flags;
-	u32 refresh_rate;
-	u32 refresh_rate_index;
-	u32 mode_id;
-};
-
 struct ast_vbios_dclk_info {
 	u8 param1;
 	u8 param2;
 	u8 param3;
-};
-
-struct ast_vbios_mode_info {
-	const struct ast_vbios_stdtable *std_table;
-	const struct ast_vbios_enhtable *enh_table;
 };
 
 struct ast_crtc_state {
@@ -419,12 +368,11 @@ struct ast_crtc_state {
 	/* Last known format of primary plane */
 	const struct drm_format_info *format;
 
-	struct ast_vbios_mode_info vbios_mode_info;
+	const struct ast_vbios_stdtable *std_table;
+	const struct ast_vbios_enhtable *vmode;
 };
 
 #define to_ast_crtc_state(state) container_of(state, struct ast_crtc_state, base)
-
-int ast_mode_config_init(struct ast_device *ast);
 
 #define AST_MM_ALIGN_SHIFT 4
 #define AST_MM_ALIGN_MASK ((1 << AST_MM_ALIGN_SHIFT) - 1)
@@ -439,9 +387,6 @@ int ast_mode_config_init(struct ast_device *ast);
 #define AST_DP501_PNPMONITOR	0xf010
 #define AST_DP501_LINKRATE	0xf014
 #define AST_DP501_EDID_DATA	0xf020
-
-#define AST_DP_POWER_ON			true
-#define AST_DP_POWER_OFF			false
 
 /*
  * ASTDP resoultion table:
@@ -486,27 +431,34 @@ int ast_mode_config_init(struct ast_device *ast);
 int ast_mm_init(struct ast_device *ast);
 
 /* ast post */
-void ast_post_gpu(struct drm_device *dev);
+int ast_post_gpu(struct ast_device *ast);
 u32 ast_mindwm(struct ast_device *ast, u32 r);
 void ast_moutdwm(struct ast_device *ast, u32 r, u32 v);
 void ast_patch_ahb_2500(void __iomem *regs);
-/* ast dp501 */
-void ast_set_dp501_video_output(struct drm_device *dev, u8 mode);
-bool ast_backup_fw(struct drm_device *dev, u8 *addr, u32 size);
-bool ast_dp501_is_connected(struct ast_device *ast);
-bool ast_dp501_read_edid(struct drm_device *dev, u8 *ediddata);
-u8 ast_get_dp501_max_clk(struct drm_device *dev);
-void ast_init_3rdtx(struct drm_device *dev);
 
-/* ast_i2c.c */
-struct ast_i2c_chan *ast_i2c_create(struct drm_device *dev);
+int ast_vga_output_init(struct ast_device *ast);
+int ast_sil164_output_init(struct ast_device *ast);
+
+/* ast_cursor.c */
+int ast_cursor_plane_init(struct ast_device *ast);
+
+/* ast dp501 */
+bool ast_backup_fw(struct ast_device *ast, u8 *addr, u32 size);
+void ast_init_3rdtx(struct ast_device *ast);
+int ast_dp501_output_init(struct ast_device *ast);
 
 /* aspeed DP */
-bool ast_astdp_is_connected(struct ast_device *ast);
-int ast_astdp_read_edid(struct drm_device *dev, u8 *ediddata);
-void ast_dp_launch(struct drm_device *dev);
-void ast_dp_power_on_off(struct drm_device *dev, bool no);
-void ast_dp_set_on_off(struct drm_device *dev, bool no);
-void ast_dp_set_mode(struct drm_crtc *crtc, struct ast_vbios_mode_info *vbios_mode);
+int ast_dp_launch(struct ast_device *ast);
+int ast_astdp_output_init(struct ast_device *ast);
+
+/* ast_mode.c */
+int ast_mode_config_init(struct ast_device *ast);
+int ast_plane_init(struct drm_device *dev, struct ast_plane *ast_plane,
+		   void __iomem *vaddr, u64 offset, unsigned long size,
+		   uint32_t possible_crtcs,
+		   const struct drm_plane_funcs *funcs,
+		   const uint32_t *formats, unsigned int format_count,
+		   const uint64_t *format_modifiers,
+		   enum drm_plane_type type);
 
 #endif

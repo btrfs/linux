@@ -45,6 +45,8 @@
  * find_pid_ns() using the int nr and struct pid_namespace *ns.
  */
 
+#define RESERVED_PIDS 300
+
 struct upid {
 	int nr;
 	struct pid_namespace *ns;
@@ -55,6 +57,9 @@ struct pid
 	refcount_t count;
 	unsigned int level;
 	spinlock_t lock;
+	struct dentry *stashed;
+	u64 ino;
+	struct rb_node pidfs_node;
 	/* lists of tasks that use this pid */
 	struct hlist_head tasks[PIDTYPE_MAX];
 	struct hlist_head inodes;
@@ -64,17 +69,16 @@ struct pid
 	struct upid numbers[];
 };
 
+extern seqcount_spinlock_t pidmap_lock_seq;
 extern struct pid init_struct_pid;
-
-extern const struct file_operations pidfd_fops;
 
 struct file;
 
-extern struct pid *pidfd_pid(const struct file *file);
+struct pid *pidfd_pid(const struct file *file);
 struct pid *pidfd_get_pid(unsigned int fd, unsigned int *flags);
 struct task_struct *pidfd_get_task(int pidfd, unsigned int *flags);
-int pidfd_create(struct pid *pid, unsigned int flags);
 int pidfd_prepare(struct pid *pid, unsigned int flags, struct file **ret);
+void do_notify_pidfd(struct task_struct *task);
 
 static inline struct pid *get_pid(struct pid *pid)
 {
@@ -97,15 +101,12 @@ extern struct pid *get_task_pid(struct task_struct *task, enum pid_type type);
  * these helpers must be called with the tasklist_lock write-held.
  */
 extern void attach_pid(struct task_struct *task, enum pid_type);
-extern void detach_pid(struct task_struct *task, enum pid_type);
-extern void change_pid(struct task_struct *task, enum pid_type,
-			struct pid *pid);
+void detach_pid(struct pid **pids, struct task_struct *task, enum pid_type);
+void change_pid(struct pid **pids, struct task_struct *task, enum pid_type,
+		struct pid *pid);
 extern void exchange_tids(struct task_struct *task, struct task_struct *old);
 extern void transfer_pid(struct task_struct *old, struct task_struct *new,
 			 enum pid_type);
-
-extern int pid_max;
-extern int pid_max_min, pid_max_max;
 
 /*
  * look up a PID in the hash table. Must be called with the tasklist_lock
@@ -128,6 +129,7 @@ extern struct pid *find_ge_pid(int nr, struct pid_namespace *);
 extern struct pid *alloc_pid(struct pid_namespace *ns, pid_t *set_tid,
 			     size_t set_tid_size);
 extern void free_pid(struct pid *pid);
+void free_pids(struct pid **pids);
 extern void disable_pid_allocation(struct pid_namespace *ns);
 
 /*

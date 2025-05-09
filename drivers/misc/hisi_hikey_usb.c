@@ -14,7 +14,6 @@
 #include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/notifier.h>
-#include <linux/of_gpio.h>
 #include <linux/platform_device.h>
 #include <linux/property.h>
 #include <linux/regulator/consumer.h>
@@ -239,7 +238,7 @@ static int hisi_hikey_usb_probe(struct platform_device *pdev)
 	return 0;
 }
 
-static int  hisi_hikey_usb_remove(struct platform_device *pdev)
+static void hisi_hikey_usb_remove(struct platform_device *pdev)
 {
 	struct hisi_hikey_usb *hisi_hikey_usb = platform_get_drvdata(pdev);
 
@@ -251,8 +250,6 @@ static int  hisi_hikey_usb_remove(struct platform_device *pdev)
 	} else {
 		hub_power_ctrl(hisi_hikey_usb, HUB_VBUS_POWER_OFF);
 	}
-
-	return 0;
 }
 
 static const struct of_device_id id_table_hisi_hikey_usb[] = {

@@ -303,9 +303,9 @@ static int mt7915_muru_stats_show(struct seq_file *file, void *data)
 		   phy->mib.dl_vht_3mu_cnt,
 		   phy->mib.dl_vht_4mu_cnt);
 
-	sub_total_cnt = phy->mib.dl_vht_2mu_cnt +
-			phy->mib.dl_vht_3mu_cnt +
-			phy->mib.dl_vht_4mu_cnt;
+	sub_total_cnt = (u64)phy->mib.dl_vht_2mu_cnt +
+			     phy->mib.dl_vht_3mu_cnt +
+			     phy->mib.dl_vht_4mu_cnt;
 
 	seq_printf(file, "\nTotal non-HE MU-MIMO DL PPDU count: %lld",
 		   sub_total_cnt);
@@ -353,26 +353,27 @@ static int mt7915_muru_stats_show(struct seq_file *file, void *data)
 		   phy->mib.dl_he_9to16ru_cnt,
 		   phy->mib.dl_he_gtr16ru_cnt);
 
-	sub_total_cnt = phy->mib.dl_he_2mu_cnt +
-			phy->mib.dl_he_3mu_cnt +
-			phy->mib.dl_he_4mu_cnt;
+	sub_total_cnt = (u64)phy->mib.dl_he_2mu_cnt +
+			     phy->mib.dl_he_3mu_cnt +
+			     phy->mib.dl_he_4mu_cnt;
 	total_ppdu_cnt = sub_total_cnt;
 
 	seq_printf(file, "\nTotal HE MU-MIMO DL PPDU count: %lld",
 		   sub_total_cnt);
 
-	sub_total_cnt = phy->mib.dl_he_2ru_cnt +
-			phy->mib.dl_he_3ru_cnt +
-			phy->mib.dl_he_4ru_cnt +
-			phy->mib.dl_he_5to8ru_cnt +
-			phy->mib.dl_he_9to16ru_cnt +
-			phy->mib.dl_he_gtr16ru_cnt;
+	sub_total_cnt = (u64)phy->mib.dl_he_2ru_cnt +
+			     phy->mib.dl_he_3ru_cnt +
+			     phy->mib.dl_he_4ru_cnt +
+			     phy->mib.dl_he_5to8ru_cnt +
+			     phy->mib.dl_he_9to16ru_cnt +
+			     phy->mib.dl_he_gtr16ru_cnt;
 	total_ppdu_cnt += sub_total_cnt;
 
 	seq_printf(file, "\nTotal HE OFDMA DL PPDU count: %lld",
 		   sub_total_cnt);
 
-	total_ppdu_cnt += phy->mib.dl_he_su_cnt + phy->mib.dl_he_ext_su_cnt;
+	total_ppdu_cnt += (u64)phy->mib.dl_he_su_cnt +
+			       phy->mib.dl_he_ext_su_cnt;
 
 	seq_printf(file, "\nAll HE DL PPDU count: %lld", total_ppdu_cnt);
 
@@ -404,20 +405,20 @@ static int mt7915_muru_stats_show(struct seq_file *file, void *data)
 		   phy->mib.ul_hetrig_9to16ru_cnt,
 		   phy->mib.ul_hetrig_gtr16ru_cnt);
 
-	sub_total_cnt = phy->mib.ul_hetrig_2mu_cnt +
-			phy->mib.ul_hetrig_3mu_cnt +
-			phy->mib.ul_hetrig_4mu_cnt;
+	sub_total_cnt = (u64)phy->mib.ul_hetrig_2mu_cnt +
+			     phy->mib.ul_hetrig_3mu_cnt +
+			     phy->mib.ul_hetrig_4mu_cnt;
 	total_ppdu_cnt = sub_total_cnt;
 
 	seq_printf(file, "\nTotal HE MU-MIMO UL TB PPDU count: %lld",
 		   sub_total_cnt);
 
-	sub_total_cnt = phy->mib.ul_hetrig_2ru_cnt +
-			phy->mib.ul_hetrig_3ru_cnt +
-			phy->mib.ul_hetrig_4ru_cnt +
-			phy->mib.ul_hetrig_5to8ru_cnt +
-			phy->mib.ul_hetrig_9to16ru_cnt +
-			phy->mib.ul_hetrig_gtr16ru_cnt;
+	sub_total_cnt = (u64)phy->mib.ul_hetrig_2ru_cnt +
+			     phy->mib.ul_hetrig_3ru_cnt +
+			     phy->mib.ul_hetrig_4ru_cnt +
+			     phy->mib.ul_hetrig_5to8ru_cnt +
+			     phy->mib.ul_hetrig_9to16ru_cnt +
+			     phy->mib.ul_hetrig_gtr16ru_cnt;
 	total_ppdu_cnt += sub_total_cnt;
 
 	seq_printf(file, "\nTotal HE OFDMA UL TB PPDU count: %lld",
@@ -523,7 +524,8 @@ mt7915_fw_debug_wm_set(void *data, u64 val)
 
 	/* WM CPU info record control */
 	mt76_clear(dev, MT_CPU_UTIL_CTRL, BIT(0));
-	mt76_wr(dev, MT_DIC_CMD_REG_CMD, BIT(2) | BIT(13) | !dev->fw.debug_wm);
+	mt76_wr(dev, MT_DIC_CMD_REG_CMD, BIT(2) | BIT(13) |
+		(dev->fw.debug_wm ? 0 : BIT(0)));
 	mt76_wr(dev, MT_MCU_WM_CIRQ_IRQ_MASK_CLR_ADDR, BIT(5));
 	mt76_wr(dev, MT_MCU_WM_CIRQ_IRQ_SOFT_ADDR, BIT(5));
 
@@ -1049,6 +1051,7 @@ static ssize_t
 mt7915_rate_txpower_set(struct file *file, const char __user *user_buf,
 			size_t count, loff_t *ppos)
 {
+	int i, ret, pwr, pwr160 = 0, pwr80 = 0, pwr40 = 0, pwr20 = 0;
 	struct mt7915_phy *phy = file->private_data;
 	struct mt7915_dev *dev = phy->dev;
 	struct mt76_phy *mphy = phy->mt76;
@@ -1057,7 +1060,6 @@ mt7915_rate_txpower_set(struct file *file, const char __user *user_buf,
 		.band_idx = phy->mt76->band_idx,
 	};
 	char buf[100];
-	int i, ret, pwr160 = 0, pwr80 = 0, pwr40 = 0, pwr20 = 0;
 	enum mac80211_rx_encoding mode;
 	u32 offs = 0, len = 0;
 
@@ -1083,13 +1085,13 @@ mt7915_rate_txpower_set(struct file *file, const char __user *user_buf,
 		return -EINVAL;
 
 	if (pwr160)
-		pwr160 = mt7915_get_power_bound(phy, pwr160);
+		pwr160 = mt76_get_power_bound(mphy, pwr160);
 	if (pwr80)
-		pwr80 = mt7915_get_power_bound(phy, pwr80);
+		pwr80 = mt76_get_power_bound(mphy, pwr80);
 	if (pwr40)
-		pwr40 = mt7915_get_power_bound(phy, pwr40);
+		pwr40 = mt76_get_power_bound(mphy, pwr40);
 	if (pwr20)
-		pwr20 = mt7915_get_power_bound(phy, pwr20);
+		pwr20 = mt76_get_power_bound(mphy, pwr20);
 
 	if (pwr160 < 0 || pwr80 < 0 || pwr40 < 0 || pwr20 < 0)
 		return -EINVAL;
@@ -1130,8 +1132,8 @@ skip:
 	if (ret)
 		goto out;
 
-	mphy->txpower_cur = max(mphy->txpower_cur,
-				max(pwr160, max(pwr80, max(pwr40, pwr20))));
+	pwr = max3(pwr80, pwr40, pwr20);
+	mphy->txpower_cur = max3(mphy->txpower_cur, pwr160, pwr);
 out:
 	mutex_unlock(&dev->mt76.mutex);
 

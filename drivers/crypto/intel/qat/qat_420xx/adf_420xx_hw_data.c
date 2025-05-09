@@ -10,12 +10,14 @@
 #include <adf_fw_config.h>
 #include <adf_gen4_config.h>
 #include <adf_gen4_dc.h>
+#include <adf_gen4_hw_csr_data.h>
 #include <adf_gen4_hw_data.h>
 #include <adf_gen4_pfvf.h>
 #include <adf_gen4_pm.h>
 #include <adf_gen4_ras.h>
 #include <adf_gen4_timer.h>
 #include <adf_gen4_tl.h>
+#include <adf_gen4_vf_mig.h>
 #include "adf_420xx_hw_data.h"
 #include "icp_qat_hw.h"
 
@@ -96,7 +98,7 @@ static struct adf_hw_device_class adf_420xx_class = {
 
 static u32 get_ae_mask(struct adf_hw_device_data *self)
 {
-	u32 me_disable = self->fuses;
+	u32 me_disable = self->fuses[ADF_FUSECTL4];
 
 	return ~me_disable & ADF_420XX_ACCELENGINES_MASK;
 }
@@ -104,8 +106,7 @@ static u32 get_ae_mask(struct adf_hw_device_data *self)
 static u32 uof_get_num_objs(struct adf_accel_dev *accel_dev)
 {
 	switch (adf_get_service_enabled(accel_dev)) {
-	case SVC_CY:
-	case SVC_CY2:
+	case SVC_SYM_ASYM:
 		return ARRAY_SIZE(adf_fw_cy_config);
 	case SVC_DC:
 		return ARRAY_SIZE(adf_fw_dc_config);
@@ -116,10 +117,8 @@ static u32 uof_get_num_objs(struct adf_accel_dev *accel_dev)
 	case SVC_ASYM:
 		return ARRAY_SIZE(adf_fw_asym_config);
 	case SVC_ASYM_DC:
-	case SVC_DC_ASYM:
 		return ARRAY_SIZE(adf_fw_asym_dc_config);
 	case SVC_SYM_DC:
-	case SVC_DC_SYM:
 		return ARRAY_SIZE(adf_fw_sym_dc_config);
 	default:
 		return 0;
@@ -129,8 +128,7 @@ static u32 uof_get_num_objs(struct adf_accel_dev *accel_dev)
 static const struct adf_fw_config *get_fw_config(struct adf_accel_dev *accel_dev)
 {
 	switch (adf_get_service_enabled(accel_dev)) {
-	case SVC_CY:
-	case SVC_CY2:
+	case SVC_SYM_ASYM:
 		return adf_fw_cy_config;
 	case SVC_DC:
 		return adf_fw_dc_config;
@@ -141,10 +139,8 @@ static const struct adf_fw_config *get_fw_config(struct adf_accel_dev *accel_dev
 	case SVC_ASYM:
 		return adf_fw_asym_config;
 	case SVC_ASYM_DC:
-	case SVC_DC_ASYM:
 		return adf_fw_asym_dc_config;
 	case SVC_SYM_DC:
-	case SVC_DC_SYM:
 		return adf_fw_sym_dc_config;
 	default:
 		return NULL;
@@ -264,8 +260,7 @@ static u32 get_accel_cap(struct adf_accel_dev *accel_dev)
 	}
 
 	switch (adf_get_service_enabled(accel_dev)) {
-	case SVC_CY:
-	case SVC_CY2:
+	case SVC_SYM_ASYM:
 		return capabilities_sym | capabilities_asym;
 	case SVC_DC:
 		return capabilities_dc;
@@ -282,10 +277,8 @@ static u32 get_accel_cap(struct adf_accel_dev *accel_dev)
 	case SVC_ASYM:
 		return capabilities_asym;
 	case SVC_ASYM_DC:
-	case SVC_DC_ASYM:
 		return capabilities_asym | capabilities_dc;
 	case SVC_SYM_DC:
-	case SVC_DC_SYM:
 		return capabilities_sym | capabilities_dc;
 	default:
 		return 0;
@@ -296,7 +289,7 @@ static const u32 *adf_get_arbiter_mapping(struct adf_accel_dev *accel_dev)
 {
 	if (adf_gen4_init_thd2arb_map(accel_dev))
 		dev_warn(&GET_DEV(accel_dev),
-			 "Generate of the thread to arbiter map failed");
+			 "Failed to generate thread to arbiter mapping");
 
 	return GET_HW_DATA(accel_dev)->thd_to_arb_map;
 }
@@ -361,53 +354,6 @@ static u32 get_ena_thd_mask(struct adf_accel_dev *accel_dev, u32 obj_num)
 	}
 }
 
-static u16 get_ring_to_svc_map(struct adf_accel_dev *accel_dev)
-{
-	enum adf_cfg_service_type rps[RP_GROUP_COUNT] = { };
-	const struct adf_fw_config *fw_config;
-	u16 ring_to_svc_map;
-	int i, j;
-
-	fw_config = get_fw_config(accel_dev);
-	if (!fw_config)
-		return 0;
-
-	for (i = 0; i < RP_GROUP_COUNT; i++) {
-		switch (fw_config[i].ae_mask) {
-		case ADF_AE_GROUP_0:
-			j = RP_GROUP_0;
-			break;
-		case ADF_AE_GROUP_1:
-			j = RP_GROUP_1;
-			break;
-		default:
-			return 0;
-		}
-
-		switch (fw_config[i].obj) {
-		case ADF_FW_SYM_OBJ:
-			rps[j] = SYM;
-			break;
-		case ADF_FW_ASYM_OBJ:
-			rps[j] = ASYM;
-			break;
-		case ADF_FW_DC_OBJ:
-			rps[j] = COMP;
-			break;
-		default:
-			rps[j] = 0;
-			break;
-		}
-	}
-
-	ring_to_svc_map = rps[RP_GROUP_0] << ADF_CFG_SERV_RING_PAIR_0_SHIFT |
-			  rps[RP_GROUP_1] << ADF_CFG_SERV_RING_PAIR_1_SHIFT |
-			  rps[RP_GROUP_0] << ADF_CFG_SERV_RING_PAIR_2_SHIFT |
-			  rps[RP_GROUP_1] << ADF_CFG_SERV_RING_PAIR_3_SHIFT;
-
-	return ring_to_svc_map;
-}
-
 static const char *uof_get_name(struct adf_accel_dev *accel_dev, u32 obj_num,
 				const char * const fw_objs[], int num_objs)
 {
@@ -420,7 +366,7 @@ static const char *uof_get_name(struct adf_accel_dev *accel_dev, u32 obj_num,
 	else
 		id = -EINVAL;
 
-	if (id < 0 || id > num_objs)
+	if (id < 0 || id >= num_objs)
 		return NULL;
 
 	return fw_objs[id];
@@ -431,6 +377,20 @@ static const char *uof_get_name_420xx(struct adf_accel_dev *accel_dev, u32 obj_n
 	int num_fw_objs = ARRAY_SIZE(adf_420xx_fw_objs);
 
 	return uof_get_name(accel_dev, obj_num, adf_420xx_fw_objs, num_fw_objs);
+}
+
+static int uof_get_obj_type(struct adf_accel_dev *accel_dev, u32 obj_num)
+{
+	const struct adf_fw_config *fw_config;
+
+	if (obj_num >= uof_get_num_objs(accel_dev))
+		return -EINVAL;
+
+	fw_config = get_fw_config(accel_dev);
+	if (!fw_config)
+		return -EINVAL;
+
+	return fw_config[obj_num].obj;
 }
 
 static u32 uof_get_ae_mask(struct adf_accel_dev *accel_dev, u32 obj_num)
@@ -451,6 +411,7 @@ static void adf_gen4_set_err_mask(struct adf_dev_err_mask *dev_err_mask)
 	dev_err_mask->parerr_cpr_xlt_mask = ADF_420XX_PARITYERRORMASK_CPR_XLT_MASK;
 	dev_err_mask->parerr_dcpr_ucs_mask = ADF_420XX_PARITYERRORMASK_DCPR_UCS_MASK;
 	dev_err_mask->parerr_pke_mask = ADF_420XX_PARITYERRORMASK_PKE_MASK;
+	dev_err_mask->parerr_wat_wcp_mask = ADF_420XX_PARITYERRORMASK_WAT_WCP_MASK;
 	dev_err_mask->ssmfeatren_mask = ADF_420XX_SSMFEATREN_MASK;
 }
 
@@ -496,12 +457,13 @@ void adf_init_hw_data_420xx(struct adf_hw_device_data *hw_data, u32 dev_id)
 	hw_data->fw_mmp_name = ADF_420XX_MMP;
 	hw_data->uof_get_name = uof_get_name_420xx;
 	hw_data->uof_get_num_objs = uof_get_num_objs;
+	hw_data->uof_get_obj_type = uof_get_obj_type;
 	hw_data->uof_get_ae_mask = uof_get_ae_mask;
 	hw_data->get_rp_group = get_rp_group;
 	hw_data->get_ena_thd_mask = get_ena_thd_mask;
 	hw_data->set_msix_rttable = adf_gen4_set_msix_default_rttable;
 	hw_data->set_ssm_wdtimer = adf_gen4_set_ssm_wdtimer;
-	hw_data->get_ring_to_svc_map = get_ring_to_svc_map;
+	hw_data->get_ring_to_svc_map = adf_gen4_get_ring_to_svc_map;
 	hw_data->disable_iov = adf_disable_sriov;
 	hw_data->ring_pair_reset = adf_gen4_ring_pair_reset;
 	hw_data->enable_pm = adf_gen4_enable_pm;
@@ -512,6 +474,7 @@ void adf_init_hw_data_420xx(struct adf_hw_device_data *hw_data, u32 dev_id)
 	hw_data->get_hb_clock = adf_gen4_get_heartbeat_clock;
 	hw_data->num_hb_ctrs = ADF_NUM_HB_CNT_PER_AE;
 	hw_data->clock_frequency = ADF_420XX_AE_FREQ;
+	hw_data->services_supported = adf_gen4_services_supported;
 
 	adf_gen4_set_err_mask(&hw_data->dev_err_mask);
 	adf_gen4_init_hw_csr_ops(&hw_data->csr_ops);
@@ -519,6 +482,7 @@ void adf_init_hw_data_420xx(struct adf_hw_device_data *hw_data, u32 dev_id)
 	adf_gen4_init_dc_ops(&hw_data->dc_ops);
 	adf_gen4_init_ras_ops(&hw_data->ras_ops);
 	adf_gen4_init_tl_data(&hw_data->tl_data);
+	adf_gen4_init_vf_mig_ops(&hw_data->vfmig_ops);
 	adf_init_rl_data(&hw_data->rl_data);
 }
 

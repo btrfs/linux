@@ -5,11 +5,12 @@
  * Copyright (C) 2023 Axis Communications AB
  */
 
-#include <asm/unaligned.h>
+#include <linux/unaligned.h>
 #include <linux/bitfield.h>
 #include <linux/i2c.h>
 #include <linux/module.h>
 #include <linux/regmap.h>
+#include <linux/string_choices.h>
 
 #include <linux/iio/buffer.h>
 #include <linux/iio/events.h>
@@ -648,7 +649,8 @@ static int irsd200_read_event_config(struct iio_dev *indio_dev,
 static int irsd200_write_event_config(struct iio_dev *indio_dev,
 				      const struct iio_chan_spec *chan,
 				      enum iio_event_type type,
-				      enum iio_event_direction dir, int state)
+				      enum iio_event_direction dir,
+				      bool state)
 {
 	struct irsd200_data *data = iio_priv(indio_dev);
 	unsigned int tmp;
@@ -662,7 +664,7 @@ static int irsd200_write_event_config(struct iio_dev *indio_dev,
 			return ret;
 
 		return regmap_field_write(
-			data->regfields[IRS_REGF_INTR_COUNT_THR_OR], !!state);
+			data->regfields[IRS_REGF_INTR_COUNT_THR_OR], state);
 	default:
 		return -EINVAL;
 	}
@@ -782,7 +784,7 @@ static int irsd200_set_trigger_state(struct iio_trigger *trig, bool state)
 	ret = regmap_field_write(data->regfields[IRS_REGF_INTR_DATA], state);
 	if (ret) {
 		dev_err(data->dev, "Could not %s data interrupt source (%d)\n",
-			state ? "enable" : "disable", ret);
+			str_enable_disable(state), ret);
 	}
 
 	return ret;

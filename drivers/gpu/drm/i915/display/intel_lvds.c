@@ -37,6 +37,7 @@
 #include <drm/drm_atomic_helper.h>
 #include <drm/drm_crtc.h>
 #include <drm/drm_edid.h>
+#include <drm/drm_probe_helper.h>
 
 #include "i915_drv.h"
 #include "i915_reg.h"
@@ -51,16 +52,13 @@
 #include "intel_lvds.h"
 #include "intel_lvds_regs.h"
 #include "intel_panel.h"
+#include "intel_pfit.h"
+#include "intel_pfit_regs.h"
 #include "intel_pps_regs.h"
 
 /* Private structure for the integrated LVDS support */
 struct intel_lvds_pps {
-	/* 100us units */
-	int t1_t2;
-	int t3;
-	int t4;
-	int t5;
-	int tx;
+	struct intel_pps_delays delays;
 
 	int divider;
 
@@ -105,18 +103,19 @@ bool intel_lvds_port_enabled(struct drm_i915_private *i915,
 static bool intel_lvds_get_hw_state(struct intel_encoder *encoder,
 				    enum pipe *pipe)
 {
+	struct intel_display *display = to_intel_display(encoder);
 	struct drm_i915_private *i915 = to_i915(encoder->base.dev);
 	struct intel_lvds_encoder *lvds_encoder = to_lvds_encoder(encoder);
 	intel_wakeref_t wakeref;
 	bool ret;
 
-	wakeref = intel_display_power_get_if_enabled(i915, encoder->power_domain);
+	wakeref = intel_display_power_get_if_enabled(display, encoder->power_domain);
 	if (!wakeref)
 		return false;
 
 	ret = intel_lvds_port_enabled(i915, lvds_encoder->reg, pipe);
 
-	intel_display_power_put(i915, encoder->power_domain, wakeref);
+	intel_display_power_put(display, encoder->power_domain, wakeref);
 
 	return ret;
 }
@@ -148,7 +147,7 @@ static void intel_lvds_get_config(struct intel_encoder *encoder,
 
 	/* gen2/3 store dither state in pfit control, needs to match */
 	if (DISPLAY_VER(dev_priv) < 4) {
-		tmp = intel_de_read(dev_priv, PFIT_CONTROL);
+		tmp = intel_de_read(dev_priv, PFIT_CONTROL(dev_priv));
 
 		crtc_state->gmch_pfit.control |= tmp & PFIT_PANEL_8TO6_DITHER_ENABLE;
 	}
@@ -161,18 +160,19 @@ static void intel_lvds_pps_get_hw_state(struct drm_i915_private *dev_priv,
 {
 	u32 val;
 
-	pps->powerdown_on_reset = intel_de_read(dev_priv, PP_CONTROL(0)) & PANEL_POWER_RESET;
+	pps->powerdown_on_reset = intel_de_read(dev_priv,
+						PP_CONTROL(dev_priv, 0)) & PANEL_POWER_RESET;
 
-	val = intel_de_read(dev_priv, PP_ON_DELAYS(0));
+	val = intel_de_read(dev_priv, PP_ON_DELAYS(dev_priv, 0));
 	pps->port = REG_FIELD_GET(PANEL_PORT_SELECT_MASK, val);
-	pps->t1_t2 = REG_FIELD_GET(PANEL_POWER_UP_DELAY_MASK, val);
-	pps->t5 = REG_FIELD_GET(PANEL_LIGHT_ON_DELAY_MASK, val);
+	pps->delays.power_up = REG_FIELD_GET(PANEL_POWER_UP_DELAY_MASK, val);
+	pps->delays.backlight_on = REG_FIELD_GET(PANEL_LIGHT_ON_DELAY_MASK, val);
 
-	val = intel_de_read(dev_priv, PP_OFF_DELAYS(0));
-	pps->t3 = REG_FIELD_GET(PANEL_POWER_DOWN_DELAY_MASK, val);
-	pps->tx = REG_FIELD_GET(PANEL_LIGHT_OFF_DELAY_MASK, val);
+	val = intel_de_read(dev_priv, PP_OFF_DELAYS(dev_priv, 0));
+	pps->delays.power_down = REG_FIELD_GET(PANEL_POWER_DOWN_DELAY_MASK, val);
+	pps->delays.backlight_off = REG_FIELD_GET(PANEL_LIGHT_OFF_DELAY_MASK, val);
 
-	val = intel_de_read(dev_priv, PP_DIVISOR(0));
+	val = intel_de_read(dev_priv, PP_DIVISOR(dev_priv, 0));
 	pps->divider = REG_FIELD_GET(PP_REFERENCE_DIVIDER_MASK, val);
 	val = REG_FIELD_GET(PANEL_POWER_CYCLE_DELAY_MASK, val);
 	/*
@@ -183,25 +183,30 @@ static void intel_lvds_pps_get_hw_state(struct drm_i915_private *dev_priv,
 	if (val)
 		val--;
 	/* Convert from 100ms to 100us units */
-	pps->t4 = val * 1000;
+	pps->delays.power_cycle = val * 1000;
 
 	if (DISPLAY_VER(dev_priv) < 5 &&
-	    pps->t1_t2 == 0 && pps->t5 == 0 && pps->t3 == 0 && pps->tx == 0) {
+	    pps->delays.power_up == 0 &&
+	    pps->delays.backlight_on == 0 &&
+	    pps->delays.power_down == 0 &&
+	    pps->delays.backlight_off == 0) {
 		drm_dbg_kms(&dev_priv->drm,
 			    "Panel power timings uninitialized, "
 			    "setting defaults\n");
 		/* Set T2 to 40ms and T5 to 200ms in 100 usec units */
-		pps->t1_t2 = 40 * 10;
-		pps->t5 = 200 * 10;
+		pps->delays.power_up = 40 * 10;
+		pps->delays.backlight_on = 200 * 10;
 		/* Set T3 to 35ms and Tx to 200ms in 100 usec units */
-		pps->t3 = 35 * 10;
-		pps->tx = 200 * 10;
+		pps->delays.power_down = 35 * 10;
+		pps->delays.backlight_off = 200 * 10;
 	}
 
-	drm_dbg(&dev_priv->drm, "LVDS PPS:t1+t2 %d t3 %d t4 %d t5 %d tx %d "
+	drm_dbg(&dev_priv->drm, "LVDS PPS:power_up %d power_down %d power_cycle %d backlight_on %d backlight_off %d "
 		"divider %d port %d powerdown_on_reset %d\n",
-		pps->t1_t2, pps->t3, pps->t4, pps->t5, pps->tx,
-		pps->divider, pps->port, pps->powerdown_on_reset);
+		pps->delays.power_up, pps->delays.power_down,
+		pps->delays.power_cycle, pps->delays.backlight_on,
+		pps->delays.backlight_off, pps->divider,
+		pps->port, pps->powerdown_on_reset);
 }
 
 static void intel_lvds_pps_init_hw(struct drm_i915_private *dev_priv,
@@ -209,25 +214,26 @@ static void intel_lvds_pps_init_hw(struct drm_i915_private *dev_priv,
 {
 	u32 val;
 
-	val = intel_de_read(dev_priv, PP_CONTROL(0));
+	val = intel_de_read(dev_priv, PP_CONTROL(dev_priv, 0));
 	drm_WARN_ON(&dev_priv->drm,
 		    (val & PANEL_UNLOCK_MASK) != PANEL_UNLOCK_REGS);
 	if (pps->powerdown_on_reset)
 		val |= PANEL_POWER_RESET;
-	intel_de_write(dev_priv, PP_CONTROL(0), val);
+	intel_de_write(dev_priv, PP_CONTROL(dev_priv, 0), val);
 
-	intel_de_write(dev_priv, PP_ON_DELAYS(0),
+	intel_de_write(dev_priv, PP_ON_DELAYS(dev_priv, 0),
 		       REG_FIELD_PREP(PANEL_PORT_SELECT_MASK, pps->port) |
-		       REG_FIELD_PREP(PANEL_POWER_UP_DELAY_MASK, pps->t1_t2) |
-		       REG_FIELD_PREP(PANEL_LIGHT_ON_DELAY_MASK, pps->t5));
+		       REG_FIELD_PREP(PANEL_POWER_UP_DELAY_MASK, pps->delays.power_up) |
+		       REG_FIELD_PREP(PANEL_LIGHT_ON_DELAY_MASK, pps->delays.backlight_on));
 
-	intel_de_write(dev_priv, PP_OFF_DELAYS(0),
-		       REG_FIELD_PREP(PANEL_POWER_DOWN_DELAY_MASK, pps->t3) |
-		       REG_FIELD_PREP(PANEL_LIGHT_OFF_DELAY_MASK, pps->tx));
+	intel_de_write(dev_priv, PP_OFF_DELAYS(dev_priv, 0),
+		       REG_FIELD_PREP(PANEL_POWER_DOWN_DELAY_MASK, pps->delays.power_down) |
+		       REG_FIELD_PREP(PANEL_LIGHT_OFF_DELAY_MASK, pps->delays.backlight_off));
 
-	intel_de_write(dev_priv, PP_DIVISOR(0),
+	intel_de_write(dev_priv, PP_DIVISOR(dev_priv, 0),
 		       REG_FIELD_PREP(PP_REFERENCE_DIVIDER_MASK, pps->divider) |
-		       REG_FIELD_PREP(PANEL_POWER_CYCLE_DELAY_MASK, DIV_ROUND_UP(pps->t4, 1000) + 1));
+		       REG_FIELD_PREP(PANEL_POWER_CYCLE_DELAY_MASK,
+				      DIV_ROUND_UP(pps->delays.power_cycle, 1000) + 1));
 }
 
 static void intel_pre_enable_lvds(struct intel_atomic_state *state,
@@ -235,6 +241,7 @@ static void intel_pre_enable_lvds(struct intel_atomic_state *state,
 				  const struct intel_crtc_state *crtc_state,
 				  const struct drm_connector_state *conn_state)
 {
+	struct intel_display *display = to_intel_display(state);
 	struct intel_lvds_encoder *lvds_encoder = to_lvds_encoder(encoder);
 	struct drm_i915_private *i915 = to_i915(encoder->base.dev);
 	struct intel_crtc *crtc = to_intel_crtc(crtc_state->uapi.crtc);
@@ -243,10 +250,10 @@ static void intel_pre_enable_lvds(struct intel_atomic_state *state,
 	u32 temp;
 
 	if (HAS_PCH_SPLIT(i915)) {
-		assert_fdi_rx_pll_disabled(i915, pipe);
-		assert_shared_dpll_disabled(i915, crtc_state->shared_dpll);
+		assert_fdi_rx_pll_disabled(display, pipe);
+		assert_shared_dpll_disabled(display, crtc_state->shared_dpll);
 	} else {
-		assert_pll_disabled(i915, pipe);
+		assert_pll_disabled(display, pipe);
 	}
 
 	intel_lvds_pps_init_hw(i915, &lvds_encoder->init_pps);
@@ -262,7 +269,7 @@ static void intel_pre_enable_lvds(struct intel_atomic_state *state,
 		temp |= LVDS_PIPE_SEL(pipe);
 	}
 
-	/* set the corresponsding LVDS_BORDER bit */
+	/* set the corresponding LVDS_BORDER bit */
 	temp &= ~LVDS_BORDER_ENABLE;
 	temp |= crtc_state->gmch_pfit.lvds_border_bits;
 
@@ -321,10 +328,10 @@ static void intel_enable_lvds(struct intel_atomic_state *state,
 
 	intel_de_rmw(dev_priv, lvds_encoder->reg, 0, LVDS_PORT_EN);
 
-	intel_de_rmw(dev_priv, PP_CONTROL(0), 0, PANEL_POWER_ON);
+	intel_de_rmw(dev_priv, PP_CONTROL(dev_priv, 0), 0, PANEL_POWER_ON);
 	intel_de_posting_read(dev_priv, lvds_encoder->reg);
 
-	if (intel_de_wait_for_set(dev_priv, PP_STATUS(0), PP_ON, 5000))
+	if (intel_de_wait_for_set(dev_priv, PP_STATUS(dev_priv, 0), PP_ON, 5000))
 		drm_err(&dev_priv->drm,
 			"timed out waiting for panel to power on\n");
 
@@ -339,8 +346,8 @@ static void intel_disable_lvds(struct intel_atomic_state *state,
 	struct intel_lvds_encoder *lvds_encoder = to_lvds_encoder(encoder);
 	struct drm_i915_private *dev_priv = to_i915(encoder->base.dev);
 
-	intel_de_rmw(dev_priv, PP_CONTROL(0), PANEL_POWER_ON, 0);
-	if (intel_de_wait_for_clear(dev_priv, PP_STATUS(0), PP_ON, 1000))
+	intel_de_rmw(dev_priv, PP_CONTROL(dev_priv, 0), PANEL_POWER_ON, 0);
+	if (intel_de_wait_for_clear(dev_priv, PP_STATUS(dev_priv, 0), PP_ON, 1000))
 		drm_err(&dev_priv->drm,
 			"timed out waiting for panel to power off\n");
 
@@ -379,28 +386,25 @@ static void intel_lvds_shutdown(struct intel_encoder *encoder)
 {
 	struct drm_i915_private *dev_priv = to_i915(encoder->base.dev);
 
-	if (intel_de_wait_for_clear(dev_priv, PP_STATUS(0), PP_CYCLE_DELAY_ACTIVE, 5000))
+	if (intel_de_wait_for_clear(dev_priv, PP_STATUS(dev_priv, 0), PP_CYCLE_DELAY_ACTIVE, 5000))
 		drm_err(&dev_priv->drm,
 			"timed out waiting for panel power cycle delay\n");
 }
 
 static enum drm_mode_status
 intel_lvds_mode_valid(struct drm_connector *_connector,
-		      struct drm_display_mode *mode)
+		      const struct drm_display_mode *mode)
 {
+	struct intel_display *display = to_intel_display(_connector->dev);
 	struct intel_connector *connector = to_intel_connector(_connector);
-	struct drm_i915_private *i915 = to_i915(connector->base.dev);
 	const struct drm_display_mode *fixed_mode =
 		intel_panel_fixed_mode(connector, mode);
-	int max_pixclk = to_i915(connector->base.dev)->max_dotclk_freq;
+	int max_pixclk = display->cdclk.max_dotclk_freq;
 	enum drm_mode_status status;
 
-	status = intel_cpu_transcoder_mode_valid(i915, mode);
+	status = intel_cpu_transcoder_mode_valid(display, mode);
 	if (status != MODE_OK)
 		return status;
-
-	if (mode->flags & DRM_MODE_FLAG_DBLSCAN)
-		return MODE_NO_DBLESCAN;
 
 	status = intel_panel_mode_valid(connector, mode);
 	if (status != MODE_OK)
@@ -465,7 +469,7 @@ static int intel_lvds_compute_config(struct intel_encoder *encoder,
 	if (adjusted_mode->flags & DRM_MODE_FLAG_DBLSCAN)
 		return -EINVAL;
 
-	ret = intel_panel_fitting(crtc_state, conn_state);
+	ret = intel_pfit_compute_config(crtc_state, conn_state);
 	if (ret)
 		return ret;
 
@@ -840,6 +844,7 @@ static void intel_lvds_add_properties(struct drm_connector *connector)
  */
 void intel_lvds_init(struct drm_i915_private *i915)
 {
+	struct intel_display *display = &i915->display;
 	struct intel_lvds_encoder *lvds_encoder;
 	struct intel_connector *connector;
 	const struct drm_edid *drm_edid;
@@ -874,7 +879,7 @@ void intel_lvds_init(struct drm_i915_private *i915)
 	}
 
 	ddc_pin = GMBUS_PIN_PANEL;
-	if (!intel_bios_is_lvds_present(i915, &ddc_pin)) {
+	if (!intel_bios_is_lvds_present(display, &ddc_pin)) {
 		if ((lvds & LVDS_PORT_EN) == 0) {
 			drm_dbg_kms(&i915->drm,
 				    "LVDS is not present in VBT\n");
@@ -900,7 +905,7 @@ void intel_lvds_init(struct drm_i915_private *i915)
 	drm_connector_init_with_ddc(&i915->drm, &connector->base,
 				    &intel_lvds_connector_funcs,
 				    DRM_MODE_CONNECTOR_LVDS,
-				    intel_gmbus_get_adapter(i915, ddc_pin));
+				    intel_gmbus_get_adapter(display, ddc_pin));
 
 	drm_encoder_init(&i915->drm, &encoder->base, &intel_lvds_enc_funcs,
 			 DRM_MODE_ENCODER_LVDS, "LVDS");
@@ -968,7 +973,7 @@ void intel_lvds_init(struct drm_i915_private *i915)
 	} else {
 		drm_edid = ERR_PTR(-ENOENT);
 	}
-	intel_bios_init_panel_late(i915, &connector->panel, NULL,
+	intel_bios_init_panel_late(display, &connector->panel, NULL,
 				   IS_ERR(drm_edid) ? NULL : drm_edid);
 
 	/* Try EDID first */

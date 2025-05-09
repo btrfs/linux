@@ -158,6 +158,7 @@
 /* LED_DRV bits */
 #define DP83867_LED_DRV_EN(x)	BIT((x) * 4)
 #define DP83867_LED_DRV_VAL(x)	BIT((x) * 4 + 1)
+#define DP83867_LED_POLARITY(x)	BIT((x) * 4 + 2)
 
 #define DP83867_LED_FN(idx, val)	(((val) & 0xf) << ((idx) * 4))
 #define DP83867_LED_FN_MASK(idx)	(0xf << ((idx) * 4))
@@ -1008,8 +1009,11 @@ static void dp83867_link_change_notify(struct phy_device *phydev)
 	}
 }
 
-static int dp83867_loopback(struct phy_device *phydev, bool enable)
+static int dp83867_loopback(struct phy_device *phydev, bool enable, int speed)
 {
+	if (enable && speed)
+		return -EOPNOTSUPP;
+
 	return phy_modify(phydev, MII_BMCR, BMCR_LOOPBACK,
 			  enable ? BMCR_LOOPBACK : 0);
 }
@@ -1152,6 +1156,26 @@ static int dp83867_led_hw_control_get(struct phy_device *phydev, u8 index,
 	return 0;
 }
 
+static int dp83867_led_polarity_set(struct phy_device *phydev, int index,
+				    unsigned long modes)
+{
+	/* Default active high */
+	u16 polarity = DP83867_LED_POLARITY(index);
+	u32 mode;
+
+	for_each_set_bit(mode, &modes, __PHY_LED_MODES_NUM) {
+		switch (mode) {
+		case PHY_LED_ACTIVE_LOW:
+			polarity = 0;
+			break;
+		default:
+			return -EINVAL;
+		}
+	}
+	return phy_modify(phydev, DP83867_LEDCR2,
+			  DP83867_LED_POLARITY(index), polarity);
+}
+
 static struct phy_driver dp83867_driver[] = {
 	{
 		.phy_id		= DP83867_PHY_ID,
@@ -1184,11 +1208,12 @@ static struct phy_driver dp83867_driver[] = {
 		.led_hw_is_supported = dp83867_led_hw_is_supported,
 		.led_hw_control_set = dp83867_led_hw_control_set,
 		.led_hw_control_get = dp83867_led_hw_control_get,
+		.led_polarity_set = dp83867_led_polarity_set,
 	},
 };
 module_phy_driver(dp83867_driver);
 
-static struct mdio_device_id __maybe_unused dp83867_tbl[] = {
+static const struct mdio_device_id __maybe_unused dp83867_tbl[] = {
 	{ DP83867_PHY_ID, 0xfffffff0 },
 	{ }
 };

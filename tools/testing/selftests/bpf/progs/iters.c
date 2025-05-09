@@ -5,8 +5,9 @@
 #include <linux/bpf.h>
 #include <bpf/bpf_helpers.h>
 #include "bpf_misc.h"
+#include "bpf_compiler.h"
 
-#define ARRAY_SIZE(x) (int)(sizeof(x) / sizeof((x)[0]))
+#define unlikely(x)	__builtin_expect(!!(x), 0)
 
 static volatile int zero = 0;
 
@@ -78,8 +79,8 @@ int iter_err_unsafe_asm_loop(const void *ctx)
 		"*(u32 *)(r1 + 0) = r6;" /* invalid */
 		:
 		: [it]"r"(&it),
-		  [small_arr]"p"(small_arr),
-		  [zero]"p"(zero),
+		  [small_arr]"r"(small_arr),
+		  [zero]"r"(zero),
 		  __imm(bpf_iter_num_new),
 		  __imm(bpf_iter_num_next),
 		  __imm(bpf_iter_num_destroy)
@@ -183,7 +184,7 @@ int iter_pragma_unroll_loop(const void *ctx)
 	MY_PID_GUARD();
 
 	bpf_iter_num_new(&it, 0, 2);
-#pragma nounroll
+	__pragma_loop_no_unroll
 	for (i = 0; i < 3; i++) {
 		v = bpf_iter_num_next(&it);
 		bpf_printk("ITER_BASIC: E3 VAL: i=%d v=%d", i, v ? *v : -1);
@@ -238,7 +239,7 @@ int iter_multiple_sequential_loops(const void *ctx)
 	bpf_iter_num_destroy(&it);
 
 	bpf_iter_num_new(&it, 0, 2);
-#pragma nounroll
+	__pragma_loop_no_unroll
 	for (i = 0; i < 3; i++) {
 		v = bpf_iter_num_next(&it);
 		bpf_printk("ITER_BASIC: E3 VAL: i=%d v=%d", i, v ? *v : -1);
@@ -525,11 +526,11 @@ int iter_subprog_iters(const void *ctx)
 }
 
 struct {
-	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__uint(type, BPF_MAP_TYPE_HASH);
 	__type(key, int);
 	__type(value, int);
 	__uint(max_entries, 1000);
-} arr_map SEC(".maps");
+} hash_map SEC(".maps");
 
 SEC("?raw_tp")
 __failure __msg("invalid mem access 'scalar'")
@@ -540,7 +541,7 @@ int iter_err_too_permissive1(const void *ctx)
 
 	MY_PID_GUARD();
 
-	map_val = bpf_map_lookup_elem(&arr_map, &key);
+	map_val = bpf_map_lookup_elem(&hash_map, &key);
 	if (!map_val)
 		return 0;
 
@@ -562,12 +563,12 @@ int iter_err_too_permissive2(const void *ctx)
 
 	MY_PID_GUARD();
 
-	map_val = bpf_map_lookup_elem(&arr_map, &key);
+	map_val = bpf_map_lookup_elem(&hash_map, &key);
 	if (!map_val)
 		return 0;
 
 	bpf_repeat(1000000) {
-		map_val = bpf_map_lookup_elem(&arr_map, &key);
+		map_val = bpf_map_lookup_elem(&hash_map, &key);
 	}
 
 	*map_val = 123;
@@ -586,7 +587,7 @@ int iter_err_too_permissive3(const void *ctx)
 	MY_PID_GUARD();
 
 	bpf_repeat(1000000) {
-		map_val = bpf_map_lookup_elem(&arr_map, &key);
+		map_val = bpf_map_lookup_elem(&hash_map, &key);
 		found = true;
 	}
 
@@ -607,7 +608,7 @@ int iter_tricky_but_fine(const void *ctx)
 	MY_PID_GUARD();
 
 	bpf_repeat(1000000) {
-		map_val = bpf_map_lookup_elem(&arr_map, &key);
+		map_val = bpf_map_lookup_elem(&hash_map, &key);
 		if (map_val) {
 			found = true;
 			break;
@@ -672,7 +673,7 @@ static __noinline void fill(struct bpf_iter_num *it, int *arr, __u32 n, int mul)
 
 static __noinline int sum(struct bpf_iter_num *it, int *arr, __u32 n)
 {
-	int *t, i, sum = 0;;
+	int *t, i, sum = 0;
 
 	while ((t = bpf_iter_num_next(it))) {
 		i = *t;
@@ -1176,6 +1177,122 @@ __naked int loop_state_deps2(void)
 }
 
 SEC("?raw_tp")
+__failure
+__msg("math between fp pointer and register with unbounded")
+__flag(BPF_F_TEST_STATE_FREQ)
+__naked int loop_state_deps3(void)
+{
+	/* This is equivalent to a C program below.
+	 *
+	 *   if (random() != 24) {       // assume false branch is placed first
+	 *     i = iter_new();           // fp[-8]
+	 *     while (iter_next(i));
+	 *     iter_destroy(i);
+	 *     return;
+	 *   }
+	 *
+	 *   for (i = 10; i > 0; i--);   // increase dfs_depth for child states
+	 *
+	 *   i = iter_new();             // fp[-8]
+	 *   b = -24;                    // r8
+	 *   for (;;) {                  // checkpoint (L)
+	 *     if (iter_next(i))         // checkpoint (N)
+	 *       break;
+	 *     if (random() == 77) {     // assume false branch is placed first
+	 *       *(u64 *)(r10 + b) = 7;  // this is not safe when b == -25
+	 *       iter_destroy(i);
+	 *       return;
+	 *     }
+	 *     if (random() == 42) {     // assume false branch is placed first
+	 *       b = -25;
+	 *     }
+	 *   }
+	 *   iter_destroy(i);
+	 *
+	 * In case of a buggy verifier first loop might poison
+	 * env->cur_state->loop_entry with a state having 0 branches
+	 * and small dfs_depth. This would trigger NOT_EXACT states
+	 * comparison for some states within second loop.
+	 * Specifically, checkpoint (L) might be problematic if:
+	 * - branch with '*(u64 *)(r10 + b) = 7' is not explored yet;
+	 * - checkpoint (L) is first reached in state {b=-24};
+	 * - traversal is pruned at checkpoint (N) setting checkpoint's (L)
+	 *   branch count to 0, thus making it eligible for use in pruning;
+	 * - checkpoint (L) is next reached in state {b=-25},
+	 *   this would cause NOT_EXACT comparison with a state {b=-24}
+	 *   while 'b' is not marked precise yet.
+	 */
+	asm volatile (
+		"call %[bpf_get_prandom_u32];"
+		"if r0 == 24 goto 2f;"
+		"r1 = r10;"
+		"r1 += -8;"
+		"r2 = 0;"
+		"r3 = 5;"
+		"call %[bpf_iter_num_new];"
+	"1:"
+		"r1 = r10;"
+		"r1 += -8;"
+		"call %[bpf_iter_num_next];"
+		"if r0 != 0 goto 1b;"
+		"r1 = r10;"
+		"r1 += -8;"
+		"call %[bpf_iter_num_destroy];"
+		"r0 = 0;"
+		"exit;"
+	"2:"
+		/* loop to increase dfs_depth */
+		"r0 = 10;"
+	"3:"
+		"r0 -= 1;"
+		"if r0 != 0 goto 3b;"
+		/* end of loop */
+		"r1 = r10;"
+		"r1 += -8;"
+		"r2 = 0;"
+		"r3 = 10;"
+		"call %[bpf_iter_num_new];"
+		"r8 = -24;"
+	"main_loop_%=:"
+		"r1 = r10;"
+		"r1 += -8;"
+		"call %[bpf_iter_num_next];"
+		"if r0 == 0 goto main_loop_end_%=;"
+		/* first if */
+		"call %[bpf_get_prandom_u32];"
+		"if r0 == 77 goto unsafe_write_%=;"
+		/* second if */
+		"call %[bpf_get_prandom_u32];"
+		"if r0 == 42 goto poison_r8_%=;"
+		/* iterate */
+		"goto main_loop_%=;"
+	"main_loop_end_%=:"
+		"r1 = r10;"
+		"r1 += -8;"
+		"call %[bpf_iter_num_destroy];"
+		"r0 = 0;"
+		"exit;"
+
+	"unsafe_write_%=:"
+		"r0 = r10;"
+		"r0 += r8;"
+		"r1 = 7;"
+		"*(u64 *)(r0 + 0) = r1;"
+		"goto main_loop_end_%=;"
+
+	"poison_r8_%=:"
+		"r8 = -25;"
+		"goto main_loop_%=;"
+		:
+		: __imm(bpf_get_prandom_u32),
+		  __imm(bpf_iter_num_new),
+		  __imm(bpf_iter_num_next),
+		  __imm(bpf_iter_num_destroy)
+		: __clobber_all
+	);
+}
+
+SEC("?raw_tp")
 __success
 __naked int triple_continue(void)
 {
@@ -1431,6 +1548,107 @@ int iter_arr_with_actual_elem_count(const void *ctx)
 	}
 
 	return sum;
+}
+
+__u32 upper, select_n, result;
+__u64 global;
+
+static __noinline bool nest_2(char *str)
+{
+	/* some insns (including branch insns) to ensure stacksafe() is triggered
+	 * in nest_2(). This way, stacksafe() can compare frame associated with nest_1().
+	 */
+	if (str[0] == 't')
+		return true;
+	if (str[1] == 'e')
+		return true;
+	if (str[2] == 's')
+		return true;
+	if (str[3] == 't')
+		return true;
+	return false;
+}
+
+static __noinline bool nest_1(int n)
+{
+	/* case 0: allocate stack, case 1: no allocate stack */
+	switch (n) {
+	case 0: {
+		char comm[16];
+
+		if (bpf_get_current_comm(comm, 16))
+			return false;
+		return nest_2(comm);
+	}
+	case 1:
+		return nest_2((char *)&global);
+	default:
+		return false;
+	}
+}
+
+SEC("raw_tp")
+__success
+int iter_subprog_check_stacksafe(const void *ctx)
+{
+	long i;
+
+	bpf_for(i, 0, upper) {
+		if (!nest_1(select_n)) {
+			result = 1;
+			return 0;
+		}
+	}
+
+	result = 2;
+	return 0;
+}
+
+struct bpf_iter_num global_it;
+
+SEC("raw_tp")
+__failure __msg("arg#0 expected pointer to an iterator on stack")
+int iter_new_bad_arg(const void *ctx)
+{
+	bpf_iter_num_new(&global_it, 0, 1);
+	return 0;
+}
+
+SEC("raw_tp")
+__failure __msg("arg#0 expected pointer to an iterator on stack")
+int iter_next_bad_arg(const void *ctx)
+{
+	bpf_iter_num_next(&global_it);
+	return 0;
+}
+
+SEC("raw_tp")
+__failure __msg("arg#0 expected pointer to an iterator on stack")
+int iter_destroy_bad_arg(const void *ctx)
+{
+	bpf_iter_num_destroy(&global_it);
+	return 0;
+}
+
+SEC("raw_tp")
+__success
+int clean_live_states(const void *ctx)
+{
+	char buf[1];
+	int i, j, k, l, m, n, o;
+
+	bpf_for(i, 0, 10)
+	bpf_for(j, 0, 10)
+	bpf_for(k, 0, 10)
+	bpf_for(l, 0, 10)
+	bpf_for(m, 0, 10)
+	bpf_for(n, 0, 10)
+	bpf_for(o, 0, 10) {
+		if (unlikely(bpf_get_prandom_u32()))
+			buf[0] = 42;
+		bpf_printk("%s", buf);
+	}
+	return 0;
 }
 
 char _license[] SEC("license") = "GPL";

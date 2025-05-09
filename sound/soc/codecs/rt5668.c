@@ -2010,10 +2010,10 @@ static int rt5668_set_dai_fmt(struct snd_soc_dai *dai, unsigned int fmt)
 	unsigned int reg_val = 0, tdm_ctrl = 0;
 
 	switch (fmt & SND_SOC_DAIFMT_MASTER_MASK) {
-	case SND_SOC_DAIFMT_CBM_CFM:
+	case SND_SOC_DAIFMT_CBP_CFP:
 		rt5668->master[dai->id] = 1;
 		break;
-	case SND_SOC_DAIFMT_CBS_CFS:
+	case SND_SOC_DAIFMT_CBC_CFC:
 		rt5668->master[dai->id] = 0;
 		break;
 	default:
@@ -2378,7 +2378,7 @@ static const struct regmap_config rt5668_regmap = {
 };
 
 static const struct i2c_device_id rt5668_i2c_id[] = {
-	{"rt5668b", 0},
+	{"rt5668b"},
 	{}
 };
 MODULE_DEVICE_TABLE(i2c, rt5668_i2c_id);
@@ -2580,7 +2580,7 @@ static int rt5668_i2c_probe(struct i2c_client *i2c)
 			rt5668_irq, IRQF_TRIGGER_RISING | IRQF_TRIGGER_FALLING
 			| IRQF_ONESHOT, "rt5668", rt5668);
 		if (ret)
-			dev_err(&i2c->dev, "Failed to reguest IRQ: %d\n", ret);
+			dev_err(&i2c->dev, "Failed to request IRQ: %d\n", ret);
 
 	}
 
@@ -2598,15 +2598,15 @@ static void rt5668_i2c_shutdown(struct i2c_client *client)
 #ifdef CONFIG_OF
 static const struct of_device_id rt5668_of_match[] = {
 	{.compatible = "realtek,rt5668b"},
-	{},
+	{ }
 };
 MODULE_DEVICE_TABLE(of, rt5668_of_match);
 #endif
 
 #ifdef CONFIG_ACPI
 static const struct acpi_device_id rt5668_acpi_match[] = {
-	{"10EC5668", 0,},
-	{},
+	{ "10EC5668" },
+	{ }
 };
 MODULE_DEVICE_TABLE(acpi, rt5668_acpi_match);
 #endif

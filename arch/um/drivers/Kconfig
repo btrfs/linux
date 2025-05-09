@@ -297,26 +297,6 @@ config UML_NET_MCAST
 
 	  If unsure, say N.
 
-config UML_NET_PCAP
-	bool "pcap transport (obsolete)"
-	depends on UML_NET
-	depends on !MODVERSIONS
-	select MAY_HAVE_RUNTIME_DEPS
-	help
-	  The pcap transport makes a pcap packet stream on the host look
-	  like an ethernet device inside UML.  This is useful for making
-	  UML act as a network monitor for the host.  You must have libcap
-	  installed in order to build the pcap transport into UML.
-
-	  For more information, see
-	  <http://user-mode-linux.sourceforge.net/old/networking.html>  That site
-	  has examples of the UML command line to use to enable this option.
-
-	  NOTE: THIS TRANSPORT IS DEPRECATED AND WILL BE REMOVED SOON!!! Please
-	  migrate to UML_NET_VECTOR.
-
-	  If unsure, say N.
-
 config UML_NET_SLIRP
 	bool "SLiRP transport (obsolete)"
 	depends on UML_NET
@@ -365,15 +345,19 @@ config UML_RTC
 	  by providing a fake RTC clock that causes a wakeup at the right
 	  time.
 
-config UML_PCI_OVER_VIRTIO
-	bool "Enable PCI over VIRTIO device simulation"
-	# in theory, just VIRTIO is enough, but that causes recursion
-	depends on VIRTIO_UML
+config UML_PCI
+	bool
 	select FORCE_PCI
 	select UML_IOMEM_EMULATION
 	select UML_DMA_EMULATION
 	select PCI_MSI
 	select PCI_LOCKLESS_CONFIG
+
+config UML_PCI_OVER_VIRTIO
+	bool "Enable PCI over VIRTIO device simulation"
+	# in theory, just VIRTIO is enough, but that causes recursion
+	depends on VIRTIO_UML
+	select UML_PCI
 
 config UML_PCI_OVER_VIRTIO_DEVICE_ID
 	int "set the virtio device ID for PCI emulation"

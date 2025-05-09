@@ -18,9 +18,8 @@ static int group_cmp(const void *_l, const void *_r)
 		strncmp(l->label, r->label, sizeof(l->label));
 }
 
-static int bch2_sb_disk_groups_validate(struct bch_sb *sb,
-					struct bch_sb_field *f,
-					struct printbuf *err)
+static int bch2_sb_disk_groups_validate(struct bch_sb *sb, struct bch_sb_field *f,
+				enum bch_validate_flags flags, struct printbuf *err)
 {
 	struct bch_sb_field_disk_groups *groups =
 		field_to_type(f, disk_groups);
@@ -177,7 +176,7 @@ int bch2_sb_disk_groups_to_cpu(struct bch_fs *c)
 		struct bch_member m = bch2_sb_member_get(c->disk_sb.sb, i);
 		struct bch_disk_group_cpu *dst;
 
-		if (!bch2_member_exists(&m))
+		if (!bch2_member_alive(&m))
 			continue;
 
 		g = BCH_MEMBER_GROUP(&m);
@@ -471,23 +470,22 @@ inval:
 
 int __bch2_dev_group_set(struct bch_fs *c, struct bch_dev *ca, const char *name)
 {
-	struct bch_member *mi;
-	int ret, v = -1;
+	lockdep_assert_held(&c->sb_lock);
 
-	if (!strlen(name) || !strcmp(name, "none"))
-		return 0;
 
-	v = bch2_disk_path_find_or_create(&c->disk_sb, name);
-	if (v < 0)
-		return v;
+	if (!strlen(name) || !strcmp(name, "none")) {
+		struct bch_member *mi = bch2_members_v2_get_mut(c->disk_sb.sb, ca->dev_idx);
+		SET_BCH_MEMBER_GROUP(mi, 0);
+	} else {
+		int v = bch2_disk_path_find_or_create(&c->disk_sb, name);
+		if (v < 0)
+			return v;
 
-	ret = bch2_sb_disk_groups_to_cpu(c);
-	if (ret)
-		return ret;
+		struct bch_member *mi = bch2_members_v2_get_mut(c->disk_sb.sb, ca->dev_idx);
+		SET_BCH_MEMBER_GROUP(mi, v + 1);
+	}
 
-	mi = bch2_members_v2_get_mut(c->disk_sb.sb, ca->dev_idx);
-	SET_BCH_MEMBER_GROUP(mi, v + 1);
-	return 0;
+	return bch2_sb_disk_groups_to_cpu(c);
 }
 
 int bch2_dev_group_set(struct bch_fs *c, struct bch_dev *ca, const char *name)
@@ -512,7 +510,7 @@ int bch2_opt_target_parse(struct bch_fs *c, const char *val, u64 *res,
 		return -EINVAL;
 
 	if (!c)
-		return 0;
+		return -BCH_ERR_option_needs_open_fs;
 
 	if (!strlen(val) || !strcmp(val, "none")) {
 		*res = 0;
@@ -523,7 +521,7 @@ int bch2_opt_target_parse(struct bch_fs *c, const char *val, u64 *res,
 	ca = bch2_dev_lookup(c, val);
 	if (!IS_ERR(ca)) {
 		*res = dev_to_target(ca->dev_idx);
-		percpu_ref_put(&ca->ref);
+		bch2_dev_put(ca);
 		return 0;
 	}
 
@@ -556,9 +554,9 @@ void bch2_target_to_text(struct printbuf *out, struct bch_fs *c, unsigned v)
 			? rcu_dereference(c->devs[t.dev])
 			: NULL;
 
-		if (ca && percpu_ref_tryget(&ca->io_ref)) {
+		if (ca && percpu_ref_tryget(&ca->io_ref[READ])) {
 			prt_printf(out, "/dev/%s", ca->name);
-			percpu_ref_put(&ca->io_ref);
+			percpu_ref_put(&ca->io_ref[READ]);
 		} else if (ca) {
 			prt_printf(out, "offline device %u", t.dev);
 		} else {
@@ -588,7 +586,7 @@ static void bch2_target_to_text_sb(struct printbuf *out, struct bch_sb *sb, unsi
 	case TARGET_DEV: {
 		struct bch_member m = bch2_sb_member_get(sb, t.dev);
 
-		if (bch2_dev_exists(sb, t.dev)) {
+		if (bch2_member_exists(sb, t.dev)) {
 			prt_printf(out, "Device ");
 			pr_uuid(out, m.uuid.b);
 			prt_printf(out, " (%u)", t.dev);

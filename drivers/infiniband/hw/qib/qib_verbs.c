@@ -1551,7 +1551,7 @@ int qib_register_ib_device(struct qib_devdata *dd)
 	ibdev->dev.parent = &dd->pcidev->dev;
 
 	snprintf(ibdev->node_desc, sizeof(ibdev->node_desc),
-		 "Intel Infiniband HCA %s", init_utsname()->nodename);
+		 "Intel Infiniband HCA %.42s", init_utsname()->nodename);
 
 	/*
 	 * Fill in rvt info object.
@@ -1655,7 +1655,7 @@ void qib_unregister_ib_device(struct qib_devdata *dd)
 	if (!list_empty(&dev->memwait))
 		qib_dev_err(dd, "memwait list not empty!\n");
 
-	del_timer_sync(&dev->mem_timer);
+	timer_delete_sync(&dev->mem_timer);
 	while (!list_empty(&dev->txreq_free)) {
 		struct list_head *l = dev->txreq_free.next;
 		struct qib_verbs_txreq *tx;

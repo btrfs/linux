@@ -52,6 +52,9 @@ properties:
     minItems: 1
     maxItems: 2
 
+  interrupts:
+    maxItems: 1
+
   m25p,fast-read:
     type: boolean
     description:
@@ -92,6 +95,10 @@ properties:
       A GPIO line connected to the RESET (active low) signal of the device.
       If "broken-flash-reset" is present then having this property does not
       make any difference.
+
+  vcc-supply:
+    description:
+      Supply for the SPI NOR power.
 
   spi-cpol: true
   spi-cpha: true
