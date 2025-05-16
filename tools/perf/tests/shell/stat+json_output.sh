@@ -105,7 +105,7 @@ check_per_thread()
 		echo "[Skip] paranoia and not root"
 		return
 	fi
-	perf stat -j --per-thread -a -o "${stat_output}" true
+	perf stat -j --per-thread -p $$ -o "${stat_output}" true
 	$PYTHON $pythonchecker --per-thread --file "${stat_output}"
 	echo "[Success]"
 }
@@ -119,6 +119,18 @@ check_per_cache_instance()
 		return
 	fi
 	perf stat -j --per-cache -a true 2>&1 | $PYTHON $pythonchecker --per-cache
+	echo "[Success]"
+}
+
+check_per_cluster()
+{
+	echo -n "Checking json output: per cluster "
+	if ParanoidAndNotRoot 0
+	then
+		echo "[Skip] paranoia and not root"
+		return
+	fi
+	perf stat -j --per-cluster -a true 2>&1 | $PYTHON $pythonchecker --per-cluster
 	echo "[Success]"
 }
 
@@ -161,6 +173,14 @@ check_per_socket()
 	echo "[Success]"
 }
 
+check_metric_only()
+{
+	echo -n "Checking json output: metric only "
+	perf stat -j --metric-only -e instructions,cycles -o "${stat_output}" true
+	$PYTHON $pythonchecker --metric-only --file "${stat_output}"
+	echo "[Success]"
+}
+
 # The perf stat options for per-socket, per-core, per-die
 # and -A ( no_aggr mode ) uses the info fetched from this
 # directory: "/sys/devices/system/cpu/cpu*/topology". For
@@ -195,11 +215,13 @@ check_interval
 check_event
 check_per_thread
 check_per_node
+check_metric_only
 if [ $skip_test -ne 1 ]
 then
 	check_system_wide_no_aggr
 	check_per_core
 	check_per_cache_instance
+	check_per_cluster
 	check_per_die
 	check_per_socket
 else

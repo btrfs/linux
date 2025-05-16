@@ -6,11 +6,6 @@
 #include <asm/pgtable_types.h>
 #include <uapi/asm/boot.h>
 
-/* Physical address where kernel should be loaded. */
-#define LOAD_PHYSICAL_ADDR ((CONFIG_PHYSICAL_START \
-				+ (CONFIG_PHYSICAL_ALIGN - 1)) \
-				& ~(CONFIG_PHYSICAL_ALIGN - 1))
-
 /* Minimum kernel alignment, as a power of two */
 #ifdef CONFIG_X86_64
 # define MIN_KERNEL_ALIGN_LG2	PMD_SHIFT
@@ -79,8 +74,9 @@
 # define BOOT_STACK_SIZE	0x1000
 #endif
 
-#ifndef __ASSEMBLY__
+#ifndef __ASSEMBLER__
 extern unsigned int output_len;
+extern const unsigned long kernel_text_size;
 extern const unsigned long kernel_total_size;
 
 unsigned long decompress_kernel(unsigned char *outbuf, unsigned long virt_addr,

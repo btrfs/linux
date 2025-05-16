@@ -1117,19 +1117,6 @@ static int bcm2835_spi_prepare_message(struct spi_controller *ctlr,
 	struct spi_device *spi = msg->spi;
 	struct bcm2835_spi *bs = spi_controller_get_devdata(ctlr);
 	struct bcm2835_spidev *target = spi_get_ctldata(spi);
-	int ret;
-
-	if (ctlr->can_dma) {
-		/*
-		 * DMA transfers are limited to 16 bit (0 to 65535 bytes) by
-		 * the SPI HW due to DLEN. Split up transfers (32-bit FIFO
-		 * aligned) if the limit is exceeded.
-		 */
-		ret = spi_split_transfers_maxsize(ctlr, msg, 65532,
-						  GFP_KERNEL | GFP_DMA);
-		if (ret)
-			return ret;
-	}
 
 	/*
 	 * Set up clock polarity before spi_transfer_one_message() asserts
@@ -1175,7 +1162,8 @@ static void bcm2835_spi_cleanup(struct spi_device *spi)
 				 sizeof(u32),
 				 DMA_TO_DEVICE);
 
-	gpiod_put(bs->cs_gpio);
+	if (!IS_ERR(bs->cs_gpio))
+		gpiod_put(bs->cs_gpio);
 	spi_set_csgpiod(spi, 0, NULL);
 
 	kfree(target);
@@ -1219,13 +1207,31 @@ static int bcm2835_spi_setup_dma(struct spi_controller *ctlr,
 	return 0;
 }
 
+static size_t bcm2835_spi_max_transfer_size(struct spi_device *spi)
+{
+	/*
+	 * DMA transfers are limited to 16 bit (0 to 65535 bytes) by
+	 * the SPI HW due to DLEN. Split up transfers (32-bit FIFO
+	 * aligned) if the limit is exceeded.
+	 */
+	if (spi->controller->can_dma)
+		return 65532;
+
+	return SIZE_MAX;
+}
+
 static int bcm2835_spi_setup(struct spi_device *spi)
 {
 	struct spi_controller *ctlr = spi->controller;
 	struct bcm2835_spi *bs = spi_controller_get_devdata(ctlr);
 	struct bcm2835_spidev *target = spi_get_ctldata(spi);
 	struct gpiod_lookup_table *lookup __free(kfree) = NULL;
-	int ret;
+	const char *pinctrl_compats[] = {
+		"brcm,bcm2835-gpio",
+		"brcm,bcm2711-gpio",
+		"brcm,bcm7211-gpio",
+	};
+	int ret, i;
 	u32 cs;
 
 	if (!target) {
@@ -1290,6 +1296,14 @@ static int bcm2835_spi_setup(struct spi_device *spi)
 		goto err_cleanup;
 	}
 
+	for (i = 0; i < ARRAY_SIZE(pinctrl_compats); i++) {
+		if (of_find_compatible_node(NULL, NULL, pinctrl_compats[i]))
+			break;
+	}
+
+	if (i == ARRAY_SIZE(pinctrl_compats))
+		return 0;
+
 	/*
 	 * TODO: The code below is a slightly better alternative to the utter
 	 * abuse of the GPIO API that I found here before. It creates a
@@ -1348,6 +1362,7 @@ static int bcm2835_spi_probe(struct platform_device *pdev)
 	ctlr->mode_bits = BCM2835_SPI_MODE_BITS;
 	ctlr->bits_per_word_mask = SPI_BPW_MASK(8);
 	ctlr->num_chipselect = 3;
+	ctlr->max_transfer_size = bcm2835_spi_max_transfer_size;
 	ctlr->setup = bcm2835_spi_setup;
 	ctlr->cleanup = bcm2835_spi_cleanup;
 	ctlr->transfer_one = bcm2835_spi_transfer_one;
@@ -1434,7 +1449,7 @@ static struct platform_driver bcm2835_spi_driver = {
 		.of_match_table	= bcm2835_spi_match,
 	},
 	.probe		= bcm2835_spi_probe,
-	.remove_new	= bcm2835_spi_remove,
+	.remove		= bcm2835_spi_remove,
 	.shutdown	= bcm2835_spi_remove,
 };
 module_platform_driver(bcm2835_spi_driver);

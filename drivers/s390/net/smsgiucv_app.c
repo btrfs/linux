@@ -23,6 +23,7 @@
 #include <linux/spinlock.h>
 #include <linux/workqueue.h>
 #include <net/iucv/iucv.h>
+#include <asm/machine.h>
 #include "smsgiucv.h"
 
 /* prefix used for SMSG registration */
@@ -153,28 +154,17 @@ static int __init smsgiucv_app_init(void)
 	struct device_driver *smsgiucv_drv;
 	int rc;
 
-	if (!MACHINE_IS_VM)
+	if (!machine_is_vm())
 		return -ENODEV;
 
-	smsg_app_dev = kzalloc(sizeof(*smsg_app_dev), GFP_KERNEL);
+	smsgiucv_drv = driver_find(SMSGIUCV_DRV_NAME, &iucv_bus);
+	if (!smsgiucv_drv)
+		return -ENODEV;
+
+	smsg_app_dev = iucv_alloc_device(NULL, smsgiucv_drv, NULL, KMSG_COMPONENT);
 	if (!smsg_app_dev)
 		return -ENOMEM;
 
-	smsgiucv_drv = driver_find(SMSGIUCV_DRV_NAME, &iucv_bus);
-	if (!smsgiucv_drv) {
-		kfree(smsg_app_dev);
-		return -ENODEV;
-	}
-
-	rc = dev_set_name(smsg_app_dev, KMSG_COMPONENT);
-	if (rc) {
-		kfree(smsg_app_dev);
-		goto fail;
-	}
-	smsg_app_dev->bus = &iucv_bus;
-	smsg_app_dev->parent = iucv_root;
-	smsg_app_dev->release = (void (*)(struct device *)) kfree;
-	smsg_app_dev->driver = smsgiucv_drv;
 	rc = device_register(smsg_app_dev);
 	if (rc) {
 		put_device(smsg_app_dev);

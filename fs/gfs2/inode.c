@@ -750,6 +750,7 @@ static int gfs2_create_inode(struct inode *dir, struct dentry *dentry,
 	if (error)
 		goto fail_free_inode;
 	gfs2_cancel_delete_work(io_gl);
+	io_gl->gl_no_formal_ino = ip->i_no_formal_ino;
 
 retry:
 	error = insert_inode_locked4(inode, ip->i_no_addr, iget_test, &ip->i_no_addr);
@@ -1247,14 +1248,15 @@ static int gfs2_symlink(struct mnt_idmap *idmap, struct inode *dir,
  * @dentry: The dentry of the new directory
  * @mode: The mode of the new directory
  *
- * Returns: errno
+ * Returns: the dentry, or ERR_PTR(errno)
  */
 
-static int gfs2_mkdir(struct mnt_idmap *idmap, struct inode *dir,
-		      struct dentry *dentry, umode_t mode)
+static struct dentry *gfs2_mkdir(struct mnt_idmap *idmap, struct inode *dir,
+				 struct dentry *dentry, umode_t mode)
 {
 	unsigned dsize = gfs2_max_stuffed_size(GFS2_I(dir));
-	return gfs2_create_inode(dir, dentry, NULL, S_IFDIR | mode, 0, NULL, dsize, 0);
+
+	return ERR_PTR(gfs2_create_inode(dir, dentry, NULL, S_IFDIR | mode, 0, NULL, dsize, 0));
 }
 
 /**
@@ -1882,10 +1884,10 @@ int gfs2_permission(struct mnt_idmap *idmap, struct inode *inode,
 		WARN_ON_ONCE(!may_not_block);
 		return -ECHILD;
         }
-	if (gfs2_glock_is_locked_by_me(ip->i_gl) == NULL) {
-		int noblock = may_not_block ? GL_NOBLOCK : 0;
-		error = gfs2_glock_nq_init(ip->i_gl, LM_ST_SHARED,
-					   LM_FLAG_ANY | noblock, &i_gh);
+	if (gfs2_glock_is_locked_by_me(gl) == NULL) {
+		if (may_not_block)
+			return -ECHILD;
+		error = gfs2_glock_nq_init(gl, LM_ST_SHARED, LM_FLAG_ANY, &i_gh);
 		if (error)
 			return error;
 	}

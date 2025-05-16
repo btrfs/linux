@@ -19,11 +19,12 @@
 #define __page_to_pfn(page)	((unsigned long)((page) - mem_map) + \
 				 ARCH_PFN_OFFSET)
 
+/* avoid <linux/mm.h> include hell */
+extern unsigned long max_mapnr;
+
 #ifndef pfn_valid
 static inline int pfn_valid(unsigned long pfn)
 {
-	/* avoid <linux/mm.h> include hell */
-	extern unsigned long max_mapnr;
 	unsigned long pfn_offset = ARCH_PFN_OFFSET;
 
 	return pfn >= pfn_offset && (pfn - pfn_offset) < max_mapnr;
@@ -63,6 +64,19 @@ static inline int pfn_valid(unsigned long pfn)
 
 #define page_to_pfn __page_to_pfn
 #define pfn_to_page __pfn_to_page
+
+#ifdef CONFIG_DEBUG_VIRTUAL
+#define page_to_phys(page)						\
+({									\
+	unsigned long __pfn = page_to_pfn(page);			\
+									\
+	WARN_ON_ONCE(!pfn_valid(__pfn));				\
+	PFN_PHYS(__pfn);						\
+})
+#else
+#define page_to_phys(page)	PFN_PHYS(page_to_pfn(page))
+#endif /* CONFIG_DEBUG_VIRTUAL */
+#define phys_to_page(phys)	pfn_to_page(PHYS_PFN(phys))
 
 #endif /* __ASSEMBLY__ */
 

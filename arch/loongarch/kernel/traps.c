@@ -53,6 +53,32 @@
 
 #include "access-helper.h"
 
+void *exception_table[EXCCODE_INT_START] = {
+	[0 ... EXCCODE_INT_START - 1] = handle_reserved,
+
+	[EXCCODE_TLBI]		= handle_tlb_load,
+	[EXCCODE_TLBL]		= handle_tlb_load,
+	[EXCCODE_TLBS]		= handle_tlb_store,
+	[EXCCODE_TLBM]		= handle_tlb_modify,
+	[EXCCODE_TLBNR]		= handle_tlb_protect,
+	[EXCCODE_TLBNX]		= handle_tlb_protect,
+	[EXCCODE_TLBPE]		= handle_tlb_protect,
+	[EXCCODE_ADE]		= handle_ade,
+	[EXCCODE_ALE]		= handle_ale,
+	[EXCCODE_BCE]		= handle_bce,
+	[EXCCODE_SYS]		= handle_sys,
+	[EXCCODE_BP]		= handle_bp,
+	[EXCCODE_INE]		= handle_ri,
+	[EXCCODE_IPE]		= handle_ri,
+	[EXCCODE_FPDIS]		= handle_fpu,
+	[EXCCODE_LSXDIS]	= handle_lsx,
+	[EXCCODE_LASXDIS]	= handle_lasx,
+	[EXCCODE_FPE]		= handle_fpe,
+	[EXCCODE_WATCH]		= handle_watch,
+	[EXCCODE_BTDIS]		= handle_lbt,
+};
+EXPORT_SYMBOL_GPL(exception_table);
+
 static void show_backtrace(struct task_struct *task, const struct pt_regs *regs,
 			   const char *loglvl, bool user)
 {
@@ -527,7 +553,11 @@ asmlinkage void noinstr do_ale(struct pt_regs *regs)
 	die_if_kernel("Kernel ale access", regs);
 	force_sig_fault(SIGBUS, BUS_ADRALN, (void __user *)regs->csr_badvaddr);
 #else
+	bool pie = regs_irqs_disabled(regs);
 	unsigned int *pc;
+
+	if (!pie)
+		local_irq_enable();
 
 	perf_sw_event(PERF_COUNT_SW_ALIGNMENT_FAULTS, 1, regs, regs->csr_badvaddr);
 
@@ -553,6 +583,8 @@ sigbus:
 	die_if_kernel("Kernel ale access", regs);
 	force_sig_fault(SIGBUS, BUS_ADRALN, (void __user *)regs->csr_badvaddr);
 out:
+	if (!pie)
+		local_irq_disable();
 #endif
 	irqentry_exit(regs, state);
 }
@@ -566,29 +598,37 @@ int is_valid_bugaddr(unsigned long addr)
 
 static void bug_handler(struct pt_regs *regs)
 {
+	if (user_mode(regs)) {
+		force_sig(SIGTRAP);
+		return;
+	}
+
 	switch (report_bug(regs->csr_era, regs)) {
 	case BUG_TRAP_TYPE_BUG:
-	case BUG_TRAP_TYPE_NONE:
-		die_if_kernel("Oops - BUG", regs);
-		force_sig(SIGTRAP);
+		die("Oops - BUG", regs);
 		break;
 
 	case BUG_TRAP_TYPE_WARN:
 		/* Skip the BUG instruction and continue */
 		regs->csr_era += LOONGARCH_INSN_SIZE;
 		break;
+
+	default:
+		if (!fixup_exception(regs))
+			die("Oops - BUG", regs);
 	}
 }
 
 asmlinkage void noinstr do_bce(struct pt_regs *regs)
 {
 	bool user = user_mode(regs);
+	bool pie = regs_irqs_disabled(regs);
 	unsigned long era = exception_era(regs);
 	u64 badv = 0, lower = 0, upper = ULONG_MAX;
 	union loongarch_instruction insn;
 	irqentry_state_t state = irqentry_enter(regs);
 
-	if (regs->csr_prmd & CSR_PRMD_PIE)
+	if (!pie)
 		local_irq_enable();
 
 	current->thread.trap_nr = read_csr_excode();
@@ -654,7 +694,7 @@ asmlinkage void noinstr do_bce(struct pt_regs *regs)
 	force_sig_bnderr((void __user *)badv, (void __user *)lower, (void __user *)upper);
 
 out:
-	if (regs->csr_prmd & CSR_PRMD_PIE)
+	if (!pie)
 		local_irq_disable();
 
 	irqentry_exit(regs, state);
@@ -672,11 +712,12 @@ bad_era:
 asmlinkage void noinstr do_bp(struct pt_regs *regs)
 {
 	bool user = user_mode(regs);
+	bool pie = regs_irqs_disabled(regs);
 	unsigned int opcode, bcode;
 	unsigned long era = exception_era(regs);
 	irqentry_state_t state = irqentry_enter(regs);
 
-	if (regs->csr_prmd & CSR_PRMD_PIE)
+	if (!pie)
 		local_irq_enable();
 
 	if (__get_inst(&opcode, (u32 *)era, user))
@@ -742,7 +783,7 @@ asmlinkage void noinstr do_bp(struct pt_regs *regs)
 	}
 
 out:
-	if (regs->csr_prmd & CSR_PRMD_PIE)
+	if (!pie)
 		local_irq_disable();
 
 	irqentry_exit(regs, state);
@@ -977,6 +1018,7 @@ static void init_restore_lbt(void)
 
 asmlinkage void noinstr do_lbt(struct pt_regs *regs)
 {
+	bool pie = regs_irqs_disabled(regs);
 	irqentry_state_t state = irqentry_enter(regs);
 
 	/*
@@ -986,7 +1028,7 @@ asmlinkage void noinstr do_lbt(struct pt_regs *regs)
 	 * (including the user using 'MOVGR2GCSR' to turn on TM, which
 	 * will not trigger the BTE), we need to check PRMD first.
 	 */
-	if (regs->csr_prmd & CSR_PRMD_PIE)
+	if (!pie)
 		local_irq_enable();
 
 	if (!cpu_has_lbt) {
@@ -1000,7 +1042,7 @@ asmlinkage void noinstr do_lbt(struct pt_regs *regs)
 	preempt_enable();
 
 out:
-	if (regs->csr_prmd & CSR_PRMD_PIE)
+	if (!pie)
 		local_irq_disable();
 
 	irqentry_exit(regs, state);
@@ -1150,19 +1192,9 @@ void __init trap_init(void)
 	for (i = EXCCODE_INT_START; i <= EXCCODE_INT_END; i++)
 		set_handler(i * VECSIZE, handle_vint, VECSIZE);
 
-	set_handler(EXCCODE_ADE * VECSIZE, handle_ade, VECSIZE);
-	set_handler(EXCCODE_ALE * VECSIZE, handle_ale, VECSIZE);
-	set_handler(EXCCODE_BCE * VECSIZE, handle_bce, VECSIZE);
-	set_handler(EXCCODE_SYS * VECSIZE, handle_sys, VECSIZE);
-	set_handler(EXCCODE_BP * VECSIZE, handle_bp, VECSIZE);
-	set_handler(EXCCODE_INE * VECSIZE, handle_ri, VECSIZE);
-	set_handler(EXCCODE_IPE * VECSIZE, handle_ri, VECSIZE);
-	set_handler(EXCCODE_FPDIS * VECSIZE, handle_fpu, VECSIZE);
-	set_handler(EXCCODE_LSXDIS * VECSIZE, handle_lsx, VECSIZE);
-	set_handler(EXCCODE_LASXDIS * VECSIZE, handle_lasx, VECSIZE);
-	set_handler(EXCCODE_FPE * VECSIZE, handle_fpe, VECSIZE);
-	set_handler(EXCCODE_BTDIS * VECSIZE, handle_lbt, VECSIZE);
-	set_handler(EXCCODE_WATCH * VECSIZE, handle_watch, VECSIZE);
+	/* Set exception vector handler */
+	for (i = EXCCODE_ADE; i <= EXCCODE_BTDIS; i++)
+		set_handler(i * VECSIZE, exception_table[i], VECSIZE);
 
 	cache_error_setup();
 

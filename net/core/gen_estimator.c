@@ -177,7 +177,7 @@ int gen_new_estimator(struct gnet_stats_basic_sync *bstats,
 		spin_lock_bh(lock);
 	old = rcu_dereference_protected(*rate_est, 1);
 	if (old) {
-		del_timer_sync(&old->timer);
+		timer_delete_sync(&old->timer);
 		est->avbps = old->avbps;
 		est->avpps = old->avpps;
 	}
@@ -206,7 +206,7 @@ void gen_kill_estimator(struct net_rate_estimator __rcu **rate_est)
 {
 	struct net_rate_estimator *est;
 
-	est = xchg((__force struct net_rate_estimator **)rate_est, NULL);
+	est = unrcu_pointer(xchg(rate_est, NULL));
 	if (est) {
 		timer_shutdown_sync(&est->timer);
 		kfree_rcu(est, rcu);

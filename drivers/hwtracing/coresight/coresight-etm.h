@@ -215,7 +215,6 @@ struct etm_config {
  * @port_size:	port size as reported by ETMCR bit 4-6 and 21.
  * @arch:	ETM/PTM version number.
  * @use_cpu14:	true if management registers need to be accessed via CP14.
- * @mode:	this tracer's mode, i.e sysFS, Perf or disabled.
  * @sticky_enable: true if ETM base configuration has been done.
  * @boot_enable:true if we should start tracing at boot time.
  * @os_unlock:	true if access to management registers is allowed.
@@ -238,7 +237,6 @@ struct etm_drvdata {
 	int				port_size;
 	u8				arch;
 	bool				use_cp14;
-	local_t				mode;
 	bool				sticky_enable;
 	bool				boot_enable;
 	bool				os_unlock;
@@ -286,6 +284,5 @@ extern const struct attribute_group *coresight_etm_groups[];
 void etm_set_default(struct etm_config *config);
 void etm_config_trace_mode(struct etm_config *config);
 struct etm_config *get_etm_config(struct etm_drvdata *drvdata);
-int etm_read_alloc_trace_id(struct etm_drvdata *drvdata);
 void etm_release_trace_id(struct etm_drvdata *drvdata);
 #endif

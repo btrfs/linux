@@ -10,6 +10,8 @@
 #ifndef __SOUND_HDA_LOCAL_H
 #define __SOUND_HDA_LOCAL_H
 
+#include <sound/pcm_drm_eld.h>
+
 /* We abuse kcontrol_new.subdev field to pass the NID corresponding to
  * the given new control.  If id.subdev has a bit flag HDA_SUBDEV_NID_FLAG,
  * snd_hda_ctl_add() takes the lower-bit subdev value as a valid NID.
@@ -292,6 +294,32 @@ struct hda_fixup {
 	} v;
 };
 
+/*
+ * extended form of snd_pci_quirk:
+ * for PCI SSID matching, use SND_PCI_QUIRK() like before;
+ * for codec SSID matching, use the new HDA_CODEC_QUIRK() instead
+ */
+struct hda_quirk {
+	unsigned short subvendor;	/* PCI subvendor ID */
+	unsigned short subdevice;	/* PCI subdevice ID */
+	unsigned short subdevice_mask;	/* bitmask to match */
+	bool match_codec_ssid;		/* match only with codec SSID */
+	int value;			/* value */
+#ifdef CONFIG_SND_DEBUG_VERBOSE
+	const char *name;		/* name of the device (optional) */
+#endif
+};
+
+#ifdef CONFIG_SND_DEBUG_VERBOSE
+#define HDA_CODEC_QUIRK(vend, dev, xname, val) \
+	{ _SND_PCI_QUIRK_ID(vend, dev), .value = (val), .name = (xname),\
+			.match_codec_ssid = true }
+#else
+#define HDA_CODEC_QUIRK(vend, dev, xname, val) \
+	{ _SND_PCI_QUIRK_ID(vend, dev), .value = (val), \
+			.match_codec_ssid = true }
+#endif
+
 struct snd_hda_pin_quirk {
 	unsigned int codec;             /* Codec vendor/device ID */
 	unsigned short subvendor;	/* PCI subvendor ID */
@@ -351,7 +379,7 @@ void snd_hda_apply_fixup(struct hda_codec *codec, int action);
 void __snd_hda_apply_fixup(struct hda_codec *codec, int id, int action, int depth);
 void snd_hda_pick_fixup(struct hda_codec *codec,
 			const struct hda_model_fixup *models,
-			const struct snd_pci_quirk *quirk,
+			const struct hda_quirk *quirk,
 			const struct hda_fixup *fixlist);
 void snd_hda_pick_pin_fixup(struct hda_codec *codec,
 			    const struct snd_hda_pin_quirk *pin_quirk,
@@ -649,61 +677,18 @@ int snd_hda_enum_helper_info(struct snd_kcontrol *kcontrol,
 #define snd_hda_enum_bool_helper_info(kcontrol, uinfo) \
 	snd_hda_enum_helper_info(kcontrol, uinfo, 0, NULL)
 
-/*
- * CEA Short Audio Descriptor data
- */
-struct cea_sad {
-	int	channels;
-	int	format;		/* (format == 0) indicates invalid SAD */
-	int	rates;
-	int	sample_bits;	/* for LPCM */
-	int	max_bitrate;	/* for AC3...ATRAC */
-	int	profile;	/* for WMAPRO */
-};
-
-#define ELD_FIXED_BYTES	20
-#define ELD_MAX_SIZE    256
-#define ELD_MAX_MNL	16
-#define ELD_MAX_SAD	16
-
-/*
- * ELD: EDID Like Data
- */
-struct parsed_hdmi_eld {
-	/*
-	 * all fields will be cleared before updating ELD
-	 */
-	int	baseline_len;
-	int	eld_ver;
-	int	cea_edid_ver;
-	char	monitor_name[ELD_MAX_MNL + 1];
-	int	manufacture_id;
-	int	product_id;
-	u64	port_id;
-	int	support_hdcp;
-	int	support_ai;
-	int	conn_type;
-	int	aud_synch_delay;
-	int	spk_alloc;
-	int	sad_count;
-	struct cea_sad sad[ELD_MAX_SAD];
-};
-
 struct hdmi_eld {
 	bool	monitor_present;
 	bool	eld_valid;
 	int	eld_size;
 	char    eld_buffer[ELD_MAX_SIZE];
-	struct parsed_hdmi_eld info;
+	struct snd_parsed_hdmi_eld info;
 };
 
 int snd_hdmi_get_eld_size(struct hda_codec *codec, hda_nid_t nid);
 int snd_hdmi_get_eld(struct hda_codec *codec, hda_nid_t nid,
 		     unsigned char *buf, int *eld_size);
-int snd_hdmi_parse_eld(struct hda_codec *codec, struct parsed_hdmi_eld *e,
-		       const unsigned char *buf, int size);
-void snd_hdmi_show_eld(struct hda_codec *codec, struct parsed_hdmi_eld *e);
-void snd_hdmi_eld_update_pcm_info(struct parsed_hdmi_eld *e,
+void snd_hdmi_eld_update_pcm_info(struct snd_parsed_hdmi_eld *e,
 			      struct hda_pcm_stream *hinfo);
 
 int snd_hdmi_get_eld_ati(struct hda_codec *codec, hda_nid_t nid,

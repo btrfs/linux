@@ -38,7 +38,7 @@ static DEFINE_MUTEX(gameport_mutex);
 
 static LIST_HEAD(gameport_list);
 
-static struct bus_type gameport_bus;
+static const struct bus_type gameport_bus;
 
 static void gameport_add_port(struct gameport *gameport);
 static void gameport_attach_driver(struct gameport_driver *drv);
@@ -191,7 +191,7 @@ void gameport_stop_polling(struct gameport *gameport)
 	spin_lock(&gameport->timer_lock);
 
 	if (!--gameport->poll_cnt)
-		del_timer(&gameport->poll_timer);
+		timer_delete(&gameport->poll_timer);
 
 	spin_unlock(&gameport->timer_lock);
 }
@@ -372,7 +372,7 @@ static int gameport_queue_event(void *object, struct module *owner,
 		}
 	}
 
-	event = kmalloc(sizeof(struct gameport_event), GFP_ATOMIC);
+	event = kmalloc(sizeof(*event), GFP_ATOMIC);
 	if (!event) {
 		pr_err("Not enough memory to queue event %d\n", event_type);
 		retval = -ENOMEM;
@@ -806,14 +806,14 @@ start_over:
 }
 EXPORT_SYMBOL(gameport_unregister_driver);
 
-static int gameport_bus_match(struct device *dev, struct device_driver *drv)
+static int gameport_bus_match(struct device *dev, const struct device_driver *drv)
 {
-	struct gameport_driver *gameport_drv = to_gameport_driver(drv);
+	const struct gameport_driver *gameport_drv = to_gameport_driver(drv);
 
 	return !gameport_drv->ignore;
 }
 
-static struct bus_type gameport_bus = {
+static const struct bus_type gameport_bus = {
 	.name		= "gameport",
 	.dev_groups	= gameport_device_groups,
 	.drv_groups	= gameport_driver_groups,
@@ -847,7 +847,7 @@ EXPORT_SYMBOL(gameport_open);
 
 void gameport_close(struct gameport *gameport)
 {
-	del_timer_sync(&gameport->poll_timer);
+	timer_delete_sync(&gameport->poll_timer);
 	gameport->poll_handler = NULL;
 	gameport->poll_interval = 0;
 	gameport_set_drv(gameport, NULL);

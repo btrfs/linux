@@ -7,12 +7,10 @@
 #include <linux/bitops.h>
 #include <linux/err.h>
 #include <linux/platform_device.h>
+#include <linux/mod_devicetable.h>
 #include <linux/module.h>
-#include <linux/of.h>
 #include <linux/clk-provider.h>
 #include <linux/regmap.h>
-#include <linux/reset-controller.h>
-#include <linux/clk.h>
 
 #include <dt-bindings/clock/qcom,mmcc-msm8996.h>
 
@@ -57,20 +55,20 @@ static struct clk_fixed_factor gpll0_div = {
 	},
 };
 
-static struct pll_vco mmpll_p_vco[] = {
+static const struct pll_vco mmpll_p_vco[] = {
 	{ 250000000, 500000000, 3 },
 	{ 500000000, 1000000000, 2 },
 	{ 1000000000, 1500000000, 1 },
 	{ 1500000000, 2000000000, 0 },
 };
 
-static struct pll_vco mmpll_gfx_vco[] = {
+static const struct pll_vco mmpll_gfx_vco[] = {
 	{ 400000000, 1000000000, 2 },
 	{ 1000000000, 1500000000, 1 },
 	{ 1500000000, 2000000000, 0 },
 };
 
-static struct pll_vco mmpll_t_vco[] = {
+static const struct pll_vco mmpll_t_vco[] = {
 	{ 500000000, 1500000000, 0 },
 };
 
@@ -734,7 +732,7 @@ static struct clk_rcg2 mdp_clk_src = {
 	},
 };
 
-static struct freq_tbl extpclk_freq_tbl[] = {
+static const struct freq_tbl extpclk_freq_tbl[] = {
 	{ .src = P_HDMIPLL },
 	{ }
 };
@@ -753,7 +751,7 @@ static struct clk_rcg2 extpclk_clk_src = {
 	},
 };
 
-static struct freq_tbl ftbl_mdss_vsync_clk[] = {
+static const struct freq_tbl ftbl_mdss_vsync_clk[] = {
 	F(19200000, P_XO, 1, 0, 0),
 	{ }
 };
@@ -771,7 +769,7 @@ static struct clk_rcg2 vsync_clk_src = {
 	},
 };
 
-static struct freq_tbl ftbl_mdss_hdmi_clk[] = {
+static const struct freq_tbl ftbl_mdss_hdmi_clk[] = {
 	F(19200000, P_XO, 1, 0, 0),
 	{ }
 };
@@ -815,7 +813,7 @@ static struct clk_rcg2 byte1_clk_src = {
 	},
 };
 
-static struct freq_tbl ftbl_mdss_esc0_1_clk[] = {
+static const struct freq_tbl ftbl_mdss_esc0_1_clk[] = {
 	F(19200000, P_XO, 1, 0, 0),
 	{ }
 };
@@ -3626,7 +3624,7 @@ static int mmcc_msm8996_probe(struct platform_device *pdev)
 	/* Disable the NoC FSM for mmss_mmagic_cfg_ahb_clk */
 	regmap_update_bits(regmap, 0x5054, BIT(15), 0);
 
-	return qcom_cc_really_probe(pdev, &mmcc_msm8996_desc, regmap);
+	return qcom_cc_really_probe(&pdev->dev, &mmcc_msm8996_desc, regmap);
 }
 
 static struct platform_driver mmcc_msm8996_driver = {

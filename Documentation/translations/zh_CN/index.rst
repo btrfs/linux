@@ -24,9 +24,15 @@
 上的linux-doc邮件列表。
 
 顺便说下，中文文档也需要遵守内核编码风格，风格中中文和英文的主要不同就是中文
-的字符标点占用两个英文字符宽度， 所以，当英文要求不要超过每行100个字符时，
-中文就不要超过50个字符。另外，也要注意'-'，'=' 等符号与相关标题的对齐。在将
-补丁提交到社区之前，一定要进行必要的 ``checkpatch.pl`` 检查和编译测试。
+的字符标点占用两个英文字符宽度，所以，当英文要求不要超过每行100个字符时，
+中文就不要超过50个字符。另外，也要注意'-'，'='等符号与相关标题的对齐。在将
+补丁提交到社区之前，一定要进行必要的 ``checkpatch.pl`` 检查和编译测试，确保
+在 ``make htmldocs/pdfdocs`` 中不增加新的告警，最后，安装检查你生成的
+html/pdf 文件，确认它们看起来是正常的。
+
+提交之前请确认你的补丁可以正常提交到中文文档维护库:
+https://git.kernel.org/pub/scm/linux/kernel/git/alexs/linux.git/
+如果你的补丁依赖于其他人的补丁, 可以与其他人商量后由某一个人合并提交。
 
 与Linux 内核社区一起工作
 ------------------------
@@ -89,10 +95,10 @@ TODOList:
    admin-guide/index
    admin-guide/reporting-issues.rst
    userspace-api/index
+   内核构建系统 <kbuild/index>
 
 TODOList:
 
-* 内核构建系统 <kbuild/index>
 * 用户空间工具 <tools/index>
 
 也可参考独立于内核文档的 `Linux 手册页 <https://www.kernel.org/doc/man-pages/>`_ 。

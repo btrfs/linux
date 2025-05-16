@@ -122,6 +122,11 @@ struct phy_ops {
 			    union phy_configure_opts *opts);
 	int	(*reset)(struct phy *phy);
 	int	(*calibrate)(struct phy *phy);
+
+	/* notify phy connect status change */
+	int	(*connect)(struct phy *phy, int port);
+	int	(*disconnect)(struct phy *phy, int port);
+
 	void	(*release)(struct phy *phy);
 	struct module *owner;
 };
@@ -176,7 +181,7 @@ struct phy_provider {
 	struct module		*owner;
 	struct list_head	list;
 	struct phy * (*of_xlate)(struct device *dev,
-		struct of_phandle_args *args);
+				 const struct of_phandle_args *args);
 };
 
 /**
@@ -222,8 +227,6 @@ int phy_pm_runtime_get(struct phy *phy);
 int phy_pm_runtime_get_sync(struct phy *phy);
 int phy_pm_runtime_put(struct phy *phy);
 int phy_pm_runtime_put_sync(struct phy *phy);
-void phy_pm_runtime_allow(struct phy *phy);
-void phy_pm_runtime_forbid(struct phy *phy);
 int phy_init(struct phy *phy);
 int phy_exit(struct phy *phy);
 int phy_power_on(struct phy *phy);
@@ -243,6 +246,8 @@ static inline enum phy_mode phy_get_mode(struct phy *phy)
 }
 int phy_reset(struct phy *phy);
 int phy_calibrate(struct phy *phy);
+int phy_notify_connect(struct phy *phy, int port);
+int phy_notify_disconnect(struct phy *phy, int port);
 static inline int phy_get_bus_width(struct phy *phy)
 {
 	return phy->attrs.bus_width;
@@ -265,7 +270,7 @@ void phy_put(struct device *dev, struct phy *phy);
 void devm_phy_put(struct device *dev, struct phy *phy);
 struct phy *of_phy_get(struct device_node *np, const char *con_id);
 struct phy *of_phy_simple_xlate(struct device *dev,
-	struct of_phandle_args *args);
+				const struct of_phandle_args *args);
 struct phy *phy_create(struct device *dev, struct device_node *node,
 		       const struct phy_ops *ops);
 struct phy *devm_phy_create(struct device *dev, struct device_node *node,
@@ -275,11 +280,11 @@ void devm_phy_destroy(struct device *dev, struct phy *phy);
 struct phy_provider *__of_phy_provider_register(struct device *dev,
 	struct device_node *children, struct module *owner,
 	struct phy * (*of_xlate)(struct device *dev,
-				 struct of_phandle_args *args));
+				 const struct of_phandle_args *args));
 struct phy_provider *__devm_of_phy_provider_register(struct device *dev,
 	struct device_node *children, struct module *owner,
 	struct phy * (*of_xlate)(struct device *dev,
-				 struct of_phandle_args *args));
+				 const struct of_phandle_args *args));
 void of_phy_provider_unregister(struct phy_provider *phy_provider);
 void devm_of_phy_provider_unregister(struct device *dev,
 	struct phy_provider *phy_provider);
@@ -312,16 +317,6 @@ static inline int phy_pm_runtime_put_sync(struct phy *phy)
 	if (!phy)
 		return 0;
 	return -ENOSYS;
-}
-
-static inline void phy_pm_runtime_allow(struct phy *phy)
-{
-	return;
-}
-
-static inline void phy_pm_runtime_forbid(struct phy *phy)
-{
-	return;
 }
 
 static inline int phy_init(struct phy *phy)
@@ -390,6 +385,20 @@ static inline int phy_reset(struct phy *phy)
 }
 
 static inline int phy_calibrate(struct phy *phy)
+{
+	if (!phy)
+		return 0;
+	return -ENOSYS;
+}
+
+static inline int phy_notify_connect(struct phy *phy, int index)
+{
+	if (!phy)
+		return 0;
+	return -ENOSYS;
+}
+
+static inline int phy_notify_disconnect(struct phy *phy, int index)
 {
 	if (!phy)
 		return 0;
@@ -479,7 +488,7 @@ static inline struct phy *of_phy_get(struct device_node *np, const char *con_id)
 }
 
 static inline struct phy *of_phy_simple_xlate(struct device *dev,
-	struct of_phandle_args *args)
+					      const struct of_phandle_args *args)
 {
 	return ERR_PTR(-ENOSYS);
 }
@@ -509,7 +518,7 @@ static inline void devm_phy_destroy(struct device *dev, struct phy *phy)
 static inline struct phy_provider *__of_phy_provider_register(
 	struct device *dev, struct device_node *children, struct module *owner,
 	struct phy * (*of_xlate)(struct device *dev,
-				 struct of_phandle_args *args))
+				 const struct of_phandle_args *args))
 {
 	return ERR_PTR(-ENOSYS);
 }
@@ -517,7 +526,7 @@ static inline struct phy_provider *__of_phy_provider_register(
 static inline struct phy_provider *__devm_of_phy_provider_register(struct device
 	*dev, struct device_node *children, struct module *owner,
 	struct phy * (*of_xlate)(struct device *dev,
-				 struct of_phandle_args *args))
+				 const struct of_phandle_args *args))
 {
 	return ERR_PTR(-ENOSYS);
 }

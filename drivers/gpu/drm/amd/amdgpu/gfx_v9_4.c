@@ -27,7 +27,6 @@
 #include "amdgpu_gfx.h"
 #include "soc15.h"
 #include "soc15d.h"
-#include "amdgpu_atomfirmware.h"
 #include "amdgpu_pm.h"
 
 #include "gc/gc_9_4_1_offset.h"
@@ -970,8 +969,9 @@ static void gfx_v9_4_reset_ras_error_count(struct amdgpu_device *adev)
 	WREG32_SOC15(GC, 0, mmATC_L2_CACHE_4K_DSM_INDEX, 255);
 }
 
-static const struct soc15_reg_entry gfx_v9_4_ea_err_status_regs =
-	{ SOC15_REG_ENTRY(GC, 0, mmGCEA_ERR_STATUS), 0, 1, 32 };
+static const struct soc15_reg_entry gfx_v9_4_ea_err_status_regs = {
+	SOC15_REG_ENTRY(GC, 0, mmGCEA_ERR_STATUS), 0, 1, 32
+};
 
 static void gfx_v9_4_query_ras_error_status(struct amdgpu_device *adev)
 {

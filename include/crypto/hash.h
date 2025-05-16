@@ -10,7 +10,11 @@
 
 #include <linux/atomic.h>
 #include <linux/crypto.h>
+#include <linux/slab.h>
 #include <linux/string.h>
+
+/* Set this bit for virtual address instead of SG list. */
+#define CRYPTO_AHASH_REQ_VIRT	0x00000001
 
 struct crypto_ahash;
 
@@ -24,26 +28,7 @@ struct crypto_ahash;
  */
 
 /*
- * struct crypto_istat_hash - statistics for has algorithm
- * @hash_cnt:		number of hash requests
- * @hash_tlen:		total data size hashed
- * @err_cnt:		number of error for hash requests
- */
-struct crypto_istat_hash {
-	atomic64_t hash_cnt;
-	atomic64_t hash_tlen;
-	atomic64_t err_cnt;
-};
-
-#ifdef CONFIG_CRYPTO_STATS
-#define HASH_ALG_COMMON_STAT struct crypto_istat_hash stat;
-#else
-#define HASH_ALG_COMMON_STAT
-#endif
-
-/*
  * struct hash_alg_common - define properties of message digest
- * @stat: Statistics for hash algorithm.
  * @digestsize: Size of the result of the transformation. A buffer of this size
  *	        must be available to the @final and @finup calls, so they can
  *	        store the resulting hash into it. For various predefined sizes,
@@ -60,8 +45,6 @@ struct crypto_istat_hash {
  *	  information.
  */
 #define HASH_ALG_COMMON {		\
-	HASH_ALG_COMMON_STAT		\
-					\
 	unsigned int digestsize;	\
 	unsigned int statesize;		\
 					\
@@ -73,11 +56,11 @@ struct ahash_request {
 	struct crypto_async_request base;
 
 	unsigned int nbytes;
-	struct scatterlist *src;
+	union {
+		struct scatterlist *src;
+		const u8 *svirt;
+	};
 	u8 *result;
-
-	/* This field may only be used by the ahash API code. */
-	void *priv;
 
 	void *__ctx[] CRYPTO_MINALIGN_ATTR;
 };
@@ -153,6 +136,7 @@ struct ahash_request {
  *	      This is a counterpart to @init_tfm, used to remove
  *	      various changes set in @init_tfm.
  * @clone_tfm: Copy transform into new object, may allocate memory.
+ * @reqsize: Size of the request context.
  * @halg: see struct hash_alg_common
  */
 struct ahash_alg {
@@ -168,6 +152,8 @@ struct ahash_alg {
 	int (*init_tfm)(struct crypto_ahash *tfm);
 	void (*exit_tfm)(struct crypto_ahash *tfm);
 	int (*clone_tfm)(struct crypto_ahash *dst, struct crypto_ahash *src);
+
+	unsigned int reqsize;
 
 	struct hash_alg_common halg;
 };
@@ -243,7 +229,6 @@ struct shash_alg {
 	};
 };
 #undef HASH_ALG_COMMON
-#undef HASH_ALG_COMMON_STAT
 
 struct crypto_ahash {
 	bool using_shash; /* Underlying algorithm is shash, not ahash */
@@ -578,19 +563,20 @@ static inline void ahash_request_set_tfm(struct ahash_request *req,
  *
  * Return: allocated request handle in case of success, or NULL if out of memory
  */
-static inline struct ahash_request *ahash_request_alloc(
+static inline struct ahash_request *ahash_request_alloc_noprof(
 	struct crypto_ahash *tfm, gfp_t gfp)
 {
 	struct ahash_request *req;
 
-	req = kmalloc(sizeof(struct ahash_request) +
-		      crypto_ahash_reqsize(tfm), gfp);
+	req = kmalloc_noprof(sizeof(struct ahash_request) +
+			     crypto_ahash_reqsize(tfm), gfp);
 
 	if (likely(req))
 		ahash_request_set_tfm(req, tfm);
 
 	return req;
 }
+#define ahash_request_alloc(...)	alloc_hooks(ahash_request_alloc_noprof(__VA_ARGS__))
 
 /**
  * ahash_request_free() - zeroize and free the request data structure
@@ -599,12 +585,6 @@ static inline struct ahash_request *ahash_request_alloc(
 static inline void ahash_request_free(struct ahash_request *req)
 {
 	kfree_sensitive(req);
-}
-
-static inline void ahash_request_zero(struct ahash_request *req)
-{
-	memzero_explicit(req, sizeof(*req) +
-			      crypto_ahash_reqsize(crypto_ahash_reqtfm(req)));
 }
 
 static inline struct ahash_request *ahash_request_cast(
@@ -643,9 +623,14 @@ static inline void ahash_request_set_callback(struct ahash_request *req,
 					      crypto_completion_t compl,
 					      void *data)
 {
+	u32 keep = CRYPTO_AHASH_REQ_VIRT;
+
 	req->base.complete = compl;
 	req->base.data = data;
-	req->base.flags = flags;
+	flags &= ~keep;
+	req->base.flags &= keep;
+	req->base.flags |= flags;
+	crypto_reqchain_init(&req->base);
 }
 
 /**
@@ -668,6 +653,36 @@ static inline void ahash_request_set_crypt(struct ahash_request *req,
 	req->src = src;
 	req->nbytes = nbytes;
 	req->result = result;
+	req->base.flags &= ~CRYPTO_AHASH_REQ_VIRT;
+}
+
+/**
+ * ahash_request_set_virt() - set virtual address data buffers
+ * @req: ahash_request handle to be updated
+ * @src: source virtual address
+ * @result: buffer that is filled with the message digest -- the caller must
+ *	    ensure that the buffer has sufficient space by, for example, calling
+ *	    crypto_ahash_digestsize()
+ * @nbytes: number of bytes to process from the source virtual address
+ *
+ * By using this call, the caller references the source virtual address.
+ * The source virtual address points to the data the message digest is to
+ * be calculated for.
+ */
+static inline void ahash_request_set_virt(struct ahash_request *req,
+					  const u8 *src, u8 *result,
+					  unsigned int nbytes)
+{
+	req->svirt = src;
+	req->nbytes = nbytes;
+	req->result = result;
+	req->base.flags |= CRYPTO_AHASH_REQ_VIRT;
+}
+
+static inline void ahash_request_chain(struct ahash_request *req,
+				       struct ahash_request *head)
+{
+	crypto_request_chain(&req->base, &head->base);
 }
 
 /**
@@ -969,6 +984,16 @@ static inline void shash_desc_zero(struct shash_desc *desc)
 {
 	memzero_explicit(desc,
 			 sizeof(*desc) + crypto_shash_descsize(desc->tfm));
+}
+
+static inline int ahash_request_err(struct ahash_request *req)
+{
+	return req->base.err;
+}
+
+static inline bool ahash_is_async(struct crypto_ahash *tfm)
+{
+	return crypto_tfm_is_async(&tfm->base);
 }
 
 #endif	/* _CRYPTO_HASH_H */

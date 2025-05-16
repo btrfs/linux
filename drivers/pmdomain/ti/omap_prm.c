@@ -613,7 +613,7 @@ static int omap_prm_domain_attach_clock(struct device *dev,
 	if (!of_device_is_compatible(np, "simple-pm-bus"))
 		return 0;
 
-	if (!of_property_read_bool(np, "clocks"))
+	if (!of_property_present(np, "clocks"))
 		return 0;
 
 	error = pm_clk_create(dev);
@@ -695,6 +695,8 @@ static int omap_prm_domain_init(struct device *dev, struct omap_prm *prm)
 	data = prm->data;
 	name = devm_kasprintf(dev, GFP_KERNEL, "prm_%s",
 			      data->name);
+	if (!name)
+		return -ENOMEM;
 
 	prmd->dev = dev;
 	prmd->prm = prm;

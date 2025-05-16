@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
 /*
  * Copyright (C) 2015-2017 Intel Deutschland GmbH
- * Copyright (C) 2018-2023 Intel Corporation
+ * Copyright (C) 2018-2024 Intel Corporation
  */
 #include <linux/module.h>
 #include <linux/stringify.h>
@@ -13,7 +13,7 @@
 #define IWL_22000_UCODE_API_MAX	77
 
 /* Lowest firmware API version supported */
-#define IWL_22000_UCODE_API_MIN	50
+#define IWL_22000_UCODE_API_MIN	77
 
 /* NVM versions */
 #define IWL_22000_NVM_VERSION		0x0a1d
@@ -205,7 +205,6 @@ const char iwl_ax101_name[] = "Intel(R) Wi-Fi 6 AX101";
 const char iwl_ax200_name[] = "Intel(R) Wi-Fi 6 AX200 160MHz";
 const char iwl_ax201_name[] = "Intel(R) Wi-Fi 6 AX201 160MHz";
 const char iwl_ax203_name[] = "Intel(R) Wi-Fi 6 AX203";
-const char iwl_ax204_name[] = "Intel(R) Wi-Fi 6 AX204 160MHz";
 
 const char iwl_ax200_killer_1650w_name[] =
 	"Killer(R) Wi-Fi 6 AX1650w 160MHz Wireless Network Adapter (200D2W)";

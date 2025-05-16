@@ -9,7 +9,7 @@
 #include <linux/slab.h>
 #include <linux/timer.h>
 
-MODULE_AUTHOR("(C) 2000 IBM Corp. by Fritz Elfert (felfert@millenux.com)");
+MODULE_AUTHOR("(C) 2000 IBM Corp. by Fritz Elfert <felfert@millenux.com>");
 MODULE_DESCRIPTION("Finite state machine helper functions");
 MODULE_LICENSE("GPL");
 
@@ -158,7 +158,7 @@ fsm_deltimer(fsm_timer *this)
 	printk(KERN_DEBUG "fsm(%s): Delete timer %p\n", this->fi->name,
 		this);
 #endif
-	del_timer(&this->tl);
+	timer_delete(&this->tl);
 }
 
 int
@@ -188,7 +188,7 @@ fsm_modtimer(fsm_timer *this, int millisec, int event, void *arg)
 		this->fi->name, this, millisec);
 #endif
 
-	del_timer(&this->tl);
+	timer_delete(&this->tl);
 	timer_setup(&this->tl, fsm_expire_timer, 0);
 	this->expire_event = event;
 	this->event_arg = arg;

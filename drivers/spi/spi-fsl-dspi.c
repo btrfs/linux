@@ -280,25 +280,25 @@ static void dspi_native_dev_to_host(struct fsl_dspi *dspi, u32 rxdata)
 
 static void dspi_8on32_host_to_dev(struct fsl_dspi *dspi, u32 *txdata)
 {
-	*txdata = cpu_to_be32(*(u32 *)dspi->tx);
+	*txdata = (__force u32)cpu_to_be32(*(u32 *)dspi->tx);
 	dspi->tx += sizeof(u32);
 }
 
 static void dspi_8on32_dev_to_host(struct fsl_dspi *dspi, u32 rxdata)
 {
-	*(u32 *)dspi->rx = be32_to_cpu(rxdata);
+	*(u32 *)dspi->rx = be32_to_cpu((__force __be32)rxdata);
 	dspi->rx += sizeof(u32);
 }
 
 static void dspi_8on16_host_to_dev(struct fsl_dspi *dspi, u32 *txdata)
 {
-	*txdata = cpu_to_be16(*(u16 *)dspi->tx);
+	*txdata = (__force u32)cpu_to_be16(*(u16 *)dspi->tx);
 	dspi->tx += sizeof(u16);
 }
 
 static void dspi_8on16_dev_to_host(struct fsl_dspi *dspi, u32 rxdata)
 {
-	*(u16 *)dspi->rx = be16_to_cpu(rxdata);
+	*(u16 *)dspi->rx = be16_to_cpu((__force __be16)rxdata);
 	dspi->rx += sizeof(u16);
 }
 
@@ -502,15 +502,12 @@ static int dspi_request_dma(struct fsl_dspi *dspi, phys_addr_t phy_addr)
 		return -ENOMEM;
 
 	dma->chan_rx = dma_request_chan(dev, "rx");
-	if (IS_ERR(dma->chan_rx)) {
-		return dev_err_probe(dev, PTR_ERR(dma->chan_rx),
-			"rx dma channel not available\n");
-	}
+	if (IS_ERR(dma->chan_rx))
+		return dev_err_probe(dev, PTR_ERR(dma->chan_rx), "rx dma channel not available\n");
 
 	dma->chan_tx = dma_request_chan(dev, "tx");
 	if (IS_ERR(dma->chan_tx)) {
-		ret = PTR_ERR(dma->chan_tx);
-		dev_err_probe(dev, ret, "tx dma channel not available\n");
+		ret = dev_err_probe(dev, PTR_ERR(dma->chan_tx), "tx dma channel not available\n");
 		goto err_tx_channel;
 	}
 
@@ -541,16 +538,14 @@ static int dspi_request_dma(struct fsl_dspi *dspi, phys_addr_t phy_addr)
 	cfg.direction = DMA_DEV_TO_MEM;
 	ret = dmaengine_slave_config(dma->chan_rx, &cfg);
 	if (ret) {
-		dev_err(dev, "can't configure rx dma channel\n");
-		ret = -EINVAL;
+		dev_err_probe(dev, ret, "can't configure rx dma channel\n");
 		goto err_slave_config;
 	}
 
 	cfg.direction = DMA_MEM_TO_DEV;
 	ret = dmaengine_slave_config(dma->chan_tx, &cfg);
 	if (ret) {
-		dev_err(dev, "can't configure tx dma channel\n");
-		ret = -EINVAL;
+		dev_err_probe(dev, ret, "can't configure tx dma channel\n");
 		goto err_slave_config;
 	}
 
@@ -1008,9 +1003,11 @@ static int dspi_setup(struct spi_device *spi)
 	u32 cs_sck_delay = 0, sck_cs_delay = 0;
 	struct fsl_dspi_platform_data *pdata;
 	unsigned char pasc = 0, asc = 0;
+	struct gpio_desc *gpio_cs;
 	struct chip_data *chip;
 	unsigned long clkrate;
 	bool cs = true;
+	int val;
 
 	/* Only alloc on first setup */
 	chip = spi_get_ctldata(spi);
@@ -1023,11 +1020,19 @@ static int dspi_setup(struct spi_device *spi)
 	pdata = dev_get_platdata(&dspi->pdev->dev);
 
 	if (!pdata) {
-		of_property_read_u32(spi->dev.of_node, "fsl,spi-cs-sck-delay",
-				     &cs_sck_delay);
+		val = spi_delay_to_ns(&spi->cs_setup, NULL);
+		cs_sck_delay = val >= 0 ? val : 0;
+		if (!cs_sck_delay)
+			of_property_read_u32(spi->dev.of_node,
+					     "fsl,spi-cs-sck-delay",
+					     &cs_sck_delay);
 
-		of_property_read_u32(spi->dev.of_node, "fsl,spi-sck-cs-delay",
-				     &sck_cs_delay);
+		val = spi_delay_to_ns(&spi->cs_hold, NULL);
+		sck_cs_delay =  val >= 0 ? val : 0;
+		if (!sck_cs_delay)
+			of_property_read_u32(spi->dev.of_node,
+					     "fsl,spi-sck-cs-delay",
+					     &sck_cs_delay);
 	} else {
 		cs_sck_delay = pdata->cs_sck_delay;
 		sck_cs_delay = pdata->sck_cs_delay;
@@ -1073,7 +1078,10 @@ static int dspi_setup(struct spi_device *spi)
 			chip->ctar_val |= SPI_CTAR_LSBFE;
 	}
 
-	gpiod_direction_output(spi_get_csgpiod(spi, 0), false);
+	gpio_cs = spi_get_csgpiod(spi, 0);
+	if (gpio_cs)
+		gpiod_direction_output(gpio_cs, false);
+
 	dspi_deassert_cs(spi, &cs);
 
 	spi_set_ctldata(spi, chip);
@@ -1463,10 +1471,9 @@ static void dspi_shutdown(struct platform_device *pdev)
 static struct platform_driver fsl_dspi_driver = {
 	.driver.name		= DRIVER_NAME,
 	.driver.of_match_table	= fsl_dspi_dt_ids,
-	.driver.owner		= THIS_MODULE,
 	.driver.pm		= &dspi_pm,
 	.probe			= dspi_probe,
-	.remove_new		= dspi_remove,
+	.remove			= dspi_remove,
 	.shutdown		= dspi_shutdown,
 };
 module_platform_driver(fsl_dspi_driver);

@@ -177,7 +177,7 @@ settles down a bit.
 **mandatory**
 
 s_export_op is now required for exporting a filesystem.
-isofs, ext2, ext3, reiserfs, fat
+isofs, ext2, ext3, fat
 can be used as examples of very different filesystems.
 
 ---
@@ -313,7 +313,7 @@ done.
 
 **mandatory**
 
-block truncatation on error exit from ->write_begin, and ->direct_IO
+block truncation on error exit from ->write_begin, and ->direct_IO
 moved from generic methods (block_write_begin, cont_write_begin,
 nobh_write_begin, blockdev_direct_IO*) to callers.  Take a look at
 ext2_write_failed and callers for an example.
@@ -858,7 +858,7 @@ be misspelled d_alloc_anon().
 
 **mandatory**
 
-[should've been added in 2016] stale comment in finish_open() nonwithstanding,
+[should've been added in 2016] stale comment in finish_open() notwithstanding,
 failure exits in ->atomic_open() instances should *NOT* fput() the file,
 no matter what.  Everything is handled by the caller.
 
@@ -989,7 +989,7 @@ This mechanism would only work for a single device so the block layer couldn't
 find the owning superblock of any additional devices.
 
 In the old mechanism reusing or creating a superblock for a racing mount(2) and
-umount(2) relied on the file_system_type as the holder. This was severly
+umount(2) relied on the file_system_type as the holder. This was severely
 underdocumented however:
 
 (1) Any concurrent mounter that managed to grab an active reference on an
@@ -1134,3 +1134,72 @@ superblock of the main block device, i.e., the one stored in sb->s_bdev. Block
 device freezing now works for any block device owned by a given superblock, not
 just the main block device. The get_active_super() helper and bd_fsfreeze_sb
 pointer are gone.
+
+---
+
+**mandatory**
+
+set_blocksize() takes opened struct file instead of struct block_device now
+and it *must* be opened exclusive.
+
+---
+
+**mandatory**
+
+->d_revalidate() gets two extra arguments - inode of parent directory and
+name our dentry is expected to have.  Both are stable (dir is pinned in
+non-RCU case and will stay around during the call in RCU case, and name
+is guaranteed to stay unchanging).  Your instance doesn't have to use
+either, but it often helps to avoid a lot of painful boilerplate.
+Note that while name->name is stable and NUL-terminated, it may (and
+often will) have name->name[name->len] equal to '/' rather than '\0' -
+in normal case it points into the pathname being looked up.
+NOTE: if you need something like full path from the root of filesystem,
+you are still on your own - this assists with simple cases, but it's not
+magic.
+
+---
+
+**recommended**
+
+kern_path_locked() and user_path_locked() no longer return a negative
+dentry so this doesn't need to be checked.  If the name cannot be found,
+ERR_PTR(-ENOENT) is returned.
+
+---
+
+**recommended**
+
+lookup_one_qstr_excl() is changed to return errors in more cases, so
+these conditions don't require explicit checks:
+
+ - if LOOKUP_CREATE is NOT given, then the dentry won't be negative,
+   ERR_PTR(-ENOENT) is returned instead
+ - if LOOKUP_EXCL IS given, then the dentry won't be positive,
+   ERR_PTR(-EEXIST) is rreturned instread
+
+LOOKUP_EXCL now means "target must not exist".  It can be combined with
+LOOK_CREATE or LOOKUP_RENAME_TARGET.
+
+---
+
+**mandatory**
+invalidate_inodes() is gone use evict_inodes() instead.
+
+---
+
+**mandatory**
+
+->mkdir() now returns a dentry.  If the created inode is found to
+already be in cache and have a dentry (often IS_ROOT()), it will need to
+be spliced into the given name in place of the given dentry. That dentry
+now needs to be returned.  If the original dentry is used, NULL should
+be returned.  Any error should be returned with ERR_PTR().
+
+In general, filesystems which use d_instantiate_new() to install the new
+inode can safely return NULL.  Filesystems which may not have an I_NEW inode
+should use d_drop();d_splice_alias() and return the result of the latter.
+
+If a positive dentry cannot be returned for some reason, in-kernel
+clients such as cachefiles, nfsd, smb/server may not perform ideally but
+will fail-safe.

@@ -16,31 +16,6 @@
 #include <asm/tlb.h>
 #include <asm/tlbflush.h>
 
-#ifdef CONFIG_PGSTE
-
-int page_table_allocate_pgste = 0;
-EXPORT_SYMBOL(page_table_allocate_pgste);
-
-static struct ctl_table page_table_sysctl[] = {
-	{
-		.procname	= "allocate_pgste",
-		.data		= &page_table_allocate_pgste,
-		.maxlen		= sizeof(int),
-		.mode		= S_IRUGO | S_IWUSR,
-		.proc_handler	= proc_dointvec_minmax,
-		.extra1		= SYSCTL_ZERO,
-		.extra2		= SYSCTL_ONE,
-	},
-};
-
-static int __init page_table_register_sysctl(void)
-{
-	return register_sysctl("vm", page_table_sysctl) ? 0 : -ENOMEM;
-}
-__initcall(page_table_register_sysctl);
-
-#endif /* CONFIG_PGSTE */
-
 unsigned long *crst_table_alloc(struct mm_struct *mm)
 {
 	struct ptdesc *ptdesc = pagetable_alloc(GFP_KERNEL, CRST_ALLOC_ORDER);
@@ -55,6 +30,8 @@ unsigned long *crst_table_alloc(struct mm_struct *mm)
 
 void crst_table_free(struct mm_struct *mm, unsigned long *table)
 {
+	if (!table)
+		return;
 	pagetable_free(virt_to_ptdesc(table));
 }
 
@@ -64,8 +41,8 @@ static void __crst_table_upgrade(void *arg)
 
 	/* change all active ASCEs to avoid the creation of new TLBs */
 	if (current->active_mm == mm) {
-		S390_lowcore.user_asce.val = mm->context.asce;
-		local_ctl_load(7, &S390_lowcore.user_asce);
+		get_lowcore()->user_asce.val = mm->context.asce;
+		local_ctl_load(7, &get_lowcore()->user_asce);
 	}
 	__tlb_flush_local();
 }
@@ -86,12 +63,14 @@ int crst_table_upgrade(struct mm_struct *mm, unsigned long end)
 		if (unlikely(!p4d))
 			goto err_p4d;
 		crst_table_init(p4d, _REGION2_ENTRY_EMPTY);
+		pagetable_p4d_ctor(virt_to_ptdesc(p4d));
 	}
 	if (end > _REGION1_SIZE) {
 		pgd = crst_table_alloc(mm);
 		if (unlikely(!pgd))
 			goto err_pgd;
 		crst_table_init(pgd, _REGION1_ENTRY_EMPTY);
+		pagetable_pgd_ctor(virt_to_ptdesc(pgd));
 	}
 
 	spin_lock_bh(&mm->page_table_lock);
@@ -128,6 +107,7 @@ int crst_table_upgrade(struct mm_struct *mm, unsigned long end)
 	return 0;
 
 err_pgd:
+	pagetable_dtor(virt_to_ptdesc(p4d));
 	crst_table_free(mm, p4d);
 err_p4d:
 	return -ENOMEM;
@@ -135,7 +115,7 @@ err_p4d:
 
 #ifdef CONFIG_PGSTE
 
-struct page *page_table_alloc_pgste(struct mm_struct *mm)
+struct ptdesc *page_table_alloc_pgste(struct mm_struct *mm)
 {
 	struct ptdesc *ptdesc;
 	u64 *table;
@@ -147,12 +127,12 @@ struct page *page_table_alloc_pgste(struct mm_struct *mm)
 		memset64(table, _PAGE_INVALID, PTRS_PER_PTE);
 		memset64(table + PTRS_PER_PTE, 0, PTRS_PER_PTE);
 	}
-	return ptdesc_page(ptdesc);
+	return ptdesc;
 }
 
-void page_table_free_pgste(struct page *page)
+void page_table_free_pgste(struct ptdesc *ptdesc)
 {
-	pagetable_free(page_ptdesc(page));
+	pagetable_free(ptdesc);
 }
 
 #endif /* CONFIG_PGSTE */
@@ -171,37 +151,16 @@ unsigned long *page_table_alloc(struct mm_struct *mm)
 	}
 	table = ptdesc_to_virt(ptdesc);
 	__arch_set_page_dat(table, 1);
-	/* pt_list is used by gmap only */
-	INIT_LIST_HEAD(&ptdesc->pt_list);
 	memset64((u64 *)table, _PAGE_INVALID, PTRS_PER_PTE);
 	memset64((u64 *)table + PTRS_PER_PTE, 0, PTRS_PER_PTE);
 	return table;
-}
-
-static void pagetable_pte_dtor_free(struct ptdesc *ptdesc)
-{
-	pagetable_pte_dtor(ptdesc);
-	pagetable_free(ptdesc);
 }
 
 void page_table_free(struct mm_struct *mm, unsigned long *table)
 {
 	struct ptdesc *ptdesc = virt_to_ptdesc(table);
 
-	pagetable_pte_dtor_free(ptdesc);
-}
-
-void __tlb_remove_table(void *table)
-{
-	struct ptdesc *ptdesc = virt_to_ptdesc(table);
-	struct page *page = ptdesc_page(ptdesc);
-
-	if (compound_order(page) == CRST_ALLOC_ORDER) {
-		/* pmd, pud, or p4d */
-		pagetable_free(ptdesc);
-		return;
-	}
-	pagetable_pte_dtor_free(ptdesc);
+	pagetable_dtor_free(ptdesc);
 }
 
 #ifdef CONFIG_TRANSPARENT_HUGEPAGE
@@ -209,7 +168,7 @@ static void pte_free_now(struct rcu_head *head)
 {
 	struct ptdesc *ptdesc = container_of(head, struct ptdesc, pt_rcu_head);
 
-	pagetable_pte_dtor_free(ptdesc);
+	pagetable_dtor_free(ptdesc);
 }
 
 void pte_free_defer(struct mm_struct *mm, pgtable_t pgtable)
@@ -262,6 +221,8 @@ static unsigned long *base_crst_alloc(unsigned long val)
 
 static void base_crst_free(unsigned long *table)
 {
+	if (!table)
+		return;
 	pagetable_free(virt_to_ptdesc(table));
 }
 
@@ -274,7 +235,7 @@ static inline unsigned long base_##NAME##_addr_end(unsigned long addr,	\
 	return (next - 1) < (end - 1) ? next : end;			\
 }
 
-BASE_ADDR_END_FUNC(page,    _PAGE_SIZE)
+BASE_ADDR_END_FUNC(page,    PAGE_SIZE)
 BASE_ADDR_END_FUNC(segment, _SEGMENT_SIZE)
 BASE_ADDR_END_FUNC(region3, _REGION3_SIZE)
 BASE_ADDR_END_FUNC(region2, _REGION2_SIZE)
@@ -298,7 +259,7 @@ static int base_page_walk(unsigned long *origin, unsigned long addr,
 	if (!alloc)
 		return 0;
 	pte = origin;
-	pte += (addr & _PAGE_INDEX) >> _PAGE_SHIFT;
+	pte += (addr & _PAGE_INDEX) >> PAGE_SHIFT;
 	do {
 		next = base_page_addr_end(addr, end);
 		*pte = base_lra(addr);

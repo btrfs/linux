@@ -29,12 +29,15 @@ all_files := \
 		compiler.h \
 		crt.h \
 		ctype.h \
+		dirent.h \
 		errno.h \
+		limits.h \
 		nolibc.h \
 		signal.h \
 		stackprotector.h \
 		std.h \
 		stdarg.h \
+		stdbool.h \
 		stdint.h \
 		stdlib.h \
 		string.h \

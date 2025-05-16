@@ -78,7 +78,11 @@ static int rcar_pcie_wakeup(struct device *pcie_dev, void __iomem *pcie_base)
 		writel(L1IATN, pcie_base + PMCTLR);
 		ret = readl_poll_timeout_atomic(pcie_base + PMSR, val,
 						val & L1FAEG, 10, 1000);
-		WARN(ret, "Timeout waiting for L1 link state, ret=%d\n", ret);
+		if (ret) {
+			dev_warn_ratelimited(pcie_dev,
+					     "Timeout waiting for L1 link state, ret=%d\n",
+					     ret);
+		}
 		writel(L1FAEG | PMEL1RX, pcie_base + PMSR);
 	}
 
@@ -174,8 +178,8 @@ static int rcar_pcie_config_access(struct rcar_pcie_host *host,
 	 * space, it's generally only accessible when in endpoint mode.
 	 * When in root complex mode, the controller is unable to target
 	 * itself with either type 0 or type 1 accesses, and indeed, any
-	 * controller initiated target transfer to its own config space
-	 * result in a completer abort.
+	 * controller-initiated target transfer to its own config space
+	 * results in a completer abort.
 	 *
 	 * Each channel effectively only supports a single device, but as
 	 * the same channel <-> device access works for any PCI_SLOT()
@@ -654,11 +658,6 @@ static void rcar_msi_irq_unmask(struct irq_data *d)
 	spin_unlock_irqrestore(&msi->mask_lock, flags);
 }
 
-static int rcar_msi_set_affinity(struct irq_data *d, const struct cpumask *mask, bool force)
-{
-	return -EINVAL;
-}
-
 static void rcar_compose_msi_msg(struct irq_data *data, struct msi_msg *msg)
 {
 	struct rcar_msi *msi = irq_data_get_irq_chip_data(data);
@@ -674,7 +673,6 @@ static struct irq_chip rcar_msi_bottom_chip = {
 	.irq_ack		= rcar_msi_irq_ack,
 	.irq_mask		= rcar_msi_irq_mask,
 	.irq_unmask		= rcar_msi_irq_unmask,
-	.irq_set_affinity 	= rcar_msi_set_affinity,
 	.irq_compose_msi_msg	= rcar_compose_msi_msg,
 };
 
@@ -721,8 +719,8 @@ static const struct irq_domain_ops rcar_msi_domain_ops = {
 };
 
 static struct msi_domain_info rcar_msi_info = {
-	.flags	= (MSI_FLAG_USE_DEF_DOM_OPS | MSI_FLAG_USE_DEF_CHIP_OPS |
-		   MSI_FLAG_MULTI_PCI_MSI),
+	.flags	= MSI_FLAG_USE_DEF_DOM_OPS | MSI_FLAG_USE_DEF_CHIP_OPS |
+		  MSI_FLAG_NO_AFFINITY | MSI_FLAG_MULTI_PCI_MSI,
 	.chip	= &rcar_msi_top_chip,
 };
 
@@ -777,7 +775,7 @@ static int rcar_pcie_enable_msi(struct rcar_pcie_host *host)
 	if (err)
 		return err;
 
-	/* Two irqs are for MSI, but they are also used for non-MSI irqs */
+	/* Two IRQs are for MSI, but they are also used for non-MSI IRQs */
 	err = devm_request_irq(dev, msi->irq1, rcar_pcie_msi_irq,
 			       IRQF_SHARED | IRQF_NO_THREAD,
 			       rcar_msi_bottom_chip.name, host);
@@ -794,12 +792,12 @@ static int rcar_pcie_enable_msi(struct rcar_pcie_host *host)
 		goto err;
 	}
 
-	/* disable all MSIs */
+	/* Disable all MSIs */
 	rcar_pci_write_reg(pcie, 0, PCIEMSIIER);
 
 	/*
-	 * Setup MSI data target using RC base address address, which
-	 * is guaranteed to be in the low 32bit range on any R-Car HW.
+	 * Setup MSI data target using RC base address, which is guaranteed
+	 * to be in the low 32bit range on any R-Car HW.
 	 */
 	rcar_pci_write_reg(pcie, lower_32_bits(res.start) | MSIFE, PCIEMSIALR);
 	rcar_pci_write_reg(pcie, upper_32_bits(res.start), PCIEMSIAUR);
@@ -894,6 +892,7 @@ static int rcar_pcie_inbound_ranges(struct rcar_pcie *pcie,
 			dev_err(pcie->dev, "Failed to map inbound regions!\n");
 			return -EINVAL;
 		}
+
 		/*
 		 * If the size of the range is larger than the alignment of
 		 * the start address, we have to use multiple entries to
@@ -905,6 +904,7 @@ static int rcar_pcie_inbound_ranges(struct rcar_pcie *pcie,
 
 			size = min(size, alignment);
 		}
+
 		/* Hardware supports max 4GiB inbound region */
 		size = min(size, 1ULL << 32);
 

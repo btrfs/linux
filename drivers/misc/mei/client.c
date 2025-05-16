@@ -272,28 +272,6 @@ void mei_me_cl_rm_by_uuid(struct mei_device *dev, const uuid_le *uuid)
 }
 
 /**
- * mei_me_cl_rm_by_uuid_id - remove all me clients matching client id
- *
- * @dev: the device structure
- * @uuid: me client uuid
- * @id: me client id
- *
- * Locking: called under "dev->device_lock" lock
- */
-void mei_me_cl_rm_by_uuid_id(struct mei_device *dev, const uuid_le *uuid, u8 id)
-{
-	struct mei_me_client *me_cl;
-
-	dev_dbg(dev->dev, "remove %pUl %d\n", uuid, id);
-
-	down_write(&dev->me_clients_rwsem);
-	me_cl = __mei_me_cl_by_uuid_id(dev, uuid, id);
-	__mei_me_cl_del(dev, me_cl);
-	mei_me_cl_put(me_cl);
-	up_write(&dev->me_clients_rwsem);
-}
-
-/**
  * mei_me_cl_rm_all - remove all me clients
  *
  * @dev: the device structure
@@ -321,7 +299,7 @@ void mei_io_cb_free(struct mei_cl_cb *cb)
 		return;
 
 	list_del(&cb->list);
-	kfree(cb->buf.data);
+	kvfree(cb->buf.data);
 	kfree(cb->ext_hdr);
 	kfree(cb);
 }
@@ -497,7 +475,7 @@ struct mei_cl_cb *mei_cl_alloc_cb(struct mei_cl *cl, size_t length,
 	if (length == 0)
 		return cb;
 
-	cb->buf.data = kmalloc(roundup(length, MEI_SLOT_SIZE), GFP_KERNEL);
+	cb->buf.data = kvmalloc(roundup(length, MEI_SLOT_SIZE), GFP_KERNEL);
 	if (!cb->buf.data) {
 		mei_io_cb_free(cb);
 		return NULL;

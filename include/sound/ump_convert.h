@@ -13,12 +13,13 @@ struct ump_cvt_to_ump_bank {
 	unsigned char cc_nrpn_msb, cc_nrpn_lsb;
 	unsigned char cc_data_msb, cc_data_lsb;
 	unsigned char cc_bank_msb, cc_bank_lsb;
+	bool cc_data_msb_set, cc_data_lsb_set;
 };
 
 /* context for converting from MIDI1 byte stream to UMP packet */
 struct ump_cvt_to_ump {
 	/* MIDI1 intermediate buffer */
-	unsigned char buf[4];
+	unsigned char buf[6]; /* up to 6 bytes for SysEx */
 	int len;
 	int cmd_bytes;
 
