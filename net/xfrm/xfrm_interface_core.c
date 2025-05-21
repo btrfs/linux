@@ -240,13 +240,11 @@ static void xfrmi_dev_free(struct net_device *dev)
 	struct xfrm_if *xi = netdev_priv(dev);
 
 	gro_cells_destroy(&xi->gro_cells);
-	free_percpu(dev->tstats);
 }
 
-static int xfrmi_create(struct net_device *dev)
+static int xfrmi_create(struct net *net, struct net_device *dev)
 {
 	struct xfrm_if *xi = netdev_priv(dev);
-	struct net *net = dev_net(dev);
 	struct xfrmi_net *xfrmn = net_generic(net, xfrmi_net_id);
 	int err;
 
@@ -507,7 +505,7 @@ xmit:
 	skb_dst_set(skb, dst);
 	skb->dev = tdev;
 
-	err = dst_output(xi->net, skb->sk, skb);
+	err = dst_output(xi->net, skb_to_full_sk(skb), skb);
 	if (net_xmit_eval(err) == 0) {
 		dev_sw_netstats_tx_add(dev, 1, length);
 	} else {
@@ -727,7 +725,7 @@ static int xfrmi_get_iflink(const struct net_device *dev)
 {
 	struct xfrm_if *xi = netdev_priv(dev);
 
-	return xi->p.link;
+	return READ_ONCE(xi->p.link);
 }
 
 static const struct net_device_ops xfrmi_netdev_ops = {
@@ -749,6 +747,7 @@ static void xfrmi_dev_setup(struct net_device *dev)
 	dev->flags 		= IFF_NOARP;
 	dev->needs_free_netdev	= true;
 	dev->priv_destructor	= xfrmi_dev_free;
+	dev->pcpu_stat_type	= NETDEV_PCPU_STAT_TSTATS;
 	netif_keep_dst(dev);
 
 	eth_broadcast_addr(dev->broadcast);
@@ -765,17 +764,11 @@ static int xfrmi_dev_init(struct net_device *dev)
 	struct net_device *phydev = __dev_get_by_index(xi->net, xi->p.link);
 	int err;
 
-	dev->tstats = netdev_alloc_pcpu_stats(struct pcpu_sw_netstats);
-	if (!dev->tstats)
-		return -ENOMEM;
-
 	err = gro_cells_init(&xi->gro_cells, dev);
-	if (err) {
-		free_percpu(dev->tstats);
+	if (err)
 		return err;
-	}
 
-	dev->features |= NETIF_F_LLTX;
+	dev->lltx = true;
 	dev->features |= XFRMI_FEATURES;
 	dev->hw_features |= XFRMI_FEATURES;
 
@@ -820,15 +813,17 @@ static void xfrmi_netlink_parms(struct nlattr *data[],
 		parms->collect_md = true;
 }
 
-static int xfrmi_newlink(struct net *src_net, struct net_device *dev,
-			struct nlattr *tb[], struct nlattr *data[],
-			struct netlink_ext_ack *extack)
+static int xfrmi_newlink(struct net_device *dev,
+			 struct rtnl_newlink_params *params,
+			 struct netlink_ext_ack *extack)
 {
-	struct net *net = dev_net(dev);
+	struct nlattr **data = params->data;
 	struct xfrm_if_parms p = {};
 	struct xfrm_if *xi;
+	struct net *net;
 	int err;
 
+	net = params->link_net ? : dev_net(dev);
 	xfrmi_netlink_parms(data, &p);
 	if (p.collect_md) {
 		struct xfrmi_net *xfrmn = net_generic(net, xfrmi_net_id);
@@ -857,7 +852,7 @@ static int xfrmi_newlink(struct net *src_net, struct net_device *dev,
 	xi->net = net;
 	xi->dev = dev;
 
-	err = xfrmi_create(dev);
+	err = xfrmi_create(net, dev);
 	return err;
 }
 
@@ -932,7 +927,7 @@ static struct net *xfrmi_get_link_net(const struct net_device *dev)
 {
 	struct xfrm_if *xi = netdev_priv(dev);
 
-	return xi->net;
+	return READ_ONCE(xi->net);
 }
 
 static const struct nla_policy xfrmi_policy[IFLA_XFRM_MAX + 1] = {
@@ -957,12 +952,12 @@ static struct rtnl_link_ops xfrmi_link_ops __read_mostly = {
 	.get_link_net	= xfrmi_get_link_net,
 };
 
-static void __net_exit xfrmi_exit_batch_net(struct list_head *net_exit_list)
+static void __net_exit xfrmi_exit_batch_rtnl(struct list_head *net_exit_list,
+					     struct list_head *dev_to_kill)
 {
 	struct net *net;
-	LIST_HEAD(list);
 
-	rtnl_lock();
+	ASSERT_RTNL();
 	list_for_each_entry(net, net_exit_list, exit_list) {
 		struct xfrmi_net *xfrmn = net_generic(net, xfrmi_net_id);
 		struct xfrm_if __rcu **xip;
@@ -973,18 +968,16 @@ static void __net_exit xfrmi_exit_batch_net(struct list_head *net_exit_list)
 			for (xip = &xfrmn->xfrmi[i];
 			     (xi = rtnl_dereference(*xip)) != NULL;
 			     xip = &xi->next)
-				unregister_netdevice_queue(xi->dev, &list);
+				unregister_netdevice_queue(xi->dev, dev_to_kill);
 		}
 		xi = rtnl_dereference(xfrmn->collect_md_xfrmi);
 		if (xi)
-			unregister_netdevice_queue(xi->dev, &list);
+			unregister_netdevice_queue(xi->dev, dev_to_kill);
 	}
-	unregister_netdevice_many(&list);
-	rtnl_unlock();
 }
 
 static struct pernet_operations xfrmi_net_ops = {
-	.exit_batch = xfrmi_exit_batch_net,
+	.exit_batch_rtnl = xfrmi_exit_batch_rtnl,
 	.id   = &xfrmi_net_id,
 	.size = sizeof(struct xfrmi_net),
 };

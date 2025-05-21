@@ -5,7 +5,7 @@
 
 #include <linux/string_helpers.h>
 
-#include <drm/i915_drm.h>
+#include <drm/intel/i915_drm.h>
 
 #include "display/intel_display.h"
 #include "display/intel_display_irq.h"
@@ -52,7 +52,7 @@ static struct intel_guc_slpc *rps_to_slpc(struct intel_rps *rps)
 {
 	struct intel_gt *gt = rps_to_gt(rps);
 
-	return &gt->uc.guc.slpc;
+	return &gt_to_guc(gt)->slpc;
 }
 
 static bool rps_uses_slpc(struct intel_rps *rps)
@@ -161,7 +161,7 @@ static void rps_start_timer(struct intel_rps *rps)
 
 static void rps_stop_timer(struct intel_rps *rps)
 {
-	del_timer_sync(&rps->timer);
+	timer_delete_sync(&rps->timer);
 	rps->pm_timestamp = ktime_sub(ktime_get(), rps->pm_timestamp);
 	cancel_work_sync(&rps->work);
 }
@@ -265,10 +265,10 @@ static const struct cparams {
 	u16 c;
 } cparams[] = {
 	{ 1, 1333, 301, 28664 },
-	{ 1, 1066, 294, 24460 },
+	{ 1, 1067, 294, 24460 },
 	{ 1, 800, 294, 25192 },
 	{ 0, 1333, 276, 27605 },
-	{ 0, 1066, 276, 27605 },
+	{ 0, 1067, 276, 27605 },
 	{ 0, 800, 231, 23784 },
 };
 
@@ -280,15 +280,16 @@ static void gen5_rps_init(struct intel_rps *rps)
 	u32 rgvmodectl;
 	int c_m, i;
 
-	if (i915->fsb_freq <= 3200)
+	if (i915->fsb_freq <= 3200000)
 		c_m = 0;
-	else if (i915->fsb_freq <= 4800)
+	else if (i915->fsb_freq <= 4800000)
 		c_m = 1;
 	else
 		c_m = 2;
 
 	for (i = 0; i < ARRAY_SIZE(cparams); i++) {
-		if (cparams[i].i == c_m && cparams[i].t == i915->mem_freq) {
+		if (cparams[i].i == c_m &&
+		    cparams[i].t == DIV_ROUND_CLOSEST(i915->mem_freq, 1000)) {
 			rps->ips.m = cparams[i].m;
 			rps->ips.c = cparams[i].c;
 			break;
@@ -1000,6 +1001,10 @@ void intel_rps_dec_waiters(struct intel_rps *rps)
 	if (rps_uses_slpc(rps)) {
 		slpc = rps_to_slpc(rps);
 
+		/* Don't decrement num_waiters for req where increment was skipped */
+		if (slpc->power_profile == SLPC_POWER_PROFILES_POWER_SAVING)
+			return;
+
 		intel_guc_slpc_dec_waiters(slpc);
 	} else {
 		atomic_dec(&rps->num_waiters);
@@ -1013,6 +1018,10 @@ void intel_rps_boost(struct i915_request *rq)
 	if (i915_request_signaled(rq) || i915_request_has_waitboost(rq))
 		return;
 
+	/* Waitboost is not needed for contexts marked with a Freq hint */
+	if (test_bit(CONTEXT_LOW_LATENCY, &rq->context->flags))
+		return;
+
 	/* Serializes with i915_request_retire() */
 	if (!test_and_set_bit(I915_FENCE_FLAG_BOOST, &rq->fence.flags)) {
 		struct intel_rps *rps = &READ_ONCE(rq->engine)->gt->rps;
@@ -1020,11 +1029,19 @@ void intel_rps_boost(struct i915_request *rq)
 		if (rps_uses_slpc(rps)) {
 			slpc = rps_to_slpc(rps);
 
-			if (slpc->min_freq_softlimit >= slpc->boost_freq)
+			/* Waitboost should not be done with power saving profile */
+			if (slpc->power_profile == SLPC_POWER_PROFILES_POWER_SAVING)
 				return;
 
 			/* Return if old value is non zero */
 			if (!atomic_fetch_inc(&slpc->num_waiters)) {
+				/*
+				 * Skip queuing boost work if frequency is already boosted,
+				 * but still increment num_waiters.
+				 */
+				if (slpc->min_freq_softlimit >= slpc->boost_freq)
+					return;
+
 				GT_TRACE(rps_to_gt(rps), "boost fence:%llx:%llx\n",
 					 rq->fence.context, rq->fence.seqno);
 				queue_work(rps_to_gt(rps)->i915->unordered_wq,
@@ -1086,11 +1103,7 @@ static u32 intel_rps_read_state_cap(struct intel_rps *rps)
 	struct drm_i915_private *i915 = rps_to_i915(rps);
 	struct intel_uncore *uncore = rps_to_uncore(rps);
 
-	if (IS_PONTEVECCHIO(i915))
-		return intel_uncore_read(uncore, PVC_RP_STATE_CAP);
-	else if (IS_XEHPSDV(i915))
-		return intel_uncore_read(uncore, XEHPSDV_RP_STATE_CAP);
-	else if (IS_GEN9_LP(i915))
+	if (IS_GEN9_LP(i915))
 		return intel_uncore_read(uncore, BXT_RP_STATE_CAP);
 	else
 		return intel_uncore_read(uncore, GEN6_RP_STATE_CAP);

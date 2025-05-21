@@ -27,7 +27,7 @@ void blk_rq_stat_init(struct blk_rq_stat *stat)
 /* src is a per-cpu stat, mean isn't initialized */
 void blk_rq_stat_sum(struct blk_rq_stat *dst, struct blk_rq_stat *src)
 {
-	if (!src->nr_samples)
+	if (dst->nr_samples + src->nr_samples <= dst->nr_samples)
 		return;
 
 	dst->min = min(dst->min, src->min);
@@ -56,9 +56,6 @@ void blk_stat_add(struct request *rq, u64 now)
 	u64 value;
 
 	value = (now >= rq->io_start_time_ns) ? now - rq->io_start_time_ns : 0;
-
-	if (req_op(rq) == REQ_OP_READ || req_op(rq) == REQ_OP_WRITE)
-		blk_throtl_stat_add(rq, value);
 
 	rcu_read_lock();
 	cpu = get_cpu();
@@ -165,7 +162,7 @@ void blk_stat_remove_callback(struct request_queue *q,
 		blk_queue_flag_clear(QUEUE_FLAG_STATS, q);
 	spin_unlock_irqrestore(&q->stats->lock, flags);
 
-	del_timer_sync(&cb->timer);
+	timer_delete_sync(&cb->timer);
 }
 
 static void blk_stat_free_callback_rcu(struct rcu_head *head)

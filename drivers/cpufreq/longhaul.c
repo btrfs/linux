@@ -236,8 +236,9 @@ static void do_powersaver(int cx_address, unsigned int mults_index,
 }
 
 /**
- * longhaul_set_cpu_frequency()
- * @mults_index : bitpattern of the new multiplier.
+ * longhaul_setstate()
+ * @policy: cpufreq_policy structure containing the current policy.
+ * @table_index: index of the frequency within the cpufreq_frequency_table.
  *
  * Sets a new clock ratio.
  */
@@ -905,7 +906,6 @@ static struct cpufreq_driver longhaul_driver = {
 	.get	= longhaul_get,
 	.init	= longhaul_cpu_init,
 	.name	= "longhaul",
-	.attr	= cpufreq_generic_attr,
 };
 
 static const struct x86_cpu_id longhaul_id[] = {

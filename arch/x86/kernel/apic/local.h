@@ -16,8 +16,6 @@
 /* X2APIC */
 void __x2apic_send_IPI_dest(unsigned int apicid, int vector, unsigned int dest);
 u32 x2apic_get_apic_id(u32 id);
-u32 x2apic_set_apic_id(u32 id);
-u32 x2apic_phys_pkg_id(u32 initial_apicid, int index_msb);
 
 void x2apic_send_IPI_all(int vector);
 void x2apic_send_IPI_allbutself(int vector);
@@ -63,24 +61,8 @@ void default_send_IPI_allbutself(int vector);
 void default_send_IPI_all(int vector);
 void default_send_IPI_self(int vector);
 
-bool default_apic_id_registered(void);
-bool default_check_apicid_used(physid_mask_t *map, u32 apicid);
-
 #ifdef CONFIG_X86_32
 void default_send_IPI_mask_sequence_logical(const struct cpumask *mask, int vector);
 void default_send_IPI_mask_allbutself_logical(const struct cpumask *mask, int vector);
 void default_send_IPI_mask_logical(const struct cpumask *mask, int vector);
-void x86_32_probe_bigsmp_early(void);
-void x86_32_install_bigsmp(void);
-#else
-static inline void x86_32_probe_bigsmp_early(void) { }
-static inline void x86_32_install_bigsmp(void) { }
-#endif
-
-#ifdef CONFIG_X86_BIGSMP
-bool apic_bigsmp_possible(bool cmdline_selected);
-void apic_bigsmp_force(void);
-#else
-static inline bool apic_bigsmp_possible(bool cmdline_selected) { return false; };
-static inline void apic_bigsmp_force(void) { }
 #endif

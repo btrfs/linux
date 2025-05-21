@@ -47,6 +47,7 @@
 #include <linux/kcmp.h>
 #include <sys/resource.h>
 #include <sys/capability.h>
+#include <linux/perf_event.h>
 
 #include <unistd.h>
 #include <sys/syscall.h>
@@ -60,10 +61,16 @@
 #define SKIP(s, ...)	XFAIL(s, ##__VA_ARGS__)
 #endif
 
+#ifndef MIN
 #define MIN(X, Y) ((X) < (Y) ? (X) : (Y))
+#endif
 
 #ifndef PR_SET_PTRACER
 # define PR_SET_PTRACER 0x59616d61
+#endif
+
+#ifndef noinline
+#define noinline __attribute__((noinline))
 #endif
 
 #ifndef PR_SET_NO_NEW_PRIVS
@@ -145,6 +152,12 @@ struct seccomp_data {
 # else
 #  warning "seccomp syscall number unknown for this architecture"
 #  define __NR_seccomp 0xffff
+# endif
+#endif
+
+#ifndef __NR_uretprobe
+# if defined(__x86_64__)
+#  define __NR_uretprobe 335
 # endif
 #endif
 
@@ -784,7 +797,7 @@ void *kill_thread(void *data)
 	bool die = (bool)data;
 
 	if (die) {
-		prctl(PR_GET_SECCOMP, 0, 0, 0, 0);
+		syscall(__NR_getpid);
 		return (void *)SIBLING_EXIT_FAILURE;
 	}
 
@@ -803,11 +816,11 @@ void kill_thread_or_group(struct __test_metadata *_metadata,
 {
 	pthread_t thread;
 	void *status;
-	/* Kill only when calling __NR_prctl. */
+	/* Kill only when calling __NR_getpid. */
 	struct sock_filter filter_thread[] = {
 		BPF_STMT(BPF_LD|BPF_W|BPF_ABS,
 			offsetof(struct seccomp_data, nr)),
-		BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K, __NR_prctl, 0, 1),
+		BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K, __NR_getpid, 0, 1),
 		BPF_STMT(BPF_RET|BPF_K, SECCOMP_RET_KILL_THREAD),
 		BPF_STMT(BPF_RET|BPF_K, SECCOMP_RET_ALLOW),
 	};
@@ -819,7 +832,7 @@ void kill_thread_or_group(struct __test_metadata *_metadata,
 	struct sock_filter filter_process[] = {
 		BPF_STMT(BPF_LD|BPF_W|BPF_ABS,
 			offsetof(struct seccomp_data, nr)),
-		BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K, __NR_prctl, 0, 1),
+		BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K, __NR_getpid, 0, 1),
 		BPF_STMT(BPF_RET|BPF_K, kill),
 		BPF_STMT(BPF_RET|BPF_K, SECCOMP_RET_ALLOW),
 	};
@@ -1576,7 +1589,7 @@ void start_tracer(struct __test_metadata *_metadata, int fd, pid_t tracee,
 		ASSERT_EQ(0, ret);
 	}
 	/* Directly report the status of our test harness results. */
-	syscall(__NR_exit, _metadata->passed ? EXIT_SUCCESS : EXIT_FAILURE);
+	syscall(__NR_exit, _metadata->exit_code);
 }
 
 /* Common tracer setup/teardown functions. */
@@ -1623,7 +1636,7 @@ void teardown_trace_fixture(struct __test_metadata *_metadata,
 		ASSERT_EQ(0, kill(tracer, SIGUSR1));
 		ASSERT_EQ(tracer, waitpid(tracer, &status, 0));
 		if (WEXITSTATUS(status))
-			_metadata->passed = 0;
+			_metadata->exit_code = KSFT_FAIL;
 	}
 }
 
@@ -3088,8 +3101,7 @@ TEST(syscall_restart)
 		}
 
 		/* Directly report the status of our test harness results. */
-		syscall(__NR_exit, _metadata->passed ? EXIT_SUCCESS
-						     : EXIT_FAILURE);
+		syscall(__NR_exit, _metadata->exit_code);
 	}
 	EXPECT_EQ(0, close(pipefd[0]));
 
@@ -3174,7 +3186,7 @@ TEST(syscall_restart)
 
 	ASSERT_EQ(child_pid, waitpid(child_pid, &status, 0));
 	if (WIFSIGNALED(status) || WEXITSTATUS(status))
-		_metadata->passed = 0;
+		_metadata->exit_code = KSFT_FAIL;
 }
 
 TEST_SIGNAL(filter_flag_log, SIGSYS)
@@ -3709,7 +3721,12 @@ TEST(user_notification_sibling_pid_ns)
 	ASSERT_GE(pid, 0);
 
 	if (pid == 0) {
-		ASSERT_EQ(unshare(CLONE_NEWPID), 0);
+		ASSERT_EQ(unshare(CLONE_NEWPID), 0) {
+			if (errno == EPERM)
+				SKIP(return, "CLONE_NEWPID requires CAP_SYS_ADMIN");
+			else if (errno == EINVAL)
+				SKIP(return, "CLONE_NEWPID is invalid (missing CONFIG_PID_NS?)");
+		}
 
 		pid2 = fork();
 		ASSERT_GE(pid2, 0);
@@ -3727,6 +3744,8 @@ TEST(user_notification_sibling_pid_ns)
 	ASSERT_EQ(unshare(CLONE_NEWPID), 0) {
 		if (errno == EPERM)
 			SKIP(return, "CLONE_NEWPID requires CAP_SYS_ADMIN");
+		else if (errno == EINVAL)
+			SKIP(return, "CLONE_NEWPID is invalid (missing CONFIG_PID_NS?)");
 	}
 	ASSERT_EQ(errno, 0);
 
@@ -3948,6 +3967,60 @@ TEST(user_notification_filter_empty)
 	EXPECT_GT((pollfd.revents & POLLHUP) ?: 0, 0);
 }
 
+TEST(user_ioctl_notification_filter_empty)
+{
+	pid_t pid;
+	long ret;
+	int status, p[2];
+	struct __clone_args args = {
+		.flags = CLONE_FILES,
+		.exit_signal = SIGCHLD,
+	};
+	struct seccomp_notif req = {};
+
+	ret = prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
+	ASSERT_EQ(0, ret) {
+		TH_LOG("Kernel does not support PR_SET_NO_NEW_PRIVS!");
+	}
+
+	if (__NR_clone3 < 0)
+		SKIP(return, "Test not built with clone3 support");
+
+	ASSERT_EQ(0, pipe(p));
+
+	pid = sys_clone3(&args, sizeof(args));
+	ASSERT_GE(pid, 0);
+
+	if (pid == 0) {
+		int listener;
+
+		listener = user_notif_syscall(__NR_mknodat, SECCOMP_FILTER_FLAG_NEW_LISTENER);
+		if (listener < 0)
+			_exit(EXIT_FAILURE);
+
+		if (dup2(listener, 200) != 200)
+			_exit(EXIT_FAILURE);
+		close(p[1]);
+		close(listener);
+		sleep(1);
+
+		_exit(EXIT_SUCCESS);
+	}
+	if (read(p[0], &status, 1) != 0)
+		_exit(EXIT_SUCCESS);
+	close(p[0]);
+	/*
+	 * The seccomp filter has become unused so we should be notified once
+	 * the kernel gets around to cleaning up task struct.
+	 */
+	EXPECT_EQ(ioctl(200, SECCOMP_IOCTL_NOTIF_RECV, &req), -1);
+	EXPECT_EQ(errno, ENOENT);
+
+	EXPECT_EQ(waitpid(pid, &status, 0), pid);
+	EXPECT_EQ(true, WIFEXITED(status));
+	EXPECT_EQ(0, WEXITSTATUS(status));
+}
+
 static void *do_thread(void *data)
 {
 	return NULL;
@@ -4037,6 +4110,16 @@ TEST(user_notification_filter_empty_threaded)
 	EXPECT_GT((pollfd.revents & POLLHUP) ?: 0, 0);
 }
 
+
+int get_next_fd(int prev_fd)
+{
+	for (int i = prev_fd + 1; i < FD_SETSIZE; ++i) {
+		if (fcntl(i, F_GETFD) == -1)
+			return i;
+	}
+	_exit(EXIT_FAILURE);
+}
+
 TEST(user_notification_addfd)
 {
 	pid_t pid;
@@ -4053,7 +4136,7 @@ TEST(user_notification_addfd)
 	/* There may be arbitrary already-open fds at test start. */
 	memfd = memfd_create("test", 0);
 	ASSERT_GE(memfd, 0);
-	nextfd = memfd + 1;
+	nextfd = get_next_fd(memfd);
 
 	ret = prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
 	ASSERT_EQ(0, ret) {
@@ -4064,7 +4147,8 @@ TEST(user_notification_addfd)
 	/* Check that the basic notification machinery works */
 	listener = user_notif_syscall(__NR_getppid,
 				      SECCOMP_FILTER_FLAG_NEW_LISTENER);
-	ASSERT_EQ(listener, nextfd++);
+	ASSERT_EQ(listener, nextfd);
+	nextfd = get_next_fd(nextfd);
 
 	pid = fork();
 	ASSERT_GE(pid, 0);
@@ -4119,14 +4203,16 @@ TEST(user_notification_addfd)
 
 	/* Verify we can set an arbitrary remote fd */
 	fd = ioctl(listener, SECCOMP_IOCTL_NOTIF_ADDFD, &addfd);
-	EXPECT_EQ(fd, nextfd++);
+	EXPECT_EQ(fd, nextfd);
+	nextfd = get_next_fd(nextfd);
 	EXPECT_EQ(filecmp(getpid(), pid, memfd, fd), 0);
 
 	/* Verify we can set an arbitrary remote fd with large size */
 	memset(&big, 0x0, sizeof(big));
 	big.addfd = addfd;
 	fd = ioctl(listener, SECCOMP_IOCTL_NOTIF_ADDFD_BIG, &big);
-	EXPECT_EQ(fd, nextfd++);
+	EXPECT_EQ(fd, nextfd);
+	nextfd = get_next_fd(nextfd);
 
 	/* Verify we can set a specific remote fd */
 	addfd.newfd = 42;
@@ -4164,7 +4250,8 @@ TEST(user_notification_addfd)
 	 * Child has earlier "low" fds and now 42, so we expect the next
 	 * lowest available fd to be assigned here.
 	 */
-	EXPECT_EQ(fd, nextfd++);
+	EXPECT_EQ(fd, nextfd);
+	nextfd = get_next_fd(nextfd);
 	ASSERT_EQ(filecmp(getpid(), pid, memfd, fd), 0);
 
 	/*
@@ -4733,6 +4820,277 @@ TEST(user_notification_wait_killable_fatal)
 	EXPECT_EQ(waitpid(pid, &status, 0), pid);
 	EXPECT_EQ(true, WIFSIGNALED(status));
 	EXPECT_EQ(SIGTERM, WTERMSIG(status));
+}
+
+struct tsync_vs_thread_leader_args {
+	pthread_t leader;
+};
+
+static void *tsync_vs_dead_thread_leader_sibling(void *_args)
+{
+	struct sock_filter allow_filter[] = {
+		BPF_STMT(BPF_RET|BPF_K, SECCOMP_RET_ALLOW),
+	};
+	struct sock_fprog allow_prog = {
+		.len = (unsigned short)ARRAY_SIZE(allow_filter),
+		.filter = allow_filter,
+	};
+	struct tsync_vs_thread_leader_args *args = _args;
+	void *retval;
+	long ret;
+
+	ret = pthread_join(args->leader, &retval);
+	if (ret)
+		exit(1);
+	if (retval != _args)
+		exit(2);
+	ret = seccomp(SECCOMP_SET_MODE_FILTER, SECCOMP_FILTER_FLAG_TSYNC, &allow_prog);
+	if (ret)
+		exit(3);
+
+	exit(0);
+}
+
+/*
+ * Ensure that a dead thread leader doesn't prevent installing new filters with
+ * SECCOMP_FILTER_FLAG_TSYNC from other threads.
+ */
+TEST(tsync_vs_dead_thread_leader)
+{
+	int status;
+	pid_t pid;
+	long ret;
+
+	ret = prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
+	ASSERT_EQ(0, ret) {
+		TH_LOG("Kernel does not support PR_SET_NO_NEW_PRIVS!");
+	}
+
+	pid = fork();
+	ASSERT_GE(pid, 0);
+
+	if (pid == 0) {
+		struct sock_filter allow_filter[] = {
+			BPF_STMT(BPF_RET|BPF_K, SECCOMP_RET_ALLOW),
+		};
+		struct sock_fprog allow_prog = {
+			.len = (unsigned short)ARRAY_SIZE(allow_filter),
+			.filter = allow_filter,
+		};
+		struct  tsync_vs_thread_leader_args *args;
+		pthread_t sibling;
+
+		args = malloc(sizeof(*args));
+		ASSERT_NE(NULL, args);
+		args->leader = pthread_self();
+
+		ret = pthread_create(&sibling, NULL,
+				     tsync_vs_dead_thread_leader_sibling, args);
+		ASSERT_EQ(0, ret);
+
+		/* Install a new filter just to the leader thread. */
+		ret = seccomp(SECCOMP_SET_MODE_FILTER, 0, &allow_prog);
+		ASSERT_EQ(0, ret);
+		pthread_exit(args);
+		exit(1);
+	}
+
+	EXPECT_EQ(pid, waitpid(pid, &status, 0));
+	EXPECT_EQ(0, status);
+}
+
+noinline int probed(void)
+{
+	return 1;
+}
+
+static int parse_uint_from_file(const char *file, const char *fmt)
+{
+	int err = -1, ret;
+	FILE *f;
+
+	f = fopen(file, "re");
+	if (f) {
+		err = fscanf(f, fmt, &ret);
+		fclose(f);
+	}
+	return err == 1 ? ret : err;
+}
+
+static int determine_uprobe_perf_type(void)
+{
+	const char *file = "/sys/bus/event_source/devices/uprobe/type";
+
+	return parse_uint_from_file(file, "%d\n");
+}
+
+static int determine_uprobe_retprobe_bit(void)
+{
+	const char *file = "/sys/bus/event_source/devices/uprobe/format/retprobe";
+
+	return parse_uint_from_file(file, "config:%d\n");
+}
+
+static ssize_t get_uprobe_offset(const void *addr)
+{
+	size_t start, base, end;
+	bool found = false;
+	char buf[256];
+	FILE *f;
+
+	f = fopen("/proc/self/maps", "r");
+	if (!f)
+		return -1;
+
+	while (fscanf(f, "%zx-%zx %s %zx %*[^\n]\n", &start, &end, buf, &base) == 4) {
+		if (buf[2] == 'x' && (uintptr_t)addr >= start && (uintptr_t)addr < end) {
+			found = true;
+			break;
+		}
+	}
+	fclose(f);
+	return found ? (uintptr_t)addr - start + base : -1;
+}
+
+FIXTURE(URETPROBE) {
+	int fd;
+};
+
+FIXTURE_VARIANT(URETPROBE) {
+	/*
+	 * All of the URETPROBE behaviors can be tested with either
+	 * uretprobe attached or not
+	 */
+	bool attach;
+};
+
+FIXTURE_VARIANT_ADD(URETPROBE, attached) {
+	.attach = true,
+};
+
+FIXTURE_VARIANT_ADD(URETPROBE, not_attached) {
+	.attach = false,
+};
+
+FIXTURE_SETUP(URETPROBE)
+{
+	const size_t attr_sz = sizeof(struct perf_event_attr);
+	struct perf_event_attr attr;
+	ssize_t offset;
+	int type, bit;
+
+#ifndef __NR_uretprobe
+	SKIP(return, "__NR_uretprobe syscall not defined");
+#endif
+
+	if (!variant->attach)
+		return;
+
+	memset(&attr, 0, attr_sz);
+
+	type = determine_uprobe_perf_type();
+	ASSERT_GE(type, 0);
+	bit = determine_uprobe_retprobe_bit();
+	ASSERT_GE(bit, 0);
+	offset = get_uprobe_offset(probed);
+	ASSERT_GE(offset, 0);
+
+	attr.config |= 1 << bit;
+	attr.size = attr_sz;
+	attr.type = type;
+	attr.config1 = ptr_to_u64("/proc/self/exe");
+	attr.config2 = offset;
+
+	self->fd = syscall(__NR_perf_event_open, &attr,
+			   getpid() /* pid */, -1 /* cpu */, -1 /* group_fd */,
+			   PERF_FLAG_FD_CLOEXEC);
+}
+
+FIXTURE_TEARDOWN(URETPROBE)
+{
+	/* we could call close(self->fd), but we'd need extra filter for
+	 * that and since we are calling _exit right away..
+	 */
+}
+
+static int run_probed_with_filter(struct sock_fprog *prog)
+{
+	if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) ||
+	    seccomp(SECCOMP_SET_MODE_FILTER, 0, prog)) {
+		return -1;
+	}
+
+	probed();
+	return 0;
+}
+
+TEST_F(URETPROBE, uretprobe_default_allow)
+{
+	struct sock_filter filter[] = {
+		BPF_STMT(BPF_RET|BPF_K, SECCOMP_RET_ALLOW),
+	};
+	struct sock_fprog prog = {
+		.len = (unsigned short)ARRAY_SIZE(filter),
+		.filter = filter,
+	};
+
+	ASSERT_EQ(0, run_probed_with_filter(&prog));
+}
+
+TEST_F(URETPROBE, uretprobe_default_block)
+{
+	struct sock_filter filter[] = {
+		BPF_STMT(BPF_LD|BPF_W|BPF_ABS,
+			offsetof(struct seccomp_data, nr)),
+		BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K, __NR_exit_group, 1, 0),
+		BPF_STMT(BPF_RET|BPF_K, SECCOMP_RET_KILL),
+		BPF_STMT(BPF_RET|BPF_K, SECCOMP_RET_ALLOW),
+	};
+	struct sock_fprog prog = {
+		.len = (unsigned short)ARRAY_SIZE(filter),
+		.filter = filter,
+	};
+
+	ASSERT_EQ(0, run_probed_with_filter(&prog));
+}
+
+TEST_F(URETPROBE, uretprobe_block_uretprobe_syscall)
+{
+	struct sock_filter filter[] = {
+		BPF_STMT(BPF_LD|BPF_W|BPF_ABS,
+			offsetof(struct seccomp_data, nr)),
+#ifdef __NR_uretprobe
+		BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K, __NR_uretprobe, 0, 1),
+#endif
+		BPF_STMT(BPF_RET|BPF_K, SECCOMP_RET_KILL),
+		BPF_STMT(BPF_RET|BPF_K, SECCOMP_RET_ALLOW),
+	};
+	struct sock_fprog prog = {
+		.len = (unsigned short)ARRAY_SIZE(filter),
+		.filter = filter,
+	};
+
+	ASSERT_EQ(0, run_probed_with_filter(&prog));
+}
+
+TEST_F(URETPROBE, uretprobe_default_block_with_uretprobe_syscall)
+{
+	struct sock_filter filter[] = {
+		BPF_STMT(BPF_LD|BPF_W|BPF_ABS,
+			offsetof(struct seccomp_data, nr)),
+#ifdef __NR_uretprobe
+		BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K, __NR_uretprobe, 2, 0),
+#endif
+		BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K, __NR_exit_group, 1, 0),
+		BPF_STMT(BPF_RET|BPF_K, SECCOMP_RET_KILL),
+		BPF_STMT(BPF_RET|BPF_K, SECCOMP_RET_ALLOW),
+	};
+	struct sock_fprog prog = {
+		.len = (unsigned short)ARRAY_SIZE(filter),
+		.filter = filter,
+	};
+
+	ASSERT_EQ(0, run_probed_with_filter(&prog));
 }
 
 /*

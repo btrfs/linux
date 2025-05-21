@@ -90,7 +90,7 @@ static int clear_uie(struct rtc_device *rtc)
 		rtc->stop_uie_polling = 1;
 		if (rtc->uie_timer_active) {
 			spin_unlock_irq(&rtc->irq_lock);
-			del_timer_sync(&rtc->uie_timer);
+			timer_delete_sync(&rtc->uie_timer);
 			spin_lock_irq(&rtc->irq_lock);
 			rtc->uie_timer_active = 0;
 		}
@@ -523,7 +523,6 @@ static int rtc_dev_release(struct inode *inode, struct file *file)
 
 static const struct file_operations rtc_dev_fops = {
 	.owner		= THIS_MODULE,
-	.llseek		= no_llseek,
 	.read		= rtc_dev_read,
 	.poll		= rtc_dev_poll,
 	.unlocked_ioctl	= rtc_dev_ioctl,

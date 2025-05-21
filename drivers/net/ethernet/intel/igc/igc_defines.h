@@ -4,6 +4,8 @@
 #ifndef _IGC_DEFINES_H_
 #define _IGC_DEFINES_H_
 
+#include <linux/bitfield.h>
+
 /* Number of Transmit and Receive Descriptors must be a multiple of 8 */
 #define REQ_TX_DESCRIPTOR_MULTIPLE	8
 #define REQ_RX_DESCRIPTOR_MULTIPLE	8
@@ -176,7 +178,6 @@
 
 /* PHY GPY 211 registers */
 #define STANDARD_AN_REG_MASK	0x0007 /* MMD */
-#define ANEG_MULTIGBT_AN_CTRL	0x0020 /* MULTI GBT AN Control Register */
 #define MMD_DEVADDR_SHIFT	16     /* Shift MMD to higher bits */
 #define CR_2500T_FD_CAPS	0x0080 /* Advertise 2500T FD capability */
 
@@ -404,6 +405,12 @@
 #define IGC_DTXMXPKTSZ_TSN	0x19 /* 1600 bytes of max TX DMA packet size */
 #define IGC_DTXMXPKTSZ_DEFAULT	0x98 /* 9728-byte Jumbo frames */
 
+/* Retry Buffer Control */
+#define IGC_RETX_CTL			0x041C
+#define IGC_RETX_CTL_WATERMARK_MASK	0xF
+#define IGC_RETX_CTL_QBVFULLTH_SHIFT	8 /* QBV Retry Buffer Full Threshold */
+#define IGC_RETX_CTL_QBVFULLEN	0x1000 /* Enable QBV Retry Buffer Full Threshold */
+
 /* Transmit Scheduling Latency */
 /* Latency between transmission scheduling (LaunchTime) and the time
  * the packet is transmitted to the network in nanosecond.
@@ -547,6 +554,15 @@
 
 #define IGC_MAX_SR_QUEUES		2
 
+#define IGC_TXARB_TXQ_PRIO_0_MASK	GENMASK(1, 0)
+#define IGC_TXARB_TXQ_PRIO_1_MASK	GENMASK(3, 2)
+#define IGC_TXARB_TXQ_PRIO_2_MASK	GENMASK(5, 4)
+#define IGC_TXARB_TXQ_PRIO_3_MASK	GENMASK(7, 6)
+#define IGC_TXARB_TXQ_PRIO_0(x)		FIELD_PREP(IGC_TXARB_TXQ_PRIO_0_MASK, (x))
+#define IGC_TXARB_TXQ_PRIO_1(x)		FIELD_PREP(IGC_TXARB_TXQ_PRIO_1_MASK, (x))
+#define IGC_TXARB_TXQ_PRIO_2(x)		FIELD_PREP(IGC_TXARB_TXQ_PRIO_2_MASK, (x))
+#define IGC_TXARB_TXQ_PRIO_3(x)		FIELD_PREP(IGC_TXARB_TXQ_PRIO_3_MASK, (x))
+
 /* Receive Checksum Control */
 #define IGC_RXCSUM_CRCOFL	0x00000800   /* CRC32 offload enable */
 #define IGC_RXCSUM_PCSD		0x00002000   /* packet checksum disabled */
@@ -558,7 +574,10 @@
 #define IGC_PTM_CTRL_SHRT_CYC(usec)	(((usec) & 0x3f) << 2)
 #define IGC_PTM_CTRL_PTM_TO(usec)	(((usec) & 0xff) << 8)
 
-#define IGC_PTM_SHORT_CYC_DEFAULT	1   /* Default short cycle interval */
+/* A short cycle time of 1us theoretically should work, but appears to be too
+ * short in practice.
+ */
+#define IGC_PTM_SHORT_CYC_DEFAULT	4   /* Default short cycle interval */
 #define IGC_PTM_CYC_TIME_DEFAULT	5   /* Default PTM cycle time */
 #define IGC_PTM_TIMEOUT_DEFAULT		255 /* Default timeout for PTM errors */
 
@@ -577,6 +596,7 @@
 #define IGC_PTM_STAT_T4M1_OVFL		BIT(3) /* T4 minus T1 overflow */
 #define IGC_PTM_STAT_ADJUST_1ST		BIT(4) /* 1588 timer adjusted during 1st PTM cycle */
 #define IGC_PTM_STAT_ADJUST_CYC		BIT(5) /* 1588 timer adjusted during non-1st PTM cycle */
+#define IGC_PTM_STAT_ALL		GENMASK(5, 0) /* Used to clear all status */
 
 /* PCIe PTM Cycle Control */
 #define IGC_PTM_CYCLE_CTRL_CYC_TIME(msec)	((msec) & 0x3ff) /* PTM Cycle Time (msec) */
@@ -634,6 +654,16 @@
 #define IGC_MDIC_OP_READ	0x08000000
 #define IGC_MDIC_READY		0x10000000
 #define IGC_MDIC_ERROR		0x40000000
+
+/* EEE Link Ability */
+#define IGC_EEE_2500BT_MASK	BIT(0)
+#define IGC_EEE_1000BT_MASK	BIT(2)
+#define IGC_EEE_100BT_MASK	BIT(1)
+
+/* EEE Link-Partner Ability */
+#define IGC_LP_EEE_2500BT_MASK	BIT(0)
+#define IGC_LP_EEE_1000BT_MASK	BIT(2)
+#define IGC_LP_EEE_100BT_MASK	BIT(1)
 
 #define IGC_N0_QUEUE		-1
 

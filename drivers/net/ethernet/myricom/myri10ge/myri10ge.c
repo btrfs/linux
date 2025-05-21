@@ -2482,7 +2482,7 @@ static int myri10ge_close(struct net_device *dev)
 	if (mgp->ss[0].tx.req_bytes == NULL)
 		return 0;
 
-	del_timer_sync(&mgp->watchdog_timer);
+	timer_delete_sync(&mgp->watchdog_timer);
 	mgp->running = MYRI10GE_ETH_STOPPING;
 	for (i = 0; i < mgp->num_slices; i++)
 		napi_disable(&mgp->ss[i].napi);
@@ -3036,11 +3036,11 @@ static int myri10ge_change_mtu(struct net_device *dev, int new_mtu)
 		/* if we change the mtu on an active device, we must
 		 * reset the device so the firmware sees the change */
 		myri10ge_close(dev);
-		dev->mtu = new_mtu;
+		WRITE_ONCE(dev->mtu, new_mtu);
 		myri10ge_open(dev);
-	} else
-		dev->mtu = new_mtu;
-
+	} else {
+		WRITE_ONCE(dev->mtu, new_mtu);
+	}
 	return 0;
 }
 

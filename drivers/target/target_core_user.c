@@ -361,7 +361,7 @@ static const struct genl_multicast_group tcmu_mcgrps[] = {
 	[TCMU_MCGRP_CONFIG] = { .name = "config", },
 };
 
-static struct nla_policy tcmu_attr_policy[TCMU_ATTR_MAX+1] = {
+static const struct nla_policy tcmu_attr_policy[TCMU_ATTR_MAX + 1] = {
 	[TCMU_ATTR_DEVICE]	= { .type = NLA_STRING },
 	[TCMU_ATTR_MINOR]	= { .type = NLA_U32 },
 	[TCMU_ATTR_CMD_STATUS]	= { .type = NLA_S32 },
@@ -1232,7 +1232,7 @@ static void tcmu_set_next_deadline(struct list_head *queue,
 		cmd = list_first_entry(queue, struct tcmu_cmd, queue_entry);
 		mod_timer(timer, cmd->deadline);
 	} else
-		del_timer(timer);
+		timer_delete(timer);
 }
 
 static int
@@ -2130,7 +2130,7 @@ static int tcmu_netlink_event_send(struct tcmu_dev *udev,
 	}
 
 	ret = genlmsg_multicast_allns(&tcmu_genl_family, skb, 0,
-				      TCMU_MCGRP_CONFIG, GFP_KERNEL);
+				      TCMU_MCGRP_CONFIG);
 
 	/* Wait during an add as the listener may not be up yet */
 	if (ret == 0 ||
@@ -2321,8 +2321,8 @@ static void tcmu_destroy_device(struct se_device *dev)
 {
 	struct tcmu_dev *udev = TCMU_DEV(dev);
 
-	del_timer_sync(&udev->cmd_timer);
-	del_timer_sync(&udev->qfull_timer);
+	timer_delete_sync(&udev->cmd_timer);
+	timer_delete_sync(&udev->qfull_timer);
 
 	mutex_lock(&root_udev_mutex);
 	list_del(&udev->node);
@@ -2408,7 +2408,7 @@ static void tcmu_reset_ring(struct tcmu_dev *udev, u8 err_level)
 	tcmu_flush_dcache_range(mb, sizeof(*mb));
 	clear_bit(TCMU_DEV_BIT_BROKEN, &udev->flags);
 
-	del_timer(&udev->cmd_timer);
+	timer_delete(&udev->cmd_timer);
 
 	/*
 	 * ring is empty and qfull queue never contains aborted commands.
@@ -2430,7 +2430,7 @@ enum {
 	Opt_cmd_ring_size_mb, Opt_err,
 };
 
-static match_table_t tokens = {
+static const match_table_t tokens = {
 	{Opt_dev_config, "dev_config=%s"},
 	{Opt_dev_size, "dev_size=%s"},
 	{Opt_hw_block_size, "hw_block_size=%d"},

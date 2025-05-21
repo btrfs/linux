@@ -39,9 +39,11 @@
 #include <linux/pfn_t.h>
 #include <linux/slab.h>
 #include <linux/mm.h>
+#include <linux/highmem.h>
 #include <linux/fs.h>
 #include <linux/rbtree.h>
 
+#include <asm/cpu_device_id.h>
 #include <asm/cacheflush.h>
 #include <asm/cacheinfo.h>
 #include <asm/processor.h>
@@ -103,7 +105,7 @@ __setup("debugpat", pat_debug_setup);
 
 #ifdef CONFIG_X86_PAT
 /*
- * X86 PAT uses page flags arch_1 and uncached together to keep track of
+ * X86 PAT uses page flags arch_1 and arch_2 together to keep track of
  * memory type of pages that have backing page struct.
  *
  * X86 PAT supports 4 different memory types:
@@ -117,9 +119,9 @@ __setup("debugpat", pat_debug_setup);
 
 #define _PGMT_WB		0
 #define _PGMT_WC		(1UL << PG_arch_1)
-#define _PGMT_UC_MINUS		(1UL << PG_uncached)
-#define _PGMT_WT		(1UL << PG_uncached | 1UL << PG_arch_1)
-#define _PGMT_MASK		(1UL << PG_uncached | 1UL << PG_arch_1)
+#define _PGMT_UC_MINUS		(1UL << PG_arch_2)
+#define _PGMT_WT		(1UL << PG_arch_2 | 1UL << PG_arch_1)
+#define _PGMT_MASK		(1UL << PG_arch_2 | 1UL << PG_arch_1)
 #define _PGMT_CLEAR_MASK	(~_PGMT_MASK)
 
 static inline enum page_cache_mode get_page_memtype(struct page *pg)
@@ -175,15 +177,6 @@ static inline void set_page_memtype(struct page *pg,
 }
 #endif
 
-enum {
-	PAT_UC = 0,		/* uncached */
-	PAT_WC = 1,		/* Write combining */
-	PAT_WT = 4,		/* Write Through */
-	PAT_WP = 5,		/* Write Protected */
-	PAT_WB = 6,		/* Write Back (default) */
-	PAT_UC_MINUS = 7,	/* UC, but can be overridden by MTRR */
-};
-
 #define CM(c) (_PAGE_CACHE_MODE_ ## c)
 
 static enum page_cache_mode __init pat_get_cache_mode(unsigned int pat_val,
@@ -193,13 +186,13 @@ static enum page_cache_mode __init pat_get_cache_mode(unsigned int pat_val,
 	char *cache_mode;
 
 	switch (pat_val) {
-	case PAT_UC:       cache = CM(UC);       cache_mode = "UC  "; break;
-	case PAT_WC:       cache = CM(WC);       cache_mode = "WC  "; break;
-	case PAT_WT:       cache = CM(WT);       cache_mode = "WT  "; break;
-	case PAT_WP:       cache = CM(WP);       cache_mode = "WP  "; break;
-	case PAT_WB:       cache = CM(WB);       cache_mode = "WB  "; break;
-	case PAT_UC_MINUS: cache = CM(UC_MINUS); cache_mode = "UC- "; break;
-	default:           cache = CM(WB);       cache_mode = "WB  "; break;
+	case X86_MEMTYPE_UC:       cache = CM(UC);       cache_mode = "UC  "; break;
+	case X86_MEMTYPE_WC:       cache = CM(WC);       cache_mode = "WC  "; break;
+	case X86_MEMTYPE_WT:       cache = CM(WT);       cache_mode = "WT  "; break;
+	case X86_MEMTYPE_WP:       cache = CM(WP);       cache_mode = "WP  "; break;
+	case X86_MEMTYPE_WB:       cache = CM(WB);       cache_mode = "WB  "; break;
+	case X86_MEMTYPE_UC_MINUS: cache = CM(UC_MINUS); cache_mode = "UC- "; break;
+	default:                   cache = CM(WB);       cache_mode = "WB  "; break;
 	}
 
 	memcpy(msg, cache_mode, 4);
@@ -240,6 +233,8 @@ void pat_cpu_init(void)
 	}
 
 	wrmsrl(MSR_IA32_CR_PAT, pat_msr_val);
+
+	__flush_tlb_all();
 }
 
 /**
@@ -254,12 +249,6 @@ void pat_cpu_init(void)
 void __init pat_bp_init(void)
 {
 	struct cpuinfo_x86 *c = &boot_cpu_data;
-#define PAT(p0, p1, p2, p3, p4, p5, p6, p7)			\
-	(((u64)PAT_ ## p0) | ((u64)PAT_ ## p1 << 8) |		\
-	((u64)PAT_ ## p2 << 16) | ((u64)PAT_ ## p3 << 24) |	\
-	((u64)PAT_ ## p4 << 32) | ((u64)PAT_ ## p5 << 40) |	\
-	((u64)PAT_ ## p6 << 48) | ((u64)PAT_ ## p7 << 56))
-
 
 	if (!IS_ENABLED(CONFIG_X86_PAT))
 		pr_info_once("x86/PAT: PAT support disabled because CONFIG_X86_PAT is disabled in the kernel.\n");
@@ -290,26 +279,20 @@ void __init pat_bp_init(void)
 		 * NOTE: When WC or WP is used, it is redirected to UC- per
 		 * the default setup in __cachemode2pte_tbl[].
 		 */
-		pat_msr_val = PAT(WB, WT, UC_MINUS, UC, WB, WT, UC_MINUS, UC);
+		pat_msr_val = PAT_VALUE(WB, WT, UC_MINUS, UC, WB, WT, UC_MINUS, UC);
 	}
 
 	/*
 	 * Xen PV doesn't allow to set PAT MSR, but all cache modes are
 	 * supported.
-	 * When running as TDX guest setting the PAT MSR won't work either
-	 * due to the requirement to set CR0.CD when doing so. Rely on
-	 * firmware to have set the PAT MSR correctly.
 	 */
-	if (pat_disabled ||
-	    cpu_feature_enabled(X86_FEATURE_XENPV) ||
-	    cpu_feature_enabled(X86_FEATURE_TDX_GUEST)) {
+	if (pat_disabled || cpu_feature_enabled(X86_FEATURE_XENPV)) {
 		init_cache_modes(pat_msr_val);
 		return;
 	}
 
-	if ((c->x86_vendor == X86_VENDOR_INTEL) &&
-	    (((c->x86 == 0x6) && (c->x86_model <= 0xd)) ||
-	     ((c->x86 == 0xf) && (c->x86_model <= 0x6)))) {
+	if ((c->x86_vfm >= INTEL_PENTIUM_PRO   && c->x86_vfm <= INTEL_PENTIUM_M_DOTHAN) ||
+	    (c->x86_vfm >= INTEL_P4_WILLAMETTE && c->x86_vfm <= INTEL_P4_CEDARMILL)) {
 		/*
 		 * PAT support with the lower four entries. Intel Pentium 2,
 		 * 3, M, and 4 are affected by PAT errata, which makes the
@@ -330,7 +313,7 @@ void __init pat_bp_init(void)
 		 * NOTE: When WT or WP is used, it is redirected to UC- per
 		 * the default setup in __cachemode2pte_tbl[].
 		 */
-		pat_msr_val = PAT(WB, WC, UC_MINUS, UC, WB, WC, UC_MINUS, UC);
+		pat_msr_val = PAT_VALUE(WB, WC, UC_MINUS, UC, WB, WC, UC_MINUS, UC);
 	} else {
 		/*
 		 * Full PAT support.  We put WT in slot 7 to improve
@@ -358,13 +341,12 @@ void __init pat_bp_init(void)
 		 * The reserved slots are unused, but mapped to their
 		 * corresponding types in the presence of PAT errata.
 		 */
-		pat_msr_val = PAT(WB, WC, UC_MINUS, UC, WB, WP, UC_MINUS, WT);
+		pat_msr_val = PAT_VALUE(WB, WC, UC_MINUS, UC, WB, WP, UC_MINUS, WT);
 	}
 
 	memory_caching_control |= CACHE_PAT;
 
 	init_cache_modes(pat_msr_val);
-#undef PAT
 }
 
 static DEFINE_SPINLOCK(memtype_lock);	/* protects memtype accesses */
@@ -950,34 +932,92 @@ static void free_pfn_range(u64 paddr, unsigned long size)
 		memtype_free(paddr, paddr + size);
 }
 
-/*
- * track_pfn_copy is called when vma that is covering the pfnmap gets
- * copied through copy_page_range().
- *
- * If the vma has a linear pfn mapping for the entire range, we get the prot
- * from pte and reserve the entire vma range with single reserve_pfn_range call.
- */
-int track_pfn_copy(struct vm_area_struct *vma)
+static int follow_phys(struct vm_area_struct *vma, unsigned long *prot,
+		resource_size_t *phys)
 {
-	resource_size_t paddr;
-	unsigned long prot;
-	unsigned long vma_size = vma->vm_end - vma->vm_start;
-	pgprot_t pgprot;
+	struct follow_pfnmap_args args = { .vma = vma, .address = vma->vm_start };
 
-	if (vma->vm_flags & VM_PAT) {
-		/*
-		 * reserve the whole chunk covered by vma. We need the
-		 * starting address and protection from pte.
-		 */
-		if (follow_phys(vma, vma->vm_start, 0, &prot, &paddr)) {
-			WARN_ON_ONCE(1);
-			return -EINVAL;
-		}
-		pgprot = __pgprot(prot);
-		return reserve_pfn_range(paddr, vma_size, &pgprot, 1);
+	if (follow_pfnmap_start(&args))
+		return -EINVAL;
+
+	/* Never return PFNs of anon folios in COW mappings. */
+	if (!args.special) {
+		follow_pfnmap_end(&args);
+		return -EINVAL;
 	}
 
+	*prot = pgprot_val(args.pgprot);
+	*phys = (resource_size_t)args.pfn << PAGE_SHIFT;
+	follow_pfnmap_end(&args);
 	return 0;
+}
+
+static int get_pat_info(struct vm_area_struct *vma, resource_size_t *paddr,
+		pgprot_t *pgprot)
+{
+	unsigned long prot;
+
+	VM_WARN_ON_ONCE(!(vma->vm_flags & VM_PAT));
+
+	/*
+	 * We need the starting PFN and cachemode used for track_pfn_remap()
+	 * that covered the whole VMA. For most mappings, we can obtain that
+	 * information from the page tables. For COW mappings, we might now
+	 * suddenly have anon folios mapped and follow_phys() will fail.
+	 *
+	 * Fallback to using vma->vm_pgoff, see remap_pfn_range_notrack(), to
+	 * detect the PFN. If we need the cachemode as well, we're out of luck
+	 * for now and have to fail fork().
+	 */
+	if (!follow_phys(vma, &prot, paddr)) {
+		if (pgprot)
+			*pgprot = __pgprot(prot);
+		return 0;
+	}
+	if (is_cow_mapping(vma->vm_flags)) {
+		if (pgprot)
+			return -EINVAL;
+		*paddr = (resource_size_t)vma->vm_pgoff << PAGE_SHIFT;
+		return 0;
+	}
+	WARN_ON_ONCE(1);
+	return -EINVAL;
+}
+
+int track_pfn_copy(struct vm_area_struct *dst_vma,
+		struct vm_area_struct *src_vma, unsigned long *pfn)
+{
+	const unsigned long vma_size = src_vma->vm_end - src_vma->vm_start;
+	resource_size_t paddr;
+	pgprot_t pgprot;
+	int rc;
+
+	if (!(src_vma->vm_flags & VM_PAT))
+		return 0;
+
+	/*
+	 * Duplicate the PAT information for the dst VMA based on the src
+	 * VMA.
+	 */
+	if (get_pat_info(src_vma, &paddr, &pgprot))
+		return -EINVAL;
+	rc = reserve_pfn_range(paddr, vma_size, &pgprot, 1);
+	if (rc)
+		return rc;
+
+	/* Reservation for the destination VMA succeeded. */
+	vm_flags_set(dst_vma, VM_PAT);
+	*pfn = PHYS_PFN(paddr);
+	return 0;
+}
+
+void untrack_pfn_copy(struct vm_area_struct *dst_vma, unsigned long pfn)
+{
+	untrack_pfn(dst_vma, pfn, dst_vma->vm_end - dst_vma->vm_start, true);
+	/*
+	 * Reservation was freed, any copied page tables will get cleaned
+	 * up later, but without getting PAT involved again.
+	 */
 }
 
 /*
@@ -1048,7 +1088,6 @@ void untrack_pfn(struct vm_area_struct *vma, unsigned long pfn,
 		 unsigned long size, bool mm_wr_locked)
 {
 	resource_size_t paddr;
-	unsigned long prot;
 
 	if (vma && !(vma->vm_flags & VM_PAT))
 		return;
@@ -1056,11 +1095,8 @@ void untrack_pfn(struct vm_area_struct *vma, unsigned long pfn,
 	/* free the chunk starting from pfn or the whole chunk */
 	paddr = (resource_size_t)pfn << PAGE_SHIFT;
 	if (!paddr && !size) {
-		if (follow_phys(vma, vma->vm_start, 0, &prot, &paddr)) {
-			WARN_ON_ONCE(1);
+		if (get_pat_info(vma, &paddr, NULL))
 			return;
-		}
-
 		size = vma->vm_end - vma->vm_start;
 	}
 	free_pfn_range(paddr, size);
@@ -1072,15 +1108,6 @@ void untrack_pfn(struct vm_area_struct *vma, unsigned long pfn,
 	}
 }
 
-/*
- * untrack_pfn_clear is called if the following situation fits:
- *
- * 1) while mremapping a pfnmap for a new region,  with the old vma after
- * its pfnmap page table has been removed.  The new vma has a new pfnmap
- * to the same pfn & cache type with VM_PAT set.
- * 2) while duplicating vm area, the new vma fails to copy the pgtable from
- * old vma.
- */
 void untrack_pfn_clear(struct vm_area_struct *vma)
 {
 	vm_flags_clear(vma, VM_PAT);

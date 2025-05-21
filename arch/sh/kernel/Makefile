@@ -21,10 +21,7 @@ obj-y	:= head_32.o debugtraps.o dumpstack.o				\
 	   syscalls_32.o time.o topology.o traps.o			\
 	   traps_32.o unwinder.o
 
-ifndef CONFIG_GENERIC_IOMAP
-obj-y				+= iomap.o
 obj-$(CONFIG_HAS_IOPORT_MAP)	+= ioport.o
-endif
 
 obj-y				+= sys_sh32.o
 obj-y				+= cpu/
@@ -34,6 +31,7 @@ obj-$(CONFIG_SH_STANDARD_BIOS)	+= sh_bios.o
 obj-$(CONFIG_KGDB)		+= kgdb.o
 obj-$(CONFIG_MODULES)		+= sh_ksyms_32.o module.o
 obj-$(CONFIG_KEXEC_CORE)	+= machine_kexec.o relocate_kernel.o
+obj-$(CONFIG_VMCORE_INFO)	+= vmcore_info.o
 obj-$(CONFIG_CRASH_DUMP)	+= crash_dump.o
 obj-$(CONFIG_STACKTRACE)	+= stacktrace.o
 obj-$(CONFIG_IO_TRAPPED)	+= io_trapped.o

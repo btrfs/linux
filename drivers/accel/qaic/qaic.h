@@ -30,6 +30,13 @@
 #define to_qaic_drm_device(dev) container_of(dev, struct qaic_drm_device, drm)
 #define to_drm(qddev) (&(qddev)->drm)
 #define to_accel_kdev(qddev) (to_drm(qddev)->accel->kdev) /* Return Linux device of accel node */
+#define to_qaic_device(dev) (to_qaic_drm_device((dev))->qdev)
+
+enum aic_families {
+	FAMILY_AIC100,
+	FAMILY_AIC200,
+	FAMILY_MAX,
+};
 
 enum __packed dev_states {
 	/* Device is offline or will be very soon */
@@ -112,10 +119,10 @@ struct qaic_device {
 	struct pci_dev		*pdev;
 	/* Req. ID of request that will be queued next in MHI control device */
 	u32			next_seq_num;
-	/* Base address of bar 0 */
-	void __iomem		*bar_0;
-	/* Base address of bar 2 */
-	void __iomem		*bar_2;
+	/* Base address of the MHI bar */
+	void __iomem		*bar_mhi;
+	/* Base address of the DBCs bar */
+	void __iomem		*bar_dbc;
 	/* Controller structure for MHI devices */
 	struct mhi_controller	*mhi_cntrl;
 	/* MHI control channel device */
@@ -152,6 +159,14 @@ struct qaic_device {
 	struct mhi_device	*qts_ch;
 	/* Work queue for tasks related to MHI "QAIC_TIMESYNC" channel */
 	struct workqueue_struct	*qts_wq;
+	/* Head of list of page allocated by MHI bootlog device */
+	struct list_head        bootlog;
+	/* MHI bootlog channel device */
+	struct mhi_device       *bootlog_ch;
+	/* Work queue for tasks related to MHI bootlog device */
+	struct workqueue_struct *bootlog_wq;
+	/* Synchronizes access of pages in MHI bootlog device */
+	struct mutex            bootlog_mutex;
 };
 
 struct qaic_drm_device {
@@ -191,8 +206,6 @@ struct qaic_bo {
 	u32			nr_slice;
 	/* Number of slice that have been transferred by DMA engine */
 	u32			nr_slice_xfer_done;
-	/* true = BO is queued for execution, true = BO is not queued */
-	bool			queued;
 	/*
 	 * If true then user has attached slicing information to this BO by
 	 * calling DRM_IOCTL_QAIC_ATTACH_SLICE_BO ioctl.
@@ -281,6 +294,7 @@ int disable_dbc(struct qaic_device *qdev, u32 dbc_id, struct qaic_user *usr);
 void enable_dbc(struct qaic_device *qdev, u32 dbc_id, struct qaic_user *usr);
 void wakeup_dbc(struct qaic_device *qdev, u32 dbc_id);
 void release_dbc(struct qaic_device *qdev, u32 dbc_id);
+void qaic_data_get_fifo_info(struct dma_bridge_chan *dbc, u32 *head, u32 *tail);
 
 void wake_all_cntl(struct qaic_device *qdev);
 void qaic_dev_reset_clean_local_state(struct qaic_device *qdev);

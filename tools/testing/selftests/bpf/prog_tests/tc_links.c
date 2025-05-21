@@ -9,9 +9,11 @@
 #define ping_cmd "ping -q -c1 -w1 127.0.0.1 > /dev/null"
 
 #include "test_tc_link.skel.h"
+
+#include "netlink_helpers.h"
 #include "tc_helpers.h"
 
-void serial_test_tc_links_basic(void)
+void test_ns_tc_links_basic(void)
 {
 	LIBBPF_OPTS(bpf_prog_query_opts, optq);
 	LIBBPF_OPTS(bpf_tcx_opts, optl);
@@ -258,7 +260,7 @@ cleanup:
 	assert_mprog_count(target, 0);
 }
 
-void serial_test_tc_links_before(void)
+void test_ns_tc_links_before(void)
 {
 	test_tc_links_before_target(BPF_TCX_INGRESS);
 	test_tc_links_before_target(BPF_TCX_EGRESS);
@@ -412,7 +414,7 @@ cleanup:
 	assert_mprog_count(target, 0);
 }
 
-void serial_test_tc_links_after(void)
+void test_ns_tc_links_after(void)
 {
 	test_tc_links_after_target(BPF_TCX_INGRESS);
 	test_tc_links_after_target(BPF_TCX_EGRESS);
@@ -512,7 +514,7 @@ cleanup:
 	assert_mprog_count(target, 0);
 }
 
-void serial_test_tc_links_revision(void)
+void test_ns_tc_links_revision(void)
 {
 	test_tc_links_revision_target(BPF_TCX_INGRESS);
 	test_tc_links_revision_target(BPF_TCX_EGRESS);
@@ -616,7 +618,7 @@ cleanup:
 	assert_mprog_count(target, 0);
 }
 
-void serial_test_tc_links_chain_classic(void)
+void test_ns_tc_links_chain_classic(void)
 {
 	test_tc_chain_classic(BPF_TCX_INGRESS, false);
 	test_tc_chain_classic(BPF_TCX_EGRESS, false);
@@ -844,7 +846,7 @@ cleanup:
 	assert_mprog_count(target, 0);
 }
 
-void serial_test_tc_links_replace(void)
+void test_ns_tc_links_replace(void)
 {
 	test_tc_links_replace_target(BPF_TCX_INGRESS);
 	test_tc_links_replace_target(BPF_TCX_EGRESS);
@@ -1156,7 +1158,7 @@ cleanup:
 	assert_mprog_count(target, 0);
 }
 
-void serial_test_tc_links_invalid(void)
+void test_ns_tc_links_invalid(void)
 {
 	test_tc_links_invalid_target(BPF_TCX_INGRESS);
 	test_tc_links_invalid_target(BPF_TCX_EGRESS);
@@ -1312,7 +1314,7 @@ cleanup:
 	assert_mprog_count(target, 0);
 }
 
-void serial_test_tc_links_prepend(void)
+void test_ns_tc_links_prepend(void)
 {
 	test_tc_links_prepend_target(BPF_TCX_INGRESS);
 	test_tc_links_prepend_target(BPF_TCX_EGRESS);
@@ -1468,7 +1470,7 @@ cleanup:
 	assert_mprog_count(target, 0);
 }
 
-void serial_test_tc_links_append(void)
+void test_ns_tc_links_append(void)
 {
 	test_tc_links_append_target(BPF_TCX_INGRESS);
 	test_tc_links_append_target(BPF_TCX_EGRESS);
@@ -1566,7 +1568,7 @@ cleanup:
 	ASSERT_EQ(if_nametoindex("tcx_opts2"), 0, "dev2_removed");
 }
 
-void serial_test_tc_links_dev_cleanup(void)
+void test_ns_tc_links_dev_cleanup(void)
 {
 	test_tc_links_dev_cleanup_target(BPF_TCX_INGRESS);
 	test_tc_links_dev_cleanup_target(BPF_TCX_EGRESS);
@@ -1670,7 +1672,7 @@ cleanup:
 	test_tc_link__destroy(skel);
 }
 
-void serial_test_tc_links_chain_mixed(void)
+void test_ns_tc_links_chain_mixed(void)
 {
 	test_tc_chain_mixed(BPF_TCX_INGRESS);
 	test_tc_chain_mixed(BPF_TCX_EGRESS);
@@ -1780,11 +1782,70 @@ cleanup:
 	assert_mprog_count(target, 0);
 }
 
-void serial_test_tc_links_ingress(void)
+void test_ns_tc_links_ingress(void)
 {
 	test_tc_links_ingress(BPF_TCX_INGRESS, true, true);
 	test_tc_links_ingress(BPF_TCX_INGRESS, true, false);
 	test_tc_links_ingress(BPF_TCX_INGRESS, false, false);
+}
+
+struct qdisc_req {
+	struct nlmsghdr  n;
+	struct tcmsg     t;
+	char             buf[1024];
+};
+
+static int qdisc_replace(int ifindex, const char *kind, bool block)
+{
+	struct rtnl_handle rth = { .fd = -1 };
+	struct qdisc_req req;
+	int err;
+
+	err = rtnl_open(&rth, 0);
+	if (!ASSERT_OK(err, "open_rtnetlink"))
+		return err;
+
+	memset(&req, 0, sizeof(req));
+	req.n.nlmsg_len = NLMSG_LENGTH(sizeof(struct tcmsg));
+	req.n.nlmsg_flags = NLM_F_CREATE | NLM_F_REPLACE | NLM_F_REQUEST;
+	req.n.nlmsg_type = RTM_NEWQDISC;
+	req.t.tcm_family = AF_UNSPEC;
+	req.t.tcm_ifindex = ifindex;
+	req.t.tcm_parent = 0xfffffff1;
+
+	addattr_l(&req.n, sizeof(req), TCA_KIND, kind, strlen(kind) + 1);
+	if (block)
+		addattr32(&req.n, sizeof(req), TCA_INGRESS_BLOCK, 1);
+
+	err = rtnl_talk(&rth, &req.n, NULL);
+	ASSERT_OK(err, "talk_rtnetlink");
+	rtnl_close(&rth);
+	return err;
+}
+
+void test_ns_tc_links_dev_chain0(void)
+{
+	int err, ifindex;
+
+	ASSERT_OK(system("ip link add dev foo type veth peer name bar"), "add veth");
+	ifindex = if_nametoindex("foo");
+	ASSERT_NEQ(ifindex, 0, "non_zero_ifindex");
+	err = qdisc_replace(ifindex, "ingress", true);
+	if (!ASSERT_OK(err, "attaching ingress"))
+		goto cleanup;
+	ASSERT_OK(system("tc filter add block 1 matchall action skbmod swap mac"), "add block");
+	err = qdisc_replace(ifindex, "clsact", false);
+	if (!ASSERT_OK(err, "attaching clsact"))
+		goto cleanup;
+	/* Heuristic: kern_sync_rcu() alone does not work; a wait-time of ~5s
+	 * triggered the issue without the fix reliably 100% of the time.
+	 */
+	sleep(5);
+	ASSERT_OK(system("tc filter add dev foo ingress matchall action skbmod swap mac"), "add filter");
+cleanup:
+	ASSERT_OK(system("ip link del dev foo"), "del veth");
+	ASSERT_EQ(if_nametoindex("foo"), 0, "foo removed");
+	ASSERT_EQ(if_nametoindex("bar"), 0, "bar removed");
 }
 
 static void test_tc_links_dev_mixed(int target)
@@ -1894,7 +1955,7 @@ cleanup:
 	ASSERT_EQ(if_nametoindex("tcx_opts2"), 0, "dev2_removed");
 }
 
-void serial_test_tc_links_dev_mixed(void)
+void test_ns_tc_links_dev_mixed(void)
 {
 	test_tc_links_dev_mixed(BPF_TCX_INGRESS);
 	test_tc_links_dev_mixed(BPF_TCX_EGRESS);

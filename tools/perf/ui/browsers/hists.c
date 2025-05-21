@@ -38,6 +38,7 @@
 #include "../ui.h"
 #include "map.h"
 #include "annotate.h"
+#include "annotate-data.h"
 #include "srcline.h"
 #include "string2.h"
 #include "units.h"
@@ -1225,7 +1226,7 @@ int __hpp__slsmg_color_printf(struct perf_hpp *hpp, const char *fmt, ...)
 	return ret;
 }
 
-#define __HPP_COLOR_PERCENT_FN(_type, _field)				\
+#define __HPP_COLOR_PERCENT_FN(_type, _field, _fmttype)			\
 static u64 __hpp_get_##_field(struct hist_entry *he)			\
 {									\
 	return he->stat._field;						\
@@ -1237,10 +1238,10 @@ hist_browser__hpp_color_##_type(struct perf_hpp_fmt *fmt,		\
 				struct hist_entry *he)			\
 {									\
 	return hpp__fmt(fmt, hpp, he, __hpp_get_##_field, " %*.2f%%",	\
-			__hpp__slsmg_color_printf, true);		\
+			__hpp__slsmg_color_printf, _fmttype);		\
 }
 
-#define __HPP_COLOR_ACC_PERCENT_FN(_type, _field)			\
+#define __HPP_COLOR_ACC_PERCENT_FN(_type, _field, _fmttype)		\
 static u64 __hpp_get_acc_##_field(struct hist_entry *he)		\
 {									\
 	return he->stat_acc->_field;					\
@@ -1261,15 +1262,18 @@ hist_browser__hpp_color_##_type(struct perf_hpp_fmt *fmt,		\
 		return ret;						\
 	}								\
 	return hpp__fmt(fmt, hpp, he, __hpp_get_acc_##_field,		\
-			" %*.2f%%", __hpp__slsmg_color_printf, true);	\
+			" %*.2f%%", __hpp__slsmg_color_printf,		\
+			_fmttype);					\
 }
 
-__HPP_COLOR_PERCENT_FN(overhead, period)
-__HPP_COLOR_PERCENT_FN(overhead_sys, period_sys)
-__HPP_COLOR_PERCENT_FN(overhead_us, period_us)
-__HPP_COLOR_PERCENT_FN(overhead_guest_sys, period_guest_sys)
-__HPP_COLOR_PERCENT_FN(overhead_guest_us, period_guest_us)
-__HPP_COLOR_ACC_PERCENT_FN(overhead_acc, period)
+__HPP_COLOR_PERCENT_FN(overhead, period, PERF_HPP_FMT_TYPE__PERCENT)
+__HPP_COLOR_PERCENT_FN(latency, latency, PERF_HPP_FMT_TYPE__LATENCY)
+__HPP_COLOR_PERCENT_FN(overhead_sys, period_sys, PERF_HPP_FMT_TYPE__PERCENT)
+__HPP_COLOR_PERCENT_FN(overhead_us, period_us, PERF_HPP_FMT_TYPE__PERCENT)
+__HPP_COLOR_PERCENT_FN(overhead_guest_sys, period_guest_sys, PERF_HPP_FMT_TYPE__PERCENT)
+__HPP_COLOR_PERCENT_FN(overhead_guest_us, period_guest_us, PERF_HPP_FMT_TYPE__PERCENT)
+__HPP_COLOR_ACC_PERCENT_FN(overhead_acc, period, PERF_HPP_FMT_TYPE__PERCENT)
+__HPP_COLOR_ACC_PERCENT_FN(latency_acc, latency, PERF_HPP_FMT_TYPE__LATENCY)
 
 #undef __HPP_COLOR_PERCENT_FN
 #undef __HPP_COLOR_ACC_PERCENT_FN
@@ -1278,6 +1282,8 @@ void hist_browser__init_hpp(void)
 {
 	perf_hpp__format[PERF_HPP__OVERHEAD].color =
 				hist_browser__hpp_color_overhead;
+	perf_hpp__format[PERF_HPP__LATENCY].color =
+				hist_browser__hpp_color_latency;
 	perf_hpp__format[PERF_HPP__OVERHEAD_SYS].color =
 				hist_browser__hpp_color_overhead_sys;
 	perf_hpp__format[PERF_HPP__OVERHEAD_US].color =
@@ -1288,6 +1294,8 @@ void hist_browser__init_hpp(void)
 				hist_browser__hpp_color_overhead_guest_us;
 	perf_hpp__format[PERF_HPP__OVERHEAD_ACC].color =
 				hist_browser__hpp_color_overhead_acc;
+	perf_hpp__format[PERF_HPP__LATENCY_ACC].color =
+				hist_browser__hpp_color_latency_acc;
 
 	res_sample_init();
 }
@@ -2488,7 +2496,7 @@ add_annotate_opt(struct hist_browser *browser __maybe_unused,
 {
 	struct dso *dso;
 
-	if (!ms->map || (dso = map__dso(ms->map)) == NULL || dso->annotate_warned)
+	if (!ms->map || (dso = map__dso(ms->map)) == NULL || dso__annotate_warned(dso))
 		return 0;
 
 	if (!ms->sym)
@@ -2502,6 +2510,32 @@ add_annotate_opt(struct hist_browser *browser __maybe_unused,
 
 	act->ms = *ms;
 	act->fn = do_annotate;
+	return 1;
+}
+
+static int
+do_annotate_type(struct hist_browser *browser, struct popup_action *act)
+{
+	struct hist_entry *he = browser->he_selection;
+
+	hist_entry__annotate_data_tui(he, act->evsel, browser->hbt);
+	ui_browser__handle_resize(&browser->b);
+	return 0;
+}
+
+static int
+add_annotate_type_opt(struct hist_browser *browser,
+		      struct popup_action *act, char **optstr,
+		      struct hist_entry *he)
+{
+	if (he == NULL || he->mem_type == NULL || he->mem_type->histograms == NULL)
+		return 0;
+
+	if (asprintf(optstr, "Annotate type %s", he->mem_type->self.type_name) < 0)
+		return 0;
+
+	act->evsel = hists_to_evsel(browser->hists);
+	act->fn = do_annotate_type;
 	return 1;
 }
 
@@ -2581,7 +2615,7 @@ static int hists_browser__zoom_map(struct hist_browser *browser, struct map *map
 	} else {
 		struct dso *dso = map__dso(map);
 		ui_helpline__fpush("To zoom out press ESC or ENTER + \"Zoom out of %s DSO\"",
-				   __map__is_kernel(map) ? "the Kernel" : dso->short_name);
+				   __map__is_kernel(map) ? "the Kernel" : dso__short_name(dso));
 		browser->hists->dso_filter = dso;
 		perf_hpp__set_elide(HISTC_DSO, true);
 		pstack__push(browser->pstack, &browser->hists->dso_filter);
@@ -2607,7 +2641,7 @@ add_dso_opt(struct hist_browser *browser, struct popup_action *act,
 
 	if (asprintf(optstr, "Zoom %s %s DSO (use the 'k' hotkey to zoom directly into the kernel)",
 		     browser->hists->dso_filter ? "out of" : "into",
-		     __map__is_kernel(map) ? "the Kernel" : map__dso(map)->short_name) < 0)
+		     __map__is_kernel(map) ? "the Kernel" : dso__short_name(map__dso(map))) < 0)
 		return 0;
 
 	act->ms.map = map;
@@ -3083,7 +3117,7 @@ do_hotkey:		 // key came straight from options ui__popup_menu()
 			if (!browser->selection ||
 			    !browser->selection->map ||
 			    !map__dso(browser->selection->map) ||
-			    map__dso(browser->selection->map)->annotate_warned) {
+			    dso__annotate_warned(map__dso(browser->selection->map))) {
 				continue;
 			}
 
@@ -3307,6 +3341,10 @@ do_hotkey:		 // key came straight from options ui__popup_menu()
 						       browser->he_selection->ip);
 		}
 skip_annotation:
+		nr_options += add_annotate_type_opt(browser,
+						    &actions[nr_options],
+						    &options[nr_options],
+						    browser->he_selection);
 		nr_options += add_thread_opt(browser, &actions[nr_options],
 					     &options[nr_options], thread);
 		nr_options += add_dso_opt(browser, &actions[nr_options],
@@ -3653,8 +3691,10 @@ int block_hists_tui_browse(struct block_hist *bh, struct evsel *evsel,
 	struct hist_browser *browser;
 	int key = -1;
 	struct popup_action action;
+	char *br_cntr_text = NULL;
 	static const char help[] =
-	" q             Quit \n";
+	" q             Quit \n"
+	" B             Branch counter abbr list (Optional)\n";
 
 	browser = hist_browser__new(hists);
 	if (!browser)
@@ -3671,6 +3711,9 @@ int block_hists_tui_browse(struct block_hist *bh, struct evsel *evsel,
 	SLtty_set_suspend_state(true);
 
 	memset(&action, 0, sizeof(action));
+
+	if (!annotation_br_cntr_abbr_list(&br_cntr_text, evsel, false))
+		annotate_opts.show_br_cntr = true;
 
 	while (1) {
 		key = hist_browser__run(browser, "? - help", true, 0);
@@ -3692,6 +3735,16 @@ int block_hists_tui_browse(struct block_hist *bh, struct evsel *evsel,
 			action.ms.sym = browser->selection->sym;
 			do_annotate(browser, &action);
 			continue;
+		case 'B':
+			if (br_cntr_text) {
+				ui__question_window("Branch counter abbr list",
+						    br_cntr_text, "Press any key...", 0);
+			} else {
+				ui__question_window("Branch counter abbr list",
+						    "\n The branch counter is not available.\n",
+						    "Press any key...", 0);
+			}
+			continue;
 		default:
 			break;
 		}
@@ -3699,5 +3752,6 @@ int block_hists_tui_browse(struct block_hist *bh, struct evsel *evsel,
 
 out:
 	hist_browser__delete(browser);
+	free(br_cntr_text);
 	return 0;
 }

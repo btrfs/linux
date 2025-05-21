@@ -8,22 +8,25 @@
 #include <linux/dma-fence-array.h>
 #include <linux/nospec.h>
 
+#include <drm/drm_drv.h>
 #include <drm/drm_exec.h>
 #include <drm/drm_print.h>
-#include <drm/ttm/ttm_execbuf_util.h>
 #include <drm/ttm/ttm_tt.h>
-#include <drm/xe_drm.h>
+#include <uapi/drm/xe_drm.h>
+#include <linux/ascii85.h>
 #include <linux/delay.h>
 #include <linux/kthread.h>
 #include <linux/mm.h>
 #include <linux/swap.h>
 
+#include <generated/xe_wa_oob.h>
+
+#include "regs/xe_gtt_defs.h"
 #include "xe_assert.h"
 #include "xe_bo.h"
 #include "xe_device.h"
 #include "xe_drm_client.h"
 #include "xe_exec_queue.h"
-#include "xe_gt.h"
 #include "xe_gt_pagefault.h"
 #include "xe_gt_tlb_invalidation.h"
 #include "xe_migrate.h"
@@ -31,13 +34,13 @@
 #include "xe_pm.h"
 #include "xe_preempt_fence.h"
 #include "xe_pt.h"
+#include "xe_pxp.h"
 #include "xe_res_cursor.h"
+#include "xe_svm.h"
 #include "xe_sync.h"
-#include "xe_trace.h"
-#include "generated/xe_wa_oob.h"
+#include "xe_trace_bo.h"
 #include "xe_wa.h"
-
-#define TEST_VM_ASYNC_OPS_ERROR
+#include "xe_hmm.h"
 
 static struct drm_gem_object *xe_vm_obj(struct xe_vm *vm)
 {
@@ -46,7 +49,7 @@ static struct drm_gem_object *xe_vm_obj(struct xe_vm *vm)
 
 /**
  * xe_vma_userptr_check_repin() - Advisory check for repin needed
- * @vma: The userptr vma
+ * @uvma: The userptr vma
  *
  * Check if the userptr vma has been invalidated since last successful
  * repin. The check is advisory only and can the function can be called
@@ -56,123 +59,23 @@ static struct drm_gem_object *xe_vm_obj(struct xe_vm *vm)
  *
  * Return: 0 if userptr vma is valid, -EAGAIN otherwise; repin recommended.
  */
-int xe_vma_userptr_check_repin(struct xe_vma *vma)
+int xe_vma_userptr_check_repin(struct xe_userptr_vma *uvma)
 {
-	return mmu_interval_check_retry(&vma->userptr.notifier,
-					vma->userptr.notifier_seq) ?
+	return mmu_interval_check_retry(&uvma->userptr.notifier,
+					uvma->userptr.notifier_seq) ?
 		-EAGAIN : 0;
 }
 
-int xe_vma_userptr_pin_pages(struct xe_vma *vma)
+int xe_vma_userptr_pin_pages(struct xe_userptr_vma *uvma)
 {
+	struct xe_vma *vma = &uvma->vma;
 	struct xe_vm *vm = xe_vma_vm(vma);
 	struct xe_device *xe = vm->xe;
-	const unsigned long num_pages = xe_vma_size(vma) >> PAGE_SHIFT;
-	struct page **pages;
-	bool in_kthread = !current->mm;
-	unsigned long notifier_seq;
-	int pinned, ret, i;
-	bool read_only = xe_vma_read_only(vma);
 
 	lockdep_assert_held(&vm->lock);
 	xe_assert(xe, xe_vma_is_userptr(vma));
-retry:
-	if (vma->gpuva.flags & XE_VMA_DESTROYED)
-		return 0;
 
-	notifier_seq = mmu_interval_read_begin(&vma->userptr.notifier);
-	if (notifier_seq == vma->userptr.notifier_seq)
-		return 0;
-
-	pages = kvmalloc_array(num_pages, sizeof(*pages), GFP_KERNEL);
-	if (!pages)
-		return -ENOMEM;
-
-	if (vma->userptr.sg) {
-		dma_unmap_sgtable(xe->drm.dev,
-				  vma->userptr.sg,
-				  read_only ? DMA_TO_DEVICE :
-				  DMA_BIDIRECTIONAL, 0);
-		sg_free_table(vma->userptr.sg);
-		vma->userptr.sg = NULL;
-	}
-
-	pinned = ret = 0;
-	if (in_kthread) {
-		if (!mmget_not_zero(vma->userptr.notifier.mm)) {
-			ret = -EFAULT;
-			goto mm_closed;
-		}
-		kthread_use_mm(vma->userptr.notifier.mm);
-	}
-
-	while (pinned < num_pages) {
-		ret = get_user_pages_fast(xe_vma_userptr(vma) +
-					  pinned * PAGE_SIZE,
-					  num_pages - pinned,
-					  read_only ? 0 : FOLL_WRITE,
-					  &pages[pinned]);
-		if (ret < 0) {
-			if (in_kthread)
-				ret = 0;
-			break;
-		}
-
-		pinned += ret;
-		ret = 0;
-	}
-
-	if (in_kthread) {
-		kthread_unuse_mm(vma->userptr.notifier.mm);
-		mmput(vma->userptr.notifier.mm);
-	}
-mm_closed:
-	if (ret)
-		goto out;
-
-	ret = sg_alloc_table_from_pages_segment(&vma->userptr.sgt, pages,
-						pinned, 0,
-						(u64)pinned << PAGE_SHIFT,
-						xe_sg_segment_size(xe->drm.dev),
-						GFP_KERNEL);
-	if (ret) {
-		vma->userptr.sg = NULL;
-		goto out;
-	}
-	vma->userptr.sg = &vma->userptr.sgt;
-
-	ret = dma_map_sgtable(xe->drm.dev, vma->userptr.sg,
-			      read_only ? DMA_TO_DEVICE :
-			      DMA_BIDIRECTIONAL,
-			      DMA_ATTR_SKIP_CPU_SYNC |
-			      DMA_ATTR_NO_KERNEL_MAPPING);
-	if (ret) {
-		sg_free_table(vma->userptr.sg);
-		vma->userptr.sg = NULL;
-		goto out;
-	}
-
-	for (i = 0; i < pinned; ++i) {
-		if (!read_only) {
-			lock_page(pages[i]);
-			set_page_dirty(pages[i]);
-			unlock_page(pages[i]);
-		}
-
-		mark_page_accessed(pages[i]);
-	}
-
-out:
-	release_pages(pages, pinned);
-	kvfree(pages);
-
-	if (!(ret < 0)) {
-		vma->userptr.notifier_seq = notifier_seq;
-		if (xe_vma_userptr_check_repin(vma) == -EAGAIN)
-			goto retry;
-	}
-
-	return ret < 0 ? ret : 0;
+	return xe_hmm_userptr_populate_range(uvma, false);
 }
 
 static bool preempt_fences_waiting(struct xe_vm *vm)
@@ -182,10 +85,10 @@ static bool preempt_fences_waiting(struct xe_vm *vm)
 	lockdep_assert_held(&vm->lock);
 	xe_vm_assert_held(vm);
 
-	list_for_each_entry(q, &vm->preempt.exec_queues, compute.link) {
-		if (!q->compute.pfence ||
-		    (q->compute.pfence && test_bit(DMA_FENCE_FLAG_ENABLE_SIGNAL_BIT,
-						   &q->compute.pfence->flags))) {
+	list_for_each_entry(q, &vm->preempt.exec_queues, lr.link) {
+		if (!q->lr.pfence ||
+		    test_bit(DMA_FENCE_FLAG_ENABLE_SIGNAL_BIT,
+			     &q->lr.pfence->flags)) {
 			return true;
 		}
 	}
@@ -228,14 +131,16 @@ static int wait_for_existing_preempt_fences(struct xe_vm *vm)
 
 	xe_vm_assert_held(vm);
 
-	list_for_each_entry(q, &vm->preempt.exec_queues, compute.link) {
-		if (q->compute.pfence) {
-			long timeout = dma_fence_wait(q->compute.pfence, false);
+	list_for_each_entry(q, &vm->preempt.exec_queues, lr.link) {
+		if (q->lr.pfence) {
+			long timeout = dma_fence_wait(q->lr.pfence, false);
 
-			if (timeout < 0)
+			/* Only -ETIME on fence indicates VM needs to be killed */
+			if (timeout < 0 || q->lr.pfence->error == -ETIME)
 				return -ETIME;
-			dma_fence_put(q->compute.pfence);
-			q->compute.pfence = NULL;
+
+			dma_fence_put(q->lr.pfence);
+			q->lr.pfence = NULL;
 		}
 	}
 
@@ -247,7 +152,7 @@ static bool xe_vm_is_idle(struct xe_vm *vm)
 	struct xe_exec_queue *q;
 
 	xe_vm_assert_held(vm);
-	list_for_each_entry(q, &vm->preempt.exec_queues, compute.link) {
+	list_for_each_entry(q, &vm->preempt.exec_queues, lr.link) {
 		if (!xe_exec_queue_is_idle(q))
 			return false;
 	}
@@ -260,17 +165,17 @@ static void arm_preempt_fences(struct xe_vm *vm, struct list_head *list)
 	struct list_head *link;
 	struct xe_exec_queue *q;
 
-	list_for_each_entry(q, &vm->preempt.exec_queues, compute.link) {
+	list_for_each_entry(q, &vm->preempt.exec_queues, lr.link) {
 		struct dma_fence *fence;
 
 		link = list->next;
 		xe_assert(vm->xe, link != list);
 
 		fence = xe_preempt_fence_arm(to_preempt_fence_from_link(link),
-					     q, q->compute.context,
-					     ++q->compute.seqno);
-		dma_fence_put(q->compute.pfence);
-		q->compute.pfence = fence;
+					     q, q->lr.context,
+					     ++q->lr.seqno);
+		dma_fence_put(q->lr.pfence);
+		q->lr.pfence = fence;
 	}
 }
 
@@ -279,27 +184,23 @@ static int add_preempt_fences(struct xe_vm *vm, struct xe_bo *bo)
 	struct xe_exec_queue *q;
 	int err;
 
+	xe_bo_assert_held(bo);
+
 	if (!vm->preempt.num_exec_queues)
 		return 0;
 
-	err = xe_bo_lock(bo, true);
+	err = dma_resv_reserve_fences(bo->ttm.base.resv, vm->preempt.num_exec_queues);
 	if (err)
 		return err;
 
-	err = dma_resv_reserve_fences(bo->ttm.base.resv, vm->preempt.num_exec_queues);
-	if (err)
-		goto out_unlock;
-
-	list_for_each_entry(q, &vm->preempt.exec_queues, compute.link)
-		if (q->compute.pfence) {
+	list_for_each_entry(q, &vm->preempt.exec_queues, lr.link)
+		if (q->lr.pfence) {
 			dma_resv_add_fence(bo->ttm.base.resv,
-					   q->compute.pfence,
+					   q->lr.pfence,
 					   DMA_RESV_USAGE_BOOKKEEP);
 		}
 
-out_unlock:
-	xe_bo_unlock(bo);
-	return err;
+	return 0;
 }
 
 static void resume_and_reinstall_preempt_fences(struct xe_vm *vm,
@@ -310,10 +211,10 @@ static void resume_and_reinstall_preempt_fences(struct xe_vm *vm,
 	lockdep_assert_held(&vm->lock);
 	xe_vm_assert_held(vm);
 
-	list_for_each_entry(q, &vm->preempt.exec_queues, compute.link) {
+	list_for_each_entry(q, &vm->preempt.exec_queues, lr.link) {
 		q->ops->resume(q);
 
-		drm_gpuvm_resv_add_fence(&vm->gpuvm, exec, q->compute.pfence,
+		drm_gpuvm_resv_add_fence(&vm->gpuvm, exec, q->lr.pfence,
 					 DMA_RESV_USAGE_BOOKKEEP, DMA_RESV_USAGE_BOOKKEEP);
 	}
 }
@@ -337,16 +238,16 @@ int xe_vm_add_compute_exec_queue(struct xe_vm *vm, struct xe_exec_queue *q)
 	if (err)
 		goto out_up_write;
 
-	pfence = xe_preempt_fence_create(q, q->compute.context,
-					 ++q->compute.seqno);
+	pfence = xe_preempt_fence_create(q, q->lr.context,
+					 ++q->lr.seqno);
 	if (!pfence) {
 		err = -ENOMEM;
 		goto out_fini;
 	}
 
-	list_add(&q->compute.link, &vm->preempt.exec_queues);
+	list_add(&q->lr.link, &vm->preempt.exec_queues);
 	++vm->preempt.num_exec_queues;
-	q->compute.pfence = pfence;
+	q->lr.pfence = pfence;
 
 	down_read(&vm->userptr.notifier_lock);
 
@@ -371,11 +272,14 @@ out_up_write:
 
 	return err;
 }
+ALLOW_ERROR_INJECTION(xe_vm_add_compute_exec_queue, ERRNO);
 
 /**
  * xe_vm_remove_compute_exec_queue() - Remove compute exec queue from VM
  * @vm: The VM.
  * @q: The exec_queue
+ *
+ * Note that this function might be called multiple times on the same queue.
  */
 void xe_vm_remove_compute_exec_queue(struct xe_vm *vm, struct xe_exec_queue *q)
 {
@@ -383,12 +287,14 @@ void xe_vm_remove_compute_exec_queue(struct xe_vm *vm, struct xe_exec_queue *q)
 		return;
 
 	down_write(&vm->lock);
-	list_del(&q->compute.link);
-	--vm->preempt.num_exec_queues;
-	if (q->compute.pfence) {
-		dma_fence_enable_sw_signaling(q->compute.pfence);
-		dma_fence_put(q->compute.pfence);
-		q->compute.pfence = NULL;
+	if (!list_empty(&q->lr.link)) {
+		list_del_init(&q->lr.link);
+		--vm->preempt.num_exec_queues;
+	}
+	if (q->lr.pfence) {
+		dma_fence_enable_sw_signaling(q->lr.pfence);
+		dma_fence_put(q->lr.pfence);
+		q->lr.pfence = NULL;
 	}
 	up_write(&vm->lock);
 }
@@ -414,19 +320,31 @@ int __xe_vm_userptr_needs_repin(struct xe_vm *vm)
 
 #define XE_VM_REBIND_RETRY_TIMEOUT_MS 1000
 
-static void xe_vm_kill(struct xe_vm *vm)
+/**
+ * xe_vm_kill() - VM Kill
+ * @vm: The VM.
+ * @unlocked: Flag indicates the VM's dma-resv is not held
+ *
+ * Kill the VM by setting banned flag indicated VM is no longer available for
+ * use. If in preempt fence mode, also kill all exec queue attached to the VM.
+ */
+void xe_vm_kill(struct xe_vm *vm, bool unlocked)
 {
 	struct xe_exec_queue *q;
 
 	lockdep_assert_held(&vm->lock);
 
-	xe_vm_lock(vm, false);
+	if (unlocked)
+		xe_vm_lock(vm, false);
+
 	vm->flags |= XE_VM_FLAG_BANNED;
 	trace_xe_vm_kill(vm);
 
-	list_for_each_entry(q, &vm->preempt.exec_queues, compute.link)
+	list_for_each_entry(q, &vm->preempt.exec_queues, lr.link)
 		q->ops->kill(q);
-	xe_vm_unlock(vm);
+
+	if (unlocked)
+		xe_vm_unlock(vm);
 
 	/* TODO: Inform user the VM is banned */
 }
@@ -483,17 +401,53 @@ static int xe_gpuvm_validate(struct drm_gpuvm_bo *vm_bo, struct drm_exec *exec)
 	return 0;
 }
 
+/**
+ * xe_vm_validate_rebind() - Validate buffer objects and rebind vmas
+ * @vm: The vm for which we are rebinding.
+ * @exec: The struct drm_exec with the locked GEM objects.
+ * @num_fences: The number of fences to reserve for the operation, not
+ * including rebinds and validations.
+ *
+ * Validates all evicted gem objects and rebinds their vmas. Note that
+ * rebindings may cause evictions and hence the validation-rebind
+ * sequence is rerun until there are no more objects to validate.
+ *
+ * Return: 0 on success, negative error code on error. In particular,
+ * may return -EINTR or -ERESTARTSYS if interrupted, and -EDEADLK if
+ * the drm_exec transaction needs to be restarted.
+ */
+int xe_vm_validate_rebind(struct xe_vm *vm, struct drm_exec *exec,
+			  unsigned int num_fences)
+{
+	struct drm_gem_object *obj;
+	unsigned long index;
+	int ret;
+
+	do {
+		ret = drm_gpuvm_validate(&vm->gpuvm, exec);
+		if (ret)
+			return ret;
+
+		ret = xe_vm_rebind(vm, false);
+		if (ret)
+			return ret;
+	} while (!list_empty(&vm->gpuvm.evict.list));
+
+	drm_exec_for_each_locked_object(exec, index, obj) {
+		ret = dma_resv_reserve_fences(obj->resv, num_fences);
+		if (ret)
+			return ret;
+	}
+
+	return 0;
+}
+
 static int xe_preempt_work_begin(struct drm_exec *exec, struct xe_vm *vm,
 				 bool *done)
 {
 	int err;
 
-	/*
-	 * 1 fence for each preempt fence plus a fence for each tile from a
-	 * possible rebind
-	 */
-	err = drm_gpuvm_prepare_vm(&vm->gpuvm, exec, vm->preempt.num_exec_queues +
-				   vm->xe->info.tile_count);
+	err = drm_gpuvm_prepare_vm(&vm->gpuvm, exec, 0);
 	if (err)
 		return err;
 
@@ -508,7 +462,7 @@ static int xe_preempt_work_begin(struct drm_exec *exec, struct xe_vm *vm,
 		return 0;
 	}
 
-	err = drm_gpuvm_prepare_objects(&vm->gpuvm, exec, vm->preempt.num_exec_queues);
+	err = drm_gpuvm_prepare_objects(&vm->gpuvm, exec, 0);
 	if (err)
 		return err;
 
@@ -516,14 +470,19 @@ static int xe_preempt_work_begin(struct drm_exec *exec, struct xe_vm *vm,
 	if (err)
 		return err;
 
-	return drm_gpuvm_validate(&vm->gpuvm, exec);
+	/*
+	 * Add validation and rebinding to the locking loop since both can
+	 * cause evictions which may require blocing dma_resv locks.
+	 * The fence reservation here is intended for the new preempt fences
+	 * we attach at the end of the rebind work.
+	 */
+	return xe_vm_validate_rebind(vm, exec, vm->preempt.num_exec_queues);
 }
 
 static void preempt_rebind_work_func(struct work_struct *w)
 {
 	struct xe_vm *vm = container_of(w, struct xe_vm, preempt.rebind_work);
 	struct drm_exec exec;
-	struct dma_fence *rebind_fence;
 	unsigned int fence_count = 0;
 	LIST_HEAD(preempt_fences);
 	ktime_t end = 0;
@@ -569,18 +528,11 @@ retry:
 	if (err)
 		goto out_unlock;
 
-	rebind_fence = xe_vm_rebind(vm, true);
-	if (IS_ERR(rebind_fence)) {
-		err = PTR_ERR(rebind_fence);
+	err = xe_vm_rebind(vm, true);
+	if (err)
 		goto out_unlock;
-	}
 
-	if (rebind_fence) {
-		dma_fence_wait(rebind_fence, false);
-		dma_fence_put(rebind_fence);
-	}
-
-	/* Wait on munmap style VM unbinds */
+	/* Wait on rebinds and munmap style VM unbinds */
 	wait = dma_resv_wait_timeout(xe_vm_resv(vm),
 				     DMA_RESV_USAGE_KERNEL,
 				     false, MAX_SCHEDULE_TIMEOUT);
@@ -622,7 +574,7 @@ out_unlock_outer:
 
 	if (err) {
 		drm_warn(&vm->xe->drm, "VM worker error: %d\n", err);
-		xe_vm_kill(vm);
+		xe_vm_kill(vm, true);
 	}
 	up_write(&vm->lock);
 
@@ -631,44 +583,25 @@ out_unlock_outer:
 	trace_xe_vm_rebind_worker_exit(vm);
 }
 
-static bool vma_userptr_invalidate(struct mmu_interval_notifier *mni,
-				   const struct mmu_notifier_range *range,
-				   unsigned long cur_seq)
+static void __vma_userptr_invalidate(struct xe_vm *vm, struct xe_userptr_vma *uvma)
 {
-	struct xe_vma *vma = container_of(mni, struct xe_vma, userptr.notifier);
-	struct xe_vm *vm = xe_vma_vm(vma);
+	struct xe_userptr *userptr = &uvma->userptr;
+	struct xe_vma *vma = &uvma->vma;
 	struct dma_resv_iter cursor;
 	struct dma_fence *fence;
 	long err;
-
-	xe_assert(vm->xe, xe_vma_is_userptr(vma));
-	trace_xe_vma_userptr_invalidate(vma);
-
-	if (!mmu_notifier_range_blockable(range))
-		return false;
-
-	down_write(&vm->userptr.notifier_lock);
-	mmu_interval_set_seq(mni, cur_seq);
-
-	/* No need to stop gpu access if the userptr is not yet bound. */
-	if (!vma->userptr.initial_bind) {
-		up_write(&vm->userptr.notifier_lock);
-		return true;
-	}
 
 	/*
 	 * Tell exec and rebind worker they need to repin and rebind this
 	 * userptr.
 	 */
 	if (!xe_vm_in_fault_mode(vm) &&
-	    !(vma->gpuva.flags & XE_VMA_DESTROYED) && vma->tile_present) {
+	    !(vma->gpuva.flags & XE_VMA_DESTROYED)) {
 		spin_lock(&vm->userptr.invalidated_lock);
-		list_move_tail(&vma->userptr.invalidate_link,
+		list_move_tail(&userptr->invalidate_link,
 			       &vm->userptr.invalidated);
 		spin_unlock(&vm->userptr.invalidated_lock);
 	}
-
-	up_write(&vm->userptr.notifier_lock);
 
 	/*
 	 * Preempt fences turn into schedule disables, pipeline these.
@@ -687,11 +620,37 @@ static bool vma_userptr_invalidate(struct mmu_interval_notifier *mni,
 				    false, MAX_SCHEDULE_TIMEOUT);
 	XE_WARN_ON(err <= 0);
 
-	if (xe_vm_in_fault_mode(vm)) {
+	if (xe_vm_in_fault_mode(vm) && userptr->initial_bind) {
 		err = xe_vm_invalidate_vma(vma);
 		XE_WARN_ON(err);
 	}
 
+	xe_hmm_userptr_unmap(uvma);
+}
+
+static bool vma_userptr_invalidate(struct mmu_interval_notifier *mni,
+				   const struct mmu_notifier_range *range,
+				   unsigned long cur_seq)
+{
+	struct xe_userptr_vma *uvma = container_of(mni, typeof(*uvma), userptr.notifier);
+	struct xe_vma *vma = &uvma->vma;
+	struct xe_vm *vm = xe_vma_vm(vma);
+
+	xe_assert(vm->xe, xe_vma_is_userptr(vma));
+	trace_xe_vma_userptr_invalidate(vma);
+
+	if (!mmu_notifier_range_blockable(range))
+		return false;
+
+	vm_dbg(&xe_vma_vm(vma)->xe->drm,
+	       "NOTIFIER: addr=0x%016llx, range=0x%016llx",
+		xe_vma_start(vma), xe_vma_size(vma));
+
+	down_write(&vm->userptr.notifier_lock);
+	mmu_interval_set_seq(mni, cur_seq);
+
+	__vma_userptr_invalidate(vm, uvma);
+	up_write(&vm->userptr.notifier_lock);
 	trace_xe_vma_userptr_invalidate_complete(vma);
 
 	return true;
@@ -701,35 +660,105 @@ static const struct mmu_interval_notifier_ops vma_userptr_notifier_ops = {
 	.invalidate = vma_userptr_invalidate,
 };
 
+#if IS_ENABLED(CONFIG_DRM_XE_USERPTR_INVAL_INJECT)
+/**
+ * xe_vma_userptr_force_invalidate() - force invalidate a userptr
+ * @uvma: The userptr vma to invalidate
+ *
+ * Perform a forced userptr invalidation for testing purposes.
+ */
+void xe_vma_userptr_force_invalidate(struct xe_userptr_vma *uvma)
+{
+	struct xe_vm *vm = xe_vma_vm(&uvma->vma);
+
+	/* Protect against concurrent userptr pinning */
+	lockdep_assert_held(&vm->lock);
+	/* Protect against concurrent notifiers */
+	lockdep_assert_held(&vm->userptr.notifier_lock);
+	/*
+	 * Protect against concurrent instances of this function and
+	 * the critical exec sections
+	 */
+	xe_vm_assert_held(vm);
+
+	if (!mmu_interval_read_retry(&uvma->userptr.notifier,
+				     uvma->userptr.notifier_seq))
+		uvma->userptr.notifier_seq -= 2;
+	__vma_userptr_invalidate(vm, uvma);
+}
+#endif
+
 int xe_vm_userptr_pin(struct xe_vm *vm)
 {
-	struct xe_vma *vma, *next;
+	struct xe_userptr_vma *uvma, *next;
 	int err = 0;
-	LIST_HEAD(tmp_evict);
 
+	xe_assert(vm->xe, !xe_vm_in_fault_mode(vm));
 	lockdep_assert_held_write(&vm->lock);
 
 	/* Collect invalidated userptrs */
 	spin_lock(&vm->userptr.invalidated_lock);
-	list_for_each_entry_safe(vma, next, &vm->userptr.invalidated,
+	xe_assert(vm->xe, list_empty(&vm->userptr.repin_list));
+	list_for_each_entry_safe(uvma, next, &vm->userptr.invalidated,
 				 userptr.invalidate_link) {
-		list_del_init(&vma->userptr.invalidate_link);
-		list_move_tail(&vma->combined_links.userptr,
-			       &vm->userptr.repin_list);
+		list_del_init(&uvma->userptr.invalidate_link);
+		list_add_tail(&uvma->userptr.repin_link,
+			      &vm->userptr.repin_list);
 	}
 	spin_unlock(&vm->userptr.invalidated_lock);
 
-	/* Pin and move to temporary list */
-	list_for_each_entry_safe(vma, next, &vm->userptr.repin_list,
-				 combined_links.userptr) {
-		err = xe_vma_userptr_pin_pages(vma);
-		if (err < 0)
-			return err;
+	/* Pin and move to bind list */
+	list_for_each_entry_safe(uvma, next, &vm->userptr.repin_list,
+				 userptr.repin_link) {
+		err = xe_vma_userptr_pin_pages(uvma);
+		if (err == -EFAULT) {
+			list_del_init(&uvma->userptr.repin_link);
+			/*
+			 * We might have already done the pin once already, but
+			 * then had to retry before the re-bind happened, due
+			 * some other condition in the caller, but in the
+			 * meantime the userptr got dinged by the notifier such
+			 * that we need to revalidate here, but this time we hit
+			 * the EFAULT. In such a case make sure we remove
+			 * ourselves from the rebind list to avoid going down in
+			 * flames.
+			 */
+			if (!list_empty(&uvma->vma.combined_links.rebind))
+				list_del_init(&uvma->vma.combined_links.rebind);
 
-		list_move_tail(&vma->combined_links.userptr, &vm->rebind_list);
+			/* Wait for pending binds */
+			xe_vm_lock(vm, false);
+			dma_resv_wait_timeout(xe_vm_resv(vm),
+					      DMA_RESV_USAGE_BOOKKEEP,
+					      false, MAX_SCHEDULE_TIMEOUT);
+
+			err = xe_vm_invalidate_vma(&uvma->vma);
+			xe_vm_unlock(vm);
+			if (err)
+				break;
+		} else {
+			if (err)
+				break;
+
+			list_del_init(&uvma->userptr.repin_link);
+			list_move_tail(&uvma->vma.combined_links.rebind,
+				       &vm->rebind_list);
+		}
 	}
 
-	return 0;
+	if (err) {
+		down_write(&vm->userptr.notifier_lock);
+		spin_lock(&vm->userptr.invalidated_lock);
+		list_for_each_entry_safe(uvma, next, &vm->userptr.repin_list,
+					 userptr.repin_link) {
+			list_del_init(&uvma->userptr.repin_link);
+			list_move_tail(&uvma->userptr.invalidate_link,
+				       &vm->userptr.invalidated);
+		}
+		spin_unlock(&vm->userptr.invalidated_lock);
+		up_write(&vm->userptr.notifier_lock);
+	}
+	return err;
 }
 
 /**
@@ -749,41 +778,363 @@ int xe_vm_userptr_check_repin(struct xe_vm *vm)
 		list_empty_careful(&vm->userptr.invalidated)) ? 0 : -EAGAIN;
 }
 
-static struct dma_fence *
-xe_vm_bind_vma(struct xe_vma *vma, struct xe_exec_queue *q,
-	       struct xe_sync_entry *syncs, u32 num_syncs,
-	       bool first_op, bool last_op);
-
-struct dma_fence *xe_vm_rebind(struct xe_vm *vm, bool rebind_worker)
+static int xe_vma_ops_alloc(struct xe_vma_ops *vops, bool array_of_binds)
 {
-	struct dma_fence *fence = NULL;
+	int i;
+
+	for (i = 0; i < XE_MAX_TILES_PER_DEVICE; ++i) {
+		if (!vops->pt_update_ops[i].num_ops)
+			continue;
+
+		vops->pt_update_ops[i].ops =
+			kmalloc_array(vops->pt_update_ops[i].num_ops,
+				      sizeof(*vops->pt_update_ops[i].ops),
+				      GFP_KERNEL | __GFP_RETRY_MAYFAIL | __GFP_NOWARN);
+		if (!vops->pt_update_ops[i].ops)
+			return array_of_binds ? -ENOBUFS : -ENOMEM;
+	}
+
+	return 0;
+}
+ALLOW_ERROR_INJECTION(xe_vma_ops_alloc, ERRNO);
+
+static void xe_vma_ops_fini(struct xe_vma_ops *vops)
+{
+	int i;
+
+	for (i = 0; i < XE_MAX_TILES_PER_DEVICE; ++i)
+		kfree(vops->pt_update_ops[i].ops);
+}
+
+static void xe_vma_ops_incr_pt_update_ops(struct xe_vma_ops *vops, u8 tile_mask)
+{
+	int i;
+
+	for (i = 0; i < XE_MAX_TILES_PER_DEVICE; ++i)
+		if (BIT(i) & tile_mask)
+			++vops->pt_update_ops[i].num_ops;
+}
+
+static void xe_vm_populate_rebind(struct xe_vma_op *op, struct xe_vma *vma,
+				  u8 tile_mask)
+{
+	INIT_LIST_HEAD(&op->link);
+	op->tile_mask = tile_mask;
+	op->base.op = DRM_GPUVA_OP_MAP;
+	op->base.map.va.addr = vma->gpuva.va.addr;
+	op->base.map.va.range = vma->gpuva.va.range;
+	op->base.map.gem.obj = vma->gpuva.gem.obj;
+	op->base.map.gem.offset = vma->gpuva.gem.offset;
+	op->map.vma = vma;
+	op->map.immediate = true;
+	op->map.dumpable = vma->gpuva.flags & XE_VMA_DUMPABLE;
+	op->map.is_null = xe_vma_is_null(vma);
+}
+
+static int xe_vm_ops_add_rebind(struct xe_vma_ops *vops, struct xe_vma *vma,
+				u8 tile_mask)
+{
+	struct xe_vma_op *op;
+
+	op = kzalloc(sizeof(*op), GFP_KERNEL);
+	if (!op)
+		return -ENOMEM;
+
+	xe_vm_populate_rebind(op, vma, tile_mask);
+	list_add_tail(&op->link, &vops->list);
+	xe_vma_ops_incr_pt_update_ops(vops, tile_mask);
+
+	return 0;
+}
+
+static struct dma_fence *ops_execute(struct xe_vm *vm,
+				     struct xe_vma_ops *vops);
+static void xe_vma_ops_init(struct xe_vma_ops *vops, struct xe_vm *vm,
+			    struct xe_exec_queue *q,
+			    struct xe_sync_entry *syncs, u32 num_syncs);
+
+int xe_vm_rebind(struct xe_vm *vm, bool rebind_worker)
+{
+	struct dma_fence *fence;
 	struct xe_vma *vma, *next;
+	struct xe_vma_ops vops;
+	struct xe_vma_op *op, *next_op;
+	int err, i;
 
 	lockdep_assert_held(&vm->lock);
-	if (xe_vm_in_lr_mode(vm) && !rebind_worker)
-		return NULL;
+	if ((xe_vm_in_lr_mode(vm) && !rebind_worker) ||
+	    list_empty(&vm->rebind_list))
+		return 0;
+
+	xe_vma_ops_init(&vops, vm, NULL, NULL, 0);
+	for (i = 0; i < XE_MAX_TILES_PER_DEVICE; ++i)
+		vops.pt_update_ops[i].wait_vm_bookkeep = true;
 
 	xe_vm_assert_held(vm);
-	list_for_each_entry_safe(vma, next, &vm->rebind_list,
-				 combined_links.rebind) {
+	list_for_each_entry(vma, &vm->rebind_list, combined_links.rebind) {
 		xe_assert(vm->xe, vma->tile_present);
 
-		list_del_init(&vma->combined_links.rebind);
-		dma_fence_put(fence);
 		if (rebind_worker)
 			trace_xe_vma_rebind_worker(vma);
 		else
 			trace_xe_vma_rebind_exec(vma);
-		fence = xe_vm_bind_vma(vma, NULL, NULL, 0, false, false);
-		if (IS_ERR(fence))
-			return fence;
+
+		err = xe_vm_ops_add_rebind(&vops, vma,
+					   vma->tile_present);
+		if (err)
+			goto free_ops;
 	}
+
+	err = xe_vma_ops_alloc(&vops, false);
+	if (err)
+		goto free_ops;
+
+	fence = ops_execute(vm, &vops);
+	if (IS_ERR(fence)) {
+		err = PTR_ERR(fence);
+	} else {
+		dma_fence_put(fence);
+		list_for_each_entry_safe(vma, next, &vm->rebind_list,
+					 combined_links.rebind)
+			list_del_init(&vma->combined_links.rebind);
+	}
+free_ops:
+	list_for_each_entry_safe(op, next_op, &vops.list, link) {
+		list_del(&op->link);
+		kfree(op);
+	}
+	xe_vma_ops_fini(&vops);
+
+	return err;
+}
+
+struct dma_fence *xe_vma_rebind(struct xe_vm *vm, struct xe_vma *vma, u8 tile_mask)
+{
+	struct dma_fence *fence = NULL;
+	struct xe_vma_ops vops;
+	struct xe_vma_op *op, *next_op;
+	struct xe_tile *tile;
+	u8 id;
+	int err;
+
+	lockdep_assert_held(&vm->lock);
+	xe_vm_assert_held(vm);
+	xe_assert(vm->xe, xe_vm_in_fault_mode(vm));
+
+	xe_vma_ops_init(&vops, vm, NULL, NULL, 0);
+	for_each_tile(tile, vm->xe, id) {
+		vops.pt_update_ops[id].wait_vm_bookkeep = true;
+		vops.pt_update_ops[tile->id].q =
+			xe_tile_migrate_exec_queue(tile);
+	}
+
+	err = xe_vm_ops_add_rebind(&vops, vma, tile_mask);
+	if (err)
+		return ERR_PTR(err);
+
+	err = xe_vma_ops_alloc(&vops, false);
+	if (err) {
+		fence = ERR_PTR(err);
+		goto free_ops;
+	}
+
+	fence = ops_execute(vm, &vops);
+
+free_ops:
+	list_for_each_entry_safe(op, next_op, &vops.list, link) {
+		list_del(&op->link);
+		kfree(op);
+	}
+	xe_vma_ops_fini(&vops);
 
 	return fence;
 }
 
-#define VMA_CREATE_FLAG_READ_ONLY	BIT(0)
-#define VMA_CREATE_FLAG_IS_NULL		BIT(1)
+static void xe_vm_populate_range_rebind(struct xe_vma_op *op,
+					struct xe_vma *vma,
+					struct xe_svm_range *range,
+					u8 tile_mask)
+{
+	INIT_LIST_HEAD(&op->link);
+	op->tile_mask = tile_mask;
+	op->base.op = DRM_GPUVA_OP_DRIVER;
+	op->subop = XE_VMA_SUBOP_MAP_RANGE;
+	op->map_range.vma = vma;
+	op->map_range.range = range;
+}
+
+static int
+xe_vm_ops_add_range_rebind(struct xe_vma_ops *vops,
+			   struct xe_vma *vma,
+			   struct xe_svm_range *range,
+			   u8 tile_mask)
+{
+	struct xe_vma_op *op;
+
+	op = kzalloc(sizeof(*op), GFP_KERNEL);
+	if (!op)
+		return -ENOMEM;
+
+	xe_vm_populate_range_rebind(op, vma, range, tile_mask);
+	list_add_tail(&op->link, &vops->list);
+	xe_vma_ops_incr_pt_update_ops(vops, tile_mask);
+
+	return 0;
+}
+
+/**
+ * xe_vm_range_rebind() - VM range (re)bind
+ * @vm: The VM which the range belongs to.
+ * @vma: The VMA which the range belongs to.
+ * @range: SVM range to rebind.
+ * @tile_mask: Tile mask to bind the range to.
+ *
+ * (re)bind SVM range setting up GPU page tables for the range.
+ *
+ * Return: dma fence for rebind to signal completion on succees, ERR_PTR on
+ * failure
+ */
+struct dma_fence *xe_vm_range_rebind(struct xe_vm *vm,
+				     struct xe_vma *vma,
+				     struct xe_svm_range *range,
+				     u8 tile_mask)
+{
+	struct dma_fence *fence = NULL;
+	struct xe_vma_ops vops;
+	struct xe_vma_op *op, *next_op;
+	struct xe_tile *tile;
+	u8 id;
+	int err;
+
+	lockdep_assert_held(&vm->lock);
+	xe_vm_assert_held(vm);
+	xe_assert(vm->xe, xe_vm_in_fault_mode(vm));
+	xe_assert(vm->xe, xe_vma_is_cpu_addr_mirror(vma));
+
+	xe_vma_ops_init(&vops, vm, NULL, NULL, 0);
+	for_each_tile(tile, vm->xe, id) {
+		vops.pt_update_ops[id].wait_vm_bookkeep = true;
+		vops.pt_update_ops[tile->id].q =
+			xe_tile_migrate_exec_queue(tile);
+	}
+
+	err = xe_vm_ops_add_range_rebind(&vops, vma, range, tile_mask);
+	if (err)
+		return ERR_PTR(err);
+
+	err = xe_vma_ops_alloc(&vops, false);
+	if (err) {
+		fence = ERR_PTR(err);
+		goto free_ops;
+	}
+
+	fence = ops_execute(vm, &vops);
+
+free_ops:
+	list_for_each_entry_safe(op, next_op, &vops.list, link) {
+		list_del(&op->link);
+		kfree(op);
+	}
+	xe_vma_ops_fini(&vops);
+
+	return fence;
+}
+
+static void xe_vm_populate_range_unbind(struct xe_vma_op *op,
+					struct xe_svm_range *range)
+{
+	INIT_LIST_HEAD(&op->link);
+	op->tile_mask = range->tile_present;
+	op->base.op = DRM_GPUVA_OP_DRIVER;
+	op->subop = XE_VMA_SUBOP_UNMAP_RANGE;
+	op->unmap_range.range = range;
+}
+
+static int
+xe_vm_ops_add_range_unbind(struct xe_vma_ops *vops,
+			   struct xe_svm_range *range)
+{
+	struct xe_vma_op *op;
+
+	op = kzalloc(sizeof(*op), GFP_KERNEL);
+	if (!op)
+		return -ENOMEM;
+
+	xe_vm_populate_range_unbind(op, range);
+	list_add_tail(&op->link, &vops->list);
+	xe_vma_ops_incr_pt_update_ops(vops, range->tile_present);
+
+	return 0;
+}
+
+/**
+ * xe_vm_range_unbind() - VM range unbind
+ * @vm: The VM which the range belongs to.
+ * @range: SVM range to rebind.
+ *
+ * Unbind SVM range removing the GPU page tables for the range.
+ *
+ * Return: dma fence for unbind to signal completion on succees, ERR_PTR on
+ * failure
+ */
+struct dma_fence *xe_vm_range_unbind(struct xe_vm *vm,
+				     struct xe_svm_range *range)
+{
+	struct dma_fence *fence = NULL;
+	struct xe_vma_ops vops;
+	struct xe_vma_op *op, *next_op;
+	struct xe_tile *tile;
+	u8 id;
+	int err;
+
+	lockdep_assert_held(&vm->lock);
+	xe_vm_assert_held(vm);
+	xe_assert(vm->xe, xe_vm_in_fault_mode(vm));
+
+	if (!range->tile_present)
+		return dma_fence_get_stub();
+
+	xe_vma_ops_init(&vops, vm, NULL, NULL, 0);
+	for_each_tile(tile, vm->xe, id) {
+		vops.pt_update_ops[id].wait_vm_bookkeep = true;
+		vops.pt_update_ops[tile->id].q =
+			xe_tile_migrate_exec_queue(tile);
+	}
+
+	err = xe_vm_ops_add_range_unbind(&vops, range);
+	if (err)
+		return ERR_PTR(err);
+
+	err = xe_vma_ops_alloc(&vops, false);
+	if (err) {
+		fence = ERR_PTR(err);
+		goto free_ops;
+	}
+
+	fence = ops_execute(vm, &vops);
+
+free_ops:
+	list_for_each_entry_safe(op, next_op, &vops.list, link) {
+		list_del(&op->link);
+		kfree(op);
+	}
+	xe_vma_ops_fini(&vops);
+
+	return fence;
+}
+
+static void xe_vma_free(struct xe_vma *vma)
+{
+	if (xe_vma_is_userptr(vma))
+		kfree(to_userptr_vma(vma));
+	else
+		kfree(vma);
+}
+
+#define VMA_CREATE_FLAG_READ_ONLY		BIT(0)
+#define VMA_CREATE_FLAG_IS_NULL			BIT(1)
+#define VMA_CREATE_FLAG_DUMPABLE		BIT(2)
+#define VMA_CREATE_FLAG_IS_SYSTEM_ALLOCATOR	BIT(3)
 
 static struct xe_vma *xe_vma_create(struct xe_vm *vm,
 				    struct xe_bo *bo,
@@ -796,18 +1147,35 @@ static struct xe_vma *xe_vma_create(struct xe_vm *vm,
 	u8 id;
 	bool read_only = (flags & VMA_CREATE_FLAG_READ_ONLY);
 	bool is_null = (flags & VMA_CREATE_FLAG_IS_NULL);
+	bool dumpable = (flags & VMA_CREATE_FLAG_DUMPABLE);
+	bool is_cpu_addr_mirror =
+		(flags & VMA_CREATE_FLAG_IS_SYSTEM_ALLOCATOR);
 
 	xe_assert(vm->xe, start < end);
 	xe_assert(vm->xe, end < vm->size);
 
-	if (!bo && !is_null)	/* userptr */
+	/*
+	 * Allocate and ensure that the xe_vma_is_userptr() return
+	 * matches what was allocated.
+	 */
+	if (!bo && !is_null && !is_cpu_addr_mirror) {
+		struct xe_userptr_vma *uvma = kzalloc(sizeof(*uvma), GFP_KERNEL);
+
+		if (!uvma)
+			return ERR_PTR(-ENOMEM);
+
+		vma = &uvma->vma;
+	} else {
 		vma = kzalloc(sizeof(*vma), GFP_KERNEL);
-	else
-		vma = kzalloc(sizeof(*vma) - sizeof(struct xe_userptr),
-			      GFP_KERNEL);
-	if (!vma) {
-		vma = ERR_PTR(-ENOMEM);
-		return vma;
+		if (!vma)
+			return ERR_PTR(-ENOMEM);
+
+		if (is_cpu_addr_mirror)
+			vma->gpuva.flags |= XE_VMA_SYSTEM_ALLOCATOR;
+		if (is_null)
+			vma->gpuva.flags |= DRM_GPUVA_SPARSE;
+		if (bo)
+			vma->gpuva.gem.obj = &bo->ttm.base;
 	}
 
 	INIT_LIST_HEAD(&vma->combined_links.rebind);
@@ -818,13 +1186,13 @@ static struct xe_vma *xe_vma_create(struct xe_vm *vm,
 	vma->gpuva.va.range = end - start + 1;
 	if (read_only)
 		vma->gpuva.flags |= XE_VMA_READ_ONLY;
-	if (is_null)
-		vma->gpuva.flags |= DRM_GPUVA_SPARSE;
+	if (dumpable)
+		vma->gpuva.flags |= XE_VMA_DUMPABLE;
 
 	for_each_tile(tile, vm->xe, id)
 		vma->tile_mask |= 0x1 << id;
 
-	if (GRAPHICS_VER(vm->xe) >= 20 || vm->xe->info.platform == XE_PVC)
+	if (vm->xe->info.has_atomic_enable_pte_bit)
 		vma->gpuva.flags |= XE_VMA_ATOMIC_PTE_BIT;
 
 	vma->pat_index = pat_index;
@@ -836,35 +1204,36 @@ static struct xe_vma *xe_vma_create(struct xe_vm *vm,
 
 		vm_bo = drm_gpuvm_bo_obtain(vma->gpuva.vm, &bo->ttm.base);
 		if (IS_ERR(vm_bo)) {
-			kfree(vma);
+			xe_vma_free(vma);
 			return ERR_CAST(vm_bo);
 		}
 
 		drm_gpuvm_bo_extobj_add(vm_bo);
 		drm_gem_object_get(&bo->ttm.base);
-		vma->gpuva.gem.obj = &bo->ttm.base;
 		vma->gpuva.gem.offset = bo_offset_or_userptr;
 		drm_gpuva_link(&vma->gpuva, vm_bo);
 		drm_gpuvm_bo_put(vm_bo);
 	} else /* userptr or null */ {
-		if (!is_null) {
+		if (!is_null && !is_cpu_addr_mirror) {
+			struct xe_userptr *userptr = &to_userptr_vma(vma)->userptr;
 			u64 size = end - start + 1;
 			int err;
 
-			INIT_LIST_HEAD(&vma->userptr.invalidate_link);
+			INIT_LIST_HEAD(&userptr->invalidate_link);
+			INIT_LIST_HEAD(&userptr->repin_link);
 			vma->gpuva.gem.offset = bo_offset_or_userptr;
+			mutex_init(&userptr->unmap_mutex);
 
-			err = mmu_interval_notifier_insert(&vma->userptr.notifier,
+			err = mmu_interval_notifier_insert(&userptr->notifier,
 							   current->mm,
 							   xe_vma_userptr(vma), size,
 							   &vma_userptr_notifier_ops);
 			if (err) {
-				kfree(vma);
-				vma = ERR_PTR(err);
-				return vma;
+				xe_vma_free(vma);
+				return ERR_PTR(err);
 			}
 
-			vma->userptr.notifier_seq = LONG_MAX;
+			userptr->notifier_seq = LONG_MAX;
 		}
 
 		xe_vm_get(vm);
@@ -876,33 +1245,34 @@ static struct xe_vma *xe_vma_create(struct xe_vm *vm,
 static void xe_vma_destroy_late(struct xe_vma *vma)
 {
 	struct xe_vm *vm = xe_vma_vm(vma);
-	struct xe_device *xe = vm->xe;
-	bool read_only = xe_vma_read_only(vma);
+
+	if (vma->ufence) {
+		xe_sync_ufence_put(vma->ufence);
+		vma->ufence = NULL;
+	}
 
 	if (xe_vma_is_userptr(vma)) {
-		if (vma->userptr.sg) {
-			dma_unmap_sgtable(xe->drm.dev,
-					  vma->userptr.sg,
-					  read_only ? DMA_TO_DEVICE :
-					  DMA_BIDIRECTIONAL, 0);
-			sg_free_table(vma->userptr.sg);
-			vma->userptr.sg = NULL;
-		}
+		struct xe_userptr_vma *uvma = to_userptr_vma(vma);
+		struct xe_userptr *userptr = &uvma->userptr;
+
+		if (userptr->sg)
+			xe_hmm_userptr_free_sg(uvma);
 
 		/*
 		 * Since userptr pages are not pinned, we can't remove
-		 * the notifer until we're sure the GPU is not accessing
+		 * the notifier until we're sure the GPU is not accessing
 		 * them anymore
 		 */
-		mmu_interval_notifier_remove(&vma->userptr.notifier);
+		mmu_interval_notifier_remove(&userptr->notifier);
+		mutex_destroy(&userptr->unmap_mutex);
 		xe_vm_put(vm);
-	} else if (xe_vma_is_null(vma)) {
+	} else if (xe_vma_is_null(vma) || xe_vma_is_cpu_addr_mirror(vma)) {
 		xe_vm_put(vm);
 	} else {
 		xe_bo_put(xe_vma_bo(vma));
 	}
 
-	kfree(vma);
+	xe_vma_free(vma);
 }
 
 static void vma_destroy_work_func(struct work_struct *w)
@@ -933,9 +1303,10 @@ static void xe_vma_destroy(struct xe_vma *vma, struct dma_fence *fence)
 		xe_assert(vm->xe, vma->gpuva.flags & XE_VMA_DESTROYED);
 
 		spin_lock(&vm->userptr.invalidated_lock);
-		list_del(&vma->userptr.invalidate_link);
+		xe_assert(vm->xe, list_empty(&to_userptr_vma(vma)->userptr.repin_link));
+		list_del(&to_userptr_vma(vma)->userptr.invalidate_link);
 		spin_unlock(&vm->userptr.invalidated_lock);
-	} else if (!xe_vma_is_null(vma)) {
+	} else if (!xe_vma_is_null(vma) && !xe_vma_is_cpu_addr_mirror(vma)) {
 		xe_bo_assert_held(xe_vma_bo(vma));
 
 		drm_gpuva_unlink(&vma->gpuva);
@@ -956,28 +1327,26 @@ static void xe_vma_destroy(struct xe_vma *vma, struct dma_fence *fence)
 }
 
 /**
- * xe_vm_prepare_vma() - drm_exec utility to lock a vma
+ * xe_vm_lock_vma() - drm_exec utility to lock a vma
  * @exec: The drm_exec object we're currently locking for.
  * @vma: The vma for witch we want to lock the vm resv and any attached
  * object's resv.
- * @num_shared: The number of dma-fence slots to pre-allocate in the
- * objects' reservation objects.
  *
  * Return: 0 on success, negative error code on error. In particular
  * may return -EDEADLK on WW transaction contention and -EINTR if
  * an interruptible wait is terminated by a signal.
  */
-int xe_vm_prepare_vma(struct drm_exec *exec, struct xe_vma *vma,
-		      unsigned int num_shared)
+int xe_vm_lock_vma(struct drm_exec *exec, struct xe_vma *vma)
 {
 	struct xe_vm *vm = xe_vma_vm(vma);
 	struct xe_bo *bo = xe_vma_bo(vma);
 	int err;
 
 	XE_WARN_ON(!vm);
-	err = drm_exec_prepare_obj(exec, xe_vm_obj(vm), num_shared);
+
+	err = drm_exec_lock_obj(exec, xe_vm_obj(vm));
 	if (!err && bo && !bo->vm)
-		err = drm_exec_prepare_obj(exec, &bo->ttm.base, num_shared);
+		err = drm_exec_lock_obj(exec, &bo->ttm.base);
 
 	return err;
 }
@@ -989,7 +1358,7 @@ static void xe_vma_destroy_unlocked(struct xe_vma *vma)
 
 	drm_exec_init(&exec, 0, 0);
 	drm_exec_until_all_locked(&exec) {
-		err = xe_vm_prepare_vma(&exec, vma, 0);
+		err = xe_vm_lock_vma(&exec, vma);
 		drm_exec_retry_on_contention(&exec);
 		if (XE_WARN_ON(err))
 			break;
@@ -1024,7 +1393,9 @@ static int xe_vm_insert_vma(struct xe_vm *vm, struct xe_vma *vma)
 	xe_assert(vm->xe, xe_vma_vm(vma) == vm);
 	lockdep_assert_held(&vm->lock);
 
+	mutex_lock(&vm->snap_mutex);
 	err = drm_gpuva_insert(&vm->gpuvm, &vma->gpuva);
+	mutex_unlock(&vm->snap_mutex);
 	XE_WARN_ON(err);	/* Shouldn't be possible */
 
 	return err;
@@ -1035,7 +1406,9 @@ static void xe_vm_remove_vma(struct xe_vm *vm, struct xe_vma *vma)
 	xe_assert(vm->xe, xe_vma_vm(vma) == vm);
 	lockdep_assert_held(&vm->lock);
 
+	mutex_lock(&vm->snap_mutex);
 	drm_gpuva_remove(&vma->gpuva);
+	mutex_unlock(&vm->snap_mutex);
 	if (vm->usm.last_fault_vma == vma)
 		vm->usm.last_fault_vma = NULL;
 }
@@ -1054,13 +1427,13 @@ static struct drm_gpuva_op *xe_vm_op_alloc(void)
 
 static void xe_vm_free(struct drm_gpuvm *gpuvm);
 
-static struct drm_gpuvm_ops gpuvm_ops = {
+static const struct drm_gpuvm_ops gpuvm_ops = {
 	.op_alloc = xe_vm_op_alloc,
 	.vm_bo_validate = xe_gpuvm_validate,
 	.vm_free = xe_vm_free,
 };
 
-static u64 pde_encode_pat_index(struct xe_device *xe, u16 pat_index)
+static u64 pde_encode_pat_index(u16 pat_index)
 {
 	u64 pte = 0;
 
@@ -1073,8 +1446,7 @@ static u64 pde_encode_pat_index(struct xe_device *xe, u16 pat_index)
 	return pte;
 }
 
-static u64 pte_encode_pat_index(struct xe_device *xe, u16 pat_index,
-				u32 pt_level)
+static u64 pte_encode_pat_index(u16 pat_index, u32 pt_level)
 {
 	u64 pte = 0;
 
@@ -1115,12 +1487,11 @@ static u64 pte_encode_ps(u32 pt_level)
 static u64 xelp_pde_encode_bo(struct xe_bo *bo, u64 bo_offset,
 			      const u16 pat_index)
 {
-	struct xe_device *xe = xe_bo_device(bo);
 	u64 pde;
 
 	pde = xe_bo_addr(bo, bo_offset, XE_PAGE_SIZE);
 	pde |= XE_PAGE_PRESENT | XE_PAGE_RW;
-	pde |= pde_encode_pat_index(xe, pat_index);
+	pde |= pde_encode_pat_index(pat_index);
 
 	return pde;
 }
@@ -1128,12 +1499,11 @@ static u64 xelp_pde_encode_bo(struct xe_bo *bo, u64 bo_offset,
 static u64 xelp_pte_encode_bo(struct xe_bo *bo, u64 bo_offset,
 			      u16 pat_index, u32 pt_level)
 {
-	struct xe_device *xe = xe_bo_device(bo);
 	u64 pte;
 
 	pte = xe_bo_addr(bo, bo_offset, XE_PAGE_SIZE);
 	pte |= XE_PAGE_PRESENT | XE_PAGE_RW;
-	pte |= pte_encode_pat_index(xe, pat_index, pt_level);
+	pte |= pte_encode_pat_index(pat_index, pt_level);
 	pte |= pte_encode_ps(pt_level);
 
 	if (xe_bo_is_vram(bo) || xe_bo_is_stolen_devmem(bo))
@@ -1145,14 +1515,12 @@ static u64 xelp_pte_encode_bo(struct xe_bo *bo, u64 bo_offset,
 static u64 xelp_pte_encode_vma(u64 pte, struct xe_vma *vma,
 			       u16 pat_index, u32 pt_level)
 {
-	struct xe_device *xe = xe_vma_vm(vma)->xe;
-
 	pte |= XE_PAGE_PRESENT;
 
 	if (likely(!xe_vma_read_only(vma)))
 		pte |= XE_PAGE_RW;
 
-	pte |= pte_encode_pat_index(xe, pat_index, pt_level);
+	pte |= pte_encode_pat_index(pat_index, pt_level);
 	pte |= pte_encode_ps(pt_level);
 
 	if (unlikely(xe_vma_is_null(vma)))
@@ -1172,7 +1540,7 @@ static u64 xelp_pte_encode_addr(struct xe_device *xe, u64 addr,
 
 	pte = addr;
 	pte |= XE_PAGE_PRESENT | XE_PAGE_RW;
-	pte |= pte_encode_pat_index(xe, pat_index, pt_level);
+	pte |= pte_encode_pat_index(pat_index, pt_level);
 	pte |= pte_encode_ps(pt_level);
 
 	if (devmem)
@@ -1222,6 +1590,7 @@ static int xe_vm_create_scratch(struct xe_device *xe, struct xe_tile *tile,
 
 	return 0;
 }
+ALLOW_ERROR_INJECTION(xe_vm_create_scratch, ERRNO);
 
 static void xe_vm_free_scratch(struct xe_vm *vm)
 {
@@ -1251,6 +1620,12 @@ struct xe_vm *xe_vm_create(struct xe_device *xe, u32 flags)
 	struct xe_tile *tile;
 	u8 id;
 
+	/*
+	 * Since the GSCCS is not user-accessible, we don't expect a GSC VM to
+	 * ever be in faulting mode.
+	 */
+	xe_assert(xe, !((flags & XE_VM_FLAG_GSC) && (flags & XE_VM_FLAG_FAULT_MODE)));
+
 	vm = kzalloc(sizeof(*vm), GFP_KERNEL);
 	if (!vm)
 		return ERR_PTR(-ENOMEM);
@@ -1261,7 +1636,22 @@ struct xe_vm *xe_vm_create(struct xe_device *xe, u32 flags)
 
 	vm->flags = flags;
 
-	init_rwsem(&vm->lock);
+	/**
+	 * GSC VMs are kernel-owned, only used for PXP ops and can sometimes be
+	 * manipulated under the PXP mutex. However, the PXP mutex can be taken
+	 * under a user-VM lock when the PXP session is started at exec_queue
+	 * creation time. Those are different VMs and therefore there is no risk
+	 * of deadlock, but we need to tell lockdep that this is the case or it
+	 * will print a warning.
+	 */
+	if (flags & XE_VM_FLAG_GSC) {
+		static struct lock_class_key gsc_vm_key;
+
+		__init_rwsem(&vm->lock, "gsc_vm", &gsc_vm_key);
+	} else {
+		init_rwsem(&vm->lock);
+	}
+	mutex_init(&vm->snap_mutex);
 
 	INIT_LIST_HEAD(&vm->rebind_list);
 
@@ -1269,6 +1659,8 @@ struct xe_vm *xe_vm_create(struct xe_device *xe, u32 flags)
 	INIT_LIST_HEAD(&vm->userptr.invalidated);
 	init_rwsem(&vm->userptr.notifier_lock);
 	spin_lock_init(&vm->userptr.invalidated_lock);
+
+	ttm_lru_bulk_move_init(&vm->lru_bulk_move);
 
 	INIT_WORK(&vm->destroy_work, vm_destroy_work_func);
 
@@ -1280,8 +1672,14 @@ struct xe_vm *xe_vm_create(struct xe_device *xe, u32 flags)
 
 	vm->pt_ops = &xelp_pt_ops;
 
-	if (!(flags & XE_VM_FLAG_MIGRATION))
-		xe_device_mem_access_get(xe);
+	/*
+	 * Long-running workloads are not protected by the scheduler references.
+	 * By design, run_job for long-running workloads returns NULL and the
+	 * scheduler drops all the references of it, hence protecting the VM
+	 * for this case is necessary.
+	 */
+	if (flags & XE_VM_FLAG_LR_MODE)
+		xe_pm_runtime_get_noresume(xe);
 
 	vm_resv_obj = drm_gpuvm_resv_object_alloc(&xe->drm);
 	if (!vm_resv_obj) {
@@ -1294,7 +1692,7 @@ struct xe_vm *xe_vm_create(struct xe_device *xe, u32 flags)
 
 	drm_gem_object_put(vm_resv_obj);
 
-	err = dma_resv_lock_interruptible(xe_vm_resv(vm), NULL);
+	err = xe_vm_lock(vm, true);
 	if (err)
 		goto err_close;
 
@@ -1326,9 +1724,8 @@ struct xe_vm *xe_vm_create(struct xe_device *xe, u32 flags)
 		vm->batch_invalidate_tlb = true;
 	}
 
-	if (flags & XE_VM_FLAG_LR_MODE) {
+	if (vm->flags & XE_VM_FLAG_LR_MODE) {
 		INIT_WORK(&vm->preempt.rebind_work, preempt_rebind_work_func);
-		vm->flags |= XE_VM_FLAG_LR_MODE;
 		vm->batch_invalidate_tlb = false;
 	}
 
@@ -1339,24 +1736,18 @@ struct xe_vm *xe_vm_create(struct xe_device *xe, u32 flags)
 
 		xe_pt_populate_empty(tile, vm, vm->pt_root[id]);
 	}
-	dma_resv_unlock(xe_vm_resv(vm));
+	xe_vm_unlock(vm);
 
 	/* Kernel migration VM shouldn't have a circular loop.. */
 	if (!(flags & XE_VM_FLAG_MIGRATION)) {
 		for_each_tile(tile, xe, id) {
-			struct xe_gt *gt = tile->primary_gt;
-			struct xe_vm *migrate_vm;
 			struct xe_exec_queue *q;
 			u32 create_flags = EXEC_QUEUE_FLAG_VM;
 
 			if (!vm->pt_root[id])
 				continue;
 
-			migrate_vm = xe_migrate_get_vm(tile->migrate);
-			q = xe_exec_queue_create_class(xe, gt, migrate_vm,
-						       XE_ENGINE_CLASS_COPY,
-						       create_flags);
-			xe_vm_put(migrate_vm);
+			q = xe_exec_queue_create_bind(xe, tile, create_flags, 0);
 			if (IS_ERR(q)) {
 				err = PTR_ERR(q);
 				goto err_close;
@@ -1366,40 +1757,76 @@ struct xe_vm *xe_vm_create(struct xe_device *xe, u32 flags)
 		}
 	}
 
+	if (flags & XE_VM_FLAG_FAULT_MODE) {
+		err = xe_svm_init(vm);
+		if (err)
+			goto err_close;
+	}
+
 	if (number_tiles > 1)
 		vm->composite_fence_ctx = dma_fence_context_alloc(1);
-
-	mutex_lock(&xe->usm.lock);
-	if (flags & XE_VM_FLAG_FAULT_MODE)
-		xe->usm.num_vm_in_fault_mode++;
-	else if (!(flags & XE_VM_FLAG_MIGRATION))
-		xe->usm.num_vm_in_non_fault_mode++;
-	mutex_unlock(&xe->usm.lock);
 
 	trace_xe_vm_create(vm);
 
 	return vm;
 
 err_unlock_close:
-	dma_resv_unlock(xe_vm_resv(vm));
+	xe_vm_unlock(vm);
 err_close:
 	xe_vm_close_and_put(vm);
 	return ERR_PTR(err);
 
 err_no_resv:
+	mutex_destroy(&vm->snap_mutex);
 	for_each_tile(tile, xe, id)
 		xe_range_fence_tree_fini(&vm->rftree[id]);
+	ttm_lru_bulk_move_fini(&xe->ttm, &vm->lru_bulk_move);
 	kfree(vm);
-	if (!(flags & XE_VM_FLAG_MIGRATION))
-		xe_device_mem_access_put(xe);
+	if (flags & XE_VM_FLAG_LR_MODE)
+		xe_pm_runtime_put(xe);
 	return ERR_PTR(err);
 }
 
 static void xe_vm_close(struct xe_vm *vm)
 {
+	struct xe_device *xe = vm->xe;
+	bool bound;
+	int idx;
+
+	bound = drm_dev_enter(&xe->drm, &idx);
+
 	down_write(&vm->lock);
+	if (xe_vm_in_fault_mode(vm))
+		xe_svm_notifier_lock(vm);
+
 	vm->size = 0;
+
+	if (!((vm->flags & XE_VM_FLAG_MIGRATION))) {
+		struct xe_tile *tile;
+		struct xe_gt *gt;
+		u8 id;
+
+		/* Wait for pending binds */
+		dma_resv_wait_timeout(xe_vm_resv(vm),
+				      DMA_RESV_USAGE_BOOKKEEP,
+				      false, MAX_SCHEDULE_TIMEOUT);
+
+		if (bound) {
+			for_each_tile(tile, xe, id)
+				if (vm->pt_root[id])
+					xe_pt_clear(xe, vm->pt_root[id]);
+
+			for_each_gt(gt, xe, id)
+				xe_gt_tlb_invalidation_vm(gt, vm);
+		}
+	}
+
+	if (xe_vm_in_fault_mode(vm))
+		xe_svm_notifier_unlock(vm);
 	up_write(&vm->lock);
+
+	if (bound)
+		drm_dev_exit(idx);
 }
 
 void xe_vm_close_and_put(struct xe_vm *vm)
@@ -1416,6 +1843,8 @@ void xe_vm_close_and_put(struct xe_vm *vm)
 	xe_vm_close(vm);
 	if (xe_vm_in_preempt_fence_mode(vm))
 		flush_work(&vm->preempt.rebind_work);
+	if (xe_vm_in_fault_mode(vm))
+		xe_svm_close(vm);
 
 	down_write(&vm->lock);
 	for_each_tile(tile, xe, id) {
@@ -1484,14 +1913,22 @@ void xe_vm_close_and_put(struct xe_vm *vm)
 		xe_vma_destroy_unlocked(vma);
 	}
 
+	if (xe_vm_in_fault_mode(vm))
+		xe_svm_fini(vm);
+
 	up_write(&vm->lock);
 
-	mutex_lock(&xe->usm.lock);
-	if (vm->flags & XE_VM_FLAG_FAULT_MODE)
-		xe->usm.num_vm_in_fault_mode--;
-	else if (!(vm->flags & XE_VM_FLAG_MIGRATION))
-		xe->usm.num_vm_in_non_fault_mode--;
-	mutex_unlock(&xe->usm.lock);
+	down_write(&xe->usm.lock);
+	if (vm->usm.asid) {
+		void *lookup;
+
+		xe_assert(xe, xe->info.has_asid);
+		xe_assert(xe, !(vm->flags & XE_VM_FLAG_MIGRATION));
+
+		lookup = xa_erase(&xe->usm.asid_to_vm, vm->usm.asid);
+		xe_assert(xe, lookup == vm);
+	}
+	up_write(&xe->usm.lock);
 
 	for_each_tile(tile, xe, id)
 		xe_range_fence_tree_fini(&vm->rftree[id]);
@@ -1506,27 +1943,28 @@ static void vm_destroy_work_func(struct work_struct *w)
 	struct xe_device *xe = vm->xe;
 	struct xe_tile *tile;
 	u8 id;
-	void *lookup;
 
 	/* xe_vm_close_and_put was not called? */
 	xe_assert(xe, !vm->size);
 
-	if (!(vm->flags & XE_VM_FLAG_MIGRATION)) {
-		xe_device_mem_access_put(xe);
+	if (xe_vm_in_preempt_fence_mode(vm))
+		flush_work(&vm->preempt.rebind_work);
 
-		if (xe->info.has_asid && vm->usm.asid) {
-			mutex_lock(&xe->usm.lock);
-			lookup = xa_erase(&xe->usm.asid_to_vm, vm->usm.asid);
-			xe_assert(xe, lookup == vm);
-			mutex_unlock(&xe->usm.lock);
-		}
-	}
+	mutex_destroy(&vm->snap_mutex);
+
+	if (vm->flags & XE_VM_FLAG_LR_MODE)
+		xe_pm_runtime_put(xe);
 
 	for_each_tile(tile, xe, id)
 		XE_WARN_ON(vm->pt_root[id]);
 
 	trace_xe_vm_free(vm);
-	dma_fence_put(vm->rebind_fence);
+
+	ttm_lru_bulk_move_fini(&xe->ttm, &vm->lru_bulk_move);
+
+	if (vm->xef)
+		xe_file_put(vm->xef);
+
 	kfree(vm);
 }
 
@@ -1563,231 +2001,19 @@ to_wait_exec_queue(struct xe_vm *vm, struct xe_exec_queue *q)
 	return q ? q : vm->q[0];
 }
 
-static struct dma_fence *
-xe_vm_unbind_vma(struct xe_vma *vma, struct xe_exec_queue *q,
-		 struct xe_sync_entry *syncs, u32 num_syncs,
-		 bool first_op, bool last_op)
+static struct xe_user_fence *
+find_ufence_get(struct xe_sync_entry *syncs, u32 num_syncs)
 {
-	struct xe_vm *vm = xe_vma_vm(vma);
-	struct xe_exec_queue *wait_exec_queue = to_wait_exec_queue(vm, q);
-	struct xe_tile *tile;
-	struct dma_fence *fence = NULL;
-	struct dma_fence **fences = NULL;
-	struct dma_fence_array *cf = NULL;
-	int cur_fence = 0, i;
-	int number_tiles = hweight8(vma->tile_present);
-	int err;
-	u8 id;
+	unsigned int i;
 
-	trace_xe_vma_unbind(vma);
+	for (i = 0; i < num_syncs; i++) {
+		struct xe_sync_entry *e = &syncs[i];
 
-	if (number_tiles > 1) {
-		fences = kmalloc_array(number_tiles, sizeof(*fences),
-				       GFP_KERNEL);
-		if (!fences)
-			return ERR_PTR(-ENOMEM);
+		if (xe_sync_is_ufence(e))
+			return xe_sync_ufence_get(e);
 	}
 
-	for_each_tile(tile, vm->xe, id) {
-		if (!(vma->tile_present & BIT(id)))
-			goto next;
-
-		fence = __xe_pt_unbind_vma(tile, vma, q ? q : vm->q[id],
-					   first_op ? syncs : NULL,
-					   first_op ? num_syncs : 0);
-		if (IS_ERR(fence)) {
-			err = PTR_ERR(fence);
-			goto err_fences;
-		}
-
-		if (fences)
-			fences[cur_fence++] = fence;
-
-next:
-		if (q && vm->pt_root[id] && !list_empty(&q->multi_gt_list))
-			q = list_next_entry(q, multi_gt_list);
-	}
-
-	if (fences) {
-		cf = dma_fence_array_create(number_tiles, fences,
-					    vm->composite_fence_ctx,
-					    vm->composite_fence_seqno++,
-					    false);
-		if (!cf) {
-			--vm->composite_fence_seqno;
-			err = -ENOMEM;
-			goto err_fences;
-		}
-	}
-
-	fence = cf ? &cf->base : !fence ?
-		xe_exec_queue_last_fence_get(wait_exec_queue, vm) : fence;
-	if (last_op) {
-		for (i = 0; i < num_syncs; i++)
-			xe_sync_entry_signal(&syncs[i], NULL, fence);
-	}
-
-	return fence;
-
-err_fences:
-	if (fences) {
-		while (cur_fence)
-			dma_fence_put(fences[--cur_fence]);
-		kfree(fences);
-	}
-
-	return ERR_PTR(err);
-}
-
-static struct dma_fence *
-xe_vm_bind_vma(struct xe_vma *vma, struct xe_exec_queue *q,
-	       struct xe_sync_entry *syncs, u32 num_syncs,
-	       bool first_op, bool last_op)
-{
-	struct xe_tile *tile;
-	struct dma_fence *fence;
-	struct dma_fence **fences = NULL;
-	struct dma_fence_array *cf = NULL;
-	struct xe_vm *vm = xe_vma_vm(vma);
-	int cur_fence = 0, i;
-	int number_tiles = hweight8(vma->tile_mask);
-	int err;
-	u8 id;
-
-	trace_xe_vma_bind(vma);
-
-	if (number_tiles > 1) {
-		fences = kmalloc_array(number_tiles, sizeof(*fences),
-				       GFP_KERNEL);
-		if (!fences)
-			return ERR_PTR(-ENOMEM);
-	}
-
-	for_each_tile(tile, vm->xe, id) {
-		if (!(vma->tile_mask & BIT(id)))
-			goto next;
-
-		fence = __xe_pt_bind_vma(tile, vma, q ? q : vm->q[id],
-					 first_op ? syncs : NULL,
-					 first_op ? num_syncs : 0,
-					 vma->tile_present & BIT(id));
-		if (IS_ERR(fence)) {
-			err = PTR_ERR(fence);
-			goto err_fences;
-		}
-
-		if (fences)
-			fences[cur_fence++] = fence;
-
-next:
-		if (q && vm->pt_root[id] && !list_empty(&q->multi_gt_list))
-			q = list_next_entry(q, multi_gt_list);
-	}
-
-	if (fences) {
-		cf = dma_fence_array_create(number_tiles, fences,
-					    vm->composite_fence_ctx,
-					    vm->composite_fence_seqno++,
-					    false);
-		if (!cf) {
-			--vm->composite_fence_seqno;
-			err = -ENOMEM;
-			goto err_fences;
-		}
-	}
-
-	if (last_op) {
-		for (i = 0; i < num_syncs; i++)
-			xe_sync_entry_signal(&syncs[i], NULL,
-					     cf ? &cf->base : fence);
-	}
-
-	return cf ? &cf->base : fence;
-
-err_fences:
-	if (fences) {
-		while (cur_fence)
-			dma_fence_put(fences[--cur_fence]);
-		kfree(fences);
-	}
-
-	return ERR_PTR(err);
-}
-
-static int __xe_vm_bind(struct xe_vm *vm, struct xe_vma *vma,
-			struct xe_exec_queue *q, struct xe_sync_entry *syncs,
-			u32 num_syncs, bool immediate, bool first_op,
-			bool last_op)
-{
-	struct dma_fence *fence;
-	struct xe_exec_queue *wait_exec_queue = to_wait_exec_queue(vm, q);
-
-	xe_vm_assert_held(vm);
-
-	if (immediate) {
-		fence = xe_vm_bind_vma(vma, q, syncs, num_syncs, first_op,
-				       last_op);
-		if (IS_ERR(fence))
-			return PTR_ERR(fence);
-	} else {
-		int i;
-
-		xe_assert(vm->xe, xe_vm_in_fault_mode(vm));
-
-		fence = xe_exec_queue_last_fence_get(wait_exec_queue, vm);
-		if (last_op) {
-			for (i = 0; i < num_syncs; i++)
-				xe_sync_entry_signal(&syncs[i], NULL, fence);
-		}
-	}
-
-	if (last_op)
-		xe_exec_queue_last_fence_set(wait_exec_queue, vm, fence);
-	dma_fence_put(fence);
-
-	return 0;
-}
-
-static int xe_vm_bind(struct xe_vm *vm, struct xe_vma *vma, struct xe_exec_queue *q,
-		      struct xe_bo *bo, struct xe_sync_entry *syncs,
-		      u32 num_syncs, bool immediate, bool first_op,
-		      bool last_op)
-{
-	int err;
-
-	xe_vm_assert_held(vm);
-	xe_bo_assert_held(bo);
-
-	if (bo && immediate) {
-		err = xe_bo_validate(bo, vm, true);
-		if (err)
-			return err;
-	}
-
-	return __xe_vm_bind(vm, vma, q, syncs, num_syncs, immediate, first_op,
-			    last_op);
-}
-
-static int xe_vm_unbind(struct xe_vm *vm, struct xe_vma *vma,
-			struct xe_exec_queue *q, struct xe_sync_entry *syncs,
-			u32 num_syncs, bool first_op, bool last_op)
-{
-	struct dma_fence *fence;
-	struct xe_exec_queue *wait_exec_queue = to_wait_exec_queue(vm, q);
-
-	xe_vm_assert_held(vm);
-	xe_bo_assert_held(xe_vma_bo(vma));
-
-	fence = xe_vm_unbind_vma(vma, q, syncs, num_syncs, first_op, last_op);
-	if (IS_ERR(fence))
-		return PTR_ERR(fence);
-
-	xe_vma_destroy(vma, fence);
-	if (last_op)
-		xe_exec_queue_last_fence_set(wait_exec_queue, vm, fence);
-	dma_fence_put(fence);
-
-	return 0;
+	return NULL;
 }
 
 #define ALL_DRM_XE_VM_CREATE_FLAGS (DRM_XE_VM_CREATE_FLAG_SCRATCH_PAGE | \
@@ -1830,17 +2056,6 @@ int xe_vm_create_ioctl(struct drm_device *dev, void *data,
 			 args->flags & DRM_XE_VM_CREATE_FLAG_FAULT_MODE))
 		return -EINVAL;
 
-	if (XE_IOCTL_DBG(xe, args->flags & DRM_XE_VM_CREATE_FLAG_FAULT_MODE &&
-			 xe_device_in_non_fault_mode(xe)))
-		return -EINVAL;
-
-	if (XE_IOCTL_DBG(xe, !(args->flags & DRM_XE_VM_CREATE_FLAG_FAULT_MODE) &&
-			 xe_device_in_fault_mode(xe)))
-		return -EINVAL;
-
-	if (XE_IOCTL_DBG(xe, args->extensions))
-		return -EINVAL;
-
 	if (args->flags & DRM_XE_VM_CREATE_FLAG_SCRATCH_PAGE)
 		flags |= XE_VM_FLAG_SCRATCH_PAGE;
 	if (args->flags & DRM_XE_VM_CREATE_FLAG_LR_MODE)
@@ -1852,30 +2067,19 @@ int xe_vm_create_ioctl(struct drm_device *dev, void *data,
 	if (IS_ERR(vm))
 		return PTR_ERR(vm);
 
-	mutex_lock(&xef->vm.lock);
-	err = xa_alloc(&xef->vm.xa, &id, vm, xa_limit_32b, GFP_KERNEL);
-	mutex_unlock(&xef->vm.lock);
-	if (err) {
-		xe_vm_close_and_put(vm);
-		return err;
-	}
-
 	if (xe->info.has_asid) {
-		mutex_lock(&xe->usm.lock);
+		down_write(&xe->usm.lock);
 		err = xa_alloc_cyclic(&xe->usm.asid_to_vm, &asid, vm,
 				      XA_LIMIT(1, XE_MAX_ASID - 1),
 				      &xe->usm.next_asid, GFP_KERNEL);
-		mutex_unlock(&xe->usm.lock);
-		if (err < 0) {
-			xe_vm_close_and_put(vm);
-			return err;
-		}
-		err = 0;
+		up_write(&xe->usm.lock);
+		if (err < 0)
+			goto err_close_and_put;
+
 		vm->usm.asid = asid;
 	}
 
-	args->vm_id = id;
-	vm->xef = xef;
+	vm->xef = xe_file_get(xef);
 
 	/* Record BO memory for VM pagetable created against client */
 	for_each_tile(tile, xe, id)
@@ -1887,7 +2091,19 @@ int xe_vm_create_ioctl(struct drm_device *dev, void *data,
 	args->reserved[0] = xe_bo_main_addr(vm->pt_root[0]->bo, XE_PAGE_SIZE);
 #endif
 
+	/* user id alloc must always be last in ioctl to prevent UAF */
+	err = xa_alloc(&xef->vm.xa, &id, vm, xa_limit_32b, GFP_KERNEL);
+	if (err)
+		goto err_close_and_put;
+
+	args->vm_id = id;
+
 	return 0;
+
+err_close_and_put:
+	xe_vm_close_and_put(vm);
+
+	return err;
 }
 
 int xe_vm_destroy_ioctl(struct drm_device *dev, void *data,
@@ -1924,42 +2140,6 @@ static const u32 region_to_mem_type[] = {
 	XE_PL_VRAM0,
 	XE_PL_VRAM1,
 };
-
-static int xe_vm_prefetch(struct xe_vm *vm, struct xe_vma *vma,
-			  struct xe_exec_queue *q, u32 region,
-			  struct xe_sync_entry *syncs, u32 num_syncs,
-			  bool first_op, bool last_op)
-{
-	struct xe_exec_queue *wait_exec_queue = to_wait_exec_queue(vm, q);
-	int err;
-
-	xe_assert(vm->xe, region <= ARRAY_SIZE(region_to_mem_type));
-
-	if (!xe_vma_has_no_bo(vma)) {
-		err = xe_bo_migrate(xe_vma_bo(vma), region_to_mem_type[region]);
-		if (err)
-			return err;
-	}
-
-	if (vma->tile_mask != (vma->tile_present & ~vma->usm.tile_invalidated)) {
-		return xe_vm_bind(vm, vma, q, xe_vma_bo(vma), syncs, num_syncs,
-				  true, first_op, last_op);
-	} else {
-		int i;
-
-		/* Nothing to do, signal fences now */
-		if (last_op) {
-			for (i = 0; i < num_syncs; i++) {
-				struct dma_fence *fence =
-					xe_exec_queue_last_fence_get(wait_exec_queue, vm);
-
-				xe_sync_entry_signal(&syncs[i], NULL, fence);
-			}
-		}
-
-		return 0;
-	}
-}
 
 static void prep_vma_destroy(struct xe_vm *vm, struct xe_vma *vma,
 			     bool post_commit)
@@ -2034,7 +2214,6 @@ vm_bind_ioctl_ops_create(struct xe_vm *vm, struct xe_bo *bo,
 	struct drm_gem_object *obj = bo ? &bo->ttm.base : NULL;
 	struct drm_gpuva_ops *ops;
 	struct drm_gpuva_op *__op;
-	struct xe_vma_op *op;
 	struct drm_gpuvm_bo *vm_bo;
 	int err;
 
@@ -2081,15 +2260,6 @@ vm_bind_ioctl_ops_create(struct xe_vm *vm, struct xe_bo *bo,
 	if (IS_ERR(ops))
 		return ops;
 
-#ifdef TEST_VM_ASYNC_OPS_ERROR
-	if (operation & FORCE_ASYNC_OP_ERROR) {
-		op = list_first_entry_or_null(&ops->list, struct xe_vma_op,
-					      base.entry);
-		if (op)
-			op->inject_error = true;
-	}
-#endif
-
 	drm_gpuva_for_each_op(__op, ops) {
 		struct xe_vma_op *op = gpuva_op_to_vma_op(__op);
 
@@ -2099,6 +2269,9 @@ vm_bind_ioctl_ops_create(struct xe_vm *vm, struct xe_bo *bo,
 			op->map.read_only =
 				flags & DRM_XE_VM_BIND_FLAG_READONLY;
 			op->map.is_null = flags & DRM_XE_VM_BIND_FLAG_NULL;
+			op->map.is_cpu_addr_mirror = flags &
+				DRM_XE_VM_BIND_FLAG_CPU_ADDR_MIRROR;
+			op->map.dumpable = flags & DRM_XE_VM_BIND_FLAG_DUMPABLE;
 			op->map.pat_index = pat_index;
 		} else if (__op->op == DRM_GPUVA_OP_PREFETCH) {
 			op->prefetch.region = prefetch_region;
@@ -2109,6 +2282,7 @@ vm_bind_ioctl_ops_create(struct xe_vm *vm, struct xe_bo *bo,
 
 	return ops;
 }
+ALLOW_ERROR_INJECTION(vm_bind_ioctl_ops_create, ERRNO);
 
 static struct xe_vma *new_vma(struct xe_vm *vm, struct drm_gpuva_op_map *op,
 			      u16 pat_index, unsigned int flags)
@@ -2116,7 +2290,7 @@ static struct xe_vma *new_vma(struct xe_vm *vm, struct drm_gpuva_op_map *op,
 	struct xe_bo *bo = op->gem.obj ? gem_to_xe_bo(op->gem.obj) : NULL;
 	struct drm_exec exec;
 	struct xe_vma *vma;
-	int err;
+	int err = 0;
 
 	lockdep_assert_held_write(&vm->lock);
 
@@ -2141,23 +2315,22 @@ static struct xe_vma *new_vma(struct xe_vm *vm, struct drm_gpuva_op_map *op,
 	vma = xe_vma_create(vm, bo, op->gem.offset,
 			    op->va.addr, op->va.addr +
 			    op->va.range - 1, pat_index, flags);
+	if (IS_ERR(vma))
+		goto err_unlock;
+
+	if (xe_vma_is_userptr(vma))
+		err = xe_vma_userptr_pin_pages(to_userptr_vma(vma));
+	else if (!xe_vma_has_no_bo(vma) && !bo->vm)
+		err = add_preempt_fences(vm, bo);
+
+err_unlock:
 	if (bo)
 		drm_exec_fini(&exec);
 
-	if (xe_vma_is_userptr(vma)) {
-		err = xe_vma_userptr_pin_pages(vma);
-		if (err) {
-			prep_vma_destroy(vm, vma, false);
-			xe_vma_destroy_unlocked(vma);
-			return ERR_PTR(err);
-		}
-	} else if (!xe_vma_has_no_bo(vma) && !bo->vm) {
-		err = add_preempt_fences(vm, bo);
-		if (err) {
-			prep_vma_destroy(vm, vma, false);
-			xe_vma_destroy_unlocked(vma);
-			return ERR_PTR(err);
-		}
+	if (err) {
+		prep_vma_destroy(vm, vma, false);
+		xe_vma_destroy_unlocked(vma);
+		vma = ERR_PTR(err);
 	}
 
 	return vma;
@@ -2167,13 +2340,17 @@ static u64 xe_vma_max_pte_size(struct xe_vma *vma)
 {
 	if (vma->gpuva.flags & XE_VMA_PTE_1G)
 		return SZ_1G;
-	else if (vma->gpuva.flags & XE_VMA_PTE_2M)
+	else if (vma->gpuva.flags & (XE_VMA_PTE_2M | XE_VMA_PTE_COMPACT))
 		return SZ_2M;
+	else if (vma->gpuva.flags & XE_VMA_PTE_64K)
+		return SZ_64K;
+	else if (vma->gpuva.flags & XE_VMA_PTE_4K)
+		return SZ_4K;
 
-	return SZ_4K;
+	return SZ_1G;	/* Uninitialized, used max size */
 }
 
-static u64 xe_vma_set_pte_size(struct xe_vma *vma, u64 size)
+static void xe_vma_set_pte_size(struct xe_vma *vma, u64 size)
 {
 	switch (size) {
 	case SZ_1G:
@@ -2182,9 +2359,13 @@ static u64 xe_vma_set_pte_size(struct xe_vma *vma, u64 size)
 	case SZ_2M:
 		vma->gpuva.flags |= XE_VMA_PTE_2M;
 		break;
+	case SZ_64K:
+		vma->gpuva.flags |= XE_VMA_PTE_64K;
+		break;
+	case SZ_4K:
+		vma->gpuva.flags |= XE_VMA_PTE_4K;
+		break;
 	}
-
-	return SZ_4K;
 }
 
 static int xe_vma_op_commit(struct xe_vm *vm, struct xe_vma_op *op)
@@ -2229,7 +2410,7 @@ static int xe_vma_op_commit(struct xe_vm *vm, struct xe_vma_op *op)
 			}
 		}
 
-		/* Adjust for partial unbind after removin VMA from VM */
+		/* Adjust for partial unbind after removing VMA from VM */
 		if (!err) {
 			op->base.remap.unmap->va->va.addr = op->remap.start;
 			op->base.remap.unmap->va->va.range = op->remap.range;
@@ -2250,34 +2431,28 @@ static int xe_vma_op_commit(struct xe_vm *vm, struct xe_vma_op *op)
 	return err;
 }
 
-
-static int vm_bind_ioctl_ops_parse(struct xe_vm *vm, struct xe_exec_queue *q,
-				   struct drm_gpuva_ops *ops,
-				   struct xe_sync_entry *syncs, u32 num_syncs,
-				   struct list_head *ops_list, bool last)
+static int vm_bind_ioctl_ops_parse(struct xe_vm *vm, struct drm_gpuva_ops *ops,
+				   struct xe_vma_ops *vops)
 {
-	struct xe_vma_op *last_op = NULL;
+	struct xe_device *xe = vm->xe;
 	struct drm_gpuva_op *__op;
+	struct xe_tile *tile;
+	u8 id, tile_mask = 0;
 	int err = 0;
 
 	lockdep_assert_held_write(&vm->lock);
 
+	for_each_tile(tile, vm->xe, id)
+		tile_mask |= 0x1 << id;
+
 	drm_gpuva_for_each_op(__op, ops) {
 		struct xe_vma_op *op = gpuva_op_to_vma_op(__op);
 		struct xe_vma *vma;
-		bool first = list_empty(ops_list);
 		unsigned int flags = 0;
 
 		INIT_LIST_HEAD(&op->link);
-		list_add_tail(&op->link, ops_list);
-
-		if (first) {
-			op->flags |= XE_VMA_OP_FIRST;
-			op->num_syncs = num_syncs;
-			op->syncs = syncs;
-		}
-
-		op->q = q;
+		list_add_tail(&op->link, &vops->list);
+		op->tile_mask = tile_mask;
 
 		switch (op->base.op) {
 		case DRM_GPUVA_OP_MAP:
@@ -2286,6 +2461,10 @@ static int vm_bind_ioctl_ops_parse(struct xe_vm *vm, struct xe_exec_queue *q,
 				VMA_CREATE_FLAG_READ_ONLY : 0;
 			flags |= op->map.is_null ?
 				VMA_CREATE_FLAG_IS_NULL : 0;
+			flags |= op->map.dumpable ?
+				VMA_CREATE_FLAG_DUMPABLE : 0;
+			flags |= op->map.is_cpu_addr_mirror ?
+				VMA_CREATE_FLAG_IS_SYSTEM_ALLOCATOR : 0;
 
 			vma = new_vma(vm, &op->base.map, op->map.pat_index,
 				      flags);
@@ -2293,24 +2472,45 @@ static int vm_bind_ioctl_ops_parse(struct xe_vm *vm, struct xe_exec_queue *q,
 				return PTR_ERR(vma);
 
 			op->map.vma = vma;
+			if ((op->map.immediate || !xe_vm_in_fault_mode(vm)) &&
+			    !op->map.is_cpu_addr_mirror)
+				xe_vma_ops_incr_pt_update_ops(vops,
+							      op->tile_mask);
 			break;
 		}
 		case DRM_GPUVA_OP_REMAP:
 		{
 			struct xe_vma *old =
 				gpuva_to_vma(op->base.remap.unmap->va);
+			bool skip = xe_vma_is_cpu_addr_mirror(old);
+			u64 start = xe_vma_start(old), end = xe_vma_end(old);
+
+			if (op->base.remap.prev)
+				start = op->base.remap.prev->va.addr +
+					op->base.remap.prev->va.range;
+			if (op->base.remap.next)
+				end = op->base.remap.next->va.addr;
+
+			if (xe_vma_is_cpu_addr_mirror(old) &&
+			    xe_svm_has_mapping(vm, start, end))
+				return -EBUSY;
 
 			op->remap.start = xe_vma_start(old);
 			op->remap.range = xe_vma_size(old);
 
-			if (op->base.remap.prev) {
-				flags |= op->base.remap.unmap->va->flags &
-					XE_VMA_READ_ONLY ?
-					VMA_CREATE_FLAG_READ_ONLY : 0;
-				flags |= op->base.remap.unmap->va->flags &
-					DRM_GPUVA_SPARSE ?
-					VMA_CREATE_FLAG_IS_NULL : 0;
+			flags |= op->base.remap.unmap->va->flags &
+				XE_VMA_READ_ONLY ?
+				VMA_CREATE_FLAG_READ_ONLY : 0;
+			flags |= op->base.remap.unmap->va->flags &
+				DRM_GPUVA_SPARSE ?
+				VMA_CREATE_FLAG_IS_NULL : 0;
+			flags |= op->base.remap.unmap->va->flags &
+				XE_VMA_DUMPABLE ?
+				VMA_CREATE_FLAG_DUMPABLE : 0;
+			flags |= xe_vma_is_cpu_addr_mirror(old) ?
+				VMA_CREATE_FLAG_IS_SYSTEM_ALLOCATOR : 0;
 
+			if (op->base.remap.prev) {
 				vma = new_vma(vm, op->base.remap.prev,
 					      old->pat_index, flags);
 				if (IS_ERR(vma))
@@ -2322,26 +2522,25 @@ static int vm_bind_ioctl_ops_parse(struct xe_vm *vm, struct xe_exec_queue *q,
 				 * Userptr creates a new SG mapping so
 				 * we must also rebind.
 				 */
-				op->remap.skip_prev = !xe_vma_is_userptr(old) &&
+				op->remap.skip_prev = skip ||
+					(!xe_vma_is_userptr(old) &&
 					IS_ALIGNED(xe_vma_end(vma),
-						   xe_vma_max_pte_size(old));
+						   xe_vma_max_pte_size(old)));
 				if (op->remap.skip_prev) {
 					xe_vma_set_pte_size(vma, xe_vma_max_pte_size(old));
 					op->remap.range -=
 						xe_vma_end(vma) -
 						xe_vma_start(old);
 					op->remap.start = xe_vma_end(vma);
+					vm_dbg(&xe->drm, "REMAP:SKIP_PREV: addr=0x%016llx, range=0x%016llx",
+					       (ULL)op->remap.start,
+					       (ULL)op->remap.range);
+				} else {
+					xe_vma_ops_incr_pt_update_ops(vops, op->tile_mask);
 				}
 			}
 
 			if (op->base.remap.next) {
-				flags |= op->base.remap.unmap->va->flags &
-					XE_VMA_READ_ONLY ?
-					VMA_CREATE_FLAG_READ_ONLY : 0;
-				flags |= op->base.remap.unmap->va->flags &
-					DRM_GPUVA_SPARSE ?
-					VMA_CREATE_FLAG_IS_NULL : 0;
-
 				vma = new_vma(vm, op->base.remap.next,
 					      old->pat_index, flags);
 				if (IS_ERR(vma))
@@ -2353,229 +2552,59 @@ static int vm_bind_ioctl_ops_parse(struct xe_vm *vm, struct xe_exec_queue *q,
 				 * Userptr creates a new SG mapping so
 				 * we must also rebind.
 				 */
-				op->remap.skip_next = !xe_vma_is_userptr(old) &&
+				op->remap.skip_next = skip ||
+					(!xe_vma_is_userptr(old) &&
 					IS_ALIGNED(xe_vma_start(vma),
-						   xe_vma_max_pte_size(old));
+						   xe_vma_max_pte_size(old)));
 				if (op->remap.skip_next) {
 					xe_vma_set_pte_size(vma, xe_vma_max_pte_size(old));
 					op->remap.range -=
 						xe_vma_end(old) -
 						xe_vma_start(vma);
+					vm_dbg(&xe->drm, "REMAP:SKIP_NEXT: addr=0x%016llx, range=0x%016llx",
+					       (ULL)op->remap.start,
+					       (ULL)op->remap.range);
+				} else {
+					xe_vma_ops_incr_pt_update_ops(vops, op->tile_mask);
 				}
 			}
+			if (!skip)
+				xe_vma_ops_incr_pt_update_ops(vops, op->tile_mask);
 			break;
 		}
 		case DRM_GPUVA_OP_UNMAP:
+			vma = gpuva_to_vma(op->base.unmap.va);
+
+			if (xe_vma_is_cpu_addr_mirror(vma) &&
+			    xe_svm_has_mapping(vm, xe_vma_start(vma),
+					       xe_vma_end(vma)))
+				return -EBUSY;
+
+			if (!xe_vma_is_cpu_addr_mirror(vma))
+				xe_vma_ops_incr_pt_update_ops(vops, op->tile_mask);
+			break;
 		case DRM_GPUVA_OP_PREFETCH:
-			/* Nothing to do */
+			vma = gpuva_to_vma(op->base.prefetch.va);
+
+			if (xe_vma_is_userptr(vma)) {
+				err = xe_vma_userptr_pin_pages(to_userptr_vma(vma));
+				if (err)
+					return err;
+			}
+
+			if (!xe_vma_is_cpu_addr_mirror(vma))
+				xe_vma_ops_incr_pt_update_ops(vops, op->tile_mask);
 			break;
 		default:
 			drm_warn(&vm->xe->drm, "NOT POSSIBLE");
 		}
-
-		last_op = op;
 
 		err = xe_vma_op_commit(vm, op);
 		if (err)
 			return err;
 	}
 
-	/* FIXME: Unhandled corner case */
-	XE_WARN_ON(!last_op && last && !list_empty(ops_list));
-
-	if (!last_op)
-		return 0;
-
-	last_op->ops = ops;
-	if (last) {
-		last_op->flags |= XE_VMA_OP_LAST;
-		last_op->num_syncs = num_syncs;
-		last_op->syncs = syncs;
-	}
-
 	return 0;
-}
-
-static int op_execute(struct drm_exec *exec, struct xe_vm *vm,
-		      struct xe_vma *vma, struct xe_vma_op *op)
-{
-	int err;
-
-	lockdep_assert_held_write(&vm->lock);
-
-	err = xe_vm_prepare_vma(exec, vma, 1);
-	if (err)
-		return err;
-
-	xe_vm_assert_held(vm);
-	xe_bo_assert_held(xe_vma_bo(vma));
-
-	switch (op->base.op) {
-	case DRM_GPUVA_OP_MAP:
-		err = xe_vm_bind(vm, vma, op->q, xe_vma_bo(vma),
-				 op->syncs, op->num_syncs,
-				 op->map.immediate || !xe_vm_in_fault_mode(vm),
-				 op->flags & XE_VMA_OP_FIRST,
-				 op->flags & XE_VMA_OP_LAST);
-		break;
-	case DRM_GPUVA_OP_REMAP:
-	{
-		bool prev = !!op->remap.prev;
-		bool next = !!op->remap.next;
-
-		if (!op->remap.unmap_done) {
-			if (prev || next)
-				vma->gpuva.flags |= XE_VMA_FIRST_REBIND;
-			err = xe_vm_unbind(vm, vma, op->q, op->syncs,
-					   op->num_syncs,
-					   op->flags & XE_VMA_OP_FIRST,
-					   op->flags & XE_VMA_OP_LAST &&
-					   !prev && !next);
-			if (err)
-				break;
-			op->remap.unmap_done = true;
-		}
-
-		if (prev) {
-			op->remap.prev->gpuva.flags |= XE_VMA_LAST_REBIND;
-			err = xe_vm_bind(vm, op->remap.prev, op->q,
-					 xe_vma_bo(op->remap.prev), op->syncs,
-					 op->num_syncs, true, false,
-					 op->flags & XE_VMA_OP_LAST && !next);
-			op->remap.prev->gpuva.flags &= ~XE_VMA_LAST_REBIND;
-			if (err)
-				break;
-			op->remap.prev = NULL;
-		}
-
-		if (next) {
-			op->remap.next->gpuva.flags |= XE_VMA_LAST_REBIND;
-			err = xe_vm_bind(vm, op->remap.next, op->q,
-					 xe_vma_bo(op->remap.next),
-					 op->syncs, op->num_syncs,
-					 true, false,
-					 op->flags & XE_VMA_OP_LAST);
-			op->remap.next->gpuva.flags &= ~XE_VMA_LAST_REBIND;
-			if (err)
-				break;
-			op->remap.next = NULL;
-		}
-
-		break;
-	}
-	case DRM_GPUVA_OP_UNMAP:
-		err = xe_vm_unbind(vm, vma, op->q, op->syncs,
-				   op->num_syncs, op->flags & XE_VMA_OP_FIRST,
-				   op->flags & XE_VMA_OP_LAST);
-		break;
-	case DRM_GPUVA_OP_PREFETCH:
-		err = xe_vm_prefetch(vm, vma, op->q, op->prefetch.region,
-				     op->syncs, op->num_syncs,
-				     op->flags & XE_VMA_OP_FIRST,
-				     op->flags & XE_VMA_OP_LAST);
-		break;
-	default:
-		drm_warn(&vm->xe->drm, "NOT POSSIBLE");
-	}
-
-	if (err)
-		trace_xe_vma_fail(vma);
-
-	return err;
-}
-
-static int __xe_vma_op_execute(struct xe_vm *vm, struct xe_vma *vma,
-			       struct xe_vma_op *op)
-{
-	struct drm_exec exec;
-	int err;
-
-retry_userptr:
-	drm_exec_init(&exec, DRM_EXEC_INTERRUPTIBLE_WAIT, 0);
-	drm_exec_until_all_locked(&exec) {
-		err = op_execute(&exec, vm, vma, op);
-		drm_exec_retry_on_contention(&exec);
-		if (err)
-			break;
-	}
-	drm_exec_fini(&exec);
-
-	if (err == -EAGAIN && xe_vma_is_userptr(vma)) {
-		lockdep_assert_held_write(&vm->lock);
-		err = xe_vma_userptr_pin_pages(vma);
-		if (!err)
-			goto retry_userptr;
-
-		trace_xe_vma_fail(vma);
-	}
-
-	return err;
-}
-
-static int xe_vma_op_execute(struct xe_vm *vm, struct xe_vma_op *op)
-{
-	int ret = 0;
-
-	lockdep_assert_held_write(&vm->lock);
-
-#ifdef TEST_VM_ASYNC_OPS_ERROR
-	if (op->inject_error) {
-		op->inject_error = false;
-		return -ENOMEM;
-	}
-#endif
-
-	switch (op->base.op) {
-	case DRM_GPUVA_OP_MAP:
-		ret = __xe_vma_op_execute(vm, op->map.vma, op);
-		break;
-	case DRM_GPUVA_OP_REMAP:
-	{
-		struct xe_vma *vma;
-
-		if (!op->remap.unmap_done)
-			vma = gpuva_to_vma(op->base.remap.unmap->va);
-		else if (op->remap.prev)
-			vma = op->remap.prev;
-		else
-			vma = op->remap.next;
-
-		ret = __xe_vma_op_execute(vm, vma, op);
-		break;
-	}
-	case DRM_GPUVA_OP_UNMAP:
-		ret = __xe_vma_op_execute(vm, gpuva_to_vma(op->base.unmap.va),
-					  op);
-		break;
-	case DRM_GPUVA_OP_PREFETCH:
-		ret = __xe_vma_op_execute(vm,
-					  gpuva_to_vma(op->base.prefetch.va),
-					  op);
-		break;
-	default:
-		drm_warn(&vm->xe->drm, "NOT POSSIBLE");
-	}
-
-	return ret;
-}
-
-static void xe_vma_op_cleanup(struct xe_vm *vm, struct xe_vma_op *op)
-{
-	bool last = op->flags & XE_VMA_OP_LAST;
-
-	if (last) {
-		while (op->num_syncs--)
-			xe_sync_entry_cleanup(&op->syncs[op->num_syncs]);
-		kfree(op->syncs);
-		if (op->q)
-			xe_exec_queue_put(op->q);
-	}
-	if (!list_empty(&op->link))
-		list_del(&op->link);
-	if (op->ops)
-		drm_gpuva_ops_free(&vm->gpuvm, op->ops);
-	if (last)
-		xe_vm_put(vm);
 }
 
 static void xe_vma_op_unwind(struct xe_vm *vm, struct xe_vma_op *op,
@@ -2639,7 +2668,7 @@ static void vm_bind_ioctl_ops_unwind(struct xe_vm *vm,
 {
 	int i;
 
-	for (i = num_ops_list - 1; i; ++i) {
+	for (i = num_ops_list - 1; i >= 0; --i) {
 		struct drm_gpuva_ops *__ops = ops[i];
 		struct drm_gpuva_op *__op;
 
@@ -2654,52 +2683,381 @@ static void vm_bind_ioctl_ops_unwind(struct xe_vm *vm,
 					 op->flags & XE_VMA_OP_PREV_COMMITTED,
 					 op->flags & XE_VMA_OP_NEXT_COMMITTED);
 		}
-
-		drm_gpuva_ops_free(&vm->gpuvm, __ops);
 	}
 }
 
-static int vm_bind_ioctl_ops_execute(struct xe_vm *vm,
-				     struct list_head *ops_list)
+static int vma_lock_and_validate(struct drm_exec *exec, struct xe_vma *vma,
+				 bool validate)
 {
-	struct xe_vma_op *op, *next;
-	int err;
+	struct xe_bo *bo = xe_vma_bo(vma);
+	struct xe_vm *vm = xe_vma_vm(vma);
+	int err = 0;
 
-	lockdep_assert_held_write(&vm->lock);
+	if (bo) {
+		if (!bo->vm)
+			err = drm_exec_lock_obj(exec, &bo->ttm.base);
+		if (!err && validate)
+			err = xe_bo_validate(bo, vm,
+					     !xe_vm_in_preempt_fence_mode(vm));
+	}
 
-	list_for_each_entry_safe(op, next, ops_list, link) {
-		err = xe_vma_op_execute(vm, op);
-		if (err) {
-			drm_warn(&vm->xe->drm, "VM op(%d) failed with %d",
-				 op->base.op, err);
-			/*
-			 * FIXME: Killing VM rather than proper error handling
-			 */
-			xe_vm_kill(vm);
-			return -ENOSPC;
-		}
-		xe_vma_op_cleanup(vm, op);
+	return err;
+}
+
+static int check_ufence(struct xe_vma *vma)
+{
+	if (vma->ufence) {
+		struct xe_user_fence * const f = vma->ufence;
+
+		if (!xe_sync_ufence_get_status(f))
+			return -EBUSY;
+
+		vma->ufence = NULL;
+		xe_sync_ufence_put(f);
 	}
 
 	return 0;
 }
 
-#ifdef TEST_VM_ASYNC_OPS_ERROR
-#define SUPPORTED_FLAGS	\
-	(FORCE_ASYNC_OP_ERROR | DRM_XE_VM_BIND_FLAG_READONLY | \
-	 DRM_XE_VM_BIND_FLAG_IMMEDIATE | DRM_XE_VM_BIND_FLAG_NULL | 0xffff)
-#else
-#define SUPPORTED_FLAGS	\
-	(DRM_XE_VM_BIND_FLAG_READONLY | \
-	 DRM_XE_VM_BIND_FLAG_IMMEDIATE | DRM_XE_VM_BIND_FLAG_NULL | \
-	 0xffff)
+static int op_lock_and_prep(struct drm_exec *exec, struct xe_vm *vm,
+			    struct xe_vma_op *op)
+{
+	int err = 0;
+
+	switch (op->base.op) {
+	case DRM_GPUVA_OP_MAP:
+		err = vma_lock_and_validate(exec, op->map.vma,
+					    !xe_vm_in_fault_mode(vm) ||
+					    op->map.immediate);
+		break;
+	case DRM_GPUVA_OP_REMAP:
+		err = check_ufence(gpuva_to_vma(op->base.remap.unmap->va));
+		if (err)
+			break;
+
+		err = vma_lock_and_validate(exec,
+					    gpuva_to_vma(op->base.remap.unmap->va),
+					    false);
+		if (!err && op->remap.prev)
+			err = vma_lock_and_validate(exec, op->remap.prev, true);
+		if (!err && op->remap.next)
+			err = vma_lock_and_validate(exec, op->remap.next, true);
+		break;
+	case DRM_GPUVA_OP_UNMAP:
+		err = check_ufence(gpuva_to_vma(op->base.unmap.va));
+		if (err)
+			break;
+
+		err = vma_lock_and_validate(exec,
+					    gpuva_to_vma(op->base.unmap.va),
+					    false);
+		break;
+	case DRM_GPUVA_OP_PREFETCH:
+	{
+		struct xe_vma *vma = gpuva_to_vma(op->base.prefetch.va);
+		u32 region = op->prefetch.region;
+
+		xe_assert(vm->xe, region <= ARRAY_SIZE(region_to_mem_type));
+
+		err = vma_lock_and_validate(exec,
+					    gpuva_to_vma(op->base.prefetch.va),
+					    false);
+		if (!err && !xe_vma_has_no_bo(vma))
+			err = xe_bo_migrate(xe_vma_bo(vma),
+					    region_to_mem_type[region]);
+		break;
+	}
+	default:
+		drm_warn(&vm->xe->drm, "NOT POSSIBLE");
+	}
+
+	return err;
+}
+
+static int vm_bind_ioctl_ops_lock_and_prep(struct drm_exec *exec,
+					   struct xe_vm *vm,
+					   struct xe_vma_ops *vops)
+{
+	struct xe_vma_op *op;
+	int err;
+
+	err = drm_exec_lock_obj(exec, xe_vm_obj(vm));
+	if (err)
+		return err;
+
+	list_for_each_entry(op, &vops->list, link) {
+		err = op_lock_and_prep(exec, vm, op);
+		if (err)
+			return err;
+	}
+
+#ifdef TEST_VM_OPS_ERROR
+	if (vops->inject_error &&
+	    vm->xe->vm_inject_error_position == FORCE_OP_ERROR_LOCK)
+		return -ENOSPC;
 #endif
+
+	return 0;
+}
+
+static void op_trace(struct xe_vma_op *op)
+{
+	switch (op->base.op) {
+	case DRM_GPUVA_OP_MAP:
+		trace_xe_vma_bind(op->map.vma);
+		break;
+	case DRM_GPUVA_OP_REMAP:
+		trace_xe_vma_unbind(gpuva_to_vma(op->base.remap.unmap->va));
+		if (op->remap.prev)
+			trace_xe_vma_bind(op->remap.prev);
+		if (op->remap.next)
+			trace_xe_vma_bind(op->remap.next);
+		break;
+	case DRM_GPUVA_OP_UNMAP:
+		trace_xe_vma_unbind(gpuva_to_vma(op->base.unmap.va));
+		break;
+	case DRM_GPUVA_OP_PREFETCH:
+		trace_xe_vma_bind(gpuva_to_vma(op->base.prefetch.va));
+		break;
+	case DRM_GPUVA_OP_DRIVER:
+		break;
+	default:
+		XE_WARN_ON("NOT POSSIBLE");
+	}
+}
+
+static void trace_xe_vm_ops_execute(struct xe_vma_ops *vops)
+{
+	struct xe_vma_op *op;
+
+	list_for_each_entry(op, &vops->list, link)
+		op_trace(op);
+}
+
+static int vm_ops_setup_tile_args(struct xe_vm *vm, struct xe_vma_ops *vops)
+{
+	struct xe_exec_queue *q = vops->q;
+	struct xe_tile *tile;
+	int number_tiles = 0;
+	u8 id;
+
+	for_each_tile(tile, vm->xe, id) {
+		if (vops->pt_update_ops[id].num_ops)
+			++number_tiles;
+
+		if (vops->pt_update_ops[id].q)
+			continue;
+
+		if (q) {
+			vops->pt_update_ops[id].q = q;
+			if (vm->pt_root[id] && !list_empty(&q->multi_gt_list))
+				q = list_next_entry(q, multi_gt_list);
+		} else {
+			vops->pt_update_ops[id].q = vm->q[id];
+		}
+	}
+
+	return number_tiles;
+}
+
+static struct dma_fence *ops_execute(struct xe_vm *vm,
+				     struct xe_vma_ops *vops)
+{
+	struct xe_tile *tile;
+	struct dma_fence *fence = NULL;
+	struct dma_fence **fences = NULL;
+	struct dma_fence_array *cf = NULL;
+	int number_tiles = 0, current_fence = 0, err;
+	u8 id;
+
+	number_tiles = vm_ops_setup_tile_args(vm, vops);
+	if (number_tiles == 0)
+		return ERR_PTR(-ENODATA);
+
+	if (number_tiles > 1) {
+		fences = kmalloc_array(number_tiles, sizeof(*fences),
+				       GFP_KERNEL);
+		if (!fences) {
+			fence = ERR_PTR(-ENOMEM);
+			goto err_trace;
+		}
+	}
+
+	for_each_tile(tile, vm->xe, id) {
+		if (!vops->pt_update_ops[id].num_ops)
+			continue;
+
+		err = xe_pt_update_ops_prepare(tile, vops);
+		if (err) {
+			fence = ERR_PTR(err);
+			goto err_out;
+		}
+	}
+
+	trace_xe_vm_ops_execute(vops);
+
+	for_each_tile(tile, vm->xe, id) {
+		if (!vops->pt_update_ops[id].num_ops)
+			continue;
+
+		fence = xe_pt_update_ops_run(tile, vops);
+		if (IS_ERR(fence))
+			goto err_out;
+
+		if (fences)
+			fences[current_fence++] = fence;
+	}
+
+	if (fences) {
+		cf = dma_fence_array_create(number_tiles, fences,
+					    vm->composite_fence_ctx,
+					    vm->composite_fence_seqno++,
+					    false);
+		if (!cf) {
+			--vm->composite_fence_seqno;
+			fence = ERR_PTR(-ENOMEM);
+			goto err_out;
+		}
+		fence = &cf->base;
+	}
+
+	for_each_tile(tile, vm->xe, id) {
+		if (!vops->pt_update_ops[id].num_ops)
+			continue;
+
+		xe_pt_update_ops_fini(tile, vops);
+	}
+
+	return fence;
+
+err_out:
+	for_each_tile(tile, vm->xe, id) {
+		if (!vops->pt_update_ops[id].num_ops)
+			continue;
+
+		xe_pt_update_ops_abort(tile, vops);
+	}
+	while (current_fence)
+		dma_fence_put(fences[--current_fence]);
+	kfree(fences);
+	kfree(cf);
+
+err_trace:
+	trace_xe_vm_ops_fail(vm);
+	return fence;
+}
+
+static void vma_add_ufence(struct xe_vma *vma, struct xe_user_fence *ufence)
+{
+	if (vma->ufence)
+		xe_sync_ufence_put(vma->ufence);
+	vma->ufence = __xe_sync_ufence_get(ufence);
+}
+
+static void op_add_ufence(struct xe_vm *vm, struct xe_vma_op *op,
+			  struct xe_user_fence *ufence)
+{
+	switch (op->base.op) {
+	case DRM_GPUVA_OP_MAP:
+		vma_add_ufence(op->map.vma, ufence);
+		break;
+	case DRM_GPUVA_OP_REMAP:
+		if (op->remap.prev)
+			vma_add_ufence(op->remap.prev, ufence);
+		if (op->remap.next)
+			vma_add_ufence(op->remap.next, ufence);
+		break;
+	case DRM_GPUVA_OP_UNMAP:
+		break;
+	case DRM_GPUVA_OP_PREFETCH:
+		vma_add_ufence(gpuva_to_vma(op->base.prefetch.va), ufence);
+		break;
+	default:
+		drm_warn(&vm->xe->drm, "NOT POSSIBLE");
+	}
+}
+
+static void vm_bind_ioctl_ops_fini(struct xe_vm *vm, struct xe_vma_ops *vops,
+				   struct dma_fence *fence)
+{
+	struct xe_exec_queue *wait_exec_queue = to_wait_exec_queue(vm, vops->q);
+	struct xe_user_fence *ufence;
+	struct xe_vma_op *op;
+	int i;
+
+	ufence = find_ufence_get(vops->syncs, vops->num_syncs);
+	list_for_each_entry(op, &vops->list, link) {
+		if (ufence)
+			op_add_ufence(vm, op, ufence);
+
+		if (op->base.op == DRM_GPUVA_OP_UNMAP)
+			xe_vma_destroy(gpuva_to_vma(op->base.unmap.va), fence);
+		else if (op->base.op == DRM_GPUVA_OP_REMAP)
+			xe_vma_destroy(gpuva_to_vma(op->base.remap.unmap->va),
+				       fence);
+	}
+	if (ufence)
+		xe_sync_ufence_put(ufence);
+	if (fence) {
+		for (i = 0; i < vops->num_syncs; i++)
+			xe_sync_entry_signal(vops->syncs + i, fence);
+		xe_exec_queue_last_fence_set(wait_exec_queue, vm, fence);
+	}
+}
+
+static struct dma_fence *vm_bind_ioctl_ops_execute(struct xe_vm *vm,
+						   struct xe_vma_ops *vops)
+{
+	struct drm_exec exec;
+	struct dma_fence *fence;
+	int err;
+
+	lockdep_assert_held_write(&vm->lock);
+
+	drm_exec_init(&exec, DRM_EXEC_INTERRUPTIBLE_WAIT |
+		      DRM_EXEC_IGNORE_DUPLICATES, 0);
+	drm_exec_until_all_locked(&exec) {
+		err = vm_bind_ioctl_ops_lock_and_prep(&exec, vm, vops);
+		drm_exec_retry_on_contention(&exec);
+		if (err) {
+			fence = ERR_PTR(err);
+			goto unlock;
+		}
+
+		fence = ops_execute(vm, vops);
+		if (IS_ERR(fence)) {
+			if (PTR_ERR(fence) == -ENODATA)
+				vm_bind_ioctl_ops_fini(vm, vops, NULL);
+			goto unlock;
+		}
+
+		vm_bind_ioctl_ops_fini(vm, vops, fence);
+	}
+
+unlock:
+	drm_exec_fini(&exec);
+	return fence;
+}
+ALLOW_ERROR_INJECTION(vm_bind_ioctl_ops_execute, ERRNO);
+
+#define SUPPORTED_FLAGS_STUB  \
+	(DRM_XE_VM_BIND_FLAG_READONLY | \
+	 DRM_XE_VM_BIND_FLAG_IMMEDIATE | \
+	 DRM_XE_VM_BIND_FLAG_NULL | \
+	 DRM_XE_VM_BIND_FLAG_DUMPABLE | \
+	 DRM_XE_VM_BIND_FLAG_CHECK_PXP | \
+	 DRM_XE_VM_BIND_FLAG_CPU_ADDR_MIRROR)
+
+#ifdef TEST_VM_OPS_ERROR
+#define SUPPORTED_FLAGS	(SUPPORTED_FLAGS_STUB | FORCE_OP_ERROR)
+#else
+#define SUPPORTED_FLAGS	SUPPORTED_FLAGS_STUB
+#endif
+
 #define XE_64K_PAGE_MASK 0xffffull
 #define ALL_DRM_XE_SYNCS_FLAGS (DRM_XE_SYNCS_FLAG_WAIT_FOR_OP)
 
-#define MAX_BINDS	512	/* FIXME: Picking random upper limit */
-
-static int vm_bind_ioctl_check_args(struct xe_device *xe,
+static int vm_bind_ioctl_check_args(struct xe_device *xe, struct xe_vm *vm,
 				    struct drm_xe_vm_bind *args,
 				    struct drm_xe_vm_bind_op **bind_ops)
 {
@@ -2710,18 +3068,19 @@ static int vm_bind_ioctl_check_args(struct xe_device *xe,
 	    XE_IOCTL_DBG(xe, args->reserved[0] || args->reserved[1]))
 		return -EINVAL;
 
-	if (XE_IOCTL_DBG(xe, args->extensions) ||
-	    XE_IOCTL_DBG(xe, args->num_binds > MAX_BINDS))
+	if (XE_IOCTL_DBG(xe, args->extensions))
 		return -EINVAL;
 
 	if (args->num_binds > 1) {
 		u64 __user *bind_user =
 			u64_to_user_ptr(args->vector_of_binds);
 
-		*bind_ops = kmalloc(sizeof(struct drm_xe_vm_bind_op) *
-				    args->num_binds, GFP_KERNEL);
+		*bind_ops = kvmalloc_array(args->num_binds,
+					   sizeof(struct drm_xe_vm_bind_op),
+					   GFP_KERNEL | __GFP_ACCOUNT |
+					   __GFP_RETRY_MAYFAIL | __GFP_NOWARN);
 		if (!*bind_ops)
-			return -ENOMEM;
+			return args->num_binds > 1 ? -ENOBUFS : -ENOMEM;
 
 		err = __copy_from_user(*bind_ops, bind_user,
 				       sizeof(struct drm_xe_vm_bind_op) *
@@ -2743,8 +3102,17 @@ static int vm_bind_ioctl_check_args(struct xe_device *xe,
 		u64 obj_offset = (*bind_ops)[i].obj_offset;
 		u32 prefetch_region = (*bind_ops)[i].prefetch_mem_region_instance;
 		bool is_null = flags & DRM_XE_VM_BIND_FLAG_NULL;
+		bool is_cpu_addr_mirror = flags &
+			DRM_XE_VM_BIND_FLAG_CPU_ADDR_MIRROR;
 		u16 pat_index = (*bind_ops)[i].pat_index;
 		u16 coh_mode;
+
+		if (XE_IOCTL_DBG(xe, is_cpu_addr_mirror &&
+				 (!xe_vm_in_fault_mode(vm) ||
+				 !IS_ENABLED(CONFIG_DRM_GPUSVM)))) {
+			err = -EINVAL;
+			goto free_bind_ops;
+		}
 
 		if (XE_IOCTL_DBG(xe, pat_index >= xe->pat.n_entries)) {
 			err = -EINVAL;
@@ -2766,13 +3134,14 @@ static int vm_bind_ioctl_check_args(struct xe_device *xe,
 
 		if (XE_IOCTL_DBG(xe, op > DRM_XE_VM_BIND_OP_PREFETCH) ||
 		    XE_IOCTL_DBG(xe, flags & ~SUPPORTED_FLAGS) ||
-		    XE_IOCTL_DBG(xe, obj && is_null) ||
-		    XE_IOCTL_DBG(xe, obj_offset && is_null) ||
+		    XE_IOCTL_DBG(xe, obj && (is_null || is_cpu_addr_mirror)) ||
+		    XE_IOCTL_DBG(xe, obj_offset && (is_null ||
+						    is_cpu_addr_mirror)) ||
 		    XE_IOCTL_DBG(xe, op != DRM_XE_VM_BIND_OP_MAP &&
-				 is_null) ||
+				 (is_null || is_cpu_addr_mirror)) ||
 		    XE_IOCTL_DBG(xe, !obj &&
 				 op == DRM_XE_VM_BIND_OP_MAP &&
-				 !is_null) ||
+				 !is_null && !is_cpu_addr_mirror) ||
 		    XE_IOCTL_DBG(xe, !obj &&
 				 op == DRM_XE_VM_BIND_OP_UNMAP_ALL) ||
 		    XE_IOCTL_DBG(xe, addr &&
@@ -2809,7 +3178,7 @@ static int vm_bind_ioctl_check_args(struct xe_device *xe,
 
 free_bind_ops:
 	if (args->num_binds > 1)
-		kfree(*bind_ops);
+		kvfree(*bind_ops);
 	return err;
 }
 
@@ -2827,13 +3196,80 @@ static int vm_bind_ioctl_signal_fences(struct xe_vm *vm,
 		return PTR_ERR(fence);
 
 	for (i = 0; i < num_syncs; i++)
-		xe_sync_entry_signal(&syncs[i], NULL, fence);
+		xe_sync_entry_signal(&syncs[i], fence);
 
 	xe_exec_queue_last_fence_set(to_wait_exec_queue(vm, q), vm,
 				     fence);
 	dma_fence_put(fence);
 
 	return err;
+}
+
+static void xe_vma_ops_init(struct xe_vma_ops *vops, struct xe_vm *vm,
+			    struct xe_exec_queue *q,
+			    struct xe_sync_entry *syncs, u32 num_syncs)
+{
+	memset(vops, 0, sizeof(*vops));
+	INIT_LIST_HEAD(&vops->list);
+	vops->vm = vm;
+	vops->q = q;
+	vops->syncs = syncs;
+	vops->num_syncs = num_syncs;
+}
+
+static int xe_vm_bind_ioctl_validate_bo(struct xe_device *xe, struct xe_bo *bo,
+					u64 addr, u64 range, u64 obj_offset,
+					u16 pat_index, u32 op, u32 bind_flags)
+{
+	u16 coh_mode;
+
+	if (XE_IOCTL_DBG(xe, range > bo->size) ||
+	    XE_IOCTL_DBG(xe, obj_offset >
+			 bo->size - range)) {
+		return -EINVAL;
+	}
+
+	/*
+	 * Some platforms require 64k VM_BIND alignment,
+	 * specifically those with XE_VRAM_FLAGS_NEED64K.
+	 *
+	 * Other platforms may have BO's set to 64k physical placement,
+	 * but can be mapped at 4k offsets anyway. This check is only
+	 * there for the former case.
+	 */
+	if ((bo->flags & XE_BO_FLAG_INTERNAL_64K) &&
+	    (xe->info.vram_flags & XE_VRAM_FLAGS_NEED64K)) {
+		if (XE_IOCTL_DBG(xe, obj_offset &
+				 XE_64K_PAGE_MASK) ||
+		    XE_IOCTL_DBG(xe, addr & XE_64K_PAGE_MASK) ||
+		    XE_IOCTL_DBG(xe, range & XE_64K_PAGE_MASK)) {
+			return  -EINVAL;
+		}
+	}
+
+	coh_mode = xe_pat_index_get_coh_mode(xe, pat_index);
+	if (bo->cpu_caching) {
+		if (XE_IOCTL_DBG(xe, coh_mode == XE_COH_NONE &&
+				 bo->cpu_caching == DRM_XE_GEM_CPU_CACHING_WB)) {
+			return  -EINVAL;
+		}
+	} else if (XE_IOCTL_DBG(xe, coh_mode == XE_COH_NONE)) {
+		/*
+		 * Imported dma-buf from a different device should
+		 * require 1way or 2way coherency since we don't know
+		 * how it was mapped on the CPU. Just assume is it
+		 * potentially cached on CPU side.
+		 */
+		return  -EINVAL;
+	}
+
+	/* If a BO is protected it can only be mapped if the key is still valid */
+	if ((bind_flags & DRM_XE_VM_BIND_FLAG_CHECK_PXP) && xe_bo_is_protected(bo) &&
+	    op != DRM_XE_VM_BIND_OP_UNMAP && op != DRM_XE_VM_BIND_OP_UNMAP_ALL)
+		if (XE_IOCTL_DBG(xe, xe_pxp_bo_key_check(xe->pxp, bo) != 0))
+			return -ENOEXEC;
+
+	return 0;
 }
 
 int xe_vm_bind_ioctl(struct drm_device *dev, void *data, struct drm_file *file)
@@ -2846,22 +3282,27 @@ int xe_vm_bind_ioctl(struct drm_device *dev, void *data, struct drm_file *file)
 	struct drm_gpuva_ops **ops = NULL;
 	struct xe_vm *vm;
 	struct xe_exec_queue *q = NULL;
-	u32 num_syncs;
+	u32 num_syncs, num_ufence = 0;
 	struct xe_sync_entry *syncs = NULL;
 	struct drm_xe_vm_bind_op *bind_ops;
-	LIST_HEAD(ops_list);
+	struct xe_vma_ops vops;
+	struct dma_fence *fence;
 	int err;
 	int i;
 
-	err = vm_bind_ioctl_check_args(xe, args, &bind_ops);
+	vm = xe_vm_lookup(xef, args->vm_id);
+	if (XE_IOCTL_DBG(xe, !vm))
+		return -EINVAL;
+
+	err = vm_bind_ioctl_check_args(xe, vm, args, &bind_ops);
 	if (err)
-		return err;
+		goto put_vm;
 
 	if (args->exec_queue_id) {
 		q = xe_exec_queue_lookup(xef, args->exec_queue_id);
 		if (XE_IOCTL_DBG(xe, !q)) {
 			err = -ENOENT;
-			goto free_objs;
+			goto put_vm;
 		}
 
 		if (XE_IOCTL_DBG(xe, !(q->flags & EXEC_QUEUE_FLAG_VM))) {
@@ -2870,15 +3311,12 @@ int xe_vm_bind_ioctl(struct drm_device *dev, void *data, struct drm_file *file)
 		}
 	}
 
-	vm = xe_vm_lookup(xef, args->vm_id);
-	if (XE_IOCTL_DBG(xe, !vm)) {
-		err = -EINVAL;
-		goto put_exec_queue;
-	}
+	/* Ensure all UNMAPs visible */
+	xe_svm_flush(vm);
 
 	err = down_write_killable(&vm->lock);
 	if (err)
-		goto put_vm;
+		goto put_exec_queue;
 
 	if (XE_IOCTL_DBG(xe, xe_vm_is_closed_or_banned(vm))) {
 		err = -ENOENT;
@@ -2897,13 +3335,17 @@ int xe_vm_bind_ioctl(struct drm_device *dev, void *data, struct drm_file *file)
 	}
 
 	if (args->num_binds) {
-		bos = kcalloc(args->num_binds, sizeof(*bos), GFP_KERNEL);
+		bos = kvcalloc(args->num_binds, sizeof(*bos),
+			       GFP_KERNEL | __GFP_ACCOUNT |
+			       __GFP_RETRY_MAYFAIL | __GFP_NOWARN);
 		if (!bos) {
 			err = -ENOMEM;
 			goto release_vm_lock;
 		}
 
-		ops = kcalloc(args->num_binds, sizeof(*ops), GFP_KERNEL);
+		ops = kvcalloc(args->num_binds, sizeof(*ops),
+			       GFP_KERNEL | __GFP_ACCOUNT |
+			       __GFP_RETRY_MAYFAIL | __GFP_NOWARN);
 		if (!ops) {
 			err = -ENOMEM;
 			goto release_vm_lock;
@@ -2917,7 +3359,8 @@ int xe_vm_bind_ioctl(struct drm_device *dev, void *data, struct drm_file *file)
 		u32 obj = bind_ops[i].obj;
 		u64 obj_offset = bind_ops[i].obj_offset;
 		u16 pat_index = bind_ops[i].pat_index;
-		u16 coh_mode;
+		u32 op = bind_ops[i].op;
+		u32 bind_flags = bind_ops[i].flags;
 
 		if (!obj)
 			continue;
@@ -2929,40 +3372,11 @@ int xe_vm_bind_ioctl(struct drm_device *dev, void *data, struct drm_file *file)
 		}
 		bos[i] = gem_to_xe_bo(gem_obj);
 
-		if (XE_IOCTL_DBG(xe, range > bos[i]->size) ||
-		    XE_IOCTL_DBG(xe, obj_offset >
-				 bos[i]->size - range)) {
-			err = -EINVAL;
+		err = xe_vm_bind_ioctl_validate_bo(xe, bos[i], addr, range,
+						   obj_offset, pat_index, op,
+						   bind_flags);
+		if (err)
 			goto put_obj;
-		}
-
-		if (bos[i]->flags & XE_BO_INTERNAL_64K) {
-			if (XE_IOCTL_DBG(xe, obj_offset &
-					 XE_64K_PAGE_MASK) ||
-			    XE_IOCTL_DBG(xe, addr & XE_64K_PAGE_MASK) ||
-			    XE_IOCTL_DBG(xe, range & XE_64K_PAGE_MASK)) {
-				err = -EINVAL;
-				goto put_obj;
-			}
-		}
-
-		coh_mode = xe_pat_index_get_coh_mode(xe, pat_index);
-		if (bos[i]->cpu_caching) {
-			if (XE_IOCTL_DBG(xe, coh_mode == XE_COH_NONE &&
-					 bos[i]->cpu_caching == DRM_XE_GEM_CPU_CACHING_WB)) {
-				err = -EINVAL;
-				goto put_obj;
-			}
-		} else if (XE_IOCTL_DBG(xe, coh_mode == XE_COH_NONE)) {
-			/*
-			 * Imported dma-buf from a different device should
-			 * require 1way or 2way coherency since we don't know
-			 * how it was mapped on the CPU. Just assume is it
-			 * potentially cached on CPU side.
-			 */
-			err = -EINVAL;
-			goto put_obj;
-		}
 	}
 
 	if (args->num_syncs) {
@@ -2983,6 +3397,14 @@ int xe_vm_bind_ioctl(struct drm_device *dev, void *data, struct drm_file *file)
 					   SYNC_PARSE_FLAG_DISALLOW_USER_FENCE : 0));
 		if (err)
 			goto free_syncs;
+
+		if (xe_sync_is_ufence(&syncs[num_syncs]))
+			num_ufence++;
+	}
+
+	if (XE_IOCTL_DBG(xe, num_ufence > 1)) {
+		err = -EINVAL;
+		goto free_syncs;
 	}
 
 	if (!args->num_binds) {
@@ -2990,6 +3412,7 @@ int xe_vm_bind_ioctl(struct drm_device *dev, void *data, struct drm_file *file)
 		goto free_syncs;
 	}
 
+	xe_vma_ops_init(&vops, vm, q, syncs, num_syncs);
 	for (i = 0; i < args->num_binds; ++i) {
 		u64 range = bind_ops[i].range;
 		u64 addr = bind_ops[i].addr;
@@ -3008,43 +3431,43 @@ int xe_vm_bind_ioctl(struct drm_device *dev, void *data, struct drm_file *file)
 			goto unwind_ops;
 		}
 
-		err = vm_bind_ioctl_ops_parse(vm, q, ops[i], syncs, num_syncs,
-					      &ops_list,
-					      i == args->num_binds - 1);
+		err = vm_bind_ioctl_ops_parse(vm, ops[i], &vops);
 		if (err)
 			goto unwind_ops;
+
+#ifdef TEST_VM_OPS_ERROR
+		if (flags & FORCE_OP_ERROR) {
+			vops.inject_error = true;
+			vm->xe->vm_inject_error_position =
+				(vm->xe->vm_inject_error_position + 1) %
+				FORCE_OP_ERROR_COUNT;
+		}
+#endif
 	}
 
 	/* Nothing to do */
-	if (list_empty(&ops_list)) {
+	if (list_empty(&vops.list)) {
 		err = -ENODATA;
 		goto unwind_ops;
 	}
 
-	xe_vm_get(vm);
-	if (q)
-		xe_exec_queue_get(q);
+	err = xe_vma_ops_alloc(&vops, args->num_binds > 1);
+	if (err)
+		goto unwind_ops;
 
-	err = vm_bind_ioctl_ops_execute(vm, &ops_list);
-
-	up_write(&vm->lock);
-
-	if (q)
-		xe_exec_queue_put(q);
-	xe_vm_put(vm);
-
-	for (i = 0; bos && i < args->num_binds; ++i)
-		xe_bo_put(bos[i]);
-
-	kfree(bos);
-	kfree(ops);
-	if (args->num_binds > 1)
-		kfree(bind_ops);
-
-	return err;
+	fence = vm_bind_ioctl_ops_execute(vm, &vops);
+	if (IS_ERR(fence))
+		err = PTR_ERR(fence);
+	else
+		dma_fence_put(fence);
 
 unwind_ops:
-	vm_bind_ioctl_ops_unwind(vm, ops, args->num_binds);
+	if (err && err != -ENODATA)
+		vm_bind_ioctl_ops_unwind(vm, ops, args->num_binds);
+	xe_vma_ops_fini(&vops);
+	for (i = args->num_binds - 1; i >= 0; --i)
+		if (ops[i])
+			drm_gpuva_ops_free(&vm->gpuvm, ops[i]);
 free_syncs:
 	if (err == -ENODATA)
 		err = vm_bind_ioctl_signal_fences(vm, q, syncs, num_syncs);
@@ -3057,17 +3480,91 @@ put_obj:
 		xe_bo_put(bos[i]);
 release_vm_lock:
 	up_write(&vm->lock);
-put_vm:
-	xe_vm_put(vm);
 put_exec_queue:
 	if (q)
 		xe_exec_queue_put(q);
-free_objs:
-	kfree(bos);
-	kfree(ops);
+put_vm:
+	xe_vm_put(vm);
+	kvfree(bos);
+	kvfree(ops);
 	if (args->num_binds > 1)
-		kfree(bind_ops);
+		kvfree(bind_ops);
 	return err;
+}
+
+/**
+ * xe_vm_bind_kernel_bo - bind a kernel BO to a VM
+ * @vm: VM to bind the BO to
+ * @bo: BO to bind
+ * @q: exec queue to use for the bind (optional)
+ * @addr: address at which to bind the BO
+ * @cache_lvl: PAT cache level to use
+ *
+ * Execute a VM bind map operation on a kernel-owned BO to bind it into a
+ * kernel-owned VM.
+ *
+ * Returns a dma_fence to track the binding completion if the job to do so was
+ * successfully submitted, an error pointer otherwise.
+ */
+struct dma_fence *xe_vm_bind_kernel_bo(struct xe_vm *vm, struct xe_bo *bo,
+				       struct xe_exec_queue *q, u64 addr,
+				       enum xe_cache_level cache_lvl)
+{
+	struct xe_vma_ops vops;
+	struct drm_gpuva_ops *ops = NULL;
+	struct dma_fence *fence;
+	int err;
+
+	xe_bo_get(bo);
+	xe_vm_get(vm);
+	if (q)
+		xe_exec_queue_get(q);
+
+	down_write(&vm->lock);
+
+	xe_vma_ops_init(&vops, vm, q, NULL, 0);
+
+	ops = vm_bind_ioctl_ops_create(vm, bo, 0, addr, bo->size,
+				       DRM_XE_VM_BIND_OP_MAP, 0, 0,
+				       vm->xe->pat.idx[cache_lvl]);
+	if (IS_ERR(ops)) {
+		err = PTR_ERR(ops);
+		goto release_vm_lock;
+	}
+
+	err = vm_bind_ioctl_ops_parse(vm, ops, &vops);
+	if (err)
+		goto release_vm_lock;
+
+	xe_assert(vm->xe, !list_empty(&vops.list));
+
+	err = xe_vma_ops_alloc(&vops, false);
+	if (err)
+		goto unwind_ops;
+
+	fence = vm_bind_ioctl_ops_execute(vm, &vops);
+	if (IS_ERR(fence))
+		err = PTR_ERR(fence);
+
+unwind_ops:
+	if (err && err != -ENODATA)
+		vm_bind_ioctl_ops_unwind(vm, &ops, 1);
+
+	xe_vma_ops_fini(&vops);
+	drm_gpuva_ops_free(&vm->gpuvm, ops);
+
+release_vm_lock:
+	up_write(&vm->lock);
+
+	if (q)
+		xe_exec_queue_put(q);
+	xe_vm_put(vm);
+	xe_bo_put(bo);
+
+	if (err)
+		fence = ERR_PTR(err);
+
+	return fence;
 }
 
 /**
@@ -3112,21 +3609,26 @@ int xe_vm_invalidate_vma(struct xe_vma *vma)
 {
 	struct xe_device *xe = xe_vma_vm(vma)->xe;
 	struct xe_tile *tile;
-	u32 tile_needs_invalidate = 0;
-	int seqno[XE_MAX_TILES_PER_DEVICE];
+	struct xe_gt_tlb_invalidation_fence
+		fence[XE_MAX_TILES_PER_DEVICE * XE_MAX_GT_PER_TILE];
 	u8 id;
-	int ret;
+	u32 fence_id = 0;
+	int ret = 0;
 
-	xe_assert(xe, xe_vm_in_fault_mode(xe_vma_vm(vma)));
 	xe_assert(xe, !xe_vma_is_null(vma));
-	trace_xe_vma_usm_invalidate(vma);
+	xe_assert(xe, !xe_vma_is_cpu_addr_mirror(vma));
+	trace_xe_vma_invalidate(vma);
+
+	vm_dbg(&xe_vma_vm(vma)->xe->drm,
+	       "INVALIDATE: addr=0x%016llx, range=0x%016llx",
+		xe_vma_start(vma), xe_vma_size(vma));
 
 	/* Check that we don't race with page-table updates */
 	if (IS_ENABLED(CONFIG_PROVE_LOCKING)) {
 		if (xe_vma_is_userptr(vma)) {
 			WARN_ON_ONCE(!mmu_interval_check_retry
-				     (&vma->userptr.notifier,
-				      vma->userptr.notifier_seq));
+				     (&to_userptr_vma(vma)->userptr.notifier,
+				      to_userptr_vma(vma)->userptr.notifier_seq));
 			WARN_ON_ONCE(!dma_resv_test_signaled(xe_vm_resv(xe_vma_vm(vma)),
 							     DMA_RESV_USAGE_BOOKKEEP));
 
@@ -3137,76 +3639,229 @@ int xe_vm_invalidate_vma(struct xe_vma *vma)
 
 	for_each_tile(tile, xe, id) {
 		if (xe_pt_zap_ptes(tile, vma)) {
-			tile_needs_invalidate |= BIT(id);
 			xe_device_wmb(xe);
-			/*
-			 * FIXME: We potentially need to invalidate multiple
-			 * GTs within the tile
-			 */
-			seqno[id] = xe_gt_tlb_invalidation_vma(tile->primary_gt, NULL, vma);
-			if (seqno[id] < 0)
-				return seqno[id];
+			xe_gt_tlb_invalidation_fence_init(tile->primary_gt,
+							  &fence[fence_id],
+							  true);
+
+			ret = xe_gt_tlb_invalidation_vma(tile->primary_gt,
+							 &fence[fence_id], vma);
+			if (ret)
+				goto wait;
+			++fence_id;
+
+			if (!tile->media_gt)
+				continue;
+
+			xe_gt_tlb_invalidation_fence_init(tile->media_gt,
+							  &fence[fence_id],
+							  true);
+
+			ret = xe_gt_tlb_invalidation_vma(tile->media_gt,
+							 &fence[fence_id], vma);
+			if (ret)
+				goto wait;
+			++fence_id;
 		}
 	}
 
-	for_each_tile(tile, xe, id) {
-		if (tile_needs_invalidate & BIT(id)) {
-			ret = xe_gt_tlb_invalidation_wait(tile->primary_gt, seqno[id]);
-			if (ret < 0)
-				return ret;
-		}
-	}
+wait:
+	for (id = 0; id < fence_id; ++id)
+		xe_gt_tlb_invalidation_fence_wait(&fence[id]);
 
-	vma->usm.tile_invalidated = vma->tile_mask;
+	vma->tile_invalidated = vma->tile_mask;
 
-	return 0;
+	return ret;
 }
 
-int xe_analyze_vm(struct drm_printer *p, struct xe_vm *vm, int gt_id)
+int xe_vm_validate_protected(struct xe_vm *vm)
 {
 	struct drm_gpuva *gpuva;
-	bool is_vram;
-	uint64_t addr;
+	int err = 0;
 
-	if (!down_read_trylock(&vm->lock)) {
-		drm_printf(p, " Failed to acquire VM lock to dump capture");
-		return 0;
-	}
-	if (vm->pt_root[gt_id]) {
-		addr = xe_bo_addr(vm->pt_root[gt_id]->bo, 0, XE_PAGE_SIZE);
-		is_vram = xe_bo_is_vram(vm->pt_root[gt_id]->bo);
-		drm_printf(p, " VM root: A:0x%llx %s\n", addr,
-			   is_vram ? "VRAM" : "SYS");
-	}
+	if (!vm)
+		return -ENODEV;
+
+	mutex_lock(&vm->snap_mutex);
 
 	drm_gpuvm_for_each_va(gpuva, &vm->gpuvm) {
 		struct xe_vma *vma = gpuva_to_vma(gpuva);
-		bool is_userptr = xe_vma_is_userptr(vma);
-		bool is_null = xe_vma_is_null(vma);
+		struct xe_bo *bo = vma->gpuva.gem.obj ?
+			gem_to_xe_bo(vma->gpuva.gem.obj) : NULL;
 
-		if (is_null) {
-			addr = 0;
-		} else if (is_userptr) {
-			struct xe_res_cursor cur;
+		if (!bo)
+			continue;
 
-			if (vma->userptr.sg) {
-				xe_res_first_sg(vma->userptr.sg, 0, XE_PAGE_SIZE,
-						&cur);
-				addr = xe_res_dma(&cur);
-			} else {
-				addr = 0;
-			}
-		} else {
-			addr = __xe_bo_addr(xe_vma_bo(vma), 0, XE_PAGE_SIZE);
-			is_vram = xe_bo_is_vram(xe_vma_bo(vma));
+		if (xe_bo_is_protected(bo)) {
+			err = xe_pxp_bo_key_check(vm->xe->pxp, bo);
+			if (err)
+				break;
 		}
-		drm_printf(p, " [%016llx-%016llx] S:0x%016llx A:%016llx %s\n",
-			   xe_vma_start(vma), xe_vma_end(vma) - 1,
-			   xe_vma_size(vma),
-			   addr, is_null ? "NULL" : is_userptr ? "USR" :
-			   is_vram ? "VRAM" : "SYS");
 	}
-	up_read(&vm->lock);
 
-	return 0;
+	mutex_unlock(&vm->snap_mutex);
+	return err;
+}
+
+struct xe_vm_snapshot {
+	unsigned long num_snaps;
+	struct {
+		u64 ofs, bo_ofs;
+		unsigned long len;
+		struct xe_bo *bo;
+		void *data;
+		struct mm_struct *mm;
+	} snap[];
+};
+
+struct xe_vm_snapshot *xe_vm_snapshot_capture(struct xe_vm *vm)
+{
+	unsigned long num_snaps = 0, i;
+	struct xe_vm_snapshot *snap = NULL;
+	struct drm_gpuva *gpuva;
+
+	if (!vm)
+		return NULL;
+
+	mutex_lock(&vm->snap_mutex);
+	drm_gpuvm_for_each_va(gpuva, &vm->gpuvm) {
+		if (gpuva->flags & XE_VMA_DUMPABLE)
+			num_snaps++;
+	}
+
+	if (num_snaps)
+		snap = kvzalloc(offsetof(struct xe_vm_snapshot, snap[num_snaps]), GFP_NOWAIT);
+	if (!snap) {
+		snap = num_snaps ? ERR_PTR(-ENOMEM) : ERR_PTR(-ENODEV);
+		goto out_unlock;
+	}
+
+	snap->num_snaps = num_snaps;
+	i = 0;
+	drm_gpuvm_for_each_va(gpuva, &vm->gpuvm) {
+		struct xe_vma *vma = gpuva_to_vma(gpuva);
+		struct xe_bo *bo = vma->gpuva.gem.obj ?
+			gem_to_xe_bo(vma->gpuva.gem.obj) : NULL;
+
+		if (!(gpuva->flags & XE_VMA_DUMPABLE))
+			continue;
+
+		snap->snap[i].ofs = xe_vma_start(vma);
+		snap->snap[i].len = xe_vma_size(vma);
+		if (bo) {
+			snap->snap[i].bo = xe_bo_get(bo);
+			snap->snap[i].bo_ofs = xe_vma_bo_offset(vma);
+		} else if (xe_vma_is_userptr(vma)) {
+			struct mm_struct *mm =
+				to_userptr_vma(vma)->userptr.notifier.mm;
+
+			if (mmget_not_zero(mm))
+				snap->snap[i].mm = mm;
+			else
+				snap->snap[i].data = ERR_PTR(-EFAULT);
+
+			snap->snap[i].bo_ofs = xe_vma_userptr(vma);
+		} else {
+			snap->snap[i].data = ERR_PTR(-ENOENT);
+		}
+		i++;
+	}
+
+out_unlock:
+	mutex_unlock(&vm->snap_mutex);
+	return snap;
+}
+
+void xe_vm_snapshot_capture_delayed(struct xe_vm_snapshot *snap)
+{
+	if (IS_ERR_OR_NULL(snap))
+		return;
+
+	for (int i = 0; i < snap->num_snaps; i++) {
+		struct xe_bo *bo = snap->snap[i].bo;
+		int err;
+
+		if (IS_ERR(snap->snap[i].data))
+			continue;
+
+		snap->snap[i].data = kvmalloc(snap->snap[i].len, GFP_USER);
+		if (!snap->snap[i].data) {
+			snap->snap[i].data = ERR_PTR(-ENOMEM);
+			goto cleanup_bo;
+		}
+
+		if (bo) {
+			err = xe_bo_read(bo, snap->snap[i].bo_ofs,
+					 snap->snap[i].data, snap->snap[i].len);
+		} else {
+			void __user *userptr = (void __user *)(size_t)snap->snap[i].bo_ofs;
+
+			kthread_use_mm(snap->snap[i].mm);
+			if (!copy_from_user(snap->snap[i].data, userptr, snap->snap[i].len))
+				err = 0;
+			else
+				err = -EFAULT;
+			kthread_unuse_mm(snap->snap[i].mm);
+
+			mmput(snap->snap[i].mm);
+			snap->snap[i].mm = NULL;
+		}
+
+		if (err) {
+			kvfree(snap->snap[i].data);
+			snap->snap[i].data = ERR_PTR(err);
+		}
+
+cleanup_bo:
+		xe_bo_put(bo);
+		snap->snap[i].bo = NULL;
+	}
+}
+
+void xe_vm_snapshot_print(struct xe_vm_snapshot *snap, struct drm_printer *p)
+{
+	unsigned long i, j;
+
+	if (IS_ERR_OR_NULL(snap)) {
+		drm_printf(p, "[0].error: %li\n", PTR_ERR(snap));
+		return;
+	}
+
+	for (i = 0; i < snap->num_snaps; i++) {
+		drm_printf(p, "[%llx].length: 0x%lx\n", snap->snap[i].ofs, snap->snap[i].len);
+
+		if (IS_ERR(snap->snap[i].data)) {
+			drm_printf(p, "[%llx].error: %li\n", snap->snap[i].ofs,
+				   PTR_ERR(snap->snap[i].data));
+			continue;
+		}
+
+		drm_printf(p, "[%llx].data: ", snap->snap[i].ofs);
+
+		for (j = 0; j < snap->snap[i].len; j += sizeof(u32)) {
+			u32 *val = snap->snap[i].data + j;
+			char dumped[ASCII85_BUFSZ];
+
+			drm_puts(p, ascii85_encode(*val, dumped));
+		}
+
+		drm_puts(p, "\n");
+	}
+}
+
+void xe_vm_snapshot_free(struct xe_vm_snapshot *snap)
+{
+	unsigned long i;
+
+	if (IS_ERR_OR_NULL(snap))
+		return;
+
+	for (i = 0; i < snap->num_snaps; i++) {
+		if (!IS_ERR(snap->snap[i].data))
+			kvfree(snap->snap[i].data);
+		xe_bo_put(snap->snap[i].bo);
+		if (snap->snap[i].mm)
+			mmput(snap->snap[i].mm);
+	}
+	kvfree(snap);
 }

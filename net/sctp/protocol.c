@@ -43,7 +43,9 @@
 #include <net/addrconf.h>
 #include <net/inet_common.h>
 #include <net/inet_ecn.h>
+#include <net/inet_sock.h>
 #include <net/udp_tunnel.h>
+#include <net/inet_dscp.h>
 
 #define MAX_SCTP_PORT_HASH_ENTRIES (64 * 1024)
 
@@ -183,12 +185,9 @@ static void sctp_v4_copy_ip_options(struct sock *sk, struct sock *newsk)
 	rcu_read_lock();
 	inet_opt = rcu_dereference(inet->inet_opt);
 	if (inet_opt) {
-		newopt = sock_kmalloc(newsk, sizeof(*inet_opt) +
+		newopt = sock_kmemdup(newsk, inet_opt, sizeof(*inet_opt) +
 				      inet_opt->opt.optlen, GFP_ATOMIC);
-		if (newopt)
-			memcpy(newopt, inet_opt, sizeof(*inet_opt) +
-			       inet_opt->opt.optlen);
-		else
+		if (!newopt)
 			pr_err("%s: Failed to copy ip options\n", __func__);
 	}
 	RCU_INIT_POINTER(newinet->inet_opt, newopt);
@@ -426,16 +425,19 @@ static void sctp_v4_get_dst(struct sctp_transport *t, union sctp_addr *saddr,
 	struct dst_entry *dst = NULL;
 	union sctp_addr *daddr = &t->ipaddr;
 	union sctp_addr dst_saddr;
-	u8 tos = READ_ONCE(inet_sk(sk)->tos);
+	dscp_t dscp;
 
 	if (t->dscp & SCTP_DSCP_SET_MASK)
-		tos = t->dscp & SCTP_DSCP_VAL_MASK;
+		dscp = inet_dsfield_to_dscp(t->dscp);
+	else
+		dscp = inet_sk_dscp(inet_sk(sk));
+
 	memset(&_fl, 0x0, sizeof(_fl));
 	fl4->daddr  = daddr->v4.sin_addr.s_addr;
 	fl4->fl4_dport = daddr->v4.sin_port;
 	fl4->flowi4_proto = IPPROTO_SCTP;
 	if (asoc) {
-		fl4->flowi4_tos = RT_TOS(tos);
+		fl4->flowi4_tos = inet_dscp_to_dsfield(dscp);
 		fl4->flowi4_scope = ip_sock_rt_scope(asoc->base.sk);
 		fl4->flowi4_oif = asoc->base.sk->sk_bound_dev_if;
 		fl4->fl4_sport = htons(asoc->base.bind_addr.port);
@@ -552,7 +554,7 @@ static void sctp_v4_get_saddr(struct sctp_sock *sk,
 			      struct flowi *fl)
 {
 	union sctp_addr *saddr = &t->saddr;
-	struct rtable *rt = (struct rtable *)t->dst;
+	struct rtable *rt = dst_rtable(t->dst);
 
 	if (rt) {
 		saddr->v4.sin_family = AF_INET;
@@ -693,7 +695,7 @@ static void sctp_free_addr_wq(struct net *net)
 	struct sctp_sockaddr_entry *temp;
 
 	spin_lock_bh(&net->sctp.addr_wq_lock);
-	del_timer(&net->sctp.addr_wq_timer);
+	timer_delete(&net->sctp.addr_wq_timer);
 	list_for_each_entry_safe(addrw, temp, &net->sctp.addr_waitq, list) {
 		list_del(&addrw->list);
 		kfree(addrw);
@@ -737,6 +739,20 @@ void sctp_addr_wq_mgmt(struct net *net, struct sctp_sockaddr_entry *addr, int cm
 	 */
 
 	spin_lock_bh(&net->sctp.addr_wq_lock);
+
+	/* Avoid searching the queue or modifying it if there are no consumers,
+	 * as it can lead to performance degradation if addresses are modified
+	 * en-masse.
+	 *
+	 * If the queue already contains some events, update it anyway to avoid
+	 * ugly races between new sessions and new address events.
+	 */
+	if (list_empty(&net->sctp.auto_asconf_splist) &&
+	    list_empty(&net->sctp.addr_waitq)) {
+		spin_unlock_bh(&net->sctp.addr_wq_lock);
+		return;
+	}
+
 	/* Offsets existing events in addr_wq */
 	addrw = sctp_addr_wq_lookup(net, addr);
 	if (addrw) {
@@ -807,10 +823,10 @@ static int sctp_inetaddr_event(struct notifier_block *this, unsigned long ev,
 			if (addr->a.sa.sa_family == AF_INET &&
 					addr->a.v4.sin_addr.s_addr ==
 					ifa->ifa_local) {
-				sctp_addr_wq_mgmt(net, addr, SCTP_ADDR_DEL);
 				found = 1;
 				addr->valid = 0;
 				list_del_rcu(&addr->list);
+				sctp_addr_wq_mgmt(net, addr, SCTP_ADDR_DEL);
 				break;
 			}
 		}
@@ -1085,7 +1101,7 @@ static inline int sctp_v4_xmit(struct sk_buff *skb, struct sctp_transport *t)
 	skb_reset_inner_mac_header(skb);
 	skb_reset_inner_transport_header(skb);
 	skb_set_inner_ipproto(skb, IPPROTO_SCTP);
-	udp_tunnel_xmit_skb((struct rtable *)dst, sk, skb, fl4->saddr,
+	udp_tunnel_xmit_skb(dst_rtable(dst), sk, skb, fl4->saddr,
 			    fl4->daddr, dscp, ip4_dst_hoplimit(dst), df,
 			    sctp_sk(sk)->udp_port, t->encap_port, false, false);
 	return 0;
@@ -1495,17 +1511,11 @@ static __init int sctp_init(void)
 
 	/* Allocate bind_bucket and chunk caches. */
 	status = -ENOBUFS;
-	sctp_bucket_cachep = kmem_cache_create("sctp_bind_bucket",
-					       sizeof(struct sctp_bind_bucket),
-					       0, SLAB_HWCACHE_ALIGN,
-					       NULL);
+	sctp_bucket_cachep = KMEM_CACHE(sctp_bind_bucket, SLAB_HWCACHE_ALIGN);
 	if (!sctp_bucket_cachep)
 		goto out;
 
-	sctp_chunk_cachep = kmem_cache_create("sctp_chunk",
-					       sizeof(struct sctp_chunk),
-					       0, SLAB_HWCACHE_ALIGN,
-					       NULL);
+	sctp_chunk_cachep = KMEM_CACHE(sctp_chunk, SLAB_HWCACHE_ALIGN);
 	if (!sctp_chunk_cachep)
 		goto err_chunk_cachep;
 

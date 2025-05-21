@@ -27,7 +27,9 @@
 #define OLD_CL_ADDRESS		0x020	/* Relative to real mode data */
 #define NEW_CL_POINTER		0x228	/* Relative to real mode data */
 
-#ifndef __ASSEMBLY__
+#ifndef __ASSEMBLER__
+#include <linux/cache.h>
+
 #include <asm/bootparam.h>
 #include <asm/x86_init.h>
 
@@ -44,11 +46,12 @@ void setup_bios_corruption_check(void);
 void early_platform_quirks(void);
 
 extern unsigned long saved_video_mode;
+extern unsigned long acpi_realmode_flags;
 
 extern void reserve_standard_io_resources(void);
 extern void i386_reserve_resources(void);
-extern unsigned long __startup_64(unsigned long physaddr, struct boot_params *bp);
-extern void startup_64_setup_env(unsigned long physbase);
+extern unsigned long __startup_64(unsigned long p2v_offset, struct boot_params *bp);
+extern void startup_64_setup_gdt_idt(void);
 extern void early_setup_idt(void);
 extern void __init do_early_exception(struct pt_regs *regs, int trapnr);
 
@@ -133,7 +136,13 @@ asmlinkage void __init __noreturn x86_64_start_reservations(char *real_mode_data
 #endif /* __i386__ */
 #endif /* _SETUP */
 
-#else  /* __ASSEMBLY */
+#ifdef CONFIG_CMDLINE_BOOL
+extern bool builtin_cmdline_added __ro_after_init;
+#else
+#define builtin_cmdline_added 0
+#endif
+
+#else  /* __ASSEMBLER__ */
 
 .macro __RESERVE_BRK name, size
 	.pushsection .bss..brk, "aw"
@@ -145,6 +154,6 @@ SYM_DATA_END(__brk_\name)
 
 #define RESERVE_BRK(name, size) __RESERVE_BRK name, size
 
-#endif /* __ASSEMBLY__ */
+#endif /* __ASSEMBLER__ */
 
 #endif /* _ASM_X86_SETUP_H */

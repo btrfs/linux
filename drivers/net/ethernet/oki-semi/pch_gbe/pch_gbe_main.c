@@ -1916,7 +1916,7 @@ void pch_gbe_down(struct pch_gbe_adapter *adapter)
 	pch_gbe_irq_disable(adapter);
 	pch_gbe_free_irq(adapter);
 
-	del_timer_sync(&adapter->watchdog_timer);
+	timer_delete_sync(&adapter->watchdog_timer);
 
 	netdev->tx_queue_len = adapter->tx_queue_len;
 	netif_carrier_off(netdev);
@@ -2184,7 +2184,7 @@ static int pch_gbe_change_mtu(struct net_device *netdev, int new_mtu)
 		}
 	} else {
 		pch_gbe_reset(adapter);
-		netdev->mtu = new_mtu;
+		WRITE_ONCE(netdev->mtu, new_mtu);
 		adapter->hw.mac.max_frame_size = max_frame;
 	}
 

@@ -175,7 +175,7 @@ static const struct phy_ops brcm_usb_phy_ops = {
 };
 
 static struct phy *brcm_usb_phy_xlate(struct device *dev,
-				      struct of_phandle_args *args)
+				      const struct of_phandle_args *args)
 {
 	struct brcm_usb_phy_data *data = dev_get_drvdata(dev);
 
@@ -667,7 +667,7 @@ MODULE_DEVICE_TABLE(of, brcm_usb_dt_ids);
 
 static struct platform_driver brcm_usb_driver = {
 	.probe		= brcm_usb_phy_probe,
-	.remove_new	= brcm_usb_phy_remove,
+	.remove		= brcm_usb_phy_remove,
 	.driver		= {
 		.name	= "brcmstb-usb-phy",
 		.pm = &brcm_usb_phy_pm_ops,

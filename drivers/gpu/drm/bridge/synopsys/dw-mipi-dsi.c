@@ -722,7 +722,12 @@ static void dw_mipi_dsi_dpi_config(struct dw_mipi_dsi *dsi,
 
 static void dw_mipi_dsi_packet_handler_config(struct dw_mipi_dsi *dsi)
 {
-	dsi_write(dsi, DSI_PCKHDL_CFG, CRC_RX_EN | ECC_RX_EN | BTA_EN);
+	u32 val = CRC_RX_EN | ECC_RX_EN | BTA_EN | EOTP_TX_EN;
+
+	if (dsi->mode_flags & MIPI_DSI_MODE_NO_EOT_PACKET)
+		val &= ~EOTP_TX_EN;
+
+	dsi_write(dsi, DSI_PCKHDL_CFG, val);
 }
 
 static void dw_mipi_dsi_video_packet_config(struct dw_mipi_dsi *dsi,
@@ -929,7 +934,7 @@ static void dw_mipi_dsi_clear_err(struct dw_mipi_dsi *dsi)
 }
 
 static void dw_mipi_dsi_bridge_post_atomic_disable(struct drm_bridge *bridge,
-						   struct drm_bridge_state *old_bridge_state)
+						   struct drm_atomic_state *state)
 {
 	struct dw_mipi_dsi *dsi = bridge_to_dsi(bridge);
 	const struct dw_mipi_dsi_phy_ops *phy_ops = dsi->plat_data->phy_ops;
@@ -1017,7 +1022,7 @@ static void dw_mipi_dsi_mode_set(struct dw_mipi_dsi *dsi,
 }
 
 static void dw_mipi_dsi_bridge_atomic_pre_enable(struct drm_bridge *bridge,
-						 struct drm_bridge_state *old_bridge_state)
+						 struct drm_atomic_state *state)
 {
 	struct dw_mipi_dsi *dsi = bridge_to_dsi(bridge);
 
@@ -1038,7 +1043,7 @@ static void dw_mipi_dsi_bridge_mode_set(struct drm_bridge *bridge,
 }
 
 static void dw_mipi_dsi_bridge_atomic_enable(struct drm_bridge *bridge,
-					     struct drm_bridge_state *old_bridge_state)
+					     struct drm_atomic_state *state)
 {
 	struct dw_mipi_dsi *dsi = bridge_to_dsi(bridge);
 
@@ -1070,11 +1075,6 @@ static int dw_mipi_dsi_bridge_attach(struct drm_bridge *bridge,
 				     enum drm_bridge_attach_flags flags)
 {
 	struct dw_mipi_dsi *dsi = bridge_to_dsi(bridge);
-
-	if (!bridge->encoder) {
-		DRM_ERROR("Parent encoder object not found\n");
-		return -ENODEV;
-	}
 
 	/* Set the encoder type as caller does not know it */
 	bridge->encoder->encoder_type = DRM_MODE_ENCODER_DSI;

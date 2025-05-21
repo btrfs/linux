@@ -6,11 +6,12 @@
 #define __LINUX_UIO_H
 
 #include <linux/kernel.h>
-#include <linux/thread_info.h>
 #include <linux/mm_types.h>
+#include <linux/ucopysize.h>
 #include <uapi/linux/uio.h>
 
 struct page;
+struct folio_queue;
 
 typedef unsigned int __bitwise iov_iter_extraction_t;
 
@@ -25,6 +26,7 @@ enum iter_type {
 	ITER_IOVEC,
 	ITER_BVEC,
 	ITER_KVEC,
+	ITER_FOLIOQ,
 	ITER_XARRAY,
 	ITER_DISCARD,
 };
@@ -40,7 +42,6 @@ struct iov_iter_state {
 
 struct iov_iter {
 	u8 iter_type;
-	bool copy_mc;
 	bool nofault;
 	bool data_source;
 	size_t iov_offset;
@@ -67,6 +68,7 @@ struct iov_iter {
 				const struct iovec *__iov;
 				const struct kvec *kvec;
 				const struct bio_vec *bvec;
+				const struct folio_queue *folioq;
 				struct xarray *xarray;
 				void __user *ubuf;
 			};
@@ -75,8 +77,18 @@ struct iov_iter {
 	};
 	union {
 		unsigned long nr_segs;
+		u8 folioq_slot;
 		loff_t xarray_start;
 	};
+};
+
+typedef __u16 uio_meta_flags_t;
+
+struct uio_meta {
+	uio_meta_flags_t	flags;
+	u16			app_tag;
+	u64			seed;
+	struct iov_iter		iter;
 };
 
 static inline const struct iovec *iter_iov(const struct iov_iter *iter)
@@ -125,6 +137,11 @@ static inline bool iov_iter_is_bvec(const struct iov_iter *i)
 static inline bool iov_iter_is_discard(const struct iov_iter *i)
 {
 	return iov_iter_type(i) == ITER_DISCARD;
+}
+
+static inline bool iov_iter_is_folioq(const struct iov_iter *i)
+{
+	return iov_iter_type(i) == ITER_FOLIOQ;
 }
 
 static inline bool iov_iter_is_xarray(const struct iov_iter *i)
@@ -181,6 +198,12 @@ static inline size_t copy_folio_to_iter(struct folio *folio, size_t offset,
 	return copy_page_to_iter(&folio->page, offset, bytes, i);
 }
 
+static inline size_t copy_folio_from_iter(struct folio *folio, size_t offset,
+					  size_t bytes, struct iov_iter *i)
+{
+	return copy_page_from_iter(&folio->page, offset, bytes, i);
+}
+
 static inline size_t copy_folio_from_iter_atomic(struct folio *folio,
 		size_t offset, size_t bytes, struct iov_iter *i)
 {
@@ -204,6 +227,16 @@ size_t copy_from_iter(void *addr, size_t bytes, struct iov_iter *i)
 	if (check_copy_size(addr, bytes, false))
 		return _copy_from_iter(addr, bytes, i);
 	return 0;
+}
+
+static __always_inline __must_check
+bool copy_to_iter_full(const void *addr, size_t bytes, struct iov_iter *i)
+{
+	size_t copied = copy_to_iter(addr, bytes, i);
+	if (likely(copied == bytes))
+		return true;
+	iov_iter_revert(i, copied);
+	return false;
 }
 
 static __always_inline __must_check
@@ -248,22 +281,8 @@ size_t _copy_from_iter_flushcache(void *addr, size_t bytes, struct iov_iter *i);
 
 #ifdef CONFIG_ARCH_HAS_COPY_MC
 size_t _copy_mc_to_iter(const void *addr, size_t bytes, struct iov_iter *i);
-static inline void iov_iter_set_copy_mc(struct iov_iter *i)
-{
-	i->copy_mc = true;
-}
-
-static inline bool iov_iter_is_copy_mc(const struct iov_iter *i)
-{
-	return i->copy_mc;
-}
 #else
 #define _copy_mc_to_iter _copy_to_iter
-static inline void iov_iter_set_copy_mc(struct iov_iter *i) { }
-static inline bool iov_iter_is_copy_mc(const struct iov_iter *i)
-{
-	return false;
-}
 #endif
 
 size_t iov_iter_zero(size_t bytes, struct iov_iter *);
@@ -278,6 +297,9 @@ void iov_iter_kvec(struct iov_iter *i, unsigned int direction, const struct kvec
 void iov_iter_bvec(struct iov_iter *i, unsigned int direction, const struct bio_vec *bvec,
 			unsigned long nr_segs, size_t count);
 void iov_iter_discard(struct iov_iter *i, unsigned int direction, size_t count);
+void iov_iter_folio_queue(struct iov_iter *i, unsigned int direction,
+			  const struct folio_queue *folioq,
+			  unsigned int first_slot, unsigned int offset, size_t count);
 void iov_iter_xarray(struct iov_iter *i, unsigned int direction, struct xarray *xarray,
 		     loff_t start, size_t count);
 ssize_t iov_iter_get_pages2(struct iov_iter *i, struct page **pages,
@@ -355,7 +377,6 @@ static inline void iov_iter_ubuf(struct iov_iter *i, unsigned int direction,
 	WARN_ON(direction & ~(READ | WRITE));
 	*i = (struct iov_iter) {
 		.iter_type = ITER_UBUF,
-		.copy_mc = false,
 		.data_source = direction,
 		.ubuf = buf,
 		.count = count,

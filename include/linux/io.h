@@ -6,26 +6,37 @@
 #ifndef _LINUX_IO_H
 #define _LINUX_IO_H
 
+#include <linux/sizes.h>
 #include <linux/types.h>
 #include <linux/init.h>
-#include <linux/bug.h>
-#include <linux/err.h>
 #include <asm/io.h>
 #include <asm/page.h>
 
 struct device;
-struct resource;
 
-__visible void __iowrite32_copy(void __iomem *to, const void *from, size_t count);
+#ifndef __iowrite32_copy
+void __iowrite32_copy(void __iomem *to, const void *from, size_t count);
+#endif
+
 void __ioread32_copy(void *to, const void __iomem *from, size_t count);
+
+#ifndef __iowrite64_copy
 void __iowrite64_copy(void __iomem *to, const void *from, size_t count);
+#endif
 
 #ifdef CONFIG_MMU
 int ioremap_page_range(unsigned long addr, unsigned long end,
 		       phys_addr_t phys_addr, pgprot_t prot);
+int vmap_page_range(unsigned long addr, unsigned long end,
+		    phys_addr_t phys_addr, pgprot_t prot);
 #else
 static inline int ioremap_page_range(unsigned long addr, unsigned long end,
 				     phys_addr_t phys_addr, pgprot_t prot)
+{
+	return 0;
+}
+static inline int vmap_page_range(unsigned long addr, unsigned long end,
+				  phys_addr_t phys_addr, pgprot_t prot)
 {
 	return 0;
 }
@@ -50,8 +61,6 @@ static inline void devm_ioport_unmap(struct device *dev, void __iomem *addr)
 {
 }
 #endif
-
-#define IOMEM_ERR_PTR(err) (__force void __iomem *)ERR_PTR(err)
 
 void __iomem *devm_ioremap(struct device *dev, resource_size_t offset,
 			   resource_size_t size);

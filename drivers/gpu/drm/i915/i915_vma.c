@@ -26,7 +26,7 @@
 #include <linux/dma-fence-array.h>
 #include <drm/drm_gem.h>
 
-#include "display/intel_display.h"
+#include "display/intel_fb.h"
 #include "display/intel_frontbuffer.h"
 #include "gem/i915_gem_lmem.h"
 #include "gem/i915_gem_object_frontbuffer.h"
@@ -34,6 +34,7 @@
 #include "gt/intel_engine.h"
 #include "gt/intel_engine_heartbeat.h"
 #include "gt/intel_gt.h"
+#include "gt/intel_gt_pm.h"
 #include "gt/intel_gt_requests.h"
 #include "gt/intel_tlb.h"
 
@@ -103,12 +104,42 @@ static inline struct i915_vma *active_to_vma(struct i915_active *ref)
 
 static int __i915_vma_active(struct i915_active *ref)
 {
-	return i915_vma_tryget(active_to_vma(ref)) ? 0 : -ENOENT;
+	struct i915_vma *vma = active_to_vma(ref);
+
+	if (!i915_vma_tryget(vma))
+		return -ENOENT;
+
+	/*
+	 * Exclude global GTT VMA from holding a GT wakeref
+	 * while active, otherwise GPU never goes idle.
+	 */
+	if (!i915_vma_is_ggtt(vma)) {
+		/*
+		 * Since we and our _retire() counterpart can be
+		 * called asynchronously, storing a wakeref tracking
+		 * handle inside struct i915_vma is not safe, and
+		 * there is no other good place for that.  Hence,
+		 * use untracked variants of intel_gt_pm_get/put().
+		 */
+		intel_gt_pm_get_untracked(vma->vm->gt);
+	}
+
+	return 0;
 }
 
 static void __i915_vma_retire(struct i915_active *ref)
 {
-	i915_vma_put(active_to_vma(ref));
+	struct i915_vma *vma = active_to_vma(ref);
+
+	if (!i915_vma_is_ggtt(vma)) {
+		/*
+		 * Since we can be called from atomic contexts,
+		 * use an async variant of intel_gt_pm_put().
+		 */
+		intel_gt_pm_put_async_untracked(vma->vm->gt);
+	}
+
+	i915_vma_put(vma);
 }
 
 static struct i915_vma *
@@ -747,8 +778,8 @@ bool i915_gem_valid_gtt_space(struct i915_vma *vma, unsigned long color)
  * @flags: mask of PIN_* flags to use
  *
  * First we try to allocate some free space that meets the requirements for
- * the VMA. Failiing that, if the flags permit, it will evict an old VMA,
- * preferrably the oldest idle entry to make room for the new VMA.
+ * the VMA. Failing that, if the flags permit, it will evict an old VMA,
+ * preferably the oldest idle entry to make room for the new VMA.
  *
  * Returns:
  * 0 on success, negative error code otherwise.
@@ -846,7 +877,7 @@ i915_vma_insert(struct i915_vma *vma, struct i915_gem_ww_ctx *ww,
 		 * objects which need to be tightly packed into the low 32bits.
 		 *
 		 * Note that we assume that GGTT are limited to 4GiB for the
-		 * forseeable future. See also i915_ggtt_offset().
+		 * foreseeable future. See also i915_ggtt_offset().
 		 */
 		if (upper_32_bits(end - 1) &&
 		    vma->page_sizes.sg > I915_GTT_PAGE_SIZE &&
@@ -970,7 +1001,7 @@ rotate_pages(struct drm_i915_gem_object *obj, unsigned int offset,
 
 		/*
 		 * The DE ignores the PTEs for the padding tiles, the sg entry
-		 * here is just a conenience to indicate how many padding PTEs
+		 * here is just a convenience to indicate how many padding PTEs
 		 * to insert at this spot.
 		 */
 		sg_set_page(sg, NULL, left, 0);
@@ -1404,7 +1435,7 @@ int i915_vma_pin_ww(struct i915_vma *vma, struct i915_gem_ww_ctx *ww,
 	struct i915_vma_work *work = NULL;
 	struct dma_fence *moving = NULL;
 	struct i915_vma_resource *vma_res = NULL;
-	intel_wakeref_t wakeref = 0;
+	intel_wakeref_t wakeref;
 	unsigned int bound;
 	int err;
 
@@ -1424,8 +1455,14 @@ int i915_vma_pin_ww(struct i915_vma *vma, struct i915_gem_ww_ctx *ww,
 	if (err)
 		return err;
 
-	if (flags & PIN_GLOBAL)
-		wakeref = intel_runtime_pm_get(&vma->vm->i915->runtime_pm);
+	/*
+	 * In case of a global GTT, we must hold a runtime-pm wakeref
+	 * while global PTEs are updated.  In other cases, we hold
+	 * the rpm reference while the VMA is active.  Since runtime
+	 * resume may require allocations, which are forbidden inside
+	 * vm->mutex, get the first rpm wakeref outside of the mutex.
+	 */
+	wakeref = intel_runtime_pm_get(&vma->vm->i915->runtime_pm);
 
 	if (flags & vma->vm->bind_async_flags) {
 		/* lock VM */
@@ -1561,8 +1598,7 @@ err_fence:
 	if (work)
 		dma_fence_work_commit_imm(&work->base);
 err_rpm:
-	if (wakeref)
-		intel_runtime_pm_put(&vma->vm->i915->runtime_pm, wakeref);
+	intel_runtime_pm_put(&vma->vm->i915->runtime_pm, wakeref);
 
 	if (moving)
 		dma_fence_put(moving);
@@ -1740,8 +1776,6 @@ static void release_references(struct i915_vma *vma, struct intel_gt *gt,
 	if (vm_ddestroy)
 		i915_vm_resv_put(vma->vm);
 
-	/* Wait for async active retire */
-	i915_active_wait(&vma->active);
 	i915_active_fini(&vma->active);
 	GEM_WARN_ON(vma->resource);
 	i915_vma_free(vma);
@@ -2123,7 +2157,7 @@ static struct dma_fence *__i915_vma_unbind_async(struct i915_vma *vma)
 int i915_vma_unbind(struct i915_vma *vma)
 {
 	struct i915_address_space *vm = vma->vm;
-	intel_wakeref_t wakeref = 0;
+	intel_wakeref_t wakeref = NULL;
 	int err;
 
 	assert_object_held_shared(vma->obj);
@@ -2162,7 +2196,7 @@ int i915_vma_unbind_async(struct i915_vma *vma, bool trylock_vm)
 {
 	struct drm_i915_gem_object *obj = vma->obj;
 	struct i915_address_space *vm = vma->vm;
-	intel_wakeref_t wakeref = 0;
+	intel_wakeref_t wakeref = NULL;
 	struct dma_fence *fence;
 	int err;
 

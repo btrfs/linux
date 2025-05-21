@@ -14,7 +14,9 @@
 
 struct drm_i915_private;
 struct intel_atomic_state;
+struct intel_crtc;
 struct intel_crtc_state;
+struct intel_display;
 
 struct intel_dbuf_bw {
 	unsigned int max_bw[I915_MAX_DBUF_SLICES];
@@ -47,12 +49,19 @@ struct intel_bw_state {
 	 */
 	u16 qgv_points_mask;
 
+	/*
+	 * Flag to force the QGV comparison in atomic check right after the
+	 * hw state readout
+	 */
+	bool force_check_qgv;
+
 	int min_cdclk[I915_MAX_PIPES];
 	unsigned int data_rate[I915_MAX_PIPES];
 	u8 num_active_planes[I915_MAX_PIPES];
 };
 
-#define to_intel_bw_state(x) container_of((x), struct intel_bw_state, base)
+#define to_intel_bw_state(global_state) \
+	container_of_const((global_state), struct intel_bw_state, base)
 
 struct intel_bw_state *
 intel_atomic_get_old_bw_state(struct intel_atomic_state *state);
@@ -66,13 +75,13 @@ intel_atomic_get_bw_state(struct intel_atomic_state *state);
 void intel_bw_init_hw(struct drm_i915_private *dev_priv);
 int intel_bw_init(struct drm_i915_private *dev_priv);
 int intel_bw_atomic_check(struct intel_atomic_state *state);
-void intel_bw_crtc_update(struct intel_bw_state *bw_state,
-			  const struct intel_crtc_state *crtc_state);
 int icl_pcode_restrict_qgv_points(struct drm_i915_private *dev_priv,
 				  u32 points_mask);
 int intel_bw_calc_min_cdclk(struct intel_atomic_state *state,
 			    bool *need_cdclk_calc);
 int intel_bw_min_cdclk(struct drm_i915_private *i915,
 		       const struct intel_bw_state *bw_state);
+void intel_bw_update_hw_state(struct intel_display *display);
+void intel_bw_crtc_disable_noatomic(struct intel_crtc *crtc);
 
 #endif /* __INTEL_BW_H__ */

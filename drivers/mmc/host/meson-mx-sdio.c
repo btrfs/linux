@@ -446,7 +446,7 @@ static irqreturn_t meson_mx_mmc_irq_thread(int irq, void *irq_data)
 	if (WARN_ON(!cmd))
 		return IRQ_HANDLED;
 
-	del_timer_sync(&host->cmd_timeout);
+	timer_delete_sync(&host->cmd_timeout);
 
 	if (cmd->data) {
 		dma_unmap_sg(mmc_dev(host->mmc), cmd->data->sg,
@@ -733,7 +733,7 @@ static void meson_mx_mmc_remove(struct platform_device *pdev)
 	struct meson_mx_mmc_host *host = platform_get_drvdata(pdev);
 	struct device *slot_dev = mmc_dev(host->mmc);
 
-	del_timer_sync(&host->cmd_timeout);
+	timer_delete_sync(&host->cmd_timeout);
 
 	mmc_remove_host(host->mmc);
 
@@ -754,7 +754,7 @@ MODULE_DEVICE_TABLE(of, meson_mx_mmc_of_match);
 
 static struct platform_driver meson_mx_mmc_driver = {
 	.probe   = meson_mx_mmc_probe,
-	.remove_new = meson_mx_mmc_remove,
+	.remove = meson_mx_mmc_remove,
 	.driver  = {
 		.name = "meson-mx-sdio",
 		.probe_type = PROBE_PREFER_ASYNCHRONOUS,

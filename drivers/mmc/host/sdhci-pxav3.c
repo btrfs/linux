@@ -399,6 +399,7 @@ static int sdhci_pxav3_probe(struct platform_device *pdev)
 	if (!IS_ERR(pxa->clk_core))
 		clk_prepare_enable(pxa->clk_core);
 
+	host->mmc->caps |= MMC_CAP_NEED_RSP_BUSY;
 	/* enable 1/8V DDR capable */
 	host->mmc->caps |= MMC_CAP_1_8V_DDR;
 
@@ -568,7 +569,7 @@ static struct platform_driver sdhci_pxav3_driver = {
 		.pm	= &sdhci_pxav3_pmops,
 	},
 	.probe		= sdhci_pxav3_probe,
-	.remove_new	= sdhci_pxav3_remove,
+	.remove		= sdhci_pxav3_remove,
 };
 
 module_platform_driver(sdhci_pxav3_driver);

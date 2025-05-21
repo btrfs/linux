@@ -859,7 +859,7 @@ restart:
 
 	if (si_sm_result == SI_SM_IDLE && smi_info->timer_running) {
 		/* Ok it if fails, the timer will just go off. */
-		if (del_timer(&smi_info->si_timer))
+		if (timer_delete(&smi_info->si_timer))
 			smi_info->timer_running = false;
 	}
 
@@ -1839,7 +1839,7 @@ static inline void stop_timer_and_thread(struct smi_info *smi_info)
 	}
 
 	smi_info->timer_can_start = false;
-	del_timer_sync(&smi_info->si_timer);
+	timer_delete_sync(&smi_info->si_timer);
 }
 
 static struct smi_info *find_dup_si(struct smi_info *info)
@@ -1882,7 +1882,8 @@ int ipmi_si_add_smi(struct si_sm_io *io)
 	}
 
 	if (!io->io_setup) {
-		if (io->addr_space == IPMI_IO_ADDR_SPACE) {
+		if (IS_ENABLED(CONFIG_HAS_IOPORT) &&
+		    io->addr_space == IPMI_IO_ADDR_SPACE) {
 			io->io_setup = ipmi_si_port_setup;
 		} else if (io->addr_space == IPMI_MEM_ADDR_SPACE) {
 			io->io_setup = ipmi_si_mem_setup;

@@ -79,21 +79,8 @@ nouveau_dp_probe_dpcd(struct nouveau_connector *nv_connector,
 	    !drm_dp_read_lttpr_common_caps(aux, dpcd, outp->dp.lttpr.caps)) {
 		int nr = drm_dp_lttpr_count(outp->dp.lttpr.caps);
 
-		if (nr) {
-			drm_dp_dpcd_writeb(aux, DP_PHY_REPEATER_MODE,
-						DP_PHY_REPEATER_MODE_TRANSPARENT);
-
-			if (nr > 0) {
-				ret = drm_dp_dpcd_writeb(aux, DP_PHY_REPEATER_MODE,
-							      DP_PHY_REPEATER_MODE_NON_TRANSPARENT);
-				if (ret != 1) {
-					drm_dp_dpcd_writeb(aux, DP_PHY_REPEATER_MODE,
-								DP_PHY_REPEATER_MODE_TRANSPARENT);
-				} else {
-					outp->dp.lttpr.nr = nr;
-				}
-			}
-		}
+		if (!drm_dp_lttpr_init(aux, nr))
+			outp->dp.lttpr.nr = nr;
 	}
 
 	ret = drm_dp_read_dpcd_caps(aux, dpcd);
@@ -181,7 +168,7 @@ nouveau_dp_probe_dpcd(struct nouveau_connector *nv_connector,
 	if (nouveau_mst) {
 		mstm = outp->dp.mstm;
 		if (mstm)
-			mstm->can_mst = drm_dp_read_mst_cap(aux, dpcd);
+			mstm->can_mst = drm_dp_read_mst_cap(aux, dpcd) == DRM_DP_MST;
 	}
 
 	if (nouveau_dp_has_sink_count(connector, outp)) {
@@ -225,12 +212,18 @@ nouveau_dp_detect(struct nouveau_connector *nv_connector,
 	u8 *dpcd = nv_encoder->dp.dpcd;
 	int ret = NOUVEAU_DP_NONE, hpd;
 
-	/* If we've already read the DPCD on an eDP device, we don't need to
-	 * reread it as it won't change
+	/* eDP ports don't support hotplugging - so there's no point in probing eDP ports unless we
+	 * haven't probed them once before.
 	 */
-	if (connector->connector_type == DRM_MODE_CONNECTOR_eDP &&
-	    dpcd[DP_DPCD_REV] != 0)
-		return NOUVEAU_DP_SST;
+	if (connector->connector_type == DRM_MODE_CONNECTOR_eDP) {
+		if (connector->status == connector_status_connected)
+			return NOUVEAU_DP_SST;
+		else if (connector->status == connector_status_disconnected)
+			return NOUVEAU_DP_NONE;
+	}
+
+	// Ensure that the aux bus is enabled for probing
+	drm_dp_dpcd_set_powered(&nv_connector->aux, true);
 
 	mutex_lock(&nv_encoder->dp.hpd_irq_lock);
 	if (mstm) {
@@ -292,6 +285,13 @@ nouveau_dp_detect(struct nouveau_connector *nv_connector,
 out:
 	if (mstm && !mstm->suspended && ret != NOUVEAU_DP_MST)
 		nv50_mstm_remove(mstm);
+
+	/* GSP doesn't like when we try to do aux transactions on a port it considers disconnected,
+	 * and since we don't really have a usecase for that anyway - just disable the aux bus here
+	 * if we've decided the connector is disconnected
+	 */
+	if (ret == NOUVEAU_DP_NONE)
+		drm_dp_dpcd_set_powered(&nv_connector->aux, false);
 
 	mutex_unlock(&nv_encoder->dp.hpd_irq_lock);
 	return ret;

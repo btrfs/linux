@@ -48,13 +48,14 @@
 #include <linux/usb/hcd.h>
 #include <linux/platform_device.h>
 #include <linux/prefetch.h>
+#include <linux/string_choices.h>
 #include <linux/debugfs.h>
 #include <linux/seq_file.h>
 
 #include <asm/io.h>
 #include <asm/irq.h>
 #include <asm/byteorder.h>
-#include <asm/unaligned.h>
+#include <linux/unaligned.h>
 
 #include "sl811.h"
 
@@ -98,7 +99,7 @@ static void port_power(struct sl811 *sl811, int is_on)
 	if (sl811->board && sl811->board->port_power) {
 		/* switch VBUS, at 500mA unless hub power budget gets set */
 		dev_dbg(hcd->self.controller, "power %s\n",
-			is_on ? "on" : "off");
+			str_on_off(is_on));
 		sl811->board->port_power(hcd->self.controller, is_on);
 	}
 
@@ -585,6 +586,7 @@ done(struct sl811 *sl811, struct sl811h_ep *ep, u8 bank)
 		finish_request(sl811, ep, urb, urbstat);
 }
 
+#ifdef QUIRK2
 static inline u8 checkdone(struct sl811 *sl811)
 {
 	u8	ctl;
@@ -616,6 +618,7 @@ static inline u8 checkdone(struct sl811 *sl811)
 #endif
 	return irqstat;
 }
+#endif
 
 static irqreturn_t sl811h_irq(struct usb_hcd *hcd)
 {
@@ -1512,7 +1515,7 @@ sl811h_stop(struct usb_hcd *hcd)
 	struct sl811	*sl811 = hcd_to_sl811(hcd);
 	unsigned long	flags;
 
-	del_timer_sync(&hcd->rh_timer);
+	timer_delete_sync(&hcd->rh_timer);
 
 	spin_lock_irqsave(&sl811->lock, flags);
 	port_power(sl811, 0);
@@ -1782,7 +1785,7 @@ sl811h_resume(struct platform_device *dev)
 /* this driver is exported so sl811_cs can depend on it */
 struct platform_driver sl811h_driver = {
 	.probe =	sl811h_probe,
-	.remove_new =	sl811h_remove,
+	.remove =	sl811h_remove,
 
 	.suspend =	sl811h_suspend,
 	.resume =	sl811h_resume,

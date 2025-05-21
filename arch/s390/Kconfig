@@ -17,8 +17,11 @@ config ARCH_HAS_ILOG2_U32
 config ARCH_HAS_ILOG2_U64
 	def_bool n
 
-config GENERIC_HWEIGHT
+config ARCH_PROC_KCORE_TEXT
 	def_bool y
+
+config GENERIC_HWEIGHT
+	def_bool !HAVE_MARCH_Z196_FEATURES
 
 config GENERIC_BUG
 	def_bool y if BUG
@@ -38,9 +41,6 @@ config AUDIT_ARCH
 config NO_IOPORT_MAP
 	def_bool y
 
-config PCI_QUIRKS
-	def_bool n
-
 config ARCH_SUPPORTS_UPROBES
 	def_bool y
 
@@ -48,6 +48,19 @@ config KASAN_SHADOW_OFFSET
 	hex
 	depends on KASAN
 	default 0x1C000000000000
+
+config CC_ASM_FLAG_OUTPUT_BROKEN
+	def_bool CC_IS_GCC && GCC_VERSION < 140200
+	help
+	  GCC versions before 14.2.0 may die with an internal
+	  compiler error in some configurations if flag output
+	  operands are used within inline assemblies.
+
+config CC_HAS_ASM_AOR_FORMAT_FLAGS
+	def_bool !(CC_IS_CLANG && CLANG_VERSION < 190100)
+	help
+	  Clang versions before 19.1.0 do not support A,
+	  O, and R inline assembly format flags.
 
 config S390
 	def_bool y
@@ -57,15 +70,18 @@ config S390
 	imply IMA_SECURE_AND_OR_TRUSTED_BOOT
 	select ALTERNATE_USER_ADDRESS_SPACE
 	select ARCH_32BIT_USTAT_F_TINODE
-	select ARCH_BINFMT_ELF_STATE
 	select ARCH_CORRECT_STACKTRACE_ON_KRETPROBE
 	select ARCH_ENABLE_MEMORY_HOTPLUG if SPARSEMEM
 	select ARCH_ENABLE_MEMORY_HOTREMOVE
 	select ARCH_ENABLE_SPLIT_PMD_PTLOCK if PGTABLE_LEVELS > 2
+	select ARCH_HAS_CPU_FINALIZE_INIT
+	select ARCH_HAS_CRC32
 	select ARCH_HAS_CURRENT_STACK_POINTER
+	select ARCH_HAS_DEBUG_VIRTUAL
 	select ARCH_HAS_DEBUG_VM_PGTABLE
 	select ARCH_HAS_DEBUG_WX
 	select ARCH_HAS_DEVMEM_IS_ALLOWED
+	select ARCH_HAS_DMA_OPS if PCI
 	select ARCH_HAS_ELF_RANDOMIZE
 	select ARCH_HAS_FORCE_DMA_UNENCRYPTED
 	select ARCH_HAS_FORTIFY_SOURCE
@@ -75,6 +91,8 @@ config S390
 	select ARCH_HAS_MEMBARRIER_SYNC_CORE
 	select ARCH_HAS_MEM_ENCRYPT
 	select ARCH_HAS_NMI_SAFE_THIS_CPU_OPS
+	select ARCH_HAS_PREEMPT_LAZY
+	select ARCH_HAS_PTDUMP
 	select ARCH_HAS_PTE_SPECIAL
 	select ARCH_HAS_SCALED_CPUTIME
 	select ARCH_HAS_SET_DIRECT_MAP
@@ -82,8 +100,8 @@ config S390
 	select ARCH_HAS_STRICT_KERNEL_RWX
 	select ARCH_HAS_STRICT_MODULE_RWX
 	select ARCH_HAS_SYSCALL_WRAPPER
-	select ARCH_HAS_UBSAN_SANITIZE_ALL
-	select ARCH_HAS_VDSO_DATA
+	select ARCH_HAS_UBSAN
+	select ARCH_HAS_VDSO_TIME_DATA
 	select ARCH_HAVE_NMI_SAFE_CMPXCHG
 	select ARCH_INLINE_READ_LOCK
 	select ARCH_INLINE_READ_LOCK_BH
@@ -113,11 +131,13 @@ config S390
 	select ARCH_INLINE_WRITE_UNLOCK_BH
 	select ARCH_INLINE_WRITE_UNLOCK_IRQ
 	select ARCH_INLINE_WRITE_UNLOCK_IRQRESTORE
+	select ARCH_MHP_MEMMAP_ON_MEMORY_ENABLE
 	select ARCH_STACKWALK
 	select ARCH_SUPPORTS_ATOMIC_RMW
 	select ARCH_SUPPORTS_DEBUG_PAGEALLOC
 	select ARCH_SUPPORTS_HUGETLBFS
 	select ARCH_SUPPORTS_INT128 if CC_HAS_INT128 && CC_IS_CLANG
+	select ARCH_SUPPORTS_MSEAL_SYSTEM_MAPPINGS
 	select ARCH_SUPPORTS_NUMA_BALANCING
 	select ARCH_SUPPORTS_PER_VMA_LOCK
 	select ARCH_USE_BUILTIN_BSWAP
@@ -127,22 +147,23 @@ config S390
 	select ARCH_WANT_DEFAULT_BPF_JIT
 	select ARCH_WANT_IPC_PARSE_VERSION
 	select ARCH_WANT_KERNEL_PMD_MKWRITE
+	select ARCH_WANT_LD_ORPHAN_WARN
 	select ARCH_WANT_OPTIMIZE_HUGETLB_VMEMMAP
 	select BUILDTIME_TABLE_SORT
 	select CLONE_BACKWARDS2
 	select DCACHE_WORD_ACCESS if !KMSAN
-	select DMA_OPS if PCI
 	select DYNAMIC_FTRACE if FUNCTION_TRACER
 	select FUNCTION_ALIGNMENT_8B if CC_IS_GCC
 	select FUNCTION_ALIGNMENT_16B if !CC_IS_GCC
 	select GENERIC_ALLOCATOR
+	select GENERIC_CPU_DEVICES
 	select GENERIC_CPU_AUTOPROBE
 	select GENERIC_CPU_VULNERABILITIES
 	select GENERIC_ENTRY
 	select GENERIC_GETTIMEOFDAY
-	select GENERIC_PTDUMP
 	select GENERIC_SMP_IDLE_THREAD
 	select GENERIC_TIME_VSYSCALL
+	select GENERIC_VDSO_DATA_STORE
 	select GENERIC_VDSO_TIME_NS
 	select GENERIC_IOREMAP if PCI
 	select HAVE_ALIGNED_STRUCT_PAGE
@@ -152,6 +173,7 @@ config S390
 	select HAVE_ARCH_KASAN
 	select HAVE_ARCH_KASAN_VMALLOC
 	select HAVE_ARCH_KCSAN
+	select HAVE_ARCH_KMSAN
 	select HAVE_ARCH_KFENCE
 	select HAVE_ARCH_RANDOMIZE_KSTACK_OFFSET
 	select HAVE_ARCH_SECCOMP_FILTER
@@ -161,22 +183,25 @@ config S390
 	select HAVE_ARCH_TRANSPARENT_HUGEPAGE
 	select HAVE_ARCH_VMAP_STACK
 	select HAVE_ASM_MODVERSIONS
+	select HAVE_BUILDTIME_MCOUNT_SORT
 	select HAVE_CMPXCHG_DOUBLE
 	select HAVE_CMPXCHG_LOCAL
 	select HAVE_DEBUG_KMEMLEAK
 	select HAVE_DMA_CONTIGUOUS
 	select HAVE_DYNAMIC_FTRACE
 	select HAVE_DYNAMIC_FTRACE_WITH_ARGS
+	select HAVE_FTRACE_REGS_HAVING_PT_REGS
 	select HAVE_DYNAMIC_FTRACE_WITH_DIRECT_CALLS
 	select HAVE_DYNAMIC_FTRACE_WITH_REGS
 	select HAVE_EBPF_JIT if HAVE_MARCH_Z196_FEATURES
 	select HAVE_EFFICIENT_UNALIGNED_ACCESS
-	select HAVE_FAST_GUP
+	select HAVE_GUP_FAST
 	select HAVE_FENTRY
+	select HAVE_FTRACE_GRAPH_FUNC
 	select HAVE_FTRACE_MCOUNT_RECORD
 	select HAVE_FUNCTION_ARG_ACCESS_API
 	select HAVE_FUNCTION_ERROR_INJECTION
-	select HAVE_FUNCTION_GRAPH_RETVAL
+	select HAVE_FUNCTION_GRAPH_FREGS
 	select HAVE_FUNCTION_GRAPH_TRACER
 	select HAVE_FUNCTION_TRACER
 	select HAVE_GCC_PLUGINS
@@ -193,16 +218,17 @@ config S390
 	select HAVE_KPROBES
 	select HAVE_KPROBES_ON_FTRACE
 	select HAVE_KRETPROBES
-	select HAVE_KVM
 	select HAVE_LIVEPATCH
 	select HAVE_MEMBLOCK_PHYS_MAP
 	select HAVE_MOD_ARCH_SPECIFIC
 	select HAVE_NMI
 	select HAVE_NOP_MCOUNT
+	select HAVE_PAGE_SIZE_4KB
 	select HAVE_PCI
 	select HAVE_PERF_EVENTS
 	select HAVE_PERF_REGS
 	select HAVE_PERF_USER_STACK_DUMP
+	select HAVE_PREEMPT_DYNAMIC_KEY
 	select HAVE_REGS_AND_STACK_ACCESS_API
 	select HAVE_RELIABLE_STACKTRACE
 	select HAVE_RETHOOK
@@ -214,20 +240,25 @@ config S390
 	select HAVE_SYSCALL_TRACEPOINTS
 	select HAVE_VIRT_CPU_ACCOUNTING
 	select HAVE_VIRT_CPU_ACCOUNTING_IDLE
+	select HOTPLUG_SMT
 	select IOMMU_HELPER		if PCI
 	select IOMMU_SUPPORT		if PCI
+	select KASAN_VMALLOC if KASAN
+	select LOCK_MM_AND_FIND_VMA
 	select MMU_GATHER_MERGE_VMAS
 	select MMU_GATHER_NO_GATHER
 	select MMU_GATHER_RCU_TABLE_FREE
 	select MODULES_USE_ELF_RELA
 	select NEED_DMA_MAP_STATE	if PCI
 	select NEED_PER_CPU_EMBED_FIRST_CHUNK
+	select NEED_PROC_VMCORE_DEVICE_RAM if PROC_VMCORE
 	select NEED_SG_DMA_LENGTH	if PCI
 	select OLD_SIGACTION
 	select OLD_SIGSUSPEND3
 	select PCI_DOMAINS		if PCI
 	select PCI_MSI			if PCI
 	select PCI_MSI_ARCH_FALLBACKS	if PCI_MSI
+	select PCI_QUIRKS		if PCI
 	select SPARSE_IRQ
 	select SWIOTLB
 	select SYSCTL_EXCEPTION_TRACE
@@ -235,7 +266,9 @@ config S390
 	select TRACE_IRQFLAGS_SUPPORT
 	select TTY
 	select USER_STACKTRACE_SUPPORT
+	select VDSO_GETRANDOM
 	select VIRT_CPU_ACCOUNTING
+	select VMAP_STACK
 	select ZONE_DMA
 	# Note: keep the above list sorted alphabetically
 
@@ -267,6 +300,9 @@ config ARCH_SUPPORTS_CRASH_DUMP
 	  This option also enables s390 zfcpdump.
 	  See also <file:Documentation/arch/s390/zfcpdump.rst>
 
+config ARCH_DEFAULT_CRASH_DUMP
+	def_bool y
+
 menu "Processor type and features"
 
 config HAVE_MARCH_Z10_FEATURES
@@ -295,6 +331,10 @@ config HAVE_MARCH_Z15_FEATURES
 config HAVE_MARCH_Z16_FEATURES
 	def_bool n
 	select HAVE_MARCH_Z15_FEATURES
+
+config HAVE_MARCH_Z17_FEATURES
+	def_bool n
+	select HAVE_MARCH_Z16_FEATURES
 
 choice
 	prompt "Processor type"
@@ -361,6 +401,14 @@ config MARCH_Z16
 	  Select this to enable optimizations for IBM z16 (3931 and
 	  3932 series).
 
+config MARCH_Z17
+	bool "IBM z17"
+	select HAVE_MARCH_Z17_FEATURES
+	depends on $(cc-option,-march=z17)
+	help
+	  Select this to enable optimizations for IBM z17 (9175 and
+	  9176 series).
+
 endchoice
 
 config MARCH_Z10_TUNE
@@ -383,6 +431,9 @@ config MARCH_Z15_TUNE
 
 config MARCH_Z16_TUNE
 	def_bool TUNE_Z16 || MARCH_Z16 && TUNE_DEFAULT
+
+config MARCH_Z17_TUNE
+	def_bool TUNE_Z17 || MARCH_Z17 && TUNE_DEFAULT
 
 choice
 	prompt "Tune code generation"
@@ -428,6 +479,10 @@ config TUNE_Z16
 	bool "IBM z16"
 	depends on $(cc-option,-mtune=z16)
 
+config TUNE_Z17
+	bool "IBM z17"
+	depends on $(cc-option,-mtune=z17)
+
 endchoice
 
 config 64BIT
@@ -448,7 +503,7 @@ config COMPAT
 	select COMPAT_OLD_SIGACTION
 	select HAVE_UID16
 	depends on MULTIUSER
-	depends on !CC_IS_CLANG
+	depends on !CC_IS_CLANG && !LD_IS_LLD
 	help
 	  Select this option if you want to enable your system kernel to
 	  handle system-calls from ELF binaries for 31 bit ESA.  This option
@@ -505,6 +560,26 @@ config SCHED_TOPOLOGY
 	  making when dealing with machines that have multi-threading,
 	  multiple cores or multiple books.
 
+config SCHED_TOPOLOGY_VERTICAL
+	def_bool y
+	bool "Use vertical CPU polarization by default"
+	depends on SCHED_TOPOLOGY
+	help
+	  Use vertical CPU polarization by default if available.
+	  The default CPU polarization is horizontal.
+
+config HIPERDISPATCH_ON
+	def_bool y
+	bool "Use hiperdispatch on vertical polarization by default"
+	depends on SCHED_TOPOLOGY
+	depends on PROC_SYSCTL
+	help
+	  Hiperdispatch aims to improve the CPU scheduler's decision
+	  making when using vertical polarization by adjusting CPU
+	  capacities dynamically. Set this option to use hiperdispatch
+	  on vertical polarization by default. This can be overwritten
+	  by sysctl's s390.hiperdispatch attribute later on.
+
 source "kernel/Kconfig.hz"
 
 config CERT_STORE
@@ -549,17 +624,13 @@ config EXPOLINE
 	  If unsure, say N.
 
 config EXPOLINE_EXTERN
-	def_bool n
-	depends on EXPOLINE
-	depends on CC_IS_GCC && GCC_VERSION >= 110200
-	depends on $(success,$(srctree)/arch/s390/tools/gcc-thunk-extern.sh $(CC))
-	prompt "Generate expolines as extern functions."
+	def_bool EXPOLINE && CC_IS_GCC && GCC_VERSION >= 110200 && \
+		 $(success,$(srctree)/arch/s390/tools/gcc-thunk-extern.sh $(CC))
 	help
-	  This option is required for some tooling like kpatch. The kernel is
-	  compiled with -mindirect-branch=thunk-extern and requires a newer
-	  compiler.
-
-	  If unsure, say N.
+	  Generate expolines as external functions if the compiler supports it.
+	  This option is required for some tooling like kpatch, if expolines
+	  are enabled. The kernel is compiled with
+	  -mindirect-branch=thunk-extern, which requires a newer compiler.
 
 choice
 	prompt "Expoline default"
@@ -579,12 +650,10 @@ endchoice
 
 config RELOCATABLE
 	def_bool y
+	select ARCH_VMLINUX_NEEDS_RELOCS
 	help
 	  This builds a kernel image that retains relocation information
 	  so it can be loaded at an arbitrary address.
-	  The kernel is linked as a position-independent executable (PIE)
-	  and contains dynamic relocations which are processed early in the
-	  bootup process.
 	  The relocations make the kernel image about 15% larger (compressed
 	  10%), but are discarded at runtime.
 	  Note: this option exists only for documentation purposes, please do
@@ -598,6 +667,38 @@ config RANDOMIZE_BASE
 	  this randomizes the address at which the kernel image is loaded,
 	  as a security feature that deters exploit attempts relying on
 	  knowledge of the location of kernel internals.
+
+config RANDOMIZE_IDENTITY_BASE
+	bool "Randomize the address of the identity mapping base"
+	depends on RANDOMIZE_BASE
+	default DEBUG_VM
+	help
+	  The identity mapping base address is pinned to zero by default.
+	  Allow randomization of that base to expose otherwise missed
+	  notion of physical and virtual addresses of data structures.
+	  That does not have any impact on the base address at which the
+	  kernel image is loaded.
+
+	  If unsure, say N
+
+config KERNEL_IMAGE_BASE
+	hex "Kernel image base address"
+	range 0x100000 0x1FFFFFE0000000 if !KASAN
+	range 0x100000 0x1BFFFFE0000000 if KASAN
+	default 0x3FFE0000000 if !KASAN
+	default 0x7FFFE0000000 if KASAN
+	help
+	  This is the address at which the kernel image is loaded in case
+	  Kernel Address Space Layout Randomization (KASLR) is disabled.
+
+	  In case the Protected virtualization guest support is enabled the
+	  Ultravisor imposes a virtual address limit. If the value of this
+	  option leads to the kernel image exceeding the Ultravisor limit,
+	  this option is ignored and the image is loaded below the limit.
+
+	  If the value of this option leads to the kernel image overlapping
+	  the virtual memory where other data structures are located, this
+	  option is ignored and the image is loaded above the structures.
 
 endmenu
 
@@ -620,32 +721,6 @@ config MAX_PHYSMEM_BITS
 	  in bits. Supported is any size between 2^42 (4TB) and 2^53 (8PB).
 	  Increasing the number of bits also increases the kernel image size.
 	  By default 46 bits (64TB) are supported.
-
-config CHECK_STACK
-	def_bool y
-	depends on !VMAP_STACK
-	prompt "Detect kernel stack overflow"
-	help
-	  This option enables the compiler option -mstack-guard and
-	  -mstack-size if they are available. If the compiler supports them
-	  it will emit additional code to each function prolog to trigger
-	  an illegal operation if the kernel stack is about to overflow.
-
-	  Say N if you are unsure.
-
-config STACK_GUARD
-	int "Size of the guard area (128-1024)"
-	range 128 1024
-	depends on CHECK_STACK
-	default "256"
-	help
-	  This allows you to specify the size of the guard area at the lower
-	  end of the kernel stack. If the kernel stack points into the guard
-	  area on function entry an illegal operation is triggered. The size
-	  needs to be a power of 2. Please keep in mind that the size of an
-	  interrupt frame is 184 bytes for 31 bit and 328 bytes on 64 bit.
-	  The minimum size for the stack guard should be 256 for 31 bit and
-	  512 for 64 bit.
 
 endmenu
 
@@ -712,6 +787,33 @@ config EADM_SCH
 	  To compile this driver as a module, choose M here: the
 	  module will be called eadm_sch.
 
+config AP
+	def_tristate y
+	prompt "Support for Adjunct Processors (ap)"
+	help
+	  This driver allows usage to Adjunct Processor (AP) devices via
+	  the ap bus, cards and queues. Supported Adjunct Processors are
+	  the CryptoExpress Cards (CEX).
+
+	  To compile this driver as a module, choose M here: the
+	  module will be called ap.
+
+	  If unsure, say Y (default).
+
+config AP_DEBUG
+	def_bool n
+	prompt "Enable debug features for Adjunct Processor (ap) devices"
+	depends on AP
+	help
+	  Say 'Y' here to enable some additional debug features for Adjunct
+	  Processor (ap) devices.
+
+	  There will be some more sysfs attributes displayed for ap queues.
+
+	  Do not enable on production level kernel build.
+
+	  If unsure, say N.
+
 config VFIO_CCW
 	def_tristate n
 	prompt "Support for VFIO-CCW subchannels"
@@ -728,7 +830,7 @@ config VFIO_AP
 	prompt "VFIO support for AP devices"
 	depends on KVM
 	depends on VFIO
-	depends on ZCRYPT
+	depends on AP
 	select VFIO_MDEV
 	help
 	  This driver grants access to Adjunct Processor (AP) devices
@@ -747,17 +849,6 @@ config HAVE_PNETID
 	default (SMC || CCWGROUP)
 
 menu "Virtualization"
-
-config PROTECTED_VIRTUALIZATION_GUEST
-	def_bool n
-	prompt "Protected virtualization guest support"
-	help
-	  Select this option, if you want to be able to run this
-	  kernel as a protected virtualization KVM guest.
-	  Protected virtualization capable machines have a mini hypervisor
-	  located at machine level (an ultravisor). With help of the
-	  Ultravisor, KVM will be able to run "protected" VMs, special
-	  VMs whose memory and management data are unavailable to KVM.
 
 config PFAULT
 	def_bool y

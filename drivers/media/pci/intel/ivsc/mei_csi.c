@@ -19,20 +19,21 @@
 #include <linux/mei_cl_bus.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
+#include <linux/pci.h>
 #include <linux/pm_runtime.h>
 #include <linux/slab.h>
 #include <linux/units.h>
 #include <linux/uuid.h>
 #include <linux/workqueue.h>
 
+#include <media/ipu-bridge.h>
+#include <media/ipu6-pci-table.h>
 #include <media/v4l2-async.h>
 #include <media/v4l2-ctrls.h>
 #include <media/v4l2-fwnode.h>
 #include <media/v4l2-subdev.h>
 
 #define MEI_CSI_ENTITY_NAME "Intel IVSC CSI"
-
-#define MEI_CSI_LINK_FREQ_400MHZ 400000000ULL
 
 /* the 5s used here is based on experiment */
 #define CSI_CMD_TIMEOUT (5 * HZ)
@@ -71,8 +72,8 @@ enum ivsc_privacy_status {
 };
 
 enum csi_pads {
-	CSI_PAD_SOURCE,
 	CSI_PAD_SINK,
+	CSI_PAD_SOURCE,
 	CSI_NUM_PADS
 };
 
@@ -118,25 +119,22 @@ struct mei_csi {
 	struct mutex lock;
 
 	struct v4l2_subdev subdev;
-	struct v4l2_subdev *remote;
+	struct media_pad *remote;
 	struct v4l2_async_notifier notifier;
 	struct v4l2_ctrl_handler ctrl_handler;
 	struct v4l2_ctrl *freq_ctrl;
 	struct v4l2_ctrl *privacy_ctrl;
-	unsigned int remote_pad;
+	/* lock for v4l2 controls */
+	struct mutex ctrl_lock;
 	/* start streaming or not */
 	int streaming;
 
 	struct media_pad pads[CSI_NUM_PADS];
-	struct v4l2_mbus_framefmt format_mbus[CSI_NUM_PADS];
 
 	/* number of data lanes used on the CSI-2 link */
 	u32 nr_of_lanes;
 	/* frequency of the CSI-2 link */
 	u64 link_freq;
-
-	/* privacy status */
-	enum ivsc_privacy_status status;
 };
 
 static const struct v4l2_mbus_framefmt mei_csi_format_mbus_default = {
@@ -144,10 +142,6 @@ static const struct v4l2_mbus_framefmt mei_csi_format_mbus_default = {
 	.height = 1,
 	.code = MEDIA_BUS_FMT_Y8_1X8,
 	.field = V4L2_FIELD_NONE,
-};
-
-static s64 link_freq_menu_items[] = {
-	MEI_CSI_LINK_FREQ_400MHZ
 };
 
 static inline struct mei_csi *notifier_to_csi(struct v4l2_async_notifier *n)
@@ -158,11 +152,6 @@ static inline struct mei_csi *notifier_to_csi(struct v4l2_async_notifier *n)
 static inline struct mei_csi *sd_to_csi(struct v4l2_subdev *sd)
 {
 	return container_of(sd, struct mei_csi, subdev);
-}
-
-static inline struct mei_csi *ctrl_to_csi(struct v4l2_ctrl *ctrl)
-{
-	return container_of(ctrl->handler, struct mei_csi, ctrl_handler);
 }
 
 /* send a command to firmware and mutex must be held by caller */
@@ -188,7 +177,11 @@ static int mei_csi_send(struct mei_csi *csi, u8 *buf, size_t len)
 
 	/* command response status */
 	ret = csi->cmd_response.status;
-	if (ret) {
+	if (ret == -1) {
+		/* notify privacy on instead of reporting error */
+		ret = 0;
+		v4l2_ctrl_s_ctrl(csi->privacy_ctrl, 1);
+	} else if (ret) {
 		ret = -EINVAL;
 		goto out;
 	}
@@ -263,10 +256,9 @@ static void mei_csi_rx(struct mei_cl_device *cldev)
 
 	switch (notif.cmd_id) {
 	case CSI_PRIVACY_NOTIF:
-		if (notif.cont.cont < CSI_PRIVACY_MAX) {
-			csi->status = notif.cont.cont;
-			v4l2_ctrl_s_ctrl(csi->privacy_ctrl, csi->status);
-		}
+		if (notif.cont.cont < CSI_PRIVACY_MAX)
+			v4l2_ctrl_s_ctrl(csi->privacy_ctrl,
+					 notif.cont.cont == CSI_PRIVACY_ON);
 		break;
 	case CSI_SET_OWNER:
 	case CSI_SET_CONF:
@@ -282,11 +274,13 @@ static void mei_csi_rx(struct mei_cl_device *cldev)
 static int mei_csi_set_stream(struct v4l2_subdev *sd, int enable)
 {
 	struct mei_csi *csi = sd_to_csi(sd);
+	struct v4l2_subdev *remote_sd =
+		media_entity_to_v4l2_subdev(csi->remote->entity);
 	s64 freq;
 	int ret;
 
 	if (enable && csi->streaming == 0) {
-		freq = v4l2_get_link_freq(csi->remote->ctrl_handler, 0, 0);
+		freq = v4l2_get_link_freq(csi->remote, 0, 0);
 		if (freq < 0) {
 			dev_err(&csi->cldev->dev,
 				"error %lld, invalid link_freq\n", freq);
@@ -305,11 +299,11 @@ static int mei_csi_set_stream(struct v4l2_subdev *sd, int enable)
 		if (ret < 0)
 			goto err_switch;
 
-		ret = v4l2_subdev_call(csi->remote, video, s_stream, 1);
+		ret = v4l2_subdev_call(remote_sd, video, s_stream, 1);
 		if (ret)
 			goto err_switch;
 	} else if (!enable && csi->streaming == 1) {
-		v4l2_subdev_call(csi->remote, video, s_stream, 0);
+		v4l2_subdev_call(remote_sd, video, s_stream, 0);
 
 		/* switch CSI-2 link to IVSC */
 		ret = csi_set_link_owner(csi, CSI_LINK_IVSC);
@@ -329,57 +323,16 @@ err:
 	return ret;
 }
 
-static struct v4l2_mbus_framefmt *
-mei_csi_get_pad_format(struct v4l2_subdev *sd,
-		       struct v4l2_subdev_state *sd_state,
-		       unsigned int pad, u32 which)
-{
-	struct mei_csi *csi = sd_to_csi(sd);
-
-	switch (which) {
-	case V4L2_SUBDEV_FORMAT_TRY:
-		return v4l2_subdev_state_get_format(sd_state, pad);
-	case V4L2_SUBDEV_FORMAT_ACTIVE:
-		return &csi->format_mbus[pad];
-	default:
-		return NULL;
-	}
-}
-
 static int mei_csi_init_state(struct v4l2_subdev *sd,
 			      struct v4l2_subdev_state *sd_state)
 {
 	struct v4l2_mbus_framefmt *mbusformat;
-	struct mei_csi *csi = sd_to_csi(sd);
 	unsigned int i;
-
-	mutex_lock(&csi->lock);
 
 	for (i = 0; i < sd->entity.num_pads; i++) {
 		mbusformat = v4l2_subdev_state_get_format(sd_state, i);
 		*mbusformat = mei_csi_format_mbus_default;
 	}
-
-	mutex_unlock(&csi->lock);
-
-	return 0;
-}
-
-static int mei_csi_get_fmt(struct v4l2_subdev *sd,
-			   struct v4l2_subdev_state *sd_state,
-			   struct v4l2_subdev_format *format)
-{
-	struct v4l2_mbus_framefmt *mbusformat;
-	struct mei_csi *csi = sd_to_csi(sd);
-
-	mutex_lock(&csi->lock);
-
-	mbusformat = mei_csi_get_pad_format(sd, sd_state, format->pad,
-					    format->which);
-	if (mbusformat)
-		format->format = *mbusformat;
-
-	mutex_unlock(&csi->lock);
 
 	return 0;
 }
@@ -388,20 +341,17 @@ static int mei_csi_set_fmt(struct v4l2_subdev *sd,
 			   struct v4l2_subdev_state *sd_state,
 			   struct v4l2_subdev_format *format)
 {
-	struct v4l2_mbus_framefmt *source_mbusformat;
-	struct v4l2_mbus_framefmt *mbusformat;
-	struct mei_csi *csi = sd_to_csi(sd);
-	struct media_pad *pad;
+	struct v4l2_mbus_framefmt *source_fmt;
+	struct v4l2_mbus_framefmt *sink_fmt;
 
-	mbusformat = mei_csi_get_pad_format(sd, sd_state, format->pad,
-					    format->which);
-	if (!mbusformat)
-		return -EINVAL;
+	sink_fmt = v4l2_subdev_state_get_format(sd_state, CSI_PAD_SINK);
+	source_fmt = v4l2_subdev_state_get_format(sd_state, CSI_PAD_SOURCE);
 
-	source_mbusformat = mei_csi_get_pad_format(sd, sd_state, CSI_PAD_SOURCE,
-						   format->which);
-	if (!source_mbusformat)
-		return -EINVAL;
+	if (format->pad) {
+		*source_fmt = *sink_fmt;
+
+		return 0;
+	}
 
 	v4l_bound_align_image(&format->format.width, 1, 65536, 0,
 			      &format->format.height, 1, 65536, 0, 0);
@@ -504,58 +454,45 @@ static int mei_csi_set_fmt(struct v4l2_subdev *sd,
 	if (format->format.field == V4L2_FIELD_ANY)
 		format->format.field = V4L2_FIELD_NONE;
 
-	mutex_lock(&csi->lock);
-
-	pad = &csi->pads[format->pad];
-	if (pad->flags & MEDIA_PAD_FL_SOURCE)
-		format->format = csi->format_mbus[CSI_PAD_SINK];
-
-	*mbusformat = format->format;
-
-	if (pad->flags & MEDIA_PAD_FL_SINK)
-		*source_mbusformat = format->format;
-
-	mutex_unlock(&csi->lock);
+	*sink_fmt = format->format;
+	*source_fmt = *sink_fmt;
 
 	return 0;
 }
 
-static int mei_csi_g_volatile_ctrl(struct v4l2_ctrl *ctrl)
+static int mei_csi_get_mbus_config(struct v4l2_subdev *sd, unsigned int pad,
+				   struct v4l2_mbus_config *mbus_config)
 {
-	struct mei_csi *csi = ctrl_to_csi(ctrl);
+	struct mei_csi *csi = sd_to_csi(sd);
+	unsigned int i;
 	s64 freq;
 
-	if (ctrl->id == V4L2_CID_LINK_FREQ) {
-		if (!csi->remote)
-			return -EINVAL;
+	mbus_config->type = V4L2_MBUS_CSI2_DPHY;
+	for (i = 0; i < V4L2_MBUS_CSI2_MAX_DATA_LANES; i++)
+		mbus_config->bus.mipi_csi2.data_lanes[i] = i + 1;
+	mbus_config->bus.mipi_csi2.num_data_lanes = csi->nr_of_lanes;
 
-		freq = v4l2_get_link_freq(csi->remote->ctrl_handler, 0, 0);
-		if (freq < 0) {
-			dev_err(&csi->cldev->dev,
-				"error %lld, invalid link_freq\n", freq);
-			return -EINVAL;
-		}
-
-		link_freq_menu_items[0] = freq;
-		ctrl->val = 0;
-
-		return 0;
+	freq = v4l2_get_link_freq(csi->remote, 0, 0);
+	if (freq < 0) {
+		dev_err(&csi->cldev->dev,
+			"error %lld, invalid link_freq\n", freq);
+		return -EINVAL;
 	}
 
-	return -EINVAL;
-}
+	csi->link_freq = freq;
+	mbus_config->link_freq = freq;
 
-static const struct v4l2_ctrl_ops mei_csi_ctrl_ops = {
-	.g_volatile_ctrl = mei_csi_g_volatile_ctrl,
-};
+	return 0;
+}
 
 static const struct v4l2_subdev_video_ops mei_csi_video_ops = {
 	.s_stream = mei_csi_set_stream,
 };
 
 static const struct v4l2_subdev_pad_ops mei_csi_pad_ops = {
-	.get_fmt = mei_csi_get_fmt,
+	.get_fmt = v4l2_subdev_get_fmt,
 	.set_fmt = mei_csi_set_fmt,
+	.get_mbus_config = mei_csi_get_mbus_config,
 };
 
 static const struct v4l2_subdev_ops mei_csi_subdev_ops = {
@@ -583,11 +520,10 @@ static int mei_csi_notify_bound(struct v4l2_async_notifier *notifier,
 	if (pad < 0)
 		return pad;
 
-	csi->remote = subdev;
-	csi->remote_pad = pad;
+	csi->remote = &subdev->entity.pads[pad];
 
 	return media_create_pad_link(&subdev->entity, pad,
-				     &csi->subdev.entity, 1,
+				     &csi->subdev.entity, CSI_PAD_SINK,
 				     MEDIA_LNK_FL_ENABLED |
 				     MEDIA_LNK_FL_IMMUTABLE);
 }
@@ -608,25 +544,15 @@ static const struct v4l2_async_notifier_operations mei_csi_notify_ops = {
 
 static int mei_csi_init_controls(struct mei_csi *csi)
 {
-	u32 max;
 	int ret;
 
-	ret = v4l2_ctrl_handler_init(&csi->ctrl_handler, 2);
+	mutex_init(&csi->ctrl_lock);
+
+	ret = v4l2_ctrl_handler_init(&csi->ctrl_handler, 1);
 	if (ret)
 		return ret;
 
-	csi->ctrl_handler.lock = &csi->lock;
-
-	max = ARRAY_SIZE(link_freq_menu_items) - 1;
-	csi->freq_ctrl = v4l2_ctrl_new_int_menu(&csi->ctrl_handler,
-						&mei_csi_ctrl_ops,
-						V4L2_CID_LINK_FREQ,
-						max,
-						0,
-						link_freq_menu_items);
-	if (csi->freq_ctrl)
-		csi->freq_ctrl->flags |= V4L2_CTRL_FLAG_READ_ONLY |
-					 V4L2_CTRL_FLAG_VOLATILE;
+	csi->ctrl_handler.lock = &csi->ctrl_lock;
 
 	csi->privacy_ctrl = v4l2_ctrl_new_std(&csi->ctrl_handler, NULL,
 					      V4L2_CID_PRIVACY, 0, 1, 1, 0);
@@ -716,11 +642,26 @@ static int mei_csi_probe(struct mei_cl_device *cldev,
 			 const struct mei_cl_device_id *id)
 {
 	struct device *dev = &cldev->dev;
+	struct pci_dev *ipu;
 	struct mei_csi *csi;
+	unsigned int i;
 	int ret;
 
-	if (!dev_fwnode(dev))
-		return -EPROBE_DEFER;
+	for (i = 0, ipu = NULL; !ipu && ipu6_pci_tbl[i].vendor; i++)
+		ipu = pci_get_device(ipu6_pci_tbl[i].vendor,
+				     ipu6_pci_tbl[i].device, NULL);
+
+	if (!ipu)
+		return -ENODEV;
+
+	ret = ipu_bridge_init(&ipu->dev, ipu_bridge_parse_ssdb);
+	put_device(&ipu->dev);
+	if (ret < 0)
+		return ret;
+	if (!dev_fwnode(dev)) {
+		dev_err(dev, "mei-csi probed without device fwnode!\n");
+		return -ENXIO;
+	}
 
 	csi = devm_kzalloc(dev, sizeof(struct mei_csi), GFP_KERNEL);
 	if (!csi)
@@ -749,6 +690,7 @@ static int mei_csi_probe(struct mei_cl_device *cldev,
 		goto err_disable;
 
 	csi->subdev.dev = &cldev->dev;
+	csi->subdev.state_lock = &csi->lock;
 	v4l2_subdev_init(&csi->subdev, &mei_csi_subdev_ops);
 	csi->subdev.internal_ops = &mei_csi_internal_ops;
 	v4l2_set_subdevdata(&csi->subdev, csi);
@@ -763,9 +705,6 @@ static int mei_csi_probe(struct mei_cl_device *cldev,
 	ret = mei_csi_init_controls(csi);
 	if (ret)
 		goto err_ctrl_handler;
-
-	csi->format_mbus[CSI_PAD_SOURCE] = mei_csi_format_mbus_default;
-	csi->format_mbus[CSI_PAD_SINK] = mei_csi_format_mbus_default;
 
 	csi->pads[CSI_PAD_SOURCE].flags = MEDIA_PAD_FL_SOURCE;
 	csi->pads[CSI_PAD_SINK].flags = MEDIA_PAD_FL_SINK;
@@ -794,6 +733,7 @@ err_entity:
 
 err_ctrl_handler:
 	v4l2_ctrl_handler_free(&csi->ctrl_handler);
+	mutex_destroy(&csi->ctrl_lock);
 	v4l2_async_nf_unregister(&csi->notifier);
 	v4l2_async_nf_cleanup(&csi->notifier);
 
@@ -813,6 +753,7 @@ static void mei_csi_remove(struct mei_cl_device *cldev)
 	v4l2_async_nf_unregister(&csi->notifier);
 	v4l2_async_nf_cleanup(&csi->notifier);
 	v4l2_ctrl_handler_free(&csi->ctrl_handler);
+	mutex_destroy(&csi->ctrl_lock);
 	v4l2_async_unregister_subdev(&csi->subdev);
 	v4l2_subdev_cleanup(&csi->subdev);
 	media_entity_cleanup(&csi->subdev.entity);
@@ -841,6 +782,7 @@ static struct mei_cl_driver mei_csi_driver = {
 
 module_mei_cl_driver(mei_csi_driver);
 
+MODULE_IMPORT_NS("INTEL_IPU_BRIDGE");
 MODULE_AUTHOR("Wentong Wu <wentong.wu@intel.com>");
 MODULE_AUTHOR("Zhifeng Wang <zhifeng.wang@intel.com>");
 MODULE_DESCRIPTION("Device driver for IVSC CSI");

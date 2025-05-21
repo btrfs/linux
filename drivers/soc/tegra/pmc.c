@@ -3,7 +3,7 @@
  * drivers/soc/tegra/pmc.c
  *
  * Copyright (c) 2010 Google, Inc
- * Copyright (c) 2018-2023, NVIDIA CORPORATION. All rights reserved.
+ * Copyright (c) 2018-2024, NVIDIA CORPORATION. All rights reserved.
  *
  * Author:
  *	Colin Cross <ccross@google.com>
@@ -47,6 +47,7 @@
 #include <linux/seq_file.h>
 #include <linux/slab.h>
 #include <linux/spinlock.h>
+#include <linux/string_choices.h>
 #include <linux/syscore_ops.h>
 
 #include <soc/tegra/common.h>
@@ -384,6 +385,7 @@ struct tegra_pmc_soc {
 	bool has_blink_output;
 	bool has_usb_sleepwalk;
 	bool supports_core_domain;
+	bool has_single_mmio_aperture;
 };
 
 /**
@@ -1180,7 +1182,7 @@ static int powergate_show(struct seq_file *s, void *data)
 			continue;
 
 		seq_printf(s, " %9s %7s\n", pmc->soc->powergates[i],
-			   status ? "yes" : "no");
+			   str_yes_no(status));
 	}
 
 	return 0;
@@ -1437,7 +1439,7 @@ static int tegra_powergate_init(struct tegra_pmc *pmc,
 				struct device_node *parent)
 {
 	struct of_phandle_args child_args, parent_args;
-	struct device_node *np, *child;
+	struct device_node *np;
 	int err = 0;
 
 	/*
@@ -1456,12 +1458,10 @@ static int tegra_powergate_init(struct tegra_pmc *pmc,
 	if (!np)
 		return 0;
 
-	for_each_child_of_node(np, child) {
+	for_each_child_of_node_scoped(np, child) {
 		err = tegra_powergate_add(pmc, child);
-		if (err < 0) {
-			of_node_put(child);
+		if (err < 0)
 			break;
-		}
 
 		if (of_parse_phandle_with_args(child, "power-domains",
 					       "#power-domain-cells",
@@ -1473,10 +1473,8 @@ static int tegra_powergate_init(struct tegra_pmc *pmc,
 
 		err = of_genpd_add_subdomain(&parent_args, &child_args);
 		of_node_put(parent_args.np);
-		if (err) {
-			of_node_put(child);
+		if (err)
 			break;
-		}
 	}
 
 	of_node_put(np);
@@ -1776,30 +1774,6 @@ static int tegra_io_pad_get_voltage(struct tegra_pmc *pmc, enum tegra_io_pad id)
 
 	return TEGRA_IO_PAD_VOLTAGE_3V3;
 }
-
-/**
- * tegra_io_rail_power_on() - enable power to I/O rail
- * @id: Tegra I/O pad ID for which to enable power
- *
- * See also: tegra_io_pad_power_enable()
- */
-int tegra_io_rail_power_on(unsigned int id)
-{
-	return tegra_io_pad_power_enable(id);
-}
-EXPORT_SYMBOL(tegra_io_rail_power_on);
-
-/**
- * tegra_io_rail_power_off() - disable power to I/O rail
- * @id: Tegra I/O pad ID for which to disable power
- *
- * See also: tegra_io_pad_power_disable()
- */
-int tegra_io_rail_power_off(unsigned int id)
-{
-	return tegra_io_pad_power_disable(id);
-}
-EXPORT_SYMBOL(tegra_io_rail_power_off);
 
 #ifdef CONFIG_PM_SLEEP
 enum tegra_suspend_mode tegra_pmc_get_suspend_mode(void)
@@ -2909,31 +2883,29 @@ static int tegra_pmc_probe(struct platform_device *pdev)
 	if (IS_ERR(base))
 		return PTR_ERR(base);
 
-	res = platform_get_resource_byname(pdev, IORESOURCE_MEM, "wake");
-	if (res) {
-		pmc->wake = devm_ioremap_resource(&pdev->dev, res);
+	if (pmc->soc->has_single_mmio_aperture) {
+		pmc->wake = base;
+		pmc->aotag = base;
+		pmc->scratch = base;
+	} else {
+		pmc->wake = devm_platform_ioremap_resource_byname(pdev, "wake");
 		if (IS_ERR(pmc->wake))
 			return PTR_ERR(pmc->wake);
-	} else {
-		pmc->wake = base;
-	}
 
-	res = platform_get_resource_byname(pdev, IORESOURCE_MEM, "aotag");
-	if (res) {
-		pmc->aotag = devm_ioremap_resource(&pdev->dev, res);
+		pmc->aotag = devm_platform_ioremap_resource_byname(pdev, "aotag");
 		if (IS_ERR(pmc->aotag))
 			return PTR_ERR(pmc->aotag);
-	} else {
-		pmc->aotag = base;
-	}
 
-	res = platform_get_resource_byname(pdev, IORESOURCE_MEM, "scratch");
-	if (res) {
-		pmc->scratch = devm_ioremap_resource(&pdev->dev, res);
-		if (IS_ERR(pmc->scratch))
-			return PTR_ERR(pmc->scratch);
-	} else {
-		pmc->scratch = base;
+		/* "scratch" is an optional aperture */
+		res = platform_get_resource_byname(pdev, IORESOURCE_MEM,
+						"scratch");
+		if (res) {
+			pmc->scratch = devm_ioremap_resource(&pdev->dev, res);
+			if (IS_ERR(pmc->scratch))
+				return PTR_ERR(pmc->scratch);
+		} else {
+			pmc->scratch = NULL;
+		}
 	}
 
 	pmc->clk = devm_clk_get_optional(&pdev->dev, "pclk");
@@ -2945,12 +2917,15 @@ static int tegra_pmc_probe(struct platform_device *pdev)
 	 * PMC should be last resort for restarting since it soft-resets
 	 * CPU without resetting everything else.
 	 */
-	err = devm_register_reboot_notifier(&pdev->dev,
-					    &tegra_pmc_reboot_notifier);
-	if (err) {
-		dev_err(&pdev->dev, "unable to register reboot notifier, %d\n",
-			err);
-		return err;
+	if (pmc->scratch) {
+		err = devm_register_reboot_notifier(&pdev->dev,
+						    &tegra_pmc_reboot_notifier);
+		if (err) {
+			dev_err(&pdev->dev,
+				"unable to register reboot notifier, %d\n",
+				err);
+			return err;
+		}
 	}
 
 	err = devm_register_sys_off_handler(&pdev->dev,
@@ -3324,6 +3299,7 @@ static const struct tegra_pmc_soc tegra20_pmc_soc = {
 	.num_pmc_clks = 0,
 	.has_blink_output = true,
 	.has_usb_sleepwalk = true,
+	.has_single_mmio_aperture = true,
 };
 
 static const char * const tegra30_powergates[] = {
@@ -3385,6 +3361,7 @@ static const struct tegra_pmc_soc tegra30_pmc_soc = {
 	.num_pmc_clks = ARRAY_SIZE(tegra_pmc_clks_data),
 	.has_blink_output = true,
 	.has_usb_sleepwalk = true,
+	.has_single_mmio_aperture = true,
 };
 
 static const char * const tegra114_powergates[] = {
@@ -3442,6 +3419,7 @@ static const struct tegra_pmc_soc tegra114_pmc_soc = {
 	.num_pmc_clks = ARRAY_SIZE(tegra_pmc_clks_data),
 	.has_blink_output = true,
 	.has_usb_sleepwalk = true,
+	.has_single_mmio_aperture = true,
 };
 
 static const char * const tegra124_powergates[] = {
@@ -3586,6 +3564,7 @@ static const struct tegra_pmc_soc tegra124_pmc_soc = {
 	.num_pmc_clks = ARRAY_SIZE(tegra_pmc_clks_data),
 	.has_blink_output = true,
 	.has_usb_sleepwalk = true,
+	.has_single_mmio_aperture = true,
 };
 
 static const char * const tegra210_powergates[] = {
@@ -3749,6 +3728,7 @@ static const struct tegra_pmc_soc tegra210_pmc_soc = {
 	.num_pmc_clks = ARRAY_SIZE(tegra_pmc_clks_data),
 	.has_blink_output = true,
 	.has_usb_sleepwalk = true,
+	.has_single_mmio_aperture = true,
 };
 
 static const struct tegra_io_pad_soc tegra186_io_pads[] = {
@@ -3946,6 +3926,7 @@ static const struct tegra_pmc_soc tegra186_pmc_soc = {
 	.num_pmc_clks = 0,
 	.has_blink_output = false,
 	.has_usb_sleepwalk = false,
+	.has_single_mmio_aperture = false,
 };
 
 static const struct tegra_io_pad_soc tegra194_io_pads[] = {
@@ -4086,6 +4067,7 @@ static const char * const tegra194_reset_sources[] = {
 };
 
 static const struct tegra_wake_event tegra194_wake_events[] = {
+	TEGRA_WAKE_GPIO("eqos", 20, 0, TEGRA194_MAIN_GPIO(G, 4)),
 	TEGRA_WAKE_IRQ("pmu", 24, 209),
 	TEGRA_WAKE_GPIO("power", 29, 1, TEGRA194_AON_GPIO(EE, 4)),
 	TEGRA_WAKE_IRQ("rtc", 73, 10),
@@ -4131,6 +4113,7 @@ static const struct tegra_pmc_soc tegra194_pmc_soc = {
 	.num_pmc_clks = 0,
 	.has_blink_output = false,
 	.has_usb_sleepwalk = false,
+	.has_single_mmio_aperture = false,
 };
 
 static const struct tegra_io_pad_soc tegra234_io_pads[] = {
@@ -4220,6 +4203,8 @@ static const char * const tegra234_reset_sources[] = {
 };
 
 static const struct tegra_wake_event tegra234_wake_events[] = {
+	TEGRA_WAKE_GPIO("sd-wake", 8, 0, TEGRA234_MAIN_GPIO(G, 7)),
+	TEGRA_WAKE_GPIO("eqos", 20, 0, TEGRA234_MAIN_GPIO(G, 4)),
 	TEGRA_WAKE_IRQ("pmu", 24, 209),
 	TEGRA_WAKE_GPIO("power", 29, 1, TEGRA234_AON_GPIO(EE, 4)),
 	TEGRA_WAKE_GPIO("mgbe", 56, 0, TEGRA234_MAIN_GPIO(Y, 3)),
@@ -4259,6 +4244,7 @@ static const struct tegra_pmc_soc tegra234_pmc_soc = {
 	.pmc_clks_data = NULL,
 	.num_pmc_clks = 0,
 	.has_blink_output = false,
+	.has_single_mmio_aperture = false,
 };
 
 static const struct of_device_id tegra_pmc_match[] = {

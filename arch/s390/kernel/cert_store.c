@@ -21,6 +21,7 @@
 #include <linux/seq_file.h>
 #include <linux/slab.h>
 #include <linux/sysfs.h>
+#include <linux/vmalloc.h>
 #include <crypto/sha2.h>
 #include <keys/user-type.h>
 #include <asm/debug.h>
@@ -234,7 +235,7 @@ static int __diag320(unsigned long subcode, void *addr)
 {
 	union register_pair rp = { .even = (unsigned long)addr, };
 
-	asm volatile(
+	asm_inline volatile(
 		"	diag	%[rp],%[subcode],0x320\n"
 		"0:	nopr	%%r7\n"
 		EX_TABLE(0b, 0b)

@@ -31,10 +31,16 @@
 
 #define DRIVER_NAME "v3d"
 #define DRIVER_DESC "Broadcom V3D graphics"
-#define DRIVER_DATE "20180419"
 #define DRIVER_MAJOR 1
 #define DRIVER_MINOR 0
 #define DRIVER_PATCHLEVEL 0
+
+/* Only expose the `super_pages` modparam if THP is enabled. */
+#ifdef CONFIG_TRANSPARENT_HUGEPAGE
+bool super_pages = true;
+module_param_named(super_pages, super_pages, bool, 0400);
+MODULE_PARM_DESC(super_pages, "Enable/Disable Super Pages support.");
+#endif
 
 static int v3d_get_param_ioctl(struct drm_device *dev, void *data,
 			       struct drm_file *file_priv)
@@ -94,6 +100,12 @@ static int v3d_get_param_ioctl(struct drm_device *dev, void *data,
 	case DRM_V3D_PARAM_SUPPORTS_CPU_QUEUE:
 		args->value = 1;
 		return 0;
+	case DRM_V3D_PARAM_MAX_PERF_COUNTERS:
+		args->value = v3d->perfmon_info.max_counters;
+		return 0;
+	case DRM_V3D_PARAM_SUPPORTS_SUPER_PAGES:
+		args->value = !!v3d->gemfs;
+		return 0;
 	default:
 		DRM_DEBUG("Unknown parameter %d\n", args->param);
 		return -EINVAL;
@@ -115,14 +127,13 @@ v3d_open(struct drm_device *dev, struct drm_file *file)
 	v3d_priv->v3d = v3d;
 
 	for (i = 0; i < V3D_MAX_QUEUES; i++) {
-		v3d_priv->enabled_ns[i] = 0;
-		v3d_priv->start_ns[i] = 0;
-		v3d_priv->jobs_sent[i] = 0;
-
 		sched = &v3d->queue[i].sched;
 		drm_sched_entity_init(&v3d_priv->sched_entity[i],
 				      DRM_SCHED_PRIORITY_NORMAL, &sched,
 				      1, NULL);
+
+		memset(&v3d_priv->stats[i], 0, sizeof(v3d_priv->stats[i]));
+		seqcount_init(&v3d_priv->stats[i].lock);
 	}
 
 	v3d_perfmon_open_file(v3d_priv);
@@ -144,6 +155,20 @@ v3d_postclose(struct drm_device *dev, struct drm_file *file)
 	kfree(v3d_priv);
 }
 
+void v3d_get_stats(const struct v3d_stats *stats, u64 timestamp,
+		   u64 *active_runtime, u64 *jobs_completed)
+{
+	unsigned int seq;
+
+	do {
+		seq = read_seqcount_begin(&stats->lock);
+		*active_runtime = stats->enabled_ns;
+		if (stats->start_ns)
+			*active_runtime += timestamp - stats->start_ns;
+		*jobs_completed = stats->jobs_completed;
+	} while (read_seqcount_retry(&stats->lock, seq));
+}
+
 static void v3d_show_fdinfo(struct drm_printer *p, struct drm_file *file)
 {
 	struct v3d_file_priv *file_priv = file->driver_priv;
@@ -151,21 +176,25 @@ static void v3d_show_fdinfo(struct drm_printer *p, struct drm_file *file)
 	enum v3d_queue queue;
 
 	for (queue = 0; queue < V3D_MAX_QUEUES; queue++) {
+		struct v3d_stats *stats = &file_priv->stats[queue];
+		u64 active_runtime, jobs_completed;
+
+		v3d_get_stats(stats, timestamp, &active_runtime, &jobs_completed);
+
 		/* Note that, in case of a GPU reset, the time spent during an
 		 * attempt of executing the job is not computed in the runtime.
 		 */
 		drm_printf(p, "drm-engine-%s: \t%llu ns\n",
-			   v3d_queue_to_string(queue),
-			   file_priv->start_ns[queue] ? file_priv->enabled_ns[queue]
-						      + timestamp - file_priv->start_ns[queue]
-						      : file_priv->enabled_ns[queue]);
+			   v3d_queue_to_string(queue), active_runtime);
 
 		/* Note that we only count jobs that completed. Therefore, jobs
 		 * that were resubmitted due to a GPU reset are not computed.
 		 */
 		drm_printf(p, "v3d-jobs-%s: \t%llu jobs\n",
-			   v3d_queue_to_string(queue), file_priv->jobs_sent[queue]);
+			   v3d_queue_to_string(queue), jobs_completed);
 	}
+
+	drm_show_memory_stats(p, file);
 }
 
 static const struct file_operations v3d_drm_fops = {
@@ -193,6 +222,8 @@ static const struct drm_ioctl_desc v3d_drm_ioctls[] = {
 	DRM_IOCTL_DEF_DRV(V3D_PERFMON_DESTROY, v3d_perfmon_destroy_ioctl, DRM_RENDER_ALLOW),
 	DRM_IOCTL_DEF_DRV(V3D_PERFMON_GET_VALUES, v3d_perfmon_get_values_ioctl, DRM_RENDER_ALLOW),
 	DRM_IOCTL_DEF_DRV(V3D_SUBMIT_CPU, v3d_submit_cpu_ioctl, DRM_RENDER_ALLOW | DRM_AUTH),
+	DRM_IOCTL_DEF_DRV(V3D_PERFMON_GET_COUNTER, v3d_perfmon_get_counter_ioctl, DRM_RENDER_ALLOW),
+	DRM_IOCTL_DEF_DRV(V3D_PERFMON_SET_GLOBAL, v3d_perfmon_set_global_ioctl, DRM_RENDER_ALLOW),
 };
 
 static const struct drm_driver v3d_drm_driver = {
@@ -217,7 +248,6 @@ static const struct drm_driver v3d_drm_driver = {
 
 	.name = DRIVER_NAME,
 	.desc = DRIVER_DESC,
-	.date = DRIVER_DATE,
 	.major = DRIVER_MAJOR,
 	.minor = DRIVER_MINOR,
 	.patchlevel = DRIVER_PATCHLEVEL,
@@ -246,7 +276,7 @@ static int v3d_platform_drm_probe(struct platform_device *pdev)
 	struct v3d_dev *v3d;
 	int ret;
 	u32 mmu_debug;
-	u32 ident1;
+	u32 ident1, ident3;
 	u64 mask;
 
 	v3d = devm_drm_dev_alloc(dev, &v3d_drm_driver, struct v3d_dev, drm);
@@ -265,11 +295,21 @@ static int v3d_platform_drm_probe(struct platform_device *pdev)
 	if (ret)
 		return ret;
 
+	v3d->clk = devm_clk_get_optional(dev, NULL);
+	if (IS_ERR(v3d->clk))
+		return dev_err_probe(dev, PTR_ERR(v3d->clk), "Failed to get V3D clock\n");
+
+	ret = clk_prepare_enable(v3d->clk);
+	if (ret) {
+		dev_err(&pdev->dev, "Couldn't enable the V3D clock\n");
+		return ret;
+	}
+
 	mmu_debug = V3D_READ(V3D_MMU_DEBUG_INFO);
 	mask = DMA_BIT_MASK(30 + V3D_GET_FIELD(mmu_debug, V3D_MMU_PA_WIDTH));
 	ret = dma_set_mask_and_coherent(dev, mask);
 	if (ret)
-		return ret;
+		goto clk_disable;
 
 	v3d->va_width = 30 + V3D_GET_FIELD(mmu_debug, V3D_MMU_VA_WIDTH);
 
@@ -279,33 +319,39 @@ static int v3d_platform_drm_probe(struct platform_device *pdev)
 	v3d->cores = V3D_GET_FIELD(ident1, V3D_HUB_IDENT1_NCORES);
 	WARN_ON(v3d->cores > 1); /* multicore not yet implemented */
 
+	ident3 = V3D_READ(V3D_HUB_IDENT3);
+	v3d->rev = V3D_GET_FIELD(ident3, V3D_HUB_IDENT3_IPREV);
+
+	v3d_perfmon_init(v3d);
+
 	v3d->reset = devm_reset_control_get_exclusive(dev, NULL);
 	if (IS_ERR(v3d->reset)) {
 		ret = PTR_ERR(v3d->reset);
 
 		if (ret == -EPROBE_DEFER)
-			return ret;
+			goto clk_disable;
 
 		v3d->reset = NULL;
 		ret = map_regs(v3d, &v3d->bridge_regs, "bridge");
 		if (ret) {
 			dev_err(dev,
 				"Failed to get reset control or bridge regs\n");
-			return ret;
+			goto clk_disable;
 		}
 	}
 
 	if (v3d->ver < 41) {
 		ret = map_regs(v3d, &v3d->gca_regs, "gca");
 		if (ret)
-			return ret;
+			goto clk_disable;
 	}
 
 	v3d->mmu_scratch = dma_alloc_wc(dev, 4096, &v3d->mmu_scratch_paddr,
 					GFP_KERNEL | __GFP_NOWARN | __GFP_ZERO);
 	if (!v3d->mmu_scratch) {
 		dev_err(dev, "Failed to allocate MMU scratch page\n");
-		return -ENOMEM;
+		ret = -ENOMEM;
+		goto clk_disable;
 	}
 
 	ret = v3d_gem_init(drm);
@@ -334,6 +380,8 @@ gem_destroy:
 	v3d_gem_destroy(drm);
 dma_free:
 	dma_free_wc(dev, 4096, v3d->mmu_scratch, v3d->mmu_scratch_paddr);
+clk_disable:
+	clk_disable_unprepare(v3d->clk);
 	return ret;
 }
 
@@ -351,11 +399,13 @@ static void v3d_platform_drm_remove(struct platform_device *pdev)
 
 	dma_free_wc(v3d->drm.dev, 4096, v3d->mmu_scratch,
 		    v3d->mmu_scratch_paddr);
+
+	clk_disable_unprepare(v3d->clk);
 }
 
 static struct platform_driver v3d_platform_driver = {
 	.probe		= v3d_platform_drm_probe,
-	.remove_new	= v3d_platform_drm_remove,
+	.remove		= v3d_platform_drm_remove,
 	.driver		= {
 		.name	= "v3d",
 		.of_match_table = v3d_of_match,

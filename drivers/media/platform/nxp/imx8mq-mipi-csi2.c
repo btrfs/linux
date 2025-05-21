@@ -287,6 +287,7 @@ static int imx8mq_mipi_csi_calc_hs_settle(struct csi_state *state,
 					  struct v4l2_subdev_state *sd_state,
 					  u32 *hs_settle)
 {
+	struct media_pad *src_pad;
 	s64 link_freq;
 	u32 lane_rate;
 	unsigned long esc_clk_rate;
@@ -294,13 +295,19 @@ static int imx8mq_mipi_csi_calc_hs_settle(struct csi_state *state,
 	const struct v4l2_mbus_framefmt *fmt;
 	const struct csi2_pix_format *csi2_fmt;
 
+	src_pad = media_entity_remote_source_pad_unique(&sd_state->sd->entity);
+	if (IS_ERR(src_pad)) {
+		dev_err(state->dev, "can't get source pad of %s (%ld)\n",
+			sd_state->sd->name, PTR_ERR(src_pad));
+		return PTR_ERR(src_pad);
+	}
+
 	/* Calculate the line rate from the pixel rate. */
 
 	fmt = v4l2_subdev_state_get_format(sd_state, MIPI_CSI2_PAD_SINK);
 	csi2_fmt = find_csi2_format(fmt->code);
 
-	link_freq = v4l2_get_link_freq(state->src_sd->ctrl_handler,
-				       csi2_fmt->width,
+	link_freq = v4l2_get_link_freq(src_pad, csi2_fmt->width,
 				       state->bus.num_data_lanes * 2);
 	if (link_freq < 0) {
 		dev_err(state->dev, "Unable to obtain link frequency: %d\n",
@@ -693,7 +700,7 @@ unlock:
 	return ret ? -EAGAIN : 0;
 }
 
-static int __maybe_unused imx8mq_mipi_csi_suspend(struct device *dev)
+static int imx8mq_mipi_csi_suspend(struct device *dev)
 {
 	struct v4l2_subdev *sd = dev_get_drvdata(dev);
 	struct csi_state *state = mipi_sd_to_csi2_state(sd);
@@ -705,7 +712,7 @@ static int __maybe_unused imx8mq_mipi_csi_suspend(struct device *dev)
 	return 0;
 }
 
-static int __maybe_unused imx8mq_mipi_csi_resume(struct device *dev)
+static int imx8mq_mipi_csi_resume(struct device *dev)
 {
 	struct v4l2_subdev *sd = dev_get_drvdata(dev);
 	struct csi_state *state = mipi_sd_to_csi2_state(sd);
@@ -716,7 +723,7 @@ static int __maybe_unused imx8mq_mipi_csi_resume(struct device *dev)
 	return imx8mq_mipi_csi_pm_resume(dev);
 }
 
-static int __maybe_unused imx8mq_mipi_csi_runtime_suspend(struct device *dev)
+static int imx8mq_mipi_csi_runtime_suspend(struct device *dev)
 {
 	struct v4l2_subdev *sd = dev_get_drvdata(dev);
 	struct csi_state *state = mipi_sd_to_csi2_state(sd);
@@ -731,7 +738,7 @@ static int __maybe_unused imx8mq_mipi_csi_runtime_suspend(struct device *dev)
 	return ret;
 }
 
-static int __maybe_unused imx8mq_mipi_csi_runtime_resume(struct device *dev)
+static int imx8mq_mipi_csi_runtime_resume(struct device *dev)
 {
 	struct v4l2_subdev *sd = dev_get_drvdata(dev);
 	struct csi_state *state = mipi_sd_to_csi2_state(sd);
@@ -747,10 +754,9 @@ static int __maybe_unused imx8mq_mipi_csi_runtime_resume(struct device *dev)
 }
 
 static const struct dev_pm_ops imx8mq_mipi_csi_pm_ops = {
-	SET_RUNTIME_PM_OPS(imx8mq_mipi_csi_runtime_suspend,
-			   imx8mq_mipi_csi_runtime_resume,
-			   NULL)
-	SET_SYSTEM_SLEEP_PM_OPS(imx8mq_mipi_csi_suspend, imx8mq_mipi_csi_resume)
+	RUNTIME_PM_OPS(imx8mq_mipi_csi_runtime_suspend,
+		       imx8mq_mipi_csi_runtime_resume, NULL)
+	SYSTEM_SLEEP_PM_OPS(imx8mq_mipi_csi_suspend, imx8mq_mipi_csi_resume)
 };
 
 /* -----------------------------------------------------------------------------
@@ -954,11 +960,11 @@ MODULE_DEVICE_TABLE(of, imx8mq_mipi_csi_of_match);
 
 static struct platform_driver imx8mq_mipi_csi_driver = {
 	.probe		= imx8mq_mipi_csi_probe,
-	.remove_new	= imx8mq_mipi_csi_remove,
+	.remove		= imx8mq_mipi_csi_remove,
 	.driver		= {
 		.of_match_table = imx8mq_mipi_csi_of_match,
 		.name		= MIPI_CSI2_DRIVER_NAME,
-		.pm		= &imx8mq_mipi_csi_pm_ops,
+		.pm		= pm_ptr(&imx8mq_mipi_csi_pm_ops),
 	},
 };
 

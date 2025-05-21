@@ -125,7 +125,8 @@ static int scmi_perf_domain_probe(struct scmi_device *sdev)
 		scmi_pd->ph = ph;
 		scmi_pd->genpd.name = scmi_pd->info->name;
 		scmi_pd->genpd.flags = GENPD_FLAG_ALWAYS_ON |
-				       GENPD_FLAG_OPP_TABLE_FW;
+				       GENPD_FLAG_OPP_TABLE_FW |
+				       GENPD_FLAG_DEV_NAME_FW;
 		scmi_pd->genpd.set_performance_state = scmi_pd_set_perf_state;
 		scmi_pd->genpd.attach_dev = scmi_pd_attach_dev;
 		scmi_pd->genpd.detach_dev = scmi_pd_detach_dev;
@@ -158,6 +159,9 @@ static void scmi_perf_domain_remove(struct scmi_device *sdev)
 	struct device *dev = &sdev->dev;
 	struct genpd_onecell_data *scmi_pd_data = dev_get_drvdata(dev);
 	int i;
+
+	if (!scmi_pd_data)
+		return;
 
 	of_genpd_del_provider(dev->of_node);
 

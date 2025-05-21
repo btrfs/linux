@@ -180,8 +180,8 @@ enum attr_idn {
 	QUERY_ATTR_IDN_AVAIL_WB_BUFF_SIZE       = 0x1D,
 	QUERY_ATTR_IDN_WB_BUFF_LIFE_TIME_EST    = 0x1E,
 	QUERY_ATTR_IDN_CURR_WB_BUFF_SIZE        = 0x1F,
-	QUERY_ATTR_IDN_EXT_IID_EN		= 0x2A,
-	QUERY_ATTR_IDN_TIMESTAMP		= 0x30
+	QUERY_ATTR_IDN_TIMESTAMP		= 0x30,
+	QUERY_ATTR_IDN_DEV_LVL_EXCEPTION_ID     = 0x34,
 };
 
 /* Descriptor idn for Query requests */
@@ -386,12 +386,12 @@ enum {
 
 /* Possible values for dExtendedUFSFeaturesSupport */
 enum {
-	UFS_DEV_LOW_TEMP_NOTIF		= BIT(4),
-	UFS_DEV_HIGH_TEMP_NOTIF		= BIT(5),
+	UFS_DEV_HIGH_TEMP_NOTIF		= BIT(4),
+	UFS_DEV_LOW_TEMP_NOTIF		= BIT(5),
 	UFS_DEV_EXT_TEMP_NOTIF		= BIT(6),
 	UFS_DEV_HPB_SUPPORT		= BIT(7),
 	UFS_DEV_WRITE_BOOSTER_SUP	= BIT(8),
-	UFS_DEV_EXT_IID_SUP		= BIT(16),
+	UFS_DEV_LVL_EXCEPTION_SUP       = BIT(12),
 };
 #define UFS_DEV_HPB_SUPPORT_VERSION		0x310
 
@@ -421,6 +421,8 @@ enum {
 	MASK_EE_TOO_LOW_TEMP		= BIT(4),
 	MASK_EE_WRITEBOOSTER_EVENT	= BIT(5),
 	MASK_EE_PERFORMANCE_THROTTLING	= BIT(6),
+	MASK_EE_DEV_LVL_EXCEPTION       = BIT(7),
+	MASK_EE_HEALTH_CRITICAL		= BIT(9),
 };
 #define MASK_EE_URGENT_TEMP (MASK_EE_TOO_HIGH_TEMP | MASK_EE_TOO_LOW_TEMP)
 
@@ -585,17 +587,16 @@ struct ufs_dev_info {
 
 	bool    b_advanced_rpmb_en;
 
-	/* UFS EXT_IID Enable */
-	bool	b_ext_iid_en;
-
 	/* UFS RTC */
 	enum ufs_rtc_time rtc_type;
 	time64_t rtc_time_baseline;
 	u32 rtc_update_period;
+
+	u8 rtt_cap; /* bDeviceRTTCap */
 };
 
 /*
- * This enum is used in string mapping in include/trace/events/ufs.h.
+ * This enum is used in string mapping in ufs_trace.h.
  */
 enum ufs_trace_str_t {
 	UFS_CMD_SEND, UFS_CMD_COMP, UFS_DEV_COMP,
@@ -605,7 +606,7 @@ enum ufs_trace_str_t {
 
 /*
  * Transaction Specific Fields (TSF) type in the UPIU package, this enum is
- * used in include/trace/events/ufs.h for UFS command trace.
+ * used in ufs_trace.h for UFS command trace.
  */
 enum ufs_trace_tsf_t {
 	UFS_TSF_CDB, UFS_TSF_OSF, UFS_TSF_TM_INPUT, UFS_TSF_TM_OUTPUT

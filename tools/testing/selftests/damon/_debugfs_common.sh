@@ -8,7 +8,12 @@ test_write_result() {
 	expect_reason=$4
 	expected=$5
 
-	echo "$content" > "$file"
+	if [ "$expected" = "0" ]
+	then
+		echo "$content" > "$file"
+	else
+		echo "$content" > "$file" 2> /dev/null
+	fi
 	if [ $? -ne "$expected" ]
 	then
 		echo "writing $content to $file doesn't return $expected"
@@ -45,6 +50,13 @@ test_content() {
 source ./_chk_dependency.sh
 
 damon_onoff="$DBGFS/monitor_on"
+if [ -f "$DBGFS/monitor_on_DEPRECATED" ]
+then
+	damon_onoff="$DBGFS/monitor_on_DEPRECATED"
+else
+	damon_onoff="$DBGFS/monitor_on"
+fi
+
 if [ $(cat "$damon_onoff") = "on" ]
 then
 	echo "monitoring is on"

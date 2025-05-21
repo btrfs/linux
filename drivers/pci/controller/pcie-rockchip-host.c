@@ -294,7 +294,7 @@ static int rockchip_pcie_host_init_port(struct rockchip_pcie *rockchip)
 	int err, i = MAX_LANE_NUM;
 	u32 status;
 
-	gpiod_set_value_cansleep(rockchip->ep_gpio, 0);
+	gpiod_set_value_cansleep(rockchip->perst_gpio, 0);
 
 	err = rockchip_pcie_init_port(rockchip);
 	if (err)
@@ -322,7 +322,10 @@ static int rockchip_pcie_host_init_port(struct rockchip_pcie *rockchip)
 	rockchip_pcie_write(rockchip, PCIE_CLIENT_LINK_TRAIN_ENABLE,
 			    PCIE_CLIENT_CONFIG);
 
-	gpiod_set_value_cansleep(rockchip->ep_gpio, 1);
+	msleep(PCIE_T_PVPERL_MS);
+	gpiod_set_value_cansleep(rockchip->perst_gpio, 1);
+
+	msleep(PCIE_T_RRS_READY_MS);
 
 	/* 500ms timeout value should be enough for Gen1/2 training */
 	err = readl_poll_timeout(rockchip->apb_base + PCIE_CLIENT_BASIC_STATUS1,
@@ -364,7 +367,7 @@ static int rockchip_pcie_host_init_port(struct rockchip_pcie *rockchip)
 		}
 	}
 
-	rockchip_pcie_write(rockchip, ROCKCHIP_VENDOR_ID,
+	rockchip_pcie_write(rockchip, PCI_VENDOR_ID_ROCKCHIP,
 			    PCIE_CORE_CONFIG_VENDOR);
 	rockchip_pcie_write(rockchip,
 			    PCI_CLASS_BRIDGE_PCI_NORMAL << 8,
@@ -1047,7 +1050,7 @@ static struct platform_driver rockchip_pcie_driver = {
 		.pm = &rockchip_pcie_pm_ops,
 	},
 	.probe = rockchip_pcie_probe,
-	.remove_new = rockchip_pcie_remove,
+	.remove = rockchip_pcie_remove,
 };
 module_platform_driver(rockchip_pcie_driver);
 

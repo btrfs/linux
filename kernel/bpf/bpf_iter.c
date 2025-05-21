@@ -283,7 +283,6 @@ static int iter_release(struct inode *inode, struct file *file)
 
 const struct file_operations bpf_iter_fops = {
 	.open		= iter_open,
-	.llseek		= no_llseek,
 	.read		= bpf_seq_read,
 	.release	= iter_release,
 };
@@ -336,7 +335,7 @@ static void cache_btf_id(struct bpf_iter_target_info *tinfo,
 	tinfo->btf_id = prog->aux->attach_btf_id;
 }
 
-bool bpf_iter_prog_supported(struct bpf_prog *prog)
+int bpf_iter_prog_supported(struct bpf_prog *prog)
 {
 	const char *attach_fname = prog->aux->attach_func_name;
 	struct bpf_iter_target_info *tinfo = NULL, *iter;
@@ -345,7 +344,7 @@ bool bpf_iter_prog_supported(struct bpf_prog *prog)
 	int prefix_len = strlen(prefix);
 
 	if (strncmp(attach_fname, prefix, prefix_len))
-		return false;
+		return -EINVAL;
 
 	mutex_lock(&targets_mutex);
 	list_for_each_entry(iter, &targets, list) {
@@ -361,12 +360,11 @@ bool bpf_iter_prog_supported(struct bpf_prog *prog)
 	}
 	mutex_unlock(&targets_mutex);
 
-	if (tinfo) {
-		prog->aux->ctx_arg_info_size = tinfo->reg_info->ctx_arg_info_size;
-		prog->aux->ctx_arg_info = tinfo->reg_info->ctx_arg_info;
-	}
+	if (!tinfo)
+		return -EINVAL;
 
-	return tinfo != NULL;
+	return bpf_prog_ctx_arg_info_init(prog, tinfo->reg_info->ctx_arg_info,
+					  tinfo->reg_info->ctx_arg_info_size);
 }
 
 const struct bpf_func_proto *
@@ -548,7 +546,7 @@ int bpf_iter_link_attach(const union bpf_attr *attr, bpfptr_t uattr,
 		return -ENOENT;
 
 	/* Only allow sleepable program for resched-able iterator */
-	if (prog->aux->sleepable && !bpf_iter_target_support_resched(tinfo))
+	if (prog->sleepable && !bpf_iter_target_support_resched(tinfo))
 		return -EINVAL;
 
 	link = kzalloc(sizeof(*link), GFP_USER | __GFP_NOWARN);
@@ -697,7 +695,7 @@ int bpf_iter_run_prog(struct bpf_prog *prog, void *ctx)
 	struct bpf_run_ctx run_ctx, *old_run_ctx;
 	int ret;
 
-	if (prog->aux->sleepable) {
+	if (prog->sleepable) {
 		rcu_read_lock_trace();
 		migrate_disable();
 		might_fault();

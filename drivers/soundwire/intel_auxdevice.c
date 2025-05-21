@@ -41,12 +41,17 @@ static int md_flags;
 module_param_named(sdw_md_flags, md_flags, int, 0444);
 MODULE_PARM_DESC(sdw_md_flags, "SoundWire Intel Master device flags (0x0 all off)");
 
+static int mclk_divider;
+module_param_named(sdw_mclk_divider, mclk_divider, int, 0444);
+MODULE_PARM_DESC(sdw_mclk_divider, "SoundWire Intel mclk divider");
+
 struct wake_capable_part {
 	const u16 mfg_id;
 	const u16 part_id;
 };
 
 static struct wake_capable_part wake_capable_list[] = {
+	{0x01fa, 0x4243},
 	{0x025d, 0x5682},
 	{0x025d, 0x700},
 	{0x025d, 0x711},
@@ -72,6 +77,27 @@ static bool is_wake_capable(struct sdw_slave *slave)
 		    slave->id.mfg_id == wake_capable_list[i].mfg_id)
 			return true;
 	return false;
+}
+
+static int generic_bpt_send_async(struct sdw_bus *bus, struct sdw_slave *slave,
+				  struct sdw_bpt_msg *msg)
+{
+	struct sdw_cdns *cdns = bus_to_cdns(bus);
+	struct sdw_intel *sdw = cdns_to_intel(cdns);
+
+	if (sdw->link_res->hw_ops->bpt_send_async)
+		return sdw->link_res->hw_ops->bpt_send_async(sdw, slave, msg);
+	return -EOPNOTSUPP;
+}
+
+static int generic_bpt_wait(struct sdw_bus *bus, struct sdw_slave *slave, struct sdw_bpt_msg *msg)
+{
+	struct sdw_cdns *cdns = bus_to_cdns(bus);
+	struct sdw_intel *sdw = cdns_to_intel(cdns);
+
+	if (sdw->link_res->hw_ops->bpt_wait)
+		return sdw->link_res->hw_ops->bpt_wait(sdw, slave, msg);
+	return -EOPNOTSUPP;
 }
 
 static int generic_pre_bank_switch(struct sdw_bus *bus)
@@ -122,6 +148,7 @@ static void generic_new_peripheral_assigned(struct sdw_bus *bus,
 static int sdw_master_read_intel_prop(struct sdw_bus *bus)
 {
 	struct sdw_master_prop *prop = &bus->prop;
+	struct sdw_intel_prop *intel_prop;
 	struct fwnode_handle *link;
 	char name[32];
 	u32 quirk_mask;
@@ -140,8 +167,12 @@ static int sdw_master_read_intel_prop(struct sdw_bus *bus)
 				 "intel-sdw-ip-clock",
 				 &prop->mclk_freq);
 
-	/* the values reported by BIOS are the 2x clock, not the bus clock */
-	prop->mclk_freq /= 2;
+	if (mclk_divider)
+		/* use kernel parameter for BIOS or board work-arounds */
+		prop->mclk_freq /= mclk_divider;
+	else
+		/* the values reported by BIOS are the 2x clock, not the bus clock */
+		prop->mclk_freq /= 2;
 
 	fwnode_property_read_u32(link,
 				 "intel-quirk-mask",
@@ -152,6 +183,60 @@ static int sdw_master_read_intel_prop(struct sdw_bus *bus)
 
 	prop->quirks = SDW_MASTER_QUIRKS_CLEAR_INITIAL_CLASH |
 		SDW_MASTER_QUIRKS_CLEAR_INITIAL_PARITY;
+
+	intel_prop = devm_kzalloc(bus->dev, sizeof(*intel_prop), GFP_KERNEL);
+	if (!intel_prop) {
+		fwnode_handle_put(link);
+		return -ENOMEM;
+	}
+
+	/* initialize with hardware defaults, in case the properties are not found */
+	intel_prop->clde = 0x0;
+	intel_prop->doaise2 = 0x0;
+	intel_prop->dodse2 = 0x0;
+	intel_prop->clds = 0x0;
+	intel_prop->clss = 0x0;
+	intel_prop->doaise = 0x1;
+	intel_prop->doais = 0x3;
+	intel_prop->dodse  = 0x0;
+	intel_prop->dods  = 0x1;
+
+	fwnode_property_read_u16(link,
+				 "intel-sdw-clde",
+				 &intel_prop->clde);
+	fwnode_property_read_u16(link,
+				 "intel-sdw-doaise2",
+				 &intel_prop->doaise2);
+	fwnode_property_read_u16(link,
+				 "intel-sdw-dodse2",
+				 &intel_prop->dodse2);
+	fwnode_property_read_u16(link,
+				 "intel-sdw-clds",
+				 &intel_prop->clds);
+	fwnode_property_read_u16(link,
+				 "intel-sdw-clss",
+				 &intel_prop->clss);
+	fwnode_property_read_u16(link,
+				 "intel-sdw-doaise",
+				 &intel_prop->doaise);
+	fwnode_property_read_u16(link,
+				 "intel-sdw-doais",
+				 &intel_prop->doais);
+	fwnode_property_read_u16(link,
+				 "intel-sdw-dodse",
+				 &intel_prop->dodse);
+	fwnode_property_read_u16(link,
+				 "intel-sdw-dods",
+				 &intel_prop->dods);
+	bus->vendor_specific_prop = intel_prop;
+
+	dev_dbg(bus->dev, "doaise %#x doais %#x dodse %#x dods %#x\n",
+		intel_prop->doaise,
+		intel_prop->doais,
+		intel_prop->dodse,
+		intel_prop->dods);
+
+	fwnode_handle_put(link);
 
 	return 0;
 }
@@ -203,6 +288,9 @@ static struct sdw_master_ops sdw_intel_ops = {
 	.get_device_num =  intel_get_device_num_ida,
 	.put_device_num = intel_put_device_num_ida,
 	.new_peripheral_assigned = generic_new_peripheral_assigned,
+
+	.bpt_send_async = generic_bpt_send_async,
+	.bpt_wait = generic_bpt_wait,
 };
 
 /*
@@ -240,6 +328,20 @@ static int intel_link_probe(struct auxiliary_device *auxdev,
 	bus->link_id = auxdev->id;
 	bus->clk_stop_timeout = 1;
 
+	/*
+	 * paranoia check: make sure ACPI-reported number of links is aligned with
+	 * hardware capabilities.
+	 */
+	ret = sdw_intel_get_link_count(sdw);
+	if (ret < 0) {
+		dev_err(dev, "%s: sdw_intel_get_link_count failed: %d\n", __func__, ret);
+		return ret;
+	}
+	if (ret <= sdw->instance) {
+		dev_err(dev, "%s: invalid link id %d, link count %d\n", __func__, auxdev->id, ret);
+		return -EINVAL;
+	}
+
 	sdw_cdns_probe(cdns);
 
 	/* Set ops */
@@ -250,9 +352,6 @@ static int intel_link_probe(struct auxiliary_device *auxdev,
 
 	/* use generic bandwidth allocation algorithm */
 	sdw->cdns.bus.compute_params = sdw_compute_params;
-
-	/* avoid resuming from pm_runtime suspend if it's not required */
-	dev_pm_set_driver_flags(dev, DPM_FLAG_SMART_SUSPEND);
 
 	ret = sdw_bus_master_add(bus, dev, dev->fwnode);
 	if (ret) {
@@ -398,6 +497,7 @@ static void intel_link_remove(struct auxiliary_device *auxdev)
 	 */
 	if (!bus->prop.hw_disabled) {
 		sdw_intel_debugfs_exit(sdw);
+		cancel_delayed_work_sync(&cdns->attach_dwork);
 		sdw_cdns_enable_interrupt(cdns, false);
 	}
 	sdw_bus_master_delete(bus);
@@ -440,7 +540,7 @@ int intel_link_process_wakeen_event(struct auxiliary_device *auxdev)
  * PM calls
  */
 
-static int intel_resume_child_device(struct device *dev, void *data)
+int intel_resume_child_device(struct device *dev, void *data)
 {
 	int ret;
 	struct sdw_slave *slave = dev_to_sdw_dev(dev);
@@ -454,9 +554,9 @@ static int intel_resume_child_device(struct device *dev, void *data)
 		return 0;
 	}
 
-	ret = pm_request_resume(dev);
+	ret = pm_runtime_resume(dev);
 	if (ret < 0) {
-		dev_err(dev, "%s: pm_request_resume failed: %d\n", __func__, ret);
+		dev_err(dev, "%s: pm_runtime_resume failed: %d\n", __func__, ret);
 		return ret;
 	}
 
@@ -499,9 +599,9 @@ static int __maybe_unused intel_pm_prepare(struct device *dev)
 		 * first resume the device for this link. This will also by construction
 		 * resume the PCI parent device.
 		 */
-		ret = pm_request_resume(dev);
+		ret = pm_runtime_resume(dev);
 		if (ret < 0) {
-			dev_err(dev, "%s: pm_request_resume failed: %d\n", __func__, ret);
+			dev_err(dev, "%s: pm_runtime_resume failed: %d\n", __func__, ret);
 			return 0;
 		}
 
@@ -537,7 +637,10 @@ static int __maybe_unused intel_suspend(struct device *dev)
 		return 0;
 	}
 
-	if (pm_runtime_suspended(dev)) {
+	/* Prevent runtime PM from racing with the code below. */
+	pm_runtime_disable(dev);
+
+	if (pm_runtime_status_suspended(dev)) {
 		dev_dbg(dev, "pm_runtime status: suspended\n");
 
 		clock_stop_quirks = sdw->link_res->clock_stop_quirks;
@@ -545,7 +648,7 @@ static int __maybe_unused intel_suspend(struct device *dev)
 		if ((clock_stop_quirks & SDW_INTEL_CLK_STOP_BUS_RESET) ||
 		    !clock_stop_quirks) {
 
-			if (pm_runtime_suspended(dev->parent)) {
+			if (pm_runtime_status_suspended(dev->parent)) {
 				/*
 				 * paranoia check: this should not happen with the .prepare
 				 * resume to full power
@@ -612,32 +715,12 @@ static int __maybe_unused intel_resume(struct device *dev)
 	struct sdw_cdns *cdns = dev_get_drvdata(dev);
 	struct sdw_intel *sdw = cdns_to_intel(cdns);
 	struct sdw_bus *bus = &cdns->bus;
-	int link_flags;
 	int ret;
 
 	if (bus->prop.hw_disabled || !sdw->startup_done) {
 		dev_dbg(dev, "SoundWire master %d is disabled or not-started, ignoring\n",
 			bus->link_id);
 		return 0;
-	}
-
-	link_flags = md_flags >> (bus->link_id * 8);
-
-	if (pm_runtime_suspended(dev)) {
-		dev_dbg(dev, "pm_runtime status was suspended, forcing active\n");
-
-		/* follow required sequence from runtime_pm.rst */
-		pm_runtime_disable(dev);
-		pm_runtime_set_active(dev);
-		pm_runtime_mark_last_busy(dev);
-		pm_runtime_enable(dev);
-
-		pm_runtime_resume(bus->dev);
-
-		link_flags = md_flags >> (bus->link_id * 8);
-
-		if (!(link_flags & SDW_INTEL_MASTER_DISABLE_PM_RUNTIME_IDLE))
-			pm_runtime_idle(dev);
 	}
 
 	ret = sdw_intel_link_power_up(sdw);
@@ -658,6 +741,14 @@ static int __maybe_unused intel_resume(struct device *dev)
 		sdw_intel_link_power_down(sdw);
 		return ret;
 	}
+
+	/*
+	 * Runtime PM has been disabled in intel_suspend(), so set the status
+	 * to active because the device has just been resumed and re-enable
+	 * runtime PM.
+	 */
+	pm_runtime_set_active(dev);
+	pm_runtime_enable(dev);
 
 	/*
 	 * after system resume, the pm_runtime suspend() may kick in

@@ -33,7 +33,7 @@ struct disk_stats {
 
 #define part_stat_read(part, field)					\
 ({									\
-	typeof((part)->bd_stats->field) res = 0;			\
+	TYPEOF_UNQUAL((part)->bd_stats->field) res = 0;			\
 	unsigned int _cpu;						\
 	for_each_possible_cpu(_cpu)					\
 		res += per_cpu_ptr((part)->bd_stats, _cpu)->field; \
@@ -59,7 +59,7 @@ static inline void part_stat_set_all(struct block_device *part, int value)
 
 #define part_stat_add(part, field, addnd)	do {			\
 	__part_stat_add((part), field, addnd);				\
-	if ((part)->bd_partno)						\
+	if (bdev_is_partition(part))					\
 		__part_stat_add(bdev_whole(part), field, addnd);	\
 } while (0)
 

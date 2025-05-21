@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * Copyright (C) Fuzhou Rockchip Electronics Co.Ltd
+ * Copyright (C) Rockchip Electronics Co., Ltd.
  * Author: Chris Zhong <zyw@rock-chips.com>
  */
 
@@ -262,20 +262,12 @@ static const struct drm_connector_funcs cdn_dp_atomic_connector_funcs = {
 static int cdn_dp_connector_get_modes(struct drm_connector *connector)
 {
 	struct cdn_dp_device *dp = connector_to_dp(connector);
-	struct edid *edid;
 	int ret = 0;
 
 	mutex_lock(&dp->lock);
-	edid = dp->edid;
-	if (edid) {
-		DRM_DEV_DEBUG_KMS(dp->dev, "got edid: width[%d] x height[%d]\n",
-				  edid->width_cm, edid->height_cm);
 
-		dp->sink_has_audio = drm_detect_monitor_audio(edid);
+	ret = drm_edid_connector_add_modes(connector);
 
-		drm_connector_update_edid_property(connector, edid);
-		ret = drm_add_edid_modes(connector, edid);
-	}
 	mutex_unlock(&dp->lock);
 
 	return ret;
@@ -283,7 +275,7 @@ static int cdn_dp_connector_get_modes(struct drm_connector *connector)
 
 static enum drm_mode_status
 cdn_dp_connector_mode_valid(struct drm_connector *connector,
-			    struct drm_display_mode *mode)
+			    const struct drm_display_mode *mode)
 {
 	struct cdn_dp_device *dp = connector_to_dp(connector);
 	struct drm_display_info *display_info = &dp->connector.display_info;
@@ -368,6 +360,7 @@ static int cdn_dp_firmware_init(struct cdn_dp_device *dp)
 
 static int cdn_dp_get_sink_capability(struct cdn_dp_device *dp)
 {
+	const struct drm_display_info *info = &dp->connector.display_info;
 	int ret;
 
 	if (!cdn_dp_check_sink_connection(dp))
@@ -380,9 +373,17 @@ static int cdn_dp_get_sink_capability(struct cdn_dp_device *dp)
 		return ret;
 	}
 
-	kfree(dp->edid);
-	dp->edid = drm_do_get_edid(&dp->connector,
-				   cdn_dp_get_edid_block, dp);
+	drm_edid_free(dp->drm_edid);
+	dp->drm_edid = drm_edid_read_custom(&dp->connector,
+					    cdn_dp_get_edid_block, dp);
+	drm_edid_connector_update(&dp->connector, dp->drm_edid);
+
+	dp->sink_has_audio = info->has_audio;
+
+	if (dp->drm_edid)
+		DRM_DEV_DEBUG_KMS(dp->dev, "got edid: width[%d] x height[%d]\n",
+				  info->width_mm / 10, info->height_mm / 10);
+
 	return 0;
 }
 
@@ -488,8 +489,8 @@ static int cdn_dp_disable(struct cdn_dp_device *dp)
 	dp->max_lanes = 0;
 	dp->max_rate = 0;
 	if (!dp->connected) {
-		kfree(dp->edid);
-		dp->edid = NULL;
+		drm_edid_free(dp->drm_edid);
+		dp->drm_edid = NULL;
 	}
 
 	return 0;
@@ -884,7 +885,6 @@ static const struct hdmi_codec_ops audio_codec_ops = {
 	.mute_stream = cdn_dp_audio_mute_stream,
 	.get_eld = cdn_dp_audio_get_eld,
 	.hook_plugged_cb = cdn_dp_audio_hook_plugged_cb,
-	.no_capture_mute = 1,
 };
 
 static int cdn_dp_audio_codec_init(struct cdn_dp_device *dp,
@@ -895,6 +895,7 @@ static int cdn_dp_audio_codec_init(struct cdn_dp_device *dp,
 		.spdif = 1,
 		.ops = &audio_codec_ops,
 		.max_i2s_channels = 8,
+		.no_capture_mute = 1,
 	};
 
 	dp->audio_pdev = platform_device_register_data(
@@ -946,9 +947,6 @@ static void cdn_dp_pd_event_work(struct work_struct *work)
 {
 	struct cdn_dp_device *dp = container_of(work, struct cdn_dp_device,
 						event_work);
-	struct drm_connector *connector = &dp->connector;
-	enum drm_connector_status old_status;
-
 	int ret;
 
 	mutex_lock(&dp->lock);
@@ -964,21 +962,21 @@ static void cdn_dp_pd_event_work(struct work_struct *work)
 
 	/* Not connected, notify userspace to disable the block */
 	if (!cdn_dp_connected_port(dp)) {
-		DRM_DEV_INFO(dp->dev, "Not connected. Disabling cdn\n");
+		DRM_DEV_INFO(dp->dev, "Not connected; disabling cdn\n");
 		dp->connected = false;
 
 	/* Connected but not enabled, enable the block */
 	} else if (!dp->active) {
-		DRM_DEV_INFO(dp->dev, "Connected, not enabled. Enabling cdn\n");
+		DRM_DEV_INFO(dp->dev, "Connected, not enabled; enabling cdn\n");
 		ret = cdn_dp_enable(dp);
 		if (ret) {
-			DRM_DEV_ERROR(dp->dev, "Enable dp failed %d\n", ret);
+			DRM_DEV_ERROR(dp->dev, "Enabling dp failed: %d\n", ret);
 			dp->connected = false;
 		}
 
 	/* Enabled and connected to a dongle without a sink, notify userspace */
 	} else if (!cdn_dp_check_sink_connection(dp)) {
-		DRM_DEV_INFO(dp->dev, "Connected without sink. Assert hpd\n");
+		DRM_DEV_INFO(dp->dev, "Connected without sink; assert hpd\n");
 		dp->connected = false;
 
 	/* Enabled and connected with a sink, re-train if requested */
@@ -987,11 +985,11 @@ static void cdn_dp_pd_event_work(struct work_struct *work)
 		unsigned int lanes = dp->max_lanes;
 		struct drm_display_mode *mode = &dp->mode;
 
-		DRM_DEV_INFO(dp->dev, "Connected with sink. Re-train link\n");
+		DRM_DEV_INFO(dp->dev, "Connected with sink; re-train link\n");
 		ret = cdn_dp_train_link(dp);
 		if (ret) {
 			dp->connected = false;
-			DRM_DEV_ERROR(dp->dev, "Train link failed %d\n", ret);
+			DRM_DEV_ERROR(dp->dev, "Training link failed: %d\n", ret);
 			goto out;
 		}
 
@@ -1001,20 +999,14 @@ static void cdn_dp_pd_event_work(struct work_struct *work)
 			ret = cdn_dp_config_video(dp);
 			if (ret) {
 				dp->connected = false;
-				DRM_DEV_ERROR(dp->dev,
-					      "Failed to config video %d\n",
-					      ret);
+				DRM_DEV_ERROR(dp->dev, "Failed to configure video: %d\n", ret);
 			}
 		}
 	}
 
 out:
 	mutex_unlock(&dp->lock);
-
-	old_status = connector->status;
-	connector->status = connector->funcs->detect(connector, false);
-	if (old_status != connector->status)
-		drm_kms_helper_hotplug_event(dp->drm_dev);
+	drm_connector_helper_hpd_irq_event(&dp->connector);
 }
 
 static int cdn_dp_pd_event(struct notifier_block *nb,
@@ -1131,8 +1123,8 @@ static void cdn_dp_unbind(struct device *dev, struct device *master, void *data)
 	pm_runtime_disable(dev);
 	if (dp->fw_loaded)
 		release_firmware(dp->fw);
-	kfree(dp->edid);
-	dp->edid = NULL;
+	drm_edid_free(dp->drm_edid);
+	dp->drm_edid = NULL;
 }
 
 static const struct component_ops cdn_dp_component_ops = {
@@ -1255,11 +1247,10 @@ static const struct dev_pm_ops cdn_dp_pm_ops = {
 
 struct platform_driver cdn_dp_driver = {
 	.probe = cdn_dp_probe,
-	.remove_new = cdn_dp_remove,
+	.remove = cdn_dp_remove,
 	.shutdown = cdn_dp_shutdown,
 	.driver = {
 		   .name = "cdn-dp",
-		   .owner = THIS_MODULE,
 		   .of_match_table = cdn_dp_dt_ids,
 		   .pm = &cdn_dp_pm_ops,
 	},

@@ -2,7 +2,7 @@
 /*
  *  Support for the interrupt controllers found on Power Macintosh,
  *  currently Apple's "Grand Central" interrupt controller in all
- *  it's incarnations. OpenPIC support used on newer machines is
+ *  its incarnations. OpenPIC support used on newer machines is
  *  in a separate file
  *
  *  Copyright (C) 1997 Paul Mackerras (paulus@samba.org)
@@ -330,7 +330,7 @@ static void __init pmac_pic_probe_oldstyle(void)
 	pmac_pic_host = irq_domain_add_linear(master, max_irqs,
 					      &pmac_pic_host_ops, NULL);
 	BUG_ON(pmac_pic_host == NULL);
-	irq_set_default_host(pmac_pic_host);
+	irq_set_default_domain(pmac_pic_host);
 
 	/* Get addresses of first controller if we have a node for it */
 	BUG_ON(of_address_to_resource(master, 0, &r));

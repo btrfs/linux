@@ -188,6 +188,7 @@ static int memory_block_online(struct memory_block *mem)
 	unsigned long start_pfn = section_nr_to_pfn(mem->start_section_nr);
 	unsigned long nr_pages = PAGES_PER_SECTION * sections_per_block;
 	unsigned long nr_vmemmap_pages = 0;
+	struct memory_notify arg;
 	struct zone *zone;
 	int ret;
 
@@ -207,9 +208,19 @@ static int memory_block_online(struct memory_block *mem)
 	if (mem->altmap)
 		nr_vmemmap_pages = mem->altmap->free;
 
+	arg.altmap_start_pfn = start_pfn;
+	arg.altmap_nr_pages = nr_vmemmap_pages;
+	arg.start_pfn = start_pfn + nr_vmemmap_pages;
+	arg.nr_pages = nr_pages - nr_vmemmap_pages;
 	mem_hotplug_begin();
+	ret = memory_notify(MEM_PREPARE_ONLINE, &arg);
+	ret = notifier_to_errno(ret);
+	if (ret)
+		goto out_notifier;
+
 	if (nr_vmemmap_pages) {
-		ret = mhp_init_memmap_on_memory(start_pfn, nr_vmemmap_pages, zone);
+		ret = mhp_init_memmap_on_memory(start_pfn, nr_vmemmap_pages,
+						zone, mem->altmap->inaccessible);
 		if (ret)
 			goto out;
 	}
@@ -231,7 +242,11 @@ static int memory_block_online(struct memory_block *mem)
 					  nr_vmemmap_pages);
 
 	mem->zone = zone;
+	mem_hotplug_done();
+	return ret;
 out:
+	memory_notify(MEM_FINISH_OFFLINE, &arg);
+out_notifier:
 	mem_hotplug_done();
 	return ret;
 }
@@ -244,6 +259,7 @@ static int memory_block_offline(struct memory_block *mem)
 	unsigned long start_pfn = section_nr_to_pfn(mem->start_section_nr);
 	unsigned long nr_pages = PAGES_PER_SECTION * sections_per_block;
 	unsigned long nr_vmemmap_pages = 0;
+	struct memory_notify arg;
 	int ret;
 
 	if (!mem->zone)
@@ -275,6 +291,11 @@ static int memory_block_offline(struct memory_block *mem)
 		mhp_deinit_memmap_on_memory(start_pfn, nr_vmemmap_pages);
 
 	mem->zone = NULL;
+	arg.altmap_start_pfn = start_pfn;
+	arg.altmap_nr_pages = nr_vmemmap_pages;
+	arg.start_pfn = start_pfn + nr_vmemmap_pages;
+	arg.nr_pages = nr_pages - nr_vmemmap_pages;
+	memory_notify(MEM_FINISH_OFFLINE, &arg);
 out:
 	mem_hotplug_done();
 	return ret;
@@ -434,7 +455,7 @@ static ssize_t valid_zones_show(struct device *dev,
 	struct memory_group *group = mem->group;
 	struct zone *default_zone;
 	int nid = mem->nid;
-	int len = 0;
+	int len;
 
 	/*
 	 * Check the existing zone. Make sure that we do that only on the
@@ -445,22 +466,18 @@ static ssize_t valid_zones_show(struct device *dev,
 		 * If !mem->zone, the memory block spans multiple zones and
 		 * cannot get offlined.
 		 */
-		default_zone = mem->zone;
-		if (!default_zone)
-			return sysfs_emit(buf, "%s\n", "none");
-		len += sysfs_emit_at(buf, len, "%s", default_zone->name);
-		goto out;
+		return sysfs_emit(buf, "%s\n",
+				  mem->zone ? mem->zone->name : "none");
 	}
 
 	default_zone = zone_for_pfn_range(MMOP_ONLINE, nid, group,
 					  start_pfn, nr_pages);
 
-	len += sysfs_emit_at(buf, len, "%s", default_zone->name);
+	len = sysfs_emit(buf, "%s", default_zone->name);
 	len += print_allowed_zone(buf, len, nid, group, start_pfn, nr_pages,
 				  MMOP_ONLINE_KERNEL, default_zone);
 	len += print_allowed_zone(buf, len, nid, group, start_pfn, nr_pages,
 				  MMOP_ONLINE_MOVABLE, default_zone);
-out:
 	len += sysfs_emit_at(buf, len, "\n");
 	return len;
 }
@@ -491,7 +508,7 @@ static ssize_t auto_online_blocks_show(struct device *dev,
 				       struct device_attribute *attr, char *buf)
 {
 	return sysfs_emit(buf, "%s\n",
-			  online_type_to_str[mhp_default_online_type]);
+			  online_type_to_str[mhp_get_default_online_type()]);
 }
 
 static ssize_t auto_online_blocks_store(struct device *dev,
@@ -503,7 +520,7 @@ static ssize_t auto_online_blocks_store(struct device *dev,
 	if (online_type < 0)
 		return -EINVAL;
 
-	mhp_default_online_type = online_type;
+	mhp_set_default_online_type(online_type);
 	return count;
 }
 
@@ -514,7 +531,7 @@ static DEVICE_ATTR_RW(auto_online_blocks);
 static ssize_t crash_hotplug_show(struct device *dev,
 				       struct device_attribute *attr, char *buf)
 {
-	return sysfs_emit(buf, "%d\n", crash_hotplug_memory_support());
+	return sysfs_emit(buf, "%d\n", crash_check_hotplug_support());
 }
 static DEVICE_ATTR_RO(crash_hotplug);
 #endif
@@ -799,22 +816,6 @@ static int add_memory_block(unsigned long block_id, unsigned long state,
 	return 0;
 }
 
-static int __init add_boot_memory_block(unsigned long base_section_nr)
-{
-	int section_count = 0;
-	unsigned long nr;
-
-	for (nr = base_section_nr; nr < base_section_nr + sections_per_block;
-	     nr++)
-		if (present_section_nr(nr))
-			section_count++;
-
-	if (section_count == 0)
-		return 0;
-	return add_memory_block(memory_block_id(base_section_nr),
-				MEM_ONLINE, NULL,  NULL);
-}
-
 static int add_hotplug_memory_block(unsigned long block_id,
 				    struct vmem_altmap *altmap,
 				    struct memory_group *group)
@@ -941,7 +942,7 @@ static const struct attribute_group *memory_root_attr_groups[] = {
 void __init memory_dev_init(void)
 {
 	int ret;
-	unsigned long block_sz, nr;
+	unsigned long block_sz, block_id, nr;
 
 	/* Validate the configured memory block size */
 	block_sz = memory_block_size_bytes();
@@ -954,15 +955,23 @@ void __init memory_dev_init(void)
 		panic("%s() failed to register subsystem: %d\n", __func__, ret);
 
 	/*
-	 * Create entries for memory sections that were found
-	 * during boot and have been initialized
+	 * Create entries for memory sections that were found during boot
+	 * and have been initialized. Use @block_id to track the last
+	 * handled block and initialize it to an invalid value (ULONG_MAX)
+	 * to bypass the block ID matching check for the first present
+	 * block so that it can be covered.
 	 */
-	for (nr = 0; nr <= __highest_present_section_nr;
-	     nr += sections_per_block) {
-		ret = add_boot_memory_block(nr);
-		if (ret)
-			panic("%s() failed to add memory block: %d\n", __func__,
-			      ret);
+	block_id = ULONG_MAX;
+	for_each_present_section_nr(0, nr) {
+		if (block_id != ULONG_MAX && memory_block_id(nr) == block_id)
+			continue;
+
+		block_id = memory_block_id(nr);
+		ret = add_memory_block(block_id, MEM_ONLINE, NULL, NULL);
+		if (ret) {
+			panic("%s() failed to add memory block: %d\n",
+			      __func__, ret);
+		}
 	}
 }
 

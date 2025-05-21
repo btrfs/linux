@@ -2641,7 +2641,7 @@ static void atl1_down(struct atl1_adapter *adapter)
 
 	napi_disable(&adapter->napi);
 	netif_stop_queue(netdev);
-	del_timer_sync(&adapter->phy_config_timer);
+	timer_delete_sync(&adapter->phy_config_timer);
 	adapter->phy_timer_pending = false;
 
 	atlx_irq_disable(adapter);
@@ -2687,7 +2687,7 @@ static int atl1_change_mtu(struct net_device *netdev, int new_mtu)
 	adapter->rx_buffer_len = (max_frame + 7) & ~7;
 	adapter->hw.rx_jumbo_th = adapter->rx_buffer_len / 8;
 
-	netdev->mtu = new_mtu;
+	WRITE_ONCE(netdev->mtu, new_mtu);
 	if (netif_running(netdev)) {
 		atl1_down(adapter);
 		atl1_up(adapter);

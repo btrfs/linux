@@ -275,7 +275,7 @@ static DEFINE_TIMER(kd_mksound_timer, kd_nosound);
 
 void kd_mksound(unsigned int hz, unsigned int ticks)
 {
-	del_timer_sync(&kd_mksound_timer);
+	timer_delete_sync(&kd_mksound_timer);
 
 	input_handler_for_each_handle(&kbd_handler, &hz, kd_sound_helper);
 
@@ -1033,9 +1033,7 @@ static int kbd_led_trigger_activate(struct led_classdev *cdev)
 
 	tasklet_disable(&keyboard_tasklet);
 	if (ledstate != -1U)
-		led_trigger_event(&trigger->trigger,
-				  ledstate & trigger->mask ?
-					LED_FULL : LED_OFF);
+		led_set_brightness(cdev, ledstate & trigger->mask ? LED_FULL : LED_OFF);
 	tasklet_enable(&keyboard_tasklet);
 
 	return 0;

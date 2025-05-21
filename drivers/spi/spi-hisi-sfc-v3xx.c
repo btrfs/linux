@@ -40,7 +40,7 @@
 /* Common definition of interrupt bit masks */
 #define HISI_SFC_V3XX_INT_MASK_ALL (0x1ff)	/* all the masks */
 #define HISI_SFC_V3XX_INT_MASK_CPLT BIT(0)	/* command execution complete */
-#define HISI_SFC_V3XX_INT_MASK_PP_ERR BIT(2)	/* page progrom error */
+#define HISI_SFC_V3XX_INT_MASK_PP_ERR BIT(2)	/* page program error */
 #define HISI_SFC_V3XX_INT_MASK_IACCES BIT(5)	/* error visiting inaccessible/
 						 * protected address
 						 */
@@ -377,6 +377,11 @@ static const struct spi_controller_mem_ops hisi_sfc_v3xx_mem_ops = {
 static irqreturn_t hisi_sfc_v3xx_isr(int irq, void *data)
 {
 	struct hisi_sfc_v3xx_host *host = data;
+	u32 reg;
+
+	reg = readl(host->regbase + HISI_SFC_V3XX_INT_STAT);
+	if (!reg)
+		return IRQ_NONE;
 
 	hisi_sfc_v3xx_disable_int(host);
 

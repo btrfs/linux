@@ -21,7 +21,7 @@
 #include <linux/posix_acl.h>
 #include <linux/posix_acl_xattr.h>
 #include <linux/fileattr.h>
-#include <asm/unaligned.h>
+#include <linux/unaligned.h>
 #include "ecryptfs_kernel.h"
 
 static int lock_parent(struct dentry *dentry,
@@ -503,18 +503,24 @@ out_lock:
 	return rc;
 }
 
-static int ecryptfs_mkdir(struct mnt_idmap *idmap, struct inode *dir,
-			  struct dentry *dentry, umode_t mode)
+static struct dentry *ecryptfs_mkdir(struct mnt_idmap *idmap, struct inode *dir,
+				     struct dentry *dentry, umode_t mode)
 {
 	int rc;
 	struct dentry *lower_dentry;
 	struct inode *lower_dir;
 
 	rc = lock_parent(dentry, &lower_dentry, &lower_dir);
-	if (!rc)
-		rc = vfs_mkdir(&nop_mnt_idmap, lower_dir,
-			       lower_dentry, mode);
-	if (rc || d_really_is_negative(lower_dentry))
+	if (rc)
+		goto out;
+
+	lower_dentry = vfs_mkdir(&nop_mnt_idmap, lower_dir,
+				 lower_dentry, mode);
+	rc = PTR_ERR(lower_dentry);
+	if (IS_ERR(lower_dentry))
+		goto out;
+	rc = 0;
+	if (d_unhashed(lower_dentry))
 		goto out;
 	rc = ecryptfs_interpose(lower_dentry, dentry, dir->i_sb);
 	if (rc)
@@ -526,7 +532,7 @@ out:
 	inode_unlock(lower_dir);
 	if (d_really_is_negative(dentry))
 		d_drop(dentry);
-	return rc;
+	return ERR_PTR(rc);
 }
 
 static int ecryptfs_rmdir(struct inode *dir, struct dentry *dentry)
@@ -1008,14 +1014,6 @@ static int ecryptfs_getattr_link(struct mnt_idmap *idmap,
 	return rc;
 }
 
-static int ecryptfs_do_getattr(const struct path *path, struct kstat *stat,
-			       u32 request_mask, unsigned int flags)
-{
-	if (flags & AT_GETATTR_NOSEC)
-		return vfs_getattr_nosec(path, stat, request_mask, flags);
-	return vfs_getattr(path, stat, request_mask, flags);
-}
-
 static int ecryptfs_getattr(struct mnt_idmap *idmap,
 			    const struct path *path, struct kstat *stat,
 			    u32 request_mask, unsigned int flags)
@@ -1024,8 +1022,8 @@ static int ecryptfs_getattr(struct mnt_idmap *idmap,
 	struct kstat lower_stat;
 	int rc;
 
-	rc = ecryptfs_do_getattr(ecryptfs_dentry_to_lower_path(dentry),
-				 &lower_stat, request_mask, flags);
+	rc = vfs_getattr_nosec(ecryptfs_dentry_to_lower_path(dentry),
+			       &lower_stat, request_mask, flags);
 	if (!rc) {
 		fsstack_copy_attr_all(d_inode(dentry),
 				      ecryptfs_inode_to_lower(d_inode(dentry)));

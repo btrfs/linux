@@ -30,7 +30,7 @@ static const char driver_name[] = "sierra_net";
 #include <linux/usb/cdc.h>
 #include <net/ip.h>
 #include <net/udp.h>
-#include <asm/unaligned.h>
+#include <linux/unaligned.h>
 #include <linux/usb/usbnet.h>
 
 #define SWI_USB_REQUEST_GET_FW_ATTR	0x06
@@ -522,7 +522,7 @@ static void sierra_net_kevent(struct work_struct *work)
 						" stopping sync timer",
 						hh.msgspecific.byte);
 				/* Got sync resp - stop timer & clear mask */
-				del_timer_sync(&priv->sync_timer);
+				timer_delete_sync(&priv->sync_timer);
 				clear_bit(SIERRA_NET_TIMER_EXPIRY,
 					  &priv->kevent_flags);
 				break;

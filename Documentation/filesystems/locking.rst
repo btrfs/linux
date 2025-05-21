@@ -17,7 +17,8 @@ dentry_operations
 
 prototypes::
 
-	int (*d_revalidate)(struct dentry *, unsigned int);
+	int (*d_revalidate)(struct inode *, const struct qstr *,
+			    struct dentry *, unsigned int);
 	int (*d_weak_revalidate)(struct dentry *, unsigned int);
 	int (*d_hash)(const struct dentry *, struct qstr *);
 	int (*d_compare)(const struct dentry *,
@@ -29,7 +30,9 @@ prototypes::
 	char *(*d_dname)((struct dentry *dentry, char *buffer, int buflen);
 	struct vfsmount *(*d_automount)(struct path *path);
 	int (*d_manage)(const struct path *, bool);
-	struct dentry *(*d_real)(struct dentry *, const struct inode *);
+	struct dentry *(*d_real)(struct dentry *, enum d_real_type type);
+	bool (*d_unalias_trylock)(const struct dentry *);
+	void (*d_unalias_unlock)(const struct dentry *);
 
 locking rules:
 
@@ -49,6 +52,8 @@ d_dname:	   no		no		no		no
 d_automount:	   no		no		yes		no
 d_manage:	   no		no		yes (ref-walk)	maybe
 d_real		   no		no		yes 		no
+d_unalias_trylock  yes		no		no 		no
+d_unalias_unlock   yes		no		no 		no
 ================== ===========	========	==============	========
 
 inode_operations
@@ -61,7 +66,7 @@ prototypes::
 	int (*link) (struct dentry *,struct inode *,struct dentry *);
 	int (*unlink) (struct inode *,struct dentry *);
 	int (*symlink) (struct mnt_idmap *, struct inode *,struct dentry *,const char *);
-	int (*mkdir) (struct mnt_idmap *, struct inode *,struct dentry *,umode_t);
+	struct dentry *(*mkdir) (struct mnt_idmap *, struct inode *,struct dentry *,umode_t);
 	int (*rmdir) (struct inode *,struct dentry *);
 	int (*mknod) (struct mnt_idmap *, struct inode *,struct dentry *,umode_t,dev_t);
 	int (*rename) (struct mnt_idmap *, struct inode *, struct dentry *,
@@ -251,10 +256,10 @@ prototypes::
 	void (*readahead)(struct readahead_control *);
 	int (*write_begin)(struct file *, struct address_space *mapping,
 				loff_t pos, unsigned len,
-				struct page **pagep, void **fsdata);
+				struct folio **foliop, void **fsdata);
 	int (*write_end)(struct file *, struct address_space *mapping,
 				loff_t pos, unsigned len, unsigned copied,
-				struct page *page, void *fsdata);
+				struct folio *folio, void *fsdata);
 	sector_t (*bmap)(struct address_space *, sector_t);
 	void (*invalidate_folio) (struct folio *, size_t start, size_t len);
 	bool (*release_folio)(struct folio *, gfp_t);
@@ -280,7 +285,7 @@ read_folio:		yes, unlocks				shared
 writepages:
 dirty_folio:		maybe
 readahead:		yes, unlocks				shared
-write_begin:		locks the page		 exclusive
+write_begin:		locks the folio		 exclusive
 write_end:		yes, unlocks		 exclusive
 bmap:
 invalidate_folio:	yes					exclusive
