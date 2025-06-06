@@ -47,10 +47,12 @@ struct system_device_crosststamp;
  * struct ptp_system_timestamp - system time corresponding to a PHC timestamp
  * @pre_ts: system timestamp before capturing PHC
  * @post_ts: system timestamp after capturing PHC
+ * @clockid: clock-base used for capturing the system timestamps
  */
 struct ptp_system_timestamp {
 	struct timespec64 pre_ts;
 	struct timespec64 post_ts;
+	clockid_t clockid;
 };
 
 /**
@@ -66,6 +68,22 @@ struct ptp_system_timestamp {
  * @n_per_out: The number of programmable periodic signals.
  * @n_pins:    The number of programmable pins.
  * @pps:       Indicates whether the clock supports a PPS callback.
+ *
+ * @supported_perout_flags:  The set of flags the driver supports for the
+ *                           PTP_PEROUT_REQUEST ioctl. The PTP core will
+ *                           reject a request with any flag not specified
+ *                           here.
+ *
+ * @supported_extts_flags:  The set of flags the driver supports for the
+ *                          PTP_EXTTS_REQUEST ioctl. The PTP core will use
+ *                          this list to reject unsupported requests.
+ *                          PTP_ENABLE_FEATURE is assumed and does not need to
+ *                          be included. If PTP_STRICT_FLAGS is *not* set,
+ *                          then both PTP_RISING_EDGE and PTP_FALLING_EDGE
+ *                          will be assumed. Note that PTP_STRICT_FLAGS must
+ *                          be set if the drivers wants to honor
+ *                          PTP_EXTTS_REQUEST2 and any future flags.
+ *
  * @pin_config: Array of length 'n_pins'. If the number of
  *              programmable pins is nonzero, then drivers must
  *              allocate and initialize this array.
@@ -172,6 +190,8 @@ struct ptp_clock_info {
 	int n_per_out;
 	int n_pins;
 	int pps;
+	unsigned int supported_perout_flags;
+	unsigned int supported_extts_flags;
 	struct ptp_pin_desc *pin_config;
 	int (*adjfine)(struct ptp_clock_info *ptp, long scaled_ppm);
 	int (*adjphase)(struct ptp_clock_info *ptp, s32 phase);
@@ -200,6 +220,7 @@ struct ptp_clock;
 enum ptp_clock_events {
 	PTP_CLOCK_ALARM,
 	PTP_CLOCK_EXTTS,
+	PTP_CLOCK_EXTOFF,
 	PTP_CLOCK_PPS,
 	PTP_CLOCK_PPSUSR,
 };
@@ -210,6 +231,7 @@ enum ptp_clock_events {
  * @type:  One of the ptp_clock_events enumeration values.
  * @index: Identifies the source of the event.
  * @timestamp: When the event occurred (%PTP_CLOCK_EXTTS only).
+ * @offset:    When the event occurred (%PTP_CLOCK_EXTOFF only).
  * @pps_times: When the event occurred (%PTP_CLOCK_PPSUSR only).
  */
 
@@ -218,6 +240,7 @@ struct ptp_clock_event {
 	int index;
 	union {
 		u64 timestamp;
+		s64 offset;
 		struct pps_event_time pps_times;
 	};
 };
@@ -302,7 +325,7 @@ static inline u64 adjust_by_scaled_ppm(u64 base, long scaled_ppm)
  * @info:   Structure describing the new clock.
  * @parent: Pointer to the parent device of the new clock.
  *
- * Returns a valid pointer on success or PTR_ERR on failure.  If PHC
+ * Returns: a valid pointer on success or PTR_ERR on failure.  If PHC
  * support is missing at the configuration level, this function
  * returns NULL, and drivers are expected to gracefully handle that
  * case separately.
@@ -440,7 +463,7 @@ int ptp_get_vclocks_index(int pclock_index, int **vclock_index);
  * @hwtstamp:     timestamp
  * @vclock_index: phc index of ptp vclock.
  *
- * Returns converted timestamp, or 0 on error.
+ * Returns: converted timestamp, or 0 on error.
  */
 ktime_t ptp_convert_timestamp(const ktime_t *hwtstamp, int vclock_index);
 #else
@@ -454,14 +477,40 @@ static inline ktime_t ptp_convert_timestamp(const ktime_t *hwtstamp,
 
 static inline void ptp_read_system_prets(struct ptp_system_timestamp *sts)
 {
-	if (sts)
-		ktime_get_real_ts64(&sts->pre_ts);
+	if (sts) {
+		switch (sts->clockid) {
+		case CLOCK_REALTIME:
+			ktime_get_real_ts64(&sts->pre_ts);
+			break;
+		case CLOCK_MONOTONIC:
+			ktime_get_ts64(&sts->pre_ts);
+			break;
+		case CLOCK_MONOTONIC_RAW:
+			ktime_get_raw_ts64(&sts->pre_ts);
+			break;
+		default:
+			break;
+		}
+	}
 }
 
 static inline void ptp_read_system_postts(struct ptp_system_timestamp *sts)
 {
-	if (sts)
-		ktime_get_real_ts64(&sts->post_ts);
+	if (sts) {
+		switch (sts->clockid) {
+		case CLOCK_REALTIME:
+			ktime_get_real_ts64(&sts->post_ts);
+			break;
+		case CLOCK_MONOTONIC:
+			ktime_get_ts64(&sts->post_ts);
+			break;
+		case CLOCK_MONOTONIC_RAW:
+			ktime_get_raw_ts64(&sts->post_ts);
+			break;
+		default:
+			break;
+		}
+	}
 }
 
 #endif

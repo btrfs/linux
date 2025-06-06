@@ -629,7 +629,7 @@ static struct link_encoder *dce112_link_encoder_create(
 		kzalloc(sizeof(struct dce110_link_encoder), GFP_KERNEL);
 	int link_regs_id;
 
-	if (!enc110)
+	if (!enc110 || enc_init_data->hpd_source >= ARRAY_SIZE(link_enc_hpd_regs))
 		return NULL;
 
 	link_regs_id =
@@ -864,8 +864,6 @@ static struct clock_source *find_matching_pll(
 	default:
 		return NULL;
 	}
-
-	return NULL;
 }
 
 static enum dc_status build_mapped_resource(
@@ -885,7 +883,7 @@ static enum dc_status build_mapped_resource(
 	return DC_OK;
 }
 
-bool dce112_validate_bandwidth(
+enum dc_status dce112_validate_bandwidth(
 	struct dc *dc,
 	struct dc_state *context,
 	bool fast_validate)
@@ -954,7 +952,7 @@ bool dce112_validate_bandwidth(
 			context->bw_ctx.bw.dce.yclk_khz,
 			context->bw_ctx.bw.dce.blackout_recovery_time_us);
 	}
-	return result;
+	return result ? DC_OK : DC_FAIL_BANDWIDTH_VALIDATE;
 }
 
 enum dc_status resource_map_phy_clock_resources(
@@ -1069,7 +1067,10 @@ static void bw_calcs_data_update_from_pplib(struct dc *dc)
 	struct dm_pp_clock_levels clks = {0};
 	int memory_type_multiplier = MEMORY_TYPE_MULTIPLIER_CZ;
 
-	if (dc->bw_vbios && dc->bw_vbios->memory_type == bw_def_hbm)
+	if (!dc->bw_vbios)
+		return;
+
+	if (dc->bw_vbios->memory_type == bw_def_hbm)
 		memory_type_multiplier = MEMORY_TYPE_HBM;
 
 	/*do system clock  TODO PPLIB: after PPLIB implement,

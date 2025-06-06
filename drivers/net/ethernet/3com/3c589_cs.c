@@ -502,7 +502,7 @@ static int el3_config(struct net_device *dev, struct ifmap *map)
 {
 	if ((map->port != (u_char)(-1)) && (map->port != dev->if_port)) {
 		if (map->port <= 3) {
-			dev->if_port = map->port;
+			WRITE_ONCE(dev->if_port, map->port);
 			netdev_info(dev, "switched to %s port\n", if_names[dev->if_port]);
 			tc589_set_xcvr(dev, dev->if_port);
 		} else {
@@ -946,7 +946,7 @@ static int el3_close(struct net_device *dev)
 
 	link->open--;
 	netif_stop_queue(dev);
-	del_timer_sync(&lp->media);
+	timer_delete_sync(&lp->media);
 
 	return 0;
 }

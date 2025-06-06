@@ -199,7 +199,7 @@ MODULE_DESCRIPTION("Generic AES-GCM library");
 MODULE_AUTHOR("Ard Biesheuvel <ardb@kernel.org>");
 MODULE_LICENSE("GPL");
 
-#ifndef CONFIG_CRYPTO_MANAGER_DISABLE_TESTS
+#ifdef CONFIG_CRYPTO_SELFTESTS
 
 /*
  * Test code below. Vectors taken from crypto/testmgr.h
@@ -697,7 +697,7 @@ static int __init libaesgcm_init(void)
 		u8 tagbuf[AES_BLOCK_SIZE];
 		int plen = aesgcm_tv[i].plen;
 		struct aesgcm_ctx ctx;
-		u8 buf[sizeof(ptext12)];
+		static u8 buf[sizeof(ptext12)];
 
 		if (aesgcm_expandkey(&ctx, aesgcm_tv[i].key, aesgcm_tv[i].klen,
 				     aesgcm_tv[i].clen - plen)) {

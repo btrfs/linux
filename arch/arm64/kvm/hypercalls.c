@@ -15,6 +15,8 @@
 	GENMASK(KVM_REG_ARM_STD_HYP_BMAP_BIT_COUNT - 1, 0)
 #define KVM_ARM_SMCCC_VENDOR_HYP_FEATURES			\
 	GENMASK(KVM_REG_ARM_VENDOR_HYP_BMAP_BIT_COUNT - 1, 0)
+#define KVM_ARM_SMCCC_VENDOR_HYP_FEATURES_2			\
+	GENMASK(KVM_REG_ARM_VENDOR_HYP_BMAP_2_BIT_COUNT - 1, 0)
 
 static void kvm_ptp_get_time(struct kvm_vcpu *vcpu, u64 *val)
 {
@@ -317,7 +319,7 @@ int kvm_smccc_call_handler(struct kvm_vcpu *vcpu)
 				 * to the guest, and hide SSBS so that the
 				 * guest stays protected.
 				 */
-				if (cpus_have_final_cap(ARM64_SSBS))
+				if (kvm_has_feat(vcpu->kvm, ID_AA64PFR1_EL1, SSBS, IMP))
 					break;
 				fallthrough;
 			case SPECTRE_UNAFFECTED:
@@ -360,6 +362,8 @@ int kvm_smccc_call_handler(struct kvm_vcpu *vcpu)
 		break;
 	case ARM_SMCCC_VENDOR_HYP_KVM_FEATURES_FUNC_ID:
 		val[0] = smccc_feat->vendor_hyp_bmap;
+		/* Function numbers 2-63 are reserved for pKVM for now */
+		val[2] = smccc_feat->vendor_hyp_bmap_2;
 		break;
 	case ARM_SMCCC_VENDOR_HYP_KVM_PTP_FUNC_ID:
 		kvm_ptp_get_time(vcpu, val);
@@ -387,6 +391,7 @@ static const u64 kvm_arm_fw_reg_ids[] = {
 	KVM_REG_ARM_STD_BMAP,
 	KVM_REG_ARM_STD_HYP_BMAP,
 	KVM_REG_ARM_VENDOR_HYP_BMAP,
+	KVM_REG_ARM_VENDOR_HYP_BMAP_2,
 };
 
 void kvm_arm_init_hypercalls(struct kvm *kvm)
@@ -428,7 +433,7 @@ int kvm_arm_copy_fw_reg_indices(struct kvm_vcpu *vcpu, u64 __user *uindices)
  * Convert the workaround level into an easy-to-compare number, where higher
  * values mean better protection.
  */
-static int get_kernel_wa_level(u64 regid)
+static int get_kernel_wa_level(struct kvm_vcpu *vcpu, u64 regid)
 {
 	switch (regid) {
 	case KVM_REG_ARM_SMCCC_ARCH_WORKAROUND_1:
@@ -449,7 +454,7 @@ static int get_kernel_wa_level(u64 regid)
 			 * don't have any FW mitigation if SSBS is there at
 			 * all times.
 			 */
-			if (cpus_have_final_cap(ARM64_SSBS))
+			if (kvm_has_feat(vcpu->kvm, ID_AA64PFR1_EL1, SSBS, IMP))
 				return KVM_REG_ARM_SMCCC_ARCH_WORKAROUND_2_NOT_AVAIL;
 			fallthrough;
 		case SPECTRE_UNAFFECTED:
@@ -486,7 +491,7 @@ int kvm_arm_get_fw_reg(struct kvm_vcpu *vcpu, const struct kvm_one_reg *reg)
 	case KVM_REG_ARM_SMCCC_ARCH_WORKAROUND_1:
 	case KVM_REG_ARM_SMCCC_ARCH_WORKAROUND_2:
 	case KVM_REG_ARM_SMCCC_ARCH_WORKAROUND_3:
-		val = get_kernel_wa_level(reg->id) & KVM_REG_FEATURE_LEVEL_MASK;
+		val = get_kernel_wa_level(vcpu, reg->id) & KVM_REG_FEATURE_LEVEL_MASK;
 		break;
 	case KVM_REG_ARM_STD_BMAP:
 		val = READ_ONCE(smccc_feat->std_bmap);
@@ -496,6 +501,9 @@ int kvm_arm_get_fw_reg(struct kvm_vcpu *vcpu, const struct kvm_one_reg *reg)
 		break;
 	case KVM_REG_ARM_VENDOR_HYP_BMAP:
 		val = READ_ONCE(smccc_feat->vendor_hyp_bmap);
+		break;
+	case KVM_REG_ARM_VENDOR_HYP_BMAP_2:
+		val = READ_ONCE(smccc_feat->vendor_hyp_bmap_2);
 		break;
 	default:
 		return -ENOENT;
@@ -526,6 +534,10 @@ static int kvm_arm_set_fw_reg_bmap(struct kvm_vcpu *vcpu, u64 reg_id, u64 val)
 	case KVM_REG_ARM_VENDOR_HYP_BMAP:
 		fw_reg_bmap = &smccc_feat->vendor_hyp_bmap;
 		fw_reg_features = KVM_ARM_SMCCC_VENDOR_HYP_FEATURES;
+		break;
+	case KVM_REG_ARM_VENDOR_HYP_BMAP_2:
+		fw_reg_bmap = &smccc_feat->vendor_hyp_bmap_2;
+		fw_reg_features = KVM_ARM_SMCCC_VENDOR_HYP_FEATURES_2;
 		break;
 	default:
 		return -ENOENT;
@@ -575,6 +587,8 @@ int kvm_arm_set_fw_reg(struct kvm_vcpu *vcpu, const struct kvm_one_reg *reg)
 		case KVM_ARM_PSCI_0_2:
 		case KVM_ARM_PSCI_1_0:
 		case KVM_ARM_PSCI_1_1:
+		case KVM_ARM_PSCI_1_2:
+		case KVM_ARM_PSCI_1_3:
 			if (!wants_02)
 				return -EINVAL;
 			vcpu->kvm->arch.psci_version = val;
@@ -588,7 +602,7 @@ int kvm_arm_set_fw_reg(struct kvm_vcpu *vcpu, const struct kvm_one_reg *reg)
 		if (val & ~KVM_REG_FEATURE_LEVEL_MASK)
 			return -EINVAL;
 
-		if (get_kernel_wa_level(reg->id) < val)
+		if (get_kernel_wa_level(vcpu, reg->id) < val)
 			return -EINVAL;
 
 		return 0;
@@ -624,13 +638,14 @@ int kvm_arm_set_fw_reg(struct kvm_vcpu *vcpu, const struct kvm_one_reg *reg)
 		 * We can deal with NOT_AVAIL on NOT_REQUIRED, but not the
 		 * other way around.
 		 */
-		if (get_kernel_wa_level(reg->id) < wa_level)
+		if (get_kernel_wa_level(vcpu, reg->id) < wa_level)
 			return -EINVAL;
 
 		return 0;
 	case KVM_REG_ARM_STD_BMAP:
 	case KVM_REG_ARM_STD_HYP_BMAP:
 	case KVM_REG_ARM_VENDOR_HYP_BMAP:
+	case KVM_REG_ARM_VENDOR_HYP_BMAP_2:
 		return kvm_arm_set_fw_reg_bmap(vcpu, reg->id, val);
 	default:
 		return -ENOENT;

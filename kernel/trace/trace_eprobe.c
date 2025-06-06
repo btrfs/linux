@@ -220,7 +220,7 @@ static struct trace_eprobe *alloc_event_probe(const char *group,
 	if (!ep->event_system)
 		goto error;
 
-	ret = trace_probe_init(&ep->tp, this_event, group, false);
+	ret = trace_probe_init(&ep->tp, this_event, group, false, nargs);
 	if (ret < 0)
 		goto error;
 
@@ -390,8 +390,8 @@ static int get_eprobe_size(struct trace_probe *tp, void *rec)
 
 /* Note that we don't verify it, since the code does not come from user space */
 static int
-process_fetch_insn(struct fetch_insn *code, void *rec, void *dest,
-		   void *base)
+process_fetch_insn(struct fetch_insn *code, void *rec, void *edata,
+		   void *dest, void *base)
 {
 	unsigned long val;
 	int ret;
@@ -438,7 +438,7 @@ __eprobe_trace_func(struct eprobe_data *edata, void *rec)
 		return;
 
 	entry = fbuffer.entry = ring_buffer_event_data(fbuffer.event);
-	store_trace_args(&entry[1], &edata->ep->tp, rec, sizeof(*entry), dsize);
+	store_trace_args(&entry[1], &edata->ep->tp, rec, NULL, sizeof(*entry), dsize);
 
 	trace_event_buffer_commit(&fbuffer);
 }
@@ -478,7 +478,7 @@ static void eprobe_trigger_func(struct event_trigger_data *data,
 	__eprobe_trace_func(edata, rec);
 }
 
-static struct event_trigger_ops eprobe_trigger_ops = {
+static const struct event_trigger_ops eprobe_trigger_ops = {
 	.trigger		= eprobe_trigger_func,
 	.print			= eprobe_trigger_print,
 	.init			= eprobe_trigger_init,
@@ -507,8 +507,8 @@ static void eprobe_trigger_unreg_func(char *glob,
 
 }
 
-static struct event_trigger_ops *eprobe_trigger_get_ops(char *cmd,
-							char *param)
+static const struct event_trigger_ops *eprobe_trigger_get_ops(char *cmd,
+							      char *param)
 {
 	return &eprobe_trigger_ops;
 }
@@ -912,10 +912,17 @@ static int __trace_eprobe_create(int argc, const char *argv[])
 		}
 	}
 
-	mutex_lock(&event_mutex);
-	event_call = find_and_get_event(sys_name, sys_event);
-	ep = alloc_event_probe(group, event, event_call, argc - 2);
-	mutex_unlock(&event_mutex);
+	if (argc - 2 > MAX_TRACE_ARGS) {
+		trace_probe_log_set_index(2);
+		trace_probe_log_err(0, TOO_MANY_ARGS);
+		ret = -E2BIG;
+		goto error;
+	}
+
+	scoped_guard(mutex, &event_mutex) {
+		event_call = find_and_get_event(sys_name, sys_event);
+		ep = alloc_event_probe(group, event, event_call, argc - 2);
+	}
 
 	if (IS_ERR(ep)) {
 		ret = PTR_ERR(ep);
@@ -937,7 +944,7 @@ static int __trace_eprobe_create(int argc, const char *argv[])
 
 	argc -= 2; argv += 2;
 	/* parse arguments */
-	for (i = 0; i < argc && i < MAX_TRACE_ARGS; i++) {
+	for (i = 0; i < argc; i++) {
 		trace_probe_log_set_index(i + 2);
 		ret = trace_eprobe_tp_update_arg(ep, argv, i);
 		if (ret)
@@ -947,22 +954,28 @@ static int __trace_eprobe_create(int argc, const char *argv[])
 	if (ret < 0)
 		goto error;
 	init_trace_eprobe_call(ep);
-	mutex_lock(&event_mutex);
-	ret = trace_probe_register_event_call(&ep->tp);
-	if (ret) {
-		if (ret == -EEXIST) {
-			trace_probe_log_set_index(0);
-			trace_probe_log_err(0, EVENT_EXIST);
+	scoped_guard(mutex, &event_mutex) {
+		ret = trace_probe_register_event_call(&ep->tp);
+		if (ret) {
+			if (ret == -EEXIST) {
+				trace_probe_log_set_index(0);
+				trace_probe_log_err(0, EVENT_EXIST);
+			}
+			goto error;
 		}
-		mutex_unlock(&event_mutex);
-		goto error;
+		ret = dyn_event_add(&ep->devent, &ep->tp.event->call);
+		if (ret < 0) {
+			trace_probe_unregister_event_call(&ep->tp);
+			goto error;
+		}
 	}
-	ret = dyn_event_add(&ep->devent, &ep->tp.event->call);
-	mutex_unlock(&event_mutex);
+	trace_probe_log_clear();
 	return ret;
+
 parse_error:
 	ret = -EINVAL;
 error:
+	trace_probe_log_clear();
 	trace_event_probe_cleanup(ep);
 	return ret;
 }

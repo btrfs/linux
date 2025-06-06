@@ -6,13 +6,20 @@
 #include <stdbool.h>
 
 extern bool CONFIG_X86_KERNEL_IBT __kconfig __weak;
+extern bool CONFIG_PPC_FTRACE_OUT_OF_LINE __kconfig __weak;
+extern bool CONFIG_KPROBES_ON_FTRACE __kconfig __weak;
+extern bool CONFIG_PPC64 __kconfig __weak;
 
-/* This function is here to have CONFIG_X86_KERNEL_IBT
- * used and added to object BTF.
+/* This function is here to have CONFIG_X86_KERNEL_IBT,
+ * CONFIG_PPC_FTRACE_OUT_OF_LINE, CONFIG_KPROBES_ON_FTRACE,
+ * CONFIG_PPC6 used and added to object BTF.
  */
 int unused(void)
 {
-	return CONFIG_X86_KERNEL_IBT ? 0 : 1;
+	return CONFIG_X86_KERNEL_IBT ||
+			CONFIG_PPC_FTRACE_OUT_OF_LINE ||
+			CONFIG_KPROBES_ON_FTRACE ||
+			CONFIG_PPC64 ? 0 : 1;
 }
 
 SEC("kprobe")
@@ -29,6 +36,12 @@ int BPF_PROG(uprobe_run)
 
 SEC("tracepoint")
 int BPF_PROG(tp_run)
+{
+	return 0;
+}
+
+SEC("perf_event")
+int event_run(void *ctx)
 {
 	return 0;
 }

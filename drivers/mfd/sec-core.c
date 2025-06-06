@@ -34,6 +34,10 @@ static const struct mfd_cell s5m8767_devs[] = {
 	},
 };
 
+static const struct mfd_cell s2dos05_devs[] = {
+	{ .name = "s2dos05-regulator", },
+};
+
 static const struct mfd_cell s2mps11_devs[] = {
 	{ .name = "s2mps11-regulator", },
 	{ .name = "s2mps14-rtc", },
@@ -79,10 +83,18 @@ static const struct mfd_cell s2mpu02_devs[] = {
 	{ .name = "s2mpu02-regulator", },
 };
 
+static const struct mfd_cell s2mpu05_devs[] = {
+	{ .name = "s2mpu05-regulator", },
+	{ .name = "s2mps15-rtc", },
+};
+
 static const struct of_device_id sec_dt_match[] = {
 	{
 		.compatible = "samsung,s5m8767-pmic",
 		.data = (void *)S5M8767X,
+	}, {
+		.compatible = "samsung,s2dos05",
+		.data = (void *)S2DOS05,
 	}, {
 		.compatible = "samsung,s2mps11-pmic",
 		.data = (void *)S2MPS11X,
@@ -101,6 +113,9 @@ static const struct of_device_id sec_dt_match[] = {
 	}, {
 		.compatible = "samsung,s2mpu02-pmic",
 		.data = (void *)S2MPU02,
+	}, {
+		.compatible = "samsung,s2mpu05-pmic",
+		.data = (void *)S2MPU05,
 	}, {
 		/* Sentinel */
 	},
@@ -339,6 +354,10 @@ static int sec_pmic_probe(struct i2c_client *i2c)
 		sec_devs = s5m8767_devs;
 		num_sec_devs = ARRAY_SIZE(s5m8767_devs);
 		break;
+	case S2DOS05:
+		sec_devs = s2dos05_devs;
+		num_sec_devs = ARRAY_SIZE(s2dos05_devs);
+		break;
 	case S2MPA01:
 		sec_devs = s2mpa01_devs;
 		num_sec_devs = ARRAY_SIZE(s2mpa01_devs);
@@ -362,6 +381,10 @@ static int sec_pmic_probe(struct i2c_client *i2c)
 	case S2MPU02:
 		sec_devs = s2mpu02_devs;
 		num_sec_devs = ARRAY_SIZE(s2mpu02_devs);
+		break;
+	case S2MPU05:
+		sec_devs = s2mpu05_devs;
+		num_sec_devs = ARRAY_SIZE(s2mpu05_devs);
 		break;
 	default:
 		dev_err(&i2c->dev, "Unsupported device type (%lu)\n",

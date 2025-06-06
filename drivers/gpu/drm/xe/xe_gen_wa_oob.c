@@ -28,10 +28,10 @@
 	"\n" \
 	"#endif\n"
 
-static void print_usage(FILE *f)
+static void print_usage(FILE *f, const char *progname)
 {
 	fprintf(f, "usage: %s <input-rule-file> <generated-c-source-file> <generated-c-header-file>\n",
-		program_invocation_short_name);
+		progname);
 }
 
 static void print_parse_error(const char *err_msg, const char *line,
@@ -97,18 +97,26 @@ static int parse(FILE *input, FILE *csource, FILE *cheader)
 
 		if (name) {
 			fprintf(cheader, "\tXE_WA_OOB_%s = %u,\n", name, idx);
-			fprintf(csource, "{ XE_RTP_NAME(\"%s\"), XE_RTP_RULES(%s) },\n",
+
+			/* Close previous entry before starting a new one */
+			if (idx)
+				fprintf(csource, ") },\n");
+
+			fprintf(csource, "{ XE_RTP_NAME(\"%s\"),\n  XE_RTP_RULES(%s",
 				name, rules);
+			idx++;
 		} else {
-			fprintf(csource, "{ XE_RTP_NAME(NULL), XE_RTP_RULES(%s) },\n",
-				rules);
+			fprintf(csource, ", OR,\n\t%s", rules);
 		}
 
-		idx++;
 		lineno++;
 		if (!is_continuation)
 			prev_name = name;
 	}
+
+	/* Close last entry */
+	if (idx)
+		fprintf(csource, ") },\n");
 
 	fprintf(cheader, "\t_XE_WA_OOB_COUNT = %u\n", idx);
 
@@ -136,7 +144,7 @@ int main(int argc, const char *argv[])
 
 	if (argc < 3) {
 		fprintf(stderr, "ERROR: wrong arguments\n");
-		print_usage(stderr);
+		print_usage(stderr, argv[0]);
 		return 1;
 	}
 

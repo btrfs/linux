@@ -37,7 +37,7 @@ struct dcn31_resource_pool {
 	struct resource_pool base;
 };
 
-bool dcn31_validate_bandwidth(struct dc *dc,
+enum dc_status dcn31_validate_bandwidth(struct dc *dc,
 		struct dc_state *context,
 		bool fast_validate);
 void dcn31_calculate_wm_and_dlg(
@@ -62,6 +62,9 @@ dcn31_set_mcif_arb_params(struct dc *dc,
 struct resource_pool *dcn31_create_resource_pool(
 		const struct dc_init_data *init_data,
 		struct dc *dc);
+
+unsigned int dcn31_get_det_buffer_size(
+	const struct dc_state *context);
 
 /*temp: B0 specific before switch to dcn313 headers*/
 #ifndef regPHYPLLF_PIXCLK_RESYNC_CNTL

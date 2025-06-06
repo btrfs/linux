@@ -50,6 +50,7 @@
 
 	bt_sco_codec:bt_sco_codec {
 		compatible = "linux,bt-sco";
+		#sound-dai-cells = <0>;
 	};
 
 	backlight_lcd: backlight_lcd {
@@ -231,7 +232,7 @@
 				 <MT2701_PIN_238_EXT_SDIO1__FUNC_EXT_SDIO1>,
 				 <MT2701_PIN_237_EXT_SDIO2__FUNC_EXT_SDIO2>,
 				 <MT2701_PIN_236_EXT_SDIO3__FUNC_EXT_SDIO3>;
-			drive-strength = <MTK_DRIVE_4mA>;
+			drive-strength = <4>;
 			bias-pull-up;
 		};
 	};

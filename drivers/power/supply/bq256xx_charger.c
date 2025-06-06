@@ -334,14 +334,6 @@ static const int bq25618_619_ichg_values[] = {
 	1290000, 1360000, 1430000, 1500000
 };
 
-static enum power_supply_usb_type bq256xx_usb_type[] = {
-	POWER_SUPPLY_USB_TYPE_SDP,
-	POWER_SUPPLY_USB_TYPE_CDP,
-	POWER_SUPPLY_USB_TYPE_DCP,
-	POWER_SUPPLY_USB_TYPE_UNKNOWN,
-	POWER_SUPPLY_USB_TYPE_ACA,
-};
-
 static int bq256xx_array_parse(int array_size, int val, const int array[])
 {
 	int i = 0;
@@ -1252,8 +1244,11 @@ static int bq256xx_property_is_writeable(struct power_supply *psy,
 static const struct power_supply_desc bq256xx_power_supply_desc = {
 	.name = "bq256xx-charger",
 	.type = POWER_SUPPLY_TYPE_USB,
-	.usb_types = bq256xx_usb_type,
-	.num_usb_types = ARRAY_SIZE(bq256xx_usb_type),
+	.usb_types = BIT(POWER_SUPPLY_USB_TYPE_SDP) |
+		     BIT(POWER_SUPPLY_USB_TYPE_CDP) |
+		     BIT(POWER_SUPPLY_USB_TYPE_DCP) |
+		     BIT(POWER_SUPPLY_USB_TYPE_ACA) |
+		     BIT(POWER_SUPPLY_USB_TYPE_UNKNOWN),
 	.properties = bq256xx_power_supply_props,
 	.num_properties = ARRAY_SIZE(bq256xx_power_supply_props),
 	.get_property = bq256xx_get_charger_property,
@@ -1662,7 +1657,7 @@ static int bq256xx_parse_dt(struct bq256xx_device *bq,
 	int ret = 0;
 
 	psy_cfg->drv_data = bq;
-	psy_cfg->of_node = dev->of_node;
+	psy_cfg->fwnode = dev_fwnode(dev);
 
 	ret = device_property_read_u32(bq->dev, "ti,watchdog-timeout-ms",
 				       &bq->watchdog_timer);

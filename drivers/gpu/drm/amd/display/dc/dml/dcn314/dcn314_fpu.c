@@ -310,7 +310,7 @@ int dcn314_populate_dml_pipes_from_context_fpu(struct dc *dc, struct dc_state *c
 {
 	int i, pipe_cnt;
 	struct resource_context *res_ctx = &context->res_ctx;
-	struct pipe_ctx *pipe;
+	struct pipe_ctx *pipe = 0;
 	bool upscaled = false;
 	const unsigned int max_allowed_vblank_nom = 1023;
 
@@ -408,6 +408,9 @@ int dcn314_populate_dml_pipes_from_context_fpu(struct dc *dc, struct dc_state *c
 	} else if (context->stream_count >= 3 && upscaled) {
 		context->bw_ctx.dml.ip.det_buffer_size_kbytes = 192;
 	}
+
+	if (dc->debug.force_odm_combine_4to1)
+		context->bw_ctx.dml.ip.odm_combine_4to1_supported = true;
 
 	for (i = 0; i < dc->res_pool->pipe_count; i++) {
 		struct pipe_ctx *pipe = &context->res_ctx.pipe_ctx[i];

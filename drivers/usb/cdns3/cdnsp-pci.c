@@ -28,10 +28,7 @@
 #define PCI_DRIVER_NAME		"cdns-pci-usbssp"
 #define PLAT_DRIVER_NAME	"cdns-usbssp"
 
-#define CDNS_VENDOR_ID		0x17cd
-#define CDNS_DEVICE_ID		0x0200
-#define CDNS_DRD_ID		0x0100
-#define CDNS_DRD_IF		(PCI_CLASS_SERIAL_USB << 8 | 0x80)
+#define CHICKEN_APB_TIMEOUT_VALUE       0x1C20
 
 static struct pci_dev *cdnsp_get_second_fun(struct pci_dev *pdev)
 {
@@ -40,10 +37,10 @@ static struct pci_dev *cdnsp_get_second_fun(struct pci_dev *pdev)
 	 * Platform has two function. The fist keeps resources for
 	 * Host/Device while the secon keeps resources for DRD/OTG.
 	 */
-	if (pdev->device == CDNS_DEVICE_ID)
-		return  pci_get_device(pdev->vendor, CDNS_DRD_ID, NULL);
-	else if (pdev->device == CDNS_DRD_ID)
-		return pci_get_device(pdev->vendor, CDNS_DEVICE_ID, NULL);
+	if (pdev->device == PCI_DEVICE_ID_CDNS_USBSSP)
+		return pci_get_device(pdev->vendor, PCI_DEVICE_ID_CDNS_USBSS, NULL);
+	if (pdev->device == PCI_DEVICE_ID_CDNS_USBSS)
+		return pci_get_device(pdev->vendor, PCI_DEVICE_ID_CDNS_USBSSP, NULL);
 
 	return NULL;
 }
@@ -144,6 +141,14 @@ static int cdnsp_pci_probe(struct pci_dev *pdev,
 		cdnsp->otg_irq = pdev->irq;
 	}
 
+	/*
+	 * Cadence PCI based platform require some longer timeout for APB
+	 * to fixes domain clock synchronization issue after resuming
+	 * controller from L1 state.
+	 */
+	cdnsp->override_apb_timeout = CHICKEN_APB_TIMEOUT_VALUE;
+	pci_set_drvdata(pdev, cdnsp);
+
 	if (pci_is_enabled(func)) {
 		cdnsp->dev = dev;
 		cdnsp->gadget_init = cdnsp_gadget_init;
@@ -152,8 +157,6 @@ static int cdnsp_pci_probe(struct pci_dev *pdev,
 		if (ret)
 			goto free_cdnsp;
 	}
-
-	pci_set_drvdata(pdev, cdnsp);
 
 	device_wakeup_enable(&pdev->dev);
 	if (pci_dev_run_wake(pdev))
@@ -220,18 +223,18 @@ static const struct dev_pm_ops cdnsp_pci_pm_ops = {
 };
 
 static const struct pci_device_id cdnsp_pci_ids[] = {
-	{ PCI_VENDOR_ID_CDNS, CDNS_DEVICE_ID, PCI_ANY_ID, PCI_ANY_ID,
-	  PCI_CLASS_SERIAL_USB_DEVICE, PCI_ANY_ID },
-	{ PCI_VENDOR_ID_CDNS, CDNS_DEVICE_ID, PCI_ANY_ID, PCI_ANY_ID,
-	  CDNS_DRD_IF, PCI_ANY_ID },
-	{ PCI_VENDOR_ID_CDNS, CDNS_DRD_ID, PCI_ANY_ID, PCI_ANY_ID,
-	  CDNS_DRD_IF, PCI_ANY_ID },
+	{ PCI_DEVICE(PCI_VENDOR_ID_CDNS, PCI_DEVICE_ID_CDNS_USBSSP),
+	  .class = PCI_CLASS_SERIAL_USB_DEVICE },
+	{ PCI_DEVICE(PCI_VENDOR_ID_CDNS, PCI_DEVICE_ID_CDNS_USBSSP),
+	  .class = PCI_CLASS_SERIAL_USB_CDNS },
+	{ PCI_DEVICE(PCI_VENDOR_ID_CDNS, PCI_DEVICE_ID_CDNS_USBSS),
+	  .class = PCI_CLASS_SERIAL_USB_CDNS },
 	{ 0, }
 };
 
 static struct pci_driver cdnsp_pci_driver = {
 	.name = "cdnsp-pci",
-	.id_table = &cdnsp_pci_ids[0],
+	.id_table = cdnsp_pci_ids,
 	.probe = cdnsp_pci_probe,
 	.remove = cdnsp_pci_remove,
 	.driver = {

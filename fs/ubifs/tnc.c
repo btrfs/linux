@@ -2930,8 +2930,6 @@ int ubifs_tnc_remove_ino(struct ubifs_info *c, ino_t inum)
 		dbg_tnc("xent '%s', ino %lu", xent->name,
 			(unsigned long)xattr_inum);
 
-		ubifs_evict_xattr_inode(c, xattr_inum);
-
 		fname_name(&nm) = xent->name;
 		fname_len(&nm) = le16_to_cpu(xent->nlen);
 		err = ubifs_tnc_remove_nm(c, &key1, &nm);
@@ -3116,14 +3114,7 @@ static void tnc_destroy_cnext(struct ubifs_info *c)
 void ubifs_tnc_close(struct ubifs_info *c)
 {
 	tnc_destroy_cnext(c);
-	if (c->zroot.znode) {
-		long n, freed;
-
-		n = atomic_long_read(&c->clean_zn_cnt);
-		freed = ubifs_destroy_tnc_subtree(c, c->zroot.znode);
-		ubifs_assert(c, freed == n);
-		atomic_long_sub(n, &ubifs_clean_zn_cnt);
-	}
+	ubifs_destroy_tnc_tree(c);
 	kfree(c->gap_lebs);
 	kfree(c->ilebs);
 	destroy_old_idx(c);

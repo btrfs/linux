@@ -38,9 +38,12 @@ int ksz_ptp_clock_register(struct dsa_switch *ds);
 void ksz_ptp_clock_unregister(struct dsa_switch *ds);
 
 int ksz_get_ts_info(struct dsa_switch *ds, int port,
-		    struct ethtool_ts_info *ts);
-int ksz_hwtstamp_get(struct dsa_switch *ds, int port, struct ifreq *ifr);
-int ksz_hwtstamp_set(struct dsa_switch *ds, int port, struct ifreq *ifr);
+		    struct kernel_ethtool_ts_info *ts);
+int ksz_hwtstamp_get(struct dsa_switch *ds, int port,
+		     struct kernel_hwtstamp_config *config);
+int ksz_hwtstamp_set(struct dsa_switch *ds, int port,
+		     struct kernel_hwtstamp_config *config,
+		     struct netlink_ext_ack *extack);
 void ksz_port_txtstamp(struct dsa_switch *ds, int port, struct sk_buff *skb);
 void ksz_port_deferred_xmit(struct kthread_work *work);
 bool ksz_port_rxtstamp(struct dsa_switch *ds, int port, struct sk_buff *skb,

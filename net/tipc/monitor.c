@@ -149,7 +149,7 @@ static int dom_size(int peers)
 
 	while ((i * i) < peers)
 		i++;
-	return i < MAX_MON_DOMAIN ? i : MAX_MON_DOMAIN;
+	return min(i, MAX_MON_DOMAIN);
 }
 
 static void map_set(u64 *up_map, int i, unsigned int v)
@@ -716,7 +716,8 @@ void tipc_mon_reinit_self(struct net *net)
 		if (!mon)
 			continue;
 		write_lock_bh(&mon->lock);
-		mon->self->addr = tipc_own_addr(net);
+		if (mon->self)
+			mon->self->addr = tipc_own_addr(net);
 		write_unlock_bh(&mon->lock);
 	}
 }

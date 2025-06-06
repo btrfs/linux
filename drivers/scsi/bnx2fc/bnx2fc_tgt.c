@@ -74,7 +74,7 @@ static void bnx2fc_ofld_wait(struct bnx2fc_rport *tgt)
 				  &tgt->flags)));
 	if (signal_pending(current))
 		flush_signals(current);
-	del_timer_sync(&tgt->ofld_timer);
+	timer_delete_sync(&tgt->ofld_timer);
 }
 
 static void bnx2fc_offload_session(struct fcoe_port *port,
@@ -128,10 +128,8 @@ retry_ofld:
 			BNX2FC_TGT_DBG(tgt, "ctx_alloc_failure, "
 				"retry ofld..%d\n", i++);
 			msleep_interruptible(1000);
-			if (i > 3) {
-				i = 0;
+			if (i > 3)
 				goto ofld_err;
-			}
 			goto retry_ofld;
 		}
 		goto ofld_err;
@@ -285,7 +283,7 @@ static void bnx2fc_upld_wait(struct bnx2fc_rport *tgt)
 				  &tgt->flags)));
 	if (signal_pending(current))
 		flush_signals(current);
-	del_timer_sync(&tgt->upld_timer);
+	timer_delete_sync(&tgt->upld_timer);
 }
 
 static void bnx2fc_upload_session(struct fcoe_port *port,
@@ -833,7 +831,6 @@ static void bnx2fc_free_session_resc(struct bnx2fc_hba *hba,
 
 	BNX2FC_TGT_DBG(tgt, "Freeing up session resources\n");
 
-	spin_lock_bh(&tgt->cq_lock);
 	ctx_base_ptr = tgt->ctx_base;
 	tgt->ctx_base = NULL;
 
@@ -889,7 +886,6 @@ static void bnx2fc_free_session_resc(struct bnx2fc_hba *hba,
 				    tgt->sq, tgt->sq_dma);
 		tgt->sq = NULL;
 	}
-	spin_unlock_bh(&tgt->cq_lock);
 
 	if (ctx_base_ptr)
 		iounmap(ctx_base_ptr);

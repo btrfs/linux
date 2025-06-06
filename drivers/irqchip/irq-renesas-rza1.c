@@ -231,9 +231,9 @@ static int rza1_irqc_probe(struct platform_device *pdev)
 	priv->chip.irq_set_type = rza1_irqc_set_type;
 	priv->chip.flags = IRQCHIP_MASK_ON_SUSPEND | IRQCHIP_SKIP_SET_WAKE;
 
-	priv->irq_domain = irq_domain_add_hierarchy(parent, 0, IRQC_NUM_IRQ,
-						    np, &rza1_irqc_domain_ops,
-						    priv);
+	priv->irq_domain = irq_domain_create_hierarchy(parent, 0, IRQC_NUM_IRQ,
+						       of_fwnode_handle(np), &rza1_irqc_domain_ops,
+						       priv);
 	if (!priv->irq_domain) {
 		dev_err(dev, "cannot initialize irq domain\n");
 		ret = -ENOMEM;
@@ -244,12 +244,11 @@ out_put_node:
 	return ret;
 }
 
-static int rza1_irqc_remove(struct platform_device *pdev)
+static void rza1_irqc_remove(struct platform_device *pdev)
 {
 	struct rza1_irqc_priv *priv = platform_get_drvdata(pdev);
 
 	irq_domain_remove(priv->irq_domain);
-	return 0;
 }
 
 static const struct of_device_id rza1_irqc_dt_ids[] = {
@@ -262,7 +261,7 @@ static struct platform_driver rza1_irqc_device_driver = {
 	.probe		= rza1_irqc_probe,
 	.remove		= rza1_irqc_remove,
 	.driver		= {
-		.name	= "renesas_rza1_irqc",
+		.name		= "renesas_rza1_irqc",
 		.of_match_table	= rza1_irqc_dt_ids,
 	}
 };

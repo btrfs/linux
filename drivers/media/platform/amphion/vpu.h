@@ -162,7 +162,6 @@ struct vpu_core {
 	struct delayed_work msg_delayed_work;
 	struct kfifo msg_fifo;
 	void *msg_buffer;
-	unsigned int msg_buffer_size;
 
 	struct vpu_dev *vpu;
 	void *iface;
@@ -306,6 +305,7 @@ struct vpu_vb2_buffer {
 	dma_addr_t chroma_v;
 	unsigned int state;
 	u32 tag;
+	u32 average_qp;
 };
 
 void vpu_writel(struct vpu_dev *vpu, u32 reg, u32 val);

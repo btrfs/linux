@@ -50,9 +50,9 @@ static inline void INIT_LIST_HEAD(struct list_head *list)
  * Performs the full set of list corruption checks before __list_add().
  * On list corruption reports a warning, and returns false.
  */
-extern bool __list_valid_slowpath __list_add_valid_or_report(struct list_head *new,
-							     struct list_head *prev,
-							     struct list_head *next);
+bool __list_valid_slowpath __list_add_valid_or_report(struct list_head *new,
+						      struct list_head *prev,
+						      struct list_head *next);
 
 /*
  * Performs list corruption checks before __list_add(). Returns false if a
@@ -93,7 +93,7 @@ static __always_inline bool __list_add_valid(struct list_head *new,
  * Performs the full set of list corruption checks before __list_del_entry().
  * On list corruption reports a warning, and returns false.
  */
-extern bool __list_valid_slowpath __list_del_entry_valid_or_report(struct list_head *entry);
+bool __list_valid_slowpath __list_del_entry_valid_or_report(struct list_head *entry);
 
 /*
  * Performs list corruption checks before __list_del_entry(). Returns false if a
@@ -687,14 +687,6 @@ static inline void list_splice_tail_init(struct list_head *list,
 	for (pos = (head)->next; !list_is_head(pos, (head)); pos = pos->next)
 
 /**
- * list_for_each_reverse - iterate backwards over a list
- * @pos:	the &struct list_head to use as a loop cursor.
- * @head:	the head for your list.
- */
-#define list_for_each_reverse(pos, head) \
-	for (pos = (head)->prev; pos != (head); pos = pos->prev)
-
-/**
  * list_for_each_rcu - Iterate over a list in an RCU-safe fashion
  * @pos:	the &struct list_head to use as a loop cursor.
  * @head:	the head for your list.
@@ -766,7 +758,7 @@ static inline size_t list_count_nodes(struct list_head *head)
  * @member:	the name of the list_head within the struct.
  */
 #define list_entry_is_head(pos, head, member)				\
-	(&pos->member == (head))
+	list_is_head(&pos->member, (head))
 
 /**
  * list_for_each_entry	-	iterate over list of given type
@@ -1194,5 +1186,20 @@ static inline void hlist_splice_init(struct hlist_head *from,
 	for (pos = hlist_entry_safe((head)->first, typeof(*pos), member);\
 	     pos && ({ n = pos->member.next; 1; });			\
 	     pos = hlist_entry_safe(n, typeof(*pos), member))
+
+/**
+ * hlist_count_nodes - count nodes in the hlist
+ * @head:	the head for your hlist.
+ */
+static inline size_t hlist_count_nodes(struct hlist_head *head)
+{
+	struct hlist_node *pos;
+	size_t count = 0;
+
+	hlist_for_each(pos, head)
+		count++;
+
+	return count;
+}
 
 #endif

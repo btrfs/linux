@@ -18,7 +18,7 @@
 
 #define DRV_MODULE_VERSION	"0.1"
 
-MODULE_AUTHOR("David S. Miller (davem@davemloft.net)");
+MODULE_AUTHOR("David S. Miller <davem@davemloft.net>");
 MODULE_DESCRIPTION("Ultra45 environmental monitor driver");
 MODULE_LICENSE("GPL");
 MODULE_VERSION(DRV_MODULE_VERSION);
@@ -317,7 +317,7 @@ static struct platform_driver env_driver = {
 		.of_match_table = env_match,
 	},
 	.probe		= env_probe,
-	.remove_new	= env_remove,
+	.remove		= env_remove,
 };
 
 module_platform_driver(env_driver);

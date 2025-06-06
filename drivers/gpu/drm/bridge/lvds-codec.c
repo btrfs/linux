@@ -34,11 +34,12 @@ static inline struct lvds_codec *to_lvds_codec(struct drm_bridge *bridge)
 }
 
 static int lvds_codec_attach(struct drm_bridge *bridge,
+			     struct drm_encoder *encoder,
 			     enum drm_bridge_attach_flags flags)
 {
 	struct lvds_codec *lvds_codec = to_lvds_codec(bridge);
 
-	return drm_bridge_attach(bridge->encoder, lvds_codec->panel_bridge,
+	return drm_bridge_attach(encoder, lvds_codec->panel_bridge,
 				 bridge, flags);
 }
 
@@ -236,7 +237,7 @@ MODULE_DEVICE_TABLE(of, lvds_codec_match);
 
 static struct platform_driver lvds_codec_driver = {
 	.probe	= lvds_codec_probe,
-	.remove_new = lvds_codec_remove,
+	.remove = lvds_codec_remove,
 	.driver		= {
 		.name		= "lvds-codec",
 		.of_match_table	= lvds_codec_match,

@@ -54,7 +54,7 @@ struct lmac {
 	bool			link_up;
 	int			lmacid; /* ID within BGX */
 	int			lmacid_bd; /* ID on board */
-	struct net_device       netdev;
+	struct net_device       *netdev;
 	struct phy_device       *phydev;
 	unsigned int            last_duplex;
 	unsigned int            last_link;
@@ -590,10 +590,12 @@ static void bgx_sgmii_change_link_state(struct lmac *lmac)
 
 static void bgx_lmac_handler(struct net_device *netdev)
 {
-	struct lmac *lmac = container_of(netdev, struct lmac, netdev);
 	struct phy_device *phydev;
+	struct lmac *lmac, **priv;
 	int link_changed = 0;
 
+	priv = netdev_priv(netdev);
+	lmac = *priv;
 	phydev = lmac->phydev;
 
 	if (!phydev->link && lmac->last_link)
@@ -1116,7 +1118,7 @@ static int bgx_lmac_enable(struct bgx *bgx, u8 lmacid)
 		}
 		lmac->phydev->dev_flags = 0;
 
-		if (phy_connect_direct(&lmac->netdev, lmac->phydev,
+		if (phy_connect_direct(lmac->netdev, lmac->phydev,
 				       bgx_lmac_handler,
 				       phy_interface_mode(lmac->lmac_type)))
 			return -ENODEV;
@@ -1414,7 +1416,7 @@ static acpi_status bgx_acpi_register_phy(acpi_handle handle,
 
 	acpi_get_mac_address(dev, adev, bgx->lmac[bgx->acpi_lmac_idx].mac);
 
-	SET_NETDEV_DEV(&bgx->lmac[bgx->acpi_lmac_idx].netdev, dev);
+	SET_NETDEV_DEV(bgx->lmac[bgx->acpi_lmac_idx].netdev, dev);
 
 	bgx->lmac[bgx->acpi_lmac_idx].lmacid = bgx->acpi_lmac_idx;
 	bgx->acpi_lmac_idx++; /* move to next LMAC */
@@ -1483,7 +1485,7 @@ static int bgx_init_of_phy(struct bgx *bgx)
 
 		of_get_mac_address(node, bgx->lmac[lmac].mac);
 
-		SET_NETDEV_DEV(&bgx->lmac[lmac].netdev, &bgx->pdev->dev);
+		SET_NETDEV_DEV(bgx->lmac[lmac].netdev, &bgx->pdev->dev);
 		bgx->lmac[lmac].lmacid = lmac;
 
 		phy_np = of_parse_phandle(node, "phy-handle", 0);
@@ -1603,10 +1605,10 @@ static int bgx_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 		return dev_err_probe(dev, err, "Failed to enable PCI device\n");
 	}
 
-	err = pci_request_regions(pdev, DRV_NAME);
+	err = pcim_request_all_regions(pdev, DRV_NAME);
 	if (err) {
 		dev_err(dev, "PCI request regions failed 0x%x\n", err);
-		goto err_disable_device;
+		goto err_zero_drv_data;
 	}
 
 	/* MAP configuration registers */
@@ -1614,7 +1616,7 @@ static int bgx_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 	if (!bgx->reg_base) {
 		dev_err(dev, "BGX: Cannot map CSR memory space, aborting\n");
 		err = -ENOMEM;
-		goto err_release_regions;
+		goto err_zero_drv_data;
 	}
 
 	set_max_bgx_per_node(pdev);
@@ -1644,6 +1646,23 @@ static int bgx_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 
 	bgx_get_qlm_mode(bgx);
 
+	for (lmac = 0; lmac < bgx->lmac_count; lmac++) {
+		struct lmac *lmacp, **priv;
+
+		lmacp = &bgx->lmac[lmac];
+		lmacp->netdev = alloc_netdev_dummy(sizeof(struct lmac *));
+
+		if (!lmacp->netdev) {
+			for (int i = 0; i < lmac; i++)
+				free_netdev(bgx->lmac[i].netdev);
+			err = -ENOMEM;
+			goto err_enable;
+		}
+
+		priv = netdev_priv(lmacp->netdev);
+		*priv = lmacp;
+	}
+
 	err = bgx_init_phy(bgx);
 	if (err)
 		goto err_enable;
@@ -1669,10 +1688,7 @@ static int bgx_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 err_enable:
 	bgx_vnic[bgx->bgx_id] = NULL;
 	pci_free_irq(pdev, GMPX_GMI_TX_INT, bgx);
-err_release_regions:
-	pci_release_regions(pdev);
-err_disable_device:
-	pci_disable_device(pdev);
+err_zero_drv_data:
 	pci_set_drvdata(pdev, NULL);
 	return err;
 }
@@ -1683,14 +1699,14 @@ static void bgx_remove(struct pci_dev *pdev)
 	u8 lmac;
 
 	/* Disable all LMACs */
-	for (lmac = 0; lmac < bgx->lmac_count; lmac++)
+	for (lmac = 0; lmac < bgx->lmac_count; lmac++) {
 		bgx_lmac_disable(bgx, lmac);
+		free_netdev(bgx->lmac[lmac].netdev);
+	}
 
 	pci_free_irq(pdev, GMPX_GMI_TX_INT, bgx);
 
 	bgx_vnic[bgx->bgx_id] = NULL;
-	pci_release_regions(pdev);
-	pci_disable_device(pdev);
 	pci_set_drvdata(pdev, NULL);
 }
 

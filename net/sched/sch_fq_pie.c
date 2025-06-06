@@ -10,6 +10,7 @@
  */
 
 #include <linux/jhash.h>
+#include <linux/module.h>
 #include <linux/sizes.h>
 #include <linux/vmalloc.h>
 #include <net/pkt_cls.h>
@@ -129,6 +130,7 @@ static inline void flow_queue_add(struct fq_pie_flow *flow,
 static int fq_pie_qdisc_enqueue(struct sk_buff *skb, struct Qdisc *sch,
 				struct sk_buff **to_free)
 {
+	enum skb_drop_reason reason = SKB_DROP_REASON_QDISC_OVERLIMIT;
 	struct fq_pie_sched_data *q = qdisc_priv(sch);
 	struct fq_pie_flow *sel_flow;
 	int ret;
@@ -159,6 +161,8 @@ static int fq_pie_qdisc_enqueue(struct sk_buff *skb, struct Qdisc *sch,
 	} else if (unlikely(memory_limited)) {
 		q->overmemory++;
 	}
+
+	reason = SKB_DROP_REASON_QDISC_CONGESTED;
 
 	if (!pie_drop_early(sch, &q->p_params, &sel_flow->vars,
 			    sel_flow->backlog, skb->len)) {
@@ -197,8 +201,7 @@ static int fq_pie_qdisc_enqueue(struct sk_buff *skb, struct Qdisc *sch,
 out:
 	q->stats.dropped++;
 	sel_flow->vars.accu_prob = 0;
-	__qdisc_drop(skb, to_free);
-	qdisc_qstats_drop(sch);
+	qdisc_drop_reason(skb, sch, to_free, reason);
 	return NET_XMIT_CN;
 }
 
@@ -298,8 +301,8 @@ static int fq_pie_change(struct Qdisc *sch, struct nlattr *opt,
 	if (tb[TCA_FQ_PIE_LIMIT]) {
 		u32 limit = nla_get_u32(tb[TCA_FQ_PIE_LIMIT]);
 
-		q->p_params.limit = limit;
-		sch->limit = limit;
+		WRITE_ONCE(q->p_params.limit, limit);
+		WRITE_ONCE(sch->limit, limit);
 	}
 	if (tb[TCA_FQ_PIE_FLOWS]) {
 		if (q->flows) {
@@ -321,43 +324,49 @@ static int fq_pie_change(struct Qdisc *sch, struct nlattr *opt,
 		u32 target = nla_get_u32(tb[TCA_FQ_PIE_TARGET]);
 
 		/* convert to pschedtime */
-		q->p_params.target =
-			PSCHED_NS2TICKS((u64)target * NSEC_PER_USEC);
+		WRITE_ONCE(q->p_params.target,
+			   PSCHED_NS2TICKS((u64)target * NSEC_PER_USEC));
 	}
 
 	/* tupdate is in jiffies */
 	if (tb[TCA_FQ_PIE_TUPDATE])
-		q->p_params.tupdate =
-			usecs_to_jiffies(nla_get_u32(tb[TCA_FQ_PIE_TUPDATE]));
+		WRITE_ONCE(q->p_params.tupdate,
+			usecs_to_jiffies(nla_get_u32(tb[TCA_FQ_PIE_TUPDATE])));
 
 	if (tb[TCA_FQ_PIE_ALPHA])
-		q->p_params.alpha = nla_get_u32(tb[TCA_FQ_PIE_ALPHA]);
+		WRITE_ONCE(q->p_params.alpha,
+			   nla_get_u32(tb[TCA_FQ_PIE_ALPHA]));
 
 	if (tb[TCA_FQ_PIE_BETA])
-		q->p_params.beta = nla_get_u32(tb[TCA_FQ_PIE_BETA]);
+		WRITE_ONCE(q->p_params.beta,
+			   nla_get_u32(tb[TCA_FQ_PIE_BETA]));
 
 	if (tb[TCA_FQ_PIE_QUANTUM])
-		q->quantum = nla_get_u32(tb[TCA_FQ_PIE_QUANTUM]);
+		WRITE_ONCE(q->quantum, nla_get_u32(tb[TCA_FQ_PIE_QUANTUM]));
 
 	if (tb[TCA_FQ_PIE_MEMORY_LIMIT])
-		q->memory_limit = nla_get_u32(tb[TCA_FQ_PIE_MEMORY_LIMIT]);
+		WRITE_ONCE(q->memory_limit,
+			   nla_get_u32(tb[TCA_FQ_PIE_MEMORY_LIMIT]));
 
 	if (tb[TCA_FQ_PIE_ECN_PROB])
-		q->ecn_prob = nla_get_u32(tb[TCA_FQ_PIE_ECN_PROB]);
+		WRITE_ONCE(q->ecn_prob,
+			   nla_get_u32(tb[TCA_FQ_PIE_ECN_PROB]));
 
 	if (tb[TCA_FQ_PIE_ECN])
-		q->p_params.ecn = nla_get_u32(tb[TCA_FQ_PIE_ECN]);
+		WRITE_ONCE(q->p_params.ecn,
+			   nla_get_u32(tb[TCA_FQ_PIE_ECN]));
 
 	if (tb[TCA_FQ_PIE_BYTEMODE])
-		q->p_params.bytemode = nla_get_u32(tb[TCA_FQ_PIE_BYTEMODE]);
+		WRITE_ONCE(q->p_params.bytemode,
+			   nla_get_u32(tb[TCA_FQ_PIE_BYTEMODE]));
 
 	if (tb[TCA_FQ_PIE_DQ_RATE_ESTIMATOR])
-		q->p_params.dq_rate_estimator =
-			nla_get_u32(tb[TCA_FQ_PIE_DQ_RATE_ESTIMATOR]);
+		WRITE_ONCE(q->p_params.dq_rate_estimator,
+			   nla_get_u32(tb[TCA_FQ_PIE_DQ_RATE_ESTIMATOR]));
 
 	/* Drop excess packets if new limit is lower */
 	while (sch->q.qlen > sch->limit) {
-		struct sk_buff *skb = fq_pie_qdisc_dequeue(sch);
+		struct sk_buff *skb = qdisc_dequeue_internal(sch, false);
 
 		len_dropped += qdisc_pkt_len(skb);
 		num_dropped += 1;
@@ -470,22 +479,23 @@ static int fq_pie_dump(struct Qdisc *sch, struct sk_buff *skb)
 		return -EMSGSIZE;
 
 	/* convert target from pschedtime to us */
-	if (nla_put_u32(skb, TCA_FQ_PIE_LIMIT, sch->limit) ||
-	    nla_put_u32(skb, TCA_FQ_PIE_FLOWS, q->flows_cnt) ||
+	if (nla_put_u32(skb, TCA_FQ_PIE_LIMIT, READ_ONCE(sch->limit)) ||
+	    nla_put_u32(skb, TCA_FQ_PIE_FLOWS, READ_ONCE(q->flows_cnt)) ||
 	    nla_put_u32(skb, TCA_FQ_PIE_TARGET,
-			((u32)PSCHED_TICKS2NS(q->p_params.target)) /
+			((u32)PSCHED_TICKS2NS(READ_ONCE(q->p_params.target))) /
 			NSEC_PER_USEC) ||
 	    nla_put_u32(skb, TCA_FQ_PIE_TUPDATE,
-			jiffies_to_usecs(q->p_params.tupdate)) ||
-	    nla_put_u32(skb, TCA_FQ_PIE_ALPHA, q->p_params.alpha) ||
-	    nla_put_u32(skb, TCA_FQ_PIE_BETA, q->p_params.beta) ||
-	    nla_put_u32(skb, TCA_FQ_PIE_QUANTUM, q->quantum) ||
-	    nla_put_u32(skb, TCA_FQ_PIE_MEMORY_LIMIT, q->memory_limit) ||
-	    nla_put_u32(skb, TCA_FQ_PIE_ECN_PROB, q->ecn_prob) ||
-	    nla_put_u32(skb, TCA_FQ_PIE_ECN, q->p_params.ecn) ||
-	    nla_put_u32(skb, TCA_FQ_PIE_BYTEMODE, q->p_params.bytemode) ||
+			jiffies_to_usecs(READ_ONCE(q->p_params.tupdate))) ||
+	    nla_put_u32(skb, TCA_FQ_PIE_ALPHA, READ_ONCE(q->p_params.alpha)) ||
+	    nla_put_u32(skb, TCA_FQ_PIE_BETA, READ_ONCE(q->p_params.beta)) ||
+	    nla_put_u32(skb, TCA_FQ_PIE_QUANTUM, READ_ONCE(q->quantum)) ||
+	    nla_put_u32(skb, TCA_FQ_PIE_MEMORY_LIMIT,
+			READ_ONCE(q->memory_limit)) ||
+	    nla_put_u32(skb, TCA_FQ_PIE_ECN_PROB, READ_ONCE(q->ecn_prob)) ||
+	    nla_put_u32(skb, TCA_FQ_PIE_ECN, READ_ONCE(q->p_params.ecn)) ||
+	    nla_put_u32(skb, TCA_FQ_PIE_BYTEMODE, READ_ONCE(q->p_params.bytemode)) ||
 	    nla_put_u32(skb, TCA_FQ_PIE_DQ_RATE_ESTIMATOR,
-			q->p_params.dq_rate_estimator))
+			READ_ONCE(q->p_params.dq_rate_estimator)))
 		goto nla_put_failure;
 
 	return nla_nest_end(skb, opts);
@@ -545,7 +555,7 @@ static void fq_pie_destroy(struct Qdisc *sch)
 
 	tcf_block_put(q->block);
 	q->p_params.tupdate = 0;
-	del_timer_sync(&q->adapt_timer);
+	timer_delete_sync(&q->adapt_timer);
 	kvfree(q->flows);
 }
 
@@ -563,6 +573,7 @@ static struct Qdisc_ops fq_pie_qdisc_ops __read_mostly = {
 	.dump_stats	= fq_pie_dump_stats,
 	.owner		= THIS_MODULE,
 };
+MODULE_ALIAS_NET_SCH("fq_pie");
 
 static int __init fq_pie_module_init(void)
 {

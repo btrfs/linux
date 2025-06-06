@@ -21,3 +21,7 @@ are configurable at compile, boot or run time.
    cross-thread-rsb
    srso
    gather_data_sampling
+   reg-file-data-sampling
+   rsb
+   old_microcode
+   indirect-target-selection

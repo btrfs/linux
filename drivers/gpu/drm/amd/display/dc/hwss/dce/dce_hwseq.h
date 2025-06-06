@@ -644,10 +644,18 @@ struct dce_hwseq_registers {
 	uint32_t DPP_TOP0_DPP_CRC_CTRL;
 	uint32_t DPP_TOP0_DPP_CRC_VAL_R_G;
 	uint32_t DPP_TOP0_DPP_CRC_VAL_B_A;
+	uint32_t DPP_TOP0_DPP_CRC_VAL_R;
+	uint32_t DPP_TOP0_DPP_CRC_VAL_G;
+	uint32_t DPP_TOP0_DPP_CRC_VAL_B;
+	uint32_t DPP_TOP0_DPP_CRC_VAL_A;
 	uint32_t MPC_CRC_CTRL;
 	uint32_t MPC_CRC_RESULT_GB;
 	uint32_t MPC_CRC_RESULT_C;
 	uint32_t MPC_CRC_RESULT_AR;
+	uint32_t MPC_CRC_RESULT_R;
+	uint32_t MPC_CRC_RESULT_G;
+	uint32_t MPC_CRC_RESULT_B;
+	uint32_t MPC_CRC_RESULT_A;
 	uint32_t D1VGA_CONTROL;
 	uint32_t D2VGA_CONTROL;
 	uint32_t D3VGA_CONTROL;
@@ -684,6 +692,14 @@ struct dce_hwseq_registers {
 	uint32_t DMU_CLK_CNTL;
 	uint32_t DCCG_GATE_DISABLE_CNTL4;
 	uint32_t DCCG_GATE_DISABLE_CNTL5;
+	uint32_t DOMAIN22_PG_CONFIG;
+	uint32_t DOMAIN23_PG_CONFIG;
+	uint32_t DOMAIN24_PG_CONFIG;
+	uint32_t DOMAIN25_PG_CONFIG;
+	uint32_t DOMAIN22_PG_STATUS;
+	uint32_t DOMAIN23_PG_STATUS;
+	uint32_t DOMAIN24_PG_STATUS;
+	uint32_t DOMAIN25_PG_STATUS;
 };
  /* set field name */
 #define HWS_SF(blk_name, reg_name, field_name, post_fix)\
@@ -1214,6 +1230,21 @@ struct dce_hwseq_registers {
 	type DPIASYMCLK2_GATE_DISABLE;\
 	type DPIASYMCLK3_GATE_DISABLE;
 
+#define HWSEQ_DCN401_REG_FIELD_LIST(type) \
+	type DOMAIN22_POWER_FORCEON; \
+	type DOMAIN22_POWER_GATE; \
+	type DOMAIN23_POWER_FORCEON; \
+	type DOMAIN23_POWER_GATE; \
+	type DOMAIN24_POWER_FORCEON; \
+	type DOMAIN24_POWER_GATE; \
+	type DOMAIN25_POWER_FORCEON; \
+	type DOMAIN25_POWER_GATE; \
+	type DOMAIN22_PGFSM_PWR_STATUS; \
+	type DOMAIN23_PGFSM_PWR_STATUS; \
+	type DOMAIN24_PGFSM_PWR_STATUS; \
+	type DOMAIN25_PGFSM_PWR_STATUS; \
+	type DOMAIN_DESIRED_PWR_STATE;
+
 struct dce_hwseq_shift {
 	HWSEQ_REG_FIELD_LIST(uint8_t)
 	HWSEQ_DCN_REG_FIELD_LIST(uint8_t)
@@ -1221,6 +1252,7 @@ struct dce_hwseq_shift {
 	HWSEQ_DCN301_REG_FIELD_LIST(uint8_t)
 	HWSEQ_DCN31_REG_FIELD_LIST(uint8_t)
 	HWSEQ_DCN35_REG_FIELD_LIST(uint8_t)
+	HWSEQ_DCN401_REG_FIELD_LIST(uint8_t)
 };
 
 struct dce_hwseq_mask {
@@ -1230,6 +1262,7 @@ struct dce_hwseq_mask {
 	HWSEQ_DCN301_REG_FIELD_LIST(uint32_t)
 	HWSEQ_DCN31_REG_FIELD_LIST(uint32_t)
 	HWSEQ_DCN35_REG_FIELD_LIST(uint32_t)
+	HWSEQ_DCN401_REG_FIELD_LIST(uint32_t)
 };
 
 

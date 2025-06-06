@@ -230,14 +230,14 @@ static const struct drm_connector_funcs ch7033_connector_funcs = {
 static int ch7033_connector_get_modes(struct drm_connector *connector)
 {
 	struct ch7033_priv *priv = conn_to_ch7033_priv(connector);
-	struct edid *edid;
+	const struct drm_edid *drm_edid;
 	int ret;
 
-	edid = drm_bridge_get_edid(priv->next_bridge, connector);
-	drm_connector_update_edid_property(connector, edid);
-	if (edid) {
-		ret = drm_add_edid_modes(connector, edid);
-		kfree(edid);
+	drm_edid = drm_bridge_edid_read(priv->next_bridge, connector);
+	drm_edid_connector_update(connector, drm_edid);
+	if (drm_edid) {
+		ret = drm_edid_connector_add_modes(connector);
+		drm_edid_free(drm_edid);
 	} else {
 		ret = drm_add_modes_noedid(connector, 1920, 1080);
 		drm_set_preferred_mode(connector, 1024, 768);
@@ -268,13 +268,14 @@ static void ch7033_hpd_event(void *arg, enum drm_connector_status status)
 }
 
 static int ch7033_bridge_attach(struct drm_bridge *bridge,
+				struct drm_encoder *encoder,
 				enum drm_bridge_attach_flags flags)
 {
 	struct ch7033_priv *priv = bridge_to_ch7033_priv(bridge);
 	struct drm_connector *connector = &priv->connector;
 	int ret;
 
-	ret = drm_bridge_attach(bridge->encoder, priv->next_bridge, bridge,
+	ret = drm_bridge_attach(encoder, priv->next_bridge, bridge,
 				DRM_BRIDGE_ATTACH_NO_CONNECTOR);
 	if (ret)
 		return ret;
@@ -305,7 +306,7 @@ static int ch7033_bridge_attach(struct drm_bridge *bridge,
 		return ret;
 	}
 
-	return drm_connector_attach_encoder(&priv->connector, bridge->encoder);
+	return drm_connector_attach_encoder(&priv->connector, encoder);
 }
 
 static void ch7033_bridge_detach(struct drm_bridge *bridge)
@@ -597,7 +598,7 @@ static const struct of_device_id ch7033_dt_ids[] = {
 MODULE_DEVICE_TABLE(of, ch7033_dt_ids);
 
 static const struct i2c_device_id ch7033_ids[] = {
-	{ "ch7033", 0 },
+	{ "ch7033" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, ch7033_ids);
