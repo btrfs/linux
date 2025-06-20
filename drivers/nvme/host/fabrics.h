@@ -19,13 +19,6 @@
 #define NVMF_DEF_FAIL_FAST_TMO		-1
 
 /*
- * Reserved one command for internal usage.  This command is used for sending
- * the connect command, as well as for the keep alive command on the admin
- * queue once live.
- */
-#define NVMF_RESERVED_TAGS	1
-
-/*
  * Define a host as seen by the target.  We allocate one at boot, but also
  * allow the override it when creating controllers.  This is both to provide
  * persistence of the Host NQN over multiple boots, and to allow using
@@ -73,6 +66,7 @@ enum {
 	NVMF_OPT_TLS		= 1 << 25,
 	NVMF_OPT_KEYRING	= 1 << 26,
 	NVMF_OPT_TLS_KEY	= 1 << 27,
+	NVMF_OPT_CONCAT		= 1 << 28,
 };
 
 /**
@@ -86,7 +80,7 @@ enum {
  * @transport:	Holds the fabric transport "technology name" (for a lack of
  *		better description) that will be used by an NVMe controller
  *		being added.
- * @subsysnqn:	Hold the fully qualified NQN subystem name (format defined
+ * @subsysnqn:	Hold the fully qualified NQN subsystem name (format defined
  *		in the NVMe specification, "NVMe Qualified Names").
  * @traddr:	The transport-specific TRADDR field for a port on the
  *              subsystem which is adding a controller.
@@ -108,6 +102,7 @@ enum {
  * @keyring:    Keyring to use for key lookups
  * @tls_key:    TLS key for encrypted connections (TCP)
  * @tls:        Start TLS encrypted connections (TCP)
+ * @concat:     Enabled Secure channel concatenation (TCP)
  * @disable_sqflow: disable controller sq flow control
  * @hdr_digest: generate/verify header digest (TCP)
  * @data_digest: generate/verify data digest (TCP)
@@ -137,6 +132,7 @@ struct nvmf_ctrl_options {
 	struct key		*keyring;
 	struct key		*tls_key;
 	bool			tls;
+	bool			concat;
 	bool			disable_sqflow;
 	bool			hdr_digest;
 	bool			data_digest;
@@ -160,7 +156,7 @@ struct nvmf_ctrl_options {
  * @create_ctrl():	function pointer that points to a non-NVMe
  *			implementation-specific fabric technology
  *			that would go into starting up that fabric
- *			for the purpose of conneciton to an NVMe controller
+ *			for the purpose of connection to an NVMe controller
  *			using that fabric technology.
  *
  * Notes:
@@ -169,7 +165,7 @@ struct nvmf_ctrl_options {
  *	2. create_ctrl() must be defined (even if it does nothing)
  *	3. struct nvmf_transport_ops must be statically allocated in the
  *	   modules .bss section so that a pure module_get on @module
- *	   prevents the memory from beeing freed.
+ *	   prevents the memory from being freed.
  */
 struct nvmf_transport_ops {
 	struct list_head	entry;
@@ -185,9 +181,11 @@ static inline bool
 nvmf_ctlr_matches_baseopts(struct nvme_ctrl *ctrl,
 			struct nvmf_ctrl_options *opts)
 {
-	if (ctrl->state == NVME_CTRL_DELETING ||
-	    ctrl->state == NVME_CTRL_DELETING_NOIO ||
-	    ctrl->state == NVME_CTRL_DEAD ||
+	enum nvme_ctrl_state state = nvme_ctrl_state(ctrl);
+
+	if (state == NVME_CTRL_DELETING ||
+	    state == NVME_CTRL_DELETING_NOIO ||
+	    state == NVME_CTRL_DEAD ||
 	    strcmp(opts->subsysnqn, ctrl->opts->subsysnqn) ||
 	    strcmp(opts->host->nqn, ctrl->opts->host->nqn) ||
 	    !uuid_equal(&opts->host->id, &ctrl->opts->host->id))
@@ -222,13 +220,14 @@ static inline unsigned int nvmf_nr_io_queues(struct nvmf_ctrl_options *opts)
 int nvmf_reg_read32(struct nvme_ctrl *ctrl, u32 off, u32 *val);
 int nvmf_reg_read64(struct nvme_ctrl *ctrl, u32 off, u64 *val);
 int nvmf_reg_write32(struct nvme_ctrl *ctrl, u32 off, u32 val);
+int nvmf_subsystem_reset(struct nvme_ctrl *ctrl);
 int nvmf_connect_admin_queue(struct nvme_ctrl *ctrl);
 int nvmf_connect_io_queue(struct nvme_ctrl *ctrl, u16 qid);
 int nvmf_register_transport(struct nvmf_transport_ops *ops);
 void nvmf_unregister_transport(struct nvmf_transport_ops *ops);
 void nvmf_free_options(struct nvmf_ctrl_options *opts);
 int nvmf_get_address(struct nvme_ctrl *ctrl, char *buf, int size);
-bool nvmf_should_reconnect(struct nvme_ctrl *ctrl);
+bool nvmf_should_reconnect(struct nvme_ctrl *ctrl, int status);
 bool nvmf_ip_options_match(struct nvme_ctrl *ctrl,
 		struct nvmf_ctrl_options *opts);
 void nvmf_set_io_queues(struct nvmf_ctrl_options *opts, u32 nr_io_queues,

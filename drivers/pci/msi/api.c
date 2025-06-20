@@ -53,10 +53,9 @@ void pci_disable_msi(struct pci_dev *dev)
 	if (!pci_msi_enabled() || !dev || !dev->msi_enabled)
 		return;
 
-	msi_lock_descs(&dev->dev);
+	guard(msi_descs_lock)(&dev->dev);
 	pci_msi_shutdown(dev);
 	pci_free_msi_irqs(dev);
-	msi_unlock_descs(&dev->dev);
 }
 EXPORT_SYMBOL(pci_disable_msi);
 
@@ -162,7 +161,7 @@ struct msi_map pci_msix_alloc_irq_at(struct pci_dev *dev, unsigned int index,
 EXPORT_SYMBOL_GPL(pci_msix_alloc_irq_at);
 
 /**
- * pci_msix_free_irq - Free an interrupt on a PCI/MSIX interrupt domain
+ * pci_msix_free_irq - Free an interrupt on a PCI/MSI-X interrupt domain
  *
  * @dev:	The PCI device to operate on
  * @map:	A struct msi_map describing the interrupt to free
@@ -196,10 +195,9 @@ void pci_disable_msix(struct pci_dev *dev)
 	if (!pci_msi_enabled() || !dev || !dev->msix_enabled)
 		return;
 
-	msi_lock_descs(&dev->dev);
+	guard(msi_descs_lock)(&dev->dev);
 	pci_msix_shutdown(dev);
 	pci_free_msi_irqs(dev);
-	msi_unlock_descs(&dev->dev);
 }
 EXPORT_SYMBOL(pci_disable_msix);
 
@@ -213,8 +211,8 @@ EXPORT_SYMBOL(pci_disable_msix);
  *            * %PCI_IRQ_MSIX      Allow trying MSI-X vector allocations
  *            * %PCI_IRQ_MSI       Allow trying MSI vector allocations
  *
- *            * %PCI_IRQ_LEGACY    Allow trying legacy INTx interrupts, if
- *              and only if @min_vecs == 1
+ *            * %PCI_IRQ_INTX      Allow trying INTx interrupts, if and
+ *              only if @min_vecs == 1
  *
  *            * %PCI_IRQ_AFFINITY  Auto-manage IRQs affinity by spreading
  *              the vectors around available CPUs
@@ -279,8 +277,8 @@ int pci_alloc_irq_vectors_affinity(struct pci_dev *dev, unsigned int min_vecs,
 			return nvecs;
 	}
 
-	/* use legacy IRQ if allowed */
-	if (flags & PCI_IRQ_LEGACY) {
+	/* use INTx IRQ if allowed */
+	if (flags & PCI_IRQ_INTX) {
 		if (min_vecs == 1 && dev->irq) {
 			/*
 			 * Invoke the affinity spreading logic to ensure that
@@ -366,56 +364,6 @@ const struct cpumask *pci_irq_get_affinity(struct pci_dev *dev, int nr)
 EXPORT_SYMBOL(pci_irq_get_affinity);
 
 /**
- * pci_ims_alloc_irq - Allocate an interrupt on a PCI/IMS interrupt domain
- * @dev:	The PCI device to operate on
- * @icookie:	Pointer to an IMS implementation specific cookie for this
- *		IMS instance (PASID, queue ID, pointer...).
- *		The cookie content is copied into the MSI descriptor for the
- *		interrupt chip callbacks or domain specific setup functions.
- * @affdesc:	Optional pointer to an interrupt affinity descriptor
- *
- * There is no index for IMS allocations as IMS is an implementation
- * specific storage and does not have any direct associations between
- * index, which might be a pure software construct, and device
- * functionality. This association is established by the driver either via
- * the index - if there is a hardware table - or in case of purely software
- * managed IMS implementation the association happens via the
- * irq_write_msi_msg() callback of the implementation specific interrupt
- * chip, which utilizes the provided @icookie to store the MSI message in
- * the appropriate place.
- *
- * Return: A struct msi_map
- *
- *	On success msi_map::index contains the allocated index (>= 0) and
- *	msi_map::virq the allocated Linux interrupt number (> 0).
- *
- *	On fail msi_map::index contains the error code and msi_map::virq
- *	is set to 0.
- */
-struct msi_map pci_ims_alloc_irq(struct pci_dev *dev, union msi_instance_cookie *icookie,
-				 const struct irq_affinity_desc *affdesc)
-{
-	return msi_domain_alloc_irq_at(&dev->dev, MSI_SECONDARY_DOMAIN, MSI_ANY_INDEX,
-				       affdesc, icookie);
-}
-EXPORT_SYMBOL_GPL(pci_ims_alloc_irq);
-
-/**
- * pci_ims_free_irq - Allocate an interrupt on a PCI/IMS interrupt domain
- *		      which was allocated via pci_ims_alloc_irq()
- * @dev:	The PCI device to operate on
- * @map:	A struct msi_map describing the interrupt to free as
- *		returned from pci_ims_alloc_irq()
- */
-void pci_ims_free_irq(struct pci_dev *dev, struct msi_map map)
-{
-	if (WARN_ON_ONCE(map.index < 0 || map.virq <= 0))
-		return;
-	msi_domain_free_irqs_range(&dev->dev, MSI_SECONDARY_DOMAIN, map.index, map.index);
-}
-EXPORT_SYMBOL_GPL(pci_ims_free_irq);
-
-/**
  * pci_free_irq_vectors() - Free previously allocated IRQs for a device
  * @dev: the PCI device to operate on
  *
@@ -451,7 +399,7 @@ EXPORT_SYMBOL_GPL(pci_restore_msi_state);
  * Return: true if MSI has not been globally disabled through ACPI FADT,
  * PCI bridge quirks, or the "pci=nomsi" kernel command-line option.
  */
-int pci_msi_enabled(void)
+bool pci_msi_enabled(void)
 {
 	return pci_msi_enable;
 }

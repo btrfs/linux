@@ -25,7 +25,8 @@ struct print_callbacks {
 			const char *long_desc,
 			const char *expr,
 			const char *threshold,
-			const char *unit);
+			const char *unit,
+			const char *pmu_name);
 	bool (*skip_duplicate_pmus)(void *print_state);
 };
 
@@ -36,7 +37,6 @@ void print_sdt_events(const struct print_callbacks *print_cb, void *print_state)
 void print_symbol_events(const struct print_callbacks *print_cb, void *print_state,
 			 unsigned int type, const struct event_symbol *syms,
 			 unsigned int max);
-void print_tool_events(const struct print_callbacks *print_cb, void *print_state);
 void print_tracepoint_events(const struct print_callbacks *print_cb, void *print_state);
 bool is_event_supported(u8 type, u64 config);
 

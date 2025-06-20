@@ -20,6 +20,7 @@
 #include <linux/irq.h>
 #include <linux/interrupt.h>
 #include <linux/platform_device.h>
+#include <linux/string_choices.h>
 
 #include <linux/mmc/host.h>
 #include <linux/mmc/mmc.h>
@@ -208,7 +209,7 @@ static void alcor_trf_block_pio(struct alcor_sdmmc_host *host, bool read)
 	len = min(host->sg_miter.length, blksize);
 
 	dev_dbg(host->dev, "PIO, %s block size: 0x%zx\n",
-		read ? "read" : "write", blksize);
+		str_read_write(read), blksize);
 
 	host->sg_miter.consumed = len;
 	host->blocks--;
@@ -1175,7 +1176,7 @@ MODULE_DEVICE_TABLE(platform, alcor_pci_sdmmc_ids);
 
 static struct platform_driver alcor_pci_sdmmc_driver = {
 	.probe		= alcor_pci_sdmmc_drv_probe,
-	.remove_new	= alcor_pci_sdmmc_drv_remove,
+	.remove		= alcor_pci_sdmmc_drv_remove,
 	.id_table	= alcor_pci_sdmmc_ids,
 	.driver		= {
 		.name	= DRV_NAME_ALCOR_PCI_SDMMC,

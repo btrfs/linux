@@ -13,27 +13,6 @@
 #define PARMAREA		0x10400
 
 #define COMMAND_LINE_SIZE CONFIG_COMMAND_LINE_SIZE
-/*
- * Machine features detected in early.c
- */
-
-#define MACHINE_FLAG_VM		BIT(0)
-#define MACHINE_FLAG_KVM	BIT(1)
-#define MACHINE_FLAG_LPAR	BIT(2)
-#define MACHINE_FLAG_DIAG9C	BIT(3)
-#define MACHINE_FLAG_ESOP	BIT(4)
-#define MACHINE_FLAG_IDTE	BIT(5)
-#define MACHINE_FLAG_EDAT1	BIT(7)
-#define MACHINE_FLAG_EDAT2	BIT(8)
-#define MACHINE_FLAG_TOPOLOGY	BIT(10)
-#define MACHINE_FLAG_TE		BIT(11)
-#define MACHINE_FLAG_TLB_LC	BIT(12)
-#define MACHINE_FLAG_TLB_GUEST	BIT(14)
-#define MACHINE_FLAG_NX		BIT(15)
-#define MACHINE_FLAG_GS		BIT(16)
-#define MACHINE_FLAG_SCC	BIT(17)
-#define MACHINE_FLAG_PCI_MIO	BIT(18)
-#define MACHINE_FLAG_RDP	BIT(19)
 
 #define LPP_MAGIC		BIT(31)
 #define LPP_PID_MASK		_AC(0xffffffff, UL)
@@ -77,25 +56,6 @@ extern unsigned long max_mappable;
 /* The Write Back bit position in the physaddr is given by the SLPC PCI */
 extern unsigned long mio_wb_bit_mask;
 
-#define MACHINE_IS_VM		(S390_lowcore.machine_flags & MACHINE_FLAG_VM)
-#define MACHINE_IS_KVM		(S390_lowcore.machine_flags & MACHINE_FLAG_KVM)
-#define MACHINE_IS_LPAR		(S390_lowcore.machine_flags & MACHINE_FLAG_LPAR)
-
-#define MACHINE_HAS_DIAG9C	(S390_lowcore.machine_flags & MACHINE_FLAG_DIAG9C)
-#define MACHINE_HAS_ESOP	(S390_lowcore.machine_flags & MACHINE_FLAG_ESOP)
-#define MACHINE_HAS_IDTE	(S390_lowcore.machine_flags & MACHINE_FLAG_IDTE)
-#define MACHINE_HAS_EDAT1	(S390_lowcore.machine_flags & MACHINE_FLAG_EDAT1)
-#define MACHINE_HAS_EDAT2	(S390_lowcore.machine_flags & MACHINE_FLAG_EDAT2)
-#define MACHINE_HAS_TOPOLOGY	(S390_lowcore.machine_flags & MACHINE_FLAG_TOPOLOGY)
-#define MACHINE_HAS_TE		(S390_lowcore.machine_flags & MACHINE_FLAG_TE)
-#define MACHINE_HAS_TLB_LC	(S390_lowcore.machine_flags & MACHINE_FLAG_TLB_LC)
-#define MACHINE_HAS_TLB_GUEST	(S390_lowcore.machine_flags & MACHINE_FLAG_TLB_GUEST)
-#define MACHINE_HAS_NX		(S390_lowcore.machine_flags & MACHINE_FLAG_NX)
-#define MACHINE_HAS_GS		(S390_lowcore.machine_flags & MACHINE_FLAG_GS)
-#define MACHINE_HAS_SCC		(S390_lowcore.machine_flags & MACHINE_FLAG_SCC)
-#define MACHINE_HAS_PCI_MIO	(S390_lowcore.machine_flags & MACHINE_FLAG_PCI_MIO)
-#define MACHINE_HAS_RDP		(S390_lowcore.machine_flags & MACHINE_FLAG_RDP)
-
 /*
  * Console mode. Override with conmode=
  */
@@ -115,6 +75,8 @@ extern unsigned int console_irq;
 #define SET_CONSOLE_VT220	do { console_mode = 4; } while (0)
 #define SET_CONSOLE_HVC		do { console_mode = 5; } while (0)
 
+void register_early_console(void);
+
 #ifdef CONFIG_VMCP
 void vmcp_cma_reserve(void);
 #else
@@ -126,20 +88,6 @@ void report_user_fault(struct pt_regs *regs, long signr, int is_mm_fault);
 extern void (*_machine_restart)(char *command);
 extern void (*_machine_halt)(void);
 extern void (*_machine_power_off)(void);
-
-extern unsigned long __kaslr_offset;
-static inline unsigned long kaslr_offset(void)
-{
-	return __kaslr_offset;
-}
-
-extern int __kaslr_enabled;
-static inline int kaslr_enabled(void)
-{
-	if (IS_ENABLED(CONFIG_RANDOMIZE_BASE))
-		return __kaslr_enabled;
-	return 0;
-}
 
 struct oldmem_data {
 	unsigned long start;

@@ -342,7 +342,7 @@ static int mtk_mdp_try_crop(struct mtk_mdp_ctx *ctx, u32 type,
 	if (r->left & 1)
 		r->left -= 1;
 
-	mtk_mdp_dbg(2, "[%d] crop l,t,w,h:%d,%d,%d,%d, max:%dx%d", ctx->id,
+	mtk_mdp_dbg(2, "[%d] crop (%d,%d)/%ux%u, max:%dx%d", ctx->id,
 		    r->left, r->top, r->width,
 		    r->height, max_w, max_h);
 	return 0;
@@ -584,8 +584,6 @@ static const struct vb2_ops mtk_mdp_m2m_qops = {
 	.buf_queue	 = mtk_mdp_m2m_buf_queue,
 	.stop_streaming	 = mtk_mdp_m2m_stop_streaming,
 	.start_streaming = mtk_mdp_m2m_start_streaming,
-	.wait_prepare	 = vb2_ops_wait_prepare,
-	.wait_finish	 = vb2_ops_wait_finish,
 };
 
 static int mtk_mdp_m2m_querycap(struct file *file, void *fh,

@@ -27,7 +27,7 @@ static void rtl88e_init_aspm_vars(struct ieee80211_hw *hw)
 	 * 2 - Enable ASPM with Clock Req,
 	 * 3 - Alwyas Enable ASPM with Clock Req,
 	 * 4 - Always Enable ASPM without Clock Req.
-	 * set defult to RTL8192CE:3 RTL8192E:2
+	 * set default to RTL8192CE:3 RTL8192E:2
 	 */
 	rtlpci->const_pci_aspm = 3;
 
@@ -179,9 +179,9 @@ static void rtl88e_deinit_sw_vars(struct ieee80211_hw *hw)
 	}
 
 	if (rtlpriv->psc.low_power_enable)
-		del_timer_sync(&rtlpriv->works.fw_clockoff_timer);
+		timer_delete_sync(&rtlpriv->works.fw_clockoff_timer);
 
-	del_timer_sync(&rtlpriv->works.fast_antenna_training_timer);
+	timer_delete_sync(&rtlpriv->works.fast_antenna_training_timer);
 }
 
 /* get bt coexist status */

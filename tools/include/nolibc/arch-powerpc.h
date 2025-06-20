@@ -172,7 +172,7 @@
 	_ret;                                                                \
 })
 
-#ifndef __powerpc64__
+#if !defined(__powerpc64__) && !defined(__clang__)
 /* FIXME: For 32-bit PowerPC, with newer gcc compilers (e.g. gcc 13.1.0),
  * "omit-frame-pointer" fails with __attribute__((no_stack_protector)) but
  * works with __attribute__((__optimize__("-fno-stack-protector")))
@@ -184,7 +184,7 @@
 #endif /* !__powerpc64__ */
 
 /* startup code */
-void __attribute__((weak, noreturn, optimize("Os", "omit-frame-pointer"))) __no_stack_protector _start(void)
+void __attribute__((weak, noreturn)) __nolibc_entrypoint __no_stack_protector _start(void)
 {
 #ifdef __powerpc64__
 #if _CALL_ELF == 2
@@ -201,7 +201,6 @@ void __attribute__((weak, noreturn, optimize("Os", "omit-frame-pointer"))) __no_
 
 	__asm__ volatile (
 		"mr     3, 1\n"         /* save stack pointer to r3, as arg1 of _start_c */
-		"clrrdi 1, 1, 4\n"      /* align the stack to 16 bytes                   */
 		"li     0, 0\n"         /* zero the frame pointer                        */
 		"stdu   1, -32(1)\n"    /* the initial stack frame                       */
 		"bl     _start_c\n"     /* transfer to c runtime                         */
@@ -209,13 +208,12 @@ void __attribute__((weak, noreturn, optimize("Os", "omit-frame-pointer"))) __no_
 #else
 	__asm__ volatile (
 		"mr     3, 1\n"         /* save stack pointer to r3, as arg1 of _start_c */
-		"clrrwi 1, 1, 4\n"      /* align the stack to 16 bytes                   */
 		"li     0, 0\n"         /* zero the frame pointer                        */
 		"stwu   1, -16(1)\n"    /* the initial stack frame                       */
 		"bl     _start_c\n"     /* transfer to c runtime                         */
 	);
 #endif
-	__builtin_unreachable();
+	__nolibc_entrypoint_epilogue();
 }
 
 #endif /* _NOLIBC_ARCH_POWERPC_H */

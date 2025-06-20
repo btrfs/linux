@@ -2,9 +2,9 @@
  * SPDX-License-Identifier: MIT
  */
 
+#include "display/intel_overlay.h"
 #include "gem/i915_gem_mman.h"
 #include "gt/intel_engine_user.h"
-
 #include "pxp/intel_pxp.h"
 
 #include "i915_cmd_parser.h"
@@ -16,6 +16,7 @@ int i915_getparam_ioctl(struct drm_device *dev, void *data,
 			struct drm_file *file_priv)
 {
 	struct drm_i915_private *i915 = to_i915(dev);
+	struct intel_display *display = &i915->display;
 	struct pci_dev *pdev = to_pci_dev(dev->dev);
 	const struct sseu_dev_info *sseu = &to_gt(i915)->info.sseu;
 	drm_i915_getparam_t *param = data;
@@ -38,7 +39,7 @@ int i915_getparam_ioctl(struct drm_device *dev, void *data,
 		value = to_gt(i915)->ggtt->num_fences;
 		break;
 	case I915_PARAM_HAS_OVERLAY:
-		value = !!i915->display.overlay;
+		value = intel_overlay_available(display);
 		break;
 	case I915_PARAM_HAS_BSD:
 		value = !!intel_engine_lookup_user(i915,
@@ -155,12 +156,18 @@ int i915_getparam_ioctl(struct drm_device *dev, void *data,
 		 */
 		value = 1;
 		break;
+	case I915_PARAM_HAS_CONTEXT_FREQ_HINT:
+		if (intel_uc_uses_guc_submission(&to_gt(i915)->uc))
+			value = 1;
+		else
+			value = -EINVAL;
+		break;
 	case I915_PARAM_HAS_CONTEXT_ISOLATION:
 		value = intel_engines_has_context_isolation(i915);
 		break;
 	case I915_PARAM_SLICE_MASK:
 		/* Not supported from Xe_HP onward; use topology queries */
-		if (GRAPHICS_VER_FULL(i915) >= IP_VER(12, 50))
+		if (GRAPHICS_VER_FULL(i915) >= IP_VER(12, 55))
 			return -EINVAL;
 
 		value = sseu->slice_mask;
@@ -169,7 +176,7 @@ int i915_getparam_ioctl(struct drm_device *dev, void *data,
 		break;
 	case I915_PARAM_SUBSLICE_MASK:
 		/* Not supported from Xe_HP onward; use topology queries */
-		if (GRAPHICS_VER_FULL(i915) >= IP_VER(12, 50))
+		if (GRAPHICS_VER_FULL(i915) >= IP_VER(12, 55))
 			return -EINVAL;
 
 		/* Only copy bits from the first slice */

@@ -183,7 +183,7 @@ static int tb10x_gpio_probe(struct platform_device *pdev)
 		if (ret != 0)
 			return ret;
 
-		tb10x_gpio->domain = irq_domain_add_linear(np,
+		tb10x_gpio->domain = irq_domain_create_linear(of_fwnode_handle(np),
 						tb10x_gpio->gc.ngpio,
 						&irq_generic_chip_ops, NULL);
 		if (!tb10x_gpio->domain) {
@@ -235,7 +235,7 @@ MODULE_DEVICE_TABLE(of, tb10x_gpio_dt_ids);
 
 static struct platform_driver tb10x_gpio_driver = {
 	.probe		= tb10x_gpio_probe,
-	.remove_new	= tb10x_gpio_remove,
+	.remove		= tb10x_gpio_remove,
 	.driver = {
 		.name	= "tb10x-gpio",
 		.of_match_table = tb10x_gpio_dt_ids,

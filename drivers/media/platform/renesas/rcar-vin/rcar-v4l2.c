@@ -86,6 +86,22 @@ static const struct rvin_video_format rvin_formats[] = {
 		.fourcc			= V4L2_PIX_FMT_GREY,
 		.bpp			= 1,
 	},
+	{
+		.fourcc			= V4L2_PIX_FMT_SBGGR10,
+		.bpp			= 2,
+	},
+	{
+		.fourcc			= V4L2_PIX_FMT_SGBRG10,
+		.bpp			= 2,
+	},
+	{
+		.fourcc			= V4L2_PIX_FMT_SGRBG10,
+		.bpp			= 2,
+	},
+	{
+		.fourcc			= V4L2_PIX_FMT_SRGGB10,
+		.bpp			= 2,
+	},
 };
 
 const struct rvin_video_format *rvin_format_from_pixel(struct rvin_dev *vin,
@@ -104,6 +120,13 @@ const struct rvin_video_format *rvin_format_from_pixel(struct rvin_dev *vin,
 		 * 5, 8, 9, 12 and 13.
 		 */
 		if (!vin->info->nv12 || !(BIT(vin->id) & 0x3333))
+			return NULL;
+		break;
+	case V4L2_PIX_FMT_SBGGR10:
+	case V4L2_PIX_FMT_SGBRG10:
+	case V4L2_PIX_FMT_SGRBG10:
+	case V4L2_PIX_FMT_SRGGB10:
+		if (!vin->info->raw10)
 			return NULL;
 		break;
 	default:
@@ -138,9 +161,6 @@ static u32 rvin_format_bytesperline(struct rvin_dev *vin,
 		break;
 	}
 
-	if (V4L2_FIELD_IS_SEQUENTIAL(pix->field))
-		align = 0x80;
-
 	return ALIGN(pix->width, align) * fmt->bpp;
 }
 
@@ -171,8 +191,6 @@ static void rvin_format_align(struct rvin_dev *vin, struct v4l2_pix_format *pix)
 	case V4L2_FIELD_INTERLACED_BT:
 	case V4L2_FIELD_INTERLACED:
 	case V4L2_FIELD_ALTERNATE:
-	case V4L2_FIELD_SEQ_TB:
-	case V4L2_FIELD_SEQ_BT:
 		break;
 	default:
 		pix->field = RVIN_DEFAULT_FIELD;
@@ -407,6 +425,26 @@ static int rvin_enum_fmt_vid_cap(struct file *file, void *priv,
 			return -EINVAL;
 		f->pixelformat = V4L2_PIX_FMT_SRGGB8;
 		return 0;
+	case MEDIA_BUS_FMT_SBGGR10_1X10:
+		if (f->index)
+			return -EINVAL;
+		f->pixelformat = V4L2_PIX_FMT_SBGGR10;
+		return 0;
+	case MEDIA_BUS_FMT_SGBRG10_1X10:
+		if (f->index)
+			return -EINVAL;
+		f->pixelformat = V4L2_PIX_FMT_SGBRG10;
+		return 0;
+	case MEDIA_BUS_FMT_SGRBG10_1X10:
+		if (f->index)
+			return -EINVAL;
+		f->pixelformat = V4L2_PIX_FMT_SGRBG10;
+		return 0;
+	case MEDIA_BUS_FMT_SRGGB10_1X10:
+		if (f->index)
+			return -EINVAL;
+		f->pixelformat = V4L2_PIX_FMT_SRGGB10;
+		return 0;
 	default:
 		return -EINVAL;
 	}
@@ -461,8 +499,6 @@ static int rvin_remote_rectangle(struct rvin_dev *vin, struct v4l2_rect *rect)
 		case V4L2_FIELD_INTERLACED_TB:
 		case V4L2_FIELD_INTERLACED_BT:
 		case V4L2_FIELD_INTERLACED:
-		case V4L2_FIELD_SEQ_TB:
-		case V4L2_FIELD_SEQ_BT:
 			rect->height *= 2;
 			break;
 		}
@@ -548,8 +584,8 @@ static int rvin_s_selection(struct file *file, void *fh,
 
 		vin->crop = s->r = r;
 
-		vin_dbg(vin, "Cropped %dx%d@%d:%d of %dx%d\n",
-			r.width, r.height, r.left, r.top,
+		vin_dbg(vin, "Cropped (%d,%d)/%ux%u of %dx%d\n",
+			r.left, r.top, r.width, r.height,
 			max_rect.width, max_rect.height);
 		break;
 	case V4L2_SEL_TGT_COMPOSE:
@@ -573,8 +609,8 @@ static int rvin_s_selection(struct file *file, void *fh,
 
 		vin->compose = s->r = r;
 
-		vin_dbg(vin, "Compose %dx%d@%d:%d in %dx%d\n",
-			r.width, r.height, r.left, r.top,
+		vin_dbg(vin, "Compose (%d,%d)/%ux%u in %dx%d\n",
+			r.left, r.top, r.width, r.height,
 			vin->format.width, vin->format.height);
 		break;
 	default:
@@ -730,7 +766,8 @@ static int rvin_s_dv_timings(struct file *file, void *priv_fh,
 	struct v4l2_subdev *sd = vin_to_source(vin);
 	int ret;
 
-	ret = v4l2_subdev_call(sd, video, s_dv_timings, timings);
+	ret = v4l2_subdev_call(sd, pad, s_dv_timings,
+			       vin->parallel.sink_pad, timings);
 	if (ret)
 		return ret;
 
@@ -744,7 +781,8 @@ static int rvin_g_dv_timings(struct file *file, void *priv_fh,
 	struct rvin_dev *vin = video_drvdata(file);
 	struct v4l2_subdev *sd = vin_to_source(vin);
 
-	return v4l2_subdev_call(sd, video, g_dv_timings, timings);
+	return v4l2_subdev_call(sd, pad, g_dv_timings,
+				vin->parallel.sink_pad, timings);
 }
 
 static int rvin_query_dv_timings(struct file *file, void *priv_fh,
@@ -753,7 +791,8 @@ static int rvin_query_dv_timings(struct file *file, void *priv_fh,
 	struct rvin_dev *vin = video_drvdata(file);
 	struct v4l2_subdev *sd = vin_to_source(vin);
 
-	return v4l2_subdev_call(sd, video, query_dv_timings, timings);
+	return v4l2_subdev_call(sd, pad, query_dv_timings,
+				vin->parallel.sink_pad, timings);
 }
 
 static int rvin_dv_timings_cap(struct file *file, void *priv_fh,

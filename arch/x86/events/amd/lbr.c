@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 #include <linux/perf_event.h>
+#include <asm/msr.h>
 #include <asm/perf_event.h>
 
 #include "../perf_event.h"
@@ -61,19 +62,19 @@ struct branch_entry {
 
 static __always_inline void amd_pmu_lbr_set_from(unsigned int idx, u64 val)
 {
-	wrmsrl(MSR_AMD_SAMP_BR_FROM + idx * 2, val);
+	wrmsrq(MSR_AMD_SAMP_BR_FROM + idx * 2, val);
 }
 
 static __always_inline void amd_pmu_lbr_set_to(unsigned int idx, u64 val)
 {
-	wrmsrl(MSR_AMD_SAMP_BR_FROM + idx * 2 + 1, val);
+	wrmsrq(MSR_AMD_SAMP_BR_FROM + idx * 2 + 1, val);
 }
 
 static __always_inline u64 amd_pmu_lbr_get_from(unsigned int idx)
 {
 	u64 val;
 
-	rdmsrl(MSR_AMD_SAMP_BR_FROM + idx * 2, val);
+	rdmsrq(MSR_AMD_SAMP_BR_FROM + idx * 2, val);
 
 	return val;
 }
@@ -82,7 +83,7 @@ static __always_inline u64 amd_pmu_lbr_get_to(unsigned int idx)
 {
 	u64 val;
 
-	rdmsrl(MSR_AMD_SAMP_BR_FROM + idx * 2 + 1, val);
+	rdmsrq(MSR_AMD_SAMP_BR_FROM + idx * 2 + 1, val);
 
 	return val;
 }
@@ -173,9 +174,11 @@ void amd_pmu_lbr_read(void)
 
 		/*
 		 * Check if a branch has been logged; if valid = 0, spec = 0
-		 * then no branch was recorded
+		 * then no branch was recorded; if reserved = 1 then an
+		 * erroneous branch was recorded (see Erratum 1452)
 		 */
-		if (!entry.to.split.valid && !entry.to.split.spec)
+		if ((!entry.to.split.valid && !entry.to.split.spec) ||
+		    entry.to.split.reserved)
 			continue;
 
 		perf_clear_branch_entry_bitfields(br + out);
@@ -308,10 +311,6 @@ int amd_pmu_lbr_hw_config(struct perf_event *event)
 {
 	int ret = 0;
 
-	/* LBR is not recommended in counting mode */
-	if (!is_sampling_event(event))
-		return -EINVAL;
-
 	ret = amd_pmu_lbr_setup_filter(event);
 	if (!ret)
 		event->attach_state |= PERF_ATTACH_SCHED_CB;
@@ -335,7 +334,7 @@ void amd_pmu_lbr_reset(void)
 
 	cpuc->last_task_ctx = NULL;
 	cpuc->last_log_id = 0;
-	wrmsrl(MSR_AMD64_LBR_SELECT, 0);
+	wrmsrq(MSR_AMD64_LBR_SELECT, 0);
 }
 
 void amd_pmu_lbr_add(struct perf_event *event)
@@ -373,7 +372,8 @@ void amd_pmu_lbr_del(struct perf_event *event)
 	perf_sched_cb_dec(event->pmu);
 }
 
-void amd_pmu_lbr_sched_task(struct perf_event_pmu_context *pmu_ctx, bool sched_in)
+void amd_pmu_lbr_sched_task(struct perf_event_pmu_context *pmu_ctx,
+			    struct task_struct *task, bool sched_in)
 {
 	struct cpu_hw_events *cpuc = this_cpu_ptr(&cpu_hw_events);
 
@@ -397,29 +397,26 @@ void amd_pmu_lbr_enable_all(void)
 	/* Set hardware branch filter */
 	if (cpuc->lbr_select) {
 		lbr_select = cpuc->lbr_sel->config & LBR_SELECT_MASK;
-		wrmsrl(MSR_AMD64_LBR_SELECT, lbr_select);
+		wrmsrq(MSR_AMD64_LBR_SELECT, lbr_select);
 	}
 
-	rdmsrl(MSR_IA32_DEBUGCTLMSR, dbg_ctl);
-	rdmsrl(MSR_AMD_DBG_EXTN_CFG, dbg_extn_cfg);
+	if (cpu_feature_enabled(X86_FEATURE_AMD_LBR_PMC_FREEZE)) {
+		rdmsrq(MSR_IA32_DEBUGCTLMSR, dbg_ctl);
+		wrmsrq(MSR_IA32_DEBUGCTLMSR, dbg_ctl | DEBUGCTLMSR_FREEZE_LBRS_ON_PMI);
+	}
 
-	wrmsrl(MSR_IA32_DEBUGCTLMSR, dbg_ctl | DEBUGCTLMSR_FREEZE_LBRS_ON_PMI);
-	wrmsrl(MSR_AMD_DBG_EXTN_CFG, dbg_extn_cfg | DBG_EXTN_CFG_LBRV2EN);
+	rdmsrq(MSR_AMD_DBG_EXTN_CFG, dbg_extn_cfg);
+	wrmsrq(MSR_AMD_DBG_EXTN_CFG, dbg_extn_cfg | DBG_EXTN_CFG_LBRV2EN);
 }
 
 void amd_pmu_lbr_disable_all(void)
 {
 	struct cpu_hw_events *cpuc = this_cpu_ptr(&cpu_hw_events);
-	u64 dbg_ctl, dbg_extn_cfg;
 
 	if (!cpuc->lbr_users || !x86_pmu.lbr_nr)
 		return;
 
-	rdmsrl(MSR_AMD_DBG_EXTN_CFG, dbg_extn_cfg);
-	rdmsrl(MSR_IA32_DEBUGCTLMSR, dbg_ctl);
-
-	wrmsrl(MSR_AMD_DBG_EXTN_CFG, dbg_extn_cfg & ~DBG_EXTN_CFG_LBRV2EN);
-	wrmsrl(MSR_IA32_DEBUGCTLMSR, dbg_ctl & ~DEBUGCTLMSR_FREEZE_LBRS_ON_PMI);
+	__amd_pmu_lbr_disable();
 }
 
 __init int amd_pmu_lbr_init(void)

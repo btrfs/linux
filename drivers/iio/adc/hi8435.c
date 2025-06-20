@@ -132,7 +132,7 @@ static int hi8435_read_event_config(struct iio_dev *idev,
 static int hi8435_write_event_config(struct iio_dev *idev,
 				     const struct iio_chan_spec *chan,
 				     enum iio_event_type type,
-				     enum iio_event_direction dir, int state)
+				     enum iio_event_direction dir, bool state)
 {
 	struct hi8435_priv *priv = iio_priv(idev);
 	int ret;
@@ -351,7 +351,7 @@ static const struct iio_enum hi8435_sensing_mode = {
 static const struct iio_chan_spec_ext_info hi8435_ext_info[] = {
 	IIO_ENUM("sensing_mode", IIO_SEPARATE, &hi8435_sensing_mode),
 	IIO_ENUM_AVAILABLE("sensing_mode", IIO_SHARED_BY_TYPE, &hi8435_sensing_mode),
-	{},
+	{ }
 };
 
 #define HI8435_VOLTAGE_CHANNEL(num)			\
@@ -524,7 +524,7 @@ static int hi8435_probe(struct spi_device *spi)
 
 static const struct of_device_id hi8435_dt_ids[] = {
 	{ .compatible = "holt,hi8435" },
-	{},
+	{ }
 };
 MODULE_DEVICE_TABLE(of, hi8435_dt_ids);
 

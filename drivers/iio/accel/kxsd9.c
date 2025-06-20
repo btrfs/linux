@@ -15,6 +15,7 @@
 #include <linux/kernel.h>
 #include <linux/sysfs.h>
 #include <linux/slab.h>
+#include <linux/types.h>
 #include <linux/module.h>
 #include <linux/regmap.h>
 #include <linux/bitops.h>
@@ -215,7 +216,7 @@ static irqreturn_t kxsd9_trigger_handler(int irq, void *p)
 	 */
 	struct {
 		__be16 chan[4];
-		s64 ts __aligned(8);
+		aligned_s64 ts;
 	} hw_values;
 	int ret;
 
@@ -228,9 +229,8 @@ static irqreturn_t kxsd9_trigger_handler(int irq, void *p)
 		goto out;
 	}
 
-	iio_push_to_buffers_with_timestamp(indio_dev,
-					   &hw_values,
-					   iio_get_time_ns(indio_dev));
+	iio_push_to_buffers_with_ts(indio_dev, &hw_values, sizeof(hw_values),
+				    iio_get_time_ns(indio_dev));
 out:
 	iio_trigger_notify_done(indio_dev->trig);
 
@@ -272,7 +272,7 @@ kxsd9_get_mount_matrix(const struct iio_dev *indio_dev,
 
 static const struct iio_chan_spec_ext_info kxsd9_ext_info[] = {
 	IIO_MOUNT_MATRIX(IIO_SHARED_BY_TYPE, kxsd9_get_mount_matrix),
-	{ },
+	{ }
 };
 
 #define KXSD9_ACCEL_CHAN(axis, index)						\
@@ -370,10 +370,7 @@ static int kxsd9_power_down(struct kxsd9_state *st)
 	 * make sure we conserve power even if there are others users on the
 	 * regulators.
 	 */
-	ret = regmap_update_bits(st->map,
-				 KXSD9_REG_CTRL_B,
-				 KXSD9_CTRL_B_ENABLE,
-				 0);
+	ret = regmap_clear_bits(st->map, KXSD9_REG_CTRL_B, KXSD9_CTRL_B_ENABLE);
 	if (ret)
 		return ret;
 
@@ -476,7 +473,7 @@ err_power_down:
 
 	return ret;
 }
-EXPORT_SYMBOL_NS(kxsd9_common_probe, IIO_KXSD9);
+EXPORT_SYMBOL_NS(kxsd9_common_probe, "IIO_KXSD9");
 
 void kxsd9_common_remove(struct device *dev)
 {
@@ -490,7 +487,7 @@ void kxsd9_common_remove(struct device *dev)
 	pm_runtime_disable(dev);
 	kxsd9_power_down(st);
 }
-EXPORT_SYMBOL_NS(kxsd9_common_remove, IIO_KXSD9);
+EXPORT_SYMBOL_NS(kxsd9_common_remove, "IIO_KXSD9");
 
 static int kxsd9_runtime_suspend(struct device *dev)
 {

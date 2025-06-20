@@ -77,6 +77,12 @@ struct perf_record_lost_samples {
 	__u64			 lost;
 };
 
+#define MAX_ID_HDR_ENTRIES  6
+struct perf_record_lost_samples_and_ids {
+	struct perf_record_lost_samples lost;
+	__u64 sample_ids[MAX_ID_HDR_ENTRIES];
+};
+
 /*
  * PERF_FORMAT_ENABLED | PERF_FORMAT_RUNNING | PERF_FORMAT_ID | PERF_FORMAT_LOST
  */
@@ -451,6 +457,16 @@ struct perf_record_compressed {
 	char			 data[];
 };
 
+/*
+ * `header.size` includes the padding we are going to add while writing the record.
+ * `data_size` only includes the size of `data[]` itself.
+ */
+struct perf_record_compressed2 {
+	struct perf_event_header header;
+	__u64			 data_size;
+	char			 data[];
+};
+
 enum perf_user_event_type { /* above any possible kernel type */
 	PERF_RECORD_USER_TYPE_START		= 64,
 	PERF_RECORD_HEADER_ATTR			= 64,
@@ -472,6 +488,7 @@ enum perf_user_event_type { /* above any possible kernel type */
 	PERF_RECORD_HEADER_FEATURE		= 80,
 	PERF_RECORD_COMPRESSED			= 81,
 	PERF_RECORD_FINISHED_INIT		= 82,
+	PERF_RECORD_COMPRESSED2			= 83,
 	PERF_RECORD_HEADER_MAX
 };
 
@@ -512,6 +529,7 @@ union perf_event {
 	struct perf_record_time_conv		time_conv;
 	struct perf_record_header_feature	feat;
 	struct perf_record_compressed		pack;
+	struct perf_record_compressed2		pack2;
 };
 
 #endif /* __LIBPERF_EVENT_H */

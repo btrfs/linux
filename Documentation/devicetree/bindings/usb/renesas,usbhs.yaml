@@ -19,10 +19,16 @@ properties:
       - items:
           - enum:
               - renesas,usbhs-r7s9210   # RZ/A2
+          - const: renesas,rza2-usbhs
+
+      - items:
+          - enum:
               - renesas,usbhs-r9a07g043 # RZ/G2UL and RZ/Five
               - renesas,usbhs-r9a07g044 # RZ/G2{L,LC}
               - renesas,usbhs-r9a07g054 # RZ/V2L
-          - const: renesas,rza2-usbhs
+              - renesas,usbhs-r9a08g045 # RZ/G3S
+              - renesas,usbhs-r9a09g057 # RZ/V2H(P)
+          - const: renesas,rzg2l-usbhs
 
       - items:
           - enum:
@@ -72,6 +78,10 @@ properties:
       Integer to use BUSWAIT register.
 
   renesas,enable-gpio:
+    deprecated: true
+    maxItems: 1
+
+  renesas,enable-gpios:
     maxItems: 1
     description: |
       gpio specifier to check GPIO determining if USB function should be
@@ -118,10 +128,7 @@ allOf:
       properties:
         compatible:
           contains:
-            enum:
-              - renesas,usbhs-r9a07g043
-              - renesas,usbhs-r9a07g044
-              - renesas,usbhs-r9a07g054
+            const: renesas,rzg2l-usbhs
     then:
       properties:
         interrupts:

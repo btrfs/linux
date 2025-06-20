@@ -91,6 +91,14 @@
 /* Keep this the last entry.  */
 #define R_390_NUM	61
 
+/*
+ * HWCAP flags - for AT_HWCAP
+ *
+ * Bits 32-63 are reserved for use by libc.
+ * Bit 31 is reserved and will be used by libc to determine if a second
+ * argument is passed to IFUNC resolvers. This will be implemented when
+ * there is a need for AT_HWCAP2.
+ */
 enum {
 	HWCAP_NR_ESAN3		= 0,
 	HWCAP_NR_ZARCH		= 1,
@@ -150,9 +158,6 @@ enum {
 #define ELF_DATA	ELFDATA2MSB
 #define ELF_ARCH	EM_S390
 
-/* s390 specific phdr types */
-#define PT_S390_PGSTE	0x70000000
-
 /*
  * ELF register definitions..
  */
@@ -182,35 +187,6 @@ typedef s390_compat_regs compat_elf_gregset_t;
 	(((x)->e_machine == EM_S390 || (x)->e_machine == EM_S390_OLD) \
 	 && (x)->e_ident[EI_CLASS] == ELF_CLASS)
 #define compat_start_thread	start_thread31
-
-struct arch_elf_state {
-	int rc;
-};
-
-#define INIT_ARCH_ELF_STATE { .rc = 0 }
-
-#define arch_check_elf(ehdr, interp, interp_ehdr, state) (0)
-#ifdef CONFIG_PGSTE
-#define arch_elf_pt_proc(ehdr, phdr, elf, interp, state)	\
-({								\
-	struct arch_elf_state *_state = state;			\
-	if ((phdr)->p_type == PT_S390_PGSTE &&			\
-	    !page_table_allocate_pgste &&			\
-	    !test_thread_flag(TIF_PGSTE) &&			\
-	    !current->mm->context.alloc_pgste) {		\
-		set_thread_flag(TIF_PGSTE);			\
-		set_pt_regs_flag(task_pt_regs(current),		\
-				 PIF_EXECVE_PGSTE_RESTART);	\
-		_state->rc = -EAGAIN;				\
-	}							\
-	_state->rc;						\
-})
-#else
-#define arch_elf_pt_proc(ehdr, phdr, elf, interp, state)	\
-({								\
-	(state)->rc;						\
-})
-#endif
 
 /* For SVR4/S390 the function pointer to be registered with `atexit` is
    passed in R14. */

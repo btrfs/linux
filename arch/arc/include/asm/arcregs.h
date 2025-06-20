@@ -144,9 +144,9 @@
 #define ARC_AUX_AGU_MOD2	0x5E2
 #define ARC_AUX_AGU_MOD3	0x5E3
 
-#ifndef __ASSEMBLY__
+#ifndef __ASSEMBLER__
 
-#include <soc/arc/aux.h>
+#include <soc/arc/arc_aux.h>
 
 /* Helpers */
 #define TO_KB(bytes)		((bytes) >> 10)

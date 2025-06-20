@@ -24,6 +24,7 @@
 #include <linux/tty.h>
 #include <linux/wait.h>
 #include <net/iucv/iucv.h>
+#include <asm/machine.h>
 
 #include "hvc_console.h"
 
@@ -1035,7 +1036,6 @@ static const struct attribute_group *hvc_iucv_dev_attr_groups[] = {
 	NULL,
 };
 
-
 /**
  * hvc_iucv_alloc() - Allocates a new struct hvc_iucv_private instance
  * @id:			hvc_iucv_table index
@@ -1086,18 +1086,12 @@ static int __init hvc_iucv_alloc(int id, unsigned int is_console)
 	memcpy(priv->srv_name, name, 8);
 	ASCEBC(priv->srv_name, 8);
 
-	/* create and setup device */
-	priv->dev = kzalloc(sizeof(*priv->dev), GFP_KERNEL);
+	priv->dev = iucv_alloc_device(hvc_iucv_dev_attr_groups, NULL,
+				      priv, "hvc_iucv%d", id);
 	if (!priv->dev) {
 		rc = -ENOMEM;
 		goto out_error_dev;
 	}
-	dev_set_name(priv->dev, "hvc_iucv%d", id);
-	dev_set_drvdata(priv->dev, priv);
-	priv->dev->bus = &iucv_bus;
-	priv->dev->parent = iucv_root;
-	priv->dev->groups = hvc_iucv_dev_attr_groups;
-	priv->dev->release = (void (*)(struct device *)) kfree;
 	rc = device_register(priv->dev);
 	if (rc) {
 		put_device(priv->dev);
@@ -1247,7 +1241,7 @@ static int param_set_vmidfilter(const char *val, const struct kernel_param *kp)
 {
 	int rc;
 
-	if (!MACHINE_IS_VM || !hvc_iucv_devices)
+	if (!machine_is_vm() || !hvc_iucv_devices)
 		return -ENODEV;
 
 	if (!val)
@@ -1276,7 +1270,7 @@ static int param_get_vmidfilter(char *buffer, const struct kernel_param *kp)
 	size_t index, len;
 	void *start, *end;
 
-	if (!MACHINE_IS_VM || !hvc_iucv_devices)
+	if (!machine_is_vm() || !hvc_iucv_devices)
 		return -ENODEV;
 
 	rc = 0;
@@ -1313,7 +1307,7 @@ static int __init hvc_iucv_init(void)
 	if (!hvc_iucv_devices)
 		return -ENODEV;
 
-	if (!MACHINE_IS_VM) {
+	if (!machine_is_vm()) {
 		pr_notice("The z/VM IUCV HVC device driver cannot "
 			   "be used without z/VM\n");
 		rc = -ENODEV;

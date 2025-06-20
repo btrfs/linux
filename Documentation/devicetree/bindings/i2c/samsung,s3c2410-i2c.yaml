@@ -22,12 +22,10 @@ properties:
           - samsung,exynos5-sata-phy-i2c
       - items:
           - enum:
+              - samsung,exynos7870-i2c
               - samsung,exynos7885-i2c
               - samsung,exynos850-i2c
           - const: samsung,s3c2440-i2c
-
-  '#address-cells':
-    const: 1
 
   clocks:
     maxItems: 1
@@ -72,9 +70,6 @@ properties:
   samsung,sysreg-phandle:
     $ref: /schemas/types.yaml#/definitions/phandle
     description: Pandle to syscon used to control the system registers.
-
-  '#size-cells':
-    const: 0
 
 required:
   - compatible

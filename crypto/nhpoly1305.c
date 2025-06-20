@@ -30,7 +30,7 @@
  *     (https://cr.yp.to/mac/poly1305-20050329.pdf)
  */
 
-#include <asm/unaligned.h>
+#include <linux/unaligned.h>
 #include <crypto/algapi.h>
 #include <crypto/internal/hash.h>
 #include <crypto/internal/poly1305.h>
@@ -245,7 +245,7 @@ static void __exit nhpoly1305_mod_exit(void)
 	crypto_unregister_shash(&nhpoly1305_alg);
 }
 
-subsys_initcall(nhpoly1305_mod_init);
+module_init(nhpoly1305_mod_init);
 module_exit(nhpoly1305_mod_exit);
 
 MODULE_DESCRIPTION("NHPoly1305 ε-almost-∆-universal hash function");

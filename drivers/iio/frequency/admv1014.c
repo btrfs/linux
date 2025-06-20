@@ -19,7 +19,7 @@
 #include <linux/spi/spi.h>
 #include <linux/units.h>
 
-#include <asm/unaligned.h>
+#include <linux/unaligned.h>
 
 /* ADMV1014 Register Map */
 #define ADMV1014_REG_SPI_CONTROL		0x00
@@ -792,13 +792,13 @@ static int admv1014_probe(struct spi_device *spi)
 
 static const struct spi_device_id admv1014_id[] = {
 	{ "admv1014", 0 },
-	{}
+	{ }
 };
 MODULE_DEVICE_TABLE(spi, admv1014_id);
 
 static const struct of_device_id admv1014_of_match[] = {
 	{ .compatible = "adi,admv1014" },
-	{}
+	{ }
 };
 MODULE_DEVICE_TABLE(of, admv1014_of_match);
 

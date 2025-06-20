@@ -144,10 +144,24 @@ int mmc_set_dsr(struct mmc_host *host)
 	return mmc_wait_for_cmd(host, &cmd, MMC_CMD_RETRIES);
 }
 
+int __mmc_go_idle(struct mmc_host *host)
+{
+	struct mmc_command cmd = {};
+	int err;
+
+	cmd.opcode = MMC_GO_IDLE_STATE;
+	cmd.arg = 0;
+	cmd.flags = MMC_RSP_SPI_R1 | MMC_RSP_NONE | MMC_CMD_BC;
+
+	err = mmc_wait_for_cmd(host, &cmd, 0);
+	mmc_delay(1);
+
+	return err;
+}
+
 int mmc_go_idle(struct mmc_host *host)
 {
 	int err;
-	struct mmc_command cmd = {};
 
 	/*
 	 * Non-SPI hosts need to prevent chipselect going active during
@@ -163,13 +177,7 @@ int mmc_go_idle(struct mmc_host *host)
 		mmc_delay(1);
 	}
 
-	cmd.opcode = MMC_GO_IDLE_STATE;
-	cmd.arg = 0;
-	cmd.flags = MMC_RSP_SPI_R1 | MMC_RSP_NONE | MMC_CMD_BC;
-
-	err = mmc_wait_for_cmd(host, &cmd, 0);
-
-	mmc_delay(1);
+	err = __mmc_go_idle(host);
 
 	if (!mmc_host_is_spi(host)) {
 		mmc_set_chip_select(host, MMC_CS_DONTCARE);
@@ -375,7 +383,7 @@ int mmc_get_ext_csd(struct mmc_card *card, u8 **new_ext_csd)
 	if (!card || !new_ext_csd)
 		return -EINVAL;
 
-	if (!mmc_can_ext_csd(card))
+	if (!mmc_card_can_ext_csd(card))
 		return -EOPNOTSUPP;
 
 	/*
@@ -936,7 +944,7 @@ out:
 	return err;
 }
 
-int mmc_can_ext_csd(struct mmc_card *card)
+bool mmc_card_can_ext_csd(struct mmc_card *card)
 {
 	return (card && card->csd.mmca_vsn > CSD_SPEC_VER_3);
 }
@@ -1038,7 +1046,7 @@ int mmc_sanitize(struct mmc_card *card, unsigned int timeout_ms)
 	struct mmc_host *host = card->host;
 	int err;
 
-	if (!mmc_can_sanitize(card)) {
+	if (!mmc_card_can_sanitize(card)) {
 		pr_warn("%s: Sanitize not supported\n", mmc_hostname(host));
 		return -EOPNOTSUPP;
 	}

@@ -4,6 +4,8 @@
  * Copyright (C) 2017 Broadcom
  */
 
+#include <linux/debugfs.h>
+
 #include <drm/drm_atomic_helper.h>
 #include <drm/drm_bridge.h>
 #include <drm/drm_connector.h>
@@ -56,6 +58,7 @@ static const struct drm_connector_funcs panel_bridge_connector_funcs = {
 };
 
 static int panel_bridge_attach(struct drm_bridge *bridge,
+			       struct drm_encoder *encoder,
 			       enum drm_bridge_attach_flags flags)
 {
 	struct panel_bridge *panel_bridge = drm_bridge_to_panel_bridge(bridge);
@@ -64,11 +67,6 @@ static int panel_bridge_attach(struct drm_bridge *bridge,
 
 	if (flags & DRM_BRIDGE_ATTACH_NO_CONNECTOR)
 		return 0;
-
-	if (!bridge->encoder) {
-		DRM_ERROR("Missing encoder\n");
-		return -ENODEV;
-	}
 
 	drm_connector_helper_add(connector,
 				 &panel_bridge_connector_helper_funcs);
@@ -84,7 +82,7 @@ static int panel_bridge_attach(struct drm_bridge *bridge,
 	drm_panel_bridge_set_orientation(connector, bridge);
 
 	drm_connector_attach_encoder(&panel_bridge->connector,
-					  bridge->encoder);
+					  encoder);
 
 	if (bridge->dev->registered) {
 		if (connector->funcs->reset)
@@ -112,10 +110,9 @@ static void panel_bridge_detach(struct drm_bridge *bridge)
 }
 
 static void panel_bridge_atomic_pre_enable(struct drm_bridge *bridge,
-				struct drm_bridge_state *old_bridge_state)
+					   struct drm_atomic_state *atomic_state)
 {
 	struct panel_bridge *panel_bridge = drm_bridge_to_panel_bridge(bridge);
-	struct drm_atomic_state *atomic_state = old_bridge_state->base.state;
 	struct drm_encoder *encoder = bridge->encoder;
 	struct drm_crtc *crtc;
 	struct drm_crtc_state *old_crtc_state;
@@ -132,10 +129,9 @@ static void panel_bridge_atomic_pre_enable(struct drm_bridge *bridge,
 }
 
 static void panel_bridge_atomic_enable(struct drm_bridge *bridge,
-				struct drm_bridge_state *old_bridge_state)
+				       struct drm_atomic_state *atomic_state)
 {
 	struct panel_bridge *panel_bridge = drm_bridge_to_panel_bridge(bridge);
-	struct drm_atomic_state *atomic_state = old_bridge_state->base.state;
 	struct drm_encoder *encoder = bridge->encoder;
 	struct drm_crtc *crtc;
 	struct drm_crtc_state *old_crtc_state;
@@ -152,10 +148,9 @@ static void panel_bridge_atomic_enable(struct drm_bridge *bridge,
 }
 
 static void panel_bridge_atomic_disable(struct drm_bridge *bridge,
-				struct drm_bridge_state *old_bridge_state)
+					struct drm_atomic_state *atomic_state)
 {
 	struct panel_bridge *panel_bridge = drm_bridge_to_panel_bridge(bridge);
-	struct drm_atomic_state *atomic_state = old_bridge_state->base.state;
 	struct drm_encoder *encoder = bridge->encoder;
 	struct drm_crtc *crtc;
 	struct drm_crtc_state *new_crtc_state;
@@ -172,10 +167,9 @@ static void panel_bridge_atomic_disable(struct drm_bridge *bridge,
 }
 
 static void panel_bridge_atomic_post_disable(struct drm_bridge *bridge,
-				struct drm_bridge_state *old_bridge_state)
+					     struct drm_atomic_state *atomic_state)
 {
 	struct panel_bridge *panel_bridge = drm_bridge_to_panel_bridge(bridge);
-	struct drm_atomic_state *atomic_state = old_bridge_state->base.state;
 	struct drm_encoder *encoder = bridge->encoder;
 	struct drm_crtc *crtc;
 	struct drm_crtc_state *new_crtc_state;
@@ -325,8 +319,10 @@ void drm_panel_bridge_remove(struct drm_bridge *bridge)
 	if (!bridge)
 		return;
 
-	if (bridge->funcs != &panel_bridge_bridge_funcs)
+	if (!drm_bridge_is_panel(bridge)) {
+		drm_warn(bridge->dev, "%s: called on non-panel bridge!\n", __func__);
 		return;
+	}
 
 	panel_bridge = drm_bridge_to_panel_bridge(bridge);
 
@@ -358,9 +354,12 @@ EXPORT_SYMBOL(drm_panel_bridge_set_orientation);
 
 static void devm_drm_panel_bridge_release(struct device *dev, void *res)
 {
-	struct drm_bridge **bridge = res;
+	struct drm_bridge *bridge = *(struct drm_bridge **)res;
 
-	drm_panel_bridge_remove(*bridge);
+	if (!bridge)
+		return;
+
+	drm_bridge_remove(bridge);
 }
 
 /**
