@@ -35,6 +35,31 @@ static ssize_t nvme_sysfs_rescan(struct device *dev,
 }
 static DEVICE_ATTR(rescan_controller, S_IWUSR, NULL, nvme_sysfs_rescan);
 
+static ssize_t nvme_adm_passthru_err_log_enabled_show(struct device *dev,
+		struct device_attribute *attr, char *buf)
+{
+	struct nvme_ctrl *ctrl = dev_get_drvdata(dev);
+
+	return sysfs_emit(buf,
+			  ctrl->passthru_err_log_enabled ? "on\n" : "off\n");
+}
+
+static ssize_t nvme_adm_passthru_err_log_enabled_store(struct device *dev,
+		struct device_attribute *attr, const char *buf, size_t count)
+{
+	struct nvme_ctrl *ctrl = dev_get_drvdata(dev);
+	bool passthru_err_log_enabled;
+	int err;
+
+	err = kstrtobool(buf, &passthru_err_log_enabled);
+	if (err)
+		return -EINVAL;
+
+	ctrl->passthru_err_log_enabled = passthru_err_log_enabled;
+
+	return count;
+}
+
 static inline struct nvme_ns_head *dev_to_ns_head(struct device *dev)
 {
 	struct gendisk *disk = dev_to_disk(dev);
@@ -43,6 +68,37 @@ static inline struct nvme_ns_head *dev_to_ns_head(struct device *dev)
 		return disk->private_data;
 	return nvme_get_ns_from_dev(dev)->head;
 }
+
+static ssize_t nvme_io_passthru_err_log_enabled_show(struct device *dev,
+		struct device_attribute *attr, char *buf)
+{
+	struct nvme_ns_head *head = dev_to_ns_head(dev);
+
+	return sysfs_emit(buf, head->passthru_err_log_enabled ? "on\n" : "off\n");
+}
+
+static ssize_t nvme_io_passthru_err_log_enabled_store(struct device *dev,
+		struct device_attribute *attr, const char *buf, size_t count)
+{
+	struct nvme_ns_head *head = dev_to_ns_head(dev);
+	bool passthru_err_log_enabled;
+	int err;
+
+	err = kstrtobool(buf, &passthru_err_log_enabled);
+	if (err)
+		return -EINVAL;
+	head->passthru_err_log_enabled = passthru_err_log_enabled;
+
+	return count;
+}
+
+static struct device_attribute dev_attr_adm_passthru_err_log_enabled = \
+	__ATTR(passthru_err_log_enabled, S_IRUGO | S_IWUSR, \
+	nvme_adm_passthru_err_log_enabled_show, nvme_adm_passthru_err_log_enabled_store);
+
+static struct device_attribute dev_attr_io_passthru_err_log_enabled = \
+	__ATTR(passthru_err_log_enabled, S_IRUGO | S_IWUSR, \
+	nvme_io_passthru_err_log_enabled_show, nvme_io_passthru_err_log_enabled_store);
 
 static ssize_t wwid_show(struct device *dev, struct device_attribute *attr,
 		char *buf)
@@ -165,14 +221,11 @@ static int ns_update_nuse(struct nvme_ns *ns)
 
 	ret = nvme_identify_ns(ns->ctrl, ns->head->ns_id, &id);
 	if (ret)
-		goto out_free_id;
+		return ret;
 
 	ns->head->nuse = le64_to_cpu(id->nuse);
-
-out_free_id:
 	kfree(id);
-
-	return ret;
+	return 0;
 }
 
 static ssize_t nuse_show(struct device *dev, struct device_attribute *attr,
@@ -180,14 +233,12 @@ static ssize_t nuse_show(struct device *dev, struct device_attribute *attr,
 {
 	struct nvme_ns_head *head = dev_to_ns_head(dev);
 	struct gendisk *disk = dev_to_disk(dev);
-	struct block_device *bdev = disk->part0;
 	int ret;
 
-	if (IS_ENABLED(CONFIG_NVME_MULTIPATH) &&
-	    bdev->bd_disk->fops == &nvme_ns_head_ops)
+	if (nvme_disk_is_ns_head(disk))
 		ret = ns_head_update_nuse(head);
 	else
-		ret = ns_update_nuse(bdev->bd_disk->private_data);
+		ret = ns_update_nuse(disk->private_data);
 	if (ret)
 		return ret;
 
@@ -207,7 +258,11 @@ static struct attribute *nvme_ns_attrs[] = {
 #ifdef CONFIG_NVME_MULTIPATH
 	&dev_attr_ana_grpid.attr,
 	&dev_attr_ana_state.attr,
+	&dev_attr_queue_depth.attr,
+	&dev_attr_numa_nodes.attr,
+	&dev_attr_delayed_removal_secs.attr,
 #endif
+	&dev_attr_io_passthru_err_log_enabled.attr,
 	NULL,
 };
 
@@ -238,6 +293,16 @@ static umode_t nvme_ns_attrs_are_visible(struct kobject *kobj,
 		if (!nvme_ctrl_use_ana(nvme_get_ns_from_dev(dev)->ctrl))
 			return 0;
 	}
+	if (a == &dev_attr_queue_depth.attr || a == &dev_attr_numa_nodes.attr) {
+		if (nvme_disk_is_ns_head(dev_to_disk(dev)))
+			return 0;
+	}
+	if (a == &dev_attr_delayed_removal_secs.attr) {
+		struct gendisk *disk = dev_to_disk(dev);
+
+		if (!nvme_disk_is_ns_head(disk))
+			return 0;
+	}
 #endif
 	return a->mode;
 }
@@ -247,8 +312,50 @@ static const struct attribute_group nvme_ns_attr_group = {
 	.is_visible	= nvme_ns_attrs_are_visible,
 };
 
+#ifdef CONFIG_NVME_MULTIPATH
+/*
+ * NOTE: The dummy attribute does not appear in sysfs. It exists solely to allow
+ * control over the visibility of the multipath sysfs node. Without at least one
+ * attribute defined in nvme_ns_mpath_attrs[], the sysfs implementation does not
+ * invoke the multipath_sysfs_group_visible() method. As a result, we would not
+ * be able to control the visibility of the multipath sysfs node.
+ */
+static struct attribute dummy_attr = {
+	.name = "dummy",
+};
+
+static struct attribute *nvme_ns_mpath_attrs[] = {
+	&dummy_attr,
+	NULL,
+};
+
+static bool multipath_sysfs_group_visible(struct kobject *kobj)
+{
+	struct device *dev = container_of(kobj, struct device, kobj);
+
+	return nvme_disk_is_ns_head(dev_to_disk(dev));
+}
+
+static bool multipath_sysfs_attr_visible(struct kobject *kobj,
+		struct attribute *attr, int n)
+{
+	return false;
+}
+
+DEFINE_SYSFS_GROUP_VISIBLE(multipath_sysfs)
+
+const struct attribute_group nvme_ns_mpath_attr_group = {
+	.name           = "multipath",
+	.attrs		= nvme_ns_mpath_attrs,
+	.is_visible     = SYSFS_GROUP_VISIBLE(multipath_sysfs),
+};
+#endif
+
 const struct attribute_group *nvme_ns_attr_groups[] = {
 	&nvme_ns_attr_group,
+#ifdef CONFIG_NVME_MULTIPATH
+	&nvme_ns_mpath_attr_group,
+#endif
 	NULL,
 };
 
@@ -311,6 +418,7 @@ static ssize_t nvme_sysfs_show_state(struct device *dev,
 				     char *buf)
 {
 	struct nvme_ctrl *ctrl = dev_get_drvdata(dev);
+	unsigned state = (unsigned)nvme_ctrl_state(ctrl);
 	static const char *const state_name[] = {
 		[NVME_CTRL_NEW]		= "new",
 		[NVME_CTRL_LIVE]	= "live",
@@ -321,9 +429,8 @@ static ssize_t nvme_sysfs_show_state(struct device *dev,
 		[NVME_CTRL_DEAD]	= "dead",
 	};
 
-	if ((unsigned)ctrl->state < ARRAY_SIZE(state_name) &&
-	    state_name[ctrl->state])
-		return sysfs_emit(buf, "%s\n", state_name[ctrl->state]);
+	if (state < ARRAY_SIZE(state_name) && state_name[state])
+		return sysfs_emit(buf, "%s\n", state_name[state]);
 
 	return sysfs_emit(buf, "unknown state\n");
 }
@@ -612,19 +719,6 @@ static DEVICE_ATTR(dhchap_ctrl_secret, S_IRUGO | S_IWUSR,
 	nvme_ctrl_dhchap_ctrl_secret_show, nvme_ctrl_dhchap_ctrl_secret_store);
 #endif
 
-#ifdef CONFIG_NVME_TCP_TLS
-static ssize_t tls_key_show(struct device *dev,
-			    struct device_attribute *attr, char *buf)
-{
-	struct nvme_ctrl *ctrl = dev_get_drvdata(dev);
-
-	if (!ctrl->tls_key)
-		return 0;
-	return sysfs_emit(buf, "%08x", key_serial(ctrl->tls_key));
-}
-static DEVICE_ATTR_RO(tls_key);
-#endif
-
 static struct attribute *nvme_dev_attrs[] = {
 	&dev_attr_reset_controller.attr,
 	&dev_attr_rescan_controller.attr,
@@ -652,9 +746,7 @@ static struct attribute *nvme_dev_attrs[] = {
 	&dev_attr_dhchap_secret.attr,
 	&dev_attr_dhchap_ctrl_secret.attr,
 #endif
-#ifdef CONFIG_NVME_TCP_TLS
-	&dev_attr_tls_key.attr,
-#endif
+	&dev_attr_adm_passthru_err_log_enabled.attr,
 	NULL
 };
 
@@ -684,11 +776,6 @@ static umode_t nvme_dev_attrs_are_visible(struct kobject *kobj,
 	if (a == &dev_attr_dhchap_ctrl_secret.attr && !ctrl->opts)
 		return 0;
 #endif
-#ifdef CONFIG_NVME_TCP_TLS
-	if (a == &dev_attr_tls_key.attr &&
-	    (!ctrl->opts || strcmp(ctrl->opts->transport, "tcp")))
-		return 0;
-#endif
 
 	return a->mode;
 }
@@ -699,8 +786,78 @@ const struct attribute_group nvme_dev_attrs_group = {
 };
 EXPORT_SYMBOL_GPL(nvme_dev_attrs_group);
 
+#ifdef CONFIG_NVME_TCP_TLS
+static ssize_t tls_key_show(struct device *dev,
+			    struct device_attribute *attr, char *buf)
+{
+	struct nvme_ctrl *ctrl = dev_get_drvdata(dev);
+
+	if (!ctrl->tls_pskid)
+		return 0;
+	return sysfs_emit(buf, "%08x\n", ctrl->tls_pskid);
+}
+static DEVICE_ATTR_RO(tls_key);
+
+static ssize_t tls_configured_key_show(struct device *dev,
+		struct device_attribute *attr, char *buf)
+{
+	struct nvme_ctrl *ctrl = dev_get_drvdata(dev);
+	struct key *key = ctrl->opts->tls_key;
+
+	return sysfs_emit(buf, "%08x\n", key_serial(key));
+}
+static DEVICE_ATTR_RO(tls_configured_key);
+
+static ssize_t tls_keyring_show(struct device *dev,
+		struct device_attribute *attr, char *buf)
+{
+	struct nvme_ctrl *ctrl = dev_get_drvdata(dev);
+	struct key *keyring = ctrl->opts->keyring;
+
+	return sysfs_emit(buf, "%s\n", keyring->description);
+}
+static DEVICE_ATTR_RO(tls_keyring);
+
+static struct attribute *nvme_tls_attrs[] = {
+	&dev_attr_tls_key.attr,
+	&dev_attr_tls_configured_key.attr,
+	&dev_attr_tls_keyring.attr,
+	NULL,
+};
+
+static umode_t nvme_tls_attrs_are_visible(struct kobject *kobj,
+		struct attribute *a, int n)
+{
+	struct device *dev = container_of(kobj, struct device, kobj);
+	struct nvme_ctrl *ctrl = dev_get_drvdata(dev);
+
+	if (!ctrl->opts || strcmp(ctrl->opts->transport, "tcp"))
+		return 0;
+
+	if (a == &dev_attr_tls_key.attr &&
+	    !ctrl->opts->tls && !ctrl->opts->concat)
+		return 0;
+	if (a == &dev_attr_tls_configured_key.attr &&
+	    (!ctrl->opts->tls_key || ctrl->opts->concat))
+		return 0;
+	if (a == &dev_attr_tls_keyring.attr &&
+	    !ctrl->opts->keyring)
+		return 0;
+
+	return a->mode;
+}
+
+static const struct attribute_group nvme_tls_attrs_group = {
+	.attrs		= nvme_tls_attrs,
+	.is_visible	= nvme_tls_attrs_are_visible,
+};
+#endif
+
 const struct attribute_group *nvme_dev_attr_groups[] = {
 	&nvme_dev_attrs_group,
+#ifdef CONFIG_NVME_TCP_TLS
+	&nvme_tls_attrs_group,
+#endif
 	NULL,
 };
 

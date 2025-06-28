@@ -43,7 +43,7 @@
 #include <linux/iio/trigger_consumer.h>
 #include <linux/iio/triggered_buffer.h>
 
-#include <asm/unaligned.h>
+#include <linux/unaligned.h>
 
 /* Commonly used registers */
 #define YAS5XX_DEVICE_ID		0x80
@@ -236,7 +236,7 @@ struct yas5xx {
 	 */
 	struct {
 		s32 channels[4];
-		s64 ts __aligned(8);
+		aligned_s64 ts;
 	} scan;
 };
 
@@ -372,6 +372,7 @@ static int yas537_measure(struct yas5xx *yas5xx, u16 *t, u16 *x, u16 *y1, u16 *y
 	u8 data[8];
 	u16 xy1y2[3];
 	s32 h[3], s[3];
+	int half_range = BIT(13);
 	int i, ret;
 
 	mutex_lock(&yas5xx->lock);
@@ -406,13 +407,13 @@ static int yas537_measure(struct yas5xx *yas5xx, u16 *t, u16 *x, u16 *y1, u16 *y
 	/* The second version of YAS537 needs to include calibration coefficients */
 	if (yas5xx->version == YAS537_VERSION_1) {
 		for (i = 0; i < 3; i++)
-			s[i] = xy1y2[i] - BIT(13);
-		h[0] = (c->k *   (128 * s[0] + c->a2 * s[1] + c->a3 * s[2])) / BIT(13);
-		h[1] = (c->k * (c->a4 * s[0] + c->a5 * s[1] + c->a6 * s[2])) / BIT(13);
-		h[2] = (c->k * (c->a7 * s[0] + c->a8 * s[1] + c->a9 * s[2])) / BIT(13);
+			s[i] = xy1y2[i] - half_range;
+		h[0] = (c->k *   (128 * s[0] + c->a2 * s[1] + c->a3 * s[2])) / half_range;
+		h[1] = (c->k * (c->a4 * s[0] + c->a5 * s[1] + c->a6 * s[2])) / half_range;
+		h[2] = (c->k * (c->a7 * s[0] + c->a8 * s[1] + c->a9 * s[2])) / half_range;
 		for (i = 0; i < 3; i++) {
-			clamp_val(h[i], -BIT(13), BIT(13) - 1);
-			xy1y2[i] = h[i] + BIT(13);
+			h[i] = clamp(h[i], -half_range, half_range - 1);
+			xy1y2[i] = h[i] + half_range;
 		}
 	}
 
@@ -673,8 +674,8 @@ static void yas5xx_fill_buffer(struct iio_dev *indio_dev)
 	yas5xx->scan.channels[1] = x;
 	yas5xx->scan.channels[2] = y;
 	yas5xx->scan.channels[3] = z;
-	iio_push_to_buffers_with_timestamp(indio_dev, &yas5xx->scan,
-					   iio_get_time_ns(indio_dev));
+	iio_push_to_buffers_with_ts(indio_dev, &yas5xx->scan, sizeof(yas5xx->scan),
+				    iio_get_time_ns(indio_dev));
 }
 
 static irqreturn_t yas5xx_handle_trigger(int irq, void *p)
@@ -1584,7 +1585,7 @@ static const struct i2c_device_id yas5xx_id[] = {
 	{"yas532", (kernel_ulong_t)&yas5xx_chip_info_tbl[yas532] },
 	{"yas533", (kernel_ulong_t)&yas5xx_chip_info_tbl[yas533] },
 	{"yas537", (kernel_ulong_t)&yas5xx_chip_info_tbl[yas537] },
-	{}
+	{ }
 };
 MODULE_DEVICE_TABLE(i2c, yas5xx_id);
 
@@ -1593,7 +1594,7 @@ static const struct of_device_id yas5xx_of_match[] = {
 	{ .compatible = "yamaha,yas532", &yas5xx_chip_info_tbl[yas532] },
 	{ .compatible = "yamaha,yas533", &yas5xx_chip_info_tbl[yas533] },
 	{ .compatible = "yamaha,yas537", &yas5xx_chip_info_tbl[yas537] },
-	{}
+	{ }
 };
 MODULE_DEVICE_TABLE(of, yas5xx_of_match);
 

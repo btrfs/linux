@@ -12,7 +12,7 @@
 
 #include <asm/fixmap.h>
 
-#ifndef __ASSEMBLY__
+#ifndef __ASSEMBLER__
 /*
  * we simulate an x86-style page table for the linux mm code
  */
@@ -73,7 +73,7 @@ extern void __update_cache(pte_t pte);
 		mb();				\
 	} while(0)
 
-#endif /* !__ASSEMBLY__ */
+#endif /* !__ASSEMBLER__ */
 
 #define pte_ERROR(e) \
 	printk("%s:%d: bad pte %08lx.\n", __FILE__, __LINE__, pte_val(e))
@@ -226,7 +226,7 @@ extern void __update_cache(pte_t pte);
 #define PxD_FLAG_SHIFT    (4)
 #define PxD_VALUE_SHIFT   (PFN_PTE_SHIFT-PxD_FLAG_SHIFT)
 
-#ifndef __ASSEMBLY__
+#ifndef __ASSEMBLER__
 
 #define PAGE_NONE	__pgprot(_PAGE_PRESENT | _PAGE_USER)
 #define PAGE_SHARED	__pgprot(_PAGE_PRESENT | _PAGE_USER | _PAGE_READ | _PAGE_WRITE)
@@ -338,10 +338,6 @@ static inline pte_t pte_mkspecial(pte_t pte)	{ pte_val(pte) |= _PAGE_SPECIAL; re
 #endif
 
 
-/*
- * Conversion functions: convert a page and protection to a page entry,
- * and a page entry and page directory to the page they refer to.
- */
 #define __mk_pte(addr,pgprot) \
 ({									\
 	pte_t __pte;							\
@@ -350,8 +346,6 @@ static inline pte_t pte_mkspecial(pte_t pte)	{ pte_val(pte) |= _PAGE_SPECIAL; re
 									\
 	__pte;								\
 })
-
-#define mk_pte(page, pgprot)	pfn_pte(page_to_pfn(page), (pgprot))
 
 static inline pte_t pfn_pte(unsigned long pfn, pgprot_t pgprot)
 {
@@ -431,7 +425,7 @@ static inline void set_ptes(struct mm_struct *mm, unsigned long addr,
 #define __pte_to_swp_entry(pte)		((swp_entry_t) { pte_val(pte) })
 #define __swp_entry_to_pte(x)		((pte_t) { (x).val })
 
-static inline int pte_swp_exclusive(pte_t pte)
+static inline bool pte_swp_exclusive(pte_t pte)
 {
 	return pte_val(pte) & _PAGE_SWP_EXCLUSIVE;
 }
@@ -448,14 +442,17 @@ static inline pte_t pte_swp_clear_exclusive(pte_t pte)
 	return pte;
 }
 
+static inline pte_t ptep_get(pte_t *ptep)
+{
+	return READ_ONCE(*ptep);
+}
+#define ptep_get ptep_get
+
 static inline int ptep_test_and_clear_young(struct vm_area_struct *vma, unsigned long addr, pte_t *ptep)
 {
 	pte_t pte;
 
-	if (!pte_young(*ptep))
-		return 0;
-
-	pte = *ptep;
+	pte = ptep_get(ptep);
 	if (!pte_young(pte)) {
 		return 0;
 	}
@@ -463,17 +460,10 @@ static inline int ptep_test_and_clear_young(struct vm_area_struct *vma, unsigned
 	return 1;
 }
 
+int ptep_clear_flush_young(struct vm_area_struct *vma, unsigned long addr, pte_t *ptep);
+pte_t ptep_clear_flush(struct vm_area_struct *vma, unsigned long addr, pte_t *ptep);
+
 struct mm_struct;
-static inline pte_t ptep_get_and_clear(struct mm_struct *mm, unsigned long addr, pte_t *ptep)
-{
-	pte_t old_pte;
-
-	old_pte = *ptep;
-	set_pte(ptep, __pte(0));
-
-	return old_pte;
-}
-
 static inline void ptep_set_wrprotect(struct mm_struct *mm, unsigned long addr, pte_t *ptep)
 {
 	set_pte(ptep, pte_wrprotect(*ptep));
@@ -481,7 +471,7 @@ static inline void ptep_set_wrprotect(struct mm_struct *mm, unsigned long addr, 
 
 #define pte_same(A,B)	(pte_val(A) == pte_val(B))
 
-#endif /* !__ASSEMBLY__ */
+#endif /* !__ASSEMBLER__ */
 
 
 /* TLB page size encoding - see table 3-1 in parisc20.pdf */
@@ -511,7 +501,8 @@ static inline void ptep_set_wrprotect(struct mm_struct *mm, unsigned long addr, 
 #define HAVE_ARCH_UNMAPPED_AREA_TOPDOWN
 
 #define __HAVE_ARCH_PTEP_TEST_AND_CLEAR_YOUNG
-#define __HAVE_ARCH_PTEP_GET_AND_CLEAR
+#define __HAVE_ARCH_PTEP_CLEAR_YOUNG_FLUSH
+#define __HAVE_ARCH_PTEP_CLEAR_FLUSH
 #define __HAVE_ARCH_PTEP_SET_WRPROTECT
 #define __HAVE_ARCH_PTE_SAME
 

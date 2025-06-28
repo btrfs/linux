@@ -12,7 +12,7 @@
 
 / {
 	model = "Longcheer L8150";
-	compatible = "longcheer,l8150", "qcom,msm8916-v1-qrd/9-v1", "qcom,msm8916";
+	compatible = "longcheer,l8150", "qcom,msm8916";
 	chassis-type = "handset";
 
 	aliases {
@@ -254,6 +254,9 @@
 
 &blsp_uart2 {
 	status = "okay";
+	pinctrl-0 = <&blsp_uart2_console_default>;
+	pinctrl-1 = <&blsp_uart2_console_sleep>;
+	pinctrl-names = "default", "sleep";
 };
 
 &pm8916_bms {

@@ -16,7 +16,7 @@
 #include <linux/mmzone.h>
 #include <asm/page.h>		/* PAGE_SIZE */
 #include <asm/e820/api.h>
-#include <asm/amd_nb.h>
+#include <asm/amd/nb.h>
 #include <asm/gart.h>
 #include "agp.h"
 
@@ -802,4 +802,5 @@ module_exit(agp_amd64_cleanup);
 
 MODULE_AUTHOR("Dave Jones, Andi Kleen");
 module_param(agp_try_unsupported, bool, 0);
+MODULE_DESCRIPTION("GART driver for the AMD Opteron/Athlon64 on-CPU northbridge");
 MODULE_LICENSE("GPL");

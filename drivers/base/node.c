@@ -7,6 +7,7 @@
 #include <linux/init.h>
 #include <linux/mm.h>
 #include <linux/memory.h>
+#include <linux/mempolicy.h>
 #include <linux/vmstat.h>
 #include <linux/notifier.h>
 #include <linux/node.h>
@@ -27,7 +28,7 @@ static const struct bus_type node_subsys = {
 };
 
 static inline ssize_t cpumap_read(struct file *file, struct kobject *kobj,
-				  struct bin_attribute *attr, char *buf,
+				  const struct bin_attribute *attr, char *buf,
 				  loff_t off, size_t count)
 {
 	struct device *dev = kobj_to_dev(kobj);
@@ -45,10 +46,10 @@ static inline ssize_t cpumap_read(struct file *file, struct kobject *kobj,
 	return n;
 }
 
-static BIN_ATTR_RO(cpumap, CPUMAP_FILE_MAX_BYTES);
+static const BIN_ATTR_RO(cpumap, CPUMAP_FILE_MAX_BYTES);
 
 static inline ssize_t cpulist_read(struct file *file, struct kobject *kobj,
-				   struct bin_attribute *attr, char *buf,
+				   const struct bin_attribute *attr, char *buf,
 				   loff_t off, size_t count)
 {
 	struct device *dev = kobj_to_dev(kobj);
@@ -66,7 +67,7 @@ static inline ssize_t cpulist_read(struct file *file, struct kobject *kobj,
 	return n;
 }
 
-static BIN_ATTR_RO(cpulist, CPULIST_FILE_MAX_BYTES);
+static const BIN_ATTR_RO(cpulist, CPULIST_FILE_MAX_BYTES);
 
 /**
  * struct node_access_nodes - Access class device to hold user visible
@@ -126,7 +127,7 @@ static void node_access_release(struct device *dev)
 }
 
 static struct node_access_nodes *node_init_node_access(struct node *node,
-						       unsigned int access)
+						       enum access_coordinate_class access)
 {
 	struct node_access_nodes *access_node;
 	struct device *dev;
@@ -191,7 +192,7 @@ static struct attribute *access_attrs[] = {
  * @access: The access class the for the given attributes
  */
 void node_set_perf_attrs(unsigned int nid, struct access_coordinate *coord,
-			 unsigned int access)
+			 enum access_coordinate_class access)
 {
 	struct node_access_nodes *c;
 	struct node *node;
@@ -214,7 +215,16 @@ void node_set_perf_attrs(unsigned int nid, struct access_coordinate *coord,
 			break;
 		}
 	}
+
+	/* When setting CPU access coordinates, update mempolicy */
+	if (access == ACCESS_COORDINATE_CPU) {
+		if (mempolicy_set_node_perf(nid, coord)) {
+			pr_info("failed to set mempolicy attrs for node %d\n",
+				nid);
+		}
+	}
 }
+EXPORT_SYMBOL_GPL(node_set_perf_attrs);
 
 /**
  * struct node_cache_info - Internal tracking for memory node caches
@@ -243,12 +253,14 @@ CACHE_ATTR(size, "%llu")
 CACHE_ATTR(line_size, "%u")
 CACHE_ATTR(indexing, "%u")
 CACHE_ATTR(write_policy, "%u")
+CACHE_ATTR(address_mode, "%#x")
 
 static struct attribute *cache_attrs[] = {
 	&dev_attr_indexing.attr,
 	&dev_attr_size.attr,
 	&dev_attr_line_size.attr,
 	&dev_attr_write_policy.attr,
+	&dev_attr_address_mode.attr,
 	NULL,
 };
 ATTRIBUTE_GROUPS(cache);
@@ -465,7 +477,7 @@ static ssize_t node_read_meminfo(struct device *dev,
 			     nid, K(node_page_state(pgdat, NR_PAGETABLE)),
 			     nid, K(node_page_state(pgdat, NR_SECONDARY_PAGETABLE)),
 			     nid, 0UL,
-			     nid, K(sum_zone_node_page_state(nid, NR_BOUNCE)),
+			     nid, 0UL,
 			     nid, K(node_page_state(pgdat, NR_WRITEBACK_TEMP)),
 			     nid, K(sreclaimable +
 				    node_page_state(pgdat, NR_KERNEL_MISC_RECLAIMABLE)),
@@ -577,7 +589,7 @@ static struct attribute *node_dev_attrs[] = {
 	NULL
 };
 
-static struct bin_attribute *node_dev_bin_attrs[] = {
+static const struct bin_attribute *node_dev_bin_attrs[] = {
 	&bin_attr_cpumap,
 	&bin_attr_cpulist,
 	NULL
@@ -585,7 +597,7 @@ static struct bin_attribute *node_dev_bin_attrs[] = {
 
 static const struct attribute_group node_dev_group = {
 	.attrs = node_dev_attrs,
-	.bin_attrs = node_dev_bin_attrs
+	.bin_attrs_new = node_dev_bin_attrs,
 };
 
 static const struct attribute_group *node_dev_groups[] = {
@@ -689,7 +701,7 @@ int register_cpu_under_node(unsigned int cpu, unsigned int nid)
  */
 int register_memory_node_under_compute_node(unsigned int mem_nid,
 					    unsigned int cpu_nid,
-					    unsigned int access)
+					    enum access_coordinate_class access)
 {
 	struct node *init_node, *targ_node;
 	struct node_access_nodes *initiator, *target;

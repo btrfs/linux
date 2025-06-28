@@ -1320,6 +1320,7 @@ static int isp_video_open(struct file *file)
 	queue->buf_struct_size = sizeof(struct isp_buffer);
 	queue->timestamp_flags = V4L2_BUF_FLAG_TIMESTAMP_MONOTONIC;
 	queue->dev = video->isp->dev;
+	queue->lock = &video->queue_lock;
 
 	ret = vb2_queue_init(&handle->queue);
 	if (ret < 0) {

@@ -56,7 +56,7 @@ static int usnic_uiom_dma_fault(struct iommu_domain *domain,
 				unsigned long iova, int flags,
 				void *token)
 {
-	usnic_err("Device %s iommu fault domain 0x%pK va 0x%lx flags 0x%x\n",
+	usnic_err("Device %s iommu fault domain 0x%p va 0x%lx flags 0x%x\n",
 		dev_name(dev),
 		domain, iova, flags);
 	return -ENOSYS;
@@ -443,11 +443,11 @@ struct usnic_uiom_pd *usnic_uiom_alloc_pd(struct device *dev)
 	if (!pd)
 		return ERR_PTR(-ENOMEM);
 
-	pd->domain = domain = iommu_domain_alloc(dev->bus);
-	if (!domain) {
+	pd->domain = domain = iommu_paging_domain_alloc(dev);
+	if (IS_ERR(domain)) {
 		usnic_err("Failed to allocate IOMMU domain");
 		kfree(pd);
-		return ERR_PTR(-ENOMEM);
+		return ERR_CAST(domain);
 	}
 
 	iommu_set_fault_handler(pd->domain, usnic_uiom_dma_fault, NULL);

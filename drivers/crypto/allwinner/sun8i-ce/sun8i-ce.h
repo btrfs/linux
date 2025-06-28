@@ -149,6 +149,7 @@ struct ce_variant {
 	bool hash_t_dlen_in_bits;
 	bool prng_t_dlen_in_bytes;
 	bool trng_t_dlen_in_bytes;
+	bool needs_word_addresses;
 	struct ce_clock ce_clks[CE_MAX_CLOCKS];
 	int esr;
 	unsigned char prng;
@@ -241,6 +242,20 @@ struct sun8i_ce_dev {
 #endif
 };
 
+static inline u32 desc_addr_val(struct sun8i_ce_dev *dev, dma_addr_t addr)
+{
+	if (dev->variant->needs_word_addresses)
+		return addr / 4;
+
+	return addr;
+}
+
+static inline __le32 desc_addr_val_le32(struct sun8i_ce_dev *dev,
+					dma_addr_t addr)
+{
+	return cpu_to_le32(desc_addr_val(dev, addr));
+}
+
 /*
  * struct sun8i_cipher_req_ctx - context for a skcipher request
  * @op_dir:		direction (encrypt vs decrypt) for this request
@@ -293,8 +308,8 @@ struct sun8i_ce_hash_tfm_ctx {
  * @flow:	the flow to use for this request
  */
 struct sun8i_ce_hash_reqctx {
-	struct ahash_request fallback_req;
 	int flow;
+	struct ahash_request fallback_req; // keep at the end
 };
 
 /*

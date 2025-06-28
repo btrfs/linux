@@ -4,9 +4,13 @@
  * Copyright (C) 2017-2021 Willy Tarreau <w@1wt.eu>
  */
 
+/* make sure to include all global symbols */
+#include "nolibc.h"
+
 #ifndef _NOLIBC_STRING_H
 #define _NOLIBC_STRING_H
 
+#include "arch.h"
 #include "std.h"
 
 static void *malloc(size_t len);
@@ -31,6 +35,7 @@ int memcmp(const void *s1, const void *s2, size_t n)
 /* might be ignored by the compiler without -ffreestanding, then found as
  * missing.
  */
+void *memmove(void *dst, const void *src, size_t len);
 __attribute__((weak,unused,section(".text.nolibc_memmove")))
 void *memmove(void *dst, const void *src, size_t len)
 {
@@ -55,6 +60,7 @@ void *memmove(void *dst, const void *src, size_t len)
 
 #ifndef NOLIBC_ARCH_HAS_MEMCPY
 /* must be exported, as it's used by libgcc on ARM */
+void *memcpy(void *dst, const void *src, size_t len);
 __attribute__((weak,unused,section(".text.nolibc_memcpy")))
 void *memcpy(void *dst, const void *src, size_t len)
 {
@@ -72,6 +78,7 @@ void *memcpy(void *dst, const void *src, size_t len)
 /* might be ignored by the compiler without -ffreestanding, then found as
  * missing.
  */
+void *memset(void *dst, int b, size_t len);
 __attribute__((weak,unused,section(".text.nolibc_memset")))
 void *memset(void *dst, int b, size_t len)
 {
@@ -123,7 +130,8 @@ char *strcpy(char *dst, const char *src)
  * thus itself, hence the asm() statement below that's meant to disable this
  * confusing practice.
  */
-static __attribute__((unused))
+size_t strlen(const char *str);
+__attribute__((weak,unused,section(".text.nolibc_strlen")))
 size_t strlen(const char *str)
 {
 	size_t len;
@@ -187,21 +195,25 @@ char *strndup(const char *str, size_t maxlen)
 static __attribute__((unused))
 size_t strlcat(char *dst, const char *src, size_t size)
 {
-	size_t len;
-	char c;
+	size_t len = strnlen(dst, size);
 
-	for (len = 0; dst[len];	len++)
-		;
-
-	for (;;) {
-		c = *src;
-		if (len < size)
-			dst[len] = c;
-		if (!c)
+	/*
+	 * We want len < size-1. But as size is unsigned and can wrap
+	 * around, we use len + 1 instead.
+	 */
+	while (len + 1 < size) {
+		dst[len] = *src;
+		if (*src == '\0')
 			break;
 		len++;
 		src++;
 	}
+
+	if (len < size)
+		dst[len] = '\0';
+
+	while (*src++)
+		len++;
 
 	return len;
 }
@@ -210,16 +222,18 @@ static __attribute__((unused))
 size_t strlcpy(char *dst, const char *src, size_t size)
 {
 	size_t len;
-	char c;
 
-	for (len = 0;;) {
-		c = src[len];
-		if (len < size)
-			dst[len] = c;
-		if (!c)
-			break;
-		len++;
+	for (len = 0; len < size; len++) {
+		dst[len] = src[len];
+		if (!dst[len])
+			return len;
 	}
+	if (size)
+		dst[size-1] = '\0';
+
+	while (src[len])
+		len++;
+
 	return len;
 }
 
@@ -278,7 +292,40 @@ char *strrchr(const char *s, int c)
 	return (char *)ret;
 }
 
-/* make sure to include all global symbols */
-#include "nolibc.h"
+static __attribute__((unused))
+char *strstr(const char *haystack, const char *needle)
+{
+	size_t len_haystack, len_needle;
+
+	len_needle = strlen(needle);
+	if (!len_needle)
+		return NULL;
+
+	len_haystack = strlen(haystack);
+	while (len_haystack >= len_needle) {
+		if (!memcmp(haystack, needle, len_needle))
+			return (char *)haystack;
+		haystack++;
+		len_haystack--;
+	}
+
+	return NULL;
+}
+
+static __attribute__((unused))
+int tolower(int c)
+{
+	if (c >= 'A' && c <= 'Z')
+		return c - 'A' + 'a';
+	return c;
+}
+
+static __attribute__((unused))
+int toupper(int c)
+{
+	if (c >= 'a' && c <= 'z')
+		return c - 'a' + 'A';
+	return c;
+}
 
 #endif /* _NOLIBC_STRING_H */

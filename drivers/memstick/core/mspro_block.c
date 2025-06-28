@@ -627,9 +627,7 @@ static int mspro_block_issue_req(struct memstick_dev *card)
 	while (true) {
 		msb->current_page = 0;
 		msb->current_seg = 0;
-		msb->seg_count = blk_rq_map_sg(msb->block_req->q,
-					       msb->block_req,
-					       msb->req_sg);
+		msb->seg_count = blk_rq_map_sg(msb->block_req, msb->req_sg);
 
 		if (!msb->seg_count) {
 			unsigned int bytes = blk_rq_cur_bytes(msb->block_req);
@@ -1103,6 +1101,12 @@ static const struct blk_mq_ops mspro_mq_ops = {
 static int mspro_block_init_disk(struct memstick_dev *card)
 {
 	struct mspro_block_data *msb = memstick_get_drvdata(card);
+	struct queue_limits lim = {
+		.logical_block_size	= msb->page_size,
+		.max_hw_sectors		= MSPRO_BLOCK_MAX_PAGES,
+		.max_segments		= MSPRO_BLOCK_MAX_SEGS,
+		.max_segment_size	= MSPRO_BLOCK_MAX_PAGES * msb->page_size,
+	};
 	struct mspro_devinfo *dev_info = NULL;
 	struct mspro_sys_info *sys_info = NULL;
 	struct mspro_sys_attr *s_attr = NULL;
@@ -1133,22 +1137,16 @@ static int mspro_block_init_disk(struct memstick_dev *card)
 	if (disk_id < 0)
 		return disk_id;
 
-	rc = blk_mq_alloc_sq_tag_set(&msb->tag_set, &mspro_mq_ops, 2,
-				     BLK_MQ_F_SHOULD_MERGE);
+	rc = blk_mq_alloc_sq_tag_set(&msb->tag_set, &mspro_mq_ops, 2, 0);
 	if (rc)
 		goto out_release_id;
 
-	msb->disk = blk_mq_alloc_disk(&msb->tag_set, card);
+	msb->disk = blk_mq_alloc_disk(&msb->tag_set, &lim, card);
 	if (IS_ERR(msb->disk)) {
 		rc = PTR_ERR(msb->disk);
 		goto out_free_tag_set;
 	}
 	msb->queue = msb->disk->queue;
-
-	blk_queue_max_hw_sectors(msb->queue, MSPRO_BLOCK_MAX_PAGES);
-	blk_queue_max_segments(msb->queue, MSPRO_BLOCK_MAX_SEGS);
-	blk_queue_max_segment_size(msb->queue,
-				   MSPRO_BLOCK_MAX_PAGES * msb->page_size);
 
 	msb->disk->major = major;
 	msb->disk->first_minor = disk_id << MSPRO_BLOCK_PART_SHIFT;
@@ -1157,8 +1155,6 @@ static int mspro_block_init_disk(struct memstick_dev *card)
 	msb->disk->private_data = msb;
 
 	sprintf(msb->disk->disk_name, "mspblk%d", disk_id);
-
-	blk_queue_logical_block_size(msb->queue, msb->page_size);
 
 	capacity = be16_to_cpu(sys_info->user_block_count);
 	capacity *= be16_to_cpu(sys_info->block_size);
@@ -1350,7 +1346,7 @@ out_unlock:
 
 #endif /* CONFIG_PM */
 
-static struct memstick_device_id mspro_block_id_tbl[] = {
+static const struct memstick_device_id mspro_block_id_tbl[] = {
 	{MEMSTICK_MATCH_ALL, MEMSTICK_TYPE_PRO, MEMSTICK_CATEGORY_STORAGE_DUO,
 	 MEMSTICK_CLASS_DUO},
 	{}

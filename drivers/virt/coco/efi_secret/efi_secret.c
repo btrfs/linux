@@ -326,11 +326,10 @@ err_unmap:
 	return ret;
 }
 
-static int efi_secret_remove(struct platform_device *dev)
+static void efi_secret_remove(struct platform_device *dev)
 {
 	efi_secret_securityfs_teardown(dev);
 	efi_secret_unmap_area();
-	return 0;
 }
 
 static struct platform_driver efi_secret_driver = {

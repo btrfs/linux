@@ -504,12 +504,6 @@ static inline int ptep_set_access_flags(struct vm_area_struct *vma,
 	return true;
 }
 
-/*
- * Conversion functions: convert a page and protection to a page entry,
- * and a page entry and page directory to the page they refer to.
- */
-#define mk_pte(page, pgprot)	pfn_pte(page_to_pfn(page), (pgprot))
-
 #if defined(CONFIG_XPA)
 static inline pte_t pte_modify(pte_t pte, pgprot_t newprot)
 {
@@ -540,7 +534,7 @@ static inline pte_t pte_modify(pte_t pte, pgprot_t newprot)
 #endif
 
 #if defined(CONFIG_PHYS_ADDR_T_64BIT) && defined(CONFIG_CPU_MIPS32)
-static inline int pte_swp_exclusive(pte_t pte)
+static inline bool pte_swp_exclusive(pte_t pte)
 {
 	return pte.pte_low & _PAGE_SWP_EXCLUSIVE;
 }
@@ -557,7 +551,7 @@ static inline pte_t pte_swp_clear_exclusive(pte_t pte)
 	return pte;
 }
 #else
-static inline int pte_swp_exclusive(pte_t pte)
+static inline bool pte_swp_exclusive(pte_t pte)
 {
 	return pte_val(pte) & _PAGE_SWP_EXCLUSIVE;
 }
@@ -594,8 +588,8 @@ static inline void update_mmu_cache_range(struct vm_fault *vmf,
 #define update_mmu_cache(vma, address, ptep) \
 	update_mmu_cache_range(NULL, vma, address, ptep, 1)
 
-#define	__HAVE_ARCH_UPDATE_MMU_TLB
-#define update_mmu_tlb	update_mmu_cache
+#define update_mmu_tlb_range(vma, address, ptep, nr) \
+	update_mmu_cache_range(NULL, vma, address, ptep, nr)
 
 static inline void update_mmu_cache_pmd(struct vm_area_struct *vma,
 	unsigned long address, pmd_t *pmdp)
@@ -718,9 +712,6 @@ static inline pmd_t pmd_clear_soft_dirty(pmd_t pmd)
 }
 
 #endif /* CONFIG_HAVE_ARCH_SOFT_DIRTY */
-
-/* Extern to avoid header file madness */
-extern pmd_t mk_pmd(struct page *page, pgprot_t prot);
 
 static inline pmd_t pmd_modify(pmd_t pmd, pgprot_t newprot)
 {

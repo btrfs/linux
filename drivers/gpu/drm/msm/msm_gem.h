@@ -140,8 +140,8 @@ int msm_gem_get_and_pin_iova(struct drm_gem_object *obj,
 void msm_gem_unpin_iova(struct drm_gem_object *obj,
 		struct msm_gem_address_space *aspace);
 void msm_gem_pin_obj_locked(struct drm_gem_object *obj);
-struct page **msm_gem_pin_pages(struct drm_gem_object *obj);
-void msm_gem_unpin_pages(struct drm_gem_object *obj);
+struct page **msm_gem_pin_pages_locked(struct drm_gem_object *obj);
+void msm_gem_unpin_pages_locked(struct drm_gem_object *obj);
 int msm_gem_dumb_create(struct drm_file *file, struct drm_device *dev,
 		struct drm_mode_create_dumb *args);
 int msm_gem_dumb_map_offset(struct drm_file *file, struct drm_device *dev,
@@ -224,7 +224,7 @@ msm_gem_assert_locked(struct drm_gem_object *obj)
 /* imported/exported objects are not purgeable: */
 static inline bool is_unpurgeable(struct msm_gem_object *msm_obj)
 {
-	return msm_obj->base.import_attach || msm_obj->pin_count;
+	return drm_gem_is_imported(&msm_obj->base) || msm_obj->pin_count;
 }
 
 static inline bool is_purgeable(struct msm_gem_object *msm_obj)

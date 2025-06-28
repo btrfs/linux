@@ -36,6 +36,7 @@
 #include <net/compat.h>
 #include <net/scm.h>
 #include <net/cls_cgroup.h>
+#include <net/af_unix.h>
 
 
 /*
@@ -85,8 +86,15 @@ static int scm_fp_copy(struct cmsghdr *cmsg, struct scm_fp_list **fplp)
 			return -ENOMEM;
 		*fplp = fpl;
 		fpl->count = 0;
+		fpl->count_unix = 0;
 		fpl->max = SCM_MAX_FD;
 		fpl->user = NULL;
+#if IS_ENABLED(CONFIG_UNIX)
+		fpl->inflight = false;
+		fpl->dead = false;
+		fpl->edges = NULL;
+		INIT_LIST_HEAD(&fpl->vertices);
+#endif
 	}
 	fpp = &fpl->fp[fpl->count];
 
@@ -109,6 +117,9 @@ static int scm_fp_copy(struct cmsghdr *cmsg, struct scm_fp_list **fplp)
 			fput(file);
 			return -EINVAL;
 		}
+		if (unix_get_socket(file))
+			fpl->count_unix++;
+
 		*fpp++ = file;
 		fpl->count++;
 	}
@@ -271,6 +282,16 @@ efault:
 }
 EXPORT_SYMBOL(put_cmsg);
 
+int put_cmsg_notrunc(struct msghdr *msg, int level, int type, int len,
+		     void *data)
+{
+	/* Don't produce truncated CMSGs */
+	if (!msg->msg_control || msg->msg_controllen < CMSG_LEN(len))
+		return -ETOOSMALL;
+
+	return put_cmsg(msg, level, type, len, data);
+}
+
 void put_cmsg_scm_timestamping64(struct msghdr *msg, struct scm_timestamping_internal *tss_internal)
 {
 	struct scm_timestamping64 tss;
@@ -371,9 +392,137 @@ struct scm_fp_list *scm_fp_dup(struct scm_fp_list *fpl)
 	if (new_fpl) {
 		for (i = 0; i < fpl->count; i++)
 			get_file(fpl->fp[i]);
+
 		new_fpl->max = new_fpl->count;
 		new_fpl->user = get_uid(fpl->user);
+#if IS_ENABLED(CONFIG_UNIX)
+		new_fpl->inflight = false;
+		new_fpl->edges = NULL;
+		INIT_LIST_HEAD(&new_fpl->vertices);
+#endif
 	}
 	return new_fpl;
 }
 EXPORT_SYMBOL(scm_fp_dup);
+
+#ifdef CONFIG_SECURITY_NETWORK
+static void scm_passec(struct sock *sk, struct msghdr *msg, struct scm_cookie *scm)
+{
+	struct lsm_context ctx;
+	int err;
+
+	if (sk->sk_scm_security) {
+		err = security_secid_to_secctx(scm->secid, &ctx);
+
+		if (err >= 0) {
+			put_cmsg(msg, SOL_SOCKET, SCM_SECURITY, ctx.len,
+				 ctx.context);
+
+			security_release_secctx(&ctx);
+		}
+	}
+}
+
+static bool scm_has_secdata(struct sock *sk)
+{
+	return sk->sk_scm_security;
+}
+#else
+static void scm_passec(struct sock *sk, struct msghdr *msg, struct scm_cookie *scm)
+{
+}
+
+static bool scm_has_secdata(struct sock *sk)
+{
+	return false;
+}
+#endif
+
+static void scm_pidfd_recv(struct msghdr *msg, struct scm_cookie *scm)
+{
+	struct file *pidfd_file = NULL;
+	int len, pidfd;
+
+	/* put_cmsg() doesn't return an error if CMSG is truncated,
+	 * that's why we need to opencode these checks here.
+	 */
+	if (msg->msg_flags & MSG_CMSG_COMPAT)
+		len = sizeof(struct compat_cmsghdr) + sizeof(int);
+	else
+		len = sizeof(struct cmsghdr) + sizeof(int);
+
+	if (msg->msg_controllen < len) {
+		msg->msg_flags |= MSG_CTRUNC;
+		return;
+	}
+
+	if (!scm->pid)
+		return;
+
+	pidfd = pidfd_prepare(scm->pid, 0, &pidfd_file);
+
+	if (put_cmsg(msg, SOL_SOCKET, SCM_PIDFD, sizeof(int), &pidfd)) {
+		if (pidfd_file) {
+			put_unused_fd(pidfd);
+			fput(pidfd_file);
+		}
+
+		return;
+	}
+
+	if (pidfd_file)
+		fd_install(pidfd, pidfd_file);
+}
+
+static bool __scm_recv_common(struct sock *sk, struct msghdr *msg,
+			      struct scm_cookie *scm, int flags)
+{
+	if (!msg->msg_control) {
+		if (sk->sk_scm_credentials || sk->sk_scm_pidfd ||
+		    scm->fp || scm_has_secdata(sk))
+			msg->msg_flags |= MSG_CTRUNC;
+
+		scm_destroy(scm);
+		return false;
+	}
+
+	if (sk->sk_scm_credentials) {
+		struct user_namespace *current_ns = current_user_ns();
+		struct ucred ucreds = {
+			.pid = scm->creds.pid,
+			.uid = from_kuid_munged(current_ns, scm->creds.uid),
+			.gid = from_kgid_munged(current_ns, scm->creds.gid),
+		};
+
+		put_cmsg(msg, SOL_SOCKET, SCM_CREDENTIALS, sizeof(ucreds), &ucreds);
+	}
+
+	scm_passec(sk, msg, scm);
+
+	if (scm->fp)
+		scm_detach_fds(msg, scm);
+
+	return true;
+}
+
+void scm_recv(struct socket *sock, struct msghdr *msg,
+	      struct scm_cookie *scm, int flags)
+{
+	if (!__scm_recv_common(sock->sk, msg, scm, flags))
+		return;
+
+	scm_destroy_cred(scm);
+}
+EXPORT_SYMBOL(scm_recv);
+
+void scm_recv_unix(struct socket *sock, struct msghdr *msg,
+		   struct scm_cookie *scm, int flags)
+{
+	if (!__scm_recv_common(sock->sk, msg, scm, flags))
+		return;
+
+	if (sock->sk->sk_scm_pidfd)
+		scm_pidfd_recv(msg, scm);
+
+	scm_destroy_cred(scm);
+}

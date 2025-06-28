@@ -2,7 +2,7 @@
 /*
  * Copyright (c) 2016-2019 The Linux Foundation. All rights reserved.
  * Copyright (c) 2023, Linaro Ltd.
- * Author: Caleb Connolly <caleb.connolly@linaro.org>
+ * Author: Casey Connolly <casey.connolly@linaro.org>
  *
  * This driver is for the switch-mode battery charger and boost
  * hardware found in pmi8998 and related PMICs.
@@ -411,13 +411,6 @@ static enum power_supply_property smb2_properties[] = {
 	POWER_SUPPLY_PROP_USB_TYPE,
 };
 
-static enum power_supply_usb_type smb2_usb_types[] = {
-	POWER_SUPPLY_USB_TYPE_UNKNOWN,
-	POWER_SUPPLY_USB_TYPE_SDP,
-	POWER_SUPPLY_USB_TYPE_DCP,
-	POWER_SUPPLY_USB_TYPE_CDP,
-};
-
 static int smb2_get_prop_usb_online(struct smb2_chip *chip, int *val)
 {
 	unsigned int stat;
@@ -775,8 +768,10 @@ static irqreturn_t smb2_handle_wdog_bark(int irq, void *data)
 static const struct power_supply_desc smb2_psy_desc = {
 	.name = "pmi8998_charger",
 	.type = POWER_SUPPLY_TYPE_USB,
-	.usb_types = smb2_usb_types,
-	.num_usb_types = ARRAY_SIZE(smb2_usb_types),
+	.usb_types = BIT(POWER_SUPPLY_USB_TYPE_SDP) |
+		     BIT(POWER_SUPPLY_USB_TYPE_CDP) |
+		     BIT(POWER_SUPPLY_USB_TYPE_DCP) |
+		     BIT(POWER_SUPPLY_USB_TYPE_UNKNOWN),
 	.properties = smb2_properties,
 	.num_properties = ARRAY_SIZE(smb2_properties),
 	.get_property = smb2_get_property,
@@ -837,7 +832,7 @@ static const struct smb2_register smb2_init_seq[] = {
 		  AUTO_RECHG_BIT | EN_ANALOG_DROP_IN_VBATT_BIT |
 		  CHARGER_INHIBIT_BIT,
 	  .val = CHARGER_INHIBIT_BIT },
-	/* STAT pin software override, match downstream. Parallell charging? */
+	/* STAT pin software override, match downstream. Parallel charging? */
 	{ .addr = STAT_CFG,
 	  .mask = STAT_SW_OVERRIDE_CFG_BIT,
 	  .val = STAT_SW_OVERRIDE_CFG_BIT },
@@ -969,7 +964,7 @@ static int smb2_probe(struct platform_device *pdev)
 		return rc;
 
 	supply_config.drv_data = chip;
-	supply_config.of_node = pdev->dev.of_node;
+	supply_config.fwnode = dev_fwnode(&pdev->dev);
 
 	desc = devm_kzalloc(chip->dev, sizeof(smb2_psy_desc), GFP_KERNEL);
 	if (!desc)
@@ -1050,6 +1045,6 @@ static struct platform_driver qcom_spmi_smb2 = {
 
 module_platform_driver(qcom_spmi_smb2);
 
-MODULE_AUTHOR("Caleb Connolly <caleb.connolly@linaro.org>");
+MODULE_AUTHOR("Casey Connolly <casey.connolly@linaro.org>");
 MODULE_DESCRIPTION("Qualcomm SMB2 Charger Driver");
 MODULE_LICENSE("GPL");

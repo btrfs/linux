@@ -16,6 +16,9 @@
 #include <asm/pgalloc.h>
 #include <asm/tlbflush.h>
 
+/* ensure that the fixmap region does not grow down into the PCI I/O region */
+static_assert(FIXADDR_TOT_START > PCI_IO_END);
+
 #define NR_BM_PTE_TABLES \
 	SPAN_NR_ENTRIES(FIXADDR_TOT_START, FIXADDR_TOP, PMD_SHIFT)
 #define NR_BM_PMD_TABLES \
@@ -44,7 +47,8 @@ static void __init early_fixmap_init_pte(pmd_t *pmdp, unsigned long addr)
 
 	if (pmd_none(pmd)) {
 		ptep = bm_pte[BM_PTE_TABLE_IDX(addr)];
-		__pmd_populate(pmdp, __pa_symbol(ptep), PMD_TYPE_TABLE);
+		__pmd_populate(pmdp, __pa_symbol(ptep),
+			       PMD_TYPE_TABLE | PMD_TABLE_AF);
 	}
 }
 
@@ -56,7 +60,8 @@ static void __init early_fixmap_init_pmd(pud_t *pudp, unsigned long addr,
 	pmd_t *pmdp;
 
 	if (pud_none(pud))
-		__pud_populate(pudp, __pa_symbol(bm_pmd), PUD_TYPE_TABLE);
+		__pud_populate(pudp, __pa_symbol(bm_pmd),
+			       PUD_TYPE_TABLE | PUD_TABLE_AF);
 
 	pmdp = pmd_offset_kimg(pudp, addr);
 	do {
@@ -83,7 +88,8 @@ static void __init early_fixmap_init_pud(p4d_t *p4dp, unsigned long addr,
 	}
 
 	if (p4d_none(p4d))
-		__p4d_populate(p4dp, __pa_symbol(bm_pud), P4D_TYPE_TABLE);
+		__p4d_populate(p4dp, __pa_symbol(bm_pud),
+			       P4D_TYPE_TABLE | P4D_TABLE_AF);
 
 	pudp = pud_offset_kimg(p4dp, addr);
 	early_fixmap_init_pmd(pudp, addr, end);
@@ -101,7 +107,7 @@ void __init early_fixmap_init(void)
 	unsigned long end = FIXADDR_TOP;
 
 	pgd_t *pgdp = pgd_offset_k(addr);
-	p4d_t *p4dp = p4d_offset(pgdp, addr);
+	p4d_t *p4dp = p4d_offset_kimg(pgdp, addr);
 
 	early_fixmap_init_pud(p4dp, addr, end);
 }
@@ -121,9 +127,9 @@ void __set_fixmap(enum fixed_addresses idx,
 	ptep = fixmap_pte(addr);
 
 	if (pgprot_val(flags)) {
-		set_pte(ptep, pfn_pte(phys >> PAGE_SHIFT, flags));
+		__set_pte(ptep, pfn_pte(phys >> PAGE_SHIFT, flags));
 	} else {
-		pte_clear(&init_mm, addr, ptep);
+		__pte_clear(&init_mm, addr, ptep);
 		flush_tlb_kernel_range(addr, addr+PAGE_SIZE);
 	}
 }
@@ -166,38 +172,4 @@ void *__init fixmap_remap_fdt(phys_addr_t dt_phys, int *size, pgprot_t prot)
 	}
 
 	return dt_virt;
-}
-
-/*
- * Copy the fixmap region into a new pgdir.
- */
-void __init fixmap_copy(pgd_t *pgdir)
-{
-	if (!READ_ONCE(pgd_val(*pgd_offset_pgd(pgdir, FIXADDR_TOT_START)))) {
-		/*
-		 * The fixmap falls in a separate pgd to the kernel, and doesn't
-		 * live in the carveout for the swapper_pg_dir. We can simply
-		 * re-use the existing dir for the fixmap.
-		 */
-		set_pgd(pgd_offset_pgd(pgdir, FIXADDR_TOT_START),
-			READ_ONCE(*pgd_offset_k(FIXADDR_TOT_START)));
-	} else if (CONFIG_PGTABLE_LEVELS > 3) {
-		pgd_t *bm_pgdp;
-		p4d_t *bm_p4dp;
-		pud_t *bm_pudp;
-		/*
-		 * The fixmap shares its top level pgd entry with the kernel
-		 * mapping. This can really only occur when we are running
-		 * with 16k/4 levels, so we can simply reuse the pud level
-		 * entry instead.
-		 */
-		BUG_ON(!IS_ENABLED(CONFIG_ARM64_16K_PAGES));
-		bm_pgdp = pgd_offset_pgd(pgdir, FIXADDR_TOT_START);
-		bm_p4dp = p4d_offset(bm_pgdp, FIXADDR_TOT_START);
-		bm_pudp = pud_set_fixmap_offset(bm_p4dp, FIXADDR_TOT_START);
-		pud_populate(&init_mm, bm_pudp, lm_alias(bm_pmd));
-		pud_clear_fixmap();
-	} else {
-		BUG();
-	}
 }

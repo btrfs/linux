@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 /*
- * Copyright (C) Fuzhou Rockchip Electronics Co.Ltd
+ * Copyright (C) Rockchip Electronics Co., Ltd.
  *    Zheng Yang <zhengyang@rock-chips.com>
  *    Yakir Yang <ykk@rock-chips.com>
  */
@@ -9,11 +9,6 @@
 #define __INNO_HDMI_H__
 
 #define DDC_SEGMENT_ADDR		0x30
-
-enum PWR_MODE {
-	NORMAL,
-	LOWER_PWR,
-};
 
 #define HDMI_SCL_RATE			(100*1000)
 #define DDC_BUS_FREQ_L			0x4b

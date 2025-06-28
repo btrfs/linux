@@ -23,8 +23,10 @@
 
 #include "../kselftest.h"
 
-#define TESTS_EXPECTED 51
+#define TESTS_EXPECTED 54
 #define TEST_NAME_LEN (PATH_MAX * 4)
+
+#define CHECK_COMM "CHECK_COMM"
 
 static char longpath[2 * PATH_MAX] = "";
 static char *envp[] = { "IN_TEST=yes", NULL, NULL };
@@ -98,10 +100,9 @@ static int check_execveat_invoked_rc(int fd, const char *path, int flags,
 	if (child == 0) {
 		/* Child: do execveat(). */
 		rc = execveat_(fd, path, argv, envp, flags);
-		ksft_print_msg("execveat() failed, rc=%d errno=%d (%s)\n",
+		ksft_print_msg("child execveat() failed, rc=%d errno=%d (%s)\n",
 			       rc, errno, strerror(errno));
-		ksft_test_result_fail("%s\n", test_name);
-		exit(1);  /* should not reach here */
+		exit(errno);
 	}
 	/* Parent: wait for & check child's exit status. */
 	rc = waitpid(child, &status, 0);
@@ -118,7 +119,7 @@ static int check_execveat_invoked_rc(int fd, const char *path, int flags,
 	}
 	if ((WEXITSTATUS(status) != expected_rc) &&
 	    (WEXITSTATUS(status) != expected_rc2)) {
-		ksft_print_msg("child %d exited with %d not %d nor %d\n",
+		ksft_print_msg("child %d exited with %d neither %d nor %d\n",
 			       child, WEXITSTATUS(status), expected_rc,
 			       expected_rc2);
 		ksft_test_result_fail("%s\n", test_name);
@@ -226,13 +227,39 @@ static int check_execveat_pathmax(int root_dfd, const char *src, int is_script)
 	 * "If the command name is found, but it is not an executable utility,
 	 * the exit status shall be 126."), so allow either.
 	 */
-	if (is_script)
+	if (is_script) {
+		ksft_print_msg("Invoke script via root_dfd and relative filename\n");
 		fail += check_execveat_invoked_rc(root_dfd, longpath + 1, 0,
 						  127, 126);
-	else
+	} else {
+		ksft_print_msg("Invoke exec via root_dfd and relative filename\n");
 		fail += check_execveat(root_dfd, longpath + 1, 0);
+	}
 
 	return fail;
+}
+
+static int check_execveat_comm(int fd, char *argv0, char *expected)
+{
+	char buf[128], *old_env, *old_argv0;
+	int ret;
+
+	snprintf(buf, sizeof(buf), CHECK_COMM "=%s", expected);
+
+	old_env = envp[1];
+	envp[1] = buf;
+
+	old_argv0 = argv[0];
+	argv[0] = argv0;
+
+	ksft_print_msg("Check execveat(AT_EMPTY_PATH)'s comm is %s\n",
+		       expected);
+	ret = check_execveat_invoked_rc(fd, "", AT_EMPTY_PATH, 0, 0);
+
+	envp[1] = old_env;
+	argv[0] = old_argv0;
+
+	return ret;
 }
 
 static int run_tests(void)
@@ -387,13 +414,21 @@ static int run_tests(void)
 
 	fail += check_execveat_pathmax(root_dfd, "execveat", 0);
 	fail += check_execveat_pathmax(root_dfd, "script", 1);
+
+	/* /proc/pid/comm gives filename by default */
+	fail += check_execveat_comm(fd, "sentinel", "execveat");
+	/* /proc/pid/comm gives argv[0] when invoked via link */
+	fail += check_execveat_comm(fd_symlink, "sentinel", "execveat");
+	/* /proc/pid/comm gives filename if NULL is passed */
+	fail += check_execveat_comm(fd, NULL, "execveat");
+
 	return fail;
 }
 
 static void prerequisites(void)
 {
 	int fd;
-	const char *script = "#!/bin/sh\nexit $*\n";
+	const char *script = "#!/bin/bash\nexit $*\n";
 
 	/* Create ephemeral copies of files */
 	exe_cp("execveat", "execveat.ephemeral");
@@ -413,15 +448,51 @@ int main(int argc, char **argv)
 	int ii;
 	int rc;
 	const char *verbose = getenv("VERBOSE");
+	const char *check_comm = getenv(CHECK_COMM);
 
-	if (argc >= 2) {
-		/* If we are invoked with an argument, don't run tests. */
+	if (argc >= 2 || check_comm) {
+		/*
+		 * If we are invoked with an argument, or no arguments but a
+		 * command to check, don't run tests.
+		 */
 		const char *in_test = getenv("IN_TEST");
 
 		if (verbose) {
 			ksft_print_msg("invoked with:\n");
 			for (ii = 0; ii < argc; ii++)
 				ksft_print_msg("\t[%d]='%s\n'", ii, argv[ii]);
+		}
+
+		/* If the tests wanted us to check the command, do so. */
+		if (check_comm) {
+			/* TASK_COMM_LEN == 16 */
+			char buf[32];
+			int fd, ret;
+
+			fd = open("/proc/self/comm", O_RDONLY);
+			if (fd < 0) {
+				ksft_perror("open() comm failed");
+				exit(1);
+			}
+
+			ret = read(fd, buf, sizeof(buf));
+			if (ret < 0) {
+				ksft_perror("read() comm failed");
+				close(fd);
+				exit(1);
+			}
+			close(fd);
+
+			// trim off the \n
+			buf[ret-1] = 0;
+
+			if (strcmp(buf, check_comm)) {
+				ksft_print_msg("bad comm, got: %s expected: %s\n",
+					       buf, check_comm);
+				exit(1);
+			}
+
+			exit(0);
 		}
 
 		/* Check expected environment transferred. */

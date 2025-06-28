@@ -73,6 +73,11 @@
 #define FFA_FN64_MEM_PERM_GET		FFA_SMC_64(0x88)
 #define FFA_MEM_PERM_SET		FFA_SMC_32(0x89)
 #define FFA_FN64_MEM_PERM_SET		FFA_SMC_64(0x89)
+#define FFA_CONSOLE_LOG			FFA_SMC_32(0x8A)
+#define FFA_PARTITION_INFO_GET_REGS	FFA_SMC_64(0x8B)
+#define FFA_EL3_INTR_HANDLE		FFA_SMC_32(0x8C)
+#define FFA_MSG_SEND_DIRECT_REQ2	FFA_SMC_64(0x8D)
+#define FFA_MSG_SEND_DIRECT_RESP2	FFA_SMC_64(0x8E)
 
 /*
  * For some calls it is necessary to use SMC64 to pass or return 64-bit values.
@@ -107,6 +112,7 @@
 	 FIELD_PREP(FFA_MINOR_VERSION_MASK, (minor)))
 #define FFA_VERSION_1_0		FFA_PACK_VERSION_INFO(1, 0)
 #define FFA_VERSION_1_1		FFA_PACK_VERSION_INFO(1, 1)
+#define FFA_VERSION_1_2		FFA_PACK_VERSION_INFO(1, 2)
 
 /**
  * FF-A specification mentions explicitly about '4K pages'. This should
@@ -126,6 +132,7 @@
 /* FFA Bus/Device/Driver related */
 struct ffa_device {
 	u32 id;
+	u32 properties;
 	int vm_id;
 	bool mode_32bit;
 	uuid_t uuid;
@@ -148,7 +155,7 @@ struct ffa_driver {
 	struct device_driver driver;
 };
 
-#define to_ffa_driver(d) container_of(d, struct ffa_driver, driver)
+#define to_ffa_driver(d) container_of_const(d, struct ffa_driver, driver)
 
 static inline void ffa_dev_set_drvdata(struct ffa_device *fdev, void *data)
 {
@@ -160,24 +167,30 @@ static inline void *ffa_dev_get_drvdata(struct ffa_device *fdev)
 	return dev_get_drvdata(&fdev->dev);
 }
 
+struct ffa_partition_info;
+
 #if IS_REACHABLE(CONFIG_ARM_FFA_TRANSPORT)
-struct ffa_device *ffa_device_register(const uuid_t *uuid, int vm_id,
-				       const struct ffa_ops *ops);
+struct ffa_device *
+ffa_device_register(const struct ffa_partition_info *part_info,
+		    const struct ffa_ops *ops);
 void ffa_device_unregister(struct ffa_device *ffa_dev);
 int ffa_driver_register(struct ffa_driver *driver, struct module *owner,
 			const char *mod_name);
 void ffa_driver_unregister(struct ffa_driver *driver);
+void ffa_devices_unregister(void);
 bool ffa_device_is_valid(struct ffa_device *ffa_dev);
 
 #else
-static inline
-struct ffa_device *ffa_device_register(const uuid_t *uuid, int vm_id,
-				       const struct ffa_ops *ops)
+static inline struct ffa_device *
+ffa_device_register(const struct ffa_partition_info *part_info,
+		    const struct ffa_ops *ops)
 {
 	return NULL;
 }
 
 static inline void ffa_device_unregister(struct ffa_device *dev) {}
+
+static inline void ffa_devices_unregister(void) {}
 
 static inline int
 ffa_driver_register(struct ffa_driver *driver, struct module *owner,
@@ -209,7 +222,10 @@ bool ffa_device_is_valid(struct ffa_device *ffa_dev) { return false; }
 #define module_ffa_driver(__ffa_driver)	\
 	module_driver(__ffa_driver, ffa_register, ffa_unregister)
 
-extern struct bus_type ffa_bus_type;
+extern const struct bus_type ffa_bus_type;
+
+/* The FF-A 1.0 partition structure lacks the uuid[4] */
+#define FFA_1_0_PARTITON_INFO_SZ	(8)
 
 /* FFA transport related */
 struct ffa_partition_info {
@@ -221,11 +237,36 @@ struct ffa_partition_info {
 #define FFA_PARTITION_DIRECT_SEND	BIT(1)
 /* partition can send and receive indirect messages. */
 #define FFA_PARTITION_INDIRECT_MSG	BIT(2)
+/* partition can receive notifications */
+#define FFA_PARTITION_NOTIFICATION_RECV	BIT(3)
 /* partition runs in the AArch64 execution state. */
 #define FFA_PARTITION_AARCH64_EXEC	BIT(8)
+/* partition supports receipt of direct request2 */
+#define FFA_PARTITION_DIRECT_REQ2_RECV	BIT(9)
+/* partition can send direct request2. */
+#define FFA_PARTITION_DIRECT_REQ2_SEND	BIT(10)
 	u32 properties;
-	u32 uuid[4];
+	uuid_t uuid;
 };
+
+static inline
+bool ffa_partition_check_property(struct ffa_device *dev, u32 property)
+{
+	return dev->properties & property;
+}
+
+#define ffa_partition_supports_notify_recv(dev)	\
+	ffa_partition_check_property(dev, FFA_PARTITION_NOTIFICATION_RECV)
+
+#define ffa_partition_supports_indirect_msg(dev)	\
+	ffa_partition_check_property(dev, FFA_PARTITION_INDIRECT_MSG)
+
+#define ffa_partition_supports_direct_recv(dev)	\
+	ffa_partition_check_property(dev, FFA_PARTITION_DIRECT_RECV)
+
+#define ffa_partition_supports_direct_req2_recv(dev)	\
+	(ffa_partition_check_property(dev, FFA_PARTITION_DIRECT_REQ2_RECV) && \
+	 !dev->mode_32bit)
 
 /* For use with FFA_MSG_SEND_DIRECT_{REQ,RESP} which pass data via registers */
 struct ffa_send_direct_data {
@@ -234,6 +275,20 @@ struct ffa_send_direct_data {
 	unsigned long data2; /* w5/x5 */
 	unsigned long data3; /* w6/x6 */
 	unsigned long data4; /* w7/x7 */
+};
+
+struct ffa_indirect_msg_hdr {
+	u32 flags;
+	u32 res0;
+	u32 offset;
+	u32 send_recv_id;
+	u32 size;
+	uuid_t uuid;
+};
+
+/* For use with FFA_MSG_SEND_DIRECT_{REQ,RESP}2 which pass data via registers */
+struct ffa_send_direct_data2 {
+	unsigned long data[14]; /* x4-x17 */
 };
 
 struct ffa_mem_region_addr_range {
@@ -396,6 +451,9 @@ struct ffa_msg_ops {
 	void (*mode_32bit_set)(struct ffa_device *dev);
 	int (*sync_send_receive)(struct ffa_device *dev,
 				 struct ffa_send_direct_data *data);
+	int (*indirect_send)(struct ffa_device *dev, void *buf, size_t sz);
+	int (*sync_send_receive2)(struct ffa_device *dev,
+				  struct ffa_send_direct_data2 *data);
 };
 
 struct ffa_mem_ops {
@@ -410,6 +468,7 @@ struct ffa_cpu_ops {
 
 typedef void (*ffa_sched_recv_cb)(u16 vcpu, bool is_per_vcpu, void *cb_data);
 typedef void (*ffa_notifier_cb)(int notify_id, void *cb_data);
+typedef void (*ffa_fwk_notifier_cb)(int notify_id, void *cb_data, void *buf);
 
 struct ffa_notifier_ops {
 	int (*sched_recv_cb_register)(struct ffa_device *dev,
@@ -418,6 +477,10 @@ struct ffa_notifier_ops {
 	int (*notify_request)(struct ffa_device *dev, bool per_vcpu,
 			      ffa_notifier_cb cb, void *cb_data, int notify_id);
 	int (*notify_relinquish)(struct ffa_device *dev, int notify_id);
+	int (*fwk_notify_request)(struct ffa_device *dev,
+				  ffa_fwk_notifier_cb cb, void *cb_data,
+				  int notify_id);
+	int (*fwk_notify_relinquish)(struct ffa_device *dev, int notify_id);
 	int (*notify_send)(struct ffa_device *dev, int notify_id, bool per_vcpu,
 			   u16 vcpu);
 };

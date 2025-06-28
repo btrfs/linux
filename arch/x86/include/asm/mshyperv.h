@@ -6,10 +6,10 @@
 #include <linux/nmi.h>
 #include <linux/msi.h>
 #include <linux/io.h>
-#include <asm/hyperv-tlfs.h>
 #include <asm/nospec-branch.h>
 #include <asm/paravirt.h>
-#include <asm/mshyperv.h>
+#include <asm/msr.h>
+#include <hyperv/hvhdk.h>
 
 /*
  * Hyper-V always provides a single IO-APIC at this MMIO address.
@@ -40,12 +40,9 @@ static inline unsigned char hv_get_nmi_reason(void)
 }
 
 #if IS_ENABLED(CONFIG_HYPERV)
-extern int hyperv_init_cpuhp;
 extern bool hyperv_paravisor_present;
 
 extern void *hv_hypercall_pg;
-
-extern u64 hv_current_partition_id;
 
 extern union hv_ghcb * __percpu *hv_ghcb_pg;
 
@@ -59,10 +56,6 @@ u64 hv_tdx_hypercall(u64 control, u64 param1, u64 param2);
  */
 #define HV_AP_INIT_GPAT_DEFAULT		0x0007040600070406ULL
 #define HV_AP_SEGMENT_LIMIT		0xffffffff
-
-int hv_call_deposit_pages(int node, u64 partition_id, u32 num_pages);
-int hv_call_add_logical_proc(int node, u32 lp_index, u32 acpi_id);
-int hv_call_create_vp(int node, u64 partition_id, u32 vp_index, u32 flags);
 
 /*
  * If the hypercall involves no input or output parameters, the hypervisor
@@ -79,11 +72,11 @@ static inline u64 hv_do_hypercall(u64 control, void *input, void *output)
 		return hv_tdx_hypercall(control, input_address, output_address);
 
 	if (hv_isolation_type_snp() && !hyperv_paravisor_present) {
-		__asm__ __volatile__("mov %4, %%r8\n"
+		__asm__ __volatile__("mov %[output_address], %%r8\n"
 				     "vmmcall"
 				     : "=a" (hv_status), ASM_CALL_CONSTRAINT,
 				       "+c" (control), "+d" (input_address)
-				     :  "r" (output_address)
+				     : [output_address] "r" (output_address)
 				     : "cc", "memory", "r8", "r9", "r10", "r11");
 		return hv_status;
 	}
@@ -91,12 +84,12 @@ static inline u64 hv_do_hypercall(u64 control, void *input, void *output)
 	if (!hv_hypercall_pg)
 		return U64_MAX;
 
-	__asm__ __volatile__("mov %4, %%r8\n"
+	__asm__ __volatile__("mov %[output_address], %%r8\n"
 			     CALL_NOSPEC
 			     : "=a" (hv_status), ASM_CALL_CONSTRAINT,
 			       "+c" (control), "+d" (input_address)
-			     :  "r" (output_address),
-				THUNK_TARGET(hv_hypercall_pg)
+			     : [output_address] "r" (output_address),
+			       THUNK_TARGET(hv_hypercall_pg)
 			     : "cc", "memory", "r8", "r9", "r10", "r11");
 #else
 	u32 input_address_hi = upper_32_bits(input_address);
@@ -162,7 +155,7 @@ static inline u64 _hv_do_fast_hypercall8(u64 control, u64 input1)
 				      : "cc", "edi", "esi");
 	}
 #endif
-		return hv_status;
+	return hv_status;
 }
 
 static inline u64 hv_do_fast_hypercall8(u16 code, u64 input1)
@@ -189,18 +182,18 @@ static inline u64 _hv_do_fast_hypercall16(u64 control, u64 input1, u64 input2)
 		return hv_tdx_hypercall(control, input1, input2);
 
 	if (hv_isolation_type_snp() && !hyperv_paravisor_present) {
-		__asm__ __volatile__("mov %4, %%r8\n"
+		__asm__ __volatile__("mov %[input2], %%r8\n"
 				     "vmmcall"
 				     : "=a" (hv_status), ASM_CALL_CONSTRAINT,
 				       "+c" (control), "+d" (input1)
-				     : "r" (input2)
+				     : [input2] "r" (input2)
 				     : "cc", "r8", "r9", "r10", "r11");
 	} else {
-		__asm__ __volatile__("mov %4, %%r8\n"
+		__asm__ __volatile__("mov %[input2], %%r8\n"
 				     CALL_NOSPEC
 				     : "=a" (hv_status), ASM_CALL_CONSTRAINT,
 				       "+c" (control), "+d" (input1)
-				     : "r" (input2),
+				     : [input2] "r" (input2),
 				       THUNK_TARGET(hv_hypercall_pg)
 				     : "cc", "r8", "r9", "r10", "r11");
 	}
@@ -276,11 +269,12 @@ int hv_unmap_ioapic_interrupt(int ioapic_id, struct hv_interrupt_entry *entry);
 #ifdef CONFIG_AMD_MEM_ENCRYPT
 bool hv_ghcb_negotiate_protocol(void);
 void __noreturn hv_ghcb_terminate(unsigned int set, unsigned int reason);
-int hv_snp_boot_ap(u32 cpu, unsigned long start_ip);
+int hv_snp_boot_ap(u32 apic_id, unsigned long start_ip, unsigned int cpu);
 #else
 static inline bool hv_ghcb_negotiate_protocol(void) { return false; }
 static inline void hv_ghcb_terminate(unsigned int set, unsigned int reason) {}
-static inline int hv_snp_boot_ap(u32 cpu, unsigned long start_ip) { return 0; }
+static inline int hv_snp_boot_ap(u32 apic_id, unsigned long start_ip,
+		unsigned int cpu) { return 0; }
 #endif
 
 #if defined(CONFIG_AMD_MEM_ENCRYPT) || defined(CONFIG_INTEL_TDX_GUEST)
@@ -293,27 +287,28 @@ static inline void hv_ivm_msr_write(u64 msr, u64 value) {}
 static inline void hv_ivm_msr_read(u64 msr, u64 *value) {}
 #endif
 
-static inline bool hv_is_synic_reg(unsigned int reg)
+static inline bool hv_is_synic_msr(unsigned int reg)
 {
-	return (reg >= HV_REGISTER_SCONTROL) &&
-	       (reg <= HV_REGISTER_SINT15);
+	return (reg >= HV_X64_MSR_SCONTROL) &&
+	       (reg <= HV_X64_MSR_SINT15);
 }
 
-static inline bool hv_is_sint_reg(unsigned int reg)
+static inline bool hv_is_sint_msr(unsigned int reg)
 {
-	return (reg >= HV_REGISTER_SINT0) &&
-	       (reg <= HV_REGISTER_SINT15);
+	return (reg >= HV_X64_MSR_SINT0) &&
+	       (reg <= HV_X64_MSR_SINT15);
 }
 
-u64 hv_get_register(unsigned int reg);
-void hv_set_register(unsigned int reg, u64 value);
-u64 hv_get_non_nested_register(unsigned int reg);
-void hv_set_non_nested_register(unsigned int reg, u64 value);
+u64 hv_get_msr(unsigned int reg);
+void hv_set_msr(unsigned int reg, u64 value);
+u64 hv_get_non_nested_msr(unsigned int reg);
+void hv_set_non_nested_msr(unsigned int reg, u64 value);
 
-static __always_inline u64 hv_raw_get_register(unsigned int reg)
+static __always_inline u64 hv_raw_get_msr(unsigned int reg)
 {
-	return __rdmsr(reg);
+	return native_rdmsrq(reg);
 }
+int hv_apicid_to_vp_index(u32 apic_id);
 
 #else /* CONFIG_HYPERV */
 static inline void hyperv_init(void) {}
@@ -331,10 +326,11 @@ static inline int hyperv_flush_guest_mapping_range(u64 as,
 {
 	return -1;
 }
-static inline void hv_set_register(unsigned int reg, u64 value) { }
-static inline u64 hv_get_register(unsigned int reg) { return 0; }
-static inline void hv_set_non_nested_register(unsigned int reg, u64 value) { }
-static inline u64 hv_get_non_nested_register(unsigned int reg) { return 0; }
+static inline void hv_set_msr(unsigned int reg, u64 value) { }
+static inline u64 hv_get_msr(unsigned int reg) { return 0; }
+static inline void hv_set_non_nested_msr(unsigned int reg, u64 value) { }
+static inline u64 hv_get_non_nested_msr(unsigned int reg) { return 0; }
+static inline int hv_apicid_to_vp_index(u32 apic_id) { return -EINVAL; }
 #endif /* CONFIG_HYPERV */
 
 

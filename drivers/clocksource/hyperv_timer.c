@@ -23,11 +23,12 @@
 #include <linux/acpi.h>
 #include <linux/hyperv.h>
 #include <clocksource/hyperv_timer.h>
-#include <asm/hyperv-tlfs.h>
+#include <hyperv/hvhdk.h>
 #include <asm/mshyperv.h>
 
 static struct clock_event_device __percpu *hv_clock_event;
-static u64 hv_sched_clock_offset __ro_after_init;
+/* Note: offset can hold negative values after hibernation. */
+static u64 hv_sched_clock_offset __read_mostly;
 
 /*
  * If false, we're using the old mechanism for stimer0 interrupts
@@ -81,14 +82,14 @@ static int hv_ce_set_next_event(unsigned long delta,
 
 	current_tick = hv_read_reference_counter();
 	current_tick += delta;
-	hv_set_register(HV_REGISTER_STIMER0_COUNT, current_tick);
+	hv_set_msr(HV_MSR_STIMER0_COUNT, current_tick);
 	return 0;
 }
 
 static int hv_ce_shutdown(struct clock_event_device *evt)
 {
-	hv_set_register(HV_REGISTER_STIMER0_COUNT, 0);
-	hv_set_register(HV_REGISTER_STIMER0_CONFIG, 0);
+	hv_set_msr(HV_MSR_STIMER0_COUNT, 0);
+	hv_set_msr(HV_MSR_STIMER0_CONFIG, 0);
 	if (direct_mode_enabled && stimer0_irq >= 0)
 		disable_percpu_irq(stimer0_irq);
 
@@ -119,7 +120,7 @@ static int hv_ce_set_oneshot(struct clock_event_device *evt)
 		timer_cfg.direct_mode = 0;
 		timer_cfg.sintx = stimer0_message_sint;
 	}
-	hv_set_register(HV_REGISTER_STIMER0_CONFIG, timer_cfg.as_uint64);
+	hv_set_msr(HV_MSR_STIMER0_CONFIG, timer_cfg.as_uint64);
 	return 0;
 }
 
@@ -137,7 +138,21 @@ static int hv_stimer_init(unsigned int cpu)
 	ce->name = "Hyper-V clockevent";
 	ce->features = CLOCK_EVT_FEAT_ONESHOT;
 	ce->cpumask = cpumask_of(cpu);
-	ce->rating = 1000;
+
+	/*
+	 * Lower the rating of the Hyper-V timer in a TDX VM without paravisor,
+	 * so the local APIC timer (lapic_clockevent) is the default timer in
+	 * such a VM. The Hyper-V timer is not preferred in such a VM because
+	 * it depends on the slow VM Reference Counter MSR (the Hyper-V TSC
+	 * page is not enbled in such a VM because the VM uses Invariant TSC
+	 * as a better clocksource and it's challenging to mark the Hyper-V
+	 * TSC page shared in very early boot).
+	 */
+	if (!ms_hyperv.paravisor_present && hv_isolation_type_tdx())
+		ce->rating = 90;
+	else
+		ce->rating = 1000;
+
 	ce->set_state_shutdown = hv_ce_shutdown;
 	ce->set_state_oneshot = hv_ce_set_oneshot;
 	ce->set_next_event = hv_ce_set_next_event;
@@ -372,11 +387,11 @@ static __always_inline u64 read_hv_clock_msr(void)
 	 * is set to 0 when the partition is created and is incremented in 100
 	 * nanosecond units.
 	 *
-	 * Use hv_raw_get_register() because this function is used from
-	 * noinstr. Notable; while HV_REGISTER_TIME_REF_COUNT is a synthetic
+	 * Use hv_raw_get_msr() because this function is used from
+	 * noinstr. Notable; while HV_MSR_TIME_REF_COUNT is a synthetic
 	 * register it doesn't need the GHCB path.
 	 */
-	return hv_raw_get_register(HV_REGISTER_TIME_REF_COUNT);
+	return hv_raw_get_msr(HV_MSR_TIME_REF_COUNT);
 }
 
 /*
@@ -439,9 +454,9 @@ static void suspend_hv_clock_tsc(struct clocksource *arg)
 	union hv_reference_tsc_msr tsc_msr;
 
 	/* Disable the TSC page */
-	tsc_msr.as_uint64 = hv_get_register(HV_REGISTER_REFERENCE_TSC);
+	tsc_msr.as_uint64 = hv_get_msr(HV_MSR_REFERENCE_TSC);
 	tsc_msr.enable = 0;
-	hv_set_register(HV_REGISTER_REFERENCE_TSC, tsc_msr.as_uint64);
+	hv_set_msr(HV_MSR_REFERENCE_TSC, tsc_msr.as_uint64);
 }
 
 
@@ -450,10 +465,21 @@ static void resume_hv_clock_tsc(struct clocksource *arg)
 	union hv_reference_tsc_msr tsc_msr;
 
 	/* Re-enable the TSC page */
-	tsc_msr.as_uint64 = hv_get_register(HV_REGISTER_REFERENCE_TSC);
+	tsc_msr.as_uint64 = hv_get_msr(HV_MSR_REFERENCE_TSC);
 	tsc_msr.enable = 1;
 	tsc_msr.pfn = tsc_pfn;
-	hv_set_register(HV_REGISTER_REFERENCE_TSC, tsc_msr.as_uint64);
+	hv_set_msr(HV_MSR_REFERENCE_TSC, tsc_msr.as_uint64);
+}
+
+/*
+ * Called during resume from hibernation, from overridden
+ * x86_platform.restore_sched_clock_state routine. This is to adjust offsets
+ * used to calculate time for hv tsc page based sched_clock, to account for
+ * time spent before hibernation.
+ */
+void hv_adj_sched_clock_offset(u64 offset)
+{
+	hv_sched_clock_offset -= offset;
 }
 
 #ifdef HAVE_VDSO_CLOCKMODE_HVCLOCK
@@ -555,14 +581,14 @@ static void __init hv_init_tsc_clocksource(void)
 	 * thus TSC clocksource will work even without the real TSC page
 	 * mapped.
 	 */
-	tsc_msr.as_uint64 = hv_get_register(HV_REGISTER_REFERENCE_TSC);
-	if (hv_root_partition)
+	tsc_msr.as_uint64 = hv_get_msr(HV_MSR_REFERENCE_TSC);
+	if (hv_root_partition())
 		tsc_pfn = tsc_msr.pfn;
 	else
 		tsc_pfn = HVPFN_DOWN(virt_to_phys(tsc_page));
 	tsc_msr.enable = 1;
 	tsc_msr.pfn = tsc_pfn;
-	hv_set_register(HV_REGISTER_REFERENCE_TSC, tsc_msr.as_uint64);
+	hv_set_msr(HV_MSR_REFERENCE_TSC, tsc_msr.as_uint64);
 
 	clocksource_register_hz(&hyperv_cs_tsc, NSEC_PER_SEC/100);
 
@@ -601,7 +627,7 @@ void __init hv_remap_tsc_clocksource(void)
 	if (!(ms_hyperv.features & HV_MSR_REFERENCE_TSC_AVAILABLE))
 		return;
 
-	if (!hv_root_partition) {
+	if (!hv_root_partition()) {
 		WARN(1, "%s: attempt to remap TSC page in guest partition\n",
 		     __func__);
 		return;

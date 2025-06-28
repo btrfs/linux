@@ -1,10 +1,10 @@
+// SPDX-License-Identifier: MIT
 /*
- * SPDX-License-Identifier: MIT
- *
  * Copyright © 2014-2016 Intel Corporation
  */
 
 #include <drm/drm_cache.h>
+#include <linux/vmalloc.h>
 
 #include "gt/intel_gt.h"
 #include "gt/intel_tlb.h"

@@ -16,6 +16,7 @@
 #include <linux/netdevice.h>
 #include <linux/pci.h>
 #include <linux/timer.h>
+#include <net/netdev_queues.h>
 
 MODULE_LICENSE("Dual BSD/GPL");
 MODULE_AUTHOR("Kvaser AB <support@kvaser.com>");
@@ -27,12 +28,12 @@ MODULE_DESCRIPTION("CAN driver for Kvaser CAN/PCIe devices");
 #define KVASER_PCIEFD_BEC_POLL_FREQ (jiffies + msecs_to_jiffies(200))
 #define KVASER_PCIEFD_MAX_ERR_REP 256U
 #define KVASER_PCIEFD_CAN_TX_MAX_COUNT 17U
-#define KVASER_PCIEFD_MAX_CAN_CHANNELS 4UL
+#define KVASER_PCIEFD_MAX_CAN_CHANNELS 8UL
 #define KVASER_PCIEFD_DMA_COUNT 2U
-
 #define KVASER_PCIEFD_DMA_SIZE (4U * 1024U)
 
 #define KVASER_PCIEFD_VENDOR 0x1a07
+
 /* Altera based devices */
 #define KVASER_PCIEFD_4HS_DEVICE_ID 0x000d
 #define KVASER_PCIEFD_2HS_V2_DEVICE_ID 0x000e
@@ -47,11 +48,18 @@ MODULE_DESCRIPTION("CAN driver for Kvaser CAN/PCIe devices");
 #define KVASER_PCIEFD_MINIPCIE_2CAN_V3_DEVICE_ID 0x0015
 #define KVASER_PCIEFD_MINIPCIE_1CAN_V3_DEVICE_ID 0x0016
 
+/* Xilinx based devices */
+#define KVASER_PCIEFD_M2_4CAN_DEVICE_ID 0x0017
+#define KVASER_PCIEFD_8CAN_DEVICE_ID 0x0019
+
 /* Altera SerDes Enable 64-bit DMA address translation */
 #define KVASER_PCIEFD_ALTERA_DMA_64BIT BIT(0)
 
 /* SmartFusion2 SerDes LSB address translation mask */
 #define KVASER_PCIEFD_SF2_DMA_LSB_MASK GENMASK(31, 12)
+
+/* Xilinx SerDes LSB address translation mask */
+#define KVASER_PCIEFD_XILINX_DMA_LSB_MASK GENMASK(31, 12)
 
 /* Kvaser KCAN CAN controller registers */
 #define KVASER_PCIEFD_KCAN_FIFO_REG 0x100
@@ -281,6 +289,8 @@ static void kvaser_pciefd_write_dma_map_altera(struct kvaser_pciefd *pcie,
 					       dma_addr_t addr, int index);
 static void kvaser_pciefd_write_dma_map_sf2(struct kvaser_pciefd *pcie,
 					    dma_addr_t addr, int index);
+static void kvaser_pciefd_write_dma_map_xilinx(struct kvaser_pciefd *pcie,
+					       dma_addr_t addr, int index);
 
 struct kvaser_pciefd_address_offset {
 	u32 serdes;
@@ -335,6 +345,18 @@ static const struct kvaser_pciefd_address_offset kvaser_pciefd_sf2_address_offse
 	.kcan_ch1 = 0x142000,
 };
 
+static const struct kvaser_pciefd_address_offset kvaser_pciefd_xilinx_address_offset = {
+	.serdes = 0x00208,
+	.pci_ien = 0x102004,
+	.pci_irq = 0x102008,
+	.sysid = 0x100000,
+	.loopback = 0x103000,
+	.kcan_srb_fifo = 0x120000,
+	.kcan_srb = 0x121000,
+	.kcan_ch0 = 0x140000,
+	.kcan_ch1 = 0x142000,
+};
+
 static const struct kvaser_pciefd_irq_mask kvaser_pciefd_altera_irq_mask = {
 	.kcan_rx0 = BIT(4),
 	.kcan_tx = { BIT(0), BIT(1), BIT(2), BIT(3) },
@@ -347,12 +369,22 @@ static const struct kvaser_pciefd_irq_mask kvaser_pciefd_sf2_irq_mask = {
 	.all = GENMASK(19, 16) | BIT(4),
 };
 
+static const struct kvaser_pciefd_irq_mask kvaser_pciefd_xilinx_irq_mask = {
+	.kcan_rx0 = BIT(4),
+	.kcan_tx = { BIT(16), BIT(17), BIT(18), BIT(19), BIT(20), BIT(21), BIT(22), BIT(23) },
+	.all = GENMASK(23, 16) | BIT(4),
+};
+
 static const struct kvaser_pciefd_dev_ops kvaser_pciefd_altera_dev_ops = {
 	.kvaser_pciefd_write_dma_map = kvaser_pciefd_write_dma_map_altera,
 };
 
 static const struct kvaser_pciefd_dev_ops kvaser_pciefd_sf2_dev_ops = {
 	.kvaser_pciefd_write_dma_map = kvaser_pciefd_write_dma_map_sf2,
+};
+
+static const struct kvaser_pciefd_dev_ops kvaser_pciefd_xilinx_dev_ops = {
+	.kvaser_pciefd_write_dma_map = kvaser_pciefd_write_dma_map_xilinx,
 };
 
 static const struct kvaser_pciefd_driver_data kvaser_pciefd_altera_driver_data = {
@@ -367,16 +399,25 @@ static const struct kvaser_pciefd_driver_data kvaser_pciefd_sf2_driver_data = {
 	.ops = &kvaser_pciefd_sf2_dev_ops,
 };
 
+static const struct kvaser_pciefd_driver_data kvaser_pciefd_xilinx_driver_data = {
+	.address_offset = &kvaser_pciefd_xilinx_address_offset,
+	.irq_mask = &kvaser_pciefd_xilinx_irq_mask,
+	.ops = &kvaser_pciefd_xilinx_dev_ops,
+};
+
 struct kvaser_pciefd_can {
 	struct can_priv can;
 	struct kvaser_pciefd *kv_pcie;
 	void __iomem *reg_base;
 	struct can_berr_counter bec;
 	u8 cmd_seq;
+	u8 tx_max_count;
+	u8 tx_idx;
+	u8 ack_idx;
 	int err_rep_cnt;
-	int echo_idx;
+	unsigned int completed_tx_pkts;
+	unsigned int completed_tx_bytes;
 	spinlock_t lock; /* Locks sensitive registers (e.g. MODE) */
-	spinlock_t echo_lock; /* Locks the message echo buffer */
 	struct timer_list bec_poll_timer;
 	struct completion start_comp, flush_comp;
 };
@@ -457,6 +498,14 @@ static struct pci_device_id kvaser_pciefd_id_table[] = {
 		.driver_data = (kernel_ulong_t)&kvaser_pciefd_sf2_driver_data,
 	},
 	{
+		PCI_DEVICE(KVASER_PCIEFD_VENDOR, KVASER_PCIEFD_M2_4CAN_DEVICE_ID),
+		.driver_data = (kernel_ulong_t)&kvaser_pciefd_xilinx_driver_data,
+	},
+	{
+		PCI_DEVICE(KVASER_PCIEFD_VENDOR, KVASER_PCIEFD_8CAN_DEVICE_ID),
+		.driver_data = (kernel_ulong_t)&kvaser_pciefd_xilinx_driver_data,
+	},
+	{
 		0,
 	},
 };
@@ -505,7 +554,7 @@ static void kvaser_pciefd_disable_err_gen(struct kvaser_pciefd_can *can)
 	spin_unlock_irqrestore(&can->lock, irq);
 }
 
-static void kvaser_pciefd_set_tx_irq(struct kvaser_pciefd_can *can)
+static inline void kvaser_pciefd_set_tx_irq(struct kvaser_pciefd_can *can)
 {
 	u32 msk;
 
@@ -586,7 +635,7 @@ static int kvaser_pciefd_bus_on(struct kvaser_pciefd_can *can)
 	u32 mode;
 	unsigned long irq;
 
-	del_timer(&can->bec_poll_timer);
+	timer_delete(&can->bec_poll_timer);
 	if (!completion_done(&can->flush_comp))
 		kvaser_pciefd_start_controller_flush(can);
 
@@ -666,17 +715,20 @@ static void kvaser_pciefd_pwm_start(struct kvaser_pciefd_can *can)
 
 static int kvaser_pciefd_open(struct net_device *netdev)
 {
-	int err;
+	int ret;
 	struct kvaser_pciefd_can *can = netdev_priv(netdev);
 
-	err = open_candev(netdev);
-	if (err)
-		return err;
+	can->tx_idx = 0;
+	can->ack_idx = 0;
 
-	err = kvaser_pciefd_bus_on(can);
-	if (err) {
+	ret = open_candev(netdev);
+	if (ret)
+		return ret;
+
+	ret = kvaser_pciefd_bus_on(can);
+	if (ret) {
 		close_candev(netdev);
-		return err;
+		return ret;
 	}
 
 	return 0;
@@ -697,24 +749,29 @@ static int kvaser_pciefd_stop(struct net_device *netdev)
 		ret = -ETIMEDOUT;
 	} else {
 		iowrite32(0, can->reg_base + KVASER_PCIEFD_KCAN_IEN_REG);
-		del_timer(&can->bec_poll_timer);
+		timer_delete(&can->bec_poll_timer);
 	}
 	can->can.state = CAN_STATE_STOPPED;
+	netdev_reset_queue(netdev);
 	close_candev(netdev);
 
 	return ret;
 }
 
+static unsigned int kvaser_pciefd_tx_avail(const struct kvaser_pciefd_can *can)
+{
+	return can->tx_max_count - (READ_ONCE(can->tx_idx) - READ_ONCE(can->ack_idx));
+}
+
 static int kvaser_pciefd_prepare_tx_packet(struct kvaser_pciefd_tx_packet *p,
-					   struct kvaser_pciefd_can *can,
+					   struct can_priv *can, u8 seq,
 					   struct sk_buff *skb)
 {
 	struct canfd_frame *cf = (struct canfd_frame *)skb->data;
 	int packet_size;
-	int seq = can->echo_idx;
 
 	memset(p, 0, sizeof(*p));
-	if (can->can.ctrlmode & CAN_CTRLMODE_ONE_SHOT)
+	if (can->ctrlmode & CAN_CTRLMODE_ONE_SHOT)
 		p->header[1] |= KVASER_PCIEFD_TPACKET_SMS;
 
 	if (cf->can_id & CAN_RTR_FLAG)
@@ -737,7 +794,7 @@ static int kvaser_pciefd_prepare_tx_packet(struct kvaser_pciefd_tx_packet *p,
 	} else {
 		p->header[1] |=
 			FIELD_PREP(KVASER_PCIEFD_RPACKET_DLC_MASK,
-				   can_get_cc_dlc((struct can_frame *)cf, can->can.ctrlmode));
+				   can_get_cc_dlc((struct can_frame *)cf, can->ctrlmode));
 	}
 
 	p->header[1] |= FIELD_PREP(KVASER_PCIEFD_PACKET_SEQ_MASK, seq);
@@ -752,22 +809,24 @@ static netdev_tx_t kvaser_pciefd_start_xmit(struct sk_buff *skb,
 					    struct net_device *netdev)
 {
 	struct kvaser_pciefd_can *can = netdev_priv(netdev);
-	unsigned long irq_flags;
 	struct kvaser_pciefd_tx_packet packet;
+	unsigned int seq = can->tx_idx & (can->can.echo_skb_max - 1);
+	unsigned int frame_len;
 	int nr_words;
-	u8 count;
 
 	if (can_dev_dropped_skb(netdev, skb))
 		return NETDEV_TX_OK;
+	if (!netif_subqueue_maybe_stop(netdev, 0, kvaser_pciefd_tx_avail(can), 1, 1))
+		return NETDEV_TX_BUSY;
 
-	nr_words = kvaser_pciefd_prepare_tx_packet(&packet, can, skb);
+	nr_words = kvaser_pciefd_prepare_tx_packet(&packet, &can->can, seq, skb);
 
-	spin_lock_irqsave(&can->echo_lock, irq_flags);
 	/* Prepare and save echo skb in internal slot */
-	can_put_echo_skb(skb, netdev, can->echo_idx, 0);
-
-	/* Move echo index to the next slot */
-	can->echo_idx = (can->echo_idx + 1) % can->can.echo_skb_max;
+	WRITE_ONCE(can->can.echo_skb[seq], NULL);
+	frame_len = can_skb_get_frame_len(skb);
+	can_put_echo_skb(skb, netdev, seq, frame_len);
+	netdev_sent_queue(netdev, frame_len);
+	WRITE_ONCE(can->tx_idx, can->tx_idx + 1);
 
 	/* Write header to fifo */
 	iowrite32(packet.header[0],
@@ -791,14 +850,7 @@ static netdev_tx_t kvaser_pciefd_start_xmit(struct sk_buff *skb,
 			     KVASER_PCIEFD_KCAN_FIFO_LAST_REG);
 	}
 
-	count = FIELD_GET(KVASER_PCIEFD_KCAN_TX_NR_PACKETS_CURRENT_MASK,
-			  ioread32(can->reg_base + KVASER_PCIEFD_KCAN_TX_NR_PACKETS_REG));
-	/* No room for a new message, stop the queue until at least one
-	 * successful transmit
-	 */
-	if (count >= can->can.echo_skb_max || can->can.echo_skb[can->echo_idx])
-		netif_stop_queue(netdev);
-	spin_unlock_irqrestore(&can->echo_lock, irq_flags);
+	netif_subqueue_maybe_stop(netdev, 0, kvaser_pciefd_tx_avail(can), 1, 1);
 
 	return NETDEV_TX_OK;
 }
@@ -811,7 +863,7 @@ static int kvaser_pciefd_set_bittiming(struct kvaser_pciefd_can *can, bool data)
 	struct can_bittiming *bt;
 
 	if (data)
-		bt = &can->can.data_bittiming;
+		bt = &can->can.fd.data_bittiming;
 	else
 		bt = &can->can.bittiming;
 
@@ -885,7 +937,8 @@ static int kvaser_pciefd_get_berr_counter(const struct net_device *ndev,
 
 static void kvaser_pciefd_bec_poll_timer(struct timer_list *data)
 {
-	struct kvaser_pciefd_can *can = from_timer(can, data, bec_poll_timer);
+	struct kvaser_pciefd_can *can = timer_container_of(can, data,
+							   bec_poll_timer);
 
 	kvaser_pciefd_enable_err_gen(can);
 	kvaser_pciefd_request_status(can);
@@ -914,7 +967,7 @@ static int kvaser_pciefd_setup_can_ctrls(struct kvaser_pciefd *pcie)
 		u32 status, tx_nr_packets_max;
 
 		netdev = alloc_candev(sizeof(struct kvaser_pciefd_can),
-				      KVASER_PCIEFD_CAN_TX_MAX_COUNT);
+				      roundup_pow_of_two(KVASER_PCIEFD_CAN_TX_MAX_COUNT));
 		if (!netdev)
 			return -ENOMEM;
 
@@ -925,6 +978,8 @@ static int kvaser_pciefd_setup_can_ctrls(struct kvaser_pciefd *pcie)
 		can->kv_pcie = pcie;
 		can->cmd_seq = 0;
 		can->err_rep_cnt = 0;
+		can->completed_tx_pkts = 0;
+		can->completed_tx_bytes = 0;
 		can->bec.txerr = 0;
 		can->bec.rxerr = 0;
 
@@ -938,23 +993,22 @@ static int kvaser_pciefd_setup_can_ctrls(struct kvaser_pciefd *pcie)
 		tx_nr_packets_max =
 			FIELD_GET(KVASER_PCIEFD_KCAN_TX_NR_PACKETS_MAX_MASK,
 				  ioread32(can->reg_base + KVASER_PCIEFD_KCAN_TX_NR_PACKETS_REG));
+		can->tx_max_count = min(KVASER_PCIEFD_CAN_TX_MAX_COUNT, tx_nr_packets_max - 1);
 
 		can->can.clock.freq = pcie->freq;
-		can->can.echo_skb_max = min(KVASER_PCIEFD_CAN_TX_MAX_COUNT, tx_nr_packets_max - 1);
-		can->echo_idx = 0;
-		spin_lock_init(&can->echo_lock);
 		spin_lock_init(&can->lock);
 
 		can->can.bittiming_const = &kvaser_pciefd_bittiming_const;
-		can->can.data_bittiming_const = &kvaser_pciefd_bittiming_const;
+		can->can.fd.data_bittiming_const = &kvaser_pciefd_bittiming_const;
 		can->can.do_set_bittiming = kvaser_pciefd_set_nominal_bittiming;
-		can->can.do_set_data_bittiming = kvaser_pciefd_set_data_bittiming;
+		can->can.fd.do_set_data_bittiming = kvaser_pciefd_set_data_bittiming;
 		can->can.do_set_mode = kvaser_pciefd_set_mode;
 		can->can.do_get_berr_counter = kvaser_pciefd_get_berr_counter;
 		can->can.ctrlmode_supported = CAN_CTRLMODE_LISTENONLY |
 					      CAN_CTRLMODE_FD |
 					      CAN_CTRLMODE_FD_NON_ISO |
-					      CAN_CTRLMODE_CC_LEN8_DLC;
+					      CAN_CTRLMODE_CC_LEN8_DLC |
+					      CAN_CTRLMODE_BERR_REPORTING;
 
 		status = ioread32(can->reg_base + KVASER_PCIEFD_KCAN_STAT_REG);
 		if (!(status & KVASER_PCIEFD_KCAN_STAT_FD)) {
@@ -987,15 +1041,15 @@ static int kvaser_pciefd_reg_candev(struct kvaser_pciefd *pcie)
 	int i;
 
 	for (i = 0; i < pcie->nr_channels; i++) {
-		int err = register_candev(pcie->can[i]->can.dev);
+		int ret = register_candev(pcie->can[i]->can.dev);
 
-		if (err) {
+		if (ret) {
 			int j;
 
 			/* Unregister all successfully registered devices. */
 			for (j = 0; j < i; j++)
 				unregister_candev(pcie->can[j]->can.dev);
-			return err;
+			return ret;
 		}
 	}
 
@@ -1008,13 +1062,13 @@ static void kvaser_pciefd_write_dma_map_altera(struct kvaser_pciefd *pcie,
 	void __iomem *serdes_base;
 	u32 word1, word2;
 
-#ifdef CONFIG_ARCH_DMA_ADDR_T_64BIT
-	word1 = addr | KVASER_PCIEFD_ALTERA_DMA_64BIT;
-	word2 = addr >> 32;
-#else
-	word1 = addr;
-	word2 = 0;
-#endif
+	if (IS_ENABLED(CONFIG_ARCH_DMA_ADDR_T_64BIT)) {
+		word1 = lower_32_bits(addr) | KVASER_PCIEFD_ALTERA_DMA_64BIT;
+		word2 = upper_32_bits(addr);
+	} else {
+		word1 = addr;
+		word2 = 0;
+	}
 	serdes_base = KVASER_PCIEFD_SERDES_ADDR(pcie) + 0x8 * index;
 	iowrite32(word1, serdes_base);
 	iowrite32(word2, serdes_base + 0x4);
@@ -1027,12 +1081,27 @@ static void kvaser_pciefd_write_dma_map_sf2(struct kvaser_pciefd *pcie,
 	u32 lsb = addr & KVASER_PCIEFD_SF2_DMA_LSB_MASK;
 	u32 msb = 0x0;
 
-#ifdef CONFIG_ARCH_DMA_ADDR_T_64BIT
-	msb = addr >> 32;
-#endif
+	if (IS_ENABLED(CONFIG_ARCH_DMA_ADDR_T_64BIT))
+		msb = upper_32_bits(addr);
+
 	serdes_base = KVASER_PCIEFD_SERDES_ADDR(pcie) + 0x10 * index;
 	iowrite32(lsb, serdes_base);
 	iowrite32(msb, serdes_base + 0x4);
+}
+
+static void kvaser_pciefd_write_dma_map_xilinx(struct kvaser_pciefd *pcie,
+					       dma_addr_t addr, int index)
+{
+	void __iomem *serdes_base;
+	u32 lsb = addr & KVASER_PCIEFD_XILINX_DMA_LSB_MASK;
+	u32 msb = 0x0;
+
+	if (IS_ENABLED(CONFIG_ARCH_DMA_ADDR_T_64BIT))
+		msb = upper_32_bits(addr);
+
+	serdes_base = KVASER_PCIEFD_SERDES_ADDR(pcie) + 0x8 * index;
+	iowrite32(msb, serdes_base);
+	iowrite32(lsb, serdes_base + 0x4);
 }
 
 static int kvaser_pciefd_setup_dma(struct kvaser_pciefd *pcie)
@@ -1044,6 +1113,9 @@ static int kvaser_pciefd_setup_dma(struct kvaser_pciefd *pcie)
 
 	/* Disable the DMA */
 	iowrite32(0, KVASER_PCIEFD_SRB_ADDR(pcie) + KVASER_PCIEFD_SRB_CTRL_REG);
+
+	dma_set_mask_and_coherent(&pcie->pci->dev, DMA_BIT_MASK(64));
+
 	for (i = 0; i < KVASER_PCIEFD_DMA_COUNT; i++) {
 		pcie->dma_data[i] = dmam_alloc_coherent(&pcie->pci->dev,
 							KVASER_PCIEFD_DMA_SIZE,
@@ -1137,7 +1209,7 @@ static int kvaser_pciefd_handle_data_packet(struct kvaser_pciefd *pcie,
 		skb = alloc_canfd_skb(priv->dev, &cf);
 		if (!skb) {
 			priv->dev->stats.rx_dropped++;
-			return -ENOMEM;
+			return 0;
 		}
 
 		cf->len = can_fd_dlc2len(dlc);
@@ -1149,7 +1221,7 @@ static int kvaser_pciefd_handle_data_packet(struct kvaser_pciefd *pcie,
 		skb = alloc_can_skb(priv->dev, (struct can_frame **)&cf);
 		if (!skb) {
 			priv->dev->stats.rx_dropped++;
-			return -ENOMEM;
+			return 0;
 		}
 		can_frame_set_cc_len((struct can_frame *)cf, dlc, priv->ctrlmode);
 	}
@@ -1167,15 +1239,21 @@ static int kvaser_pciefd_handle_data_packet(struct kvaser_pciefd *pcie,
 	priv->dev->stats.rx_packets++;
 	kvaser_pciefd_set_skb_timestamp(pcie, skb, p->timestamp);
 
-	return netif_rx(skb);
+	netif_rx(skb);
+
+	return 0;
 }
 
 static void kvaser_pciefd_change_state(struct kvaser_pciefd_can *can,
+				       const struct can_berr_counter *bec,
 				       struct can_frame *cf,
 				       enum can_state new_state,
 				       enum can_state tx_state,
 				       enum can_state rx_state)
 {
+	enum can_state old_state;
+
+	old_state = can->can.state;
 	can_change_state(can->can.dev, cf, tx_state, rx_state);
 
 	if (new_state == CAN_STATE_BUS_OFF) {
@@ -1190,6 +1268,18 @@ static void kvaser_pciefd_change_state(struct kvaser_pciefd_can *can,
 			kvaser_pciefd_start_controller_flush(can);
 			can_bus_off(ndev);
 		}
+	}
+	if (old_state == CAN_STATE_BUS_OFF &&
+	    new_state == CAN_STATE_ERROR_ACTIVE &&
+	    can->can.restart_ms) {
+		can->can.can_stats.restarts++;
+		if (cf)
+			cf->can_id |= CAN_ERR_RESTARTED;
+	}
+	if (cf && new_state != CAN_STATE_BUS_OFF) {
+		cf->can_id |= CAN_ERR_CNT;
+		cf->data[6] = bec->txerr;
+		cf->data[7] = bec->rxerr;
 	}
 }
 
@@ -1225,7 +1315,7 @@ static int kvaser_pciefd_rx_error_frame(struct kvaser_pciefd_can *can,
 	struct can_berr_counter bec;
 	enum can_state old_state, new_state, tx_state, rx_state;
 	struct net_device *ndev = can->can.dev;
-	struct sk_buff *skb;
+	struct sk_buff *skb = NULL;
 	struct can_frame *cf = NULL;
 
 	old_state = can->can.state;
@@ -1234,16 +1324,10 @@ static int kvaser_pciefd_rx_error_frame(struct kvaser_pciefd_can *can,
 	bec.rxerr = FIELD_GET(KVASER_PCIEFD_SPACK_RXERR_MASK, p->header[0]);
 
 	kvaser_pciefd_packet_to_state(p, &bec, &new_state, &tx_state, &rx_state);
-	skb = alloc_can_err_skb(ndev, &cf);
+	if (can->can.ctrlmode & CAN_CTRLMODE_BERR_REPORTING)
+		skb = alloc_can_err_skb(ndev, &cf);
 	if (new_state != old_state) {
-		kvaser_pciefd_change_state(can, cf, new_state, tx_state, rx_state);
-		if (old_state == CAN_STATE_BUS_OFF &&
-		    new_state == CAN_STATE_ERROR_ACTIVE &&
-		    can->can.restart_ms) {
-			can->can.can_stats.restarts++;
-			if (skb)
-				cf->can_id |= CAN_ERR_RESTARTED;
-		}
+		kvaser_pciefd_change_state(can, &bec, cf, new_state, tx_state, rx_state);
 	}
 
 	can->err_rep_cnt++;
@@ -1256,17 +1340,18 @@ static int kvaser_pciefd_rx_error_frame(struct kvaser_pciefd_can *can,
 	can->bec.txerr = bec.txerr;
 	can->bec.rxerr = bec.rxerr;
 
-	if (!skb) {
-		ndev->stats.rx_dropped++;
-		return -ENOMEM;
+	if (can->can.ctrlmode & CAN_CTRLMODE_BERR_REPORTING) {
+		if (!skb) {
+			netdev_warn(ndev, "No memory left for err_skb\n");
+			ndev->stats.rx_dropped++;
+			return -ENOMEM;
+		}
+		kvaser_pciefd_set_skb_timestamp(can->kv_pcie, skb, p->timestamp);
+		cf->can_id |= CAN_ERR_BUSERROR | CAN_ERR_CNT;
+		cf->data[6] = bec.txerr;
+		cf->data[7] = bec.rxerr;
+		netif_rx(skb);
 	}
-
-	kvaser_pciefd_set_skb_timestamp(can->kv_pcie, skb, p->timestamp);
-	cf->can_id |= CAN_ERR_BUSERROR | CAN_ERR_CNT;
-	cf->data[6] = bec.txerr;
-	cf->data[7] = bec.rxerr;
-
-	netif_rx(skb);
 
 	return 0;
 }
@@ -1296,6 +1381,7 @@ static int kvaser_pciefd_handle_status_resp(struct kvaser_pciefd_can *can,
 {
 	struct can_berr_counter bec;
 	enum can_state old_state, new_state, tx_state, rx_state;
+	int ret = 0;
 
 	old_state = can->can.state;
 
@@ -1309,25 +1395,15 @@ static int kvaser_pciefd_handle_status_resp(struct kvaser_pciefd_can *can,
 		struct can_frame *cf;
 
 		skb = alloc_can_err_skb(ndev, &cf);
-		if (!skb) {
+		kvaser_pciefd_change_state(can, &bec, cf, new_state, tx_state, rx_state);
+		if (skb) {
+			kvaser_pciefd_set_skb_timestamp(can->kv_pcie, skb, p->timestamp);
+			netif_rx(skb);
+		} else {
 			ndev->stats.rx_dropped++;
-			return -ENOMEM;
+			netdev_warn(ndev, "No memory left for err_skb\n");
+			ret = -ENOMEM;
 		}
-
-		kvaser_pciefd_change_state(can, cf, new_state, tx_state, rx_state);
-		if (old_state == CAN_STATE_BUS_OFF &&
-		    new_state == CAN_STATE_ERROR_ACTIVE &&
-		    can->can.restart_ms) {
-			can->can.can_stats.restarts++;
-			cf->can_id |= CAN_ERR_RESTARTED;
-		}
-
-		kvaser_pciefd_set_skb_timestamp(can->kv_pcie, skb, p->timestamp);
-
-		cf->data[6] = bec.txerr;
-		cf->data[7] = bec.rxerr;
-
-		netif_rx(skb);
 	}
 	can->bec.txerr = bec.txerr;
 	can->bec.rxerr = bec.rxerr;
@@ -1335,7 +1411,7 @@ static int kvaser_pciefd_handle_status_resp(struct kvaser_pciefd_can *can,
 	if (bec.txerr || bec.rxerr)
 		mod_timer(&can->bec_poll_timer, KVASER_PCIEFD_BEC_POLL_FREQ);
 
-	return 0;
+	return ret;
 }
 
 static int kvaser_pciefd_handle_status_packet(struct kvaser_pciefd *pcie,
@@ -1444,19 +1520,21 @@ static int kvaser_pciefd_handle_ack_packet(struct kvaser_pciefd *pcie,
 		netdev_dbg(can->can.dev, "Packet was flushed\n");
 	} else {
 		int echo_idx = FIELD_GET(KVASER_PCIEFD_PACKET_SEQ_MASK, p->header[0]);
-		int len;
-		u8 count;
+		unsigned int len, frame_len = 0;
 		struct sk_buff *skb;
 
+		if (echo_idx != (can->ack_idx & (can->can.echo_skb_max - 1)))
+			return 0;
 		skb = can->can.echo_skb[echo_idx];
-		if (skb)
-			kvaser_pciefd_set_skb_timestamp(pcie, skb, p->timestamp);
-		len = can_get_echo_skb(can->can.dev, echo_idx, NULL);
-		count = FIELD_GET(KVASER_PCIEFD_KCAN_TX_NR_PACKETS_CURRENT_MASK,
-				  ioread32(can->reg_base + KVASER_PCIEFD_KCAN_TX_NR_PACKETS_REG));
+		if (!skb)
+			return 0;
+		kvaser_pciefd_set_skb_timestamp(pcie, skb, p->timestamp);
+		len = can_get_echo_skb(can->can.dev, echo_idx, &frame_len);
 
-		if (count < can->can.echo_skb_max && netif_queue_stopped(can->can.dev))
-			netif_wake_queue(can->can.dev);
+		/* Pairs with barrier in kvaser_pciefd_start_xmit() */
+		smp_store_release(&can->ack_idx, can->ack_idx + 1);
+		can->completed_tx_pkts++;
+		can->completed_tx_bytes += frame_len;
 
 		if (!one_shot_fail) {
 			can->can.dev->stats.tx_bytes += len;
@@ -1559,7 +1637,7 @@ static int kvaser_pciefd_read_packet(struct kvaser_pciefd *pcie, int *start_pos,
 	/* Position does not point to the end of the package,
 	 * corrupted packet size?
 	 */
-	if ((*start_pos + size) != pos)
+	if (unlikely((*start_pos + size) != pos))
 		return -EIO;
 
 	/* Point to the next packet header, if any */
@@ -1572,39 +1650,51 @@ static int kvaser_pciefd_read_buffer(struct kvaser_pciefd *pcie, int dma_buf)
 {
 	int pos = 0;
 	int res = 0;
+	unsigned int i;
 
 	do {
 		res = kvaser_pciefd_read_packet(pcie, &pos, dma_buf);
 	} while (!res && pos > 0 && pos < KVASER_PCIEFD_DMA_SIZE);
+
+	/* Report ACKs in this buffer to BQL en masse for correct periods */
+	for (i = 0; i < pcie->nr_channels; ++i) {
+		struct kvaser_pciefd_can *can = pcie->can[i];
+
+		if (!can->completed_tx_pkts)
+			continue;
+		netif_subqueue_completed_wake(can->can.dev, 0,
+					      can->completed_tx_pkts,
+					      can->completed_tx_bytes,
+					      kvaser_pciefd_tx_avail(can), 1);
+		can->completed_tx_pkts = 0;
+		can->completed_tx_bytes = 0;
+	}
 
 	return res;
 }
 
 static void kvaser_pciefd_receive_irq(struct kvaser_pciefd *pcie)
 {
+	void __iomem *srb_cmd_reg = KVASER_PCIEFD_SRB_ADDR(pcie) + KVASER_PCIEFD_SRB_CMD_REG;
 	u32 irq = ioread32(KVASER_PCIEFD_SRB_ADDR(pcie) + KVASER_PCIEFD_SRB_IRQ_REG);
+
+	iowrite32(irq, KVASER_PCIEFD_SRB_ADDR(pcie) + KVASER_PCIEFD_SRB_IRQ_REG);
 
 	if (irq & KVASER_PCIEFD_SRB_IRQ_DPD0) {
 		kvaser_pciefd_read_buffer(pcie, 0);
-		/* Reset DMA buffer 0 */
-		iowrite32(KVASER_PCIEFD_SRB_CMD_RDB0,
-			  KVASER_PCIEFD_SRB_ADDR(pcie) + KVASER_PCIEFD_SRB_CMD_REG);
+		iowrite32(KVASER_PCIEFD_SRB_CMD_RDB0, srb_cmd_reg); /* Rearm buffer */
 	}
 
 	if (irq & KVASER_PCIEFD_SRB_IRQ_DPD1) {
 		kvaser_pciefd_read_buffer(pcie, 1);
-		/* Reset DMA buffer 1 */
-		iowrite32(KVASER_PCIEFD_SRB_CMD_RDB1,
-			  KVASER_PCIEFD_SRB_ADDR(pcie) + KVASER_PCIEFD_SRB_CMD_REG);
+		iowrite32(KVASER_PCIEFD_SRB_CMD_RDB1, srb_cmd_reg); /* Rearm buffer */
 	}
 
-	if (irq & KVASER_PCIEFD_SRB_IRQ_DOF0 ||
-	    irq & KVASER_PCIEFD_SRB_IRQ_DOF1 ||
-	    irq & KVASER_PCIEFD_SRB_IRQ_DUF0 ||
-	    irq & KVASER_PCIEFD_SRB_IRQ_DUF1)
+	if (unlikely(irq & KVASER_PCIEFD_SRB_IRQ_DOF0 ||
+		     irq & KVASER_PCIEFD_SRB_IRQ_DOF1 ||
+		     irq & KVASER_PCIEFD_SRB_IRQ_DUF0 ||
+		     irq & KVASER_PCIEFD_SRB_IRQ_DUF1))
 		dev_err(&pcie->pci->dev, "DMA IRQ error 0x%08X\n", irq);
-
-	iowrite32(irq, KVASER_PCIEFD_SRB_ADDR(pcie) + KVASER_PCIEFD_SRB_IRQ_REG);
 }
 
 static void kvaser_pciefd_transmit_irq(struct kvaser_pciefd_can *can)
@@ -1631,26 +1721,23 @@ static irqreturn_t kvaser_pciefd_irq_handler(int irq, void *dev)
 {
 	struct kvaser_pciefd *pcie = (struct kvaser_pciefd *)dev;
 	const struct kvaser_pciefd_irq_mask *irq_mask = pcie->driver_data->irq_mask;
-	u32 board_irq = ioread32(KVASER_PCIEFD_PCI_IRQ_ADDR(pcie));
+	u32 pci_irq = ioread32(KVASER_PCIEFD_PCI_IRQ_ADDR(pcie));
 	int i;
 
-	if (!(board_irq & irq_mask->all))
+	if (!(pci_irq & irq_mask->all))
 		return IRQ_NONE;
 
-	if (board_irq & irq_mask->kcan_rx0)
+	iowrite32(0, KVASER_PCIEFD_PCI_IEN_ADDR(pcie));
+
+	if (pci_irq & irq_mask->kcan_rx0)
 		kvaser_pciefd_receive_irq(pcie);
 
 	for (i = 0; i < pcie->nr_channels; i++) {
-		if (!pcie->can[i]) {
-			dev_err(&pcie->pci->dev,
-				"IRQ mask points to unallocated controller\n");
-			break;
-		}
-
-		/* Check that mask matches channel (i) IRQ mask */
-		if (board_irq & irq_mask->kcan_tx[i])
+		if (pci_irq & irq_mask->kcan_tx[i])
 			kvaser_pciefd_transmit_irq(pcie->can[i]);
 	}
+
+	iowrite32(irq_mask->all, KVASER_PCIEFD_PCI_IEN_ADDR(pcie));
 
 	return IRQ_HANDLED;
 }
@@ -1670,13 +1757,22 @@ static void kvaser_pciefd_teardown_can_ctrls(struct kvaser_pciefd *pcie)
 	}
 }
 
+static void kvaser_pciefd_disable_irq_srcs(struct kvaser_pciefd *pcie)
+{
+	unsigned int i;
+
+	/* Masking PCI_IRQ is insufficient as running ISR will unmask it */
+	iowrite32(0, KVASER_PCIEFD_SRB_ADDR(pcie) + KVASER_PCIEFD_SRB_IEN_REG);
+	for (i = 0; i < pcie->nr_channels; ++i)
+		iowrite32(0, pcie->can[i]->reg_base + KVASER_PCIEFD_KCAN_IEN_REG);
+}
+
 static int kvaser_pciefd_probe(struct pci_dev *pdev,
 			       const struct pci_device_id *id)
 {
-	int err;
+	int ret;
 	struct kvaser_pciefd *pcie;
 	const struct kvaser_pciefd_irq_mask *irq_mask;
-	void __iomem *irq_en_base;
 
 	pcie = devm_kzalloc(&pdev->dev, sizeof(*pcie), GFP_KERNEL);
 	if (!pcie)
@@ -1687,39 +1783,52 @@ static int kvaser_pciefd_probe(struct pci_dev *pdev,
 	pcie->driver_data = (const struct kvaser_pciefd_driver_data *)id->driver_data;
 	irq_mask = pcie->driver_data->irq_mask;
 
-	err = pci_enable_device(pdev);
-	if (err)
-		return err;
+	ret = pci_enable_device(pdev);
+	if (ret)
+		return ret;
 
-	err = pci_request_regions(pdev, KVASER_PCIEFD_DRV_NAME);
-	if (err)
+	ret = pci_request_regions(pdev, KVASER_PCIEFD_DRV_NAME);
+	if (ret)
 		goto err_disable_pci;
 
 	pcie->reg_base = pci_iomap(pdev, 0, 0);
 	if (!pcie->reg_base) {
-		err = -ENOMEM;
+		ret = -ENOMEM;
 		goto err_release_regions;
 	}
 
-	err = kvaser_pciefd_setup_board(pcie);
-	if (err)
+	ret = kvaser_pciefd_setup_board(pcie);
+	if (ret)
 		goto err_pci_iounmap;
 
-	err = kvaser_pciefd_setup_dma(pcie);
-	if (err)
+	ret = kvaser_pciefd_setup_dma(pcie);
+	if (ret)
 		goto err_pci_iounmap;
 
 	pci_set_master(pdev);
 
-	err = kvaser_pciefd_setup_can_ctrls(pcie);
-	if (err)
+	ret = kvaser_pciefd_setup_can_ctrls(pcie);
+	if (ret)
 		goto err_teardown_can_ctrls;
 
-	err = request_irq(pcie->pci->irq, kvaser_pciefd_irq_handler,
+	ret = pci_alloc_irq_vectors(pcie->pci, 1, 1, PCI_IRQ_INTX | PCI_IRQ_MSI);
+	if (ret < 0) {
+		dev_err(&pcie->pci->dev, "Failed to allocate IRQ vectors.\n");
+		goto err_teardown_can_ctrls;
+	}
+
+	ret = pci_irq_vector(pcie->pci, 0);
+	if (ret < 0)
+		goto err_pci_free_irq_vectors;
+
+	pcie->pci->irq = ret;
+
+	ret = request_irq(pcie->pci->irq, kvaser_pciefd_irq_handler,
 			  IRQF_SHARED, KVASER_PCIEFD_DRV_NAME, pcie);
-	if (err)
-		goto err_teardown_can_ctrls;
-
+	if (ret) {
+		dev_err(&pcie->pci->dev, "Failed to request IRQ %d\n", pcie->pci->irq);
+		goto err_pci_free_irq_vectors;
+	}
 	iowrite32(KVASER_PCIEFD_SRB_IRQ_DPD0 | KVASER_PCIEFD_SRB_IRQ_DPD1,
 		  KVASER_PCIEFD_SRB_ADDR(pcie) + KVASER_PCIEFD_SRB_IRQ_REG);
 
@@ -1729,24 +1838,25 @@ static int kvaser_pciefd_probe(struct pci_dev *pdev,
 		  KVASER_PCIEFD_SRB_ADDR(pcie) + KVASER_PCIEFD_SRB_IEN_REG);
 
 	/* Enable PCI interrupts */
-	irq_en_base = KVASER_PCIEFD_PCI_IEN_ADDR(pcie);
-	iowrite32(irq_mask->all, irq_en_base);
+	iowrite32(irq_mask->all, KVASER_PCIEFD_PCI_IEN_ADDR(pcie));
 	/* Ready the DMA buffers */
 	iowrite32(KVASER_PCIEFD_SRB_CMD_RDB0,
 		  KVASER_PCIEFD_SRB_ADDR(pcie) + KVASER_PCIEFD_SRB_CMD_REG);
 	iowrite32(KVASER_PCIEFD_SRB_CMD_RDB1,
 		  KVASER_PCIEFD_SRB_ADDR(pcie) + KVASER_PCIEFD_SRB_CMD_REG);
 
-	err = kvaser_pciefd_reg_candev(pcie);
-	if (err)
+	ret = kvaser_pciefd_reg_candev(pcie);
+	if (ret)
 		goto err_free_irq;
 
 	return 0;
 
 err_free_irq:
-	/* Disable PCI interrupts */
-	iowrite32(0, irq_en_base);
+	kvaser_pciefd_disable_irq_srcs(pcie);
 	free_irq(pcie->pci->irq, pcie);
+
+err_pci_free_irq_vectors:
+	pci_free_irq_vectors(pcie->pci);
 
 err_teardown_can_ctrls:
 	kvaser_pciefd_teardown_can_ctrls(pcie);
@@ -1762,37 +1872,28 @@ err_release_regions:
 err_disable_pci:
 	pci_disable_device(pdev);
 
-	return err;
-}
-
-static void kvaser_pciefd_remove_all_ctrls(struct kvaser_pciefd *pcie)
-{
-	int i;
-
-	for (i = 0; i < pcie->nr_channels; i++) {
-		struct kvaser_pciefd_can *can = pcie->can[i];
-
-		if (can) {
-			iowrite32(0, can->reg_base + KVASER_PCIEFD_KCAN_IEN_REG);
-			unregister_candev(can->can.dev);
-			del_timer(&can->bec_poll_timer);
-			kvaser_pciefd_pwm_stop(can);
-			free_candev(can->can.dev);
-		}
-	}
+	return ret;
 }
 
 static void kvaser_pciefd_remove(struct pci_dev *pdev)
 {
 	struct kvaser_pciefd *pcie = pci_get_drvdata(pdev);
+	unsigned int i;
 
-	kvaser_pciefd_remove_all_ctrls(pcie);
+	for (i = 0; i < pcie->nr_channels; ++i) {
+		struct kvaser_pciefd_can *can = pcie->can[i];
 
-	/* Disable interrupts */
-	iowrite32(0, KVASER_PCIEFD_SRB_ADDR(pcie) + KVASER_PCIEFD_SRB_CTRL_REG);
-	iowrite32(0, KVASER_PCIEFD_PCI_IEN_ADDR(pcie));
+		unregister_candev(can->can.dev);
+		timer_delete(&can->bec_poll_timer);
+		kvaser_pciefd_pwm_stop(can);
+	}
 
+	kvaser_pciefd_disable_irq_srcs(pcie);
 	free_irq(pcie->pci->irq, pcie);
+	pci_free_irq_vectors(pcie->pci);
+
+	for (i = 0; i < pcie->nr_channels; ++i)
+		free_candev(pcie->can[i]->can.dev);
 
 	pci_iounmap(pdev, pcie->reg_base);
 	pci_release_regions(pdev);

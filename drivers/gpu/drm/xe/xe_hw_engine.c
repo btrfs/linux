@@ -5,26 +5,40 @@
 
 #include "xe_hw_engine.h"
 
+#include <linux/nospec.h>
+
 #include <drm/drm_managed.h>
+#include <drm/drm_print.h>
+#include <uapi/drm/xe_drm.h>
+#include <generated/xe_wa_oob.h>
 
 #include "regs/xe_engine_regs.h"
 #include "regs/xe_gt_regs.h"
+#include "regs/xe_irq_regs.h"
 #include "xe_assert.h"
 #include "xe_bo.h"
 #include "xe_device.h"
 #include "xe_execlist.h"
 #include "xe_force_wake.h"
+#include "xe_gsc.h"
 #include "xe_gt.h"
 #include "xe_gt_ccs_mode.h"
+#include "xe_gt_clock.h"
+#include "xe_gt_printk.h"
+#include "xe_gt_mcr.h"
 #include "xe_gt_topology.h"
+#include "xe_guc_capture.h"
+#include "xe_hw_engine_group.h"
 #include "xe_hw_fence.h"
 #include "xe_irq.h"
 #include "xe_lrc.h"
 #include "xe_macros.h"
 #include "xe_mmio.h"
 #include "xe_reg_sr.h"
+#include "xe_reg_whitelist.h"
 #include "xe_rtp.h"
 #include "xe_sched_job.h"
+#include "xe_sriov.h"
 #include "xe_tuning.h"
 #include "xe_uc_fw.h"
 #include "xe_wa.h"
@@ -34,6 +48,7 @@ struct engine_info {
 	const char *name;
 	unsigned int class : 8;
 	unsigned int instance : 8;
+	unsigned int irq_offset : 8;
 	enum xe_force_wake_domains domain;
 	u32 mmio_base;
 };
@@ -43,6 +58,7 @@ static const struct engine_info engine_infos[] = {
 		.name = "rcs0",
 		.class = XE_ENGINE_CLASS_RENDER,
 		.instance = 0,
+		.irq_offset = ilog2(INTR_RCS0),
 		.domain = XE_FW_RENDER,
 		.mmio_base = RENDER_RING_BASE,
 	},
@@ -50,6 +66,7 @@ static const struct engine_info engine_infos[] = {
 		.name = "bcs0",
 		.class = XE_ENGINE_CLASS_COPY,
 		.instance = 0,
+		.irq_offset = ilog2(INTR_BCS(0)),
 		.domain = XE_FW_RENDER,
 		.mmio_base = BLT_RING_BASE,
 	},
@@ -57,6 +74,7 @@ static const struct engine_info engine_infos[] = {
 		.name = "bcs1",
 		.class = XE_ENGINE_CLASS_COPY,
 		.instance = 1,
+		.irq_offset = ilog2(INTR_BCS(1)),
 		.domain = XE_FW_RENDER,
 		.mmio_base = XEHPC_BCS1_RING_BASE,
 	},
@@ -64,6 +82,7 @@ static const struct engine_info engine_infos[] = {
 		.name = "bcs2",
 		.class = XE_ENGINE_CLASS_COPY,
 		.instance = 2,
+		.irq_offset = ilog2(INTR_BCS(2)),
 		.domain = XE_FW_RENDER,
 		.mmio_base = XEHPC_BCS2_RING_BASE,
 	},
@@ -71,6 +90,7 @@ static const struct engine_info engine_infos[] = {
 		.name = "bcs3",
 		.class = XE_ENGINE_CLASS_COPY,
 		.instance = 3,
+		.irq_offset = ilog2(INTR_BCS(3)),
 		.domain = XE_FW_RENDER,
 		.mmio_base = XEHPC_BCS3_RING_BASE,
 	},
@@ -78,6 +98,7 @@ static const struct engine_info engine_infos[] = {
 		.name = "bcs4",
 		.class = XE_ENGINE_CLASS_COPY,
 		.instance = 4,
+		.irq_offset = ilog2(INTR_BCS(4)),
 		.domain = XE_FW_RENDER,
 		.mmio_base = XEHPC_BCS4_RING_BASE,
 	},
@@ -85,6 +106,7 @@ static const struct engine_info engine_infos[] = {
 		.name = "bcs5",
 		.class = XE_ENGINE_CLASS_COPY,
 		.instance = 5,
+		.irq_offset = ilog2(INTR_BCS(5)),
 		.domain = XE_FW_RENDER,
 		.mmio_base = XEHPC_BCS5_RING_BASE,
 	},
@@ -92,12 +114,14 @@ static const struct engine_info engine_infos[] = {
 		.name = "bcs6",
 		.class = XE_ENGINE_CLASS_COPY,
 		.instance = 6,
+		.irq_offset = ilog2(INTR_BCS(6)),
 		.domain = XE_FW_RENDER,
 		.mmio_base = XEHPC_BCS6_RING_BASE,
 	},
 	[XE_HW_ENGINE_BCS7] = {
 		.name = "bcs7",
 		.class = XE_ENGINE_CLASS_COPY,
+		.irq_offset = ilog2(INTR_BCS(7)),
 		.instance = 7,
 		.domain = XE_FW_RENDER,
 		.mmio_base = XEHPC_BCS7_RING_BASE,
@@ -106,6 +130,7 @@ static const struct engine_info engine_infos[] = {
 		.name = "bcs8",
 		.class = XE_ENGINE_CLASS_COPY,
 		.instance = 8,
+		.irq_offset = ilog2(INTR_BCS8),
 		.domain = XE_FW_RENDER,
 		.mmio_base = XEHPC_BCS8_RING_BASE,
 	},
@@ -114,6 +139,7 @@ static const struct engine_info engine_infos[] = {
 		.name = "vcs0",
 		.class = XE_ENGINE_CLASS_VIDEO_DECODE,
 		.instance = 0,
+		.irq_offset = 32 + ilog2(INTR_VCS(0)),
 		.domain = XE_FW_MEDIA_VDBOX0,
 		.mmio_base = BSD_RING_BASE,
 	},
@@ -121,6 +147,7 @@ static const struct engine_info engine_infos[] = {
 		.name = "vcs1",
 		.class = XE_ENGINE_CLASS_VIDEO_DECODE,
 		.instance = 1,
+		.irq_offset = 32 + ilog2(INTR_VCS(1)),
 		.domain = XE_FW_MEDIA_VDBOX1,
 		.mmio_base = BSD2_RING_BASE,
 	},
@@ -128,6 +155,7 @@ static const struct engine_info engine_infos[] = {
 		.name = "vcs2",
 		.class = XE_ENGINE_CLASS_VIDEO_DECODE,
 		.instance = 2,
+		.irq_offset = 32 + ilog2(INTR_VCS(2)),
 		.domain = XE_FW_MEDIA_VDBOX2,
 		.mmio_base = BSD3_RING_BASE,
 	},
@@ -135,6 +163,7 @@ static const struct engine_info engine_infos[] = {
 		.name = "vcs3",
 		.class = XE_ENGINE_CLASS_VIDEO_DECODE,
 		.instance = 3,
+		.irq_offset = 32 + ilog2(INTR_VCS(3)),
 		.domain = XE_FW_MEDIA_VDBOX3,
 		.mmio_base = BSD4_RING_BASE,
 	},
@@ -142,6 +171,7 @@ static const struct engine_info engine_infos[] = {
 		.name = "vcs4",
 		.class = XE_ENGINE_CLASS_VIDEO_DECODE,
 		.instance = 4,
+		.irq_offset = 32 + ilog2(INTR_VCS(4)),
 		.domain = XE_FW_MEDIA_VDBOX4,
 		.mmio_base = XEHP_BSD5_RING_BASE,
 	},
@@ -149,6 +179,7 @@ static const struct engine_info engine_infos[] = {
 		.name = "vcs5",
 		.class = XE_ENGINE_CLASS_VIDEO_DECODE,
 		.instance = 5,
+		.irq_offset = 32 + ilog2(INTR_VCS(5)),
 		.domain = XE_FW_MEDIA_VDBOX5,
 		.mmio_base = XEHP_BSD6_RING_BASE,
 	},
@@ -156,6 +187,7 @@ static const struct engine_info engine_infos[] = {
 		.name = "vcs6",
 		.class = XE_ENGINE_CLASS_VIDEO_DECODE,
 		.instance = 6,
+		.irq_offset = 32 + ilog2(INTR_VCS(6)),
 		.domain = XE_FW_MEDIA_VDBOX6,
 		.mmio_base = XEHP_BSD7_RING_BASE,
 	},
@@ -163,6 +195,7 @@ static const struct engine_info engine_infos[] = {
 		.name = "vcs7",
 		.class = XE_ENGINE_CLASS_VIDEO_DECODE,
 		.instance = 7,
+		.irq_offset = 32 + ilog2(INTR_VCS(7)),
 		.domain = XE_FW_MEDIA_VDBOX7,
 		.mmio_base = XEHP_BSD8_RING_BASE,
 	},
@@ -170,6 +203,7 @@ static const struct engine_info engine_infos[] = {
 		.name = "vecs0",
 		.class = XE_ENGINE_CLASS_VIDEO_ENHANCE,
 		.instance = 0,
+		.irq_offset = 32 + ilog2(INTR_VECS(0)),
 		.domain = XE_FW_MEDIA_VEBOX0,
 		.mmio_base = VEBOX_RING_BASE,
 	},
@@ -177,6 +211,7 @@ static const struct engine_info engine_infos[] = {
 		.name = "vecs1",
 		.class = XE_ENGINE_CLASS_VIDEO_ENHANCE,
 		.instance = 1,
+		.irq_offset = 32 + ilog2(INTR_VECS(1)),
 		.domain = XE_FW_MEDIA_VEBOX1,
 		.mmio_base = VEBOX2_RING_BASE,
 	},
@@ -184,6 +219,7 @@ static const struct engine_info engine_infos[] = {
 		.name = "vecs2",
 		.class = XE_ENGINE_CLASS_VIDEO_ENHANCE,
 		.instance = 2,
+		.irq_offset = 32 + ilog2(INTR_VECS(2)),
 		.domain = XE_FW_MEDIA_VEBOX2,
 		.mmio_base = XEHP_VEBOX3_RING_BASE,
 	},
@@ -191,6 +227,7 @@ static const struct engine_info engine_infos[] = {
 		.name = "vecs3",
 		.class = XE_ENGINE_CLASS_VIDEO_ENHANCE,
 		.instance = 3,
+		.irq_offset = 32 + ilog2(INTR_VECS(3)),
 		.domain = XE_FW_MEDIA_VEBOX3,
 		.mmio_base = XEHP_VEBOX4_RING_BASE,
 	},
@@ -198,6 +235,7 @@ static const struct engine_info engine_infos[] = {
 		.name = "ccs0",
 		.class = XE_ENGINE_CLASS_COMPUTE,
 		.instance = 0,
+		.irq_offset = ilog2(INTR_CCS(0)),
 		.domain = XE_FW_RENDER,
 		.mmio_base = COMPUTE0_RING_BASE,
 	},
@@ -205,6 +243,7 @@ static const struct engine_info engine_infos[] = {
 		.name = "ccs1",
 		.class = XE_ENGINE_CLASS_COMPUTE,
 		.instance = 1,
+		.irq_offset = ilog2(INTR_CCS(1)),
 		.domain = XE_FW_RENDER,
 		.mmio_base = COMPUTE1_RING_BASE,
 	},
@@ -212,6 +251,7 @@ static const struct engine_info engine_infos[] = {
 		.name = "ccs2",
 		.class = XE_ENGINE_CLASS_COMPUTE,
 		.instance = 2,
+		.irq_offset = ilog2(INTR_CCS(2)),
 		.domain = XE_FW_RENDER,
 		.mmio_base = COMPUTE2_RING_BASE,
 	},
@@ -219,6 +259,7 @@ static const struct engine_info engine_infos[] = {
 		.name = "ccs3",
 		.class = XE_ENGINE_CLASS_COMPUTE,
 		.instance = 3,
+		.irq_offset = ilog2(INTR_CCS(3)),
 		.domain = XE_FW_RENDER,
 		.mmio_base = COMPUTE3_RING_BASE,
 	},
@@ -231,55 +272,77 @@ static const struct engine_info engine_infos[] = {
 	},
 };
 
-static void hw_engine_fini(struct drm_device *drm, void *arg)
+static void hw_engine_fini(void *arg)
 {
 	struct xe_hw_engine *hwe = arg;
 
 	if (hwe->exl_port)
 		xe_execlist_port_destroy(hwe->exl_port);
-	xe_lrc_finish(&hwe->kernel_lrc);
 
 	hwe->gt = NULL;
 }
 
-static void hw_engine_mmio_write32(struct xe_hw_engine *hwe, struct xe_reg reg,
-				   u32 val)
+/**
+ * xe_hw_engine_mmio_write32() - Write engine register
+ * @hwe: engine
+ * @reg: register to write into
+ * @val: desired 32-bit value to write
+ *
+ * This function will write val into an engine specific register.
+ * Forcewake must be held by the caller.
+ *
+ */
+void xe_hw_engine_mmio_write32(struct xe_hw_engine *hwe,
+			       struct xe_reg reg, u32 val)
 {
 	xe_gt_assert(hwe->gt, !(reg.addr & hwe->mmio_base));
 	xe_force_wake_assert_held(gt_to_fw(hwe->gt), hwe->domain);
 
 	reg.addr += hwe->mmio_base;
 
-	xe_mmio_write32(hwe->gt, reg, val);
+	xe_mmio_write32(&hwe->gt->mmio, reg, val);
 }
 
-static u32 hw_engine_mmio_read32(struct xe_hw_engine *hwe, struct xe_reg reg)
+/**
+ * xe_hw_engine_mmio_read32() - Read engine register
+ * @hwe: engine
+ * @reg: register to read from
+ *
+ * This function will read from an engine specific register.
+ * Forcewake must be held by the caller.
+ *
+ * Return: value of the 32-bit register.
+ */
+u32 xe_hw_engine_mmio_read32(struct xe_hw_engine *hwe, struct xe_reg reg)
 {
 	xe_gt_assert(hwe->gt, !(reg.addr & hwe->mmio_base));
 	xe_force_wake_assert_held(gt_to_fw(hwe->gt), hwe->domain);
 
 	reg.addr += hwe->mmio_base;
 
-	return xe_mmio_read32(hwe->gt, reg);
+	return xe_mmio_read32(&hwe->gt->mmio, reg);
 }
 
 void xe_hw_engine_enable_ring(struct xe_hw_engine *hwe)
 {
 	u32 ccs_mask =
 		xe_hw_engine_mask_per_class(hwe->gt, XE_ENGINE_CLASS_COMPUTE);
+	u32 ring_mode = _MASKED_BIT_ENABLE(GFX_DISABLE_LEGACY_MODE);
 
 	if (hwe->class == XE_ENGINE_CLASS_COMPUTE && ccs_mask)
-		xe_mmio_write32(hwe->gt, RCU_MODE,
+		xe_mmio_write32(&hwe->gt->mmio, RCU_MODE,
 				_MASKED_BIT_ENABLE(RCU_MODE_CCS_ENABLE));
 
-	hw_engine_mmio_write32(hwe, RING_HWSTAM(0), ~0x0);
-	hw_engine_mmio_write32(hwe, RING_HWS_PGA(0),
-			       xe_bo_ggtt_addr(hwe->hwsp));
-	hw_engine_mmio_write32(hwe, RING_MODE(0),
-			       _MASKED_BIT_ENABLE(GFX_DISABLE_LEGACY_MODE));
-	hw_engine_mmio_write32(hwe, RING_MI_MODE(0),
-			       _MASKED_BIT_DISABLE(STOP_RING));
-	hw_engine_mmio_read32(hwe, RING_MI_MODE(0));
+	xe_hw_engine_mmio_write32(hwe, RING_HWSTAM(0), ~0x0);
+	xe_hw_engine_mmio_write32(hwe, RING_HWS_PGA(0),
+				  xe_bo_ggtt_addr(hwe->hwsp));
+
+	if (xe_device_has_msix(gt_to_xe(hwe->gt)))
+		ring_mode |= _MASKED_BIT_ENABLE(GFX_MSIX_INTERRUPT_ENABLE);
+	xe_hw_engine_mmio_write32(hwe, RING_MODE(0), ring_mode);
+	xe_hw_engine_mmio_write32(hwe, RING_MI_MODE(0),
+				  _MASKED_BIT_DISABLE(STOP_RING));
+	xe_hw_engine_mmio_read32(hwe, RING_MI_MODE(0));
 }
 
 static bool xe_hw_engine_match_fixed_cslice_mode(const struct xe_gt *gt,
@@ -287,6 +350,19 @@ static bool xe_hw_engine_match_fixed_cslice_mode(const struct xe_gt *gt,
 {
 	return xe_gt_ccs_mode_enabled(gt) &&
 	       xe_rtp_match_first_render_or_compute(gt, hwe);
+}
+
+static bool xe_rtp_cfeg_wmtp_disabled(const struct xe_gt *gt,
+				      const struct xe_hw_engine *hwe)
+{
+	if (GRAPHICS_VER(gt_to_xe(gt)) < 20)
+		return false;
+
+	if (hwe->class != XE_ENGINE_CLASS_COMPUTE &&
+	    hwe->class != XE_ENGINE_CLASS_RENDER)
+		return false;
+
+	return xe_mmio_read32(&hwe->gt->mmio, XEHP_FUSE4) & CFEG_WMTP_DISABLE;
 }
 
 void
@@ -298,7 +374,7 @@ xe_hw_engine_setup_default_lrc_state(struct xe_hw_engine *hwe)
 	u32 blit_cctl_val = REG_FIELD_PREP(BLIT_CCTL_DST_MOCS_MASK, mocs_write_idx) |
 			    REG_FIELD_PREP(BLIT_CCTL_SRC_MOCS_MASK, mocs_read_idx);
 	struct xe_rtp_process_ctx ctx = XE_RTP_PROCESS_CTX_INITIALIZER(hwe);
-	const struct xe_rtp_entry_sr lrc_was[] = {
+	const struct xe_rtp_entry_sr lrc_setup[] = {
 		/*
 		 * Some blitter commands do not have a field for MOCS, those
 		 * commands will use MOCS index pointed by BLIT_CCTL.
@@ -313,16 +389,17 @@ xe_hw_engine_setup_default_lrc_state(struct xe_hw_engine *hwe)
 				 blit_cctl_val,
 				 XE_RTP_ACTION_FLAG(ENGINE_BASE)))
 		},
-		/* Use Fixed slice CCS mode */
-		{ XE_RTP_NAME("RCU_MODE_FIXED_SLICE_CCS_MODE"),
-		  XE_RTP_RULES(FUNC(xe_hw_engine_match_fixed_cslice_mode)),
-		  XE_RTP_ACTIONS(FIELD_SET(RCU_MODE, RCU_MODE_FIXED_SLICE_CCS_MODE,
-					   RCU_MODE_FIXED_SLICE_CCS_MODE))
+		/* Disable WMTP if HW doesn't support it */
+		{ XE_RTP_NAME("DISABLE_WMTP_ON_UNSUPPORTED_HW"),
+		  XE_RTP_RULES(FUNC(xe_rtp_cfeg_wmtp_disabled)),
+		  XE_RTP_ACTIONS(FIELD_SET(CS_CHICKEN1(0),
+					   PREEMPT_GPGPU_LEVEL_MASK,
+					   PREEMPT_GPGPU_THREAD_GROUP_LEVEL)),
+		  XE_RTP_ENTRY_FLAG(FOREACH_ENGINE)
 		},
-		{}
 	};
 
-	xe_rtp_process_to_sr(&ctx, lrc_was, &hwe->reg_lrc);
+	xe_rtp_process_to_sr(&ctx, lrc_setup, ARRAY_SIZE(lrc_setup), &hwe->reg_lrc);
 }
 
 static void
@@ -341,7 +418,7 @@ hw_engine_setup_default_state(struct xe_hw_engine *hwe)
 	 * Bspec: 72161
 	 */
 	const u8 mocs_write_idx = gt->mocs.uc_index;
-	const u8 mocs_read_idx = hwe->class == XE_ENGINE_CLASS_COMPUTE &&
+	const u8 mocs_read_idx = hwe->class == XE_ENGINE_CLASS_COMPUTE && IS_DGFX(xe) &&
 				 (GRAPHICS_VER(xe) >= 20 || xe->info.platform == XE_PVC) ?
 				 gt->mocs.wb_index : gt->mocs.uc_index;
 	u32 ring_cmd_cctl_val = REG_FIELD_PREP(CMD_CCTL_WRITE_OVERRIDE_MASK, mocs_write_idx) |
@@ -372,10 +449,45 @@ hw_engine_setup_default_state(struct xe_hw_engine *hwe)
 					   0xA,
 					   XE_RTP_ACTION_FLAG(ENGINE_BASE)))
 		},
-		{}
+		/* Enable Priority Mem Read */
+		{ XE_RTP_NAME("Priority_Mem_Read"),
+		  XE_RTP_RULES(GRAPHICS_VERSION_RANGE(2001, XE_RTP_END_VERSION_UNDEFINED)),
+		  XE_RTP_ACTIONS(SET(CSFE_CHICKEN1(0), CS_PRIORITY_MEM_READ,
+				     XE_RTP_ACTION_FLAG(ENGINE_BASE)))
+		},
+		/* Use Fixed slice CCS mode */
+		{ XE_RTP_NAME("RCU_MODE_FIXED_SLICE_CCS_MODE"),
+		  XE_RTP_RULES(FUNC(xe_hw_engine_match_fixed_cslice_mode)),
+		  XE_RTP_ACTIONS(FIELD_SET(RCU_MODE, RCU_MODE_FIXED_SLICE_CCS_MODE,
+					   RCU_MODE_FIXED_SLICE_CCS_MODE))
+		},
 	};
 
-	xe_rtp_process_to_sr(&ctx, engine_entries, &hwe->reg_sr);
+	xe_rtp_process_to_sr(&ctx, engine_entries, ARRAY_SIZE(engine_entries), &hwe->reg_sr);
+}
+
+static const struct engine_info *find_engine_info(enum xe_engine_class class, int instance)
+{
+	const struct engine_info *info;
+	enum xe_hw_engine_id id;
+
+	for (id = 0; id < XE_NUM_HW_ENGINES; ++id) {
+		info = &engine_infos[id];
+		if (info->class == class && info->instance == instance)
+			return info;
+	}
+
+	return NULL;
+}
+
+static u16 get_msix_irq_offset(struct xe_gt *gt, enum xe_engine_class class)
+{
+	/* For MSI-X, hw engines report to offset of engine instance zero */
+	const struct engine_info *info = find_engine_info(class, 0);
+
+	xe_gt_assert(gt, info);
+
+	return info ? info->irq_offset : 0;
 }
 
 static void hw_engine_init_early(struct xe_gt *gt, struct xe_hw_engine *hwe,
@@ -397,6 +509,9 @@ static void hw_engine_init_early(struct xe_gt *gt, struct xe_hw_engine *hwe,
 	hwe->class = info->class;
 	hwe->instance = info->instance;
 	hwe->mmio_base = info->mmio_base;
+	hwe->irq_offset = xe_device_has_msix(gt_to_xe(gt)) ?
+		get_msix_irq_offset(gt, info->class) :
+		info->irq_offset;
 	hwe->domain = info->domain;
 	hwe->name = info->name;
 	hwe->fence_irq = &gt->fence_irq[info->class];
@@ -413,6 +528,32 @@ static void hw_engine_init_early(struct xe_gt *gt, struct xe_hw_engine *hwe,
 		hwe->eclass->sched_props.preempt_timeout_us = XE_HW_ENGINE_PREEMPT_TIMEOUT;
 		hwe->eclass->sched_props.preempt_timeout_min = XE_HW_ENGINE_PREEMPT_TIMEOUT_MIN;
 		hwe->eclass->sched_props.preempt_timeout_max = XE_HW_ENGINE_PREEMPT_TIMEOUT_MAX;
+
+		/*
+		 * The GSC engine can accept submissions while the GSC shim is
+		 * being reset, during which time the submission is stalled. In
+		 * the worst case, the shim reset can take up to the maximum GSC
+		 * command execution time (250ms), so the request start can be
+		 * delayed by that much; the request itself can take that long
+		 * without being preemptible, which means worst case it can
+		 * theoretically take up to 500ms for a preemption to go through
+		 * on the GSC engine. Adding to that an extra 100ms as a safety
+		 * margin, we get a minimum recommended timeout of 600ms.
+		 * The preempt_timeout value can't be tuned for OTHER_CLASS
+		 * because the class is reserved for kernel usage, so we just
+		 * need to make sure that the starting value is above that
+		 * threshold; since our default value (640ms) is greater than
+		 * 600ms, the only way we can go below is via a kconfig setting.
+		 * If that happens, log it in dmesg and update the value.
+		 */
+		if (hwe->class == XE_ENGINE_CLASS_OTHER) {
+			const u32 min_preempt_timeout = 600 * 1000;
+			if (hwe->eclass->sched_props.preempt_timeout_us < min_preempt_timeout) {
+				hwe->eclass->sched_props.preempt_timeout_us = min_preempt_timeout;
+				xe_gt_notice(gt, "Increasing preempt_timeout for GSC to 600ms\n");
+			}
+		}
+
 		/* Record default props */
 		hwe->eclass->defaults = hwe->eclass->sched_props;
 	}
@@ -426,6 +567,33 @@ static void hw_engine_init_early(struct xe_gt *gt, struct xe_hw_engine *hwe,
 	xe_reg_whitelist_process_engine(hwe);
 }
 
+static void adjust_idledly(struct xe_hw_engine *hwe)
+{
+	struct xe_gt *gt = hwe->gt;
+	u32 idledly, maxcnt;
+	u32 idledly_units_ps = 8 * gt->info.timestamp_base;
+	u32 maxcnt_units_ns = 640;
+	bool inhibit_switch = 0;
+
+	if (!IS_SRIOV_VF(gt_to_xe(hwe->gt)) && XE_WA(gt, 16023105232)) {
+		idledly = xe_mmio_read32(&gt->mmio, RING_IDLEDLY(hwe->mmio_base));
+		maxcnt = xe_mmio_read32(&gt->mmio, RING_PWRCTX_MAXCNT(hwe->mmio_base));
+
+		inhibit_switch = idledly & INHIBIT_SWITCH_UNTIL_PREEMPTED;
+		idledly = REG_FIELD_GET(IDLE_DELAY, idledly);
+		idledly = DIV_ROUND_CLOSEST(idledly * idledly_units_ps, 1000);
+		maxcnt = REG_FIELD_GET(IDLE_WAIT_TIME, maxcnt);
+		maxcnt *= maxcnt_units_ns;
+
+		if (xe_gt_WARN_ON(gt, idledly >= maxcnt || inhibit_switch)) {
+			idledly = DIV_ROUND_CLOSEST(((maxcnt - 1) * maxcnt_units_ns),
+						    idledly_units_ps);
+			idledly = DIV_ROUND_CLOSEST(idledly, 1000);
+			xe_mmio_write32(&gt->mmio, RING_IDLEDLY(hwe->mmio_base), idledly);
+		}
+	}
+}
+
 static int hw_engine_init(struct xe_gt *gt, struct xe_hw_engine *hwe,
 			  enum xe_hw_engine_id id)
 {
@@ -437,43 +605,40 @@ static int hw_engine_init(struct xe_gt *gt, struct xe_hw_engine *hwe,
 	xe_gt_assert(gt, gt->info.engine_mask & BIT(id));
 
 	xe_reg_sr_apply_mmio(&hwe->reg_sr, gt);
-	xe_reg_sr_apply_whitelist(hwe);
 
 	hwe->hwsp = xe_managed_bo_create_pin_map(xe, tile, SZ_4K,
-						 XE_BO_CREATE_VRAM_IF_DGFX(tile) |
-						 XE_BO_CREATE_GGTT_BIT);
+						 XE_BO_FLAG_VRAM_IF_DGFX(tile) |
+						 XE_BO_FLAG_GGTT |
+						 XE_BO_FLAG_GGTT_INVALIDATE);
 	if (IS_ERR(hwe->hwsp)) {
 		err = PTR_ERR(hwe->hwsp);
 		goto err_name;
 	}
 
-	err = xe_lrc_init(&hwe->kernel_lrc, hwe, NULL, NULL, SZ_16K);
-	if (err)
-		goto err_hwsp;
-
 	if (!xe_device_uc_enabled(xe)) {
 		hwe->exl_port = xe_execlist_port_create(xe, hwe);
 		if (IS_ERR(hwe->exl_port)) {
 			err = PTR_ERR(hwe->exl_port);
-			goto err_kernel_lrc;
+			goto err_hwsp;
 		}
-	}
+	} else {
+		/* GSCCS has a special interrupt for reset */
+		if (hwe->class == XE_ENGINE_CLASS_OTHER)
+			hwe->irq_handler = xe_gsc_hwe_irq_handler;
 
-	if (xe_device_uc_enabled(xe))
-		xe_hw_engine_enable_ring(hwe);
+		if (!IS_SRIOV_VF(xe))
+			xe_hw_engine_enable_ring(hwe);
+	}
 
 	/* We reserve the highest BCS instance for USM */
 	if (xe->info.has_usm && hwe->class == XE_ENGINE_CLASS_COPY)
 		gt->usm.reserved_bcs_instance = hwe->instance;
 
-	err = drmm_add_action_or_reset(&xe->drm, hw_engine_fini, hwe);
-	if (err)
-		return err;
+	/* Ensure IDLEDLY is lower than MAXCNT */
+	adjust_idledly(hwe);
 
-	return 0;
+	return devm_add_action_or_reset(xe->drm.dev, hw_engine_fini, hwe);
 
-err_kernel_lrc:
-	xe_lrc_finish(&hwe->kernel_lrc);
 err_hwsp:
 	xe_bo_unpin_map_no_vm(hwe->hwsp);
 err_name:
@@ -508,7 +673,7 @@ static void read_media_fuses(struct xe_gt *gt)
 
 	xe_force_wake_assert_held(gt_to_fw(gt), XE_FW_GT);
 
-	media_fuse = xe_mmio_read32(gt, GT_VEBOX_VDBOX_DISABLE);
+	media_fuse = xe_mmio_read32(&gt->mmio, GT_VEBOX_VDBOX_DISABLE);
 
 	/*
 	 * Pre-Xe_HP platforms had register bits representing absent engines,
@@ -553,7 +718,7 @@ static void read_copy_fuses(struct xe_gt *gt)
 
 	xe_force_wake_assert_held(gt_to_fw(gt), XE_FW_GT);
 
-	bcs_mask = xe_mmio_read32(gt, MIRROR_FUSE3);
+	bcs_mask = xe_mmio_read32(&gt->mmio, MIRROR_FUSE3);
 	bcs_mask = REG_FIELD_GET(MEML3_EN_MASK, bcs_mask);
 
 	/* BCS0 is always present; only BCS1-BCS8 may be fused off */
@@ -600,7 +765,7 @@ static void read_compute_fuses_from_reg(struct xe_gt *gt)
 	struct xe_device *xe = gt_to_xe(gt);
 	u32 ccs_mask;
 
-	ccs_mask = xe_mmio_read32(gt, XEHP_FUSE4);
+	ccs_mask = xe_mmio_read32(&gt->mmio, XEHP_FUSE4);
 	ccs_mask = REG_FIELD_GET(CCS_EN_MASK, ccs_mask);
 
 	for (int i = XE_HW_ENGINE_CCS0, j = 0; i <= XE_HW_ENGINE_CCS3; ++i, ++j) {
@@ -636,7 +801,12 @@ static void check_gsc_availability(struct xe_gt *gt)
 	 */
 	if (!xe_uc_fw_is_available(&gt->uc.gsc.fw)) {
 		gt->info.engine_mask &= ~BIT(XE_HW_ENGINE_GSCCS0);
-		drm_info(&xe->drm, "gsccs disabled due to lack of FW\n");
+
+		/* interrupts where previously enabled, so turn them off */
+		xe_mmio_write32(&gt->mmio, GUNIT_GSC_INTR_ENABLE, 0);
+		xe_mmio_write32(&gt->mmio, GUNIT_GSC_INTR_MASK, ~0);
+
+		drm_dbg(&xe->drm, "GSC FW not used, disabling gsccs\n");
 	}
 }
 
@@ -671,6 +841,9 @@ int xe_hw_engines_init(struct xe_gt *gt)
 	}
 
 	hw_engine_setup_logical_mapping(gt);
+	err = xe_hw_engine_setup_groups(gt);
+	if (err)
+		return err;
 
 	return 0;
 }
@@ -689,6 +862,7 @@ void xe_hw_engine_handle_irq(struct xe_hw_engine *hwe, u16 intr_vec)
 /**
  * xe_hw_engine_snapshot_capture - Take a quick snapshot of the HW Engine.
  * @hwe: Xe HW Engine.
+ * @q: The exec queue object.
  *
  * This can be printed out in a later stage like during dev_coredump
  * analysis.
@@ -697,10 +871,10 @@ void xe_hw_engine_handle_irq(struct xe_hw_engine *hwe, u16 intr_vec)
  * caller, using `xe_hw_engine_snapshot_free`.
  */
 struct xe_hw_engine_snapshot *
-xe_hw_engine_snapshot_capture(struct xe_hw_engine *hwe)
+xe_hw_engine_snapshot_capture(struct xe_hw_engine *hwe, struct xe_exec_queue *q)
 {
 	struct xe_hw_engine_snapshot *snapshot;
-	int len;
+	struct __guc_capture_parsed_output *node;
 
 	if (!xe_hw_engine_is_valid(hwe))
 		return NULL;
@@ -710,112 +884,37 @@ xe_hw_engine_snapshot_capture(struct xe_hw_engine *hwe)
 	if (!snapshot)
 		return NULL;
 
-	len = strlen(hwe->name) + 1;
-	snapshot->name = kzalloc(len, GFP_ATOMIC);
-	if (snapshot->name)
-		strscpy(snapshot->name, hwe->name, len);
-
-	snapshot->class = hwe->class;
+	snapshot->name = kstrdup(hwe->name, GFP_ATOMIC);
+	snapshot->hwe = hwe;
 	snapshot->logical_instance = hwe->logical_instance;
 	snapshot->forcewake.domain = hwe->domain;
 	snapshot->forcewake.ref = xe_force_wake_ref(gt_to_fw(hwe->gt),
 						    hwe->domain);
 	snapshot->mmio_base = hwe->mmio_base;
+	snapshot->kernel_reserved = xe_hw_engine_is_reserved(hwe);
 
-	snapshot->reg.ring_hwstam = hw_engine_mmio_read32(hwe, RING_HWSTAM(0));
-	snapshot->reg.ring_hws_pga = hw_engine_mmio_read32(hwe,
-							   RING_HWS_PGA(0));
-	snapshot->reg.ring_execlist_status_lo =
-		hw_engine_mmio_read32(hwe, RING_EXECLIST_STATUS_LO(0));
-	snapshot->reg.ring_execlist_status_hi =
-		hw_engine_mmio_read32(hwe, RING_EXECLIST_STATUS_HI(0));
-	snapshot->reg.ring_execlist_sq_contents_lo =
-		hw_engine_mmio_read32(hwe,
-				      RING_EXECLIST_SQ_CONTENTS_LO(0));
-	snapshot->reg.ring_execlist_sq_contents_hi =
-		hw_engine_mmio_read32(hwe,
-				      RING_EXECLIST_SQ_CONTENTS_HI(0));
-	snapshot->reg.ring_start = hw_engine_mmio_read32(hwe, RING_START(0));
-	snapshot->reg.ring_head =
-		hw_engine_mmio_read32(hwe, RING_HEAD(0)) & HEAD_ADDR;
-	snapshot->reg.ring_tail =
-		hw_engine_mmio_read32(hwe, RING_TAIL(0)) & TAIL_ADDR;
-	snapshot->reg.ring_ctl = hw_engine_mmio_read32(hwe, RING_CTL(0));
-	snapshot->reg.ring_mi_mode =
-		hw_engine_mmio_read32(hwe, RING_MI_MODE(0));
-	snapshot->reg.ring_mode = hw_engine_mmio_read32(hwe, RING_MODE(0));
-	snapshot->reg.ring_imr = hw_engine_mmio_read32(hwe, RING_IMR(0));
-	snapshot->reg.ring_esr = hw_engine_mmio_read32(hwe, RING_ESR(0));
-	snapshot->reg.ring_emr = hw_engine_mmio_read32(hwe, RING_EMR(0));
-	snapshot->reg.ring_eir = hw_engine_mmio_read32(hwe, RING_EIR(0));
-	snapshot->reg.ring_acthd_udw =
-		hw_engine_mmio_read32(hwe, RING_ACTHD_UDW(0));
-	snapshot->reg.ring_acthd = hw_engine_mmio_read32(hwe, RING_ACTHD(0));
-	snapshot->reg.ring_bbaddr_udw =
-		hw_engine_mmio_read32(hwe, RING_BBADDR_UDW(0));
-	snapshot->reg.ring_bbaddr = hw_engine_mmio_read32(hwe, RING_BBADDR(0));
-	snapshot->reg.ring_dma_fadd_udw =
-		hw_engine_mmio_read32(hwe, RING_DMA_FADD_UDW(0));
-	snapshot->reg.ring_dma_fadd =
-		hw_engine_mmio_read32(hwe, RING_DMA_FADD(0));
-	snapshot->reg.ipehr = hw_engine_mmio_read32(hwe, RING_IPEHR(0));
+	/* no more VF accessible data below this point */
+	if (IS_SRIOV_VF(gt_to_xe(hwe->gt)))
+		return snapshot;
 
-	if (snapshot->class == XE_ENGINE_CLASS_COMPUTE)
-		snapshot->reg.rcu_mode = xe_mmio_read32(hwe->gt, RCU_MODE);
+	if (q) {
+		/* If got guc capture, set source to GuC */
+		node = xe_guc_capture_get_matching_and_lock(q);
+		if (node) {
+			struct xe_device *xe = gt_to_xe(hwe->gt);
+			struct xe_devcoredump *coredump = &xe->devcoredump;
+
+			coredump->snapshot.matched_node = node;
+			xe_gt_dbg(hwe->gt, "Found and locked GuC-err-capture node");
+			return snapshot;
+		}
+	}
+
+	/* otherwise, do manual capture */
+	xe_engine_manual_capture(hwe, snapshot);
+	xe_gt_dbg(hwe->gt, "Proceeding with manual engine snapshot");
 
 	return snapshot;
-}
-
-/**
- * xe_hw_engine_snapshot_print - Print out a given Xe HW Engine snapshot.
- * @snapshot: Xe HW Engine snapshot object.
- * @p: drm_printer where it will be printed out.
- *
- * This function prints out a given Xe HW Engine snapshot object.
- */
-void xe_hw_engine_snapshot_print(struct xe_hw_engine_snapshot *snapshot,
-				 struct drm_printer *p)
-{
-	if (!snapshot)
-		return;
-
-	drm_printf(p, "%s (physical), logical instance=%d\n",
-		   snapshot->name ? snapshot->name : "",
-		   snapshot->logical_instance);
-	drm_printf(p, "\tForcewake: domain 0x%x, ref %d\n",
-		   snapshot->forcewake.domain, snapshot->forcewake.ref);
-	drm_printf(p, "\tHWSTAM: 0x%08x\n", snapshot->reg.ring_hwstam);
-	drm_printf(p, "\tRING_HWS_PGA: 0x%08x\n", snapshot->reg.ring_hws_pga);
-	drm_printf(p, "\tRING_EXECLIST_STATUS_LO: 0x%08x\n",
-		   snapshot->reg.ring_execlist_status_lo);
-	drm_printf(p, "\tRING_EXECLIST_STATUS_HI: 0x%08x\n",
-		   snapshot->reg.ring_execlist_status_hi);
-	drm_printf(p, "\tRING_EXECLIST_SQ_CONTENTS_LO: 0x%08x\n",
-		   snapshot->reg.ring_execlist_sq_contents_lo);
-	drm_printf(p, "\tRING_EXECLIST_SQ_CONTENTS_HI: 0x%08x\n",
-		   snapshot->reg.ring_execlist_sq_contents_hi);
-	drm_printf(p, "\tRING_START: 0x%08x\n", snapshot->reg.ring_start);
-	drm_printf(p, "\tRING_HEAD:  0x%08x\n", snapshot->reg.ring_head);
-	drm_printf(p, "\tRING_TAIL:  0x%08x\n", snapshot->reg.ring_tail);
-	drm_printf(p, "\tRING_CTL: 0x%08x\n", snapshot->reg.ring_ctl);
-	drm_printf(p, "\tRING_MI_MODE: 0x%08x\n", snapshot->reg.ring_mi_mode);
-	drm_printf(p, "\tRING_MODE: 0x%08x\n",
-		   snapshot->reg.ring_mode);
-	drm_printf(p, "\tRING_IMR:   0x%08x\n", snapshot->reg.ring_imr);
-	drm_printf(p, "\tRING_ESR:   0x%08x\n", snapshot->reg.ring_esr);
-	drm_printf(p, "\tRING_EMR:   0x%08x\n", snapshot->reg.ring_emr);
-	drm_printf(p, "\tRING_EIR:   0x%08x\n", snapshot->reg.ring_eir);
-	drm_printf(p, "\tACTHD:  0x%08x_%08x\n", snapshot->reg.ring_acthd_udw,
-		   snapshot->reg.ring_acthd);
-	drm_printf(p, "\tBBADDR: 0x%08x_%08x\n", snapshot->reg.ring_bbaddr_udw,
-		   snapshot->reg.ring_bbaddr);
-	drm_printf(p, "\tDMA_FADDR: 0x%08x_%08x\n",
-		   snapshot->reg.ring_dma_fadd_udw,
-		   snapshot->reg.ring_dma_fadd);
-	drm_printf(p, "\tIPEHR: 0x%08x\n\n", snapshot->reg.ipehr);
-	if (snapshot->class == XE_ENGINE_CLASS_COMPUTE)
-		drm_printf(p, "\tRCU_MODE: 0x%08x\n",
-			   snapshot->reg.rcu_mode);
 }
 
 /**
@@ -827,8 +926,17 @@ void xe_hw_engine_snapshot_print(struct xe_hw_engine_snapshot *snapshot,
  */
 void xe_hw_engine_snapshot_free(struct xe_hw_engine_snapshot *snapshot)
 {
+	struct xe_gt *gt;
 	if (!snapshot)
 		return;
+
+	gt = snapshot->hwe->gt;
+	/*
+	 * xe_guc_capture_put_matched_nodes is called here and from
+	 * xe_devcoredump_snapshot_free, to cover the 2 calling paths
+	 * of hw_engines - debugfs and devcoredump free.
+	 */
+	xe_guc_capture_put_matched_nodes(&gt->uc.guc);
 
 	kfree(snapshot->name);
 	kfree(snapshot);
@@ -845,8 +953,8 @@ void xe_hw_engine_print(struct xe_hw_engine *hwe, struct drm_printer *p)
 {
 	struct xe_hw_engine_snapshot *snapshot;
 
-	snapshot = xe_hw_engine_snapshot_capture(hwe);
-	xe_hw_engine_snapshot_print(snapshot, p);
+	snapshot = xe_hw_engine_snapshot_capture(hwe, NULL);
+	xe_engine_snapshot_print(snapshot, p);
 	xe_hw_engine_snapshot_free(snapshot);
 }
 
@@ -880,4 +988,74 @@ bool xe_hw_engine_is_reserved(struct xe_hw_engine *hwe)
 
 	return xe->info.has_usm && hwe->class == XE_ENGINE_CLASS_COPY &&
 		hwe->instance == gt->usm.reserved_bcs_instance;
+}
+
+const char *xe_hw_engine_class_to_str(enum xe_engine_class class)
+{
+	switch (class) {
+	case XE_ENGINE_CLASS_RENDER:
+		return "rcs";
+	case XE_ENGINE_CLASS_VIDEO_DECODE:
+		return "vcs";
+	case XE_ENGINE_CLASS_VIDEO_ENHANCE:
+		return "vecs";
+	case XE_ENGINE_CLASS_COPY:
+		return "bcs";
+	case XE_ENGINE_CLASS_OTHER:
+		return "other";
+	case XE_ENGINE_CLASS_COMPUTE:
+		return "ccs";
+	case XE_ENGINE_CLASS_MAX:
+		break;
+	}
+
+	return NULL;
+}
+
+u64 xe_hw_engine_read_timestamp(struct xe_hw_engine *hwe)
+{
+	return xe_mmio_read64_2x32(&hwe->gt->mmio, RING_TIMESTAMP(hwe->mmio_base));
+}
+
+enum xe_force_wake_domains xe_hw_engine_to_fw_domain(struct xe_hw_engine *hwe)
+{
+	return engine_infos[hwe->engine_id].domain;
+}
+
+static const enum xe_engine_class user_to_xe_engine_class[] = {
+	[DRM_XE_ENGINE_CLASS_RENDER] = XE_ENGINE_CLASS_RENDER,
+	[DRM_XE_ENGINE_CLASS_COPY] = XE_ENGINE_CLASS_COPY,
+	[DRM_XE_ENGINE_CLASS_VIDEO_DECODE] = XE_ENGINE_CLASS_VIDEO_DECODE,
+	[DRM_XE_ENGINE_CLASS_VIDEO_ENHANCE] = XE_ENGINE_CLASS_VIDEO_ENHANCE,
+	[DRM_XE_ENGINE_CLASS_COMPUTE] = XE_ENGINE_CLASS_COMPUTE,
+};
+
+/**
+ * xe_hw_engine_lookup() - Lookup hardware engine for class:instance
+ * @xe: xe device
+ * @eci: engine class and instance
+ *
+ * This function will find a hardware engine for given engine
+ * class and instance.
+ *
+ * Return: If found xe_hw_engine pointer, NULL otherwise.
+ */
+struct xe_hw_engine *
+xe_hw_engine_lookup(struct xe_device *xe,
+		    struct drm_xe_engine_class_instance eci)
+{
+	unsigned int idx;
+
+	if (eci.engine_class >= ARRAY_SIZE(user_to_xe_engine_class))
+		return NULL;
+
+	if (eci.gt_id >= xe->info.gt_count)
+		return NULL;
+
+	idx = array_index_nospec(eci.engine_class,
+				 ARRAY_SIZE(user_to_xe_engine_class));
+
+	return xe_gt_hw_engine(xe_device_get_gt(xe, eci.gt_id),
+			       user_to_xe_engine_class[idx],
+			       eci.engine_instance, true);
 }

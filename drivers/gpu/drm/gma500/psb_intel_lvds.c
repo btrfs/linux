@@ -97,7 +97,7 @@ static int psb_lvds_i2c_set_brightness(struct drm_device *dev,
 
 	struct i2c_msg msgs[] = {
 		{
-			.addr = lvds_i2c_bus->slave_addr,
+			.addr = lvds_i2c_bus->target_addr,
 			.flags = 0,
 			.len = 2,
 			.buf = out_buf,
@@ -331,7 +331,7 @@ static void psb_intel_lvds_restore(struct drm_connector *connector)
 }
 
 enum drm_mode_status psb_intel_lvds_mode_valid(struct drm_connector *connector,
-				 struct drm_display_mode *mode)
+				 const struct drm_display_mode *mode)
 {
 	struct drm_psb_private *dev_priv = to_drm_psb_private(connector->dev);
 	struct gma_encoder *gma_encoder = gma_attached_encoder(connector);
@@ -504,6 +504,9 @@ static int psb_intel_lvds_get_modes(struct drm_connector *connector)
 	if (mode_dev->panel_fixed_mode != NULL) {
 		struct drm_display_mode *mode =
 		    drm_mode_duplicate(dev, mode_dev->panel_fixed_mode);
+		if (!mode)
+			return 0;
+
 		drm_mode_probed_add(connector, mode);
 		return 1;
 	}
@@ -707,7 +710,7 @@ void psb_intel_lvds_init(struct drm_device *dev,
 			dev->dev, "I2C bus registration failed.\n");
 		goto err_encoder_cleanup;
 	}
-	lvds_priv->i2c_bus->slave_addr = 0x2C;
+	lvds_priv->i2c_bus->target_addr = 0x2C;
 	dev_priv->lvds_i2c_bus =  lvds_priv->i2c_bus;
 
 	/*

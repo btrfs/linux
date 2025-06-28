@@ -13,12 +13,14 @@
 #include <linux/regmap.h>
 #include <linux/mfd/core.h>
 #include <linux/mfd/mt6323/core.h>
+#include <linux/mfd/mt6328/core.h>
 #include <linux/mfd/mt6331/core.h>
 #include <linux/mfd/mt6357/core.h>
 #include <linux/mfd/mt6358/core.h>
 #include <linux/mfd/mt6359/core.h>
 #include <linux/mfd/mt6397/core.h>
 #include <linux/mfd/mt6323/registers.h>
+#include <linux/mfd/mt6328/registers.h>
 #include <linux/mfd/mt6331/registers.h>
 #include <linux/mfd/mt6357/registers.h>
 #include <linux/mfd/mt6358/registers.h>
@@ -82,9 +84,22 @@ static const struct resource mt6359_keys_resources[] = {
 	DEFINE_RES_IRQ_NAMED(MT6359_IRQ_HOMEKEY_R, "homekey_r"),
 };
 
+static const struct resource mt6359_accdet_resources[] = {
+	DEFINE_RES_IRQ_NAMED(MT6359_IRQ_ACCDET, "accdet_irq"),
+	DEFINE_RES_IRQ_NAMED(MT6359_IRQ_ACCDET_EINT0, "accdet_eint0"),
+	DEFINE_RES_IRQ_NAMED(MT6359_IRQ_ACCDET_EINT1, "accdet_eint1"),
+};
+
 static const struct resource mt6323_keys_resources[] = {
 	DEFINE_RES_IRQ_NAMED(MT6323_IRQ_STATUS_PWRKEY, "powerkey"),
 	DEFINE_RES_IRQ_NAMED(MT6323_IRQ_STATUS_FCHRKEY, "homekey"),
+};
+
+static const struct resource mt6328_keys_resources[] = {
+	DEFINE_RES_IRQ_NAMED(MT6328_IRQ_STATUS_PWRKEY, "powerkey"),
+	DEFINE_RES_IRQ_NAMED(MT6328_IRQ_STATUS_HOMEKEY, "homekey"),
+	DEFINE_RES_IRQ_NAMED(MT6328_IRQ_STATUS_PWRKEY_R, "powerkey_r"),
+	DEFINE_RES_IRQ_NAMED(MT6328_IRQ_STATUS_HOMEKEY_R, "homekey_r"),
 };
 
 static const struct resource mt6357_keys_resources[] = {
@@ -133,14 +148,32 @@ static const struct mfd_cell mt6323_devs[] = {
 	},
 };
 
+static const struct mfd_cell mt6328_devs[] = {
+	{
+		.name = "mt6328-regulator",
+		.of_compatible = "mediatek,mt6328-regulator"
+	}, {
+		.name = "mtk-pmic-keys",
+		.num_resources = ARRAY_SIZE(mt6328_keys_resources),
+		.resources = mt6328_keys_resources,
+		.of_compatible = "mediatek,mt6328-keys"
+	},
+};
+
 static const struct mfd_cell mt6357_devs[] = {
 	{
+		.name = "mt6359-auxadc",
+		.of_compatible = "mediatek,mt6357-auxadc"
+	}, {
 		.name = "mt6357-regulator",
 	}, {
 		.name = "mt6357-rtc",
 		.num_resources = ARRAY_SIZE(mt6357_rtc_resources),
 		.resources = mt6357_rtc_resources,
 		.of_compatible = "mediatek,mt6357-rtc",
+	}, {
+		.name = "mt6357-sound",
+		.of_compatible = "mediatek,mt6357-sound"
 	}, {
 		.name = "mtk-pmic-keys",
 		.num_resources = ARRAY_SIZE(mt6357_keys_resources),
@@ -172,6 +205,9 @@ static const struct mfd_cell mt6331_mt6332_devs[] = {
 
 static const struct mfd_cell mt6358_devs[] = {
 	{
+		.name = "mt6359-auxadc",
+		.of_compatible = "mediatek,mt6358-auxadc"
+	}, {
 		.name = "mt6358-regulator",
 		.of_compatible = "mediatek,mt6358-regulator"
 	}, {
@@ -191,6 +227,10 @@ static const struct mfd_cell mt6358_devs[] = {
 };
 
 static const struct mfd_cell mt6359_devs[] = {
+	{
+		.name = "mt6359-auxadc",
+		.of_compatible = "mediatek,mt6359-auxadc"
+	},
 	{ .name = "mt6359-regulator", },
 	{
 		.name = "mt6359-rtc",
@@ -204,6 +244,12 @@ static const struct mfd_cell mt6359_devs[] = {
 		.num_resources = ARRAY_SIZE(mt6359_keys_resources),
 		.resources = mt6359_keys_resources,
 		.of_compatible = "mediatek,mt6359-keys"
+	},
+	{
+		.name = "mt6359-accdet",
+		.of_compatible = "mediatek,mt6359-accdet",
+		.num_resources = ARRAY_SIZE(mt6359_accdet_resources),
+		.resources = mt6359_accdet_resources,
 	},
 };
 
@@ -246,6 +292,14 @@ static const struct chip_data mt6323_core = {
 	.cid_shift = 0,
 	.cells = mt6323_devs,
 	.cell_size = ARRAY_SIZE(mt6323_devs),
+	.irq_init = mt6397_irq_init,
+};
+
+static const struct chip_data mt6328_core = {
+	.cid_addr = MT6328_HWCID,
+	.cid_shift = 0,
+	.cells = mt6328_devs,
+	.cell_size = ARRAY_SIZE(mt6328_devs),
 	.irq_init = mt6397_irq_init,
 };
 
@@ -347,6 +401,9 @@ static const struct of_device_id mt6397_of_match[] = {
 	{
 		.compatible = "mediatek,mt6323",
 		.data = &mt6323_core,
+	}, {
+		.compatible = "mediatek,mt6328",
+		.data = &mt6328_core,
 	}, {
 		.compatible = "mediatek,mt6331",
 		.data = &mt6331_mt6332_core,

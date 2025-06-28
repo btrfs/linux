@@ -7,18 +7,17 @@
 #include <asm/kvm.h>
 #include <asm/intel_pt.h>
 #include <asm/perf_event.h>
+#include <asm/posted_intr.h>
 
 #include "capabilities.h"
 #include "../kvm_cache_regs.h"
-#include "posted_intr.h"
+#include "pmu_intel.h"
 #include "vmcs.h"
 #include "vmx_ops.h"
 #include "../cpuid.h"
 #include "run_flags.h"
-
-#define MSR_TYPE_R	1
-#define MSR_TYPE_W	2
-#define MSR_TYPE_RW	3
+#include "../mmu.h"
+#include "common.h"
 
 #define X2APIC_MSR(r) (APIC_BASE_MSR + ((r) >> 4))
 
@@ -68,45 +67,6 @@ struct pt_desc {
 	u32 caps[PT_CPUID_REGS_NUM * PT_CPUID_LEAVES];
 	struct pt_ctx host;
 	struct pt_ctx guest;
-};
-
-union vmx_exit_reason {
-	struct {
-		u32	basic			: 16;
-		u32	reserved16		: 1;
-		u32	reserved17		: 1;
-		u32	reserved18		: 1;
-		u32	reserved19		: 1;
-		u32	reserved20		: 1;
-		u32	reserved21		: 1;
-		u32	reserved22		: 1;
-		u32	reserved23		: 1;
-		u32	reserved24		: 1;
-		u32	reserved25		: 1;
-		u32	bus_lock_detected	: 1;
-		u32	enclave_mode		: 1;
-		u32	smi_pending_mtf		: 1;
-		u32	smi_from_vmx_root	: 1;
-		u32	reserved30		: 1;
-		u32	failed_vmentry		: 1;
-	};
-	u32 full;
-};
-
-struct lbr_desc {
-	/* Basic info about guest LBR records. */
-	struct x86_pmu_lbr records;
-
-	/*
-	 * Emulate LBR feature via passthrough LBR registers when the
-	 * per-vcpu guest LBR event is scheduled on the current pcpu.
-	 *
-	 * The records may be inaccurate if the host reclaims the LBR.
-	 */
-	struct perf_event *event;
-
-	/* True if LBRs are marked as not intercepted in the MSR bitmap */
-	bool msr_passthrough;
 };
 
 /*
@@ -177,6 +137,7 @@ struct nested_vmx {
 	bool reload_vmcs01_apic_access_page;
 	bool update_vmcs01_cpu_dirty_logging;
 	bool update_vmcs01_apicv_status;
+	bool update_vmcs01_hwapic_isr;
 
 	/*
 	 * Enlightened VMCS has been enabled. It does not mean that L1 has to
@@ -200,8 +161,6 @@ struct nested_vmx {
 	struct kvm_host_map apic_access_page_map;
 	struct kvm_host_map virtual_apic_map;
 	struct kvm_host_map pi_desc_map;
-
-	struct kvm_host_map msr_bitmap_map;
 
 	struct pi_desc *pi_desc;
 	bool pi_pending;
@@ -250,20 +209,10 @@ struct nested_vmx {
 
 struct vcpu_vmx {
 	struct kvm_vcpu       vcpu;
+	struct vcpu_vt	      vt;
 	u8                    fail;
 	u8		      x2apic_msr_bitmap_mode;
 
-	/*
-	 * If true, host state has been stored in vmx->loaded_vmcs for
-	 * the CPU registers that only need to be switched when transitioning
-	 * to/from the kernel, and the registers have been loaded with guest
-	 * values.  If false, host state is loaded in the CPU registers
-	 * and vmx->loaded_vmcs->host_state is invalid.
-	 */
-	bool		      guest_state_loaded;
-
-	unsigned long         exit_qualification;
-	u32                   exit_intr_info;
 	u32                   idt_vectoring_info;
 	ulong                 rflags;
 
@@ -276,7 +225,6 @@ struct vcpu_vmx {
 	struct vmx_uret_msr   guest_uret_msrs[MAX_NR_USER_RETURN_MSRS];
 	bool                  guest_uret_msrs_loaded;
 #ifdef CONFIG_X86_64
-	u64		      msr_host_kernel_gs_base;
 	u64		      msr_guest_kernel_gs_base;
 #endif
 
@@ -315,15 +263,6 @@ struct vcpu_vmx {
 		} seg[8];
 	} segment_cache;
 	int vpid;
-	bool emulation_required;
-
-	union vmx_exit_reason exit_reason;
-
-	/* Posted interrupt descriptor */
-	struct pi_desc pi_desc;
-
-	/* Used if this vCPU is waiting for PI notification wakeup. */
-	struct list_head pi_wakeup_list;
 
 	/* Support for a guest hypervisor (nested VMX) */
 	struct nested_vmx nested;
@@ -332,16 +271,15 @@ struct vcpu_vmx {
 	unsigned int ple_window;
 	bool ple_window_dirty;
 
-	bool req_immediate_exit;
-
 	/* Support for PML */
-#define PML_ENTITY_NUM		512
+#define PML_LOG_NR_ENTRIES	512
+	/* PML is written backwards: this is the first entry written by the CPU */
+#define PML_HEAD_INDEX		(PML_LOG_NR_ENTRIES-1)
+
 	struct page *pml_pg;
 
 	/* apic deadline value in host tsc */
 	u64 hv_deadline_tsc;
-
-	unsigned long host_debugctlmsr;
 
 	/*
 	 * Only bits masked by msr_ia32_feature_control_valid_bits can be set in
@@ -364,6 +302,9 @@ struct vcpu_vmx {
 		DECLARE_BITMAP(read, MAX_POSSIBLE_PASSTHROUGH_MSRS);
 		DECLARE_BITMAP(write, MAX_POSSIBLE_PASSTHROUGH_MSRS);
 	} shadow_msr_intercept;
+
+	/* ve_info must be page aligned. */
+	struct vmx_ve_information *ve_info;
 };
 
 struct kvm_vmx {
@@ -376,8 +317,44 @@ struct kvm_vmx {
 	u64 *pid_table;
 };
 
-void vmx_vcpu_load_vmcs(struct kvm_vcpu *vcpu, int cpu,
-			struct loaded_vmcs *buddy);
+static __always_inline struct vcpu_vt *to_vt(struct kvm_vcpu *vcpu)
+{
+	return &(container_of(vcpu, struct vcpu_vmx, vcpu)->vt);
+}
+
+static __always_inline struct kvm_vcpu *vt_to_vcpu(struct vcpu_vt *vt)
+{
+	return &(container_of(vt, struct vcpu_vmx, vt)->vcpu);
+}
+
+static __always_inline union vmx_exit_reason vmx_get_exit_reason(struct kvm_vcpu *vcpu)
+{
+	return to_vt(vcpu)->exit_reason;
+}
+
+static __always_inline unsigned long vmx_get_exit_qual(struct kvm_vcpu *vcpu)
+{
+	struct vcpu_vt *vt = to_vt(vcpu);
+
+	if (!kvm_register_test_and_mark_available(vcpu, VCPU_EXREG_EXIT_INFO_1) &&
+	    !WARN_ON_ONCE(is_td_vcpu(vcpu)))
+		vt->exit_qualification = vmcs_readl(EXIT_QUALIFICATION);
+
+	return vt->exit_qualification;
+}
+
+static __always_inline u32 vmx_get_intr_info(struct kvm_vcpu *vcpu)
+{
+	struct vcpu_vt *vt = to_vt(vcpu);
+
+	if (!kvm_register_test_and_mark_available(vcpu, VCPU_EXREG_EXIT_INFO_2) &&
+	    !WARN_ON_ONCE(is_td_vcpu(vcpu)))
+		vt->exit_intr_info = vmcs_read32(VM_EXIT_INTR_INFO);
+
+	return vt->exit_intr_info;
+}
+
+void vmx_vcpu_load_vmcs(struct kvm_vcpu *vcpu, int cpu);
 int allocate_vpid(void);
 void free_vpid(int vpid);
 void vmx_set_constant_host_state(struct vcpu_vmx *vmx);
@@ -385,6 +362,7 @@ void vmx_prepare_switch_to_guest(struct kvm_vcpu *vcpu);
 void vmx_set_host_fs_gs(struct vmcs_host_state *host, u16 fs_sel, u16 gs_sel,
 			unsigned long fs_base, unsigned long gs_base);
 int vmx_get_cpl(struct kvm_vcpu *vcpu);
+int vmx_get_cpl_no_cache(struct kvm_vcpu *vcpu);
 bool vmx_emulation_required(struct kvm_vcpu *vcpu);
 unsigned long vmx_get_rflags(struct kvm_vcpu *vcpu);
 void vmx_set_rflags(struct kvm_vcpu *vcpu, unsigned long rflags);
@@ -402,6 +380,7 @@ u64 construct_eptp(struct kvm_vcpu *vcpu, hpa_t root_hpa, int root_level);
 bool vmx_guest_inject_ac(struct kvm_vcpu *vcpu);
 void vmx_update_exception_bitmap(struct kvm_vcpu *vcpu);
 bool vmx_nmi_blocked(struct kvm_vcpu *vcpu);
+bool __vmx_interrupt_blocked(struct kvm_vcpu *vcpu);
 bool vmx_interrupt_blocked(struct kvm_vcpu *vcpu);
 bool vmx_get_nmi_mask(struct kvm_vcpu *vcpu);
 void vmx_set_nmi_mask(struct kvm_vcpu *vcpu, bool masked);
@@ -576,7 +555,8 @@ static inline u8 vmx_get_rvi(void)
 	 SECONDARY_EXEC_ENABLE_VMFUNC |					\
 	 SECONDARY_EXEC_BUS_LOCK_DETECTION |				\
 	 SECONDARY_EXEC_NOTIFY_VM_EXITING |				\
-	 SECONDARY_EXEC_ENCLS_EXITING)
+	 SECONDARY_EXEC_ENCLS_EXITING |					\
+	 SECONDARY_EXEC_EPT_VIOLATION_VE)
 
 #define KVM_REQUIRED_VMX_TERTIARY_VM_EXEC_CONTROL 0
 #define KVM_OPTIONAL_VMX_TERTIARY_VM_EXEC_CONTROL			\
@@ -659,44 +639,9 @@ static __always_inline struct vcpu_vmx *to_vmx(struct kvm_vcpu *vcpu)
 	return container_of(vcpu, struct vcpu_vmx, vcpu);
 }
 
-static inline struct lbr_desc *vcpu_to_lbr_desc(struct kvm_vcpu *vcpu)
-{
-	return &to_vmx(vcpu)->lbr_desc;
-}
-
-static inline struct x86_pmu_lbr *vcpu_to_lbr_records(struct kvm_vcpu *vcpu)
-{
-	return &vcpu_to_lbr_desc(vcpu)->records;
-}
-
-static inline bool intel_pmu_lbr_is_enabled(struct kvm_vcpu *vcpu)
-{
-	return !!vcpu_to_lbr_records(vcpu)->nr;
-}
-
 void intel_pmu_cross_mapped_check(struct kvm_pmu *pmu);
 int intel_pmu_create_guest_lbr_event(struct kvm_vcpu *vcpu);
 void vmx_passthrough_lbr_msrs(struct kvm_vcpu *vcpu);
-
-static __always_inline unsigned long vmx_get_exit_qual(struct kvm_vcpu *vcpu)
-{
-	struct vcpu_vmx *vmx = to_vmx(vcpu);
-
-	if (!kvm_register_test_and_mark_available(vcpu, VCPU_EXREG_EXIT_INFO_1))
-		vmx->exit_qualification = vmcs_readl(EXIT_QUALIFICATION);
-
-	return vmx->exit_qualification;
-}
-
-static __always_inline u32 vmx_get_intr_info(struct kvm_vcpu *vcpu)
-{
-	struct vcpu_vmx *vmx = to_vmx(vcpu);
-
-	if (!kvm_register_test_and_mark_available(vcpu, VCPU_EXREG_EXIT_INFO_2))
-		vmx->exit_intr_info = vmcs_read32(VM_EXIT_INTR_INFO);
-
-	return vmx->exit_intr_info;
-}
 
 struct vmcs *alloc_vmcs_cpu(bool shadow, int cpu, gfp_t flags);
 void free_vmcs(struct vmcs *vmcs);
@@ -721,7 +666,8 @@ static inline bool vmx_need_pf_intercept(struct kvm_vcpu *vcpu)
 	if (!enable_ept)
 		return true;
 
-	return allow_smaller_maxphyaddr && cpuid_maxphyaddr(vcpu) < boot_cpu_data.x86_phys_bits;
+	return allow_smaller_maxphyaddr &&
+	       cpuid_maxphyaddr(vcpu) < kvm_host.maxphyaddr;
 }
 
 static inline bool is_unrestricted_guest(struct kvm_vcpu *vcpu)
@@ -748,5 +694,13 @@ static inline bool vmx_can_use_ipiv(struct kvm_vcpu *vcpu)
 {
 	return  lapic_in_kernel(vcpu) && enable_ipiv;
 }
+
+static inline void vmx_segment_cache_clear(struct vcpu_vmx *vmx)
+{
+	vmx->segment_cache.bitmask = 0;
+}
+
+int vmx_init(void);
+void vmx_exit(void);
 
 #endif /* __KVM_X86_VMX_H */

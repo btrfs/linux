@@ -145,7 +145,9 @@ filesystem, an overlay filesystem needs to record in the upper filesystem
 that files have been removed.  This is done using whiteouts and opaque
 directories (non-directories are always opaque).
 
-A whiteout is created as a character device with 0/0 device number.
+A whiteout is created as a character device with 0/0 device number or
+as a zero-size regular file with the xattr "trusted.overlay.whiteout".
+
 When a whiteout is found in the upper level of a merged directory, any
 matching name in the lower level is ignored, and the whiteout itself
 is also hidden.
@@ -153,6 +155,13 @@ is also hidden.
 A directory is made opaque by setting the xattr "trusted.overlay.opaque"
 to "y".  Where the upper filesystem contains an opaque directory, any
 directory in the lower filesystem with the same name is ignored.
+
+An opaque directory should not contain any whiteouts, because they do not
+serve any purpose.  A merge directory containing regular files with the xattr
+"trusted.overlay.whiteout", should be additionally marked by setting the xattr
+"trusted.overlay.opaque" to "x" on the merge directory itself.
+This is needed to avoid the overhead of checking the "trusted.overlay.whiteout"
+on all entries during readdir in the common case.
 
 readdir
 -------
@@ -257,7 +266,7 @@ Non-directories
 Objects that are not directories (files, symlinks, device-special
 files etc.) are presented either from the upper or lower filesystem as
 appropriate.  When a file in the lower filesystem is accessed in a way
-the requires write-access, such as opening for write access, changing
+that requires write-access, such as opening for write access, changing
 some metadata etc., the file is first copied from the lower filesystem
 to the upper filesystem (copy_up).  Note that creating a hard-link
 also requires copy_up, though of course creation of a symlink does
@@ -283,13 +292,27 @@ rename or unlink will of course be noticed and handled).
 Permission model
 ----------------
 
+An overlay filesystem stashes credentials that will be used when
+accessing lower or upper filesystems.
+
+In the old mount api the credentials of the task calling mount(2) are
+stashed. In the new mount api the credentials of the task creating the
+superblock through FSCONFIG_CMD_CREATE command of fsconfig(2) are
+stashed.
+
+Starting with kernel v6.15 it is possible to use the "override_creds"
+mount option which will cause the credentials of the calling task to be
+recorded. Note that "override_creds" is only meaningful when used with
+the new mount api as the old mount api combines setting options and
+superblock creation in a single mount(2) syscall.
+
 Permission checking in the overlay filesystem follows these principles:
 
  1) permission check SHOULD return the same result before and after copy up
 
  2) task creating the overlay mount MUST NOT gain additional privileges
 
- 3) non-mounting task MAY gain additional privileges through the overlay,
+ 3) task[*] MAY gain additional privileges through the overlay,
     compared to direct access on underlying lower or upper filesystems
 
 This is achieved by performing two permission checks on each access:
@@ -297,7 +320,7 @@ This is achieved by performing two permission checks on each access:
  a) check if current task is allowed access based on local DAC (owner,
     group, mode and posix acl), as well as MAC checks
 
- b) check if mounting task would be allowed real operation on lower or
+ b) check if stashed credentials would be allowed real operation on lower or
     upper layer based on underlying filesystem permissions, again including
     MAC checks
 
@@ -306,10 +329,10 @@ are copied up.  On the other hand it can result in server enforced
 permissions (used by NFS, for example) being ignored (3).
 
 Check (b) ensures that no task gains permissions to underlying layers that
-the mounting task does not have (2).  This also means that it is possible
+the stashed credentials do not have (2).  This also means that it is possible
 to create setups where the consistency rule (1) does not hold; normally,
-however, the mounting task will have sufficient privileges to perform all
-operations.
+however, the stashed credentials will have sufficient privileges to
+perform all operations.
 
 Another way to demonstrate this model is drawing parallels between::
 
@@ -358,8 +381,11 @@ Metadata only copy up
 
 When the "metacopy" feature is enabled, overlayfs will only copy
 up metadata (as opposed to whole file), when a metadata specific operation
-like chown/chmod is performed. Full file will be copied up later when
-file is opened for WRITE operation.
+like chown/chmod is performed. An upper file in this state is marked with
+"trusted.overlayfs.metacopy" xattr which indicates that the upper file
+contains no data.  The data will be copied up later when file is opened for
+WRITE operation.  After the lower file's data is copied up,
+the "trusted.overlayfs.metacopy" xattr is removed from the upper file.
 
 In other words, this is delayed data copy up operation and data is copied
 up when there is a need to actually modify data.
@@ -417,6 +443,13 @@ Only the data of the files in the "data-only" lower layers may be visible
 when a "metacopy" file in one of the lower layers above it, has a "redirect"
 to the absolute path of the "lower data" file in the "data-only" lower layer.
 
+Instead of explicitly enabling "metacopy=on" it is sufficient to specify at
+least one data-only layer to enable redirection of data to a data-only layer.
+In this case other forms of metacopy are rejected.  Note: this way data-only
+layers may be used toghether with "userxattr", in which case careful attention
+must be given to privileges needed to change the "user.overlay.redirect" xattr
+to prevent misuse.
+
 Since kernel version v6.8, "data-only" lower layers can also be added using
 the "datadir+" mount options and the fsconfig syscall from new mount api.
 For example::
@@ -426,6 +459,23 @@ For example::
   fsconfig(fs_fd, FSCONFIG_SET_STRING, "lowerdir+", "/l3", 0);
   fsconfig(fs_fd, FSCONFIG_SET_STRING, "datadir+", "/do1", 0);
   fsconfig(fs_fd, FSCONFIG_SET_STRING, "datadir+", "/do2", 0);
+
+
+Specifying layers via file descriptors
+--------------------------------------
+
+Since kernel v6.13, overlayfs supports specifying layers via file descriptors in
+addition to specifying them as paths. This feature is available for the
+"datadir+", "lowerdir+", "upperdir", and "workdir+" mount options with the
+fsconfig syscall from the new mount api::
+
+  fsconfig(fs_fd, FSCONFIG_SET_FD, "lowerdir+", NULL, fd_lower1);
+  fsconfig(fs_fd, FSCONFIG_SET_FD, "lowerdir+", NULL, fd_lower2);
+  fsconfig(fs_fd, FSCONFIG_SET_FD, "lowerdir+", NULL, fd_lower3);
+  fsconfig(fs_fd, FSCONFIG_SET_FD, "datadir+", NULL, fd_data1);
+  fsconfig(fs_fd, FSCONFIG_SET_FD, "datadir+", NULL, fd_data2);
+  fsconfig(fs_fd, FSCONFIG_SET_FD, "workdir", NULL, fd_work);
+  fsconfig(fs_fd, FSCONFIG_SET_FD, "upperdir", NULL, fd_upper);
 
 
 fs-verity support
@@ -520,8 +570,8 @@ Nesting overlayfs mounts
 
 It is possible to use a lower directory that is stored on an overlayfs
 mount. For regular files this does not need any special care. However, files
-that have overlayfs attributes, such as whiteouts or "overlay.*" xattrs will be
-interpreted by the underlying overlayfs mount and stripped out. In order to
+that have overlayfs attributes, such as whiteouts or "overlay.*" xattrs, will
+be interpreted by the underlying overlayfs mount and stripped out. In order to
 allow the second overlayfs mount to see the attributes they must be escaped.
 
 Overlayfs specific xattrs are escaped by using a special prefix of
@@ -534,8 +584,9 @@ A lower dir with a regular whiteout will always be handled by the overlayfs
 mount, so to support storing an effective whiteout file in an overlayfs mount an
 alternative form of whiteout is supported. This form is a regular, zero-size
 file with the "overlay.whiteout" xattr set, inside a directory with the
-"overlay.whiteouts" xattr set. Such whiteouts are never created by overlayfs,
-but can be used by userspace tools (like containers) that generate lower layers.
+"overlay.opaque" xattr set to "x" (see `whiteouts and opaque directories`_).
+These alternative whiteouts are never created by overlayfs, but can be used by
+userspace tools (like containers) that generate lower layers.
 These alternative whiteouts can be escaped using the standard xattr escape
 mechanism in order to properly nest to any depth.
 

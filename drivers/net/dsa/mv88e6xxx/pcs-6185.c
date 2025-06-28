@@ -55,6 +55,7 @@ static irqreturn_t mv88e6185_pcs_handle_irq(int irq, void *dev_id)
 }
 
 static void mv88e6185_pcs_get_state(struct phylink_pcs *pcs,
+				    unsigned int neg_mode,
 				    struct phylink_link_state *state)
 {
 	struct mv88e6185_pcs *mpcs = pcs_to_mv88e6185_pcs(pcs);
@@ -95,7 +96,7 @@ static void mv88e6185_pcs_get_state(struct phylink_pcs *pcs,
 	}
 }
 
-static int mv88e6185_pcs_config(struct phylink_pcs *pcs, unsigned int mode,
+static int mv88e6185_pcs_config(struct phylink_pcs *pcs, unsigned int neg_mode,
 				phy_interface_t interface,
 				const unsigned long *advertising,
 				bool permit_pause_to_mac)

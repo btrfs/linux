@@ -63,8 +63,12 @@ static u64 nested_svm_get_tdp_pdptr(struct kvm_vcpu *vcpu, int index)
 	u64 pdpte;
 	int ret;
 
+	/*
+	 * Note, nCR3 is "assumed" to be 32-byte aligned, i.e. the CPU ignores
+	 * nCR3[4:0] when loading PDPTEs from memory.
+	 */
 	ret = kvm_vcpu_read_guest_page(vcpu, gpa_to_gfn(cr3), &pdpte,
-				       offset_in_page(cr3) + index * 8, 8);
+				       (cr3 & GENMASK(11, 5)) + index * 8, 8);
 	if (ret)
 		return 0;
 	return pdpte;
@@ -107,7 +111,7 @@ static void nested_svm_uninit_mmu_context(struct kvm_vcpu *vcpu)
 
 static bool nested_vmcb_needs_vls_intercept(struct vcpu_svm *svm)
 {
-	if (!guest_can_use(&svm->vcpu, X86_FEATURE_V_VMSAVE_VMLOAD))
+	if (!guest_cpu_cap_has(&svm->vcpu, X86_FEATURE_V_VMSAVE_VMLOAD))
 		return true;
 
 	if (!nested_npt_enabled(svm))
@@ -590,7 +594,7 @@ static void nested_vmcb02_prepare_save(struct vcpu_svm *svm, struct vmcb *vmcb12
 		vmcb_mark_dirty(vmcb02, VMCB_DR);
 	}
 
-	if (unlikely(guest_can_use(vcpu, X86_FEATURE_LBRV) &&
+	if (unlikely(guest_cpu_cap_has(vcpu, X86_FEATURE_LBRV) &&
 		     (svm->nested.ctl.virt_ext & LBR_CTL_ENABLE_MASK))) {
 		/*
 		 * Reserved bits of DEBUGCTL are ignored.  Be consistent with
@@ -642,12 +646,17 @@ static void nested_vmcb02_prepare_control(struct vcpu_svm *svm,
 	u32 pause_count12;
 	u32 pause_thresh12;
 
+	nested_svm_transition_tlb_flush(vcpu);
+
+	/* Enter Guest-Mode */
+	enter_guest_mode(vcpu);
+
 	/*
 	 * Filled at exit: exit_code, exit_code_hi, exit_info_1, exit_info_2,
 	 * exit_int_info, exit_int_info_err, next_rip, insn_len, insn_bytes.
 	 */
 
-	if (guest_can_use(vcpu, X86_FEATURE_VGIF) &&
+	if (guest_cpu_cap_has(vcpu, X86_FEATURE_VGIF) &&
 	    (svm->nested.ctl.int_ctl & V_GIF_ENABLE_MASK))
 		int_ctl_vmcb12_bits |= (V_GIF_MASK | V_GIF_ENABLE_MASK);
 	else
@@ -669,6 +678,33 @@ static void nested_vmcb02_prepare_control(struct vcpu_svm *svm,
 	vmcb02->control.iopm_base_pa = vmcb01->control.iopm_base_pa;
 	vmcb02->control.msrpm_base_pa = vmcb01->control.msrpm_base_pa;
 
+	/*
+	 * Stash vmcb02's counter if the guest hasn't moved past the guilty
+	 * instruction; otherwise, reset the counter to '0'.
+	 *
+	 * In order to detect if L2 has made forward progress or not, track the
+	 * RIP at which a bus lock has occurred on a per-vmcb12 basis.  If RIP
+	 * is changed, guest has clearly made forward progress, bus_lock_counter
+	 * still remained '1', so reset bus_lock_counter to '0'. Eg. In the
+	 * scenario, where a buslock happened in L1 before VMRUN, the bus lock
+	 * firmly happened on an instruction in the past. Even if vmcb01's
+	 * counter is still '1', (because the guilty instruction got patched),
+	 * the vCPU has clearly made forward progress and so KVM should reset
+	 * vmcb02's counter to '0'.
+	 *
+	 * If the RIP hasn't changed, stash the bus lock counter at nested VMRUN
+	 * to prevent the same guilty instruction from triggering a VM-Exit. Eg.
+	 * if userspace rate-limits the vCPU, then it's entirely possible that
+	 * L1's tick interrupt is pending by the time userspace re-runs the
+	 * vCPU.  If KVM unconditionally clears the counter on VMRUN, then when
+	 * L1 re-enters L2, the same instruction will trigger a VM-Exit and the
+	 * entire cycle start over.
+	 */
+	if (vmcb02->save.rip && (svm->nested.ctl.bus_lock_rip == vmcb02->save.rip))
+		vmcb02->control.bus_lock_counter = 1;
+	else
+		vmcb02->control.bus_lock_counter = 0;
+
 	/* Done at vmrun: asid.  */
 
 	/* Also overwritten later if necessary.  */
@@ -685,7 +721,7 @@ static void nested_vmcb02_prepare_control(struct vcpu_svm *svm,
 
 	vmcb02->control.tsc_offset = vcpu->arch.tsc_offset;
 
-	if (guest_can_use(vcpu, X86_FEATURE_TSCRATEMSR) &&
+	if (guest_cpu_cap_has(vcpu, X86_FEATURE_TSCRATEMSR) &&
 	    svm->tsc_ratio_msr != kvm_caps.default_tsc_scaling_ratio)
 		nested_svm_update_tsc_ratio_msr(vcpu);
 
@@ -706,7 +742,7 @@ static void nested_vmcb02_prepare_control(struct vcpu_svm *svm,
 	 * what a nrips=0 CPU would do (L1 is responsible for advancing RIP
 	 * prior to injecting the event).
 	 */
-	if (guest_can_use(vcpu, X86_FEATURE_NRIPS))
+	if (guest_cpu_cap_has(vcpu, X86_FEATURE_NRIPS))
 		vmcb02->control.next_rip    = svm->nested.ctl.next_rip;
 	else if (boot_cpu_has(X86_FEATURE_NRIPS))
 		vmcb02->control.next_rip    = vmcb12_rip;
@@ -716,7 +752,7 @@ static void nested_vmcb02_prepare_control(struct vcpu_svm *svm,
 		svm->soft_int_injected = true;
 		svm->soft_int_csbase = vmcb12_csbase;
 		svm->soft_int_old_rip = vmcb12_rip;
-		if (guest_can_use(vcpu, X86_FEATURE_NRIPS))
+		if (guest_cpu_cap_has(vcpu, X86_FEATURE_NRIPS))
 			svm->soft_int_next_rip = svm->nested.ctl.next_rip;
 		else
 			svm->soft_int_next_rip = vmcb12_rip;
@@ -724,18 +760,18 @@ static void nested_vmcb02_prepare_control(struct vcpu_svm *svm,
 
 	vmcb02->control.virt_ext            = vmcb01->control.virt_ext &
 					      LBR_CTL_ENABLE_MASK;
-	if (guest_can_use(vcpu, X86_FEATURE_LBRV))
+	if (guest_cpu_cap_has(vcpu, X86_FEATURE_LBRV))
 		vmcb02->control.virt_ext  |=
 			(svm->nested.ctl.virt_ext & LBR_CTL_ENABLE_MASK);
 
 	if (!nested_vmcb_needs_vls_intercept(svm))
 		vmcb02->control.virt_ext |= VIRTUAL_VMLOAD_VMSAVE_ENABLE_MASK;
 
-	if (guest_can_use(vcpu, X86_FEATURE_PAUSEFILTER))
+	if (guest_cpu_cap_has(vcpu, X86_FEATURE_PAUSEFILTER))
 		pause_count12 = svm->nested.ctl.pause_filter_count;
 	else
 		pause_count12 = 0;
-	if (guest_can_use(vcpu, X86_FEATURE_PFTHRESHOLD))
+	if (guest_cpu_cap_has(vcpu, X86_FEATURE_PFTHRESHOLD))
 		pause_thresh12 = svm->nested.ctl.pause_filter_thresh;
 	else
 		pause_thresh12 = 0;
@@ -757,11 +793,6 @@ static void nested_vmcb02_prepare_control(struct vcpu_svm *svm,
 				vmcb02->control.pause_filter_thresh = 0;
 		}
 	}
-
-	nested_svm_transition_tlb_flush(vcpu);
-
-	/* Enter Guest-Mode */
-	enter_guest_mode(vcpu);
 
 	/*
 	 * Merge guest and host intercepts - must be called with vcpu in
@@ -922,7 +953,7 @@ out_exit_err:
 	nested_svm_vmexit(svm);
 
 out:
-	kvm_vcpu_unmap(vcpu, &map, true);
+	kvm_vcpu_unmap(vcpu, &map);
 
 	return ret;
 }
@@ -990,7 +1021,7 @@ int nested_svm_vmexit(struct vcpu_svm *svm)
 	kvm_clear_request(KVM_REQ_GET_NESTED_STATE_PAGES, vcpu);
 
 	/* in case we halted in L2 */
-	svm->vcpu.arch.mp_state = KVM_MP_STATE_RUNNABLE;
+	kvm_set_mp_state(vcpu, KVM_MP_STATE_RUNNABLE);
 
 	/* Give the current vmcb to the guest */
 
@@ -1022,7 +1053,7 @@ int nested_svm_vmexit(struct vcpu_svm *svm)
 	if (vmcb12->control.exit_code != SVM_EXIT_ERR)
 		nested_save_pending_event_to_vmcb12(svm, vmcb12);
 
-	if (guest_can_use(vcpu, X86_FEATURE_NRIPS))
+	if (guest_cpu_cap_has(vcpu, X86_FEATURE_NRIPS))
 		vmcb12->control.next_rip  = vmcb02->control.next_rip;
 
 	vmcb12->control.int_ctl           = svm->nested.ctl.int_ctl;
@@ -1035,7 +1066,16 @@ int nested_svm_vmexit(struct vcpu_svm *svm)
 
 	}
 
+	/*
+	 * Invalidate bus_lock_rip unless KVM is still waiting for the guest
+	 * to make forward progress before re-enabling bus lock detection.
+	 */
+	if (!vmcb02->control.bus_lock_counter)
+		svm->nested.ctl.bus_lock_rip = INVALID_GPA;
+
 	nested_svm_copy_common_state(svm->nested.vmcb02.ptr, svm->vmcb01.ptr);
+
+	kvm_nested_vmexit_handle_ibrs(vcpu);
 
 	svm_switch_vmcb(svm, &svm->vmcb01);
 
@@ -1061,7 +1101,7 @@ int nested_svm_vmexit(struct vcpu_svm *svm)
 	if (!nested_exit_on_intr(svm))
 		kvm_make_request(KVM_REQ_EVENT, &svm->vcpu);
 
-	if (unlikely(guest_can_use(vcpu, X86_FEATURE_LBRV) &&
+	if (unlikely(guest_cpu_cap_has(vcpu, X86_FEATURE_LBRV) &&
 		     (svm->nested.ctl.virt_ext & LBR_CTL_ENABLE_MASK))) {
 		svm_copy_lbrs(vmcb12, vmcb02);
 		svm_update_lbrv(vcpu);
@@ -1126,7 +1166,7 @@ int nested_svm_vmexit(struct vcpu_svm *svm)
 				       vmcb12->control.exit_int_info_err,
 				       KVM_ISA_SVM);
 
-	kvm_vcpu_unmap(vcpu, &map, true);
+	kvm_vcpu_unmap(vcpu, &map);
 
 	nested_svm_transition_tlb_flush(vcpu);
 
@@ -1181,7 +1221,7 @@ int svm_allocate_nested(struct vcpu_svm *svm)
 	if (svm->nested.initialized)
 		return 0;
 
-	vmcb02_page = alloc_page(GFP_KERNEL_ACCOUNT | __GFP_ZERO);
+	vmcb02_page = snp_safe_alloc_page();
 	if (!vmcb02_page)
 		return -ENOMEM;
 	svm->nested.vmcb02.ptr = page_address(vmcb02_page);
@@ -1693,8 +1733,8 @@ static int svm_set_nested_state(struct kvm_vcpu *vcpu,
 		return -EINVAL;
 
 	ret  = -ENOMEM;
-	ctl  = kzalloc(sizeof(*ctl),  GFP_KERNEL_ACCOUNT);
-	save = kzalloc(sizeof(*save), GFP_KERNEL_ACCOUNT);
+	ctl  = kzalloc(sizeof(*ctl),  GFP_KERNEL);
+	save = kzalloc(sizeof(*save), GFP_KERNEL);
 	if (!ctl || !save)
 		goto out_free;
 

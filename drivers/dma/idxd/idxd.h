@@ -19,7 +19,6 @@
 
 #define IDXD_DRIVER_VERSION	"1.00"
 
-extern struct kmem_cache *idxd_desc_pool;
 extern bool tc_override;
 
 struct idxd_wq;
@@ -124,7 +123,6 @@ struct idxd_pmu {
 
 	struct pmu pmu;
 	char name[IDXD_NAME_SIZE];
-	int cpu;
 
 	int n_counters;
 	int counter_width;
@@ -135,8 +133,6 @@ struct idxd_pmu {
 
 	unsigned long supported_filters;
 	int n_filters;
-
-	struct hlist_node cpuhp_node;
 };
 
 #define IDXD_MAX_PRIORITY	0xf
@@ -174,7 +170,6 @@ struct idxd_cdev {
 
 #define DRIVER_NAME_SIZE		128
 
-#define IDXD_ALLOCATED_BATCH_SIZE	128U
 #define WQ_NAME_SIZE   1024
 #define WQ_TYPE_SIZE   10
 
@@ -282,25 +277,25 @@ typedef int (*load_device_defaults_fn_t) (struct idxd_device *idxd);
 struct idxd_driver_data {
 	const char *name_prefix;
 	enum idxd_type type;
-	struct device_type *dev_type;
+	const struct device_type *dev_type;
 	int compl_size;
 	int align;
 	int evl_cr_off;
 	int cr_status_off;
 	int cr_result_off;
+	bool user_submission_safe;
 	load_device_defaults_fn_t load_device_defaults;
 };
 
 struct idxd_evl {
 	/* Lock to protect event log access. */
-	spinlock_t lock;
+	struct mutex lock;
 	void *log;
 	dma_addr_t dma;
 	/* Total size of event log = number of entries * entry size. */
 	unsigned int log_size;
 	/* The number of entries in the event log. */
 	u16 size;
-	u16 head;
 	unsigned long *bmap;
 	bool batch_fail[IDXD_MAX_BATCH_IDENT];
 };
@@ -375,6 +370,19 @@ struct idxd_device {
 
 	struct dentry *dbgfs_dir;
 	struct dentry *dbgfs_evl_file;
+
+	bool user_submission_safe;
+
+	struct idxd_saved_states *idxd_saved;
+};
+
+struct idxd_saved_states {
+	struct idxd_device saved_idxd;
+	struct idxd_evl saved_evl;
+	struct idxd_engine **saved_engines;
+	struct idxd_wq **saved_wqs;
+	struct idxd_group **saved_groups;
+	unsigned long *saved_wq_enable_map;
 };
 
 static inline unsigned int evl_ent_size(struct idxd_device *idxd)
@@ -516,15 +524,15 @@ static inline void idxd_set_user_intr(struct idxd_device *idxd, bool enable)
 	iowrite32(reg.bits, idxd->reg_base + IDXD_GENCFG_OFFSET);
 }
 
-extern struct bus_type dsa_bus_type;
+extern const struct bus_type dsa_bus_type;
 
 extern bool support_enqcmd;
 extern struct ida idxd_ida;
-extern struct device_type dsa_device_type;
-extern struct device_type iax_device_type;
-extern struct device_type idxd_wq_device_type;
-extern struct device_type idxd_engine_device_type;
-extern struct device_type idxd_group_device_type;
+extern const struct device_type dsa_device_type;
+extern const struct device_type iax_device_type;
+extern const struct device_type idxd_wq_device_type;
+extern const struct device_type idxd_engine_device_type;
+extern const struct device_type idxd_group_device_type;
 
 static inline bool is_dsa_dev(struct idxd_dev *idxd_dev)
 {
@@ -726,8 +734,6 @@ static inline void idxd_desc_complete(struct idxd_desc *desc,
 				   &desc->txd, &status);
 }
 
-int idxd_register_bus_type(void);
-void idxd_unregister_bus_type(void);
 int idxd_register_devices(struct idxd_device *idxd);
 void idxd_unregister_devices(struct idxd_device *idxd);
 void idxd_wqs_quiesce(struct idxd_device *idxd);
@@ -743,6 +749,8 @@ void idxd_unmask_error_interrupts(struct idxd_device *idxd);
 
 /* device control */
 int idxd_device_drv_probe(struct idxd_dev *idxd_dev);
+int idxd_pci_probe_alloc(struct idxd_device *idxd, struct pci_dev *pdev,
+			 const struct pci_device_id *id);
 void idxd_device_drv_remove(struct idxd_dev *idxd_dev);
 int idxd_drv_enable_wq(struct idxd_wq *wq);
 void idxd_drv_disable_wq(struct idxd_wq *wq);
@@ -801,14 +809,10 @@ void idxd_user_counter_increment(struct idxd_wq *wq, u32 pasid, int index);
 int perfmon_pmu_init(struct idxd_device *idxd);
 void perfmon_pmu_remove(struct idxd_device *idxd);
 void perfmon_counter_overflow(struct idxd_device *idxd);
-void perfmon_init(void);
-void perfmon_exit(void);
 #else
 static inline int perfmon_pmu_init(struct idxd_device *idxd) { return 0; }
 static inline void perfmon_pmu_remove(struct idxd_device *idxd) {}
 static inline void perfmon_counter_overflow(struct idxd_device *idxd) {}
-static inline void perfmon_init(void) {}
-static inline void perfmon_exit(void) {}
 #endif
 
 /* debugfs */

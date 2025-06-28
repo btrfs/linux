@@ -9,14 +9,10 @@
 #include <linux/bitops.h>
 #include <linux/err.h>
 #include <linux/platform_device.h>
-#include <linux/property.h>
+#include <linux/mod_devicetable.h>
 #include <linux/module.h>
-#include <linux/of.h>
 #include <linux/clk-provider.h>
 #include <linux/regmap.h>
-#include <linux/reset-controller.h>
-#include <linux/clk.h>
-
 
 #include <dt-bindings/clock/qcom,mmcc-sdm660.h>
 
@@ -96,14 +92,14 @@ static struct clk_alpha_pll mmpll6 =  {
 };
 
 /* APSS controlled PLLs */
-static struct pll_vco vco[] = {
+static const struct pll_vco vco[] = {
 	{ 1000000000, 2000000000, 0 },
 	{ 750000000, 1500000000, 1 },
 	{ 500000000, 1000000000, 2 },
 	{ 250000000, 500000000, 3 },
 };
 
-static struct pll_vco mmpll3_vco[] = {
+static const struct pll_vco mmpll3_vco[] = {
 	{ 750000000, 1500000000, 1 },
 };
 
@@ -2544,7 +2540,7 @@ static struct clk_branch video_core_clk = {
 
 static struct clk_branch video_subcore0_clk = {
 	.halt_reg = 0x1048,
-	.halt_check = BRANCH_HALT,
+	.halt_check = BRANCH_HALT_SKIP,
 	.clkr = {
 		.enable_reg = 0x1048,
 		.enable_mask = BIT(0),
@@ -2847,7 +2843,7 @@ static int mmcc_660_probe(struct platform_device *pdev)
 	clk_alpha_pll_configure(&mmpll8, regmap, &mmpll8_config);
 	clk_alpha_pll_configure(&mmpll10, regmap, &mmpll10_config);
 
-	return qcom_cc_really_probe(pdev, &mmcc_660_desc, regmap);
+	return qcom_cc_really_probe(&pdev->dev, &mmcc_660_desc, regmap);
 }
 
 static struct platform_driver mmcc_660_driver = {

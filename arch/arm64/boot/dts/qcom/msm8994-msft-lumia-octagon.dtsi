@@ -377,7 +377,7 @@
 &blsp2_i2c1 {
 	status = "okay";
 
-	sideinteraction: ad7147_captouch@2c {
+	sideinteraction: touch@2c {
 		compatible = "ad,ad7147_captouch";
 		reg = <0x2c>;
 
@@ -386,11 +386,6 @@
 		pinctrl-1 = <&grip_sleep>;
 
 		interrupts = <&tlmm 96 IRQ_TYPE_EDGE_FALLING>;
-
-		button_num = <8>;
-		touchpad_num = <0>;
-		wheel_num = <0>;
-		slider_num = <0>;
 
 		vcc-supply = <&vreg_l18a_2p85>;
 	};

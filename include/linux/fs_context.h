@@ -144,8 +144,6 @@ extern void put_fs_context(struct fs_context *fc);
 extern int vfs_parse_fs_param_source(struct fs_context *fc,
 				     struct fs_parameter *param);
 extern void fc_drop_locked(struct fs_context *fc);
-int reconfigure_single(struct super_block *s,
-		       int flags, void *data);
 
 extern int get_tree_nodev(struct fs_context *fc,
 			 int (*fill_super)(struct super_block *sb,
@@ -160,6 +158,12 @@ extern int get_tree_keyed(struct fs_context *fc,
 
 int setup_bdev_super(struct super_block *sb, int sb_flags,
 		struct fs_context *fc);
+
+#define GET_TREE_BDEV_QUIET_LOOKUP		0x0001
+int get_tree_bdev_flags(struct fs_context *fc,
+		int (*fill_super)(struct super_block *sb,
+				  struct fs_context *fc), unsigned int flags);
+
 extern int get_tree_bdev(struct fs_context *fc,
 			       int (*fill_super)(struct super_block *sb,
 						 struct fs_context *fc));

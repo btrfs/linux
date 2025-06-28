@@ -89,7 +89,7 @@ static int wm831x_wall_get_prop(struct power_supply *psy,
 	return ret;
 }
 
-static enum power_supply_property wm831x_wall_props[] = {
+static const enum power_supply_property wm831x_wall_props[] = {
 	POWER_SUPPLY_PROP_ONLINE,
 	POWER_SUPPLY_PROP_VOLTAGE_NOW,
 };
@@ -120,7 +120,7 @@ static int wm831x_usb_get_prop(struct power_supply *psy,
 	return ret;
 }
 
-static enum power_supply_property wm831x_usb_props[] = {
+static const enum power_supply_property wm831x_usb_props[] = {
 	POWER_SUPPLY_PROP_ONLINE,
 	POWER_SUPPLY_PROP_VOLTAGE_NOW,
 };
@@ -171,21 +171,21 @@ struct chg_map {
 	int reg_val;
 };
 
-static struct chg_map trickle_ilims[] = {
+static const struct chg_map trickle_ilims[] = {
 	{  50, 0 << WM831X_CHG_TRKL_ILIM_SHIFT },
 	{ 100, 1 << WM831X_CHG_TRKL_ILIM_SHIFT },
 	{ 150, 2 << WM831X_CHG_TRKL_ILIM_SHIFT },
 	{ 200, 3 << WM831X_CHG_TRKL_ILIM_SHIFT },
 };
 
-static struct chg_map vsels[] = {
+static const struct chg_map vsels[] = {
 	{ 4050, 0 << WM831X_CHG_VSEL_SHIFT },
 	{ 4100, 1 << WM831X_CHG_VSEL_SHIFT },
 	{ 4150, 2 << WM831X_CHG_VSEL_SHIFT },
 	{ 4200, 3 << WM831X_CHG_VSEL_SHIFT },
 };
 
-static struct chg_map fast_ilims[] = {
+static const struct chg_map fast_ilims[] = {
 	{    0,  0 << WM831X_CHG_FAST_ILIM_SHIFT },
 	{   50,  1 << WM831X_CHG_FAST_ILIM_SHIFT },
 	{  100,  2 << WM831X_CHG_FAST_ILIM_SHIFT },
@@ -204,7 +204,7 @@ static struct chg_map fast_ilims[] = {
 	{ 1000, 15 << WM831X_CHG_FAST_ILIM_SHIFT },
 };
 
-static struct chg_map eoc_iterms[] = {
+static const struct chg_map eoc_iterms[] = {
 	{ 20, 0 << WM831X_CHG_ITERM_SHIFT },
 	{ 30, 1 << WM831X_CHG_ITERM_SHIFT },
 	{ 40, 2 << WM831X_CHG_ITERM_SHIFT },
@@ -215,7 +215,7 @@ static struct chg_map eoc_iterms[] = {
 	{ 90, 7 << WM831X_CHG_ITERM_SHIFT },
 };
 
-static struct chg_map chg_times[] = {
+static const struct chg_map chg_times[] = {
 	{  60,  0 << WM831X_CHG_TIME_SHIFT },
 	{  90,  1 << WM831X_CHG_TIME_SHIFT },
 	{ 120,  2 << WM831X_CHG_TIME_SHIFT },
@@ -235,7 +235,7 @@ static struct chg_map chg_times[] = {
 };
 
 static void wm831x_battery_apply_config(struct wm831x *wm831x,
-				       struct chg_map *map, int count, int val,
+				       const struct chg_map *map, int count, int val,
 				       int *reg, const char *name,
 				       const char *units)
 {
@@ -462,7 +462,7 @@ static int wm831x_bat_get_prop(struct power_supply *psy,
 	return ret;
 }
 
-static enum power_supply_property wm831x_bat_props[] = {
+static const enum power_supply_property wm831x_bat_props[] = {
 	POWER_SUPPLY_PROP_STATUS,
 	POWER_SUPPLY_PROP_ONLINE,
 	POWER_SUPPLY_PROP_VOLTAGE_NOW,
@@ -470,7 +470,7 @@ static enum power_supply_property wm831x_bat_props[] = {
 	POWER_SUPPLY_PROP_CHARGE_TYPE,
 };
 
-static const char *wm831x_bat_irqs[] = {
+static const char * const wm831x_bat_irqs[] = {
 	"BATT HOT",
 	"BATT COLD",
 	"BATT FAIL",
@@ -570,8 +570,9 @@ static int wm831x_power_probe(struct platform_device *pdev)
 	power->wall_desc.properties = wm831x_wall_props;
 	power->wall_desc.num_properties = ARRAY_SIZE(wm831x_wall_props);
 	power->wall_desc.get_property = wm831x_wall_get_prop;
-	power->wall = power_supply_register(&pdev->dev, &power->wall_desc,
-					    NULL);
+	power->wall = devm_power_supply_register(&pdev->dev,
+						 &power->wall_desc,
+						 NULL);
 	if (IS_ERR(power->wall)) {
 		ret = PTR_ERR(power->wall);
 		goto err;
@@ -582,7 +583,9 @@ static int wm831x_power_probe(struct platform_device *pdev)
 	power->usb_desc.properties = wm831x_usb_props;
 	power->usb_desc.num_properties = ARRAY_SIZE(wm831x_usb_props);
 	power->usb_desc.get_property = wm831x_usb_get_prop;
-	power->usb = power_supply_register(&pdev->dev, &power->usb_desc, NULL);
+	power->usb = devm_power_supply_register(&pdev->dev,
+						&power->usb_desc,
+						NULL);
 	if (IS_ERR(power->usb)) {
 		ret = PTR_ERR(power->usb);
 		goto err_wall;
@@ -599,9 +602,9 @@ static int wm831x_power_probe(struct platform_device *pdev)
 		power->battery_desc.num_properties = ARRAY_SIZE(wm831x_bat_props);
 		power->battery_desc.get_property = wm831x_bat_get_prop;
 		power->battery_desc.use_for_apm = 1;
-		power->battery = power_supply_register(&pdev->dev,
-						       &power->battery_desc,
-						       NULL);
+		power->battery = devm_power_supply_register(&pdev->dev,
+							    &power->battery_desc,
+							    NULL);
 		if (IS_ERR(power->battery)) {
 			ret = PTR_ERR(power->battery);
 			goto err_usb;
@@ -684,12 +687,8 @@ err_syslo:
 	irq = wm831x_irq(wm831x, platform_get_irq_byname(pdev, "SYSLO"));
 	free_irq(irq, power);
 err_battery:
-	if (power->have_battery)
-		power_supply_unregister(power->battery);
 err_usb:
-	power_supply_unregister(power->usb);
 err_wall:
-	power_supply_unregister(power->wall);
 err:
 	return ret;
 }
@@ -717,16 +716,11 @@ static void wm831x_power_remove(struct platform_device *pdev)
 
 	irq = wm831x_irq(wm831x, platform_get_irq_byname(pdev, "SYSLO"));
 	free_irq(irq, wm831x_power);
-
-	if (wm831x_power->have_battery)
-		power_supply_unregister(wm831x_power->battery);
-	power_supply_unregister(wm831x_power->wall);
-	power_supply_unregister(wm831x_power->usb);
 }
 
 static struct platform_driver wm831x_power_driver = {
 	.probe = wm831x_power_probe,
-	.remove_new = wm831x_power_remove,
+	.remove = wm831x_power_remove,
 	.driver = {
 		.name = "wm831x-power",
 	},

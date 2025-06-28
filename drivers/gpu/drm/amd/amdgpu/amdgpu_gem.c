@@ -36,14 +36,122 @@
 #include <drm/drm_exec.h>
 #include <drm/drm_gem_ttm_helper.h>
 #include <drm/ttm/ttm_tt.h>
+#include <drm/drm_syncobj.h>
 
 #include "amdgpu.h"
 #include "amdgpu_display.h"
 #include "amdgpu_dma_buf.h"
 #include "amdgpu_hmm.h"
 #include "amdgpu_xgmi.h"
+#include "amdgpu_vm.h"
 
-static const struct drm_gem_object_funcs amdgpu_gem_object_funcs;
+static int
+amdgpu_gem_add_input_fence(struct drm_file *filp,
+			   uint64_t syncobj_handles_array,
+			   uint32_t num_syncobj_handles)
+{
+	struct dma_fence *fence;
+	uint32_t *syncobj_handles;
+	int ret, i;
+
+	if (!num_syncobj_handles)
+		return 0;
+
+	syncobj_handles = memdup_user(u64_to_user_ptr(syncobj_handles_array),
+				      size_mul(sizeof(uint32_t), num_syncobj_handles));
+	if (IS_ERR(syncobj_handles))
+		return PTR_ERR(syncobj_handles);
+
+	for (i = 0; i < num_syncobj_handles; i++) {
+
+		if (!syncobj_handles[i]) {
+			ret = -EINVAL;
+			goto free_memdup;
+		}
+
+		ret = drm_syncobj_find_fence(filp, syncobj_handles[i], 0, 0, &fence);
+		if (ret)
+			goto free_memdup;
+
+		dma_fence_wait(fence, false);
+
+		/* TODO: optimize async handling */
+		dma_fence_put(fence);
+	}
+
+free_memdup:
+	kfree(syncobj_handles);
+	return ret;
+}
+
+static int
+amdgpu_gem_update_timeline_node(struct drm_file *filp,
+				uint32_t syncobj_handle,
+				uint64_t point,
+				struct drm_syncobj **syncobj,
+				struct dma_fence_chain **chain)
+{
+	if (!syncobj_handle)
+		return 0;
+
+	/* Find the sync object */
+	*syncobj = drm_syncobj_find(filp, syncobj_handle);
+	if (!*syncobj)
+		return -ENOENT;
+
+	if (!point)
+		return 0;
+
+	/* Allocate the chain node */
+	*chain = dma_fence_chain_alloc();
+	if (!*chain) {
+		drm_syncobj_put(*syncobj);
+		return -ENOMEM;
+	}
+
+	return 0;
+}
+
+static void
+amdgpu_gem_update_bo_mapping(struct drm_file *filp,
+			     struct amdgpu_bo_va *bo_va,
+			     uint32_t operation,
+			     uint64_t point,
+			     struct dma_fence *fence,
+			     struct drm_syncobj *syncobj,
+			     struct dma_fence_chain *chain)
+{
+	struct amdgpu_bo *bo = bo_va ? bo_va->base.bo : NULL;
+	struct amdgpu_fpriv *fpriv = filp->driver_priv;
+	struct amdgpu_vm *vm = &fpriv->vm;
+	struct dma_fence *last_update;
+
+	if (!syncobj)
+		return;
+
+	/* Find the last update fence */
+	switch (operation) {
+	case AMDGPU_VA_OP_MAP:
+	case AMDGPU_VA_OP_REPLACE:
+		if (bo && (bo->tbo.base.resv == vm->root.bo->tbo.base.resv))
+			last_update = vm->last_update;
+		else
+			last_update = bo_va->last_pt_update;
+		break;
+	case AMDGPU_VA_OP_UNMAP:
+	case AMDGPU_VA_OP_CLEAR:
+		last_update = fence;
+		break;
+	default:
+		return;
+	}
+
+	/* Add fence to timeline */
+	if (!point)
+		drm_syncobj_replace_fence(syncobj, last_update);
+	else
+		drm_syncobj_add_point(syncobj, chain, last_update, point);
+}
 
 static vm_fault_t amdgpu_gem_fault(struct vm_fault *vmf)
 {
@@ -87,12 +195,10 @@ static const struct vm_operations_struct amdgpu_gem_vm_ops = {
 
 static void amdgpu_gem_object_free(struct drm_gem_object *gobj)
 {
-	struct amdgpu_bo *robj = gem_to_amdgpu_bo(gobj);
+	struct amdgpu_bo *aobj = gem_to_amdgpu_bo(gobj);
 
-	if (robj) {
-		amdgpu_hmm_unregister(robj);
-		amdgpu_bo_unref(&robj);
-	}
+	amdgpu_hmm_unregister(aobj);
+	ttm_bo_put(&aobj->tbo);
 }
 
 int amdgpu_gem_object_create(struct amdgpu_device *adev, unsigned long size,
@@ -108,6 +214,7 @@ int amdgpu_gem_object_create(struct amdgpu_device *adev, unsigned long size,
 
 	memset(&bp, 0, sizeof(bp));
 	*obj = NULL;
+	flags |= AMDGPU_GEM_CREATE_VRAM_WIPE_ON_RELEASE;
 
 	bp.size = size;
 	bp.byte_align = alignment;
@@ -125,7 +232,6 @@ int amdgpu_gem_object_create(struct amdgpu_device *adev, unsigned long size,
 
 	bo = &ubo->bo;
 	*obj = &bo->tbo.base;
-	(*obj)->funcs = &amdgpu_gem_object_funcs;
 
 	return 0;
 }
@@ -174,20 +280,63 @@ static int amdgpu_gem_object_open(struct drm_gem_object *obj,
 		return -EPERM;
 
 	if (abo->flags & AMDGPU_GEM_CREATE_VM_ALWAYS_VALID &&
-	    abo->tbo.base.resv != vm->root.bo->tbo.base.resv)
+	    !amdgpu_vm_is_bo_always_valid(vm, abo))
 		return -EPERM;
 
 	r = amdgpu_bo_reserve(abo, false);
 	if (r)
 		return r;
 
+	amdgpu_vm_bo_update_shared(abo);
 	bo_va = amdgpu_vm_bo_find(vm, abo);
 	if (!bo_va)
 		bo_va = amdgpu_vm_bo_add(adev, vm, abo);
 	else
 		++bo_va->ref_count;
+
+	/* attach gfx eviction fence */
+	r = amdgpu_eviction_fence_attach(&fpriv->evf_mgr, abo);
+	if (r) {
+		DRM_DEBUG_DRIVER("Failed to attach eviction fence to BO\n");
+		amdgpu_bo_unreserve(abo);
+		return r;
+	}
+
 	amdgpu_bo_unreserve(abo);
-	return 0;
+
+	/* Validate and add eviction fence to DMABuf imports with dynamic
+	 * attachment in compute VMs. Re-validation will be done by
+	 * amdgpu_vm_validate. Fences are on the reservation shared with the
+	 * export, which is currently required to be validated and fenced
+	 * already by amdgpu_amdkfd_gpuvm_restore_process_bos.
+	 *
+	 * Nested locking below for the case that a GEM object is opened in
+	 * kfd_mem_export_dmabuf. Since the lock below is only taken for imports,
+	 * but not for export, this is a different lock class that cannot lead to
+	 * circular lock dependencies.
+	 */
+	if (!vm->is_compute_context || !vm->process_info)
+		return 0;
+	if (!obj->import_attach ||
+	    !dma_buf_is_dynamic(obj->import_attach->dmabuf))
+		return 0;
+	mutex_lock_nested(&vm->process_info->lock, 1);
+	if (!WARN_ON(!vm->process_info->eviction_fence)) {
+		r = amdgpu_amdkfd_bo_validate_and_fence(abo, AMDGPU_GEM_DOMAIN_GTT,
+							&vm->process_info->eviction_fence->base);
+		if (r) {
+			struct amdgpu_task_info *ti = amdgpu_vm_get_task_info_vm(vm);
+
+			dev_warn(adev->dev, "validate_and_fence failed: %d\n", r);
+			if (ti) {
+				dev_warn(adev->dev, "pid %d\n", ti->pid);
+				amdgpu_vm_put_task_info(ti);
+			}
+		}
+	}
+	mutex_unlock(&vm->process_info->lock);
+
+	return r;
 }
 
 static void amdgpu_gem_object_close(struct drm_gem_object *obj,
@@ -216,11 +365,15 @@ static void amdgpu_gem_object_close(struct drm_gem_object *obj,
 			goto out_unlock;
 	}
 
+	if (!amdgpu_vm_is_bo_always_valid(vm, bo))
+		amdgpu_eviction_fence_detach(&fpriv->evf_mgr, bo);
+
 	bo_va = amdgpu_vm_bo_find(vm, bo);
 	if (!bo_va || --bo_va->ref_count)
 		goto out_unlock;
 
 	amdgpu_vm_bo_del(adev, bo_va);
+	amdgpu_vm_bo_update_shared(bo);
 	if (!amdgpu_vm_ready(vm))
 		goto out_unlock;
 
@@ -261,7 +414,7 @@ static int amdgpu_gem_object_mmap(struct drm_gem_object *obj, struct vm_area_str
 	return drm_gem_ttm_mmap(obj, vma);
 }
 
-static const struct drm_gem_object_funcs amdgpu_gem_object_funcs = {
+const struct drm_gem_object_funcs amdgpu_gem_object_funcs = {
 	.free = amdgpu_gem_object_free,
 	.open = amdgpu_gem_object_open,
 	.close = amdgpu_gem_object_close,
@@ -289,10 +442,6 @@ int amdgpu_gem_create_ioctl(struct drm_device *dev, void *data,
 	uint32_t handle, initial_domain;
 	int r;
 
-	/* reject DOORBELLs until userspace code to use it is available */
-	if (args->in.domains & AMDGPU_GEM_DOMAIN_DOORBELL)
-		return -EINVAL;
-
 	/* reject invalid gem flags */
 	if (flags & ~(AMDGPU_GEM_CREATE_CPU_ACCESS_REQUIRED |
 		      AMDGPU_GEM_CREATE_NO_CPU_ACCESS |
@@ -301,6 +450,7 @@ int amdgpu_gem_create_ioctl(struct drm_device *dev, void *data,
 		      AMDGPU_GEM_CREATE_VM_ALWAYS_VALID |
 		      AMDGPU_GEM_CREATE_EXPLICIT_SYNC |
 		      AMDGPU_GEM_CREATE_ENCRYPTED |
+		      AMDGPU_GEM_CREATE_GFX12_DCC |
 		      AMDGPU_GEM_CREATE_DISCARDABLE))
 		return -EINVAL;
 
@@ -312,6 +462,9 @@ int amdgpu_gem_create_ioctl(struct drm_device *dev, void *data,
 		DRM_NOTE_ONCE("Cannot allocate secure buffer since TMZ is disabled\n");
 		return -EINVAL;
 	}
+
+	/* always clear VRAM */
+	flags |= AMDGPU_GEM_CREATE_VRAM_CLEARED;
 
 	/* create a gem object to contain this object in */
 	if (args->in.domains & (AMDGPU_GEM_DOMAIN_GDS |
@@ -602,18 +755,23 @@ out:
  *
  * Update the bo_va directly after setting its address. Errors are not
  * vital here, so they are not reported back to userspace.
+ *
+ * Returns resulting fence if freed BO(s) got cleared from the PT.
+ * otherwise stub fence in case of error.
  */
-static void amdgpu_gem_va_update_vm(struct amdgpu_device *adev,
-				    struct amdgpu_vm *vm,
-				    struct amdgpu_bo_va *bo_va,
-				    uint32_t operation)
+static struct dma_fence *
+amdgpu_gem_va_update_vm(struct amdgpu_device *adev,
+			struct amdgpu_vm *vm,
+			struct amdgpu_bo_va *bo_va,
+			uint32_t operation)
 {
+	struct dma_fence *fence = dma_fence_get_stub();
 	int r;
 
 	if (!amdgpu_vm_ready(vm))
-		return;
+		return fence;
 
-	r = amdgpu_vm_clear_freed(adev, vm, NULL);
+	r = amdgpu_vm_clear_freed(adev, vm, &fence);
 	if (r)
 		goto error;
 
@@ -629,6 +787,8 @@ static void amdgpu_gem_va_update_vm(struct amdgpu_device *adev,
 error:
 	if (r && r != -ERESTARTSYS)
 		DRM_ERROR("Couldn't update BO_VA (%d)\n", r);
+
+	return fence;
 }
 
 /**
@@ -650,7 +810,7 @@ uint64_t amdgpu_gem_va_map_flags(struct amdgpu_device *adev, uint32_t flags)
 	if (flags & AMDGPU_VM_PAGE_WRITEABLE)
 		pte_flag |= AMDGPU_PTE_WRITEABLE;
 	if (flags & AMDGPU_VM_PAGE_PRT)
-		pte_flag |= AMDGPU_PTE_PRT;
+		pte_flag |= AMDGPU_PTE_PRT_FLAG(adev);
 	if (flags & AMDGPU_VM_PAGE_NOALLOC)
 		pte_flag |= AMDGPU_PTE_NOALLOC;
 
@@ -677,15 +837,18 @@ int amdgpu_gem_va_ioctl(struct drm_device *dev, void *data,
 	struct amdgpu_fpriv *fpriv = filp->driver_priv;
 	struct amdgpu_bo *abo;
 	struct amdgpu_bo_va *bo_va;
+	struct drm_syncobj *timeline_syncobj = NULL;
+	struct dma_fence_chain *timeline_chain = NULL;
+	struct dma_fence *fence;
 	struct drm_exec exec;
 	uint64_t va_flags;
 	uint64_t vm_size;
 	int r = 0;
 
-	if (args->va_address < AMDGPU_VA_RESERVED_SIZE) {
+	if (args->va_address < AMDGPU_VA_RESERVED_BOTTOM) {
 		dev_dbg(dev->dev,
 			"va_address 0x%llx is in reserved area 0x%llx\n",
-			args->va_address, AMDGPU_VA_RESERVED_SIZE);
+			args->va_address, AMDGPU_VA_RESERVED_BOTTOM);
 		return -EINVAL;
 	}
 
@@ -701,7 +864,7 @@ int amdgpu_gem_va_ioctl(struct drm_device *dev, void *data,
 	args->va_address &= AMDGPU_GMC_HOLE_MASK;
 
 	vm_size = adev->vm_manager.max_pfn * AMDGPU_GPU_PAGE_SIZE;
-	vm_size -= AMDGPU_VA_RESERVED_SIZE;
+	vm_size -= AMDGPU_VA_RESERVED_TOP;
 	if (args->va_address + args->map_size > vm_size) {
 		dev_dbg(dev->dev,
 			"va_address 0x%llx is in top reserved area 0x%llx\n",
@@ -738,6 +901,12 @@ int amdgpu_gem_va_ioctl(struct drm_device *dev, void *data,
 		abo = NULL;
 	}
 
+	r = amdgpu_gem_add_input_fence(filp,
+				       args->input_fence_syncobj_handles,
+				       args->num_syncobj_handles);
+	if (r)
+		goto error_put_gobj;
+
 	drm_exec_init(&exec, DRM_EXEC_INTERRUPTIBLE_WAIT |
 		      DRM_EXEC_IGNORE_DUPLICATES, 0);
 	drm_exec_until_all_locked(&exec) {
@@ -766,6 +935,14 @@ int amdgpu_gem_va_ioctl(struct drm_device *dev, void *data,
 		bo_va = NULL;
 	}
 
+	r = amdgpu_gem_update_timeline_node(filp,
+					    args->vm_timeline_syncobj_out,
+					    args->vm_timeline_point,
+					    &timeline_syncobj,
+					    &timeline_chain);
+	if (r)
+		goto error;
+
 	switch (args->operation) {
 	case AMDGPU_VA_OP_MAP:
 		va_flags = amdgpu_gem_va_map_flags(adev, args->flags);
@@ -791,12 +968,24 @@ int amdgpu_gem_va_ioctl(struct drm_device *dev, void *data,
 	default:
 		break;
 	}
-	if (!r && !(args->flags & AMDGPU_VM_DELAY_UPDATE) && !adev->debug_vm)
-		amdgpu_gem_va_update_vm(adev, &fpriv->vm, bo_va,
-					args->operation);
+	if (!r && !(args->flags & AMDGPU_VM_DELAY_UPDATE) && !adev->debug_vm) {
+		fence = amdgpu_gem_va_update_vm(adev, &fpriv->vm, bo_va,
+						args->operation);
+
+		if (timeline_syncobj)
+			amdgpu_gem_update_bo_mapping(filp, bo_va,
+					     args->operation,
+					     args->vm_timeline_point,
+					     fence, timeline_syncobj,
+					     timeline_chain);
+		else
+			dma_fence_put(fence);
+
+	}
 
 error:
 	drm_exec_fini(&exec);
+error_put_gobj:
 	drm_gem_object_put(gobj);
 	return r;
 }
@@ -804,7 +993,6 @@ error:
 int amdgpu_gem_op_ioctl(struct drm_device *dev, void *data,
 			struct drm_file *filp)
 {
-	struct amdgpu_device *adev = drm_to_adev(dev);
 	struct drm_amdgpu_gem_op *args = data;
 	struct drm_gem_object *gobj;
 	struct amdgpu_vm_bo_base *base;
@@ -864,7 +1052,7 @@ int amdgpu_gem_op_ioctl(struct drm_device *dev, void *data,
 			robj->allowed_domains |= AMDGPU_GEM_DOMAIN_GTT;
 
 		if (robj->flags & AMDGPU_GEM_CREATE_VM_ALWAYS_VALID)
-			amdgpu_vm_bo_invalidate(adev, robj, true);
+			amdgpu_vm_bo_invalidate(robj, true);
 
 		amdgpu_bo_unreserve(robj);
 		break;

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 //
-// Copyright(c) 2021-2022 Intel Corporation. All rights reserved.
+// Copyright(c) 2021-2022 Intel Corporation
 //
 // Authors: Cezary Rojewski <cezary.rojewski@intel.com>
 //          Amadeusz Slawinski <amadeuszx.slawinski@linux.intel.com>
@@ -36,7 +36,8 @@ static int avs_probe_mb_probe(struct platform_device *pdev)
 	if (!card)
 		return -ENOMEM;
 
-	card->name = "avs_probe_mb";
+	card->driver_name = "avs_probe_mb";
+	card->long_name = card->name = "AVS PROBE";
 	card->dev = dev;
 	card->owner = THIS_MODULE;
 	card->dai_link = probe_mb_dai_links;
@@ -47,7 +48,7 @@ static int avs_probe_mb_probe(struct platform_device *pdev)
 	if (ret)
 		return ret;
 
-	return devm_snd_soc_register_card(dev, card);
+	return devm_snd_soc_register_deferrable_card(dev, card);
 }
 
 static const struct platform_device_id avs_probe_mb_driver_ids[] = {
@@ -69,4 +70,5 @@ static struct platform_driver avs_probe_mb_driver = {
 
 module_platform_driver(avs_probe_mb_driver);
 
+MODULE_DESCRIPTION("Intel probe machine driver");
 MODULE_LICENSE("GPL");

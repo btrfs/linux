@@ -250,6 +250,8 @@ static int cifs_debug_files_proc_show(struct seq_file *m, void *v)
 	spin_lock(&cifs_tcp_ses_lock);
 	list_for_each_entry(server, &cifs_tcp_ses_list, tcp_ses_list) {
 		list_for_each_entry(ses, &server->smb_ses_list, smb_ses_list) {
+			if (cifs_ses_exiting(ses))
+				continue;
 			list_for_each_entry(tcon, &ses->tcon_list, tcon_list) {
 				spin_lock(&tcon->open_file_lock);
 				list_for_each_entry(cfile, &tcon->openFileList, tlist) {
@@ -276,6 +278,24 @@ static int cifs_debug_files_proc_show(struct seq_file *m, void *v)
 	spin_unlock(&cifs_tcp_ses_lock);
 	seq_putc(m, '\n');
 	return 0;
+}
+
+static __always_inline const char *compression_alg_str(__le16 alg)
+{
+	switch (alg) {
+	case SMB3_COMPRESS_NONE:
+		return "NONE";
+	case SMB3_COMPRESS_LZNT1:
+		return "LZNT1";
+	case SMB3_COMPRESS_LZ77:
+		return "LZ77";
+	case SMB3_COMPRESS_LZ77_HUFF:
+		return "LZ77-Huffman";
+	case SMB3_COMPRESS_PATTERN:
+		return "Pattern_V1";
+	default:
+		return "invalid";
+	}
 }
 
 static int cifs_debug_data_proc_show(struct seq_file *m, void *v)
@@ -330,6 +350,9 @@ static int cifs_debug_data_proc_show(struct seq_file *m, void *v)
 #ifdef CONFIG_CIFS_SWN_UPCALL
 	seq_puts(m, ",WITNESS");
 #endif
+#ifdef CONFIG_CIFS_COMPRESSION
+	seq_puts(m, ",COMPRESSION");
+#endif
 	seq_putc(m, '\n');
 	seq_printf(m, "CIFSMaxBufSize: %d\n", CIFSMaxBufSize);
 	seq_printf(m, "Active VFS Requests: %d\n", GlobalTotalActiveXid);
@@ -339,6 +362,10 @@ static int cifs_debug_data_proc_show(struct seq_file *m, void *v)
 	c = 0;
 	spin_lock(&cifs_tcp_ses_lock);
 	list_for_each_entry(server, &cifs_tcp_ses_list, tcp_ses_list) {
+#ifdef CONFIG_CIFS_SMB_DIRECT
+		struct smbdirect_socket_parameters *sp;
+#endif
+
 		/* channel info will be printed as a part of sessions below */
 		if (SERVER_IS_CHAN(server))
 			continue;
@@ -360,25 +387,26 @@ static int cifs_debug_data_proc_show(struct seq_file *m, void *v)
 			seq_printf(m, "\nSMBDirect transport not available");
 			goto skip_rdma;
 		}
+		sp = &server->smbd_conn->socket.parameters;
 
 		seq_printf(m, "\nSMBDirect (in hex) protocol version: %x "
 			"transport status: %x",
 			server->smbd_conn->protocol,
-			server->smbd_conn->transport_status);
+			server->smbd_conn->socket.status);
 		seq_printf(m, "\nConn receive_credit_max: %x "
 			"send_credit_target: %x max_send_size: %x",
-			server->smbd_conn->receive_credit_max,
-			server->smbd_conn->send_credit_target,
-			server->smbd_conn->max_send_size);
+			sp->recv_credit_max,
+			sp->send_credit_target,
+			sp->max_send_size);
 		seq_printf(m, "\nConn max_fragmented_recv_size: %x "
 			"max_fragmented_send_size: %x max_receive_size:%x",
-			server->smbd_conn->max_fragmented_recv_size,
-			server->smbd_conn->max_fragmented_send_size,
-			server->smbd_conn->max_receive_size);
+			sp->max_fragmented_recv_size,
+			sp->max_fragmented_send_size,
+			sp->max_recv_size);
 		seq_printf(m, "\nConn keep_alive_interval: %x "
 			"max_readwrite_size: %x rdma_readwrite_threshold: %x",
-			server->smbd_conn->keep_alive_interval,
-			server->smbd_conn->max_readwrite_size,
+			sp->keepalive_interval_msec * 1000,
+			sp->max_read_write_size,
 			server->smbd_conn->rdma_readwrite_threshold);
 		seq_printf(m, "\nDebug count_get_receive_buffer: %x "
 			"count_put_receive_buffer: %x count_send_empty: %x",
@@ -423,12 +451,6 @@ skip_rdma:
 			server->echo_credits,
 			server->oplock_credits,
 			server->dialect);
-		if (server->compress_algorithm == SMB3_COMPRESS_LZNT1)
-			seq_printf(m, " COMPRESS_LZNT1");
-		else if (server->compress_algorithm == SMB3_COMPRESS_LZ77)
-			seq_printf(m, " COMPRESS_LZ77");
-		else if (server->compress_algorithm == SMB3_COMPRESS_LZ77_HUFF)
-			seq_printf(m, " COMPRESS_LZ77_HUFF");
 		if (server->sign)
 			seq_printf(m, " signed");
 		if (server->posix_ext_supported)
@@ -460,6 +482,16 @@ skip_rdma:
 				   server->leaf_fullpath);
 		}
 
+		seq_puts(m, "\nCompression: ");
+		if (!IS_ENABLED(CONFIG_CIFS_COMPRESSION))
+			seq_puts(m, "no built-in support");
+		else if (!server->compression.requested)
+			seq_puts(m, "disabled on mount");
+		else if (server->compression.enabled)
+			seq_printf(m, "enabled (%s)", compression_alg_str(server->compression.alg));
+		else
+			seq_puts(m, "disabled (not supported by this server)");
+
 		seq_printf(m, "\n\n\tSessions: ");
 		i = 0;
 		list_for_each_entry(ses, &server->smb_ses_list, smb_ses_list) {
@@ -488,6 +520,8 @@ skip_rdma:
 				ses->ses_count, ses->serverOS, ses->serverNOS,
 				ses->capabilities, ses->ses_status);
 			}
+			if (ses->expired_pwd)
+				seq_puts(m, "password no longer valid ");
 			spin_unlock(&ses->ses_lock);
 
 			seq_printf(m, "\n\tSecurity type: %s ",
@@ -654,6 +688,8 @@ static ssize_t cifs_stats_proc_write(struct file *file,
 			}
 #endif /* CONFIG_CIFS_STATS2 */
 			list_for_each_entry(ses, &server->smb_ses_list, smb_ses_list) {
+				if (cifs_ses_exiting(ses))
+					continue;
 				list_for_each_entry(tcon, &ses->tcon_list, tcon_list) {
 					atomic_set(&tcon->num_smbs_sent, 0);
 					spin_lock(&tcon->stat_lock);
@@ -733,6 +769,8 @@ static int cifs_stats_proc_show(struct seq_file *m, void *v)
 			}
 #endif /* STATS2 */
 		list_for_each_entry(ses, &server->smb_ses_list, smb_ses_list) {
+			if (cifs_ses_exiting(ses))
+				continue;
 			list_for_each_entry(tcon, &ses->tcon_list, tcon_list) {
 				i++;
 				seq_printf(m, "\n%d) %s", i, tcon->tree_name);
@@ -1044,7 +1082,7 @@ static int cifs_security_flags_proc_open(struct inode *inode, struct file *file)
 static void
 cifs_security_flags_handle_must_flags(unsigned int *flags)
 {
-	unsigned int signflags = *flags & CIFSSEC_MUST_SIGN;
+	unsigned int signflags = *flags & (CIFSSEC_MUST_SIGN | CIFSSEC_MUST_SEAL);
 
 	if ((*flags & CIFSSEC_MUST_KRB5) == CIFSSEC_MUST_KRB5)
 		*flags = CIFSSEC_MUST_KRB5;
@@ -1067,7 +1105,7 @@ static ssize_t cifs_security_flags_proc_write(struct file *file,
 	if ((count < 1) || (count > 11))
 		return -EINVAL;
 
-	memset(flags_string, 0, 12);
+	memset(flags_string, 0, sizeof(flags_string));
 
 	if (copy_from_user(flags_string, buffer, count))
 		return -EFAULT;

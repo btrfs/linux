@@ -818,7 +818,9 @@ static void log_writes_status(struct dm_target *ti, status_type_t type,
 }
 
 static int log_writes_prepare_ioctl(struct dm_target *ti,
-				    struct block_device **bdev)
+				    struct block_device **bdev,
+				    unsigned int cmd, unsigned long arg,
+				    bool *forward)
 {
 	struct log_writes_c *lc = ti->private;
 	struct dm_dev *dev = lc->dev;
@@ -871,7 +873,7 @@ static void log_writes_io_hints(struct dm_target *ti, struct queue_limits *limit
 	if (!bdev_max_discard_sectors(lc->dev->bdev)) {
 		lc->device_supports_discard = false;
 		limits->discard_granularity = lc->sectorsize;
-		limits->max_discard_sectors = (UINT_MAX >> SECTOR_SHIFT);
+		limits->max_hw_discard_sectors = (UINT_MAX >> SECTOR_SHIFT);
 	}
 	limits->logical_block_size = bdev_logical_block_size(lc->dev->bdev);
 	limits->physical_block_size = bdev_physical_block_size(lc->dev->bdev);

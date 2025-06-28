@@ -95,6 +95,28 @@ static inline bool sg_is_last(struct scatterlist *sg)
 }
 
 /**
+ * sg_next - return the next scatterlist entry in a list
+ * @sg:		The current sg entry
+ *
+ * Description:
+ *   Usually the next entry will be @sg + 1, but if this sg element is part
+ *   of a chained scatterlist, it could jump to the start of a new
+ *   scatterlist array.
+ *
+ **/
+static inline struct scatterlist *sg_next(struct scatterlist *sg)
+{
+	if (sg_is_last(sg))
+		return NULL;
+
+	sg++;
+	if (unlikely(sg_is_chain(sg)))
+		sg = sg_chain_ptr(sg);
+
+	return sg;
+}
+
+/**
  * sg_assign_page - Assign a given page to an SG entry
  * @sg:		    SG entry
  * @page:	    The page
@@ -232,7 +254,7 @@ static inline void __sg_chain(struct scatterlist *chain_sg,
  * @sgl:	Second scatterlist
  *
  * Description:
- *   Links @prv@ and @sgl@ together, to form a longer scatterlist.
+ *   Links @prv and @sgl together, to form a longer scatterlist.
  *
  **/
 static inline void sg_chain(struct scatterlist *prv, unsigned int prv_nents,
@@ -273,7 +295,7 @@ static inline void sg_unmark_end(struct scatterlist *sg)
 }
 
 /*
- * One 64-bit architectures there is a 4-byte padding in struct scatterlist
+ * On 64-bit architectures there is a 4-byte padding in struct scatterlist
  * (assuming also CONFIG_NEED_SG_DMA_LENGTH is set). Use this padding for DMA
  * flags bits to indicate when a specific dma address is a bus address or the
  * buffer may have been bounced via SWIOTLB.
@@ -313,7 +335,7 @@ static inline void sg_dma_mark_bus_address(struct scatterlist *sg)
 }
 
 /**
- * sg_unmark_bus_address - Unmark the scatterlist entry as a bus address
+ * sg_dma_unmark_bus_address - Unmark the scatterlist entry as a bus address
  * @sg:		 SG entry
  *
  * Description:
@@ -332,7 +354,7 @@ static inline void sg_dma_unmark_bus_address(struct scatterlist *sg)
  * Description:
  *   Returns true if the scatterlist was marked for SWIOTLB bouncing. Not all
  *   elements may have been bounced, so the caller would have to check
- *   individual SG entries with is_swiotlb_buffer().
+ *   individual SG entries with swiotlb_find_pool().
  */
 static inline bool sg_dma_is_swiotlb(struct scatterlist *sg)
 {
@@ -418,7 +440,6 @@ static inline void sg_init_marker(struct scatterlist *sgl,
 
 int sg_nents(struct scatterlist *sg);
 int sg_nents_for_len(struct scatterlist *sg, u64 len);
-struct scatterlist *sg_next(struct scatterlist *);
 struct scatterlist *sg_last(struct scatterlist *s, unsigned int);
 void sg_init_table(struct scatterlist *, unsigned int);
 void sg_init_one(struct scatterlist *, const void *, unsigned int);
@@ -671,6 +692,7 @@ sg_page_iter_dma_address(struct sg_dma_page_iter *dma_iter)
 #define SG_MITER_ATOMIC		(1 << 0)	 /* use kmap_atomic */
 #define SG_MITER_TO_SG		(1 << 1)	/* flush back to phys on unmap */
 #define SG_MITER_FROM_SG	(1 << 2)	/* nop */
+#define SG_MITER_LOCAL		(1 << 3)	 /* use kmap_local */
 
 struct sg_mapping_iter {
 	/* the following three fields can be accessed directly */

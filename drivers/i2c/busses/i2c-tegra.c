@@ -1331,7 +1331,6 @@ static int tegra_i2c_xfer_msg(struct tegra_i2c_dev *i2c_dev,
 		dmaengine_terminate_sync(i2c_dev->dma_chan);
 
 		if (!time_left && !completion_done(&i2c_dev->dma_complete)) {
-			dev_err(i2c_dev->dev, "DMA transfer timed out\n");
 			tegra_i2c_init(i2c_dev);
 			return -ETIMEDOUT;
 		}
@@ -1351,7 +1350,6 @@ static int tegra_i2c_xfer_msg(struct tegra_i2c_dev *i2c_dev,
 	tegra_i2c_mask_irq(i2c_dev, int_mask);
 
 	if (time_left == 0) {
-		dev_err(i2c_dev->dev, "I2C transfer timed out\n");
 		tegra_i2c_init(i2c_dev);
 		return -ETIMEDOUT;
 	}
@@ -1397,6 +1395,11 @@ static int tegra_i2c_xfer(struct i2c_adapter *adap, struct i2c_msg msgs[],
 			ret = tegra_i2c_xfer_msg(i2c_dev, &msgs[i], MSG_END_CONTINUE);
 			if (ret)
 				break;
+
+			/* Validate message length before proceeding */
+			if (msgs[i].buf[0] == 0 || msgs[i].buf[0] > I2C_SMBUS_BLOCK_MAX)
+				break;
+
 			/* Set the msg length from first byte */
 			msgs[i].len += msgs[i].buf[0];
 			dev_dbg(i2c_dev->dev, "reading %d bytes\n", msgs[i].len);
@@ -1437,9 +1440,9 @@ static u32 tegra_i2c_func(struct i2c_adapter *adap)
 }
 
 static const struct i2c_algorithm tegra_i2c_algo = {
-	.master_xfer		= tegra_i2c_xfer,
-	.master_xfer_atomic	= tegra_i2c_xfer_atomic,
-	.functionality		= tegra_i2c_func,
+	.xfer = tegra_i2c_xfer,
+	.xfer_atomic = tegra_i2c_xfer_atomic,
+	.functionality = tegra_i2c_func,
 };
 
 /* payload size is only 12 bit */
@@ -1804,9 +1807,9 @@ static int tegra_i2c_probe(struct platform_device *pdev)
 	 * domain.
 	 *
 	 * VI I2C device shouldn't be marked as IRQ-safe because VI I2C won't
-	 * be used for atomic transfers.
+	 * be used for atomic transfers. ACPI device is not IRQ safe also.
 	 */
-	if (!IS_VI(i2c_dev))
+	if (!IS_VI(i2c_dev) && !has_acpi_companion(i2c_dev->dev))
 		pm_runtime_irq_safe(i2c_dev->dev);
 
 	pm_runtime_enable(i2c_dev->dev);
@@ -1966,7 +1969,7 @@ MODULE_DEVICE_TABLE(acpi, tegra_i2c_acpi_match);
 
 static struct platform_driver tegra_i2c_driver = {
 	.probe = tegra_i2c_probe,
-	.remove_new = tegra_i2c_remove,
+	.remove = tegra_i2c_remove,
 	.driver = {
 		.name = "tegra-i2c",
 		.of_match_table = tegra_i2c_of_match,

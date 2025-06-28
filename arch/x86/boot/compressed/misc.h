@@ -59,12 +59,15 @@ extern char _head[], _end[];
 /* misc.c */
 extern memptr free_mem_ptr;
 extern memptr free_mem_end_ptr;
+extern int spurious_nmi_count;
 void *malloc(int size);
 void free(void *where);
 void __putstr(const char *s);
 void __puthex(unsigned long value);
+void __putdec(unsigned long value);
 #define error_putstr(__x)  __putstr(__x)
 #define error_puthex(__x)  __puthex(__x)
+#define error_putdec(__x)  __putdec(__x)
 
 #ifdef CONFIG_X86_VERBOSE_BOOTUP
 
@@ -133,6 +136,9 @@ static inline void console_init(void)
 #endif
 
 #ifdef CONFIG_AMD_MEM_ENCRYPT
+struct es_em_ctxt;
+struct insn;
+
 void sev_enable(struct boot_params *bp);
 void snp_check_features(void);
 void sev_es_shutdown_ghcb(void);
@@ -140,6 +146,11 @@ extern bool sev_es_check_ghcb_fault(unsigned long address);
 void snp_set_page_private(unsigned long paddr);
 void snp_set_page_shared(unsigned long paddr);
 void sev_prep_identity_maps(unsigned long top_level_pgt);
+
+enum es_result vc_decode_insn(struct es_em_ctxt *ctxt);
+bool insn_has_rep_prefix(struct insn *insn);
+void sev_insn_decode_init(void);
+bool early_setup_ghcb(void);
 #else
 static inline void sev_enable(struct boot_params *bp)
 {
@@ -253,6 +264,6 @@ static inline bool init_unaccepted_memory(void) { return false; }
 
 /* Defined in EFI stub */
 extern struct efi_unaccepted_memory *unaccepted_table;
-void accept_memory(phys_addr_t start, phys_addr_t end);
+void accept_memory(phys_addr_t start, unsigned long size);
 
 #endif /* BOOT_COMPRESSED_MISC_H */

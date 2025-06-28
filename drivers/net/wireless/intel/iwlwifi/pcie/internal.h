@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause */
 /*
- * Copyright (C) 2003-2015, 2018-2023 Intel Corporation
+ * Copyright (C) 2003-2015, 2018-2025 Intel Corporation
  * Copyright (C) 2013-2015 Intel Mobile Communications GmbH
  * Copyright (C) 2016-2017 Intel Deutschland GmbH
  */
@@ -22,7 +22,6 @@
 #include "iwl-io.h"
 #include "iwl-op-mode.h"
 #include "iwl-drv.h"
-#include "queue/tx.h"
 #include "iwl-context-info.h"
 
 /*
@@ -195,7 +194,7 @@ struct iwl_rb_allocator {
 static inline u16 iwl_get_closed_rb_stts(struct iwl_trans *trans,
 					 struct iwl_rxq *rxq)
 {
-	if (trans->trans_cfg->device_family >= IWL_DEVICE_FAMILY_AX210) {
+	if (trans->mac_cfg->device_family >= IWL_DEVICE_FAMILY_AX210) {
 		__le16 *rb_stts = rxq->rb_stts;
 
 		return le16_to_cpu(READ_ONCE(*rb_stts));
@@ -270,10 +269,11 @@ enum iwl_pcie_fw_reset_state {
 	FW_RESET_REQUESTED,
 	FW_RESET_OK,
 	FW_RESET_ERROR,
+	FW_RESET_TOP_REQUESTED,
 };
 
 /**
- * enum wl_pcie_imr_status - imr dma transfer state
+ * enum iwl_pcie_imr_status - imr dma transfer state
  * @IMR_D2S_IDLE: default value of the dma transfer
  * @IMR_D2S_REQUESTED: dma transfer requested
  * @IMR_D2S_COMPLETED: dma transfer completed
@@ -287,13 +287,46 @@ enum iwl_pcie_imr_status {
 };
 
 /**
+ * struct iwl_pcie_txqs - TX queues data
+ *
+ * @queue_used: bit mask of used queues
+ * @queue_stopped: bit mask of stopped queues
+ * @txq: array of TXQ data structures representing the TXQs
+ * @scd_bc_tbls: gen1 pointer to the byte count table of the scheduler
+ * @bc_pool: bytecount DMA allocations pool
+ * @bc_tbl_size: bytecount table size
+ * @tso_hdr_page: page allocated (per CPU) for A-MSDU headers when doing TSO
+ *	(and similar usage)
+ * @tfd: TFD data
+ * @tfd.max_tbs: max number of buffers per TFD
+ * @tfd.size: TFD size
+ * @tfd.addr_size: TFD/TB address size
+ */
+struct iwl_pcie_txqs {
+	unsigned long queue_used[BITS_TO_LONGS(IWL_MAX_TVQM_QUEUES)];
+	unsigned long queue_stopped[BITS_TO_LONGS(IWL_MAX_TVQM_QUEUES)];
+	struct iwl_txq *txq[IWL_MAX_TVQM_QUEUES];
+	struct dma_pool *bc_pool;
+	size_t bc_tbl_size;
+	struct iwl_tso_hdr_page __percpu *tso_hdr_page;
+
+	struct {
+		u8 max_tbs;
+		u16 size;
+		u8 addr_size;
+	} tfd;
+
+	struct iwl_dma_ptr scd_bc_tbls;
+};
+
+/**
  * struct iwl_trans_pcie - PCIe transport specific data
  * @rxq: all the RX queue data
  * @rx_pool: initial pool of iwl_rx_mem_buffer for all the queues
  * @global_table: table mapping received VID from hw to rxb
  * @rba: allocator for RX replenishing
  * @ctxt_info: context information for FW self init
- * @ctxt_info_gen3: context information for gen3 devices
+ * @ctxt_info_v2: context information for v1 devices
  * @prph_info: prph info for self init
  * @prph_scratch: prph scratch for self init
  * @ctxt_info_dma_addr: dma addr of context information
@@ -301,6 +334,7 @@ enum iwl_pcie_imr_status {
  * @prph_scratch_dma_addr: dma addr of prph scratch
  * @ctxt_info_dma_addr: dma addr of context information
  * @iml: image loader image virtual address
+ * @iml_len: image loader image size
  * @iml_dma_addr: image loader image DMA address
  * @trans: pointer to the generic transport area
  * @scd_base_addr: scheduler sram base address in SRAM
@@ -312,9 +346,6 @@ enum iwl_pcie_imr_status {
  * @hw_base: pci hardware address support
  * @ucode_write_complete: indicates that the ucode has been copied.
  * @ucode_write_waitq: wait queue for uCode load
- * @cmd_queue - command queue number
- * @rx_buf_size: Rx buffer size
- * @scd_set_active: should the transport configure the SCD for HCMD queue
  * @rx_page_order: page order for receive buffer size
  * @rx_buf_bytes: RX buffer (RB) size in bytes
  * @reg_lock: protect hw register access
@@ -355,18 +386,20 @@ enum iwl_pcie_imr_status {
  * @pcie_dbg_dumped_once: indicates PCIe regs were dumped already
  * @opmode_down: indicates opmode went away
  * @num_rx_bufs: number of RX buffers to allocate/use
- * @no_reclaim_cmds: special commands not using reclaim flow
- *	(firmware workaround)
- * @n_no_reclaim_cmds: number of special commands not using reclaim flow
  * @affinity_mask: IRQ affinity mask for each RX queue
  * @debug_rfkill: RF-kill debugging state, -1 for unset, 0/1 for radio
  *	enable/disable
- * @fw_reset_handshake: indicates FW reset handshake is needed
  * @fw_reset_state: state of FW reset handshake
  * @fw_reset_waitq: waitqueue for FW reset handshake
  * @is_down: indicates the NIC is down
  * @isr_stats: interrupt statistics
  * @napi_dev: (fake) netdev for NAPI registration
+ * @txqs: transport tx queues data.
+ * @me_present: WiAMT/CSME is detected as present (1), not present (0)
+ *	or unknown (-1, so can still use it as a boolean safely)
+ * @me_recheck_wk: worker to recheck WiAMT/CSME presence
+ * @invalid_tx_cmd: invalid TX command buffer
+ * @wait_command_queue: wait queue for sync commands
  */
 struct iwl_trans_pcie {
 	struct iwl_rxq *rxq;
@@ -375,18 +408,19 @@ struct iwl_trans_pcie {
 	struct iwl_rb_allocator rba;
 	union {
 		struct iwl_context_info *ctxt_info;
-		struct iwl_context_info_gen3 *ctxt_info_gen3;
+		struct iwl_context_info_v2 *ctxt_info_v2;
 	};
 	struct iwl_prph_info *prph_info;
 	struct iwl_prph_scratch *prph_scratch;
 	void *iml;
+	size_t iml_len;
 	dma_addr_t ctxt_info_dma_addr;
 	dma_addr_t prph_info_dma_addr;
 	dma_addr_t prph_scratch_dma_addr;
 	dma_addr_t iml_dma_addr;
 	struct iwl_trans *trans;
 
-	struct net_device napi_dev;
+	struct net_device *napi_dev;
 
 	/* INT ICT Table */
 	__le32 *ict_tbl;
@@ -418,12 +452,8 @@ struct iwl_trans_pcie {
 	wait_queue_head_t ucode_write_waitq;
 	wait_queue_head_t sx_waitq;
 
-	u8 n_no_reclaim_cmds;
-	u8 no_reclaim_cmds[MAX_NO_RECLAIM_CMDS];
 	u16 num_rx_bufs;
 
-	enum iwl_amsdu_size rx_buf_size;
-	bool scd_set_active;
 	bool pcie_dbg_dumped_once;
 	u32 rx_page_order;
 	u32 rx_buf_bytes;
@@ -458,12 +488,20 @@ struct iwl_trans_pcie {
 	void *base_rb_stts;
 	dma_addr_t base_rb_stts_dma;
 
-	bool fw_reset_handshake;
 	enum iwl_pcie_fw_reset_state fw_reset_state;
 	wait_queue_head_t fw_reset_waitq;
 	enum iwl_pcie_imr_status imr_status;
 	wait_queue_head_t imr_waitq;
 	char rf_name[32];
+
+	struct iwl_pcie_txqs txqs;
+
+	s8 me_present;
+	struct delayed_work me_recheck_wk;
+
+	struct iwl_dma_ptr invalid_tx_cmd;
+
+	wait_queue_head_t wait_command_queue;
 };
 
 static inline struct iwl_trans_pcie *
@@ -498,16 +536,19 @@ iwl_trans_pcie_get_trans(struct iwl_trans_pcie *trans_pcie)
  */
 struct iwl_trans
 *iwl_trans_pcie_alloc(struct pci_dev *pdev,
-		      const struct pci_device_id *ent,
-		      const struct iwl_cfg_trans_params *cfg_trans);
+		      const struct iwl_mac_cfg *mac_cfg,
+		      struct iwl_trans_info *info);
 void iwl_trans_pcie_free(struct iwl_trans *trans);
 void iwl_trans_pcie_free_pnvm_dram_regions(struct iwl_dram_regions *dram_regions,
 					   struct device *dev);
 
-bool __iwl_trans_pcie_grab_nic_access(struct iwl_trans *trans);
-#define _iwl_trans_pcie_grab_nic_access(trans)			\
+bool __iwl_trans_pcie_grab_nic_access(struct iwl_trans *trans, bool silent);
+#define _iwl_trans_pcie_grab_nic_access(trans, silent)		\
 	__cond_lock(nic_access_nobh,				\
-		    likely(__iwl_trans_pcie_grab_nic_access(trans)))
+		    likely(__iwl_trans_pcie_grab_nic_access(trans, silent)))
+
+void iwl_trans_pcie_check_product_reset_status(struct pci_dev *pdev);
+void iwl_trans_pcie_check_product_reset_mode(struct pci_dev *pdev);
 
 /*****************************************************
 * RX
@@ -538,8 +579,35 @@ void iwl_pcie_disable_ict(struct iwl_trans *trans);
 /*****************************************************
 * TX / HCMD
 ******************************************************/
+/* We need 2 entries for the TX command and header, and another one might
+ * be needed for potential data in the SKB's head. The remaining ones can
+ * be used for frags.
+ */
+#define IWL_TRANS_PCIE_MAX_FRAGS(trans_pcie) ((trans_pcie)->txqs.tfd.max_tbs - 3)
+
+struct iwl_tso_hdr_page {
+	struct page *page;
+	u8 *pos;
+};
+
+/*
+ * Note that we put this struct *last* in the page. By doing that, we ensure
+ * that no TB referencing this page can trigger the 32-bit boundary hardware
+ * bug.
+ */
+struct iwl_tso_page_info {
+	dma_addr_t dma_addr;
+	struct page *next;
+	refcount_t use_count;
+};
+
+#define IWL_TSO_PAGE_DATA_SIZE	(PAGE_SIZE - sizeof(struct iwl_tso_page_info))
+#define IWL_TSO_PAGE_INFO(addr)	\
+	((struct iwl_tso_page_info *)(((unsigned long)addr & PAGE_MASK) + \
+				      IWL_TSO_PAGE_DATA_SIZE))
+
 int iwl_pcie_tx_init(struct iwl_trans *trans);
-void iwl_pcie_tx_start(struct iwl_trans *trans, u32 scd_base_addr);
+void iwl_pcie_tx_start(struct iwl_trans *trans);
 int iwl_pcie_tx_stop(struct iwl_trans *trans);
 void iwl_pcie_tx_free(struct iwl_trans *trans);
 bool iwl_trans_pcie_txq_enable(struct iwl_trans *trans, int queue, u16 ssn,
@@ -552,10 +620,174 @@ void iwl_trans_pcie_txq_set_shared_mode(struct iwl_trans *trans, u32 txq_id,
 int iwl_trans_pcie_tx(struct iwl_trans *trans, struct sk_buff *skb,
 		      struct iwl_device_tx_cmd *dev_cmd, int txq_id);
 void iwl_pcie_txq_check_wrptrs(struct iwl_trans *trans);
-int iwl_trans_pcie_send_hcmd(struct iwl_trans *trans, struct iwl_host_cmd *cmd);
 void iwl_pcie_hcmd_complete(struct iwl_trans *trans,
 			    struct iwl_rx_cmd_buffer *rxb);
 void iwl_trans_pcie_tx_reset(struct iwl_trans *trans);
+int iwl_pcie_txq_alloc(struct iwl_trans *trans, struct iwl_txq *txq,
+		       int slots_num, bool cmd_queue);
+
+dma_addr_t iwl_pcie_get_sgt_tb_phys(struct sg_table *sgt, unsigned int offset,
+				    unsigned int len);
+struct sg_table *iwl_pcie_prep_tso(struct iwl_trans *trans, struct sk_buff *skb,
+				   struct iwl_cmd_meta *cmd_meta,
+				   u8 **hdr, unsigned int hdr_room,
+				   unsigned int offset);
+
+void iwl_pcie_free_tso_pages(struct iwl_trans *trans, struct sk_buff *skb,
+			     struct iwl_cmd_meta *cmd_meta);
+
+static inline dma_addr_t iwl_pcie_get_tso_page_phys(void *addr)
+{
+	dma_addr_t res;
+
+	res = IWL_TSO_PAGE_INFO(addr)->dma_addr;
+	res += (unsigned long)addr & ~PAGE_MASK;
+
+	return res;
+}
+
+static inline dma_addr_t
+iwl_txq_get_first_tb_dma(struct iwl_txq *txq, int idx)
+{
+	return txq->first_tb_dma +
+	       sizeof(struct iwl_pcie_first_tb_buf) * idx;
+}
+
+static inline u16 iwl_txq_get_cmd_index(const struct iwl_txq *q, u32 index)
+{
+	return index & (q->n_window - 1);
+}
+
+static inline void *iwl_txq_get_tfd(struct iwl_trans *trans,
+				    struct iwl_txq *txq, int idx)
+{
+	struct iwl_trans_pcie *trans_pcie = IWL_TRANS_GET_PCIE_TRANS(trans);
+
+	if (trans->mac_cfg->gen2)
+		idx = iwl_txq_get_cmd_index(txq, idx);
+
+	return (u8 *)txq->tfds + trans_pcie->txqs.tfd.size * idx;
+}
+
+/*
+ * We need this inline in case dma_addr_t is only 32-bits - since the
+ * hardware is always 64-bit, the issue can still occur in that case,
+ * so use u64 for 'phys' here to force the addition in 64-bit.
+ */
+static inline bool iwl_txq_crosses_4g_boundary(u64 phys, u16 len)
+{
+	return upper_32_bits(phys) != upper_32_bits(phys + len);
+}
+
+int iwl_txq_space(struct iwl_trans *trans, const struct iwl_txq *q);
+
+static inline void iwl_txq_stop(struct iwl_trans *trans, struct iwl_txq *txq)
+{
+	struct iwl_trans_pcie *trans_pcie = IWL_TRANS_GET_PCIE_TRANS(trans);
+
+	if (!test_and_set_bit(txq->id, trans_pcie->txqs.queue_stopped)) {
+		iwl_op_mode_queue_full(trans->op_mode, txq->id);
+		IWL_DEBUG_TX_QUEUES(trans, "Stop hwq %d\n", txq->id);
+	} else {
+		IWL_DEBUG_TX_QUEUES(trans, "hwq %d already stopped\n",
+				    txq->id);
+	}
+}
+
+/**
+ * iwl_txq_inc_wrap - increment queue index, wrap back to beginning
+ * @trans: the transport (for configuration data)
+ * @index: current index
+ */
+static inline int iwl_txq_inc_wrap(struct iwl_trans *trans, int index)
+{
+	return ++index &
+		(trans->mac_cfg->base->max_tfd_queue_size - 1);
+}
+
+/**
+ * iwl_txq_dec_wrap - decrement queue index, wrap back to end
+ * @trans: the transport (for configuration data)
+ * @index: current index
+ */
+static inline int iwl_txq_dec_wrap(struct iwl_trans *trans, int index)
+{
+	return --index &
+		(trans->mac_cfg->base->max_tfd_queue_size - 1);
+}
+
+void iwl_txq_log_scd_error(struct iwl_trans *trans, struct iwl_txq *txq);
+
+static inline void
+iwl_trans_pcie_wake_queue(struct iwl_trans *trans, struct iwl_txq *txq)
+{
+	struct iwl_trans_pcie *trans_pcie = IWL_TRANS_GET_PCIE_TRANS(trans);
+
+	if (test_and_clear_bit(txq->id, trans_pcie->txqs.queue_stopped)) {
+		IWL_DEBUG_TX_QUEUES(trans, "Wake hwq %d\n", txq->id);
+		iwl_op_mode_queue_not_full(trans->op_mode, txq->id);
+	}
+}
+
+int iwl_txq_gen2_set_tb(struct iwl_trans *trans,
+			struct iwl_tfh_tfd *tfd, dma_addr_t addr,
+			u16 len);
+
+static inline void iwl_txq_set_tfd_invalid_gen2(struct iwl_trans *trans,
+						struct iwl_tfh_tfd *tfd)
+{
+	struct iwl_trans_pcie *trans_pcie = IWL_TRANS_GET_PCIE_TRANS(trans);
+
+	tfd->num_tbs = 0;
+
+	iwl_txq_gen2_set_tb(trans, tfd, trans_pcie->invalid_tx_cmd.dma,
+			    trans_pcie->invalid_tx_cmd.size);
+}
+
+void iwl_txq_gen2_tfd_unmap(struct iwl_trans *trans,
+			    struct iwl_cmd_meta *meta,
+			    struct iwl_tfh_tfd *tfd);
+
+int iwl_txq_dyn_alloc(struct iwl_trans *trans, u32 flags,
+		      u32 sta_mask, u8 tid,
+		      int size, unsigned int timeout);
+
+int iwl_txq_gen2_tx(struct iwl_trans *trans, struct sk_buff *skb,
+		    struct iwl_device_tx_cmd *dev_cmd, int txq_id);
+
+void iwl_txq_dyn_free(struct iwl_trans *trans, int queue);
+void iwl_txq_gen2_tx_free(struct iwl_trans *trans);
+int iwl_txq_init(struct iwl_trans *trans, struct iwl_txq *txq,
+		 int slots_num, bool cmd_queue);
+int iwl_txq_gen2_init(struct iwl_trans *trans, int txq_id,
+		      int queue_size);
+
+static inline u16 iwl_txq_gen1_tfd_tb_get_len(struct iwl_trans *trans,
+					      void *_tfd, u8 idx)
+{
+	struct iwl_tfd *tfd;
+	struct iwl_tfd_tb *tb;
+
+	if (trans->mac_cfg->gen2) {
+		struct iwl_tfh_tfd *tfh_tfd = _tfd;
+		struct iwl_tfh_tb *tfh_tb = &tfh_tfd->tbs[idx];
+
+		return le16_to_cpu(tfh_tb->tb_len);
+	}
+
+	tfd = (struct iwl_tfd *)_tfd;
+	tb = &tfd->tbs[idx];
+
+	return le16_to_cpu(tb->hi_n_len) >> 4;
+}
+
+void iwl_pcie_reclaim(struct iwl_trans *trans, int txq_id, int ssn,
+		      struct sk_buff_head *skbs, bool is_flush);
+void iwl_pcie_set_q_ptrs(struct iwl_trans *trans, int txq_id, int ptr);
+void iwl_pcie_freeze_txq_timer(struct iwl_trans *trans,
+			       unsigned long txqs, bool freeze);
+int iwl_trans_pcie_wait_txq_empty(struct iwl_trans *trans, int txq_idx);
+int iwl_trans_pcie_wait_txqs_empty(struct iwl_trans *trans, u32 txq_bm);
 
 /*****************************************************
 * Error handling
@@ -694,11 +926,13 @@ static inline void iwl_enable_fw_load_int(struct iwl_trans *trans)
 	}
 }
 
-static inline void iwl_enable_fw_load_int_ctx_info(struct iwl_trans *trans)
+static inline void iwl_enable_fw_load_int_ctx_info(struct iwl_trans *trans,
+						   bool top_reset)
 {
 	struct iwl_trans_pcie *trans_pcie = IWL_TRANS_GET_PCIE_TRANS(trans);
 
-	IWL_DEBUG_ISR(trans, "Enabling ALIVE interrupt only\n");
+	IWL_DEBUG_ISR(trans, "Enabling %s interrupt only\n",
+		      top_reset ? "RESET" : "ALIVE");
 
 	if (!trans_pcie->msix_enabled) {
 		/*
@@ -708,11 +942,20 @@ static inline void iwl_enable_fw_load_int_ctx_info(struct iwl_trans *trans)
 		 * RX interrupt which will allow us to receive the ALIVE
 		 * notification (which is Rx) and continue the flow.
 		 */
-		trans_pcie->inta_mask =  CSR_INT_BIT_ALIVE | CSR_INT_BIT_FH_RX;
+		if (top_reset)
+			trans_pcie->inta_mask =  CSR_INT_BIT_RESET_DONE;
+		else
+			trans_pcie->inta_mask =  CSR_INT_BIT_ALIVE |
+						 CSR_INT_BIT_FH_RX;
 		iwl_write32(trans, CSR_INT_MASK, trans_pcie->inta_mask);
 	} else {
-		iwl_enable_hw_int_msk_msix(trans,
-					   MSIX_HW_INT_CAUSES_REG_ALIVE);
+		u32 val = top_reset ? MSIX_HW_INT_CAUSES_REG_RESET_DONE
+				    : MSIX_HW_INT_CAUSES_REG_ALIVE;
+
+		iwl_enable_hw_int_msk_msix(trans, val);
+
+		if (top_reset)
+			return;
 		/*
 		 * Leave all the FH causes enabled to get the ALIVE
 		 * notification.
@@ -759,7 +1002,7 @@ static inline void iwl_enable_rfkill_int(struct iwl_trans *trans)
 					   MSIX_HW_INT_CAUSES_REG_RF_KILL);
 	}
 
-	if (trans->trans_cfg->device_family >= IWL_DEVICE_FAMILY_9000) {
+	if (trans->mac_cfg->device_family >= IWL_DEVICE_FAMILY_9000) {
 		/*
 		 * On 9000-series devices this bit isn't enabled by default, so
 		 * when we power down the device we need set the bit to allow it
@@ -822,11 +1065,53 @@ void iwl_trans_pcie_dump_regs(struct iwl_trans *trans);
 
 #ifdef CONFIG_IWLWIFI_DEBUGFS
 void iwl_trans_pcie_dbgfs_register(struct iwl_trans *trans);
+void iwl_trans_pcie_debugfs_cleanup(struct iwl_trans *trans);
 #else
 static inline void iwl_trans_pcie_dbgfs_register(struct iwl_trans *trans) { }
 #endif
 
 void iwl_pcie_rx_allocator_work(struct work_struct *data);
+
+/* common trans ops for all generations transports */
+void iwl_trans_pcie_op_mode_enter(struct iwl_trans *trans);
+int iwl_trans_pcie_start_hw(struct iwl_trans *trans);
+void iwl_trans_pcie_op_mode_leave(struct iwl_trans *trans);
+void iwl_trans_pcie_write8(struct iwl_trans *trans, u32 ofs, u8 val);
+void iwl_trans_pcie_write32(struct iwl_trans *trans, u32 ofs, u32 val);
+u32 iwl_trans_pcie_read32(struct iwl_trans *trans, u32 ofs);
+u32 iwl_trans_pcie_read_prph(struct iwl_trans *trans, u32 reg);
+void iwl_trans_pcie_write_prph(struct iwl_trans *trans, u32 addr, u32 val);
+int iwl_trans_pcie_read_mem(struct iwl_trans *trans, u32 addr,
+			    void *buf, int dwords);
+int iwl_trans_pcie_write_mem(struct iwl_trans *trans, u32 addr,
+			     const void *buf, int dwords);
+int iwl_trans_pcie_sw_reset(struct iwl_trans *trans, bool retake_ownership);
+struct iwl_trans_dump_data *
+iwl_trans_pcie_dump_data(struct iwl_trans *trans, u32 dump_mask,
+			 const struct iwl_dump_sanitize_ops *sanitize_ops,
+			 void *sanitize_ctx);
+int iwl_trans_pcie_d3_resume(struct iwl_trans *trans,
+			     enum iwl_d3_status *status,
+			     bool test,  bool reset);
+int iwl_trans_pcie_d3_suspend(struct iwl_trans *trans, bool test, bool reset);
+void iwl_trans_pci_interrupts(struct iwl_trans *trans, bool enable);
+void iwl_trans_pcie_sync_nmi(struct iwl_trans *trans);
+void iwl_trans_pcie_set_bits_mask(struct iwl_trans *trans, u32 reg,
+				  u32 mask, u32 value);
+int iwl_trans_pcie_read_config32(struct iwl_trans *trans, u32 ofs,
+				 u32 *val);
+bool iwl_trans_pcie_grab_nic_access(struct iwl_trans *trans);
+void __releases(nic_access_nobh)
+iwl_trans_pcie_release_nic_access(struct iwl_trans *trans);
+void iwl_pcie_alloc_fw_monitor(struct iwl_trans *trans, u8 max_power);
+
+/* transport gen 1 exported functions */
+void iwl_trans_pcie_fw_alive(struct iwl_trans *trans);
+int iwl_trans_pcie_start_fw(struct iwl_trans *trans,
+			    const struct iwl_fw *fw,
+			    const struct fw_img *img,
+			    bool run_in_rfkill);
+void iwl_trans_pcie_stop_device(struct iwl_trans *trans);
 
 /* common functions that are used by gen2 transport */
 int iwl_pcie_gen2_apm_init(struct iwl_trans *trans);
@@ -843,19 +1128,13 @@ int iwl_pcie_alloc_dma_ptr(struct iwl_trans *trans,
 void iwl_pcie_free_dma_ptr(struct iwl_trans *trans, struct iwl_dma_ptr *ptr);
 void iwl_pcie_apply_destination(struct iwl_trans *trans);
 
-/* common functions that are used by gen3 transport */
-void iwl_pcie_alloc_fw_monitor(struct iwl_trans *trans, u8 max_power);
-
 /* transport gen 2 exported functions */
 int iwl_trans_pcie_gen2_start_fw(struct iwl_trans *trans,
-				 const struct fw_img *fw, bool run_in_rfkill);
-void iwl_trans_pcie_gen2_fw_alive(struct iwl_trans *trans, u32 scd_addr);
-int iwl_trans_pcie_gen2_send_hcmd(struct iwl_trans *trans,
-				  struct iwl_host_cmd *cmd);
+				 const struct iwl_fw *fw,
+				 const struct fw_img *img,
+				 bool run_in_rfkill);
+void iwl_trans_pcie_gen2_fw_alive(struct iwl_trans *trans);
 void iwl_trans_pcie_gen2_stop_device(struct iwl_trans *trans);
-void _iwl_trans_pcie_gen2_stop_device(struct iwl_trans *trans);
-void iwl_pcie_d3_complete_suspend(struct iwl_trans *trans,
-				  bool test, bool reset);
 int iwl_pcie_gen2_enqueue_hcmd(struct iwl_trans *trans,
 			       struct iwl_host_cmd *cmd);
 int iwl_pcie_enqueue_hcmd(struct iwl_trans *trans,
@@ -864,5 +1143,7 @@ void iwl_trans_pcie_copy_imr_fh(struct iwl_trans *trans,
 				u32 dst_addr, u64 src_addr, u32 byte_cnt);
 int iwl_trans_pcie_copy_imr(struct iwl_trans *trans,
 			    u32 dst_addr, u64 src_addr, u32 byte_cnt);
+int iwl_trans_pcie_rxq_dma_data(struct iwl_trans *trans, int queue,
+				struct iwl_trans_rxq_dma_data *data);
 
 #endif /* __iwl_trans_int_pcie_h__ */

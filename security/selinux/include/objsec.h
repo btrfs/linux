@@ -29,6 +29,13 @@
 #include "flask.h"
 #include "avc.h"
 
+struct avdc_entry {
+	u32 isid; /* inode SID */
+	u32 allowed; /* allowed permission bitmask */
+	u32 audited; /* audited permission bitmask */
+	bool permissive; /* AVC permissive flag */
+};
+
 struct task_security_struct {
 	u32 osid; /* SID prior to last execve */
 	u32 sid; /* current SID */
@@ -36,6 +43,13 @@ struct task_security_struct {
 	u32 create_sid; /* fscreate SID */
 	u32 keycreate_sid; /* keycreate SID */
 	u32 sockcreate_sid; /* fscreate SID */
+#define TSEC_AVDC_DIR_SIZE (1 << 2)
+	struct {
+		u32 sid; /* current SID for cached entries */
+		u32 seqno; /* AVC sequence number */
+		unsigned int dir_spot; /* dir cache index to check first */
+		struct avdc_entry dir[TSEC_AVDC_DIR_SIZE]; /* dir entries */
+	} avdcache;
 } __randomize_layout;
 
 enum label_initialized {
@@ -82,7 +96,7 @@ struct ipc_security_struct {
 };
 
 struct netif_security_struct {
-	struct net *ns; /* network namespace */
+	const struct net *ns; /* network namespace */
 	int ifindex; /* device index */
 	u32 sid; /* SID for this interface */
 };
@@ -193,6 +207,34 @@ static inline struct superblock_security_struct *
 selinux_superblock(const struct super_block *superblock)
 {
 	return superblock->s_security + selinux_blob_sizes.lbs_superblock;
+}
+
+#ifdef CONFIG_KEYS
+static inline struct key_security_struct *selinux_key(const struct key *key)
+{
+	return key->security + selinux_blob_sizes.lbs_key;
+}
+#endif /* CONFIG_KEYS */
+
+static inline struct sk_security_struct *selinux_sock(const struct sock *sock)
+{
+	return sock->sk_security + selinux_blob_sizes.lbs_sock;
+}
+
+static inline struct tun_security_struct *selinux_tun_dev(void *security)
+{
+	return security + selinux_blob_sizes.lbs_tun_dev;
+}
+
+static inline struct ib_security_struct *selinux_ib(void *ib_sec)
+{
+	return ib_sec + selinux_blob_sizes.lbs_ib;
+}
+
+static inline struct perf_event_security_struct *
+selinux_perf_event(void *perf_event)
+{
+	return perf_event + selinux_blob_sizes.lbs_perf_event;
 }
 
 #endif /* _SELINUX_OBJSEC_H_ */
