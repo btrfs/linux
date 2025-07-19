@@ -31,8 +31,7 @@ static void mlx5e_tc_tun_route_attr_cleanup(struct mlx5e_tc_tun_route_attr *attr
 {
 	if (attr->n)
 		neigh_release(attr->n);
-	if (attr->route_dev)
-		dev_put(attr->route_dev);
+	dev_put(attr->route_dev);
 }
 
 struct mlx5e_tc_tunnel *mlx5e_get_tc_tun(struct net_device *tunnel_dev)
@@ -68,16 +67,14 @@ static int get_route_and_out_devs(struct mlx5e_priv *priv,
 	 * while holding rcu read lock. Take the net_device for correctness
 	 * sake.
 	 */
-	if (uplink_upper)
-		dev_hold(uplink_upper);
+	dev_hold(uplink_upper);
 	rcu_read_unlock();
 
 	dst_is_lag_dev = (uplink_upper &&
 			  netif_is_lag_master(uplink_upper) &&
 			  real_dev == uplink_upper &&
 			  mlx5_lag_is_sriov(priv->mdev));
-	if (uplink_upper)
-		dev_put(uplink_upper);
+	dev_put(uplink_upper);
 
 	/* if the egress device isn't on the same HW e-switch or
 	 * it's a LAG device, use the uplink
@@ -849,6 +846,12 @@ int mlx5e_tc_tun_parse(struct net_device *filter_dev,
 
 		flow_rule_match_enc_control(rule, &match);
 		addr_type = match.key->addr_type;
+
+		if (flow_rule_has_enc_control_flags(match.mask->flags,
+						    extack)) {
+			err = -EOPNOTSUPP;
+			goto out;
+		}
 
 		/* For tunnel addr_type used same key id`s as for non-tunnel */
 		if (addr_type == FLOW_DISSECTOR_KEY_IPV4_ADDRS) {

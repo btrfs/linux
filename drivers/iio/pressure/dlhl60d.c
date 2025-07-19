@@ -15,7 +15,7 @@
 #include <linux/iio/buffer.h>
 #include <linux/iio/trigger_consumer.h>
 #include <linux/iio/triggered_buffer.h>
-#include <asm/unaligned.h>
+#include <linux/unaligned.h>
 
 /* Commands */
 #define DLH_START_SINGLE    0xAA
@@ -147,12 +147,11 @@ static int dlh_read_raw(struct iio_dev *indio_dev,
 
 	switch (mask) {
 	case IIO_CHAN_INFO_RAW:
-		ret = iio_device_claim_direct_mode(indio_dev);
-		if (ret)
-			return ret;
+		if (!iio_device_claim_direct(indio_dev))
+			return -EBUSY;
 
 		ret = dlh_read_direct(st, &pressure, &temperature);
-		iio_device_release_direct_mode(indio_dev);
+		iio_device_release_direct(indio_dev);
 		if (ret)
 			return ret;
 
@@ -250,18 +249,16 @@ static irqreturn_t dlh_trigger_handler(int irq, void *private)
 	struct dlh_state *st = iio_priv(indio_dev);
 	int ret;
 	unsigned int chn, i = 0;
-	__be32 tmp_buf[2];
+	__be32 tmp_buf[2] = { };
 
 	ret = dlh_start_capture_and_read(st);
 	if (ret)
 		goto out;
 
-	for_each_set_bit(chn, indio_dev->active_scan_mask,
-		indio_dev->masklength) {
-		memcpy(tmp_buf + i,
+	iio_for_each_active_channel(indio_dev, chn) {
+		memcpy(&tmp_buf[i++],
 			&st->rx_buf[1] + chn * DLH_NUM_DATA_BYTES,
 			DLH_NUM_DATA_BYTES);
-		i++;
 	}
 
 	iio_push_to_buffers(indio_dev, tmp_buf);
@@ -346,14 +343,14 @@ static int dlh_probe(struct i2c_client *client)
 static const struct of_device_id dlh_of_match[] = {
 	{ .compatible = "asc,dlhl60d" },
 	{ .compatible = "asc,dlhl60g" },
-	{}
+	{ }
 };
 MODULE_DEVICE_TABLE(of, dlh_of_match);
 
 static const struct i2c_device_id dlh_id[] = {
 	{ "dlhl60d",    dlhl60d },
 	{ "dlhl60g",    dlhl60g },
-	{}
+	{ }
 };
 MODULE_DEVICE_TABLE(i2c, dlh_id);
 

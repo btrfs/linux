@@ -563,7 +563,7 @@ static int pru_handle_intrmap(struct rproc *rproc)
 		return -ENODEV;
 	}
 
-	fwspec.fwnode = of_node_to_fwnode(irq_parent);
+	fwspec.fwnode = of_fwnode_handle(irq_parent);
 	fwspec.param_count = 3;
 	for (i = 0; i < pru->evt_count; i++) {
 		fwspec.param[0] = rsc->pru_intc_map[i].event;
@@ -1132,7 +1132,7 @@ static struct platform_driver pru_rproc_driver = {
 		.suppress_bind_attrs = true,
 	},
 	.probe  = pru_rproc_probe,
-	.remove_new = pru_rproc_remove,
+	.remove = pru_rproc_remove,
 };
 module_platform_driver(pru_rproc_driver);
 

@@ -33,22 +33,30 @@ static int sun8i_ce_cipher_need_fallback(struct skcipher_request *areq)
 
 	if (sg_nents_for_len(areq->src, areq->cryptlen) > MAX_SG ||
 	    sg_nents_for_len(areq->dst, areq->cryptlen) > MAX_SG) {
-		algt->stat_fb_maxsg++;
+		if (IS_ENABLED(CONFIG_CRYPTO_DEV_SUN8I_CE_DEBUG))
+			algt->stat_fb_maxsg++;
+
 		return true;
 	}
 
 	if (areq->cryptlen < crypto_skcipher_ivsize(tfm)) {
-		algt->stat_fb_leniv++;
+		if (IS_ENABLED(CONFIG_CRYPTO_DEV_SUN8I_CE_DEBUG))
+			algt->stat_fb_leniv++;
+
 		return true;
 	}
 
 	if (areq->cryptlen == 0) {
-		algt->stat_fb_len0++;
+		if (IS_ENABLED(CONFIG_CRYPTO_DEV_SUN8I_CE_DEBUG))
+			algt->stat_fb_len0++;
+
 		return true;
 	}
 
 	if (areq->cryptlen % 16) {
-		algt->stat_fb_mod16++;
+		if (IS_ENABLED(CONFIG_CRYPTO_DEV_SUN8I_CE_DEBUG))
+			algt->stat_fb_mod16++;
+
 		return true;
 	}
 
@@ -56,12 +64,16 @@ static int sun8i_ce_cipher_need_fallback(struct skcipher_request *areq)
 	sg = areq->src;
 	while (sg) {
 		if (!IS_ALIGNED(sg->offset, sizeof(u32))) {
-			algt->stat_fb_srcali++;
+			if (IS_ENABLED(CONFIG_CRYPTO_DEV_SUN8I_CE_DEBUG))
+				algt->stat_fb_srcali++;
+
 			return true;
 		}
 		todo = min(len, sg->length);
 		if (todo % 4) {
-			algt->stat_fb_srclen++;
+			if (IS_ENABLED(CONFIG_CRYPTO_DEV_SUN8I_CE_DEBUG))
+				algt->stat_fb_srclen++;
+
 			return true;
 		}
 		len -= todo;
@@ -72,12 +84,16 @@ static int sun8i_ce_cipher_need_fallback(struct skcipher_request *areq)
 	sg = areq->dst;
 	while (sg) {
 		if (!IS_ALIGNED(sg->offset, sizeof(u32))) {
-			algt->stat_fb_dstali++;
+			if (IS_ENABLED(CONFIG_CRYPTO_DEV_SUN8I_CE_DEBUG))
+				algt->stat_fb_dstali++;
+
 			return true;
 		}
 		todo = min(len, sg->length);
 		if (todo % 4) {
-			algt->stat_fb_dstlen++;
+			if (IS_ENABLED(CONFIG_CRYPTO_DEV_SUN8I_CE_DEBUG))
+				algt->stat_fb_dstlen++;
+
 			return true;
 		}
 		len -= todo;
@@ -100,9 +116,7 @@ static int sun8i_ce_cipher_fallback(struct skcipher_request *areq)
 		algt = container_of(alg, struct sun8i_ce_alg_template,
 				    alg.skcipher.base);
 
-#ifdef CONFIG_CRYPTO_DEV_SUN8I_CE_DEBUG
 		algt->stat_fb++;
-#endif
 	}
 
 	skcipher_request_set_tfm(&rctx->fallback_req, op->fallback_tfm);
@@ -146,9 +160,8 @@ static int sun8i_ce_cipher_prepare(struct crypto_engine *engine, void *async_req
 		rctx->op_dir, areq->iv, crypto_skcipher_ivsize(tfm),
 		op->keylen);
 
-#ifdef CONFIG_CRYPTO_DEV_SUN8I_CE_DEBUG
-	algt->stat_req++;
-#endif
+	if (IS_ENABLED(CONFIG_CRYPTO_DEV_SUN8I_CE_DEBUG))
+		algt->stat_req++;
 
 	flow = rctx->flow;
 
@@ -190,7 +203,7 @@ static int sun8i_ce_cipher_prepare(struct crypto_engine *engine, void *async_req
 		err = -EFAULT;
 		goto theend;
 	}
-	cet->t_key = cpu_to_le32(rctx->addr_key);
+	cet->t_key = desc_addr_val_le32(ce, rctx->addr_key);
 
 	ivsize = crypto_skcipher_ivsize(tfm);
 	if (areq->iv && crypto_skcipher_ivsize(tfm) > 0) {
@@ -208,7 +221,7 @@ static int sun8i_ce_cipher_prepare(struct crypto_engine *engine, void *async_req
 			err = -ENOMEM;
 			goto theend_iv;
 		}
-		cet->t_iv = cpu_to_le32(rctx->addr_iv);
+		cet->t_iv = desc_addr_val_le32(ce, rctx->addr_iv);
 	}
 
 	if (areq->src == areq->dst) {
@@ -236,7 +249,7 @@ static int sun8i_ce_cipher_prepare(struct crypto_engine *engine, void *async_req
 
 	len = areq->cryptlen;
 	for_each_sg(areq->src, sg, nr_sgs, i) {
-		cet->t_src[i].addr = cpu_to_le32(sg_dma_address(sg));
+		cet->t_src[i].addr = desc_addr_val_le32(ce, sg_dma_address(sg));
 		todo = min(len, sg_dma_len(sg));
 		cet->t_src[i].len = cpu_to_le32(todo / 4);
 		dev_dbg(ce->dev, "%s total=%u SG(%d %u off=%d) todo=%u\n", __func__,
@@ -251,7 +264,7 @@ static int sun8i_ce_cipher_prepare(struct crypto_engine *engine, void *async_req
 
 	len = areq->cryptlen;
 	for_each_sg(areq->dst, sg, nr_sgd, i) {
-		cet->t_dst[i].addr = cpu_to_le32(sg_dma_address(sg));
+		cet->t_dst[i].addr = desc_addr_val_le32(ce, sg_dma_address(sg));
 		todo = min(len, sg_dma_len(sg));
 		cet->t_dst[i].len = cpu_to_le32(todo / 4);
 		dev_dbg(ce->dev, "%s total=%u SG(%d %u off=%d) todo=%u\n", __func__,
@@ -275,13 +288,16 @@ theend_sgs:
 	} else {
 		if (nr_sgs > 0)
 			dma_unmap_sg(ce->dev, areq->src, ns, DMA_TO_DEVICE);
-		dma_unmap_sg(ce->dev, areq->dst, nd, DMA_FROM_DEVICE);
+
+		if (nr_sgd > 0)
+			dma_unmap_sg(ce->dev, areq->dst, nd, DMA_FROM_DEVICE);
 	}
 
 theend_iv:
 	if (areq->iv && ivsize > 0) {
-		if (rctx->addr_iv)
+		if (!dma_mapping_error(ce->dev, rctx->addr_iv))
 			dma_unmap_single(ce->dev, rctx->addr_iv, rctx->ivlen, DMA_TO_DEVICE);
+
 		offset = areq->cryptlen - ivsize;
 		if (rctx->op_dir & CE_DECRYPTION) {
 			memcpy(areq->iv, chan->backup_iv, ivsize);
@@ -297,22 +313,6 @@ theend_iv:
 
 theend:
 	return err;
-}
-
-static void sun8i_ce_cipher_run(struct crypto_engine *engine, void *areq)
-{
-	struct skcipher_request *breq = container_of(areq, struct skcipher_request, base);
-	struct crypto_skcipher *tfm = crypto_skcipher_reqtfm(breq);
-	struct sun8i_cipher_tfm_ctx *op = crypto_skcipher_ctx(tfm);
-	struct sun8i_ce_dev *ce = op->ce;
-	struct sun8i_cipher_req_ctx *rctx = skcipher_request_ctx(breq);
-	int flow, err;
-
-	flow = rctx->flow;
-	err = sun8i_ce_run_task(ce, flow, crypto_tfm_alg_name(breq->base.tfm));
-	local_bh_disable();
-	crypto_finalize_skcipher_request(engine, breq, err);
-	local_bh_enable();
 }
 
 static void sun8i_ce_cipher_unprepare(struct crypto_engine *engine,
@@ -360,6 +360,23 @@ static void sun8i_ce_cipher_unprepare(struct crypto_engine *engine,
 	dma_unmap_single(ce->dev, rctx->addr_key, op->keylen, DMA_TO_DEVICE);
 }
 
+static void sun8i_ce_cipher_run(struct crypto_engine *engine, void *areq)
+{
+	struct skcipher_request *breq = container_of(areq, struct skcipher_request, base);
+	struct crypto_skcipher *tfm = crypto_skcipher_reqtfm(breq);
+	struct sun8i_cipher_tfm_ctx *op = crypto_skcipher_ctx(tfm);
+	struct sun8i_ce_dev *ce = op->ce;
+	struct sun8i_cipher_req_ctx *rctx = skcipher_request_ctx(breq);
+	int flow, err;
+
+	flow = rctx->flow;
+	err = sun8i_ce_run_task(ce, flow, crypto_tfm_alg_name(breq->base.tfm));
+	sun8i_ce_cipher_unprepare(engine, areq);
+	local_bh_disable();
+	crypto_finalize_skcipher_request(engine, breq, err);
+	local_bh_enable();
+}
+
 int sun8i_ce_cipher_do_one(struct crypto_engine *engine, void *areq)
 {
 	int err = sun8i_ce_cipher_prepare(engine, areq);
@@ -368,7 +385,6 @@ int sun8i_ce_cipher_do_one(struct crypto_engine *engine, void *areq)
 		return err;
 
 	sun8i_ce_cipher_run(engine, areq);
-	sun8i_ce_cipher_unprepare(engine, areq);
 	return 0;
 }
 
@@ -434,17 +450,17 @@ int sun8i_ce_cipher_init(struct crypto_tfm *tfm)
 	crypto_skcipher_set_reqsize(sktfm, sizeof(struct sun8i_cipher_req_ctx) +
 				    crypto_skcipher_reqsize(op->fallback_tfm));
 
-	memcpy(algt->fbname,
-	       crypto_tfm_alg_driver_name(crypto_skcipher_tfm(op->fallback_tfm)),
-	       CRYPTO_MAX_ALG_NAME);
+	if (IS_ENABLED(CONFIG_CRYPTO_DEV_SUN8I_CE_DEBUG))
+		memcpy(algt->fbname,
+		       crypto_skcipher_driver_name(op->fallback_tfm),
+		       CRYPTO_MAX_ALG_NAME);
 
-	err = pm_runtime_get_sync(op->ce->dev);
+	err = pm_runtime_resume_and_get(op->ce->dev);
 	if (err < 0)
 		goto error_pm;
 
 	return 0;
 error_pm:
-	pm_runtime_put_noidle(op->ce->dev);
 	crypto_free_skcipher(op->fallback_tfm);
 	return err;
 }

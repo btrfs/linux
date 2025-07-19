@@ -49,7 +49,7 @@ static int ui_browser__jumps_percent_color(struct ui_browser *browser, int nr, b
 
 	if (current && (!browser->use_navkeypressed || browser->navkeypressed))
 		return HE_COLORSET_SELECTED;
-	if (nr == notes->max_jump_sources)
+	if (nr == notes->src->max_jump_sources)
 		return HE_COLORSET_TOP;
 	if (nr > 1)
 		return HE_COLORSET_MEDIUM;
@@ -156,6 +156,7 @@ static void annotate_browser__draw_current_jump(struct ui_browser *browser)
 	struct symbol *sym = ms->sym;
 	struct annotation *notes = symbol__annotation(sym);
 	u8 pcnt_width = annotation__pcnt_width(notes);
+	u8 cntr_width = annotation__br_cntr_width();
 	int width;
 	int diff = 0;
 
@@ -186,7 +187,7 @@ static void annotate_browser__draw_current_jump(struct ui_browser *browser)
 	 *  name right after the '<' token and probably treating this like a
 	 *  'call' instruction.
 	 */
-	target = notes->src->offsets[cursor->ops.target.offset];
+	target = annotated_source__get_line(notes->src, cursor->ops.target.offset);
 	if (target == NULL) {
 		ui_helpline__printf("WARN: jump target inconsistency, press 'o', notes->offsets[%#x] = NULL\n",
 				    cursor->ops.target.offset);
@@ -205,13 +206,13 @@ static void annotate_browser__draw_current_jump(struct ui_browser *browser)
 
 	ui_browser__set_color(browser, HE_COLORSET_JUMP_ARROWS);
 	__ui_browser__line_arrow(browser,
-				 pcnt_width + 2 + notes->widths.addr + width,
+				 pcnt_width + 2 + notes->src->widths.addr + width + cntr_width,
 				 from, to);
 
 	diff = is_fused(ab, cursor);
 	if (diff > 0) {
 		ui_browser__mark_fused(browser,
-				       pcnt_width + 3 + notes->widths.addr + width,
+				       pcnt_width + 3 + notes->src->widths.addr + width + cntr_width,
 				       from - diff, diff, to > from);
 	}
 }
@@ -405,6 +406,9 @@ static bool annotate_browser__toggle_source(struct annotate_browser *browser)
 		browser->b.index = al->idx_asm;
 	}
 
+	if (annotate_opts.hide_src_code_on_title)
+		annotate_opts.hide_src_code_on_title = false;
+
 	return true;
 }
 
@@ -438,7 +442,7 @@ static int sym_title(struct symbol *sym, struct map *map, char *title,
 		     size_t sz, int percent_type)
 {
 	return snprintf(title, sz, "%s  %s [Percent: %s]", sym->name,
-			map__dso(map)->long_name,
+			dso__long_name(map__dso(map)),
 			percent_type_str(percent_type));
 }
 
@@ -703,6 +707,18 @@ switch_percent_type(struct annotation_options *opts, bool base)
 	}
 }
 
+static int annotate__scnprintf_title(struct hists *hists, char *bf, size_t size)
+{
+	int printed = hists__scnprintf_title(hists, bf, size);
+
+	if (!annotate_opts.hide_src_code_on_title) {
+		printed += scnprintf(bf + printed, size - printed, " [source: %s]",
+				     annotate_opts.hide_src_code ? "OFF" : "On");
+	}
+
+	return printed;
+}
+
 static int annotate_browser__run(struct annotate_browser *browser,
 				 struct evsel *evsel,
 				 struct hist_browser_timer *hbt)
@@ -714,10 +730,11 @@ static int annotate_browser__run(struct annotate_browser *browser,
 	struct annotation *notes = symbol__annotation(ms->sym);
 	const char *help = "Press 'h' for help on key bindings";
 	int delay_secs = hbt ? hbt->refresh : 0;
+	char *br_cntr_text = NULL;
 	char title[256];
 	int key;
 
-	hists__scnprintf_title(hists, title, sizeof(title));
+	annotate__scnprintf_title(hists, title, sizeof(title));
 	if (annotate_browser__show(&browser->b, title, help) < 0)
 		return -1;
 
@@ -729,6 +746,8 @@ static int annotate_browser__run(struct annotate_browser *browser,
 	}
 
 	nd = browser->curr_hot;
+
+	annotation_br_cntr_abbr_list(&br_cntr_text, evsel, false);
 
 	while (1) {
 		key = ui_browser__run(&browser->b, delay_secs);
@@ -750,8 +769,8 @@ static int annotate_browser__run(struct annotate_browser *browser,
 				hbt->timer(hbt->arg);
 
 			if (delay_secs != 0) {
-				symbol__annotate_decay_histogram(sym, evsel->core.idx);
-				hists__scnprintf_title(hists, title, sizeof(title));
+				symbol__annotate_decay_histogram(sym, evsel);
+				annotate__scnprintf_title(hists, title, sizeof(title));
 				annotate_browser__show(&browser->b, title, help);
 			}
 			continue;
@@ -796,6 +815,7 @@ static int annotate_browser__run(struct annotate_browser *browser,
 		"r             Run available scripts\n"
 		"p             Toggle percent type [local/global]\n"
 		"b             Toggle percent base [period/hits]\n"
+		"B             Branch counter abbr list (Optional)\n"
 		"?             Search string backwards\n"
 		"f             Toggle showing offsets to full address\n");
 			continue;
@@ -815,6 +835,8 @@ static int annotate_browser__run(struct annotate_browser *browser,
 		case 's':
 			if (annotate_browser__toggle_source(browser))
 				ui_helpline__puts(help);
+			annotate__scnprintf_title(hists, title, sizeof(title));
+			annotate_browser__show(&browser->b, title, help);
 			continue;
 		case 'o':
 			annotate_opts.use_offset = !annotate_opts.use_offset;
@@ -901,8 +923,16 @@ show_sup_ins:
 		case 'p':
 		case 'b':
 			switch_percent_type(&annotate_opts, key == 'b');
-			hists__scnprintf_title(hists, title, sizeof(title));
+			annotate__scnprintf_title(hists, title, sizeof(title));
 			annotate_browser__show(&browser->b, title, help);
+			continue;
+		case 'B':
+			if (br_cntr_text)
+				ui_browser__help_window(&browser->b, br_cntr_text);
+			else {
+				ui_browser__help_window(&browser->b,
+							"\n The branch counter is not available.\n");
+			}
 			continue;
 		case 'f':
 			annotation__toggle_full_addr(notes, ms);
@@ -915,6 +945,7 @@ show_sup_ins:
 		case CTRL('c'):
 			goto out;
 		default:
+			ui_browser__warn_unhandled_hotkey(&browser->b, key, delay_secs, ", use 'h'/F1 to see actions");
 			continue;
 		}
 
@@ -923,6 +954,7 @@ show_sup_ins:
 	}
 out:
 	ui_browser__hide(&browser->b);
+	free(br_cntr_text);
 	return key;
 }
 
@@ -967,25 +999,25 @@ int symbol__tui_annotate(struct map_symbol *ms, struct evsel *evsel,
 		return -1;
 
 	dso = map__dso(ms->map);
-	if (dso->annotate_warned)
+	if (dso__annotate_warned(dso))
 		return -1;
 
-	if (not_annotated) {
+	if (not_annotated || !sym->annotate2) {
 		err = symbol__annotate2(ms, evsel, &browser.arch);
 		if (err) {
 			char msg[BUFSIZ];
-			dso->annotate_warned = true;
+			dso__set_annotate_warned(dso);
 			symbol__strerror_disassemble(ms, err, msg, sizeof(msg));
 			ui__error("Couldn't annotate %s:\n%s", sym->name, msg);
-			goto out_free_offsets;
+			return -1;
 		}
 	}
 
 	ui_helpline__push("Press ESC to exit");
 
-	browser.b.width = notes->src->max_line_len;
+	browser.b.width = notes->src->widths.max_line_len;
 	browser.b.nr_entries = notes->src->nr_entries;
-	browser.b.entries = &notes->src->source,
+	browser.b.entries = &notes->src->source;
 	browser.b.width += 18; /* Percentage */
 
 	if (annotate_opts.hide_src_code)
@@ -996,8 +1028,5 @@ int symbol__tui_annotate(struct map_symbol *ms, struct evsel *evsel,
 	if(not_annotated)
 		annotated_source__purge(notes->src);
 
-out_free_offsets:
-	if(not_annotated)
-		zfree(&notes->src->offsets);
 	return ret;
 }

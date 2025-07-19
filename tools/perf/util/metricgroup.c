@@ -14,6 +14,7 @@
 #include "pmus.h"
 #include "print-events.h"
 #include "smt.h"
+#include "tool_pmu.h"
 #include "expr.h"
 #include "rblist.h"
 #include <string.h>
@@ -44,6 +45,8 @@ struct metric_event *metricgroup__lookup(struct rblist *metric_events,
 	if (!metric_events)
 		return NULL;
 
+	if (evsel && evsel->metric_leader)
+		me.evsel = evsel->metric_leader;
 	nd = rblist__find(metric_events, &me);
 	if (nd)
 		return container_of(nd, struct metric_event, nd);
@@ -286,7 +289,7 @@ static int setup_metric_events(const char *pmu, struct hashmap *ids,
 	*out_metric_events = NULL;
 	ids_size = hashmap__size(ids);
 
-	metric_events = calloc(sizeof(void *), ids_size + 1);
+	metric_events = calloc(ids_size + 1, sizeof(void *));
 	if (!metric_events)
 		return -ENOMEM;
 
@@ -295,8 +298,8 @@ static int setup_metric_events(const char *pmu, struct hashmap *ids,
 		struct expr_id_data *val_ptr;
 
 		/* Don't match events for the wrong hybrid PMU. */
-		if (!all_pmus && ev->pmu_name && evsel__is_hybrid(ev) &&
-		    strcmp(ev->pmu_name, pmu))
+		if (!all_pmus && ev->pmu && evsel__is_hybrid(ev) &&
+		    strcmp(ev->pmu->name, pmu))
 			continue;
 		/*
 		 * Check for duplicate events with the same name. For
@@ -350,36 +353,35 @@ static int setup_metric_events(const char *pmu, struct hashmap *ids,
 	return 0;
 }
 
-static bool match_metric(const char *n, const char *list)
+static bool match_metric_or_groups(const char *metric_or_groups, const char *sought)
 {
 	int len;
 	char *m;
 
-	if (!list)
+	if (!sought)
 		return false;
-	if (!strcmp(list, "all"))
+	if (!strcmp(sought, "all"))
 		return true;
-	if (!n)
-		return !strcasecmp(list, "No_group");
-	len = strlen(list);
-	m = strcasestr(n, list);
-	if (!m)
-		return false;
-	if ((m == n || m[-1] == ';' || m[-1] == ' ') &&
-	    (m[len] == 0 || m[len] == ';'))
+	if (!metric_or_groups)
+		return !strcasecmp(sought, "No_group");
+	len = strlen(sought);
+	if (!strncasecmp(metric_or_groups, sought, len) &&
+	    (metric_or_groups[len] == 0 || metric_or_groups[len] == ';'))
 		return true;
-	return false;
+	m = strchr(metric_or_groups, ';');
+	return m && match_metric_or_groups(m + 1, sought);
 }
 
-static bool match_pm_metric(const struct pmu_metric *pm, const char *pmu, const char *metric)
+static bool match_pm_metric_or_groups(const struct pmu_metric *pm, const char *pmu,
+				      const char *metric_or_groups)
 {
 	const char *pm_pmu = pm->pmu ?: "cpu";
 
 	if (strcmp(pmu, "all") && strcmp(pm_pmu, pmu))
 		return false;
 
-	return match_metric(pm->metric_group, metric) ||
-	       match_metric(pm->metric_name, metric);
+	return match_metric_or_groups(pm->metric_group, metric_or_groups) ||
+	       match_metric_or_groups(pm->metric_name, metric_or_groups);
 }
 
 /** struct mep - RB-tree node for building printing information. */
@@ -394,6 +396,7 @@ struct mep {
 	const char *metric_expr;
 	const char *metric_threshold;
 	const char *metric_unit;
+	const char *pmu_name;
 };
 
 static int mep_cmp(struct rb_node *rb_node, const void *entry)
@@ -455,7 +458,7 @@ static int metricgroup__add_to_mep_groups(const struct pmu_metric *pm,
 	const char *g;
 	char *omg, *mg;
 
-	mg = strdup(pm->metric_group ?: "No_group");
+	mg = strdup(pm->metric_group ?: pm->metric_name);
 	if (!mg)
 		return -ENOMEM;
 	omg = mg;
@@ -466,7 +469,7 @@ static int metricgroup__add_to_mep_groups(const struct pmu_metric *pm,
 		if (strlen(g))
 			me = mep_lookup(groups, g, pm->metric_name);
 		else
-			me = mep_lookup(groups, "No_group", pm->metric_name);
+			me = mep_lookup(groups, pm->metric_name, pm->metric_name);
 
 		if (me) {
 			me->metric_desc = pm->desc;
@@ -474,6 +477,7 @@ static int metricgroup__add_to_mep_groups(const struct pmu_metric *pm,
 			me->metric_expr = pm->metric_expr;
 			me->metric_threshold = pm->metric_threshold;
 			me->metric_unit = pm->unit;
+			me->pmu_name = pm->pmu;
 		}
 	}
 	free(omg);
@@ -549,7 +553,8 @@ void metricgroup__print(const struct print_callbacks *print_cb, void *print_stat
 				me->metric_long_desc,
 				me->metric_expr,
 				me->metric_threshold,
-				me->metric_unit);
+				me->metric_unit,
+				me->pmu_name);
 		next = rb_next(node);
 		rblist__remove_node(&groups, node);
 	}
@@ -673,20 +678,20 @@ static int metricgroup__build_event_string(struct strbuf *events,
 	struct hashmap_entry *cur;
 	size_t bkt;
 	bool no_group = true, has_tool_events = false;
-	bool tool_events[PERF_TOOL_MAX] = {false};
+	bool tool_events[TOOL_PMU__EVENT_MAX] = {false};
 	int ret = 0;
 
 #define RETURN_IF_NON_ZERO(x) do { if (x) return x; } while (0)
 
 	hashmap__for_each_entry(ctx->ids, cur, bkt) {
 		const char *sep, *rsep, *id = cur->pkey;
-		enum perf_tool_event ev;
+		enum tool_pmu_event ev;
 
 		pr_debug("found event %s\n", id);
 
 		/* Always move tool events outside of the group. */
-		ev = perf_tool_event__from_str(id);
-		if (ev != PERF_TOOL_NONE) {
+		ev = tool_pmu__str_to_event(id);
+		if (ev != TOOL_PMU__EVENT_NONE) {
 			has_tool_events = true;
 			tool_events[ev] = true;
 			continue;
@@ -754,14 +759,14 @@ static int metricgroup__build_event_string(struct strbuf *events,
 	if (has_tool_events) {
 		int i;
 
-		perf_tool_event__for_each_event(i) {
+		tool_pmu__for_each_event(i) {
 			if (tool_events[i]) {
 				if (!no_group) {
 					ret = strbuf_addch(events, ',');
 					RETURN_IF_NON_ZERO(ret);
 				}
 				no_group = false;
-				ret = strbuf_addstr(events, perf_tool_event__to_str(i));
+				ret = strbuf_addstr(events, tool_pmu__event_to_str(i));
 				RETURN_IF_NON_ZERO(ret);
 			}
 		}
@@ -801,11 +806,6 @@ struct metricgroup_add_iter_data {
 	const struct pmu_metrics_table *table;
 };
 
-static bool metricgroup__find_metric(const char *pmu,
-				     const char *metric,
-				     const struct pmu_metrics_table *table,
-				     struct pmu_metric *pm);
-
 static int add_metric(struct list_head *metric_list,
 		      const struct pmu_metric *pm,
 		      const char *modifier,
@@ -816,6 +816,16 @@ static int add_metric(struct list_head *metric_list,
 		      struct metric *root_metric,
 		      const struct visited_metric *visited,
 		      const struct pmu_metrics_table *table);
+
+static int metricgroup__find_metric_callback(const struct pmu_metric *pm,
+					     const struct pmu_metrics_table *table  __maybe_unused,
+					     void *vdata)
+{
+	struct pmu_metric *copied_pm = vdata;
+
+	memcpy(copied_pm, pm, sizeof(*pm));
+	return 0;
+}
 
 /**
  * resolve_metric - Locate metrics within the root metric and recursively add
@@ -837,7 +847,7 @@ static int add_metric(struct list_head *metric_list,
  *       architecture perf is running upon.
  */
 static int resolve_metric(struct list_head *metric_list,
-			  const char *pmu,
+			  struct perf_pmu *pmu,
 			  const char *modifier,
 			  bool metric_no_group,
 			  bool metric_no_threshold,
@@ -867,7 +877,9 @@ static int resolve_metric(struct list_head *metric_list,
 	hashmap__for_each_entry(root_metric->pctx->ids, cur, bkt) {
 		struct pmu_metric pm;
 
-		if (metricgroup__find_metric(pmu, cur->pkey, table, &pm)) {
+		if (pmu_metrics_table__find_metric(table, pmu, cur->pkey,
+						   metricgroup__find_metric_callback,
+						   &pm) != PMU_METRICS__NOT_FOUND) {
 			pending = realloc(pending,
 					(pending_cnt + 1) * sizeof(struct to_resolve));
 			if (!pending)
@@ -1018,7 +1030,12 @@ static int __add_metric(struct list_head *metric_list,
 	}
 	if (!ret) {
 		/* Resolve referenced metrics. */
-		const char *pmu = pm->pmu ?: "cpu";
+		struct perf_pmu *pmu;
+
+		if (pm->pmu && pm->pmu[0] != '\0')
+			pmu = perf_pmus__find(pm->pmu);
+		else
+			pmu = perf_pmus__scan_core(/*pmu=*/ NULL);
 
 		ret = resolve_metric(metric_list, pmu, modifier, metric_no_group,
 				     metric_no_threshold, user_requested_cpu_list,
@@ -1033,44 +1050,6 @@ static int __add_metric(struct list_head *metric_list,
 		list_add(&root_metric->nd, metric_list);
 
 	return ret;
-}
-
-struct metricgroup__find_metric_data {
-	const char *pmu;
-	const char *metric;
-	struct pmu_metric *pm;
-};
-
-static int metricgroup__find_metric_callback(const struct pmu_metric *pm,
-					     const struct pmu_metrics_table *table  __maybe_unused,
-					     void *vdata)
-{
-	struct metricgroup__find_metric_data *data = vdata;
-	const char *pm_pmu = pm->pmu ?: "cpu";
-
-	if (strcmp(data->pmu, "all") && strcmp(pm_pmu, data->pmu))
-		return 0;
-
-	if (!match_metric(pm->metric_name, data->metric))
-		return 0;
-
-	memcpy(data->pm, pm, sizeof(*pm));
-	return 1;
-}
-
-static bool metricgroup__find_metric(const char *pmu,
-				     const char *metric,
-				     const struct pmu_metrics_table *table,
-				     struct pmu_metric *pm)
-{
-	struct metricgroup__find_metric_data data = {
-		.pmu = pmu,
-		.metric = metric,
-		.pm = pm,
-	};
-
-	return pmu_metrics_table__for_each_metric(table, metricgroup__find_metric_callback, &data)
-		? true : false;
 }
 
 static int add_metric(struct list_head *metric_list,
@@ -1118,7 +1097,7 @@ static int metricgroup__add_metric_sys_event_iter(const struct pmu_metric *pm,
 	struct metricgroup_add_iter_data *d = data;
 	int ret;
 
-	if (!match_pm_metric(pm, d->pmu, d->metric_name))
+	if (!match_pm_metric_or_groups(pm, d->pmu, d->metric_name))
 		return 0;
 
 	ret = add_metric(d->metric_list, pm, d->modifier, d->metric_no_group,
@@ -1147,14 +1126,14 @@ static int metric_list_cmp(void *priv __maybe_unused, const struct list_head *l,
 	int i, left_count, right_count;
 
 	left_count = hashmap__size(left->pctx->ids);
-	perf_tool_event__for_each_event(i) {
-		if (!expr__get_id(left->pctx, perf_tool_event__to_str(i), &data))
+	tool_pmu__for_each_event(i) {
+		if (!expr__get_id(left->pctx, tool_pmu__event_to_str(i), &data))
 			left_count--;
 	}
 
 	right_count = hashmap__size(right->pctx->ids);
-	perf_tool_event__for_each_event(i) {
-		if (!expr__get_id(right->pctx, perf_tool_event__to_str(i), &data))
+	tool_pmu__for_each_event(i) {
+		if (!expr__get_id(right->pctx, tool_pmu__event_to_str(i), &data))
 			right_count--;
 	}
 
@@ -1199,9 +1178,9 @@ static int metricgroup__add_metric_callback(const struct pmu_metric *pm,
 	struct metricgroup__add_metric_data *data = vdata;
 	int ret = 0;
 
-	if (pm->metric_expr && match_pm_metric(pm, data->pmu, data->metric_name)) {
+	if (pm->metric_expr && match_pm_metric_or_groups(pm, data->pmu, data->metric_name)) {
 		bool metric_no_group = data->metric_no_group ||
-			match_metric(pm->metricgroup_no_group, data->metric_name);
+			match_metric_or_groups(pm->metricgroup_no_group, data->metric_name);
 
 		data->has_match = true;
 		ret = add_metric(data->list, pm, data->modifier, metric_no_group,
@@ -1374,18 +1353,18 @@ static void metricgroup__free_metrics(struct list_head *metric_list)
  *               to true if tool event is found.
  */
 static void find_tool_events(const struct list_head *metric_list,
-			     bool tool_events[PERF_TOOL_MAX])
+			     bool tool_events[TOOL_PMU__EVENT_MAX])
 {
 	struct metric *m;
 
 	list_for_each_entry(m, metric_list, nd) {
 		int i;
 
-		perf_tool_event__for_each_event(i) {
+		tool_pmu__for_each_event(i) {
 			struct expr_id_data *data;
 
 			if (!tool_events[i] &&
-			    !expr__get_id(m->pctx, perf_tool_event__to_str(i), &data))
+			    !expr__get_id(m->pctx, tool_pmu__event_to_str(i), &data))
 				tool_events[i] = true;
 		}
 	}
@@ -1436,7 +1415,7 @@ err_out:
  * parse_ids - Build the event string for the ids and parse them creating an
  *             evlist. The encoded metric_ids are decoded.
  * @metric_no_merge: is metric sharing explicitly disabled.
- * @fake_pmu: used when testing metrics not supported by the current CPU.
+ * @fake_pmu: use a fake PMU when testing metrics not supported by the current CPU.
  * @ids: the event identifiers parsed from a metric.
  * @modifier: any modifiers added to the events.
  * @group_events: should events be placed in a weak group.
@@ -1444,9 +1423,9 @@ err_out:
  *               the overall list of metrics.
  * @out_evlist: the created list of events.
  */
-static int parse_ids(bool metric_no_merge, struct perf_pmu *fake_pmu,
+static int parse_ids(bool metric_no_merge, bool fake_pmu,
 		     struct expr_parse_ctx *ids, const char *modifier,
-		     bool group_events, const bool tool_events[PERF_TOOL_MAX],
+		     bool group_events, const bool tool_events[TOOL_PMU__EVENT_MAX],
 		     struct evlist **out_evlist)
 {
 	struct parse_events_error parse_error;
@@ -1471,9 +1450,9 @@ static int parse_ids(bool metric_no_merge, struct perf_pmu *fake_pmu,
 		 *    event1 if #smt_on else 0
 		 * Add a tool event to avoid a parse error on an empty string.
 		 */
-		perf_tool_event__for_each_event(i) {
+		tool_pmu__for_each_event(i) {
 			if (tool_events[i]) {
-				char *tmp = strdup(perf_tool_event__to_str(i));
+				char *tmp = strdup(tool_pmu__event_to_str(i));
 
 				if (!tmp)
 					return -ENOMEM;
@@ -1502,7 +1481,8 @@ static int parse_ids(bool metric_no_merge, struct perf_pmu *fake_pmu,
 	pr_debug("Parsing metric events '%s'\n", events.buf);
 	parse_events_error__init(&parse_error);
 	ret = __parse_events(parsed_evlist, events.buf, /*pmu_filter=*/NULL,
-			     &parse_error, fake_pmu, /*warn_if_reordered=*/false);
+			     &parse_error, fake_pmu, /*warn_if_reordered=*/false,
+			     /*fake_tp=*/false);
 	if (ret) {
 		parse_events_error__print(&parse_error, events.buf);
 		goto err_out;
@@ -1527,14 +1507,14 @@ static int parse_groups(struct evlist *perf_evlist,
 			bool metric_no_threshold,
 			const char *user_requested_cpu_list,
 			bool system_wide,
-			struct perf_pmu *fake_pmu,
+			bool fake_pmu,
 			struct rblist *metric_events_list,
 			const struct pmu_metrics_table *table)
 {
 	struct evlist *combined_evlist = NULL;
 	LIST_HEAD(metric_list);
 	struct metric *m;
-	bool tool_events[PERF_TOOL_MAX] = {false};
+	bool tool_events[TOOL_PMU__EVENT_MAX] = {false};
 	bool is_default = !strcmp(str, "Default");
 	int ret;
 
@@ -1690,16 +1670,19 @@ int metricgroup__parse_groups(struct evlist *perf_evlist,
 			      bool metric_no_threshold,
 			      const char *user_requested_cpu_list,
 			      bool system_wide,
+			      bool hardware_aware_grouping,
 			      struct rblist *metric_events)
 {
 	const struct pmu_metrics_table *table = pmu_metrics_table__find();
 
 	if (!table)
 		return -EINVAL;
+	if (hardware_aware_grouping)
+		pr_debug("Use hardware aware grouping instead of traditional metric grouping method\n");
 
 	return parse_groups(perf_evlist, pmu, str, metric_no_group, metric_no_merge,
 			    metric_no_threshold, user_requested_cpu_list, system_wide,
-			    /*fake_pmu=*/NULL, metric_events, table);
+			    /*fake_pmu=*/false, metric_events, table);
 }
 
 int metricgroup__parse_groups_test(struct evlist *evlist,
@@ -1713,34 +1696,37 @@ int metricgroup__parse_groups_test(struct evlist *evlist,
 			    /*metric_no_threshold=*/false,
 			    /*user_requested_cpu_list=*/NULL,
 			    /*system_wide=*/false,
-			    &perf_pmu__fake, metric_events, table);
+			    /*fake_pmu=*/true, metric_events, table);
 }
 
 struct metricgroup__has_metric_data {
 	const char *pmu;
-	const char *metric;
+	const char *metric_or_groups;
 };
-static int metricgroup__has_metric_callback(const struct pmu_metric *pm,
-					    const struct pmu_metrics_table *table __maybe_unused,
-					    void *vdata)
+static int metricgroup__has_metric_or_groups_callback(const struct pmu_metric *pm,
+						      const struct pmu_metrics_table *table
+							__maybe_unused,
+						      void *vdata)
 {
 	struct metricgroup__has_metric_data *data = vdata;
 
-	return match_pm_metric(pm, data->pmu, data->metric) ? 1 : 0;
+	return match_pm_metric_or_groups(pm, data->pmu, data->metric_or_groups) ? 1 : 0;
 }
 
-bool metricgroup__has_metric(const char *pmu, const char *metric)
+bool metricgroup__has_metric_or_groups(const char *pmu, const char *metric_or_groups)
 {
 	const struct pmu_metrics_table *table = pmu_metrics_table__find();
 	struct metricgroup__has_metric_data data = {
 		.pmu = pmu,
-		.metric = metric,
+		.metric_or_groups = metric_or_groups,
 	};
 
 	if (!table)
 		return false;
 
-	return pmu_metrics_table__for_each_metric(table, metricgroup__has_metric_callback, &data)
+	return pmu_metrics_table__for_each_metric(table,
+						  metricgroup__has_metric_or_groups_callback,
+						  &data)
 		? true : false;
 }
 

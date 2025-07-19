@@ -28,6 +28,11 @@ void __fsnotify_vfsmount_delete(struct vfsmount *mnt)
 	fsnotify_clear_marks_by_mount(mnt);
 }
 
+void __fsnotify_mntns_delete(struct mnt_namespace *mntns)
+{
+	fsnotify_clear_marks_by_mntns(mntns);
+}
+
 /**
  * fsnotify_unmount_inodes - an sb is unmounting.  handle any watched inodes.
  * @sb: superblock being unmounted.
@@ -89,11 +94,25 @@ static void fsnotify_unmount_inodes(struct super_block *sb)
 
 void fsnotify_sb_delete(struct super_block *sb)
 {
+	struct fsnotify_sb_info *sbinfo = fsnotify_sb_info(sb);
+
+	/* Were any marks ever added to any object on this sb? */
+	if (!sbinfo)
+		return;
+
 	fsnotify_unmount_inodes(sb);
 	fsnotify_clear_marks_by_sb(sb);
 	/* Wait for outstanding object references from connectors */
-	wait_var_event(&sb->s_fsnotify_connectors,
-		       !atomic_long_read(&sb->s_fsnotify_connectors));
+	wait_var_event(fsnotify_sb_watched_objects(sb),
+		       !atomic_long_read(fsnotify_sb_watched_objects(sb)));
+	WARN_ON(fsnotify_sb_has_priority_watchers(sb, FSNOTIFY_PRIO_CONTENT));
+	WARN_ON(fsnotify_sb_has_priority_watchers(sb,
+						  FSNOTIFY_PRIO_PRE_CONTENT));
+}
+
+void fsnotify_sb_free(struct super_block *sb)
+{
+	kfree(sb->s_fsnotify_info);
 }
 
 /*
@@ -103,16 +122,12 @@ void fsnotify_sb_delete(struct super_block *sb)
  * parent cares.  Thus when an event happens on a child it can quickly tell
  * if there is a need to find a parent and send the event to the parent.
  */
-void __fsnotify_update_child_dentry_flags(struct inode *inode)
+void fsnotify_set_children_dentry_flags(struct inode *inode)
 {
 	struct dentry *alias;
-	int watched;
 
 	if (!S_ISDIR(inode->i_mode))
 		return;
-
-	/* determine if the children should tell inode about their events */
-	watched = fsnotify_inode_watches_children(inode);
 
 	spin_lock(&inode->i_lock);
 	/* run all of the dentries associated with this inode.  Since this is a
@@ -129,10 +144,7 @@ void __fsnotify_update_child_dentry_flags(struct inode *inode)
 				continue;
 
 			spin_lock_nested(&child->d_lock, DENTRY_D_LOCK_NESTED);
-			if (watched)
-				child->d_flags |= DCACHE_FSNOTIFY_PARENT_WATCHED;
-			else
-				child->d_flags &= ~DCACHE_FSNOTIFY_PARENT_WATCHED;
+			child->d_flags |= DCACHE_FSNOTIFY_PARENT_WATCHED;
 			spin_unlock(&child->d_lock);
 		}
 		spin_unlock(&alias->d_lock);
@@ -140,8 +152,26 @@ void __fsnotify_update_child_dentry_flags(struct inode *inode)
 	spin_unlock(&inode->i_lock);
 }
 
+/*
+ * Lazily clear false positive PARENT_WATCHED flag for child whose parent had
+ * stopped watching children.
+ */
+static void fsnotify_clear_child_dentry_flag(struct inode *pinode,
+					     struct dentry *dentry)
+{
+	spin_lock(&dentry->d_lock);
+	/*
+	 * d_lock is a sufficient barrier to prevent observing a non-watched
+	 * parent state from before the fsnotify_set_children_dentry_flags()
+	 * or fsnotify_update_flags() call that had set PARENT_WATCHED.
+	 */
+	if (!fsnotify_inode_watches_children(pinode))
+		dentry->d_flags &= ~DCACHE_FSNOTIFY_PARENT_WATCHED;
+	spin_unlock(&dentry->d_lock);
+}
+
 /* Are inode/sb/mount interested in parent and name info with this event? */
-static bool fsnotify_event_needs_parent(struct inode *inode, struct mount *mnt,
+static bool fsnotify_event_needs_parent(struct inode *inode, __u32 mnt_mask,
 					__u32 mask)
 {
 	__u32 marks_mask = 0;
@@ -158,13 +188,42 @@ static bool fsnotify_event_needs_parent(struct inode *inode, struct mount *mnt,
 	BUILD_BUG_ON(FS_EVENTS_POSS_ON_CHILD & ~FS_EVENTS_POSS_TO_PARENT);
 
 	/* Did either inode/sb/mount subscribe for events with parent/name? */
-	marks_mask |= fsnotify_parent_needed_mask(inode->i_fsnotify_mask);
-	marks_mask |= fsnotify_parent_needed_mask(inode->i_sb->s_fsnotify_mask);
-	if (mnt)
-		marks_mask |= fsnotify_parent_needed_mask(mnt->mnt_fsnotify_mask);
+	marks_mask |= fsnotify_parent_needed_mask(
+				READ_ONCE(inode->i_fsnotify_mask));
+	marks_mask |= fsnotify_parent_needed_mask(
+				READ_ONCE(inode->i_sb->s_fsnotify_mask));
+	marks_mask |= fsnotify_parent_needed_mask(mnt_mask);
 
 	/* Did they subscribe for this event with parent/name info? */
 	return mask & marks_mask;
+}
+
+/* Are there any inode/mount/sb objects that watch for these events? */
+static inline bool fsnotify_object_watched(struct inode *inode, __u32 mnt_mask,
+					   __u32 mask)
+{
+	__u32 marks_mask = READ_ONCE(inode->i_fsnotify_mask) | mnt_mask |
+			   READ_ONCE(inode->i_sb->s_fsnotify_mask);
+
+	return mask & marks_mask & ALL_FSNOTIFY_EVENTS;
+}
+
+/* Report pre-content event with optional range info */
+int fsnotify_pre_content(const struct path *path, const loff_t *ppos,
+			 size_t count)
+{
+	struct file_range range;
+
+	/* Report page aligned range only when pos is known */
+	if (!ppos)
+		return fsnotify_path(path, FS_PRE_ACCESS);
+
+	range.path = path;
+	range.pos = PAGE_ALIGN_DOWN(*ppos);
+	range.count = PAGE_ALIGN(*ppos + count) - range.pos;
+
+	return fsnotify_parent(path->dentry, FS_PRE_ACCESS, &range,
+			       FSNOTIFY_EVENT_FILE_RANGE);
 }
 
 /*
@@ -179,7 +238,8 @@ int __fsnotify_parent(struct dentry *dentry, __u32 mask, const void *data,
 		      int data_type)
 {
 	const struct path *path = fsnotify_data_path(data, data_type);
-	struct mount *mnt = path ? real_mount(path->mnt) : NULL;
+	__u32 mnt_mask = path ?
+		READ_ONCE(real_mount(path->mnt)->mnt_fsnotify_mask) : 0;
 	struct inode *inode = d_inode(dentry);
 	struct dentry *parent;
 	bool parent_watched = dentry->d_flags & DCACHE_FSNOTIFY_PARENT_WATCHED;
@@ -190,16 +250,13 @@ int __fsnotify_parent(struct dentry *dentry, __u32 mask, const void *data,
 	struct qstr *file_name = NULL;
 	int ret = 0;
 
-	/*
-	 * Do inode/sb/mount care about parent and name info on non-dir?
-	 * Do they care about any event at all?
-	 */
-	if (!inode->i_fsnotify_marks && !inode->i_sb->s_fsnotify_marks &&
-	    (!mnt || !mnt->mnt_fsnotify_marks) && !parent_watched)
+	/* Optimize the likely case of nobody watching this path */
+	if (likely(!parent_watched &&
+		   !fsnotify_object_watched(inode, mnt_mask, mask)))
 		return 0;
 
 	parent = NULL;
-	parent_needed = fsnotify_event_needs_parent(inode, mnt, mask);
+	parent_needed = fsnotify_event_needs_parent(inode, mnt_mask, mask);
 	if (!parent_watched && !parent_needed)
 		goto notify;
 
@@ -208,7 +265,7 @@ int __fsnotify_parent(struct dentry *dentry, __u32 mask, const void *data,
 	p_inode = parent->d_inode;
 	p_mask = fsnotify_inode_watches_children(p_inode);
 	if (unlikely(parent_watched && !p_mask))
-		__fsnotify_update_child_dentry_flags(p_inode);
+		fsnotify_clear_child_dentry_flag(p_inode, dentry);
 
 	/*
 	 * Include parent/name in notification either if some notification
@@ -299,16 +356,19 @@ static int fsnotify_handle_event(struct fsnotify_group *group, __u32 mask,
 	if (!inode_mark)
 		return 0;
 
-	if (mask & FS_EVENT_ON_CHILD) {
-		/*
-		 * Some events can be sent on both parent dir and child marks
-		 * (e.g. FS_ATTRIB).  If both parent dir and child are
-		 * watching, report the event once to parent dir with name (if
-		 * interested) and once to child without name (if interested).
-		 * The child watcher is expecting an event without a file name
-		 * and without the FS_EVENT_ON_CHILD flag.
-		 */
-		mask &= ~FS_EVENT_ON_CHILD;
+	/*
+	 * Some events can be sent on both parent dir and child marks (e.g.
+	 * FS_ATTRIB).  If both parent dir and child are watching, report the
+	 * event once to parent dir with name (if interested) and once to child
+	 * without name (if interested).
+	 *
+	 * In any case regardless whether the parent is watching or not, the
+	 * child watcher is expecting an event without the FS_EVENT_ON_CHILD
+	 * flag. The file name is expected if and only if this is a directory
+	 * event.
+	 */
+	mask &= ~FS_EVENT_ON_CHILD;
+	if (!(mask & ALL_FSNOTIFY_DIRENT_EVENTS)) {
 		dir = NULL;
 		name = NULL;
 	}
@@ -365,7 +425,7 @@ static int send_to_group(__u32 mask, const void *data, int data_type,
 				     file_name, cookie, iter_info);
 }
 
-static struct fsnotify_mark *fsnotify_first_mark(struct fsnotify_mark_connector **connp)
+static struct fsnotify_mark *fsnotify_first_mark(struct fsnotify_mark_connector *const *connp)
 {
 	struct fsnotify_mark_connector *conn;
 	struct hlist_node *node = NULL;
@@ -483,13 +543,15 @@ int fsnotify(__u32 mask, const void *data, int data_type, struct inode *dir,
 {
 	const struct path *path = fsnotify_data_path(data, data_type);
 	struct super_block *sb = fsnotify_data_sb(data, data_type);
+	const struct fsnotify_mnt *mnt_data = fsnotify_data_mnt(data, data_type);
+	struct fsnotify_sb_info *sbinfo = sb ? fsnotify_sb_info(sb) : NULL;
 	struct fsnotify_iter_info iter_info = {};
 	struct mount *mnt = NULL;
 	struct inode *inode2 = NULL;
 	struct dentry *moved;
 	int inode2_type;
 	int ret = 0;
-	__u32 test_mask, marks_mask;
+	__u32 test_mask, marks_mask = 0;
 
 	if (path)
 		mnt = real_mount(path->mnt);
@@ -519,20 +581,23 @@ int fsnotify(__u32 mask, const void *data, int data_type, struct inode *dir,
 	 * SRCU because we have no references to any objects and do not
 	 * need SRCU to keep them "alive".
 	 */
-	if (!sb->s_fsnotify_marks &&
+	if ((!sbinfo || !sbinfo->sb_marks) &&
 	    (!mnt || !mnt->mnt_fsnotify_marks) &&
 	    (!inode || !inode->i_fsnotify_marks) &&
-	    (!inode2 || !inode2->i_fsnotify_marks))
+	    (!inode2 || !inode2->i_fsnotify_marks) &&
+	    (!mnt_data || !mnt_data->ns->n_fsnotify_marks))
 		return 0;
 
-	marks_mask = sb->s_fsnotify_mask;
+	if (sb)
+		marks_mask |= READ_ONCE(sb->s_fsnotify_mask);
 	if (mnt)
-		marks_mask |= mnt->mnt_fsnotify_mask;
+		marks_mask |= READ_ONCE(mnt->mnt_fsnotify_mask);
 	if (inode)
-		marks_mask |= inode->i_fsnotify_mask;
+		marks_mask |= READ_ONCE(inode->i_fsnotify_mask);
 	if (inode2)
-		marks_mask |= inode2->i_fsnotify_mask;
-
+		marks_mask |= READ_ONCE(inode2->i_fsnotify_mask);
+	if (mnt_data)
+		marks_mask |= READ_ONCE(mnt_data->ns->n_fsnotify_mask);
 
 	/*
 	 * If this is a modify event we may need to clear some ignore masks.
@@ -546,8 +611,10 @@ int fsnotify(__u32 mask, const void *data, int data_type, struct inode *dir,
 
 	iter_info.srcu_idx = srcu_read_lock(&fsnotify_mark_srcu);
 
-	iter_info.marks[FSNOTIFY_ITER_TYPE_SB] =
-		fsnotify_first_mark(&sb->s_fsnotify_marks);
+	if (sbinfo) {
+		iter_info.marks[FSNOTIFY_ITER_TYPE_SB] =
+			fsnotify_first_mark(&sbinfo->sb_marks);
+	}
 	if (mnt) {
 		iter_info.marks[FSNOTIFY_ITER_TYPE_VFSMOUNT] =
 			fsnotify_first_mark(&mnt->mnt_fsnotify_marks);
@@ -559,6 +626,10 @@ int fsnotify(__u32 mask, const void *data, int data_type, struct inode *dir,
 	if (inode2) {
 		iter_info.marks[inode2_type] =
 			fsnotify_first_mark(&inode2->i_fsnotify_marks);
+	}
+	if (mnt_data) {
+		iter_info.marks[FSNOTIFY_ITER_TYPE_MNTNS] =
+			fsnotify_first_mark(&mnt_data->ns->n_fsnotify_marks);
 	}
 
 	/*
@@ -583,11 +654,98 @@ out:
 }
 EXPORT_SYMBOL_GPL(fsnotify);
 
+#ifdef CONFIG_FANOTIFY_ACCESS_PERMISSIONS
+/*
+ * At open time we check fsnotify_sb_has_priority_watchers() and set the
+ * FMODE_NONOTIFY_ mode bits accordignly.
+ * Later, fsnotify permission hooks do not check if there are permission event
+ * watches, but that there were permission event watches at open time.
+ */
+void file_set_fsnotify_mode_from_watchers(struct file *file)
+{
+	struct dentry *dentry = file->f_path.dentry, *parent;
+	struct super_block *sb = dentry->d_sb;
+	__u32 mnt_mask, p_mask;
+
+	/* Is it a file opened by fanotify? */
+	if (FMODE_FSNOTIFY_NONE(file->f_mode))
+		return;
+
+	/*
+	 * Permission events is a super set of pre-content events, so if there
+	 * are no permission event watchers, there are also no pre-content event
+	 * watchers and this is implied from the single FMODE_NONOTIFY_PERM bit.
+	 */
+	if (likely(!fsnotify_sb_has_priority_watchers(sb,
+						FSNOTIFY_PRIO_CONTENT))) {
+		file_set_fsnotify_mode(file, FMODE_NONOTIFY_PERM);
+		return;
+	}
+
+	/*
+	 * If there are permission event watchers but no pre-content event
+	 * watchers, set FMODE_NONOTIFY | FMODE_NONOTIFY_PERM to indicate that.
+	 */
+	if ((!d_is_dir(dentry) && !d_is_reg(dentry)) ||
+	    likely(!fsnotify_sb_has_priority_watchers(sb,
+						FSNOTIFY_PRIO_PRE_CONTENT))) {
+		file_set_fsnotify_mode(file, FMODE_NONOTIFY | FMODE_NONOTIFY_PERM);
+		return;
+	}
+
+	/*
+	 * OK, there are some pre-content watchers. Check if anybody is
+	 * watching for pre-content events on *this* file.
+	 */
+	mnt_mask = READ_ONCE(real_mount(file->f_path.mnt)->mnt_fsnotify_mask);
+	if (unlikely(fsnotify_object_watched(d_inode(dentry), mnt_mask,
+				     FSNOTIFY_PRE_CONTENT_EVENTS))) {
+		/* Enable pre-content events */
+		file_set_fsnotify_mode(file, 0);
+		return;
+	}
+
+	/* Is parent watching for pre-content events on this file? */
+	if (dentry->d_flags & DCACHE_FSNOTIFY_PARENT_WATCHED) {
+		parent = dget_parent(dentry);
+		p_mask = fsnotify_inode_watches_children(d_inode(parent));
+		dput(parent);
+		if (p_mask & FSNOTIFY_PRE_CONTENT_EVENTS) {
+			/* Enable pre-content events */
+			file_set_fsnotify_mode(file, 0);
+			return;
+		}
+	}
+	/* Nobody watching for pre-content events from this file */
+	file_set_fsnotify_mode(file, FMODE_NONOTIFY | FMODE_NONOTIFY_PERM);
+}
+#endif
+
+void fsnotify_mnt(__u32 mask, struct mnt_namespace *ns, struct vfsmount *mnt)
+{
+	struct fsnotify_mnt data = {
+		.ns = ns,
+		.mnt_id = real_mount(mnt)->mnt_id_unique,
+	};
+
+	if (WARN_ON_ONCE(!ns))
+		return;
+
+	/*
+	 * This is an optimization as well as making sure fsnotify_init() has
+	 * been called.
+	 */
+	if (!ns->n_fsnotify_marks)
+		return;
+
+	fsnotify(mask, &data, FSNOTIFY_EVENT_MNT, NULL, NULL, NULL, 0);
+}
+
 static __init int fsnotify_init(void)
 {
 	int ret;
 
-	BUILD_BUG_ON(HWEIGHT32(ALL_FSNOTIFY_BITS) != 23);
+	BUILD_BUG_ON(HWEIGHT32(ALL_FSNOTIFY_BITS) != 26);
 
 	ret = init_srcu_struct(&fsnotify_mark_srcu);
 	if (ret)

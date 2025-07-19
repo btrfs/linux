@@ -87,8 +87,6 @@ static void ls_scfg_msi_compose_msg(struct irq_data *data, struct msi_msg *msg)
 {
 	struct ls_scfg_msi *msi_data = irq_data_get_irq_chip_data(data);
 
-	msg->address_hi = upper_32_bits(msi_data->msiir_addr);
-	msg->address_lo = lower_32_bits(msi_data->msiir_addr);
 	msg->data = data->hwirq;
 
 	if (msi_affinity_flag) {
@@ -98,7 +96,8 @@ static void ls_scfg_msi_compose_msg(struct irq_data *data, struct msi_msg *msg)
 		msg->data |= cpumask_first(mask);
 	}
 
-	iommu_dma_compose_msi_msg(irq_data_get_msi_desc(data), msg);
+	msi_msg_set_addr(irq_data_get_msi_desc(data), msg,
+			 msi_data->msiir_addr);
 }
 
 static int ls_scfg_msi_set_affinity(struct irq_data *irq_data,
@@ -216,17 +215,17 @@ static void ls_scfg_msi_irq_handler(struct irq_desc *desc)
 static int ls_scfg_msi_domains_init(struct ls_scfg_msi *msi_data)
 {
 	/* Initialize MSI domain parent */
-	msi_data->parent = irq_domain_add_linear(NULL,
-						 msi_data->irqs_num,
-						 &ls_scfg_msi_domain_ops,
-						 msi_data);
+	msi_data->parent = irq_domain_create_linear(NULL,
+						    msi_data->irqs_num,
+						    &ls_scfg_msi_domain_ops,
+						    msi_data);
 	if (!msi_data->parent) {
 		dev_err(&msi_data->pdev->dev, "failed to create IRQ domain\n");
 		return -ENOMEM;
 	}
 
 	msi_data->msi_domain = pci_msi_create_irq_domain(
-				of_node_to_fwnode(msi_data->pdev->dev.of_node),
+				of_fwnode_handle(msi_data->pdev->dev.of_node),
 				&ls_scfg_msi_domain_info,
 				msi_data->parent);
 	if (!msi_data->msi_domain) {
@@ -398,7 +397,7 @@ static int ls_scfg_msi_probe(struct platform_device *pdev)
 	return 0;
 }
 
-static int ls_scfg_msi_remove(struct platform_device *pdev)
+static void ls_scfg_msi_remove(struct platform_device *pdev)
 {
 	struct ls_scfg_msi *msi_data = platform_get_drvdata(pdev);
 	int i;
@@ -410,17 +409,15 @@ static int ls_scfg_msi_remove(struct platform_device *pdev)
 	irq_domain_remove(msi_data->parent);
 
 	platform_set_drvdata(pdev, NULL);
-
-	return 0;
 }
 
 static struct platform_driver ls_scfg_msi_driver = {
 	.driver = {
-		.name = "ls-scfg-msi",
-		.of_match_table = ls_scfg_msi_id,
+		.name		= "ls-scfg-msi",
+		.of_match_table	= ls_scfg_msi_id,
 	},
-	.probe = ls_scfg_msi_probe,
-	.remove = ls_scfg_msi_remove,
+	.probe		= ls_scfg_msi_probe,
+	.remove		= ls_scfg_msi_remove,
 };
 
 module_platform_driver(ls_scfg_msi_driver);

@@ -6,10 +6,7 @@
 #include <bpf/bpf_core_read.h>
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_tracing.h>
-
-#ifndef ARRAY_SIZE
-#define ARRAY_SIZE(x) (sizeof(x) / sizeof((x)[0]))
-#endif
+#include "bpf_misc.h"
 
 extern unsigned long CONFIG_HZ __kconfig;
 
@@ -62,6 +59,11 @@ static const struct sockopt_test sol_tcp_tests[] = {
 	{ .opt = TCP_THIN_LINEAR_TIMEOUTS, .flip = 1, },
 	{ .opt = TCP_USER_TIMEOUT, .new = 123400, .expected = 123400, },
 	{ .opt = TCP_NOTSENT_LOWAT, .new = 1314, .expected = 1314, },
+	{ .opt = TCP_BPF_SOCK_OPS_CB_FLAGS, .new = BPF_SOCK_OPS_ALL_CB_FLAGS,
+	  .expected = BPF_SOCK_OPS_ALL_CB_FLAGS, },
+	{ .opt = TCP_BPF_DELACK_MAX, .new = 30000, .expected = 30000, },
+	{ .opt = TCP_BPF_RTO_MIN, .new = 30000, .expected = 30000, },
+	{ .opt = TCP_RTO_MAX_MS, .new = 2000, .expected = 2000, },
 	{ .opt = 0, },
 };
 
@@ -81,6 +83,14 @@ struct loop_ctx {
 	struct sock *sk;
 };
 
+static bool sk_is_tcp(struct sock *sk)
+{
+	return (sk->__sk_common.skc_family == AF_INET ||
+		sk->__sk_common.skc_family == AF_INET6) &&
+		sk->sk_type == SOCK_STREAM &&
+		sk->sk_protocol == IPPROTO_TCP;
+}
+
 static int bpf_test_sockopt_flip(void *ctx, struct sock *sk,
 				 const struct sockopt_test *t,
 				 int level)
@@ -88,6 +98,9 @@ static int bpf_test_sockopt_flip(void *ctx, struct sock *sk,
 	int old, tmp, new, opt = t->opt;
 
 	opt = t->opt;
+
+	if (opt == SO_TXREHASH && !sk_is_tcp(sk))
+		return 0;
 
 	if (bpf_getsockopt(ctx, level, opt, &old, sizeof(old)))
 		return 1;
@@ -356,11 +369,30 @@ int BPF_PROG(socket_post_create, struct socket *sock, int family,
 	return 1;
 }
 
+SEC("cgroup/getsockopt")
+int _getsockopt(struct bpf_sockopt *ctx)
+{
+	struct bpf_sock *sk = ctx->sk;
+	int *optval = ctx->optval;
+	struct tcp_sock *tp;
+
+	if (!sk || ctx->level != SOL_TCP || ctx->optname != TCP_BPF_SOCK_OPS_CB_FLAGS)
+		return 1;
+
+	tp = bpf_core_cast(sk, struct tcp_sock);
+	if (ctx->optval + sizeof(int) <= ctx->optval_end) {
+		*optval = tp->bpf_sock_ops_cb_flags;
+		ctx->retval = 0;
+	}
+	return 1;
+}
+
 SEC("sockops")
 int skops_sockopt(struct bpf_sock_ops *skops)
 {
 	struct bpf_sock *bpf_sk = skops->sk;
 	struct sock *sk;
+	int flags;
 
 	if (!bpf_sk)
 		return 1;
@@ -387,9 +419,8 @@ int skops_sockopt(struct bpf_sock_ops *skops)
 		nr_passive += !(bpf_test_sockopt(skops, sk) ||
 				test_tcp_maxseg(skops, sk) ||
 				test_tcp_saved_syn(skops, sk));
-		bpf_sock_ops_cb_flags_set(skops,
-					  skops->bpf_sock_ops_cb_flags |
-					  BPF_SOCK_OPS_STATE_CB_FLAG);
+		flags = skops->bpf_sock_ops_cb_flags | BPF_SOCK_OPS_STATE_CB_FLAG;
+		bpf_setsockopt(skops, SOL_TCP, TCP_BPF_SOCK_OPS_CB_FLAGS, &flags, sizeof(flags));
 		break;
 	case BPF_SOCK_OPS_STATE_CB:
 		if (skops->args[1] == BPF_TCP_CLOSE_WAIT)

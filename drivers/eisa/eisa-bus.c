@@ -21,7 +21,7 @@
 
 struct eisa_device_info {
 	struct eisa_device_id id;
-	char name[50];
+	char name[EISA_DEVICE_INFO_NAME_SIZE];
 };
 
 #ifdef CONFIG_EISA_NAMES
@@ -105,10 +105,10 @@ static char __init *decode_eisa_sig(unsigned long addr)
 	return sig_str;
 }
 
-static int eisa_bus_match(struct device *dev, struct device_driver *drv)
+static int eisa_bus_match(struct device *dev, const struct device_driver *drv)
 {
 	struct eisa_device *edev = to_eisa_device(dev);
-	struct eisa_driver *edrv = to_eisa_driver(drv);
+	const struct eisa_driver *edrv = to_eisa_driver(drv);
 	const struct eisa_device_id *eids = edrv->id_table;
 
 	if (!eids)

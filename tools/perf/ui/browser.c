@@ -203,7 +203,7 @@ void ui_browser__refresh_dimensions(struct ui_browser *browser)
 void ui_browser__handle_resize(struct ui_browser *browser)
 {
 	ui__refresh_dimensions(false);
-	ui_browser__show(browser, browser->title, ui_helpline__current);
+	ui_browser__show(browser, browser->title ?: "", ui_helpline__current);
 	ui_browser__refresh(browser);
 }
 
@@ -231,6 +231,14 @@ int ui_browser__warning(struct ui_browser *browser, int timeout,
 	}
 
 	return key;
+}
+
+int ui_browser__warn_unhandled_hotkey(struct ui_browser *browser, int key, int timeout, const char *help)
+{
+	char kname[32];
+
+	key_name(key, kname, sizeof(kname));
+	return ui_browser__warning(browser, timeout, "\n'%s' key not associated%s!\n", kname, help ?: "");
 }
 
 int ui_browser__help_window(struct ui_browser *browser, const char *text)
@@ -287,7 +295,8 @@ int ui_browser__show(struct ui_browser *browser, const char *title,
 	mutex_lock(&ui__lock);
 	__ui_browser__show_title(browser, title);
 
-	browser->title = title;
+	free(browser->title);
+	browser->title = strdup(title);
 	zfree(&browser->helpline);
 
 	va_start(ap, helpline);
@@ -304,6 +313,7 @@ void ui_browser__hide(struct ui_browser *browser)
 	mutex_lock(&ui__lock);
 	ui_helpline__pop();
 	zfree(&browser->helpline);
+	zfree(&browser->title);
 	mutex_unlock(&ui__lock);
 }
 
@@ -449,6 +459,8 @@ int ui_browser__run(struct ui_browser *browser, int delay_secs)
 				goto out;
 			if (browser->horiz_scroll != 0)
 				--browser->horiz_scroll;
+			else
+				goto out;
 			break;
 		case K_PGDN:
 		case ' ':

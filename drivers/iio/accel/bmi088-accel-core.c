@@ -18,7 +18,7 @@
 #include <linux/pm_runtime.h>
 #include <linux/regmap.h>
 #include <linux/slab.h>
-#include <asm/unaligned.h>
+#include <linux/unaligned.h>
 
 #include "bmi088-accel.h"
 
@@ -114,11 +114,6 @@ enum bmi088_odr_modes {
 	BMI088_ACCEL_MODE_ODR_1600 = 0xc,
 };
 
-struct bmi088_scale_info {
-	int scale;
-	u8 reg_range;
-};
-
 struct bmi088_accel_chip_info {
 	const char *name;
 	u8 chip_id;
@@ -150,9 +145,9 @@ const struct regmap_config bmi088_regmap_conf = {
 	.val_bits = 8,
 	.max_register = 0x7E,
 	.volatile_table = &bmi088_volatile_table,
-	.cache_type = REGCACHE_RBTREE,
+	.cache_type = REGCACHE_MAPLE,
 };
-EXPORT_SYMBOL_NS_GPL(bmi088_regmap_conf, IIO_BMI088);
+EXPORT_SYMBOL_NS_GPL(bmi088_regmap_conf, "IIO_BMI088");
 
 static int bmi088_accel_power_up(struct bmi088_accel_data *data)
 {
@@ -318,12 +313,13 @@ static int bmi088_accel_read_raw(struct iio_dev *indio_dev,
 			if (ret)
 				return ret;
 
-			ret = iio_device_claim_direct_mode(indio_dev);
-			if (ret)
+			if (!iio_device_claim_direct(indio_dev)) {
+				ret = -EBUSY;
 				goto out_read_raw_pm_put;
+			}
 
 			ret = bmi088_accel_get_axis(data, chan, val);
-			iio_device_release_direct_mode(indio_dev);
+			iio_device_release_direct(indio_dev);
 			if (!ret)
 				ret = IIO_VAL_INT;
 
@@ -592,7 +588,7 @@ int bmi088_accel_core_probe(struct device *dev, struct regmap *regmap,
 
 	return ret;
 }
-EXPORT_SYMBOL_NS_GPL(bmi088_accel_core_probe, IIO_BMI088);
+EXPORT_SYMBOL_NS_GPL(bmi088_accel_core_probe, "IIO_BMI088");
 
 
 void bmi088_accel_core_remove(struct device *dev)
@@ -606,7 +602,7 @@ void bmi088_accel_core_remove(struct device *dev)
 	pm_runtime_set_suspended(dev);
 	bmi088_accel_power_down(data);
 }
-EXPORT_SYMBOL_NS_GPL(bmi088_accel_core_remove, IIO_BMI088);
+EXPORT_SYMBOL_NS_GPL(bmi088_accel_core_remove, "IIO_BMI088");
 
 static int bmi088_accel_runtime_suspend(struct device *dev)
 {

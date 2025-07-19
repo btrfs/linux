@@ -449,7 +449,7 @@ static int vcnl3020_write_event_config(struct iio_dev *indio_dev,
 				       const struct iio_chan_spec *chan,
 				       enum iio_event_type type,
 				       enum iio_event_direction dir,
-				       int state)
+				       bool state)
 {
 	switch (chan->type) {
 	case IIO_PROXIMITY:
@@ -653,7 +653,7 @@ static const struct of_device_id vcnl3020_of_match[] = {
 	{
 		.compatible = "vishay,vcnl3020",
 	},
-	{}
+	{ }
 };
 MODULE_DEVICE_TABLE(of, vcnl3020_of_match);
 

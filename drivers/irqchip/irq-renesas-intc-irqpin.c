@@ -513,8 +513,10 @@ static int intc_irqpin_probe(struct platform_device *pdev)
 	irq_chip->irq_set_wake = intc_irqpin_irq_set_wake;
 	irq_chip->flags	= IRQCHIP_MASK_ON_SUSPEND;
 
-	p->irq_domain = irq_domain_add_simple(dev->of_node, nirqs, 0,
-					      &intc_irqpin_irq_domain_ops, p);
+	p->irq_domain = irq_domain_create_simple(of_fwnode_handle(dev->of_node),
+						 nirqs, 0,
+						 &intc_irqpin_irq_domain_ops,
+						 p);
 	if (!p->irq_domain) {
 		ret = -ENXIO;
 		dev_err(dev, "cannot initialize irq domain\n");
@@ -561,14 +563,13 @@ err0:
 	return ret;
 }
 
-static int intc_irqpin_remove(struct platform_device *pdev)
+static void intc_irqpin_remove(struct platform_device *pdev)
 {
 	struct intc_irqpin_priv *p = platform_get_drvdata(pdev);
 
 	irq_domain_remove(p->irq_domain);
 	pm_runtime_put(&pdev->dev);
 	pm_runtime_disable(&pdev->dev);
-	return 0;
 }
 
 static int __maybe_unused intc_irqpin_suspend(struct device *dev)
@@ -587,9 +588,9 @@ static struct platform_driver intc_irqpin_device_driver = {
 	.probe		= intc_irqpin_probe,
 	.remove		= intc_irqpin_remove,
 	.driver		= {
-		.name	= "renesas_intc_irqpin",
-		.of_match_table = intc_irqpin_dt_ids,
-		.pm	= &intc_irqpin_pm_ops,
+		.name		= "renesas_intc_irqpin",
+		.of_match_table	= intc_irqpin_dt_ids,
+		.pm		= &intc_irqpin_pm_ops,
 	}
 };
 

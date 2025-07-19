@@ -16,10 +16,10 @@
  */
 
 #include <linux/delay.h>
-#include <linux/fwnode.h>
 #include <linux/init.h>
 #include <linux/i2c.h>
 #include <linux/module.h>
+#include <linux/property.h>
 #include <linux/slab.h>
 #include <linux/videodev2.h>
 
@@ -463,8 +463,8 @@ static int rdacm20_initialize(struct rdacm20_device *dev)
 		return ret;
 
 	/*
-	 *  Ensure that we have a good link configuration before attempting to
-	 *  identify the device.
+	 * Ensure that we have a good link configuration before attempting to
+	 * identify the device.
 	 */
 	ret = max9271_configure_i2c(&dev->serializer,
 				    MAX9271_I2CSLVSH_469NS_234NS |
@@ -575,10 +575,9 @@ static int rdacm20_probe(struct i2c_client *client)
 	dev->dev = &client->dev;
 	dev->serializer.client = client;
 
-	ret = of_property_read_u32_array(client->dev.of_node, "reg",
-					 dev->addrs, 2);
+	ret = device_property_read_u32_array(dev->dev, "reg", dev->addrs, 2);
 	if (ret < 0) {
-		dev_err(dev->dev, "Invalid DT reg property: %d\n", ret);
+		dev_err(dev->dev, "Invalid FW reg property: %d\n", ret);
 		return -EINVAL;
 	}
 

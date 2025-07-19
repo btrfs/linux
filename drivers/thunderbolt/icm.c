@@ -22,6 +22,7 @@
 #include "ctl.h"
 #include "nhi_regs.h"
 #include "tb.h"
+#include "tunnel.h"
 
 #define PCIE2CIO_CMD			0x30
 #define PCIE2CIO_CMD_TIMEOUT		BIT(31)
@@ -379,6 +380,27 @@ static bool icm_firmware_running(const struct tb_nhi *nhi)
 	return !!(val & REG_FW_STS_ICM_EN);
 }
 
+static void icm_xdomain_activated(struct tb_xdomain *xd, bool activated)
+{
+	struct tb_port *nhi_port, *dst_port;
+	struct tb *tb = xd->tb;
+
+	nhi_port = tb_switch_find_port(tb->root_switch, TB_TYPE_NHI);
+	dst_port = tb_xdomain_downstream_port(xd);
+
+	if (activated)
+		tb_tunnel_event(tb, TB_TUNNEL_ACTIVATED, TB_TUNNEL_DMA,
+				nhi_port, dst_port);
+	else
+		tb_tunnel_event(tb, TB_TUNNEL_DEACTIVATED, TB_TUNNEL_DMA,
+				nhi_port, dst_port);
+}
+
+static void icm_dp_event(struct tb *tb)
+{
+	tb_tunnel_event(tb, TB_TUNNEL_CHANGED, TB_TUNNEL_DP, NULL, NULL);
+}
+
 static bool icm_fr_is_supported(struct tb *tb)
 {
 	return !x86_apple_machine;
@@ -584,6 +606,7 @@ static int icm_fr_approve_xdomain_paths(struct tb *tb, struct tb_xdomain *xd,
 	if (reply.hdr.flags & ICM_FLAGS_ERROR)
 		return -EIO;
 
+	icm_xdomain_activated(xd, true);
 	return 0;
 }
 
@@ -603,6 +626,8 @@ static int icm_fr_disconnect_xdomain_paths(struct tb *tb, struct tb_xdomain *xd,
 	nhi_mailbox_cmd(tb->nhi, cmd, 1);
 	usleep_range(10, 50);
 	nhi_mailbox_cmd(tb->nhi, cmd, 2);
+
+	icm_xdomain_activated(xd, false);
 	return 0;
 }
 
@@ -1151,6 +1176,7 @@ static int icm_tr_approve_xdomain_paths(struct tb *tb, struct tb_xdomain *xd,
 	if (reply.hdr.flags & ICM_FLAGS_ERROR)
 		return -EIO;
 
+	icm_xdomain_activated(xd, true);
 	return 0;
 }
 
@@ -1191,7 +1217,12 @@ static int icm_tr_disconnect_xdomain_paths(struct tb *tb, struct tb_xdomain *xd,
 		return ret;
 
 	usleep_range(10, 50);
-	return icm_tr_xdomain_tear_down(tb, xd, 2);
+	ret = icm_tr_xdomain_tear_down(tb, xd, 2);
+	if (ret)
+		return ret;
+
+	icm_xdomain_activated(xd, false);
+	return 0;
 }
 
 static void
@@ -1718,6 +1749,9 @@ static void icm_handle_notification(struct work_struct *work)
 			if (tb_is_xdomain_enabled())
 				icm->xdomain_disconnected(tb, n->pkg);
 			break;
+		case ICM_EVENT_DP_CONFIG_CHANGED:
+			icm_dp_event(tb);
+			break;
 		case ICM_EVENT_RTD3_VETO:
 			icm->rtd3_veto(tb, n->pkg);
 			break;
@@ -2144,7 +2178,7 @@ static int icm_runtime_resume(struct tb *tb)
 	return 0;
 }
 
-static int icm_start(struct tb *tb)
+static int icm_start(struct tb *tb, bool not_used)
 {
 	struct icm *icm = tb_priv(tb);
 	int ret;
@@ -2532,6 +2566,7 @@ struct tb *icm_probe(struct tb_nhi *nhi)
 
 	case PCI_DEVICE_ID_INTEL_MAPLE_RIDGE_2C_NHI:
 	case PCI_DEVICE_ID_INTEL_MAPLE_RIDGE_4C_NHI:
+		icm->can_upgrade_nvm = true;
 		icm->is_supported = icm_tgl_is_supported;
 		icm->get_mode = icm_ar_get_mode;
 		icm->driver_ready = icm_tr_driver_ready;

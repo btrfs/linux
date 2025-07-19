@@ -228,7 +228,7 @@ static int bnxt_queue_remap(struct bnxt *bp, unsigned int lltc_mask)
 		}
 	}
 	if (bp->ieee_ets) {
-		int tc = netdev_get_num_tc(bp->dev);
+		int tc = bp->num_tc;
 
 		if (!tc)
 			tc = 1;
@@ -487,7 +487,9 @@ static int bnxt_ets_validate(struct bnxt *bp, struct ieee_ets *ets, u8 *tc)
 
 		if ((ets->tc_tx_bw[i] || ets->tc_tsa[i]) && i > bp->max_tc)
 			return -EINVAL;
+	}
 
+	for (i = 0; i < max_tc; i++) {
 		switch (ets->tc_tsa[i]) {
 		case IEEE_8021QAZ_TSA_STRICT:
 			break;

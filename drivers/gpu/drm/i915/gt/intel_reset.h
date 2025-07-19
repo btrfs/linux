@@ -28,6 +28,8 @@ void intel_gt_handle_error(struct intel_gt *gt,
 			   const char *fmt, ...);
 #define I915_ERROR_CAPTURE BIT(0)
 
+bool intel_gt_gpu_reset_clobbers_display(struct intel_gt *gt);
+
 void intel_gt_reset(struct intel_gt *gt,
 		    intel_engine_mask_t stalled_mask,
 		    const char *reason);
@@ -54,7 +56,8 @@ int intel_gt_terminally_wedged(struct intel_gt *gt);
 void intel_gt_set_wedged_on_init(struct intel_gt *gt);
 void intel_gt_set_wedged_on_fini(struct intel_gt *gt);
 
-int __intel_gt_reset(struct intel_gt *gt, intel_engine_mask_t engine_mask);
+int intel_gt_reset_engine(struct intel_engine_cs *engine);
+int intel_gt_reset_all_engines(struct intel_gt *gt);
 
 int intel_reset_guc(struct intel_gt *gt);
 

@@ -55,7 +55,7 @@ void dp_set_hw_test_pattern(
 		uint8_t *custom_pattern,
 		uint32_t custom_pattern_size);
 
-void dpcd_set_training_pattern(
+enum dc_status dpcd_set_training_pattern(
 	struct dc_link *link,
 	enum dc_dp_training_pattern training_pattern);
 
@@ -104,6 +104,7 @@ void start_clock_recovery_pattern_early(struct dc_link *link,
 
 void dp_decide_training_settings(
 		struct dc_link *link,
+		const struct link_resource *link_res,
 		const struct dc_link_settings *link_settings,
 		struct link_training_settings *lt_settings);
 
@@ -117,6 +118,7 @@ enum dc_dp_training_pattern decide_cr_training_pattern(
 		const struct dc_link_settings *link_settings);
 
 enum dc_dp_training_pattern decide_eq_training_pattern(struct dc_link *link,
+		const struct link_resource *link_res,
 		const struct dc_link_settings *link_settings);
 
 enum lttpr_mode dp_decide_lttpr_mode(struct dc_link *link,
@@ -182,4 +184,18 @@ uint32_t dp_translate_training_aux_read_interval(
 
 uint8_t dp_get_nibble_at_index(const uint8_t *buf,
 	uint32_t index);
+
+bool dp_check_interlane_aligned(union lane_align_status_updated align_status,
+		struct dc_link *link,
+		uint8_t retries);
+
+uint32_t dp_get_eq_aux_rd_interval(
+		const struct dc_link *link,
+		const struct link_training_settings *lt_settings,
+		uint32_t offset,
+		uint8_t retries);
+
+bool dp_check_dpcd_reqeust_status(const struct dc_link *link,
+		enum dc_status status);
+
 #endif /* __DC_LINK_DP_TRAINING_H__ */

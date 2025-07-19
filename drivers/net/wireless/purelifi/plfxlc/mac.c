@@ -7,7 +7,6 @@
 #include <linux/etherdevice.h>
 #include <linux/slab.h>
 #include <linux/usb.h>
-#include <linux/gpio.h>
 #include <linux/jiffies.h>
 #include <net/ieee80211_radiotap.h>
 
@@ -103,7 +102,6 @@ int plfxlc_mac_init_hw(struct ieee80211_hw *hw)
 void plfxlc_mac_release(struct plfxlc_mac *mac)
 {
 	plfxlc_chip_release(&mac->chip);
-	lockdep_assert_held(&mac->lock);
 }
 
 int plfxlc_op_start(struct ieee80211_hw *hw)
@@ -112,7 +110,7 @@ int plfxlc_op_start(struct ieee80211_hw *hw)
 	return 0;
 }
 
-void plfxlc_op_stop(struct ieee80211_hw *hw)
+void plfxlc_op_stop(struct ieee80211_hw *hw, bool suspend)
 {
 	struct plfxlc_mac *mac = plfxlc_hw_mac(hw);
 
@@ -685,6 +683,10 @@ static int plfxlc_set_rts_threshold(struct ieee80211_hw *hw, u32 value)
 }
 
 static const struct ieee80211_ops plfxlc_ops = {
+	.add_chanctx = ieee80211_emulate_add_chanctx,
+	.remove_chanctx = ieee80211_emulate_remove_chanctx,
+	.change_chanctx = ieee80211_emulate_change_chanctx,
+	.switch_vif_chanctx = ieee80211_emulate_switch_vif_chanctx,
 	.tx = plfxlc_op_tx,
 	.wake_tx_queue = ieee80211_handle_wake_tx_queue,
 	.start = plfxlc_op_start,

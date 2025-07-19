@@ -905,11 +905,11 @@ static int rt5660_set_dai_fmt(struct snd_soc_dai *dai, unsigned int fmt)
 	unsigned int reg_val = 0;
 
 	switch (fmt & SND_SOC_DAIFMT_MASTER_MASK) {
-	case SND_SOC_DAIFMT_CBM_CFM:
+	case SND_SOC_DAIFMT_CBP_CFP:
 		rt5660->master[dai->id] = 1;
 		break;
 
-	case SND_SOC_DAIFMT_CBS_CFS:
+	case SND_SOC_DAIFMT_CBC_CFC:
 		reg_val |= RT5660_I2S_MS_S;
 		rt5660->master[dai->id] = 0;
 		break;
@@ -1079,9 +1079,6 @@ static int rt5660_set_bias_level(struct snd_soc_component *component,
 		snd_soc_component_update_bits(component, RT5660_GEN_CTRL1,
 			RT5660_DIG_GATE_CTRL, RT5660_DIG_GATE_CTRL);
 
-		if (IS_ERR(rt5660->mclk))
-			break;
-
 		if (snd_soc_component_get_bias_level(component) == SND_SOC_BIAS_ON) {
 			clk_disable_unprepare(rt5660->mclk);
 		} else {
@@ -1227,7 +1224,7 @@ static const struct regmap_config rt5660_regmap = {
 };
 
 static const struct i2c_device_id rt5660_i2c_id[] = {
-	{ "rt5660", 0 },
+	{ "rt5660" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, rt5660_i2c_id);
@@ -1235,16 +1232,16 @@ MODULE_DEVICE_TABLE(i2c, rt5660_i2c_id);
 #ifdef CONFIG_OF
 static const struct of_device_id rt5660_of_match[] = {
 	{ .compatible = "realtek,rt5660", },
-	{},
+	{ }
 };
 MODULE_DEVICE_TABLE(of, rt5660_of_match);
 #endif
 
 #ifdef CONFIG_ACPI
 static const struct acpi_device_id rt5660_acpi_match[] = {
-	{ "10EC5660", 0 },
-	{ "10EC3277", 0 },
-	{ },
+	{ "10EC3277" },
+	{ "10EC5660" },
+	{ }
 };
 MODULE_DEVICE_TABLE(acpi, rt5660_acpi_match);
 #endif
@@ -1277,9 +1274,9 @@ static int rt5660_i2c_probe(struct i2c_client *i2c)
 		return -ENOMEM;
 
 	/* Check if MCLK provided */
-	rt5660->mclk = devm_clk_get(&i2c->dev, "mclk");
-	if (PTR_ERR(rt5660->mclk) == -EPROBE_DEFER)
-		return -EPROBE_DEFER;
+	rt5660->mclk = devm_clk_get_optional(&i2c->dev, "mclk");
+	if (IS_ERR(rt5660->mclk))
+		return PTR_ERR(rt5660->mclk);
 
 	i2c_set_clientdata(i2c, rt5660);
 

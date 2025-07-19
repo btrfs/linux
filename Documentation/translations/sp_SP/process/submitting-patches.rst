@@ -1,7 +1,7 @@
 .. include:: ../disclaimer-sp.rst
 
 :Original: :ref:`Documentation/process/submitting-patches.rst <submittingpatches>`
-:Translator: Carlos Bilbao <carlos.bilbao@amd.com>
+:Translator: Carlos Bilbao <carlos.bilbao.osdev@gmail.com>
 
 .. _sp_submittingpatches:
 
@@ -136,11 +136,11 @@ algo documentado en la web, referencie esto.
 
 Cuando se vincule a archivos de listas de correo, preferiblemente use el
 servicio de archivador de mensajes lore.kernel.org. Para crear la URL del
-enlace, utilice el contenido del encabezado ("header") ``Message-Id`` del
+enlace, utilice el contenido del encabezado ("header") ``Message-ID`` del
 mensaje sin los corchetes angulares que lo rodean.
 Por ejemplo::
 
-    Link: https://lore.kernel.org/r/30th.anniversary.repost@klaava.Helsinki.FI/
+    Link: https://lore.kernel.org/30th.anniversary.repost@klaava.Helsinki.FI
 
 Verifique el enlace para asegurarse de que realmente funciona y apunta al
 mensaje correspondiente.
@@ -257,10 +257,10 @@ archivo MAINTAINERS una lista específica de los subsistemas; su parche
 probablemente recibirá más atención allí. Sin embargo, no envíe spam a
 listas no relacionadas.
 
-Muchas listas relacionadas con el kernel están alojadas en vger.kernel.org;
+Muchas listas relacionadas con el kernel están alojadas en kernel.org;
 puedes encontrar un listado de estas en
-http://vger.kernel.org/vger-lists.html. Existen listas relacionadas con el
-kernel alojadas en otros lugares, no obstante.
+https://subspace.kernel.org. Existen listas relacionadas con el kernel
+alojadas en otros lugares, no obstante.
 
 ¡No envíe más de 15 parches a la vez a las listas de correo de vger!
 
@@ -355,6 +355,34 @@ diferencia con la presentación anterior (ver
 Consulte Documentation/process/email-clients.rst para obtener
 recomendaciones sobre clientes de correo electrónico y normas de etiqueta
 en la lista de correo.
+
+.. _sp_interleaved_replies:
+
+Uso de respuestas intercaladas recortadas en las discusiones por correo electrónico
+-----------------------------------------------------------------------------------
+
+Se desaconseja encarecidamente la publicación en la parte superior de las
+discusiones sobre el desarrollo del kernel de Linux. Las respuestas
+intercaladas (o "en línea") hacen que las conversaciones sean mucho más
+fáciles de seguir. Para obtener más detalles, consulte:
+https://en.wikipedia.org/wiki/Posting_style#Interleaved_style
+
+Como se cita frecuentemente en la lista de correo::
+
+  A: http://en.wikipedia.org/wiki/Top_post
+  Q: ¿Dónde puedo encontrar información sobre esto que se llama top-posting?
+  A: Porque desordena el orden en el que la gente normalmente lee el texto.
+  Q: ¿Por qué es tan malo el top-posting?
+  A: Top-posting.
+  Q: ¿Qué es lo más molesto del correo electrónico?
+
+Del mismo modo, por favor, recorte todas las citas innecesarias que no
+sean relevantes para su respuesta. Esto hace que las respuestas sean más
+fáciles de encontrar y ahorra tiempo y espacio. Para obtener más
+información, consulte: http://daringfireball.net/2007/07/on_top ::
+
+  A: No.
+  Q: ¿Debo incluir citas después de mi respuesta?
 
 .. _sp_resend_reminders:
 
@@ -878,9 +906,6 @@ Referencias
   <http://www.kroah.com/log/linux/maintainer-05.html>
 
   <http://www.kroah.com/log/linux/maintainer-06.html>
-
-NO!!!! Gente, no mas bombas enormes de parches a linux-kernel@vger.kernel.org!
-  <https://lore.kernel.org/r/20050711.125305.08322243.davem@davemloft.net>
 
 Kernel Documentation/process/coding-style.rst
 

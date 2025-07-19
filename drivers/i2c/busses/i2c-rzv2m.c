@@ -287,20 +287,15 @@ static int rzv2m_i2c_send_address(struct rzv2m_i2c_priv *priv,
 	int ret;
 
 	if (msg->flags & I2C_M_TEN) {
-		/*
-		 * 10-bit address
-		 *   addr_1: 5'b11110 | addr[9:8] | (R/nW)
-		 *   addr_2: addr[7:0]
-		 */
-		addr = 0xf0 | ((msg->addr & GENMASK(9, 8)) >> 7);
-		addr |= !!(msg->flags & I2C_M_RD);
-		/* Send 1st address(extend code) */
+		/* 10-bit address: Send 1st address(extend code) */
+		addr = i2c_10bit_addr_hi_from_msg(msg);
 		ret = rzv2m_i2c_write_with_ack(priv, addr);
 		if (ret)
 			return ret;
 
-		/* Send 2nd address */
-		ret = rzv2m_i2c_write_with_ack(priv, msg->addr & 0xff);
+		/* 10-bit address: Send 2nd address */
+		addr = i2c_10bit_addr_lo_from_msg(msg);
+		ret = rzv2m_i2c_write_with_ack(priv, addr);
 	} else {
 		/* 7-bit address */
 		addr = i2c_8bit_addr_from_msg(msg);
@@ -321,8 +316,8 @@ static int rzv2m_i2c_stop_condition(struct rzv2m_i2c_priv *priv)
 				  100, jiffies_to_usecs(priv->adap.timeout));
 }
 
-static int rzv2m_i2c_master_xfer_msg(struct rzv2m_i2c_priv *priv,
-				  struct i2c_msg *msg, int stop)
+static int rzv2m_i2c_xfer_msg(struct rzv2m_i2c_priv *priv,
+			      struct i2c_msg *msg, int stop)
 {
 	unsigned int count = 0;
 	int ret, read = !!(msg->flags & I2C_M_RD);
@@ -351,8 +346,8 @@ static int rzv2m_i2c_master_xfer_msg(struct rzv2m_i2c_priv *priv,
 	return ret;
 }
 
-static int rzv2m_i2c_master_xfer(struct i2c_adapter *adap,
-				 struct i2c_msg *msgs, int num)
+static int rzv2m_i2c_xfer(struct i2c_adapter *adap,
+			  struct i2c_msg *msgs, int num)
 {
 	struct rzv2m_i2c_priv *priv = i2c_get_adapdata(adap);
 	struct device *dev = priv->adap.dev.parent;
@@ -370,7 +365,7 @@ static int rzv2m_i2c_master_xfer(struct i2c_adapter *adap,
 
 	/* I2C main transfer */
 	for (i = 0; i < num; i++) {
-		ret = rzv2m_i2c_master_xfer_msg(priv, &msgs[i], i == (num - 1));
+		ret = rzv2m_i2c_xfer_msg(priv, &msgs[i], i == (num - 1));
 		if (ret < 0)
 			goto out;
 	}
@@ -407,8 +402,8 @@ static const struct i2c_adapter_quirks rzv2m_i2c_quirks = {
 	.flags = I2C_AQ_NO_ZERO_LEN,
 };
 
-static struct i2c_algorithm rzv2m_i2c_algo = {
-	.master_xfer = rzv2m_i2c_master_xfer,
+static const struct i2c_algorithm rzv2m_i2c_algo = {
+	.xfer = rzv2m_i2c_xfer,
 	.functionality = rzv2m_i2c_func,
 };
 
@@ -536,7 +531,7 @@ static struct platform_driver rzv2m_i2c_driver = {
 		.pm = pm_sleep_ptr(&rzv2m_i2c_pm_ops),
 	},
 	.probe	= rzv2m_i2c_probe,
-	.remove_new = rzv2m_i2c_remove,
+	.remove = rzv2m_i2c_remove,
 };
 module_platform_driver(rzv2m_i2c_driver);
 

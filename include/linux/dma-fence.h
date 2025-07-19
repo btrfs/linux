@@ -169,8 +169,8 @@ struct dma_fence_ops {
 	 * implementation know that there is another driver waiting on the
 	 * signal (ie. hw->sw case).
 	 *
-	 * This function can be called from atomic context, but not
-	 * from irq context, so normal spinlocks can be used.
+	 * This is called with irq's disabled, so only spinlocks which disable
+	 * IRQ's can be used in the code outside of this callback.
 	 *
 	 * A return value of false indicates the fence already passed,
 	 * or some failure occurred that made it impossible to enable
@@ -237,27 +237,6 @@ struct dma_fence_ops {
 	 * implementation.
 	 */
 	void (*release)(struct dma_fence *fence);
-
-	/**
-	 * @fence_value_str:
-	 *
-	 * Callback to fill in free-form debug info specific to this fence, like
-	 * the sequence number.
-	 *
-	 * This callback is optional.
-	 */
-	void (*fence_value_str)(struct dma_fence *fence, char *str, int size);
-
-	/**
-	 * @timeline_value_str:
-	 *
-	 * Fills in the current value of the timeline as a string, like the
-	 * sequence number. Note that the specific fence passed to this function
-	 * should not matter, drivers should only use it to look up the
-	 * corresponding timeline structures.
-	 */
-	void (*timeline_value_str)(struct dma_fence *fence,
-				   char *str, int size);
 
 	/**
 	 * @set_deadline:
@@ -574,6 +553,12 @@ int dma_fence_get_status(struct dma_fence *fence);
  * rather than success. This must be set before signaling (so that the value
  * is visible before any waiters on the signal callback are woken). This
  * helper exists to help catching erroneous setting of #dma_fence.error.
+ *
+ * Examples of error codes which drivers should use:
+ *
+ * * %-ENODATA	 This operation produced no data, no other operation affected.
+ * * %-ECANCELED All operations from the same context have been canceled.
+ * * %-ETIME	 Operation caused a timeout and potentially device reset.
  */
 static inline void dma_fence_set_error(struct dma_fence *fence,
 				       int error)

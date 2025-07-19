@@ -6,12 +6,18 @@ $schema: https://json-schema.org/draft-07/schema
 
 # Common defines
 $defs:
+  name:
+    type: string
+    pattern: ^[0-9a-z-]+$
+  name-cap:
+    type: string
+    pattern: ^[0-9a-zA-Z-]+$
   uint:
     type: integer
     minimum: 0
   len-or-define:
     type: [ string, integer ]
-    pattern: ^[0-9A-Za-z_]+( - 1)?$
+    pattern: ^[0-9A-Za-z_-]+( - 1)?$
     minimum: 0
 
 # Schema for specs
@@ -71,7 +77,7 @@ properties:
       additionalProperties: False
       properties:
         name:
-          type: string
+          $ref: '#/$defs/name'
         header:
           description: For C-compatible languages, header which already defines this value.
           type: string
@@ -98,7 +104,7 @@ properties:
                 additionalProperties: False
                 properties:
                   name:
-                    type: string
+                    $ref: '#/$defs/name'
                   value:
                     type: integer
                   doc:
@@ -124,7 +130,7 @@ properties:
             additionalProperties: False
             properties:
               name:
-                type: string
+                $ref: '#/$defs/name-cap'
               type:
                 description: |
                   The netlink attribute type. Members of type 'binary' or 'pad'
@@ -152,14 +158,23 @@ properties:
                   the right formatting mechanism when displaying values of this
                   type.
                 enum: [ hex, mac, fddi, ipv4, ipv6, uuid ]
+              struct:
+                description: Name of the nested struct type.
+                type: string
             if:
               properties:
                 type:
-                  oneOf:
-                    - const: binary
-                    - const: pad
+                  const: pad
             then:
               required: [ len ]
+            if:
+              properties:
+                type:
+                  const: binary
+            then:
+              oneOf:
+                - required: [ len ]
+                - required: [ struct ]
         # End genetlink-legacy
 
   attribute-sets:
@@ -174,14 +189,15 @@ properties:
         name:
           description: |
             Name used when referring to this space in other definitions, not used outside of the spec.
-          type: string
+          $ref: '#/$defs/name'
         name-prefix:
           description: |
             Prefix for the C enum name of the attributes. Default family[name]-set[name]-a-
           type: string
         enum-name:
-          description: Name for the enum type of the attribute.
-          type: string
+          description: |
+            Name for the enum type of the attribute, if empty no name will be used.
+          type: [ string, "null" ]
         doc:
           description: Documentation of the space.
           type: string
@@ -197,6 +213,9 @@ properties:
         attr-max-name:
           description: The explicit name for last member of attribute enum.
           type: string
+        header:
+          description: For C-compatible languages, header which already defines this attribute set.
+          type: string
         # End genetlink-c
         attributes:
           description: List of attributes in the space.
@@ -207,12 +226,12 @@ properties:
             additionalProperties: False
             properties:
               name:
-                type: string
+                $ref: '#/$defs/name'
               type: &attr-type
                 description: The netlink attribute type
                 enum: [ unused, pad, flag, binary, bitfield32,
-                        u8, u16, u32, u64, s8, s16, s32, s64,
-                        string, nest, array-nest, nest-type-value,
+                        uint, sint, u8, u16, u32, u64, s8, s16, s32, s64,
+                        string, nest, indexed-array, nest-type-value,
                         sub-message ]
               doc:
                 description: Documentation of the attribute.
@@ -261,6 +280,11 @@ properties:
                   exact-len:
                     description: Exact length for a string or a binary attribute.
                     $ref: '#/$defs/len-or-define'
+                  unterminated-ok:
+                    description: |
+                      For string attributes, do not check whether attribute
+                      contains the terminating null character.
+                    type: boolean
               sub-type: *attr-type
               display-hint: *display-hint
               # Start genetlink-c
@@ -362,14 +386,16 @@ properties:
           the prefix with the upper case name of the command, with dashes replaced by underscores.
         type: string
       enum-name:
-        description: Name for the enum type with commands.
-        type: string
+        description: |
+          Name for the enum type with commands, if empty no name will be used.
+        type: [ string, "null" ]
       async-prefix:
         description: Same as name-prefix but used to render notifications and events to separate enum.
         type: string
       async-enum:
-        description: Name for the enum type with notifications/events.
-        type: string
+        description: |
+          Name for the enum type with commands, if empty no name will be used.
+        type: [ string, "null" ]
       # Start genetlink-legacy
       fixed-header: &fixed-header
         description: |
@@ -388,7 +414,7 @@ properties:
           properties:
             name:
               description: Name of the operation, also defining its C enum value in uAPI.
-              type: string
+              $ref: '#/$defs/name'
             doc:
               description: Documentation for the command.
               type: string

@@ -31,6 +31,10 @@ try_modprobe act_skbedit
 try_modprobe act_skbmod
 try_modprobe act_tunnel_key
 try_modprobe act_vlan
+try_modprobe act_ife
+try_modprobe act_meta_mark
+try_modprobe act_meta_skbtcindex
+try_modprobe act_meta_skbprio
 try_modprobe cls_basic
 try_modprobe cls_bpf
 try_modprobe cls_cgroup
@@ -63,5 +67,4 @@ try_modprobe sch_hfsc
 try_modprobe sch_hhf
 try_modprobe sch_htb
 try_modprobe sch_teql
-./tdc.py -J`nproc` -c actions
-./tdc.py -J`nproc` -c qdisc
+./tdc.py -J`nproc`

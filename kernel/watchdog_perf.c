@@ -21,8 +21,6 @@
 #include <linux/perf_event.h>
 
 static DEFINE_PER_CPU(struct perf_event *, watchdog_ev);
-static DEFINE_PER_CPU(struct perf_event *, dead_event);
-static struct cpumask dead_events_mask;
 
 static atomic_t watchdog_cpus = ATOMIC_INIT(0);
 
@@ -75,14 +73,26 @@ static bool watchdog_check_timestamp(void)
 	__this_cpu_write(last_timestamp, now);
 	return true;
 }
-#else
-static inline bool watchdog_check_timestamp(void)
+
+static void watchdog_init_timestamp(void)
 {
-	return true;
+	__this_cpu_write(nmi_rearmed, 0);
+	__this_cpu_write(last_timestamp, ktime_get_mono_fast_ns());
 }
+#else
+static inline bool watchdog_check_timestamp(void) { return true; }
+static inline void watchdog_init_timestamp(void) { }
 #endif
 
 static struct perf_event_attr wd_hw_attr = {
+	.type		= PERF_TYPE_HARDWARE,
+	.config		= PERF_COUNT_HW_CPU_CYCLES,
+	.size		= sizeof(struct perf_event_attr),
+	.pinned		= 1,
+	.disabled	= 1,
+};
+
+static struct perf_event_attr fallback_wd_hw_attr = {
 	.type		= PERF_TYPE_HARDWARE,
 	.config		= PERF_COUNT_HW_CPU_CYCLES,
 	.size		= sizeof(struct perf_event_attr),
@@ -123,17 +133,24 @@ static int hardlockup_detector_event_create(void)
 	evt = perf_event_create_kernel_counter(wd_attr, cpu, NULL,
 					       watchdog_overflow_callback, NULL);
 	if (IS_ERR(evt)) {
+		wd_attr = &fallback_wd_hw_attr;
+		wd_attr->sample_period = hw_nmi_get_sample_period(watchdog_thresh);
+		evt = perf_event_create_kernel_counter(wd_attr, cpu, NULL,
+						       watchdog_overflow_callback, NULL);
+	}
+
+	if (IS_ERR(evt)) {
 		pr_debug("Perf event create on CPU %d failed with %ld\n", cpu,
 			 PTR_ERR(evt));
 		return PTR_ERR(evt);
 	}
+	WARN_ONCE(this_cpu_read(watchdog_ev), "unexpected watchdog_ev leak");
 	this_cpu_write(watchdog_ev, evt);
 	return 0;
 }
 
 /**
  * watchdog_hardlockup_enable - Enable the local event
- *
  * @cpu: The CPU to enable hard lockup on.
  */
 void watchdog_hardlockup_enable(unsigned int cpu)
@@ -147,12 +164,12 @@ void watchdog_hardlockup_enable(unsigned int cpu)
 	if (!atomic_fetch_inc(&watchdog_cpus))
 		pr_info("Enabled. Permanently consumes one hw-PMU counter.\n");
 
+	watchdog_init_timestamp();
 	perf_event_enable(this_cpu_read(watchdog_ev));
 }
 
 /**
  * watchdog_hardlockup_disable - Disable the local event
- *
  * @cpu: The CPU to enable hard lockup on.
  */
 void watchdog_hardlockup_disable(unsigned int cpu)
@@ -163,34 +180,10 @@ void watchdog_hardlockup_disable(unsigned int cpu)
 
 	if (event) {
 		perf_event_disable(event);
+		perf_event_release_kernel(event);
 		this_cpu_write(watchdog_ev, NULL);
-		this_cpu_write(dead_event, event);
-		cpumask_set_cpu(smp_processor_id(), &dead_events_mask);
 		atomic_dec(&watchdog_cpus);
 	}
-}
-
-/**
- * hardlockup_detector_perf_cleanup - Cleanup disabled events and destroy them
- *
- * Called from lockup_detector_cleanup(). Serialized by the caller.
- */
-void hardlockup_detector_perf_cleanup(void)
-{
-	int cpu;
-
-	for_each_cpu(cpu, &dead_events_mask) {
-		struct perf_event *event = per_cpu(dead_event, cpu);
-
-		/*
-		 * Required because for_each_cpu() reports  unconditionally
-		 * CPU0 as set on UP kernels. Sigh.
-		 */
-		if (event)
-			perf_event_release_kernel(event);
-		per_cpu(dead_event, cpu) = NULL;
-	}
-	cpumask_clear(&dead_events_mask);
 }
 
 /**
@@ -258,4 +251,32 @@ int __init watchdog_hardlockup_probe(void)
 		this_cpu_write(watchdog_ev, NULL);
 	}
 	return ret;
+}
+
+/**
+ * hardlockup_config_perf_event - Overwrite config of wd_hw_attr.
+ * @str: number which identifies the raw perf event to use
+ */
+void __init hardlockup_config_perf_event(const char *str)
+{
+	u64 config;
+	char buf[24];
+	char *comma = strchr(str, ',');
+
+	if (!comma) {
+		if (kstrtoull(str, 16, &config))
+			return;
+	} else {
+		unsigned int len = comma - str;
+
+		if (len > sizeof(buf))
+			return;
+
+		strscpy(buf, str, len);
+		if (kstrtoull(buf, 16, &config))
+			return;
+	}
+
+	wd_hw_attr.type = PERF_TYPE_RAW;
+	wd_hw_attr.config = config;
 }

@@ -164,11 +164,9 @@ static int virtio_gpu_conn_get_modes(struct drm_connector *connector)
 	struct drm_display_mode *mode = NULL;
 	int count, width, height;
 
-	if (output->edid) {
-		count = drm_add_edid_modes(connector, output->edid);
-		if (count)
-			return count;
-	}
+	count = drm_edid_connector_add_modes(connector);
+	if (count)
+		return count;
 
 	width  = le32_to_cpu(output->info.r.width);
 	height = le32_to_cpu(output->info.r.height);
@@ -191,7 +189,7 @@ static int virtio_gpu_conn_get_modes(struct drm_connector *connector)
 }
 
 static enum drm_mode_status virtio_gpu_conn_mode_valid(struct drm_connector *connector,
-				      struct drm_display_mode *mode)
+				      const struct drm_display_mode *mode)
 {
 	struct virtio_gpu_output *output =
 		drm_connector_to_virtio_gpu_output(connector);
@@ -369,5 +367,5 @@ void virtio_gpu_modeset_fini(struct virtio_gpu_device *vgdev)
 		return;
 
 	for (i = 0 ; i < vgdev->num_scanouts; ++i)
-		kfree(vgdev->outputs[i].edid);
+		drm_edid_free(vgdev->outputs[i].drm_edid);
 }

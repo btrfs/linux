@@ -101,6 +101,14 @@ struct msm_gpu_fault_info {
 	int flags;
 	const char *type;
 	const char *block;
+
+	/* Information about what we think/expect is the current SMMU state,
+	 * for example expected_ttbr0 should match smmu_info.ttbr0 which
+	 * was read back from SMMU registers.
+	 */
+	phys_addr_t pgtbl_ttbr0;
+	u64 ptes[4];
+	int asid;
 };
 
 /**
@@ -194,17 +202,6 @@ struct msm_gpu {
 	refcount_t sysprof_active;
 
 	/**
-	 * cur_ctx_seqno:
-	 *
-	 * The ctx->seqno value of the last context to submit rendering,
-	 * and the one with current pgtables installed (for generations
-	 * that support per-context pgtables).  Tracked by seqno rather
-	 * than pointer value to avoid dangling pointers, and cases where
-	 * a ctx can be freed and a new one created with the same address.
-	 */
-	int cur_ctx_seqno;
-
-	/**
 	 * lock:
 	 *
 	 * General lock for serializing all the gpu things.
@@ -255,12 +252,6 @@ struct msm_gpu {
 #define DRM_MSM_HANGCHECK_DEFAULT_PERIOD 500 /* in ms */
 #define DRM_MSM_HANGCHECK_PROGRESS_RETRIES 3
 	struct timer_list hangcheck_timer;
-
-	/* Fault info for most recent iova fault: */
-	struct msm_gpu_fault_info fault_info;
-
-	/* work for handling GPU ioval faults: */
-	struct kthread_work fault_work;
 
 	/* work for handling GPU recovery: */
 	struct kthread_work recover_work;
@@ -428,6 +419,14 @@ struct msm_file_private {
 	 * level.
 	 */
 	struct drm_sched_entity *entities[NR_SCHED_PRIORITIES * MSM_GPU_MAX_RINGS];
+
+	/**
+	 * ctx_mem:
+	 *
+	 * Total amount of memory of GEM buffers with handles attached for
+	 * this context.
+	 */
+	atomic64_t ctx_mem;
 };
 
 /**
@@ -519,6 +518,7 @@ struct msm_gpu_submitqueue {
 struct msm_gpu_state_bo {
 	u64 iova;
 	size_t size;
+	u32 flags;
 	void *data;
 	bool encoded;
 	char name[32];
@@ -555,12 +555,12 @@ struct msm_gpu_state {
 
 static inline void gpu_write(struct msm_gpu *gpu, u32 reg, u32 data)
 {
-	msm_writel(data, gpu->mmio + (reg << 2));
+	writel(data, gpu->mmio + (reg << 2));
 }
 
 static inline u32 gpu_read(struct msm_gpu *gpu, u32 reg)
 {
-	return msm_readl(gpu->mmio + (reg << 2));
+	return readl(gpu->mmio + (reg << 2));
 }
 
 static inline void gpu_rmw(struct msm_gpu *gpu, u32 reg, u32 mask, u32 or)
@@ -586,8 +586,8 @@ static inline u64 gpu_read64(struct msm_gpu *gpu, u32 reg)
 	 * when the lo is read, so make sure to read the lo first to trigger
 	 * that
 	 */
-	val = (u64) msm_readl(gpu->mmio + (reg << 2));
-	val |= ((u64) msm_readl(gpu->mmio + ((reg + 1) << 2)) << 32);
+	val = (u64) readl(gpu->mmio + (reg << 2));
+	val |= ((u64) readl(gpu->mmio + ((reg + 1) << 2)) << 32);
 
 	return val;
 }
@@ -595,8 +595,8 @@ static inline u64 gpu_read64(struct msm_gpu *gpu, u32 reg)
 static inline void gpu_write64(struct msm_gpu *gpu, u32 reg, u64 val)
 {
 	/* Why not a writeq here? Read the screed above */
-	msm_writel(lower_32_bits(val), gpu->mmio + (reg << 2));
-	msm_writel(upper_32_bits(val), gpu->mmio + ((reg + 1) << 2));
+	writel(lower_32_bits(val), gpu->mmio + (reg << 2));
+	writel(upper_32_bits(val), gpu->mmio + ((reg + 1) << 2));
 }
 
 int msm_gpu_pm_suspend(struct msm_gpu *gpu);
@@ -662,6 +662,7 @@ msm_gpu_create_private_address_space(struct msm_gpu *gpu, struct task_struct *ta
 void msm_gpu_cleanup(struct msm_gpu *gpu);
 
 struct msm_gpu *adreno_load_gpu(struct drm_device *dev);
+bool adreno_has_gpu(struct device_node *node);
 void __init adreno_register(void);
 void __exit adreno_unregister(void);
 
@@ -698,6 +699,8 @@ static inline void msm_gpu_crashstate_put(struct msm_gpu *gpu)
 
 	mutex_unlock(&gpu->lock);
 }
+
+void msm_gpu_fault_crashstate_capture(struct msm_gpu *gpu, struct msm_gpu_fault_info *fault_info);
 
 /*
  * Simple macro to semi-cleanly add the MAP_PRIV flag for targets that can

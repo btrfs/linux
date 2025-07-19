@@ -518,7 +518,7 @@ struct drm_gpuvm_exec {
 	/**
 	 * @flags: the flags for the struct drm_exec
 	 */
-	uint32_t flags;
+	u32 flags;
 
 	/**
 	 * @vm: the &drm_gpuvm to lock its DMA reservations
@@ -812,6 +812,11 @@ enum drm_gpuva_op_type {
 	 * @DRM_GPUVA_OP_PREFETCH: the prefetch op type
 	 */
 	DRM_GPUVA_OP_PREFETCH,
+
+	/**
+	 * @DRM_GPUVA_OP_DRIVER: the driver defined op type
+	 */
+	DRM_GPUVA_OP_DRIVER,
 };
 
 /**

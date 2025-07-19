@@ -24,7 +24,7 @@
 #define THREAD_SIZE     (PAGE_SIZE << THREAD_SIZE_ORDER)
 #define THREAD_SHIFT	(PAGE_SHIFT << THREAD_SIZE_ORDER)
 
-#ifndef __ASSEMBLY__
+#ifndef __ASSEMBLER__
 
 #include <linux/thread_info.h>
 
@@ -38,7 +38,7 @@
 struct thread_info {
 	unsigned long flags;		/* low level flags */
 	unsigned long ksp;		/* kernel mode stack top in __switch_to */
-	int preempt_count;		/* 0 => preemptable, <0 => BUG */
+	int preempt_count;		/* 0 => preemptible, <0 => BUG */
 	int cpu;			/* current CPU */
 	unsigned long thr_ptr;		/* TLS ptr */
 	struct task_struct *task;	/* main task structure */
@@ -62,7 +62,7 @@ static inline __attribute_const__ struct thread_info *current_thread_info(void)
 	return (struct thread_info *)(sp & ~(THREAD_SIZE - 1));
 }
 
-#endif /* !__ASSEMBLY__ */
+#endif /* !__ASSEMBLER__ */
 
 /*
  * thread information flags

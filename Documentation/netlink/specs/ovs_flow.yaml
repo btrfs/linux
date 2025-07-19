@@ -216,7 +216,7 @@ definitions:
     type: struct
     members:
       -
-        name: nd_target
+        name: nd-target
         type: binary
         len: 16
         byte-order: big-endian
@@ -258,12 +258,12 @@ definitions:
     type: struct
     members:
       -
-        name: vlan_tpid
+        name: vlan-tpid
         type: u16
         byte-order: big-endian
         doc: Tag protocol identifier (TPID) to push.
       -
-        name: vlan_tci
+        name: vlan-tci
         type: u16
         byte-order: big-endian
         doc: Tag control identifier (TCI) to push.
@@ -727,6 +727,12 @@ attribute-sets:
         name: dec-ttl
         type: nest
         nested-attributes: dec-ttl-attrs
+      -
+        name: psample
+        type: nest
+        nested-attributes: psample-attrs
+        doc: |
+          Sends a packet sample to psample for external observation.
   -
     name: tunnel-key-attrs
     enum-name: ovs-tunnel-key-attr
@@ -938,6 +944,17 @@ attribute-sets:
       -
         name: gbp
         type: u32
+  -
+    name: psample-attrs
+    enum-name: ovs-psample-attr
+    name-prefix: ovs-psample-attr-
+    attributes:
+      -
+        name: group
+        type: u32
+      -
+        name: cookie
+        type: binary
 
 operations:
   name-prefix: ovs-flow-cmd-

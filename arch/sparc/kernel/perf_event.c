@@ -979,7 +979,7 @@ out:
 
 static void sparc_pmu_start(struct perf_event *event, int flags);
 
-/* On this PMU each PIC has it's own PCR control register.  */
+/* On this PMU each PIC has its own PCR control register.  */
 static void calculate_multiple_pcrs(struct cpu_hw_events *cpuc)
 {
 	int i;
@@ -1668,8 +1668,7 @@ static int __kprobes perf_event_nmi_handler(struct notifier_block *self,
 		if (!sparc_perf_event_set_period(event, hwc, idx))
 			continue;
 
-		if (perf_event_overflow(event, &data, regs))
-			sparc_pmu_stop(event, 0);
+		perf_event_overflow(event, &data, regs);
 	}
 
 	finish_clock = sched_clock();

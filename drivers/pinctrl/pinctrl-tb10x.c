@@ -820,14 +820,15 @@ MODULE_DEVICE_TABLE(of, tb10x_pinctrl_dt_ids);
 
 static struct platform_driver tb10x_pinctrl_pdrv = {
 	.probe   = tb10x_pinctrl_probe,
-	.remove_new = tb10x_pinctrl_remove,
+	.remove  = tb10x_pinctrl_remove,
 	.driver  = {
 		.name  = "tb10x_pinctrl",
-		.of_match_table = of_match_ptr(tb10x_pinctrl_dt_ids),
+		.of_match_table = tb10x_pinctrl_dt_ids,
 	}
 };
 
 module_platform_driver(tb10x_pinctrl_pdrv);
 
 MODULE_AUTHOR("Christian Ruppert <christian.ruppert@abilis.com>");
+MODULE_DESCRIPTION("Abilis Systems TB10x pinctrl driver");
 MODULE_LICENSE("GPL");
