@@ -76,7 +76,7 @@
 	},
 	.prog_type = BPF_PROG_TYPE_SCHED_CLS,
 	.result = REJECT,
-	.errstr = "R1 must have zero offset when passed to release func or trusted arg to kfunc",
+	.errstr = "arg#0 expected pointer to ctx, but got fp",
 	.fixup_kfunc_btf_id = {
 		{ "bpf_kfunc_call_test_pass_ctx", 2 },
 	},
@@ -274,6 +274,19 @@
 	},
 	.result_unpriv = REJECT,
 	.result = ACCEPT,
+},
+{
+	"calls: invalid kfunc call: must provide (attach_prog_fd, btf_id) pair when freplace",
+	.insns = {
+	BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, BPF_PSEUDO_KFUNC_CALL, 0, 0),
+	BPF_EXIT_INSN(),
+	},
+	.prog_type = BPF_PROG_TYPE_EXT,
+	.result = REJECT,
+	.errstr = "Tracing programs must provide btf_id",
+	.fixup_kfunc_btf_id = {
+		{ "bpf_dynptr_from_skb", 0 },
+	},
 },
 {
 	"calls: basic sanity",
@@ -2239,7 +2252,7 @@
 	BPF_EXIT_INSN(),
 	},
 	.fixup_map_hash_48b = { 7 },
-	.errstr_unpriv = "invalid indirect read from stack R2 off -8+0 size 8",
+	.errstr_unpriv = "invalid read from stack R2 off -8+0 size 8",
 	.result_unpriv = REJECT,
 	/* in privileged mode reads from uninitialized stack locations are permitted */
 	.result = ACCEPT,
@@ -2395,4 +2408,28 @@
 	.result_unpriv = REJECT,
 	.errstr_unpriv = "",
 	.prog_type = BPF_PROG_TYPE_CGROUP_SKB,
+},
+{
+	"calls: several args with ref_obj_id",
+	.insns = {
+	/* Reserve at least sizeof(struct iphdr) bytes in the ring buffer.
+	 * With a smaller size, the verifier would reject the call to
+	 * bpf_tcp_raw_gen_syncookie_ipv4 before we can reach the
+	 * ref_obj_id error.
+	 */
+	BPF_MOV64_IMM(BPF_REG_2, 20),
+	BPF_MOV64_IMM(BPF_REG_3, 0),
+	BPF_LD_MAP_FD(BPF_REG_1, 0),
+	BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 0, 0, BPF_FUNC_ringbuf_reserve),
+	/* if r0 == 0 goto <exit> */
+	BPF_JMP_IMM(BPF_JEQ, BPF_REG_0, 0, 3),
+	BPF_MOV64_REG(BPF_REG_1, BPF_REG_0),
+	BPF_MOV64_REG(BPF_REG_2, BPF_REG_0),
+	BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 0, 0, BPF_FUNC_tcp_raw_gen_syncookie_ipv4),
+	BPF_EXIT_INSN(),
+	},
+	.fixup_map_ringbuf = { 2 },
+	.result = REJECT,
+	.errstr = "more than one arg with ref_obj_id",
+	.prog_type = BPF_PROG_TYPE_SCHED_CLS,
 },

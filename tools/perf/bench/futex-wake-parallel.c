@@ -57,9 +57,12 @@ static struct stats waketime_stats, wakeup_stats;
 static unsigned int threads_starting;
 static int futex_flag = 0;
 
-static struct bench_futex_parameters params;
+static struct bench_futex_parameters params = {
+	.nbuckets = -1,
+};
 
 static const struct option options[] = {
+	OPT_INTEGER( 'b', "buckets", &params.nbuckets, "Specify amount of hash buckets"),
 	OPT_UINTEGER('t', "threads", &params.nthreads, "Specify amount of threads"),
 	OPT_UINTEGER('w', "nwakers", &params.nwakes, "Specify amount of waking threads"),
 	OPT_BOOLEAN( 's', "silent",  &params.silent, "Silent mode: do not display data/details"),
@@ -149,7 +152,7 @@ static void block_threads(pthread_t *w, struct perf_cpu_map *cpu)
 {
 	cpu_set_t *cpuset;
 	unsigned int i;
-	int nrcpus = perf_cpu_map__nr(cpu);
+	int nrcpus = cpu__max_cpu().cpu;
 	size_t size;
 
 	threads_starting = params.nthreads;
@@ -218,6 +221,7 @@ static void print_summary(void)
 	       params.nthreads,
 	       waketime_avg / USEC_PER_MSEC,
 	       rel_stddev_stats(waketime_stddev, waketime_avg));
+	futex_print_nbuckets(&params);
 }
 
 
@@ -291,6 +295,8 @@ int bench_futex_wake_parallel(int argc, const char **argv)
 	if (!params.fshared)
 		futex_flag = FUTEX_PRIVATE_FLAG;
 
+	futex_set_nbuckets_param(&params);
+
 	printf("Run summary [PID %d]: blocking on %d threads (at [%s] "
 	       "futex %p), %d threads waking up %d at a time.\n\n",
 	       getpid(), params.nthreads, params.fshared ? "shared":"private",
@@ -318,7 +324,7 @@ int bench_futex_wake_parallel(int argc, const char **argv)
 		cond_broadcast(&thread_worker);
 		mutex_unlock(&thread_lock);
 
-		usleep(100000);
+		usleep(200000);
 
 		/* Ok, all threads are patiently blocked, start waking folks up */
 		wakeup_threads(waking_worker);

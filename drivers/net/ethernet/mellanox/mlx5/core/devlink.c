@@ -35,6 +35,55 @@ static u16 mlx5_fw_ver_subminor(u32 version)
 	return version & 0xffff;
 }
 
+static int mlx5_devlink_serial_numbers_put(struct mlx5_core_dev *dev,
+					   struct devlink_info_req *req,
+					   struct netlink_ext_ack *extack)
+{
+	struct pci_dev *pdev = dev->pdev;
+	unsigned int vpd_size, kw_len;
+	char *str, *end;
+	u8 *vpd_data;
+	int err = 0;
+	int start;
+
+	vpd_data = pci_vpd_alloc(pdev, &vpd_size);
+	if (IS_ERR(vpd_data))
+		return 0;
+
+	start = pci_vpd_find_ro_info_keyword(vpd_data, vpd_size,
+					     PCI_VPD_RO_KEYWORD_SERIALNO, &kw_len);
+	if (start >= 0) {
+		str = kstrndup(vpd_data + start, kw_len, GFP_KERNEL);
+		if (!str) {
+			err = -ENOMEM;
+			goto end;
+		}
+		end = strchrnul(str, ' ');
+		*end = '\0';
+		err = devlink_info_board_serial_number_put(req, str);
+		kfree(str);
+		if (err)
+			goto end;
+	}
+
+	start = pci_vpd_find_ro_info_keyword(vpd_data, vpd_size, "V3", &kw_len);
+	if (start >= 0) {
+		str = kstrndup(vpd_data + start, kw_len, GFP_KERNEL);
+		if (!str) {
+			err = -ENOMEM;
+			goto end;
+		}
+		err = devlink_info_serial_number_put(req, str);
+		kfree(str);
+		if (err)
+			goto end;
+	}
+
+end:
+	kfree(vpd_data);
+	return err;
+}
+
 #define DEVLINK_FW_STRING_LEN 32
 
 static int
@@ -45,6 +94,13 @@ mlx5_devlink_info_get(struct devlink *devlink, struct devlink_info_req *req,
 	char version_str[DEVLINK_FW_STRING_LEN];
 	u32 running_fw, stored_fw;
 	int err;
+
+	if (!mlx5_core_is_pf(dev))
+		return 0;
+
+	err = mlx5_devlink_serial_numbers_put(dev, req, extack);
+	if (err)
+		return err;
 
 	err = devlink_info_version_fixed_put(req, "fw.psid", dev->board_id);
 	if (err)
@@ -154,6 +210,12 @@ static int mlx5_devlink_reload_down(struct devlink *devlink, bool netns_change,
 
 	if (mlx5_core_is_mp_slave(dev)) {
 		NL_SET_ERR_MSG_MOD(extack, "reload is unsupported for multi port slave");
+		return -EOPNOTSUPP;
+	}
+
+	if (action == DEVLINK_RELOAD_ACTION_FW_ACTIVATE &&
+	    !dev->priv.fw_reset) {
+		NL_SET_ERR_MSG_MOD(extack, "FW activate is unsupported for this function");
 		return -EOPNOTSUPP;
 	}
 
@@ -314,11 +376,14 @@ static const struct devlink_ops mlx5_devlink_ops = {
 	.eswitch_encap_mode_get = mlx5_devlink_eswitch_encap_mode_get,
 	.rate_leaf_tx_share_set = mlx5_esw_devlink_rate_leaf_tx_share_set,
 	.rate_leaf_tx_max_set = mlx5_esw_devlink_rate_leaf_tx_max_set,
+	.rate_leaf_tc_bw_set = mlx5_esw_devlink_rate_leaf_tc_bw_set,
+	.rate_node_tc_bw_set = mlx5_esw_devlink_rate_node_tc_bw_set,
 	.rate_node_tx_share_set = mlx5_esw_devlink_rate_node_tx_share_set,
 	.rate_node_tx_max_set = mlx5_esw_devlink_rate_node_tx_max_set,
 	.rate_node_new = mlx5_esw_devlink_rate_node_new,
 	.rate_node_del = mlx5_esw_devlink_rate_node_del,
-	.rate_leaf_parent_set = mlx5_esw_devlink_rate_parent_set,
+	.rate_leaf_parent_set = mlx5_esw_devlink_rate_leaf_parent_set,
+	.rate_node_parent_set = mlx5_esw_devlink_rate_node_parent_set,
 #endif
 #ifdef CONFIG_MLX5_SF_MANAGER
 	.port_new = mlx5_devlink_sf_port_new,

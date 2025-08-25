@@ -24,6 +24,10 @@ static const char *const misc_res_name[] = {
 	/* AMD SEV-ES ASIDs resource */
 	"sev_es",
 #endif
+#ifdef CONFIG_INTEL_TDX_HOST
+	/* Intel TDX HKIDs resource */
+	"tdx",
+#endif
 };
 
 /* Root misc cgroup */
@@ -68,22 +72,6 @@ static inline bool valid_type(enum misc_res_type type)
 }
 
 /**
- * misc_cg_res_total_usage() - Get the current total usage of the resource.
- * @type: misc res type.
- *
- * Context: Any context.
- * Return: Current total usage of the resource.
- */
-u64 misc_cg_res_total_usage(enum misc_res_type type)
-{
-	if (valid_type(type))
-		return atomic64_read(&root_cg.res[type].usage);
-
-	return 0;
-}
-EXPORT_SYMBOL_GPL(misc_cg_res_total_usage);
-
-/**
  * misc_cg_set_capacity() - Set the capacity of the misc cgroup res.
  * @type: Type of the misc res.
  * @capacity: Supported capacity of the misc res on the host.
@@ -119,6 +107,30 @@ static void misc_cg_cancel_charge(enum misc_res_type type, struct misc_cg *cg,
 	WARN_ONCE(atomic64_add_negative(-amount, &cg->res[type].usage),
 		  "misc cgroup resource %s became less than 0",
 		  misc_res_name[type]);
+}
+
+static void misc_cg_update_watermark(struct misc_res *res, u64 new_usage)
+{
+	u64 old;
+
+	while (true) {
+		old = atomic64_read(&res->watermark);
+		if (new_usage <= old)
+			break;
+		if (atomic64_cmpxchg(&res->watermark, old, new_usage) == old)
+			break;
+	}
+}
+
+static void misc_cg_event(enum misc_res_type type, struct misc_cg *cg)
+{
+	atomic64_inc(&cg->res[type].events_local);
+	cgroup_file_notify(&cg->events_local_file);
+
+	for (; parent_misc(cg); cg = parent_misc(cg)) {
+		atomic64_inc(&cg->res[type].events);
+		cgroup_file_notify(&cg->events_file);
+	}
 }
 
 /**
@@ -159,14 +171,12 @@ int misc_cg_try_charge(enum misc_res_type type, struct misc_cg *cg, u64 amount)
 			ret = -EBUSY;
 			goto err_charge;
 		}
+		misc_cg_update_watermark(res, new_usage);
 	}
 	return 0;
 
 err_charge:
-	for (j = i; j; j = parent_misc(j)) {
-		atomic64_inc(&j->res[type].events);
-		cgroup_file_notify(&j->events_file);
-	}
+	misc_cg_event(type, i);
 
 	for (j = cg; j != i; j = parent_misc(j))
 		misc_cg_cancel_charge(type, j, amount);
@@ -308,6 +318,29 @@ static int misc_cg_current_show(struct seq_file *sf, void *v)
 }
 
 /**
+ * misc_cg_peak_show() - Show the peak usage of the misc cgroup.
+ * @sf: Interface file
+ * @v: Arguments passed
+ *
+ * Context: Any context.
+ * Return: 0 to denote successful print.
+ */
+static int misc_cg_peak_show(struct seq_file *sf, void *v)
+{
+	int i;
+	u64 watermark;
+	struct misc_cg *cg = css_misc(seq_css(sf));
+
+	for (i = 0; i < MISC_CG_RES_TYPES; i++) {
+		watermark = atomic64_read(&cg->res[i].watermark);
+		if (READ_ONCE(misc_res_capacity[i]) || watermark)
+			seq_printf(sf, "%s %llu\n", misc_res_name[i], watermark);
+	}
+
+	return 0;
+}
+
+/**
  * misc_cg_capacity_show() - Show the total capacity of misc res on the host.
  * @sf: Interface file
  * @v: Arguments passed
@@ -331,18 +364,31 @@ static int misc_cg_capacity_show(struct seq_file *sf, void *v)
 	return 0;
 }
 
-static int misc_events_show(struct seq_file *sf, void *v)
+static int __misc_events_show(struct seq_file *sf, bool local)
 {
 	struct misc_cg *cg = css_misc(seq_css(sf));
 	u64 events;
 	int i;
 
 	for (i = 0; i < MISC_CG_RES_TYPES; i++) {
-		events = atomic64_read(&cg->res[i].events);
+		if (local)
+			events = atomic64_read(&cg->res[i].events_local);
+		else
+			events = atomic64_read(&cg->res[i].events);
 		if (READ_ONCE(misc_res_capacity[i]) || events)
 			seq_printf(sf, "%s.max %llu\n", misc_res_name[i], events);
 	}
 	return 0;
+}
+
+static int misc_events_show(struct seq_file *sf, void *v)
+{
+	return __misc_events_show(sf, false);
+}
+
+static int misc_events_local_show(struct seq_file *sf, void *v)
+{
+	return __misc_events_show(sf, true);
 }
 
 /* Misc cgroup interface files */
@@ -358,6 +404,10 @@ static struct cftype misc_cg_files[] = {
 		.seq_show = misc_cg_current_show,
 	},
 	{
+		.name = "peak",
+		.seq_show = misc_cg_peak_show,
+	},
+	{
 		.name = "capacity",
 		.seq_show = misc_cg_capacity_show,
 		.flags = CFTYPE_ONLY_ON_ROOT,
@@ -367,6 +417,12 @@ static struct cftype misc_cg_files[] = {
 		.flags = CFTYPE_NOT_ON_ROOT,
 		.file_offset = offsetof(struct misc_cg, events_file),
 		.seq_show = misc_events_show,
+	},
+	{
+		.name = "events.local",
+		.flags = CFTYPE_NOT_ON_ROOT,
+		.file_offset = offsetof(struct misc_cg, events_local_file),
+		.seq_show = misc_events_local_show,
 	},
 	{}
 };

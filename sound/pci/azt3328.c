@@ -295,7 +295,6 @@ struct snd_azf3328 {
 	 * CONFIG_PM register storage below, but that's slightly difficult. */
 	u16 shadow_reg_ctrl_6AH;
 
-#ifdef CONFIG_PM_SLEEP
 	/* register value containers for power management
 	 * Note: not always full I/O range preserved (similar to Win driver!) */
 	u32 saved_regs_ctrl[AZF_ALIGN(AZF_IO_SIZE_CTRL_PM) / 4];
@@ -303,7 +302,6 @@ struct snd_azf3328 {
 	u32 saved_regs_mpu[AZF_ALIGN(AZF_IO_SIZE_MPU_PM) / 4];
 	u32 saved_regs_opl3[AZF_ALIGN(AZF_IO_SIZE_OPL3_PM) / 4];
 	u32 saved_regs_mixer[AZF_ALIGN(AZF_IO_SIZE_MIXER_PM) / 4];
-#endif
 };
 
 static const struct pci_device_id snd_azf3328_ids[] = {
@@ -414,25 +412,25 @@ snd_azf3328_ctrl_outl(const struct snd_azf3328 *chip, unsigned reg, u32 value)
 	outl(value, chip->ctrl_io + reg);
 }
 
-static inline void
+static inline void __maybe_unused
 snd_azf3328_game_outb(const struct snd_azf3328 *chip, unsigned reg, u8 value)
 {
 	outb(value, chip->game_io + reg);
 }
 
-static inline void
+static inline void __maybe_unused
 snd_azf3328_game_outw(const struct snd_azf3328 *chip, unsigned reg, u16 value)
 {
 	outw(value, chip->game_io + reg);
 }
 
-static inline u8
+static inline u8 __maybe_unused
 snd_azf3328_game_inb(const struct snd_azf3328 *chip, unsigned reg)
 {
 	return inb(chip->game_io + reg);
 }
 
-static inline u16
+static inline u16 __maybe_unused
 snd_azf3328_game_inw(const struct snd_azf3328 *chip, unsigned reg)
 {
 	return inw(chip->game_io + reg);
@@ -1190,7 +1188,7 @@ snd_azf3328_mixer_new(struct snd_azf3328 *chip)
 			return err;
 	}
 	snd_component_add(card, "AZF3328 mixer");
-	strcpy(card->mixername, "AZF3328 mixer");
+	strscpy(card->mixername, "AZF3328 mixer");
 
 	return 0;
 }
@@ -1222,7 +1220,7 @@ snd_azf3328_codec_setfmt(struct snd_azf3328_codec_data *codec,
 	case AZF_FREQ_22050: freq = SOUNDFORMAT_FREQ_22050; break;
 	case AZF_FREQ_32000: freq = SOUNDFORMAT_FREQ_32000; break;
 	default:
-		snd_printk(KERN_WARNING "unknown bitrate %d, assuming 44.1kHz!\n", bitrate);
+		pr_warn("azf3328: unknown bitrate %d, assuming 44.1kHz!\n", bitrate);
 		fallthrough;
 	case AZF_FREQ_44100: freq = SOUNDFORMAT_FREQ_44100; break;
 	case AZF_FREQ_48000: freq = SOUNDFORMAT_FREQ_48000; break;
@@ -2097,7 +2095,7 @@ snd_azf3328_pcm(struct snd_azf3328 *chip)
 
 	pcm->private_data = chip;
 	pcm->info_flags = 0;
-	strcpy(pcm->name, chip->card->shortname);
+	strscpy(pcm->name, chip->card->shortname);
 	/* same pcm object for playback/capture (see snd_pcm_new() above) */
 	chip->pcm[AZF_CODEC_PLAYBACK] = pcm;
 	chip->pcm[AZF_CODEC_CAPTURE] = pcm;
@@ -2114,7 +2112,7 @@ snd_azf3328_pcm(struct snd_azf3328 *chip)
 
 	pcm->private_data = chip;
 	pcm->info_flags = 0;
-	strcpy(pcm->name, chip->card->shortname);
+	strscpy(pcm->name, chip->card->shortname);
 	chip->pcm[AZF_CODEC_I2S_OUT] = pcm;
 
 	snd_pcm_set_managed_buffer_all(pcm, SNDRV_DMA_TYPE_DEV, &chip->pci->dev,
@@ -2219,7 +2217,7 @@ snd_azf3328_timer(struct snd_azf3328 *chip, int device)
 	if (err < 0)
 		goto out;
 
-	strcpy(timer->name, "AZF3328 timer");
+	strscpy(timer->name, "AZF3328 timer");
 	timer->private_data = chip;
 	timer->hw = snd_azf3328_timer_hw;
 
@@ -2349,7 +2347,7 @@ snd_azf3328_create(struct snd_card *card,
 		return -ENXIO;
 	}
 
-	err = pci_request_regions(pci, "Aztech AZF3328");
+	err = pcim_request_all_regions(pci, "Aztech AZF3328");
 	if (err < 0)
 		return err;
 
@@ -2439,8 +2437,8 @@ __snd_azf3328_probe(struct pci_dev *pci, const struct pci_device_id *pci_id)
 		return err;
 	chip = card->private_data;
 
-	strcpy(card->driver, "AZF3328");
-	strcpy(card->shortname, "Aztech AZF3328 (PCI168)");
+	strscpy(card->driver, "AZF3328");
+	strscpy(card->shortname, "Aztech AZF3328 (PCI168)");
 
 	err = snd_azf3328_create(card, pci, pci_id->driver_data);
 	if (err < 0)
@@ -2517,7 +2515,6 @@ snd_azf3328_probe(struct pci_dev *pci, const struct pci_device_id *pci_id)
 	return snd_card_free_on_error(&pci->dev, __snd_azf3328_probe(pci, pci_id));
 }
 
-#ifdef CONFIG_PM_SLEEP
 static inline void
 snd_azf3328_suspend_regs(const struct snd_azf3328 *chip,
 			 unsigned long io_addr, unsigned count, u32 *saved_regs)
@@ -2633,18 +2630,14 @@ snd_azf3328_resume(struct device *dev)
 	return 0;
 }
 
-static SIMPLE_DEV_PM_OPS(snd_azf3328_pm, snd_azf3328_suspend, snd_azf3328_resume);
-#define SND_AZF3328_PM_OPS	&snd_azf3328_pm
-#else
-#define SND_AZF3328_PM_OPS	NULL
-#endif /* CONFIG_PM_SLEEP */
+static DEFINE_SIMPLE_DEV_PM_OPS(snd_azf3328_pm, snd_azf3328_suspend, snd_azf3328_resume);
 
 static struct pci_driver azf3328_driver = {
 	.name = KBUILD_MODNAME,
 	.id_table = snd_azf3328_ids,
 	.probe = snd_azf3328_probe,
 	.driver = {
-		.pm = SND_AZF3328_PM_OPS,
+		.pm = &snd_azf3328_pm,
 	},
 };
 

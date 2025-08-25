@@ -13,7 +13,7 @@
 #define __GEN_RMWcc(fullop, _var, cc, clobbers, ...)			\
 ({									\
 	bool c = false;							\
-	asm_volatile_goto (fullop "; j" #cc " %l[cc_label]"		\
+	asm goto (fullop "; j" #cc " %l[cc_label]"		\
 			: : [var] "m" (_var), ## __VA_ARGS__		\
 			: clobbers : cc_label);				\
 	if (0) {							\
@@ -29,7 +29,7 @@ cc_label:	c = true;						\
 #define __GEN_RMWcc(fullop, _var, cc, clobbers, ...)			\
 ({									\
 	bool c;								\
-	asm volatile (fullop CC_SET(cc)					\
+	asm_inline volatile (fullop CC_SET(cc)				\
 			: [var] "+m" (_var), CC_OUT(cc) (c)		\
 			: __VA_ARGS__ : clobbers);			\
 	c;								\

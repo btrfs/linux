@@ -17,6 +17,7 @@
 #include <linux/panic.h>
 #include <linux/sched/debug.h>
 #include <linux/sched.h>
+#include <linux/mm.h>
 
 #include "debugfs.h"
 #include "device-impl.h"
@@ -67,6 +68,13 @@ static bool enable_param;
 #endif
 module_param_named(enable, enable_param, bool, 0);
 MODULE_PARM_DESC(enable, "Enable KUnit tests");
+
+/*
+ * Configure the base timeout.
+ */
+static unsigned long kunit_base_timeout = CONFIG_KUNIT_DEFAULT_TIMEOUT;
+module_param_named(timeout, kunit_base_timeout, ulong, 0644);
+MODULE_PARM_DESC(timeout, "Set the base timeout for Kunit test cases");
 
 /*
  * KUnit statistic mode:
@@ -372,6 +380,40 @@ static void kunit_run_case_check_speed(struct kunit *test,
 		   duration.tv_sec, duration.tv_nsec);
 }
 
+/* Returns timeout multiplier based on speed.
+ * DEFAULT:		    1
+ * KUNIT_SPEED_SLOW:        3
+ * KUNIT_SPEED_VERY_SLOW:   12
+ */
+static int kunit_timeout_mult(enum kunit_speed speed)
+{
+	switch (speed) {
+	case KUNIT_SPEED_SLOW:
+		return 3;
+	case KUNIT_SPEED_VERY_SLOW:
+		return 12;
+	default:
+		return 1;
+	}
+}
+
+static unsigned long kunit_test_timeout(struct kunit_suite *suite, struct kunit_case *test_case)
+{
+	int mult = 1;
+
+	/*
+	 * The default test timeout is 300 seconds and will be adjusted by mult
+	 * based on the test speed. The test speed will be overridden by the
+	 * innermost test component.
+	 */
+	if (suite->attr.speed != KUNIT_SPEED_UNSET)
+		mult = kunit_timeout_mult(suite->attr.speed);
+	if (test_case->attr.speed != KUNIT_SPEED_UNSET)
+		mult = kunit_timeout_mult(test_case->attr.speed);
+	return mult * kunit_base_timeout * msecs_to_jiffies(MSEC_PER_SEC);
+}
+
+
 /*
  * Initializes and runs test case. Does not clean up or do post validations.
  */
@@ -526,7 +568,8 @@ static void kunit_run_case_catch_errors(struct kunit_suite *suite,
 	kunit_try_catch_init(try_catch,
 			     test,
 			     kunit_try_run_case,
-			     kunit_catch_run_case);
+			     kunit_catch_run_case,
+			     kunit_test_timeout(suite, test_case));
 	context.test = test;
 	context.suite = suite;
 	context.test_case = test_case;
@@ -536,7 +579,8 @@ static void kunit_run_case_catch_errors(struct kunit_suite *suite,
 	kunit_try_catch_init(try_catch,
 			     test,
 			     kunit_try_run_case_cleanup,
-			     kunit_catch_run_case_cleanup);
+			     kunit_catch_run_case_cleanup,
+			     kunit_test_timeout(suite, test_case));
 	kunit_try_catch_run(try_catch, &context);
 
 	/* Propagate the parameter result to the test case. */
@@ -707,9 +751,13 @@ bool kunit_enabled(void)
 	return enable_param;
 }
 
-int __kunit_test_suites_init(struct kunit_suite * const * const suites, int num_suites)
+int __kunit_test_suites_init(struct kunit_suite * const * const suites, int num_suites,
+			     bool run_tests)
 {
 	unsigned int i;
+
+	if (num_suites == 0)
+		return 0;
 
 	if (!kunit_enabled() && num_suites > 0) {
 		pr_info("kunit: disabled\n");
@@ -727,7 +775,8 @@ int __kunit_test_suites_init(struct kunit_suite * const * const suites, int num_
 
 	for (i = 0; i < num_suites; i++) {
 		kunit_init_suite(suites[i]);
-		kunit_run_tests(suites[i]);
+		if (run_tests)
+			kunit_run_tests(suites[i]);
 	}
 
 	static_branch_dec(&kunit_running);
@@ -753,7 +802,6 @@ void __kunit_test_suites_exit(struct kunit_suite **suites, int num_suites)
 }
 EXPORT_SYMBOL_GPL(__kunit_test_suites_exit);
 
-#ifdef CONFIG_MODULES
 static void kunit_module_init(struct module *mod)
 {
 	struct kunit_suite_set suite_set, filtered_set;
@@ -801,12 +849,19 @@ static void kunit_module_exit(struct module *mod)
 	};
 	const char *action = kunit_action();
 
+	/*
+	 * Check if the start address is a valid virtual address to detect
+	 * if the module load sequence has failed and the suite set has not
+	 * been initialized and filtered.
+	 */
+	if (!suite_set.start || !virt_addr_valid(suite_set.start))
+		return;
+
 	if (!action)
 		__kunit_test_suites_exit(mod->kunit_suites,
 					 mod->num_kunit_suites);
 
-	if (suite_set.start)
-		kunit_free_suite_set(suite_set);
+	kunit_free_suite_set(suite_set);
 }
 
 static int kunit_module_notify(struct notifier_block *nb, unsigned long val,
@@ -816,12 +871,12 @@ static int kunit_module_notify(struct notifier_block *nb, unsigned long val,
 
 	switch (val) {
 	case MODULE_STATE_LIVE:
+		kunit_module_init(mod);
 		break;
 	case MODULE_STATE_GOING:
 		kunit_module_exit(mod);
 		break;
 	case MODULE_STATE_COMING:
-		kunit_module_init(mod);
 		break;
 	case MODULE_STATE_UNFORMED:
 		break;
@@ -834,7 +889,6 @@ static struct notifier_block kunit_mod_nb = {
 	.notifier_call = kunit_module_notify,
 	.priority = 0,
 };
-#endif
 
 KUNIT_DEFINE_ACTION_WRAPPER(kfree_action_wrapper, kfree, const void *)
 
@@ -862,6 +916,25 @@ void kunit_kfree(struct kunit *test, const void *ptr)
 	kunit_release_action(test, kfree_action_wrapper, (void *)ptr);
 }
 EXPORT_SYMBOL_GPL(kunit_kfree);
+
+void kunit_kfree_const(struct kunit *test, const void *x)
+{
+#if !IS_MODULE(CONFIG_KUNIT)
+	if (!is_kernel_rodata((unsigned long)x))
+#endif
+		kunit_kfree(test, x);
+}
+EXPORT_SYMBOL_GPL(kunit_kfree_const);
+
+const char *kunit_kstrdup_const(struct kunit *test, const char *str, gfp_t gfp)
+{
+#if !IS_MODULE(CONFIG_KUNIT)
+	if (is_kernel_rodata((unsigned long)str))
+		return str;
+#endif
+	return kunit_kstrdup(test, str, gfp);
+}
+EXPORT_SYMBOL_GPL(kunit_kstrdup_const);
 
 void kunit_cleanup(struct kunit *test)
 {
@@ -906,22 +979,20 @@ static int __init kunit_init(void)
 	kunit_debugfs_init();
 
 	kunit_bus_init();
-#ifdef CONFIG_MODULES
 	return register_module_notifier(&kunit_mod_nb);
-#else
-	return 0;
-#endif
 }
 late_initcall(kunit_init);
 
 static void __exit kunit_exit(void)
 {
 	memset(&kunit_hooks, 0, sizeof(kunit_hooks));
-#ifdef CONFIG_MODULES
 	unregister_module_notifier(&kunit_mod_nb);
-#endif
+
+	kunit_bus_shutdown();
+
 	kunit_debugfs_cleanup();
 }
 module_exit(kunit_exit);
 
+MODULE_DESCRIPTION("Base unit test (KUnit) API");
 MODULE_LICENSE("GPL v2");

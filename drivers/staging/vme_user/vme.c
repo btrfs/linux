@@ -416,10 +416,6 @@ void vme_slave_free(struct vme_resource *resource)
 
 	slave_image = list_entry(resource->entry, struct vme_slave_resource,
 				 list);
-	if (!slave_image) {
-		dev_err(bridge->parent, "Can't find slave resource\n");
-		return;
-	}
 
 	/* Unlock image */
 	mutex_lock(&slave_image->mtx);
@@ -794,10 +790,6 @@ void vme_master_free(struct vme_resource *resource)
 
 	master_image = list_entry(resource->entry, struct vme_master_resource,
 				  list);
-	if (!master_image) {
-		dev_err(bridge->parent, "Can't find master resource\n");
-		return;
-	}
 
 	/* Unlock image */
 	spin_lock(&master_image->lock);
@@ -817,7 +809,7 @@ EXPORT_SYMBOL(vme_master_free);
  * @vdev: Pointer to VME device struct vme_dev assigned to driver instance.
  * @route: Required src/destination combination.
  *
- * Request a VME DMA controller with capability to perform transfers bewteen
+ * Request a VME DMA controller with capability to perform transfers between
  * requested source/destination combination.
  *
  * Return: Pointer to VME DMA resource on success, NULL on failure.
@@ -1053,7 +1045,7 @@ void vme_dma_free_attribute(struct vme_dma_attr *attributes)
 EXPORT_SYMBOL(vme_dma_free_attribute);
 
 /**
- * vme_dma_list_add - Add enty to a VME DMA list.
+ * vme_dma_list_add - Add entry to a VME DMA list.
  * @list: Pointer to VME list.
  * @src: Pointer to DMA list attribute to use as source.
  * @dest: Pointer to DMA list attribute to use as destination.
@@ -1265,7 +1257,7 @@ EXPORT_SYMBOL(vme_unregister_error_handler);
 
 void vme_irq_handler(struct vme_bridge *bridge, int level, int statid)
 {
-	void (*call)(int, int, void *);
+	void (*call)(int level, int statid, void *priv_data);
 	void *priv_data;
 
 	call = bridge->irq[level - 1].callback[statid].func;
@@ -1931,9 +1923,9 @@ EXPORT_SYMBOL(vme_unregister_driver);
 
 /* - Bus Registration ------------------------------------------------------ */
 
-static int vme_bus_match(struct device *dev, struct device_driver *drv)
+static int vme_bus_match(struct device *dev, const struct device_driver *drv)
 {
-	struct vme_driver *vme_drv;
+	const struct vme_driver *vme_drv;
 
 	vme_drv = container_of(drv, struct vme_driver, driver);
 
@@ -1970,7 +1962,7 @@ static void vme_bus_remove(struct device *dev)
 		driver->remove(vdev);
 }
 
-struct bus_type vme_bus_type = {
+const struct bus_type vme_bus_type = {
 	.name = "vme",
 	.match = vme_bus_match,
 	.probe = vme_bus_probe,

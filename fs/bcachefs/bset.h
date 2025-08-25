@@ -206,7 +206,10 @@ static inline size_t btree_aux_data_u64s(const struct btree *b)
 }
 
 #define for_each_bset(_b, _t)						\
-	for (_t = (_b)->set; _t < (_b)->set + (_b)->nsets; _t++)
+	for (struct bset_tree *_t = (_b)->set; _t < (_b)->set + (_b)->nsets; _t++)
+
+#define for_each_bset_c(_b, _t)						\
+	for (const struct bset_tree *_t = (_b)->set; _t < (_b)->set + (_b)->nsets; _t++)
 
 #define bset_tree_for_each_key(_b, _t, _k)				\
 	for (_k = btree_bkey_first(_b, _t);				\
@@ -267,8 +270,8 @@ void bch2_bset_init_first(struct btree *, struct bset *);
 void bch2_bset_init_next(struct btree *, struct btree_node_entry *);
 void bch2_bset_build_aux_tree(struct btree *, struct bset_tree *, bool);
 
-void bch2_bset_insert(struct btree *, struct btree_node_iter *,
-		     struct bkey_packed *, struct bkey_i *, unsigned);
+void bch2_bset_insert(struct btree *, struct bkey_packed *, struct bkey_i *,
+		      unsigned);
 void bch2_bset_delete(struct btree *, struct bkey_packed *, unsigned);
 
 /* Bkey utility code */
@@ -294,7 +297,6 @@ static inline struct bset_tree *
 bch2_bkey_to_bset_inlined(struct btree *b, struct bkey_packed *k)
 {
 	unsigned offset = __btree_node_key_to_offset(b, k);
-	struct bset_tree *t;
 
 	for_each_bset(b, t)
 		if (offset <= t->end_offset) {
@@ -458,6 +460,8 @@ struct bkey_s_c bch2_btree_node_iter_peek_unpack(struct btree_node_iter *,
 
 /* Accounting: */
 
+struct btree_nr_keys bch2_btree_node_count_keys(struct btree *);
+
 static inline void btree_keys_account_key(struct btree_nr_keys *n,
 					  unsigned bset,
 					  struct bkey_packed *k,
@@ -513,27 +517,19 @@ void bch2_dump_bset(struct bch_fs *, struct btree *, struct bset *, unsigned);
 void bch2_dump_btree_node(struct bch_fs *, struct btree *);
 void bch2_dump_btree_node_iter(struct btree *, struct btree_node_iter *);
 
-#ifdef CONFIG_BCACHEFS_DEBUG
-
 void __bch2_verify_btree_nr_keys(struct btree *);
-void bch2_btree_node_iter_verify(struct btree_node_iter *, struct btree *);
-void bch2_verify_insert_pos(struct btree *, struct bkey_packed *,
-			    struct bkey_packed *, unsigned);
+void __bch2_btree_node_iter_verify(struct btree_node_iter *, struct btree *);
 
-#else
-
-static inline void __bch2_verify_btree_nr_keys(struct btree *b) {}
 static inline void bch2_btree_node_iter_verify(struct btree_node_iter *iter,
-					      struct btree *b) {}
-static inline void bch2_verify_insert_pos(struct btree *b,
-					  struct bkey_packed *where,
-					  struct bkey_packed *insert,
-					  unsigned clobber_u64s) {}
-#endif
+					       struct btree *b)
+{
+	if (static_branch_unlikely(&bch2_debug_check_bset_lookups))
+		__bch2_btree_node_iter_verify(iter, b);
+}
 
 static inline void bch2_verify_btree_nr_keys(struct btree *b)
 {
-	if (bch2_debug_check_btree_accounting)
+	if (static_branch_unlikely(&bch2_debug_check_btree_accounting))
 		__bch2_verify_btree_nr_keys(b);
 }
 

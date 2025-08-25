@@ -36,7 +36,7 @@ void nvmet_bdev_set_limits(struct block_device *bdev, struct nvme_id_ns *id)
 	 */
 	id->nsfeat |= 1 << 4;
 	/* NPWG = Namespace Preferred Write Granularity. 0's based */
-	id->npwg = lpp0b;
+	id->npwg = to0based(bdev_io_min(bdev) / bdev_logical_block_size(bdev));
 	/* NPWA = Namespace Preferred Write Alignment. 0's based */
 	id->npwa = id->npwg;
 	/* NPDG = Namespace Preferred Deallocate Granularity. 0's based */
@@ -46,14 +46,18 @@ void nvmet_bdev_set_limits(struct block_device *bdev, struct nvme_id_ns *id)
 	id->npda = id->npdg;
 	/* NOWS = Namespace Optimal Write Size */
 	id->nows = to0based(bdev_io_opt(bdev) / bdev_logical_block_size(bdev));
+
+	/* Set WZDS and DRB if device supports unmapped write zeroes */
+	if (bdev_write_zeroes_unmap_sectors(bdev))
+		id->dlfeat = (1 << 3) | 0x1;
 }
 
 void nvmet_bdev_ns_disable(struct nvmet_ns *ns)
 {
-	if (ns->bdev_handle) {
-		bdev_release(ns->bdev_handle);
+	if (ns->bdev_file) {
+		fput(ns->bdev_file);
 		ns->bdev = NULL;
-		ns->bdev_handle = NULL;
+		ns->bdev_file = NULL;
 	}
 }
 
@@ -61,15 +65,17 @@ static void nvmet_bdev_ns_enable_integrity(struct nvmet_ns *ns)
 {
 	struct blk_integrity *bi = bdev_get_integrity(ns->bdev);
 
-	if (bi) {
-		ns->metadata_size = bi->tuple_size;
-		if (bi->profile == &t10_pi_type1_crc)
+	if (!bi)
+		return;
+
+	if (bi->csum_type == BLK_INTEGRITY_CSUM_CRC) {
+		ns->metadata_size = bi->metadata_size;
+		if (bi->flags & BLK_INTEGRITY_REF_TAG)
 			ns->pi_type = NVME_NS_DPS_PI_TYPE1;
-		else if (bi->profile == &t10_pi_type3_crc)
-			ns->pi_type = NVME_NS_DPS_PI_TYPE3;
 		else
-			/* Unsupported metadata type */
-			ns->metadata_size = 0;
+			ns->pi_type = NVME_NS_DPS_PI_TYPE3;
+	} else {
+		ns->metadata_size = 0;
 	}
 }
 
@@ -85,24 +91,24 @@ int nvmet_bdev_ns_enable(struct nvmet_ns *ns)
 	if (ns->buffered_io)
 		return -ENOTBLK;
 
-	ns->bdev_handle = bdev_open_by_path(ns->device_path,
+	ns->bdev_file = bdev_file_open_by_path(ns->device_path,
 				BLK_OPEN_READ | BLK_OPEN_WRITE, NULL, NULL);
-	if (IS_ERR(ns->bdev_handle)) {
-		ret = PTR_ERR(ns->bdev_handle);
+	if (IS_ERR(ns->bdev_file)) {
+		ret = PTR_ERR(ns->bdev_file);
 		if (ret != -ENOTBLK) {
 			pr_err("failed to open block device %s: (%d)\n",
 					ns->device_path, ret);
 		}
-		ns->bdev_handle = NULL;
+		ns->bdev_file = NULL;
 		return ret;
 	}
-	ns->bdev = ns->bdev_handle->bdev;
+	ns->bdev = file_bdev(ns->bdev_file);
 	ns->size = bdev_nr_bytes(ns->bdev);
 	ns->blksize_shift = blksize_bits(bdev_logical_block_size(ns->bdev));
 
 	ns->pi_type = 0;
 	ns->metadata_size = 0;
-	if (IS_ENABLED(CONFIG_BLK_DEV_INTEGRITY_T10))
+	if (IS_ENABLED(CONFIG_BLK_DEV_INTEGRITY))
 		nvmet_bdev_ns_enable_integrity(ns);
 
 	if (bdev_is_zoned(ns->bdev)) {
@@ -131,27 +137,20 @@ u16 blk_to_nvme_status(struct nvmet_req *req, blk_status_t blk_sts)
 	 * Right now there exists M : 1 mapping between block layer error
 	 * to the NVMe status code (see nvme_error_status()). For consistency,
 	 * when we reverse map we use most appropriate NVMe Status code from
-	 * the group of the NVMe staus codes used in the nvme_error_status().
+	 * the group of the NVMe status codes used in the nvme_error_status().
 	 */
 	switch (blk_sts) {
 	case BLK_STS_NOSPC:
-		status = NVME_SC_CAP_EXCEEDED | NVME_SC_DNR;
+		status = NVME_SC_CAP_EXCEEDED | NVME_STATUS_DNR;
 		req->error_loc = offsetof(struct nvme_rw_command, length);
 		break;
 	case BLK_STS_TARGET:
-		status = NVME_SC_LBA_RANGE | NVME_SC_DNR;
+		status = NVME_SC_LBA_RANGE | NVME_STATUS_DNR;
 		req->error_loc = offsetof(struct nvme_rw_command, slba);
 		break;
 	case BLK_STS_NOTSUPP:
+		status = NVME_SC_INVALID_OPCODE | NVME_STATUS_DNR;
 		req->error_loc = offsetof(struct nvme_common_command, opcode);
-		switch (req->cmd->common.opcode) {
-		case nvme_cmd_dsm:
-		case nvme_cmd_write_zeroes:
-			status = NVME_SC_ONCS_NOT_SUPPORTED | NVME_SC_DNR;
-			break;
-		default:
-			status = NVME_SC_INVALID_OPCODE | NVME_SC_DNR;
-		}
 		break;
 	case BLK_STS_MEDIUM:
 		status = NVME_SC_ACCESS_DENIED;
@@ -159,7 +158,7 @@ u16 blk_to_nvme_status(struct nvmet_req *req, blk_status_t blk_sts)
 		break;
 	case BLK_STS_IOERR:
 	default:
-		status = NVME_SC_INTERNAL | NVME_SC_DNR;
+		status = NVME_SC_INTERNAL | NVME_STATUS_DNR;
 		req->error_loc = offsetof(struct nvme_common_command, opcode);
 	}
 
@@ -270,6 +269,9 @@ static void nvmet_bdev_execute_rw(struct nvmet_req *req)
 		iter_flags = SG_MITER_FROM_SG;
 	}
 
+	if (req->cmd->rw.control & cpu_to_le16(NVME_RW_LR))
+		opf |= REQ_FAILFAST_DEV;
+
 	if (is_pci_p2pdma_page(sg_page(req->sg)))
 		opf |= REQ_NOMERGE;
 
@@ -356,7 +358,7 @@ u16 nvmet_bdev_flush(struct nvmet_req *req)
 		return 0;
 
 	if (blkdev_issue_flush(req->ns->bdev))
-		return NVME_SC_INTERNAL | NVME_SC_DNR;
+		return NVME_SC_INTERNAL | NVME_STATUS_DNR;
 	return 0;
 }
 

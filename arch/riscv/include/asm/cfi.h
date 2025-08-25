@@ -13,6 +13,7 @@ struct pt_regs;
 
 #ifdef CONFIG_CFI_CLANG
 enum bug_trap_type handle_cfi_failure(struct pt_regs *regs);
+#define __bpfcall
 #else
 static inline enum bug_trap_type handle_cfi_failure(struct pt_regs *regs)
 {

@@ -7,6 +7,8 @@
 
 #include <linux/tracepoint.h>
 
+#define TRACE_SCMI_MAX_TAG_LEN	6
+
 TRACE_EVENT(scmi_fc_call,
 	TP_PROTO(u8 protocol_id, u8 msg_id, u32 res_id, u32 val1, u32 val2),
 	TP_ARGS(protocol_id, msg_id, res_id, val1, val2),
@@ -34,8 +36,8 @@ TRACE_EVENT(scmi_fc_call,
 
 TRACE_EVENT(scmi_xfer_begin,
 	TP_PROTO(int transfer_id, u8 msg_id, u8 protocol_id, u16 seq,
-		 bool poll),
-	TP_ARGS(transfer_id, msg_id, protocol_id, seq, poll),
+		 bool poll, int inflight),
+	TP_ARGS(transfer_id, msg_id, protocol_id, seq, poll, inflight),
 
 	TP_STRUCT__entry(
 		__field(int, transfer_id)
@@ -43,6 +45,7 @@ TRACE_EVENT(scmi_xfer_begin,
 		__field(u8, protocol_id)
 		__field(u16, seq)
 		__field(bool, poll)
+		__field(int, inflight)
 	),
 
 	TP_fast_assign(
@@ -51,11 +54,12 @@ TRACE_EVENT(scmi_xfer_begin,
 		__entry->protocol_id = protocol_id;
 		__entry->seq = seq;
 		__entry->poll = poll;
+		__entry->inflight = inflight;
 	),
 
-	TP_printk("pt=%02X msg_id=%02X seq=%04X transfer_id=%X poll=%u",
-		__entry->protocol_id, __entry->msg_id, __entry->seq,
-		__entry->transfer_id, __entry->poll)
+	TP_printk("pt=%02X msg_id=%02X seq=%04X transfer_id=%X poll=%u inflight=%d",
+		  __entry->protocol_id, __entry->msg_id, __entry->seq,
+		  __entry->transfer_id, __entry->poll, __entry->inflight)
 );
 
 TRACE_EVENT(scmi_xfer_response_wait,
@@ -88,8 +92,8 @@ TRACE_EVENT(scmi_xfer_response_wait,
 
 TRACE_EVENT(scmi_xfer_end,
 	TP_PROTO(int transfer_id, u8 msg_id, u8 protocol_id, u16 seq,
-		 int status),
-	TP_ARGS(transfer_id, msg_id, protocol_id, seq, status),
+		 int status, int inflight),
+	TP_ARGS(transfer_id, msg_id, protocol_id, seq, status, inflight),
 
 	TP_STRUCT__entry(
 		__field(int, transfer_id)
@@ -97,6 +101,7 @@ TRACE_EVENT(scmi_xfer_end,
 		__field(u8, protocol_id)
 		__field(u16, seq)
 		__field(int, status)
+		__field(int, inflight)
 	),
 
 	TP_fast_assign(
@@ -105,11 +110,12 @@ TRACE_EVENT(scmi_xfer_end,
 		__entry->protocol_id = protocol_id;
 		__entry->seq = seq;
 		__entry->status = status;
+		__entry->inflight = inflight;
 	),
 
-	TP_printk("pt=%02X msg_id=%02X seq=%04X transfer_id=%X s=%d",
-		__entry->protocol_id, __entry->msg_id, __entry->seq,
-		__entry->transfer_id, __entry->status)
+	TP_printk("pt=%02X msg_id=%02X seq=%04X transfer_id=%X s=%d inflight=%d",
+		  __entry->protocol_id, __entry->msg_id, __entry->seq,
+		  __entry->transfer_id, __entry->status, __entry->inflight)
 );
 
 TRACE_EVENT(scmi_rx_done,
@@ -150,7 +156,7 @@ TRACE_EVENT(scmi_msg_dump,
 		__field(u8, channel_id)
 		__field(u8, protocol_id)
 		__field(u8, msg_id)
-		__array(char, tag, 5)
+		__array(char, tag, TRACE_SCMI_MAX_TAG_LEN)
 		__field(u16, seq)
 		__field(int, status)
 		__field(size_t, len)
@@ -162,7 +168,7 @@ TRACE_EVENT(scmi_msg_dump,
 		__entry->channel_id = channel_id;
 		__entry->protocol_id = protocol_id;
 		__entry->msg_id = msg_id;
-		strscpy(__entry->tag, tag, 5);
+		strscpy(__entry->tag, tag, TRACE_SCMI_MAX_TAG_LEN);
 		__entry->seq = seq;
 		__entry->status = status;
 		__entry->len = len;

@@ -76,9 +76,16 @@ log_test()
 		printf "TEST: %-60s  [ OK ]\n" "${msg}"
 		nsuccess=$((nsuccess+1))
 	else
-		ret=1
-		nfail=$((nfail+1))
-		printf "TEST: %-60s  [FAIL]\n" "${msg}"
+		if [[ $rc -eq $ksft_skip ]]; then
+			[[ $ret -eq 0 ]] && ret=$ksft_skip
+			nskip=$((nskip+1))
+			printf "TEST: %-60s  [SKIP]\n" "${msg}"
+		else
+			ret=1
+			nfail=$((nfail+1))
+			printf "TEST: %-60s  [FAIL]\n" "${msg}"
+		fi
+
 		if [ "$VERBOSE" = "1" ]; then
 			echo "    rc=$rc, expected $expected"
 		fi
@@ -736,7 +743,7 @@ ipv6_fcnal()
 	run_cmd "$IP nexthop add id 52 via 2001:db8:92::3"
 	log_test $? 2 "Create nexthop - gw only"
 
-	# gw is not reachable throught given dev
+	# gw is not reachable through given dev
 	run_cmd "$IP nexthop add id 53 via 2001:db8:3::3 dev veth1"
 	log_test $? 2 "Create nexthop - invalid gw+dev combination"
 
@@ -923,6 +930,29 @@ ipv6_grp_fcnal()
 
 	ipv6_grp_refs
 	log_test $? 0 "Nexthop group replace refcounts"
+
+	#
+	# 16-bit weights.
+	#
+	run_cmd "$IP nexthop add id 62 via 2001:db8:91::2 dev veth1"
+	run_cmd "$IP nexthop add id 63 via 2001:db8:91::3 dev veth1"
+	run_cmd "$IP nexthop add id 64 via 2001:db8:91::4 dev veth1"
+	run_cmd "$IP nexthop add id 65 via 2001:db8:91::5 dev veth1"
+	run_cmd "$IP nexthop add id 66 dev veth1"
+
+	run_cmd "$IP nexthop add id 103 group 62,1000"
+	if [[ $? == 0 ]]; then
+		local GRP="id 103 group 62,254/63,255/64,256/65,257/66,65535"
+		run_cmd "$IP nexthop replace $GRP"
+		check_nexthop "id 103" "$GRP"
+		rc=$?
+	else
+		rc=$ksft_skip
+	fi
+
+	$IP nexthop flush >/dev/null 2>&1
+
+	log_test $rc 0 "16-bit weights"
 }
 
 ipv6_res_grp_fcnal()
@@ -987,6 +1017,31 @@ ipv6_res_grp_fcnal()
 	check_nexthop_bucket "list id 102" \
 		"id 102 index 0 nhid 63 id 102 index 1 nhid 62 id 102 index 2 nhid 62 id 102 index 3 nhid 62"
 	log_test $? 0 "Nexthop buckets updated after replace - nECMP"
+
+	#
+	# 16-bit weights.
+	#
+	run_cmd "$IP nexthop add id 62 via 2001:db8:91::2 dev veth1"
+	run_cmd "$IP nexthop add id 63 via 2001:db8:91::3 dev veth1"
+	run_cmd "$IP nexthop add id 64 via 2001:db8:91::4 dev veth1"
+	run_cmd "$IP nexthop add id 65 via 2001:db8:91::5 dev veth1"
+	run_cmd "$IP nexthop add id 66 dev veth1"
+
+	run_cmd "$IP nexthop add id 103 group 62,1000 type resilient buckets 32"
+	if [[ $? == 0 ]]; then
+		local GRP="id 103 group 62,254/63,255/64,256/65,257/66,65535 $(:
+			  )type resilient buckets 32 idle_timer 0 $(:
+			  )unbalanced_timer 0"
+		run_cmd "$IP nexthop replace $GRP"
+		check_nexthop "id 103" "$GRP unbalanced_time 0"
+		rc=$?
+	else
+		rc=$ksft_skip
+	fi
+
+	$IP nexthop flush >/dev/null 2>&1
+
+	log_test $rc 0 "16-bit weights"
 }
 
 ipv6_fcnal_runtime()
@@ -2066,6 +2121,12 @@ basic()
 	run_cmd "$IP nexthop get id 1"
 	log_test $? 2 "Nexthop get on non-existent id"
 
+	run_cmd "$IP nexthop del id 1"
+	log_test $? 2 "Nexthop del with non-existent id"
+
+	run_cmd "$IP nexthop del id 1 group 1/2/3/4/5/6/7/8"
+	log_test $? 2 "Nexthop del with non-existent id and extra attributes"
+
 	# attempt to create nh without a device or gw - fails
 	run_cmd "$IP nexthop add id 1"
 	log_test $? 2 "Nexthop with no device or gateway"
@@ -2469,6 +2530,7 @@ done
 if [ "$TESTS" != "none" ]; then
 	printf "\nTests passed: %3d\n" ${nsuccess}
 	printf "Tests failed: %3d\n"   ${nfail}
+	printf "Tests skipped: %2d\n"  ${nskip}
 fi
 
 exit $ret

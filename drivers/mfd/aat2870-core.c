@@ -320,9 +320,7 @@ static const struct file_operations aat2870_reg_fops = {
 
 static void aat2870_init_debugfs(struct aat2870_data *aat2870)
 {
-	aat2870->dentry_root = debugfs_create_dir("aat2870", NULL);
-
-	debugfs_create_file("regs", 0644, aat2870->dentry_root, aat2870,
+	debugfs_create_file("regs", 0644, aat2870->client->debugfs, aat2870,
 			    &aat2870_reg_fops);
 }
 
@@ -439,7 +437,7 @@ static DEFINE_SIMPLE_DEV_PM_OPS(aat2870_pm_ops, aat2870_i2c_suspend,
 				aat2870_i2c_resume);
 
 static const struct i2c_device_id aat2870_i2c_id_table[] = {
-	{ "aat2870", 0 },
+	{ "aat2870" },
 	{ }
 };
 

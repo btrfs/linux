@@ -60,15 +60,6 @@ enum {
 
 #include <net/neighbour.h>
 
-/* Set to 3 to get tracing... */
-#define ND_DEBUG 1
-
-#define ND_PRINTK(val, level, fmt, ...)				\
-do {								\
-	if (val <= ND_DEBUG)					\
-		net_##level##_ratelimited(fmt, ##__VA_ARGS__);	\
-} while (0)
-
 struct ctl_table;
 struct inet6_dev;
 struct net_device;
@@ -147,11 +138,6 @@ void __ndisc_fill_addr_option(struct sk_buff *skb, int type, const void *data,
  * The following hooks can be defined; unless noted otherwise, they are
  * optional and can be filled with a null pointer.
  *
- * int (*is_useropt)(u8 nd_opt_type):
- *     This function is called when IPv6 decide RA userspace options. if
- *     this function returns 1 then the option given by nd_opt_type will
- *     be handled as userspace option additional to the IPv6 options.
- *
  * int (*parse_options)(const struct net_device *dev,
  *			struct nd_opt_hdr *nd_opt,
  *			struct ndisc_options *ndopts):
@@ -200,7 +186,6 @@ void __ndisc_fill_addr_option(struct sk_buff *skb, int type, const void *data,
  *     addresses. E.g. 802.15.4 6LoWPAN.
  */
 struct ndisc_ops {
-	int	(*is_useropt)(u8 nd_opt_type);
 	int	(*parse_options)(const struct net_device *dev,
 				 struct nd_opt_hdr *nd_opt,
 				 struct ndisc_options *ndopts);
@@ -224,15 +209,6 @@ struct ndisc_ops {
 };
 
 #if IS_ENABLED(CONFIG_IPV6)
-static inline int ndisc_ops_is_useropt(const struct net_device *dev,
-				       u8 nd_opt_type)
-{
-	if (dev->ndisc_ops && dev->ndisc_ops->is_useropt)
-		return dev->ndisc_ops->is_useropt(nd_opt_type);
-	else
-		return 0;
-}
-
 static inline int ndisc_ops_parse_options(const struct net_device *dev,
 					  struct nd_opt_hdr *nd_opt,
 					  struct ndisc_options *ndopts)
@@ -486,7 +462,7 @@ void igmp6_event_report(struct sk_buff *skb);
 
 
 #ifdef CONFIG_SYSCTL
-int ndisc_ifinfo_sysctl_change(struct ctl_table *ctl, int write,
+int ndisc_ifinfo_sysctl_change(const struct ctl_table *ctl, int write,
 			       void *buffer, size_t *lenp, loff_t *ppos);
 #endif
 

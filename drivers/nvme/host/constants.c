@@ -133,7 +133,7 @@ static const char * const nvme_statuses[] = {
 	[NVME_SC_NS_NOT_ATTACHED] = "Namespace Not Attached",
 	[NVME_SC_THIN_PROV_NOT_SUPP] = "Thin Provisioning Not Supported",
 	[NVME_SC_CTRL_LIST_INVALID] = "Controller List Invalid",
-	[NVME_SC_SELT_TEST_IN_PROGRESS] = "Device Self-test In Progress",
+	[NVME_SC_SELF_TEST_IN_PROGRESS] = "Device Self-test In Progress",
 	[NVME_SC_BP_WRITE_PROHIBITED] = "Boot Partition Write Prohibited",
 	[NVME_SC_CTRL_ID_INVALID] = "Invalid Controller Identifier",
 	[NVME_SC_SEC_CTRL_STATE_INVALID] = "Invalid Secondary Controller State",
@@ -145,7 +145,7 @@ static const char * const nvme_statuses[] = {
 	[NVME_SC_BAD_ATTRIBUTES] = "Conflicting Attributes",
 	[NVME_SC_INVALID_PI] = "Invalid Protection Information",
 	[NVME_SC_READ_ONLY] = "Attempted Write to Read Only Range",
-	[NVME_SC_ONCS_NOT_SUPPORTED] = "ONCS Not Supported",
+	[NVME_SC_CMD_SIZE_LIM_EXCEEDED] = "Command Size Limits Exceeded",
 	[NVME_SC_ZONE_BOUNDARY_ERROR] = "Zoned Boundary Error",
 	[NVME_SC_ZONE_FULL] = "Zone Is Full",
 	[NVME_SC_ZONE_READ_ONLY] = "Zone Is Read Only",
@@ -171,15 +171,15 @@ static const char * const nvme_statuses[] = {
 	[NVME_SC_HOST_ABORTED_CMD] = "Host Aborted Command",
 };
 
-const unsigned char *nvme_get_error_status_str(u16 status)
+const char *nvme_get_error_status_str(u16 status)
 {
-	status &= 0x7ff;
+	status &= NVME_SCT_SC_MASK;
 	if (status < ARRAY_SIZE(nvme_statuses) && nvme_statuses[status])
-		return nvme_statuses[status & 0x7ff];
+		return nvme_statuses[status];
 	return "Unknown";
 }
 
-const unsigned char *nvme_get_opcode_str(u8 opcode)
+const char *nvme_get_opcode_str(u8 opcode)
 {
 	if (opcode < ARRAY_SIZE(nvme_ops) && nvme_ops[opcode])
 		return nvme_ops[opcode];
@@ -187,7 +187,7 @@ const unsigned char *nvme_get_opcode_str(u8 opcode)
 }
 EXPORT_SYMBOL_GPL(nvme_get_opcode_str);
 
-const unsigned char *nvme_get_admin_opcode_str(u8 opcode)
+const char *nvme_get_admin_opcode_str(u8 opcode)
 {
 	if (opcode < ARRAY_SIZE(nvme_admin_ops) && nvme_admin_ops[opcode])
 		return nvme_admin_ops[opcode];
@@ -195,7 +195,7 @@ const unsigned char *nvme_get_admin_opcode_str(u8 opcode)
 }
 EXPORT_SYMBOL_GPL(nvme_get_admin_opcode_str);
 
-const unsigned char *nvme_get_fabrics_opcode_str(u8 opcode) {
+const char *nvme_get_fabrics_opcode_str(u8 opcode) {
 	if (opcode < ARRAY_SIZE(nvme_fabrics_ops) && nvme_fabrics_ops[opcode])
 		return nvme_fabrics_ops[opcode];
 	return "Unknown";

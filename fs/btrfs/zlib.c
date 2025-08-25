@@ -18,7 +18,10 @@
 #include <linux/pagemap.h>
 #include <linux/bio.h>
 #include <linux/refcount.h>
+#include "btrfs_inode.h"
 #include "compression.h"
+#include "fs.h"
+#include "subpage.h"
 
 /* workspace buffer size for s390 zlib hardware support */
 #define ZLIB_DFLTCC_BUF_SIZE    (4 * PAGE_SIZE)
@@ -31,11 +34,9 @@ struct workspace {
 	int level;
 };
 
-static struct workspace_manager wsm;
-
-struct list_head *zlib_get_workspace(unsigned int level)
+struct list_head *zlib_get_workspace(struct btrfs_fs_info *fs_info, unsigned int level)
 {
-	struct list_head *ws = btrfs_get_workspace(BTRFS_COMPRESS_ZLIB, level);
+	struct list_head *ws = btrfs_get_workspace(fs_info, BTRFS_COMPRESS_ZLIB, level);
 	struct workspace *workspace = list_entry(ws, struct workspace, list);
 
 	workspace->level = level;
@@ -52,8 +53,9 @@ void zlib_free_workspace(struct list_head *ws)
 	kfree(workspace);
 }
 
-struct list_head *zlib_alloc_workspace(unsigned int level)
+struct list_head *zlib_alloc_workspace(struct btrfs_fs_info *fs_info, unsigned int level)
 {
+	const u32 blocksize = fs_info->sectorsize;
 	struct workspace *workspace;
 	int workspacesize;
 
@@ -77,8 +79,8 @@ struct list_head *zlib_alloc_workspace(unsigned int level)
 		workspace->buf_size = ZLIB_DFLTCC_BUF_SIZE;
 	}
 	if (!workspace->buf) {
-		workspace->buf = kmalloc(PAGE_SIZE, GFP_KERNEL);
-		workspace->buf_size = PAGE_SIZE;
+		workspace->buf = kmalloc(blocksize, GFP_KERNEL);
+		workspace->buf_size = blocksize;
 	}
 	if (!workspace->strm.workspace || !workspace->buf)
 		goto fail;
@@ -91,29 +93,72 @@ fail:
 	return ERR_PTR(-ENOMEM);
 }
 
-int zlib_compress_pages(struct list_head *ws, struct address_space *mapping,
-		u64 start, struct page **pages, unsigned long *out_pages,
-		unsigned long *total_in, unsigned long *total_out)
+/*
+ * Helper for S390x with hardware zlib compression support.
+ *
+ * That hardware acceleration requires a buffer size larger than a single page
+ * to get ideal performance, thus we need to do the memory copy rather than
+ * use the page cache directly as input buffer.
+ */
+static int copy_data_into_buffer(struct address_space *mapping,
+				 struct workspace *workspace, u64 filepos,
+				 unsigned long length)
+{
+	u64 cur = filepos;
+
+	/* It's only for hardware accelerated zlib code. */
+	ASSERT(zlib_deflate_dfltcc_enabled());
+
+	while (cur < filepos + length) {
+		struct folio *folio;
+		void *data_in;
+		unsigned int offset;
+		unsigned long copy_length;
+		int ret;
+
+		ret = btrfs_compress_filemap_get_folio(mapping, cur, &folio);
+		if (ret < 0)
+			return ret;
+
+		offset = offset_in_folio(folio, cur);
+		copy_length = min(folio_size(folio) - offset,
+				  filepos + length - cur);
+
+		data_in = kmap_local_folio(folio, offset);
+		memcpy(workspace->buf + cur - filepos, data_in, copy_length);
+		kunmap_local(data_in);
+		cur += copy_length;
+	}
+	return 0;
+}
+
+int zlib_compress_folios(struct list_head *ws, struct btrfs_inode *inode,
+			 u64 start, struct folio **folios, unsigned long *out_folios,
+			 unsigned long *total_in, unsigned long *total_out)
 {
 	struct workspace *workspace = list_entry(ws, struct workspace, list);
+	struct address_space *mapping = inode->vfs_inode.i_mapping;
 	int ret;
 	char *data_in = NULL;
-	char *cpage_out;
-	int nr_pages = 0;
-	struct page *in_page = NULL;
-	struct page *out_page = NULL;
-	unsigned long bytes_left;
-	unsigned int in_buf_pages;
+	char *cfolio_out;
+	int nr_folios = 0;
+	struct folio *in_folio = NULL;
+	struct folio *out_folio = NULL;
 	unsigned long len = *total_out;
-	unsigned long nr_dest_pages = *out_pages;
-	const unsigned long max_out = nr_dest_pages * PAGE_SIZE;
+	unsigned long nr_dest_folios = *out_folios;
+	const unsigned long max_out = nr_dest_folios * PAGE_SIZE;
+	const u32 blocksize = inode->root->fs_info->sectorsize;
+	const u64 orig_end = start + len;
 
-	*out_pages = 0;
+	*out_folios = 0;
 	*total_out = 0;
 	*total_in = 0;
 
-	if (Z_OK != zlib_deflateInit(&workspace->strm, workspace->level)) {
-		pr_warn("BTRFS: deflateInit failed\n");
+	ret = zlib_deflateInit(&workspace->strm, workspace->level);
+	if (unlikely(ret != Z_OK)) {
+		btrfs_err(inode->root->fs_info,
+	"zlib compression init failed, error %d root %llu inode %llu offset %llu",
+			  ret, btrfs_root_id(inode->root), btrfs_ino(inode), start);
 		ret = -EIO;
 		goto out;
 	}
@@ -121,18 +166,18 @@ int zlib_compress_pages(struct list_head *ws, struct address_space *mapping,
 	workspace->strm.total_in = 0;
 	workspace->strm.total_out = 0;
 
-	out_page = btrfs_alloc_compr_page();
-	if (out_page == NULL) {
+	out_folio = btrfs_alloc_compr_folio();
+	if (out_folio == NULL) {
 		ret = -ENOMEM;
 		goto out;
 	}
-	cpage_out = page_address(out_page);
-	pages[0] = out_page;
-	nr_pages = 1;
+	cfolio_out = folio_address(out_folio);
+	folios[0] = out_folio;
+	nr_folios = 1;
 
 	workspace->strm.next_in = workspace->buf;
 	workspace->strm.avail_in = 0;
-	workspace->strm.next_out = cpage_out;
+	workspace->strm.next_out = cfolio_out;
 	workspace->strm.avail_out = PAGE_SIZE;
 
 	while (workspace->strm.total_in < len) {
@@ -141,51 +186,55 @@ int zlib_compress_pages(struct list_head *ws, struct address_space *mapping,
 		 * the workspace buffer if required.
 		 */
 		if (workspace->strm.avail_in == 0) {
-			bytes_left = len - workspace->strm.total_in;
-			in_buf_pages = min(DIV_ROUND_UP(bytes_left, PAGE_SIZE),
-					   workspace->buf_size / PAGE_SIZE);
-			if (in_buf_pages > 1) {
-				int i;
+			unsigned long bytes_left = len - workspace->strm.total_in;
+			unsigned int copy_length = min(bytes_left, workspace->buf_size);
 
-				for (i = 0; i < in_buf_pages; i++) {
-					if (data_in) {
-						kunmap_local(data_in);
-						put_page(in_page);
-					}
-					in_page = find_get_page(mapping,
-								start >> PAGE_SHIFT);
-					data_in = kmap_local_page(in_page);
-					copy_page(workspace->buf + i * PAGE_SIZE,
-						  data_in);
-					start += PAGE_SIZE;
-				}
+			/*
+			 * This can only happen when hardware zlib compression is
+			 * enabled.
+			 */
+			if (copy_length > PAGE_SIZE) {
+				ret = copy_data_into_buffer(mapping, workspace,
+							    start, copy_length);
+				if (ret < 0)
+					goto out;
+				start += copy_length;
 				workspace->strm.next_in = workspace->buf;
+				workspace->strm.avail_in = copy_length;
 			} else {
+				unsigned int cur_len;
+
 				if (data_in) {
 					kunmap_local(data_in);
-					put_page(in_page);
+					folio_put(in_folio);
+					data_in = NULL;
 				}
-				in_page = find_get_page(mapping,
-							start >> PAGE_SHIFT);
-				data_in = kmap_local_page(in_page);
-				start += PAGE_SIZE;
+				ret = btrfs_compress_filemap_get_folio(mapping,
+						start, &in_folio);
+				if (ret < 0)
+					goto out;
+				cur_len = btrfs_calc_input_length(in_folio, orig_end, start);
+				data_in = kmap_local_folio(in_folio,
+							   offset_in_folio(in_folio, start));
+				start += cur_len;
 				workspace->strm.next_in = data_in;
+				workspace->strm.avail_in = cur_len;
 			}
-			workspace->strm.avail_in = min(bytes_left,
-						       (unsigned long) workspace->buf_size);
 		}
 
 		ret = zlib_deflate(&workspace->strm, Z_SYNC_FLUSH);
-		if (ret != Z_OK) {
-			pr_debug("BTRFS: deflate in loop returned %d\n",
-			       ret);
+		if (unlikely(ret != Z_OK)) {
+			btrfs_warn(inode->root->fs_info,
+		"zlib compression failed, error %d root %llu inode %llu offset %llu",
+				   ret, btrfs_root_id(inode->root), btrfs_ino(inode),
+				   start);
 			zlib_deflateEnd(&workspace->strm);
 			ret = -EIO;
 			goto out;
 		}
 
 		/* we're making it bigger, give up */
-		if (workspace->strm.total_in > 8192 &&
+		if (workspace->strm.total_in > blocksize * 2 &&
 		    workspace->strm.total_in <
 		    workspace->strm.total_out) {
 			ret = -E2BIG;
@@ -196,20 +245,20 @@ int zlib_compress_pages(struct list_head *ws, struct address_space *mapping,
 		 * the stream end if required
 		 */
 		if (workspace->strm.avail_out == 0) {
-			if (nr_pages == nr_dest_pages) {
+			if (nr_folios == nr_dest_folios) {
 				ret = -E2BIG;
 				goto out;
 			}
-			out_page = btrfs_alloc_compr_page();
-			if (out_page == NULL) {
+			out_folio = btrfs_alloc_compr_folio();
+			if (out_folio == NULL) {
 				ret = -ENOMEM;
 				goto out;
 			}
-			cpage_out = page_address(out_page);
-			pages[nr_pages] = out_page;
-			nr_pages++;
+			cfolio_out = folio_address(out_folio);
+			folios[nr_folios] = out_folio;
+			nr_folios++;
 			workspace->strm.avail_out = PAGE_SIZE;
-			workspace->strm.next_out = cpage_out;
+			workspace->strm.next_out = cfolio_out;
 		}
 		/* we're all done */
 		if (workspace->strm.total_in >= len)
@@ -231,21 +280,21 @@ int zlib_compress_pages(struct list_head *ws, struct address_space *mapping,
 			ret = -EIO;
 			goto out;
 		} else if (workspace->strm.avail_out == 0) {
-			/* get another page for the stream end */
-			if (nr_pages == nr_dest_pages) {
+			/* Get another folio for the stream end. */
+			if (nr_folios == nr_dest_folios) {
 				ret = -E2BIG;
 				goto out;
 			}
-			out_page = btrfs_alloc_compr_page();
-			if (out_page == NULL) {
+			out_folio = btrfs_alloc_compr_folio();
+			if (out_folio == NULL) {
 				ret = -ENOMEM;
 				goto out;
 			}
-			cpage_out = page_address(out_page);
-			pages[nr_pages] = out_page;
-			nr_pages++;
+			cfolio_out = folio_address(out_folio);
+			folios[nr_folios] = out_folio;
+			nr_folios++;
 			workspace->strm.avail_out = PAGE_SIZE;
-			workspace->strm.next_out = cpage_out;
+			workspace->strm.next_out = cfolio_out;
 		}
 	}
 	zlib_deflateEnd(&workspace->strm);
@@ -259,10 +308,10 @@ int zlib_compress_pages(struct list_head *ws, struct address_space *mapping,
 	*total_out = workspace->strm.total_out;
 	*total_in = workspace->strm.total_in;
 out:
-	*out_pages = nr_pages;
+	*out_folios = nr_folios;
 	if (data_in) {
 		kunmap_local(data_in);
-		put_page(in_page);
+		folio_put(in_folio);
 	}
 
 	return ret;
@@ -275,13 +324,13 @@ int zlib_decompress_bio(struct list_head *ws, struct compressed_bio *cb)
 	int wbits = MAX_WBITS;
 	char *data_in;
 	size_t total_out = 0;
-	unsigned long page_in_index = 0;
+	unsigned long folio_in_index = 0;
 	size_t srclen = cb->compressed_len;
-	unsigned long total_pages_in = DIV_ROUND_UP(srclen, PAGE_SIZE);
+	unsigned long total_folios_in = DIV_ROUND_UP(srclen, PAGE_SIZE);
 	unsigned long buf_start;
-	struct page **pages_in = cb->compressed_pages;
+	struct folio **folios_in = cb->compressed_folios;
 
-	data_in = kmap_local_page(pages_in[page_in_index]);
+	data_in = kmap_local_folio(folios_in[folio_in_index], 0);
 	workspace->strm.next_in = data_in;
 	workspace->strm.avail_in = min_t(size_t, srclen, PAGE_SIZE);
 	workspace->strm.total_in = 0;
@@ -301,9 +350,14 @@ int zlib_decompress_bio(struct list_head *ws, struct compressed_bio *cb)
 		workspace->strm.avail_in -= 2;
 	}
 
-	if (Z_OK != zlib_inflateInit2(&workspace->strm, wbits)) {
-		pr_warn("BTRFS: inflateInit failed\n");
+	ret = zlib_inflateInit2(&workspace->strm, wbits);
+	if (unlikely(ret != Z_OK)) {
+		struct btrfs_inode *inode = cb->bbio.inode;
+
 		kunmap_local(data_in);
+		btrfs_err(inode->root->fs_info,
+	"zlib decompression init failed, error %d root %llu inode %llu offset %llu",
+			  ret, btrfs_root_id(inode->root), btrfs_ino(inode), cb->start);
 		return -EIO;
 	}
 	while (workspace->strm.total_in < srclen) {
@@ -331,21 +385,26 @@ int zlib_decompress_bio(struct list_head *ws, struct compressed_bio *cb)
 		if (workspace->strm.avail_in == 0) {
 			unsigned long tmp;
 			kunmap_local(data_in);
-			page_in_index++;
-			if (page_in_index >= total_pages_in) {
+			folio_in_index++;
+			if (folio_in_index >= total_folios_in) {
 				data_in = NULL;
 				break;
 			}
-			data_in = kmap_local_page(pages_in[page_in_index]);
+			data_in = kmap_local_folio(folios_in[folio_in_index], 0);
 			workspace->strm.next_in = data_in;
 			tmp = srclen - workspace->strm.total_in;
 			workspace->strm.avail_in = min(tmp, PAGE_SIZE);
 		}
 	}
-	if (ret != Z_STREAM_END)
+	if (unlikely(ret != Z_STREAM_END)) {
+		btrfs_err(cb->bbio.inode->root->fs_info,
+		"zlib decompression failed, error %d root %llu inode %llu offset %llu",
+			  ret, btrfs_root_id(cb->bbio.inode->root),
+			  btrfs_ino(cb->bbio.inode), cb->start);
 		ret = -EIO;
-	else
+	} else {
 		ret = 0;
+	}
 done:
 	zlib_inflateEnd(&workspace->strm);
 	if (data_in)
@@ -354,18 +413,13 @@ done:
 }
 
 int zlib_decompress(struct list_head *ws, const u8 *data_in,
-		struct page *dest_page, unsigned long start_byte, size_t srclen,
+		struct folio *dest_folio, unsigned long dest_pgoff, size_t srclen,
 		size_t destlen)
 {
 	struct workspace *workspace = list_entry(ws, struct workspace, list);
 	int ret = 0;
 	int wbits = MAX_WBITS;
-	unsigned long bytes_left;
-	unsigned long total_out = 0;
-	unsigned long pg_offset = 0;
-
-	destlen = min_t(unsigned long, destlen, PAGE_SIZE);
-	bytes_left = destlen;
+	unsigned long to_copy;
 
 	workspace->strm.next_in = data_in;
 	workspace->strm.avail_in = srclen;
@@ -385,70 +439,50 @@ int zlib_decompress(struct list_head *ws, const u8 *data_in,
 		workspace->strm.avail_in -= 2;
 	}
 
-	if (Z_OK != zlib_inflateInit2(&workspace->strm, wbits)) {
-		pr_warn("BTRFS: inflateInit failed\n");
+	ret = zlib_inflateInit2(&workspace->strm, wbits);
+	if (unlikely(ret != Z_OK)) {
+		struct btrfs_inode *inode = folio_to_inode(dest_folio);
+
+		btrfs_err(inode->root->fs_info,
+		"zlib decompression init failed, error %d root %llu inode %llu offset %llu",
+			  ret, btrfs_root_id(inode->root), btrfs_ino(inode),
+			  folio_pos(dest_folio));
 		return -EIO;
 	}
 
-	while (bytes_left > 0) {
-		unsigned long buf_start;
-		unsigned long buf_offset;
-		unsigned long bytes;
+	/*
+	 * Everything (in/out buf) should be at most one sector, there should
+	 * be no need to switch any input/output buffer.
+	 */
+	ret = zlib_inflate(&workspace->strm, Z_FINISH);
+	to_copy = min(workspace->strm.total_out, destlen);
+	if (ret != Z_STREAM_END)
+		goto out;
 
-		ret = zlib_inflate(&workspace->strm, Z_NO_FLUSH);
-		if (ret != Z_OK && ret != Z_STREAM_END)
-			break;
+	memcpy_to_folio(dest_folio, dest_pgoff, workspace->buf, to_copy);
 
-		buf_start = total_out;
-		total_out = workspace->strm.total_out;
+out:
+	if (unlikely(to_copy != destlen)) {
+		struct btrfs_inode *inode = folio_to_inode(dest_folio);
 
-		if (total_out == buf_start) {
-			ret = -EIO;
-			break;
-		}
-
-		if (total_out <= start_byte)
-			goto next;
-
-		if (total_out > start_byte && buf_start < start_byte)
-			buf_offset = start_byte - buf_start;
-		else
-			buf_offset = 0;
-
-		bytes = min(PAGE_SIZE - pg_offset,
-			    PAGE_SIZE - (buf_offset % PAGE_SIZE));
-		bytes = min(bytes, bytes_left);
-
-		memcpy_to_page(dest_page, pg_offset,
-			       workspace->buf + buf_offset, bytes);
-
-		pg_offset += bytes;
-		bytes_left -= bytes;
-next:
-		workspace->strm.next_out = workspace->buf;
-		workspace->strm.avail_out = workspace->buf_size;
-	}
-
-	if (ret != Z_STREAM_END && bytes_left != 0)
+		btrfs_err(inode->root->fs_info,
+"zlib decompression failed, error %d root %llu inode %llu offset %llu decompressed %lu expected %zu",
+			  ret, btrfs_root_id(inode->root), btrfs_ino(inode),
+			  folio_pos(dest_folio), to_copy, destlen);
 		ret = -EIO;
-	else
+	} else {
 		ret = 0;
+	}
 
 	zlib_inflateEnd(&workspace->strm);
 
-	/*
-	 * this should only happen if zlib returned fewer bytes than we
-	 * expected.  btrfs_get_block is responsible for zeroing from the
-	 * end of the inline extent (destlen) to the end of the page
-	 */
-	if (pg_offset < destlen) {
-		memzero_page(dest_page, pg_offset, destlen - pg_offset);
-	}
+	if (unlikely(to_copy < destlen))
+		folio_zero_range(dest_folio, dest_pgoff + to_copy, destlen - to_copy);
 	return ret;
 }
 
-const struct btrfs_compress_op btrfs_zlib_compress = {
-	.workspace_manager	= &wsm,
+const struct btrfs_compress_levels btrfs_zlib_compress = {
+	.min_level		= 1,
 	.max_level		= 9,
 	.default_level		= BTRFS_ZLIB_DEFAULT_LEVEL,
 };

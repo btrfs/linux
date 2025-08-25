@@ -33,13 +33,13 @@ static void al_to_d_al(struct addr_location *al, struct perf_dlfilter_al *d_al)
 	if (al->map) {
 		struct dso *dso = map__dso(al->map);
 
-		if (symbol_conf.show_kernel_path && dso->long_name)
-			d_al->dso = dso->long_name;
+		if (symbol_conf.show_kernel_path && dso__long_name(dso))
+			d_al->dso = dso__long_name(dso);
 		else
-			d_al->dso = dso->name;
-		d_al->is_64_bit = dso->is_64_bit;
-		d_al->buildid_size = dso->bid.size;
-		d_al->buildid = dso->bid.data;
+			d_al->dso = dso__name(dso);
+		d_al->is_64_bit = dso__is_64_bit(dso);
+		d_al->buildid_size = dso__bid(dso)->size;
+		d_al->buildid = dso__bid(dso)->data;
 	} else {
 		d_al->dso = NULL;
 		d_al->is_64_bit = 0;
@@ -234,7 +234,8 @@ static const __u8 *dlfilter__insn(void *ctx, __u32 *len)
 			struct machine *machine = maps__machine(thread__maps(al->thread));
 
 			if (machine)
-				script_fetch_insn(d->sample, al->thread, machine);
+				script_fetch_insn(d->sample, al->thread, machine,
+						  /*native_arch=*/true);
 		}
 	}
 
@@ -512,6 +513,7 @@ int dlfilter__do_filter_event(struct dlfilter *d,
 	d->d_addr_al   = &d_addr_al;
 
 	d_sample.size  = sizeof(d_sample);
+	d_sample.p_stage_cyc = sample->weight3;
 	d_ip_al.size   = 0; /* To indicate d_ip_al is not initialized */
 	d_addr_al.size = 0; /* To indicate d_addr_al is not initialized */
 
@@ -525,7 +527,6 @@ int dlfilter__do_filter_event(struct dlfilter *d,
 	ASSIGN(period);
 	ASSIGN(weight);
 	ASSIGN(ins_lat);
-	ASSIGN(p_stage_cyc);
 	ASSIGN(transaction);
 	ASSIGN(insn_cnt);
 	ASSIGN(cyc_cnt);

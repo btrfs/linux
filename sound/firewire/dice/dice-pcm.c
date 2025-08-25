@@ -441,7 +441,8 @@ int snd_dice_create_pcm(struct snd_dice *dice)
 		if (err < 0)
 			return err;
 		pcm->private_data = dice;
-		strcpy(pcm->name, dice->card->shortname);
+		pcm->nonatomic = true;
+		strscpy(pcm->name, dice->card->shortname);
 
 		if (capture > 0)
 			snd_pcm_set_ops(pcm, SNDRV_PCM_STREAM_CAPTURE,

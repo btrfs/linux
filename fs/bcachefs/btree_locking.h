@@ -13,15 +13,9 @@
 #include "btree_iter.h"
 #include "six.h"
 
-void bch2_btree_lock_init(struct btree_bkey_cached_common *, enum six_lock_init_flags);
+void bch2_btree_lock_init(struct btree_bkey_cached_common *, enum six_lock_init_flags, gfp_t gfp);
 
-#ifdef CONFIG_LOCKDEP
-void bch2_assert_btree_nodes_not_locked(void);
-#else
-static inline void bch2_assert_btree_nodes_not_locked(void) {}
-#endif
-
-void bch2_trans_unlock_noassert(struct btree_trans *);
+void bch2_trans_unlock_write(struct btree_trans *);
 
 static inline bool is_btree_node(struct btree_path *path, unsigned l)
 {
@@ -47,6 +41,15 @@ static inline int btree_node_locked_type(struct btree_path *path,
 					 unsigned level)
 {
 	return BTREE_NODE_UNLOCKED + ((path->nodes_locked >> (level << 1)) & 3);
+}
+
+static inline int btree_node_locked_type_nowrite(struct btree_path *path,
+						 unsigned level)
+{
+	int have = btree_node_locked_type(path, level);
+	return have == BTREE_NODE_WRITE_LOCKED
+		? BTREE_NODE_INTENT_LOCKED
+		: have;
 }
 
 static inline bool btree_node_write_locked(struct btree_path *path, unsigned l)
@@ -79,13 +82,6 @@ static inline void mark_btree_node_locked_noreset(struct btree_path *path,
 
 	path->nodes_locked &= ~(3U << (level << 1));
 	path->nodes_locked |= (type + 1) << (level << 1);
-}
-
-static inline void mark_btree_node_unlocked(struct btree_path *path,
-					    unsigned level)
-{
-	EBUG_ON(btree_node_write_locked(path, level));
-	mark_btree_node_locked_noreset(path, level, BTREE_NODE_UNLOCKED);
 }
 
 static inline void mark_btree_node_locked(struct btree_trans *trans,
@@ -130,6 +126,9 @@ static void btree_trans_lock_hold_time_update(struct btree_trans *trans,
 
 /* unlock: */
 
+void bch2_btree_node_unlock_write(struct btree_trans *,
+			struct btree_path *, struct btree *);
+
 static inline void btree_node_unlock(struct btree_trans *trans,
 				     struct btree_path *path, unsigned level)
 {
@@ -138,10 +137,14 @@ static inline void btree_node_unlock(struct btree_trans *trans,
 	EBUG_ON(level >= BTREE_MAX_DEPTH);
 
 	if (lock_type != BTREE_NODE_UNLOCKED) {
+		if (unlikely(lock_type == BTREE_NODE_WRITE_LOCKED)) {
+			bch2_btree_node_unlock_write(trans, path, path->l[level].b);
+			lock_type = BTREE_NODE_INTENT_LOCKED;
+		}
 		six_unlock_type(&path->l[level].b->c.lock, lock_type);
 		btree_trans_lock_hold_time_update(trans, path, level);
+		mark_btree_node_locked_noreset(path, level, BTREE_NODE_UNLOCKED);
 	}
-	mark_btree_node_unlocked(path, level);
 }
 
 static inline int btree_path_lowest_level_locked(struct btree_path *path)
@@ -157,7 +160,7 @@ static inline int btree_path_highest_level_locked(struct btree_path *path)
 static inline void __bch2_btree_path_unlock(struct btree_trans *trans,
 					    struct btree_path *path)
 {
-	btree_path_set_dirty(path, BTREE_ITER_NEED_RELOCK);
+	btree_path_set_dirty(trans, path, BTREE_ITER_NEED_RELOCK);
 
 	while (path->nodes_locked)
 		btree_node_unlock(trans, path, btree_path_lowest_level_locked(path));
@@ -168,30 +171,58 @@ static inline void __bch2_btree_path_unlock(struct btree_trans *trans,
  * succeed:
  */
 static inline void
+__bch2_btree_node_unlock_write(struct btree_trans *trans, struct btree *b)
+{
+	if (!b->c.lock.write_lock_recurse) {
+		struct btree_path *linked;
+		unsigned i;
+
+		trans_for_each_path_with_node(trans, b, linked, i)
+			linked->l[b->c.level].lock_seq++;
+	}
+
+	six_unlock_write(&b->c.lock);
+}
+
+static inline void
 bch2_btree_node_unlock_write_inlined(struct btree_trans *trans, struct btree_path *path,
 				     struct btree *b)
 {
-	struct btree_path *linked;
-	unsigned i;
-
 	EBUG_ON(path->l[b->c.level].b != b);
 	EBUG_ON(path->l[b->c.level].lock_seq != six_lock_seq(&b->c.lock));
 	EBUG_ON(btree_node_locked_type(path, b->c.level) != SIX_LOCK_write);
 
 	mark_btree_node_locked_noreset(path, b->c.level, BTREE_NODE_INTENT_LOCKED);
-
-	trans_for_each_path_with_node(trans, b, linked, i)
-		linked->l[b->c.level].lock_seq++;
-
-	six_unlock_write(&b->c.lock);
+	__bch2_btree_node_unlock_write(trans, b);
 }
-
-void bch2_btree_node_unlock_write(struct btree_trans *,
-			struct btree_path *, struct btree *);
 
 int bch2_six_check_for_deadlock(struct six_lock *lock, void *p);
 
 /* lock: */
+
+static inline void trans_set_locked(struct btree_trans *trans, bool try)
+{
+	if (!trans->locked) {
+		lock_acquire_exclusive(&trans->dep_map, 0, try, NULL, _THIS_IP_);
+		trans->locked = true;
+		trans->last_unlock_ip = 0;
+
+		trans->pf_memalloc_nofs = (current->flags & PF_MEMALLOC_NOFS) != 0;
+		current->flags |= PF_MEMALLOC_NOFS;
+	}
+}
+
+static inline void trans_set_unlocked(struct btree_trans *trans)
+{
+	if (trans->locked) {
+		lock_release(&trans->dep_map, _THIS_IP_);
+		trans->locked = false;
+		trans->last_unlock_ip = _RET_IP_;
+
+		if (!trans->pf_memalloc_nofs)
+			current->flags &= ~PF_MEMALLOC_NOFS;
+	}
+}
 
 static inline int __btree_node_lock_nopath(struct btree_trans *trans,
 					 struct btree_bkey_cached_common *b,
@@ -199,16 +230,17 @@ static inline int __btree_node_lock_nopath(struct btree_trans *trans,
 					 bool lock_may_not_fail,
 					 unsigned long ip)
 {
-	int ret;
-
 	trans->lock_may_not_fail = lock_may_not_fail;
 	trans->lock_must_abort	= false;
 	trans->locking		= b;
 
-	ret = six_lock_ip_waiter(&b->lock, type, &trans->locking_wait,
-				 bch2_six_check_for_deadlock, trans, ip);
+	int ret = six_lock_ip_waiter(&b->lock, type, &trans->locking_wait,
+				     bch2_six_check_for_deadlock, trans, ip);
 	WRITE_ONCE(trans->locking, NULL);
 	WRITE_ONCE(trans->locking_wait.start_time, 0);
+
+	if (!ret)
+		trace_btree_path_lock(trans, _THIS_IP_, b);
 	return ret;
 }
 
@@ -262,6 +294,7 @@ static inline int btree_node_lock(struct btree_trans *trans,
 	int ret = 0;
 
 	EBUG_ON(level >= BTREE_MAX_DEPTH);
+	bch2_trans_verify_not_unlocked_or_in_restart(trans);
 
 	if (likely(six_trylock_type(&b->lock, type)) ||
 	    btree_node_lock_increment(trans, b, level, (enum btree_node_locked_type) type) ||
@@ -342,8 +375,8 @@ static inline bool bch2_btree_node_relock_notrace(struct btree_trans *trans,
 						  struct btree_path *path, unsigned level)
 {
 	EBUG_ON(btree_node_locked(path, level) &&
-		!btree_node_write_locked(path, level) &&
-		btree_node_locked_type(path, level) != __btree_lock_want(path, level));
+		btree_node_locked_type_nowrite(path, level) !=
+		__btree_lock_want(path, level));
 
 	return likely(btree_node_locked(path, level)) ||
 		(!IS_ERR_OR_NULL(path->l[level].b) &&
@@ -352,41 +385,42 @@ static inline bool bch2_btree_node_relock_notrace(struct btree_trans *trans,
 
 /* upgrade */
 
-bool bch2_btree_path_upgrade_noupgrade_sibs(struct btree_trans *,
-			       struct btree_path *, unsigned,
-			       struct get_locks_fail *);
+bool __bch2_btree_path_upgrade_norestart(struct btree_trans *, struct btree_path *, unsigned);
 
-bool __bch2_btree_path_upgrade(struct btree_trans *,
-			       struct btree_path *, unsigned,
-			       struct get_locks_fail *);
+static inline bool bch2_btree_path_upgrade_norestart(struct btree_trans *trans,
+			       struct btree_path *path,
+			       unsigned new_locks_want)
+{
+	return new_locks_want > path->locks_want
+		? __bch2_btree_path_upgrade_norestart(trans, path, new_locks_want)
+		: true;
+}
+
+int __bch2_btree_path_upgrade(struct btree_trans *,
+			      struct btree_path *, unsigned);
 
 static inline int bch2_btree_path_upgrade(struct btree_trans *trans,
 					  struct btree_path *path,
 					  unsigned new_locks_want)
 {
-	struct get_locks_fail f;
-	unsigned old_locks_want = path->locks_want;
-
 	new_locks_want = min(new_locks_want, BTREE_MAX_DEPTH);
 
-	if (path->locks_want < new_locks_want
-	    ? __bch2_btree_path_upgrade(trans, path, new_locks_want, &f)
-	    : path->uptodate == BTREE_ITER_UPTODATE)
-		return 0;
-
-	trace_and_count(trans->c, trans_restart_upgrade, trans, _THIS_IP_, path,
-			old_locks_want, new_locks_want, &f);
-	return btree_trans_restart(trans, BCH_ERR_transaction_restart_upgrade);
+	return likely(path->locks_want >= new_locks_want && path->nodes_locked)
+		? 0
+		: __bch2_btree_path_upgrade(trans, path, new_locks_want);
 }
 
 /* misc: */
 
-static inline void btree_path_set_should_be_locked(struct btree_path *path)
+static inline void btree_path_set_should_be_locked(struct btree_trans *trans, struct btree_path *path)
 {
 	EBUG_ON(!btree_node_locked(path, path->level));
 	EBUG_ON(path->uptodate);
 
-	path->should_be_locked = true;
+	if (!path->should_be_locked) {
+		path->should_be_locked = true;
+		trace_btree_path_should_be_locked(trans, path);
+	}
 }
 
 static inline void __btree_path_set_level_up(struct btree_trans *trans,
@@ -401,7 +435,7 @@ static inline void btree_path_set_level_up(struct btree_trans *trans,
 				    struct btree_path *path)
 {
 	__btree_path_set_level_up(trans, path, path->level++);
-	btree_path_set_dirty(path, BTREE_ITER_NEED_TRAVERSE);
+	btree_path_set_dirty(trans, path, BTREE_ITER_NEED_TRAVERSE);
 }
 
 /* debug */
@@ -413,12 +447,20 @@ struct six_lock_count bch2_btree_node_lock_counts(struct btree_trans *,
 
 int bch2_check_for_deadlock(struct btree_trans *, struct printbuf *);
 
-#ifdef CONFIG_BCACHEFS_DEBUG
-void bch2_btree_path_verify_locks(struct btree_path *);
-void bch2_trans_verify_locks(struct btree_trans *);
-#else
-static inline void bch2_btree_path_verify_locks(struct btree_path *path) {}
-static inline void bch2_trans_verify_locks(struct btree_trans *trans) {}
-#endif
+void __bch2_btree_path_verify_locks(struct btree_trans *, struct btree_path *);
+void __bch2_trans_verify_locks(struct btree_trans *);
+
+static inline void bch2_btree_path_verify_locks(struct btree_trans *trans,
+						struct btree_path *path)
+{
+	if (static_branch_unlikely(&bch2_debug_check_btree_locking))
+		__bch2_btree_path_verify_locks(trans, path);
+}
+
+static inline void bch2_trans_verify_locks(struct btree_trans *trans)
+{
+	if (static_branch_unlikely(&bch2_debug_check_btree_locking))
+		__bch2_trans_verify_locks(trans);
+}
 
 #endif /* _BCACHEFS_BTREE_LOCKING_H */

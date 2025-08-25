@@ -13,7 +13,7 @@ description: |
   Qualcomm display clock control module provides the clocks and power domains
   on SM6115.
 
-  See also:: include/dt-bindings/clock/qcom,sm6115-dispcc.h
+  See also: include/dt-bindings/clock/qcom,sm6115-dispcc.h
 
 properties:
   compatible:
@@ -28,27 +28,15 @@ properties:
       - description: Pixel clock from DSI PHY0
       - description: GPLL0 DISP DIV clock from GCC
 
-  '#clock-cells':
-    const: 1
-
-  '#reset-cells':
-    const: 1
-
-  '#power-domain-cells':
-    const: 1
-
-  reg:
-    maxItems: 1
-
 required:
   - compatible
-  - reg
   - clocks
-  - '#clock-cells'
-  - '#reset-cells'
   - '#power-domain-cells'
 
-additionalProperties: false
+allOf:
+  - $ref: qcom,gcc.yaml#
+
+unevaluatedProperties: false
 
 examples:
   - |

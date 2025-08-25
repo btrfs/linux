@@ -20,7 +20,35 @@ debian/arm64_build:
     EXTRA_LOCAL_PACKAGES: "jq libasound2 libcairo2 libdw1 libglib2.0-0 libjson-c5"
 
 # Disable container jobs that we won't use
-alpine/x86_64_build:
+debian/arm64_test-vk:
+  rules:
+    - when: never
+
+debian/baremetal_arm32_test-gl:
+  rules:
+    - when: never
+
+debian/baremetal_arm64_test-vk:
+  rules:
+    - when: never
+
+debian/ppc64el_build:
+  rules:
+    - when: never
+
+debian/s390x_build:
+  rules:
+    - when: never
+
+debian/x86_32_build:
+  rules:
+    - when: never
+
+debian/x86_64_test-android:
+  rules:
+    - when: never
+
+debian/x86_64_test-video:
   rules:
     - when: never
 
@@ -36,30 +64,14 @@ debian/android_build:
   rules:
     - when: never
 
-debian/x86_64_test-android:
+windows_build_msvc:
   rules:
     - when: never
 
-windows_build_vs2019:
+windows_test_msvc:
   rules:
     - when: never
 
-windows_test_vs2019:
-  rules:
-    - when: never
-
-.debian/x86_64_build-mingw:
-   rules:
-    - when: never
-
-rustfmt:
-   rules:
-    - when: never
-
-windows_vs2019:
-   rules:
-    - when: never
-
-clang-format:
+windows_msvc:
    rules:
     - when: never

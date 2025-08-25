@@ -23,7 +23,7 @@
 
 	memory@40000000 {
 		device_type = "memory";
-		reg = <0x40000000 0x80000000>;
+		reg = <0x40000000 0x7fc00000>;
 	};
 
 	aliases {
@@ -140,7 +140,7 @@
 		constant-charge-voltage-max-microvolt = <4200000>;
 	};
 
-	i2c-gpio-1 {
+	i2c-9 {
 		compatible = "i2c-gpio";
 		sda-gpios = <&gpy2 4 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
 		scl-gpios = <&gpy2 5 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
@@ -158,7 +158,7 @@
 		};
 	};
 
-	i2c-gpio-2 {
+	i2c-10 {
 		compatible = "i2c-gpio";
 		sda-gpios = <&gpy0 2 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
 		scl-gpios = <&gpy0 3 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
@@ -179,7 +179,7 @@
 		};
 	};
 
-	i2c-gpio-3 {
+	i2c-11 {
 		compatible = "i2c-gpio";
 		sda-gpios = <&gpm4 1 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
 		scl-gpios = <&gpm4 0 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
@@ -207,7 +207,7 @@
 		};
 	};
 
-	i2c-gpio-4 {
+	i2c-12 {
 		compatible = "i2c-gpio";
 		sda-gpios = <&gpm2 0 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
 		scl-gpios = <&gpm2 1 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
@@ -360,6 +360,39 @@
 	vusb_a-supply = <&ldo12_reg>;
 	dr_mode = "peripheral";
 	status = "okay";
+};
+
+&i2c_1 {
+	samsung,i2c-sda-delay = <100>;
+	samsung,i2c-slave-addr = <0x10>;
+	samsung,i2c-max-bus-freq = <400000>;
+	pinctrl-0 = <&i2c1_bus>;
+	pinctrl-names = "default";
+	status = "okay";
+
+	accelerometer@19 {
+		compatible = "st,lsm330dlc-accel";
+		reg = <0x19>;
+		interrupt-parent = <&gpx0>;
+		interrupts = <0 IRQ_TYPE_EDGE_RISING>;
+		pinctrl-0 = <&accelerometer_irq>;
+		pinctrl-names = "default";
+		mount-matrix =	"1",  "0",  "0",
+				"0", "-1",  "0",
+				"0",  "0", "-1";
+	};
+
+	gyro@6b {
+		compatible = "st,lsm330dlc-gyro";
+		reg = <0x6b>;
+		interrupt-parent = <&gpx0>;
+		interrupts = <6 IRQ_TYPE_EDGE_RISING>;
+		pinctrl-0 = <&gyro_data_enable &gyro_irq>;
+		pinctrl-names = "default";
+		mount-matrix =	"1",  "0",  "0",
+				"0", "-1",  "0",
+				"0",  "0", "-1";
+	};
 };
 
 &i2c_3 {
@@ -844,6 +877,12 @@
 		samsung,pin-pud = <EXYNOS_PIN_PULL_NONE>;
 	};
 
+	gyro_data_enable: gyro-data-enable-pins {
+		samsung,pins = "gpl2-0";
+		samsung,pin-function = <EXYNOS_PIN_FUNC_OUTPUT>;
+		samsung,pin-pud = <EXYNOS_PIN_PULL_DOWN>;
+	};
+
 	uart_sel: uart-sel-pins {
 		samsung,pins = "gpl2-7";
 		samsung,pin-function = <EXYNOS_PIN_FUNC_OUTPUT>;
@@ -894,8 +933,20 @@
 		samsung,pin-pud = <EXYNOS_PIN_PULL_DOWN>;
 	};
 
+	accelerometer_irq: accelerometer-irq-pins {
+		samsung,pins = "gpx0-0";
+		samsung,pin-function = <EXYNOS_PIN_FUNC_INPUT>;
+		samsung,pin-pud = <EXYNOS_PIN_PULL_NONE>;
+	};
+
 	stmpe_adc_irq: stmpe-adc-irq-pins {
 		samsung,pins = "gpx0-1";
+		samsung,pin-function = <EXYNOS_PIN_FUNC_INPUT>;
+		samsung,pin-pud = <EXYNOS_PIN_PULL_NONE>;
+	};
+
+	gyro_irq: gyro-irq-pins {
+		samsung,pins = "gpx0-6";
 		samsung,pin-function = <EXYNOS_PIN_FUNC_INPUT>;
 		samsung,pin-pud = <EXYNOS_PIN_PULL_NONE>;
 	};

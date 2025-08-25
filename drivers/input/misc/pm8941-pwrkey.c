@@ -154,8 +154,8 @@ static irqreturn_t pm8941_pwrkey_irq(int irq, void *_data)
 	if (pwrkey->sw_debounce_time_us) {
 		if (ktime_before(ktime_get(), pwrkey->sw_debounce_end_time)) {
 			dev_dbg(pwrkey->dev,
-				"ignoring key event received before debounce end %llu us\n",
-				pwrkey->sw_debounce_end_time);
+				"ignoring key event received before debounce end %lld us\n",
+				ktime_to_us(pwrkey->sw_debounce_end_time));
 			return IRQ_HANDLED;
 		}
 	}
@@ -465,7 +465,7 @@ MODULE_DEVICE_TABLE(of, pm8941_pwr_key_id_table);
 
 static struct platform_driver pm8941_pwrkey_driver = {
 	.probe = pm8941_pwrkey_probe,
-	.remove_new = pm8941_pwrkey_remove,
+	.remove = pm8941_pwrkey_remove,
 	.driver = {
 		.name = "pm8941-pwrkey",
 		.pm = pm_sleep_ptr(&pm8941_pwr_key_pm_ops),

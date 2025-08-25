@@ -39,10 +39,6 @@ int meson_eeclkc_probe(struct platform_device *pdev)
 	if (data->init_count)
 		regmap_multi_reg_write(map, data->init_regs, data->init_count);
 
-	/* Populate regmap for the regmap backed clocks */
-	for (i = 0; i < data->regmap_clk_num; i++)
-		data->regmap_clks[i]->map = map;
-
 	for (i = 0; i < data->hw_clks.num; i++) {
 		/* array might be sparse */
 		if (!data->hw_clks.hws[i])
@@ -57,5 +53,8 @@ int meson_eeclkc_probe(struct platform_device *pdev)
 
 	return devm_of_clk_add_hw_provider(dev, meson_clk_hw_get, (void *)&data->hw_clks);
 }
-EXPORT_SYMBOL_GPL(meson_eeclkc_probe);
-MODULE_LICENSE("GPL v2");
+EXPORT_SYMBOL_NS_GPL(meson_eeclkc_probe, "CLK_MESON");
+
+MODULE_DESCRIPTION("Amlogic Main Clock Controller Helpers");
+MODULE_LICENSE("GPL");
+MODULE_IMPORT_NS("CLK_MESON");

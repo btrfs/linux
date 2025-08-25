@@ -1989,13 +1989,6 @@ INT_DEFINE_END(system_call)
 	INTERRUPT_TO_KERNEL
 #endif
 
-#ifdef CONFIG_PPC_FAST_ENDIAN_SWITCH
-BEGIN_FTR_SECTION
-	cmpdi	r0,0x1ebe
-	beq-	1f
-END_FTR_SECTION_IFSET(CPU_FTR_REAL_LE)
-#endif
-
 	/* We reach here with PACA in r13, r13 in r9. */
 	mfspr	r11,SPRN_SRR0
 	mfspr	r12,SPRN_SRR1
@@ -2015,16 +2008,6 @@ END_FTR_SECTION_IFSET(CPU_FTR_REAL_LE)
 	b	system_call_common
 #endif
 	.endif
-
-#ifdef CONFIG_PPC_FAST_ENDIAN_SWITCH
-	/* Fast LE/BE switch system call */
-1:	mfspr	r12,SPRN_SRR1
-	xori	r12,r12,MSR_LE
-	mtspr	SPRN_SRR1,r12
-	mr	r13,r9
-	RFI_TO_USER	/* return to userspace */
-	b	.	/* prevent speculative execution */
-#endif
 .endm
 
 EXC_REAL_BEGIN(system_call, 0xc00, 0x100)
@@ -2554,27 +2537,8 @@ EXC_REAL_NONE(0x1000, 0x100)
 EXC_VIRT_NONE(0x5000, 0x100)
 EXC_REAL_NONE(0x1100, 0x100)
 EXC_VIRT_NONE(0x5100, 0x100)
-
-#ifdef CONFIG_CBE_RAS
-INT_DEFINE_BEGIN(cbe_system_error)
-	IVEC=0x1200
-	IHSRR=1
-INT_DEFINE_END(cbe_system_error)
-
-EXC_REAL_BEGIN(cbe_system_error, 0x1200, 0x100)
-	GEN_INT_ENTRY cbe_system_error, virt=0
-EXC_REAL_END(cbe_system_error, 0x1200, 0x100)
-EXC_VIRT_NONE(0x5200, 0x100)
-EXC_COMMON_BEGIN(cbe_system_error_common)
-	GEN_COMMON cbe_system_error
-	addi	r3,r1,STACK_INT_FRAME_REGS
-	bl	CFUNC(cbe_system_error_exception)
-	b	interrupt_return_hsrr
-
-#else /* CONFIG_CBE_RAS */
 EXC_REAL_NONE(0x1200, 0x100)
 EXC_VIRT_NONE(0x5200, 0x100)
-#endif
 
 /**
  * Interrupt 0x1300 - Instruction Address Breakpoint Interrupt.
@@ -2725,26 +2689,8 @@ EXC_COMMON_BEGIN(denorm_exception_common)
 	b	interrupt_return_hsrr
 
 
-#ifdef CONFIG_CBE_RAS
-INT_DEFINE_BEGIN(cbe_maintenance)
-	IVEC=0x1600
-	IHSRR=1
-INT_DEFINE_END(cbe_maintenance)
-
-EXC_REAL_BEGIN(cbe_maintenance, 0x1600, 0x100)
-	GEN_INT_ENTRY cbe_maintenance, virt=0
-EXC_REAL_END(cbe_maintenance, 0x1600, 0x100)
-EXC_VIRT_NONE(0x5600, 0x100)
-EXC_COMMON_BEGIN(cbe_maintenance_common)
-	GEN_COMMON cbe_maintenance
-	addi	r3,r1,STACK_INT_FRAME_REGS
-	bl	CFUNC(cbe_maintenance_exception)
-	b	interrupt_return_hsrr
-
-#else /* CONFIG_CBE_RAS */
 EXC_REAL_NONE(0x1600, 0x100)
 EXC_VIRT_NONE(0x5600, 0x100)
-#endif
 
 
 INT_DEFINE_BEGIN(altivec_assist)
@@ -2772,26 +2718,8 @@ EXC_COMMON_BEGIN(altivec_assist_common)
 	b	interrupt_return_srr
 
 
-#ifdef CONFIG_CBE_RAS
-INT_DEFINE_BEGIN(cbe_thermal)
-	IVEC=0x1800
-	IHSRR=1
-INT_DEFINE_END(cbe_thermal)
-
-EXC_REAL_BEGIN(cbe_thermal, 0x1800, 0x100)
-	GEN_INT_ENTRY cbe_thermal, virt=0
-EXC_REAL_END(cbe_thermal, 0x1800, 0x100)
-EXC_VIRT_NONE(0x5800, 0x100)
-EXC_COMMON_BEGIN(cbe_thermal_common)
-	GEN_COMMON cbe_thermal
-	addi	r3,r1,STACK_INT_FRAME_REGS
-	bl	CFUNC(cbe_thermal_exception)
-	b	interrupt_return_hsrr
-
-#else /* CONFIG_CBE_RAS */
 EXC_REAL_NONE(0x1800, 0x100)
 EXC_VIRT_NONE(0x5800, 0x100)
-#endif
 
 
 #ifdef CONFIG_PPC_WATCHDOG
