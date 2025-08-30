@@ -50,15 +50,16 @@ void bpf_sk_storage_free(struct sock *sk)
 {
 	struct bpf_local_storage *sk_storage;
 
+	migrate_disable();
 	rcu_read_lock();
 	sk_storage = rcu_dereference(sk->sk_bpf_storage);
-	if (!sk_storage) {
-		rcu_read_unlock();
-		return;
-	}
+	if (!sk_storage)
+		goto out;
 
 	bpf_local_storage_destroy(sk_storage);
+out:
 	rcu_read_unlock();
+	migrate_enable();
 }
 
 static void bpf_sk_storage_map_free(struct bpf_map *map)
@@ -106,7 +107,7 @@ static long bpf_fd_sk_storage_update_elem(struct bpf_map *map, void *key,
 	if (sock) {
 		sdata = bpf_local_storage_update(
 			sock->sk, (struct bpf_local_storage_map *)map, value,
-			map_flags, GFP_ATOMIC);
+			map_flags, false, GFP_ATOMIC);
 		sockfd_put(sock);
 		return PTR_ERR_OR_ZERO(sdata);
 	}
@@ -137,7 +138,7 @@ bpf_sk_storage_clone_elem(struct sock *newsk,
 {
 	struct bpf_local_storage_elem *copy_selem;
 
-	copy_selem = bpf_selem_alloc(smap, newsk, NULL, true, GFP_ATOMIC);
+	copy_selem = bpf_selem_alloc(smap, newsk, NULL, true, false, GFP_ATOMIC);
 	if (!copy_selem)
 		return NULL;
 
@@ -160,6 +161,7 @@ int bpf_sk_storage_clone(const struct sock *sk, struct sock *newsk)
 
 	RCU_INIT_POINTER(newsk->sk_bpf_storage, NULL);
 
+	migrate_disable();
 	rcu_read_lock();
 	sk_storage = rcu_dereference(sk->sk_bpf_storage);
 
@@ -212,6 +214,7 @@ int bpf_sk_storage_clone(const struct sock *sk, struct sock *newsk)
 
 out:
 	rcu_read_unlock();
+	migrate_enable();
 
 	/* In case of an error, don't free anything explicitly here, the
 	 * caller is responsible to call bpf_sk_storage_free.
@@ -243,7 +246,7 @@ BPF_CALL_5(bpf_sk_storage_get, struct bpf_map *, map, struct sock *, sk,
 	    refcount_inc_not_zero(&sk->sk_refcnt)) {
 		sdata = bpf_local_storage_update(
 			sk, (struct bpf_local_storage_map *)map, value,
-			BPF_NOEXIST, gfp_flags);
+			BPF_NOEXIST, false, gfp_flags);
 		/* sk must be a fullsock (guaranteed by verifier),
 		 * so sock_gen_put() is unnecessary.
 		 */
@@ -352,11 +355,6 @@ const struct bpf_func_proto bpf_sk_storage_delete_proto = {
 
 static bool bpf_sk_storage_tracing_allowed(const struct bpf_prog *prog)
 {
-	const struct btf *btf_vmlinux;
-	const struct btf_type *t;
-	const char *tname;
-	u32 btf_id;
-
 	if (prog->aux->dst_prog)
 		return false;
 
@@ -371,13 +369,7 @@ static bool bpf_sk_storage_tracing_allowed(const struct bpf_prog *prog)
 		return true;
 	case BPF_TRACE_FENTRY:
 	case BPF_TRACE_FEXIT:
-		btf_vmlinux = bpf_get_btf_vmlinux();
-		if (IS_ERR_OR_NULL(btf_vmlinux))
-			return false;
-		btf_id = prog->aux->attach_btf_id;
-		t = btf_type_by_id(btf_vmlinux, btf_id);
-		tname = btf_name_by_offset(btf_vmlinux, t->name_off);
-		return !!strncmp(tname, "bpf_sk_storage",
+		return !!strncmp(prog->aux->attach_func_name, "bpf_sk_storage",
 				 strlen("bpf_sk_storage"));
 	default:
 		return false;
@@ -496,27 +488,22 @@ bpf_sk_storage_diag_alloc(const struct nlattr *nla_stgs)
 	if (!bpf_capable())
 		return ERR_PTR(-EPERM);
 
-	nla_for_each_nested(nla, nla_stgs, rem) {
-		if (nla_type(nla) == SK_DIAG_BPF_STORAGE_REQ_MAP_FD) {
-			if (nla_len(nla) != sizeof(u32))
-				return ERR_PTR(-EINVAL);
-			nr_maps++;
-		}
+	nla_for_each_nested_type(nla, SK_DIAG_BPF_STORAGE_REQ_MAP_FD,
+				 nla_stgs, rem) {
+		if (nla_len(nla) != sizeof(u32))
+			return ERR_PTR(-EINVAL);
+		nr_maps++;
 	}
 
 	diag = kzalloc(struct_size(diag, maps, nr_maps), GFP_KERNEL);
 	if (!diag)
 		return ERR_PTR(-ENOMEM);
 
-	nla_for_each_nested(nla, nla_stgs, rem) {
-		struct bpf_map *map;
-		int map_fd;
+	nla_for_each_nested_type(nla, SK_DIAG_BPF_STORAGE_REQ_MAP_FD,
+				 nla_stgs, rem) {
+		int map_fd = nla_get_u32(nla);
+		struct bpf_map *map = bpf_map_get(map_fd);
 
-		if (nla_type(nla) != SK_DIAG_BPF_STORAGE_REQ_MAP_FD)
-			continue;
-
-		map_fd = nla_get_u32(nla);
-		map = bpf_map_get(map_fd);
 		if (IS_ERR(map)) {
 			err = PTR_ERR(map);
 			goto err_free;

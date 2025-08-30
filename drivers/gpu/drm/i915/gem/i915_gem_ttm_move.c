@@ -155,7 +155,7 @@ void i915_ttm_adjust_gem_after_move(struct drm_i915_gem_object *obj)
  * @bo: The ttm buffer object.
  *
  * This function prepares an object for move by removing all GPU bindings,
- * removing all CPU mapings and finally releasing the pages sg-table.
+ * removing all CPU mappings and finally releasing the pages sg-table.
  *
  * Return: 0 if successful, negative error code on error.
  */
@@ -603,7 +603,7 @@ int i915_ttm_move(struct ttm_buffer_object *bo, bool evict,
 		 * sequence, where at the end we can do the move for real.
 		 *
 		 * The special case here is when the dst_mem is TTM_PL_SYSTEM,
-		 * which doens't require any kind of move, so it should be safe
+		 * which doesn't require any kind of move, so it should be safe
 		 * to skip all the below and call ttm_bo_move_null() here, where
 		 * the caller in __i915_ttm_get_pages() will take care of the
 		 * rest, since we should have a valid ttm_tt.
@@ -624,7 +624,7 @@ int i915_ttm_move(struct ttm_buffer_object *bo, bool evict,
 
 	/* Populate ttm with pages if needed. Typically system memory. */
 	if (ttm && (dst_man->use_tt || (ttm->page_flags & TTM_TT_FLAG_SWAPPED))) {
-		ret = ttm_tt_populate(bo->bdev, ttm, ctx);
+		ret = ttm_bo_populate(bo, ctx);
 		if (ret)
 			return ret;
 	}

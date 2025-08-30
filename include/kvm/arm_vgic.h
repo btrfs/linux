@@ -13,6 +13,7 @@
 #include <linux/spinlock.h>
 #include <linux/static_key.h>
 #include <linux/types.h>
+#include <linux/xarray.h>
 #include <kvm/iodev.h>
 #include <linux/list.h>
 #include <linux/jump_label.h>
@@ -25,7 +26,6 @@
 #define VGIC_NR_SGIS		16
 #define VGIC_NR_PPIS		16
 #define VGIC_NR_PRIVATE_IRQS	(VGIC_NR_SGIS + VGIC_NR_PPIS)
-#define VGIC_MAX_PRIVATE	(VGIC_NR_PRIVATE_IRQS - 1)
 #define VGIC_MAX_SPI		1019
 #define VGIC_MAX_RESERVED	1023
 #define VGIC_MIN_LPI		8192
@@ -38,6 +38,7 @@
 enum vgic_type {
 	VGIC_V2,		/* Good ol' GICv2 */
 	VGIC_V3,		/* New fancy GICv3 */
+	VGIC_V5,		/* Newer, fancier GICv5 */
 };
 
 /* same for all guests, as depending only on the _host's_ GIC model */
@@ -77,8 +78,11 @@ struct vgic_global {
 	/* Pseudo GICv3 from outer space */
 	bool			no_hw_deactivation;
 
-	/* GIC system register CPU interface */
+	/* GICv3 system register CPU interface */
 	struct static_key_false gicv3_cpuif;
+
+	/* GICv3 compat mode on a GICv5 host */
+	bool			has_gcie_v3_compat;
 
 	u32			ich_vtr_el2;
 };
@@ -116,7 +120,7 @@ struct irq_ops {
 
 struct vgic_irq {
 	raw_spinlock_t irq_lock;	/* Protects the content of the struct */
-	struct list_head lpi_list;	/* Used to link all LPIs together */
+	struct rcu_head rcu;
 	struct list_head ap_list;
 
 	struct kvm_vcpu *vcpu;		/* SGIs and PPIs: The VCPU
@@ -209,6 +213,12 @@ struct vgic_its {
 	struct mutex		its_lock;
 	struct list_head	device_list;
 	struct list_head	collection_list;
+
+	/*
+	 * Caches the (device_id, event_id) -> vgic_irq translation for
+	 * LPIs that are mapped and enabled.
+	 */
+	struct xarray		translation_cache;
 };
 
 struct vgic_state_iter;
@@ -243,6 +253,9 @@ struct vgic_dist {
 
 	int			nr_spis;
 
+	/* The GIC maintenance IRQ for nested hypervisors. */
+	u32			mi_intid;
+
 	/* base addresses in guest physical address space: */
 	gpa_t			vgic_dist_base;		/* distributor */
 	union {
@@ -254,6 +267,9 @@ struct vgic_dist {
 
 	/* distributor enabled */
 	bool			enabled;
+
+	/* Supports SGIs without active state */
+	bool			nassgicap;
 
 	/* Wants SGIs without active state */
 	bool			nassgireq;
@@ -273,13 +289,8 @@ struct vgic_dist {
 	 */
 	u64			propbaser;
 
-	/* Protects the lpi_list and the count value below. */
-	raw_spinlock_t		lpi_list_lock;
-	struct list_head	lpi_list_head;
-	int			lpi_list_count;
-
-	/* LPI translation cache */
-	struct list_head	lpi_translation_cache;
+#define LPI_XA_MARK_DEBUG_ITER	XA_MARK_0
+	struct xarray		lpi_xa;
 
 	/* used by vgic-debug */
 	struct vgic_state_iter *iter;
@@ -329,7 +340,7 @@ struct vgic_cpu {
 		struct vgic_v3_cpu_if	vgic_v3;
 	};
 
-	struct vgic_irq private_irqs[VGIC_NR_PRIVATE_IRQS];
+	struct vgic_irq *private_irqs;
 
 	raw_spinlock_t ap_list_lock;	/* Protects the ap_list */
 
@@ -368,6 +379,7 @@ extern struct static_key_false vgic_v3_cpuif_trap;
 int kvm_set_legacy_vgic_v2_addr(struct kvm *kvm, struct kvm_arm_device_addr *dev_addr);
 void kvm_vgic_early_init(struct kvm *kvm);
 int kvm_vgic_vcpu_init(struct kvm_vcpu *vcpu);
+int kvm_vgic_vcpu_nv_init(struct kvm_vcpu *vcpu);
 int kvm_vgic_create(struct kvm *kvm, u32 type);
 void kvm_vgic_destroy(struct kvm *kvm);
 void kvm_vgic_vcpu_destroy(struct kvm_vcpu *vcpu);
@@ -387,7 +399,10 @@ int kvm_vgic_vcpu_pending_irq(struct kvm_vcpu *vcpu);
 
 void kvm_vgic_load(struct kvm_vcpu *vcpu);
 void kvm_vgic_put(struct kvm_vcpu *vcpu);
-void kvm_vgic_vmcr_sync(struct kvm_vcpu *vcpu);
+
+u16 vgic_v3_get_eisr(struct kvm_vcpu *vcpu);
+u16 vgic_v3_get_elrsr(struct kvm_vcpu *vcpu);
+u64 vgic_v3_get_misr(struct kvm_vcpu *vcpu);
 
 #define irqchip_in_kernel(k)	(!!((k)->arch.vgic.in_kernel))
 #define vgic_initialized(k)	((k)->arch.vgic.initialized)
@@ -426,12 +441,13 @@ struct kvm_kernel_irq_routing_entry;
 int kvm_vgic_v4_set_forwarding(struct kvm *kvm, int irq,
 			       struct kvm_kernel_irq_routing_entry *irq_entry);
 
-int kvm_vgic_v4_unset_forwarding(struct kvm *kvm, int irq,
-				 struct kvm_kernel_irq_routing_entry *irq_entry);
+void kvm_vgic_v4_unset_forwarding(struct kvm *kvm, int host_irq);
 
 int vgic_v4_load(struct kvm_vcpu *vcpu);
 void vgic_v4_commit(struct kvm_vcpu *vcpu);
 int vgic_v4_put(struct kvm_vcpu *vcpu);
+
+bool vgic_state_is_nested(struct kvm_vcpu *vcpu);
 
 /* CPU HP callbacks */
 void kvm_vgic_cpu_up(void);

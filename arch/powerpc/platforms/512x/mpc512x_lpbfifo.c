@@ -240,10 +240,8 @@ static int mpc512x_lpbfifo_kick(void)
 	dma_conf.src_addr_width = DMA_SLAVE_BUSWIDTH_4_BYTES;
 
 	/* Make DMA channel work with LPB FIFO data register */
-	if (dma_dev->device_config(lpbfifo.chan, &dma_conf)) {
-		ret = -EINVAL;
-		goto err_dma_prep;
-	}
+	if (dma_dev->device_config(lpbfifo.chan, &dma_conf))
+		return -EINVAL;
 
 	sg_init_table(&sg, 1);
 
@@ -504,7 +502,7 @@ MODULE_DEVICE_TABLE(of, mpc512x_lpbfifo_match);
 
 static struct platform_driver mpc512x_lpbfifo_driver = {
 	.probe = mpc512x_lpbfifo_probe,
-	.remove_new = mpc512x_lpbfifo_remove,
+	.remove = mpc512x_lpbfifo_remove,
 	.driver = {
 		.name = DRV_NAME,
 		.of_match_table = mpc512x_lpbfifo_match,

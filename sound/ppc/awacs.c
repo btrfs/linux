@@ -39,7 +39,7 @@ static void snd_pmac_screamer_wait(struct snd_pmac *chip)
 	while (!(in_le32(&chip->awacs->codec_stat) & MASK_VALID)) {
 		mdelay(1);
 		if (! --timeout) {
-			snd_printd("snd_pmac_screamer_wait timeout\n");
+			dev_dbg(chip->card->dev, "%s timeout\n", __func__);
 			break;
 		}
 	}
@@ -58,7 +58,7 @@ snd_pmac_awacs_write(struct snd_pmac *chip, int val)
 	out_le32(&chip->awacs->codec_ctrl, val | (chip->subframe << 22));
 	while (in_le32(&chip->awacs->codec_ctrl) & MASK_NEWECMD) {
 		if (! --timeout) {
-			snd_printd("snd_pmac_awacs_write timeout\n");
+			dev_dbg(chip->card->dev, "%s timeout\n", __func__);
 			break;
 		}
 	}
@@ -956,7 +956,7 @@ snd_pmac_awacs_init(struct snd_pmac *chip)
 	/*
 	 * build mixers
 	 */
-	strcpy(chip->card->mixername, "PowerMac AWACS");
+	strscpy(chip->card->mixername, "PowerMac AWACS");
 
 	err = build_mixers(chip, ARRAY_SIZE(snd_pmac_awacs_mixers),
 				snd_pmac_awacs_mixers);

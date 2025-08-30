@@ -164,7 +164,7 @@ static const struct regmap_config bq25890_regmap_config = {
 	.val_bits = 8,
 
 	.max_register = 0x14,
-	.cache_type = REGCACHE_RBTREE,
+	.cache_type = REGCACHE_MAPLE,
 
 	.wr_table = &bq25890_writeable_regs,
 	.volatile_table = &bq25890_volatile_regs,
@@ -1617,11 +1617,11 @@ static const struct dev_pm_ops bq25890_pm = {
 };
 
 static const struct i2c_device_id bq25890_i2c_ids[] = {
-	{ "bq25890", 0 },
-	{ "bq25892", 0 },
-	{ "bq25895", 0 },
-	{ "bq25896", 0 },
-	{},
+	{ "bq25890" },
+	{ "bq25892" },
+	{ "bq25895" },
+	{ "bq25896" },
+	{}
 };
 MODULE_DEVICE_TABLE(i2c, bq25890_i2c_ids);
 

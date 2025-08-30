@@ -13,8 +13,10 @@
  *	 however I decided to publish this code under the plain GPL.
  */
 
+#include <linux/export.h>
 #include <linux/sched.h>
 #include <linux/string.h>
+
 #include "mpi-internal.h"
 #include "longlong.h"
 
@@ -176,7 +178,6 @@ int mpi_powm(MPI res, MPI base, MPI exp, MPI mod)
 
 		for (;;) {
 			while (c) {
-				mpi_ptr_t tp;
 				mpi_size_t xsize;
 
 				/*if (mpihelp_mul_n(xp, rp, rp, rsize) < 0) goto enomem */
@@ -207,9 +208,7 @@ int mpi_powm(MPI res, MPI base, MPI exp, MPI mod)
 					xsize = msize;
 				}
 
-				tp = rp;
-				rp = xp;
-				xp = tp;
+				swap(rp, xp);
 				rsize = xsize;
 
 				if ((mpi_limb_signed_t) e < 0) {
@@ -235,9 +234,7 @@ int mpi_powm(MPI res, MPI base, MPI exp, MPI mod)
 						xsize = msize;
 					}
 
-					tp = rp;
-					rp = xp;
-					xp = tp;
+					swap(rp, xp);
 					rsize = xsize;
 				}
 				e <<= 1;

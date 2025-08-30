@@ -87,8 +87,8 @@ static int snd_soc_ac97_gpio_get(struct gpio_chip *chip, unsigned int offset)
 	return !!(ret & (1 << offset));
 }
 
-static void snd_soc_ac97_gpio_set(struct gpio_chip *chip, unsigned int offset,
-				  int value)
+static int snd_soc_ac97_gpio_set(struct gpio_chip *chip, unsigned int offset,
+				 int value)
 {
 	struct snd_ac97_gpio_priv *gpio_priv = gpiochip_get_data(chip);
 	struct snd_soc_component *component = gpio_to_component(chip);
@@ -98,15 +98,22 @@ static void snd_soc_ac97_gpio_set(struct gpio_chip *chip, unsigned int offset,
 	snd_soc_component_write(component, AC97_GPIO_STATUS,
 				gpio_priv->gpios_set);
 	dev_dbg(component->dev, "set gpio %d to %d\n", offset, !!value);
+
+	return 0;
 }
 
 static int snd_soc_ac97_gpio_direction_out(struct gpio_chip *chip,
 				     unsigned offset, int value)
 {
 	struct snd_soc_component *component = gpio_to_component(chip);
+	int ret;
 
 	dev_dbg(component->dev, "set gpio %d to output\n", offset);
-	snd_soc_ac97_gpio_set(chip, offset, value);
+
+	ret = snd_soc_ac97_gpio_set(chip, offset, value);
+	if (ret)
+		return ret;
+
 	return snd_soc_component_update_bits(component, AC97_GPIO_CFG,
 					     1 << offset, 0);
 }
@@ -168,7 +175,7 @@ static void snd_soc_ac97_free_gpio(struct snd_ac97 *ac97)
  * it. The caller is responsible to either call device_add(&ac97->dev) to
  * register the device, or to call put_device(&ac97->dev) to free the device.
  *
- * Returns: A snd_ac97 device or a PTR_ERR in case of an error.
+ * Returns: A snd_ac97 device or an ERR_PTR in case of an error.
  */
 struct snd_ac97 *snd_soc_alloc_ac97_component(struct snd_soc_component *component)
 {
@@ -207,7 +214,7 @@ EXPORT_SYMBOL(snd_soc_alloc_ac97_component);
  * the device and check if it matches the expected ID. If it doesn't match an
  * error will be returned and device will not be registered.
  *
- * Returns: A PTR_ERR() on failure or a valid snd_ac97 struct on success.
+ * Returns: An ERR_PTR on failure or a valid snd_ac97 struct on success.
  */
 struct snd_ac97 *snd_soc_new_ac97_component(struct snd_soc_component *component,
 	unsigned int id, unsigned int id_mask)

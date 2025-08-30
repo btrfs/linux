@@ -3,7 +3,6 @@
 #define __NOUVEAU_FENCE_H__
 
 #include <linux/dma-fence.h>
-#include <linux/workqueue.h>
 #include <nvif/event.h>
 
 struct nouveau_drm;
@@ -18,12 +17,19 @@ struct nouveau_fence {
 	unsigned long timeout;
 };
 
+static inline struct nouveau_fence *
+to_nouveau_fence(struct dma_fence *fence)
+{
+	return container_of(fence, struct nouveau_fence, base);
+}
+
 int  nouveau_fence_create(struct nouveau_fence **, struct nouveau_channel *);
 int  nouveau_fence_new(struct nouveau_fence **, struct nouveau_channel *);
 void nouveau_fence_unref(struct nouveau_fence **);
 
 int  nouveau_fence_emit(struct nouveau_fence *);
 bool nouveau_fence_done(struct nouveau_fence *);
+void nouveau_fence_cancel(struct nouveau_fence *fence);
 int  nouveau_fence_wait(struct nouveau_fence *, bool lazy, bool intr);
 int  nouveau_fence_sync(struct nouveau_bo *, struct nouveau_channel *, bool exclusive, bool intr);
 
@@ -45,10 +51,9 @@ struct nouveau_fence_chan {
 	u32 context;
 	char name[32];
 
+	struct work_struct uevent_work;
 	struct nvif_event event;
-	struct work_struct allow_block_work;
-	atomic_t notify_ref;
-	int dead, killed;
+	int notify_ref, dead, killed;
 };
 
 struct nouveau_fence_priv {
@@ -85,6 +90,7 @@ void nv17_fence_resume(struct nouveau_drm *drm);
 int nv50_fence_create(struct nouveau_drm *);
 int nv84_fence_create(struct nouveau_drm *);
 int nvc0_fence_create(struct nouveau_drm *);
+int gv100_fence_create(struct nouveau_drm *);
 
 struct nv84_fence_chan {
 	struct nouveau_fence_chan base;

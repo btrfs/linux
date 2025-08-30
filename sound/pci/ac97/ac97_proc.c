@@ -98,7 +98,7 @@ static void snd_ac97_proc_read_main(struct snd_ac97 *ac97, struct snd_info_buffe
 	static const char *spdif_rates_cs4205[4] = { " Rate=48kHz", " Rate=44.1kHz", " Rate=res", " Rate=res" };
 	static const char *double_rate_slots[4] = { "10/11", "7/8", "reserved", "reserved" };
 
-	snd_ac97_get_name(NULL, ac97->id, name, 0);
+	snd_ac97_get_name(NULL, ac97->id, name, sizeof(name), 0);
 	snd_iprintf(buffer, "%d-%d/%d: %s\n\n", ac97->addr, ac97->num, subidx, name);
 
 	if ((ac97->scaps & AC97_SCAP_AUDIO) == 0)
@@ -161,12 +161,12 @@ static void snd_ac97_proc_read_main(struct snd_ac97 *ac97, struct snd_info_buffe
 		    "Mic select       : %s\n"
 		    "ADC/DAC loopback : %s\n",
 		    val & 0x8000 ? "post" : "pre",
-		    val & 0x4000 ? "on" : "off",
-		    val & 0x2000 ? "on" : "off",
-		    val & 0x1000 ? "on" : "off",
+		    str_on_off(val & 0x4000),
+		    str_on_off(val & 0x2000),
+		    str_on_off(val & 0x1000),
 		    val & 0x0200 ? "Mic" : "MIX",
 		    val & 0x0100 ? "Mic2" : "Mic1",
-		    val & 0x0080 ? "on" : "off");
+		    str_on_off(val & 0x0080));
 	if (ac97->ext_id & AC97_EI_DRA)
 		snd_iprintf(buffer, "Double rate slots: %s\n",
 			    double_rate_slots[(val >> 10) & 3]);

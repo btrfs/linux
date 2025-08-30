@@ -15,9 +15,23 @@ download_location="${cache_dir}/crosstools/"
 build_location="$(realpath "${cache_dir}"/nolibc-tests/)"
 perform_download=0
 test_mode=system
-archs="i386 x86_64 arm64 arm mips32le mips32be ppc ppc64 ppc64le riscv s390 loongarch"
+werror=1
+llvm=
+all_archs=(
+	i386 x86_64 x32
+	arm64 arm armthumb
+	mips32le mips32be mipsn32le mipsn32be mips64le mips64be
+	ppc ppc64 ppc64le
+	riscv32 riscv64
+	s390x s390
+	loongarch
+	sparc32 sparc64
+	m68k
+	sh4
+)
+archs="${all_archs[@]}"
 
-TEMP=$(getopt -o 'j:d:c:b:a:m:ph' -n "$0" -- "$@")
+TEMP=$(getopt -o 'j:d:c:b:a:m:pelh' -n "$0" -- "$@")
 
 eval set -- "$TEMP"
 unset TEMP
@@ -40,6 +54,8 @@ Options:
  -a [ARCH]      Host architecture of toolchains to use (default: ${hostarch})
  -b [DIR]       Build location (default: ${build_location})
  -m [MODE]      Test mode user/system (default: ${test_mode})
+ -e             Disable -Werror
+ -l             Build with LLVM/clang
 EOF
 }
 
@@ -66,6 +82,12 @@ while true; do
 		'-m')
 			test_mode="$2"
 			shift 2; continue ;;
+		'-e')
+			werror=0
+			shift; continue ;;
+		'-l')
+			llvm=1
+			shift; continue ;;
 		'-h')
 			print_usage
 			exit 0
@@ -84,19 +106,23 @@ fi
 crosstool_arch() {
 	case "$1" in
 	arm64) echo aarch64;;
+	armthumb) echo arm;;
 	ppc) echo powerpc;;
 	ppc64) echo powerpc64;;
 	ppc64le) echo powerpc64;;
 	riscv) echo riscv64;;
 	loongarch) echo loongarch64;;
 	mips*) echo mips;;
+	s390*) echo s390;;
+	sparc*) echo sparc64;;
+	x32*) echo x86_64;;
 	*) echo "$1";;
 	esac
 }
 
 crosstool_abi() {
 	case "$1" in
-	arm) echo linux-gnueabi;;
+	arm | armthumb) echo linux-gnueabi;;
 	*) echo linux;;
 	esac
 }
@@ -133,14 +159,20 @@ test_arch() {
 	arch=$1
 	ct_arch=$(crosstool_arch "$arch")
 	ct_abi=$(crosstool_abi "$1")
+
+	if [ ! -d "${download_location}gcc-${crosstool_version}-nolibc/${ct_arch}-${ct_abi}/bin/." ]; then
+		echo "No toolchain found in ${download_location}gcc-${crosstool_version}-nolibc/${ct_arch}-${ct_abi}."
+		echo "Did you install the toolchains or set the correct arch ? Rerun with -h for help."
+		return 1
+	fi
+
 	cross_compile=$(realpath "${download_location}gcc-${crosstool_version}-nolibc/${ct_arch}-${ct_abi}/bin/${ct_arch}-${ct_abi}-")
 	build_dir="${build_location}/${arch}"
-	MAKE=(make -j"${nproc}" XARCH="${arch}" CROSS_COMPILE="${cross_compile}" O="${build_dir}")
-
-	mkdir -p "$build_dir"
-	if [ "$test_mode" = "system" ] && [ ! -f "${build_dir}/.config" ]; then
-		swallow_output "${MAKE[@]}" defconfig
+	if [ "$werror" -ne 0 ]; then
+		CFLAGS_EXTRA="$CFLAGS_EXTRA -Werror"
 	fi
+	MAKE=(make -f Makefile.nolibc -j"${nproc}" XARCH="${arch}" CROSS_COMPILE="${cross_compile}" LLVM="${llvm}" O="${build_dir}")
+
 	case "$test_mode" in
 		'system')
 			test_target=run
@@ -153,7 +185,22 @@ test_arch() {
 			exit 1
 	esac
 	printf '%-15s' "$arch:"
-	swallow_output "${MAKE[@]}" "$test_target" V=1
+	if [ "$arch" = "s390" ] && ([ "$llvm" = "1" ] || [ "$test_mode" = "user" ]); then
+		echo "Unsupported configuration"
+		return
+	fi
+	if [ "$arch" = "m68k" -o "$arch" = "sh4" ] && [ "$llvm" = "1" ]; then
+		echo "Unsupported configuration"
+		return
+	fi
+	if [ "$arch" = "x32" ] && [ "$test_mode" = "user" ]; then
+		echo "Unsupported configuration"
+		return
+	fi
+
+	mkdir -p "$build_dir"
+	swallow_output "${MAKE[@]}" defconfig
+	swallow_output "${MAKE[@]}" CFLAGS_EXTRA="$CFLAGS_EXTRA" "$test_target" V=1
 	cp run.out run.out."${arch}"
 	"${MAKE[@]}" report | grep passed
 }

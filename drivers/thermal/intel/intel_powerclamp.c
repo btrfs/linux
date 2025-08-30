@@ -49,7 +49,6 @@
  */
 #define DEFAULT_DURATION_JIFFIES (6)
 
-static unsigned int target_mwait;
 static struct dentry *debug_dir;
 static bool poll_pkg_cstate_enable;
 
@@ -312,34 +311,6 @@ MODULE_PARM_DESC(window_size, "sliding window in number of clamping cycles\n"
 	"\twindow size results in slower response time but more smooth\n"
 	"\tclamping results. default to 2.");
 
-static void find_target_mwait(void)
-{
-	unsigned int eax, ebx, ecx, edx;
-	unsigned int highest_cstate = 0;
-	unsigned int highest_subcstate = 0;
-	int i;
-
-	if (boot_cpu_data.cpuid_level < CPUID_MWAIT_LEAF)
-		return;
-
-	cpuid(CPUID_MWAIT_LEAF, &eax, &ebx, &ecx, &edx);
-
-	if (!(ecx & CPUID5_ECX_EXTENSIONS_SUPPORTED) ||
-	    !(ecx & CPUID5_ECX_INTERRUPT_BREAK))
-		return;
-
-	edx >>= MWAIT_SUBSTATE_SIZE;
-	for (i = 0; i < 7 && edx; i++, edx >>= MWAIT_SUBSTATE_SIZE) {
-		if (edx & MWAIT_SUBSTATE_MASK) {
-			highest_cstate = i;
-			highest_subcstate = edx & MWAIT_SUBSTATE_MASK;
-		}
-	}
-	target_mwait = (highest_cstate << MWAIT_SUBSTATE_SIZE) |
-		(highest_subcstate - 1);
-
-}
-
 struct pkg_cstate_info {
 	bool skip;
 	int msr_index;
@@ -369,7 +340,7 @@ static bool has_pkg_state_counter(void)
 
 	/* check if any one of the counter msrs exists */
 	while (info->msr_index) {
-		if (!rdmsrl_safe(info->msr_index, &val))
+		if (!rdmsrq_safe(info->msr_index, &val))
 			return true;
 		info++;
 	}
@@ -385,7 +356,7 @@ static u64 pkg_state_counter(void)
 
 	while (info->msr_index) {
 		if (!info->skip) {
-			if (!rdmsrl_safe(info->msr_index, &val))
+			if (!rdmsrq_safe(info->msr_index, &val))
 				count += val;
 			else
 				info->skip = true;
@@ -616,7 +587,7 @@ static int powerclamp_idle_injection_register(void)
 	poll_pkg_cstate_enable = false;
 	if (cpumask_equal(cpu_present_mask, idle_injection_cpu_mask)) {
 		ii_dev = idle_inject_register_full(idle_injection_cpu_mask, idle_inject_update);
-		if (topology_max_packages() == 1 && topology_max_die_per_package() == 1)
+		if (topology_max_packages() == 1 && topology_max_dies_per_package() == 1)
 			poll_pkg_cstate_enable = true;
 	} else {
 		ii_dev = idle_inject_register(idle_injection_cpu_mask);
@@ -759,9 +730,6 @@ static int __init powerclamp_probe(void)
 		return -ENODEV;
 	}
 
-	/* find the deepest mwait value */
-	find_target_mwait();
-
 	return 0;
 }
 
@@ -841,7 +809,7 @@ static void __exit powerclamp_exit(void)
 }
 module_exit(powerclamp_exit);
 
-MODULE_IMPORT_NS(IDLE_INJECT);
+MODULE_IMPORT_NS("IDLE_INJECT");
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Arjan van de Ven <arjan@linux.intel.com>");

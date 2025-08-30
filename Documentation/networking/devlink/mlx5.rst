@@ -53,6 +53,9 @@ parameters.
        * ``smfs`` Software managed flow steering. In SMFS mode, the HW
          steering entities are created and manage through the driver without
          firmware intervention.
+       * ``hmfs`` Hardware managed flow steering. In HMFS mode, the driver
+         is configuring steering rules directly to the HW using Work Queues with
+         a special new type of WQE (Work Queue Element).
 
        SMFS mode is faster and provides better rule insertion rate compared to
        default DMFS mode.
@@ -97,6 +100,10 @@ parameters.
 
        When metadata is disabled, the above use cases will fail to initialize if
        users try to enable them.
+
+       Note: Setting this parameter does not take effect immediately. Setting
+       must happen in legacy mode and eswitch port metadata takes effect after
+       enabling switchdev mode.
    * - ``hairpin_num_queues``
      - u32
      - driverinit
@@ -246,7 +253,7 @@ them in realtime.
 
 Description of the vnic counters:
 
-- total_q_under_processor_handle
+- total_error_queues
         number of queues in an error state due to
         an async error or errored command.
 - send_queue_priority_update_flow
@@ -255,7 +262,8 @@ Description of the vnic counters:
         number of times CQ entered an error state due to an overflow.
 - async_eq_overrun
         number of times an EQ mapped to async events was overrun.
-        comp_eq_overrun number of times an EQ mapped to completion events was
+- comp_eq_overrun
+        number of times an EQ mapped to completion events was
         overrun.
 - quota_exceeded_command
         number of commands issued and failed due to quota exceeded.
@@ -272,6 +280,10 @@ Description of the vnic counters:
 	number of packets handled by the VNIC experiencing unexpected steering
 	failure (at any point in steering flow owned by the VNIC, including the FDB
 	for the eswitch owner).
+- icm_consumption
+        amount of Interconnect Host Memory (ICM) consumed by the vnic in
+        granularity of 4KB. ICM is host memory allocated by SW upon HCA request
+        and is used for storing data structures that control HCA operation.
 
 User commands examples:
 

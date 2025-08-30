@@ -494,28 +494,14 @@ static int ptrace_hbp_fill_attr_ctrl(unsigned int note_type,
 				     struct arch_hw_breakpoint_ctrl ctrl,
 				     struct perf_event_attr *attr)
 {
-	int err, len, type, offset;
+	int err, len, type;
 
-	err = arch_bp_generic_fields(ctrl, &len, &type, &offset);
+	err = arch_bp_generic_fields(ctrl, &len, &type);
 	if (err)
 		return err;
 
-	switch (note_type) {
-	case NT_LOONGARCH_HW_BREAK:
-		if ((type & HW_BREAKPOINT_X) != type)
-			return -EINVAL;
-		break;
-	case NT_LOONGARCH_HW_WATCH:
-		if ((type & HW_BREAKPOINT_RW) != type)
-			return -EINVAL;
-		break;
-	default:
-		return -EINVAL;
-	}
-
 	attr->bp_len	= len;
 	attr->bp_type	= type;
-	attr->bp_addr	+= offset;
 
 	return 0;
 }
@@ -603,16 +589,36 @@ static int ptrace_hbp_set_ctrl(unsigned int note_type,
 	struct perf_event *bp;
 	struct perf_event_attr attr;
 	struct arch_hw_breakpoint_ctrl ctrl;
+	struct thread_info *ti = task_thread_info(tsk);
 
 	bp = ptrace_hbp_get_initialised_bp(note_type, tsk, idx);
 	if (IS_ERR(bp))
 		return PTR_ERR(bp);
 
 	attr = bp->attr;
-	decode_ctrl_reg(uctrl, &ctrl);
-	err = ptrace_hbp_fill_attr_ctrl(note_type, ctrl, &attr);
-	if (err)
-		return err;
+
+	switch (note_type) {
+	case NT_LOONGARCH_HW_BREAK:
+		ctrl.type = LOONGARCH_BREAKPOINT_EXECUTE;
+		ctrl.len = LOONGARCH_BREAKPOINT_LEN_4;
+		break;
+	case NT_LOONGARCH_HW_WATCH:
+		decode_ctrl_reg(uctrl, &ctrl);
+		break;
+	default:
+		return -EINVAL;
+	}
+
+	if (uctrl & CTRL_PLV_ENABLE) {
+		err = ptrace_hbp_fill_attr_ctrl(note_type, ctrl, &attr);
+		if (err)
+			return err;
+		attr.disabled = 0;
+		set_ti_thread_flag(ti, TIF_LOAD_WATCH);
+	} else {
+		attr.disabled = 1;
+		clear_ti_thread_flag(ti, TIF_LOAD_WATCH);
+	}
 
 	return modify_user_hw_breakpoint(bp, &attr);
 }
@@ -642,6 +648,10 @@ static int ptrace_hbp_set_addr(unsigned int note_type,
 {
 	struct perf_event *bp;
 	struct perf_event_attr attr;
+
+	/* Kernel-space address cannot be monitored by user-space */
+	if ((unsigned long)addr >= XKPRANGE)
+		return -EINVAL;
 
 	bp = ptrace_hbp_get_initialised_bp(note_type, tsk, idx);
 	if (IS_ERR(bp))
@@ -710,7 +720,7 @@ static int hw_break_set(struct task_struct *target,
 	unsigned int note_type = regset->core_note_type;
 
 	/* Resource info */
-	offset = offsetof(struct user_watch_state, dbg_regs);
+	offset = offsetof(struct user_watch_state_v2, dbg_regs);
 	user_regset_copyin_ignore(&pos, &count, &kbuf, &ubuf, 0, offset);
 
 	/* (address, mask, ctrl) registers */
@@ -854,7 +864,7 @@ enum loongarch_regset {
 
 static const struct user_regset loongarch64_regsets[] = {
 	[REGSET_GPR] = {
-		.core_note_type	= NT_PRSTATUS,
+		USER_REGSET_NOTE_TYPE(PRSTATUS),
 		.n		= ELF_NGREG,
 		.size		= sizeof(elf_greg_t),
 		.align		= sizeof(elf_greg_t),
@@ -862,7 +872,7 @@ static const struct user_regset loongarch64_regsets[] = {
 		.set		= gpr_set,
 	},
 	[REGSET_FPR] = {
-		.core_note_type	= NT_PRFPREG,
+		USER_REGSET_NOTE_TYPE(PRFPREG),
 		.n		= ELF_NFPREG,
 		.size		= sizeof(elf_fpreg_t),
 		.align		= sizeof(elf_fpreg_t),
@@ -870,7 +880,7 @@ static const struct user_regset loongarch64_regsets[] = {
 		.set		= fpr_set,
 	},
 	[REGSET_CPUCFG] = {
-		.core_note_type	= NT_LOONGARCH_CPUCFG,
+		USER_REGSET_NOTE_TYPE(LOONGARCH_CPUCFG),
 		.n		= 64,
 		.size		= sizeof(u32),
 		.align		= sizeof(u32),
@@ -879,7 +889,7 @@ static const struct user_regset loongarch64_regsets[] = {
 	},
 #ifdef CONFIG_CPU_HAS_LSX
 	[REGSET_LSX] = {
-		.core_note_type	= NT_LOONGARCH_LSX,
+		USER_REGSET_NOTE_TYPE(LOONGARCH_LSX),
 		.n		= NUM_FPU_REGS,
 		.size		= 16,
 		.align		= 16,
@@ -889,7 +899,7 @@ static const struct user_regset loongarch64_regsets[] = {
 #endif
 #ifdef CONFIG_CPU_HAS_LASX
 	[REGSET_LASX] = {
-		.core_note_type	= NT_LOONGARCH_LASX,
+		USER_REGSET_NOTE_TYPE(LOONGARCH_LASX),
 		.n		= NUM_FPU_REGS,
 		.size		= 32,
 		.align		= 32,
@@ -899,7 +909,7 @@ static const struct user_regset loongarch64_regsets[] = {
 #endif
 #ifdef CONFIG_CPU_HAS_LBT
 	[REGSET_LBT] = {
-		.core_note_type	= NT_LOONGARCH_LBT,
+		USER_REGSET_NOTE_TYPE(LOONGARCH_LBT),
 		.n		= 5,
 		.size		= sizeof(u64),
 		.align		= sizeof(u64),
@@ -909,16 +919,16 @@ static const struct user_regset loongarch64_regsets[] = {
 #endif
 #ifdef CONFIG_HAVE_HW_BREAKPOINT
 	[REGSET_HW_BREAK] = {
-		.core_note_type = NT_LOONGARCH_HW_BREAK,
-		.n = sizeof(struct user_watch_state) / sizeof(u32),
+		USER_REGSET_NOTE_TYPE(LOONGARCH_HW_BREAK),
+		.n = sizeof(struct user_watch_state_v2) / sizeof(u32),
 		.size = sizeof(u32),
 		.align = sizeof(u32),
 		.regset_get = hw_break_get,
 		.set = hw_break_set,
 	},
 	[REGSET_HW_WATCH] = {
-		.core_note_type = NT_LOONGARCH_HW_WATCH,
-		.n = sizeof(struct user_watch_state) / sizeof(u32),
+		USER_REGSET_NOTE_TYPE(LOONGARCH_HW_WATCH),
+		.n = sizeof(struct user_watch_state_v2) / sizeof(u32),
 		.size = sizeof(u32),
 		.align = sizeof(u32),
 		.regset_get = hw_break_get,

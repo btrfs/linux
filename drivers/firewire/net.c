@@ -28,7 +28,7 @@
 #include <linux/slab.h>
 #include <linux/spinlock.h>
 
-#include <asm/unaligned.h>
+#include <linux/unaligned.h>
 #include <net/arp.h>
 #include <net/firewire.h>
 
@@ -1007,7 +1007,7 @@ static int fwnet_send_packet(struct fwnet_packet_task *ptask)
 
 		spin_lock_irqsave(&dev->lock, flags);
 
-		/* If the AT tasklet already ran, we may be last user. */
+		/* If the AT work item already ran, we may be last user. */
 		free = (ptask->outstanding_pkts == 0 && !ptask->enqueued);
 		if (!free)
 			ptask->enqueued = true;
@@ -1026,7 +1026,7 @@ static int fwnet_send_packet(struct fwnet_packet_task *ptask)
 
 	spin_lock_irqsave(&dev->lock, flags);
 
-	/* If the AT tasklet already ran, we may be last user. */
+	/* If the AT work item already ran, we may be last user. */
 	free = (ptask->outstanding_pkts == 0 && !ptask->enqueued);
 	if (!free)
 		ptask->enqueued = true;

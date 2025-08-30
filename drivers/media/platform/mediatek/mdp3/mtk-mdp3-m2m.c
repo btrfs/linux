@@ -87,6 +87,9 @@ static void mdp_m2m_device_run(void *priv)
 	dst_vb = v4l2_m2m_next_dst_buf(ctx->m2m_ctx);
 	mdp_set_dst_config(&param.outputs[0], frame, &dst_vb->vb2_buf);
 
+	if (mdp_check_pp_enable(ctx->mdp_dev, frame))
+		param.type = MDP_STREAM_TYPE_DUAL_BITBLT;
+
 	ret = mdp_vpu_process(&ctx->mdp_dev->vpu, &param);
 	if (ret) {
 		dev_err(&ctx->mdp_dev->pdev->dev,
@@ -100,6 +103,18 @@ static void mdp_m2m_device_run(void *priv)
 	task.cmdq_cb = NULL;
 	task.cb_data = NULL;
 	task.mdp_ctx = ctx;
+
+	if (refcount_read(&ctx->mdp_dev->job_count)) {
+		ret = wait_event_timeout(ctx->mdp_dev->callback_wq,
+					 !refcount_read(&ctx->mdp_dev->job_count),
+					 2 * HZ);
+		if (ret == 0) {
+			dev_err(&ctx->mdp_dev->pdev->dev,
+				"%d jobs not yet done\n",
+				refcount_read(&ctx->mdp_dev->job_count));
+			goto worker_end;
+		}
+	}
 
 	ret = mdp_cmdq_send(ctx->mdp_dev, &task);
 	if (ret) {
@@ -251,8 +266,6 @@ static void mdp_m2m_buf_queue(struct vb2_buffer *vb)
 
 static const struct vb2_ops mdp_m2m_qops = {
 	.queue_setup	= mdp_m2m_queue_setup,
-	.wait_prepare	= vb2_ops_wait_prepare,
-	.wait_finish	= vb2_ops_wait_finish,
 	.buf_prepare	= mdp_m2m_buf_prepare,
 	.start_streaming = mdp_m2m_start_streaming,
 	.stop_streaming	= mdp_m2m_stop_streaming,

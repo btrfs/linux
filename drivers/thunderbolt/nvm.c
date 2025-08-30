@@ -330,7 +330,7 @@ struct tb_nvm *tb_nvm_alloc(struct device *dev)
 	if (!nvm)
 		return ERR_PTR(-ENOMEM);
 
-	ret = ida_simple_get(&nvm_ida, 0, 0, GFP_KERNEL);
+	ret = ida_alloc(&nvm_ida, GFP_KERNEL);
 	if (ret < 0) {
 		kfree(nvm);
 		return ERR_PTR(ret);
@@ -528,7 +528,7 @@ void tb_nvm_free(struct tb_nvm *nvm)
 		nvmem_unregister(nvm->non_active);
 		nvmem_unregister(nvm->active);
 		vfree(nvm->buf);
-		ida_simple_remove(&nvm_ida, nvm->id);
+		ida_free(&nvm_ida, nvm->id);
 	}
 	kfree(nvm);
 }
@@ -588,7 +588,7 @@ int tb_nvm_read_data(unsigned int address, void *buf, size_t size,
  * @size: Size of the buffer in bytes
  * @retries: Number of retries if the block write fails
  * @write_block: Function that writes block to the flash
- * @write_block_data: Data passwd to @write_block
+ * @write_block_data: Data passed to @write_block
  *
  * This is generic function that writes data to NVM or NVM like device.
  *

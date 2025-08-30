@@ -9,6 +9,7 @@
 #include <linux/backlight.h>
 #include <linux/delay.h>
 #include <linux/gpio/consumer.h>
+#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/regulator/consumer.h>
 
@@ -389,7 +390,7 @@ static int otm8009a_backlight_update_status(struct backlight_device *bd)
 		return -ENXIO;
 	}
 
-	if (bd->props.power <= FB_BLANK_NORMAL) {
+	if (bd->props.power <= BACKLIGHT_POWER_REDUCED) {
 		/* Power on the backlight with the requested brightness
 		 * Note We can not use mipi_dsi_dcs_set_display_brightness()
 		 * as otm8009a driver support only 8-bit brightness (1 param).
@@ -423,9 +424,11 @@ static int otm8009a_probe(struct mipi_dsi_device *dsi)
 	struct otm8009a *ctx;
 	int ret;
 
-	ctx = devm_kzalloc(dev, sizeof(*ctx), GFP_KERNEL);
-	if (!ctx)
-		return -ENOMEM;
+	ctx = devm_drm_panel_alloc(dev, struct otm8009a, panel,
+				   &otm8009a_drm_funcs,
+				   DRM_MODE_CONNECTOR_DSI);
+	if (IS_ERR(ctx))
+		return PTR_ERR(ctx);
 
 	ctx->reset_gpio = devm_gpiod_get_optional(dev, "reset", GPIOD_OUT_LOW);
 	if (IS_ERR(ctx->reset_gpio)) {
@@ -450,9 +453,6 @@ static int otm8009a_probe(struct mipi_dsi_device *dsi)
 	dsi->mode_flags = MIPI_DSI_MODE_VIDEO | MIPI_DSI_MODE_VIDEO_BURST |
 			  MIPI_DSI_MODE_LPM | MIPI_DSI_CLOCK_NON_CONTINUOUS;
 
-	drm_panel_init(&ctx->panel, dev, &otm8009a_drm_funcs,
-		       DRM_MODE_CONNECTOR_DSI);
-
 	ctx->bl_dev = devm_backlight_device_register(dev, dev_name(dev),
 						     dev, ctx,
 						     &otm8009a_backlight_ops,
@@ -465,7 +465,7 @@ static int otm8009a_probe(struct mipi_dsi_device *dsi)
 
 	ctx->bl_dev->props.max_brightness = OTM8009A_BACKLIGHT_MAX;
 	ctx->bl_dev->props.brightness = OTM8009A_BACKLIGHT_DEFAULT;
-	ctx->bl_dev->props.power = FB_BLANK_POWERDOWN;
+	ctx->bl_dev->props.power = BACKLIGHT_POWER_OFF;
 	ctx->bl_dev->props.type = BACKLIGHT_RAW;
 
 	drm_panel_add(&ctx->panel);

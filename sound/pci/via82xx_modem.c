@@ -842,7 +842,7 @@ static int snd_via686_pcm_new(struct via82xx_modem *chip)
 	snd_pcm_set_ops(pcm, SNDRV_PCM_STREAM_CAPTURE, &snd_via686_capture_ops);
 	pcm->dev_class = SNDRV_PCM_CLASS_MODEM;
 	pcm->private_data = chip;
-	strcpy(pcm->name, chip->card->shortname);
+	strscpy(pcm->name, chip->card->shortname);
 	chip->pcms[0] = pcm;
 	init_viadev(chip, 0, VIA_REG_MO_STATUS, 0);
 	init_viadev(chip, 1, VIA_REG_MI_STATUS, 1);
@@ -1008,7 +1008,6 @@ static int snd_via82xx_chip_init(struct via82xx_modem *chip)
 	return 0;
 }
 
-#ifdef CONFIG_PM_SLEEP
 /*
  * power management
  */
@@ -1042,11 +1041,7 @@ static int snd_via82xx_resume(struct device *dev)
 	return 0;
 }
 
-static SIMPLE_DEV_PM_OPS(snd_via82xx_pm, snd_via82xx_suspend, snd_via82xx_resume);
-#define SND_VIA82XX_PM_OPS	&snd_via82xx_pm
-#else
-#define SND_VIA82XX_PM_OPS	NULL
-#endif /* CONFIG_PM_SLEEP */
+static DEFINE_SIMPLE_DEV_PM_OPS(snd_via82xx_pm, snd_via82xx_suspend, snd_via82xx_resume);
 
 static void snd_via82xx_free(struct snd_card *card)
 {
@@ -1076,7 +1071,7 @@ static int snd_via82xx_create(struct snd_card *card,
 	chip->pci = pci;
 	chip->irq = -1;
 
-	err = pci_request_regions(pci, card->driver);
+	err = pcim_request_all_regions(pci, card->driver);
 	if (err < 0)
 		return err;
 	chip->port = pci_resource_start(pci, 0);
@@ -1121,7 +1116,7 @@ static int __snd_via82xx_probe(struct pci_dev *pci,
 	card_type = pci_id->driver_data;
 	switch (card_type) {
 	case TYPE_CARD_VIA82XX_MODEM:
-		strcpy(card->driver, "VIA82XX-MODEM");
+		strscpy(card->driver, "VIA82XX-MODEM");
 		sprintf(card->shortname, "VIA 82XX modem");
 		break;
 	default:
@@ -1168,7 +1163,7 @@ static struct pci_driver via82xx_modem_driver = {
 	.id_table = snd_via82xx_modem_ids,
 	.probe = snd_via82xx_probe,
 	.driver = {
-		.pm = SND_VIA82XX_PM_OPS,
+		.pm = &snd_via82xx_pm,
 	},
 };
 

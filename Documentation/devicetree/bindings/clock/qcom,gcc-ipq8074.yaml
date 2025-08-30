@@ -14,7 +14,7 @@ description: |
   Qualcomm global clock control module provides the clocks, resets and power
   domains on IPQ8074.
 
-  See also:: include/dt-bindings/clock/qcom,gcc-ipq8074.h
+  See also: include/dt-bindings/clock/qcom,gcc-ipq8074.h
 
 allOf:
   - $ref: qcom,gcc.yaml#
@@ -39,6 +39,7 @@ properties:
 
 required:
   - compatible
+  - '#power-domain-cells'
 
 unevaluatedProperties: false
 

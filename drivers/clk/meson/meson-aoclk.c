@@ -18,6 +18,7 @@
 
 #include <linux/slab.h>
 #include "meson-aoclk.h"
+#include "clk-regmap.h"
 
 static int meson_aoclk_do_reset(struct reset_controller_dev *rcdev,
 			       unsigned long id)
@@ -70,10 +71,6 @@ int meson_aoclkc_probe(struct platform_device *pdev)
 		return ret;
 	}
 
-	/* Populate regmap */
-	for (clkid = 0; clkid < data->num_clks; clkid++)
-		data->clks[clkid]->map = regmap;
-
 	/* Register all clks */
 	for (clkid = 0; clkid < data->hw_clks.num; clkid++) {
 		if (!data->hw_clks.hws[clkid])
@@ -88,5 +85,8 @@ int meson_aoclkc_probe(struct platform_device *pdev)
 
 	return devm_of_clk_add_hw_provider(dev, meson_clk_hw_get, (void *)&data->hw_clks);
 }
-EXPORT_SYMBOL_GPL(meson_aoclkc_probe);
-MODULE_LICENSE("GPL v2");
+EXPORT_SYMBOL_NS_GPL(meson_aoclkc_probe, "CLK_MESON");
+
+MODULE_DESCRIPTION("Amlogic Always-ON Clock Controller helpers");
+MODULE_LICENSE("GPL");
+MODULE_IMPORT_NS("CLK_MESON");

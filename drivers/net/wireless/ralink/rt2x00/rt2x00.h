@@ -335,16 +335,6 @@ struct link {
 	struct delayed_work watchdog_work;
 	unsigned int watchdog_interval;
 	unsigned int watchdog;
-
-	/*
-	 * Work structure for scheduling periodic AGC adjustments.
-	 */
-	struct delayed_work agc_work;
-
-	/*
-	 * Work structure for scheduling periodic VCO calibration.
-	 */
-	struct delayed_work vco_work;
 };
 
 enum rt2x00_delayed_flags {
@@ -1460,14 +1450,14 @@ void rt2x00mac_tx(struct ieee80211_hw *hw,
 		  struct ieee80211_tx_control *control,
 		  struct sk_buff *skb);
 int rt2x00mac_start(struct ieee80211_hw *hw);
-void rt2x00mac_stop(struct ieee80211_hw *hw);
+void rt2x00mac_stop(struct ieee80211_hw *hw, bool suspend);
 void rt2x00mac_reconfig_complete(struct ieee80211_hw *hw,
 				 enum ieee80211_reconfig_type reconfig_type);
 int rt2x00mac_add_interface(struct ieee80211_hw *hw,
 			    struct ieee80211_vif *vif);
 void rt2x00mac_remove_interface(struct ieee80211_hw *hw,
 				struct ieee80211_vif *vif);
-int rt2x00mac_config(struct ieee80211_hw *hw, u32 changed);
+int rt2x00mac_config(struct ieee80211_hw *hw, int radio_idx, u32 changed);
 void rt2x00mac_configure_filter(struct ieee80211_hw *hw,
 				unsigned int changed_flags,
 				unsigned int *total_flags,
@@ -1499,8 +1489,10 @@ int rt2x00mac_conf_tx(struct ieee80211_hw *hw,
 void rt2x00mac_rfkill_poll(struct ieee80211_hw *hw);
 void rt2x00mac_flush(struct ieee80211_hw *hw, struct ieee80211_vif *vif,
 		     u32 queues, bool drop);
-int rt2x00mac_set_antenna(struct ieee80211_hw *hw, u32 tx_ant, u32 rx_ant);
-int rt2x00mac_get_antenna(struct ieee80211_hw *hw, u32 *tx_ant, u32 *rx_ant);
+int rt2x00mac_set_antenna(struct ieee80211_hw *hw, int radio_idx,
+			  u32 tx_ant, u32 rx_ant);
+int rt2x00mac_get_antenna(struct ieee80211_hw *hw, int radio_idx,
+			  u32 *tx_ant, u32 *rx_ant);
 void rt2x00mac_get_ringparam(struct ieee80211_hw *hw,
 			     u32 *tx, u32 *tx_max, u32 *rx, u32 *rx_max);
 bool rt2x00mac_tx_frames_pending(struct ieee80211_hw *hw);

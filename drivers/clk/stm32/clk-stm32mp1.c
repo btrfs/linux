@@ -2041,7 +2041,7 @@ static const struct clock_config stm32mp1_clock_cfg[] = {
 	KCLK(ADFSDM_K, "adfsdm_k", sai_src, 0, G_ADFSDM, M_SAI1),
 	KCLK(USBO_K, "usbo_k", usbo_src, 0, G_USBO, M_USBO),
 
-	/* Particulary Kernel Clocks (no mux or no gate) */
+	/* Particularly Kernel Clocks (no mux or no gate) */
 	MGATE_MP1(DFSDM_K, "dfsdm_k", "ck_mcu", 0, G_DFSDM),
 	MGATE_MP1(DSI_PX, "dsi_px", "pll4_q", CLK_SET_RATE_PARENT, G_DSI),
 	MGATE_MP1(LTDC_PX, "ltdc_px", "pll4_q", CLK_SET_RATE_PARENT, G_LTDC),
@@ -2354,7 +2354,7 @@ static struct platform_driver stm32mp1_rcc_clocks_driver = {
 		.of_match_table = stm32mp1_match_data,
 	},
 	.probe = stm32mp1_rcc_clocks_probe,
-	.remove_new = stm32mp1_rcc_clocks_remove,
+	.remove = stm32mp1_rcc_clocks_remove,
 };
 
 static int __init stm32mp1_clocks_init(void)

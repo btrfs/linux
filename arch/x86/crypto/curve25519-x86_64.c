@@ -7,6 +7,7 @@
 #include <crypto/curve25519.h>
 #include <crypto/internal/kpp.h>
 
+#include <linux/export.h>
 #include <linux/types.h>
 #include <linux/jump_label.h>
 #include <linux/kernel.h>
@@ -1720,5 +1721,6 @@ module_exit(curve25519_mod_exit);
 
 MODULE_ALIAS_CRYPTO("curve25519");
 MODULE_ALIAS_CRYPTO("curve25519-x86");
+MODULE_DESCRIPTION("Curve25519 algorithm, ADX optimized");
 MODULE_LICENSE("GPL v2");
 MODULE_AUTHOR("Jason A. Donenfeld <Jason@zx2c4.com>");

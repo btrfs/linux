@@ -154,6 +154,11 @@ static long ptp_vclock_refresh(struct ptp_clock_info *ptp)
 	return PTP_VCLOCK_REFRESH_INTERVAL;
 }
 
+static void ptp_vclock_set_subclass(struct ptp_clock *ptp)
+{
+	lockdep_set_subclass(&ptp->clock.rwsem, PTP_LOCK_VIRTUAL);
+}
+
 static const struct ptp_clock_info ptp_vclock_info = {
 	.owner		= THIS_MODULE,
 	.name		= "ptp virtual clock",
@@ -164,7 +169,7 @@ static const struct ptp_clock_info ptp_vclock_info = {
 	.do_aux_work	= ptp_vclock_refresh,
 };
 
-static u64 ptp_vclock_read(const struct cyclecounter *cc)
+static u64 ptp_vclock_read(struct cyclecounter *cc)
 {
 	struct ptp_vclock *vclock = cc_to_vclock(cc);
 	struct ptp_clock *ptp = vclock->pclock;
@@ -213,6 +218,8 @@ struct ptp_vclock *ptp_vclock_register(struct ptp_clock *pclock)
 		return NULL;
 	}
 
+	ptp_vclock_set_subclass(vclock->clock);
+
 	timecounter_init(&vclock->tc, &vclock->cc, 0);
 	ptp_schedule_worker(vclock->clock, PTP_VCLOCK_REFRESH_INTERVAL);
 
@@ -241,7 +248,7 @@ int ptp_get_vclocks_index(int pclock_index, int **vclock_index)
 		return num;
 
 	snprintf(name, PTP_CLOCK_NAME_LEN, "ptp%d", pclock_index);
-	dev = class_find_device_by_name(ptp_class, name);
+	dev = class_find_device_by_name(&ptp_class, name);
 	if (!dev)
 		return num;
 

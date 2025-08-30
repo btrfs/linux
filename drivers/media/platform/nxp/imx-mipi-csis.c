@@ -28,8 +28,10 @@
 #include <linux/reset.h>
 #include <linux/spinlock.h>
 
+#include <media/mipi-csi2.h>
 #include <media/v4l2-common.h>
 #include <media/v4l2-device.h>
+#include <media/v4l2-event.h>
 #include <media/v4l2-fwnode.h>
 #include <media/v4l2-mc.h>
 #include <media/v4l2-subdev.h>
@@ -228,25 +230,6 @@
 
 #define DEFAULT_SCLK_CSIS_FREQ			166000000UL
 
-/* MIPI CSI-2 Data Types */
-#define MIPI_CSI2_DATA_TYPE_YUV420_8		0x18
-#define MIPI_CSI2_DATA_TYPE_YUV420_10		0x19
-#define MIPI_CSI2_DATA_TYPE_LE_YUV420_8		0x1a
-#define MIPI_CSI2_DATA_TYPE_CS_YUV420_8		0x1c
-#define MIPI_CSI2_DATA_TYPE_CS_YUV420_10	0x1d
-#define MIPI_CSI2_DATA_TYPE_YUV422_8		0x1e
-#define MIPI_CSI2_DATA_TYPE_YUV422_10		0x1f
-#define MIPI_CSI2_DATA_TYPE_RGB565		0x22
-#define MIPI_CSI2_DATA_TYPE_RGB666		0x23
-#define MIPI_CSI2_DATA_TYPE_RGB888		0x24
-#define MIPI_CSI2_DATA_TYPE_RAW6		0x28
-#define MIPI_CSI2_DATA_TYPE_RAW7		0x29
-#define MIPI_CSI2_DATA_TYPE_RAW8		0x2a
-#define MIPI_CSI2_DATA_TYPE_RAW10		0x2b
-#define MIPI_CSI2_DATA_TYPE_RAW12		0x2c
-#define MIPI_CSI2_DATA_TYPE_RAW14		0x2d
-#define MIPI_CSI2_DATA_TYPE_USER(x)		(0x30 + (x))
-
 struct mipi_csis_event {
 	bool debug;
 	u32 mask;
@@ -319,7 +302,11 @@ struct mipi_csis_device {
 	struct v4l2_subdev sd;
 	struct media_pad pads[CSIS_PADS_NUM];
 	struct v4l2_async_notifier notifier;
-	struct v4l2_subdev *src_sd;
+
+	struct {
+		struct v4l2_subdev *sd;
+		const struct media_pad *pad;
+	} source;
 
 	struct v4l2_mbus_config_mipi_csi2 bus;
 	u32 clk_frequency;
@@ -352,116 +339,116 @@ static const struct csis_pix_format mipi_csis_formats[] = {
 	{
 		.code = MEDIA_BUS_FMT_UYVY8_1X16,
 		.output = MEDIA_BUS_FMT_UYVY8_1X16,
-		.data_type = MIPI_CSI2_DATA_TYPE_YUV422_8,
+		.data_type = MIPI_CSI2_DT_YUV422_8B,
 		.width = 16,
 	},
 	/* RGB formats. */
 	{
 		.code = MEDIA_BUS_FMT_RGB565_1X16,
 		.output = MEDIA_BUS_FMT_RGB565_1X16,
-		.data_type = MIPI_CSI2_DATA_TYPE_RGB565,
+		.data_type = MIPI_CSI2_DT_RGB565,
 		.width = 16,
 	}, {
 		.code = MEDIA_BUS_FMT_BGR888_1X24,
 		.output = MEDIA_BUS_FMT_RGB888_1X24,
-		.data_type = MIPI_CSI2_DATA_TYPE_RGB888,
+		.data_type = MIPI_CSI2_DT_RGB888,
 		.width = 24,
 	},
 	/* RAW (Bayer and greyscale) formats. */
 	{
 		.code = MEDIA_BUS_FMT_SBGGR8_1X8,
 		.output = MEDIA_BUS_FMT_SBGGR8_1X8,
-		.data_type = MIPI_CSI2_DATA_TYPE_RAW8,
+		.data_type = MIPI_CSI2_DT_RAW8,
 		.width = 8,
 	}, {
 		.code = MEDIA_BUS_FMT_SGBRG8_1X8,
 		.output = MEDIA_BUS_FMT_SGBRG8_1X8,
-		.data_type = MIPI_CSI2_DATA_TYPE_RAW8,
+		.data_type = MIPI_CSI2_DT_RAW8,
 		.width = 8,
 	}, {
 		.code = MEDIA_BUS_FMT_SGRBG8_1X8,
 		.output = MEDIA_BUS_FMT_SGRBG8_1X8,
-		.data_type = MIPI_CSI2_DATA_TYPE_RAW8,
+		.data_type = MIPI_CSI2_DT_RAW8,
 		.width = 8,
 	}, {
 		.code = MEDIA_BUS_FMT_SRGGB8_1X8,
 		.output = MEDIA_BUS_FMT_SRGGB8_1X8,
-		.data_type = MIPI_CSI2_DATA_TYPE_RAW8,
+		.data_type = MIPI_CSI2_DT_RAW8,
 		.width = 8,
 	}, {
 		.code = MEDIA_BUS_FMT_Y8_1X8,
 		.output = MEDIA_BUS_FMT_Y8_1X8,
-		.data_type = MIPI_CSI2_DATA_TYPE_RAW8,
+		.data_type = MIPI_CSI2_DT_RAW8,
 		.width = 8,
 	}, {
 		.code = MEDIA_BUS_FMT_SBGGR10_1X10,
 		.output = MEDIA_BUS_FMT_SBGGR10_1X10,
-		.data_type = MIPI_CSI2_DATA_TYPE_RAW10,
+		.data_type = MIPI_CSI2_DT_RAW10,
 		.width = 10,
 	}, {
 		.code = MEDIA_BUS_FMT_SGBRG10_1X10,
 		.output = MEDIA_BUS_FMT_SGBRG10_1X10,
-		.data_type = MIPI_CSI2_DATA_TYPE_RAW10,
+		.data_type = MIPI_CSI2_DT_RAW10,
 		.width = 10,
 	}, {
 		.code = MEDIA_BUS_FMT_SGRBG10_1X10,
 		.output = MEDIA_BUS_FMT_SGRBG10_1X10,
-		.data_type = MIPI_CSI2_DATA_TYPE_RAW10,
+		.data_type = MIPI_CSI2_DT_RAW10,
 		.width = 10,
 	}, {
 		.code = MEDIA_BUS_FMT_SRGGB10_1X10,
 		.output = MEDIA_BUS_FMT_SRGGB10_1X10,
-		.data_type = MIPI_CSI2_DATA_TYPE_RAW10,
+		.data_type = MIPI_CSI2_DT_RAW10,
 		.width = 10,
 	}, {
 		.code = MEDIA_BUS_FMT_Y10_1X10,
 		.output = MEDIA_BUS_FMT_Y10_1X10,
-		.data_type = MIPI_CSI2_DATA_TYPE_RAW10,
+		.data_type = MIPI_CSI2_DT_RAW10,
 		.width = 10,
 	}, {
 		.code = MEDIA_BUS_FMT_SBGGR12_1X12,
 		.output = MEDIA_BUS_FMT_SBGGR12_1X12,
-		.data_type = MIPI_CSI2_DATA_TYPE_RAW12,
+		.data_type = MIPI_CSI2_DT_RAW12,
 		.width = 12,
 	}, {
 		.code = MEDIA_BUS_FMT_SGBRG12_1X12,
 		.output = MEDIA_BUS_FMT_SGBRG12_1X12,
-		.data_type = MIPI_CSI2_DATA_TYPE_RAW12,
+		.data_type = MIPI_CSI2_DT_RAW12,
 		.width = 12,
 	}, {
 		.code = MEDIA_BUS_FMT_SGRBG12_1X12,
 		.output = MEDIA_BUS_FMT_SGRBG12_1X12,
-		.data_type = MIPI_CSI2_DATA_TYPE_RAW12,
+		.data_type = MIPI_CSI2_DT_RAW12,
 		.width = 12,
 	}, {
 		.code = MEDIA_BUS_FMT_SRGGB12_1X12,
 		.output = MEDIA_BUS_FMT_SRGGB12_1X12,
-		.data_type = MIPI_CSI2_DATA_TYPE_RAW12,
+		.data_type = MIPI_CSI2_DT_RAW12,
 		.width = 12,
 	}, {
 		.code = MEDIA_BUS_FMT_Y12_1X12,
 		.output = MEDIA_BUS_FMT_Y12_1X12,
-		.data_type = MIPI_CSI2_DATA_TYPE_RAW12,
+		.data_type = MIPI_CSI2_DT_RAW12,
 		.width = 12,
 	}, {
 		.code = MEDIA_BUS_FMT_SBGGR14_1X14,
 		.output = MEDIA_BUS_FMT_SBGGR14_1X14,
-		.data_type = MIPI_CSI2_DATA_TYPE_RAW14,
+		.data_type = MIPI_CSI2_DT_RAW14,
 		.width = 14,
 	}, {
 		.code = MEDIA_BUS_FMT_SGBRG14_1X14,
 		.output = MEDIA_BUS_FMT_SGBRG14_1X14,
-		.data_type = MIPI_CSI2_DATA_TYPE_RAW14,
+		.data_type = MIPI_CSI2_DT_RAW14,
 		.width = 14,
 	}, {
 		.code = MEDIA_BUS_FMT_SGRBG14_1X14,
 		.output = MEDIA_BUS_FMT_SGRBG14_1X14,
-		.data_type = MIPI_CSI2_DATA_TYPE_RAW14,
+		.data_type = MIPI_CSI2_DT_RAW14,
 		.width = 14,
 	}, {
 		.code = MEDIA_BUS_FMT_SRGGB14_1X14,
 		.output = MEDIA_BUS_FMT_SRGGB14_1X14,
-		.data_type = MIPI_CSI2_DATA_TYPE_RAW14,
+		.data_type = MIPI_CSI2_DT_RAW14,
 		.width = 14,
 	},
 	/* JPEG */
@@ -489,7 +476,7 @@ static const struct csis_pix_format mipi_csis_formats[] = {
 		 * SoC that can support quad pixel mode, this will have to be
 		 * revisited.
 		 */
-		.data_type = MIPI_CSI2_DATA_TYPE_RAW8,
+		.data_type = MIPI_CSI2_DT_RAW8,
 		.width = 8,
 	}
 };
@@ -578,7 +565,7 @@ static void __mipi_csis_set_format(struct mipi_csis_device *csis,
 	 *
 	 * TODO: Verify which other formats require DUAL (or QUAD) modes.
 	 */
-	if (csis_fmt->data_type == MIPI_CSI2_DATA_TYPE_YUV422_8)
+	if (csis_fmt->data_type == MIPI_CSI2_DT_YUV422_8B)
 		val |= MIPI_CSIS_ISPCFG_PIXEL_MODE_DUAL;
 
 	val |= MIPI_CSIS_ISPCFG_FMT(csis_fmt->data_type);
@@ -592,12 +579,13 @@ static void __mipi_csis_set_format(struct mipi_csis_device *csis,
 static int mipi_csis_calculate_params(struct mipi_csis_device *csis,
 				      const struct csis_pix_format *csis_fmt)
 {
+	struct media_pad *src_pad =
+		&csis->source.sd->entity.pads[csis->source.pad->index];
 	s64 link_freq;
 	u32 lane_rate;
 
 	/* Calculate the line rate from the pixel rate. */
-	link_freq = v4l2_get_link_freq(csis->src_sd->ctrl_handler,
-				       csis_fmt->width,
+	link_freq = v4l2_get_link_freq(src_pad, csis_fmt->width,
 				       csis->bus.num_data_lanes * 2);
 	if (link_freq < 0) {
 		dev_err(csis->dev, "Unable to obtain link frequency: %d\n",
@@ -742,6 +730,18 @@ static void mipi_csis_stop_stream(struct mipi_csis_device *csis)
 	mipi_csis_system_enable(csis, false);
 }
 
+static void mipi_csis_queue_event_sof(struct mipi_csis_device *csis)
+{
+	struct v4l2_event event = {
+		.type = V4L2_EVENT_FRAME_SYNC,
+	};
+	u32 frame;
+
+	frame = mipi_csis_read(csis, MIPI_CSIS_FRAME_COUNTER_CH(0));
+	event.u.frame_sync.frame_sequence = frame;
+	v4l2_event_queue(csis->sd.devnode, &event);
+}
+
 static irqreturn_t mipi_csis_irq_handler(int irq, void *dev_id)
 {
 	struct mipi_csis_device *csis = dev_id;
@@ -765,6 +765,10 @@ static irqreturn_t mipi_csis_irq_handler(int irq, void *dev_id)
 				event->counter++;
 		}
 	}
+
+	if (status & MIPI_CSIS_INT_SRC_FRAME_START)
+		mipi_csis_queue_event_sof(csis);
+
 	spin_unlock_irqrestore(&csis->slock, flags);
 
 	mipi_csis_write(csis, MIPI_CSIS_INT_SRC, status);
@@ -840,18 +844,21 @@ static void mipi_csis_log_counters(struct mipi_csis_device *csis, bool non_error
 {
 	unsigned int num_events = non_errors ? MIPI_CSIS_NUM_EVENTS
 				: MIPI_CSIS_NUM_EVENTS - 8;
+	unsigned int counters[MIPI_CSIS_NUM_EVENTS];
 	unsigned long flags;
 	unsigned int i;
 
 	spin_lock_irqsave(&csis->slock, flags);
+	for (i = 0; i < num_events; ++i)
+		counters[i] =  csis->events[i].counter;
+	spin_unlock_irqrestore(&csis->slock, flags);
 
 	for (i = 0; i < num_events; ++i) {
-		if (csis->events[i].counter > 0 || csis->debug.enable)
+		if (counters[i] > 0 || csis->debug.enable)
 			dev_info(csis->dev, "%s events: %d\n",
 				 csis->events[i].name,
-				 csis->events[i].counter);
+				 counters[i]);
 	}
-	spin_unlock_irqrestore(&csis->slock, flags);
 }
 
 static int mipi_csis_dump_regs(struct mipi_csis_device *csis)
@@ -941,7 +948,8 @@ static int mipi_csis_s_stream(struct v4l2_subdev *sd, int enable)
 	int ret;
 
 	if (!enable) {
-		v4l2_subdev_call(csis->src_sd, video, s_stream, 0);
+		v4l2_subdev_disable_streams(csis->source.sd,
+					    csis->source.pad->index, BIT(0));
 
 		mipi_csis_stop_stream(csis);
 		if (csis->debug.enable)
@@ -969,7 +977,8 @@ static int mipi_csis_s_stream(struct v4l2_subdev *sd, int enable)
 
 	mipi_csis_start_stream(csis, format, csis_fmt);
 
-	ret = v4l2_subdev_call(csis->src_sd, video, s_stream, 1);
+	ret = v4l2_subdev_enable_streams(csis->source.sd,
+					 csis->source.pad->index, BIT(0));
 	if (ret < 0)
 		goto err_stop;
 
@@ -1154,8 +1163,23 @@ static int mipi_csis_log_status(struct v4l2_subdev *sd)
 	return 0;
 }
 
+static int mipi_csis_subscribe_event(struct v4l2_subdev *sd, struct v4l2_fh *fh,
+				     struct v4l2_event_subscription *sub)
+{
+	if (sub->type != V4L2_EVENT_FRAME_SYNC)
+		return -EINVAL;
+
+	/* V4L2_EVENT_FRAME_SYNC doesn't require an id, so zero should be set */
+	if (sub->id != 0)
+		return -EINVAL;
+
+	return v4l2_event_subscribe(fh, sub, 0, NULL);
+}
+
 static const struct v4l2_subdev_core_ops mipi_csis_core_ops = {
 	.log_status	= mipi_csis_log_status,
+	.subscribe_event =  mipi_csis_subscribe_event,
+	.unsubscribe_event = v4l2_event_subdev_unsubscribe,
 };
 
 static const struct v4l2_subdev_video_ops mipi_csis_video_ops = {
@@ -1201,12 +1225,14 @@ static int mipi_csis_link_setup(struct media_entity *entity,
 	remote_sd = media_entity_to_v4l2_subdev(remote_pad->entity);
 
 	if (flags & MEDIA_LNK_FL_ENABLED) {
-		if (csis->src_sd)
+		if (csis->source.sd)
 			return -EBUSY;
 
-		csis->src_sd = remote_sd;
+		csis->source.sd = remote_sd;
+		csis->source.pad = remote_pad;
 	} else {
-		csis->src_sd = NULL;
+		csis->source.sd = NULL;
+		csis->source.pad = NULL;
 	}
 
 	return 0;
@@ -1304,7 +1330,7 @@ err_parse:
  * Suspend/resume
  */
 
-static int __maybe_unused mipi_csis_runtime_suspend(struct device *dev)
+static int mipi_csis_runtime_suspend(struct device *dev)
 {
 	struct v4l2_subdev *sd = dev_get_drvdata(dev);
 	struct mipi_csis_device *csis = sd_to_mipi_csis_device(sd);
@@ -1319,7 +1345,7 @@ static int __maybe_unused mipi_csis_runtime_suspend(struct device *dev)
 	return 0;
 }
 
-static int __maybe_unused mipi_csis_runtime_resume(struct device *dev)
+static int mipi_csis_runtime_resume(struct device *dev)
 {
 	struct v4l2_subdev *sd = dev_get_drvdata(dev);
 	struct mipi_csis_device *csis = sd_to_mipi_csis_device(sd);
@@ -1339,8 +1365,8 @@ static int __maybe_unused mipi_csis_runtime_resume(struct device *dev)
 }
 
 static const struct dev_pm_ops mipi_csis_pm_ops = {
-	SET_RUNTIME_PM_OPS(mipi_csis_runtime_suspend, mipi_csis_runtime_resume,
-			   NULL)
+	RUNTIME_PM_OPS(mipi_csis_runtime_suspend, mipi_csis_runtime_resume,
+		       NULL)
 };
 
 /* -----------------------------------------------------------------------------
@@ -1358,7 +1384,7 @@ static int mipi_csis_subdev_init(struct mipi_csis_device *csis)
 	snprintf(sd->name, sizeof(sd->name), "csis-%s",
 		 dev_name(csis->dev));
 
-	sd->flags |= V4L2_SUBDEV_FL_HAS_DEVNODE;
+	sd->flags |= V4L2_SUBDEV_FL_HAS_DEVNODE | V4L2_SUBDEV_FL_HAS_EVENTS;
 	sd->ctrl_handler = NULL;
 
 	sd->entity.function = MEDIA_ENT_F_VID_IF_BRIDGE;
@@ -1527,11 +1553,11 @@ MODULE_DEVICE_TABLE(of, mipi_csis_of_match);
 
 static struct platform_driver mipi_csis_driver = {
 	.probe		= mipi_csis_probe,
-	.remove_new	= mipi_csis_remove,
+	.remove		= mipi_csis_remove,
 	.driver		= {
 		.of_match_table = mipi_csis_of_match,
 		.name		= CSIS_DRIVER_NAME,
-		.pm		= &mipi_csis_pm_ops,
+		.pm		= pm_ptr(&mipi_csis_pm_ops),
 	},
 };
 

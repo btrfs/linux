@@ -220,12 +220,10 @@ struct rme96 {
 
 	u8 rev; /* card revision number */
 
-#ifdef CONFIG_PM_SLEEP
 	u32 playback_pointer;
 	u32 capture_pointer;
 	void *playback_suspend_buffer;
 	void *capture_suspend_buffer;
-#endif
 
 	struct snd_pcm_substream *playback_substream;
 	struct snd_pcm_substream *capture_substream;
@@ -324,8 +322,10 @@ snd_rme96_playback_copy(struct snd_pcm_substream *substream,
 {
 	struct rme96 *rme96 = snd_pcm_substream_chip(substream);
 
-	return copy_from_iter_toio(rme96->iobase + RME96_IO_PLAY_BUFFER + pos,
-				   src, count);
+	if (copy_from_iter_toio(rme96->iobase + RME96_IO_PLAY_BUFFER + pos,
+				count, src) != count)
+		return -EFAULT;
+	return 0;
 }
 
 static int
@@ -335,9 +335,10 @@ snd_rme96_capture_copy(struct snd_pcm_substream *substream,
 {
 	struct rme96 *rme96 = snd_pcm_substream_chip(substream);
 
-	return copy_to_iter_fromio(dst,
-				   rme96->iobase + RME96_IO_REC_BUFFER + pos,
-				   count);
+	if (copy_to_iter_fromio(rme96->iobase + RME96_IO_REC_BUFFER + pos,
+				count, dst) != count)
+		return -EFAULT;
+	return 0;
 }
 
 /*
@@ -1543,10 +1544,8 @@ snd_rme96_free(struct rme96 *rme96)
 		rme96->areg &= ~RME96_AR_DAC_EN;
 		writel(rme96->areg, rme96->iobase + RME96_IO_ADDITIONAL_REG);
 	}
-#ifdef CONFIG_PM_SLEEP
 	vfree(rme96->playback_suspend_buffer);
 	vfree(rme96->capture_suspend_buffer);
-#endif
 }
 
 static void
@@ -1576,7 +1575,7 @@ snd_rme96_create(struct rme96 *rme96)
 	if (err < 0)
 		return err;
 
-	err = pci_request_regions(pci, "RME96");
+	err = pcim_request_all_regions(pci, "RME96");
 	if (err < 0)
 		return err;
 	rme96->port = pci_resource_start(rme96->pci, 0);
@@ -1608,7 +1607,7 @@ snd_rme96_create(struct rme96 *rme96)
 
 	rme96->spdif_pcm->private_data = rme96;
 	rme96->spdif_pcm->private_free = snd_rme96_free_spdif_pcm;
-	strcpy(rme96->spdif_pcm->name, "Digi96 IEC958");
+	strscpy(rme96->spdif_pcm->name, "Digi96 IEC958");
 	snd_pcm_set_ops(rme96->spdif_pcm, SNDRV_PCM_STREAM_PLAYBACK, &snd_rme96_playback_spdif_ops);
 	snd_pcm_set_ops(rme96->spdif_pcm, SNDRV_PCM_STREAM_CAPTURE, &snd_rme96_capture_spdif_ops);
 
@@ -1625,7 +1624,7 @@ snd_rme96_create(struct rme96 *rme96)
 			return err;
 		rme96->adat_pcm->private_data = rme96;
 		rme96->adat_pcm->private_free = snd_rme96_free_adat_pcm;
-		strcpy(rme96->adat_pcm->name, "Digi96 ADAT");
+		strscpy(rme96->adat_pcm->name, "Digi96 ADAT");
 		snd_pcm_set_ops(rme96->adat_pcm, SNDRV_PCM_STREAM_PLAYBACK, &snd_rme96_playback_adat_ops);
 		snd_pcm_set_ops(rme96->adat_pcm, SNDRV_PCM_STREAM_CAPTURE, &snd_rme96_capture_adat_ops);
 		
@@ -2329,8 +2328,6 @@ snd_rme96_create_switches(struct snd_card *card,
  * Card initialisation
  */
 
-#ifdef CONFIG_PM_SLEEP
-
 static int rme96_suspend(struct device *dev)
 {
 	struct snd_card *card = dev_get_drvdata(dev);
@@ -2392,11 +2389,7 @@ static int rme96_resume(struct device *dev)
 	return 0;
 }
 
-static SIMPLE_DEV_PM_OPS(rme96_pm, rme96_suspend, rme96_resume);
-#define RME96_PM_OPS	&rme96_pm
-#else
-#define RME96_PM_OPS	NULL
-#endif /* CONFIG_PM_SLEEP */
+static DEFINE_SIMPLE_DEV_PM_OPS(rme96_pm, rme96_suspend, rme96_resume);
 
 static void snd_rme96_card_free(struct snd_card *card)
 {
@@ -2432,32 +2425,32 @@ __snd_rme96_probe(struct pci_dev *pci,
 	if (err)
 		return err;
 	
-#ifdef CONFIG_PM_SLEEP
-	rme96->playback_suspend_buffer = vmalloc(RME96_BUFFER_SIZE);
-	if (!rme96->playback_suspend_buffer)
-		return -ENOMEM;
-	rme96->capture_suspend_buffer = vmalloc(RME96_BUFFER_SIZE);
-	if (!rme96->capture_suspend_buffer)
-		return -ENOMEM;
-#endif
+	if (IS_ENABLED(CONFIG_PM_SLEEP)) {
+		rme96->playback_suspend_buffer = vmalloc(RME96_BUFFER_SIZE);
+		if (!rme96->playback_suspend_buffer)
+			return -ENOMEM;
+		rme96->capture_suspend_buffer = vmalloc(RME96_BUFFER_SIZE);
+		if (!rme96->capture_suspend_buffer)
+			return -ENOMEM;
+	}
 
-	strcpy(card->driver, "Digi96");
+	strscpy(card->driver, "Digi96");
 	switch (rme96->pci->device) {
 	case PCI_DEVICE_ID_RME_DIGI96:
-		strcpy(card->shortname, "RME Digi96");
+		strscpy(card->shortname, "RME Digi96");
 		break;
 	case PCI_DEVICE_ID_RME_DIGI96_8:
-		strcpy(card->shortname, "RME Digi96/8");
+		strscpy(card->shortname, "RME Digi96/8");
 		break;
 	case PCI_DEVICE_ID_RME_DIGI96_8_PRO:
-		strcpy(card->shortname, "RME Digi96/8 PRO");
+		strscpy(card->shortname, "RME Digi96/8 PRO");
 		break;
 	case PCI_DEVICE_ID_RME_DIGI96_8_PAD_OR_PST:
 		pci_read_config_byte(rme96->pci, 8, &val);
 		if (val < 5) {
-			strcpy(card->shortname, "RME Digi96/8 PAD");
+			strscpy(card->shortname, "RME Digi96/8 PAD");
 		} else {
-			strcpy(card->shortname, "RME Digi96/8 PST");
+			strscpy(card->shortname, "RME Digi96/8 PST");
 		}
 		break;
 	}
@@ -2483,7 +2476,7 @@ static struct pci_driver rme96_driver = {
 	.id_table = snd_rme96_ids,
 	.probe = snd_rme96_probe,
 	.driver = {
-		.pm = RME96_PM_OPS,
+		.pm = &rme96_pm,
 	},
 };
 

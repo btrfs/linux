@@ -26,14 +26,73 @@ struct icssg_flow_cfg {
 #define PRUETH_MAX_RX_FLOWS	1	/* excluding default flow */
 #define PRUETH_RX_FLOW_DATA	0
 
-#define PRUETH_EMAC_BUF_POOL_SIZE	SZ_8K
-#define PRUETH_EMAC_POOLS_PER_SLICE	24
-#define PRUETH_EMAC_BUF_POOL_START	8
-#define PRUETH_NUM_BUF_POOLS	8
-#define PRUETH_EMAC_RX_CTX_BUF_SIZE	SZ_16K	/* per slice */
-#define MSMC_RAM_SIZE	\
-	(2 * (PRUETH_EMAC_BUF_POOL_SIZE * PRUETH_NUM_BUF_POOLS + \
-	 PRUETH_EMAC_RX_CTX_BUF_SIZE * 2))
+/* Defines for forwarding path buffer pools:
+ *   - used by firmware to store packets to be forwarded to other port
+ *   - 8 total pools per slice
+ *   - only used in switch mode (as no forwarding in mac mode)
+ */
+#define PRUETH_NUM_FWD_BUF_POOLS_PER_SLICE			8
+#define PRUETH_SW_FWD_BUF_POOL_SIZE				(SZ_8K)
+
+/* Defines for local injection path buffer pools:
+ *   - used by firmware to store packets received from host core
+ *   - 16 total pools per slice
+ *   - 8 pools per port per slice and each slice handles both ports
+ *   - only 4 out of 8 pools used per port (as only 4 real QoS levels in ICSSG)
+ *   - switch mode: 8 total pools used
+ *   - mac mode:    4 total pools used
+ */
+#define PRUETH_NUM_LI_BUF_POOLS_PER_SLICE			16
+#define PRUETH_NUM_LI_BUF_POOLS_PER_PORT_PER_SLICE		8
+#define PRUETH_SW_LI_BUF_POOL_SIZE				SZ_4K
+#define PRUETH_SW_USED_LI_BUF_POOLS_PER_SLICE			8
+#define PRUETH_SW_USED_LI_BUF_POOLS_PER_PORT_PER_SLICE		4
+#define PRUETH_EMAC_LI_BUF_POOL_SIZE				SZ_8K
+#define PRUETH_EMAC_USED_LI_BUF_POOLS_PER_SLICE			4
+#define PRUETH_EMAC_USED_LI_BUF_POOLS_PER_PORT_PER_SLICE	4
+
+/* Defines for host egress path - express and preemptible buffers
+ *   - used by firmware to store express and preemptible packets
+ *     to be transmitted to host core
+ *   - used by both mac/switch modes
+ */
+#define PRUETH_SW_HOST_EXP_BUF_POOL_SIZE	SZ_16K
+#define PRUETH_SW_HOST_PRE_BUF_POOL_SIZE	(SZ_16K - SZ_2K)
+#define PRUETH_EMAC_HOST_EXP_BUF_POOL_SIZE	PRUETH_SW_HOST_EXP_BUF_POOL_SIZE
+#define PRUETH_EMAC_HOST_PRE_BUF_POOL_SIZE	PRUETH_SW_HOST_PRE_BUF_POOL_SIZE
+
+/* Buffer used by firmware to temporarily store packet to be dropped */
+#define PRUETH_SW_DROP_PKT_BUF_SIZE		SZ_2K
+#define PRUETH_EMAC_DROP_PKT_BUF_SIZE		PRUETH_SW_DROP_PKT_BUF_SIZE
+
+/* Total switch mode memory usage for buffers per slice */
+#define PRUETH_SW_TOTAL_BUF_SIZE_PER_SLICE \
+	(PRUETH_SW_FWD_BUF_POOL_SIZE * PRUETH_NUM_FWD_BUF_POOLS_PER_SLICE + \
+	 PRUETH_SW_LI_BUF_POOL_SIZE * PRUETH_SW_USED_LI_BUF_POOLS_PER_SLICE + \
+	 PRUETH_SW_HOST_EXP_BUF_POOL_SIZE + \
+	 PRUETH_SW_HOST_PRE_BUF_POOL_SIZE + \
+	 PRUETH_SW_DROP_PKT_BUF_SIZE)
+
+/* Total switch mode memory usage for all buffers */
+#define PRUETH_SW_TOTAL_BUF_SIZE \
+	(2 * PRUETH_SW_TOTAL_BUF_SIZE_PER_SLICE)
+
+/* Total mac mode memory usage for buffers per slice */
+#define PRUETH_EMAC_TOTAL_BUF_SIZE_PER_SLICE \
+	(PRUETH_EMAC_LI_BUF_POOL_SIZE * \
+	 PRUETH_EMAC_USED_LI_BUF_POOLS_PER_SLICE + \
+	 PRUETH_EMAC_HOST_EXP_BUF_POOL_SIZE + \
+	 PRUETH_EMAC_HOST_PRE_BUF_POOL_SIZE + \
+	 PRUETH_EMAC_DROP_PKT_BUF_SIZE)
+
+/* Total mac mode memory usage for all buffers */
+#define PRUETH_EMAC_TOTAL_BUF_SIZE \
+	(2 * PRUETH_EMAC_TOTAL_BUF_SIZE_PER_SLICE)
+
+/* Size of 1 bank of MSMC/OC_SRAM memory */
+#define MSMC_RAM_BANK_SIZE			SZ_256K
+
+#define PRUETH_SWITCH_FDB_MASK ((SIZE_OF_FDB / NUMBER_OF_FDB_BUCKET_ENTRIES) - 1)
 
 struct icssg_rxq_ctx {
 	__le32 start[3];
@@ -46,6 +105,7 @@ struct icssg_rxq_ctx {
 #define ICSSG_FW_MGMT_FDB_CMD_TYPE	0x03
 #define ICSSG_FW_MGMT_CMD_TYPE		0x04
 #define ICSSG_FW_MGMT_PKT		0x80000000
+#define ICSSG_FW_MGMT_FDB_CMD_TYPE_RX_FLOW	0x05
 
 struct icssg_r30_cmd {
 	u32 cmd[4];
@@ -71,6 +131,8 @@ enum icssg_port_state_cmd {
 	ICSSG_EMAC_PORT_PREMPT_TX_DISABLE,
 	ICSSG_EMAC_PORT_VLAN_AWARE_ENABLE,
 	ICSSG_EMAC_PORT_VLAN_AWARE_DISABLE,
+	ICSSG_EMAC_HSR_RX_OFFLOAD_ENABLE,
+	ICSSG_EMAC_HSR_RX_OFFLOAD_DISABLE,
 	ICSSG_EMAC_PORT_MAX_COMMANDS
 };
 
@@ -109,6 +171,62 @@ enum icssg_port_state_cmd {
 
 #define ICSSG_FLAG_MASK		0xff00ffff
 
+/* SR1.0-specific bits */
+#define PRUETH_MAX_RX_FLOWS_SR1			4	/* excluding default flow */
+#define PRUETH_RX_FLOW_DATA_SR1			3       /* highest priority flow */
+#define PRUETH_MAX_RX_MGM_DESC_SR1		8
+#define PRUETH_MAX_RX_MGM_FLOWS_SR1		2	/* excluding default flow */
+#define PRUETH_RX_MGM_FLOW_RESPONSE_SR1		0
+#define PRUETH_RX_MGM_FLOW_TIMESTAMP_SR1	1
+
+#define PRUETH_NUM_BUF_POOLS_SR1		16
+#define PRUETH_EMAC_BUF_POOL_START_SR1		8
+#define PRUETH_EMAC_BUF_POOL_MIN_SIZE_SR1	128
+#define PRUETH_EMAC_BUF_SIZE_SR1		1536
+#define PRUETH_EMAC_NUM_BUF_SR1			4
+#define PRUETH_EMAC_BUF_POOL_SIZE_SR1	(PRUETH_EMAC_NUM_BUF_SR1 * \
+					 PRUETH_EMAC_BUF_SIZE_SR1)
+#define MSMC_RAM_SIZE_SR1	(SZ_64K + SZ_32K + SZ_2K) /* 0x1880 x 8 x 2 */
+
+struct icssg_sr1_config {
+	__le32 status;		/* Firmware status */
+	__le32 addr_lo;		/* MSMC Buffer pool base address low. */
+	__le32 addr_hi;		/* MSMC Buffer pool base address high. Must be 0 */
+	__le32 tx_buf_sz[16];	/* Array of buffer pool sizes */
+	__le32 num_tx_threads;	/* Number of active egress threads, 1 to 4 */
+	__le32 tx_rate_lim_en;	/* Bitmask: Egress rate limit en per thread */
+	__le32 rx_flow_id;	/* RX flow id for first rx ring */
+	__le32 rx_mgr_flow_id;	/* RX flow id for the first management ring */
+	__le32 flags;		/* TBD */
+	__le32 n_burst;		/* for debug */
+	__le32 rtu_status;	/* RTU status */
+	__le32 info;		/* reserved */
+	__le32 reserve;
+	__le32 rand_seed;	/* Used for the random number generation at fw */
+} __packed;
+
+/* SR1.0 shutdown command to stop processing at firmware.
+ * Command format: 0x8101ss00, where
+ *	- ss: sequence number. Currently not used by driver.
+ */
+#define ICSSG_SHUTDOWN_CMD_SR1		0x81010000
+
+/* SR1.0 pstate speed/duplex command to set speed and duplex settings
+ * in firmware.
+ * Command format: 0x8102ssPN, where
+ *	- ss: sequence number. Currently not used by driver.
+ *	- P: port number (for switch mode).
+ *	- N: Speed/Duplex state:
+ *		0x0 - 10Mbps/Half duplex;
+ *		0x8 - 10Mbps/Full duplex;
+ *		0x2 - 100Mbps/Half duplex;
+ *		0xa - 100Mbps/Full duplex;
+ *		0xc - 1Gbps/Full duplex;
+ *		NOTE: The above are the same value as bits [3..1](slice 0)
+ *		      or bits [7..5](slice 1) of RGMII CFG register.
+ */
+#define ICSSG_PSTATE_SPEED_DUPLEX_CMD_SR1	0x81020000
+
 struct icssg_setclock_desc {
 	u8 request;
 	u8 restore;
@@ -145,6 +263,23 @@ struct icssg_setclock_desc {
 
 #define ICSSG_TS_PUSH_SLICE0	40
 #define ICSSG_TS_PUSH_SLICE1	41
+
+struct mgmt_cmd {
+	u8 param;
+	u8 seqnum;
+	u8 type;
+	u8 header;
+	u32 cmd_args[3];
+};
+
+struct mgmt_cmd_rsp {
+	u32 reserved;
+	u8 status;
+	u8 seqnum;
+	u8 type;
+	u8 header;
+	u32 cmd_args[3];
+};
 
 /* FDB FID_C2 flag definitions */
 /* Indicates host port membership.*/

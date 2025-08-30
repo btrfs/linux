@@ -92,6 +92,30 @@ static const struct ce_variant ce_h6_variant = {
 	.trng = CE_ALG_TRNG_V2,
 };
 
+static const struct ce_variant ce_h616_variant = {
+	.alg_cipher = { CE_ALG_AES, CE_ALG_DES, CE_ALG_3DES,
+	},
+	.alg_hash = { CE_ALG_MD5, CE_ALG_SHA1, CE_ALG_SHA224, CE_ALG_SHA256,
+		CE_ALG_SHA384, CE_ALG_SHA512
+	},
+	.op_mode = { CE_OP_ECB, CE_OP_CBC
+	},
+	.cipher_t_dlen_in_bytes = true,
+	.hash_t_dlen_in_bits = true,
+	.prng_t_dlen_in_bytes = true,
+	.trng_t_dlen_in_bytes = true,
+	.needs_word_addresses = true,
+	.ce_clks = {
+		{ "bus", 0, 200000000 },
+		{ "mod", 300000000, 0 },
+		{ "ram", 0, 400000000 },
+		{ "trng", 0, 0 },
+		},
+	.esr = ESR_H6,
+	.prng = CE_ALG_PRNG_V2,
+	.trng = CE_ALG_TRNG_V2,
+};
+
 static const struct ce_variant ce_a64_variant = {
 	.alg_cipher = { CE_ALG_AES, CE_ALG_DES, CE_ALG_3DES,
 	},
@@ -172,7 +196,7 @@ int sun8i_ce_run_task(struct sun8i_ce_dev *ce, int flow, const char *name)
 	writel(v, ce->base + CE_ICR);
 
 	reinit_completion(&ce->chanlist[flow].complete);
-	writel(ce->chanlist[flow].t_phy, ce->base + CE_TDQ);
+	writel(desc_addr_val(ce, ce->chanlist[flow].t_phy), ce->base + CE_TDQ);
 
 	ce->chanlist[flow].status = 0;
 	/* Be sure all data is written before enabling the task */
@@ -808,13 +832,12 @@ static int sun8i_ce_pm_init(struct sun8i_ce_dev *ce)
 	err = pm_runtime_set_suspended(ce->dev);
 	if (err)
 		return err;
-	pm_runtime_enable(ce->dev);
-	return err;
-}
 
-static void sun8i_ce_pm_exit(struct sun8i_ce_dev *ce)
-{
-	pm_runtime_disable(ce->dev);
+	err = devm_pm_runtime_enable(ce->dev);
+	if (err)
+		return err;
+
+	return 0;
 }
 
 static int sun8i_ce_get_clks(struct sun8i_ce_dev *ce)
@@ -1017,7 +1040,7 @@ static int sun8i_ce_probe(struct platform_device *pdev)
 			       "sun8i-ce-ns", ce);
 	if (err) {
 		dev_err(ce->dev, "Cannot request CryptoEngine Non-secure IRQ (err=%d)\n", err);
-		goto error_irq;
+		goto error_pm;
 	}
 
 	err = sun8i_ce_register_algs(ce);
@@ -1058,8 +1081,6 @@ static int sun8i_ce_probe(struct platform_device *pdev)
 	return 0;
 error_alg:
 	sun8i_ce_unregister_algs(ce);
-error_irq:
-	sun8i_ce_pm_exit(ce);
 error_pm:
 	sun8i_ce_free_chanlist(ce, MAXFLOW - 1);
 	return err;
@@ -1080,8 +1101,6 @@ static void sun8i_ce_remove(struct platform_device *pdev)
 #endif
 
 	sun8i_ce_free_chanlist(ce, MAXFLOW - 1);
-
-	sun8i_ce_pm_exit(ce);
 }
 
 static const struct of_device_id sun8i_ce_crypto_of_match_table[] = {
@@ -1097,13 +1116,15 @@ static const struct of_device_id sun8i_ce_crypto_of_match_table[] = {
 	  .data = &ce_h5_variant },
 	{ .compatible = "allwinner,sun50i-h6-crypto",
 	  .data = &ce_h6_variant },
+	{ .compatible = "allwinner,sun50i-h616-crypto",
+	  .data = &ce_h616_variant },
 	{}
 };
 MODULE_DEVICE_TABLE(of, sun8i_ce_crypto_of_match_table);
 
 static struct platform_driver sun8i_ce_driver = {
 	.probe		 = sun8i_ce_probe,
-	.remove_new	 = sun8i_ce_remove,
+	.remove		 = sun8i_ce_remove,
 	.driver		 = {
 		.name		= "sun8i-ce",
 		.pm		= &sun8i_ce_pm_ops,

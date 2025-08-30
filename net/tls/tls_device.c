@@ -37,6 +37,7 @@
 #include <net/inet_connection_sock.h>
 #include <net/tcp.h>
 #include <net/tls.h>
+#include <linux/skbuff_ref.h>
 
 #include "tls.h"
 #include "trace.h"
@@ -156,7 +157,7 @@ static void delete_all_records(struct tls_offload_context_tx *offload_ctx)
 	offload_ctx->retransmit_hint = NULL;
 }
 
-static void tls_icsk_clean_acked(struct sock *sk, u32 acked_seq)
+static void tls_tcp_clean_acked(struct sock *sk, u32 acked_seq)
 {
 	struct tls_context *tls_ctx = tls_get_ctx(sk);
 	struct tls_record_info *info, *temp;
@@ -203,7 +204,7 @@ void tls_device_sk_destruct(struct sock *sk)
 			destroy_record(ctx->open_record);
 		delete_all_records(ctx);
 		crypto_free_aead(ctx->aead_send);
-		clean_acked_data_disable(inet_csk(sk));
+		clean_acked_data_disable(tcp_sk(sk));
 	}
 
 	tls_device_queue_ctx_destruction(tls_ctx);
@@ -230,14 +231,10 @@ static void tls_device_resync_tx(struct sock *sk, struct tls_context *tls_ctx,
 				 u32 seq)
 {
 	struct net_device *netdev;
-	struct sk_buff *skb;
 	int err = 0;
 	u8 *rcd_sn;
 
-	skb = tcp_write_queue_tail(sk);
-	if (skb)
-		TCP_SKB_CB(skb)->eor = 1;
-
+	tcp_write_collapse_fence(sk);
 	rcd_sn = tls_ctx->tx.rec_seq;
 
 	trace_tls_device_tx_resync_send(sk, seq, rcd_sn);
@@ -1066,7 +1063,6 @@ int tls_set_device_offload(struct sock *sk)
 	struct tls_prot_info *prot;
 	struct net_device *netdev;
 	struct tls_context *ctx;
-	struct sk_buff *skb;
 	char *iv, *rec_seq;
 	int rc;
 
@@ -1130,16 +1126,14 @@ int tls_set_device_offload(struct sock *sk)
 	start_marker_record->num_frags = 0;
 	list_add_tail(&start_marker_record->list, &offload_ctx->records_list);
 
-	clean_acked_data_enable(inet_csk(sk), &tls_icsk_clean_acked);
+	clean_acked_data_enable(tcp_sk(sk), &tls_tcp_clean_acked);
 	ctx->push_pending_record = tls_device_push_pending_record;
 
 	/* TLS offload is greatly simplified if we don't send
 	 * SKBs where only part of the payload needs to be encrypted.
 	 * So mark the last skb in the write queue as end of record.
 	 */
-	skb = tcp_write_queue_tail(sk);
-	if (skb)
-		TCP_SKB_CB(skb)->eor = 1;
+	tcp_write_collapse_fence(sk);
 
 	/* Avoid offloading if the device is down
 	 * We don't want to offload new flows after
@@ -1178,7 +1172,7 @@ int tls_set_device_offload(struct sock *sk)
 
 release_lock:
 	up_read(&device_offload_lock);
-	clean_acked_data_disable(inet_csk(sk));
+	clean_acked_data_disable(tcp_sk(sk));
 	crypto_free_aead(offload_ctx->aead_send);
 free_offload_ctx:
 	kfree(offload_ctx);
@@ -1233,7 +1227,7 @@ int tls_set_device_offload_rx(struct sock *sk, struct tls_context *ctx)
 	context->resync_nh_reset = 1;
 
 	ctx->priv_ctx_rx = context;
-	rc = tls_set_sw_offload(sk, 0);
+	rc = tls_set_sw_offload(sk, 0, NULL);
 	if (rc)
 		goto release_ctx;
 

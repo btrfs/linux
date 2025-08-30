@@ -73,10 +73,7 @@
 #define RFKILL_MINOR		242
 #define MISC_DYNAMIC_MINOR	255
 
-struct device;
-struct attribute_group;
-
-struct miscdevice  {
+struct miscdevice {
 	int minor;
 	const char *name;
 	const struct file_operations *fops;

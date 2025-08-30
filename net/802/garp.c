@@ -16,7 +16,7 @@
 #include <net/llc.h>
 #include <net/llc_pdu.h>
 #include <net/garp.h>
-#include <asm/unaligned.h>
+#include <linux/unaligned.h>
 
 static unsigned int garp_join_time __read_mostly = 200;
 module_param(garp_join_time, uint, 0644);
@@ -414,7 +414,7 @@ static void garp_join_timer_arm(struct garp_applicant *app)
 
 static void garp_join_timer(struct timer_list *t)
 {
-	struct garp_applicant *app = from_timer(app, t, join_timer);
+	struct garp_applicant *app = timer_container_of(app, t, join_timer);
 
 	spin_lock(&app->lock);
 	garp_gid_event(app, GARP_EVENT_TRANSMIT_PDU);

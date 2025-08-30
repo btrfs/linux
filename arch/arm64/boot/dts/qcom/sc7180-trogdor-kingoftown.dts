@@ -9,7 +9,7 @@
 
 #include "sc7180-trogdor.dtsi"
 #include "sc7180-trogdor-parade-ps8640.dtsi"
-#include <arm/cros-ec-keyboard.dtsi>
+#include "sc7180-trogdor-clamshell.dtsi"
 #include "sc7180-trogdor-lte-sku.dtsi"
 #include "sc7180-trogdor-rt5682s-sku.dtsi"
 
@@ -79,7 +79,7 @@ ap_ts_pen_1v8: &i2c4 {
 };
 
 &wifi {
-	qcom,ath10k-calibration-variant = "GO_KINGOFTOWN";
+	qcom,calibration-variant = "GO_KINGOFTOWN";
 };
 
 /* PINCTRL - modifications to sc7180-trogdor.dtsi */

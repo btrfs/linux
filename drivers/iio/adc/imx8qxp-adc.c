@@ -481,13 +481,13 @@ static DEFINE_RUNTIME_DEV_PM_OPS(imx8qxp_adc_pm_ops,
 
 static const struct of_device_id imx8qxp_adc_match[] = {
 	{ .compatible = "nxp,imx8qxp-adc", },
-	{ /* sentinel */ }
+	{ }
 };
 MODULE_DEVICE_TABLE(of, imx8qxp_adc_match);
 
 static struct platform_driver imx8qxp_adc_driver = {
 	.probe		= imx8qxp_adc_probe,
-	.remove_new	= imx8qxp_adc_remove,
+	.remove		= imx8qxp_adc_remove,
 	.driver		= {
 		.name	= ADC_DRIVER_NAME,
 		.of_match_table = imx8qxp_adc_match,

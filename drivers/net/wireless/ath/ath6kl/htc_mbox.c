@@ -21,7 +21,7 @@
 #include "hif-ops.h"
 #include "trace.h"
 
-#include <asm/unaligned.h>
+#include <linux/unaligned.h>
 
 #define CALC_TXRX_PADDED_LEN(dev, len)  (__ALIGN_MASK((len), (dev)->block_mask))
 
@@ -364,8 +364,7 @@ static void ath6kl_htc_tx_prep_pkt(struct htc_packet *packet, u8 flags,
 	packet->buf -= HTC_HDR_LENGTH;
 	hdr =  (struct htc_frame_hdr *)packet->buf;
 
-	/* Endianess? */
-	put_unaligned((u16)packet->act_len, &hdr->payld_len);
+	put_unaligned_le16(packet->act_len, &hdr->payld_len);
 	hdr->flags = flags;
 	hdr->eid = packet->endpoint;
 	hdr->ctrl[0] = ctrl0;
@@ -939,7 +938,7 @@ static void ath6kl_htc_tx_from_queue(struct htc_target *target,
 
 		/*
 		 * if an AC has bundling disabled and no tx bundling
-		 * has occured continously for a certain number of TX,
+		 * has occurred continuously for a certain number of TX,
 		 * enable tx bundling for this AC
 		 */
 		if (!bundle_sent) {

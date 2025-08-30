@@ -66,28 +66,15 @@
 
 #define MOS_WDR_TIMEOUT		5000	/* default urb timeout */
 
-#define MOS_PORT1       0x0200
-#define MOS_PORT2       0x0300
-#define MOS_VENREG      0x0000
-#define MOS_MAX_PORT	0x02
-#define MOS_WRITE       0x0E
-#define MOS_READ        0x0D
-
 /* Requests */
 #define MCS_RD_RTYPE    0xC0
 #define MCS_WR_RTYPE    0x40
 #define MCS_RDREQ       0x0D
 #define MCS_WRREQ       0x0E
-#define MCS_CTRL_TIMEOUT        500
 #define VENDOR_READ_LENGTH      (0x01)
-
-#define MAX_NAME_LEN    64
 
 #define ZLP_REG1  0x3A		/* Zero_Flag_Reg1    58 */
 #define ZLP_REG5  0x3E		/* Zero_Flag_Reg5    62 */
-
-/* For higher baud Rates use TIOCEXBAUD */
-#define TIOCEXBAUD     0x5462
 
 /*
  * Vendor id and device id defines
@@ -396,7 +383,7 @@ static void mos7840_set_led_sync(struct usb_serial_port *port, __u16 reg,
 
 static void mos7840_led_off(struct timer_list *t)
 {
-	struct moschip_port *mcs = from_timer(mcs, t, led_timer1);
+	struct moschip_port *mcs = timer_container_of(mcs, t, led_timer1);
 
 	/* Turn off LED */
 	mos7840_set_led_async(mcs, 0x0300, MODEM_CONTROL_REGISTER);
@@ -406,7 +393,7 @@ static void mos7840_led_off(struct timer_list *t)
 
 static void mos7840_led_flag_off(struct timer_list *t)
 {
-	struct moschip_port *mcs = from_timer(mcs, t, led_timer2);
+	struct moschip_port *mcs = timer_container_of(mcs, t, led_timer2);
 
 	clear_bit_unlock(MOS7840_FLAG_LED_BUSY, &mcs->flags);
 }
@@ -1737,9 +1724,51 @@ static void mos7840_port_remove(struct usb_serial_port *port)
 	kfree(mos7840_port);
 }
 
+static int mos7840_suspend(struct usb_serial *serial, pm_message_t message)
+{
+	struct moschip_port *mos7840_port;
+	struct usb_serial_port *port;
+	int i;
+
+	for (i = 0; i < serial->num_ports; ++i) {
+		port = serial->port[i];
+		if (!tty_port_initialized(&port->port))
+			continue;
+
+		mos7840_port = usb_get_serial_port_data(port);
+
+		usb_kill_urb(mos7840_port->read_urb);
+		mos7840_port->read_urb_busy = false;
+	}
+
+	return 0;
+}
+
+static int mos7840_resume(struct usb_serial *serial)
+{
+	struct moschip_port *mos7840_port;
+	struct usb_serial_port *port;
+	int res;
+	int i;
+
+	for (i = 0; i < serial->num_ports; ++i) {
+		port = serial->port[i];
+		if (!tty_port_initialized(&port->port))
+			continue;
+
+		mos7840_port = usb_get_serial_port_data(port);
+
+		mos7840_port->read_urb_busy = true;
+		res = usb_submit_urb(mos7840_port->read_urb, GFP_NOIO);
+		if (res)
+			mos7840_port->read_urb_busy = false;
+	}
+
+	return 0;
+}
+
 static struct usb_serial_driver moschip7840_4port_device = {
 	.driver = {
-		   .owner = THIS_MODULE,
 		   .name = "mos7840",
 		   },
 	.description = DRIVER_DESC,
@@ -1764,6 +1793,8 @@ static struct usb_serial_driver moschip7840_4port_device = {
 	.port_probe = mos7840_port_probe,
 	.port_remove = mos7840_port_remove,
 	.read_bulk_callback = mos7840_bulk_in_callback,
+	.suspend = mos7840_suspend,
+	.resume = mos7840_resume,
 };
 
 static struct usb_serial_driver * const serial_drivers[] = {

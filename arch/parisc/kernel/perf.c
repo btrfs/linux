@@ -466,7 +466,6 @@ static long perf_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 }
 
 static const struct file_operations perf_fops = {
-	.llseek = no_llseek,
 	.read = perf_read,
 	.write = perf_write,
 	.unlocked_ioctl = perf_ioctl,
@@ -476,9 +475,9 @@ static const struct file_operations perf_fops = {
 };
 
 static struct miscdevice perf_dev = {
-	MISC_DYNAMIC_MINOR,
-	PA_PERF_DEV,
-	&perf_fops
+	.minor	= MISC_DYNAMIC_MINOR,
+	.name	= PA_PERF_DEV,
+	.fops	= &perf_fops,
 };
 
 /*

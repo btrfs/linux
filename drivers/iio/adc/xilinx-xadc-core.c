@@ -628,7 +628,7 @@ static int xadc_update_scan_mode(struct iio_dev *indio_dev,
 	size_t n;
 	void *data;
 
-	n = bitmap_weight(mask, indio_dev->masklength);
+	n = bitmap_weight(mask, iio_get_masklength(indio_dev));
 
 	data = devm_krealloc_array(indio_dev->dev.parent, xadc->data,
 				   n, sizeof(*xadc->data), GFP_KERNEL);
@@ -681,8 +681,7 @@ static irqreturn_t xadc_trigger_handler(int irq, void *p)
 		goto out;
 
 	j = 0;
-	for_each_set_bit(i, indio_dev->active_scan_mask,
-		indio_dev->masklength) {
+	iio_for_each_active_channel(indio_dev, i) {
 		chan = xadc_scan_index_to_channel(i);
 		xadc_read_adc_reg(xadc, chan, &xadc->data[j]);
 		j++;
@@ -1187,7 +1186,7 @@ static const struct of_device_id xadc_of_match_table[] = {
 		.compatible = "xlnx,system-management-wiz-1.3",
 		.data = &xadc_us_axi_ops
 	},
-	{ },
+	{ }
 };
 MODULE_DEVICE_TABLE(of, xadc_of_match_table);
 
@@ -1246,8 +1245,8 @@ static int xadc_parse_dt(struct iio_dev *indio_dev, unsigned int *conf, int irq)
 		channel_templates = xadc_us_channels;
 		max_channels = ARRAY_SIZE(xadc_us_channels);
 	}
-	channels = devm_kmemdup(dev, channel_templates,
-				sizeof(channels[0]) * max_channels, GFP_KERNEL);
+	channels = devm_kmemdup_array(dev, channel_templates, max_channels,
+				      sizeof(*channel_templates), GFP_KERNEL);
 	if (!channels)
 		return -ENOMEM;
 

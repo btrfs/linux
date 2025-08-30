@@ -549,7 +549,6 @@ static int usb_pcwd_notify_sys(struct notifier_block *this, unsigned long code,
 
 static const struct file_operations usb_pcwd_fops = {
 	.owner =	THIS_MODULE,
-	.llseek =	no_llseek,
 	.write =	usb_pcwd_write,
 	.unlocked_ioctl = usb_pcwd_ioctl,
 	.compat_ioctl = compat_ptr_ioctl,
@@ -565,7 +564,6 @@ static struct miscdevice usb_pcwd_miscdev = {
 
 static const struct file_operations usb_pcwd_temperature_fops = {
 	.owner =	THIS_MODULE,
-	.llseek =	no_llseek,
 	.read =		usb_pcwd_temperature_read,
 	.open =		usb_pcwd_temperature_open,
 	.release =	usb_pcwd_temperature_release,
@@ -581,7 +579,7 @@ static struct notifier_block usb_pcwd_notifier = {
 	.notifier_call =	usb_pcwd_notify_sys,
 };
 
-/**
+/*
  *	usb_pcwd_delete
  */
 static inline void usb_pcwd_delete(struct usb_pcwd_private *usb_pcwd)
@@ -592,7 +590,7 @@ static inline void usb_pcwd_delete(struct usb_pcwd_private *usb_pcwd)
 	kfree(usb_pcwd);
 }
 
-/**
+/*
  *	usb_pcwd_probe
  *
  *	Called by the usb core when a new device is connected that it thinks
@@ -760,7 +758,7 @@ error:
 }
 
 
-/**
+/*
  *	usb_pcwd_disconnect
  *
  *	Called by the usb core when the device is removed from the system.

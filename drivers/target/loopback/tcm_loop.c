@@ -83,7 +83,7 @@ static int tcm_loop_show_info(struct seq_file *m, struct Scsi_Host *host)
 static int tcm_loop_driver_probe(struct device *);
 static void tcm_loop_driver_remove(struct device *);
 
-static struct bus_type tcm_loop_lld_bus = {
+static const struct bus_type tcm_loop_lld_bus = {
 	.name			= "tcm_loop_bus",
 	.probe			= tcm_loop_driver_probe,
 	.remove			= tcm_loop_driver_remove,
@@ -176,7 +176,7 @@ static int tcm_loop_queuecommand(struct Scsi_Host *sh, struct scsi_cmnd *sc)
 
 	memset(tl_cmd, 0, sizeof(*tl_cmd));
 	tl_cmd->sc = sc;
-	tl_cmd->sc_cmd_tag = scsi_cmd_to_rq(sc)->tag;
+	tl_cmd->sc_cmd_tag = blk_mq_unique_tag(scsi_cmd_to_rq(sc));
 
 	tcm_loop_target_queue_cmd(tl_cmd);
 	return 0;
@@ -242,7 +242,8 @@ static int tcm_loop_abort_task(struct scsi_cmnd *sc)
 	tl_hba = *(struct tcm_loop_hba **)shost_priv(sc->device->host);
 	tl_tpg = &tl_hba->tl_hba_tpgs[sc->device->id];
 	ret = tcm_loop_issue_tmr(tl_tpg, sc->device->lun,
-				 scsi_cmd_to_rq(sc)->tag, TMR_ABORT_TASK);
+				 blk_mq_unique_tag(scsi_cmd_to_rq(sc)),
+				 TMR_ABORT_TASK);
 	return (ret == TMR_FUNCTION_COMPLETE) ? SUCCESS : FAILED;
 }
 

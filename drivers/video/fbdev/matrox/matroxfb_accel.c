@@ -77,6 +77,8 @@
  *
  */
 
+#include <linux/export.h>
+
 #include "matroxfb_accel.h"
 #include "matroxfb_DAC1064.h"
 #include "matroxfb_Ti3026.h"
@@ -517,4 +519,5 @@ static void matroxfb_imageblit(struct fb_info* info, const struct fb_image* imag
 	}
 }
 
+MODULE_DESCRIPTION("Accelerated fbops for Matrox Millennium/Mystique/G100/G200/G400/G450/G550");
 MODULE_LICENSE("GPL");

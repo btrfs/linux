@@ -8,21 +8,14 @@
 #include "clock_types.h"
 #include "fifo.h"
 
-struct bucket_alloc_state {
-	u64	buckets_seen;
-	u64	skipped_open;
-	u64	skipped_need_journal_commit;
-	u64	skipped_nocow;
-	u64	skipped_nouse;
-};
-
 #define BCH_WATERMARKS()		\
 	x(stripe)			\
 	x(normal)			\
 	x(copygc)			\
 	x(btree)			\
 	x(btree_copygc)			\
-	x(reclaim)
+	x(reclaim)			\
+	x(interior_updates)
 
 enum bch_watermark {
 #define x(name)	BCH_WATERMARK_##name,
@@ -81,6 +74,7 @@ struct dev_stripe_state {
 	x(stopped)			\
 	x(waiting_io)			\
 	x(waiting_work)			\
+	x(runnable)			\
 	x(running)
 
 enum write_point_state {
@@ -116,6 +110,7 @@ struct write_point {
 		enum write_point_state	state;
 		u64			last_state_change;
 		u64			time[WRITE_POINT_STATE_NR];
+		u64			last_runtime;
 	} __aligned(SMP_CACHE_BYTES);
 };
 

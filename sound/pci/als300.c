@@ -546,7 +546,7 @@ static int snd_als300_new_pcm(struct snd_als300 *chip)
 	if (err < 0)
 		return err;
 	pcm->private_data = chip;
-	strcpy(pcm->name, "ALS300");
+	strscpy(pcm->name, "ALS300");
 	chip->pcm = pcm;
 
 	/* set operators */
@@ -617,7 +617,7 @@ static int snd_als300_create(struct snd_card *card,
 	chip->chip_type = chip_type;
 	spin_lock_init(&chip->reg_lock);
 
-	err = pci_request_regions(pci, "ALS300");
+	err = pcim_request_all_regions(pci, "ALS300");
 	if (err < 0)
 		return err;
 
@@ -654,7 +654,6 @@ static int snd_als300_create(struct snd_card *card,
 	return 0;
 }
 
-#ifdef CONFIG_PM_SLEEP
 static int snd_als300_suspend(struct device *dev)
 {
 	struct snd_card *card = dev_get_drvdata(dev);
@@ -677,11 +676,7 @@ static int snd_als300_resume(struct device *dev)
 	return 0;
 }
 
-static SIMPLE_DEV_PM_OPS(snd_als300_pm, snd_als300_suspend, snd_als300_resume);
-#define SND_ALS300_PM_OPS	&snd_als300_pm
-#else
-#define SND_ALS300_PM_OPS	NULL
-#endif
+static DEFINE_SIMPLE_DEV_PM_OPS(snd_als300_pm, snd_als300_suspend, snd_als300_resume);
 
 static int snd_als300_probe(struct pci_dev *pci,
                              const struct pci_device_id *pci_id)
@@ -710,7 +705,7 @@ static int snd_als300_probe(struct pci_dev *pci,
 	if (err < 0)
 		goto error;
 
-	strcpy(card->driver, "ALS300");
+	strscpy(card->driver, "ALS300");
 	if (chip->chip_type == DEVICE_ALS300_PLUS)
 		/* don't know much about ALS300+ yet
 		 * print revision number for now */
@@ -739,7 +734,7 @@ static struct pci_driver als300_driver = {
 	.id_table = snd_als300_ids,
 	.probe = snd_als300_probe,
 	.driver = {
-		.pm = SND_ALS300_PM_OPS,
+		.pm = &snd_als300_pm,
 	},
 };
 

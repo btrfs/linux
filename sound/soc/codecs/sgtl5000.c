@@ -806,9 +806,9 @@ static int sgtl5000_set_dai_fmt(struct snd_soc_dai *codec_dai, unsigned int fmt)
 	 *  - clock and frame master
 	 */
 	switch (fmt & SND_SOC_DAIFMT_MASTER_MASK) {
-	case SND_SOC_DAIFMT_CBS_CFS:
+	case SND_SOC_DAIFMT_CBC_CFC:
 		break;
-	case SND_SOC_DAIFMT_CBM_CFM:
+	case SND_SOC_DAIFMT_CBP_CFP:
 		i2sctl |= SGTL5000_I2S_MASTER;
 		sgtl5000->master = 1;
 		break;
@@ -1809,7 +1809,7 @@ static void sgtl5000_i2c_shutdown(struct i2c_client *client)
 }
 
 static const struct i2c_device_id sgtl5000_id[] = {
-	{"sgtl5000", 0},
+	{"sgtl5000"},
 	{},
 };
 

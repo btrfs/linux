@@ -41,12 +41,9 @@ static int patch_build_controls(struct snd_ac97 * ac97, const struct snd_kcontro
 static void reset_tlv(struct snd_ac97 *ac97, const char *name,
 		      const unsigned int *tlv)
 {
-	struct snd_ctl_elem_id sid;
 	struct snd_kcontrol *kctl;
-	memset(&sid, 0, sizeof(sid));
-	strcpy(sid.name, name);
-	sid.iface = SNDRV_CTL_ELEM_IFACE_MIXER;
-	kctl = snd_ctl_find_id(ac97->bus->card, &sid);
+
+	kctl = snd_ctl_find_id_mixer(ac97->bus->card, name);
 	if (kctl && kctl->tlv.p)
 		kctl->tlv.p = tlv;
 }
@@ -301,7 +298,7 @@ static int patch_yamaha_ymf7x3_3d(struct snd_ac97 *ac97)
 	err = snd_ctl_add(ac97->bus->card, kctl);
 	if (err < 0)
 		return err;
-	strcpy(kctl->id.name, "3D Control - Wide");
+	strscpy(kctl->id.name, "3D Control - Wide");
 	kctl->private_value = AC97_SINGLE_VALUE(AC97_3D_CONTROL, 9, 7, 0);
 	snd_ac97_write_cache(ac97, AC97_3D_CONTROL, 0x0000);
 	err = snd_ctl_add(ac97->bus->card,
@@ -894,7 +891,7 @@ static int patch_sigmatel_stac9700_3d(struct snd_ac97 * ac97)
 	err = snd_ctl_add(ac97->bus->card, kctl = snd_ac97_cnew(&snd_ac97_controls_3d[0], ac97));
 	if (err < 0)
 		return err;
-	strcpy(kctl->id.name, "3D Control Sigmatel - Depth");
+	strscpy(kctl->id.name, "3D Control Sigmatel - Depth");
 	kctl->private_value = AC97_SINGLE_VALUE(AC97_3D_CONTROL, 2, 3, 0);
 	snd_ac97_write_cache(ac97, AC97_3D_CONTROL, 0x0000);
 	return 0;
@@ -909,13 +906,13 @@ static int patch_sigmatel_stac9708_3d(struct snd_ac97 * ac97)
 	err = snd_ctl_add(ac97->bus->card, kctl);
 	if (err < 0)
 		return err;
-	strcpy(kctl->id.name, "3D Control Sigmatel - Depth");
+	strscpy(kctl->id.name, "3D Control Sigmatel - Depth");
 	kctl->private_value = AC97_SINGLE_VALUE(AC97_3D_CONTROL, 0, 3, 0);
 	kctl = snd_ac97_cnew(&snd_ac97_controls_3d[0], ac97);
 	err = snd_ctl_add(ac97->bus->card, kctl);
 	if (err < 0)
 		return err;
-	strcpy(kctl->id.name, "3D Control Sigmatel - Rear Depth");
+	strscpy(kctl->id.name, "3D Control Sigmatel - Rear Depth");
 	kctl->private_value = AC97_SINGLE_VALUE(AC97_3D_CONTROL, 2, 3, 0);
 	snd_ac97_write_cache(ac97, AC97_3D_CONTROL, 0x0000);
 	return 0;

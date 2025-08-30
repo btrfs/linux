@@ -926,6 +926,87 @@ static const struct st_sensor_settings st_accel_sensors_settings[] = {
 		.bootime = 2,
 	},
 	{
+		.wai = 0x43,
+		.wai_addr = ST_SENSORS_DEFAULT_WAI_ADDRESS,
+		.sensors_supported = {
+			[0] = LIS2DS12_ACCEL_DEV_NAME,
+		},
+		.ch = (struct iio_chan_spec *)st_accel_16bit_channels,
+		.odr = {
+			.addr = 0x20,
+			.mask = 0xf0,
+			.odr_avl = {
+				{ .hz = 10, .value = 0x01, },
+				{ .hz = 50, .value = 0x02, },
+				{ .hz = 100, .value = 0x03, },
+				{ .hz = 200, .value = 0x04, },
+				{ .hz = 400, .value = 0x05, },
+				{ .hz = 800, .value = 0x06, },
+			},
+		},
+		.pw = {
+			.addr = 0x20,
+			.mask = 0xf0,
+			.value_off = ST_SENSORS_DEFAULT_POWER_OFF_VALUE,
+		},
+		.enable_axis = {
+			.addr = ST_SENSORS_DEFAULT_AXIS_ADDR,
+			.mask = ST_SENSORS_DEFAULT_AXIS_MASK,
+		},
+		.fs = {
+			.addr = 0x20,
+			.mask = 0x0c,
+			.fs_avl = {
+				[0] = {
+					.num = ST_ACCEL_FS_AVL_2G,
+					.value = 0x00,
+					.gain = IIO_G_TO_M_S_2(61),
+				},
+				[1] = {
+					.num = ST_ACCEL_FS_AVL_4G,
+					.value = 0x02,
+					.gain = IIO_G_TO_M_S_2(122),
+				},
+				[2] = {
+					.num = ST_ACCEL_FS_AVL_8G,
+					.value = 0x03,
+					.gain = IIO_G_TO_M_S_2(244),
+				},
+				[3] = {
+					.num = ST_ACCEL_FS_AVL_16G,
+					.value = 0x01,
+					.gain = IIO_G_TO_M_S_2(488),
+				},
+			},
+		},
+		.bdu = {
+			.addr = 0x20,
+			.mask = 0x01,
+		},
+		.drdy_irq = {
+			.int1 = {
+				.addr = 0x23,
+				.mask = 0x01,
+			},
+			.int2 = {
+				.addr = 0x24,
+				.mask = 0x01,
+			},
+			.addr_ihl = 0x22,
+			.mask_ihl = 0x02,
+			.stat_drdy = {
+				.addr = ST_SENSORS_DEFAULT_STAT_ADDR,
+				.mask = 0x01,
+			},
+		},
+		.sim = {
+			.addr = 0x21,
+			.value = BIT(0),
+		},
+		.multi_read_bit = true,
+		.bootime = 2,
+	},
+	{
 		.wai = 0x41,
 		.wai_addr = ST_SENSORS_DEFAULT_WAI_ADDRESS,
 		.sensors_supported = {
@@ -1272,6 +1353,7 @@ static int apply_acpi_orientation(struct iio_dev *indio_dev)
 	union acpi_object *ont;
 	union acpi_object *elements;
 	acpi_status status;
+	struct device *parent = indio_dev->dev.parent;
 	int ret = -EINVAL;
 	unsigned int val;
 	int i, j;
@@ -1290,7 +1372,7 @@ static int apply_acpi_orientation(struct iio_dev *indio_dev)
 	};
 
 
-	adev = ACPI_COMPANION(indio_dev->dev.parent);
+	adev = ACPI_COMPANION(parent);
 	if (!adev)
 		return -ENXIO;
 
@@ -1299,8 +1381,7 @@ static int apply_acpi_orientation(struct iio_dev *indio_dev)
 	if (status == AE_NOT_FOUND) {
 		return -ENXIO;
 	} else if (ACPI_FAILURE(status)) {
-		dev_warn(&indio_dev->dev, "failed to execute _ONT: %d\n",
-			 status);
+		dev_warn(parent, "failed to execute _ONT: %d\n", status);
 		return status;
 	}
 
@@ -1376,12 +1457,12 @@ static int apply_acpi_orientation(struct iio_dev *indio_dev)
 	}
 
 	ret = 0;
-	dev_info(&indio_dev->dev, "computed mount matrix from ACPI\n");
+	dev_info(parent, "computed mount matrix from ACPI\n");
 
 out:
 	kfree(buffer.pointer);
 	if (ret)
-		dev_dbg(&indio_dev->dev,
+		dev_dbg(parent,
 			"failed to apply ACPI orientation data: %d\n", ret);
 
 	return ret;
@@ -1409,7 +1490,7 @@ const struct st_sensor_settings *st_accel_get_settings(const char *name)
 
 	return &st_accel_sensors_settings[index];
 }
-EXPORT_SYMBOL_NS(st_accel_get_settings, IIO_ST_SENSORS);
+EXPORT_SYMBOL_NS(st_accel_get_settings, "IIO_ST_SENSORS");
 
 int st_accel_common_probe(struct iio_dev *indio_dev)
 {
@@ -1463,9 +1544,9 @@ int st_accel_common_probe(struct iio_dev *indio_dev)
 
 	return devm_iio_device_register(parent, indio_dev);
 }
-EXPORT_SYMBOL_NS(st_accel_common_probe, IIO_ST_SENSORS);
+EXPORT_SYMBOL_NS(st_accel_common_probe, "IIO_ST_SENSORS");
 
 MODULE_AUTHOR("Denis Ciocca <denis.ciocca@st.com>");
 MODULE_DESCRIPTION("STMicroelectronics accelerometers driver");
 MODULE_LICENSE("GPL v2");
-MODULE_IMPORT_NS(IIO_ST_SENSORS);
+MODULE_IMPORT_NS("IIO_ST_SENSORS");

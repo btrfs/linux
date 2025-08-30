@@ -148,6 +148,9 @@ static int crypto_cbc_create(struct crypto_template *tmpl, struct rtattr **tb)
 	if (!is_power_of_2(inst->alg.co.base.cra_blocksize))
 		goto out_free_inst;
 
+	if (inst->alg.co.statesize)
+		goto out_free_inst;
+
 	inst->alg.encrypt = crypto_cbc_encrypt;
 	inst->alg.decrypt = crypto_cbc_decrypt;
 
@@ -176,7 +179,7 @@ static void __exit crypto_cbc_module_exit(void)
 	crypto_unregister_template(&crypto_cbc_tmpl);
 }
 
-subsys_initcall(crypto_cbc_module_init);
+module_init(crypto_cbc_module_init);
 module_exit(crypto_cbc_module_exit);
 
 MODULE_LICENSE("GPL");

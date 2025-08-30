@@ -209,12 +209,17 @@ Struct Resources
 ::
 
 	%pr	[mem 0x60000000-0x6fffffff flags 0x2200] or
+		[mem 0x60000000 flags 0x2200] or
 		[mem 0x0000000060000000-0x000000006fffffff flags 0x2200]
+		[mem 0x0000000060000000 flags 0x2200]
 	%pR	[mem 0x60000000-0x6fffffff pref] or
+		[mem 0x60000000 pref] or
 		[mem 0x0000000060000000-0x000000006fffffff pref]
+		[mem 0x0000000060000000 pref]
 
 For printing struct resources. The ``R`` and ``r`` specifiers result in a
-printed resource with (R) or without (r) a decoded flags member.
+printed resource with (R) or without (r) a decoded flags member.  If start is
+equal to end only print the start value.
 
 Passed by reference.
 
@@ -228,6 +233,19 @@ Physical address types phys_addr_t
 For printing a phys_addr_t type (and its derivatives, such as
 resource_size_t) which can vary based on build options, regardless of the
 width of the CPU data path.
+
+Passed by reference.
+
+Struct Range
+------------
+
+::
+
+	%pra    [range 0x0000000060000000-0x000000006fffffff] or
+		[range 0x0000000060000000]
+
+For printing struct range.  struct range holds an arbitrary range of u64
+values.  If start is equal to end only print the start value.
 
 Passed by reference.
 
@@ -553,9 +571,8 @@ struct clk
 ::
 
 	%pC	pll1
-	%pCn	pll1
 
-For printing struct clk structures. %pC and %pCn print the name of the clock
+For printing struct clk structures. %pC prints the name of the clock
 (Common Clock Framework) or a unique 32-bit ID (legacy clock framework).
 
 Passed by reference.
@@ -576,13 +593,12 @@ The field width is passed by value, the bitmap is passed by reference.
 Helper macros cpumask_pr_args() and nodemask_pr_args() are available to ease
 printing cpumask and nodemask.
 
-Flags bitfields such as page flags, page_type, gfp_flags
+Flags bitfields such as page flags and gfp_flags
 --------------------------------------------------------
 
 ::
 
 	%pGp	0x17ffffc0002036(referenced|uptodate|lru|active|private|node=0|zone=2|lastcpupid=0x1fffff)
-	%pGt	0xffffff7f(buddy)
 	%pGg	GFP_USER|GFP_DMA32|GFP_NOWARN
 	%pGv	read|exec|mayread|maywrite|mayexec|denywrite
 
@@ -591,7 +607,6 @@ would construct the value. The type of flags is given by the third
 character. Currently supported are:
 
         - p - [p]age flags, expects value of type (``unsigned long *``)
-        - t - page [t]ype, expects value of type (``unsigned int *``)
         - v - [v]ma_flags, expects value of type (``unsigned long *``)
         - g - [g]fp_flags, expects value of type (``gfp_t *``)
 
@@ -632,6 +647,38 @@ Examples::
 	%p4cc	Y10  little-endian (0x20303159)
 	%p4cc	NV12 big-endian (0xb231564e)
 
+Generic FourCC code
+-------------------
+
+::
+	%p4c[h[R]lb]	gP00 (0x67503030)
+
+Print a generic FourCC code, as both ASCII characters and its numerical
+value as hexadecimal.
+
+The generic FourCC code is always printed in the big-endian format,
+the most significant byte first. This is the opposite of V4L/DRM FourCCs.
+
+The additional ``h``, ``hR``, ``l``, and ``b`` specifiers define what
+endianness is used to load the stored bytes. The data might be interpreted
+using the host, reversed host byte order, little-endian, or big-endian.
+
+Passed by reference.
+
+Examples for a little-endian machine, given &(u32)0x67503030::
+
+	%p4ch	gP00 (0x67503030)
+	%p4chR	00Pg (0x30305067)
+	%p4cl	gP00 (0x67503030)
+	%p4cb	00Pg (0x30305067)
+
+Examples for a big-endian machine, given &(u32)0x67503030::
+
+	%p4ch	gP00 (0x67503030)
+	%p4chR	00Pg (0x30305067)
+	%p4cl	00Pg (0x30305067)
+	%p4cb	gP00 (0x67503030)
+
 Rust
 ----
 
@@ -645,7 +692,7 @@ Do *not* use it from C.
 Thanks
 ======
 
-If you add other %p extensions, please extend <lib/test_printf.c> with
-one or more test cases, if at all feasible.
+If you add other %p extensions, please extend <lib/tests/printf_kunit.c>
+with one or more test cases, if at all feasible.
 
 Thank you for your cooperation and attention.

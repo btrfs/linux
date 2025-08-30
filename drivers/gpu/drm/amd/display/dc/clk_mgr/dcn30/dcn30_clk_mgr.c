@@ -30,6 +30,7 @@
 #include "dce100/dce_clk_mgr.h"
 #include "dcn30/dcn30_clk_mgr.h"
 #include "dml/dcn30/dcn30_fpu.h"
+#include "dcn30/dcn30m_clk_mgr.h"
 #include "reg_helper.h"
 #include "core_types.h"
 #include "dm_helpers.h"
@@ -474,7 +475,7 @@ static void dcn30_notify_link_rate_change(struct clk_mgr *clk_mgr_base, struct d
 
 	clk_mgr->cur_phyclk_req_table[link->link_index] = link->cur_link_settings.link_rate * LINK_RATE_REF_FREQ_IN_KHZ;
 
-	for (i = 0; i < MAX_PIPES * 2; i++) {
+	for (i = 0; i < MAX_LINKS; i++) {
 		if (clk_mgr->cur_phyclk_req_table[i] > max_phyclk_req)
 			max_phyclk_req = clk_mgr->cur_phyclk_req_table[i];
 	}
@@ -498,7 +499,8 @@ static struct clk_mgr_funcs dcn3_funcs = {
 		.are_clock_states_equal = dcn3_are_clock_states_equal,
 		.enable_pme_wa = dcn3_enable_pme_wa,
 		.notify_link_rate_change = dcn30_notify_link_rate_change,
-		.is_smu_present = dcn3_is_smu_present
+		.is_smu_present = dcn3_is_smu_present,
+		.set_smartmux_switch = dcn30m_set_smartmux_switch
 };
 
 static void dcn3_init_clocks_fpga(struct clk_mgr *clk_mgr)
@@ -560,11 +562,19 @@ void dcn3_clk_mgr_construct(
 	dce_clock_read_ss_info(clk_mgr);
 
 	clk_mgr->base.bw_params = kzalloc(sizeof(*clk_mgr->base.bw_params), GFP_KERNEL);
+	if (!clk_mgr->base.bw_params) {
+		BREAK_TO_DEBUGGER();
+		return;
+	}
 
 	/* need physical address of table to give to PMFW */
 	clk_mgr->wm_range_table = dm_helpers_allocate_gpu_mem(clk_mgr->base.ctx,
 			DC_MEM_ALLOC_TYPE_GART, sizeof(WatermarksExternal_t),
 			&clk_mgr->wm_range_table_addr);
+	if (!clk_mgr->wm_range_table) {
+		BREAK_TO_DEBUGGER();
+		return;
+	}
 }
 
 void dcn3_clk_mgr_destroy(struct clk_mgr_internal *clk_mgr)

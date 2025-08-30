@@ -863,7 +863,7 @@ static int snd_sonicvibes_pcm(struct sonicvibes *sonic, int device)
 
 	pcm->private_data = sonic;
 	pcm->info_flags = 0;
-	strcpy(pcm->name, "S3 SonicVibes");
+	strscpy(pcm->name, "S3 SonicVibes");
 	sonic->pcm = pcm;
 
 	snd_pcm_set_managed_buffer_all(pcm, SNDRV_DMA_TYPE_DEV,
@@ -1091,7 +1091,7 @@ static int snd_sonicvibes_mixer(struct sonicvibes *sonic)
 	if (snd_BUG_ON(!sonic || !sonic->card))
 		return -EINVAL;
 	card = sonic->card;
-	strcpy(card->mixername, "S3 SonicVibes");
+	strscpy(card->mixername, "S3 SonicVibes");
 
 	for (idx = 0; idx < ARRAY_SIZE(snd_sonicvibes_controls); idx++) {
 		kctl = snd_ctl_new1(&snd_sonicvibes_controls[idx], sonic);
@@ -1118,7 +1118,7 @@ static void snd_sonicvibes_proc_read(struct snd_info_entry *entry,
 
 	tmp = sonic->srs_space & 0x0f;
 	snd_iprintf(buffer, "SRS 3D           : %s\n",
-		    sonic->srs_space & 0x80 ? "off" : "on");
+		    str_off_on(sonic->srs_space & 0x80));
 	snd_iprintf(buffer, "SRS Space        : %s\n",
 		    tmp == 0x00 ? "100%" :
 		    tmp == 0x01 ? "75%" :
@@ -1135,9 +1135,9 @@ static void snd_sonicvibes_proc_read(struct snd_info_entry *entry,
 		    tmp == 0x00 ? "on-board ROM" :
 		    tmp == 0x01 ? "PCI bus" : "on-board ROM + PCI bus");
 	tmp = sonic->mpu_switch;
-	snd_iprintf(buffer, "Onboard synth    : %s\n", tmp & 0x01 ? "on" : "off");
-	snd_iprintf(buffer, "Ext. Rx to synth : %s\n", tmp & 0x02 ? "on" : "off");
-	snd_iprintf(buffer, "MIDI to ext. Tx  : %s\n", tmp & 0x04 ? "on" : "off");
+	snd_iprintf(buffer, "Onboard synth    : %s\n", str_on_off(tmp & 0x01));
+	snd_iprintf(buffer, "Ext. Rx to synth : %s\n", str_on_off(tmp & 0x02));
+	snd_iprintf(buffer, "MIDI to ext. Tx  : %s\n", str_on_off(tmp & 0x04));
 }
 
 static void snd_sonicvibes_proc_init(struct sonicvibes *sonic)
@@ -1227,7 +1227,7 @@ static int snd_sonicvibes_create(struct snd_card *card,
 	sonic->pci = pci;
 	sonic->irq = -1;
 
-	err = pci_request_regions(pci, "S3 SonicVibes");
+	err = pcim_request_all_regions(pci, "S3 SonicVibes");
 	if (err < 0)
 		return err;
 
@@ -1415,8 +1415,8 @@ static int __snd_sonic_probe(struct pci_dev *pci,
 	if (err < 0)
 		return err;
 
-	strcpy(card->driver, "SonicVibes");
-	strcpy(card->shortname, "S3 SonicVibes");
+	strscpy(card->driver, "SonicVibes");
+	strscpy(card->shortname, "S3 SonicVibes");
 	sprintf(card->longname, "%s rev %i at 0x%llx, irq %i",
 		card->shortname,
 		sonic->revision,

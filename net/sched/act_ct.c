@@ -41,21 +41,26 @@ static struct workqueue_struct *act_ct_wq;
 static struct rhashtable zones_ht;
 static DEFINE_MUTEX(zones_mutex);
 
+struct zones_ht_key {
+	struct net *net;
+	u16 zone;
+};
+
 struct tcf_ct_flow_table {
 	struct rhash_head node; /* In zones tables */
 
 	struct rcu_work rwork;
 	struct nf_flowtable nf_ft;
 	refcount_t ref;
-	u16 zone;
+	struct zones_ht_key key;
 
 	bool dying;
 };
 
 static const struct rhashtable_params zones_params = {
 	.head_offset = offsetof(struct tcf_ct_flow_table, node),
-	.key_offset = offsetof(struct tcf_ct_flow_table, zone),
-	.key_len = sizeof_field(struct tcf_ct_flow_table, zone),
+	.key_offset = offsetof(struct tcf_ct_flow_table, key),
+	.key_len = offsetofend(struct zones_ht_key, zone),
 	.automatic_shrinking = true,
 };
 
@@ -316,11 +321,12 @@ static struct nf_flowtable_type flowtable_ct = {
 
 static int tcf_ct_flow_table_get(struct net *net, struct tcf_ct_params *params)
 {
+	struct zones_ht_key key = { .net = net, .zone = params->zone };
 	struct tcf_ct_flow_table *ct_ft;
 	int err = -ENOMEM;
 
 	mutex_lock(&zones_mutex);
-	ct_ft = rhashtable_lookup_fast(&zones_ht, &params->zone, zones_params);
+	ct_ft = rhashtable_lookup_fast(&zones_ht, &key, zones_params);
 	if (ct_ft && refcount_inc_not_zero(&ct_ft->ref))
 		goto out_unlock;
 
@@ -329,7 +335,7 @@ static int tcf_ct_flow_table_get(struct net *net, struct tcf_ct_params *params)
 		goto err_alloc;
 	refcount_set(&ct_ft->ref, 1);
 
-	ct_ft->zone = params->zone;
+	ct_ft->key = key;
 	err = rhashtable_insert_fast(&zones_ht, &ct_ft->node, zones_params);
 	if (err)
 		goto err_insert;
@@ -938,6 +944,8 @@ static int tcf_ct_act_nat(struct sk_buff *skb,
 		action |= BIT(NF_NAT_MANIP_DST);
 
 	err = nf_ct_nat(skb, ct, ctinfo, &action, range, commit);
+	if (err != NF_ACCEPT)
+		return err & NF_VERDICT_MASK;
 
 	if (action & BIT(NF_NAT_MANIP_SRC))
 		tc_skb_cb(skb)->post_ct_snat = 1;
@@ -969,7 +977,7 @@ TC_INDIRECT_SCOPE int tcf_ct_act(struct sk_buff *skb, const struct tc_action *a,
 
 	p = rcu_dereference_bh(c->params);
 
-	retval = READ_ONCE(c->tcf_action);
+	retval = p->action;
 	commit = p->ct_action & TCA_CT_ACT_COMMIT;
 	clear = p->ct_action & TCA_CT_ACT_CLEAR;
 	tmpl = p->tmpl;
@@ -1029,7 +1037,7 @@ TC_INDIRECT_SCOPE int tcf_ct_act(struct sk_buff *skb, const struct tc_action *a,
 		state.pf = family;
 		err = nf_conntrack_in(skb, &state);
 		if (err != NF_ACCEPT)
-			goto out_push;
+			goto nf_error;
 	}
 
 do_nat:
@@ -1041,7 +1049,7 @@ do_nat:
 
 	err = tcf_ct_act_nat(skb, ct, ctinfo, p->ct_action, &p->range, commit);
 	if (err != NF_ACCEPT)
-		goto drop;
+		goto nf_error;
 
 	if (!nf_ct_is_confirmed(ct) && commit && p->helper && !nfct_help(ct)) {
 		err = __nf_ct_try_assign_helper(ct, p->tmpl, GFP_ATOMIC);
@@ -1055,8 +1063,9 @@ do_nat:
 	}
 
 	if (nf_ct_is_confirmed(ct) ? ((!cached && !skip_add) || add_helper) : commit) {
-		if (nf_ct_helper(skb, ct, ctinfo, family) != NF_ACCEPT)
-			goto drop;
+		err = nf_ct_helper(skb, ct, ctinfo, family);
+		if (err != NF_ACCEPT)
+			goto nf_error;
 	}
 
 	if (commit) {
@@ -1069,8 +1078,17 @@ do_nat:
 		/* This will take care of sending queued events
 		 * even if the connection is already confirmed.
 		 */
-		if (nf_conntrack_confirm(skb) != NF_ACCEPT)
-			goto drop;
+		err = nf_conntrack_confirm(skb);
+		if (err != NF_ACCEPT)
+			goto nf_error;
+
+		/* The ct may be dropped if a clash has been resolved,
+		 * so it's necessary to retrieve it from skb again to
+		 * prevent UAF.
+		 */
+		ct = nf_ct_get(skb, &ctinfo);
+		if (!ct)
+			skip_add = true;
 	}
 
 	if (!skip_add)
@@ -1094,6 +1112,21 @@ out_frag:
 drop:
 	tcf_action_inc_drop_qstats(&c->common);
 	return TC_ACT_SHOT;
+
+nf_error:
+	/* some verdicts store extra data in upper bits, such
+	 * as errno or queue number.
+	 */
+	switch (err & NF_VERDICT_MASK) {
+	case NF_DROP:
+		goto drop;
+	case NF_STOLEN:
+		tcf_action_inc_drop_qstats(&c->common);
+		return TC_ACT_CONSUMED;
+	default:
+		DEBUG_NET_WARN_ON_ONCE(1);
+		goto drop;
+	}
 }
 
 static const struct nla_policy ct_policy[TCA_CT_MAX + 1] = {
@@ -1150,9 +1183,8 @@ static int tcf_ct_fill_params_nat(struct tcf_ct_params *p,
 		range->min_addr.ip =
 			nla_get_in_addr(tb[TCA_CT_NAT_IPV4_MIN]);
 
-		range->max_addr.ip = max_attr ?
-				     nla_get_in_addr(max_attr) :
-				     range->min_addr.ip;
+		range->max_addr.ip =
+			nla_get_in_addr_default(max_attr, range->min_addr.ip);
 	} else if (tb[TCA_CT_NAT_IPV6_MIN]) {
 		struct nlattr *max_attr = tb[TCA_CT_NAT_IPV6_MAX];
 
@@ -1281,8 +1313,9 @@ static int tcf_ct_fill_params(struct net *net,
 			err = -EINVAL;
 			goto err;
 		}
-		family = tb[TCA_CT_HELPER_FAMILY] ? nla_get_u8(tb[TCA_CT_HELPER_FAMILY]) : AF_INET;
-		proto = tb[TCA_CT_HELPER_PROTO] ? nla_get_u8(tb[TCA_CT_HELPER_PROTO]) : IPPROTO_TCP;
+		family = nla_get_u8_default(tb[TCA_CT_HELPER_FAMILY], AF_INET);
+		proto = nla_get_u8_default(tb[TCA_CT_HELPER_PROTO],
+					   IPPROTO_TCP);
 		err = nf_ct_add_helper(tmpl, name, family, proto,
 				       p->ct_action & TCA_CT_ACT_NAT, &p->helper);
 		if (err) {
@@ -1376,6 +1409,7 @@ static int tcf_ct_init(struct net *net, struct nlattr *nla,
 	if (err)
 		goto cleanup;
 
+	params->action = parm->action;
 	spin_lock_bh(&c->tcf_lock);
 	goto_ch = tcf_action_set_ctrlact(*a, parm->action, goto_ch);
 	params = rcu_replace_pointer(c->params, params,
@@ -1409,8 +1443,8 @@ static void tcf_ct_cleanup(struct tc_action *a)
 }
 
 static int tcf_ct_dump_key_val(struct sk_buff *skb,
-			       void *val, int val_type,
-			       void *mask, int mask_type,
+			       const void *val, int val_type,
+			       const void *mask, int mask_type,
 			       int len)
 {
 	int err;
@@ -1431,9 +1465,9 @@ static int tcf_ct_dump_key_val(struct sk_buff *skb,
 	return 0;
 }
 
-static int tcf_ct_dump_nat(struct sk_buff *skb, struct tcf_ct_params *p)
+static int tcf_ct_dump_nat(struct sk_buff *skb, const struct tcf_ct_params *p)
 {
-	struct nf_nat_range2 *range = &p->range;
+	const struct nf_nat_range2 *range = &p->range;
 
 	if (!(p->ct_action & TCA_CT_ACT_NAT))
 		return 0;
@@ -1471,7 +1505,8 @@ static int tcf_ct_dump_nat(struct sk_buff *skb, struct tcf_ct_params *p)
 	return 0;
 }
 
-static int tcf_ct_dump_helper(struct sk_buff *skb, struct nf_conntrack_helper *helper)
+static int tcf_ct_dump_helper(struct sk_buff *skb,
+			      const struct nf_conntrack_helper *helper)
 {
 	if (!helper)
 		return 0;
@@ -1488,9 +1523,8 @@ static inline int tcf_ct_dump(struct sk_buff *skb, struct tc_action *a,
 			      int bind, int ref)
 {
 	unsigned char *b = skb_tail_pointer(skb);
-	struct tcf_ct *c = to_ct(a);
-	struct tcf_ct_params *p;
-
+	const struct tcf_ct *c = to_ct(a);
+	const struct tcf_ct_params *p;
 	struct tc_ct opt = {
 		.index   = c->tcf_index,
 		.refcnt  = refcount_read(&c->tcf_refcnt) - ref,
@@ -1498,10 +1532,9 @@ static inline int tcf_ct_dump(struct sk_buff *skb, struct tc_action *a,
 	};
 	struct tcf_t t;
 
-	spin_lock_bh(&c->tcf_lock);
-	p = rcu_dereference_protected(c->params,
-				      lockdep_is_held(&c->tcf_lock));
-	opt.action = c->tcf_action;
+	rcu_read_lock();
+	p = rcu_dereference(c->params);
+	opt.action = p->action;
 
 	if (tcf_ct_dump_key_val(skb,
 				&p->ct_action, TCA_CT_ACTION,
@@ -1546,11 +1579,11 @@ skip_dump:
 	tcf_tm_dump(&t, &c->tcf_tm);
 	if (nla_put_64bit(skb, TCA_CT_TM, sizeof(t), &t, TCA_CT_PAD))
 		goto nla_put_failure;
-	spin_unlock_bh(&c->tcf_lock);
+	rcu_read_unlock();
 
 	return skb->len;
 nla_put_failure:
-	spin_unlock_bh(&c->tcf_lock);
+	rcu_read_unlock();
 	nlmsg_trim(skb, b);
 	return -1;
 }
@@ -1600,6 +1633,7 @@ static struct tc_action_ops act_ct_ops = {
 	.offload_act_setup =	tcf_ct_offload_act_setup,
 	.size		=	sizeof(struct tcf_ct),
 };
+MODULE_ALIAS_NET_ACT("ct");
 
 static __net_init int ct_init_net(struct net *net)
 {

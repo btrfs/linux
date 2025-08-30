@@ -151,7 +151,7 @@ int hclge_mac_mdio_config(struct hclge_dev *hdev)
 
 	mdio_bus->parent = &hdev->pdev->dev;
 	mdio_bus->priv = hdev;
-	mdio_bus->phy_mask = ~(1 << mac->phy_addr);
+	mdio_bus->phy_mask = ~(1U << mac->phy_addr);
 	ret = mdiobus_register(mdio_bus);
 	if (ret) {
 		dev_err(mdio_bus->parent,
@@ -190,6 +190,9 @@ static void hclge_mac_adjust_link(struct net_device *netdev)
 	ret = hclge_cfg_mac_speed_dup(hdev, speed, duplex, 0);
 	if (ret)
 		netdev_err(netdev, "failed to adjust link.\n");
+
+	hdev->hw.mac.req_speed = (u32)speed;
+	hdev->hw.mac.req_duplex = (u8)duplex;
 
 	ret = hclge_cfg_flowctrl(hdev);
 	if (ret)
@@ -255,7 +258,7 @@ void hclge_mac_start_phy(struct hclge_dev *hdev)
 	if (!phydev)
 		return;
 
-	phy_loopback(phydev, false);
+	phy_loopback(phydev, false, 0);
 
 	phy_start(phydev);
 }

@@ -88,8 +88,14 @@ struct soc15_ras_field_entry {
 };
 
 #define SOC15_REG_ENTRY(ip, inst, reg)	ip##_HWIP, inst, reg##_BASE_IDX, reg
+#define SOC15_REG_ENTRY_STR(ip, inst, reg) \
+	{ ip##_HWIP, inst, reg##_BASE_IDX, reg, #reg }
 
 #define SOC15_REG_ENTRY_OFFSET(entry)	(adev->reg_offset[entry.hwip][entry.inst][entry.seg] + entry.reg_offset)
+
+/* Over ride the instance id */
+#define SOC15_REG_ENTRY_OFFSET_INST(entry, inst) \
+	(adev->reg_offset[entry.hwip][inst][entry.seg] + entry.reg_offset)
 
 #define SOC15_REG_GOLDEN_VALUE(ip, inst, reg, and_mask, or_mask) \
 	{ ip##_HWIP, inst, reg##_BASE_IDX, reg, and_mask, or_mask }
@@ -112,7 +118,6 @@ int vega10_reg_base_init(struct amdgpu_device *adev);
 int vega20_reg_base_init(struct amdgpu_device *adev);
 int arct_reg_base_init(struct amdgpu_device *adev);
 int aldebaran_reg_base_init(struct amdgpu_device *adev);
-void aqua_vanjaram_ip_map_init(struct amdgpu_device *adev);
 u64 aqua_vanjaram_encode_ext_smn_addressing(int ext_id);
 int aqua_vanjaram_init_soc_config(struct amdgpu_device *adev);
 ssize_t aqua_vanjaram_get_reg_state(struct amdgpu_device *adev,
