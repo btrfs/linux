@@ -208,9 +208,6 @@ static const struct {
 };
 #define UART_INFO_NUM	ARRAY_SIZE(Gpci_uart_info)
 
-
-/* driver_data correspond to the lines in the structure above
-   see also ISA probe function before you change something */
 static const struct pci_device_id mxser_pcibrds[] = {
 	{ PCI_DEVICE_DATA(MOXA, C168,		8) },
 	{ PCI_DEVICE_DATA(MOXA, C104,		4) },
@@ -288,7 +285,7 @@ struct mxser_board {
 	enum mxser_must_hwid must_hwid;
 	speed_t max_baud;
 
-	struct mxser_port ports[] __counted_by(nports);
+	struct mxser_port ports[] /* __counted_by(nports) */;
 };
 
 static DECLARE_BITMAP(mxser_boards, MXSER_BOARDS);
@@ -986,7 +983,7 @@ static int mxser_get_serial_info(struct tty_struct *tty,
 	ss->baud_base = MXSER_BAUD_BASE;
 	ss->close_delay = close_delay;
 	ss->closing_wait = closing_wait;
-	ss->custom_divisor = MXSER_CUSTOM_DIVISOR,
+	ss->custom_divisor = MXSER_CUSTOM_DIVISOR;
 	mutex_unlock(&port->mutex);
 	return 0;
 }
@@ -1773,8 +1770,6 @@ static void mxser_initbrd(struct mxser_board *brd, bool high_baud)
 
 		mxser_process_txrx_fifo(info);
 
-		info->port.close_delay = 5 * HZ / 10;
-		info->port.closing_wait = 30 * HZ;
 		spin_lock_init(&info->slock);
 
 		/* before set INT ISR, disable all int */
@@ -1817,7 +1812,7 @@ static int mxser_probe(struct pci_dev *pdev,
 
 	/* io address */
 	ioaddress = pci_resource_start(pdev, 2);
-	retval = pci_request_region(pdev, 2, "mxser(IO)");
+	retval = pcim_request_region(pdev, 2, "mxser(IO)");
 	if (retval)
 		goto err_zero;
 
@@ -1827,7 +1822,7 @@ static int mxser_probe(struct pci_dev *pdev,
 
 	/* vector */
 	ioaddress = pci_resource_start(pdev, 3);
-	retval = pci_request_region(pdev, 3, "mxser(vector)");
+	retval = pcim_request_region(pdev, 3, "mxser(vector)");
 	if (retval)
 		goto err_zero;
 	brd->vector = ioaddress;

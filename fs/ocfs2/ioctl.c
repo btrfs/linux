@@ -62,7 +62,7 @@ static inline int o2info_coherent(struct ocfs2_info_request *req)
 	return (!(req->ir_flags & OCFS2_INFO_FL_NON_COHERENT));
 }
 
-int ocfs2_fileattr_get(struct dentry *dentry, struct fileattr *fa)
+int ocfs2_fileattr_get(struct dentry *dentry, struct file_kattr *fa)
 {
 	struct inode *inode = d_inode(dentry);
 	unsigned int flags;
@@ -83,7 +83,7 @@ int ocfs2_fileattr_get(struct dentry *dentry, struct fileattr *fa)
 }
 
 int ocfs2_fileattr_set(struct mnt_idmap *idmap,
-		       struct dentry *dentry, struct fileattr *fa)
+		       struct dentry *dentry, struct file_kattr *fa)
 {
 	struct inode *inode = d_inode(dentry);
 	unsigned int flags = fa->flags;
@@ -125,6 +125,7 @@ int ocfs2_fileattr_set(struct mnt_idmap *idmap,
 
 	ocfs2_inode->ip_attr = flags;
 	ocfs2_set_inode_flags(inode);
+	inode_set_ctime_current(inode);
 
 	status = ocfs2_mark_inode_dirty(handle, inode, bh);
 	if (status < 0)
@@ -795,7 +796,7 @@ bail:
 /*
  * OCFS2_IOC_INFO handles an array of requests passed from userspace.
  *
- * ocfs2_info_handle() recevies a large info aggregation, grab and
+ * ocfs2_info_handle() receives a large info aggregation, grab and
  * validate the request count from header, then break it into small
  * pieces, later specific handlers can handle them one by one.
  *

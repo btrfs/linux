@@ -63,7 +63,7 @@ STATIC void
 xfs_icreate_item_release(
 	struct xfs_log_item	*lip)
 {
-	kmem_free(ICR_ITEM(lip)->ic_item.li_lv_shadow);
+	kvfree(ICR_ITEM(lip)->ic_item.li_lv_shadow);
 	kmem_cache_free(xfs_icreate_cache, ICR_ITEM(lip));
 }
 
@@ -158,7 +158,7 @@ xlog_recover_icreate_commit_pass2(
 	int				nbufs;
 	int				i;
 
-	icl = (struct xfs_icreate_log *)item->ri_buf[0].i_addr;
+	icl = (struct xfs_icreate_log *)item->ri_buf[0].iov_base;
 	if (icl->icl_type != XFS_LI_ICREATE) {
 		xfs_warn(log->l_mp, "xlog_recover_do_icreate_trans: bad type");
 		return -EINVAL;

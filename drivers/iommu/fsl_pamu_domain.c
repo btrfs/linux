@@ -64,7 +64,7 @@ static int update_liodn_stash(int liodn, struct fsl_dma_domain *dma_domain,
 	spin_lock_irqsave(&iommu_lock, flags);
 	ret = pamu_update_paace_stash(liodn, val);
 	if (ret) {
-		pr_debug("Failed to update SPAACE for liodn %d\n ", liodn);
+		pr_debug("Failed to update SPAACE for liodn %d\n", liodn);
 		spin_unlock_irqrestore(&iommu_lock, flags);
 		return ret;
 	}
@@ -416,14 +416,12 @@ static struct iommu_group *fsl_pamu_device_group(struct device *dev)
 
 static struct iommu_device *fsl_pamu_probe_device(struct device *dev)
 {
-	int len;
-
 	/*
 	 * uboot must fill the fsl,liodn for platform devices to be supported by
 	 * the iommu.
 	 */
 	if (!dev_is_pci(dev) &&
-	    !of_get_property(dev->of_node, "fsl,liodn", &len))
+	    !of_property_present(dev->of_node, "fsl,liodn"))
 		return ERR_PTR(-ENODEV);
 
 	return &pamu_iommu;

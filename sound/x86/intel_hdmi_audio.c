@@ -22,6 +22,7 @@
 #include <linux/pm_runtime.h>
 #include <linux/dma-mapping.h>
 #include <linux/delay.h>
+#include <linux/string.h>
 #include <sound/core.h>
 #include <sound/asoundef.h>
 #include <sound/pcm.h>
@@ -31,7 +32,7 @@
 #include <sound/jack.h>
 #include <drm/drm_edid.h>
 #include <drm/drm_eld.h>
-#include <drm/intel_lpe_audio.h>
+#include <drm/intel/intel_lpe_audio.h>
 #include "intel_hdmi_audio.h"
 
 #define INTEL_HDMI_AUDIO_SUSPEND_DELAY_MS  5000
@@ -1101,7 +1102,6 @@ static int had_pcm_open(struct snd_pcm_substream *substream)
 
 	return retval;
  error:
-	pm_runtime_mark_last_busy(intelhaddata->dev);
 	pm_runtime_put_autosuspend(intelhaddata->dev);
 	return retval;
 }
@@ -1126,7 +1126,6 @@ static int had_pcm_close(struct snd_pcm_substream *substream)
 	}
 	spin_unlock_irq(&intelhaddata->had_spinlock);
 
-	pm_runtime_mark_last_busy(intelhaddata->dev);
 	pm_runtime_put_autosuspend(intelhaddata->dev);
 	return 0;
 }
@@ -1588,7 +1587,6 @@ static void had_audio_wq(struct work_struct *work)
 	}
 
 	mutex_unlock(&ctx->mutex);
-	pm_runtime_mark_last_busy(ctx->dev);
 	pm_runtime_put_autosuspend(ctx->dev);
 }
 
@@ -1617,7 +1615,7 @@ static int had_create_jack(struct snd_intelhad *ctx,
  * PM callbacks
  */
 
-static int __maybe_unused hdmi_lpe_audio_suspend(struct device *dev)
+static int hdmi_lpe_audio_suspend(struct device *dev)
 {
 	struct snd_intelhad_card *card_ctx = dev_get_drvdata(dev);
 
@@ -1626,7 +1624,7 @@ static int __maybe_unused hdmi_lpe_audio_suspend(struct device *dev)
 	return 0;
 }
 
-static int __maybe_unused hdmi_lpe_audio_resume(struct device *dev)
+static int hdmi_lpe_audio_resume(struct device *dev)
 {
 	struct snd_intelhad_card *card_ctx = dev_get_drvdata(dev);
 
@@ -1698,9 +1696,9 @@ static int __hdmi_lpe_audio_probe(struct platform_device *pdev)
 	card_ctx = card->private_data;
 	card_ctx->dev = &pdev->dev;
 	card_ctx->card = card;
-	strcpy(card->driver, INTEL_HAD);
-	strcpy(card->shortname, "Intel HDMI/DP LPE Audio");
-	strcpy(card->longname, "Intel HDMI/DP LPE Audio");
+	strscpy(card->driver, INTEL_HAD);
+	strscpy(card->shortname, "Intel HDMI/DP LPE Audio");
+	strscpy(card->longname, "Intel HDMI/DP LPE Audio");
 
 	card_ctx->irq = -1;
 
@@ -1767,7 +1765,7 @@ static int __hdmi_lpe_audio_probe(struct platform_device *pdev)
 		/* setup private data which can be retrieved when required */
 		pcm->private_data = ctx;
 		pcm->info_flags = 0;
-		strscpy(pcm->name, card->shortname, strlen(card->shortname));
+		strscpy(pcm->name, card->shortname, sizeof(pcm->name));
 		/* setup the ops for playback */
 		snd_pcm_set_ops(pcm, SNDRV_PCM_STREAM_PLAYBACK, &had_pcm_ops);
 
@@ -1833,13 +1831,13 @@ static int hdmi_lpe_audio_probe(struct platform_device *pdev)
 }
 
 static const struct dev_pm_ops hdmi_lpe_audio_pm = {
-	SET_SYSTEM_SLEEP_PM_OPS(hdmi_lpe_audio_suspend, hdmi_lpe_audio_resume)
+	SYSTEM_SLEEP_PM_OPS(hdmi_lpe_audio_suspend, hdmi_lpe_audio_resume)
 };
 
 static struct platform_driver hdmi_lpe_audio_driver = {
 	.driver		= {
 		.name  = "hdmi-lpe-audio",
-		.pm = &hdmi_lpe_audio_pm,
+		.pm = pm_ptr(&hdmi_lpe_audio_pm),
 	},
 	.probe          = hdmi_lpe_audio_probe,
 };

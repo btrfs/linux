@@ -108,7 +108,7 @@ static int em_text_dump(struct sk_buff *skb, struct tcf_ematch *m)
 	struct text_match *tm = EM_TEXT_PRIV(m);
 	struct tcf_em_text conf;
 
-	strncpy(conf.algo, tm->config->ops->name, sizeof(conf.algo) - 1);
+	strscpy(conf.algo, tm->config->ops->name);
 	conf.from_offset = tm->from_offset;
 	conf.to_offset = tm->to_offset;
 	conf.from_layer = tm->from_layer;
@@ -147,6 +147,7 @@ static void __exit exit_em_text(void)
 	tcf_em_unregister(&em_text_ops);
 }
 
+MODULE_DESCRIPTION("ematch classifier for embedded text in skbs");
 MODULE_LICENSE("GPL");
 
 module_init(init_em_text);

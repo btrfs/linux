@@ -22,13 +22,6 @@ ifeq ($(CONFIG_ARM_VIRT_EXT),y)
 OBJS		+= hyp-stub.o
 endif
 
-GCOV_PROFILE		:= n
-KASAN_SANITIZE		:= n
-
-# Prevents link failures: __sanitizer_cov_trace_pc() is not linked in.
-KCOV_INSTRUMENT		:= n
-UBSAN_SANITIZE		:= n
-
 #
 # Architecture dependencies
 #
@@ -102,7 +95,8 @@ KBUILD_CFLAGS += -DDISABLE_BRANCH_PROFILING
 
 ccflags-y := -fpic $(call cc-option,-mno-single-pic-base,) -fno-builtin \
 	     -I$(srctree)/scripts/dtc/libfdt -fno-stack-protector \
-	     -I$(obj) $(DISABLE_ARM_SSP_PER_TASK_PLUGIN)
+	     $(DISABLE_KSTACK_ERASE) \
+	     -I$(obj)
 ccflags-remove-$(CONFIG_FUNCTION_TRACER) += -pg
 asflags-y := -DZIMAGE
 

@@ -14,7 +14,6 @@
 #include <linux/dmi.h>
 #include <linux/module.h>
 #include <linux/types.h>
-#include <linux/platform_device.h>
 #include <linux/interrupt.h>
 #include <linux/input.h>
 #include <linux/delay.h>
@@ -230,7 +229,7 @@ static int lis3lv02d_get_pwron_wait(struct lis3lv02d *lis3)
 			return 0;
 		}
 
-		dev_err(&lis3->pdev->dev, "Error unknown odrs-index: %d\n", odr_idx);
+		dev_err(&lis3->fdev->dev, "Error unknown odrs-index: %d\n", odr_idx);
 		return -ENXIO;
 	}
 
@@ -669,7 +668,6 @@ static int lis3lv02d_misc_fasync(int fd, struct file *file, int on)
 
 static const struct file_operations lis3lv02d_misc_fops = {
 	.owner   = THIS_MODULE,
-	.llseek  = no_llseek,
 	.read    = lis3lv02d_misc_read,
 	.open    = lis3lv02d_misc_open,
 	.release = lis3lv02d_misc_release,
@@ -695,7 +693,7 @@ int lis3lv02d_joystick_enable(struct lis3lv02d *lis3)
 	input_dev->phys       = DRIVER_NAME "/input0";
 	input_dev->id.bustype = BUS_HOST;
 	input_dev->id.vendor  = 0;
-	input_dev->dev.parent = &lis3->pdev->dev;
+	input_dev->dev.parent = &lis3->fdev->dev;
 
 	input_dev->open = lis3lv02d_joystick_open;
 	input_dev->close = lis3lv02d_joystick_close;
@@ -856,32 +854,27 @@ static DEVICE_ATTR(position, S_IRUGO, lis3lv02d_position_show, NULL);
 static DEVICE_ATTR(rate, S_IRUGO | S_IWUSR, lis3lv02d_rate_show,
 					    lis3lv02d_rate_set);
 
-static struct attribute *lis3lv02d_attributes[] = {
+static struct attribute *lis3lv02d_attrs[] = {
 	&dev_attr_selftest.attr,
 	&dev_attr_position.attr,
 	&dev_attr_rate.attr,
 	NULL
 };
-
-static const struct attribute_group lis3lv02d_attribute_group = {
-	.attrs = lis3lv02d_attributes
-};
-
+ATTRIBUTE_GROUPS(lis3lv02d);
 
 static int lis3lv02d_add_fs(struct lis3lv02d *lis3)
 {
-	lis3->pdev = platform_device_register_simple(DRIVER_NAME, -1, NULL, 0);
-	if (IS_ERR(lis3->pdev))
-		return PTR_ERR(lis3->pdev);
+	lis3->fdev = faux_device_create_with_groups(DRIVER_NAME, NULL, NULL, lis3lv02d_groups);
+	if (!lis3->fdev)
+		return -ENODEV;
 
-	platform_set_drvdata(lis3->pdev, lis3);
-	return sysfs_create_group(&lis3->pdev->dev.kobj, &lis3lv02d_attribute_group);
+	faux_device_set_drvdata(lis3->fdev, lis3);
+	return 0;
 }
 
 void lis3lv02d_remove_fs(struct lis3lv02d *lis3)
 {
-	sysfs_remove_group(&lis3->pdev->dev.kobj, &lis3lv02d_attribute_group);
-	platform_device_unregister(lis3->pdev);
+	faux_device_destroy(lis3->fdev);
 	if (lis3->pm_dev) {
 		/* Barrier after the sysfs remove */
 		pm_runtime_barrier(lis3->pm_dev);
@@ -1038,7 +1031,7 @@ int lis3lv02d_init_dt(struct lis3lv02d *lis3)
 		pdata->wakeup_flags |= LIS3_WAKEUP_Z_LO;
 	if (of_property_read_bool(np, "st,wakeup-z-hi"))
 		pdata->wakeup_flags |= LIS3_WAKEUP_Z_HI;
-	if (of_get_property(np, "st,wakeup-threshold", &val))
+	if (!of_property_read_u32(np, "st,wakeup-threshold", &val))
 		pdata->wakeup_thresh = val;
 
 	if (of_property_read_bool(np, "st,wakeup2-x-lo"))
@@ -1053,7 +1046,7 @@ int lis3lv02d_init_dt(struct lis3lv02d *lis3)
 		pdata->wakeup_flags2 |= LIS3_WAKEUP_Z_LO;
 	if (of_property_read_bool(np, "st,wakeup2-z-hi"))
 		pdata->wakeup_flags2 |= LIS3_WAKEUP_Z_HI;
-	if (of_get_property(np, "st,wakeup2-threshold", &val))
+	if (!of_property_read_u32(np, "st,wakeup2-threshold", &val))
 		pdata->wakeup_thresh2 = val;
 
 	if (!of_property_read_u32(np, "st,highpass-cutoff-hz", &val)) {

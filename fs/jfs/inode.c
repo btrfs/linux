@@ -145,9 +145,9 @@ void jfs_evict_inode(struct inode *inode)
 	if (!inode->i_nlink && !is_bad_inode(inode)) {
 		dquot_initialize(inode);
 
+		truncate_inode_pages_final(&inode->i_data);
 		if (JFS_IP(inode)->fileset == FILESYSTEM_I) {
 			struct inode *ipimap = JFS_SBI(inode->i_sb)->ipimap;
-			truncate_inode_pages_final(&inode->i_data);
 
 			if (test_cflag(COMMIT_Freewmap, inode))
 				jfs_free_zero_link(inode);
@@ -290,26 +290,28 @@ static void jfs_write_failed(struct address_space *mapping, loff_t to)
 	}
 }
 
-static int jfs_write_begin(struct file *file, struct address_space *mapping,
-				loff_t pos, unsigned len,
-				struct page **pagep, void **fsdata)
+static int jfs_write_begin(const struct kiocb *iocb,
+			   struct address_space *mapping,
+			   loff_t pos, unsigned len,
+			   struct folio **foliop, void **fsdata)
 {
 	int ret;
 
-	ret = block_write_begin(mapping, pos, len, pagep, jfs_get_block);
+	ret = block_write_begin(mapping, pos, len, foliop, jfs_get_block);
 	if (unlikely(ret))
 		jfs_write_failed(mapping, pos + len);
 
 	return ret;
 }
 
-static int jfs_write_end(struct file *file, struct address_space *mapping,
-		loff_t pos, unsigned len, unsigned copied, struct page *page,
-		void *fsdata)
+static int jfs_write_end(const struct kiocb *iocb,
+			 struct address_space *mapping,
+			 loff_t pos, unsigned len, unsigned copied,
+			 struct folio *folio, void *fsdata)
 {
 	int ret;
 
-	ret = generic_write_end(file, mapping, pos, len, copied, page, fsdata);
+	ret = generic_write_end(iocb, mapping, pos, len, copied, folio, fsdata);
 	if (ret < len)
 		jfs_write_failed(mapping, pos + len);
 	return ret;
@@ -369,7 +371,7 @@ void jfs_truncate_nolock(struct inode *ip, loff_t length)
 
 	ASSERT(length >= 0);
 
-	if (test_cflag(COMMIT_Nolink, ip)) {
+	if (test_cflag(COMMIT_Nolink, ip) || isReadOnly(ip)) {
 		xtTruncate(0, ip, length, COMMIT_WMAP);
 		return;
 	}

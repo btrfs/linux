@@ -7,6 +7,7 @@
 #include <linux/errno.h>
 #include <linux/minmax.h>
 #include <linux/tty.h>
+#include <linux/tty_buffer.h>
 #include <linux/tty_driver.h>
 #include <linux/tty_flip.h>
 #include <linux/timer.h>
@@ -498,8 +499,7 @@ static void flush_to_ldisc(struct work_struct *work)
 		if (!rcvd)
 			break;
 
-		if (need_resched())
-			cond_resched();
+		cond_resched();
 	}
 
 	mutex_unlock(&buf->lock);

@@ -5,6 +5,7 @@
  * Author: Dmitry Baryshkov <dmitry.baryshkov@linaro.org>
  */
 #include <linux/auxiliary_bus.h>
+#include <linux/export.h>
 #include <linux/module.h>
 #include <linux/of.h>
 
@@ -25,20 +26,18 @@ static void drm_aux_hpd_bridge_release(struct device *dev)
 	ida_free(&drm_aux_hpd_bridge_ida, adev->id);
 
 	of_node_put(adev->dev.platform_data);
+	of_node_put(adev->dev.of_node);
 
 	kfree(adev);
 }
 
-static void drm_aux_hpd_bridge_unregister_adev(void *_adev)
+static void drm_aux_hpd_bridge_free_adev(void *_adev)
 {
-	struct auxiliary_device *adev = _adev;
-
-	auxiliary_device_delete(adev);
-	auxiliary_device_uninit(adev);
+	auxiliary_device_uninit(_adev);
 }
 
 /**
- * drm_dp_hpd_bridge_register - Create a simple HPD DisplayPort bridge
+ * devm_drm_dp_hpd_bridge_alloc - allocate a HPD DisplayPort bridge
  * @parent: device instance providing this bridge
  * @np: device node pointer corresponding to this bridge instance
  *
@@ -46,11 +45,9 @@ static void drm_aux_hpd_bridge_unregister_adev(void *_adev)
  * DRM_MODE_CONNECTOR_DisplayPort, which terminates the bridge chain and is
  * able to send the HPD events.
  *
- * Return: device instance that will handle created bridge or an error code
- * encoded into the pointer.
+ * Return: bridge auxiliary device pointer or an error pointer
  */
-struct device *drm_dp_hpd_bridge_register(struct device *parent,
-					  struct device_node *np)
+struct auxiliary_device *devm_drm_dp_hpd_bridge_alloc(struct device *parent, struct device_node *np)
 {
 	struct auxiliary_device *adev;
 	int ret;
@@ -68,24 +65,69 @@ struct device *drm_dp_hpd_bridge_register(struct device *parent,
 	adev->id = ret;
 	adev->name = "dp_hpd_bridge";
 	adev->dev.parent = parent;
-	adev->dev.of_node = of_node_get(parent->of_node);
 	adev->dev.release = drm_aux_hpd_bridge_release;
 	adev->dev.platform_data = of_node_get(np);
 
+	device_set_of_node_from_dev(&adev->dev, parent);
+
 	ret = auxiliary_device_init(adev);
 	if (ret) {
+		of_node_put(adev->dev.platform_data);
+		of_node_put(adev->dev.of_node);
 		ida_free(&drm_aux_hpd_bridge_ida, adev->id);
 		kfree(adev);
 		return ERR_PTR(ret);
 	}
 
-	ret = auxiliary_device_add(adev);
-	if (ret) {
-		auxiliary_device_uninit(adev);
+	ret = devm_add_action_or_reset(parent, drm_aux_hpd_bridge_free_adev, adev);
+	if (ret)
 		return ERR_PTR(ret);
-	}
 
-	ret = devm_add_action_or_reset(parent, drm_aux_hpd_bridge_unregister_adev, adev);
+	return adev;
+}
+EXPORT_SYMBOL_GPL(devm_drm_dp_hpd_bridge_alloc);
+
+static void drm_aux_hpd_bridge_del_adev(void *_adev)
+{
+	auxiliary_device_delete(_adev);
+}
+
+/**
+ * devm_drm_dp_hpd_bridge_add - register a HDP DisplayPort bridge
+ * @dev: struct device to tie registration lifetime to
+ * @adev: bridge auxiliary device to be registered
+ *
+ * Returns: zero on success or a negative errno
+ */
+int devm_drm_dp_hpd_bridge_add(struct device *dev, struct auxiliary_device *adev)
+{
+	int ret;
+
+	ret = auxiliary_device_add(adev);
+	if (ret)
+		return ret;
+
+	return devm_add_action_or_reset(dev, drm_aux_hpd_bridge_del_adev, adev);
+}
+EXPORT_SYMBOL_GPL(devm_drm_dp_hpd_bridge_add);
+
+/**
+ * drm_dp_hpd_bridge_register - allocate and register a HDP DisplayPort bridge
+ * @parent: device instance providing this bridge
+ * @np: device node pointer corresponding to this bridge instance
+ *
+ * Return: device instance that will handle created bridge or an error pointer
+ */
+struct device *drm_dp_hpd_bridge_register(struct device *parent, struct device_node *np)
+{
+	struct auxiliary_device *adev;
+	int ret;
+
+	adev = devm_drm_dp_hpd_bridge_alloc(parent, np);
+	if (IS_ERR(adev))
+		return ERR_CAST(adev);
+
+	ret = devm_drm_dp_hpd_bridge_add(parent, adev);
 	if (ret)
 		return ERR_PTR(ret);
 
@@ -116,6 +158,7 @@ void drm_aux_hpd_bridge_notify(struct device *dev, enum drm_connector_status sta
 EXPORT_SYMBOL_GPL(drm_aux_hpd_bridge_notify);
 
 static int drm_aux_hpd_bridge_attach(struct drm_bridge *bridge,
+				     struct drm_encoder *encoder,
 				     enum drm_bridge_attach_flags flags)
 {
 	return flags & DRM_BRIDGE_ATTACH_NO_CONNECTOR ? 0 : -EINVAL;
@@ -130,15 +173,20 @@ static int drm_aux_hpd_bridge_probe(struct auxiliary_device *auxdev,
 {
 	struct drm_aux_hpd_bridge_data *data;
 
-	data = devm_kzalloc(&auxdev->dev, sizeof(*data), GFP_KERNEL);
-	if (!data)
-		return -ENOMEM;
+	data = devm_drm_bridge_alloc(&auxdev->dev,
+				     struct drm_aux_hpd_bridge_data, bridge,
+				     &drm_aux_hpd_bridge_funcs);
+	if (IS_ERR(data))
+		return PTR_ERR(data);
 
 	data->dev = &auxdev->dev;
-	data->bridge.funcs = &drm_aux_hpd_bridge_funcs;
 	data->bridge.of_node = dev_get_platdata(data->dev);
 	data->bridge.ops = DRM_BRIDGE_OP_HPD;
 	data->bridge.type = id->driver_data;
+
+	/* passthrough data, allow everything */
+	data->bridge.interlace_allowed = true;
+	data->bridge.ycbcr_420_allowed = true;
 
 	auxiliary_set_drvdata(auxdev, data);
 

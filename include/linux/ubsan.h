@@ -2,8 +2,13 @@
 #ifndef _LINUX_UBSAN_H
 #define _LINUX_UBSAN_H
 
-#ifdef CONFIG_UBSAN_TRAP
-const char *report_ubsan_failure(struct pt_regs *regs, u32 check_type);
+#if defined(CONFIG_UBSAN_TRAP) || defined(CONFIG_UBSAN_KVM_EL2)
+const char *report_ubsan_failure(u32 check_type);
+#else
+static inline const char *report_ubsan_failure(u32 check_type)
+{
+	return NULL;
+}
 #endif
 
 #endif

@@ -33,8 +33,10 @@
 #include "evergreen_reg_safe.h"
 #include "cayman_reg_safe.h"
 
-#define MAX(a,b)                   (((a)>(b))?(a):(b))
-#define MIN(a,b)                   (((a)<(b))?(a):(b))
+#ifndef MIN
+#define MAX(a, b)                   (((a) > (b)) ? (a) : (b))
+#define MIN(a, b)                   (((a) < (b)) ? (a) : (b))
+#endif
 
 #define REG_SAFE_BM_SIZE ARRAY_SIZE(evergreen_reg_safe_bm)
 
@@ -209,7 +211,7 @@ static int evergreen_surface_check_linear_aligned(struct radeon_cs_parser *p,
 	surf->base_align = track->group_size;
 	surf->palign = palign;
 	surf->halign = 1;
-	if (surf->nbx & (palign - 1)) {
+	if ((surf->nbx & (palign - 1)) && !(palign == 64 && surf->nbx == 32)) {
 		if (prefix) {
 			dev_warn(p->dev, "%s:%d %s pitch %d invalid must be aligned with %d\n",
 				 __func__, __LINE__, prefix, surf->nbx, palign);
@@ -395,7 +397,7 @@ static int evergreen_cs_track_validate_cb(struct radeon_cs_parser *p, unsigned i
 	struct evergreen_cs_track *track = p->track;
 	struct eg_surface surf;
 	unsigned pitch, slice, mslice;
-	unsigned long offset;
+	u64 offset;
 	int r;
 
 	mslice = G_028C6C_SLICE_MAX(track->cb_color_view[id]) + 1;
@@ -433,14 +435,14 @@ static int evergreen_cs_track_validate_cb(struct radeon_cs_parser *p, unsigned i
 		return r;
 	}
 
-	offset = track->cb_color_bo_offset[id] << 8;
+	offset = (u64)track->cb_color_bo_offset[id] << 8;
 	if (offset & (surf.base_align - 1)) {
-		dev_warn(p->dev, "%s:%d cb[%d] bo base %ld not aligned with %ld\n",
+		dev_warn(p->dev, "%s:%d cb[%d] bo base %llu not aligned with %ld\n",
 			 __func__, __LINE__, id, offset, surf.base_align);
 		return -EINVAL;
 	}
 
-	offset += surf.layer_size * mslice;
+	offset += (u64)surf.layer_size * mslice;
 	if (offset > radeon_bo_size(track->cb_color_bo[id])) {
 		/* old ddx are broken they allocate bo with w*h*bpp but
 		 * program slice with ALIGN(h, 8), catch this and patch
@@ -448,14 +450,14 @@ static int evergreen_cs_track_validate_cb(struct radeon_cs_parser *p, unsigned i
 		 */
 		if (!surf.mode) {
 			uint32_t *ib = p->ib.ptr;
-			unsigned long tmp, nby, bsize, size, min = 0;
+			u64 tmp, nby, bsize, size, min = 0;
 
 			/* find the height the ddx wants */
 			if (surf.nby > 8) {
 				min = surf.nby - 8;
 			}
 			bsize = radeon_bo_size(track->cb_color_bo[id]);
-			tmp = track->cb_color_bo_offset[id] << 8;
+			tmp = (u64)track->cb_color_bo_offset[id] << 8;
 			for (nby = surf.nby; nby > min; nby--) {
 				size = nby * surf.nbx * surf.bpe * surf.nsamples;
 				if ((tmp + size * mslice) <= bsize) {
@@ -467,7 +469,7 @@ static int evergreen_cs_track_validate_cb(struct radeon_cs_parser *p, unsigned i
 				slice = ((nby * surf.nbx) / 64) - 1;
 				if (!evergreen_surface_check(p, &surf, "cb")) {
 					/* check if this one works */
-					tmp += surf.layer_size * mslice;
+					tmp += (u64)surf.layer_size * mslice;
 					if (tmp <= bsize) {
 						ib[track->cb_color_slice_idx[id]] = slice;
 						goto old_ddx_ok;
@@ -476,9 +478,9 @@ static int evergreen_cs_track_validate_cb(struct radeon_cs_parser *p, unsigned i
 			}
 		}
 		dev_warn(p->dev, "%s:%d cb[%d] bo too small (layer size %d, "
-			 "offset %d, max layer %d, bo size %ld, slice %d)\n",
+			 "offset %llu, max layer %d, bo size %ld, slice %d)\n",
 			 __func__, __LINE__, id, surf.layer_size,
-			track->cb_color_bo_offset[id] << 8, mslice,
+			(u64)track->cb_color_bo_offset[id] << 8, mslice,
 			radeon_bo_size(track->cb_color_bo[id]), slice);
 		dev_warn(p->dev, "%s:%d problematic surf: (%d %d) (%d %d %d %d %d %d %d)\n",
 			 __func__, __LINE__, surf.nbx, surf.nby,
@@ -562,7 +564,7 @@ static int evergreen_cs_track_validate_stencil(struct radeon_cs_parser *p)
 	struct evergreen_cs_track *track = p->track;
 	struct eg_surface surf;
 	unsigned pitch, slice, mslice;
-	unsigned long offset;
+	u64 offset;
 	int r;
 
 	mslice = G_028008_SLICE_MAX(track->db_depth_view) + 1;
@@ -608,18 +610,18 @@ static int evergreen_cs_track_validate_stencil(struct radeon_cs_parser *p)
 		return r;
 	}
 
-	offset = track->db_s_read_offset << 8;
+	offset = (u64)track->db_s_read_offset << 8;
 	if (offset & (surf.base_align - 1)) {
-		dev_warn(p->dev, "%s:%d stencil read bo base %ld not aligned with %ld\n",
+		dev_warn(p->dev, "%s:%d stencil read bo base %llu not aligned with %ld\n",
 			 __func__, __LINE__, offset, surf.base_align);
 		return -EINVAL;
 	}
-	offset += surf.layer_size * mslice;
+	offset += (u64)surf.layer_size * mslice;
 	if (offset > radeon_bo_size(track->db_s_read_bo)) {
 		dev_warn(p->dev, "%s:%d stencil read bo too small (layer size %d, "
-			 "offset %ld, max layer %d, bo size %ld)\n",
+			 "offset %llu, max layer %d, bo size %ld)\n",
 			 __func__, __LINE__, surf.layer_size,
-			(unsigned long)track->db_s_read_offset << 8, mslice,
+			(u64)track->db_s_read_offset << 8, mslice,
 			radeon_bo_size(track->db_s_read_bo));
 		dev_warn(p->dev, "%s:%d stencil invalid (0x%08x 0x%08x 0x%08x 0x%08x)\n",
 			 __func__, __LINE__, track->db_depth_size,
@@ -627,18 +629,18 @@ static int evergreen_cs_track_validate_stencil(struct radeon_cs_parser *p)
 		return -EINVAL;
 	}
 
-	offset = track->db_s_write_offset << 8;
+	offset = (u64)track->db_s_write_offset << 8;
 	if (offset & (surf.base_align - 1)) {
-		dev_warn(p->dev, "%s:%d stencil write bo base %ld not aligned with %ld\n",
+		dev_warn(p->dev, "%s:%d stencil write bo base %llu not aligned with %ld\n",
 			 __func__, __LINE__, offset, surf.base_align);
 		return -EINVAL;
 	}
-	offset += surf.layer_size * mslice;
+	offset += (u64)surf.layer_size * mslice;
 	if (offset > radeon_bo_size(track->db_s_write_bo)) {
 		dev_warn(p->dev, "%s:%d stencil write bo too small (layer size %d, "
-			 "offset %ld, max layer %d, bo size %ld)\n",
+			 "offset %llu, max layer %d, bo size %ld)\n",
 			 __func__, __LINE__, surf.layer_size,
-			(unsigned long)track->db_s_write_offset << 8, mslice,
+			(u64)track->db_s_write_offset << 8, mslice,
 			radeon_bo_size(track->db_s_write_bo));
 		return -EINVAL;
 	}
@@ -659,7 +661,7 @@ static int evergreen_cs_track_validate_depth(struct radeon_cs_parser *p)
 	struct evergreen_cs_track *track = p->track;
 	struct eg_surface surf;
 	unsigned pitch, slice, mslice;
-	unsigned long offset;
+	u64 offset;
 	int r;
 
 	mslice = G_028008_SLICE_MAX(track->db_depth_view) + 1;
@@ -706,34 +708,34 @@ static int evergreen_cs_track_validate_depth(struct radeon_cs_parser *p)
 		return r;
 	}
 
-	offset = track->db_z_read_offset << 8;
+	offset = (u64)track->db_z_read_offset << 8;
 	if (offset & (surf.base_align - 1)) {
-		dev_warn(p->dev, "%s:%d stencil read bo base %ld not aligned with %ld\n",
+		dev_warn(p->dev, "%s:%d stencil read bo base %llu not aligned with %ld\n",
 			 __func__, __LINE__, offset, surf.base_align);
 		return -EINVAL;
 	}
-	offset += surf.layer_size * mslice;
+	offset += (u64)surf.layer_size * mslice;
 	if (offset > radeon_bo_size(track->db_z_read_bo)) {
 		dev_warn(p->dev, "%s:%d depth read bo too small (layer size %d, "
-			 "offset %ld, max layer %d, bo size %ld)\n",
+			 "offset %llu, max layer %d, bo size %ld)\n",
 			 __func__, __LINE__, surf.layer_size,
-			(unsigned long)track->db_z_read_offset << 8, mslice,
+			(u64)track->db_z_read_offset << 8, mslice,
 			radeon_bo_size(track->db_z_read_bo));
 		return -EINVAL;
 	}
 
-	offset = track->db_z_write_offset << 8;
+	offset = (u64)track->db_z_write_offset << 8;
 	if (offset & (surf.base_align - 1)) {
-		dev_warn(p->dev, "%s:%d stencil write bo base %ld not aligned with %ld\n",
+		dev_warn(p->dev, "%s:%d stencil write bo base %llu not aligned with %ld\n",
 			 __func__, __LINE__, offset, surf.base_align);
 		return -EINVAL;
 	}
-	offset += surf.layer_size * mslice;
+	offset += (u64)surf.layer_size * mslice;
 	if (offset > radeon_bo_size(track->db_z_write_bo)) {
 		dev_warn(p->dev, "%s:%d depth write bo too small (layer size %d, "
-			 "offset %ld, max layer %d, bo size %ld)\n",
+			 "offset %llu, max layer %d, bo size %ld)\n",
 			 __func__, __LINE__, surf.layer_size,
-			(unsigned long)track->db_z_write_offset << 8, mslice,
+			(u64)track->db_z_write_offset << 8, mslice,
 			radeon_bo_size(track->db_z_write_bo));
 		return -EINVAL;
 	}
@@ -2659,6 +2661,95 @@ static int evergreen_packet3_check(struct radeon_cs_parser *p,
 		}
 		break;
 	}
+	case PACKET3_COND_EXEC:
+	{
+		u64 offset;
+
+		if (pkt->count != 2) {
+			DRM_ERROR("bad COND_EXEC (invalid count)\n");
+			return -EINVAL;
+		}
+		r = radeon_cs_packet_next_reloc(p, &reloc, 0);
+		if (r) {
+			DRM_ERROR("bad COND_EXEC (missing reloc)\n");
+			return -EINVAL;
+		}
+		offset = radeon_get_ib_value(p, idx + 0);
+		offset += ((u64)(radeon_get_ib_value(p, idx + 1) & 0xff)) << 32UL;
+		if (offset & 0x7) {
+			DRM_ERROR("bad COND_EXEC (address not qwords aligned)\n");
+			return -EINVAL;
+		}
+		if ((offset + 8) > radeon_bo_size(reloc->robj)) {
+			DRM_ERROR("bad COND_EXEC bo too small: 0x%llx, 0x%lx\n",
+				  offset + 8, radeon_bo_size(reloc->robj));
+			return -EINVAL;
+		}
+		offset += reloc->gpu_offset;
+		ib[idx + 0] = offset;
+		ib[idx + 1] = upper_32_bits(offset) & 0xff;
+		break;
+	}
+	case PACKET3_COND_WRITE:
+		if (pkt->count != 7) {
+			DRM_ERROR("bad COND_WRITE (invalid count)\n");
+			return -EINVAL;
+		}
+		if (idx_value & 0x10) {
+			u64 offset;
+			/* POLL is memory. */
+			r = radeon_cs_packet_next_reloc(p, &reloc, 0);
+			if (r) {
+				DRM_ERROR("bad COND_WRITE (missing src reloc)\n");
+				return -EINVAL;
+			}
+			offset = radeon_get_ib_value(p, idx + 1);
+			offset += ((u64)(radeon_get_ib_value(p, idx + 2) & 0xff)) << 32;
+			if ((offset + 8) > radeon_bo_size(reloc->robj)) {
+				DRM_ERROR("bad COND_WRITE src bo too small: 0x%llx, 0x%lx\n",
+					  offset + 8, radeon_bo_size(reloc->robj));
+				return -EINVAL;
+			}
+			offset += reloc->gpu_offset;
+			ib[idx + 1] = offset;
+			ib[idx + 2] = upper_32_bits(offset) & 0xff;
+		} else {
+			/* POLL is a reg. */
+			reg = radeon_get_ib_value(p, idx + 1) << 2;
+			if (!evergreen_is_safe_reg(p, reg)) {
+				dev_warn(p->dev, "forbidden register 0x%08x at %d\n",
+					 reg, idx + 1);
+				return -EINVAL;
+			}
+		}
+		if (idx_value & 0x100) {
+			u64 offset;
+			/* WRITE is memory. */
+			r = radeon_cs_packet_next_reloc(p, &reloc, 0);
+			if (r) {
+				DRM_ERROR("bad COND_WRITE (missing dst reloc)\n");
+				return -EINVAL;
+			}
+			offset = radeon_get_ib_value(p, idx + 5);
+			offset += ((u64)(radeon_get_ib_value(p, idx + 6) & 0xff)) << 32;
+			if ((offset + 8) > radeon_bo_size(reloc->robj)) {
+				DRM_ERROR("bad COND_WRITE dst bo too small: 0x%llx, 0x%lx\n",
+					  offset + 8, radeon_bo_size(reloc->robj));
+				return -EINVAL;
+			}
+			offset += reloc->gpu_offset;
+			ib[idx + 5] = offset;
+			ib[idx + 6] = upper_32_bits(offset) & 0xff;
+		} else {
+			/* WRITE is a reg. */
+			reg = radeon_get_ib_value(p, idx + 5) << 2;
+			if (!evergreen_is_safe_reg(p, reg)) {
+				dev_warn(p->dev, "forbidden register 0x%08x at %d\n",
+					 reg, idx + 5);
+				return -EINVAL;
+			}
+		}
+		break;
 	case PACKET3_NOP:
 		break;
 	default:
@@ -3404,7 +3495,12 @@ static int evergreen_vm_packet3_check(struct radeon_device *rdev,
 	case CAYMAN_PACKET3_DEALLOC_STATE:
 		break;
 	case PACKET3_COND_WRITE:
-		if (idx_value & 0x100) {
+		if (!(idx_value & 0x10)) {
+			reg = ib[idx + 1] * 4;
+			if (!evergreen_vm_reg_valid(reg))
+				return -EINVAL;
+		}
+		if (!(idx_value & 0x100)) {
 			reg = ib[idx + 5] * 4;
 			if (!evergreen_vm_reg_valid(reg))
 				return -EINVAL;

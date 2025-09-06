@@ -88,7 +88,6 @@ CONTENTS
 
  (*) The effects of the cpu cache.
 
-     - Cache coherency.
      - Cache coherency vs DMA.
      - Cache coherency vs MMIO.
 
@@ -676,8 +675,6 @@ for example.  See rcu_assign_pointer() and rcu_dereference() in
 include/linux/rcupdate.h.  This permits the current target of an RCU'd
 pointer to be replaced with a new modified target, without the replacement
 target appearing to be incompletely initialised.
-
-See also the subsection on "Cache Coherency" for a more thorough example.
 
 
 CONTROL DEPENDENCIES
@@ -2195,6 +2192,8 @@ interpolate the memory barrier in the right place:
 	wait_event_timeout();
 	wait_on_bit();
 	wait_on_bit_lock();
+	wait_event_cmd();
+	wait_event_exclusive_cmd();
 
 
 Secondly, code that performs a wake up normally follows something like this:

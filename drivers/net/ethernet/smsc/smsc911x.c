@@ -43,7 +43,6 @@
 #include <linux/smsc911x.h>
 #include <linux/device.h>
 #include <linux/of.h>
-#include <linux/of_gpio.h>
 #include <linux/of_net.h>
 #include <linux/acpi.h>
 #include <linux/pm_runtime.h>
@@ -56,6 +55,7 @@
 #define SMSC_MDIONAME		"smsc911x-mdio"
 #define SMSC_DRV_VERSION	"2008-10-21"
 
+MODULE_DESCRIPTION("SMSC LAN911x/LAN921x Ethernet driver");
 MODULE_LICENSE("GPL");
 MODULE_VERSION(SMSC_DRV_VERSION);
 MODULE_ALIAS("platform:smsc911x");
@@ -2350,7 +2350,7 @@ static void smsc911x_drv_remove(struct platform_device *pdev)
 	pm_runtime_disable(&pdev->dev);
 }
 
-/* standard register acces */
+/* standard register access */
 static const struct smsc911x_ops standard_smsc911x_ops = {
 	.reg_read = __smsc911x_reg_read,
 	.reg_write = __smsc911x_reg_write,
@@ -2666,7 +2666,7 @@ MODULE_DEVICE_TABLE(acpi, smsc911x_acpi_match);
 
 static struct platform_driver smsc911x_driver = {
 	.probe = smsc911x_drv_probe,
-	.remove_new = smsc911x_drv_remove,
+	.remove = smsc911x_drv_remove,
 	.driver = {
 		.name	= SMSC_CHIPNAME,
 		.pm	= SMSC911X_PM_OPS,

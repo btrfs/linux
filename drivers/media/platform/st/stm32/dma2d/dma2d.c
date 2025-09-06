@@ -186,8 +186,6 @@ static const struct vb2_ops dma2d_qops = {
 	.buf_queue	= dma2d_buf_queue,
 	.start_streaming = dma2d_start_streaming,
 	.stop_streaming  = dma2d_stop_streaming,
-	.wait_prepare	= vb2_ops_wait_prepare,
-	.wait_finish	= vb2_ops_wait_finish,
 };
 
 static int queue_init(void *priv, struct vb2_queue *src_vq,
@@ -492,7 +490,8 @@ static void device_run(void *prv)
 	dst->sequence = frm_cap->sequence++;
 	v4l2_m2m_buf_copy_metadata(src, dst, true);
 
-	clk_enable(dev->gate);
+	if (clk_enable(dev->gate))
+		goto end;
 
 	dma2d_config_fg(dev, frm_out,
 			vb2_dma_contig_plane_dma_addr(&src->vb2_buf, 0));
@@ -717,7 +716,7 @@ MODULE_DEVICE_TABLE(of, stm32_dma2d_match);
 
 static struct platform_driver dma2d_pdrv = {
 	.probe		= dma2d_probe,
-	.remove_new	= dma2d_remove,
+	.remove		= dma2d_remove,
 	.driver		= {
 		.name = DMA2D_NAME,
 		.of_match_table = stm32_dma2d_match,

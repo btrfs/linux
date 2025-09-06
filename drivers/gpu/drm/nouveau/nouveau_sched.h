@@ -42,7 +42,7 @@ struct nouveau_job_args {
 		u32 count;
 	} out_sync;
 
-	struct nouveau_job_ops *ops;
+	const struct nouveau_job_ops *ops;
 };
 
 struct nouveau_job {
@@ -73,7 +73,7 @@ struct nouveau_job {
 		u32 count;
 	} out_sync;
 
-	struct nouveau_job_ops {
+	const struct nouveau_job_ops {
 		/* If .submit() returns without any error, it is guaranteed that
 		 * armed_submit() is called.
 		 */
@@ -103,16 +103,13 @@ struct nouveau_sched {
 	struct mutex mutex;
 
 	struct {
-		struct {
-			struct list_head head;
-			spinlock_t lock;
-		} list;
-		struct wait_queue_head wq;
-	} job;
+		struct list_head head;
+		spinlock_t lock;
+	} job_list;
 };
 
-int nouveau_sched_init(struct nouveau_sched *sched, struct nouveau_drm *drm,
-		       struct workqueue_struct *wq, u32 credit_limit);
-void nouveau_sched_fini(struct nouveau_sched *sched);
+int nouveau_sched_create(struct nouveau_sched **psched, struct nouveau_drm *drm,
+			 struct workqueue_struct *wq, u32 credit_limit);
+void nouveau_sched_destroy(struct nouveau_sched **psched);
 
 #endif

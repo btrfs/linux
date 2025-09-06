@@ -726,9 +726,9 @@ static int __init chromeos_laptop_setup_irq(struct i2c_peripheral *i2c_dev)
 		if (irq < 0)
 			return irq;
 
-		i2c_dev->irq_resource  = (struct resource)
-			DEFINE_RES_NAMED(irq, 1, NULL,
-					 IORESOURCE_IRQ | i2c_dev->irqflags);
+		i2c_dev->irq_resource = DEFINE_RES_IRQ(irq);
+		i2c_dev->irq_resource.flags |= i2c_dev->irqflags;
+
 		i2c_dev->board_info.resources = &i2c_dev->irq_resource;
 		i2c_dev->board_info.num_resources = 1;
 	}
@@ -749,10 +749,9 @@ chromeos_laptop_prepare_i2c_peripherals(struct chromeos_laptop *cros_laptop,
 	if (!src->num_i2c_peripherals)
 		return 0;
 
-	i2c_peripherals = kmemdup(src->i2c_peripherals,
-					      src->num_i2c_peripherals *
-					  sizeof(*src->i2c_peripherals),
-					  GFP_KERNEL);
+	i2c_peripherals = kmemdup_array(src->i2c_peripherals,
+					src->num_i2c_peripherals,
+					sizeof(*i2c_peripherals), GFP_KERNEL);
 	if (!i2c_peripherals)
 		return -ENOMEM;
 
@@ -783,8 +782,7 @@ err_out:
 	while (--i >= 0) {
 		i2c_dev = &i2c_peripherals[i];
 		info = &i2c_dev->board_info;
-		if (!IS_ERR_OR_NULL(info->fwnode))
-			fwnode_remove_software_node(info->fwnode);
+		fwnode_remove_software_node(info->fwnode);
 	}
 	kfree(i2c_peripherals);
 	return error;

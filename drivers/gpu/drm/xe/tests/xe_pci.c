@@ -12,101 +12,79 @@
 #include <kunit/test-bug.h>
 #include <kunit/visibility.h>
 
-struct kunit_test_data {
-	int ndevs;
-	xe_device_fn xe_fn;
-};
-
-static int dev_to_xe_device_fn(struct device *dev, void *__data)
-
+static void xe_ip_kunit_desc(const struct xe_ip *param, char *desc)
 {
-	struct drm_device *drm = dev_get_drvdata(dev);
-	struct kunit_test_data *data = __data;
-	int ret = 0;
-	int idx;
-
-	data->ndevs++;
-
-	if (drm_dev_enter(drm, &idx))
-		ret = data->xe_fn(to_xe_device(dev_get_drvdata(dev)));
-	drm_dev_exit(idx);
-
-	return ret;
+	snprintf(desc, KUNIT_PARAM_DESC_SIZE, "%u.%02u %s",
+		 param->verx100 / 100, param->verx100 % 100, param->name);
 }
+
+KUNIT_ARRAY_PARAM(graphics_ip, graphics_ips, xe_ip_kunit_desc);
+KUNIT_ARRAY_PARAM(media_ip, media_ips, xe_ip_kunit_desc);
+
+static void xe_pci_id_kunit_desc(const struct pci_device_id *param, char *desc)
+{
+	const struct xe_device_desc *dev_desc =
+		(const struct xe_device_desc *)param->driver_data;
+
+	if (dev_desc)
+		snprintf(desc, KUNIT_PARAM_DESC_SIZE, "0x%X (%s)",
+			 param->device, dev_desc->platform_name);
+}
+
+KUNIT_ARRAY_PARAM(pci_id, pciidlist, xe_pci_id_kunit_desc);
 
 /**
- * xe_call_for_each_device - Iterate over all devices this driver binds to
- * @xe_fn: Function to call for each device.
+ * xe_pci_graphics_ip_gen_param - Generate graphics struct xe_ip parameters
+ * @prev: the pointer to the previous parameter to iterate from or NULL
+ * @desc: output buffer with minimum size of KUNIT_PARAM_DESC_SIZE
  *
- * This function iterated over all devices this driver binds to, and calls
- * @xe_fn: for each one of them. If the called function returns anything else
- * than 0, iteration is stopped and the return value is returned by this
- * function. Across each function call, drm_dev_enter() / drm_dev_exit() is
- * called for the corresponding drm device.
+ * This function prepares struct xe_ip parameter.
  *
- * Return: Number of devices iterated or
- *         the error code of a call to @xe_fn returning an error code.
+ * To be used only as a parameter generator function in &KUNIT_CASE_PARAM.
+ *
+ * Return: pointer to the next parameter or NULL if no more parameters
  */
-int xe_call_for_each_device(xe_device_fn xe_fn)
+const void *xe_pci_graphics_ip_gen_param(const void *prev, char *desc)
 {
-	int ret;
-	struct kunit_test_data data = {
-	    .xe_fn = xe_fn,
-	    .ndevs = 0,
-	};
-
-	ret = driver_for_each_device(&xe_pci_driver.driver, NULL,
-				     &data, dev_to_xe_device_fn);
-
-	if (!data.ndevs)
-		kunit_skip(current->kunit_test, "test runs only on hardware\n");
-
-	return ret ?: data.ndevs;
+	return graphics_ip_gen_params(prev, desc);
 }
+EXPORT_SYMBOL_IF_KUNIT(xe_pci_graphics_ip_gen_param);
 
 /**
- * xe_call_for_each_graphics_ip - Iterate over all recognized graphics IPs
- * @xe_fn: Function to call for each device.
+ * xe_pci_media_ip_gen_param - Generate media struct xe_ip parameters
+ * @prev: the pointer to the previous parameter to iterate from or NULL
+ * @desc: output buffer with minimum size of KUNIT_PARAM_DESC_SIZE
  *
- * This function iterates over the descriptors for all graphics IPs recognized
- * by the driver and calls @xe_fn: for each one of them.
+ * This function prepares struct xe_ip parameter.
+ *
+ * To be used only as a parameter generator function in &KUNIT_CASE_PARAM.
+ *
+ * Return: pointer to the next parameter or NULL if no more parameters
  */
-void xe_call_for_each_graphics_ip(xe_graphics_fn xe_fn)
+const void *xe_pci_media_ip_gen_param(const void *prev, char *desc)
 {
-	const struct xe_graphics_desc *ip, *last = NULL;
-
-	for (int i = 0; i < ARRAY_SIZE(graphics_ip_map); i++) {
-		ip = graphics_ip_map[i].ip;
-		if (ip == last)
-			continue;
-
-		xe_fn(ip);
-		last = ip;
-	}
+	return media_ip_gen_params(prev, desc);
 }
-EXPORT_SYMBOL_IF_KUNIT(xe_call_for_each_graphics_ip);
+EXPORT_SYMBOL_IF_KUNIT(xe_pci_media_ip_gen_param);
 
 /**
- * xe_call_for_each_media_ip - Iterate over all recognized media IPs
- * @xe_fn: Function to call for each device.
+ * xe_pci_id_gen_param - Generate struct pci_device_id parameters
+ * @prev: the pointer to the previous parameter to iterate from or NULL
+ * @desc: output buffer with minimum size of KUNIT_PARAM_DESC_SIZE
  *
- * This function iterates over the descriptors for all media IPs recognized
- * by the driver and calls @xe_fn: for each one of them.
+ * This function prepares struct pci_device_id parameter.
+ *
+ * To be used only as a parameter generator function in &KUNIT_CASE_PARAM.
+ *
+ * Return: pointer to the next parameter or NULL if no more parameters
  */
-void xe_call_for_each_media_ip(xe_media_fn xe_fn)
+const void *xe_pci_id_gen_param(const void *prev, char *desc)
 {
-	const struct xe_media_desc *ip, *last = NULL;
+	const struct pci_device_id *pci = pci_id_gen_params(prev, desc);
 
-	for (int i = 0; i < ARRAY_SIZE(media_ip_map); i++) {
-		ip = media_ip_map[i].ip;
-		if (ip == last)
-			continue;
-
-		xe_fn(ip);
-		last = ip;
-	}
+	return pci->driver_data ? pci : NULL;
 }
-EXPORT_SYMBOL_IF_KUNIT(xe_call_for_each_media_ip);
+EXPORT_SYMBOL_IF_KUNIT(xe_pci_id_gen_param);
 
 static void fake_read_gmdid(struct xe_device *xe, enum xe_gmdid_type type,
 			    u32 *ver, u32 *revid)
@@ -156,11 +134,44 @@ int xe_pci_fake_device_init(struct xe_device *xe)
 		return -ENODEV;
 
 done:
+	xe->sriov.__mode = data && data->sriov_mode ?
+			   data->sriov_mode : XE_SRIOV_MODE_NONE;
+
 	kunit_activate_static_stub(test, read_gmdid, fake_read_gmdid);
 
 	xe_info_init_early(xe, desc, subplatform_desc);
-	xe_info_init(xe, desc->graphics, desc->media);
+	xe_info_init(xe, desc);
 
 	return 0;
 }
 EXPORT_SYMBOL_IF_KUNIT(xe_pci_fake_device_init);
+
+/**
+ * xe_pci_live_device_gen_param - Helper to iterate Xe devices as KUnit parameters
+ * @prev: the previously returned value, or NULL for the first iteration
+ * @desc: the buffer for a parameter name
+ *
+ * Iterates over the available Xe devices on the system. Uses the device name
+ * as the parameter name.
+ *
+ * To be used only as a parameter generator function in &KUNIT_CASE_PARAM.
+ *
+ * Return: pointer to the next &struct xe_device ready to be used as a parameter
+ *         or NULL if there are no more Xe devices on the system.
+ */
+const void *xe_pci_live_device_gen_param(const void *prev, char *desc)
+{
+	const struct xe_device *xe = prev;
+	struct device *dev = xe ? xe->drm.dev : NULL;
+	struct device *next;
+
+	next = driver_find_next_device(&xe_pci_driver.driver, dev);
+	if (dev)
+		put_device(dev);
+	if (!next)
+		return NULL;
+
+	snprintf(desc, KUNIT_PARAM_DESC_SIZE, "%s", dev_name(next));
+	return pdev_to_xe_device(to_pci_dev(next));
+}
+EXPORT_SYMBOL_IF_KUNIT(xe_pci_live_device_gen_param);

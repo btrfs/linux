@@ -8,10 +8,14 @@
 #include "buckets.h"
 #include "compress.h"
 #include "dirent.h"
+#include "disk_accounting.h"
 #include "error.h"
 #include "extents.h"
 #include "extent_update.h"
+#include "fs.h"
 #include "inode.h"
+#include "namei.h"
+#include "opts.h"
 #include "str_hash.h"
 #include "snapshot.h"
 #include "subvolume.h"
@@ -19,7 +23,7 @@
 
 #include <linux/random.h>
 
-#include <asm/unaligned.h>
+#include <linux/unaligned.h>
 
 #define x(name, ...)	#name,
 const char * const bch2_inode_opts[] = {
@@ -33,6 +37,9 @@ static const char * const bch2_inode_flag_strs[] = {
 };
 #undef  x
 
+static int delete_ancestor_snapshot_inodes(struct btree_trans *, struct bpos);
+static int may_delete_deleted_inum(struct btree_trans *, subvol_inum);
+
 static const u8 byte_table[8] = { 1, 2, 3, 4, 6, 8, 10, 13 };
 
 static int inode_decode_field(const u8 *in, const u8 *end,
@@ -43,10 +50,10 @@ static int inode_decode_field(const u8 *in, const u8 *end,
 	u8 *p;
 
 	if (in >= end)
-		return -1;
+		return -BCH_ERR_inode_unpack_error;
 
 	if (!*in)
-		return -1;
+		return -BCH_ERR_inode_unpack_error;
 
 	/*
 	 * position of highest set bit indicates number of bytes:
@@ -56,7 +63,7 @@ static int inode_decode_field(const u8 *in, const u8 *end,
 	bytes	= byte_table[shift - 1];
 
 	if (in + bytes > end)
-		return -1;
+		return -BCH_ERR_inode_unpack_error;
 
 	p = (u8 *) be + 16 - bytes;
 	memcpy(p, in, bytes);
@@ -159,8 +166,8 @@ static noinline int bch2_inode_unpack_v1(struct bkey_s_c_inode inode,
 	unsigned fieldnr = 0, field_bits;
 	int ret;
 
-#define x(_name, _bits)					\
-	if (fieldnr++ == INODE_NR_FIELDS(inode.v)) {			\
+#define x(_name, _bits)							\
+	if (fieldnr++ == INODEv1_NR_FIELDS(inode.v)) {			\
 		unsigned offset = offsetof(struct bch_inode_unpacked, _name);\
 		memset((void *) unpacked + offset, 0,			\
 		       sizeof(*unpacked) - offset);			\
@@ -172,7 +179,7 @@ static noinline int bch2_inode_unpack_v1(struct bkey_s_c_inode inode,
 		return ret;						\
 									\
 	if (field_bits > sizeof(unpacked->_name) * 8)			\
-		return -1;						\
+		return -BCH_ERR_inode_unpack_error;			\
 									\
 	unpacked->_name = field[1];					\
 	in += ret;
@@ -213,7 +220,7 @@ static int bch2_inode_unpack_v2(struct bch_inode_unpacked *unpacked,
 									\
 	unpacked->_name = v[0];						\
 	if (v[1] || v[0] != unpacked->_name)				\
-		return -1;						\
+		return -BCH_ERR_inode_unpack_error;			\
 	fieldnr++;
 
 	BCH_INODE_FIELDS_v2()
@@ -235,6 +242,7 @@ static int bch2_inode_unpack_v3(struct bkey_s_c k,
 	u64 v[2];
 
 	unpacked->bi_inum	= inode.k->p.offset;
+	unpacked->bi_snapshot	= inode.k->p.snapshot;
 	unpacked->bi_journal_seq= le64_to_cpu(inode.v->bi_journal_seq);
 	unpacked->bi_hash_seed	= inode.v->bi_hash_seed;
 	unpacked->bi_flags	= le64_to_cpu(inode.v->bi_flags);
@@ -264,7 +272,7 @@ static int bch2_inode_unpack_v3(struct bkey_s_c k,
 									\
 	unpacked->_name = v[0];						\
 	if (v[1] || v[0] != unpacked->_name)				\
-		return -1;						\
+		return -BCH_ERR_inode_unpack_error;			\
 	fieldnr++;
 
 	BCH_INODE_FIELDS_v3()
@@ -284,15 +292,16 @@ static noinline int bch2_inode_unpack_slowpath(struct bkey_s_c k,
 		struct bkey_s_c_inode inode = bkey_s_c_to_inode(k);
 
 		unpacked->bi_inum	= inode.k->p.offset;
+		unpacked->bi_snapshot	= inode.k->p.snapshot;
 		unpacked->bi_journal_seq= 0;
 		unpacked->bi_hash_seed	= inode.v->bi_hash_seed;
 		unpacked->bi_flags	= le32_to_cpu(inode.v->bi_flags);
 		unpacked->bi_mode	= le16_to_cpu(inode.v->bi_mode);
 
-		if (INODE_NEW_VARINT(inode.v)) {
+		if (INODEv1_NEW_VARINT(inode.v)) {
 			return bch2_inode_unpack_v2(unpacked, inode.v->fields,
 						    bkey_val_end(inode),
-						    INODE_NR_FIELDS(inode.v));
+						    INODEv1_NR_FIELDS(inode.v));
 		} else {
 			return bch2_inode_unpack_v1(inode, unpacked);
 		}
@@ -302,6 +311,7 @@ static noinline int bch2_inode_unpack_slowpath(struct bkey_s_c k,
 		struct bkey_s_c_inode_v2 inode = bkey_s_c_to_inode_v2(k);
 
 		unpacked->bi_inum	= inode.k->p.offset;
+		unpacked->bi_snapshot	= inode.k->p.snapshot;
 		unpacked->bi_journal_seq= le64_to_cpu(inode.v->bi_journal_seq);
 		unpacked->bi_hash_seed	= inode.v->bi_hash_seed;
 		unpacked->bi_flags	= le64_to_cpu(inode.v->bi_flags);
@@ -319,27 +329,25 @@ static noinline int bch2_inode_unpack_slowpath(struct bkey_s_c k,
 int bch2_inode_unpack(struct bkey_s_c k,
 		      struct bch_inode_unpacked *unpacked)
 {
-	if (likely(k.k->type == KEY_TYPE_inode_v3))
-		return bch2_inode_unpack_v3(k, unpacked);
-	return bch2_inode_unpack_slowpath(k, unpacked);
+	return likely(k.k->type == KEY_TYPE_inode_v3)
+		? bch2_inode_unpack_v3(k, unpacked)
+		: bch2_inode_unpack_slowpath(k, unpacked);
 }
 
-static int bch2_inode_peek_nowarn(struct btree_trans *trans,
-		    struct btree_iter *iter,
-		    struct bch_inode_unpacked *inode,
-		    subvol_inum inum, unsigned flags)
+int __bch2_inode_peek(struct btree_trans *trans,
+		      struct btree_iter *iter,
+		      struct bch_inode_unpacked *inode,
+		      subvol_inum inum, unsigned flags,
+		      bool warn)
 {
-	struct bkey_s_c k;
 	u32 snapshot;
-	int ret;
-
-	ret = bch2_subvolume_get_snapshot(trans, inum.subvol, &snapshot);
+	int ret = __bch2_subvolume_get_snapshot(trans, inum.subvol, &snapshot, warn);
 	if (ret)
 		return ret;
 
-	k = bch2_bkey_get_iter(trans, iter, BTREE_ID_inodes,
-			       SPOS(0, inum.inum, snapshot),
-			       flags|BTREE_ITER_CACHED);
+	struct bkey_s_c k = bch2_bkey_get_iter(trans, iter, BTREE_ID_inodes,
+					       SPOS(0, inum.inum, snapshot),
+					       flags|BTREE_ITER_cached);
 	ret = bkey_err(k);
 	if (ret)
 		return ret;
@@ -354,546 +362,29 @@ static int bch2_inode_peek_nowarn(struct btree_trans *trans,
 
 	return 0;
 err:
+	if (warn)
+		bch_err_msg(trans->c, ret, "looking up inum %llu:%llu:", inum.subvol, inum.inum);
 	bch2_trans_iter_exit(trans, iter);
 	return ret;
 }
 
-int bch2_inode_peek(struct btree_trans *trans,
-		    struct btree_iter *iter,
-		    struct bch_inode_unpacked *inode,
-		    subvol_inum inum, unsigned flags)
-{
-	int ret = bch2_inode_peek_nowarn(trans, iter, inode, inum, flags);
-	bch_err_msg(trans->c, ret, "looking up inum %u:%llu:", inum.subvol, inum.inum);
-	return ret;
-}
-
-int bch2_inode_write_flags(struct btree_trans *trans,
-		     struct btree_iter *iter,
-		     struct bch_inode_unpacked *inode,
-		     enum btree_update_flags flags)
-{
-	struct bkey_inode_buf *inode_p;
-
-	inode_p = bch2_trans_kmalloc(trans, sizeof(*inode_p));
-	if (IS_ERR(inode_p))
-		return PTR_ERR(inode_p);
-
-	bch2_inode_pack_inlined(inode_p, inode);
-	inode_p->inode.k.p.snapshot = iter->snapshot;
-	return bch2_trans_update(trans, iter, &inode_p->inode.k_i, flags);
-}
-
-struct bkey_i *bch2_inode_to_v3(struct btree_trans *trans, struct bkey_i *k)
-{
-	struct bch_inode_unpacked u;
-	struct bkey_inode_buf *inode_p;
-	int ret;
-
-	if (!bkey_is_inode(&k->k))
-		return ERR_PTR(-ENOENT);
-
-	inode_p = bch2_trans_kmalloc(trans, sizeof(*inode_p));
-	if (IS_ERR(inode_p))
-		return ERR_CAST(inode_p);
-
-	ret = bch2_inode_unpack(bkey_i_to_s_c(k), &u);
-	if (ret)
-		return ERR_PTR(ret);
-
-	bch2_inode_pack(inode_p, &u);
-	return &inode_p->inode.k_i;
-}
-
-static int __bch2_inode_invalid(struct bch_fs *c, struct bkey_s_c k, struct printbuf *err)
-{
-	struct bch_inode_unpacked unpacked;
-	int ret = 0;
-
-	bkey_fsck_err_on(k.k->p.inode, c, err,
-			 inode_pos_inode_nonzero,
-			 "nonzero k.p.inode");
-
-	bkey_fsck_err_on(k.k->p.offset < BLOCKDEV_INODE_MAX, c, err,
-			 inode_pos_blockdev_range,
-			 "fs inode in blockdev range");
-
-	bkey_fsck_err_on(bch2_inode_unpack(k, &unpacked), c, err,
-			 inode_unpack_error,
-			 "invalid variable length fields");
-
-	bkey_fsck_err_on(unpacked.bi_data_checksum >= BCH_CSUM_OPT_NR + 1, c, err,
-			 inode_checksum_type_invalid,
-			 "invalid data checksum type (%u >= %u",
-			 unpacked.bi_data_checksum, BCH_CSUM_OPT_NR + 1);
-
-	bkey_fsck_err_on(unpacked.bi_compression &&
-			 !bch2_compression_opt_valid(unpacked.bi_compression - 1), c, err,
-			 inode_compression_type_invalid,
-			 "invalid compression opt %u", unpacked.bi_compression - 1);
-
-	bkey_fsck_err_on((unpacked.bi_flags & BCH_INODE_unlinked) &&
-			 unpacked.bi_nlink != 0, c, err,
-			 inode_unlinked_but_nlink_nonzero,
-			 "flagged as unlinked but bi_nlink != 0");
-
-	bkey_fsck_err_on(unpacked.bi_subvol && !S_ISDIR(unpacked.bi_mode), c, err,
-			 inode_subvol_root_but_not_dir,
-			 "subvolume root but not a directory");
-fsck_err:
-	return ret;
-}
-
-int bch2_inode_invalid(struct bch_fs *c, struct bkey_s_c k,
-		       enum bkey_invalid_flags flags,
-		       struct printbuf *err)
-{
-	struct bkey_s_c_inode inode = bkey_s_c_to_inode(k);
-	int ret = 0;
-
-	bkey_fsck_err_on(INODE_STR_HASH(inode.v) >= BCH_STR_HASH_NR, c, err,
-			 inode_str_hash_invalid,
-			 "invalid str hash type (%llu >= %u)",
-			 INODE_STR_HASH(inode.v), BCH_STR_HASH_NR);
-
-	ret = __bch2_inode_invalid(c, k, err);
-fsck_err:
-	return ret;
-}
-
-int bch2_inode_v2_invalid(struct bch_fs *c, struct bkey_s_c k,
-			  enum bkey_invalid_flags flags,
-			  struct printbuf *err)
-{
-	struct bkey_s_c_inode_v2 inode = bkey_s_c_to_inode_v2(k);
-	int ret = 0;
-
-	bkey_fsck_err_on(INODEv2_STR_HASH(inode.v) >= BCH_STR_HASH_NR, c, err,
-			 inode_str_hash_invalid,
-			 "invalid str hash type (%llu >= %u)",
-			 INODEv2_STR_HASH(inode.v), BCH_STR_HASH_NR);
-
-	ret = __bch2_inode_invalid(c, k, err);
-fsck_err:
-	return ret;
-}
-
-int bch2_inode_v3_invalid(struct bch_fs *c, struct bkey_s_c k,
-			  enum bkey_invalid_flags flags,
-			  struct printbuf *err)
-{
-	struct bkey_s_c_inode_v3 inode = bkey_s_c_to_inode_v3(k);
-	int ret = 0;
-
-	bkey_fsck_err_on(INODEv3_FIELDS_START(inode.v) < INODEv3_FIELDS_START_INITIAL ||
-			 INODEv3_FIELDS_START(inode.v) > bkey_val_u64s(inode.k), c, err,
-			 inode_v3_fields_start_bad,
-			 "invalid fields_start (got %llu, min %u max %zu)",
-			 INODEv3_FIELDS_START(inode.v),
-			 INODEv3_FIELDS_START_INITIAL,
-			 bkey_val_u64s(inode.k));
-
-	bkey_fsck_err_on(INODEv3_STR_HASH(inode.v) >= BCH_STR_HASH_NR, c, err,
-			 inode_str_hash_invalid,
-			 "invalid str hash type (%llu >= %u)",
-			 INODEv3_STR_HASH(inode.v), BCH_STR_HASH_NR);
-
-	ret = __bch2_inode_invalid(c, k, err);
-fsck_err:
-	return ret;
-}
-
-static void __bch2_inode_unpacked_to_text(struct printbuf *out,
-					  struct bch_inode_unpacked *inode)
-{
-	printbuf_indent_add(out, 2);
-	prt_printf(out, "mode=%o", inode->bi_mode);
-	prt_newline(out);
-
-	prt_str(out, "flags=");
-	prt_bitflags(out, bch2_inode_flag_strs, inode->bi_flags & ((1U << 20) - 1));
-	prt_printf(out, " (%x)", inode->bi_flags);
-	prt_newline(out);
-
-	prt_printf(out, "journal_seq=%llu", inode->bi_journal_seq);
-	prt_newline(out);
-
-	prt_printf(out, "bi_size=%llu", inode->bi_size);
-	prt_newline(out);
-
-	prt_printf(out, "bi_sectors=%llu", inode->bi_sectors);
-	prt_newline(out);
-
-	prt_newline(out);
-	prt_printf(out, "bi_version=%llu", inode->bi_version);
-
-#define x(_name, _bits)						\
-	prt_printf(out, #_name "=%llu", (u64) inode->_name);	\
-	prt_newline(out);
-	BCH_INODE_FIELDS_v3()
-#undef  x
-	printbuf_indent_sub(out, 2);
-}
-
-void bch2_inode_unpacked_to_text(struct printbuf *out, struct bch_inode_unpacked *inode)
-{
-	prt_printf(out, "inum: %llu ", inode->bi_inum);
-	__bch2_inode_unpacked_to_text(out, inode);
-}
-
-void bch2_inode_to_text(struct printbuf *out, struct bch_fs *c, struct bkey_s_c k)
-{
-	struct bch_inode_unpacked inode;
-
-	if (bch2_inode_unpack(k, &inode)) {
-		prt_printf(out, "(unpack error)");
-		return;
-	}
-
-	__bch2_inode_unpacked_to_text(out, &inode);
-}
-
-static inline u64 bkey_inode_flags(struct bkey_s_c k)
-{
-	switch (k.k->type) {
-	case KEY_TYPE_inode:
-		return le32_to_cpu(bkey_s_c_to_inode(k).v->bi_flags);
-	case KEY_TYPE_inode_v2:
-		return le64_to_cpu(bkey_s_c_to_inode_v2(k).v->bi_flags);
-	case KEY_TYPE_inode_v3:
-		return le64_to_cpu(bkey_s_c_to_inode_v3(k).v->bi_flags);
-	default:
-		return 0;
-	}
-}
-
-static inline bool bkey_is_deleted_inode(struct bkey_s_c k)
-{
-	return bkey_inode_flags(k) & BCH_INODE_unlinked;
-}
-
-int bch2_trigger_inode(struct btree_trans *trans,
-		       enum btree_id btree_id, unsigned level,
-		       struct bkey_s_c old,
-		       struct bkey_s new,
-		       unsigned flags)
-{
-	s64 nr = bkey_is_inode(new.k) - bkey_is_inode(old.k);
-
-	if (flags & BTREE_TRIGGER_TRANSACTIONAL) {
-		if (nr) {
-			int ret = bch2_replicas_deltas_realloc(trans, 0);
-			if (ret)
-				return ret;
-
-			trans->fs_usage_deltas->nr_inodes += nr;
-		}
-
-		bool old_deleted = bkey_is_deleted_inode(old);
-		bool new_deleted = bkey_is_deleted_inode(new.s_c);
-		if (old_deleted != new_deleted) {
-			int ret = bch2_btree_bit_mod(trans, BTREE_ID_deleted_inodes, new.k->p, new_deleted);
-			if (ret)
-				return ret;
-		}
-	}
-
-	if ((flags & BTREE_TRIGGER_ATOMIC) && (flags & BTREE_TRIGGER_INSERT)) {
-		BUG_ON(!trans->journal_res.seq);
-
-		bkey_s_to_inode_v3(new).v->bi_journal_seq = cpu_to_le64(trans->journal_res.seq);
-	}
-
-	if (flags & BTREE_TRIGGER_GC) {
-		struct bch_fs *c = trans->c;
-
-		percpu_down_read(&c->mark_lock);
-		this_cpu_add(c->usage_gc->b.nr_inodes, nr);
-		percpu_up_read(&c->mark_lock);
-	}
-
-	return 0;
-}
-
-int bch2_inode_generation_invalid(struct bch_fs *c, struct bkey_s_c k,
-				  enum bkey_invalid_flags flags,
-				  struct printbuf *err)
-{
-	int ret = 0;
-
-	bkey_fsck_err_on(k.k->p.inode, c, err,
-			 inode_pos_inode_nonzero,
-			 "nonzero k.p.inode");
-fsck_err:
-	return ret;
-}
-
-void bch2_inode_generation_to_text(struct printbuf *out, struct bch_fs *c,
-				   struct bkey_s_c k)
-{
-	struct bkey_s_c_inode_generation gen = bkey_s_c_to_inode_generation(k);
-
-	prt_printf(out, "generation: %u", le32_to_cpu(gen.v->bi_generation));
-}
-
-void bch2_inode_init_early(struct bch_fs *c,
-			   struct bch_inode_unpacked *inode_u)
-{
-	enum bch_str_hash_type str_hash =
-		bch2_str_hash_opt_to_type(c, c->opts.str_hash);
-
-	memset(inode_u, 0, sizeof(*inode_u));
-
-	/* ick */
-	inode_u->bi_flags |= str_hash << INODE_STR_HASH_OFFSET;
-	get_random_bytes(&inode_u->bi_hash_seed,
-			 sizeof(inode_u->bi_hash_seed));
-}
-
-void bch2_inode_init_late(struct bch_inode_unpacked *inode_u, u64 now,
-			  uid_t uid, gid_t gid, umode_t mode, dev_t rdev,
-			  struct bch_inode_unpacked *parent)
-{
-	inode_u->bi_mode	= mode;
-	inode_u->bi_uid		= uid;
-	inode_u->bi_gid		= gid;
-	inode_u->bi_dev		= rdev;
-	inode_u->bi_atime	= now;
-	inode_u->bi_mtime	= now;
-	inode_u->bi_ctime	= now;
-	inode_u->bi_otime	= now;
-
-	if (parent && parent->bi_mode & S_ISGID) {
-		inode_u->bi_gid = parent->bi_gid;
-		if (S_ISDIR(mode))
-			inode_u->bi_mode |= S_ISGID;
-	}
-
-	if (parent) {
-#define x(_name, ...)	inode_u->bi_##_name = parent->bi_##_name;
-		BCH_INODE_OPTS()
-#undef x
-	}
-}
-
-void bch2_inode_init(struct bch_fs *c, struct bch_inode_unpacked *inode_u,
-		     uid_t uid, gid_t gid, umode_t mode, dev_t rdev,
-		     struct bch_inode_unpacked *parent)
-{
-	bch2_inode_init_early(c, inode_u);
-	bch2_inode_init_late(inode_u, bch2_current_time(c),
-			     uid, gid, mode, rdev, parent);
-}
-
-static inline u32 bkey_generation(struct bkey_s_c k)
-{
-	switch (k.k->type) {
-	case KEY_TYPE_inode:
-	case KEY_TYPE_inode_v2:
-		BUG();
-	case KEY_TYPE_inode_generation:
-		return le32_to_cpu(bkey_s_c_to_inode_generation(k).v->bi_generation);
-	default:
-		return 0;
-	}
-}
-
-/*
- * This just finds an empty slot:
- */
-int bch2_inode_create(struct btree_trans *trans,
-		      struct btree_iter *iter,
-		      struct bch_inode_unpacked *inode_u,
-		      u32 snapshot, u64 cpu)
-{
-	struct bch_fs *c = trans->c;
-	struct bkey_s_c k;
-	u64 min, max, start, pos, *hint;
-	int ret = 0;
-	unsigned bits = (c->opts.inodes_32bit ? 31 : 63);
-
-	if (c->opts.shard_inode_numbers) {
-		bits -= c->inode_shard_bits;
-
-		min = (cpu << bits);
-		max = (cpu << bits) | ~(ULLONG_MAX << bits);
-
-		min = max_t(u64, min, BLOCKDEV_INODE_MAX);
-		hint = c->unused_inode_hints + cpu;
-	} else {
-		min = BLOCKDEV_INODE_MAX;
-		max = ~(ULLONG_MAX << bits);
-		hint = c->unused_inode_hints;
-	}
-
-	start = READ_ONCE(*hint);
-
-	if (start >= max || start < min)
-		start = min;
-
-	pos = start;
-	bch2_trans_iter_init(trans, iter, BTREE_ID_inodes, POS(0, pos),
-			     BTREE_ITER_ALL_SNAPSHOTS|
-			     BTREE_ITER_INTENT);
-again:
-	while ((k = bch2_btree_iter_peek(iter)).k &&
-	       !(ret = bkey_err(k)) &&
-	       bkey_lt(k.k->p, POS(0, max))) {
-		if (pos < iter->pos.offset)
-			goto found_slot;
-
-		/*
-		 * We don't need to iterate over keys in every snapshot once
-		 * we've found just one:
-		 */
-		pos = iter->pos.offset + 1;
-		bch2_btree_iter_set_pos(iter, POS(0, pos));
-	}
-
-	if (!ret && pos < max)
-		goto found_slot;
-
-	if (!ret && start == min)
-		ret = -BCH_ERR_ENOSPC_inode_create;
-
-	if (ret) {
-		bch2_trans_iter_exit(trans, iter);
-		return ret;
-	}
-
-	/* Retry from start */
-	pos = start = min;
-	bch2_btree_iter_set_pos(iter, POS(0, pos));
-	goto again;
-found_slot:
-	bch2_btree_iter_set_pos(iter, SPOS(0, pos, snapshot));
-	k = bch2_btree_iter_peek_slot(iter);
-	ret = bkey_err(k);
-	if (ret) {
-		bch2_trans_iter_exit(trans, iter);
-		return ret;
-	}
-
-	*hint			= k.k->p.offset;
-	inode_u->bi_inum	= k.k->p.offset;
-	inode_u->bi_generation	= bkey_generation(k);
-	return 0;
-}
-
-static int bch2_inode_delete_keys(struct btree_trans *trans,
-				  subvol_inum inum, enum btree_id id)
+int bch2_inode_find_by_inum_snapshot(struct btree_trans *trans,
+					    u64 inode_nr, u32 snapshot,
+					    struct bch_inode_unpacked *inode,
+					    unsigned flags)
 {
 	struct btree_iter iter;
-	struct bkey_s_c k;
-	struct bkey_i delete;
-	struct bpos end = POS(inum.inum, U64_MAX);
-	u32 snapshot;
-	int ret = 0;
-
-	/*
-	 * We're never going to be deleting partial extents, no need to use an
-	 * extent iterator:
-	 */
-	bch2_trans_iter_init(trans, &iter, id, POS(inum.inum, 0),
-			     BTREE_ITER_INTENT);
-
-	while (1) {
-		bch2_trans_begin(trans);
-
-		ret = bch2_subvolume_get_snapshot(trans, inum.subvol, &snapshot);
-		if (ret)
-			goto err;
-
-		bch2_btree_iter_set_snapshot(&iter, snapshot);
-
-		k = bch2_btree_iter_peek_upto(&iter, end);
-		ret = bkey_err(k);
-		if (ret)
-			goto err;
-
-		if (!k.k)
-			break;
-
-		bkey_init(&delete.k);
-		delete.k.p = iter.pos;
-
-		if (iter.flags & BTREE_ITER_IS_EXTENTS)
-			bch2_key_resize(&delete.k,
-					bpos_min(end, k.k->p).offset -
-					iter.pos.offset);
-
-		ret = bch2_trans_update(trans, &iter, &delete, 0) ?:
-		      bch2_trans_commit(trans, NULL, NULL,
-					BCH_TRANS_COMMIT_no_enospc);
-err:
-		if (ret && !bch2_err_matches(ret, BCH_ERR_transaction_restart))
-			break;
-	}
-
-	bch2_trans_iter_exit(trans, &iter);
-	return ret;
-}
-
-int bch2_inode_rm(struct bch_fs *c, subvol_inum inum)
-{
-	struct btree_trans *trans = bch2_trans_get(c);
-	struct btree_iter iter = { NULL };
-	struct bkey_i_inode_generation delete;
-	struct bch_inode_unpacked inode_u;
-	struct bkey_s_c k;
-	u32 snapshot;
-	int ret;
-
-	/*
-	 * If this was a directory, there shouldn't be any real dirents left -
-	 * but there could be whiteouts (from hash collisions) that we should
-	 * delete:
-	 *
-	 * XXX: the dirent could ideally would delete whiteouts when they're no
-	 * longer needed
-	 */
-	ret   = bch2_inode_delete_keys(trans, inum, BTREE_ID_extents) ?:
-		bch2_inode_delete_keys(trans, inum, BTREE_ID_xattrs) ?:
-		bch2_inode_delete_keys(trans, inum, BTREE_ID_dirents);
-	if (ret)
-		goto err;
-retry:
-	bch2_trans_begin(trans);
-
-	ret = bch2_subvolume_get_snapshot(trans, inum.subvol, &snapshot);
+	struct bkey_s_c k = bch2_bkey_get_iter(trans, &iter, BTREE_ID_inodes,
+					       SPOS(0, inode_nr, snapshot), flags);
+	int ret = bkey_err(k);
 	if (ret)
 		goto err;
 
-	k = bch2_bkey_get_iter(trans, &iter, BTREE_ID_inodes,
-			       SPOS(0, inum.inum, snapshot),
-			       BTREE_ITER_INTENT|BTREE_ITER_CACHED);
-	ret = bkey_err(k);
-	if (ret)
-		goto err;
-
-	if (!bkey_is_inode(k.k)) {
-		bch2_fs_inconsistent(c,
-				     "inode %llu:%u not found when deleting",
-				     inum.inum, snapshot);
-		ret = -EIO;
-		goto err;
-	}
-
-	bch2_inode_unpack(k, &inode_u);
-
-	bkey_inode_generation_init(&delete.k_i);
-	delete.k.p = iter.pos;
-	delete.v.bi_generation = cpu_to_le32(inode_u.bi_generation + 1);
-
-	ret   = bch2_trans_update(trans, &iter, &delete.k_i, 0) ?:
-		bch2_trans_commit(trans, NULL, NULL,
-				BCH_TRANS_COMMIT_no_enospc);
+	ret = bkey_is_inode(k.k)
+		? bch2_inode_unpack(k, inode)
+		: -BCH_ERR_ENOENT_inode;
 err:
 	bch2_trans_iter_exit(trans, &iter);
-	if (bch2_err_matches(ret, BCH_ERR_transaction_restart))
-		goto retry;
-
-	bch2_trans_put(trans);
 	return ret;
 }
 
@@ -926,8 +417,774 @@ int bch2_inode_find_by_inum_trans(struct btree_trans *trans,
 int bch2_inode_find_by_inum(struct bch_fs *c, subvol_inum inum,
 			    struct bch_inode_unpacked *inode)
 {
-	return bch2_trans_do(c, NULL, NULL, 0,
-		bch2_inode_find_by_inum_trans(trans, inum, inode));
+	return bch2_trans_do(c, bch2_inode_find_by_inum_trans(trans, inum, inode));
+}
+
+int bch2_inode_find_snapshot_root(struct btree_trans *trans, u64 inum,
+				  struct bch_inode_unpacked *root)
+{
+	struct btree_iter iter;
+	struct bkey_s_c k;
+	int ret = 0;
+
+	for_each_btree_key_reverse_norestart(trans, iter, BTREE_ID_inodes,
+					     SPOS(0, inum, U32_MAX),
+					     BTREE_ITER_all_snapshots, k, ret) {
+		if (k.k->p.offset != inum)
+			break;
+		if (bkey_is_inode(k.k)) {
+			ret = bch2_inode_unpack(k, root);
+			goto out;
+		}
+	}
+	/* We're only called when we know we have an inode for @inum */
+	BUG_ON(!ret);
+out:
+	bch2_trans_iter_exit(trans, &iter);
+	return ret;
+}
+
+int bch2_inode_write_flags(struct btree_trans *trans,
+		     struct btree_iter *iter,
+		     struct bch_inode_unpacked *inode,
+		     enum btree_iter_update_trigger_flags flags)
+{
+	struct bkey_inode_buf *inode_p;
+
+	inode_p = bch2_trans_kmalloc(trans, sizeof(*inode_p));
+	if (IS_ERR(inode_p))
+		return PTR_ERR(inode_p);
+
+	bch2_inode_pack_inlined(inode_p, inode);
+	inode_p->inode.k.p.snapshot = iter->snapshot;
+	return bch2_trans_update(trans, iter, &inode_p->inode.k_i, flags);
+}
+
+int __bch2_fsck_write_inode(struct btree_trans *trans, struct bch_inode_unpacked *inode)
+{
+	struct bkey_inode_buf *inode_p =
+		bch2_trans_kmalloc(trans, sizeof(*inode_p));
+
+	if (IS_ERR(inode_p))
+		return PTR_ERR(inode_p);
+
+	bch2_inode_pack(inode_p, inode);
+	inode_p->inode.k.p.snapshot = inode->bi_snapshot;
+
+	return bch2_btree_insert_nonextent(trans, BTREE_ID_inodes,
+				&inode_p->inode.k_i,
+				BTREE_UPDATE_internal_snapshot_node);
+}
+
+int bch2_fsck_write_inode(struct btree_trans *trans, struct bch_inode_unpacked *inode)
+{
+	int ret = commit_do(trans, NULL, NULL, BCH_TRANS_COMMIT_no_enospc,
+			    __bch2_fsck_write_inode(trans, inode));
+	bch_err_fn(trans->c, ret);
+	return ret;
+}
+
+struct bkey_i *bch2_inode_to_v3(struct btree_trans *trans, struct bkey_i *k)
+{
+	struct bch_inode_unpacked u;
+	struct bkey_inode_buf *inode_p;
+	int ret;
+
+	if (!bkey_is_inode(&k->k))
+		return ERR_PTR(-ENOENT);
+
+	inode_p = bch2_trans_kmalloc(trans, sizeof(*inode_p));
+	if (IS_ERR(inode_p))
+		return ERR_CAST(inode_p);
+
+	ret = bch2_inode_unpack(bkey_i_to_s_c(k), &u);
+	if (ret)
+		return ERR_PTR(ret);
+
+	bch2_inode_pack(inode_p, &u);
+	return &inode_p->inode.k_i;
+}
+
+static int __bch2_inode_validate(struct bch_fs *c, struct bkey_s_c k,
+				 struct bkey_validate_context from)
+{
+	struct bch_inode_unpacked unpacked;
+	int ret = 0;
+
+	bkey_fsck_err_on(k.k->p.inode,
+			 c, inode_pos_inode_nonzero,
+			 "nonzero k.p.inode");
+
+	bkey_fsck_err_on(k.k->p.offset < BLOCKDEV_INODE_MAX,
+			 c, inode_pos_blockdev_range,
+			 "fs inode in blockdev range");
+
+	bkey_fsck_err_on(bch2_inode_unpack(k, &unpacked),
+			 c, inode_unpack_error,
+			 "invalid variable length fields");
+
+	bkey_fsck_err_on(unpacked.bi_data_checksum >= BCH_CSUM_OPT_NR + 1,
+			 c, inode_checksum_type_invalid,
+			 "invalid data checksum type (%u >= %u",
+			 unpacked.bi_data_checksum, BCH_CSUM_OPT_NR + 1);
+
+	bkey_fsck_err_on(unpacked.bi_compression &&
+			 !bch2_compression_opt_valid(unpacked.bi_compression - 1),
+			 c, inode_compression_type_invalid,
+			 "invalid compression opt %u", unpacked.bi_compression - 1);
+
+	bkey_fsck_err_on((unpacked.bi_flags & BCH_INODE_unlinked) &&
+			 unpacked.bi_nlink != 0,
+			 c, inode_unlinked_but_nlink_nonzero,
+			 "flagged as unlinked but bi_nlink != 0");
+
+	bkey_fsck_err_on(unpacked.bi_subvol && !S_ISDIR(unpacked.bi_mode),
+			 c, inode_subvol_root_but_not_dir,
+			 "subvolume root but not a directory");
+fsck_err:
+	return ret;
+}
+
+int bch2_inode_validate(struct bch_fs *c, struct bkey_s_c k,
+			struct bkey_validate_context from)
+{
+	struct bkey_s_c_inode inode = bkey_s_c_to_inode(k);
+	int ret = 0;
+
+	bkey_fsck_err_on(INODEv1_STR_HASH(inode.v) >= BCH_STR_HASH_NR,
+			 c, inode_str_hash_invalid,
+			 "invalid str hash type (%llu >= %u)",
+			 INODEv1_STR_HASH(inode.v), BCH_STR_HASH_NR);
+
+	ret = __bch2_inode_validate(c, k, from);
+fsck_err:
+	return ret;
+}
+
+int bch2_inode_v2_validate(struct bch_fs *c, struct bkey_s_c k,
+			   struct bkey_validate_context from)
+{
+	struct bkey_s_c_inode_v2 inode = bkey_s_c_to_inode_v2(k);
+	int ret = 0;
+
+	bkey_fsck_err_on(INODEv2_STR_HASH(inode.v) >= BCH_STR_HASH_NR,
+			 c, inode_str_hash_invalid,
+			 "invalid str hash type (%llu >= %u)",
+			 INODEv2_STR_HASH(inode.v), BCH_STR_HASH_NR);
+
+	ret = __bch2_inode_validate(c, k, from);
+fsck_err:
+	return ret;
+}
+
+int bch2_inode_v3_validate(struct bch_fs *c, struct bkey_s_c k,
+			   struct bkey_validate_context from)
+{
+	struct bkey_s_c_inode_v3 inode = bkey_s_c_to_inode_v3(k);
+	int ret = 0;
+
+	bkey_fsck_err_on(INODEv3_FIELDS_START(inode.v) < INODEv3_FIELDS_START_INITIAL ||
+			 INODEv3_FIELDS_START(inode.v) > bkey_val_u64s(inode.k),
+			 c, inode_v3_fields_start_bad,
+			 "invalid fields_start (got %llu, min %u max %zu)",
+			 INODEv3_FIELDS_START(inode.v),
+			 INODEv3_FIELDS_START_INITIAL,
+			 bkey_val_u64s(inode.k));
+
+	bkey_fsck_err_on(INODEv3_STR_HASH(inode.v) >= BCH_STR_HASH_NR,
+			 c, inode_str_hash_invalid,
+			 "invalid str hash type (%llu >= %u)",
+			 INODEv3_STR_HASH(inode.v), BCH_STR_HASH_NR);
+
+	ret = __bch2_inode_validate(c, k, from);
+fsck_err:
+	return ret;
+}
+
+static void __bch2_inode_unpacked_to_text(struct printbuf *out,
+					  struct bch_inode_unpacked *inode)
+{
+	prt_printf(out, "\n");
+	printbuf_indent_add(out, 2);
+	prt_printf(out, "mode=%o\n", inode->bi_mode);
+
+	prt_str(out, "flags=");
+	prt_bitflags(out, bch2_inode_flag_strs, inode->bi_flags & ((1U << 20) - 1));
+	prt_printf(out, "(%x)\n", inode->bi_flags);
+
+	prt_printf(out, "journal_seq=%llu\n",	inode->bi_journal_seq);
+	prt_printf(out, "hash_seed=%llx\n",	inode->bi_hash_seed);
+	prt_printf(out, "hash_type=");
+	bch2_prt_str_hash_type(out, INODE_STR_HASH(inode));
+	prt_newline(out);
+	prt_printf(out, "bi_size=%llu\n",	inode->bi_size);
+	prt_printf(out, "bi_sectors=%llu\n",	inode->bi_sectors);
+	prt_printf(out, "bi_version=%llu\n",	inode->bi_version);
+
+#define x(_name, _bits)						\
+	prt_printf(out, #_name "=%llu\n", (u64) inode->_name);
+	BCH_INODE_FIELDS_v3()
+#undef  x
+
+	bch2_printbuf_strip_trailing_newline(out);
+	printbuf_indent_sub(out, 2);
+}
+
+void bch2_inode_unpacked_to_text(struct printbuf *out, struct bch_inode_unpacked *inode)
+{
+	prt_printf(out, "inum: %llu:%u ", inode->bi_inum, inode->bi_snapshot);
+	__bch2_inode_unpacked_to_text(out, inode);
+}
+
+void bch2_inode_to_text(struct printbuf *out, struct bch_fs *c, struct bkey_s_c k)
+{
+	struct bch_inode_unpacked inode;
+
+	if (bch2_inode_unpack(k, &inode)) {
+		prt_printf(out, "(unpack error)");
+		return;
+	}
+
+	__bch2_inode_unpacked_to_text(out, &inode);
+}
+
+static inline u64 bkey_inode_flags(struct bkey_s_c k)
+{
+	switch (k.k->type) {
+	case KEY_TYPE_inode:
+		return le32_to_cpu(bkey_s_c_to_inode(k).v->bi_flags);
+	case KEY_TYPE_inode_v2:
+		return le64_to_cpu(bkey_s_c_to_inode_v2(k).v->bi_flags);
+	case KEY_TYPE_inode_v3:
+		return le64_to_cpu(bkey_s_c_to_inode_v3(k).v->bi_flags);
+	default:
+		return 0;
+	}
+}
+
+static inline void bkey_inode_flags_set(struct bkey_s k, u64 f)
+{
+	switch (k.k->type) {
+	case KEY_TYPE_inode:
+		bkey_s_to_inode(k).v->bi_flags = cpu_to_le32(f);
+		return;
+	case KEY_TYPE_inode_v2:
+		bkey_s_to_inode_v2(k).v->bi_flags = cpu_to_le64(f);
+		return;
+	case KEY_TYPE_inode_v3:
+		bkey_s_to_inode_v3(k).v->bi_flags = cpu_to_le64(f);
+		return;
+	default:
+		BUG();
+	}
+}
+
+static inline bool bkey_is_unlinked_inode(struct bkey_s_c k)
+{
+	unsigned f = bkey_inode_flags(k) & BCH_INODE_unlinked;
+
+	return (f & BCH_INODE_unlinked) && !(f & BCH_INODE_has_child_snapshot);
+}
+
+static struct bkey_s_c
+bch2_bkey_get_iter_snapshot_parent(struct btree_trans *trans, struct btree_iter *iter,
+				   enum btree_id btree, struct bpos pos,
+				   unsigned flags)
+{
+	struct bch_fs *c = trans->c;
+	struct bkey_s_c k;
+	int ret = 0;
+
+	for_each_btree_key_max_norestart(trans, *iter, btree,
+					  bpos_successor(pos),
+					  SPOS(pos.inode, pos.offset, U32_MAX),
+					  flags|BTREE_ITER_all_snapshots, k, ret)
+		if (bch2_snapshot_is_ancestor(c, pos.snapshot, k.k->p.snapshot))
+			return k;
+
+	bch2_trans_iter_exit(trans, iter);
+	return ret ? bkey_s_c_err(ret) : bkey_s_c_null;
+}
+
+static struct bkey_s_c
+bch2_inode_get_iter_snapshot_parent(struct btree_trans *trans, struct btree_iter *iter,
+				    struct bpos pos, unsigned flags)
+{
+	struct bkey_s_c k;
+again:
+	k = bch2_bkey_get_iter_snapshot_parent(trans, iter, BTREE_ID_inodes, pos, flags);
+	if (!k.k ||
+	    bkey_err(k) ||
+	    bkey_is_inode(k.k))
+		return k;
+
+	bch2_trans_iter_exit(trans, iter);
+	pos = k.k->p;
+	goto again;
+}
+
+int __bch2_inode_has_child_snapshots(struct btree_trans *trans, struct bpos pos)
+{
+	struct bch_fs *c = trans->c;
+	struct btree_iter iter;
+	struct bkey_s_c k;
+	int ret = 0;
+
+	for_each_btree_key_max_norestart(trans, iter,
+			BTREE_ID_inodes, POS(0, pos.offset), bpos_predecessor(pos),
+			BTREE_ITER_all_snapshots|
+			BTREE_ITER_with_updates, k, ret)
+		if (bch2_snapshot_is_ancestor(c, k.k->p.snapshot, pos.snapshot) &&
+		    bkey_is_inode(k.k)) {
+			ret = 1;
+			break;
+		}
+	bch2_trans_iter_exit(trans, &iter);
+	return ret;
+}
+
+static int update_inode_has_children(struct btree_trans *trans,
+				     struct bkey_s k,
+				     bool have_child)
+{
+	if (!have_child) {
+		int ret = bch2_inode_has_child_snapshots(trans, k.k->p);
+		if (ret)
+			return ret < 0 ? ret : 0;
+	}
+
+	u64 f = bkey_inode_flags(k.s_c);
+	if (have_child != !!(f & BCH_INODE_has_child_snapshot))
+		bkey_inode_flags_set(k, f ^ BCH_INODE_has_child_snapshot);
+
+	return 0;
+}
+
+static int update_parent_inode_has_children(struct btree_trans *trans, struct bpos pos,
+					    bool have_child)
+{
+	struct btree_iter iter;
+	struct bkey_s_c k = bch2_inode_get_iter_snapshot_parent(trans,
+						&iter, pos, BTREE_ITER_with_updates);
+	int ret = bkey_err(k);
+	if (ret)
+		return ret;
+	if (!k.k)
+		return 0;
+
+	if (!have_child) {
+		ret = bch2_inode_has_child_snapshots(trans, k.k->p);
+		if (ret) {
+			ret = ret < 0 ? ret : 0;
+			goto err;
+		}
+	}
+
+	u64 f = bkey_inode_flags(k);
+	if (have_child != !!(f & BCH_INODE_has_child_snapshot)) {
+		struct bkey_i *update = bch2_bkey_make_mut(trans, &iter, &k,
+					     BTREE_UPDATE_internal_snapshot_node);
+		ret = PTR_ERR_OR_ZERO(update);
+		if (ret)
+			goto err;
+
+		bkey_inode_flags_set(bkey_i_to_s(update), f ^ BCH_INODE_has_child_snapshot);
+	}
+err:
+	bch2_trans_iter_exit(trans, &iter);
+	return ret;
+}
+
+int bch2_trigger_inode(struct btree_trans *trans,
+		       enum btree_id btree_id, unsigned level,
+		       struct bkey_s_c old,
+		       struct bkey_s new,
+		       enum btree_iter_update_trigger_flags flags)
+{
+	struct bch_fs *c = trans->c;
+
+	if ((flags & BTREE_TRIGGER_atomic) && (flags & BTREE_TRIGGER_insert)) {
+		BUG_ON(!trans->journal_res.seq);
+		bkey_s_to_inode_v3(new).v->bi_journal_seq = cpu_to_le64(trans->journal_res.seq);
+	}
+
+	s64 nr[1] = { bkey_is_inode(new.k) - bkey_is_inode(old.k) };
+	if ((flags & (BTREE_TRIGGER_transactional|BTREE_TRIGGER_gc)) && nr[0]) {
+		int ret = bch2_disk_accounting_mod2(trans, flags & BTREE_TRIGGER_gc, nr, nr_inodes);
+		if (ret)
+			return ret;
+	}
+
+	if (flags & BTREE_TRIGGER_transactional) {
+		int unlinked_delta =	(int) bkey_is_unlinked_inode(new.s_c) -
+					(int) bkey_is_unlinked_inode(old);
+		if (unlinked_delta) {
+			int ret = bch2_btree_bit_mod_buffered(trans, BTREE_ID_deleted_inodes,
+							      new.k->p, unlinked_delta > 0);
+			if (ret)
+				return ret;
+		}
+
+		/*
+		 * If we're creating or deleting an inode at this snapshot ID,
+		 * and there might be an inode in a parent snapshot ID, we might
+		 * need to set or clear the has_child_snapshot flag on the
+		 * parent.
+		 */
+		int deleted_delta = (int) bkey_is_inode(new.k) -
+				    (int) bkey_is_inode(old.k);
+		if (deleted_delta &&
+		    bch2_snapshot_parent(c, new.k->p.snapshot)) {
+			int ret = update_parent_inode_has_children(trans, new.k->p,
+								   deleted_delta > 0);
+			if (ret)
+				return ret;
+		}
+
+		/*
+		 * When an inode is first updated in a new snapshot, we may need
+		 * to clear has_child_snapshot
+		 */
+		if (deleted_delta > 0) {
+			int ret = update_inode_has_children(trans, new, false);
+			if (ret)
+				return ret;
+		}
+	}
+
+	return 0;
+}
+
+int bch2_inode_generation_validate(struct bch_fs *c, struct bkey_s_c k,
+				   struct bkey_validate_context from)
+{
+	int ret = 0;
+
+	bkey_fsck_err_on(k.k->p.inode,
+			 c, inode_pos_inode_nonzero,
+			 "nonzero k.p.inode");
+fsck_err:
+	return ret;
+}
+
+void bch2_inode_generation_to_text(struct printbuf *out, struct bch_fs *c,
+				   struct bkey_s_c k)
+{
+	struct bkey_s_c_inode_generation gen = bkey_s_c_to_inode_generation(k);
+
+	prt_printf(out, "generation: %u", le32_to_cpu(gen.v->bi_generation));
+}
+
+int bch2_inode_alloc_cursor_validate(struct bch_fs *c, struct bkey_s_c k,
+				   struct bkey_validate_context from)
+{
+	int ret = 0;
+
+	bkey_fsck_err_on(k.k->p.inode != LOGGED_OPS_INUM_inode_cursors,
+			 c, inode_alloc_cursor_inode_bad,
+			 "k.p.inode bad");
+fsck_err:
+	return ret;
+}
+
+void bch2_inode_alloc_cursor_to_text(struct printbuf *out, struct bch_fs *c,
+				     struct bkey_s_c k)
+{
+	struct bkey_s_c_inode_alloc_cursor i = bkey_s_c_to_inode_alloc_cursor(k);
+
+	prt_printf(out, "idx %llu generation %llu",
+		   le64_to_cpu(i.v->idx),
+		   le64_to_cpu(i.v->gen));
+}
+
+void bch2_inode_init_early(struct bch_fs *c,
+			   struct bch_inode_unpacked *inode_u)
+{
+	enum bch_str_hash_type str_hash =
+		bch2_str_hash_opt_to_type(c, c->opts.str_hash);
+
+	memset(inode_u, 0, sizeof(*inode_u));
+
+	SET_INODE_STR_HASH(inode_u, str_hash);
+	get_random_bytes(&inode_u->bi_hash_seed, sizeof(inode_u->bi_hash_seed));
+}
+
+void bch2_inode_init_late(struct bch_fs *c,
+			  struct bch_inode_unpacked *inode_u, u64 now,
+			  uid_t uid, gid_t gid, umode_t mode, dev_t rdev,
+			  struct bch_inode_unpacked *parent)
+{
+	inode_u->bi_mode	= mode;
+	inode_u->bi_uid		= uid;
+	inode_u->bi_gid		= gid;
+	inode_u->bi_dev		= rdev;
+	inode_u->bi_atime	= now;
+	inode_u->bi_mtime	= now;
+	inode_u->bi_ctime	= now;
+	inode_u->bi_otime	= now;
+
+	if (parent && parent->bi_mode & S_ISGID) {
+		inode_u->bi_gid = parent->bi_gid;
+		if (S_ISDIR(mode))
+			inode_u->bi_mode |= S_ISGID;
+	}
+
+	if (parent) {
+#define x(_name, ...)	inode_u->bi_##_name = parent->bi_##_name;
+		BCH_INODE_OPTS()
+#undef x
+	}
+
+	if (!S_ISDIR(mode))
+		inode_u->bi_casefold = 0;
+
+	if (bch2_inode_casefold(c, inode_u))
+		inode_u->bi_flags |= BCH_INODE_has_case_insensitive;
+}
+
+void bch2_inode_init(struct bch_fs *c, struct bch_inode_unpacked *inode_u,
+		     uid_t uid, gid_t gid, umode_t mode, dev_t rdev,
+		     struct bch_inode_unpacked *parent)
+{
+	bch2_inode_init_early(c, inode_u);
+	bch2_inode_init_late(c, inode_u, bch2_current_time(c),
+			     uid, gid, mode, rdev, parent);
+}
+
+static struct bkey_i_inode_alloc_cursor *
+bch2_inode_alloc_cursor_get(struct btree_trans *trans, u64 cpu, u64 *min, u64 *max)
+{
+	struct bch_fs *c = trans->c;
+
+	u64 cursor_idx = c->opts.inodes_32bit ? 0 : cpu + 1;
+
+	cursor_idx &= ~(~0ULL << c->opts.shard_inode_numbers_bits);
+
+	struct btree_iter iter;
+	struct bkey_s_c k = bch2_bkey_get_iter(trans, &iter,
+					BTREE_ID_logged_ops,
+					POS(LOGGED_OPS_INUM_inode_cursors, cursor_idx),
+					BTREE_ITER_cached);
+	int ret = bkey_err(k);
+	if (ret)
+		return ERR_PTR(ret);
+
+	struct bkey_i_inode_alloc_cursor *cursor =
+		k.k->type == KEY_TYPE_inode_alloc_cursor
+		? bch2_bkey_make_mut_typed(trans, &iter, &k, 0, inode_alloc_cursor)
+		: bch2_bkey_alloc(trans, &iter, 0, inode_alloc_cursor);
+	ret = PTR_ERR_OR_ZERO(cursor);
+	if (ret)
+		goto err;
+
+	if (c->opts.inodes_32bit) {
+		*min = BLOCKDEV_INODE_MAX;
+		*max = INT_MAX;
+	} else {
+		cursor->v.bits = c->opts.shard_inode_numbers_bits;
+
+		unsigned bits = 63 - c->opts.shard_inode_numbers_bits;
+
+		*min = max(cpu << bits, (u64) INT_MAX + 1);
+		*max = (cpu << bits) | ~(ULLONG_MAX << bits);
+	}
+
+	if (le64_to_cpu(cursor->v.idx)  < *min)
+		cursor->v.idx = cpu_to_le64(*min);
+
+	if (le64_to_cpu(cursor->v.idx) >= *max) {
+		cursor->v.idx = cpu_to_le64(*min);
+		le32_add_cpu(&cursor->v.gen, 1);
+	}
+err:
+	bch2_trans_iter_exit(trans, &iter);
+	return ret ? ERR_PTR(ret) : cursor;
+}
+
+/*
+ * This just finds an empty slot:
+ */
+int bch2_inode_create(struct btree_trans *trans,
+		      struct btree_iter *iter,
+		      struct bch_inode_unpacked *inode_u,
+		      u32 snapshot, u64 cpu)
+{
+	u64 min, max;
+	struct bkey_i_inode_alloc_cursor *cursor =
+		bch2_inode_alloc_cursor_get(trans, cpu, &min, &max);
+	int ret = PTR_ERR_OR_ZERO(cursor);
+	if (ret)
+		return ret;
+
+	u64 start = le64_to_cpu(cursor->v.idx);
+	u64 pos = start;
+
+	bch2_trans_iter_init(trans, iter, BTREE_ID_inodes, POS(0, pos),
+			     BTREE_ITER_all_snapshots|
+			     BTREE_ITER_intent);
+	struct bkey_s_c k;
+again:
+	while ((k = bch2_btree_iter_peek(trans, iter)).k &&
+	       !(ret = bkey_err(k)) &&
+	       bkey_lt(k.k->p, POS(0, max))) {
+		if (pos < iter->pos.offset)
+			goto found_slot;
+
+		/*
+		 * We don't need to iterate over keys in every snapshot once
+		 * we've found just one:
+		 */
+		pos = iter->pos.offset + 1;
+		bch2_btree_iter_set_pos(trans, iter, POS(0, pos));
+	}
+
+	if (!ret && pos < max)
+		goto found_slot;
+
+	if (!ret && start == min)
+		ret = bch_err_throw(trans->c, ENOSPC_inode_create);
+
+	if (ret) {
+		bch2_trans_iter_exit(trans, iter);
+		return ret;
+	}
+
+	/* Retry from start */
+	pos = start = min;
+	bch2_btree_iter_set_pos(trans, iter, POS(0, pos));
+	le32_add_cpu(&cursor->v.gen, 1);
+	goto again;
+found_slot:
+	bch2_btree_iter_set_pos(trans, iter, SPOS(0, pos, snapshot));
+	k = bch2_btree_iter_peek_slot(trans, iter);
+	ret = bkey_err(k);
+	if (ret) {
+		bch2_trans_iter_exit(trans, iter);
+		return ret;
+	}
+
+	inode_u->bi_inum	= k.k->p.offset;
+	inode_u->bi_generation	= le64_to_cpu(cursor->v.gen);
+	cursor->v.idx		= cpu_to_le64(k.k->p.offset + 1);
+	return 0;
+}
+
+static int bch2_inode_delete_keys(struct btree_trans *trans,
+				  subvol_inum inum, enum btree_id id)
+{
+	struct btree_iter iter;
+	struct bkey_s_c k;
+	struct bkey_i delete;
+	struct bpos end = POS(inum.inum, U64_MAX);
+	u32 snapshot;
+	int ret = 0;
+
+	/*
+	 * We're never going to be deleting partial extents, no need to use an
+	 * extent iterator:
+	 */
+	bch2_trans_iter_init(trans, &iter, id, POS(inum.inum, 0),
+			     BTREE_ITER_intent);
+
+	while (1) {
+		bch2_trans_begin(trans);
+
+		ret = bch2_subvolume_get_snapshot(trans, inum.subvol, &snapshot);
+		if (ret)
+			goto err;
+
+		bch2_btree_iter_set_snapshot(trans, &iter, snapshot);
+
+		k = bch2_btree_iter_peek_max(trans, &iter, end);
+		ret = bkey_err(k);
+		if (ret)
+			goto err;
+
+		if (!k.k)
+			break;
+
+		bkey_init(&delete.k);
+		delete.k.p = iter.pos;
+
+		if (iter.flags & BTREE_ITER_is_extents)
+			bch2_key_resize(&delete.k,
+					bpos_min(end, k.k->p).offset -
+					iter.pos.offset);
+
+		ret = bch2_trans_update(trans, &iter, &delete, 0) ?:
+		      bch2_trans_commit(trans, NULL, NULL,
+					BCH_TRANS_COMMIT_no_enospc);
+err:
+		if (ret && !bch2_err_matches(ret, BCH_ERR_transaction_restart))
+			break;
+	}
+
+	bch2_trans_iter_exit(trans, &iter);
+	return ret;
+}
+
+int bch2_inode_rm(struct bch_fs *c, subvol_inum inum)
+{
+	struct btree_trans *trans = bch2_trans_get(c);
+	struct btree_iter iter = {};
+	struct bkey_s_c k;
+	u32 snapshot;
+	int ret;
+
+	ret = lockrestart_do(trans, may_delete_deleted_inum(trans, inum));
+	if (ret)
+		goto err2;
+
+	/*
+	 * If this was a directory, there shouldn't be any real dirents left -
+	 * but there could be whiteouts (from hash collisions) that we should
+	 * delete:
+	 *
+	 * XXX: the dirent code ideally would delete whiteouts when they're no
+	 * longer needed
+	 */
+	ret   = bch2_inode_delete_keys(trans, inum, BTREE_ID_extents) ?:
+		bch2_inode_delete_keys(trans, inum, BTREE_ID_xattrs) ?:
+		bch2_inode_delete_keys(trans, inum, BTREE_ID_dirents);
+	if (ret)
+		goto err2;
+retry:
+	bch2_trans_begin(trans);
+
+	ret = bch2_subvolume_get_snapshot(trans, inum.subvol, &snapshot);
+	if (ret)
+		goto err;
+
+	k = bch2_bkey_get_iter(trans, &iter, BTREE_ID_inodes,
+			       SPOS(0, inum.inum, snapshot),
+			       BTREE_ITER_intent|BTREE_ITER_cached);
+	ret = bkey_err(k);
+	if (ret)
+		goto err;
+
+	if (!bkey_is_inode(k.k)) {
+		bch2_fs_inconsistent(c,
+				     "inode %llu:%u not found when deleting",
+				     inum.inum, snapshot);
+		ret = bch_err_throw(c, ENOENT_inode);
+		goto err;
+	}
+
+	ret   = bch2_btree_delete_at(trans, &iter, 0) ?:
+		bch2_trans_commit(trans, NULL, NULL,
+				BCH_TRANS_COMMIT_no_enospc);
+err:
+	bch2_trans_iter_exit(trans, &iter);
+	if (bch2_err_matches(ret, BCH_ERR_transaction_restart))
+		goto retry;
+
+	if (ret)
+		goto err2;
+
+	ret = delete_ancestor_snapshot_inodes(trans, SPOS(0, inum.inum, snapshot));
+err2:
+	bch2_trans_put(trans);
+	return ret;
 }
 
 int bch2_inode_nlink_inc(struct bch_inode_unpacked *bi)
@@ -977,12 +1234,18 @@ struct bch_opts bch2_inode_opts_to_opts(struct bch_inode_unpacked *inode)
 void bch2_inode_opts_get(struct bch_io_opts *opts, struct bch_fs *c,
 			 struct bch_inode_unpacked *inode)
 {
-#define x(_name, _bits)		opts->_name = inode_opt_get(c, inode, _name);
+#define x(_name, _bits)							\
+	if ((inode)->bi_##_name) {					\
+		opts->_name = inode->bi_##_name - 1;			\
+		opts->_name##_from_inode = true;			\
+	} else {							\
+		opts->_name = c->opts._name;				\
+		opts->_name##_from_inode = false;			\
+	}
 	BCH_INODE_OPTS()
 #undef x
 
-	if (opts->nocow)
-		opts->compression = opts->background_compression = opts->data_checksum = opts->erasure_code = 0;
+	bch2_io_opts_fixups(opts);
 }
 
 int bch2_inum_opts_get(struct btree_trans *trans, subvol_inum inum, struct bch_io_opts *opts)
@@ -997,10 +1260,48 @@ int bch2_inum_opts_get(struct btree_trans *trans, subvol_inum inum, struct bch_i
 	return 0;
 }
 
-int bch2_inode_rm_snapshot(struct btree_trans *trans, u64 inum, u32 snapshot)
+int bch2_inode_set_casefold(struct btree_trans *trans, subvol_inum inum,
+			    struct bch_inode_unpacked *bi, unsigned v)
 {
 	struct bch_fs *c = trans->c;
-	struct btree_iter iter = { NULL };
+
+#ifndef CONFIG_UNICODE
+	bch_err(c, "Cannot use casefolding on a kernel without CONFIG_UNICODE");
+	return -EOPNOTSUPP;
+#endif
+
+	if (c->opts.casefold_disabled)
+		return -EOPNOTSUPP;
+
+	int ret = 0;
+	/* Not supported on individual files. */
+	if (!S_ISDIR(bi->bi_mode))
+		return -EOPNOTSUPP;
+
+	/*
+	 * Make sure the dir is empty, as otherwise we'd need to
+	 * rehash everything and update the dirent keys.
+	 */
+	ret = bch2_empty_dir_trans(trans, inum);
+	if (ret < 0)
+		return ret;
+
+	ret = bch2_request_incompat_feature(c, bcachefs_metadata_version_casefolding);
+	if (ret)
+		return ret;
+
+	bch2_check_set_feature(c, BCH_FEATURE_casefolding);
+
+	bi->bi_casefold = v + 1;
+	bi->bi_fields_set |= BIT(Inode_opt_casefold);
+
+	return bch2_maybe_propagate_has_case_insensitive(trans, inum, bi);
+}
+
+static noinline int __bch2_inode_rm_snapshot(struct btree_trans *trans, u64 inum, u32 snapshot)
+{
+	struct bch_fs *c = trans->c;
+	struct btree_iter iter = {};
 	struct bkey_i_inode_generation delete;
 	struct bch_inode_unpacked inode_u;
 	struct bkey_s_c k;
@@ -1026,7 +1327,7 @@ retry:
 	bch2_trans_begin(trans);
 
 	k = bch2_bkey_get_iter(trans, &iter, BTREE_ID_inodes,
-			       SPOS(0, inum, snapshot), BTREE_ITER_INTENT);
+			       SPOS(0, inum, snapshot), BTREE_ITER_intent);
 	ret = bkey_err(k);
 	if (ret)
 		goto err;
@@ -1035,7 +1336,7 @@ retry:
 		bch2_fs_inconsistent(c,
 				     "inode %llu:%u not found when deleting",
 				     inum, snapshot);
-		ret = -EIO;
+		ret = bch_err_throw(c, ENOENT_inode);
 		goto err;
 	}
 
@@ -1060,36 +1361,78 @@ err:
 	return ret ?: -BCH_ERR_transaction_restart_nested;
 }
 
-static int may_delete_deleted_inode(struct btree_trans *trans,
-				    struct btree_iter *iter,
-				    struct bpos pos,
-				    bool *need_another_pass)
+/*
+ * After deleting an inode, there may be versions in older snapshots that should
+ * also be deleted - if they're not referenced by sibling snapshots and not open
+ * in other subvolumes:
+ */
+static int delete_ancestor_snapshot_inodes(struct btree_trans *trans, struct bpos pos)
+{
+	struct btree_iter iter;
+	struct bkey_s_c k;
+	int ret;
+next_parent:
+	ret = lockrestart_do(trans,
+		bkey_err(k = bch2_inode_get_iter_snapshot_parent(trans, &iter, pos, 0)));
+	if (ret || !k.k)
+		return ret;
+
+	bool unlinked = bkey_is_unlinked_inode(k);
+	pos = k.k->p;
+	bch2_trans_iter_exit(trans, &iter);
+
+	if (!unlinked)
+		return 0;
+
+	ret = lockrestart_do(trans, bch2_inode_or_descendents_is_open(trans, pos));
+	if (ret)
+		return ret < 0 ? ret : 0;
+
+	ret = __bch2_inode_rm_snapshot(trans, pos.offset, pos.snapshot);
+	if (ret)
+		return ret;
+	goto next_parent;
+}
+
+int bch2_inode_rm_snapshot(struct btree_trans *trans, u64 inum, u32 snapshot)
+{
+	return __bch2_inode_rm_snapshot(trans, inum, snapshot) ?:
+		delete_ancestor_snapshot_inodes(trans, SPOS(0, inum, snapshot));
+}
+
+static int may_delete_deleted_inode(struct btree_trans *trans, struct bpos pos,
+				    bool from_deleted_inodes)
 {
 	struct bch_fs *c = trans->c;
 	struct btree_iter inode_iter;
 	struct bkey_s_c k;
 	struct bch_inode_unpacked inode;
+	struct printbuf buf = PRINTBUF;
 	int ret;
 
-	k = bch2_bkey_get_iter(trans, &inode_iter, BTREE_ID_inodes, pos, BTREE_ITER_CACHED);
+	k = bch2_bkey_get_iter(trans, &inode_iter, BTREE_ID_inodes, pos, BTREE_ITER_cached);
 	ret = bkey_err(k);
 	if (ret)
 		return ret;
 
-	ret = bkey_is_inode(k.k) ? 0 : -BCH_ERR_ENOENT_inode;
-	if (fsck_err_on(!bkey_is_inode(k.k), c,
-			deleted_inode_missing,
+	ret = bkey_is_inode(k.k) ? 0 : bch_err_throw(c, ENOENT_inode);
+	if (fsck_err_on(from_deleted_inodes && ret,
+			trans, deleted_inode_missing,
 			"nonexistent inode %llu:%u in deleted_inodes btree",
 			pos.offset, pos.snapshot))
 		goto delete;
+	if (ret)
+		goto out;
 
 	ret = bch2_inode_unpack(k, &inode);
 	if (ret)
 		goto out;
 
 	if (S_ISDIR(inode.bi_mode)) {
-		ret = bch2_empty_dir_snapshot(trans, pos.offset, pos.snapshot);
-		if (fsck_err_on(ret == -ENOTEMPTY, c, deleted_inode_is_dir,
+		ret = bch2_empty_dir_snapshot(trans, pos.offset, 0, pos.snapshot);
+		if (fsck_err_on(from_deleted_inodes &&
+				bch2_err_matches(ret, ENOTEMPTY),
+				trans, deleted_inode_is_dir,
 				"non empty directory %llu:%u in deleted_inodes btree",
 				pos.offset, pos.snapshot))
 			goto delete;
@@ -1097,61 +1440,94 @@ static int may_delete_deleted_inode(struct btree_trans *trans,
 			goto out;
 	}
 
-	if (fsck_err_on(!(inode.bi_flags & BCH_INODE_unlinked), c,
-			deleted_inode_not_unlinked,
+	ret = inode.bi_flags & BCH_INODE_unlinked ? 0 : bch_err_throw(c, inode_not_unlinked);
+	if (fsck_err_on(from_deleted_inodes && ret,
+			trans, deleted_inode_not_unlinked,
 			"non-deleted inode %llu:%u in deleted_inodes btree",
 			pos.offset, pos.snapshot))
 		goto delete;
-
-	if (c->sb.clean &&
-	    !fsck_err(c,
-		      deleted_inode_but_clean,
-		      "filesystem marked as clean but have deleted inode %llu:%u",
-		      pos.offset, pos.snapshot)) {
-		ret = 0;
+	if (ret)
 		goto out;
+
+	ret = !(inode.bi_flags & BCH_INODE_has_child_snapshot)
+		? 0 : bch_err_throw(c, inode_has_child_snapshot);
+
+	if (fsck_err_on(from_deleted_inodes && ret,
+			trans, deleted_inode_has_child_snapshots,
+			"inode with child snapshots %llu:%u in deleted_inodes btree",
+			pos.offset, pos.snapshot))
+		goto delete;
+	if (ret)
+		goto out;
+
+	ret = bch2_inode_has_child_snapshots(trans, k.k->p);
+	if (ret < 0)
+		goto out;
+
+	if (ret) {
+		if (fsck_err(trans, inode_has_child_snapshots_wrong,
+			     "inode has_child_snapshots flag wrong (should be set)\n%s",
+			     (printbuf_reset(&buf),
+			      bch2_inode_unpacked_to_text(&buf, &inode),
+			      buf.buf))) {
+			inode.bi_flags |= BCH_INODE_has_child_snapshot;
+			ret = __bch2_fsck_write_inode(trans, &inode);
+			if (ret)
+				goto out;
+		}
+
+		if (!from_deleted_inodes) {
+			ret =   bch2_trans_commit(trans, NULL, NULL, BCH_TRANS_COMMIT_no_enospc) ?:
+				bch_err_throw(c, inode_has_child_snapshot);
+			goto out;
+		}
+
+		goto delete;
+
 	}
 
-	if (bch2_snapshot_is_internal_node(c, pos.snapshot)) {
-		struct bpos new_min_pos;
-
-		ret = bch2_propagate_key_to_snapshot_leaves(trans, inode_iter.btree_id, k, &new_min_pos);
-		if (ret)
+	if (from_deleted_inodes) {
+		if (test_bit(BCH_FS_clean_recovery, &c->flags) &&
+		    !fsck_err(trans, deleted_inode_but_clean,
+			      "filesystem marked as clean but have deleted inode %llu:%u",
+			      pos.offset, pos.snapshot)) {
+			ret = 0;
 			goto out;
+		}
 
-		inode.bi_flags &= ~BCH_INODE_unlinked;
-
-		ret = bch2_inode_write_flags(trans, &inode_iter, &inode,
-					     BTREE_UPDATE_INTERNAL_SNAPSHOT_NODE);
-		bch_err_msg(c, ret, "clearing inode unlinked flag");
-		if (ret)
-			goto out;
-
-		/*
-		 * We'll need another write buffer flush to pick up the new
-		 * unlinked inodes in the snapshot leaves:
-		 */
-		*need_another_pass = true;
-		goto out;
+		ret = 1;
 	}
-
-	ret = 1;
 out:
 fsck_err:
 	bch2_trans_iter_exit(trans, &inode_iter);
+	printbuf_exit(&buf);
 	return ret;
 delete:
-	ret = bch2_btree_bit_mod(trans, BTREE_ID_deleted_inodes, pos, false);
+	ret = bch2_btree_bit_mod_buffered(trans, BTREE_ID_deleted_inodes, pos, false);
 	goto out;
+}
+
+static int may_delete_deleted_inum(struct btree_trans *trans, subvol_inum inum)
+{
+	u32 snapshot;
+
+	return bch2_subvolume_get_snapshot(trans, inum.subvol, &snapshot) ?:
+		may_delete_deleted_inode(trans, SPOS(0, inum.inum, snapshot), false);
 }
 
 int bch2_delete_dead_inodes(struct bch_fs *c)
 {
 	struct btree_trans *trans = bch2_trans_get(c);
-	bool need_another_pass;
 	int ret;
-again:
-	need_another_pass = false;
+
+	/*
+	 * if we ran check_inodes() unlinked inodes will have already been
+	 * cleaned up but the write buffer will be out of sync; therefore we
+	 * alway need a write buffer flush
+	 */
+	ret = bch2_btree_write_buffer_flush_sync(trans);
+	if (ret)
+		goto err;
 
 	/*
 	 * Weird transaction restart handling here because on successful delete,
@@ -1160,11 +1536,12 @@ again:
 	 * flushed and we'd spin:
 	 */
 	ret = for_each_btree_key_commit(trans, iter, BTREE_ID_deleted_inodes, POS_MIN,
-					BTREE_ITER_PREFETCH|BTREE_ITER_ALL_SNAPSHOTS, k,
+					BTREE_ITER_prefetch|BTREE_ITER_all_snapshots, k,
 					NULL, NULL, BCH_TRANS_COMMIT_no_enospc, ({
-		ret = may_delete_deleted_inode(trans, &iter, k.k->p, &need_another_pass);
+		ret = may_delete_deleted_inode(trans, k.k->p, true);
 		if (ret > 0) {
-			bch_verbose(c, "deleting unlinked inode %llu:%u", k.k->p.offset, k.k->p.snapshot);
+			bch_verbose_ratelimited(c, "deleting unlinked inode %llu:%u",
+						k.k->p.offset, k.k->p.snapshot);
 
 			ret = bch2_inode_rm_snapshot(trans, k.k->p.offset, k.k->p.snapshot);
 			/*
@@ -1182,14 +1559,8 @@ again:
 
 		ret;
 	}));
-
-	if (!ret && need_another_pass) {
-		ret = bch2_btree_write_buffer_flush_sync(trans);
-		if (ret)
-			goto err;
-		goto again;
-	}
 err:
 	bch2_trans_put(trans);
+	bch_err_fn(c, ret);
 	return ret;
 }

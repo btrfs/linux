@@ -15,6 +15,8 @@
 
 #include "ctl.h"
 
+#define CREATE_TRACE_POINTS
+#include "trace.h"
 
 #define TB_CTL_RX_PKG_COUNT	10
 #define TB_CTL_RETRIES		4
@@ -32,6 +34,7 @@
  * @timeout_msec: Default timeout for non-raw control messages
  * @callback: Callback called when hotplug message is received
  * @callback_data: Data passed to @callback
+ * @index: Domain number. This will be output with the trace record.
  */
 struct tb_ctl {
 	struct tb_nhi *nhi;
@@ -47,6 +50,8 @@ struct tb_ctl {
 	int timeout_msec;
 	event_cb callback;
 	void *callback_data;
+
+	int index;
 };
 
 
@@ -64,6 +69,9 @@ struct tb_ctl {
 
 #define tb_ctl_dbg(ctl, format, arg...) \
 	dev_dbg(&(ctl)->nhi->pdev->dev, format, ## arg)
+
+#define tb_ctl_dbg_once(ctl, format, arg...) \
+	dev_dbg_once(&(ctl)->nhi->pdev->dev, format, ## arg)
 
 static DECLARE_WAIT_QUEUE_HEAD(tb_cfg_request_cancel_queue);
 /* Serializes access to request kref_get/put */
@@ -143,6 +151,11 @@ static void tb_cfg_request_dequeue(struct tb_cfg_request *req)
 	struct tb_ctl *ctl = req->ctl;
 
 	mutex_lock(&ctl->request_queue_lock);
+	if (!test_bit(TB_CFG_REQUEST_ACTIVE, &req->flags)) {
+		mutex_unlock(&ctl->request_queue_lock);
+		return;
+	}
+
 	list_del(&req->list);
 	clear_bit(TB_CFG_REQUEST_ACTIVE, &req->flags);
 	if (test_bit(TB_CFG_REQUEST_CANCELED, &req->flags))
@@ -260,7 +273,7 @@ static struct tb_cfg_result parse_header(const struct ctl_pkg *pkg, u32 len,
 	return res;
 }
 
-static void tb_cfg_print_error(struct tb_ctl *ctl,
+static void tb_cfg_print_error(struct tb_ctl *ctl, enum tb_cfg_space space,
 			       const struct tb_cfg_result *res)
 {
 	WARN_ON(res->err != 1);
@@ -274,8 +287,8 @@ static void tb_cfg_print_error(struct tb_ctl *ctl,
 		 * Invalid cfg_space/offset/length combination in
 		 * cfg_read/cfg_write.
 		 */
-		tb_ctl_dbg(ctl, "%llx:%x: invalid config space or offset\n",
-			   res->response_route, res->response_port);
+		tb_ctl_dbg_once(ctl, "%llx:%x: invalid config space (%u) or offset\n",
+				res->response_route, res->response_port, space);
 		return;
 	case TB_CFG_ERROR_NO_SUCH_PORT:
 		/*
@@ -304,7 +317,7 @@ static void tb_cfg_print_error(struct tb_ctl *ctl,
 
 static __be32 tb_crc(const void *data, size_t len)
 {
-	return cpu_to_be32(~__crc32c_le(~0, data, len));
+	return cpu_to_be32(~crc32c(~0, data, len));
 }
 
 static void tb_ctl_pkg_free(struct ctl_pkg *pkg)
@@ -369,6 +382,9 @@ static int tb_ctl_tx(struct tb_ctl *ctl, const void *data, size_t len,
 	pkg->frame.size = len + 4;
 	pkg->frame.sof = type;
 	pkg->frame.eof = type;
+
+	trace_tb_tx(ctl->index, type, data, len);
+
 	cpu_to_be32_array(pkg->buffer, data, len / 4);
 	*(__be32 *) (pkg->buffer + len) = tb_crc(pkg->buffer, len);
 
@@ -384,6 +400,7 @@ static int tb_ctl_tx(struct tb_ctl *ctl, const void *data, size_t len,
 static bool tb_ctl_handle_event(struct tb_ctl *ctl, enum tb_cfg_pkg_type type,
 				struct ctl_pkg *pkg, size_t size)
 {
+	trace_tb_event(ctl->index, type, pkg->buffer, size);
 	return ctl->callback(ctl->callback_data, type, pkg->buffer, size);
 }
 
@@ -489,6 +506,9 @@ static void tb_ctl_rx_callback(struct tb_ring *ring, struct ring_frame *frame,
 	 * triggered from messing with the active requests.
 	 */
 	req = tb_cfg_request_find(pkg->ctl, pkg);
+
+	trace_tb_rx(pkg->ctl->index, frame->eof, pkg->buffer, frame->size, !req);
+
 	if (req) {
 		if (req->copy(req, pkg))
 			schedule_work(&req->work);
@@ -614,6 +634,7 @@ struct tb_cfg_result tb_cfg_request_sync(struct tb_ctl *ctl,
 /**
  * tb_ctl_alloc() - allocate a control channel
  * @nhi: Pointer to NHI
+ * @index: Domain number
  * @timeout_msec: Default timeout used with non-raw control messages
  * @cb: Callback called for plug events
  * @cb_data: Data passed to @cb
@@ -622,14 +643,16 @@ struct tb_cfg_result tb_cfg_request_sync(struct tb_ctl *ctl,
  *
  * Return: Returns a pointer on success or NULL on failure.
  */
-struct tb_ctl *tb_ctl_alloc(struct tb_nhi *nhi, int timeout_msec, event_cb cb,
-			    void *cb_data)
+struct tb_ctl *tb_ctl_alloc(struct tb_nhi *nhi, int index, int timeout_msec,
+			    event_cb cb, void *cb_data)
 {
 	int i;
 	struct tb_ctl *ctl = kzalloc(sizeof(*ctl), GFP_KERNEL);
 	if (!ctl)
 		return NULL;
+
 	ctl->nhi = nhi;
+	ctl->index = index;
 	ctl->timeout_msec = timeout_msec;
 	ctl->callback = cb;
 	ctl->callback_data = cb_data;
@@ -1057,7 +1080,7 @@ static int tb_cfg_get_error(struct tb_ctl *ctl, enum tb_cfg_space space,
 	    res->tb_error == TB_CFG_ERROR_INVALID_CONFIG_SPACE)
 		return -ENODEV;
 
-	tb_cfg_print_error(ctl, res);
+	tb_cfg_print_error(ctl, space, res);
 
 	if (res->tb_error == TB_CFG_ERROR_LOCK)
 		return -EACCES;

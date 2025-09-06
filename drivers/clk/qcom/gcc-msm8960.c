@@ -7,7 +7,6 @@
 #include <linux/bitops.h>
 #include <linux/err.h>
 #include <linux/platform_device.h>
-#include <linux/property.h>
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/of_platform.h>
@@ -328,7 +327,7 @@ static const struct clk_parent_data gcc_pxo_pll8_pll3[] = {
 	{ .hw = &pll3.clkr.hw },
 };
 
-static struct freq_tbl clk_tbl_gsbi_uart[] = {
+static const struct freq_tbl clk_tbl_gsbi_uart[] = {
 	{  1843200, P_PLL8, 2,  6, 625 },
 	{  3686400, P_PLL8, 2, 12, 625 },
 	{  7372800, P_PLL8, 2, 24, 625 },
@@ -958,7 +957,7 @@ static struct clk_branch gsbi12_uart_clk = {
 	},
 };
 
-static struct freq_tbl clk_tbl_gsbi_qup[] = {
+static const struct freq_tbl clk_tbl_gsbi_qup[] = {
 	{  1100000, P_PXO,  1, 2, 49 },
 	{  5400000, P_PXO,  1, 1,  5 },
 	{ 10800000, P_PXO,  1, 2,  5 },
@@ -2940,7 +2939,7 @@ static struct clk_branch adm0_pbus_clk = {
 	},
 };
 
-static struct freq_tbl clk_tbl_ce3[] = {
+static const struct freq_tbl clk_tbl_ce3[] = {
 	{ 48000000, P_PLL8, 8 },
 	{ 100000000, P_PLL3, 12 },
 	{ 120000000, P_PLL3, 10 },
@@ -3761,7 +3760,7 @@ static void gcc_msm8960_remove(struct platform_device *pdev)
 
 static struct platform_driver gcc_msm8960_driver = {
 	.probe		= gcc_msm8960_probe,
-	.remove_new	= gcc_msm8960_remove,
+	.remove		= gcc_msm8960_remove,
 	.driver		= {
 		.name	= "gcc-msm8960",
 		.of_match_table = gcc_msm8960_match_table,

@@ -104,7 +104,7 @@ exit_up:
 }
 
 static ssize_t max6875_read(struct file *filp, struct kobject *kobj,
-			    struct bin_attribute *bin_attr,
+			    const struct bin_attribute *bin_attr,
 			    char *buf, loff_t off, size_t count)
 {
 	struct i2c_client *client = kobj_to_i2c_client(kobj);
@@ -183,7 +183,7 @@ static void max6875_remove(struct i2c_client *client)
 }
 
 static const struct i2c_device_id max6875_id[] = {
-	{ "max6875", 0 },
+	{ "max6875" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, max6875_id);

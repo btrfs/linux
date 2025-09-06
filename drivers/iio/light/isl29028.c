@@ -562,7 +562,7 @@ static const struct regmap_config isl29028_regmap_config = {
 	.volatile_reg = isl29028_is_volatile_reg,
 	.max_register = ISL29028_NUM_REGS - 1,
 	.num_reg_defaults_raw = ISL29028_NUM_REGS,
-	.cache_type = REGCACHE_RBTREE,
+	.cache_type = REGCACHE_MAPLE,
 };
 
 static int isl29028_probe(struct i2c_client *client)
@@ -678,9 +678,9 @@ static DEFINE_RUNTIME_DEV_PM_OPS(isl29028_pm_ops, isl29028_suspend,
 				 isl29028_resume, NULL);
 
 static const struct i2c_device_id isl29028_id[] = {
-	{"isl29028", 0},
-	{"isl29030", 0},
-	{}
+	{ "isl29028" },
+	{ "isl29030" },
+	{ }
 };
 MODULE_DEVICE_TABLE(i2c, isl29028_id);
 
@@ -688,7 +688,7 @@ static const struct of_device_id isl29028_of_match[] = {
 	{ .compatible = "isl,isl29028", }, /* for backward compat., don't use */
 	{ .compatible = "isil,isl29028", },
 	{ .compatible = "isil,isl29030", },
-	{ },
+	{ }
 };
 MODULE_DEVICE_TABLE(of, isl29028_of_match);
 

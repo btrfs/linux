@@ -26,7 +26,9 @@
 static DEFINE_MUTEX(wwan_register_lock); /* WWAN device create|remove lock */
 static DEFINE_IDA(minors); /* minors for WWAN port chardevs */
 static DEFINE_IDA(wwan_dev_ids); /* for unique WWAN device IDs */
-static struct class *wwan_class;
+static const struct class wwan_class = {
+	.name = "wwan",
+};
 static int wwan_major;
 static struct dentry *wwan_debugfs_dir;
 
@@ -130,7 +132,7 @@ static struct wwan_device *wwan_dev_get_by_parent(struct device *parent)
 {
 	struct device *dev;
 
-	dev = class_find_device(wwan_class, NULL, parent, wwan_dev_parent_match);
+	dev = class_find_device(&wwan_class, NULL, parent, wwan_dev_parent_match);
 	if (!dev)
 		return ERR_PTR(-ENODEV);
 
@@ -147,7 +149,7 @@ static struct wwan_device *wwan_dev_get_by_name(const char *name)
 {
 	struct device *dev;
 
-	dev = class_find_device(wwan_class, NULL, name, wwan_dev_name_match);
+	dev = class_find_device(&wwan_class, NULL, name, wwan_dev_name_match);
 	if (!dev)
 		return ERR_PTR(-ENODEV);
 
@@ -183,7 +185,7 @@ static struct wwan_device *wwan_dev_get_by_debugfs(struct dentry *dir)
 {
 	struct device *dev;
 
-	dev = class_find_device(wwan_class, NULL, dir, wwan_dev_debugfs_match);
+	dev = class_find_device(&wwan_class, NULL, dir, wwan_dev_debugfs_match);
 	if (!dev)
 		return ERR_PTR(-ENODEV);
 
@@ -239,7 +241,7 @@ static struct wwan_device *wwan_create_dev(struct device *parent)
 	}
 
 	wwandev->dev.parent = parent;
-	wwandev->dev.class = wwan_class;
+	wwandev->dev.class = &wwan_class;
 	wwandev->dev.type = &wwan_dev_type;
 	wwandev->id = id;
 	dev_set_name(&wwandev->dev, "wwan%d", wwandev->id);
@@ -265,7 +267,7 @@ done_unlock:
 
 static int is_wwan_child(struct device *dev, void *data)
 {
-	return dev->class == wwan_class;
+	return dev->class == &wwan_class;
 }
 
 static void wwan_remove_dev(struct wwan_device *wwandev)
@@ -328,6 +330,18 @@ static const struct {
 		.name = "XMMRPC",
 		.devsuf = "xmmrpc",
 	},
+	[WWAN_PORT_FASTBOOT] = {
+		.name = "FASTBOOT",
+		.devsuf = "fastboot",
+	},
+	[WWAN_PORT_ADB] = {
+		.name = "ADB",
+		.devsuf = "adb",
+	},
+	[WWAN_PORT_MIPC] = {
+		.name = "MIPC",
+		.devsuf = "mipc",
+	},
 };
 
 static ssize_t type_show(struct device *dev, struct device_attribute *attr,
@@ -371,7 +385,7 @@ static struct wwan_port *wwan_port_get_by_minor(unsigned int minor)
 {
 	struct device *dev;
 
-	dev = class_find_device(wwan_class, NULL, &minor, wwan_port_minor_match);
+	dev = class_find_device(&wwan_class, NULL, &minor, wwan_port_minor_match);
 	if (!dev)
 		return ERR_PTR(-ENODEV);
 
@@ -401,7 +415,7 @@ static int __wwan_port_dev_assign_name(struct wwan_port *port, const char *fmt)
 		return -ENOMEM;
 
 	/* Collect ids of same name format ports */
-	class_dev_iter_init(&iter, wwan_class, NULL, &wwan_port_dev_type);
+	class_dev_iter_init(&iter, &wwan_class, NULL, &wwan_port_dev_type);
 	while ((dev = class_dev_iter_next(&iter))) {
 		if (dev->parent != &wwandev->dev)
 			continue;
@@ -425,7 +439,7 @@ static int __wwan_port_dev_assign_name(struct wwan_port *port, const char *fmt)
 		return -ENFILE;
 	}
 
-	return dev_set_name(&port->dev, buf);
+	return dev_set_name(&port->dev, "%s", buf);
 }
 
 struct wwan_port *wwan_create_port(struct device *parent,
@@ -473,7 +487,7 @@ struct wwan_port *wwan_create_port(struct device *parent,
 	mutex_init(&port->data_lock);
 
 	port->dev.parent = &wwandev->dev;
-	port->dev.class = wwan_class;
+	port->dev.class = &wwan_class;
 	port->dev.type = &wwan_port_dev_type;
 	port->dev.devt = MKDEV(wwan_major, minor);
 	dev_set_drvdata(&port->dev, drvdata);
@@ -916,7 +930,7 @@ static int wwan_rtnl_validate(struct nlattr *tb[], struct nlattr *data[],
 	return 0;
 }
 
-static struct device_type wwan_type = { .name = "wwan" };
+static const struct device_type wwan_type = { .name = "wwan" };
 
 static struct net_device *wwan_rtnl_alloc(struct nlattr *tb[],
 					  const char *ifname,
@@ -953,14 +967,17 @@ out:
 	return dev;
 }
 
-static int wwan_rtnl_newlink(struct net *src_net, struct net_device *dev,
-			     struct nlattr *tb[], struct nlattr *data[],
+static int wwan_rtnl_newlink(struct net_device *dev,
+			     struct rtnl_newlink_params *params,
 			     struct netlink_ext_ack *extack)
 {
 	struct wwan_device *wwandev = wwan_dev_get_by_parent(dev->dev.parent);
-	u32 link_id = nla_get_u32(data[IFLA_WWAN_LINK_ID]);
 	struct wwan_netdev_priv *priv = netdev_priv(dev);
+	struct nlattr **data = params->data;
+	u32 link_id;
 	int ret;
+
+	link_id = nla_get_u32(data[IFLA_WWAN_LINK_ID]);
 
 	if (IS_ERR(wwandev))
 		return PTR_ERR(wwandev);
@@ -1032,7 +1049,7 @@ static const struct nla_policy wwan_rtnl_policy[IFLA_WWAN_MAX + 1] = {
 
 static struct rtnl_link_ops wwan_rtnl_link_ops __read_mostly = {
 	.kind = "wwan",
-	.maxtype = __IFLA_WWAN_MAX,
+	.maxtype = IFLA_WWAN_MAX,
 	.alloc = wwan_rtnl_alloc,
 	.validate = wwan_rtnl_validate,
 	.newlink = wwan_rtnl_newlink,
@@ -1047,6 +1064,11 @@ static void wwan_create_default_link(struct wwan_device *wwandev,
 {
 	struct nlattr *tb[IFLA_MAX + 1], *linkinfo[IFLA_INFO_MAX + 1];
 	struct nlattr *data[IFLA_WWAN_MAX + 1];
+	struct rtnl_newlink_params params = {
+		.src_net = &init_net,
+		.tb = tb,
+		.data = data,
+	};
 	struct net_device *dev;
 	struct nlmsghdr *nlh;
 	struct sk_buff *msg;
@@ -1091,7 +1113,7 @@ static void wwan_create_default_link(struct wwan_device *wwandev,
 	if (WARN_ON(IS_ERR(dev)))
 		goto unlock;
 
-	if (WARN_ON(wwan_rtnl_newlink(&init_net, dev, tb, data, NULL))) {
+	if (WARN_ON(wwan_rtnl_newlink(dev, &params, NULL))) {
 		free_netdev(dev);
 		goto unlock;
 	}
@@ -1208,11 +1230,9 @@ static int __init wwan_init(void)
 	if (err)
 		return err;
 
-	wwan_class = class_create("wwan");
-	if (IS_ERR(wwan_class)) {
-		err = PTR_ERR(wwan_class);
+	err = class_register(&wwan_class);
+	if (err)
 		goto unregister;
-	}
 
 	/* chrdev used for wwan ports */
 	wwan_major = __register_chrdev(0, 0, WWAN_MAX_MINORS, "wwan_port",
@@ -1229,7 +1249,7 @@ static int __init wwan_init(void)
 	return 0;
 
 destroy:
-	class_destroy(wwan_class);
+	class_unregister(&wwan_class);
 unregister:
 	rtnl_link_unregister(&wwan_rtnl_link_ops);
 	return err;
@@ -1240,7 +1260,7 @@ static void __exit wwan_exit(void)
 	debugfs_remove_recursive(wwan_debugfs_dir);
 	__unregister_chrdev(wwan_major, 0, WWAN_MAX_MINORS, "wwan_port");
 	rtnl_link_unregister(&wwan_rtnl_link_ops);
-	class_destroy(wwan_class);
+	class_unregister(&wwan_class);
 }
 
 module_init(wwan_init);

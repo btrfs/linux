@@ -90,11 +90,7 @@ struct voice {
  * we're not doing power management, we still need to allocate a page
  * for the silence buffer.
  */
-#ifdef CONFIG_PM_SLEEP
 #define SIS_SUSPEND_PAGES	4
-#else
-#define SIS_SUSPEND_PAGES	1
-#endif
 
 struct sis7019 {
 	unsigned long ioport;
@@ -872,7 +868,7 @@ static int sis_pcm_create(struct sis7019 *sis)
 		return rc;
 
 	pcm->private_data = sis;
-	strcpy(pcm->name, "SiS7019");
+	strscpy(pcm->name, "SiS7019");
 	sis->pcm = pcm;
 
 	snd_pcm_set_ops(pcm, SNDRV_PCM_STREAM_PLAYBACK, &sis_playback_ops);
@@ -1152,7 +1148,6 @@ static int sis_chip_init(struct sis7019 *sis)
 	return 0;
 }
 
-#ifdef CONFIG_PM_SLEEP
 static int sis_suspend(struct device *dev)
 {
 	struct snd_card *card = dev_get_drvdata(dev);
@@ -1231,11 +1226,7 @@ error:
 	return -EIO;
 }
 
-static SIMPLE_DEV_PM_OPS(sis_pm, sis_suspend, sis_resume);
-#define SIS_PM_OPS	&sis_pm
-#else
-#define SIS_PM_OPS	NULL
-#endif /* CONFIG_PM_SLEEP */
+static DEFINE_SIMPLE_DEV_PM_OPS(sis_pm, sis_suspend, sis_resume);
 
 static int sis_alloc_suspend(struct sis7019 *sis)
 {
@@ -1282,7 +1273,7 @@ static int sis_chip_create(struct snd_card *card,
 	sis->irq = -1;
 	sis->ioport = pci_resource_start(pci, 0);
 
-	rc = pci_request_regions(pci, "SiS7019");
+	rc = pcim_request_all_regions(pci, "SiS7019");
 	if (rc) {
 		dev_err(&pci->dev, "unable request regions\n");
 		return rc;
@@ -1357,8 +1348,8 @@ static int __snd_sis7019_probe(struct pci_dev *pci,
 	if (rc < 0)
 		return rc;
 
-	strcpy(card->driver, "SiS7019");
-	strcpy(card->shortname, "SiS7019");
+	strscpy(card->driver, "SiS7019");
+	strscpy(card->shortname, "SiS7019");
 	rc = sis_chip_create(card, pci);
 	if (rc)
 		return rc;
@@ -1397,7 +1388,7 @@ static struct pci_driver sis7019_driver = {
 	.id_table = snd_sis7019_ids,
 	.probe = snd_sis7019_probe,
 	.driver = {
-		.pm = SIS_PM_OPS,
+		.pm = &sis_pm,
 	},
 };
 

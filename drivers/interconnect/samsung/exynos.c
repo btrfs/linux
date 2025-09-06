@@ -82,7 +82,7 @@ static int exynos_generic_icc_set(struct icc_node *src, struct icc_node *dst)
 	return 0;
 }
 
-static struct icc_node *exynos_generic_icc_xlate(struct of_phandle_args *spec,
+static struct icc_node *exynos_generic_icc_xlate(const struct of_phandle_args *spec,
 						 void *data)
 {
 	struct exynos_icc_priv *priv = data;
@@ -134,6 +134,11 @@ static int exynos_generic_icc_probe(struct platform_device *pdev)
 	priv->node = icc_node;
 	icc_node->name = devm_kasprintf(&pdev->dev, GFP_KERNEL, "%pOFn",
 					bus_dev->of_node);
+	if (!icc_node->name) {
+		icc_node_destroy(pdev->id);
+		return -ENOMEM;
+	}
+
 	if (of_property_read_u32(bus_dev->of_node, "samsung,data-clock-ratio",
 				 &priv->bus_clk_ratio))
 		priv->bus_clk_ratio = EXYNOS_ICC_DEFAULT_BUS_CLK_RATIO;
@@ -180,7 +185,7 @@ static struct platform_driver exynos_generic_icc_driver = {
 		.sync_state = icc_sync_state,
 	},
 	.probe = exynos_generic_icc_probe,
-	.remove_new = exynos_generic_icc_remove,
+	.remove = exynos_generic_icc_remove,
 };
 module_platform_driver(exynos_generic_icc_driver);
 

@@ -21,6 +21,7 @@
  *
  */
 
+#include <linux/export.h>
 #include <linux/init.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
@@ -43,19 +44,21 @@ static const struct drm_driver amdgpu_xcp_driver = {
 	.minor = 0,
 };
 
-static int pdev_num;
+static int8_t pdev_num;
 static struct xcp_device *xcp_dev[MAX_XCP_PLATFORM_DEVICE];
 
 int amdgpu_xcp_drm_dev_alloc(struct drm_device **ddev)
 {
 	struct platform_device *pdev;
 	struct xcp_device *pxcp_dev;
+	char dev_name[20];
 	int ret;
 
 	if (pdev_num >= MAX_XCP_PLATFORM_DEVICE)
 		return -ENODEV;
 
-	pdev = platform_device_register_simple("amdgpu_xcp", pdev_num, NULL, 0);
+	snprintf(dev_name, sizeof(dev_name), "amdgpu_xcp_%d", pdev_num);
+	pdev = platform_device_register_simple(dev_name, -1, NULL, 0);
 	if (IS_ERR(pdev))
 		return PTR_ERR(pdev);
 

@@ -14,6 +14,7 @@
 #include <linux/export.h>
 #include <linux/delay.h>
 #include <linux/io.h>
+#include <linux/string.h>
 #include <sound/core.h>
 #include <sound/emu8000.h>
 #include <sound/emu8000_reg.h>
@@ -160,8 +161,8 @@ snd_emu8000_detect(struct snd_emu8000 *emu)
 	if ((EMU8000_HWCF2_READ(emu) & 0x0003) != 0x0003)
 		return -ENODEV;
 
-	snd_printdd("EMU8000 [0x%lx]: Synth chip found\n",
-                    emu->port1);
+	dev_dbg(emu->card->dev, "EMU8000 [0x%lx]: Synth chip found\n",
+		emu->port1);
 	return 0;
 }
 
@@ -652,7 +653,7 @@ snd_emu8000_load_chorus_fx(struct snd_emu8000 *emu, int mode, const void __user 
 {
 	struct soundfont_chorus_fx rec;
 	if (mode < SNDRV_EMU8000_CHORUS_PREDEFINED || mode >= SNDRV_EMU8000_CHORUS_NUMBERS) {
-		snd_printk(KERN_WARNING "invalid chorus mode %d for uploading\n", mode);
+		dev_warn(emu->card->dev, "invalid chorus mode %d for uploading\n", mode);
 		return -EINVAL;
 	}
 	if (len < (long)sizeof(rec) || copy_from_user(&rec, buf, sizeof(rec)))
@@ -780,7 +781,7 @@ snd_emu8000_load_reverb_fx(struct snd_emu8000 *emu, int mode, const void __user 
 	struct soundfont_reverb_fx rec;
 
 	if (mode < SNDRV_EMU8000_REVERB_PREDEFINED || mode >= SNDRV_EMU8000_REVERB_NUMBERS) {
-		snd_printk(KERN_WARNING "invalid reverb mode %d for uploading\n", mode);
+		dev_warn(emu->card->dev, "invalid reverb mode %d for uploading\n", mode);
 		return -EINVAL;
 	}
 	if (len < (long)sizeof(rec) || copy_from_user(&rec, buf, sizeof(rec)))
@@ -1039,10 +1040,8 @@ snd_emu8000_create_mixer(struct snd_card *card, struct snd_emu8000 *emu)
 	return 0;
 
 __error:
-	for (i = 0; i < EMU8000_NUM_CONTROLS; i++) {
-		if (emu->controls[i])
-			snd_ctl_remove(card, emu->controls[i]);
-	}
+	for (i = 0; i < EMU8000_NUM_CONTROLS; i++)
+		snd_ctl_remove(card, emu->controls[i]);
 	return err;
 }
 
@@ -1074,7 +1073,8 @@ snd_emu8000_new(struct snd_card *card, int index, long port, int seq_ports,
 	if (!devm_request_region(card->dev, hw->port1, 4, "Emu8000-1") ||
 	    !devm_request_region(card->dev, hw->port2, 4, "Emu8000-2") ||
 	    !devm_request_region(card->dev, hw->port3, 4, "Emu8000-3")) {
-		snd_printk(KERN_ERR "sbawe: can't grab ports 0x%lx, 0x%lx, 0x%lx\n", hw->port1, hw->port2, hw->port3);
+		dev_err(card->dev, "sbawe: can't grab ports 0x%lx, 0x%lx, 0x%lx\n",
+			hw->port1, hw->port2, hw->port3);
 		return -EBUSY;
 	}
 	hw->mem_size = 0;
@@ -1097,7 +1097,7 @@ snd_emu8000_new(struct snd_card *card, int index, long port, int seq_ports,
 #if IS_ENABLED(CONFIG_SND_SEQUENCER)
 	if (snd_seq_device_new(card, index, SNDRV_SEQ_DEV_ID_EMU8000,
 			       sizeof(struct snd_emu8000*), &awe) >= 0) {
-		strcpy(awe->name, "EMU-8000");
+		strscpy(awe->name, "EMU-8000");
 		*(struct snd_emu8000 **)SNDRV_SEQ_DEVICE_ARGPTR(awe) = hw;
 	}
 #else

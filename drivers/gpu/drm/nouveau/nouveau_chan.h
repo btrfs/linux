@@ -3,17 +3,13 @@
 #define __NOUVEAU_CHAN_H__
 #include <nvif/object.h>
 #include <nvif/event.h>
-#include <nvif/push.h>
+#include <nvif/chan.h>
 struct nvif_device;
 
 struct nouveau_channel {
-	struct {
-		struct nvif_push _push;
-		struct nvif_push *push;
-	} chan;
+	struct nvif_chan chan;
 
-	struct nvif_device *device;
-	struct nouveau_drm *drm;
+	struct nouveau_cli *cli;
 	struct nouveau_vmm *vmm;
 
 	struct nvif_mem mem_userd;
@@ -43,14 +39,14 @@ struct nouveau_channel {
 		int free;
 		int cur;
 		int put;
-		int ib_base;
-		int ib_max;
-		int ib_free;
-		int ib_put;
 	} dma;
-	u32 user_get_hi;
 	u32 user_get;
 	u32 user_put;
+
+	struct {
+		struct nouveau_bo *bo;
+		struct nouveau_vma *vma;
+	} sema;
 
 	struct nvif_object user;
 	struct nvif_object blit;
@@ -62,7 +58,7 @@ struct nouveau_channel {
 int nouveau_channels_init(struct nouveau_drm *);
 void nouveau_channels_fini(struct nouveau_drm *);
 
-int  nouveau_channel_new(struct nouveau_drm *, struct nvif_device *, bool priv, u64 runm,
+int  nouveau_channel_new(struct nouveau_cli *, bool priv, u64 runm,
 			 u32 vram, u32 gart, struct nouveau_channel **);
 void nouveau_channel_del(struct nouveau_channel **);
 int  nouveau_channel_idle(struct nouveau_channel *);

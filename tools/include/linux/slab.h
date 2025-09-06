@@ -12,13 +12,13 @@
 
 void *kmalloc(size_t size, gfp_t gfp);
 void kfree(void *p);
+void *kmalloc_array(size_t n, size_t size, gfp_t gfp);
 
 bool slab_is_available(void);
 
 enum slab_state {
 	DOWN,
 	PARTIAL,
-	PARTIAL_NODE,
 	UP,
 	FULL
 };

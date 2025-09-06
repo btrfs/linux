@@ -819,7 +819,7 @@ static int aw88261_profile_info(struct snd_kcontrol *kcontrol,
 {
 	struct snd_soc_component *codec = snd_soc_kcontrol_component(kcontrol);
 	struct aw88261 *aw88261 = snd_soc_component_get_drvdata(codec);
-	char *prof_name, *name;
+	char *prof_name;
 	int count, ret;
 
 	uinfo->type = SNDRV_CTL_ELEM_TYPE_ENUMERATED;
@@ -836,17 +836,15 @@ static int aw88261_profile_info(struct snd_kcontrol *kcontrol,
 	if (uinfo->value.enumerated.item >= count)
 		uinfo->value.enumerated.item = count - 1;
 
-	name = uinfo->value.enumerated.name;
 	count = uinfo->value.enumerated.item;
 
 	ret = aw88261_dev_get_prof_name(aw88261->aw_pa, count, &prof_name);
 	if (ret) {
-		strscpy(uinfo->value.enumerated.name, "null",
-						strlen("null") + 1);
+		strscpy(uinfo->value.enumerated.name, "null");
 		return 0;
 	}
 
-	strscpy(name, prof_name, sizeof(uinfo->value.enumerated.name));
+	strscpy(uinfo->value.enumerated.name, prof_name);
 
 	return 0;
 }
@@ -1266,7 +1264,7 @@ static int aw88261_i2c_probe(struct i2c_client *i2c)
 }
 
 static const struct i2c_device_id aw88261_i2c_id[] = {
-	{ AW88261_I2C_NAME, 0 },
+	{ AW88261_I2C_NAME },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, aw88261_i2c_id);

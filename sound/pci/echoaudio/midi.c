@@ -200,7 +200,7 @@ static int snd_echo_midi_output_open(struct snd_rawmidi_substream *substream)
 
 static void snd_echo_midi_output_write(struct timer_list *t)
 {
-	struct echoaudio *chip = from_timer(chip, t, timer);
+	struct echoaudio *chip = timer_container_of(chip, t, timer);
 	unsigned long flags;
 	int bytes, sent, time;
 	unsigned char buf[MIDI_OUT_BUFFER_SIZE - 1];
@@ -264,7 +264,7 @@ static void snd_echo_midi_output_trigger(struct snd_rawmidi_substream *substream
 		if (chip->tinuse) {
 			chip->tinuse = 0;
 			spin_unlock_irq(&chip->lock);
-			del_timer_sync(&chip->timer);
+			timer_delete_sync(&chip->timer);
 			dev_dbg(chip->card->dev, "Timer removed\n");
 			return;
 		}
@@ -311,7 +311,7 @@ static int snd_echo_midi_create(struct snd_card *card,
 	if (err < 0)
 		return err;
 
-	strcpy(chip->rmidi->name, card->shortname);
+	strscpy(chip->rmidi->name, card->shortname);
 	chip->rmidi->private_data = chip;
 
 	snd_rawmidi_set_ops(chip->rmidi, SNDRV_RAWMIDI_STREAM_INPUT,

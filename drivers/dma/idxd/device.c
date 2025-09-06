@@ -161,7 +161,7 @@ int idxd_wq_alloc_resources(struct idxd_wq *wq)
 	free_hw_descs(wq);
 	return rc;
 }
-EXPORT_SYMBOL_NS_GPL(idxd_wq_alloc_resources, IDXD);
+EXPORT_SYMBOL_NS_GPL(idxd_wq_alloc_resources, "IDXD");
 
 void idxd_wq_free_resources(struct idxd_wq *wq)
 {
@@ -175,7 +175,7 @@ void idxd_wq_free_resources(struct idxd_wq *wq)
 	dma_free_coherent(dev, wq->compls_size, wq->compls, wq->compls_addr);
 	sbitmap_queue_free(&wq->sbq);
 }
-EXPORT_SYMBOL_NS_GPL(idxd_wq_free_resources, IDXD);
+EXPORT_SYMBOL_NS_GPL(idxd_wq_free_resources, "IDXD");
 
 int idxd_wq_enable(struct idxd_wq *wq)
 {
@@ -407,7 +407,7 @@ int idxd_wq_init_percpu_ref(struct idxd_wq *wq)
 	reinit_completion(&wq->wq_resurrect);
 	return 0;
 }
-EXPORT_SYMBOL_NS_GPL(idxd_wq_init_percpu_ref, IDXD);
+EXPORT_SYMBOL_NS_GPL(idxd_wq_init_percpu_ref, "IDXD");
 
 void __idxd_wq_quiesce(struct idxd_wq *wq)
 {
@@ -417,7 +417,7 @@ void __idxd_wq_quiesce(struct idxd_wq *wq)
 	complete_all(&wq->wq_resurrect);
 	wait_for_completion(&wq->wq_dead);
 }
-EXPORT_SYMBOL_NS_GPL(__idxd_wq_quiesce, IDXD);
+EXPORT_SYMBOL_NS_GPL(__idxd_wq_quiesce, "IDXD");
 
 void idxd_wq_quiesce(struct idxd_wq *wq)
 {
@@ -425,7 +425,7 @@ void idxd_wq_quiesce(struct idxd_wq *wq)
 	__idxd_wq_quiesce(wq);
 	mutex_unlock(&wq->wq_lock);
 }
-EXPORT_SYMBOL_NS_GPL(idxd_wq_quiesce, IDXD);
+EXPORT_SYMBOL_NS_GPL(idxd_wq_quiesce, "IDXD");
 
 /* Device control bits */
 static inline bool idxd_is_enabled(struct idxd_device *idxd)
@@ -775,7 +775,7 @@ static int idxd_device_evl_setup(struct idxd_device *idxd)
 		goto err_alloc;
 	}
 
-	spin_lock(&evl->lock);
+	mutex_lock(&evl->lock);
 	evl->log = addr;
 	evl->dma = dma_addr;
 	evl->log_size = size;
@@ -796,7 +796,7 @@ static int idxd_device_evl_setup(struct idxd_device *idxd)
 	gencfg.evl_en = 1;
 	iowrite32(gencfg.bits, idxd->reg_base + IDXD_GENCFG_OFFSET);
 
-	spin_unlock(&evl->lock);
+	mutex_unlock(&evl->lock);
 	return 0;
 
 err_alloc:
@@ -819,7 +819,7 @@ static void idxd_device_evl_free(struct idxd_device *idxd)
 	if (!gencfg.evl_en)
 		return;
 
-	spin_lock(&evl->lock);
+	mutex_lock(&evl->lock);
 	gencfg.evl_en = 0;
 	iowrite32(gencfg.bits, idxd->reg_base + IDXD_GENCFG_OFFSET);
 
@@ -836,7 +836,7 @@ static void idxd_device_evl_free(struct idxd_device *idxd)
 	evl_dma = evl->dma;
 	evl->log = NULL;
 	evl->size = IDXD_EVL_SIZE_MIN;
-	spin_unlock(&evl->lock);
+	mutex_unlock(&evl->lock);
 
 	dma_free_coherent(dev, evl_log_size, evl_log, evl_dma);
 }
@@ -1494,7 +1494,7 @@ err_map_portal:
 err:
 	return rc;
 }
-EXPORT_SYMBOL_NS_GPL(idxd_drv_enable_wq, IDXD);
+EXPORT_SYMBOL_NS_GPL(idxd_drv_enable_wq, "IDXD");
 
 void idxd_drv_disable_wq(struct idxd_wq *wq)
 {
@@ -1516,7 +1516,7 @@ void idxd_drv_disable_wq(struct idxd_wq *wq)
 	wq->type = IDXD_WQT_NONE;
 	wq->client_count = 0;
 }
-EXPORT_SYMBOL_NS_GPL(idxd_drv_disable_wq, IDXD);
+EXPORT_SYMBOL_NS_GPL(idxd_drv_disable_wq, "IDXD");
 
 int idxd_device_drv_probe(struct idxd_dev *idxd_dev)
 {

@@ -9,6 +9,7 @@ struct mnt_idmap;
 struct user_namespace;
 
 extern struct mnt_idmap nop_mnt_idmap;
+extern struct mnt_idmap invalid_mnt_idmap;
 extern struct user_namespace init_user_ns;
 
 typedef struct {
@@ -23,6 +24,11 @@ static_assert(sizeof(vfsuid_t) == sizeof(kuid_t));
 static_assert(sizeof(vfsgid_t) == sizeof(kgid_t));
 static_assert(offsetof(vfsuid_t, val) == offsetof(kuid_t, val));
 static_assert(offsetof(vfsgid_t, val) == offsetof(kgid_t, val));
+
+static inline bool is_valid_mnt_idmap(const struct mnt_idmap *idmap)
+{
+	return idmap != &nop_mnt_idmap && idmap != &invalid_mnt_idmap;
+}
 
 #ifdef CONFIG_MULTIUSER
 static inline uid_t __vfsuid_val(vfsuid_t uid)

@@ -2137,7 +2137,7 @@ int snd_trident_pcm(struct snd_trident *trident, int device)
 
 	pcm->info_flags = 0;
 	pcm->dev_subclass = SNDRV_PCM_SUBCLASS_GENERIC_MIX;
-	strcpy(pcm->name, "Trident 4DWave");
+	strscpy(pcm->name, "Trident 4DWave");
 	trident->pcm = pcm;
 
 	if (trident->tlb.entries) {
@@ -2189,16 +2189,16 @@ int snd_trident_foldback_pcm(struct snd_trident *trident, int device)
 	else
 		snd_pcm_set_ops(foldback, SNDRV_PCM_STREAM_CAPTURE, &snd_trident_foldback_ops);
 	foldback->info_flags = 0;
-	strcpy(foldback->name, "Trident 4DWave");
+	strscpy(foldback->name, "Trident 4DWave");
 	substream = foldback->streams[SNDRV_PCM_STREAM_CAPTURE].substream;
-	strcpy(substream->name, "Front Mixer");
+	strscpy(substream->name, "Front Mixer");
 	substream = substream->next;
-	strcpy(substream->name, "Reverb Mixer");
+	strscpy(substream->name, "Reverb Mixer");
 	substream = substream->next;
-	strcpy(substream->name, "Chorus Mixer");
+	strscpy(substream->name, "Chorus Mixer");
 	if (num_chan == 4) {
 		substream = substream->next;
-		strcpy(substream->name, "Second AC'97 ADC");
+		strscpy(substream->name, "Second AC'97 ADC");
 	}
 	trident->foldback = foldback;
 
@@ -2241,7 +2241,7 @@ int snd_trident_spdif_pcm(struct snd_trident *trident, int device)
 		snd_pcm_set_ops(spdif, SNDRV_PCM_STREAM_PLAYBACK, &snd_trident_spdif_7018_ops);
 	}
 	spdif->info_flags = 0;
-	strcpy(spdif->name, "Trident 4DWave IEC958");
+	strscpy(spdif->name, "Trident 4DWave IEC958");
 	trident->spdif = spdif;
 
 	snd_pcm_set_managed_buffer_all(spdif, SNDRV_DMA_TYPE_DEV,
@@ -3278,9 +3278,9 @@ static void snd_trident_proc_read(struct snd_info_entry *entry,
 	snd_iprintf(buffer, "Spurious IRQs    : %d\n", trident->spurious_irq_count);
 	snd_iprintf(buffer, "Spurious IRQ dlta: %d\n", trident->spurious_irq_max_delta);
 	if (trident->device == TRIDENT_DEVICE_ID_NX || trident->device == TRIDENT_DEVICE_ID_SI7018)
-		snd_iprintf(buffer, "IEC958 Mixer Out : %s\n", trident->spdif_ctrl == 0x28 ? "on" : "off");
+		snd_iprintf(buffer, "IEC958 Mixer Out : %s\n", str_on_off(trident->spdif_ctrl == 0x28));
 	if (trident->device == TRIDENT_DEVICE_ID_NX) {
-		snd_iprintf(buffer, "Rear Speakers    : %s\n", trident->ac97_ctrl & 0x00000010 ? "on" : "off");
+		snd_iprintf(buffer, "Rear Speakers    : %s\n", str_on_off(trident->ac97_ctrl & 0x00000010));
 		if (trident->tlb.entries) {
 			snd_iprintf(buffer,"\nVirtual Memory\n");
 			snd_iprintf(buffer, "Memory Maximum : %d\n", trident->tlb.memhdr->size);
@@ -3533,7 +3533,7 @@ int snd_trident_create(struct snd_card *card,
 	trident->midi_port = TRID_REG(trident, T4D_MPU401_BASE);
 	pci_set_master(pci);
 
-	err = pci_request_regions(pci, "Trident Audio");
+	err = pcim_request_all_regions(pci, "Trident Audio");
 	if (err < 0)
 		return err;
 	trident->port = pci_resource_start(pci, 0);

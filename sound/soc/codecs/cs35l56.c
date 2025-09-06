@@ -5,6 +5,8 @@
 // Copyright (C) 2023 Cirrus Logic, Inc. and
 //                    Cirrus Logic International Semiconductor Ltd.
 
+#include <linux/acpi.h>
+#include <linux/array_size.h>
 #include <linux/completion.h>
 #include <linux/debugfs.h>
 #include <linux/delay.h>
@@ -15,12 +17,14 @@
 #include <linux/module.h>
 #include <linux/pm.h>
 #include <linux/pm_runtime.h>
+#include <linux/property.h>
 #include <linux/regmap.h>
 #include <linux/regulator/consumer.h>
 #include <linux/slab.h>
 #include <linux/soundwire/sdw.h>
 #include <linux/types.h>
 #include <linux/workqueue.h>
+#include <sound/cs-amp-lib.h>
 #include <sound/pcm.h>
 #include <sound/pcm_params.h>
 #include <sound/soc.h>
@@ -67,11 +71,34 @@ static const struct snd_kcontrol_new cs35l56_controls[] = {
 		       cs35l56_dspwait_get_volsw, cs35l56_dspwait_put_volsw),
 	SOC_SINGLE_S_EXT_TLV("Speaker Volume",
 			     CS35L56_MAIN_RENDER_USER_VOLUME,
-			     6, -400, 400, 9, 0,
+			     CS35L56_MAIN_RENDER_USER_VOLUME_SHIFT,
+			     CS35L56_MAIN_RENDER_USER_VOLUME_MIN,
+			     CS35L56_MAIN_RENDER_USER_VOLUME_MAX,
+			     CS35L56_MAIN_RENDER_USER_VOLUME_SIGNBIT,
+			     0,
 			     cs35l56_dspwait_get_volsw,
 			     cs35l56_dspwait_put_volsw,
 			     vol_tlv),
 	SOC_SINGLE_EXT("Posture Number", CS35L56_MAIN_POSTURE_NUMBER,
+		       0, 255, 0,
+		       cs35l56_dspwait_get_volsw, cs35l56_dspwait_put_volsw),
+};
+
+static const struct snd_kcontrol_new cs35l63_controls[] = {
+	SOC_SINGLE_EXT("Speaker Switch",
+		       CS35L63_MAIN_RENDER_USER_MUTE, 0, 1, 1,
+		       cs35l56_dspwait_get_volsw, cs35l56_dspwait_put_volsw),
+	SOC_SINGLE_S_EXT_TLV("Speaker Volume",
+			     CS35L63_MAIN_RENDER_USER_VOLUME,
+			     CS35L56_MAIN_RENDER_USER_VOLUME_SHIFT,
+			     CS35L56_MAIN_RENDER_USER_VOLUME_MIN,
+			     CS35L56_MAIN_RENDER_USER_VOLUME_MAX,
+			     CS35L56_MAIN_RENDER_USER_VOLUME_SIGNBIT,
+			     0,
+			     cs35l56_dspwait_get_volsw,
+			     cs35l56_dspwait_put_volsw,
+			     vol_tlv),
+	SOC_SINGLE_EXT("Posture Number", CS35L63_MAIN_POSTURE_NUMBER,
 		       0, 255, 0,
 		       cs35l56_dspwait_get_volsw, cs35l56_dspwait_put_volsw),
 };
@@ -166,7 +193,7 @@ static int cs35l56_play_event(struct snd_soc_dapm_widget *w,
 	case SND_SOC_DAPM_POST_PMU:
 		/* Wait for firmware to enter PS0 power state */
 		ret = regmap_read_poll_timeout(cs35l56->base.regmap,
-					       CS35L56_TRANSDUCER_ACTUAL_PS,
+					       cs35l56->base.fw_reg->transducer_actual_ps,
 					       val, (val == CS35L56_PS0),
 					       CS35L56_PS0_POLL_US,
 					       CS35L56_PS0_TIMEOUT_US);
@@ -638,6 +665,12 @@ static struct snd_soc_dai_driver cs35l56_dai[] = {
 			.rates = CS35L56_RATES,
 			.formats = CS35L56_RX_FORMATS,
 		},
+		.symmetric_rate = 1,
+		.ops = &cs35l56_sdw_dai_ops,
+	},
+	{
+		.name = "cs35l56-sdw1c",
+		.id = 2,
 		.capture = {
 			.stream_name = "SDW1 Capture",
 			.channels_min = 1,
@@ -647,33 +680,76 @@ static struct snd_soc_dai_driver cs35l56_dai[] = {
 		},
 		.symmetric_rate = 1,
 		.ops = &cs35l56_sdw_dai_ops,
-	}
+	},
 };
 
-static void cs35l56_secure_patch(struct cs35l56_private *cs35l56)
+static int cs35l56_write_cal(struct cs35l56_private *cs35l56)
 {
 	int ret;
 
-	/* Use wm_adsp to load and apply the firmware patch and coefficient files */
-	ret = wm_adsp_power_up(&cs35l56->dsp, true);
+	if (cs35l56->base.secured || !cs35l56->base.cal_data_valid)
+		return -ENODATA;
+
+	ret = wm_adsp_run(&cs35l56->dsp);
 	if (ret)
-		dev_dbg(cs35l56->base.dev, "%s: wm_adsp_power_up ret %d\n", __func__, ret);
-	else
-		cs35l56_mbox_send(&cs35l56->base, CS35L56_MBOX_CMD_AUDIO_REINIT);
+		return ret;
+
+	ret = cs_amp_write_cal_coeffs(&cs35l56->dsp.cs_dsp,
+				      cs35l56->base.calibration_controls,
+				      &cs35l56->base.cal_data);
+
+	wm_adsp_stop(&cs35l56->dsp);
+
+	if (ret == 0)
+		dev_info(cs35l56->base.dev, "Calibration applied\n");
+
+	return ret;
 }
 
-static void cs35l56_patch(struct cs35l56_private *cs35l56)
+static int cs35l56_dsp_download_and_power_up(struct cs35l56_private *cs35l56,
+					     bool load_firmware)
 {
-	unsigned int firmware_missing;
 	int ret;
 
-	ret = regmap_read(cs35l56->base.regmap, CS35L56_PROTECTION_STATUS, &firmware_missing);
-	if (ret) {
-		dev_err(cs35l56->base.dev, "Failed to read PROTECTION_STATUS: %d\n", ret);
-		return;
+	/*
+	 * Abort the first load if it didn't find the suffixed bins and
+	 * we have an alternate fallback suffix.
+	 */
+	cs35l56->dsp.bin_mandatory = (load_firmware && cs35l56->fallback_fw_suffix);
+
+	ret = wm_adsp_power_up(&cs35l56->dsp, load_firmware);
+	if ((ret == -ENOENT) && cs35l56->dsp.bin_mandatory) {
+		cs35l56->dsp.fwf_suffix = cs35l56->fallback_fw_suffix;
+		cs35l56->fallback_fw_suffix = NULL;
+		cs35l56->dsp.bin_mandatory = false;
+		ret = wm_adsp_power_up(&cs35l56->dsp, load_firmware);
 	}
 
-	firmware_missing &= CS35L56_FIRMWARE_MISSING;
+	if (ret) {
+		dev_dbg(cs35l56->base.dev, "wm_adsp_power_up ret %d\n", ret);
+		return ret;
+	}
+
+	return 0;
+}
+
+static void cs35l56_reinit_patch(struct cs35l56_private *cs35l56)
+{
+	int ret;
+
+	ret = cs35l56_dsp_download_and_power_up(cs35l56, true);
+	if (ret)
+		return;
+
+	cs35l56_write_cal(cs35l56);
+
+	/* Always REINIT after applying patch or coefficients */
+	cs35l56_mbox_send(&cs35l56->base, CS35L56_MBOX_CMD_AUDIO_REINIT);
+}
+
+static void cs35l56_patch(struct cs35l56_private *cs35l56, bool firmware_missing)
+{
+	int ret;
 
 	/*
 	 * Disable SoundWire interrupts to prevent race with IRQ work.
@@ -698,11 +774,9 @@ static void cs35l56_patch(struct cs35l56_private *cs35l56)
 	 * but only if firmware is missing. If firmware is already patched just
 	 * power-up wm_adsp without downloading firmware.
 	 */
-	ret = wm_adsp_power_up(&cs35l56->dsp, !!firmware_missing);
-	if (ret) {
-		dev_dbg(cs35l56->base.dev, "%s: wm_adsp_power_up ret %d\n", __func__, ret);
+	ret = cs35l56_dsp_download_and_power_up(cs35l56, firmware_missing);
+	if (ret)
 		goto err;
-	}
 
 	mutex_lock(&cs35l56->base.irq_lock);
 
@@ -727,9 +801,13 @@ static void cs35l56_patch(struct cs35l56_private *cs35l56)
 		goto err_unlock;
 	}
 
-	regmap_clear_bits(cs35l56->base.regmap, CS35L56_PROTECTION_STATUS,
+	regmap_clear_bits(cs35l56->base.regmap,
+			  cs35l56->base.fw_reg->prot_sts,
 			  CS35L56_FIRMWARE_MISSING);
 	cs35l56->base.fw_patched = true;
+
+	if (cs35l56_write_cal(cs35l56) == 0)
+		cs35l56_mbox_send(&cs35l56->base, CS35L56_MBOX_CMD_AUDIO_REINIT);
 
 err_unlock:
 	mutex_unlock(&cs35l56->base.irq_lock);
@@ -747,25 +825,81 @@ static void cs35l56_dsp_work(struct work_struct *work)
 	struct cs35l56_private *cs35l56 = container_of(work,
 						       struct cs35l56_private,
 						       dsp_work);
+	unsigned int firmware_version;
+	bool firmware_missing;
+	int ret;
 
 	if (!cs35l56->base.init_done)
 		return;
 
 	pm_runtime_get_sync(cs35l56->base.dev);
 
-	/*
-	 * When the device is running in secure mode the firmware files can
-	 * only contain insecure tunings and therefore we do not need to
-	 * shutdown the firmware to apply them and can use the lower cost
-	 * reinit sequence instead.
-	 */
-	if (cs35l56->base.secured)
-		cs35l56_secure_patch(cs35l56);
-	else
-		cs35l56_patch(cs35l56);
+	ret = cs35l56_read_prot_status(&cs35l56->base, &firmware_missing, &firmware_version);
+	if (ret)
+		goto err;
 
-	pm_runtime_mark_last_busy(cs35l56->base.dev);
+	/* Populate fw file qualifier with the revision and security state */
+	kfree(cs35l56->dsp.fwf_name);
+	if (firmware_missing) {
+		cs35l56->dsp.fwf_name = kasprintf(GFP_KERNEL, "%02x-dsp1", cs35l56->base.rev);
+	} else {
+		/* Firmware files must match the running firmware version */
+		cs35l56->dsp.fwf_name = kasprintf(GFP_KERNEL,
+						  "%02x%s-%06x-dsp1",
+						  cs35l56->base.rev,
+						  cs35l56->base.secured ? "-s" : "",
+						  firmware_version);
+	}
+
+	if (!cs35l56->dsp.fwf_name)
+		goto err;
+
+	dev_dbg(cs35l56->base.dev, "DSP fwf name: '%s' system name: '%s'\n",
+		cs35l56->dsp.fwf_name, cs35l56->dsp.system_name);
+
+	/*
+	 * The firmware cannot be patched if it is already running from
+	 * patch RAM. In this case the firmware files are versioned to
+	 * match the running firmware version and will only contain
+	 * tunings. We do not need to shutdown the firmware to apply
+	 * tunings so can use the lower cost reinit sequence instead.
+	 */
+	if (!firmware_missing)
+		cs35l56_reinit_patch(cs35l56);
+	else
+		cs35l56_patch(cs35l56, firmware_missing);
+
+	cs35l56_log_tuning(&cs35l56->base, &cs35l56->dsp.cs_dsp);
+err:
 	pm_runtime_put_autosuspend(cs35l56->base.dev);
+}
+
+static int cs35l56_set_fw_suffix(struct cs35l56_private *cs35l56)
+{
+	if (cs35l56->dsp.fwf_suffix)
+		return 0;
+
+	if (!cs35l56->sdw_peripheral)
+		return 0;
+
+	cs35l56->dsp.fwf_suffix = devm_kasprintf(cs35l56->base.dev, GFP_KERNEL,
+						 "l%uu%u",
+						 cs35l56->sdw_link_num,
+						 cs35l56->sdw_unique_id);
+	if (!cs35l56->dsp.fwf_suffix)
+		return -ENOMEM;
+
+	/*
+	 * There are published firmware files for L56 B0 silicon using
+	 * the ALSA prefix as the filename suffix. Default to trying these
+	 * first, with the new name as an alternate.
+	 */
+	if ((cs35l56->base.type == 0x56) && (cs35l56->base.rev == 0xb0)) {
+		cs35l56->fallback_fw_suffix = cs35l56->dsp.fwf_suffix;
+		cs35l56->dsp.fwf_suffix = cs35l56->component->name_prefix;
+	}
+
+	return 0;
 }
 
 static int cs35l56_component_probe(struct snd_soc_component *component)
@@ -773,15 +907,25 @@ static int cs35l56_component_probe(struct snd_soc_component *component)
 	struct cs35l56_private *cs35l56 = snd_soc_component_get_drvdata(component);
 	struct dentry *debugfs_root = component->debugfs_root;
 	unsigned short vendor, device;
+	int ret;
 
 	BUILD_BUG_ON(ARRAY_SIZE(cs35l56_tx_input_texts) != ARRAY_SIZE(cs35l56_tx_input_values));
 
 	if (!cs35l56->dsp.system_name &&
 	    (snd_soc_card_get_pci_ssid(component->card, &vendor, &device) == 0)) {
-		cs35l56->dsp.system_name = devm_kasprintf(cs35l56->base.dev,
-							  GFP_KERNEL,
-							  "%04x%04x",
-							  vendor, device);
+		/* Append a speaker qualifier if there is a speaker ID */
+		if (cs35l56->speaker_id >= 0) {
+			cs35l56->dsp.system_name = devm_kasprintf(cs35l56->base.dev,
+								  GFP_KERNEL,
+								  "%04x%04x-spkid%d",
+								  vendor, device,
+								  cs35l56->speaker_id);
+		} else {
+			cs35l56->dsp.system_name = devm_kasprintf(cs35l56->base.dev,
+								  GFP_KERNEL,
+								  "%04x%04x",
+								  vendor, device);
+		}
 		if (!cs35l56->dsp.system_name)
 			return -ENOMEM;
 	}
@@ -792,12 +936,40 @@ static int cs35l56_component_probe(struct snd_soc_component *component)
 		return -ENODEV;
 	}
 
+	cs35l56->dsp.part = kasprintf(GFP_KERNEL, "cs35l%02x", cs35l56->base.type);
+	if (!cs35l56->dsp.part)
+		return -ENOMEM;
+
 	cs35l56->component = component;
+	ret = cs35l56_set_fw_suffix(cs35l56);
+	if (ret)
+		return ret;
+
 	wm_adsp2_component_probe(&cs35l56->dsp, component);
 
 	debugfs_create_bool("init_done", 0444, debugfs_root, &cs35l56->base.init_done);
 	debugfs_create_bool("can_hibernate", 0444, debugfs_root, &cs35l56->base.can_hibernate);
 	debugfs_create_bool("fw_patched", 0444, debugfs_root, &cs35l56->base.fw_patched);
+
+
+	switch (cs35l56->base.type) {
+	case 0x54:
+	case 0x56:
+	case 0x57:
+		ret = snd_soc_add_component_controls(component, cs35l56_controls,
+						     ARRAY_SIZE(cs35l56_controls));
+		break;
+	case 0x63:
+		ret = snd_soc_add_component_controls(component, cs35l63_controls,
+						     ARRAY_SIZE(cs35l63_controls));
+		break;
+	default:
+		ret = -ENODEV;
+		break;
+	}
+
+	if (ret)
+		return dev_err_probe(cs35l56->base.dev, ret, "unable to add controls\n");
 
 	queue_work(cs35l56->dsp_wq, &cs35l56->dsp_work);
 
@@ -809,6 +981,19 @@ static void cs35l56_component_remove(struct snd_soc_component *component)
 	struct cs35l56_private *cs35l56 = snd_soc_component_get_drvdata(component);
 
 	cancel_work_sync(&cs35l56->dsp_work);
+
+	if (cs35l56->dsp.cs_dsp.booted)
+		wm_adsp_power_down(&cs35l56->dsp);
+
+	wm_adsp2_component_remove(&cs35l56->dsp, component);
+
+	kfree(cs35l56->dsp.part);
+	cs35l56->dsp.part = NULL;
+
+	kfree(cs35l56->dsp.fwf_name);
+	cs35l56->dsp.fwf_name = NULL;
+
+	cs35l56->component = NULL;
 }
 
 static int cs35l56_set_bias_level(struct snd_soc_component *component,
@@ -841,8 +1026,6 @@ static const struct snd_soc_component_driver soc_component_dev_cs35l56 = {
 	.num_dapm_widgets = ARRAY_SIZE(cs35l56_dapm_widgets),
 	.dapm_routes = cs35l56_audio_map,
 	.num_dapm_routes = ARRAY_SIZE(cs35l56_audio_map),
-	.controls = cs35l56_controls,
-	.num_controls = ARRAY_SIZE(cs35l56_controls),
 
 	.set_bias_level = cs35l56_set_bias_level,
 
@@ -1011,6 +1194,11 @@ int cs35l56_system_resume(struct device *dev)
 }
 EXPORT_SYMBOL_GPL(cs35l56_system_resume);
 
+static int cs35l56_control_add_nop(struct wm_adsp *dsp, struct cs_dsp_coeff_ctl *cs_ctl)
+{
+	return 0;
+}
+
 static int cs35l56_dsp_init(struct cs35l56_private *cs35l56)
 {
 	struct wm_adsp *dsp;
@@ -1024,9 +1212,20 @@ static int cs35l56_dsp_init(struct cs35l56_private *cs35l56)
 
 	dsp = &cs35l56->dsp;
 	cs35l56_init_cs_dsp(&cs35l56->base, &dsp->cs_dsp);
-	dsp->part = "cs35l56";
+
+	/*
+	 * dsp->part is filled in later as it is based on the DEVID. In a
+	 * SoundWire system that cannot be read until enumeration has occurred
+	 * and the device has attached.
+	 */
 	dsp->fw = 12;
 	dsp->wmfw_optional = true;
+
+	/*
+	 * None of the firmware controls need to be exported so add a no-op
+	 * callback that suppresses creating an ALSA control.
+	 */
+	dsp->control_add = &cs35l56_control_add_nop;
 
 	dev_dbg(cs35l56->base.dev, "DSP system name: '%s'\n", dsp->system_name);
 
@@ -1050,7 +1249,13 @@ static int cs35l56_get_firmware_uid(struct cs35l56_private *cs35l56)
 	if (ret < 0)
 		return 0;
 
-	cs35l56->dsp.system_name = devm_kstrdup(dev, prop, GFP_KERNEL);
+	/* Append a speaker qualifier if there is a speaker ID */
+	if (cs35l56->speaker_id >= 0)
+		cs35l56->dsp.system_name = devm_kasprintf(dev, GFP_KERNEL, "%s-spkid%d",
+							  prop, cs35l56->speaker_id);
+	else
+		cs35l56->dsp.system_name = devm_kstrdup(dev, prop, GFP_KERNEL);
+
 	if (cs35l56->dsp.system_name == NULL)
 		return -ENOMEM;
 
@@ -1059,12 +1264,111 @@ static int cs35l56_get_firmware_uid(struct cs35l56_private *cs35l56)
 	return 0;
 }
 
+/*
+ * Some SoundWire laptops have a spk-id-gpios property but it points to
+ * the wrong ACPI Device node so can't be used to get the GPIO. Try to
+ * find the SDCA node containing the GpioIo resource and add a GPIO
+ * mapping to it.
+ */
+static const struct acpi_gpio_params cs35l56_af01_first_gpio = { 0, 0, false };
+static const struct acpi_gpio_mapping cs35l56_af01_spkid_gpios_mapping[] = {
+	{ "spk-id-gpios", &cs35l56_af01_first_gpio, 1 },
+	{ }
+};
+
+static void cs35l56_acpi_dev_release_driver_gpios(void *adev)
+{
+	acpi_dev_remove_driver_gpios(adev);
+}
+
+static int cs35l56_try_get_broken_sdca_spkid_gpio(struct cs35l56_private *cs35l56)
+{
+	struct fwnode_handle *af01_fwnode;
+	const union acpi_object *obj;
+	struct gpio_desc *desc;
+	int ret;
+
+	/* Find the SDCA node containing the GpioIo */
+	af01_fwnode = device_get_named_child_node(cs35l56->base.dev, "AF01");
+	if (!af01_fwnode) {
+		dev_dbg(cs35l56->base.dev, "No AF01 node\n");
+		return -ENOENT;
+	}
+
+	ret = acpi_dev_get_property(ACPI_COMPANION(cs35l56->base.dev),
+				    "spk-id-gpios", ACPI_TYPE_PACKAGE, &obj);
+	if (ret) {
+		dev_dbg(cs35l56->base.dev, "Could not get spk-id-gpios package: %d\n", ret);
+		fwnode_handle_put(af01_fwnode);
+		return -ENOENT;
+	}
+
+	/* The broken properties we can handle are a 4-element package (one GPIO) */
+	if (obj->package.count != 4) {
+		dev_warn(cs35l56->base.dev, "Unexpected spk-id element count %d\n",
+			 obj->package.count);
+		fwnode_handle_put(af01_fwnode);
+		return -ENOENT;
+	}
+
+	/* Add a GPIO mapping if it doesn't already have one */
+	if (!fwnode_property_present(af01_fwnode, "spk-id-gpios")) {
+		struct acpi_device *adev = to_acpi_device_node(af01_fwnode);
+
+		/*
+		 * Can't use devm_acpi_dev_add_driver_gpios() because the
+		 * mapping isn't being added to the node pointed to by
+		 * ACPI_COMPANION().
+		 */
+		ret = acpi_dev_add_driver_gpios(adev, cs35l56_af01_spkid_gpios_mapping);
+		if (ret) {
+			fwnode_handle_put(af01_fwnode);
+			return dev_err_probe(cs35l56->base.dev, ret,
+					     "Failed to add gpio mapping to AF01\n");
+		}
+
+		ret = devm_add_action_or_reset(cs35l56->base.dev,
+					       cs35l56_acpi_dev_release_driver_gpios,
+					       adev);
+		if (ret) {
+			fwnode_handle_put(af01_fwnode);
+			return ret;
+		}
+
+		dev_dbg(cs35l56->base.dev, "Added spk-id-gpios mapping to AF01\n");
+	}
+
+	desc = fwnode_gpiod_get_index(af01_fwnode, "spk-id", 0, GPIOD_IN, NULL);
+	if (IS_ERR(desc)) {
+		fwnode_handle_put(af01_fwnode);
+		ret = PTR_ERR(desc);
+		return dev_err_probe(cs35l56->base.dev, ret, "Get GPIO from AF01 failed\n");
+	}
+
+	ret = gpiod_get_value_cansleep(desc);
+	gpiod_put(desc);
+
+	if (ret < 0) {
+		fwnode_handle_put(af01_fwnode);
+		dev_err_probe(cs35l56->base.dev, ret, "Error reading spk-id GPIO\n");
+		return ret;
+	}
+
+	fwnode_handle_put(af01_fwnode);
+
+	dev_info(cs35l56->base.dev, "Got spk-id from AF01\n");
+
+	return ret;
+}
+
 int cs35l56_common_probe(struct cs35l56_private *cs35l56)
 {
 	int ret;
 
 	init_completion(&cs35l56->init_completion);
 	mutex_init(&cs35l56->base.irq_lock);
+	cs35l56->base.cal_index = -1;
+	cs35l56->speaker_id = -ENOENT;
 
 	dev_set_drvdata(cs35l56->base.dev, cs35l56);
 
@@ -1101,6 +1405,15 @@ int cs35l56_common_probe(struct cs35l56_private *cs35l56)
 		gpiod_set_value_cansleep(cs35l56->base.reset_gpio, 1);
 	}
 
+	ret = cs35l56_get_speaker_id(&cs35l56->base);
+	if (ACPI_COMPANION(cs35l56->base.dev) && cs35l56->sdw_peripheral && (ret == -ENOENT))
+		ret = cs35l56_try_get_broken_sdca_spkid_gpio(cs35l56);
+
+	if ((ret < 0) && (ret != -ENOENT))
+		goto err;
+
+	cs35l56->speaker_id = ret;
+
 	ret = cs35l56_get_firmware_uid(cs35l56);
 	if (ret != 0)
 		goto err;
@@ -1127,7 +1440,7 @@ err:
 
 	return ret;
 }
-EXPORT_SYMBOL_NS_GPL(cs35l56_common_probe, SND_SOC_CS35L56_CORE);
+EXPORT_SYMBOL_NS_GPL(cs35l56_common_probe, "SND_SOC_CS35L56_CORE");
 
 int cs35l56_init(struct cs35l56_private *cs35l56)
 {
@@ -1152,11 +1465,13 @@ int cs35l56_init(struct cs35l56_private *cs35l56)
 	if (ret < 0)
 		return ret;
 
-	/* Populate the DSP information with the revision and security state */
-	cs35l56->dsp.part = devm_kasprintf(cs35l56->base.dev, GFP_KERNEL, "cs35l56%s-%02x",
-					   cs35l56->base.secured ? "s" : "", cs35l56->base.rev);
-	if (!cs35l56->dsp.part)
-		return -ENOMEM;
+	ret = cs35l56_set_patch(&cs35l56->base);
+	if (ret)
+		return ret;
+
+	ret = cs35l56_get_calibration(&cs35l56->base);
+	if (ret)
+		return ret;
 
 	if (!cs35l56->base.reset_gpio) {
 		dev_dbg(cs35l56->base.dev, "No reset gpio: using soft reset\n");
@@ -1183,14 +1498,12 @@ post_soft_reset:
 			return ret;
 
 		dev_dbg(cs35l56->base.dev, "Firmware rebooted after soft reset\n");
+
+		regcache_cache_only(cs35l56->base.regmap, false);
 	}
 
 	/* Disable auto-hibernate so that runtime_pm has control */
 	ret = cs35l56_mbox_send(&cs35l56->base, CS35L56_MBOX_CMD_PREVENT_AUTO_HIBERNATE);
-	if (ret)
-		return ret;
-
-	ret = cs35l56_set_patch(&cs35l56->base);
 	if (ret)
 		return ret;
 
@@ -1208,7 +1521,7 @@ post_soft_reset:
 
 	return 0;
 }
-EXPORT_SYMBOL_NS_GPL(cs35l56_init, SND_SOC_CS35L56_CORE);
+EXPORT_SYMBOL_NS_GPL(cs35l56_init, "SND_SOC_CS35L56_CORE");
 
 void cs35l56_remove(struct cs35l56_private *cs35l56)
 {
@@ -1221,7 +1534,6 @@ void cs35l56_remove(struct cs35l56_private *cs35l56)
 	if (cs35l56->base.irq)
 		devm_free_irq(cs35l56->base.dev, cs35l56->base.irq, &cs35l56->base);
 
-	flush_workqueue(cs35l56->dsp_wq);
 	destroy_workqueue(cs35l56->dsp_wq);
 
 	pm_runtime_dont_use_autosuspend(cs35l56->base.dev);
@@ -1233,7 +1545,7 @@ void cs35l56_remove(struct cs35l56_private *cs35l56)
 	gpiod_set_value_cansleep(cs35l56->base.reset_gpio, 0);
 	regulator_bulk_disable(ARRAY_SIZE(cs35l56->supplies), cs35l56->supplies);
 }
-EXPORT_SYMBOL_NS_GPL(cs35l56_remove, SND_SOC_CS35L56_CORE);
+EXPORT_SYMBOL_NS_GPL(cs35l56_remove, "SND_SOC_CS35L56_CORE");
 
 #if IS_ENABLED(CONFIG_SND_SOC_CS35L56_I2C) || IS_ENABLED(CONFIG_SND_SOC_CS35L56_SPI)
 EXPORT_NS_GPL_DEV_PM_OPS(cs35l56_pm_ops_i2c_spi, SND_SOC_CS35L56_CORE) = {
@@ -1245,7 +1557,8 @@ EXPORT_NS_GPL_DEV_PM_OPS(cs35l56_pm_ops_i2c_spi, SND_SOC_CS35L56_CORE) = {
 #endif
 
 MODULE_DESCRIPTION("ASoC CS35L56 driver");
-MODULE_IMPORT_NS(SND_SOC_CS35L56_SHARED);
+MODULE_IMPORT_NS("SND_SOC_CS35L56_SHARED");
+MODULE_IMPORT_NS("SND_SOC_CS_AMP_LIB");
 MODULE_AUTHOR("Richard Fitzgerald <rf@opensource.cirrus.com>");
 MODULE_AUTHOR("Simon Trimmer <simont@opensource.cirrus.com>");
 MODULE_LICENSE("GPL");

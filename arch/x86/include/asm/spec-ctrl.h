@@ -84,7 +84,7 @@ static inline u64 ssbd_tif_to_amd_ls_cfg(u64 tifn)
 static __always_inline void __update_spec_ctrl(u64 val)
 {
 	__this_cpu_write(x86_spec_ctrl_current, val);
-	native_wrmsrl(MSR_IA32_SPEC_CTRL, val);
+	native_wrmsrq(MSR_IA32_SPEC_CTRL, val);
 }
 
 #ifdef CONFIG_SMP
@@ -95,5 +95,7 @@ static inline void speculative_store_bypass_ht_init(void) { }
 
 extern void speculation_ctrl_update(unsigned long tif);
 extern void speculation_ctrl_update_current(void);
+
+extern bool itlb_multihit_kvm_mitigation;
 
 #endif

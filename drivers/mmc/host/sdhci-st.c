@@ -380,13 +380,13 @@ static int sdhci_st_probe(struct platform_device *pdev)
 	ret = mmc_of_parse(host->mmc);
 	if (ret) {
 		dev_err(&pdev->dev, "Failed mmc_of_parse\n");
-		goto err_of;
+		goto err_pltfm_init;
 	}
 
 	ret = clk_prepare_enable(clk);
 	if (ret) {
 		dev_err(&pdev->dev, "Failed to prepare clock\n");
-		goto err_of;
+		goto err_pltfm_init;
 	}
 
 	ret = clk_prepare_enable(icnclk);
@@ -423,8 +423,6 @@ err_out:
 	clk_disable_unprepare(icnclk);
 err_icnclk:
 	clk_disable_unprepare(clk);
-err_of:
-	sdhci_pltfm_free(pdev);
 err_pltfm_init:
 	reset_control_assert(rstc);
 
@@ -507,7 +505,7 @@ MODULE_DEVICE_TABLE(of, st_sdhci_match);
 
 static struct platform_driver sdhci_st_driver = {
 	.probe = sdhci_st_probe,
-	.remove_new = sdhci_st_remove,
+	.remove = sdhci_st_remove,
 	.driver = {
 		   .name = "sdhci-st",
 		   .probe_type = PROBE_PREFER_ASYNCHRONOUS,

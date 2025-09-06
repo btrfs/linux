@@ -1162,7 +1162,7 @@ err_resume_exit:
 	dev_err(&pdev->dev, "resume of device failed: %d\n", rv);
 }
 
-static struct pci_error_handlers csio_err_handler = {
+static const struct pci_error_handlers csio_err_handler = {
 	.error_detected = csio_pci_error_detected,
 	.slot_reset	= csio_pci_slot_reset,
 	.resume		= csio_pci_resume,
@@ -1185,9 +1185,6 @@ static struct pci_error_handlers csio_err_handler = {
 
 static struct pci_driver csio_pci_driver = {
 	.name		= KBUILD_MODNAME,
-	.driver		= {
-		.owner	= THIS_MODULE,
-	},
 	.id_table	= csio_pci_tbl,
 	.probe		= csio_probe_one,
 	.remove		= csio_remove_one,

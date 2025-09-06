@@ -13,7 +13,6 @@ struct siginfo;
 
 extern int uml_exitcode;
 
-extern int ncpus;
 extern int kmalloc_ok;
 
 #define UML_ROUND_UP(addr) \
@@ -25,10 +24,12 @@ extern void free_stack(unsigned long stack, int order);
 struct pt_regs;
 extern void do_signal(struct pt_regs *regs);
 extern void interrupt_end(void);
-extern void relay_signal(int sig, struct siginfo *si, struct uml_pt_regs *regs);
+extern void relay_signal(int sig, struct siginfo *si, struct uml_pt_regs *regs,
+			 void *mc);
 
 extern unsigned long segv(struct faultinfo fi, unsigned long ip,
-			  int is_user, struct uml_pt_regs *regs);
+			  int is_user, struct uml_pt_regs *regs,
+			  void *mc);
 extern int handle_page_fault(unsigned long address, unsigned long ip,
 			     int is_write, int is_user, int *code_out);
 
@@ -41,6 +42,7 @@ extern void uml_pm_wake(void);
 
 extern int start_uml(void);
 extern void paging_init(void);
+extern int parse_iomem(char *str, int *add);
 
 extern void uml_cleanup(void);
 extern void do_uml_exitcalls(void);
@@ -59,11 +61,14 @@ extern unsigned long from_irq_stack(int nested);
 
 extern int singlestepping(void);
 
-extern void segv_handler(int sig, struct siginfo *unused_si, struct uml_pt_regs *regs);
-extern void bus_handler(int sig, struct siginfo *si, struct uml_pt_regs *regs);
-extern void winch(int sig, struct siginfo *unused_si, struct uml_pt_regs *regs);
+extern void segv_handler(int sig, struct siginfo *unused_si, struct uml_pt_regs *regs,
+			 void *mc);
+extern void winch(int sig, struct siginfo *unused_si, struct uml_pt_regs *regs,
+		  void *mc);
 extern void fatal_sigsegv(void) __attribute__ ((noreturn));
 
 void um_idle_sleep(void);
+
+void kasan_map_memory(void *start, size_t len);
 
 #endif
