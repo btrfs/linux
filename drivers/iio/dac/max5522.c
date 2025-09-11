@@ -132,7 +132,6 @@ static const struct regmap_config max5522_regmap_config = {
 
 static int max5522_spi_probe(struct spi_device *spi)
 {
-	const struct spi_device_id *id = spi_get_device_id(spi);
 	struct iio_dev *indio_dev;
 	struct max5522_state *state;
 	int ret;
@@ -144,13 +143,9 @@ static int max5522_spi_probe(struct spi_device *spi)
 	}
 
 	state = iio_priv(indio_dev);
-	state->chip_info = device_get_match_data(&spi->dev);
-	if (!state->chip_info) {
-		state->chip_info =
-			(struct max5522_chip_info *)(id->driver_data);
-		if (!state->chip_info)
-			return -EINVAL;
-	}
+	state->chip_info = spi_get_device_match_data(spi);
+	if (!state->chip_info)
+		return -EINVAL;
 
 	state->vrefin_reg = devm_regulator_get(&spi->dev, "vrefin");
 	if (IS_ERR(state->vrefin_reg))
@@ -179,7 +174,7 @@ static int max5522_spi_probe(struct spi_device *spi)
 
 static const struct spi_device_id max5522_ids[] = {
 	{ "max5522", (kernel_ulong_t)&max5522_chip_info_tbl[ID_MAX5522] },
-	{}
+	{ }
 };
 MODULE_DEVICE_TABLE(spi, max5522_ids);
 
@@ -188,7 +183,7 @@ static const struct of_device_id max5522_of_match[] = {
 		.compatible = "maxim,max5522",
 		.data = &max5522_chip_info_tbl[ID_MAX5522],
 	},
-	{}
+	{ }
 };
 MODULE_DEVICE_TABLE(of, max5522_of_match);
 

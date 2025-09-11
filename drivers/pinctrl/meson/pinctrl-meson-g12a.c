@@ -270,15 +270,21 @@ static const unsigned int pwm_a_pins[]			= { GPIOX_6 };
 /* pwm_b */
 static const unsigned int pwm_b_x7_pins[]		= { GPIOX_7 };
 static const unsigned int pwm_b_x19_pins[]		= { GPIOX_19 };
+static const unsigned int pwm_b_z0_pins[]		= { GPIOZ_0 };
+static const unsigned int pwm_b_z13_pins[]		= { GPIOZ_13 };
+static const unsigned int pwm_b_h_pins[]		= { GPIOH_7 };
 
 /* pwm_c */
 static const unsigned int pwm_c_c_pins[]		= { GPIOC_4 };
 static const unsigned int pwm_c_x5_pins[]		= { GPIOX_5 };
 static const unsigned int pwm_c_x8_pins[]		= { GPIOX_8 };
+static const unsigned int pwm_c_z_pins[]		= { GPIOZ_1 };
 
 /* pwm_d */
 static const unsigned int pwm_d_x3_pins[]		= { GPIOX_3 };
 static const unsigned int pwm_d_x6_pins[]		= { GPIOX_6 };
+static const unsigned int pwm_d_z_pins[]		= { GPIOZ_2 };
+static const unsigned int pwm_d_a_pins[]		= { GPIOA_4 };
 
 /* pwm_e */
 static const unsigned int pwm_e_pins[]			= { GPIOX_16 };
@@ -436,7 +442,7 @@ static const unsigned int tdm_c_dout1_z_pins[]		= { GPIOZ_3 };
 static const unsigned int tdm_c_dout2_z_pins[]		= { GPIOZ_4 };
 static const unsigned int tdm_c_dout3_z_pins[]		= { GPIOZ_5 };
 
-static struct meson_pmx_group meson_g12a_periphs_groups[] = {
+static const struct meson_pmx_group meson_g12a_periphs_groups[] = {
 	GPIO_GROUP(GPIOZ_0),
 	GPIO_GROUP(GPIOZ_1),
 	GPIO_GROUP(GPIOZ_2),
@@ -649,12 +655,22 @@ static struct meson_pmx_group meson_g12a_periphs_groups[] = {
 	GROUP(pwm_a,			1),
 	GROUP(pwm_b_x7,			4),
 	GROUP(pwm_b_x19,		1),
+	GROUP(pwm_b_z0,			5),
+	GROUP(pwm_b_z13,		5),
+	GROUP(pwm_b_h,			5),
 	GROUP(pwm_c_x5,			4),
 	GROUP(pwm_c_x8,			5),
+	GROUP(pwm_c_c,			5),
+	GROUP(pwm_c_z,			5),
+	GROUP(pwm_d_z,			4),
+	GROUP(pwm_d_a,			3),
 	GROUP(pwm_d_x3,			4),
 	GROUP(pwm_d_x6,			4),
 	GROUP(pwm_e,			1),
+	GROUP(pwm_f_a,			3),
+	GROUP(pwm_f_h,			4),
 	GROUP(pwm_f_x,			1),
+	GROUP(pwm_f_z,			5),
 	GROUP(tsin_a_valid,		3),
 	GROUP(tsin_a_sop,		3),
 	GROUP(tsin_a_din0,		3),
@@ -860,7 +876,7 @@ static const unsigned int tdm_ao_b_dout2_pins[]		= { GPIOAO_6 };
 /* mclk0_ao */
 static const unsigned int mclk0_ao_pins[]		= { GPIOAO_9 };
 
-static struct meson_pmx_group meson_g12a_aobus_groups[] = {
+static const struct meson_pmx_group meson_g12a_aobus_groups[] = {
 	GPIO_GROUP(GPIOAO_0),
 	GPIO_GROUP(GPIOAO_1),
 	GPIO_GROUP(GPIOAO_2),
@@ -1058,15 +1074,15 @@ static const char * const pwm_a_groups[] = {
 };
 
 static const char * const pwm_b_groups[] = {
-	"pwm_b_x7", "pwm_b_x19",
+	"pwm_b_h", "pwm_b_x7", "pwm_b_x19", "pwm_b_z0", "pwm_b_z13"
 };
 
 static const char * const pwm_c_groups[] = {
-	"pwm_c_c", "pwm_c_x5", "pwm_c_x8",
+	"pwm_c_c", "pwm_c_x5", "pwm_c_x8", "pwm_c_z",
 };
 
 static const char * const pwm_d_groups[] = {
-	"pwm_d_x3", "pwm_d_x6",
+	"pwm_d_a", "pwm_d_x3", "pwm_d_x6", "pwm_d_z",
 };
 
 static const char * const pwm_e_groups[] = {
@@ -1253,7 +1269,7 @@ static const char * const mclk0_ao_groups[] = {
 	"mclk0_ao",
 };
 
-static struct meson_pmx_func meson_g12a_periphs_functions[] = {
+static const struct meson_pmx_func meson_g12a_periphs_functions[] = {
 	FUNCTION(gpio_periphs),
 	FUNCTION(emmc),
 	FUNCTION(nor),
@@ -1295,7 +1311,7 @@ static struct meson_pmx_func meson_g12a_periphs_functions[] = {
 	FUNCTION(tdm_c),
 };
 
-static struct meson_pmx_func meson_g12a_aobus_functions[] = {
+static const struct meson_pmx_func meson_g12a_aobus_functions[] = {
 	FUNCTION(gpio_aobus),
 	FUNCTION(uart_ao_a),
 	FUNCTION(uart_ao_b),
@@ -1317,7 +1333,7 @@ static struct meson_pmx_func meson_g12a_aobus_functions[] = {
 	FUNCTION(mclk0_ao),
 };
 
-static struct meson_bank meson_g12a_periphs_banks[] = {
+static const struct meson_bank meson_g12a_periphs_banks[] = {
 	/* name  first  last  irq  pullen  pull  dir  out  in  ds */
 	BANK_DS("Z",    GPIOZ_0,  GPIOZ_15,  IRQID_GPIOZ_0,  IRQID_GPIOZ_15,
 		4,  0,  4,  0,  12,  0, 13,  0,  14,  0,  5, 0),
@@ -1333,7 +1349,7 @@ static struct meson_bank meson_g12a_periphs_banks[] = {
 		2,  0,  2,  0,   6,  0,  7,  0,   8,  0,  2, 0),
 };
 
-static struct meson_bank meson_g12a_aobus_banks[] = {
+static const struct meson_bank meson_g12a_aobus_banks[] = {
 	/* name  first  last  irq  pullen  pull  dir  out  in  ds */
 	BANK_DS("AO",   GPIOAO_0, GPIOAO_11, IRQID_GPIOAO_0, IRQID_GPIOAO_11,
 		3,  0,  2,  0,   0,  0,  4,  0,   1,  0,  0, 0),
@@ -1342,7 +1358,7 @@ static struct meson_bank meson_g12a_aobus_banks[] = {
 		3, 16,  2, 16,   0, 16,  4, 16,   1, 16,  1, 0),
 };
 
-static struct meson_pmx_bank meson_g12a_periphs_pmx_banks[] = {
+static const struct meson_pmx_bank meson_g12a_periphs_pmx_banks[] = {
 	/*	 name	 first	  last	    reg	 offset  */
 	BANK_PMX("Z",    GPIOZ_0, GPIOZ_15, 0x6, 0),
 	BANK_PMX("H",    GPIOH_0, GPIOH_8,  0xb, 0),
@@ -1352,17 +1368,17 @@ static struct meson_pmx_bank meson_g12a_periphs_pmx_banks[] = {
 	BANK_PMX("X",    GPIOX_0, GPIOX_19, 0x3, 0),
 };
 
-static struct meson_axg_pmx_data meson_g12a_periphs_pmx_banks_data = {
+static const struct meson_axg_pmx_data meson_g12a_periphs_pmx_banks_data = {
 	.pmx_banks	= meson_g12a_periphs_pmx_banks,
 	.num_pmx_banks	= ARRAY_SIZE(meson_g12a_periphs_pmx_banks),
 };
 
-static struct meson_pmx_bank meson_g12a_aobus_pmx_banks[] = {
+static const struct meson_pmx_bank meson_g12a_aobus_pmx_banks[] = {
 	BANK_PMX("AO",  GPIOAO_0, GPIOAO_11, 0x0, 0),
 	BANK_PMX("E",   GPIOE_0,  GPIOE_2,   0x1, 16),
 };
 
-static struct meson_axg_pmx_data meson_g12a_aobus_pmx_banks_data = {
+static const struct meson_axg_pmx_data meson_g12a_aobus_pmx_banks_data = {
 	.pmx_banks	= meson_g12a_aobus_pmx_banks,
 	.num_pmx_banks	= ARRAY_SIZE(meson_g12a_aobus_pmx_banks),
 };
@@ -1375,7 +1391,7 @@ static int meson_g12a_aobus_parse_dt_extra(struct meson_pinctrl *pc)
 	return 0;
 }
 
-static struct meson_pinctrl_data meson_g12a_periphs_pinctrl_data = {
+static const struct meson_pinctrl_data meson_g12a_periphs_pinctrl_data = {
 	.name		= "periphs-banks",
 	.pins		= meson_g12a_periphs_pins,
 	.groups		= meson_g12a_periphs_groups,
@@ -1389,7 +1405,7 @@ static struct meson_pinctrl_data meson_g12a_periphs_pinctrl_data = {
 	.pmx_data	= &meson_g12a_periphs_pmx_banks_data,
 };
 
-static struct meson_pinctrl_data meson_g12a_aobus_pinctrl_data = {
+static const struct meson_pinctrl_data meson_g12a_aobus_pinctrl_data = {
 	.name		= "aobus-banks",
 	.pins		= meson_g12a_aobus_pins,
 	.groups		= meson_g12a_aobus_groups,
@@ -1426,4 +1442,5 @@ static struct platform_driver meson_g12a_pinctrl_driver = {
 };
 
 module_platform_driver(meson_g12a_pinctrl_driver);
+MODULE_DESCRIPTION("Amlogic Meson G12A SoC pinctrl driver");
 MODULE_LICENSE("Dual BSD/GPL");

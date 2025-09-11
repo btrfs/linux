@@ -297,10 +297,6 @@ struct drbd_epoch {
 	unsigned long flags;
 };
 
-/* Prototype declaration of function defined in drbd_receiver.c */
-int drbdd_init(struct drbd_thread *);
-int drbd_asender(struct drbd_thread *);
-
 /* drbd_epoch flag bits */
 enum {
 	DE_HAVE_BARRIER_NUMBER,
@@ -384,6 +380,9 @@ enum {
 	/* this is/was a write request */
 	__EE_WRITE,
 
+	/* hand back using mempool_free(e, drbd_buffer_page_pool) */
+	__EE_RELEASE_TO_MEMPOOL,
+
 	/* this is/was a write same request */
 	__EE_WRITE_SAME,
 
@@ -406,6 +405,7 @@ enum {
 #define EE_IN_INTERVAL_TREE	(1<<__EE_IN_INTERVAL_TREE)
 #define EE_SUBMITTED		(1<<__EE_SUBMITTED)
 #define EE_WRITE		(1<<__EE_WRITE)
+#define EE_RELEASE_TO_MEMPOOL	(1<<__EE_RELEASE_TO_MEMPOOL)
 #define EE_WRITE_SAME		(1<<__EE_WRITE_SAME)
 #define EE_APPLICATION		(1<<__EE_APPLICATION)
 #define EE_RS_THIN_REQ		(1<<__EE_RS_THIN_REQ)
@@ -524,9 +524,9 @@ struct drbd_md {
 
 struct drbd_backing_dev {
 	struct block_device *backing_bdev;
-	struct bdev_handle *backing_bdev_handle;
+	struct file *backing_bdev_file;
 	struct block_device *md_bdev;
-	struct bdev_handle *md_bdev_handle;
+	struct file *f_md_bdev;
 	struct drbd_md md;
 	struct disk_conf *disk_conf; /* RCU, for updates: resource->conf_update */
 	sector_t known_size; /* last known size of that backing device */
@@ -862,9 +862,7 @@ struct drbd_device {
 	struct list_head sync_ee;   /* IO in progress (P_RS_DATA_REPLY gets written to disk) */
 	struct list_head done_ee;   /* need to send P_WRITE_ACK */
 	struct list_head read_ee;   /* [RS]P_DATA_REQUEST being read */
-	struct list_head net_ee;    /* zero-copy network send in progress */
 
-	int next_barrier_nr;
 	struct list_head resync_reads;
 	atomic_t pp_in_use;		/* allocated from page pool */
 	atomic_t pp_in_use_by_net;	/* sendpage()d, still referenced by tcp */
@@ -1334,24 +1332,6 @@ extern struct kmem_cache *drbd_al_ext_cache;	/* activity log extents */
 extern mempool_t drbd_request_mempool;
 extern mempool_t drbd_ee_mempool;
 
-/* drbd's page pool, used to buffer data received from the peer,
- * or data requested by the peer.
- *
- * This does not have an emergency reserve.
- *
- * When allocating from this pool, it first takes pages from the pool.
- * Only if the pool is depleted will try to allocate from the system.
- *
- * The assumption is that pages taken from this pool will be processed,
- * and given back, "quickly", and then can be recycled, so we can avoid
- * frequent calls to alloc_page(), and still will be able to make progress even
- * under memory pressure.
- */
-extern struct page *drbd_pp_pool;
-extern spinlock_t   drbd_pp_lock;
-extern int	    drbd_pp_vacant;
-extern wait_queue_head_t drbd_pp_wait;
-
 /* We also need a standard (emergency-reserve backed) page pool
  * for meta data IO (activity log, bitmap).
  * We can keep it global, as long as it is used as "N pages at a time".
@@ -1359,6 +1339,7 @@ extern wait_queue_head_t drbd_pp_wait;
  */
 #define DRBD_MIN_POOL_PAGES	128
 extern mempool_t drbd_md_io_page_pool;
+extern mempool_t drbd_buffer_page_pool;
 
 /* We also need to make sure we get a bio
  * when we need it for housekeeping purposes */
@@ -1369,7 +1350,6 @@ extern struct bio_set drbd_io_bio_set;
 
 extern struct mutex resources_mutex;
 
-extern int conn_lowest_minor(struct drbd_connection *connection);
 extern enum drbd_ret_code drbd_create_device(struct drbd_config_context *adm_ctx, unsigned int minor);
 extern void drbd_destroy_device(struct kref *kref);
 extern void drbd_delete_device(struct drbd_device *device);
@@ -1390,9 +1370,6 @@ extern void conn_free_crypto(struct drbd_connection *connection);
 extern void do_submit(struct work_struct *ws);
 extern void __drbd_make_request(struct drbd_device *, struct bio *);
 void drbd_submit_bio(struct bio *bio);
-extern int drbd_read_remote(struct drbd_device *device, struct drbd_request *req);
-extern int is_valid_ar_handle(struct drbd_request *, sector_t);
-
 
 /* drbd_nl.c */
 
@@ -1474,7 +1451,6 @@ extern int w_resync_timer(struct drbd_work *, int);
 extern int w_send_write_hint(struct drbd_work *, int);
 extern int w_send_dblock(struct drbd_work *, int);
 extern int w_send_read_req(struct drbd_work *, int);
-extern int w_e_reissue(struct drbd_work *, int);
 extern int w_restart_disk_io(struct drbd_work *, int);
 extern int w_send_out_of_sync(struct drbd_work *, int);
 
@@ -1488,7 +1464,6 @@ extern int drbd_issue_discard_or_zero_out(struct drbd_device *device,
 		sector_t start, unsigned int nr_sectors, int flags);
 extern int drbd_receiver(struct drbd_thread *thi);
 extern int drbd_ack_receiver(struct drbd_thread *thi);
-extern void drbd_send_ping_wf(struct work_struct *ws);
 extern void drbd_send_acks_wf(struct work_struct *ws);
 extern bool drbd_rs_c_min_rate_throttle(struct drbd_device *device);
 extern bool drbd_rs_should_slow_down(struct drbd_peer_device *peer_device, sector_t sector,
@@ -1499,12 +1474,8 @@ extern struct drbd_peer_request *drbd_alloc_peer_req(struct drbd_peer_device *, 
 						     sector_t, unsigned int,
 						     unsigned int,
 						     gfp_t) __must_hold(local);
-extern void __drbd_free_peer_req(struct drbd_device *, struct drbd_peer_request *,
-				 int);
-#define drbd_free_peer_req(m,e) __drbd_free_peer_req(m, e, 0)
-#define drbd_free_net_peer_req(m,e) __drbd_free_peer_req(m, e, 1)
+extern void drbd_free_peer_req(struct drbd_device *device, struct drbd_peer_request *req);
 extern struct page *drbd_alloc_pages(struct drbd_peer_device *, unsigned int, bool);
-extern void drbd_set_recv_tcq(struct drbd_device *device, int tcq_enabled);
 extern void _drbd_clear_done_ee(struct drbd_device *device, struct list_head *to_be_freed);
 extern int drbd_connected(struct drbd_peer_device *);
 
@@ -1621,16 +1592,6 @@ static inline struct page *page_chain_next(struct page *page)
 #define page_chain_for_each_safe(page, n) \
 	for (; page && ({ n = page_chain_next(page); 1; }); page = n)
 
-
-static inline int drbd_peer_req_has_active_page(struct drbd_peer_request *peer_req)
-{
-	struct page *page = peer_req->pages;
-	page_chain_for_each(page) {
-		if (page_count(page) > 1)
-			return 1;
-	}
-	return 0;
-}
 
 static inline union drbd_state drbd_read_state(struct drbd_device *device)
 {

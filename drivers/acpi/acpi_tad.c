@@ -27,6 +27,7 @@
 #include <linux/pm_runtime.h>
 #include <linux/suspend.h>
 
+MODULE_DESCRIPTION("ACPI Time and Alarm (TAD) Device Driver");
 MODULE_LICENSE("GPL v2");
 MODULE_AUTHOR("Rafael J. Wysocki");
 
@@ -232,7 +233,7 @@ static ssize_t time_show(struct device *dev, struct device_attribute *attr,
 	if (ret)
 		return ret;
 
-	return sprintf(buf, "%u:%u:%u:%u:%u:%u:%d:%u\n",
+	return sysfs_emit(buf, "%u:%u:%u:%u:%u:%u:%d:%u\n",
 		       rt.year, rt.month, rt.day, rt.hour, rt.minute, rt.second,
 		       rt.tz, rt.daylight);
 }
@@ -427,7 +428,7 @@ static ssize_t caps_show(struct device *dev, struct device_attribute *attr,
 {
 	struct acpi_tad_driver_data *dd = dev_get_drvdata(dev);
 
-	return sprintf(buf, "0x%02X\n", dd->capabilities);
+	return sysfs_emit(buf, "0x%02X\n", dd->capabilities);
 }
 
 static DEVICE_ATTR_RO(caps);
@@ -554,7 +555,7 @@ static int acpi_tad_disable_timer(struct device *dev, u32 timer_id)
 	return acpi_tad_wake_set(dev, "_STV", timer_id, ACPI_TAD_WAKE_DISABLED);
 }
 
-static int acpi_tad_remove(struct platform_device *pdev)
+static void acpi_tad_remove(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
 	acpi_handle handle = ACPI_HANDLE(dev);
@@ -579,7 +580,6 @@ static int acpi_tad_remove(struct platform_device *pdev)
 	pm_runtime_put_sync(dev);
 	pm_runtime_disable(dev);
 	acpi_remove_cmos_rtc_space_handler(handle);
-	return 0;
 }
 
 static int acpi_tad_probe(struct platform_device *pdev)

@@ -473,9 +473,7 @@ struct esschan {
 	/* linked list */
 	struct list_head list;
 
-#ifdef CONFIG_PM_SLEEP
 	u16 wc_map[4];
-#endif
 };
 
 struct es1968 {
@@ -526,9 +524,7 @@ struct es1968 {
 	struct list_head substream_list;
 	spinlock_t substream_lock;
 
-#ifdef CONFIG_PM_SLEEP
 	u16 apu_map[NR_APUS][NR_APU_REGS];
-#endif
 
 #ifdef SUPPORT_JOYSTICK
 	struct gameport *gameport;
@@ -689,9 +685,7 @@ static void __apu_set_register(struct es1968 *chip, u16 channel, u8 reg, u16 dat
 {
 	if (snd_BUG_ON(channel >= NR_APUS))
 		return;
-#ifdef CONFIG_PM_SLEEP
 	chip->apu_map[channel][reg] = data;
-#endif
 	reg |= (channel << 4);
 	apu_index_set(chip, reg);
 	apu_data_set(chip, data);
@@ -976,9 +970,7 @@ static void snd_es1968_program_wavecache(struct es1968 *chip, struct esschan *es
 	/* set the wavecache control reg */
 	wave_set_register(chip, es->apu[channel] << 3, tmpval);
 
-#ifdef CONFIG_PM_SLEEP
 	es->wc_map[channel] = tmpval;
-#endif
 }
 
 
@@ -1569,7 +1561,7 @@ static int snd_es1968_capture_open(struct snd_pcm_substream *substream)
 	struct snd_pcm_runtime *runtime = substream->runtime;
 	struct es1968 *chip = snd_pcm_substream_chip(substream);
 	struct esschan *es;
-	int apu1, apu2;
+	int err, apu1, apu2;
 
 	apu1 = snd_es1968_alloc_apu_pair(chip, ESM_APU_PCM_CAPTURE);
 	if (apu1 < 0)
@@ -1613,7 +1605,9 @@ static int snd_es1968_capture_open(struct snd_pcm_substream *substream)
 	runtime->hw = snd_es1968_capture;
 	runtime->hw.buffer_bytes_max = runtime->hw.period_bytes_max =
 		calc_available_memory_size(chip) - 1024; /* keep MIXBUF size */
-	snd_pcm_hw_constraint_pow2(runtime, 0, SNDRV_PCM_HW_PARAM_BUFFER_BYTES);
+	err = snd_pcm_hw_constraint_pow2(runtime, 0, SNDRV_PCM_HW_PARAM_BUFFER_BYTES);
+	if (err < 0)
+		return err;
 
 	spin_lock_irq(&chip->substream_lock);
 	list_add(&es->list, &chip->substream_list);
@@ -1818,7 +1812,7 @@ snd_es1968_pcm(struct es1968 *chip, int device)
 
 	pcm->info_flags = 0;
 
-	strcpy(pcm->name, "ESS Maestro");
+	strscpy(pcm->name, "ESS Maestro");
 
 	chip->pcm = pcm;
 
@@ -2356,7 +2350,6 @@ static void snd_es1968_start_irq(struct es1968 *chip)
 	outw(w, chip->io_port + ESM_PORT_HOST_IRQ);
 }
 
-#ifdef CONFIG_PM_SLEEP
 /*
  * PM support
  */
@@ -2418,11 +2411,7 @@ static int es1968_resume(struct device *dev)
 	return 0;
 }
 
-static SIMPLE_DEV_PM_OPS(es1968_pm, es1968_suspend, es1968_resume);
-#define ES1968_PM_OPS	&es1968_pm
-#else
-#define ES1968_PM_OPS	NULL
-#endif /* CONFIG_PM_SLEEP */
+static DEFINE_SIMPLE_DEV_PM_OPS(es1968_pm, es1968_suspend, es1968_resume);
 
 #ifdef SUPPORT_JOYSTICK
 #define JOYSTICK_ADDR	0x200
@@ -2660,7 +2649,7 @@ static int snd_es1968_create(struct snd_card *card,
 	chip->playback_streams = play_streams;
 	chip->capture_streams = capt_streams;
 
-	err = pci_request_regions(pci, "ESS Maestro");
+	err = pcim_request_all_regions(pci, "ESS Maestro");
 	if (err < 0)
 		return err;
 	chip->io_port = pci_resource_start(pci, 0);
@@ -2772,16 +2761,16 @@ static int __snd_es1968_probe(struct pci_dev *pci,
 
 	switch (chip->type) {
 	case TYPE_MAESTRO2E:
-		strcpy(card->driver, "ES1978");
-		strcpy(card->shortname, "ESS ES1978 (Maestro 2E)");
+		strscpy(card->driver, "ES1978");
+		strscpy(card->shortname, "ESS ES1978 (Maestro 2E)");
 		break;
 	case TYPE_MAESTRO2:
-		strcpy(card->driver, "ES1968");
-		strcpy(card->shortname, "ESS ES1968 (Maestro 2)");
+		strscpy(card->driver, "ES1968");
+		strscpy(card->shortname, "ESS ES1968 (Maestro 2)");
 		break;
 	case TYPE_MAESTRO:
-		strcpy(card->driver, "ESM1");
-		strcpy(card->shortname, "ESS Maestro 1");
+		strscpy(card->driver, "ESM1");
+		strscpy(card->shortname, "ESS Maestro 1");
 		break;
 	}
 
@@ -2852,7 +2841,7 @@ static struct pci_driver es1968_driver = {
 	.id_table = snd_es1968_ids,
 	.probe = snd_es1968_probe,
 	.driver = {
-		.pm = ES1968_PM_OPS,
+		.pm = &es1968_pm,
 	},
 };
 

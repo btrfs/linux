@@ -62,7 +62,6 @@ config MAC80211_KUNIT_TEST
 	depends on KUNIT
 	depends on MAC80211
 	default KUNIT_ALL_TESTS
-	depends on !KERNEL_6_2
 	help
 	  Enable this option to test mac80211 internals with kunit.
 
@@ -97,7 +96,7 @@ config MAC80211_DEBUGFS
 
 config MAC80211_MESSAGE_TRACING
 	bool "Trace all mac80211 debug messages"
-	depends on MAC80211
+	depends on MAC80211 && TRACING
 	help
 	  Select this option to have mac80211 register the
 	  mac80211_msg trace subsystem with tracepoints to

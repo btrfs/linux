@@ -88,6 +88,7 @@ static inline void atalk_remove_socket(struct sock *sk)
 static struct sock *atalk_search_socket(struct sockaddr_at *to,
 					struct atalk_iface *atif)
 {
+	struct sock *def_socket = NULL;
 	struct sock *s;
 
 	read_lock_bh(&atalk_sockets_lock);
@@ -98,8 +99,20 @@ static struct sock *atalk_search_socket(struct sockaddr_at *to,
 			continue;
 
 		if (to->sat_addr.s_net == ATADDR_ANYNET &&
-		    to->sat_addr.s_node == ATADDR_BCAST)
-			goto found;
+		    to->sat_addr.s_node == ATADDR_BCAST) {
+			if (atif->address.s_node == at->src_node &&
+			    atif->address.s_net == at->src_net) {
+				/* This socket's address matches the address of the interface
+				 * that received the packet -- use it
+				 */
+				goto found;
+			}
+
+			/* Continue searching for a socket matching the interface address,
+			 * but use this socket by default if no other one is found
+			 */
+			def_socket = s;
+		}
 
 		if (to->sat_addr.s_net == at->src_net &&
 		    (to->sat_addr.s_node == at->src_node ||
@@ -116,7 +129,7 @@ static struct sock *atalk_search_socket(struct sockaddr_at *to,
 			goto found;
 		}
 	}
-	s = NULL;
+	s = def_socket;
 found:
 	read_unlock_bh(&atalk_sockets_lock);
 	return s;
@@ -156,7 +169,7 @@ found:
 
 static void atalk_destroy_timer(struct timer_list *t)
 {
-	struct sock *sk = from_timer(sk, t, sk_timer);
+	struct sock *sk = timer_container_of(sk, t, sk_timer);
 
 	if (sk_has_allocations(sk)) {
 		sk->sk_timer.expires = jiffies + SOCK_DESTROY_TIME;
@@ -563,6 +576,7 @@ static int atrtr_create(struct rtentry *r, struct net_device *devhint)
 
 	/* Fill in the routing entry */
 	rt->target  = ta->sat_addr;
+	dev_put(rt->dev); /* Release old device */
 	dev_hold(devhint);
 	rt->dev     = devhint;
 	rt->flags   = r->rt_flags;

@@ -16,29 +16,35 @@
 #include <asm/stackframe.h>
 #include <asm/thread_info.h>
 
+	.section .cpuidle.text, "ax"
 	.align	5
 SYM_FUNC_START(__arch_cpu_idle)
-	/* start of rollback region */
-	LONG_L	t0, tp, TI_FLAGS
-	nop
-	andi	t0, t0, _TIF_NEED_RESCHED
-	bnez	t0, 1f
-	nop
-	nop
-	nop
+	/* start of idle interrupt region */
+	ori	t0, zero, CSR_CRMD_IE
+	/* idle instruction needs irq enabled */
+	csrxchg	t0, t0, LOONGARCH_CSR_CRMD
+	/*
+	 * If an interrupt lands here; between enabling interrupts above and
+	 * going idle on the next instruction, we must *NOT* go idle since the
+	 * interrupt could have set TIF_NEED_RESCHED or caused an timer to need
+	 * reprogramming. Fall through -- see handle_vint() below -- and have
+	 * the idle loop take care of things.
+	 */
 	idle	0
-	/* end of rollback region */
-1:	jr	ra
+	/* end of idle interrupt region */
+idle_exit:
+	jr	ra
 SYM_FUNC_END(__arch_cpu_idle)
+	.previous
 
 SYM_CODE_START(handle_vint)
+	UNWIND_HINT_UNDEFINED
 	BACKUP_T0T1
 	SAVE_ALL
-	la_abs	t1, __arch_cpu_idle
+	la_abs	t1, idle_exit
 	LONG_L	t0, sp, PT_ERA
-	/* 32 byte rollback region */
-	ori	t0, t0, 0x1f
-	xori	t0, t0, 0x1f
+	/* 3 instructions idle interrupt region */
+	ori	t0, t0, 0b1100
 	bne	t0, t1, 1f
 	LONG_S	t0, sp, PT_ERA
 1:	move	a0, sp
@@ -49,6 +55,7 @@ SYM_CODE_START(handle_vint)
 SYM_CODE_END(handle_vint)
 
 SYM_CODE_START(except_vec_cex)
+	UNWIND_HINT_UNDEFINED
 	b	cache_parity_error
 SYM_CODE_END(except_vec_cex)
 
@@ -67,6 +74,7 @@ SYM_CODE_END(except_vec_cex)
 	.macro	BUILD_HANDLER exception handler prep
 	.align	5
 	SYM_CODE_START(handle_\exception)
+	UNWIND_HINT_UNDEFINED
 	666:
 	BACKUP_T0T1
 	SAVE_ALL
@@ -77,7 +85,9 @@ SYM_CODE_END(except_vec_cex)
 	668:
 	RESTORE_ALL_AND_RET
 	SYM_CODE_END(handle_\exception)
+	.pushsection	".data", "aw", %progbits
 	SYM_DATA(unwind_hint_\exception, .word 668b - 666b)
+	.popsection
 	.endm
 
 	BUILD_HANDLER ade ade badv
@@ -94,6 +104,7 @@ SYM_CODE_END(except_vec_cex)
 	BUILD_HANDLER reserved reserved none	/* others */
 
 SYM_CODE_START(handle_sys)
+	UNWIND_HINT_UNDEFINED
 	la_abs	t0, handle_syscall
 	jr	t0
 SYM_CODE_END(handle_sys)

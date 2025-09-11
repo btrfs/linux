@@ -81,7 +81,7 @@ Documentation written by Tom Zanussi
 	.usecs         display a common_timestamp in microseconds
         .percent       display a number of percentage value
         .graph         display a bar-graph of a value
-	.stacktrace    display as a stacktrace (must by a long[] type)
+	.stacktrace    display as a stacktrace (must be a long[] type)
 	=============  =================================================
 
   Note that in general the semantics of a given field aren't
@@ -249,7 +249,7 @@ Extended error information
   table, it should keep a running total of the number of bytes
   requested by that call_site.
 
-  We'll let it run for awhile and then dump the contents of the 'hist'
+  We'll let it run for a while and then dump the contents of the 'hist'
   file in the kmalloc event's subdirectory (for readability, a number
   of entries have been omitted)::
 

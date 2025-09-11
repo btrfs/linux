@@ -18,12 +18,14 @@ properties:
       - enum:
           - mediatek,mt2712-pwm
           - mediatek,mt6795-pwm
+          - mediatek,mt6991-pwm
           - mediatek,mt7622-pwm
           - mediatek,mt7623-pwm
           - mediatek,mt7628-pwm
           - mediatek,mt7629-pwm
           - mediatek,mt7981-pwm
           - mediatek,mt7986-pwm
+          - mediatek,mt7988-pwm
           - mediatek,mt8183-pwm
           - mediatek,mt8365-pwm
           - mediatek,mt8516-pwm
@@ -31,6 +33,10 @@ properties:
           - enum:
               - mediatek,mt8195-pwm
           - const: mediatek,mt8183-pwm
+      - items:
+          - enum:
+              - mediatek,mt8196-pwm
+          - const: mediatek,mt6991-pwm
 
   reg:
     maxItems: 1
@@ -65,7 +71,6 @@ properties:
 required:
   - compatible
   - reg
-  - "#pwm-cells"
   - clocks
   - clock-names
 

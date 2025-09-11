@@ -12,16 +12,17 @@
  */
 #if PAGE_SHIFT < 13
 #ifdef CONFIG_4KSTACKS
-#define THREAD_SIZE	4096
+#define THREAD_SIZE_ORDER	0
 #else
-#define THREAD_SIZE	8192
+#define THREAD_SIZE_ORDER	1
 #endif
 #else
-#define THREAD_SIZE	PAGE_SIZE
+#define THREAD_SIZE_ORDER	0
 #endif
-#define THREAD_SIZE_ORDER	((THREAD_SIZE / PAGE_SIZE) - 1)
 
-#ifndef __ASSEMBLY__
+#define THREAD_SIZE	(PAGE_SIZE << THREAD_SIZE_ORDER)
+
+#ifndef __ASSEMBLER__
 
 struct thread_info {
 	struct task_struct	*task;		/* main task structure */
@@ -30,7 +31,7 @@ struct thread_info {
 	__u32			cpu;		/* should always be 0 on m68k */
 	unsigned long		tp_value;	/* thread pointer */
 };
-#endif /* __ASSEMBLY__ */
+#endif /* __ASSEMBLER__ */
 
 #define INIT_THREAD_INFO(tsk)			\
 {						\
@@ -38,7 +39,7 @@ struct thread_info {
 	.preempt_count	= INIT_PREEMPT_COUNT,	\
 }
 
-#ifndef __ASSEMBLY__
+#ifndef __ASSEMBLER__
 /* how to get the thread information struct from C */
 static inline struct thread_info *current_thread_info(void)
 {

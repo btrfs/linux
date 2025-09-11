@@ -24,6 +24,11 @@
 #include <net/checksum.h>
 #include <net/dsfield.h>
 #include <net/mpls.h>
+
+#if IS_ENABLED(CONFIG_PSAMPLE)
+#include <net/psample.h>
+#endif
+
 #include <net/sctp/checksum.h>
 
 #include "datapath.h"
@@ -34,56 +39,16 @@
 #include "flow_netlink.h"
 #include "openvswitch_trace.h"
 
-struct deferred_action {
-	struct sk_buff *skb;
-	const struct nlattr *actions;
-	int actions_len;
-
-	/* Store pkt_key clone when creating deferred action. */
-	struct sw_flow_key pkt_key;
-};
-
-#define MAX_L2_LEN	(VLAN_ETH_HLEN + 3 * MPLS_HLEN)
-struct ovs_frag_data {
-	unsigned long dst;
-	struct vport *vport;
-	struct ovs_skb_cb cb;
-	__be16 inner_protocol;
-	u16 network_offset;	/* valid only for MPLS */
-	u16 vlan_tci;
-	__be16 vlan_proto;
-	unsigned int l2_len;
-	u8 mac_proto;
-	u8 l2_data[MAX_L2_LEN];
-};
-
-static DEFINE_PER_CPU(struct ovs_frag_data, ovs_frag_data_storage);
-
-#define DEFERRED_ACTION_FIFO_SIZE 10
-#define OVS_RECURSION_LIMIT 5
-#define OVS_DEFERRED_ACTION_THRESHOLD (OVS_RECURSION_LIMIT - 2)
-struct action_fifo {
-	int head;
-	int tail;
-	/* Deferred action fifo queue storage. */
-	struct deferred_action fifo[DEFERRED_ACTION_FIFO_SIZE];
-};
-
-struct action_flow_keys {
-	struct sw_flow_key key[OVS_DEFERRED_ACTION_THRESHOLD];
-};
-
-static struct action_fifo __percpu *action_fifos;
-static struct action_flow_keys __percpu *flow_keys;
-static DEFINE_PER_CPU(int, exec_actions_level);
+struct ovs_pcpu_storage __percpu *ovs_pcpu_storage;
 
 /* Make a clone of the 'key', using the pre-allocated percpu 'flow_keys'
  * space. Return NULL if out of key spaces.
  */
 static struct sw_flow_key *clone_key(const struct sw_flow_key *key_)
 {
-	struct action_flow_keys *keys = this_cpu_ptr(flow_keys);
-	int level = this_cpu_read(exec_actions_level);
+	struct ovs_pcpu_storage *ovs_pcpu = this_cpu_ptr(ovs_pcpu_storage);
+	struct action_flow_keys *keys = &ovs_pcpu->flow_keys;
+	int level = ovs_pcpu->exec_level;
 	struct sw_flow_key *key = NULL;
 
 	if (level <= OVS_DEFERRED_ACTION_THRESHOLD) {
@@ -127,10 +92,9 @@ static struct deferred_action *add_deferred_actions(struct sk_buff *skb,
 				    const struct nlattr *actions,
 				    const int actions_len)
 {
-	struct action_fifo *fifo;
+	struct action_fifo *fifo = this_cpu_ptr(&ovs_pcpu_storage->action_fifos);
 	struct deferred_action *da;
 
-	fifo = this_cpu_ptr(action_fifos);
 	da = action_fifo_put(fifo);
 	if (da) {
 		da->skb = skb;
@@ -232,14 +196,18 @@ static int pop_vlan(struct sk_buff *skb, struct sw_flow_key *key)
 static int push_vlan(struct sk_buff *skb, struct sw_flow_key *key,
 		     const struct ovs_action_push_vlan *vlan)
 {
+	int err;
+
 	if (skb_vlan_tag_present(skb)) {
 		invalidate_flow_key(key);
 	} else {
 		key->eth.vlan.tci = vlan->vlan_tci;
 		key->eth.vlan.tpid = vlan->vlan_tpid;
 	}
-	return skb_vlan_push(skb, vlan->vlan_tpid,
-			     ntohs(vlan->vlan_tci) & ~VLAN_CFI_MASK);
+	err = skb_vlan_push(skb, vlan->vlan_tpid,
+			    ntohs(vlan->vlan_tci) & ~VLAN_CFI_MASK);
+	skb_reset_mac_len(skb);
+	return err;
 }
 
 /* 'src' is already properly masked. */
@@ -785,7 +753,7 @@ static int set_sctp(struct sk_buff *skb, struct sw_flow_key *flow_key,
 static int ovs_vport_output(struct net *net, struct sock *sk,
 			    struct sk_buff *skb)
 {
-	struct ovs_frag_data *data = this_cpu_ptr(&ovs_frag_data_storage);
+	struct ovs_frag_data *data = this_cpu_ptr(&ovs_pcpu_storage->frag_data);
 	struct vport *vport = data->vport;
 
 	if (skb_cow_head(skb, data->l2_len) < 0) {
@@ -837,7 +805,7 @@ static void prepare_frag(struct vport *vport, struct sk_buff *skb,
 	unsigned int hlen = skb_network_offset(skb);
 	struct ovs_frag_data *data;
 
-	data = this_cpu_ptr(&ovs_frag_data_storage);
+	data = this_cpu_ptr(&ovs_pcpu_storage->frag_data);
 	data->dst = skb->_skb_refdst;
 	data->vport = vport;
 	data->cb = *OVS_CB(skb);
@@ -925,7 +893,9 @@ static void do_output(struct datapath *dp, struct sk_buff *skb, int out_port,
 {
 	struct vport *vport = ovs_vport_rcu(dp, out_port);
 
-	if (likely(vport && netif_carrier_ok(vport->dev))) {
+	if (likely(vport &&
+		   netif_running(vport->dev) &&
+		   netif_carrier_ok(vport->dev))) {
 		u16 mru = OVS_CB(skb)->mru;
 		u32 cutlen = OVS_CB(skb)->cutlen;
 
@@ -964,16 +934,17 @@ static int output_userspace(struct datapath *dp, struct sk_buff *skb,
 	upcall.cmd = OVS_PACKET_CMD_ACTION;
 	upcall.mru = OVS_CB(skb)->mru;
 
-	for (a = nla_data(attr), rem = nla_len(attr); rem > 0;
-	     a = nla_next(a, &rem)) {
+	nla_for_each_nested(a, attr, rem) {
 		switch (nla_type(a)) {
 		case OVS_USERSPACE_ATTR_USERDATA:
 			upcall.userdata = a;
 			break;
 
 		case OVS_USERSPACE_ATTR_PID:
-			if (dp->user_features &
-			    OVS_DP_F_DISPATCH_UPCALL_PER_CPU)
+			if (OVS_CB(skb)->upcall_pid)
+				upcall.portid = OVS_CB(skb)->upcall_pid;
+			else if (dp->user_features &
+				 OVS_DP_F_DISPATCH_UPCALL_PER_CPU)
 				upcall.portid =
 				  ovs_dp_get_upcall_portid(dp,
 							   smp_processor_id());
@@ -1037,12 +1008,15 @@ static int sample(struct datapath *dp, struct sk_buff *skb,
 	struct nlattr *sample_arg;
 	int rem = nla_len(attr);
 	const struct sample_arg *arg;
+	u32 init_probability;
 	bool clone_flow_key;
+	int err;
 
 	/* The first action is always 'OVS_SAMPLE_ATTR_ARG'. */
 	sample_arg = nla_data(attr);
 	arg = nla_data(sample_arg);
 	actions = nla_next(sample_arg, &rem);
+	init_probability = OVS_CB(skb)->probability;
 
 	if ((arg->probability != U32_MAX) &&
 	    (!arg->probability || get_random_u32() > arg->probability)) {
@@ -1051,9 +1025,16 @@ static int sample(struct datapath *dp, struct sk_buff *skb,
 		return 0;
 	}
 
+	OVS_CB(skb)->probability = arg->probability;
+
 	clone_flow_key = !arg->exec;
-	return clone_execute(dp, skb, key, 0, actions, rem, last,
-			     clone_flow_key);
+	err = clone_execute(dp, skb, key, 0, actions, rem, last,
+			    clone_flow_key);
+
+	if (!last)
+		OVS_CB(skb)->probability = init_probability;
+
+	return err;
 }
 
 /* When 'last' is true, clone() should always consume the 'skb'.
@@ -1293,6 +1274,44 @@ static int execute_dec_ttl(struct sk_buff *skb, struct sw_flow_key *key)
 	return 0;
 }
 
+#if IS_ENABLED(CONFIG_PSAMPLE)
+static void execute_psample(struct datapath *dp, struct sk_buff *skb,
+			    const struct nlattr *attr)
+{
+	struct psample_group psample_group = {};
+	struct psample_metadata md = {};
+	const struct nlattr *a;
+	u32 rate;
+	int rem;
+
+	nla_for_each_attr(a, nla_data(attr), nla_len(attr), rem) {
+		switch (nla_type(a)) {
+		case OVS_PSAMPLE_ATTR_GROUP:
+			psample_group.group_num = nla_get_u32(a);
+			break;
+
+		case OVS_PSAMPLE_ATTR_COOKIE:
+			md.user_cookie = nla_data(a);
+			md.user_cookie_len = nla_len(a);
+			break;
+		}
+	}
+
+	psample_group.net = ovs_dp_get_net(dp);
+	md.in_ifindex = OVS_CB(skb)->input_vport->dev->ifindex;
+	md.trunc_size = skb->len - OVS_CB(skb)->cutlen;
+	md.rate_as_probability = 1;
+
+	rate = OVS_CB(skb)->probability ? OVS_CB(skb)->probability : U32_MAX;
+
+	psample_sample_packet(&psample_group, skb, rate, &md);
+}
+#else
+static void execute_psample(struct datapath *dp, struct sk_buff *skb,
+			    const struct nlattr *attr)
+{}
+#endif
+
 /* Execute a list of actions against 'skb'. */
 static int do_execute_actions(struct datapath *dp, struct sk_buff *skb,
 			      struct sw_flow_key *key,
@@ -1496,6 +1515,15 @@ static int do_execute_actions(struct datapath *dp, struct sk_buff *skb,
 			ovs_kfree_skb_reason(skb, reason);
 			return 0;
 		}
+
+		case OVS_ACTION_ATTR_PSAMPLE:
+			execute_psample(dp, skb, a);
+			OVS_CB(skb)->cutlen = 0;
+			if (nla_is_last(a, rem)) {
+				consume_skb(skb);
+				return 0;
+			}
+			break;
 		}
 
 		if (unlikely(err)) {
@@ -1538,16 +1566,15 @@ static int clone_execute(struct datapath *dp, struct sk_buff *skb,
 	clone = clone_flow_key ? clone_key(key) : key;
 	if (clone) {
 		int err = 0;
-
 		if (actions) { /* Sample action */
 			if (clone_flow_key)
-				__this_cpu_inc(exec_actions_level);
+				__this_cpu_inc(ovs_pcpu_storage->exec_level);
 
 			err = do_execute_actions(dp, skb, clone,
 						 actions, len);
 
 			if (clone_flow_key)
-				__this_cpu_dec(exec_actions_level);
+				__this_cpu_dec(ovs_pcpu_storage->exec_level);
 		} else { /* Recirc action */
 			clone->recirc_id = recirc_id;
 			ovs_dp_process_packet(skb, clone);
@@ -1583,7 +1610,7 @@ static int clone_execute(struct datapath *dp, struct sk_buff *skb,
 
 static void process_deferred_actions(struct datapath *dp)
 {
-	struct action_fifo *fifo = this_cpu_ptr(action_fifos);
+	struct action_fifo *fifo = this_cpu_ptr(&ovs_pcpu_storage->action_fifos);
 
 	/* Do not touch the FIFO in case there is no deferred actions. */
 	if (action_fifo_is_empty(fifo))
@@ -1614,7 +1641,7 @@ int ovs_execute_actions(struct datapath *dp, struct sk_buff *skb,
 {
 	int err, level;
 
-	level = __this_cpu_inc_return(exec_actions_level);
+	level = __this_cpu_inc_return(ovs_pcpu_storage->exec_level);
 	if (unlikely(level > OVS_RECURSION_LIMIT)) {
 		net_crit_ratelimited("ovs: recursion limit reached on datapath %s, probable configuration error\n",
 				     ovs_dp_name(dp));
@@ -1631,27 +1658,6 @@ int ovs_execute_actions(struct datapath *dp, struct sk_buff *skb,
 		process_deferred_actions(dp);
 
 out:
-	__this_cpu_dec(exec_actions_level);
+	__this_cpu_dec(ovs_pcpu_storage->exec_level);
 	return err;
-}
-
-int action_fifos_init(void)
-{
-	action_fifos = alloc_percpu(struct action_fifo);
-	if (!action_fifos)
-		return -ENOMEM;
-
-	flow_keys = alloc_percpu(struct action_flow_keys);
-	if (!flow_keys) {
-		free_percpu(action_fifos);
-		return -ENOMEM;
-	}
-
-	return 0;
-}
-
-void action_fifos_exit(void)
-{
-	free_percpu(action_fifos);
-	free_percpu(flow_keys);
 }

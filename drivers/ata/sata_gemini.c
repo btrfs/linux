@@ -11,7 +11,6 @@
 #include <linux/mfd/syscon.h>
 #include <linux/regmap.h>
 #include <linux/delay.h>
-#include <linux/reset.h>
 #include <linux/of.h>
 #include <linux/clk.h>
 #include <linux/io.h>
@@ -27,8 +26,6 @@
  * @muxmode: the current muxing mode
  * @ide_pins: if the device is using the plain IDE interface pins
  * @sata_bridge: if the device enables the SATA bridge
- * @sata0_reset: SATA0 reset handler
- * @sata1_reset: SATA1 reset handler
  * @sata0_pclk: SATA0 PCLK handler
  * @sata1_pclk: SATA1 PCLK handler
  */
@@ -38,8 +35,6 @@ struct sata_gemini {
 	enum gemini_muxmode muxmode;
 	bool ide_pins;
 	bool sata_bridge;
-	struct reset_control *sata0_reset;
-	struct reset_control *sata1_reset;
 	struct clk *sata0_pclk;
 	struct clk *sata1_pclk;
 };
@@ -200,7 +195,10 @@ int gemini_sata_start_bridge(struct sata_gemini *sg, unsigned int bridge)
 		pclk = sg->sata0_pclk;
 	else
 		pclk = sg->sata1_pclk;
-	clk_enable(pclk);
+	ret = clk_enable(pclk);
+	if (ret)
+		return ret;
+
 	msleep(10);
 
 	/* Do not keep clocking a bridge that is not online */
@@ -220,18 +218,6 @@ void gemini_sata_stop_bridge(struct sata_gemini *sg, unsigned int bridge)
 		clk_disable(sg->sata1_pclk);
 }
 EXPORT_SYMBOL(gemini_sata_stop_bridge);
-
-int gemini_sata_reset_bridge(struct sata_gemini *sg,
-			     unsigned int bridge)
-{
-	if (bridge == 0)
-		reset_control_reset(sg->sata0_reset);
-	else
-		reset_control_reset(sg->sata1_reset);
-	msleep(10);
-	return gemini_sata_setup_bridge(sg, bridge);
-}
-EXPORT_SYMBOL(gemini_sata_reset_bridge);
 
 static int gemini_sata_bridge_init(struct sata_gemini *sg)
 {
@@ -260,21 +246,6 @@ static int gemini_sata_bridge_init(struct sata_gemini *sg)
 		dev_err(dev, "failed to enable SATA1 PCLK\n");
 		clk_disable_unprepare(sg->sata0_pclk);
 		return ret;
-	}
-
-	sg->sata0_reset = devm_reset_control_get_exclusive(dev, "sata0");
-	if (IS_ERR(sg->sata0_reset)) {
-		dev_err(dev, "no SATA0 reset controller\n");
-		clk_disable_unprepare(sg->sata1_pclk);
-		clk_disable_unprepare(sg->sata0_pclk);
-		return PTR_ERR(sg->sata0_reset);
-	}
-	sg->sata1_reset = devm_reset_control_get_exclusive(dev, "sata1");
-	if (IS_ERR(sg->sata1_reset)) {
-		dev_err(dev, "no SATA1 reset controller\n");
-		clk_disable_unprepare(sg->sata1_pclk);
-		clk_disable_unprepare(sg->sata0_pclk);
-		return PTR_ERR(sg->sata1_reset);
 	}
 
 	sata_id = readl(sg->base + GEMINI_SATA_ID);
@@ -414,6 +385,7 @@ static const struct of_device_id gemini_sata_of_match[] = {
 	{ .compatible = "cortina,gemini-sata-bridge", },
 	{ /* sentinel */ }
 };
+MODULE_DEVICE_TABLE(of, gemini_sata_of_match);
 
 static struct platform_driver gemini_sata_driver = {
 	.driver = {
@@ -421,7 +393,7 @@ static struct platform_driver gemini_sata_driver = {
 		.of_match_table = gemini_sata_of_match,
 	},
 	.probe = gemini_sata_probe,
-	.remove_new = gemini_sata_remove,
+	.remove = gemini_sata_remove,
 };
 module_platform_driver(gemini_sata_driver);
 

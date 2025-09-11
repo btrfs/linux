@@ -534,7 +534,9 @@ static void dust_status(struct dm_target *ti, status_type_t type,
 	}
 }
 
-static int dust_prepare_ioctl(struct dm_target *ti, struct block_device **bdev)
+static int dust_prepare_ioctl(struct dm_target *ti, struct block_device **bdev,
+			      unsigned int cmd, unsigned long arg,
+			      bool *forward)
 {
 	struct dust_device *dd = ti->private;
 	struct dm_dev *dev = dd->dev;
@@ -573,5 +575,5 @@ static struct target_type dust_target = {
 module_dm(dust);
 
 MODULE_DESCRIPTION(DM_NAME " dust test target");
-MODULE_AUTHOR("Bryan Gurney <dm-devel@redhat.com>");
+MODULE_AUTHOR("Bryan Gurney <dm-devel@lists.linux.dev>");
 MODULE_LICENSE("GPL");

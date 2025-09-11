@@ -47,7 +47,7 @@ struct anx6345 {
 	struct drm_dp_aux aux;
 	struct drm_bridge bridge;
 	struct i2c_client *client;
-	struct edid *edid;
+	const struct drm_edid *drm_edid;
 	struct drm_connector connector;
 	struct drm_panel *panel;
 	struct regulator *dvdd12;
@@ -143,35 +143,7 @@ static int anx6345_dp_link_training(struct anx6345 *anx6345)
 	if (err)
 		return err;
 
-	/*
-	 * Power up the sink (DP_SET_POWER register is only available on DPCD
-	 * v1.1 and later).
-	 */
-	if (anx6345->dpcd[DP_DPCD_REV] >= 0x11) {
-		err = drm_dp_dpcd_readb(&anx6345->aux, DP_SET_POWER, &dpcd[0]);
-		if (err < 0) {
-			DRM_ERROR("Failed to read DP_SET_POWER register: %d\n",
-				  err);
-			return err;
-		}
-
-		dpcd[0] &= ~DP_SET_POWER_MASK;
-		dpcd[0] |= DP_SET_POWER_D0;
-
-		err = drm_dp_dpcd_writeb(&anx6345->aux, DP_SET_POWER, dpcd[0]);
-		if (err < 0) {
-			DRM_ERROR("Failed to power up DisplayPort link: %d\n",
-				  err);
-			return err;
-		}
-
-		/*
-		 * According to the DP 1.1 specification, a "Sink Device must
-		 * exit the power saving state within 1 ms" (Section 2.5.3.1,
-		 * Table 5-52, "Sink Control Field" (register 0x600).
-		 */
-		usleep_range(1000, 2000);
-	}
+	drm_dp_link_power_up(&anx6345->aux, anx6345->dpcd[DP_DPCD_REV]);
 
 	/* Possibly enable downspread on the sink */
 	err = regmap_write(anx6345->map[I2C_IDX_DPTX],
@@ -458,7 +430,7 @@ static int anx6345_get_modes(struct drm_connector *connector)
 
 	mutex_lock(&anx6345->lock);
 
-	if (!anx6345->edid) {
+	if (!anx6345->drm_edid) {
 		if (!anx6345->powered) {
 			anx6345_poweron(anx6345);
 			power_off = true;
@@ -470,19 +442,18 @@ static int anx6345_get_modes(struct drm_connector *connector)
 			goto unlock;
 		}
 
-		anx6345->edid = drm_get_edid(connector, &anx6345->aux.ddc);
-		if (!anx6345->edid)
+		anx6345->drm_edid = drm_edid_read_ddc(connector, &anx6345->aux.ddc);
+		if (!anx6345->drm_edid)
 			DRM_ERROR("Failed to read EDID from panel\n");
 
-		err = drm_connector_update_edid_property(connector,
-							 anx6345->edid);
+		err = drm_edid_connector_update(connector, anx6345->drm_edid);
 		if (err) {
 			DRM_ERROR("Failed to update EDID property: %d\n", err);
 			goto unlock;
 		}
 	}
 
-	num_modes += drm_add_edid_modes(connector, anx6345->edid);
+	num_modes += drm_edid_connector_add_modes(connector);
 
 	/* Driver currently supports only 6bpc */
 	connector->display_info.bpc = 6;
@@ -518,6 +489,7 @@ static const struct drm_connector_funcs anx6345_connector_funcs = {
 };
 
 static int anx6345_bridge_attach(struct drm_bridge *bridge,
+				 struct drm_encoder *encoder,
 				 enum drm_bridge_attach_flags flags)
 {
 	struct anx6345 *anx6345 = bridge_to_anx6345(bridge);
@@ -526,11 +498,6 @@ static int anx6345_bridge_attach(struct drm_bridge *bridge,
 	if (flags & DRM_BRIDGE_ATTACH_NO_CONNECTOR) {
 		DRM_ERROR("Fix bridge driver to make connector optional!");
 		return -EINVAL;
-	}
-
-	if (!bridge->encoder) {
-		DRM_ERROR("Parent encoder object not found");
-		return -ENODEV;
 	}
 
 	/* Register aux channel */
@@ -559,7 +526,7 @@ static int anx6345_bridge_attach(struct drm_bridge *bridge,
 	anx6345->connector.polled = DRM_CONNECTOR_POLL_HPD;
 
 	err = drm_connector_attach_encoder(&anx6345->connector,
-					   bridge->encoder);
+					   encoder);
 	if (err) {
 		DRM_ERROR("Failed to link up connector to encoder: %d\n", err);
 		goto connector_cleanup;
@@ -697,9 +664,10 @@ static int anx6345_i2c_probe(struct i2c_client *client)
 	struct device *dev;
 	int i, err;
 
-	anx6345 = devm_kzalloc(&client->dev, sizeof(*anx6345), GFP_KERNEL);
-	if (!anx6345)
-		return -ENOMEM;
+	anx6345 = devm_drm_bridge_alloc(&client->dev, struct anx6345, bridge,
+					&anx6345_bridge_funcs);
+	if (IS_ERR(anx6345))
+		return PTR_ERR(anx6345);
 
 	mutex_init(&anx6345->lock);
 
@@ -771,7 +739,6 @@ static int anx6345_i2c_probe(struct i2c_client *client)
 	/* Look for supported chip ID */
 	anx6345_poweron(anx6345);
 	if (anx6345_get_chip_id(anx6345)) {
-		anx6345->bridge.funcs = &anx6345_bridge_funcs;
 		drm_bridge_add(&anx6345->bridge);
 
 		return 0;
@@ -793,13 +760,13 @@ static void anx6345_i2c_remove(struct i2c_client *client)
 
 	unregister_i2c_dummy_clients(anx6345);
 
-	kfree(anx6345->edid);
+	drm_edid_free(anx6345->drm_edid);
 
 	mutex_destroy(&anx6345->lock);
 }
 
 static const struct i2c_device_id anx6345_id[] = {
-	{ "anx6345", 0 },
+	{ "anx6345" },
 	{ /* sentinel */ }
 };
 MODULE_DEVICE_TABLE(i2c, anx6345_id);

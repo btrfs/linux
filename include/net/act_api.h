@@ -76,19 +76,24 @@ static inline void tcf_lastuse_update(struct tcf_t *tm)
 {
 	unsigned long now = jiffies;
 
-	if (tm->lastuse != now)
-		tm->lastuse = now;
-	if (unlikely(!tm->firstuse))
-		tm->firstuse = now;
+	if (READ_ONCE(tm->lastuse) != now)
+		WRITE_ONCE(tm->lastuse, now);
+	if (unlikely(!READ_ONCE(tm->firstuse)))
+		WRITE_ONCE(tm->firstuse, now);
 }
 
 static inline void tcf_tm_dump(struct tcf_t *dtm, const struct tcf_t *stm)
 {
-	dtm->install = jiffies_to_clock_t(jiffies - stm->install);
-	dtm->lastuse = jiffies_to_clock_t(jiffies - stm->lastuse);
-	dtm->firstuse = stm->firstuse ?
-		jiffies_to_clock_t(jiffies - stm->firstuse) : 0;
-	dtm->expires = jiffies_to_clock_t(stm->expires);
+	unsigned long firstuse, now = jiffies;
+
+	dtm->install = jiffies_to_clock_t(now - READ_ONCE(stm->install));
+	dtm->lastuse = jiffies_to_clock_t(now - READ_ONCE(stm->lastuse));
+
+	firstuse = READ_ONCE(stm->firstuse);
+	dtm->firstuse = firstuse ?
+		jiffies_to_clock_t(now - firstuse) : 0;
+
+	dtm->expires = jiffies_to_clock_t(READ_ONCE(stm->expires));
 }
 
 static inline enum flow_action_hw_stats tc_act_hw_stats(u8 hw_stats)
@@ -170,14 +175,12 @@ static inline void tc_action_net_exit(struct list_head *net_list,
 {
 	struct net *net;
 
-	rtnl_lock();
 	list_for_each_entry(net, net_list, exit_list) {
 		struct tc_action_net *tn = net_generic(net, id);
 
 		tcf_idrinfo_destroy(tn->ops, tn->idrinfo);
 		kfree(tn->idrinfo);
 	}
-	rtnl_unlock();
 }
 
 int tcf_generic_walker(struct tc_action_net *tn, struct sk_buff *skb,
@@ -201,6 +204,8 @@ int tcf_idr_release(struct tc_action *a, bool bind);
 int tcf_register_action(struct tc_action_ops *a, struct pernet_operations *ops);
 int tcf_unregister_action(struct tc_action_ops *a,
 			  struct pernet_operations *ops);
+#define NET_ACT_ALIAS_PREFIX "net-act-"
+#define MODULE_ALIAS_NET_ACT(kind)	MODULE_ALIAS(NET_ACT_ALIAS_PREFIX kind)
 int tcf_action_destroy(struct tc_action *actions[], int bind);
 int tcf_action_exec(struct sk_buff *skb, struct tc_action **actions,
 		    int nr_actions, struct tcf_result *res);
@@ -217,7 +222,6 @@ struct tc_action *tcf_action_init_1(struct net *net, struct tcf_proto *tp,
 int tcf_action_dump(struct sk_buff *skb, struct tc_action *actions[], int bind,
 		    int ref, bool terse);
 int tcf_action_dump_old(struct sk_buff *skb, struct tc_action *a, int, int);
-int tcf_action_dump_1(struct sk_buff *skb, struct tc_action *a, int, int);
 
 static inline void tcf_action_update_bstats(struct tc_action *a,
 					    struct sk_buff *skb)

@@ -25,7 +25,7 @@ static inline int snd_ad1816a_busy_wait(struct snd_ad1816a *chip)
 		if (inb(AD1816A_REG(AD1816A_CHIP_STATUS)) & AD1816A_READY)
 			return 0;
 
-	snd_printk(KERN_WARNING "chip busy.\n");
+	dev_warn(chip->card->dev, "chip busy.\n");
 	return -EBUSY;
 }
 
@@ -186,7 +186,7 @@ static int snd_ad1816a_trigger(struct snd_ad1816a *chip, unsigned char what,
 		spin_unlock(&chip->lock);
 		break;
 	default:
-		snd_printk(KERN_WARNING "invalid trigger mode 0x%x.\n", what);
+		dev_warn(chip->card->dev, "invalid trigger mode 0x%x.\n", what);
 		error = -EINVAL;
 	}
 
@@ -548,8 +548,8 @@ static const char *snd_ad1816a_chip_id(struct snd_ad1816a *chip)
 	case AD1816A_HW_AD1815:	return "AD1815";
 	case AD1816A_HW_AD18MAX10: return "AD18max10";
 	default:
-		snd_printk(KERN_WARNING "Unknown chip version %d:%d.\n",
-			chip->version, chip->hardware);
+		dev_warn(chip->card->dev, "Unknown chip version %d:%d.\n",
+			 chip->version, chip->hardware);
 		return "AD1816A - unknown";
 	}
 }
@@ -566,23 +566,23 @@ int snd_ad1816a_create(struct snd_card *card,
 
 	chip->res_port = devm_request_region(card->dev, port, 16, "AD1816A");
 	if (!chip->res_port) {
-		snd_printk(KERN_ERR "ad1816a: can't grab port 0x%lx\n", port);
+		dev_err(card->dev, "ad1816a: can't grab port 0x%lx\n", port);
 		return -EBUSY;
 	}
 	if (devm_request_irq(card->dev, irq, snd_ad1816a_interrupt, 0,
 			     "AD1816A", (void *) chip)) {
-		snd_printk(KERN_ERR "ad1816a: can't grab IRQ %d\n", irq);
+		dev_err(card->dev, "ad1816a: can't grab IRQ %d\n", irq);
 		return -EBUSY;
 	}
 	chip->irq = irq;
 	card->sync_irq = chip->irq;
 	if (snd_devm_request_dma(card->dev, dma1, "AD1816A - 1")) {
-		snd_printk(KERN_ERR "ad1816a: can't grab DMA1 %d\n", dma1);
+		dev_err(card->dev, "ad1816a: can't grab DMA1 %d\n", dma1);
 		return -EBUSY;
 	}
 	chip->dma1 = dma1;
 	if (snd_devm_request_dma(card->dev, dma2, "AD1816A - 2")) {
-		snd_printk(KERN_ERR "ad1816a: can't grab DMA2 %d\n", dma2);
+		dev_err(card->dev, "ad1816a: can't grab DMA2 %d\n", dma2);
 		return -EBUSY;
 	}
 	chip->dma2 = dma2;
@@ -631,7 +631,7 @@ int snd_ad1816a_pcm(struct snd_ad1816a *chip, int device)
 	pcm->private_data = chip;
 	pcm->info_flags = (chip->dma1 == chip->dma2 ) ? SNDRV_PCM_INFO_JOINT_DUPLEX : 0;
 
-	strcpy(pcm->name, snd_ad1816a_chip_id(chip));
+	strscpy(pcm->name, snd_ad1816a_chip_id(chip));
 	snd_ad1816a_init(chip);
 
 	snd_pcm_set_managed_buffer_all(pcm, SNDRV_DMA_TYPE_DEV, chip->card->dev,
@@ -655,7 +655,7 @@ int snd_ad1816a_timer(struct snd_ad1816a *chip, int device)
 	error = snd_timer_new(chip->card, "AD1816A", &tid, &timer);
 	if (error < 0)
 		return error;
-	strcpy(timer->name, snd_ad1816a_chip_id(chip));
+	strscpy(timer->name, snd_ad1816a_chip_id(chip));
 	timer->private_data = chip;
 	chip->timer = timer;
 	timer->hw = snd_ad1816a_timer_table;
@@ -912,7 +912,7 @@ int snd_ad1816a_mixer(struct snd_ad1816a *chip)
 
 	card = chip->card;
 
-	strcpy(card->mixername, snd_ad1816a_chip_id(chip));
+	strscpy(card->mixername, snd_ad1816a_chip_id(chip));
 
 	for (idx = 0; idx < ARRAY_SIZE(snd_ad1816a_controls); idx++) {
 		err = snd_ctl_add(card, snd_ctl_new1(&snd_ad1816a_controls[idx], chip));

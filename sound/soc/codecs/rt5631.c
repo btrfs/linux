@@ -1411,10 +1411,10 @@ static int rt5631_hifi_codec_set_dai_fmt(struct snd_soc_dai *codec_dai,
 	dev_dbg(component->dev, "enter %s\n", __func__);
 
 	switch (fmt & SND_SOC_DAIFMT_MASTER_MASK) {
-	case SND_SOC_DAIFMT_CBM_CFM:
+	case SND_SOC_DAIFMT_CBP_CFP:
 		rt5631->master = 1;
 		break;
-	case SND_SOC_DAIFMT_CBS_CFS:
+	case SND_SOC_DAIFMT_CBC_CFC:
 		iface |= RT5631_SDP_MODE_SEL_SLAVE;
 		rt5631->master = 0;
 		break;
@@ -1669,8 +1669,8 @@ static const struct snd_soc_component_driver soc_component_dev_rt5631 = {
 };
 
 static const struct i2c_device_id rt5631_i2c_id[] = {
-	{ "rt5631", 0 },
-	{ "alc5631", 0 },
+	{ "rt5631" },
+	{ "alc5631" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, rt5631_i2c_id);

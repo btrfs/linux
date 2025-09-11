@@ -150,7 +150,7 @@ ITU-T.81
 ========
 
 
-:title:     ITU-T Recommendation T.81 "Information Technology --- Digital Compression and Coding of Continous-Tone Still Images --- Requirements and Guidelines"
+:title:     ITU-T Recommendation T.81 "Information Technology --- Digital Compression and Coding of Continuous-Tone Still Images --- Requirements and Guidelines"
 
 :author:    International Telecommunication Union (http://www.itu.int)
 
@@ -331,6 +331,17 @@ VESA DMT
 
 
 :title:     VESA and Industry Standards and Guidelines for Computer Display Monitor Timing (DMT)
+
+:author:    Video Electronics Standards Association (http://www.vesa.org)
+
+.. _vesaeddc:
+
+E-DDC
+=====
+
+
+:title:     VESA Enhanced Display Data Channel (E-DDC) Standard
+:subtitle:  Version 1.3
 
 :author:    Video Electronics Standards Association (http://www.vesa.org)
 

@@ -3,7 +3,7 @@
 
 #include "ice_dcb_lib.h"
 #include "ice_dcb_nl.h"
-#include "ice_devlink.h"
+#include "devlink/devlink.h"
 
 /**
  * ice_dcb_get_ena_tc - return bitmap of enabled TCs
@@ -187,6 +187,7 @@ void ice_vsi_set_dcb_tc_cfg(struct ice_vsi *vsi)
 		vsi->tc_cfg.numtc = ice_dcb_get_num_tc(cfg);
 		break;
 	case ICE_VSI_CHNL:
+	case ICE_VSI_SF:
 		vsi->tc_cfg.ena_tc = BIT(ice_get_first_droptc(vsi));
 		vsi->tc_cfg.numtc = 1;
 		break;
@@ -291,7 +292,6 @@ static void ice_dcb_ena_dis_vsi(struct ice_pf *pf, bool ena, bool locked)
 
 		switch (vsi->type) {
 		case ICE_VSI_CHNL:
-		case ICE_VSI_SWITCHDEV_CTRL:
 		case ICE_VSI_PF:
 			if (ena)
 				ice_ena_vsi(vsi, locked);
@@ -352,8 +352,8 @@ int ice_pf_dcb_cfg(struct ice_pf *pf, struct ice_dcbx_cfg *new_cfg, bool locked)
 	struct ice_aqc_port_ets_elem buf = { 0 };
 	struct ice_dcbx_cfg *old_cfg, *curr_cfg;
 	struct device *dev = ice_pf_to_dev(pf);
+	struct iidc_rdma_event *event;
 	int ret = ICE_DCB_NO_HW_CHG;
-	struct iidc_event *event;
 	struct ice_vsi *pf_vsi;
 
 	curr_cfg = &pf->hw.port_info->qos_cfg.local_dcbx_cfg;
@@ -405,7 +405,7 @@ int ice_pf_dcb_cfg(struct ice_pf *pf, struct ice_dcbx_cfg *new_cfg, bool locked)
 		goto free_cfg;
 	}
 
-	set_bit(IIDC_EVENT_BEFORE_TC_CHANGE, event->type);
+	set_bit(IIDC_RDMA_EVENT_BEFORE_TC_CHANGE, event->type);
 	ice_send_event_to_aux(pf, event);
 	kfree(event);
 
@@ -740,7 +740,9 @@ static int ice_dcb_noncontig_cfg(struct ice_pf *pf)
 void ice_pf_dcb_recfg(struct ice_pf *pf, bool locked)
 {
 	struct ice_dcbx_cfg *dcbcfg = &pf->hw.port_info->qos_cfg.local_dcbx_cfg;
-	struct iidc_event *event;
+	struct iidc_rdma_priv_dev_info *privd;
+	struct iidc_rdma_core_dev_info *cdev;
+	struct iidc_rdma_event *event;
 	u8 tc_map = 0;
 	int v, ret;
 
@@ -776,21 +778,24 @@ void ice_pf_dcb_recfg(struct ice_pf *pf, bool locked)
 		/* no need to proceed with remaining cfg if it is CHNL
 		 * or switchdev VSI
 		 */
-		if (vsi->type == ICE_VSI_CHNL ||
-		    vsi->type == ICE_VSI_SWITCHDEV_CTRL)
+		if (vsi->type == ICE_VSI_CHNL)
 			continue;
 
 		ice_vsi_map_rings_to_vectors(vsi);
 		if (vsi->type == ICE_VSI_PF)
 			ice_dcbnl_set_all(vsi);
 	}
-	if (!locked) {
+
+	cdev = pf->cdev_info;
+	if (cdev && !locked) {
+		privd = cdev->iidc_priv;
+		ice_setup_dcb_qos_info(pf, &privd->qos_info);
 		/* Notify the AUX drivers that TC change is finished */
 		event = kzalloc(sizeof(*event), GFP_KERNEL);
 		if (!event)
 			return;
 
-		set_bit(IIDC_EVENT_AFTER_TC_CHANGE, event->type);
+		set_bit(IIDC_RDMA_EVENT_AFTER_TC_CHANGE, event->type);
 		ice_send_event_to_aux(pf, event);
 		kfree(event);
 	}
@@ -847,7 +852,7 @@ int ice_init_pf_dcb(struct ice_pf *pf, bool locked)
 			goto dcb_init_err;
 		}
 
-		ice_cfg_sw_lldp(pf_vsi, false, true);
+		ice_cfg_sw_rx_lldp(pf, true);
 
 		pf->dcbx_cap = ice_dcb_get_mode(port_info, true);
 		return 0;
@@ -946,6 +951,37 @@ ice_tx_prepare_vlan_flags_dcb(struct ice_tx_ring *tx_ring,
 }
 
 /**
+ * ice_setup_dcb_qos_info - Setup DCB QoS information
+ * @pf: ptr to ice_pf
+ * @qos_info: QoS param instance
+ */
+void ice_setup_dcb_qos_info(struct ice_pf *pf, struct iidc_rdma_qos_params *qos_info)
+{
+	struct ice_dcbx_cfg *dcbx_cfg;
+	unsigned int i;
+	u32 up2tc;
+
+	if (!pf || !qos_info)
+		return;
+
+	dcbx_cfg = &pf->hw.port_info->qos_cfg.local_dcbx_cfg;
+	up2tc = rd32(&pf->hw, PRTDCB_TUP2TC);
+
+	qos_info->num_tc = ice_dcb_get_num_tc(dcbx_cfg);
+
+	for (i = 0; i < IIDC_MAX_USER_PRIORITY; i++)
+		qos_info->up2tc[i] = (up2tc >> (i * 3)) & 0x7;
+
+	for (i = 0; i < IEEE_8021QAZ_MAX_TCS; i++)
+		qos_info->tc_info[i].rel_bw = dcbx_cfg->etscfg.tcbwtable[i];
+
+	qos_info->pfc_mode = dcbx_cfg->pfc_mode;
+	if (qos_info->pfc_mode == IIDC_DSCP_PFC_MODE)
+		for (i = 0; i < DSCP_MAX; i++)
+			qos_info->dscp_map[i] = dcbx_cfg->dscp_map[i];
+}
+
+/**
  * ice_dcb_is_mib_change_pending - Check if MIB change is pending
  * @state: MIB change state
  */
@@ -984,7 +1020,7 @@ ice_dcb_process_lldp_set_mib_change(struct ice_pf *pf,
 	}
 
 	pi = pf->hw.port_info;
-	mib = (struct ice_aqc_lldp_get_mib *)&event->desc.params.raw;
+	mib = libie_aq_raw(&event->desc);
 
 	/* Ignore if event is not for Nearest Bridge */
 	mib_type = FIELD_GET(ICE_AQ_LLDP_BRID_TYPE_M, mib->type);

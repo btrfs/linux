@@ -2,7 +2,7 @@
 /*
  * Line 6 Linux USB driver
  *
- * Copyright (C) 2004-2010 Markus Grabner (grabner@icg.tugraz.at)
+ * Copyright (C) 2004-2010 Markus Grabner (line6@grabner-graz.at)
  */
 
 #include <linux/slab.h>
@@ -486,7 +486,7 @@ static int snd_line6_new_pcm(struct usb_line6 *line6, struct snd_pcm **pcm_ret)
 	if (err < 0)
 		return err;
 	pcm = *pcm_ret;
-	strcpy(pcm->name, line6->properties->name);
+	strscpy(pcm->name, line6->properties->name);
 
 	/* set operators */
 	snd_pcm_set_ops(pcm, SNDRV_PCM_STREAM_PLAYBACK,

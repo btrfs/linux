@@ -350,7 +350,8 @@ static int i2c_nuvoton_recv(struct tpm_chip *chip, u8 *buf, size_t count)
  * tpm.c can skip polling for the data to be available as the interrupt is
  * waited for here
  */
-static int i2c_nuvoton_send(struct tpm_chip *chip, u8 *buf, size_t len)
+static int i2c_nuvoton_send(struct tpm_chip *chip, u8 *buf, size_t bufsiz,
+			    size_t len)
 {
 	struct priv_data *priv = dev_get_drvdata(&chip->dev);
 	struct device *dev = chip->dev.parent;
@@ -654,6 +655,6 @@ static struct i2c_driver i2c_nuvoton_driver = {
 
 module_i2c_driver(i2c_nuvoton_driver);
 
-MODULE_AUTHOR("Dan Morav (dan.morav@nuvoton.com)");
+MODULE_AUTHOR("Dan Morav <dan.morav@nuvoton.com>");
 MODULE_DESCRIPTION("Nuvoton TPM I2C Driver");
 MODULE_LICENSE("GPL");

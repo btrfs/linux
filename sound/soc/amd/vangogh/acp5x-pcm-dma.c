@@ -420,7 +420,7 @@ static void acp5x_audio_remove(struct platform_device *pdev)
 	pm_runtime_disable(&pdev->dev);
 }
 
-static int __maybe_unused acp5x_pcm_resume(struct device *dev)
+static int acp5x_pcm_resume(struct device *dev)
 {
 	struct i2s_dev_data *adata;
 	struct i2s_stream_instance *rtd;
@@ -473,7 +473,7 @@ static int __maybe_unused acp5x_pcm_resume(struct device *dev)
 	return 0;
 }
 
-static int __maybe_unused acp5x_pcm_suspend(struct device *dev)
+static int acp5x_pcm_suspend(struct device *dev)
 {
 	struct i2s_dev_data *adata;
 
@@ -482,7 +482,7 @@ static int __maybe_unused acp5x_pcm_suspend(struct device *dev)
 	return 0;
 }
 
-static int __maybe_unused acp5x_pcm_runtime_resume(struct device *dev)
+static int acp5x_pcm_runtime_resume(struct device *dev)
 {
 	struct i2s_dev_data *adata;
 
@@ -492,14 +492,13 @@ static int __maybe_unused acp5x_pcm_runtime_resume(struct device *dev)
 }
 
 static const struct dev_pm_ops acp5x_pm_ops = {
-	SET_RUNTIME_PM_OPS(acp5x_pcm_suspend,
-			   acp5x_pcm_runtime_resume, NULL)
-	SET_SYSTEM_SLEEP_PM_OPS(acp5x_pcm_suspend, acp5x_pcm_resume)
+	RUNTIME_PM_OPS(acp5x_pcm_suspend, acp5x_pcm_runtime_resume, NULL)
+	SYSTEM_SLEEP_PM_OPS(acp5x_pcm_suspend, acp5x_pcm_resume)
 };
 
 static struct platform_driver acp5x_dma_driver = {
 	.probe = acp5x_audio_probe,
-	.remove_new = acp5x_audio_remove,
+	.remove = acp5x_audio_remove,
 	.driver = {
 		.name = "acp5x_i2s_dma",
 		.pm = &acp5x_pm_ops,

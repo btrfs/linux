@@ -147,7 +147,7 @@ static const struct iio_chan_spec_ext_info ti_dac_ext_info[] = {
 	},
 	IIO_ENUM("powerdown_mode", IIO_SHARED_BY_TYPE, &ti_dac_powerdown_mode),
 	IIO_ENUM_AVAILABLE("powerdown_mode", IIO_SHARED_BY_TYPE, &ti_dac_powerdown_mode),
-	{ },
+	{ }
 };
 
 #define TI_DAC_CHANNEL(chan) {					\
@@ -249,7 +249,9 @@ static int ti_dac_probe(struct spi_device *spi)
 
 	spi->mode = SPI_MODE_1;
 	spi->bits_per_word = 16;
-	spi_setup(spi);
+	ret = spi_setup(spi);
+	if (ret < 0)
+		return dev_err_probe(dev, ret, "spi_setup failed\n");
 
 	indio_dev->info = &ti_dac_info;
 	indio_dev->name = spi_get_device_id(spi)->name;

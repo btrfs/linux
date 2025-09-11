@@ -18,6 +18,7 @@
 #include <dt-bindings/clock/r8a77970-cpg-mssr.h>
 
 #include "renesas-cpg-mssr.h"
+#include "rcar-cpg-lib.h"
 #include "rcar-gen3-cpg.h"
 
 #define CPG_SD0CKCR		0x0074
@@ -46,8 +47,6 @@ enum clk_ids {
 	/* Module Clocks */
 	MOD_CLK_BASE
 };
-
-static spinlock_t cpg_lock;
 
 static const struct clk_div_table cpg_sd0h_div_table[] = {
 	{  0,  2 }, {  1,  3 }, {  2,  4 }, {  3,  6 },
@@ -213,8 +212,6 @@ static int __init r8a77970_cpg_mssr_init(struct device *dev)
 	if (error)
 		return error;
 
-	spin_lock_init(&cpg_lock);
-
 	cpg_pll_config = &cpg_pll_configs[CPG_PLL_CONFIG_INDEX(cpg_mode)];
 
 	return rcar_gen3_cpg_init(cpg_pll_config, CLK_EXTALR, cpg_mode);
@@ -222,10 +219,11 @@ static int __init r8a77970_cpg_mssr_init(struct device *dev)
 
 static struct clk * __init r8a77970_cpg_clk_register(struct device *dev,
 	const struct cpg_core_clk *core, const struct cpg_mssr_info *info,
-	struct clk **clks, void __iomem *base,
-	struct raw_notifier_head *notifiers)
+	struct cpg_mssr_pub *pub)
 {
 	const struct clk_div_table *table;
+	void __iomem *base = pub->base0;
+	struct clk **clks = pub->clks;
 	const struct clk *parent;
 	unsigned int shift;
 
@@ -239,8 +237,7 @@ static struct clk * __init r8a77970_cpg_clk_register(struct device *dev,
 		shift = 4;
 		break;
 	default:
-		return rcar_gen3_cpg_clk_register(dev, core, info, clks, base,
-						  notifiers);
+		return rcar_gen3_cpg_clk_register(dev, core, info, pub);
 	}
 
 	parent = clks[core->parent];

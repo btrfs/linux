@@ -237,8 +237,7 @@ static int htc_issue_packets(struct htc_target *target,
 
 		packet->info.tx.flags |= HTC_FLAGS_TX_FIXUP_NETBUF;
 
-		/* Endianess? */
-		put_unaligned((u16) payload_len, &htc_hdr->payld_len);
+		put_unaligned_le16(payload_len, &htc_hdr->payld_len);
 		htc_hdr->flags = packet->info.tx.flags;
 		htc_hdr->eid = (u8) packet->endpoint;
 		htc_hdr->ctrl[0] = 0;
@@ -719,7 +718,7 @@ static struct htc_packet *htc_lookup_tx_packet(struct htc_target *target,
 	spin_lock_bh(&target->tx_lock);
 
 	/*
-	 * interate from the front of tx lookup queue
+	 * iterate from the front of tx lookup queue
 	 * this lookup should be fast since lower layers completes in-order and
 	 * so the completed packet should be at the head of the list generally
 	 */

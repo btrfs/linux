@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 /******************************************************************************
  *
- * Copyright(c) 2007 - 2014, 2023 Intel Corporation. All rights reserved.
+ * Copyright(c) 2007 - 2014, 2023-2024 Intel Corporation. All rights reserved.
  *
  * Portions of this file are derived from the ipw3945 project, as well
  * as portions of the ieee80211 subsystem header files.
@@ -64,7 +64,7 @@ struct iwl_tt_trans {
 };
 
 /**
- * struct iwl_tt_mgnt - Thermal Throttling Management structure
+ * struct iwl_tt_mgmt - Thermal Throttling Management structure
  * @advanced_tt:    advanced thermal throttle required
  * @state:          current Thermal Throttling state
  * @tt_power_mode:  Thermal Throttling power mode index
@@ -100,7 +100,6 @@ u8 iwl_tt_current_power_mode(struct iwl_priv *priv);
 bool iwl_tt_is_low_power_state(struct iwl_priv *priv);
 bool iwl_ht_enabled(struct iwl_priv *priv);
 enum iwl_antenna_ok iwl_tx_ant_restriction(struct iwl_priv *priv);
-enum iwl_antenna_ok iwl_rx_ant_restriction(struct iwl_priv *priv);
 void iwl_tt_enter_ct_kill(struct iwl_priv *priv);
 void iwl_tt_exit_ct_kill(struct iwl_priv *priv);
 void iwl_tt_handler(struct iwl_priv *priv);

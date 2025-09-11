@@ -802,7 +802,7 @@ static struct shrinker *nfs4_xattr_large_entry_shrinker;
 
 static enum lru_status
 cache_lru_isolate(struct list_head *item,
-	struct list_lru_one *lru, spinlock_t *lru_lock, void *arg)
+	struct list_lru_one *lru, void *arg)
 {
 	struct list_head *dispose = arg;
 	struct inode *inode;
@@ -867,7 +867,7 @@ nfs4_xattr_cache_count(struct shrinker *shrink, struct shrink_control *sc)
 
 static enum lru_status
 entry_lru_isolate(struct list_head *item,
-	struct list_lru_one *lru, spinlock_t *lru_lock, void *arg)
+	struct list_lru_one *lru, void *arg)
 {
 	struct list_head *dispose = arg;
 	struct nfs4_xattr_bucket *bucket;
@@ -1017,7 +1017,7 @@ int __init nfs4_xattr_cache_init(void)
 
 	nfs4_xattr_cache_cachep = kmem_cache_create("nfs4_xattr_cache_cache",
 	    sizeof(struct nfs4_xattr_cache), 0,
-	    (SLAB_RECLAIM_ACCOUNT|SLAB_MEM_SPREAD),
+	    (SLAB_RECLAIM_ACCOUNT),
 	    nfs4_xattr_cache_init_once);
 	if (nfs4_xattr_cache_cachep == NULL)
 		return -ENOMEM;

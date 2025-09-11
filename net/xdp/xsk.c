@@ -25,6 +25,7 @@
 #include <linux/vmalloc.h>
 #include <net/xdp_sock_drv.h>
 #include <net/busy_poll.h>
+#include <net/netdev_lock.h>
 #include <net/netdev_rx_queue.h>
 #include <net/xdp.h>
 
@@ -33,9 +34,7 @@
 #include "xsk.h"
 
 #define TX_BATCH_SIZE 32
-#define MAX_PER_SOCKET_BUDGET (TX_BATCH_SIZE)
-
-static DEFINE_PER_CPU(struct list_head, xskmap_flush_list);
+#define MAX_PER_SOCKET_BUDGET 32
 
 void xsk_set_rx_need_wakeup(struct xsk_buff_pool *pool)
 {
@@ -143,7 +142,7 @@ static int __xsk_rcv_zc(struct xdp_sock *xs, struct xdp_buff_xsk *xskb, u32 len,
 	u64 addr;
 	int err;
 
-	addr = xp_get_handle(xskb);
+	addr = xp_get_handle(xskb, xskb->pool);
 	err = xskq_prod_reserve_desc(xs->rx, addr, len, flags);
 	if (err) {
 		xs->rx_queue_full++;
@@ -167,21 +166,25 @@ static int xsk_rcv_zc(struct xdp_sock *xs, struct xdp_buff *xdp, u32 len)
 		contd = XDP_PKT_CONTD;
 
 	err = __xsk_rcv_zc(xs, xskb, len, contd);
-	if (err || likely(!frags))
-		goto out;
+	if (err)
+		goto err;
+	if (likely(!frags))
+		return 0;
 
 	xskb_list = &xskb->pool->xskb_list;
-	list_for_each_entry_safe(pos, tmp, xskb_list, xskb_list_node) {
+	list_for_each_entry_safe(pos, tmp, xskb_list, list_node) {
 		if (list_is_singular(xskb_list))
 			contd = 0;
 		len = pos->xdp.data_end - pos->xdp.data;
 		err = __xsk_rcv_zc(xs, pos, len, contd);
 		if (err)
-			return err;
-		list_del(&pos->xskb_list_node);
+			goto err;
+		list_del(&pos->list_node);
 	}
 
-out:
+	return 0;
+err:
+	xsk_buff_free(xdp);
 	return err;
 }
 
@@ -297,6 +300,13 @@ static bool xsk_tx_writeable(struct xdp_sock *xs)
 	return true;
 }
 
+static void __xsk_tx_release(struct xdp_sock *xs)
+{
+	__xskq_cons_release(xs->tx);
+	if (xsk_tx_writeable(xs))
+		xs->sk.sk_write_space(&xs->sk);
+}
+
 static bool xsk_is_bound(struct xdp_sock *xs)
 {
 	if (READ_ONCE(xs->state) == XSK_BOUND) {
@@ -320,7 +330,6 @@ static int xsk_rcv_check(struct xdp_sock *xs, struct xdp_buff *xdp, u32 len)
 		return -ENOSPC;
 	}
 
-	sk_mark_napi_id_once_xdp(&xs->sk, xdp);
 	return 0;
 }
 
@@ -336,13 +345,14 @@ int xsk_generic_rcv(struct xdp_sock *xs, struct xdp_buff *xdp)
 	u32 len = xdp_get_buff_len(xdp);
 	int err;
 
-	spin_lock_bh(&xs->rx_lock);
 	err = xsk_rcv_check(xs, xdp, len);
 	if (!err) {
+		spin_lock_bh(&xs->pool->rx_lock);
 		err = __xsk_rcv(xs, xdp, len);
 		xsk_flush(xs);
+		spin_unlock_bh(&xs->pool->rx_lock);
 	}
-	spin_unlock_bh(&xs->rx_lock);
+
 	return err;
 }
 
@@ -368,22 +378,23 @@ static int xsk_rcv(struct xdp_sock *xs, struct xdp_buff *xdp)
 
 int __xsk_map_redirect(struct xdp_sock *xs, struct xdp_buff *xdp)
 {
-	struct list_head *flush_list = this_cpu_ptr(&xskmap_flush_list);
 	int err;
 
 	err = xsk_rcv(xs, xdp);
 	if (err)
 		return err;
 
-	if (!xs->flush_node.prev)
+	if (!xs->flush_node.prev) {
+		struct list_head *flush_list = bpf_net_ctx_get_xskmap_flush_list();
+
 		list_add(&xs->flush_node, flush_list);
+	}
 
 	return 0;
 }
 
-void __xsk_map_flush(void)
+void __xsk_map_flush(struct list_head *flush_list)
 {
-	struct list_head *flush_list = this_cpu_ptr(&xskmap_flush_list);
 	struct xdp_sock *xs, *tmp;
 
 	list_for_each_entry_safe(xs, tmp, flush_list, flush_node) {
@@ -391,16 +402,6 @@ void __xsk_map_flush(void)
 		__list_del_clearprev(&xs->flush_node);
 	}
 }
-
-#ifdef CONFIG_DEBUG_NET
-bool xsk_map_check_flush(void)
-{
-	if (list_empty(this_cpu_ptr(&xskmap_flush_list)))
-		return false;
-	__xsk_map_flush();
-	return true;
-}
-#endif
 
 void xsk_tx_completed(struct xsk_buff_pool *pool, u32 nb_entries)
 {
@@ -413,11 +414,8 @@ void xsk_tx_release(struct xsk_buff_pool *pool)
 	struct xdp_sock *xs;
 
 	rcu_read_lock();
-	list_for_each_entry_rcu(xs, &pool->xsk_tx_list, tx_list) {
-		__xskq_cons_release(xs->tx);
-		if (xsk_tx_writeable(xs))
-			xs->sk.sk_write_space(&xs->sk);
-	}
+	list_for_each_entry_rcu(xs, &pool->xsk_tx_list, tx_list)
+		__xsk_tx_release(xs);
 	rcu_read_unlock();
 }
 EXPORT_SYMBOL(xsk_tx_release);
@@ -534,34 +532,34 @@ static int xsk_wakeup(struct xdp_sock *xs, u8 flags)
 	return dev->netdev_ops->ndo_xsk_wakeup(dev, xs->queue_id, flags);
 }
 
-static int xsk_cq_reserve_addr_locked(struct xdp_sock *xs, u64 addr)
+static int xsk_cq_reserve_addr_locked(struct xsk_buff_pool *pool, u64 addr)
 {
 	unsigned long flags;
 	int ret;
 
-	spin_lock_irqsave(&xs->pool->cq_lock, flags);
-	ret = xskq_prod_reserve_addr(xs->pool->cq, addr);
-	spin_unlock_irqrestore(&xs->pool->cq_lock, flags);
+	spin_lock_irqsave(&pool->cq_lock, flags);
+	ret = xskq_prod_reserve_addr(pool->cq, addr);
+	spin_unlock_irqrestore(&pool->cq_lock, flags);
 
 	return ret;
 }
 
-static void xsk_cq_submit_locked(struct xdp_sock *xs, u32 n)
+static void xsk_cq_submit_locked(struct xsk_buff_pool *pool, u32 n)
 {
 	unsigned long flags;
 
-	spin_lock_irqsave(&xs->pool->cq_lock, flags);
-	xskq_prod_submit_n(xs->pool->cq, n);
-	spin_unlock_irqrestore(&xs->pool->cq_lock, flags);
+	spin_lock_irqsave(&pool->cq_lock, flags);
+	xskq_prod_submit_n(pool->cq, n);
+	spin_unlock_irqrestore(&pool->cq_lock, flags);
 }
 
-static void xsk_cq_cancel_locked(struct xdp_sock *xs, u32 n)
+static void xsk_cq_cancel_locked(struct xsk_buff_pool *pool, u32 n)
 {
 	unsigned long flags;
 
-	spin_lock_irqsave(&xs->pool->cq_lock, flags);
-	xskq_prod_cancel_n(xs->pool->cq, n);
-	spin_unlock_irqrestore(&xs->pool->cq_lock, flags);
+	spin_lock_irqsave(&pool->cq_lock, flags);
+	xskq_prod_cancel_n(pool->cq, n);
+	spin_unlock_irqrestore(&pool->cq_lock, flags);
 }
 
 static u32 xsk_get_num_desc(struct sk_buff *skb)
@@ -578,7 +576,7 @@ static void xsk_destruct_skb(struct sk_buff *skb)
 		*compl->tx_timestamp = ktime_get_tai_fast_ns();
 	}
 
-	xsk_cq_submit_locked(xdp_sk(skb->sk), xsk_get_num_desc(skb));
+	xsk_cq_submit_locked(xdp_sk(skb->sk)->pool, xsk_get_num_desc(skb));
 	sock_wfree(skb);
 }
 
@@ -594,7 +592,7 @@ static void xsk_consume_skb(struct sk_buff *skb)
 	struct xdp_sock *xs = xdp_sk(skb->sk);
 
 	skb->destructor = sock_wfree;
-	xsk_cq_cancel_locked(xs, xsk_get_num_desc(skb));
+	xsk_cq_cancel_locked(xs->pool, xsk_get_num_desc(skb));
 	/* Free skb without triggering the perf drop trace */
 	consume_skb(skb);
 	xs->skb = NULL;
@@ -682,6 +680,8 @@ static struct sk_buff *xsk_build_skb(struct xdp_sock *xs,
 		len = desc->len;
 
 		if (!skb) {
+			first_frag = true;
+
 			hr = max(NET_SKB_PAD, L1_CACHE_ALIGN(dev->needed_headroom));
 			tr = dev->needed_tailroom;
 			skb = sock_alloc_send_skb(&xs->sk, hr + len + tr, 1, &err);
@@ -692,12 +692,8 @@ static struct sk_buff *xsk_build_skb(struct xdp_sock *xs,
 			skb_put(skb, len);
 
 			err = skb_store_bits(skb, 0, buffer, len);
-			if (unlikely(err)) {
-				kfree_skb(skb);
+			if (unlikely(err))
 				goto free_err;
-			}
-
-			first_frag = true;
 		} else {
 			int nr_frags = skb_shinfo(skb)->nr_frags;
 			struct page *page;
@@ -718,7 +714,8 @@ static struct sk_buff *xsk_build_skb(struct xdp_sock *xs,
 			memcpy(vaddr, buffer, len);
 			kunmap_local(vaddr);
 
-			skb_add_rx_frag(skb, nr_frags, page, 0, len, 0);
+			skb_add_rx_frag(skb, nr_frags, page, 0, len, PAGE_SIZE);
+			refcount_add(PAGE_SIZE, &xs->sk.sk_wmem_alloc);
 		}
 
 		if (first_frag && desc->options & XDP_TX_METADATA) {
@@ -751,6 +748,9 @@ static struct sk_buff *xsk_build_skb(struct xdp_sock *xs,
 						goto free_err;
 				}
 			}
+
+			if (meta->flags & XDP_TXMD_FLAGS_LAUNCH_TIME)
+				skb->skb_mstamp_ns = meta->request.launch_time;
 		}
 	}
 
@@ -764,6 +764,9 @@ static struct sk_buff *xsk_build_skb(struct xdp_sock *xs,
 	return skb;
 
 free_err:
+	if (first_frag && skb)
+		kfree_skb(skb);
+
 	if (err == -EOVERFLOW) {
 		/* Drop the packet */
 		xsk_set_destructor_arg(xs->skb);
@@ -771,7 +774,7 @@ free_err:
 		xskq_cons_release(xs->tx);
 	} else {
 		/* Let application retry */
-		xsk_cq_cancel_locked(xs, 1);
+		xsk_cq_cancel_locked(xs->pool, 1);
 	}
 
 	return ERR_PTR(err);
@@ -780,10 +783,10 @@ free_err:
 static int __xsk_generic_xmit(struct sock *sk)
 {
 	struct xdp_sock *xs = xdp_sk(sk);
-	u32 max_batch = TX_BATCH_SIZE;
 	bool sent_frame = false;
 	struct xdp_desc desc;
 	struct sk_buff *skb;
+	u32 max_batch;
 	int err = 0;
 
 	mutex_lock(&xs->mutex);
@@ -797,6 +800,7 @@ static int __xsk_generic_xmit(struct sock *sk)
 	if (xs->queue_id >= xs->dev->real_num_tx_queues)
 		goto out;
 
+	max_batch = READ_ONCE(xs->max_tx_budget);
 	while (xskq_cons_peek_desc(xs->tx, &desc, xs->pool)) {
 		if (max_batch-- == 0) {
 			err = -EAGAIN;
@@ -808,8 +812,11 @@ static int __xsk_generic_xmit(struct sock *sk)
 		 * if there is space in it. This avoids having to implement
 		 * any buffering in the Tx path.
 		 */
-		if (xsk_cq_reserve_addr_locked(xs, desc.addr))
+		err = xsk_cq_reserve_addr_locked(xs->pool, desc.addr);
+		if (err) {
+			err = -EAGAIN;
 			goto out;
+		}
 
 		skb = xsk_build_skb(xs, &desc);
 		if (IS_ERR(skb)) {
@@ -856,8 +863,7 @@ static int __xsk_generic_xmit(struct sock *sk)
 
 out:
 	if (sent_frame)
-		if (xsk_tx_writeable(xs))
-			sk->sk_write_space(sk);
+		__xsk_tx_release(xs);
 
 	mutex_unlock(&xs->mutex);
 	return err;
@@ -881,7 +887,7 @@ static bool xsk_no_wakeup(struct sock *sk)
 #ifdef CONFIG_NET_RX_BUSY_POLL
 	/* Prefer busy-polling, skip the wakeup. */
 	return READ_ONCE(sk->sk_prefer_busy_poll) && READ_ONCE(sk->sk_ll_usec) &&
-		READ_ONCE(sk->sk_napi_id) >= MIN_NAPI_ID;
+		napi_id_valid(READ_ONCE(sk->sk_napi_id));
 #else
 	return false;
 #endif
@@ -913,11 +919,8 @@ static int __xsk_sendmsg(struct socket *sock, struct msghdr *m, size_t total_len
 	if (unlikely(!xs->tx))
 		return -ENOBUFS;
 
-	if (sk_can_busy_loop(sk)) {
-		if (xs->zc)
-			__sk_mark_napi_id_once(sk, xsk_pool_get_napi_id(xs->pool));
+	if (sk_can_busy_loop(sk))
 		sk_busy_loop(sk, 1); /* only support non-blocking sockets */
-	}
 
 	if (xs->zc && xsk_no_wakeup(sk))
 		return 0;
@@ -1187,6 +1190,8 @@ static int xsk_bind(struct socket *sock, struct sockaddr *addr, int addr_len)
 		goto out_release;
 	}
 
+	netdev_lock_ops(dev);
+
 	if (!xs->rx && !xs->tx) {
 		err = -EINVAL;
 		goto out_unlock;
@@ -1303,6 +1308,14 @@ static int xsk_bind(struct socket *sock, struct sockaddr *addr, int addr_len)
 	xs->queue_id = qid;
 	xp_add_xsk(xs->pool, xs);
 
+	if (qid < dev->real_num_rx_queues) {
+		struct netdev_rx_queue *rxq;
+
+		rxq = __netif_get_rx_queue(dev, qid);
+		if (rxq->napi)
+			__sk_mark_napi_id_once(sk, rxq->napi->napi_id);
+	}
+
 out_unlock:
 	if (err) {
 		dev_put(dev);
@@ -1313,6 +1326,7 @@ out_unlock:
 		smp_wmb();
 		WRITE_ONCE(xs->state, XSK_BOUND);
 	}
+	netdev_unlock_ops(dev);
 out_release:
 	mutex_unlock(&xs->mutex);
 	rtnl_unlock();
@@ -1324,14 +1338,6 @@ struct xdp_umem_reg_v1 {
 	__u64 len; /* Length of packet data area */
 	__u32 chunk_size;
 	__u32 headroom;
-};
-
-struct xdp_umem_reg_v2 {
-	__u64 addr; /* Start of packet data area */
-	__u64 len; /* Length of packet data area */
-	__u32 chunk_size;
-	__u32 headroom;
-	__u32 flags;
 };
 
 static int xsk_setsockopt(struct socket *sock, int level, int optname,
@@ -1377,10 +1383,19 @@ static int xsk_setsockopt(struct socket *sock, int level, int optname,
 
 		if (optlen < sizeof(struct xdp_umem_reg_v1))
 			return -EINVAL;
-		else if (optlen < sizeof(struct xdp_umem_reg_v2))
-			mr_size = sizeof(struct xdp_umem_reg_v1);
 		else if (optlen < sizeof(mr))
-			mr_size = sizeof(struct xdp_umem_reg_v2);
+			mr_size = sizeof(struct xdp_umem_reg_v1);
+
+		BUILD_BUG_ON(sizeof(struct xdp_umem_reg_v1) >= sizeof(struct xdp_umem_reg));
+
+		/* Make sure the last field of the struct doesn't have
+		 * uninitialized padding. All padding has to be explicit
+		 * and has to be set to zero by the userspace to make
+		 * struct xdp_umem_reg extensible in the future.
+		 */
+		BUILD_BUG_ON(offsetof(struct xdp_umem_reg, tx_metadata_len) +
+			     sizeof_field(struct xdp_umem_reg, tx_metadata_len) !=
+			     sizeof(struct xdp_umem_reg));
 
 		if (copy_from_sockptr(&mr, optval, mr_size))
 			return -EFAULT;
@@ -1409,6 +1424,8 @@ static int xsk_setsockopt(struct socket *sock, int level, int optname,
 		struct xsk_queue **q;
 		int entries;
 
+		if (optlen < sizeof(entries))
+			return -EINVAL;
 		if (copy_from_sockptr(&entries, optval, sizeof(entries)))
 			return -EFAULT;
 
@@ -1423,6 +1440,21 @@ static int xsk_setsockopt(struct socket *sock, int level, int optname,
 		err = xsk_init_queue(entries, q, true);
 		mutex_unlock(&xs->mutex);
 		return err;
+	}
+	case XDP_MAX_TX_SKB_BUDGET:
+	{
+		unsigned int budget;
+
+		if (optlen != sizeof(budget))
+			return -EINVAL;
+		if (copy_from_sockptr(&budget, optval, sizeof(budget)))
+			return -EFAULT;
+		if (!xs->tx ||
+		    budget < TX_BATCH_SIZE || budget > xs->tx->nentries)
+			return -EACCES;
+
+		WRITE_ONCE(xs->max_tx_budget, budget);
+		return 0;
 	}
 	default:
 		break;
@@ -1721,8 +1753,8 @@ static int xsk_create(struct net *net, struct socket *sock, int protocol,
 
 	xs = xdp_sk(sk);
 	xs->state = XSK_READY;
+	xs->max_tx_budget = TX_BATCH_SIZE;
 	mutex_init(&xs->mutex);
-	spin_lock_init(&xs->rx_lock);
 
 	INIT_LIST_HEAD(&xs->map_list);
 	spin_lock_init(&xs->map_list_lock);
@@ -1765,7 +1797,7 @@ static struct pernet_operations xsk_net_ops = {
 
 static int __init xsk_init(void)
 {
-	int err, cpu;
+	int err;
 
 	err = proto_register(&xsk_proto, 0 /* no slab */);
 	if (err)
@@ -1783,8 +1815,6 @@ static int __init xsk_init(void)
 	if (err)
 		goto out_pernet;
 
-	for_each_possible_cpu(cpu)
-		INIT_LIST_HEAD(&per_cpu(xskmap_flush_list, cpu));
 	return 0;
 
 out_pernet:

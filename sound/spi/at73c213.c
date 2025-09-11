@@ -336,7 +336,7 @@ static int snd_at73c213_pcm_new(struct snd_at73c213 *chip, int device)
 
 	pcm->private_data = chip;
 	pcm->info_flags = SNDRV_PCM_INFO_BLOCK_TRANSFER;
-	strcpy(pcm->name, "at73c213");
+	strscpy(pcm->name, "at73c213");
 	chip->pcm = pcm;
 
 	snd_pcm_set_ops(pcm, SNDRV_PCM_STREAM_PLAYBACK, &at73c213_playback_ops);
@@ -713,7 +713,7 @@ static int snd_at73c213_mixer(struct snd_at73c213 *chip)
 
 	card = chip->card;
 
-	strcpy(card->mixername, chip->pcm->name);
+	strscpy(card->mixername, chip->pcm->name);
 
 	for (idx = 0; idx < ARRAY_SIZE(snd_at73c213_controls); idx++) {
 		errval = snd_ctl_add(card,
@@ -726,12 +726,8 @@ static int snd_at73c213_mixer(struct snd_at73c213 *chip)
 	return 0;
 
 cleanup:
-	for (idx = 1; idx < ARRAY_SIZE(snd_at73c213_controls) + 1; idx++) {
-		struct snd_kcontrol *kctl;
-		kctl = snd_ctl_find_numid(card, idx);
-		if (kctl)
-			snd_ctl_remove(card, kctl);
-	}
+	for (idx = 1; idx < ARRAY_SIZE(snd_at73c213_controls) + 1; idx++)
+		snd_ctl_remove(card, snd_ctl_find_numid(card, idx));
 	return errval;
 }
 
@@ -987,8 +983,8 @@ static int snd_at73c213_probe(struct spi_device *spi)
 	if (retval)
 		goto out_ssc;
 
-	strcpy(card->driver, "at73c213");
-	strcpy(card->shortname, board->shortname);
+	strscpy(card->driver, "at73c213");
+	strscpy(card->shortname, board->shortname);
 	sprintf(card->longname, "%s on irq %d", card->shortname, chip->irq);
 
 	retval = snd_card_register(card);
@@ -1076,8 +1072,6 @@ out:
 	snd_card_free(card);
 }
 
-#ifdef CONFIG_PM_SLEEP
-
 static int snd_at73c213_suspend(struct device *dev)
 {
 	struct snd_card *card = dev_get_drvdata(dev);
@@ -1109,18 +1103,13 @@ static int snd_at73c213_resume(struct device *dev)
 	return 0;
 }
 
-static SIMPLE_DEV_PM_OPS(at73c213_pm_ops, snd_at73c213_suspend,
+static DEFINE_SIMPLE_DEV_PM_OPS(at73c213_pm_ops, snd_at73c213_suspend,
 		snd_at73c213_resume);
-#define AT73C213_PM_OPS (&at73c213_pm_ops)
-
-#else
-#define AT73C213_PM_OPS NULL
-#endif
 
 static struct spi_driver at73c213_driver = {
 	.driver		= {
 		.name	= "at73c213",
-		.pm	= AT73C213_PM_OPS,
+		.pm	= &at73c213_pm_ops,
 	},
 	.probe		= snd_at73c213_probe,
 	.remove		= snd_at73c213_remove,

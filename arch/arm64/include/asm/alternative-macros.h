@@ -229,8 +229,12 @@ alternative_has_cap_likely(const unsigned long cpucap)
 	if (!cpucap_is_possible(cpucap))
 		return false;
 
-	asm_volatile_goto(
+	asm goto(
+#ifdef BUILD_VDSO
+	ALTERNATIVE("b	%l[l_no]", "nop", %[cpucap])
+#else
 	ALTERNATIVE_CB("b	%l[l_no]", %[cpucap], alt_cb_patch_nops)
+#endif
 	:
 	: [cpucap] "i" (cpucap)
 	:
@@ -247,7 +251,7 @@ alternative_has_cap_unlikely(const unsigned long cpucap)
 	if (!cpucap_is_possible(cpucap))
 		return false;
 
-	asm_volatile_goto(
+	asm goto(
 	ALTERNATIVE("nop", "b	%l[l_yes]", %[cpucap])
 	:
 	: [cpucap] "i" (cpucap)

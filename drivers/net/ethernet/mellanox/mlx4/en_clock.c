@@ -38,7 +38,7 @@
 
 /* mlx4_en_read_clock - read raw cycle counter (to be used by time counter)
  */
-static u64 mlx4_en_read_clock(const struct cyclecounter *tc)
+static u64 mlx4_en_read_clock(struct cyclecounter *tc)
 {
 	struct mlx4_en_dev *mdev =
 		container_of(tc, struct mlx4_en_dev, cycles);
@@ -96,8 +96,8 @@ void mlx4_en_remove_timestamp(struct mlx4_en_dev *mdev)
 
 #define MLX4_EN_WRAP_AROUND_SEC	10UL
 /* By scheduling the overflow check every 5 seconds, we have a reasonably
- * good chance we wont miss a wrap around.
- * TOTO: Use a timer instead of a work queue to increase the guarantee.
+ * good chance we won't miss a wrap around.
+ * TODO: Use a timer instead of a work queue to increase the guarantee.
  */
 #define MLX4_EN_OVERFLOW_PERIOD (MLX4_EN_WRAP_AROUND_SEC * HZ / 2)
 
@@ -249,7 +249,7 @@ static const struct ptp_clock_info mlx4_en_ptp_clock_info = {
 static u32 freq_to_shift(u16 freq)
 {
 	u32 freq_khz = freq * 1000;
-	u64 max_val_cycles = freq_khz * 1000 * MLX4_EN_WRAP_AROUND_SEC;
+	u64 max_val_cycles = freq_khz * 1000ULL * MLX4_EN_WRAP_AROUND_SEC;
 	u64 max_val_cycles_rounded = 1ULL << fls64(max_val_cycles - 1);
 	/* calculate max possible multiplier in order to fit in 64bit */
 	u64 max_mul = div64_u64(ULLONG_MAX, max_val_cycles_rounded);

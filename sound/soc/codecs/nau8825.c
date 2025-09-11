@@ -1356,10 +1356,10 @@ static int nau8825_set_dai_fmt(struct snd_soc_dai *codec_dai, unsigned int fmt)
 	unsigned int ctrl1_val = 0, ctrl2_val = 0;
 
 	switch (fmt & SND_SOC_DAIFMT_MASTER_MASK) {
-	case SND_SOC_DAIFMT_CBM_CFM:
+	case SND_SOC_DAIFMT_CBP_CFP:
 		ctrl2_val |= NAU8825_I2S_MS_MASTER;
 		break;
-	case SND_SOC_DAIFMT_CBS_CFS:
+	case SND_SOC_DAIFMT_CBC_CFC:
 		break;
 	default:
 		return -EINVAL;
@@ -2836,16 +2836,12 @@ static int nau8825_read_device_properties(struct device *dev,
 	if (nau8825->adc_delay < 125 || nau8825->adc_delay > 500)
 		dev_warn(dev, "Please set the suitable delay time!\n");
 
-	nau8825->mclk = devm_clk_get(dev, "mclk");
-	if (PTR_ERR(nau8825->mclk) == -EPROBE_DEFER) {
-		return -EPROBE_DEFER;
-	} else if (PTR_ERR(nau8825->mclk) == -ENOENT) {
+	nau8825->mclk = devm_clk_get_optional(dev, "mclk");
+	if (IS_ERR(nau8825->mclk))
+		return PTR_ERR(nau8825->mclk);
+	if (!nau8825->mclk)
 		/* The MCLK is managed externally or not used at all */
-		nau8825->mclk = NULL;
 		dev_info(dev, "No 'mclk' clock found, assume MCLK is managed externally");
-	} else if (IS_ERR(nau8825->mclk)) {
-		return -EINVAL;
-	}
 
 	return 0;
 }
@@ -2938,7 +2934,7 @@ static void nau8825_i2c_remove(struct i2c_client *client)
 {}
 
 static const struct i2c_device_id nau8825_i2c_ids[] = {
-	{ "nau8825", 0 },
+	{ "nau8825" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, nau8825_i2c_ids);

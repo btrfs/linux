@@ -382,7 +382,7 @@ efct_lio_sg_unmap(struct efct_io *io)
 		return;
 
 	dma_unmap_sg(&io->efct->pci->dev, cmd->t_data_sg,
-		     ocp->seg_map_cnt, cmd->data_direction);
+		     cmd->t_data_nents, cmd->data_direction);
 	ocp->seg_map_cnt = 0;
 }
 
@@ -1114,7 +1114,8 @@ int efct_scsi_tgt_new_device(struct efct *efct)
 	atomic_set(&efct->tgt_efct.watermark_hit, 0);
 	atomic_set(&efct->tgt_efct.initiator_count, 0);
 
-	lio_wq = create_singlethread_workqueue("efct_lio_worker");
+	lio_wq = alloc_ordered_workqueue("%s", WQ_MEM_RECLAIM,
+					 "efct_lio_worker");
 	if (!lio_wq) {
 		efc_log_err(efct, "workqueue create failed\n");
 		return -EIO;

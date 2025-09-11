@@ -608,7 +608,7 @@ int platform_device_add_resources(struct platform_device *pdev,
 	struct resource *r = NULL;
 
 	if (res) {
-		r = kmemdup(res, sizeof(struct resource) * num, GFP_KERNEL);
+		r = kmemdup_array(res, num, sizeof(*r), GFP_KERNEL);
 		if (!r)
 			return -ENOMEM;
 	}
@@ -982,7 +982,7 @@ struct platform_device * __init_or_module __platform_create_bundle(
 	struct platform_device *pdev;
 	int error;
 
-	pdev = platform_device_alloc(driver->driver.name, -1);
+	pdev = platform_device_alloc(driver->driver.name, PLATFORM_DEVID_NONE);
 	if (!pdev) {
 		error = -ENOMEM;
 		goto err_out;
@@ -1122,7 +1122,7 @@ static int platform_legacy_resume(struct device *dev)
 
 int platform_pm_suspend(struct device *dev)
 {
-	struct device_driver *drv = dev->driver;
+	const struct device_driver *drv = dev->driver;
 	int ret = 0;
 
 	if (!drv)
@@ -1140,7 +1140,7 @@ int platform_pm_suspend(struct device *dev)
 
 int platform_pm_resume(struct device *dev)
 {
-	struct device_driver *drv = dev->driver;
+	const struct device_driver *drv = dev->driver;
 	int ret = 0;
 
 	if (!drv)
@@ -1162,7 +1162,7 @@ int platform_pm_resume(struct device *dev)
 
 int platform_pm_freeze(struct device *dev)
 {
-	struct device_driver *drv = dev->driver;
+	const struct device_driver *drv = dev->driver;
 	int ret = 0;
 
 	if (!drv)
@@ -1180,7 +1180,7 @@ int platform_pm_freeze(struct device *dev)
 
 int platform_pm_thaw(struct device *dev)
 {
-	struct device_driver *drv = dev->driver;
+	const struct device_driver *drv = dev->driver;
 	int ret = 0;
 
 	if (!drv)
@@ -1198,7 +1198,7 @@ int platform_pm_thaw(struct device *dev)
 
 int platform_pm_poweroff(struct device *dev)
 {
-	struct device_driver *drv = dev->driver;
+	const struct device_driver *drv = dev->driver;
 	int ret = 0;
 
 	if (!drv)
@@ -1216,7 +1216,7 @@ int platform_pm_poweroff(struct device *dev)
 
 int platform_pm_restore(struct device *dev)
 {
-	struct device_driver *drv = dev->driver;
+	const struct device_driver *drv = dev->driver;
 	int ret = 0;
 
 	if (!drv)
@@ -1332,7 +1332,7 @@ __ATTRIBUTE_GROUPS(platform_dev);
  * and compare it against the name of the driver. Return whether they match
  * or not.
  */
-static int platform_match(struct device *dev, struct device_driver *drv)
+static int platform_match(struct device *dev, const struct device_driver *drv)
 {
 	struct platform_device *pdev = to_platform_device(dev);
 	struct platform_driver *pdrv = to_platform_driver(drv);
@@ -1396,15 +1396,13 @@ static int platform_probe(struct device *_dev)
 	if (ret < 0)
 		return ret;
 
-	ret = dev_pm_domain_attach(_dev, true);
+	ret = dev_pm_domain_attach(_dev, PD_FLAG_ATTACH_POWER_ON |
+					 PD_FLAG_DETACH_POWER_OFF);
 	if (ret)
 		goto out;
 
-	if (drv->probe) {
+	if (drv->probe)
 		ret = drv->probe(dev);
-		if (ret)
-			dev_pm_domain_detach(_dev, true);
-	}
 
 out:
 	if (drv->prevent_deferred_probe && ret == -EPROBE_DEFER) {
@@ -1420,15 +1418,8 @@ static void platform_remove(struct device *_dev)
 	struct platform_driver *drv = to_platform_driver(_dev->driver);
 	struct platform_device *dev = to_platform_device(_dev);
 
-	if (drv->remove_new) {
-		drv->remove_new(dev);
-	} else if (drv->remove) {
-		int ret = drv->remove(dev);
-
-		if (ret)
-			dev_warn(_dev, "remove callback returned a non-zero value. This will be ignored.\n");
-	}
-	dev_pm_domain_detach(_dev, true);
+	if (drv->remove)
+		drv->remove(dev);
 }
 
 static void platform_shutdown(struct device *_dev)
@@ -1446,7 +1437,7 @@ static void platform_shutdown(struct device *_dev)
 
 static int platform_dma_configure(struct device *dev)
 {
-	struct platform_driver *drv = to_platform_driver(dev->driver);
+	struct device_driver *drv = READ_ONCE(dev->driver);
 	struct fwnode_handle *fwnode = dev_fwnode(dev);
 	enum dev_dma_attr attr;
 	int ret = 0;
@@ -1457,7 +1448,8 @@ static int platform_dma_configure(struct device *dev)
 		attr = acpi_get_dma_attr(to_acpi_device_node(fwnode));
 		ret = acpi_dma_configure(dev, attr);
 	}
-	if (ret || drv->driver_managed_dma)
+	/* @dev->driver may not be valid when we're called from the IOMMU layer */
+	if (ret || !drv || to_platform_driver(drv)->driver_managed_dma)
 		return ret;
 
 	ret = iommu_device_use_default_domain(dev);
@@ -1480,7 +1472,7 @@ static const struct dev_pm_ops platform_dev_pm_ops = {
 	USE_PLATFORM_PM_SLEEP_OPS
 };
 
-struct bus_type platform_bus_type = {
+const struct bus_type platform_bus_type = {
 	.name		= "platform",
 	.dev_groups	= platform_dev_groups,
 	.match		= platform_match,

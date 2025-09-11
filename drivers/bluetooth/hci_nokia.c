@@ -20,7 +20,7 @@
 #include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/types.h>
-#include <asm/unaligned.h>
+#include <linux/unaligned.h>
 #include <net/bluetooth/bluetooth.h>
 #include <net/bluetooth/hci_core.h>
 
@@ -115,11 +115,6 @@ struct hci_nokia_neg_evt {
 #define MAX_BAUD_RATE		3692300
 #define SETUP_BAUD_RATE		921600
 #define INIT_BAUD_RATE		120000
-
-struct hci_nokia_radio_hdr {
-	u8	evt;
-	u8	dlen;
-} __packed;
 
 struct nokia_bt_dev {
 	struct hci_uart hu;
@@ -444,7 +439,7 @@ static int nokia_setup(struct hci_uart *hu)
 
 	if (btdev->man_id == NOKIA_ID_BCM2048) {
 		hu->hdev->set_bdaddr = btbcm_set_bdaddr;
-		set_bit(HCI_QUIRK_INVALID_BDADDR, &hu->hdev->quirks);
+		hci_set_quirk(hu->hdev, HCI_QUIRK_INVALID_BDADDR);
 		dev_dbg(dev, "bcm2048 has invalid bluetooth address!");
 	}
 
@@ -506,7 +501,7 @@ static int nokia_close(struct hci_uart *hu)
 	return 0;
 }
 
-/* Enqueue frame for transmittion (padding, crc, etc) */
+/* Enqueue frame for transmission (padding, crc, etc) */
 static int nokia_enqueue(struct hci_uart *hu, struct sk_buff *skb)
 {
 	struct nokia_bt_dev *btdev = hu->priv;

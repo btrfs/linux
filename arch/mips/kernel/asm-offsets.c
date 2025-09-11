@@ -27,6 +27,12 @@ void output_ptreg_defines(void);
 void output_ptreg_defines(void)
 {
 	COMMENT("MIPS pt_regs offsets.");
+#ifdef CONFIG_32BIT
+	OFFSET(PT_ARG4, pt_regs, args[4]);
+	OFFSET(PT_ARG5, pt_regs, args[5]);
+	OFFSET(PT_ARG6, pt_regs, args[6]);
+	OFFSET(PT_ARG7, pt_regs, args[7]);
+#endif
 	OFFSET(PT_R0, pt_regs, regs[0]);
 	OFFSET(PT_R1, pt_regs, regs[1]);
 	OFFSET(PT_R2, pt_regs, regs[2]);
@@ -101,6 +107,7 @@ void output_thread_info_defines(void)
 	OFFSET(TI_CPU, thread_info, cpu);
 	OFFSET(TI_PRE_COUNT, thread_info, preempt_count);
 	OFFSET(TI_REGS, thread_info, regs);
+	OFFSET(TI_SYSCALL, thread_info, syscall);
 	DEFINE(_THREAD_SIZE, THREAD_SIZE);
 	DEFINE(_THREAD_MASK, THREAD_MASK);
 	DEFINE(_IRQ_STACK_SIZE, IRQ_STACK_SIZE);
@@ -402,6 +409,9 @@ void output_cps_defines(void);
 void output_cps_defines(void)
 {
 	COMMENT(" MIPS CPS offsets. ");
+
+	OFFSET(CLUSTERBOOTCFG_CORECONFIG, cluster_boot_config, core_config);
+	DEFINE(CLUSTERBOOTCFG_SIZE, sizeof(struct cluster_boot_config));
 
 	OFFSET(COREBOOTCFG_VPEMASK, core_boot_config, vpe_mask);
 	OFFSET(COREBOOTCFG_VPECONFIG, core_boot_config, vpe_config);

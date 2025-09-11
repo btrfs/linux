@@ -471,7 +471,7 @@ static void sdio_uart_check_modem_status(struct sdio_uart_port *port)
 		port->icount.cts++;
 		tty = tty_port_tty_get(&port->port);
 		if (tty && C_CRTSCTS(tty)) {
-			int cts = (status & UART_MSR_CTS);
+			bool cts = status & UART_MSR_CTS;
 			if (tty->hw_stopped) {
 				if (cts) {
 					tty->hw_stopped = false;
@@ -1162,4 +1162,5 @@ module_init(sdio_uart_init);
 module_exit(sdio_uart_exit);
 
 MODULE_AUTHOR("Nicolas Pitre");
+MODULE_DESCRIPTION("SDIO UART/GPS driver");
 MODULE_LICENSE("GPL");

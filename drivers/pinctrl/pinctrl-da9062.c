@@ -102,14 +102,14 @@ static int da9062_gpio_get(struct gpio_chip *gc, unsigned int offset)
 	return !!(val & BIT(offset));
 }
 
-static void da9062_gpio_set(struct gpio_chip *gc, unsigned int offset,
-			    int value)
+static int da9062_gpio_set(struct gpio_chip *gc, unsigned int offset,
+			   int value)
 {
 	struct da9062_pctl *pctl = gpiochip_get_data(gc);
 	struct regmap *regmap = pctl->da9062->regmap;
 
-	regmap_update_bits(regmap, DA9062AA_GPIO_MODE0_4, BIT(offset),
-			   value << offset);
+	return regmap_update_bits(regmap, DA9062AA_GPIO_MODE0_4, BIT(offset),
+				  value << offset);
 }
 
 static int da9062_gpio_get_direction(struct gpio_chip *gc, unsigned int offset)
@@ -139,7 +139,7 @@ static int da9062_gpio_direction_input(struct gpio_chip *gc,
 {
 	struct da9062_pctl *pctl = gpiochip_get_data(gc);
 	struct regmap *regmap = pctl->da9062->regmap;
-	struct gpio_desc *desc = gpiochip_get_desc(gc, offset);
+	struct gpio_desc *desc = gpio_device_get_desc(gc->gpiodev, offset);
 	unsigned int gpi_type;
 	int ret;
 
@@ -172,9 +172,7 @@ static int da9062_gpio_direction_output(struct gpio_chip *gc,
 	if (ret)
 		return ret;
 
-	da9062_gpio_set(gc, offset, value);
-
-	return 0;
+	return da9062_gpio_set(gc, offset, value);
 }
 
 static int da9062_gpio_set_config(struct gpio_chip *gc, unsigned int offset,
@@ -281,10 +279,17 @@ static int da9062_pctl_probe(struct platform_device *pdev)
 	return devm_gpiochip_add_data(&pdev->dev, &pctl->gc, pctl);
 }
 
+static const struct of_device_id da9062_compatible_reg_id_table[] = {
+	{ .compatible = "dlg,da9062-gpio" },
+	{ }
+};
+MODULE_DEVICE_TABLE(of, da9062_compatible_reg_id_table);
+
 static struct platform_driver da9062_pctl_driver = {
 	.probe = da9062_pctl_probe,
 	.driver = {
 		.name	= "da9062-gpio",
+		.of_match_table = da9062_compatible_reg_id_table,
 	},
 };
 module_platform_driver(da9062_pctl_driver);

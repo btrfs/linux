@@ -706,12 +706,12 @@ static int rt274_set_dai_fmt(struct snd_soc_dai *dai, unsigned int fmt)
 	struct rt274_priv *rt274 = snd_soc_component_get_drvdata(component);
 
 	switch (fmt & SND_SOC_DAIFMT_MASTER_MASK) {
-	case SND_SOC_DAIFMT_CBM_CFM:
+	case SND_SOC_DAIFMT_CBP_CFP:
 		snd_soc_component_update_bits(component,
 			RT274_I2S_CTRL1, RT274_I2S_MODE_MASK, RT274_I2S_MODE_M);
 		rt274->master = true;
 		break;
-	case SND_SOC_DAIFMT_CBS_CFS:
+	case SND_SOC_DAIFMT_CBC_CFC:
 		snd_soc_component_update_bits(component,
 			RT274_I2S_CTRL1, RT274_I2S_MODE_MASK, RT274_I2S_MODE_S);
 		rt274->master = false;
@@ -1091,22 +1091,22 @@ static const struct regmap_config rt274_regmap = {
 #ifdef CONFIG_OF
 static const struct of_device_id rt274_of_match[] = {
 	{.compatible = "realtek,rt274"},
-	{},
+	{ }
 };
 MODULE_DEVICE_TABLE(of, rt274_of_match);
 #endif
 
 static const struct i2c_device_id rt274_i2c_id[] = {
-	{"rt274", 0},
+	{"rt274"},
 	{}
 };
 MODULE_DEVICE_TABLE(i2c, rt274_i2c_id);
 
 #ifdef CONFIG_ACPI
 static const struct acpi_device_id rt274_acpi_match[] = {
-	{ "10EC0274", 0 },
-	{ "INT34C2", 0 },
-	{},
+	{ "10EC0274" },
+	{ "INT34C2" },
+	{ }
 };
 MODULE_DEVICE_TABLE(acpi, rt274_acpi_match);
 #endif
@@ -1192,7 +1192,7 @@ static int rt274_i2c_probe(struct i2c_client *i2c)
 			IRQF_TRIGGER_HIGH | IRQF_ONESHOT, "rt274", rt274);
 		if (ret != 0) {
 			dev_err(&i2c->dev,
-				"Failed to reguest IRQ: %d\n", ret);
+				"Failed to request IRQ: %d\n", ret);
 			return ret;
 		}
 	}

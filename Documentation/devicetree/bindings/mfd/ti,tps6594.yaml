@@ -21,6 +21,8 @@ properties:
       - ti,lp8764-q1
       - ti,tps6593-q1
       - ti,tps6594-q1
+      - ti,tps65224-q1
+      - ti,tps652g1
 
   reg:
     description: I2C slave address or SPI chip select number.

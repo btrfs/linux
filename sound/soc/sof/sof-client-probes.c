@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 //
-// Copyright(c) 2019-2022 Intel Corporation. All rights reserved.
+// Copyright(c) 2019-2022 Intel Corporation
 //
 // Author: Cezary Rojewski <cezary.rojewski@intel.com>
 //
@@ -238,7 +238,6 @@ static ssize_t sof_probes_dfs_points_read(struct file *file, char __user *to,
 	kfree(desc);
 
 pm_error:
-	pm_runtime_mark_last_busy(dev);
 	err = pm_runtime_put_autosuspend(dev);
 	if (err < 0)
 		dev_err_ratelimited(dev, "debugfs read failed to idle %d\n", err);
@@ -289,7 +288,6 @@ sof_probes_dfs_points_write(struct file *file, const char __user *from,
 	if (!ret)
 		ret = count;
 
-	pm_runtime_mark_last_busy(dev);
 	err = pm_runtime_put_autosuspend(dev);
 	if (err < 0)
 		dev_err_ratelimited(dev, "debugfs write failed to idle %d\n", err);
@@ -337,7 +335,6 @@ sof_probes_dfs_points_remove_write(struct file *file, const char __user *from,
 	if (!ret)
 		ret = count;
 
-	pm_runtime_mark_last_busy(dev);
 	err = pm_runtime_put_autosuspend(dev);
 	if (err < 0)
 		dev_err_ratelimited(dev, "debugfs write failed to idle %d\n", err);
@@ -540,6 +537,6 @@ static struct auxiliary_driver sof_probes_client_drv = {
 
 module_auxiliary_driver(sof_probes_client_drv);
 
-MODULE_DESCRIPTION("SOF Probes Client Driver");
 MODULE_LICENSE("GPL v2");
-MODULE_IMPORT_NS(SND_SOC_SOF_CLIENT);
+MODULE_DESCRIPTION("SOF Probes Client Driver");
+MODULE_IMPORT_NS("SND_SOC_SOF_CLIENT");

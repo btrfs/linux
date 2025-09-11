@@ -33,19 +33,19 @@ struct meson_encoder_dsi {
 	container_of(x, struct meson_encoder_dsi, bridge)
 
 static int meson_encoder_dsi_attach(struct drm_bridge *bridge,
+				    struct drm_encoder *encoder,
 				    enum drm_bridge_attach_flags flags)
 {
 	struct meson_encoder_dsi *encoder_dsi = bridge_to_meson_encoder_dsi(bridge);
 
-	return drm_bridge_attach(bridge->encoder, encoder_dsi->next_bridge,
+	return drm_bridge_attach(encoder, encoder_dsi->next_bridge,
 				 &encoder_dsi->bridge, flags);
 }
 
 static void meson_encoder_dsi_atomic_enable(struct drm_bridge *bridge,
-					    struct drm_bridge_state *bridge_state)
+					    struct drm_atomic_state *state)
 {
 	struct meson_encoder_dsi *encoder_dsi = bridge_to_meson_encoder_dsi(bridge);
-	struct drm_atomic_state *state = bridge_state->base.state;
 	struct meson_drm *priv = encoder_dsi->priv;
 	struct drm_connector_state *conn_state;
 	struct drm_crtc_state *crtc_state;
@@ -80,7 +80,7 @@ static void meson_encoder_dsi_atomic_enable(struct drm_bridge *bridge,
 }
 
 static void meson_encoder_dsi_atomic_disable(struct drm_bridge *bridge,
-					     struct drm_bridge_state *bridge_state)
+					     struct drm_atomic_state *state)
 {
 	struct meson_encoder_dsi *meson_encoder_dsi =
 					bridge_to_meson_encoder_dsi(bridge);
@@ -100,15 +100,18 @@ static const struct drm_bridge_funcs meson_encoder_dsi_bridge_funcs = {
 	.atomic_reset = drm_atomic_helper_bridge_reset,
 };
 
-int meson_encoder_dsi_init(struct meson_drm *priv)
+int meson_encoder_dsi_probe(struct meson_drm *priv)
 {
 	struct meson_encoder_dsi *meson_encoder_dsi;
 	struct device_node *remote;
 	int ret;
 
-	meson_encoder_dsi = devm_kzalloc(priv->dev, sizeof(*meson_encoder_dsi), GFP_KERNEL);
-	if (!meson_encoder_dsi)
-		return -ENOMEM;
+	meson_encoder_dsi = devm_drm_bridge_alloc(priv->dev,
+						  struct meson_encoder_dsi,
+						  bridge,
+						  &meson_encoder_dsi_bridge_funcs);
+	if (IS_ERR(meson_encoder_dsi))
+		return PTR_ERR(meson_encoder_dsi);
 
 	/* DSI Transceiver Bridge */
 	remote = of_graph_get_remote_node(priv->dev->of_node, 2, 0);
@@ -118,13 +121,11 @@ int meson_encoder_dsi_init(struct meson_drm *priv)
 	}
 
 	meson_encoder_dsi->next_bridge = of_drm_find_bridge(remote);
-	if (!meson_encoder_dsi->next_bridge) {
-		dev_dbg(priv->dev, "Failed to find DSI transceiver bridge\n");
-		return -EPROBE_DEFER;
-	}
+	if (!meson_encoder_dsi->next_bridge)
+		return dev_err_probe(priv->dev, -EPROBE_DEFER,
+				     "Failed to find DSI transceiver bridge\n");
 
 	/* DSI Encoder Bridge */
-	meson_encoder_dsi->bridge.funcs = &meson_encoder_dsi_bridge_funcs;
 	meson_encoder_dsi->bridge.of_node = priv->dev->of_node;
 	meson_encoder_dsi->bridge.type = DRM_MODE_CONNECTOR_DSI;
 
@@ -135,19 +136,17 @@ int meson_encoder_dsi_init(struct meson_drm *priv)
 	/* Encoder */
 	ret = drm_simple_encoder_init(priv->drm, &meson_encoder_dsi->encoder,
 				      DRM_MODE_ENCODER_DSI);
-	if (ret) {
-		dev_err(priv->dev, "Failed to init DSI encoder: %d\n", ret);
-		return ret;
-	}
+	if (ret)
+		return dev_err_probe(priv->dev, ret,
+				     "Failed to init DSI encoder\n");
 
 	meson_encoder_dsi->encoder.possible_crtcs = BIT(0);
 
 	/* Attach DSI Encoder Bridge to Encoder */
 	ret = drm_bridge_attach(&meson_encoder_dsi->encoder, &meson_encoder_dsi->bridge, NULL, 0);
-	if (ret) {
-		dev_err(priv->dev, "Failed to attach bridge: %d\n", ret);
-		return ret;
-	}
+	if (ret)
+		return dev_err_probe(priv->dev, ret,
+				     "Failed to attach bridge\n");
 
 	/*
 	 * We should have now in place:
@@ -168,6 +167,5 @@ void meson_encoder_dsi_remove(struct meson_drm *priv)
 	if (priv->encoders[MESON_ENC_DSI]) {
 		meson_encoder_dsi = priv->encoders[MESON_ENC_DSI];
 		drm_bridge_remove(&meson_encoder_dsi->bridge);
-		drm_bridge_remove(meson_encoder_dsi->next_bridge);
 	}
 }

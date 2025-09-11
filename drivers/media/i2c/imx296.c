@@ -604,7 +604,6 @@ static int imx296_s_stream(struct v4l2_subdev *sd, int enable)
 	if (!enable) {
 		ret = imx296_stream_off(sensor);
 
-		pm_runtime_mark_last_busy(sensor->dev);
 		pm_runtime_put_autosuspend(sensor->dev);
 
 		goto unlock;
@@ -953,6 +952,8 @@ static int imx296_identify_model(struct imx296 *sensor)
 			"failed to get sensor out of standby (%d)\n", ret);
 		return ret;
 	}
+
+	usleep_range(2000, 5000);
 
 	ret = imx296_read(sensor, IMX296_SENSOR_INFO);
 	if (ret < 0) {

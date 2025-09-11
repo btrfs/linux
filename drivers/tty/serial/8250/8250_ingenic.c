@@ -168,9 +168,9 @@ OF_EARLYCON_DECLARE(jz4780_uart, "ingenic,jz4780-uart",
 OF_EARLYCON_DECLARE(x1000_uart, "ingenic,x1000-uart",
 		    ingenic_early_console_setup);
 
-static void ingenic_uart_serial_out(struct uart_port *p, int offset, int value)
+static void ingenic_uart_serial_out(struct uart_port *p, unsigned int offset, u32 value)
 {
-	int ier;
+	u32 ier;
 
 	switch (offset) {
 	case UART_FCR:
@@ -206,9 +206,9 @@ static void ingenic_uart_serial_out(struct uart_port *p, int offset, int value)
 	writeb(value, p->membase + (offset << p->regshift));
 }
 
-static unsigned int ingenic_uart_serial_in(struct uart_port *p, int offset)
+static u32 ingenic_uart_serial_in(struct uart_port *p, unsigned int offset)
 {
-	unsigned int value;
+	u8 value;
 
 	value = readb(p->membase + (offset << p->regshift));
 
@@ -234,17 +234,13 @@ static int ingenic_uart_probe(struct platform_device *pdev)
 	struct ingenic_uart_data *data;
 	const struct ingenic_uart_config *cdata;
 	struct resource *regs;
-	int irq, err, line;
+	int err;
 
 	cdata = of_device_get_match_data(&pdev->dev);
 	if (!cdata) {
 		dev_err(&pdev->dev, "Error: No device match found\n");
 		return -ENODEV;
 	}
-
-	irq = platform_get_irq(pdev, 0);
-	if (irq < 0)
-		return irq;
 
 	regs = platform_get_resource(pdev, IORESOURCE_MEM, 0);
 	if (!regs) {
@@ -259,21 +255,19 @@ static int ingenic_uart_probe(struct platform_device *pdev)
 	spin_lock_init(&uart.port.lock);
 	uart.port.type = PORT_16550A;
 	uart.port.flags = UPF_SKIP_TEST | UPF_IOREMAP | UPF_FIXED_TYPE;
-	uart.port.iotype = UPIO_MEM;
 	uart.port.mapbase = regs->start;
-	uart.port.regshift = 2;
 	uart.port.serial_out = ingenic_uart_serial_out;
 	uart.port.serial_in = ingenic_uart_serial_in;
-	uart.port.irq = irq;
 	uart.port.dev = &pdev->dev;
-	uart.port.fifosize = cdata->fifosize;
 	uart.tx_loadsz = cdata->tx_loadsz;
 	uart.capabilities = UART_CAP_FIFO | UART_CAP_RTOIE;
 
-	/* Check for a fixed line number */
-	line = of_alias_get_id(pdev->dev.of_node, "serial");
-	if (line >= 0)
-		uart.port.line = line;
+	err = uart_read_port_properties(&uart.port);
+	if (err)
+		return err;
+
+	uart.port.regshift = 2;
+	uart.port.fifosize = cdata->fifosize;
 
 	uart.port.membase = devm_ioremap(&pdev->dev, regs->start,
 					 resource_size(regs));
@@ -367,7 +361,7 @@ static struct platform_driver ingenic_uart_platform_driver = {
 		.of_match_table	= of_match,
 	},
 	.probe			= ingenic_uart_probe,
-	.remove_new		= ingenic_uart_remove,
+	.remove			= ingenic_uart_remove,
 };
 
 module_platform_driver(ingenic_uart_platform_driver);

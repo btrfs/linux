@@ -363,7 +363,7 @@ static int twl4030_charger_update_current(struct twl4030_bci *bci)
 	if (status < 0)
 		return status;
 	cur_reg |= oldreg << 8;
-	if (reg != oldreg) {
+	if (reg != cur_reg) {
 		/* disable write protection for one write access for
 		 * BCIIREF */
 		status = twl_i2c_write_u8(TWL_MODULE_MAIN_CHARGE, 0xE7,
@@ -512,7 +512,6 @@ static int twl4030_charger_enable_usb(struct twl4030_bci *bci, bool enable)
 		ret |= twl_i2c_write_u8(TWL_MODULE_MAIN_CHARGE, 0x2a,
 					TWL4030_BCIMDKEY);
 		if (bci->usb_enabled) {
-			pm_runtime_mark_last_busy(bci->transceiver->dev);
 			pm_runtime_put_autosuspend(bci->transceiver->dev);
 			bci->usb_enabled = 0;
 		}
@@ -1133,7 +1132,7 @@ MODULE_DEVICE_TABLE(of, twl_bci_of_match);
 
 static struct platform_driver twl4030_bci_driver = {
 	.probe = twl4030_bci_probe,
-	.remove_new = twl4030_bci_remove,
+	.remove = twl4030_bci_remove,
 	.driver	= {
 		.name	= "twl4030_bci",
 		.of_match_table = of_match_ptr(twl_bci_of_match),

@@ -14,7 +14,7 @@
 
 #include "max98363.h"
 
-static struct reg_default max98363_reg[] = {
+static const struct reg_default max98363_reg[] = {
 	{MAX98363_R2021_ERR_MON_CTRL, 0x0},
 	{MAX98363_R2022_SPK_MON_THRESH, 0x0},
 	{MAX98363_R2023_SPK_MON_DURATION, 0x0},
@@ -188,7 +188,6 @@ static int max98363_io_init(struct sdw_slave *slave)
 	max98363->hw_init = true;
 
 out:
-	pm_runtime_mark_last_busy(dev);
 	pm_runtime_put_autosuspend(dev);
 
 	return ret;
@@ -314,7 +313,7 @@ static int max98363_update_status(struct sdw_slave *slave,
 	return max98363_io_init(slave);
 }
 
-static struct sdw_slave_ops max98363_slave_ops = {
+static const struct sdw_slave_ops max98363_slave_ops = {
 	.read_prop = max98363_read_prop,
 	.update_status = max98363_update_status,
 };

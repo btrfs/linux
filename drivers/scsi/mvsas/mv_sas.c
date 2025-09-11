@@ -151,16 +151,6 @@ static inline u8 mvs_assign_reg_set(struct mvs_info *mvi,
 	return MVS_CHIP_DISP->assign_reg_set(mvi, &dev->taskfileset);
 }
 
-void mvs_phys_reset(struct mvs_info *mvi, u32 phy_mask, int hard)
-{
-	u32 no;
-	for_each_phy(phy_mask, phy_mask, no) {
-		if (!(phy_mask & 1))
-			continue;
-		MVS_CHIP_DISP->phy_reset(mvi, no, hard);
-	}
-}
-
 int mvs_phy_control(struct asd_sas_phy *sas_phy, enum phy_func func,
 			void *funcdata)
 {
@@ -828,7 +818,7 @@ err_out:
 	dev_printk(KERN_ERR, mvi->dev, "mvsas prep failed[%d]!\n", rc);
 	if (!sas_protocol_ata(task->task_proto))
 		if (n_elem)
-			dma_unmap_sg(mvi->dev, task->scatter, n_elem,
+			dma_unmap_sg(mvi->dev, task->scatter, task->num_scatter,
 				     task->data_dir);
 prep_out:
 	return rc;
@@ -874,7 +864,7 @@ static void mvs_slot_task_free(struct mvs_info *mvi, struct sas_task *task,
 	if (!sas_protocol_ata(task->task_proto))
 		if (slot->n_elem)
 			dma_unmap_sg(mvi->dev, task->scatter,
-				     slot->n_elem, task->data_dir);
+				     task->num_scatter, task->data_dir);
 
 	switch (task->task_proto) {
 	case SAS_PROTOCOL_SMP:
@@ -986,7 +976,7 @@ static u32 mvs_is_sig_fis_received(u32 irq_status)
 static void mvs_sig_remove_timer(struct mvs_phy *phy)
 {
 	if (phy->timer.function)
-		del_timer(&phy->timer);
+		timer_delete(&phy->timer);
 	phy->timer.function = NULL;
 }
 
@@ -1765,7 +1755,7 @@ static int mvs_handle_event(struct mvs_info *mvi, void *data, int handler)
 
 static void mvs_sig_time_out(struct timer_list *t)
 {
-	struct mvs_phy *phy = from_timer(phy, t, timer);
+	struct mvs_phy *phy = timer_container_of(phy, t, timer);
 	struct mvs_info *mvi = phy->mvi;
 	u8 phy_no;
 

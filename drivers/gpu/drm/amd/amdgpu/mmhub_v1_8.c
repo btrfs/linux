@@ -30,6 +30,7 @@
 #include "soc15_common.h"
 #include "soc15.h"
 #include "amdgpu_ras.h"
+#include "amdgpu_psp.h"
 
 #define regVM_L2_CNTL3_DEFAULT	0x80100007
 #define regVM_L2_CNTL4_DEFAULT	0x000000c1
@@ -75,6 +76,8 @@ static void mmhub_v1_8_setup_vm_pt_regs(struct amdgpu_device *adev, uint32_t vmi
 
 static void mmhub_v1_8_init_gart_aperture_regs(struct amdgpu_device *adev)
 {
+	uint64_t gart_start = amdgpu_virt_xgmi_migrate_enabled(adev) ?
+			adev->gmc.vram_start : adev->gmc.fb_start;
 	uint64_t pt_base;
 	u32 inst_mask;
 	int i;
@@ -94,10 +97,10 @@ static void mmhub_v1_8_init_gart_aperture_regs(struct amdgpu_device *adev)
 		if (adev->gmc.pdb0_bo) {
 			WREG32_SOC15(MMHUB, i,
 				     regVM_CONTEXT0_PAGE_TABLE_START_ADDR_LO32,
-				     (u32)(adev->gmc.fb_start >> 12));
+				     (u32)(gart_start >> 12));
 			WREG32_SOC15(MMHUB, i,
 				     regVM_CONTEXT0_PAGE_TABLE_START_ADDR_HI32,
-				     (u32)(adev->gmc.fb_start >> 44));
+				     (u32)(gart_start >> 44));
 
 			WREG32_SOC15(MMHUB, i,
 				     regVM_CONTEXT0_PAGE_TABLE_END_ADDR_LO32,
@@ -192,10 +195,8 @@ static void mmhub_v1_8_init_tlb_regs(struct amdgpu_device *adev)
 	uint32_t tmp, inst_mask;
 	int i;
 
-	/* Setup TLB control */
-	inst_mask = adev->aid_mask;
-	for_each_inst(i, inst_mask) {
-		tmp = RREG32_SOC15(MMHUB, i, regMC_VM_MX_L1_TLB_CNTL);
+	if (amdgpu_sriov_reg_indirect_l1_tlb_cntl(adev)) {
+		tmp = RREG32_SOC15(MMHUB, 0, regMC_VM_MX_L1_TLB_CNTL);
 
 		tmp = REG_SET_FIELD(tmp, MC_VM_MX_L1_TLB_CNTL, ENABLE_L1_TLB,
 				    1);
@@ -209,7 +210,55 @@ static void mmhub_v1_8_init_tlb_regs(struct amdgpu_device *adev)
 				    MTYPE, MTYPE_UC);/* XXX for emulation. */
 		tmp = REG_SET_FIELD(tmp, MC_VM_MX_L1_TLB_CNTL, ATC_EN, 1);
 
-		WREG32_SOC15(MMHUB, i, regMC_VM_MX_L1_TLB_CNTL, tmp);
+		psp_reg_program_no_ring(&adev->psp, tmp, PSP_REG_MMHUB_L1_TLB_CNTL);
+	} else {
+		inst_mask = adev->aid_mask;
+		for_each_inst(i, inst_mask) {
+			tmp = RREG32_SOC15(MMHUB, i, regMC_VM_MX_L1_TLB_CNTL);
+
+			tmp = REG_SET_FIELD(tmp, MC_VM_MX_L1_TLB_CNTL, ENABLE_L1_TLB,
+					    1);
+			tmp = REG_SET_FIELD(tmp, MC_VM_MX_L1_TLB_CNTL,
+					    SYSTEM_ACCESS_MODE, 3);
+			tmp = REG_SET_FIELD(tmp, MC_VM_MX_L1_TLB_CNTL,
+					    ENABLE_ADVANCED_DRIVER_MODEL, 1);
+			tmp = REG_SET_FIELD(tmp, MC_VM_MX_L1_TLB_CNTL,
+					    SYSTEM_APERTURE_UNMAPPED_ACCESS, 0);
+			tmp = REG_SET_FIELD(tmp, MC_VM_MX_L1_TLB_CNTL,
+					    MTYPE, MTYPE_UC);/* XXX for emulation. */
+			tmp = REG_SET_FIELD(tmp, MC_VM_MX_L1_TLB_CNTL, ATC_EN, 1);
+
+			WREG32_SOC15(MMHUB, i, regMC_VM_MX_L1_TLB_CNTL, tmp);
+		}
+	}
+}
+
+/* Set snoop bit for SDMA so that SDMA writes probe-invalidates RW lines */
+static void mmhub_v1_8_init_snoop_override_regs(struct amdgpu_device *adev)
+{
+	uint32_t tmp, inst_mask;
+	int i, j;
+	uint32_t distance = regDAGB1_WRCLI_GPU_SNOOP_OVERRIDE -
+			    regDAGB0_WRCLI_GPU_SNOOP_OVERRIDE;
+
+	if (amdgpu_sriov_vf(adev))
+		return;
+
+	inst_mask = adev->aid_mask;
+	for_each_inst(i, inst_mask) {
+		for (j = 0; j < 5; j++) { /* DAGB instances */
+			tmp = RREG32_SOC15_OFFSET(MMHUB, i,
+				regDAGB0_WRCLI_GPU_SNOOP_OVERRIDE, j * distance);
+			tmp |= (1 << 15); /* SDMA client is BIT15 */
+			WREG32_SOC15_OFFSET(MMHUB, i,
+				regDAGB0_WRCLI_GPU_SNOOP_OVERRIDE, j * distance, tmp);
+
+			tmp = RREG32_SOC15_OFFSET(MMHUB, i,
+				regDAGB0_WRCLI_GPU_SNOOP_OVERRIDE_VALUE, j * distance);
+			tmp |= (1 << 15);
+			WREG32_SOC15_OFFSET(MMHUB, i,
+				regDAGB0_WRCLI_GPU_SNOOP_OVERRIDE_VALUE, j * distance, tmp);
+		}
 	}
 }
 
@@ -418,6 +467,7 @@ static int mmhub_v1_8_gart_enable(struct amdgpu_device *adev)
 	mmhub_v1_8_init_system_aperture_regs(adev);
 	mmhub_v1_8_init_tlb_regs(adev);
 	mmhub_v1_8_init_cache_regs(adev);
+	mmhub_v1_8_init_snoop_override_regs(adev);
 
 	mmhub_v1_8_enable_system_domain(adev);
 	mmhub_v1_8_disable_identity_aperture(adev);
@@ -425,6 +475,30 @@ static int mmhub_v1_8_gart_enable(struct amdgpu_device *adev)
 	mmhub_v1_8_program_invalidation(adev);
 
 	return 0;
+}
+
+static void mmhub_v1_8_disable_l1_tlb(struct amdgpu_device *adev)
+{
+	u32 tmp;
+	u32 i, inst_mask;
+
+	if (amdgpu_sriov_reg_indirect_l1_tlb_cntl(adev)) {
+		tmp = RREG32_SOC15(MMHUB, 0, regMC_VM_MX_L1_TLB_CNTL);
+		tmp = REG_SET_FIELD(tmp, MC_VM_MX_L1_TLB_CNTL, ENABLE_L1_TLB, 0);
+		tmp = REG_SET_FIELD(tmp, MC_VM_MX_L1_TLB_CNTL,
+				    ENABLE_ADVANCED_DRIVER_MODEL, 0);
+		psp_reg_program_no_ring(&adev->psp, tmp, PSP_REG_MMHUB_L1_TLB_CNTL);
+	} else {
+		inst_mask = adev->aid_mask;
+		for_each_inst(i, inst_mask) {
+			tmp = RREG32_SOC15(MMHUB, i, regMC_VM_MX_L1_TLB_CNTL);
+			tmp = REG_SET_FIELD(tmp, MC_VM_MX_L1_TLB_CNTL, ENABLE_L1_TLB,
+					    0);
+			tmp = REG_SET_FIELD(tmp, MC_VM_MX_L1_TLB_CNTL,
+					    ENABLE_ADVANCED_DRIVER_MODEL, 0);
+			WREG32_SOC15(MMHUB, i, regMC_VM_MX_L1_TLB_CNTL, tmp);
+		}
+	}
 }
 
 static void mmhub_v1_8_gart_disable(struct amdgpu_device *adev)
@@ -440,15 +514,6 @@ static void mmhub_v1_8_gart_disable(struct amdgpu_device *adev)
 		for (i = 0; i < 16; i++)
 			WREG32_SOC15_OFFSET(MMHUB, j, regVM_CONTEXT0_CNTL,
 					    i * hub->ctx_distance, 0);
-
-		/* Setup TLB control */
-		tmp = RREG32_SOC15(MMHUB, j, regMC_VM_MX_L1_TLB_CNTL);
-		tmp = REG_SET_FIELD(tmp, MC_VM_MX_L1_TLB_CNTL, ENABLE_L1_TLB,
-				    0);
-		tmp = REG_SET_FIELD(tmp, MC_VM_MX_L1_TLB_CNTL,
-				    ENABLE_ADVANCED_DRIVER_MODEL, 0);
-		WREG32_SOC15(MMHUB, j, regMC_VM_MX_L1_TLB_CNTL, tmp);
-
 		if (!amdgpu_sriov_vf(adev)) {
 			/* Setup L2 cache */
 			tmp = RREG32_SOC15(MMHUB, j, regVM_L2_CNTL);
@@ -458,6 +523,8 @@ static void mmhub_v1_8_gart_disable(struct amdgpu_device *adev)
 			WREG32_SOC15(MMHUB, j, regVM_L2_CNTL3, 0);
 		}
 	}
+
+	mmhub_v1_8_disable_l1_tlb(adev);
 }
 
 /**
@@ -652,8 +719,8 @@ static void mmhub_v1_8_inst_query_ras_error_count(struct amdgpu_device *adev,
 					AMDGPU_RAS_ERROR__MULTI_UNCORRECTABLE,
 					&ue_count);
 
-	amdgpu_ras_error_statistic_ce_count(err_data, &mcm_info, NULL, ce_count);
-	amdgpu_ras_error_statistic_ue_count(err_data, &mcm_info, NULL, ue_count);
+	amdgpu_ras_error_statistic_ce_count(err_data, &mcm_info, ce_count);
+	amdgpu_ras_error_statistic_ue_count(err_data, &mcm_info, ue_count);
 }
 
 static void mmhub_v1_8_query_ras_error_count(struct amdgpu_device *adev,
@@ -705,8 +772,100 @@ static const struct amdgpu_ras_block_hw_ops mmhub_v1_8_ras_hw_ops = {
 	.reset_ras_error_count = mmhub_v1_8_reset_ras_error_count,
 };
 
+static int mmhub_v1_8_aca_bank_parser(struct aca_handle *handle, struct aca_bank *bank,
+				      enum aca_smu_type type, void *data)
+{
+	struct aca_bank_info info;
+	u64 misc0;
+	int ret;
+
+	ret = aca_bank_info_decode(bank, &info);
+	if (ret)
+		return ret;
+
+	misc0 = bank->regs[ACA_REG_IDX_MISC0];
+	switch (type) {
+	case ACA_SMU_TYPE_UE:
+		bank->aca_err_type = ACA_ERROR_TYPE_UE;
+		ret = aca_error_cache_log_bank_error(handle, &info, ACA_ERROR_TYPE_UE,
+						     1ULL);
+		break;
+	case ACA_SMU_TYPE_CE:
+		bank->aca_err_type = ACA_ERROR_TYPE_CE;
+		ret = aca_error_cache_log_bank_error(handle, &info, bank->aca_err_type,
+						     ACA_REG__MISC0__ERRCNT(misc0));
+		break;
+	default:
+		return -EINVAL;
+	}
+
+	return ret;
+}
+
+/* reference to smu driver if header file */
+static int mmhub_v1_8_err_codes[] = {
+	0, 1, 2, 3, 4, /* CODE_DAGB0 - 4 */
+	5, 6, 7, 8, 9, /* CODE_EA0 - 4 */
+	10, /* CODE_UTCL2_ROUTER */
+	11, /* CODE_VML2 */
+	12, /* CODE_VML2_WALKER */
+	13, /* CODE_MMCANE */
+};
+
+static bool mmhub_v1_8_aca_bank_is_valid(struct aca_handle *handle, struct aca_bank *bank,
+					 enum aca_smu_type type, void *data)
+{
+	u32 instlo;
+
+	instlo = ACA_REG__IPID__INSTANCEIDLO(bank->regs[ACA_REG_IDX_IPID]);
+	instlo &= GENMASK(31, 1);
+
+	if (instlo != mmSMNAID_AID0_MCA_SMU)
+		return false;
+
+	if (aca_bank_check_error_codes(handle->adev, bank,
+				       mmhub_v1_8_err_codes,
+				       ARRAY_SIZE(mmhub_v1_8_err_codes)))
+		return false;
+
+	return true;
+}
+
+static const struct aca_bank_ops mmhub_v1_8_aca_bank_ops = {
+	.aca_bank_parser = mmhub_v1_8_aca_bank_parser,
+	.aca_bank_is_valid = mmhub_v1_8_aca_bank_is_valid,
+};
+
+static const struct aca_info mmhub_v1_8_aca_info = {
+	.hwip = ACA_HWIP_TYPE_SMU,
+	.mask = ACA_ERROR_UE_MASK,
+	.bank_ops = &mmhub_v1_8_aca_bank_ops,
+};
+
+static int mmhub_v1_8_ras_late_init(struct amdgpu_device *adev, struct ras_common_if *ras_block)
+{
+	int r;
+
+	r = amdgpu_ras_block_late_init(adev, ras_block);
+	if (r)
+		return r;
+
+	r = amdgpu_ras_bind_aca(adev, AMDGPU_RAS_BLOCK__MMHUB,
+				&mmhub_v1_8_aca_info, NULL);
+	if (r)
+		goto late_fini;
+
+	return 0;
+
+late_fini:
+	amdgpu_ras_block_late_fini(adev, ras_block);
+
+	return r;
+}
+
 struct amdgpu_mmhub_ras mmhub_v1_8_ras = {
 	.ras_block = {
 		.hw_ops = &mmhub_v1_8_ras_hw_ops,
+		.ras_late_init = mmhub_v1_8_ras_late_init,
 	},
 };

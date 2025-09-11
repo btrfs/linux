@@ -12,6 +12,7 @@
 	chassis-type = "handset";
 
 	aliases {
+		mmc0 = &sdhc_1;
 		serial0 = &blsp1_uart1;
 		serial1 = &blsp2_uart4;
 	};
@@ -167,7 +168,7 @@
 	status = "okay";
 	clock-frequency = <100000>;
 
-	avago_apds993@39 {
+	sensor@39 {
 		compatible = "avago,apds9930";
 		reg = <0x39>;
 		interrupts-extended = <&tlmm 61 IRQ_TYPE_EDGE_FALLING>;
@@ -182,7 +183,7 @@
 	status = "okay";
 	clock-frequency = <355000>;
 
-	led-controller@38 {
+	backlight: led-controller@38 {
 		compatible = "ti,lm3630a";
 		status = "okay";
 		reg = <0x38>;
@@ -272,6 +273,8 @@
 		reg = <0>;
 		compatible = "lg,acx467akm-7";
 
+		backlight = <&backlight>;
+
 		pinctrl-names = "default";
 		pinctrl-0 = <&panel_pin>;
 
@@ -328,7 +331,7 @@
 		power-source = <PM8941_GPIO_S3>;
 	};
 
-	otg {
+	otg-hog {
 		gpio-hog;
 		gpios = <35 GPIO_ACTIVE_HIGH>;
 		output-high;
@@ -596,7 +599,7 @@
 	pinctrl-0 = <&sdc2_on>;
 	pinctrl-1 = <&sdc2_off>;
 
-	bcrmf@1 {
+	wifi@1 {
 		compatible = "brcm,bcm4339-fmac", "brcm,bcm4329-fmac";
 		reg = <1>;
 

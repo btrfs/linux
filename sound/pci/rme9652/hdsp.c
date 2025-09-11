@@ -1298,8 +1298,10 @@ static int snd_hdsp_midi_output_possible (struct hdsp *hdsp, int id)
 
 static void snd_hdsp_flush_midi_input (struct hdsp *hdsp, int id)
 {
-	while (snd_hdsp_midi_input_available (hdsp, id))
-		snd_hdsp_midi_read_byte (hdsp, id);
+	int count = 256;
+
+	while (snd_hdsp_midi_input_available(hdsp, id) && --count)
+		snd_hdsp_midi_read_byte(hdsp, id);
 }
 
 static int snd_hdsp_midi_output_write (struct hdsp_midi *hmidi)
@@ -1391,7 +1393,7 @@ static void snd_hdsp_midi_input_trigger(struct snd_rawmidi_substream *substream,
 
 static void snd_hdsp_midi_output_timer(struct timer_list *t)
 {
-	struct hdsp_midi *hmidi = from_timer(hmidi, t, timer);
+	struct hdsp_midi *hmidi = timer_container_of(hmidi, t, timer);
 	unsigned long flags;
 
 	snd_hdsp_midi_output_write(hmidi);
@@ -1425,7 +1427,7 @@ static void snd_hdsp_midi_output_trigger(struct snd_rawmidi_substream *substream
 		}
 	} else {
 		if (hmidi->istimer && --hmidi->istimer <= 0)
-			del_timer (&hmidi->timer);
+			timer_delete(&hmidi->timer);
 	}
 	spin_unlock_irqrestore (&hmidi->lock, flags);
 	if (up)
@@ -3442,7 +3444,7 @@ snd_hdsp_proc_read(struct snd_info_entry *entry, struct snd_info_buffer *buffer)
 	snd_iprintf(buffer, "MIDI1 Input status: 0x%x\n", hdsp_read(hdsp, HDSP_midiStatusIn0));
 	snd_iprintf(buffer, "MIDI2 Output status: 0x%x\n", hdsp_read(hdsp, HDSP_midiStatusOut1));
 	snd_iprintf(buffer, "MIDI2 Input status: 0x%x\n", hdsp_read(hdsp, HDSP_midiStatusIn1));
-	snd_iprintf(buffer, "Use Midi Tasklet: %s\n", hdsp->use_midi_work ? "on" : "off");
+	snd_iprintf(buffer, "Use Midi Tasklet: %s\n", str_on_off(hdsp->use_midi_work));
 
 	snd_iprintf(buffer, "\n");
 
@@ -3450,8 +3452,8 @@ snd_hdsp_proc_read(struct snd_info_entry *entry, struct snd_info_buffer *buffer)
 
 	snd_iprintf(buffer, "Buffer Size (Latency): %d samples (2 periods of %lu bytes)\n", x, (unsigned long) hdsp->period_bytes);
 	snd_iprintf(buffer, "Hardware pointer (frames): %ld\n", hdsp_hw_pointer(hdsp));
-	snd_iprintf(buffer, "Precise pointer: %s\n", hdsp->precise_ptr ? "on" : "off");
-	snd_iprintf(buffer, "Line out: %s\n", (hdsp->control_register & HDSP_LineOut) ? "on" : "off");
+	snd_iprintf(buffer, "Precise pointer: %s\n", str_on_off(hdsp->precise_ptr));
+	snd_iprintf(buffer, "Line out: %s\n", str_on_off(hdsp->control_register & HDSP_LineOut));
 
 	snd_iprintf(buffer, "Firmware version: %d\n", (status2&HDSP_version0)|(status2&HDSP_version1)<<1|(status2&HDSP_version2)<<2);
 
@@ -3748,8 +3750,8 @@ snd_hdsp_proc_read(struct snd_info_entry *entry, struct snd_info_buffer *buffer)
 		snd_iprintf(buffer, "Phones Gain : %s\n", tmp);
 
 		snd_iprintf(buffer, "XLR Breakout Cable : %s\n",
-			hdsp_toggle_setting(hdsp, HDSP_XLRBreakoutCable) ?
-			"yes" : "no");
+			str_yes_no(hdsp_toggle_setting(hdsp,
+						       HDSP_XLRBreakoutCable)));
 
 		if (hdsp->control_register & HDSP_AnalogExtensionBoard)
 			snd_iprintf(buffer, "AEB : on (ADAT1 internal)\n");
@@ -4299,14 +4301,6 @@ static const struct snd_pcm_hw_constraint_list hdsp_hw_constraints_period_sizes 
 	.mask = 0
 };
 
-static const unsigned int hdsp_9632_sample_rates[] = { 32000, 44100, 48000, 64000, 88200, 96000, 128000, 176400, 192000 };
-
-static const struct snd_pcm_hw_constraint_list hdsp_hw_constraints_9632_sample_rates = {
-	.count = ARRAY_SIZE(hdsp_9632_sample_rates),
-	.list = hdsp_9632_sample_rates,
-	.mask = 0
-};
-
 static int snd_hdsp_hw_rule_in_channels(struct snd_pcm_hw_params *params,
 					struct snd_pcm_hw_rule *rule)
 {
@@ -4497,8 +4491,9 @@ static int snd_hdsp_playback_open(struct snd_pcm_substream *substream)
 		runtime->hw.rate_min = runtime->hw.rate_max = hdsp->system_sample_rate;
 	} else if (hdsp->io_type == H9632) {
 		runtime->hw.rate_max = 192000;
-		runtime->hw.rates = SNDRV_PCM_RATE_KNOT;
-		snd_pcm_hw_constraint_list(runtime, 0, SNDRV_PCM_HW_PARAM_RATE, &hdsp_hw_constraints_9632_sample_rates);
+		runtime->hw.rates |= (SNDRV_PCM_RATE_128000 |
+				      SNDRV_PCM_RATE_176400 |
+				      SNDRV_PCM_RATE_192000);
 	}
 	if (hdsp->io_type == H9632) {
 		runtime->hw.channels_min = hdsp->qs_out_channels;
@@ -4573,8 +4568,9 @@ static int snd_hdsp_capture_open(struct snd_pcm_substream *substream)
 		runtime->hw.channels_min = hdsp->qs_in_channels;
 		runtime->hw.channels_max = hdsp->ss_in_channels;
 		runtime->hw.rate_max = 192000;
-		runtime->hw.rates = SNDRV_PCM_RATE_KNOT;
-		snd_pcm_hw_constraint_list(runtime, 0, SNDRV_PCM_HW_PARAM_RATE, &hdsp_hw_constraints_9632_sample_rates);
+		runtime->hw.rates |= (SNDRV_PCM_RATE_128000 |
+				      SNDRV_PCM_RATE_176400 |
+				      SNDRV_PCM_RATE_192000);
 	}
 	snd_pcm_hw_rule_add(runtime, 0, SNDRV_PCM_HW_PARAM_CHANNELS,
 			     snd_hdsp_hw_rule_in_channels, hdsp,
@@ -4948,7 +4944,7 @@ static int snd_hdsp_create_hwdep(struct snd_card *card, struct hdsp *hdsp)
 
 	hdsp->hwdep = hw;
 	hw->private_data = hdsp;
-	strcpy(hw->name, "HDSP hwdep interface");
+	strscpy(hw->name, "HDSP hwdep interface");
 
 	hw->ops.ioctl = snd_hdsp_hwdep_ioctl;
 	hw->ops.ioctl_compat = snd_hdsp_hwdep_ioctl;
@@ -4967,7 +4963,7 @@ static int snd_hdsp_create_pcm(struct snd_card *card, struct hdsp *hdsp)
 
 	hdsp->pcm = pcm;
 	pcm->private_data = hdsp;
-	strcpy(pcm->name, hdsp->card_name);
+	strscpy(pcm->name, hdsp->card_name);
 
 	snd_pcm_set_ops(pcm, SNDRV_PCM_STREAM_PLAYBACK, &snd_hdsp_playback_ops);
 	snd_pcm_set_ops(pcm, SNDRV_PCM_STREAM_CAPTURE, &snd_hdsp_capture_ops);
@@ -5115,7 +5111,7 @@ static int snd_hdsp_create_alsa_devices(struct snd_card *card, struct hdsp *hdsp
 	}
 
 	if (!(hdsp->state & HDSP_InitializationComplete)) {
-		strcpy(card->shortname, "Hammerfall DSP");
+		strscpy(card->shortname, "Hammerfall DSP");
 		sprintf(card->longname, "%s at 0x%lx, irq %d", hdsp->card_name,
 			hdsp->port, hdsp->irq);
 
@@ -5259,8 +5255,8 @@ static int snd_hdsp_create(struct snd_card *card,
 	*/
 	pci_write_config_byte(hdsp->pci, PCI_LATENCY_TIMER, 0xFF);
 
-	strcpy(card->driver, "H-DSP");
-	strcpy(card->mixername, "Xilinx FPGA");
+	strscpy(card->driver, "H-DSP");
+	strscpy(card->mixername, "Xilinx FPGA");
 
 	if (hdsp->firmware_rev < 0xa)
 		return -ENODEV;
@@ -5281,7 +5277,7 @@ static int snd_hdsp_create(struct snd_card *card,
 
 	pci_set_master(hdsp->pci);
 
-	err = pci_request_regions(pci, "hdsp");
+	err = pcim_request_all_regions(pci, "hdsp");
 	if (err < 0)
 		return err;
 	hdsp->port = pci_resource_start(pci, 0);
@@ -5416,7 +5412,7 @@ static int snd_hdsp_probe(struct pci_dev *pci,
 	if (err)
 		goto error;
 
-	strcpy(card->shortname, "Hammerfall DSP");
+	strscpy(card->shortname, "Hammerfall DSP");
 	sprintf(card->longname, "%s at 0x%lx, irq %d", hdsp->card_name,
 		hdsp->port, hdsp->irq);
 	err = snd_card_register(card);

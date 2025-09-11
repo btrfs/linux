@@ -169,7 +169,7 @@ static void unref_cursor_worker(struct drm_flip_work *work, void *val)
 	struct mdp5_kms *mdp5_kms = get_kms(&mdp5_crtc->base);
 	struct msm_kms *kms = &mdp5_kms->base.base;
 
-	msm_gem_unpin_iova(val, kms->aspace);
+	msm_gem_unpin_iova(val, kms->vm);
 	drm_gem_object_put(val);
 }
 
@@ -216,7 +216,7 @@ static void blend_setup(struct drm_crtc *crtc)
 	struct mdp5_kms *mdp5_kms = get_kms(crtc);
 	struct drm_plane *plane;
 	struct mdp5_plane_state *pstate, *pstates[STAGE_MAX + 1] = {NULL};
-	const struct mdp_format *format;
+	const struct msm_format *format;
 	struct mdp5_hw_mixer *mixer = pipeline->mixer;
 	uint32_t lm = mixer->lm;
 	struct mdp5_hw_mixer *r_mixer = pipeline->r_mixer;
@@ -274,7 +274,7 @@ static void blend_setup(struct drm_crtc *crtc)
 		ctl_blend_flags |= MDP5_CTL_BLEND_OP_FLAG_BORDER_OUT;
 		DBG("Border Color is enabled");
 	} else if (plane_cnt) {
-		format = to_mdp_format(msm_framebuffer_format(pstates[STAGE_BASE]->base.fb));
+		format = msm_framebuffer_format(pstates[STAGE_BASE]->base.fb);
 
 		if (format->alpha_enable)
 			bg_alpha_enabled = true;
@@ -285,8 +285,7 @@ static void blend_setup(struct drm_crtc *crtc)
 		if (!pstates[i])
 			continue;
 
-		format = to_mdp_format(
-			msm_framebuffer_format(pstates[i]->base.fb));
+		format = msm_framebuffer_format(pstates[i]->base.fb);
 		plane = pstates[i]->base.plane;
 		blend_op = MDP5_LM_BLEND_OP_MODE_FG_ALPHA(FG_CONST) |
 			MDP5_LM_BLEND_OP_MODE_BG_ALPHA(BG_CONST);
@@ -994,7 +993,7 @@ static int mdp5_crtc_cursor_set(struct drm_crtc *crtc,
 	if (!cursor_bo)
 		return -ENOENT;
 
-	ret = msm_gem_get_and_pin_iova(cursor_bo, kms->aspace,
+	ret = msm_gem_get_and_pin_iova(cursor_bo, kms->vm,
 			&mdp5_crtc->cursor.iova);
 	if (ret) {
 		drm_gem_object_put(cursor_bo);
@@ -1197,7 +1196,7 @@ static void mdp5_crtc_vblank_irq(struct mdp_irq *irq, uint32_t irqstatus)
 	}
 
 	if (pending & PENDING_CURSOR)
-		drm_flip_work_commit(&mdp5_crtc->unref_cursor_work, priv->wq);
+		drm_flip_work_commit(&mdp5_crtc->unref_cursor_work, priv->kms->wq);
 }
 
 static void mdp5_crtc_err_irq(struct mdp_irq *irq, uint32_t irqstatus)

@@ -1216,7 +1216,6 @@ static int i2s_alloc_dais(struct samsung_i2s_priv *priv,
 	return 0;
 }
 
-#ifdef CONFIG_PM
 static int i2s_runtime_suspend(struct device *dev)
 {
 	struct samsung_i2s_priv *priv = dev_get_drvdata(dev);
@@ -1254,7 +1253,6 @@ static int i2s_runtime_resume(struct device *dev)
 
 	return 0;
 }
-#endif /* CONFIG_PM */
 
 static void i2s_unregister_clocks(struct samsung_i2s_priv *priv)
 {
@@ -1733,20 +1731,18 @@ MODULE_DEVICE_TABLE(of, exynos_i2s_match);
 #endif
 
 static const struct dev_pm_ops samsung_i2s_pm = {
-	SET_RUNTIME_PM_OPS(i2s_runtime_suspend,
-				i2s_runtime_resume, NULL)
-	SET_SYSTEM_SLEEP_PM_OPS(pm_runtime_force_suspend,
-				     pm_runtime_force_resume)
+	RUNTIME_PM_OPS(i2s_runtime_suspend, i2s_runtime_resume, NULL)
+	SYSTEM_SLEEP_PM_OPS(pm_runtime_force_suspend, pm_runtime_force_resume)
 };
 
 static struct platform_driver samsung_i2s_driver = {
 	.probe  = samsung_i2s_probe,
-	.remove_new = samsung_i2s_remove,
+	.remove = samsung_i2s_remove,
 	.id_table = samsung_i2s_driver_ids,
 	.driver = {
 		.name = "samsung-i2s",
 		.of_match_table = of_match_ptr(exynos_i2s_match),
-		.pm = &samsung_i2s_pm,
+		.pm = pm_ptr(&samsung_i2s_pm),
 	},
 };
 
@@ -1755,5 +1751,4 @@ module_platform_driver(samsung_i2s_driver);
 /* Module information */
 MODULE_AUTHOR("Jaswinder Singh, <jassisinghbrar@gmail.com>");
 MODULE_DESCRIPTION("Samsung I2S Interface");
-MODULE_ALIAS("platform:samsung-i2s");
 MODULE_LICENSE("GPL");

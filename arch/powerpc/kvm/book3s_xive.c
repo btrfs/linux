@@ -531,7 +531,7 @@ static int xive_vm_h_eoi(struct kvm_vcpu *vcpu, unsigned long xirr)
 	xc->cppr = xive_prio_from_guest(new_cppr);
 
 	/*
-	 * IPIs are synthetized from MFRR and thus don't need
+	 * IPIs are synthesized from MFRR and thus don't need
 	 * any special EOI handling. The underlying interrupt
 	 * used to signal MFRR changes is EOId when fetched from
 	 * the queue.
@@ -1555,7 +1555,7 @@ int kvmppc_xive_set_mapped(struct kvm *kvm, unsigned long guest_irq,
 	struct kvmppc_xive_src_block *sb;
 	struct kvmppc_xive_irq_state *state;
 	struct irq_data *host_data =
-		irq_domain_get_irq_data(irq_get_default_host(), host_irq);
+		irq_domain_get_irq_data(irq_get_default_domain(), host_irq);
 	unsigned int hw_irq = (unsigned int)irqd_to_hwirq(host_data);
 	u16 idx;
 	u8 prio;
