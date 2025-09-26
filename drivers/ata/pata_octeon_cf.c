@@ -183,7 +183,7 @@ static void octeon_cf_set_piomode(struct ata_port *ap, struct ata_device *dev)
 	reg_tim.s.ale = 0;
 	/* Not used */
 	reg_tim.s.page = 0;
-	/* Time after IORDY to coninue to assert the data */
+	/* Time after IORDY to continue to assert the data */
 	reg_tim.s.wait = 0;
 	/* Time to wait to complete the cycle. */
 	reg_tim.s.pause = pause;
@@ -789,7 +789,6 @@ static unsigned int octeon_cf_qc_issue(struct ata_queued_cmd *qc)
 static struct ata_port_operations octeon_cf_ops = {
 	.inherits		= &ata_sff_port_ops,
 	.check_atapi_dma	= octeon_cf_check_atapi_dma,
-	.qc_prep		= ata_noop_qc_prep,
 	.qc_issue		= octeon_cf_qc_issue,
 	.sff_dev_select		= octeon_cf_dev_select,
 	.sff_irq_on		= octeon_cf_ata_port_noaction,
@@ -936,14 +935,13 @@ static int octeon_cf_probe(struct platform_device *pdev)
 		ap->mwdma_mask	= enable_dma ? ATA_MWDMA4 : 0;
 
 		/* True IDE mode needs a timer to poll for not-busy.  */
-		hrtimer_init(&cf_port->delayed_finish, CLOCK_MONOTONIC,
-			     HRTIMER_MODE_REL);
-		cf_port->delayed_finish.function = octeon_cf_delayed_finish;
+		hrtimer_setup(&cf_port->delayed_finish, octeon_cf_delayed_finish, CLOCK_MONOTONIC,
+			      HRTIMER_MODE_REL);
 	} else {
 		/* 16 bit but not True IDE */
 		base = cs0 + 0x800;
 		octeon_cf_ops.sff_data_xfer	= octeon_cf_data_xfer16;
-		octeon_cf_ops.softreset		= octeon_cf_softreset16;
+		octeon_cf_ops.reset.softreset	= octeon_cf_softreset16;
 		octeon_cf_ops.sff_check_status	= octeon_cf_check_status16;
 		octeon_cf_ops.sff_tf_read	= octeon_cf_tf_read16;
 		octeon_cf_ops.sff_tf_load	= octeon_cf_tf_load16;

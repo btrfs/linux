@@ -7,6 +7,7 @@
 #include <linux/debugfs.h>
 #include <linux/delay.h>
 #include <linux/fs.h>
+#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
 #include <linux/platform_data/cros_ec_commands.h>
@@ -24,6 +25,10 @@
 #define LOG_POLL_SEC		10
 
 #define CIRC_ADD(idx, size, value)	(((idx) + (value)) & ((size) - 1))
+
+static unsigned int log_poll_period_ms = LOG_POLL_SEC * MSEC_PER_SEC;
+module_param(log_poll_period_ms, uint, 0644);
+MODULE_PARM_DESC(log_poll_period_ms, "EC log polling period(ms)");
 
 /* waitqueue for log readers */
 static DECLARE_WAIT_QUEUE_HEAD(cros_ec_debugfs_log_wq);
@@ -56,7 +61,7 @@ struct cros_ec_debugfs {
 
 /*
  * We need to make sure that the EC log buffer on the UART is large enough,
- * so that it is unlikely enough to overlow within LOG_POLL_SEC.
+ * so that it is unlikely enough to overlow within log_poll_period_ms.
  */
 static void cros_ec_console_log_work(struct work_struct *__work)
 {
@@ -118,7 +123,7 @@ static void cros_ec_console_log_work(struct work_struct *__work)
 
 resched:
 	schedule_delayed_work(&debug_info->log_poll_work,
-			      msecs_to_jiffies(LOG_POLL_SEC * 1000));
+			      msecs_to_jiffies(log_poll_period_ms));
 }
 
 static int cros_ec_console_log_open(struct inode *inode, struct file *file)
@@ -202,21 +207,14 @@ static ssize_t cros_ec_pdinfo_read(struct file *file,
 	char read_buf[EC_USB_PD_MAX_PORTS * 40], *p = read_buf;
 	struct cros_ec_debugfs *debug_info = file->private_data;
 	struct cros_ec_device *ec_dev = debug_info->ec->ec_dev;
-	struct {
-		struct cros_ec_command msg;
-		union {
-			struct ec_response_usb_pd_control_v1 resp;
-			struct ec_params_usb_pd_control params;
-		};
-	} __packed ec_buf;
-	struct cros_ec_command *msg;
-	struct ec_response_usb_pd_control_v1 *resp;
-	struct ec_params_usb_pd_control *params;
+	DEFINE_RAW_FLEX(struct cros_ec_command, msg, data,
+			MAX(sizeof(struct ec_response_usb_pd_control_v1),
+			    sizeof(struct ec_params_usb_pd_control)));
+	struct ec_response_usb_pd_control_v1 *resp =
+			(struct ec_response_usb_pd_control_v1 *)msg->data;
+	struct ec_params_usb_pd_control *params =
+			(struct ec_params_usb_pd_control *)msg->data;
 	int i;
-
-	msg = &ec_buf.msg;
-	params = (struct ec_params_usb_pd_control *)msg->data;
-	resp = (struct ec_response_usb_pd_control_v1 *)msg->data;
 
 	msg->command = EC_CMD_USB_PD_CONTROL;
 	msg->version = 1;
@@ -248,17 +246,15 @@ static ssize_t cros_ec_pdinfo_read(struct file *file,
 
 static bool cros_ec_uptime_is_supported(struct cros_ec_device *ec_dev)
 {
-	struct {
-		struct cros_ec_command cmd;
-		struct ec_response_uptime_info resp;
-	} __packed msg = {};
+	DEFINE_RAW_FLEX(struct cros_ec_command, msg, data,
+			sizeof(struct ec_response_uptime_info));
 	int ret;
 
-	msg.cmd.command = EC_CMD_GET_UPTIME_INFO;
-	msg.cmd.insize = sizeof(msg.resp);
+	msg->command = EC_CMD_GET_UPTIME_INFO;
+	msg->insize = sizeof(struct ec_response_uptime_info);
 
-	ret = cros_ec_cmd_xfer_status(ec_dev, &msg.cmd);
-	if (ret == -EPROTO && msg.cmd.result == EC_RES_INVALID_COMMAND)
+	ret = cros_ec_cmd_xfer_status(ec_dev, msg);
+	if (ret == -EPROTO && msg->result == EC_RES_INVALID_COMMAND)
 		return false;
 
 	/* Other errors maybe a transient error, do not rule about support. */
@@ -270,20 +266,17 @@ static ssize_t cros_ec_uptime_read(struct file *file, char __user *user_buf,
 {
 	struct cros_ec_debugfs *debug_info = file->private_data;
 	struct cros_ec_device *ec_dev = debug_info->ec->ec_dev;
-	struct {
-		struct cros_ec_command cmd;
-		struct ec_response_uptime_info resp;
-	} __packed msg = {};
-	struct ec_response_uptime_info *resp;
+	DEFINE_RAW_FLEX(struct cros_ec_command, msg, data,
+			sizeof(struct ec_response_uptime_info));
+	struct ec_response_uptime_info *resp =
+				(struct ec_response_uptime_info *)msg->data;
 	char read_buf[32];
 	int ret;
 
-	resp = (struct ec_response_uptime_info *)&msg.resp;
+	msg->command = EC_CMD_GET_UPTIME_INFO;
+	msg->insize = sizeof(*resp);
 
-	msg.cmd.command = EC_CMD_GET_UPTIME_INFO;
-	msg.cmd.insize = sizeof(*resp);
-
-	ret = cros_ec_cmd_xfer_status(ec_dev, &msg.cmd);
+	ret = cros_ec_cmd_xfer_status(ec_dev, msg);
 	if (ret < 0)
 		return ret;
 
@@ -297,7 +290,6 @@ static const struct file_operations cros_ec_console_log_fops = {
 	.owner = THIS_MODULE,
 	.open = cros_ec_console_log_open,
 	.read = cros_ec_console_log_read,
-	.llseek = no_llseek,
 	.poll = cros_ec_console_log_poll,
 	.release = cros_ec_console_log_release,
 };
@@ -329,6 +321,7 @@ static int ec_read_version_supported(struct cros_ec_dev *ec)
 	if (!msg)
 		return 0;
 
+	msg->version = 1;
 	msg->command = EC_CMD_GET_CMD_VERSIONS + ec->cmd_offset;
 	msg->outsize = sizeof(*params);
 	msg->insize = sizeof(*response);
@@ -564,6 +557,12 @@ static int __maybe_unused cros_ec_debugfs_resume(struct device *dev)
 static SIMPLE_DEV_PM_OPS(cros_ec_debugfs_pm_ops,
 			 cros_ec_debugfs_suspend, cros_ec_debugfs_resume);
 
+static const struct platform_device_id cros_ec_debugfs_id[] = {
+	{ DRV_NAME, 0 },
+	{}
+};
+MODULE_DEVICE_TABLE(platform, cros_ec_debugfs_id);
+
 static struct platform_driver cros_ec_debugfs_driver = {
 	.driver = {
 		.name = DRV_NAME,
@@ -571,11 +570,11 @@ static struct platform_driver cros_ec_debugfs_driver = {
 		.probe_type = PROBE_PREFER_ASYNCHRONOUS,
 	},
 	.probe = cros_ec_debugfs_probe,
-	.remove_new = cros_ec_debugfs_remove,
+	.remove = cros_ec_debugfs_remove,
+	.id_table = cros_ec_debugfs_id,
 };
 
 module_platform_driver(cros_ec_debugfs_driver);
 
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("Debug logs for ChromeOS EC");
-MODULE_ALIAS("platform:" DRV_NAME);

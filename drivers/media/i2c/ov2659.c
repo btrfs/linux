@@ -1388,7 +1388,7 @@ ov2659_get_pdata(struct i2c_client *client)
 	if (!IS_ENABLED(CONFIG_OF) || !client->dev.of_node)
 		return client->dev.platform_data;
 
-	endpoint = of_graph_get_next_endpoint(client->dev.of_node, NULL);
+	endpoint = of_graph_get_endpoint_by_regs(client->dev.of_node, 0, -1);
 	if (!endpoint)
 		return NULL;
 
@@ -1469,14 +1469,15 @@ static int ov2659_probe(struct i2c_client *client)
 				     V4L2_CID_TEST_PATTERN,
 				     ARRAY_SIZE(ov2659_test_pattern_menu) - 1,
 				     0, 0, ov2659_test_pattern_menu);
-	ov2659->sd.ctrl_handler = &ov2659->ctrls;
 
 	if (ov2659->ctrls.error) {
 		dev_err(&client->dev, "%s: control initialization error %d\n",
 			__func__, ov2659->ctrls.error);
+		v4l2_ctrl_handler_free(&ov2659->ctrls);
 		return  ov2659->ctrls.error;
 	}
 
+	ov2659->sd.ctrl_handler = &ov2659->ctrls;
 	sd = &ov2659->sd;
 	client->flags |= I2C_CLIENT_SCCB;
 
@@ -1551,8 +1552,8 @@ static const struct dev_pm_ops ov2659_pm_ops = {
 };
 
 static const struct i2c_device_id ov2659_id[] = {
-	{ "ov2659", 0 },
-	{ /* sentinel */ },
+	{ "ov2659" },
+	{ /* sentinel */ }
 };
 MODULE_DEVICE_TABLE(i2c, ov2659_id);
 

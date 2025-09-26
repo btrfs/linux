@@ -26,7 +26,7 @@
  * Daniel Vetter <daniel.vetter@ffwll.ch>
  */
 
-
+#include <linux/export.h>
 #include <linux/sync_file.h>
 
 #include <drm/drm_atomic.h>
@@ -63,7 +63,6 @@ EXPORT_SYMBOL(__drm_crtc_commit_free);
  * hardware and flipped to.
  *
  * Returns:
- *
  * 0 on success, a negative error code otherwise.
  */
 int drm_crtc_commit_wait(struct drm_crtc_commit *commit)
@@ -337,7 +336,6 @@ EXPORT_SYMBOL(__drm_atomic_state_free);
  * not created by userspace through an IOCTL call.
  *
  * Returns:
- *
  * Either the allocated state or the error code encoded into the pointer. When
  * the error is EDEADLK then the w/w mutex code has detected a deadlock and the
  * entire atomic sequence must be restarted. All other errors are fatal.
@@ -518,7 +516,6 @@ static int drm_atomic_connector_check(struct drm_connector *connector,
  * is consistent.
  *
  * Returns:
- *
  * Either the allocated state or the error code encoded into the pointer. When
  * the error is EDEADLK then the w/w mutex code has detected a deadlock and the
  * entire atomic sequence must be restarted. All other errors are fatal.
@@ -608,7 +605,6 @@ static int drm_atomic_plane_check(const struct drm_plane_state *old_plane_state,
 	unsigned int fb_width, fb_height;
 	struct drm_mode_rect *clips;
 	uint32_t num_clips;
-	int ret;
 
 	/* either *both* CRTC and FB must be set, or neither */
 	if (crtc && !fb) {
@@ -635,14 +631,12 @@ static int drm_atomic_plane_check(const struct drm_plane_state *old_plane_state,
 	}
 
 	/* Check whether this plane supports the fb pixel format. */
-	ret = drm_plane_check_pixel_format(plane, fb->format->format,
-					   fb->modifier);
-	if (ret) {
+	if (!drm_plane_has_format(plane, fb->format->format, fb->modifier)) {
 		drm_dbg_atomic(plane->dev,
 			       "[PLANE:%d:%s] invalid pixel format %p4cc, modifier 0x%llx\n",
 			       plane->base.id, plane->name,
 			       &fb->format->format, fb->modifier);
-		return ret;
+		return -EINVAL;
 	}
 
 	/* Give drivers some help against integer overflows */
@@ -831,7 +825,6 @@ EXPORT_SYMBOL(drm_atomic_private_obj_fini);
  * object lock to make sure that the state is consistent.
  *
  * RETURNS:
- *
  * Either the allocated state or the error code encoded into a pointer.
  */
 struct drm_private_state *
@@ -940,6 +933,9 @@ EXPORT_SYMBOL(drm_atomic_get_new_private_obj_state);
  * state). This is especially true in enable hooks because the pipeline has
  * changed.
  *
+ * If you don't have access to the atomic state, see
+ * drm_atomic_get_connector_for_encoder().
+ *
  * Returns: The old connector connected to @encoder, or NULL if the encoder is
  * not connected.
  */
@@ -974,6 +970,9 @@ EXPORT_SYMBOL(drm_atomic_get_old_connector_for_encoder);
  * attached to @encoder vs ones that do (and to inspect their state). This is
  * especially true in disable hooks because the pipeline will change.
  *
+ * If you don't have access to the atomic state, see
+ * drm_atomic_get_connector_for_encoder().
+ *
  * Returns: The new connector connected to @encoder, or NULL if the encoder is
  * not connected.
  */
@@ -993,6 +992,59 @@ drm_atomic_get_new_connector_for_encoder(const struct drm_atomic_state *state,
 	return NULL;
 }
 EXPORT_SYMBOL(drm_atomic_get_new_connector_for_encoder);
+
+/**
+ * drm_atomic_get_connector_for_encoder - Get connector currently assigned to an encoder
+ * @encoder: The encoder to find the connector of
+ * @ctx: Modeset locking context
+ *
+ * This function finds and returns the connector currently assigned to
+ * an @encoder.
+ *
+ * It is similar to the drm_atomic_get_old_connector_for_encoder() and
+ * drm_atomic_get_new_connector_for_encoder() helpers, but doesn't
+ * require access to the atomic state. If you have access to it, prefer
+ * using these. This helper is typically useful in situations where you
+ * don't have access to the atomic state, like detect, link repair,
+ * threaded interrupt handlers, or hooks from other frameworks (ALSA,
+ * CEC, etc.).
+ *
+ * Returns:
+ * The connector connected to @encoder, or an error pointer otherwise.
+ * When the error is EDEADLK, a deadlock has been detected and the
+ * sequence must be restarted.
+ */
+struct drm_connector *
+drm_atomic_get_connector_for_encoder(const struct drm_encoder *encoder,
+				     struct drm_modeset_acquire_ctx *ctx)
+{
+	struct drm_connector_list_iter conn_iter;
+	struct drm_connector *out_connector = ERR_PTR(-EINVAL);
+	struct drm_connector *connector;
+	struct drm_device *dev = encoder->dev;
+	int ret;
+
+	ret = drm_modeset_lock(&dev->mode_config.connection_mutex, ctx);
+	if (ret)
+		return ERR_PTR(ret);
+
+	drm_connector_list_iter_begin(dev, &conn_iter);
+	drm_for_each_connector_iter(connector, &conn_iter) {
+		if (!connector->state)
+			continue;
+
+		if (encoder == connector->state->best_encoder) {
+			out_connector = connector;
+			break;
+		}
+	}
+	drm_connector_list_iter_end(&conn_iter);
+	drm_modeset_unlock(&dev->mode_config.connection_mutex);
+
+	return out_connector;
+}
+EXPORT_SYMBOL(drm_atomic_get_connector_for_encoder);
+
 
 /**
  * drm_atomic_get_old_crtc_for_encoder - Get old crtc for an encoder
@@ -1064,7 +1116,6 @@ EXPORT_SYMBOL(drm_atomic_get_new_crtc_for_encoder);
  * make sure that the state is consistent.
  *
  * Returns:
- *
  * Either the allocated state or the error code encoded into the pointer. When
  * the error is EDEADLK then the w/w mutex code has detected a deadlock and the
  * entire atomic sequence must be restarted. All other errors are fatal.
@@ -1140,8 +1191,21 @@ static void drm_atomic_connector_print_state(struct drm_printer *p,
 	drm_printf(p, "connector[%u]: %s\n", connector->base.id, connector->name);
 	drm_printf(p, "\tcrtc=%s\n", state->crtc ? state->crtc->name : "(null)");
 	drm_printf(p, "\tself_refresh_aware=%d\n", state->self_refresh_aware);
+	drm_printf(p, "\tinterlace_allowed=%d\n", connector->interlace_allowed);
+	drm_printf(p, "\tycbcr_420_allowed=%d\n", connector->ycbcr_420_allowed);
 	drm_printf(p, "\tmax_requested_bpc=%d\n", state->max_requested_bpc);
 	drm_printf(p, "\tcolorspace=%s\n", drm_get_colorspace_name(state->colorspace));
+
+	if (connector->connector_type == DRM_MODE_CONNECTOR_HDMIA ||
+	    connector->connector_type == DRM_MODE_CONNECTOR_HDMIB) {
+		drm_printf(p, "\tbroadcast_rgb=%s\n",
+			   drm_hdmi_connector_get_broadcast_rgb_name(state->hdmi.broadcast_rgb));
+		drm_printf(p, "\tis_limited_range=%c\n", state->hdmi.is_limited_range ? 'y' : 'n');
+		drm_printf(p, "\toutput_bpc=%u\n", state->hdmi.output_bpc);
+		drm_printf(p, "\toutput_format=%s\n",
+			   drm_hdmi_connector_get_output_format_name(state->hdmi.output_format));
+		drm_printf(p, "\ttmds_char_rate=%llu\n", state->hdmi.tmds_char_rate);
+	}
 
 	if (connector->connector_type == DRM_MODE_CONNECTOR_WRITEBACK)
 		if (state->writeback_job && state->writeback_job->fb)
@@ -1161,7 +1225,6 @@ static void drm_atomic_connector_print_state(struct drm_printer *p,
  * state is consistent.
  *
  * Returns:
- *
  * Either the allocated state or the error code encoded into the pointer. When
  * the error is EDEADLK then the w/w mutex code has detected a deadlock and the
  * entire atomic sequence must be restarted.

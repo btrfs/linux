@@ -172,8 +172,8 @@ Currently, the types available are:
   - It's usually used for copying pixel data between host memory and
     memory-mapped GPU device memory, such as found on modern PCI video graphics
     cards. The most immediate example is the OpenGL API function
-    ``glReadPielx()``, which might require a verbatim copy of a huge framebuffer
-    from local device memory onto host memory.
+    ``glReadPixels()``, which might require a verbatim copy of a huge
+    framebuffer from local device memory onto host memory.
 
 - DMA_XOR
 
@@ -217,10 +217,12 @@ Currently, the types available are:
 
 - DMA_ASYNC_TX
 
-  - Must not be set by the device, and will be set by the framework
-    if needed
+  - The device supports asynchronous memory-to-memory operations,
+    including memcpy, memset, xor, pq, xor_val, and pq_val.
 
-  - TODO: What is it about?
+  - This capability is automatically set by the DMA engine
+    framework and must not be configured manually by device
+    drivers.
 
 - DMA_SLAVE
 
@@ -433,6 +435,12 @@ supported.
     - residue: Provides the residue bytes of the transfer for those that
       support residue.
 
+- ``device_prep_peripheral_dma_vec``
+
+  - Similar to ``device_prep_slave_sg``, but it takes a pointer to a
+    array of ``dma_vec`` structures, which (in the long run) will replace
+    scatterlists.
+
 - ``device_issue_pending``
 
   - Takes the first transaction descriptor in the pending queue,
@@ -543,6 +551,10 @@ dma_cookie_t
 
 - Not really relevant any more since the introduction of ``virt-dma``
   that abstracts it away.
+
+dma_vec
+
+- A small structure that contains a DMA address and length.
 
 DMA_CTRL_ACK
 

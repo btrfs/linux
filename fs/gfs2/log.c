@@ -31,6 +31,7 @@
 #include "dir.h"
 #include "trace_gfs2.h"
 #include "trans.h"
+#include "aops.h"
 
 static void gfs2_log_shutdown(struct gfs2_sbd *sdp);
 
@@ -78,15 +79,6 @@ void gfs2_remove_from_ail(struct gfs2_bufdata *bd)
 	list_del_init(&bd->bd_ail_gl_list);
 	atomic_dec(&bd->bd_gl->gl_ail_count);
 	brelse(bd->bd_bh);
-}
-
-static int __gfs2_writepage(struct folio *folio, struct writeback_control *wbc,
-		       void *data)
-{
-	struct address_space *mapping = data;
-	int ret = mapping->a_ops->writepage(&folio->page, wbc);
-	mapping_set_error(mapping, ret);
-	return ret;
 }
 
 /**
@@ -140,7 +132,11 @@ __acquires(&sdp->sd_ail_lock)
 		if (!mapping)
 			continue;
 		spin_unlock(&sdp->sd_ail_lock);
-		ret = write_cache_pages(mapping, wbc, __gfs2_writepage, mapping);
+		BUG_ON(GFS2_SB(mapping->host) != sdp);
+		if (gfs2_is_jdata(GFS2_I(mapping->host)))
+			ret = gfs2_jdata_writeback(mapping, wbc);
+		else
+			ret = mapping->a_ops->writepages(mapping, wbc);
 		if (need_resched()) {
 			blk_finish_plug(plug);
 			cond_resched();
@@ -149,6 +145,7 @@ __acquires(&sdp->sd_ail_lock)
 		spin_lock(&sdp->sd_ail_lock);
 		if (ret == -ENODATA) /* if a jdata write into a new hole */
 			ret = 0; /* ignore it */
+		mapping_set_error(mapping, ret);
 		if (ret || wbc->nr_to_write <= 0)
 			break;
 		return -EBUSY;
@@ -786,7 +783,7 @@ void gfs2_glock_remove_revoke(struct gfs2_glock *gl)
 {
 	if (atomic_dec_return(&gl->gl_revokes) == 0) {
 		clear_bit(GLF_LFLUSH, &gl->gl_flags);
-		gfs2_glock_queue_put(gl);
+		gfs2_glock_put_async(gl);
 	}
 }
 
@@ -1108,7 +1105,8 @@ repeat:
 	lops_before_commit(sdp, tr);
 	if (gfs2_withdrawing_or_withdrawn(sdp))
 		goto out_withdraw;
-	gfs2_log_submit_bio(&sdp->sd_jdesc->jd_log_bio, REQ_OP_WRITE);
+	if (sdp->sd_jdesc)
+		gfs2_log_submit_bio(&sdp->sd_jdesc->jd_log_bio, REQ_OP_WRITE);
 	if (gfs2_withdrawing_or_withdrawn(sdp))
 		goto out_withdraw;
 

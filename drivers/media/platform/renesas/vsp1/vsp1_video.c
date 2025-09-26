@@ -78,8 +78,14 @@ static int vsp1_video_verify_format(struct vsp1_video *video)
 
 	if (video->rwpf->fmtinfo->mbus != fmt.format.code ||
 	    video->rwpf->format.height != fmt.format.height ||
-	    video->rwpf->format.width != fmt.format.width)
-		return -EINVAL;
+	    video->rwpf->format.width != fmt.format.width) {
+		dev_dbg(video->vsp1->dev,
+			"Format mismatch: 0x%04x/%ux%u != 0x%04x/%ux%u\n",
+			video->rwpf->fmtinfo->mbus, video->rwpf->format.width,
+			video->rwpf->format.height, fmt.format.code,
+			fmt.format.width, fmt.format.height);
+		return -EPIPE;
+	}
 
 	return 0;
 }
@@ -121,12 +127,24 @@ static int __vsp1_video_try_format(struct vsp1_video *video,
 		info = vsp1_get_format_info(video->vsp1, VSP1_VIDEO_DEF_FORMAT);
 
 	pix->pixelformat = info->fourcc;
-	pix->colorspace = V4L2_COLORSPACE_SRGB;
 	pix->field = V4L2_FIELD_NONE;
 
-	if (info->fourcc == V4L2_PIX_FMT_HSV24 ||
-	    info->fourcc == V4L2_PIX_FMT_HSV32)
-		pix->hsv_enc = V4L2_HSV_ENC_256;
+	/*
+	 * Adjust the colour space fields. On capture devices, userspace needs
+	 * to set the V4L2_PIX_FMT_FLAG_SET_CSC to override the defaults. Reset
+	 * all fields to *_DEFAULT if the flag isn't set, to then handle
+	 * capture and output devices in the same way.
+	 */
+	if (video->type == V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE &&
+	    !(pix->flags & V4L2_PIX_FMT_FLAG_SET_CSC)) {
+		pix->colorspace = V4L2_COLORSPACE_DEFAULT;
+		pix->xfer_func = V4L2_XFER_FUNC_DEFAULT;
+		pix->ycbcr_enc = V4L2_YCBCR_ENC_DEFAULT;
+		pix->quantization = V4L2_QUANTIZATION_DEFAULT;
+	}
+
+	vsp1_adjust_color_space(info->mbus, &pix->colorspace, &pix->xfer_func,
+				&pix->ycbcr_enc, &pix->quantization);
 
 	memset(pix->reserved, 0, sizeof(pix->reserved));
 
@@ -168,131 +186,6 @@ static int __vsp1_video_try_format(struct vsp1_video *video,
 
 	if (fmtinfo)
 		*fmtinfo = info;
-
-	return 0;
-}
-
-/* -----------------------------------------------------------------------------
- * VSP1 Partition Algorithm support
- */
-
-/**
- * vsp1_video_calculate_partition - Calculate the active partition output window
- *
- * @pipe: the pipeline
- * @partition: partition that will hold the calculated values
- * @div_size: pre-determined maximum partition division size
- * @index: partition index
- */
-static void vsp1_video_calculate_partition(struct vsp1_pipeline *pipe,
-					   struct vsp1_partition *partition,
-					   unsigned int div_size,
-					   unsigned int index)
-{
-	const struct v4l2_mbus_framefmt *format;
-	struct vsp1_partition_window window;
-	unsigned int modulus;
-
-	/*
-	 * Partitions are computed on the size before rotation, use the format
-	 * at the WPF sink.
-	 */
-	format = vsp1_entity_get_pad_format(&pipe->output->entity,
-					    pipe->output->entity.state,
-					    RWPF_PAD_SINK);
-
-	/* A single partition simply processes the output size in full. */
-	if (pipe->partitions <= 1) {
-		window.left = 0;
-		window.width = format->width;
-
-		vsp1_pipeline_propagate_partition(pipe, partition, index,
-						  &window);
-		return;
-	}
-
-	/* Initialise the partition with sane starting conditions. */
-	window.left = index * div_size;
-	window.width = div_size;
-
-	modulus = format->width % div_size;
-
-	/*
-	 * We need to prevent the last partition from being smaller than the
-	 * *minimum* width of the hardware capabilities.
-	 *
-	 * If the modulus is less than half of the partition size,
-	 * the penultimate partition is reduced to half, which is added
-	 * to the final partition: |1234|1234|1234|12|341|
-	 * to prevent this:        |1234|1234|1234|1234|1|.
-	 */
-	if (modulus) {
-		/*
-		 * pipe->partitions is 1 based, whilst index is a 0 based index.
-		 * Normalise this locally.
-		 */
-		unsigned int partitions = pipe->partitions - 1;
-
-		if (modulus < div_size / 2) {
-			if (index == partitions - 1) {
-				/* Halve the penultimate partition. */
-				window.width = div_size / 2;
-			} else if (index == partitions) {
-				/* Increase the final partition. */
-				window.width = (div_size / 2) + modulus;
-				window.left -= div_size / 2;
-			}
-		} else if (index == partitions) {
-			window.width = modulus;
-		}
-	}
-
-	vsp1_pipeline_propagate_partition(pipe, partition, index, &window);
-}
-
-static int vsp1_video_pipeline_setup_partitions(struct vsp1_pipeline *pipe)
-{
-	struct vsp1_device *vsp1 = pipe->output->entity.vsp1;
-	const struct v4l2_mbus_framefmt *format;
-	struct vsp1_entity *entity;
-	unsigned int div_size;
-	unsigned int i;
-
-	/*
-	 * Partitions are computed on the size before rotation, use the format
-	 * at the WPF sink.
-	 */
-	format = vsp1_entity_get_pad_format(&pipe->output->entity,
-					    pipe->output->entity.state,
-					    RWPF_PAD_SINK);
-	div_size = format->width;
-
-	/*
-	 * Only Gen3+ hardware requires image partitioning, Gen2 will operate
-	 * with a single partition that covers the whole output.
-	 */
-	if (vsp1->info->gen >= 3) {
-		list_for_each_entry(entity, &pipe->entities, list_pipe) {
-			unsigned int entity_max;
-
-			if (!entity->ops->max_width)
-				continue;
-
-			entity_max = entity->ops->max_width(entity, pipe);
-			if (entity_max)
-				div_size = min(div_size, entity_max);
-		}
-	}
-
-	pipe->partitions = DIV_ROUND_UP(format->width, div_size);
-	pipe->part_table = kcalloc(pipe->partitions, sizeof(*pipe->part_table),
-				   GFP_KERNEL);
-	if (!pipe->part_table)
-		return -ENOMEM;
-
-	for (i = 0; i < pipe->partitions; ++i)
-		vsp1_video_calculate_partition(pipe, &pipe->part_table[i],
-					       div_size, i);
 
 	return 0;
 }
@@ -365,13 +258,12 @@ static void vsp1_video_pipeline_run_partition(struct vsp1_pipeline *pipe,
 					      struct vsp1_dl_list *dl,
 					      unsigned int partition)
 {
+	struct vsp1_partition *part = &pipe->part_table[partition];
 	struct vsp1_dl_body *dlb = vsp1_dl_list_get_body0(dl);
 	struct vsp1_entity *entity;
 
-	pipe->partition = &pipe->part_table[partition];
-
 	list_for_each_entry(entity, &pipe->entities, list_pipe)
-		vsp1_entity_configure_partition(entity, pipe, dl, dlb);
+		vsp1_entity_configure_partition(entity, pipe, part, dl, dlb);
 }
 
 static void vsp1_video_pipeline_run(struct vsp1_pipeline *pipe)
@@ -646,11 +538,19 @@ static int vsp1_video_pipeline_build(struct vsp1_pipeline *pipe,
 static int vsp1_video_pipeline_init(struct vsp1_pipeline *pipe,
 				    struct vsp1_video *video)
 {
+	int ret;
+
 	vsp1_pipeline_init(pipe);
 
 	pipe->frame_end = vsp1_video_pipeline_frame_end;
 
-	return vsp1_video_pipeline_build(pipe, video);
+	ret = vsp1_video_pipeline_build(pipe, video);
+	if (ret)
+		return ret;
+
+	vsp1_pipeline_dump(pipe, "video");
+
+	return 0;
 }
 
 static struct vsp1_pipeline *vsp1_video_pipeline_get(struct vsp1_video *video)
@@ -784,6 +684,54 @@ static void vsp1_video_buffer_queue(struct vb2_buffer *vb)
 	spin_unlock_irqrestore(&pipe->irqlock, flags);
 }
 
+static int vsp1_video_pipeline_setup_partitions(struct vsp1_pipeline *pipe)
+{
+	struct vsp1_device *vsp1 = pipe->output->entity.vsp1;
+	const struct v4l2_mbus_framefmt *format;
+	struct vsp1_entity *entity;
+	unsigned int div_size;
+	unsigned int i;
+
+	/*
+	 * Partitions are computed on the size before rotation, use the format
+	 * at the WPF sink.
+	 */
+	format = v4l2_subdev_state_get_format(pipe->output->entity.state,
+					      RWPF_PAD_SINK);
+	div_size = format->width;
+
+	/*
+	 * Only Gen3+ hardware requires image partitioning, Gen2 will operate
+	 * with a single partition that covers the whole output.
+	 */
+	if (vsp1->info->gen >= 3) {
+		list_for_each_entry(entity, &pipe->entities, list_pipe) {
+			unsigned int entity_max;
+
+			if (!entity->ops->max_width)
+				continue;
+
+			entity_max = entity->ops->max_width(entity,
+							    entity->state,
+							    pipe);
+			if (entity_max)
+				div_size = min(div_size, entity_max);
+		}
+	}
+
+	pipe->partitions = DIV_ROUND_UP(format->width, div_size);
+	pipe->part_table = kcalloc(pipe->partitions, sizeof(*pipe->part_table),
+				   GFP_KERNEL);
+	if (!pipe->part_table)
+		return -ENOMEM;
+
+	for (i = 0; i < pipe->partitions; ++i)
+		vsp1_pipeline_calculate_partition(pipe, &pipe->part_table[i],
+						  div_size, i);
+
+	return 0;
+}
+
 static int vsp1_video_setup_pipeline(struct vsp1_pipeline *pipe)
 {
 	struct vsp1_entity *entity;
@@ -826,7 +774,7 @@ static int vsp1_video_setup_pipeline(struct vsp1_pipeline *pipe)
 
 	list_for_each_entry(entity, &pipe->entities, list_pipe) {
 		vsp1_entity_route_setup(entity, pipe, pipe->stream_config);
-		vsp1_entity_configure_stream(entity, pipe, NULL,
+		vsp1_entity_configure_stream(entity, entity->state, pipe, NULL,
 					     pipe->stream_config);
 	}
 
@@ -937,8 +885,6 @@ static const struct vb2_ops vsp1_video_queue_qops = {
 	.queue_setup = vsp1_video_queue_setup,
 	.buf_prepare = vsp1_video_buffer_prepare,
 	.buf_queue = vsp1_video_buffer_queue,
-	.wait_prepare = vb2_ops_wait_prepare,
-	.wait_finish = vb2_ops_wait_finish,
 	.start_streaming = vsp1_video_start_streaming,
 	.stop_streaming = vsp1_video_stop_streaming,
 };
@@ -954,12 +900,32 @@ vsp1_video_querycap(struct file *file, void *fh, struct v4l2_capability *cap)
 	struct vsp1_video *video = to_vsp1_video(vfh->vdev);
 
 	cap->capabilities = V4L2_CAP_DEVICE_CAPS | V4L2_CAP_STREAMING
-			  | V4L2_CAP_VIDEO_CAPTURE_MPLANE
+			  | V4L2_CAP_IO_MC | V4L2_CAP_VIDEO_CAPTURE_MPLANE
 			  | V4L2_CAP_VIDEO_OUTPUT_MPLANE;
-
 
 	strscpy(cap->driver, "vsp1", sizeof(cap->driver));
 	strscpy(cap->card, video->video.name, sizeof(cap->card));
+
+	return 0;
+}
+
+static int vsp1_video_enum_format(struct file *file, void *fh,
+				  struct v4l2_fmtdesc *f)
+{
+	struct v4l2_fh *vfh = file->private_data;
+	struct vsp1_video *video = to_vsp1_video(vfh->vdev);
+	const struct vsp1_format_info *info;
+
+	info = vsp1_get_format_info_by_index(video->vsp1, f->index, f->mbus_code);
+	if (!info)
+		return -EINVAL;
+
+	f->pixelformat = info->fourcc;
+
+	if (video->type == V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE &&
+	    info->mbus == MEDIA_BUS_FMT_AYUV8_1X32)
+		f->flags = V4L2_FMT_FLAG_CSC_YCBCR_ENC
+			 | V4L2_FMT_FLAG_CSC_QUANTIZATION;
 
 	return 0;
 }
@@ -1079,6 +1045,8 @@ err_pipe:
 
 static const struct v4l2_ioctl_ops vsp1_video_ioctl_ops = {
 	.vidioc_querycap		= vsp1_video_querycap,
+	.vidioc_enum_fmt_vid_cap	= vsp1_video_enum_format,
+	.vidioc_enum_fmt_vid_out	= vsp1_video_enum_format,
 	.vidioc_g_fmt_vid_cap_mplane	= vsp1_video_get_format,
 	.vidioc_s_fmt_vid_cap_mplane	= vsp1_video_set_format,
 	.vidioc_try_fmt_vid_cap_mplane	= vsp1_video_try_format,
@@ -1143,6 +1111,27 @@ static const struct v4l2_file_operations vsp1_video_fops = {
 	.release = vsp1_video_release,
 	.poll = vb2_fop_poll,
 	.mmap = vb2_fop_mmap,
+};
+
+/* -----------------------------------------------------------------------------
+ * Media entity operations
+ */
+
+static int vsp1_video_link_validate(struct media_link *link)
+{
+	/*
+	 * Ideally, link validation should be implemented here instead of
+	 * calling vsp1_video_verify_format() in vsp1_video_streamon()
+	 * manually. That would however break userspace that start one video
+	 * device before configures formats on other video devices in the
+	 * pipeline. This operation is just a no-op to silence the warnings
+	 * from v4l2_subdev_link_validate().
+	 */
+	return 0;
+}
+
+static const struct media_entity_operations vsp1_video_media_ops = {
+	.link_validate = vsp1_video_link_validate,
 };
 
 /* -----------------------------------------------------------------------------
@@ -1252,14 +1241,14 @@ struct vsp1_video *vsp1_video_create(struct vsp1_device *vsp1,
 		video->pad.flags = MEDIA_PAD_FL_SOURCE;
 		video->video.vfl_dir = VFL_DIR_TX;
 		video->video.device_caps = V4L2_CAP_VIDEO_OUTPUT_MPLANE |
-					   V4L2_CAP_STREAMING;
+					   V4L2_CAP_STREAMING | V4L2_CAP_IO_MC;
 	} else {
 		direction = "output";
 		video->type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
 		video->pad.flags = MEDIA_PAD_FL_SINK;
 		video->video.vfl_dir = VFL_DIR_RX;
 		video->video.device_caps = V4L2_CAP_VIDEO_CAPTURE_MPLANE |
-					   V4L2_CAP_STREAMING;
+					   V4L2_CAP_STREAMING | V4L2_CAP_IO_MC;
 	}
 
 	mutex_init(&video->lock);
@@ -1279,6 +1268,7 @@ struct vsp1_video *vsp1_video_create(struct vsp1_device *vsp1,
 
 	/* ... and the video node... */
 	video->video.v4l2_dev = &video->vsp1->v4l2_dev;
+	video->video.entity.ops = &vsp1_video_media_ops;
 	video->video.fops = &vsp1_video_fops;
 	snprintf(video->video.name, sizeof(video->video.name), "%s %s",
 		 rwpf->entity.subdev.name, direction);

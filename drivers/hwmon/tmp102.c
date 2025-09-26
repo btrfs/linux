@@ -16,6 +16,7 @@
 #include <linux/device.h>
 #include <linux/jiffies.h>
 #include <linux/regmap.h>
+#include <linux/regulator/consumer.h>
 #include <linux/of.h>
 
 #define	DRIVER_NAME "tmp102"
@@ -204,6 +205,10 @@ static int tmp102_probe(struct i2c_client *client)
 		return -ENODEV;
 	}
 
+	err = devm_regulator_get_enable_optional(dev, "vcc");
+	if (err < 0 && err != -ENODEV)
+		return dev_err_probe(dev, err, "Failed to enable regulator\n");
+
 	tmp102 = devm_kzalloc(dev, sizeof(*tmp102), GFP_KERNEL);
 	if (!tmp102)
 		return -ENOMEM;
@@ -286,7 +291,7 @@ static int tmp102_resume(struct device *dev)
 static DEFINE_SIMPLE_DEV_PM_OPS(tmp102_dev_pm_ops, tmp102_suspend, tmp102_resume);
 
 static const struct i2c_device_id tmp102_id[] = {
-	{ "tmp102", 0 },
+	{ "tmp102" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, tmp102_id);

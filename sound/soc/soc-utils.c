@@ -7,7 +7,7 @@
 // Author: Mark Brown <broonie@opensource.wolfsonmicro.com>
 //         Liam Girdwood <lrg@slimlogic.co.uk>
 
-#include <linux/platform_device.h>
+#include <linux/device/faux.h>
 #include <linux/export.h>
 #include <linux/math.h>
 #include <sound/core.h>
@@ -15,13 +15,40 @@
 #include <sound/pcm_params.h>
 #include <sound/soc.h>
 
+int snd_soc_ret(const struct device *dev, int ret, const char *fmt, ...)
+{
+	struct va_format vaf;
+	va_list args;
+
+	/* Positive, Zero values are not errors */
+	if (ret >= 0)
+		return ret;
+
+	/* Negative values might be errors */
+	switch (ret) {
+	case -EPROBE_DEFER:
+	case -ENOTSUPP:
+	case -EOPNOTSUPP:
+		break;
+	default:
+		va_start(args, fmt);
+		vaf.fmt = fmt;
+		vaf.va = &args;
+
+		dev_err(dev, "ASoC error (%d): %pV", ret, &vaf);
+	}
+
+	return ret;
+}
+EXPORT_SYMBOL_GPL(snd_soc_ret);
+
 int snd_soc_calc_frame_size(int sample_size, int channels, int tdm_slots)
 {
 	return sample_size * channels * tdm_slots;
 }
 EXPORT_SYMBOL_GPL(snd_soc_calc_frame_size);
 
-int snd_soc_params_to_frame_size(struct snd_pcm_hw_params *params)
+int snd_soc_params_to_frame_size(const struct snd_pcm_hw_params *params)
 {
 	int sample_size;
 
@@ -40,7 +67,7 @@ int snd_soc_calc_bclk(int fs, int sample_size, int channels, int tdm_slots)
 }
 EXPORT_SYMBOL_GPL(snd_soc_calc_bclk);
 
-int snd_soc_params_to_bclk(struct snd_pcm_hw_params *params)
+int snd_soc_params_to_bclk(const struct snd_pcm_hw_params *params)
 {
 	int ret;
 
@@ -79,7 +106,7 @@ EXPORT_SYMBOL_GPL(snd_soc_params_to_bclk);
  * Return: bclk frequency in Hz, else a negative error code if params format
  *	   is invalid.
  */
-int snd_soc_tdm_params_to_bclk(struct snd_pcm_hw_params *params,
+int snd_soc_tdm_params_to_bclk(const struct snd_pcm_hw_params *params,
 			       int tdm_width, int tdm_slots, int slot_multiple)
 {
 	if (!tdm_slots)
@@ -103,8 +130,8 @@ static const struct snd_pcm_hardware dummy_dma_hardware = {
 	.info			= SNDRV_PCM_INFO_INTERLEAVED |
 				  SNDRV_PCM_INFO_BLOCK_TRANSFER,
 	.buffer_bytes_max	= 128*1024,
-	.period_bytes_min	= PAGE_SIZE,
-	.period_bytes_max	= PAGE_SIZE*2,
+	.period_bytes_min	= 4096,
+	.period_bytes_max	= 4096*2,
 	.periods_min		= 2,
 	.periods_max		= 128,
 };
@@ -144,7 +171,6 @@ static const struct snd_soc_component_driver dummy_codec = {
 	.endianness		= 1,
 };
 
-#define STUB_RATES	SNDRV_PCM_RATE_8000_384000
 #define STUB_FORMATS	(SNDRV_PCM_FMTBIT_S8 | \
 			SNDRV_PCM_FMTBIT_U8 | \
 			SNDRV_PCM_FMTBIT_S16_LE | \
@@ -163,7 +189,7 @@ static const struct snd_soc_component_driver dummy_codec = {
  *	SND_SOC_POSSIBLE_DAIFMT_CBC_CFP
  *	SND_SOC_POSSIBLE_DAIFMT_CBC_CFC
  */
-static u64 dummy_dai_formats =
+static const u64 dummy_dai_formats =
 	SND_SOC_POSSIBLE_DAIFMT_I2S	|
 	SND_SOC_POSSIBLE_DAIFMT_RIGHT_J	|
 	SND_SOC_POSSIBLE_DAIFMT_LEFT_J	|
@@ -198,20 +224,24 @@ static struct snd_soc_dai_driver dummy_dai = {
 		.stream_name	= "Playback",
 		.channels_min	= 1,
 		.channels_max	= 384,
-		.rates		= STUB_RATES,
+		.rates		= SNDRV_PCM_RATE_CONTINUOUS,
+		.rate_min	= 5512,
+		.rate_max	= 768000,
 		.formats	= STUB_FORMATS,
 	},
 	.capture = {
 		.stream_name	= "Capture",
 		.channels_min	= 1,
 		.channels_max	= 384,
-		.rates = STUB_RATES,
+		.rates = SNDRV_PCM_RATE_CONTINUOUS,
+		.rate_min	= 5512,
+		.rate_max	= 768000,
 		.formats = STUB_FORMATS,
 	 },
 	.ops = &dummy_dai_ops,
 };
 
-int snd_soc_dai_is_dummy(struct snd_soc_dai *dai)
+int snd_soc_dai_is_dummy(const struct snd_soc_dai *dai)
 {
 	if (dai->driver == &dummy_dai)
 		return 1;
@@ -232,48 +262,51 @@ struct snd_soc_dai_link_component snd_soc_dummy_dlc = {
 };
 EXPORT_SYMBOL_GPL(snd_soc_dummy_dlc);
 
-static int snd_soc_dummy_probe(struct platform_device *pdev)
+int snd_soc_dlc_is_dummy(struct snd_soc_dai_link_component *dlc)
+{
+	if (dlc == &snd_soc_dummy_dlc)
+		return true;
+
+	if ((dlc->name     && strcmp(dlc->name,     snd_soc_dummy_dlc.name)     == 0) ||
+	    (dlc->dai_name && strcmp(dlc->dai_name, snd_soc_dummy_dlc.dai_name) == 0))
+		return true;
+
+	return false;
+}
+EXPORT_SYMBOL_GPL(snd_soc_dlc_is_dummy);
+
+static int snd_soc_dummy_probe(struct faux_device *fdev)
 {
 	int ret;
 
-	ret = devm_snd_soc_register_component(&pdev->dev,
+	ret = devm_snd_soc_register_component(&fdev->dev,
 					      &dummy_codec, &dummy_dai, 1);
 	if (ret < 0)
 		return ret;
 
-	ret = devm_snd_soc_register_component(&pdev->dev, &dummy_platform,
+	ret = devm_snd_soc_register_component(&fdev->dev, &dummy_platform,
 					      NULL, 0);
 
 	return ret;
 }
 
-static struct platform_driver soc_dummy_driver = {
-	.driver = {
-		.name = "snd-soc-dummy",
-	},
+static struct faux_device_ops soc_dummy_ops = {
 	.probe = snd_soc_dummy_probe,
 };
 
-static struct platform_device *soc_dummy_dev;
+static struct faux_device *soc_dummy_dev;
 
 int __init snd_soc_util_init(void)
 {
-	int ret;
+	soc_dummy_dev = faux_device_create("snd-soc-dummy", NULL,
+					   &soc_dummy_ops);
+	if (!soc_dummy_dev)
+		return -ENODEV;
 
-	soc_dummy_dev =
-		platform_device_register_simple("snd-soc-dummy", -1, NULL, 0);
-	if (IS_ERR(soc_dummy_dev))
-		return PTR_ERR(soc_dummy_dev);
-
-	ret = platform_driver_register(&soc_dummy_driver);
-	if (ret != 0)
-		platform_device_unregister(soc_dummy_dev);
-
-	return ret;
+	return 0;
 }
 
 void snd_soc_util_exit(void)
 {
-	platform_driver_unregister(&soc_dummy_driver);
-	platform_device_unregister(soc_dummy_dev);
+	faux_device_destroy(soc_dummy_dev);
 }

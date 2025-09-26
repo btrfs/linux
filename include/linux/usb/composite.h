@@ -237,7 +237,7 @@ struct usb_function {
 	/* internals */
 	struct list_head		list;
 	DECLARE_BITMAP(endpoints, 32);
-	const struct usb_function_instance *fi;
+	struct usb_function_instance *fi;
 
 	unsigned int		bind_deactivated:1;
 };
@@ -256,7 +256,7 @@ int config_ep_by_speed(struct usb_gadget *g, struct usb_function *f,
 			struct usb_ep *_ep);
 int usb_func_wakeup(struct usb_function *func);
 
-#define	MAX_CONFIG_INTERFACES		16	/* arbitrary; max 255 */
+#define	MAX_CONFIG_INTERFACES		32
 
 /**
  * struct usb_configuration - represents one gadget configuration
@@ -338,9 +338,6 @@ struct usb_configuration {
 int usb_add_config(struct usb_composite_dev *,
 		struct usb_configuration *,
 		int (*)(struct usb_configuration *));
-
-void usb_remove_config(struct usb_composite_dev *,
-		struct usb_configuration *);
 
 /* predefined index for usb_composite_driver */
 enum {

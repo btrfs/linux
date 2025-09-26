@@ -39,11 +39,12 @@
  */
 #define TASK_UNMAPPED_BASE      (TASK_SIZE / 8 * 3)
 
-#ifndef __ASSEMBLY__
+#ifndef __ASSEMBLER__
 
 struct task_struct;
 
 struct thread_struct {
+	long fpcsr;		/* Floating point control status register. */
 };
 
 /*
@@ -77,5 +78,5 @@ void show_registers(struct pt_regs *regs);
 
 #define cpu_relax()     barrier()
 
-#endif /* __ASSEMBLY__ */
+#endif /* __ASSEMBLER__ */
 #endif /* __ASM_OPENRISC_PROCESSOR_H */

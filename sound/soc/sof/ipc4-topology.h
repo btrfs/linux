@@ -3,7 +3,7 @@
  * This file is provided under a dual BSD/GPLv2 license.  When using or
  * redistributing this file, you may do so under either license.
  *
- * Copyright(c) 2022 Intel Corporation. All rights reserved.
+ * Copyright(c) 2022 Intel Corporation
  */
 
 #ifndef __INCLUDE_SOUND_SOF_IPC4_TOPOLOGY_H__
@@ -45,6 +45,7 @@
 #define SOF_IPC4_NODE_INDEX_MASK	0xFF
 #define SOF_IPC4_NODE_INDEX(x)	((x) & SOF_IPC4_NODE_INDEX_MASK)
 #define SOF_IPC4_NODE_TYPE(x)  ((x) << 8)
+#define SOF_IPC4_GET_NODE_TYPE(node_id) ((node_id) >> 8)
 
 /* Node ID for SSP type DAI copiers */
 #define SOF_IPC4_NODE_INDEX_INTEL_SSP(x) (((x) & 0xf) << 4)
@@ -57,6 +58,7 @@
 
 #define SOF_IPC4_DMA_DEVICE_MAX_COUNT 16
 
+#define SOF_IPC4_CHAIN_DMA_NODE_ID	0x7fffffff
 #define SOF_IPC4_INVALID_NODE_ID	0xffffffff
 
 /* FW requires minimum 2ms DMA buffer size */
@@ -313,7 +315,7 @@ struct sof_ipc4_copier {
 	struct sof_ipc4_gtw_attributes *gtw_attr;
 	u32 dai_type;
 	int dai_index;
-	struct sof_ipc4_dma_config_tlv dma_config_tlv;
+	struct sof_ipc4_dma_config_tlv dma_config_tlv[SOF_IPC4_DMA_DEVICE_MAX_COUNT];
 };
 
 /**
@@ -434,6 +436,30 @@ struct sof_ipc4_src {
 	struct sof_ipc4_msg msg;
 };
 
+/*
+ * struct sof_ipc4_asrc_data - IPC data for ASRC
+ * @base_config: IPC base config data
+ * @out_freq: Output rate for sink module, passed as such from topology to FW.
+ * @asrc_mode: Control for ASRC features with bit-fields, passed as such from topolgy to FW.
+ */
+struct sof_ipc4_asrc_data {
+	struct sof_ipc4_base_module_cfg base_config;
+	uint32_t out_freq;
+	uint32_t asrc_mode;
+} __packed __aligned(4);
+
+/**
+ * struct sof_ipc4_asrc - ASRC config data
+ * @data: IPC base config data
+ * @available_fmt: Available audio format
+ * @msg: IPC4 message struct containing header and data info
+ */
+struct sof_ipc4_asrc {
+	struct sof_ipc4_asrc_data data;
+	struct sof_ipc4_available_audio_format available_fmt;
+	struct sof_ipc4_msg msg;
+};
+
 /**
  * struct sof_ipc4_base_module_cfg_ext - base module config extension containing the pin format
  * information for the module. Both @num_input_pin_fmts and @num_output_pin_fmts cannot be 0 for a
@@ -475,7 +501,7 @@ struct sof_ipc4_process {
 	u32 init_config;
 };
 
-bool sof_ipc4_copier_is_single_format(struct snd_sof_dev *sdev,
-				      struct sof_ipc4_pin_format *pin_fmts,
-				      u32 pin_fmts_size);
+bool sof_ipc4_copier_is_single_bitdepth(struct snd_sof_dev *sdev,
+					struct sof_ipc4_pin_format *pin_fmts,
+					u32 pin_fmts_size);
 #endif

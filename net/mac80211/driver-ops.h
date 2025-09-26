@@ -2,12 +2,13 @@
 /*
 * Portions of this file
 * Copyright(c) 2016 Intel Deutschland GmbH
-* Copyright (C) 2018 - 2019, 2021 - 2023 Intel Corporation
+* Copyright (C) 2018-2019, 2021-2025 Intel Corporation
 */
 
 #ifndef __MAC80211_DRIVER_OPS
 #define __MAC80211_DRIVER_OPS
 
+#include <linux/fips.h>
 #include <net/mac80211.h>
 #include "ieee80211_i.h"
 #include "trace.h"
@@ -88,7 +89,7 @@ static inline int drv_get_et_sset_count(struct ieee80211_sub_if_data *sdata,
 }
 
 int drv_start(struct ieee80211_local *local);
-void drv_stop(struct ieee80211_local *local);
+void drv_stop(struct ieee80211_local *local, bool suspend);
 
 #ifdef CONFIG_PM
 static inline int drv_suspend(struct ieee80211_local *local,
@@ -143,15 +144,16 @@ int drv_change_interface(struct ieee80211_local *local,
 void drv_remove_interface(struct ieee80211_local *local,
 			  struct ieee80211_sub_if_data *sdata);
 
-static inline int drv_config(struct ieee80211_local *local, u32 changed)
+static inline int drv_config(struct ieee80211_local *local, int radio_idx,
+			     u32 changed)
 {
 	int ret;
 
 	might_sleep();
 	lockdep_assert_wiphy(local->hw.wiphy);
 
-	trace_drv_config(local, changed);
-	ret = local->ops->config(&local->hw, changed);
+	trace_drv_config(local, radio_idx, changed);
+	ret = local->ops->config(&local->hw, radio_idx, changed);
 	trace_drv_return_int(local, ret);
 	return ret;
 }
@@ -387,45 +389,47 @@ static inline void drv_get_key_seq(struct ieee80211_local *local,
 }
 
 static inline int drv_set_frag_threshold(struct ieee80211_local *local,
-					u32 value)
+					 int radio_idx, u32 value)
 {
 	int ret = 0;
 
 	might_sleep();
 	lockdep_assert_wiphy(local->hw.wiphy);
 
-	trace_drv_set_frag_threshold(local, value);
+	trace_drv_set_frag_threshold(local, radio_idx, value);
 	if (local->ops->set_frag_threshold)
-		ret = local->ops->set_frag_threshold(&local->hw, value);
+		ret = local->ops->set_frag_threshold(&local->hw, radio_idx,
+						     value);
 	trace_drv_return_int(local, ret);
 	return ret;
 }
 
 static inline int drv_set_rts_threshold(struct ieee80211_local *local,
-					u32 value)
+					int radio_idx, u32 value)
 {
 	int ret = 0;
 
 	might_sleep();
 	lockdep_assert_wiphy(local->hw.wiphy);
 
-	trace_drv_set_rts_threshold(local, value);
+	trace_drv_set_rts_threshold(local, radio_idx, value);
 	if (local->ops->set_rts_threshold)
-		ret = local->ops->set_rts_threshold(&local->hw, value);
+		ret = local->ops->set_rts_threshold(&local->hw, radio_idx,
+						    value);
 	trace_drv_return_int(local, ret);
 	return ret;
 }
 
 static inline int drv_set_coverage_class(struct ieee80211_local *local,
-					 s16 value)
+					 int radio_idx, s16 value)
 {
 	int ret = 0;
 	might_sleep();
 	lockdep_assert_wiphy(local->hw.wiphy);
 
-	trace_drv_set_coverage_class(local, value);
+	trace_drv_set_coverage_class(local, radio_idx, value);
 	if (local->ops->set_coverage_class)
-		local->ops->set_coverage_class(&local->hw, value);
+		local->ops->set_coverage_class(&local->hw, radio_idx, value);
 	else
 		ret = -EOPNOTSUPP;
 
@@ -594,9 +598,9 @@ int drv_sta_set_txpwr(struct ieee80211_local *local,
 		      struct ieee80211_sub_if_data *sdata,
 		      struct sta_info *sta);
 
-void drv_sta_rc_update(struct ieee80211_local *local,
-		       struct ieee80211_sub_if_data *sdata,
-		       struct ieee80211_sta *sta, u32 changed);
+void drv_link_sta_rc_update(struct ieee80211_local *local,
+			    struct ieee80211_sub_if_data *sdata,
+			    struct ieee80211_link_sta *link_sta, u32 changed);
 
 static inline void drv_sta_rate_tbl_update(struct ieee80211_local *local,
 					   struct ieee80211_sub_if_data *sdata,
@@ -628,6 +632,25 @@ static inline void drv_sta_statistics(struct ieee80211_local *local,
 	trace_drv_sta_statistics(local, sdata, sta);
 	if (local->ops->sta_statistics)
 		local->ops->sta_statistics(&local->hw, &sdata->vif, sta, sinfo);
+	trace_drv_return_void(local);
+}
+
+static inline void drv_link_sta_statistics(struct ieee80211_local *local,
+					   struct ieee80211_sub_if_data *sdata,
+					   struct ieee80211_link_sta *link_sta,
+					   struct link_station_info *link_sinfo)
+{
+	might_sleep();
+	lockdep_assert_wiphy(local->hw.wiphy);
+
+	sdata = get_bss_sdata(sdata);
+	if (!check_sdata_in_driver(sdata))
+		return;
+
+	trace_drv_link_sta_statistics(local, sdata, link_sta);
+	if (local->ops->link_sta_statistics)
+		local->ops->link_sta_statistics(&local->hw, &sdata->vif,
+						link_sta, link_sinfo);
 	trace_drv_return_void(local);
 }
 
@@ -724,6 +747,9 @@ static inline void drv_flush_sta(struct ieee80211_local *local,
 	if (sdata && !check_sdata_in_driver(sdata))
 		return;
 
+	if (!sta->uploaded)
+		return;
+
 	trace_drv_flush_sta(local, sdata, &sta->sta);
 	if (local->ops->flush_sta)
 		local->ops->flush_sta(&local->hw, &sdata->vif, &sta->sta);
@@ -750,20 +776,21 @@ static inline int drv_set_antenna(struct ieee80211_local *local,
 	might_sleep();
 	lockdep_assert_wiphy(local->hw.wiphy);
 	if (local->ops->set_antenna)
-		ret = local->ops->set_antenna(&local->hw, tx_ant, rx_ant);
+		ret = local->ops->set_antenna(&local->hw, -1, tx_ant, rx_ant);
 	trace_drv_set_antenna(local, tx_ant, rx_ant, ret);
 	return ret;
 }
 
-static inline int drv_get_antenna(struct ieee80211_local *local,
+static inline int drv_get_antenna(struct ieee80211_local *local, int radio_idx,
 				  u32 *tx_ant, u32 *rx_ant)
 {
 	int ret = -EOPNOTSUPP;
 	might_sleep();
 	lockdep_assert_wiphy(local->hw.wiphy);
 	if (local->ops->get_antenna)
-		ret = local->ops->get_antenna(&local->hw, tx_ant, rx_ant);
-	trace_drv_get_antenna(local, *tx_ant, *rx_ant, ret);
+		ret = local->ops->get_antenna(&local->hw, radio_idx,
+					      tx_ant, rx_ant);
+	trace_drv_get_antenna(local, radio_idx, *tx_ant, *rx_ant, ret);
 	return ret;
 }
 
@@ -876,6 +903,9 @@ static inline void drv_set_rekey_data(struct ieee80211_local *local,
 	if (!check_sdata_in_driver(sdata))
 		return;
 
+	if (fips_enabled)
+		return;
+
 	trace_drv_set_rekey_data(local, sdata, data);
 	if (local->ops->set_rekey_data)
 		local->ops->set_rekey_data(&local->hw, &sdata->vif, data);
@@ -952,6 +982,7 @@ static inline void drv_mgd_complete_tx(struct ieee80211_local *local,
 		return;
 	WARN_ON_ONCE(sdata->vif.type != NL80211_IFTYPE_STATION);
 
+	info->link_id = info->link_id < 0 ? 0 : info->link_id;
 	trace_drv_mgd_complete_tx(local, sdata, info->duration,
 				  info->subtype, info->success);
 	if (local->ops->mgd_complete_tx)
@@ -1150,6 +1181,9 @@ drv_pre_channel_switch(struct ieee80211_sub_if_data *sdata,
 	if (!check_sdata_in_driver(sdata))
 		return -EIO;
 
+	if (!ieee80211_vif_link_active(&sdata->vif, ch_switch->link_id))
+		return 0;
+
 	trace_drv_pre_channel_switch(local, sdata, ch_switch);
 	if (local->ops->pre_channel_switch)
 		ret = local->ops->pre_channel_switch(&local->hw, &sdata->vif,
@@ -1171,6 +1205,9 @@ drv_post_channel_switch(struct ieee80211_link_data *link)
 	if (!check_sdata_in_driver(sdata))
 		return -EIO;
 
+	if (!ieee80211_vif_link_active(&sdata->vif, link->link_id))
+		return 0;
+
 	trace_drv_post_channel_switch(local, sdata);
 	if (local->ops->post_channel_switch)
 		ret = local->ops->post_channel_switch(&local->hw, &sdata->vif,
@@ -1180,8 +1217,9 @@ drv_post_channel_switch(struct ieee80211_link_data *link)
 }
 
 static inline void
-drv_abort_channel_switch(struct ieee80211_sub_if_data *sdata)
+drv_abort_channel_switch(struct ieee80211_link_data *link)
 {
+	struct ieee80211_sub_if_data *sdata = link->sdata;
 	struct ieee80211_local *local = sdata->local;
 
 	might_sleep();
@@ -1190,10 +1228,14 @@ drv_abort_channel_switch(struct ieee80211_sub_if_data *sdata)
 	if (!check_sdata_in_driver(sdata))
 		return;
 
+	if (!ieee80211_vif_link_active(&sdata->vif, link->link_id))
+		return;
+
 	trace_drv_abort_channel_switch(local, sdata);
 
 	if (local->ops->abort_channel_switch)
-		local->ops->abort_channel_switch(&local->hw, &sdata->vif);
+		local->ops->abort_channel_switch(&local->hw, &sdata->vif,
+						 link->conf);
 }
 
 static inline void
@@ -1206,6 +1248,9 @@ drv_channel_switch_rx_beacon(struct ieee80211_sub_if_data *sdata,
 	lockdep_assert_wiphy(local->hw.wiphy);
 
 	if (!check_sdata_in_driver(sdata))
+		return;
+
+	if (!ieee80211_vif_link_active(&sdata->vif, ch_switch->link_id))
 		return;
 
 	trace_drv_channel_switch_rx_beacon(local, sdata, ch_switch);
@@ -1259,7 +1304,8 @@ static inline u32 drv_get_expected_throughput(struct ieee80211_local *local,
 }
 
 static inline int drv_get_txpower(struct ieee80211_local *local,
-				  struct ieee80211_sub_if_data *sdata, int *dbm)
+				  struct ieee80211_sub_if_data *sdata,
+				  unsigned int link_id, int *dbm)
 {
 	int ret;
 
@@ -1269,8 +1315,8 @@ static inline int drv_get_txpower(struct ieee80211_local *local,
 	if (!local->ops->get_txpower)
 		return -EOPNOTSUPP;
 
-	ret = local->ops->get_txpower(&local->hw, &sdata->vif, dbm);
-	trace_drv_get_txpower(local, sdata, *dbm, ret);
+	ret = local->ops->get_txpower(&local->hw, &sdata->vif, link_id, dbm);
+	trace_drv_get_txpower(local, sdata, link_id, *dbm, ret);
 
 	return ret;
 }
@@ -1370,7 +1416,7 @@ drv_get_ftm_responder_stats(struct ieee80211_local *local,
 			    struct ieee80211_sub_if_data *sdata,
 			    struct cfg80211_ftm_responder_stats *ftm_stats)
 {
-	u32 ret = -EOPNOTSUPP;
+	int ret = -EOPNOTSUPP;
 
 	might_sleep();
 	lockdep_assert_wiphy(local->hw.wiphy);
@@ -1694,5 +1740,36 @@ int drv_change_sta_links(struct ieee80211_local *local,
 			 struct ieee80211_sub_if_data *sdata,
 			 struct ieee80211_sta *sta,
 			 u16 old_links, u16 new_links);
+
+static inline enum ieee80211_neg_ttlm_res
+drv_can_neg_ttlm(struct ieee80211_local *local,
+		 struct ieee80211_sub_if_data *sdata,
+		 struct ieee80211_neg_ttlm *neg_ttlm)
+{
+	enum ieee80211_neg_ttlm_res res = NEG_TTLM_RES_REJECT;
+
+	might_sleep();
+	if (!check_sdata_in_driver(sdata))
+		return -EIO;
+
+	trace_drv_can_neg_ttlm(local, sdata, neg_ttlm);
+	if (local->ops->can_neg_ttlm)
+		res = local->ops->can_neg_ttlm(&local->hw, &sdata->vif,
+					       neg_ttlm);
+	trace_drv_neg_ttlm_res(local, sdata, res, neg_ttlm);
+
+	return res;
+}
+
+static inline void
+drv_prep_add_interface(struct ieee80211_local *local,
+		       enum nl80211_iftype type)
+{
+	trace_drv_prep_add_interface(local, type);
+	if (local->ops->prep_add_interface)
+		local->ops->prep_add_interface(&local->hw, type);
+
+	trace_drv_return_void(local);
+}
 
 #endif /* __MAC80211_DRIVER_OPS */

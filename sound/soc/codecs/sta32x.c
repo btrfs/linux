@@ -983,8 +983,7 @@ static int sta32x_probe(struct snd_soc_component *component)
 err_regulator_bulk_disable:
 	regulator_bulk_disable(ARRAY_SIZE(sta32x->supplies), sta32x->supplies);
 err_clk_disable_unprepare:
-	if (sta32x->xti_clk)
-		clk_disable_unprepare(sta32x->xti_clk);
+	clk_disable_unprepare(sta32x->xti_clk);
 	return ret;
 }
 
@@ -995,8 +994,7 @@ static void sta32x_remove(struct snd_soc_component *component)
 	sta32x_watchdog_stop(sta32x);
 	regulator_bulk_disable(ARRAY_SIZE(sta32x->supplies), sta32x->supplies);
 
-	if (sta32x->xti_clk)
-		clk_disable_unprepare(sta32x->xti_clk);
+	clk_disable_unprepare(sta32x->xti_clk);
 }
 
 static const struct snd_soc_component_driver sta32x_component = {
@@ -1154,9 +1152,9 @@ static int sta32x_i2c_probe(struct i2c_client *i2c)
 }
 
 static const struct i2c_device_id sta32x_i2c_id[] = {
-	{ "sta326", 0 },
-	{ "sta328", 0 },
-	{ "sta329", 0 },
+	{ "sta326" },
+	{ "sta328" },
+	{ "sta329" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, sta32x_i2c_id);

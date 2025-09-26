@@ -15,9 +15,8 @@
 #include "rtl8723b_recv.h"
 #include "rtl8723b_xmit.h"
 #include "rtl8723b_cmd.h"
-#include "rtw_mp.h"
 #include "hal_pwr_seq.h"
-#include "hal_phy_reg_8723b.h"
+#include "Hal8192CPhyReg.h"
 #include "hal_phy_cfg.h"
 
 /*  */
@@ -38,7 +37,7 @@ struct rt_firmware {
 
 /* This structure must be carefully byte-ordered. */
 struct rt_firmware_hdr {
-	/*  8-byte alinment required */
+	/*  8-byte alignment required */
 
 	/*  LONG WORD 0 ---- */
 	__le16 signature;  /* 92C0: test chip; 92C, 88C0: test chip;
@@ -224,7 +223,6 @@ void Hal_EfuseParseVoltage_8723B(struct adapter *padapter, u8 *hwinfo,
 
 void C2HPacketHandler_8723B(struct adapter *padapter, u8 *pbuffer, u16 length);
 
-void rtl8723b_set_hal_ops(struct hal_ops *pHalFunc);
 void SetHwReg8723B(struct adapter *padapter, u8 variable, u8 *val);
 void GetHwReg8723B(struct adapter *padapter, u8 variable, u8 *val);
 u8 SetHalDefVar8723B(struct adapter *padapter, enum hal_def_variable variable,

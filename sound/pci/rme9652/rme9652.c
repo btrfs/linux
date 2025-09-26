@@ -1561,8 +1561,7 @@ snd_rme9652_proc_read(struct snd_info_entry *entry, struct snd_info_buffer *buff
 		    x, (unsigned long) rme9652->period_bytes);
 	snd_iprintf(buffer, "Hardware pointer (frames): %ld\n",
 		    rme9652_hw_pointer(rme9652));
-	snd_iprintf(buffer, "Passthru: %s\n",
-		    rme9652->passthru ? "yes" : "no");
+	snd_iprintf(buffer, "Passthru: %s\n", str_yes_no(rme9652->passthru));
 
 	if ((rme9652->control_register & (RME9652_Master | RME9652_wsel)) == 0) {
 		snd_iprintf(buffer, "Clock mode: autosync\n");
@@ -1685,7 +1684,7 @@ snd_rme9652_proc_read(struct snd_info_entry *entry, struct snd_info_buffer *buff
 	snd_iprintf(buffer, "\n");
 
 	snd_iprintf(buffer, "Timecode signal: %s\n",
-		    (status & RME9652_tc_valid) ? "yes" : "no");
+		    str_yes_no(status & RME9652_tc_valid));
 
 	/* thru modes */
 
@@ -2365,7 +2364,7 @@ static int snd_rme9652_create_pcm(struct snd_card *card,
 
 	rme9652->pcm = pcm;
 	pcm->private_data = rme9652;
-	strcpy(pcm->name, rme9652->card_name);
+	strscpy(pcm->name, rme9652->card_name);
 
 	snd_pcm_set_ops(pcm, SNDRV_PCM_STREAM_PLAYBACK, &snd_rme9652_playback_ops);
 	snd_pcm_set_ops(pcm, SNDRV_PCM_STREAM_CAPTURE, &snd_rme9652_capture_ops);
@@ -2407,7 +2406,7 @@ static int snd_rme9652_create(struct snd_card *card,
 
 	spin_lock_init(&rme9652->lock);
 
-	err = pci_request_regions(pci, "rme9652");
+	err = pcim_request_all_regions(pci, "rme9652");
 	if (err < 0)
 		return err;
 	rme9652->port = pci_resource_start(pci, 0);
@@ -2448,7 +2447,7 @@ static int snd_rme9652_create(struct snd_card *card,
 
 	switch (rev) {
 	case 8: /* original eprom */
-		strcpy(card->driver, "RME9636");
+		strscpy(card->driver, "RME9636");
 		if (rme9652->hw_rev == 15) {
 			rme9652->card_name = "RME Digi9636 (Rev 1.5)";
 		} else {
@@ -2457,17 +2456,17 @@ static int snd_rme9652_create(struct snd_card *card,
 		rme9652->ss_channels = RME9636_NCHANNELS;
 		break;
 	case 9: /* W36_G EPROM */
-		strcpy(card->driver, "RME9636");
+		strscpy(card->driver, "RME9636");
 		rme9652->card_name = "RME Digi9636 (Rev G)";
 		rme9652->ss_channels = RME9636_NCHANNELS;
 		break;
 	case 4: /* W52_G EPROM */
-		strcpy(card->driver, "RME9652");
+		strscpy(card->driver, "RME9652");
 		rme9652->card_name = "RME Digi9652 (Rev G)";
 		rme9652->ss_channels = RME9652_NCHANNELS;
 		break;
 	case 3: /* original eprom */
-		strcpy(card->driver, "RME9652");
+		strscpy(card->driver, "RME9652");
 		if (rme9652->hw_rev == 15) {
 			rme9652->card_name = "RME Digi9652 (Rev 1.5)";
 		} else {
@@ -2540,7 +2539,7 @@ static int snd_rme9652_probe(struct pci_dev *pci,
 	if (err)
 		goto error;
 
-	strcpy(card->shortname, rme9652->card_name);
+	strscpy(card->shortname, rme9652->card_name);
 
 	sprintf(card->longname, "%s at 0x%lx, irq %d",
 		card->shortname, rme9652->port, rme9652->irq);

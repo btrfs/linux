@@ -53,7 +53,7 @@ static const struct regmap_config stmfx_regmap_config = {
 	.max_register	= STMFX_REG_MAX,
 	.volatile_reg	= stmfx_reg_volatile,
 	.writeable_reg	= stmfx_reg_writeable,
-	.cache_type	= REGCACHE_RBTREE,
+	.cache_type	= REGCACHE_MAPLE,
 };
 
 static const struct resource stmfx_pinctrl_resources[] = {
@@ -269,9 +269,8 @@ static int stmfx_irq_init(struct i2c_client *client)
 	u32 irqoutpin = 0, irqtrigger;
 	int ret;
 
-	stmfx->irq_domain = irq_domain_add_simple(stmfx->dev->of_node,
-						  STMFX_REG_IRQ_SRC_MAX, 0,
-						  &stmfx_irq_ops, stmfx);
+	stmfx->irq_domain = irq_domain_create_simple(dev_fwnode(stmfx->dev), STMFX_REG_IRQ_SRC_MAX,
+						     0, &stmfx_irq_ops, stmfx);
 	if (!stmfx->irq_domain) {
 		dev_err(stmfx->dev, "Failed to create IRQ domain\n");
 		return -EINVAL;

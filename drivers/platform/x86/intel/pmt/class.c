@@ -9,12 +9,14 @@
  */
 
 #include <linux/kernel.h>
+#include <linux/log2.h>
+#include <linux/intel_vsec.h>
 #include <linux/io-64-nonatomic-lo-hi.h>
 #include <linux/module.h>
 #include <linux/mm.h>
 #include <linux/pci.h>
+#include <linux/sysfs.h>
 
-#include "../vsec.h"
 #include "class.h"
 
 #define PMT_XA_START		1
@@ -33,7 +35,7 @@ bool intel_pmt_is_early_client_hw(struct device *dev)
 	 */
 	return !!(ivdev->quirks & VSEC_QUIRK_EARLY_HW);
 }
-EXPORT_SYMBOL_NS_GPL(intel_pmt_is_early_client_hw, INTEL_PMT);
+EXPORT_SYMBOL_NS_GPL(intel_pmt_is_early_client_hw, "INTEL_PMT");
 
 static inline int
 pmt_memcpy64_fromio(void *to, const u64 __iomem *from, size_t count)
@@ -58,12 +60,30 @@ pmt_memcpy64_fromio(void *to, const u64 __iomem *from, size_t count)
 	return count;
 }
 
+int pmt_telem_read_mmio(struct pci_dev *pdev, struct pmt_callbacks *cb, u32 guid, void *buf,
+			void __iomem *addr, loff_t off, u32 count)
+{
+	if (cb && cb->read_telem)
+		return cb->read_telem(pdev, guid, buf, off, count);
+
+	addr += off;
+
+	if (guid == GUID_SPR_PUNIT)
+		/* PUNIT on SPR only supports aligned 64-bit read */
+		return pmt_memcpy64_fromio(buf, addr, count);
+
+	memcpy_fromio(buf, addr, count);
+
+	return count;
+}
+EXPORT_SYMBOL_NS_GPL(pmt_telem_read_mmio, "INTEL_PMT");
+
 /*
  * sysfs
  */
 static ssize_t
 intel_pmt_read(struct file *filp, struct kobject *kobj,
-	       struct bin_attribute *attr, char *buf, loff_t off,
+	       const struct bin_attribute *attr, char *buf, loff_t off,
 	       size_t count)
 {
 	struct intel_pmt_entry *entry = container_of(attr,
@@ -79,18 +99,15 @@ intel_pmt_read(struct file *filp, struct kobject *kobj,
 	if (count > entry->size - off)
 		count = entry->size - off;
 
-	if (entry->guid == GUID_SPR_PUNIT)
-		/* PUNIT on SPR only supports aligned 64-bit read */
-		count = pmt_memcpy64_fromio(buf, entry->base + off, count);
-	else
-		memcpy_fromio(buf, entry->base + off, count);
+	count = pmt_telem_read_mmio(entry->pcidev, entry->cb, entry->header.guid, buf,
+				    entry->base, off, count);
 
 	return count;
 }
 
 static int
 intel_pmt_mmap(struct file *filp, struct kobject *kobj,
-		struct bin_attribute *attr, struct vm_area_struct *vma)
+		const struct bin_attribute *attr, struct vm_area_struct *vma)
 {
 	struct intel_pmt_entry *entry = container_of(attr,
 						     struct intel_pmt_entry,
@@ -151,12 +168,41 @@ static struct attribute *intel_pmt_attrs[] = {
 	&dev_attr_offset.attr,
 	NULL
 };
-ATTRIBUTE_GROUPS(intel_pmt);
 
-static struct class intel_pmt_class = {
+static umode_t intel_pmt_attr_visible(struct kobject *kobj,
+				      struct attribute *attr, int n)
+{
+	struct device *dev = container_of(kobj, struct device, kobj);
+	struct auxiliary_device *auxdev = to_auxiliary_dev(dev->parent);
+	struct intel_vsec_device *ivdev = auxdev_to_ivdev(auxdev);
+
+	/*
+	 * Place the discovery features folder in /sys/class/intel_pmt, but
+	 * exclude the common attributes as they are not applicable.
+	 */
+	if (ivdev->cap_id == ilog2(VSEC_CAP_DISCOVERY))
+		return 0;
+
+	return attr->mode;
+}
+
+static bool intel_pmt_group_visible(struct kobject *kobj)
+{
+	return true;
+}
+DEFINE_SYSFS_GROUP_VISIBLE(intel_pmt);
+
+static const struct attribute_group intel_pmt_group = {
+	.attrs = intel_pmt_attrs,
+	.is_visible = SYSFS_GROUP_VISIBLE(intel_pmt),
+};
+__ATTRIBUTE_GROUPS(intel_pmt);
+
+struct class intel_pmt_class = {
 	.name = "intel_pmt",
 	.dev_groups = intel_pmt_groups,
 };
+EXPORT_SYMBOL_GPL(intel_pmt_class);
 
 static int intel_pmt_populate_entry(struct intel_pmt_entry *entry,
 				    struct intel_vsec_device *ivdev,
@@ -194,7 +240,7 @@ static int intel_pmt_populate_entry(struct intel_pmt_entry *entry,
 		/*
 		 * Some hardware use a different calculation for the base address
 		 * when access_type == ACCESS_LOCAL. On the these systems
-		 * ACCCESS_LOCAL refers to an address in the same BAR as the
+		 * ACCESS_LOCAL refers to an address in the same BAR as the
 		 * header but at a fixed offset. But as the header address was
 		 * supplied to the driver, we don't know which BAR it was in.
 		 * So search for the bar whose range includes the header address.
@@ -237,8 +283,10 @@ static int intel_pmt_populate_entry(struct intel_pmt_entry *entry,
 		return -EINVAL;
 	}
 
+	entry->pcidev = pci_dev;
 	entry->guid = header->guid;
 	entry->size = header->size;
+	entry->cb = ivdev->priv_data;
 
 	return 0;
 }
@@ -268,8 +316,8 @@ static int intel_pmt_dev_register(struct intel_pmt_entry *entry,
 
 	entry->kobj = &dev->kobj;
 
-	if (ns->attr_grp) {
-		ret = sysfs_create_group(entry->kobj, ns->attr_grp);
+	if (entry->attr_grp) {
+		ret = sysfs_create_group(entry->kobj, entry->attr_grp);
 		if (ret)
 			goto fail_sysfs_create_group;
 	}
@@ -300,7 +348,7 @@ static int intel_pmt_dev_register(struct intel_pmt_entry *entry,
 		goto fail_ioremap;
 
 	if (ns->pmt_add_endpoint) {
-		ret = ns->pmt_add_endpoint(entry, ivdev->pcidev);
+		ret = ns->pmt_add_endpoint(ivdev, entry);
 		if (ret)
 			goto fail_add_endpoint;
 	}
@@ -310,8 +358,8 @@ static int intel_pmt_dev_register(struct intel_pmt_entry *entry,
 fail_add_endpoint:
 	sysfs_remove_bin_file(entry->kobj, &entry->pmt_bin_attr);
 fail_ioremap:
-	if (ns->attr_grp)
-		sysfs_remove_group(entry->kobj, ns->attr_grp);
+	if (entry->attr_grp)
+		sysfs_remove_group(entry->kobj, entry->attr_grp);
 fail_sysfs_create_group:
 	device_unregister(dev);
 fail_dev_create:
@@ -343,7 +391,7 @@ int intel_pmt_dev_create(struct intel_pmt_entry *entry, struct intel_pmt_namespa
 
 	return intel_pmt_dev_register(entry, ns, dev);
 }
-EXPORT_SYMBOL_NS_GPL(intel_pmt_dev_create, INTEL_PMT);
+EXPORT_SYMBOL_NS_GPL(intel_pmt_dev_create, "INTEL_PMT");
 
 void intel_pmt_dev_destroy(struct intel_pmt_entry *entry,
 			   struct intel_pmt_namespace *ns)
@@ -353,13 +401,13 @@ void intel_pmt_dev_destroy(struct intel_pmt_entry *entry,
 	if (entry->size)
 		sysfs_remove_bin_file(entry->kobj, &entry->pmt_bin_attr);
 
-	if (ns->attr_grp)
-		sysfs_remove_group(entry->kobj, ns->attr_grp);
+	if (entry->attr_grp)
+		sysfs_remove_group(entry->kobj, entry->attr_grp);
 
 	device_unregister(dev);
 	xa_erase(ns->xa, entry->devid);
 }
-EXPORT_SYMBOL_NS_GPL(intel_pmt_dev_destroy, INTEL_PMT);
+EXPORT_SYMBOL_NS_GPL(intel_pmt_dev_destroy, "INTEL_PMT");
 
 static int __init pmt_class_init(void)
 {

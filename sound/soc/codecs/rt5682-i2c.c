@@ -186,6 +186,12 @@ static int rt5682_i2c_probe(struct i2c_client *i2c)
 		return -ENODEV;
 	}
 
+	regmap_read(rt5682->regmap, RT5682_INT_DEVICE_ID, &val);
+	if (val == 0x6956) {
+		dev_dbg(&i2c->dev, "ALC5682I-VE device\n");
+		rt5682->ve_ic = true;
+	}
+
 	mutex_init(&rt5682->calibrate_mutex);
 	rt5682_calibrate(rt5682);
 
@@ -266,7 +272,7 @@ static int rt5682_i2c_probe(struct i2c_client *i2c)
 		if (!ret)
 			rt5682->irq = i2c->irq;
 		else
-			dev_err(&i2c->dev, "Failed to reguest IRQ: %d\n", ret);
+			dev_err(&i2c->dev, "Failed to request IRQ: %d\n", ret);
 	}
 
 #ifdef CONFIG_COMMON_CLK
@@ -307,18 +313,18 @@ static void rt5682_i2c_remove(struct i2c_client *client)
 
 static const struct of_device_id rt5682_of_match[] = {
 	{.compatible = "realtek,rt5682i"},
-	{},
+	{ }
 };
 MODULE_DEVICE_TABLE(of, rt5682_of_match);
 
 static const struct acpi_device_id rt5682_acpi_match[] = {
-	{"10EC5682", 0,},
-	{},
+	{ "10EC5682" },
+	{ }
 };
 MODULE_DEVICE_TABLE(acpi, rt5682_acpi_match);
 
 static const struct i2c_device_id rt5682_i2c_id[] = {
-	{"rt5682", 0},
+	{"rt5682"},
 	{}
 };
 MODULE_DEVICE_TABLE(i2c, rt5682_i2c_id);

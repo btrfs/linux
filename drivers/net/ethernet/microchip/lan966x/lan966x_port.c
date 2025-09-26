@@ -88,7 +88,7 @@ static void lan966x_port_link_down(struct lan966x_port *port)
 		SYS_FRONT_PORT_MODE_HDX_MODE,
 		lan966x, SYS_FRONT_PORT_MODE(port->chip_port));
 
-	/* 8: Flush the queues accociated with the port */
+	/* 8: Flush the queues associated with the port */
 	lan_rmw(QSYS_SW_PORT_MODE_AGING_MODE_SET(3),
 		QSYS_SW_PORT_MODE_AGING_MODE,
 		lan966x, QSYS_SW_PORT_MODE(port->chip_port));
@@ -168,9 +168,10 @@ static void lan966x_port_link_up(struct lan966x_port *port)
 	lan966x_taprio_speed_set(port, config->speed);
 
 	/* Also the GIGA_MODE_ENA(1) needs to be set regardless of the
-	 * port speed for QSGMII ports.
+	 * port speed for QSGMII or SGMII ports.
 	 */
-	if (phy_interface_num_ports(config->portmode) == 4)
+	if (phy_interface_num_ports(config->portmode) == 4 ||
+	    config->portmode == PHY_INTERFACE_MODE_SGMII)
 		mode = DEV_MAC_MODE_CFG_GIGA_MODE_ENA_SET(1);
 
 	lan_wr(config->duplex | mode,
@@ -283,7 +284,7 @@ void lan966x_port_config_up(struct lan966x_port *port)
 	lan966x_port_link_up(port);
 }
 
-void lan966x_port_status_get(struct lan966x_port *port,
+void lan966x_port_status_get(struct lan966x_port *port, unsigned int neg_mode,
 			     struct phylink_link_state *state)
 {
 	struct lan966x *lan966x = port->lan966x;
@@ -313,7 +314,7 @@ void lan966x_port_status_get(struct lan966x_port *port,
 		bmsr |= BMSR_ANEGCOMPLETE;
 
 		lp_adv = DEV_PCS1G_ANEG_STATUS_LP_ADV_GET(val);
-		phylink_mii_c22_pcs_decode_state(state, bmsr, lp_adv);
+		phylink_mii_c22_pcs_decode_state(state, neg_mode, bmsr, lp_adv);
 	} else {
 		if (!state->link)
 			return;

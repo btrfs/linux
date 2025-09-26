@@ -152,7 +152,7 @@ static int mqprio_parse_opt(struct net_device *dev, struct tc_mqprio_qopt *qopt,
 static const struct
 nla_policy mqprio_tc_entry_policy[TCA_MQPRIO_TC_ENTRY_MAX + 1] = {
 	[TCA_MQPRIO_TC_ENTRY_INDEX]	= NLA_POLICY_MAX(NLA_U32,
-							 TC_QOPT_MAX_QUEUE),
+							 TC_QOPT_MAX_QUEUE - 1),
 	[TCA_MQPRIO_TC_ENTRY_FP]	= NLA_POLICY_RANGE(NLA_U32,
 							   TC_FP_EXPRESS,
 							   TC_FP_PREEMPTIBLE),
@@ -215,10 +215,8 @@ static int mqprio_parse_tc_entries(struct Qdisc *sch, struct nlattr *nlattr_opt,
 	for (tc = 0; tc < TC_QOPT_MAX_QUEUE; tc++)
 		fp[tc] = priv->fp[tc];
 
-	nla_for_each_attr(n, nlattr_opt, nlattr_opt_len, rem) {
-		if (nla_type(n) != TCA_MQPRIO_TC_ENTRY)
-			continue;
-
+	nla_for_each_attr_type(n, TCA_MQPRIO_TC_ENTRY, nlattr_opt,
+			       nlattr_opt_len, rem) {
 		err = mqprio_parse_tc_entry(fp, n, &seen_tcs, extack);
 		if (err)
 			goto out;
@@ -774,6 +772,7 @@ static struct Qdisc_ops mqprio_qdisc_ops __read_mostly = {
 	.dump		= mqprio_dump,
 	.owner		= THIS_MODULE,
 };
+MODULE_ALIAS_NET_SCH("mqprio");
 
 static int __init mqprio_module_init(void)
 {

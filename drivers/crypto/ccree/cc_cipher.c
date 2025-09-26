@@ -179,7 +179,7 @@ static int cc_cipher_init(struct crypto_tfm *tfm)
 		}
 		max_key_buf_size <<= 1;
 
-		/* Alloc fallabck tfm or essiv when key size != 256 bit */
+		/* Alloc fallback tfm or essiv when key size != 256 bit */
 		ctx_p->fallback_tfm =
 			crypto_alloc_skcipher(name, 0, CRYPTO_ALG_NEED_FALLBACK | CRYPTO_ALG_ASYNC);
 
@@ -211,11 +211,11 @@ static int cc_cipher_init(struct crypto_tfm *tfm)
 						  max_key_buf_size,
 						  DMA_TO_DEVICE);
 	if (dma_mapping_error(dev, ctx_p->user.key_dma_addr)) {
-		dev_err(dev, "Mapping Key %u B at va=%pK for DMA failed\n",
+		dev_err(dev, "Mapping Key %u B at va=%p for DMA failed\n",
 			max_key_buf_size, ctx_p->user.key);
 		goto free_key;
 	}
-	dev_dbg(dev, "Mapped key %u B at va=%pK to dma=%pad\n",
+	dev_dbg(dev, "Mapped key %u B at va=%p to dma=%pad\n",
 		max_key_buf_size, ctx_p->user.key, &ctx_p->user.key_dma_addr);
 
 	return 0;
@@ -260,12 +260,6 @@ static void cc_cipher_exit(struct crypto_tfm *tfm)
 	dev_dbg(dev, "Free key buffer in context. key=@%p\n", ctx_p->user.key);
 	kfree_sensitive(ctx_p->user.key);
 }
-
-struct tdes_keys {
-	u8	key1[DES_KEY_SIZE];
-	u8	key2[DES_KEY_SIZE];
-	u8	key3[DES_KEY_SIZE];
-};
 
 static enum cc_hw_crypto_key cc_slot_to_hw_key(u8 slot_num)
 {

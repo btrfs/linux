@@ -131,6 +131,7 @@ void kvm_smm_changed(struct kvm_vcpu *vcpu, bool entering_smm)
 
 	kvm_mmu_reset_context(vcpu);
 }
+EXPORT_SYMBOL_GPL(kvm_smm_changed);
 
 void process_smi(struct kvm_vcpu *vcpu)
 {
@@ -184,7 +185,6 @@ static void enter_smm_save_state_32(struct kvm_vcpu *vcpu,
 				    struct kvm_smram_state_32 *smram)
 {
 	struct desc_ptr dt;
-	unsigned long val;
 	int i;
 
 	smram->cr0     = kvm_read_cr0(vcpu);
@@ -195,19 +195,17 @@ static void enter_smm_save_state_32(struct kvm_vcpu *vcpu,
 	for (i = 0; i < 8; i++)
 		smram->gprs[i] = kvm_register_read_raw(vcpu, i);
 
-	kvm_get_dr(vcpu, 6, &val);
-	smram->dr6     = (u32)val;
-	kvm_get_dr(vcpu, 7, &val);
-	smram->dr7     = (u32)val;
+	smram->dr6     = (u32)vcpu->arch.dr6;
+	smram->dr7     = (u32)vcpu->arch.dr7;
 
 	enter_smm_save_seg_32(vcpu, &smram->tr, &smram->tr_sel, VCPU_SREG_TR);
 	enter_smm_save_seg_32(vcpu, &smram->ldtr, &smram->ldtr_sel, VCPU_SREG_LDTR);
 
-	static_call(kvm_x86_get_gdt)(vcpu, &dt);
+	kvm_x86_call(get_gdt)(vcpu, &dt);
 	smram->gdtr.base = dt.address;
 	smram->gdtr.limit = dt.size;
 
-	static_call(kvm_x86_get_idt)(vcpu, &dt);
+	kvm_x86_call(get_idt)(vcpu, &dt);
 	smram->idtr.base = dt.address;
 	smram->idtr.limit = dt.size;
 
@@ -223,7 +221,7 @@ static void enter_smm_save_state_32(struct kvm_vcpu *vcpu,
 	smram->smm_revision = 0x00020000;
 	smram->smbase = vcpu->arch.smbase;
 
-	smram->int_shadow = static_call(kvm_x86_get_interrupt_shadow)(vcpu);
+	smram->int_shadow = kvm_x86_call(get_interrupt_shadow)(vcpu);
 }
 
 #ifdef CONFIG_X86_64
@@ -231,7 +229,6 @@ static void enter_smm_save_state_64(struct kvm_vcpu *vcpu,
 				    struct kvm_smram_state_64 *smram)
 {
 	struct desc_ptr dt;
-	unsigned long val;
 	int i;
 
 	for (i = 0; i < 16; i++)
@@ -240,11 +237,8 @@ static void enter_smm_save_state_64(struct kvm_vcpu *vcpu,
 	smram->rip    = kvm_rip_read(vcpu);
 	smram->rflags = kvm_get_rflags(vcpu);
 
-
-	kvm_get_dr(vcpu, 6, &val);
-	smram->dr6 = val;
-	kvm_get_dr(vcpu, 7, &val);
-	smram->dr7 = val;
+	smram->dr6 = vcpu->arch.dr6;
+	smram->dr7 = vcpu->arch.dr7;
 
 	smram->cr0 = kvm_read_cr0(vcpu);
 	smram->cr3 = kvm_read_cr3(vcpu);
@@ -257,13 +251,13 @@ static void enter_smm_save_state_64(struct kvm_vcpu *vcpu,
 
 	enter_smm_save_seg_64(vcpu, &smram->tr, VCPU_SREG_TR);
 
-	static_call(kvm_x86_get_idt)(vcpu, &dt);
+	kvm_x86_call(get_idt)(vcpu, &dt);
 	smram->idtr.limit = dt.size;
 	smram->idtr.base = dt.address;
 
 	enter_smm_save_seg_64(vcpu, &smram->ldtr, VCPU_SREG_LDTR);
 
-	static_call(kvm_x86_get_gdt)(vcpu, &dt);
+	kvm_x86_call(get_gdt)(vcpu, &dt);
 	smram->gdtr.limit = dt.size;
 	smram->gdtr.base = dt.address;
 
@@ -274,7 +268,7 @@ static void enter_smm_save_state_64(struct kvm_vcpu *vcpu,
 	enter_smm_save_seg_64(vcpu, &smram->fs, VCPU_SREG_FS);
 	enter_smm_save_seg_64(vcpu, &smram->gs, VCPU_SREG_GS);
 
-	smram->int_shadow = static_call(kvm_x86_get_interrupt_shadow)(vcpu);
+	smram->int_shadow = kvm_x86_call(get_interrupt_shadow)(vcpu);
 }
 #endif
 
@@ -290,7 +284,7 @@ void enter_smm(struct kvm_vcpu *vcpu)
 	memset(smram.bytes, 0, sizeof(smram.bytes));
 
 #ifdef CONFIG_X86_64
-	if (guest_cpuid_has(vcpu, X86_FEATURE_LM))
+	if (guest_cpu_cap_has(vcpu, X86_FEATURE_LM))
 		enter_smm_save_state_64(vcpu, &smram.smram64);
 	else
 #endif
@@ -304,7 +298,7 @@ void enter_smm(struct kvm_vcpu *vcpu)
 	 * Kill the VM in the unlikely case of failure, because the VM
 	 * can be in undefined state in this case.
 	 */
-	if (static_call(kvm_x86_enter_smm)(vcpu, &smram))
+	if (kvm_x86_call(enter_smm)(vcpu, &smram))
 		goto error;
 
 	kvm_smm_changed(vcpu, true);
@@ -312,24 +306,24 @@ void enter_smm(struct kvm_vcpu *vcpu)
 	if (kvm_vcpu_write_guest(vcpu, vcpu->arch.smbase + 0xfe00, &smram, sizeof(smram)))
 		goto error;
 
-	if (static_call(kvm_x86_get_nmi_mask)(vcpu))
+	if (kvm_x86_call(get_nmi_mask)(vcpu))
 		vcpu->arch.hflags |= HF_SMM_INSIDE_NMI_MASK;
 	else
-		static_call(kvm_x86_set_nmi_mask)(vcpu, true);
+		kvm_x86_call(set_nmi_mask)(vcpu, true);
 
 	kvm_set_rflags(vcpu, X86_EFLAGS_FIXED);
 	kvm_rip_write(vcpu, 0x8000);
 
-	static_call(kvm_x86_set_interrupt_shadow)(vcpu, 0);
+	kvm_x86_call(set_interrupt_shadow)(vcpu, 0);
 
 	cr0 = vcpu->arch.cr0 & ~(X86_CR0_PE | X86_CR0_EM | X86_CR0_TS | X86_CR0_PG);
-	static_call(kvm_x86_set_cr0)(vcpu, cr0);
+	kvm_x86_call(set_cr0)(vcpu, cr0);
 
-	static_call(kvm_x86_set_cr4)(vcpu, 0);
+	kvm_x86_call(set_cr4)(vcpu, 0);
 
 	/* Undocumented: IDT limit is set to zero on entry to SMM.  */
 	dt.address = dt.size = 0;
-	static_call(kvm_x86_set_idt)(vcpu, &dt);
+	kvm_x86_call(set_idt)(vcpu, &dt);
 
 	if (WARN_ON_ONCE(kvm_set_dr(vcpu, 7, DR7_FIXED_1)))
 		goto error;
@@ -360,12 +354,12 @@ void enter_smm(struct kvm_vcpu *vcpu)
 	kvm_set_segment(vcpu, &ds, VCPU_SREG_SS);
 
 #ifdef CONFIG_X86_64
-	if (guest_cpuid_has(vcpu, X86_FEATURE_LM))
-		if (static_call(kvm_x86_set_efer)(vcpu, 0))
+	if (guest_cpu_cap_has(vcpu, X86_FEATURE_LM))
+		if (kvm_x86_call(set_efer)(vcpu, 0))
 			goto error;
 #endif
 
-	kvm_update_cpuid_runtime(vcpu);
+	vcpu->arch.cpuid_dynamic_bits_dirty = true;
 	kvm_mmu_reset_context(vcpu);
 	return;
 error:
@@ -486,11 +480,11 @@ static int rsm_load_state_32(struct x86_emulate_ctxt *ctxt,
 
 	dt.address =               smstate->gdtr.base;
 	dt.size =                  smstate->gdtr.limit;
-	static_call(kvm_x86_set_gdt)(vcpu, &dt);
+	kvm_x86_call(set_gdt)(vcpu, &dt);
 
 	dt.address =               smstate->idtr.base;
 	dt.size =                  smstate->idtr.limit;
-	static_call(kvm_x86_set_idt)(vcpu, &dt);
+	kvm_x86_call(set_idt)(vcpu, &dt);
 
 	rsm_load_seg_32(vcpu, &smstate->es, smstate->es_sel, VCPU_SREG_ES);
 	rsm_load_seg_32(vcpu, &smstate->cs, smstate->cs_sel, VCPU_SREG_CS);
@@ -508,7 +502,7 @@ static int rsm_load_state_32(struct x86_emulate_ctxt *ctxt,
 	if (r != X86EMUL_CONTINUE)
 		return r;
 
-	static_call(kvm_x86_set_interrupt_shadow)(vcpu, 0);
+	kvm_x86_call(set_interrupt_shadow)(vcpu, 0);
 	ctxt->interruptibility = (u8)smstate->int_shadow;
 
 	return r;
@@ -542,13 +536,13 @@ static int rsm_load_state_64(struct x86_emulate_ctxt *ctxt,
 
 	dt.size =                   smstate->idtr.limit;
 	dt.address =                smstate->idtr.base;
-	static_call(kvm_x86_set_idt)(vcpu, &dt);
+	kvm_x86_call(set_idt)(vcpu, &dt);
 
 	rsm_load_seg_64(vcpu, &smstate->ldtr, VCPU_SREG_LDTR);
 
 	dt.size =                   smstate->gdtr.limit;
 	dt.address =                smstate->gdtr.base;
-	static_call(kvm_x86_set_gdt)(vcpu, &dt);
+	kvm_x86_call(set_gdt)(vcpu, &dt);
 
 	r = rsm_enter_protected_mode(vcpu, smstate->cr0, smstate->cr3, smstate->cr4);
 	if (r != X86EMUL_CONTINUE)
@@ -561,7 +555,7 @@ static int rsm_load_state_64(struct x86_emulate_ctxt *ctxt,
 	rsm_load_seg_64(vcpu, &smstate->fs, VCPU_SREG_FS);
 	rsm_load_seg_64(vcpu, &smstate->gs, VCPU_SREG_GS);
 
-	static_call(kvm_x86_set_interrupt_shadow)(vcpu, 0);
+	kvm_x86_call(set_interrupt_shadow)(vcpu, 0);
 	ctxt->interruptibility = (u8)smstate->int_shadow;
 
 	return X86EMUL_CONTINUE;
@@ -583,7 +577,7 @@ int emulator_leave_smm(struct x86_emulate_ctxt *ctxt)
 		return X86EMUL_UNHANDLEABLE;
 
 	if ((vcpu->arch.hflags & HF_SMM_INSIDE_NMI_MASK) == 0)
-		static_call(kvm_x86_set_nmi_mask)(vcpu, false);
+		kvm_x86_call(set_nmi_mask)(vcpu, false);
 
 	kvm_smm_changed(vcpu, false);
 
@@ -593,7 +587,7 @@ int emulator_leave_smm(struct x86_emulate_ctxt *ctxt)
 	 * supports long mode.
 	 */
 #ifdef CONFIG_X86_64
-	if (guest_cpuid_has(vcpu, X86_FEATURE_LM)) {
+	if (guest_cpu_cap_has(vcpu, X86_FEATURE_LM)) {
 		struct kvm_segment cs_desc;
 		unsigned long cr4;
 
@@ -616,7 +610,7 @@ int emulator_leave_smm(struct x86_emulate_ctxt *ctxt)
 		kvm_set_cr0(vcpu, cr0 & ~(X86_CR0_PG | X86_CR0_PE));
 
 #ifdef CONFIG_X86_64
-	if (guest_cpuid_has(vcpu, X86_FEATURE_LM)) {
+	if (guest_cpu_cap_has(vcpu, X86_FEATURE_LM)) {
 		unsigned long cr4, efer;
 
 		/* Clear CR4.PAE before clearing EFER.LME. */
@@ -631,17 +625,31 @@ int emulator_leave_smm(struct x86_emulate_ctxt *ctxt)
 #endif
 
 	/*
-	 * Give leave_smm() a chance to make ISA-specific changes to the vCPU
-	 * state (e.g. enter guest mode) before loading state from the SMM
-	 * state-save area.
+	 * FIXME: When resuming L2 (a.k.a. guest mode), the transition to guest
+	 * mode should happen _after_ loading state from SMRAM.  However, KVM
+	 * piggybacks the nested VM-Enter flows (which is wrong for many other
+	 * reasons), and so nSVM/nVMX would clobber state that is loaded from
+	 * SMRAM and from the VMCS/VMCB.
 	 */
-	if (static_call(kvm_x86_leave_smm)(vcpu, &smram))
+	if (kvm_x86_call(leave_smm)(vcpu, &smram))
 		return X86EMUL_UNHANDLEABLE;
 
 #ifdef CONFIG_X86_64
-	if (guest_cpuid_has(vcpu, X86_FEATURE_LM))
-		return rsm_load_state_64(ctxt, &smram.smram64);
+	if (guest_cpu_cap_has(vcpu, X86_FEATURE_LM))
+		ret = rsm_load_state_64(ctxt, &smram.smram64);
 	else
 #endif
-		return rsm_load_state_32(ctxt, &smram.smram32);
+		ret = rsm_load_state_32(ctxt, &smram.smram32);
+
+	/*
+	 * If RSM fails and triggers shutdown, architecturally the shutdown
+	 * occurs *before* the transition to guest mode.  But due to KVM's
+	 * flawed handling of RSM to L2 (see above), the vCPU may already be
+	 * in_guest_mode().  Force the vCPU out of guest mode before delivering
+	 * the shutdown, so that L1 enters shutdown instead of seeing a VM-Exit
+	 * that architecturally shouldn't be possible.
+	 */
+	if (ret != X86EMUL_CONTINUE && is_guest_mode(vcpu))
+		kvm_leave_nested(vcpu);
+	return ret;
 }

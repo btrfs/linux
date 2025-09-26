@@ -100,7 +100,8 @@ static void rmobile_init_pm_domain(struct rmobile_pm_domain *rmobile_pd)
 	struct generic_pm_domain *genpd = &rmobile_pd->genpd;
 	struct dev_power_governor *gov = rmobile_pd->gov;
 
-	genpd->flags |= GENPD_FLAG_PM_CLK | GENPD_FLAG_ACTIVE_WAKEUP;
+	genpd->flags |= GENPD_FLAG_PM_CLK | GENPD_FLAG_ACTIVE_WAKEUP |
+		GENPD_FLAG_NO_STAY_ON;
 	genpd->attach_dev = cpg_mstp_attach_dev;
 	genpd->detach_dev = cpg_mstp_detach_dev;
 
@@ -268,9 +269,7 @@ static int __init rmobile_add_pm_domains(void __iomem *base,
 					 struct device_node *parent,
 					 struct generic_pm_domain *genpd_parent)
 {
-	struct device_node *np;
-
-	for_each_child_of_node(parent, np) {
+	for_each_child_of_node_scoped(parent, np) {
 		struct rmobile_pm_domain *pd;
 		u32 idx = ~0;
 
@@ -279,10 +278,8 @@ static int __init rmobile_add_pm_domains(void __iomem *base,
 		}
 
 		pd = kzalloc(sizeof(*pd), GFP_KERNEL);
-		if (!pd) {
-			of_node_put(np);
+		if (!pd)
 			return -ENOMEM;
-		}
 
 		pd->genpd.name = np->name;
 		pd->base = base;
@@ -339,5 +336,4 @@ static int __init rmobile_init_pm_domains(void)
 
 	return ret;
 }
-
-core_initcall(rmobile_init_pm_domains);
+postcore_initcall(rmobile_init_pm_domains);

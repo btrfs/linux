@@ -24,11 +24,13 @@
 struct nft_rhash {
 	struct rhashtable		ht;
 	struct delayed_work		gc_work;
+	u32				wq_gc_seq;
 };
 
 struct nft_rhash_elem {
 	struct nft_elem_priv		priv;
 	struct rhash_head		node;
+	u32				wq_gc_seq;
 	struct nft_set_ext		ext;
 };
 
@@ -36,6 +38,7 @@ struct nft_rhash_cmp_arg {
 	const struct nft_set		*set;
 	const u32			*key;
 	u8				genmask;
+	u64				tstamp;
 };
 
 static inline u32 nft_rhash_key(const void *data, u32 len, u32 seed)
@@ -62,7 +65,7 @@ static inline int nft_rhash_cmp(struct rhashtable_compare_arg *arg,
 		return 1;
 	if (nft_set_elem_is_dead(&he->ext))
 		return 1;
-	if (nft_set_elem_expired(&he->ext))
+	if (__nft_set_elem_expired(&he->ext, x->tstamp))
 		return 1;
 	if (!nft_set_elem_active(&he->ext, x->genmask))
 		return 1;
@@ -78,8 +81,9 @@ static const struct rhashtable_params nft_rhash_params = {
 };
 
 INDIRECT_CALLABLE_SCOPE
-bool nft_rhash_lookup(const struct net *net, const struct nft_set *set,
-		      const u32 *key, const struct nft_set_ext **ext)
+const struct nft_set_ext *
+nft_rhash_lookup(const struct net *net, const struct nft_set *set,
+		 const u32 *key)
 {
 	struct nft_rhash *priv = nft_set_priv(set);
 	const struct nft_rhash_elem *he;
@@ -87,13 +91,14 @@ bool nft_rhash_lookup(const struct net *net, const struct nft_set *set,
 		.genmask = nft_genmask_cur(net),
 		.set	 = set,
 		.key	 = key,
+		.tstamp  = get_jiffies_64(),
 	};
 
 	he = rhashtable_lookup(&priv->ht, &arg, nft_rhash_params);
 	if (he != NULL)
-		*ext = &he->ext;
+		return &he->ext;
 
-	return !!he;
+	return NULL;
 }
 
 static struct nft_elem_priv *
@@ -106,6 +111,7 @@ nft_rhash_get(const struct net *net, const struct nft_set *set,
 		.genmask = nft_genmask_cur(net),
 		.set	 = set,
 		.key	 = elem->key.val.data,
+		.tstamp  = get_jiffies_64(),
 	};
 
 	he = rhashtable_lookup(&priv->ht, &arg, nft_rhash_params);
@@ -115,14 +121,9 @@ nft_rhash_get(const struct net *net, const struct nft_set *set,
 	return ERR_PTR(-ENOENT);
 }
 
-static bool nft_rhash_update(struct nft_set *set, const u32 *key,
-			     struct nft_elem_priv *
-				   (*new)(struct nft_set *,
-					  const struct nft_expr *,
-					  struct nft_regs *regs),
-			     const struct nft_expr *expr,
-			     struct nft_regs *regs,
-			     const struct nft_set_ext **ext)
+static const struct nft_set_ext *
+nft_rhash_update(struct nft_set *set, const u32 *key,
+		 const struct nft_expr *expr, struct nft_regs *regs)
 {
 	struct nft_rhash *priv = nft_set_priv(set);
 	struct nft_rhash_elem *he, *prev;
@@ -131,13 +132,14 @@ static bool nft_rhash_update(struct nft_set *set, const u32 *key,
 		.genmask = NFT_GENMASK_ANY,
 		.set	 = set,
 		.key	 = key,
+		.tstamp  = get_jiffies_64(),
 	};
 
 	he = rhashtable_lookup(&priv->ht, &arg, nft_rhash_params);
 	if (he != NULL)
 		goto out;
 
-	elem_priv = new(set, expr, regs);
+	elem_priv = nft_dynset_new(set, expr, regs);
 	if (!elem_priv)
 		goto err1;
 
@@ -155,14 +157,13 @@ static bool nft_rhash_update(struct nft_set *set, const u32 *key,
 	}
 
 out:
-	*ext = &he->ext;
-	return true;
+	return &he->ext;
 
 err2:
 	nft_set_elem_destroy(set, &he->priv, true);
 	atomic_dec(&set->nelems);
 err1:
-	return false;
+	return NULL;
 }
 
 static int nft_rhash_insert(const struct net *net, const struct nft_set *set,
@@ -175,6 +176,7 @@ static int nft_rhash_insert(const struct net *net, const struct nft_set *set,
 		.genmask = nft_genmask_next(net),
 		.set	 = set,
 		.key	 = elem->key.val.data,
+		.tstamp	 = nft_net_tstamp(net),
 	};
 	struct nft_rhash_elem *prev;
 
@@ -194,7 +196,7 @@ static void nft_rhash_activate(const struct net *net, const struct nft_set *set,
 {
 	struct nft_rhash_elem *he = nft_elem_priv_cast(elem_priv);
 
-	nft_set_elem_change_active(net, set, &he->ext);
+	nft_clear(net, &he->ext);
 }
 
 static void nft_rhash_flush(const struct net *net,
@@ -216,6 +218,7 @@ nft_rhash_deactivate(const struct net *net, const struct nft_set *set,
 		.genmask = nft_genmask_next(net),
 		.set	 = set,
 		.key	 = elem->key.val.data,
+		.tstamp	 = nft_net_tstamp(net),
 	};
 
 	rcu_read_lock();
@@ -280,8 +283,6 @@ static void nft_rhash_walk(const struct nft_ctx *ctx, struct nft_set *set,
 
 		if (iter->count < iter->skip)
 			goto cont;
-		if (!nft_set_elem_active(&he->ext, iter->genmask))
-			goto cont;
 
 		iter->err = iter->fn(ctx, set, iter, &he->priv);
 		if (iter->err < 0)
@@ -303,7 +304,8 @@ static bool nft_rhash_expr_needs_gc_run(const struct nft_set *set,
 
 	nft_setelem_expr_foreach(expr, elem_expr, size) {
 		if (expr->ops->gc &&
-		    expr->ops->gc(read_pnet(&set->net), expr))
+		    expr->ops->gc(read_pnet(&set->net), expr) &&
+		    set->flags & NFT_SET_EVAL)
 			return true;
 	}
 
@@ -334,6 +336,10 @@ static void nft_rhash_gc(struct work_struct *work)
 	if (!gc)
 		goto done;
 
+	/* Elements never collected use a zero gc worker sequence number. */
+	if (unlikely(++priv->wq_gc_seq == 0))
+		priv->wq_gc_seq++;
+
 	rhashtable_walk_enter(&priv->ht, &hti);
 	rhashtable_walk_start(&hti);
 
@@ -351,6 +357,14 @@ static void nft_rhash_gc(struct work_struct *work)
 			goto try_later;
 		}
 
+		/* rhashtable walk is unstable, already seen in this gc run?
+		 * Then, skip this element. In case of (unlikely) sequence
+		 * wraparound and stale element wq_gc_seq, next gc run will
+		 * just find this expired element.
+		 */
+		if (he->wq_gc_seq == priv->wq_gc_seq)
+			continue;
+
 		if (nft_set_elem_is_dead(&he->ext))
 			goto dead_elem;
 
@@ -367,6 +381,8 @@ dead_elem:
 		if (!gc)
 			goto try_later;
 
+		/* annotate gc sequence for this attempt. */
+		he->wq_gc_seq = priv->wq_gc_seq;
 		nft_trans_gc_elem_add(gc, he);
 	}
 
@@ -486,8 +502,9 @@ struct nft_hash_elem {
 };
 
 INDIRECT_CALLABLE_SCOPE
-bool nft_hash_lookup(const struct net *net, const struct nft_set *set,
-		     const u32 *key, const struct nft_set_ext **ext)
+const struct nft_set_ext *
+nft_hash_lookup(const struct net *net, const struct nft_set *set,
+		const u32 *key)
 {
 	struct nft_hash *priv = nft_set_priv(set);
 	u8 genmask = nft_genmask_cur(net);
@@ -498,12 +515,10 @@ bool nft_hash_lookup(const struct net *net, const struct nft_set *set,
 	hash = reciprocal_scale(hash, priv->buckets);
 	hlist_for_each_entry_rcu(he, &priv->table[hash], node) {
 		if (!memcmp(nft_set_ext_key(&he->ext), key, set->klen) &&
-		    nft_set_elem_active(&he->ext, genmask)) {
-			*ext = &he->ext;
-			return true;
-		}
+		    nft_set_elem_active(&he->ext, genmask))
+			return &he->ext;
 	}
-	return false;
+	return NULL;
 }
 
 static struct nft_elem_priv *
@@ -526,9 +541,9 @@ nft_hash_get(const struct net *net, const struct nft_set *set,
 }
 
 INDIRECT_CALLABLE_SCOPE
-bool nft_hash_lookup_fast(const struct net *net,
-			  const struct nft_set *set,
-			  const u32 *key, const struct nft_set_ext **ext)
+const struct nft_set_ext *
+nft_hash_lookup_fast(const struct net *net, const struct nft_set *set,
+		     const u32 *key)
 {
 	struct nft_hash *priv = nft_set_priv(set);
 	u8 genmask = nft_genmask_cur(net);
@@ -541,12 +556,10 @@ bool nft_hash_lookup_fast(const struct net *net,
 	hlist_for_each_entry_rcu(he, &priv->table[hash], node) {
 		k2 = *(u32 *)nft_set_ext_key(&he->ext)->data;
 		if (k1 == k2 &&
-		    nft_set_elem_active(&he->ext, genmask)) {
-			*ext = &he->ext;
-			return true;
-		}
+		    nft_set_elem_active(&he->ext, genmask))
+			return &he->ext;
 	}
-	return false;
+	return NULL;
 }
 
 static u32 nft_jhash(const struct nft_set *set, const struct nft_hash *priv,
@@ -593,7 +606,7 @@ static void nft_hash_activate(const struct net *net, const struct nft_set *set,
 {
 	struct nft_hash_elem *he = nft_elem_priv_cast(elem_priv);
 
-	nft_set_elem_change_active(net, set, &he->ext);
+	nft_clear(net, &he->ext);
 }
 
 static void nft_hash_flush(const struct net *net,
@@ -643,10 +656,9 @@ static void nft_hash_walk(const struct nft_ctx *ctx, struct nft_set *set,
 	int i;
 
 	for (i = 0; i < priv->buckets; i++) {
-		hlist_for_each_entry_rcu(he, &priv->table[i], node) {
+		hlist_for_each_entry_rcu(he, &priv->table[i], node,
+					 lockdep_is_held(&nft_pernet(ctx->net)->commit_mutex)) {
 			if (iter->count < iter->skip)
-				goto cont;
-			if (!nft_set_elem_active(&he->ext, iter->genmask))
 				goto cont;
 
 			iter->err = iter->fn(ctx, set, iter, &he->priv);

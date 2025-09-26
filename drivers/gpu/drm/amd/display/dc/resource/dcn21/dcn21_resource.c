@@ -581,32 +581,6 @@ static const struct resource_caps res_cap_rn = {
 		.num_dsc = 3,
 };
 
-#ifdef DIAGS_BUILD
-static const struct resource_caps res_cap_rn_FPGA_4pipe = {
-		.num_timing_generator = 4,
-		.num_opp = 4,
-		.num_video_plane = 4,
-		.num_audio = 7,
-		.num_stream_encoder = 4,
-		.num_pll = 4,
-		.num_dwb = 1,
-		.num_ddc = 4,
-		.num_dsc = 0,
-};
-
-static const struct resource_caps res_cap_rn_FPGA_2pipe_dsc = {
-		.num_timing_generator = 2,
-		.num_opp = 2,
-		.num_video_plane = 2,
-		.num_audio = 7,
-		.num_stream_encoder = 2,
-		.num_pll = 4,
-		.num_dwb = 1,
-		.num_ddc = 4,
-		.num_dsc = 2,
-};
-#endif
-
 static const struct dc_plane_cap plane_cap = {
 	.type = DC_PLANE_TYPE_DCN_UNIVERSAL,
 	.per_pixel_alpha = true,
@@ -636,7 +610,6 @@ static const struct dc_plane_cap plane_cap = {
 static const struct dc_debug_options debug_defaults_drv = {
 		.disable_dmcu = false,
 		.force_abm_enable = false,
-		.timing_trace = false,
 		.clock_trace = true,
 		.disable_pplib_clock_request = true,
 		.min_disp_clk_khz = 100000,
@@ -796,10 +769,11 @@ bool dcn21_fast_validate_bw(struct dc *dc,
 			    int *pipe_cnt_out,
 			    int *pipe_split_from,
 			    int *vlevel_out,
-			    bool fast_validate)
+			    enum dc_validate_mode validate_mode)
 {
 	bool out = false;
 	int split[MAX_PIPES] = { 0 };
+	bool merge[MAX_PIPES] = { false };
 	int pipe_cnt, i, pipe_idx, vlevel;
 
 	ASSERT(pipes);
@@ -809,7 +783,7 @@ bool dcn21_fast_validate_bw(struct dc *dc,
 	dcn20_merge_pipes_for_validate(dc, context);
 
 	DC_FP_START();
-	pipe_cnt = dc->res_pool->funcs->populate_dml_pipes(dc, context, pipes, fast_validate);
+	pipe_cnt = dc->res_pool->funcs->populate_dml_pipes(dc, context, pipes, validate_mode);
 	DC_FP_END();
 
 	*pipe_cnt_out = pipe_cnt;
@@ -842,7 +816,7 @@ bool dcn21_fast_validate_bw(struct dc *dc,
 			goto validate_fail;
 	}
 
-	vlevel = dcn20_validate_apply_pipe_split_flags(dc, context, vlevel, split, NULL);
+	vlevel = dcn20_validate_apply_pipe_split_flags(dc, context, vlevel, split, merge);
 
 	for (i = 0, pipe_idx = 0; i < dc->res_pool->pipe_count; i++) {
 		struct pipe_ctx *pipe = &context->res_ctx.pipe_ctx[i];
@@ -949,22 +923,22 @@ validate_out:
  * with DC_FP_START()/DC_FP_END(). Use the same approach as for
  * dcn20_validate_bandwidth in dcn20_resource.c.
  */
-static bool dcn21_validate_bandwidth(struct dc *dc, struct dc_state *context,
-		bool fast_validate)
+static enum dc_status dcn21_validate_bandwidth(struct dc *dc, struct dc_state *context,
+		enum dc_validate_mode validate_mode)
 {
 	bool voltage_supported;
 	display_e2e_pipe_params_st *pipes;
 
 	pipes = kcalloc(dc->res_pool->pipe_count, sizeof(display_e2e_pipe_params_st), GFP_KERNEL);
 	if (!pipes)
-		return false;
+		return DC_FAIL_BANDWIDTH_VALIDATE;
 
 	DC_FP_START();
-	voltage_supported = dcn21_validate_bandwidth_fp(dc, context, fast_validate, pipes);
+	voltage_supported = dcn21_validate_bandwidth_fp(dc, context, validate_mode, pipes);
 	DC_FP_END();
 
 	kfree(pipes);
-	return voltage_supported;
+	return voltage_supported ? DC_OK : DC_NOT_SUPPORTED;
 }
 
 static void dcn21_destroy_resource_pool(struct resource_pool **pool)
@@ -1323,7 +1297,7 @@ static struct link_encoder *dcn21_link_encoder_create(
 		kzalloc(sizeof(struct dcn21_link_encoder), GFP_KERNEL);
 	int link_regs_id;
 
-	if (!enc21)
+	if (!enc21 || enc_init_data->hpd_source >= ARRAY_SIZE(link_enc_hpd_regs))
 		return NULL;
 
 	link_regs_id =
@@ -1404,6 +1378,7 @@ static const struct resource_funcs dcn21_res_pool_funcs = {
 	.find_first_free_match_stream_enc_for_link = dcn10_find_first_free_match_stream_enc_for_link,
 	.update_bw_bounding_box = dcn21_update_bw_bounding_box,
 	.get_panel_config_defaults = dcn21_get_panel_config_defaults,
+	.get_vstartup_for_pipe = dcn10_get_vstartup_for_pipe
 };
 
 static bool dcn21_resource_construct(
@@ -1415,16 +1390,11 @@ static bool dcn21_resource_construct(
 	struct dc_context *ctx = dc->ctx;
 	struct irq_service_init_data init_data;
 	uint32_t pipe_fuses = read_pipe_fuses(ctx);
-	uint32_t num_pipes;
+	uint32_t num_pipes = 0;
 
 	ctx->dc_bios->regs = &bios_regs;
 
 	pool->base.res_cap = &res_cap_rn;
-#ifdef DIAGS_BUILD
-	if (IS_FPGA_MAXIMUS_DC(dc->ctx->dce_environment))
-		//pool->base.res_cap = &res_cap_nv10_FPGA_2pipe_dsc;
-		pool->base.res_cap = &res_cap_rn_FPGA_4pipe;
-#endif
 
 	pool->base.funcs = &dcn21_res_pool_funcs;
 
@@ -1443,9 +1413,9 @@ static bool dcn21_resource_construct(
 	dc->caps.min_horizontal_blanking_period = 80;
 	dc->caps.dmdata_alloc_size = 2048;
 
-	dc->caps.max_slave_planes = 1;
-	dc->caps.max_slave_yuv_planes = 1;
-	dc->caps.max_slave_rgb_planes = 1;
+	dc->caps.max_slave_planes = 3;
+	dc->caps.max_slave_yuv_planes = 3;
+	dc->caps.max_slave_rgb_planes = 3;
 	dc->caps.post_blend_color_processing = true;
 	dc->caps.force_dp_tps4_for_cp2520 = true;
 	dc->caps.extended_aux_timeout_support = true;
@@ -1713,6 +1683,8 @@ static bool dcn21_resource_construct(
 
 	for (i = 0; i < dc->caps.max_planes; ++i)
 		dc->caps.planes[i] = plane_cap;
+
+	dc->caps.max_odm_combine_factor = 2;
 
 	dc->cap_funcs = cap_funcs;
 

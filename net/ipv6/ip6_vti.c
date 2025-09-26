@@ -45,6 +45,7 @@
 #include <net/xfrm.h>
 #include <net/net_namespace.h>
 #include <net/netns/generic.h>
+#include <net/netdev_lock.h>
 #include <linux/etherdevice.h>
 
 #define IP6_VTI_HASH_SIZE_SHIFT  5
@@ -174,16 +175,10 @@ vti6_tnl_unlink(struct vti6_net *ip6n, struct ip6_tnl *t)
 	}
 }
 
-static void vti6_dev_free(struct net_device *dev)
-{
-	free_percpu(dev->tstats);
-}
-
 static int vti6_tnl_create2(struct net_device *dev)
 {
 	struct ip6_tnl *t = netdev_priv(dev);
-	struct net *net = dev_net(dev);
-	struct vti6_net *ip6n = net_generic(net, vti6_net_id);
+	struct vti6_net *ip6n = net_generic(t->net, vti6_net_id);
 	int err;
 
 	dev->rtnl_link_ops = &vti6_link_ops;
@@ -502,7 +497,7 @@ vti6_xmit(struct sk_buff *skb, struct net_device *dev, struct flowi *fl)
 			      (const struct in6_addr *)&x->id.daddr))
 		goto tx_err_link_failure;
 
-	tdev = dst->dev;
+	tdev = dst_dev(dst);
 
 	if (tdev == dev) {
 		DEV_STATS_INC(dev, collisions);
@@ -534,7 +529,7 @@ vti6_xmit(struct sk_buff *skb, struct net_device *dev, struct flowi *fl)
 xmit:
 	skb_scrub_packet(skb, !net_eq(t->net, dev_net(dev)));
 	skb_dst_set(skb, dst);
-	skb->dev = skb_dst(skb)->dev;
+	skb->dev = dst_dev(dst);
 
 	err = dst_output(t->net, skb->sk, skb);
 	if (net_xmit_eval(err) == 0)
@@ -671,7 +666,8 @@ static void vti6_link_config(struct ip6_tnl *t, bool keep_mtu)
 		dev->flags &= ~IFF_POINTOPOINT;
 
 	if (keep_mtu && dev->mtu) {
-		dev->mtu = clamp(dev->mtu, dev->min_mtu, dev->max_mtu);
+		WRITE_ONCE(dev->mtu,
+			   clamp(dev->mtu, dev->min_mtu, dev->max_mtu));
 		return;
 	}
 
@@ -892,7 +888,6 @@ static const struct net_device_ops vti6_netdev_ops = {
 	.ndo_uninit	= vti6_dev_uninit,
 	.ndo_start_xmit = vti6_tnl_xmit,
 	.ndo_siocdevprivate = vti6_siocdevprivate,
-	.ndo_get_stats64 = dev_get_tstats64,
 	.ndo_get_iflink = ip6_tnl_get_iflink,
 };
 
@@ -908,8 +903,8 @@ static void vti6_dev_setup(struct net_device *dev)
 	dev->netdev_ops = &vti6_netdev_ops;
 	dev->header_ops = &ip_tunnel_header_ops;
 	dev->needs_free_netdev = true;
-	dev->priv_destructor = vti6_dev_free;
 
+	dev->pcpu_stat_type = NETDEV_PCPU_STAT_TSTATS;
 	dev->type = ARPHRD_TUNNEL6;
 	dev->min_mtu = IPV4_MIN_MTU;
 	dev->max_mtu = IP_MAX_MTU - sizeof(struct ipv6hdr);
@@ -930,11 +925,8 @@ static inline int vti6_dev_init_gen(struct net_device *dev)
 	struct ip6_tnl *t = netdev_priv(dev);
 
 	t->dev = dev;
-	t->net = dev_net(dev);
-	dev->tstats = netdev_alloc_pcpu_stats(struct pcpu_sw_netstats);
-	if (!dev->tstats)
-		return -ENOMEM;
 	netdev_hold(dev, &t->dev_tracker, GFP_KERNEL);
+	netdev_lockdep_set_classes(dev);
 	return 0;
 }
 
@@ -965,6 +957,7 @@ static int __net_init vti6_fb_tnl_dev_init(struct net_device *dev)
 	struct net *net = dev_net(dev);
 	struct vti6_net *ip6n = net_generic(net, vti6_net_id);
 
+	t->net = net;
 	t->parms.proto = IPPROTO_IPV6;
 
 	rcu_assign_pointer(ip6n->tnls_wc[0], t);
@@ -1004,17 +997,20 @@ static void vti6_netlink_parms(struct nlattr *data[],
 		parms->fwmark = nla_get_u32(data[IFLA_VTI_FWMARK]);
 }
 
-static int vti6_newlink(struct net *src_net, struct net_device *dev,
-			struct nlattr *tb[], struct nlattr *data[],
+static int vti6_newlink(struct net_device *dev,
+			struct rtnl_newlink_params *params,
 			struct netlink_ext_ack *extack)
 {
-	struct net *net = dev_net(dev);
+	struct nlattr **data = params->data;
 	struct ip6_tnl *nt;
+	struct net *net;
 
+	net = params->link_net ? : dev_net(dev);
 	nt = netdev_priv(dev);
 	vti6_netlink_parms(data, &nt->parms);
 
 	nt->parms.proto = IPPROTO_IPV6;
+	nt->net = net;
 
 	if (vti6_locate(net, &nt->parms, 0))
 		return -EEXIST;
@@ -1116,21 +1112,21 @@ static struct rtnl_link_ops vti6_link_ops __read_mostly = {
 	.get_link_net	= ip6_tnl_get_link_net,
 };
 
-static void __net_exit vti6_destroy_tunnels(struct vti6_net *ip6n,
-					    struct list_head *list)
+static void __net_exit vti6_exit_rtnl_net(struct net *net, struct list_head *list)
 {
-	int h;
+	struct vti6_net *ip6n = net_generic(net, vti6_net_id);
 	struct ip6_tnl *t;
+	int h;
 
 	for (h = 0; h < IP6_VTI_HASH_SIZE; h++) {
-		t = rtnl_dereference(ip6n->tnls_r_l[h]);
+		t = rtnl_net_dereference(net, ip6n->tnls_r_l[h]);
 		while (t) {
 			unregister_netdevice_queue(t->dev, list);
-			t = rtnl_dereference(t->next);
+			t = rtnl_net_dereference(net, t->next);
 		}
 	}
 
-	t = rtnl_dereference(ip6n->tnls_wc[0]);
+	t = rtnl_net_dereference(net, ip6n->tnls_wc[0]);
 	if (t)
 		unregister_netdevice_queue(t->dev, list);
 }
@@ -1174,24 +1170,9 @@ err_alloc_dev:
 	return err;
 }
 
-static void __net_exit vti6_exit_batch_net(struct list_head *net_list)
-{
-	struct vti6_net *ip6n;
-	struct net *net;
-	LIST_HEAD(list);
-
-	rtnl_lock();
-	list_for_each_entry(net, net_list, exit_list) {
-		ip6n = net_generic(net, vti6_net_id);
-		vti6_destroy_tunnels(ip6n, &list);
-	}
-	unregister_netdevice_many(&list);
-	rtnl_unlock();
-}
-
 static struct pernet_operations vti6_net_ops = {
 	.init = vti6_init_net,
-	.exit_batch = vti6_exit_batch_net,
+	.exit_rtnl = vti6_exit_rtnl_net,
 	.id   = &vti6_net_id,
 	.size = sizeof(struct vti6_net),
 };

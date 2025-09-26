@@ -96,6 +96,20 @@ static const int gisb_offsets_bcm7400[] = {
 	[ARB_ERR_CAP_MASTER]	= 0x0d8,
 };
 
+static const int gisb_offsets_bcm74165[] = {
+	[ARB_TIMER]		= 0x008,
+	[ARB_BP_CAP_CLR]	= 0x044,
+	[ARB_BP_CAP_HI_ADDR]	= -1,
+	[ARB_BP_CAP_ADDR]	= 0x048,
+	[ARB_BP_CAP_STATUS]	= 0x058,
+	[ARB_BP_CAP_MASTER]	= 0x05c,
+	[ARB_ERR_CAP_CLR]	= 0x038,
+	[ARB_ERR_CAP_HI_ADDR]	= -1,
+	[ARB_ERR_CAP_ADDR]	= 0x020,
+	[ARB_ERR_CAP_STATUS]	= 0x030,
+	[ARB_ERR_CAP_MASTER]	= 0x034,
+};
+
 static const int gisb_offsets_bcm7435[] = {
 	[ARB_TIMER]		= 0x00c,
 	[ARB_BP_CAP_CLR]	= 0x014,
@@ -381,10 +395,7 @@ static struct attribute *gisb_arb_sysfs_attrs[] = {
 	&dev_attr_gisb_arb_timeout.attr,
 	NULL,
 };
-
-static struct attribute_group gisb_arb_sysfs_attr_group = {
-	.attrs = gisb_arb_sysfs_attrs,
-};
+ATTRIBUTE_GROUPS(gisb_arb_sysfs);
 
 static const struct of_device_id brcmstb_gisb_arb_of_match[] = {
 	{ .compatible = "brcm,gisb-arb",         .data = gisb_offsets_bcm7445 },
@@ -393,8 +404,10 @@ static const struct of_device_id brcmstb_gisb_arb_of_match[] = {
 	{ .compatible = "brcm,bcm7400-gisb-arb", .data = gisb_offsets_bcm7400 },
 	{ .compatible = "brcm,bcm7278-gisb-arb", .data = gisb_offsets_bcm7278 },
 	{ .compatible = "brcm,bcm7038-gisb-arb", .data = gisb_offsets_bcm7038 },
+	{ .compatible = "brcm,bcm74165-gisb-arb", .data = gisb_offsets_bcm74165 },
 	{ },
 };
+MODULE_DEVICE_TABLE(of, brcmstb_gisb_arb_of_match);
 
 static int __init brcmstb_gisb_arb_probe(struct platform_device *pdev)
 {
@@ -474,10 +487,6 @@ static int __init brcmstb_gisb_arb_probe(struct platform_device *pdev)
 		}
 	}
 
-	err = sysfs_create_group(&pdev->dev.kobj, &gisb_arb_sysfs_attr_group);
-	if (err)
-		return err;
-
 	platform_set_drvdata(pdev, gdev);
 
 	list_add_tail(&gdev->next, &brcmstb_gisb_arb_device_list);
@@ -534,6 +543,7 @@ static struct platform_driver brcmstb_gisb_arb_driver = {
 		.name	= "brcm-gisb-arb",
 		.of_match_table = brcmstb_gisb_arb_of_match,
 		.pm	= &brcmstb_gisb_arb_pm_ops,
+		.dev_groups = gisb_arb_sysfs_groups,
 	},
 };
 

@@ -175,7 +175,7 @@ static int fimc_is_parse_sensor_config(struct fimc_is *is, unsigned int index,
 		return -EINVAL;
 	}
 
-	ep = of_graph_get_next_endpoint(node, NULL);
+	ep = of_graph_get_endpoint_by_regs(node, 0, -1);
 	if (!ep)
 		return -ENXIO;
 
@@ -207,7 +207,7 @@ static int fimc_is_register_subdevs(struct fimc_is *is)
 	if (ret < 0)
 		return ret;
 
-	for_each_compatible_node(i2c_bus, NULL, FIMC_IS_I2C_COMPATIBLE) {
+	for_each_compatible_node(i2c_bus, NULL, "samsung,exynos4212-i2c-isp") {
 		for_each_available_child_of_node(i2c_bus, child) {
 			ret = fimc_is_parse_sensor_config(is, index, child);
 
@@ -963,7 +963,7 @@ static const struct dev_pm_ops fimc_is_pm_ops = {
 
 static struct platform_driver fimc_is_driver = {
 	.probe		= fimc_is_probe,
-	.remove_new	= fimc_is_remove,
+	.remove		= fimc_is_remove,
 	.driver = {
 		.of_match_table	= fimc_is_of_match,
 		.name		= FIMC_IS_DRV_NAME,
@@ -999,4 +999,5 @@ module_exit(fimc_is_module_exit);
 MODULE_ALIAS("platform:" FIMC_IS_DRV_NAME);
 MODULE_AUTHOR("Younghwan Joo <yhwan.joo@samsung.com>");
 MODULE_AUTHOR("Sylwester Nawrocki <s.nawrocki@samsung.com>");
+MODULE_DESCRIPTION("Samsung EXYNOS4x12 FIMC-IS (Imaging Subsystem) driver");
 MODULE_LICENSE("GPL v2");

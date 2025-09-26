@@ -8,6 +8,7 @@
 #include <linux/mutex.h>
 #include <linux/of_device.h>
 #include <linux/power_supply.h>
+#include <linux/property.h>
 #include <linux/soc/qcom/pdr.h>
 #include <linux/soc/qcom/pmic_glink.h>
 #include <linux/math.h>
@@ -151,7 +152,7 @@ struct qcom_battmgr_message {
 			__le32 capacity_low;
 			__le32 capacity_warning;
 			__le32 cycle_count;
-			/* thousandth of persent */
+			/* thousandth of percent */
 			__le32 accuracy;
 			__le32 max_sample_time_ms;
 			__le32 min_sample_time_ms;
@@ -282,7 +283,6 @@ struct qcom_battmgr_wireless {
 
 struct qcom_battmgr {
 	struct device *dev;
-	struct auxiliary_device *adev;
 	struct pmic_glink_client *client;
 
 	enum qcom_battmgr_variant variant;
@@ -487,7 +487,7 @@ static int qcom_battmgr_bat_get_property(struct power_supply *psy,
 	int ret;
 
 	if (!battmgr->service_up)
-		return -ENODEV;
+		return -EAGAIN;
 
 	if (battmgr->variant == QCOM_BATTMGR_SC8280XP)
 		ret = qcom_battmgr_bat_sc8280xp_update(battmgr, psp);
@@ -577,6 +577,8 @@ static int qcom_battmgr_bat_get_property(struct power_supply *psy,
 		val->intval = battmgr->status.capacity;
 		break;
 	case POWER_SUPPLY_PROP_CAPACITY:
+		if (battmgr->status.percent == (unsigned int)-1)
+			return -ENODATA;
 		val->intval = battmgr->status.percent;
 		break;
 	case POWER_SUPPLY_PROP_TEMP:
@@ -617,6 +619,7 @@ static const enum power_supply_property sc8280xp_bat_props[] = {
 	POWER_SUPPLY_PROP_STATUS,
 	POWER_SUPPLY_PROP_PRESENT,
 	POWER_SUPPLY_PROP_TECHNOLOGY,
+	POWER_SUPPLY_PROP_CAPACITY,
 	POWER_SUPPLY_PROP_CYCLE_COUNT,
 	POWER_SUPPLY_PROP_VOLTAGE_MAX_DESIGN,
 	POWER_SUPPLY_PROP_VOLTAGE_NOW,
@@ -684,7 +687,7 @@ static int qcom_battmgr_ac_get_property(struct power_supply *psy,
 	int ret;
 
 	if (!battmgr->service_up)
-		return -ENODEV;
+		return -EAGAIN;
 
 	ret = qcom_battmgr_bat_sc8280xp_update(battmgr, psp);
 	if (ret)
@@ -749,7 +752,7 @@ static int qcom_battmgr_usb_get_property(struct power_supply *psy,
 	int ret;
 
 	if (!battmgr->service_up)
-		return -ENODEV;
+		return -EAGAIN;
 
 	if (battmgr->variant == QCOM_BATTMGR_SC8280XP)
 		ret = qcom_battmgr_bat_sc8280xp_update(battmgr, psp);
@@ -787,19 +790,6 @@ static int qcom_battmgr_usb_get_property(struct power_supply *psy,
 	return 0;
 }
 
-static const enum power_supply_usb_type usb_psy_supported_types[] = {
-	POWER_SUPPLY_USB_TYPE_UNKNOWN,
-	POWER_SUPPLY_USB_TYPE_SDP,
-	POWER_SUPPLY_USB_TYPE_DCP,
-	POWER_SUPPLY_USB_TYPE_CDP,
-	POWER_SUPPLY_USB_TYPE_ACA,
-	POWER_SUPPLY_USB_TYPE_C,
-	POWER_SUPPLY_USB_TYPE_PD,
-	POWER_SUPPLY_USB_TYPE_PD_DRP,
-	POWER_SUPPLY_USB_TYPE_PD_PPS,
-	POWER_SUPPLY_USB_TYPE_APPLE_BRICK_ID,
-};
-
 static const enum power_supply_property sc8280xp_usb_props[] = {
 	POWER_SUPPLY_PROP_ONLINE,
 };
@@ -810,8 +800,16 @@ static const struct power_supply_desc sc8280xp_usb_psy_desc = {
 	.properties = sc8280xp_usb_props,
 	.num_properties = ARRAY_SIZE(sc8280xp_usb_props),
 	.get_property = qcom_battmgr_usb_get_property,
-	.usb_types = usb_psy_supported_types,
-	.num_usb_types = ARRAY_SIZE(usb_psy_supported_types),
+	.usb_types = BIT(POWER_SUPPLY_USB_TYPE_UNKNOWN) |
+		     BIT(POWER_SUPPLY_USB_TYPE_SDP)     |
+		     BIT(POWER_SUPPLY_USB_TYPE_DCP)     |
+		     BIT(POWER_SUPPLY_USB_TYPE_CDP)     |
+		     BIT(POWER_SUPPLY_USB_TYPE_ACA)     |
+		     BIT(POWER_SUPPLY_USB_TYPE_C)       |
+		     BIT(POWER_SUPPLY_USB_TYPE_PD)      |
+		     BIT(POWER_SUPPLY_USB_TYPE_PD_DRP)  |
+		     BIT(POWER_SUPPLY_USB_TYPE_PD_PPS)  |
+		     BIT(POWER_SUPPLY_USB_TYPE_APPLE_BRICK_ID),
 };
 
 static const enum power_supply_property sm8350_usb_props[] = {
@@ -830,8 +828,16 @@ static const struct power_supply_desc sm8350_usb_psy_desc = {
 	.properties = sm8350_usb_props,
 	.num_properties = ARRAY_SIZE(sm8350_usb_props),
 	.get_property = qcom_battmgr_usb_get_property,
-	.usb_types = usb_psy_supported_types,
-	.num_usb_types = ARRAY_SIZE(usb_psy_supported_types),
+	.usb_types = BIT(POWER_SUPPLY_USB_TYPE_UNKNOWN) |
+		     BIT(POWER_SUPPLY_USB_TYPE_SDP)     |
+		     BIT(POWER_SUPPLY_USB_TYPE_DCP)     |
+		     BIT(POWER_SUPPLY_USB_TYPE_CDP)     |
+		     BIT(POWER_SUPPLY_USB_TYPE_ACA)     |
+		     BIT(POWER_SUPPLY_USB_TYPE_C)       |
+		     BIT(POWER_SUPPLY_USB_TYPE_PD)      |
+		     BIT(POWER_SUPPLY_USB_TYPE_PD_DRP)  |
+		     BIT(POWER_SUPPLY_USB_TYPE_PD_PPS)  |
+		     BIT(POWER_SUPPLY_USB_TYPE_APPLE_BRICK_ID),
 };
 
 static const u8 sm8350_wls_prop_map[] = {
@@ -868,7 +874,7 @@ static int qcom_battmgr_wls_get_property(struct power_supply *psy,
 	int ret;
 
 	if (!battmgr->service_up)
-		return -ENODEV;
+		return -EAGAIN;
 
 	if (battmgr->variant == QCOM_BATTMGR_SC8280XP)
 		ret = qcom_battmgr_bat_sc8280xp_update(battmgr, psp);
@@ -978,6 +984,8 @@ static unsigned int qcom_battmgr_sc8280xp_parse_technology(const char *chemistry
 {
 	if (!strncmp(chemistry, "LIO", BATTMGR_CHEMISTRY_LEN))
 		return POWER_SUPPLY_TECHNOLOGY_LION;
+	if (!strncmp(chemistry, "LIP", BATTMGR_CHEMISTRY_LEN))
+		return POWER_SUPPLY_TECHNOLOGY_LIPO;
 
 	pr_err("Unknown battery technology '%s'\n", chemistry);
 	return POWER_SUPPLY_TECHNOLOGY_UNKNOWN;
@@ -1008,7 +1016,9 @@ static void qcom_battmgr_sc8280xp_callback(struct qcom_battmgr *battmgr,
 		battmgr->error = 0;
 		break;
 	case BATTMGR_BAT_INFO:
-		if (payload_len != sizeof(resp->info)) {
+		/* some firmware versions report an extra __le32 at the end of the payload */
+		if (payload_len != sizeof(resp->info) &&
+		    payload_len != (sizeof(resp->info) + sizeof(__le32))) {
 			dev_warn(battmgr->dev,
 				 "invalid payload length for battery information request: %zd\n",
 				 payload_len);
@@ -1058,6 +1068,26 @@ static void qcom_battmgr_sc8280xp_callback(struct qcom_battmgr *battmgr,
 		battmgr->ac.online = source == BATTMGR_CHARGING_SOURCE_AC;
 		battmgr->usb.online = source == BATTMGR_CHARGING_SOURCE_USB;
 		battmgr->wireless.online = source == BATTMGR_CHARGING_SOURCE_WIRELESS;
+		if (battmgr->info.last_full_capacity != 0) {
+			/*
+			 * 100 * battmgr->status.capacity can overflow a 32bit
+			 * unsigned integer. FW readings are in m{W/A}h, which
+			 * are multiplied by 1000 converting them to u{W/A}h,
+			 * the format the power_supply API expects.
+			 * To avoid overflow use the original value for dividend
+			 * and convert the divider back to m{W/A}h, which can be
+			 * done without any loss of precision.
+			 */
+			battmgr->status.percent =
+				(100 * le32_to_cpu(resp->status.capacity)) /
+				(battmgr->info.last_full_capacity / 1000);
+		} else {
+			/*
+			 * Let the sysfs handler know no data is available at
+			 * this time.
+			 */
+			battmgr->status.percent = (unsigned int)-1;
+		}
 		break;
 	case BATTMGR_BAT_DISCHARGE_TIME:
 		battmgr->status.discharge_time = le32_to_cpu(resp->time);
@@ -1294,69 +1324,11 @@ static void qcom_battmgr_enable_worker(struct work_struct *work)
 		dev_err(battmgr->dev, "failed to request power notifications\n");
 }
 
-static char *qcom_battmgr_battery[] = { "battery" };
-
-static void qcom_battmgr_register_psy(struct qcom_battmgr *battmgr)
-{
-	struct power_supply_config psy_cfg_supply = {};
-	struct auxiliary_device *adev = battmgr->adev;
-	struct power_supply_config psy_cfg = {};
-	struct device *dev = &adev->dev;
-
-	psy_cfg.drv_data = battmgr;
-	psy_cfg.of_node = adev->dev.of_node;
-
-	psy_cfg_supply.drv_data = battmgr;
-	psy_cfg_supply.of_node = adev->dev.of_node;
-	psy_cfg_supply.supplied_to = qcom_battmgr_battery;
-	psy_cfg_supply.num_supplicants = 1;
-
-	if (battmgr->variant == QCOM_BATTMGR_SC8280XP) {
-		battmgr->bat_psy = devm_power_supply_register(dev, &sc8280xp_bat_psy_desc, &psy_cfg);
-		if (IS_ERR(battmgr->bat_psy))
-			dev_err(dev, "failed to register battery power supply (%ld)\n",
-				PTR_ERR(battmgr->bat_psy));
-
-		battmgr->ac_psy = devm_power_supply_register(dev, &sc8280xp_ac_psy_desc, &psy_cfg_supply);
-		if (IS_ERR(battmgr->ac_psy))
-			dev_err(dev, "failed to register AC power supply (%ld)\n",
-				PTR_ERR(battmgr->ac_psy));
-
-		battmgr->usb_psy = devm_power_supply_register(dev, &sc8280xp_usb_psy_desc, &psy_cfg_supply);
-		if (IS_ERR(battmgr->usb_psy))
-			dev_err(dev, "failed to register USB power supply (%ld)\n",
-				PTR_ERR(battmgr->usb_psy));
-
-		battmgr->wls_psy = devm_power_supply_register(dev, &sc8280xp_wls_psy_desc, &psy_cfg_supply);
-		if (IS_ERR(battmgr->wls_psy))
-			dev_err(dev, "failed to register wireless charing power supply (%ld)\n",
-				PTR_ERR(battmgr->wls_psy));
-	} else {
-		battmgr->bat_psy = devm_power_supply_register(dev, &sm8350_bat_psy_desc, &psy_cfg);
-		if (IS_ERR(battmgr->bat_psy))
-			dev_err(dev, "failed to register battery power supply (%ld)\n",
-				PTR_ERR(battmgr->bat_psy));
-
-		battmgr->usb_psy = devm_power_supply_register(dev, &sm8350_usb_psy_desc, &psy_cfg_supply);
-		if (IS_ERR(battmgr->usb_psy))
-			dev_err(dev, "failed to register USB power supply (%ld)\n",
-				PTR_ERR(battmgr->usb_psy));
-
-		battmgr->wls_psy = devm_power_supply_register(dev, &sm8350_wls_psy_desc, &psy_cfg_supply);
-		if (IS_ERR(battmgr->wls_psy))
-			dev_err(dev, "failed to register wireless charing power supply (%ld)\n",
-				PTR_ERR(battmgr->wls_psy));
-	}
-}
-
 static void qcom_battmgr_pdr_notify(void *priv, int state)
 {
 	struct qcom_battmgr *battmgr = priv;
 
 	if (state == SERVREG_SERVICE_STATE_UP) {
-		if (!battmgr->bat_psy)
-			qcom_battmgr_register_psy(battmgr);
-
 		battmgr->service_up = true;
 		schedule_work(&battmgr->enable_work);
 	} else {
@@ -1367,13 +1339,18 @@ static void qcom_battmgr_pdr_notify(void *priv, int state)
 static const struct of_device_id qcom_battmgr_of_variants[] = {
 	{ .compatible = "qcom,sc8180x-pmic-glink", .data = (void *)QCOM_BATTMGR_SC8280XP },
 	{ .compatible = "qcom,sc8280xp-pmic-glink", .data = (void *)QCOM_BATTMGR_SC8280XP },
+	{ .compatible = "qcom,x1e80100-pmic-glink", .data = (void *)QCOM_BATTMGR_SC8280XP },
 	/* Unmatched devices falls back to QCOM_BATTMGR_SM8350 */
 	{}
 };
 
+static char *qcom_battmgr_battery[] = { "battery" };
+
 static int qcom_battmgr_probe(struct auxiliary_device *adev,
 			      const struct auxiliary_device_id *id)
 {
+	struct power_supply_config psy_cfg_supply = {};
+	struct power_supply_config psy_cfg = {};
 	const struct of_device_id *match;
 	struct qcom_battmgr *battmgr;
 	struct device *dev = &adev->dev;
@@ -1383,7 +1360,14 @@ static int qcom_battmgr_probe(struct auxiliary_device *adev,
 		return -ENOMEM;
 
 	battmgr->dev = dev;
-	battmgr->adev = adev;
+
+	psy_cfg.drv_data = battmgr;
+	psy_cfg.fwnode = dev_fwnode(&adev->dev);
+
+	psy_cfg_supply.drv_data = battmgr;
+	psy_cfg_supply.fwnode = dev_fwnode(&adev->dev);
+	psy_cfg_supply.supplied_to = qcom_battmgr_battery;
+	psy_cfg_supply.num_supplicants = 1;
 
 	INIT_WORK(&battmgr->enable_work, qcom_battmgr_enable_worker);
 	mutex_init(&battmgr->lock);
@@ -1395,12 +1379,53 @@ static int qcom_battmgr_probe(struct auxiliary_device *adev,
 	else
 		battmgr->variant = QCOM_BATTMGR_SM8350;
 
-	battmgr->client = devm_pmic_glink_register_client(dev,
-							  PMIC_GLINK_OWNER_BATTMGR,
-							  qcom_battmgr_callback,
-							  qcom_battmgr_pdr_notify,
-							  battmgr);
-	return PTR_ERR_OR_ZERO(battmgr->client);
+	if (battmgr->variant == QCOM_BATTMGR_SC8280XP) {
+		battmgr->bat_psy = devm_power_supply_register(dev, &sc8280xp_bat_psy_desc, &psy_cfg);
+		if (IS_ERR(battmgr->bat_psy))
+			return dev_err_probe(dev, PTR_ERR(battmgr->bat_psy),
+					     "failed to register battery power supply\n");
+
+		battmgr->ac_psy = devm_power_supply_register(dev, &sc8280xp_ac_psy_desc, &psy_cfg_supply);
+		if (IS_ERR(battmgr->ac_psy))
+			return dev_err_probe(dev, PTR_ERR(battmgr->ac_psy),
+					     "failed to register AC power supply\n");
+
+		battmgr->usb_psy = devm_power_supply_register(dev, &sc8280xp_usb_psy_desc, &psy_cfg_supply);
+		if (IS_ERR(battmgr->usb_psy))
+			return dev_err_probe(dev, PTR_ERR(battmgr->usb_psy),
+					     "failed to register USB power supply\n");
+
+		battmgr->wls_psy = devm_power_supply_register(dev, &sc8280xp_wls_psy_desc, &psy_cfg_supply);
+		if (IS_ERR(battmgr->wls_psy))
+			return dev_err_probe(dev, PTR_ERR(battmgr->wls_psy),
+					     "failed to register wireless charing power supply\n");
+	} else {
+		battmgr->bat_psy = devm_power_supply_register(dev, &sm8350_bat_psy_desc, &psy_cfg);
+		if (IS_ERR(battmgr->bat_psy))
+			return dev_err_probe(dev, PTR_ERR(battmgr->bat_psy),
+					     "failed to register battery power supply\n");
+
+		battmgr->usb_psy = devm_power_supply_register(dev, &sm8350_usb_psy_desc, &psy_cfg_supply);
+		if (IS_ERR(battmgr->usb_psy))
+			return dev_err_probe(dev, PTR_ERR(battmgr->usb_psy),
+					     "failed to register USB power supply\n");
+
+		battmgr->wls_psy = devm_power_supply_register(dev, &sm8350_wls_psy_desc, &psy_cfg_supply);
+		if (IS_ERR(battmgr->wls_psy))
+			return dev_err_probe(dev, PTR_ERR(battmgr->wls_psy),
+					     "failed to register wireless charing power supply\n");
+	}
+
+	battmgr->client = devm_pmic_glink_client_alloc(dev, PMIC_GLINK_OWNER_BATTMGR,
+						       qcom_battmgr_callback,
+						       qcom_battmgr_pdr_notify,
+						       battmgr);
+	if (IS_ERR(battmgr->client))
+		return PTR_ERR(battmgr->client);
+
+	pmic_glink_client_register(battmgr->client);
+
+	return 0;
 }
 
 static const struct auxiliary_device_id qcom_battmgr_id_table[] = {

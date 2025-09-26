@@ -6,7 +6,6 @@
  *******************************************************************************/
 
 #include <drv_types.h>
-#include <rtw_debug.h>
 
 static bool rtw_sdio_claim_host_needed(struct sdio_func *func)
 {
@@ -306,7 +305,6 @@ void sd_write32(struct intf_hdl *pintfhdl, u32 addr, u32 v, s32 *err)
 				}
 			}
 		}
-
 	}
 }
 

@@ -503,6 +503,8 @@ static int dma_xfer(struct fsmc_nand_data *host, void *buffer, int len,
 
 	dma_dev = chan->device;
 	dma_addr = dma_map_single(dma_dev->dev, buffer, len, direction);
+	if (dma_mapping_error(dma_dev->dev, dma_addr))
+		return -EINVAL;
 
 	if (direction == DMA_TO_DEVICE) {
 		dma_src = dma_addr;
@@ -1221,7 +1223,7 @@ static const struct of_device_id fsmc_nand_id_table[] = {
 MODULE_DEVICE_TABLE(of, fsmc_nand_id_table);
 
 static struct platform_driver fsmc_nand_driver = {
-	.remove_new = fsmc_nand_remove,
+	.remove = fsmc_nand_remove,
 	.driver = {
 		.name = "fsmc-nand",
 		.of_match_table = fsmc_nand_id_table,

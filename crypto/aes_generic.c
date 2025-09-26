@@ -54,7 +54,7 @@
 #include <linux/types.h>
 #include <linux/errno.h>
 #include <asm/byteorder.h>
-#include <asm/unaligned.h>
+#include <linux/unaligned.h>
 
 static inline u8 byte(const u32 x, const unsigned n)
 {
@@ -1311,7 +1311,7 @@ static void __exit aes_fini(void)
 	crypto_unregister_alg(&aes_alg);
 }
 
-subsys_initcall(aes_init);
+module_init(aes_init);
 module_exit(aes_fini);
 
 MODULE_DESCRIPTION("Rijndael (AES) Cipher Algorithm");

@@ -5,17 +5,34 @@
 #include <linux/ns_common.h>
 #include <linux/fs_pin.h>
 
+extern struct list_head notify_list;
+
 struct mnt_namespace {
 	struct ns_common	ns;
 	struct mount *	root;
-	struct rb_root		mounts; /* Protected by namespace_sem */
+	struct {
+		struct rb_root	mounts;		 /* Protected by namespace_sem */
+		struct rb_node	*mnt_last_node;	 /* last (rightmost) mount in the rbtree */
+		struct rb_node	*mnt_first_node; /* first (leftmost) mount in the rbtree */
+	};
 	struct user_namespace	*user_ns;
 	struct ucounts		*ucounts;
 	u64			seq;	/* Sequence number to prevent loops */
-	wait_queue_head_t poll;
+	union {
+		wait_queue_head_t	poll;
+		struct rcu_head		mnt_ns_rcu;
+	};
+	u64			seq_origin; /* Sequence number of origin mount namespace */
 	u64 event;
+#ifdef CONFIG_FSNOTIFY
+	__u32			n_fsnotify_mask;
+	struct fsnotify_mark_connector __rcu *n_fsnotify_marks;
+#endif
 	unsigned int		nr_mounts; /* # of mounts in the namespace */
 	unsigned int		pending_mounts;
+	struct rb_node		mnt_ns_tree_node; /* node in the mnt_ns_tree */
+	struct list_head	mnt_ns_list; /* entry in the sequential list of mounts namespace */
+	refcount_t		passive; /* number references not pinning @mounts */
 } __randomize_layout;
 
 struct mnt_pcp {
@@ -27,7 +44,6 @@ struct mountpoint {
 	struct hlist_node m_hash;
 	struct dentry *m_dentry;
 	struct hlist_head m_list;
-	int m_count;
 };
 
 struct mount {
@@ -36,6 +52,7 @@ struct mount {
 	struct dentry *mnt_mountpoint;
 	struct vfsmount mnt;
 	union {
+		struct rb_node mnt_node; /* node in the ns->mounts rbtree */
 		struct rcu_head mnt_rcu;
 		struct llist_node mnt_llist;
 	};
@@ -49,14 +66,11 @@ struct mount {
 	struct list_head mnt_child;	/* and going through their mnt_child */
 	struct list_head mnt_instance;	/* mount instance on sb->s_mounts */
 	const char *mnt_devname;	/* Name of device e.g. /dev/dsk/hda1 */
-	union {
-		struct rb_node mnt_node;	/* Under ns->mounts */
-		struct list_head mnt_list;
-	};
+	struct list_head mnt_list;
 	struct list_head mnt_expire;	/* link in fs-specific expiry list */
 	struct list_head mnt_share;	/* circular list of shared mounts */
-	struct list_head mnt_slave_list;/* list of slave mounts */
-	struct list_head mnt_slave;	/* slave list entry */
+	struct hlist_head mnt_slave_list;/* list of slave mounts */
+	struct hlist_node mnt_slave;	/* slave list entry */
 	struct mount *mnt_master;	/* slave is on master->mnt_slave_list */
 	struct mnt_namespace *mnt_ns;	/* containing namespace */
 	struct mountpoint *mnt_mp;	/* where is it mounted */
@@ -64,18 +78,37 @@ struct mount {
 		struct hlist_node mnt_mp_list;	/* list mounts with the same mountpoint */
 		struct hlist_node mnt_umount;
 	};
-	struct list_head mnt_umounting; /* list entry for umount propagation */
 #ifdef CONFIG_FSNOTIFY
 	struct fsnotify_mark_connector __rcu *mnt_fsnotify_marks;
 	__u32 mnt_fsnotify_mask;
+	struct list_head to_notify;	/* need to queue notification */
+	struct mnt_namespace *prev_ns;	/* previous namespace (NULL if none) */
 #endif
+	int mnt_t_flags;		/* namespace_sem-protected flags */
 	int mnt_id;			/* mount identifier, reused */
 	u64 mnt_id_unique;		/* mount ID unique until reboot */
 	int mnt_group_id;		/* peer group identifier */
 	int mnt_expiry_mark;		/* true if marked for expiry */
 	struct hlist_head mnt_pins;
 	struct hlist_head mnt_stuck_children;
+	struct mount *overmount;	/* mounted on ->mnt_root */
 } __randomize_layout;
+
+enum {
+	T_SHARED		= 1, /* mount is shared */
+	T_UNBINDABLE		= 2, /* mount is unbindable */
+	T_MARKED		= 4, /* internal mark for propagate_... */
+	T_UMOUNT_CANDIDATE	= 8, /* for propagate_umount */
+
+	/*
+	 * T_SHARED_MASK is the set of flags that should be cleared when a
+	 * mount becomes shared.  Currently, this is only the flag that says a
+	 * mount cannot be bind mounted, since this is how we create a mount
+	 * that shares events with another mount.  If you add a new T_*
+	 * flag, consider how it interacts with shared mounts.
+	 */
+	T_SHARED_MASK	= T_UNBINDABLE,
+};
 
 #define MNT_NS_INTERNAL ERR_PTR(-EINVAL) /* distinct from any mnt_namespace */
 
@@ -84,7 +117,7 @@ static inline struct mount *real_mount(struct vfsmount *mnt)
 	return container_of(mnt, struct mount, mnt);
 }
 
-static inline int mnt_has_parent(struct mount *mnt)
+static inline int mnt_has_parent(const struct mount *mnt)
 {
 	return mnt != mnt->mnt_parent;
 }
@@ -129,8 +162,8 @@ struct proc_mounts {
 
 extern const struct seq_operations mounts_op;
 
-extern bool __is_local_mountpoint(struct dentry *dentry);
-static inline bool is_local_mountpoint(struct dentry *dentry)
+extern bool __is_local_mountpoint(const struct dentry *dentry);
+static inline bool is_local_mountpoint(const struct dentry *dentry)
 {
 	if (!d_mountpoint(dentry))
 		return false;
@@ -143,12 +176,58 @@ static inline bool is_anon_ns(struct mnt_namespace *ns)
 	return ns->seq == 0;
 }
 
-static inline void move_from_ns(struct mount *mnt, struct list_head *dt_list)
+static inline bool anon_ns_root(const struct mount *m)
 {
-	WARN_ON(!(mnt->mnt.mnt_flags & MNT_ONRB));
-	mnt->mnt.mnt_flags &= ~MNT_ONRB;
-	rb_erase(&mnt->mnt_node, &mnt->mnt_ns->mounts);
-	list_add_tail(&mnt->mnt_list, dt_list);
+	struct mnt_namespace *ns = READ_ONCE(m->mnt_ns);
+
+	return !IS_ERR_OR_NULL(ns) && is_anon_ns(ns) && m == ns->root;
 }
 
-extern void mnt_cursor_del(struct mnt_namespace *ns, struct mount *cursor);
+static inline bool mnt_ns_attached(const struct mount *mnt)
+{
+	return !RB_EMPTY_NODE(&mnt->mnt_node);
+}
+
+static inline bool mnt_ns_empty(const struct mnt_namespace *ns)
+{
+	return RB_EMPTY_ROOT(&ns->mounts);
+}
+
+static inline void move_from_ns(struct mount *mnt)
+{
+	struct mnt_namespace *ns = mnt->mnt_ns;
+	WARN_ON(!mnt_ns_attached(mnt));
+	if (ns->mnt_last_node == &mnt->mnt_node)
+		ns->mnt_last_node = rb_prev(&mnt->mnt_node);
+	if (ns->mnt_first_node == &mnt->mnt_node)
+		ns->mnt_first_node = rb_next(&mnt->mnt_node);
+	rb_erase(&mnt->mnt_node, &ns->mounts);
+	RB_CLEAR_NODE(&mnt->mnt_node);
+}
+
+bool has_locked_children(struct mount *mnt, struct dentry *dentry);
+struct mnt_namespace *get_sequential_mnt_ns(struct mnt_namespace *mnt_ns,
+					    bool previous);
+
+static inline struct mnt_namespace *to_mnt_ns(struct ns_common *ns)
+{
+	return container_of(ns, struct mnt_namespace, ns);
+}
+
+#ifdef CONFIG_FSNOTIFY
+static inline void mnt_notify_add(struct mount *m)
+{
+	/* Optimize the case where there are no watches */
+	if ((m->mnt_ns && m->mnt_ns->n_fsnotify_marks) ||
+	    (m->prev_ns && m->prev_ns->n_fsnotify_marks))
+		list_add_tail(&m->to_notify, &notify_list);
+	else
+		m->prev_ns = m->mnt_ns;
+}
+#else
+static inline void mnt_notify_add(struct mount *m)
+{
+}
+#endif
+
+struct mnt_namespace *mnt_ns_from_dentry(struct dentry *dentry);

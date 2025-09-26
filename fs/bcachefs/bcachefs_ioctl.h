@@ -5,6 +5,7 @@
 #include <linux/uuid.h>
 #include <asm/ioctl.h>
 #include "bcachefs_format.h"
+#include "bkey_types.h"
 
 /*
  * Flags common to multiple ioctls:
@@ -85,6 +86,8 @@ struct bch_ioctl_incremental {
 
 #define BCH_IOCTL_FSCK_OFFLINE	_IOW(0xbc,	19,  struct bch_ioctl_fsck_offline)
 #define BCH_IOCTL_FSCK_ONLINE	_IOW(0xbc,	20,  struct bch_ioctl_fsck_online)
+#define BCH_IOCTL_QUERY_ACCOUNTING _IOW(0xbc,	21,  struct bch_ioctl_query_accounting)
+#define BCH_IOCTL_QUERY_COUNTERS _IOW(0xbc,	21,  struct bch_ioctl_query_counters)
 
 /* ioctl below act on a particular file, not the filesystem as a whole: */
 
@@ -213,6 +216,10 @@ struct bch_ioctl_data {
 	union {
 	struct {
 		__u32		dev;
+		__u32		data_types;
+	}			scrub;
+	struct {
+		__u32		dev;
 		__u32		pad;
 	}			migrate;
 	struct {
@@ -227,6 +234,11 @@ enum bch_data_event {
 	BCH_DATA_EVENT_NR	= 1,
 };
 
+enum data_progress_data_type_special {
+	DATA_PROGRESS_DATA_TYPE_phys	= 254,
+	DATA_PROGRESS_DATA_TYPE_done	= 255,
+};
+
 struct bch_ioctl_data_progress {
 	__u8			data_type;
 	__u8			btree_id;
@@ -235,11 +247,19 @@ struct bch_ioctl_data_progress {
 
 	__u64			sectors_done;
 	__u64			sectors_total;
+	__u64			sectors_error_corrected;
+	__u64			sectors_error_uncorrected;
 } __packed __aligned(8);
+
+enum bch_ioctl_data_event_ret {
+	BCH_IOCTL_DATA_EVENT_RET_done		= 1,
+	BCH_IOCTL_DATA_EVENT_RET_device_offline	= 2,
+};
 
 struct bch_ioctl_data_event {
 	__u8			type;
-	__u8			pad[7];
+	__u8			ret;
+	__u8			pad[6];
 	union {
 	struct bch_ioctl_data_progress p;
 	__u64			pad2[15];
@@ -251,12 +271,18 @@ struct bch_replicas_usage {
 	struct bch_replicas_entry_v1 r;
 } __packed;
 
+static inline unsigned replicas_usage_bytes(struct bch_replicas_usage *u)
+{
+	return offsetof(struct bch_replicas_usage, r) + replicas_entry_bytes(&u->r);
+}
+
 static inline struct bch_replicas_usage *
 replicas_usage_next(struct bch_replicas_usage *u)
 {
-	return (void *) u + replicas_entry_bytes(&u->r) + 8;
+	return (void *) u + replicas_usage_bytes(u);
 }
 
+/* Obsolete */
 /*
  * BCH_IOCTL_FS_USAGE: query filesystem disk space usage
  *
@@ -282,6 +308,7 @@ struct bch_ioctl_fs_usage {
 	struct bch_replicas_usage replicas[];
 };
 
+/* Obsolete */
 /*
  * BCH_IOCTL_DEV_USAGE: query device disk space usage
  *
@@ -306,6 +333,7 @@ struct bch_ioctl_dev_usage {
 	}			d[10];
 };
 
+/* Obsolete */
 struct bch_ioctl_dev_usage_v2 {
 	__u64			dev;
 	__u32			flags;
@@ -407,6 +435,39 @@ struct bch_ioctl_fsck_offline {
 struct bch_ioctl_fsck_online {
 	__u64			flags;
 	__u64			opts;		/* string */
+};
+
+/*
+ * BCH_IOCTL_QUERY_ACCOUNTING: query filesystem disk accounting
+ *
+ * Returns disk space usage broken out by data type, number of replicas, and
+ * by component device
+ *
+ * @replica_entries_bytes - size, in bytes, allocated for replica usage entries
+ *
+ * On success, @replica_entries_bytes will be changed to indicate the number of
+ * bytes actually used.
+ *
+ * Returns -ERANGE if @replica_entries_bytes was too small
+ */
+struct bch_ioctl_query_accounting {
+	__u64			capacity;
+	__u64			used;
+	__u64			online_reserved;
+
+	__u32			accounting_u64s; /* input parameter */
+	__u32			accounting_types_mask; /* input parameter */
+
+	struct bkey_i_accounting accounting[];
+};
+
+#define BCH_IOCTL_QUERY_COUNTERS_MOUNT	(1 << 0)
+
+struct bch_ioctl_query_counters {
+	__u16			nr;
+	__u16			flags;
+	__u32			pad;
+	__u64			d[];
 };
 
 #endif /* _BCACHEFS_IOCTL_H */

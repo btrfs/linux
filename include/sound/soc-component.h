@@ -206,7 +206,6 @@ struct snd_soc_component_driver {
 
 struct snd_soc_component {
 	const char *name;
-	int id;
 	const char *name_prefix;
 	struct device *dev;
 	struct snd_soc_card *card;
@@ -462,6 +461,8 @@ int snd_soc_component_force_enable_pin_unlocked(
 	const char *pin);
 
 /* component controls */
+struct snd_kcontrol *snd_soc_component_get_kcontrol(struct snd_soc_component *component,
+						    const char * const ctl);
 int snd_soc_component_notify_control(struct snd_soc_component *component,
 				     const char * const ctl);
 

@@ -7,6 +7,7 @@ DTC_FLAGS_bcm2835-rpi-b-plus := -@
 DTC_FLAGS_bcm2835-rpi-a-plus := -@
 DTC_FLAGS_bcm2835-rpi-cm1-io1 := -@
 DTC_FLAGS_bcm2836-rpi-2-b := -@
+DTC_FLAGS_bcm2837-rpi-2-b := -@
 DTC_FLAGS_bcm2837-rpi-3-a-plus := -@
 DTC_FLAGS_bcm2837-rpi-3-b := -@
 DTC_FLAGS_bcm2837-rpi-3-b-plus := -@
@@ -25,6 +26,7 @@ dtb-$(CONFIG_ARCH_BCM2835) += \
 	bcm2835-rpi-a-plus.dtb \
 	bcm2835-rpi-cm1-io1.dtb \
 	bcm2836-rpi-2-b.dtb \
+	bcm2837-rpi-2-b.dtb \
 	bcm2837-rpi-3-a-plus.dtb \
 	bcm2837-rpi-3-b.dtb \
 	bcm2837-rpi-3-b-plus.dtb \
@@ -36,6 +38,7 @@ dtb-$(CONFIG_ARCH_BCM2835) += \
 	bcm2835-rpi-zero.dtb \
 	bcm2835-rpi-zero-w.dtb
 dtb-$(CONFIG_ARCH_BCMBCA) += \
+	bcm6846-genexis-xg6846b.dtb \
 	bcm947622.dtb \
 	bcm963138.dtb \
 	bcm963138dvt.dtb \
@@ -64,6 +67,7 @@ dtb-$(CONFIG_ARCH_BCM_5301X) += \
 	bcm47081-luxul-xap-1410.dtb \
 	bcm47081-luxul-xwr-1200.dtb \
 	bcm47081-tplink-archer-c5-v2.dtb \
+	bcm4709-asus-rt-ac3200.dtb \
 	bcm4709-asus-rt-ac87u.dtb \
 	bcm4709-buffalo-wxr-1900dhp.dtb \
 	bcm4709-linksys-ea9200.dtb \
@@ -71,6 +75,7 @@ dtb-$(CONFIG_ARCH_BCM_5301X) += \
 	bcm4709-netgear-r8000.dtb \
 	bcm4709-tplink-archer-c9-v1.dtb \
 	bcm47094-asus-rt-ac3100.dtb \
+	bcm47094-asus-rt-ac5300.dtb \
 	bcm47094-asus-rt-ac88u.dtb \
 	bcm47094-dlink-dir-885l.dtb \
 	bcm47094-dlink-dir-890l.dtb \

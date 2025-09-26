@@ -35,40 +35,26 @@ struct msm_dsi {
 	struct drm_device *dev;
 	struct platform_device *pdev;
 
-	/* internal dsi bridge attached to MDP interface */
-	struct drm_bridge *bridge;
-
 	struct mipi_dsi_host *host;
 	struct msm_dsi_phy *phy;
+	const char *te_source;
 
-	/*
-	 * external_bridge connected to dsi bridge output
-	 */
-	struct drm_bridge *external_bridge;
+	struct drm_bridge *next_bridge;
 
 	struct device *phy_dev;
 	bool phy_enabled;
-
-	/* the encoder we are hooked to (outside of dsi block) */
-	struct drm_encoder *encoder;
 
 	int id;
 };
 
 /* dsi manager */
-int msm_dsi_manager_bridge_init(struct msm_dsi *msm_dsi);
-int msm_dsi_manager_ext_bridge_init(u8 id);
+int msm_dsi_manager_connector_init(struct msm_dsi *msm_dsi,
+				   struct drm_encoder *encoder);
 int msm_dsi_manager_cmd_xfer(int id, const struct mipi_dsi_msg *msg);
 bool msm_dsi_manager_cmd_xfer_trigger(int id, u32 dma_base, u32 len);
 int msm_dsi_manager_register(struct msm_dsi *msm_dsi);
 void msm_dsi_manager_unregister(struct msm_dsi *msm_dsi);
 void msm_dsi_manager_tpg_enable(void);
-
-/* msm dsi */
-static inline bool msm_dsi_device_connected(struct msm_dsi *msm_dsi)
-{
-	return msm_dsi->external_bridge;
-}
 
 /* dsi host */
 struct msm_dsi_host;
@@ -112,6 +98,7 @@ int msm_dsi_host_init(struct msm_dsi *msm_dsi);
 int msm_dsi_runtime_suspend(struct device *dev);
 int msm_dsi_runtime_resume(struct device *dev);
 int dsi_link_clk_set_rate_6g(struct msm_dsi_host *msm_host);
+int dsi_link_clk_set_rate_6g_v2_9(struct msm_dsi_host *msm_host);
 int dsi_link_clk_set_rate_v2(struct msm_dsi_host *msm_host);
 int dsi_link_clk_enable_6g(struct msm_dsi_host *msm_host);
 int dsi_link_clk_enable_v2(struct msm_dsi_host *msm_host);
@@ -129,6 +116,7 @@ int dsi_dma_base_get_6g(struct msm_dsi_host *msm_host, uint64_t *iova);
 int dsi_dma_base_get_v2(struct msm_dsi_host *msm_host, uint64_t *iova);
 int dsi_clk_init_v2(struct msm_dsi_host *msm_host);
 int dsi_clk_init_6g_v2(struct msm_dsi_host *msm_host);
+int dsi_clk_init_6g_v2_9(struct msm_dsi_host *msm_host);
 int dsi_calc_clk_rate_v2(struct msm_dsi_host *msm_host, bool is_bonded_dsi);
 int dsi_calc_clk_rate_6g(struct msm_dsi_host *msm_host, bool is_bonded_dsi);
 void msm_dsi_host_snapshot(struct msm_disp_state *disp_state, struct mipi_dsi_host *host);

@@ -260,7 +260,7 @@ u32 xskq_cons_read_desc_batch(struct xsk_queue *q, struct xsk_buff_pool *pool,
 			nr_frags = 0;
 		} else {
 			nr_frags++;
-			if (nr_frags == pool->netdev->xdp_zc_max_segs) {
+			if (nr_frags == pool->xdp_zc_max_segs) {
 				nr_frags = 0;
 				break;
 			}
@@ -306,11 +306,6 @@ static inline u32 xskq_cons_nb_entries(struct xsk_queue *q, u32 max)
 	return entries >= max ? max : entries;
 }
 
-static inline bool xskq_cons_has_entries(struct xsk_queue *q, u32 cnt)
-{
-	return xskq_cons_nb_entries(q, cnt) >= cnt;
-}
-
 static inline bool xskq_cons_peek_addr_unchecked(struct xsk_queue *q, u64 *addr)
 {
 	if (q->cached_prod == q->cached_cons)
@@ -348,6 +343,11 @@ static inline u32 xskq_cons_present_entries(struct xsk_queue *q)
 }
 
 /* Functions for producers */
+
+static inline u32 xskq_get_prod(struct xsk_queue *q)
+{
+	return READ_ONCE(q->ring->producer);
+}
 
 static inline u32 xskq_prod_nb_free(struct xsk_queue *q, u32 max)
 {
@@ -393,6 +393,13 @@ static inline int xskq_prod_reserve_addr(struct xsk_queue *q, u64 addr)
 	/* A, matches D */
 	ring->desc[q->cached_prod++ & q->ring_mask] = addr;
 	return 0;
+}
+
+static inline void xskq_prod_write_addr(struct xsk_queue *q, u32 idx, u64 addr)
+{
+	struct xdp_umem_ring *ring = (struct xdp_umem_ring *)q->ring;
+
+	ring->desc[idx & q->ring_mask] = addr;
 }
 
 static inline void xskq_prod_write_addr_batch(struct xsk_queue *q, struct xdp_desc *descs,

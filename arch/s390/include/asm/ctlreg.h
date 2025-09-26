@@ -80,7 +80,7 @@
 #define CR14_EXTERNAL_DAMAGE_SUBMASK		BIT(CR14_EXTERNAL_DAMAGE_SUBMASK_BIT)
 #define CR14_WARNING_SUBMASK			BIT(CR14_WARNING_SUBMASK_BIT)
 
-#ifndef __ASSEMBLY__
+#ifndef __ASSEMBLER__
 
 #include <linux/bug.h>
 
@@ -202,8 +202,9 @@ union ctlreg0 {
 		unsigned long	   : 3;
 		unsigned long ccc  : 1; /* Cryptography counter control */
 		unsigned long pec  : 1; /* PAI extension control */
-		unsigned long	   : 17;
-		unsigned long	   : 3;
+		unsigned long	   : 15;
+		unsigned long wti  : 1; /* Warning-track */
+		unsigned long	   : 4;
 		unsigned long lap  : 1; /* Low-address-protection control */
 		unsigned long	   : 4;
 		unsigned long edat : 1; /* Enhanced-DAT-enablement control */
@@ -251,5 +252,5 @@ union ctlreg15 {
 	};
 };
 
-#endif /* __ASSEMBLY__ */
+#endif /* __ASSEMBLER__ */
 #endif /* __ASM_S390_CTLREG_H */

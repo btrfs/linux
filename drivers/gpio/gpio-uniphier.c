@@ -11,6 +11,7 @@
 #include <linux/of.h>
 #include <linux/of_irq.h>
 #include <linux/platform_device.h>
+#include <linux/property.h>
 #include <linux/spinlock.h>
 #include <dt-bindings/gpio/uniphier-gpio.h>
 
@@ -137,14 +138,16 @@ static int uniphier_gpio_get(struct gpio_chip *chip, unsigned int offset)
 	return uniphier_gpio_offset_read(chip, offset, UNIPHIER_GPIO_PORT_DATA);
 }
 
-static void uniphier_gpio_set(struct gpio_chip *chip,
-			      unsigned int offset, int val)
+static int uniphier_gpio_set(struct gpio_chip *chip,
+			     unsigned int offset, int val)
 {
 	uniphier_gpio_offset_write(chip, offset, UNIPHIER_GPIO_PORT_DATA, val);
+
+	return 0;
 }
 
-static void uniphier_gpio_set_multiple(struct gpio_chip *chip,
-				       unsigned long *mask, unsigned long *bits)
+static int uniphier_gpio_set_multiple(struct gpio_chip *chip,
+				      unsigned long *mask, unsigned long *bits)
 {
 	unsigned long i, bank, bank_mask, bank_bits;
 
@@ -155,6 +158,8 @@ static void uniphier_gpio_set_multiple(struct gpio_chip *chip,
 		uniphier_gpio_bank_write(chip, bank, UNIPHIER_GPIO_PORT_DATA,
 					 bank_mask, bank_bits);
 	}
+
+	return 0;
 }
 
 static int uniphier_gpio_to_irq(struct gpio_chip *chip, unsigned int offset)
@@ -164,7 +169,7 @@ static int uniphier_gpio_to_irq(struct gpio_chip *chip, unsigned int offset)
 	if (offset < UNIPHIER_GPIO_IRQ_OFFSET)
 		return -ENXIO;
 
-	fwspec.fwnode = of_node_to_fwnode(chip->parent->of_node);
+	fwspec.fwnode = dev_fwnode(chip->parent);
 	fwspec.param_count = 2;
 	fwspec.param[0] = offset - UNIPHIER_GPIO_IRQ_OFFSET;
 	/*
@@ -404,7 +409,7 @@ static int uniphier_gpio_probe(struct platform_device *pdev)
 	priv->domain = irq_domain_create_hierarchy(
 					parent_domain, 0,
 					UNIPHIER_GPIO_IRQ_MAX_NUM,
-					of_node_to_fwnode(dev->of_node),
+					dev_fwnode(dev),
 					&uniphier_gpio_irq_domain_ops, priv);
 	if (!priv->domain)
 		return -ENOMEM;
@@ -480,7 +485,7 @@ MODULE_DEVICE_TABLE(of, uniphier_gpio_match);
 
 static struct platform_driver uniphier_gpio_driver = {
 	.probe = uniphier_gpio_probe,
-	.remove_new = uniphier_gpio_remove,
+	.remove = uniphier_gpio_remove,
 	.driver = {
 		.name = "uniphier-gpio",
 		.of_match_table = uniphier_gpio_match,

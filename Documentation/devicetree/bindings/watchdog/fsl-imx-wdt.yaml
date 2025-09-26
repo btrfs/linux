@@ -7,7 +7,9 @@ $schema: http://devicetree.org/meta-schemas/core.yaml#
 title: Freescale i.MX Watchdog Timer (WDT) Controller
 
 maintainers:
-  - Anson Huang <Anson.Huang@nxp.com>
+  - Shawn Guo <shawnguo@kernel.org>
+  - Sascha Hauer <s.hauer@pengutronix.de>
+  - Fabio Estevam <festevam@gmail.com>
 
 properties:
   compatible:
@@ -33,7 +35,9 @@ properties:
               - fsl,imx8mp-wdt
               - fsl,imx8mq-wdt
               - fsl,ls1012a-wdt
+              - fsl,ls1021a-wdt
               - fsl,ls1043a-wdt
+              - fsl,ls1046a-wdt
               - fsl,vf610-wdt
           - const: fsl,imx21-wdt
 
@@ -45,6 +49,8 @@ properties:
 
   clocks:
     maxItems: 1
+
+  big-endian: true
 
   fsl,ext-reset-output:
     $ref: /schemas/types.yaml#/definitions/flag
@@ -90,6 +96,20 @@ allOf:
     then:
       properties:
         fsl,suspend-in-wait: false
+
+  - if:
+      not:
+        properties:
+          compatible:
+            contains:
+              enum:
+                - fsl,ls1012a-wdt
+                - fsl,ls1021a-wdt
+                - fsl,ls1043a-wdt
+                - fsl,ls1046a-wdt
+    then:
+      properties:
+        big-endian: false
 
 unevaluatedProperties: false
 

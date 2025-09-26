@@ -3,7 +3,7 @@
 // This file is provided under a dual BSD/GPLv2 license.  When using or
 // redistributing this file, you may do so under either license.
 //
-// Copyright(c) 2018-2022 Intel Corporation. All rights reserved.
+// Copyright(c) 2018-2022 Intel Corporation
 //
 // Author: Ranjani Sridharan <ranjani.sridharan@linux.intel.com>
 //
@@ -19,6 +19,14 @@
 /* platform specific devices */
 #include "hda.h"
 #include "mtl.h"
+
+/* Meteorlake ops */
+static struct snd_sof_dsp_ops sof_mtl_ops;
+
+static int sof_mtl_ops_init(struct snd_sof_dev *sdev)
+{
+	return sof_mtl_set_ops(sdev, &sof_mtl_ops);
+}
 
 static const struct sof_dev_desc mtl_desc = {
 	.use_acpi_target_states	= true,
@@ -127,11 +135,13 @@ static struct pci_driver snd_sof_pci_intel_mtl_driver = {
 	.remove = sof_pci_remove,
 	.shutdown = sof_pci_shutdown,
 	.driver = {
-		.pm = &sof_pci_pm,
+		.pm = pm_ptr(&sof_pci_pm),
 	},
 };
 module_pci_driver(snd_sof_pci_intel_mtl_driver);
 
 MODULE_LICENSE("Dual BSD/GPL");
-MODULE_IMPORT_NS(SND_SOC_SOF_INTEL_HDA_COMMON);
-MODULE_IMPORT_NS(SND_SOC_SOF_PCI_DEV);
+MODULE_DESCRIPTION("SOF support for MeteorLake platforms");
+MODULE_IMPORT_NS("SND_SOC_SOF_INTEL_HDA_GENERIC");
+MODULE_IMPORT_NS("SND_SOC_SOF_INTEL_HDA_COMMON");
+MODULE_IMPORT_NS("SND_SOC_SOF_PCI_DEV");

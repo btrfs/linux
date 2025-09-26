@@ -24,6 +24,7 @@
 #include <linux/interrupt.h>
 #include <linux/module.h>
 #include <linux/bcma/bcma.h>
+#include <linux/string_choices.h>
 #include <net/mac80211.h>
 #include <defs.h>
 #include "phy/phy_int.h"
@@ -48,9 +49,9 @@
 	FIF_BCN_PRBRESP_PROMISC | \
 	FIF_PSPOLL)
 
-#define CHAN2GHZ(channel, freqency, chflags)  { \
+#define CHAN2GHZ(channel, frequency, chflags)  { \
 	.band = NL80211_BAND_2GHZ, \
-	.center_freq = (freqency), \
+	.center_freq = (frequency), \
 	.hw_value = (channel), \
 	.flags = chflags, \
 	.max_antenna_gain = 0, \
@@ -457,7 +458,7 @@ static int brcms_ops_start(struct ieee80211_hw *hw)
 	return err;
 }
 
-static void brcms_ops_stop(struct ieee80211_hw *hw)
+static void brcms_ops_stop(struct ieee80211_hw *hw, bool suspend)
 {
 	struct brcms_info *wl = hw->priv;
 	int status;
@@ -525,7 +526,8 @@ brcms_ops_remove_interface(struct ieee80211_hw *hw, struct ieee80211_vif *vif)
 	spin_unlock_bh(&wl->lock);
 }
 
-static int brcms_ops_config(struct ieee80211_hw *hw, u32 changed)
+static int brcms_ops_config(struct ieee80211_hw *hw, int radio_idx,
+			    u32 changed)
 {
 	struct ieee80211_conf *conf = &hw->conf;
 	struct brcms_info *wl = hw->priv;
@@ -539,13 +541,13 @@ static int brcms_ops_config(struct ieee80211_hw *hw, u32 changed)
 						   conf->listen_interval);
 	}
 	if (changed & IEEE80211_CONF_CHANGE_MONITOR)
-		brcms_dbg_info(core, "%s: change monitor mode: %s\n",
-			       __func__, conf->flags & IEEE80211_CONF_MONITOR ?
-			       "true" : "false");
+		brcms_dbg_info(core, "%s: change monitor mode: %s\n", __func__,
+			       str_true_false(conf->flags &
+					      IEEE80211_CONF_MONITOR));
 	if (changed & IEEE80211_CONF_CHANGE_PS)
 		brcms_err(core, "%s: change power-save mode: %s (implement)\n",
-			  __func__, conf->flags & IEEE80211_CONF_PS ?
-			  "true" : "false");
+			  __func__,
+			  str_true_false(conf->flags & IEEE80211_CONF_PS));
 
 	if (changed & IEEE80211_CONF_CHANGE_POWER) {
 		err = brcms_c_set_tx_power(wl->wlc, conf->power_level);
@@ -696,7 +698,7 @@ brcms_ops_bss_info_changed(struct ieee80211_hw *hw,
 	if (changed & BSS_CHANGED_BEACON_ENABLED) {
 		/* Beaconing should be enabled/disabled (beaconing modes) */
 		brcms_err(core, "%s: Beacon enabled: %s\n", __func__,
-			  info->enable_beacon ? "true" : "false");
+			  str_true_false(info->enable_beacon));
 		if (info->enable_beacon &&
 		    hw->wiphy->flags & WIPHY_FLAG_AP_PROBE_RESP_OFFLOAD) {
 			brcms_c_enable_probe_resp(wl->wlc, true);
@@ -715,7 +717,7 @@ brcms_ops_bss_info_changed(struct ieee80211_hw *hw,
 	if (changed & BSS_CHANGED_IBSS) {
 		/* IBSS join status changed */
 		brcms_err(core, "%s: IBSS joined: %s (implement)\n",
-			  __func__, vif->cfg.ibss_joined ? "true" : "false");
+			  __func__, str_true_false(vif->cfg.ibss_joined));
 	}
 
 	if (changed & BSS_CHANGED_ARP_FILTER) {
@@ -730,7 +732,7 @@ brcms_ops_bss_info_changed(struct ieee80211_hw *hw,
 		 * Note that it is only ever disabled for station mode.
 		 */
 		brcms_err(core, "%s: qos enabled: %s (implement)\n",
-			  __func__, info->qos ? "true" : "false");
+			  __func__, str_true_false(info->qos));
 	}
 	return;
 }
@@ -907,7 +909,7 @@ static void brcms_ops_flush(struct ieee80211_hw *hw, struct ieee80211_vif *vif,
 	struct brcms_info *wl = hw->priv;
 	int ret;
 
-	no_printk("%s: drop = %s\n", __func__, drop ? "true" : "false");
+	no_printk("%s: drop = %s\n", __func__, str_true_false(drop));
 
 	ret = wait_event_timeout(wl->tx_flush_wq,
 				 brcms_tx_flush_completed(wl),
@@ -959,6 +961,10 @@ static int brcms_ops_beacon_set_tim(struct ieee80211_hw *hw,
 }
 
 static const struct ieee80211_ops brcms_ops = {
+	.add_chanctx = ieee80211_emulate_add_chanctx,
+	.remove_chanctx = ieee80211_emulate_remove_chanctx,
+	.change_chanctx = ieee80211_emulate_change_chanctx,
+	.switch_vif_chanctx = ieee80211_emulate_switch_vif_chanctx,
 	.tx = brcms_ops_tx,
 	.wake_tx_queue = ieee80211_handle_wake_tx_queue,
 	.start = brcms_ops_start,
@@ -1086,6 +1092,7 @@ static int ieee_hw_init(struct ieee80211_hw *hw)
 	ieee80211_hw_set(hw, AMPDU_AGGREGATION);
 	ieee80211_hw_set(hw, SIGNAL_DBM);
 	ieee80211_hw_set(hw, REPORTS_TX_ACK_STATUS);
+	ieee80211_hw_set(hw, MFP_CAPABLE);
 
 	hw->extra_tx_headroom = brcms_c_get_header_len();
 	hw->queues = N_TX_QUEUES;
@@ -1492,7 +1499,7 @@ struct brcms_timer *brcms_init_timer(struct brcms_info *wl,
 {
 	struct brcms_timer *t;
 
-	t = kzalloc(sizeof(struct brcms_timer), GFP_ATOMIC);
+	t = kzalloc(sizeof(*t), GFP_ATOMIC);
 	if (!t)
 		return NULL;
 
@@ -1606,10 +1613,9 @@ int brcms_ucode_init_buf(struct brcms_info *wl, void **pbuf, u32 idx)
 			if (le32_to_cpu(hdr->idx) == idx) {
 				pdata = wl->fw.fw_bin[i]->data +
 					le32_to_cpu(hdr->offset);
-				*pbuf = kvmalloc(len, GFP_KERNEL);
+				*pbuf = kvmemdup(pdata, len, GFP_KERNEL);
 				if (*pbuf == NULL)
-					goto fail;
-				memcpy(*pbuf, pdata, len);
+					return -ENOMEM;
 				return 0;
 			}
 		}
@@ -1617,7 +1623,6 @@ int brcms_ucode_init_buf(struct brcms_info *wl, void **pbuf, u32 idx)
 	brcms_err(wl->wlc->hw->d11core,
 		  "ERROR: ucode buf tag:%d can not be found!\n", idx);
 	*pbuf = NULL;
-fail:
 	return -ENODATA;
 }
 

@@ -1361,16 +1361,6 @@ void sc_flush(struct send_context *sc)
 	sc_wait_for_packet_egress(sc, 1);
 }
 
-/* drop all packets on the context, no waiting until they are sent */
-void sc_drop(struct send_context *sc)
-{
-	if (!sc)
-		return;
-
-	dd_dev_info(sc->dd, "%s: context %u(%u) - not implemented\n",
-		    __func__, sc->sw_index, sc->hw_context);
-}
-
 /*
  * Start the software reaction to a context halt or SPC freeze:
  *	- mark the context as halted or frozen
@@ -2086,7 +2076,7 @@ int init_credit_return(struct hfi1_devdata *dd)
 				   "Unable to allocate credit return DMA range for NUMA %d\n",
 				   i);
 			ret = -ENOMEM;
-			goto done;
+			goto free_cr_base;
 		}
 	}
 	set_dev_node(&dd->pcidev->dev, dd->node);
@@ -2094,6 +2084,10 @@ int init_credit_return(struct hfi1_devdata *dd)
 	ret = 0;
 done:
 	return ret;
+
+free_cr_base:
+	free_credit_return(dd);
+	goto done;
 }
 
 void free_credit_return(struct hfi1_devdata *dd)

@@ -61,7 +61,7 @@ struct mlxsw_sp_bridge_port {
 	struct mlxsw_sp_bridge_device *bridge_device;
 	struct list_head list;
 	struct list_head vlans_list;
-	unsigned int ref_count;
+	refcount_t ref_count;
 	u8 stp_state;
 	unsigned long flags;
 	bool mrouter;
@@ -495,7 +495,7 @@ mlxsw_sp_bridge_port_create(struct mlxsw_sp_bridge_device *bridge_device,
 			     BR_MCAST_FLOOD;
 	INIT_LIST_HEAD(&bridge_port->vlans_list);
 	list_add(&bridge_port->list, &bridge_device->ports_list);
-	bridge_port->ref_count = 1;
+	refcount_set(&bridge_port->ref_count, 1);
 
 	err = switchdev_bridge_port_offload(brport_dev, mlxsw_sp_port->dev,
 					    NULL, NULL, NULL, false, extack);
@@ -531,7 +531,7 @@ mlxsw_sp_bridge_port_get(struct mlxsw_sp_bridge *bridge,
 
 	bridge_port = mlxsw_sp_bridge_port_find(bridge, brport_dev);
 	if (bridge_port) {
-		bridge_port->ref_count++;
+		refcount_inc(&bridge_port->ref_count);
 		return bridge_port;
 	}
 
@@ -558,7 +558,7 @@ static void mlxsw_sp_bridge_port_put(struct mlxsw_sp_bridge *bridge,
 {
 	struct mlxsw_sp_bridge_device *bridge_device;
 
-	if (--bridge_port->ref_count != 0)
+	if (!refcount_dec_and_test(&bridge_port->ref_count))
 		return;
 	bridge_device = bridge_port->bridge_device;
 	mlxsw_sp_bridge_port_destroy(bridge_port);
@@ -2929,23 +2929,8 @@ void mlxsw_sp_port_bridge_leave(struct mlxsw_sp_port *mlxsw_sp_port,
 	mlxsw_sp_bridge_port_put(mlxsw_sp->bridge, bridge_port);
 }
 
-int mlxsw_sp_bridge_vxlan_join(struct mlxsw_sp *mlxsw_sp,
-			       const struct net_device *br_dev,
-			       const struct net_device *vxlan_dev, u16 vid,
-			       struct netlink_ext_ack *extack)
-{
-	struct mlxsw_sp_bridge_device *bridge_device;
-
-	bridge_device = mlxsw_sp_bridge_device_find(mlxsw_sp->bridge, br_dev);
-	if (WARN_ON(!bridge_device))
-		return -EINVAL;
-
-	return bridge_device->ops->vxlan_join(bridge_device, vxlan_dev, vid,
-					      extack);
-}
-
-void mlxsw_sp_bridge_vxlan_leave(struct mlxsw_sp *mlxsw_sp,
-				 const struct net_device *vxlan_dev)
+static void __mlxsw_sp_bridge_vxlan_leave(struct mlxsw_sp *mlxsw_sp,
+					  const struct net_device *vxlan_dev)
 {
 	struct vxlan_dev *vxlan = netdev_priv(vxlan_dev);
 	struct mlxsw_sp_fid *fid;
@@ -2961,6 +2946,47 @@ void mlxsw_sp_bridge_vxlan_leave(struct mlxsw_sp *mlxsw_sp,
 	 */
 	mlxsw_sp_fid_put(fid);
 	mlxsw_sp_fid_put(fid);
+}
+
+int mlxsw_sp_bridge_vxlan_join(struct mlxsw_sp *mlxsw_sp,
+			       const struct net_device *br_dev,
+			       struct net_device *vxlan_dev, u16 vid,
+			       struct netlink_ext_ack *extack)
+{
+	struct mlxsw_sp_bridge_device *bridge_device;
+	struct mlxsw_sp_port *mlxsw_sp_port;
+	int err;
+
+	bridge_device = mlxsw_sp_bridge_device_find(mlxsw_sp->bridge, br_dev);
+	if (WARN_ON(!bridge_device))
+		return -EINVAL;
+
+	mlxsw_sp_port = mlxsw_sp_port_dev_lower_find(bridge_device->dev);
+	if (!mlxsw_sp_port)
+		return -EINVAL;
+
+	err = bridge_device->ops->vxlan_join(bridge_device, vxlan_dev, vid,
+					     extack);
+	if (err)
+		return err;
+
+	err = switchdev_bridge_port_offload(vxlan_dev, mlxsw_sp_port->dev,
+					    NULL, NULL, NULL, false, extack);
+	if (err)
+		goto err_bridge_port_offload;
+
+	return 0;
+
+err_bridge_port_offload:
+	__mlxsw_sp_bridge_vxlan_leave(mlxsw_sp, vxlan_dev);
+	return err;
+}
+
+void mlxsw_sp_bridge_vxlan_leave(struct mlxsw_sp *mlxsw_sp,
+				 struct net_device *vxlan_dev)
+{
+	switchdev_bridge_port_unoffload(vxlan_dev, NULL, NULL, NULL);
+	__mlxsw_sp_bridge_vxlan_leave(mlxsw_sp, vxlan_dev);
 }
 
 static void
@@ -3867,7 +3893,7 @@ mlxsw_sp_switchdev_vxlan_vlan_add(struct mlxsw_sp *mlxsw_sp,
 			mlxsw_sp_fid_put(fid);
 			return -EINVAL;
 		}
-		mlxsw_sp_bridge_vxlan_leave(mlxsw_sp, vxlan_dev);
+		__mlxsw_sp_bridge_vxlan_leave(mlxsw_sp, vxlan_dev);
 		mlxsw_sp_fid_put(fid);
 		return 0;
 	}
@@ -3883,7 +3909,7 @@ mlxsw_sp_switchdev_vxlan_vlan_add(struct mlxsw_sp *mlxsw_sp,
 	/* Fourth case: Thew new VLAN is PVID, which means the VLAN currently
 	 * mapped to the VNI should be unmapped
 	 */
-	mlxsw_sp_bridge_vxlan_leave(mlxsw_sp, vxlan_dev);
+	__mlxsw_sp_bridge_vxlan_leave(mlxsw_sp, vxlan_dev);
 	mlxsw_sp_fid_put(fid);
 
 	/* Fifth case: The new VLAN is also egress untagged, which means the
@@ -3923,7 +3949,7 @@ mlxsw_sp_switchdev_vxlan_vlan_del(struct mlxsw_sp *mlxsw_sp,
 	if (mlxsw_sp_fid_8021q_vid(fid) != vid)
 		goto out;
 
-	mlxsw_sp_bridge_vxlan_leave(mlxsw_sp, vxlan_dev);
+	__mlxsw_sp_bridge_vxlan_leave(mlxsw_sp, vxlan_dev);
 
 out:
 	mlxsw_sp_fid_put(fid);

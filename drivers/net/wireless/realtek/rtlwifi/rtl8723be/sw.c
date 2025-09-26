@@ -32,7 +32,7 @@ static void rtl8723be_init_aspm_vars(struct ieee80211_hw *hw)
 	 * 2 - Enable ASPM with Clock Req,
 	 * 3 - Alwyas Enable ASPM with Clock Req,
 	 * 4 - Always Enable ASPM without Clock Req.
-	 * set defult to RTL8192CE:3 RTL8192E:2
+	 * set default to RTL8192CE:3 RTL8192E:2
 	 */
 	rtlpci->const_pci_aspm = 3;
 
@@ -187,7 +187,7 @@ static bool is_fw_header(struct rtlwifi_firmware_header *hdr)
 	return (le16_to_cpu(hdr->signature) & 0xfff0) == 0x5300;
 }
 
-static struct rtl_hal_ops rtl8723be_hal_ops = {
+static const struct rtl_hal_ops rtl8723be_hal_ops = {
 	.init_sw_vars = rtl8723be_init_sw_vars,
 	.deinit_sw_vars = rtl8723be_deinit_sw_vars,
 	.read_eeprom_info = rtl8723be_read_eeprom_info,

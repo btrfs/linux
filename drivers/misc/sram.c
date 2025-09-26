@@ -23,12 +23,13 @@
 #define SRAM_GRANULARITY	32
 
 static ssize_t sram_read(struct file *filp, struct kobject *kobj,
-			 struct bin_attribute *attr,
+			 const struct bin_attribute *attr,
 			 char *buf, loff_t pos, size_t count)
 {
 	struct sram_partition *part;
 
-	part = container_of(attr, struct sram_partition, battr);
+	/* Cast away the const as the attribute is part of a larger structure */
+	part = (struct sram_partition *)container_of(attr, struct sram_partition, battr);
 
 	mutex_lock(&part->lock);
 	memcpy_fromio(buf, part->base + pos, count);
@@ -38,12 +39,13 @@ static ssize_t sram_read(struct file *filp, struct kobject *kobj,
 }
 
 static ssize_t sram_write(struct file *filp, struct kobject *kobj,
-			  struct bin_attribute *attr,
+			  const struct bin_attribute *attr,
 			  char *buf, loff_t pos, size_t count)
 {
 	struct sram_partition *part;
 
-	part = container_of(attr, struct sram_partition, battr);
+	/* Cast away the const as the attribute is part of a larger structure */
+	part = (struct sram_partition *)container_of(attr, struct sram_partition, battr);
 
 	mutex_lock(&part->lock);
 	memcpy_toio(part->base + pos, buf, count);
@@ -164,8 +166,8 @@ static void sram_free_partitions(struct sram_dev *sram)
 static int sram_reserve_cmp(void *priv, const struct list_head *a,
 					const struct list_head *b)
 {
-	struct sram_reserve *ra = list_entry(a, struct sram_reserve, list);
-	struct sram_reserve *rb = list_entry(b, struct sram_reserve, list);
+	const struct sram_reserve *ra = list_entry(a, struct sram_reserve, list);
+	const struct sram_reserve *rb = list_entry(b, struct sram_reserve, list);
 
 	return ra->start - rb->start;
 }
@@ -435,7 +437,7 @@ err_free_partitions:
 	return ret;
 }
 
-static int sram_remove(struct platform_device *pdev)
+static void sram_remove(struct platform_device *pdev)
 {
 	struct sram_dev *sram = platform_get_drvdata(pdev);
 
@@ -443,8 +445,6 @@ static int sram_remove(struct platform_device *pdev)
 
 	if (sram->pool && gen_pool_avail(sram->pool) < gen_pool_size(sram->pool))
 		dev_err(sram->dev, "removed while SRAM allocated\n");
-
-	return 0;
 }
 
 static struct platform_driver sram_driver = {

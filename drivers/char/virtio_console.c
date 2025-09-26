@@ -26,6 +26,7 @@
 #include <linux/workqueue.h>
 #include <linux/module.h>
 #include <linux/dma-mapping.h>
+#include <linux/string_choices.h>
 #include "../tty/hvc/hvc_console.h"
 
 #define is_rproc_enabled IS_ENABLED(CONFIG_REMOTEPROC)
@@ -883,9 +884,9 @@ static int pipe_to_sg(struct pipe_inode_info *pipe, struct pipe_buffer *buf,
 		if (len + offset > PAGE_SIZE)
 			len = PAGE_SIZE - offset;
 
-		src = kmap_atomic(buf->page);
+		src = kmap_local_page(buf->page);
 		memcpy(page_address(page) + offset, src + buf->offset, len);
-		kunmap_atomic(src);
+		kunmap_local(src);
 
 		sg_set_page(&(sgl->sg[sgl->n]), page, len, offset);
 	}
@@ -923,14 +924,14 @@ static ssize_t port_fops_splice_write(struct pipe_inode_info *pipe,
 
 	pipe_lock(pipe);
 	ret = 0;
-	if (pipe_empty(pipe->head, pipe->tail))
+	if (pipe_is_empty(pipe))
 		goto error_out;
 
 	ret = wait_port_writable(port, filp->f_flags & O_NONBLOCK);
 	if (ret < 0)
 		goto error_out;
 
-	occupancy = pipe_occupancy(pipe->head, pipe->tail);
+	occupancy = pipe_buf_usage(pipe);
 	buf = alloc_buf(port->portdev->vdev, 0, occupancy);
 
 	if (!buf) {
@@ -1093,7 +1094,6 @@ static const struct file_operations port_fops = {
 	.poll  = port_fops_poll,
 	.release = port_fops_release,
 	.fasync = port_fops_fasync,
-	.llseek = no_llseek,
 };
 
 /*
@@ -1270,8 +1270,7 @@ static int port_debugfs_show(struct seq_file *s, void *data)
 	seq_printf(s, "bytes_sent: %lu\n", port->stats.bytes_sent);
 	seq_printf(s, "bytes_received: %lu\n", port->stats.bytes_received);
 	seq_printf(s, "bytes_discarded: %lu\n", port->stats.bytes_discarded);
-	seq_printf(s, "is_console: %s\n",
-		   is_console_port(port) ? "yes" : "no");
+	seq_printf(s, "is_console: %s\n", str_yes_no(is_console_port(port)));
 	seq_printf(s, "console_vtermno: %u\n", port->cons.vtermno);
 
 	return 0;
@@ -1322,7 +1321,6 @@ static void send_sigio_to_port(struct port *port)
 
 static int add_port(struct ports_device *portdev, u32 id)
 {
-	char debugfs_name[16];
 	struct port *port;
 	dev_t devt;
 	int err;
@@ -1425,9 +1423,7 @@ static int add_port(struct ports_device *portdev, u32 id)
 	 * Finally, create the debugfs file that we can use to
 	 * inspect a port's state at any time
 	 */
-	snprintf(debugfs_name, sizeof(debugfs_name), "vport%up%u",
-		 port->portdev->vdev->index, id);
-	port->debugfs_file = debugfs_create_file(debugfs_name, 0444,
+	port->debugfs_file = debugfs_create_file(dev_name(port->dev), 0444,
 						 pdrvdata.debugfs_dir,
 						 port, &port_debugfs_fops);
 	return 0;
@@ -1580,8 +1576,8 @@ static void handle_control_message(struct virtio_device *vdev,
 		break;
 	case VIRTIO_CONSOLE_RESIZE: {
 		struct {
-			__u16 rows;
-			__u16 cols;
+			__virtio16 cols;
+			__virtio16 rows;
 		} size;
 
 		if (!is_console_port(port))
@@ -1589,7 +1585,8 @@ static void handle_control_message(struct virtio_device *vdev,
 
 		memcpy(&size, buf->buf + buf->offset + sizeof(*cpkt),
 		       sizeof(size));
-		set_console_size(port, size.rows, size.cols);
+		set_console_size(port, virtio16_to_cpu(vdev, size.rows),
+				 virtio16_to_cpu(vdev, size.cols));
 
 		port->cons.hvc->irq_requested = 1;
 		resize_console(port);
@@ -1804,8 +1801,7 @@ static void config_work_handler(struct work_struct *work)
 
 static int init_vqs(struct ports_device *portdev)
 {
-	vq_callback_t **io_callbacks;
-	char **io_names;
+	struct virtqueue_info *vqs_info;
 	struct virtqueue **vqs;
 	u32 i, j, nr_ports, nr_queues;
 	int err;
@@ -1814,15 +1810,12 @@ static int init_vqs(struct ports_device *portdev)
 	nr_queues = use_multiport(portdev) ? (nr_ports + 1) * 2 : 2;
 
 	vqs = kmalloc_array(nr_queues, sizeof(struct virtqueue *), GFP_KERNEL);
-	io_callbacks = kmalloc_array(nr_queues, sizeof(vq_callback_t *),
-				     GFP_KERNEL);
-	io_names = kmalloc_array(nr_queues, sizeof(char *), GFP_KERNEL);
+	vqs_info = kcalloc(nr_queues, sizeof(*vqs_info), GFP_KERNEL);
 	portdev->in_vqs = kmalloc_array(nr_ports, sizeof(struct virtqueue *),
 					GFP_KERNEL);
 	portdev->out_vqs = kmalloc_array(nr_ports, sizeof(struct virtqueue *),
 					 GFP_KERNEL);
-	if (!vqs || !io_callbacks || !io_names || !portdev->in_vqs ||
-	    !portdev->out_vqs) {
+	if (!vqs || !vqs_info || !portdev->in_vqs || !portdev->out_vqs) {
 		err = -ENOMEM;
 		goto free;
 	}
@@ -1833,30 +1826,27 @@ static int init_vqs(struct ports_device *portdev)
 	 * 0 before others.
 	 */
 	j = 0;
-	io_callbacks[j] = in_intr;
-	io_callbacks[j + 1] = out_intr;
-	io_names[j] = "input";
-	io_names[j + 1] = "output";
+	vqs_info[j].callback = in_intr;
+	vqs_info[j + 1].callback = out_intr;
+	vqs_info[j].name = "input";
+	vqs_info[j + 1].name = "output";
 	j += 2;
 
 	if (use_multiport(portdev)) {
-		io_callbacks[j] = control_intr;
-		io_callbacks[j + 1] = NULL;
-		io_names[j] = "control-i";
-		io_names[j + 1] = "control-o";
+		vqs_info[j].callback = control_intr;
+		vqs_info[j].name = "control-i";
+		vqs_info[j + 1].name = "control-o";
 
 		for (i = 1; i < nr_ports; i++) {
 			j += 2;
-			io_callbacks[j] = in_intr;
-			io_callbacks[j + 1] = out_intr;
-			io_names[j] = "input";
-			io_names[j + 1] = "output";
+			vqs_info[j].callback = in_intr;
+			vqs_info[j + 1].callback = out_intr;
+			vqs_info[j].name = "input";
+			vqs_info[j + 1].name = "output";
 		}
 	}
 	/* Find the queues. */
-	err = virtio_find_vqs(portdev->vdev, nr_queues, vqs,
-			      io_callbacks,
-			      (const char **)io_names, NULL);
+	err = virtio_find_vqs(portdev->vdev, nr_queues, vqs, vqs_info, NULL);
 	if (err)
 		goto free;
 
@@ -1874,8 +1864,7 @@ static int init_vqs(struct ports_device *portdev)
 			portdev->out_vqs[i] = vqs[j + 1];
 		}
 	}
-	kfree(io_names);
-	kfree(io_callbacks);
+	kfree(vqs_info);
 	kfree(vqs);
 
 	return 0;
@@ -1883,8 +1872,7 @@ static int init_vqs(struct ports_device *portdev)
 free:
 	kfree(portdev->out_vqs);
 	kfree(portdev->in_vqs);
-	kfree(io_names);
-	kfree(io_callbacks);
+	kfree(vqs_info);
 	kfree(vqs);
 
 	return err;
@@ -2016,17 +2004,9 @@ static int virtcons_probe(struct virtio_device *vdev)
 		multiport = true;
 	}
 
-	err = init_vqs(portdev);
-	if (err < 0) {
-		dev_err(&vdev->dev, "Error %d initializing vqs\n", err);
-		goto free_chrdev;
-	}
-
 	spin_lock_init(&portdev->ports_lock);
 	INIT_LIST_HEAD(&portdev->ports);
 	INIT_LIST_HEAD(&portdev->list);
-
-	virtio_device_ready(portdev->vdev);
 
 	INIT_WORK(&portdev->config_work, &config_work_handler);
 	INIT_WORK(&portdev->control_work, &control_work_handler);
@@ -2034,7 +2014,17 @@ static int virtcons_probe(struct virtio_device *vdev)
 	if (multiport) {
 		spin_lock_init(&portdev->c_ivq_lock);
 		spin_lock_init(&portdev->c_ovq_lock);
+	}
 
+	err = init_vqs(portdev);
+	if (err < 0) {
+		dev_err(&vdev->dev, "Error %d initializing vqs\n", err);
+		goto free_chrdev;
+	}
+
+	virtio_device_ready(portdev->vdev);
+
+	if (multiport) {
 		err = fill_queue(portdev->c_ivq, &portdev->c_ivq_lock);
 		if (err < 0) {
 			dev_err(&vdev->dev,
@@ -2173,7 +2163,6 @@ static struct virtio_driver virtio_console = {
 	.feature_table = features,
 	.feature_table_size = ARRAY_SIZE(features),
 	.driver.name =	KBUILD_MODNAME,
-	.driver.owner =	THIS_MODULE,
 	.id_table =	id_table,
 	.probe =	virtcons_probe,
 	.remove =	virtcons_remove,
@@ -2188,7 +2177,6 @@ static struct virtio_driver virtio_rproc_serial = {
 	.feature_table = rproc_serial_features,
 	.feature_table_size = ARRAY_SIZE(rproc_serial_features),
 	.driver.name =	"virtio_rproc_serial",
-	.driver.owner =	THIS_MODULE,
 	.id_table =	rproc_serial_id_table,
 	.probe =	virtcons_probe,
 	.remove =	virtcons_remove,

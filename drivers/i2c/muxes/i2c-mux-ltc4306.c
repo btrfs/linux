@@ -85,13 +85,13 @@ static int ltc4306_gpio_get(struct gpio_chip *chip, unsigned int offset)
 	return !!(val & BIT(1 - offset));
 }
 
-static void ltc4306_gpio_set(struct gpio_chip *chip, unsigned int offset,
-			     int value)
+static int ltc4306_gpio_set(struct gpio_chip *chip, unsigned int offset,
+			    int value)
 {
 	struct ltc4306 *data = gpiochip_get_data(chip);
 
-	regmap_update_bits(data->regmap, LTC_REG_CONFIG, BIT(5 - offset),
-			   value ? BIT(5 - offset) : 0);
+	return regmap_update_bits(data->regmap, LTC_REG_CONFIG,
+				  BIT(5 - offset), value ? BIT(5 - offset) : 0);
 }
 
 static int ltc4306_gpio_get_direction(struct gpio_chip *chip,
@@ -279,7 +279,7 @@ static int ltc4306_probe(struct i2c_client *client)
 
 	/* Now create an adapter for each channel */
 	for (num = 0; num < chip->nchans; num++) {
-		ret = i2c_mux_add_adapter(muxc, 0, num, 0);
+		ret = i2c_mux_add_adapter(muxc, 0, num);
 		if (ret) {
 			i2c_mux_del_adapters(muxc);
 			return ret;
@@ -303,7 +303,7 @@ static void ltc4306_remove(struct i2c_client *client)
 static struct i2c_driver ltc4306_driver = {
 	.driver		= {
 		.name	= "ltc4306",
-		.of_match_table = of_match_ptr(ltc4306_of_match),
+		.of_match_table = ltc4306_of_match,
 	},
 	.probe		= ltc4306_probe,
 	.remove		= ltc4306_remove,

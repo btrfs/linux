@@ -922,6 +922,8 @@ static int ov7251_set_power_on(struct device *dev)
 		return ret;
 	}
 
+	usleep_range(1000, 1100);
+
 	gpiod_set_value_cansleep(ov7251->enable_gpio, 1);
 
 	/* wait at least 65536 external clock cycles */
@@ -1484,9 +1486,14 @@ static int ov7251_check_hwcfg(struct ov7251 *ov7251)
 	unsigned int i, j;
 	int ret;
 
+	/*
+	 * Sometimes the fwnode graph is initialized by the bridge driver
+	 * Bridge drivers doing this may also add GPIO mappings, wait for this.
+	 */
 	endpoint = fwnode_graph_get_next_endpoint(fwnode, NULL);
 	if (!endpoint)
-		return -EPROBE_DEFER; /* could be provided by cio2-bridge */
+		return dev_err_probe(ov7251->dev, -EPROBE_DEFER,
+				     "waiting for fwnode graph endpoint\n");
 
 	ret = v4l2_fwnode_endpoint_alloc_parse(endpoint, &bus_cfg);
 	fwnode_handle_put(endpoint);
@@ -1696,7 +1703,7 @@ static int ov7251_probe(struct i2c_client *client)
 		return PTR_ERR(ov7251->analog_regulator);
 	}
 
-	ov7251->enable_gpio = devm_gpiod_get(dev, "enable", GPIOD_OUT_HIGH);
+	ov7251->enable_gpio = devm_gpiod_get(dev, "enable", GPIOD_OUT_LOW);
 	if (IS_ERR(ov7251->enable_gpio)) {
 		dev_err(dev, "cannot get enable gpio\n");
 		return PTR_ERR(ov7251->enable_gpio);

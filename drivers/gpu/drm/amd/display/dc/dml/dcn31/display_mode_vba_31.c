@@ -1105,6 +1105,7 @@ static bool CalculatePrefetchSchedule(
 	Tr0_oto_lines = dml_ceil(4.0 * Tr0_oto / LineTime, 1) / 4.0;
 	dst_y_prefetch_oto = Tvm_oto_lines + 2 * Tr0_oto_lines + Lsw_oto;
 	dst_y_prefetch_equ =  VStartup - (*TSetup + dml_max(TWait + TCalc, *Tdmdl)) / LineTime - (*DSTYAfterScaler + *DSTXAfterScaler / myPipe->HTotal);
+	dst_y_prefetch_equ = dml_min(dst_y_prefetch_equ, 63.75); // limit to the reg limit of U6.2 for DST_Y_PREFETCH
 	dst_y_prefetch_equ = dml_floor(4.0 * (dst_y_prefetch_equ + 0.125), 1) / 4.0;
 	Tpre_rounded = dst_y_prefetch_equ * LineTime;
 
@@ -1444,12 +1445,9 @@ static bool CalculatePrefetchSchedule(
 
 	if (MyError) {
 		*PrefetchBandwidth = 0;
-		TimeForFetchingMetaPTE = 0;
-		TimeForFetchingRowInVBlank = 0;
 		*DestinationLinesToRequestVMInVBlank = 0;
 		*DestinationLinesToRequestRowInVBlank = 0;
 		*DestinationLinesForPrefetch = 0;
-		LinesToRequestPrefetchPixelData = 0;
 		*VRatioPrefetchY = 0;
 		*VRatioPrefetchC = 0;
 		*RequiredPrefetchPixDataBWLuma = 0;
@@ -1924,15 +1922,6 @@ static unsigned int CalculateVMAndRowBytes(
 		*PixelPTEReqWidth = 32768.0 / BytePerPixel;
 		*PTERequestSize = 64;
 		FractionOfPTEReturnDrop = 0;
-	} else if (MacroTileSizeBytes == 4096) {
-		PixelPTEReqHeightPTEs = 1;
-		*PixelPTEReqHeight = MacroTileHeight;
-		*PixelPTEReqWidth = 8 * *MacroTileWidth;
-		*PTERequestSize = 64;
-		if (ScanDirection != dm_vert)
-			FractionOfPTEReturnDrop = 0;
-		else
-			FractionOfPTEReturnDrop = 7 / 8;
 	} else if (GPUVMMinPageSize == 4 && MacroTileSizeBytes > 4096) {
 		PixelPTEReqHeightPTEs = 16;
 		*PixelPTEReqHeight = 16 * BlockHeight256Bytes;
@@ -3617,7 +3606,7 @@ static double TruncToValidBPP(
 		NonDSCBPP1 = 15;
 		NonDSCBPP2 = 18;
 		MinDSCBPP = 6;
-		MaxDSCBPP = 1.5 * DSCInputBitPerComponent - 1 / 16;
+		MaxDSCBPP = 1.5 * DSCInputBitPerComponent - 1.0 / 16;
 	} else if (Format == dm_444) {
 		NonDSCBPP0 = 24;
 		NonDSCBPP1 = 30;
@@ -3679,7 +3668,6 @@ static double TruncToValidBPP(
 			return DesiredBPP;
 		}
 	}
-	return BPP_INVALID;
 }
 
 static noinline void CalculatePrefetchSchedulePerPlane(
