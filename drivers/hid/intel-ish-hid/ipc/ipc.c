@@ -78,7 +78,7 @@ static bool check_generated_interrupt(struct ishtp_device *dev)
 	bool interrupt_generated = true;
 	uint32_t pisr_val = 0;
 
-	if (dev->pdev->device == CHV_DEVICE_ID) {
+	if (dev->pdev->device == PCI_DEVICE_ID_INTEL_ISH_CHV) {
 		pisr_val = ish_reg_read(dev, IPC_REG_PISR_CHV_AB);
 		interrupt_generated =
 			IPC_INT_FROM_ISH_TO_HOST_CHV_AB(pisr_val);
@@ -117,7 +117,7 @@ static bool ish_is_input_ready(struct ishtp_device *dev)
  */
 static void set_host_ready(struct ishtp_device *dev)
 {
-	if (dev->pdev->device == CHV_DEVICE_ID) {
+	if (dev->pdev->device == PCI_DEVICE_ID_INTEL_ISH_CHV) {
 		if (dev->pdev->revision == REVISION_ID_CHT_A0 ||
 				(dev->pdev->revision & REVISION_ID_SI_MASK) ==
 				REVISION_ID_CHT_Ax_SI)
@@ -517,6 +517,10 @@ static int ish_fw_reset_handler(struct ishtp_device *dev)
 	/* ISH FW is dead */
 	if (!ish_is_input_ready(dev))
 		return	-EPIPE;
+
+	/* Send clock sync at once after reset */
+	ishtp_dev->prev_sync = 0;
+
 	/*
 	 * Set HOST2ISH.ILUP. Apparently we need this BEFORE sending
 	 * RESET_NOTIFY_ACK - FW will be checking for it
@@ -546,11 +550,11 @@ static int ish_fw_reset_handler(struct ishtp_device *dev)
 
 /**
  * fw_reset_work_fn() - FW reset worker function
- * @unused: not used
+ * @work: Work item
  *
  * Call ish_fw_reset_handler to complete FW reset
  */
-static void fw_reset_work_fn(struct work_struct *unused)
+static void fw_reset_work_fn(struct work_struct *work)
 {
 	int	rv;
 
@@ -562,7 +566,8 @@ static void fw_reset_work_fn(struct work_struct *unused)
 		wake_up_interruptible(&ishtp_dev->wait_hw_ready);
 
 		/* ISHTP notification in IPC_RESET sequence completion */
-		ishtp_reset_compl_handler(ishtp_dev);
+		if (!work_pending(work))
+			ishtp_reset_compl_handler(ishtp_dev);
 	} else
 		dev_err(ishtp_dev->devc, "[ishtp-ish]: FW reset failed (%d)\n",
 			rv);
@@ -576,15 +581,14 @@ static void fw_reset_work_fn(struct work_struct *unused)
  */
 static void _ish_sync_fw_clock(struct ishtp_device *dev)
 {
-	static unsigned long	prev_sync;
-	uint64_t	usec;
+	struct ipc_time_update_msg time = {};
 
-	if (prev_sync && time_before(jiffies, prev_sync + 20 * HZ))
+	if (dev->prev_sync && time_before(jiffies, dev->prev_sync + 20 * HZ))
 		return;
 
-	prev_sync = jiffies;
-	usec = ktime_to_us(ktime_get_boottime());
-	ipc_send_mng_msg(dev, MNG_SYNC_FW_CLOCK, &usec, sizeof(uint64_t));
+	dev->prev_sync = jiffies;
+	/* The fields of time would be updated while sending message */
+	ipc_send_mng_msg(dev, MNG_SYNC_FW_CLOCK, &time, sizeof(time));
 }
 
 /**
@@ -909,11 +913,11 @@ static uint32_t ish_ipc_get_header(struct ishtp_device *dev, int length,
  */
 static bool _dma_no_cache_snooping(struct ishtp_device *dev)
 {
-	return (dev->pdev->device == EHL_Ax_DEVICE_ID ||
-		dev->pdev->device == TGL_LP_DEVICE_ID ||
-		dev->pdev->device == TGL_H_DEVICE_ID ||
-		dev->pdev->device == ADL_S_DEVICE_ID ||
-		dev->pdev->device == ADL_P_DEVICE_ID);
+	return (dev->pdev->device == PCI_DEVICE_ID_INTEL_ISH_EHL_Ax ||
+		dev->pdev->device == PCI_DEVICE_ID_INTEL_ISH_TGL_LP ||
+		dev->pdev->device == PCI_DEVICE_ID_INTEL_ISH_TGL_H ||
+		dev->pdev->device == PCI_DEVICE_ID_INTEL_ISH_ADL_S ||
+		dev->pdev->device == PCI_DEVICE_ID_INTEL_ISH_ADL_P);
 }
 
 static const struct ishtp_hw_ops ish_hw_ops = {
@@ -948,6 +952,7 @@ struct ishtp_device *ish_dev_init(struct pci_dev *pdev)
 	if (!dev)
 		return NULL;
 
+	dev->devc = &pdev->dev;
 	ishtp_device_init(dev);
 
 	init_waitqueue_head(&dev->wait_hw_ready);
@@ -983,7 +988,6 @@ struct ishtp_device *ish_dev_init(struct pci_dev *pdev)
 	}
 
 	dev->ops = &ish_hw_ops;
-	dev->devc = &pdev->dev;
 	dev->mtu = IPC_PAYLOAD_SIZE - sizeof(struct ishtp_msg_hdr);
 	return dev;
 }

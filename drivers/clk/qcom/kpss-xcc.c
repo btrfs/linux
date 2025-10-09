@@ -5,7 +5,6 @@
 #include <linux/init.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
-#include <linux/property.h>
 #include <linux/err.h>
 #include <linux/io.h>
 #include <linux/of.h>
@@ -58,9 +57,7 @@ static int kpss_xcc_driver_probe(struct platform_device *pdev)
 	if (IS_ERR(hw))
 		return PTR_ERR(hw);
 
-	of_clk_add_hw_provider(dev->of_node, of_clk_hw_simple_get, hw);
-
-	return 0;
+	return of_clk_add_hw_provider(dev->of_node, of_clk_hw_simple_get, hw);
 }
 
 static struct platform_driver kpss_xcc_driver = {

@@ -7,12 +7,13 @@
 
 #include <kunit/visibility.h>
 
-#include <drm/xe_drm.h>
+#include <uapi/drm/xe_drm.h>
 
 #include "xe_gt.h"
 #include "xe_gt_topology.h"
 #include "xe_macros.h"
 #include "xe_reg_sr.h"
+#include "xe_sriov.h"
 
 /**
  * DOC: Register Table Processing
@@ -35,11 +36,18 @@ static bool rule_matches(const struct xe_device *xe,
 			 unsigned int n_rules)
 {
 	const struct xe_rtp_rule *r;
-	unsigned int i;
+	unsigned int i, rcount = 0;
 	bool match;
 
 	for (r = rules, i = 0; i < n_rules; r = &rules[++i]) {
 		switch (r->match_type) {
+		case XE_RTP_MATCH_OR:
+			/*
+			 * This is only reached if a complete set of
+			 * rules passed or none were evaluated. For both cases,
+			 * shortcut the other rules and return the proper value.
+			 */
+			goto done;
 		case XE_RTP_MATCH_PLATFORM:
 			match = xe->info.platform == r->platform;
 			break;
@@ -48,32 +56,62 @@ static bool rule_matches(const struct xe_device *xe,
 				xe->info.subplatform == r->subplatform;
 			break;
 		case XE_RTP_MATCH_GRAPHICS_VERSION:
+			if (drm_WARN_ON(&xe->drm, !gt))
+				return false;
+
 			match = xe->info.graphics_verx100 == r->ver_start &&
 				(!has_samedia(xe) || !xe_gt_is_media_type(gt));
 			break;
 		case XE_RTP_MATCH_GRAPHICS_VERSION_RANGE:
+			if (drm_WARN_ON(&xe->drm, !gt))
+				return false;
+
 			match = xe->info.graphics_verx100 >= r->ver_start &&
 				xe->info.graphics_verx100 <= r->ver_end &&
 				(!has_samedia(xe) || !xe_gt_is_media_type(gt));
 			break;
+		case XE_RTP_MATCH_GRAPHICS_VERSION_ANY_GT:
+			if (drm_WARN_ON(&xe->drm, !gt))
+				return false;
+
+			match = xe->info.graphics_verx100 == r->ver_start;
+			break;
 		case XE_RTP_MATCH_GRAPHICS_STEP:
+			if (drm_WARN_ON(&xe->drm, !gt))
+				return false;
+
 			match = xe->info.step.graphics >= r->step_start &&
 				xe->info.step.graphics < r->step_end &&
 				(!has_samedia(xe) || !xe_gt_is_media_type(gt));
 			break;
 		case XE_RTP_MATCH_MEDIA_VERSION:
+			if (drm_WARN_ON(&xe->drm, !gt))
+				return false;
+
 			match = xe->info.media_verx100 == r->ver_start &&
 				(!has_samedia(xe) || xe_gt_is_media_type(gt));
 			break;
 		case XE_RTP_MATCH_MEDIA_VERSION_RANGE:
+			if (drm_WARN_ON(&xe->drm, !gt))
+				return false;
+
 			match = xe->info.media_verx100 >= r->ver_start &&
 				xe->info.media_verx100 <= r->ver_end &&
 				(!has_samedia(xe) || xe_gt_is_media_type(gt));
 			break;
 		case XE_RTP_MATCH_MEDIA_STEP:
+			if (drm_WARN_ON(&xe->drm, !gt))
+				return false;
+
 			match = xe->info.step.media >= r->step_start &&
 				xe->info.step.media < r->step_end &&
 				(!has_samedia(xe) || xe_gt_is_media_type(gt));
+			break;
+		case XE_RTP_MATCH_MEDIA_VERSION_ANY_GT:
+			if (drm_WARN_ON(&xe->drm, !gt))
+				return false;
+
+			match = xe->info.media_verx100 == r->ver_start;
 			break;
 		case XE_RTP_MATCH_INTEGRATED:
 			match = !xe->info.is_dgfx;
@@ -94,6 +132,9 @@ static bool rule_matches(const struct xe_device *xe,
 			match = hwe->class != r->engine_class;
 			break;
 		case XE_RTP_MATCH_FUNC:
+			if (drm_WARN_ON(&xe->drm, !gt))
+				return false;
+
 			match = r->match_func(gt, hwe);
 			break;
 		default:
@@ -102,9 +143,26 @@ static bool rule_matches(const struct xe_device *xe,
 			match = false;
 		}
 
-		if (!match)
-			return false;
+		if (!match) {
+			/*
+			 * Advance rules until we find XE_RTP_MATCH_OR to check
+			 * if there's another set of conditions to check
+			 */
+			while (++i < n_rules && rules[i].match_type != XE_RTP_MATCH_OR)
+				;
+
+			if (i >= n_rules)
+				return false;
+
+			rcount = 0;
+		} else {
+			rcount++;
+		}
 	}
+
+done:
+	if (drm_WARN_ON(&xe->drm, !rcount))
+		return false;
 
 	return true;
 }
@@ -155,6 +213,11 @@ static void rtp_get_context(struct xe_rtp_process_ctx *ctx,
 			    struct xe_device **xe)
 {
 	switch (ctx->type) {
+	case XE_RTP_PROCESS_TYPE_DEVICE:
+		*hwe = NULL;
+		*gt = NULL;
+		*xe = ctx->xe;
+		break;
 	case XE_RTP_PROCESS_TYPE_GT:
 		*hwe = NULL;
 		*gt = ctx->gt;
@@ -165,7 +228,7 @@ static void rtp_get_context(struct xe_rtp_process_ctx *ctx,
 		*gt = (*hwe)->gt;
 		*xe = gt_to_xe(*gt);
 		break;
-	};
+	}
 }
 
 /**
@@ -186,21 +249,19 @@ void xe_rtp_process_ctx_enable_active_tracking(struct xe_rtp_process_ctx *ctx,
 	ctx->active_entries = active_entries;
 	ctx->n_entries = n_entries;
 }
+EXPORT_SYMBOL_IF_KUNIT(xe_rtp_process_ctx_enable_active_tracking);
 
 static void rtp_mark_active(struct xe_device *xe,
 			    struct xe_rtp_process_ctx *ctx,
-			    unsigned int first, unsigned int last)
+			    unsigned int idx)
 {
 	if (!ctx->active_entries)
 		return;
 
-	if (drm_WARN_ON(&xe->drm, last > ctx->n_entries))
+	if (drm_WARN_ON(&xe->drm, idx >= ctx->n_entries))
 		return;
 
-	if (first == last)
-		bitmap_set(ctx->active_entries, first, 1);
-	else
-		bitmap_set(ctx->active_entries, first, last - first + 2);
+	bitmap_set(ctx->active_entries, idx, 1);
 }
 
 /**
@@ -208,6 +269,7 @@ static void rtp_mark_active(struct xe_device *xe,
  *                        the save-restore argument.
  * @ctx: The context for processing the table, with one of device, gt or hwe
  * @entries: Table with RTP definitions
+ * @n_entries: Number of entries to process, usually ARRAY_SIZE(entries)
  * @sr: Save-restore struct where matching rules execute the action. This can be
  *      viewed as the "coalesced view" of multiple the tables. The bits for each
  *      register set are expected not to collide with previously added entries
@@ -218,6 +280,7 @@ static void rtp_mark_active(struct xe_device *xe,
  */
 void xe_rtp_process_to_sr(struct xe_rtp_process_ctx *ctx,
 			  const struct xe_rtp_entry_sr *entries,
+			  size_t n_entries,
 			  struct xe_reg_sr *sr)
 {
 	const struct xe_rtp_entry_sr *entry;
@@ -227,7 +290,9 @@ void xe_rtp_process_to_sr(struct xe_rtp_process_ctx *ctx,
 
 	rtp_get_context(ctx, &hwe, &gt, &xe);
 
-	for (entry = entries; entry && entry->name; entry++) {
+	xe_assert(xe, entries);
+
+	for (entry = entries; entry - entries < n_entries; entry++) {
 		bool match = false;
 
 		if (entry->flags & XE_RTP_ENTRY_FLAG_FOREACH_ENGINE) {
@@ -242,8 +307,7 @@ void xe_rtp_process_to_sr(struct xe_rtp_process_ctx *ctx,
 		}
 
 		if (match)
-			rtp_mark_active(xe, ctx, entry - entries,
-					entry - entries);
+			rtp_mark_active(xe, ctx, entry - entries);
 	}
 }
 EXPORT_SYMBOL_IF_KUNIT(xe_rtp_process_to_sr);
@@ -254,44 +318,29 @@ EXPORT_SYMBOL_IF_KUNIT(xe_rtp_process_to_sr);
  * @entries: Table with RTP definitions
  *
  * Walk the table pointed by @entries (with an empty sentinel), executing the
- * rules. A few differences from xe_rtp_process_to_sr():
- *
- * 1. There is no action associated with each entry since this uses
- *    struct xe_rtp_entry. Its main use is for marking active workarounds via
- *    xe_rtp_process_ctx_enable_active_tracking().
- * 2. There is support for OR operations by having entries with no name.
+ * rules. One difference from xe_rtp_process_to_sr(): there is no action
+ * associated with each entry since this uses struct xe_rtp_entry. Its main use
+ * is for marking active workarounds via
+ * xe_rtp_process_ctx_enable_active_tracking().
  */
 void xe_rtp_process(struct xe_rtp_process_ctx *ctx,
 		    const struct xe_rtp_entry *entries)
 {
-	const struct xe_rtp_entry *entry, *first_entry;
+	const struct xe_rtp_entry *entry;
 	struct xe_hw_engine *hwe;
 	struct xe_gt *gt;
 	struct xe_device *xe;
 
 	rtp_get_context(ctx, &hwe, &gt, &xe);
 
-	first_entry = entries;
-	if (drm_WARN_ON(&xe->drm, !first_entry->name))
-		return;
-
 	for (entry = entries; entry && entry->rules; entry++) {
-		if (entry->name)
-			first_entry = entry;
-
 		if (!rule_matches(xe, gt, hwe, entry->rules, entry->n_rules))
 			continue;
 
-		/* Fast-forward entry, eliminating the OR'ed entries */
-		for (entry++; entry && entry->rules; entry++)
-			if (entry->name)
-				break;
-		entry--;
-
-		rtp_mark_active(xe, ctx, first_entry - entries,
-				entry - entries);
+		rtp_mark_active(xe, ctx, entry - entries);
 	}
 }
+EXPORT_SYMBOL_IF_KUNIT(xe_rtp_process);
 
 bool xe_rtp_match_even_instance(const struct xe_gt *gt,
 				const struct xe_hw_engine *hwe)
@@ -309,17 +358,8 @@ bool xe_rtp_match_first_render_or_compute(const struct xe_gt *gt,
 		hwe->engine_id == __ffs(render_compute_mask);
 }
 
-bool xe_rtp_match_first_gslice_fused_off(const struct xe_gt *gt,
-					 const struct xe_hw_engine *hwe)
+bool xe_rtp_match_not_sriov_vf(const struct xe_gt *gt,
+			       const struct xe_hw_engine *hwe)
 {
-	unsigned int dss_per_gslice = 4;
-	unsigned int dss;
-
-	if (drm_WARN(&gt_to_xe(gt)->drm, xe_dss_mask_empty(gt->fuse_topo.g_dss_mask),
-		     "Checking gslice for platform without geometry pipeline\n"))
-		return false;
-
-	dss = xe_dss_mask_group_ffs(gt->fuse_topo.g_dss_mask, 0, 0);
-
-	return dss >= dss_per_gslice;
+	return !IS_SRIOV_VF(gt_to_xe(gt));
 }

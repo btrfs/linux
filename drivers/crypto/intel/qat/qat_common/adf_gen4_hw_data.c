@@ -1,108 +1,19 @@
 // SPDX-License-Identifier: (BSD-3-Clause OR GPL-2.0-only)
 /* Copyright(c) 2020 Intel Corporation */
+
+#define pr_fmt(fmt)	"QAT: " fmt
+
+#include <linux/bitops.h>
 #include <linux/iopoll.h>
+#include <asm/div64.h>
 #include "adf_accel_devices.h"
 #include "adf_cfg_services.h"
 #include "adf_common_drv.h"
+#include "adf_fw_config.h"
 #include "adf_gen4_hw_data.h"
 #include "adf_gen4_pm.h"
-
-static u64 build_csr_ring_base_addr(dma_addr_t addr, u32 size)
-{
-	return BUILD_RING_BASE_ADDR(addr, size);
-}
-
-static u32 read_csr_ring_head(void __iomem *csr_base_addr, u32 bank, u32 ring)
-{
-	return READ_CSR_RING_HEAD(csr_base_addr, bank, ring);
-}
-
-static void write_csr_ring_head(void __iomem *csr_base_addr, u32 bank, u32 ring,
-				u32 value)
-{
-	WRITE_CSR_RING_HEAD(csr_base_addr, bank, ring, value);
-}
-
-static u32 read_csr_ring_tail(void __iomem *csr_base_addr, u32 bank, u32 ring)
-{
-	return READ_CSR_RING_TAIL(csr_base_addr, bank, ring);
-}
-
-static void write_csr_ring_tail(void __iomem *csr_base_addr, u32 bank, u32 ring,
-				u32 value)
-{
-	WRITE_CSR_RING_TAIL(csr_base_addr, bank, ring, value);
-}
-
-static u32 read_csr_e_stat(void __iomem *csr_base_addr, u32 bank)
-{
-	return READ_CSR_E_STAT(csr_base_addr, bank);
-}
-
-static void write_csr_ring_config(void __iomem *csr_base_addr, u32 bank, u32 ring,
-				  u32 value)
-{
-	WRITE_CSR_RING_CONFIG(csr_base_addr, bank, ring, value);
-}
-
-static void write_csr_ring_base(void __iomem *csr_base_addr, u32 bank, u32 ring,
-				dma_addr_t addr)
-{
-	WRITE_CSR_RING_BASE(csr_base_addr, bank, ring, addr);
-}
-
-static void write_csr_int_flag(void __iomem *csr_base_addr, u32 bank,
-			       u32 value)
-{
-	WRITE_CSR_INT_FLAG(csr_base_addr, bank, value);
-}
-
-static void write_csr_int_srcsel(void __iomem *csr_base_addr, u32 bank)
-{
-	WRITE_CSR_INT_SRCSEL(csr_base_addr, bank);
-}
-
-static void write_csr_int_col_en(void __iomem *csr_base_addr, u32 bank, u32 value)
-{
-	WRITE_CSR_INT_COL_EN(csr_base_addr, bank, value);
-}
-
-static void write_csr_int_col_ctl(void __iomem *csr_base_addr, u32 bank,
-				  u32 value)
-{
-	WRITE_CSR_INT_COL_CTL(csr_base_addr, bank, value);
-}
-
-static void write_csr_int_flag_and_col(void __iomem *csr_base_addr, u32 bank,
-				       u32 value)
-{
-	WRITE_CSR_INT_FLAG_AND_COL(csr_base_addr, bank, value);
-}
-
-static void write_csr_ring_srv_arb_en(void __iomem *csr_base_addr, u32 bank,
-				      u32 value)
-{
-	WRITE_CSR_RING_SRV_ARB_EN(csr_base_addr, bank, value);
-}
-
-void adf_gen4_init_hw_csr_ops(struct adf_hw_csr_ops *csr_ops)
-{
-	csr_ops->build_csr_ring_base_addr = build_csr_ring_base_addr;
-	csr_ops->read_csr_ring_head = read_csr_ring_head;
-	csr_ops->write_csr_ring_head = write_csr_ring_head;
-	csr_ops->read_csr_ring_tail = read_csr_ring_tail;
-	csr_ops->write_csr_ring_tail = write_csr_ring_tail;
-	csr_ops->read_csr_e_stat = read_csr_e_stat;
-	csr_ops->write_csr_ring_config = write_csr_ring_config;
-	csr_ops->write_csr_ring_base = write_csr_ring_base;
-	csr_ops->write_csr_int_flag = write_csr_int_flag;
-	csr_ops->write_csr_int_srcsel = write_csr_int_srcsel;
-	csr_ops->write_csr_int_col_en = write_csr_int_col_en;
-	csr_ops->write_csr_int_col_ctl = write_csr_int_col_ctl;
-	csr_ops->write_csr_int_flag_and_col = write_csr_int_flag_and_col;
-	csr_ops->write_csr_ring_srv_arb_en = write_csr_ring_srv_arb_en;
-}
-EXPORT_SYMBOL_GPL(adf_gen4_init_hw_csr_ops);
+#include "icp_qat_fw_comp.h"
+#include "icp_qat_hw_20_comp.h"
 
 u32 adf_gen4_get_accel_mask(struct adf_hw_device_data *self)
 {
@@ -229,36 +140,18 @@ int adf_gen4_init_device(struct adf_accel_dev *accel_dev)
 }
 EXPORT_SYMBOL_GPL(adf_gen4_init_device);
 
-static inline void adf_gen4_unpack_ssm_wdtimer(u64 value, u32 *upper,
-					       u32 *lower)
-{
-	*lower = lower_32_bits(value);
-	*upper = upper_32_bits(value);
-}
-
 void adf_gen4_set_ssm_wdtimer(struct adf_accel_dev *accel_dev)
 {
 	void __iomem *pmisc_addr = adf_get_pmisc_base(accel_dev);
 	u64 timer_val_pke = ADF_SSM_WDT_PKE_DEFAULT_VALUE;
 	u64 timer_val = ADF_SSM_WDT_DEFAULT_VALUE;
-	u32 ssm_wdt_pke_high = 0;
-	u32 ssm_wdt_pke_low = 0;
-	u32 ssm_wdt_high = 0;
-	u32 ssm_wdt_low = 0;
 
-	/* Convert 64bit WDT timer value into 32bit values for
-	 * mmio write to 32bit CSRs.
-	 */
-	adf_gen4_unpack_ssm_wdtimer(timer_val, &ssm_wdt_high, &ssm_wdt_low);
-	adf_gen4_unpack_ssm_wdtimer(timer_val_pke, &ssm_wdt_pke_high,
-				    &ssm_wdt_pke_low);
+	/* Enable watchdog timer for sym and dc */
+	ADF_CSR_WR64_LO_HI(pmisc_addr, ADF_SSMWDTL_OFFSET, ADF_SSMWDTH_OFFSET, timer_val);
 
-	/* Enable WDT for sym and dc */
-	ADF_CSR_WR(pmisc_addr, ADF_SSMWDTL_OFFSET, ssm_wdt_low);
-	ADF_CSR_WR(pmisc_addr, ADF_SSMWDTH_OFFSET, ssm_wdt_high);
-	/* Enable WDT for pke */
-	ADF_CSR_WR(pmisc_addr, ADF_SSMWDTPKEL_OFFSET, ssm_wdt_pke_low);
-	ADF_CSR_WR(pmisc_addr, ADF_SSMWDTPKEH_OFFSET, ssm_wdt_pke_high);
+	/* Enable watchdog timer for pke */
+	ADF_CSR_WR64_LO_HI(pmisc_addr, ADF_SSMWDTPKEL_OFFSET, ADF_SSMWDTPKEH_OFFSET,
+			   timer_val_pke);
 }
 EXPORT_SYMBOL_GPL(adf_gen4_set_ssm_wdtimer);
 
@@ -320,8 +213,7 @@ static int reset_ring_pair(void __iomem *csr, u32 bank_number)
 int adf_gen4_ring_pair_reset(struct adf_accel_dev *accel_dev, u32 bank_number)
 {
 	struct adf_hw_device_data *hw_data = accel_dev->hw_device;
-	u32 etr_bar_id = hw_data->get_etr_bar_id(hw_data);
-	void __iomem *csr;
+	void __iomem *csr = adf_get_etr_base(accel_dev);
 	int ret;
 
 	if (bank_number >= hw_data->num_banks)
@@ -330,7 +222,6 @@ int adf_gen4_ring_pair_reset(struct adf_accel_dev *accel_dev, u32 bank_number)
 	dev_dbg(&GET_DEV(accel_dev),
 		"ring pair reset for bank:%d\n", bank_number);
 
-	csr = (&GET_BARS(accel_dev)[etr_bar_id])->virt_addr;
 	ret = reset_ring_pair(csr, bank_number);
 	if (ret)
 		dev_err(&GET_DEV(accel_dev),
@@ -362,17 +253,31 @@ static bool is_single_service(int service_id)
 	case SVC_SYM:
 	case SVC_ASYM:
 		return true;
-	case SVC_CY:
-	case SVC_CY2:
-	case SVC_DCC:
-	case SVC_ASYM_DC:
-	case SVC_DC_ASYM:
-	case SVC_SYM_DC:
-	case SVC_DC_SYM:
 	default:
 		return false;
 	}
 }
+
+bool adf_gen4_services_supported(unsigned long mask)
+{
+	unsigned long num_svc = hweight_long(mask);
+
+	if (mask >= BIT(SVC_COUNT))
+		return false;
+
+	if (test_bit(SVC_DECOMP, &mask))
+		return false;
+
+	switch (num_svc) {
+	case ADF_ONE_SERVICE:
+		return true;
+	case ADF_TWO_SERVICES:
+		return !test_bit(SVC_DCC, &mask);
+	default:
+		return false;
+	}
+}
+EXPORT_SYMBOL_GPL(adf_gen4_services_supported);
 
 int adf_gen4_init_thd2arb_map(struct adf_accel_dev *accel_dev)
 {
@@ -398,6 +303,9 @@ int adf_gen4_init_thd2arb_map(struct adf_accel_dev *accel_dev)
 			 ADF_GEN4_ADMIN_ACCELENGINES;
 
 	if (srv_id == SVC_DCC) {
+		if (ae_cnt > ICP_QAT_HW_AE_DELIMITER)
+			return -EINVAL;
+
 		memcpy(thd2arb_map, thrd_to_arb_map_dcc,
 		       array_size(sizeof(*thd2arb_map), ae_cnt));
 		return 0;
@@ -430,3 +338,263 @@ int adf_gen4_init_thd2arb_map(struct adf_accel_dev *accel_dev)
 	return 0;
 }
 EXPORT_SYMBOL_GPL(adf_gen4_init_thd2arb_map);
+
+u16 adf_gen4_get_ring_to_svc_map(struct adf_accel_dev *accel_dev)
+{
+	struct adf_hw_device_data *hw_data = GET_HW_DATA(accel_dev);
+	enum adf_cfg_service_type rps[RP_GROUP_COUNT] = { };
+	unsigned int ae_mask, start_id, worker_obj_cnt, i;
+	u16 ring_to_svc_map;
+	int rp_group;
+
+	if (!hw_data->get_rp_group || !hw_data->uof_get_ae_mask ||
+	    !hw_data->uof_get_obj_type || !hw_data->uof_get_num_objs)
+		return 0;
+
+	/* If dcc, all rings handle compression requests */
+	if (adf_get_service_enabled(accel_dev) == SVC_DCC) {
+		for (i = 0; i < RP_GROUP_COUNT; i++)
+			rps[i] = COMP;
+		goto set_mask;
+	}
+
+	worker_obj_cnt = hw_data->uof_get_num_objs(accel_dev) -
+			 ADF_GEN4_ADMIN_ACCELENGINES;
+	start_id = worker_obj_cnt - RP_GROUP_COUNT;
+
+	for (i = start_id; i < worker_obj_cnt; i++) {
+		ae_mask = hw_data->uof_get_ae_mask(accel_dev, i);
+		rp_group = hw_data->get_rp_group(accel_dev, ae_mask);
+		if (rp_group >= RP_GROUP_COUNT || rp_group < RP_GROUP_0)
+			return 0;
+
+		switch (hw_data->uof_get_obj_type(accel_dev, i)) {
+		case ADF_FW_SYM_OBJ:
+			rps[rp_group] = SYM;
+			break;
+		case ADF_FW_ASYM_OBJ:
+			rps[rp_group] = ASYM;
+			break;
+		case ADF_FW_DC_OBJ:
+			rps[rp_group] = COMP;
+			break;
+		default:
+			rps[rp_group] = 0;
+			break;
+		}
+	}
+
+set_mask:
+	ring_to_svc_map = rps[RP_GROUP_0] << ADF_CFG_SERV_RING_PAIR_0_SHIFT |
+			  rps[RP_GROUP_1] << ADF_CFG_SERV_RING_PAIR_1_SHIFT |
+			  rps[RP_GROUP_0] << ADF_CFG_SERV_RING_PAIR_2_SHIFT |
+			  rps[RP_GROUP_1] << ADF_CFG_SERV_RING_PAIR_3_SHIFT;
+
+	return ring_to_svc_map;
+}
+EXPORT_SYMBOL_GPL(adf_gen4_get_ring_to_svc_map);
+
+/*
+ * adf_gen4_bank_quiesce_coal_timer() - quiesce bank coalesced interrupt timer
+ * @accel_dev: Pointer to the device structure
+ * @bank_idx: Offset to the bank within this device
+ * @timeout_ms: Timeout in milliseconds for the operation
+ *
+ * This function tries to quiesce the coalesced interrupt timer of a bank if
+ * it has been enabled and triggered.
+ *
+ * Returns 0 on success, error code otherwise
+ *
+ */
+int adf_gen4_bank_quiesce_coal_timer(struct adf_accel_dev *accel_dev,
+				     u32 bank_idx, int timeout_ms)
+{
+	struct adf_hw_device_data *hw_data = GET_HW_DATA(accel_dev);
+	struct adf_hw_csr_ops *csr_ops = GET_CSR_OPS(accel_dev);
+	void __iomem *csr_misc = adf_get_pmisc_base(accel_dev);
+	void __iomem *csr_etr = adf_get_etr_base(accel_dev);
+	u32 int_col_ctl, int_col_mask, int_col_en;
+	u32 e_stat, intsrc;
+	u64 wait_us;
+	int ret;
+
+	if (timeout_ms < 0)
+		return -EINVAL;
+
+	int_col_ctl = csr_ops->read_csr_int_col_ctl(csr_etr, bank_idx);
+	int_col_mask = csr_ops->get_int_col_ctl_enable_mask();
+	if (!(int_col_ctl & int_col_mask))
+		return 0;
+
+	int_col_en = csr_ops->read_csr_int_col_en(csr_etr, bank_idx);
+	int_col_en &= BIT(ADF_WQM_CSR_RP_IDX_RX);
+
+	e_stat = csr_ops->read_csr_e_stat(csr_etr, bank_idx);
+	if (!(~e_stat & int_col_en))
+		return 0;
+
+	wait_us = 2 * ((int_col_ctl & ~int_col_mask) << 8) * USEC_PER_SEC;
+	do_div(wait_us, hw_data->clock_frequency);
+	wait_us = min(wait_us, (u64)timeout_ms * USEC_PER_MSEC);
+	dev_dbg(&GET_DEV(accel_dev),
+		"wait for bank %d - coalesced timer expires in %llu us (max=%u ms estat=0x%x intcolen=0x%x)\n",
+		bank_idx, wait_us, timeout_ms, e_stat, int_col_en);
+
+	ret = read_poll_timeout(ADF_CSR_RD, intsrc, intsrc,
+				ADF_COALESCED_POLL_DELAY_US, wait_us, true,
+				csr_misc, ADF_WQM_CSR_RPINTSOU(bank_idx));
+	if (ret)
+		dev_warn(&GET_DEV(accel_dev),
+			 "coalesced timer for bank %d expired (%llu us)\n",
+			 bank_idx, wait_us);
+
+	return ret;
+}
+EXPORT_SYMBOL_GPL(adf_gen4_bank_quiesce_coal_timer);
+
+static int drain_bank(void __iomem *csr, u32 bank_number, int timeout_us)
+{
+	u32 status;
+
+	ADF_CSR_WR(csr, ADF_WQM_CSR_RPRESETCTL(bank_number),
+		   ADF_WQM_CSR_RPRESETCTL_DRAIN);
+
+	return read_poll_timeout(ADF_CSR_RD, status,
+				status & ADF_WQM_CSR_RPRESETSTS_STATUS,
+				ADF_RPRESET_POLL_DELAY_US, timeout_us, true,
+				csr, ADF_WQM_CSR_RPRESETSTS(bank_number));
+}
+
+void adf_gen4_bank_drain_finish(struct adf_accel_dev *accel_dev,
+				u32 bank_number)
+{
+	void __iomem *csr = adf_get_etr_base(accel_dev);
+
+	ADF_CSR_WR(csr, ADF_WQM_CSR_RPRESETSTS(bank_number),
+		   ADF_WQM_CSR_RPRESETSTS_STATUS);
+}
+
+int adf_gen4_bank_drain_start(struct adf_accel_dev *accel_dev,
+			      u32 bank_number, int timeout_us)
+{
+	void __iomem *csr = adf_get_etr_base(accel_dev);
+	int ret;
+
+	dev_dbg(&GET_DEV(accel_dev), "Drain bank %d\n", bank_number);
+
+	ret = drain_bank(csr, bank_number, timeout_us);
+	if (ret)
+		dev_err(&GET_DEV(accel_dev), "Bank drain failed (timeout)\n");
+	else
+		dev_dbg(&GET_DEV(accel_dev), "Bank drain successful\n");
+
+	return ret;
+}
+
+static int adf_gen4_build_comp_block(void *ctx, enum adf_dc_algo algo)
+{
+	struct icp_qat_fw_comp_req *req_tmpl = ctx;
+	struct icp_qat_fw_comp_req_hdr_cd_pars *cd_pars = &req_tmpl->cd_pars;
+	struct icp_qat_hw_comp_20_config_csr_upper hw_comp_upper_csr = { };
+	struct icp_qat_hw_comp_20_config_csr_lower hw_comp_lower_csr = { };
+	struct icp_qat_fw_comn_req_hdr *header = &req_tmpl->comn_hdr;
+	u32 upper_val;
+	u32 lower_val;
+
+	switch (algo) {
+	case QAT_DEFLATE:
+		header->service_cmd_id = ICP_QAT_FW_COMP_CMD_DYNAMIC;
+		break;
+	default:
+		return -EINVAL;
+	}
+
+	hw_comp_lower_csr.skip_ctrl = ICP_QAT_HW_COMP_20_BYTE_SKIP_3BYTE_LITERAL;
+	hw_comp_lower_csr.algo = ICP_QAT_HW_COMP_20_HW_COMP_FORMAT_ILZ77;
+	hw_comp_lower_csr.lllbd = ICP_QAT_HW_COMP_20_LLLBD_CTRL_LLLBD_ENABLED;
+	hw_comp_lower_csr.sd = ICP_QAT_HW_COMP_20_SEARCH_DEPTH_LEVEL_1;
+	hw_comp_lower_csr.hash_update = ICP_QAT_HW_COMP_20_SKIP_HASH_UPDATE_DONT_ALLOW;
+	hw_comp_lower_csr.edmm = ICP_QAT_HW_COMP_20_EXTENDED_DELAY_MATCH_MODE_EDMM_ENABLED;
+	hw_comp_upper_csr.nice = ICP_QAT_HW_COMP_20_CONFIG_CSR_NICE_PARAM_DEFAULT_VAL;
+	hw_comp_upper_csr.lazy = ICP_QAT_HW_COMP_20_CONFIG_CSR_LAZY_PARAM_DEFAULT_VAL;
+
+	upper_val = ICP_QAT_FW_COMP_20_BUILD_CONFIG_UPPER(hw_comp_upper_csr);
+	lower_val = ICP_QAT_FW_COMP_20_BUILD_CONFIG_LOWER(hw_comp_lower_csr);
+
+	cd_pars->u.sl.comp_slice_cfg_word[0] = lower_val;
+	cd_pars->u.sl.comp_slice_cfg_word[1] = upper_val;
+
+	return 0;
+}
+
+static int adf_gen4_build_decomp_block(void *ctx, enum adf_dc_algo algo)
+{
+	struct icp_qat_fw_comp_req *req_tmpl = ctx;
+	struct icp_qat_hw_decomp_20_config_csr_lower hw_decomp_lower_csr = { };
+	struct icp_qat_fw_comp_req_hdr_cd_pars *cd_pars = &req_tmpl->cd_pars;
+	struct icp_qat_fw_comn_req_hdr *header = &req_tmpl->comn_hdr;
+	u32 lower_val;
+
+	switch (algo) {
+	case QAT_DEFLATE:
+		header->service_cmd_id = ICP_QAT_FW_COMP_CMD_DECOMPRESS;
+		break;
+	default:
+		return -EINVAL;
+	}
+
+	hw_decomp_lower_csr.algo = ICP_QAT_HW_DECOMP_20_HW_DECOMP_FORMAT_DEFLATE;
+	lower_val = ICP_QAT_FW_DECOMP_20_BUILD_CONFIG_LOWER(hw_decomp_lower_csr);
+
+	cd_pars->u.sl.comp_slice_cfg_word[0] = lower_val;
+	cd_pars->u.sl.comp_slice_cfg_word[1] = 0;
+
+	return 0;
+}
+
+void adf_gen4_init_dc_ops(struct adf_dc_ops *dc_ops)
+{
+	dc_ops->build_comp_block = adf_gen4_build_comp_block;
+	dc_ops->build_decomp_block = adf_gen4_build_decomp_block;
+}
+EXPORT_SYMBOL_GPL(adf_gen4_init_dc_ops);
+
+void adf_gen4_init_num_svc_aes(struct adf_rl_hw_data *device_data)
+{
+	struct adf_hw_device_data *hw_data;
+	unsigned int i;
+	u32 ae_cnt;
+
+	hw_data = container_of(device_data, struct adf_hw_device_data, rl_data);
+	ae_cnt = hweight32(hw_data->get_ae_mask(hw_data));
+	if (!ae_cnt)
+		return;
+
+	for (i = 0; i < SVC_BASE_COUNT; i++)
+		device_data->svc_ae_mask[i] = ae_cnt - 1;
+
+	/*
+	 * The decompression service is not supported on QAT GEN4 devices.
+	 * Therefore, set svc_ae_mask to 0.
+	 */
+	device_data->svc_ae_mask[SVC_DECOMP] = 0;
+}
+EXPORT_SYMBOL_GPL(adf_gen4_init_num_svc_aes);
+
+u32 adf_gen4_get_svc_slice_cnt(struct adf_accel_dev *accel_dev,
+			       enum adf_base_services svc)
+{
+	struct adf_rl_hw_data *device_data = &accel_dev->hw_device->rl_data;
+
+	switch (svc) {
+	case SVC_SYM:
+		return device_data->slices.cph_cnt;
+	case SVC_ASYM:
+		return device_data->slices.pke_cnt;
+	case SVC_DC:
+		return device_data->slices.dcpr_cnt;
+	default:
+		return 0;
+	}
+}
+EXPORT_SYMBOL_GPL(adf_gen4_get_svc_slice_cnt);

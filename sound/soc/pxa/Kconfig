@@ -1,4 +1,6 @@
 # SPDX-License-Identifier: GPL-2.0-only
+menu "PXA"
+
 config SND_PXA2XX_SOC
 	tristate "SoC Audio for the Intel PXA2xx chip"
 	depends on ARCH_PXA || COMPILE_TEST
@@ -7,9 +9,6 @@ config SND_PXA2XX_SOC
 	  Say Y or M if you want to add support for codecs attached to
 	  the PXA2xx AC97, I2S or SSP interface. You will also need
 	  to select the audio interfaces to support below.
-
-config SND_PXA2XX_AC97
-	tristate
 
 config SND_PXA2XX_SOC_AC97
 	tristate "SoC AC97 support for PXA2xx"
@@ -55,3 +54,5 @@ config SND_PXA910_SOC
 	help
 	  Say Y if you want to add support for SoC audio on the
 	  Marvell PXA910 reference platform.
+
+endmenu

@@ -17,6 +17,7 @@
 #include <linux/sched.h>
 #include <linux/sched/debug.h>
 #include <linux/sched/task_stack.h>
+#include <asm/asm-offsets.h>
 #include <asm/processor.h>
 #include <asm/debug.h>
 #include <asm/dis.h>
@@ -61,28 +62,28 @@ static bool in_task_stack(unsigned long sp, struct task_struct *task,
 
 static bool in_irq_stack(unsigned long sp, struct stack_info *info)
 {
-	unsigned long stack = S390_lowcore.async_stack - STACK_INIT_OFFSET;
+	unsigned long stack = get_lowcore()->async_stack - STACK_INIT_OFFSET;
 
 	return in_stack(sp, info, STACK_TYPE_IRQ, stack);
 }
 
 static bool in_nodat_stack(unsigned long sp, struct stack_info *info)
 {
-	unsigned long stack = S390_lowcore.nodat_stack - STACK_INIT_OFFSET;
+	unsigned long stack = get_lowcore()->nodat_stack - STACK_INIT_OFFSET;
 
 	return in_stack(sp, info, STACK_TYPE_NODAT, stack);
 }
 
 static bool in_mcck_stack(unsigned long sp, struct stack_info *info)
 {
-	unsigned long stack = S390_lowcore.mcck_stack - STACK_INIT_OFFSET;
+	unsigned long stack = get_lowcore()->mcck_stack - STACK_INIT_OFFSET;
 
 	return in_stack(sp, info, STACK_TYPE_MCCK, stack);
 }
 
 static bool in_restart_stack(unsigned long sp, struct stack_info *info)
 {
-	unsigned long stack = S390_lowcore.restart_stack - STACK_INIT_OFFSET;
+	unsigned long stack = get_lowcore()->restart_stack - STACK_INIT_OFFSET;
 
 	return in_stack(sp, info, STACK_TYPE_RESTART, stack);
 }
@@ -198,13 +199,8 @@ void __noreturn die(struct pt_regs *regs, const char *str)
 	console_verbose();
 	spin_lock_irq(&die_lock);
 	bust_spinlocks(1);
-	printk("%s: %04x ilc:%d [#%d] ", str, regs->int_code & 0xffff,
+	printk("%s: %04x ilc:%d [#%d]", str, regs->int_code & 0xffff,
 	       regs->int_code >> 17, ++die_counter);
-#ifdef CONFIG_PREEMPT
-	pr_cont("PREEMPT ");
-#elif defined(CONFIG_PREEMPT_RT)
-	pr_cont("PREEMPT_RT ");
-#endif
 	pr_cont("SMP ");
 	if (debug_pagealloc_enabled())
 		pr_cont("DEBUG_PAGEALLOC");

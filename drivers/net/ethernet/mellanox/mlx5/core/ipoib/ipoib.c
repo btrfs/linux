@@ -32,6 +32,7 @@
 
 #include <rdma/ib_verbs.h>
 #include <linux/mlx5/fs.h>
+#include <net/netdev_lock.h>
 #include "en.h"
 #include "en/params.h"
 #include "ipoib.h"
@@ -102,6 +103,8 @@ int mlx5i_init(struct mlx5_core_dev *mdev, struct net_device *netdev)
 
 	netdev->netdev_ops = &mlx5i_netdev_ops;
 	netdev->ethtool_ops = &mlx5i_ethtool_ops;
+	netdev->request_ops_lock = true;
+	netdev_lockdep_set_classes(netdev);
 
 	return 0;
 }
@@ -372,7 +375,7 @@ static int mlx5i_create_flow_steering(struct mlx5e_priv *priv)
 
 	mlx5e_fs_set_ns(priv->fs, ns, false);
 	err = mlx5e_arfs_create_tables(priv->fs, priv->rx_res,
-				       !!(priv->netdev->hw_features & NETIF_F_NTUPLE));
+				       mlx5e_fs_has_arfs(priv->netdev));
 	if (err) {
 		netdev_err(priv->netdev, "Failed to create arfs tables, err=%d\n",
 			   err);
@@ -391,8 +394,7 @@ static int mlx5i_create_flow_steering(struct mlx5e_priv *priv)
 	return 0;
 
 err_destroy_arfs_tables:
-	mlx5e_arfs_destroy_tables(priv->fs,
-				  !!(priv->netdev->hw_features & NETIF_F_NTUPLE));
+	mlx5e_arfs_destroy_tables(priv->fs, mlx5e_fs_has_arfs(priv->netdev));
 
 	return err;
 }
@@ -400,8 +402,7 @@ err_destroy_arfs_tables:
 static void mlx5i_destroy_flow_steering(struct mlx5e_priv *priv)
 {
 	mlx5e_destroy_ttc_table(priv->fs);
-	mlx5e_arfs_destroy_tables(priv->fs,
-				  !!(priv->netdev->hw_features & NETIF_F_NTUPLE));
+	mlx5e_arfs_destroy_tables(priv->fs, mlx5e_fs_has_arfs(priv->netdev));
 	mlx5e_ethtool_cleanup_steering(priv->fs);
 }
 
@@ -531,7 +532,7 @@ static int mlx5i_change_mtu(struct net_device *netdev, int new_mtu)
 	if (err)
 		goto out;
 
-	netdev->mtu = new_params.sw_mtu;
+	WRITE_ONCE(netdev->mtu, new_params.sw_mtu);
 
 out:
 	mutex_unlock(&priv->state_lock);
@@ -783,7 +784,7 @@ static int mlx5_rdma_setup_rn(struct ib_device *ibdev, u32 port_num,
 		}
 
 		/* This should only be called once per mdev */
-		err = mlx5e_create_mdev_resources(mdev);
+		err = mlx5e_create_mdev_resources(mdev, false);
 		if (err)
 			goto destroy_ht;
 	}

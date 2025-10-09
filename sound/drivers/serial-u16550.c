@@ -166,7 +166,7 @@ static inline void snd_uart16550_add_timer(struct snd_uart16550 *uart)
 static inline void snd_uart16550_del_timer(struct snd_uart16550 *uart)
 {
 	if (uart->timer_running) {
-		del_timer(&uart->buffer_timer);
+		timer_delete(&uart->buffer_timer);
 		uart->timer_running = 0;
 	}
 }
@@ -224,9 +224,9 @@ static void snd_uart16550_io_loop(struct snd_uart16550 * uart)
 			snd_rawmidi_receive(uart->midi_input[substream], &c, 1);
 
 		if (status & UART_LSR_OE)
-			snd_printk(KERN_WARNING
-				   "%s: Overrun on device at 0x%lx\n",
-			       uart->rmidi->name, uart->base);
+			dev_warn(uart->card->dev,
+				 "%s: Overrun on device at 0x%lx\n",
+				 uart->rmidi->name, uart->base);
 	}
 
 	/* remember the last stream */
@@ -299,7 +299,7 @@ static void snd_uart16550_buffer_timer(struct timer_list *t)
 	unsigned long flags;
 	struct snd_uart16550 *uart;
 
-	uart = from_timer(uart, t, buffer_timer);
+	uart = timer_container_of(uart, t, buffer_timer);
 	spin_lock_irqsave(&uart->open_lock, flags);
 	snd_uart16550_del_timer(uart);
 	snd_uart16550_io_loop(uart);
@@ -323,7 +323,8 @@ static int snd_uart16550_detect(struct snd_uart16550 *uart)
 	}
 
 	if (!devm_request_region(uart->card->dev, io_base, 8, "Serial MIDI")) {
-		snd_printk(KERN_ERR "u16550: can't grab port 0x%lx\n", io_base);
+		dev_err(uart->card->dev,
+			"u16550: can't grab port 0x%lx\n", io_base);
 		return -EBUSY;
 	}
 
@@ -619,9 +620,9 @@ static int snd_uart16550_output_byte(struct snd_uart16550 *uart,
 		}
 	} else {
 		if (!snd_uart16550_write_buffer(uart, midi_byte)) {
-			snd_printk(KERN_WARNING
-				   "%s: Buffer overrun on device at 0x%lx\n",
-				   uart->rmidi->name, uart->base);
+			dev_warn(uart->card->dev,
+				 "%s: Buffer overrun on device at 0x%lx\n",
+				 uart->rmidi->name, uart->base);
 			return 0;
 		}
 	}
@@ -775,15 +776,15 @@ static int snd_uart16550_create(struct snd_card *card,
 
 	err = snd_uart16550_detect(uart);
 	if (err <= 0) {
-		printk(KERN_ERR "no UART detected at 0x%lx\n", iobase);
+		dev_err(card->dev, "no UART detected at 0x%lx\n", iobase);
 		return -ENODEV;
 	}
 
 	if (irq >= 0 && irq != SNDRV_AUTO_IRQ) {
 		if (devm_request_irq(card->dev, irq, snd_uart16550_interrupt,
 				     0, "Serial MIDI", uart)) {
-			snd_printk(KERN_WARNING
-				   "irq %d busy. Using Polling.\n", irq);
+			dev_warn(card->dev,
+				 "irq %d busy. Using Polling.\n", irq);
 		} else {
 			uart->irq = irq;
 		}
@@ -844,7 +845,7 @@ static int snd_uart16550_rmidi(struct snd_uart16550 *uart, int device,
 			    &snd_uart16550_input);
 	snd_rawmidi_set_ops(rrawmidi, SNDRV_RAWMIDI_STREAM_OUTPUT,
 			    &snd_uart16550_output);
-	strcpy(rrawmidi->name, "Serial MIDI");
+	strscpy(rrawmidi->name, "Serial MIDI");
 	snd_uart16550_substreams(&rrawmidi->streams[SNDRV_RAWMIDI_STREAM_OUTPUT]);
 	snd_uart16550_substreams(&rrawmidi->streams[SNDRV_RAWMIDI_STREAM_INPUT]);
 	rrawmidi->info_flags = SNDRV_RAWMIDI_INFO_OUTPUT |
@@ -879,23 +880,23 @@ static int snd_serial_probe(struct platform_device *devptr)
 	case SNDRV_SERIAL_GENERIC:
 		break;
 	default:
-		snd_printk(KERN_ERR
-			   "Adaptor type is out of range 0-%d (%d)\n",
-			   SNDRV_SERIAL_MAX_ADAPTOR, adaptor[dev]);
+		dev_err(&devptr->dev,
+			"Adaptor type is out of range 0-%d (%d)\n",
+			SNDRV_SERIAL_MAX_ADAPTOR, adaptor[dev]);
 		return -ENODEV;
 	}
 
 	if (outs[dev] < 1 || outs[dev] > SNDRV_SERIAL_MAX_OUTS) {
-		snd_printk(KERN_ERR
-			   "Count of outputs is out of range 1-%d (%d)\n",
-			   SNDRV_SERIAL_MAX_OUTS, outs[dev]);
+		dev_err(&devptr->dev,
+			"Count of outputs is out of range 1-%d (%d)\n",
+			SNDRV_SERIAL_MAX_OUTS, outs[dev]);
 		return -ENODEV;
 	}
 
 	if (ins[dev] < 1 || ins[dev] > SNDRV_SERIAL_MAX_INS) {
-		snd_printk(KERN_ERR
-			   "Count of inputs is out of range 1-%d (%d)\n",
-			   SNDRV_SERIAL_MAX_INS, ins[dev]);
+		dev_err(&devptr->dev,
+			"Count of inputs is out of range 1-%d (%d)\n",
+			SNDRV_SERIAL_MAX_INS, ins[dev]);
 		return -ENODEV;
 	}
 
@@ -904,8 +905,8 @@ static int snd_serial_probe(struct platform_device *devptr)
 	if (err < 0)
 		return err;
 
-	strcpy(card->driver, "Serial");
-	strcpy(card->shortname, "Serial MIDI (UART16550A)");
+	strscpy(card->driver, "Serial");
+	strscpy(card->shortname, "Serial MIDI (UART16550A)");
 
 	err = snd_uart16550_create(card, port[dev], irq[dev], speed[dev],
 				   base[dev], adaptor[dev], droponfull[dev],
@@ -975,7 +976,7 @@ static int __init alsa_card_serial_init(void)
 	}
 	if (! cards) {
 #ifdef MODULE
-		printk(KERN_ERR "serial midi soundcard not found or device busy\n");
+		pr_err("serial midi soundcard not found or device busy\n");
 #endif
 		snd_serial_unregister_all();
 		return -ENODEV;

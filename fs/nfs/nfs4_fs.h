@@ -63,11 +63,11 @@ struct nfs4_minor_version_ops {
 	bool	(*match_stateid)(const nfs4_stateid *,
 			const nfs4_stateid *);
 	int	(*find_root_sec)(struct nfs_server *, struct nfs_fh *,
-			struct nfs_fsinfo *);
+				 struct nfs_fattr *);
 	void	(*free_lock_state)(struct nfs_server *,
 			struct nfs4_lock_state *);
 	int	(*test_and_free_expired)(struct nfs_server *,
-			nfs4_stateid *, const struct cred *);
+					 nfs4_stateid *, const struct cred *);
 	struct nfs_seqid *
 		(*alloc_seqid)(struct nfs_seqid_counter *, gfp_t);
 	void	(*session_trunk)(struct rpc_clnt *clnt,
@@ -82,7 +82,7 @@ struct nfs4_minor_version_ops {
 #define NFS_SEQID_CONFIRMED 1
 struct nfs_seqid_counter {
 	ktime_t create_time;
-	int owner_id;
+	u64 owner_id;
 	int flags;
 	u32 counter;
 	spinlock_t lock;		/* Protects the list */
@@ -120,7 +120,6 @@ struct nfs4_state_owner {
 	unsigned long	     so_flags;
 	struct list_head     so_states;
 	struct nfs_seqid_counter so_seqid;
-	seqcount_spinlock_t  so_reclaim_seqcount;
 	struct mutex	     so_delegreturn_mutex;
 };
 
@@ -297,7 +296,8 @@ extern int nfs4_call_sync(struct rpc_clnt *, struct nfs_server *,
 extern void nfs4_init_sequence(struct nfs4_sequence_args *, struct nfs4_sequence_res *, int, int);
 extern int nfs4_proc_setclientid(struct nfs_client *, u32, unsigned short, const struct cred *, struct nfs4_setclientid_res *);
 extern int nfs4_proc_setclientid_confirm(struct nfs_client *, struct nfs4_setclientid_res *arg, const struct cred *);
-extern int nfs4_proc_get_rootfh(struct nfs_server *, struct nfs_fh *, struct nfs_fsinfo *, bool);
+extern int nfs4_proc_get_rootfh(struct nfs_server *, struct nfs_fh *,
+				struct nfs_fattr *, bool);
 extern int nfs4_proc_bind_conn_to_session(struct nfs_client *, const struct cred *cred);
 extern int nfs4_proc_exchange_id(struct nfs_client *clp, const struct cred *cred);
 extern int nfs4_destroy_clientid(struct nfs_client *clp);
@@ -330,7 +330,7 @@ extern int update_open_stateid(struct nfs4_state *state,
 				const nfs4_stateid *deleg_stateid,
 				fmode_t fmode);
 extern int nfs4_proc_setlease(struct file *file, int arg,
-			      struct file_lock **lease, void **priv);
+			      struct file_lease **lease, void **priv);
 extern int nfs4_proc_get_lease_time(struct nfs_client *clp,
 		struct nfs_fsinfo *fsinfo);
 extern void nfs4_update_changeattr(struct inode *dir,

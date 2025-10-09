@@ -14,6 +14,7 @@
 #define DATA_RATE_HT_IDX_MASK		GENMASK(4, 0)
 #define DATA_RATE_HT_IDX_MASK_V1	GENMASK(4, 0)
 #define DATA_RATE_MODE_HT		0x1
+#define DATA_RATE_HT_NSS_MASK		GENMASK(4, 3)
 #define DATA_RATE_VHT_HE_NSS_MASK	GENMASK(6, 4)
 #define DATA_RATE_VHT_HE_IDX_MASK	GENMASK(3, 0)
 #define DATA_RATE_NSS_MASK_V1		GENMASK(7, 5)
@@ -51,6 +52,11 @@ static inline u8 rtw89_get_data_mcs(struct rtw89_dev *rtwdev, u16 hw_rate)
 	return u16_get_bits(hw_rate, DATA_RATE_VHT_HE_IDX_MASK);
 }
 
+static inline u8 rtw89_get_data_ht_nss(struct rtw89_dev *rtwdev, u16 hw_rate)
+{
+	return u16_get_bits(hw_rate, DATA_RATE_HT_NSS_MASK);
+}
+
 static inline u8 rtw89_get_data_nss(struct rtw89_dev *rtwdev, u16 hw_rate)
 {
 	if (rtwdev->chip->chip_gen == RTW89_CHIP_BE)
@@ -67,6 +73,7 @@ static inline u8 rtw89_get_data_nss(struct rtw89_dev *rtwdev, u16 hw_rate)
 #define RTW89_TXWD_BODY0_FW_DL BIT(20)
 #define RTW89_TXWD_BODY0_CHANNEL_DMA GENMASK(19, 16)
 #define RTW89_TXWD_BODY0_HDR_LLC_LEN GENMASK(15, 11)
+#define RTW89_TXWD_BODY0_STF_MODE BIT(10)
 #define RTW89_TXWD_BODY0_WD_PAGE BIT(7)
 #define RTW89_TXWD_BODY0_HW_AMSDU BIT(5)
 #define RTW89_TXWD_BODY0_HW_SSN_SEL GENMASK(3, 2)
@@ -113,6 +120,8 @@ static inline u8 rtw89_get_data_nss(struct rtw89_dev *rtwdev, u16 hw_rate)
 #define RTW89_TXWD_INFO0_GI_LTF GENMASK(27, 25)
 #define RTW89_TXWD_INFO0_DATA_RATE GENMASK(24, 16)
 #define RTW89_TXWD_INFO0_DATA_ER BIT(15)
+#define RTW89_TXWD_INFO0_DATA_STBC BIT(12)
+#define RTW89_TXWD_INFO0_DATA_LDPC BIT(11)
 #define RTW89_TXWD_INFO0_DISDATAFB BIT(10)
 #define RTW89_TXWD_INFO0_DATA_BW_ER BIT(8)
 #define RTW89_TXWD_INFO0_MULTIPORT_ID GENMASK(6, 4)
@@ -406,7 +415,7 @@ struct rtw89_rxinfo_user {
 #define RTW89_RXINFO_USER_DATA BIT(1)
 #define RTW89_RXINFO_USER_CTRL BIT(2)
 #define RTW89_RXINFO_USER_MGMT BIT(3)
-#define RTW89_RXINFO_USER_BCM BIT(4)
+#define RTW89_RXINFO_USER_BCN BIT(4)
 #define RTW89_RXINFO_USER_MACID GENMASK(15, 8)
 
 struct rtw89_rxinfo {
@@ -433,6 +442,7 @@ struct rtw89_phy_sts_hdr {
 } __packed;
 
 #define RTW89_PHY_STS_HDR_W0_IE_MAP GENMASK(4, 0)
+#define RTW89_PHY_STS_HDR_W0_HDR_2_EN BIT(5)
 #define RTW89_PHY_STS_HDR_W0_VALID BIT(7)
 #define RTW89_PHY_STS_HDR_W0_LEN GENMASK(15, 8)
 #define RTW89_PHY_STS_HDR_W0_RSSI_AVG GENMASK(31, 24)
@@ -440,6 +450,13 @@ struct rtw89_phy_sts_hdr {
 #define RTW89_PHY_STS_HDR_W1_RSSI_B GENMASK(15, 8)
 #define RTW89_PHY_STS_HDR_W1_RSSI_C GENMASK(23, 16)
 #define RTW89_PHY_STS_HDR_W1_RSSI_D GENMASK(31, 24)
+
+struct rtw89_phy_sts_hdr_v2 {
+	__le32 w0;
+	__le32 w1;
+} __packed;
+
+#define RTW89_PHY_STS_HDR_V2_W0_PATH_EN GENMASK(20, 16)
 
 struct rtw89_phy_sts_iehdr {
 	__le32 w0;
@@ -544,18 +561,72 @@ struct rtw89_phy_sts_iehdr {
 #define BE_RXD_HDR_OFFSET_MASK GENMASK(20, 16)
 #define BE_RXD_WL_HD_IV_LEN_MASK GENMASK(26, 21)
 
-struct rtw89_phy_sts_ie0 {
+/* BE RXD - PHY RPT dword0 */
+#define BE_RXD_PHY_RSSI GENMASK(11, 0)
+
+struct rtw89_phy_sts_ie00 {
 	__le32 w0;
 	__le32 w1;
 	__le32 w2;
+	__le32 w3;
+} __packed;
+
+#define RTW89_PHY_STS_IE00_W0_RPL GENMASK(15, 7)
+
+struct rtw89_phy_sts_ie00_v2 {
+	__le32 w0;
+	__le32 w1;
+	__le32 w2;
+	__le32 w3;
+	__le32 w4;
+	__le32 w5;
+	__le32 w6;
+	__le32 w7;
+} __packed;
+
+#define RTW89_PHY_STS_IE00_V2_W4_RPL_TD_A GENMASK(8, 0)
+#define RTW89_PHY_STS_IE00_V2_W4_RPL_TD_B GENMASK(17, 9)
+#define RTW89_PHY_STS_IE00_V2_W4_RPL_TD_C GENMASK(26, 18)
+#define RTW89_PHY_STS_IE00_V2_W5_RPL_TD_D GENMASK(8, 0)
+
+struct rtw89_phy_sts_ie01 {
+	__le32 w0;
+	__le32 w1;
+	__le32 w2;
+	__le32 w3;
+	__le32 w4;
+	__le32 w5;
 } __packed;
 
 #define RTW89_PHY_STS_IE01_W0_CH_IDX GENMASK(23, 16)
+#define RTW89_PHY_STS_IE01_W0_RSSI_AVG_FD GENMASK(15, 8)
+#define RTW89_PHY_STS_IE01_W0_RX_PATH_EN GENMASK(31, 28)
 #define RTW89_PHY_STS_IE01_W1_FD_CFO GENMASK(19, 8)
 #define RTW89_PHY_STS_IE01_W1_PREMB_CFO GENMASK(31, 20)
 #define RTW89_PHY_STS_IE01_W2_AVG_SNR GENMASK(5, 0)
 #define RTW89_PHY_STS_IE01_W2_EVM_MAX GENMASK(15, 8)
 #define RTW89_PHY_STS_IE01_W2_EVM_MIN GENMASK(23, 16)
+#define RTW89_PHY_STS_IE01_W2_LDPC BIT(28)
+#define RTW89_PHY_STS_IE01_W2_STBC BIT(30)
+
+struct rtw89_phy_sts_ie01_v2 {
+	__le32 w0;
+	__le32 w1;
+	__le32 w2;
+	__le32 w3;
+	__le32 w4;
+	__le32 w5;
+	__le32 w6;
+	__le32 w7;
+	__le32 w8;
+	__le32 w9;
+} __packed;
+
+#define RTW89_PHY_STS_IE01_V2_W5_BW_IDX GENMASK(31, 29)
+#define RTW89_PHY_STS_IE01_V2_W8_RPL_FD_A GENMASK(11, 4)
+#define RTW89_PHY_STS_IE01_V2_W8_RPL_FD_B GENMASK(23, 16)
+#define RTW89_PHY_STS_IE01_V2_W9_RPL_FD_C GENMASK(11, 4)
+#define RTW89_PHY_STS_IE01_V2_W9_RPL_FD_D GENMASK(23, 16)
 
 enum rtw89_tx_channel {
 	RTW89_TXCH_ACH0	= 0,
@@ -642,6 +713,25 @@ static inline u8 rtw89_core_get_qsel(struct rtw89_dev *rtwdev, u8 tid)
 	}
 }
 
+static inline u8
+rtw89_core_get_qsel_mgmt(struct rtw89_dev *rtwdev, struct rtw89_core_tx_request *tx_req)
+{
+	struct rtw89_tx_desc_info *desc_info = &tx_req->desc_info;
+	struct rtw89_vif_link *rtwvif_link = tx_req->rtwvif_link;
+
+	if (desc_info->hiq) {
+		if (rtwvif_link->mac_idx == RTW89_MAC_1)
+			return RTW89_TX_QSEL_B1_HI;
+		else
+			return RTW89_TX_QSEL_B0_HI;
+	}
+
+	if (rtwvif_link->mac_idx == RTW89_MAC_1)
+		return RTW89_TX_QSEL_B1_MGMT;
+	else
+		return RTW89_TX_QSEL_B0_MGMT;
+}
+
 static inline u8 rtw89_core_get_ch_dma(struct rtw89_dev *rtwdev, u8 qsel)
 {
 	switch (qsel) {
@@ -649,12 +739,24 @@ static inline u8 rtw89_core_get_ch_dma(struct rtw89_dev *rtwdev, u8 qsel)
 		rtw89_warn(rtwdev, "Cannot map qsel to dma: %d\n", qsel);
 		fallthrough;
 	case RTW89_TX_QSEL_BE_0:
+	case RTW89_TX_QSEL_BE_1:
+	case RTW89_TX_QSEL_BE_2:
+	case RTW89_TX_QSEL_BE_3:
 		return RTW89_TXCH_ACH0;
 	case RTW89_TX_QSEL_BK_0:
+	case RTW89_TX_QSEL_BK_1:
+	case RTW89_TX_QSEL_BK_2:
+	case RTW89_TX_QSEL_BK_3:
 		return RTW89_TXCH_ACH1;
 	case RTW89_TX_QSEL_VI_0:
+	case RTW89_TX_QSEL_VI_1:
+	case RTW89_TX_QSEL_VI_2:
+	case RTW89_TX_QSEL_VI_3:
 		return RTW89_TXCH_ACH2;
 	case RTW89_TX_QSEL_VO_0:
+	case RTW89_TX_QSEL_VO_1:
+	case RTW89_TX_QSEL_VO_2:
+	case RTW89_TX_QSEL_VO_3:
 		return RTW89_TXCH_ACH3;
 	case RTW89_TX_QSEL_B0_MGMT:
 		return RTW89_TXCH_CH8;

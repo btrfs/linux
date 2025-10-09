@@ -99,8 +99,8 @@ static irqreturn_t ad7476_trigger_handler(int irq, void  *p)
 	if (b_sent < 0)
 		goto done;
 
-	iio_push_to_buffers_with_timestamp(indio_dev, st->data,
-		iio_get_time_ns(indio_dev));
+	iio_push_to_buffers_with_ts(indio_dev, st->data, sizeof(st->data),
+				    iio_get_time_ns(indio_dev));
 done:
 	iio_trigger_notify_done(indio_dev->trig);
 
@@ -138,11 +138,10 @@ static int ad7476_read_raw(struct iio_dev *indio_dev,
 
 	switch (m) {
 	case IIO_CHAN_INFO_RAW:
-		ret = iio_device_claim_direct_mode(indio_dev);
-		if (ret)
-			return ret;
+		if (!iio_device_claim_direct(indio_dev))
+			return -EBUSY;
 		ret = ad7476_scan_direct(st);
-		iio_device_release_direct_mode(indio_dev);
+		iio_device_release_direct(indio_dev);
 
 		if (ret < 0)
 			return ret;
@@ -409,35 +408,42 @@ static int ad7476_probe(struct spi_device *spi)
 }
 
 static const struct spi_device_id ad7476_id[] = {
-	{"ad7091", ID_AD7091},
-	{"ad7091r", ID_AD7091R},
-	{"ad7273", ID_AD7273},
-	{"ad7274", ID_AD7274},
-	{"ad7276", ID_AD7276},
-	{"ad7277", ID_AD7277},
-	{"ad7278", ID_AD7278},
-	{"ad7466", ID_AD7466},
-	{"ad7467", ID_AD7467},
-	{"ad7468", ID_AD7468},
-	{"ad7475", ID_AD7475},
-	{"ad7476", ID_AD7466},
-	{"ad7476a", ID_AD7466},
-	{"ad7477", ID_AD7467},
-	{"ad7477a", ID_AD7467},
-	{"ad7478", ID_AD7468},
-	{"ad7478a", ID_AD7468},
-	{"ad7495", ID_AD7495},
-	{"ad7910", ID_AD7467},
-	{"ad7920", ID_AD7466},
-	{"ad7940", ID_AD7940},
-	{"adc081s", ID_ADC081S},
-	{"adc101s", ID_ADC101S},
-	{"adc121s", ID_ADC121S},
-	{"ads7866", ID_ADS7866},
-	{"ads7867", ID_ADS7867},
-	{"ads7868", ID_ADS7868},
-	{"ltc2314-14", ID_LTC2314_14},
-	{}
+	{ "ad7091", ID_AD7091 },
+	{ "ad7091r", ID_AD7091R },
+	{ "ad7273", ID_AD7273 },
+	{ "ad7274", ID_AD7274 },
+	{ "ad7276", ID_AD7276},
+	{ "ad7277", ID_AD7277 },
+	{ "ad7278", ID_AD7278 },
+	{ "ad7466", ID_AD7466 },
+	{ "ad7467", ID_AD7467 },
+	{ "ad7468", ID_AD7468 },
+	{ "ad7475", ID_AD7475 },
+	{ "ad7476", ID_AD7466 },
+	{ "ad7476a", ID_AD7466 },
+	{ "ad7477", ID_AD7467 },
+	{ "ad7477a", ID_AD7467 },
+	{ "ad7478", ID_AD7468 },
+	{ "ad7478a", ID_AD7468 },
+	{ "ad7495", ID_AD7495 },
+	{ "ad7910", ID_AD7467 },
+	{ "ad7920", ID_AD7466 },
+	{ "ad7940", ID_AD7940 },
+	{ "adc081s", ID_ADC081S },
+	{ "adc101s", ID_ADC101S },
+	{ "adc121s", ID_ADC121S },
+	{ "ads7866", ID_ADS7866 },
+	{ "ads7867", ID_ADS7867 },
+	{ "ads7868", ID_ADS7868 },
+	/*
+	 * The ROHM BU79100G is identical to the TI's ADS7866 from the software
+	 * point of view. The binding document mandates the ADS7866 to be
+	 * marked as a fallback for the BU79100G, but we still need the SPI ID
+	 * here to make the module loading work.
+	 */
+	{ "bu79100g", ID_ADS7866 },
+	{ "ltc2314-14", ID_LTC2314_14 },
+	{ }
 };
 MODULE_DEVICE_TABLE(spi, ad7476_id);
 

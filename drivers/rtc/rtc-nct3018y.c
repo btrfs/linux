@@ -102,6 +102,8 @@ static int nct3018y_get_alarm_mode(struct i2c_client *client, unsigned char *ala
 		if (flags < 0)
 			return flags;
 		*alarm_enable = flags & NCT3018Y_BIT_AIE;
+		dev_dbg(&client->dev, "%s:alarm_enable:%x\n", __func__, *alarm_enable);
+
 	}
 
 	if (alarm_flag) {
@@ -110,10 +112,8 @@ static int nct3018y_get_alarm_mode(struct i2c_client *client, unsigned char *ala
 		if (flags < 0)
 			return flags;
 		*alarm_flag = flags & NCT3018Y_BIT_AF;
+		dev_dbg(&client->dev, "%s:alarm_flag:%x\n", __func__, *alarm_flag);
 	}
-
-	dev_dbg(&client->dev, "%s:alarm_enable:%x alarm_flag:%x\n",
-		__func__, *alarm_enable, *alarm_flag);
 
 	return 0;
 }
@@ -367,14 +367,19 @@ static unsigned long nct3018y_clkout_recalc_rate(struct clk_hw *hw,
 	return clkout_rates[flags];
 }
 
-static long nct3018y_clkout_round_rate(struct clk_hw *hw, unsigned long rate,
-				       unsigned long *prate)
+static int nct3018y_clkout_determine_rate(struct clk_hw *hw,
+					  struct clk_rate_request *req)
 {
 	int i;
 
 	for (i = 0; i < ARRAY_SIZE(clkout_rates); i++)
-		if (clkout_rates[i] <= rate)
-			return clkout_rates[i];
+		if (clkout_rates[i] <= req->rate) {
+			req->rate = clkout_rates[i];
+
+			return 0;
+		}
+
+	req->rate = clkout_rates[0];
 
 	return 0;
 }
@@ -446,7 +451,7 @@ static const struct clk_ops nct3018y_clkout_ops = {
 	.unprepare = nct3018y_clkout_unprepare,
 	.is_prepared = nct3018y_clkout_is_prepared,
 	.recalc_rate = nct3018y_clkout_recalc_rate,
-	.round_rate = nct3018y_clkout_round_rate,
+	.determine_rate = nct3018y_clkout_determine_rate,
 	.set_rate = nct3018y_clkout_set_rate,
 };
 
@@ -517,12 +522,15 @@ static int nct3018y_probe(struct i2c_client *client)
 	if (nct3018y->part_num < 0) {
 		dev_dbg(&client->dev, "Failed to read NCT3018Y_REG_PART.\n");
 		return nct3018y->part_num;
-	} else if (nct3018y->part_num == NCT3018Y_REG_PART_NCT3018Y) {
-		flags = NCT3018Y_BIT_HF;
-		err = i2c_smbus_write_byte_data(client, NCT3018Y_REG_CTRL, flags);
-		if (err < 0) {
-			dev_dbg(&client->dev, "Unable to write NCT3018Y_REG_CTRL.\n");
-			return err;
+	} else {
+		nct3018y->part_num &= 0x03; /* Part number is corresponding to bit 0 and 1 */
+		if (nct3018y->part_num == NCT3018Y_REG_PART_NCT3018Y) {
+			flags = NCT3018Y_BIT_HF;
+			err = i2c_smbus_write_byte_data(client, NCT3018Y_REG_CTRL, flags);
+			if (err < 0) {
+				dev_dbg(&client->dev, "Unable to write NCT3018Y_REG_CTRL.\n");
+				return err;
+			}
 		}
 	}
 
@@ -564,7 +572,7 @@ static int nct3018y_probe(struct i2c_client *client)
 }
 
 static const struct i2c_device_id nct3018y_id[] = {
-	{ "nct3018y", 0 },
+	{ "nct3018y" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, nct3018y_id);

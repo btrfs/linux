@@ -13,6 +13,7 @@ mlx5_ib_set_vport_rep(struct mlx5_core_dev *dev,
 		      int vport_index)
 {
 	struct mlx5_ib_dev *ibdev;
+	struct net_device *ndev;
 
 	ibdev = mlx5_eswitch_uplink_get_proto_dev(dev->priv.eswitch, REP_IB);
 	if (!ibdev)
@@ -20,12 +21,9 @@ mlx5_ib_set_vport_rep(struct mlx5_core_dev *dev,
 
 	ibdev->port[vport_index].rep = rep;
 	rep->rep_data[REP_IB].priv = ibdev;
-	write_lock(&ibdev->port[vport_index].roce.netdev_lock);
-	ibdev->port[vport_index].roce.netdev =
-		mlx5_ib_get_rep_netdev(rep->esw, rep->vport);
-	write_unlock(&ibdev->port[vport_index].roce.netdev_lock);
+	ndev = mlx5_ib_get_rep_netdev(rep->esw, rep->vport);
 
-	return 0;
+	return ib_device_set_netdev(&ibdev->ib_dev, ndev, vport_index + 1);
 }
 
 static void mlx5_ib_register_peer_vport_reps(struct mlx5_core_dev *mdev);
@@ -90,7 +88,8 @@ mlx5_ib_vport_rep_load(struct mlx5_core_dev *dev, struct mlx5_eswitch_rep *rep)
 	else
 		return mlx5_ib_set_vport_rep(lag_master, rep, vport_index);
 
-	ibdev = ib_alloc_device(mlx5_ib_dev, ib_dev);
+	ibdev = ib_alloc_device_with_net(mlx5_ib_dev, ib_dev,
+					 mlx5_core_net(lag_master));
 	if (!ibdev)
 		return -ENOMEM;
 
@@ -104,10 +103,15 @@ mlx5_ib_vport_rep_load(struct mlx5_core_dev *dev, struct mlx5_eswitch_rep *rep)
 	ibdev->is_rep = true;
 	vport_index = rep->vport_index;
 	ibdev->port[vport_index].rep = rep;
-	ibdev->port[vport_index].roce.netdev =
-		mlx5_ib_get_rep_netdev(lag_master->priv.eswitch, rep->vport);
 	ibdev->mdev = lag_master;
 	ibdev->num_ports = num_ports;
+	ibdev->ib_dev.phys_port_cnt = num_ports;
+	ret = ib_device_set_netdev(&ibdev->ib_dev,
+			mlx5_ib_get_rep_netdev(lag_master->priv.eswitch,
+					       rep->vport),
+			vport_index + 1);
+	if (ret)
+		goto fail_add;
 
 	ret = __mlx5_ib_add(ibdev, profile);
 	if (ret)
@@ -160,9 +164,8 @@ mlx5_ib_vport_rep_unload(struct mlx5_eswitch_rep *rep)
 	}
 
 	port = &dev->port[vport_index];
-	write_lock(&port->roce.netdev_lock);
-	port->roce.netdev = NULL;
-	write_unlock(&port->roce.netdev_lock);
+
+	ib_device_set_netdev(&dev->ib_dev, NULL, vport_index + 1);
 	rep->rep_data[REP_IB].priv = NULL;
 	port->rep = NULL;
 

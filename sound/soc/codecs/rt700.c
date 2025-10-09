@@ -37,8 +37,8 @@ static int rt700_index_write(struct regmap *regmap,
 
 	ret = regmap_write(regmap, addr, value);
 	if (ret < 0)
-		pr_err("Failed to set private value: %06x <= %04x ret=%d\n",
-			addr, value, ret);
+		pr_err("%s: Failed to set private value: %06x <= %04x ret=%d\n",
+		       __func__, addr, value, ret);
 
 	return ret;
 }
@@ -52,8 +52,8 @@ static int rt700_index_read(struct regmap *regmap,
 	*value = 0;
 	ret = regmap_read(regmap, addr, value);
 	if (ret < 0)
-		pr_err("Failed to get private value: %06x => %04x ret=%d\n",
-			addr, *value, ret);
+		pr_err("%s: Failed to get private value: %06x => %04x ret=%d\n",
+		       __func__, addr, *value, ret);
 
 	return ret;
 }
@@ -338,7 +338,6 @@ static int rt700_set_jack_detect(struct snd_soc_component *component,
 
 	rt700_jack_init(rt700);
 
-	pm_runtime_mark_last_busy(component->dev);
 	pm_runtime_put_autosuspend(component->dev);
 
 	return 0;
@@ -862,7 +861,7 @@ static int rt700_set_bias_level(struct snd_soc_component *component,
 	default:
 		break;
 	}
-	dapm->bias_level = level;
+
 	return 0;
 }
 
@@ -930,14 +929,14 @@ static int rt700_pcm_hw_params(struct snd_pcm_substream *substream,
 		port_config.num += 2;
 		break;
 	default:
-		dev_err(component->dev, "Invalid DAI id %d\n", dai->id);
+		dev_err(component->dev, "%s: Invalid DAI id %d\n", __func__, dai->id);
 		return -EINVAL;
 	}
 
 	retval = sdw_stream_add_slave(rt700->slave, &stream_config,
 					&port_config, 1, sdw_stream);
 	if (retval) {
-		dev_err(dai->dev, "Unable to configure port\n");
+		dev_err(dai->dev, "%s: Unable to configure port\n", __func__);
 		return retval;
 	}
 
@@ -945,8 +944,8 @@ static int rt700_pcm_hw_params(struct snd_pcm_substream *substream,
 		/* bit 3:0 Number of Channel */
 		val |= (params_channels(params) - 1);
 	} else {
-		dev_err(component->dev, "Unsupported channels %d\n",
-			params_channels(params));
+		dev_err(component->dev, "%s: Unsupported channels %d\n",
+			__func__, params_channels(params));
 		return -EINVAL;
 	}
 
@@ -1230,7 +1229,6 @@ int rt700_io_init(struct device *dev, struct sdw_slave *slave)
 	/* Mark Slave initialization complete */
 	rt700->hw_init = true;
 
-	pm_runtime_mark_last_busy(&slave->dev);
 	pm_runtime_put_autosuspend(&slave->dev);
 
 	dev_dbg(&slave->dev, "%s hw_init complete\n", __func__);

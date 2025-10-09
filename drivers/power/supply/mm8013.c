@@ -71,7 +71,6 @@ static int mm8013_checkdevice(struct mm8013_chip *chip)
 
 static enum power_supply_property mm8013_battery_props[] = {
 	POWER_SUPPLY_PROP_CAPACITY,
-	POWER_SUPPLY_PROP_CHARGE_BEHAVIOUR,
 	POWER_SUPPLY_PROP_CHARGE_FULL,
 	POWER_SUPPLY_PROP_CHARGE_FULL_DESIGN,
 	POWER_SUPPLY_PROP_CHARGE_NOW,
@@ -91,7 +90,7 @@ static int mm8013_get_property(struct power_supply *psy,
 			       enum power_supply_property psp,
 			       union power_supply_propval *val)
 {
-	struct mm8013_chip *chip = psy->drv_data;
+	struct mm8013_chip *chip = power_supply_get_drvdata(psy);
 	int ret = 0;
 	u32 regval;
 
@@ -102,16 +101,6 @@ static int mm8013_get_property(struct power_supply *psy,
 			return ret;
 
 		val->intval = regval;
-		break;
-	case POWER_SUPPLY_PROP_CHARGE_BEHAVIOUR:
-		ret = regmap_read(chip->regmap, REG_FLAGS, &regval);
-		if (ret < 0)
-			return ret;
-
-		if (regval & MM8013_FLAG_CHG_INH)
-			val->intval = POWER_SUPPLY_CHARGE_BEHAVIOUR_INHIBIT_CHARGE;
-		else
-			val->intval = POWER_SUPPLY_CHARGE_BEHAVIOUR_AUTO;
 		break;
 	case POWER_SUPPLY_PROP_CHARGE_FULL:
 		ret = regmap_read(chip->regmap, REG_FULL_CHARGE_CAPACITY, &regval);
@@ -187,6 +176,8 @@ static int mm8013_get_property(struct power_supply *psy,
 
 		if (regval & MM8013_FLAG_DSG)
 			val->intval = POWER_SUPPLY_STATUS_DISCHARGING;
+		else if (regval & MM8013_FLAG_CHG_INH)
+			val->intval = POWER_SUPPLY_STATUS_NOT_CHARGING;
 		else if (regval & MM8013_FLAG_CHG)
 			val->intval = POWER_SUPPLY_STATUS_CHARGING;
 		else if (regval & MM8013_FLAG_FC)
@@ -283,7 +274,7 @@ static int mm8013_probe(struct i2c_client *client)
 		return dev_err_probe(dev, ret, "MM8013 not found\n");
 
 	psy_cfg.drv_data = chip;
-	psy_cfg.of_node = dev->of_node;
+	psy_cfg.fwnode = dev_fwnode(dev);
 
 	psy = devm_power_supply_register(dev, &mm8013_desc, &psy_cfg);
 	if (IS_ERR(psy))
@@ -293,7 +284,7 @@ static int mm8013_probe(struct i2c_client *client)
 }
 
 static const struct i2c_device_id mm8013_id_table[] = {
-	{ "mm8013", 0 },
+	{ "mm8013" },
 	{}
 };
 MODULE_DEVICE_TABLE(i2c, mm8013_id_table);

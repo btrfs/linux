@@ -19,23 +19,28 @@ extern const struct rhashtable_params vxlan_vni_rht_params;
 /* per-network namespace private data for this module */
 struct vxlan_net {
 	struct list_head  vxlan_list;
+	/* sock_list is protected by rtnl lock */
 	struct hlist_head sock_list[PORT_HASH_SIZE];
-	spinlock_t	  sock_lock;
 	struct notifier_block nexthop_notifier_block;
+};
+
+struct vxlan_fdb_key {
+	u8 eth_addr[ETH_ALEN];
+	__be32 vni;
 };
 
 /* Forwarding table entry */
 struct vxlan_fdb {
-	struct hlist_node hlist;	/* linked list of entries */
+	struct rhash_head rhnode;
 	struct rcu_head	  rcu;
 	unsigned long	  updated;	/* jiffies */
 	unsigned long	  used;
 	struct list_head  remotes;
-	u8		  eth_addr[ETH_ALEN];
+	struct vxlan_fdb_key key;
 	u16		  state;	/* see ndm_state */
-	__be32		  vni;
 	u16		  flags;	/* see ndm_flags and below */
 	struct list_head  nh_list;
+	struct hlist_node fdb_node;
 	struct nexthop __rcu *nh;
 	struct vxlan_dev  __rcu *vdev;
 };
@@ -56,9 +61,7 @@ static inline struct hlist_head *vs_head(struct net *net, __be16 port)
 	return &vn->sock_list[hash_32(ntohs(port), PORT_HASH_BITS)];
 }
 
-/* First remote destination for a forwarding entry.
- * Guaranteed to be non-NULL because remotes are never deleted.
- */
+/* First remote destination for a forwarding entry. */
 static inline struct vxlan_rdst *first_remote_rcu(struct vxlan_fdb *fdb)
 {
 	if (rcu_access_pointer(fdb->nh))
@@ -202,7 +205,7 @@ int vxlan_vni_in_use(struct net *src_net, struct vxlan_dev *vxlan,
 int vxlan_vnigroup_init(struct vxlan_dev *vxlan);
 void vxlan_vnigroup_uninit(struct vxlan_dev *vxlan);
 
-void vxlan_vnifilter_init(void);
+int vxlan_vnifilter_init(void);
 void vxlan_vnifilter_uninit(void);
 void vxlan_vnifilter_count(struct vxlan_dev *vxlan, __be32 vni,
 			   struct vxlan_vni_node *vninode,

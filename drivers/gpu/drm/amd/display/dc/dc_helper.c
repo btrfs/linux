@@ -91,11 +91,6 @@ struct dc_reg_value_masks {
 	uint32_t mask;
 };
 
-struct dc_reg_sequence {
-	uint32_t addr;
-	struct dc_reg_value_masks value_masks;
-};
-
 static inline void set_reg_field_value_masks(
 	struct dc_reg_value_masks *field_value_mask,
 	uint32_t value,
@@ -265,7 +260,6 @@ uint32_t generic_reg_set_ex(const struct dc_context *ctx,
 			field_value1, ap);
 
 	va_end(ap);
-
 
 	/* mmio write directly */
 	reg_val = (reg_val & ~field_value_mask.mask) | field_value_mask.value;
@@ -688,13 +682,19 @@ void reg_sequence_wait_done(const struct dc_context *ctx)
 	if (offload &&
 	    ctx->dc->debug.dmub_offload_enabled &&
 	    !ctx->dc->debug.dmcub_emulation) {
-		dc_dmub_srv_wait_idle(ctx->dmub_srv);
+		dc_dmub_srv_wait_for_idle(ctx->dmub_srv, DM_DMUB_WAIT_TYPE_WAIT, NULL);
 	}
 }
 
 char *dce_version_to_string(const int version)
 {
 	switch (version) {
+	case DCE_VERSION_6_0:
+		return "DCE 6.0";
+	case DCE_VERSION_6_1:
+		return "DCE 6.1";
+	case DCE_VERSION_6_4:
+		return "DCE 6.4";
 	case DCE_VERSION_8_0:
 		return "DCE 8.0";
 	case DCE_VERSION_8_1:
@@ -747,6 +747,10 @@ char *dce_version_to_string(const int version)
 		return "DCN 3.5";
 	case DCN_VERSION_3_51:
 		return "DCN 3.5.1";
+	case DCN_VERSION_3_6:
+		return "DCN 3.6";
+	case DCN_VERSION_4_01:
+		return "DCN 4.0.1";
 	default:
 		return "Unknown";
 	}

@@ -8,9 +8,11 @@
  */
 #include <linux/auxiliary_bus.h>
 #include <linux/delay.h>
+#include <linux/io.h>
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/platform_device.h>
+#include <linux/slab.h>
 #include <linux/reset-controller.h>
 #include <dt-bindings/clock/microchip,mpfs-clock.h>
 #include <soc/microchip/mpfs.h>
@@ -28,20 +30,30 @@
 /* block concurrent access to the soft reset register */
 static DEFINE_SPINLOCK(mpfs_reset_lock);
 
+struct mpfs_reset {
+	void __iomem *base;
+	struct reset_controller_dev rcdev;
+};
+
+static inline struct mpfs_reset *to_mpfs_reset(struct reset_controller_dev *rcdev)
+{
+	return container_of(rcdev, struct mpfs_reset, rcdev);
+}
+
 /*
  * Peripheral clock resets
  */
-
 static int mpfs_assert(struct reset_controller_dev *rcdev, unsigned long id)
 {
+	struct mpfs_reset *rst = to_mpfs_reset(rcdev);
 	unsigned long flags;
 	u32 reg;
 
 	spin_lock_irqsave(&mpfs_reset_lock, flags);
 
-	reg = mpfs_reset_read(rcdev->dev);
+	reg = readl(rst->base);
 	reg |= BIT(id);
-	mpfs_reset_write(rcdev->dev, reg);
+	writel(reg, rst->base);
 
 	spin_unlock_irqrestore(&mpfs_reset_lock, flags);
 
@@ -50,14 +62,15 @@ static int mpfs_assert(struct reset_controller_dev *rcdev, unsigned long id)
 
 static int mpfs_deassert(struct reset_controller_dev *rcdev, unsigned long id)
 {
+	struct mpfs_reset *rst = to_mpfs_reset(rcdev);
 	unsigned long flags;
 	u32 reg;
 
 	spin_lock_irqsave(&mpfs_reset_lock, flags);
 
-	reg = mpfs_reset_read(rcdev->dev);
+	reg = readl(rst->base);
 	reg &= ~BIT(id);
-	mpfs_reset_write(rcdev->dev, reg);
+	writel(reg, rst->base);
 
 	spin_unlock_irqrestore(&mpfs_reset_lock, flags);
 
@@ -66,7 +79,8 @@ static int mpfs_deassert(struct reset_controller_dev *rcdev, unsigned long id)
 
 static int mpfs_status(struct reset_controller_dev *rcdev, unsigned long id)
 {
-	u32 reg = mpfs_reset_read(rcdev->dev);
+	struct mpfs_reset *rst = to_mpfs_reset(rcdev);
+	u32 reg = readl(rst->base);
 
 	/*
 	 * It is safe to return here as MPFS_NUM_RESETS makes sure the sign bit
@@ -121,11 +135,15 @@ static int mpfs_reset_probe(struct auxiliary_device *adev,
 {
 	struct device *dev = &adev->dev;
 	struct reset_controller_dev *rcdev;
+	struct mpfs_reset *rst;
 
-	rcdev = devm_kzalloc(dev, sizeof(*rcdev), GFP_KERNEL);
-	if (!rcdev)
+	rst = devm_kzalloc(dev, sizeof(*rst), GFP_KERNEL);
+	if (!rst)
 		return -ENOMEM;
 
+	rst->base = (void __iomem *)adev->dev.platform_data;
+
+	rcdev = &rst->rcdev;
 	rcdev->dev = dev;
 	rcdev->dev->parent = dev->parent;
 	rcdev->ops = &mpfs_reset_ops;
@@ -137,9 +155,22 @@ static int mpfs_reset_probe(struct auxiliary_device *adev,
 	return devm_reset_controller_register(dev, rcdev);
 }
 
+int mpfs_reset_controller_register(struct device *clk_dev, void __iomem *base)
+{
+	struct auxiliary_device *adev;
+
+	adev = devm_auxiliary_device_create(clk_dev, "reset-mpfs",
+					    (__force void *)base);
+	if (!adev)
+		return -ENODEV;
+
+	return 0;
+}
+EXPORT_SYMBOL_NS_GPL(mpfs_reset_controller_register, "MCHP_CLK_MPFS");
+
 static const struct auxiliary_device_id mpfs_reset_ids[] = {
 	{
-		.name = "clk_mpfs.reset-mpfs",
+		.name = "reset_mpfs.reset-mpfs",
 	},
 	{ }
 };
@@ -154,4 +185,4 @@ module_auxiliary_driver(mpfs_reset_driver);
 
 MODULE_DESCRIPTION("Microchip PolarFire SoC Reset Driver");
 MODULE_AUTHOR("Conor Dooley <conor.dooley@microchip.com>");
-MODULE_IMPORT_NS(MCHP_CLK_MPFS);
+MODULE_IMPORT_NS("MCHP_CLK_MPFS");

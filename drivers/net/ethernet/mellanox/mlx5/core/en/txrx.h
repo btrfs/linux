@@ -6,6 +6,8 @@
 
 #include "en.h"
 #include <linux/indirect_call_wrapper.h>
+#include <net/ip6_checksum.h>
+#include <net/tcp.h>
 
 #define MLX5E_TX_WQE_EMPTY_DS_COUNT (sizeof(struct mlx5e_tx_wqe) / MLX5_SEND_WQE_DS)
 
@@ -33,6 +35,25 @@
 					 MLX5_SEND_WQEBB_NUM_DS)
 
 #define MLX5E_RX_ERR_CQE(cqe) (get_cqe_opcode(cqe) != MLX5_CQE_RESP_SEND)
+
+#define MLX5E_KSM_UMR_WQE_SZ(sgl_len)\
+	(sizeof(struct mlx5e_umr_wqe) +\
+	(sizeof(struct mlx5_ksm) * (sgl_len)))
+
+#define MLX5E_KSM_UMR_WQEBBS(ksm_entries) \
+	(DIV_ROUND_UP(MLX5E_KSM_UMR_WQE_SZ(ksm_entries), MLX5_SEND_WQE_BB))
+
+#define MLX5E_KSM_UMR_DS_CNT(ksm_entries)\
+	(DIV_ROUND_UP(MLX5E_KSM_UMR_WQE_SZ(ksm_entries), MLX5_SEND_WQE_DS))
+
+#define MLX5E_KSM_MAX_ENTRIES_PER_WQE(wqe_size)\
+	(((wqe_size) - sizeof(struct mlx5e_umr_wqe)) / sizeof(struct mlx5_ksm))
+
+#define MLX5E_KSM_ENTRIES_PER_WQE(wqe_size)\
+	ALIGN_DOWN(MLX5E_KSM_MAX_ENTRIES_PER_WQE(wqe_size), MLX5_UMR_KSM_NUM_ENTRIES_ALIGNMENT)
+
+#define MLX5E_MAX_KSM_PER_WQE(mdev) \
+	MLX5E_KSM_ENTRIES_PER_WQE(MLX5_SEND_WQE_BB * mlx5e_get_max_sq_aligned_wqebbs(mdev))
 
 static inline
 ktime_t mlx5e_cqe_ts_to_ns(cqe_ts_to_ns func, struct mlx5_clock *clock, u64 cqe_ts)
@@ -193,6 +214,19 @@ static inline u16 mlx5e_txqsq_get_next_pi(struct mlx5e_txqsq *sq, u16 size)
 	return pi;
 }
 
+static inline u16 mlx5e_txqsq_get_next_pi_anysize(struct mlx5e_txqsq *sq,
+						  u16 *size)
+{
+	struct mlx5_wq_cyc *wq = &sq->wq;
+	u16 pi, contig_wqebbs;
+
+	pi = mlx5_wq_cyc_ctr2ix(wq, sq->pc);
+	contig_wqebbs = mlx5_wq_cyc_get_contig_wqebbs(wq, pi);
+	*size = min_t(u16, contig_wqebbs, sq->max_sq_mpw_wqebbs);
+
+	return pi;
+}
+
 void mlx5e_txqsq_wake(struct mlx5e_txqsq *sq);
 
 static inline u16 mlx5e_shampo_get_cqe_header_index(struct mlx5e_rq *rq, struct mlx5_cqe64 *cqe)
@@ -288,14 +322,24 @@ mlx5e_dma_get(struct mlx5e_txqsq *sq, u32 i)
 }
 
 static inline void
-mlx5e_dma_push(struct mlx5e_txqsq *sq, dma_addr_t addr, u32 size,
-	       enum mlx5e_dma_map_type map_type)
+mlx5e_dma_push_single(struct mlx5e_txqsq *sq, dma_addr_t addr, u32 size)
 {
 	struct mlx5e_sq_dma *dma = mlx5e_dma_get(sq, sq->dma_fifo_pc++);
 
 	dma->addr = addr;
 	dma->size = size;
-	dma->type = map_type;
+	dma->type = MLX5E_DMA_MAP_SINGLE;
+}
+
+static inline void
+mlx5e_dma_push_netmem(struct mlx5e_txqsq *sq, netmem_ref netmem,
+		      dma_addr_t addr, u32 size)
+{
+	struct mlx5e_sq_dma *dma = mlx5e_dma_get(sq, sq->dma_fifo_pc++);
+
+	netmem_dma_unmap_addr_set(netmem, dma, addr, addr);
+	dma->size = size;
+	dma->type = MLX5E_DMA_MAP_PAGE;
 }
 
 static inline
@@ -328,7 +372,8 @@ mlx5e_tx_dma_unmap(struct device *pdev, struct mlx5e_sq_dma *dma)
 		dma_unmap_single(pdev, dma->addr, dma->size, DMA_TO_DEVICE);
 		break;
 	case MLX5E_DMA_MAP_PAGE:
-		dma_unmap_page(pdev, dma->addr, dma->size, DMA_TO_DEVICE);
+		netmem_dma_unmap_page_attrs(pdev, dma->addr, dma->size,
+					    DMA_TO_DEVICE, 0);
 		break;
 	default:
 		WARN_ONCE(true, "mlx5e_tx_dma_unmap unknown DMA type!\n");
@@ -337,9 +382,9 @@ mlx5e_tx_dma_unmap(struct device *pdev, struct mlx5e_sq_dma *dma)
 
 void mlx5e_tx_mpwqe_ensure_complete(struct mlx5e_txqsq *sq);
 
-static inline bool mlx5e_tx_mpwqe_is_full(struct mlx5e_tx_mpwqe *session, u8 max_sq_mpw_wqebbs)
+static inline bool mlx5e_tx_mpwqe_is_full(struct mlx5e_tx_mpwqe *session)
 {
-	return session->ds_count == max_sq_mpw_wqebbs * MLX5_SEND_WQEBB_NUM_DS;
+	return session->ds_count == session->ds_count_max;
 }
 
 static inline void mlx5e_rqwq_reset(struct mlx5e_rq *rq)
@@ -457,6 +502,41 @@ mlx5e_set_eseg_swp(struct sk_buff *skb, struct mlx5_wqe_eth_seg *eseg,
 	case IPPROTO_TCP:
 		eseg->swp_inner_l4_offset = skb_inner_transport_offset(skb) / 2;
 		break;
+	}
+}
+
+static inline void
+mlx5e_swp_encap_csum_partial(struct mlx5_core_dev *mdev, struct sk_buff *skb, bool tunnel)
+{
+	const struct iphdr *ip = tunnel ? inner_ip_hdr(skb) : ip_hdr(skb);
+	const struct ipv6hdr *ip6;
+	struct tcphdr *th;
+	struct udphdr *uh;
+	int len;
+
+	if (!MLX5_CAP_ETH(mdev, swp_csum_l4_partial) || !skb_is_gso(skb))
+		return;
+
+	if (skb_is_gso_tcp(skb)) {
+		th = inner_tcp_hdr(skb);
+		len = skb_shinfo(skb)->gso_size + inner_tcp_hdrlen(skb);
+
+		if (ip->version == 4) {
+			th->check = ~tcp_v4_check(len, ip->saddr, ip->daddr, 0);
+		} else {
+			ip6 = tunnel ? inner_ipv6_hdr(skb) : ipv6_hdr(skb);
+			th->check = ~tcp_v6_check(len, &ip6->saddr, &ip6->daddr, 0);
+		}
+	} else if (skb_shinfo(skb)->gso_type & SKB_GSO_UDP_L4) {
+		uh = (struct udphdr *)skb_inner_transport_header(skb);
+		len = skb_shinfo(skb)->gso_size + sizeof(struct udphdr);
+
+		if (ip->version == 4) {
+			uh->check = ~udp_v4_check(len, ip->saddr, ip->daddr, 0);
+		} else {
+			ip6 = tunnel ? inner_ipv6_hdr(skb) : ipv6_hdr(skb);
+			uh->check = ~udp_v6_check(len, &ip6->saddr, &ip6->daddr, 0);
+		}
 	}
 }
 

@@ -13,6 +13,7 @@
 #include <linux/net_tstamp.h>
 #include <linux/interrupt.h>
 #include <linux/phy/phy.h>
+#include <linux/workqueue.h>
 
 #if defined(CONFIG_ARCH_DMA_ADDR_T_64BIT) || defined(CONFIG_MACB_USE_HWSTAMP)
 #define MACB_EXT_DESC
@@ -645,6 +646,10 @@
 #define GEM_T2OFST_OFFSET			0 /* offset value */
 #define GEM_T2OFST_SIZE				7
 
+/* Bitfields in queue pointer registers */
+#define MACB_QUEUE_DISABLE_OFFSET		0 /* disable queue */
+#define MACB_QUEUE_DISABLE_SIZE			1
+
 /* Offset for screener type 2 compare values (T2CMPOFST).
  * Note the offset is applied after the specified point,
  * e.g. GEM_T2COMPOFST_ETYPE denotes the EtherType field, so an offset
@@ -733,6 +738,7 @@
 #define MACB_CAPS_NEEDS_RSTONUBR		0x00000100
 #define MACB_CAPS_MIIONRGMII			0x00000200
 #define MACB_CAPS_NEED_TSUCLK			0x00000400
+#define MACB_CAPS_QUEUE_DISABLE			0x00000800
 #define MACB_CAPS_PCS				0x01000000
 #define MACB_CAPS_HIGH_SPEED			0x02000000
 #define MACB_CAPS_CLK_HW_CHG			0x04000000
@@ -945,75 +951,73 @@ struct macb_tx_skb {
  * device stats by a periodic timer.
  */
 struct macb_stats {
-	u32	rx_pause_frames;
-	u32	tx_ok;
-	u32	tx_single_cols;
-	u32	tx_multiple_cols;
-	u32	rx_ok;
-	u32	rx_fcs_errors;
-	u32	rx_align_errors;
-	u32	tx_deferred;
-	u32	tx_late_cols;
-	u32	tx_excessive_cols;
-	u32	tx_underruns;
-	u32	tx_carrier_errors;
-	u32	rx_resource_errors;
-	u32	rx_overruns;
-	u32	rx_symbol_errors;
-	u32	rx_oversize_pkts;
-	u32	rx_jabbers;
-	u32	rx_undersize_pkts;
-	u32	sqe_test_errors;
-	u32	rx_length_mismatch;
-	u32	tx_pause_frames;
+	u64	rx_pause_frames;
+	u64	tx_ok;
+	u64	tx_single_cols;
+	u64	tx_multiple_cols;
+	u64	rx_ok;
+	u64	rx_fcs_errors;
+	u64	rx_align_errors;
+	u64	tx_deferred;
+	u64	tx_late_cols;
+	u64	tx_excessive_cols;
+	u64	tx_underruns;
+	u64	tx_carrier_errors;
+	u64	rx_resource_errors;
+	u64	rx_overruns;
+	u64	rx_symbol_errors;
+	u64	rx_oversize_pkts;
+	u64	rx_jabbers;
+	u64	rx_undersize_pkts;
+	u64	sqe_test_errors;
+	u64	rx_length_mismatch;
+	u64	tx_pause_frames;
 };
 
 struct gem_stats {
-	u32	tx_octets_31_0;
-	u32	tx_octets_47_32;
-	u32	tx_frames;
-	u32	tx_broadcast_frames;
-	u32	tx_multicast_frames;
-	u32	tx_pause_frames;
-	u32	tx_64_byte_frames;
-	u32	tx_65_127_byte_frames;
-	u32	tx_128_255_byte_frames;
-	u32	tx_256_511_byte_frames;
-	u32	tx_512_1023_byte_frames;
-	u32	tx_1024_1518_byte_frames;
-	u32	tx_greater_than_1518_byte_frames;
-	u32	tx_underrun;
-	u32	tx_single_collision_frames;
-	u32	tx_multiple_collision_frames;
-	u32	tx_excessive_collisions;
-	u32	tx_late_collisions;
-	u32	tx_deferred_frames;
-	u32	tx_carrier_sense_errors;
-	u32	rx_octets_31_0;
-	u32	rx_octets_47_32;
-	u32	rx_frames;
-	u32	rx_broadcast_frames;
-	u32	rx_multicast_frames;
-	u32	rx_pause_frames;
-	u32	rx_64_byte_frames;
-	u32	rx_65_127_byte_frames;
-	u32	rx_128_255_byte_frames;
-	u32	rx_256_511_byte_frames;
-	u32	rx_512_1023_byte_frames;
-	u32	rx_1024_1518_byte_frames;
-	u32	rx_greater_than_1518_byte_frames;
-	u32	rx_undersized_frames;
-	u32	rx_oversize_frames;
-	u32	rx_jabbers;
-	u32	rx_frame_check_sequence_errors;
-	u32	rx_length_field_frame_errors;
-	u32	rx_symbol_errors;
-	u32	rx_alignment_errors;
-	u32	rx_resource_errors;
-	u32	rx_overruns;
-	u32	rx_ip_header_checksum_errors;
-	u32	rx_tcp_checksum_errors;
-	u32	rx_udp_checksum_errors;
+	u64	tx_octets;
+	u64	tx_frames;
+	u64	tx_broadcast_frames;
+	u64	tx_multicast_frames;
+	u64	tx_pause_frames;
+	u64	tx_64_byte_frames;
+	u64	tx_65_127_byte_frames;
+	u64	tx_128_255_byte_frames;
+	u64	tx_256_511_byte_frames;
+	u64	tx_512_1023_byte_frames;
+	u64	tx_1024_1518_byte_frames;
+	u64	tx_greater_than_1518_byte_frames;
+	u64	tx_underrun;
+	u64	tx_single_collision_frames;
+	u64	tx_multiple_collision_frames;
+	u64	tx_excessive_collisions;
+	u64	tx_late_collisions;
+	u64	tx_deferred_frames;
+	u64	tx_carrier_sense_errors;
+	u64	rx_octets;
+	u64	rx_frames;
+	u64	rx_broadcast_frames;
+	u64	rx_multicast_frames;
+	u64	rx_pause_frames;
+	u64	rx_64_byte_frames;
+	u64	rx_65_127_byte_frames;
+	u64	rx_128_255_byte_frames;
+	u64	rx_256_511_byte_frames;
+	u64	rx_512_1023_byte_frames;
+	u64	rx_1024_1518_byte_frames;
+	u64	rx_greater_than_1518_byte_frames;
+	u64	rx_undersized_frames;
+	u64	rx_oversize_frames;
+	u64	rx_jabbers;
+	u64	rx_frame_check_sequence_errors;
+	u64	rx_length_field_frame_errors;
+	u64	rx_symbol_errors;
+	u64	rx_alignment_errors;
+	u64	rx_resource_errors;
+	u64	rx_overruns;
+	u64	rx_ip_header_checksum_errors;
+	u64	rx_tcp_checksum_errors;
+	u64	rx_udp_checksum_errors;
 };
 
 /* Describes the name and offset of an individual statistic register, as
@@ -1021,7 +1025,7 @@ struct gem_stats {
  * this register should contribute to.
  */
 struct gem_statistic {
-	char stat_string[ETH_GSTRING_LEN];
+	char stat_string[ETH_GSTRING_LEN] __nonstring;
 	int offset;
 	u32 stat_bits;
 };
@@ -1163,7 +1167,7 @@ struct macb_ptp_info {
 	s32 (*get_ptp_max_adj)(void);
 	unsigned int (*get_tsu_rate)(struct macb *bp);
 	int (*get_ts_info)(struct net_device *dev,
-			   struct ethtool_ts_info *info);
+			   struct kernel_ethtool_ts_info *info);
 	int (*get_hwtst)(struct net_device *netdev,
 			 struct kernel_hwtstamp_config *tstamp_config);
 	int (*set_hwtst)(struct net_device *netdev,
@@ -1254,6 +1258,8 @@ struct macb {
 	u32	(*macb_reg_readl)(struct macb *bp, int offset);
 	void	(*macb_reg_writel)(struct macb *bp, int offset, u32 value);
 
+	struct macb_dma_desc	*rx_ring_tieoff;
+	dma_addr_t		rx_ring_tieoff_dma;
 	size_t			rx_buffer_size;
 
 	unsigned int		rx_ring_size;
@@ -1271,6 +1277,8 @@ struct macb {
 	struct clk		*rx_clk;
 	struct clk		*tsu_clk;
 	struct net_device	*dev;
+	/* Protects hw_stats and ethtool_stats */
+	spinlock_t		stats_lock;
 	union {
 		struct macb_stats	macb;
 		struct gem_stats	gem;
@@ -1299,6 +1307,7 @@ struct macb {
 	unsigned int		jumbo_max_len;
 
 	u32			wol;
+	u32			wolopts;
 
 	/* holds value of rx watermark value for pbuf_rxcutthru register */
 	u32			rx_watermark;
@@ -1322,7 +1331,7 @@ struct macb {
 	spinlock_t rx_fs_lock;
 	unsigned int max_tuples;
 
-	struct tasklet_struct	hresp_err_tasklet;
+	struct work_struct	hresp_err_bh_work;
 
 	int	rx_bd_rd_prefetch;
 	int	tx_bd_rd_prefetch;

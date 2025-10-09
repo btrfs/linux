@@ -27,6 +27,7 @@
 #include <linux/io-64-nonatomic-lo-hi.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
+#include <linux/of.h>
 #include <linux/perf_event.h>
 #include <linux/platform_device.h>
 
@@ -38,51 +39,6 @@
 #define ARM_CSPMU_CPUMASK_ATTR(_name, _config)			\
 	ARM_CSPMU_EXT_ATTR(_name, arm_cspmu_cpumask_show,	\
 				(unsigned long)_config)
-
-/*
- * CoreSight PMU Arch register offsets.
- */
-#define PMEVCNTR_LO					0x0
-#define PMEVCNTR_HI					0x4
-#define PMEVTYPER					0x400
-#define PMCCFILTR					0x47C
-#define PMEVFILTR					0xA00
-#define PMCNTENSET					0xC00
-#define PMCNTENCLR					0xC20
-#define PMINTENSET					0xC40
-#define PMINTENCLR					0xC60
-#define PMOVSCLR					0xC80
-#define PMOVSSET					0xCC0
-#define PMCFGR						0xE00
-#define PMCR						0xE04
-#define PMIIDR						0xE08
-
-/* PMCFGR register field */
-#define PMCFGR_NCG					GENMASK(31, 28)
-#define PMCFGR_HDBG					BIT(24)
-#define PMCFGR_TRO					BIT(23)
-#define PMCFGR_SS					BIT(22)
-#define PMCFGR_FZO					BIT(21)
-#define PMCFGR_MSI					BIT(20)
-#define PMCFGR_UEN					BIT(19)
-#define PMCFGR_NA					BIT(17)
-#define PMCFGR_EX					BIT(16)
-#define PMCFGR_CCD					BIT(15)
-#define PMCFGR_CC					BIT(14)
-#define PMCFGR_SIZE					GENMASK(13, 8)
-#define PMCFGR_N					GENMASK(7, 0)
-
-/* PMCR register field */
-#define PMCR_TRO					BIT(11)
-#define PMCR_HDBG					BIT(10)
-#define PMCR_FZO					BIT(9)
-#define PMCR_NA						BIT(8)
-#define PMCR_DP						BIT(5)
-#define PMCR_X						BIT(4)
-#define PMCR_D						BIT(3)
-#define PMCR_C						BIT(2)
-#define PMCR_P						BIT(1)
-#define PMCR_E						BIT(0)
 
 /* Each SET/CLR register supports up to 32 counters. */
 #define ARM_CSPMU_SET_CLR_COUNTER_SHIFT		5
@@ -100,13 +56,6 @@
 #define ARM_CSPMU_ACTIVE_CPU_MASK		0x0
 #define ARM_CSPMU_ASSOCIATED_CPU_MASK		0x1
 
-/* Check and use default if implementer doesn't provide attribute callback */
-#define CHECK_DEFAULT_IMPL_OPS(ops, callback)			\
-	do {							\
-		if (!ops->callback)				\
-			ops->callback = arm_cspmu_ ## callback;	\
-	} while (0)
-
 /*
  * Maximum poll count for reading counter value using high-low-high sequence.
  */
@@ -117,11 +66,15 @@ static unsigned long arm_cspmu_cpuhp_state;
 static DEFINE_MUTEX(arm_cspmu_lock);
 
 static void arm_cspmu_set_ev_filter(struct arm_cspmu *cspmu,
-				    struct hw_perf_event *hwc, u32 filter);
+				    const struct perf_event *event);
+static void arm_cspmu_set_cc_filter(struct arm_cspmu *cspmu,
+				    const struct perf_event *event);
 
 static struct acpi_apmt_node *arm_cspmu_apmt_node(struct device *dev)
 {
-	return *(struct acpi_apmt_node **)dev_get_platdata(dev);
+	struct acpi_apmt_node **ptr = dev_get_platdata(dev);
+
+	return ptr ? *ptr : NULL;
 }
 
 /*
@@ -227,19 +180,10 @@ arm_cspmu_event_attr_is_visible(struct kobject *kobj,
 	return attr->mode;
 }
 
-ssize_t arm_cspmu_sysfs_format_show(struct device *dev,
-				struct device_attribute *attr,
-				char *buf)
-{
-	struct dev_ext_attribute *eattr =
-		container_of(attr, struct dev_ext_attribute, attr);
-	return sysfs_emit(buf, "%s\n", (char *)eattr->var);
-}
-EXPORT_SYMBOL_GPL(arm_cspmu_sysfs_format_show);
-
 static struct attribute *arm_cspmu_format_attrs[] = {
 	ARM_CSPMU_FORMAT_EVENT_ATTR,
 	ARM_CSPMU_FORMAT_FILTER_ATTR,
+	ARM_CSPMU_FORMAT_FILTER2_ATTR,
 	NULL,
 };
 
@@ -262,11 +206,6 @@ static u32 arm_cspmu_event_type(const struct perf_event *event)
 static bool arm_cspmu_is_cycle_counter_event(const struct perf_event *event)
 {
 	return (event->attr.config == ARM_CSPMU_EVT_CYCLES_DEFAULT);
-}
-
-static u32 arm_cspmu_event_filter(const struct perf_event *event)
-{
-	return event->attr.config1 & ARM_CSPMU_FILTER_MASK;
 }
 
 static ssize_t arm_cspmu_identifier_show(struct device *dev,
@@ -317,6 +256,10 @@ static const char *arm_cspmu_get_name(const struct arm_cspmu *cspmu)
 
 	dev = cspmu->dev;
 	apmt_node = arm_cspmu_apmt_node(dev);
+	if (!apmt_node)
+		return devm_kasprintf(dev, GFP_KERNEL, PMUNAME "_%u",
+				      atomic_fetch_inc(&pmu_idx[0]));
+
 	pmu_type = apmt_node->type;
 
 	if (pmu_type >= ACPI_APMT_NODE_TYPE_COUNT) {
@@ -408,21 +351,32 @@ static struct arm_cspmu_impl_match *arm_cspmu_impl_match_get(u32 pmiidr)
 	return NULL;
 }
 
+#define DEFAULT_IMPL_OP(name)	.name = arm_cspmu_##name
+
 static int arm_cspmu_init_impl_ops(struct arm_cspmu *cspmu)
 {
 	int ret = 0;
-	struct arm_cspmu_impl_ops *impl_ops = &cspmu->impl.ops;
 	struct acpi_apmt_node *apmt_node = arm_cspmu_apmt_node(cspmu->dev);
 	struct arm_cspmu_impl_match *match;
 
-	/*
-	 * Get PMU implementer and product id from APMT node.
-	 * If APMT node doesn't have implementer/product id, try get it
-	 * from PMIIDR.
-	 */
-	cspmu->impl.pmiidr =
-		(apmt_node->impl_id) ? apmt_node->impl_id :
-				       readl(cspmu->base0 + PMIIDR);
+	/* Start with a default PMU implementation */
+	cspmu->impl.module = THIS_MODULE;
+	cspmu->impl.pmiidr = readl(cspmu->base0 + PMIIDR);
+	cspmu->impl.ops = (struct arm_cspmu_impl_ops) {
+		DEFAULT_IMPL_OP(get_event_attrs),
+		DEFAULT_IMPL_OP(get_format_attrs),
+		DEFAULT_IMPL_OP(get_identifier),
+		DEFAULT_IMPL_OP(get_name),
+		DEFAULT_IMPL_OP(is_cycle_counter_event),
+		DEFAULT_IMPL_OP(event_type),
+		DEFAULT_IMPL_OP(set_cc_filter),
+		DEFAULT_IMPL_OP(set_ev_filter),
+		DEFAULT_IMPL_OP(event_attr_is_visible),
+	};
+
+	/* Firmware may override implementer/product ID from PMIIDR */
+	if (apmt_node && apmt_node->impl_id)
+		cspmu->impl.pmiidr = apmt_node->impl_id;
 
 	/* Find implementer specific attribute ops. */
 	match = arm_cspmu_impl_match_get(cspmu->impl.pmiidr);
@@ -450,24 +404,9 @@ static int arm_cspmu_init_impl_ops(struct arm_cspmu *cspmu)
 		}
 
 		mutex_unlock(&arm_cspmu_lock);
+	}
 
-		if (ret)
-			return ret;
-	} else
-		cspmu->impl.module = THIS_MODULE;
-
-	/* Use default callbacks if implementer doesn't provide one. */
-	CHECK_DEFAULT_IMPL_OPS(impl_ops, get_event_attrs);
-	CHECK_DEFAULT_IMPL_OPS(impl_ops, get_format_attrs);
-	CHECK_DEFAULT_IMPL_OPS(impl_ops, get_identifier);
-	CHECK_DEFAULT_IMPL_OPS(impl_ops, get_name);
-	CHECK_DEFAULT_IMPL_OPS(impl_ops, is_cycle_counter_event);
-	CHECK_DEFAULT_IMPL_OPS(impl_ops, event_type);
-	CHECK_DEFAULT_IMPL_OPS(impl_ops, event_filter);
-	CHECK_DEFAULT_IMPL_OPS(impl_ops, event_attr_is_visible);
-	CHECK_DEFAULT_IMPL_OPS(impl_ops, set_ev_filter);
-
-	return 0;
+	return ret;
 }
 
 static struct attribute_group *
@@ -512,23 +451,16 @@ arm_cspmu_alloc_format_attr_group(struct arm_cspmu *cspmu)
 	return format_group;
 }
 
-static struct attribute_group **
-arm_cspmu_alloc_attr_group(struct arm_cspmu *cspmu)
+static int arm_cspmu_alloc_attr_groups(struct arm_cspmu *cspmu)
 {
-	struct attribute_group **attr_groups = NULL;
-	struct device *dev = cspmu->dev;
+	const struct attribute_group **attr_groups = cspmu->attr_groups;
 	const struct arm_cspmu_impl_ops *impl_ops = &cspmu->impl.ops;
 
 	cspmu->identifier = impl_ops->get_identifier(cspmu);
 	cspmu->name = impl_ops->get_name(cspmu);
 
 	if (!cspmu->identifier || !cspmu->name)
-		return NULL;
-
-	attr_groups = devm_kcalloc(dev, 5, sizeof(struct attribute_group *),
-				   GFP_KERNEL);
-	if (!attr_groups)
-		return NULL;
+		return -ENOMEM;
 
 	attr_groups[0] = arm_cspmu_alloc_event_attr_group(cspmu);
 	attr_groups[1] = arm_cspmu_alloc_format_attr_group(cspmu);
@@ -536,18 +468,14 @@ arm_cspmu_alloc_attr_group(struct arm_cspmu *cspmu)
 	attr_groups[3] = &arm_cspmu_cpumask_attr_group;
 
 	if (!attr_groups[0] || !attr_groups[1])
-		return NULL;
+		return -ENOMEM;
 
-	return attr_groups;
+	return 0;
 }
 
 static inline void arm_cspmu_reset_counters(struct arm_cspmu *cspmu)
 {
-	u32 pmcr = 0;
-
-	pmcr |= PMCR_P;
-	pmcr |= PMCR_C;
-	writel(pmcr, cspmu->base0 + PMCR);
+	writel(PMCR_C | PMCR_P, cspmu->base0 + PMCR);
 }
 
 static inline void arm_cspmu_start_counters(struct arm_cspmu *cspmu)
@@ -837,26 +765,28 @@ static inline void arm_cspmu_set_event(struct arm_cspmu *cspmu,
 }
 
 static void arm_cspmu_set_ev_filter(struct arm_cspmu *cspmu,
-					struct hw_perf_event *hwc,
-					u32 filter)
+				    const struct perf_event *event)
 {
-	u32 offset = PMEVFILTR + (4 * hwc->idx);
+	u32 filter = event->attr.config1 & ARM_CSPMU_FILTER_MASK;
+	u32 filter2 = event->attr.config2 & ARM_CSPMU_FILTER_MASK;
+	u32 offset = 4 * event->hw.idx;
 
-	writel(filter, cspmu->base0 + offset);
+	writel(filter, cspmu->base0 + PMEVFILTR + offset);
+	writel(filter2, cspmu->base0 + PMEVFILT2R + offset);
 }
 
-static inline void arm_cspmu_set_cc_filter(struct arm_cspmu *cspmu, u32 filter)
+static void arm_cspmu_set_cc_filter(struct arm_cspmu *cspmu,
+				    const struct perf_event *event)
 {
-	u32 offset = PMCCFILTR;
+	u32 filter = event->attr.config1 & ARM_CSPMU_FILTER_MASK;
 
-	writel(filter, cspmu->base0 + offset);
+	writel(filter, cspmu->base0 + PMCCFILTR);
 }
 
 static void arm_cspmu_start(struct perf_event *event, int pmu_flags)
 {
 	struct arm_cspmu *cspmu = to_arm_cspmu(event->pmu);
 	struct hw_perf_event *hwc = &event->hw;
-	u32 filter;
 
 	/* We always reprogram the counter */
 	if (pmu_flags & PERF_EF_RELOAD)
@@ -864,13 +794,11 @@ static void arm_cspmu_start(struct perf_event *event, int pmu_flags)
 
 	arm_cspmu_set_event_period(event);
 
-	filter = cspmu->impl.ops.event_filter(event);
-
 	if (event->hw.extra_reg.idx == cspmu->cycle_counter_logical_idx) {
-		arm_cspmu_set_cc_filter(cspmu, filter);
+		cspmu->impl.ops.set_cc_filter(cspmu, event);
 	} else {
 		arm_cspmu_set_event(cspmu, hwc);
-		cspmu->impl.ops.set_ev_filter(cspmu, hwc, filter);
+		cspmu->impl.ops.set_ev_filter(cspmu, event);
 	}
 
 	hwc->state = 0;
@@ -962,7 +890,14 @@ static struct arm_cspmu *arm_cspmu_alloc(struct platform_device *pdev)
 	platform_set_drvdata(pdev, cspmu);
 
 	apmt_node = arm_cspmu_apmt_node(dev);
-	cspmu->has_atomic_dword = apmt_node->flags & ACPI_APMT_FLAGS_ATOMIC;
+	if (apmt_node) {
+		cspmu->has_atomic_dword = apmt_node->flags & ACPI_APMT_FLAGS_ATOMIC;
+	} else {
+		u32 width = 0;
+
+		device_property_read_u32(dev, "reg-io-width", &width);
+		cspmu->has_atomic_dword = (width == 8);
+	}
 
 	return cspmu;
 }
@@ -1153,11 +1088,6 @@ static int arm_cspmu_acpi_get_cpus(struct arm_cspmu *cspmu)
 		}
 	}
 
-	if (cpumask_empty(&cspmu->associated_cpus)) {
-		dev_dbg(cspmu->dev, "No cpu associated with the PMU\n");
-		return -ENODEV;
-	}
-
 	return 0;
 }
 #else
@@ -1167,19 +1097,45 @@ static int arm_cspmu_acpi_get_cpus(struct arm_cspmu *cspmu)
 }
 #endif
 
+static int arm_cspmu_of_get_cpus(struct arm_cspmu *cspmu)
+{
+	struct of_phandle_iterator it;
+	int ret, cpu;
+
+	of_for_each_phandle(&it, ret, dev_of_node(cspmu->dev), "cpus", NULL, 0) {
+		cpu = of_cpu_node_to_id(it.node);
+		if (cpu < 0)
+			continue;
+		cpumask_set_cpu(cpu, &cspmu->associated_cpus);
+	}
+	return ret == -ENOENT ? 0 : ret;
+}
+
 static int arm_cspmu_get_cpus(struct arm_cspmu *cspmu)
 {
-	return arm_cspmu_acpi_get_cpus(cspmu);
+	int ret = 0;
+
+	if (arm_cspmu_apmt_node(cspmu->dev))
+		ret = arm_cspmu_acpi_get_cpus(cspmu);
+	else if (device_property_present(cspmu->dev, "cpus"))
+		ret = arm_cspmu_of_get_cpus(cspmu);
+	else
+		cpumask_copy(&cspmu->associated_cpus, cpu_possible_mask);
+
+	if (!ret && cpumask_empty(&cspmu->associated_cpus)) {
+		dev_dbg(cspmu->dev, "No cpu associated with the PMU\n");
+		ret = -ENODEV;
+	}
+	return ret;
 }
 
 static int arm_cspmu_register_pmu(struct arm_cspmu *cspmu)
 {
 	int ret, capabilities;
-	struct attribute_group **attr_groups;
 
-	attr_groups = arm_cspmu_alloc_attr_group(cspmu);
-	if (!attr_groups)
-		return -ENOMEM;
+	ret = arm_cspmu_alloc_attr_groups(cspmu);
+	if (ret)
+		return ret;
 
 	ret = cpuhp_state_add_instance(arm_cspmu_cpuhp_state,
 				       &cspmu->cpuhp_node);
@@ -1193,6 +1149,7 @@ static int arm_cspmu_register_pmu(struct arm_cspmu *cspmu)
 	cspmu->pmu = (struct pmu){
 		.task_ctx_nr	= perf_invalid_context,
 		.module		= cspmu->impl.module,
+		.parent		= cspmu->dev,
 		.pmu_enable	= arm_cspmu_enable,
 		.pmu_disable	= arm_cspmu_disable,
 		.event_init	= arm_cspmu_event_init,
@@ -1201,12 +1158,11 @@ static int arm_cspmu_register_pmu(struct arm_cspmu *cspmu)
 		.start		= arm_cspmu_start,
 		.stop		= arm_cspmu_stop,
 		.read		= arm_cspmu_read,
-		.attr_groups	= (const struct attribute_group **)attr_groups,
+		.attr_groups	= cspmu->attr_groups,
 		.capabilities	= capabilities,
 	};
 
 	/* Hardware counter init */
-	arm_cspmu_stop_counters(cspmu);
 	arm_cspmu_reset_counters(cspmu);
 
 	ret = perf_pmu_register(&cspmu->pmu, cspmu->name, -1);
@@ -1252,14 +1208,12 @@ static int arm_cspmu_device_probe(struct platform_device *pdev)
 	return ret;
 }
 
-static int arm_cspmu_device_remove(struct platform_device *pdev)
+static void arm_cspmu_device_remove(struct platform_device *pdev)
 {
 	struct arm_cspmu *cspmu = platform_get_drvdata(pdev);
 
 	perf_pmu_unregister(&cspmu->pmu);
 	cpuhp_state_remove_instance(arm_cspmu_cpuhp_state, &cspmu->cpuhp_node);
-
-	return 0;
 }
 
 static const struct platform_device_id arm_cspmu_id[] = {
@@ -1268,11 +1222,18 @@ static const struct platform_device_id arm_cspmu_id[] = {
 };
 MODULE_DEVICE_TABLE(platform, arm_cspmu_id);
 
+static const struct of_device_id arm_cspmu_of_match[] = {
+	{ .compatible = "arm,coresight-pmu" },
+	{}
+};
+MODULE_DEVICE_TABLE(of, arm_cspmu_of_match);
+
 static struct platform_driver arm_cspmu_driver = {
 	.driver = {
-			.name = DRVNAME,
-			.suppress_bind_attrs = true,
-		},
+		.name = DRVNAME,
+		.of_match_table = arm_cspmu_of_match,
+		.suppress_bind_attrs = true,
+	},
 	.probe = arm_cspmu_device_probe,
 	.remove = arm_cspmu_device_remove,
 	.id_table = arm_cspmu_id,
@@ -1305,8 +1266,7 @@ static int arm_cspmu_cpu_online(unsigned int cpu, struct hlist_node *node)
 
 static int arm_cspmu_cpu_teardown(unsigned int cpu, struct hlist_node *node)
 {
-	int dst;
-	struct cpumask online_supported;
+	unsigned int dst;
 
 	struct arm_cspmu *cspmu =
 		hlist_entry_safe(node, struct arm_cspmu, cpuhp_node);
@@ -1316,9 +1276,8 @@ static int arm_cspmu_cpu_teardown(unsigned int cpu, struct hlist_node *node)
 		return 0;
 
 	/* Choose a new CPU to migrate ownership of the PMU to */
-	cpumask_and(&online_supported, &cspmu->associated_cpus,
-		    cpu_online_mask);
-	dst = cpumask_any_but(&online_supported, cpu);
+	dst = cpumask_any_and_but(&cspmu->associated_cpus,
+				  cpu_online_mask, cpu);
 	if (dst >= nr_cpu_ids)
 		return 0;
 
@@ -1421,4 +1380,5 @@ EXPORT_SYMBOL_GPL(arm_cspmu_impl_unregister);
 module_init(arm_cspmu_init);
 module_exit(arm_cspmu_exit);
 
+MODULE_DESCRIPTION("ARM CoreSight Architecture Performance Monitor Driver");
 MODULE_LICENSE("GPL v2");

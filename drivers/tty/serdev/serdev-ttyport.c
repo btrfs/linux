@@ -27,19 +27,17 @@ static size_t ttyport_receive_buf(struct tty_port *port, const u8 *cp,
 {
 	struct serdev_controller *ctrl = port->client_data;
 	struct serport *serport = serdev_controller_get_drvdata(ctrl);
-	int ret;
+	size_t ret;
 
 	if (!test_bit(SERPORT_ACTIVE, &serport->flags))
 		return 0;
 
 	ret = serdev_controller_receive_buf(ctrl, cp, count);
 
-	dev_WARN_ONCE(&ctrl->dev, ret < 0 || ret > count,
-				"receive_buf returns %d (count = %zu)\n",
+	dev_WARN_ONCE(&ctrl->dev, ret > count,
+				"receive_buf returns %zu (count = %zu)\n",
 				ret, count);
-	if (ret < 0)
-		return 0;
-	else if (ret > count)
+	if (ret > count)
 		return count;
 
 	return ret;
@@ -92,14 +90,6 @@ static void ttyport_write_flush(struct serdev_controller *ctrl)
 	struct tty_struct *tty = serport->tty;
 
 	tty_driver_flush_buffer(tty);
-}
-
-static int ttyport_write_room(struct serdev_controller *ctrl)
-{
-	struct serport *serport = serdev_controller_get_drvdata(ctrl);
-	struct tty_struct *tty = serport->tty;
-
-	return tty_write_room(tty);
 }
 
 static int ttyport_open(struct serdev_controller *ctrl)
@@ -261,7 +251,6 @@ static int ttyport_break_ctl(struct serdev_controller *ctrl, unsigned int break_
 static const struct serdev_controller_ops ctrl_ops = {
 	.write_buf = ttyport_write_buf,
 	.write_flush = ttyport_write_flush,
-	.write_room = ttyport_write_room,
 	.open = ttyport_open,
 	.close = ttyport_close,
 	.set_flow_control = ttyport_set_flow_control,

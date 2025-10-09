@@ -3,7 +3,7 @@
  * Copyright 2002-2005, Devicescape Software, Inc.
  * Copyright 2013-2014  Intel Mobile Communications GmbH
  * Copyright(c) 2015-2017 Intel Deutschland GmbH
- * Copyright(c) 2020-2023 Intel Corporation
+ * Copyright(c) 2020-2024 Intel Corporation
  */
 
 #ifndef STA_INFO_H
@@ -169,7 +169,7 @@ struct sta_info;
  * @buf_size: reorder buffer size at receiver
  * @failed_bar_ssn: ssn of the last failed BAR tx attempt
  * @bar_pending: BAR needs to be re-sent
- * @amsdu: support A-MSDU withing A-MDPU
+ * @amsdu: support A-MSDU within A-MDPU
  * @ssn: starting sequence number of the session
  *
  * This structure's lifetime is managed by RCU, assignments to
@@ -466,14 +466,6 @@ struct ieee80211_fragment_cache {
 	unsigned int next;
 };
 
-/*
- * The bandwidth threshold below which the per-station CoDel parameters will be
- * scaled to be more lenient (to prevent starvation of slow stations). This
- * value will be scaled by the number of active stations when it is being
- * applied.
- */
-#define STA_SLOW_THRESHOLD 6000 /* 6 Mbps */
-
 /**
  * struct link_sta_info - Link STA information
  * All link specific sta info are stored here for reference. This can be
@@ -482,6 +474,8 @@ struct ieee80211_fragment_cache {
  *	same for non-MLD STA. This is used as key for searching link STA
  * @link_id: Link ID uniquely identifying the link STA. This is 0 for non-MLD
  *	and set to the corresponding vif LinkId for MLD STA
+ * @op_mode_nss: NSS limit as set by operating mode notification, or 0
+ * @capa_nss: NSS limit as determined by local and peer capabilities
  * @link_hash_node: hash node for rhashtable
  * @sta: Points to the STA info
  * @gtk: group keys negotiated with this station, if any
@@ -510,6 +504,10 @@ struct ieee80211_fragment_cache {
  * @status_stats.avg_ack_signal: average ACK signal
  * @cur_max_bandwidth: maximum bandwidth to use for TX to the station,
  *	taken from HT/VHT capabilities or VHT operating mode notification
+ * @rx_omi_bw_rx: RX OMI bandwidth restriction to apply for RX
+ * @rx_omi_bw_tx: RX OMI bandwidth restriction to apply for TX
+ * @rx_omi_bw_staging: RX OMI bandwidth restriction to apply later
+ *	during finalize
  * @debugfs_dir: debug filesystem directory dentry
  * @pub: public (driver visible) link STA data
  * TODO Move other link params from sta_info as required for MLD operation
@@ -517,6 +515,8 @@ struct ieee80211_fragment_cache {
 struct link_sta_info {
 	u8 addr[ETH_ALEN];
 	u8 link_id;
+
+	u8 op_mode_nss, capa_nss;
 
 	struct rhlist_head link_hash_node;
 
@@ -557,12 +557,67 @@ struct link_sta_info {
 	} tx_stats;
 
 	enum ieee80211_sta_rx_bandwidth cur_max_bandwidth;
+	enum ieee80211_sta_rx_bandwidth rx_omi_bw_rx,
+					rx_omi_bw_tx,
+					rx_omi_bw_staging;
 
 #ifdef CONFIG_MAC80211_DEBUGFS
 	struct dentry *debugfs_dir;
 #endif
 
 	struct ieee80211_link_sta *pub;
+};
+
+/**
+ * struct ieee80211_sta_removed_link_stats - Removed link sta data
+ *
+ * keep required accumulated removed link data for stats
+ *
+ * @rx_packets: accumulated packets (MSDUs & MMPDUs) received from
+ *	this station for removed links
+ * @tx_packets: accumulated packets (MSDUs & MMPDUs) transmitted to
+ *	this station for removed links
+ * @rx_bytes: accumulated bytes (size of MPDUs) received from this
+ *	station for removed links
+ * @tx_bytes: accumulated bytes (size of MPDUs) transmitted to this
+ *	station for removed links
+ * @tx_retries: cumulative retry counts (MPDUs) for removed links
+ * @tx_failed: accumulated number of failed transmissions (MPDUs)
+ *	(retries exceeded, no ACK) for removed links
+ * @rx_dropped_misc: accumulated dropped packets for un-specified reason
+ *	from this station for removed links
+ * @beacon_loss_count: Number of times beacon loss event has triggered
+ *	from this station for removed links.
+ * @expected_throughput: expected throughput in kbps (including 802.11
+ *	headers) towards this station for removed links
+ * @pertid_stats: accumulated per-TID statistics for removed link of
+ *	station
+ * @pertid_stats.rx_msdu : accumulated number of received MSDUs towards
+ *	this station for removed links.
+ * @pertid_stats.tx_msdu: accumulated number of (attempted) transmitted
+ *	MSDUs towards this station for removed links
+ * @pertid_stats.tx_msdu_retries: accumulated number of retries (not
+ *	counting the first) for transmitted MSDUs towards this station
+ *	for removed links
+ * @pertid_stats.tx_msdu_failed: accumulated number of failed transmitted
+ *	MSDUs towards this station for removed links
+ */
+struct ieee80211_sta_removed_link_stats {
+	u32 rx_packets;
+	u32 tx_packets;
+	u64 rx_bytes;
+	u64 tx_bytes;
+	u32 tx_retries;
+	u32 tx_failed;
+	u32 rx_dropped_misc;
+	u32 beacon_loss_count;
+	u32 expected_throughput;
+	struct {
+		u64 rx_msdu;
+		u64 tx_msdu;
+		u64 tx_msdu_retries;
+		u64 tx_msdu_failed;
+	} pertid_stats;
 };
 
 /**
@@ -615,7 +670,6 @@ struct link_sta_info {
  * @sta: station information we share with the driver
  * @sta_state: duplicates information about station state (for debug)
  * @rcu_head: RCU head used for freeing this station struct
- * @cparams: CoDel parameters for this station.
  * @reserved_tid: reserved TID (if any, otherwise IEEE80211_TID_UNRESERVED)
  * @amsdu_mesh_control: track the mesh A-MSDU format used by the peer:
  *
@@ -642,6 +696,7 @@ struct link_sta_info {
  *	@deflink address and remaining would be allocated and the address
  *	would be assigned to link[link_id] where link_id is the id assigned
  *	by the AP.
+ * @rem_link_stats: accumulated removed link stats
  */
 struct sta_info {
 	/* General information, mostly static */
@@ -706,8 +761,6 @@ struct sta_info {
 	struct dentry *debugfs_dir;
 #endif
 
-	struct codel_params cparams;
-
 	u8 reserved_tid;
 	s8 amsdu_mesh_control;
 
@@ -718,10 +771,17 @@ struct sta_info {
 	struct ieee80211_sta_aggregates cur;
 	struct link_sta_info deflink;
 	struct link_sta_info __rcu *link[IEEE80211_MLD_MAX_NUM_LINKS];
+	struct ieee80211_sta_removed_link_stats rem_link_stats;
 
 	/* keep last! */
 	struct ieee80211_sta sta;
 };
+
+static inline int ieee80211_tdls_sta_link_id(struct sta_info *sta)
+{
+	/* TDLS STA can only have a single link */
+	return sta->sta.valid_links ? __ffs(sta->sta.valid_links) : 0;
+}
 
 static inline enum nl80211_plink_state sta_plink_state(struct sta_info *sta)
 {
@@ -882,23 +942,32 @@ void sta_info_stop(struct ieee80211_local *local);
 /**
  * __sta_info_flush - flush matching STA entries from the STA table
  *
- * Returns the number of removed STA entries.
+ * Return: the number of removed STA entries.
  *
  * @sdata: sdata to remove all stations from
  * @vlans: if the given interface is an AP interface, also flush VLANs
+ * @link_id: if given (>=0), all those STA entries using @link_id only
+ *	     will be removed. If -1 is passed, all STA entries will be
+ *	     removed.
+ * @do_not_flush_sta: a station that shouldn't be flushed.
  */
-int __sta_info_flush(struct ieee80211_sub_if_data *sdata, bool vlans);
+int __sta_info_flush(struct ieee80211_sub_if_data *sdata, bool vlans,
+		     int link_id, struct sta_info *do_not_flush_sta);
 
 /**
  * sta_info_flush - flush matching STA entries from the STA table
  *
- * Returns the number of removed STA entries.
+ * Return: the number of removed STA entries.
  *
  * @sdata: sdata to remove all stations from
+ * @link_id: if given (>=0), all those STA entries using @link_id only
+ *	     will be removed. If -1 is passed, all STA entries will be
+ *	     removed.
  */
-static inline int sta_info_flush(struct ieee80211_sub_if_data *sdata)
+static inline int sta_info_flush(struct ieee80211_sub_if_data *sdata,
+				 int link_id)
 {
-	return __sta_info_flush(sdata, false);
+	return __sta_info_flush(sdata, false, link_id, NULL);
 }
 
 void sta_set_rate_info_tx(struct sta_info *sta,
@@ -906,6 +975,9 @@ void sta_set_rate_info_tx(struct sta_info *sta,
 			  struct rate_info *rinfo);
 void sta_set_sinfo(struct sta_info *sta, struct station_info *sinfo,
 		   bool tidstats);
+
+void sta_set_accumulated_removed_links_sinfo(struct sta_info *sta,
+					     struct station_info *sinfo);
 
 u32 sta_get_expected_throughput(struct sta_info *sta);
 
@@ -921,7 +993,7 @@ void ieee80211_sta_ps_deliver_wakeup(struct sta_info *sta);
 void ieee80211_sta_ps_deliver_poll_response(struct sta_info *sta);
 void ieee80211_sta_ps_deliver_uapsd(struct sta_info *sta);
 
-unsigned long ieee80211_sta_last_active(struct sta_info *sta);
+unsigned long ieee80211_sta_last_active(struct sta_info *sta, int link_id);
 
 void ieee80211_sta_set_max_amsdu_subframes(struct sta_info *sta,
 					   const u8 *ext_capab,

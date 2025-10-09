@@ -20,7 +20,11 @@
 #include "rcu_segcblist.h"
 #include "rcu.h"
 
+#ifndef CONFIG_TREE_RCU
 int rcu_scheduler_active __read_mostly;
+#else // #ifndef CONFIG_TREE_RCU
+extern int rcu_scheduler_active;
+#endif // #else // #ifndef CONFIG_TREE_RCU
 static LIST_HEAD(srcu_boot_list);
 static bool srcu_init_done;
 
@@ -96,9 +100,12 @@ EXPORT_SYMBOL_GPL(cleanup_srcu_struct);
  */
 void __srcu_read_unlock(struct srcu_struct *ssp, int idx)
 {
-	int newval = READ_ONCE(ssp->srcu_lock_nesting[idx]) - 1;
+	int newval;
 
+	preempt_disable();  // Needed for PREEMPT_LAZY
+	newval = READ_ONCE(ssp->srcu_lock_nesting[idx]) - 1;
 	WRITE_ONCE(ssp->srcu_lock_nesting[idx], newval);
+	preempt_enable();
 	if (!newval && READ_ONCE(ssp->srcu_gp_waiting) && in_task())
 		swake_up_one(&ssp->srcu_wq);
 }
@@ -117,8 +124,11 @@ void srcu_drive_gp(struct work_struct *wp)
 	struct srcu_struct *ssp;
 
 	ssp = container_of(wp, struct srcu_struct, srcu_work);
-	if (ssp->srcu_gp_running || ULONG_CMP_GE(ssp->srcu_idx, READ_ONCE(ssp->srcu_idx_max)))
+	preempt_disable();  // Needed for PREEMPT_LAZY
+	if (ssp->srcu_gp_running || ULONG_CMP_GE(ssp->srcu_idx, READ_ONCE(ssp->srcu_idx_max))) {
+		preempt_enable();
 		return; /* Already running or nothing to do. */
+	}
 
 	/* Remove recently arrived callbacks and wait for readers. */
 	WRITE_ONCE(ssp->srcu_gp_running, true);
@@ -130,9 +140,12 @@ void srcu_drive_gp(struct work_struct *wp)
 	idx = (ssp->srcu_idx & 0x2) / 2;
 	WRITE_ONCE(ssp->srcu_idx, ssp->srcu_idx + 1);
 	WRITE_ONCE(ssp->srcu_gp_waiting, true);  /* srcu_read_unlock() wakes! */
+	preempt_enable();
 	swait_event_exclusive(ssp->srcu_wq, !READ_ONCE(ssp->srcu_lock_nesting[idx]));
+	preempt_disable();  // Needed for PREEMPT_LAZY
 	WRITE_ONCE(ssp->srcu_gp_waiting, false); /* srcu_read_unlock() cheap. */
 	WRITE_ONCE(ssp->srcu_idx, ssp->srcu_idx + 1);
+	preempt_enable();
 
 	/* Invoke the callbacks we removed above. */
 	while (lh) {
@@ -150,8 +163,11 @@ void srcu_drive_gp(struct work_struct *wp)
 	 * at interrupt level, but the ->srcu_gp_running checks will
 	 * straighten that out.
 	 */
+	preempt_disable();  // Needed for PREEMPT_LAZY
 	WRITE_ONCE(ssp->srcu_gp_running, false);
-	if (ULONG_CMP_LT(ssp->srcu_idx, READ_ONCE(ssp->srcu_idx_max)))
+	idx = ULONG_CMP_LT(ssp->srcu_idx, READ_ONCE(ssp->srcu_idx_max));
+	preempt_enable();
+	if (idx)
 		schedule_work(&ssp->srcu_work);
 }
 EXPORT_SYMBOL_GPL(srcu_drive_gp);
@@ -160,9 +176,12 @@ static void srcu_gp_start_if_needed(struct srcu_struct *ssp)
 {
 	unsigned long cookie;
 
+	preempt_disable();  // Needed for PREEMPT_LAZY
 	cookie = get_state_synchronize_srcu(ssp);
-	if (ULONG_CMP_GE(READ_ONCE(ssp->srcu_idx_max), cookie))
+	if (ULONG_CMP_GE(READ_ONCE(ssp->srcu_idx_max), cookie)) {
+		preempt_enable();
 		return;
+	}
 	WRITE_ONCE(ssp->srcu_idx_max, cookie);
 	if (!READ_ONCE(ssp->srcu_gp_running)) {
 		if (likely(srcu_init_done))
@@ -170,6 +189,7 @@ static void srcu_gp_start_if_needed(struct srcu_struct *ssp)
 		else if (list_empty(&ssp->srcu_work.entry))
 			list_add(&ssp->srcu_work.entry, &srcu_boot_list);
 	}
+	preempt_enable();
 }
 
 /*
@@ -183,11 +203,13 @@ void call_srcu(struct srcu_struct *ssp, struct rcu_head *rhp,
 
 	rhp->func = func;
 	rhp->next = NULL;
+	preempt_disable();  // Needed for PREEMPT_LAZY
 	local_irq_save(flags);
 	*ssp->srcu_cb_tail = rhp;
 	ssp->srcu_cb_tail = &rhp->next;
 	local_irq_restore(flags);
 	srcu_gp_start_if_needed(ssp);
+	preempt_enable();
 }
 EXPORT_SYMBOL_GPL(call_srcu);
 
@@ -241,9 +263,12 @@ EXPORT_SYMBOL_GPL(get_state_synchronize_srcu);
  */
 unsigned long start_poll_synchronize_srcu(struct srcu_struct *ssp)
 {
-	unsigned long ret = get_state_synchronize_srcu(ssp);
+	unsigned long ret;
 
+	preempt_disable();  // Needed for PREEMPT_LAZY
+	ret = get_state_synchronize_srcu(ssp);
 	srcu_gp_start_if_needed(ssp);
+	preempt_enable();
 	return ret;
 }
 EXPORT_SYMBOL_GPL(start_poll_synchronize_srcu);
@@ -256,15 +281,18 @@ bool poll_state_synchronize_srcu(struct srcu_struct *ssp, unsigned long cookie)
 	unsigned long cur_s = READ_ONCE(ssp->srcu_idx);
 
 	barrier();
-	return ULONG_CMP_GE(cur_s, cookie) || ULONG_CMP_LT(cur_s, cookie - 3);
+	return cookie == SRCU_GET_STATE_COMPLETED ||
+	       ULONG_CMP_GE(cur_s, cookie) || ULONG_CMP_LT(cur_s, cookie - 3);
 }
 EXPORT_SYMBOL_GPL(poll_state_synchronize_srcu);
 
+#ifndef CONFIG_TREE_RCU
 /* Lockdep diagnostics.  */
 void __init rcu_scheduler_starting(void)
 {
 	rcu_scheduler_active = RCU_SCHEDULER_RUNNING;
 }
+#endif // #ifndef CONFIG_TREE_RCU
 
 /*
  * Queue work for srcu_struct structures with early boot callbacks.

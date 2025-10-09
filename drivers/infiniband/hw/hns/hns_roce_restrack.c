@@ -4,7 +4,6 @@
 #include <rdma/rdma_cm.h>
 #include <rdma/restrack.h>
 #include <uapi/rdma/rdma_netlink.h>
-#include "hnae3.h"
 #include "hns_roce_common.h"
 #include "hns_roce_device.h"
 #include "hns_roce_hw_v2.h"
@@ -97,16 +96,40 @@ int hns_roce_fill_res_qp_entry_raw(struct sk_buff *msg, struct ib_qp *ib_qp)
 {
 	struct hns_roce_dev *hr_dev = to_hr_dev(ib_qp->device);
 	struct hns_roce_qp *hr_qp = to_hr_qp(ib_qp);
-	struct hns_roce_v2_qp_context context;
+	struct hns_roce_full_qp_ctx {
+		struct hns_roce_v2_qp_context qpc;
+		struct hns_roce_v2_scc_context sccc;
+	} context = {};
+	u32 sccn = hr_qp->qpn;
 	int ret;
 
 	if (!hr_dev->hw->query_qpc)
 		return -EINVAL;
 
-	ret = hr_dev->hw->query_qpc(hr_dev, hr_qp->qpn, &context);
+	ret = hr_dev->hw->query_qpc(hr_dev, hr_qp->qpn, &context.qpc);
 	if (ret)
-		return -EINVAL;
+		return ret;
 
+	/* If SCC is disabled or the query fails, the queried SCCC will
+	 * be all 0.
+	 */
+	if (!(hr_dev->caps.flags & HNS_ROCE_CAP_FLAG_QP_FLOW_CTRL) ||
+	    !hr_dev->hw->query_sccc)
+		goto out;
+
+	if (hr_qp->cong_type == CONG_TYPE_DIP) {
+		if (!hr_qp->dip)
+			goto out;
+		sccn = hr_qp->dip->dip_idx;
+	}
+
+	ret = hr_dev->hw->query_sccc(hr_dev, sccn, &context.sccc);
+	if (ret)
+		ibdev_warn_ratelimited(&hr_dev->ib_dev,
+				       "failed to query SCCC, ret = %d.\n",
+				       ret);
+
+out:
 	ret = nla_put(msg, RDMA_NLDEV_ATTR_RES_RAW, sizeof(context), &context);
 
 	return ret;

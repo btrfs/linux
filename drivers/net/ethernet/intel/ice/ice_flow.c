@@ -409,6 +409,29 @@ static const u32 ice_ptypes_gtpc_tid[] = {
 };
 
 /* Packet types for GTPU */
+static const struct ice_ptype_attributes ice_attr_gtpu_session[] = {
+	{ ICE_MAC_IPV4_GTPU_IPV4_FRAG,	  ICE_PTYPE_ATTR_GTP_SESSION },
+	{ ICE_MAC_IPV4_GTPU_IPV4_PAY,	  ICE_PTYPE_ATTR_GTP_SESSION },
+	{ ICE_MAC_IPV4_GTPU_IPV4_UDP_PAY, ICE_PTYPE_ATTR_GTP_SESSION },
+	{ ICE_MAC_IPV4_GTPU_IPV4_TCP,	  ICE_PTYPE_ATTR_GTP_SESSION },
+	{ ICE_MAC_IPV4_GTPU_IPV4_ICMP,	  ICE_PTYPE_ATTR_GTP_SESSION },
+	{ ICE_MAC_IPV6_GTPU_IPV4_FRAG,	  ICE_PTYPE_ATTR_GTP_SESSION },
+	{ ICE_MAC_IPV6_GTPU_IPV4_PAY,	  ICE_PTYPE_ATTR_GTP_SESSION },
+	{ ICE_MAC_IPV6_GTPU_IPV4_UDP_PAY, ICE_PTYPE_ATTR_GTP_SESSION },
+	{ ICE_MAC_IPV6_GTPU_IPV4_TCP,	  ICE_PTYPE_ATTR_GTP_SESSION },
+	{ ICE_MAC_IPV6_GTPU_IPV4_ICMP,	  ICE_PTYPE_ATTR_GTP_SESSION },
+	{ ICE_MAC_IPV4_GTPU_IPV6_FRAG,	  ICE_PTYPE_ATTR_GTP_SESSION },
+	{ ICE_MAC_IPV4_GTPU_IPV6_PAY,	  ICE_PTYPE_ATTR_GTP_SESSION },
+	{ ICE_MAC_IPV4_GTPU_IPV6_UDP_PAY, ICE_PTYPE_ATTR_GTP_SESSION },
+	{ ICE_MAC_IPV4_GTPU_IPV6_TCP,	  ICE_PTYPE_ATTR_GTP_SESSION },
+	{ ICE_MAC_IPV4_GTPU_IPV6_ICMPV6,  ICE_PTYPE_ATTR_GTP_SESSION },
+	{ ICE_MAC_IPV6_GTPU_IPV6_FRAG,	  ICE_PTYPE_ATTR_GTP_SESSION },
+	{ ICE_MAC_IPV6_GTPU_IPV6_PAY,	  ICE_PTYPE_ATTR_GTP_SESSION },
+	{ ICE_MAC_IPV6_GTPU_IPV6_UDP_PAY, ICE_PTYPE_ATTR_GTP_SESSION },
+	{ ICE_MAC_IPV6_GTPU_IPV6_TCP,	  ICE_PTYPE_ATTR_GTP_SESSION },
+	{ ICE_MAC_IPV6_GTPU_IPV6_ICMPV6,  ICE_PTYPE_ATTR_GTP_SESSION },
+};
+
 static const struct ice_ptype_attributes ice_attr_gtpu_eh[] = {
 	{ ICE_MAC_IPV4_GTPU_IPV4_FRAG,	  ICE_PTYPE_ATTR_GTP_PDU_EH },
 	{ ICE_MAC_IPV4_GTPU_IPV4_PAY,	  ICE_PTYPE_ATTR_GTP_PDU_EH },
@@ -1398,9 +1421,9 @@ ice_flow_add_prof_sync(struct ice_hw *hw, enum ice_block blk,
 	}
 
 	/* Add a HW profile for this flow profile */
-	status = ice_add_prof(hw, blk, prof_id, (u8 *)params->ptypes,
+	status = ice_add_prof(hw, blk, prof_id, params->ptypes,
 			      params->attr, params->attr_cnt, params->es,
-			      params->mask, symm);
+			      params->mask, symm, true);
 	if (status) {
 		ice_debug(hw, ICE_DBG_FLOW, "Error adding a HW flow profile\n");
 		goto out;
@@ -1519,6 +1542,90 @@ ice_flow_disassoc_prof(struct ice_hw *hw, enum ice_block blk,
 			ice_debug(hw, ICE_DBG_FLOW, "HW profile remove failed, %d\n",
 				  status);
 	}
+
+	return status;
+}
+
+#define FLAG_GTP_EH_PDU_LINK	BIT_ULL(13)
+#define FLAG_GTP_EH_PDU		BIT_ULL(14)
+
+#define HI_BYTE_IN_WORD		GENMASK(15, 8)
+#define LO_BYTE_IN_WORD		GENMASK(7, 0)
+
+#define FLAG_GTPU_MSK	\
+	(FLAG_GTP_EH_PDU | FLAG_GTP_EH_PDU_LINK)
+#define FLAG_GTPU_UP	\
+	(FLAG_GTP_EH_PDU | FLAG_GTP_EH_PDU_LINK)
+#define FLAG_GTPU_DW	FLAG_GTP_EH_PDU
+
+/**
+ * ice_flow_set_parser_prof - Set flow profile based on the parsed profile info
+ * @hw: pointer to the HW struct
+ * @dest_vsi: dest VSI
+ * @fdir_vsi: fdir programming VSI
+ * @prof: stores parsed profile info from raw flow
+ * @blk: classification blk
+ *
+ * Return: 0 on success or negative errno on failure.
+ */
+int
+ice_flow_set_parser_prof(struct ice_hw *hw, u16 dest_vsi, u16 fdir_vsi,
+			 struct ice_parser_profile *prof, enum ice_block blk)
+{
+	u64 id = find_first_bit(prof->ptypes, ICE_FLOW_PTYPE_MAX);
+	struct ice_flow_prof_params *params __free(kfree);
+	u8 fv_words = hw->blk[blk].es.fvw;
+	int status;
+	int i, idx;
+
+	params = kzalloc(sizeof(*params), GFP_KERNEL);
+	if (!params)
+		return -ENOMEM;
+
+	for (i = 0; i < ICE_MAX_FV_WORDS; i++) {
+		params->es[i].prot_id = ICE_PROT_INVALID;
+		params->es[i].off = ICE_FV_OFFSET_INVAL;
+	}
+
+	for (i = 0; i < prof->fv_num; i++) {
+		if (hw->blk[blk].es.reverse)
+			idx = fv_words - i - 1;
+		else
+			idx = i;
+		params->es[idx].prot_id = prof->fv[i].proto_id;
+		params->es[idx].off = prof->fv[i].offset;
+		params->mask[idx] = (((prof->fv[i].msk) << BITS_PER_BYTE) &
+				      HI_BYTE_IN_WORD) |
+				    (((prof->fv[i].msk) >> BITS_PER_BYTE) &
+				      LO_BYTE_IN_WORD);
+	}
+
+	switch (prof->flags) {
+	case FLAG_GTPU_DW:
+		params->attr = ice_attr_gtpu_down;
+		params->attr_cnt = ARRAY_SIZE(ice_attr_gtpu_down);
+		break;
+	case FLAG_GTPU_UP:
+		params->attr = ice_attr_gtpu_up;
+		params->attr_cnt = ARRAY_SIZE(ice_attr_gtpu_up);
+		break;
+	default:
+		if (prof->flags_msk & FLAG_GTPU_MSK) {
+			params->attr = ice_attr_gtpu_session;
+			params->attr_cnt = ARRAY_SIZE(ice_attr_gtpu_session);
+		}
+		break;
+	}
+
+	status = ice_add_prof(hw, blk, id, prof->ptypes,
+			      params->attr, params->attr_cnt,
+			      params->es, params->mask, false, false);
+	if (status)
+		return status;
+
+	status = ice_flow_assoc_fdir_prof(hw, blk, dest_vsi, fdir_vsi, id);
+	if (status)
+		ice_rem_prof(hw, blk, id);
 
 	return status;
 }
@@ -2466,38 +2573,38 @@ ice_rem_rss_cfg(struct ice_hw *hw, u16 vsi_handle,
  * convert its values to their appropriate flow L3, L4 values.
  */
 #define ICE_FLOW_AVF_RSS_IPV4_MASKS \
-	(BIT_ULL(ICE_AVF_FLOW_FIELD_IPV4_OTHER) | \
-	 BIT_ULL(ICE_AVF_FLOW_FIELD_FRAG_IPV4))
+	(BIT_ULL(LIBIE_FILTER_PCTYPE_NONF_IPV4_OTHER) | \
+	 BIT_ULL(LIBIE_FILTER_PCTYPE_FRAG_IPV4))
 #define ICE_FLOW_AVF_RSS_TCP_IPV4_MASKS \
-	(BIT_ULL(ICE_AVF_FLOW_FIELD_IPV4_TCP_SYN_NO_ACK) | \
-	 BIT_ULL(ICE_AVF_FLOW_FIELD_IPV4_TCP))
+	(BIT_ULL(LIBIE_FILTER_PCTYPE_NONF_IPV4_TCP_SYN_NO_ACK) | \
+	 BIT_ULL(LIBIE_FILTER_PCTYPE_NONF_IPV4_TCP))
 #define ICE_FLOW_AVF_RSS_UDP_IPV4_MASKS \
-	(BIT_ULL(ICE_AVF_FLOW_FIELD_UNICAST_IPV4_UDP) | \
-	 BIT_ULL(ICE_AVF_FLOW_FIELD_MULTICAST_IPV4_UDP) | \
-	 BIT_ULL(ICE_AVF_FLOW_FIELD_IPV4_UDP))
+	(BIT_ULL(LIBIE_FILTER_PCTYPE_NONF_UNICAST_IPV4_UDP) | \
+	 BIT_ULL(LIBIE_FILTER_PCTYPE_NONF_MULTICAST_IPV4_UDP) | \
+	 BIT_ULL(LIBIE_FILTER_PCTYPE_NONF_IPV4_UDP))
 #define ICE_FLOW_AVF_RSS_ALL_IPV4_MASKS \
 	(ICE_FLOW_AVF_RSS_TCP_IPV4_MASKS | ICE_FLOW_AVF_RSS_UDP_IPV4_MASKS | \
-	 ICE_FLOW_AVF_RSS_IPV4_MASKS | BIT_ULL(ICE_AVF_FLOW_FIELD_IPV4_SCTP))
+	 ICE_FLOW_AVF_RSS_IPV4_MASKS | BIT_ULL(LIBIE_FILTER_PCTYPE_NONF_IPV4_SCTP))
 
 #define ICE_FLOW_AVF_RSS_IPV6_MASKS \
-	(BIT_ULL(ICE_AVF_FLOW_FIELD_IPV6_OTHER) | \
-	 BIT_ULL(ICE_AVF_FLOW_FIELD_FRAG_IPV6))
+	(BIT_ULL(LIBIE_FILTER_PCTYPE_NONF_IPV6_OTHER) | \
+	 BIT_ULL(LIBIE_FILTER_PCTYPE_FRAG_IPV6))
 #define ICE_FLOW_AVF_RSS_UDP_IPV6_MASKS \
-	(BIT_ULL(ICE_AVF_FLOW_FIELD_UNICAST_IPV6_UDP) | \
-	 BIT_ULL(ICE_AVF_FLOW_FIELD_MULTICAST_IPV6_UDP) | \
-	 BIT_ULL(ICE_AVF_FLOW_FIELD_IPV6_UDP))
+	(BIT_ULL(LIBIE_FILTER_PCTYPE_NONF_UNICAST_IPV6_UDP) | \
+	 BIT_ULL(LIBIE_FILTER_PCTYPE_NONF_MULTICAST_IPV6_UDP) | \
+	 BIT_ULL(LIBIE_FILTER_PCTYPE_NONF_IPV6_UDP))
 #define ICE_FLOW_AVF_RSS_TCP_IPV6_MASKS \
-	(BIT_ULL(ICE_AVF_FLOW_FIELD_IPV6_TCP_SYN_NO_ACK) | \
-	 BIT_ULL(ICE_AVF_FLOW_FIELD_IPV6_TCP))
+	(BIT_ULL(LIBIE_FILTER_PCTYPE_NONF_IPV6_TCP_SYN_NO_ACK) | \
+	 BIT_ULL(LIBIE_FILTER_PCTYPE_NONF_IPV6_TCP))
 #define ICE_FLOW_AVF_RSS_ALL_IPV6_MASKS \
 	(ICE_FLOW_AVF_RSS_TCP_IPV6_MASKS | ICE_FLOW_AVF_RSS_UDP_IPV6_MASKS | \
-	 ICE_FLOW_AVF_RSS_IPV6_MASKS | BIT_ULL(ICE_AVF_FLOW_FIELD_IPV6_SCTP))
+	 ICE_FLOW_AVF_RSS_IPV6_MASKS | BIT_ULL(LIBIE_FILTER_PCTYPE_NONF_IPV6_SCTP))
 
 /**
  * ice_add_avf_rss_cfg - add an RSS configuration for AVF driver
  * @hw: pointer to the hardware structure
  * @vsi: VF's VSI
- * @avf_hash: hash bit fields (ICE_AVF_FLOW_FIELD_*) to configure
+ * @avf_hash: hash bit fields (LIBIE_FILTER_PCTYPE_*) to configure
  *
  * This function will take the hash bitmap provided by the AVF driver via a
  * message, convert it to ICE-compatible values, and configure RSS flow
@@ -2514,8 +2621,7 @@ int ice_add_avf_rss_cfg(struct ice_hw *hw, struct ice_vsi *vsi, u64 avf_hash)
 		return -EINVAL;
 
 	vsi_handle = vsi->idx;
-	if (avf_hash == ICE_AVF_FLOW_FIELD_INVALID ||
-	    !ice_is_vsi_valid(hw, vsi_handle))
+	if (!avf_hash || !ice_is_vsi_valid(hw, vsi_handle))
 		return -EINVAL;
 
 	/* Make sure no unsupported bits are specified */
@@ -2551,11 +2657,11 @@ int ice_add_avf_rss_cfg(struct ice_hw *hw, struct ice_vsi *vsi, u64 avf_hash)
 					ICE_FLOW_HASH_UDP_PORT;
 				hash_flds &= ~ICE_FLOW_AVF_RSS_UDP_IPV4_MASKS;
 			} else if (hash_flds &
-				   BIT_ULL(ICE_AVF_FLOW_FIELD_IPV4_SCTP)) {
+				   BIT_ULL(LIBIE_FILTER_PCTYPE_NONF_IPV4_SCTP)) {
 				rss_hash = ICE_FLOW_HASH_IPV4 |
 					ICE_FLOW_HASH_SCTP_PORT;
 				hash_flds &=
-					~BIT_ULL(ICE_AVF_FLOW_FIELD_IPV4_SCTP);
+					~BIT_ULL(LIBIE_FILTER_PCTYPE_NONF_IPV4_SCTP);
 			}
 		} else if (hash_flds & ICE_FLOW_AVF_RSS_ALL_IPV6_MASKS) {
 			if (hash_flds & ICE_FLOW_AVF_RSS_IPV6_MASKS) {
@@ -2572,11 +2678,11 @@ int ice_add_avf_rss_cfg(struct ice_hw *hw, struct ice_vsi *vsi, u64 avf_hash)
 					ICE_FLOW_HASH_UDP_PORT;
 				hash_flds &= ~ICE_FLOW_AVF_RSS_UDP_IPV6_MASKS;
 			} else if (hash_flds &
-				   BIT_ULL(ICE_AVF_FLOW_FIELD_IPV6_SCTP)) {
+				   BIT_ULL(LIBIE_FILTER_PCTYPE_NONF_IPV6_SCTP)) {
 				rss_hash = ICE_FLOW_HASH_IPV6 |
 					ICE_FLOW_HASH_SCTP_PORT;
 				hash_flds &=
-					~BIT_ULL(ICE_AVF_FLOW_FIELD_IPV6_SCTP);
+					~BIT_ULL(LIBIE_FILTER_PCTYPE_NONF_IPV6_SCTP);
 			}
 		}
 

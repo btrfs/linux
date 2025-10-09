@@ -418,7 +418,7 @@ static struct rockchip_clk_branch rk3288_clk_branches[] __initdata = {
 			RK3288_CLKSEL_CON(32), 14, 2, MFLAGS, 8, 5, DFLAGS,
 			RK3288_CLKGATE_CON(3), 11, GFLAGS),
 	MUXGRF(0, "aclk_vcodec_pre", mux_aclk_vcodec_pre_p, CLK_SET_RATE_PARENT,
-			RK3288_GRF_SOC_CON(0), 7, 1, MFLAGS),
+			RK3288_GRF_SOC_CON(0), 7, 1, MFLAGS, grf_type_sys),
 	GATE(ACLK_VCODEC, "aclk_vcodec", "aclk_vcodec_pre", 0,
 		RK3288_CLKGATE_CON(9), 0, GFLAGS),
 
@@ -932,6 +932,7 @@ static void __init rk3288_common_init(struct device_node *np,
 				      enum rk3288_variant soc)
 {
 	struct rockchip_clk_provider *ctx;
+	unsigned long clk_nr_clks;
 
 	rk3288_cru_base = of_iomap(np, 0);
 	if (!rk3288_cru_base) {
@@ -939,7 +940,9 @@ static void __init rk3288_common_init(struct device_node *np,
 		return;
 	}
 
-	ctx = rockchip_clk_init(np, rk3288_cru_base, CLK_NR_CLKS);
+	clk_nr_clks = rockchip_clk_find_max_clk_id(rk3288_clk_branches,
+						   ARRAY_SIZE(rk3288_clk_branches)) + 1;
+	ctx = rockchip_clk_init(np, rk3288_cru_base, clk_nr_clks);
 	if (IS_ERR(ctx)) {
 		pr_err("%s: rockchip clk init failed\n", __func__);
 		iounmap(rk3288_cru_base);

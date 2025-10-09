@@ -15,6 +15,7 @@
 #include <linux/types.h>
 #include <linux/string.h>
 #include <linux/export.h>
+#include <asm/asm.h>
 
 /*
  * Helper functions to find the end of a string
@@ -77,50 +78,6 @@ EXPORT_SYMBOL(strnlen);
 #endif
 
 /**
- * strcpy - Copy a %NUL terminated string
- * @dest: Where to copy the string to
- * @src: Where to copy the string from
- *
- * returns a pointer to @dest
- */
-#ifdef __HAVE_ARCH_STRCPY
-char *strcpy(char *dest, const char *src)
-{
-	char *ret = dest;
-
-	asm volatile(
-		"	lghi	0,0\n"
-		"0:	mvst	%[dest],%[src]\n"
-		"	jo	0b\n"
-		: [dest] "+&a" (dest), [src] "+&a" (src)
-		:
-		: "cc", "memory", "0");
-	return ret;
-}
-EXPORT_SYMBOL(strcpy);
-#endif
-
-/**
- * strncpy - Copy a length-limited, %NUL-terminated string
- * @dest: Where to copy the string to
- * @src: Where to copy the string from
- * @n: The maximum number of bytes to copy
- *
- * The result is not %NUL-terminated if the source exceeds
- * @n bytes.
- */
-#ifdef __HAVE_ARCH_STRNCPY
-char *strncpy(char *dest, const char *src, size_t n)
-{
-	size_t len = __strnend(src, n) - src;
-	memset(dest + len, 0, n - len);
-	memcpy(dest, src, len);
-	return dest;
-}
-EXPORT_SYMBOL(strncpy);
-#endif
-
-/**
  * strcat - Append one %NUL-terminated string to another
  * @dest: The string to be appended to
  * @src: The string to append to it
@@ -180,9 +137,6 @@ EXPORT_SYMBOL(strlcat);
  * @n: The maximum numbers of bytes to copy
  *
  * returns a pointer to @dest
- *
- * Note that in contrast to strncpy, strncat ensures the result is
- * terminated.
  */
 #ifdef __HAVE_ARCH_STRNCAT
 char *strncat(char *dest, const char *src, size_t n)
@@ -238,12 +192,11 @@ static inline int clcle(const char *s1, unsigned long l1,
 	asm volatile(
 		"0:	clcle	%[r1],%[r3],0\n"
 		"	jo	0b\n"
-		"	ipm	%[cc]\n"
-		"	srl	%[cc],28\n"
-		: [cc] "=&d" (cc), [r1] "+&d" (r1.pair), [r3] "+&d" (r3.pair)
+		CC_IPM(cc)
+		: CC_OUT(cc, cc), [r1] "+d" (r1.pair), [r3] "+d" (r3.pair)
 		:
-		: "cc", "memory");
-	return cc;
+		: CC_CLOBBER_LIST("memory"));
+	return CC_TRANSFORM(cc);
 }
 
 /**

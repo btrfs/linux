@@ -19,6 +19,8 @@
 #define ASP_INTR2_TX_DESC(intr)			BIT((intr) + 14)
 #define ASP_INTR2_UMC0_WAKE			BIT(22)
 #define ASP_INTR2_UMC1_WAKE			BIT(28)
+#define ASP_INTR2_PHY_EVENT(intr)		((intr) ? BIT(30) | BIT(31) : \
+						BIT(24) | BIT(25))
 
 #define ASP_WAKEUP_INTR2_OFFSET			0x1200
 #define  ASP_WAKEUP_INTR2_STATUS		0x0
@@ -33,6 +35,12 @@
 #define ASP_WAKEUP_INTR2_FILT_1			BIT(3)
 #define ASP_WAKEUP_INTR2_FW			BIT(4)
 
+#define ASP_CTRL2_OFFSET			0x2000
+#define  ASP_CTRL2_CORE_CLOCK_SELECT		0x0
+#define   ASP_CTRL2_CORE_CLOCK_SELECT_MAIN	BIT(0)
+#define  ASP_CTRL2_CPU_CLOCK_SELECT		0x4
+#define   ASP_CTRL2_CPU_CLOCK_SELECT_MAIN	BIT(0)
+
 #define ASP_TX_ANALYTICS_OFFSET			0x4c000
 #define  ASP_TX_ANALYTICS_CTRL			0x0
 
@@ -45,22 +53,15 @@
 #define ASP_RX_CTRL_FB_0_FRAME_COUNT		0x14
 #define ASP_RX_CTRL_FB_1_FRAME_COUNT		0x18
 #define ASP_RX_CTRL_FB_8_FRAME_COUNT		0x1c
-/* asp2.1 diverges offsets here */
-/* ASP2.0 */
-#define ASP_RX_CTRL_FB_OUT_FRAME_COUNT		0x20
-#define ASP_RX_CTRL_FB_FILT_OUT_FRAME_COUNT	0x24
-#define ASP_RX_CTRL_FLUSH			0x28
-#define  ASP_CTRL_UMAC0_FLUSH_MASK		(BIT(0) | BIT(12))
-#define  ASP_CTRL_UMAC1_FLUSH_MASK		(BIT(1) | BIT(13))
-#define  ASP_CTRL_SPB_FLUSH_MASK		(BIT(8) | BIT(20))
-#define ASP_RX_CTRL_FB_RX_FIFO_DEPTH		0x30
-/* ASP2.1 */
-#define ASP_RX_CTRL_FB_9_FRAME_COUNT_2_1	0x20
-#define ASP_RX_CTRL_FB_10_FRAME_COUNT_2_1	0x24
-#define ASP_RX_CTRL_FB_OUT_FRAME_COUNT_2_1	0x28
-#define ASP_RX_CTRL_FB_FILT_OUT_FRAME_COUNT_2_1	0x2c
-#define ASP_RX_CTRL_FLUSH_2_1			0x30
-#define ASP_RX_CTRL_FB_RX_FIFO_DEPTH_2_1	0x38
+#define ASP_RX_CTRL_FB_9_FRAME_COUNT		0x20
+#define ASP_RX_CTRL_FB_10_FRAME_COUNT		0x24
+#define ASP_RX_CTRL_FB_OUT_FRAME_COUNT		0x28
+#define ASP_RX_CTRL_FB_FILT_OUT_FRAME_COUNT	0x2c
+#define ASP_RX_CTRL_FLUSH			0x30
+#define  ASP_CTRL_UMAC0_FLUSH_MASK             (BIT(0) | BIT(12))
+#define  ASP_CTRL_UMAC1_FLUSH_MASK             (BIT(1) | BIT(13))
+#define  ASP_CTRL_SPB_FLUSH_MASK               (BIT(8) | BIT(20))
+#define ASP_RX_CTRL_FB_RX_FIFO_DEPTH		0x38
 
 #define ASP_RX_FILTER_OFFSET			0x80000
 #define  ASP_RX_FILTER_BLK_CTRL			0x0
@@ -134,8 +135,11 @@ enum asp_rx_net_filter_block {
 #define ASP_EDPKT_RX_PKT_CNT			0x138
 #define ASP_EDPKT_HDR_EXTR_CNT			0x13c
 #define ASP_EDPKT_HDR_OUT_CNT			0x140
+#define ASP_EDPKT_SPARE_REG			0x174
+#define  ASP_EDPKT_SPARE_REG_EPHY_LPI		BIT(4)
+#define  ASP_EDPKT_SPARE_REG_GPHY_LPI		BIT(3)
 
-#define ASP_CTRL				0x101000
+#define ASP_CTRL_OFFSET				0x101000
 #define  ASP_CTRL_ASP_SW_INIT			0x04
 #define   ASP_CTRL_ASP_SW_INIT_ACPUSS_CORE	BIT(0)
 #define   ASP_CTRL_ASP_SW_INIT_ASP_TX		BIT(1)
@@ -306,6 +310,7 @@ struct bcmasp_intf {
 	struct bcmasp_desc		*rx_edpkt_cpu;
 	dma_addr_t			rx_edpkt_dma_addr;
 	dma_addr_t			rx_edpkt_dma_read;
+	dma_addr_t			rx_edpkt_dma_valid;
 
 	/* RX buffer prefetcher ring*/
 	void				*rx_ring_cpu;
@@ -333,11 +338,6 @@ struct bcmasp_intf {
 
 	u32				wolopts;
 	u8				sopass[SOPASS_MAX];
-	/* Used if per intf wol irq */
-	int				wol_irq;
-	unsigned int			wol_irq_enabled:1;
-
-	struct ethtool_eee		eee;
 };
 
 #define NUM_NET_FILTERS				32
@@ -360,19 +360,13 @@ struct bcmasp_mda_filter {
 	u8		mask[ETH_ALEN];
 };
 
-struct bcmasp_hw_info {
-	u32		rx_ctrl_flush;
-	u32		umac2fb;
-	u32		rx_ctrl_fb_out_frame_count;
-	u32		rx_ctrl_fb_filt_out_frame_count;
-	u32		rx_ctrl_fb_rx_fifo_depth;
-};
-
 struct bcmasp_plat_data {
-	void (*init_wol)(struct bcmasp_priv *priv);
-	void (*enable_wol)(struct bcmasp_intf *intf, bool en);
-	void (*destroy_wol)(struct bcmasp_priv *priv);
-	struct bcmasp_hw_info		*hw_info;
+	void (*core_clock_select)(struct bcmasp_priv *priv, bool slow);
+	void (*eee_fixup)(struct bcmasp_intf *priv, bool en);
+	unsigned int num_mda_filters;
+	unsigned int num_net_filters;
+	unsigned int tx_chan_offset;
+	unsigned int rx_ctrl_offset;
 };
 
 struct bcmasp_priv {
@@ -387,16 +381,18 @@ struct bcmasp_priv {
 	int				wol_irq;
 	unsigned long			wol_irq_enabled_mask;
 
-	void (*init_wol)(struct bcmasp_priv *priv);
-	void (*enable_wol)(struct bcmasp_intf *intf, bool en);
-	void (*destroy_wol)(struct bcmasp_priv *priv);
+	void (*core_clock_select)(struct bcmasp_priv *priv, bool slow);
+	void (*eee_fixup)(struct bcmasp_intf *intf, bool en);
+	unsigned int			num_mda_filters;
+	unsigned int			num_net_filters;
+	unsigned int			tx_chan_offset;
+	unsigned int			rx_ctrl_offset;
 
 	void __iomem			*base;
-	struct	bcmasp_hw_info		*hw_info;
 
 	struct list_head		intfs;
 
-	struct bcmasp_mda_filter	mda_filters[NUM_MDA_FILTERS];
+	struct bcmasp_mda_filter	*mda_filters;
 
 	/* MAC destination address filters lock */
 	spinlock_t			mda_lock;
@@ -404,7 +400,7 @@ struct bcmasp_priv {
 	/* Protects accesses to ASP_CTRL_CLOCK_CTRL */
 	spinlock_t			clk_lock;
 
-	struct bcmasp_net_filter	net_filters[NUM_NET_FILTERS];
+	struct bcmasp_net_filter	*net_filters;
 
 	/* Network filter lock */
 	struct mutex			net_lock;
@@ -494,8 +490,8 @@ BCMASP_FP_IO_MACRO_Q(rx_edpkt_cfg);
 #define  PKT_OFFLOAD_EPKT_IP(x)		((x) << 21)
 #define  PKT_OFFLOAD_EPKT_TP(x)		((x) << 19)
 #define  PKT_OFFLOAD_EPKT_LEN(x)	((x) << 16)
-#define  PKT_OFFLOAD_EPKT_CSUM_L3	BIT(15)
-#define  PKT_OFFLOAD_EPKT_CSUM_L2	BIT(14)
+#define  PKT_OFFLOAD_EPKT_CSUM_L4	BIT(15)
+#define  PKT_OFFLOAD_EPKT_CSUM_L3	BIT(14)
 #define  PKT_OFFLOAD_EPKT_ID(x)		((x) << 12)
 #define  PKT_OFFLOAD_EPKT_SEQ(x)	((x) << 10)
 #define  PKT_OFFLOAD_EPKT_TS(x)		((x) << 8)
@@ -527,10 +523,26 @@ BCMASP_CORE_IO_MACRO(intr2, ASP_INTR2_OFFSET);
 BCMASP_CORE_IO_MACRO(wakeup_intr2, ASP_WAKEUP_INTR2_OFFSET);
 BCMASP_CORE_IO_MACRO(tx_analytics, ASP_TX_ANALYTICS_OFFSET);
 BCMASP_CORE_IO_MACRO(rx_analytics, ASP_RX_ANALYTICS_OFFSET);
-BCMASP_CORE_IO_MACRO(rx_ctrl, ASP_RX_CTRL_OFFSET);
 BCMASP_CORE_IO_MACRO(rx_filter, ASP_RX_FILTER_OFFSET);
 BCMASP_CORE_IO_MACRO(rx_edpkt, ASP_EDPKT_OFFSET);
-BCMASP_CORE_IO_MACRO(ctrl, ASP_CTRL);
+BCMASP_CORE_IO_MACRO(ctrl, ASP_CTRL_OFFSET);
+BCMASP_CORE_IO_MACRO(ctrl2, ASP_CTRL2_OFFSET);
+
+#define BCMASP_CORE_IO_MACRO_OFFSET(name, offset)			\
+static inline u32 name##_core_rl(struct bcmasp_priv *priv,		\
+				 u32 off)				\
+{									\
+	u32 reg = readl_relaxed(priv->base + priv->name##_offset +	\
+				(offset) + off);			\
+	return reg;							\
+}									\
+static inline void name##_core_wl(struct bcmasp_priv *priv,		\
+				  u32 val, u32 off)			\
+{									\
+	writel_relaxed(val, priv->base + priv->name##_offset +		\
+		       (offset) + off);					\
+}
+BCMASP_CORE_IO_MACRO_OFFSET(rx_ctrl, ASP_RX_CTRL_OFFSET);
 
 struct bcmasp_intf *bcmasp_interface_create(struct bcmasp_priv *priv,
 					    struct device_node *ndev_dn, int i);
@@ -540,6 +552,8 @@ void bcmasp_interface_destroy(struct bcmasp_intf *intf);
 void bcmasp_enable_tx_irq(struct bcmasp_intf *intf, int en);
 
 void bcmasp_enable_rx_irq(struct bcmasp_intf *intf, int en);
+
+void bcmasp_enable_phy_irq(struct bcmasp_intf *intf, int en);
 
 void bcmasp_flush_rx_port(struct bcmasp_intf *intf);
 
@@ -582,5 +596,5 @@ int bcmasp_netfilt_get_all_active(struct bcmasp_intf *intf, u32 *rule_locs,
 
 void bcmasp_netfilt_suspend(struct bcmasp_intf *intf);
 
-void bcmasp_eee_enable_set(struct bcmasp_intf *intf, bool enable);
+void bcmasp_enable_wol(struct bcmasp_intf *intf, bool en);
 #endif

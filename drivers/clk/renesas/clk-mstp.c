@@ -10,7 +10,6 @@
 
 #include <linux/clk.h>
 #include <linux/clk-provider.h>
-#include <linux/clkdev.h>
 #include <linux/clk/renesas.h>
 #include <linux/device.h>
 #include <linux/io.h>
@@ -19,6 +18,7 @@
 #include <linux/of_address.h>
 #include <linux/pm_clock.h>
 #include <linux/pm_domain.h>
+#include <linux/slab.h>
 #include <linux/spinlock.h>
 
 /*
@@ -207,7 +207,7 @@ static void __init cpg_mstp_clocks_init(struct device_node *np)
 	for (i = 0; i < MSTP_MAX_CLOCKS; ++i)
 		clks[i] = ERR_PTR(-ENOENT);
 
-	if (of_find_property(np, "clock-indices", &i))
+	if (of_property_present(np, "clock-indices"))
 		idxname = "clock-indices";
 	else
 		idxname = "renesas,clock-indices";
@@ -237,22 +237,12 @@ static void __init cpg_mstp_clocks_init(struct device_node *np)
 
 		clks[clkidx] = cpg_mstp_clock_register(name, parent_name,
 						       clkidx, group);
-		if (!IS_ERR(clks[clkidx])) {
+		if (!IS_ERR(clks[clkidx]))
 			group->data.clk_num = max(group->data.clk_num,
 						  clkidx + 1);
-			/*
-			 * Register a clkdev to let board code retrieve the
-			 * clock by name and register aliases for non-DT
-			 * devices.
-			 *
-			 * FIXME: Remove this when all devices that require a
-			 * clock will be instantiated from DT.
-			 */
-			clk_register_clkdev(clks[clkidx], name, NULL);
-		} else {
+		else
 			pr_err("%s: failed to register %pOFn %s clock (%ld)\n",
 			       __func__, np, name, PTR_ERR(clks[clkidx]));
-		}
 	}
 
 	of_clk_add_provider(np, of_clk_src_onecell_get, &group->data);
@@ -313,6 +303,9 @@ void cpg_mstp_detach_dev(struct generic_pm_domain *unused, struct device *dev)
 		pm_clk_destroy(dev);
 }
 
+static struct device_node *cpg_mstp_pd_np __initdata = NULL;
+static struct generic_pm_domain *cpg_mstp_pd_genpd __initdata = NULL;
+
 void __init cpg_mstp_add_clk_domain(struct device_node *np)
 {
 	struct generic_pm_domain *pd;
@@ -334,5 +327,20 @@ void __init cpg_mstp_add_clk_domain(struct device_node *np)
 	pd->detach_dev = cpg_mstp_detach_dev;
 	pm_genpd_init(pd, &pm_domain_always_on_gov, false);
 
-	of_genpd_add_provider_simple(np, pd);
+	cpg_mstp_pd_np = of_node_get(np);
+	cpg_mstp_pd_genpd = pd;
 }
+
+static int __init cpg_mstp_pd_init_provider(void)
+{
+	int error;
+
+	if (!cpg_mstp_pd_np)
+		return -ENODEV;
+
+	error = of_genpd_add_provider_simple(cpg_mstp_pd_np, cpg_mstp_pd_genpd);
+
+	of_node_put(cpg_mstp_pd_np);
+	return error;
+}
+postcore_initcall(cpg_mstp_pd_init_provider);

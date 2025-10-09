@@ -273,7 +273,7 @@ revelada involucrada. La lista de embajadores actuales:
   IBM Power	Anton Blanchard <anton@linux.ibm.com>
   IBM Z		Christian Borntraeger <borntraeger@de.ibm.com>
   Intel		Tony Luck <tony.luck@intel.com>
-  Qualcomm	Trilok Soni <tsoni@codeaurora.org>
+  Qualcomm	Trilok Soni <quic_tsoni@quicinc.com>
   Samsung	Javier González <javier.gonz@samsung.com>
 
   Microsoft	James Morris <jamorris@linux.microsoft.com>
@@ -287,7 +287,7 @@ revelada involucrada. La lista de embajadores actuales:
 
   Google	Kees Cook <keescook@chromium.org>
 
-  LLVM		Nick Desaulniers <ndesaulniers@google.com>
+  LLVM		Nick Desaulniers <nick.desaulniers+lkml@gmail.com>
   ============= ========================================================
 
 Si quiere que su organización se añada a la lista de embajadores, por

@@ -558,8 +558,6 @@ static const struct vb2_ops dw100_qops = {
 	.buf_queue	 = dw100_buf_queue,
 	.start_streaming = dw100_start_streaming,
 	.stop_streaming  = dw100_stop_streaming,
-	.wait_prepare	 = vb2_ops_wait_prepare,
-	.wait_finish	 = vb2_ops_wait_finish,
 };
 
 static int dw100_m2m_queue_init(void *priv, struct vb2_queue *src_vq,
@@ -963,9 +961,9 @@ static int dw100_s_selection(struct file *file, void *fh,
 	src_q_data = dw100_get_q_data(ctx, V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE);
 
 	dev_dbg(&ctx->dw_dev->pdev->dev,
-		">>> Buffer Type: %u Target: %u Rect: %ux%u@%d.%d\n",
+		">>> Buffer Type: %u Target: %u Rect: (%d,%d)/%ux%u\n",
 		sel->type, sel->target,
-		sel->r.width, sel->r.height, sel->r.left, sel->r.top);
+		sel->r.left, sel->r.top, sel->r.width, sel->r.height);
 
 	switch (sel->target) {
 	case V4L2_SEL_TGT_CROP:
@@ -1027,9 +1025,9 @@ static int dw100_s_selection(struct file *file, void *fh,
 	}
 
 	dev_dbg(&ctx->dw_dev->pdev->dev,
-		"<<< Buffer Type: %u Target: %u Rect: %ux%u@%d.%d\n",
+		"<<< Buffer Type: %u Target: %u Rect: (%d,%d)/%ux%u\n",
 		sel->type, sel->target,
-		sel->r.width, sel->r.height, sel->r.left, sel->r.top);
+		sel->r.left, sel->r.top, sel->r.width, sel->r.height);
 
 	return 0;
 }
@@ -1311,7 +1309,7 @@ static void dw100_hw_set_destination(struct dw100_device *dw_dev,
 	}
 
 	dev_dbg(&dw_dev->pdev->dev,
-		"Set HW source registers for %ux%u - stride %u, pixfmt: %p4cc, dma:%pad\n",
+		"Set HW destination registers for %ux%u - stride %u, pixfmt: %p4cc, dma:%pad\n",
 		width, height, stride, &fourcc, &addr_y);
 
 	/* Pixel Format */
@@ -1688,7 +1686,7 @@ MODULE_DEVICE_TABLE(of, dw100_dt_ids);
 
 static struct platform_driver dw100_driver = {
 	.probe		= dw100_probe,
-	.remove_new	= dw100_remove,
+	.remove		= dw100_remove,
 	.driver		= {
 		.name	= DRV_NAME,
 		.pm = &dw100_pm,

@@ -126,13 +126,16 @@ Users may also set the RoCE capability of the function using
 `devlink port function set roce` command.
 
 Users may also set the function as migratable using
-'devlink port function set migratable' command.
+`devlink port function set migratable` command.
 
 Users may also set the IPsec crypto capability of the function using
 `devlink port function set ipsec_crypto` command.
 
 Users may also set the IPsec packet capability of the function using
 `devlink port function set ipsec_packet` command.
+
+Users may also set the maximum IO event queues of the function
+using `devlink port function set max_io_eqs` command.
 
 Function attributes
 ===================
@@ -295,6 +298,36 @@ policy is processed in software by the kernel.
         function:
             hw_addr 00:00:00:00:00:00 ipsec_packet enabled
 
+Maximum IO events queues setup
+------------------------------
+When user sets maximum number of IO event queues for a SF or
+a VF, such function driver is limited to consume only enforced
+number of IO event queues.
+
+IO event queues deliver events related to IO queues, including network
+device transmit and receive queues (txq and rxq) and RDMA Queue Pairs (QPs).
+For example, the number of netdevice channels and RDMA device completion
+vectors are derived from the function's IO event queues. Usually, the number
+of interrupt vectors consumed by the driver is limited by the number of IO
+event queues per device, as each of the IO event queues is connected to an
+interrupt vector.
+
+- Get maximum IO event queues of the VF device::
+
+    $ devlink port show pci/0000:06:00.0/2
+    pci/0000:06:00.0/2: type eth netdev enp6s0pf0vf1 flavour pcivf pfnum 0 vfnum 1
+        function:
+            hw_addr 00:00:00:00:00:00 ipsec_packet disabled max_io_eqs 10
+
+- Set maximum IO event queues of the VF device::
+
+    $ devlink port function set pci/0000:06:00.0/2 max_io_eqs 32
+
+    $ devlink port show pci/0000:06:00.0/2
+    pci/0000:06:00.0/2: type eth netdev enp6s0pf0vf1 flavour pcivf pfnum 0 vfnum 1
+        function:
+            hw_addr 00:00:00:00:00:00 ipsec_packet disabled max_io_eqs 32
+
 Subfunction
 ============
 
@@ -384,6 +417,14 @@ API allows to configure following rate object's parameters:
   Parent node name. Parent node rate limits are considered as additional limits
   to all node children limits. ``tx_max`` is an upper limit for children.
   ``tx_share`` is a total bandwidth distributed among children.
+
+``tc_bw``
+  Allow users to set the bandwidth allocation per traffic class on rate
+  objects. This enables fine-grained QoS configurations by assigning a relative
+  share value to each traffic class. The bandwidth is distributed in proportion
+  to the share value for each class, relative to the sum of all shares.
+  When applied to a non-leaf node, tc_bw determines how bandwidth is shared
+  among its child elements.
 
 ``tx_priority`` and ``tx_weight`` can be used simultaneously. In that case
 nodes with the same priority form a WFQ subgroup in the sibling group

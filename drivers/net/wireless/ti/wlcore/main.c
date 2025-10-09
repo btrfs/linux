@@ -117,7 +117,7 @@ int wl1271_recalc_rx_streaming(struct wl1271 *wl, struct wl12xx_vif *wlvif)
 	else {
 		ret = wl1271_set_rx_streaming(wl, wlvif, false);
 		/* don't cancel_work_sync since we might deadlock */
-		del_timer_sync(&wlvif->rx_streaming_timer);
+		timer_delete_sync(&wlvif->rx_streaming_timer);
 	}
 out:
 	return ret;
@@ -189,7 +189,8 @@ out:
 
 static void wl1271_rx_streaming_timer(struct timer_list *t)
 {
-	struct wl12xx_vif *wlvif = from_timer(wlvif, t, rx_streaming_timer);
+	struct wl12xx_vif *wlvif = timer_container_of(wlvif, t,
+						      rx_streaming_timer);
 	struct wl1271 *wl = wlvif->wl;
 	ieee80211_queue_work(wl->hw, &wlvif->rx_streaming_disable_work);
 }
@@ -379,6 +380,8 @@ static void wl12xx_irq_update_links_status(struct wl1271 *wl,
 
 static int wlcore_fw_status(struct wl1271 *wl, struct wl_fw_status *status)
 {
+	struct wl12xx_vif *wlvifsta;
+	struct wl12xx_vif *wlvifap;
 	struct wl12xx_vif *wlvif;
 	u32 old_tx_blk_count = wl->tx_blocks_available;
 	int avail, freed_blocks;
@@ -392,7 +395,7 @@ static int wlcore_fw_status(struct wl1271 *wl, struct wl_fw_status *status)
 	if (ret < 0)
 		return ret;
 
-	wlcore_hw_convert_fw_status(wl, wl->raw_fw_status, wl->fw_status);
+	wlcore_hw_convert_fw_status(wl, wl->raw_fw_status, status);
 
 	wl1271_debug(DEBUG_IRQ, "intr: 0x%x (fw_rx_counter = %d, "
 		     "drv_rx_counter = %d, tx_results_counter = %d)",
@@ -410,23 +413,100 @@ static int wlcore_fw_status(struct wl1271 *wl, struct wl_fw_status *status)
 		wl->tx_pkts_freed[i] = status->counters.tx_released_pkts[i];
 	}
 
+	/* Find an authorized STA vif */
+	wlvifsta = NULL;
+	wl12xx_for_each_wlvif_sta(wl, wlvif) {
+		if (wlvif->sta.hlid != WL12XX_INVALID_LINK_ID &&
+		    test_bit(WLVIF_FLAG_STA_AUTHORIZED, &wlvif->flags)) {
+			wlvifsta = wlvif;
+			break;
+		}
+	}
+
+	/* Find a started AP vif */
+	wlvifap = NULL;
+	wl12xx_for_each_wlvif(wl, wlvif) {
+		if (wlvif->bss_type == BSS_TYPE_AP_BSS &&
+		    wlvif->inconn_count == 0 &&
+		    test_bit(WLVIF_FLAG_AP_STARTED, &wlvif->flags)) {
+			wlvifap = wlvif;
+			break;
+		}
+	}
 
 	for_each_set_bit(i, wl->links_map, wl->num_links) {
-		u8 diff;
+		u16 diff16, sec_pn16;
+		u8 diff, tx_lnk_free_pkts;
+
 		lnk = &wl->links[i];
 
 		/* prevent wrap-around in freed-packets counter */
-		diff = (status->counters.tx_lnk_free_pkts[i] -
-		       lnk->prev_freed_pkts) & 0xff;
+		tx_lnk_free_pkts = status->counters.tx_lnk_free_pkts[i];
+		diff = (tx_lnk_free_pkts - lnk->prev_freed_pkts) & 0xff;
 
-		if (diff == 0)
+		if (diff) {
+			lnk->allocated_pkts -= diff;
+			lnk->prev_freed_pkts = tx_lnk_free_pkts;
+		}
+
+		/* Get the current sec_pn16 value if present */
+		if (status->counters.tx_lnk_sec_pn16)
+			sec_pn16 = __le16_to_cpu(status->counters.tx_lnk_sec_pn16[i]);
+		else
+			sec_pn16 = 0;
+		/* prevent wrap-around in pn16 counter */
+		diff16 = (sec_pn16 - lnk->prev_sec_pn16) & 0xffff;
+
+		/* FIXME: since free_pkts is a 8-bit counter of packets that
+		 * rolls over, it can become zero. If it is zero, then we
+		 * omit processing below. Is that really correct?
+		 */
+		if (tx_lnk_free_pkts <= 0)
 			continue;
 
-		lnk->allocated_pkts -= diff;
-		lnk->prev_freed_pkts = status->counters.tx_lnk_free_pkts[i];
+		/* For a station that has an authorized link: */
+		if (wlvifsta && wlvifsta->sta.hlid == i) {
+			if (wlvifsta->encryption_type == KEY_TKIP ||
+			    wlvifsta->encryption_type == KEY_AES) {
+				if (diff16) {
+					lnk->prev_sec_pn16 = sec_pn16;
+					/* accumulate the prev_freed_pkts
+					 * counter according to the PN from
+					 * firmware
+					 */
+					lnk->total_freed_pkts += diff16;
+				}
+			} else {
+				if (diff)
+					/* accumulate the prev_freed_pkts
+					 * counter according to the free packets
+					 * count from firmware
+					 */
+					lnk->total_freed_pkts += diff;
+			}
+		}
 
-		/* accumulate the prev_freed_pkts counter */
-		lnk->total_freed_pkts += diff;
+		/* For an AP that has been started */
+		if (wlvifap && test_bit(i, wlvifap->ap.sta_hlid_map)) {
+			if (wlvifap->encryption_type == KEY_TKIP ||
+			    wlvifap->encryption_type == KEY_AES) {
+				if (diff16) {
+					lnk->prev_sec_pn16 = sec_pn16;
+					/* accumulate the prev_freed_pkts
+					 * counter according to the PN from
+					 * firmware
+					 */
+					lnk->total_freed_pkts += diff16;
+				}
+			} else {
+				if (diff)
+					/* accumulate the prev_freed_pkts
+					 * counter according to the free packets
+					 * count from firmware
+					 */
+					lnk->total_freed_pkts += diff;
+			}
+		}
 	}
 
 	/* prevent wrap-around in total blocks counter */
@@ -2006,7 +2086,7 @@ static void wlcore_op_stop_locked(struct wl1271 *wl)
 	memset(wl->reg_ch_conf_last, 0, sizeof(wl->reg_ch_conf_last));
 }
 
-static void wlcore_op_stop(struct ieee80211_hw *hw)
+static void wlcore_op_stop(struct ieee80211_hw *hw, bool suspend)
 {
 	struct wl1271 *wl = hw->priv;
 
@@ -2533,24 +2613,24 @@ static int wl1271_op_add_interface(struct ieee80211_hw *hw,
 	if (test_bit(WL1271_FLAG_RECOVERY_IN_PROGRESS, &wl->flags) ||
 	    test_bit(WLVIF_FLAG_INITIALIZED, &wlvif->flags)) {
 		ret = -EBUSY;
-		goto out;
+		goto out_unlock;
 	}
 
 
 	ret = wl12xx_init_vif_data(wl, vif);
 	if (ret < 0)
-		goto out;
+		goto out_unlock;
 
 	wlvif->wl = wl;
 	role_type = wl12xx_get_role_type(wl, wlvif);
 	if (role_type == WL12XX_INVALID_ROLE_TYPE) {
 		ret = -EINVAL;
-		goto out;
+		goto out_unlock;
 	}
 
 	ret = wlcore_allocate_hw_queue_base(wl, wlvif);
 	if (ret < 0)
-		goto out;
+		goto out_unlock;
 
 	/*
 	 * TODO: after the nvs issue will be solved, move this block
@@ -2565,7 +2645,7 @@ static int wl1271_op_add_interface(struct ieee80211_hw *hw,
 
 		ret = wl12xx_init_fw(wl);
 		if (ret < 0)
-			goto out;
+			goto out_unlock;
 	}
 
 	/*
@@ -2762,7 +2842,7 @@ deinit:
 unlock:
 	mutex_unlock(&wl->mutex);
 
-	del_timer_sync(&wlvif->rx_streaming_timer);
+	timer_delete_sync(&wlvif->rx_streaming_timer);
 	cancel_work_sync(&wlvif->rx_streaming_enable_work);
 	cancel_work_sync(&wlvif->rx_streaming_disable_work);
 	cancel_work_sync(&wlvif->rc_update_work);
@@ -2910,7 +2990,7 @@ static int wlcore_set_assoc(struct wl1271 *wl, struct wl12xx_vif *wlvif,
 	int ret;
 
 	wlvif->aid = vif->cfg.aid;
-	wlvif->channel_type = cfg80211_get_chandef_type(&bss_conf->chandef);
+	wlvif->channel_type = cfg80211_get_chandef_type(&bss_conf->chanreq.oper);
 	wlvif->beacon_int = bss_conf->beacon_int;
 	wlvif->wmm_enabled = bss_conf->qos;
 
@@ -3086,7 +3166,7 @@ static int wl12xx_config_vif(struct wl1271 *wl, struct wl12xx_vif *wlvif,
 	return 0;
 }
 
-static int wl1271_op_config(struct ieee80211_hw *hw, u32 changed)
+static int wl1271_op_config(struct ieee80211_hw *hw, int radio_idx, u32 changed)
 {
 	struct wl1271 *wl = hw->priv;
 	struct wl12xx_vif *wlvif;
@@ -3537,6 +3617,10 @@ int wlcore_set_key(struct wl1271 *wl, enum set_key_cmd cmd,
 			return ret;
 		}
 
+		/* Store AP encryption key type */
+		if (wlvif->bss_type == BSS_TYPE_AP_BSS)
+			wlvif->encryption_type = key_type;
+
 		/*
 		 * reconfiguring arp response if the unicast (or common)
 		 * encryption key type was changed
@@ -3811,7 +3895,8 @@ out:
 	return 0;
 }
 
-static int wl1271_op_set_frag_threshold(struct ieee80211_hw *hw, u32 value)
+static int wl1271_op_set_frag_threshold(struct ieee80211_hw *hw,
+					int radio_idx, u32 value)
 {
 	struct wl1271 *wl = hw->priv;
 	int ret = 0;
@@ -3840,7 +3925,8 @@ out:
 	return ret;
 }
 
-static int wl1271_op_set_rts_threshold(struct ieee80211_hw *hw, u32 value)
+static int wl1271_op_set_rts_threshold(struct ieee80211_hw *hw, int radio_idx,
+				       u32 value)
 {
 	struct wl1271 *wl = hw->priv;
 	struct wl12xx_vif *wlvif;
@@ -4242,7 +4328,7 @@ static void wl1271_bss_info_changed_ap(struct wl1271 *wl,
 
 	/* Handle HT information change */
 	if ((changed & BSS_CHANGED_HT) &&
-	    (bss_conf->chandef.width != NL80211_CHAN_WIDTH_20_NOHT)) {
+	    (bss_conf->chanreq.oper.width != NL80211_CHAN_WIDTH_20_NOHT)) {
 		ret = wl1271_acx_set_ht_information(wl, wlvif,
 					bss_conf->ht_operation_mode);
 		if (ret < 0) {
@@ -4515,7 +4601,7 @@ static void wl1271_bss_info_changed_sta(struct wl1271 *wl,
 	/* Handle new association with HT. Do this after join. */
 	if (sta_exists) {
 		bool enabled =
-			bss_conf->chandef.width != NL80211_CHAN_WIDTH_20_NOHT;
+			bss_conf->chanreq.oper.width != NL80211_CHAN_WIDTH_20_NOHT;
 
 		ret = wlcore_hw_set_peer_cap(wl,
 					     &sta_ht_cap,
@@ -5139,19 +5225,23 @@ static int wl12xx_update_sta_state(struct wl1271 *wl,
 
 	/* Add station (AP mode) */
 	if (is_ap &&
-	    old_state == IEEE80211_STA_NOTEXIST &&
-	    new_state == IEEE80211_STA_NONE) {
+	    old_state == IEEE80211_STA_AUTH &&
+	    new_state == IEEE80211_STA_ASSOC) {
 		ret = wl12xx_sta_add(wl, wlvif, sta);
 		if (ret)
 			return ret;
+
+		wl_sta->fw_added = true;
 
 		wlcore_update_inconn_sta(wl, wlvif, wl_sta, true);
 	}
 
 	/* Remove station (AP mode) */
 	if (is_ap &&
-	    old_state == IEEE80211_STA_NONE &&
-	    new_state == IEEE80211_STA_NOTEXIST) {
+	    old_state == IEEE80211_STA_ASSOC &&
+	    new_state == IEEE80211_STA_AUTH) {
+		wl_sta->fw_added = false;
+
 		/* must not fail */
 		wl12xx_sta_remove(wl, wlvif, sta);
 
@@ -5162,11 +5252,6 @@ static int wl12xx_update_sta_state(struct wl1271 *wl,
 	if (is_ap &&
 	    new_state == IEEE80211_STA_AUTHORIZED) {
 		ret = wl12xx_cmd_set_peer_state(wl, wlvif, wl_sta->hlid);
-		if (ret < 0)
-			return ret;
-
-		/* reconfigure rates */
-		ret = wl12xx_cmd_add_peer(wl, wlvif, sta, wl_sta->hlid);
 		if (ret < 0)
 			return ret;
 
@@ -5707,9 +5792,10 @@ static int wlcore_op_cancel_remain_on_channel(struct ieee80211_hw *hw,
 
 static void wlcore_op_sta_rc_update(struct ieee80211_hw *hw,
 				    struct ieee80211_vif *vif,
-				    struct ieee80211_sta *sta,
+				    struct ieee80211_link_sta *link_sta,
 				    u32 changed)
 {
+	struct ieee80211_sta *sta = link_sta->sta;
 	struct wl12xx_vif *wlvif = wl12xx_vif_to_data(vif);
 
 	wl1271_debug(DEBUG_MAC80211, "mac80211 sta_rc_update");
@@ -5970,7 +6056,7 @@ static const struct ieee80211_ops wl1271_ops = {
 	.assign_vif_chanctx = wlcore_op_assign_vif_chanctx,
 	.unassign_vif_chanctx = wlcore_op_unassign_vif_chanctx,
 	.switch_vif_chanctx = wlcore_op_switch_vif_chanctx,
-	.sta_rc_update = wlcore_op_sta_rc_update,
+	.link_sta_rc_update = wlcore_op_sta_rc_update,
 	.sta_statistics = wlcore_op_sta_statistics,
 	.get_expected_throughput = wlcore_op_get_expected_throughput,
 	CFG80211_TESTMODE_CMD(wl1271_tm_cmd)
@@ -6793,6 +6879,7 @@ MODULE_PARM_DESC(bug_on_recovery, "BUG() on fw recovery");
 module_param(no_recovery, int, 0600);
 MODULE_PARM_DESC(no_recovery, "Prevent HW recovery. FW will remain stuck.");
 
+MODULE_DESCRIPTION("TI WLAN core driver");
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Luciano Coelho <coelho@ti.com>");
 MODULE_AUTHOR("Juuso Oikarinen <juuso.oikarinen@nokia.com>");
