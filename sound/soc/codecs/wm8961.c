@@ -627,10 +627,10 @@ static int wm8961_set_fmt(struct snd_soc_dai *dai, unsigned int fmt)
 		 WM8961_MS | WM8961_FORMAT_MASK);
 
 	switch (fmt & SND_SOC_DAIFMT_MASTER_MASK) {
-	case SND_SOC_DAIFMT_CBM_CFM:
+	case SND_SOC_DAIFMT_CBP_CFP:
 		aif |= WM8961_MS;
 		break;
-	case SND_SOC_DAIFMT_CBS_CFS:
+	case SND_SOC_DAIFMT_CBC_CFC:
 		break;
 	default:
 		return -EINVAL;
@@ -966,7 +966,7 @@ static int wm8961_i2c_probe(struct i2c_client *i2c)
 }
 
 static const struct i2c_device_id wm8961_i2c_id[] = {
-	{ "wm8961", 0 },
+	{ "wm8961" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, wm8961_i2c_id);

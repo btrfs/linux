@@ -19,7 +19,7 @@
 #include <linux/i2c.h>
 #include <linux/spi/spi.h>
 #include <linux/regmap.h>
-#include <asm/unaligned.h>
+#include <linux/unaligned.h>
 
 #include "sigmadsp.h"
 #include "adau17x1.h"
@@ -255,7 +255,7 @@ static int adau17x1_dsp_mux_enum_get(struct snd_kcontrol *kcontrol,
 
 #define DECLARE_ADAU17X1_DSP_MUX_CTRL(_name, _label, _stream, _text) \
 	const struct snd_kcontrol_new _name = \
-		SOC_DAPM_ENUM_EXT(_label, (const struct soc_enum)\
+		SOC_ENUM_EXT(_label, (const struct soc_enum)\
 			SOC_ENUM_SINGLE(SND_SOC_NOPM, _stream, \
 				ARRAY_SIZE(_text), _text), \
 			adau17x1_dsp_mux_enum_get, adau17x1_dsp_mux_enum_put)

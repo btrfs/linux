@@ -10,17 +10,12 @@
 #include <media/v4l2-subdev.h>
 
 #include "vsp1.h"
+#include "vsp1_entity.h"
 #include "vsp1_rwpf.h"
 #include "vsp1_video.h"
 
 #define RWPF_MIN_WIDTH				1
 #define RWPF_MIN_HEIGHT				1
-
-struct v4l2_rect *vsp1_rwpf_get_crop(struct vsp1_rwpf *rwpf,
-				     struct v4l2_subdev_state *sd_state)
-{
-	return v4l2_subdev_state_get_crop(sd_state, RWPF_PAD_SINK);
-}
 
 /* -----------------------------------------------------------------------------
  * V4L2 Subdevice Operations
@@ -40,6 +35,11 @@ static int vsp1_rwpf_enum_mbus_code(struct v4l2_subdev *subdev,
 		return -EINVAL;
 
 	code->code = codes[code->index];
+
+	if (code->pad == RWPF_PAD_SOURCE &&
+	    code->code == MEDIA_BUS_FMT_AYUV8_1X32)
+		code->flags = V4L2_SUBDEV_MBUS_CODE_CSC_YCBCR_ENC
+			    | V4L2_SUBDEV_MBUS_CODE_CSC_QUANTIZATION;
 
 	return 0;
 }
@@ -79,15 +79,48 @@ static int vsp1_rwpf_set_format(struct v4l2_subdev *subdev,
 	    fmt->format.code != MEDIA_BUS_FMT_AYUV8_1X32)
 		fmt->format.code = MEDIA_BUS_FMT_AYUV8_1X32;
 
-	format = vsp1_entity_get_pad_format(&rwpf->entity, state, fmt->pad);
+	format = v4l2_subdev_state_get_format(state, fmt->pad);
 
 	if (fmt->pad == RWPF_PAD_SOURCE) {
+		const struct v4l2_mbus_framefmt *sink_format =
+			v4l2_subdev_state_get_format(state, RWPF_PAD_SINK);
+		u16 flags = fmt->format.flags & V4L2_MBUS_FRAMEFMT_SET_CSC;
+		bool csc;
+
 		/*
 		 * The RWPF performs format conversion but can't scale, only the
-		 * format code can be changed on the source pad.
+		 * format code, encoding and quantization can be changed on the
+		 * source pad when converting between RGB and YUV.
 		 */
-		format->code = fmt->format.code;
+		if (sink_format->code != MEDIA_BUS_FMT_AHSV8888_1X32 &&
+		    fmt->format.code != MEDIA_BUS_FMT_AHSV8888_1X32)
+			format->code = fmt->format.code;
+		else
+			format->code = sink_format->code;
+
+		/*
+		 * Encoding and quantization can only be configured when YCbCr
+		 * <-> RGB is enabled. The V4L2 API requires userspace to set
+		 * the V4L2_MBUS_FRAMEFMT_SET_CSC flag. If either of these
+		 * conditions is not met, use the encoding and quantization
+		 * values from the sink pad.
+		 */
+		csc = (format->code == MEDIA_BUS_FMT_AYUV8_1X32) !=
+		      (sink_format->code == MEDIA_BUS_FMT_AYUV8_1X32);
+
+		if (csc && (flags & V4L2_MBUS_FRAMEFMT_SET_CSC)) {
+			format->ycbcr_enc = fmt->format.ycbcr_enc;
+			format->quantization = fmt->format.quantization;
+		} else {
+			format->ycbcr_enc = sink_format->ycbcr_enc;
+			format->quantization = sink_format->quantization;
+		}
+
+		vsp1_entity_adjust_color_space(format);
+
 		fmt->format = *format;
+		fmt->format.flags = flags;
+
 		goto done;
 	}
 
@@ -97,7 +130,13 @@ static int vsp1_rwpf_set_format(struct v4l2_subdev *subdev,
 	format->height = clamp_t(unsigned int, fmt->format.height,
 				 RWPF_MIN_HEIGHT, rwpf->max_height);
 	format->field = V4L2_FIELD_NONE;
-	format->colorspace = V4L2_COLORSPACE_SRGB;
+
+	format->colorspace = fmt->format.colorspace;
+	format->xfer_func = fmt->format.xfer_func;
+	format->ycbcr_enc = fmt->format.ycbcr_enc;
+	format->quantization = fmt->format.quantization;
+
+	vsp1_entity_adjust_color_space(format);
 
 	fmt->format = *format;
 
@@ -105,7 +144,7 @@ static int vsp1_rwpf_set_format(struct v4l2_subdev *subdev,
 		struct v4l2_rect *crop;
 
 		/* Update the sink crop rectangle. */
-		crop = vsp1_rwpf_get_crop(rwpf, state);
+		crop = v4l2_subdev_state_get_crop(state, RWPF_PAD_SINK);
 		crop->left = 0;
 		crop->top = 0;
 		crop->width = fmt->format.width;
@@ -113,8 +152,7 @@ static int vsp1_rwpf_set_format(struct v4l2_subdev *subdev,
 	}
 
 	/* Propagate the format to the source pad. */
-	format = vsp1_entity_get_pad_format(&rwpf->entity, state,
-					    RWPF_PAD_SOURCE);
+	format = v4l2_subdev_state_get_format(state, RWPF_PAD_SOURCE);
 	*format = fmt->format;
 
 	if (rwpf->flip.rotate) {
@@ -153,12 +191,11 @@ static int vsp1_rwpf_get_selection(struct v4l2_subdev *subdev,
 
 	switch (sel->target) {
 	case V4L2_SEL_TGT_CROP:
-		sel->r = *vsp1_rwpf_get_crop(rwpf, state);
+		sel->r = *v4l2_subdev_state_get_crop(state, RWPF_PAD_SINK);
 		break;
 
 	case V4L2_SEL_TGT_CROP_BOUNDS:
-		format = vsp1_entity_get_pad_format(&rwpf->entity, state,
-						    RWPF_PAD_SINK);
+		format = v4l2_subdev_state_get_format(state, RWPF_PAD_SINK);
 		sel->r.left = 0;
 		sel->r.top = 0;
 		sel->r.width = format->width;
@@ -204,8 +241,7 @@ static int vsp1_rwpf_set_selection(struct v4l2_subdev *subdev,
 	}
 
 	/* Make sure the crop rectangle is entirely contained in the image. */
-	format = vsp1_entity_get_pad_format(&rwpf->entity, state,
-					    RWPF_PAD_SINK);
+	format = v4l2_subdev_state_get_format(state, RWPF_PAD_SINK);
 
 	/*
 	 * Restrict the crop rectangle coordinates to multiples of 2 to avoid
@@ -225,12 +261,11 @@ static int vsp1_rwpf_set_selection(struct v4l2_subdev *subdev,
 	sel->r.height = min_t(unsigned int, sel->r.height,
 			      format->height - sel->r.top);
 
-	crop = vsp1_rwpf_get_crop(rwpf, state);
+	crop = v4l2_subdev_state_get_crop(state, RWPF_PAD_SINK);
 	*crop = sel->r;
 
 	/* Propagate the format to the source pad. */
-	format = vsp1_entity_get_pad_format(&rwpf->entity, state,
-					    RWPF_PAD_SOURCE);
+	format = v4l2_subdev_state_get_format(state, RWPF_PAD_SOURCE);
 	format->width = crop->width;
 	format->height = crop->height;
 

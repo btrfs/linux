@@ -8,8 +8,10 @@
 
 #include <linux/acpi.h>
 #include <linux/cacheinfo.h>
+#include <linux/cleanup.h>
 #include <linux/cpu.h>
 #include <linux/cpufreq.h>
+#include <linux/cpu_smt.h>
 #include <linux/device.h>
 #include <linux/of.h>
 #include <linux/slab.h>
@@ -22,12 +24,12 @@
 #include <linux/units.h>
 
 #define CREATE_TRACE_POINTS
-#include <trace/events/thermal_pressure.h>
+#include <trace/events/hw_pressure.h>
 
 static DEFINE_PER_CPU(struct scale_freq_data __rcu *, sft_data);
 static struct cpumask scale_freq_counters_mask;
 static bool scale_freq_invariant;
-DEFINE_PER_CPU(unsigned long, capacity_freq_ref) = 1;
+DEFINE_PER_CPU(unsigned long, capacity_freq_ref) = 0;
 EXPORT_PER_CPU_SYMBOL_GPL(capacity_freq_ref);
 
 static bool supports_scale_freq_counters(const struct cpumask *cpus)
@@ -152,34 +154,26 @@ void topology_set_freq_scale(const struct cpumask *cpus, unsigned long cur_freq,
 		per_cpu(arch_freq_scale, i) = scale;
 }
 
-DEFINE_PER_CPU(unsigned long, cpu_scale) = SCHED_CAPACITY_SCALE;
-EXPORT_PER_CPU_SYMBOL_GPL(cpu_scale);
-
-void topology_set_cpu_scale(unsigned int cpu, unsigned long capacity)
-{
-	per_cpu(cpu_scale, cpu) = capacity;
-}
-
-DEFINE_PER_CPU(unsigned long, thermal_pressure);
+DEFINE_PER_CPU(unsigned long, hw_pressure);
 
 /**
- * topology_update_thermal_pressure() - Update thermal pressure for CPUs
+ * topology_update_hw_pressure() - Update HW pressure for CPUs
  * @cpus        : The related CPUs for which capacity has been reduced
  * @capped_freq : The maximum allowed frequency that CPUs can run at
  *
- * Update the value of thermal pressure for all @cpus in the mask. The
+ * Update the value of HW pressure for all @cpus in the mask. The
  * cpumask should include all (online+offline) affected CPUs, to avoid
  * operating on stale data when hot-plug is used for some CPUs. The
  * @capped_freq reflects the currently allowed max CPUs frequency due to
- * thermal capping. It might be also a boost frequency value, which is bigger
+ * HW capping. It might be also a boost frequency value, which is bigger
  * than the internal 'capacity_freq_ref' max frequency. In such case the
  * pressure value should simply be removed, since this is an indication that
- * there is no thermal throttling. The @capped_freq must be provided in kHz.
+ * there is no HW throttling. The @capped_freq must be provided in kHz.
  */
-void topology_update_thermal_pressure(const struct cpumask *cpus,
+void topology_update_hw_pressure(const struct cpumask *cpus,
 				      unsigned long capped_freq)
 {
-	unsigned long max_capacity, capacity, th_pressure;
+	unsigned long max_capacity, capacity, pressure;
 	u32 max_freq;
 	int cpu;
 
@@ -189,68 +183,24 @@ void topology_update_thermal_pressure(const struct cpumask *cpus,
 
 	/*
 	 * Handle properly the boost frequencies, which should simply clean
-	 * the thermal pressure value.
+	 * the HW pressure value.
 	 */
 	if (max_freq <= capped_freq)
 		capacity = max_capacity;
 	else
 		capacity = mult_frac(max_capacity, capped_freq, max_freq);
 
-	th_pressure = max_capacity - capacity;
+	pressure = max_capacity - capacity;
 
-	trace_thermal_pressure_update(cpu, th_pressure);
+	trace_hw_pressure_update(cpu, pressure);
 
 	for_each_cpu(cpu, cpus)
-		WRITE_ONCE(per_cpu(thermal_pressure, cpu), th_pressure);
+		WRITE_ONCE(per_cpu(hw_pressure, cpu), pressure);
 }
-EXPORT_SYMBOL_GPL(topology_update_thermal_pressure);
-
-static ssize_t cpu_capacity_show(struct device *dev,
-				 struct device_attribute *attr,
-				 char *buf)
-{
-	struct cpu *cpu = container_of(dev, struct cpu, dev);
-
-	return sysfs_emit(buf, "%lu\n", topology_get_cpu_scale(cpu->dev.id));
-}
+EXPORT_SYMBOL_GPL(topology_update_hw_pressure);
 
 static void update_topology_flags_workfn(struct work_struct *work);
 static DECLARE_WORK(update_topology_flags_work, update_topology_flags_workfn);
-
-static DEVICE_ATTR_RO(cpu_capacity);
-
-static int cpu_capacity_sysctl_add(unsigned int cpu)
-{
-	struct device *cpu_dev = get_cpu_device(cpu);
-
-	if (!cpu_dev)
-		return -ENOENT;
-
-	device_create_file(cpu_dev, &dev_attr_cpu_capacity);
-
-	return 0;
-}
-
-static int cpu_capacity_sysctl_remove(unsigned int cpu)
-{
-	struct device *cpu_dev = get_cpu_device(cpu);
-
-	if (!cpu_dev)
-		return -ENOENT;
-
-	device_remove_file(cpu_dev, &dev_attr_cpu_capacity);
-
-	return 0;
-}
-
-static int register_cpu_capacity_sysctl(void)
-{
-	cpuhp_setup_state(CPUHP_AP_ONLINE_DYN, "topology/cpu-capacity",
-			  cpu_capacity_sysctl_add, cpu_capacity_sysctl_remove);
-
-	return 0;
-}
-subsys_initcall(register_cpu_capacity_sysctl);
 
 static int update_topology;
 
@@ -292,13 +242,15 @@ void topology_normalize_cpu_scale(void)
 
 	capacity_scale = 1;
 	for_each_possible_cpu(cpu) {
-		capacity = raw_capacity[cpu] * per_cpu(capacity_freq_ref, cpu);
+		capacity = raw_capacity[cpu] *
+			   (per_cpu(capacity_freq_ref, cpu) ?: 1);
 		capacity_scale = max(capacity, capacity_scale);
 	}
 
 	pr_debug("cpu_capacity: capacity_scale=%llu\n", capacity_scale);
 	for_each_possible_cpu(cpu) {
-		capacity = raw_capacity[cpu] * per_cpu(capacity_freq_ref, cpu);
+		capacity = raw_capacity[cpu] *
+			   (per_cpu(capacity_freq_ref, cpu) ?: 1);
 		capacity = div64_u64(capacity << SCHED_CAPACITY_SHIFT,
 			capacity_scale);
 		topology_set_cpu_scale(cpu, capacity);
@@ -365,7 +317,7 @@ void __weak freq_inv_set_max_ratio(int cpu, u64 max_rate)
 #ifdef CONFIG_ACPI_CPPC_LIB
 #include <acpi/cppc_acpi.h>
 
-void topology_init_cpu_capacity_cppc(void)
+static inline void topology_init_cpu_capacity_cppc(void)
 {
 	u64 capacity, capacity_scale = 0;
 	struct cppc_perf_caps perf_caps;
@@ -416,6 +368,10 @@ void topology_init_cpu_capacity_cppc(void)
 exit:
 	free_raw_capacity();
 }
+void acpi_processor_init_invariance_cppc(void)
+{
+	topology_init_cpu_capacity_cppc();
+}
 #endif
 
 #ifdef CONFIG_CPU_FREQ
@@ -430,9 +386,6 @@ init_cpu_capacity_callback(struct notifier_block *nb,
 {
 	struct cpufreq_policy *policy = data;
 	int cpu;
-
-	if (!raw_capacity)
-		return 0;
 
 	if (val != CPUFREQ_CREATE_POLICY)
 		return 0;
@@ -450,9 +403,11 @@ init_cpu_capacity_callback(struct notifier_block *nb,
 	}
 
 	if (cpumask_empty(cpus_to_visit)) {
-		topology_normalize_cpu_scale();
-		schedule_work(&update_topology_flags_work);
-		free_raw_capacity();
+		if (raw_capacity) {
+			topology_normalize_cpu_scale();
+			schedule_work(&update_topology_flags_work);
+			free_raw_capacity();
+		}
 		pr_debug("cpu_capacity: parsing done\n");
 		schedule_work(&parsing_done_work);
 	}
@@ -472,7 +427,7 @@ static int __init register_cpufreq_notifier(void)
 	 * On ACPI-based systems skip registering cpufreq notifier as cpufreq
 	 * information is not needed for cpu capacity initialization.
 	 */
-	if (!acpi_disabled || !raw_capacity)
+	if (!acpi_disabled)
 		return -EINVAL;
 
 	if (!alloc_cpumask_var(&cpus_to_visit, GFP_KERNEL))
@@ -502,6 +457,10 @@ core_initcall(free_raw_capacity);
 #endif
 
 #if defined(CONFIG_ARM64) || defined(CONFIG_RISCV)
+
+/* Used to enable the SMT control */
+static unsigned int max_smt_thread_num = 1;
+
 /*
  * This function returns the logic cpu number of the node.
  * There are basically three kinds of return values:
@@ -514,10 +473,10 @@ core_initcall(free_raw_capacity);
  */
 static int __init get_cpu_for_node(struct device_node *node)
 {
-	struct device_node *cpu_node;
 	int cpu;
+	struct device_node *cpu_node __free(device_node) =
+		of_parse_phandle(node, "cpu", 0);
 
-	cpu_node = of_parse_phandle(node, "cpu", 0);
 	if (!cpu_node)
 		return -1;
 
@@ -528,7 +487,6 @@ static int __init get_cpu_for_node(struct device_node *node)
 		pr_info("CPU node for %pOF exist but the possible cpu range is :%*pbl\n",
 			cpu_node, cpumask_pr_args(cpu_possible_mask));
 
-	of_node_put(cpu_node);
 	return cpu;
 }
 
@@ -539,28 +497,30 @@ static int __init parse_core(struct device_node *core, int package_id,
 	bool leaf = true;
 	int i = 0;
 	int cpu;
-	struct device_node *t;
 
 	do {
 		snprintf(name, sizeof(name), "thread%d", i);
-		t = of_get_child_by_name(core, name);
-		if (t) {
-			leaf = false;
-			cpu = get_cpu_for_node(t);
-			if (cpu >= 0) {
-				cpu_topology[cpu].package_id = package_id;
-				cpu_topology[cpu].cluster_id = cluster_id;
-				cpu_topology[cpu].core_id = core_id;
-				cpu_topology[cpu].thread_id = i;
-			} else if (cpu != -ENODEV) {
-				pr_err("%pOF: Can't get CPU for thread\n", t);
-				of_node_put(t);
-				return -EINVAL;
-			}
-			of_node_put(t);
+		struct device_node *t __free(device_node) =
+			of_get_child_by_name(core, name);
+
+		if (!t)
+			break;
+
+		leaf = false;
+		cpu = get_cpu_for_node(t);
+		if (cpu >= 0) {
+			cpu_topology[cpu].package_id = package_id;
+			cpu_topology[cpu].cluster_id = cluster_id;
+			cpu_topology[cpu].core_id = core_id;
+			cpu_topology[cpu].thread_id = i;
+		} else if (cpu != -ENODEV) {
+			pr_err("%pOF: Can't get CPU for thread\n", t);
+			return -EINVAL;
 		}
 		i++;
-	} while (t);
+	} while (1);
+
+	max_smt_thread_num = max_t(unsigned int, max_smt_thread_num, i);
 
 	cpu = get_cpu_for_node(core);
 	if (cpu >= 0) {
@@ -587,7 +547,6 @@ static int __init parse_cluster(struct device_node *cluster, int package_id,
 	char name[20];
 	bool leaf = true;
 	bool has_cores = false;
-	struct device_node *c;
 	int core_id = 0;
 	int i, ret;
 
@@ -599,49 +558,50 @@ static int __init parse_cluster(struct device_node *cluster, int package_id,
 	i = 0;
 	do {
 		snprintf(name, sizeof(name), "cluster%d", i);
-		c = of_get_child_by_name(cluster, name);
-		if (c) {
-			leaf = false;
-			ret = parse_cluster(c, package_id, i, depth + 1);
-			if (depth > 0)
-				pr_warn("Topology for clusters of clusters not yet supported\n");
-			of_node_put(c);
-			if (ret != 0)
-				return ret;
-		}
+		struct device_node *c __free(device_node) =
+			of_get_child_by_name(cluster, name);
+
+		if (!c)
+			break;
+
+		leaf = false;
+		ret = parse_cluster(c, package_id, i, depth + 1);
+		if (depth > 0)
+			pr_warn("Topology for clusters of clusters not yet supported\n");
+		if (ret != 0)
+			return ret;
 		i++;
-	} while (c);
+	} while (1);
 
 	/* Now check for cores */
 	i = 0;
 	do {
 		snprintf(name, sizeof(name), "core%d", i);
-		c = of_get_child_by_name(cluster, name);
-		if (c) {
-			has_cores = true;
+		struct device_node *c __free(device_node) =
+			of_get_child_by_name(cluster, name);
 
-			if (depth == 0) {
-				pr_err("%pOF: cpu-map children should be clusters\n",
-				       c);
-				of_node_put(c);
-				return -EINVAL;
-			}
+		if (!c)
+			break;
 
-			if (leaf) {
-				ret = parse_core(c, package_id, cluster_id,
-						 core_id++);
-			} else {
-				pr_err("%pOF: Non-leaf cluster with core %s\n",
-				       cluster, name);
-				ret = -EINVAL;
-			}
+		has_cores = true;
 
-			of_node_put(c);
+		if (depth == 0) {
+			pr_err("%pOF: cpu-map children should be clusters\n", c);
+			return -EINVAL;
+		}
+
+		if (leaf) {
+			ret = parse_core(c, package_id, cluster_id, core_id++);
 			if (ret != 0)
 				return ret;
+		} else {
+			pr_err("%pOF: Non-leaf cluster with core %s\n",
+			       cluster, name);
+			return -EINVAL;
 		}
+
 		i++;
-	} while (c);
+	} while (1);
 
 	if (leaf && !has_cores)
 		pr_warn("%pOF: empty cluster\n", cluster);
@@ -652,36 +612,49 @@ static int __init parse_cluster(struct device_node *cluster, int package_id,
 static int __init parse_socket(struct device_node *socket)
 {
 	char name[20];
-	struct device_node *c;
 	bool has_socket = false;
 	int package_id = 0, ret;
 
 	do {
 		snprintf(name, sizeof(name), "socket%d", package_id);
-		c = of_get_child_by_name(socket, name);
-		if (c) {
-			has_socket = true;
-			ret = parse_cluster(c, package_id, -1, 0);
-			of_node_put(c);
-			if (ret != 0)
-				return ret;
-		}
+		struct device_node *c __free(device_node) =
+			of_get_child_by_name(socket, name);
+
+		if (!c)
+			break;
+
+		has_socket = true;
+		ret = parse_cluster(c, package_id, -1, 0);
+		if (ret != 0)
+			return ret;
+
 		package_id++;
-	} while (c);
+	} while (1);
 
 	if (!has_socket)
 		ret = parse_cluster(socket, 0, -1, 0);
+
+	/*
+	 * Reset the max_smt_thread_num to 1 on failure. Since on failure
+	 * we need to notify the framework the SMT is not supported, but
+	 * max_smt_thread_num can be initialized to the SMT thread number
+	 * of the cores which are successfully parsed.
+	 */
+	if (ret)
+		max_smt_thread_num = 1;
+
+	cpu_smt_set_num_threads(max_smt_thread_num, max_smt_thread_num);
 
 	return ret;
 }
 
 static int __init parse_dt_topology(void)
 {
-	struct device_node *cn, *map;
 	int ret = 0;
 	int cpu;
+	struct device_node *cn __free(device_node) =
+		of_find_node_by_path("/cpus");
 
-	cn = of_find_node_by_path("/cpus");
 	if (!cn) {
 		pr_err("No CPU information found in DT\n");
 		return 0;
@@ -691,13 +664,15 @@ static int __init parse_dt_topology(void)
 	 * When topology is provided cpu-map is essentially a root
 	 * cluster with restricted subnodes.
 	 */
-	map = of_get_child_by_name(cn, "cpu-map");
+	struct device_node *map __free(device_node) =
+		of_get_child_by_name(cn, "cpu-map");
+
 	if (!map)
-		goto out;
+		return ret;
 
 	ret = parse_socket(map);
 	if (ret != 0)
-		goto out_map;
+		return ret;
 
 	topology_normalize_cpu_scale();
 
@@ -707,14 +682,9 @@ static int __init parse_dt_topology(void)
 	 */
 	for_each_possible_cpu(cpu)
 		if (cpu_topology[cpu].package_id < 0) {
-			ret = -EINVAL;
-			break;
+			return -EINVAL;
 		}
 
-out_map:
-	of_node_put(map);
-out:
-	of_node_put(cn);
 	return ret;
 }
 #endif

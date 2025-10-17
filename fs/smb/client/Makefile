@@ -12,7 +12,7 @@ cifs-y := trace.o cifsfs.o cifs_debug.o connect.o dir.o file.o \
 	  smb2ops.o smb2maperror.o smb2transport.o \
 	  smb2misc.o smb2pdu.o smb2inode.o smb2file.o cifsacl.o fs_context.o \
 	  dns_resolve.o cifs_spnego_negtokeninit.asn1.o asn1.o \
-	  namespace.o
+	  namespace.o reparse.o
 
 $(obj)/asn1.o: $(obj)/cifs_spnego_negtokeninit.asn1.h
 
@@ -32,4 +32,6 @@ cifs-$(CONFIG_CIFS_SMB_DIRECT) += smbdirect.o
 
 cifs-$(CONFIG_CIFS_ROOT) += cifsroot.o
 
-cifs-$(CONFIG_CIFS_ALLOW_INSECURE_LEGACY) += smb1ops.o cifssmb.o
+cifs-$(CONFIG_CIFS_ALLOW_INSECURE_LEGACY) += smb1ops.o cifssmb.o cifstransport.o
+
+cifs-$(CONFIG_CIFS_COMPRESSION) += compress.o compress/lz77.o

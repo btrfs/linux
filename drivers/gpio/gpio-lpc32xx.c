@@ -340,28 +340,34 @@ static int lpc32xx_gpio_dir_out_always(struct gpio_chip *chip, unsigned pin,
 	return 0;
 }
 
-static void lpc32xx_gpio_set_value_p012(struct gpio_chip *chip, unsigned pin,
-	int value)
+static int lpc32xx_gpio_set_value_p012(struct gpio_chip *chip,
+				       unsigned int pin, int value)
 {
 	struct lpc32xx_gpio_chip *group = gpiochip_get_data(chip);
 
 	__set_gpio_level_p012(group, pin, value);
+
+	return 0;
 }
 
-static void lpc32xx_gpio_set_value_p3(struct gpio_chip *chip, unsigned pin,
-	int value)
+static int lpc32xx_gpio_set_value_p3(struct gpio_chip *chip,
+				     unsigned int pin, int value)
 {
 	struct lpc32xx_gpio_chip *group = gpiochip_get_data(chip);
 
 	__set_gpio_level_p3(group, pin, value);
+
+	return 0;
 }
 
-static void lpc32xx_gpo_set_value(struct gpio_chip *chip, unsigned pin,
-	int value)
+static int lpc32xx_gpo_set_value(struct gpio_chip *chip, unsigned int pin,
+				 int value)
 {
 	struct lpc32xx_gpio_chip *group = gpiochip_get_data(chip);
 
 	__set_gpo_level_p3(group, pin, value);
+
+	return 0;
 }
 
 static int lpc32xx_gpo_get_value(struct gpio_chip *chip, unsigned pin)
@@ -529,6 +535,7 @@ static const struct of_device_id lpc32xx_gpio_of_match[] = {
 	{ .compatible = "nxp,lpc3220-gpio", },
 	{ },
 };
+MODULE_DEVICE_TABLE(of, lpc32xx_gpio_of_match);
 
 static struct platform_driver lpc32xx_gpio_driver = {
 	.driver		= {

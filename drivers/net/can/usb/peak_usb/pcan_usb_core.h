@@ -3,8 +3,8 @@
  * CAN driver for PEAK System USB adapters
  * Derived from the PCAN project file driver/src/pcan_usb_core.c
  *
- * Copyright (C) 2003-2010 PEAK System-Technik GmbH
- * Copyright (C) 2010-2012 Stephane Grosjean <s.grosjean@peak-system.com>
+ * Copyright (C) 2003-2025 PEAK System-Technik GmbH
+ * Author: Stéphane Grosjean <stephane.grosjean@hms-networks.com>
  *
  * Many thanks to Klaus Hitschler <klaus.hitschler@gmx.de>
  */
@@ -145,7 +145,7 @@ void peak_usb_get_ts_time(struct peak_time_ref *time_ref, u32 ts, ktime_t *tv);
 int peak_usb_netif_rx_64(struct sk_buff *skb, u32 ts_low, u32 ts_high);
 void peak_usb_async_complete(struct urb *urb);
 void peak_usb_restart_complete(struct peak_usb_device *dev);
-int pcan_get_ts_info(struct net_device *dev, struct ethtool_ts_info *info);
+int pcan_get_ts_info(struct net_device *dev, struct kernel_ethtool_ts_info *info);
 
 /* common 32-bit CAN channel ID ethtool management */
 int peak_usb_get_eeprom_len(struct net_device *netdev);

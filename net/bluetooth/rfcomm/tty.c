@@ -201,14 +201,14 @@ static ssize_t address_show(struct device *tty_dev,
 			    struct device_attribute *attr, char *buf)
 {
 	struct rfcomm_dev *dev = dev_get_drvdata(tty_dev);
-	return sprintf(buf, "%pMR\n", &dev->dst);
+	return sysfs_emit(buf, "%pMR\n", &dev->dst);
 }
 
 static ssize_t channel_show(struct device *tty_dev,
 			    struct device_attribute *attr, char *buf)
 {
 	struct rfcomm_dev *dev = dev_get_drvdata(tty_dev);
-	return sprintf(buf, "%d\n", dev->channel);
+	return sysfs_emit(buf, "%d\n", dev->channel);
 }
 
 static DEVICE_ATTR_RO(address);
@@ -438,7 +438,6 @@ static int __rfcomm_release_dev(void __user *arg)
 {
 	struct rfcomm_dev_req req;
 	struct rfcomm_dev *dev;
-	struct tty_struct *tty;
 
 	if (copy_from_user(&req, arg, sizeof(req)))
 		return -EFAULT;
@@ -464,11 +463,7 @@ static int __rfcomm_release_dev(void __user *arg)
 		rfcomm_dlc_close(dev->dlc, 0);
 
 	/* Shut down TTY synchronously before freeing rfcomm_dev */
-	tty = tty_port_tty_get(&dev->port);
-	if (tty) {
-		tty_vhangup(tty);
-		tty_kref_put(tty);
-	}
+	tty_port_tty_vhangup(&dev->port);
 
 	if (!test_bit(RFCOMM_TTY_OWNED, &dev->status))
 		tty_port_put(&dev->port);
@@ -504,7 +499,7 @@ static int rfcomm_get_dev_list(void __user *arg)
 	struct rfcomm_dev *dev;
 	struct rfcomm_dev_list_req *dl;
 	struct rfcomm_dev_info *di;
-	int n = 0, size, err;
+	int n = 0, err;
 	u16 dev_num;
 
 	BT_DBG("");
@@ -515,12 +510,11 @@ static int rfcomm_get_dev_list(void __user *arg)
 	if (!dev_num || dev_num > (PAGE_SIZE * 4) / sizeof(*di))
 		return -EINVAL;
 
-	size = sizeof(*dl) + dev_num * sizeof(*di);
-
-	dl = kzalloc(size, GFP_KERNEL);
+	dl = kzalloc(struct_size(dl, dev_info, dev_num), GFP_KERNEL);
 	if (!dl)
 		return -ENOMEM;
 
+	dl->dev_num = dev_num;
 	di = dl->dev_info;
 
 	mutex_lock(&rfcomm_dev_lock);
@@ -528,12 +522,12 @@ static int rfcomm_get_dev_list(void __user *arg)
 	list_for_each_entry(dev, &rfcomm_dev_list, list) {
 		if (!tty_port_get(&dev->port))
 			continue;
-		(di + n)->id      = dev->id;
-		(di + n)->flags   = dev->flags;
-		(di + n)->state   = dev->dlc->state;
-		(di + n)->channel = dev->channel;
-		bacpy(&(di + n)->src, &dev->src);
-		bacpy(&(di + n)->dst, &dev->dst);
+		di[n].id      = dev->id;
+		di[n].flags   = dev->flags;
+		di[n].state   = dev->dlc->state;
+		di[n].channel = dev->channel;
+		bacpy(&di[n].src, &dev->src);
+		bacpy(&di[n].dst, &dev->dst);
 		tty_port_put(&dev->port);
 		if (++n >= dev_num)
 			break;
@@ -542,9 +536,7 @@ static int rfcomm_get_dev_list(void __user *arg)
 	mutex_unlock(&rfcomm_dev_lock);
 
 	dl->dev_num = n;
-	size = sizeof(*dl) + n * sizeof(*di);
-
-	err = copy_to_user(arg, dl, size);
+	err = copy_to_user(arg, dl, struct_size(dl, dev_info, n));
 	kfree(dl);
 
 	return err ? -EFAULT : 0;
@@ -983,7 +975,7 @@ static void rfcomm_tty_set_termios(struct tty_struct *tty,
 		baud = RFCOMM_RPN_BR_230400;
 		break;
 	default:
-		/* 9600 is standard accordinag to the RFCOMM specification */
+		/* 9600 is standard according to the RFCOMM specification */
 		baud = RFCOMM_RPN_BR_9600;
 		break;
 

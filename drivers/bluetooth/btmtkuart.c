@@ -8,7 +8,7 @@
  *
  */
 
-#include <asm/unaligned.h>
+#include <linux/unaligned.h>
 #include <linux/atomic.h>
 #include <linux/clk.h>
 #include <linux/firmware.h>
@@ -22,11 +22,12 @@
 #include <linux/regulator/consumer.h>
 #include <linux/serdev.h>
 #include <linux/skbuff.h>
+#include <linux/usb.h>
 
 #include <net/bluetooth/bluetooth.h>
 #include <net/bluetooth/hci_core.h>
 
-#include "h4_recv.h"
+#include "hci_uart.h"
 #include "btmtk.h"
 
 #define VERSION "0.2"
@@ -315,7 +316,7 @@ mtk_stp_split(struct btmtkuart_dev *bdev, const unsigned char *data, int count,
 
 		/* Resync STP when unexpected data is being read */
 		if (shdr->prefix != 0x80 || bdev->stp_dlen > 2048) {
-			bt_dev_err(bdev->hdev, "stp format unexpect (%d, %d)",
+			bt_dev_err(bdev->hdev, "stp format unexpected (%d, %d)",
 				   shdr->prefix, bdev->stp_dlen);
 			bdev->stp_cursor = 2;
 			bdev->stp_dlen = 0;
@@ -326,7 +327,7 @@ mtk_stp_split(struct btmtkuart_dev *bdev, const unsigned char *data, int count,
 	if (count <= 0)
 		return NULL;
 
-	/* Tranlate to how much the size of data H4 can handle so far */
+	/* Translate to how much the size of data H4 can handle so far */
 	*sz_h4 = min_t(int, count, bdev->stp_dlen);
 
 	/* Update the remaining size of STP packet */
@@ -383,8 +384,8 @@ static void btmtkuart_recv(struct hci_dev *hdev, const u8 *data, size_t count)
 	}
 }
 
-static ssize_t btmtkuart_receive_buf(struct serdev_device *serdev,
-				     const u8 *data, size_t count)
+static size_t btmtkuart_receive_buf(struct serdev_device *serdev,
+				    const u8 *data, size_t count)
 {
 	struct btmtkuart_dev *bdev = serdev_device_get_drvdata(serdev);
 
@@ -871,7 +872,7 @@ static int btmtkuart_probe(struct serdev_device *serdev)
 	SET_HCIDEV_DEV(hdev, &serdev->dev);
 
 	hdev->manufacturer = 70;
-	set_bit(HCI_QUIRK_NON_PERSISTENT_SETUP, &hdev->quirks);
+	hci_set_quirk(hdev, HCI_QUIRK_NON_PERSISTENT_SETUP);
 
 	if (btmtkuart_is_standalone(bdev)) {
 		err = clk_prepare_enable(bdev->osc);

@@ -2042,12 +2042,14 @@ int qlcnic_83xx_config_hw_lro(struct qlcnic_adapter *adapter, int mode)
 
 int qlcnic_83xx_config_rss(struct qlcnic_adapter *adapter, int enable)
 {
-	int err;
-	u32 word;
 	struct qlcnic_cmd_args cmd;
-	const u64 key[] = { 0xbeac01fa6a42b73bULL, 0x8030f20c77cb2da3ULL,
-			    0xae7b30b4d0ca2bcbULL, 0x43a38fb04167253dULL,
-			    0x255b0ec26d5a56daULL };
+	static const u64 key[] = {
+		0xbeac01fa6a42b73bULL, 0x8030f20c77cb2da3ULL,
+		0xae7b30b4d0ca2bcbULL, 0x43a38fb04167253dULL,
+		0x255b0ec26d5a56daULL
+	};
+	u32 word;
+	int err;
 
 	err = qlcnic_alloc_mbx_args(&cmd, adapter, QLCNIC_CMD_CONFIGURE_RSS);
 	if (err)
@@ -4213,7 +4215,6 @@ static pci_ers_result_t qlcnic_83xx_io_slot_reset(struct pci_dev *pdev)
 	struct qlcnic_adapter *adapter = pci_get_drvdata(pdev);
 	int err = 0;
 
-	pdev->error_state = pci_channel_io_normal;
 	err = pci_enable_device(pdev);
 	if (err)
 		goto disconnect;

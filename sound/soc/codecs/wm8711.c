@@ -243,10 +243,10 @@ static int wm8711_set_dai_fmt(struct snd_soc_dai *codec_dai,
 
 	/* set master/slave audio interface */
 	switch (fmt & SND_SOC_DAIFMT_MASTER_MASK) {
-	case SND_SOC_DAIFMT_CBM_CFM:
+	case SND_SOC_DAIFMT_CBP_CFP:
 		iface |= 0x0040;
 		break;
-	case SND_SOC_DAIFMT_CBS_CFS:
+	case SND_SOC_DAIFMT_CBC_CFC:
 		break;
 	default:
 		return -EINVAL;
@@ -454,7 +454,7 @@ static int wm8711_i2c_probe(struct i2c_client *client)
 }
 
 static const struct i2c_device_id wm8711_i2c_id[] = {
-	{ "wm8711", 0 },
+	{ "wm8711" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, wm8711_i2c_id);

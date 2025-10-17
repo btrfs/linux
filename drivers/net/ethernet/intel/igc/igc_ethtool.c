@@ -8,6 +8,7 @@
 
 #include "igc.h"
 #include "igc_diag.h"
+#include "igc_tsn.h"
 
 /* forward declaration */
 struct igc_stats {
@@ -121,9 +122,11 @@ static const char igc_gstrings_test[][ETH_GSTRING_LEN] = {
 #define IGC_STATS_LEN \
 	(IGC_GLOBAL_STATS_LEN + IGC_NETDEV_STATS_LEN + IGC_QUEUE_STATS_LEN)
 
+#define IGC_PRIV_FLAGS_LEGACY_RX		BIT(0)
+#define IGC_PRIV_FLAGS_REVERSE_TSN_TXQ_PRIO	BIT(1)
 static const char igc_priv_flags_strings[][ETH_GSTRING_LEN] = {
-#define IGC_PRIV_FLAGS_LEGACY_RX	BIT(0)
 	"legacy-rx",
+	"reverse-tsn-txq-prio",
 };
 
 #define IGC_PRIV_FLAGS_STR_LEN ARRAY_SIZE(igc_priv_flags_strings)
@@ -624,11 +627,11 @@ igc_ethtool_set_ringparam(struct net_device *netdev,
 	}
 
 	if (adapter->num_tx_queues > adapter->num_rx_queues)
-		temp_ring = vmalloc(array_size(sizeof(struct igc_ring),
-					       adapter->num_tx_queues));
+		temp_ring = vmalloc_array(adapter->num_tx_queues,
+					  sizeof(struct igc_ring));
 	else
-		temp_ring = vmalloc(array_size(sizeof(struct igc_ring),
-					       adapter->num_rx_queues));
+		temp_ring = vmalloc_array(adapter->num_rx_queues,
+					  sizeof(struct igc_ring));
 
 	if (!temp_ring) {
 		err = -ENOMEM;
@@ -981,7 +984,7 @@ static int igc_ethtool_get_nfc_rule(struct igc_adapter *adapter,
 
 	if (rule->filter.match_flags & IGC_FILTER_FLAG_VLAN_ETYPE) {
 		fsp->flow_type |= FLOW_EXT;
-		fsp->h_ext.vlan_etype = rule->filter.vlan_etype;
+		fsp->h_ext.vlan_etype = htons(rule->filter.vlan_etype);
 		fsp->m_ext.vlan_etype = ETHER_TYPE_FULL_MASK;
 	}
 
@@ -1044,9 +1047,11 @@ static int igc_ethtool_get_nfc_rules(struct igc_adapter *adapter,
 	return 0;
 }
 
-static int igc_ethtool_get_rss_hash_opts(struct igc_adapter *adapter,
-					 struct ethtool_rxnfc *cmd)
+static int igc_ethtool_get_rxfh_fields(struct net_device *dev,
+				       struct ethtool_rxfh_fields *cmd)
 {
+	struct igc_adapter *adapter = netdev_priv(dev);
+
 	cmd->data = 0;
 
 	/* Report default options for RSS on igc */
@@ -1102,8 +1107,6 @@ static int igc_ethtool_get_rxnfc(struct net_device *dev,
 		return igc_ethtool_get_nfc_rule(adapter, cmd);
 	case ETHTOOL_GRXCLSRLALL:
 		return igc_ethtool_get_nfc_rules(adapter, cmd, rule_locs);
-	case ETHTOOL_GRXFH:
-		return igc_ethtool_get_rss_hash_opts(adapter, cmd);
 	default:
 		return -EOPNOTSUPP;
 	}
@@ -1111,9 +1114,11 @@ static int igc_ethtool_get_rxnfc(struct net_device *dev,
 
 #define UDP_RSS_FLAGS (IGC_FLAG_RSS_FIELD_IPV4_UDP | \
 		       IGC_FLAG_RSS_FIELD_IPV6_UDP)
-static int igc_ethtool_set_rss_hash_opt(struct igc_adapter *adapter,
-					struct ethtool_rxnfc *nfc)
+static int igc_ethtool_set_rxfh_fields(struct net_device *dev,
+				       const struct ethtool_rxfh_fields *nfc,
+				       struct netlink_ext_ack *extack)
 {
+	struct igc_adapter *adapter = netdev_priv(dev);
 	u32 flags = adapter->flags;
 
 	/* RSS does not support anything other than hashing
@@ -1249,7 +1254,7 @@ static void igc_ethtool_init_nfc_rule(struct igc_nfc_rule *rule,
 
 	/* VLAN etype matching */
 	if ((fsp->flow_type & FLOW_EXT) && fsp->h_ext.vlan_etype) {
-		rule->filter.vlan_etype = fsp->h_ext.vlan_etype;
+		rule->filter.vlan_etype = ntohs(fsp->h_ext.vlan_etype);
 		rule->filter.match_flags |= IGC_FILTER_FLAG_VLAN_ETYPE;
 	}
 
@@ -1278,6 +1283,24 @@ static void igc_ethtool_init_nfc_rule(struct igc_nfc_rule *rule,
 		rule->flex = true;
 	else
 		rule->flex = false;
+
+	/* The wildcard rule is only applied if:
+	 *  a) None of the other filtering rules match (match_flags is zero)
+	 *  b) The flow type is ETHER_FLOW only (no additional fields set)
+	 *  c) Mask for Source MAC address is not specified (all zeros)
+	 *  d) Mask for Destination MAC address is not specified (all zeros)
+	 *  e) Mask for L2 EtherType is not specified (zero)
+	 *
+	 * If all these conditions are met, the rule is treated as a wildcard
+	 * rule. Default queue feature will be used, so that all packets that do
+	 * not match any other rule will be routed to the default queue.
+	 */
+	if (!rule->filter.match_flags &&
+	    fsp->flow_type == ETHER_FLOW &&
+	    is_zero_ether_addr(fsp->m_u.ether_spec.h_source) &&
+	    is_zero_ether_addr(fsp->m_u.ether_spec.h_dest) &&
+	    !fsp->m_u.ether_spec.h_proto)
+		rule->filter.match_flags = IGC_FILTER_FLAG_DEFAULT_QUEUE;
 }
 
 /**
@@ -1424,8 +1447,6 @@ static int igc_ethtool_set_rxnfc(struct net_device *dev,
 	struct igc_adapter *adapter = netdev_priv(dev);
 
 	switch (cmd->cmd) {
-	case ETHTOOL_SRXFH:
-		return igc_ethtool_set_rss_hash_opt(adapter, cmd);
 	case ETHTOOL_SRXCLSRLINS:
 		return igc_ethtool_add_nfc_rule(adapter, cmd);
 	case ETHTOOL_SRXCLSRLDEL:
@@ -1540,6 +1561,10 @@ static int igc_ethtool_set_channels(struct net_device *netdev,
 	if (ch->other_count != NON_Q_VECTORS)
 		return -EINVAL;
 
+	/* Do not allow channel reconfiguration when mqprio is enabled */
+	if (adapter->strict_priority_enable)
+		return -EINVAL;
+
 	/* Verify the number of channels doesn't exceed hw limits */
 	max_combined = igc_get_max_rss_queues(adapter);
 	if (count > max_combined)
@@ -1559,21 +1584,17 @@ static int igc_ethtool_set_channels(struct net_device *netdev,
 }
 
 static int igc_ethtool_get_ts_info(struct net_device *dev,
-				   struct ethtool_ts_info *info)
+				   struct kernel_ethtool_ts_info *info)
 {
 	struct igc_adapter *adapter = netdev_priv(dev);
 
 	if (adapter->ptp_clock)
 		info->phc_index = ptp_clock_index(adapter->ptp_clock);
-	else
-		info->phc_index = -1;
 
 	switch (adapter->hw.mac.type) {
 	case igc_i225:
 		info->so_timestamping =
 			SOF_TIMESTAMPING_TX_SOFTWARE |
-			SOF_TIMESTAMPING_RX_SOFTWARE |
-			SOF_TIMESTAMPING_SOFTWARE |
 			SOF_TIMESTAMPING_TX_HARDWARE |
 			SOF_TIMESTAMPING_RX_HARDWARE |
 			SOF_TIMESTAMPING_RAW_HARDWARE;
@@ -1599,6 +1620,9 @@ static u32 igc_ethtool_get_priv_flags(struct net_device *netdev)
 	if (adapter->flags & IGC_FLAG_RX_LEGACY)
 		priv_flags |= IGC_PRIV_FLAGS_LEGACY_RX;
 
+	if (adapter->flags & IGC_FLAG_TSN_REVERSE_TXQ_PRIO)
+		priv_flags |= IGC_PRIV_FLAGS_REVERSE_TSN_TXQ_PRIO;
+
 	return priv_flags;
 }
 
@@ -1607,9 +1631,12 @@ static int igc_ethtool_set_priv_flags(struct net_device *netdev, u32 priv_flags)
 	struct igc_adapter *adapter = netdev_priv(netdev);
 	unsigned int flags = adapter->flags;
 
-	flags &= ~IGC_FLAG_RX_LEGACY;
+	flags &= ~(IGC_FLAG_RX_LEGACY | IGC_FLAG_TSN_REVERSE_TXQ_PRIO);
 	if (priv_flags & IGC_PRIV_FLAGS_LEGACY_RX)
 		flags |= IGC_FLAG_RX_LEGACY;
+
+	if (priv_flags & IGC_PRIV_FLAGS_REVERSE_TSN_TXQ_PRIO)
+		flags |= IGC_FLAG_TSN_REVERSE_TXQ_PRIO;
 
 	if (flags != adapter->flags) {
 		adapter->flags = flags;
@@ -1623,18 +1650,89 @@ static int igc_ethtool_set_priv_flags(struct net_device *netdev, u32 priv_flags)
 }
 
 static int igc_ethtool_get_eee(struct net_device *netdev,
-			       struct ethtool_eee *edata)
+			       struct ethtool_keee *edata)
 {
 	struct igc_adapter *adapter = netdev_priv(netdev);
 	struct igc_hw *hw = &adapter->hw;
-	u32 eeer;
+	struct igc_phy_info *phy = &hw->phy;
+	u16 eee_advert, eee_lp_advert;
+	u32 eeer, ret_val;
 
-	if (hw->dev_spec._base.eee_enable)
-		edata->advertised =
-			mmd_eee_adv_to_ethtool_adv_t(adapter->eee_advert);
+	/* EEE supported */
+	linkmode_set_bit(ETHTOOL_LINK_MODE_2500baseT_Full_BIT,
+			 edata->supported);
+	linkmode_set_bit(ETHTOOL_LINK_MODE_1000baseT_Full_BIT,
+			 edata->supported);
+	linkmode_set_bit(ETHTOOL_LINK_MODE_100baseT_Full_BIT,
+			 edata->supported);
 
-	*edata = adapter->eee;
-	edata->supported = SUPPORTED_Autoneg;
+	/* EEE Advertisement 1 - reg 7.60 */
+	ret_val = phy->ops.read_reg(hw, (STANDARD_AN_REG_MASK <<
+				    MMD_DEVADDR_SHIFT) |
+				    IGC_ANEG_EEE_AB1,
+				    &eee_advert);
+	if (ret_val) {
+		netdev_err(adapter->netdev,
+			   "Failed to read IEEE 7.60 register\n");
+		return -EINVAL;
+	}
+
+	if (eee_advert & IGC_EEE_1000BT_MASK)
+		linkmode_set_bit(ETHTOOL_LINK_MODE_1000baseT_Full_BIT,
+				 edata->advertised);
+
+	if (eee_advert & IGC_EEE_100BT_MASK)
+		linkmode_set_bit(ETHTOOL_LINK_MODE_100baseT_Full_BIT,
+				 edata->advertised);
+
+	/* EEE Advertisement 2 - reg 7.62 */
+	ret_val = phy->ops.read_reg(hw, (STANDARD_AN_REG_MASK <<
+				    MMD_DEVADDR_SHIFT) |
+				    IGC_ANEG_EEE_AB2,
+				    &eee_advert);
+	if (ret_val) {
+		netdev_err(adapter->netdev,
+			   "Failed to read IEEE 7.62 register\n");
+		return -EINVAL;
+	}
+
+	if (eee_advert & IGC_EEE_2500BT_MASK)
+		linkmode_set_bit(ETHTOOL_LINK_MODE_2500baseT_Full_BIT,
+				 edata->advertised);
+
+	/* EEE Link-Partner Ability 1 - reg 7.61 */
+	ret_val = phy->ops.read_reg(hw, (STANDARD_AN_REG_MASK <<
+				    MMD_DEVADDR_SHIFT) |
+				    IGC_ANEG_EEE_LP_AB1,
+				    &eee_lp_advert);
+	if (ret_val) {
+		netdev_err(adapter->netdev,
+			   "Failed to read IEEE 7.61 register\n");
+		return -EINVAL;
+	}
+
+	if (eee_lp_advert & IGC_LP_EEE_1000BT_MASK)
+		linkmode_set_bit(ETHTOOL_LINK_MODE_1000baseT_Full_BIT,
+				 edata->lp_advertised);
+
+	if (eee_lp_advert & IGC_LP_EEE_100BT_MASK)
+		linkmode_set_bit(ETHTOOL_LINK_MODE_100baseT_Full_BIT,
+				 edata->lp_advertised);
+
+	/* EEE Link-Partner Ability 2 - reg 7.63 */
+	ret_val = phy->ops.read_reg(hw, (STANDARD_AN_REG_MASK <<
+				    MMD_DEVADDR_SHIFT) |
+				    IGC_ANEG_EEE_LP_AB2,
+				    &eee_lp_advert);
+	if (ret_val) {
+		netdev_err(adapter->netdev,
+			   "Failed to read IEEE 7.63 register\n");
+		return -EINVAL;
+	}
+
+	if (eee_lp_advert & IGC_LP_EEE_2500BT_MASK)
+		linkmode_set_bit(ETHTOOL_LINK_MODE_2500baseT_Full_BIT,
+				 edata->lp_advertised);
 
 	eeer = rd32(IGC_EEER);
 
@@ -1647,9 +1745,6 @@ static int igc_ethtool_get_eee(struct net_device *netdev,
 
 	edata->eee_enabled = hw->dev_spec._base.eee_enable;
 
-	edata->advertised = SUPPORTED_Autoneg;
-	edata->lp_advertised = SUPPORTED_Autoneg;
-
 	/* Report correct negotiated EEE status for devices that
 	 * wrongly report EEE at half-duplex
 	 */
@@ -1657,21 +1752,21 @@ static int igc_ethtool_get_eee(struct net_device *netdev,
 		edata->eee_enabled = false;
 		edata->eee_active = false;
 		edata->tx_lpi_enabled = false;
-		edata->advertised &= ~edata->advertised;
+		linkmode_zero(edata->advertised);
 	}
 
 	return 0;
 }
 
 static int igc_ethtool_set_eee(struct net_device *netdev,
-			       struct ethtool_eee *edata)
+			       struct ethtool_keee *edata)
 {
 	struct igc_adapter *adapter = netdev_priv(netdev);
 	struct igc_hw *hw = &adapter->hw;
-	struct ethtool_eee eee_curr;
+	struct ethtool_keee eee_curr;
 	s32 ret_val;
 
-	memset(&eee_curr, 0, sizeof(struct ethtool_eee));
+	memset(&eee_curr, 0, sizeof(struct ethtool_keee));
 
 	ret_val = igc_ethtool_get_eee(netdev, &eee_curr);
 	if (ret_val) {
@@ -1699,7 +1794,6 @@ static int igc_ethtool_set_eee(struct net_device *netdev,
 		return -EINVAL;
 	}
 
-	adapter->eee_advert = ethtool_adv_to_mmd_eee_adv_t(edata->advertised);
 	if (hw->dev_spec._base.eee_enable != edata->eee_enabled) {
 		hw->dev_spec._base.eee_enable = edata->eee_enabled;
 		adapter->flags |= IGC_FLAG_EEE;
@@ -1714,19 +1808,81 @@ static int igc_ethtool_set_eee(struct net_device *netdev,
 	return 0;
 }
 
-static int igc_ethtool_begin(struct net_device *netdev)
+static int igc_ethtool_get_mm(struct net_device *netdev,
+			      struct ethtool_mm_state *cmd)
 {
 	struct igc_adapter *adapter = netdev_priv(netdev);
+	struct igc_fpe_t *fpe = &adapter->fpe;
 
-	pm_runtime_get_sync(&adapter->pdev->dev);
+	ethtool_mmsv_get_mm(&fpe->mmsv, cmd);
+	cmd->tx_min_frag_size = fpe->tx_min_frag_size;
+	cmd->rx_min_frag_size = IGC_RX_MIN_FRAG_SIZE;
+
 	return 0;
 }
 
-static void igc_ethtool_complete(struct net_device *netdev)
+static int igc_ethtool_set_mm(struct net_device *netdev,
+			      struct ethtool_mm_cfg *cmd,
+			      struct netlink_ext_ack *extack)
 {
 	struct igc_adapter *adapter = netdev_priv(netdev);
+	struct igc_fpe_t *fpe = &adapter->fpe;
 
-	pm_runtime_put(&adapter->pdev->dev);
+	fpe->tx_min_frag_size = igc_fpe_get_supported_frag_size(cmd->tx_min_frag_size);
+	if (fpe->tx_min_frag_size != cmd->tx_min_frag_size)
+		NL_SET_ERR_MSG_MOD(extack,
+				   "tx-min-frag-size value set is unsupported. Rounded up to supported value (64, 128, 192, 256)");
+
+	if (fpe->mmsv.pmac_enabled != cmd->pmac_enabled) {
+		if (cmd->pmac_enabled)
+			static_branch_inc(&igc_fpe_enabled);
+		else
+			static_branch_dec(&igc_fpe_enabled);
+	}
+
+	ethtool_mmsv_set_mm(&fpe->mmsv, cmd);
+
+	return igc_tsn_offload_apply(adapter);
+}
+
+/**
+ * igc_ethtool_get_frame_ass_error - Get the frame assembly error count.
+ * @reg_value: Register value for IGC_PRMEXCPRCNT
+ * Return: The count of frame assembly errors.
+ */
+static u64 igc_ethtool_get_frame_ass_error(u32 reg_value)
+{
+	/* Out of order statistics */
+	u32 ooo_frame_cnt, ooo_frag_cnt;
+	u32 miss_frame_frag_cnt;
+
+	ooo_frame_cnt = FIELD_GET(IGC_PRMEXCPRCNT_OOO_FRAME_CNT, reg_value);
+	ooo_frag_cnt = FIELD_GET(IGC_PRMEXCPRCNT_OOO_FRAG_CNT, reg_value);
+	miss_frame_frag_cnt = FIELD_GET(IGC_PRMEXCPRCNT_MISS_FRAME_FRAG_CNT,
+					reg_value);
+
+	return ooo_frame_cnt + ooo_frag_cnt + miss_frame_frag_cnt;
+}
+
+static u64 igc_ethtool_get_frame_smd_error(u32 reg_value)
+{
+	return FIELD_GET(IGC_PRMEXCPRCNT_OOO_SMDC, reg_value);
+}
+
+static void igc_ethtool_get_mm_stats(struct net_device *dev,
+				     struct ethtool_mm_stats *stats)
+{
+	struct igc_adapter *adapter = netdev_priv(dev);
+	struct igc_hw *hw = &adapter->hw;
+	u32 reg_value;
+
+	reg_value = rd32(IGC_PRMEXCPRCNT);
+
+	stats->MACMergeFrameAssErrorCount = igc_ethtool_get_frame_ass_error(reg_value);
+	stats->MACMergeFrameSmdErrorCount = igc_ethtool_get_frame_smd_error(reg_value);
+	stats->MACMergeFrameAssOkCount = rd32(IGC_PRMPTDRCNT);
+	stats->MACMergeFragCountRx = rd32(IGC_PRMEVNTRCNT);
+	stats->MACMergeFragCountTx = rd32(IGC_PRMEVNTTCNT);
 }
 
 static int igc_ethtool_get_link_ksettings(struct net_device *netdev,
@@ -1769,11 +1925,8 @@ static int igc_ethtool_get_link_ksettings(struct net_device *netdev,
 		ethtool_link_ksettings_add_link_mode(cmd, advertising, 2500baseT_Full);
 
 	/* set autoneg settings */
-	if (hw->mac.autoneg == 1) {
-		ethtool_link_ksettings_add_link_mode(cmd, supported, Autoneg);
-		ethtool_link_ksettings_add_link_mode(cmd, advertising,
-						     Autoneg);
-	}
+	ethtool_link_ksettings_add_link_mode(cmd, supported, Autoneg);
+	ethtool_link_ksettings_add_link_mode(cmd, advertising, Autoneg);
 
 	/* Set pause flow control settings */
 	ethtool_link_ksettings_add_link_mode(cmd, supported, Pause);
@@ -1826,10 +1979,7 @@ static int igc_ethtool_get_link_ksettings(struct net_device *netdev,
 		cmd->base.duplex = DUPLEX_UNKNOWN;
 	}
 	cmd->base.speed = speed;
-	if (hw->mac.autoneg)
-		cmd->base.autoneg = AUTONEG_ENABLE;
-	else
-		cmd->base.autoneg = AUTONEG_DISABLE;
+	cmd->base.autoneg = AUTONEG_ENABLE;
 
 	/* MDI-X => 2; MDI =>1; Invalid =>0 */
 	if (hw->phy.media_type == igc_media_type_copper)
@@ -1903,7 +2053,6 @@ igc_ethtool_set_link_ksettings(struct net_device *netdev,
 		advertised |= ADVERTISE_10_HALF;
 
 	if (cmd->base.autoneg == AUTONEG_ENABLE) {
-		hw->mac.autoneg = 1;
 		hw->phy.autoneg_advertised = advertised;
 		if (adapter->fc_autoneg)
 			hw->fc.requested_mode = igc_fc_default;
@@ -2021,6 +2170,8 @@ static const struct ethtool_ops igc_ethtool_ops = {
 	.get_rxfh_indir_size	= igc_ethtool_get_rxfh_indir_size,
 	.get_rxfh		= igc_ethtool_get_rxfh,
 	.set_rxfh		= igc_ethtool_set_rxfh,
+	.get_rxfh_fields	= igc_ethtool_get_rxfh_fields,
+	.set_rxfh_fields	= igc_ethtool_set_rxfh_fields,
 	.get_ts_info		= igc_ethtool_get_ts_info,
 	.get_channels		= igc_ethtool_get_channels,
 	.set_channels		= igc_ethtool_set_channels,
@@ -2028,11 +2179,12 @@ static const struct ethtool_ops igc_ethtool_ops = {
 	.set_priv_flags		= igc_ethtool_set_priv_flags,
 	.get_eee		= igc_ethtool_get_eee,
 	.set_eee		= igc_ethtool_set_eee,
-	.begin			= igc_ethtool_begin,
-	.complete		= igc_ethtool_complete,
 	.get_link_ksettings	= igc_ethtool_get_link_ksettings,
 	.set_link_ksettings	= igc_ethtool_set_link_ksettings,
 	.self_test		= igc_ethtool_diag_test,
+	.get_mm			= igc_ethtool_get_mm,
+	.get_mm_stats		= igc_ethtool_get_mm_stats,
+	.set_mm			= igc_ethtool_set_mm,
 };
 
 void igc_ethtool_set_ops(struct net_device *netdev)

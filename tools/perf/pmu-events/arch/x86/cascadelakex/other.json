@@ -1,6 +1,7 @@
 [
     {
         "BriefDescription": "Core cycles where the core was running in a manner where Turbo may be clipped to the Non-AVX turbo schedule.",
+        "Counter": "0,1,2,3",
         "EventCode": "0x28",
         "EventName": "CORE_POWER.LVL0_TURBO_LICENSE",
         "PublicDescription": "Core cycles where the core was running with power-delivery for baseline license level 0.  This includes non-AVX codes, SSE, AVX 128-bit, and low-current AVX 256-bit codes.",
@@ -9,6 +10,7 @@
     },
     {
         "BriefDescription": "Core cycles where the core was running in a manner where Turbo may be clipped to the AVX2 turbo schedule.",
+        "Counter": "0,1,2,3",
         "EventCode": "0x28",
         "EventName": "CORE_POWER.LVL1_TURBO_LICENSE",
         "PublicDescription": "Core cycles where the core was running with power-delivery for license level 1.  This includes high current AVX 256-bit instructions as well as low current AVX 512-bit instructions.",
@@ -17,14 +19,16 @@
     },
     {
         "BriefDescription": "Core cycles where the core was running in a manner where Turbo may be clipped to the AVX512 turbo schedule.",
+        "Counter": "0,1,2,3",
         "EventCode": "0x28",
         "EventName": "CORE_POWER.LVL2_TURBO_LICENSE",
-        "PublicDescription": "Core cycles where the core was running with power-delivery for license level 2 (introduced in Skylake Server michroarchtecture).  This includes high current AVX 512-bit instructions.",
+        "PublicDescription": "Core cycles where the core was running with power-delivery for license level 2 (introduced in Skylake Server microarchitecture).  This includes high current AVX 512-bit instructions.",
         "SampleAfterValue": "200003",
         "UMask": "0x20"
     },
     {
         "BriefDescription": "Core cycles the core was throttled due to a pending power level request.",
+        "Counter": "0,1,2,3",
         "EventCode": "0x28",
         "EventName": "CORE_POWER.THROTTLE",
         "PublicDescription": "Core cycles the out-of-order engine was throttled due to a pending power level request.",
@@ -32,56 +36,8 @@
         "UMask": "0x40"
     },
     {
-        "BriefDescription": "CORE_SNOOP_RESPONSE.RSP_IFWDFE",
-        "EventCode": "0xEF",
-        "EventName": "CORE_SNOOP_RESPONSE.RSP_IFWDFE",
-        "SampleAfterValue": "2000003",
-        "UMask": "0x20"
-    },
-    {
-        "BriefDescription": "CORE_SNOOP_RESPONSE.RSP_IFWDM",
-        "EventCode": "0xEF",
-        "EventName": "CORE_SNOOP_RESPONSE.RSP_IFWDM",
-        "SampleAfterValue": "2000003",
-        "UMask": "0x10"
-    },
-    {
-        "BriefDescription": "CORE_SNOOP_RESPONSE.RSP_IHITFSE",
-        "EventCode": "0xEF",
-        "EventName": "CORE_SNOOP_RESPONSE.RSP_IHITFSE",
-        "SampleAfterValue": "2000003",
-        "UMask": "0x2"
-    },
-    {
-        "BriefDescription": "CORE_SNOOP_RESPONSE.RSP_IHITI",
-        "EventCode": "0xEF",
-        "EventName": "CORE_SNOOP_RESPONSE.RSP_IHITI",
-        "SampleAfterValue": "2000003",
-        "UMask": "0x1"
-    },
-    {
-        "BriefDescription": "CORE_SNOOP_RESPONSE.RSP_SFWDFE",
-        "EventCode": "0xEF",
-        "EventName": "CORE_SNOOP_RESPONSE.RSP_SFWDFE",
-        "SampleAfterValue": "2000003",
-        "UMask": "0x40"
-    },
-    {
-        "BriefDescription": "CORE_SNOOP_RESPONSE.RSP_SFWDM",
-        "EventCode": "0xEF",
-        "EventName": "CORE_SNOOP_RESPONSE.RSP_SFWDM",
-        "SampleAfterValue": "2000003",
-        "UMask": "0x8"
-    },
-    {
-        "BriefDescription": "CORE_SNOOP_RESPONSE.RSP_SHITFSE",
-        "EventCode": "0xEF",
-        "EventName": "CORE_SNOOP_RESPONSE.RSP_SHITFSE",
-        "SampleAfterValue": "2000003",
-        "UMask": "0x4"
-    },
-    {
         "BriefDescription": "Number of hardware interrupts received by the processor.",
+        "Counter": "0,1,2,3",
         "EventCode": "0xCB",
         "EventName": "HW_INTERRUPTS.RECEIVED",
         "PublicDescription": "Counts the number of hardware interruptions received by the processor.",
@@ -89,23 +45,8 @@
         "UMask": "0x1"
     },
     {
-        "BriefDescription": "Counts number of cache lines that are dropped and not written back to L3 as they are deemed to be less likely to be reused shortly",
-        "EventCode": "0xFE",
-        "EventName": "IDI_MISC.WB_DOWNGRADE",
-        "PublicDescription": "Counts number of cache lines that are dropped and not written back to L3 as they are deemed to be less likely to be reused shortly.",
-        "SampleAfterValue": "100003",
-        "UMask": "0x4"
-    },
-    {
-        "BriefDescription": "Counts number of cache lines that are allocated and written back to L3 with the intention that they are more likely to be reused shortly",
-        "EventCode": "0xFE",
-        "EventName": "IDI_MISC.WB_UPGRADE",
-        "PublicDescription": "Counts number of cache lines that are allocated and written back to L3 with the intention that they are more likely to be reused shortly.",
-        "SampleAfterValue": "100003",
-        "UMask": "0x2"
-    },
-    {
         "BriefDescription": "OCR.ALL_DATA_RD.ANY_RESPONSE have any response type.",
+        "Counter": "0,1,2,3",
         "EventCode": "0xB7, 0xBB",
         "EventName": "OCR.ALL_DATA_RD.ANY_RESPONSE",
         "MSRIndex": "0x1a6,0x1a7",
@@ -115,6 +56,7 @@
     },
     {
         "BriefDescription": "OCR.ALL_DATA_RD.PMM_HIT_LOCAL_PMM.ANY_SNOOP OCR.ALL_DATA_RD.PMM_HIT_LOCAL_PMM.ANY_SNOOP",
+        "Counter": "0,1,2,3",
         "EventCode": "0xB7, 0xBB",
         "EventName": "OCR.ALL_DATA_RD.PMM_HIT_LOCAL_PMM.ANY_SNOOP",
         "MSRIndex": "0x1a6,0x1a7",
@@ -124,6 +66,7 @@
     },
     {
         "BriefDescription": "OCR.ALL_DATA_RD.PMM_HIT_LOCAL_PMM.SNOOP_NONE OCR.ALL_DATA_RD.PMM_HIT_LOCAL_PMM.SNOOP_NONE",
+        "Counter": "0,1,2,3",
         "EventCode": "0xB7, 0xBB",
         "EventName": "OCR.ALL_DATA_RD.PMM_HIT_LOCAL_PMM.SNOOP_NONE",
         "MSRIndex": "0x1a6,0x1a7",
@@ -133,6 +76,7 @@
     },
     {
         "BriefDescription": "OCR.ALL_DATA_RD.PMM_HIT_LOCAL_PMM.SNOOP_NOT_NEEDED OCR.ALL_DATA_RD.PMM_HIT_LOCAL_PMM.SNOOP_NOT_NEEDED",
+        "Counter": "0,1,2,3",
         "EventCode": "0xB7, 0xBB",
         "EventName": "OCR.ALL_DATA_RD.PMM_HIT_LOCAL_PMM.SNOOP_NOT_NEEDED",
         "MSRIndex": "0x1a6,0x1a7",
@@ -142,6 +86,7 @@
     },
     {
         "BriefDescription": "OCR.ALL_DATA_RD.SUPPLIER_NONE.ANY_SNOOP  OCR.ALL_DATA_RD.SUPPLIER_NONE.ANY_SNOOP",
+        "Counter": "0,1,2,3",
         "EventCode": "0xB7, 0xBB",
         "EventName": "OCR.ALL_DATA_RD.SUPPLIER_NONE.ANY_SNOOP",
         "MSRIndex": "0x1a6,0x1a7",
@@ -151,6 +96,7 @@
     },
     {
         "BriefDescription": "OCR.ALL_DATA_RD.SUPPLIER_NONE.HITM_OTHER_CORE  OCR.ALL_DATA_RD.SUPPLIER_NONE.HITM_OTHER_CORE",
+        "Counter": "0,1,2,3",
         "EventCode": "0xB7, 0xBB",
         "EventName": "OCR.ALL_DATA_RD.SUPPLIER_NONE.HITM_OTHER_CORE",
         "MSRIndex": "0x1a6,0x1a7",
@@ -160,6 +106,7 @@
     },
     {
         "BriefDescription": "OCR.ALL_DATA_RD.SUPPLIER_NONE.HIT_OTHER_CORE_FWD  OCR.ALL_DATA_RD.SUPPLIER_NONE.HIT_OTHER_CORE_FWD",
+        "Counter": "0,1,2,3",
         "EventCode": "0xB7, 0xBB",
         "EventName": "OCR.ALL_DATA_RD.SUPPLIER_NONE.HIT_OTHER_CORE_FWD",
         "MSRIndex": "0x1a6,0x1a7",
@@ -169,6 +116,7 @@
     },
     {
         "BriefDescription": "OCR.ALL_DATA_RD.SUPPLIER_NONE.HIT_OTHER_CORE_NO_FWD  OCR.ALL_DATA_RD.SUPPLIER_NONE.HIT_OTHER_CORE_NO_FWD",
+        "Counter": "0,1,2,3",
         "EventCode": "0xB7, 0xBB",
         "EventName": "OCR.ALL_DATA_RD.SUPPLIER_NONE.HIT_OTHER_CORE_NO_FWD",
         "MSRIndex": "0x1a6,0x1a7",
@@ -178,6 +126,7 @@
     },
     {
         "BriefDescription": "OCR.ALL_DATA_RD.SUPPLIER_NONE.NO_SNOOP_NEEDED  OCR.ALL_DATA_RD.SUPPLIER_NONE.NO_SNOOP_NEEDED",
+        "Counter": "0,1,2,3",
         "EventCode": "0xB7, 0xBB",
         "EventName": "OCR.ALL_DATA_RD.SUPPLIER_NONE.NO_SNOOP_NEEDED",
         "MSRIndex": "0x1a6,0x1a7",
@@ -187,6 +136,7 @@
     },
     {
         "BriefDescription": "OCR.ALL_DATA_RD.SUPPLIER_NONE.SNOOP_MISS",
+        "Counter": "0,1,2,3",
         "EventCode": "0xB7, 0xBB",
         "EventName": "OCR.ALL_DATA_RD.SUPPLIER_NONE.SNOOP_MISS",
         "MSRIndex": "0x1a6,0x1a7",
@@ -196,6 +146,7 @@
     },
     {
         "BriefDescription": "OCR.ALL_DATA_RD.SUPPLIER_NONE.SNOOP_NONE",
+        "Counter": "0,1,2,3",
         "EventCode": "0xB7, 0xBB",
         "EventName": "OCR.ALL_DATA_RD.SUPPLIER_NONE.SNOOP_NONE",
         "MSRIndex": "0x1a6,0x1a7",
@@ -205,6 +156,7 @@
     },
     {
         "BriefDescription": "OCR.ALL_PF_DATA_RD.ANY_RESPONSE have any response type.",
+        "Counter": "0,1,2,3",
         "EventCode": "0xB7, 0xBB",
         "EventName": "OCR.ALL_PF_DATA_RD.ANY_RESPONSE",
         "MSRIndex": "0x1a6,0x1a7",
@@ -214,6 +166,7 @@
     },
     {
         "BriefDescription": "OCR.ALL_PF_DATA_RD.PMM_HIT_LOCAL_PMM.ANY_SNOOP OCR.ALL_PF_DATA_RD.PMM_HIT_LOCAL_PMM.ANY_SNOOP",
+        "Counter": "0,1,2,3",
         "EventCode": "0xB7, 0xBB",
         "EventName": "OCR.ALL_PF_DATA_RD.PMM_HIT_LOCAL_PMM.ANY_SNOOP",
         "MSRIndex": "0x1a6,0x1a7",
@@ -223,6 +176,7 @@
     },
     {
         "BriefDescription": "OCR.ALL_PF_DATA_RD.PMM_HIT_LOCAL_PMM.SNOOP_NONE OCR.ALL_PF_DATA_RD.PMM_HIT_LOCAL_PMM.SNOOP_NONE",
+        "Counter": "0,1,2,3",
         "EventCode": "0xB7, 0xBB",
         "EventName": "OCR.ALL_PF_DATA_RD.PMM_HIT_LOCAL_PMM.SNOOP_NONE",
         "MSRIndex": "0x1a6,0x1a7",
@@ -232,6 +186,7 @@
     },
     {
         "BriefDescription": "OCR.ALL_PF_DATA_RD.PMM_HIT_LOCAL_PMM.SNOOP_NOT_NEEDED OCR.ALL_PF_DATA_RD.PMM_HIT_LOCAL_PMM.SNOOP_NOT_NEEDED",
+        "Counter": "0,1,2,3",
         "EventCode": "0xB7, 0xBB",
         "EventName": "OCR.ALL_PF_DATA_RD.PMM_HIT_LOCAL_PMM.SNOOP_NOT_NEEDED",
         "MSRIndex": "0x1a6,0x1a7",
@@ -241,6 +196,7 @@
     },
     {
         "BriefDescription": "OCR.ALL_PF_DATA_RD.SUPPLIER_NONE.ANY_SNOOP  OCR.ALL_PF_DATA_RD.SUPPLIER_NONE.ANY_SNOOP",
+        "Counter": "0,1,2,3",
         "EventCode": "0xB7, 0xBB",
         "EventName": "OCR.ALL_PF_DATA_RD.SUPPLIER_NONE.ANY_SNOOP",
         "MSRIndex": "0x1a6,0x1a7",
@@ -250,6 +206,7 @@
     },
     {
         "BriefDescription": "OCR.ALL_PF_DATA_RD.SUPPLIER_NONE.HITM_OTHER_CORE  OCR.ALL_PF_DATA_RD.SUPPLIER_NONE.HITM_OTHER_CORE",
+        "Counter": "0,1,2,3",
         "EventCode": "0xB7, 0xBB",
         "EventName": "OCR.ALL_PF_DATA_RD.SUPPLIER_NONE.HITM_OTHER_CORE",
         "MSRIndex": "0x1a6,0x1a7",
@@ -259,6 +216,7 @@
     },
     {
         "BriefDescription": "OCR.ALL_PF_DATA_RD.SUPPLIER_NONE.HIT_OTHER_CORE_FWD  OCR.ALL_PF_DATA_RD.SUPPLIER_NONE.HIT_OTHER_CORE_FWD",
+        "Counter": "0,1,2,3",
         "EventCode": "0xB7, 0xBB",
         "EventName": "OCR.ALL_PF_DATA_RD.SUPPLIER_NONE.HIT_OTHER_CORE_FWD",
         "MSRIndex": "0x1a6,0x1a7",
@@ -268,6 +226,7 @@
     },
     {
         "BriefDescription": "OCR.ALL_PF_DATA_RD.SUPPLIER_NONE.HIT_OTHER_CORE_NO_FWD  OCR.ALL_PF_DATA_RD.SUPPLIER_NONE.HIT_OTHER_CORE_NO_FWD",
+        "Counter": "0,1,2,3",
         "EventCode": "0xB7, 0xBB",
         "EventName": "OCR.ALL_PF_DATA_RD.SUPPLIER_NONE.HIT_OTHER_CORE_NO_FWD",
         "MSRIndex": "0x1a6,0x1a7",
@@ -277,6 +236,7 @@
     },
     {
         "BriefDescription": "OCR.ALL_PF_DATA_RD.SUPPLIER_NONE.NO_SNOOP_NEEDED  OCR.ALL_PF_DATA_RD.SUPPLIER_NONE.NO_SNOOP_NEEDED",
+        "Counter": "0,1,2,3",
         "EventCode": "0xB7, 0xBB",
         "EventName": "OCR.ALL_PF_DATA_RD.SUPPLIER_NONE.NO_SNOOP_NEEDED",
         "MSRIndex": "0x1a6,0x1a7",
@@ -286,6 +246,7 @@
     },
     {
         "BriefDescription": "OCR.ALL_PF_DATA_RD.SUPPLIER_NONE.SNOOP_MISS",
+        "Counter": "0,1,2,3",
         "EventCode": "0xB7, 0xBB",
         "EventName": "OCR.ALL_PF_DATA_RD.SUPPLIER_NONE.SNOOP_MISS",
         "MSRIndex": "0x1a6,0x1a7",
@@ -295,6 +256,7 @@
     },
     {
         "BriefDescription": "OCR.ALL_PF_DATA_RD.SUPPLIER_NONE.SNOOP_NONE",
+        "Counter": "0,1,2,3",
         "EventCode": "0xB7, 0xBB",
         "EventName": "OCR.ALL_PF_DATA_RD.SUPPLIER_NONE.SNOOP_NONE",
         "MSRIndex": "0x1a6,0x1a7",
@@ -304,6 +266,7 @@
     },
     {
         "BriefDescription": "OCR.ALL_PF_RFO.ANY_RESPONSE have any response type.",
+        "Counter": "0,1,2,3",
         "EventCode": "0xB7, 0xBB",
         "EventName": "OCR.ALL_PF_RFO.ANY_RESPONSE",
         "MSRIndex": "0x1a6,0x1a7",
@@ -313,6 +276,7 @@
     },
     {
         "BriefDescription": "OCR.ALL_PF_RFO.PMM_HIT_LOCAL_PMM.ANY_SNOOP OCR.ALL_PF_RFO.PMM_HIT_LOCAL_PMM.ANY_SNOOP",
+        "Counter": "0,1,2,3",
         "EventCode": "0xB7, 0xBB",
         "EventName": "OCR.ALL_PF_RFO.PMM_HIT_LOCAL_PMM.ANY_SNOOP",
         "MSRIndex": "0x1a6,0x1a7",
@@ -322,6 +286,7 @@
     },
     {
         "BriefDescription": "OCR.ALL_PF_RFO.PMM_HIT_LOCAL_PMM.SNOOP_NONE OCR.ALL_PF_RFO.PMM_HIT_LOCAL_PMM.SNOOP_NONE",
+        "Counter": "0,1,2,3",
         "EventCode": "0xB7, 0xBB",
         "EventName": "OCR.ALL_PF_RFO.PMM_HIT_LOCAL_PMM.SNOOP_NONE",
         "MSRIndex": "0x1a6,0x1a7",
@@ -331,6 +296,7 @@
     },
     {
         "BriefDescription": "OCR.ALL_PF_RFO.PMM_HIT_LOCAL_PMM.SNOOP_NOT_NEEDED OCR.ALL_PF_RFO.PMM_HIT_LOCAL_PMM.SNOOP_NOT_NEEDED",
+        "Counter": "0,1,2,3",
         "EventCode": "0xB7, 0xBB",
         "EventName": "OCR.ALL_PF_RFO.PMM_HIT_LOCAL_PMM.SNOOP_NOT_NEEDED",
         "MSRIndex": "0x1a6,0x1a7",
@@ -340,6 +306,7 @@
     },
     {
         "BriefDescription": "OCR.ALL_PF_RFO.SUPPLIER_NONE.ANY_SNOOP  OCR.ALL_PF_RFO.SUPPLIER_NONE.ANY_SNOOP",
+        "Counter": "0,1,2,3",
         "EventCode": "0xB7, 0xBB",
         "EventName": "OCR.ALL_PF_RFO.SUPPLIER_NONE.ANY_SNOOP",
         "MSRIndex": "0x1a6,0x1a7",
@@ -349,6 +316,7 @@
     },
     {
         "BriefDescription": "OCR.ALL_PF_RFO.SUPPLIER_NONE.HITM_OTHER_CORE  OCR.ALL_PF_RFO.SUPPLIER_NONE.HITM_OTHER_CORE",
+        "Counter": "0,1,2,3",
         "EventCode": "0xB7, 0xBB",
         "EventName": "OCR.ALL_PF_RFO.SUPPLIER_NONE.HITM_OTHER_CORE",
         "MSRIndex": "0x1a6,0x1a7",
@@ -358,6 +326,7 @@
     },
     {
         "BriefDescription": "OCR.ALL_PF_RFO.SUPPLIER_NONE.HIT_OTHER_CORE_FWD  OCR.ALL_PF_RFO.SUPPLIER_NONE.HIT_OTHER_CORE_FWD",
+        "Counter": "0,1,2,3",
         "EventCode": "0xB7, 0xBB",
         "EventName": "OCR.ALL_PF_RFO.SUPPLIER_NONE.HIT_OTHER_CORE_FWD",
         "MSRIndex": "0x1a6,0x1a7",
@@ -367,6 +336,7 @@
     },
     {
         "BriefDescription": "OCR.ALL_PF_RFO.SUPPLIER_NONE.HIT_OTHER_CORE_NO_FWD  OCR.ALL_PF_RFO.SUPPLIER_NONE.HIT_OTHER_CORE_NO_FWD",
+        "Counter": "0,1,2,3",
         "EventCode": "0xB7, 0xBB",
         "EventName": "OCR.ALL_PF_RFO.SUPPLIER_NONE.HIT_OTHER_CORE_NO_FWD",
         "MSRIndex": "0x1a6,0x1a7",
@@ -376,6 +346,7 @@
     },
     {
         "BriefDescription": "OCR.ALL_PF_RFO.SUPPLIER_NONE.NO_SNOOP_NEEDED  OCR.ALL_PF_RFO.SUPPLIER_NONE.NO_SNOOP_NEEDED",
+        "Counter": "0,1,2,3",
         "EventCode": "0xB7, 0xBB",
         "EventName": "OCR.ALL_PF_RFO.SUPPLIER_NONE.NO_SNOOP_NEEDED",
         "MSRIndex": "0x1a6,0x1a7",
@@ -385,6 +356,7 @@
     },
     {
         "BriefDescription": "OCR.ALL_PF_RFO.SUPPLIER_NONE.SNOOP_MISS",
+        "Counter": "0,1,2,3",
         "EventCode": "0xB7, 0xBB",
         "EventName": "OCR.ALL_PF_RFO.SUPPLIER_NONE.SNOOP_MISS",
         "MSRIndex": "0x1a6,0x1a7",
@@ -394,6 +366,7 @@
     },
     {
         "BriefDescription": "OCR.ALL_PF_RFO.SUPPLIER_NONE.SNOOP_NONE",
+        "Counter": "0,1,2,3",
         "EventCode": "0xB7, 0xBB",
         "EventName": "OCR.ALL_PF_RFO.SUPPLIER_NONE.SNOOP_NONE",
         "MSRIndex": "0x1a6,0x1a7",
@@ -403,6 +376,7 @@
     },
     {
         "BriefDescription": "OCR.ALL_READS.ANY_RESPONSE have any response type.",
+        "Counter": "0,1,2,3",
         "EventCode": "0xB7, 0xBB",
         "EventName": "OCR.ALL_READS.ANY_RESPONSE",
         "MSRIndex": "0x1a6,0x1a7",
@@ -412,6 +386,7 @@
     },
     {
         "BriefDescription": "OCR.ALL_READS.PMM_HIT_LOCAL_PMM.ANY_SNOOP OCR.ALL_READS.PMM_HIT_LOCAL_PMM.ANY_SNOOP",
+        "Counter": "0,1,2,3",
         "EventCode": "0xB7, 0xBB",
         "EventName": "OCR.ALL_READS.PMM_HIT_LOCAL_PMM.ANY_SNOOP",
         "MSRIndex": "0x1a6,0x1a7",
@@ -421,6 +396,7 @@
     },
     {
         "BriefDescription": "OCR.ALL_READS.PMM_HIT_LOCAL_PMM.SNOOP_NONE OCR.ALL_READS.PMM_HIT_LOCAL_PMM.SNOOP_NONE",
+        "Counter": "0,1,2,3",
         "EventCode": "0xB7, 0xBB",
         "EventName": "OCR.ALL_READS.PMM_HIT_LOCAL_PMM.SNOOP_NONE",
         "MSRIndex": "0x1a6,0x1a7",
@@ -430,6 +406,7 @@
     },
     {
         "BriefDescription": "OCR.ALL_READS.PMM_HIT_LOCAL_PMM.SNOOP_NOT_NEEDED OCR.ALL_READS.PMM_HIT_LOCAL_PMM.SNOOP_NOT_NEEDED",
+        "Counter": "0,1,2,3",
         "EventCode": "0xB7, 0xBB",
         "EventName": "OCR.ALL_READS.PMM_HIT_LOCAL_PMM.SNOOP_NOT_NEEDED",
         "MSRIndex": "0x1a6,0x1a7",
@@ -439,6 +416,7 @@
     },
     {
         "BriefDescription": "OCR.ALL_READS.SUPPLIER_NONE.ANY_SNOOP  OCR.ALL_READS.SUPPLIER_NONE.ANY_SNOOP",
+        "Counter": "0,1,2,3",
         "EventCode": "0xB7, 0xBB",
         "EventName": "OCR.ALL_READS.SUPPLIER_NONE.ANY_SNOOP",
         "MSRIndex": "0x1a6,0x1a7",
@@ -448,6 +426,7 @@
     },
     {
         "BriefDescription": "OCR.ALL_READS.SUPPLIER_NONE.HITM_OTHER_CORE  OCR.ALL_READS.SUPPLIER_NONE.HITM_OTHER_CORE",
+        "Counter": "0,1,2,3",
         "EventCode": "0xB7, 0xBB",
         "EventName": "OCR.ALL_READS.SUPPLIER_NONE.HITM_OTHER_CORE",
         "MSRIndex": "0x1a6,0x1a7",
@@ -457,6 +436,7 @@
     },
     {
         "BriefDescription": "OCR.ALL_READS.SUPPLIER_NONE.HIT_OTHER_CORE_FWD  OCR.ALL_READS.SUPPLIER_NONE.HIT_OTHER_CORE_FWD",
+        "Counter": "0,1,2,3",
         "EventCode": "0xB7, 0xBB",
         "EventName": "OCR.ALL_READS.SUPPLIER_NONE.HIT_OTHER_CORE_FWD",
         "MSRIndex": "0x1a6,0x1a7",
@@ -466,6 +446,7 @@
     },
     {
         "BriefDescription": "OCR.ALL_READS.SUPPLIER_NONE.HIT_OTHER_CORE_NO_FWD  OCR.ALL_READS.SUPPLIER_NONE.HIT_OTHER_CORE_NO_FWD",
+        "Counter": "0,1,2,3",
         "EventCode": "0xB7, 0xBB",
         "EventName": "OCR.ALL_READS.SUPPLIER_NONE.HIT_OTHER_CORE_NO_FWD",
         "MSRIndex": "0x1a6,0x1a7",
@@ -475,6 +456,7 @@
     },
     {
         "BriefDescription": "OCR.ALL_READS.SUPPLIER_NONE.NO_SNOOP_NEEDED  OCR.ALL_READS.SUPPLIER_NONE.NO_SNOOP_NEEDED",
+        "Counter": "0,1,2,3",
         "EventCode": "0xB7, 0xBB",
         "EventName": "OCR.ALL_READS.SUPPLIER_NONE.NO_SNOOP_NEEDED",
         "MSRIndex": "0x1a6,0x1a7",
@@ -484,6 +466,7 @@
     },
     {
         "BriefDescription": "OCR.ALL_READS.SUPPLIER_NONE.SNOOP_MISS",
+        "Counter": "0,1,2,3",
         "EventCode": "0xB7, 0xBB",
         "EventName": "OCR.ALL_READS.SUPPLIER_NONE.SNOOP_MISS",
         "MSRIndex": "0x1a6,0x1a7",
@@ -493,6 +476,7 @@
     },
     {
         "BriefDescription": "OCR.ALL_READS.SUPPLIER_NONE.SNOOP_NONE",
+        "Counter": "0,1,2,3",
         "EventCode": "0xB7, 0xBB",
         "EventName": "OCR.ALL_READS.SUPPLIER_NONE.SNOOP_NONE",
         "MSRIndex": "0x1a6,0x1a7",
@@ -502,6 +486,7 @@
     },
     {
         "BriefDescription": "OCR.ALL_RFO.ANY_RESPONSE have any response type.",
+        "Counter": "0,1,2,3",
         "EventCode": "0xB7, 0xBB",
         "EventName": "OCR.ALL_RFO.ANY_RESPONSE",
         "MSRIndex": "0x1a6,0x1a7",
@@ -511,6 +496,7 @@
     },
     {
         "BriefDescription": "OCR.ALL_RFO.PMM_HIT_LOCAL_PMM.ANY_SNOOP OCR.ALL_RFO.PMM_HIT_LOCAL_PMM.ANY_SNOOP",
+        "Counter": "0,1,2,3",
         "EventCode": "0xB7, 0xBB",
         "EventName": "OCR.ALL_RFO.PMM_HIT_LOCAL_PMM.ANY_SNOOP",
         "MSRIndex": "0x1a6,0x1a7",
@@ -520,6 +506,7 @@
     },
     {
         "BriefDescription": "OCR.ALL_RFO.PMM_HIT_LOCAL_PMM.SNOOP_NONE OCR.ALL_RFO.PMM_HIT_LOCAL_PMM.SNOOP_NONE",
+        "Counter": "0,1,2,3",
         "EventCode": "0xB7, 0xBB",
         "EventName": "OCR.ALL_RFO.PMM_HIT_LOCAL_PMM.SNOOP_NONE",
         "MSRIndex": "0x1a6,0x1a7",
@@ -529,6 +516,7 @@
     },
     {
         "BriefDescription": "OCR.ALL_RFO.PMM_HIT_LOCAL_PMM.SNOOP_NOT_NEEDED OCR.ALL_RFO.PMM_HIT_LOCAL_PMM.SNOOP_NOT_NEEDED",
+        "Counter": "0,1,2,3",
         "EventCode": "0xB7, 0xBB",
         "EventName": "OCR.ALL_RFO.PMM_HIT_LOCAL_PMM.SNOOP_NOT_NEEDED",
         "MSRIndex": "0x1a6,0x1a7",
@@ -538,6 +526,7 @@
     },
     {
         "BriefDescription": "OCR.ALL_RFO.SUPPLIER_NONE.ANY_SNOOP  OCR.ALL_RFO.SUPPLIER_NONE.ANY_SNOOP",
+        "Counter": "0,1,2,3",
         "EventCode": "0xB7, 0xBB",
         "EventName": "OCR.ALL_RFO.SUPPLIER_NONE.ANY_SNOOP",
         "MSRIndex": "0x1a6,0x1a7",
@@ -547,6 +536,7 @@
     },
     {
         "BriefDescription": "OCR.ALL_RFO.SUPPLIER_NONE.HITM_OTHER_CORE  OCR.ALL_RFO.SUPPLIER_NONE.HITM_OTHER_CORE",
+        "Counter": "0,1,2,3",
         "EventCode": "0xB7, 0xBB",
         "EventName": "OCR.ALL_RFO.SUPPLIER_NONE.HITM_OTHER_CORE",
         "MSRIndex": "0x1a6,0x1a7",
@@ -556,6 +546,7 @@
     },
     {
         "BriefDescription": "OCR.ALL_RFO.SUPPLIER_NONE.HIT_OTHER_CORE_FWD  OCR.ALL_RFO.SUPPLIER_NONE.HIT_OTHER_CORE_FWD",
+        "Counter": "0,1,2,3",
         "EventCode": "0xB7, 0xBB",
         "EventName": "OCR.ALL_RFO.SUPPLIER_NONE.HIT_OTHER_CORE_FWD",
         "MSRIndex": "0x1a6,0x1a7",
@@ -565,6 +556,7 @@
     },
     {
         "BriefDescription": "OCR.ALL_RFO.SUPPLIER_NONE.HIT_OTHER_CORE_NO_FWD  OCR.ALL_RFO.SUPPLIER_NONE.HIT_OTHER_CORE_NO_FWD",
+        "Counter": "0,1,2,3",
         "EventCode": "0xB7, 0xBB",
         "EventName": "OCR.ALL_RFO.SUPPLIER_NONE.HIT_OTHER_CORE_NO_FWD",
         "MSRIndex": "0x1a6,0x1a7",
@@ -574,6 +566,7 @@
     },
     {
         "BriefDescription": "OCR.ALL_RFO.SUPPLIER_NONE.NO_SNOOP_NEEDED  OCR.ALL_RFO.SUPPLIER_NONE.NO_SNOOP_NEEDED",
+        "Counter": "0,1,2,3",
         "EventCode": "0xB7, 0xBB",
         "EventName": "OCR.ALL_RFO.SUPPLIER_NONE.NO_SNOOP_NEEDED",
         "MSRIndex": "0x1a6,0x1a7",
@@ -583,6 +576,7 @@
     },
     {
         "BriefDescription": "OCR.ALL_RFO.SUPPLIER_NONE.SNOOP_MISS",
+        "Counter": "0,1,2,3",
         "EventCode": "0xB7, 0xBB",
         "EventName": "OCR.ALL_RFO.SUPPLIER_NONE.SNOOP_MISS",
         "MSRIndex": "0x1a6,0x1a7",
@@ -592,6 +586,7 @@
     },
     {
         "BriefDescription": "OCR.ALL_RFO.SUPPLIER_NONE.SNOOP_NONE",
+        "Counter": "0,1,2,3",
         "EventCode": "0xB7, 0xBB",
         "EventName": "OCR.ALL_RFO.SUPPLIER_NONE.SNOOP_NONE",
         "MSRIndex": "0x1a6,0x1a7",
@@ -600,304 +595,8 @@
         "UMask": "0x1"
     },
     {
-        "BriefDescription": "Counts all demand code reads have any response type.",
-        "EventCode": "0xB7, 0xBB",
-        "EventName": "OCR.DEMAND_CODE_RD.ANY_RESPONSE",
-        "MSRIndex": "0x1a6,0x1a7",
-        "MSRValue": "0x10004",
-        "SampleAfterValue": "100003",
-        "UMask": "0x1"
-    },
-    {
-        "BriefDescription": "Counts all demand code reads OCR.DEMAND_CODE_RD.PMM_HIT_LOCAL_PMM.ANY_SNOOP",
-        "EventCode": "0xB7, 0xBB",
-        "EventName": "OCR.DEMAND_CODE_RD.PMM_HIT_LOCAL_PMM.ANY_SNOOP",
-        "MSRIndex": "0x1a6,0x1a7",
-        "MSRValue": "0x3F80400004",
-        "SampleAfterValue": "100003",
-        "UMask": "0x1"
-    },
-    {
-        "BriefDescription": "Counts all demand code reads OCR.DEMAND_CODE_RD.PMM_HIT_LOCAL_PMM.SNOOP_NONE",
-        "EventCode": "0xB7, 0xBB",
-        "EventName": "OCR.DEMAND_CODE_RD.PMM_HIT_LOCAL_PMM.SNOOP_NONE",
-        "MSRIndex": "0x1a6,0x1a7",
-        "MSRValue": "0x80400004",
-        "SampleAfterValue": "100003",
-        "UMask": "0x1"
-    },
-    {
-        "BriefDescription": "Counts all demand code reads OCR.DEMAND_CODE_RD.PMM_HIT_LOCAL_PMM.SNOOP_NOT_NEEDED",
-        "EventCode": "0xB7, 0xBB",
-        "EventName": "OCR.DEMAND_CODE_RD.PMM_HIT_LOCAL_PMM.SNOOP_NOT_NEEDED",
-        "MSRIndex": "0x1a6,0x1a7",
-        "MSRValue": "0x100400004",
-        "SampleAfterValue": "100003",
-        "UMask": "0x1"
-    },
-    {
-        "BriefDescription": "Counts all demand code reads  OCR.DEMAND_CODE_RD.SUPPLIER_NONE.ANY_SNOOP",
-        "EventCode": "0xB7, 0xBB",
-        "EventName": "OCR.DEMAND_CODE_RD.SUPPLIER_NONE.ANY_SNOOP",
-        "MSRIndex": "0x1a6,0x1a7",
-        "MSRValue": "0x3F80020004",
-        "SampleAfterValue": "100003",
-        "UMask": "0x1"
-    },
-    {
-        "BriefDescription": "Counts all demand code reads  OCR.DEMAND_CODE_RD.SUPPLIER_NONE.HITM_OTHER_CORE",
-        "EventCode": "0xB7, 0xBB",
-        "EventName": "OCR.DEMAND_CODE_RD.SUPPLIER_NONE.HITM_OTHER_CORE",
-        "MSRIndex": "0x1a6,0x1a7",
-        "MSRValue": "0x1000020004",
-        "SampleAfterValue": "100003",
-        "UMask": "0x1"
-    },
-    {
-        "BriefDescription": "Counts all demand code reads  OCR.DEMAND_CODE_RD.SUPPLIER_NONE.HIT_OTHER_CORE_FWD",
-        "EventCode": "0xB7, 0xBB",
-        "EventName": "OCR.DEMAND_CODE_RD.SUPPLIER_NONE.HIT_OTHER_CORE_FWD",
-        "MSRIndex": "0x1a6,0x1a7",
-        "MSRValue": "0x800020004",
-        "SampleAfterValue": "100003",
-        "UMask": "0x1"
-    },
-    {
-        "BriefDescription": "Counts all demand code reads  OCR.DEMAND_CODE_RD.SUPPLIER_NONE.HIT_OTHER_CORE_NO_FWD",
-        "EventCode": "0xB7, 0xBB",
-        "EventName": "OCR.DEMAND_CODE_RD.SUPPLIER_NONE.HIT_OTHER_CORE_NO_FWD",
-        "MSRIndex": "0x1a6,0x1a7",
-        "MSRValue": "0x400020004",
-        "SampleAfterValue": "100003",
-        "UMask": "0x1"
-    },
-    {
-        "BriefDescription": "Counts all demand code reads  OCR.DEMAND_CODE_RD.SUPPLIER_NONE.NO_SNOOP_NEEDED",
-        "EventCode": "0xB7, 0xBB",
-        "EventName": "OCR.DEMAND_CODE_RD.SUPPLIER_NONE.NO_SNOOP_NEEDED",
-        "MSRIndex": "0x1a6,0x1a7",
-        "MSRValue": "0x100020004",
-        "SampleAfterValue": "100003",
-        "UMask": "0x1"
-    },
-    {
-        "BriefDescription": "Counts all demand code reads",
-        "EventCode": "0xB7, 0xBB",
-        "EventName": "OCR.DEMAND_CODE_RD.SUPPLIER_NONE.SNOOP_MISS",
-        "MSRIndex": "0x1a6,0x1a7",
-        "MSRValue": "0x200020004",
-        "SampleAfterValue": "100003",
-        "UMask": "0x1"
-    },
-    {
-        "BriefDescription": "Counts all demand code reads",
-        "EventCode": "0xB7, 0xBB",
-        "EventName": "OCR.DEMAND_CODE_RD.SUPPLIER_NONE.SNOOP_NONE",
-        "MSRIndex": "0x1a6,0x1a7",
-        "MSRValue": "0x80020004",
-        "SampleAfterValue": "100003",
-        "UMask": "0x1"
-    },
-    {
-        "BriefDescription": "Counts demand data reads have any response type.",
-        "EventCode": "0xB7, 0xBB",
-        "EventName": "OCR.DEMAND_DATA_RD.ANY_RESPONSE",
-        "MSRIndex": "0x1a6,0x1a7",
-        "MSRValue": "0x10001",
-        "SampleAfterValue": "100003",
-        "UMask": "0x1"
-    },
-    {
-        "BriefDescription": "Counts demand data reads OCR.DEMAND_DATA_RD.PMM_HIT_LOCAL_PMM.ANY_SNOOP",
-        "EventCode": "0xB7, 0xBB",
-        "EventName": "OCR.DEMAND_DATA_RD.PMM_HIT_LOCAL_PMM.ANY_SNOOP",
-        "MSRIndex": "0x1a6,0x1a7",
-        "MSRValue": "0x3F80400001",
-        "SampleAfterValue": "100003",
-        "UMask": "0x1"
-    },
-    {
-        "BriefDescription": "Counts demand data reads OCR.DEMAND_DATA_RD.PMM_HIT_LOCAL_PMM.SNOOP_NONE",
-        "EventCode": "0xB7, 0xBB",
-        "EventName": "OCR.DEMAND_DATA_RD.PMM_HIT_LOCAL_PMM.SNOOP_NONE",
-        "MSRIndex": "0x1a6,0x1a7",
-        "MSRValue": "0x80400001",
-        "SampleAfterValue": "100003",
-        "UMask": "0x1"
-    },
-    {
-        "BriefDescription": "Counts demand data reads OCR.DEMAND_DATA_RD.PMM_HIT_LOCAL_PMM.SNOOP_NOT_NEEDED",
-        "EventCode": "0xB7, 0xBB",
-        "EventName": "OCR.DEMAND_DATA_RD.PMM_HIT_LOCAL_PMM.SNOOP_NOT_NEEDED",
-        "MSRIndex": "0x1a6,0x1a7",
-        "MSRValue": "0x100400001",
-        "SampleAfterValue": "100003",
-        "UMask": "0x1"
-    },
-    {
-        "BriefDescription": "Counts demand data reads  OCR.DEMAND_DATA_RD.SUPPLIER_NONE.ANY_SNOOP",
-        "EventCode": "0xB7, 0xBB",
-        "EventName": "OCR.DEMAND_DATA_RD.SUPPLIER_NONE.ANY_SNOOP",
-        "MSRIndex": "0x1a6,0x1a7",
-        "MSRValue": "0x3F80020001",
-        "SampleAfterValue": "100003",
-        "UMask": "0x1"
-    },
-    {
-        "BriefDescription": "Counts demand data reads  OCR.DEMAND_DATA_RD.SUPPLIER_NONE.HITM_OTHER_CORE",
-        "EventCode": "0xB7, 0xBB",
-        "EventName": "OCR.DEMAND_DATA_RD.SUPPLIER_NONE.HITM_OTHER_CORE",
-        "MSRIndex": "0x1a6,0x1a7",
-        "MSRValue": "0x1000020001",
-        "SampleAfterValue": "100003",
-        "UMask": "0x1"
-    },
-    {
-        "BriefDescription": "Counts demand data reads  OCR.DEMAND_DATA_RD.SUPPLIER_NONE.HIT_OTHER_CORE_FWD",
-        "EventCode": "0xB7, 0xBB",
-        "EventName": "OCR.DEMAND_DATA_RD.SUPPLIER_NONE.HIT_OTHER_CORE_FWD",
-        "MSRIndex": "0x1a6,0x1a7",
-        "MSRValue": "0x800020001",
-        "SampleAfterValue": "100003",
-        "UMask": "0x1"
-    },
-    {
-        "BriefDescription": "Counts demand data reads  OCR.DEMAND_DATA_RD.SUPPLIER_NONE.HIT_OTHER_CORE_NO_FWD",
-        "EventCode": "0xB7, 0xBB",
-        "EventName": "OCR.DEMAND_DATA_RD.SUPPLIER_NONE.HIT_OTHER_CORE_NO_FWD",
-        "MSRIndex": "0x1a6,0x1a7",
-        "MSRValue": "0x400020001",
-        "SampleAfterValue": "100003",
-        "UMask": "0x1"
-    },
-    {
-        "BriefDescription": "Counts demand data reads  OCR.DEMAND_DATA_RD.SUPPLIER_NONE.NO_SNOOP_NEEDED",
-        "EventCode": "0xB7, 0xBB",
-        "EventName": "OCR.DEMAND_DATA_RD.SUPPLIER_NONE.NO_SNOOP_NEEDED",
-        "MSRIndex": "0x1a6,0x1a7",
-        "MSRValue": "0x100020001",
-        "SampleAfterValue": "100003",
-        "UMask": "0x1"
-    },
-    {
-        "BriefDescription": "Counts demand data reads",
-        "EventCode": "0xB7, 0xBB",
-        "EventName": "OCR.DEMAND_DATA_RD.SUPPLIER_NONE.SNOOP_MISS",
-        "MSRIndex": "0x1a6,0x1a7",
-        "MSRValue": "0x200020001",
-        "SampleAfterValue": "100003",
-        "UMask": "0x1"
-    },
-    {
-        "BriefDescription": "Counts demand data reads",
-        "EventCode": "0xB7, 0xBB",
-        "EventName": "OCR.DEMAND_DATA_RD.SUPPLIER_NONE.SNOOP_NONE",
-        "MSRIndex": "0x1a6,0x1a7",
-        "MSRValue": "0x80020001",
-        "SampleAfterValue": "100003",
-        "UMask": "0x1"
-    },
-    {
-        "BriefDescription": "Counts all demand data writes (RFOs) have any response type.",
-        "EventCode": "0xB7, 0xBB",
-        "EventName": "OCR.DEMAND_RFO.ANY_RESPONSE",
-        "MSRIndex": "0x1a6,0x1a7",
-        "MSRValue": "0x10002",
-        "SampleAfterValue": "100003",
-        "UMask": "0x1"
-    },
-    {
-        "BriefDescription": "Counts all demand data writes (RFOs) OCR.DEMAND_RFO.PMM_HIT_LOCAL_PMM.ANY_SNOOP",
-        "EventCode": "0xB7, 0xBB",
-        "EventName": "OCR.DEMAND_RFO.PMM_HIT_LOCAL_PMM.ANY_SNOOP",
-        "MSRIndex": "0x1a6,0x1a7",
-        "MSRValue": "0x3F80400002",
-        "SampleAfterValue": "100003",
-        "UMask": "0x1"
-    },
-    {
-        "BriefDescription": "Counts all demand data writes (RFOs) OCR.DEMAND_RFO.PMM_HIT_LOCAL_PMM.SNOOP_NONE",
-        "EventCode": "0xB7, 0xBB",
-        "EventName": "OCR.DEMAND_RFO.PMM_HIT_LOCAL_PMM.SNOOP_NONE",
-        "MSRIndex": "0x1a6,0x1a7",
-        "MSRValue": "0x80400002",
-        "SampleAfterValue": "100003",
-        "UMask": "0x1"
-    },
-    {
-        "BriefDescription": "Counts all demand data writes (RFOs) OCR.DEMAND_RFO.PMM_HIT_LOCAL_PMM.SNOOP_NOT_NEEDED",
-        "EventCode": "0xB7, 0xBB",
-        "EventName": "OCR.DEMAND_RFO.PMM_HIT_LOCAL_PMM.SNOOP_NOT_NEEDED",
-        "MSRIndex": "0x1a6,0x1a7",
-        "MSRValue": "0x100400002",
-        "SampleAfterValue": "100003",
-        "UMask": "0x1"
-    },
-    {
-        "BriefDescription": "Counts all demand data writes (RFOs)  OCR.DEMAND_RFO.SUPPLIER_NONE.ANY_SNOOP",
-        "EventCode": "0xB7, 0xBB",
-        "EventName": "OCR.DEMAND_RFO.SUPPLIER_NONE.ANY_SNOOP",
-        "MSRIndex": "0x1a6,0x1a7",
-        "MSRValue": "0x3F80020002",
-        "SampleAfterValue": "100003",
-        "UMask": "0x1"
-    },
-    {
-        "BriefDescription": "Counts all demand data writes (RFOs)  OCR.DEMAND_RFO.SUPPLIER_NONE.HITM_OTHER_CORE",
-        "EventCode": "0xB7, 0xBB",
-        "EventName": "OCR.DEMAND_RFO.SUPPLIER_NONE.HITM_OTHER_CORE",
-        "MSRIndex": "0x1a6,0x1a7",
-        "MSRValue": "0x1000020002",
-        "SampleAfterValue": "100003",
-        "UMask": "0x1"
-    },
-    {
-        "BriefDescription": "Counts all demand data writes (RFOs)  OCR.DEMAND_RFO.SUPPLIER_NONE.HIT_OTHER_CORE_FWD",
-        "EventCode": "0xB7, 0xBB",
-        "EventName": "OCR.DEMAND_RFO.SUPPLIER_NONE.HIT_OTHER_CORE_FWD",
-        "MSRIndex": "0x1a6,0x1a7",
-        "MSRValue": "0x800020002",
-        "SampleAfterValue": "100003",
-        "UMask": "0x1"
-    },
-    {
-        "BriefDescription": "Counts all demand data writes (RFOs)  OCR.DEMAND_RFO.SUPPLIER_NONE.HIT_OTHER_CORE_NO_FWD",
-        "EventCode": "0xB7, 0xBB",
-        "EventName": "OCR.DEMAND_RFO.SUPPLIER_NONE.HIT_OTHER_CORE_NO_FWD",
-        "MSRIndex": "0x1a6,0x1a7",
-        "MSRValue": "0x400020002",
-        "SampleAfterValue": "100003",
-        "UMask": "0x1"
-    },
-    {
-        "BriefDescription": "Counts all demand data writes (RFOs)  OCR.DEMAND_RFO.SUPPLIER_NONE.NO_SNOOP_NEEDED",
-        "EventCode": "0xB7, 0xBB",
-        "EventName": "OCR.DEMAND_RFO.SUPPLIER_NONE.NO_SNOOP_NEEDED",
-        "MSRIndex": "0x1a6,0x1a7",
-        "MSRValue": "0x100020002",
-        "SampleAfterValue": "100003",
-        "UMask": "0x1"
-    },
-    {
-        "BriefDescription": "Counts all demand data writes (RFOs)",
-        "EventCode": "0xB7, 0xBB",
-        "EventName": "OCR.DEMAND_RFO.SUPPLIER_NONE.SNOOP_MISS",
-        "MSRIndex": "0x1a6,0x1a7",
-        "MSRValue": "0x200020002",
-        "SampleAfterValue": "100003",
-        "UMask": "0x1"
-    },
-    {
-        "BriefDescription": "Counts all demand data writes (RFOs)",
-        "EventCode": "0xB7, 0xBB",
-        "EventName": "OCR.DEMAND_RFO.SUPPLIER_NONE.SNOOP_NONE",
-        "MSRIndex": "0x1a6,0x1a7",
-        "MSRValue": "0x80020002",
-        "SampleAfterValue": "100003",
-        "UMask": "0x1"
-    },
-    {
         "BriefDescription": "Counts any other requests have any response type.",
+        "Counter": "0,1,2,3",
         "EventCode": "0xB7, 0xBB",
         "EventName": "OCR.OTHER.ANY_RESPONSE",
         "MSRIndex": "0x1a6,0x1a7",
@@ -907,6 +606,7 @@
     },
     {
         "BriefDescription": "Counts any other requests OCR.OTHER.PMM_HIT_LOCAL_PMM.ANY_SNOOP",
+        "Counter": "0,1,2,3",
         "EventCode": "0xB7, 0xBB",
         "EventName": "OCR.OTHER.PMM_HIT_LOCAL_PMM.ANY_SNOOP",
         "MSRIndex": "0x1a6,0x1a7",
@@ -916,6 +616,7 @@
     },
     {
         "BriefDescription": "Counts any other requests OCR.OTHER.PMM_HIT_LOCAL_PMM.SNOOP_NONE",
+        "Counter": "0,1,2,3",
         "EventCode": "0xB7, 0xBB",
         "EventName": "OCR.OTHER.PMM_HIT_LOCAL_PMM.SNOOP_NONE",
         "MSRIndex": "0x1a6,0x1a7",
@@ -925,6 +626,7 @@
     },
     {
         "BriefDescription": "Counts any other requests OCR.OTHER.PMM_HIT_LOCAL_PMM.SNOOP_NOT_NEEDED",
+        "Counter": "0,1,2,3",
         "EventCode": "0xB7, 0xBB",
         "EventName": "OCR.OTHER.PMM_HIT_LOCAL_PMM.SNOOP_NOT_NEEDED",
         "MSRIndex": "0x1a6,0x1a7",
@@ -934,6 +636,7 @@
     },
     {
         "BriefDescription": "Counts any other requests  OCR.OTHER.SUPPLIER_NONE.ANY_SNOOP",
+        "Counter": "0,1,2,3",
         "EventCode": "0xB7, 0xBB",
         "EventName": "OCR.OTHER.SUPPLIER_NONE.ANY_SNOOP",
         "MSRIndex": "0x1a6,0x1a7",
@@ -943,6 +646,7 @@
     },
     {
         "BriefDescription": "Counts any other requests  OCR.OTHER.SUPPLIER_NONE.HITM_OTHER_CORE",
+        "Counter": "0,1,2,3",
         "EventCode": "0xB7, 0xBB",
         "EventName": "OCR.OTHER.SUPPLIER_NONE.HITM_OTHER_CORE",
         "MSRIndex": "0x1a6,0x1a7",
@@ -952,6 +656,7 @@
     },
     {
         "BriefDescription": "Counts any other requests  OCR.OTHER.SUPPLIER_NONE.HIT_OTHER_CORE_FWD",
+        "Counter": "0,1,2,3",
         "EventCode": "0xB7, 0xBB",
         "EventName": "OCR.OTHER.SUPPLIER_NONE.HIT_OTHER_CORE_FWD",
         "MSRIndex": "0x1a6,0x1a7",
@@ -961,6 +666,7 @@
     },
     {
         "BriefDescription": "Counts any other requests  OCR.OTHER.SUPPLIER_NONE.HIT_OTHER_CORE_NO_FWD",
+        "Counter": "0,1,2,3",
         "EventCode": "0xB7, 0xBB",
         "EventName": "OCR.OTHER.SUPPLIER_NONE.HIT_OTHER_CORE_NO_FWD",
         "MSRIndex": "0x1a6,0x1a7",
@@ -970,6 +676,7 @@
     },
     {
         "BriefDescription": "Counts any other requests  OCR.OTHER.SUPPLIER_NONE.NO_SNOOP_NEEDED",
+        "Counter": "0,1,2,3",
         "EventCode": "0xB7, 0xBB",
         "EventName": "OCR.OTHER.SUPPLIER_NONE.NO_SNOOP_NEEDED",
         "MSRIndex": "0x1a6,0x1a7",
@@ -979,6 +686,7 @@
     },
     {
         "BriefDescription": "Counts any other requests",
+        "Counter": "0,1,2,3",
         "EventCode": "0xB7, 0xBB",
         "EventName": "OCR.OTHER.SUPPLIER_NONE.SNOOP_MISS",
         "MSRIndex": "0x1a6,0x1a7",
@@ -988,6 +696,7 @@
     },
     {
         "BriefDescription": "Counts any other requests",
+        "Counter": "0,1,2,3",
         "EventCode": "0xB7, 0xBB",
         "EventName": "OCR.OTHER.SUPPLIER_NONE.SNOOP_NONE",
         "MSRIndex": "0x1a6,0x1a7",
@@ -997,6 +706,7 @@
     },
     {
         "BriefDescription": "Counts L1 data cache hardware prefetch requests and software prefetch requests have any response type.",
+        "Counter": "0,1,2,3",
         "EventCode": "0xB7, 0xBB",
         "EventName": "OCR.PF_L1D_AND_SW.ANY_RESPONSE",
         "MSRIndex": "0x1a6,0x1a7",
@@ -1006,6 +716,7 @@
     },
     {
         "BriefDescription": "Counts L1 data cache hardware prefetch requests and software prefetch requests OCR.PF_L1D_AND_SW.PMM_HIT_LOCAL_PMM.ANY_SNOOP",
+        "Counter": "0,1,2,3",
         "EventCode": "0xB7, 0xBB",
         "EventName": "OCR.PF_L1D_AND_SW.PMM_HIT_LOCAL_PMM.ANY_SNOOP",
         "MSRIndex": "0x1a6,0x1a7",
@@ -1015,6 +726,7 @@
     },
     {
         "BriefDescription": "Counts L1 data cache hardware prefetch requests and software prefetch requests OCR.PF_L1D_AND_SW.PMM_HIT_LOCAL_PMM.SNOOP_NONE",
+        "Counter": "0,1,2,3",
         "EventCode": "0xB7, 0xBB",
         "EventName": "OCR.PF_L1D_AND_SW.PMM_HIT_LOCAL_PMM.SNOOP_NONE",
         "MSRIndex": "0x1a6,0x1a7",
@@ -1024,6 +736,7 @@
     },
     {
         "BriefDescription": "Counts L1 data cache hardware prefetch requests and software prefetch requests OCR.PF_L1D_AND_SW.PMM_HIT_LOCAL_PMM.SNOOP_NOT_NEEDED",
+        "Counter": "0,1,2,3",
         "EventCode": "0xB7, 0xBB",
         "EventName": "OCR.PF_L1D_AND_SW.PMM_HIT_LOCAL_PMM.SNOOP_NOT_NEEDED",
         "MSRIndex": "0x1a6,0x1a7",
@@ -1033,6 +746,7 @@
     },
     {
         "BriefDescription": "Counts L1 data cache hardware prefetch requests and software prefetch requests  OCR.PF_L1D_AND_SW.SUPPLIER_NONE.ANY_SNOOP",
+        "Counter": "0,1,2,3",
         "EventCode": "0xB7, 0xBB",
         "EventName": "OCR.PF_L1D_AND_SW.SUPPLIER_NONE.ANY_SNOOP",
         "MSRIndex": "0x1a6,0x1a7",
@@ -1042,6 +756,7 @@
     },
     {
         "BriefDescription": "Counts L1 data cache hardware prefetch requests and software prefetch requests  OCR.PF_L1D_AND_SW.SUPPLIER_NONE.HITM_OTHER_CORE",
+        "Counter": "0,1,2,3",
         "EventCode": "0xB7, 0xBB",
         "EventName": "OCR.PF_L1D_AND_SW.SUPPLIER_NONE.HITM_OTHER_CORE",
         "MSRIndex": "0x1a6,0x1a7",
@@ -1051,6 +766,7 @@
     },
     {
         "BriefDescription": "Counts L1 data cache hardware prefetch requests and software prefetch requests  OCR.PF_L1D_AND_SW.SUPPLIER_NONE.HIT_OTHER_CORE_FWD",
+        "Counter": "0,1,2,3",
         "EventCode": "0xB7, 0xBB",
         "EventName": "OCR.PF_L1D_AND_SW.SUPPLIER_NONE.HIT_OTHER_CORE_FWD",
         "MSRIndex": "0x1a6,0x1a7",
@@ -1060,6 +776,7 @@
     },
     {
         "BriefDescription": "Counts L1 data cache hardware prefetch requests and software prefetch requests  OCR.PF_L1D_AND_SW.SUPPLIER_NONE.HIT_OTHER_CORE_NO_FWD",
+        "Counter": "0,1,2,3",
         "EventCode": "0xB7, 0xBB",
         "EventName": "OCR.PF_L1D_AND_SW.SUPPLIER_NONE.HIT_OTHER_CORE_NO_FWD",
         "MSRIndex": "0x1a6,0x1a7",
@@ -1069,6 +786,7 @@
     },
     {
         "BriefDescription": "Counts L1 data cache hardware prefetch requests and software prefetch requests  OCR.PF_L1D_AND_SW.SUPPLIER_NONE.NO_SNOOP_NEEDED",
+        "Counter": "0,1,2,3",
         "EventCode": "0xB7, 0xBB",
         "EventName": "OCR.PF_L1D_AND_SW.SUPPLIER_NONE.NO_SNOOP_NEEDED",
         "MSRIndex": "0x1a6,0x1a7",
@@ -1078,6 +796,7 @@
     },
     {
         "BriefDescription": "Counts L1 data cache hardware prefetch requests and software prefetch requests",
+        "Counter": "0,1,2,3",
         "EventCode": "0xB7, 0xBB",
         "EventName": "OCR.PF_L1D_AND_SW.SUPPLIER_NONE.SNOOP_MISS",
         "MSRIndex": "0x1a6,0x1a7",
@@ -1087,6 +806,7 @@
     },
     {
         "BriefDescription": "Counts L1 data cache hardware prefetch requests and software prefetch requests",
+        "Counter": "0,1,2,3",
         "EventCode": "0xB7, 0xBB",
         "EventName": "OCR.PF_L1D_AND_SW.SUPPLIER_NONE.SNOOP_NONE",
         "MSRIndex": "0x1a6,0x1a7",
@@ -1096,6 +816,7 @@
     },
     {
         "BriefDescription": "Counts prefetch (that bring data to L2) data reads have any response type.",
+        "Counter": "0,1,2,3",
         "EventCode": "0xB7, 0xBB",
         "EventName": "OCR.PF_L2_DATA_RD.ANY_RESPONSE",
         "MSRIndex": "0x1a6,0x1a7",
@@ -1105,6 +826,7 @@
     },
     {
         "BriefDescription": "Counts prefetch (that bring data to L2) data reads OCR.PF_L2_DATA_RD.PMM_HIT_LOCAL_PMM.ANY_SNOOP",
+        "Counter": "0,1,2,3",
         "EventCode": "0xB7, 0xBB",
         "EventName": "OCR.PF_L2_DATA_RD.PMM_HIT_LOCAL_PMM.ANY_SNOOP",
         "MSRIndex": "0x1a6,0x1a7",
@@ -1114,6 +836,7 @@
     },
     {
         "BriefDescription": "Counts prefetch (that bring data to L2) data reads OCR.PF_L2_DATA_RD.PMM_HIT_LOCAL_PMM.SNOOP_NONE",
+        "Counter": "0,1,2,3",
         "EventCode": "0xB7, 0xBB",
         "EventName": "OCR.PF_L2_DATA_RD.PMM_HIT_LOCAL_PMM.SNOOP_NONE",
         "MSRIndex": "0x1a6,0x1a7",
@@ -1123,6 +846,7 @@
     },
     {
         "BriefDescription": "Counts prefetch (that bring data to L2) data reads OCR.PF_L2_DATA_RD.PMM_HIT_LOCAL_PMM.SNOOP_NOT_NEEDED",
+        "Counter": "0,1,2,3",
         "EventCode": "0xB7, 0xBB",
         "EventName": "OCR.PF_L2_DATA_RD.PMM_HIT_LOCAL_PMM.SNOOP_NOT_NEEDED",
         "MSRIndex": "0x1a6,0x1a7",
@@ -1132,6 +856,7 @@
     },
     {
         "BriefDescription": "Counts prefetch (that bring data to L2) data reads  OCR.PF_L2_DATA_RD.SUPPLIER_NONE.ANY_SNOOP",
+        "Counter": "0,1,2,3",
         "EventCode": "0xB7, 0xBB",
         "EventName": "OCR.PF_L2_DATA_RD.SUPPLIER_NONE.ANY_SNOOP",
         "MSRIndex": "0x1a6,0x1a7",
@@ -1141,6 +866,7 @@
     },
     {
         "BriefDescription": "Counts prefetch (that bring data to L2) data reads  OCR.PF_L2_DATA_RD.SUPPLIER_NONE.HITM_OTHER_CORE",
+        "Counter": "0,1,2,3",
         "EventCode": "0xB7, 0xBB",
         "EventName": "OCR.PF_L2_DATA_RD.SUPPLIER_NONE.HITM_OTHER_CORE",
         "MSRIndex": "0x1a6,0x1a7",
@@ -1150,6 +876,7 @@
     },
     {
         "BriefDescription": "Counts prefetch (that bring data to L2) data reads  OCR.PF_L2_DATA_RD.SUPPLIER_NONE.HIT_OTHER_CORE_FWD",
+        "Counter": "0,1,2,3",
         "EventCode": "0xB7, 0xBB",
         "EventName": "OCR.PF_L2_DATA_RD.SUPPLIER_NONE.HIT_OTHER_CORE_FWD",
         "MSRIndex": "0x1a6,0x1a7",
@@ -1159,6 +886,7 @@
     },
     {
         "BriefDescription": "Counts prefetch (that bring data to L2) data reads  OCR.PF_L2_DATA_RD.SUPPLIER_NONE.HIT_OTHER_CORE_NO_FWD",
+        "Counter": "0,1,2,3",
         "EventCode": "0xB7, 0xBB",
         "EventName": "OCR.PF_L2_DATA_RD.SUPPLIER_NONE.HIT_OTHER_CORE_NO_FWD",
         "MSRIndex": "0x1a6,0x1a7",
@@ -1168,6 +896,7 @@
     },
     {
         "BriefDescription": "Counts prefetch (that bring data to L2) data reads  OCR.PF_L2_DATA_RD.SUPPLIER_NONE.NO_SNOOP_NEEDED",
+        "Counter": "0,1,2,3",
         "EventCode": "0xB7, 0xBB",
         "EventName": "OCR.PF_L2_DATA_RD.SUPPLIER_NONE.NO_SNOOP_NEEDED",
         "MSRIndex": "0x1a6,0x1a7",
@@ -1177,6 +906,7 @@
     },
     {
         "BriefDescription": "Counts prefetch (that bring data to L2) data reads",
+        "Counter": "0,1,2,3",
         "EventCode": "0xB7, 0xBB",
         "EventName": "OCR.PF_L2_DATA_RD.SUPPLIER_NONE.SNOOP_MISS",
         "MSRIndex": "0x1a6,0x1a7",
@@ -1186,6 +916,7 @@
     },
     {
         "BriefDescription": "Counts prefetch (that bring data to L2) data reads",
+        "Counter": "0,1,2,3",
         "EventCode": "0xB7, 0xBB",
         "EventName": "OCR.PF_L2_DATA_RD.SUPPLIER_NONE.SNOOP_NONE",
         "MSRIndex": "0x1a6,0x1a7",
@@ -1195,6 +926,7 @@
     },
     {
         "BriefDescription": "Counts all prefetch (that bring data to L2) RFOs have any response type.",
+        "Counter": "0,1,2,3",
         "EventCode": "0xB7, 0xBB",
         "EventName": "OCR.PF_L2_RFO.ANY_RESPONSE",
         "MSRIndex": "0x1a6,0x1a7",
@@ -1204,6 +936,7 @@
     },
     {
         "BriefDescription": "Counts all prefetch (that bring data to L2) RFOs OCR.PF_L2_RFO.PMM_HIT_LOCAL_PMM.ANY_SNOOP",
+        "Counter": "0,1,2,3",
         "EventCode": "0xB7, 0xBB",
         "EventName": "OCR.PF_L2_RFO.PMM_HIT_LOCAL_PMM.ANY_SNOOP",
         "MSRIndex": "0x1a6,0x1a7",
@@ -1213,6 +946,7 @@
     },
     {
         "BriefDescription": "Counts all prefetch (that bring data to L2) RFOs OCR.PF_L2_RFO.PMM_HIT_LOCAL_PMM.SNOOP_NONE",
+        "Counter": "0,1,2,3",
         "EventCode": "0xB7, 0xBB",
         "EventName": "OCR.PF_L2_RFO.PMM_HIT_LOCAL_PMM.SNOOP_NONE",
         "MSRIndex": "0x1a6,0x1a7",
@@ -1222,6 +956,7 @@
     },
     {
         "BriefDescription": "Counts all prefetch (that bring data to L2) RFOs OCR.PF_L2_RFO.PMM_HIT_LOCAL_PMM.SNOOP_NOT_NEEDED",
+        "Counter": "0,1,2,3",
         "EventCode": "0xB7, 0xBB",
         "EventName": "OCR.PF_L2_RFO.PMM_HIT_LOCAL_PMM.SNOOP_NOT_NEEDED",
         "MSRIndex": "0x1a6,0x1a7",
@@ -1231,6 +966,7 @@
     },
     {
         "BriefDescription": "Counts all prefetch (that bring data to L2) RFOs  OCR.PF_L2_RFO.SUPPLIER_NONE.ANY_SNOOP",
+        "Counter": "0,1,2,3",
         "EventCode": "0xB7, 0xBB",
         "EventName": "OCR.PF_L2_RFO.SUPPLIER_NONE.ANY_SNOOP",
         "MSRIndex": "0x1a6,0x1a7",
@@ -1240,6 +976,7 @@
     },
     {
         "BriefDescription": "Counts all prefetch (that bring data to L2) RFOs  OCR.PF_L2_RFO.SUPPLIER_NONE.HITM_OTHER_CORE",
+        "Counter": "0,1,2,3",
         "EventCode": "0xB7, 0xBB",
         "EventName": "OCR.PF_L2_RFO.SUPPLIER_NONE.HITM_OTHER_CORE",
         "MSRIndex": "0x1a6,0x1a7",
@@ -1249,6 +986,7 @@
     },
     {
         "BriefDescription": "Counts all prefetch (that bring data to L2) RFOs  OCR.PF_L2_RFO.SUPPLIER_NONE.HIT_OTHER_CORE_FWD",
+        "Counter": "0,1,2,3",
         "EventCode": "0xB7, 0xBB",
         "EventName": "OCR.PF_L2_RFO.SUPPLIER_NONE.HIT_OTHER_CORE_FWD",
         "MSRIndex": "0x1a6,0x1a7",
@@ -1258,6 +996,7 @@
     },
     {
         "BriefDescription": "Counts all prefetch (that bring data to L2) RFOs  OCR.PF_L2_RFO.SUPPLIER_NONE.HIT_OTHER_CORE_NO_FWD",
+        "Counter": "0,1,2,3",
         "EventCode": "0xB7, 0xBB",
         "EventName": "OCR.PF_L2_RFO.SUPPLIER_NONE.HIT_OTHER_CORE_NO_FWD",
         "MSRIndex": "0x1a6,0x1a7",
@@ -1267,6 +1006,7 @@
     },
     {
         "BriefDescription": "Counts all prefetch (that bring data to L2) RFOs  OCR.PF_L2_RFO.SUPPLIER_NONE.NO_SNOOP_NEEDED",
+        "Counter": "0,1,2,3",
         "EventCode": "0xB7, 0xBB",
         "EventName": "OCR.PF_L2_RFO.SUPPLIER_NONE.NO_SNOOP_NEEDED",
         "MSRIndex": "0x1a6,0x1a7",
@@ -1276,6 +1016,7 @@
     },
     {
         "BriefDescription": "Counts all prefetch (that bring data to L2) RFOs",
+        "Counter": "0,1,2,3",
         "EventCode": "0xB7, 0xBB",
         "EventName": "OCR.PF_L2_RFO.SUPPLIER_NONE.SNOOP_MISS",
         "MSRIndex": "0x1a6,0x1a7",
@@ -1285,6 +1026,7 @@
     },
     {
         "BriefDescription": "Counts all prefetch (that bring data to L2) RFOs",
+        "Counter": "0,1,2,3",
         "EventCode": "0xB7, 0xBB",
         "EventName": "OCR.PF_L2_RFO.SUPPLIER_NONE.SNOOP_NONE",
         "MSRIndex": "0x1a6,0x1a7",
@@ -1294,6 +1036,7 @@
     },
     {
         "BriefDescription": "Counts all prefetch (that bring data to LLC only) data reads have any response type.",
+        "Counter": "0,1,2,3",
         "EventCode": "0xB7, 0xBB",
         "EventName": "OCR.PF_L3_DATA_RD.ANY_RESPONSE",
         "MSRIndex": "0x1a6,0x1a7",
@@ -1303,6 +1046,7 @@
     },
     {
         "BriefDescription": "Counts all prefetch (that bring data to LLC only) data reads OCR.PF_L3_DATA_RD.PMM_HIT_LOCAL_PMM.ANY_SNOOP",
+        "Counter": "0,1,2,3",
         "EventCode": "0xB7, 0xBB",
         "EventName": "OCR.PF_L3_DATA_RD.PMM_HIT_LOCAL_PMM.ANY_SNOOP",
         "MSRIndex": "0x1a6,0x1a7",
@@ -1312,6 +1056,7 @@
     },
     {
         "BriefDescription": "Counts all prefetch (that bring data to LLC only) data reads OCR.PF_L3_DATA_RD.PMM_HIT_LOCAL_PMM.SNOOP_NONE",
+        "Counter": "0,1,2,3",
         "EventCode": "0xB7, 0xBB",
         "EventName": "OCR.PF_L3_DATA_RD.PMM_HIT_LOCAL_PMM.SNOOP_NONE",
         "MSRIndex": "0x1a6,0x1a7",
@@ -1321,6 +1066,7 @@
     },
     {
         "BriefDescription": "Counts all prefetch (that bring data to LLC only) data reads OCR.PF_L3_DATA_RD.PMM_HIT_LOCAL_PMM.SNOOP_NOT_NEEDED",
+        "Counter": "0,1,2,3",
         "EventCode": "0xB7, 0xBB",
         "EventName": "OCR.PF_L3_DATA_RD.PMM_HIT_LOCAL_PMM.SNOOP_NOT_NEEDED",
         "MSRIndex": "0x1a6,0x1a7",
@@ -1330,6 +1076,7 @@
     },
     {
         "BriefDescription": "Counts all prefetch (that bring data to LLC only) data reads  OCR.PF_L3_DATA_RD.SUPPLIER_NONE.ANY_SNOOP",
+        "Counter": "0,1,2,3",
         "EventCode": "0xB7, 0xBB",
         "EventName": "OCR.PF_L3_DATA_RD.SUPPLIER_NONE.ANY_SNOOP",
         "MSRIndex": "0x1a6,0x1a7",
@@ -1339,6 +1086,7 @@
     },
     {
         "BriefDescription": "Counts all prefetch (that bring data to LLC only) data reads  OCR.PF_L3_DATA_RD.SUPPLIER_NONE.HITM_OTHER_CORE",
+        "Counter": "0,1,2,3",
         "EventCode": "0xB7, 0xBB",
         "EventName": "OCR.PF_L3_DATA_RD.SUPPLIER_NONE.HITM_OTHER_CORE",
         "MSRIndex": "0x1a6,0x1a7",
@@ -1348,6 +1096,7 @@
     },
     {
         "BriefDescription": "Counts all prefetch (that bring data to LLC only) data reads  OCR.PF_L3_DATA_RD.SUPPLIER_NONE.HIT_OTHER_CORE_FWD",
+        "Counter": "0,1,2,3",
         "EventCode": "0xB7, 0xBB",
         "EventName": "OCR.PF_L3_DATA_RD.SUPPLIER_NONE.HIT_OTHER_CORE_FWD",
         "MSRIndex": "0x1a6,0x1a7",
@@ -1357,6 +1106,7 @@
     },
     {
         "BriefDescription": "Counts all prefetch (that bring data to LLC only) data reads  OCR.PF_L3_DATA_RD.SUPPLIER_NONE.HIT_OTHER_CORE_NO_FWD",
+        "Counter": "0,1,2,3",
         "EventCode": "0xB7, 0xBB",
         "EventName": "OCR.PF_L3_DATA_RD.SUPPLIER_NONE.HIT_OTHER_CORE_NO_FWD",
         "MSRIndex": "0x1a6,0x1a7",
@@ -1366,6 +1116,7 @@
     },
     {
         "BriefDescription": "Counts all prefetch (that bring data to LLC only) data reads  OCR.PF_L3_DATA_RD.SUPPLIER_NONE.NO_SNOOP_NEEDED",
+        "Counter": "0,1,2,3",
         "EventCode": "0xB7, 0xBB",
         "EventName": "OCR.PF_L3_DATA_RD.SUPPLIER_NONE.NO_SNOOP_NEEDED",
         "MSRIndex": "0x1a6,0x1a7",
@@ -1375,6 +1126,7 @@
     },
     {
         "BriefDescription": "Counts all prefetch (that bring data to LLC only) data reads",
+        "Counter": "0,1,2,3",
         "EventCode": "0xB7, 0xBB",
         "EventName": "OCR.PF_L3_DATA_RD.SUPPLIER_NONE.SNOOP_MISS",
         "MSRIndex": "0x1a6,0x1a7",
@@ -1384,6 +1136,7 @@
     },
     {
         "BriefDescription": "Counts all prefetch (that bring data to LLC only) data reads",
+        "Counter": "0,1,2,3",
         "EventCode": "0xB7, 0xBB",
         "EventName": "OCR.PF_L3_DATA_RD.SUPPLIER_NONE.SNOOP_NONE",
         "MSRIndex": "0x1a6,0x1a7",
@@ -1393,6 +1146,7 @@
     },
     {
         "BriefDescription": "Counts all prefetch (that bring data to LLC only) RFOs have any response type.",
+        "Counter": "0,1,2,3",
         "EventCode": "0xB7, 0xBB",
         "EventName": "OCR.PF_L3_RFO.ANY_RESPONSE",
         "MSRIndex": "0x1a6,0x1a7",
@@ -1402,6 +1156,7 @@
     },
     {
         "BriefDescription": "Counts all prefetch (that bring data to LLC only) RFOs OCR.PF_L3_RFO.PMM_HIT_LOCAL_PMM.ANY_SNOOP",
+        "Counter": "0,1,2,3",
         "EventCode": "0xB7, 0xBB",
         "EventName": "OCR.PF_L3_RFO.PMM_HIT_LOCAL_PMM.ANY_SNOOP",
         "MSRIndex": "0x1a6,0x1a7",
@@ -1411,6 +1166,7 @@
     },
     {
         "BriefDescription": "Counts all prefetch (that bring data to LLC only) RFOs OCR.PF_L3_RFO.PMM_HIT_LOCAL_PMM.SNOOP_NONE",
+        "Counter": "0,1,2,3",
         "EventCode": "0xB7, 0xBB",
         "EventName": "OCR.PF_L3_RFO.PMM_HIT_LOCAL_PMM.SNOOP_NONE",
         "MSRIndex": "0x1a6,0x1a7",
@@ -1420,6 +1176,7 @@
     },
     {
         "BriefDescription": "Counts all prefetch (that bring data to LLC only) RFOs OCR.PF_L3_RFO.PMM_HIT_LOCAL_PMM.SNOOP_NOT_NEEDED",
+        "Counter": "0,1,2,3",
         "EventCode": "0xB7, 0xBB",
         "EventName": "OCR.PF_L3_RFO.PMM_HIT_LOCAL_PMM.SNOOP_NOT_NEEDED",
         "MSRIndex": "0x1a6,0x1a7",
@@ -1429,6 +1186,7 @@
     },
     {
         "BriefDescription": "Counts all prefetch (that bring data to LLC only) RFOs  OCR.PF_L3_RFO.SUPPLIER_NONE.ANY_SNOOP",
+        "Counter": "0,1,2,3",
         "EventCode": "0xB7, 0xBB",
         "EventName": "OCR.PF_L3_RFO.SUPPLIER_NONE.ANY_SNOOP",
         "MSRIndex": "0x1a6,0x1a7",
@@ -1438,6 +1196,7 @@
     },
     {
         "BriefDescription": "Counts all prefetch (that bring data to LLC only) RFOs  OCR.PF_L3_RFO.SUPPLIER_NONE.HITM_OTHER_CORE",
+        "Counter": "0,1,2,3",
         "EventCode": "0xB7, 0xBB",
         "EventName": "OCR.PF_L3_RFO.SUPPLIER_NONE.HITM_OTHER_CORE",
         "MSRIndex": "0x1a6,0x1a7",
@@ -1447,6 +1206,7 @@
     },
     {
         "BriefDescription": "Counts all prefetch (that bring data to LLC only) RFOs  OCR.PF_L3_RFO.SUPPLIER_NONE.HIT_OTHER_CORE_FWD",
+        "Counter": "0,1,2,3",
         "EventCode": "0xB7, 0xBB",
         "EventName": "OCR.PF_L3_RFO.SUPPLIER_NONE.HIT_OTHER_CORE_FWD",
         "MSRIndex": "0x1a6,0x1a7",
@@ -1456,6 +1216,7 @@
     },
     {
         "BriefDescription": "Counts all prefetch (that bring data to LLC only) RFOs  OCR.PF_L3_RFO.SUPPLIER_NONE.HIT_OTHER_CORE_NO_FWD",
+        "Counter": "0,1,2,3",
         "EventCode": "0xB7, 0xBB",
         "EventName": "OCR.PF_L3_RFO.SUPPLIER_NONE.HIT_OTHER_CORE_NO_FWD",
         "MSRIndex": "0x1a6,0x1a7",
@@ -1465,6 +1226,7 @@
     },
     {
         "BriefDescription": "Counts all prefetch (that bring data to LLC only) RFOs  OCR.PF_L3_RFO.SUPPLIER_NONE.NO_SNOOP_NEEDED",
+        "Counter": "0,1,2,3",
         "EventCode": "0xB7, 0xBB",
         "EventName": "OCR.PF_L3_RFO.SUPPLIER_NONE.NO_SNOOP_NEEDED",
         "MSRIndex": "0x1a6,0x1a7",
@@ -1474,6 +1236,7 @@
     },
     {
         "BriefDescription": "Counts all prefetch (that bring data to LLC only) RFOs",
+        "Counter": "0,1,2,3",
         "EventCode": "0xB7, 0xBB",
         "EventName": "OCR.PF_L3_RFO.SUPPLIER_NONE.SNOOP_MISS",
         "MSRIndex": "0x1a6,0x1a7",
@@ -1483,6 +1246,7 @@
     },
     {
         "BriefDescription": "Counts all prefetch (that bring data to LLC only) RFOs",
+        "Counter": "0,1,2,3",
         "EventCode": "0xB7, 0xBB",
         "EventName": "OCR.PF_L3_RFO.SUPPLIER_NONE.SNOOP_NONE",
         "MSRIndex": "0x1a6,0x1a7",

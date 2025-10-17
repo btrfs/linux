@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 //
-// Copyright(c) 2020 Intel Corporation. All rights reserved.
+// Copyright(c) 2020 Intel Corporation
 //
 // Author: Cezary Rojewski <cezary.rojewski@intel.com>
 //
@@ -21,7 +21,6 @@ static ssize_t fw_version_show(struct device *dev,
 
 	ret = catpt_ipc_get_fw_version(cdev, &version);
 
-	pm_runtime_mark_last_busy(cdev->dev);
 	pm_runtime_put_autosuspend(cdev->dev);
 
 	if (ret)

@@ -79,8 +79,8 @@ struct nouveau_svm {
 #define SVM_ERR(s,f,a...) NV_WARN((s)->drm, "svm: "f"\n", ##a)
 
 struct nouveau_pfnmap_args {
-	struct nvif_ioctl_v0 i;
-	struct nvif_ioctl_mthd_v0 m;
+	struct nvif_ioctl_v0_hdr i;
+	struct nvif_ioctl_mthd_v0_hdr m;
 	struct nvif_vmm_pfnmap_v0 p;
 };
 
@@ -112,7 +112,7 @@ nouveau_svmm_bind(struct drm_device *dev, void *data,
 {
 	struct nouveau_cli *cli = nouveau_cli(file_priv);
 	struct drm_nouveau_svm_bind *args = data;
-	unsigned target, cmd, priority;
+	unsigned target, cmd;
 	unsigned long addr, end;
 	struct mm_struct *mm;
 
@@ -135,9 +135,6 @@ nouveau_svmm_bind(struct drm_device *dev, void *data,
 	default:
 		return -EINVAL;
 	}
-
-	priority = args->header >> NOUVEAU_SVM_BIND_PRIORITY_SHIFT;
-	priority &= NOUVEAU_SVM_BIND_PRIORITY_MASK;
 
 	/* FIXME support CPU target ie all target value < GPU_VRAM */
 	target = args->header >> NOUVEAU_SVM_BIND_TARGET_SHIFT;
@@ -593,6 +590,7 @@ static int nouveau_atomic_range_fault(struct nouveau_svmm *svmm,
 	unsigned long timeout =
 		jiffies + msecs_to_jiffies(HMM_RANGE_DEFAULT_TIMEOUT);
 	struct mm_struct *mm = svmm->notifier.mm;
+	struct folio *folio;
 	struct page *page;
 	unsigned long start = args->p.addr;
 	unsigned long notifier_seq;
@@ -612,19 +610,22 @@ static int nouveau_atomic_range_fault(struct nouveau_svmm *svmm,
 
 		notifier_seq = mmu_interval_read_begin(&notifier->notifier);
 		mmap_read_lock(mm);
-		ret = make_device_exclusive_range(mm, start, start + PAGE_SIZE,
-					    &page, drm->dev);
+		page = make_device_exclusive(mm, start, drm->dev, &folio);
 		mmap_read_unlock(mm);
-		if (ret <= 0 || !page) {
+		if (IS_ERR(page)) {
 			ret = -EINVAL;
 			goto out;
 		}
+		folio = page_folio(page);
 
 		mutex_lock(&svmm->mutex);
 		if (!mmu_interval_read_retry(&notifier->notifier,
 					     notifier_seq))
 			break;
 		mutex_unlock(&svmm->mutex);
+
+		folio_unlock(folio);
+		folio_put(folio);
 	}
 
 	/* Map the page on the GPU. */
@@ -640,8 +641,8 @@ static int nouveau_atomic_range_fault(struct nouveau_svmm *svmm,
 	ret = nvif_object_ioctl(&svmm->vmm->vmm.object, args, size, NULL);
 	mutex_unlock(&svmm->mutex);
 
-	unlock_page(page);
-	put_page(page);
+	folio_unlock(folio);
+	folio_put(folio);
 
 out:
 	mmu_interval_notifier_remove(&notifier->notifier);
@@ -719,10 +720,7 @@ nouveau_svm_fault(struct work_struct *work)
 	struct nouveau_svm *svm = container_of(buffer, typeof(*svm), buffer[buffer->id]);
 	struct nvif_object *device = &svm->drm->client.device.object;
 	struct nouveau_svmm *svmm;
-	struct {
-		struct nouveau_pfnmap_args i;
-		u64 phys[1];
-	} args;
+	DEFINE_RAW_FLEX(struct nouveau_pfnmap_args, args, p.phys, 1);
 	unsigned long hmm_flags;
 	u64 inst, start, limit;
 	int fi, fn;
@@ -771,11 +769,11 @@ nouveau_svm_fault(struct work_struct *work)
 	mutex_unlock(&svm->mutex);
 
 	/* Process list of faults. */
-	args.i.i.version = 0;
-	args.i.i.type = NVIF_IOCTL_V0_MTHD;
-	args.i.m.version = 0;
-	args.i.m.method = NVIF_VMM_V0_PFNMAP;
-	args.i.p.version = 0;
+	args->i.version = 0;
+	args->i.type = NVIF_IOCTL_V0_MTHD;
+	args->m.version = 0;
+	args->m.method = NVIF_VMM_V0_PFNMAP;
+	args->p.version = 0;
 
 	for (fi = 0; fn = fi + 1, fi < buffer->fault_nr; fi = fn) {
 		struct svm_notifier notifier;
@@ -801,9 +799,9 @@ nouveau_svm_fault(struct work_struct *work)
 		 * fault window, determining required pages and access
 		 * permissions based on pending faults.
 		 */
-		args.i.p.addr = start;
-		args.i.p.page = PAGE_SHIFT;
-		args.i.p.size = PAGE_SIZE;
+		args->p.addr = start;
+		args->p.page = PAGE_SHIFT;
+		args->p.size = PAGE_SIZE;
 		/*
 		 * Determine required permissions based on GPU fault
 		 * access flags.
@@ -831,16 +829,16 @@ nouveau_svm_fault(struct work_struct *work)
 
 		notifier.svmm = svmm;
 		if (atomic)
-			ret = nouveau_atomic_range_fault(svmm, svm->drm,
-							 &args.i, sizeof(args),
+			ret = nouveau_atomic_range_fault(svmm, svm->drm, args,
+							 __struct_size(args),
 							 &notifier);
 		else
-			ret = nouveau_range_fault(svmm, svm->drm, &args.i,
-						  sizeof(args), hmm_flags,
-						  &notifier);
+			ret = nouveau_range_fault(svmm, svm->drm, args,
+						  __struct_size(args),
+						  hmm_flags, &notifier);
 		mmput(mm);
 
-		limit = args.i.p.addr + args.i.p.size;
+		limit = args->p.addr + args->p.size;
 		for (fn = fi; ++fn < buffer->fault_nr; ) {
 			/* It's okay to skip over duplicate addresses from the
 			 * same SVMM as faults are ordered by access type such
@@ -854,14 +852,14 @@ nouveau_svm_fault(struct work_struct *work)
 			if (buffer->fault[fn]->svmm != svmm ||
 			    buffer->fault[fn]->addr >= limit ||
 			    (buffer->fault[fi]->access == FAULT_ACCESS_READ &&
-			     !(args.phys[0] & NVIF_VMM_PFNMAP_V0_V)) ||
+			     !(args->p.phys[0] & NVIF_VMM_PFNMAP_V0_V)) ||
 			    (buffer->fault[fi]->access != FAULT_ACCESS_READ &&
 			     buffer->fault[fi]->access != FAULT_ACCESS_PREFETCH &&
-			     !(args.phys[0] & NVIF_VMM_PFNMAP_V0_W)) ||
+			     !(args->p.phys[0] & NVIF_VMM_PFNMAP_V0_W)) ||
 			    (buffer->fault[fi]->access != FAULT_ACCESS_READ &&
 			     buffer->fault[fi]->access != FAULT_ACCESS_WRITE &&
 			     buffer->fault[fi]->access != FAULT_ACCESS_PREFETCH &&
-			     !(args.phys[0] & NVIF_VMM_PFNMAP_V0_A)))
+			     !(args->p.phys[0] & NVIF_VMM_PFNMAP_V0_A)))
 				break;
 		}
 
@@ -926,15 +924,14 @@ nouveau_pfns_map(struct nouveau_svmm *svmm, struct mm_struct *mm,
 		 unsigned long addr, u64 *pfns, unsigned long npages)
 {
 	struct nouveau_pfnmap_args *args = nouveau_pfns_to_args(pfns);
-	int ret;
 
 	args->p.addr = addr;
 	args->p.size = npages << PAGE_SHIFT;
 
 	mutex_lock(&svmm->mutex);
 
-	ret = nvif_object_ioctl(&svmm->vmm->vmm.object, args,
-				struct_size(args, p.phys, npages), NULL);
+	nvif_object_ioctl(&svmm->vmm->vmm.object, args,
+			  struct_size(args, p.phys, npages), NULL);
 
 	mutex_unlock(&svmm->mutex);
 }
@@ -1011,7 +1008,7 @@ nouveau_svm_fault_buffer_ctor(struct nouveau_svm *svm, s32 oclass, int id)
 	if (ret)
 		return ret;
 
-	buffer->fault = kvcalloc(sizeof(*buffer->fault), buffer->entries, GFP_KERNEL);
+	buffer->fault = kvcalloc(buffer->entries, sizeof(*buffer->fault), GFP_KERNEL);
 	if (!buffer->fault)
 		return -ENOMEM;
 

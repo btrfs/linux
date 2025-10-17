@@ -47,7 +47,7 @@
 #include <drm/drm_print.h>
 #include <drm/drm_probe_helper.h>
 
-#include <asm/unaligned.h>
+#include <linux/unaligned.h>
 
 #include "cdns-mhdp8546-core.h"
 #include "cdns-mhdp8546-hdcp.h"
@@ -543,76 +543,6 @@ out:
 		dev_err(mhdp->dev, "Failed to adjust Link Training.\n");
 
 	return ret;
-}
-
-/**
- * cdns_mhdp_link_power_up() - power up a DisplayPort link
- * @aux: DisplayPort AUX channel
- * @link: pointer to a structure containing the link configuration
- *
- * Returns 0 on success or a negative error code on failure.
- */
-static
-int cdns_mhdp_link_power_up(struct drm_dp_aux *aux, struct cdns_mhdp_link *link)
-{
-	u8 value;
-	int err;
-
-	/* DP_SET_POWER register is only available on DPCD v1.1 and later */
-	if (link->revision < 0x11)
-		return 0;
-
-	err = drm_dp_dpcd_readb(aux, DP_SET_POWER, &value);
-	if (err < 0)
-		return err;
-
-	value &= ~DP_SET_POWER_MASK;
-	value |= DP_SET_POWER_D0;
-
-	err = drm_dp_dpcd_writeb(aux, DP_SET_POWER, value);
-	if (err < 0)
-		return err;
-
-	/*
-	 * According to the DP 1.1 specification, a "Sink Device must exit the
-	 * power saving state within 1 ms" (Section 2.5.3.1, Table 5-52, "Sink
-	 * Control Field" (register 0x600).
-	 */
-	usleep_range(1000, 2000);
-
-	return 0;
-}
-
-/**
- * cdns_mhdp_link_power_down() - power down a DisplayPort link
- * @aux: DisplayPort AUX channel
- * @link: pointer to a structure containing the link configuration
- *
- * Returns 0 on success or a negative error code on failure.
- */
-static
-int cdns_mhdp_link_power_down(struct drm_dp_aux *aux,
-			      struct cdns_mhdp_link *link)
-{
-	u8 value;
-	int err;
-
-	/* DP_SET_POWER register is only available on DPCD v1.1 and later */
-	if (link->revision < 0x11)
-		return 0;
-
-	err = drm_dp_dpcd_readb(aux, DP_SET_POWER, &value);
-	if (err < 0)
-		return err;
-
-	value &= ~DP_SET_POWER_MASK;
-	value |= DP_SET_POWER_D3;
-
-	err = drm_dp_dpcd_writeb(aux, DP_SET_POWER, value);
-	if (err < 0)
-		return err;
-
-	return 0;
 }
 
 /**
@@ -1453,7 +1383,7 @@ static int cdns_mhdp_link_up(struct cdns_mhdp_device *mhdp)
 		mhdp->link.capabilities |= DP_LINK_CAP_ENHANCED_FRAMING;
 
 	dev_dbg(mhdp->dev, "Set sink device power state via DPCD\n");
-	cdns_mhdp_link_power_up(&mhdp->aux, &mhdp->link);
+	drm_dp_link_power_up(&mhdp->aux, mhdp->link.revision);
 
 	cdns_mhdp_fill_sink_caps(mhdp, dpcd);
 
@@ -1500,38 +1430,40 @@ static void cdns_mhdp_link_down(struct cdns_mhdp_device *mhdp)
 	WARN_ON(!mutex_is_locked(&mhdp->link_mutex));
 
 	if (mhdp->plugged)
-		cdns_mhdp_link_power_down(&mhdp->aux, &mhdp->link);
+		drm_dp_link_power_down(&mhdp->aux, mhdp->link.revision);
 
 	mhdp->link_up = false;
 }
 
-static struct edid *cdns_mhdp_get_edid(struct cdns_mhdp_device *mhdp,
-				       struct drm_connector *connector)
+static const struct drm_edid *cdns_mhdp_edid_read(struct cdns_mhdp_device *mhdp,
+						  struct drm_connector *connector)
 {
 	if (!mhdp->plugged)
 		return NULL;
 
-	return drm_do_get_edid(connector, cdns_mhdp_get_edid_block, mhdp);
+	return drm_edid_read_custom(connector, cdns_mhdp_get_edid_block, mhdp);
 }
 
 static int cdns_mhdp_get_modes(struct drm_connector *connector)
 {
 	struct cdns_mhdp_device *mhdp = connector_to_mhdp(connector);
-	struct edid *edid;
+	const struct drm_edid *drm_edid;
 	int num_modes;
 
 	if (!mhdp->plugged)
 		return 0;
 
-	edid = cdns_mhdp_get_edid(mhdp, connector);
-	if (!edid) {
+	drm_edid = cdns_mhdp_edid_read(mhdp, connector);
+
+	drm_edid_connector_update(connector, drm_edid);
+
+	if (!drm_edid) {
 		dev_err(mhdp->dev, "Failed to read EDID\n");
 		return 0;
 	}
 
-	drm_connector_update_edid_property(connector, edid);
-	num_modes = drm_add_edid_modes(connector, edid);
-	kfree(edid);
+	num_modes = drm_edid_connector_add_modes(connector);
+	drm_edid_free(drm_edid);
 
 	/*
 	 * HACK: Warn about unsupported display formats until we deal
@@ -1617,7 +1549,7 @@ bool cdns_mhdp_bandwidth_ok(struct cdns_mhdp_device *mhdp,
 
 static
 enum drm_mode_status cdns_mhdp_mode_valid(struct drm_connector *conn,
-					  struct drm_display_mode *mode)
+					  const struct drm_display_mode *mode)
 {
 	struct cdns_mhdp_device *mhdp = connector_to_mhdp(conn);
 
@@ -1695,11 +1627,6 @@ static int cdns_mhdp_connector_init(struct cdns_mhdp_device *mhdp)
 	struct drm_bridge *bridge = &mhdp->bridge;
 	int ret;
 
-	if (!bridge->encoder) {
-		dev_err(mhdp->dev, "Parent encoder object not found");
-		return -ENODEV;
-	}
-
 	conn->polled = DRM_CONNECTOR_POLL_HPD;
 
 	ret = drm_connector_init(bridge->dev, conn, &cdns_mhdp_conn_funcs,
@@ -1729,6 +1656,7 @@ static int cdns_mhdp_connector_init(struct cdns_mhdp_device *mhdp)
 }
 
 static int cdns_mhdp_attach(struct drm_bridge *bridge,
+			    struct drm_encoder *encoder,
 			    enum drm_bridge_attach_flags flags)
 {
 	struct cdns_mhdp_device *mhdp = bridge_to_mhdp(bridge);
@@ -1982,10 +1910,9 @@ static void cdns_mhdp_sst_enable(struct cdns_mhdp_device *mhdp,
 }
 
 static void cdns_mhdp_atomic_enable(struct drm_bridge *bridge,
-				    struct drm_bridge_state *bridge_state)
+				    struct drm_atomic_state *state)
 {
 	struct cdns_mhdp_device *mhdp = bridge_to_mhdp(bridge);
-	struct drm_atomic_state *state = bridge_state->base.state;
 	struct cdns_mhdp_bridge_state *mhdp_state;
 	struct drm_crtc_state *crtc_state;
 	struct drm_connector *connector;
@@ -2057,6 +1984,11 @@ static void cdns_mhdp_atomic_enable(struct drm_bridge *bridge,
 	mhdp_state = to_cdns_mhdp_bridge_state(new_state);
 
 	mhdp_state->current_mode = drm_mode_duplicate(bridge->dev, mode);
+	if (!mhdp_state->current_mode) {
+		ret = -EINVAL;
+		goto out;
+	}
+
 	drm_mode_set_name(mhdp_state->current_mode);
 
 	dev_dbg(mhdp->dev, "%s: Enabling mode %s\n", __func__, mode->name);
@@ -2070,7 +2002,7 @@ out:
 }
 
 static void cdns_mhdp_atomic_disable(struct drm_bridge *bridge,
-				     struct drm_bridge_state *bridge_state)
+				     struct drm_atomic_state *state)
 {
 	struct cdns_mhdp_device *mhdp = bridge_to_mhdp(bridge);
 	u32 resp;
@@ -2213,19 +2145,20 @@ static int cdns_mhdp_atomic_check(struct drm_bridge *bridge,
 	return 0;
 }
 
-static enum drm_connector_status cdns_mhdp_bridge_detect(struct drm_bridge *bridge)
+static enum drm_connector_status
+cdns_mhdp_bridge_detect(struct drm_bridge *bridge, struct drm_connector *connector)
 {
 	struct cdns_mhdp_device *mhdp = bridge_to_mhdp(bridge);
 
 	return cdns_mhdp_detect(mhdp);
 }
 
-static struct edid *cdns_mhdp_bridge_get_edid(struct drm_bridge *bridge,
-					      struct drm_connector *connector)
+static const struct drm_edid *cdns_mhdp_bridge_edid_read(struct drm_bridge *bridge,
+							 struct drm_connector *connector)
 {
 	struct cdns_mhdp_device *mhdp = bridge_to_mhdp(bridge);
 
-	return cdns_mhdp_get_edid(mhdp, connector);
+	return cdns_mhdp_edid_read(mhdp, connector);
 }
 
 static const struct drm_bridge_funcs cdns_mhdp_bridge_funcs = {
@@ -2239,7 +2172,7 @@ static const struct drm_bridge_funcs cdns_mhdp_bridge_funcs = {
 	.atomic_reset = cdns_mhdp_bridge_atomic_reset,
 	.atomic_get_input_bus_fmts = cdns_mhdp_get_input_bus_fmts,
 	.detect = cdns_mhdp_bridge_detect,
-	.get_edid = cdns_mhdp_bridge_get_edid,
+	.edid_read = cdns_mhdp_bridge_edid_read,
 	.hpd_enable = cdns_mhdp_bridge_hpd_enable,
 	.hpd_disable = cdns_mhdp_bridge_hpd_disable,
 };
@@ -2306,7 +2239,7 @@ static int cdns_mhdp_update_link_status(struct cdns_mhdp_device *mhdp)
 		 * If everything looks fine, just return, as we don't handle
 		 * DP IRQs.
 		 */
-		if (ret > 0 &&
+		if (!ret &&
 		    drm_dp_channel_eq_ok(status, mhdp->link.num_lanes) &&
 		    drm_dp_clock_recovery_ok(status, mhdp->link.num_lanes))
 			goto out;
@@ -2459,13 +2392,14 @@ static int cdns_mhdp_probe(struct platform_device *pdev)
 	int ret;
 	int irq;
 
-	mhdp = devm_kzalloc(dev, sizeof(*mhdp), GFP_KERNEL);
-	if (!mhdp)
-		return -ENOMEM;
+	mhdp = devm_drm_bridge_alloc(dev, struct cdns_mhdp_device, bridge,
+				     &cdns_mhdp_bridge_funcs);
+	if (IS_ERR(mhdp))
+		return PTR_ERR(mhdp);
 
-	clk = devm_clk_get(dev, NULL);
+	clk = devm_clk_get_enabled(dev, NULL);
 	if (IS_ERR(clk)) {
-		dev_err(dev, "couldn't get clk: %ld\n", PTR_ERR(clk));
+		dev_err(dev, "couldn't get and enable clk: %ld\n", PTR_ERR(clk));
 		return PTR_ERR(clk);
 	}
 
@@ -2504,14 +2438,12 @@ static int cdns_mhdp_probe(struct platform_device *pdev)
 
 	mhdp->info = of_device_get_match_data(dev);
 
-	clk_prepare_enable(clk);
-
 	pm_runtime_enable(dev);
 	ret = pm_runtime_resume_and_get(dev);
 	if (ret < 0) {
 		dev_err(dev, "pm_runtime_resume_and_get failed\n");
 		pm_runtime_disable(dev);
-		goto clk_disable;
+		return ret;
 	}
 
 	if (mhdp->info && mhdp->info->ops && mhdp->info->ops->init) {
@@ -2553,7 +2485,6 @@ static int cdns_mhdp_probe(struct platform_device *pdev)
 	mhdp->display_fmt.bpc = 8;
 
 	mhdp->bridge.of_node = pdev->dev.of_node;
-	mhdp->bridge.funcs = &cdns_mhdp_bridge_funcs;
 	mhdp->bridge.ops = DRM_BRIDGE_OP_DETECT | DRM_BRIDGE_OP_EDID |
 			   DRM_BRIDGE_OP_HPD;
 	mhdp->bridge.type = DRM_MODE_CONNECTOR_DisplayPort;
@@ -2590,8 +2521,6 @@ plat_fini:
 runtime_put:
 	pm_runtime_put_sync(dev);
 	pm_runtime_disable(dev);
-clk_disable:
-	clk_disable_unprepare(mhdp->clk);
 
 	return ret;
 }
@@ -2632,8 +2561,6 @@ static void cdns_mhdp_remove(struct platform_device *pdev)
 	cancel_work_sync(&mhdp->modeset_retry_work);
 	flush_work(&mhdp->hpd_work);
 	/* Ignoring mhdp->hdcp.check_work and mhdp->hdcp.prop_work here. */
-
-	clk_disable_unprepare(mhdp->clk);
 }
 
 static const struct of_device_id mhdp_ids[] = {
@@ -2656,7 +2583,7 @@ static struct platform_driver mhdp_driver = {
 		.of_match_table	= mhdp_ids,
 	},
 	.probe	= cdns_mhdp_probe,
-	.remove_new = cdns_mhdp_remove,
+	.remove = cdns_mhdp_remove,
 };
 module_platform_driver(mhdp_driver);
 

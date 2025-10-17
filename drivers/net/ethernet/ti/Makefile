@@ -3,6 +3,9 @@
 # Makefile for the TI network device drivers.
 #
 
+obj-$(CONFIG_TI_PRUETH) += icssm-prueth.o
+icssm-prueth-y := icssm/icssm_prueth.o
+
 obj-$(CONFIG_TI_CPSW) += cpsw-common.o
 obj-$(CONFIG_TI_DAVINCI_EMAC) += cpsw-common.o
 obj-$(CONFIG_TI_CPSW_SWITCHDEV) += cpsw-common.o
@@ -31,12 +34,18 @@ ti-am65-cpsw-nuss-$(CONFIG_TI_AM65_CPSW_QOS) += am65-cpsw-qos.o
 ti-am65-cpsw-nuss-$(CONFIG_TI_K3_AM65_CPSW_SWITCHDEV) += am65-cpsw-switchdev.o
 obj-$(CONFIG_TI_K3_AM65_CPTS) += am65-cpts.o
 
-obj-$(CONFIG_TI_ICSSG_PRUETH) += icssg-prueth.o
-icssg-prueth-y := icssg/icssg_prueth.o \
-		  icssg/icssg_classifier.o \
-		  icssg/icssg_queues.o \
-		  icssg/icssg_config.o \
-		  icssg/icssg_mii_cfg.o \
-		  icssg/icssg_stats.o \
-		  icssg/icssg_ethtool.o
+obj-$(CONFIG_TI_ICSSG_PRUETH) += icssg-prueth.o icssg.o
+icssg-prueth-y := icssg/icssg_prueth.o icssg/icssg_switchdev.o
+
+obj-$(CONFIG_TI_ICSSG_PRUETH_SR1) += icssg-prueth-sr1.o icssg.o
+icssg-prueth-sr1-y := icssg/icssg_prueth_sr1.o
+
+icssg-y := icssg/icssg_common.o \
+	   icssg/icssg_classifier.o \
+	   icssg/icssg_queues.o \
+	   icssg/icssg_config.o \
+	   icssg/icssg_mii_cfg.o \
+	   icssg/icssg_stats.o \
+	   icssg/icssg_ethtool.o
+
 obj-$(CONFIG_TI_ICSS_IEP) += icssg/icss_iep.o

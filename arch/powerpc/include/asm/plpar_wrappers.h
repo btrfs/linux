@@ -18,16 +18,6 @@ static inline long poll_pending(void)
 	return plpar_hcall_norets(H_POLL_PENDING);
 }
 
-static inline u8 get_cede_latency_hint(void)
-{
-	return get_lppaca()->cede_latency_hint;
-}
-
-static inline void set_cede_latency_hint(u8 latency_hint)
-{
-	get_lppaca()->cede_latency_hint = latency_hint;
-}
-
 static inline long cede_processor(void)
 {
 	/*
@@ -35,24 +25,6 @@ static inline long cede_processor(void)
 	 * means we must not trace H_CEDE.
 	 */
 	return plpar_hcall_norets_notrace(H_CEDE);
-}
-
-static inline long extended_cede_processor(unsigned long latency_hint)
-{
-	long rc;
-	u8 old_latency_hint = get_cede_latency_hint();
-
-	set_cede_latency_hint(latency_hint);
-
-	rc = cede_processor();
-
-	/* Ensure that H_CEDE returns with IRQs on */
-	if (WARN_ON(IS_ENABLED(CONFIG_PPC_IRQ_SOFT_MASK_DEBUG) && !(mfmsr() & MSR_EE)))
-		__hard_irq_enable();
-
-	set_cede_latency_hint(old_latency_hint);
-
-	return rc;
 }
 
 static inline long vpa_call(unsigned long flags, unsigned long cpu,
@@ -91,6 +63,35 @@ static inline long unregister_dtl(unsigned long cpu)
 static inline long register_dtl(unsigned long cpu, unsigned long vpa)
 {
 	return vpa_call(H_VPA_REG_DTL, cpu, vpa);
+}
+
+/*
+ * Invokes H_HTM hcall with parameters passed from htm_hcall_wrapper.
+ * flags: Set to hardwareTarget.
+ * target: Specifies target using node index, nodal chip index and core index.
+ * operation : action to perform ie configure, start, stop, deconfigure, trace
+ * based on the HTM type.
+ * param1, param2, param3: parameters for each action.
+ */
+static inline long htm_call(unsigned long flags, unsigned long target,
+               unsigned long operation, unsigned long param1,
+               unsigned long param2, unsigned long param3)
+{
+       return plpar_hcall_norets(H_HTM, flags, target, operation,
+                                 param1, param2, param3);
+}
+
+static inline long htm_hcall_wrapper(unsigned long flags, unsigned long nodeindex,
+               unsigned long nodalchipindex, unsigned long coreindexonchip,
+	       unsigned long type, unsigned long htm_op, unsigned long param1, unsigned long param2,
+	       unsigned long param3)
+{
+	return htm_call(H_HTM_FLAGS_HARDWARE_TARGET | flags,
+                       H_HTM_TARGET_NODE_INDEX(nodeindex) |
+                       H_HTM_TARGET_NODAL_CHIP_INDEX(nodalchipindex) |
+                       H_HTM_TARGET_CORE_INDEX_ON_CHIP(coreindexonchip),
+		       H_HTM_OP(htm_op) | H_HTM_TYPE(type),
+		       param1, param2, param3);
 }
 
 extern void vpa_init(int cpu);

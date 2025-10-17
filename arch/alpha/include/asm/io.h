@@ -10,10 +10,6 @@
 #include <asm/machvec.h>
 #include <asm/hwrpb.h>
 
-/* The generic header contains only prototypes.  Including it ensures that
-   the implementation we have here matches that interface.  */
-#include <asm-generic/iomap.h>
-
 /*
  * Virtual -> physical identity mapping starts at this offset
  */
@@ -88,7 +84,6 @@ static inline void * phys_to_virt(unsigned long address)
 
 #define virt_to_phys		virt_to_phys
 #define phys_to_virt		phys_to_virt
-#define page_to_phys(page)	page_to_pa(page)
 
 /* Maximum PIO space address supported?  */
 #define IO_SPACE_LIMIT 0xffff
@@ -203,16 +198,10 @@ static inline int generic_is_mmio(const volatile void __iomem *a)
 
 #else
 
-#if defined(CONFIG_ALPHA_APECS)
-# include <asm/core_apecs.h>
-#elif defined(CONFIG_ALPHA_CIA)
+#if defined(CONFIG_ALPHA_CIA)
 # include <asm/core_cia.h>
 #elif defined(CONFIG_ALPHA_IRONGATE)
 # include <asm/core_irongate.h>
-#elif defined(CONFIG_ALPHA_JENSEN)
-# include <asm/jensen.h>
-#elif defined(CONFIG_ALPHA_LCA)
-# include <asm/core_lca.h>
 #elif defined(CONFIG_ALPHA_MARVEL)
 # include <asm/core_marvel.h>
 #elif defined(CONFIG_ALPHA_MCPCIA)
@@ -283,13 +272,24 @@ extern void		__raw_writeq(u64 b, volatile void __iomem *addr);
 #define __raw_writel __raw_writel
 #define __raw_writeq __raw_writeq
 
-/*
- * Mapping from port numbers to __iomem space is pretty easy.
- */
+extern unsigned int ioread8(const void __iomem *);
+extern unsigned int ioread16(const void __iomem *);
+extern unsigned int ioread32(const void __iomem *);
+extern u64 ioread64(const void __iomem *);
 
-/* These two have to be extern inline because of the extern prototype from
-   <asm-generic/iomap.h>.  It is not legal to mix "extern" and "static" for
-   the same declaration.  */
+extern void iowrite8(u8, void __iomem *);
+extern void iowrite16(u16, void __iomem *);
+extern void iowrite32(u32, void __iomem *);
+extern void iowrite64(u64, void __iomem *);
+
+extern void ioread8_rep(const void __iomem *port, void *buf, unsigned long count);
+extern void ioread16_rep(const void __iomem *port, void *buf, unsigned long count);
+extern void ioread32_rep(const void __iomem *port, void *buf, unsigned long count);
+
+extern void iowrite8_rep(void __iomem *port, const void *buf, unsigned long count);
+extern void iowrite16_rep(void __iomem *port, const void *buf, unsigned long count);
+extern void iowrite32_rep(void __iomem *port, const void *buf, unsigned long count);
+
 extern inline void __iomem *ioport_map(unsigned long port, unsigned int size)
 {
 	return IO_CONCAT(__IO_PREFIX,ioportmap) (port);
@@ -540,8 +540,10 @@ extern inline void writeq(u64 b, volatile void __iomem *addr)
 
 #define ioread16be(p) swab16(ioread16(p))
 #define ioread32be(p) swab32(ioread32(p))
+#define ioread64be(p) swab64(ioread64(p))
 #define iowrite16be(v,p) iowrite16(swab16(v), (p))
 #define iowrite32be(v,p) iowrite32(swab32(v), (p))
+#define iowrite64be(v,p) iowrite64(swab64(v), (p))
 
 #define inb_p		inb
 #define inw_p		inw
@@ -631,33 +633,11 @@ extern void outsl (unsigned long port, const void *src, unsigned long count);
 #define outsw outsw
 #define outsl outsl
 
-/*
- * The Alpha Jensen hardware for some rather strange reason puts
- * the RTC clock at 0x170 instead of 0x70. Probably due to some
- * misguided idea about using 0x70 for NMI stuff.
- *
- * These defines will override the defaults when doing RTC queries
- */
-
-#ifdef CONFIG_ALPHA_GENERIC
-# define RTC_PORT(x)	((x) + alpha_mv.rtc_port)
-#else
-# ifdef CONFIG_ALPHA_JENSEN
-#  define RTC_PORT(x)	(0x170+(x))
-# else
-#  define RTC_PORT(x)	(0x70 + (x))
-# endif
-#endif
+#define RTC_PORT(x)	(0x70 + (x))
 #define RTC_ALWAYS_BCD	0
 
-/*
- * These get provided from <asm-generic/iomap.h> since alpha does not
- * select GENERIC_IOMAP.
- */
 #define ioread64 ioread64
 #define iowrite64 iowrite64
-#define ioread64be ioread64be
-#define iowrite64be iowrite64be
 #define ioread8_rep ioread8_rep
 #define ioread16_rep ioread16_rep
 #define ioread32_rep ioread32_rep

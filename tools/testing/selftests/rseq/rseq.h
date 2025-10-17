@@ -60,19 +60,20 @@
 extern ptrdiff_t rseq_offset;
 
 /*
- * Size of the registered rseq area. 0 if the registration was
+ * The rseq ABI is composed of extensible feature fields. The extensions
+ * are done by appending additional fields at the end of the structure.
+ * The rseq_size defines the size of the active feature set which can be
+ * used by the application for the current rseq registration. Features
+ * starting at offset >= rseq_size are inactive and should not be used.
+ *
+ * The rseq_size is the intersection between the available allocation
+ * size for the rseq area and the feature size supported by the kernel.
  * unsuccessful.
  */
 extern unsigned int rseq_size;
 
 /* Flags used during rseq registration. */
 extern unsigned int rseq_flags;
-
-/*
- * rseq feature size supported by the kernel. 0 if the registration was
- * unsuccessful.
- */
-extern unsigned int rseq_feature_size;
 
 enum rseq_mo {
 	RSEQ_MO_RELAXED = 0,
@@ -128,6 +129,8 @@ static inline struct rseq_abi *rseq_get_abi(void)
 #include <rseq-s390.h>
 #elif defined(__riscv)
 #include <rseq-riscv.h>
+#elif defined(__or1k__)
+#include <rseq-or1k.h>
 #else
 #error unsupported target
 #endif
@@ -155,6 +158,11 @@ int32_t rseq_fallback_current_cpu(void);
  * Restartable sequence fallback for reading the current node number.
  */
 int32_t rseq_fallback_current_node(void);
+
+/*
+ * Returns true if rseq is supported.
+ */
+bool rseq_available(void);
 
 /*
  * Values returned can be either the current CPU number, -1 (rseq is
@@ -193,7 +201,7 @@ static inline uint32_t rseq_current_cpu(void)
 
 static inline bool rseq_node_id_available(void)
 {
-	return (int) rseq_feature_size >= rseq_offsetofend(struct rseq_abi, node_id);
+	return (int) rseq_size >= rseq_offsetofend(struct rseq_abi, node_id);
 }
 
 /*
@@ -207,7 +215,7 @@ static inline uint32_t rseq_current_node_id(void)
 
 static inline bool rseq_mm_cid_available(void)
 {
-	return (int) rseq_feature_size >= rseq_offsetofend(struct rseq_abi, mm_cid);
+	return (int) rseq_size >= rseq_offsetofend(struct rseq_abi, mm_cid);
 }
 
 static inline uint32_t rseq_current_mm_cid(void)

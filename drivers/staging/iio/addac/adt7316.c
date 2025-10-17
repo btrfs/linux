@@ -209,15 +209,6 @@ struct adt7316_chip_info {
 #define ADT7316_TEMP_AIN_INT_MASK	\
 	(ADT7316_TEMP_INT_MASK)
 
-/*
- * struct adt7316_chip_info - chip specific information
- */
-
-struct adt7316_limit_regs {
-	u16	data_high;
-	u16	data_low;
-};
-
 static ssize_t adt7316_show_enabled(struct device *dev,
 				    struct device_attribute *attr,
 				    char *buf)
@@ -1803,7 +1794,7 @@ static int adt7316_setup_irq(struct iio_dev *indio_dev)
 	struct adt7316_chip_info *chip = iio_priv(indio_dev);
 	int irq_type, ret;
 
-	irq_type = irqd_get_trigger_type(irq_get_irq_data(chip->bus.irq));
+	irq_type = irq_get_trigger_type(chip->bus.irq);
 
 	switch (irq_type) {
 	case IRQF_TRIGGER_HIGH:

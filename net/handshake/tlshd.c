@@ -213,7 +213,6 @@ static int tls_handshake_accept(struct handshake_req *req,
 	if (!hdr)
 		goto out_cancel;
 
-	ret = -EMSGSIZE;
 	ret = nla_put_s32(msg, HANDSHAKE_A_ACCEPT_SOCKFD, fd);
 	if (ret < 0)
 		goto out_cancel;
@@ -228,6 +227,12 @@ static int tls_handshake_accept(struct handshake_req *req,
 	}
 	if (treq->th_timeout_ms) {
 		ret = nla_put_u32(msg, HANDSHAKE_A_ACCEPT_TIMEOUT, treq->th_timeout_ms);
+		if (ret < 0)
+			goto out_cancel;
+	}
+	if (treq->th_keyring) {
+		ret = nla_put_u32(msg, HANDSHAKE_A_ACCEPT_KEYRING,
+				  treq->th_keyring);
 		if (ret < 0)
 			goto out_cancel;
 	}

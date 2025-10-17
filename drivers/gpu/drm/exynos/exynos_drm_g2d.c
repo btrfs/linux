@@ -1607,10 +1607,9 @@ MODULE_DEVICE_TABLE(of, exynos_g2d_match);
 
 struct platform_driver g2d_driver = {
 	.probe		= g2d_probe,
-	.remove_new	= g2d_remove,
+	.remove		= g2d_remove,
 	.driver		= {
 		.name	= "exynos-drm-g2d",
-		.owner	= THIS_MODULE,
 		.pm	= pm_ptr(&g2d_pm_ops),
 		.of_match_table = exynos_g2d_match,
 	},

@@ -9,8 +9,15 @@
 #include "reg.h"
 #include "rtw8922a.h"
 
+static const struct rtw89_pci_ssid_quirk rtw8922a_pci_ssid_quirks[] = {
+	{RTW89_PCI_SSID(PCI_VENDOR_ID_REALTEK, 0x8922, 0x10EC, 0xA891, DELL),
+	 .bitmap = BIT(RTW89_QUIRK_THERMAL_PROT_120C)},
+	{},
+};
+
 static const struct rtw89_pci_info rtw8922a_pci_info = {
 	.gen_def		= &rtw89_pci_gen_be,
+	.isr_def		= &rtw89_pci_isr_be,
 	.txbd_trunc_mode	= MAC_AX_BD_TRUNC,
 	.rxbd_trunc_mode	= MAC_AX_BD_TRUNC,
 	.rxbd_mode		= MAC_AX_RXBD_PKT,
@@ -26,6 +33,10 @@ static const struct rtw89_pci_info rtw8922a_pci_info = {
 	.io_rcy_en		= MAC_AX_PCIE_ENABLE,
 	.io_rcy_tmr		= MAC_AX_IO_RCY_ANA_TMR_DEF,
 	.rx_ring_eq_is_full	= true,
+	.check_rx_tag		= true,
+	.no_rxbd_fs		= true,
+	.group_bd_addr		= false,
+	.rpp_fmt_size		= sizeof(struct rtw89_pci_rpp_fmt),
 
 	.init_cfg_reg		= R_BE_HAXI_INIT_CFG1,
 	.txhci_en_bit		= B_BE_TXDMA_EN,
@@ -45,6 +56,7 @@ static const struct rtw89_pci_info rtw8922a_pci_info = {
 	.rpwm_addr		= R_BE_PCIE_HRPWM,
 	.cpwm_addr		= R_BE_PCIE_CRPWM,
 	.mit_addr		= R_BE_PCIE_MIT_CH_EN,
+	.wp_sel_addr		= R_BE_WP_ADDR_H_SEL0_3_V1,
 	.tx_dma_ch_mask		= 0,
 	.bd_idx_addr_low_power	= NULL,
 	.dma_addr_set		= &rtw89_pci_ch_dma_addr_set_be,
@@ -52,14 +64,28 @@ static const struct rtw89_pci_info rtw8922a_pci_info = {
 
 	.ltr_set		= rtw89_pci_ltr_set_v2,
 	.fill_txaddr_info	= rtw89_pci_fill_txaddr_info_v1,
+	.parse_rpp		= rtw89_pci_parse_rpp,
 	.config_intr_mask	= rtw89_pci_config_intr_mask_v2,
 	.enable_intr		= rtw89_pci_enable_intr_v2,
 	.disable_intr		= rtw89_pci_disable_intr_v2,
 	.recognize_intrs	= rtw89_pci_recognize_intrs_v2,
+
+	.ssid_quirks		= rtw8922a_pci_ssid_quirks,
 };
 
 static const struct rtw89_driver_info rtw89_8922ae_info = {
 	.chip = &rtw8922a_chip_info,
+	.variant = NULL,
+	.quirks = NULL,
+	.bus = {
+		.pci = &rtw8922a_pci_info,
+	},
+};
+
+static const struct rtw89_driver_info rtw89_8922ae_vs_info = {
+	.chip = &rtw8922a_chip_info,
+	.variant = &rtw8922ae_vs_variant,
+	.quirks = NULL,
 	.bus = {
 		.pci = &rtw8922a_pci_info,
 	},
@@ -70,6 +96,10 @@ static const struct pci_device_id rtw89_8922ae_id_table[] = {
 		PCI_DEVICE(PCI_VENDOR_ID_REALTEK, 0x8922),
 		.driver_data = (kernel_ulong_t)&rtw89_8922ae_info,
 	},
+	{
+		PCI_DEVICE(PCI_VENDOR_ID_REALTEK, 0x892B),
+		.driver_data = (kernel_ulong_t)&rtw89_8922ae_vs_info,
+	},
 	{},
 };
 MODULE_DEVICE_TABLE(pci, rtw89_8922ae_id_table);
@@ -79,10 +109,11 @@ static struct pci_driver rtw89_8922ae_driver = {
 	.id_table	= rtw89_8922ae_id_table,
 	.probe		= rtw89_pci_probe,
 	.remove		= rtw89_pci_remove,
-	.driver.pm	= &rtw89_pm_ops,
+	.driver.pm	= &rtw89_pm_ops_be,
+	.err_handler    = &rtw89_pci_err_handler,
 };
 module_pci_driver(rtw89_8922ae_driver);
 
 MODULE_AUTHOR("Realtek Corporation");
-MODULE_DESCRIPTION("Realtek 802.11be wireless 8922AE driver");
+MODULE_DESCRIPTION("Realtek 802.11be wireless 8922AE/8922AE-VS driver");
 MODULE_LICENSE("Dual BSD/GPL");

@@ -2,9 +2,10 @@
 /*
  * System Control and Power Interface (SCMI) Protocol based clock driver
  *
- * Copyright (C) 2018-2022 ARM Ltd.
+ * Copyright (C) 2018-2024 ARM Ltd.
  */
 
+#include <linux/bits.h>
 #include <linux/clk-provider.h>
 #include <linux/device.h>
 #include <linux/err.h>
@@ -15,6 +16,17 @@
 
 #define NOT_ATOMIC	false
 #define ATOMIC		true
+
+enum scmi_clk_feats {
+	SCMI_CLK_ATOMIC_SUPPORTED,
+	SCMI_CLK_STATE_CTRL_SUPPORTED,
+	SCMI_CLK_RATE_CTRL_SUPPORTED,
+	SCMI_CLK_PARENT_CTRL_SUPPORTED,
+	SCMI_CLK_DUTY_CYCLE_SUPPORTED,
+	SCMI_CLK_FEATS_COUNT
+};
+
+#define SCMI_MAX_CLK_OPS	BIT(SCMI_CLK_FEATS_COUNT)
 
 static const struct scmi_clk_proto_ops *scmi_proto_clk_ops;
 
@@ -42,8 +54,8 @@ static unsigned long scmi_clk_recalc_rate(struct clk_hw *hw,
 	return rate;
 }
 
-static long scmi_clk_round_rate(struct clk_hw *hw, unsigned long rate,
-				unsigned long *parent_rate)
+static int scmi_clk_determine_rate(struct clk_hw *hw,
+				   struct clk_rate_request *req)
 {
 	u64 fmin, fmax, ftmp;
 	struct scmi_clk *clk = to_scmi_clk(hw);
@@ -55,20 +67,27 @@ static long scmi_clk_round_rate(struct clk_hw *hw, unsigned long rate,
 	 * running at then.
 	 */
 	if (clk->info->rate_discrete)
-		return rate;
+		return 0;
 
 	fmin = clk->info->range.min_rate;
 	fmax = clk->info->range.max_rate;
-	if (rate <= fmin)
-		return fmin;
-	else if (rate >= fmax)
-		return fmax;
+	if (req->rate <= fmin) {
+		req->rate = fmin;
 
-	ftmp = rate - fmin;
+		return 0;
+	} else if (req->rate >= fmax) {
+		req->rate = fmax;
+
+		return 0;
+	}
+
+	ftmp = req->rate - fmin;
 	ftmp += clk->info->range.step_size - 1; /* to round up */
 	do_div(ftmp, clk->info->range.step_size);
 
-	return ftmp * clk->info->range.step_size + fmin;
+	req->rate = ftmp * clk->info->range.step_size + fmin;
+
+	return 0;
 }
 
 static int scmi_clk_set_rate(struct clk_hw *hw, unsigned long rate,
@@ -107,15 +126,6 @@ static u8 scmi_clk_get_parent(struct clk_hw *hw)
 	return p_idx;
 }
 
-static int scmi_clk_determine_rate(struct clk_hw *hw, struct clk_rate_request *req)
-{
-	/*
-	 * Suppose all the requested rates are supported, and let firmware
-	 * to handle the left work.
-	 */
-	return 0;
-}
-
 static int scmi_clk_enable(struct clk_hw *hw)
 {
 	struct scmi_clk *clk = to_scmi_clk(hw);
@@ -144,13 +154,13 @@ static void scmi_clk_atomic_disable(struct clk_hw *hw)
 	scmi_proto_clk_ops->disable(clk->ph, clk->id, ATOMIC);
 }
 
-static int scmi_clk_atomic_is_enabled(struct clk_hw *hw)
+static int __scmi_clk_is_enabled(struct clk_hw *hw, bool atomic)
 {
 	int ret;
 	bool enabled = false;
 	struct scmi_clk *clk = to_scmi_clk(hw);
 
-	ret = scmi_proto_clk_ops->state_get(clk->ph, clk->id, &enabled, ATOMIC);
+	ret = scmi_proto_clk_ops->state_get(clk->ph, clk->id, &enabled, atomic);
 	if (ret)
 		dev_warn(clk->dev,
 			 "Failed to get state for clock ID %d\n", clk->id);
@@ -158,41 +168,54 @@ static int scmi_clk_atomic_is_enabled(struct clk_hw *hw)
 	return !!enabled;
 }
 
-/*
- * We can provide enable/disable/is_enabled atomic callbacks only if the
- * underlying SCMI transport for an SCMI instance is configured to handle
- * SCMI commands in an atomic manner.
- *
- * When no SCMI atomic transport support is available we instead provide only
- * the prepare/unprepare API, as allowed by the clock framework when atomic
- * calls are not available.
- *
- * Two distinct sets of clk_ops are provided since we could have multiple SCMI
- * instances with different underlying transport quality, so they cannot be
- * shared.
- */
-static const struct clk_ops scmi_clk_ops = {
-	.recalc_rate = scmi_clk_recalc_rate,
-	.round_rate = scmi_clk_round_rate,
-	.set_rate = scmi_clk_set_rate,
-	.prepare = scmi_clk_enable,
-	.unprepare = scmi_clk_disable,
-	.set_parent = scmi_clk_set_parent,
-	.get_parent = scmi_clk_get_parent,
-	.determine_rate = scmi_clk_determine_rate,
-};
+static int scmi_clk_atomic_is_enabled(struct clk_hw *hw)
+{
+	return __scmi_clk_is_enabled(hw, ATOMIC);
+}
 
-static const struct clk_ops scmi_atomic_clk_ops = {
-	.recalc_rate = scmi_clk_recalc_rate,
-	.round_rate = scmi_clk_round_rate,
-	.set_rate = scmi_clk_set_rate,
-	.enable = scmi_clk_atomic_enable,
-	.disable = scmi_clk_atomic_disable,
-	.is_enabled = scmi_clk_atomic_is_enabled,
-	.set_parent = scmi_clk_set_parent,
-	.get_parent = scmi_clk_get_parent,
-	.determine_rate = scmi_clk_determine_rate,
-};
+static int scmi_clk_is_enabled(struct clk_hw *hw)
+{
+	return __scmi_clk_is_enabled(hw, NOT_ATOMIC);
+}
+
+static int scmi_clk_get_duty_cycle(struct clk_hw *hw, struct clk_duty *duty)
+{
+	int ret;
+	u32 val;
+	struct scmi_clk *clk = to_scmi_clk(hw);
+
+	ret = scmi_proto_clk_ops->config_oem_get(clk->ph, clk->id,
+						 SCMI_CLOCK_CFG_DUTY_CYCLE,
+						 &val, NULL, false);
+	if (!ret) {
+		duty->num = val;
+		duty->den = 100;
+	} else {
+		dev_warn(clk->dev,
+			 "Failed to get duty cycle for clock ID %d\n", clk->id);
+	}
+
+	return ret;
+}
+
+static int scmi_clk_set_duty_cycle(struct clk_hw *hw, struct clk_duty *duty)
+{
+	int ret;
+	u32 val;
+	struct scmi_clk *clk = to_scmi_clk(hw);
+
+	/* SCMI OEM Duty Cycle is expressed as a percentage */
+	val = (duty->num * 100) / duty->den;
+	ret = scmi_proto_clk_ops->config_oem_set(clk->ph, clk->id,
+						 SCMI_CLOCK_CFG_DUTY_CYCLE,
+						 val, false);
+	if (ret)
+		dev_warn(clk->dev,
+			 "Failed to set duty cycle(%u/%u) for clock ID %d\n",
+			 duty->num, duty->den, clk->id);
+
+	return ret;
+}
 
 static int scmi_clk_ops_init(struct device *dev, struct scmi_clk *sclk,
 			     const struct clk_ops *scmi_ops)
@@ -230,17 +253,162 @@ static int scmi_clk_ops_init(struct device *dev, struct scmi_clk *sclk,
 	return ret;
 }
 
+/**
+ * scmi_clk_ops_alloc() - Alloc and configure clock operations
+ * @dev: A device reference for devres
+ * @feats_key: A bitmap representing the desired clk_ops capabilities
+ *
+ * Allocate and configure a proper set of clock operations depending on the
+ * specifically required SCMI clock features.
+ *
+ * Return: A pointer to the allocated and configured clk_ops on success,
+ *	   or NULL on allocation failure.
+ */
+static const struct clk_ops *
+scmi_clk_ops_alloc(struct device *dev, unsigned long feats_key)
+{
+	struct clk_ops *ops;
+
+	ops = devm_kzalloc(dev, sizeof(*ops), GFP_KERNEL);
+	if (!ops)
+		return NULL;
+	/*
+	 * We can provide enable/disable/is_enabled atomic callbacks only if the
+	 * underlying SCMI transport for an SCMI instance is configured to
+	 * handle SCMI commands in an atomic manner.
+	 *
+	 * When no SCMI atomic transport support is available we instead provide
+	 * only the prepare/unprepare API, as allowed by the clock framework
+	 * when atomic calls are not available.
+	 */
+	if (feats_key & BIT(SCMI_CLK_STATE_CTRL_SUPPORTED)) {
+		if (feats_key & BIT(SCMI_CLK_ATOMIC_SUPPORTED)) {
+			ops->enable = scmi_clk_atomic_enable;
+			ops->disable = scmi_clk_atomic_disable;
+		} else {
+			ops->prepare = scmi_clk_enable;
+			ops->unprepare = scmi_clk_disable;
+		}
+	}
+
+	if (feats_key & BIT(SCMI_CLK_ATOMIC_SUPPORTED))
+		ops->is_enabled = scmi_clk_atomic_is_enabled;
+	else
+		ops->is_prepared = scmi_clk_is_enabled;
+
+	/* Rate ops */
+	ops->recalc_rate = scmi_clk_recalc_rate;
+	ops->determine_rate = scmi_clk_determine_rate;
+	if (feats_key & BIT(SCMI_CLK_RATE_CTRL_SUPPORTED))
+		ops->set_rate = scmi_clk_set_rate;
+
+	/* Parent ops */
+	ops->get_parent = scmi_clk_get_parent;
+	if (feats_key & BIT(SCMI_CLK_PARENT_CTRL_SUPPORTED))
+		ops->set_parent = scmi_clk_set_parent;
+
+	/* Duty cycle */
+	if (feats_key & BIT(SCMI_CLK_DUTY_CYCLE_SUPPORTED)) {
+		ops->get_duty_cycle = scmi_clk_get_duty_cycle;
+		ops->set_duty_cycle = scmi_clk_set_duty_cycle;
+	}
+
+	return ops;
+}
+
+/**
+ * scmi_clk_ops_select() - Select a proper set of clock operations
+ * @sclk: A reference to an SCMI clock descriptor
+ * @atomic_capable: A flag to indicate if atomic mode is supported by the
+ *		    transport
+ * @atomic_threshold_us: Platform atomic threshold value in microseconds:
+ *			 clk_ops are atomic when clock enable latency is less
+ *			 than this threshold
+ * @clk_ops_db: A reference to the array used as a database to store all the
+ *		created clock operations combinations.
+ * @db_size: Maximum number of entries held by @clk_ops_db
+ *
+ * After having built a bitmap descriptor to represent the set of features
+ * needed by this SCMI clock, at first use it to lookup into the set of
+ * previously allocated clk_ops to check if a suitable combination of clock
+ * operations was already created; when no match is found allocate a brand new
+ * set of clk_ops satisfying the required combination of features and save it
+ * for future references.
+ *
+ * In this way only one set of clk_ops is ever created for each different
+ * combination that is effectively needed by a driver instance.
+ *
+ * Return: A pointer to the allocated and configured clk_ops on success, or
+ *	   NULL otherwise.
+ */
+static const struct clk_ops *
+scmi_clk_ops_select(struct scmi_clk *sclk, bool atomic_capable,
+		    unsigned int atomic_threshold_us,
+		    const struct clk_ops **clk_ops_db, size_t db_size)
+{
+	int ret;
+	u32 val;
+	const struct scmi_clock_info *ci = sclk->info;
+	unsigned int feats_key = 0;
+	const struct clk_ops *ops;
+
+	/*
+	 * Note that when transport is atomic but SCMI protocol did not
+	 * specify (or support) an enable_latency associated with a
+	 * clock, we default to use atomic operations mode.
+	 */
+	if (atomic_capable && ci->enable_latency <= atomic_threshold_us)
+		feats_key |= BIT(SCMI_CLK_ATOMIC_SUPPORTED);
+
+	if (!ci->state_ctrl_forbidden)
+		feats_key |= BIT(SCMI_CLK_STATE_CTRL_SUPPORTED);
+
+	if (!ci->rate_ctrl_forbidden)
+		feats_key |= BIT(SCMI_CLK_RATE_CTRL_SUPPORTED);
+
+	if (!ci->parent_ctrl_forbidden)
+		feats_key |= BIT(SCMI_CLK_PARENT_CTRL_SUPPORTED);
+
+	if (ci->extended_config) {
+		ret = scmi_proto_clk_ops->config_oem_get(sclk->ph, sclk->id,
+						 SCMI_CLOCK_CFG_DUTY_CYCLE,
+						 &val, NULL, false);
+		if (!ret)
+			feats_key |= BIT(SCMI_CLK_DUTY_CYCLE_SUPPORTED);
+	}
+
+	if (WARN_ON(feats_key >= db_size))
+		return NULL;
+
+	/* Lookup previously allocated ops */
+	ops = clk_ops_db[feats_key];
+	if (ops)
+		return ops;
+
+	/* Did not find a pre-allocated clock_ops */
+	ops = scmi_clk_ops_alloc(sclk->dev, feats_key);
+	if (!ops)
+		return NULL;
+
+	/* Store new ops combinations */
+	clk_ops_db[feats_key] = ops;
+
+	return ops;
+}
+
 static int scmi_clocks_probe(struct scmi_device *sdev)
 {
 	int idx, count, err;
-	unsigned int atomic_threshold;
-	bool is_atomic;
+	unsigned int atomic_threshold_us;
+	bool transport_is_atomic;
 	struct clk_hw **hws;
 	struct clk_hw_onecell_data *clk_data;
 	struct device *dev = &sdev->dev;
 	struct device_node *np = dev->of_node;
 	const struct scmi_handle *handle = sdev->handle;
 	struct scmi_protocol_handle *ph;
+	const struct clk_ops *scmi_clk_ops_db[SCMI_MAX_CLK_OPS] = {};
+	struct scmi_clk *sclks;
 
 	if (!handle)
 		return -ENODEV;
@@ -264,20 +432,24 @@ static int scmi_clocks_probe(struct scmi_device *sdev)
 	clk_data->num = count;
 	hws = clk_data->hws;
 
-	is_atomic = handle->is_transport_atomic(handle, &atomic_threshold);
+	transport_is_atomic = handle->is_transport_atomic(handle,
+							  &atomic_threshold_us);
+
+	sclks = devm_kcalloc(dev, count, sizeof(*sclks), GFP_KERNEL);
+	if (!sclks)
+		return -ENOMEM;
+
+	for (idx = 0; idx < count; idx++)
+		hws[idx] = &sclks[idx].hw;
 
 	for (idx = 0; idx < count; idx++) {
-		struct scmi_clk *sclk;
+		struct scmi_clk *sclk = &sclks[idx];
 		const struct clk_ops *scmi_ops;
-
-		sclk = devm_kzalloc(dev, sizeof(*sclk), GFP_KERNEL);
-		if (!sclk)
-			return -ENOMEM;
 
 		sclk->info = scmi_proto_clk_ops->info_get(ph, idx);
 		if (!sclk->info) {
 			dev_dbg(dev, "invalid clock info for idx %d\n", idx);
-			devm_kfree(dev, sclk);
+			hws[idx] = NULL;
 			continue;
 		}
 
@@ -286,15 +458,17 @@ static int scmi_clocks_probe(struct scmi_device *sdev)
 		sclk->dev = dev;
 
 		/*
-		 * Note that when transport is atomic but SCMI protocol did not
-		 * specify (or support) an enable_latency associated with a
-		 * clock, we default to use atomic operations mode.
+		 * Note that the scmi_clk_ops_db is on the stack, not global,
+		 * because it cannot be shared between multiple probe-sequences
+		 * to avoid sharing the devm_ allocated clk_ops between multiple
+		 * SCMI clk driver instances.
 		 */
-		if (is_atomic &&
-		    sclk->info->enable_latency <= atomic_threshold)
-			scmi_ops = &scmi_atomic_clk_ops;
-		else
-			scmi_ops = &scmi_clk_ops;
+		scmi_ops = scmi_clk_ops_select(sclk, transport_is_atomic,
+					       atomic_threshold_us,
+					       scmi_clk_ops_db,
+					       ARRAY_SIZE(scmi_clk_ops_db));
+		if (!scmi_ops)
+			return -ENOMEM;
 
 		/* Initialize clock parent data. */
 		if (sclk->info->num_parents > 0) {
@@ -313,14 +487,11 @@ static int scmi_clocks_probe(struct scmi_device *sdev)
 		if (err) {
 			dev_err(dev, "failed to register clock %d\n", idx);
 			devm_kfree(dev, sclk->parent_data);
-			devm_kfree(dev, sclk);
 			hws[idx] = NULL;
 		} else {
 			dev_dbg(dev, "Registered clock:%s%s\n",
 				sclk->info->name,
-				scmi_ops == &scmi_atomic_clk_ops ?
-				" (atomic ops)" : "");
-			hws[idx] = &sclk->hw;
+				scmi_ops->enable ? " (atomic ops)" : "");
 		}
 	}
 

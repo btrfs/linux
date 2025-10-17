@@ -15,6 +15,7 @@ config CIFS
 	select CRYPTO_GCM
 	select CRYPTO_ECB
 	select CRYPTO_AES
+	select CRYPTO_LIB_ARC4
 	select KEYS
 	select DNS_RESOLVER
 	select ASN1
@@ -202,5 +203,19 @@ config CIFS_ROOT
 	  Enables root file system support over SMB protocol.
 
 	  Most people say N here.
+
+config CIFS_COMPRESSION
+	bool "SMB message compression (Experimental)"
+	depends on CIFS
+	default n
+	help
+	  Enables over-the-wire message compression for SMB 3.1.1
+	  mounts when negotiated with the server.
+
+	  Only write requests with data size >= PAGE_SIZE will be
+	  compressed to avoid wasting resources.
+
+	  Say Y here if you want SMB traffic to be compressed.
+	  If unsure, say N.
 
 endif

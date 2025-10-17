@@ -954,7 +954,7 @@ static DEF_SCSI_QCMD(imm_queuecommand)
  * be done in sd.c.  Even if it gets fixed there, this will still
  * work.
  */
-static int imm_biosparam(struct scsi_device *sdev, struct block_device *dev,
+static int imm_biosparam(struct scsi_device *sdev, struct gendisk *unused,
 			 sector_t capacity, int ip[])
 {
 	ip[0] = 0x40;
@@ -1100,16 +1100,6 @@ static int device_check(imm_struct *dev, bool autodetect)
 	return -ENODEV;
 }
 
-/*
- * imm cannot deal with highmem, so this causes all IO pages for this host
- * to reside in low memory (hence mapped)
- */
-static int imm_adjust_queue(struct scsi_device *device)
-{
-	blk_queue_bounce_limit(device->request_queue, BLK_BOUNCE_HIGH);
-	return 0;
-}
-
 static const struct scsi_host_template imm_template = {
 	.module			= THIS_MODULE,
 	.proc_name		= "imm",
@@ -1123,7 +1113,6 @@ static const struct scsi_host_template imm_template = {
 	.this_id		= 7,
 	.sg_tablesize		= SG_ALL,
 	.can_queue		= 1,
-	.slave_alloc		= imm_adjust_queue,
 	.cmd_size		= sizeof(struct scsi_pointer),
 };
 
@@ -1285,8 +1274,8 @@ static struct parport_driver imm_driver = {
 	.name		= "imm",
 	.match_port	= imm_attach,
 	.detach		= imm_detach,
-	.devmodel	= true,
 };
 module_parport_driver(imm_driver);
 
+MODULE_DESCRIPTION("IOMEGA MatchMaker parallel port SCSI host adapter driver");
 MODULE_LICENSE("GPL");

@@ -235,7 +235,7 @@ static struct platform_device *ieee802154fake_dev;
 
 static struct platform_driver ieee802154fake_driver = {
 	.probe = fakelb_probe,
-	.remove_new = fakelb_remove,
+	.remove = fakelb_remove,
 	.driver = {
 			.name = "ieee802154fakelb",
 	},
@@ -259,4 +259,5 @@ static __exit void fake_remove_module(void)
 
 module_init(fakelb_init_module);
 module_exit(fake_remove_module);
+MODULE_DESCRIPTION("IEEE 802.15.4 loopback driver");
 MODULE_LICENSE("GPL");

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0
 /* Check that after SEQ number wrap-around:
  * 1. SEQ-extension has upper bytes set
- * 2. TCP conneciton is alive and no TCPAOBad segments
+ * 2. TCP connection is alive and no TCPAOBad segments
  * In order to test (2), the test doesn't just adjust seq number for a queue
  * on a connected socket, but migrates it to another sk+port number, so
  * that there won't be any delayed packets that will fail to verify
@@ -40,7 +40,7 @@ static void test_adjust_seqs(struct tcp_sock_state *img,
 static int test_sk_restore(struct tcp_sock_state *img,
 			   struct tcp_ao_repair *ao_img, sockaddr_af *saddr,
 			   const union tcp_addr daddr, unsigned int dport,
-			   struct tcp_ao_counters *cnt)
+			   struct tcp_counters *cnt)
 {
 	int sk;
 
@@ -54,8 +54,8 @@ static int test_sk_restore(struct tcp_sock_state *img,
 		test_error("setsockopt(TCP_AO_ADD_KEY)");
 	test_ao_restore(sk, ao_img);
 
-	if (test_get_tcp_ao_counters(sk, cnt))
-		test_error("test_get_tcp_ao_counters()");
+	if (test_get_tcp_counters(sk, cnt))
+		test_error("test_get_tcp_counters()");
 
 	test_disable_repair(sk);
 	test_sock_state_free(img);
@@ -65,7 +65,7 @@ static int test_sk_restore(struct tcp_sock_state *img,
 static void *server_fn(void *arg)
 {
 	uint64_t before_good, after_good, after_bad;
-	struct tcp_ao_counters ao1, ao2;
+	struct tcp_counters cnt1, cnt2;
 	struct tcp_sock_state img;
 	struct tcp_ao_repair ao_img;
 	sockaddr_af saddr;
@@ -114,9 +114,17 @@ static void *server_fn(void *arg)
 	test_adjust_seqs(&img, &ao_img, true);
 	synchronize_threads(); /* 4: dump finished */
 	sk = test_sk_restore(&img, &ao_img, &saddr, this_ip_dest,
-			     client_new_port, &ao1);
+			     client_new_port, &cnt1);
 
-	synchronize_threads(); /* 5: verify counters during SEQ-number rollover */
+	trace_ao_event_sne_expect(TCP_AO_SND_SNE_UPDATE, this_ip_addr,
+			this_ip_dest, test_server_port + 1, client_new_port, 1);
+	trace_ao_event_sne_expect(TCP_AO_SND_SNE_UPDATE, this_ip_dest,
+			this_ip_addr, client_new_port, test_server_port + 1, 1);
+	trace_ao_event_sne_expect(TCP_AO_RCV_SNE_UPDATE, this_ip_addr,
+			this_ip_dest, test_server_port + 1, client_new_port, 1);
+	trace_ao_event_sne_expect(TCP_AO_RCV_SNE_UPDATE, this_ip_dest,
+			this_ip_addr, client_new_port, test_server_port + 1, 1);
+	synchronize_threads(); /* 5: verify the connection during SEQ-number rollover */
 	bytes = test_server_run(sk, quota, TEST_TIMEOUT_SEC);
 	if (bytes != quota) {
 		if (bytes > 0)
@@ -127,22 +135,23 @@ static void *server_fn(void *arg)
 		test_ok("server alive");
 	}
 
-	if (test_get_tcp_ao_counters(sk, &ao2))
-		test_error("test_get_tcp_ao_counters()");
+	synchronize_threads(); /* 6: verify counters after SEQ-number rollover */
+	if (test_get_tcp_counters(sk, &cnt2))
+		test_error("test_get_tcp_counters()");
 	after_good = netstat_get_one("TCPAOGood", NULL);
 
-	test_tcp_ao_counters_cmp(NULL, &ao1, &ao2, TEST_CNT_GOOD);
+	test_assert_counters(NULL, &cnt1, &cnt2, TEST_CNT_GOOD);
 
 	if (after_good <= before_good) {
-		test_fail("TCPAOGood counter did not increase: %zu <= %zu",
+		test_fail("TCPAOGood counter did not increase: %" PRIu64 " <= %" PRIu64,
 			  after_good, before_good);
 	} else {
-		test_ok("TCPAOGood counter increased %zu => %zu",
+		test_ok("TCPAOGood counter increased %" PRIu64 " => %" PRIu64,
 			before_good, after_good);
 	}
 	after_bad = netstat_get_one("TCPAOBad", NULL);
 	if (after_bad)
-		test_fail("TCPAOBad counter is non-zero: %zu", after_bad);
+		test_fail("TCPAOBad counter is non-zero: %" PRIu64, after_bad);
 	else
 		test_ok("TCPAOBad counter didn't increase");
 	test_enable_repair(sk);
@@ -164,7 +173,7 @@ out:
 static void *client_fn(void *arg)
 {
 	uint64_t before_good, after_good, after_bad;
-	struct tcp_ao_counters ao1, ao2;
+	struct tcp_counters cnt1, cnt2;
 	struct tcp_sock_state img;
 	struct tcp_ao_repair ao_img;
 	sockaddr_af saddr;
@@ -182,7 +191,7 @@ static void *client_fn(void *arg)
 		test_error("failed to connect()");
 
 	synchronize_threads(); /* 2: accepted => send data */
-	if (test_client_verify(sk, msg_len, nr_packets, TEST_TIMEOUT_SEC)) {
+	if (test_client_verify(sk, msg_len, nr_packets)) {
 		test_fail("pre-migrate verify failed");
 		return NULL;
 	}
@@ -204,30 +213,31 @@ static void *client_fn(void *arg)
 	test_adjust_seqs(&img, &ao_img, false);
 	synchronize_threads(); /* 4: dump finished */
 	sk = test_sk_restore(&img, &ao_img, &saddr, this_ip_dest,
-			     test_server_port + 1, &ao1);
+			     test_server_port + 1, &cnt1);
 
-	synchronize_threads(); /* 5: verify counters during SEQ-number rollover */
-	if (test_client_verify(sk, msg_len, nr_packets, TEST_TIMEOUT_SEC))
+	synchronize_threads(); /* 5: verify the connection during SEQ-number rollover */
+	if (test_client_verify(sk, msg_len, nr_packets))
 		test_fail("post-migrate verify failed");
 	else
 		test_ok("post-migrate connection alive");
 
-	if (test_get_tcp_ao_counters(sk, &ao2))
-		test_error("test_get_tcp_ao_counters()");
+	synchronize_threads(); /* 5: verify counters after SEQ-number rollover */
+	if (test_get_tcp_counters(sk, &cnt2))
+		test_error("test_get_tcp_counters()");
 	after_good = netstat_get_one("TCPAOGood", NULL);
 
-	test_tcp_ao_counters_cmp(NULL, &ao1, &ao2, TEST_CNT_GOOD);
+	test_assert_counters(NULL, &cnt1, &cnt2, TEST_CNT_GOOD);
 
 	if (after_good <= before_good) {
-		test_fail("TCPAOGood counter did not increase: %zu <= %zu",
+		test_fail("TCPAOGood counter did not increase: %" PRIu64 " <= %" PRIu64,
 			  after_good, before_good);
 	} else {
-		test_ok("TCPAOGood counter increased %zu => %zu",
+		test_ok("TCPAOGood counter increased %" PRIu64 " => %" PRIu64,
 			before_good, after_good);
 	}
 	after_bad = netstat_get_one("TCPAOBad", NULL);
 	if (after_bad)
-		test_fail("TCPAOBad counter is non-zero: %zu", after_bad);
+		test_fail("TCPAOBad counter is non-zero: %" PRIu64, after_bad);
 	else
 		test_ok("TCPAOBad counter didn't increase");
 
@@ -240,6 +250,6 @@ static void *client_fn(void *arg)
 
 int main(int argc, char *argv[])
 {
-	test_init(7, server_fn, client_fn);
+	test_init(8, server_fn, client_fn);
 	return 0;
 }

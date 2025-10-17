@@ -103,13 +103,12 @@ EXPORT_SYMBOL_GPL(rds_send_path_reset);
 
 static int acquire_in_xmit(struct rds_conn_path *cp)
 {
-	return test_and_set_bit(RDS_IN_XMIT, &cp->cp_flags) == 0;
+	return test_and_set_bit_lock(RDS_IN_XMIT, &cp->cp_flags) == 0;
 }
 
 static void release_in_xmit(struct rds_conn_path *cp)
 {
-	clear_bit(RDS_IN_XMIT, &cp->cp_flags);
-	smp_mb__after_atomic();
+	clear_bit_unlock(RDS_IN_XMIT, &cp->cp_flags);
 	/*
 	 * We don't use wait_on_bit()/wake_up_bit() because our waking is in a
 	 * hot path and finding waiters is very rare.  We don't want to walk
@@ -233,7 +232,7 @@ restart:
 		 * If not already working on one, grab the next message.
 		 *
 		 * cp_xmit_rm holds a ref while we're sending this message down
-		 * the connction.  We can use this ref while holding the
+		 * the connection.  We can use this ref while holding the
 		 * send_sem.. rds_send_reset() is serialized with it.
 		 */
 		if (!rm) {
@@ -1313,12 +1312,8 @@ int rds_sendmsg(struct socket *sock, struct msghdr *msg, size_t payload_len)
 
 	/* Parse any control messages the user may have included. */
 	ret = rds_cmsg_send(rs, rm, msg, &allocated_mr, &vct);
-	if (ret) {
-		/* Trigger connection so that its ready for the next retry */
-		if (ret ==  -EAGAIN)
-			rds_conn_connect_if_down(conn);
+	if (ret)
 		goto out;
-	}
 
 	if (rm->rdma.op_active && !conn->c_trans->xmit_rdma) {
 		printk_ratelimited(KERN_NOTICE "rdma_op %p conn xmit_rdma %p\n",
@@ -1459,8 +1454,8 @@ rds_send_probe(struct rds_conn_path *cp, __be16 sport,
 
 	if (RDS_HS_PROBE(be16_to_cpu(sport), be16_to_cpu(dport)) &&
 	    cp->cp_conn->c_trans->t_mp_capable) {
-		u16 npaths = cpu_to_be16(RDS_MPATH_WORKERS);
-		u32 my_gen_num = cpu_to_be32(cp->cp_conn->c_my_gen_num);
+		__be16 npaths = cpu_to_be16(RDS_MPATH_WORKERS);
+		__be32 my_gen_num = cpu_to_be32(cp->cp_conn->c_my_gen_num);
 
 		rds_message_add_extension(&rm->m_inc.i_hdr,
 					  RDS_EXTHDR_NPATHS, &npaths,

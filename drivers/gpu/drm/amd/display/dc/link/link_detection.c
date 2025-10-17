@@ -41,11 +41,15 @@
 #include "protocols/link_dp_dpia.h"
 #include "protocols/link_dp_phy.h"
 #include "protocols/link_dp_training.h"
+#include "protocols/link_dp_dpia_bw.h"
 #include "accessories/link_dp_trace.h"
 
 #include "link_enc_cfg.h"
 #include "dm_helpers.h"
 #include "clk_mgr.h"
+
+ // Offset DPCD 050Eh == 0x5A
+#define MST_HUB_ID_0x5A  0x5A
 
 #define DC_LOGGER \
 	link->ctx->logger
@@ -64,7 +68,7 @@
 
 static const u8 DP_SINK_BRANCH_DEV_NAME_7580[] = "7580\x80u";
 
-static const uint8_t dp_hdmi_dongle_signature_str[] = "DP-HDMI ADAPTOR";
+static const u8 dp_hdmi_dongle_signature_str[] = "DP-HDMI ADAPTOR";
 
 static enum ddc_transaction_type get_ddc_transaction_type(enum signal_type sink_signal)
 {
@@ -515,8 +519,8 @@ static void query_hdcp_capability(enum signal_type signal, struct dc_link *link)
 static void read_current_link_settings_on_detect(struct dc_link *link)
 {
 	union lane_count_set lane_count_set = {0};
-	uint8_t link_bw_set;
-	uint8_t link_rate_set;
+	uint8_t link_bw_set = 0;
+	uint8_t link_rate_set = 0;
 	uint32_t read_dpcd_retry_cnt = 10;
 	enum dc_status status = DC_ERROR_UNEXPECTED;
 	int i;
@@ -589,8 +593,9 @@ static bool detect_dp(struct dc_link *link,
 
 	if (sink_caps->transaction_type == DDC_TRANSACTION_TYPE_I2C_OVER_AUX) {
 		sink_caps->signal = SIGNAL_TYPE_DISPLAY_PORT;
-		if (!detect_dp_sink_caps(link))
+		if (!detect_dp_sink_caps(link)) {
 			return false;
+		}
 
 		if (is_dp_branch_device(link))
 			/* DP SST branch */
@@ -607,6 +612,7 @@ static bool detect_dp(struct dc_link *link,
 		link->dpcd_caps.dongle_type = sink_caps->dongle_type;
 		link->dpcd_caps.is_dongle_type_one = sink_caps->is_dongle_type_one;
 		link->dpcd_caps.dpcd_rev.raw = 0;
+		link->dpcd_caps.usb4_dp_tun_info.dp_tun_cap.raw = 0;
 	}
 
 	return true;
@@ -650,7 +656,7 @@ static bool wait_for_entering_dp_alt_mode(struct dc_link *link)
 		return true;
 
 	is_in_alt_mode = link->link_enc->funcs->is_in_alt_mode(link->link_enc);
-	DC_LOG_DC("DP Alt mode state on HPD: %d\n", is_in_alt_mode);
+	DC_LOG_DC("DP Alt mode state on HPD: %d  Link=%d\n", is_in_alt_mode, link->link_index);
 
 	if (is_in_alt_mode)
 		return true;
@@ -691,6 +697,15 @@ static void apply_dpia_mst_dsc_always_on_wa(struct dc_link *link)
 			link->dpcd_caps.dsc_caps.dsc_basic_caps.fields.dsc_support.DSC_SUPPORT &&
 			!link->dc->debug.dpia_debug.bits.disable_mst_dsc_work_around)
 		link->wa_flags.dpia_mst_dsc_always_on = true;
+
+	if (link->ep_type == DISPLAY_ENDPOINT_USB4_DPIA &&
+		link->type == dc_connection_mst_branch &&
+		link->dpcd_caps.branch_dev_id == DP_BRANCH_DEVICE_ID_90CC24 &&
+		link->dpcd_caps.branch_vendor_specific_data[2] == MST_HUB_ID_0x5A &&
+		link->dpcd_caps.dsc_caps.dsc_basic_caps.fields.dsc_support.DSC_SUPPORT &&
+		!link->dc->debug.dpia_debug.bits.disable_mst_dsc_work_around) {
+			link->wa_flags.dpia_mst_dsc_always_on = true;
+	}
 }
 
 static void revert_dpia_mst_dsc_always_on_wa(struct dc_link *link)
@@ -803,7 +818,10 @@ static bool should_verify_link_capability_destructively(struct dc_link *link,
 {
 	bool destrictive = false;
 	struct dc_link_settings max_link_cap;
-	bool is_link_enc_unavailable = link->link_enc &&
+	bool is_link_enc_unavailable = false;
+
+	if (!link->dc->config.unify_link_enc_assignment)
+		is_link_enc_unavailable = link->link_enc &&
 			link->dc->res_pool->funcs->link_encs_assign &&
 			!link_enc_cfg_is_link_enc_avail(
 					link->ctx->dc,
@@ -816,7 +834,8 @@ static bool should_verify_link_capability_destructively(struct dc_link *link,
 
 		if (link->dc->debug.skip_detection_link_training ||
 				dc_is_embedded_signal(link->local_sink->sink_signal) ||
-				link->ep_type == DISPLAY_ENDPOINT_USB4_DPIA) {
+				(link->ep_type == DISPLAY_ENDPOINT_USB4_DPIA &&
+				!link->dc->config.enable_dpia_pre_training)) {
 			destrictive = false;
 		} else if (link_dp_get_encoding_format(&max_link_cap) ==
 				DP_8b_10b_ENCODING) {
@@ -862,7 +881,6 @@ static bool detect_link_and_local_sink(struct dc_link *link,
 	struct dc_sink *prev_sink = NULL;
 	struct dpcd_caps prev_dpcd_caps;
 	enum dc_connection_type new_connection_type = dc_connection_none;
-	enum dc_connection_type pre_connection_type = link->type;
 	const uint32_t post_oui_delay = 30; // 30ms
 
 	DC_LOGGER_INIT(link->ctx->logger);
@@ -964,7 +982,6 @@ static bool detect_link_and_local_sink(struct dc_link *link,
 			}
 
 			if (!detect_dp(link, &sink_caps, reason)) {
-				link->type = pre_connection_type;
 
 				if (prev_sink)
 					dc_sink_release(prev_sink);
@@ -991,6 +1008,13 @@ static bool detect_link_and_local_sink(struct dc_link *link,
 			if (link->ep_type == DISPLAY_ENDPOINT_USB4_DPIA &&
 					link->reported_link_cap.link_rate > LINK_RATE_HIGH3)
 				link->reported_link_cap.link_rate = LINK_RATE_HIGH3;
+
+			if (link->dpcd_caps.usb4_dp_tun_info.dp_tun_cap.bits.dp_tunneling
+					&& link->dpcd_caps.usb4_dp_tun_info.dp_tun_cap.bits.dpia_bw_alloc
+					&& link->dpcd_caps.usb4_dp_tun_info.driver_bw_cap.bits.driver_bw_alloc_support) {
+				if (link_dpia_enable_usb4_dp_bw_alloc_mode(link) == false)
+					link->dpcd_caps.usb4_dp_tun_info.dp_tun_cap.bits.dpia_bw_alloc = false;
+			}
 			break;
 		}
 
@@ -1116,6 +1140,10 @@ static bool detect_link_and_local_sink(struct dc_link *link,
 		if (sink->sink_signal == SIGNAL_TYPE_HDMI_TYPE_A &&
 		    !sink->edid_caps.edid_hdmi)
 			sink->sink_signal = SIGNAL_TYPE_DVI_SINGLE_LINK;
+		else if (dc_is_dvi_signal(sink->sink_signal) &&
+			 aud_support->hdmi_audio_native &&
+			 sink->edid_caps.edid_hdmi)
+			sink->sink_signal = SIGNAL_TYPE_HDMI_TYPE_A;
 
 		if (link->local_sink && dc_is_dp_signal(sink_caps.signal))
 			dp_trace_init(link);
@@ -1173,8 +1201,7 @@ static bool detect_link_and_local_sink(struct dc_link *link,
 			//sink only can use supported link rate table, we are foreced to enable it
 			if (link->reported_link_cap.link_rate == LINK_RATE_UNKNOWN)
 				link->panel_config.ilr.optimize_edp_link_rate = true;
-			if (edp_is_ilr_optimization_enabled(link))
-				link->reported_link_cap.link_rate = get_max_link_rate_from_ilr_table(link);
+			link->reported_link_cap.link_rate = get_max_edp_link_rate(link);
 		}
 
 	} else {
@@ -1281,8 +1308,7 @@ bool link_detect(struct dc_link *link, enum dc_detect_reason reason)
 			link->dpcd_caps.is_mst_capable)
 		is_delegated_to_mst_top_mgr = discover_dp_mst_topology(link, reason);
 
-	if (is_local_sink_detect_success &&
-			pre_link_type == dc_connection_mst_branch &&
+	if (pre_link_type == dc_connection_mst_branch &&
 			link->type != dc_connection_mst_branch)
 		is_delegated_to_mst_top_mgr = link_reset_cur_dp_mst_topology(link);
 

@@ -268,6 +268,7 @@ static int cpcap_rtc_probe(struct platform_device *pdev)
 		return err;
 
 	rtc->alarm_irq = platform_get_irq(pdev, 0);
+	rtc->alarm_enabled = true;
 	err = devm_request_threaded_irq(dev, rtc->alarm_irq, NULL,
 					cpcap_rtc_alarm_irq,
 					IRQF_TRIGGER_NONE | IRQF_ONESHOT,
@@ -295,7 +296,7 @@ static int cpcap_rtc_probe(struct platform_device *pdev)
 	}
 	disable_irq(rtc->update_irq);
 
-	err = device_init_wakeup(dev, 1);
+	err = device_init_wakeup(dev, true);
 	if (err) {
 		dev_err(dev, "wakeup initialization failed (%d)\n", err);
 		/* ignore error and continue without wakeup support */
@@ -320,7 +321,6 @@ static struct platform_driver cpcap_rtc_driver = {
 
 module_platform_driver(cpcap_rtc_driver);
 
-MODULE_ALIAS("platform:cpcap-rtc");
 MODULE_DESCRIPTION("CPCAP RTC driver");
 MODULE_AUTHOR("Sebastian Reichel <sre@kernel.org>");
 MODULE_LICENSE("GPL");

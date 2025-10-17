@@ -219,12 +219,10 @@ static void mvebu_uart_stop_tx(struct uart_port *port)
 static void mvebu_uart_start_tx(struct uart_port *port)
 {
 	unsigned int ctl;
-	struct circ_buf *xmit = &port->state->xmit;
+	unsigned char c;
 
-	if (IS_EXTENDED(port) && !uart_circ_empty(xmit)) {
-		writel(xmit->buf[xmit->tail], port->membase + UART_TSH(port));
-		uart_xmit_advance(port, 1);
-	}
+	if (IS_EXTENDED(port) && uart_fifo_get(port, &c))
+		writel(c, port->membase + UART_TSH(port));
 
 	ctl = readl(port->membase + UART_INTR(port));
 	ctl |= CTRL_TX_RDY_INT(port);
@@ -1266,14 +1264,16 @@ static unsigned long mvebu_uart_clock_recalc_rate(struct clk_hw *hw,
 	return parent_rate / uart_clock_base->div;
 }
 
-static long mvebu_uart_clock_round_rate(struct clk_hw *hw, unsigned long rate,
-					unsigned long *parent_rate)
+static int mvebu_uart_clock_determine_rate(struct clk_hw *hw,
+					   struct clk_rate_request *req)
 {
 	struct mvebu_uart_clock *uart_clock = to_uart_clock(hw);
 	struct mvebu_uart_clock_base *uart_clock_base =
 						to_uart_clock_base(uart_clock);
 
-	return *parent_rate / uart_clock_base->div;
+	req->rate = req->best_parent_rate / uart_clock_base->div;
+
+	return 0;
 }
 
 static int mvebu_uart_clock_set_rate(struct clk_hw *hw, unsigned long rate,
@@ -1295,7 +1295,7 @@ static const struct clk_ops mvebu_uart_clock_ops = {
 	.is_enabled = mvebu_uart_clock_is_enabled,
 	.save_context = mvebu_uart_clock_save_context,
 	.restore_context = mvebu_uart_clock_restore_context,
-	.round_rate = mvebu_uart_clock_round_rate,
+	.determine_rate = mvebu_uart_clock_determine_rate,
 	.set_rate = mvebu_uart_clock_set_rate,
 	.recalc_rate = mvebu_uart_clock_recalc_rate,
 };

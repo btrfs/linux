@@ -61,7 +61,7 @@ static irq_hw_number_t pci_msi_domain_calc_hwirq(struct msi_desc *desc)
 
 	return (irq_hw_number_t)desc->msi_index |
 		pci_dev_id(dev) << 11 |
-		(pci_domain_nr(dev->bus) & 0xFFFFFFFF) << 27;
+		((irq_hw_number_t)(pci_domain_nr(dev->bus) & 0xFFFFFFFF)) << 27;
 }
 
 static void pci_msi_domain_set_desc(msi_alloc_info_t *arg,
@@ -148,6 +148,45 @@ static void pci_device_domain_set_desc(msi_alloc_info_t *arg, struct msi_desc *d
 	arg->hwirq = desc->msi_index;
 }
 
+static void cond_shutdown_parent(struct irq_data *data)
+{
+	struct msi_domain_info *info = data->domain->host_data;
+
+	if (unlikely(info->flags & MSI_FLAG_PCI_MSI_STARTUP_PARENT))
+		irq_chip_shutdown_parent(data);
+	else if (unlikely(info->flags & MSI_FLAG_PCI_MSI_MASK_PARENT))
+		irq_chip_mask_parent(data);
+}
+
+static unsigned int cond_startup_parent(struct irq_data *data)
+{
+	struct msi_domain_info *info = data->domain->host_data;
+
+	if (unlikely(info->flags & MSI_FLAG_PCI_MSI_STARTUP_PARENT))
+		return irq_chip_startup_parent(data);
+	else if (unlikely(info->flags & MSI_FLAG_PCI_MSI_MASK_PARENT))
+		irq_chip_unmask_parent(data);
+
+	return 0;
+}
+
+static void pci_irq_shutdown_msi(struct irq_data *data)
+{
+	struct msi_desc *desc = irq_data_get_msi_desc(data);
+
+	pci_msi_mask(desc, BIT(data->irq - desc->irq));
+	cond_shutdown_parent(data);
+}
+
+static unsigned int pci_irq_startup_msi(struct irq_data *data)
+{
+	struct msi_desc *desc = irq_data_get_msi_desc(data);
+	unsigned int ret = cond_startup_parent(data);
+
+	pci_msi_unmask(desc, BIT(data->irq - desc->irq));
+	return ret;
+}
+
 static void pci_irq_mask_msi(struct irq_data *data)
 {
 	struct msi_desc *desc = irq_data_get_msi_desc(data);
@@ -176,6 +215,8 @@ static void pci_irq_unmask_msi(struct irq_data *data)
 static const struct msi_domain_template pci_msi_template = {
 	.chip = {
 		.name			= "PCI-MSI",
+		.irq_startup		= pci_irq_startup_msi,
+		.irq_shutdown		= pci_irq_shutdown_msi,
 		.irq_mask		= pci_irq_mask_msi,
 		.irq_unmask		= pci_irq_unmask_msi,
 		.irq_write_msi_msg	= pci_msi_domain_write_msg,
@@ -192,6 +233,20 @@ static const struct msi_domain_template pci_msi_template = {
 	},
 };
 
+static void pci_irq_shutdown_msix(struct irq_data *data)
+{
+	pci_msix_mask(irq_data_get_msi_desc(data));
+	cond_shutdown_parent(data);
+}
+
+static unsigned int pci_irq_startup_msix(struct irq_data *data)
+{
+	unsigned int ret = cond_startup_parent(data);
+
+	pci_msix_unmask(irq_data_get_msi_desc(data));
+	return ret;
+}
+
 static void pci_irq_mask_msix(struct irq_data *data)
 {
 	pci_msix_mask(irq_data_get_msi_desc(data));
@@ -202,17 +257,20 @@ static void pci_irq_unmask_msix(struct irq_data *data)
 	pci_msix_unmask(irq_data_get_msi_desc(data));
 }
 
-static void pci_msix_prepare_desc(struct irq_domain *domain, msi_alloc_info_t *arg,
-				  struct msi_desc *desc)
+void pci_msix_prepare_desc(struct irq_domain *domain, msi_alloc_info_t *arg,
+			   struct msi_desc *desc)
 {
 	/* Don't fiddle with preallocated MSI descriptors */
 	if (!desc->pci.mask_base)
 		msix_prepare_msi_desc(to_pci_dev(desc->dev), desc);
 }
+EXPORT_SYMBOL_GPL(pci_msix_prepare_desc);
 
 static const struct msi_domain_template pci_msix_template = {
 	.chip = {
 		.name			= "PCI-MSIX",
+		.irq_startup		= pci_irq_startup_msix,
+		.irq_shutdown		= pci_irq_shutdown_msix,
 		.irq_mask		= pci_irq_mask_msix,
 		.irq_unmask		= pci_irq_unmask_msix,
 		.irq_write_msi_msg	= pci_msi_domain_write_msg,
@@ -251,6 +309,7 @@ static bool pci_create_device_domain(struct pci_dev *pdev, const struct msi_doma
 /**
  * pci_setup_msi_device_domain - Setup a device MSI interrupt domain
  * @pdev:	The PCI device to create the domain on
+ * @hwsize:	The maximum number of MSI vectors
  *
  * Return:
  *  True when:
@@ -267,7 +326,7 @@ static bool pci_create_device_domain(struct pci_dev *pdev, const struct msi_doma
  *	- The device is removed
  *	- MSI is disabled and a MSI-X domain is created
  */
-bool pci_setup_msi_device_domain(struct pci_dev *pdev)
+bool pci_setup_msi_device_domain(struct pci_dev *pdev, unsigned int hwsize)
 {
 	if (WARN_ON_ONCE(pdev->msix_enabled))
 		return false;
@@ -277,7 +336,7 @@ bool pci_setup_msi_device_domain(struct pci_dev *pdev)
 	if (pci_match_device_domain(pdev, DOMAIN_BUS_PCI_DEVICE_MSIX))
 		msi_remove_device_irq_domain(&pdev->dev, MSI_DEFAULT_DOMAIN);
 
-	return pci_create_device_domain(pdev, &pci_msi_template, 1);
+	return pci_create_device_domain(pdev, &pci_msi_template, hwsize);
 }
 
 /**
@@ -330,8 +389,11 @@ bool pci_msi_domain_supports(struct pci_dev *pdev, unsigned int feature_mask,
 
 	domain = dev_get_msi_domain(&pdev->dev);
 
-	if (!domain || !irq_domain_is_hierarchy(domain))
-		return mode == ALLOW_LEGACY;
+	if (!domain || !irq_domain_is_hierarchy(domain)) {
+		if (IS_ENABLED(CONFIG_PCI_MSI_ARCH_FALLBACKS))
+			return mode == ALLOW_LEGACY;
+		return false;
+	}
 
 	if (!irq_domain_is_msi_parent(domain)) {
 		/*
@@ -354,65 +416,6 @@ bool pci_msi_domain_supports(struct pci_dev *pdev, unsigned int feature_mask,
 
 	return (supported & feature_mask) == feature_mask;
 }
-
-/**
- * pci_create_ims_domain - Create a secondary IMS domain for a PCI device
- * @pdev:	The PCI device to operate on
- * @template:	The MSI info template which describes the domain
- * @hwsize:	The size of the hardware entry table or 0 if the domain
- *		is purely software managed
- * @data:	Optional pointer to domain specific data to be stored
- *		in msi_domain_info::data
- *
- * Return: True on success, false otherwise
- *
- * An IMS domain is expected to have the following constraints:
- *	- The index space is managed by the core code
- *
- *	- There is no requirement for consecutive index ranges
- *
- *	- The interrupt chip must provide the following callbacks:
- *		- irq_mask()
- *		- irq_unmask()
- *		- irq_write_msi_msg()
- *
- *	- The interrupt chip must provide the following optional callbacks
- *	  when the irq_mask(), irq_unmask() and irq_write_msi_msg() callbacks
- *	  cannot operate directly on hardware, e.g. in the case that the
- *	  interrupt message store is in queue memory:
- *		- irq_bus_lock()
- *		- irq_bus_unlock()
- *
- *	  These callbacks are invoked from preemptible task context and are
- *	  allowed to sleep. In this case the mandatory callbacks above just
- *	  store the information. The irq_bus_unlock() callback is supposed
- *	  to make the change effective before returning.
- *
- *	- Interrupt affinity setting is handled by the underlying parent
- *	  interrupt domain and communicated to the IMS domain via
- *	  irq_write_msi_msg().
- *
- * The domain is automatically destroyed when the PCI device is removed.
- */
-bool pci_create_ims_domain(struct pci_dev *pdev, const struct msi_domain_template *template,
-			   unsigned int hwsize, void *data)
-{
-	struct irq_domain *domain = dev_get_msi_domain(&pdev->dev);
-
-	if (!domain || !irq_domain_is_msi_parent(domain))
-		return false;
-
-	if (template->info.bus_token != DOMAIN_BUS_PCI_DEVICE_IMS ||
-	    !(template->info.flags & MSI_FLAG_ALLOC_SIMPLE_MSI_DESCS) ||
-	    !(template->info.flags & MSI_FLAG_FREE_MSI_DESCS) ||
-	    !template->chip.irq_mask || !template->chip.irq_unmask ||
-	    !template->chip.irq_write_msi_msg || template->chip.irq_set_affinity)
-		return false;
-
-	return msi_create_device_irq_domain(&pdev->dev, MSI_SECONDARY_DOMAIN, template,
-					    hwsize, data, NULL);
-}
-EXPORT_SYMBOL_GPL(pci_create_ims_domain);
 
 /*
  * Users of the generic MSI infrastructure expect a device to have a single ID,
@@ -456,10 +459,30 @@ u32 pci_msi_domain_get_msi_rid(struct irq_domain *domain, struct pci_dev *pdev)
 	pci_for_each_dma_alias(pdev, get_msi_id_cb, &rid);
 
 	of_node = irq_domain_get_of_node(domain);
-	rid = of_node ? of_msi_map_id(&pdev->dev, of_node, rid) :
+	rid = of_node ? of_msi_xlate(&pdev->dev, &of_node, rid) :
 			iort_msi_map_id(&pdev->dev, rid);
 
 	return rid;
+}
+
+/**
+ * pci_msi_map_rid_ctlr_node - Get the MSI controller node and MSI requester id (RID)
+ * @pdev:	The PCI device
+ * @node:	Pointer to store the MSI controller device node
+ *
+ * Use the firmware data to find the MSI controller node for @pdev.
+ * If found map the RID and initialize @node with it. @node value must
+ * be set to NULL on entry.
+ *
+ * Returns: The RID.
+ */
+u32 pci_msi_map_rid_ctlr_node(struct pci_dev *pdev, struct device_node **node)
+{
+	u32 rid = pci_dev_id(pdev);
+
+	pci_for_each_dma_alias(pdev, get_msi_id_cb, &rid);
+
+	return of_msi_xlate(&pdev->dev, node, rid);
 }
 
 /**

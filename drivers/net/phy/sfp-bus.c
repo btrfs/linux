@@ -22,7 +22,6 @@ struct sfp_bus {
 	const struct sfp_socket_ops *socket_ops;
 	struct device *sfp_dev;
 	struct sfp *sfp;
-	const struct sfp_quirk *sfp_quirk;
 
 	const struct sfp_upstream_ops *upstream_ops;
 	void *upstream;
@@ -30,24 +29,18 @@ struct sfp_bus {
 
 	bool registered;
 	bool started;
+
+	struct sfp_module_caps caps;
 };
 
-/**
- * sfp_parse_port() - Parse the EEPROM base ID, setting the port type
- * @bus: a pointer to the &struct sfp_bus structure for the sfp module
- * @id: a pointer to the module's &struct sfp_eeprom_id
- * @support: optional pointer to an array of unsigned long for the
- *   ethtool support mask
- *
- * Parse the EEPROM identification given in @id, and return one of
- * %PORT_TP, %PORT_FIBRE or %PORT_OTHER. If @support is non-%NULL,
- * also set the ethtool %ETHTOOL_LINK_MODE_xxx_BIT corresponding with
- * the connector type.
- *
- * If the port type is not known, returns %PORT_OTHER.
- */
-int sfp_parse_port(struct sfp_bus *bus, const struct sfp_eeprom_id *id,
-		   unsigned long *support)
+const struct sfp_module_caps *sfp_get_module_caps(struct sfp_bus *bus)
+{
+	return &bus->caps;
+}
+EXPORT_SYMBOL_GPL(sfp_get_module_caps);
+
+static void sfp_module_parse_port(struct sfp_bus *bus,
+				  const struct sfp_eeprom_id *id)
 {
 	int port;
 
@@ -91,34 +84,26 @@ int sfp_parse_port(struct sfp_bus *bus, const struct sfp_eeprom_id *id,
 		break;
 	}
 
-	if (support) {
-		switch (port) {
-		case PORT_FIBRE:
-			phylink_set(support, FIBRE);
-			break;
+	switch (port) {
+	case PORT_FIBRE:
+		phylink_set(bus->caps.link_modes, FIBRE);
+		break;
 
-		case PORT_TP:
-			phylink_set(support, TP);
-			break;
-		}
+	case PORT_TP:
+		phylink_set(bus->caps.link_modes, TP);
+		break;
 	}
 
-	return port;
+	bus->caps.port = port;
 }
-EXPORT_SYMBOL_GPL(sfp_parse_port);
 
-/**
- * sfp_may_have_phy() - indicate whether the module may have a PHY
- * @bus: a pointer to the &struct sfp_bus structure for the sfp module
- * @id: a pointer to the module's &struct sfp_eeprom_id
- *
- * Parse the EEPROM identification given in @id, and return whether
- * this module may have a PHY.
- */
-bool sfp_may_have_phy(struct sfp_bus *bus, const struct sfp_eeprom_id *id)
+static void sfp_module_parse_may_have_phy(struct sfp_bus *bus,
+					  const struct sfp_eeprom_id *id)
 {
-	if (id->base.e1000_base_t)
-		return true;
+	if (id->base.e1000_base_t) {
+		bus->caps.may_have_phy = true;
+		return;
+	}
 
 	if (id->base.phys_id != SFF8024_ID_DWDM_SFP) {
 		switch (id->base.extended_cc) {
@@ -126,30 +111,20 @@ bool sfp_may_have_phy(struct sfp_bus *bus, const struct sfp_eeprom_id *id)
 		case SFF8024_ECC_10GBASE_T_SR:
 		case SFF8024_ECC_5GBASE_T:
 		case SFF8024_ECC_2_5GBASE_T:
-			return true;
+			bus->caps.may_have_phy = true;
+			return;
 		}
 	}
 
-	return false;
+	bus->caps.may_have_phy = false;
 }
-EXPORT_SYMBOL_GPL(sfp_may_have_phy);
 
-/**
- * sfp_parse_support() - Parse the eeprom id for supported link modes
- * @bus: a pointer to the &struct sfp_bus structure for the sfp module
- * @id: a pointer to the module's &struct sfp_eeprom_id
- * @support: pointer to an array of unsigned long for the ethtool support mask
- * @interfaces: pointer to an array of unsigned long for phy interface modes
- *		mask
- *
- * Parse the EEPROM identification information and derive the supported
- * ethtool link modes for the module.
- */
-void sfp_parse_support(struct sfp_bus *bus, const struct sfp_eeprom_id *id,
-		       unsigned long *support, unsigned long *interfaces)
+static void sfp_module_parse_support(struct sfp_bus *bus,
+				     const struct sfp_eeprom_id *id)
 {
+	unsigned long *interfaces = bus->caps.interfaces;
+	unsigned long *modes = bus->caps.link_modes;
 	unsigned int br_min, br_nom, br_max;
-	__ETHTOOL_DECLARE_LINK_MODE_MASK(modes) = { 0, };
 
 	/* Decode the bitrate information to MBd */
 	br_min = br_nom = br_max = 0;
@@ -338,13 +313,21 @@ void sfp_parse_support(struct sfp_bus *bus, const struct sfp_eeprom_id *id,
 	phylink_set(modes, Autoneg);
 	phylink_set(modes, Pause);
 	phylink_set(modes, Asym_Pause);
-
-	if (bus->sfp_quirk && bus->sfp_quirk->modes)
-		bus->sfp_quirk->modes(id, modes, interfaces);
-
-	linkmode_or(support, support, modes);
 }
-EXPORT_SYMBOL_GPL(sfp_parse_support);
+
+static void sfp_init_module(struct sfp_bus *bus,
+			    const struct sfp_eeprom_id *id,
+			    const struct sfp_quirk *quirk)
+{
+	memset(&bus->caps, 0, sizeof(bus->caps));
+
+	sfp_module_parse_support(bus, id);
+	sfp_module_parse_port(bus, id);
+	sfp_module_parse_may_have_phy(bus, id);
+
+	if (quirk && quirk->support)
+		quirk->support(id, &bus->caps);
+}
 
 /**
  * sfp_select_interface() - Select appropriate phy_interface_t mode
@@ -355,7 +338,7 @@ EXPORT_SYMBOL_GPL(sfp_parse_support);
  * modes mask.
  */
 phy_interface_t sfp_select_interface(struct sfp_bus *bus,
-				     unsigned long *link_modes)
+				     const unsigned long *link_modes)
 {
 	if (phylink_test(link_modes, 25000baseCR_Full) ||
 	    phylink_test(link_modes, 25000baseKR_Full) ||
@@ -373,7 +356,8 @@ phy_interface_t sfp_select_interface(struct sfp_bus *bus,
 	if (phylink_test(link_modes, 5000baseT_Full))
 		return PHY_INTERFACE_MODE_5GBASER;
 
-	if (phylink_test(link_modes, 2500baseX_Full))
+	if (phylink_test(link_modes, 2500baseX_Full) ||
+	    phylink_test(link_modes, 2500baseT_Full))
 		return PHY_INTERFACE_MODE_2500BASEX;
 
 	if (phylink_test(link_modes, 1000baseT_Half) ||
@@ -486,7 +470,7 @@ static void sfp_unregister_bus(struct sfp_bus *bus)
 			bus->socket_ops->stop(bus->sfp);
 		bus->socket_ops->detach(bus->sfp);
 		if (bus->phydev && ops && ops->disconnect_phy)
-			ops->disconnect_phy(bus->upstream);
+			ops->disconnect_phy(bus->upstream, bus->phydev);
 	}
 	bus->registered = false;
 }
@@ -721,6 +705,28 @@ void sfp_bus_del_upstream(struct sfp_bus *bus)
 }
 EXPORT_SYMBOL_GPL(sfp_bus_del_upstream);
 
+/**
+ * sfp_get_name() - Get the SFP device name
+ * @bus: a pointer to the &struct sfp_bus structure for the sfp module
+ *
+ * Gets the SFP device's name, if @bus has a registered socket. Callers must
+ * hold RTNL, and the returned name is only valid until RTNL is released.
+ *
+ * Returns:
+ *	- The name of the SFP device registered with sfp_register_socket()
+ *	- %NULL if no device was registered on @bus
+ */
+const char *sfp_get_name(struct sfp_bus *bus)
+{
+	ASSERT_RTNL();
+
+	if (bus->sfp_dev)
+		return dev_name(bus->sfp_dev);
+
+	return NULL;
+}
+EXPORT_SYMBOL_GPL(sfp_get_name);
+
 /* Socket driver entry points */
 int sfp_add_phy(struct sfp_bus *bus, struct phy_device *phydev)
 {
@@ -742,7 +748,7 @@ void sfp_remove_phy(struct sfp_bus *bus)
 	const struct sfp_upstream_ops *ops = sfp_get_upstream_ops(bus);
 
 	if (ops && ops->disconnect_phy)
-		ops->disconnect_phy(bus->upstream);
+		ops->disconnect_phy(bus->upstream, bus->phydev);
 	bus->phydev = NULL;
 }
 EXPORT_SYMBOL_GPL(sfp_remove_phy);
@@ -771,7 +777,7 @@ int sfp_module_insert(struct sfp_bus *bus, const struct sfp_eeprom_id *id,
 	const struct sfp_upstream_ops *ops = sfp_get_upstream_ops(bus);
 	int ret = 0;
 
-	bus->sfp_quirk = quirk;
+	sfp_init_module(bus, id, quirk);
 
 	if (ops && ops->module_insert)
 		ret = ops->module_insert(bus->upstream, id);
@@ -786,8 +792,6 @@ void sfp_module_remove(struct sfp_bus *bus)
 
 	if (ops && ops->module_remove)
 		ops->module_remove(bus->upstream);
-
-	bus->sfp_quirk = NULL;
 }
 EXPORT_SYMBOL_GPL(sfp_module_remove);
 

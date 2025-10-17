@@ -30,8 +30,7 @@
 #include "dcn20/dcn20_resource.h"
 #include "dcn21/dcn21_resource.h"
 #include "clk_mgr/dcn21/rn_clk_mgr.h"
-
-#include "link.h"
+#include "link_service.h"
 #include "dcn20_fpu.h"
 #include "dc_state_priv.h"
 
@@ -1084,7 +1083,10 @@ static enum dcn_zstate_support_state  decide_zstate_support(struct dc *dc, struc
 		struct dc_stream_status *stream_status = &context->stream_status[0];
 		int minmum_z8_residency = dc->debug.minimum_z8_residency_time > 0 ? dc->debug.minimum_z8_residency_time : 1000;
 		bool allow_z8 = context->bw_ctx.dml.vba.StutterPeriod > (double)minmum_z8_residency;
-		bool is_pwrseq0 = link->link_index == 0;
+		bool is_pwrseq0 = (link && link->link_index == 0);
+		bool is_psr = (link && (link->psr_settings.psr_version == DC_PSR_VERSION_1 ||
+						link->psr_settings.psr_version == DC_PSR_VERSION_SU_1) && !link->panel_config.psr.disable_psr);
+		bool is_replay = link && link->replay_settings.replay_feature_enabled;
 
 		/* Don't support multi-plane configurations */
 		if (stream_status->plane_count > 1)
@@ -1092,8 +1094,8 @@ static enum dcn_zstate_support_state  decide_zstate_support(struct dc *dc, struc
 
 		if (is_pwrseq0 && context->bw_ctx.dml.vba.StutterPeriod > 5000.0)
 			return DCN_ZSTATE_SUPPORT_ALLOW;
-		else if (is_pwrseq0 && link->psr_settings.psr_version == DC_PSR_VERSION_1 && !link->panel_config.psr.disable_psr)
-			return allow_z8 ? DCN_ZSTATE_SUPPORT_ALLOW_Z8_Z10_ONLY : DCN_ZSTATE_SUPPORT_ALLOW_Z10_ONLY;
+		else if (is_pwrseq0 && (is_psr || is_replay))
+			return DCN_ZSTATE_SUPPORT_ALLOW_Z8_Z10_ONLY;
 		else
 			return allow_z8 ? DCN_ZSTATE_SUPPORT_ALLOW_Z8_ONLY : DCN_ZSTATE_SUPPORT_DISALLOW;
 	} else {
@@ -1129,7 +1131,8 @@ static void dcn20_adjust_freesync_v_startup(
 					patched_crtc_timing.v_addressable -
 					patched_crtc_timing.v_border_top;
 
-	newVstartup = asic_blank_end + (patched_crtc_timing.v_total - asic_blank_start);
+	/* The newVStartUp is 1 line before vsync point */
+	newVstartup = asic_blank_end + 1;
 
 	*vstartup_start = ((newVstartup > *vstartup_start) ? newVstartup : *vstartup_start);
 }
@@ -1311,7 +1314,7 @@ static void swizzle_to_dml_params(
 int dcn20_populate_dml_pipes_from_context(struct dc *dc,
 					  struct dc_state *context,
 					  display_e2e_pipe_params_st *pipes,
-					  bool fast_validate)
+					  enum dc_validate_mode validate_mode)
 {
 	int pipe_cnt, i;
 	bool synchronized_vblank = true;
@@ -1559,6 +1562,8 @@ int dcn20_populate_dml_pipes_from_context(struct dc *dc,
 			pipes[pipe_cnt].pipe.src.surface_width_c = pipes[pipe_cnt].pipe.src.viewport_width;
 			pipes[pipe_cnt].pipe.src.data_pitch = ((pipes[pipe_cnt].pipe.src.viewport_width + 255) / 256) * 256;
 			pipes[pipe_cnt].pipe.src.source_format = dm_444_32;
+			pipes[pipe_cnt].pipe.src.cur0_src_width = 0;
+			pipes[pipe_cnt].pipe.src.cur1_src_width = 0;
 			pipes[pipe_cnt].pipe.dest.recout_width = pipes[pipe_cnt].pipe.src.viewport_width; /*vp_width/hratio*/
 			pipes[pipe_cnt].pipe.dest.recout_height = pipes[pipe_cnt].pipe.src.viewport_height; /*vp_height/vratio*/
 			pipes[pipe_cnt].pipe.dest.full_recout_width = pipes[pipe_cnt].pipe.dest.recout_width;  /*when is_hsplit != 1*/
@@ -1727,7 +1732,7 @@ void dcn20_calculate_wm(struct dc *dc, struct dc_state *context,
 			int *out_pipe_cnt,
 			int *pipe_split_from,
 			int vlevel,
-			bool fast_validate)
+			enum dc_validate_mode validate_mode)
 {
 	int pipe_cnt, i, pipe_idx;
 
@@ -1774,10 +1779,10 @@ void dcn20_calculate_wm(struct dc *dc, struct dc_state *context,
 	if (pipe_cnt != pipe_idx) {
 		if (dc->res_pool->funcs->populate_dml_pipes)
 			pipe_cnt = dc->res_pool->funcs->populate_dml_pipes(dc,
-				context, pipes, fast_validate);
+				context, pipes, validate_mode);
 		else
 			pipe_cnt = dcn20_populate_dml_pipes_from_context(dc,
-				context, pipes, fast_validate);
+				context, pipes, validate_mode);
 	}
 
 	*out_pipe_cnt = pipe_cnt;
@@ -1879,10 +1884,10 @@ void dcn20_update_bounding_box(struct dc *dc,
 		bb->clock_limits[i].fabricclk_mhz = (min_fclk_required_by_uclk < min_dcfclk) ?
 				min_dcfclk : min_fclk_required_by_uclk;
 
-		bb->clock_limits[i].socclk_mhz = (bb->clock_limits[i].fabricclk_mhz > max_clocks->socClockInKhz / 1000) ?
+		bb->clock_limits[i].socclk_mhz = (bb->clock_limits[i].fabricclk_mhz > max_clocks->socClockInKhz / 1000.0) ?
 				max_clocks->socClockInKhz / 1000 : bb->clock_limits[i].fabricclk_mhz;
 
-		bb->clock_limits[i].dcfclk_mhz = (bb->clock_limits[i].fabricclk_mhz > max_clocks->dcfClockInKhz / 1000) ?
+		bb->clock_limits[i].dcfclk_mhz = (bb->clock_limits[i].fabricclk_mhz > max_clocks->dcfClockInKhz / 1000.0) ?
 				max_clocks->dcfClockInKhz / 1000 : bb->clock_limits[i].fabricclk_mhz;
 
 		bb->clock_limits[i].dispclk_mhz = max_clocks->displayClockInKhz / 1000;
@@ -1914,35 +1919,35 @@ void dcn20_cap_soc_clocks(struct _vcs_dpi_soc_bounding_box_st *bb,
 
 	// First pass - cap all clocks higher than the reported max
 	for (i = 0; i < bb->num_states; i++) {
-		if ((bb->clock_limits[i].dcfclk_mhz > (max_clocks.dcfClockInKhz / 1000))
+		if ((bb->clock_limits[i].dcfclk_mhz > (max_clocks.dcfClockInKhz / 1000.0))
 				&& max_clocks.dcfClockInKhz != 0)
 			bb->clock_limits[i].dcfclk_mhz = (max_clocks.dcfClockInKhz / 1000);
 
-		if ((bb->clock_limits[i].dram_speed_mts > (max_clocks.uClockInKhz / 1000) * 16)
+		if ((bb->clock_limits[i].dram_speed_mts > (max_clocks.uClockInKhz / 1000.0) * 16)
 						&& max_clocks.uClockInKhz != 0)
 			bb->clock_limits[i].dram_speed_mts = (max_clocks.uClockInKhz / 1000) * 16;
 
-		if ((bb->clock_limits[i].fabricclk_mhz > (max_clocks.fabricClockInKhz / 1000))
+		if ((bb->clock_limits[i].fabricclk_mhz > (max_clocks.fabricClockInKhz / 1000.0))
 						&& max_clocks.fabricClockInKhz != 0)
 			bb->clock_limits[i].fabricclk_mhz = (max_clocks.fabricClockInKhz / 1000);
 
-		if ((bb->clock_limits[i].dispclk_mhz > (max_clocks.displayClockInKhz / 1000))
+		if ((bb->clock_limits[i].dispclk_mhz > (max_clocks.displayClockInKhz / 1000.0))
 						&& max_clocks.displayClockInKhz != 0)
 			bb->clock_limits[i].dispclk_mhz = (max_clocks.displayClockInKhz / 1000);
 
-		if ((bb->clock_limits[i].dppclk_mhz > (max_clocks.dppClockInKhz / 1000))
+		if ((bb->clock_limits[i].dppclk_mhz > (max_clocks.dppClockInKhz / 1000.0))
 						&& max_clocks.dppClockInKhz != 0)
 			bb->clock_limits[i].dppclk_mhz = (max_clocks.dppClockInKhz / 1000);
 
-		if ((bb->clock_limits[i].phyclk_mhz > (max_clocks.phyClockInKhz / 1000))
+		if ((bb->clock_limits[i].phyclk_mhz > (max_clocks.phyClockInKhz / 1000.0))
 						&& max_clocks.phyClockInKhz != 0)
 			bb->clock_limits[i].phyclk_mhz = (max_clocks.phyClockInKhz / 1000);
 
-		if ((bb->clock_limits[i].socclk_mhz > (max_clocks.socClockInKhz / 1000))
+		if ((bb->clock_limits[i].socclk_mhz > (max_clocks.socClockInKhz / 1000.0))
 						&& max_clocks.socClockInKhz != 0)
 			bb->clock_limits[i].socclk_mhz = (max_clocks.socClockInKhz / 1000);
 
-		if ((bb->clock_limits[i].dscclk_mhz > (max_clocks.dscClockInKhz / 1000))
+		if ((bb->clock_limits[i].dscclk_mhz > (max_clocks.dscClockInKhz / 1000.0))
 						&& max_clocks.dscClockInKhz != 0)
 			bb->clock_limits[i].dscclk_mhz = (max_clocks.dscClockInKhz / 1000);
 	}
@@ -2021,7 +2026,7 @@ void dcn20_patch_bounding_box(struct dc *dc, struct _vcs_dpi_soc_bounding_box_st
 }
 
 static bool dcn20_validate_bandwidth_internal(struct dc *dc, struct dc_state *context,
-		bool fast_validate, display_e2e_pipe_params_st *pipes)
+		enum dc_validate_mode validate_mode, display_e2e_pipe_params_st *pipes)
 {
 	bool out = false;
 
@@ -2034,7 +2039,7 @@ static bool dcn20_validate_bandwidth_internal(struct dc *dc, struct dc_state *co
 
 	BW_VAL_TRACE_COUNT();
 
-	out = dcn20_fast_validate_bw(dc, context, pipes, &pipe_cnt, pipe_split_from, &vlevel, fast_validate);
+	out = dcn20_fast_validate_bw(dc, context, pipes, &pipe_cnt, pipe_split_from, &vlevel, validate_mode);
 
 	if (pipe_cnt == 0)
 		goto validate_out;
@@ -2044,12 +2049,12 @@ static bool dcn20_validate_bandwidth_internal(struct dc *dc, struct dc_state *co
 
 	BW_VAL_TRACE_END_VOLTAGE_LEVEL();
 
-	if (fast_validate) {
+	if (validate_mode != DC_VALIDATE_MODE_AND_PROGRAMMING) {
 		BW_VAL_TRACE_SKIP(fast);
 		goto validate_out;
 	}
 
-	dcn20_calculate_wm(dc, context, pipes, &pipe_cnt, pipe_split_from, vlevel, fast_validate);
+	dcn20_calculate_wm(dc, context, pipes, &pipe_cnt, pipe_split_from, vlevel, validate_mode);
 	dcn20_calculate_dlg_params(dc, context, pipes, pipe_cnt, vlevel);
 
 	BW_VAL_TRACE_END_WATERMARKS();
@@ -2071,7 +2076,7 @@ validate_out:
 }
 
 bool dcn20_validate_bandwidth_fp(struct dc *dc, struct dc_state *context,
-				 bool fast_validate, display_e2e_pipe_params_st *pipes)
+				 enum dc_validate_mode validate_mode, display_e2e_pipe_params_st *pipes)
 {
 	bool voltage_supported = false;
 	bool full_pstate_supported = false;
@@ -2089,12 +2094,11 @@ bool dcn20_validate_bandwidth_fp(struct dc *dc, struct dc_state *context,
 	/*Unsafe due to current pipe merge and split logic*/
 	ASSERT(context != dc->current_state);
 
-	if (fast_validate) {
-		return dcn20_validate_bandwidth_internal(dc, context, true, pipes);
-	}
+	if (validate_mode != DC_VALIDATE_MODE_AND_PROGRAMMING)
+		return dcn20_validate_bandwidth_internal(dc, context, validate_mode, pipes);
 
 	// Best case, we support full UCLK switch latency
-	voltage_supported = dcn20_validate_bandwidth_internal(dc, context, false, pipes);
+	voltage_supported = dcn20_validate_bandwidth_internal(dc, context, DC_VALIDATE_MODE_AND_PROGRAMMING, pipes);
 	full_pstate_supported = context->bw_ctx.bw.dcn.clk.p_state_change_support;
 
 	if (context->bw_ctx.dml.soc.dummy_pstate_latency_us == 0 ||
@@ -2107,7 +2111,7 @@ bool dcn20_validate_bandwidth_fp(struct dc *dc, struct dc_state *context,
 	context->bw_ctx.dml.soc.dram_clock_change_latency_us = context->bw_ctx.dml.soc.dummy_pstate_latency_us;
 
 	memset(pipes, 0, dc->res_pool->pipe_count * sizeof(display_e2e_pipe_params_st));
-	voltage_supported = dcn20_validate_bandwidth_internal(dc, context, false, pipes);
+	voltage_supported = dcn20_validate_bandwidth_internal(dc, context, DC_VALIDATE_MODE_AND_PROGRAMMING, pipes);
 	dummy_pstate_supported = context->bw_ctx.bw.dcn.clk.p_state_change_support;
 
 	if (voltage_supported && (dummy_pstate_supported || !(context->stream_count))) {
@@ -2150,14 +2154,14 @@ void dcn20_fpu_adjust_dppclk(struct vba_vars_st *v,
 int dcn21_populate_dml_pipes_from_context(struct dc *dc,
 					  struct dc_state *context,
 					  display_e2e_pipe_params_st *pipes,
-					  bool fast_validate)
+					  enum dc_validate_mode validate_mode)
 {
 	uint32_t pipe_cnt;
 	int i;
 
 	dc_assert_fp_enabled();
 
-	pipe_cnt = dcn20_populate_dml_pipes_from_context(dc, context, pipes, fast_validate);
+	pipe_cnt = dcn20_populate_dml_pipes_from_context(dc, context, pipes, validate_mode);
 
 	for (i = 0; i < pipe_cnt; i++) {
 
@@ -2233,7 +2237,7 @@ static void dcn21_calculate_wm(struct dc *dc, struct dc_state *context,
 			int *out_pipe_cnt,
 			int *pipe_split_from,
 			int vlevel_req,
-			bool fast_validate)
+			enum dc_validate_mode validate_mode)
 {
 	int pipe_cnt, i, pipe_idx;
 	int vlevel, vlevel_max;
@@ -2275,10 +2279,10 @@ static void dcn21_calculate_wm(struct dc *dc, struct dc_state *context,
 	if (pipe_cnt != pipe_idx) {
 		if (dc->res_pool->funcs->populate_dml_pipes)
 			pipe_cnt = dc->res_pool->funcs->populate_dml_pipes(dc,
-				context, pipes, fast_validate);
+				context, pipes, validate_mode);
 		else
 			pipe_cnt = dcn21_populate_dml_pipes_from_context(dc,
-				context, pipes, fast_validate);
+				context, pipes, validate_mode);
 	}
 
 	*out_pipe_cnt = pipe_cnt;
@@ -2313,7 +2317,7 @@ static void dcn21_calculate_wm(struct dc *dc, struct dc_state *context,
 }
 
 bool dcn21_validate_bandwidth_fp(struct dc *dc, struct dc_state *context,
-				 bool fast_validate, display_e2e_pipe_params_st *pipes)
+				 enum dc_validate_mode validate_mode, display_e2e_pipe_params_st *pipes)
 {
 	bool out = false;
 
@@ -2331,7 +2335,7 @@ bool dcn21_validate_bandwidth_fp(struct dc *dc, struct dc_state *context,
 	/*Unsafe due to current pipe merge and split logic*/
 	ASSERT(context != dc->current_state);
 
-	out = dcn21_fast_validate_bw(dc, context, pipes, &pipe_cnt, pipe_split_from, &vlevel, fast_validate);
+	out = dcn21_fast_validate_bw(dc, context, pipes, &pipe_cnt, pipe_split_from, &vlevel, validate_mode);
 
 	if (pipe_cnt == 0)
 		goto validate_out;
@@ -2341,12 +2345,12 @@ bool dcn21_validate_bandwidth_fp(struct dc *dc, struct dc_state *context,
 
 	BW_VAL_TRACE_END_VOLTAGE_LEVEL();
 
-	if (fast_validate) {
+	if (validate_mode != DC_VALIDATE_MODE_AND_PROGRAMMING) {
 		BW_VAL_TRACE_SKIP(fast);
 		goto validate_out;
 	}
 
-	dcn21_calculate_wm(dc, context, pipes, &pipe_cnt, pipe_split_from, vlevel, fast_validate);
+	dcn21_calculate_wm(dc, context, pipes, &pipe_cnt, pipe_split_from, vlevel, validate_mode);
 	dcn20_calculate_dlg_params(dc, context, pipes, pipe_cnt, vlevel);
 
 	BW_VAL_TRACE_END_WATERMARKS();
@@ -2369,7 +2373,7 @@ validate_out:
 
 static struct _vcs_dpi_voltage_scaling_st construct_low_pstate_lvl(struct clk_limit_table *clk_table, unsigned int high_voltage_lvl)
 {
-	struct _vcs_dpi_voltage_scaling_st low_pstate_lvl;
+	struct _vcs_dpi_voltage_scaling_st low_pstate_lvl = {0};
 	int i;
 
 	low_pstate_lvl.state = 1;
@@ -2474,7 +2478,7 @@ void dcn201_populate_dml_writeback_from_context_fpu(struct dc *dc,
 	int pipe_cnt, i, j;
 	double max_calc_writeback_dispclk;
 	double writeback_dispclk;
-	struct writeback_st dout_wb;
+	struct writeback_st dout_wb = {0};
 
 	dc_assert_fp_enabled();
 

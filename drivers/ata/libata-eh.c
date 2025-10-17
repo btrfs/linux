@@ -153,8 +153,6 @@ ata_eh_cmd_timeout_table[ATA_EH_CMD_TIMEOUT_TABLE_SIZE] = {
 #undef CMDS
 
 static void __ata_port_freeze(struct ata_port *ap);
-static int ata_eh_set_lpm(struct ata_link *link, enum ata_lpm_policy policy,
-			  struct ata_device **r_failed_dev);
 #ifdef CONFIG_PM
 static void ata_eh_handle_port_suspend(struct ata_port *ap);
 static void ata_eh_handle_port_resume(struct ata_port *ap);
@@ -500,10 +498,13 @@ static void ata_eh_dev_disable(struct ata_device *dev)
 	ata_down_xfermask_limit(dev, ATA_DNXFER_FORCE_PIO0 | ATA_DNXFER_QUIET);
 	dev->class++;
 
-	/* From now till the next successful probe, ering is used to
+	/*
+	 * From now till the next successful probe, ering is used to
 	 * track probe failures.  Clear accumulated device error info.
 	 */
 	ata_ering_clear(&dev->ering);
+
+	ata_dev_free_resources(dev);
 }
 
 static void ata_eh_unload(struct ata_port *ap)
@@ -630,6 +631,14 @@ void ata_scsi_cmd_error_handler(struct Scsi_Host *host, struct ata_port *ap,
 	list_for_each_entry_safe(scmd, tmp, eh_work_q, eh_entry) {
 		struct ata_queued_cmd *qc;
 
+		/*
+		 * If the scmd was added to EH, via ata_qc_schedule_eh() ->
+		 * scsi_timeout() -> scsi_eh_scmd_add(), scsi_timeout() will
+		 * have set DID_TIME_OUT (since libata does not have an abort
+		 * handler). Thus, to clear DID_TIME_OUT, clear the host byte.
+		 */
+		set_host_byte(scmd, DID_OK);
+
 		ata_qc_for_each_raw(ap, qc, i) {
 			if (qc->flags & ATA_QCFLAG_ACTIVE &&
 			    qc->scsicmd == scmd)
@@ -640,6 +649,7 @@ void ata_scsi_cmd_error_handler(struct Scsi_Host *host, struct ata_port *ap,
 			/* the scmd has an associated qc */
 			if (!(qc->flags & ATA_QCFLAG_EH)) {
 				/* which hasn't failed yet, timeout */
+				set_host_byte(scmd, DID_TIME_OUT);
 				qc->err_mask |= AC_ERR_TIMEOUT;
 				qc->flags |= ATA_QCFLAG_EH;
 				nr_timedout++;
@@ -688,7 +698,7 @@ void ata_scsi_port_error_handler(struct Scsi_Host *host, struct ata_port *ap)
 	ata_eh_acquire(ap);
  repeat:
 	/* kill fast drain timer */
-	del_timer_sync(&ap->fastdrain_timer);
+	timer_delete_sync(&ap->fastdrain_timer);
 
 	/* process port resume request */
 	ata_eh_handle_port_resume(ap);
@@ -712,8 +722,10 @@ void ata_scsi_port_error_handler(struct Scsi_Host *host, struct ata_port *ap)
 				ehc->saved_ncq_enabled |= 1 << devno;
 
 			/* If we are resuming, wake up the device */
-			if (ap->pflags & ATA_PFLAG_RESUMING)
+			if (ap->pflags & ATA_PFLAG_RESUMING) {
+				dev->flags |= ATA_DFLAG_RESUMING;
 				ehc->i.dev_action[devno] |= ATA_EH_SET_ACTIVE;
+			}
 		}
 	}
 
@@ -811,7 +823,7 @@ void ata_port_wait_eh(struct ata_port *ap)
  retry:
 	spin_lock_irqsave(ap->lock, flags);
 
-	while (ap->pflags & (ATA_PFLAG_EH_PENDING | ATA_PFLAG_EH_IN_PROGRESS)) {
+	while (ata_port_eh_scheduled(ap)) {
 		prepare_to_wait(&ap->eh_wait_q, &wait, TASK_UNINTERRUPTIBLE);
 		spin_unlock_irqrestore(ap->lock, flags);
 		schedule();
@@ -846,7 +858,7 @@ static unsigned int ata_eh_nr_in_flight(struct ata_port *ap)
 
 void ata_eh_fastdrain_timerfn(struct timer_list *t)
 {
-	struct ata_port *ap = from_timer(ap, t, fastdrain_timer);
+	struct ata_port *ap = timer_container_of(ap, t, fastdrain_timer);
 	unsigned long flags;
 	unsigned int cnt;
 
@@ -895,7 +907,7 @@ void ata_eh_fastdrain_timerfn(struct timer_list *t)
  *	LOCKING:
  *	spin_lock_irqsave(host lock)
  */
-static void ata_eh_set_pending(struct ata_port *ap, int fastdrain)
+static void ata_eh_set_pending(struct ata_port *ap, bool fastdrain)
 {
 	unsigned int cnt;
 
@@ -935,7 +947,7 @@ void ata_qc_schedule_eh(struct ata_queued_cmd *qc)
 	struct ata_port *ap = qc->ap;
 
 	qc->flags |= ATA_QCFLAG_EH;
-	ata_eh_set_pending(ap, 1);
+	ata_eh_set_pending(ap, true);
 
 	/* The following will fail if timeout has already expired.
 	 * ata_scsi_error() takes care of such scmds on EH entry.
@@ -957,7 +969,7 @@ void ata_std_sched_eh(struct ata_port *ap)
 	if (ap->pflags & ATA_PFLAG_INITIALIZING)
 		return;
 
-	ata_eh_set_pending(ap, 1);
+	ata_eh_set_pending(ap, true);
 	scsi_schedule_eh(ap->scsi_host);
 
 	trace_ata_std_sched_eh(ap);
@@ -1008,7 +1020,7 @@ static int ata_do_link_abort(struct ata_port *ap, struct ata_link *link)
 	int tag, nr_aborted = 0;
 
 	/* we're gonna abort all commands, no need for fast drain */
-	ata_eh_set_pending(ap, 0);
+	ata_eh_set_pending(ap, false);
 
 	/* include internal tag in iteration */
 	ata_qc_for_each_with_internal(ap, qc, tag) {
@@ -1400,6 +1412,43 @@ unsigned int atapi_eh_tur(struct ata_device *dev, u8 *r_sense_key)
 }
 
 /**
+ *	ata_eh_decide_disposition - Disposition a qc based on sense data
+ *	@qc: qc to examine
+ *
+ *	For a regular SCSI command, the SCSI completion callback (scsi_done())
+ *	will call scsi_complete(), which will call scsi_decide_disposition(),
+ *	which will call scsi_check_sense(). scsi_complete() finally calls
+ *	scsi_finish_command(). This is fine for SCSI, since any eventual sense
+ *	data is usually returned in the completion itself (without invoking SCSI
+ *	EH). However, for a QC, we always need to fetch the sense data
+ *	explicitly using SCSI EH.
+ *
+ *	A command that is completed via SCSI EH will instead be completed using
+ *	scsi_eh_flush_done_q(), which will call scsi_finish_command() directly
+ *	(without ever calling scsi_check_sense()).
+ *
+ *	For a command that went through SCSI EH, it is the responsibility of the
+ *	SCSI EH strategy handler to call scsi_decide_disposition(), see e.g. how
+ *	scsi_eh_get_sense() calls scsi_decide_disposition() for SCSI LLDDs that
+ *	do not get the sense data as part of the completion.
+ *
+ *	Thus, for QC commands that went via SCSI EH, we need to call
+ *	scsi_check_sense() ourselves, similar to how scsi_eh_get_sense() calls
+ *	scsi_decide_disposition(), which calls scsi_check_sense(), in order to
+ *	set the correct SCSI ML byte (if any).
+ *
+ *	LOCKING:
+ *	EH context.
+ *
+ *	RETURNS:
+ *	SUCCESS or FAILED or NEEDS_RETRY or ADD_TO_MLQUEUE
+ */
+enum scsi_disposition ata_eh_decide_disposition(struct ata_queued_cmd *qc)
+{
+	return scsi_check_sense(qc->scsicmd);
+}
+
+/**
  *	ata_eh_request_sense - perform REQUEST_SENSE_DATA_EXT
  *	@qc: qc to perform REQUEST_SENSE_SENSE_DATA_EXT to
  *
@@ -1491,8 +1540,15 @@ unsigned int atapi_eh_request_sense(struct ata_device *dev,
 	tf.flags |= ATA_TFLAG_ISADDR | ATA_TFLAG_DEVICE;
 	tf.command = ATA_CMD_PACKET;
 
-	/* is it pointless to prefer PIO for "safety reasons"? */
-	if (ap->flags & ATA_FLAG_PIO_DMA) {
+	/*
+	 * Do not use DMA if the connected device only supports PIO, even if the
+	 * port prefers PIO commands via DMA.
+	 *
+	 * Ideally, we should call atapi_check_dma() to check if it is safe for
+	 * the LLD to use DMA for REQUEST_SENSE, but we don't have a qc.
+	 * Since we can't check the command, perhaps we should only use pio?
+	 */
+	if ((ap->flags & ATA_FLAG_PIO_DMA) && !(dev->flags & ATA_DFLAG_PIO)) {
 		tf.protocol = ATAPI_PROT_DMA;
 		tf.feature |= ATAPI_PKT_DMA;
 	} else {
@@ -1625,7 +1681,8 @@ static unsigned int ata_eh_analyze_tf(struct ata_queued_cmd *qc)
 	}
 
 	if (qc->flags & ATA_QCFLAG_SENSE_VALID) {
-		enum scsi_disposition ret = scsi_check_sense(qc->scsicmd);
+		enum scsi_disposition ret = ata_eh_decide_disposition(qc);
+
 		/*
 		 * SUCCESS here means that the sense code could be
 		 * evaluated and should be passed to the upper layers
@@ -1922,7 +1979,7 @@ static inline bool ata_eh_quiet(struct ata_queued_cmd *qc)
 	return qc->flags & ATA_QCFLAG_QUIET;
 }
 
-static int ata_eh_read_sense_success_non_ncq(struct ata_link *link)
+static int ata_eh_get_non_ncq_success_sense(struct ata_link *link)
 {
 	struct ata_port *ap = link->ap;
 	struct ata_queued_cmd *qc;
@@ -1940,11 +1997,10 @@ static int ata_eh_read_sense_success_non_ncq(struct ata_link *link)
 		return -EIO;
 
 	/*
-	 * If we have sense data, call scsi_check_sense() in order to set the
-	 * correct SCSI ML byte (if any). No point in checking the return value,
-	 * since the command has already completed successfully.
+	 * No point in checking the return value, since the command has already
+	 * completed successfully.
 	 */
-	scsi_check_sense(qc->scsicmd);
+	ata_eh_decide_disposition(qc);
 
 	return 0;
 }
@@ -1974,9 +2030,9 @@ static void ata_eh_get_success_sense(struct ata_link *link)
 	 * request sense ext command to retrieve the sense data.
 	 */
 	if (link->sactive)
-		ret = ata_eh_read_sense_success_ncq_log(link);
+		ret = ata_eh_get_ncq_success_sense(link);
 	else
-		ret = ata_eh_read_sense_success_non_ncq(link);
+		ret = ata_eh_get_non_ncq_success_sense(link);
 	if (ret)
 		goto out;
 
@@ -2013,6 +2069,188 @@ out:
 		qc->flags |= ATA_QCFLAG_SENSE_VALID;
 	}
 	ata_eh_done(link, dev, ATA_EH_GET_SUCCESS_SENSE);
+}
+
+/*
+ * Check if a link is established. This is a relaxed version of
+ * ata_phys_link_online() which accounts for the fact that this is potentially
+ * called after changing the link power management policy, which may not be
+ * reflected immediately in the SStatus register (e.g., we may still be seeing
+ * the PHY in partial, slumber or devsleep Partial power management state.
+ * So check that:
+ * - A device is still present, that is, DET is 1h (Device presence detected
+ *   but Phy communication not established) or 3h (Device presence detected and
+ *   Phy communication established)
+ * - Communication is established, that is, IPM is not 0h, indicating that PHY
+ *   is online or in a low power state.
+ */
+static bool ata_eh_link_established(struct ata_link *link)
+{
+	u32 sstatus;
+	u8 det, ipm;
+
+	/*
+	 * For old IDE/PATA adapters that do not have a valid scr_read method,
+	 * or if reading the SStatus register fails, assume that the device is
+	 * present. Device probe will determine if that is really the case.
+	 */
+	if (sata_scr_read(link, SCR_STATUS, &sstatus))
+		return true;
+
+	det = sstatus & 0x0f;
+	ipm = (sstatus >> 8) & 0x0f;
+
+	return (det & 0x01) && ipm;
+}
+
+/**
+ *	ata_eh_link_set_lpm - configure SATA interface power management
+ *	@link: link to configure
+ *	@policy: the link power management policy
+ *	@r_failed_dev: out parameter for failed device
+ *
+ *	Enable SATA Interface power management.  This will enable
+ *	Device Interface Power Management (DIPM) for min_power and
+ *	medium_power_with_dipm policies, and then call driver specific
+ *	callbacks for enabling Host Initiated Power management.
+ *
+ *	LOCKING:
+ *	EH context.
+ *
+ *	RETURNS:
+ *	0 on success, -errno on failure.
+ */
+static int ata_eh_link_set_lpm(struct ata_link *link,
+			       enum ata_lpm_policy policy,
+			       struct ata_device **r_failed_dev)
+{
+	struct ata_port *ap = ata_is_host_link(link) ? link->ap : NULL;
+	struct ata_eh_context *ehc = &link->eh_context;
+	struct ata_device *dev, *link_dev = NULL, *lpm_dev = NULL;
+	enum ata_lpm_policy old_policy = link->lpm_policy;
+	bool host_has_dipm = !(link->ap->flags & ATA_FLAG_NO_DIPM);
+	unsigned int hints = ATA_LPM_EMPTY | ATA_LPM_HIPM;
+	unsigned int err_mask;
+	int rc;
+
+	/* if the link or host doesn't do LPM, noop */
+	if (!IS_ENABLED(CONFIG_SATA_HOST) ||
+	    (link->flags & ATA_LFLAG_NO_LPM) || (ap && !ap->ops->set_lpm))
+		return 0;
+
+	/*
+	 * This function currently assumes that it will never be supplied policy
+	 * ATA_LPM_UNKNOWN.
+	 */
+	if (WARN_ON_ONCE(policy == ATA_LPM_UNKNOWN))
+		return 0;
+
+	ata_link_dbg(link, "Set LPM policy: %d -> %d\n", old_policy, policy);
+
+	/*
+	 * DIPM is enabled only for ATA_LPM_MIN_POWER,
+	 * ATA_LPM_MIN_POWER_WITH_PARTIAL, and ATA_LPM_MED_POWER_WITH_DIPM, as
+	 * some devices misbehave when the host NACKs transition to SLUMBER.
+	 */
+	ata_for_each_dev(dev, link, ENABLED) {
+		bool dev_has_hipm = ata_id_has_hipm(dev->id);
+		bool dev_has_dipm = ata_id_has_dipm(dev->id);
+
+		/* find the first enabled and LPM enabled devices */
+		if (!link_dev)
+			link_dev = dev;
+
+		if (!lpm_dev &&
+		    (dev_has_hipm || (dev_has_dipm && host_has_dipm)))
+			lpm_dev = dev;
+
+		hints &= ~ATA_LPM_EMPTY;
+		if (!dev_has_hipm)
+			hints &= ~ATA_LPM_HIPM;
+
+		/* disable DIPM before changing link config */
+		if (dev_has_dipm) {
+			err_mask = ata_dev_set_feature(dev,
+					SETFEATURES_SATA_DISABLE, SATA_DIPM);
+			if (err_mask && err_mask != AC_ERR_DEV) {
+				ata_dev_warn(dev,
+					     "failed to disable DIPM, Emask 0x%x\n",
+					     err_mask);
+				rc = -EIO;
+				goto fail;
+			}
+		}
+	}
+
+	if (ap) {
+		rc = ap->ops->set_lpm(link, policy, hints);
+		if (!rc && ap->slave_link)
+			rc = ap->ops->set_lpm(ap->slave_link, policy, hints);
+	} else
+		rc = sata_pmp_set_lpm(link, policy, hints);
+
+	/*
+	 * Attribute link config failure to the first (LPM) enabled
+	 * device on the link.
+	 */
+	if (rc) {
+		if (rc == -EOPNOTSUPP) {
+			link->flags |= ATA_LFLAG_NO_LPM;
+			return 0;
+		}
+		dev = lpm_dev ? lpm_dev : link_dev;
+		goto fail;
+	}
+
+	/*
+	 * Low level driver acked the transition.  Issue DIPM command
+	 * with the new policy set.
+	 */
+	link->lpm_policy = policy;
+	if (ap && ap->slave_link)
+		ap->slave_link->lpm_policy = policy;
+
+	/*
+	 * Host config updated, enable DIPM if transitioning to
+	 * ATA_LPM_MIN_POWER, ATA_LPM_MIN_POWER_WITH_PARTIAL, or
+	 * ATA_LPM_MED_POWER_WITH_DIPM.
+	 */
+	ata_for_each_dev(dev, link, ENABLED) {
+		bool dev_has_dipm = ata_id_has_dipm(dev->id);
+
+		if (policy >= ATA_LPM_MED_POWER_WITH_DIPM && host_has_dipm &&
+		    dev_has_dipm) {
+			err_mask = ata_dev_set_feature(dev,
+					SETFEATURES_SATA_ENABLE, SATA_DIPM);
+			if (err_mask && err_mask != AC_ERR_DEV) {
+				ata_dev_warn(dev,
+					"failed to enable DIPM, Emask 0x%x\n",
+					err_mask);
+				rc = -EIO;
+				goto fail;
+			}
+		}
+	}
+
+	link->last_lpm_change = jiffies;
+	link->flags |= ATA_LFLAG_CHANGED;
+
+	return 0;
+
+fail:
+	/* restore the old policy */
+	link->lpm_policy = old_policy;
+	if (ap && ap->slave_link)
+		ap->slave_link->lpm_policy = old_policy;
+
+	/* if no device or only one more chance is left, disable LPM */
+	if (!dev || ehc->tries[dev->devno] <= 2) {
+		ata_link_warn(link, "disabling LPM on the link\n");
+		link->flags |= ATA_LFLAG_NO_LPM;
+	}
+	if (r_failed_dev)
+		*r_failed_dev = dev;
+	return rc;
 }
 
 /**
@@ -2548,25 +2786,28 @@ static int ata_do_reset(struct ata_link *link, ata_reset_fn_t reset,
 	return reset(link, classes, deadline);
 }
 
-static int ata_eh_followup_srst_needed(struct ata_link *link, int rc)
+static bool ata_eh_followup_srst_needed(struct ata_link *link, int rc)
 {
 	if ((link->flags & ATA_LFLAG_NO_SRST) || ata_link_offline(link))
-		return 0;
+		return false;
 	if (rc == -EAGAIN)
-		return 1;
+		return true;
 	if (sata_pmp_supported(link->ap) && ata_is_host_link(link))
-		return 1;
-	return 0;
+		return true;
+	return false;
 }
 
 int ata_eh_reset(struct ata_link *link, int classify,
-		 ata_prereset_fn_t prereset, ata_reset_fn_t softreset,
-		 ata_reset_fn_t hardreset, ata_postreset_fn_t postreset)
+		 struct ata_reset_operations *reset_ops)
 {
 	struct ata_port *ap = link->ap;
 	struct ata_link *slave = ap->slave_link;
 	struct ata_eh_context *ehc = &link->eh_context;
 	struct ata_eh_context *sehc = slave ? &slave->eh_context : NULL;
+	ata_reset_fn_t hardreset = reset_ops->hardreset;
+	ata_reset_fn_t softreset = reset_ops->softreset;
+	ata_prereset_fn_t prereset = reset_ops->prereset;
+	ata_postreset_fn_t postreset = reset_ops->postreset;
 	unsigned int *classes = ehc->classes;
 	unsigned int lflags = link->flags;
 	int verbose = !(ehc->i.flags & ATA_EHI_QUIET);
@@ -3065,13 +3306,13 @@ static int ata_eh_revalidate_and_attach(struct ata_link *link,
 			 * to ap->target_lpm_policy after revalidation is done.
 			 */
 			if (link->lpm_policy > ATA_LPM_MAX_POWER) {
-				rc = ata_eh_set_lpm(link, ATA_LPM_MAX_POWER,
-						    r_failed_dev);
+				rc = ata_eh_link_set_lpm(link, ATA_LPM_MAX_POWER,
+							 r_failed_dev);
 				if (rc)
 					goto err;
 			}
 
-			if (ata_phys_link_offline(ata_dev_phys_link(dev))) {
+			if (!ata_eh_link_established(ata_dev_phys_link(dev))) {
 				rc = -EIO;
 				goto err;
 			}
@@ -3169,17 +3410,18 @@ static int ata_eh_revalidate_and_attach(struct ata_link *link,
 	return 0;
 
  err:
+	dev->flags &= ~ATA_DFLAG_RESUMING;
 	*r_failed_dev = dev;
 	return rc;
 }
 
 /**
- *	ata_set_mode - Program timings and issue SET FEATURES - XFER
+ *	ata_eh_set_mode - Program timings and issue SET FEATURES - XFER
  *	@link: link on which timings will be programmed
  *	@r_failed_dev: out parameter for failed device
  *
  *	Set ATA device disk transfer mode (PIO3, UDMA6, etc.).  If
- *	ata_set_mode() fails, pointer to the failing device is
+ *	ata_eh_set_mode() fails, pointer to the failing device is
  *	returned in @r_failed_dev.
  *
  *	LOCKING:
@@ -3188,7 +3430,8 @@ static int ata_eh_revalidate_and_attach(struct ata_link *link,
  *	RETURNS:
  *	0 on success, negative errno otherwise
  */
-int ata_set_mode(struct ata_link *link, struct ata_device **r_failed_dev)
+static int ata_eh_set_mode(struct ata_link *link,
+			   struct ata_device **r_failed_dev)
 {
 	struct ata_port *ap = link->ap;
 	struct ata_device *dev;
@@ -3209,7 +3452,7 @@ int ata_set_mode(struct ata_link *link, struct ata_device **r_failed_dev)
 	if (ap->ops->set_mode)
 		rc = ap->ops->set_mode(link, r_failed_dev);
 	else
-		rc = ata_do_set_mode(link, r_failed_dev);
+		rc = ata_set_mode(link, r_failed_dev);
 
 	/* if transfer mode has changed, set DUBIOUS_XFER on device */
 	ata_for_each_dev(dev, link, ENABLED) {
@@ -3244,7 +3487,7 @@ static int atapi_eh_clear_ua(struct ata_device *dev)
 	int i;
 
 	for (i = 0; i < ATA_EH_UA_TRIES; i++) {
-		u8 *sense_buffer = dev->link->ap->sector_buf;
+		u8 *sense_buffer = dev->sector_buf;
 		u8 sense_key = 0;
 		unsigned int err_mask;
 
@@ -3346,140 +3589,6 @@ static int ata_eh_maybe_retry_flush(struct ata_device *dev)
 				rc = 0;
 		}
 	}
-	return rc;
-}
-
-/**
- *	ata_eh_set_lpm - configure SATA interface power management
- *	@link: link to configure power management
- *	@policy: the link power management policy
- *	@r_failed_dev: out parameter for failed device
- *
- *	Enable SATA Interface power management.  This will enable
- *	Device Interface Power Management (DIPM) for min_power and
- *	medium_power_with_dipm policies, and then call driver specific
- *	callbacks for enabling Host Initiated Power management.
- *
- *	LOCKING:
- *	EH context.
- *
- *	RETURNS:
- *	0 on success, -errno on failure.
- */
-static int ata_eh_set_lpm(struct ata_link *link, enum ata_lpm_policy policy,
-			  struct ata_device **r_failed_dev)
-{
-	struct ata_port *ap = ata_is_host_link(link) ? link->ap : NULL;
-	struct ata_eh_context *ehc = &link->eh_context;
-	struct ata_device *dev, *link_dev = NULL, *lpm_dev = NULL;
-	enum ata_lpm_policy old_policy = link->lpm_policy;
-	bool no_dipm = link->ap->flags & ATA_FLAG_NO_DIPM;
-	unsigned int hints = ATA_LPM_EMPTY | ATA_LPM_HIPM;
-	unsigned int err_mask;
-	int rc;
-
-	/* if the link or host doesn't do LPM, noop */
-	if (!IS_ENABLED(CONFIG_SATA_HOST) ||
-	    (link->flags & ATA_LFLAG_NO_LPM) || (ap && !ap->ops->set_lpm))
-		return 0;
-
-	/*
-	 * DIPM is enabled only for MIN_POWER as some devices
-	 * misbehave when the host NACKs transition to SLUMBER.  Order
-	 * device and link configurations such that the host always
-	 * allows DIPM requests.
-	 */
-	ata_for_each_dev(dev, link, ENABLED) {
-		bool hipm = ata_id_has_hipm(dev->id);
-		bool dipm = ata_id_has_dipm(dev->id) && !no_dipm;
-
-		/* find the first enabled and LPM enabled devices */
-		if (!link_dev)
-			link_dev = dev;
-
-		if (!lpm_dev && (hipm || dipm))
-			lpm_dev = dev;
-
-		hints &= ~ATA_LPM_EMPTY;
-		if (!hipm)
-			hints &= ~ATA_LPM_HIPM;
-
-		/* disable DIPM before changing link config */
-		if (policy < ATA_LPM_MED_POWER_WITH_DIPM && dipm) {
-			err_mask = ata_dev_set_feature(dev,
-					SETFEATURES_SATA_DISABLE, SATA_DIPM);
-			if (err_mask && err_mask != AC_ERR_DEV) {
-				ata_dev_warn(dev,
-					     "failed to disable DIPM, Emask 0x%x\n",
-					     err_mask);
-				rc = -EIO;
-				goto fail;
-			}
-		}
-	}
-
-	if (ap) {
-		rc = ap->ops->set_lpm(link, policy, hints);
-		if (!rc && ap->slave_link)
-			rc = ap->ops->set_lpm(ap->slave_link, policy, hints);
-	} else
-		rc = sata_pmp_set_lpm(link, policy, hints);
-
-	/*
-	 * Attribute link config failure to the first (LPM) enabled
-	 * device on the link.
-	 */
-	if (rc) {
-		if (rc == -EOPNOTSUPP) {
-			link->flags |= ATA_LFLAG_NO_LPM;
-			return 0;
-		}
-		dev = lpm_dev ? lpm_dev : link_dev;
-		goto fail;
-	}
-
-	/*
-	 * Low level driver acked the transition.  Issue DIPM command
-	 * with the new policy set.
-	 */
-	link->lpm_policy = policy;
-	if (ap && ap->slave_link)
-		ap->slave_link->lpm_policy = policy;
-
-	/* host config updated, enable DIPM if transitioning to MIN_POWER */
-	ata_for_each_dev(dev, link, ENABLED) {
-		if (policy >= ATA_LPM_MED_POWER_WITH_DIPM && !no_dipm &&
-		    ata_id_has_dipm(dev->id)) {
-			err_mask = ata_dev_set_feature(dev,
-					SETFEATURES_SATA_ENABLE, SATA_DIPM);
-			if (err_mask && err_mask != AC_ERR_DEV) {
-				ata_dev_warn(dev,
-					"failed to enable DIPM, Emask 0x%x\n",
-					err_mask);
-				rc = -EIO;
-				goto fail;
-			}
-		}
-	}
-
-	link->last_lpm_change = jiffies;
-	link->flags |= ATA_LFLAG_CHANGED;
-
-	return 0;
-
-fail:
-	/* restore the old policy */
-	link->lpm_policy = old_policy;
-	if (ap && ap->slave_link)
-		ap->slave_link->lpm_policy = old_policy;
-
-	/* if no device or only one more chance is left, disable LPM */
-	if (!dev || ehc->tries[dev->devno] <= 2) {
-		ata_link_warn(link, "disabling LPM on the link\n");
-		link->flags |= ATA_LFLAG_NO_LPM;
-	}
-	if (r_failed_dev)
-		*r_failed_dev = dev;
 	return rc;
 }
 
@@ -3655,10 +3764,7 @@ static int ata_eh_handle_dev_fail(struct ata_device *dev, int err)
 /**
  *	ata_eh_recover - recover host port after error
  *	@ap: host port to recover
- *	@prereset: prereset method (can be NULL)
- *	@softreset: softreset method (can be NULL)
- *	@hardreset: hardreset method (can be NULL)
- *	@postreset: postreset method (can be NULL)
+ *	@reset_ops: The set of reset operations to use
  *	@r_failed_link: out parameter for failed link
  *
  *	This is the alpha and omega, eum and yang, heart and soul of
@@ -3674,9 +3780,7 @@ static int ata_eh_handle_dev_fail(struct ata_device *dev, int err)
  *	RETURNS:
  *	0 on success, -errno on failure.
  */
-int ata_eh_recover(struct ata_port *ap, ata_prereset_fn_t prereset,
-		   ata_reset_fn_t softreset, ata_reset_fn_t hardreset,
-		   ata_postreset_fn_t postreset,
+int ata_eh_recover(struct ata_port *ap, struct ata_reset_operations *reset_ops,
 		   struct ata_link **r_failed_link)
 {
 	struct ata_link *link;
@@ -3744,8 +3848,7 @@ int ata_eh_recover(struct ata_port *ap, ata_prereset_fn_t prereset,
 		if (!(ehc->i.action & ATA_EH_RESET))
 			continue;
 
-		rc = ata_eh_reset(link, ata_link_nr_vacant(link),
-				  prereset, softreset, hardreset, postreset);
+		rc = ata_eh_reset(link, ata_link_nr_vacant(link), reset_ops);
 		if (rc) {
 			ata_link_err(link, "reset failed, giving up\n");
 			goto out;
@@ -3826,7 +3929,7 @@ int ata_eh_recover(struct ata_port *ap, ata_prereset_fn_t prereset,
 
 		/* configure transfer mode if necessary */
 		if (ehc->i.flags & ATA_EHI_SETMODE) {
-			rc = ata_set_mode(link, &dev);
+			rc = ata_eh_set_mode(link, &dev);
 			if (rc)
 				goto rest_fail;
 			ehc->i.flags &= ~ATA_EHI_SETMODE;
@@ -3871,7 +3974,8 @@ int ata_eh_recover(struct ata_port *ap, ata_prereset_fn_t prereset,
 	config_lpm:
 		/* configure link power saving */
 		if (link->lpm_policy != ap->target_lpm_policy) {
-			rc = ata_eh_set_lpm(link, ap->target_lpm_policy, &dev);
+			rc = ata_eh_link_set_lpm(link, ap->target_lpm_policy,
+						 &dev);
 			if (rc)
 				goto rest_fail;
 		}
@@ -3965,58 +4069,38 @@ void ata_eh_finish(struct ata_port *ap)
 }
 
 /**
- *	ata_do_eh - do standard error handling
+ *	ata_std_error_handler - standard error handler
  *	@ap: host port to handle error for
- *
- *	@prereset: prereset method (can be NULL)
- *	@softreset: softreset method (can be NULL)
- *	@hardreset: hardreset method (can be NULL)
- *	@postreset: postreset method (can be NULL)
  *
  *	Perform standard error handling sequence.
  *
  *	LOCKING:
  *	Kernel thread context (may sleep).
  */
-void ata_do_eh(struct ata_port *ap, ata_prereset_fn_t prereset,
-	       ata_reset_fn_t softreset, ata_reset_fn_t hardreset,
-	       ata_postreset_fn_t postreset)
+void ata_std_error_handler(struct ata_port *ap)
 {
-	struct ata_device *dev;
+	struct ata_reset_operations *reset_ops = &ap->ops->reset;
+	struct ata_link *link = &ap->link;
 	int rc;
+
+	/* Ignore built-in hardresets if SCR access is not available */
+	if ((reset_ops->hardreset == sata_std_hardreset ||
+	     reset_ops->hardreset == sata_sff_hardreset) &&
+	    !sata_scr_valid(link))
+		link->flags |= ATA_LFLAG_NO_HRST;
 
 	ata_eh_autopsy(ap);
 	ata_eh_report(ap);
 
-	rc = ata_eh_recover(ap, prereset, softreset, hardreset, postreset,
-			    NULL);
+	rc = ata_eh_recover(ap, reset_ops, NULL);
 	if (rc) {
-		ata_for_each_dev(dev, &ap->link, ALL)
+		struct ata_device *dev;
+
+		ata_for_each_dev(dev, link, ALL)
 			ata_dev_disable(dev);
 	}
 
 	ata_eh_finish(ap);
-}
-
-/**
- *	ata_std_error_handler - standard error handler
- *	@ap: host port to handle error for
- *
- *	Standard error handler
- *
- *	LOCKING:
- *	Kernel thread context (may sleep).
- */
-void ata_std_error_handler(struct ata_port *ap)
-{
-	struct ata_port_operations *ops = ap->ops;
-	ata_reset_fn_t hardreset = ops->hardreset;
-
-	/* ignore built-in hardreset if SCR access is not available */
-	if (hardreset == sata_std_hardreset && !sata_scr_valid(&ap->link))
-		hardreset = NULL;
-
-	ata_do_eh(ap, ops->prereset, ops->softreset, hardreset, ops->postreset);
 }
 EXPORT_SYMBOL_GPL(ata_std_error_handler);
 
@@ -4048,10 +4132,20 @@ static void ata_eh_handle_port_suspend(struct ata_port *ap)
 
 	WARN_ON(ap->pflags & ATA_PFLAG_SUSPENDED);
 
-	/* Set all devices attached to the port in standby mode */
-	ata_for_each_link(link, ap, HOST_FIRST) {
-		ata_for_each_dev(dev, link, ENABLED)
-			ata_dev_power_set_standby(dev);
+	/*
+	 * We will reach this point for all of the PM events:
+	 * PM_EVENT_SUSPEND (if runtime pm, PM_EVENT_AUTO will also be set)
+	 * PM_EVENT_FREEZE, and PM_EVENT_HIBERNATE.
+	 *
+	 * We do not want to perform disk spin down for PM_EVENT_FREEZE.
+	 * (Spin down will be performed by the subsequent PM_EVENT_HIBERNATE.)
+	 */
+	if (!(ap->pm_mesg.event & PM_EVENT_FREEZE)) {
+		/* Set all devices attached to the port in standby mode */
+		ata_for_each_link(link, ap, HOST_FIRST) {
+			ata_for_each_dev(dev, link, ENABLED)
+				ata_dev_power_set_standby(dev);
+		}
 	}
 
 	/*

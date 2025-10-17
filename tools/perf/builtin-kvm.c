@@ -615,67 +615,6 @@ static const char *get_filename_for_perf_kvm(void)
 
 #if defined(HAVE_KVM_STAT_SUPPORT) && defined(HAVE_LIBTRACEEVENT)
 
-void exit_event_get_key(struct evsel *evsel,
-			struct perf_sample *sample,
-			struct event_key *key)
-{
-	key->info = 0;
-	key->key  = evsel__intval(evsel, sample, kvm_exit_reason);
-}
-
-bool kvm_exit_event(struct evsel *evsel)
-{
-	return evsel__name_is(evsel, kvm_exit_trace);
-}
-
-bool exit_event_begin(struct evsel *evsel,
-		      struct perf_sample *sample, struct event_key *key)
-{
-	if (kvm_exit_event(evsel)) {
-		exit_event_get_key(evsel, sample, key);
-		return true;
-	}
-
-	return false;
-}
-
-bool kvm_entry_event(struct evsel *evsel)
-{
-	return evsel__name_is(evsel, kvm_entry_trace);
-}
-
-bool exit_event_end(struct evsel *evsel,
-		    struct perf_sample *sample __maybe_unused,
-		    struct event_key *key __maybe_unused)
-{
-	return kvm_entry_event(evsel);
-}
-
-static const char *get_exit_reason(struct perf_kvm_stat *kvm,
-				   struct exit_reasons_table *tbl,
-				   u64 exit_code)
-{
-	while (tbl->reason != NULL) {
-		if (tbl->exit_code == exit_code)
-			return tbl->reason;
-		tbl++;
-	}
-
-	pr_err("unknown kvm exit code:%lld on %s\n",
-		(unsigned long long)exit_code, kvm->exit_reasons_isa);
-	return "UNKNOWN";
-}
-
-void exit_event_decode_key(struct perf_kvm_stat *kvm,
-			   struct event_key *key,
-			   char *decode)
-{
-	const char *exit_reason = get_exit_reason(kvm, key->exit_reasons,
-						  key->key);
-
-	scnprintf(decode, KVM_EVENT_NAME_LEN, "%s", exit_reason);
-}
-
 static bool register_kvm_events_ops(struct perf_kvm_stat *kvm)
 {
 	struct kvm_reg_events_ops *events_ops = kvm_reg_events_ops;
@@ -1166,7 +1105,7 @@ static void print_result(struct perf_kvm_stat *kvm)
 }
 
 #if defined(HAVE_TIMERFD_SUPPORT) && defined(HAVE_LIBTRACEEVENT)
-static int process_lost_event(struct perf_tool *tool,
+static int process_lost_event(const struct perf_tool *tool,
 			      union perf_event *event __maybe_unused,
 			      struct perf_sample *sample __maybe_unused,
 			      struct machine *machine __maybe_unused)
@@ -1187,7 +1126,7 @@ static bool skip_sample(struct perf_kvm_stat *kvm,
 	return false;
 }
 
-static int process_sample_event(struct perf_tool *tool,
+static int process_sample_event(const struct perf_tool *tool,
 				union perf_event *event,
 				struct perf_sample *sample,
 				struct evsel *evsel,
@@ -1226,7 +1165,9 @@ static int cpu_isa_config(struct perf_kvm_stat *kvm)
 	int err;
 
 	if (kvm->live) {
-		err = get_cpuid(buf, sizeof(buf));
+		struct perf_cpu cpu = {-1};
+
+		err = get_cpuid(buf, sizeof(buf), cpu);
 		if (err != 0) {
 			pr_err("Failed to look up CPU type: %s\n",
 			       str_error_r(err, buf, sizeof(buf)));
@@ -1234,7 +1175,7 @@ static int cpu_isa_config(struct perf_kvm_stat *kvm)
 		}
 		cpuid = buf;
 	} else
-		cpuid = kvm->session->header.env.cpuid;
+		cpuid = perf_session__env(kvm->session)->cpuid;
 
 	if (!cpuid) {
 		pr_err("Failed to look up CPU type\n");
@@ -1603,26 +1544,24 @@ static int read_events(struct perf_kvm_stat *kvm)
 {
 	int ret;
 
-	struct perf_tool eops = {
-		.sample			= process_sample_event,
-		.comm			= perf_event__process_comm,
-		.namespaces		= perf_event__process_namespaces,
-		.ordered_events		= true,
-	};
 	struct perf_data file = {
 		.path  = kvm->file_name,
 		.mode  = PERF_DATA_MODE_READ,
 		.force = kvm->force,
 	};
 
-	kvm->tool = eops;
+	perf_tool__init(&kvm->tool, /*ordered_events=*/true);
+	kvm->tool.sample	= process_sample_event;
+	kvm->tool.comm		= perf_event__process_comm;
+	kvm->tool.namespaces	= perf_event__process_namespaces;
+
 	kvm->session = perf_session__new(&file, &kvm->tool);
 	if (IS_ERR(kvm->session)) {
 		pr_err("Initializing perf session failed\n");
 		return PTR_ERR(kvm->session);
 	}
 
-	symbol__init(&kvm->session->header.env);
+	symbol__init(perf_session__env(kvm->session));
 
 	if (!perf_session__has_traces(kvm->session, "kvm record")) {
 		ret = -EINVAL;
@@ -1697,14 +1636,6 @@ exit:
 	return ret;
 }
 
-#define STRDUP_FAIL_EXIT(s)		\
-	({	char *_p;		\
-	_p = strdup(s);		\
-		if (!_p)		\
-			return -ENOMEM;	\
-		_p;			\
-	})
-
 int __weak setup_kvm_events_tp(struct perf_kvm_stat *kvm __maybe_unused)
 {
 	return 0;
@@ -1749,7 +1680,7 @@ kvm_events_record(struct perf_kvm_stat *kvm, int argc, const char **argv)
 		rec_argv[i] = STRDUP_FAIL_EXIT(record_args[i]);
 
 	for (j = 0; j < events_tp_size; j++) {
-		rec_argv[i++] = "-e";
+		rec_argv[i++] = STRDUP_FAIL_EXIT("-e");
 		rec_argv[i++] = STRDUP_FAIL_EXIT(kvm_events_tp[j]);
 	}
 
@@ -1757,7 +1688,7 @@ kvm_events_record(struct perf_kvm_stat *kvm, int argc, const char **argv)
 	rec_argv[i++] = STRDUP_FAIL_EXIT(kvm->file_name);
 
 	for (j = 1; j < (unsigned int)argc; j++, i++)
-		rec_argv[i] = argv[j];
+		rec_argv[i] = STRDUP_FAIL_EXIT(argv[j]);
 
 	set_option_flag(record_options, 'e', "event", PARSE_OPT_HIDDEN);
 	set_option_flag(record_options, 0, "filter", PARSE_OPT_HIDDEN);
@@ -1780,7 +1711,13 @@ kvm_events_record(struct perf_kvm_stat *kvm, int argc, const char **argv)
 	set_option_flag(record_options, 0, "transaction", PARSE_OPT_DISABLED);
 
 	record_usage = kvm_stat_record_usage;
-	return cmd_record(i, rec_argv);
+	ret = cmd_record(i, rec_argv);
+
+EXIT:
+	for (i = 0; i < rec_argc; i++)
+		free((void *)rec_argv[i]);
+	free(rec_argv);
+	return ret;
 }
 
 static int
@@ -1919,22 +1856,19 @@ static int kvm_events_live(struct perf_kvm_stat *kvm,
 
 
 	/* event handling */
+	perf_tool__init(&kvm->tool, /*ordered_events=*/true);
 	kvm->tool.sample = process_sample_event;
 	kvm->tool.comm   = perf_event__process_comm;
 	kvm->tool.exit   = perf_event__process_exit;
 	kvm->tool.fork   = perf_event__process_fork;
 	kvm->tool.lost   = process_lost_event;
 	kvm->tool.namespaces  = perf_event__process_namespaces;
-	kvm->tool.ordered_events = true;
-	perf_tool__fill_defaults(&kvm->tool);
 
 	/* set defaults */
 	kvm->display_time = 1;
 	kvm->opts.user_interval = 1;
 	kvm->opts.mmap_pages = 512;
 	kvm->opts.target.uses_mmap = false;
-	kvm->opts.target.uid_str = NULL;
-	kvm->opts.target.uid = UINT_MAX;
 
 	symbol__init(NULL);
 	disable_buildid_cache();
@@ -2064,58 +1998,122 @@ static int __cmd_record(const char *file_name, int argc, const char **argv)
 	int rec_argc, i = 0, j, ret;
 	const char **rec_argv;
 
-	ret = kvm_add_default_arch_event(&argc, argv);
-	if (ret)
-		return -EINVAL;
-
-	rec_argc = argc + 2;
+	/*
+	 * Besides the 2 more options "-o" and "filename",
+	 * kvm_add_default_arch_event() may add 2 extra options,
+	 * so allocate 4 more items.
+	 */
+	rec_argc = argc + 2 + 2;
 	rec_argv = calloc(rec_argc + 1, sizeof(char *));
-	rec_argv[i++] = strdup("record");
-	rec_argv[i++] = strdup("-o");
-	rec_argv[i++] = strdup(file_name);
+	if (!rec_argv)
+		return -ENOMEM;
+
+	rec_argv[i++] = STRDUP_FAIL_EXIT("record");
+	rec_argv[i++] = STRDUP_FAIL_EXIT("-o");
+	rec_argv[i++] = STRDUP_FAIL_EXIT(file_name);
 	for (j = 1; j < argc; j++, i++)
-		rec_argv[i] = argv[j];
+		rec_argv[i] = STRDUP_FAIL_EXIT(argv[j]);
 
 	BUG_ON(i != rec_argc);
 
-	return cmd_record(i, rec_argv);
+	ret = kvm_add_default_arch_event(&i, rec_argv);
+	if (ret)
+		goto EXIT;
+
+	ret = cmd_record(i, rec_argv);
+
+EXIT:
+	for (i = 0; i < rec_argc; i++)
+		free((void *)rec_argv[i]);
+	free(rec_argv);
+	return ret;
 }
 
 static int __cmd_report(const char *file_name, int argc, const char **argv)
 {
-	int rec_argc, i = 0, j;
+	int rec_argc, i = 0, j, ret;
 	const char **rec_argv;
 
 	rec_argc = argc + 2;
 	rec_argv = calloc(rec_argc + 1, sizeof(char *));
-	rec_argv[i++] = strdup("report");
-	rec_argv[i++] = strdup("-i");
-	rec_argv[i++] = strdup(file_name);
+	if (!rec_argv)
+		return -ENOMEM;
+
+	rec_argv[i++] = STRDUP_FAIL_EXIT("report");
+	rec_argv[i++] = STRDUP_FAIL_EXIT("-i");
+	rec_argv[i++] = STRDUP_FAIL_EXIT(file_name);
 	for (j = 1; j < argc; j++, i++)
-		rec_argv[i] = argv[j];
+		rec_argv[i] = STRDUP_FAIL_EXIT(argv[j]);
 
 	BUG_ON(i != rec_argc);
 
-	return cmd_report(i, rec_argv);
+	ret = cmd_report(i, rec_argv);
+
+EXIT:
+	for (i = 0; i < rec_argc; i++)
+		free((void *)rec_argv[i]);
+	free(rec_argv);
+	return ret;
 }
 
 static int
 __cmd_buildid_list(const char *file_name, int argc, const char **argv)
 {
-	int rec_argc, i = 0, j;
+	int rec_argc, i = 0, j, ret;
 	const char **rec_argv;
 
 	rec_argc = argc + 2;
 	rec_argv = calloc(rec_argc + 1, sizeof(char *));
-	rec_argv[i++] = strdup("buildid-list");
-	rec_argv[i++] = strdup("-i");
-	rec_argv[i++] = strdup(file_name);
+	if (!rec_argv)
+		return -ENOMEM;
+
+	rec_argv[i++] = STRDUP_FAIL_EXIT("buildid-list");
+	rec_argv[i++] = STRDUP_FAIL_EXIT("-i");
+	rec_argv[i++] = STRDUP_FAIL_EXIT(file_name);
 	for (j = 1; j < argc; j++, i++)
-		rec_argv[i] = argv[j];
+		rec_argv[i] = STRDUP_FAIL_EXIT(argv[j]);
 
 	BUG_ON(i != rec_argc);
 
-	return cmd_buildid_list(i, rec_argv);
+	ret = cmd_buildid_list(i, rec_argv);
+
+EXIT:
+	for (i = 0; i < rec_argc; i++)
+		free((void *)rec_argv[i]);
+	free(rec_argv);
+	return ret;
+}
+
+static int __cmd_top(int argc, const char **argv)
+{
+	int rec_argc, i = 0, ret;
+	const char **rec_argv;
+
+	/*
+	 * kvm_add_default_arch_event() may add 2 extra options, so
+	 * allocate 2 more pointers in adavance.
+	 */
+	rec_argc = argc + 2;
+	rec_argv = calloc(rec_argc + 1, sizeof(char *));
+	if (!rec_argv)
+		return -ENOMEM;
+
+	for (i = 0; i < argc; i++)
+		rec_argv[i] = STRDUP_FAIL_EXIT(argv[i]);
+
+	BUG_ON(i != argc);
+
+	ret = kvm_add_default_arch_event(&i, rec_argv);
+	if (ret)
+		goto EXIT;
+
+	ret = cmd_top(i, rec_argv);
+
+EXIT:
+	for (i = 0; i < rec_argc; i++)
+		free((void *)rec_argv[i]);
+	free(rec_argv);
+	return ret;
 }
 
 int cmd_kvm(int argc, const char **argv)
@@ -2150,6 +2148,7 @@ int cmd_kvm(int argc, const char **argv)
 						"buildid-list", "stat", NULL };
 	const char *kvm_usage[] = { NULL, NULL };
 
+	exclude_GH_default = true;
 	perf_host  = 0;
 	perf_guest = 1;
 
@@ -2177,7 +2176,7 @@ int cmd_kvm(int argc, const char **argv)
 	else if (strlen(argv[0]) > 2 && strstarts("diff", argv[0]))
 		return cmd_diff(argc, argv);
 	else if (!strcmp(argv[0], "top"))
-		return cmd_top(argc, argv);
+		return __cmd_top(argc, argv);
 	else if (strlen(argv[0]) > 2 && strstarts("buildid-list", argv[0]))
 		return __cmd_buildid_list(file_name, argc, argv);
 #if defined(HAVE_KVM_STAT_SUPPORT) && defined(HAVE_LIBTRACEEVENT)
@@ -2186,6 +2185,9 @@ int cmd_kvm(int argc, const char **argv)
 #endif
 	else
 		usage_with_options(kvm_usage, kvm_options);
+
+	/* free usage string allocated by parse_options_subcommand */
+	free((void *)kvm_usage[0]);
 
 	return 0;
 }

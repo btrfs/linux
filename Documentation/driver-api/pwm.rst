@@ -143,11 +143,12 @@ to implement the pwm_*() functions itself. This means that it's impossible
 to have multiple PWM drivers in the system. For this reason it's mandatory
 for new drivers to use the generic PWM framework.
 
-A new PWM controller/chip can be added using pwmchip_add() and removed
-again with pwmchip_remove(). pwmchip_add() takes a filled in struct
-pwm_chip as argument which provides a description of the PWM chip, the
-number of PWM devices provided by the chip and the chip-specific
-implementation of the supported PWM operations to the framework.
+A new PWM controller/chip can be allocated using pwmchip_alloc(), then
+registered using pwmchip_add() and removed again with pwmchip_remove(). To undo
+pwmchip_alloc() use pwmchip_put(). pwmchip_add() takes a filled in struct
+pwm_chip as argument which provides a description of the PWM chip, the number
+of PWM devices provided by the chip and the chip-specific implementation of the
+supported PWM operations to the framework.
 
 When implementing polarity support in a PWM driver, make sure to respect the
 signal conventions in the PWM framework. By definition, normal polarity
@@ -172,10 +173,15 @@ Locking
 -------
 
 The PWM core list manipulations are protected by a mutex, so pwm_get()
-and pwm_put() may not be called from an atomic context. Currently the
-PWM core does not enforce any locking to pwm_enable(), pwm_disable() and
-pwm_config(), so the calling context is currently driver specific. This
-is an issue derived from the former barebone API and should be fixed soon.
+and pwm_put() may not be called from an atomic context.
+Most functions in the PWM consumer API might sleep and so must not be called
+from atomic context. The notable exception is pwm_apply_atomic() which has the
+same semantics as pwm_apply_might_sleep() but can be called from atomic context.
+(The price for that is that it doesn't work for all PWM devices, use
+pwm_might_sleep() to check if a given PWM supports atomic operation.
+
+Locking in the PWM core ensures that callbacks related to a single chip are
+serialized.
 
 Helpers
 -------

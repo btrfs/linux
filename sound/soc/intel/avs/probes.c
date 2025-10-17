@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 //
-// Copyright(c) 2021-2022 Intel Corporation. All rights reserved.
+// Copyright(c) 2021-2022 Intel Corporation
 //
 // Authors: Cezary Rojewski <cezary.rojewski@intel.com>
 //          Amadeusz Slawinski <amadeuszx.slawinski@linux.intel.com>
@@ -11,6 +11,7 @@
 #include <sound/hdaudio.h>
 #include <sound/soc.h>
 #include "avs.h"
+#include "debug.h"
 #include "messages.h"
 
 static int avs_dsp_init_probe(struct avs_dev *adev, union avs_connector_node_id node_id,
@@ -19,8 +20,11 @@ static int avs_dsp_init_probe(struct avs_dev *adev, union avs_connector_node_id 
 	struct avs_probe_cfg cfg = {{0}};
 	struct avs_module_entry mentry;
 	u8 dummy;
+	int ret;
 
-	avs_get_module_entry(adev, &AVS_PROBE_MOD_UUID, &mentry);
+	ret = avs_get_module_entry(adev, &AVS_PROBE_MOD_UUID, &mentry);
+	if (ret)
+		return ret;
 
 	/*
 	 * Probe module uses no cycles, audio data format and input and output
@@ -39,11 +43,12 @@ static int avs_dsp_init_probe(struct avs_dev *adev, union avs_connector_node_id 
 static void avs_dsp_delete_probe(struct avs_dev *adev)
 {
 	struct avs_module_entry mentry;
+	int ret;
 
-	avs_get_module_entry(adev, &AVS_PROBE_MOD_UUID, &mentry);
-
-	/* There is only ever one probe module instance. */
-	avs_dsp_delete_module(adev, mentry.module_id, 0, INVALID_PIPELINE_ID, 0);
+	ret = avs_get_module_entry(adev, &AVS_PROBE_MOD_UUID, &mentry);
+	if (!ret)
+		/* There is only ever one probe module instance. */
+		avs_dsp_delete_module(adev, mentry.module_id, 0, INVALID_PIPELINE_ID, 0);
 }
 
 static inline struct hdac_ext_stream *avs_compr_get_host_stream(struct snd_compr_stream *cstream)
@@ -209,7 +214,7 @@ static int avs_probe_compr_trigger(struct snd_compr_stream *cstream, int cmd,
 }
 
 static int avs_probe_compr_pointer(struct snd_compr_stream *cstream,
-				   struct snd_compr_tstamp *tstamp, struct snd_soc_dai *dai)
+				   struct snd_compr_tstamp64 *tstamp, struct snd_soc_dai *dai)
 {
 	struct hdac_ext_stream *host_stream = avs_compr_get_host_stream(cstream);
 	struct snd_soc_pcm_stream *pstream;
@@ -286,8 +291,22 @@ static const struct snd_soc_component_driver avs_probe_component_driver = {
 	.module_get_upon_open	= 1, /* increment refcount when a stream is opened */
 };
 
-int avs_probe_platform_register(struct avs_dev *adev, const char *name)
+int avs_register_probe_component(struct avs_dev *adev, const char *name)
 {
-	return avs_soc_component_register(adev->dev, name, &avs_probe_component_driver,
-					  probe_cpu_dais, ARRAY_SIZE(probe_cpu_dais));
+	struct snd_soc_component *component;
+	int ret;
+
+	component = devm_kzalloc(adev->dev, sizeof(*component), GFP_KERNEL);
+	if (!component)
+		return -ENOMEM;
+
+	component->name = devm_kstrdup(adev->dev, name, GFP_KERNEL);
+	if (!component->name)
+		return -ENOMEM;
+
+	ret = snd_soc_component_initialize(component, &avs_probe_component_driver, adev->dev);
+	if (ret)
+		return ret;
+
+	return snd_soc_add_component(component, probe_cpu_dais, ARRAY_SIZE(probe_cpu_dais));
 }

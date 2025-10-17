@@ -97,7 +97,7 @@ static int for_each_padev(int (*fn)(struct device *, void *), void * data)
  * @driver: the PA-RISC driver to try
  * @dev: the PA-RISC device to try
  */
-static int match_device(struct parisc_driver *driver, struct parisc_device *dev)
+static int match_device(const struct parisc_driver *driver, struct parisc_device *dev)
 {
 	const struct parisc_device_id *ids;
 
@@ -548,7 +548,7 @@ alloc_pa_dev(unsigned long hpa, struct hardware_path *mod_path)
 	return dev;
 }
 
-static int parisc_generic_match(struct device *dev, struct device_driver *drv)
+static int parisc_generic_match(struct device *dev, const struct device_driver *drv)
 {
 	return match_device(to_parisc_driver(drv), to_parisc_device(dev));
 }
@@ -618,7 +618,7 @@ static struct attribute *parisc_device_attrs[] = {
 };
 ATTRIBUTE_GROUPS(parisc_device);
 
-struct bus_type parisc_bus_type = {
+const struct bus_type parisc_bus_type = {
 	.name = "parisc",
 	.match = parisc_generic_match,
 	.uevent = parisc_uevent,
@@ -742,7 +742,7 @@ parse_tree_node(struct device *parent, int index, struct hardware_path *modpath)
 	};
 
 	if (device_for_each_child(parent, &recurse_data, descend_children))
-		{ /* nothing */ };
+		{ /* nothing */ }
 
 	return d.dev;
 }
@@ -995,6 +995,7 @@ static __init int qemu_print_iodc_data(struct device *lin_dev, void *data)
 	struct pdc_system_map_mod_info pdc_mod_info;
 	struct pdc_module_path mod_path;
 
+	memset(&iodc_data, 0, sizeof(iodc_data));
 	status = pdc_iodc_read(&count, hpa, 0,
 		&iodc_data, sizeof(iodc_data));
 	if (status != PDC_OK) {
@@ -1004,11 +1005,19 @@ static __init int qemu_print_iodc_data(struct device *lin_dev, void *data)
 
 	pr_info("\n");
 
+	/* Prevent hung task messages when printing on serial console */
+	cond_resched();
+
 	pr_info("#define HPA_%08lx_DESCRIPTION \"%s\"\n",
 		hpa, parisc_hardware_description(&dev->id));
 
 	mod_index = 0;
 	do {
+		/* initialize device path for old machines */
+		memset(&mod_path, 0xff, sizeof(mod_path));
+		get_node_path(dev->dev.parent, &mod_path.path);
+		mod_path.path.mod = dev->hw_path;
+		memset(&pdc_mod_info, 0, sizeof(pdc_mod_info));
 		status = pdc_system_map_find_mods(&pdc_mod_info,
 				&mod_path, mod_index++);
 	} while (status == PDC_OK && pdc_mod_info.mod_addr != hpa);

@@ -107,7 +107,13 @@ static vm_fault_t nilfs_page_mkwrite(struct vm_fault *vmf)
 	nilfs_transaction_commit(inode->i_sb);
 
  mapped:
-	folio_wait_stable(folio);
+	/*
+	 * Since checksumming including data blocks is performed to determine
+	 * the validity of the log to be written and used for recovery, it is
+	 * necessary to wait for writeback to finish here, regardless of the
+	 * stable write requirement of the backing device.
+	 */
+	folio_wait_writeback(folio);
  out:
 	sb_end_pagefault(inode->i_sb);
 	return vmf_fs_error(ret);
@@ -119,10 +125,10 @@ static const struct vm_operations_struct nilfs_file_vm_ops = {
 	.page_mkwrite	= nilfs_page_mkwrite,
 };
 
-static int nilfs_file_mmap(struct file *file, struct vm_area_struct *vma)
+static int nilfs_file_mmap_prepare(struct vm_area_desc *desc)
 {
-	file_accessed(file);
-	vma->vm_ops = &nilfs_file_vm_ops;
+	file_accessed(desc->file);
+	desc->vm_ops = &nilfs_file_vm_ops;
 	return 0;
 }
 
@@ -138,7 +144,7 @@ const struct file_operations nilfs_file_operations = {
 #ifdef CONFIG_COMPAT
 	.compat_ioctl	= nilfs_compat_ioctl,
 #endif	/* CONFIG_COMPAT */
-	.mmap		= nilfs_file_mmap,
+	.mmap_prepare	= nilfs_file_mmap_prepare,
 	.open		= generic_file_open,
 	/* .release	= nilfs_release_file, */
 	.fsync		= nilfs_sync_file,

@@ -91,43 +91,37 @@ static int stdp2690_read_block(void *context, u8 *buf, unsigned int block, size_
 	return 0;
 }
 
-static struct edid *ge_b850v3_lvds_get_edid(struct drm_bridge *bridge,
-					    struct drm_connector *connector)
+static const struct drm_edid *ge_b850v3_lvds_edid_read(struct drm_bridge *bridge,
+						       struct drm_connector *connector)
 {
 	struct i2c_client *client;
 
 	client = ge_b850v3_lvds_ptr->stdp2690_i2c;
 
-	return drm_do_get_edid(connector, stdp2690_read_block, client);
+	return drm_edid_read_custom(connector, stdp2690_read_block, client);
 }
 
 static int ge_b850v3_lvds_get_modes(struct drm_connector *connector)
 {
-	struct edid *edid;
+	const struct drm_edid *drm_edid;
 	int num_modes;
 
-	edid = ge_b850v3_lvds_get_edid(&ge_b850v3_lvds_ptr->bridge, connector);
+	drm_edid = ge_b850v3_lvds_edid_read(&ge_b850v3_lvds_ptr->bridge, connector);
 
-	drm_connector_update_edid_property(connector, edid);
-	num_modes = drm_add_edid_modes(connector, edid);
-	kfree(edid);
+	drm_edid_connector_update(connector, drm_edid);
+	num_modes = drm_edid_connector_add_modes(connector);
+	drm_edid_free(drm_edid);
 
 	return num_modes;
-}
-
-static enum drm_mode_status ge_b850v3_lvds_mode_valid(
-		struct drm_connector *connector, struct drm_display_mode *mode)
-{
-	return MODE_OK;
 }
 
 static const struct
 drm_connector_helper_funcs ge_b850v3_lvds_connector_helper_funcs = {
 	.get_modes = ge_b850v3_lvds_get_modes,
-	.mode_valid = ge_b850v3_lvds_mode_valid,
 };
 
-static enum drm_connector_status ge_b850v3_lvds_bridge_detect(struct drm_bridge *bridge)
+static enum drm_connector_status
+ge_b850v3_lvds_bridge_detect(struct drm_bridge *bridge, struct drm_connector *connector)
 {
 	struct i2c_client *stdp4028_i2c =
 			ge_b850v3_lvds_ptr->stdp4028_i2c;
@@ -148,7 +142,7 @@ static enum drm_connector_status ge_b850v3_lvds_bridge_detect(struct drm_bridge 
 static enum drm_connector_status ge_b850v3_lvds_detect(struct drm_connector *connector,
 						       bool force)
 {
-	return ge_b850v3_lvds_bridge_detect(&ge_b850v3_lvds_ptr->bridge);
+	return ge_b850v3_lvds_bridge_detect(&ge_b850v3_lvds_ptr->bridge, connector);
 }
 
 static const struct drm_connector_funcs ge_b850v3_lvds_connector_funcs = {
@@ -164,11 +158,6 @@ static int ge_b850v3_lvds_create_connector(struct drm_bridge *bridge)
 {
 	struct drm_connector *connector = &ge_b850v3_lvds_ptr->connector;
 	int ret;
-
-	if (!bridge->encoder) {
-		DRM_ERROR("Parent encoder object not found");
-		return -ENODEV;
-	}
 
 	connector->polled = DRM_CONNECTOR_POLL_HPD;
 
@@ -202,6 +191,7 @@ static irqreturn_t ge_b850v3_lvds_irq_handler(int irq, void *dev_id)
 }
 
 static int ge_b850v3_lvds_attach(struct drm_bridge *bridge,
+				 struct drm_encoder *encoder,
 				 enum drm_bridge_attach_flags flags)
 {
 	struct i2c_client *stdp4028_i2c
@@ -226,7 +216,7 @@ static int ge_b850v3_lvds_attach(struct drm_bridge *bridge,
 static const struct drm_bridge_funcs ge_b850v3_lvds_funcs = {
 	.attach = ge_b850v3_lvds_attach,
 	.detect = ge_b850v3_lvds_bridge_detect,
-	.get_edid = ge_b850v3_lvds_get_edid,
+	.edid_read = ge_b850v3_lvds_edid_read,
 };
 
 static int ge_b850v3_lvds_init(struct device *dev)
@@ -236,13 +226,11 @@ static int ge_b850v3_lvds_init(struct device *dev)
 	if (ge_b850v3_lvds_ptr)
 		goto success;
 
-	ge_b850v3_lvds_ptr = devm_kzalloc(dev,
-					  sizeof(*ge_b850v3_lvds_ptr),
-					  GFP_KERNEL);
-
-	if (!ge_b850v3_lvds_ptr) {
+	ge_b850v3_lvds_ptr = devm_drm_bridge_alloc(dev, struct ge_b850v3_lvds, bridge,
+						   &ge_b850v3_lvds_funcs);
+	if (IS_ERR(ge_b850v3_lvds_ptr)) {
 		mutex_unlock(&ge_b850v3_lvds_dev_mutex);
-		return -ENOMEM;
+		return PTR_ERR(ge_b850v3_lvds_ptr);
 	}
 
 success:
@@ -275,7 +263,6 @@ static int ge_b850v3_register(void)
 	struct device *dev = &stdp4028_i2c->dev;
 
 	/* drm bridge initialization */
-	ge_b850v3_lvds_ptr->bridge.funcs = &ge_b850v3_lvds_funcs;
 	ge_b850v3_lvds_ptr->bridge.ops = DRM_BRIDGE_OP_DETECT |
 					 DRM_BRIDGE_OP_EDID;
 	ge_b850v3_lvds_ptr->bridge.type = DRM_MODE_CONNECTOR_DisplayPort;
@@ -323,8 +310,8 @@ static void stdp4028_ge_b850v3_fw_remove(struct i2c_client *stdp4028_i2c)
 }
 
 static const struct i2c_device_id stdp4028_ge_b850v3_fw_i2c_table[] = {
-	{"stdp4028_ge_fw", 0},
-	{},
+	{ "stdp4028_ge_fw" },
+	{}
 };
 MODULE_DEVICE_TABLE(i2c, stdp4028_ge_b850v3_fw_i2c_table);
 
@@ -370,8 +357,8 @@ static void stdp2690_ge_b850v3_fw_remove(struct i2c_client *stdp2690_i2c)
 }
 
 static const struct i2c_device_id stdp2690_ge_b850v3_fw_i2c_table[] = {
-	{"stdp2690_ge_fw", 0},
-	{},
+	{ "stdp2690_ge_fw" },
+	{}
 };
 MODULE_DEVICE_TABLE(i2c, stdp2690_ge_b850v3_fw_i2c_table);
 

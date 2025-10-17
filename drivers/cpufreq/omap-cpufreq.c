@@ -28,9 +28,6 @@
 #include <linux/platform_device.h>
 #include <linux/regulator/consumer.h>
 
-#include <asm/smp_plat.h>
-#include <asm/cpu.h>
-
 /* OPP tolerance in percentage */
 #define	OPP_TOLERANCE	4
 
@@ -135,11 +132,10 @@ static int omap_cpu_init(struct cpufreq_policy *policy)
 	return 0;
 }
 
-static int omap_cpu_exit(struct cpufreq_policy *policy)
+static void omap_cpu_exit(struct cpufreq_policy *policy)
 {
 	freq_table_free();
 	clk_put(policy->clk);
-	return 0;
 }
 
 static struct cpufreq_driver omap_driver = {
@@ -151,7 +147,6 @@ static struct cpufreq_driver omap_driver = {
 	.exit		= omap_cpu_exit,
 	.register_em	= cpufreq_register_em_with_opp,
 	.name		= "omap",
-	.attr		= cpufreq_generic_attr,
 };
 
 static int omap_cpufreq_probe(struct platform_device *pdev)
@@ -192,7 +187,7 @@ static struct platform_driver omap_cpufreq_platdrv = {
 		.name	= "omap-cpufreq",
 	},
 	.probe		= omap_cpufreq_probe,
-	.remove_new	= omap_cpufreq_remove,
+	.remove		= omap_cpufreq_remove,
 };
 module_platform_driver(omap_cpufreq_platdrv);
 

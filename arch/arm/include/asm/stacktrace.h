@@ -2,8 +2,9 @@
 #ifndef __ASM_STACKTRACE_H
 #define __ASM_STACKTRACE_H
 
-#include <asm/ptrace.h>
 #include <linux/llist.h>
+#include <asm/ptrace.h>
+#include <asm/sections.h>
 
 struct stackframe {
 	/*
@@ -25,6 +26,13 @@ struct stackframe {
 	bool ex_frame;
 #endif
 };
+
+static inline bool on_thread_stack(void)
+{
+	unsigned long delta = current_stack_pointer ^ (unsigned long)current->stack;
+
+	return delta < THREAD_SIZE;
+}
 
 static __always_inline
 void arm_get_current_stackframe(struct pt_regs *regs, struct stackframe *frame)

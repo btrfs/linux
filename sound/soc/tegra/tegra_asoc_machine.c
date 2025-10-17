@@ -290,7 +290,7 @@ static unsigned int tegra_machine_mclk_rate_6mhz(unsigned int srate)
 static int tegra_machine_hw_params(struct snd_pcm_substream *substream,
 				   struct snd_pcm_hw_params *params)
 {
-	struct snd_soc_pcm_runtime *rtd = substream->private_data;
+	struct snd_soc_pcm_runtime *rtd = snd_soc_substream_to_rtd(substream);
 	struct snd_soc_dai *codec_dai = snd_soc_rtd_to_codec(rtd, 0);
 	struct snd_soc_card *card = rtd->card;
 	struct tegra_machine *machine = snd_soc_card_get_drvdata(card);
@@ -637,7 +637,7 @@ static struct snd_soc_dai_link tegra_wm8753_dai = {
 	.stream_name = "WM8753 PCM",
 	.dai_fmt = SND_SOC_DAIFMT_I2S |
 		   SND_SOC_DAIFMT_NB_NF |
-		   SND_SOC_DAIFMT_CBS_CFS,
+		   SND_SOC_DAIFMT_CBC_CFC,
 	SND_SOC_DAILINK_REG(wm8753_hifi),
 };
 
@@ -701,7 +701,7 @@ static struct snd_soc_dai_link tegra_max98090_dai = {
 	.init = tegra_asoc_machine_init,
 	.dai_fmt = SND_SOC_DAIFMT_I2S |
 		   SND_SOC_DAIFMT_NB_NF |
-		   SND_SOC_DAIFMT_CBS_CFS,
+		   SND_SOC_DAIFMT_CBC_CFC,
 	SND_SOC_DAILINK_REG(max98090_hifi),
 };
 
@@ -736,7 +736,7 @@ static struct snd_soc_dai_link tegra_max98088_dai = {
 	.init = tegra_asoc_machine_init,
 	.dai_fmt = SND_SOC_DAIFMT_I2S |
 		   SND_SOC_DAIFMT_NB_NF |
-		   SND_SOC_DAIFMT_CBS_CFS,
+		   SND_SOC_DAIFMT_CBC_CFC,
 	SND_SOC_DAILINK_REG(max98088_hifi),
 };
 
@@ -769,7 +769,7 @@ static struct snd_soc_dai_link tegra_sgtl5000_dai = {
 	.stream_name = "HiFi",
 	.dai_fmt = SND_SOC_DAIFMT_I2S |
 		   SND_SOC_DAIFMT_NB_NF |
-		   SND_SOC_DAIFMT_CBS_CFS,
+		   SND_SOC_DAIFMT_CBC_CFC,
 	SND_SOC_DAILINK_REG(sgtl5000_hifi),
 };
 
@@ -812,7 +812,7 @@ static struct snd_soc_dai_link tegra_tlv320aic23_dai = {
 	.stream_name = "AIC23",
 	.dai_fmt = SND_SOC_DAIFMT_I2S |
 		   SND_SOC_DAIFMT_NB_NF |
-		   SND_SOC_DAIFMT_CBS_CFS,
+		   SND_SOC_DAIFMT_CBC_CFC,
 	SND_SOC_DAILINK_REG(tlv320aic23_hifi),
 };
 
@@ -861,7 +861,7 @@ static struct snd_soc_dai_link tegra_rt5677_dai = {
 	.init = tegra_rt5677_init,
 	.dai_fmt = SND_SOC_DAIFMT_I2S |
 		   SND_SOC_DAIFMT_NB_NF |
-		   SND_SOC_DAIFMT_CBS_CFS,
+		   SND_SOC_DAIFMT_CBC_CFC,
 	SND_SOC_DAILINK_REG(rt5677_aif1),
 };
 
@@ -895,7 +895,7 @@ static struct snd_soc_dai_link tegra_rt5640_dai = {
 	.init = tegra_asoc_machine_init,
 	.dai_fmt = SND_SOC_DAIFMT_I2S |
 		   SND_SOC_DAIFMT_NB_NF |
-		   SND_SOC_DAIFMT_CBS_CFS,
+		   SND_SOC_DAIFMT_CBC_CFC,
 	SND_SOC_DAILINK_REG(rt5640_aif1),
 };
 
@@ -928,7 +928,7 @@ static struct snd_soc_dai_link tegra_rt5632_dai = {
 	.init = tegra_rt5677_init,
 	.dai_fmt = SND_SOC_DAIFMT_I2S |
 		   SND_SOC_DAIFMT_NB_NF |
-		   SND_SOC_DAIFMT_CBS_CFS,
+		   SND_SOC_DAIFMT_CBC_CFC,
 	SND_SOC_DAILINK_REG(rt5632_hifi),
 };
 
@@ -961,7 +961,7 @@ static struct snd_soc_dai_link tegra_rt5631_dai = {
 	.init = tegra_asoc_machine_init,
 	.dai_fmt = SND_SOC_DAIFMT_I2S |
 		   SND_SOC_DAIFMT_NB_NF |
-		   SND_SOC_DAIFMT_CBS_CFS,
+		   SND_SOC_DAIFMT_CBC_CFC,
 	SND_SOC_DAILINK_REG(rt5631_hifi),
 };
 

@@ -9,6 +9,7 @@
 
 #include <linux/slab.h>
 #include <linux/cpu.h>
+#include <asm/machine.h>
 #include <asm/diag.h>
 #include <asm/hypfs.h>
 #include "hypfs.h"
@@ -20,8 +21,7 @@
  */
 static void diag0c_fn(void *data)
 {
-	diag_stat_inc(DIAG_STAT_X00C);
-	diag_amode31_ops.diag0c(((void **)data)[smp_processor_id()]);
+	diag0c(((void **)data)[smp_processor_id()]);
 }
 
 /*
@@ -108,7 +108,7 @@ static struct hypfs_dbfs_file dbfs_file_0c = {
  */
 int __init hypfs_diag0c_init(void)
 {
-	if (!MACHINE_IS_VM)
+	if (!machine_is_vm())
 		return 0;
 	hypfs_dbfs_create_file(&dbfs_file_0c);
 	return 0;
@@ -119,7 +119,7 @@ int __init hypfs_diag0c_init(void)
  */
 void hypfs_diag0c_exit(void)
 {
-	if (!MACHINE_IS_VM)
+	if (!machine_is_vm())
 		return;
 	hypfs_dbfs_remove_file(&dbfs_file_0c);
 }

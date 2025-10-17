@@ -92,7 +92,7 @@ static inline struct cred *nsset_cred(struct nsset *set)
  *
  */
 
-int copy_namespaces(unsigned long flags, struct task_struct *tsk);
+int copy_namespaces(u64 flags, struct task_struct *tsk);
 void exit_task_namespaces(struct task_struct *tsk);
 void switch_task_namespaces(struct task_struct *tsk, struct nsproxy *new);
 int exec_task_namespaces(void);
@@ -111,5 +111,7 @@ static inline void get_nsproxy(struct nsproxy *ns)
 {
 	refcount_inc(&ns->count);
 }
+
+DEFINE_FREE(put_nsproxy, struct nsproxy *, if (_T) put_nsproxy(_T))
 
 #endif

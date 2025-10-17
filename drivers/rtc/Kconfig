@@ -182,6 +182,16 @@ config RTC_DRV_88PM80X
 	  This driver can also be built as a module. If so, the module
 	  will be called rtc-88pm80x.
 
+config RTC_DRV_88PM886
+	tristate "Marvell 88PM886 RTC driver"
+	depends on MFD_88PM886_PMIC
+	help
+	  If you say yes here you will get support for the RTC function in the
+	  Marvell 88PM886 chip.
+
+	  This driver can also be built as a module. If so, the module
+	  will be called rtc-88pm886.
+
 config RTC_DRV_ABB5ZES3
 	select REGMAP_I2C
 	tristate "Abracon AB-RTCMC-32.768kHz-B5ZE-S3"
@@ -396,6 +406,16 @@ config RTC_DRV_MAX77686
 	  This driver can also be built as a module. If so, the module
 	  will be called rtc-max77686.
 
+config RTC_DRV_SPACEMIT_P1
+	tristate "SpacemiT P1 RTC"
+	depends on ARCH_SPACEMIT || COMPILE_TEST
+	select MFD_SPACEMIT_P1
+	default ARCH_SPACEMIT
+	help
+	  Enable support for the RTC function in the SpacemiT P1 PMIC.
+	  This driver can also be built as a module, which will be called
+	  "spacemit-p1-rtc".
+
 config RTC_DRV_NCT3018Y
 	tristate "Nuvoton NCT3018Y"
 	depends on OF
@@ -405,6 +425,16 @@ config RTC_DRV_NCT3018Y
 
 	   This driver can also be built as a module, if so, the module will be
 	   called "rtc-nct3018y".
+
+config RTC_DRV_NCT6694
+	tristate "Nuvoton NCT6694 RTC support"
+	depends on MFD_NCT6694
+	help
+	  If you say yes to this option, support will be included for Nuvoton
+	  NCT6694, a USB device to RTC.
+
+	  This driver can also be built as a module. If so, the module will
+	  be called rtc-nct6694.
 
 config RTC_DRV_RK808
 	tristate "Rockchip RK805/RK808/RK809/RK817/RK818 RTC"
@@ -473,15 +503,6 @@ config RTC_DRV_PCF8523
 	  This driver can also be built as a module. If so, the module
 	  will be called rtc-pcf8523.
 
-config RTC_DRV_PCF85063
-	tristate "NXP PCF85063"
-	select REGMAP_I2C
-	help
-	  If you say yes here you get support for the PCF85063 RTC chip
-
-	  This driver can also be built as a module. If so, the module
-	  will be called rtc-pcf85063.
-
 config RTC_DRV_PCF85363
 	tristate "NXP PCF85363"
 	select REGMAP_I2C
@@ -496,6 +517,7 @@ config RTC_DRV_PCF85363
 
 config RTC_DRV_PCF8563
 	tristate "Philips PCF8563/Epson RTC8564"
+	select REGMAP_I2C
 	help
 	  If you say yes here you get support for the
 	  Philips PCF8563 RTC chip. The Epson RTC8564
@@ -664,6 +686,16 @@ config RTC_DRV_RX8010
 	  This driver can also be built as a module. If so, the module
 	  will be called rtc-rx8010.
 
+config RTC_DRV_RX8111
+	tristate "Epson RX8111"
+	select REGMAP_I2C
+	depends on I2C
+	help
+	  If you say yes here you will get support for the Epson RX8111 RTC.
+
+	  This driver can also be built as a module. If so, the module will be
+	  called rtc-rx8111.
+
 config RTC_DRV_RX8581
 	tristate "Epson RX-8571/RX-8581"
 	select REGMAP_I2C
@@ -732,6 +764,16 @@ config RTC_DRV_S5M
 
 	  This driver can also be built as a module. If so, the module
 	  will be called rtc-s5m.
+
+config RTC_DRV_SD2405AL
+	tristate "DFRobot SD2405AL"
+	select REGMAP_I2C
+	help
+	  If you say yes here you will get support for the
+	  DFRobot SD2405AL I2C RTC Module.
+
+	  This driver can also be built as a module. If so, the module
+	  will be called rtc-sd2405al.
 
 config RTC_DRV_SD3078
 	tristate "ZXW Shenzhen whwave SD3078"
@@ -939,6 +981,18 @@ config RTC_DRV_PCF2127
 
 	  This driver can also be built as a module. If so, the module
 	  will be called rtc-pcf2127.
+
+config RTC_DRV_PCF85063
+	tristate "NXP PCF85063"
+	depends on RTC_I2C_AND_SPI
+	select REGMAP_I2C if I2C
+	select REGMAP_SPI if SPI_MASTER
+	help
+	  If you say yes here you get support for the PCF85063 and RV8063
+	  RTC chips.
+
+	  This driver can also be built as a module. If so, the module
+	  will be called rtc-pcf85063.
 
 config RTC_DRV_RV3029C2
 	tristate "Micro Crystal RV3029/3049"
@@ -1285,17 +1339,10 @@ config RTC_DRV_SC27XX
 config RTC_DRV_SPEAR
 	tristate "SPEAR ST RTC"
 	depends on PLAT_SPEAR || COMPILE_TEST
-	default y
+	default PLAT_SPEAR
 	help
 	 If you say Y here you will get support for the RTC found on
 	 spear
-
-config RTC_DRV_PCF50633
-	depends on MFD_PCF50633
-	tristate "NXP PCF50633 RTC"
-	help
-	  If you say yes here you get support for the RTC subsystem of the
-	  NXP PCF50633 used in embedded systems.
 
 config RTC_DRV_AB8500
 	tristate "ST-Ericsson AB8500 RTC"
@@ -1363,6 +1410,18 @@ config RTC_DRV_ASM9260
 
 	  This driver can also be built as a module. If so, the module
 	  will be called rtc-asm9260.
+
+config RTC_DRV_CV1800
+	tristate "Sophgo CV1800 RTC"
+	depends on SOPHGO_CV1800_RTCSYS || COMPILE_TEST
+	select MFD_SYSCON
+	select REGMAP
+	help
+	  If you say yes here you get support the RTC driver for Sophgo CV1800
+	  series SoC.
+
+	  This driver can also be built as a module. If so, the module will be
+	  called rtc-cv1800.
 
 config RTC_DRV_DIGICOLOR
 	tristate "Conexant Digicolor RTC"
@@ -1817,6 +1876,17 @@ config RTC_DRV_BBNSM
 	   This driver can also be built as a module, if so, the module
 	   will be called "rtc-bbnsm".
 
+config RTC_DRV_IMX_BBM_SCMI
+	depends on IMX_SCMI_BBM_EXT || COMPILE_TEST
+	default y if ARCH_MXC
+	tristate "NXP i.MX BBM SCMI RTC support"
+	help
+	  If you say yes here you get support for the NXP i.MX BBSM SCMI
+	  RTC module.
+
+	  To compile this driver as a module, choose M here: the
+	  module will be called rtc-imx-sm-bbm.
+
 config RTC_DRV_IMX_SC
 	depends on IMX_SCU
 	depends on HAVE_ARM_SMCCC
@@ -1858,7 +1928,8 @@ config RTC_DRV_MT2712
 
 config RTC_DRV_MT6397
 	tristate "MediaTek PMIC based RTC"
-	depends on MFD_MT6397 || (COMPILE_TEST && IRQ_DOMAIN)
+	depends on MFD_MT6397 || COMPILE_TEST
+	select IRQ_DOMAIN
 	help
 	  This selects the MediaTek(R) RTC driver. RTC is part of MediaTek
 	  MT6397 PMIC. You should enable MT6397 PMIC MFD before select
@@ -1912,6 +1983,12 @@ config RTC_DRV_STM32
 	tristate "STM32 RTC"
 	select REGMAP_MMIO
 	depends on ARCH_STM32 || COMPILE_TEST
+	depends on OF
+	depends on PINCTRL
+	select PINMUX
+	select PINCONF
+	select GENERIC_PINCONF
+	depends on COMMON_CLK
 	help
 	   If you say yes here you get support for the STM32 On-Chip
 	   Real Time Clock.
@@ -1967,19 +2044,15 @@ config RTC_DRV_MA35D1
 	   This driver can also be built as a module, if so, the module
 	   will be called "rtc-ma35d1".
 
-comment "HID Sensor RTC drivers"
-
-config RTC_DRV_HID_SENSOR_TIME
-	tristate "HID Sensor Time"
-	depends on USB_HID
-	depends on HID_SENSOR_HUB && IIO
-	select HID_SENSOR_IIO_COMMON
+config RTC_DRV_RENESAS_RTCA3
+	tristate "Renesas RTCA-3 RTC"
+	depends on ARCH_RENESAS
 	help
-	  Say yes here to build support for the HID Sensors of type Time.
-	  This drivers makes such sensors available as RTCs.
+	  If you say yes here you get support for the Renesas RTCA-3 RTC
+	  available on the Renesas RZ/G3S SoC.
 
-	  If this driver is compiled as a module, it will be named
-	  rtc-hid-sensor-time.
+	  This driver can also be built as a module, if so, the module
+	  will be called "rtc-rtca3".
 
 config RTC_DRV_GOLDFISH
 	tristate "Goldfish Real Time Clock"
@@ -2031,5 +2104,42 @@ config RTC_DRV_SSD202D
 
 	  This driver can also be built as a module, if so, the module
 	  will be called "rtc-ssd20xd".
+
+config RTC_DRV_AMLOGIC_A4
+	tristate "Amlogic RTC"
+	depends on ARCH_MESON || COMPILE_TEST
+	select REGMAP_MMIO
+	default ARCH_MESON
+	help
+	  If you say yes here you get support for the RTC block on the
+	  Amlogic A113L2(A4) and A113X2(A5) SoCs.
+
+	  This driver can also be built as a module. If so, the module
+	  will be called "rtc-amlogic-a4".
+
+config RTC_DRV_S32G
+	tristate "RTC driver for S32G2/S32G3 SoCs"
+	depends on ARCH_S32 || COMPILE_TEST
+	depends on COMMON_CLK
+	help
+	  Say yes to enable RTC driver for platforms based on the
+	  S32G2/S32G3 SoC family.
+
+	  This RTC module can be used as a wakeup source.
+	  Please note that it is not battery-powered.
+
+comment "HID Sensor RTC drivers"
+
+config RTC_DRV_HID_SENSOR_TIME
+	tristate "HID Sensor Time"
+	depends on USB_HID
+	depends on HID_SENSOR_HUB && IIO
+	select HID_SENSOR_IIO_COMMON
+	help
+	  Say yes here to build support for the HID Sensors of type Time.
+	  This drivers makes such sensors available as RTCs.
+
+	  If this driver is compiled as a module, it will be named
+	  rtc-hid-sensor-time.
 
 endif # RTC_CLASS

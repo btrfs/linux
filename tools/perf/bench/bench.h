@@ -28,6 +28,7 @@ int bench_syscall_fork(int argc, const char **argv);
 int bench_syscall_execve(int argc, const char **argv);
 int bench_mem_memcpy(int argc, const char **argv);
 int bench_mem_memset(int argc, const char **argv);
+int bench_mem_mmap(int argc, const char **argv);
 int bench_mem_find_bit(int argc, const char **argv);
 int bench_futex_hash(int argc, const char **argv);
 int bench_futex_wake(int argc, const char **argv);
@@ -46,6 +47,8 @@ int bench_breakpoint_enable(int argc, const char **argv);
 int bench_uprobe_baseline(int argc, const char **argv);
 int bench_uprobe_empty(int argc, const char **argv);
 int bench_uprobe_trace_printk(int argc, const char **argv);
+int bench_uprobe_empty_ret(int argc, const char **argv);
+int bench_uprobe_trace_printk_ret(int argc, const char **argv);
 int bench_pmu_scan(int argc, const char **argv);
 
 #define BENCH_FORMAT_DEFAULT_STR	"default"

@@ -13,6 +13,7 @@
 &audio_codec {
 	compatible = "realtek,rt5682i";
 	realtek,btndet-delay = <16>;
+	VBAT-supply = <&pp3300_z5>;
 };
 
 &sound {
@@ -22,4 +23,8 @@
 
 &ts_10 {
 	status = "okay";
+};
+
+&watchdog {
+	/delete-property/ mediatek,disable-extrst;
 };

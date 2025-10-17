@@ -341,10 +341,9 @@ static void chipone_configure_pll(struct chipone *icn,
 }
 
 static void chipone_atomic_enable(struct drm_bridge *bridge,
-				  struct drm_bridge_state *old_bridge_state)
+				  struct drm_atomic_state *state)
 {
 	struct chipone *icn = bridge_to_chipone(bridge);
-	struct drm_atomic_state *state = old_bridge_state->base.state;
 	struct drm_display_mode *mode = &icn->mode;
 	const struct drm_bridge_state *bridge_state;
 	u16 hfp, hbp, hsync;
@@ -445,7 +444,7 @@ static void chipone_atomic_enable(struct drm_bridge *bridge,
 }
 
 static void chipone_atomic_pre_enable(struct drm_bridge *bridge,
-				      struct drm_bridge_state *old_bridge_state)
+				      struct drm_atomic_state *state)
 {
 	struct chipone *icn = bridge_to_chipone(bridge);
 	int ret;
@@ -482,7 +481,7 @@ static void chipone_atomic_pre_enable(struct drm_bridge *bridge,
 }
 
 static void chipone_atomic_post_disable(struct drm_bridge *bridge,
-					struct drm_bridge_state *old_bridge_state)
+					struct drm_atomic_state *state)
 {
 	struct chipone *icn = bridge_to_chipone(bridge);
 
@@ -563,10 +562,8 @@ static int chipone_dsi_host_attach(struct chipone *icn)
 
 	host = of_find_mipi_dsi_host_by_node(host_node);
 	of_node_put(host_node);
-	if (!host) {
-		dev_err(dev, "failed to find dsi host\n");
-		return -EPROBE_DEFER;
-	}
+	if (!host)
+		return dev_err_probe(dev, -EPROBE_DEFER, "failed to find dsi host\n");
 
 	dsi = mipi_dsi_device_register_full(host, &info);
 	if (IS_ERR(dsi)) {
@@ -583,11 +580,13 @@ static int chipone_dsi_host_attach(struct chipone *icn)
 	return ret;
 }
 
-static int chipone_attach(struct drm_bridge *bridge, enum drm_bridge_attach_flags flags)
+static int chipone_attach(struct drm_bridge *bridge,
+			  struct drm_encoder *encoder,
+			  enum drm_bridge_attach_flags flags)
 {
 	struct chipone *icn = bridge_to_chipone(bridge);
 
-	return drm_bridge_attach(bridge->encoder, icn->panel_bridge, bridge, flags);
+	return drm_bridge_attach(encoder, icn->panel_bridge, bridge, flags);
 }
 
 #define MAX_INPUT_SEL_FORMATS	1
@@ -692,9 +691,10 @@ static int chipone_common_probe(struct device *dev, struct chipone **icnr)
 	struct chipone *icn;
 	int ret;
 
-	icn = devm_kzalloc(dev, sizeof(struct chipone), GFP_KERNEL);
-	if (!icn)
-		return -ENOMEM;
+	icn = devm_drm_bridge_alloc(dev, struct chipone, bridge,
+				    &chipone_bridge_funcs);
+	if (IS_ERR(icn))
+		return PTR_ERR(icn);
 
 	icn->dev = dev;
 
@@ -702,7 +702,6 @@ static int chipone_common_probe(struct device *dev, struct chipone **icnr)
 	if (ret)
 		return ret;
 
-	icn->bridge.funcs = &chipone_bridge_funcs;
 	icn->bridge.type = DRM_MODE_CONNECTOR_DPI;
 	icn->bridge.of_node = dev->of_node;
 
@@ -783,12 +782,11 @@ static struct mipi_dsi_driver chipone_dsi_driver = {
 	.remove = chipone_dsi_remove,
 	.driver = {
 		.name = "chipone-icn6211",
-		.owner = THIS_MODULE,
 		.of_match_table = chipone_of_match,
 	},
 };
 
-static struct i2c_device_id chipone_i2c_id[] = {
+static const struct i2c_device_id chipone_i2c_id[] = {
 	{ "chipone,icn6211" },
 	{},
 };

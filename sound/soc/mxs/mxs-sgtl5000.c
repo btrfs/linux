@@ -59,7 +59,7 @@ static const struct snd_soc_ops mxs_sgtl5000_hifi_ops = {
 };
 
 #define MXS_SGTL5000_DAI_FMT (SND_SOC_DAIFMT_I2S | SND_SOC_DAIFMT_NB_NF | \
-	SND_SOC_DAIFMT_CBS_CFS)
+	SND_SOC_DAIFMT_CBC_CFC)
 
 
 SND_SOC_DAILINK_DEFS(hifi_tx,
@@ -185,7 +185,7 @@ static struct platform_driver mxs_sgtl5000_audio_driver = {
 		.of_match_table = mxs_sgtl5000_dt_ids,
 	},
 	.probe = mxs_sgtl5000_probe,
-	.remove_new = mxs_sgtl5000_remove,
+	.remove = mxs_sgtl5000_remove,
 };
 
 module_platform_driver(mxs_sgtl5000_audio_driver);

@@ -122,7 +122,7 @@ mt76_rx_aggr_check_ctl(struct sk_buff *skb, struct sk_buff_head *frames)
 	struct ieee80211_bar *bar = mt76_skb_get_hdr(skb);
 	struct mt76_wcid *wcid = status->wcid;
 	struct mt76_rx_tid *tid;
-	u8 tidno = status->qos_ctl & IEEE80211_QOS_CTL_TID_MASK;
+	u8 tidno;
 	u16 seqno;
 
 	if (!ieee80211_is_ctl(bar->frame_control))
@@ -173,6 +173,8 @@ void mt76_rx_aggr_reorder(struct sk_buff *skb, struct sk_buff_head *frames)
 	if (ackp == IEEE80211_QOS_CTL_ACK_POLICY_NOACK)
 		return;
 
+	if (wcid->def_wcid)
+		wcid = wcid->def_wcid;
 	tid = rcu_dereference(wcid->aggr[tidno]);
 	if (!tid)
 		return;

@@ -64,17 +64,28 @@
 #define CREATE_TRACE_POINTS
 #include <trace/events/maple_tree.h>
 
+/*
+ * Kernel pointer hashing renders much of the maple tree dump useless as tagged
+ * pointers get hashed to arbitrary values.
+ *
+ * If CONFIG_DEBUG_VM_MAPLE_TREE is set we are in a debug mode where it is
+ * permissible to bypass this. Otherwise remain cautious and retain the hashing.
+ *
+ * Userland doesn't know about %px so also use %p there.
+ */
+#if defined(__KERNEL__) && defined(CONFIG_DEBUG_VM_MAPLE_TREE)
+#define PTR_FMT "%px"
+#else
+#define PTR_FMT "%p"
+#endif
+
 #define MA_ROOT_PARENT 1
 
 /*
  * Maple state flags
- * * MA_STATE_BULK		- Bulk insert mode
- * * MA_STATE_REBALANCE		- Indicate a rebalance during bulk insert
  * * MA_STATE_PREALLOC		- Preallocated nodes, WARN_ON allocation
  */
-#define MA_STATE_BULK		1
-#define MA_STATE_REBALANCE	2
-#define MA_STATE_PREALLOC	4
+#define MA_STATE_PREALLOC	1
 
 #define ma_parent_ptr(x) ((struct maple_pnode *)(x))
 #define mas_tree_parent(x) ((unsigned long)(x->tree) | MA_ROOT_PARENT)
@@ -120,7 +131,6 @@ static const unsigned char mt_min_slots[] = {
 #define MAPLE_BIG_NODE_GAPS	(MAPLE_ARANGE64_SLOTS * 2 + 1)
 
 struct maple_big_node {
-	struct maple_pnode *parent;
 	unsigned long pivot[MAPLE_BIG_NODE_SLOTS - 1];
 	union {
 		struct maple_enode *slot[MAPLE_BIG_NODE_SLOTS];
@@ -162,26 +172,25 @@ static inline struct maple_node *mt_alloc_one(gfp_t gfp)
 	return kmem_cache_alloc(maple_node_cache, gfp);
 }
 
-static inline int mt_alloc_bulk(gfp_t gfp, size_t size, void **nodes)
-{
-	return kmem_cache_alloc_bulk(maple_node_cache, gfp, size, nodes);
-}
-
-static inline void mt_free_one(struct maple_node *node)
-{
-	kmem_cache_free(maple_node_cache, node);
-}
-
 static inline void mt_free_bulk(size_t size, void __rcu **nodes)
 {
 	kmem_cache_free_bulk(maple_node_cache, size, (void **)nodes);
 }
 
-static void mt_free_rcu(struct rcu_head *head)
+static void mt_return_sheaf(struct slab_sheaf *sheaf)
 {
-	struct maple_node *node = container_of(head, struct maple_node, rcu);
+	kmem_cache_return_sheaf(maple_node_cache, GFP_NOWAIT, sheaf);
+}
 
-	kmem_cache_free(maple_node_cache, node);
+static struct slab_sheaf *mt_get_sheaf(gfp_t gfp, int count)
+{
+	return kmem_cache_prefill_sheaf(maple_node_cache, gfp, count);
+}
+
+static int mt_refill_sheaf(gfp_t gfp, struct slab_sheaf **sheaf,
+		unsigned int size)
+{
+	return kmem_cache_refill_sheaf(maple_node_cache, gfp, sheaf, size);
 }
 
 /*
@@ -194,17 +203,17 @@ static void mt_free_rcu(struct rcu_head *head)
 static void ma_free_rcu(struct maple_node *node)
 {
 	WARN_ON(node->parent != ma_parent_ptr(node));
-	call_rcu(&node->rcu, mt_free_rcu);
+	kfree_rcu(node, rcu);
 }
 
-static void mas_set_height(struct ma_state *mas)
+static void mt_set_height(struct maple_tree *mt, unsigned char height)
 {
-	unsigned int new_flags = mas->tree->ma_flags;
+	unsigned int new_flags = mt->ma_flags;
 
 	new_flags &= ~MT_FLAGS_HEIGHT_MASK;
-	MAS_BUG_ON(mas, mas->depth > MAPLE_HEIGHT_MAX);
-	new_flags |= mas->depth << MT_FLAGS_HEIGHT_OFFSET;
-	mas->tree->ma_flags = new_flags;
+	MT_BUG_ON(mt, height > MAPLE_HEIGHT_MAX);
+	new_flags |= height << MT_FLAGS_HEIGHT_OFFSET;
+	mt->ma_flags = new_flags;
 }
 
 static unsigned int mas_mt_height(struct ma_state *mas)
@@ -348,17 +357,17 @@ static inline void *mte_safe_root(const struct maple_enode *node)
 	return (void *)((unsigned long)node & ~MAPLE_ROOT_NODE);
 }
 
-static inline void *mte_set_full(const struct maple_enode *node)
+static inline void __maybe_unused *mte_set_full(const struct maple_enode *node)
 {
 	return (void *)((unsigned long)node & ~MAPLE_ENODE_NULL);
 }
 
-static inline void *mte_clear_full(const struct maple_enode *node)
+static inline void __maybe_unused *mte_clear_full(const struct maple_enode *node)
 {
 	return (void *)((unsigned long)node | MAPLE_ENODE_NULL);
 }
 
-static inline bool mte_has_null(const struct maple_enode *node)
+static inline bool __maybe_unused mte_has_null(const struct maple_enode *node)
 {
 	return (unsigned long)node & MAPLE_ENODE_NULL;
 }
@@ -391,11 +400,11 @@ static __always_inline bool mt_is_alloc(struct maple_tree *mt)
  * a reuse of the last bit in the node type.  This is possible by using bit 1 to
  * indicate if bit 2 is part of the type or the slot.
  *
- * Note types:
- *  0x??1 = Root
- *  0x?00 = 16 bit nodes
- *  0x010 = 32 bit nodes
- *  0x110 = 64 bit nodes
+ * Node types:
+ *  0b??1 = Root
+ *  0b?00 = 16 bit nodes
+ *  0b010 = 32 bit nodes
+ *  0b110 = 64 bit nodes
  *
  * Slot size and alignment
  *  0b??1 : Root
@@ -413,7 +422,7 @@ static __always_inline bool mt_is_alloc(struct maple_tree *mt)
 #define MAPLE_PARENT_16B_SLOT_MASK	0xFC
 
 #define MAPLE_PARENT_RANGE64		0x06
-#define MAPLE_PARENT_RANGE32		0x04
+#define MAPLE_PARENT_RANGE32		0x02
 #define MAPLE_PARENT_NOT_RANGE16	0x02
 
 /*
@@ -474,6 +483,7 @@ enum maple_type mas_parent_type(struct ma_state *mas, struct maple_enode *enode)
 
 /*
  * mas_set_parent() - Set the parent node and encode the slot
+ * @mas: The maple state
  * @enode: The encoded maple node.
  * @parent: The encoded maple node that is the parent of @enode.
  * @slot: The slot that @enode resides in @parent.
@@ -534,7 +544,7 @@ unsigned int mte_parent_slot(const struct maple_enode *enode)
 
 /*
  * mte_parent() - Get the parent of @node.
- * @node: The encoded maple node.
+ * @enode: The encoded maple node.
  *
  * Return: The parent maple node.
  */
@@ -569,80 +579,16 @@ static __always_inline bool ma_dead_node(const struct maple_node *node)
  */
 static __always_inline bool mte_dead_node(const struct maple_enode *enode)
 {
-	struct maple_node *parent, *node;
+	struct maple_node *node;
 
 	node = mte_to_node(enode);
-	/* Do not reorder reads from the node prior to the parent check */
-	smp_rmb();
-	parent = mte_parent(enode);
-	return (parent == node);
-}
-
-/*
- * mas_allocated() - Get the number of nodes allocated in a maple state.
- * @mas: The maple state
- *
- * The ma_state alloc member is overloaded to hold a pointer to the first
- * allocated node or to the number of requested nodes to allocate.  If bit 0 is
- * set, then the alloc contains the number of requested nodes.  If there is an
- * allocated node, then the total allocated nodes is in that node.
- *
- * Return: The total number of nodes allocated
- */
-static inline unsigned long mas_allocated(const struct ma_state *mas)
-{
-	if (!mas->alloc || ((unsigned long)mas->alloc & 0x1))
-		return 0;
-
-	return mas->alloc->total;
-}
-
-/*
- * mas_set_alloc_req() - Set the requested number of allocations.
- * @mas: the maple state
- * @count: the number of allocations.
- *
- * The requested number of allocations is either in the first allocated node,
- * located in @mas->alloc->request_count, or directly in @mas->alloc if there is
- * no allocated node.  Set the request either in the node or do the necessary
- * encoding to store in @mas->alloc directly.
- */
-static inline void mas_set_alloc_req(struct ma_state *mas, unsigned long count)
-{
-	if (!mas->alloc || ((unsigned long)mas->alloc & 0x1)) {
-		if (!count)
-			mas->alloc = NULL;
-		else
-			mas->alloc = (struct maple_alloc *)(((count) << 1U) | 1U);
-		return;
-	}
-
-	mas->alloc->request_count = count;
-}
-
-/*
- * mas_alloc_req() - get the requested number of allocations.
- * @mas: The maple state
- *
- * The alloc count is either stored directly in @mas, or in
- * @mas->alloc->request_count if there is at least one node allocated.  Decode
- * the request count if it's stored directly in @mas->alloc.
- *
- * Return: The allocation request count.
- */
-static inline unsigned int mas_alloc_req(const struct ma_state *mas)
-{
-	if ((unsigned long)mas->alloc & 0x1)
-		return (unsigned long)(mas->alloc) >> 1;
-	else if (mas->alloc)
-		return mas->alloc->request_count;
-	return 0;
+	return ma_dead_node(node);
 }
 
 /*
  * ma_pivots() - Get a pointer to the maple node pivots.
- * @node - the maple node
- * @type - the node type
+ * @node: the maple node
+ * @type: the node type
  *
  * In the event of a dead node, this array may be %NULL
  *
@@ -665,8 +611,8 @@ static inline unsigned long *ma_pivots(struct maple_node *node,
 
 /*
  * ma_gaps() - Get a pointer to the maple node gaps.
- * @node - the maple node
- * @type - the node type
+ * @node: the maple node
+ * @type: the node type
  *
  * Return: A pointer to the maple node gaps
  */
@@ -880,8 +826,6 @@ static inline void ma_set_meta(struct maple_node *mn, enum maple_type mt,
  * @mt: The maple tree
  * @mn: The maple node
  * @type: The maple node type
- * @offset: The offset of the highest sub-gap in this node.
- * @end: The end of the data in this node.
  */
 static inline void mt_clear_meta(struct maple_tree *mt, struct maple_node *mn,
 				  enum maple_type type)
@@ -939,7 +883,7 @@ static inline unsigned char ma_meta_gap(struct maple_node *mn)
 /*
  * ma_set_meta_gap() - Set the largest gap location in a nodes metadata
  * @mn: The maple node
- * @mn: The maple node type
+ * @mt: The maple node type
  * @offset: The location of the largest gap.
  */
 static inline void ma_set_meta_gap(struct maple_node *mn, enum maple_type mt,
@@ -953,8 +897,8 @@ static inline void ma_set_meta_gap(struct maple_node *mn, enum maple_type mt,
 
 /*
  * mat_add() - Add a @dead_enode to the ma_topiary of a list of dead nodes.
- * @mat - the ma_topiary, a linked list of dead nodes.
- * @dead_enode - the node to be marked as dead and added to the tail of the list
+ * @mat: the ma_topiary, a linked list of dead nodes.
+ * @dead_enode: the node to be marked as dead and added to the tail of the list
  *
  * Add the @dead_enode to the linked list in @mat.
  */
@@ -977,8 +921,8 @@ static void mt_destroy_walk(struct maple_enode *enode, struct maple_tree *mt,
 			    bool free);
 /*
  * mas_mat_destroy() - Free all nodes and subtrees in a dead list.
- * @mas - the maple state
- * @mat - the ma_topiary linked list of dead nodes to free.
+ * @mas: the maple state
+ * @mat: the ma_topiary linked list of dead nodes to free.
  *
  * Destroy walk a dead list.
  */
@@ -999,7 +943,7 @@ static void mas_mat_destroy(struct ma_state *mas, struct ma_topiary *mat)
 }
 /*
  * mas_descend() - Descend into the slot stored in the ma_state.
- * @mas - the maple state.
+ * @mas: the maple state.
  *
  * Note: Not RCU safe, only use in write side or debug code.
  */
@@ -1022,28 +966,10 @@ static inline void mas_descend(struct ma_state *mas)
 }
 
 /*
- * mte_set_gap() - Set a maple node gap.
- * @mn: The encoded maple node
- * @gap: The offset of the gap to set
- * @val: The gap value
- */
-static inline void mte_set_gap(const struct maple_enode *mn,
-				 unsigned char gap, unsigned long val)
-{
-	switch (mte_node_type(mn)) {
-	default:
-		break;
-	case maple_arange_64:
-		mte_to_node(mn)->ma64.gap[gap] = val;
-		break;
-	}
-}
-
-/*
  * mas_ascend() - Walk up a level of the tree.
  * @mas: The maple state
  *
- * Sets the @mas->max and @mas->min to the correct values when walking up.  This
+ * Sets the @mas->max and @mas->min for the parent node of mas->node.  This
  * may cause several levels of walking up to find the correct min and max.
  * May find a dead node which will cause a premature return.
  * Return: 1 on dead node, 0 otherwise
@@ -1088,6 +1014,12 @@ static int mas_ascend(struct ma_state *mas)
 
 	min = 0;
 	max = ULONG_MAX;
+
+	/*
+	 * !mas->offset implies that parent node min == mas->min.
+	 * mas->offset > 0 implies that we need to walk up to find the
+	 * implied pivot min.
+	 */
 	if (!mas->offset) {
 		min = mas->min;
 		set_min = true;
@@ -1136,81 +1068,24 @@ static int mas_ascend(struct ma_state *mas)
  *
  * Return: A pointer to a maple node.
  */
-static inline struct maple_node *mas_pop_node(struct ma_state *mas)
+static __always_inline struct maple_node *mas_pop_node(struct ma_state *mas)
 {
-	struct maple_alloc *ret, *node = mas->alloc;
-	unsigned long total = mas_allocated(mas);
-	unsigned int req = mas_alloc_req(mas);
+	struct maple_node *ret;
 
-	/* nothing or a request pending. */
-	if (WARN_ON(!total))
+	if (mas->alloc) {
+		ret = mas->alloc;
+		mas->alloc = NULL;
+		goto out;
+	}
+
+	if (WARN_ON_ONCE(!mas->sheaf))
 		return NULL;
 
-	if (total == 1) {
-		/* single allocation in this ma_state */
-		mas->alloc = NULL;
-		ret = node;
-		goto single_node;
-	}
+	ret = kmem_cache_alloc_from_sheaf(maple_node_cache, GFP_NOWAIT, mas->sheaf);
 
-	if (node->node_count == 1) {
-		/* Single allocation in this node. */
-		mas->alloc = node->slot[0];
-		mas->alloc->total = node->total - 1;
-		ret = node;
-		goto new_head;
-	}
-	node->total--;
-	ret = node->slot[--node->node_count];
-	node->slot[node->node_count] = NULL;
-
-single_node:
-new_head:
-	if (req) {
-		req++;
-		mas_set_alloc_req(mas, req);
-	}
-
+out:
 	memset(ret, 0, sizeof(*ret));
-	return (struct maple_node *)ret;
-}
-
-/*
- * mas_push_node() - Push a node back on the maple state allocation.
- * @mas: The maple state
- * @used: The used maple node
- *
- * Stores the maple node back into @mas->alloc for reuse.  Updates allocated and
- * requested node count as necessary.
- */
-static inline void mas_push_node(struct ma_state *mas, struct maple_node *used)
-{
-	struct maple_alloc *reuse = (struct maple_alloc *)used;
-	struct maple_alloc *head = mas->alloc;
-	unsigned long count;
-	unsigned int requested = mas_alloc_req(mas);
-
-	count = mas_allocated(mas);
-
-	reuse->request_count = 0;
-	reuse->node_count = 0;
-	if (count && (head->node_count < MAPLE_ALLOC_SLOTS)) {
-		head->slot[head->node_count++] = reuse;
-		head->total++;
-		goto done;
-	}
-
-	reuse->total = 1;
-	if ((head) && !((unsigned long)head & 0x1)) {
-		reuse->slot[0] = head;
-		reuse->node_count = 1;
-		reuse->total += head->total;
-	}
-
-	mas->alloc = reuse;
-done:
-	if (requested > 1)
-		mas_set_alloc_req(mas, requested - 1);
+	return ret;
 }
 
 /*
@@ -1220,72 +1095,68 @@ done:
  */
 static inline void mas_alloc_nodes(struct ma_state *mas, gfp_t gfp)
 {
-	struct maple_alloc *node;
-	unsigned long allocated = mas_allocated(mas);
-	unsigned int requested = mas_alloc_req(mas);
-	unsigned int count;
-	void **slots = NULL;
-	unsigned int max_req = 0;
-
-	if (!requested)
+	if (!mas->node_request)
 		return;
 
-	mas_set_alloc_req(mas, 0);
-	if (mas->mas_flags & MA_STATE_PREALLOC) {
-		if (allocated)
+	if (mas->node_request == 1) {
+		if (mas->sheaf)
+			goto use_sheaf;
+
+		if (mas->alloc)
 			return;
-		BUG_ON(!allocated);
-		WARN_ON(!allocated);
+
+		mas->alloc = mt_alloc_one(gfp);
+		if (!mas->alloc)
+			goto error;
+
+		mas->node_request = 0;
+		return;
 	}
 
-	if (!allocated || mas->alloc->node_count == MAPLE_ALLOC_SLOTS) {
-		node = (struct maple_alloc *)mt_alloc_one(gfp);
-		if (!node)
-			goto nomem_one;
+use_sheaf:
+	if (unlikely(mas->alloc)) {
+		kfree(mas->alloc);
+		mas->alloc = NULL;
+	}
 
-		if (allocated) {
-			node->slot[0] = mas->alloc;
-			node->node_count = 1;
-		} else {
-			node->node_count = 0;
+	if (mas->sheaf) {
+		unsigned long refill;
+
+		refill = mas->node_request;
+		if (kmem_cache_sheaf_size(mas->sheaf) >= refill) {
+			mas->node_request = 0;
+			return;
 		}
 
-		mas->alloc = node;
-		node->total = ++allocated;
-		requested--;
+		if (mt_refill_sheaf(gfp, &mas->sheaf, refill))
+			goto error;
+
+		mas->node_request = 0;
+		return;
 	}
 
-	node = mas->alloc;
-	node->request_count = 0;
-	while (requested) {
-		max_req = MAPLE_ALLOC_SLOTS - node->node_count;
-		slots = (void **)&node->slot[node->node_count];
-		max_req = min(requested, max_req);
-		count = mt_alloc_bulk(gfp, max_req, slots);
-		if (!count)
-			goto nomem_bulk;
-
-		if (node->node_count == 0) {
-			node->slot[0]->node_count = 0;
-			node->slot[0]->request_count = 0;
-		}
-
-		node->node_count += count;
-		allocated += count;
-		node = node->slot[0];
-		requested -= count;
+	mas->sheaf = mt_get_sheaf(gfp, mas->node_request);
+	if (likely(mas->sheaf)) {
+		mas->node_request = 0;
+		return;
 	}
-	mas->alloc->total = allocated;
-	return;
 
-nomem_bulk:
-	/* Clean up potential freed allocations on bulk failure */
-	memset(slots, 0, max_req * sizeof(unsigned long));
-nomem_one:
-	mas_set_alloc_req(mas, requested);
-	if (mas->alloc && !(((unsigned long)mas->alloc & 0x1)))
-		mas->alloc->total = allocated;
+error:
 	mas_set_err(mas, -ENOMEM);
+}
+
+static inline void mas_empty_nodes(struct ma_state *mas)
+{
+	mas->node_request = 0;
+	if (mas->sheaf) {
+		mt_return_sheaf(mas->sheaf);
+		mas->sheaf = NULL;
+	}
+
+	if (mas->alloc) {
+		kfree(mas->alloc);
+		mas->alloc = NULL;
+	}
 }
 
 /*
@@ -1298,56 +1169,21 @@ nomem_one:
  */
 static inline void mas_free(struct ma_state *mas, struct maple_enode *used)
 {
-	struct maple_node *tmp = mte_to_node(used);
-
-	if (mt_in_rcu(mas->tree))
-		ma_free_rcu(tmp);
-	else
-		mas_push_node(mas, tmp);
-}
-
-/*
- * mas_node_count() - Check if enough nodes are allocated and request more if
- * there is not enough nodes.
- * @mas: The maple state
- * @count: The number of nodes needed
- * @gfp: the gfp flags
- */
-static void mas_node_count_gfp(struct ma_state *mas, int count, gfp_t gfp)
-{
-	unsigned long allocated = mas_allocated(mas);
-
-	if (allocated < count) {
-		mas_set_alloc_req(mas, count - allocated);
-		mas_alloc_nodes(mas, gfp);
-	}
-}
-
-/*
- * mas_node_count() - Check if enough nodes are allocated and request more if
- * there is not enough nodes.
- * @mas: The maple state
- * @count: The number of nodes needed
- *
- * Note: Uses GFP_NOWAIT | __GFP_NOWARN for gfp flags.
- */
-static void mas_node_count(struct ma_state *mas, int count)
-{
-	return mas_node_count_gfp(mas, count, GFP_NOWAIT | __GFP_NOWARN);
+	ma_free_rcu(mte_to_node(used));
 }
 
 /*
  * mas_start() - Sets up maple state for operations.
  * @mas: The maple state.
  *
- * If mas->status == mas_start, then set the min, max and depth to
+ * If mas->status == ma_start, then set the min, max and depth to
  * defaults.
  *
  * Return:
  * - If mas->node is an error or not mas_start, return NULL.
  * - If it's an empty tree:     NULL & mas->status == ma_none
- * - If it's a single entry:    The entry & mas->status == mas_root
- * - If it's a tree:            NULL & mas->status == safe root node.
+ * - If it's a single entry:    The entry & mas->status == ma_root
+ * - If it's a tree:            NULL & mas->status == ma_active
  */
 static inline struct maple_enode *mas_start(struct ma_state *mas)
 {
@@ -1362,7 +1198,7 @@ retry:
 		root = mas_root(mas);
 		/* Tree with nodes */
 		if (likely(xa_is_node(root))) {
-			mas->depth = 1;
+			mas->depth = 0;
 			mas->status = ma_active;
 			mas->node = mte_safe_root(root);
 			mas->offset = 0;
@@ -1372,9 +1208,9 @@ retry:
 			return NULL;
 		}
 
+		mas->node = NULL;
 		/* empty tree */
 		if (unlikely(!root)) {
-			mas->node = NULL;
 			mas->status = ma_none;
 			mas->offset = MAPLE_NODE_SLOTS;
 			return NULL;
@@ -1462,7 +1298,7 @@ static inline unsigned char mas_data_end(struct ma_state *mas)
 
 /*
  * mas_leaf_max_gap() - Returns the largest gap in a leaf node
- * @mas - the maple state
+ * @mas: the maple state
  *
  * Return: The maximum gap in the leaf.
  */
@@ -1544,7 +1380,7 @@ static unsigned long mas_leaf_max_gap(struct ma_state *mas)
  * @node: The maple node
  * @gaps: The pointer to the gaps
  * @mt: The maple node type
- * @*off: Pointer to store the offset location of the gap.
+ * @off: Pointer to store the offset location of the gap.
  *
  * Uses the metadata data end to scan backwards across set gaps.
  *
@@ -1651,7 +1487,7 @@ ascend:
 
 /*
  * mas_update_gap() - Update a nodes gaps and propagate up if necessary.
- * @mas - the maple state.
+ * @mas: the maple state.
  */
 static inline void mas_update_gap(struct ma_state *mas)
 {
@@ -1678,8 +1514,8 @@ static inline void mas_update_gap(struct ma_state *mas)
 /*
  * mas_adopt_children() - Set the parent pointer of all nodes in @parent to
  * @parent with the slot encoded.
- * @mas - the maple state (for the tree)
- * @parent - the maple encoded node containing the children.
+ * @mas: the maple state (for the tree)
+ * @parent: the maple encoded node containing the children.
  */
 static inline void mas_adopt_children(struct ma_state *mas,
 		struct maple_enode *parent)
@@ -1701,11 +1537,12 @@ static inline void mas_adopt_children(struct ma_state *mas,
 /*
  * mas_put_in_tree() - Put a new node in the tree, smp_wmb(), and mark the old
  * node as dead.
- * @mas - the maple state with the new node
- * @old_enode - The old maple encoded node to replace.
+ * @mas: the maple state with the new node
+ * @old_enode: The old maple encoded node to replace.
+ * @new_height: if we are inserting a root node, update the height of the tree
  */
 static inline void mas_put_in_tree(struct ma_state *mas,
-		struct maple_enode *old_enode)
+		struct maple_enode *old_enode, char new_height)
 	__must_hold(mas->tree->ma_lock)
 {
 	unsigned char offset;
@@ -1714,7 +1551,7 @@ static inline void mas_put_in_tree(struct ma_state *mas,
 	if (mte_is_root(mas->node)) {
 		mas_mn(mas)->parent = ma_parent_ptr(mas_tree_parent(mas));
 		rcu_assign_pointer(mas->tree->ma_root, mte_mk_root(mas->node));
-		mas_set_height(mas);
+		mt_set_height(mas->tree, new_height);
 	} else {
 
 		offset = mte_parent_slot(mas->node);
@@ -1730,14 +1567,15 @@ static inline void mas_put_in_tree(struct ma_state *mas,
  * mas_replace_node() - Replace a node by putting it in the tree, marking it
  * dead, and freeing it.
  * the parent encoding to locate the maple node in the tree.
- * @mas - the ma_state with @mas->node pointing to the new node.
- * @old_enode - The old maple encoded node.
+ * @mas: the ma_state with @mas->node pointing to the new node.
+ * @old_enode: The old maple encoded node.
+ * @new_height: The new height of the tree as a result of the operation
  */
 static inline void mas_replace_node(struct ma_state *mas,
-		struct maple_enode *old_enode)
+		struct maple_enode *old_enode, unsigned char new_height)
 	__must_hold(mas->tree->ma_lock)
 {
-	mas_put_in_tree(mas, old_enode);
+	mas_put_in_tree(mas, old_enode, new_height);
 	mas_free(mas, old_enode);
 }
 
@@ -1796,7 +1634,6 @@ static inline void mab_shift_right(struct maple_big_node *b_node,
 /*
  * mab_middle_node() - Check if a middle node is needed (unlikely)
  * @b_node: the maple_big_node that contains the data.
- * @size: the amount of data in the b_node
  * @split: the potential split location
  * @slot_count: the size that can be stored in a single node being considered.
  *
@@ -1844,38 +1681,25 @@ static inline int mab_no_null_split(struct maple_big_node *b_node,
 /*
  * mab_calc_split() - Calculate the split location and if there needs to be two
  * splits.
+ * @mas: The maple state
  * @bn: The maple_big_node with the data
  * @mid_split: The second split, if required.  0 otherwise.
  *
  * Return: The first split location.  The middle split is set in @mid_split.
  */
 static inline int mab_calc_split(struct ma_state *mas,
-	 struct maple_big_node *bn, unsigned char *mid_split, unsigned long min)
+	 struct maple_big_node *bn, unsigned char *mid_split)
 {
 	unsigned char b_end = bn->b_end;
 	int split = b_end / 2; /* Assume equal split. */
-	unsigned char slot_min, slot_count = mt_slots[bn->type];
+	unsigned char slot_count = mt_slots[bn->type];
 
 	/*
 	 * To support gap tracking, all NULL entries are kept together and a node cannot
 	 * end on a NULL entry, with the exception of the left-most leaf.  The
 	 * limitation means that the split of a node must be checked for this condition
 	 * and be able to put more data in one direction or the other.
-	 */
-	if (unlikely((mas->mas_flags & MA_STATE_BULK))) {
-		*mid_split = 0;
-		split = b_end - mt_min_slots[bn->type];
-
-		if (!ma_is_leaf(bn->type))
-			return split;
-
-		mas->mas_flags |= MA_STATE_REBALANCE;
-		if (!bn->slot[split])
-			split--;
-		return split;
-	}
-
-	/*
+	 *
 	 * Although extremely rare, it is possible to enter what is known as the 3-way
 	 * split scenario.  The 3-way split comes about by means of a store of a range
 	 * that overwrites the end and beginning of two full nodes.  The result is a set
@@ -1887,18 +1711,7 @@ static inline int mab_calc_split(struct ma_state *mas,
 		split = b_end / 3;
 		*mid_split = split * 2;
 	} else {
-		slot_min = mt_min_slots[bn->type];
-
 		*mid_split = 0;
-		/*
-		 * Avoid having a range less than the slot count unless it
-		 * causes one node to be deficient.
-		 * NOTE: mt_min_slots is 1 based, b_end and split are zero.
-		 */
-		while ((split < slot_count - 1) &&
-		       ((bn->pivot[split] - min) < slot_count - 1) &&
-		       (b_end - split > slot_min))
-			split++;
 	}
 
 	/* Avoid ending a node on a NULL entry */
@@ -1944,14 +1757,13 @@ static inline void mas_mab_cp(struct ma_state *mas, unsigned char mas_start,
 	for (; i < piv_end; i++, j++) {
 		b_node->pivot[j] = pivots[i];
 		if (unlikely(!b_node->pivot[j]))
-			break;
+			goto complete;
 
 		if (unlikely(mas->max == b_node->pivot[j]))
 			goto complete;
 	}
 
-	if (likely(i <= mas_end))
-		b_node->pivot[j] = mas_safe_pivot(mas, pivots, i, mt);
+	b_node->pivot[j] = mas_safe_pivot(mas, pivots, i, mt);
 
 complete:
 	b_node->b_end = ++j;
@@ -2035,27 +1847,6 @@ static inline void mab_mas_cp(struct maple_big_node *b_node,
 }
 
 /*
- * mas_bulk_rebalance() - Rebalance the end of a tree after a bulk insert.
- * @mas: The maple state
- * @end: The maple node end
- * @mt: The maple node type
- */
-static inline void mas_bulk_rebalance(struct ma_state *mas, unsigned char end,
-				      enum maple_type mt)
-{
-	if (!(mas->mas_flags & MA_STATE_BULK))
-		return;
-
-	if (mte_is_root(mas->node))
-		return;
-
-	if (end > mt_min_slots[mt]) {
-		mas->mas_flags &= ~MA_STATE_REBALANCE;
-		return;
-	}
-}
-
-/*
  * mas_store_b_node() - Store an @entry into the b_node while also copying the
  * data from a maple encoded node.
  * @wr_mas: the maple write state
@@ -2104,9 +1895,6 @@ static noinline_for_kasan void mas_store_b_node(struct ma_wr_state *wr_mas,
 	/* Handle new range ending before old range ends */
 	piv = mas_safe_pivot(mas, wr_mas->pivots, offset_end, wr_mas->type);
 	if (piv > mas->last) {
-		if (piv == ULONG_MAX)
-			mas_bulk_rebalance(mas, b_node->b_end, wr_mas->type);
-
 		if (offset_end != slot)
 			wr_mas->content = mas_slot_locked(mas, wr_mas->slots,
 							  offset_end);
@@ -2140,9 +1928,7 @@ static inline bool mas_prev_sibling(struct ma_state *mas)
 {
 	unsigned int p_slot = mte_parent_slot(mas->node);
 
-	if (mte_is_root(mas->node))
-		return false;
-
+	/* For root node, p_slot is set to 0 by mte_parent_slot(). */
 	if (!p_slot)
 		return false;
 
@@ -2177,7 +1963,8 @@ static inline bool mas_next_sibling(struct ma_state *mas)
 }
 
 /*
- * mte_node_or_none() - Set the enode and state.
+ * mas_node_or_none() - Set the enode and state.
+ * @mas: the maple state
  * @enode: The encoded maple node.
  *
  * Set the node to the enode and the status.
@@ -2196,6 +1983,8 @@ static inline void mas_node_or_none(struct ma_state *mas,
 
 /*
  * mas_wr_node_walk() - Find the correct offset for the index in the @mas.
+ *                      If @mas->index cannot be found within the containing
+ *                      node, we traverse to the last entry in the node.
  * @wr_mas: The maple write state
  *
  * Uses mas_slot_locked() and does not need to worry about dead nodes.
@@ -2228,7 +2017,6 @@ static inline void mas_wr_node_walk(struct ma_wr_state *wr_mas)
 /*
  * mast_rebalance_next() - Rebalance against the next node
  * @mast: The maple subtree state
- * @old_r: The encoded maple node to the right (next node).
  */
 static inline void mast_rebalance_next(struct maple_subtree_state *mast)
 {
@@ -2242,7 +2030,6 @@ static inline void mast_rebalance_next(struct maple_subtree_state *mast)
 /*
  * mast_rebalance_prev() - Rebalance against the previous node
  * @mast: The maple subtree state
- * @old_l: The encoded maple node to the left (previous node)
  */
 static inline void mast_rebalance_prev(struct maple_subtree_state *mast)
 {
@@ -2271,8 +2058,6 @@ bool mast_spanning_rebalance(struct maple_subtree_state *mast)
 	struct ma_state l_tmp = *mast->orig_l;
 	unsigned char depth = 0;
 
-	r_tmp = *mast->orig_r;
-	l_tmp = *mast->orig_l;
 	do {
 		mas_ascend(mast->orig_r);
 		mas_ascend(mast->orig_l);
@@ -2368,7 +2153,7 @@ static inline struct maple_enode
 static inline unsigned char mas_mab_to_node(struct ma_state *mas,
 	struct maple_big_node *b_node, struct maple_enode **left,
 	struct maple_enode **right, struct maple_enode **middle,
-	unsigned char *mid_split, unsigned long min)
+	unsigned char *mid_split)
 {
 	unsigned char split = 0;
 	unsigned char slot_count = mt_slots[b_node->type];
@@ -2381,7 +2166,7 @@ static inline unsigned char mas_mab_to_node(struct ma_state *mas,
 	if (b_node->b_end < slot_count) {
 		split = b_node->b_end;
 	} else {
-		split = mab_calc_split(mas, b_node, mid_split, min);
+		split = mab_calc_split(mas, b_node, mid_split);
 		*right = mas_new_ma_node(mas, b_node);
 	}
 
@@ -2395,9 +2180,9 @@ static inline unsigned char mas_mab_to_node(struct ma_state *mas,
 /*
  * mab_set_b_end() - Add entry to b_node at b_node->b_end and increment the end
  * pointer.
- * @b_node - the big node to add the entry
- * @mas - the maple state to get the pivot (mas->max)
- * @entry - the entry to add, if NULL nothing happens.
+ * @b_node: the big node to add the entry
+ * @mas: the maple state to get the pivot (mas->max)
+ * @entry: the entry to add, if NULL nothing happens.
  */
 static inline void mab_set_b_end(struct maple_big_node *b_node,
 				 struct ma_state *mas,
@@ -2416,11 +2201,11 @@ static inline void mab_set_b_end(struct maple_big_node *b_node,
  * mas_set_split_parent() - combine_then_separate helper function.  Sets the parent
  * of @mas->node to either @left or @right, depending on @slot and @split
  *
- * @mas - the maple state with the node that needs a parent
- * @left - possible parent 1
- * @right - possible parent 2
- * @slot - the slot the mas->node was placed
- * @split - the split location between @left and @right
+ * @mas: the maple state with the node that needs a parent
+ * @left: possible parent 1
+ * @right: possible parent 2
+ * @slot: the slot the mas->node was placed
+ * @split: the split location between @left and @right
  */
 static inline void mas_set_split_parent(struct ma_state *mas,
 					struct maple_enode *left,
@@ -2440,11 +2225,11 @@ static inline void mas_set_split_parent(struct ma_state *mas,
 
 /*
  * mte_mid_split_check() - Check if the next node passes the mid-split
- * @**l: Pointer to left encoded maple node.
- * @**m: Pointer to middle encoded maple node.
- * @**r: Pointer to right encoded maple node.
+ * @l: Pointer to left encoded maple node.
+ * @m: Pointer to middle encoded maple node.
+ * @r: Pointer to right encoded maple node.
  * @slot: The offset
- * @*split: The split location.
+ * @split: The split location.
  * @mid_split: The middle split.
  */
 static inline void mte_mid_split_check(struct maple_enode **l,
@@ -2468,10 +2253,10 @@ static inline void mte_mid_split_check(struct maple_enode **l,
 /*
  * mast_set_split_parents() - Helper function to set three nodes parents.  Slot
  * is taken from @mast->l.
- * @mast - the maple subtree state
- * @left - the left node
- * @right - the right node
- * @split - the split location.
+ * @mast: the maple subtree state
+ * @left: the left node
+ * @right: the right node
+ * @split: the split location.
  */
 static inline void mast_set_split_parents(struct maple_subtree_state *mast,
 					  struct maple_enode *left,
@@ -2505,7 +2290,6 @@ static inline void mast_set_split_parents(struct maple_subtree_state *mast,
 /*
  * mas_topiary_node() - Dispose of a single node
  * @mas: The maple state for pushing nodes
- * @enode: The encoded maple node
  * @in_rcu: If the tree is in rcu mode
  *
  * The node will either be RCU freed or pushed back on the maple state.
@@ -2522,10 +2306,7 @@ static inline void mas_topiary_node(struct ma_state *mas,
 	enode = tmp_mas->node;
 	tmp = mte_to_node(enode);
 	mte_set_node_dead(enode);
-	if (in_rcu)
-		ma_free_rcu(tmp);
-	else
-		mas_push_node(mas, tmp);
+	ma_free_rcu(tmp);
 }
 
 /*
@@ -2543,10 +2324,11 @@ static inline void mas_topiary_node(struct ma_state *mas,
  *
  * @mas: The maple state pointing at the new data
  * @old_enode: The maple encoded node being replaced
+ * @new_height: The new height of the tree as a result of the operation
  *
  */
 static inline void mas_topiary_replace(struct ma_state *mas,
-		struct maple_enode *old_enode)
+		struct maple_enode *old_enode, unsigned char new_height)
 {
 	struct ma_state tmp[3], tmp_next[3];
 	MA_TOPIARY(subtrees, mas->tree);
@@ -2554,7 +2336,7 @@ static inline void mas_topiary_replace(struct ma_state *mas,
 	int i, n;
 
 	/* Place data in tree & then mark node as old */
-	mas_put_in_tree(mas, old_enode);
+	mas_put_in_tree(mas, old_enode, new_height);
 
 	/* Update the parent pointers in the tree */
 	tmp[0] = *mas;
@@ -2637,15 +2419,16 @@ static inline void mas_topiary_replace(struct ma_state *mas,
 /*
  * mas_wmb_replace() - Write memory barrier and replace
  * @mas: The maple state
- * @old: The old maple encoded node that is being replaced.
+ * @old_enode: The old maple encoded node that is being replaced.
+ * @new_height: The new height of the tree as a result of the operation
  *
  * Updates gap as necessary.
  */
 static inline void mas_wmb_replace(struct ma_state *mas,
-		struct maple_enode *old_enode)
+		struct maple_enode *old_enode, unsigned char new_height)
 {
 	/* Insert the new data in the tree */
-	mas_topiary_replace(mas, old_enode);
+	mas_topiary_replace(mas, old_enode, new_height);
 
 	if (mte_is_leaf(mas->node))
 		return;
@@ -2744,7 +2527,7 @@ static inline bool mast_sufficient(struct maple_subtree_state *mast)
  */
 static inline bool mast_overflow(struct maple_subtree_state *mast)
 {
-	if (mast->bn->b_end >= mt_slot_count(mast->orig_l->node))
+	if (mast->bn->b_end > mt_slot_count(mast->orig_l->node))
 		return true;
 
 	return false;
@@ -2825,14 +2608,13 @@ dead_node:
  * orig_l_mas->last is used in mas_consume to find the slots that will need to
  * be either freed or destroyed.  orig_l_mas->depth keeps track of the height of
  * the new sub-tree in case the sub-tree becomes the full tree.
- *
- * Return: the number of elements in b_node during the last loop.
  */
-static int mas_spanning_rebalance(struct ma_state *mas,
+static void mas_spanning_rebalance(struct ma_state *mas,
 		struct maple_subtree_state *mast, unsigned char count)
 {
 	unsigned char split, mid_split;
 	unsigned char slot = 0;
+	unsigned char new_height = 0; /* used if node is a new root */
 	struct maple_enode *left = NULL, *middle = NULL, *right = NULL;
 	struct maple_enode *old_enode;
 
@@ -2854,8 +2636,6 @@ static int mas_spanning_rebalance(struct ma_state *mas,
 	    unlikely(mast->bn->b_end <= mt_min_slots[mast->bn->type]))
 		mast_spanning_rebalance(mast);
 
-	l_mas.depth = 0;
-
 	/*
 	 * Each level of the tree is examined and balanced, pushing data to the left or
 	 * right, or rebalancing against left or right nodes is employed to avoid
@@ -2871,10 +2651,11 @@ static int mas_spanning_rebalance(struct ma_state *mas,
 		mast->bn->b_end--;
 		mast->bn->type = mte_node_type(mast->orig_l->node);
 		split = mas_mab_to_node(mas, mast->bn, &left, &right, &middle,
-					&mid_split, mast->orig_l->min);
+					&mid_split);
 		mast_set_split_parents(mast, left, middle, right, split,
 				       mid_split);
 		mast_cp_to_nodes(mast, left, middle, right, split, mid_split);
+		new_height++;
 
 		/*
 		 * Copy data from next level in the tree to mast->bn from next
@@ -2882,7 +2663,6 @@ static int mas_spanning_rebalance(struct ma_state *mas,
 		 */
 		memset(mast->bn, 0, sizeof(struct maple_big_node));
 		mast->bn->type = mte_node_type(left);
-		l_mas.depth++;
 
 		/* Root already stored in l->node. */
 		if (mas_is_root_limits(mast->l))
@@ -2899,11 +2679,21 @@ static int mas_spanning_rebalance(struct ma_state *mas,
 		mast_combine_cp_right(mast);
 		mast->orig_l->last = mast->orig_l->max;
 
-		if (mast_sufficient(mast))
-			continue;
+		if (mast_sufficient(mast)) {
+			if (mast_overflow(mast))
+				continue;
 
-		if (mast_overflow(mast))
+			if (mast->orig_l->node == mast->orig_r->node) {
+			       /*
+				* The data in b_node should be stored in one
+				* node and in the tree
+				*/
+				slot = mast->l->offset;
+				break;
+			}
+
 			continue;
+		}
 
 		/* May be a new root stored in mast->bn */
 		if (mas_is_root_limits(mast->orig_l))
@@ -2918,8 +2708,9 @@ static int mas_spanning_rebalance(struct ma_state *mas,
 
 	l_mas.node = mt_mk_node(ma_mnode_ptr(mas_pop_node(mas)),
 				mte_node_type(mast->orig_l->node));
-	l_mas.depth++;
+
 	mab_mas_cp(mast->bn, 0, mt_slots[mast->bn->type] - 1, &l_mas, true);
+	new_height++;
 	mas_set_parent(mas, left, l_mas.node, slot);
 	if (middle)
 		mas_set_parent(mas, middle, l_mas.node, ++slot);
@@ -2942,9 +2733,9 @@ new_root:
 	mas->min = l_mas.min;
 	mas->max = l_mas.max;
 	mas->offset = l_mas.offset;
-	mas_wmb_replace(mas, old_enode);
+	mas_wmb_replace(mas, old_enode, new_height);
 	mtree_range_walk(mas);
-	return mast->bn->b_end;
+	return;
 }
 
 /*
@@ -2954,10 +2745,8 @@ new_root:
  *
  * Rebalance two nodes into a single node or two new nodes that are sufficient.
  * Continue upwards until tree is sufficient.
- *
- * Return: the number of elements in b_node during the last loop.
  */
-static inline int mas_rebalance(struct ma_state *mas,
+static inline void mas_rebalance(struct ma_state *mas,
 				struct maple_big_node *b_node)
 {
 	char empty_count = mas_mt_height(mas);
@@ -2978,9 +2767,6 @@ static inline int mas_rebalance(struct ma_state *mas,
 	 * tries to combine the data in the same way.  If one node contains the
 	 * entire range of the tree, then that node is used as a new root node.
 	 */
-	mas_node_count(mas, empty_count * 2 - 1);
-	if (mas_is_err(mas))
-		return 0;
 
 	mast.orig_l = &l_mas;
 	mast.orig_r = &r_mas;
@@ -3006,137 +2792,12 @@ static inline int mas_rebalance(struct ma_state *mas,
 }
 
 /*
- * mas_destroy_rebalance() - Rebalance left-most node while destroying the maple
- * state.
- * @mas: The maple state
- * @end: The end of the left-most node.
- *
- * During a mass-insert event (such as forking), it may be necessary to
- * rebalance the left-most node when it is not sufficient.
- */
-static inline void mas_destroy_rebalance(struct ma_state *mas, unsigned char end)
-{
-	enum maple_type mt = mte_node_type(mas->node);
-	struct maple_node reuse, *newnode, *parent, *new_left, *left, *node;
-	struct maple_enode *eparent, *old_eparent;
-	unsigned char offset, tmp, split = mt_slots[mt] / 2;
-	void __rcu **l_slots, **slots;
-	unsigned long *l_pivs, *pivs, gap;
-	bool in_rcu = mt_in_rcu(mas->tree);
-
-	MA_STATE(l_mas, mas->tree, mas->index, mas->last);
-
-	l_mas = *mas;
-	mas_prev_sibling(&l_mas);
-
-	/* set up node. */
-	if (in_rcu) {
-		/* Allocate for both left and right as well as parent. */
-		mas_node_count(mas, 3);
-		if (mas_is_err(mas))
-			return;
-
-		newnode = mas_pop_node(mas);
-	} else {
-		newnode = &reuse;
-	}
-
-	node = mas_mn(mas);
-	newnode->parent = node->parent;
-	slots = ma_slots(newnode, mt);
-	pivs = ma_pivots(newnode, mt);
-	left = mas_mn(&l_mas);
-	l_slots = ma_slots(left, mt);
-	l_pivs = ma_pivots(left, mt);
-	if (!l_slots[split])
-		split++;
-	tmp = mas_data_end(&l_mas) - split;
-
-	memcpy(slots, l_slots + split + 1, sizeof(void *) * tmp);
-	memcpy(pivs, l_pivs + split + 1, sizeof(unsigned long) * tmp);
-	pivs[tmp] = l_mas.max;
-	memcpy(slots + tmp, ma_slots(node, mt), sizeof(void *) * end);
-	memcpy(pivs + tmp, ma_pivots(node, mt), sizeof(unsigned long) * end);
-
-	l_mas.max = l_pivs[split];
-	mas->min = l_mas.max + 1;
-	old_eparent = mt_mk_node(mte_parent(l_mas.node),
-			     mas_parent_type(&l_mas, l_mas.node));
-	tmp += end;
-	if (!in_rcu) {
-		unsigned char max_p = mt_pivots[mt];
-		unsigned char max_s = mt_slots[mt];
-
-		if (tmp < max_p)
-			memset(pivs + tmp, 0,
-			       sizeof(unsigned long) * (max_p - tmp));
-
-		if (tmp < mt_slots[mt])
-			memset(slots + tmp, 0, sizeof(void *) * (max_s - tmp));
-
-		memcpy(node, newnode, sizeof(struct maple_node));
-		ma_set_meta(node, mt, 0, tmp - 1);
-		mte_set_pivot(old_eparent, mte_parent_slot(l_mas.node),
-			      l_pivs[split]);
-
-		/* Remove data from l_pivs. */
-		tmp = split + 1;
-		memset(l_pivs + tmp, 0, sizeof(unsigned long) * (max_p - tmp));
-		memset(l_slots + tmp, 0, sizeof(void *) * (max_s - tmp));
-		ma_set_meta(left, mt, 0, split);
-		eparent = old_eparent;
-
-		goto done;
-	}
-
-	/* RCU requires replacing both l_mas, mas, and parent. */
-	mas->node = mt_mk_node(newnode, mt);
-	ma_set_meta(newnode, mt, 0, tmp);
-
-	new_left = mas_pop_node(mas);
-	new_left->parent = left->parent;
-	mt = mte_node_type(l_mas.node);
-	slots = ma_slots(new_left, mt);
-	pivs = ma_pivots(new_left, mt);
-	memcpy(slots, l_slots, sizeof(void *) * split);
-	memcpy(pivs, l_pivs, sizeof(unsigned long) * split);
-	ma_set_meta(new_left, mt, 0, split);
-	l_mas.node = mt_mk_node(new_left, mt);
-
-	/* replace parent. */
-	offset = mte_parent_slot(mas->node);
-	mt = mas_parent_type(&l_mas, l_mas.node);
-	parent = mas_pop_node(mas);
-	slots = ma_slots(parent, mt);
-	pivs = ma_pivots(parent, mt);
-	memcpy(parent, mte_to_node(old_eparent), sizeof(struct maple_node));
-	rcu_assign_pointer(slots[offset], mas->node);
-	rcu_assign_pointer(slots[offset - 1], l_mas.node);
-	pivs[offset - 1] = l_mas.max;
-	eparent = mt_mk_node(parent, mt);
-done:
-	gap = mas_leaf_max_gap(mas);
-	mte_set_gap(eparent, mte_parent_slot(mas->node), gap);
-	gap = mas_leaf_max_gap(&l_mas);
-	mte_set_gap(eparent, mte_parent_slot(l_mas.node), gap);
-	mas_ascend(mas);
-
-	if (in_rcu) {
-		mas_replace_node(mas, old_eparent);
-		mas_adopt_children(mas, mas->node);
-	}
-
-	mas_update_gap(mas);
-}
-
-/*
  * mas_split_final_node() - Split the final node in a subtree operation.
  * @mast: the maple subtree state
  * @mas: The maple state
- * @height: The height of the tree in case it's a new root.
  */
 static inline void mas_split_final_node(struct maple_subtree_state *mast,
-					struct ma_state *mas, int height)
+					struct ma_state *mas)
 {
 	struct maple_enode *ancestor;
 
@@ -3145,7 +2806,6 @@ static inline void mas_split_final_node(struct maple_subtree_state *mast,
 			mast->bn->type = maple_arange_64;
 		else
 			mast->bn->type = maple_range_64;
-		mas->depth = height;
 	}
 	/*
 	 * Only a single node is used here, could be root.
@@ -3174,10 +2834,7 @@ static inline void mast_fill_bnode(struct maple_subtree_state *mast,
 	bool cp = true;
 	unsigned char split;
 
-	memset(mast->bn->gap, 0, sizeof(unsigned long) * ARRAY_SIZE(mast->bn->gap));
-	memset(mast->bn->slot, 0, sizeof(unsigned long) * ARRAY_SIZE(mast->bn->slot));
-	memset(mast->bn->pivot, 0, sizeof(unsigned long) * ARRAY_SIZE(mast->bn->pivot));
-	mast->bn->b_end = 0;
+	memset(mast->bn, 0, sizeof(struct maple_big_node));
 
 	if (mte_is_root(mas->node)) {
 		cp = false;
@@ -3236,7 +2893,6 @@ static inline void mast_split_data(struct maple_subtree_state *mast,
  * mas_push_data() - Instead of splitting a node, it is beneficial to push the
  * data to the right or left node if there is room.
  * @mas: The maple state
- * @height: The current height of the maple state
  * @mast: The maple subtree state
  * @left: Push left or not.
  *
@@ -3244,8 +2900,8 @@ static inline void mast_split_data(struct maple_subtree_state *mast,
  *
  * Return: True if pushed, false otherwise.
  */
-static inline bool mas_push_data(struct ma_state *mas, int height,
-				 struct maple_subtree_state *mast, bool left)
+static inline bool mas_push_data(struct ma_state *mas,
+				struct maple_subtree_state *mast, bool left)
 {
 	unsigned char slot_total = mast->bn->b_end;
 	unsigned char end, space, split;
@@ -3302,7 +2958,7 @@ static inline bool mas_push_data(struct ma_state *mas, int height,
 
 	mast_split_data(mast, mas, split);
 	mast_fill_bnode(mast, mas, 2);
-	mas_split_final_node(mast, mas, height + 1);
+	mas_split_final_node(mast, mas);
 	return true;
 }
 
@@ -3310,12 +2966,12 @@ static inline bool mas_push_data(struct ma_state *mas, int height,
  * mas_split() - Split data that is too big for one node into two.
  * @mas: The maple state
  * @b_node: The maple big node
- * Return: 1 on success, 0 on failure.
  */
-static int mas_split(struct ma_state *mas, struct maple_big_node *b_node)
+static void mas_split(struct ma_state *mas, struct maple_big_node *b_node)
 {
 	struct maple_subtree_state mast;
 	int height = 0;
+	unsigned int orig_height = mas_mt_height(mas);
 	unsigned char mid_split, split = 0;
 	struct maple_enode *old;
 
@@ -3342,11 +2998,6 @@ static int mas_split(struct ma_state *mas, struct maple_big_node *b_node)
 	MA_STATE(prev_r_mas, mas->tree, mas->index, mas->last);
 
 	trace_ma_op(__func__, mas);
-	mas->depth = mas_mt_height(mas);
-	/* Allocation failures will happen early. */
-	mas_node_count(mas, 1 + mas->depth * 2);
-	if (mas_is_err(mas))
-		return 0;
 
 	mast.l = &l_mas;
 	mast.r = &r_mas;
@@ -3354,9 +3005,9 @@ static int mas_split(struct ma_state *mas, struct maple_big_node *b_node)
 	mast.orig_r = &prev_r_mas;
 	mast.bn = b_node;
 
-	while (height++ <= mas->depth) {
+	while (height++ <= orig_height) {
 		if (mt_slots[b_node->type] > b_node->b_end) {
-			mas_split_final_node(&mast, mas, height);
+			mas_split_final_node(&mast, mas);
 			break;
 		}
 
@@ -3371,13 +3022,17 @@ static int mas_split(struct ma_state *mas, struct maple_big_node *b_node)
 		 * is a significant savings.
 		 */
 		/* Try to push left. */
-		if (mas_push_data(mas, height, &mast, true))
+		if (mas_push_data(mas, &mast, true)) {
+			height++;
 			break;
+		}
 		/* Try to push right. */
-		if (mas_push_data(mas, height, &mast, false))
+		if (mas_push_data(mas, &mast, false)) {
+			height++;
 			break;
+		}
 
-		split = mab_calc_split(mas, b_node, &mid_split, prev_l_mas.min);
+		split = mab_calc_split(mas, b_node, &mid_split);
 		mast_split_data(&mast, mas, split);
 		/*
 		 * Usually correct, mab_mas_cp in the above call overwrites
@@ -3392,77 +3047,27 @@ static int mas_split(struct ma_state *mas, struct maple_big_node *b_node)
 	/* Set the original node as dead */
 	old = mas->node;
 	mas->node = l_mas.node;
-	mas_wmb_replace(mas, old);
+	mas_wmb_replace(mas, old, height);
 	mtree_range_walk(mas);
-	return 1;
-}
-
-/*
- * mas_reuse_node() - Reuse the node to store the data.
- * @wr_mas: The maple write state
- * @bn: The maple big node
- * @end: The end of the data.
- *
- * Will always return false in RCU mode.
- *
- * Return: True if node was reused, false otherwise.
- */
-static inline bool mas_reuse_node(struct ma_wr_state *wr_mas,
-			  struct maple_big_node *bn, unsigned char end)
-{
-	/* Need to be rcu safe. */
-	if (mt_in_rcu(wr_mas->mas->tree))
-		return false;
-
-	if (end > bn->b_end) {
-		int clear = mt_slots[wr_mas->type] - bn->b_end;
-
-		memset(wr_mas->slots + bn->b_end, 0, sizeof(void *) * clear--);
-		memset(wr_mas->pivots + bn->b_end, 0, sizeof(void *) * clear);
-	}
-	mab_mas_cp(bn, 0, bn->b_end, wr_mas->mas, false);
-	return true;
+	return;
 }
 
 /*
  * mas_commit_b_node() - Commit the big node into the tree.
  * @wr_mas: The maple write state
  * @b_node: The maple big node
- * @end: The end of the data.
  */
-static noinline_for_kasan int mas_commit_b_node(struct ma_wr_state *wr_mas,
-			    struct maple_big_node *b_node, unsigned char end)
+static noinline_for_kasan void mas_commit_b_node(struct ma_wr_state *wr_mas,
+			    struct maple_big_node *b_node)
 {
-	struct maple_node *node;
-	struct maple_enode *old_enode;
-	unsigned char b_end = b_node->b_end;
-	enum maple_type b_type = b_node->type;
+	enum store_type type = wr_mas->mas->store_type;
 
-	old_enode = wr_mas->mas->node;
-	if ((b_end < mt_min_slots[b_type]) &&
-	    (!mte_is_root(old_enode)) &&
-	    (mas_mt_height(wr_mas->mas) > 1))
+	WARN_ON_ONCE(type != wr_rebalance && type != wr_split_store);
+
+	if (type == wr_rebalance)
 		return mas_rebalance(wr_mas->mas, b_node);
 
-	if (b_end >= mt_slots[b_type])
-		return mas_split(wr_mas->mas, b_node);
-
-	if (mas_reuse_node(wr_mas, b_node, end))
-		goto reuse_node;
-
-	mas_node_count(wr_mas->mas, 1);
-	if (mas_is_err(wr_mas->mas))
-		return 0;
-
-	node = mas_pop_node(wr_mas->mas);
-	node->parent = mas_mn(wr_mas->mas)->parent;
-	wr_mas->mas->node = mt_mk_node(node, b_type);
-	mab_mas_cp(b_node, 0, b_end, wr_mas->mas, false);
-	mas_replace_node(wr_mas->mas, old_enode);
-reuse_node:
-	mas_update_gap(wr_mas->mas);
-	wr_mas->mas->end = b_end;
-	return 1;
+	return mas_split(wr_mas->mas, b_node);
 }
 
 /*
@@ -3470,7 +3075,7 @@ reuse_node:
  * @mas: The maple state
  * @entry: The entry to store into the tree
  */
-static inline int mas_root_expand(struct ma_state *mas, void *entry)
+static inline void mas_root_expand(struct ma_state *mas, void *entry)
 {
 	void *contents = mas_root_locked(mas);
 	enum maple_type type = maple_leaf_64;
@@ -3478,10 +3083,6 @@ static inline int mas_root_expand(struct ma_state *mas, void *entry)
 	void __rcu **slots;
 	unsigned long *pivots;
 	int slot = 0;
-
-	mas_node_count(mas, 1);
-	if (unlikely(mas_is_err(mas)))
-		return 0;
 
 	node = mas_pop_node(mas);
 	pivots = ma_pivots(node, type);
@@ -3505,17 +3106,27 @@ static inline int mas_root_expand(struct ma_state *mas, void *entry)
 	if (mas->last != ULONG_MAX)
 		pivots[++slot] = ULONG_MAX;
 
-	mas->depth = 1;
-	mas_set_height(mas);
+	mt_set_height(mas->tree, 1);
 	ma_set_meta(node, maple_leaf_64, 0, slot);
 	/* swap the new root into the tree */
 	rcu_assign_pointer(mas->tree->ma_root, mte_mk_root(mas->node));
-	return slot;
+	return;
 }
 
+/*
+ * mas_store_root() - Storing value into root.
+ * @mas: The maple state
+ * @entry: The entry to store.
+ *
+ * There is no root node now and we are storing a value into the root - this
+ * function either assigns the pointer or expands into a node.
+ */
 static inline void mas_store_root(struct ma_state *mas, void *entry)
 {
-	if (likely((mas->last != 0) || (mas->index != 0)))
+	if (!entry) {
+		if (!mas->index)
+			rcu_assign_pointer(mas->tree->ma_root, NULL);
+	} else if (likely((mas->last != 0) || (mas->index != 0)))
 		mas_root_expand(mas, entry);
 	else if (((unsigned long) (entry) & 3) == 2)
 		mas_root_expand(mas, entry);
@@ -3528,10 +3139,7 @@ static inline void mas_store_root(struct ma_state *mas, void *entry)
 /*
  * mas_is_span_wr() - Check if the write needs to be treated as a write that
  * spans the node.
- * @mas: The maple state
- * @piv: The pivot value being written
- * @type: The maple node type
- * @entry: The data to write
+ * @wr_mas: The maple write state
  *
  * Spanning writes are writes that start in one node and end in another OR if
  * the write of a %NULL will cause the node to end with a %NULL.
@@ -3605,13 +3213,23 @@ static bool mas_wr_walk(struct ma_wr_state *wr_mas)
 		if (ma_is_leaf(wr_mas->type))
 			return true;
 
+		if (mas->end < mt_slots[wr_mas->type] - 1)
+			wr_mas->vacant_height = mas->depth + 1;
+
+		if (ma_is_root(mas_mn(mas))) {
+			/* root needs more than 2 entries to be sufficient + 1 */
+			if (mas->end > 2)
+				wr_mas->sufficient_height = 1;
+		} else if (mas->end > mt_min_slots[wr_mas->type] + 1)
+			wr_mas->sufficient_height = mas->depth + 1;
+
 		mas_wr_walk_traverse(wr_mas);
 	}
 
 	return true;
 }
 
-static bool mas_wr_walk_index(struct ma_wr_state *wr_mas)
+static void mas_wr_walk_index(struct ma_wr_state *wr_mas)
 {
 	struct ma_state *mas = wr_mas->mas;
 
@@ -3620,11 +3238,9 @@ static bool mas_wr_walk_index(struct ma_wr_state *wr_mas)
 		wr_mas->content = mas_slot_locked(mas, wr_mas->slots,
 						  mas->offset);
 		if (ma_is_leaf(wr_mas->type))
-			return true;
+			return;
 		mas_wr_walk_traverse(wr_mas);
-
 	}
-	return true;
 }
 /*
  * mas_extend_spanning_null() - Extend a store of a %NULL to include surrounding %NULLs.
@@ -3732,10 +3348,8 @@ static void mte_destroy_walk(struct maple_enode *, struct maple_tree *);
  * @entry: The entry to store.
  *
  * Only valid when the index == 0 and the last == ULONG_MAX
- *
- * Return 0 on error, 1 on success.
  */
-static inline int mas_new_root(struct ma_state *mas, void *entry)
+static inline void mas_new_root(struct ma_state *mas, void *entry)
 {
 	struct maple_enode *root = mas_root_locked(mas);
 	enum maple_type type = maple_leaf_64;
@@ -3743,17 +3357,14 @@ static inline int mas_new_root(struct ma_state *mas, void *entry)
 	void __rcu **slots;
 	unsigned long *pivots;
 
-	if (!entry && !mas->index && mas->last == ULONG_MAX) {
-		mas->depth = 0;
-		mas_set_height(mas);
+	WARN_ON_ONCE(mas->index || mas->last != ULONG_MAX);
+
+	if (!entry) {
+		mt_set_height(mas->tree, 0);
 		rcu_assign_pointer(mas->tree->ma_root, entry);
 		mas->status = ma_start;
 		goto done;
 	}
-
-	mas_node_count(mas, 1);
-	if (mas_is_err(mas))
-		return 0;
 
 	node = mas_pop_node(mas);
 	pivots = ma_pivots(node, type);
@@ -3763,15 +3374,14 @@ static inline int mas_new_root(struct ma_state *mas, void *entry)
 	mas->status = ma_active;
 	rcu_assign_pointer(slots[0], entry);
 	pivots[0] = mas->last;
-	mas->depth = 1;
-	mas_set_height(mas);
+	mt_set_height(mas->tree, 1);
 	rcu_assign_pointer(mas->tree->ma_root, mte_mk_root(mas->node));
 
 done:
 	if (xa_is_node(root))
 		mte_destroy_walk(root, mas->tree);
 
-	return 1;
+	return;
 }
 /*
  * mas_wr_spanning_store() - Create a subtree with the store operation completed
@@ -3779,10 +3389,8 @@ done:
  * Note that mas is expected to point to the node which caused the store to
  * span.
  * @wr_mas: The maple write state
- *
- * Return: 0 on error, positive on success.
  */
-static inline int mas_wr_spanning_store(struct ma_wr_state *wr_mas)
+static noinline void mas_wr_spanning_store(struct ma_wr_state *wr_mas)
 {
 	struct maple_subtree_state mast;
 	struct maple_big_node b_node;
@@ -3817,9 +3425,6 @@ static inline int mas_wr_spanning_store(struct ma_wr_state *wr_mas)
 	 * entries per level plus a new root.
 	 */
 	height = mas_mt_height(mas);
-	mas_node_count(mas, 1 + height * 3);
-	if (mas_is_err(mas))
-		return 0;
 
 	/*
 	 * Set up right side.  Need to get to the next offset after the spanning
@@ -3855,8 +3460,8 @@ static inline int mas_wr_spanning_store(struct ma_wr_state *wr_mas)
 	memset(&b_node, 0, sizeof(struct maple_big_node));
 	/* Copy l_mas and store the value in b_node. */
 	mas_store_b_node(&l_wr_mas, &b_node, l_mas.end);
-	/* Copy r_mas into b_node. */
-	if (r_mas.offset <= r_mas.end)
+	/* Copy r_mas into b_node if there is anything to copy. */
+	if (r_mas.max > r_mas.last)
 		mas_mab_cp(&r_mas, r_mas.offset, r_mas.end,
 			   &b_node, b_node.b_end + 1);
 	else
@@ -3877,10 +3482,8 @@ static inline int mas_wr_spanning_store(struct ma_wr_state *wr_mas)
  * @wr_mas: The maple write state
  *
  * Attempts to reuse the node, but may allocate.
- *
- * Return: True if stored, false otherwise
  */
-static inline bool mas_wr_node_store(struct ma_wr_state *wr_mas,
+static inline void mas_wr_node_store(struct ma_wr_state *wr_mas,
 				     unsigned char new_end)
 {
 	struct ma_state *mas = wr_mas->mas;
@@ -3890,23 +3493,13 @@ static inline bool mas_wr_node_store(struct ma_wr_state *wr_mas,
 	struct maple_node reuse, *newnode;
 	unsigned char copy_size, node_pivots = mt_pivots[wr_mas->type];
 	bool in_rcu = mt_in_rcu(mas->tree);
-
-	/* Check if there is enough data. The room is enough. */
-	if (!mte_is_root(mas->node) && (new_end <= mt_min_slots[wr_mas->type]) &&
-	    !(mas->mas_flags & MA_STATE_BULK))
-		return false;
+	unsigned char height = mas_mt_height(mas);
 
 	if (mas->last == wr_mas->end_piv)
 		offset_end++; /* don't copy this offset */
-	else if (unlikely(wr_mas->r_max == ULONG_MAX))
-		mas_bulk_rebalance(mas, mas->end, wr_mas->type);
 
 	/* set up node. */
 	if (in_rcu) {
-		mas_node_count(mas, 1);
-		if (mas_is_err(mas))
-			return false;
-
 		newnode = mas_pop_node(mas);
 	} else {
 		memset(&reuse, 0, sizeof(struct maple_node));
@@ -3955,23 +3548,21 @@ done:
 		struct maple_enode *old_enode = mas->node;
 
 		mas->node = mt_mk_node(newnode, wr_mas->type);
-		mas_replace_node(mas, old_enode);
+		mas_replace_node(mas, old_enode, height);
 	} else {
 		memcpy(wr_mas->node, newnode, sizeof(struct maple_node));
 	}
 	trace_ma_write(__func__, mas, 0, wr_mas->entry);
 	mas_update_gap(mas);
 	mas->end = new_end;
-	return true;
+	return;
 }
 
 /*
  * mas_wr_slot_store: Attempt to store a value in a slot.
  * @wr_mas: the maple write state
- *
- * Return: True if stored, false otherwise
  */
-static inline bool mas_wr_slot_store(struct ma_wr_state *wr_mas)
+static inline void mas_wr_slot_store(struct ma_wr_state *wr_mas)
 {
 	struct ma_state *mas = wr_mas->mas;
 	unsigned char offset = mas->offset;
@@ -3992,7 +3583,8 @@ static inline bool mas_wr_slot_store(struct ma_wr_state *wr_mas)
 			wr_mas->pivots[offset] = mas->index - 1;
 			mas->offset++; /* Keep mas accurate. */
 		}
-	} else if (!mt_in_rcu(mas->tree)) {
+	} else {
+		WARN_ON_ONCE(mt_in_rcu(mas->tree));
 		/*
 		 * Expand the range, only partially overwriting the previous and
 		 * next ranges
@@ -4002,8 +3594,6 @@ static inline bool mas_wr_slot_store(struct ma_wr_state *wr_mas)
 		wr_mas->pivots[offset] = mas->index - 1;
 		wr_mas->pivots[offset + 1] = mas->last;
 		mas->offset++; /* Keep mas accurate. */
-	} else {
-		return false;
 	}
 
 	trace_ma_write(__func__, mas, 0, wr_mas->entry);
@@ -4014,7 +3604,7 @@ static inline bool mas_wr_slot_store(struct ma_wr_state *wr_mas)
 	if (!wr_mas->entry || gap)
 		mas_update_gap(mas);
 
-	return true;
+	return;
 }
 
 static inline void mas_wr_extend_null(struct ma_wr_state *wr_mas)
@@ -4063,9 +3653,6 @@ static inline void mas_wr_end_piv(struct ma_wr_state *wr_mas)
 		wr_mas->end_piv = wr_mas->pivots[wr_mas->offset_end];
 	else
 		wr_mas->end_piv = wr_mas->mas->max;
-
-	if (!wr_mas->entry)
-		mas_wr_extend_null(wr_mas);
 }
 
 static inline unsigned char mas_wr_new_end(struct ma_wr_state *wr_mas)
@@ -4091,23 +3678,13 @@ static inline unsigned char mas_wr_new_end(struct ma_wr_state *wr_mas)
  * This is currently unsafe in rcu mode since the end of the node may be cached
  * by readers while the node contents may be updated which could result in
  * inaccurate information.
- *
- * Return: True if appended, false otherwise
  */
-static inline bool mas_wr_append(struct ma_wr_state *wr_mas,
+static inline void mas_wr_append(struct ma_wr_state *wr_mas,
 		unsigned char new_end)
 {
-	struct ma_state *mas;
+	struct ma_state *mas = wr_mas->mas;
 	void __rcu **slots;
-	unsigned char end;
-
-	mas = wr_mas->mas;
-	if (mt_in_rcu(mas->tree))
-		return false;
-
-	end = mas->end;
-	if (mas->offset != end)
-		return false;
+	unsigned char end = mas->end;
 
 	if (new_end < mt_pivots[wr_mas->type]) {
 		wr_mas->pivots[new_end] = wr_mas->pivots[end];
@@ -4141,7 +3718,7 @@ static inline bool mas_wr_append(struct ma_wr_state *wr_mas,
 
 	mas->end = new_end;
 	trace_ma_write(__func__, mas, new_end, wr_mas->entry);
-	return  true;
+	return;
 }
 
 /*
@@ -4157,79 +3734,220 @@ static void mas_wr_bnode(struct ma_wr_state *wr_mas)
 	trace_ma_write(__func__, wr_mas->mas, 0, wr_mas->entry);
 	memset(&b_node, 0, sizeof(struct maple_big_node));
 	mas_store_b_node(wr_mas, &b_node, wr_mas->offset_end);
-	mas_commit_b_node(wr_mas, &b_node, wr_mas->mas->end);
-}
-
-static inline void mas_wr_modify(struct ma_wr_state *wr_mas)
-{
-	struct ma_state *mas = wr_mas->mas;
-	unsigned char new_end;
-
-	/* Direct replacement */
-	if (wr_mas->r_min == mas->index && wr_mas->r_max == mas->last) {
-		rcu_assign_pointer(wr_mas->slots[mas->offset], wr_mas->entry);
-		if (!!wr_mas->entry ^ !!wr_mas->content)
-			mas_update_gap(mas);
-		return;
-	}
-
-	/*
-	 * new_end exceeds the size of the maple node and cannot enter the fast
-	 * path.
-	 */
-	new_end = mas_wr_new_end(wr_mas);
-	if (new_end >= mt_slots[wr_mas->type])
-		goto slow_path;
-
-	/* Attempt to append */
-	if (mas_wr_append(wr_mas, new_end))
-		return;
-
-	if (new_end == mas->end && mas_wr_slot_store(wr_mas))
-		return;
-
-	if (mas_wr_node_store(wr_mas, new_end))
-		return;
-
-	if (mas_is_err(mas))
-		return;
-
-slow_path:
-	mas_wr_bnode(wr_mas);
+	mas_commit_b_node(wr_mas, &b_node);
 }
 
 /*
  * mas_wr_store_entry() - Internal call to store a value
- * @mas: The maple state
- * @entry: The entry to store.
- *
- * Return: The contents that was stored at the index.
+ * @wr_mas: The maple write state
  */
-static inline void *mas_wr_store_entry(struct ma_wr_state *wr_mas)
+static inline void mas_wr_store_entry(struct ma_wr_state *wr_mas)
+{
+	struct ma_state *mas = wr_mas->mas;
+	unsigned char new_end = mas_wr_new_end(wr_mas);
+
+	switch (mas->store_type) {
+	case wr_exact_fit:
+		rcu_assign_pointer(wr_mas->slots[mas->offset], wr_mas->entry);
+		if (!!wr_mas->entry ^ !!wr_mas->content)
+			mas_update_gap(mas);
+		break;
+	case wr_append:
+		mas_wr_append(wr_mas, new_end);
+		break;
+	case wr_slot_store:
+		mas_wr_slot_store(wr_mas);
+		break;
+	case wr_node_store:
+		mas_wr_node_store(wr_mas, new_end);
+		break;
+	case wr_spanning_store:
+		mas_wr_spanning_store(wr_mas);
+		break;
+	case wr_split_store:
+	case wr_rebalance:
+		mas_wr_bnode(wr_mas);
+		break;
+	case wr_new_root:
+		mas_new_root(mas, wr_mas->entry);
+		break;
+	case wr_store_root:
+		mas_store_root(mas, wr_mas->entry);
+		break;
+	case wr_invalid:
+		MT_BUG_ON(mas->tree, 1);
+	}
+
+	return;
+}
+
+static inline void mas_wr_prealloc_setup(struct ma_wr_state *wr_mas)
 {
 	struct ma_state *mas = wr_mas->mas;
 
-	wr_mas->content = mas_start(mas);
-	if (mas_is_none(mas) || mas_is_ptr(mas)) {
-		mas_store_root(mas, wr_mas->entry);
-		return wr_mas->content;
+	if (!mas_is_active(mas)) {
+		if (mas_is_start(mas))
+			goto set_content;
+
+		if (unlikely(mas_is_paused(mas)))
+			goto reset;
+
+		if (unlikely(mas_is_none(mas)))
+			goto reset;
+
+		if (unlikely(mas_is_overflow(mas)))
+			goto reset;
+
+		if (unlikely(mas_is_underflow(mas)))
+			goto reset;
 	}
 
-	if (unlikely(!mas_wr_walk(wr_mas))) {
-		mas_wr_spanning_store(wr_mas);
-		return wr_mas->content;
+	/*
+	 * A less strict version of mas_is_span_wr() where we allow spanning
+	 * writes within this node.  This is to stop partial walks in
+	 * mas_prealloc() from being reset.
+	 */
+	if (mas->last > mas->max)
+		goto reset;
+
+	if (wr_mas->entry)
+		goto set_content;
+
+	if (mte_is_leaf(mas->node) && mas->last == mas->max)
+		goto reset;
+
+	goto set_content;
+
+reset:
+	mas_reset(mas);
+set_content:
+	wr_mas->content = mas_start(mas);
+}
+
+/**
+ * mas_prealloc_calc() - Calculate number of nodes needed for a
+ * given store oepration
+ * @wr_mas: The maple write state
+ * @entry: The entry to store into the tree
+ *
+ * Return: Number of nodes required for preallocation.
+ */
+static inline void mas_prealloc_calc(struct ma_wr_state *wr_mas, void *entry)
+{
+	struct ma_state *mas = wr_mas->mas;
+	unsigned char height = mas_mt_height(mas);
+	int ret = height * 3 + 1;
+	unsigned char delta = height - wr_mas->vacant_height;
+
+	switch (mas->store_type) {
+	case wr_exact_fit:
+	case wr_append:
+	case wr_slot_store:
+		ret = 0;
+		break;
+	case wr_spanning_store:
+		if (wr_mas->sufficient_height < wr_mas->vacant_height)
+			ret = (height - wr_mas->sufficient_height) * 3 + 1;
+		else
+			ret = delta * 3 + 1;
+		break;
+	case wr_split_store:
+		ret = delta * 2 + 1;
+		break;
+	case wr_rebalance:
+		if (wr_mas->sufficient_height < wr_mas->vacant_height)
+			ret = (height - wr_mas->sufficient_height) * 2 + 1;
+		else
+			ret = delta * 2 + 1;
+		break;
+	case wr_node_store:
+		ret = mt_in_rcu(mas->tree) ? 1 : 0;
+		break;
+	case wr_new_root:
+		ret = 1;
+		break;
+	case wr_store_root:
+		if (likely((mas->last != 0) || (mas->index != 0)))
+			ret = 1;
+		else if (((unsigned long) (entry) & 3) == 2)
+			ret = 1;
+		else
+			ret = 0;
+		break;
+	case wr_invalid:
+		WARN_ON_ONCE(1);
 	}
+
+	mas->node_request = ret;
+}
+
+/*
+ * mas_wr_store_type() - Determine the store type for a given
+ * store operation.
+ * @wr_mas: The maple write state
+ *
+ * Return: the type of store needed for the operation
+ */
+static inline enum store_type mas_wr_store_type(struct ma_wr_state *wr_mas)
+{
+	struct ma_state *mas = wr_mas->mas;
+	unsigned char new_end;
+
+	if (unlikely(mas_is_none(mas) || mas_is_ptr(mas)))
+		return wr_store_root;
+
+	if (unlikely(!mas_wr_walk(wr_mas)))
+		return wr_spanning_store;
 
 	/* At this point, we are at the leaf node that needs to be altered. */
 	mas_wr_end_piv(wr_mas);
-	/* New root for a single pointer */
-	if (unlikely(!mas->index && mas->last == ULONG_MAX)) {
-		mas_new_root(mas, wr_mas->entry);
-		return wr_mas->content;
+	if (!wr_mas->entry)
+		mas_wr_extend_null(wr_mas);
+
+	if ((wr_mas->r_min == mas->index) && (wr_mas->r_max == mas->last))
+		return wr_exact_fit;
+
+	if (unlikely(!mas->index && mas->last == ULONG_MAX))
+		return wr_new_root;
+
+	new_end = mas_wr_new_end(wr_mas);
+	/* Potential spanning rebalance collapsing a node */
+	if (new_end < mt_min_slots[wr_mas->type]) {
+		if (!mte_is_root(mas->node))
+			return  wr_rebalance;
+		return wr_node_store;
 	}
 
-	mas_wr_modify(wr_mas);
-	return wr_mas->content;
+	if (new_end >= mt_slots[wr_mas->type])
+		return wr_split_store;
+
+	if (!mt_in_rcu(mas->tree) && (mas->offset == mas->end))
+		return wr_append;
+
+	if ((new_end == mas->end) && (!mt_in_rcu(mas->tree) ||
+		(wr_mas->offset_end - mas->offset == 1)))
+		return wr_slot_store;
+
+	return wr_node_store;
+}
+
+/**
+ * mas_wr_preallocate() - Preallocate enough nodes for a store operation
+ * @wr_mas: The maple write state
+ * @entry: The entry that will be stored
+ *
+ */
+static inline void mas_wr_preallocate(struct ma_wr_state *wr_mas, void *entry)
+{
+	struct ma_state *mas = wr_mas->mas;
+
+	mas_wr_prealloc_setup(wr_mas);
+	mas->store_type = mas_wr_store_type(wr_mas);
+	mas_prealloc_calc(wr_mas, entry);
+	if (!mas->node_request)
+		return;
+
+	mas_alloc_nodes(mas, GFP_NOWAIT);
 }
 
 /**
@@ -4262,26 +3980,24 @@ static inline void *mas_insert(struct ma_state *mas, void *entry)
 	if (wr_mas.content)
 		goto exists;
 
-	if (mas_is_none(mas) || mas_is_ptr(mas)) {
-		mas_store_root(mas, entry);
+	mas_wr_preallocate(&wr_mas, entry);
+	if (mas_is_err(mas))
 		return NULL;
-	}
 
 	/* spanning writes always overwrite something */
-	if (!mas_wr_walk(&wr_mas))
+	if (mas->store_type == wr_spanning_store)
 		goto exists;
 
 	/* At this point, we are at the leaf node that needs to be altered. */
-	wr_mas.offset_end = mas->offset;
-	wr_mas.end_piv = wr_mas.r_max;
+	if (mas->store_type != wr_new_root && mas->store_type != wr_store_root) {
+		wr_mas.offset_end = mas->offset;
+		wr_mas.end_piv = wr_mas.r_max;
 
-	if (wr_mas.content || (mas->last > wr_mas.r_max))
-		goto exists;
+		if (wr_mas.content || (mas->last > wr_mas.r_max))
+			goto exists;
+	}
 
-	if (!entry)
-		return NULL;
-
-	mas_wr_modify(&wr_mas);
+	mas_wr_store_entry(&wr_mas);
 	return wr_mas.content;
 
 exists:
@@ -4289,6 +4005,58 @@ exists:
 	return wr_mas.content;
 
 }
+
+/**
+ * mas_alloc_cyclic() - Internal call to find somewhere to store an entry
+ * @mas: The maple state.
+ * @startp: Pointer to ID.
+ * @range_lo: Lower bound of range to search.
+ * @range_hi: Upper bound of range to search.
+ * @entry: The entry to store.
+ * @next: Pointer to next ID to allocate.
+ * @gfp: The GFP_FLAGS to use for allocations.
+ *
+ * Return: 0 if the allocation succeeded without wrapping, 1 if the
+ * allocation succeeded after wrapping, or -EBUSY if there are no
+ * free entries.
+ */
+int mas_alloc_cyclic(struct ma_state *mas, unsigned long *startp,
+		void *entry, unsigned long range_lo, unsigned long range_hi,
+		unsigned long *next, gfp_t gfp)
+{
+	unsigned long min = range_lo;
+	int ret = 0;
+
+	range_lo = max(min, *next);
+	ret = mas_empty_area(mas, range_lo, range_hi, 1);
+	if ((mas->tree->ma_flags & MT_FLAGS_ALLOC_WRAPPED) && ret == 0) {
+		mas->tree->ma_flags &= ~MT_FLAGS_ALLOC_WRAPPED;
+		ret = 1;
+	}
+	if (ret < 0 && range_lo > min) {
+		mas_reset(mas);
+		ret = mas_empty_area(mas, min, range_hi, 1);
+		if (ret == 0)
+			ret = 1;
+	}
+	if (ret < 0)
+		return ret;
+
+	do {
+		mas_insert(mas, entry);
+	} while (mas_nomem(mas, gfp));
+	if (mas_is_err(mas))
+		return xa_err(mas->node);
+
+	*startp = mas->index;
+	*next = *startp + 1;
+	if (*next == 0)
+		mas->tree->ma_flags |= MT_FLAGS_ALLOC_WRAPPED;
+
+	mas_destroy(mas);
+	return ret;
+}
+EXPORT_SYMBOL(mas_alloc_cyclic);
 
 static __always_inline void mas_rewalk(struct ma_state *mas, unsigned long index)
 {
@@ -4395,9 +4163,8 @@ no_entry:
  * mas_prev_slot() - Get the entry in the previous slot
  *
  * @mas: The maple state
- * @max: The minimum starting range
+ * @min: The minimum starting range
  * @empty: Can be empty
- * @set_underflow: Set the @mas->node to underflow state on limit.
  *
  * Return: The entry in the previous slot which is possibly NULL
  */
@@ -4457,15 +4224,12 @@ again:
 	if (unlikely(mas_rewalk_if_dead(mas, node, save_point)))
 		goto retry;
 
-
 	if (likely(entry))
 		return entry;
 
 	if (!empty) {
-		if (mas->index <= min) {
-			mas->status = ma_underflow;
-			return NULL;
-		}
+		if (mas->index <= min)
+			goto underflow;
 
 		goto again;
 	}
@@ -4480,6 +4244,7 @@ underflow:
 /*
  * mas_next_node() - Get the next node at the same level in the tree.
  * @mas: The maple state
+ * @node: The maple node
  * @max: The maximum pivot value to check.
  *
  * The next value will be mas->node[mas->offset] or the status will have
@@ -4570,8 +4335,6 @@ overflow:
  * @mas: The maple state
  * @max: The maximum starting range
  * @empty: Can be empty
- * @set_overflow: Should @mas->node be set to overflow when the limit is
- * reached.
  *
  * Return: The entry in the next slot which is possibly NULL
  */
@@ -4657,29 +4420,6 @@ again:
 	}
 
 	return entry;
-}
-
-/*
- * mas_next_entry() - Internal function to get the next entry.
- * @mas: The maple state
- * @limit: The maximum range start.
- *
- * Set the @mas->node to the next entry and the range_start to
- * the beginning value for the entry.  Does not check beyond @limit.
- * Sets @mas->index and @mas->last to the range, Does not update @mas->index and
- * @mas->last on overflow.
- * Restarts on dead nodes.
- *
- * Return: the next entry or %NULL.
- */
-static inline void *mas_next_entry(struct ma_state *mas, unsigned long limit)
-{
-	if (mas->last >= limit) {
-		mas->status = ma_overflow;
-		return NULL;
-	}
-
-	return mas_next_slot(mas, limit, false);
 }
 
 /*
@@ -4817,15 +4557,14 @@ static inline bool mas_anode_descend(struct ma_state *mas, unsigned long size)
 		if (gap >= size) {
 			if (ma_is_leaf(type)) {
 				found = true;
-				goto done;
-			}
-			if (mas->index <= pivot) {
-				mas->node = mas_slot(mas, slots, offset);
-				mas->min = min;
-				mas->max = pivot;
-				offset = 0;
 				break;
 			}
+
+			mas->node = mas_slot(mas, slots, offset);
+			mas->min = min;
+			mas->max = pivot;
+			offset = 0;
+			break;
 		}
 next_slot:
 		min = pivot + 1;
@@ -4835,9 +4574,6 @@ next_slot:
 		}
 	}
 
-	if (mte_is_root(mas->node))
-		found = true;
-done:
 	mas->offset = offset;
 	return found;
 }
@@ -4855,7 +4591,7 @@ void *mas_walk(struct ma_state *mas)
 {
 	void *entry;
 
-	if (!mas_is_active(mas) || !mas_is_start(mas))
+	if (!mas_is_active(mas) && !mas_is_start(mas))
 		mas->status = ma_start;
 retry:
 	entry = mas_state_walk(mas);
@@ -4941,8 +4677,8 @@ static inline void mas_awalk(struct ma_state *mas, unsigned long size)
 	 * There are 4 options:
 	 * go to child (descend)
 	 * go back to parent (ascend)
-	 * no gap found. (return, slot == MAPLE_NODE_SLOTS)
-	 * found the gap. (return, slot != MAPLE_NODE_SLOTS)
+	 * no gap found. (return, error == -EBUSY)
+	 * found the gap. (return)
 	 */
 	while (!mas_is_err(mas) && !mas_anode_descend(mas, size)) {
 		if (last == mas->node)
@@ -5027,9 +4763,6 @@ int mas_empty_area(struct ma_state *mas, unsigned long min,
 		return xa_err(mas->node);
 
 	offset = mas->offset;
-	if (unlikely(offset == MAPLE_NODE_SLOTS))
-		return -EBUSY;
-
 	node = mas_mn(mas);
 	mt = mte_node_type(mas->node);
 	pivots = ma_pivots(node, mt);
@@ -5061,18 +4794,18 @@ int mas_empty_area_rev(struct ma_state *mas, unsigned long min,
 	if (size == 0 || max - min < size - 1)
 		return -EINVAL;
 
-	if (mas_is_start(mas)) {
+	if (mas_is_start(mas))
 		mas_start(mas);
-		mas->offset = mas_data_end(mas);
-	} else if (mas->offset >= 2) {
-		mas->offset -= 2;
-	} else if (!mas_rewind_node(mas)) {
+	else if ((mas->offset < 2) && (!mas_rewind_node(mas)))
 		return -EBUSY;
-	}
 
-	/* Empty set. */
-	if (mas_is_none(mas) || mas_is_ptr(mas))
+	if (unlikely(mas_is_none(mas) || mas_is_ptr(mas)))
 		return mas_sparse_area(mas, min, max, size, false);
+	else if (mas->offset >= 2)
+		mas->offset -= 2;
+	else
+		mas->offset = mas_data_end(mas);
+
 
 	/* The start of the window can only be within these values. */
 	mas->index = min;
@@ -5105,9 +4838,9 @@ EXPORT_SYMBOL_GPL(mas_empty_area_rev);
 
 /*
  * mte_dead_leaves() - Mark all leaves of a node as dead.
- * @mas: The maple state
+ * @enode: the encoded node
+ * @mt: the maple tree
  * @slots: Pointer to the slot array
- * @type: The maple node type
  *
  * Must hold the write lock.
  *
@@ -5206,7 +4939,7 @@ static void mt_free_walk(struct rcu_head *head)
 	mt_free_bulk(node->slot_len, slots);
 
 free_leaf:
-	mt_free_rcu(&node->rcu);
+	kfree(node);
 }
 
 static inline void __rcu **mte_destroy_descend(struct maple_enode **enode,
@@ -5247,6 +4980,7 @@ static void mt_destroy_walk(struct maple_enode *enode, struct maple_tree *mt,
 	struct maple_enode *start;
 
 	if (mte_is_leaf(enode)) {
+		mte_set_node_dead(enode);
 		node->type = mte_node_type(enode);
 		goto free_leaf;
 	}
@@ -5289,7 +5023,7 @@ next:
 
 free_leaf:
 	if (free)
-		mt_free_rcu(&node->rcu);
+		kfree(node);
 	else
 		mt_clear_meta(mt, node, node->type);
 }
@@ -5313,47 +5047,6 @@ static inline void mte_destroy_walk(struct maple_enode *enode,
 		mt_destroy_walk(enode, mt, true);
 	}
 }
-
-static void mas_wr_store_setup(struct ma_wr_state *wr_mas)
-{
-	if (!mas_is_active(wr_mas->mas)) {
-		if (mas_is_start(wr_mas->mas))
-			return;
-
-		if (unlikely(mas_is_paused(wr_mas->mas)))
-			goto reset;
-
-		if (unlikely(mas_is_none(wr_mas->mas)))
-			goto reset;
-
-		if (unlikely(mas_is_overflow(wr_mas->mas)))
-			goto reset;
-
-		if (unlikely(mas_is_underflow(wr_mas->mas)))
-			goto reset;
-	}
-
-	/*
-	 * A less strict version of mas_is_span_wr() where we allow spanning
-	 * writes within this node.  This is to stop partial walks in
-	 * mas_prealloc() from being reset.
-	 */
-	if (wr_mas->mas->last > wr_mas->mas->max)
-		goto reset;
-
-	if (wr_mas->entry)
-		return;
-
-	if (mte_is_leaf(wr_mas->mas->node) &&
-	    wr_mas->mas->last == wr_mas->mas->max)
-		goto reset;
-
-	return;
-
-reset:
-	mas_reset(wr_mas->mas);
-}
-
 /* Interface */
 
 /**
@@ -5362,8 +5055,6 @@ reset:
  * @entry: The entry to store.
  *
  * The @mas->index and @mas->last is used to set the range for the @entry.
- * Note: The @mas should have pre-allocated entries to ensure there is memory to
- * store the entry.  Please see mas_expected_entries()/mas_destroy() for more details.
  *
  * Return: the first entry between mas->index and mas->last or %NULL.
  */
@@ -5374,7 +5065,8 @@ void *mas_store(struct ma_state *mas, void *entry)
 	trace_ma_write(__func__, mas, 0, entry);
 #ifdef CONFIG_DEBUG_MAPLE_TREE
 	if (MAS_WARN_ON(mas, mas->index > mas->last))
-		pr_err("Error %lX > %lX %p\n", mas->index, mas->last, entry);
+		pr_err("Error %lX > %lX " PTR_FMT "\n", mas->index, mas->last,
+		       entry);
 
 	if (mas->index > mas->last) {
 		mas_set_err(mas, -EINVAL);
@@ -5389,8 +5081,25 @@ void *mas_store(struct ma_state *mas, void *entry)
 	 * want to examine what happens if a single store operation was to
 	 * overwrite multiple entries within a self-balancing B-Tree.
 	 */
-	mas_wr_store_setup(&wr_mas);
+	mas_wr_prealloc_setup(&wr_mas);
+	mas->store_type = mas_wr_store_type(&wr_mas);
+	if (mas->mas_flags & MA_STATE_PREALLOC) {
+		mas_wr_store_entry(&wr_mas);
+		MAS_WR_BUG_ON(&wr_mas, mas_is_err(mas));
+		return wr_mas.content;
+	}
+
+	mas_prealloc_calc(&wr_mas, entry);
+	if (!mas->node_request)
+		goto store;
+
+	mas_alloc_nodes(mas, GFP_NOWAIT);
+	if (mas_is_err(mas))
+		return NULL;
+
+store:
 	mas_wr_store_entry(&wr_mas);
+	mas_destroy(mas);
 	return wr_mas.content;
 }
 EXPORT_SYMBOL_GPL(mas_store);
@@ -5406,19 +5115,28 @@ EXPORT_SYMBOL_GPL(mas_store);
  */
 int mas_store_gfp(struct ma_state *mas, void *entry, gfp_t gfp)
 {
+	unsigned long index = mas->index;
+	unsigned long last = mas->last;
 	MA_WR_STATE(wr_mas, mas, entry);
+	int ret = 0;
 
-	mas_wr_store_setup(&wr_mas);
-	trace_ma_write(__func__, mas, 0, entry);
 retry:
-	mas_wr_store_entry(&wr_mas);
-	if (unlikely(mas_nomem(mas, gfp)))
+	mas_wr_preallocate(&wr_mas, entry);
+	if (unlikely(mas_nomem(mas, gfp))) {
+		if (!entry)
+			__mas_set_range(mas, index, last);
 		goto retry;
+	}
 
-	if (unlikely(mas_is_err(mas)))
-		return xa_err(mas->node);
+	if (mas_is_err(mas)) {
+		ret = xa_err(mas->node);
+		goto out;
+	}
 
-	return 0;
+	mas_wr_store_entry(&wr_mas);
+out:
+	mas_destroy(mas);
+	return ret;
 }
 EXPORT_SYMBOL_GPL(mas_store_gfp);
 
@@ -5432,7 +5150,19 @@ void mas_store_prealloc(struct ma_state *mas, void *entry)
 {
 	MA_WR_STATE(wr_mas, mas, entry);
 
-	mas_wr_store_setup(&wr_mas);
+	if (mas->store_type == wr_store_root) {
+		mas_wr_prealloc_setup(&wr_mas);
+		goto store;
+	}
+
+	mas_wr_walk_descend(&wr_mas);
+	if (mas->store_type != wr_spanning_store) {
+		/* set wr_mas->content to current slot */
+		wr_mas.content = mas_slot_locked(mas, wr_mas.slots, mas->offset);
+		mas_wr_end_piv(&wr_mas);
+	}
+
+store:
 	trace_ma_write(__func__, mas, 0, entry);
 	mas_wr_store_entry(&wr_mas);
 	MAS_WR_BUG_ON(&wr_mas, mas_is_err(mas));
@@ -5451,71 +5181,27 @@ EXPORT_SYMBOL_GPL(mas_store_prealloc);
 int mas_preallocate(struct ma_state *mas, void *entry, gfp_t gfp)
 {
 	MA_WR_STATE(wr_mas, mas, entry);
-	unsigned char node_size;
-	int request = 1;
-	int ret;
 
+	mas_wr_prealloc_setup(&wr_mas);
+	mas->store_type = mas_wr_store_type(&wr_mas);
+	mas_prealloc_calc(&wr_mas, entry);
+	if (!mas->node_request)
+		goto set_flag;
 
-	if (unlikely(!mas->index && mas->last == ULONG_MAX))
-		goto ask_now;
+	mas->mas_flags &= ~MA_STATE_PREALLOC;
+	mas_alloc_nodes(mas, gfp);
+	if (mas_is_err(mas)) {
+		int ret = xa_err(mas->node);
 
-	mas_wr_store_setup(&wr_mas);
-	wr_mas.content = mas_start(mas);
-	/* Root expand */
-	if (unlikely(mas_is_none(mas) || mas_is_ptr(mas)))
-		goto ask_now;
-
-	if (unlikely(!mas_wr_walk(&wr_mas))) {
-		/* Spanning store, use worst case for now */
-		request = 1 + mas_mt_height(mas) * 3;
-		goto ask_now;
+		mas->node_request = 0;
+		mas_destroy(mas);
+		mas_reset(mas);
+		return ret;
 	}
 
-	/* At this point, we are at the leaf node that needs to be altered. */
-	/* Exact fit, no nodes needed. */
-	if (wr_mas.r_min == mas->index && wr_mas.r_max == mas->last)
-		return 0;
-
-	mas_wr_end_piv(&wr_mas);
-	node_size = mas_wr_new_end(&wr_mas);
-
-	/* Slot store, does not require additional nodes */
-	if (node_size == mas->end) {
-		/* reuse node */
-		if (!mt_in_rcu(mas->tree))
-			return 0;
-		/* shifting boundary */
-		if (wr_mas.offset_end - mas->offset == 1)
-			return 0;
-	}
-
-	if (node_size >= mt_slots[wr_mas.type]) {
-		/* Split, worst case for now. */
-		request = 1 + mas_mt_height(mas) * 2;
-		goto ask_now;
-	}
-
-	/* New root needs a single node */
-	if (unlikely(mte_is_root(mas->node)))
-		goto ask_now;
-
-	/* Potential spanning rebalance collapsing a node, use worst-case */
-	if (node_size  - 1 <= mt_min_slots[wr_mas.type])
-		request = mas_mt_height(mas) * 2 - 1;
-
-	/* node store, slot store needs one node */
-ask_now:
-	mas_node_count_gfp(mas, request, gfp);
+set_flag:
 	mas->mas_flags |= MA_STATE_PREALLOC;
-	if (likely(!mas_is_err(mas)))
-		return 0;
-
-	mas_set_alloc_req(mas, 0);
-	ret = xa_err(mas->node);
-	mas_reset(mas);
-	mas_destroy(mas);
-	mas_reset(mas);
-	return ret;
+	return 0;
 }
 EXPORT_SYMBOL_GPL(mas_preallocate);
 
@@ -5529,107 +5215,21 @@ EXPORT_SYMBOL_GPL(mas_preallocate);
  */
 void mas_destroy(struct ma_state *mas)
 {
-	struct maple_alloc *node;
-	unsigned long total;
-
-	/*
-	 * When using mas_for_each() to insert an expected number of elements,
-	 * it is possible that the number inserted is less than the expected
-	 * number.  To fix an invalid final node, a check is performed here to
-	 * rebalance the previous node with the final node.
-	 */
-	if (mas->mas_flags & MA_STATE_REBALANCE) {
-		unsigned char end;
-
-		mas_start(mas);
-		mtree_range_walk(mas);
-		end = mas->end + 1;
-		if (end < mt_min_slot_count(mas->node) - 1)
-			mas_destroy_rebalance(mas, end);
-
-		mas->mas_flags &= ~MA_STATE_REBALANCE;
-	}
-	mas->mas_flags &= ~(MA_STATE_BULK|MA_STATE_PREALLOC);
-
-	total = mas_allocated(mas);
-	while (total) {
-		node = mas->alloc;
-		mas->alloc = node->slot[0];
-		if (node->node_count > 1) {
-			size_t count = node->node_count - 1;
-
-			mt_free_bulk(count, (void __rcu **)&node->slot[1]);
-			total -= count;
-		}
-		mt_free_one(ma_mnode_ptr(node));
-		total--;
-	}
-
-	mas->alloc = NULL;
+	mas->mas_flags &= ~MA_STATE_PREALLOC;
+	mas_empty_nodes(mas);
 }
 EXPORT_SYMBOL_GPL(mas_destroy);
 
-/*
- * mas_expected_entries() - Set the expected number of entries that will be inserted.
- * @mas: The maple state
- * @nr_entries: The number of expected entries.
- *
- * This will attempt to pre-allocate enough nodes to store the expected number
- * of entries.  The allocations will occur using the bulk allocator interface
- * for speed.  Please call mas_destroy() on the @mas after inserting the entries
- * to ensure any unused nodes are freed.
- *
- * Return: 0 on success, -ENOMEM if memory could not be allocated.
- */
-int mas_expected_entries(struct ma_state *mas, unsigned long nr_entries)
+static void mas_may_activate(struct ma_state *mas)
 {
-	int nonleaf_cap = MAPLE_ARANGE64_SLOTS - 2;
-	struct maple_enode *enode = mas->node;
-	int nr_nodes;
-	int ret;
-
-	/*
-	 * Sometimes it is necessary to duplicate a tree to a new tree, such as
-	 * forking a process and duplicating the VMAs from one tree to a new
-	 * tree.  When such a situation arises, it is known that the new tree is
-	 * not going to be used until the entire tree is populated.  For
-	 * performance reasons, it is best to use a bulk load with RCU disabled.
-	 * This allows for optimistic splitting that favours the left and reuse
-	 * of nodes during the operation.
-	 */
-
-	/* Optimize splitting for bulk insert in-order */
-	mas->mas_flags |= MA_STATE_BULK;
-
-	/*
-	 * Avoid overflow, assume a gap between each entry and a trailing null.
-	 * If this is wrong, it just means allocation can happen during
-	 * insertion of entries.
-	 */
-	nr_nodes = max(nr_entries, nr_entries * 2 + 1);
-	if (!mt_is_alloc(mas->tree))
-		nonleaf_cap = MAPLE_RANGE64_SLOTS - 2;
-
-	/* Leaves; reduce slots to keep space for expansion */
-	nr_nodes = DIV_ROUND_UP(nr_nodes, MAPLE_RANGE64_SLOTS - 2);
-	/* Internal nodes */
-	nr_nodes += DIV_ROUND_UP(nr_nodes, nonleaf_cap);
-	/* Add working room for split (2 nodes) + new parents */
-	mas_node_count_gfp(mas, nr_nodes + 3, GFP_KERNEL);
-
-	/* Detect if allocations run out */
-	mas->mas_flags |= MA_STATE_PREALLOC;
-
-	if (!mas_is_err(mas))
-		return 0;
-
-	ret = xa_err(mas->node);
-	mas->node = enode;
-	mas_destroy(mas);
-	return ret;
-
+	if (!mas->node) {
+		mas->status = ma_start;
+	} else if (mas->index > mas->max || mas->index < mas->min) {
+		mas->status = ma_start;
+	} else {
+		mas->status = ma_active;
+	}
 }
-EXPORT_SYMBOL_GPL(mas_expected_entries);
 
 static bool mas_next_setup(struct ma_state *mas, unsigned long max,
 		void **entry)
@@ -5654,11 +5254,11 @@ static bool mas_next_setup(struct ma_state *mas, unsigned long max,
 		break;
 	case ma_overflow:
 		/* Overflowed before, but the max changed */
-		mas->status = ma_active;
+		mas_may_activate(mas);
 		break;
 	case ma_underflow:
 		/* The user expects the mas to be one before where it is */
-		mas->status = ma_active;
+		mas_may_activate(mas);
 		*entry = mas_walk(mas);
 		if (*entry)
 			return true;
@@ -5779,11 +5379,11 @@ static bool mas_prev_setup(struct ma_state *mas, unsigned long min, void **entry
 		break;
 	case ma_underflow:
 		/* underflowed before but the min changed */
-		mas->status = ma_active;
+		mas_may_activate(mas);
 		break;
 	case ma_overflow:
 		/* User expects mas to be one after where it is */
-		mas->status = ma_active;
+		mas_may_activate(mas);
 		*entry = mas_walk(mas);
 		if (*entry)
 			return true;
@@ -5948,7 +5548,7 @@ static __always_inline bool mas_find_setup(struct ma_state *mas, unsigned long m
 			return true;
 		}
 
-		mas->status = ma_active;
+		mas_may_activate(mas);
 		*entry = mas_walk(mas);
 		if (*entry)
 			return true;
@@ -5957,7 +5557,7 @@ static __always_inline bool mas_find_setup(struct ma_state *mas, unsigned long m
 		if (unlikely(mas->last >= max))
 			return true;
 
-		mas->status = ma_active;
+		mas_may_activate(mas);
 		*entry = mas_walk(mas);
 		if (*entry)
 			return true;
@@ -6200,24 +5800,32 @@ EXPORT_SYMBOL_GPL(mas_find_range_rev);
 void *mas_erase(struct ma_state *mas)
 {
 	void *entry;
+	unsigned long index = mas->index;
 	MA_WR_STATE(wr_mas, mas, NULL);
 
 	if (!mas_is_active(mas) || !mas_is_start(mas))
 		mas->status = ma_start;
 
-	/* Retry unnecessary when holding the write lock. */
+write_retry:
 	entry = mas_state_walk(mas);
 	if (!entry)
 		return NULL;
 
-write_retry:
 	/* Must reset to ensure spanning writes of last slot are detected */
 	mas_reset(mas);
-	mas_wr_store_setup(&wr_mas);
-	mas_wr_store_entry(&wr_mas);
-	if (mas_nomem(mas, GFP_KERNEL))
+	mas_wr_preallocate(&wr_mas, NULL);
+	if (mas_nomem(mas, GFP_KERNEL)) {
+		/* in case the range of entry changed when unlocked */
+		mas->index = mas->last = index;
 		goto write_retry;
+	}
 
+	if (mas_is_err(mas))
+		goto out;
+
+	mas_wr_store_entry(&wr_mas);
+out:
+	mas_destroy(mas);
 	return entry;
 }
 EXPORT_SYMBOL_GPL(mas_erase);
@@ -6232,10 +5840,8 @@ EXPORT_SYMBOL_GPL(mas_erase);
 bool mas_nomem(struct ma_state *mas, gfp_t gfp)
 	__must_hold(mas->tree->ma_lock)
 {
-	if (likely(mas->node != MA_ERROR(-ENOMEM))) {
-		mas_destroy(mas);
+	if (likely(mas->node != MA_ERROR(-ENOMEM)))
 		return false;
-	}
 
 	if (gfpflags_allow_blocking(gfp) && !mt_external_lock(mas->tree)) {
 		mtree_unlock(mas->tree);
@@ -6245,7 +5851,7 @@ bool mas_nomem(struct ma_state *mas, gfp_t gfp)
 		mas_alloc_nodes(mas, gfp);
 	}
 
-	if (!mas_allocated(mas))
+	if (!mas->sheaf && !mas->alloc)
 		return false;
 
 	mas->status = ma_start;
@@ -6254,9 +5860,14 @@ bool mas_nomem(struct ma_state *mas, gfp_t gfp)
 
 void __init maple_tree_init(void)
 {
+	struct kmem_cache_args args = {
+		.align  = sizeof(struct maple_node),
+		.sheaf_capacity = 32,
+	};
+
 	maple_node_cache = kmem_cache_create("maple_node",
-			sizeof(struct maple_node), sizeof(struct maple_node),
-			SLAB_PANIC, NULL);
+			sizeof(struct maple_node), &args,
+			SLAB_PANIC);
 }
 
 /**
@@ -6312,7 +5923,7 @@ int mtree_store_range(struct maple_tree *mt, unsigned long index,
 		unsigned long last, void *entry, gfp_t gfp)
 {
 	MA_STATE(mas, mt, index, last);
-	MA_WR_STATE(wr_mas, &mas, entry);
+	int ret = 0;
 
 	trace_ma_write(__func__, &mas, 0, entry);
 	if (WARN_ON_ONCE(xa_is_advanced(entry)))
@@ -6322,16 +5933,10 @@ int mtree_store_range(struct maple_tree *mt, unsigned long index,
 		return -EINVAL;
 
 	mtree_lock(mt);
-retry:
-	mas_wr_store_entry(&wr_mas);
-	if (mas_nomem(&mas, gfp))
-		goto retry;
-
+	ret = mas_store_gfp(&mas, entry, gfp);
 	mtree_unlock(mt);
-	if (mas_is_err(&mas))
-		return xa_err(mas.node);
 
-	return 0;
+	return ret;
 }
 EXPORT_SYMBOL(mtree_store_range);
 
@@ -6367,6 +5972,7 @@ int mtree_insert_range(struct maple_tree *mt, unsigned long first,
 		unsigned long last, void *entry, gfp_t gfp)
 {
 	MA_STATE(ms, mt, first, last);
+	int ret = 0;
 
 	if (WARN_ON_ONCE(xa_is_advanced(entry)))
 		return -EINVAL;
@@ -6382,9 +5988,10 @@ retry:
 
 	mtree_unlock(mt);
 	if (mas_is_err(&ms))
-		return xa_err(ms.node);
+		ret = xa_err(ms.node);
 
-	return 0;
+	mas_destroy(&ms);
+	return ret;
 }
 EXPORT_SYMBOL(mtree_insert_range);
 
@@ -6439,9 +6046,53 @@ retry:
 
 unlock:
 	mtree_unlock(mt);
+	mas_destroy(&mas);
 	return ret;
 }
 EXPORT_SYMBOL(mtree_alloc_range);
+
+/**
+ * mtree_alloc_cyclic() - Find somewhere to store this entry in the tree.
+ * @mt: The maple tree.
+ * @startp: Pointer to ID.
+ * @range_lo: Lower bound of range to search.
+ * @range_hi: Upper bound of range to search.
+ * @entry: The entry to store.
+ * @next: Pointer to next ID to allocate.
+ * @gfp: The GFP_FLAGS to use for allocations.
+ *
+ * Finds an empty entry in @mt after @next, stores the new index into
+ * the @id pointer, stores the entry at that index, then updates @next.
+ *
+ * @mt must be initialized with the MT_FLAGS_ALLOC_RANGE flag.
+ *
+ * Context: Any context.  Takes and releases the mt.lock.  May sleep if
+ * the @gfp flags permit.
+ *
+ * Return: 0 if the allocation succeeded without wrapping, 1 if the
+ * allocation succeeded after wrapping, -ENOMEM if memory could not be
+ * allocated, -EINVAL if @mt cannot be used, or -EBUSY if there are no
+ * free entries.
+ */
+int mtree_alloc_cyclic(struct maple_tree *mt, unsigned long *startp,
+		void *entry, unsigned long range_lo, unsigned long range_hi,
+		unsigned long *next, gfp_t gfp)
+{
+	int ret;
+
+	MA_STATE(mas, mt, 0, 0);
+
+	if (!mt_is_alloc(mt))
+		return -EINVAL;
+	if (WARN_ON_ONCE(mt_is_reserved(entry)))
+		return -EINVAL;
+	mtree_lock(mt);
+	ret = mas_alloc_cyclic(&mas, startp, entry, range_lo, range_hi,
+			       next, gfp);
+	mtree_unlock(mt);
+	return ret;
+}
+EXPORT_SYMBOL(mtree_alloc_cyclic);
 
 int mtree_alloc_rrange(struct maple_tree *mt, unsigned long *startp,
 		void *entry, unsigned long size, unsigned long min,
@@ -6477,6 +6128,7 @@ retry:
 
 unlock:
 	mtree_unlock(mt);
+	mas_destroy(&mas);
 	return ret;
 }
 EXPORT_SYMBOL(mtree_alloc_rrange);
@@ -6548,7 +6200,7 @@ static void mas_dup_free(struct ma_state *mas)
 	}
 
 	node = mte_to_node(mas->node);
-	mt_free_one(node);
+	kfree(node);
 }
 
 /*
@@ -6589,7 +6241,7 @@ static inline void mas_dup_alloc(struct ma_state *mas, struct ma_state *new_mas,
 	struct maple_node *node = mte_to_node(mas->node);
 	struct maple_node *new_node = mte_to_node(new_mas->node);
 	enum maple_type type;
-	unsigned char request, count, i;
+	unsigned char count, i;
 	void __rcu **slots;
 	void __rcu **new_slots;
 	unsigned long val;
@@ -6597,20 +6249,17 @@ static inline void mas_dup_alloc(struct ma_state *mas, struct ma_state *new_mas,
 	/* Allocate memory for child nodes. */
 	type = mte_node_type(mas->node);
 	new_slots = ma_slots(new_node, type);
-	request = mas_data_end(mas) + 1;
-	count = mt_alloc_bulk(gfp, request, (void **)new_slots);
-	if (unlikely(count < request)) {
-		memset(new_slots, 0, request * sizeof(void *));
-		mas_set_err(mas, -ENOMEM);
+	count = mas->node_request = mas_data_end(mas) + 1;
+	mas_alloc_nodes(mas, gfp);
+	if (unlikely(mas_is_err(mas)))
 		return;
-	}
 
-	/* Restore node type information in slots. */
 	slots = ma_slots(node, type);
 	for (i = 0; i < count; i++) {
 		val = (unsigned long)mt_slot_locked(mas->tree, slots, i);
 		val &= MAPLE_NODE_MASK;
-		((unsigned long *)new_slots)[i] |= val;
+		new_slots[i] = ma_mnode_ptr((unsigned long)mas_pop_node(mas) |
+					    val);
 	}
 }
 
@@ -6664,7 +6313,7 @@ static inline void mas_dup_build(struct ma_state *mas, struct ma_state *new_mas,
 			/* Only allocate child nodes for non-leaf nodes. */
 			mas_dup_alloc(mas, new_mas, gfp);
 			if (unlikely(mas_is_err(mas)))
-				return;
+				goto empty_mas;
 		} else {
 			/*
 			 * This is the last leaf node and duplication is
@@ -6697,6 +6346,8 @@ set_new_tree:
 	/* Make them the same height */
 	new_mas->tree->ma_flags = mas->tree->ma_flags;
 	rcu_assign_pointer(new_mas->tree->ma_root, root);
+empty_mas:
+	mas_empty_nodes(mas);
 }
 
 /**
@@ -6852,7 +6503,7 @@ retry:
 		goto unlock;
 
 	while (mas_is_active(&mas) && (mas.last < max)) {
-		entry = mas_next_entry(&mas, max);
+		entry = mas_next_slot(&mas, max, false);
 		if (likely(entry && !xa_is_zero(entry)))
 			break;
 	}
@@ -6907,6 +6558,19 @@ extern void kmem_cache_set_non_kernel(struct kmem_cache *, unsigned int);
 void mt_set_non_kernel(unsigned int val)
 {
 	kmem_cache_set_non_kernel(maple_node_cache, val);
+}
+
+extern void kmem_cache_set_callback(struct kmem_cache *cachep,
+		void (*callback)(void *));
+void mt_set_callback(void (*callback)(void *))
+{
+	kmem_cache_set_callback(maple_node_cache, callback);
+}
+
+extern void kmem_cache_set_private(struct kmem_cache *cachep, void *private);
+void mt_set_private(void *private)
+{
+	kmem_cache_set_private(maple_node_cache, private);
 }
 
 extern unsigned long kmem_cache_get_alloc(struct kmem_cache *);
@@ -7025,14 +6689,14 @@ static void mt_dump_entry(void *entry, unsigned long min, unsigned long max,
 	mt_dump_range(min, max, depth, format);
 
 	if (xa_is_value(entry))
-		pr_cont("value %ld (0x%lx) [%p]\n", xa_to_value(entry),
-				xa_to_value(entry), entry);
+		pr_cont("value %ld (0x%lx) [" PTR_FMT "]\n", xa_to_value(entry),
+			xa_to_value(entry), entry);
 	else if (xa_is_zero(entry))
 		pr_cont("zero (%ld)\n", xa_to_internal(entry));
 	else if (mt_is_reserved(entry))
-		pr_cont("UNKNOWN ENTRY (%p)\n", entry);
+		pr_cont("UNKNOWN ENTRY (" PTR_FMT ")\n", entry);
 	else
-		pr_cont("%p\n", entry);
+		pr_cont(PTR_FMT "\n", entry);
 }
 
 static void mt_dump_range64(const struct maple_tree *mt, void *entry,
@@ -7048,13 +6712,13 @@ static void mt_dump_range64(const struct maple_tree *mt, void *entry,
 	for (i = 0; i < MAPLE_RANGE64_SLOTS - 1; i++) {
 		switch(format) {
 		case mt_dump_hex:
-			pr_cont("%p %lX ", node->slot[i], node->pivot[i]);
+			pr_cont(PTR_FMT " %lX ", node->slot[i], node->pivot[i]);
 			break;
 		case mt_dump_dec:
-			pr_cont("%p %lu ", node->slot[i], node->pivot[i]);
+			pr_cont(PTR_FMT " %lu ", node->slot[i], node->pivot[i]);
 		}
 	}
-	pr_cont("%p\n", node->slot[i]);
+	pr_cont(PTR_FMT "\n", node->slot[i]);
 	for (i = 0; i < MAPLE_RANGE64_SLOTS; i++) {
 		unsigned long last = max;
 
@@ -7076,11 +6740,11 @@ static void mt_dump_range64(const struct maple_tree *mt, void *entry,
 		if (last > max) {
 			switch(format) {
 			case mt_dump_hex:
-				pr_err("node %p last (%lx) > max (%lx) at pivot %d!\n",
+				pr_err("node " PTR_FMT " last (%lx) > max (%lx) at pivot %d!\n",
 					node, last, max, i);
 				break;
 			case mt_dump_dec:
-				pr_err("node %p last (%lu) > max (%lu) at pivot %d!\n",
+				pr_err("node " PTR_FMT " last (%lu) > max (%lu) at pivot %d!\n",
 					node, last, max, i);
 			}
 		}
@@ -7093,7 +6757,6 @@ static void mt_dump_arange64(const struct maple_tree *mt, void *entry,
 	enum mt_dump_format format)
 {
 	struct maple_arange_64 *node = &mte_to_node(entry)->ma64;
-	bool leaf = mte_is_leaf(entry);
 	unsigned long first = min;
 	int i;
 
@@ -7111,13 +6774,13 @@ static void mt_dump_arange64(const struct maple_tree *mt, void *entry,
 	for (i = 0; i < MAPLE_ARANGE64_SLOTS - 1; i++) {
 		switch (format) {
 		case mt_dump_hex:
-			pr_cont("%p %lX ", node->slot[i], node->pivot[i]);
+			pr_cont(PTR_FMT " %lX ", node->slot[i], node->pivot[i]);
 			break;
 		case mt_dump_dec:
-			pr_cont("%p %lu ", node->slot[i], node->pivot[i]);
+			pr_cont(PTR_FMT " %lu ", node->slot[i], node->pivot[i]);
 		}
 	}
-	pr_cont("%p\n", node->slot[i]);
+	pr_cont(PTR_FMT "\n", node->slot[i]);
 	for (i = 0; i < MAPLE_ARANGE64_SLOTS; i++) {
 		unsigned long last = max;
 
@@ -7127,19 +6790,22 @@ static void mt_dump_arange64(const struct maple_tree *mt, void *entry,
 			break;
 		if (last == 0 && i > 0)
 			break;
-		if (leaf)
-			mt_dump_entry(mt_slot(mt, node->slot, i),
-					first, last, depth + 1, format);
-		else if (node->slot[i])
+		if (node->slot[i])
 			mt_dump_node(mt, mt_slot(mt, node->slot, i),
 					first, last, depth + 1, format);
 
 		if (last == max)
 			break;
 		if (last > max) {
-			pr_err("node %p last (%lu) > max (%lu) at pivot %d!\n",
+			switch(format) {
+			case mt_dump_hex:
+				pr_err("node " PTR_FMT " last (%lx) > max (%lx) at pivot %d!\n",
 					node, last, max, i);
-			break;
+				break;
+			case mt_dump_dec:
+				pr_err("node " PTR_FMT " last (%lu) > max (%lu) at pivot %d!\n",
+					node, last, max, i);
+			}
 		}
 		first = last + 1;
 	}
@@ -7155,8 +6821,8 @@ static void mt_dump_node(const struct maple_tree *mt, void *entry,
 
 	mt_dump_range(min, max, depth, format);
 
-	pr_cont("node %p depth %d type %d parent %p", node, depth, type,
-			node ? node->parent : NULL);
+	pr_cont("node " PTR_FMT " depth %d type %d parent " PTR_FMT, node,
+		depth, type, node ? node->parent : NULL);
 	switch (type) {
 	case maple_dense:
 		pr_cont("\n");
@@ -7184,12 +6850,14 @@ void mt_dump(const struct maple_tree *mt, enum mt_dump_format format)
 {
 	void *entry = rcu_dereference_check(mt->ma_root, mt_locked(mt));
 
-	pr_info("maple_tree(%p) flags %X, height %u root %p\n",
+	pr_info("maple_tree(" PTR_FMT ") flags %X, height %u root " PTR_FMT "\n",
 		 mt, mt->ma_flags, mt_height(mt), entry);
-	if (!xa_is_node(entry))
-		mt_dump_entry(entry, 0, 0, 0, format);
-	else if (entry)
+	if (xa_is_node(entry))
 		mt_dump_node(mt, entry, 0, mt_node_max(entry), 0, format);
+	else if (entry)
+		mt_dump_entry(entry, 0, 0, 0, format);
+	else
+		pr_info("(empty)\n");
 }
 EXPORT_SYMBOL_GPL(mt_dump);
 
@@ -7236,7 +6904,7 @@ static void mas_validate_gaps(struct ma_state *mas)
 			MT_BUG_ON(mas->tree, !entry);
 
 			if (gap > p_end - p_start + 1) {
-				pr_err("%p[%u] %lu >= %lu - %lu + 1 (%lu)\n",
+				pr_err(PTR_FMT "[%u] %lu >= %lu - %lu + 1 (%lu)\n",
 				       mas_mn(mas), i, gap, p_end, p_start,
 				       p_end - p_start + 1);
 				MT_BUG_ON(mas->tree, gap > p_end - p_start + 1);
@@ -7256,19 +6924,19 @@ counted:
 		MT_BUG_ON(mas->tree, !gaps);
 		offset = ma_meta_gap(node);
 		if (offset > i) {
-			pr_err("gap offset %p[%u] is invalid\n", node, offset);
+			pr_err("gap offset " PTR_FMT "[%u] is invalid\n", node, offset);
 			MT_BUG_ON(mas->tree, 1);
 		}
 
 		if (gaps[offset] != max_gap) {
-			pr_err("gap %p[%u] is not the largest gap %lu\n",
+			pr_err("gap " PTR_FMT "[%u] is not the largest gap %lu\n",
 			       node, offset, max_gap);
 			MT_BUG_ON(mas->tree, 1);
 		}
 
 		for (i++ ; i < mt_slot_count(mte); i++) {
 			if (gaps[i] != 0) {
-				pr_err("gap %p[%u] beyond node limit != 0\n",
+				pr_err("gap " PTR_FMT "[%u] beyond node limit != 0\n",
 				       node, i);
 				MT_BUG_ON(mas->tree, 1);
 			}
@@ -7282,7 +6950,7 @@ counted:
 	p_mn = mte_parent(mte);
 	MT_BUG_ON(mas->tree, max_gap > mas->max);
 	if (ma_gaps(p_mn, mas_parent_type(mas, mte))[p_slot] != max_gap) {
-		pr_err("gap %p[%u] != %lu\n", p_mn, p_slot, max_gap);
+		pr_err("gap " PTR_FMT "[%u] != %lu\n", p_mn, p_slot, max_gap);
 		mt_dump(mas->tree, mt_dump_hex);
 		MT_BUG_ON(mas->tree, 1);
 	}
@@ -7312,11 +6980,11 @@ static void mas_validate_parent_slot(struct ma_state *mas)
 		node = mas_slot(mas, slots, i);
 		if (i == p_slot) {
 			if (node != mas->node)
-				pr_err("parent %p[%u] does not have %p\n",
+				pr_err("parent " PTR_FMT "[%u] does not have " PTR_FMT "\n",
 					parent, i, mas_mn(mas));
 			MT_BUG_ON(mas->tree, node != mas->node);
 		} else if (node == mas->node) {
-			pr_err("Invalid child %p at parent %p[%u] p_slot %u\n",
+			pr_err("Invalid child " PTR_FMT " at parent " PTR_FMT "[%u] p_slot %u\n",
 			       mas_mn(mas), parent, i, p_slot);
 			MT_BUG_ON(mas->tree, node == mas->node);
 		}
@@ -7338,20 +7006,20 @@ static void mas_validate_child_slot(struct ma_state *mas)
 		child = mas_slot(mas, slots, i);
 
 		if (!child) {
-			pr_err("Non-leaf node lacks child at %p[%u]\n",
+			pr_err("Non-leaf node lacks child at " PTR_FMT "[%u]\n",
 			       mas_mn(mas), i);
 			MT_BUG_ON(mas->tree, 1);
 		}
 
 		if (mte_parent_slot(child) != i) {
-			pr_err("Slot error at %p[%u]: child %p has pslot %u\n",
+			pr_err("Slot error at " PTR_FMT "[%u]: child " PTR_FMT " has pslot %u\n",
 			       mas_mn(mas), i, mte_to_node(child),
 			       mte_parent_slot(child));
 			MT_BUG_ON(mas->tree, 1);
 		}
 
 		if (mte_parent(child) != mte_to_node(mas->node)) {
-			pr_err("child %p has parent %p not %p\n",
+			pr_err("child " PTR_FMT " has parent " PTR_FMT " not " PTR_FMT "\n",
 			       mte_to_node(child), mte_parent(child),
 			       mte_to_node(mas->node));
 			MT_BUG_ON(mas->tree, 1);
@@ -7381,24 +7049,24 @@ static void mas_validate_limits(struct ma_state *mas)
 		piv = mas_safe_pivot(mas, pivots, i, type);
 
 		if (!piv && (i != 0)) {
-			pr_err("Missing node limit pivot at %p[%u]",
+			pr_err("Missing node limit pivot at " PTR_FMT "[%u]",
 			       mas_mn(mas), i);
 			MAS_WARN_ON(mas, 1);
 		}
 
 		if (prev_piv > piv) {
-			pr_err("%p[%u] piv %lu < prev_piv %lu\n",
+			pr_err(PTR_FMT "[%u] piv %lu < prev_piv %lu\n",
 				mas_mn(mas), i, piv, prev_piv);
 			MAS_WARN_ON(mas, piv < prev_piv);
 		}
 
 		if (piv < mas->min) {
-			pr_err("%p[%u] %lu < %lu\n", mas_mn(mas), i,
+			pr_err(PTR_FMT "[%u] %lu < %lu\n", mas_mn(mas), i,
 				piv, mas->min);
 			MAS_WARN_ON(mas, piv < mas->min);
 		}
 		if (piv > mas->max) {
-			pr_err("%p[%u] %lu > %lu\n", mas_mn(mas), i,
+			pr_err(PTR_FMT "[%u] %lu > %lu\n", mas_mn(mas), i,
 				piv, mas->max);
 			MAS_WARN_ON(mas, piv > mas->max);
 		}
@@ -7408,7 +7076,7 @@ static void mas_validate_limits(struct ma_state *mas)
 	}
 
 	if (mas_data_end(mas) != i) {
-		pr_err("node%p: data_end %u != the last slot offset %u\n",
+		pr_err("node" PTR_FMT ": data_end %u != the last slot offset %u\n",
 		       mas_mn(mas), mas_data_end(mas), i);
 		MT_BUG_ON(mas->tree, 1);
 	}
@@ -7417,8 +7085,8 @@ static void mas_validate_limits(struct ma_state *mas)
 		void *entry = mas_slot(mas, slots, i);
 
 		if (entry && (i != mt_slots[type] - 1)) {
-			pr_err("%p[%u] should not have entry %p\n", mas_mn(mas),
-			       i, entry);
+			pr_err(PTR_FMT "[%u] should not have entry " PTR_FMT "\n",
+			       mas_mn(mas), i, entry);
 			MT_BUG_ON(mas->tree, entry != NULL);
 		}
 
@@ -7428,7 +7096,7 @@ static void mas_validate_limits(struct ma_state *mas)
 			if (!piv)
 				continue;
 
-			pr_err("%p[%u] should not have piv %lu\n",
+			pr_err(PTR_FMT "[%u] should not have piv %lu\n",
 			       mas_mn(mas), i, piv);
 			MAS_WARN_ON(mas, i < mt_pivots[type] - 1);
 		}
@@ -7453,7 +7121,7 @@ static void mt_validate_nulls(struct maple_tree *mt)
 	do {
 		entry = mas_slot(&mas, slots, offset);
 		if (!last && !entry) {
-			pr_err("Sequential nulls end at %p[%u]\n",
+			pr_err("Sequential nulls end at " PTR_FMT "[%u]\n",
 				mas_mn(&mas), offset);
 		}
 		MT_BUG_ON(mt, !last && !entry);
@@ -7478,14 +7146,14 @@ static void mt_validate_nulls(struct maple_tree *mt)
  * 2. The gap is correctly set in the parents
  */
 void mt_validate(struct maple_tree *mt)
+	__must_hold(mas->tree->ma_lock)
 {
 	unsigned char end;
 
 	MA_STATE(mas, mt, 0, 0);
-	rcu_read_lock();
 	mas_start(&mas);
 	if (!mas_is_active(&mas))
-		goto done;
+		return;
 
 	while (!mte_is_leaf(mas.node))
 		mas_descend(&mas);
@@ -7494,8 +7162,9 @@ void mt_validate(struct maple_tree *mt)
 		MAS_WARN_ON(&mas, mte_dead_node(mas.node));
 		end = mas_data_end(&mas);
 		if (MAS_WARN_ON(&mas, (end < mt_min_slot_count(mas.node)) &&
-				(mas.max != ULONG_MAX))) {
-			pr_err("Invalid size %u of %p\n", end, mas_mn(&mas));
+				(!mte_is_root(mas.node)))) {
+			pr_err("Invalid size %u of " PTR_FMT "\n",
+			       end, mas_mn(&mas));
 		}
 
 		mas_validate_parent_slot(&mas);
@@ -7506,15 +7175,13 @@ void mt_validate(struct maple_tree *mt)
 		mas_dfs_postorder(&mas, ULONG_MAX);
 	}
 	mt_validate_nulls(mt);
-done:
-	rcu_read_unlock();
-
 }
 EXPORT_SYMBOL_GPL(mt_validate);
 
 void mas_dump(const struct ma_state *mas)
 {
-	pr_err("MAS: tree=%p enode=%p ", mas->tree, mas->node);
+	pr_err("MAS: tree=" PTR_FMT " enode=" PTR_FMT " ",
+	       mas->tree, mas->node);
 	switch (mas->status) {
 	case ma_active:
 		pr_err("(ma_active)");
@@ -7542,10 +7209,45 @@ void mas_dump(const struct ma_state *mas)
 		break;
 	}
 
+	pr_err("Store Type: ");
+	switch (mas->store_type) {
+	case wr_invalid:
+		pr_err("invalid store type\n");
+		break;
+	case wr_new_root:
+		pr_err("new_root\n");
+		break;
+	case wr_store_root:
+		pr_err("store_root\n");
+		break;
+	case wr_exact_fit:
+		pr_err("exact_fit\n");
+		break;
+	case wr_split_store:
+		pr_err("split_store\n");
+		break;
+	case wr_slot_store:
+		pr_err("slot_store\n");
+		break;
+	case wr_append:
+		pr_err("append\n");
+		break;
+	case wr_node_store:
+		pr_err("node_store\n");
+		break;
+	case wr_spanning_store:
+		pr_err("spanning_store\n");
+		break;
+	case wr_rebalance:
+		pr_err("rebalance\n");
+		break;
+	}
+
 	pr_err("[%u/%u] index=%lx last=%lx\n", mas->offset, mas->end,
 	       mas->index, mas->last);
-	pr_err("     min=%lx max=%lx alloc=%p, depth=%u, flags=%x\n",
-	       mas->min, mas->max, mas->alloc, mas->depth, mas->mas_flags);
+	pr_err("     min=%lx max=%lx sheaf=" PTR_FMT ", request %lu depth=%u, flags=%x\n",
+	       mas->min, mas->max, mas->sheaf, mas->node_request, mas->depth,
+	       mas->mas_flags);
 	if (mas->index > mas->last)
 		pr_err("Check index & last\n");
 }
@@ -7553,7 +7255,7 @@ EXPORT_SYMBOL_GPL(mas_dump);
 
 void mas_wr_dump(const struct ma_wr_state *wr_mas)
 {
-	pr_err("WR_MAS: node=%p r_min=%lx r_max=%lx\n",
+	pr_err("WR_MAS: node=" PTR_FMT " r_min=%lx r_max=%lx\n",
 	       wr_mas->node, wr_mas->r_min, wr_mas->r_max);
 	pr_err("        type=%u off_end=%u, node_end=%u, end_piv=%lx\n",
 	       wr_mas->type, wr_mas->offset_end, wr_mas->mas->end,

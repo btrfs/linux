@@ -67,7 +67,7 @@ int mt76x02u_tx_prepare_skb(struct mt76_dev *mdev, void *data,
 			    struct mt76_tx_info *tx_info)
 {
 	struct mt76x02_dev *dev = container_of(mdev, struct mt76x02_dev, mt76);
-	int pid, len = tx_info->skb->len, ep = q2ep(dev->mphy.q_tx[qid]->hw_idx);
+	int pid, len = tx_info->skb->len, ep = dev->mphy.q_tx[qid]->ep;
 	struct mt76x02_txwi *txwi;
 	bool ampdu = IEEE80211_SKB_CB(tx_info->skb)->flags & IEEE80211_TX_CTL_AMPDU;
 	enum mt76_qsel qsel;
@@ -188,10 +188,7 @@ static void mt76x02u_pre_tbtt_work(struct work_struct *work)
 	struct sk_buff *skb;
 	int nbeacons;
 
-	if (!dev->mt76.beacon_mask)
-		return;
-
-	if (mt76_hw(dev)->conf.flags & IEEE80211_CONF_OFFCHANNEL)
+	if (!dev->mt76.beacon_mask || dev->mphy.offchannel)
 		return;
 
 	__skb_queue_head_init(&data.q);
@@ -267,8 +264,8 @@ void mt76x02u_init_beacon_config(struct mt76x02_dev *dev)
 	};
 	dev->beacon_ops = &beacon_ops;
 
-	hrtimer_init(&dev->pre_tbtt_timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
-	dev->pre_tbtt_timer.function = mt76x02u_pre_tbtt_interrupt;
+	hrtimer_setup(&dev->pre_tbtt_timer, mt76x02u_pre_tbtt_interrupt, CLOCK_MONOTONIC,
+		      HRTIMER_MODE_REL);
 	INIT_WORK(&dev->pre_tbtt_work, mt76x02u_pre_tbtt_work);
 
 	mt76x02_init_beacon_config(dev);

@@ -1988,8 +1988,8 @@ megasas_fusion_start_watchdog(struct megasas_instance *instance)
 		 sizeof(instance->fault_handler_work_q_name),
 		 "poll_megasas%d_status", instance->host->host_no);
 
-	instance->fw_fault_work_q =
-		create_singlethread_workqueue(instance->fault_handler_work_q_name);
+	instance->fw_fault_work_q = alloc_ordered_workqueue(
+		"%s", WQ_MEM_RECLAIM, instance->fault_handler_work_q_name);
 	if (!instance->fw_fault_work_q) {
 		dev_err(&instance->pdev->dev, "Failed from %s %d\n",
 			__func__, __LINE__);
@@ -2043,7 +2043,10 @@ map_cmd_status(struct fusion_context *fusion,
 
 	case MFI_STAT_SCSI_IO_FAILED:
 	case MFI_STAT_LD_INIT_IN_PROGRESS:
-		scmd->result = (DID_ERROR << 16) | ext_status;
+		if (ext_status == 0xf0)
+			scmd->result = (DID_ERROR << 16) | SAM_STAT_CHECK_CONDITION;
+		else
+			scmd->result = (DID_ERROR << 16) | ext_status;
 		break;
 
 	case MFI_STAT_SCSI_DONE_WITH_ERROR:
@@ -4969,7 +4972,7 @@ int megasas_reset_fusion(struct Scsi_Host *shost, int reason)
 	}
 
 	if (instance->requestorId && !instance->skip_heartbeat_timer_del)
-		del_timer_sync(&instance->sriov_heartbeat_timer);
+		timer_delete_sync(&instance->sriov_heartbeat_timer);
 	set_bit(MEGASAS_FUSION_IN_RESET, &instance->reset_flags);
 	set_bit(MEGASAS_FUSION_OCR_NOT_POSSIBLE, &instance->reset_flags);
 	atomic_set(&instance->adprecovery, MEGASAS_ADPRESET_SM_POLLING);
@@ -5119,7 +5122,8 @@ int megasas_reset_fusion(struct Scsi_Host *shost, int reason)
 					ret_target_prop = megasas_get_target_prop(instance, sdev);
 
 				is_target_prop = (ret_target_prop == DCMD_SUCCESS) ? true : false;
-				megasas_set_dynamic_target_properties(sdev, is_target_prop);
+				megasas_set_dynamic_target_properties(sdev, NULL,
+						is_target_prop);
 			}
 
 			status_reg = instance->instancet->read_fw_status_reg

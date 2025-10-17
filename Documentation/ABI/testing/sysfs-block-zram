@@ -22,14 +22,6 @@ Description:
 		device. The reset operation frees all the memory associated
 		with this device.
 
-What:		/sys/block/zram<id>/max_comp_streams
-Date:		February 2014
-Contact:	Sergey Senozhatsky <sergey.senozhatsky@gmail.com>
-Description:
-		The max_comp_streams file is read-write and specifies the
-		number of backend's zcomp_strm compression streams (number of
-		concurrent compress operations).
-
 What:		/sys/block/zram<id>/comp_algorithm
 Date:		February 2014
 Contact:	Sergey Senozhatsky <sergey.senozhatsky@gmail.com>
@@ -151,3 +143,10 @@ Contact:	Sergey Senozhatsky <senozhatsky@chromium.org>
 Description:
 		The recompress file is write-only and triggers re-compression
 		with secondary compression algorithms.
+
+What:		/sys/block/zram<id>/algorithm_params
+Date:		August 2024
+Contact:	Sergey Senozhatsky <senozhatsky@chromium.org>
+Description:
+		The algorithm_params file is write-only and is used to setup
+		compression algorithm parameters.

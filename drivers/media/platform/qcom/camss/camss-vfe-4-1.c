@@ -210,15 +210,6 @@
 #define MSM_VFE_VFE0_UB_SIZE 1023
 #define MSM_VFE_VFE0_UB_SIZE_RDI (MSM_VFE_VFE0_UB_SIZE / 3)
 
-static u32 vfe_hw_version(struct vfe_device *vfe)
-{
-	u32 hw_version = readl_relaxed(vfe->base + VFE_0_HW_VERSION);
-
-	dev_dbg(vfe->camss->dev, "VFE HW Version = 0x%08x\n", hw_version);
-
-	return hw_version;
-}
-
 static u16 vfe_get_ub_size(u8 vfe_id)
 {
 	if (vfe_id == 0)
@@ -892,7 +883,7 @@ static irqreturn_t vfe_isr(int irq, void *dev)
 	u32 value0, value1;
 	int i, j;
 
-	vfe->ops->isr_read(vfe, &value0, &value1);
+	vfe->res->hw_ops->isr_read(vfe, &value0, &value1);
 
 	dev_dbg(vfe->camss->dev, "VFE: status0 = 0x%08x, status1 = 0x%08x\n",
 		value0, value1);
@@ -901,7 +892,7 @@ static irqreturn_t vfe_isr(int irq, void *dev)
 		vfe->isr_ops.reset_ack(vfe);
 
 	if (value1 & VFE_0_IRQ_STATUS_1_VIOLATION)
-		vfe->ops->violation_read(vfe);
+		vfe->res->hw_ops->violation_read(vfe);
 
 	if (value1 & VFE_0_IRQ_STATUS_1_BUS_BDG_HALT_ACK)
 		vfe->isr_ops.halt_ack(vfe);
@@ -938,7 +929,10 @@ static irqreturn_t vfe_isr(int irq, void *dev)
  */
 static void vfe_4_1_pm_domain_off(struct vfe_device *vfe)
 {
-	/* nop */
+	if (!vfe->res->has_pd)
+		return;
+
+	vfe_pm_domain_off(vfe);
 }
 
 /*
@@ -947,7 +941,10 @@ static void vfe_4_1_pm_domain_off(struct vfe_device *vfe)
  */
 static int vfe_4_1_pm_domain_on(struct vfe_device *vfe)
 {
-	return 0;
+	if (!vfe->res->has_pd)
+		return 0;
+
+	return vfe_pm_domain_on(vfe);
 }
 
 static const struct vfe_hw_ops_gen1 vfe_ops_gen1_4_1 = {

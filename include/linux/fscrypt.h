@@ -61,6 +61,12 @@ struct fscrypt_name {
 
 /* Crypto operations for filesystems */
 struct fscrypt_operations {
+	/*
+	 * The offset of the pointer to struct fscrypt_inode_info in the
+	 * filesystem-specific part of the inode, relative to the beginning of
+	 * the common part of the inode (the 'struct inode').
+	 */
+	ptrdiff_t inode_info_offs;
 
 	/*
 	 * If set, then fs/crypto/ will allocate a global bounce page pool the
@@ -192,16 +198,47 @@ struct fscrypt_operations {
 					     unsigned int *num_devs);
 };
 
+int fscrypt_d_revalidate(struct inode *dir, const struct qstr *name,
+			 struct dentry *dentry, unsigned int flags);
+
+/*
+ * Returns the address of the fscrypt info pointer within the
+ * filesystem-specific part of the inode.  (To save memory on filesystems that
+ * don't support fscrypt, a field in 'struct inode' itself is no longer used.)
+ */
+static inline struct fscrypt_inode_info **
+fscrypt_inode_info_addr(const struct inode *inode)
+{
+	VFS_WARN_ON_ONCE(inode->i_sb->s_cop->inode_info_offs == 0);
+	return (void *)inode + inode->i_sb->s_cop->inode_info_offs;
+}
+
+/*
+ * Load the inode's fscrypt info pointer, using a raw dereference.  Since this
+ * uses a raw dereference with no memory barrier, it is appropriate to use only
+ * when the caller knows the inode's key setup already happened, resulting in
+ * non-NULL fscrypt info.  E.g., the file contents en/decryption functions use
+ * this, since fscrypt_file_open() set up the key.
+ */
+static inline struct fscrypt_inode_info *
+fscrypt_get_inode_info_raw(const struct inode *inode)
+{
+	struct fscrypt_inode_info *ci = *fscrypt_inode_info_addr(inode);
+
+	VFS_WARN_ON_ONCE(ci == NULL);
+	return ci;
+}
+
 static inline struct fscrypt_inode_info *
 fscrypt_get_inode_info(const struct inode *inode)
 {
 	/*
 	 * Pairs with the cmpxchg_release() in fscrypt_setup_encryption_info().
-	 * I.e., another task may publish ->i_crypt_info concurrently, executing
-	 * a RELEASE barrier.  We need to use smp_load_acquire() here to safely
+	 * I.e., another task may publish the fscrypt info concurrently,
+	 * executing a RELEASE barrier.  Use smp_load_acquire() here to safely
 	 * ACQUIRE the memory the other task published.
 	 */
-	return smp_load_acquire(&inode->i_crypt_info);
+	return smp_load_acquire(fscrypt_inode_info_addr(inode));
 }
 
 /**
@@ -221,15 +258,29 @@ static inline bool fscrypt_needs_contents_encryption(const struct inode *inode)
 }
 
 /*
- * When d_splice_alias() moves a directory's no-key alias to its plaintext alias
- * as a result of the encryption key being added, DCACHE_NOKEY_NAME must be
- * cleared.  Note that we don't have to support arbitrary moves of this flag
- * because fscrypt doesn't allow no-key names to be the source or target of a
- * rename().
+ * When d_splice_alias() moves a directory's no-key alias to its
+ * plaintext alias as a result of the encryption key being added,
+ * DCACHE_NOKEY_NAME must be cleared and there might be an opportunity
+ * to disable d_revalidate.  Note that we don't have to support the
+ * inverse operation because fscrypt doesn't allow no-key names to be
+ * the source or target of a rename().
  */
 static inline void fscrypt_handle_d_move(struct dentry *dentry)
 {
-	dentry->d_flags &= ~DCACHE_NOKEY_NAME;
+	/*
+	 * VFS calls fscrypt_handle_d_move even for non-fscrypt
+	 * filesystems.
+	 */
+	if (dentry->d_flags & DCACHE_NOKEY_NAME) {
+		dentry->d_flags &= ~DCACHE_NOKEY_NAME;
+
+		/*
+		 * Other filesystem features might be handling dentry
+		 * revalidation, in which case it cannot be disabled.
+		 */
+		if (dentry->d_op->d_revalidate == fscrypt_d_revalidate)
+			dentry->d_flags &= ~DCACHE_OP_REVALIDATE;
+	}
 }
 
 /**
@@ -261,16 +312,43 @@ static inline bool fscrypt_is_nokey_name(const struct dentry *dentry)
 	return dentry->d_flags & DCACHE_NOKEY_NAME;
 }
 
+static inline void fscrypt_prepare_dentry(struct dentry *dentry,
+					  bool is_nokey_name)
+{
+	/*
+	 * This code tries to only take ->d_lock when necessary to write
+	 * to ->d_flags.  We shouldn't be peeking on d_flags for
+	 * DCACHE_OP_REVALIDATE unlocked, but in the unlikely case
+	 * there is a race, the worst it can happen is that we fail to
+	 * unset DCACHE_OP_REVALIDATE and pay the cost of an extra
+	 * d_revalidate.
+	 */
+	if (is_nokey_name) {
+		spin_lock(&dentry->d_lock);
+		dentry->d_flags |= DCACHE_NOKEY_NAME;
+		spin_unlock(&dentry->d_lock);
+	} else if (dentry->d_flags & DCACHE_OP_REVALIDATE &&
+		   dentry->d_op->d_revalidate == fscrypt_d_revalidate) {
+		/*
+		 * Unencrypted dentries and encrypted dentries where the
+		 * key is available are always valid from fscrypt
+		 * perspective. Avoid the cost of calling
+		 * fscrypt_d_revalidate unnecessarily.
+		 */
+		spin_lock(&dentry->d_lock);
+		dentry->d_flags &= ~DCACHE_OP_REVALIDATE;
+		spin_unlock(&dentry->d_lock);
+	}
+}
+
 /* crypto.c */
 void fscrypt_enqueue_decrypt_work(struct work_struct *);
 
-struct page *fscrypt_encrypt_pagecache_blocks(struct page *page,
-					      unsigned int len,
-					      unsigned int offs,
-					      gfp_t gfp_flags);
+struct page *fscrypt_encrypt_pagecache_blocks(struct folio *folio,
+		size_t len, size_t offs, gfp_t gfp_flags);
 int fscrypt_encrypt_block_inplace(const struct inode *inode, struct page *page,
 				  unsigned int len, unsigned int offs,
-				  u64 lblk_num, gfp_t gfp_flags);
+				  u64 lblk_num);
 
 int fscrypt_decrypt_pagecache_blocks(struct folio *folio, size_t len,
 				     size_t offs);
@@ -288,12 +366,13 @@ static inline struct page *fscrypt_pagecache_page(struct page *bounce_page)
 	return (struct page *)page_private(bounce_page);
 }
 
-static inline bool fscrypt_is_bounce_folio(struct folio *folio)
+static inline bool fscrypt_is_bounce_folio(const struct folio *folio)
 {
 	return folio->mapping == NULL;
 }
 
-static inline struct folio *fscrypt_pagecache_folio(struct folio *bounce_folio)
+static inline
+struct folio *fscrypt_pagecache_folio(const struct folio *bounce_folio)
 {
 	return bounce_folio->private;
 }
@@ -368,7 +447,6 @@ int fscrypt_fname_disk_to_usr(const struct inode *inode,
 bool fscrypt_match_name(const struct fscrypt_name *fname,
 			const u8 *de_name, u32 de_name_len);
 u64 fscrypt_fname_siphash(const struct inode *dir, const struct qstr *name);
-int fscrypt_d_revalidate(struct dentry *dentry, unsigned int flags);
 
 /* bio.c */
 bool fscrypt_decrypt_bio(struct bio *bio);
@@ -425,15 +503,18 @@ static inline bool fscrypt_is_nokey_name(const struct dentry *dentry)
 	return false;
 }
 
+static inline void fscrypt_prepare_dentry(struct dentry *dentry,
+					  bool is_nokey_name)
+{
+}
+
 /* crypto.c */
 static inline void fscrypt_enqueue_decrypt_work(struct work_struct *work)
 {
 }
 
-static inline struct page *fscrypt_encrypt_pagecache_blocks(struct page *page,
-							    unsigned int len,
-							    unsigned int offs,
-							    gfp_t gfp_flags)
+static inline struct page *fscrypt_encrypt_pagecache_blocks(struct folio *folio,
+		size_t len, size_t offs, gfp_t gfp_flags)
 {
 	return ERR_PTR(-EOPNOTSUPP);
 }
@@ -441,8 +522,7 @@ static inline struct page *fscrypt_encrypt_pagecache_blocks(struct page *page,
 static inline int fscrypt_encrypt_block_inplace(const struct inode *inode,
 						struct page *page,
 						unsigned int len,
-						unsigned int offs, u64 lblk_num,
-						gfp_t gfp_flags)
+						unsigned int offs, u64 lblk_num)
 {
 	return -EOPNOTSUPP;
 }
@@ -472,12 +552,13 @@ static inline struct page *fscrypt_pagecache_page(struct page *bounce_page)
 	return ERR_PTR(-EINVAL);
 }
 
-static inline bool fscrypt_is_bounce_folio(struct folio *folio)
+static inline bool fscrypt_is_bounce_folio(const struct folio *folio)
 {
 	return false;
 }
 
-static inline struct folio *fscrypt_pagecache_folio(struct folio *bounce_folio)
+static inline
+struct folio *fscrypt_pagecache_folio(const struct folio *bounce_folio)
 {
 	WARN_ON_ONCE(1);
 	return ERR_PTR(-EINVAL);
@@ -662,8 +743,8 @@ static inline u64 fscrypt_fname_siphash(const struct inode *dir,
 	return 0;
 }
 
-static inline int fscrypt_d_revalidate(struct dentry *dentry,
-				       unsigned int flags)
+static inline int fscrypt_d_revalidate(struct inode *dir, const struct qstr *name,
+				       struct dentry *dentry, unsigned int flags)
 {
 	return 1;
 }
@@ -982,6 +1063,9 @@ static inline int fscrypt_prepare_lookup(struct inode *dir,
 	fname->usr_fname = &dentry->d_name;
 	fname->disk_name.name = (unsigned char *)dentry->d_name.name;
 	fname->disk_name.len = dentry->d_name.len;
+
+	fscrypt_prepare_dentry(dentry, false);
+
 	return 0;
 }
 

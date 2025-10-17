@@ -4,29 +4,69 @@
 #ifndef __IOMMUFD_PRIVATE_H
 #define __IOMMUFD_PRIVATE_H
 
-#include <linux/rwsem.h>
-#include <linux/xarray.h>
-#include <linux/refcount.h>
-#include <linux/uaccess.h>
 #include <linux/iommu.h>
+#include <linux/iommufd.h>
 #include <linux/iova_bitmap.h>
+#include <linux/maple_tree.h>
+#include <linux/rwsem.h>
+#include <linux/uaccess.h>
+#include <linux/xarray.h>
 #include <uapi/linux/iommufd.h>
+
+#include "../iommu-priv.h"
 
 struct iommu_domain;
 struct iommu_group;
 struct iommu_option;
 struct iommufd_device;
 
+struct iommufd_sw_msi_map {
+	struct list_head sw_msi_item;
+	phys_addr_t sw_msi_start;
+	phys_addr_t msi_addr;
+	unsigned int pgoff;
+	unsigned int id;
+};
+
+/* Bitmap of struct iommufd_sw_msi_map::id */
+struct iommufd_sw_msi_maps {
+	DECLARE_BITMAP(bitmap, 64);
+};
+
+#ifdef CONFIG_IRQ_MSI_IOMMU
+int iommufd_sw_msi_install(struct iommufd_ctx *ictx,
+			   struct iommufd_hwpt_paging *hwpt_paging,
+			   struct iommufd_sw_msi_map *msi_map);
+#endif
+
 struct iommufd_ctx {
 	struct file *file;
 	struct xarray objects;
 	struct xarray groups;
 	wait_queue_head_t destroy_wait;
+	struct rw_semaphore ioas_creation_lock;
+	struct maple_tree mt_mmap;
+
+	struct mutex sw_msi_lock;
+	struct list_head sw_msi_list;
+	unsigned int sw_msi_id;
 
 	u8 account_mode;
 	/* Compatibility with VFIO no iommu */
 	u8 no_iommu_mode;
 	struct iommufd_ioas *vfio_ioas;
+};
+
+/* Entry for iommufd_ctx::mt_mmap */
+struct iommufd_mmap {
+	struct iommufd_object *owner;
+
+	/* Page-shifted start position in mt_mmap to validate vma->vm_pgoff */
+	unsigned long vm_pgoff;
+
+	/* Physical range for io_remap_pfn_range() */
+	phys_addr_t mmio_addr;
+	size_t length;
 };
 
 /*
@@ -67,6 +107,10 @@ int iopt_map_user_pages(struct iommufd_ctx *ictx, struct io_pagetable *iopt,
 			unsigned long *iova, void __user *uptr,
 			unsigned long length, int iommu_prot,
 			unsigned int flags);
+int iopt_map_file_pages(struct iommufd_ctx *ictx, struct io_pagetable *iopt,
+			unsigned long *iova, struct file *file,
+			unsigned long start, unsigned long length,
+			int iommu_prot, unsigned int flags);
 int iopt_map_pages(struct io_pagetable *iopt, struct list_head *pages_list,
 		   unsigned long length, unsigned long *dst_iova,
 		   int iommu_prot, unsigned int flags);
@@ -105,6 +149,7 @@ struct iommufd_ucmd {
 	void __user *ubuffer;
 	u32 user_size;
 	void *cmd;
+	struct iommufd_object *new_obj;
 };
 
 int iommufd_vfio_ioctl(struct iommufd_ctx *ictx, unsigned int cmd,
@@ -120,33 +165,11 @@ static inline int iommufd_ucmd_respond(struct iommufd_ucmd *ucmd,
 	return 0;
 }
 
-enum iommufd_object_type {
-	IOMMUFD_OBJ_NONE,
-	IOMMUFD_OBJ_ANY = IOMMUFD_OBJ_NONE,
-	IOMMUFD_OBJ_DEVICE,
-	IOMMUFD_OBJ_HWPT_PAGING,
-	IOMMUFD_OBJ_HWPT_NESTED,
-	IOMMUFD_OBJ_IOAS,
-	IOMMUFD_OBJ_ACCESS,
-#ifdef CONFIG_IOMMUFD_TEST
-	IOMMUFD_OBJ_SELFTEST,
-#endif
-	IOMMUFD_OBJ_MAX,
-};
-
-/* Base struct for all objects with a userspace ID handle. */
-struct iommufd_object {
-	refcount_t shortterm_users;
-	refcount_t users;
-	enum iommufd_object_type type;
-	unsigned int id;
-};
-
 static inline bool iommufd_lock_obj(struct iommufd_object *obj)
 {
 	if (!refcount_inc_not_zero(&obj->users))
 		return false;
-	if (!refcount_inc_not_zero(&obj->shortterm_users)) {
+	if (!refcount_inc_not_zero(&obj->wait_cnt)) {
 		/*
 		 * If the caller doesn't already have a ref on obj this must be
 		 * called under the xa_lock. Otherwise the caller is holding a
@@ -164,11 +187,11 @@ static inline void iommufd_put_object(struct iommufd_ctx *ictx,
 				      struct iommufd_object *obj)
 {
 	/*
-	 * Users first, then shortterm so that REMOVE_WAIT_SHORTTERM never sees
-	 * a spurious !0 users with a 0 shortterm_users.
+	 * Users first, then wait_cnt so that REMOVE_WAIT never sees a spurious
+	 * !0 users with a 0 wait_cnt.
 	 */
 	refcount_dec(&obj->users);
-	if (refcount_dec_and_test(&obj->shortterm_users))
+	if (refcount_dec_and_test(&obj->wait_cnt))
 		wake_up_interruptible_all(&ictx->destroy_wait);
 }
 
@@ -179,7 +202,8 @@ void iommufd_object_finalize(struct iommufd_ctx *ictx,
 			     struct iommufd_object *obj);
 
 enum {
-	REMOVE_WAIT_SHORTTERM = 1,
+	REMOVE_WAIT		= BIT(0),
+	REMOVE_OBJ_TOMBSTONE	= BIT(1),
 };
 int iommufd_object_remove(struct iommufd_ctx *ictx,
 			  struct iommufd_object *to_destroy, u32 id,
@@ -187,15 +211,35 @@ int iommufd_object_remove(struct iommufd_ctx *ictx,
 
 /*
  * The caller holds a users refcount and wants to destroy the object. At this
- * point the caller has no shortterm_users reference and at least the xarray
- * will be holding one.
+ * point the caller has no wait_cnt reference and at least the xarray will be
+ * holding one.
  */
 static inline void iommufd_object_destroy_user(struct iommufd_ctx *ictx,
 					       struct iommufd_object *obj)
 {
 	int ret;
 
-	ret = iommufd_object_remove(ictx, obj, obj->id, REMOVE_WAIT_SHORTTERM);
+	ret = iommufd_object_remove(ictx, obj, obj->id, REMOVE_WAIT);
+
+	/*
+	 * If there is a bug and we couldn't destroy the object then we did put
+	 * back the caller's users refcount and will eventually try to free it
+	 * again during close.
+	 */
+	WARN_ON(ret);
+}
+
+/*
+ * Similar to iommufd_object_destroy_user(), except that the object ID is left
+ * reserved/tombstoned.
+ */
+static inline void iommufd_object_tombstone_user(struct iommufd_ctx *ictx,
+						 struct iommufd_object *obj)
+{
+	int ret;
+
+	ret = iommufd_object_remove(ictx, obj, obj->id,
+				    REMOVE_WAIT | REMOVE_OBJ_TOMBSTONE);
 
 	/*
 	 * If there is a bug and we couldn't destroy the object then we did put
@@ -222,6 +266,11 @@ iommufd_object_put_and_try_destroy(struct iommufd_ctx *ictx,
 	iommufd_object_remove(ictx, obj, obj->id, 0);
 }
 
+/*
+ * Callers of these normal object allocators must call iommufd_object_finalize()
+ * to finalize the object, or call iommufd_object_abort_and_destroy() to revert
+ * the allocation.
+ */
 struct iommufd_object *_iommufd_object_alloc(struct iommufd_ctx *ictx,
 					     size_t size,
 					     enum iommufd_object_type type);
@@ -237,6 +286,26 @@ struct iommufd_object *_iommufd_object_alloc(struct iommufd_ctx *ictx,
 
 #define iommufd_object_alloc(ictx, ptr, type) \
 	__iommufd_object_alloc(ictx, ptr, type, obj)
+
+/*
+ * Callers of these _ucmd allocators should not call iommufd_object_finalize()
+ * or iommufd_object_abort_and_destroy(), as the core automatically does that.
+ */
+struct iommufd_object *
+_iommufd_object_alloc_ucmd(struct iommufd_ucmd *ucmd, size_t size,
+			   enum iommufd_object_type type);
+
+#define __iommufd_object_alloc_ucmd(ucmd, ptr, type, obj)                      \
+	container_of(_iommufd_object_alloc_ucmd(                               \
+			     ucmd,                                             \
+			     sizeof(*(ptr)) + BUILD_BUG_ON_ZERO(               \
+						      offsetof(typeof(*(ptr)), \
+							       obj) != 0),     \
+			     type),                                            \
+		     typeof(*(ptr)), obj)
+
+#define iommufd_object_alloc_ucmd(ucmd, ptr, type) \
+	__iommufd_object_alloc_ucmd(ucmd, ptr, type, obj)
 
 /*
  * The IO Address Space (IOAS) pagetable is a virtual page table backed by the
@@ -262,8 +331,7 @@ struct iommufd_ioas {
 static inline struct iommufd_ioas *iommufd_get_ioas(struct iommufd_ctx *ictx,
 						    u32 id)
 {
-	return container_of(iommufd_get_object(ictx, id,
-					       IOMMUFD_OBJ_IOAS),
+	return container_of(iommufd_get_object(ictx, id, IOMMUFD_OBJ_IOAS),
 			    struct iommufd_ioas, obj);
 }
 
@@ -273,6 +341,8 @@ void iommufd_ioas_destroy(struct iommufd_object *obj);
 int iommufd_ioas_iova_ranges(struct iommufd_ucmd *ucmd);
 int iommufd_ioas_allow_iovas(struct iommufd_ucmd *ucmd);
 int iommufd_ioas_map(struct iommufd_ucmd *ucmd);
+int iommufd_ioas_map_file(struct iommufd_ucmd *ucmd);
+int iommufd_ioas_change_process(struct iommufd_ucmd *ucmd);
 int iommufd_ioas_copy(struct iommufd_ucmd *ucmd);
 int iommufd_ioas_unmap(struct iommufd_ucmd *ucmd);
 int iommufd_ioas_option(struct iommufd_ucmd *ucmd);
@@ -292,6 +362,8 @@ int iommufd_check_iova_range(struct io_pagetable *iopt,
 struct iommufd_hw_pagetable {
 	struct iommufd_object obj;
 	struct iommu_domain *domain;
+	struct iommufd_fault *fault;
+	bool pasid_compat : 1;
 };
 
 struct iommufd_hwpt_paging {
@@ -299,15 +371,16 @@ struct iommufd_hwpt_paging {
 	struct iommufd_ioas *ioas;
 	bool auto_domain : 1;
 	bool enforce_cache_coherency : 1;
-	bool msi_cookie : 1;
 	bool nest_parent : 1;
 	/* Head at iommufd_ioas::hwpt_list */
 	struct list_head hwpt_item;
+	struct iommufd_sw_msi_maps present_sw_msi;
 };
 
 struct iommufd_hwpt_nested {
 	struct iommufd_hw_pagetable common;
 	struct iommufd_hwpt_paging *parent;
+	struct iommufd_viommu *viommu;
 };
 
 static inline bool hwpt_is_paging(struct iommufd_hw_pagetable *hwpt)
@@ -319,6 +392,25 @@ static inline struct iommufd_hwpt_paging *
 to_hwpt_paging(struct iommufd_hw_pagetable *hwpt)
 {
 	return container_of(hwpt, struct iommufd_hwpt_paging, common);
+}
+
+static inline struct iommufd_hwpt_nested *
+to_hwpt_nested(struct iommufd_hw_pagetable *hwpt)
+{
+	return container_of(hwpt, struct iommufd_hwpt_nested, common);
+}
+
+static inline struct iommufd_hwpt_paging *
+find_hwpt_paging(struct iommufd_hw_pagetable *hwpt)
+{
+	switch (hwpt->obj.type) {
+	case IOMMUFD_OBJ_HWPT_PAGING:
+		return to_hwpt_paging(hwpt);
+	case IOMMUFD_OBJ_HWPT_NESTED:
+		return to_hwpt_nested(hwpt)->parent;
+	default:
+		return NULL;
+	}
 }
 
 static inline struct iommufd_hwpt_paging *
@@ -342,13 +434,13 @@ int iommufd_hwpt_get_dirty_bitmap(struct iommufd_ucmd *ucmd);
 
 struct iommufd_hwpt_paging *
 iommufd_hwpt_paging_alloc(struct iommufd_ctx *ictx, struct iommufd_ioas *ioas,
-			  struct iommufd_device *idev, u32 flags,
-			  bool immediate_attach,
+			  struct iommufd_device *idev, ioasid_t pasid,
+			  u32 flags, bool immediate_attach,
 			  const struct iommu_user_data *user_data);
 int iommufd_hw_pagetable_attach(struct iommufd_hw_pagetable *hwpt,
-				struct iommufd_device *idev);
+				struct iommufd_device *idev, ioasid_t pasid);
 struct iommufd_hw_pagetable *
-iommufd_hw_pagetable_detach(struct iommufd_device *idev);
+iommufd_hw_pagetable_detach(struct iommufd_device *idev, ioasid_t pasid);
 void iommufd_hwpt_paging_destroy(struct iommufd_object *obj);
 void iommufd_hwpt_paging_abort(struct iommufd_object *obj);
 void iommufd_hwpt_nested_destroy(struct iommufd_object *obj);
@@ -362,9 +454,8 @@ static inline void iommufd_hw_pagetable_put(struct iommufd_ctx *ictx,
 	if (hwpt->obj.type == IOMMUFD_OBJ_HWPT_PAGING) {
 		struct iommufd_hwpt_paging *hwpt_paging = to_hwpt_paging(hwpt);
 
-		lockdep_assert_not_held(&hwpt_paging->ioas->mutex);
-
 		if (hwpt_paging->auto_domain) {
+			lockdep_assert_not_held(&hwpt_paging->ioas->mutex);
 			iommufd_object_put_and_try_destroy(ictx, &hwpt->obj);
 			return;
 		}
@@ -372,13 +463,15 @@ static inline void iommufd_hw_pagetable_put(struct iommufd_ctx *ictx,
 	refcount_dec(&hwpt->obj.users);
 }
 
+struct iommufd_attach;
+
 struct iommufd_group {
 	struct kref ref;
 	struct mutex lock;
 	struct iommufd_ctx *ictx;
 	struct iommu_group *group;
-	struct iommufd_hw_pagetable *hwpt;
-	struct list_head device_list;
+	struct xarray pasid_attach;
+	struct iommufd_sw_msi_maps required_sw_msi;
 	phys_addr_t sw_msi_start;
 };
 
@@ -395,6 +488,8 @@ struct iommufd_device {
 	/* always the physical device */
 	struct device *dev;
 	bool enforce_cache_coherency;
+	struct iommufd_vdevice *vdev;
+	bool destroying;
 };
 
 static inline struct iommufd_device *
@@ -405,6 +500,7 @@ iommufd_get_device(struct iommufd_ucmd *ucmd, u32 id)
 			    struct iommufd_device, obj);
 }
 
+void iommufd_device_pre_destroy(struct iommufd_object *obj);
 void iommufd_device_destroy(struct iommufd_object *obj);
 int iommufd_get_hw_info(struct iommufd_ucmd *ucmd);
 
@@ -422,9 +518,188 @@ struct iommufd_access {
 
 int iopt_add_access(struct io_pagetable *iopt, struct iommufd_access *access);
 void iopt_remove_access(struct io_pagetable *iopt,
-			struct iommufd_access *access,
-			u32 iopt_access_list_id);
+			struct iommufd_access *access, u32 iopt_access_list_id);
 void iommufd_access_destroy_object(struct iommufd_object *obj);
+
+/* iommufd_access for internal use */
+static inline bool iommufd_access_is_internal(struct iommufd_access *access)
+{
+	return !access->ictx;
+}
+
+struct iommufd_access *iommufd_access_create_internal(struct iommufd_ctx *ictx);
+
+static inline void
+iommufd_access_destroy_internal(struct iommufd_ctx *ictx,
+				struct iommufd_access *access)
+{
+	iommufd_object_destroy_user(ictx, &access->obj);
+}
+
+int iommufd_access_attach_internal(struct iommufd_access *access,
+				   struct iommufd_ioas *ioas);
+
+static inline void iommufd_access_detach_internal(struct iommufd_access *access)
+{
+	iommufd_access_detach(access);
+}
+
+struct iommufd_eventq {
+	struct iommufd_object obj;
+	struct iommufd_ctx *ictx;
+	struct file *filep;
+
+	spinlock_t lock; /* protects the deliver list */
+	struct list_head deliver;
+
+	struct wait_queue_head wait_queue;
+};
+
+struct iommufd_attach_handle {
+	struct iommu_attach_handle handle;
+	struct iommufd_device *idev;
+};
+
+/* Convert an iommu attach handle to iommufd handle. */
+#define to_iommufd_handle(hdl)	container_of(hdl, struct iommufd_attach_handle, handle)
+
+/*
+ * An iommufd_fault object represents an interface to deliver I/O page faults
+ * to the user space. These objects are created/destroyed by the user space and
+ * associated with hardware page table objects during page-table allocation.
+ */
+struct iommufd_fault {
+	struct iommufd_eventq common;
+	struct mutex mutex; /* serializes response flows */
+	struct xarray response;
+};
+
+static inline struct iommufd_fault *
+eventq_to_fault(struct iommufd_eventq *eventq)
+{
+	return container_of(eventq, struct iommufd_fault, common);
+}
+
+static inline struct iommufd_fault *
+iommufd_get_fault(struct iommufd_ucmd *ucmd, u32 id)
+{
+	return container_of(iommufd_get_object(ucmd->ictx, id,
+					       IOMMUFD_OBJ_FAULT),
+			    struct iommufd_fault, common.obj);
+}
+
+int iommufd_fault_alloc(struct iommufd_ucmd *ucmd);
+void iommufd_fault_destroy(struct iommufd_object *obj);
+int iommufd_fault_iopf_handler(struct iopf_group *group);
+void iommufd_auto_response_faults(struct iommufd_hw_pagetable *hwpt,
+				  struct iommufd_attach_handle *handle);
+
+/* An iommufd_vevent represents a vIOMMU event in an iommufd_veventq */
+struct iommufd_vevent {
+	struct iommufd_vevent_header header;
+	struct list_head node; /* for iommufd_eventq::deliver */
+	ssize_t data_len;
+	u64 event_data[] __counted_by(data_len);
+};
+
+#define vevent_for_lost_events_header(vevent) \
+	(vevent->header.flags & IOMMU_VEVENTQ_FLAG_LOST_EVENTS)
+
+/*
+ * An iommufd_veventq object represents an interface to deliver vIOMMU events to
+ * the user space. It is created/destroyed by the user space and associated with
+ * a vIOMMU object during the allocations.
+ */
+struct iommufd_veventq {
+	struct iommufd_eventq common;
+	struct iommufd_viommu *viommu;
+	struct list_head node; /* for iommufd_viommu::veventqs */
+	struct iommufd_vevent lost_events_header;
+
+	enum iommu_veventq_type type;
+	unsigned int depth;
+
+	/* Use common.lock for protection */
+	u32 num_events;
+	u32 sequence;
+};
+
+static inline struct iommufd_veventq *
+eventq_to_veventq(struct iommufd_eventq *eventq)
+{
+	return container_of(eventq, struct iommufd_veventq, common);
+}
+
+static inline struct iommufd_veventq *
+iommufd_get_veventq(struct iommufd_ucmd *ucmd, u32 id)
+{
+	return container_of(iommufd_get_object(ucmd->ictx, id,
+					       IOMMUFD_OBJ_VEVENTQ),
+			    struct iommufd_veventq, common.obj);
+}
+
+int iommufd_veventq_alloc(struct iommufd_ucmd *ucmd);
+void iommufd_veventq_destroy(struct iommufd_object *obj);
+void iommufd_veventq_abort(struct iommufd_object *obj);
+
+static inline void iommufd_vevent_handler(struct iommufd_veventq *veventq,
+					  struct iommufd_vevent *vevent)
+{
+	struct iommufd_eventq *eventq = &veventq->common;
+
+	lockdep_assert_held(&eventq->lock);
+
+	/*
+	 * Remove the lost_events_header and add the new node at the same time.
+	 * Note the new node can be lost_events_header, for a sequence update.
+	 */
+	if (list_is_last(&veventq->lost_events_header.node, &eventq->deliver))
+		list_del(&veventq->lost_events_header.node);
+	list_add_tail(&vevent->node, &eventq->deliver);
+	vevent->header.sequence = veventq->sequence;
+	veventq->sequence = (veventq->sequence + 1) & INT_MAX;
+
+	wake_up_interruptible(&eventq->wait_queue);
+}
+
+static inline struct iommufd_viommu *
+iommufd_get_viommu(struct iommufd_ucmd *ucmd, u32 id)
+{
+	return container_of(iommufd_get_object(ucmd->ictx, id,
+					       IOMMUFD_OBJ_VIOMMU),
+			    struct iommufd_viommu, obj);
+}
+
+static inline struct iommufd_veventq *
+iommufd_viommu_find_veventq(struct iommufd_viommu *viommu,
+			    enum iommu_veventq_type type)
+{
+	struct iommufd_veventq *veventq, *next;
+
+	lockdep_assert_held(&viommu->veventqs_rwsem);
+
+	list_for_each_entry_safe(veventq, next, &viommu->veventqs, node) {
+		if (veventq->type == type)
+			return veventq;
+	}
+	return NULL;
+}
+
+int iommufd_viommu_alloc_ioctl(struct iommufd_ucmd *ucmd);
+void iommufd_viommu_destroy(struct iommufd_object *obj);
+int iommufd_vdevice_alloc_ioctl(struct iommufd_ucmd *ucmd);
+void iommufd_vdevice_destroy(struct iommufd_object *obj);
+void iommufd_vdevice_abort(struct iommufd_object *obj);
+int iommufd_hw_queue_alloc_ioctl(struct iommufd_ucmd *ucmd);
+void iommufd_hw_queue_destroy(struct iommufd_object *obj);
+
+static inline struct iommufd_vdevice *
+iommufd_get_vdevice(struct iommufd_ctx *ictx, u32 id)
+{
+	return container_of(iommufd_get_object(ictx, id,
+					       IOMMUFD_OBJ_VDEVICE),
+			    struct iommufd_vdevice, obj);
+}
 
 #ifdef CONFIG_IOMMUFD_TEST
 int iommufd_test(struct iommufd_ucmd *ucmd);

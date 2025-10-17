@@ -236,7 +236,7 @@ static int ishtp_cl_device_probe(struct device *dev)
  *
  * Return: 1 if dev & drv matches, 0 otherwise.
  */
-static int ishtp_cl_bus_match(struct device *dev, struct device_driver *drv)
+static int ishtp_cl_bus_match(struct device *dev, const struct device_driver *drv)
 {
 	struct ishtp_cl_device *device = to_ishtp_cl_device(dev);
 	struct ishtp_cl_driver *driver = to_ishtp_cl_driver(drv);
@@ -722,6 +722,8 @@ void ishtp_bus_remove_all_clients(struct ishtp_device *ishtp_dev,
 	spin_lock_irqsave(&ishtp_dev->cl_list_lock, flags);
 	list_for_each_entry(cl, &ishtp_dev->cl_list, link) {
 		cl->state = ISHTP_CL_DISCONNECTED;
+		if (warm_reset && cl->device->reference_count)
+			continue;
 
 		/*
 		 * Wake any pending process. The waiter would check dev->state
@@ -842,6 +844,7 @@ EXPORT_SYMBOL(ishtp_device);
 
 /**
  * ishtp_wait_resume() - Wait for IPC resume
+ * @dev: ishtp device
  *
  * Wait for IPC resume
  *
@@ -849,9 +852,6 @@ EXPORT_SYMBOL(ishtp_device);
  */
 bool ishtp_wait_resume(struct ishtp_device *dev)
 {
-	/* 50ms to get resume response */
-	#define WAIT_FOR_RESUME_ACK_MS		50
-
 	/* Waiting to get resume response */
 	if (dev->resume_flag)
 		wait_event_interruptible_timeout(dev->resume_wait,
@@ -929,4 +929,5 @@ static void __exit ishtp_bus_unregister(void)
 module_init(ishtp_bus_register);
 module_exit(ishtp_bus_unregister);
 
+MODULE_DESCRIPTION("ISHTP bus driver");
 MODULE_LICENSE("GPL");

@@ -236,7 +236,7 @@ int mdp_try_crop(struct mdp_m2m_ctx *ctx, struct v4l2_rect *r,
 	u32 framew, frameh, walign, halign;
 	int ret;
 
-	dev_dbg(dev, "%d target:%d, set:(%d,%d) %ux%u", ctx->id,
+	dev_dbg(dev, "%d target:%d, set:(%d,%d)/%ux%u", ctx->id,
 		s->target, s->r.left, s->r.top, s->r.width, s->r.height);
 
 	left = s->r.left;
@@ -275,7 +275,7 @@ int mdp_try_crop(struct mdp_m2m_ctx *ctx, struct v4l2_rect *r,
 	r->width = right - left;
 	r->height = bottom - top;
 
-	dev_dbg(dev, "%d crop:(%d,%d) %ux%u", ctx->id,
+	dev_dbg(dev, "%d crop:(%d,%d)/%ux%u", ctx->id,
 		r->left, r->top, r->width, r->height);
 	return 0;
 }
@@ -302,6 +302,24 @@ int mdp_check_scaling_ratio(const struct v4l2_rect *crop,
 	    (comp_h / crop_h) > limit->v_scale_up_max)
 		return -ERANGE;
 	return 0;
+}
+
+bool mdp_check_pp_enable(struct mdp_dev *mdp, struct mdp_frame *frame)
+{
+	u32 s, r1, r2;
+
+	if (!mdp || !frame)
+		return false;
+
+	if (!mdp->mdp_data->pp_criteria)
+		return false;
+
+	s = mdp->mdp_data->pp_criteria->width *
+		mdp->mdp_data->pp_criteria->height;
+	r1 = frame->crop.c.width * frame->crop.c.height;
+	r2 = frame->compose.width * frame->compose.height;
+
+	return (r1 >= s || r2 >= s);
 }
 
 /* Stride that is accepted by MDP HW */

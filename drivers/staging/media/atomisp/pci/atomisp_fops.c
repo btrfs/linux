@@ -5,17 +5,6 @@
  * Copyright (c) 2010 Intel Corporation. All Rights Reserved.
  *
  * Copyright (c) 2010 Silicon Hive www.siliconhive.com.
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License version
- * 2 as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- *
  */
 
 #include <linux/module.h>
@@ -245,9 +234,6 @@ static int atomisp_q_video_buffers_to_css(struct atomisp_sub_device *asd,
 	if (WARN_ON(css_pipe_id >= IA_CSS_PIPE_ID_NUM))
 		return -EINVAL;
 
-	if (pipe->stopping)
-		return -EINVAL;
-
 	space = ATOMISP_CSS_Q_DEPTH - atomisp_buffers_in_css(pipe);
 	while (space--) {
 		struct ia_css_frame *frame;
@@ -378,7 +364,7 @@ static void atomisp_buf_queue(struct vb2_buffer *vb)
 	mutex_lock(&asd->isp->mutex);
 
 	ret = atomisp_pipe_check(pipe, false);
-	if (ret || pipe->stopping) {
+	if (ret) {
 		spin_lock_irqsave(&pipe->irq_lock, irqflags);
 		atomisp_buffer_done(frame, VB2_BUF_STATE_ERROR);
 		spin_unlock_irqrestore(&pipe->irq_lock, irqflags);
@@ -445,12 +431,8 @@ const struct vb2_ops atomisp_vb2_ops = {
 
 static void atomisp_dev_init_struct(struct atomisp_device *isp)
 {
-	unsigned int i;
-
 	isp->isp_fatal_error = false;
 
-	for (i = 0; i < isp->input_cnt; i++)
-		isp->inputs[i].asd = NULL;
 	/*
 	 * For Merrifield, frequency is scalable.
 	 * After boot-up, the default frequency is 200MHz.
@@ -524,21 +506,12 @@ static int atomisp_open(struct file *file)
 	}
 
 	atomisp_dev_init_struct(isp);
-
-	ret = v4l2_subdev_call(isp->flash, core, s_power, 1);
-	if (ret < 0 && ret != -ENODEV && ret != -ENOIOCTLCMD) {
-		dev_err(isp->dev, "Failed to power-on flash\n");
-		goto css_error;
-	}
-
 	atomisp_subdev_init_struct(asd);
 
 	pipe->users++;
 	mutex_unlock(&isp->mutex);
 	return 0;
 
-css_error:
-	pm_runtime_put(vdev->v4l2_dev->dev);
 error:
 	mutex_unlock(&isp->mutex);
 	v4l2_fh_release(file);
@@ -552,8 +525,6 @@ static int atomisp_release(struct file *file)
 	struct atomisp_video_pipe *pipe = atomisp_to_video_pipe(vdev);
 	struct atomisp_sub_device *asd = pipe->asd;
 	struct v4l2_subdev_fh fh;
-	struct v4l2_rect clear_compose = {0};
-	int ret;
 
 	v4l2_fh_init(&fh.vfh, vdev);
 
@@ -566,48 +537,16 @@ static int atomisp_release(struct file *file)
 
 	pipe->users--;
 
-	/*
-	 * A little trick here:
-	 * file injection input resolution is recorded in the sink pad,
-	 * therefore can not be cleared when releaseing one device node.
-	 * The sink pad setting can only be cleared when all device nodes
-	 * get released.
-	 */
-	{
-		struct v4l2_mbus_framefmt isp_sink_fmt = { 0 };
-
-		atomisp_subdev_set_ffmt(&asd->subdev, fh.state,
-					V4L2_SUBDEV_FORMAT_ACTIVE,
-					ATOMISP_SUBDEV_PAD_SINK, &isp_sink_fmt);
-	}
-
 	atomisp_css_free_stat_buffers(asd);
 	atomisp_free_internal_buffers(asd);
 
-	if (isp->inputs[asd->input_curr].asd == asd) {
-		ret = v4l2_subdev_call(isp->inputs[asd->input_curr].camera,
-				       core, s_power, 0);
-		if (ret && ret != -ENOIOCTLCMD)
-			dev_warn(isp->dev, "Failed to power-off sensor\n");
-
-		/* clear the asd field to show this camera is not used */
-		isp->inputs[asd->input_curr].asd = NULL;
-	}
+	atomisp_s_sensor_power(isp, asd->input_curr, 0);
 
 	atomisp_destroy_pipes_stream(asd);
-
-	ret = v4l2_subdev_call(isp->flash, core, s_power, 0);
-	if (ret < 0 && ret != -ENODEV && ret != -ENOIOCTLCMD)
-		dev_warn(isp->dev, "Failed to power-off flash\n");
 
 	if (pm_runtime_put_sync(vdev->v4l2_dev->dev) < 0)
 		dev_err(isp->dev, "Failed to power off device\n");
 
-	atomisp_subdev_set_selection(&asd->subdev, fh.state,
-				     V4L2_SUBDEV_FORMAT_ACTIVE,
-				     ATOMISP_SUBDEV_PAD_SOURCE,
-				     V4L2_SEL_TGT_COMPOSE, 0,
-				     &clear_compose);
 	mutex_unlock(&isp->mutex);
 	return 0;
 }

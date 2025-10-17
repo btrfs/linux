@@ -110,8 +110,10 @@ static int imx8_pcie_phy_power_on(struct phy *phy)
 		/* Source clock from SoC internal PLL */
 		writel(ANA_PLL_CLK_OUT_TO_EXT_IO_SEL,
 		       imx8_phy->base + IMX8MM_PCIE_PHY_CMN_REG062);
-		writel(AUX_PLL_REFCLK_SEL_SYS_PLL,
-		       imx8_phy->base + IMX8MM_PCIE_PHY_CMN_REG063);
+		if (imx8_phy->drvdata->variant != IMX8MM) {
+			writel(AUX_PLL_REFCLK_SEL_SYS_PLL,
+			       imx8_phy->base + IMX8MM_PCIE_PHY_CMN_REG063);
+		}
 		val = ANA_AUX_RX_TX_SEL_TX | ANA_AUX_TX_TERM;
 		writel(val | ANA_AUX_RX_TERM_GND_EN,
 		       imx8_phy->base + IMX8MM_PCIE_PHY_CMN_REG064);
@@ -139,25 +141,29 @@ static int imx8_pcie_phy_power_on(struct phy *phy)
 			   IMX8MM_GPR_PCIE_REF_CLK_PLL);
 	usleep_range(100, 200);
 
+	reset_control_deassert(imx8_phy->perst);
+	reset_control_deassert(imx8_phy->reset);
+	usleep_range(200, 500);
+
 	/* Do the PHY common block reset */
 	regmap_update_bits(imx8_phy->iomuxc_gpr, IOMUXC_GPR14,
 			   IMX8MM_GPR_PCIE_CMN_RST,
 			   IMX8MM_GPR_PCIE_CMN_RST);
 
-	switch (imx8_phy->drvdata->variant) {
-	case IMX8MP:
-		reset_control_deassert(imx8_phy->perst);
-		fallthrough;
-	case IMX8MM:
-		reset_control_deassert(imx8_phy->reset);
-		usleep_range(200, 500);
-		break;
-	}
-
 	/* Polling to check the phy is ready or not. */
 	ret = readl_poll_timeout(imx8_phy->base + IMX8MM_PCIE_PHY_CMN_REG075,
 				 val, val == ANA_PLL_DONE, 10, 20000);
 	return ret;
+}
+
+static int imx8_pcie_phy_power_off(struct phy *phy)
+{
+	struct imx8_pcie_phy *imx8_phy = phy_get_drvdata(phy);
+
+	reset_control_assert(imx8_phy->reset);
+	reset_control_assert(imx8_phy->perst);
+
+	return 0;
 }
 
 static int imx8_pcie_phy_init(struct phy *phy)
@@ -180,6 +186,7 @@ static const struct phy_ops imx8_pcie_phy_ops = {
 	.init		= imx8_pcie_phy_init,
 	.exit		= imx8_pcie_phy_exit,
 	.power_on	= imx8_pcie_phy_power_on,
+	.power_off	= imx8_pcie_phy_power_off,
 	.owner		= THIS_MODULE,
 };
 
@@ -231,24 +238,21 @@ static int imx8_pcie_phy_probe(struct platform_device *pdev)
 		imx8_phy->clkreq_unused = false;
 
 	imx8_phy->clk = devm_clk_get(dev, "ref");
-	if (IS_ERR(imx8_phy->clk)) {
-		dev_err(dev, "failed to get imx pcie phy clock\n");
-		return PTR_ERR(imx8_phy->clk);
-	}
+	if (IS_ERR(imx8_phy->clk))
+		return dev_err_probe(dev, PTR_ERR(imx8_phy->clk),
+				     "failed to get imx pcie phy clock\n");
 
 	/* Grab GPR config register range */
 	imx8_phy->iomuxc_gpr =
 		 syscon_regmap_lookup_by_compatible(imx8_phy->drvdata->gpr);
-	if (IS_ERR(imx8_phy->iomuxc_gpr)) {
-		dev_err(dev, "unable to find iomuxc registers\n");
-		return PTR_ERR(imx8_phy->iomuxc_gpr);
-	}
+	if (IS_ERR(imx8_phy->iomuxc_gpr))
+		return dev_err_probe(dev, PTR_ERR(imx8_phy->iomuxc_gpr),
+				     "unable to find iomuxc registers\n");
 
 	imx8_phy->reset = devm_reset_control_get_exclusive(dev, "pciephy");
-	if (IS_ERR(imx8_phy->reset)) {
-		dev_err(dev, "Failed to get PCIEPHY reset control\n");
-		return PTR_ERR(imx8_phy->reset);
-	}
+	if (IS_ERR(imx8_phy->reset))
+		return dev_err_probe(dev, PTR_ERR(imx8_phy->reset),
+				     "Failed to get PCIEPHY reset control\n");
 
 	if (imx8_phy->drvdata->variant == IMX8MP) {
 		imx8_phy->perst =

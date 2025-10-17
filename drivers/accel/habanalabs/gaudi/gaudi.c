@@ -614,8 +614,6 @@ static int gaudi_set_fixed_properties(struct hl_device *hdev)
 	else
 		prop->mmu_pgt_size = MMU_PAGE_TABLES_SIZE;
 	prop->mmu_pte_size = HL_PTE_SIZE;
-	prop->mmu_hop_table_size = HOP_TABLE_SIZE_512_PTE;
-	prop->mmu_hop0_tables_total_size = HOP0_512_PTE_TABLES_TOTAL_SIZE;
 	prop->dram_page_size = PAGE_SIZE_2MB;
 	prop->device_mem_alloc_default_page_size = prop->dram_page_size;
 	prop->dram_supports_virtual_memory = false;
@@ -637,8 +635,8 @@ static int gaudi_set_fixed_properties(struct hl_device *hdev)
 	prop->pmmu.num_hops = MMU_ARCH_5_HOPS;
 	prop->pmmu.last_mask = LAST_MASK;
 	/* TODO: will be duplicated until implementing per-MMU props */
-	prop->pmmu.hop_table_size = prop->mmu_hop_table_size;
-	prop->pmmu.hop0_tables_total_size = prop->mmu_hop0_tables_total_size;
+	prop->pmmu.hop_table_size = HOP_TABLE_SIZE_512_PTE;
+	prop->pmmu.hop0_tables_total_size = HOP0_512_PTE_TABLES_TOTAL_SIZE;
 
 	/* PMMU and HPMMU are the same except of page size */
 	memcpy(&prop->pmmu_huge, &prop->pmmu, sizeof(prop->pmmu));
@@ -649,6 +647,7 @@ static int gaudi_set_fixed_properties(struct hl_device *hdev)
 	prop->dmmu.start_addr = (VA_HOST_SPACE_START + VA_HOST_SPACE_SIZE / 2);
 	prop->dmmu.end_addr = VA_HOST_SPACE_END;
 	prop->dmmu.page_size = PAGE_SIZE_2MB;
+	prop->dmmu.pgt_size = prop->mmu_pgt_size;
 
 	prop->cfg_size = CFG_SIZE;
 	prop->max_asid = MAX_ASID;
@@ -1640,10 +1639,8 @@ static int gaudi_late_init(struct hl_device *hdev)
 	}
 
 	rc = hl_fw_send_pci_access_msg(hdev, CPUCP_PACKET_ENABLE_PCI_ACCESS, 0x0);
-	if (rc) {
-		dev_err(hdev->dev, "Failed to enable PCI access from CPU\n");
+	if (rc)
 		return rc;
-	}
 
 	/* Scrub both SRAM and DRAM */
 	rc = hdev->asic_funcs->scrub_device_mem(hdev);
@@ -3652,7 +3649,7 @@ static int gaudi_mmu_init(struct hl_device *hdev)
 
 	for (i = 0 ; i < prop->max_asid ; i++) {
 		hop0_addr = prop->mmu_pgt_addr +
-				(i * prop->mmu_hop_table_size);
+				(i * prop->dmmu.hop_table_size);
 
 		rc = gaudi_mmu_update_asid_hop0_addr(hdev, i, hop0_addr);
 		if (rc) {
@@ -4155,13 +4152,7 @@ skip_reset:
 
 static int gaudi_suspend(struct hl_device *hdev)
 {
-	int rc;
-
-	rc = hl_fw_send_pci_access_msg(hdev, CPUCP_PACKET_DISABLE_PCI_ACCESS, 0x0);
-	if (rc)
-		dev_err(hdev->dev, "Failed to disable PCI access from CPU\n");
-
-	return rc;
+	return hl_fw_send_pci_access_msg(hdev, CPUCP_PACKET_DISABLE_PCI_ACCESS, 0x0);
 }
 
 static int gaudi_resume(struct hl_device *hdev)
@@ -4177,10 +4168,29 @@ static int gaudi_mmap(struct hl_device *hdev, struct vm_area_struct *vma,
 	vm_flags_set(vma, VM_IO | VM_PFNMAP | VM_DONTEXPAND | VM_DONTDUMP |
 			VM_DONTCOPY | VM_NORESERVE);
 
+#ifdef _HAS_DMA_MMAP_COHERENT
+	/*
+	 * If dma_alloc_coherent() returns a vmalloc address, set VM_MIXEDMAP
+	 * so vm_insert_page() can handle it safely. Without this, the kernel
+	 * may BUG_ON due to VM_PFNMAP.
+	 */
+	if (is_vmalloc_addr(cpu_addr))
+		vm_flags_set(vma, VM_MIXEDMAP);
+
 	rc = dma_mmap_coherent(hdev->dev, vma, cpu_addr,
 				(dma_addr - HOST_PHYS_BASE), size);
 	if (rc)
 		dev_err(hdev->dev, "dma_mmap_coherent error %d", rc);
+#else
+
+	rc = remap_pfn_range(vma, vma->vm_start,
+				virt_to_phys(cpu_addr) >> PAGE_SHIFT,
+				size, vma->vm_page_prot);
+	if (rc)
+		dev_err(hdev->dev, "remap_pfn_range error %d", rc);
+
+ #endif
+
 
 	return rc;
 }

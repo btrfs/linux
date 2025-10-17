@@ -58,17 +58,6 @@ void rtl_rfreg_delay(struct ieee80211_hw *hw, enum radio_path rfpath, u32 addr,
 }
 EXPORT_SYMBOL(rtl_rfreg_delay);
 
-void rtl_bb_delay(struct ieee80211_hw *hw, u32 addr, u32 data)
-{
-	if (addr >= 0xf9 && addr <= 0xfe) {
-		rtl_addr_delay(addr);
-	} else {
-		rtl_set_bbreg(hw, addr, MASKDWORD, data);
-		udelay(1);
-	}
-}
-EXPORT_SYMBOL(rtl_bb_delay);
-
 static void rtl_fw_do_work(const struct firmware *firmware, void *context,
 			   bool is_wow)
 {
@@ -144,7 +133,7 @@ static int rtl_op_start(struct ieee80211_hw *hw)
 	return err;
 }
 
-static void rtl_op_stop(struct ieee80211_hw *hw)
+static void rtl_op_stop(struct ieee80211_hw *hw, bool suspend)
 {
 	struct rtl_priv *rtlpriv = rtl_priv(hw);
 	struct rtl_mac *mac = rtl_mac(rtl_priv(hw));
@@ -547,7 +536,7 @@ static int rtl_op_suspend(struct ieee80211_hw *hw,
 	rtlhal->enter_pnp_sleep = true;
 
 	rtl_lps_leave(hw, true);
-	rtl_op_stop(hw);
+	rtl_op_stop(hw, false);
 	device_set_wakeup_enable(wiphy_dev(hw->wiphy), true);
 	return 0;
 }
@@ -577,7 +566,7 @@ static int rtl_op_resume(struct ieee80211_hw *hw)
 }
 #endif
 
-static int rtl_op_config(struct ieee80211_hw *hw, u32 changed)
+static int rtl_op_config(struct ieee80211_hw *hw, int radio_idx, u32 changed)
 {
 	struct rtl_priv *rtlpriv = rtl_priv(hw);
 	struct rtl_phy *rtlphy = &(rtlpriv->phy);
@@ -630,21 +619,6 @@ static int rtl_op_config(struct ieee80211_hw *hw, u32 changed)
 		} else {
 			rtl_swlps_rf_awake(hw);
 			rtlpriv->psc.sw_ps_enabled = false;
-		}
-	}
-
-	if (changed & IEEE80211_CONF_CHANGE_RETRY_LIMITS) {
-		rtl_dbg(rtlpriv, COMP_MAC80211, DBG_LOUD,
-			"IEEE80211_CONF_CHANGE_RETRY_LIMITS %x\n",
-			hw->conf.long_frame_max_tx_count);
-		/* brought up everything changes (changed == ~0) indicates first
-		 * open, so use our default value instead of that of wiphy.
-		 */
-		if (changed != ~0) {
-			mac->retry_long = hw->conf.long_frame_max_tx_count;
-			mac->retry_short = hw->conf.long_frame_max_tx_count;
-			rtlpriv->cfg->ops->set_hw_reg(hw, HW_VAR_RETRY_LIMIT,
-				(u8 *)(&hw->conf.long_frame_max_tx_count));
 		}
 	}
 
@@ -1903,6 +1877,10 @@ void rtl_init_sw_leds(struct ieee80211_hw *hw)
 EXPORT_SYMBOL(rtl_init_sw_leds);
 
 const struct ieee80211_ops rtl_ops = {
+	.add_chanctx = ieee80211_emulate_add_chanctx,
+	.remove_chanctx = ieee80211_emulate_remove_chanctx,
+	.change_chanctx = ieee80211_emulate_change_chanctx,
+	.switch_vif_chanctx = ieee80211_emulate_switch_vif_chanctx,
 	.start = rtl_op_start,
 	.stop = rtl_op_stop,
 	.tx = rtl_op_tx,

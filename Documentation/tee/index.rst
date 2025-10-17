@@ -10,6 +10,8 @@ TEE Subsystem
    tee
    op-tee
    amd-tee
+   ts-tee
+   qtee
 
 .. only::  subproject and html
 

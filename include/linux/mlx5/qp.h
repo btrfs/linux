@@ -149,6 +149,7 @@ enum {
 	MLX5_WQE_CTRL_CQ_UPDATE		= 2 << 2,
 	MLX5_WQE_CTRL_CQ_UPDATE_AND_EQE	= 3 << 2,
 	MLX5_WQE_CTRL_SOLICITED		= 1 << 1,
+	MLX5_WQE_CTRL_INITIATOR_SMALL_FENCE = 1 << 5,
 };
 
 enum {
@@ -236,13 +237,11 @@ enum {
 };
 
 enum {
-	MLX5_ETH_WQE_SVLAN              = 1 << 0,
 	MLX5_ETH_WQE_TRAILER_HDR_OUTER_IP_ASSOC = 1 << 26,
 	MLX5_ETH_WQE_TRAILER_HDR_OUTER_L4_ASSOC = 1 << 27,
 	MLX5_ETH_WQE_TRAILER_HDR_INNER_IP_ASSOC = 3 << 26,
 	MLX5_ETH_WQE_TRAILER_HDR_INNER_L4_ASSOC = 1 << 28,
 	MLX5_ETH_WQE_INSERT_TRAILER     = 1 << 30,
-	MLX5_ETH_WQE_INSERT_VLAN        = 1 << 15,
 };
 
 enum {
@@ -252,9 +251,15 @@ enum {
 	MLX5_ETH_WQE_SWP_OUTER_L4_UDP   = 1 << 5,
 };
 
+/* Metadata bits 0-7 are used by timestamping */
+/* Base shift for metadata bits used by IPsec and MACsec */
+#define MLX5_ETH_WQE_FT_META_SHIFT 8
+
 enum {
-	MLX5_ETH_WQE_FT_META_IPSEC = BIT(0),
-	MLX5_ETH_WQE_FT_META_MACSEC = BIT(1),
+	MLX5_ETH_WQE_FT_META_IPSEC = BIT(0) << MLX5_ETH_WQE_FT_META_SHIFT,
+	MLX5_ETH_WQE_FT_META_MACSEC = BIT(1) << MLX5_ETH_WQE_FT_META_SHIFT,
+	MLX5_ETH_WQE_FT_META_MACSEC_FS_ID_MASK =
+		GENMASK(5, 2) << MLX5_ETH_WQE_FT_META_SHIFT,
 };
 
 struct mlx5_wqe_eth_seg {
@@ -269,12 +274,11 @@ struct mlx5_wqe_eth_seg {
 	union {
 		struct {
 			__be16 sz;
-			u8     start[2];
+			union {
+				u8     start[2];
+				DECLARE_FLEX_ARRAY(u8, data);
+			};
 		} inline_hdr;
-		struct {
-			__be16 type;
-			__be16 vlan_tci;
-		} insert;
 		__be32 trailer;
 	};
 };
@@ -573,9 +577,12 @@ static inline const char *mlx5_qp_state_str(int state)
 
 static inline int mlx5_get_qp_default_ts(struct mlx5_core_dev *dev)
 {
-	return !MLX5_CAP_ROCE(dev, qp_ts_format) ?
-		       MLX5_TIMESTAMP_FORMAT_FREE_RUNNING :
-		       MLX5_TIMESTAMP_FORMAT_DEFAULT;
+	u8 supported_ts_cap = mlx5_get_roce_state(dev) ?
+			      MLX5_CAP_ROCE(dev, qp_ts_format) :
+			      MLX5_CAP_GEN(dev, sq_ts_format);
+
+	return supported_ts_cap ? MLX5_TIMESTAMP_FORMAT_DEFAULT :
+	       MLX5_TIMESTAMP_FORMAT_FREE_RUNNING;
 }
 
 #endif /* MLX5_QP_H */

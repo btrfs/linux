@@ -37,14 +37,16 @@
 #include <asm/apic.h>
 #include <asm/apicdef.h>
 #include <asm/hypervisor.h>
+#include <asm/mtrr.h>
 #include <asm/tlb.h>
 #include <asm/cpuidle_haltpoll.h>
+#include <asm/msr.h>
 #include <asm/ptrace.h>
 #include <asm/reboot.h>
 #include <asm/svm.h>
 #include <asm/e820/api.h>
 
-DEFINE_STATIC_KEY_FALSE(kvm_async_pf_enabled);
+DEFINE_STATIC_KEY_FALSE_RO(kvm_async_pf_enabled);
 
 static int kvmapf = 1;
 
@@ -65,6 +67,7 @@ static int __init parse_no_stealacc(char *arg)
 
 early_param("no-steal-acc", parse_no_stealacc);
 
+static DEFINE_PER_CPU_READ_MOSTLY(bool, async_pf_enabled);
 static DEFINE_PER_CPU_DECRYPTED(struct kvm_vcpu_pv_apf_data, apf_reason) __aligned(64);
 DEFINE_PER_CPU_DECRYPTED(struct kvm_steal_time, steal_time) __aligned(64) __visible;
 static int has_steal_clock = 0;
@@ -187,7 +190,7 @@ static void apf_task_wake_all(void)
 	}
 }
 
-void kvm_async_pf_task_wake(u32 token)
+static void kvm_async_pf_task_wake(u32 token)
 {
 	u32 key = hash_32(token, KVM_TASK_SLEEP_HASHBITS);
 	struct kvm_task_sleep_head *b = &async_pf_sleepers[key];
@@ -238,13 +241,12 @@ again:
 	/* A dummy token might be allocated and ultimately not used.  */
 	kfree(dummy);
 }
-EXPORT_SYMBOL_GPL(kvm_async_pf_task_wake);
 
 noinstr u32 kvm_read_and_reset_apf_flags(void)
 {
 	u32 flags = 0;
 
-	if (__this_cpu_read(apf_reason.enabled)) {
+	if (__this_cpu_read(async_pf_enabled)) {
 		flags = __this_cpu_read(apf_reason.flags);
 		__this_cpu_write(apf_reason.flags, 0);
 	}
@@ -295,11 +297,11 @@ DEFINE_IDTENTRY_SYSVEC(sysvec_kvm_asyncpf_interrupt)
 
 	inc_irq_stat(irq_hv_callback_count);
 
-	if (__this_cpu_read(apf_reason.enabled)) {
+	if (__this_cpu_read(async_pf_enabled)) {
 		token = __this_cpu_read(apf_reason.token);
 		kvm_async_pf_task_wake(token);
 		__this_cpu_write(apf_reason.token, 0);
-		wrmsrl(MSR_KVM_ASYNC_PF_ACK, 1);
+		wrmsrq(MSR_KVM_ASYNC_PF_ACK, 1);
 	}
 
 	set_irq_regs(old_regs);
@@ -325,7 +327,7 @@ static void kvm_register_steal_time(void)
 	if (!has_steal_clock)
 		return;
 
-	wrmsrl(MSR_KVM_STEAL_TIME, (slow_virt_to_phys(st) | KVM_MSR_ENABLED));
+	wrmsrq(MSR_KVM_STEAL_TIME, (slow_virt_to_phys(st) | KVM_MSR_ENABLED));
 	pr_debug("stealtime: cpu %d, msr %llx\n", cpu,
 		(unsigned long long) slow_virt_to_phys(st));
 }
@@ -359,10 +361,10 @@ static void kvm_guest_cpu_init(void)
 		if (kvm_para_has_feature(KVM_FEATURE_ASYNC_PF_VMEXIT))
 			pa |= KVM_ASYNC_PF_DELIVERY_AS_PF_VMEXIT;
 
-		wrmsrl(MSR_KVM_ASYNC_PF_INT, HYPERVISOR_CALLBACK_VECTOR);
+		wrmsrq(MSR_KVM_ASYNC_PF_INT, HYPERVISOR_CALLBACK_VECTOR);
 
-		wrmsrl(MSR_KVM_ASYNC_PF_EN, pa);
-		__this_cpu_write(apf_reason.enabled, 1);
+		wrmsrq(MSR_KVM_ASYNC_PF_EN, pa);
+		__this_cpu_write(async_pf_enabled, true);
 		pr_debug("setup async PF for cpu %d\n", smp_processor_id());
 	}
 
@@ -374,7 +376,7 @@ static void kvm_guest_cpu_init(void)
 		__this_cpu_write(kvm_apic_eoi, 0);
 		pa = slow_virt_to_phys(this_cpu_ptr(&kvm_apic_eoi))
 			| KVM_MSR_ENABLED;
-		wrmsrl(MSR_KVM_PV_EOI_EN, pa);
+		wrmsrq(MSR_KVM_PV_EOI_EN, pa);
 	}
 
 	if (has_steal_clock)
@@ -383,11 +385,11 @@ static void kvm_guest_cpu_init(void)
 
 static void kvm_pv_disable_apf(void)
 {
-	if (!__this_cpu_read(apf_reason.enabled))
+	if (!__this_cpu_read(async_pf_enabled))
 		return;
 
-	wrmsrl(MSR_KVM_ASYNC_PF_EN, 0);
-	__this_cpu_write(apf_reason.enabled, 0);
+	wrmsrq(MSR_KVM_ASYNC_PF_EN, 0);
+	__this_cpu_write(async_pf_enabled, false);
 
 	pr_debug("disable async PF for cpu %d\n", smp_processor_id());
 }
@@ -397,7 +399,7 @@ static void kvm_disable_steal_time(void)
 	if (!has_steal_clock)
 		return;
 
-	wrmsr(MSR_KVM_STEAL_TIME, 0, 0);
+	wrmsrq(MSR_KVM_STEAL_TIME, 0);
 }
 
 static u64 kvm_steal_clock(int cpu)
@@ -417,7 +419,7 @@ static u64 kvm_steal_clock(int cpu)
 	return steal;
 }
 
-static inline void __set_percpu_decrypted(void *ptr, unsigned long size)
+static inline __init void __set_percpu_decrypted(void *ptr, unsigned long size)
 {
 	early_set_memory_decrypted((unsigned long) ptr, size);
 }
@@ -434,7 +436,8 @@ static void __init sev_map_percpu_data(void)
 {
 	int cpu;
 
-	if (!cc_platform_has(CC_ATTR_GUEST_MEM_ENCRYPT))
+	if (cc_vendor != CC_VENDOR_AMD ||
+	    !cc_platform_has(CC_ATTR_GUEST_MEM_ENCRYPT))
 		return;
 
 	for_each_possible_cpu(cpu) {
@@ -448,9 +451,9 @@ static void kvm_guest_cpu_offline(bool shutdown)
 {
 	kvm_disable_steal_time();
 	if (kvm_para_has_feature(KVM_FEATURE_PV_EOI))
-		wrmsrl(MSR_KVM_PV_EOI_EN, 0);
+		wrmsrq(MSR_KVM_PV_EOI_EN, 0);
 	if (kvm_para_has_feature(KVM_FEATURE_MIGRATION_CONTROL))
-		wrmsrl(MSR_KVM_MIGRATION_CONTROL, 0);
+		wrmsrq(MSR_KVM_MIGRATION_CONTROL, 0);
 	kvm_pv_disable_apf();
 	if (!shutdown)
 		apf_task_wake_all();
@@ -612,7 +615,7 @@ static int __init setup_efi_kvm_sev_migration(void)
 	}
 
 	pr_info("%s : live migration enabled in EFI\n", __func__);
-	wrmsrl(MSR_KVM_MIGRATION_CONTROL, KVM_MIGRATION_READY);
+	wrmsrq(MSR_KVM_MIGRATION_CONTROL, KVM_MIGRATION_READY);
 
 	return 1;
 }
@@ -725,7 +728,7 @@ static int kvm_suspend(void)
 
 #ifdef CONFIG_ARCH_CPUIDLE_HALTPOLL
 	if (kvm_para_has_feature(KVM_FEATURE_POLL_CONTROL))
-		rdmsrl(MSR_KVM_POLL_CONTROL, val);
+		rdmsrq(MSR_KVM_POLL_CONTROL, val);
 	has_guest_poll = !(val & 1);
 #endif
 	return 0;
@@ -737,7 +740,7 @@ static void kvm_resume(void)
 
 #ifdef CONFIG_ARCH_CPUIDLE_HALTPOLL
 	if (kvm_para_has_feature(KVM_FEATURE_POLL_CONTROL) && has_guest_poll)
-		wrmsrl(MSR_KVM_POLL_CONTROL, 0);
+		wrmsrq(MSR_KVM_POLL_CONTROL, 0);
 #endif
 }
 
@@ -769,7 +772,7 @@ static struct notifier_block kvm_pv_reboot_nb = {
  * won't be valid. In cases like kexec, in which you install a new kernel, this
  * means a random memory location will be kept being written.
  */
-#ifdef CONFIG_KEXEC_CORE
+#ifdef CONFIG_CRASH_DUMP
 static void kvm_crash_shutdown(struct pt_regs *regs)
 {
 	kvm_guest_cpu_offline(true);
@@ -829,13 +832,12 @@ static void __init kvm_guest_init(void)
 
 	if (kvm_para_has_feature(KVM_FEATURE_ASYNC_PF_INT) && kvmapf) {
 		static_branch_enable(&kvm_async_pf_enabled);
-		alloc_intr_gate(HYPERVISOR_CALLBACK_VECTOR, asm_sysvec_kvm_asyncpf_interrupt);
+		sysvec_install(HYPERVISOR_CALLBACK_VECTOR, sysvec_kvm_asyncpf_interrupt);
 	}
 
 #ifdef CONFIG_SMP
 	if (pv_tlb_flush_supported()) {
 		pv_ops.mmu.flush_tlb_multi = kvm_flush_tlb_multi;
-		pv_ops.mmu.tlb_remove_table = tlb_remove_table;
 		pr_info("KVM setup pv remote TLB flush\n");
 	}
 
@@ -852,7 +854,7 @@ static void __init kvm_guest_init(void)
 	kvm_guest_cpu_init();
 #endif
 
-#ifdef CONFIG_KEXEC_CORE
+#ifdef CONFIG_CRASH_DUMP
 	machine_ops.crash_shutdown = kvm_crash_shutdown;
 #endif
 
@@ -872,7 +874,7 @@ static noinline uint32_t __kvm_cpuid_base(void)
 		return 0;	/* So we don't blow up on old processors */
 
 	if (boot_cpu_has(X86_FEATURE_HYPERVISOR))
-		return hypervisor_cpuid_base(KVM_SIGNATURE, 0);
+		return cpuid_base_hypervisor(KVM_SIGNATURE, 0);
 
 	return 0;
 }
@@ -930,6 +932,19 @@ static void kvm_sev_hc_page_enc_status(unsigned long pfn, int npages, bool enc)
 
 static void __init kvm_init_platform(void)
 {
+	u64 tolud = PFN_PHYS(e820__end_of_low_ram_pfn());
+	/*
+	 * Note, hardware requires variable MTRR ranges to be power-of-2 sized
+	 * and naturally aligned.  But when forcing guest MTRR state, Linux
+	 * doesn't program the forced ranges into hardware.  Don't bother doing
+	 * the math to generate a technically-legal range.
+	 */
+	struct mtrr_var_range pci_hole = {
+		.base_lo = tolud | X86_MEMTYPE_UC,
+		.mask_lo = (u32)(~(SZ_4G - tolud - 1)) | MTRR_PHYSMASK_V,
+		.mask_hi = (BIT_ULL(boot_cpu_data.x86_phys_bits) - 1) >> 32,
+	};
+
 	if (cc_platform_has(CC_ATTR_GUEST_MEM_ENCRYPT) &&
 	    kvm_para_has_feature(KVM_FEATURE_MIGRATION_CONTROL)) {
 		unsigned long nr_pages;
@@ -973,11 +988,18 @@ static void __init kvm_init_platform(void)
 		 * If not booted using EFI, enable Live migration support.
 		 */
 		if (!efi_enabled(EFI_BOOT))
-			wrmsrl(MSR_KVM_MIGRATION_CONTROL,
+			wrmsrq(MSR_KVM_MIGRATION_CONTROL,
 			       KVM_MIGRATION_READY);
 	}
 	kvmclock_init();
 	x86_platform.apic_post_init = kvm_apic_init;
+
+	/*
+	 * Set WB as the default cache mode for SEV-SNP and TDX, with a single
+	 * UC range for the legacy PCI hole, e.g. so that devices that expect
+	 * to get UC/WC mappings don't get surprised with WB.
+	 */
+	guest_force_mtrr_state(&pci_hole, 1, MTRR_TYPE_WRBACK);
 }
 
 #if defined(CONFIG_AMD_MEM_ENCRYPT)
@@ -1067,16 +1089,6 @@ static void kvm_wait(u8 *ptr, u8 val)
 void __init kvm_spinlock_init(void)
 {
 	/*
-	 * In case host doesn't support KVM_FEATURE_PV_UNHALT there is still an
-	 * advantage of keeping virt_spin_lock_key enabled: virt_spin_lock() is
-	 * preferred over native qspinlock when vCPU is preempted.
-	 */
-	if (!kvm_para_has_feature(KVM_FEATURE_PV_UNHALT)) {
-		pr_info("PV spinlocks disabled, no host support\n");
-		return;
-	}
-
-	/*
 	 * Disable PV spinlocks and use native qspinlock when dedicated pCPUs
 	 * are available.
 	 */
@@ -1093,6 +1105,16 @@ void __init kvm_spinlock_init(void)
 	if (nopvspin) {
 		pr_info("PV spinlocks disabled, forced by \"nopvspin\" parameter\n");
 		goto out;
+	}
+
+	/*
+	 * In case host doesn't support KVM_FEATURE_PV_UNHALT there is still an
+	 * advantage of keeping virt_spin_lock_key enabled: virt_spin_lock() is
+	 * preferred over native qspinlock when vCPU is preempted.
+	 */
+	if (!kvm_para_has_feature(KVM_FEATURE_PV_UNHALT)) {
+		pr_info("PV spinlocks disabled, no host support\n");
+		return;
 	}
 
 	pr_info("PV spinlocks enabled\n");
@@ -1119,12 +1141,12 @@ out:
 
 static void kvm_disable_host_haltpoll(void *i)
 {
-	wrmsrl(MSR_KVM_POLL_CONTROL, 0);
+	wrmsrq(MSR_KVM_POLL_CONTROL, 0);
 }
 
 static void kvm_enable_host_haltpoll(void *i)
 {
-	wrmsrl(MSR_KVM_POLL_CONTROL, 1);
+	wrmsrq(MSR_KVM_POLL_CONTROL, 1);
 }
 
 void arch_haltpoll_enable(unsigned int cpu)

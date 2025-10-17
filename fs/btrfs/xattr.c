@@ -24,14 +24,13 @@
 #include "accessors.h"
 #include "dir-item.h"
 
-int btrfs_getxattr(struct inode *inode, const char *name,
+int btrfs_getxattr(const struct inode *inode, const char *name,
 				void *buffer, size_t size)
 {
 	struct btrfs_dir_item *di;
 	struct btrfs_root *root = BTRFS_I(inode)->root;
-	struct btrfs_path *path;
+	BTRFS_PATH_AUTO_FREE(path);
 	struct extent_buffer *leaf;
-	int ret = 0;
 	unsigned long data_ptr;
 
 	path = btrfs_alloc_path();
@@ -41,26 +40,19 @@ int btrfs_getxattr(struct inode *inode, const char *name,
 	/* lookup the xattr by name */
 	di = btrfs_lookup_xattr(NULL, root, path, btrfs_ino(BTRFS_I(inode)),
 			name, strlen(name), 0);
-	if (!di) {
-		ret = -ENODATA;
-		goto out;
-	} else if (IS_ERR(di)) {
-		ret = PTR_ERR(di);
-		goto out;
-	}
+	if (!di)
+		return -ENODATA;
+	if (IS_ERR(di))
+		return PTR_ERR(di);
 
 	leaf = path->nodes[0];
 	/* if size is 0, that means we want the size of the attr */
-	if (!size) {
-		ret = btrfs_dir_data_len(leaf, di);
-		goto out;
-	}
+	if (!size)
+		return btrfs_dir_data_len(leaf, di);
 
 	/* now get the data out of our dir_item */
-	if (btrfs_dir_data_len(leaf, di) > size) {
-		ret = -ERANGE;
-		goto out;
-	}
+	if (btrfs_dir_data_len(leaf, di) > size)
+		return -ERANGE;
 
 	/*
 	 * The way things are packed into the leaf is like this
@@ -73,11 +65,7 @@ int btrfs_getxattr(struct inode *inode, const char *name,
 				   btrfs_dir_name_len(leaf, di));
 	read_extent_buffer(leaf, buffer, data_ptr,
 			   btrfs_dir_data_len(leaf, di));
-	ret = btrfs_dir_data_len(leaf, di);
-
-out:
-	btrfs_free_path(path);
-	return ret;
+	return btrfs_dir_data_len(leaf, di);
 }
 
 int btrfs_setxattr(struct btrfs_trans_handle *trans, struct inode *inode,
@@ -85,7 +73,6 @@ int btrfs_setxattr(struct btrfs_trans_handle *trans, struct inode *inode,
 {
 	struct btrfs_dir_item *di = NULL;
 	struct btrfs_root *root = BTRFS_I(inode)->root;
-	struct btrfs_fs_info *fs_info = root->fs_info;
 	struct btrfs_path *path;
 	size_t name_len = strlen(name);
 	int ret = 0;
@@ -120,7 +107,7 @@ int btrfs_setxattr(struct btrfs_trans_handle *trans, struct inode *inode,
 	 * locks the inode's i_mutex before calling setxattr or removexattr.
 	 */
 	if (flags & XATTR_REPLACE) {
-		ASSERT(inode_is_locked(inode));
+		btrfs_assert_inode_locked(BTRFS_I(inode));
 		di = btrfs_lookup_xattr(NULL, root, path,
 				btrfs_ino(BTRFS_I(inode)), name, name_len, 0);
 		if (!di)
@@ -143,14 +130,14 @@ int btrfs_setxattr(struct btrfs_trans_handle *trans, struct inode *inode,
 		 */
 		ret = 0;
 		btrfs_assert_tree_write_locked(path->nodes[0]);
-		di = btrfs_match_dir_item_name(fs_info, path, name, name_len);
+		di = btrfs_match_dir_item_name(path, name, name_len);
 		if (!di && !(flags & XATTR_REPLACE)) {
 			ret = -ENOSPC;
 			goto out;
 		}
 	} else if (ret == -EEXIST) {
 		ret = 0;
-		di = btrfs_match_dir_item_name(fs_info, path, name, name_len);
+		di = btrfs_match_dir_item_name(path, name, name_len);
 		ASSERT(di); /* logic error */
 	} else if (ret) {
 		goto out;
@@ -205,7 +192,6 @@ int btrfs_setxattr(struct btrfs_trans_handle *trans, struct inode *inode,
 		btrfs_set_dir_data_len(leaf, di, size);
 		data_ptr = ((unsigned long)(di + 1)) + name_len;
 		write_extent_buffer(leaf, value, data_ptr, size);
-		btrfs_mark_buffer_dirty(trans, leaf);
 	} else {
 		/*
 		 * Insert, and we had space for the xattr, so path->slots[0] is
@@ -280,7 +266,7 @@ ssize_t btrfs_listxattr(struct dentry *dentry, char *buffer, size_t size)
 	struct btrfs_key key;
 	struct inode *inode = d_inode(dentry);
 	struct btrfs_root *root = BTRFS_I(inode)->root;
-	struct btrfs_path *path;
+	BTRFS_PATH_AUTO_FREE(path);
 	int iter_ret = 0;
 	int ret = 0;
 	size_t total_size = 0, size_left = size;
@@ -355,8 +341,6 @@ next:
 		ret = iter_ret;
 	else
 		ret = total_size;
-
-	btrfs_free_path(path);
 
 	return ret;
 }
@@ -451,7 +435,7 @@ static int btrfs_xattr_handler_set_prop(const struct xattr_handler *handler,
 	if (IS_ERR(trans))
 		return PTR_ERR(trans);
 
-	ret = btrfs_set_prop(trans, inode, name, value, size, flags);
+	ret = btrfs_set_prop(trans, BTRFS_I(inode), name, value, size, flags);
 	if (!ret) {
 		inode_inc_iversion(inode);
 		inode_set_ctime_current(inode);
@@ -504,7 +488,7 @@ static int btrfs_initxattrs(struct inode *inode,
 	const struct xattr *xattr;
 	unsigned int nofs_flag;
 	char *name;
-	int err = 0;
+	int ret = 0;
 
 	/*
 	 * We're holding a transaction handle, so use a NOFS memory allocation
@@ -512,26 +496,27 @@ static int btrfs_initxattrs(struct inode *inode,
 	 */
 	nofs_flag = memalloc_nofs_save();
 	for (xattr = xattr_array; xattr->name != NULL; xattr++) {
-		name = kmalloc(XATTR_SECURITY_PREFIX_LEN +
-			       strlen(xattr->name) + 1, GFP_KERNEL);
+		const size_t name_len = XATTR_SECURITY_PREFIX_LEN +
+					strlen(xattr->name) + 1;
+
+		name = kmalloc(name_len, GFP_KERNEL);
 		if (!name) {
-			err = -ENOMEM;
+			ret = -ENOMEM;
 			break;
 		}
-		strcpy(name, XATTR_SECURITY_PREFIX);
-		strcpy(name + XATTR_SECURITY_PREFIX_LEN, xattr->name);
+		scnprintf(name, name_len, "%s%s", XATTR_SECURITY_PREFIX, xattr->name);
 
 		if (strcmp(name, XATTR_NAME_CAPS) == 0)
 			clear_bit(BTRFS_INODE_NO_CAP_XATTR, &BTRFS_I(inode)->runtime_flags);
 
-		err = btrfs_setxattr(trans, inode, name, xattr->value,
+		ret = btrfs_setxattr(trans, inode, name, xattr->value,
 				     xattr->value_len, 0);
 		kfree(name);
-		if (err < 0)
+		if (ret < 0)
 			break;
 	}
 	memalloc_nofs_restore(nofs_flag);
-	return err;
+	return ret;
 }
 
 int btrfs_xattr_security_init(struct btrfs_trans_handle *trans,

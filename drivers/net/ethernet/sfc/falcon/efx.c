@@ -1394,9 +1394,8 @@ static int ef4_probe_interrupts(struct ef4_nic *efx)
 			if (n_channels > extra_channels)
 				n_channels -= extra_channels;
 			if (ef4_separate_tx_channels) {
-				efx->n_tx_channels = min(max(n_channels / 2,
-							     1U),
-							 efx->max_tx_channels);
+				efx->n_tx_channels = clamp(n_channels / 2, 1U,
+							   efx->max_tx_channels);
 				efx->n_rx_channels = max(n_channels -
 							 efx->n_tx_channels,
 							 1U);
@@ -1886,14 +1885,6 @@ unsigned int ef4_usecs_to_ticks(struct ef4_nic *efx, unsigned int usecs)
 	return usecs * 1000 / efx->timer_quantum_ns;
 }
 
-unsigned int ef4_ticks_to_usecs(struct ef4_nic *efx, unsigned int ticks)
-{
-	/* We must round up when converting ticks to microseconds
-	 * because we round down when converting the other way.
-	 */
-	return DIV_ROUND_UP(ticks * efx->timer_quantum_ns, 1000);
-}
-
 /* Set interrupt moderation parameters */
 int ef4_init_irq_moderation(struct ef4_nic *efx, unsigned int tx_usecs,
 			    unsigned int rx_usecs, bool rx_adaptive,
@@ -2085,7 +2076,7 @@ int ef4_net_stop(struct net_device *net_dev)
 	return 0;
 }
 
-/* Context: process, dev_base_lock or RTNL held, non-blocking. */
+/* Context: process, rcu_read_lock or RTNL held, non-blocking. */
 static void ef4_net_stats(struct net_device *net_dev,
 			  struct rtnl_link_stats64 *stats)
 {
@@ -2125,7 +2116,7 @@ static int ef4_change_mtu(struct net_device *net_dev, int new_mtu)
 	ef4_stop_all(efx);
 
 	mutex_lock(&efx->mac_lock);
-	net_dev->mtu = new_mtu;
+	WRITE_ONCE(net_dev->mtu, new_mtu);
 	ef4_mac_reconfigure(efx);
 	mutex_unlock(&efx->mac_lock);
 
@@ -3136,9 +3127,6 @@ out:
 
 /* For simplicity and reliability, we always require a slot reset and try to
  * reset the hardware when a pci error affecting the device is detected.
- * We leave both the link_reset and mmio_enabled callback unimplemented:
- * with our request for slot reset the mmio_enabled callback will never be
- * called, and the link_reset callback is not used by AER or EEH mechanisms.
  */
 static const struct pci_error_handlers ef4_err_handlers = {
 	.error_detected = ef4_io_error_detected,

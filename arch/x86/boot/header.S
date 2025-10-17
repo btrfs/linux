@@ -43,7 +43,7 @@ SYSSEG		= 0x1000		/* historical load address >> 4 */
 	.section ".bstext", "ax"
 #ifdef CONFIG_EFI_STUB
 	# "MZ", MS-DOS header
-	.word	MZ_MAGIC
+	.word	IMAGE_DOS_SIGNATURE
 	.org	0x38
 	#
 	# Offset to the PE header.
@@ -51,16 +51,16 @@ SYSSEG		= 0x1000		/* historical load address >> 4 */
 	.long	LINUX_PE_MAGIC
 	.long	pe_header
 pe_header:
-	.long	PE_MAGIC
+	.long	IMAGE_NT_SIGNATURE
 
 coff_header:
 #ifdef CONFIG_X86_32
 	.set	image_file_add_flags, IMAGE_FILE_32BIT_MACHINE
-	.set	pe_opt_magic, PE_OPT_MAGIC_PE32
+	.set	pe_opt_magic, IMAGE_NT_OPTIONAL_HDR32_MAGIC
 	.word	IMAGE_FILE_MACHINE_I386
 #else
 	.set	image_file_add_flags, 0
-	.set	pe_opt_magic, PE_OPT_MAGIC_PE32PLUS
+	.set	pe_opt_magic, IMAGE_NT_OPTIONAL_HDR64_MAGIC
 	.word	IMAGE_FILE_MACHINE_AMD64
 #endif
 	.word	section_count			# nr_sections
@@ -106,17 +106,12 @@ extra_header_fields:
 	.word	0				# MinorSubsystemVersion
 	.long	0				# Win32VersionValue
 
-	.long	setup_size + ZO__end + pecompat_vsize
-						# SizeOfImage
+	.long	setup_size + ZO__end		# SizeOfImage
 
 	.long	salign				# SizeOfHeaders
 	.long	0				# CheckSum
 	.word	IMAGE_SUBSYSTEM_EFI_APPLICATION	# Subsystem (EFI application)
-#ifdef CONFIG_EFI_DXE_MEM_ATTRIBUTES
-	.word	IMAGE_DLL_CHARACTERISTICS_NX_COMPAT	# DllCharacteristics
-#else
-	.word	0				# DllCharacteristics
-#endif
+	.word	IMAGE_DLLCHARACTERISTICS_NX_COMPAT	# DllCharacteristics
 #ifdef CONFIG_X86_32
 	.long	0				# SizeOfStackReserve
 	.long	0				# SizeOfStackCommit
@@ -143,7 +138,7 @@ section_table:
 	.ascii	".setup"
 	.byte	0
 	.byte	0
-	.long	setup_size - salign 		# VirtualSize
+	.long	pecompat_fstart - salign 	# VirtualSize
 	.long	salign				# VirtualAddress
 	.long	pecompat_fstart - salign	# SizeOfRawData
 	.long	salign				# PointerToRawData
@@ -156,8 +151,8 @@ section_table:
 #ifdef CONFIG_EFI_MIXED
 	.asciz	".compat"
 
-	.long	8				# VirtualSize
-	.long	setup_size + ZO__end		# VirtualAddress
+	.long	pecompat_fsize			# VirtualSize
+	.long	pecompat_fstart			# VirtualAddress
 	.long	pecompat_fsize			# SizeOfRawData
 	.long	pecompat_fstart			# PointerToRawData
 
@@ -172,28 +167,23 @@ section_table:
 	 * modes this image supports.
 	 */
 	.pushsection ".pecompat", "a", @progbits
-	.balign	falign
-	.set	pecompat_vsize, salign
+	.balign	salign
 	.globl	pecompat_fstart
 pecompat_fstart:
 	.byte	0x1				# Version
 	.byte	8				# Size
 	.word	IMAGE_FILE_MACHINE_I386		# PE machine type
 	.long	setup_size + ZO_efi32_pe_entry	# Entrypoint
+	.byte	0x0				# Sentinel
 	.popsection
 #else
-	.set	pecompat_vsize, 0
 	.set	pecompat_fstart, setup_size
 #endif
-	.ascii	".text"
-	.byte	0
-	.byte	0
-	.byte	0
-	.long	ZO__data
-	.long	setup_size
-	.long	ZO__data			# Size of initialized data
-						# on disk
-	.long	setup_size
+	.ascii	".text\0\0\0"
+	.long	textsize            		# VirtualSize
+	.long	setup_size			# VirtualAddress
+	.long	textsize			# SizeOfRawData
+	.long	setup_size			# PointerToRawData
 	.long	0				# PointerToRelocations
 	.long	0				# PointerToLineNumbers
 	.word	0				# NumberOfRelocations
@@ -201,6 +191,23 @@ pecompat_fstart:
 	.long	IMAGE_SCN_CNT_CODE		| \
 		IMAGE_SCN_MEM_READ		| \
 		IMAGE_SCN_MEM_EXECUTE		# Characteristics
+
+#ifdef CONFIG_EFI_SBAT
+	.ascii	".sbat\0\0\0"
+	.long	ZO__esbat - ZO__sbat            # VirtualSize
+	.long	setup_size + ZO__sbat           # VirtualAddress
+	.long	ZO__esbat - ZO__sbat            # SizeOfRawData
+	.long	setup_size + ZO__sbat           # PointerToRawData
+
+	.long	0, 0, 0
+	.long	IMAGE_SCN_CNT_INITIALIZED_DATA	| \
+		IMAGE_SCN_MEM_READ		| \
+		IMAGE_SCN_MEM_DISCARDABLE	# Characteristics
+
+	.set	textsize, ZO__sbat
+#else
+	.set	textsize, ZO__data
+#endif
 
 	.ascii	".data\0\0\0"
 	.long	ZO__end - ZO__data		# VirtualSize
@@ -367,11 +374,7 @@ xloadflags:
 #endif
 
 #ifdef CONFIG_X86_64
-#ifdef CONFIG_X86_5LEVEL
 #define XLF56 (XLF_5LEVEL|XLF_5LEVEL_ENABLED)
-#else
-#define XLF56 XLF_5LEVEL
-#endif
 #else
 #define XLF56 0
 #endif
@@ -591,7 +594,7 @@ start_of_setup:
 	xorl	%eax, %eax
 	subw	%di, %cx
 	shrw	$2, %cx
-	rep; stosl
+	rep stosl
 
 # Jump to C code (should not return)
 	calll	main

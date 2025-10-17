@@ -130,7 +130,7 @@ struct neigh_table nd_tbl = {
 			[NEIGH_VAR_DELAY_PROBE_TIME] = 5 * HZ,
 			[NEIGH_VAR_INTERVAL_PROBE_TIME_MS] = 5 * HZ,
 			[NEIGH_VAR_GC_STALETIME] = 60 * HZ,
-			[NEIGH_VAR_QUEUE_LEN_BYTES] = SK_WMEM_MAX,
+			[NEIGH_VAR_QUEUE_LEN_BYTES] = SK_WMEM_DEFAULT,
 			[NEIGH_VAR_PROXY_QLEN] = 64,
 			[NEIGH_VAR_ANYCAST_DELAY] = 1 * HZ,
 			[NEIGH_VAR_PROXY_DELAY] = (8 * HZ) / 10,
@@ -200,9 +200,9 @@ static inline int ndisc_is_useropt(const struct net_device *dev,
 	return opt->nd_opt_type == ND_OPT_PREFIX_INFO ||
 		opt->nd_opt_type == ND_OPT_RDNSS ||
 		opt->nd_opt_type == ND_OPT_DNSSL ||
+		opt->nd_opt_type == ND_OPT_6CO ||
 		opt->nd_opt_type == ND_OPT_CAPTIVE_PORTAL ||
-		opt->nd_opt_type == ND_OPT_PREF64 ||
-		ndisc_ops_is_useropt(dev, opt->nd_opt_type);
+		opt->nd_opt_type == ND_OPT_PREF64;
 }
 
 static struct nd_opt_hdr *ndisc_next_useropt(const struct net_device *dev,
@@ -227,6 +227,7 @@ struct ndisc_options *ndisc_parse_options(const struct net_device *dev,
 		return NULL;
 	memset(ndopts, 0, sizeof(*ndopts));
 	while (opt_len) {
+		bool unknown = false;
 		int l;
 		if (opt_len < sizeof(struct nd_opt_hdr))
 			return NULL;
@@ -242,9 +243,8 @@ struct ndisc_options *ndisc_parse_options(const struct net_device *dev,
 		case ND_OPT_NONCE:
 		case ND_OPT_REDIRECT_HDR:
 			if (ndopts->nd_opt_array[nd_opt->nd_opt_type]) {
-				ND_PRINTK(2, warn,
-					  "%s: duplicated ND6 option found: type=%d\n",
-					  __func__, nd_opt->nd_opt_type);
+				net_dbg_ratelimited("%s: duplicated ND6 option found: type=%d\n",
+						    __func__, nd_opt->nd_opt_type);
 			} else {
 				ndopts->nd_opt_array[nd_opt->nd_opt_type] = nd_opt;
 			}
@@ -262,22 +262,20 @@ struct ndisc_options *ndisc_parse_options(const struct net_device *dev,
 			break;
 #endif
 		default:
-			if (ndisc_is_useropt(dev, nd_opt)) {
-				ndopts->nd_useropts_end = nd_opt;
-				if (!ndopts->nd_useropts)
-					ndopts->nd_useropts = nd_opt;
-			} else {
-				/*
-				 * Unknown options must be silently ignored,
-				 * to accommodate future extension to the
-				 * protocol.
-				 */
-				ND_PRINTK(2, notice,
-					  "%s: ignored unsupported option; type=%d, len=%d\n",
-					  __func__,
-					  nd_opt->nd_opt_type,
-					  nd_opt->nd_opt_len);
-			}
+			unknown = true;
+		}
+		if (ndisc_is_useropt(dev, nd_opt)) {
+			ndopts->nd_useropts_end = nd_opt;
+			if (!ndopts->nd_useropts)
+				ndopts->nd_useropts = nd_opt;
+		} else if (unknown) {
+			/*
+			 * Unknown options must be silently ignored,
+			 * to accommodate future extension to the
+			 * protocol.
+			 */
+			net_dbg_ratelimited("%s: ignored unsupported option; type=%d, len=%d\n",
+					    __func__, nd_opt->nd_opt_type, nd_opt->nd_opt_len);
 		}
 next_opt:
 		opt_len -= l;
@@ -375,24 +373,25 @@ static int ndisc_constructor(struct neighbour *neigh)
 static int pndisc_constructor(struct pneigh_entry *n)
 {
 	struct in6_addr *addr = (struct in6_addr *)&n->key;
-	struct in6_addr maddr;
 	struct net_device *dev = n->dev;
+	struct in6_addr maddr;
 
-	if (!dev || !__in6_dev_get(dev))
+	if (!dev)
 		return -EINVAL;
+
 	addrconf_addr_solict_mult(addr, &maddr);
-	ipv6_dev_mc_inc(dev, &maddr);
-	return 0;
+	return ipv6_dev_mc_inc(dev, &maddr);
 }
 
 static void pndisc_destructor(struct pneigh_entry *n)
 {
 	struct in6_addr *addr = (struct in6_addr *)&n->key;
-	struct in6_addr maddr;
 	struct net_device *dev = n->dev;
+	struct in6_addr maddr;
 
-	if (!dev || !__in6_dev_get(dev))
+	if (!dev)
 		return;
+
 	addrconf_addr_solict_mult(addr, &maddr);
 	ipv6_dev_mc_dec(dev, &maddr);
 }
@@ -416,15 +415,11 @@ static struct sk_buff *ndisc_alloc_skb(struct net_device *dev,
 {
 	int hlen = LL_RESERVED_SPACE(dev);
 	int tlen = dev->needed_tailroom;
-	struct sock *sk = dev_net(dev)->ipv6.ndisc_sk;
 	struct sk_buff *skb;
 
 	skb = alloc_skb(hlen + sizeof(struct ipv6hdr) + len + tlen, GFP_ATOMIC);
-	if (!skb) {
-		ND_PRINTK(0, err, "ndisc: %s failed to allocate an skb\n",
-			  __func__);
+	if (!skb)
 		return NULL;
-	}
 
 	skb->protocol = htons(ETH_P_IPV6);
 	skb->dev = dev;
@@ -435,7 +430,9 @@ static struct sk_buff *ndisc_alloc_skb(struct net_device *dev,
 	/* Manually assign socket ownership as we avoid calling
 	 * sock_alloc_send_pskb() to bypass wmem buffer limits
 	 */
-	skb_set_owner_w(skb, sk);
+	rcu_read_lock();
+	skb_set_owner_w(skb, dev_net_rcu(dev)->ipv6.ndisc_sk);
+	rcu_read_unlock();
 
 	return skb;
 }
@@ -451,7 +448,7 @@ static void ip6_nd_hdr(struct sk_buff *skb,
 
 	rcu_read_lock();
 	idev = __in6_dev_get(skb->dev);
-	tclass = idev ? idev->cnf.ndisc_tclass : 0;
+	tclass = idev ? READ_ONCE(idev->cnf.ndisc_tclass) : 0;
 	rcu_read_unlock();
 
 	skb_push(skb, sizeof(*hdr));
@@ -471,16 +468,21 @@ static void ip6_nd_hdr(struct sk_buff *skb,
 void ndisc_send_skb(struct sk_buff *skb, const struct in6_addr *daddr,
 		    const struct in6_addr *saddr)
 {
-	struct dst_entry *dst = skb_dst(skb);
-	struct net *net = dev_net(skb->dev);
-	struct sock *sk = net->ipv6.ndisc_sk;
-	struct inet6_dev *idev;
-	int err;
 	struct icmp6hdr *icmp6h = icmp6_hdr(skb);
+	struct dst_entry *dst = skb_dst(skb);
+	struct net_device *dev;
+	struct inet6_dev *idev;
+	struct net *net;
+	struct sock *sk;
+	int err;
 	u8 type;
 
 	type = icmp6h->icmp6_type;
 
+	rcu_read_lock();
+
+	net = dev_net_rcu(skb->dev);
+	sk = net->ipv6.ndisc_sk;
 	if (!dst) {
 		struct flowi6 fl6;
 		int oif = skb->dev->ifindex;
@@ -488,6 +490,7 @@ void ndisc_send_skb(struct sk_buff *skb, const struct in6_addr *daddr,
 		icmpv6_flow_init(sk, &fl6, type, saddr, daddr, oif);
 		dst = icmp6_dst_alloc(skb->dev, &fl6);
 		if (IS_ERR(dst)) {
+			rcu_read_unlock();
 			kfree_skb(skb);
 			return;
 		}
@@ -502,12 +505,12 @@ void ndisc_send_skb(struct sk_buff *skb, const struct in6_addr *daddr,
 
 	ip6_nd_hdr(skb, saddr, daddr, READ_ONCE(inet6_sk(sk)->hop_limit), skb->len);
 
-	rcu_read_lock();
-	idev = __in6_dev_get(dst->dev);
+	dev = dst_dev_rcu(dst);
+	idev = __in6_dev_get(dev);
 	IP6_INC_STATS(net, idev, IPSTATS_MIB_OUTREQUESTS);
 
 	err = NF_HOOK(NFPROTO_IPV6, NF_INET_LOCAL_OUT,
-		      net, sk, skb, NULL, dst->dev,
+		      net, sk, skb, NULL, dev,
 		      dst_output);
 	if (!err) {
 		ICMP6MSGOUT_INC_STATS(net, idev, type);
@@ -535,7 +538,7 @@ void ndisc_send_na(struct net_device *dev, const struct in6_addr *daddr,
 		src_addr = solicited_addr;
 		if (ifp->flags & IFA_F_OPTIMISTIC)
 			override = false;
-		inc_opt |= ifp->idev->cnf.force_tllao;
+		inc_opt |= READ_ONCE(ifp->idev->cnf.force_tllao);
 		in6_ifa_put(ifp);
 	} else {
 		if (ipv6_dev_get_saddr(dev_net(dev), dev, daddr,
@@ -747,9 +750,8 @@ static void ndisc_solicit(struct neighbour *neigh, struct sk_buff *skb)
 	probes -= NEIGH_VAR(neigh->parms, UCAST_PROBES);
 	if (probes < 0) {
 		if (!(READ_ONCE(neigh->nud_state) & NUD_VALID)) {
-			ND_PRINTK(1, dbg,
-				  "%s: trying to ucast probe in NUD_INVALID: %pI6\n",
-				  __func__, target);
+			net_dbg_ratelimited("%s: trying to ucast probe in NUD_INVALID: %pI6\n",
+					    __func__, target);
 		}
 		ndisc_send_ns(dev, target, target, saddr, 0);
 	} else if ((probes -= NEIGH_VAR(neigh->parms, APP_PROBES)) < 0) {
@@ -766,11 +768,9 @@ static int pndisc_is_router(const void *pkey,
 	struct pneigh_entry *n;
 	int ret = -1;
 
-	read_lock_bh(&nd_tbl.lock);
-	n = __pneigh_lookup(&nd_tbl, dev_net(dev), pkey, dev);
+	n = pneigh_lookup(&nd_tbl, dev_net(dev), pkey, dev);
 	if (n)
-		ret = !!(n->flags & NTF_ROUTER);
-	read_unlock_bh(&nd_tbl.lock);
+		ret = !!(READ_ONCE(n->flags) & NTF_ROUTER);
 
 	return ret;
 }
@@ -807,7 +807,7 @@ static enum skb_drop_reason ndisc_recv_ns(struct sk_buff *skb)
 		return SKB_DROP_REASON_PKT_TOO_SMALL;
 
 	if (ipv6_addr_is_multicast(&msg->target)) {
-		ND_PRINTK(2, warn, "NS: multicast target address\n");
+		net_dbg_ratelimited("NS: multicast target address\n");
 		return reason;
 	}
 
@@ -816,7 +816,7 @@ static enum skb_drop_reason ndisc_recv_ns(struct sk_buff *skb)
 	 * DAD has to be destined for solicited node multicast address.
 	 */
 	if (dad && !ipv6_addr_is_solict_mult(daddr)) {
-		ND_PRINTK(2, warn, "NS: bad DAD packet (wrong destination)\n");
+		net_dbg_ratelimited("NS: bad DAD packet (wrong destination)\n");
 		return reason;
 	}
 
@@ -826,8 +826,7 @@ static enum skb_drop_reason ndisc_recv_ns(struct sk_buff *skb)
 	if (ndopts.nd_opts_src_lladdr) {
 		lladdr = ndisc_opt_addr_data(ndopts.nd_opts_src_lladdr, dev);
 		if (!lladdr) {
-			ND_PRINTK(2, warn,
-				  "NS: invalid link-layer address length\n");
+			net_dbg_ratelimited("NS: invalid link-layer address length\n");
 			return reason;
 		}
 
@@ -837,8 +836,7 @@ static enum skb_drop_reason ndisc_recv_ns(struct sk_buff *skb)
 		 *	in the message.
 		 */
 		if (dad) {
-			ND_PRINTK(2, warn,
-				  "NS: bad DAD packet (link-layer address option)\n");
+			net_dbg_ratelimited("NS: bad DAD packet (link-layer address option)\n");
 			return reason;
 		}
 	}
@@ -855,10 +853,8 @@ have_ifp:
 				if (nonce != 0 && ifp->dad_nonce == nonce) {
 					u8 *np = (u8 *)&nonce;
 					/* Matching nonce if looped back */
-					ND_PRINTK(2, notice,
-						  "%s: IPv6 DAD loopback for address %pI6c nonce %pM ignored\n",
-						  ifp->idev->dev->name,
-						  &ifp->addr, np);
+					net_dbg_ratelimited("%s: IPv6 DAD loopback for address %pI6c nonce %pM ignored\n",
+							    ifp->idev->dev->name, &ifp->addr, np);
 					goto out;
 				}
 				/*
@@ -903,8 +899,9 @@ have_ifp:
 		}
 
 		if (ipv6_chk_acast_addr(net, dev, &msg->target) ||
-		    (idev->cnf.forwarding &&
-		     (net->ipv6.devconf_all->proxy_ndp || idev->cnf.proxy_ndp) &&
+		    (READ_ONCE(idev->cnf.forwarding) &&
+		     (READ_ONCE(net->ipv6.devconf_all->proxy_ndp) ||
+		      READ_ONCE(idev->cnf.proxy_ndp)) &&
 		     (is_router = pndisc_is_router(&msg->target, dev)) >= 0)) {
 			if (!(NEIGH_CB(skb)->flags & LOCALLY_ENQUEUED) &&
 			    skb->pkt_type != PACKET_HOST &&
@@ -929,7 +926,7 @@ have_ifp:
 	}
 
 	if (is_router < 0)
-		is_router = idev->cnf.forwarding;
+		is_router = READ_ONCE(idev->cnf.forwarding);
 
 	if (dad) {
 		ndisc_send_na(dev, &in6addr_linklocal_allnodes, &msg->target,
@@ -973,7 +970,7 @@ static int accept_untracked_na(struct net_device *dev, struct in6_addr *saddr)
 {
 	struct inet6_dev *idev = __in6_dev_get(dev);
 
-	switch (idev->cnf.accept_untracked_na) {
+	switch (READ_ONCE(idev->cnf.accept_untracked_na)) {
 	case 0: /* Don't accept untracked na (absent in neighbor cache) */
 		return 0;
 	case 1: /* Create new entries from na if currently untracked */
@@ -1008,13 +1005,13 @@ static enum skb_drop_reason ndisc_recv_na(struct sk_buff *skb)
 		return SKB_DROP_REASON_PKT_TOO_SMALL;
 
 	if (ipv6_addr_is_multicast(&msg->target)) {
-		ND_PRINTK(2, warn, "NA: target address is multicast\n");
+		net_dbg_ratelimited("NA: target address is multicast\n");
 		return reason;
 	}
 
 	if (ipv6_addr_is_multicast(daddr) &&
 	    msg->icmph.icmp6_solicited) {
-		ND_PRINTK(2, warn, "NA: solicited NA is multicasted\n");
+		net_dbg_ratelimited("NA: solicited NA is multicasted\n");
 		return reason;
 	}
 
@@ -1024,7 +1021,7 @@ static enum skb_drop_reason ndisc_recv_na(struct sk_buff *skb)
 	 * drop_unsolicited_na takes precedence over accept_untracked_na
 	 */
 	if (!msg->icmph.icmp6_solicited && idev &&
-	    idev->cnf.drop_unsolicited_na)
+	    READ_ONCE(idev->cnf.drop_unsolicited_na))
 		return reason;
 
 	if (!ndisc_parse_options(dev, msg->opt, ndoptlen, &ndopts))
@@ -1033,8 +1030,7 @@ static enum skb_drop_reason ndisc_recv_na(struct sk_buff *skb)
 	if (ndopts.nd_opts_tgt_lladdr) {
 		lladdr = ndisc_opt_addr_data(ndopts.nd_opts_tgt_lladdr, dev);
 		if (!lladdr) {
-			ND_PRINTK(2, warn,
-				  "NA: invalid link-layer address length\n");
+			net_dbg_ratelimited("NA: invalid link-layer address length\n");
 			return reason;
 		}
 	}
@@ -1055,9 +1051,9 @@ static enum skb_drop_reason ndisc_recv_na(struct sk_buff *skb)
 		   unsolicited advertisement.
 		 */
 		if (skb->pkt_type != PACKET_LOOPBACK)
-			ND_PRINTK(1, warn,
-				  "NA: %pM advertised our address %pI6c on %s!\n",
-				  eth_hdr(skb)->h_source, &ifp->addr, ifp->idev->dev->name);
+			net_warn_ratelimited("NA: %pM advertised our address %pI6c on %s!\n",
+					     eth_hdr(skb)->h_source, &ifp->addr,
+					     ifp->idev->dev->name);
 		in6_ifa_put(ifp);
 		return reason;
 	}
@@ -1080,7 +1076,7 @@ static enum skb_drop_reason ndisc_recv_na(struct sk_buff *skb)
 	 * Note that we don't do a (daddr == all-routers-mcast) check.
 	 */
 	new_state = msg->icmph.icmp6_solicited ? NUD_REACHABLE : NUD_STALE;
-	if (!neigh && lladdr && idev && idev->cnf.forwarding) {
+	if (!neigh && lladdr && idev && READ_ONCE(idev->cnf.forwarding)) {
 		if (accept_untracked_na(dev, saddr)) {
 			neigh = neigh_create(&nd_tbl, &msg->target, dev);
 			new_state = NUD_STALE;
@@ -1100,8 +1096,9 @@ static enum skb_drop_reason ndisc_recv_na(struct sk_buff *skb)
 		 * has already sent a NA to us.
 		 */
 		if (lladdr && !memcmp(lladdr, dev->dev_addr, dev->addr_len) &&
-		    net->ipv6.devconf_all->forwarding && net->ipv6.devconf_all->proxy_ndp &&
-		    pneigh_lookup(&nd_tbl, net, &msg->target, dev, 0)) {
+		    READ_ONCE(net->ipv6.devconf_all->forwarding) &&
+		    READ_ONCE(net->ipv6.devconf_all->proxy_ndp) &&
+		    pneigh_lookup(&nd_tbl, net, &msg->target, dev)) {
 			/* XXX: idev->cnf.proxy_ndp */
 			goto out;
 		}
@@ -1143,12 +1140,12 @@ static enum skb_drop_reason ndisc_recv_rs(struct sk_buff *skb)
 
 	idev = __in6_dev_get(skb->dev);
 	if (!idev) {
-		ND_PRINTK(1, err, "RS: can't find in6 device\n");
+		net_err_ratelimited("RS: can't find in6 device\n");
 		return reason;
 	}
 
 	/* Don't accept RS if we're not in router mode */
-	if (!idev->cnf.forwarding)
+	if (!READ_ONCE(idev->cnf.forwarding))
 		goto out;
 
 	/*
@@ -1237,6 +1234,7 @@ static enum skb_drop_reason ndisc_router_discovery(struct sk_buff *skb)
 	struct ndisc_options ndopts;
 	struct fib6_info *rt = NULL;
 	struct inet6_dev *in6_dev;
+	struct fib6_table *table;
 	u32 defrtr_usr_metric;
 	unsigned int pref = 0;
 	__u32 old_if_flags;
@@ -1250,11 +1248,9 @@ static enum skb_drop_reason ndisc_router_discovery(struct sk_buff *skb)
 	optlen = (skb_tail_pointer(skb) - skb_transport_header(skb)) -
 		sizeof(struct ra_msg);
 
-	ND_PRINTK(2, info,
-		  "RA: %s, dev: %s\n",
-		  __func__, skb->dev->name);
+	net_dbg_ratelimited("RA: %s, dev: %s\n", __func__, skb->dev->name);
 	if (!(ipv6_addr_type(&ipv6_hdr(skb)->saddr) & IPV6_ADDR_LINKLOCAL)) {
-		ND_PRINTK(2, warn, "RA: source address is not link-local\n");
+		net_dbg_ratelimited("RA: source address is not link-local\n");
 		return reason;
 	}
 	if (optlen < 0)
@@ -1262,15 +1258,14 @@ static enum skb_drop_reason ndisc_router_discovery(struct sk_buff *skb)
 
 #ifdef CONFIG_IPV6_NDISC_NODETYPE
 	if (skb->ndisc_nodetype == NDISC_NODETYPE_HOST) {
-		ND_PRINTK(2, warn, "RA: from host or unauthorized router\n");
+		net_dbg_ratelimited("RA: from host or unauthorized router\n");
 		return reason;
 	}
 #endif
 
 	in6_dev = __in6_dev_get(skb->dev);
 	if (!in6_dev) {
-		ND_PRINTK(0, err, "RA: can't find inet6 device for %s\n",
-			  skb->dev->name);
+		net_err_ratelimited("RA: can't find inet6 device for %s\n", skb->dev->name);
 		return reason;
 	}
 
@@ -1278,18 +1273,16 @@ static enum skb_drop_reason ndisc_router_discovery(struct sk_buff *skb)
 		return SKB_DROP_REASON_IPV6_NDISC_BAD_OPTIONS;
 
 	if (!ipv6_accept_ra(in6_dev)) {
-		ND_PRINTK(2, info,
-			  "RA: %s, did not accept ra for dev: %s\n",
-			  __func__, skb->dev->name);
+		net_dbg_ratelimited("RA: %s, did not accept ra for dev: %s\n", __func__,
+				    skb->dev->name);
 		goto skip_linkparms;
 	}
 
 #ifdef CONFIG_IPV6_NDISC_NODETYPE
 	/* skip link-specific parameters from interior routers */
 	if (skb->ndisc_nodetype == NDISC_NODETYPE_NODEFAULT) {
-		ND_PRINTK(2, info,
-			  "RA: %s, nodetype is NODEFAULT, dev: %s\n",
-			  __func__, skb->dev->name);
+		net_dbg_ratelimited("RA: %s, nodetype is NODEFAULT, dev: %s\n", __func__,
+				    skb->dev->name);
 		goto skip_linkparms;
 	}
 #endif
@@ -1317,18 +1310,17 @@ static enum skb_drop_reason ndisc_router_discovery(struct sk_buff *skb)
 	if (old_if_flags != in6_dev->if_flags)
 		send_ifinfo_notify = true;
 
-	if (!in6_dev->cnf.accept_ra_defrtr) {
-		ND_PRINTK(2, info,
-			  "RA: %s, defrtr is false for dev: %s\n",
-			  __func__, skb->dev->name);
+	if (!READ_ONCE(in6_dev->cnf.accept_ra_defrtr)) {
+		net_dbg_ratelimited("RA: %s, defrtr is false for dev: %s\n", __func__,
+				    skb->dev->name);
 		goto skip_defrtr;
 	}
 
 	lifetime = ntohs(ra_msg->icmph.icmp6_rt_lifetime);
-	if (lifetime != 0 && lifetime < in6_dev->cnf.accept_ra_min_lft) {
-		ND_PRINTK(2, info,
-			  "RA: router lifetime (%ds) is too short: %s\n",
-			  lifetime, skb->dev->name);
+	if (lifetime != 0 &&
+	    lifetime < READ_ONCE(in6_dev->cnf.accept_ra_min_lft)) {
+		net_dbg_ratelimited("RA: router lifetime (%ds) is too short: %s\n", lifetime,
+				    skb->dev->name);
 		goto skip_defrtr;
 	}
 
@@ -1336,11 +1328,10 @@ static enum skb_drop_reason ndisc_router_discovery(struct sk_buff *skb)
 	 * accept_ra_from_local is set to true.
 	 */
 	net = dev_net(in6_dev->dev);
-	if (!in6_dev->cnf.accept_ra_from_local &&
+	if (!READ_ONCE(in6_dev->cnf.accept_ra_from_local) &&
 	    ipv6_chk_addr(net, &ipv6_hdr(skb)->saddr, in6_dev->dev, 0)) {
-		ND_PRINTK(2, info,
-			  "RA from local address detected on dev: %s: default router ignored\n",
-			  skb->dev->name);
+		net_dbg_ratelimited("RA from local address detected on dev: %s: default router ignored\n",
+				    skb->dev->name);
 		goto skip_defrtr;
 	}
 
@@ -1348,7 +1339,7 @@ static enum skb_drop_reason ndisc_router_discovery(struct sk_buff *skb)
 	pref = ra_msg->icmph.icmp6_router_pref;
 	/* 10b is handled as if it were 00b (medium) */
 	if (pref == ICMPV6_ROUTER_PREF_INVALID ||
-	    !in6_dev->cnf.accept_ra_rtr_pref)
+	    !READ_ONCE(in6_dev->cnf.accept_ra_rtr_pref))
 		pref = ICMPV6_ROUTER_PREF_MEDIUM;
 #endif
 	/* routes added from RAs do not use nexthop objects */
@@ -1358,9 +1349,8 @@ static enum skb_drop_reason ndisc_router_discovery(struct sk_buff *skb)
 					 rt->fib6_nh->fib_nh_dev, NULL,
 					  &ipv6_hdr(skb)->saddr);
 		if (!neigh) {
-			ND_PRINTK(0, err,
-				  "RA: %s got default router without neighbour\n",
-				  __func__);
+			net_err_ratelimited("RA: %s got default router without neighbour\n",
+					    __func__);
 			fib6_info_release(rt);
 			return reason;
 		}
@@ -1373,20 +1363,19 @@ static enum skb_drop_reason ndisc_router_discovery(struct sk_buff *skb)
 		rt = NULL;
 	}
 
-	ND_PRINTK(3, info, "RA: rt: %p  lifetime: %d, metric: %d, for dev: %s\n",
-		  rt, lifetime, defrtr_usr_metric, skb->dev->name);
+	net_dbg_ratelimited("RA: rt: %p  lifetime: %d, metric: %d, for dev: %s\n", rt, lifetime,
+			    defrtr_usr_metric, skb->dev->name);
 	if (!rt && lifetime) {
-		ND_PRINTK(3, info, "RA: adding default router\n");
+		net_dbg_ratelimited("RA: adding default router\n");
 
 		if (neigh)
 			neigh_release(neigh);
 
 		rt = rt6_add_dflt_router(net, &ipv6_hdr(skb)->saddr,
-					 skb->dev, pref, defrtr_usr_metric);
+					 skb->dev, pref, defrtr_usr_metric,
+					 lifetime);
 		if (!rt) {
-			ND_PRINTK(0, err,
-				  "RA: %s failed to add default route\n",
-				  __func__);
+			net_err_ratelimited("RA: %s failed to add default route\n", __func__);
 			return reason;
 		}
 
@@ -1394,9 +1383,8 @@ static enum skb_drop_reason ndisc_router_discovery(struct sk_buff *skb)
 					 rt->fib6_nh->fib_nh_dev, NULL,
 					  &ipv6_hdr(skb)->saddr);
 		if (!neigh) {
-			ND_PRINTK(0, err,
-				  "RA: %s got default router without neighbour\n",
-				  __func__);
+			net_err_ratelimited("RA: %s got default router without neighbour\n",
+					    __func__);
 			fib6_info_release(rt);
 			return reason;
 		}
@@ -1409,16 +1397,25 @@ static enum skb_drop_reason ndisc_router_discovery(struct sk_buff *skb)
 		inet6_rt_notify(RTM_NEWROUTE, rt, &nlinfo, NLM_F_REPLACE);
 	}
 
-	if (rt)
+	if (rt) {
+		table = rt->fib6_table;
+		spin_lock_bh(&table->tb6_lock);
+
 		fib6_set_expires(rt, jiffies + (HZ * lifetime));
-	if (in6_dev->cnf.accept_ra_min_hop_limit < 256 &&
+		fib6_add_gc_list(rt);
+
+		spin_unlock_bh(&table->tb6_lock);
+	}
+	if (READ_ONCE(in6_dev->cnf.accept_ra_min_hop_limit) < 256 &&
 	    ra_msg->icmph.icmp6_hop_limit) {
-		if (in6_dev->cnf.accept_ra_min_hop_limit <= ra_msg->icmph.icmp6_hop_limit) {
-			in6_dev->cnf.hop_limit = ra_msg->icmph.icmp6_hop_limit;
+		if (READ_ONCE(in6_dev->cnf.accept_ra_min_hop_limit) <=
+		    ra_msg->icmph.icmp6_hop_limit) {
+			WRITE_ONCE(in6_dev->cnf.hop_limit,
+				   ra_msg->icmph.icmp6_hop_limit);
 			fib6_metric_set(rt, RTAX_HOPLIMIT,
 					ra_msg->icmph.icmp6_hop_limit);
 		} else {
-			ND_PRINTK(2, warn, "RA: Got route advertisement with lower hop_limit than minimum\n");
+			net_dbg_ratelimited("RA: Got route advertisement with lower hop_limit than minimum\n");
 		}
 	}
 
@@ -1474,8 +1471,7 @@ skip_linkparms:
 			lladdr = ndisc_opt_addr_data(ndopts.nd_opts_src_lladdr,
 						     skb->dev);
 			if (!lladdr) {
-				ND_PRINTK(2, warn,
-					  "RA: invalid link-layer address length\n");
+				net_dbg_ratelimited("RA: invalid link-layer address length\n");
 				goto out;
 			}
 		}
@@ -1489,23 +1485,21 @@ skip_linkparms:
 	}
 
 	if (!ipv6_accept_ra(in6_dev)) {
-		ND_PRINTK(2, info,
-			  "RA: %s, accept_ra is false for dev: %s\n",
-			  __func__, skb->dev->name);
+		net_dbg_ratelimited("RA: %s, accept_ra is false for dev: %s\n", __func__,
+				    skb->dev->name);
 		goto out;
 	}
 
 #ifdef CONFIG_IPV6_ROUTE_INFO
-	if (!in6_dev->cnf.accept_ra_from_local &&
+	if (!READ_ONCE(in6_dev->cnf.accept_ra_from_local) &&
 	    ipv6_chk_addr(dev_net(in6_dev->dev), &ipv6_hdr(skb)->saddr,
 			  in6_dev->dev, 0)) {
-		ND_PRINTK(2, info,
-			  "RA from local address detected on dev: %s: router info ignored.\n",
-			  skb->dev->name);
+		net_dbg_ratelimited("RA from local address detected on dev: %s: router info ignored.\n",
+				    skb->dev->name);
 		goto skip_routeinfo;
 	}
 
-	if (in6_dev->cnf.accept_ra_rtr_pref && ndopts.nd_opts_ri) {
+	if (READ_ONCE(in6_dev->cnf.accept_ra_rtr_pref) && ndopts.nd_opts_ri) {
 		struct nd_opt_hdr *p;
 		for (p = ndopts.nd_opts_ri;
 		     p;
@@ -1517,14 +1511,14 @@ skip_linkparms:
 				continue;
 #endif
 			if (ri->prefix_len == 0 &&
-			    !in6_dev->cnf.accept_ra_defrtr)
+			    !READ_ONCE(in6_dev->cnf.accept_ra_defrtr))
 				continue;
 			if (ri->lifetime != 0 &&
-			    ntohl(ri->lifetime) < in6_dev->cnf.accept_ra_min_lft)
+			    ntohl(ri->lifetime) < READ_ONCE(in6_dev->cnf.accept_ra_min_lft))
 				continue;
-			if (ri->prefix_len < in6_dev->cnf.accept_ra_rt_info_min_plen)
+			if (ri->prefix_len < READ_ONCE(in6_dev->cnf.accept_ra_rt_info_min_plen))
 				continue;
-			if (ri->prefix_len > in6_dev->cnf.accept_ra_rt_info_max_plen)
+			if (ri->prefix_len > READ_ONCE(in6_dev->cnf.accept_ra_rt_info_max_plen))
 				continue;
 			rt6_route_rcv(skb->dev, (u8 *)p, (p->nd_opt_len) << 3,
 				      &ipv6_hdr(skb)->saddr);
@@ -1537,14 +1531,13 @@ skip_routeinfo:
 #ifdef CONFIG_IPV6_NDISC_NODETYPE
 	/* skip link-specific ndopts from interior routers */
 	if (skb->ndisc_nodetype == NDISC_NODETYPE_NODEFAULT) {
-		ND_PRINTK(2, info,
-			  "RA: %s, nodetype is NODEFAULT (interior routes), dev: %s\n",
-			  __func__, skb->dev->name);
+		net_dbg_ratelimited("RA: %s, nodetype is NODEFAULT (interior routes), dev: %s\n",
+				    __func__, skb->dev->name);
 		goto out;
 	}
 #endif
 
-	if (in6_dev->cnf.accept_ra_pinfo && ndopts.nd_opts_pi) {
+	if (READ_ONCE(in6_dev->cnf.accept_ra_pinfo) && ndopts.nd_opts_pi) {
 		struct nd_opt_hdr *p;
 		for (p = ndopts.nd_opts_pi;
 		     p;
@@ -1555,7 +1548,7 @@ skip_routeinfo:
 		}
 	}
 
-	if (ndopts.nd_opts_mtu && in6_dev->cnf.accept_ra_mtu) {
+	if (ndopts.nd_opts_mtu && READ_ONCE(in6_dev->cnf.accept_ra_mtu)) {
 		__be32 n;
 		u32 mtu;
 
@@ -1568,9 +1561,9 @@ skip_routeinfo:
 		}
 
 		if (mtu < IPV6_MIN_MTU || mtu > skb->dev->mtu) {
-			ND_PRINTK(2, warn, "RA: invalid mtu: %d\n", mtu);
-		} else if (in6_dev->cnf.mtu6 != mtu) {
-			in6_dev->cnf.mtu6 = mtu;
+			net_dbg_ratelimited("RA: invalid mtu: %d\n", mtu);
+		} else if (READ_ONCE(in6_dev->cnf.mtu6) != mtu) {
+			WRITE_ONCE(in6_dev->cnf.mtu6, mtu);
 			fib6_metric_set(rt, RTAX_MTU, mtu);
 			rt6_mtu_change(skb->dev, mtu);
 		}
@@ -1587,7 +1580,7 @@ skip_routeinfo:
 	}
 
 	if (ndopts.nd_opts_tgt_lladdr || ndopts.nd_opts_rh) {
-		ND_PRINTK(2, warn, "RA: invalid RA options\n");
+		net_dbg_ratelimited("RA: invalid RA options\n");
 	}
 out:
 	/* Send a notify if RA changed managed/otherconf flags or
@@ -1615,15 +1608,13 @@ static enum skb_drop_reason ndisc_redirect_rcv(struct sk_buff *skb)
 	switch (skb->ndisc_nodetype) {
 	case NDISC_NODETYPE_HOST:
 	case NDISC_NODETYPE_NODEFAULT:
-		ND_PRINTK(2, warn,
-			  "Redirect: from host or unauthorized router\n");
+		net_dbg_ratelimited("Redirect: from host or unauthorized router\n");
 		return reason;
 	}
 #endif
 
 	if (!(ipv6_addr_type(&ipv6_hdr(skb)->saddr) & IPV6_ADDR_LINKLOCAL)) {
-		ND_PRINTK(2, warn,
-			  "Redirect: source address is not link-local\n");
+		net_dbg_ratelimited("Redirect: source address is not link-local\n");
 		return reason;
 	}
 
@@ -1662,7 +1653,7 @@ static void ndisc_fill_redirect_hdr_option(struct sk_buff *skb,
 void ndisc_send_redirect(struct sk_buff *skb, const struct in6_addr *target)
 {
 	struct net_device *dev = skb->dev;
-	struct net *net = dev_net(dev);
+	struct net *net = dev_net_rcu(dev);
 	struct sock *sk = net->ipv6.ndisc_sk;
 	int optlen = 0;
 	struct inet_peer *peer;
@@ -1677,22 +1668,20 @@ void ndisc_send_redirect(struct sk_buff *skb, const struct in6_addr *target)
 	   ops_data_buf[NDISC_OPS_REDIRECT_DATA_SPACE], *ops_data = NULL;
 	bool ret;
 
-	if (netif_is_l3_master(skb->dev)) {
-		dev = __dev_get_by_index(dev_net(skb->dev), IPCB(skb)->iif);
+	if (netif_is_l3_master(dev)) {
+		dev = dev_get_by_index_rcu(net, IPCB(skb)->iif);
 		if (!dev)
 			return;
 	}
 
 	if (ipv6_get_lladdr(dev, &saddr_buf, IFA_F_TENTATIVE)) {
-		ND_PRINTK(2, warn, "Redirect: no link-local address on %s\n",
-			  dev->name);
+		net_dbg_ratelimited("Redirect: no link-local address on %s\n", dev->name);
 		return;
 	}
 
 	if (!ipv6_addr_equal(&ipv6_hdr(skb)->daddr, target) &&
 	    ipv6_addr_type(target) != (IPV6_ADDR_UNICAST|IPV6_ADDR_LINKLOCAL)) {
-		ND_PRINTK(2, warn,
-			  "Redirect: target address is not link-local unicast\n");
+		net_dbg_ratelimited("Redirect: target address is not link-local unicast\n");
 		return;
 	}
 
@@ -1708,25 +1697,23 @@ void ndisc_send_redirect(struct sk_buff *skb, const struct in6_addr *target)
 	if (IS_ERR(dst))
 		return;
 
-	rt = (struct rt6_info *) dst;
+	rt = dst_rt6_info(dst);
 
 	if (rt->rt6i_flags & RTF_GATEWAY) {
-		ND_PRINTK(2, warn,
-			  "Redirect: destination is not a neighbour\n");
+		net_dbg_ratelimited("Redirect: destination is not a neighbour\n");
 		goto release;
 	}
-	peer = inet_getpeer_v6(net->ipv6.peers, &ipv6_hdr(skb)->saddr, 1);
+
+	peer = inet_getpeer_v6(net->ipv6.peers, &ipv6_hdr(skb)->saddr);
 	ret = inet_peer_xrlim_allow(peer, 1*HZ);
-	if (peer)
-		inet_putpeer(peer);
+
 	if (!ret)
 		goto release;
 
 	if (dev->addr_len) {
 		struct neighbour *neigh = dst_neigh_lookup(skb_dst(skb), target);
 		if (!neigh) {
-			ND_PRINTK(2, warn,
-				  "Redirect: no neigh for target address\n");
+			net_dbg_ratelimited("Redirect: no neigh for target address\n");
 			goto release;
 		}
 
@@ -1804,7 +1791,7 @@ static bool ndisc_suppress_frag_ndisc(struct sk_buff *skb)
 	if (!idev)
 		return true;
 	if (IP6CB(skb)->flags & IP6SKB_FRAGMENTED &&
-	    idev->cnf.suppress_frag_ndisc) {
+	    READ_ONCE(idev->cnf.suppress_frag_ndisc)) {
 		net_warn_ratelimited("Received fragmented ndisc packet. Carefully consider disabling suppress_frag_ndisc.\n");
 		return true;
 	}
@@ -1827,14 +1814,12 @@ enum skb_drop_reason ndisc_rcv(struct sk_buff *skb)
 	__skb_push(skb, skb->data - skb_transport_header(skb));
 
 	if (ipv6_hdr(skb)->hop_limit != 255) {
-		ND_PRINTK(2, warn, "NDISC: invalid hop-limit: %d\n",
-			  ipv6_hdr(skb)->hop_limit);
+		net_dbg_ratelimited("NDISC: invalid hop-limit: %d\n", ipv6_hdr(skb)->hop_limit);
 		return SKB_DROP_REASON_IPV6_NDISC_HOP_LIMIT;
 	}
 
 	if (msg->icmph.icmp6_code != 0) {
-		ND_PRINTK(2, warn, "NDISC: invalid ICMPv6 code: %d\n",
-			  msg->icmph.icmp6_code);
+		net_dbg_ratelimited("NDISC: invalid ICMPv6 code: %d\n", msg->icmph.icmp6_code);
 		return SKB_DROP_REASON_IPV6_NDISC_BAD_CODE;
 	}
 
@@ -1881,8 +1866,8 @@ static int ndisc_netdev_event(struct notifier_block *this, unsigned long event, 
 		idev = in6_dev_get(dev);
 		if (!idev)
 			break;
-		if (idev->cnf.ndisc_notify ||
-		    net->ipv6.devconf_all->ndisc_notify)
+		if (READ_ONCE(idev->cnf.ndisc_notify) ||
+		    READ_ONCE(net->ipv6.devconf_all->ndisc_notify))
 			ndisc_send_unsol_na(dev);
 		in6_dev_put(idev);
 		break;
@@ -1891,8 +1876,8 @@ static int ndisc_netdev_event(struct notifier_block *this, unsigned long event, 
 		if (!idev)
 			evict_nocarrier = true;
 		else {
-			evict_nocarrier = idev->cnf.ndisc_evict_nocarrier &&
-					  net->ipv6.devconf_all->ndisc_evict_nocarrier;
+			evict_nocarrier = READ_ONCE(idev->cnf.ndisc_evict_nocarrier) &&
+					  READ_ONCE(net->ipv6.devconf_all->ndisc_evict_nocarrier);
 			in6_dev_put(idev);
 		}
 
@@ -1922,13 +1907,13 @@ static struct notifier_block ndisc_netdev_notifier = {
 };
 
 #ifdef CONFIG_SYSCTL
-static void ndisc_warn_deprecated_sysctl(struct ctl_table *ctl,
+static void ndisc_warn_deprecated_sysctl(const struct ctl_table *ctl,
 					 const char *func, const char *dev_name)
 {
 	static char warncomm[TASK_COMM_LEN];
 	static int warned;
 	if (strcmp(warncomm, current->comm) && warned < 5) {
-		strcpy(warncomm, current->comm);
+		strscpy(warncomm, current->comm);
 		pr_warn("process `%s' is using deprecated sysctl (%s) net.ipv6.neigh.%s.%s - use net.ipv6.neigh.%s.%s_ms instead\n",
 			warncomm, func,
 			dev_name, ctl->procname,
@@ -1937,7 +1922,7 @@ static void ndisc_warn_deprecated_sysctl(struct ctl_table *ctl,
 	}
 }
 
-int ndisc_ifinfo_sysctl_change(struct ctl_table *ctl, int write, void *buffer,
+int ndisc_ifinfo_sysctl_change(const struct ctl_table *ctl, int write, void *buffer,
 		size_t *lenp, loff_t *ppos)
 {
 	struct net_device *dev = ctl->extra1;
@@ -1966,7 +1951,7 @@ int ndisc_ifinfo_sysctl_change(struct ctl_table *ctl, int write, void *buffer,
 		if (ctl->data == &NEIGH_VAR(idev->nd_parms, BASE_REACHABLE_TIME))
 			idev->nd_parms->reachable_time =
 					neigh_rand_reach_time(NEIGH_VAR(idev->nd_parms, BASE_REACHABLE_TIME));
-		idev->tstamp = jiffies;
+		WRITE_ONCE(idev->tstamp, jiffies);
 		inet6_ifinfo_notify(RTM_NEWLINK, idev);
 		in6_dev_put(idev);
 	}
@@ -1985,9 +1970,8 @@ static int __net_init ndisc_net_init(struct net *net)
 	err = inet_ctl_sock_create(&sk, PF_INET6,
 				   SOCK_RAW, IPPROTO_ICMPV6, net);
 	if (err < 0) {
-		ND_PRINTK(0, err,
-			  "NDISC: Failed to initialize the control socket (err %d)\n",
-			  err);
+		net_err_ratelimited("NDISC: Failed to initialize the control socket (err %d)\n",
+				    err);
 		return err;
 	}
 

@@ -9,6 +9,7 @@
 #include <unistd.h>
 
 #include <api/fs/tracing_path.h>
+#include <api/io.h>
 #include <linux/stddef.h>
 #include <linux/perf_event.h>
 #include <linux/zalloc.h>
@@ -28,6 +29,8 @@
 #include "tracepoint.h"
 #include "pfm.h"
 #include "thread_map.h"
+#include "tool_pmu.h"
+#include "util.h"
 
 #define MAX_NAME_LEN 100
 
@@ -37,106 +40,9 @@ static const char * const event_type_descriptors[] = {
 	"Software event",
 	"Tracepoint event",
 	"Hardware cache event",
-	"Raw hardware event descriptor",
+	"Raw event descriptor",
 	"Hardware breakpoint",
 };
-
-static const struct event_symbol event_symbols_tool[PERF_TOOL_MAX] = {
-	[PERF_TOOL_DURATION_TIME] = {
-		.symbol = "duration_time",
-		.alias  = "",
-	},
-	[PERF_TOOL_USER_TIME] = {
-		.symbol = "user_time",
-		.alias  = "",
-	},
-	[PERF_TOOL_SYSTEM_TIME] = {
-		.symbol = "system_time",
-		.alias  = "",
-	},
-};
-
-/*
- * Print the events from <debugfs_mount_point>/tracing/events
- */
-void print_tracepoint_events(const struct print_callbacks *print_cb __maybe_unused, void *print_state __maybe_unused)
-{
-	char *events_path = get_tracing_file("events");
-	int events_fd = open(events_path, O_PATH);
-
-	put_tracing_file(events_path);
-	if (events_fd < 0) {
-		printf("Error: failed to open tracing events directory\n");
-		return;
-	}
-
-#ifdef HAVE_SCANDIRAT_SUPPORT
-{
-	struct dirent **sys_namelist = NULL;
-	int sys_items = tracing_events__scandir_alphasort(&sys_namelist);
-
-	for (int i = 0; i < sys_items; i++) {
-		struct dirent *sys_dirent = sys_namelist[i];
-		struct dirent **evt_namelist = NULL;
-		int dir_fd;
-		int evt_items;
-
-		if (sys_dirent->d_type != DT_DIR ||
-		    !strcmp(sys_dirent->d_name, ".") ||
-		    !strcmp(sys_dirent->d_name, ".."))
-			goto next_sys;
-
-		dir_fd = openat(events_fd, sys_dirent->d_name, O_PATH);
-		if (dir_fd < 0)
-			goto next_sys;
-
-		evt_items = scandirat(events_fd, sys_dirent->d_name, &evt_namelist, NULL, alphasort);
-		for (int j = 0; j < evt_items; j++) {
-			struct dirent *evt_dirent = evt_namelist[j];
-			char evt_path[MAXPATHLEN];
-			int evt_fd;
-
-			if (evt_dirent->d_type != DT_DIR ||
-			    !strcmp(evt_dirent->d_name, ".") ||
-			    !strcmp(evt_dirent->d_name, ".."))
-				goto next_evt;
-
-			snprintf(evt_path, sizeof(evt_path), "%s/id", evt_dirent->d_name);
-			evt_fd = openat(dir_fd, evt_path, O_RDONLY);
-			if (evt_fd < 0)
-				goto next_evt;
-			close(evt_fd);
-
-			snprintf(evt_path, MAXPATHLEN, "%s:%s",
-				 sys_dirent->d_name, evt_dirent->d_name);
-			print_cb->print_event(print_state,
-					/*topic=*/NULL,
-					/*pmu_name=*/NULL,
-					evt_path,
-					/*event_alias=*/NULL,
-					/*scale_unit=*/NULL,
-					/*deprecated=*/false,
-					"Tracepoint event",
-					/*desc=*/NULL,
-					/*long_desc=*/NULL,
-					/*encoding_desc=*/NULL);
-next_evt:
-			free(evt_namelist[j]);
-		}
-		close(dir_fd);
-		free(evt_namelist);
-next_sys:
-		free(sys_namelist[i]);
-	}
-
-	free(sys_namelist);
-}
-#else
-	printf("\nWARNING: Your libc doesn't have the scandirat function, please ask its maintainers to implement it.\n"
-	       "         As a rough fallback, please do 'ls %s' to see the available tracepoint events.\n", events_path);
-#endif
-	close(events_fd);
-}
 
 void print_sdt_events(const struct print_callbacks *print_cb, void *print_state)
 {
@@ -215,6 +121,7 @@ void print_sdt_events(const struct print_callbacks *print_cb, void *print_state)
 		print_cb->print_event(print_state,
 				/*topic=*/NULL,
 				/*pmu_name=*/NULL,
+				PERF_TYPE_TRACEPOINT,
 				evt_name ?: sdt_name->s,
 				/*event_alias=*/NULL,
 				/*deprecated=*/false,
@@ -232,7 +139,6 @@ void print_sdt_events(const struct print_callbacks *print_cb, void *print_state)
 bool is_event_supported(u8 type, u64 config)
 {
 	bool ret = true;
-	int open_return;
 	struct evsel *evsel;
 	struct perf_event_attr attr = {
 		.type = type,
@@ -246,20 +152,33 @@ bool is_event_supported(u8 type, u64 config)
 
 	evsel = evsel__new(&attr);
 	if (evsel) {
-		open_return = evsel__open(evsel, NULL, tmap);
-		ret = open_return >= 0;
+		ret = evsel__open(evsel, NULL, tmap) >= 0;
 
-		if (open_return == -EACCES) {
+		if (!ret) {
 			/*
-			 * This happens if the paranoid value
+			 * The event may fail to open if the paranoid value
 			 * /proc/sys/kernel/perf_event_paranoid is set to 2
-			 * Re-run with exclude_kernel set; we don't do that
-			 * by default as some ARM machines do not support it.
-			 *
+			 * Re-run with exclude_kernel set; we don't do that by
+			 * default as some ARM machines do not support it.
 			 */
 			evsel->core.attr.exclude_kernel = 1;
 			ret = evsel__open(evsel, NULL, tmap) >= 0;
 		}
+
+		if (!ret) {
+			/*
+			 * The event may fail to open if the PMU requires
+			 * exclude_guest to be set (e.g. as the Apple M1 PMU
+			 * requires).
+			 * Re-run with exclude_guest set; we don't do that by
+			 * default as it's equally legitimate for another PMU
+			 * driver to require that exclude_guest is clear.
+			 */
+			evsel->core.attr.exclude_guest = 1;
+			ret = evsel__open(evsel, NULL, tmap) >= 0;
+		}
+
+		evsel__close(evsel);
 		evsel__delete(evsel);
 	}
 
@@ -304,6 +223,7 @@ int print_hwcache_events(const struct print_callbacks *print_cb, void *print_sta
 					print_cb->print_event(print_state,
 							"cache",
 							pmu->name,
+							pmu->type,
 							name,
 							alias_name,
 							/*scale_unit=*/NULL,
@@ -317,24 +237,6 @@ int print_hwcache_events(const struct print_callbacks *print_cb, void *print_sta
 		}
 	}
 	return 0;
-}
-
-void print_tool_events(const struct print_callbacks *print_cb, void *print_state)
-{
-	// Start at 1 because the first enum entry means no tool event.
-	for (int i = 1; i < PERF_TOOL_MAX; ++i) {
-		print_cb->print_event(print_state,
-				"tool",
-				/*pmu_name=*/NULL,
-				event_symbols_tool[i].symbol,
-				event_symbols_tool[i].alias,
-				/*scale_unit=*/NULL,
-				/*deprecated=*/false,
-				"Tool event",
-				/*desc=*/NULL,
-				/*long_desc=*/NULL,
-				/*encoding_desc=*/NULL);
-	}
 }
 
 void print_symbol_events(const struct print_callbacks *print_cb, void *print_state,
@@ -378,6 +280,7 @@ void print_symbol_events(const struct print_callbacks *print_cb, void *print_sta
 		print_cb->print_event(print_state,
 				/*topic=*/NULL,
 				/*pmu_name=*/NULL,
+				type,
 				nd->s,
 				alias,
 				/*scale_unit=*/NULL,
@@ -390,19 +293,146 @@ void print_symbol_events(const struct print_callbacks *print_cb, void *print_sta
 	strlist__delete(evt_name_list);
 }
 
+/** struct mep - RB-tree node for building printing information. */
+struct mep {
+	/** nd - RB-tree element. */
+	struct rb_node nd;
+	/** @metric_group: Owned metric group name, separated others with ';'. */
+	char *metric_group;
+	const char *metric_name;
+	const char *metric_desc;
+	const char *metric_long_desc;
+	const char *metric_expr;
+	const char *metric_threshold;
+	const char *metric_unit;
+	const char *pmu_name;
+};
+
+static int mep_cmp(struct rb_node *rb_node, const void *entry)
+{
+	struct mep *a = container_of(rb_node, struct mep, nd);
+	struct mep *b = (struct mep *)entry;
+	int ret;
+
+	ret = strcmp(a->metric_group, b->metric_group);
+	if (ret)
+		return ret;
+
+	return strcmp(a->metric_name, b->metric_name);
+}
+
+static struct rb_node *mep_new(struct rblist *rl __maybe_unused, const void *entry)
+{
+	struct mep *me = malloc(sizeof(struct mep));
+
+	if (!me)
+		return NULL;
+
+	memcpy(me, entry, sizeof(struct mep));
+	return &me->nd;
+}
+
+static void mep_delete(struct rblist *rl __maybe_unused,
+		       struct rb_node *nd)
+{
+	struct mep *me = container_of(nd, struct mep, nd);
+
+	zfree(&me->metric_group);
+	free(me);
+}
+
+static struct mep *mep_lookup(struct rblist *groups, const char *metric_group,
+			      const char *metric_name)
+{
+	struct rb_node *nd;
+	struct mep me = {
+		.metric_group = strdup(metric_group),
+		.metric_name = metric_name,
+	};
+	nd = rblist__find(groups, &me);
+	if (nd) {
+		free(me.metric_group);
+		return container_of(nd, struct mep, nd);
+	}
+	rblist__add_node(groups, &me);
+	nd = rblist__find(groups, &me);
+	if (nd)
+		return container_of(nd, struct mep, nd);
+	return NULL;
+}
+
+static int metricgroup__add_to_mep_groups_callback(const struct pmu_metric *pm,
+					const struct pmu_metrics_table *table __maybe_unused,
+					void *vdata)
+{
+	struct rblist *groups = vdata;
+	const char *g;
+	char *omg, *mg;
+
+	mg = strdup(pm->metric_group ?: pm->metric_name);
+	if (!mg)
+		return -ENOMEM;
+	omg = mg;
+	while ((g = strsep(&mg, ";")) != NULL) {
+		struct mep *me;
+
+		g = skip_spaces(g);
+		if (strlen(g))
+			me = mep_lookup(groups, g, pm->metric_name);
+		else
+			me = mep_lookup(groups, pm->metric_name, pm->metric_name);
+
+		if (me) {
+			me->metric_desc = pm->desc;
+			me->metric_long_desc = pm->long_desc;
+			me->metric_expr = pm->metric_expr;
+			me->metric_threshold = pm->metric_threshold;
+			me->metric_unit = pm->unit;
+			me->pmu_name = pm->pmu;
+		}
+	}
+	free(omg);
+
+	return 0;
+}
+
+void metricgroup__print(const struct print_callbacks *print_cb, void *print_state)
+{
+	struct rblist groups;
+	struct rb_node *node, *next;
+	const struct pmu_metrics_table *table = pmu_metrics_table__find();
+
+	rblist__init(&groups);
+	groups.node_new = mep_new;
+	groups.node_cmp = mep_cmp;
+	groups.node_delete = mep_delete;
+
+	metricgroup__for_each_metric(table, metricgroup__add_to_mep_groups_callback, &groups);
+
+	for (node = rb_first_cached(&groups.entries); node; node = next) {
+		struct mep *me = container_of(node, struct mep, nd);
+
+		print_cb->print_metric(print_state,
+				me->metric_group,
+				me->metric_name,
+				me->metric_desc,
+				me->metric_long_desc,
+				me->metric_expr,
+				me->metric_threshold,
+				me->metric_unit,
+				me->pmu_name);
+		next = rb_next(node);
+		rblist__remove_node(&groups, node);
+	}
+}
+
 /*
  * Print the help text for the event symbols:
  */
 void print_events(const struct print_callbacks *print_cb, void *print_state)
 {
-	char *tmp;
-
 	print_symbol_events(print_cb, print_state, PERF_TYPE_HARDWARE,
 			event_symbols_hw, PERF_COUNT_HW_MAX);
-	print_symbol_events(print_cb, print_state, PERF_TYPE_SOFTWARE,
-			event_symbols_sw, PERF_COUNT_SW_MAX);
-
-	print_tool_events(print_cb, print_state);
 
 	print_hwcache_events(print_cb, print_state);
 
@@ -411,6 +441,7 @@ void print_events(const struct print_callbacks *print_cb, void *print_state)
 	print_cb->print_event(print_state,
 			/*topic=*/NULL,
 			/*pmu_name=*/NULL,
+			PERF_TYPE_RAW,
 			"rNNN",
 			/*event_alias=*/NULL,
 			/*scale_unit=*/NULL,
@@ -420,25 +451,12 @@ void print_events(const struct print_callbacks *print_cb, void *print_state)
 			/*long_desc=*/NULL,
 			/*encoding_desc=*/NULL);
 
-	if (asprintf(&tmp, "%s/t1=v1[,t2=v2,t3 ...]/modifier",
-		     perf_pmus__scan_core(/*pmu=*/NULL)->name) > 0) {
-		print_cb->print_event(print_state,
-				/*topic=*/NULL,
-				/*pmu_name=*/NULL,
-				tmp,
-				/*event_alias=*/NULL,
-				/*scale_unit=*/NULL,
-				/*deprecated=*/false,
-				event_type_descriptors[PERF_TYPE_RAW],
-				"(see 'man perf-list' on how to encode it)",
-				/*long_desc=*/NULL,
-				/*encoding_desc=*/NULL);
-		free(tmp);
-	}
+	perf_pmus__print_raw_pmu_events(print_cb, print_state);
 
 	print_cb->print_event(print_state,
 			/*topic=*/NULL,
 			/*pmu_name=*/NULL,
+			PERF_TYPE_BREAKPOINT,
 			"mem:<addr>[/len][:access]",
 			/*scale_unit=*/NULL,
 			/*event_alias=*/NULL,
@@ -447,8 +465,6 @@ void print_events(const struct print_callbacks *print_cb, void *print_state)
 			/*desc=*/NULL,
 			/*long_desc=*/NULL,
 			/*encoding_desc=*/NULL);
-
-	print_tracepoint_events(print_cb, print_state);
 
 	print_sdt_events(print_cb, print_state);
 

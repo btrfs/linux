@@ -189,7 +189,7 @@ static int mt25qu512a_post_bfpt_fixup(struct spi_nor *nor,
 	return 0;
 }
 
-static struct spi_nor_fixups mt25qu512a_fixups = {
+static const struct spi_nor_fixups mt25qu512a_fixups = {
 	.post_bfpt = mt25qu512a_post_bfpt_fixup,
 };
 
@@ -225,15 +225,15 @@ static int st_nor_two_die_late_init(struct spi_nor *nor)
 	return spi_nor_set_4byte_addr_mode(nor, true);
 }
 
-static struct spi_nor_fixups n25q00_fixups = {
+static const struct spi_nor_fixups n25q00_fixups = {
 	.late_init = st_nor_four_die_late_init,
 };
 
-static struct spi_nor_fixups mt25q01_fixups = {
+static const struct spi_nor_fixups mt25q01_fixups = {
 	.late_init = st_nor_two_die_late_init,
 };
 
-static struct spi_nor_fixups mt25q02_fixups = {
+static const struct spi_nor_fixups mt25q02_fixups = {
 	.late_init = st_nor_four_die_late_init,
 };
 
@@ -436,6 +436,8 @@ static const struct flash_info st_nor_parts[] = {
 		.id = SNOR_ID(0x20, 0xbb, 0x17),
 		.name = "n25q064a",
 		.size = SZ_8M,
+		.flags = SPI_NOR_HAS_LOCK | SPI_NOR_HAS_TB | SPI_NOR_4BIT_BP |
+			 SPI_NOR_BP3_SR_BIT6,
 		.no_sfdp_flags = SECT_4K | SPI_NOR_QUAD_READ,
 	}, {
 		.id = SNOR_ID(0x20, 0xbb, 0x18),

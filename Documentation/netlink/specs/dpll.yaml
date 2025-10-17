@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: ((GPL-2.0 WITH Linux-syscall-note) OR BSD-3-Clause)
-
+---
 name: dpll
 
 doc: DPLL subsystem.
@@ -50,6 +50,70 @@ definitions:
           when dpll lock-state was already DPLL_LOCK_STATUS_LOCKED_HO_ACQ,
           if dpll lock-state was not DPLL_LOCK_STATUS_LOCKED_HO_ACQ, the
           dpll's lock-state shall remain DPLL_LOCK_STATUS_UNLOCKED)
+    render-max: true
+  -
+    type: enum
+    name: lock-status-error
+    doc: |
+      if previous status change was done due to a failure, this provides
+      information of dpll device lock status error.
+      Valid values for DPLL_A_LOCK_STATUS_ERROR attribute
+    entries:
+      -
+        name: none
+        doc: |
+          dpll device lock status was changed without any error
+        value: 1
+      -
+        name: undefined
+        doc: |
+          dpll device lock status was changed due to undefined error.
+          Driver fills this value up in case it is not able
+          to obtain suitable exact error type.
+      -
+        name: media-down
+        doc: |
+          dpll device lock status was changed because of associated
+          media got down.
+          This may happen for example if dpll device was previously
+          locked on an input pin of type PIN_TYPE_SYNCE_ETH_PORT.
+      -
+        name: fractional-frequency-offset-too-high
+        doc: |
+          the FFO (Fractional Frequency Offset) between the RX and TX
+          symbol rate on the media got too high.
+          This may happen for example if dpll device was previously
+          locked on an input pin of type PIN_TYPE_SYNCE_ETH_PORT.
+    render-max: true
+  -
+    type: enum
+    name: clock-quality-level
+    doc: |
+      level of quality of a clock device. This mainly applies when
+      the dpll lock-status is DPLL_LOCK_STATUS_HOLDOVER.
+      The current list is defined according to the table 11-7 contained
+      in ITU-T G.8264/Y.1364 document. One may extend this list freely
+      by other ITU-T defined clock qualities, or different ones defined
+      by another standardization body (for those, please use
+      different prefix).
+    entries:
+      -
+        name: itu-opt1-prc
+        value: 1
+      -
+        name: itu-opt1-ssu-a
+      -
+        name: itu-opt1-ssu-b
+      -
+        name: itu-opt1-eec1
+      -
+        name: itu-opt1-prtc
+      -
+        name: itu-opt1-eprtc
+      -
+        name: itu-opt1-eeec
+      -
+        name: itu-opt1-eprc
     render-max: true
   -
     type: const
@@ -124,7 +188,7 @@ definitions:
     value: 10000
   -
     type: const
-    name: pin-frequency-77_5-khz
+    name: pin-frequency-77-5-khz
     value: 77500
   -
     type: const
@@ -176,6 +240,20 @@ definitions:
       integer part of a measured phase offset value.
       Value of (DPLL_A_PHASE_OFFSET % DPLL_PHASE_OFFSET_DIVIDER) is a
       fractional part of a measured phase offset value.
+  -
+    type: enum
+    name: feature-state
+    doc: |
+      Allow control (enable/disable) and status checking over features.
+    entries:
+      -
+        name: disable
+        doc: |
+          feature shall be disabled
+      -
+        name: enable
+        doc: |
+          feature shall be enabled
 
 attribute-sets:
   -
@@ -214,6 +292,33 @@ attribute-sets:
         name: type
         type: u32
         enum: type
+      -
+        name: lock-status-error
+        type: u32
+        enum: lock-status-error
+      -
+        name: clock-quality-level
+        type: u32
+        enum: clock-quality-level
+        multi-attr: true
+        doc: |
+          Level of quality of a clock device. This mainly applies when
+          the dpll lock-status is DPLL_LOCK_STATUS_HOLDOVER. This could
+          be put to message multiple times to indicate possible parallel
+          quality levels (e.g. one specified by ITU option 1 and another
+          one specified by option 2).
+      -
+        name: phase-offset-monitor
+        type: u32
+        enum: feature-state
+        doc: Receive or request state of phase offset monitor feature.
+          If enabled, dpll device shall monitor and notify all currently
+          available inputs for changes of their phase offset against the
+          dpll device.
+      -
+        name: phase-offset-avg-factor
+        type: u32
+        doc: Averaging factor applied to calculation of reported phase offset.
   -
     name: pin
     enum-name: dpll_a_pin
@@ -274,6 +379,7 @@ attribute-sets:
       -
         name: capabilities
         type: u32
+        enum: pin-capabilities
       -
         name: parent-device
         type: nest
@@ -306,6 +412,35 @@ attribute-sets:
           Value is in PPM (parts per million).
           This may be implemented for example for pin of type
           PIN_TYPE_SYNCE_ETH_PORT.
+      -
+        name: esync-frequency
+        type: u64
+        doc: |
+          Frequency of Embedded SYNC signal. If provided, the pin is configured
+          with a SYNC signal embedded into its base clock frequency.
+      -
+        name: esync-frequency-supported
+        type: nest
+        multi-attr: true
+        nested-attributes: frequency-range
+        doc: |
+          If provided a pin is capable of embedding a SYNC signal (within given
+          range) into its base frequency signal.
+      -
+        name: esync-pulse
+        type: u32
+        doc: |
+          A ratio of high to low state of a SYNC signal pulse embedded
+          into base clock frequency. Value is in percents.
+      -
+        name: reference-sync
+        type: nest
+        multi-attr: true
+        nested-attributes: reference-sync
+        doc: |
+          Capable pin provides list of pins that can be bound to create a
+          reference-sync pin pair.
+
   -
     name: pin-parent-device
     subset-of: pin
@@ -336,6 +471,14 @@ attribute-sets:
         name: frequency-min
       -
         name: frequency-max
+  -
+    name: reference-sync
+    subset-of: pin
+    attributes:
+      -
+        name: id
+      -
+        name: state
 
 operations:
   enum-name: dpll_cmd
@@ -345,7 +488,7 @@ operations:
       doc: |
         Get id of dpll device that matches given attributes
       attribute-set: dpll
-      flags: [ admin-perm ]
+      flags: [admin-perm]
 
       do:
         pre: dpll-lock-doit
@@ -364,7 +507,7 @@ operations:
       doc: |
         Get list of DPLL devices (dump) or attributes of a single dpll device
       attribute-set: dpll
-      flags: [ admin-perm ]
+      flags: [admin-perm]
 
       do:
         pre: dpll-pre-doit
@@ -379,20 +522,21 @@ operations:
             - mode
             - mode-supported
             - lock-status
+            - lock-status-error
             - temp
             - clock-id
             - type
+            - phase-offset-monitor
+            - phase-offset-avg-factor
 
       dump:
-        pre: dpll-lock-dumpit
-        post: dpll-unlock-dumpit
         reply: *dev-attrs
 
     -
       name: device-set
       doc: Set attributes for a DPLL device
       attribute-set: dpll
-      flags: [ admin-perm ]
+      flags: [admin-perm]
 
       do:
         pre: dpll-pre-doit
@@ -400,6 +544,8 @@ operations:
         request:
           attributes:
             - id
+            - phase-offset-monitor
+            - phase-offset-avg-factor
     -
       name: device-create-ntf
       doc: Notification about device appearing
@@ -420,7 +566,7 @@ operations:
       doc: |
         Get id of a pin that matches given attributes
       attribute-set: pin
-      flags: [ admin-perm ]
+      flags: [admin-perm]
 
       do:
         pre: dpll-lock-doit
@@ -441,13 +587,14 @@ operations:
       name: pin-get
       doc: |
         Get list of pins and its attributes.
+
         - dump request without any attributes given - list all the pins in the
           system
         - dump request with target dpll - list all the pins registered with
           a given dpll device
         - do request with target dpll and target pin - single pin attributes
       attribute-set: pin
-      flags: [ admin-perm ]
+      flags: [admin-perm]
 
       do:
         pre: dpll-pin-pre-doit
@@ -471,10 +618,12 @@ operations:
             - phase-adjust-max
             - phase-adjust
             - fractional-frequency-offset
+            - esync-frequency
+            - esync-frequency-supported
+            - esync-pulse
+            - reference-sync
 
       dump:
-        pre: dpll-lock-dumpit
-        post: dpll-unlock-dumpit
         request:
           attributes:
             - id
@@ -484,7 +633,7 @@ operations:
       name: pin-set
       doc: Set attributes of a target pin
       attribute-set: pin
-      flags: [ admin-perm ]
+      flags: [admin-perm]
 
       do:
         pre: dpll-pin-pre-doit
@@ -499,6 +648,8 @@ operations:
             - parent-device
             - parent-pin
             - phase-adjust
+            - esync-frequency
+            - reference-sync
     -
       name: pin-create-ntf
       doc: Notification about pin appearing

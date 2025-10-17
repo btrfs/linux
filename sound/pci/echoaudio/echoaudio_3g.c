@@ -119,7 +119,7 @@ static int set_digital_mode(struct echoaudio *chip, u8 mode)
 	 * updated by the DSP comm object. */
 	if (err >= 0 && previous_mode != mode &&
 	    (previous_mode == DIGITAL_MODE_ADAT || mode == DIGITAL_MODE_ADAT)) {
-		spin_lock_irq(&chip->lock);
+		guard(spinlock_irq)(&chip->lock);
 		for (o = 0; o < num_busses_out(chip); o++)
 			for (i = 0; i < num_busses_in(chip); i++)
 				set_monitor_gain(chip, o, i,
@@ -134,7 +134,6 @@ static int set_digital_mode(struct echoaudio *chip, u8 mode)
 		for (o = 0; o < num_busses_out(chip); o++)
 			set_output_gain(chip, o, chip->output_gain[o]);
 		update_output_line_level(chip);
-		spin_unlock_irq(&chip->lock);
 	}
 
 	return err;
@@ -274,7 +273,6 @@ static int set_sample_rate(struct echoaudio *chip, u32 rate)
 		       chip->digital_mode == DIGITAL_MODE_ADAT))
 		return -EINVAL;
 
-	clock = 0;
 	control_reg = le32_to_cpu(chip->comm_page->control_register);
 	control_reg &= E3G_CLOCK_CLEAR_MASK;
 
@@ -397,7 +395,7 @@ static int dsp_set_digital_mode(struct echoaudio *chip, u8 mode)
 		return -EINVAL;
 	}
 
-	spin_lock_irq(&chip->lock);
+	guard(spinlock_irq)(&chip->lock);
 
 	if (incompatible_clock) {
 		chip->sample_rate = 48000;
@@ -423,7 +421,6 @@ static int dsp_set_digital_mode(struct echoaudio *chip, u8 mode)
 	}
 
 	err = write_control_reg(chip, control_reg, get_frq_reg(chip), 1);
-	spin_unlock_irq(&chip->lock);
 	if (err < 0)
 		return err;
 	chip->digital_mode = mode;

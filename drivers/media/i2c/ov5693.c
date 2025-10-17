@@ -141,7 +141,6 @@ struct ov5693_device {
 
 	struct gpio_desc *reset;
 	struct gpio_desc *powerdown;
-	struct gpio_desc *privacy_led;
 	struct regulator_bulk_data supplies[OV5693_NUM_SUPPLIES];
 	struct clk *xvclk;
 
@@ -657,7 +656,6 @@ static int ov5693_sensor_init(struct ov5693_device *ov5693)
 
 static void ov5693_sensor_powerdown(struct ov5693_device *ov5693)
 {
-	gpiod_set_value_cansleep(ov5693->privacy_led, 0);
 	gpiod_set_value_cansleep(ov5693->reset, 1);
 	gpiod_set_value_cansleep(ov5693->powerdown, 1);
 
@@ -687,7 +685,6 @@ static int ov5693_sensor_powerup(struct ov5693_device *ov5693)
 
 	gpiod_set_value_cansleep(ov5693->powerdown, 0);
 	gpiod_set_value_cansleep(ov5693->reset, 0);
-	gpiod_set_value_cansleep(ov5693->privacy_led, 1);
 
 	usleep_range(5000, 7500);
 
@@ -1201,13 +1198,6 @@ static int ov5693_configure_gpios(struct ov5693_device *ov5693)
 		return PTR_ERR(ov5693->powerdown);
 	}
 
-	ov5693->privacy_led = devm_gpiod_get_optional(ov5693->dev, "privacy-led",
-						      GPIOD_OUT_LOW);
-	if (IS_ERR(ov5693->privacy_led)) {
-		dev_err(ov5693->dev, "Error fetching privacy-led GPIO\n");
-		return PTR_ERR(ov5693->privacy_led);
-	}
-
 	return 0;
 }
 
@@ -1232,9 +1222,14 @@ static int ov5693_check_hwcfg(struct ov5693_device *ov5693)
 	unsigned int i;
 	int ret;
 
+	/*
+	 * Sometimes the fwnode graph is initialized by the bridge driver
+	 * Bridge drivers doing this may also add GPIO mappings, wait for this.
+	 */
 	endpoint = fwnode_graph_get_next_endpoint(fwnode, NULL);
 	if (!endpoint)
-		return -EPROBE_DEFER; /* Could be provided by cio2-bridge */
+		return dev_err_probe(ov5693->dev, -EPROBE_DEFER,
+				     "waiting for fwnode graph endpoint\n");
 
 	ret = v4l2_fwnode_endpoint_alloc_parse(endpoint, &bus_cfg);
 	fwnode_handle_put(endpoint);
@@ -1294,25 +1289,13 @@ static int ov5693_probe(struct i2c_client *client)
 
 	v4l2_i2c_subdev_init(&ov5693->sd, client, &ov5693_ops);
 
-	ov5693->xvclk = devm_clk_get_optional(&client->dev, "xvclk");
+	ov5693->xvclk = devm_v4l2_sensor_clk_get(&client->dev, "xvclk");
 	if (IS_ERR(ov5693->xvclk))
 		return dev_err_probe(&client->dev, PTR_ERR(ov5693->xvclk),
 				     "failed to get xvclk: %ld\n",
 				     PTR_ERR(ov5693->xvclk));
 
-	if (ov5693->xvclk) {
-		xvclk_rate = clk_get_rate(ov5693->xvclk);
-	} else {
-		ret = fwnode_property_read_u32(dev_fwnode(&client->dev),
-				     "clock-frequency",
-				     &xvclk_rate);
-
-		if (ret) {
-			dev_err(&client->dev, "can't get clock frequency");
-			return ret;
-		}
-	}
-
+	xvclk_rate = clk_get_rate(ov5693->xvclk);
 	if (xvclk_rate != OV5693_XVCLK_FREQ)
 		dev_warn(&client->dev, "Found clk freq %u, expected %u\n",
 			 xvclk_rate, OV5693_XVCLK_FREQ);

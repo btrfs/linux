@@ -117,10 +117,10 @@ static const struct wcnss_data pronto_v1_data = {
 	.pmu_offset = 0x1004,
 	.spare_offset = 0x1088,
 
-	.pd_names = { "mx", "cx" },
+	.pd_names = { "cx", "mx" },
 	.vregs = (struct wcnss_vreg_info[]) {
-		{ "vddmx", 950000, 1150000, 0 },
 		{ "vddcx", .super_turbo = true},
+		{ "vddmx", 950000, 1150000, 0 },
 		{ "vddpx", 1800000, 1800000, 0 },
 	},
 	.num_pd_vregs = 2,
@@ -131,10 +131,10 @@ static const struct wcnss_data pronto_v2_data = {
 	.pmu_offset = 0x1004,
 	.spare_offset = 0x1088,
 
-	.pd_names = { "mx", "cx" },
+	.pd_names = { "cx", "mx" },
 	.vregs = (struct wcnss_vreg_info[]) {
-		{ "vddmx", 1287500, 1287500, 0 },
 		{ "vddcx", .super_turbo = true },
+		{ "vddmx", 1287500, 1287500, 0 },
 		{ "vddpx", 1800000, 1800000, 0 },
 	},
 	.num_pd_vregs = 2,
@@ -397,7 +397,16 @@ static irqreturn_t wcnss_stop_ack_interrupt(int irq, void *dev)
 static int wcnss_init_pds(struct qcom_wcnss *wcnss,
 			  const char * const pd_names[WCNSS_MAX_PDS])
 {
+	struct device *dev = wcnss->dev;
 	int i, ret;
+
+	/* Handle single power domain */
+	if (dev->pm_domain) {
+		wcnss->pds[0] = dev;
+		wcnss->num_pds = 1;
+		pm_runtime_enable(dev);
+		return 0;
+	}
 
 	for (i = 0; i < WCNSS_MAX_PDS; i++) {
 		if (!pd_names[i])
@@ -418,7 +427,14 @@ static int wcnss_init_pds(struct qcom_wcnss *wcnss,
 
 static void wcnss_release_pds(struct qcom_wcnss *wcnss)
 {
+	struct device *dev = wcnss->dev;
 	int i;
+
+	/* Handle single power domain */
+	if (wcnss->num_pds == 1 && dev->pm_domain) {
+		pm_runtime_disable(dev);
+		return;
+	}
 
 	for (i = 0; i < wcnss->num_pds; i++)
 		dev_pm_domain_detach(wcnss->pds[i], false);
@@ -437,10 +453,14 @@ static int wcnss_init_regulators(struct qcom_wcnss *wcnss,
 	 * the regulators for the power domains. For old device trees we need to
 	 * reserve extra space to manage them through the regulator interface.
 	 */
-	if (wcnss->num_pds)
-		info += num_pd_vregs;
-	else
+	if (wcnss->num_pds) {
+		info += wcnss->num_pds;
+		/* Handle single power domain case */
+		if (wcnss->num_pds < num_pd_vregs)
+			num_vregs += num_pd_vregs - wcnss->num_pds;
+	} else {
 		num_vregs += num_pd_vregs;
+	}
 
 	bulk = devm_kcalloc(wcnss->dev,
 			    num_vregs, sizeof(struct regulator_bulk_data),
@@ -555,8 +575,8 @@ static int wcnss_probe(struct platform_device *pdev)
 	if (ret < 0 && ret != -EINVAL)
 		return ret;
 
-	rproc = rproc_alloc(&pdev->dev, pdev->name, &wcnss_ops,
-			    fw_name, sizeof(*wcnss));
+	rproc = devm_rproc_alloc(&pdev->dev, pdev->name, &wcnss_ops,
+				 fw_name, sizeof(*wcnss));
 	if (!rproc) {
 		dev_err(&pdev->dev, "unable to allocate remoteproc\n");
 		return -ENOMEM;
@@ -574,14 +594,12 @@ static int wcnss_probe(struct platform_device *pdev)
 	mutex_init(&wcnss->iris_lock);
 
 	mmio = devm_platform_ioremap_resource_byname(pdev, "pmu");
-	if (IS_ERR(mmio)) {
-		ret = PTR_ERR(mmio);
-		goto free_rproc;
-	}
+	if (IS_ERR(mmio))
+		return PTR_ERR(mmio);
 
 	ret = wcnss_alloc_memory_region(wcnss);
 	if (ret)
-		goto free_rproc;
+		return ret;
 
 	wcnss->pmu_cfg = mmio + data->pmu_offset;
 	wcnss->spare_out = mmio + data->spare_offset;
@@ -592,7 +610,7 @@ static int wcnss_probe(struct platform_device *pdev)
 	 */
 	ret = wcnss_init_pds(wcnss, data->pd_names);
 	if (ret && (ret != -ENODATA || !data->num_pd_vregs))
-		goto free_rproc;
+		return ret;
 
 	ret = wcnss_init_regulators(wcnss, data->vregs, data->num_vregs,
 				    data->num_pd_vregs);
@@ -656,8 +674,6 @@ remove_iris:
 	qcom_iris_remove(wcnss->iris);
 detach_pds:
 	wcnss_release_pds(wcnss);
-free_rproc:
-	rproc_free(rproc);
 
 	return ret;
 }
@@ -673,7 +689,6 @@ static void wcnss_remove(struct platform_device *pdev)
 	qcom_remove_sysmon_subdev(wcnss->sysmon);
 	qcom_remove_smd_subdev(wcnss->rproc, &wcnss->smd_subdev);
 	wcnss_release_pds(wcnss);
-	rproc_free(wcnss->rproc);
 }
 
 static const struct of_device_id wcnss_of_match[] = {
@@ -687,7 +702,7 @@ MODULE_DEVICE_TABLE(of, wcnss_of_match);
 
 static struct platform_driver wcnss_driver = {
 	.probe = wcnss_probe,
-	.remove_new = wcnss_remove,
+	.remove = wcnss_remove,
 	.driver = {
 		.name = "qcom-wcnss-pil",
 		.of_match_table = wcnss_of_match,

@@ -4,6 +4,7 @@
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
 #endif
+#include <assert.h>
 #include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -20,6 +21,7 @@
 #include <sys/resource.h>
 #include <sys/stat.h>
 #include <sys/vfs.h>
+#include <sys/utsname.h>
 
 #include <linux/filter.h>
 #include <linux/limits.h>
@@ -30,6 +32,7 @@
 #include <bpf/hashmap.h>
 #include <bpf/libbpf.h> /* libbpf_num_possible_cpus */
 #include <bpf/btf.h>
+#include <zlib.h>
 
 #include "main.h"
 
@@ -193,7 +196,8 @@ int mount_tracefs(const char *target)
 	return err;
 }
 
-int open_obj_pinned(const char *path, bool quiet)
+int open_obj_pinned(const char *path, bool quiet,
+		    const struct bpf_obj_get_opts *opts)
 {
 	char *pname;
 	int fd = -1;
@@ -205,7 +209,7 @@ int open_obj_pinned(const char *path, bool quiet)
 		goto out_ret;
 	}
 
-	fd = bpf_obj_get(pname);
+	fd = bpf_obj_get_opts(pname, opts);
 	if (fd < 0) {
 		if (!quiet)
 			p_err("bpf obj get (%s): %s", pname,
@@ -221,12 +225,13 @@ out_ret:
 	return fd;
 }
 
-int open_obj_pinned_any(const char *path, enum bpf_obj_type exp_type)
+int open_obj_pinned_any(const char *path, enum bpf_obj_type exp_type,
+			const struct bpf_obj_get_opts *opts)
 {
 	enum bpf_obj_type type;
 	int fd;
 
-	fd = open_obj_pinned(path, false);
+	fd = open_obj_pinned(path, false, opts);
 	if (fd < 0)
 		return -1;
 
@@ -244,28 +249,100 @@ int open_obj_pinned_any(const char *path, enum bpf_obj_type exp_type)
 	return fd;
 }
 
-int mount_bpffs_for_pin(const char *name, bool is_dir)
+int create_and_mount_bpffs_dir(const char *dir_name)
 {
 	char err_str[ERR_MAX_LEN];
-	char *file;
+	bool dir_exists;
+	int err = 0;
+
+	if (is_bpffs(dir_name))
+		return err;
+
+	dir_exists = access(dir_name, F_OK) == 0;
+
+	if (!dir_exists) {
+		char *temp_name;
+		char *parent_name;
+
+		temp_name = strdup(dir_name);
+		if (!temp_name) {
+			p_err("mem alloc failed");
+			return -1;
+		}
+
+		parent_name = dirname(temp_name);
+
+		if (is_bpffs(parent_name)) {
+			/* nothing to do if already mounted */
+			free(temp_name);
+			return err;
+		}
+
+		if (access(parent_name, F_OK) == -1) {
+			p_err("can't create dir '%s' to pin BPF object: parent dir '%s' doesn't exist",
+			      dir_name, parent_name);
+			free(temp_name);
+			return -1;
+		}
+
+		free(temp_name);
+	}
+
+	if (block_mount) {
+		p_err("no BPF file system found, not mounting it due to --nomount option");
+		return -1;
+	}
+
+	if (!dir_exists) {
+		err = mkdir(dir_name, S_IRWXU);
+		if (err) {
+			p_err("failed to create dir '%s': %s", dir_name, strerror(errno));
+			return err;
+		}
+	}
+
+	err = mnt_fs(dir_name, "bpf", err_str, ERR_MAX_LEN);
+	if (err) {
+		err_str[ERR_MAX_LEN - 1] = '\0';
+		p_err("can't mount BPF file system on given dir '%s': %s",
+		      dir_name, err_str);
+
+		if (!dir_exists)
+			rmdir(dir_name);
+	}
+
+	return err;
+}
+
+int mount_bpffs_for_file(const char *file_name)
+{
+	char err_str[ERR_MAX_LEN];
+	char *temp_name;
 	char *dir;
 	int err = 0;
 
-	if (is_dir && is_bpffs(name))
-		return err;
+	if (access(file_name, F_OK) != -1) {
+		p_err("can't pin BPF object: path '%s' already exists", file_name);
+		return -1;
+	}
 
-	file = malloc(strlen(name) + 1);
-	if (!file) {
+	temp_name = strdup(file_name);
+	if (!temp_name) {
 		p_err("mem alloc failed");
 		return -1;
 	}
 
-	strcpy(file, name);
-	dir = dirname(file);
+	dir = dirname(temp_name);
 
 	if (is_bpffs(dir))
 		/* nothing to do if already mounted */
 		goto out_free;
+
+	if (access(dir, F_OK) == -1) {
+		p_err("can't pin BPF object: dir '%s' doesn't exist", dir);
+		err = -1;
+		goto out_free;
+	}
 
 	if (block_mount) {
 		p_err("no BPF file system found, not mounting it due to --nomount option");
@@ -276,12 +353,12 @@ int mount_bpffs_for_pin(const char *name, bool is_dir)
 	err = mnt_fs(dir, "bpf", err_str, ERR_MAX_LEN);
 	if (err) {
 		err_str[ERR_MAX_LEN - 1] = '\0';
-		p_err("can't mount BPF file system to pin the object (%s): %s",
-		      name, err_str);
+		p_err("can't mount BPF file system to pin the object '%s': %s",
+		      file_name, err_str);
 	}
 
 out_free:
-	free(file);
+	free(temp_name);
 	return err;
 }
 
@@ -289,7 +366,7 @@ int do_pin_fd(int fd, const char *name)
 {
 	int err;
 
-	err = mount_bpffs_for_pin(name, false);
+	err = mount_bpffs_for_file(name);
 	if (err)
 		return err;
 
@@ -338,7 +415,7 @@ void get_prog_full_name(const struct bpf_prog_info *prog_info, int prog_fd,
 {
 	const char *prog_name = prog_info->name;
 	const struct btf_type *func_type;
-	const struct bpf_func_info finfo = {};
+	struct bpf_func_info finfo = {};
 	struct bpf_prog_info info = {};
 	__u32 info_len = sizeof(info);
 	struct btf *prog_btf = NULL;
@@ -389,10 +466,11 @@ int get_fd_type(int fd)
 		p_err("can't read link type: %s", strerror(errno));
 		return -1;
 	}
-	if (n == sizeof(path)) {
+	if (n == sizeof(buf)) {
 		p_err("can't read link type: path too long!");
 		return -1;
 	}
+	buf[n] = '\0';
 
 	if (strstr(buf, "bpf-map"))
 		return BPF_OBJ_MAP;
@@ -482,7 +560,7 @@ static int do_build_table_cb(const char *fpath, const struct stat *sb,
 	if (typeflag != FTW_F)
 		goto out_ret;
 
-	fd = open_obj_pinned(fpath, true);
+	fd = open_obj_pinned(fpath, true, NULL);
 	if (fd < 0)
 		goto out_ret;
 
@@ -641,7 +719,7 @@ ifindex_to_arch(__u32 ifindex, __u64 ns_dev, __u64 ns_ino, const char **opt)
 	int vendor_id;
 
 	if (!ifindex_to_name_ns(ifindex, ns_dev, ns_ino, devname)) {
-		p_err("Can't get net device name for ifindex %d: %s", ifindex,
+		p_err("Can't get net device name for ifindex %u: %s", ifindex,
 		      strerror(errno));
 		return NULL;
 	}
@@ -666,7 +744,7 @@ ifindex_to_arch(__u32 ifindex, __u64 ns_dev, __u64 ns_ino, const char **opt)
 	/* No NFP support in LLVM, we have no valid triple to return. */
 	default:
 		p_err("Can't get arch name for device vendor id 0x%04x",
-		      vendor_id);
+		      (unsigned int)vendor_id);
 		return NULL;
 	}
 }
@@ -855,7 +933,7 @@ int prog_parse_fds(int *argc, char ***argv, int **fds)
 		path = **argv;
 		NEXT_ARGP();
 
-		(*fds)[0] = open_obj_pinned_any(path, BPF_OBJ_PROG);
+		(*fds)[0] = open_obj_pinned_any(path, BPF_OBJ_PROG, NULL);
 		if ((*fds)[0] < 0)
 			return -1;
 		return 1;
@@ -892,7 +970,8 @@ exit_free:
 	return fd;
 }
 
-static int map_fd_by_name(char *name, int **fds)
+static int map_fd_by_name(char *name, int **fds,
+			  const struct bpf_get_fd_by_id_opts *opts)
 {
 	unsigned int id = 0;
 	int fd, nb_fds = 0;
@@ -900,6 +979,7 @@ static int map_fd_by_name(char *name, int **fds)
 	int err;
 
 	while (true) {
+		LIBBPF_OPTS(bpf_get_fd_by_id_opts, opts_ro);
 		struct bpf_map_info info = {};
 		__u32 len = sizeof(info);
 
@@ -912,7 +992,9 @@ static int map_fd_by_name(char *name, int **fds)
 			return nb_fds;
 		}
 
-		fd = bpf_map_get_fd_by_id(id);
+		/* Request a read-only fd to query the map info */
+		opts_ro.open_flags = BPF_F_RDONLY;
+		fd = bpf_map_get_fd_by_id_opts(id, &opts_ro);
 		if (fd < 0) {
 			p_err("can't get map by id (%u): %s",
 			      id, strerror(errno));
@@ -929,6 +1011,19 @@ static int map_fd_by_name(char *name, int **fds)
 		if (strncmp(name, info.name, BPF_OBJ_NAME_LEN)) {
 			close(fd);
 			continue;
+		}
+
+		/* Get an fd with the requested options, if they differ
+		 * from the read-only options used to get the fd above.
+		 */
+		if (memcmp(opts, &opts_ro, sizeof(opts_ro))) {
+			close(fd);
+			fd = bpf_map_get_fd_by_id_opts(id, opts);
+			if (fd < 0) {
+				p_err("can't get map by id (%u): %s", id,
+					strerror(errno));
+				goto err_close_fds;
+			}
 		}
 
 		if (nb_fds > 0) {
@@ -950,8 +1045,13 @@ err_close_fds:
 	return -1;
 }
 
-int map_parse_fds(int *argc, char ***argv, int **fds)
+int map_parse_fds(int *argc, char ***argv, int **fds, __u32 open_flags)
 {
+	LIBBPF_OPTS(bpf_get_fd_by_id_opts, opts);
+
+	assert((open_flags & ~BPF_F_RDONLY) == 0);
+	opts.open_flags = open_flags;
+
 	if (is_prefix(**argv, "id")) {
 		unsigned int id;
 		char *endptr;
@@ -965,7 +1065,7 @@ int map_parse_fds(int *argc, char ***argv, int **fds)
 		}
 		NEXT_ARGP();
 
-		(*fds)[0] = bpf_map_get_fd_by_id(id);
+		(*fds)[0] = bpf_map_get_fd_by_id_opts(id, &opts);
 		if ((*fds)[0] < 0) {
 			p_err("get map by id (%u): %s", id, strerror(errno));
 			return -1;
@@ -983,16 +1083,18 @@ int map_parse_fds(int *argc, char ***argv, int **fds)
 		}
 		NEXT_ARGP();
 
-		return map_fd_by_name(name, fds);
+		return map_fd_by_name(name, fds, &opts);
 	} else if (is_prefix(**argv, "pinned")) {
 		char *path;
+		LIBBPF_OPTS(bpf_obj_get_opts, get_opts);
+		get_opts.file_flags = open_flags;
 
 		NEXT_ARGP();
 
 		path = **argv;
 		NEXT_ARGP();
 
-		(*fds)[0] = open_obj_pinned_any(path, BPF_OBJ_MAP);
+		(*fds)[0] = open_obj_pinned_any(path, BPF_OBJ_MAP, &get_opts);
 		if ((*fds)[0] < 0)
 			return -1;
 		return 1;
@@ -1002,7 +1104,7 @@ int map_parse_fds(int *argc, char ***argv, int **fds)
 	return -1;
 }
 
-int map_parse_fd(int *argc, char ***argv)
+int map_parse_fd(int *argc, char ***argv, __u32 open_flags)
 {
 	int *fds = NULL;
 	int nb_fds, fd;
@@ -1012,7 +1114,7 @@ int map_parse_fd(int *argc, char ***argv)
 		p_err("mem alloc failed");
 		return -1;
 	}
-	nb_fds = map_parse_fds(argc, argv, &fds);
+	nb_fds = map_parse_fds(argc, argv, &fds, open_flags);
 	if (nb_fds != 1) {
 		if (nb_fds > 1) {
 			p_err("several maps match this handle");
@@ -1030,12 +1132,12 @@ exit_free:
 }
 
 int map_parse_fd_and_info(int *argc, char ***argv, struct bpf_map_info *info,
-			  __u32 *info_len)
+			  __u32 *info_len, __u32 open_flags)
 {
 	int err;
 	int fd;
 
-	fd = map_parse_fd(argc, argv);
+	fd = map_parse_fd(argc, argv, open_flags);
 	if (fd < 0)
 		return -1;
 
@@ -1107,4 +1209,95 @@ int pathname_concat(char *buf, int buf_sz, const char *path,
 		return -ENAMETOOLONG;
 
 	return 0;
+}
+
+static bool read_next_kernel_config_option(gzFile file, char *buf, size_t n,
+					   char **value)
+{
+	char *sep;
+
+	while (gzgets(file, buf, n)) {
+		if (strncmp(buf, "CONFIG_", 7))
+			continue;
+
+		sep = strchr(buf, '=');
+		if (!sep)
+			continue;
+
+		/* Trim ending '\n' */
+		buf[strlen(buf) - 1] = '\0';
+
+		/* Split on '=' and ensure that a value is present. */
+		*sep = '\0';
+		if (!sep[1])
+			continue;
+
+		*value = sep + 1;
+		return true;
+	}
+
+	return false;
+}
+
+int read_kernel_config(const struct kernel_config_option *requested_options,
+		       size_t num_options, char **out_values,
+		       const char *define_prefix)
+{
+	struct utsname utsn;
+	char path[PATH_MAX];
+	gzFile file = NULL;
+	char buf[4096];
+	char *value;
+	size_t i;
+	int ret = 0;
+
+	if (!requested_options || !out_values || num_options == 0)
+		return -1;
+
+	if (!uname(&utsn)) {
+		snprintf(path, sizeof(path), "/boot/config-%s", utsn.release);
+
+		/* gzopen also accepts uncompressed files. */
+		file = gzopen(path, "r");
+	}
+
+	if (!file) {
+		/* Some distributions build with CONFIG_IKCONFIG=y and put the
+		 * config file at /proc/config.gz.
+		 */
+		file = gzopen("/proc/config.gz", "r");
+	}
+
+	if (!file) {
+		p_info("skipping kernel config, can't open file: %s",
+			strerror(errno));
+		return -1;
+	}
+
+	if (!gzgets(file, buf, sizeof(buf)) || !gzgets(file, buf, sizeof(buf))) {
+		p_info("skipping kernel config, can't read from file: %s",
+			strerror(errno));
+		ret = -1;
+		goto end_parse;
+	}
+
+	if (strcmp(buf, "# Automatically generated file; DO NOT EDIT.\n")) {
+		p_info("skipping kernel config, can't find correct file");
+		ret = -1;
+		goto end_parse;
+	}
+
+	while (read_next_kernel_config_option(file, buf, sizeof(buf), &value)) {
+		for (i = 0; i < num_options; i++) {
+			if ((define_prefix && !requested_options[i].macro_dump) ||
+			     out_values[i] || strcmp(buf, requested_options[i].name))
+				continue;
+
+			out_values[i] = strdup(value);
+		}
+	}
+
+end_parse:
+	gzclose(file);
+	return ret;
 }

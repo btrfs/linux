@@ -6,14 +6,16 @@
  *          Dave Airlie
  */
 
+#include <linux/aperture.h>
 #include <linux/module.h>
 #include <linux/pci.h>
 
-#include <drm/drm_aperture.h>
+#include <drm/clients/drm_client_setup.h>
 #include <drm/drm_atomic_helper.h>
 #include <drm/drm_drv.h>
-#include <drm/drm_fbdev_generic.h>
+#include <drm/drm_fbdev_shmem.h>
 #include <drm/drm_file.h>
+#include <drm/drm_fourcc.h>
 #include <drm/drm_ioctl.h>
 #include <drm/drm_managed.h>
 #include <drm/drm_module.h>
@@ -95,11 +97,11 @@ static const struct drm_driver mgag200_driver = {
 	.fops = &mgag200_driver_fops,
 	.name = DRIVER_NAME,
 	.desc = DRIVER_DESC,
-	.date = DRIVER_DATE,
 	.major = DRIVER_MAJOR,
 	.minor = DRIVER_MINOR,
 	.patchlevel = DRIVER_PATCHLEVEL,
 	DRM_GEM_SHMEM_DRIVER_OPS,
+	DRM_FBDEV_SHMEM_DRIVER_OPS,
 };
 
 /*
@@ -146,13 +148,18 @@ int mgag200_device_preinit(struct mga_device *mdev)
 	}
 	mdev->vram_res = res;
 
-	/* Don't fail on errors, but performance might be reduced. */
-	devm_arch_io_reserve_memtype_wc(dev->dev, res->start, resource_size(res));
-	devm_arch_phys_wc_add(dev->dev, res->start, resource_size(res));
-
+#if defined(CONFIG_DRM_MGAG200_DISABLE_WRITECOMBINE)
 	mdev->vram = devm_ioremap(dev->dev, res->start, resource_size(res));
 	if (!mdev->vram)
 		return -ENOMEM;
+#else
+	mdev->vram = devm_ioremap_wc(dev->dev, res->start, resource_size(res));
+	if (!mdev->vram)
+		return -ENOMEM;
+
+	/* Don't fail on errors, but performance might be reduced. */
+	devm_arch_phys_wc_add(dev->dev, res->start, resource_size(res));
+#endif
 
 	return 0;
 }
@@ -187,6 +194,8 @@ int mgag200_device_init(struct mga_device *mdev,
 
 	mutex_unlock(&mdev->rmmio_lock);
 
+	WREG32(MGAREG_IEN, 0);
+
 	return 0;
 }
 
@@ -205,6 +214,7 @@ static const struct pci_device_id mgag200_pciidlist[] = {
 	{ PCI_VENDOR_ID_MATROX, 0x534, PCI_ANY_ID, PCI_ANY_ID, 0, 0, G200_ER },
 	{ PCI_VENDOR_ID_MATROX, 0x536, PCI_ANY_ID, PCI_ANY_ID, 0, 0, G200_EW3 },
 	{ PCI_VENDOR_ID_MATROX, 0x538, PCI_ANY_ID, PCI_ANY_ID, 0, 0, G200_EH3 },
+	{ PCI_VENDOR_ID_MATROX, 0x53a, PCI_ANY_ID, PCI_ANY_ID, 0, 0, G200_EH5 },
 	{0,}
 };
 
@@ -218,7 +228,7 @@ mgag200_pci_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 	struct drm_device *dev;
 	int ret;
 
-	ret = drm_aperture_remove_conflicting_pci_framebuffers(pdev, &mgag200_driver);
+	ret = aperture_remove_conflicting_pci_devices(pdev, mgag200_driver.name);
 	if (ret)
 		return ret;
 
@@ -247,6 +257,9 @@ mgag200_pci_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 	case G200_EH3:
 		mdev = mgag200_g200eh3_device_create(pdev, &mgag200_driver);
 		break;
+	case G200_EH5:
+		mdev = mgag200_g200eh5_device_create(pdev, &mgag200_driver);
+		break;
 	case G200_ER:
 		mdev = mgag200_g200er_device_create(pdev, &mgag200_driver);
 		break;
@@ -269,7 +282,7 @@ mgag200_pci_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 	 * FIXME: A 24-bit color depth does not work with 24 bpp on
 	 * G200ER. Force 32 bpp.
 	 */
-	drm_fbdev_generic_setup(dev, 32);
+	drm_client_setup_with_fourcc(dev, DRM_FORMAT_XRGB8888);
 
 	return 0;
 }

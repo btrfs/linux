@@ -20,7 +20,9 @@
 
 #include "rpmsg_internal.h"
 
-struct class *rpmsg_class;
+const struct class rpmsg_class = {
+	.name = "rpmsg",
+};
 EXPORT_SYMBOL(rpmsg_class);
 
 /**
@@ -192,38 +194,6 @@ int rpmsg_sendto(struct rpmsg_endpoint *ept, void *data, int len, u32 dst)
 EXPORT_SYMBOL(rpmsg_sendto);
 
 /**
- * rpmsg_send_offchannel() - send a message using explicit src/dst addresses
- * @ept: the rpmsg endpoint
- * @src: source address
- * @dst: destination address
- * @data: payload of message
- * @len: length of payload
- *
- * This function sends @data of length @len to the remote @dst address,
- * and uses @src as the source address.
- * The message will be sent to the remote processor which the @ept
- * endpoint belongs to.
- * In case there are no TX buffers available, the function will block until
- * one becomes available, or a timeout of 15 seconds elapses. When the latter
- * happens, -ERESTARTSYS is returned.
- *
- * Can only be called from process context (for now).
- *
- * Return: 0 on success and an appropriate error value on failure.
- */
-int rpmsg_send_offchannel(struct rpmsg_endpoint *ept, u32 src, u32 dst,
-			  void *data, int len)
-{
-	if (WARN_ON(!ept))
-		return -EINVAL;
-	if (!ept->ops->send_offchannel)
-		return -ENXIO;
-
-	return ept->ops->send_offchannel(ept, src, dst, data, len);
-}
-EXPORT_SYMBOL(rpmsg_send_offchannel);
-
-/**
  * rpmsg_trysend() - send a message across to the remote processor
  * @ept: the rpmsg endpoint
  * @data: payload of message
@@ -300,37 +270,6 @@ __poll_t rpmsg_poll(struct rpmsg_endpoint *ept, struct file *filp,
 EXPORT_SYMBOL(rpmsg_poll);
 
 /**
- * rpmsg_trysend_offchannel() - send a message using explicit src/dst addresses
- * @ept: the rpmsg endpoint
- * @src: source address
- * @dst: destination address
- * @data: payload of message
- * @len: length of payload
- *
- * This function sends @data of length @len to the remote @dst address,
- * and uses @src as the source address.
- * The message will be sent to the remote processor which the @ept
- * endpoint belongs to.
- * In case there are no TX buffers available, the function will immediately
- * return -ENOMEM without waiting until one becomes available.
- *
- * Can only be called from process context (for now).
- *
- * Return: 0 on success and an appropriate error value on failure.
- */
-int rpmsg_trysend_offchannel(struct rpmsg_endpoint *ept, u32 src, u32 dst,
-			     void *data, int len)
-{
-	if (WARN_ON(!ept))
-		return -EINVAL;
-	if (!ept->ops->trysend_offchannel)
-		return -ENXIO;
-
-	return ept->ops->trysend_offchannel(ept, src, dst, data, len);
-}
-EXPORT_SYMBOL(rpmsg_trysend_offchannel);
-
-/**
  * rpmsg_set_flow_control() - request remote to pause/resume transmission
  * @ept:	the rpmsg endpoint
  * @pause:	pause transmission
@@ -375,9 +314,9 @@ EXPORT_SYMBOL(rpmsg_get_mtu);
  * this is used to make sure we're not creating rpmsg devices for channels
  * that already exist.
  */
-static int rpmsg_device_match(struct device *dev, void *data)
+static int rpmsg_device_match(struct device *dev, const void *data)
 {
-	struct rpmsg_channel_info *chinfo = data;
+	const struct rpmsg_channel_info *chinfo = data;
 	struct rpmsg_device *rpdev = to_rpmsg_device(dev);
 
 	if (chinfo->src != RPMSG_ADDR_ANY && chinfo->src != rpdev->src)
@@ -491,10 +430,10 @@ static inline int rpmsg_id_match(const struct rpmsg_device *rpdev,
 }
 
 /* match rpmsg channel and rpmsg driver */
-static int rpmsg_dev_match(struct device *dev, struct device_driver *drv)
+static int rpmsg_dev_match(struct device *dev, const struct device_driver *drv)
 {
 	struct rpmsg_device *rpdev = to_rpmsg_device(dev);
-	struct rpmsg_driver *rpdrv = to_rpmsg_driver(drv);
+	const struct rpmsg_driver *rpdrv = to_rpmsg_driver(drv);
 	const struct rpmsg_device_id *ids = rpdrv->id_table;
 	unsigned int i;
 
@@ -540,7 +479,8 @@ static int rpmsg_dev_probe(struct device *dev)
 	struct rpmsg_endpoint *ept = NULL;
 	int err;
 
-	err = dev_pm_domain_attach(dev, true);
+	err = dev_pm_domain_attach(dev, PD_FLAG_ATTACH_POWER_ON |
+					PD_FLAG_DETACH_POWER_OFF);
 	if (err)
 		goto out;
 
@@ -599,13 +539,11 @@ static void rpmsg_dev_remove(struct device *dev)
 	if (rpdrv->remove)
 		rpdrv->remove(rpdev);
 
-	dev_pm_domain_detach(dev, true);
-
 	if (rpdev->ept)
 		rpmsg_destroy_ept(rpdev->ept);
 }
 
-static struct bus_type rpmsg_bus = {
+static const struct bus_type rpmsg_bus = {
 	.name		= "rpmsg",
 	.match		= rpmsg_dev_match,
 	.dev_groups	= rpmsg_dev_groups,
@@ -715,16 +653,16 @@ static int __init rpmsg_init(void)
 {
 	int ret;
 
-	rpmsg_class = class_create("rpmsg");
-	if (IS_ERR(rpmsg_class)) {
-		pr_err("failed to create rpmsg class\n");
-		return PTR_ERR(rpmsg_class);
+	ret = class_register(&rpmsg_class);
+	if (ret) {
+		pr_err("failed to register rpmsg class\n");
+		return ret;
 	}
 
 	ret = bus_register(&rpmsg_bus);
 	if (ret) {
 		pr_err("failed to register rpmsg bus: %d\n", ret);
-		class_destroy(rpmsg_class);
+		class_destroy(&rpmsg_class);
 	}
 	return ret;
 }
@@ -733,7 +671,7 @@ postcore_initcall(rpmsg_init);
 static void __exit rpmsg_fini(void)
 {
 	bus_unregister(&rpmsg_bus);
-	class_destroy(rpmsg_class);
+	class_destroy(&rpmsg_class);
 }
 module_exit(rpmsg_fini);
 

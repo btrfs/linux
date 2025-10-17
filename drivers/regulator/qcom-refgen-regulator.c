@@ -62,7 +62,7 @@ static int qcom_sdm845_refgen_is_enabled(struct regulator_dev *rdev)
 	return 1;
 }
 
-static struct regulator_desc sdm845_refgen_desc = {
+static const struct regulator_desc sdm845_refgen_desc = {
 	.enable_time = 5,
 	.name = "refgen",
 	.owner = THIS_MODULE,
@@ -74,7 +74,7 @@ static struct regulator_desc sdm845_refgen_desc = {
 	},
 };
 
-static struct regulator_desc sm8250_refgen_desc = {
+static const struct regulator_desc sm8250_refgen_desc = {
 	.enable_reg = REFGEN_REG_PWRDWN_CTRL5,
 	.enable_mask = REFGEN_PWRDWN_CTRL5_MASK,
 	.enable_val = REFGEN_PWRDWN_CTRL5_ENABLE,
@@ -94,7 +94,6 @@ static const struct regmap_config qcom_refgen_regmap_config = {
 	.reg_bits = 32,
 	.reg_stride = 4,
 	.val_bits = 32,
-	.fast_io = true,
 };
 
 static int qcom_refgen_probe(struct platform_device *pdev)
@@ -140,6 +139,7 @@ static const struct of_device_id qcom_refgen_match_table[] = {
 	{ .compatible = "qcom,sm8250-refgen-regulator", .data = &sm8250_refgen_desc },
 	{ }
 };
+MODULE_DEVICE_TABLE(of, qcom_refgen_match_table);
 
 static struct platform_driver qcom_refgen_driver = {
 	.probe = qcom_refgen_probe,

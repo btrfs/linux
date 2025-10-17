@@ -510,7 +510,7 @@ static void aha1740_getconfig(unsigned int base, unsigned int *irq_level,
 }
 
 static int aha1740_biosparam(struct scsi_device *sdev,
-			     struct block_device *dev,
+			     struct gendisk *unused,
 			     sector_t capacity, int* ip)
 {
 	int size = capacity;
@@ -681,4 +681,5 @@ static __exit void aha1740_exit (void)
 module_init (aha1740_init);
 module_exit (aha1740_exit);
 
+MODULE_DESCRIPTION("Adaptec AHA1740 SCSI host adapter driver");
 MODULE_LICENSE("GPL");

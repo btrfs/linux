@@ -39,7 +39,6 @@ static unsigned char led_type;		/* bitmask of LED_HAS_XXX */
 static unsigned char lastleds;		/* LED state from most recent update */
 static unsigned char lcd_new_text;
 static unsigned char lcd_text[20];
-static unsigned char lcd_text_default[20];
 static unsigned char lcd_no_led_support; /* KittyHawk doesn't support LED on its LCD */
 
 struct lcd_block {
@@ -308,15 +307,13 @@ static int hppa_led_generic_probe(struct platform_device *pdev,
 	return 0;
 }
 
-static int platform_led_remove(struct platform_device *pdev)
+static void platform_led_remove(struct platform_device *pdev)
 {
 	struct hppa_drvdata *p = platform_get_drvdata(pdev);
 	int i;
 
 	for (i = 0; i < NUM_LEDS_PER_BOARD; i++)
 		led_classdev_unregister(&p->leds[i].led_cdev);
-
-	return 0;
 }
 
 static struct led_type mainboard_led_types[NUM_LEDS_PER_BOARD] = {
@@ -458,9 +455,8 @@ static int __init early_led_init(void)
 	struct pdc_chassis_info chassis_info;
 	int ret;
 
-	snprintf(lcd_text_default, sizeof(lcd_text_default),
+	scnprintf(lcd_text, sizeof(lcd_text),
 		"Linux %s", init_utsname()->release);
-	strcpy(lcd_text, lcd_text_default);
 	lcd_new_text = 1;
 
 	/* Work around the buggy PDC of KittyHawk-machines */

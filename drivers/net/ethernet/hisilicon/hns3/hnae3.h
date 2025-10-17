@@ -104,6 +104,7 @@ enum HNAE3_DEV_CAP_BITS {
 	HNAE3_DEV_SUPPORT_WOL_B,
 	HNAE3_DEV_SUPPORT_TM_FLUSH_B,
 	HNAE3_DEV_SUPPORT_VF_FAULT_B,
+	HNAE3_DEV_SUPPORT_ERR_MOD_GEN_REG_B,
 };
 
 #define hnae3_ae_dev_fd_supported(ae_dev) \
@@ -180,6 +181,9 @@ enum HNAE3_DEV_CAP_BITS {
 
 #define hnae3_ae_dev_vf_fault_supported(ae_dev) \
 	test_bit(HNAE3_DEV_SUPPORT_VF_FAULT_B, (ae_dev)->caps)
+
+#define hnae3_ae_dev_gen_reg_dfx_supported(hdev) \
+	test_bit(HNAE3_DEV_SUPPORT_ERR_MOD_GEN_REG_B, (hdev)->ae_dev->caps)
 
 enum HNAE3_PF_CAP_BITS {
 	HNAE3_PF_SUPPORT_VLAN_FLTR_MDF_B = 0,
@@ -335,6 +339,10 @@ enum hnae3_dbg_cmd {
 	HNAE3_DBG_CMD_UNKNOWN,
 };
 
+#define hnae3_seq_file_to_ae_dev(s)	(dev_get_drvdata((s)->private))
+#define hnae3_seq_file_to_handle(s)	\
+		(((struct hnae3_ae_dev *)hnae3_seq_file_to_ae_dev(s))->handle)
+
 enum hnae3_tc_map_mode {
 	HNAE3_TC_MAP_MODE_PRIO,
 	HNAE3_TC_MAP_MODE_DSCP,
@@ -362,6 +370,15 @@ struct hnae3_vector_info {
 #define HNAE3_FW_VERSION_BYTE0_SHIFT	0
 #define HNAE3_FW_VERSION_BYTE0_MASK	GENMASK(7, 0)
 
+#define HNAE3_SCC_VERSION_BYTE3_SHIFT	24
+#define HNAE3_SCC_VERSION_BYTE3_MASK	GENMASK(31, 24)
+#define HNAE3_SCC_VERSION_BYTE2_SHIFT	16
+#define HNAE3_SCC_VERSION_BYTE2_MASK	GENMASK(23, 16)
+#define HNAE3_SCC_VERSION_BYTE1_SHIFT	8
+#define HNAE3_SCC_VERSION_BYTE1_MASK	GENMASK(15, 8)
+#define HNAE3_SCC_VERSION_BYTE0_SHIFT	0
+#define HNAE3_SCC_VERSION_BYTE0_MASK	GENMASK(7, 0)
+
 struct hnae3_ring_chain_node {
 	struct hnae3_ring_chain_node *next;
 	u32 tqp_index;
@@ -388,6 +405,7 @@ struct hnae3_dev_specs {
 	u16 mc_mac_size;
 	u32 mac_stats_num;
 	u8 tnl_num;
+	u8 hilink_version;
 };
 
 struct hnae3_client_ops {
@@ -420,7 +438,10 @@ struct hnae3_ae_dev {
 	u32 dev_version;
 	DECLARE_BITMAP(caps, HNAE3_DEV_CAPS_MAX_NUM);
 	void *priv;
+	struct hnae3_handle *handle;
 };
+
+typedef int (*read_func)(struct seq_file *s, void *data);
 
 /* This struct defines the operation on the handle.
  *
@@ -566,8 +587,6 @@ struct hnae3_ae_dev {
  *   Delete clsflower rule
  * cls_flower_active
  *   Check if any cls flower rule exist
- * dbg_read_cmd
- *   Execute debugfs read command.
  * set_tx_hwts_info
  *   Save information for 1588 tx packet
  * get_rx_hwts
@@ -580,6 +599,8 @@ struct hnae3_ae_dev {
  *   Get wake on lan info
  * set_wol
  *   Config wake on lan
+ * dbg_get_read_func
+ *   Return the read func for debugfs seq file
  */
 struct hnae3_ae_ops {
 	int (*init_ae_dev)(struct hnae3_ae_dev *ae_dev);
@@ -663,7 +684,7 @@ struct hnae3_ae_ops {
 	void (*get_mac_stats)(struct hnae3_handle *handle,
 			      struct hns3_mac_stats *mac_stats);
 	void (*get_strings)(struct hnae3_handle *handle,
-			    u32 stringset, u8 *data);
+			    u32 stringset, u8 **data);
 	int (*get_sset_count)(struct hnae3_handle *handle, int stringset);
 
 	void (*get_regs)(struct hnae3_handle *handle, u32 *version,
@@ -676,9 +697,9 @@ struct hnae3_ae_ops {
 	int (*set_rss)(struct hnae3_handle *handle, const u32 *indir,
 		       const u8 *key, const u8 hfunc);
 	int (*set_rss_tuple)(struct hnae3_handle *handle,
-			     struct ethtool_rxnfc *cmd);
+			     const struct ethtool_rxfh_fields *cmd);
 	int (*get_rss_tuple)(struct hnae3_handle *handle,
-			     struct ethtool_rxnfc *cmd);
+			     struct ethtool_rxfh_fields *cmd);
 
 	int (*get_tc_size)(struct hnae3_handle *handle);
 
@@ -734,8 +755,6 @@ struct hnae3_ae_ops {
 	void (*enable_fd)(struct hnae3_handle *handle, bool enable);
 	int (*add_arfs_entry)(struct hnae3_handle *handle, u16 queue_id,
 			      u16 flow_id, struct flow_keys *fkeys);
-	int (*dbg_read_cmd)(struct hnae3_handle *handle, enum hnae3_dbg_cmd cmd,
-			    char *buf, int len);
 	pci_ers_result_t (*handle_hw_ras_error)(struct hnae3_ae_dev *ae_dev);
 	bool (*get_hw_reset_stat)(struct hnae3_handle *handle);
 	bool (*ae_dev_resetting)(struct hnae3_handle *handle);
@@ -772,7 +791,7 @@ struct hnae3_ae_ops {
 	void (*get_rx_hwts)(struct hnae3_handle *handle, struct sk_buff *skb,
 			    u32 nsec, u32 sec);
 	int (*get_ts_info)(struct hnae3_handle *handle,
-			   struct ethtool_ts_info *info);
+			   struct kernel_ethtool_ts_info *info);
 	int (*get_link_diagnosis_info)(struct hnae3_handle *handle,
 				       u32 *status_code);
 	void (*clean_vf_config)(struct hnae3_ae_dev *ae_dev, int num_vfs);
@@ -782,6 +801,9 @@ struct hnae3_ae_ops {
 			struct ethtool_wolinfo *wol);
 	int (*set_wol)(struct hnae3_handle *handle,
 		       struct ethtool_wolinfo *wol);
+	int (*dbg_get_read_func)(struct hnae3_handle *handle,
+				 enum hnae3_dbg_cmd cmd,
+				 read_func *func);
 };
 
 struct hnae3_dcb_ops {
@@ -819,6 +841,7 @@ struct hnae3_tc_info {
 	u8 max_tc; /* Total number of TCs */
 	u8 num_tc; /* Total number of enabled TCs */
 	bool mqprio_active;
+	bool mqprio_destroy;
 	bool dcb_ets_active;
 };
 
@@ -895,15 +918,12 @@ struct hnae3_handle {
 		struct hnae3_roce_private_info rinfo;
 	};
 
-	u32 numa_node_mask;	/* for multi-chip support */
+	nodemask_t numa_node_mask; /* for multi-chip support */
 
 	enum hnae3_port_base_vlan_state port_base_vlan_state;
 
 	u8 netdev_flags;
 	struct dentry *hnae3_dbgfs;
-	/* protects concurrent contention between debugfs commands */
-	struct mutex dbgfs_lock;
-	char **dbgfs_buf;
 
 	/* Network interface message level enabled bits */
 	u32 msg_enable;
@@ -951,4 +971,6 @@ int hnae3_register_client(struct hnae3_client *client);
 void hnae3_set_client_init_flag(struct hnae3_client *client,
 				struct hnae3_ae_dev *ae_dev,
 				unsigned int inited);
+void hnae3_acquire_unload_lock(void);
+void hnae3_release_unload_lock(void);
 #endif

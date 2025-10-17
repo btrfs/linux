@@ -140,8 +140,8 @@ void clk_fractional_divider_general_approximation(struct clk_hw *hw,
 	}
 
 	if (fd->flags & CLK_FRAC_DIVIDER_ZERO_BASED) {
-		max_m = 1 << fd->mwidth;
-		max_n = 1 << fd->nwidth;
+		max_m = BIT(fd->mwidth);
+		max_n = BIT(fd->nwidth);
 	} else {
 		max_m = GENMASK(fd->mwidth - 1, 0);
 		max_n = GENMASK(fd->nwidth - 1, 0);
@@ -151,25 +151,32 @@ void clk_fractional_divider_general_approximation(struct clk_hw *hw,
 }
 EXPORT_SYMBOL_GPL(clk_fractional_divider_general_approximation);
 
-static long clk_fd_round_rate(struct clk_hw *hw, unsigned long rate,
-			      unsigned long *parent_rate)
+static int clk_fd_determine_rate(struct clk_hw *hw,
+				 struct clk_rate_request *req)
 {
 	struct clk_fractional_divider *fd = to_clk_fd(hw);
 	unsigned long m, n;
 	u64 ret;
 
-	if (!rate || (!clk_hw_can_set_rate_parent(hw) && rate >= *parent_rate))
-		return *parent_rate;
+	if (!req->rate || (!clk_hw_can_set_rate_parent(hw) && req->rate >= req->best_parent_rate)) {
+		req->rate = req->best_parent_rate;
+
+		return 0;
+	}
 
 	if (fd->approximation)
-		fd->approximation(hw, rate, parent_rate, &m, &n);
+		fd->approximation(hw, req->rate, &req->best_parent_rate, &m, &n);
 	else
-		clk_fractional_divider_general_approximation(hw, rate, parent_rate, &m, &n);
+		clk_fractional_divider_general_approximation(hw, req->rate,
+							     &req->best_parent_rate,
+							     &m, &n);
 
-	ret = (u64)*parent_rate * m;
+	ret = (u64)req->best_parent_rate * m;
 	do_div(ret, n);
 
-	return ret;
+	req->rate = ret;
+
+	return 0;
 }
 
 static int clk_fd_set_rate(struct clk_hw *hw, unsigned long rate,
@@ -182,8 +189,8 @@ static int clk_fd_set_rate(struct clk_hw *hw, unsigned long rate,
 	u32 val;
 
 	if (fd->flags & CLK_FRAC_DIVIDER_ZERO_BASED) {
-		max_m = 1 << fd->mwidth;
-		max_n = 1 << fd->nwidth;
+		max_m = BIT(fd->mwidth);
+		max_n = BIT(fd->nwidth);
 	} else {
 		max_m = GENMASK(fd->mwidth - 1, 0);
 		max_n = GENMASK(fd->nwidth - 1, 0);
@@ -195,13 +202,13 @@ static int clk_fd_set_rate(struct clk_hw *hw, unsigned long rate,
 		n--;
 	}
 
+	mmask = GENMASK(fd->mwidth - 1, 0) << fd->mshift;
+	nmask = GENMASK(fd->nwidth - 1, 0) << fd->nshift;
+
 	if (fd->lock)
 		spin_lock_irqsave(fd->lock, flags);
 	else
 		__acquire(fd->lock);
-
-	mmask = GENMASK(fd->mwidth - 1, 0) << fd->mshift;
-	nmask = GENMASK(fd->nwidth - 1, 0) << fd->nshift;
 
 	val = clk_fd_readl(fd);
 	val &= ~(mmask | nmask);
@@ -250,7 +257,7 @@ static void clk_fd_debug_init(struct clk_hw *hw, struct dentry *dentry)
 
 const struct clk_ops clk_fractional_divider_ops = {
 	.recalc_rate = clk_fd_recalc_rate,
-	.round_rate = clk_fd_round_rate,
+	.determine_rate = clk_fd_determine_rate,
 	.set_rate = clk_fd_set_rate,
 #ifdef CONFIG_DEBUG_FS
 	.debug_init = clk_fd_debug_init,

@@ -28,6 +28,10 @@
 #ifdef CONFIG_MMU
 #define IO_SPACE_LIMIT		(PCI_IO_SIZE - 1)
 #define PCI_IOBASE		((void __iomem *)PCI_IO_START)
+
+#define ioremap_wc(addr, size)	\
+	ioremap_prot((addr), (size), __pgprot(_PAGE_KERNEL_NC))
+
 #endif /* CONFIG_MMU */
 
 /*
@@ -47,10 +51,10 @@
  * sufficient to ensure this works sanely on controllers that support I/O
  * writes.
  */
-#define __io_pbr()	__asm__ __volatile__ ("fence io,i"  : : : "memory");
-#define __io_par(v)	__asm__ __volatile__ ("fence i,ior" : : : "memory");
-#define __io_pbw()	__asm__ __volatile__ ("fence iow,o" : : : "memory");
-#define __io_paw()	__asm__ __volatile__ ("fence o,io"  : : : "memory");
+#define __io_pbr()	RISCV_FENCE(io, i)
+#define __io_par(v)	RISCV_FENCE(i, ior)
+#define __io_pbw()	RISCV_FENCE(iow, o)
+#define __io_paw()	RISCV_FENCE(o, io)
 
 /*
  * Accesses from a single hart to a single I/O address must be ordered.  This
@@ -136,8 +140,8 @@ __io_writes_outs(outs, u64, q, __io_pbr(), __io_paw())
 #include <asm-generic/io.h>
 
 #ifdef CONFIG_MMU
-#define arch_memremap_wb(addr, size)	\
-	((__force void *)ioremap_prot((addr), (size), _PAGE_KERNEL))
+#define arch_memremap_wb(addr, size, flags)	\
+	((__force void *)ioremap_prot((addr), (size), __pgprot(_PAGE_KERNEL)))
 #endif
 
 #endif /* _ASM_RISCV_IO_H */

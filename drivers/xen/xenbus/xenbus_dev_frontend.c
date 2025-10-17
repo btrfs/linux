@@ -406,7 +406,7 @@ void xenbus_dev_queue_reply(struct xb_req_data *req)
 	mutex_unlock(&u->reply_mutex);
 
 	kfree(req->body);
-	kfree(req);
+	kref_put(&req->kref, xs_free_req);
 
 	kref_put(&u->kref, xenbus_file_free);
 
@@ -700,7 +700,6 @@ const struct file_operations xen_xenbus_fops = {
 	.open = xenbus_file_open,
 	.release = xenbus_file_release,
 	.poll = xenbus_file_poll,
-	.llseek = no_llseek,
 };
 EXPORT_SYMBOL_GPL(xen_xenbus_fops);
 

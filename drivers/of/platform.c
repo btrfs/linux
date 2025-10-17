@@ -24,16 +24,6 @@
 
 #include "of_private.h"
 
-const struct of_device_id of_default_bus_match_table[] = {
-	{ .compatible = "simple-bus", },
-	{ .compatible = "simple-mfd", },
-	{ .compatible = "isa", },
-#ifdef CONFIG_ARM_AMBA
-	{ .compatible = "arm,amba-bus", },
-#endif /* CONFIG_ARM_AMBA */
-	{} /* Empty terminated list */
-};
-
 /**
  * of_find_device_by_node - Find the platform_device associated with a node
  * @np: Pointer to device tree node
@@ -165,6 +155,8 @@ static struct platform_device *of_platform_device_create_pdata(
 					struct device *parent)
 {
 	struct platform_device *dev;
+
+	pr_debug("create platform device: %pOF\n", np);
 
 	if (!of_device_is_available(np) ||
 	    of_node_test_and_set_flag(np, OF_POPULATED))
@@ -336,14 +328,13 @@ static int of_platform_bus_create(struct device_node *bus,
 				  struct device *parent, bool strict)
 {
 	const struct of_dev_auxdata *auxdata;
-	struct device_node *child;
 	struct platform_device *dev;
 	const char *bus_id = NULL;
 	void *platform_data = NULL;
 	int rc = 0;
 
 	/* Make sure it has a compatible property */
-	if (strict && (!of_get_property(bus, "compatible", NULL))) {
+	if (strict && (!of_property_present(bus, "compatible"))) {
 		pr_debug("%s() - skipping %pOF, no compatible prop\n",
 			 __func__, bus);
 		return 0;
@@ -380,13 +371,11 @@ static int of_platform_bus_create(struct device_node *bus,
 	if (!dev || !of_match_node(matches, bus))
 		return 0;
 
-	for_each_child_of_node(bus, child) {
+	for_each_child_of_node_scoped(bus, child) {
 		pr_debug("   create child: %pOF\n", child);
 		rc = of_platform_bus_create(child, matches, lookup, &dev->dev, strict);
-		if (rc) {
-			of_node_put(child);
+		if (rc)
 			break;
-		}
 	}
 	of_node_set_flag(bus, OF_POPULATED_BUS);
 	return rc;
@@ -457,7 +446,6 @@ int of_platform_populate(struct device_node *root,
 			const struct of_dev_auxdata *lookup,
 			struct device *parent)
 {
-	struct device_node *child;
 	int rc = 0;
 
 	root = root ? of_node_get(root) : of_find_node_by_path("/");
@@ -468,12 +456,10 @@ int of_platform_populate(struct device_node *root,
 	pr_debug(" starting at: %pOF\n", root);
 
 	device_links_supplier_sync_state_pause();
-	for_each_child_of_node(root, child) {
+	for_each_child_of_node_scoped(root, child) {
 		rc = of_platform_bus_create(child, matches, lookup, parent, true);
-		if (rc) {
-			of_node_put(child);
+		if (rc)
 			break;
-		}
 	}
 	device_links_supplier_sync_state_resume();
 
@@ -488,8 +474,17 @@ int of_platform_default_populate(struct device_node *root,
 				 const struct of_dev_auxdata *lookup,
 				 struct device *parent)
 {
-	return of_platform_populate(root, of_default_bus_match_table, lookup,
-				    parent);
+	static const struct of_device_id match_table[] = {
+		{ .compatible = "simple-bus", },
+		{ .compatible = "simple-mfd", },
+		{ .compatible = "isa", },
+#ifdef CONFIG_ARM_AMBA
+		{ .compatible = "arm,amba-bus", },
+#endif /* CONFIG_ARM_AMBA */
+		{} /* Empty terminated list */
+	};
+
+	return of_platform_populate(root, match_table, lookup, parent);
 }
 EXPORT_SYMBOL_GPL(of_platform_default_populate);
 
@@ -509,9 +504,6 @@ static int __init of_platform_default_populate_init(void)
 	struct device_node *node;
 
 	device_links_supplier_sync_state_pause();
-
-	if (!of_have_populated_dt())
-		return -ENODEV;
 
 	if (IS_ENABLED(CONFIG_PPC)) {
 		struct device_node *boot_display = NULL;
@@ -544,8 +536,8 @@ static int __init of_platform_default_populate_init(void)
 		 * ignore errors for the rest.
 		 */
 		for_each_node_by_type(node, "display") {
-			if (!of_get_property(node, "linux,opened", NULL) ||
-			    !of_get_property(node, "linux,boot-display", NULL))
+			if (!of_property_read_bool(node, "linux,opened") ||
+			    !of_property_read_bool(node, "linux,boot-display"))
 				continue;
 			dev = of_platform_device_create(node, "of-display", NULL);
 			of_node_put(node);
@@ -559,7 +551,7 @@ static int __init of_platform_default_populate_init(void)
 			char buf[14];
 			const char *of_display_format = "of-display.%d";
 
-			if (!of_get_property(node, "linux,opened", NULL) || node == boot_display)
+			if (!of_property_read_bool(node, "linux,opened") || node == boot_display)
 				continue;
 			ret = snprintf(buf, sizeof(buf), of_display_format, display_number++);
 			if (ret < sizeof(buf))
@@ -593,7 +585,7 @@ static int __init of_platform_default_populate_init(void)
 			 * This can happen for example on DT systems that do EFI
 			 * booting and may provide a GOP handle to the EFI stub.
 			 */
-			sysfb_disable();
+			sysfb_disable(NULL);
 			of_platform_device_create(node, NULL, NULL);
 			of_node_put(node);
 		}
@@ -733,11 +725,14 @@ static int of_platform_notify(struct notifier_block *nb,
 	struct of_reconfig_data *rd = arg;
 	struct platform_device *pdev_parent, *pdev;
 	bool children_left;
+	struct device_node *parent;
 
 	switch (of_reconfig_get_state_change(action, rd)) {
 	case OF_RECONFIG_CHANGE_ADD:
-		/* verify that the parent is a bus */
-		if (!of_node_check_flag(rd->dn->parent, OF_POPULATED_BUS))
+		parent = rd->dn->parent;
+		/* verify that the parent is a bus (or the root node) */
+		if (!of_node_is_root(parent) &&
+		    !of_node_check_flag(parent, OF_POPULATED_BUS))
 			return NOTIFY_OK;	/* not for us */
 
 		/* already populated? (driver using of_populate manually) */
@@ -750,7 +745,7 @@ static int of_platform_notify(struct notifier_block *nb,
 		 */
 		rd->dn->fwnode.flags &= ~FWNODE_FLAG_NOT_DEVICE;
 		/* pdev_parent may be NULL when no bus platform device */
-		pdev_parent = of_find_device_by_node(rd->dn->parent);
+		pdev_parent = of_find_device_by_node(parent);
 		pdev = of_platform_device_create(rd->dn, NULL,
 				pdev_parent ? &pdev_parent->dev : NULL);
 		platform_device_put(pdev_parent);

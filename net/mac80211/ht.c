@@ -9,7 +9,7 @@
  * Copyright 2007, Michael Wu <flamingice@sourmilk.net>
  * Copyright 2007-2010, Intel Corporation
  * Copyright 2017	Intel Deutschland GmbH
- * Copyright(c) 2020-2023 Intel Corporation
+ * Copyright(c) 2020-2025 Intel Corporation
  */
 
 #include <linux/ieee80211.h>
@@ -257,7 +257,7 @@ bool ieee80211_ht_cap_ie_to_sta_ht_cap(struct ieee80211_sub_if_data *sdata,
 	if (WARN_ON(!link_conf))
 		width = NL80211_CHAN_WIDTH_20_NOHT;
 	else
-		width = link_conf->chandef.width;
+		width = link_conf->chanreq.oper.width;
 
 	switch (width) {
 	default:
@@ -379,7 +379,7 @@ void ieee80211_ba_session_work(struct wiphy *wiphy, struct wiphy_work *work)
 				       sta->ampdu_mlme.tid_rx_manage_offl))
 			__ieee80211_start_rx_ba_session(sta, 0, 0, 0, 1, tid,
 							IEEE80211_MAX_AMPDU_BUF_HT,
-							false, true, NULL);
+							false, true, 0);
 
 		if (test_and_clear_bit(tid + IEEE80211_NUM_TIDS,
 				       sta->ampdu_mlme.tid_rx_manage_offl))
@@ -467,20 +467,7 @@ void ieee80211_send_delba(struct ieee80211_sub_if_data *sdata,
 		return;
 
 	skb_reserve(skb, local->hw.extra_tx_headroom);
-	mgmt = skb_put_zero(skb, 24);
-	memcpy(mgmt->da, da, ETH_ALEN);
-	memcpy(mgmt->sa, sdata->vif.addr, ETH_ALEN);
-	if (sdata->vif.type == NL80211_IFTYPE_AP ||
-	    sdata->vif.type == NL80211_IFTYPE_AP_VLAN ||
-	    sdata->vif.type == NL80211_IFTYPE_MESH_POINT)
-		memcpy(mgmt->bssid, sdata->vif.addr, ETH_ALEN);
-	else if (sdata->vif.type == NL80211_IFTYPE_STATION)
-		memcpy(mgmt->bssid, sdata->deflink.u.mgd.bssid, ETH_ALEN);
-	else if (sdata->vif.type == NL80211_IFTYPE_ADHOC)
-		memcpy(mgmt->bssid, sdata->u.ibss.bssid, ETH_ALEN);
-
-	mgmt->frame_control = cpu_to_le16(IEEE80211_FTYPE_MGMT |
-					  IEEE80211_STYPE_ACTION);
+	mgmt = ieee80211_mgmt_ba(skb, da, sdata);
 
 	skb_put(skb, 1 + sizeof(mgmt->u.action.u.delba));
 
@@ -580,7 +567,7 @@ int ieee80211_send_smps_action(struct ieee80211_sub_if_data *sdata,
 	/* we'll do more on status of this frame */
 	info = IEEE80211_SKB_CB(skb);
 	info->flags |= IEEE80211_TX_CTL_REQ_TX_STATUS;
-	/* we have 12 bits, and need 6: link_id 4, smps 2 */
+	/* we have 13 bits, and need 6: link_id 4, smps 2 */
 	info->status_data = IEEE80211_STATUS_TYPE_SMPS |
 			    u16_encode_bits(status_link_id << 2 | smps,
 					    IEEE80211_STATUS_SUBDATA_MASK);
@@ -603,6 +590,8 @@ void ieee80211_request_smps(struct ieee80211_vif *vif, unsigned int link_id,
 	if (WARN_ON(!link))
 		goto out;
 
+	trace_api_request_smps(sdata->local, sdata, link, smps_mode);
+
 	if (link->u.mgd.driver_smps_mode == smps_mode)
 		goto out;
 
@@ -614,3 +603,41 @@ out:
 }
 /* this might change ... don't want non-open drivers using it */
 EXPORT_SYMBOL_GPL(ieee80211_request_smps);
+
+void ieee80211_ht_handle_chanwidth_notif(struct ieee80211_local *local,
+					 struct ieee80211_sub_if_data *sdata,
+					 struct sta_info *sta,
+					 struct link_sta_info *link_sta,
+					 u8 chanwidth, enum nl80211_band band)
+{
+	enum ieee80211_sta_rx_bandwidth max_bw, new_bw;
+	struct ieee80211_supported_band *sband;
+	struct sta_opmode_info sta_opmode = {};
+
+	lockdep_assert_wiphy(local->hw.wiphy);
+
+	if (chanwidth == IEEE80211_HT_CHANWIDTH_20MHZ)
+		max_bw = IEEE80211_STA_RX_BW_20;
+	else
+		max_bw = ieee80211_sta_cap_rx_bw(link_sta);
+
+	/* set cur_max_bandwidth and recalc sta bw */
+	link_sta->cur_max_bandwidth = max_bw;
+	new_bw = ieee80211_sta_cur_vht_bw(link_sta);
+
+	if (link_sta->pub->bandwidth == new_bw)
+		return;
+
+	link_sta->pub->bandwidth = new_bw;
+	sband = local->hw.wiphy->bands[band];
+	sta_opmode.bw =
+		ieee80211_sta_rx_bw_to_chan_width(link_sta);
+	sta_opmode.changed = STA_OPMODE_MAX_BW_CHANGED;
+
+	rate_control_rate_update(local, sband, link_sta,
+				 IEEE80211_RC_BW_CHANGED);
+	cfg80211_sta_opmode_change_notify(sdata->dev,
+					  sta->addr,
+					  &sta_opmode,
+					  GFP_KERNEL);
+}

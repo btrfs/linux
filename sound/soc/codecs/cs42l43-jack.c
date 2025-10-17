@@ -6,29 +6,35 @@
 //                         Cirrus Logic International Semiconductor Ltd.
 
 #include <linux/build_bug.h>
+#include <linux/completion.h>
 #include <linux/delay.h>
 #include <linux/errno.h>
 #include <linux/irq.h>
 #include <linux/jiffies.h>
 #include <linux/mfd/cs42l43.h>
 #include <linux/mfd/cs42l43-regs.h>
+#include <linux/mutex.h>
 #include <linux/pm_runtime.h>
 #include <linux/property.h>
+#include <linux/regmap.h>
+#include <linux/time.h>
+#include <linux/workqueue.h>
 #include <sound/control.h>
 #include <sound/jack.h>
 #include <sound/pcm.h>
 #include <sound/pcm_params.h>
 #include <sound/soc-component.h>
+#include <sound/soc-jack.h>
 #include <sound/soc.h>
 
 #include "cs42l43.h"
 
 static const unsigned int cs42l43_accdet_us[] = {
-	20, 100, 1000, 10000, 50000, 75000, 100000, 200000
+	20, 100, 1000, 10000, 50000, 75000, 100000, 200000,
 };
 
 static const unsigned int cs42l43_accdet_db_ms[] = {
-	0, 125, 250, 500, 750, 1000, 1250, 1500
+	0, 125, 250, 500, 750, 1000, 1250, 1500,
 };
 
 static const unsigned int cs42l43_accdet_ramp_ms[] = { 10, 40, 90, 170 };
@@ -101,8 +107,13 @@ int cs42l43_set_jack(struct snd_soc_component *component,
 			goto error;
 		}
 
-		device_property_read_u32_array(cs42l43->dev, "cirrus,buttons-ohms",
-					       priv->buttons, ret);
+		ret = device_property_read_u32_array(cs42l43->dev, "cirrus,buttons-ohms",
+						     priv->buttons, ret);
+		if (ret < 0) {
+			dev_err(priv->dev, "Property cirrus,button-ohms malformed: %d\n",
+				ret);
+			goto error;
+		}
 	} else {
 		priv->buttons[0] = 70;
 		priv->buttons[1] = 185;
@@ -110,7 +121,7 @@ int cs42l43_set_jack(struct snd_soc_component *component,
 		priv->buttons[3] = 735;
 	}
 
-	ret = cs42l43_find_index(priv, "cirrus,detect-us", 1000, &priv->detect_us,
+	ret = cs42l43_find_index(priv, "cirrus,detect-us", 50000, &priv->detect_us,
 				 cs42l43_accdet_us, ARRAY_SIZE(cs42l43_accdet_us));
 	if (ret < 0)
 		goto error;
@@ -156,7 +167,7 @@ int cs42l43_set_jack(struct snd_soc_component *component,
 		autocontrol |= 0x3 << CS42L43_JACKDET_MODE_SHIFT;
 
 	ret = cs42l43_find_index(priv, "cirrus,tip-fall-db-ms", 500,
-				 NULL, cs42l43_accdet_db_ms,
+				 &priv->tip_fall_db_ms, cs42l43_accdet_db_ms,
 				 ARRAY_SIZE(cs42l43_accdet_db_ms));
 	if (ret < 0)
 		goto error;
@@ -164,7 +175,7 @@ int cs42l43_set_jack(struct snd_soc_component *component,
 	tip_deb |= ret << CS42L43_TIPSENSE_FALLING_DB_TIME_SHIFT;
 
 	ret = cs42l43_find_index(priv, "cirrus,tip-rise-db-ms", 500,
-				 NULL, cs42l43_accdet_db_ms,
+				 &priv->tip_rise_db_ms, cs42l43_accdet_db_ms,
 				 ARRAY_SIZE(cs42l43_accdet_db_ms));
 	if (ret < 0)
 		goto error;
@@ -231,7 +242,6 @@ done:
 error:
 	mutex_unlock(&priv->jack_lock);
 
-	pm_runtime_mark_last_busy(priv->dev);
 	pm_runtime_put_autosuspend(priv->dev);
 
 	return ret;
@@ -351,14 +361,15 @@ static void cs42l43_stop_button_detect(struct cs42l43_codec *priv)
 	priv->button_detect_running = false;
 }
 
+#define CS42L43_BUTTON_COMB_US 11000
 #define CS42L43_BUTTON_COMB_MAX 512
 #define CS42L43_BUTTON_ROUT 2210
 
-void cs42l43_button_press_work(struct work_struct *work)
+irqreturn_t cs42l43_button_press(int irq, void *data)
 {
-	struct cs42l43_codec *priv = container_of(work, struct cs42l43_codec,
-						  button_press_work.work);
+	struct cs42l43_codec *priv = data;
 	struct cs42l43 *cs42l43 = priv->core;
+	irqreturn_t iret = IRQ_NONE;
 	unsigned int buttons = 0;
 	unsigned int val = 0;
 	int i, ret;
@@ -366,7 +377,7 @@ void cs42l43_button_press_work(struct work_struct *work)
 	ret = pm_runtime_resume_and_get(priv->dev);
 	if (ret) {
 		dev_err(priv->dev, "Failed to resume for button press: %d\n", ret);
-		return;
+		return iret;
 	}
 
 	mutex_lock(&priv->jack_lock);
@@ -375,6 +386,9 @@ void cs42l43_button_press_work(struct work_struct *work)
 		dev_dbg(priv->dev, "Spurious button press IRQ\n");
 		goto error;
 	}
+
+	// Wait for 2 full cycles of comb filter to ensure good reading
+	usleep_range(2 * CS42L43_BUTTON_COMB_US, 2 * CS42L43_BUTTON_COMB_US + 50);
 
 	regmap_read(cs42l43->regmap, CS42L43_DETECT_STATUS_1, &val);
 
@@ -409,34 +423,26 @@ void cs42l43_button_press_work(struct work_struct *work)
 
 	snd_soc_jack_report(priv->jack_hp, buttons, CS42L43_JACK_BUTTONS);
 
+	iret = IRQ_HANDLED;
+
 error:
 	mutex_unlock(&priv->jack_lock);
 
-	pm_runtime_mark_last_busy(priv->dev);
 	pm_runtime_put_autosuspend(priv->dev);
+
+	return iret;
 }
 
-irqreturn_t cs42l43_button_press(int irq, void *data)
+irqreturn_t cs42l43_button_release(int irq, void *data)
 {
 	struct cs42l43_codec *priv = data;
-
-	// Wait for 2 full cycles of comb filter to ensure good reading
-	queue_delayed_work(system_wq, &priv->button_press_work,
-			   msecs_to_jiffies(10));
-
-	return IRQ_HANDLED;
-}
-
-void cs42l43_button_release_work(struct work_struct *work)
-{
-	struct cs42l43_codec *priv = container_of(work, struct cs42l43_codec,
-						  button_release_work);
+	irqreturn_t iret = IRQ_NONE;
 	int ret;
 
 	ret = pm_runtime_resume_and_get(priv->dev);
 	if (ret) {
 		dev_err(priv->dev, "Failed to resume for button release: %d\n", ret);
-		return;
+		return iret;
 	}
 
 	mutex_lock(&priv->jack_lock);
@@ -445,23 +451,17 @@ void cs42l43_button_release_work(struct work_struct *work)
 		dev_dbg(priv->dev, "Button release IRQ\n");
 
 		snd_soc_jack_report(priv->jack_hp, 0, CS42L43_JACK_BUTTONS);
+
+		iret = IRQ_HANDLED;
 	} else {
 		dev_dbg(priv->dev, "Spurious button release IRQ\n");
 	}
 
 	mutex_unlock(&priv->jack_lock);
 
-	pm_runtime_mark_last_busy(priv->dev);
 	pm_runtime_put_autosuspend(priv->dev);
-}
 
-irqreturn_t cs42l43_button_release(int irq, void *data)
-{
-	struct cs42l43_codec *priv = data;
-
-	queue_work(system_wq, &priv->button_release_work);
-
-	return IRQ_HANDLED;
+	return iret;
 }
 
 void cs42l43_bias_sense_timeout(struct work_struct *work)
@@ -493,7 +493,6 @@ void cs42l43_bias_sense_timeout(struct work_struct *work)
 
 	mutex_unlock(&priv->jack_lock);
 
-	pm_runtime_mark_last_busy(priv->dev);
 	pm_runtime_put_autosuspend(priv->dev);
 }
 
@@ -637,11 +636,15 @@ static int cs42l43_run_load_detect(struct cs42l43_codec *priv, bool mic)
 static int cs42l43_run_type_detect(struct cs42l43_codec *priv)
 {
 	struct cs42l43 *cs42l43 = priv->core;
-	int timeout_ms = ((2 * priv->detect_us) / 1000) + 200;
+	int timeout_ms = ((2 * priv->detect_us) / USEC_PER_MSEC) + 200;
 	unsigned int type = 0xff;
 	unsigned long time_left;
 
 	reinit_completion(&priv->type_detect);
+
+	regmap_update_bits(cs42l43->regmap, CS42L43_STEREO_MIC_CLAMP_CTRL,
+			   CS42L43_SMIC_HPAMP_CLAMP_DIS_FRC_VAL_MASK,
+			   CS42L43_SMIC_HPAMP_CLAMP_DIS_FRC_VAL_MASK);
 
 	cs42l43_start_hs_bias(priv, true);
 	regmap_update_bits(cs42l43->regmap, CS42L43_HS2,
@@ -653,6 +656,9 @@ static int cs42l43_run_type_detect(struct cs42l43_codec *priv)
 	regmap_update_bits(cs42l43->regmap, CS42L43_HS2,
 			   CS42L43_HSDET_MODE_MASK, 0x2 << CS42L43_HSDET_MODE_SHIFT);
 	cs42l43_stop_hs_bias(priv);
+
+	regmap_update_bits(cs42l43->regmap, CS42L43_STEREO_MIC_CLAMP_CTRL,
+			   CS42L43_SMIC_HPAMP_CLAMP_DIS_FRC_VAL_MASK, 0);
 
 	if (!time_left)
 		return -ETIMEDOUT;
@@ -678,7 +684,7 @@ static int cs42l43_run_type_detect(struct cs42l43_codec *priv)
 	}
 }
 
-static void cs42l43_clear_jack(struct cs42l43_codec *priv)
+void cs42l43_clear_jack(struct cs42l43_codec *priv)
 {
 	struct cs42l43 *cs42l43 = priv->core;
 
@@ -691,11 +697,12 @@ static void cs42l43_clear_jack(struct cs42l43_codec *priv)
 			   CS42L43_PGA_WIDESWING_MODE_EN_MASK, 0);
 	regmap_update_bits(cs42l43->regmap, CS42L43_STEREO_MIC_CTRL,
 			   CS42L43_JACK_STEREO_CONFIG_MASK, 0);
+	regmap_update_bits(cs42l43->regmap, CS42L43_STEREO_MIC_CLAMP_CTRL,
+			   CS42L43_SMIC_HPAMP_CLAMP_DIS_FRC_MASK,
+			   CS42L43_SMIC_HPAMP_CLAMP_DIS_FRC_MASK);
 	regmap_update_bits(cs42l43->regmap, CS42L43_HS2,
 			   CS42L43_HSDET_MODE_MASK | CS42L43_HSDET_MANUAL_MODE_MASK,
 			   0x2 << CS42L43_HSDET_MODE_SHIFT);
-
-	snd_soc_jack_report(priv->jack_hp, 0, 0xFFFF);
 }
 
 void cs42l43_tip_sense_work(struct work_struct *work)
@@ -744,6 +751,8 @@ void cs42l43_tip_sense_work(struct work_struct *work)
 
 		cs42l43_clear_jack(priv);
 
+		snd_soc_jack_report(priv->jack_hp, 0, 0xFFFF);
+
 		if (cs42l43->sdw && priv->jack_present) {
 			pm_runtime_put(priv->dev);
 			priv->jack_present = false;
@@ -753,21 +762,25 @@ void cs42l43_tip_sense_work(struct work_struct *work)
 error:
 	mutex_unlock(&priv->jack_lock);
 
-	pm_runtime_mark_last_busy(priv->dev);
+	priv->suspend_jack_debounce = false;
+
 	pm_runtime_put_autosuspend(priv->dev);
 }
 
 irqreturn_t cs42l43_tip_sense(int irq, void *data)
 {
 	struct cs42l43_codec *priv = data;
+	unsigned int db_delay = priv->tip_debounce_ms;
 
 	cancel_delayed_work(&priv->bias_sense_timeout);
 	cancel_delayed_work(&priv->tip_sense_work);
-	cancel_delayed_work(&priv->button_press_work);
-	cancel_work(&priv->button_release_work);
+
+	// Ensure delay after suspend is long enough to avoid false detection
+	if (priv->suspend_jack_debounce)
+		db_delay += priv->tip_fall_db_ms + priv->tip_rise_db_ms;
 
 	queue_delayed_work(system_long_wq, &priv->tip_sense_work,
-			   msecs_to_jiffies(priv->tip_debounce_ms));
+			   msecs_to_jiffies(db_delay));
 
 	return IRQ_HANDLED;
 }
@@ -846,6 +859,9 @@ static const char * const cs42l43_jack_text[] = {
 	"Line-In", "Microphone", "Optical",
 };
 
+static_assert(ARRAY_SIZE(cs42l43_jack_override_modes) ==
+	      ARRAY_SIZE(cs42l43_jack_text) - 1);
+
 SOC_ENUM_SINGLE_VIRT_DECL(cs42l43_jack_enum, cs42l43_jack_text);
 
 int cs42l43_jack_get(struct snd_kcontrol *kcontrol, struct snd_ctl_elem_value *ucontrol)
@@ -868,9 +884,6 @@ int cs42l43_jack_put(struct snd_kcontrol *kcontrol, struct snd_ctl_elem_value *u
 	struct soc_enum *e = (struct soc_enum *)kcontrol->private_value;
 	unsigned int override = ucontrol->value.integer.value[0];
 
-	BUILD_BUG_ON(ARRAY_SIZE(cs42l43_jack_override_modes) !=
-		     ARRAY_SIZE(cs42l43_jack_text) - 1);
-
 	if (override >= e->items)
 		return -EINVAL;
 
@@ -889,6 +902,8 @@ int cs42l43_jack_put(struct snd_kcontrol *kcontrol, struct snd_ctl_elem_value *u
 	priv->jack_override = override;
 
 	cs42l43_clear_jack(priv);
+
+	snd_soc_jack_report(priv->jack_hp, 0, 0xFFFF);
 
 	if (!override) {
 		queue_delayed_work(system_long_wq, &priv->tip_sense_work, 0);

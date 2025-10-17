@@ -43,6 +43,7 @@
 #include <asm/cpu_ops.h>
 #include <asm/kasan.h>
 #include <asm/numa.h>
+#include <asm/rsi.h>
 #include <asm/scs.h>
 #include <asm/sections.h>
 #include <asm/setup.h>
@@ -166,36 +167,25 @@ static void __init smp_build_mpidr_hash(void)
 		pr_warn("Large number of MPIDR hash buckets detected\n");
 }
 
-static void *early_fdt_ptr __initdata;
-
-void __init *get_early_fdt_ptr(void)
-{
-	return early_fdt_ptr;
-}
-
-asmlinkage void __init early_fdt_map(u64 dt_phys)
-{
-	int fdt_size;
-
-	early_fixmap_init();
-	early_fdt_ptr = fixmap_remap_fdt(dt_phys, &fdt_size, PAGE_KERNEL);
-}
-
 static void __init setup_machine_fdt(phys_addr_t dt_phys)
 {
-	int size;
+	int size = 0;
 	void *dt_virt = fixmap_remap_fdt(dt_phys, &size, PAGE_KERNEL);
 	const char *name;
 
 	if (dt_virt)
 		memblock_reserve(dt_phys, size);
 
-	if (!dt_virt || !early_init_dt_scan(dt_virt)) {
+	/*
+	 * dt_virt is a fixmap address, hence __pa(dt_virt) can't be used.
+	 * Pass dt_phys directly.
+	 */
+	if (!early_init_dt_scan(dt_virt, dt_phys)) {
 		pr_crit("\n"
-			"Error: invalid device tree blob at physical address %pa (virtual address 0x%px)\n"
-			"The dtb must be 8-byte aligned and must not exceed 2 MB in size\n"
-			"\nPlease check your bootloader.",
-			&dt_phys, dt_virt);
+			"Error: invalid device tree blob: PA=%pa, VA=%px, size=%d bytes\n"
+			"The dtb must be 8-byte aligned and must not exceed 2 MB in size.\n"
+			"\nPlease check your bootloader.\n",
+			&dt_phys, dt_virt, size);
 
 		/*
 		 * Note that in this _really_ early stage we cannot even BUG()
@@ -224,7 +214,7 @@ static void __init request_standard_resources(void)
 	unsigned long i = 0;
 	size_t res_size;
 
-	kernel_code.start   = __pa_symbol(_stext);
+	kernel_code.start   = __pa_symbol(_text);
 	kernel_code.end     = __pa_symbol(__init_begin - 1);
 	kernel_data.start   = __pa_symbol(_sdata);
 	kernel_data.end     = __pa_symbol(_end - 1);
@@ -233,9 +223,7 @@ static void __init request_standard_resources(void)
 
 	num_standard_resources = memblock.memory.cnt;
 	res_size = num_standard_resources * sizeof(*standard_resources);
-	standard_resources = memblock_alloc(res_size, SMP_CACHE_BYTES);
-	if (!standard_resources)
-		panic("%s: Failed to allocate %zu bytes\n", __func__, res_size);
+	standard_resources = memblock_alloc_or_panic(res_size, SMP_CACHE_BYTES);
 
 	for_each_mem_region(region) {
 		res = &standard_resources[i++];
@@ -292,18 +280,11 @@ u64 cpu_logical_map(unsigned int cpu)
 
 void __init __no_sanitize_address setup_arch(char **cmdline_p)
 {
-	setup_initial_init_mm(_stext, _etext, _edata, _end);
+	setup_initial_init_mm(_text, _etext, _edata, _end);
 
 	*cmdline_p = boot_command_line;
 
 	kaslr_init();
-
-	/*
-	 * If know now we are going to need KPTI then use non-global
-	 * mappings from the start, avoiding the cost of rewriting
-	 * everything later.
-	 */
-	arm64_use_ng_mappings = kaslr_requires_kpti();
 
 	early_fixmap_init();
 	early_ioremap_init();
@@ -320,9 +301,15 @@ void __init __no_sanitize_address setup_arch(char **cmdline_p)
 	dynamic_scs_init();
 
 	/*
-	 * Unmask asynchronous aborts and fiq after bringing up possible
-	 * earlycon. (Report possible System Errors once we can report this
-	 * occurred).
+	 * The primary CPU enters the kernel with all DAIF exceptions masked.
+	 *
+	 * We must unmask Debug and SError before preemption or scheduling is
+	 * possible to ensure that these are consistently unmasked across
+	 * threads, and we want to unmask SError as soon as possible after
+	 * initializing earlycon so that we can report any SErrors immediately.
+	 *
+	 * IRQ and FIQ will be unmasked after the root irqchip has been
+	 * detected and initialized.
 	 */
 	local_daif_restore(DAIF_PROCCTX_NOIRQ);
 
@@ -367,12 +354,11 @@ void __init __no_sanitize_address setup_arch(char **cmdline_p)
 	else
 		psci_acpi_init();
 
+	arm64_rsi_init();
+
 	init_bootcpu_ops();
 	smp_init_cpus();
 	smp_build_mpidr_hash();
-
-	/* Init percpu seeds for random tags after cpus are set up. */
-	kasan_init_sw_tags();
 
 #ifdef CONFIG_ARM64_SW_TTBR0_PAN
 	/*

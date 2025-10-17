@@ -56,10 +56,7 @@ static struct mt76_wcid *mt7915_rx_get_wcid(struct mt7915_dev *dev,
 	struct mt7915_sta *sta;
 	struct mt76_wcid *wcid;
 
-	if (idx >= ARRAY_SIZE(dev->mt76.wcid))
-		return NULL;
-
-	wcid = rcu_dereference(dev->mt76.wcid[idx]);
+	wcid = mt76_wcid_ptr(dev, idx);
 	if (unicast || !wcid)
 		return wcid;
 
@@ -140,8 +137,15 @@ static void mt7915_mac_sta_poll(struct mt7915_dev *dev)
 			msta->airtime_ac[i] = mt76_rr(dev, addr);
 			msta->airtime_ac[i + 4] = mt76_rr(dev, addr + 4);
 
-			tx_time[i] = msta->airtime_ac[i] - tx_last;
-			rx_time[i] = msta->airtime_ac[i + 4] - rx_last;
+			if (msta->airtime_ac[i] <= tx_last)
+				tx_time[i] = 0;
+			else
+				tx_time[i] = msta->airtime_ac[i] - tx_last;
+
+			if (msta->airtime_ac[i + 4] <= rx_last)
+				rx_time[i] = 0;
+			else
+				rx_time[i] = msta->airtime_ac[i + 4] - rx_last;
 
 			if ((tx_last | rx_last) & BIT(30))
 				clear = true;
@@ -326,11 +330,7 @@ mt7915_mac_fill_rx(struct mt7915_dev *dev, struct sk_buff *skb,
 
 	if (status->wcid) {
 		msta = container_of(status->wcid, struct mt7915_sta, wcid);
-		spin_lock_bh(&dev->mt76.sta_poll_lock);
-		if (list_empty(&msta->wcid.poll_list))
-			list_add_tail(&msta->wcid.poll_list,
-				      &dev->mt76.sta_poll_list);
-		spin_unlock_bh(&dev->mt76.sta_poll_lock);
+		mt76_wcid_add_poll(&dev->mt76, &msta->wcid);
 	}
 
 	status->freq = mphy->chandef.chan->center_freq;
@@ -914,17 +914,13 @@ mt7915_mac_tx_free(struct mt7915_dev *dev, void *data, int len)
 			u16 idx;
 
 			idx = FIELD_GET(MT_TX_FREE_WLAN_ID, info);
-			wcid = rcu_dereference(dev->mt76.wcid[idx]);
+			wcid = mt76_wcid_ptr(dev, idx);
 			sta = wcid_to_sta(wcid);
 			if (!sta)
 				continue;
 
 			msta = container_of(wcid, struct mt7915_sta, wcid);
-			spin_lock_bh(&mdev->sta_poll_lock);
-			if (list_empty(&msta->wcid.poll_list))
-				list_add_tail(&msta->wcid.poll_list,
-					      &mdev->sta_poll_list);
-			spin_unlock_bh(&mdev->sta_poll_lock);
+			mt76_wcid_add_poll(&dev->mt76, &msta->wcid);
 			continue;
 		}
 
@@ -1014,12 +1010,9 @@ static void mt7915_mac_add_txs(struct mt7915_dev *dev, void *data)
 	if (pid < MT_PACKET_ID_WED)
 		return;
 
-	if (wcidx >= mt7915_wtbl_size(dev))
-		return;
-
 	rcu_read_lock();
 
-	wcid = rcu_dereference(dev->mt76.wcid[wcidx]);
+	wcid = mt76_wcid_ptr(dev, wcidx);
 	if (!wcid)
 		goto out;
 
@@ -1033,10 +1026,7 @@ static void mt7915_mac_add_txs(struct mt7915_dev *dev, void *data)
 	if (!wcid->sta)
 		goto out;
 
-	spin_lock_bh(&dev->mt76.sta_poll_lock);
-	if (list_empty(&msta->wcid.poll_list))
-		list_add_tail(&msta->wcid.poll_list, &dev->mt76.sta_poll_list);
-	spin_unlock_bh(&dev->mt76.sta_poll_lock);
+	mt76_wcid_add_poll(&dev->mt76, &msta->wcid);
 
 out:
 	rcu_read_unlock();
@@ -1156,7 +1146,7 @@ void mt7915_mac_set_timing(struct mt7915_phy *phy)
 	u32 ofdm = FIELD_PREP(MT_TIMEOUT_VAL_PLCP, 60) |
 		   FIELD_PREP(MT_TIMEOUT_VAL_CCA, 28);
 	u8 band = phy->mt76->band_idx;
-	int eifs_ofdm = 360, sifs = 10, offset;
+	int eifs_ofdm = 84, sifs = 10, offset;
 	bool a_band = !(phy->mt76->chandef.chan->band == NL80211_BAND_2GHZ);
 
 	if (!test_bit(MT76_STATE_RUNNING, &phy->mt76->state))
@@ -1338,10 +1328,8 @@ mt7915_mac_restart(struct mt7915_dev *dev)
 	set_bit(MT76_RESET, &dev->mphy.state);
 	set_bit(MT76_MCU_RESET, &dev->mphy.state);
 	wake_up(&dev->mt76.mcu.wait);
-	if (ext_phy) {
+	if (ext_phy)
 		set_bit(MT76_RESET, &ext_phy->state);
-		set_bit(MT76_MCU_RESET, &ext_phy->state);
-	}
 
 	/* lock/unlock all queues to ensure that no tx is pending */
 	mt76_txq_schedule_all(&dev->mphy);
@@ -1362,10 +1350,15 @@ mt7915_mac_restart(struct mt7915_dev *dev)
 
 	mt7915_dma_reset(dev, true);
 
-	local_bh_disable();
 	mt76_for_each_q_rx(mdev, i) {
 		if (mdev->q_rx[i].ndesc) {
 			napi_enable(&dev->mt76.napi[i]);
+		}
+	}
+
+	local_bh_disable();
+	mt76_for_each_q_rx(mdev, i) {
+		if (mdev->q_rx[i].ndesc) {
 			napi_schedule(&dev->mt76.napi[i]);
 		}
 	}
@@ -1383,6 +1376,8 @@ mt7915_mac_restart(struct mt7915_dev *dev)
 	if (dev_is_pci(mdev->dev)) {
 		mt76_wr(dev, MT_PCIE_MAC_INT_ENABLE, 0xff);
 		if (dev->hif2) {
+			mt76_wr(dev, MT_PCIE_RECOG_ID,
+				dev->hif2->index | MT_PCIE_RECOG_ID_SEM);
 			if (is_mt7915(mdev))
 				mt76_wr(dev, MT_PCIE1_MAC_INT_ENABLE, 0xff);
 			else
@@ -1423,8 +1418,9 @@ out:
 	if (phy2)
 		clear_bit(MT76_RESET, &phy2->mt76->state);
 
-	local_bh_disable();
 	napi_enable(&dev->mt76.tx_napi);
+
+	local_bh_disable();
 	napi_schedule(&dev->mt76.tx_napi);
 	local_bh_enable();
 
@@ -1437,12 +1433,15 @@ static void
 mt7915_mac_full_reset(struct mt7915_dev *dev)
 {
 	struct mt76_phy *ext_phy;
+	struct mt7915_phy *phy2;
 	int i;
 
 	ext_phy = dev->mt76.phys[MT_BAND1];
+	phy2 = ext_phy ? ext_phy->priv : NULL;
 
 	dev->recovery.hw_full_reset = true;
 
+	set_bit(MT76_MCU_RESET, &dev->mphy.state);
 	wake_up(&dev->mt76.mcu.wait);
 	ieee80211_stop_queues(mt76_hw(dev));
 	if (ext_phy)
@@ -1457,26 +1456,28 @@ mt7915_mac_full_reset(struct mt7915_dev *dev)
 		if (!mt7915_mac_restart(dev))
 			break;
 	}
-	mutex_unlock(&dev->mt76.mutex);
 
 	if (i == 10)
 		dev_err(dev->mt76.dev, "chip full reset failed\n");
 
+	dev->phy.omac_mask = 0;
+	if (phy2)
+		phy2->omac_mask = 0;
+
+	mt76_reset_device(&dev->mt76);
+
+	INIT_LIST_HEAD(&dev->sta_rc_list);
+	INIT_LIST_HEAD(&dev->twt_list);
+
+	i = mt76_wcid_alloc(dev->mt76.wcid_mask, MT7915_WTBL_STA);
+	dev->mt76.global_wcid.idx = i;
+	dev->recovery.hw_full_reset = false;
+
+	mutex_unlock(&dev->mt76.mutex);
+
 	ieee80211_restart_hw(mt76_hw(dev));
 	if (ext_phy)
 		ieee80211_restart_hw(ext_phy->hw);
-
-	ieee80211_wake_queues(mt76_hw(dev));
-	if (ext_phy)
-		ieee80211_wake_queues(ext_phy->hw);
-
-	dev->recovery.hw_full_reset = false;
-	ieee80211_queue_delayed_work(mt76_hw(dev), &dev->mphy.mac_work,
-				     MT7915_WATCHDOG_TIME);
-	if (ext_phy)
-		ieee80211_queue_delayed_work(ext_phy->hw,
-					     &ext_phy->mac_work,
-					     MT7915_WATCHDOG_TIME);
 }
 
 /* system error recovery */
@@ -1520,12 +1521,6 @@ void mt7915_mac_reset_work(struct work_struct *work)
 	if (!(READ_ONCE(dev->recovery.state) & MT_MCU_CMD_STOP_DMA))
 		return;
 
-	if (mtk_wed_device_active(&dev->mt76.mmio.wed)) {
-		mtk_wed_device_stop(&dev->mt76.mmio.wed);
-		if (!is_mt798x(&dev->mt76))
-			mt76_wr(dev, MT_INT_WED_MASK_CSR, 0);
-	}
-
 	ieee80211_stop_queues(mt76_hw(dev));
 	if (ext_phy)
 		ieee80211_stop_queues(ext_phy->hw);
@@ -1538,12 +1533,17 @@ void mt7915_mac_reset_work(struct work_struct *work)
 		set_bit(MT76_RESET, &phy2->mt76->state);
 		cancel_delayed_work_sync(&phy2->mt76->mac_work);
 	}
+
+	mutex_lock(&dev->mt76.mutex);
+
 	mt76_worker_disable(&dev->mt76.tx_worker);
 	mt76_for_each_q_rx(&dev->mt76, i)
 		napi_disable(&dev->mt76.napi[i]);
 	napi_disable(&dev->mt76.tx_napi);
 
-	mutex_lock(&dev->mt76.mutex);
+
+	if (mtk_wed_device_active(&dev->mt76.mmio.wed))
+		mtk_wed_device_stop(&dev->mt76.mmio.wed);
 
 	mt76_wr(dev, MT_MCU_INT_EVENT, MT_MCU_INT_EVENT_DMA_STOPPED);
 
@@ -1568,9 +1568,12 @@ void mt7915_mac_reset_work(struct work_struct *work)
 	if (phy2)
 		clear_bit(MT76_RESET, &phy2->mt76->state);
 
-	local_bh_disable();
 	mt76_for_each_q_rx(&dev->mt76, i) {
 		napi_enable(&dev->mt76.napi[i]);
+	}
+
+	local_bh_disable();
+	mt76_for_each_q_rx(&dev->mt76, i) {
 		napi_schedule(&dev->mt76.napi[i]);
 	}
 	local_bh_enable();
@@ -1579,8 +1582,8 @@ void mt7915_mac_reset_work(struct work_struct *work)
 
 	mt76_worker_enable(&dev->mt76.tx_worker);
 
-	local_bh_disable();
 	napi_enable(&dev->mt76.tx_napi);
+	local_bh_disable();
 	napi_schedule(&dev->mt76.tx_napi);
 	local_bh_enable();
 
@@ -1688,6 +1691,11 @@ void mt7915_reset(struct mt7915_dev *dev)
 		mt7915_irq_disable(dev, MT_INT_MCU_CMD);
 		queue_work(dev->mt76.wq, &dev->dump_work);
 		return;
+	}
+
+	if ((READ_ONCE(dev->recovery.state) & MT_MCU_CMD_STOP_DMA)) {
+		set_bit(MT76_MCU_RESET, &dev->mphy.state);
+		wake_up(&dev->mt76.mcu.wait);
 	}
 
 	queue_work(dev->mt76.wq, &dev->reset_work);
@@ -2019,16 +2027,15 @@ void mt7915_mac_work(struct work_struct *work)
 static void mt7915_dfs_stop_radar_detector(struct mt7915_phy *phy)
 {
 	struct mt7915_dev *dev = phy->dev;
+	int rdd_idx = mt7915_get_rdd_idx(phy, false);
 
-	if (phy->rdd_state & BIT(0))
-		mt76_connac_mcu_rdd_cmd(&dev->mt76, RDD_STOP, 0,
-					MT_RX_SEL0, 0);
-	if (phy->rdd_state & BIT(1))
-		mt76_connac_mcu_rdd_cmd(&dev->mt76, RDD_STOP, 1,
-					MT_RX_SEL0, 0);
+	if (rdd_idx < 0)
+		return;
+
+	mt76_connac_mcu_rdd_cmd(&dev->mt76, RDD_STOP, rdd_idx, 0, 0);
 }
 
-static int mt7915_dfs_start_rdd(struct mt7915_dev *dev, int chain)
+static int mt7915_dfs_start_rdd(struct mt7915_dev *dev, int rdd_idx)
 {
 	int err, region;
 
@@ -2045,51 +2052,37 @@ static int mt7915_dfs_start_rdd(struct mt7915_dev *dev, int chain)
 		break;
 	}
 
-	err = mt76_connac_mcu_rdd_cmd(&dev->mt76, RDD_START, chain,
-				      MT_RX_SEL0, region);
+	err = mt76_connac_mcu_rdd_cmd(&dev->mt76, RDD_START, rdd_idx, 0, region);
 	if (err < 0)
 		return err;
 
 	if (is_mt7915(&dev->mt76)) {
-		err = mt76_connac_mcu_rdd_cmd(&dev->mt76, RDD_SET_WF_ANT, chain,
+		err = mt76_connac_mcu_rdd_cmd(&dev->mt76, RDD_SET_WF_ANT, rdd_idx,
 					      0, dev->dbdc_support ? 2 : 0);
 		if (err < 0)
 			return err;
 	}
 
-	return mt76_connac_mcu_rdd_cmd(&dev->mt76, RDD_DET_MODE, chain,
-				       MT_RX_SEL0, 1);
+	return mt76_connac_mcu_rdd_cmd(&dev->mt76, RDD_DET_MODE, rdd_idx, 0, 1);
 }
 
 static int mt7915_dfs_start_radar_detector(struct mt7915_phy *phy)
 {
-	struct cfg80211_chan_def *chandef = &phy->mt76->chandef;
 	struct mt7915_dev *dev = phy->dev;
-	int err;
+	int err, rdd_idx;
+
+	rdd_idx = mt7915_get_rdd_idx(phy, false);
+	if (rdd_idx < 0)
+		return -EINVAL;
 
 	/* start CAC */
-	err = mt76_connac_mcu_rdd_cmd(&dev->mt76, RDD_CAC_START,
-				      phy->mt76->band_idx, MT_RX_SEL0, 0);
+	err = mt76_connac_mcu_rdd_cmd(&dev->mt76, RDD_CAC_START, rdd_idx, 0, 0);
 	if (err < 0)
 		return err;
 
-	err = mt7915_dfs_start_rdd(dev, phy->mt76->band_idx);
+	err = mt7915_dfs_start_rdd(dev, rdd_idx);
 	if (err < 0)
 		return err;
-
-	phy->rdd_state |= BIT(phy->mt76->band_idx);
-
-	if (!is_mt7915(&dev->mt76))
-		return 0;
-
-	if (chandef->width == NL80211_CHAN_WIDTH_160 ||
-	    chandef->width == NL80211_CHAN_WIDTH_80P80) {
-		err = mt7915_dfs_start_rdd(dev, 1);
-		if (err < 0)
-			return err;
-
-		phy->rdd_state |= BIT(1);
-	}
 
 	return 0;
 }
@@ -2132,12 +2125,12 @@ int mt7915_dfs_init_radar_detector(struct mt7915_phy *phy)
 {
 	struct mt7915_dev *dev = phy->dev;
 	enum mt76_dfs_state dfs_state, prev_state;
-	int err;
+	int err, rdd_idx = mt7915_get_rdd_idx(phy, false);
 
 	prev_state = phy->mt76->dfs_state;
 	dfs_state = mt76_phy_dfs_state(phy->mt76);
 
-	if (prev_state == dfs_state)
+	if (prev_state == dfs_state || rdd_idx < 0)
 		return 0;
 
 	if (prev_state == MT_DFS_STATE_UNKNOWN)
@@ -2161,8 +2154,7 @@ int mt7915_dfs_init_radar_detector(struct mt7915_phy *phy)
 	if (dfs_state == MT_DFS_STATE_CAC)
 		return 0;
 
-	err = mt76_connac_mcu_rdd_cmd(&dev->mt76, RDD_CAC_END,
-				      phy->mt76->band_idx, MT_RX_SEL0, 0);
+	err = mt76_connac_mcu_rdd_cmd(&dev->mt76, RDD_CAC_END, rdd_idx, 0, 0);
 	if (err < 0) {
 		phy->mt76->dfs_state = MT_DFS_STATE_UNKNOWN;
 		return err;
@@ -2172,15 +2164,13 @@ int mt7915_dfs_init_radar_detector(struct mt7915_phy *phy)
 	return 0;
 
 stop:
-	err = mt76_connac_mcu_rdd_cmd(&dev->mt76, RDD_NORMAL_START,
-				      phy->mt76->band_idx, MT_RX_SEL0, 0);
+	err = mt76_connac_mcu_rdd_cmd(&dev->mt76, RDD_NORMAL_START, rdd_idx, 0, 0);
 	if (err < 0)
 		return err;
 
 	if (is_mt7915(&dev->mt76)) {
 		err = mt76_connac_mcu_rdd_cmd(&dev->mt76, RDD_SET_WF_ANT,
-					      phy->mt76->band_idx, 0,
-					      dev->dbdc_support ? 2 : 0);
+					      rdd_idx, 0, dev->dbdc_support ? 2 : 0);
 		if (err < 0)
 			return err;
 	}

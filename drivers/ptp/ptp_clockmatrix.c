@@ -17,7 +17,7 @@
 #include <linux/of.h>
 #include <linux/mfd/rsmu.h>
 #include <linux/mfd/idt8a340_reg.h>
-#include <asm/unaligned.h>
+#include <linux/unaligned.h>
 
 #include "ptp_private.h"
 #include "ptp_clockmatrix.h"
@@ -282,18 +282,6 @@ static int idtcm_extts_enable(struct idtcm_channel *channel,
 
 	idtcm = channel->idtcm;
 	old_mask = idtcm->extts_mask;
-
-	/* Reject requests with unsupported flags */
-	if (rq->extts.flags & ~(PTP_ENABLE_FEATURE |
-				PTP_RISING_EDGE |
-				PTP_FALLING_EDGE |
-				PTP_STRICT_FLAGS))
-		return -EOPNOTSUPP;
-
-	/* Reject requests to enable time stamping on falling edge */
-	if ((rq->extts.flags & PTP_ENABLE_FEATURE) &&
-	    (rq->extts.flags & PTP_FALLING_EDGE))
-		return -EOPNOTSUPP;
 
 	if (index >= MAX_TOD)
 		return -EINVAL;
@@ -1173,7 +1161,7 @@ static int set_pll_output_mask(struct idtcm *idtcm, u16 addr, u8 val)
 		SET_U16_MSB(idtcm->channel[3].output_mask, val);
 		break;
 	default:
-		err = -EFAULT; /* Bad address */;
+		err = -EFAULT; /* Bad address */
 		break;
 	}
 
@@ -2043,6 +2031,7 @@ static const struct ptp_clock_info idtcm_caps = {
 	.n_per_out	= 12,
 	.n_ext_ts	= MAX_TOD,
 	.n_pins		= MAX_REF_CLK,
+	.supported_extts_flags = PTP_RISING_EDGE | PTP_STRICT_FLAGS,
 	.adjphase	= &idtcm_adjphase,
 	.getmaxphase	= &idtcm_getmaxphase,
 	.adjfine	= &idtcm_adjfine,
@@ -2060,6 +2049,7 @@ static const struct ptp_clock_info idtcm_caps_deprecated = {
 	.n_per_out	= 12,
 	.n_ext_ts	= MAX_TOD,
 	.n_pins		= MAX_REF_CLK,
+	.supported_extts_flags = PTP_RISING_EDGE | PTP_STRICT_FLAGS,
 	.adjphase	= &idtcm_adjphase,
 	.getmaxphase    = &idtcm_getmaxphase,
 	.adjfine	= &idtcm_adjfine,
@@ -2457,15 +2447,13 @@ static int idtcm_probe(struct platform_device *pdev)
 	return 0;
 }
 
-static int idtcm_remove(struct platform_device *pdev)
+static void idtcm_remove(struct platform_device *pdev)
 {
 	struct idtcm *idtcm = platform_get_drvdata(pdev);
 
 	idtcm->extts_mask = 0;
 	ptp_clock_unregister_all(idtcm);
 	cancel_delayed_work_sync(&idtcm->extts_work);
-
-	return 0;
 }
 
 static struct platform_driver idtcm_driver = {
@@ -2473,7 +2461,7 @@ static struct platform_driver idtcm_driver = {
 		.name = "8a3400x-phc",
 	},
 	.probe = idtcm_probe,
-	.remove	= idtcm_remove,
+	.remove = idtcm_remove,
 };
 
 module_platform_driver(idtcm_driver);

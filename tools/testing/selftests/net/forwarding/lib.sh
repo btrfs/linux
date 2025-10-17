@@ -2,67 +2,133 @@
 # SPDX-License-Identifier: GPL-2.0
 
 ##############################################################################
+# Topology description. p1 looped back to p2, p3 to p4 and so on.
+
+declare -A NETIFS=(
+    [p1]=veth0
+    [p2]=veth1
+    [p3]=veth2
+    [p4]=veth3
+    [p5]=veth4
+    [p6]=veth5
+    [p7]=veth6
+    [p8]=veth7
+    [p9]=veth8
+    [p10]=veth9
+)
+
+# Port that does not have a cable connected.
+: "${NETIF_NO_CABLE:=eth8}"
+
+##############################################################################
 # Defines
 
-# Can be overridden by the configuration file.
-PING=${PING:=ping}
-PING6=${PING6:=ping6}
-MZ=${MZ:=mausezahn}
-ARPING=${ARPING:=arping}
-TEAMD=${TEAMD:=teamd}
-WAIT_TIME=${WAIT_TIME:=5}
-PAUSE_ON_FAIL=${PAUSE_ON_FAIL:=no}
-PAUSE_ON_CLEANUP=${PAUSE_ON_CLEANUP:=no}
-NETIF_TYPE=${NETIF_TYPE:=veth}
-NETIF_CREATE=${NETIF_CREATE:=yes}
-MCD=${MCD:=smcrouted}
-MC_CLI=${MC_CLI:=smcroutectl}
-PING_COUNT=${PING_COUNT:=10}
-PING_TIMEOUT=${PING_TIMEOUT:=5}
-WAIT_TIMEOUT=${WAIT_TIMEOUT:=20}
-INTERFACE_TIMEOUT=${INTERFACE_TIMEOUT:=600}
-LOW_AGEING_TIME=${LOW_AGEING_TIME:=1000}
-REQUIRE_JQ=${REQUIRE_JQ:=yes}
-REQUIRE_MZ=${REQUIRE_MZ:=yes}
-REQUIRE_MTOOLS=${REQUIRE_MTOOLS:=no}
-STABLE_MAC_ADDRS=${STABLE_MAC_ADDRS:=no}
-TCPDUMP_EXTRA_FLAGS=${TCPDUMP_EXTRA_FLAGS:=}
-TROUTE6=${TROUTE6:=traceroute6}
+# Networking utilities.
+: "${PING:=ping}"
+: "${PING6:=ping6}"	# Some distros just use ping.
+: "${ARPING:=arping}"
+: "${TROUTE6:=traceroute6}"
 
-relative_path="${BASH_SOURCE%/*}"
-if [[ "$relative_path" == "${BASH_SOURCE}" ]]; then
-	relative_path="."
-fi
+# Packet generator.
+: "${MZ:=mausezahn}"	# Some distributions use 'mz'.
+: "${MZ_DELAY:=0}"
 
-if [[ -f $relative_path/forwarding.config ]]; then
-	source "$relative_path/forwarding.config"
-fi
+# Host configuration tools.
+: "${TEAMD:=teamd}"
+: "${MCD:=smcrouted}"
+: "${MC_CLI:=smcroutectl}"
+: "${MCD_TABLE_NAME:=selftests}"
 
-# Kselftest framework requirement - SKIP code is 4.
-ksft_skip=4
+# Constants for netdevice bring-up:
+# Default time in seconds to wait for an interface to come up before giving up
+# and bailing out. Used during initial setup.
+: "${INTERFACE_TIMEOUT:=600}"
+# Like INTERFACE_TIMEOUT, but default for ad-hoc waiting in testing scripts.
+: "${WAIT_TIMEOUT:=20}"
+# Time to wait after interfaces participating in the test are all UP.
+: "${WAIT_TIME:=5}"
 
-busywait()
+# Whether to pause on, respectively, after a failure and before cleanup.
+: "${PAUSE_ON_CLEANUP:=no}"
+
+# Whether to create virtual interfaces, and what netdevice type they should be.
+: "${NETIF_CREATE:=yes}"
+: "${NETIF_TYPE:=veth}"
+
+# Constants for ping tests:
+# How many packets should be sent.
+: "${PING_COUNT:=10}"
+# Timeout (in seconds) before ping exits regardless of how many packets have
+# been sent or received
+: "${PING_TIMEOUT:=5}"
+
+# Minimum ageing_time (in centiseconds) supported by hardware
+: "${LOW_AGEING_TIME:=1000}"
+
+# Whether to check for availability of certain tools.
+: "${REQUIRE_JQ:=yes}"
+: "${REQUIRE_MZ:=yes}"
+: "${REQUIRE_MTOOLS:=no}"
+: "${REQUIRE_TEAMD:=no}"
+
+# Whether to override MAC addresses on interfaces participating in the test.
+: "${STABLE_MAC_ADDRS:=no}"
+
+# Flags for tcpdump
+: "${TCPDUMP_EXTRA_FLAGS:=}"
+
+# Flags for TC filters.
+: "${TC_FLAG:=skip_hw}"
+
+# Whether the machine is "slow" -- i.e. might be incapable of running tests
+# involving heavy traffic. This might be the case on a debug kernel, a VM, or
+# e.g. a low-power board.
+: "${KSFT_MACHINE_SLOW:=no}"
+
+##############################################################################
+# Find netifs by test-specified driver name
+
+driver_name_get()
 {
-	local timeout=$1; shift
+	local dev=$1; shift
+	local driver_path="/sys/class/net/$dev/device/driver"
 
-	local start_time="$(date -u +%s%3N)"
-	while true
+	if [[ -L $driver_path ]]; then
+		basename `realpath $driver_path`
+	fi
+}
+
+netif_find_driver()
+{
+	local ifnames=`ip -j link show | jq -r ".[].ifname"`
+	local count=0
+
+	for ifname in $ifnames
 	do
-		local out
-		out=$("$@")
-		local ret=$?
-		if ((!ret)); then
-			echo -n "$out"
-			return 0
-		fi
-
-		local current_time="$(date -u +%s%3N)"
-		if ((current_time - start_time > timeout)); then
-			echo -n "$out"
-			return 1
+		local driver_name=`driver_name_get $ifname`
+		if [[ ! -z $driver_name && $driver_name == $NETIF_FIND_DRIVER ]]; then
+			count=$((count + 1))
+			NETIFS[p$count]="$ifname"
 		fi
 	done
 }
+
+# Whether to find netdevice according to the driver speficied by the importer
+: "${NETIF_FIND_DRIVER:=}"
+
+if [[ $NETIF_FIND_DRIVER ]]; then
+	unset NETIFS
+	declare -A NETIFS
+	netif_find_driver
+fi
+
+net_forwarding_dir=$(dirname "$(readlink -e "${BASH_SOURCE[0]}")")
+
+if [[ -f $net_forwarding_dir/forwarding.config ]]; then
+	source "$net_forwarding_dir/forwarding.config"
+fi
+
+source "$net_forwarding_dir/../lib.sh"
 
 ##############################################################################
 # Sanity checks
@@ -74,6 +140,20 @@ check_tc_version()
 		echo "SKIP: iproute2 too old; tc is missing JSON support"
 		exit $ksft_skip
 	fi
+}
+
+check_tc_erspan_support()
+{
+	local dev=$1; shift
+
+	tc filter add dev $dev ingress pref 1 handle 1 flower \
+		erspan_opts 1:0:0:0 &> /dev/null
+	if [[ $? -ne 0 ]]; then
+		echo "SKIP: iproute2 too old; tc is missing erspan support"
+		return $ksft_skip
+	fi
+	tc filter del dev $dev ingress pref 1 handle 1 flower \
+		erspan_opts 1:0:0:0 &> /dev/null
 }
 
 # Old versions of tc don't understand "mpls_uc"
@@ -205,32 +285,38 @@ check_port_mab_support()
 	fi
 }
 
-skip_on_veth()
-{
-	local kind=$(ip -j -d link show dev ${NETIFS[p1]} |
-		jq -r '.[].linkinfo.info_kind')
-
-	if [[ $kind == veth ]]; then
-		echo "SKIP: Test cannot be run with veth pairs"
-		exit $ksft_skip
-	fi
-}
-
 if [[ "$(id -u)" -ne 0 ]]; then
 	echo "SKIP: need root privileges"
 	exit $ksft_skip
 fi
 
+check_driver()
+{
+	local dev=$1; shift
+	local expected=$1; shift
+	local driver_name=`driver_name_get $dev`
+
+	if [[ $driver_name != $expected ]]; then
+		echo "SKIP: expected driver $expected for $dev, got $driver_name instead"
+		exit $ksft_skip
+	fi
+}
+
 if [[ "$CHECK_TC" = "yes" ]]; then
 	check_tc_version
 fi
 
-require_command()
+# IPv6 support was added in v3.0
+check_mtools_version()
 {
-	local cmd=$1; shift
+	local version="$(msend -v)"
+	local major
 
-	if [[ ! -x "$(command -v "$cmd")" ]]; then
-		echo "SKIP: $cmd not installed"
+	version=${version##msend version }
+	major=$(echo $version | cut -d. -f1)
+
+	if [ $major -lt 3 ]; then
+		echo "SKIP: expected mtools version 3.0, got $version"
 		exit $ksft_skip
 	fi
 }
@@ -241,16 +327,14 @@ fi
 if [[ "$REQUIRE_MZ" = "yes" ]]; then
 	require_command $MZ
 fi
+if [[ "$REQUIRE_TEAMD" = "yes" ]]; then
+	require_command $TEAMD
+fi
 if [[ "$REQUIRE_MTOOLS" = "yes" ]]; then
-	# https://github.com/vladimiroltean/mtools/
-	# patched for IPv6 support
+	# https://github.com/troglobit/mtools
 	require_command msend
 	require_command mreceive
-fi
-
-if [[ ! -v NUM_NETIFS ]]; then
-	echo "SKIP: importer does not define \"NUM_NETIFS\""
-	exit $ksft_skip
+	check_mtools_version
 fi
 
 ##############################################################################
@@ -270,6 +354,23 @@ done
 
 ##############################################################################
 # Network interfaces configuration
+
+if [[ ! -v NUM_NETIFS ]]; then
+	echo "SKIP: importer does not define \"NUM_NETIFS\""
+	exit $ksft_skip
+fi
+
+if (( NUM_NETIFS > ${#NETIFS[@]} )); then
+	echo "SKIP: Importer requires $NUM_NETIFS NETIFS, but only ${#NETIFS[@]} are defined (${NETIFS[@]})"
+	exit $ksft_skip
+fi
+
+for i in $(seq ${#NETIFS[@]}); do
+	if [[ ! ${NETIFS[p$i]} ]]; then
+		echo "SKIP: NETIFS[p$i] not given"
+		exit $ksft_skip
+	fi
+done
 
 create_netif_veth()
 {
@@ -353,89 +454,6 @@ done
 ##############################################################################
 # Helpers
 
-# Exit status to return at the end. Set in case one of the tests fails.
-EXIT_STATUS=0
-# Per-test return value. Clear at the beginning of each test.
-RET=0
-
-check_err()
-{
-	local err=$1
-	local msg=$2
-
-	if [[ $RET -eq 0 && $err -ne 0 ]]; then
-		RET=$err
-		retmsg=$msg
-	fi
-}
-
-check_fail()
-{
-	local err=$1
-	local msg=$2
-
-	if [[ $RET -eq 0 && $err -eq 0 ]]; then
-		RET=1
-		retmsg=$msg
-	fi
-}
-
-check_err_fail()
-{
-	local should_fail=$1; shift
-	local err=$1; shift
-	local what=$1; shift
-
-	if ((should_fail)); then
-		check_fail $err "$what succeeded, but should have failed"
-	else
-		check_err $err "$what failed"
-	fi
-}
-
-log_test()
-{
-	local test_name=$1
-	local opt_str=$2
-
-	if [[ $# -eq 2 ]]; then
-		opt_str="($opt_str)"
-	fi
-
-	if [[ $RET -ne 0 ]]; then
-		EXIT_STATUS=1
-		printf "TEST: %-60s  [FAIL]\n" "$test_name $opt_str"
-		if [[ ! -z "$retmsg" ]]; then
-			printf "\t%s\n" "$retmsg"
-		fi
-		if [ "${PAUSE_ON_FAIL}" = "yes" ]; then
-			echo "Hit enter to continue, 'q' to quit"
-			read a
-			[ "$a" = "q" ] && exit 1
-		fi
-		return 1
-	fi
-
-	printf "TEST: %-60s  [ OK ]\n" "$test_name $opt_str"
-	return 0
-}
-
-log_test_skip()
-{
-	local test_name=$1
-	local opt_str=$2
-
-	printf "TEST: %-60s  [SKIP]\n" "$test_name $opt_str"
-	return 0
-}
-
-log_info()
-{
-	local msg=$1
-
-	echo "INFO: $msg"
-}
-
 not()
 {
 	"$@"
@@ -487,24 +505,6 @@ wait_for_trap()
 	"$@" | grep -q trap
 }
 
-until_counter_is()
-{
-	local expr=$1; shift
-	local current=$("$@")
-
-	echo $((current))
-	((current $expr))
-}
-
-busywait_for_counter()
-{
-	local timeout=$1; shift
-	local delta=$1; shift
-
-	local base=$("$@")
-	busywait "$timeout" until_counter_is ">= $((base + delta))" "$@"
-}
-
 setup_wait_dev()
 {
 	local dev=$1; shift
@@ -540,9 +540,9 @@ setup_wait_dev_with_timeout()
 	return 1
 }
 
-setup_wait()
+setup_wait_n()
 {
-	local num_netifs=${1:-$NUM_NETIFS}
+	local num_netifs=$1; shift
 	local i
 
 	for ((i = 1; i <= num_netifs; ++i)); do
@@ -553,28 +553,22 @@ setup_wait()
 	sleep $WAIT_TIME
 }
 
-cmd_jq()
+setup_wait()
 {
-	local cmd=$1
-	local jq_exp=$2
-	local jq_opts=$3
-	local ret
-	local output
+	setup_wait_n "$NUM_NETIFS"
+}
 
-	output="$($cmd)"
-	# it the command fails, return error right away
-	ret=$?
-	if [[ $ret -ne 0 ]]; then
-		return $ret
-	fi
-	output=$(echo $output | jq -r $jq_opts "$jq_exp")
-	ret=$?
-	if [[ $ret -ne 0 ]]; then
-		return $ret
-	fi
-	echo $output
-	# return success only in case of non-empty output
-	[ ! -z "$output" ]
+wait_for_dev()
+{
+        local dev=$1; shift
+        local timeout=${1:-$WAIT_TIMEOUT}; shift
+
+        slowwait $timeout ip link show dev $dev &> /dev/null
+        if (( $? )); then
+                check_err 1
+                log_test wait_for_dev "Interface $dev did not appear."
+                exit $EXIT_STATUS
+        fi
 }
 
 pre_cleanup()
@@ -603,6 +597,12 @@ vrf_cleanup()
 	ip -6 rule del pref 32765
 	ip -4 rule add pref 0 table local
 	ip -4 rule del pref 32765
+}
+
+adf_vrf_prepare()
+{
+	vrf_prepare
+	defer vrf_cleanup
 }
 
 __last_tb_id=0
@@ -717,6 +717,12 @@ simple_if_fini()
 	vrf_destroy $vrf_name
 }
 
+adf_simple_if_init()
+{
+	simple_if_init "$@"
+	defer simple_if_fini "$@"
+}
+
 tunnel_create()
 {
 	local name=$1; shift
@@ -810,29 +816,6 @@ link_stats_rx_errors_get()
 	link_stats_get $1 rx errors
 }
 
-tc_rule_stats_get()
-{
-	local dev=$1; shift
-	local pref=$1; shift
-	local dir=$1; shift
-	local selector=${1:-.packets}; shift
-
-	tc -j -s filter show dev $dev ${dir:-ingress} pref $pref \
-	    | jq ".[1].options.actions[].stats$selector"
-}
-
-tc_rule_handle_stats_get()
-{
-	local id=$1; shift
-	local handle=$1; shift
-	local selector=${1:-.packets}; shift
-	local netns=${1:-""}; shift
-
-	tc $netns -j -s filter show $id \
-	    | jq ".[] | select(.options.handle == $handle) | \
-		  .options.actions[0].stats$selector"
-}
-
 ethtool_stats_get()
 {
 	local dev=$1; shift
@@ -891,6 +874,33 @@ hw_stats_get()
 		jq ".[0].stats64.$dir.$stat"
 }
 
+__nh_stats_get()
+{
+	local key=$1; shift
+	local group_id=$1; shift
+	local member_id=$1; shift
+
+	ip -j -s -s nexthop show id $group_id |
+	    jq --argjson member_id "$member_id" --arg key "$key" \
+	       '.[].group_stats[] | select(.id == $member_id) | .[$key]'
+}
+
+nh_stats_get()
+{
+	local group_id=$1; shift
+	local member_id=$1; shift
+
+	__nh_stats_get packets "$group_id" "$member_id"
+}
+
+nh_stats_get_hw()
+{
+	local group_id=$1; shift
+	local member_id=$1; shift
+
+	__nh_stats_get packets_hw "$group_id" "$member_id"
+}
+
 humanize()
 {
 	local speed=$1; shift
@@ -924,11 +934,37 @@ packets_rate()
 	echo $(((t1 - t0) / interval))
 }
 
-mac_get()
+ether_addr_to_u64()
 {
-	local if_name=$1
+	local addr="$1"
+	local order="$((1 << 40))"
+	local val=0
+	local byte
 
-	ip -j link show dev $if_name | jq -r '.[]["address"]'
+	addr="${addr//:/ }"
+
+	for byte in $addr; do
+		byte="0x$byte"
+		val=$((val + order * byte))
+		order=$((order >> 8))
+	done
+
+	printf "0x%x" $val
+}
+
+u64_to_ether_addr()
+{
+	local val=$1
+	local byte
+	local i
+
+	for ((i = 40; i >= 0; i -= 8)); do
+		byte=$(((val & (0xff << i)) >> i))
+		printf "%02x" $byte
+		if [ $i -ne 0 ]; then
+			printf ":"
+		fi
+	done
 }
 
 ipv6_lladdr_get()
@@ -952,12 +988,19 @@ bridge_ageing_time_get()
 }
 
 declare -A SYSCTL_ORIG
+sysctl_save()
+{
+	local key=$1; shift
+
+	SYSCTL_ORIG[$key]=$(sysctl -n $key)
+}
+
 sysctl_set()
 {
 	local key=$1; shift
 	local value=$1; shift
 
-	SYSCTL_ORIG[$key]=$(sysctl -n $key)
+	sysctl_save "$key"
 	sysctl -qw $key="$value"
 }
 
@@ -978,6 +1021,12 @@ forwarding_restore()
 {
 	sysctl_restore net.ipv6.conf.all.forwarding
 	sysctl_restore net.ipv4.conf.all.forwarding
+}
+
+adf_forwarding_enable()
+{
+	forwarding_enable
+	defer forwarding_restore
 }
 
 declare -A MTU_ORIG
@@ -1036,22 +1085,6 @@ trap_uninstall()
 	tc filter del dev $dev $direction pref 1 flower
 }
 
-slow_path_trap_install()
-{
-	# For slow-path testing, we need to install a trap to get to
-	# slow path the packets that would otherwise be switched in HW.
-	if [ "${tcflags/skip_hw}" != "$tcflags" ]; then
-		trap_install "$@"
-	fi
-}
-
-slow_path_trap_uninstall()
-{
-	if [ "${tcflags/skip_hw}" != "$tcflags" ]; then
-		trap_uninstall "$@"
-	fi
-}
-
 __icmp_capture_add_del()
 {
 	local add_del=$1; shift
@@ -1068,22 +1101,34 @@ __icmp_capture_add_del()
 
 icmp_capture_install()
 {
-	__icmp_capture_add_del add 100 "" "$@"
+	local tundev=$1; shift
+	local filter=$1; shift
+
+	__icmp_capture_add_del add 100 "" "$tundev" "$filter"
 }
 
 icmp_capture_uninstall()
 {
-	__icmp_capture_add_del del 100 "" "$@"
+	local tundev=$1; shift
+	local filter=$1; shift
+
+	__icmp_capture_add_del del 100 "" "$tundev" "$filter"
 }
 
 icmp6_capture_install()
 {
-	__icmp_capture_add_del add 100 v6 "$@"
+	local tundev=$1; shift
+	local filter=$1; shift
+
+	__icmp_capture_add_del add 100 v6 "$tundev" "$filter"
 }
 
 icmp6_capture_uninstall()
 {
-	__icmp_capture_add_del del 100 v6 "$@"
+	local tundev=$1; shift
+	local filter=$1; shift
+
+	__icmp_capture_add_del del 100 v6 "$tundev" "$filter"
 }
 
 __vlan_capture_add_del()
@@ -1101,12 +1146,18 @@ __vlan_capture_add_del()
 
 vlan_capture_install()
 {
-	__vlan_capture_add_del add 100 "$@"
+	local dev=$1; shift
+	local filter=$1; shift
+
+	__vlan_capture_add_del add 100 "$dev" "$filter"
 }
 
 vlan_capture_uninstall()
 {
-	__vlan_capture_add_del del 100 "$@"
+	local dev=$1; shift
+	local filter=$1; shift
+
+	__vlan_capture_add_del del 100 "$dev" "$filter"
 }
 
 __dscp_capture_add_del()
@@ -1162,13 +1213,10 @@ matchall_sink_create()
 	   action drop
 }
 
-tests_run()
+cleanup()
 {
-	local current_test
-
-	for current_test in ${TESTS:-$ALL_TESTS}; do
-		$current_test
-	done
+	pre_cleanup
+	defer_scopes_cleanup
 }
 
 multipath_eval()
@@ -1237,8 +1285,8 @@ ping_do()
 
 	vrf_name=$(master_name_get $if_name)
 	ip vrf exec $vrf_name \
-		$PING $args $dip -c $PING_COUNT -i 0.1 \
-		-w $PING_TIMEOUT &> /dev/null
+		$PING $args -c $PING_COUNT -i 0.1 \
+		-w $PING_TIMEOUT $dip &> /dev/null
 }
 
 ping_test()
@@ -1268,8 +1316,8 @@ ping6_do()
 
 	vrf_name=$(master_name_get $if_name)
 	ip vrf exec $vrf_name \
-		$PING6 $args $dip -c $PING_COUNT -i 0.1 \
-		-w $PING_TIMEOUT &> /dev/null
+		$PING6 $args -c $PING_COUNT -i 0.1 \
+		-w $PING_TIMEOUT $dip &> /dev/null
 }
 
 ping6_test()
@@ -1466,40 +1514,68 @@ __start_traffic()
 	local sip=$1; shift
 	local dip=$1; shift
 	local dmac=$1; shift
+	local -a mz_args=("$@")
 
 	$MZ $h_in -p $pktsize -A $sip -B $dip -c 0 \
-		-a own -b $dmac -t "$proto" -q "$@" &
+		-a own -b $dmac -t "$proto" -q "${mz_args[@]}" &
 	sleep 1
 }
 
 start_traffic_pktsize()
 {
 	local pktsize=$1; shift
+	local h_in=$1; shift
+	local sip=$1; shift
+	local dip=$1; shift
+	local dmac=$1; shift
+	local -a mz_args=("$@")
 
-	__start_traffic $pktsize udp "$@"
+	__start_traffic $pktsize udp "$h_in" "$sip" "$dip" "$dmac" \
+			"${mz_args[@]}"
 }
 
 start_tcp_traffic_pktsize()
 {
 	local pktsize=$1; shift
+	local h_in=$1; shift
+	local sip=$1; shift
+	local dip=$1; shift
+	local dmac=$1; shift
+	local -a mz_args=("$@")
 
-	__start_traffic $pktsize tcp "$@"
+	__start_traffic $pktsize tcp "$h_in" "$sip" "$dip" "$dmac" \
+			"${mz_args[@]}"
 }
 
 start_traffic()
 {
-	start_traffic_pktsize 8000 "$@"
+	local h_in=$1; shift
+	local sip=$1; shift
+	local dip=$1; shift
+	local dmac=$1; shift
+	local -a mz_args=("$@")
+
+	start_traffic_pktsize 8000 "$h_in" "$sip" "$dip" "$dmac" \
+			      "${mz_args[@]}"
 }
 
 start_tcp_traffic()
 {
-	start_tcp_traffic_pktsize 8000 "$@"
+	local h_in=$1; shift
+	local sip=$1; shift
+	local dip=$1; shift
+	local dmac=$1; shift
+	local -a mz_args=("$@")
+
+	start_tcp_traffic_pktsize 8000 "$h_in" "$sip" "$dip" "$dmac" \
+				  "${mz_args[@]}"
 }
 
 stop_traffic()
 {
-	# Suppress noise from killing mausezahn.
-	{ kill %% && wait %%; } 2>/dev/null
+	local pid=${1-%%}; shift
+
+	kill_process "$pid"
 }
 
 declare -A cappid
@@ -1693,6 +1769,51 @@ mc_send()
 
 	ip vrf exec $vrf_name \
 		msend -g $groups -I $if_name -c 1 > /dev/null 2>&1
+}
+
+adf_mcd_start()
+{
+	local ifs=("$@")
+
+	local table_name="$MCD_TABLE_NAME"
+	local smcroutedir
+	local pid
+	local if
+	local i
+
+	check_command "$MCD" || return 1
+	check_command "$MC_CLI" || return 1
+
+	smcroutedir=$(mktemp -d)
+	defer rm -rf "$smcroutedir"
+
+	for ((i = 1; i <= NUM_NETIFS; ++i)); do
+		echo "phyint ${NETIFS[p$i]} enable" >> \
+			"$smcroutedir/$table_name.conf"
+	done
+
+	for if in "${ifs[@]}"; do
+		if ! ip_link_has_flag "$if" MULTICAST; then
+			ip link set dev "$if" multicast on
+			defer ip link set dev "$if" multicast off
+		fi
+
+		echo "phyint $if enable" >> \
+			"$smcroutedir/$table_name.conf"
+	done
+
+	"$MCD" -N -I "$table_name" -f "$smcroutedir/$table_name.conf" \
+		-P "$smcroutedir/$table_name.pid"
+	busywait "$BUSYWAIT_TIMEOUT" test -e "$smcroutedir/$table_name.pid"
+	pid=$(cat "$smcroutedir/$table_name.pid")
+	defer kill_process "$pid"
+}
+
+mc_cli()
+{
+	local table_name="$MCD_TABLE_NAME"
+
+        "$MC_CLI" -I "$table_name" "$@"
 }
 
 start_ip_monitor()
@@ -1975,6 +2096,8 @@ bail_on_lldpad()
 {
 	local reason1="$1"; shift
 	local reason2="$1"; shift
+	local caller=${FUNCNAME[1]}
+	local src=${BASH_SOURCE[1]}
 
 	if systemctl is-active --quiet lldpad; then
 
@@ -1995,9 +2118,36 @@ bail_on_lldpad()
 				an environment variable ALLOW_LLDPAD to a
 				non-empty string.
 			EOF
-			exit 1
+			log_test_skip $src:$caller
+			exit $EXIT_STATUS
 		else
 			return
 		fi
 	fi
+}
+
+absval()
+{
+	local v=$1; shift
+
+	echo $((v > 0 ? v : -v))
+}
+
+has_unicast_flt()
+{
+	local dev=$1; shift
+	local mac_addr=$(mac_get $dev)
+	local tmp=$(ether_addr_to_u64 $mac_addr)
+	local promisc
+
+	ip link set $dev up
+	ip link add link $dev name macvlan-tmp type macvlan mode private
+	ip link set macvlan-tmp address $(u64_to_ether_addr $((tmp + 1)))
+	ip link set macvlan-tmp up
+
+	promisc=$(ip -j -d link show dev $dev | jq -r '.[].promiscuity')
+
+	ip link del macvlan-tmp
+
+	[[ $promisc == 1 ]] && echo "no" || echo "yes"
 }

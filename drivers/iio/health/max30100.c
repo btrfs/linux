@@ -22,7 +22,6 @@
 #include <linux/iio/buffer.h>
 #include <linux/iio/kfifo_buf.h>
 
-#define MAX30100_REGMAP_NAME	"max30100_regmap"
 #define MAX30100_DRV_NAME	"max30100"
 
 #define MAX30100_REG_INT_STATUS			0x00
@@ -94,7 +93,7 @@ static bool max30100_is_volatile_reg(struct device *dev, unsigned int reg)
 }
 
 static const struct regmap_config max30100_regmap_config = {
-	.name = MAX30100_REGMAP_NAME,
+	.name = "max30100_regmap",
 
 	.reg_bits = 8,
 	.val_bits = 8,
@@ -363,9 +362,8 @@ static int max30100_get_temp(struct max30100_data *data, int *val)
 	int ret;
 
 	/* start acquisition */
-	ret = regmap_update_bits(data->regmap, MAX30100_REG_MODE_CONFIG,
-				 MAX30100_REG_MODE_CONFIG_TEMP_EN,
-				 MAX30100_REG_MODE_CONFIG_TEMP_EN);
+	ret = regmap_set_bits(data->regmap, MAX30100_REG_MODE_CONFIG,
+			      MAX30100_REG_MODE_CONFIG_TEMP_EN);
 	if (ret)
 		return ret;
 
@@ -483,8 +481,8 @@ static void max30100_remove(struct i2c_client *client)
 }
 
 static const struct i2c_device_id max30100_id[] = {
-	{ "max30100", 0 },
-	{}
+	{ "max30100" },
+	{ }
 };
 MODULE_DEVICE_TABLE(i2c, max30100_id);
 

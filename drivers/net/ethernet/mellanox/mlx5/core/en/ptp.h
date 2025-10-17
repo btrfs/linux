@@ -66,6 +66,7 @@ struct mlx5e_ptp {
 	struct mlx5_core_dev      *mdev;
 	struct hwtstamp_config    *tstamp;
 	DECLARE_BITMAP(state, MLX5E_PTP_STATE_NUM_STATES);
+	struct mlx5_sq_bfreg      *bfreg;
 };
 
 static inline bool mlx5e_use_ptpsq(struct sk_buff *skb)
@@ -95,9 +96,15 @@ static inline void mlx5e_ptp_metadata_fifo_push(struct mlx5e_ptp_metadata_fifo *
 }
 
 static inline u8
+mlx5e_ptp_metadata_fifo_peek(struct mlx5e_ptp_metadata_fifo *fifo)
+{
+	return fifo->data[fifo->mask & fifo->cc];
+}
+
+static inline void
 mlx5e_ptp_metadata_fifo_pop(struct mlx5e_ptp_metadata_fifo *fifo)
 {
-	return fifo->data[fifo->mask & fifo->cc++];
+	fifo->cc++;
 }
 
 static inline void

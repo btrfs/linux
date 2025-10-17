@@ -136,7 +136,7 @@ static int i40e_dcbnl_ieee_setets(struct net_device *netdev,
 		dev_info(&pf->pdev->dev,
 			 "Failed setting DCB ETS configuration err %pe aq_err %s\n",
 			 ERR_PTR(ret),
-			 i40e_aq_str(&pf->hw, pf->hw.aq.asq_last_status));
+			 libie_aq_str(pf->hw.aq.asq_last_status));
 		return -EINVAL;
 	}
 
@@ -175,7 +175,7 @@ static int i40e_dcbnl_ieee_setpfc(struct net_device *netdev,
 		dev_info(&pf->pdev->dev,
 			 "Failed setting DCB PFC configuration err %pe aq_err %s\n",
 			 ERR_PTR(ret),
-			 i40e_aq_str(&pf->hw, pf->hw.aq.asq_last_status));
+			 libie_aq_str(pf->hw.aq.asq_last_status));
 		return -EINVAL;
 	}
 
@@ -226,7 +226,7 @@ static int i40e_dcbnl_ieee_setapp(struct net_device *netdev,
 		dev_info(&pf->pdev->dev,
 			 "Failed setting DCB configuration err %pe aq_err %s\n",
 			 ERR_PTR(ret),
-			 i40e_aq_str(&pf->hw, pf->hw.aq.asq_last_status));
+			 libie_aq_str(pf->hw.aq.asq_last_status));
 		return -EINVAL;
 	}
 
@@ -291,7 +291,7 @@ static int i40e_dcbnl_ieee_delapp(struct net_device *netdev,
 		dev_info(&pf->pdev->dev,
 			 "Failed setting DCB configuration err %pe aq_err %s\n",
 			 ERR_PTR(ret),
-			 i40e_aq_str(&pf->hw, pf->hw.aq.asq_last_status));
+			 libie_aq_str(pf->hw.aq.asq_last_status));
 		return -EINVAL;
 	}
 
@@ -947,16 +947,16 @@ static int i40e_dcbnl_vsi_del_app(struct i40e_vsi *vsi,
 static void i40e_dcbnl_del_app(struct i40e_pf *pf,
 			       struct i40e_dcb_app_priority_table *app)
 {
+	struct i40e_vsi *vsi;
 	int v, err;
 
-	for (v = 0; v < pf->num_alloc_vsi; v++) {
-		if (pf->vsi[v] && pf->vsi[v]->netdev) {
-			err = i40e_dcbnl_vsi_del_app(pf->vsi[v], app);
+	i40e_pf_for_each_vsi(pf, v, vsi)
+		if (vsi->netdev) {
+			err = i40e_dcbnl_vsi_del_app(vsi, app);
 			dev_dbg(&pf->pdev->dev, "Deleting app for VSI seid=%d err=%d sel=%d proto=0x%x prio=%d\n",
-				pf->vsi[v]->seid, err, app->selector,
+				vsi->seid, err, app->selector,
 				app->protocolid, app->priority);
 		}
-	}
 }
 
 /**

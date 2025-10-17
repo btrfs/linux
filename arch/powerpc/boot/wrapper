@@ -226,18 +226,12 @@ ld_is_lld()
 
 # Do not include PT_INTERP segment when linking pie. Non-pie linking
 # just ignores this option.
-LD_VERSION=$(${CROSS}ld --version | ld_version)
-LD_NO_DL_MIN_VERSION=$(echo 2.26 | ld_version)
-if [ "$LD_VERSION" -ge "$LD_NO_DL_MIN_VERSION" ] ; then
-	nodl="--no-dynamic-linker"
-fi
+nodl="--no-dynamic-linker"
 
 # suppress some warnings in recent ld versions
 nowarn="-z noexecstack"
-if ! ld_is_lld; then
-	if [ "$LD_VERSION" -ge "$(echo 2.39 | ld_version)" ]; then
-		nowarn="$nowarn --no-warn-rwx-segments"
-	fi
+if "${CROSS}ld" -v --no-warn-rwx-segments >/dev/null 2>&1; then
+	nowarn="$nowarn --no-warn-rwx-segments"
 fi
 
 platformo=$object/"$platform".o
@@ -269,11 +263,6 @@ pseries)
 	link_address=
 	pie=-pie
     fi
-    make_space=n
-    ;;
-maple)
-    platformo="$object/of.o $object/epapr.o"
-    link_address='0x400000'
     make_space=n
     ;;
 pmac|chrp)
@@ -337,7 +326,7 @@ ps3)
     make_space=n
     pie=
     ;;
-ep88xc|ep405|ep8248e)
+ep88xc|ep8248e)
     platformo="$object/fixed-head.o $object/$platform.o"
     binary=y
     ;;
@@ -468,26 +457,6 @@ uboot)
     fi
     exit 0
     ;;
-uboot-obs600)
-    rm -f "$ofile"
-    # obs600 wants a multi image with an initrd, so we need to put a fake
-    # one in even when building a "normal" image.
-    if [ -n "$initrd" ]; then
-	real_rd="$initrd"
-    else
-	real_rd=`mktemp`
-	echo "\0" >>"$real_rd"
-    fi
-    ${MKIMAGE} -A ppc -O linux -T multi -C gzip -a $membase -e $membase \
-	$uboot_version -d "$vmz":"$real_rd":"$dtb" "$ofile"
-    if [ -z "$initrd" ]; then
-	rm -f "$real_rd"
-    fi
-    if [ -z "$cacheit" ]; then
-	rm -f "$vmz"
-    fi
-    exit 0
-    ;;
 esac
 
 addsec() {
@@ -537,7 +506,7 @@ fi
 
 # post-processing needed for some platforms
 case "$platform" in
-pseries|chrp|maple)
+pseries|chrp)
     $objbin/addnote "$ofile"
     ;;
 coff)

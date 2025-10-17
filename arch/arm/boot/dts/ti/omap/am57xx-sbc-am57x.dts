@@ -2,7 +2,7 @@
 /*
  * Support for CompuLab SBC-AM57x single board computer
  *
- * Copyright (C) 2015 CompuLab Ltd. - http://www.compulab.co.il/
+ * Copyright (C) 2015 CompuLab Ltd. - https://www.compulab.co.il/
  * Author: Dmitry Lifshitz <lifshitz@compulab.co.il>
  */
 
@@ -105,7 +105,7 @@
 	pinctrl-0 = <&i2c5_pins_default>;
 	clock-frequency = <400000>;
 
-	eeprom_base: atmel@54 {
+	eeprom_base: eeprom@54 {
 		compatible = "atmel,24c08";
 		reg = <0x54>;
 		pagesize = <16>;

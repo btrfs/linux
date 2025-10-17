@@ -9,6 +9,7 @@
 #ifndef TB_H_
 #define TB_H_
 
+#include <linux/debugfs.h>
 #include <linux/nvmem-provider.h>
 #include <linux/pci.h>
 #include <linux/thunderbolt.h>
@@ -23,6 +24,8 @@
 #define QUIRK_FORCE_POWER_LINK_CONTROLLER		BIT(0)
 /* Disable CLx if not supported */
 #define QUIRK_NO_CLX					BIT(1)
+/* Need to keep power on while USB4 port is in redrive mode */
+#define QUIRK_KEEP_POWER_IN_DP_REDRIVE			BIT(2)
 
 /**
  * struct tb_nvm - Structure holding NVM information
@@ -158,6 +161,7 @@ struct tb_switch_tmu {
  * @max_pcie_credits: Router preferred number of buffers for PCIe
  * @max_dma_credits: Router preferred number of buffers for DMA/P2P
  * @clx: CLx states on the upstream link of the router
+ * @drom_blob: DROM debugfs blob wrapper
  *
  * When the switch is being added or removed to the domain (other
  * switches) you need to have domain lock held.
@@ -210,6 +214,9 @@ struct tb_switch {
 	unsigned int max_pcie_credits;
 	unsigned int max_dma_credits;
 	unsigned int clx;
+#ifdef CONFIG_DEBUG_FS
+	struct debugfs_blob_wrapper drom_blob;
+#endif
 };
 
 /**
@@ -217,6 +224,11 @@ struct tb_switch {
  * @tb: Pointer to the domain the group belongs to
  * @index: Index of the group (aka Group_ID). Valid values %1-%7
  * @ports: DP IN adapters belonging to this group are linked here
+ * @reserved: Bandwidth released by one tunnel in the group, available
+ *	      to others. This is reported as part of estimated_bw for
+ *	      the group.
+ * @release_work: Worker to release the @reserved if it is not used by
+ *		  any of the tunnels.
  *
  * Any tunnel that requires isochronous bandwidth (that's DP for now) is
  * attached to a bandwidth group. All tunnels going through the same
@@ -227,6 +239,8 @@ struct tb_bandwidth_group {
 	struct tb *tb;
 	int index;
 	struct list_head ports;
+	int reserved;
+	struct delayed_work release_work;
 };
 
 /**
@@ -258,6 +272,7 @@ struct tb_bandwidth_group {
  * @group_list: The adapter is linked to the group's list of ports through this
  * @max_bw: Maximum possible bandwidth through this adapter if set to
  *	    non-zero.
+ * @redrive: For DP IN, if true the adapter is in redrive mode.
  *
  * In USB4 terminology this structure represents an adapter (protocol or
  * lane adapter).
@@ -286,6 +301,7 @@ struct tb_port {
 	struct tb_bandwidth_group *group;
 	struct list_head group_list;
 	unsigned int max_bw;
+	bool redrive;
 };
 
 /**
@@ -308,7 +324,7 @@ struct usb4_port {
 };
 
 /**
- * tb_retimer: Thunderbolt retimer
+ * struct tb_retimer - Thunderbolt retimer
  * @dev: Device for the retimer
  * @tb: Pointer to the domain the retimer belongs to
  * @index: Retimer index facing the router USB4 port
@@ -318,6 +334,7 @@ struct usb4_port {
  * @nvm: Pointer to the NVM if the retimer has one (%NULL otherwise)
  * @no_nvm_upgrade: Prevent NVM upgrade of this retimer
  * @auth_status: Status of last NVM authentication
+ * @margining: Pointer to margining structure if enabled
  */
 struct tb_retimer {
 	struct device dev;
@@ -329,6 +346,9 @@ struct tb_retimer {
 	struct tb_nvm *nvm;
 	bool no_nvm_upgrade;
 	u32 auth_status;
+#ifdef CONFIG_USB4_DEBUGFS_MARGINING
+	struct tb_margining *margining;
+#endif
 };
 
 /**
@@ -452,6 +472,8 @@ struct tb_path {
  *		  ICM to send driver ready message to the firmware.
  * @start: Starts the domain
  * @stop: Stops the domain
+ * @deinit: Perform any cleanup after the domain is stopped but before
+ *	     it is unregistered. Called without @tb->lock taken. Optional.
  * @suspend_noirq: Connection manager specific suspend_noirq
  * @resume_noirq: Connection manager specific resume_noirq
  * @suspend: Connection manager specific suspend
@@ -483,8 +505,9 @@ struct tb_path {
  */
 struct tb_cm_ops {
 	int (*driver_ready)(struct tb *tb);
-	int (*start)(struct tb *tb);
+	int (*start)(struct tb *tb, bool reset);
 	void (*stop)(struct tb *tb);
+	void (*deinit)(struct tb *tb);
 	int (*suspend_noirq)(struct tb *tb);
 	int (*resume_noirq)(struct tb *tb);
 	int (*suspend)(struct tb *tb);
@@ -529,13 +552,14 @@ static inline void *tb_priv(struct tb *tb)
 
 /**
  * tb_upstream_port() - return the upstream port of a switch
+ * @sw: Router
  *
  * Every switch has an upstream port (for the root switch it is the NHI).
  *
  * During switch alloc/init tb_upstream_port()->remote may be NULL, even for
  * non root switches (on the NHI port remote is always NULL).
  *
- * Return: Returns the upstream port of the switch.
+ * Return: Pointer to &struct tb_port.
  */
 static inline struct tb_port *tb_upstream_port(struct tb_switch *sw)
 {
@@ -546,8 +570,8 @@ static inline struct tb_port *tb_upstream_port(struct tb_switch *sw)
  * tb_is_upstream_port() - Is the port upstream facing
  * @port: Port to check
  *
- * Returns true if @port is upstream facing port. In case of dual link
- * ports both return true.
+ * Return: %true if @port is upstream facing port. In case of dual link
+ * ports, both return %true.
  */
 static inline bool tb_is_upstream_port(const struct tb_port *port)
 {
@@ -590,7 +614,7 @@ static inline const char *tb_width_name(enum tb_link_width width)
  * tb_port_has_remote() - Does the port have switch connected downstream
  * @port: Port to check
  *
- * Returns true only when the port is primary port and has remote set.
+ * Return: %true only when the port is primary port and has remote set.
  */
 static inline bool tb_port_has_remote(const struct tb_port *port)
 {
@@ -735,10 +759,10 @@ static inline int tb_port_write(struct tb_port *port, const void *buffer,
 struct tb *icm_probe(struct tb_nhi *nhi);
 struct tb *tb_probe(struct tb_nhi *nhi);
 
-extern struct device_type tb_domain_type;
-extern struct device_type tb_retimer_type;
-extern struct device_type tb_switch_type;
-extern struct device_type usb4_port_device_type;
+extern const struct device_type tb_domain_type;
+extern const struct device_type tb_retimer_type;
+extern const struct device_type tb_switch_type;
+extern const struct device_type usb4_port_device_type;
 
 int tb_domain_init(void);
 void tb_domain_exit(void);
@@ -746,7 +770,7 @@ int tb_xdomain_init(void);
 void tb_xdomain_exit(void);
 
 struct tb *tb_domain_alloc(struct tb_nhi *nhi, int timeout_msec, size_t privsize);
-int tb_domain_add(struct tb *tb);
+int tb_domain_add(struct tb *tb, bool reset);
 void tb_domain_remove(struct tb *tb);
 int tb_domain_suspend_noirq(struct tb *tb);
 int tb_domain_resume_noirq(struct tb *tb);
@@ -781,6 +805,19 @@ static inline void tb_domain_put(struct tb *tb)
 	put_device(&tb->dev);
 }
 
+/**
+ * tb_domain_event() - Notify userspace about an event in domain
+ * @tb: Domain where event occurred
+ * @envp: Array of uevent environment strings (can be %NULL)
+ *
+ * This function provides a way to notify userspace about any events
+ * that take place in the domain.
+ */
+static inline void tb_domain_event(struct tb *tb, char *envp[])
+{
+	kobject_uevent_env(&tb->dev.kobj, KOBJ_CHANGE, envp);
+}
+
 struct tb_nvm *tb_nvm_alloc(struct device *dev);
 int tb_nvm_read_version(struct tb_nvm *nvm);
 int tb_nvm_validate(struct tb_nvm *nvm);
@@ -813,7 +850,7 @@ int tb_switch_configuration_valid(struct tb_switch *sw);
 int tb_switch_add(struct tb_switch *sw);
 void tb_switch_remove(struct tb_switch *sw);
 void tb_switch_suspend(struct tb_switch *sw, bool runtime);
-int tb_switch_resume(struct tb_switch *sw);
+int tb_switch_resume(struct tb_switch *sw, bool runtime);
 int tb_switch_reset(struct tb_switch *sw);
 int tb_switch_wait_for_bit(struct tb_switch *sw, u32 offset, u32 bit,
 			   u32 value, int timeout_msec);
@@ -869,8 +906,9 @@ static inline struct tb_switch *tb_switch_parent(struct tb_switch *sw)
  * tb_switch_downstream_port() - Return downstream facing port of parent router
  * @sw: Device router pointer
  *
- * Only call for device routers. Returns the downstream facing port of
- * the parent router.
+ * Call only for device routers.
+ *
+ * Return: Pointer to &struct tb_port or %NULL in case of failure.
  */
 static inline struct tb_port *tb_switch_downstream_port(struct tb_switch *sw)
 {
@@ -882,6 +920,8 @@ static inline struct tb_port *tb_switch_downstream_port(struct tb_switch *sw)
 /**
  * tb_switch_depth() - Returns depth of the connected router
  * @sw: Router
+ *
+ * Return: Router depth level as a number.
  */
 static inline int tb_switch_depth(const struct tb_switch *sw)
 {
@@ -974,6 +1014,9 @@ static inline bool tb_switch_is_tiger_lake(const struct tb_switch *sw)
  * is handling @sw this function can be called. It is valid to call this
  * after tb_switch_alloc() and tb_switch_configure() has been called
  * (latter only for SW CM case).
+ *
+ * Return: %true if switch is handled by ICM, %false if handled by
+ * software CM.
  */
 static inline bool tb_switch_is_icm(const struct tb_switch *sw)
 {
@@ -1001,6 +1044,8 @@ int tb_switch_tmu_configure(struct tb_switch *sw, enum tb_switch_tmu_mode mode);
  *
  * Checks if given router TMU mode is configured to @mode. Note the
  * router TMU might not be enabled to this mode.
+ *
+ * Return: %true if TMU mode is equal to @mode, %false otherwise.
  */
 static inline bool tb_switch_tmu_is_configured(const struct tb_switch *sw,
 					       enum tb_switch_tmu_mode mode)
@@ -1012,8 +1057,8 @@ static inline bool tb_switch_tmu_is_configured(const struct tb_switch *sw,
  * tb_switch_tmu_is_enabled() - Checks if the specified TMU mode is enabled
  * @sw: Router whose TMU mode to check
  *
- * Return true if hardware TMU configuration matches the requested
- * configuration (and is not %TB_SWITCH_TMU_MODE_OFF).
+ * Return: %true if hardware TMU configuration matches the requested
+ * configuration (and is not %TB_SWITCH_TMU_MODE_OFF), %false otherwise.
  */
 static inline bool tb_switch_tmu_is_enabled(const struct tb_switch *sw)
 {
@@ -1033,9 +1078,10 @@ int tb_switch_clx_disable(struct tb_switch *sw);
  * @clx: The CLx states to check for
  *
  * Checks if the specified CLx is enabled on the router upstream link.
- * Returns true if any of the given states is enabled.
  *
  * Not applicable for a host router.
+ *
+ * Return: %true if any of the given states is enabled, %false otherwise.
  */
 static inline bool tb_switch_clx_is_enabled(const struct tb_switch *sw,
 					    unsigned int clx)
@@ -1067,7 +1113,7 @@ struct tb_port *tb_next_port_on_path(struct tb_port *start, struct tb_port *end,
  * @src: Source adapter
  * @dst: Destination adapter
  *
- * Returns %true only if the specified path from source adapter (@src)
+ * Return: %true only if the specified path from source adapter (@src)
  * to destination adapter (@dst) is directed downstream.
  */
 static inline bool
@@ -1150,6 +1196,7 @@ struct tb_path *tb_path_alloc(struct tb *tb, struct tb_port *src, int src_hopid,
 void tb_path_free(struct tb_path *path);
 int tb_path_activate(struct tb_path *path);
 void tb_path_deactivate(struct tb_path *path);
+int tb_path_deactivate_hop(struct tb_port *port, int hop_index);
 bool tb_path_is_invalid(struct tb_path *path);
 bool tb_path_port_on_path(const struct tb_path *path,
 			  const struct tb_port *port);
@@ -1169,6 +1216,7 @@ int tb_drom_read(struct tb_switch *sw);
 int tb_drom_read_uid_only(struct tb_switch *sw, u64 *uid);
 
 int tb_lc_read_uuid(struct tb_switch *sw, u32 *uuid);
+int tb_lc_reset_port(struct tb_port *port);
 int tb_lc_configure_port(struct tb_port *port);
 void tb_lc_unconfigure_port(struct tb_port *port);
 int tb_lc_configure_xdomain(struct tb_port *port);
@@ -1194,10 +1242,11 @@ static inline int tb_route_length(u64 route)
 
 /**
  * tb_downstream_route() - get route to downstream switch
+ * @port: Port to check
  *
  * Port must not be the upstream port (otherwise a loop is created).
  *
- * Return: Returns a route to the switch behind @port.
+ * Return: Route to the switch behind @port.
  */
 static inline u64 tb_downstream_route(struct tb_port *port)
 {
@@ -1225,7 +1274,7 @@ static inline struct tb_switch *tb_xdomain_parent(struct tb_xdomain *xd)
  * tb_xdomain_downstream_port() - Return downstream facing port of parent router
  * @xd: Xdomain pointer
  *
- * Returns the downstream port the XDomain is connected to.
+ * Return: Pointer to &struct tb_port or %NULL in case of failure.
  */
 static inline struct tb_port *tb_xdomain_downstream_port(struct tb_xdomain *xd)
 {
@@ -1253,7 +1302,7 @@ static inline struct tb_retimer *tb_to_retimer(struct device *dev)
  * usb4_switch_version() - Returns USB4 version of the router
  * @sw: Router to check
  *
- * Returns major version of USB4 router (%1 for v1, %2 for v2 and so
+ * Return: Major version of USB4 router (%1 for v1, %2 for v2 and so
  * on). Can be called to pre-USB4 router too and in that case returns %0.
  */
 static inline unsigned int usb4_switch_version(const struct tb_switch *sw)
@@ -1265,20 +1314,21 @@ static inline unsigned int usb4_switch_version(const struct tb_switch *sw)
  * tb_switch_is_usb4() - Is the switch USB4 compliant
  * @sw: Switch to check
  *
- * Returns true if the @sw is USB4 compliant router, false otherwise.
+ * Return: %true if the @sw is USB4 compliant router, %false otherwise.
  */
 static inline bool tb_switch_is_usb4(const struct tb_switch *sw)
 {
 	return usb4_switch_version(sw) > 0;
 }
 
+void usb4_switch_check_wakes(struct tb_switch *sw);
 int usb4_switch_setup(struct tb_switch *sw);
 int usb4_switch_configuration_valid(struct tb_switch *sw);
 int usb4_switch_read_uid(struct tb_switch *sw, u64 *uid);
 int usb4_switch_drom_read(struct tb_switch *sw, unsigned int address, void *buf,
 			  size_t size);
 bool usb4_switch_lane_bonding_possible(struct tb_switch *sw);
-int usb4_switch_set_wake(struct tb_switch *sw, unsigned int flags);
+int usb4_switch_set_wake(struct tb_switch *sw, unsigned int flags, bool runtime);
 int usb4_switch_set_sleep(struct tb_switch *sw);
 int usb4_switch_nvm_sector_size(struct tb_switch *sw);
 int usb4_switch_nvm_read(struct tb_switch *sw, unsigned int address, void *buf,
@@ -1301,6 +1351,7 @@ void usb4_switch_remove_ports(struct tb_switch *sw);
 
 int usb4_port_unlock(struct tb_port *port);
 int usb4_port_hotplug_enable(struct tb_port *port);
+int usb4_port_reset(struct tb_port *port);
 int usb4_port_configure(struct tb_port *port);
 void usb4_port_unconfigure(struct tb_port *port);
 int usb4_port_configure_xdomain(struct tb_port *port, struct tb_xdomain *xd);
@@ -1309,26 +1360,87 @@ int usb4_port_router_offline(struct tb_port *port);
 int usb4_port_router_online(struct tb_port *port);
 int usb4_port_enumerate_retimers(struct tb_port *port);
 bool usb4_port_clx_supported(struct tb_port *port);
-int usb4_port_margining_caps(struct tb_port *port, u32 *caps);
 
 bool usb4_port_asym_supported(struct tb_port *port);
 int usb4_port_asym_set_link_width(struct tb_port *port, enum tb_link_width width);
 int usb4_port_asym_start(struct tb_port *port);
 
-int usb4_port_hw_margin(struct tb_port *port, unsigned int lanes,
-			unsigned int ber_level, bool timing, bool right_high,
+/**
+ * enum usb4_sb_target - Sideband transaction target
+ * @USB4_SB_TARGET_ROUTER: Target is the router itself
+ * @USB4_SB_TARGET_PARTNER: Target is partner
+ * @USB4_SB_TARGET_RETIMER: Target is retimer
+ */
+enum usb4_sb_target {
+	USB4_SB_TARGET_ROUTER,
+	USB4_SB_TARGET_PARTNER,
+	USB4_SB_TARGET_RETIMER,
+};
+
+int usb4_port_sb_read(struct tb_port *port, enum usb4_sb_target target, u8 index,
+		      u8 reg, void *buf, u8 size);
+int usb4_port_sb_write(struct tb_port *port, enum usb4_sb_target target,
+		       u8 index, u8 reg, const void *buf, u8 size);
+
+/**
+ * enum usb4_margin_sw_error_counter - Software margining error counter operation
+ * @USB4_MARGIN_SW_ERROR_COUNTER_NOP: No change in counter setup
+ * @USB4_MARGIN_SW_ERROR_COUNTER_CLEAR: Set the error counter to 0, enable counter
+ * @USB4_MARGIN_SW_ERROR_COUNTER_START: Start counter, count from last value
+ * @USB4_MARGIN_SW_ERROR_COUNTER_STOP: Stop counter, do not clear value
+ */
+enum usb4_margin_sw_error_counter {
+	USB4_MARGIN_SW_ERROR_COUNTER_NOP,
+	USB4_MARGIN_SW_ERROR_COUNTER_CLEAR,
+	USB4_MARGIN_SW_ERROR_COUNTER_START,
+	USB4_MARGIN_SW_ERROR_COUNTER_STOP,
+};
+
+enum usb4_margining_lane {
+	USB4_MARGINING_LANE_RX0 = 0,
+	USB4_MARGINING_LANE_RX1 = 1,
+	USB4_MARGINING_LANE_RX2 = 2,
+	USB4_MARGINING_LANE_ALL = 7,
+};
+
+/**
+ * struct usb4_port_margining_params - USB4 margining parameters
+ * @error_counter: Error counter operation for software margining
+ * @ber_level: Current BER level contour value
+ * @lanes: Lanes to enable for the margining operation
+ * @voltage_time_offset: Offset for voltage / time for software margining
+ * @optional_voltage_offset_range: Enable optional extended voltage range
+ * @right_high: %false if left/low margin test is performed, %true if right/high
+ * @upper_eye: %true if margin test is done on upper eye, %false if done on
+ *	       lower eye
+ * @time: %true if time margining is used instead of voltage
+ */
+struct usb4_port_margining_params {
+	enum usb4_margin_sw_error_counter error_counter;
+	u32 ber_level;
+	enum usb4_margining_lane lanes;
+	u32 voltage_time_offset;
+	bool optional_voltage_offset_range;
+	bool right_high;
+	bool upper_eye;
+	bool time;
+};
+
+int usb4_port_margining_caps(struct tb_port *port, enum usb4_sb_target target,
+			     u8 index, u32 *caps, size_t ncaps);
+int usb4_port_hw_margin(struct tb_port *port, enum usb4_sb_target target,
+			u8 index, const struct usb4_port_margining_params *params,
+			u32 *results, size_t nresults);
+int usb4_port_sw_margin(struct tb_port *port, enum usb4_sb_target target,
+			u8 index, const struct usb4_port_margining_params *params,
 			u32 *results);
-int usb4_port_sw_margin(struct tb_port *port, unsigned int lanes, bool timing,
-			bool right_high, u32 counter);
-int usb4_port_sw_margin_errors(struct tb_port *port, u32 *errors);
+int usb4_port_sw_margin_errors(struct tb_port *port, enum usb4_sb_target target,
+			       u8 index, u32 *errors);
 
 int usb4_port_retimer_set_inbound_sbtx(struct tb_port *port, u8 index);
 int usb4_port_retimer_unset_inbound_sbtx(struct tb_port *port, u8 index);
-int usb4_port_retimer_read(struct tb_port *port, u8 index, u8 reg, void *buf,
-			   u8 size);
-int usb4_port_retimer_write(struct tb_port *port, u8 index, u8 reg,
-			    const void *buf, u8 size);
 int usb4_port_retimer_is_last(struct tb_port *port, u8 index);
+int usb4_port_retimer_is_cable(struct tb_port *port, u8 index);
 int usb4_port_retimer_nvm_sector_size(struct tb_port *port, u8 index);
 int usb4_port_retimer_nvm_set_offset(struct tb_port *port, u8 index,
 				     unsigned int address);
@@ -1382,6 +1494,7 @@ static inline struct usb4_port *tb_to_usb4_port_device(struct device *dev)
 struct usb4_port *usb4_port_device_add(struct tb_port *port);
 void usb4_port_device_remove(struct usb4_port *usb4);
 int usb4_port_device_resume(struct usb4_port *usb4);
+int usb4_port_index(const struct tb_switch *sw, const struct tb_port *port);
 
 static inline bool usb4_port_device_is_offline(const struct usb4_port *usb4)
 {
@@ -1427,6 +1540,8 @@ void tb_xdomain_debugfs_init(struct tb_xdomain *xd);
 void tb_xdomain_debugfs_remove(struct tb_xdomain *xd);
 void tb_service_debugfs_init(struct tb_service *svc);
 void tb_service_debugfs_remove(struct tb_service *svc);
+void tb_retimer_debugfs_init(struct tb_retimer *rt);
+void tb_retimer_debugfs_remove(struct tb_retimer *rt);
 #else
 static inline void tb_debugfs_init(void) { }
 static inline void tb_debugfs_exit(void) { }
@@ -1436,6 +1551,8 @@ static inline void tb_xdomain_debugfs_init(struct tb_xdomain *xd) { }
 static inline void tb_xdomain_debugfs_remove(struct tb_xdomain *xd) { }
 static inline void tb_service_debugfs_init(struct tb_service *svc) { }
 static inline void tb_service_debugfs_remove(struct tb_service *svc) { }
+static inline void tb_retimer_debugfs_init(struct tb_retimer *rt) { }
+static inline void tb_retimer_debugfs_remove(struct tb_retimer *rt) { }
 #endif
 
 #endif

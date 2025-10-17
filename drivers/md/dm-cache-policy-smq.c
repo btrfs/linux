@@ -590,7 +590,7 @@ static int h_init(struct smq_hash_table *ht, struct entry_space *es, unsigned in
 	nr_buckets = roundup_pow_of_two(max(nr_entries / 4u, 16u));
 	ht->hash_bits = __ffs(nr_buckets);
 
-	ht->buckets = vmalloc(array_size(nr_buckets, sizeof(*ht->buckets)));
+	ht->buckets = vmalloc_array(nr_buckets, sizeof(*ht->buckets));
 	if (!ht->buckets)
 		return -ENOMEM;
 
@@ -1947,7 +1947,7 @@ static void __exit smq_exit(void)
 module_init(smq_init);
 module_exit(smq_exit);
 
-MODULE_AUTHOR("Joe Thornber <dm-devel@redhat.com>");
+MODULE_AUTHOR("Joe Thornber <dm-devel@lists.linux.dev>");
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("smq cache policy");
 

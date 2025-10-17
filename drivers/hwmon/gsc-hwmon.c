@@ -39,7 +39,7 @@ struct gsc_hwmon_data {
 	struct hwmon_chip_info chip;
 };
 
-static struct regmap_bus gsc_hwmon_regmap_bus = {
+static const struct regmap_bus gsc_hwmon_regmap_bus = {
 	.reg_read = gsc_read,
 	.reg_write = gsc_write,
 };
@@ -47,7 +47,6 @@ static struct regmap_bus gsc_hwmon_regmap_bus = {
 static const struct regmap_config gsc_hwmon_regmap_config = {
 	.reg_bits = 8,
 	.val_bits = 8,
-	.cache_type = REGCACHE_NONE,
 };
 
 static ssize_t pwm_auto_point_temp_show(struct device *dev,
@@ -65,7 +64,7 @@ static ssize_t pwm_auto_point_temp_show(struct device *dev,
 		return ret;
 
 	ret = regs[0] | regs[1] << 8;
-	return sprintf(buf, "%d\n", ret * 10);
+	return sprintf(buf, "%d\n", ret * 100);
 }
 
 static ssize_t pwm_auto_point_temp_store(struct device *dev,
@@ -100,7 +99,7 @@ static ssize_t pwm_auto_point_pwm_show(struct device *dev,
 {
 	struct sensor_device_attribute *attr = to_sensor_dev_attr(devattr);
 
-	return sprintf(buf, "%d\n", 255 * (50 + (attr->index * 10)));
+	return sprintf(buf, "%d\n", 255 * (50 + (attr->index * 10)) / 100);
 }
 
 static SENSOR_DEVICE_ATTR_RO(pwm1_auto_point1_pwm, pwm_auto_point_pwm, 0);
@@ -231,15 +230,8 @@ gsc_hwmon_read_string(struct device *dev, enum hwmon_sensor_types type,
 	return 0;
 }
 
-static umode_t
-gsc_hwmon_is_visible(const void *_data, enum hwmon_sensor_types type, u32 attr,
-		     int ch)
-{
-	return 0444;
-}
-
 static const struct hwmon_ops gsc_hwmon_ops = {
-	.is_visible = gsc_hwmon_is_visible,
+	.visible = 0444,
 	.read = gsc_hwmon_read,
 	.read_string = gsc_hwmon_read_string,
 };
@@ -249,7 +241,6 @@ gsc_hwmon_get_devtree_pdata(struct device *dev)
 {
 	struct gsc_hwmon_platform_data *pdata;
 	struct gsc_hwmon_channel *ch;
-	struct fwnode_handle *child;
 	struct device_node *fan;
 	int nchannels;
 
@@ -276,25 +267,21 @@ gsc_hwmon_get_devtree_pdata(struct device *dev)
 
 	ch = pdata->channels;
 	/* allocate structures for channels and count instances of each type */
-	device_for_each_child_node(dev, child) {
+	device_for_each_child_node_scoped(dev, child) {
 		if (fwnode_property_read_string(child, "label", &ch->name)) {
 			dev_err(dev, "channel without label\n");
-			fwnode_handle_put(child);
 			return ERR_PTR(-EINVAL);
 		}
 		if (fwnode_property_read_u32(child, "reg", &ch->reg)) {
 			dev_err(dev, "channel without reg\n");
-			fwnode_handle_put(child);
 			return ERR_PTR(-EINVAL);
 		}
 		if (fwnode_property_read_u32(child, "gw,mode", &ch->mode)) {
 			dev_err(dev, "channel without mode\n");
-			fwnode_handle_put(child);
 			return ERR_PTR(-EINVAL);
 		}
 		if (ch->mode > mode_max) {
 			dev_err(dev, "invalid channel mode\n");
-			fwnode_handle_put(child);
 			return ERR_PTR(-EINVAL);
 		}
 
@@ -405,6 +392,7 @@ static const struct of_device_id gsc_hwmon_of_match[] = {
 	{ .compatible = "gw,gsc-adc", },
 	{}
 };
+MODULE_DEVICE_TABLE(of, gsc_hwmon_of_match);
 
 static struct platform_driver gsc_hwmon_driver = {
 	.driver = {

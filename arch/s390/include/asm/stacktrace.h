@@ -2,9 +2,9 @@
 #ifndef _ASM_S390_STACKTRACE_H
 #define _ASM_S390_STACKTRACE_H
 
+#include <linux/stacktrace.h>
 #include <linux/uaccess.h>
 #include <linux/ptrace.h>
-#include <asm/switch_to.h>
 
 struct stack_frame_user {
 	unsigned long back_chain;
@@ -12,6 +12,17 @@ struct stack_frame_user {
 	unsigned long gprs[10];
 	unsigned long empty2[4];
 };
+
+struct stack_frame_vdso_wrapper {
+	struct stack_frame_user sf;
+	unsigned long return_address;
+};
+
+struct perf_callchain_entry_ctx;
+
+void arch_stack_walk_user_common(stack_trace_consume_fn consume_entry, void *cookie,
+				 struct perf_callchain_entry_ctx *entry,
+				 const struct pt_regs *regs, bool perf);
 
 enum stack_type {
 	STACK_TYPE_UNKNOWN,
@@ -54,6 +65,7 @@ struct stack_frame {
 			unsigned long sie_reason;
 			unsigned long sie_flags;
 			unsigned long sie_control_block_phys;
+			unsigned long sie_guest_asce;
 		};
 	};
 	unsigned long gprs[10];
@@ -187,7 +199,7 @@ static __always_inline unsigned long get_stack_pointer(struct task_struct *task,
 		"	lg	15,%[_stack]\n"				\
 		"	stg	%[_frame],%[_bc](15)\n"			\
 		"	brasl	14,%[_fn]\n"				\
-		"	lgr	15,%[_prev]\n"				\
+		"	lgr	15,%[_prev]"				\
 		: [_prev] "=&d" (prev), CALL_FMT_##nr			\
 		: [_stack] "R" (__stack),				\
 		  [_bc] "i" (offsetof(struct stack_frame, back_chain)),	\
@@ -238,7 +250,7 @@ static __always_inline unsigned long get_stack_pointer(struct task_struct *task,
 		"	lra	14,0(1)\n"				\
 		"	lpswe	%[psw_enter]\n"				\
 		"0:	lpswe	0(7)\n"					\
-		"1:\n"							\
+		"1:"							\
 		: CALL_FMT_##nr, [psw_leave] "=Q" (psw_leave)		\
 		: [psw_enter] "Q" (psw_enter)				\
 		: "7", CALL_CLOBBER_##nr);				\

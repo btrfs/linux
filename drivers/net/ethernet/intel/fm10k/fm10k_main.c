@@ -17,7 +17,6 @@ static const char fm10k_driver_string[] = DRV_SUMMARY;
 static const char fm10k_copyright[] =
 	"Copyright(c) 2013 - 2019 Intel Corporation.";
 
-MODULE_AUTHOR("Intel Corporation, <linux.nics@intel.com>");
 MODULE_DESCRIPTION(DRV_SUMMARY);
 MODULE_LICENSE("GPL v2");
 
@@ -38,7 +37,7 @@ static int __init fm10k_init_module(void)
 	pr_info("%s\n", fm10k_copyright);
 
 	/* create driver workqueue */
-	fm10k_workqueue = alloc_workqueue("%s", WQ_MEM_RECLAIM, 0,
+	fm10k_workqueue = alloc_workqueue("%s", WQ_MEM_RECLAIM | WQ_PERCPU, 0,
 					  fm10k_driver_name);
 	if (!fm10k_workqueue)
 		return -ENOMEM;

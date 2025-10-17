@@ -65,7 +65,8 @@ void optc1_program_global_sync(
 		int vready_offset,
 		int vstartup_start,
 		int vupdate_offset,
-		int vupdate_width)
+		int vupdate_width,
+		int pstate_keepout)
 {
 	struct optc *optc1 = DCN10TG_FROM_TG(optc);
 
@@ -73,6 +74,7 @@ void optc1_program_global_sync(
 	optc1->vstartup_start = vstartup_start;
 	optc1->vupdate_offset = vupdate_offset;
 	optc1->vupdate_width = vupdate_width;
+	optc1->pstate_keepout = pstate_keepout;
 
 	if (optc1->vstartup_start == 0) {
 		BREAK_TO_DEBUGGER();
@@ -146,6 +148,7 @@ void optc1_setup_vertical_interrupt2(
  * @vstartup_start: Vstartup period.
  * @vupdate_offset: Vupdate starting position.
  * @vupdate_width: Vupdate duration.
+ * @pstate_keepout: determines low power mode timing during refresh
  * @signal: DC signal types.
  * @use_vbios: to program timings from BIOS command table.
  *
@@ -157,6 +160,7 @@ void optc1_program_timing(
 	int vstartup_start,
 	int vupdate_offset,
 	int vupdate_width,
+	int pstate_keepout,
 	const enum signal_type signal,
 	bool use_vbios)
 {
@@ -177,6 +181,7 @@ void optc1_program_timing(
 	optc1->vstartup_start = vstartup_start;
 	optc1->vupdate_offset = vupdate_offset;
 	optc1->vupdate_width = vupdate_width;
+	optc1->pstate_keepout = pstate_keepout;
 	patched_crtc_timing = *dc_crtc_timing;
 	apply_front_porch_workaround(&patched_crtc_timing);
 	optc1->orginal_patched_timing = patched_crtc_timing;
@@ -282,7 +287,8 @@ void optc1_program_timing(
 			vready_offset,
 			vstartup_start,
 			vupdate_offset,
-			vupdate_width);
+			vupdate_width,
+			pstate_keepout);
 
 	optc->funcs->set_vtg_params(optc, dc_crtc_timing, true);
 
@@ -296,8 +302,7 @@ void optc1_program_timing(
 	/* Enable stereo - only when we need to pack 3D frame. Other types
 	 * of stereo handled in explicit call
 	 */
-
-	if (optc1_is_two_pixels_per_containter(&patched_crtc_timing) || optc1->opp_count == 2)
+	if (optc->funcs->is_two_pixels_per_container(&patched_crtc_timing) || optc1->opp_count == 2)
 		h_div = H_TIMING_DIV_BY2;
 
 	if (REG(OPTC_DATA_FORMAT_CONTROL) && optc1->tg_mask->OPTC_DATA_FORMAT != 0) {
@@ -1307,7 +1312,7 @@ bool optc1_get_hw_timing(struct timing_generator *tg,
 	if (tg == NULL || hw_crtc_timing == NULL)
 		return false;
 
-	optc1_read_otg_state(DCN10TG_FROM_TG(tg), &s);
+	optc1_read_otg_state(tg, &s);
 
 	hw_crtc_timing->h_total = s.h_total + 1;
 	hw_crtc_timing->h_addressable = s.h_total - ((s.h_total - s.h_blank_start) + s.h_blank_end);
@@ -1323,9 +1328,11 @@ bool optc1_get_hw_timing(struct timing_generator *tg,
 }
 
 
-void optc1_read_otg_state(struct optc *optc1,
+void optc1_read_otg_state(struct timing_generator *optc,
 		struct dcn_otg_state *s)
 {
+	struct optc *optc1 = DCN10TG_FROM_TG(optc);
+
 	REG_GET(OTG_CONTROL,
 			OTG_MASTER_EN, &s->otg_enabled);
 
@@ -1383,6 +1390,9 @@ void optc1_read_otg_state(struct optc *optc1,
 
 	REG_GET(OTG_VERTICAL_INTERRUPT2_POSITION,
 			OTG_VERTICAL_INTERRUPT2_LINE_START, &s->vertical_interrupt2_line);
+
+	s->otg_master_update_lock = REG_READ(OTG_MASTER_UPDATE_LOCK);
+	s->otg_double_buffer_control = REG_READ(OTG_DOUBLE_BUFFER_CONTROL);
 }
 
 bool optc1_get_otg_active_size(struct timing_generator *optc,
@@ -1411,8 +1421,8 @@ bool optc1_get_otg_active_size(struct timing_generator *optc,
 			OTG_H_BLANK_START, &h_blank_start,
 			OTG_H_BLANK_END, &h_blank_end);
 
-	*otg_active_width = v_blank_start - v_blank_end;
-	*otg_active_height = h_blank_start - h_blank_end;
+	*otg_active_width = h_blank_start - h_blank_end;
+	*otg_active_height = v_blank_start - v_blank_end;
 	return true;
 }
 
@@ -1462,37 +1472,71 @@ bool optc1_configure_crc(struct timing_generator *optc,
 	if (!optc1_is_tg_enabled(optc))
 		return false;
 
-	REG_WRITE(OTG_CRC_CNTL, 0);
+	if (!params->enable || params->reset)
+		REG_WRITE(OTG_CRC_CNTL, 0);
 
 	if (!params->enable)
 		return true;
 
 	/* Program frame boundaries */
-	/* Window A x axis start and end. */
-	REG_UPDATE_2(OTG_CRC0_WINDOWA_X_CONTROL,
-			OTG_CRC0_WINDOWA_X_START, params->windowa_x_start,
-			OTG_CRC0_WINDOWA_X_END, params->windowa_x_end);
+	switch (params->crc_eng_inst) {
+	case 0:
+		/* Window A x axis start and end. */
+		REG_UPDATE_2(OTG_CRC0_WINDOWA_X_CONTROL,
+				OTG_CRC0_WINDOWA_X_START, params->windowa_x_start,
+				OTG_CRC0_WINDOWA_X_END, params->windowa_x_end);
 
-	/* Window A y axis start and end. */
-	REG_UPDATE_2(OTG_CRC0_WINDOWA_Y_CONTROL,
-			OTG_CRC0_WINDOWA_Y_START, params->windowa_y_start,
-			OTG_CRC0_WINDOWA_Y_END, params->windowa_y_end);
+		/* Window A y axis start and end. */
+		REG_UPDATE_2(OTG_CRC0_WINDOWA_Y_CONTROL,
+				OTG_CRC0_WINDOWA_Y_START, params->windowa_y_start,
+				OTG_CRC0_WINDOWA_Y_END, params->windowa_y_end);
 
-	/* Window B x axis start and end. */
-	REG_UPDATE_2(OTG_CRC0_WINDOWB_X_CONTROL,
-			OTG_CRC0_WINDOWB_X_START, params->windowb_x_start,
-			OTG_CRC0_WINDOWB_X_END, params->windowb_x_end);
+		/* Window B x axis start and end. */
+		REG_UPDATE_2(OTG_CRC0_WINDOWB_X_CONTROL,
+				OTG_CRC0_WINDOWB_X_START, params->windowb_x_start,
+				OTG_CRC0_WINDOWB_X_END, params->windowb_x_end);
 
-	/* Window B y axis start and end. */
-	REG_UPDATE_2(OTG_CRC0_WINDOWB_Y_CONTROL,
-			OTG_CRC0_WINDOWB_Y_START, params->windowb_y_start,
-			OTG_CRC0_WINDOWB_Y_END, params->windowb_y_end);
+		/* Window B y axis start and end. */
+		REG_UPDATE_2(OTG_CRC0_WINDOWB_Y_CONTROL,
+				OTG_CRC0_WINDOWB_Y_START, params->windowb_y_start,
+				OTG_CRC0_WINDOWB_Y_END, params->windowb_y_end);
 
-	/* Set crc mode and selection, and enable. Only using CRC0*/
-	REG_UPDATE_3(OTG_CRC_CNTL,
-			OTG_CRC_CONT_EN, params->continuous_mode ? 1 : 0,
-			OTG_CRC0_SELECT, params->selection,
-			OTG_CRC_EN, 1);
+		/* Set crc mode and selection, and enable.*/
+		REG_UPDATE_3(OTG_CRC_CNTL,
+				OTG_CRC_CONT_EN, params->continuous_mode ? 1 : 0,
+				OTG_CRC0_SELECT, params->selection,
+				OTG_CRC_EN, 1);
+		break;
+	case 1:
+		/* Window A x axis start and end. */
+		REG_UPDATE_2(OTG_CRC1_WINDOWA_X_CONTROL,
+				OTG_CRC1_WINDOWA_X_START, params->windowa_x_start,
+				OTG_CRC1_WINDOWA_X_END, params->windowa_x_end);
+
+		/* Window A y axis start and end. */
+		REG_UPDATE_2(OTG_CRC1_WINDOWA_Y_CONTROL,
+				OTG_CRC1_WINDOWA_Y_START, params->windowa_y_start,
+				OTG_CRC1_WINDOWA_Y_END, params->windowa_y_end);
+
+		/* Window B x axis start and end. */
+		REG_UPDATE_2(OTG_CRC1_WINDOWB_X_CONTROL,
+				OTG_CRC1_WINDOWB_X_START, params->windowb_x_start,
+				OTG_CRC1_WINDOWB_X_END, params->windowb_x_end);
+
+		/* Window B y axis start and end. */
+		REG_UPDATE_2(OTG_CRC1_WINDOWB_Y_CONTROL,
+				OTG_CRC1_WINDOWB_Y_START, params->windowb_y_start,
+				OTG_CRC1_WINDOWB_Y_END, params->windowb_y_end);
+
+		/* Set crc mode and selection, and enable.*/
+		REG_UPDATE_3(OTG_CRC_CNTL,
+				OTG_CRC_CONT_EN, params->continuous_mode ? 1 : 0,
+				OTG_CRC1_SELECT, params->selection,
+				OTG_CRC_EN, 1);
+		break;
+	default:
+		return false;
+	}
 
 	return true;
 }
@@ -1501,6 +1545,7 @@ bool optc1_configure_crc(struct timing_generator *optc,
  * optc1_get_crc - Capture CRC result per component
  *
  * @optc: timing_generator instance.
+ * @idx: index of crc engine to get CRC from
  * @r_cr: 16-bit primary CRC signature for red data.
  * @g_y: 16-bit primary CRC signature for green data.
  * @b_cb: 16-bit primary CRC signature for blue data.
@@ -1512,7 +1557,7 @@ bool optc1_configure_crc(struct timing_generator *optc,
  * If CRC is disabled, return false; otherwise, return true, and the CRC
  * results in the parameters.
  */
-bool optc1_get_crc(struct timing_generator *optc,
+bool optc1_get_crc(struct timing_generator *optc, uint8_t idx,
 		   uint32_t *r_cr, uint32_t *g_y, uint32_t *b_cb)
 {
 	uint32_t field = 0;
@@ -1524,16 +1569,53 @@ bool optc1_get_crc(struct timing_generator *optc,
 	if (!field)
 		return false;
 
-	/* OTG_CRC0_DATA_RG has the CRC16 results for the red and green component */
-	REG_GET_2(OTG_CRC0_DATA_RG,
-		  CRC0_R_CR, r_cr,
-		  CRC0_G_Y, g_y);
+	switch (idx) {
+	case 0:
+		/* OTG_CRC0_DATA_RG has the CRC16 results for the red and green component */
+		REG_GET_2(OTG_CRC0_DATA_RG,
+			  CRC0_R_CR, r_cr,
+			  CRC0_G_Y, g_y);
 
-	/* OTG_CRC0_DATA_B has the CRC16 results for the blue component */
-	REG_GET(OTG_CRC0_DATA_B,
-		CRC0_B_CB, b_cb);
+		/* OTG_CRC0_DATA_B has the CRC16 results for the blue component */
+		REG_GET(OTG_CRC0_DATA_B,
+			CRC0_B_CB, b_cb);
+		break;
+	case 1:
+		/* OTG_CRC1_DATA_RG has the CRC16 results for the red and green component */
+		REG_GET_2(OTG_CRC1_DATA_RG,
+			  CRC1_R_CR, r_cr,
+			  CRC1_G_Y, g_y);
+
+		/* OTG_CRC1_DATA_B has the CRC16 results for the blue component */
+		REG_GET(OTG_CRC1_DATA_B,
+			CRC1_B_CB, b_cb);
+		break;
+	default:
+		return false;
+	}
 
 	return true;
+}
+
+/* "Container" vs. "pixel" is a concept within HW blocks, mostly those closer to the back-end. It works like this:
+ *
+ * - In most of the formats (RGB or YCbCr 4:4:4, 4:2:2 uncompressed and DSC 4:2:2 Simple) pixel rate is the same as
+ *   container rate.
+ *
+ * - In 4:2:0 (DSC or uncompressed) there are two pixels per container, hence the target container rate has to be
+ *   halved to maintain the correct pixel rate.
+ *
+ * - Unlike 4:2:2 uncompressed, DSC 4:2:2 Native also has two pixels per container (this happens when DSC is applied
+ *   to it) and has to be treated the same as 4:2:0, i.e. target containter rate has to be halved in this case as well.
+ *
+ */
+bool optc1_is_two_pixels_per_container(const struct dc_crtc_timing *timing)
+{
+	bool two_pix = timing->pixel_encoding == PIXEL_ENCODING_YCBCR420;
+
+	two_pix = two_pix || (timing->flags.DSC && timing->pixel_encoding == PIXEL_ENCODING_YCBCR422
+			&& !timing->dsc_cfg.ycbcr422_simple);
+	return two_pix;
 }
 
 static const struct timing_generator_funcs dcn10_tg_funcs = {
@@ -1582,6 +1664,8 @@ static const struct timing_generator_funcs dcn10_tg_funcs = {
 		.program_manual_trigger = optc1_program_manual_trigger,
 		.setup_manual_trigger = optc1_setup_manual_trigger,
 		.get_hw_timing = optc1_get_hw_timing,
+		.is_two_pixels_per_container = optc1_is_two_pixels_per_container,
+		.read_otg_state = optc1_read_otg_state,
 };
 
 void dcn10_timing_generator_init(struct optc *optc1)
@@ -1597,25 +1681,3 @@ void dcn10_timing_generator_init(struct optc *optc1)
 	optc1->min_h_sync_width = 4;
 	optc1->min_v_sync_width = 1;
 }
-
-/* "Containter" vs. "pixel" is a concept within HW blocks, mostly those closer to the back-end. It works like this:
- *
- * - In most of the formats (RGB or YCbCr 4:4:4, 4:2:2 uncompressed and DSC 4:2:2 Simple) pixel rate is the same as
- *   containter rate.
- *
- * - In 4:2:0 (DSC or uncompressed) there are two pixels per container, hence the target container rate has to be
- *   halved to maintain the correct pixel rate.
- *
- * - Unlike 4:2:2 uncompressed, DSC 4:2:2 Native also has two pixels per container (this happens when DSC is applied
- *   to it) and has to be treated the same as 4:2:0, i.e. target containter rate has to be halved in this case as well.
- *
- */
-bool optc1_is_two_pixels_per_containter(const struct dc_crtc_timing *timing)
-{
-	bool two_pix = timing->pixel_encoding == PIXEL_ENCODING_YCBCR420;
-
-	two_pix = two_pix || (timing->flags.DSC && timing->pixel_encoding == PIXEL_ENCODING_YCBCR422
-			&& !timing->dsc_cfg.ycbcr422_simple);
-	return two_pix;
-}
-

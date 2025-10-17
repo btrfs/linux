@@ -18,7 +18,7 @@
 #include <linux/kernel.h>
 #include <linux/irqreturn.h>
 
-#ifndef __ASSEMBLY__
+#ifndef __ASSEMBLER__
 
 #ifdef CONFIG_PPC64
 #include <asm/paca.h>
@@ -27,6 +27,7 @@
 
 extern int boot_cpuid;
 extern int boot_cpu_hwid; /* PPC64 only */
+extern int boot_core_hwid;
 extern int spinning_secondaries;
 extern u32 *cpu_to_phys_id;
 extern bool coregroup_enabled;
@@ -265,7 +266,7 @@ extern char __secondary_hold;
 extern unsigned int booting_thread_hwid;
 
 extern void __early_start(void);
-#endif /* __ASSEMBLY__ */
+#endif /* __ASSEMBLER__ */
 
 #endif /* __KERNEL__ */
 #endif /* _ASM_POWERPC_SMP_H) */

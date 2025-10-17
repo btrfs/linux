@@ -28,6 +28,7 @@
 #include <linux/if_macvlan.h>
 #include <linux/hash.h>
 #include <linux/workqueue.h>
+#include <net/netdev_lock.h>
 #include <net/rtnetlink.h>
 #include <net/xfrm.h>
 #include <linux/netpoll.h>
@@ -253,7 +254,7 @@ static u32 macvlan_hash_mix(const struct macvlan_dev *vlan)
 static unsigned int mc_hash(const struct macvlan_dev *vlan,
 			    const unsigned char *addr)
 {
-	u32 val = __get_unaligned_cpu32(addr + 2);
+	u32 val = get_unaligned((u32 *)(addr + 2));
 
 	val ^= macvlan_hash_mix(vlan);
 	return hash_32(val, MACVLAN_MC_FILTER_BITS);
@@ -368,7 +369,7 @@ static void macvlan_broadcast_enqueue(struct macvlan_port *port,
 	}
 	spin_unlock(&port->bc_queue.lock);
 
-	queue_work(system_unbound_wq, &port->bc_work);
+	queue_work(system_dfl_wq, &port->bc_work);
 
 	if (err)
 		goto free_nskb;
@@ -753,13 +754,13 @@ static int macvlan_sync_address(struct net_device *dev,
 static int macvlan_set_mac_address(struct net_device *dev, void *p)
 {
 	struct macvlan_dev *vlan = netdev_priv(dev);
-	struct sockaddr *addr = p;
+	struct sockaddr_storage *addr = p;
 
-	if (!is_valid_ether_addr(addr->sa_data))
+	if (!is_valid_ether_addr(addr->__data))
 		return -EADDRNOTAVAIL;
 
 	/* If the addresses are the same, this is a no-op */
-	if (ether_addr_equal(dev->dev_addr, addr->sa_data))
+	if (ether_addr_equal(dev->dev_addr, addr->__data))
 		return 0;
 
 	if (vlan->mode == MACVLAN_MODE_PASSTHRU) {
@@ -767,10 +768,10 @@ static int macvlan_set_mac_address(struct net_device *dev, void *p)
 		return dev_set_mac_address(vlan->lowerdev, addr, NULL);
 	}
 
-	if (macvlan_addr_busy(vlan->port, addr->sa_data))
+	if (macvlan_addr_busy(vlan->port, addr->__data))
 		return -EADDRINUSE;
 
-	return macvlan_sync_address(dev, addr->sa_data);
+	return macvlan_sync_address(dev, addr->__data);
 }
 
 static void macvlan_change_rx_flags(struct net_device *dev, int change)
@@ -865,7 +866,7 @@ static int macvlan_change_mtu(struct net_device *dev, int new_mtu)
 
 	if (vlan->lowerdev->mtu < new_mtu)
 		return -EINVAL;
-	dev->mtu = new_mtu;
+	WRITE_ONCE(dev->mtu, new_mtu);
 	return 0;
 }
 
@@ -900,7 +901,7 @@ static struct lock_class_key macvlan_netdev_addr_lock_key;
 	(NETIF_F_SG | NETIF_F_HW_CSUM | NETIF_F_GSO_SOFTWARE | \
 	 NETIF_F_GSO_ROBUST | NETIF_F_GSO_ENCAP_ALL)
 
-#define ALWAYS_ON_FEATURES (ALWAYS_ON_OFFLOADS | NETIF_F_LLTX)
+#define ALWAYS_ON_FEATURES ALWAYS_ON_OFFLOADS
 
 #define MACVLAN_FEATURES \
 	(NETIF_F_SG | NETIF_F_HW_CSUM | NETIF_F_HIGHDMA | NETIF_F_FRAGLIST | \
@@ -932,6 +933,7 @@ static int macvlan_init(struct net_device *dev)
 	dev->vlan_features	= lowerdev->vlan_features & MACVLAN_FEATURES;
 	dev->vlan_features	|= ALWAYS_ON_OFFLOADS;
 	dev->hw_enc_features    |= dev->features;
+	dev->lltx		= true;
 	netif_inherit_tso_max(dev, lowerdev);
 	dev->hard_header_len	= lowerdev->hard_header_len;
 	macvlan_set_lockdep_class(dev);
@@ -1023,7 +1025,7 @@ static int macvlan_vlan_rx_kill_vid(struct net_device *dev,
 static int macvlan_fdb_add(struct ndmsg *ndm, struct nlattr *tb[],
 			   struct net_device *dev,
 			   const unsigned char *addr, u16 vid,
-			   u16 flags,
+			   u16 flags, bool *notified,
 			   struct netlink_ext_ack *extack)
 {
 	struct macvlan_dev *vlan = netdev_priv(dev);
@@ -1048,7 +1050,7 @@ static int macvlan_fdb_add(struct ndmsg *ndm, struct nlattr *tb[],
 
 static int macvlan_fdb_del(struct ndmsg *ndm, struct nlattr *tb[],
 			   struct net_device *dev,
-			   const unsigned char *addr, u16 vid,
+			   const unsigned char *addr, u16 vid, bool *notified,
 			   struct netlink_ext_ack *extack)
 {
 	struct macvlan_dev *vlan = netdev_priv(dev);
@@ -1084,7 +1086,7 @@ static int macvlan_ethtool_get_link_ksettings(struct net_device *dev,
 }
 
 static int macvlan_ethtool_get_ts_info(struct net_device *dev,
-				       struct ethtool_ts_info *info)
+				       struct kernel_ethtool_ts_info *info)
 {
 	struct net_device *real_dev = macvlan_dev_real_dev(dev);
 
@@ -1116,7 +1118,7 @@ static void macvlan_dev_poll_controller(struct net_device *dev)
 	return;
 }
 
-static int macvlan_dev_netpoll_setup(struct net_device *dev, struct netpoll_info *npinfo)
+static int macvlan_dev_netpoll_setup(struct net_device *dev)
 {
 	struct macvlan_dev *vlan = netdev_priv(dev);
 	struct net_device *real_dev = vlan->lowerdev;
@@ -1158,7 +1160,7 @@ static int macvlan_dev_get_iflink(const struct net_device *dev)
 {
 	struct macvlan_dev *vlan = netdev_priv(dev);
 
-	return vlan->lowerdev->ifindex;
+	return READ_ONCE(vlan->lowerdev->ifindex);
 }
 
 static const struct ethtool_ops macvlan_ethtool_ops = {
@@ -1213,7 +1215,8 @@ void macvlan_common_setup(struct net_device *dev)
 	dev->max_mtu		= ETH_MAX_MTU;
 	dev->priv_flags	       &= ~IFF_TX_SKB_SHARING;
 	netif_keep_dst(dev);
-	dev->priv_flags	       |= IFF_UNICAST_FLT | IFF_CHANGE_PROTO_DOWN;
+	dev->priv_flags	       |= IFF_UNICAST_FLT;
+	dev->change_proto_down	= true;
 	dev->netdev_ops		= &macvlan_netdev_ops;
 	dev->needs_free_netdev	= true;
 	dev->priv_destructor	= macvlan_dev_free;
@@ -1292,11 +1295,11 @@ static void macvlan_port_destroy(struct net_device *dev)
 	 */
 	if (macvlan_passthru(port) &&
 	    !ether_addr_equal(port->dev->dev_addr, port->perm_addr)) {
-		struct sockaddr sa;
+		struct sockaddr_storage ss;
 
-		sa.sa_family = port->dev->type;
-		memcpy(&sa.sa_data, port->perm_addr, port->dev->addr_len);
-		dev_set_mac_address(port->dev, &sa, NULL);
+		ss.ss_family = port->dev->type;
+		memcpy(&ss.__data, port->perm_addr, port->dev->addr_len);
+		dev_set_mac_address(port->dev, &ss, NULL);
 	}
 
 	kfree(port);
@@ -1438,21 +1441,24 @@ static int macvlan_changelink_sources(struct macvlan_dev *vlan, u32 mode,
 	return 0;
 }
 
-int macvlan_common_newlink(struct net *src_net, struct net_device *dev,
-			   struct nlattr *tb[], struct nlattr *data[],
+int macvlan_common_newlink(struct net_device *dev,
+			   struct rtnl_newlink_params *params,
 			   struct netlink_ext_ack *extack)
 {
+	struct net *link_net = rtnl_newlink_link_net(params);
 	struct macvlan_dev *vlan = netdev_priv(dev);
-	struct macvlan_port *port;
+	struct nlattr **data = params->data;
+	struct nlattr **tb = params->tb;
 	struct net_device *lowerdev;
-	int err;
-	int macmode;
+	struct macvlan_port *port;
 	bool create = false;
+	int macmode;
+	int err;
 
 	if (!tb[IFLA_LINK])
 		return -EINVAL;
 
-	lowerdev = __dev_get_by_index(src_net, nla_get_u32(tb[IFLA_LINK]));
+	lowerdev = __dev_get_by_index(link_net, nla_get_u32(tb[IFLA_LINK]));
 	if (lowerdev == NULL)
 		return -ENODEV;
 
@@ -1563,11 +1569,11 @@ destroy_macvlan_port:
 }
 EXPORT_SYMBOL_GPL(macvlan_common_newlink);
 
-static int macvlan_newlink(struct net *src_net, struct net_device *dev,
-			   struct nlattr *tb[], struct nlattr *data[],
+static int macvlan_newlink(struct net_device *dev,
+			   struct rtnl_newlink_params *params,
 			   struct netlink_ext_ack *extack)
 {
-	return macvlan_common_newlink(src_net, dev, tb, data, extack);
+	return macvlan_common_newlink(dev, params, extack);
 }
 
 void macvlan_dellink(struct net_device *dev, struct list_head *head)

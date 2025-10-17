@@ -13,6 +13,7 @@
  * https://www.ti.com/lit/ds/symlink/dac5573.pdf
  * https://www.ti.com/lit/ds/symlink/dac6573.pdf
  * https://www.ti.com/lit/ds/symlink/dac7573.pdf
+ * https://www.ti.com/lit/ds/symlink/dac081c081.pdf
  * https://www.ti.com/lit/ds/symlink/dac121c081.pdf
  */
 
@@ -215,7 +216,7 @@ static const struct iio_chan_spec_ext_info dac5571_ext_info[] = {
 	},
 	IIO_ENUM("powerdown_mode", IIO_SEPARATE, &dac5571_powerdown_mode),
 	IIO_ENUM_AVAILABLE("powerdown_mode", IIO_SHARED_BY_TYPE, &dac5571_powerdown_mode),
-	{},
+	{ }
 };
 
 #define dac5571_CHANNEL(chan, name) {				\
@@ -386,6 +387,7 @@ static void dac5571_remove(struct i2c_client *i2c)
 }
 
 static const struct of_device_id dac5571_of_id[] = {
+	{.compatible = "ti,dac081c081", .data = &dac5571_spec[single_8bit] },
 	{.compatible = "ti,dac121c081", .data = &dac5571_spec[single_12bit] },
 	{.compatible = "ti,dac5571", .data = &dac5571_spec[single_8bit] },
 	{.compatible = "ti,dac6571", .data = &dac5571_spec[single_10bit] },
@@ -396,11 +398,12 @@ static const struct of_device_id dac5571_of_id[] = {
 	{.compatible = "ti,dac5573", .data = &dac5571_spec[quad_8bit] },
 	{.compatible = "ti,dac6573", .data = &dac5571_spec[quad_10bit] },
 	{.compatible = "ti,dac7573", .data = &dac5571_spec[quad_12bit] },
-	{}
+	{ }
 };
 MODULE_DEVICE_TABLE(of, dac5571_of_id);
 
 static const struct i2c_device_id dac5571_id[] = {
+	{"dac081c081", (kernel_ulong_t)&dac5571_spec[single_8bit] },
 	{"dac121c081", (kernel_ulong_t)&dac5571_spec[single_12bit] },
 	{"dac5571", (kernel_ulong_t)&dac5571_spec[single_8bit] },
 	{"dac6571", (kernel_ulong_t)&dac5571_spec[single_10bit] },
@@ -411,7 +414,7 @@ static const struct i2c_device_id dac5571_id[] = {
 	{"dac5573", (kernel_ulong_t)&dac5571_spec[quad_8bit] },
 	{"dac6573", (kernel_ulong_t)&dac5571_spec[quad_10bit] },
 	{"dac7573", (kernel_ulong_t)&dac5571_spec[quad_12bit] },
-	{}
+	{ }
 };
 MODULE_DEVICE_TABLE(i2c, dac5571_id);
 

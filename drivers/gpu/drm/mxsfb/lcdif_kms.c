@@ -407,8 +407,7 @@ static void lcdif_crtc_mode_set_nofb(struct drm_crtc_state *crtc_state,
 	struct drm_display_mode *m = &crtc_state->adjusted_mode;
 
 	DRM_DEV_DEBUG_DRIVER(drm->dev, "Pixel clock: %dkHz (actual: %dkHz)\n",
-			     m->crtc_clock,
-			     (int)(clk_get_rate(lcdif->clk) / 1000));
+			     m->clock, (int)(clk_get_rate(lcdif->clk) / 1000));
 	DRM_DEV_DEBUG_DRIVER(drm->dev, "Bridge bus_flags: 0x%08X\n",
 			     lcdif_crtc_state->bus_flags);
 	DRM_DEV_DEBUG_DRIVER(drm->dev, "Mode flags: 0x%08X\n", m->flags);
@@ -434,7 +433,6 @@ static int lcdif_crtc_atomic_check(struct drm_crtc *crtc,
 	struct drm_connector *connector;
 	struct drm_encoder *encoder;
 	struct drm_bridge_state *bridge_state;
-	struct drm_bridge *bridge;
 	u32 bus_format, bus_flags;
 	bool format_set = false, flags_set = false;
 	int ret, i;
@@ -454,7 +452,8 @@ static int lcdif_crtc_atomic_check(struct drm_crtc *crtc,
 
 		encoder = connector_state->best_encoder;
 
-		bridge = drm_bridge_chain_get_first_bridge(encoder);
+		struct drm_bridge *bridge __free(drm_bridge_put) =
+			drm_bridge_chain_get_first_bridge(encoder);
 		if (!bridge)
 			continue;
 
@@ -538,7 +537,7 @@ static void lcdif_crtc_atomic_enable(struct drm_crtc *crtc,
 	struct drm_device *drm = lcdif->drm;
 	dma_addr_t paddr;
 
-	clk_set_rate(lcdif->clk, m->crtc_clock * 1000);
+	clk_set_rate(lcdif->clk, m->clock * 1000);
 
 	pm_runtime_get_sync(drm->dev);
 

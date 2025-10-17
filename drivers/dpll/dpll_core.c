@@ -29,7 +29,7 @@ static u32 dpll_pin_xa_id;
 	WARN_ON_ONCE(!xa_get_mark(&dpll_device_xa, (d)->id, DPLL_REGISTERED))
 #define ASSERT_DPLL_NOT_REGISTERED(d)	\
 	WARN_ON_ONCE(xa_get_mark(&dpll_device_xa, (d)->id, DPLL_REGISTERED))
-#define ASSERT_PIN_REGISTERED(p)	\
+#define ASSERT_DPLL_PIN_REGISTERED(p) \
 	WARN_ON_ONCE(!xa_get_mark(&dpll_pin_xa, (p)->id, DPLL_REGISTERED))
 
 struct dpll_device_registration {
@@ -42,6 +42,7 @@ struct dpll_pin_registration {
 	struct list_head list;
 	const struct dpll_pin_ops *ops;
 	void *priv;
+	void *cookie;
 };
 
 struct dpll_device *dpll_device_get_by_id(int id)
@@ -54,12 +55,14 @@ struct dpll_device *dpll_device_get_by_id(int id)
 
 static struct dpll_pin_registration *
 dpll_pin_registration_find(struct dpll_pin_ref *ref,
-			   const struct dpll_pin_ops *ops, void *priv)
+			   const struct dpll_pin_ops *ops, void *priv,
+			   void *cookie)
 {
 	struct dpll_pin_registration *reg;
 
 	list_for_each_entry(reg, &ref->registration_list, list) {
-		if (reg->ops == ops && reg->priv == priv)
+		if (reg->ops == ops && reg->priv == priv &&
+		    reg->cookie == cookie)
 			return reg;
 	}
 	return NULL;
@@ -67,7 +70,8 @@ dpll_pin_registration_find(struct dpll_pin_ref *ref,
 
 static int
 dpll_xa_ref_pin_add(struct xarray *xa_pins, struct dpll_pin *pin,
-		    const struct dpll_pin_ops *ops, void *priv)
+		    const struct dpll_pin_ops *ops, void *priv,
+		    void *cookie)
 {
 	struct dpll_pin_registration *reg;
 	struct dpll_pin_ref *ref;
@@ -78,7 +82,7 @@ dpll_xa_ref_pin_add(struct xarray *xa_pins, struct dpll_pin *pin,
 	xa_for_each(xa_pins, i, ref) {
 		if (ref->pin != pin)
 			continue;
-		reg = dpll_pin_registration_find(ref, ops, priv);
+		reg = dpll_pin_registration_find(ref, ops, priv, cookie);
 		if (reg) {
 			refcount_inc(&ref->refcount);
 			return 0;
@@ -111,6 +115,7 @@ dpll_xa_ref_pin_add(struct xarray *xa_pins, struct dpll_pin *pin,
 	}
 	reg->ops = ops;
 	reg->priv = priv;
+	reg->cookie = cookie;
 	if (ref_exists)
 		refcount_inc(&ref->refcount);
 	list_add_tail(&reg->list, &ref->registration_list);
@@ -119,7 +124,8 @@ dpll_xa_ref_pin_add(struct xarray *xa_pins, struct dpll_pin *pin,
 }
 
 static int dpll_xa_ref_pin_del(struct xarray *xa_pins, struct dpll_pin *pin,
-			       const struct dpll_pin_ops *ops, void *priv)
+			       const struct dpll_pin_ops *ops, void *priv,
+			       void *cookie)
 {
 	struct dpll_pin_registration *reg;
 	struct dpll_pin_ref *ref;
@@ -128,12 +134,12 @@ static int dpll_xa_ref_pin_del(struct xarray *xa_pins, struct dpll_pin *pin,
 	xa_for_each(xa_pins, i, ref) {
 		if (ref->pin != pin)
 			continue;
-		reg = dpll_pin_registration_find(ref, ops, priv);
+		reg = dpll_pin_registration_find(ref, ops, priv, cookie);
 		if (WARN_ON(!reg))
 			return -EINVAL;
+		list_del(&reg->list);
+		kfree(reg);
 		if (refcount_dec_and_test(&ref->refcount)) {
-			list_del(&reg->list);
-			kfree(reg);
 			xa_erase(xa_pins, i);
 			WARN_ON(!list_empty(&ref->registration_list));
 			kfree(ref);
@@ -146,7 +152,7 @@ static int dpll_xa_ref_pin_del(struct xarray *xa_pins, struct dpll_pin *pin,
 
 static int
 dpll_xa_ref_dpll_add(struct xarray *xa_dplls, struct dpll_device *dpll,
-		     const struct dpll_pin_ops *ops, void *priv)
+		     const struct dpll_pin_ops *ops, void *priv, void *cookie)
 {
 	struct dpll_pin_registration *reg;
 	struct dpll_pin_ref *ref;
@@ -157,7 +163,7 @@ dpll_xa_ref_dpll_add(struct xarray *xa_dplls, struct dpll_device *dpll,
 	xa_for_each(xa_dplls, i, ref) {
 		if (ref->dpll != dpll)
 			continue;
-		reg = dpll_pin_registration_find(ref, ops, priv);
+		reg = dpll_pin_registration_find(ref, ops, priv, cookie);
 		if (reg) {
 			refcount_inc(&ref->refcount);
 			return 0;
@@ -190,6 +196,7 @@ dpll_xa_ref_dpll_add(struct xarray *xa_dplls, struct dpll_device *dpll,
 	}
 	reg->ops = ops;
 	reg->priv = priv;
+	reg->cookie = cookie;
 	if (ref_exists)
 		refcount_inc(&ref->refcount);
 	list_add_tail(&reg->list, &ref->registration_list);
@@ -199,7 +206,7 @@ dpll_xa_ref_dpll_add(struct xarray *xa_dplls, struct dpll_device *dpll,
 
 static void
 dpll_xa_ref_dpll_del(struct xarray *xa_dplls, struct dpll_device *dpll,
-		     const struct dpll_pin_ops *ops, void *priv)
+		     const struct dpll_pin_ops *ops, void *priv, void *cookie)
 {
 	struct dpll_pin_registration *reg;
 	struct dpll_pin_ref *ref;
@@ -208,12 +215,12 @@ dpll_xa_ref_dpll_del(struct xarray *xa_dplls, struct dpll_device *dpll,
 	xa_for_each(xa_dplls, i, ref) {
 		if (ref->dpll != dpll)
 			continue;
-		reg = dpll_pin_registration_find(ref, ops, priv);
+		reg = dpll_pin_registration_find(ref, ops, priv, cookie);
 		if (WARN_ON(!reg))
 			return;
+		list_del(&reg->list);
+		kfree(reg);
 		if (refcount_dec_and_test(&ref->refcount)) {
-			list_del(&reg->list);
-			kfree(reg);
 			xa_erase(xa_dplls, i);
 			WARN_ON(!list_empty(&ref->registration_list));
 			kfree(ref);
@@ -425,6 +432,56 @@ void dpll_device_unregister(struct dpll_device *dpll,
 }
 EXPORT_SYMBOL_GPL(dpll_device_unregister);
 
+static void dpll_pin_prop_free(struct dpll_pin_properties *prop)
+{
+	kfree(prop->package_label);
+	kfree(prop->panel_label);
+	kfree(prop->board_label);
+	kfree(prop->freq_supported);
+}
+
+static int dpll_pin_prop_dup(const struct dpll_pin_properties *src,
+			     struct dpll_pin_properties *dst)
+{
+	if (WARN_ON(src->freq_supported && !src->freq_supported_num))
+		return -EINVAL;
+
+	memcpy(dst, src, sizeof(*dst));
+	if (src->freq_supported) {
+		size_t freq_size = src->freq_supported_num *
+				   sizeof(*src->freq_supported);
+		dst->freq_supported = kmemdup(src->freq_supported,
+					      freq_size, GFP_KERNEL);
+		if (!dst->freq_supported)
+			return -ENOMEM;
+	}
+	if (src->board_label) {
+		dst->board_label = kstrdup(src->board_label, GFP_KERNEL);
+		if (!dst->board_label)
+			goto err_board_label;
+	}
+	if (src->panel_label) {
+		dst->panel_label = kstrdup(src->panel_label, GFP_KERNEL);
+		if (!dst->panel_label)
+			goto err_panel_label;
+	}
+	if (src->package_label) {
+		dst->package_label = kstrdup(src->package_label, GFP_KERNEL);
+		if (!dst->package_label)
+			goto err_package_label;
+	}
+
+	return 0;
+
+err_package_label:
+	kfree(dst->panel_label);
+err_panel_label:
+	kfree(dst->board_label);
+err_board_label:
+	kfree(dst->freq_supported);
+	return -ENOMEM;
+}
+
 static struct dpll_pin *
 dpll_pin_alloc(u64 clock_id, u32 pin_idx, struct module *module,
 	       const struct dpll_pin_properties *prop)
@@ -441,23 +498,49 @@ dpll_pin_alloc(u64 clock_id, u32 pin_idx, struct module *module,
 	if (WARN_ON(prop->type < DPLL_PIN_TYPE_MUX ||
 		    prop->type > DPLL_PIN_TYPE_MAX)) {
 		ret = -EINVAL;
-		goto err;
+		goto err_pin_prop;
 	}
-	pin->prop = prop;
+	ret = dpll_pin_prop_dup(prop, &pin->prop);
+	if (ret)
+		goto err_pin_prop;
 	refcount_set(&pin->refcount, 1);
 	xa_init_flags(&pin->dpll_refs, XA_FLAGS_ALLOC);
 	xa_init_flags(&pin->parent_refs, XA_FLAGS_ALLOC);
+	xa_init_flags(&pin->ref_sync_pins, XA_FLAGS_ALLOC);
 	ret = xa_alloc_cyclic(&dpll_pin_xa, &pin->id, pin, xa_limit_32b,
 			      &dpll_pin_xa_id, GFP_KERNEL);
-	if (ret)
-		goto err;
+	if (ret < 0)
+		goto err_xa_alloc;
 	return pin;
-err:
+err_xa_alloc:
 	xa_destroy(&pin->dpll_refs);
 	xa_destroy(&pin->parent_refs);
+	xa_destroy(&pin->ref_sync_pins);
+	dpll_pin_prop_free(&pin->prop);
+err_pin_prop:
 	kfree(pin);
 	return ERR_PTR(ret);
 }
+
+static void dpll_netdev_pin_assign(struct net_device *dev, struct dpll_pin *dpll_pin)
+{
+	rtnl_lock();
+	rcu_assign_pointer(dev->dpll_pin, dpll_pin);
+	rtnl_unlock();
+}
+
+void dpll_netdev_pin_set(struct net_device *dev, struct dpll_pin *dpll_pin)
+{
+	WARN_ON(!dpll_pin);
+	dpll_netdev_pin_assign(dev, dpll_pin);
+}
+EXPORT_SYMBOL(dpll_netdev_pin_set);
+
+void dpll_netdev_pin_clear(struct net_device *dev)
+{
+	dpll_netdev_pin_assign(dev, NULL);
+}
+EXPORT_SYMBOL(dpll_netdev_pin_clear);
 
 /**
  * dpll_pin_get - find existing or create new dpll pin
@@ -511,10 +594,12 @@ void dpll_pin_put(struct dpll_pin *pin)
 {
 	mutex_lock(&dpll_lock);
 	if (refcount_dec_and_test(&pin->refcount)) {
+		xa_erase(&dpll_pin_xa, pin->id);
 		xa_destroy(&pin->dpll_refs);
 		xa_destroy(&pin->parent_refs);
-		xa_erase(&dpll_pin_xa, pin->id);
-		kfree(pin);
+		xa_destroy(&pin->ref_sync_pins);
+		dpll_pin_prop_free(&pin->prop);
+		kfree_rcu(pin, rcu);
 	}
 	mutex_unlock(&dpll_lock);
 }
@@ -522,14 +607,14 @@ EXPORT_SYMBOL_GPL(dpll_pin_put);
 
 static int
 __dpll_pin_register(struct dpll_device *dpll, struct dpll_pin *pin,
-		    const struct dpll_pin_ops *ops, void *priv)
+		    const struct dpll_pin_ops *ops, void *priv, void *cookie)
 {
 	int ret;
 
-	ret = dpll_xa_ref_pin_add(&dpll->pin_refs, pin, ops, priv);
+	ret = dpll_xa_ref_pin_add(&dpll->pin_refs, pin, ops, priv, cookie);
 	if (ret)
 		return ret;
-	ret = dpll_xa_ref_dpll_add(&pin->dpll_refs, dpll, ops, priv);
+	ret = dpll_xa_ref_dpll_add(&pin->dpll_refs, dpll, ops, priv, cookie);
 	if (ret)
 		goto ref_pin_del;
 	xa_set_mark(&dpll_pin_xa, pin->id, DPLL_REGISTERED);
@@ -538,7 +623,7 @@ __dpll_pin_register(struct dpll_device *dpll, struct dpll_pin *pin,
 	return ret;
 
 ref_pin_del:
-	dpll_xa_ref_pin_del(&dpll->pin_refs, pin, ops, priv);
+	dpll_xa_ref_pin_del(&dpll->pin_refs, pin, ops, priv, cookie);
 	return ret;
 }
 
@@ -564,27 +649,41 @@ dpll_pin_register(struct dpll_device *dpll, struct dpll_pin *pin,
 	    WARN_ON(!ops->state_on_dpll_get) ||
 	    WARN_ON(!ops->direction_get))
 		return -EINVAL;
-	if (ASSERT_DPLL_REGISTERED(dpll))
-		return -EINVAL;
 
 	mutex_lock(&dpll_lock);
 	if (WARN_ON(!(dpll->module == pin->module &&
 		      dpll->clock_id == pin->clock_id)))
 		ret = -EINVAL;
 	else
-		ret = __dpll_pin_register(dpll, pin, ops, priv);
+		ret = __dpll_pin_register(dpll, pin, ops, priv, NULL);
 	mutex_unlock(&dpll_lock);
 
 	return ret;
 }
 EXPORT_SYMBOL_GPL(dpll_pin_register);
 
+static void dpll_pin_ref_sync_pair_del(u32 ref_sync_pin_id)
+{
+	struct dpll_pin *pin, *ref_sync_pin;
+	unsigned long i;
+
+	xa_for_each(&dpll_pin_xa, i, pin) {
+		ref_sync_pin = xa_load(&pin->ref_sync_pins, ref_sync_pin_id);
+		if (ref_sync_pin) {
+			xa_erase(&pin->ref_sync_pins, ref_sync_pin_id);
+			__dpll_pin_change_ntf(pin);
+		}
+	}
+}
+
 static void
 __dpll_pin_unregister(struct dpll_device *dpll, struct dpll_pin *pin,
-		      const struct dpll_pin_ops *ops, void *priv)
+		      const struct dpll_pin_ops *ops, void *priv, void *cookie)
 {
-	dpll_xa_ref_pin_del(&dpll->pin_refs, pin, ops, priv);
-	dpll_xa_ref_dpll_del(&pin->dpll_refs, dpll, ops, priv);
+	ASSERT_DPLL_PIN_REGISTERED(pin);
+	dpll_pin_ref_sync_pair_del(pin->id);
+	dpll_xa_ref_pin_del(&dpll->pin_refs, pin, ops, priv, cookie);
+	dpll_xa_ref_dpll_del(&pin->dpll_refs, dpll, ops, priv, cookie);
 	if (xa_empty(&pin->dpll_refs))
 		xa_clear_mark(&dpll_pin_xa, pin->id, DPLL_REGISTERED);
 }
@@ -609,7 +708,7 @@ void dpll_pin_unregister(struct dpll_device *dpll, struct dpll_pin *pin,
 
 	mutex_lock(&dpll_lock);
 	dpll_pin_delete_ntf(pin);
-	__dpll_pin_unregister(dpll, pin, ops, priv);
+	__dpll_pin_unregister(dpll, pin, ops, priv, NULL);
 	mutex_unlock(&dpll_lock);
 }
 EXPORT_SYMBOL_GPL(dpll_pin_unregister);
@@ -636,23 +735,21 @@ int dpll_pin_on_pin_register(struct dpll_pin *parent, struct dpll_pin *pin,
 	unsigned long i, stop;
 	int ret;
 
-	if (WARN_ON(parent->prop->type != DPLL_PIN_TYPE_MUX))
+	if (WARN_ON(parent->prop.type != DPLL_PIN_TYPE_MUX))
 		return -EINVAL;
 
 	if (WARN_ON(!ops) ||
 	    WARN_ON(!ops->state_on_pin_get) ||
 	    WARN_ON(!ops->direction_get))
 		return -EINVAL;
-	if (ASSERT_PIN_REGISTERED(parent))
-		return -EINVAL;
 
 	mutex_lock(&dpll_lock);
-	ret = dpll_xa_ref_pin_add(&pin->parent_refs, parent, ops, priv);
+	ret = dpll_xa_ref_pin_add(&pin->parent_refs, parent, ops, priv, pin);
 	if (ret)
 		goto unlock;
 	refcount_inc(&pin->refcount);
 	xa_for_each(&parent->dpll_refs, i, ref) {
-		ret = __dpll_pin_register(ref->dpll, pin, ops, priv);
+		ret = __dpll_pin_register(ref->dpll, pin, ops, priv, parent);
 		if (ret) {
 			stop = i;
 			goto dpll_unregister;
@@ -666,11 +763,12 @@ int dpll_pin_on_pin_register(struct dpll_pin *parent, struct dpll_pin *pin,
 dpll_unregister:
 	xa_for_each(&parent->dpll_refs, i, ref)
 		if (i < stop) {
-			__dpll_pin_unregister(ref->dpll, pin, ops, priv);
+			__dpll_pin_unregister(ref->dpll, pin, ops, priv,
+					      parent);
 			dpll_pin_delete_ntf(pin);
 		}
 	refcount_dec(&pin->refcount);
-	dpll_xa_ref_pin_del(&pin->parent_refs, parent, ops, priv);
+	dpll_xa_ref_pin_del(&pin->parent_refs, parent, ops, priv, pin);
 unlock:
 	mutex_unlock(&dpll_lock);
 	return ret;
@@ -695,13 +793,40 @@ void dpll_pin_on_pin_unregister(struct dpll_pin *parent, struct dpll_pin *pin,
 
 	mutex_lock(&dpll_lock);
 	dpll_pin_delete_ntf(pin);
-	dpll_xa_ref_pin_del(&pin->parent_refs, parent, ops, priv);
+	dpll_xa_ref_pin_del(&pin->parent_refs, parent, ops, priv, pin);
 	refcount_dec(&pin->refcount);
 	xa_for_each(&pin->dpll_refs, i, ref)
-		__dpll_pin_unregister(ref->dpll, pin, ops, priv);
+		__dpll_pin_unregister(ref->dpll, pin, ops, priv, parent);
 	mutex_unlock(&dpll_lock);
 }
 EXPORT_SYMBOL_GPL(dpll_pin_on_pin_unregister);
+
+/**
+ * dpll_pin_ref_sync_pair_add - create a reference sync signal pin pair
+ * @pin: pin which produces the base frequency
+ * @ref_sync_pin: pin which produces the sync signal
+ *
+ * Once pins are paired, the user-space configuration of reference sync pair
+ * is possible.
+ * Context: Acquires a lock (dpll_lock)
+ * Return:
+ * * 0 on success
+ * * negative - error value
+ */
+int dpll_pin_ref_sync_pair_add(struct dpll_pin *pin,
+			       struct dpll_pin *ref_sync_pin)
+{
+	int ret;
+
+	mutex_lock(&dpll_lock);
+	ret = xa_insert(&pin->ref_sync_pins, ref_sync_pin->id,
+			ref_sync_pin, GFP_KERNEL);
+	__dpll_pin_change_ntf(pin);
+	mutex_unlock(&dpll_lock);
+
+	return ret;
+}
+EXPORT_SYMBOL_GPL(dpll_pin_ref_sync_pair_add);
 
 static struct dpll_device_registration *
 dpll_device_registration_first(struct dpll_device *dpll)

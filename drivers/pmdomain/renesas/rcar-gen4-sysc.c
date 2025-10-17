@@ -50,13 +50,13 @@
 #define SYSCSR_BUSY		GENMASK(1, 0)	/* All bit sets is not busy */
 
 #define SYSCSR_TIMEOUT		10000
-#define SYSCSR_DELAY_US		10
+#define SYSCSR_DELAY_US		1
 
-#define PDRESR_RETRIES		1000
-#define PDRESR_DELAY_US		10
+#define PDRESR_RETRIES		10000
+#define PDRESR_DELAY_US		1
 
-#define SYSCISR_TIMEOUT		10000
-#define SYSCISR_DELAY_US	10
+#define SYSCISCR_TIMEOUT	10000
+#define SYSCISCR_DELAY_US	1
 
 #define RCAR_GEN4_PD_ALWAYS_ON	64
 #define NUM_DOMAINS_EACH_REG	BITS_PER_TYPE(u32)
@@ -97,7 +97,7 @@ static int clear_irq_flags(unsigned int reg_idx, unsigned int isr_mask)
 
 	ret = readl_poll_timeout_atomic(rcar_gen4_sysc_base + SYSCISCR(reg_idx),
 					val, !(val & isr_mask),
-					SYSCISR_DELAY_US, SYSCISR_TIMEOUT);
+					SYSCISCR_DELAY_US, SYSCISCR_TIMEOUT);
 	if (ret < 0) {
 		pr_err("\n %s : Can not clear IRQ flags in SYSCISCR", __func__);
 		return -EIO;
@@ -157,7 +157,7 @@ static int rcar_gen4_sysc_power(u8 pdr, bool on)
 	/* Wait until the power shutoff or resume request has completed * */
 	ret = readl_poll_timeout_atomic(rcar_gen4_sysc_base + SYSCISCR(reg_idx),
 					val, (val & isr_mask),
-					SYSCISR_DELAY_US, SYSCISR_TIMEOUT);
+					SYSCISCR_DELAY_US, SYSCISCR_TIMEOUT);
 	if (ret < 0) {
 		ret = -EIO;
 		goto out;
@@ -251,6 +251,7 @@ static int __init rcar_gen4_sysc_pd_setup(struct rcar_gen4_sysc_pd *pd)
 		genpd->detach_dev = cpg_mssr_detach_dev;
 	}
 
+	genpd->flags |= GENPD_FLAG_NO_STAY_ON;
 	genpd->power_off = rcar_gen4_sysc_pd_power_off;
 	genpd->power_on = rcar_gen4_sysc_pd_power_on;
 
@@ -284,6 +285,9 @@ static const struct of_device_id rcar_gen4_sysc_matches[] __initconst = {
 #endif
 #ifdef CONFIG_SYSC_R8A779G0
 	{ .compatible = "renesas,r8a779g0-sysc", .data = &r8a779g0_sysc_info },
+#endif
+#ifdef CONFIG_SYSC_R8A779H0
+	{ .compatible = "renesas,r8a779h0-sysc", .data = &r8a779h0_sysc_info },
 #endif
 	{ /* sentinel */ }
 };
@@ -335,11 +339,6 @@ static int __init rcar_gen4_sysc_pd_init(void)
 		struct rcar_gen4_sysc_pd *pd;
 		size_t n;
 
-		if (!area->name) {
-			/* Skip NULLified area */
-			continue;
-		}
-
 		n = strlen(area->name) + 1;
 		pd = kzalloc(sizeof(*pd) + n, GFP_KERNEL);
 		if (!pd) {
@@ -376,4 +375,4 @@ out_put:
 	of_node_put(np);
 	return error;
 }
-early_initcall(rcar_gen4_sysc_pd_init);
+postcore_initcall(rcar_gen4_sysc_pd_init);

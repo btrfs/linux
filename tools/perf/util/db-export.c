@@ -146,10 +146,10 @@ int db_export__comm_thread(struct db_export *dbe, struct comm *comm,
 int db_export__dso(struct db_export *dbe, struct dso *dso,
 		   struct machine *machine)
 {
-	if (dso->db_id)
+	if (dso__db_id(dso))
 		return 0;
 
-	dso->db_id = ++dbe->dso_last_db_id;
+	dso__set_db_id(dso, ++dbe->dso_last_db_id);
 
 	if (dbe->export_dso)
 		return dbe->export_dso(dbe, dso, machine);
@@ -181,10 +181,10 @@ static int db_ids_from_al(struct db_export *dbe, struct addr_location *al,
 	if (al->map) {
 		struct dso *dso = map__dso(al->map);
 
-		err = db_export__dso(dbe, dso, maps__machine(al->maps));
+		err = db_export__dso(dbe, dso, maps__machine(thread__maps(al->thread)));
 		if (err)
 			return err;
-		*dso_db_id = dso->db_id;
+		*dso_db_id = dso__db_id(dso);
 
 		if (!al->sym) {
 			al->sym = symbol__new(al->addr, 0, 0, 0, "unknown");
@@ -256,6 +256,7 @@ static struct call_path *call_path_from_sample(struct db_export *dbe,
 		al.map = map__get(node->ms.map);
 		al.maps = maps__get(thread__maps(thread));
 		al.addr = node->ip;
+		al.thread = thread__get(thread);
 
 		if (al.map && !al.sym)
 			al.sym = dso__find_symbol(map__dso(al.map), al.addr);
@@ -358,14 +359,18 @@ int db_export__sample(struct db_export *dbe, union perf_event *event,
 	};
 	struct thread *main_thread;
 	struct comm *comm = NULL;
-	struct machine *machine;
+	struct machine *machine = NULL;
 	int err;
+
+	if (thread__maps(thread))
+		machine = maps__machine(thread__maps(thread));
+	if (!machine)
+		return -1;
 
 	err = db_export__evsel(dbe, evsel);
 	if (err)
 		return err;
 
-	machine = maps__machine(al->maps);
 	err = db_export__machine(dbe, machine);
 	if (err)
 		return err;

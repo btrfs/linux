@@ -165,6 +165,12 @@ include::itrace.txt[]
 --type-stat::
 	Show stats for the data type annotation.
 
+--skip-empty::
+	Do not display empty (or dummy) events.
+
+--code-with-type::
+	Show data type info in code annotation (for memory instructions only).
+
 
 SEE ALSO
 --------

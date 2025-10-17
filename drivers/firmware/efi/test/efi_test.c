@@ -361,6 +361,10 @@ static long efi_runtime_get_waketime(unsigned long arg)
 						getwakeuptime.enabled))
 		return -EFAULT;
 
+	if (getwakeuptime.pending && put_user(pending,
+						getwakeuptime.pending))
+		return -EFAULT;
+
 	if (getwakeuptime.time) {
 		if (copy_to_user(getwakeuptime.time, &efi_time,
 				sizeof(efi_time_t)))
@@ -750,7 +754,6 @@ static const struct file_operations efi_test_fops = {
 	.unlocked_ioctl	= efi_test_ioctl,
 	.open		= efi_test_open,
 	.release	= efi_test_close,
-	.llseek		= no_llseek,
 };
 
 static struct miscdevice efi_test_dev = {

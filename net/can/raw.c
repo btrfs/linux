@@ -75,27 +75,31 @@ MODULE_ALIAS("can-proto-1");
  */
 
 struct uniqframe {
-	int skbcnt;
 	const struct sk_buff *skb;
+	int skbcnt;
 	unsigned int join_rx_count;
 };
 
 struct raw_sock {
 	struct sock sk;
-	int bound;
-	int ifindex;
 	struct net_device *dev;
 	netdevice_tracker dev_tracker;
 	struct list_head notifier;
-	int loopback;
-	int recv_own_msgs;
-	int fd_frames;
-	int xl_frames;
-	int join_filters;
+	int ifindex;
+	unsigned int bound:1;
+	unsigned int loopback:1;
+	unsigned int recv_own_msgs:1;
+	unsigned int fd_frames:1;
+	unsigned int xl_frames:1;
+	unsigned int join_filters:1;
+	struct can_raw_vcid_options raw_vcid_opts;
+	canid_t tx_vcid_shifted;
+	canid_t rx_vcid_shifted;
+	canid_t rx_vcid_mask_shifted;
+	can_err_mask_t err_mask;
 	int count;                 /* number of active filters */
 	struct can_filter dfilter; /* default/single filter */
 	struct can_filter *filter; /* pointer to filter(s) */
-	can_err_mask_t err_mask;
 	struct uniqframe __percpu *uniq;
 };
 
@@ -125,6 +129,7 @@ static void raw_rcv(struct sk_buff *oskb, void *data)
 {
 	struct sock *sk = (struct sock *)data;
 	struct raw_sock *ro = raw_sk(sk);
+	enum skb_drop_reason reason;
 	struct sockaddr_can *addr;
 	struct sk_buff *skb;
 	unsigned int *pflags;
@@ -134,9 +139,28 @@ static void raw_rcv(struct sk_buff *oskb, void *data)
 		return;
 
 	/* make sure to not pass oversized frames to the socket */
-	if ((!ro->fd_frames && can_is_canfd_skb(oskb)) ||
-	    (!ro->xl_frames && can_is_canxl_skb(oskb)))
+	if (!ro->fd_frames && can_is_canfd_skb(oskb))
 		return;
+
+	if (can_is_canxl_skb(oskb)) {
+		struct canxl_frame *cxl = (struct canxl_frame *)oskb->data;
+
+		/* make sure to not pass oversized frames to the socket */
+		if (!ro->xl_frames)
+			return;
+
+		/* filter CAN XL VCID content */
+		if (ro->raw_vcid_opts.flags & CAN_RAW_XL_VCID_RX_FILTER) {
+			/* apply VCID filter if user enabled the filter */
+			if ((cxl->prio & ro->rx_vcid_mask_shifted) !=
+			    (ro->rx_vcid_shifted & ro->rx_vcid_mask_shifted))
+				return;
+		} else {
+			/* no filter => do not forward VCID tagged frames */
+			if (cxl->prio & CANXL_VCID_MASK)
+				return;
+		}
+	}
 
 	/* eliminate multiple filter matches for the same skb */
 	if (this_cpu_ptr(ro->uniq)->skb == oskb &&
@@ -182,8 +206,8 @@ static void raw_rcv(struct sk_buff *oskb, void *data)
 	if (oskb->sk == sk)
 		*pflags |= MSG_CONFIRM;
 
-	if (sock_queue_rcv_skb(sk, skb) < 0)
-		kfree_skb(skb);
+	if (sock_queue_rcv_skb_reason(sk, skb, &reason) < 0)
+		sk_skb_reason_drop(sk, skb, reason);
 }
 
 static int raw_enable_filters(struct net *net, struct net_device *dev,
@@ -374,11 +398,13 @@ static int raw_release(struct socket *sock)
 {
 	struct sock *sk = sock->sk;
 	struct raw_sock *ro;
+	struct net *net;
 
 	if (!sk)
 		return 0;
 
 	ro = raw_sk(sk);
+	net = sock_net(sk);
 
 	spin_lock(&raw_notifier_lock);
 	while (raw_busy_notifier == ro) {
@@ -398,7 +424,7 @@ static int raw_release(struct socket *sock)
 			raw_disable_allfilters(dev_net(ro->dev), ro->dev, sk);
 			netdev_put(ro->dev, &ro->dev_tracker);
 		} else {
-			raw_disable_allfilters(sock_net(sk), NULL, sk);
+			raw_disable_allfilters(net, NULL, sk);
 		}
 	}
 
@@ -417,6 +443,7 @@ static int raw_release(struct socket *sock)
 	release_sock(sk);
 	rtnl_unlock();
 
+	sock_prot_inuse_add(net, sk->sk_prot, -1);
 	sock_put(sk);
 
 	return 0;
@@ -533,8 +560,8 @@ static int raw_setsockopt(struct socket *sock, int level, int optname,
 	struct can_filter sfilter;         /* single filter */
 	struct net_device *dev = NULL;
 	can_err_mask_t err_mask = 0;
-	int fd_frames;
 	int count = 0;
+	int flag;
 	int err = 0;
 
 	if (level != SOL_CAN_RAW)
@@ -655,56 +682,74 @@ static int raw_setsockopt(struct socket *sock, int level, int optname,
 		break;
 
 	case CAN_RAW_LOOPBACK:
-		if (optlen != sizeof(ro->loopback))
+		if (optlen != sizeof(flag))
 			return -EINVAL;
 
-		if (copy_from_sockptr(&ro->loopback, optval, optlen))
+		if (copy_from_sockptr(&flag, optval, optlen))
 			return -EFAULT;
 
+		ro->loopback = !!flag;
 		break;
 
 	case CAN_RAW_RECV_OWN_MSGS:
-		if (optlen != sizeof(ro->recv_own_msgs))
+		if (optlen != sizeof(flag))
 			return -EINVAL;
 
-		if (copy_from_sockptr(&ro->recv_own_msgs, optval, optlen))
+		if (copy_from_sockptr(&flag, optval, optlen))
 			return -EFAULT;
 
+		ro->recv_own_msgs = !!flag;
 		break;
 
 	case CAN_RAW_FD_FRAMES:
-		if (optlen != sizeof(fd_frames))
+		if (optlen != sizeof(flag))
 			return -EINVAL;
 
-		if (copy_from_sockptr(&fd_frames, optval, optlen))
+		if (copy_from_sockptr(&flag, optval, optlen))
 			return -EFAULT;
 
 		/* Enabling CAN XL includes CAN FD */
-		if (ro->xl_frames && !fd_frames)
+		if (ro->xl_frames && !flag)
 			return -EINVAL;
 
-		ro->fd_frames = fd_frames;
+		ro->fd_frames = !!flag;
 		break;
 
 	case CAN_RAW_XL_FRAMES:
-		if (optlen != sizeof(ro->xl_frames))
+		if (optlen != sizeof(flag))
 			return -EINVAL;
 
-		if (copy_from_sockptr(&ro->xl_frames, optval, optlen))
+		if (copy_from_sockptr(&flag, optval, optlen))
 			return -EFAULT;
+
+		ro->xl_frames = !!flag;
 
 		/* Enabling CAN XL includes CAN FD */
 		if (ro->xl_frames)
 			ro->fd_frames = ro->xl_frames;
 		break;
 
-	case CAN_RAW_JOIN_FILTERS:
-		if (optlen != sizeof(ro->join_filters))
+	case CAN_RAW_XL_VCID_OPTS:
+		if (optlen != sizeof(ro->raw_vcid_opts))
 			return -EINVAL;
 
-		if (copy_from_sockptr(&ro->join_filters, optval, optlen))
+		if (copy_from_sockptr(&ro->raw_vcid_opts, optval, optlen))
 			return -EFAULT;
 
+		/* prepare 32 bit values for handling in hot path */
+		ro->tx_vcid_shifted = ro->raw_vcid_opts.tx_vcid << CANXL_VCID_OFFSET;
+		ro->rx_vcid_shifted = ro->raw_vcid_opts.rx_vcid << CANXL_VCID_OFFSET;
+		ro->rx_vcid_mask_shifted = ro->raw_vcid_opts.rx_vcid_mask << CANXL_VCID_OFFSET;
+		break;
+
+	case CAN_RAW_JOIN_FILTERS:
+		if (optlen != sizeof(flag))
+			return -EINVAL;
+
+		if (copy_from_sockptr(&flag, optval, optlen))
+			return -EFAULT;
+
+		ro->join_filters = !!flag;
 		break;
 
 	default:
@@ -718,9 +763,9 @@ static int raw_getsockopt(struct socket *sock, int level, int optname,
 {
 	struct sock *sk = sock->sk;
 	struct raw_sock *ro = raw_sk(sk);
+	int flag;
 	int len;
 	void *val;
-	int err = 0;
 
 	if (level != SOL_CAN_RAW)
 		return -EINVAL;
@@ -730,7 +775,9 @@ static int raw_getsockopt(struct socket *sock, int level, int optname,
 		return -EINVAL;
 
 	switch (optname) {
-	case CAN_RAW_FILTER:
+	case CAN_RAW_FILTER: {
+		int err = 0;
+
 		lock_sock(sk);
 		if (ro->count > 0) {
 			int fsize = ro->count * sizeof(struct can_filter);
@@ -755,7 +802,7 @@ static int raw_getsockopt(struct socket *sock, int level, int optname,
 		if (!err)
 			err = put_user(len, optlen);
 		return err;
-
+	}
 	case CAN_RAW_ERR_FILTER:
 		if (len > sizeof(can_err_mask_t))
 			len = sizeof(can_err_mask_t);
@@ -765,31 +812,55 @@ static int raw_getsockopt(struct socket *sock, int level, int optname,
 	case CAN_RAW_LOOPBACK:
 		if (len > sizeof(int))
 			len = sizeof(int);
-		val = &ro->loopback;
+		flag = ro->loopback;
+		val = &flag;
 		break;
 
 	case CAN_RAW_RECV_OWN_MSGS:
 		if (len > sizeof(int))
 			len = sizeof(int);
-		val = &ro->recv_own_msgs;
+		flag = ro->recv_own_msgs;
+		val = &flag;
 		break;
 
 	case CAN_RAW_FD_FRAMES:
 		if (len > sizeof(int))
 			len = sizeof(int);
-		val = &ro->fd_frames;
+		flag = ro->fd_frames;
+		val = &flag;
 		break;
 
 	case CAN_RAW_XL_FRAMES:
 		if (len > sizeof(int))
 			len = sizeof(int);
-		val = &ro->xl_frames;
+		flag = ro->xl_frames;
+		val = &flag;
 		break;
 
+	case CAN_RAW_XL_VCID_OPTS: {
+		int err = 0;
+
+		/* user space buffer to small for VCID opts? */
+		if (len < sizeof(ro->raw_vcid_opts)) {
+			/* return -ERANGE and needed space in optlen */
+			err = -ERANGE;
+			if (put_user(sizeof(ro->raw_vcid_opts), optlen))
+				err = -EFAULT;
+		} else {
+			if (len > sizeof(ro->raw_vcid_opts))
+				len = sizeof(ro->raw_vcid_opts);
+			if (copy_to_user(optval, &ro->raw_vcid_opts, len))
+				err = -EFAULT;
+		}
+		if (!err)
+			err = put_user(len, optlen);
+		return err;
+	}
 	case CAN_RAW_JOIN_FILTERS:
 		if (len > sizeof(int))
 			len = sizeof(int);
-		val = &ro->join_filters;
+		flag = ro->join_filters;
+		val = &flag;
 		break;
 
 	default:
@@ -803,23 +874,41 @@ static int raw_getsockopt(struct socket *sock, int level, int optname,
 	return 0;
 }
 
-static bool raw_bad_txframe(struct raw_sock *ro, struct sk_buff *skb, int mtu)
+static void raw_put_canxl_vcid(struct raw_sock *ro, struct sk_buff *skb)
+{
+	struct canxl_frame *cxl = (struct canxl_frame *)skb->data;
+
+	/* sanitize non CAN XL bits */
+	cxl->prio &= (CANXL_PRIO_MASK | CANXL_VCID_MASK);
+
+	/* clear VCID in CAN XL frame if pass through is disabled */
+	if (!(ro->raw_vcid_opts.flags & CAN_RAW_XL_VCID_TX_PASS))
+		cxl->prio &= CANXL_PRIO_MASK;
+
+	/* set VCID in CAN XL frame if enabled */
+	if (ro->raw_vcid_opts.flags & CAN_RAW_XL_VCID_TX_SET) {
+		cxl->prio &= CANXL_PRIO_MASK;
+		cxl->prio |= ro->tx_vcid_shifted;
+	}
+}
+
+static unsigned int raw_check_txframe(struct raw_sock *ro, struct sk_buff *skb, int mtu)
 {
 	/* Classical CAN -> no checks for flags and device capabilities */
 	if (can_is_can_skb(skb))
-		return false;
+		return CAN_MTU;
 
 	/* CAN FD -> needs to be enabled and a CAN FD or CAN XL device */
 	if (ro->fd_frames && can_is_canfd_skb(skb) &&
 	    (mtu == CANFD_MTU || can_is_canxl_dev_mtu(mtu)))
-		return false;
+		return CANFD_MTU;
 
 	/* CAN XL -> needs to be enabled and a CAN XL device */
 	if (ro->xl_frames && can_is_canxl_skb(skb) &&
 	    can_is_canxl_dev_mtu(mtu))
-		return false;
+		return CANXL_MTU;
 
-	return true;
+	return 0;
 }
 
 static int raw_sendmsg(struct socket *sock, struct msghdr *msg, size_t size)
@@ -829,6 +918,7 @@ static int raw_sendmsg(struct socket *sock, struct msghdr *msg, size_t size)
 	struct sockcm_cookie sockc;
 	struct sk_buff *skb;
 	struct net_device *dev;
+	unsigned int txmtu;
 	int ifindex;
 	int err = -EINVAL;
 
@@ -869,8 +959,15 @@ static int raw_sendmsg(struct socket *sock, struct msghdr *msg, size_t size)
 		goto free_skb;
 
 	err = -EINVAL;
-	if (raw_bad_txframe(ro, skb, dev->mtu))
+
+	/* check for valid CAN (CC/FD/XL) frame content */
+	txmtu = raw_check_txframe(ro, skb, READ_ONCE(dev->mtu));
+	if (!txmtu)
 		goto free_skb;
+
+	/* only CANXL: clear/forward/set VCID value */
+	if (txmtu == CANXL_MTU)
+		raw_put_canxl_vcid(ro, skb);
 
 	sockcm_init(&sockc, sk);
 	if (msg->msg_controllen) {
@@ -880,11 +977,11 @@ static int raw_sendmsg(struct socket *sock, struct msghdr *msg, size_t size)
 	}
 
 	skb->dev = dev;
-	skb->priority = READ_ONCE(sk->sk_priority);
-	skb->mark = READ_ONCE(sk->sk_mark);
+	skb->priority = sockc.priority;
+	skb->mark = sockc.mark;
 	skb->tstamp = sockc.transmit_time;
 
-	skb_setup_tx_timestamp(skb, sockc.tsflags);
+	skb_setup_tx_timestamp(skb, &sockc);
 
 	err = can_send(skb, ro->loopback);
 

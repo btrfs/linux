@@ -64,14 +64,14 @@ void copy_to_user_page(struct vm_area_struct *vma, struct page *page,
 	struct folio *folio = page_folio(page);
 
 	if (boot_cpu_data.dcache.n_aliases && folio_mapped(folio) &&
-	    test_bit(PG_dcache_clean, &folio->flags)) {
+	    test_bit(PG_dcache_clean, &folio->flags.f)) {
 		void *vto = kmap_coherent(page, vaddr) + (vaddr & ~PAGE_MASK);
 		memcpy(vto, src, len);
 		kunmap_coherent(vto);
 	} else {
 		memcpy(dst, src, len);
 		if (boot_cpu_data.dcache.n_aliases)
-			clear_bit(PG_dcache_clean, &folio->flags);
+			clear_bit(PG_dcache_clean, &folio->flags.f);
 	}
 
 	if (vma->vm_flags & VM_EXEC)
@@ -84,15 +84,15 @@ void copy_from_user_page(struct vm_area_struct *vma, struct page *page,
 {
 	struct folio *folio = page_folio(page);
 
-	if (boot_cpu_data.dcache.n_aliases && page_mapcount(page) &&
-	    test_bit(PG_dcache_clean, &folio->flags)) {
+	if (boot_cpu_data.dcache.n_aliases && folio_mapped(folio) &&
+	    test_bit(PG_dcache_clean, &folio->flags.f)) {
 		void *vfrom = kmap_coherent(page, vaddr) + (vaddr & ~PAGE_MASK);
 		memcpy(dst, vfrom, len);
 		kunmap_coherent(vfrom);
 	} else {
 		memcpy(dst, src, len);
 		if (boot_cpu_data.dcache.n_aliases)
-			clear_bit(PG_dcache_clean, &folio->flags);
+			clear_bit(PG_dcache_clean, &folio->flags.f);
 	}
 }
 
@@ -105,7 +105,7 @@ void copy_user_highpage(struct page *to, struct page *from,
 	vto = kmap_atomic(to);
 
 	if (boot_cpu_data.dcache.n_aliases && folio_mapped(src) &&
-	    test_bit(PG_dcache_clean, &src->flags)) {
+	    test_bit(PG_dcache_clean, &src->flags.f)) {
 		vfrom = kmap_coherent(from, vaddr);
 		copy_page(vto, vfrom);
 		kunmap_coherent(vfrom);
@@ -148,7 +148,7 @@ void __update_cache(struct vm_area_struct *vma,
 
 	if (pfn_valid(pfn)) {
 		struct folio *folio = page_folio(pfn_to_page(pfn));
-		int dirty = !test_and_set_bit(PG_dcache_clean, &folio->flags);
+		int dirty = !test_and_set_bit(PG_dcache_clean, &folio->flags.f);
 		if (dirty)
 			__flush_purge_region(folio_address(folio),
 						folio_size(folio));
@@ -162,7 +162,7 @@ void __flush_anon_page(struct page *page, unsigned long vmaddr)
 
 	if (pages_do_alias(addr, vmaddr)) {
 		if (boot_cpu_data.dcache.n_aliases && folio_mapped(folio) &&
-		    test_bit(PG_dcache_clean, &folio->flags)) {
+		    test_bit(PG_dcache_clean, &folio->flags.f)) {
 			void *kaddr;
 
 			kaddr = kmap_coherent(page, vmaddr);
@@ -320,30 +320,20 @@ void __init cpu_cache_init(void)
 		goto skip;
 
 	if (boot_cpu_data.type == CPU_J2) {
-		extern void __weak j2_cache_init(void);
-
 		j2_cache_init();
 	} else if (boot_cpu_data.family == CPU_FAMILY_SH2) {
-		extern void __weak sh2_cache_init(void);
-
 		sh2_cache_init();
 	}
 
 	if (boot_cpu_data.family == CPU_FAMILY_SH2A) {
-		extern void __weak sh2a_cache_init(void);
-
 		sh2a_cache_init();
 	}
 
 	if (boot_cpu_data.family == CPU_FAMILY_SH3) {
-		extern void __weak sh3_cache_init(void);
-
 		sh3_cache_init();
 
 		if ((boot_cpu_data.type == CPU_SH7705) &&
 		    (boot_cpu_data.dcache.sets == 512)) {
-			extern void __weak sh7705_cache_init(void);
-
 			sh7705_cache_init();
 		}
 	}
@@ -351,14 +341,10 @@ void __init cpu_cache_init(void)
 	if ((boot_cpu_data.family == CPU_FAMILY_SH4) ||
 	    (boot_cpu_data.family == CPU_FAMILY_SH4A) ||
 	    (boot_cpu_data.family == CPU_FAMILY_SH4AL_DSP)) {
-		extern void __weak sh4_cache_init(void);
-
 		sh4_cache_init();
 
 		if ((boot_cpu_data.type == CPU_SH7786) ||
 		    (boot_cpu_data.type == CPU_SHX3)) {
-			extern void __weak shx3_cache_init(void);
-
 			shx3_cache_init();
 		}
 	}

@@ -11,6 +11,7 @@
 
 #define pr_fmt(fmt) "PM: hibernation: " fmt
 
+#include <crypto/acompress.h>
 #include <linux/blkdev.h>
 #include <linux/export.h>
 #include <linux/suspend.h>
@@ -47,6 +48,15 @@ dev_t swsusp_resume_device;
 sector_t swsusp_resume_block;
 __visible int in_suspend __nosavedata;
 
+static char hibernate_compressor[CRYPTO_MAX_ALG_NAME] = CONFIG_HIBERNATION_DEF_COMP;
+
+/*
+ * Compression/decompression algorithm to be used while saving/loading
+ * image to/from disk. This would later be used in 'kernel/power/swap.c'
+ * to allocate comp streams.
+ */
+char hib_comp_algo[CRYPTO_MAX_ALG_NAME];
+
 enum {
 	HIBERNATION_INVALID,
 	HIBERNATION_PLATFORM,
@@ -70,6 +80,17 @@ static const struct platform_hibernation_ops *hibernation_ops;
 
 static atomic_t hibernate_atomic = ATOMIC_INIT(1);
 
+#ifdef CONFIG_SUSPEND
+/**
+ * pm_hibernation_mode_is_suspend - Check if hibernation has been set to suspend
+ */
+bool pm_hibernation_mode_is_suspend(void)
+{
+	return hibernation_mode == HIBERNATION_SUSPEND;
+}
+EXPORT_SYMBOL_GPL(pm_hibernation_mode_is_suspend);
+#endif
+
 bool hibernate_acquire(void)
 {
 	return atomic_add_unless(&hibernate_atomic, -1, 0);
@@ -78,6 +99,11 @@ bool hibernate_acquire(void)
 void hibernate_release(void)
 {
 	atomic_inc(&hibernate_atomic);
+}
+
+bool hibernation_in_progress(void)
+{
+	return !atomic_read(&hibernate_atomic);
 }
 
 bool hibernation_available(void)
@@ -123,10 +149,15 @@ bool system_entering_hibernation(void)
 EXPORT_SYMBOL(system_entering_hibernation);
 
 #ifdef CONFIG_PM_DEBUG
+static unsigned int pm_test_delay = 5;
+module_param(pm_test_delay, uint, 0644);
+MODULE_PARM_DESC(pm_test_delay,
+		 "Number of seconds to wait before resuming from hibernation test");
 static void hibernation_debug_sleep(void)
 {
-	pr_info("debug: Waiting for 5 seconds.\n");
-	mdelay(5000);
+	pr_info("hibernation debug: Waiting for %d second(s).\n",
+		pm_test_delay);
+	mdelay(pm_test_delay * 1000);
 }
 
 static int hibernation_test(int level)
@@ -361,6 +392,23 @@ static int create_image(int platform_mode)
 	return error;
 }
 
+static void shrink_shmem_memory(void)
+{
+	struct sysinfo info;
+	unsigned long nr_shmem_pages, nr_freed_pages;
+
+	si_meminfo(&info);
+	nr_shmem_pages = info.sharedram; /* current page count used for shmem */
+	/*
+	 * The intent is to reclaim all shmem pages. Though shrink_all_memory() can
+	 * only reclaim about half of them, it's enough for creating the hibernation
+	 * image.
+	 */
+	nr_freed_pages = shrink_all_memory(nr_shmem_pages);
+	pr_debug("requested to reclaim %lu shmem pages, actually freed %lu pages\n",
+			nr_shmem_pages, nr_freed_pages);
+}
+
 /**
  * hibernation_snapshot - Quiesce devices and create a hibernation image.
  * @platform_mode: If set, use platform driver to prepare for the transition.
@@ -402,7 +450,16 @@ int hibernation_snapshot(int platform_mode)
 		goto Thaw;
 	}
 
-	suspend_console();
+	/*
+	 * Device drivers may move lots of data to shmem in dpm_prepare(). The shmem
+	 * pages will use lots of system memory, causing hibernation image creation
+	 * fail due to insufficient free memory.
+	 * This call is to force flush the shmem pages to swap disk and reclaim
+	 * the system memory so that image creation can succeed.
+	 */
+	shrink_shmem_memory();
+
+	console_suspend_all();
 	pm_restrict_gfp_mask();
 
 	error = dpm_suspend(PMSG_FREEZE);
@@ -428,7 +485,7 @@ int hibernation_snapshot(int platform_mode)
 	if (error || !in_suspend)
 		pm_restore_gfp_mask();
 
-	resume_console();
+	console_resume_all();
 	dpm_complete(msg);
 
  Close:
@@ -538,8 +595,7 @@ int hibernation_restore(int platform_mode)
 	int error;
 
 	pm_prepare_console();
-	suspend_console();
-	pm_restrict_gfp_mask();
+	console_suspend_all();
 	error = dpm_suspend_start(PMSG_QUIESCE);
 	if (!error) {
 		error = resume_target_kernel(platform_mode);
@@ -551,8 +607,7 @@ int hibernation_restore(int platform_mode)
 		BUG_ON(!error);
 	}
 	dpm_resume_end(PMSG_RECOVER);
-	pm_restore_gfp_mask();
-	resume_console();
+	console_resume_all();
 	pm_restore_console();
 	return error;
 }
@@ -577,7 +632,7 @@ int hibernation_platform_enter(void)
 		goto Close;
 
 	entering_platform_hibernation = true;
-	suspend_console();
+	console_suspend_all();
 	error = dpm_suspend_start(PMSG_HIBERNATE);
 	if (error) {
 		if (hibernation_ops->recover)
@@ -599,7 +654,11 @@ int hibernation_platform_enter(void)
 
 	local_irq_disable();
 	system_state = SYSTEM_SUSPEND;
-	syscore_suspend();
+
+	error = syscore_suspend();
+	if (error)
+		goto Enable_irqs;
+
 	if (pm_wakeup_pending()) {
 		error = -EAGAIN;
 		goto Power_up;
@@ -611,6 +670,7 @@ int hibernation_platform_enter(void)
 
  Power_up:
 	syscore_resume();
+ Enable_irqs:
 	system_state = SYSTEM_RUNNING;
 	local_irq_enable();
 
@@ -625,7 +685,7 @@ int hibernation_platform_enter(void)
  Resume_devices:
 	entering_platform_hibernation = false;
 	dpm_resume_end(PMSG_RESTORE);
-	resume_console();
+	console_resume_all();
 
  Close:
 	hibernation_ops->end();
@@ -646,19 +706,13 @@ static void power_down(void)
 
 #ifdef CONFIG_SUSPEND
 	if (hibernation_mode == HIBERNATION_SUSPEND) {
+		pm_restore_gfp_mask();
 		error = suspend_devices_and_enter(mem_sleep_current);
-		if (error) {
-			hibernation_mode = hibernation_ops ?
-						HIBERNATION_PLATFORM :
-						HIBERNATION_SHUTDOWN;
-		} else {
-			/* Restore swap signature. */
-			error = swsusp_unmark();
-			if (error)
-				pr_err("Swap will be unusable! Try swapon -a.\n");
+		if (!error)
+			goto exit;
 
-			return;
-		}
+		hibernation_mode = hibernation_ops ? HIBERNATION_PLATFORM :
+						     HIBERNATION_SHUTDOWN;
 	}
 #endif
 
@@ -669,15 +723,17 @@ static void power_down(void)
 	case HIBERNATION_PLATFORM:
 		error = hibernation_platform_enter();
 		if (error == -EAGAIN || error == -EBUSY) {
-			swsusp_unmark();
 			events_check_enabled = false;
 			pr_info("Wakeup event detected during hibernation, rolling back.\n");
-			return;
+			goto exit;
 		}
 		fallthrough;
 	case HIBERNATION_SHUTDOWN:
-		if (kernel_can_power_off())
+		if (kernel_can_power_off()) {
+			entering_platform_hibernation = true;
 			kernel_power_off();
+			entering_platform_hibernation = false;
+		}
 		break;
 	}
 	kernel_halt();
@@ -688,6 +744,15 @@ static void power_down(void)
 	pr_crit("Power down manually\n");
 	while (1)
 		cpu_relax();
+
+exit:
+	/* Match the pm_restore_gfp_mask() call in hibernate(). */
+	pm_restrict_gfp_mask();
+
+	/* Restore swap signature. */
+	error = swsusp_unmark();
+	if (error)
+		pr_err("Swap will be unusable! Try swapon -a.\n");
 }
 
 static int load_image_and_restore(void)
@@ -718,6 +783,9 @@ static int load_image_and_restore(void)
 	return error;
 }
 
+#define COMPRESSION_ALGO_LZO "lzo"
+#define COMPRESSION_ALGO_LZ4 "lz4"
+
 /**
  * hibernate - Carry out system hibernation, including saving the image.
  */
@@ -730,6 +798,17 @@ int hibernate(void)
 	if (!hibernation_available()) {
 		pm_pr_dbg("Hibernation not available.\n");
 		return -EPERM;
+	}
+
+	/*
+	 * Query for the compression algorithm support if compression is enabled.
+	 */
+	if (!nocompress) {
+		strscpy(hib_comp_algo, hibernate_compressor);
+		if (!crypto_has_acomp(hib_comp_algo, 0, CRYPTO_ALG_ASYNC)) {
+			pr_err("%s compression is not available\n", hib_comp_algo);
+			return -EOPNOTSUPP;
+		}
 	}
 
 	sleep_flags = lock_system_sleep();
@@ -746,6 +825,8 @@ int hibernate(void)
 		goto Restore;
 
 	ksys_sync_helper();
+	if (filesystem_freeze_enabled)
+		filesystems_freeze();
 
 	error = freeze_processes();
 	if (error)
@@ -766,10 +847,23 @@ int hibernate(void)
 
 		if (hibernation_mode == HIBERNATION_PLATFORM)
 			flags |= SF_PLATFORM_MODE;
-		if (nocompress)
+		if (nocompress) {
 			flags |= SF_NOCOMPRESS_MODE;
-		else
+		} else {
 		        flags |= SF_CRC32_MODE;
+
+			/*
+			 * By default, LZO compression is enabled. Use SF_COMPRESSION_ALG_LZ4
+			 * to override this behaviour and use LZ4.
+			 *
+			 * Refer kernel/power/power.h for more details
+			 */
+
+			if (!strcmp(hib_comp_algo, COMPRESSION_ALGO_LZ4))
+				flags |= SF_COMPRESSION_ALG_LZ4;
+			else
+				flags |= SF_COMPRESSION_ALG_LZO;
+		}
 
 		pm_pr_dbg("Writing hibernation image.\n");
 		error = swsusp_write(flags);
@@ -801,6 +895,7 @@ int hibernate(void)
 	/* Don't bother checking whether freezer_test_done is true */
 	freezer_test_done = false;
  Exit:
+	filesystems_thaw();
 	pm_notifier_call_chain(PM_POST_HIBERNATION);
  Restore:
 	pm_restore_console();
@@ -837,6 +932,9 @@ int hibernate_quiet_exec(int (*func)(void *data), void *data)
 	if (error)
 		goto restore;
 
+	if (filesystem_freeze_enabled)
+		filesystems_freeze();
+
 	error = freeze_processes();
 	if (error)
 		goto exit;
@@ -857,7 +955,7 @@ int hibernate_quiet_exec(int (*func)(void *data), void *data)
 	if (error)
 		goto dpm_complete;
 
-	suspend_console();
+	console_suspend_all();
 
 	error = dpm_suspend(PMSG_FREEZE);
 	if (error)
@@ -881,7 +979,7 @@ skip:
 dpm_resume:
 	dpm_resume(PMSG_THAW);
 
-	resume_console();
+	console_resume_all();
 
 dpm_complete:
 	dpm_complete(PMSG_THAW);
@@ -896,6 +994,7 @@ thaw:
 	thaw_processes();
 
 exit:
+	filesystems_thaw();
 	pm_notifier_call_chain(PM_POST_HIBERNATION);
 
 restore:
@@ -955,6 +1054,22 @@ static int software_resume(void)
 	if (error)
 		goto Unlock;
 
+	/*
+	 * Check if the hibernation image is compressed. If so, query for
+	 * the algorithm support.
+	 */
+	if (!(swsusp_header_flags & SF_NOCOMPRESS_MODE)) {
+		if (swsusp_header_flags & SF_COMPRESSION_ALG_LZ4)
+			strscpy(hib_comp_algo, COMPRESSION_ALGO_LZ4);
+		else
+			strscpy(hib_comp_algo, COMPRESSION_ALGO_LZO);
+		if (!crypto_has_acomp(hib_comp_algo, 0, CRYPTO_ALG_ASYNC)) {
+			pr_err("%s compression is not available\n", hib_comp_algo);
+			error = -EOPNOTSUPP;
+			goto Unlock;
+		}
+	}
+
 	/* The snapshot device should not be opened while we're running */
 	if (!hibernate_acquire()) {
 		error = -EBUSY;
@@ -968,19 +1083,26 @@ static int software_resume(void)
 	if (error)
 		goto Restore;
 
+	if (filesystem_freeze_enabled)
+		filesystems_freeze();
+
 	pm_pr_dbg("Preparing processes for hibernation restore.\n");
 	error = freeze_processes();
-	if (error)
+	if (error) {
+		filesystems_thaw();
 		goto Close_Finish;
+	}
 
 	error = freeze_kernel_threads();
 	if (error) {
 		thaw_processes();
+		filesystems_thaw();
 		goto Close_Finish;
 	}
 
 	error = load_image_and_restore();
 	thaw_processes();
+	filesystems_thaw();
  Finish:
 	pm_notifier_call_chain(PM_POST_RESTORE);
  Restore:
@@ -1071,11 +1193,11 @@ static const char * const hibernation_modes[] = {
 static ssize_t disk_show(struct kobject *kobj, struct kobj_attribute *attr,
 			 char *buf)
 {
+	ssize_t count = 0;
 	int i;
-	char *start = buf;
 
 	if (!hibernation_available())
-		return sprintf(buf, "[disabled]\n");
+		return sysfs_emit(buf, "[disabled]\n");
 
 	for (i = HIBERNATION_FIRST; i <= HIBERNATION_MAX; i++) {
 		if (!hibernation_modes[i])
@@ -1095,12 +1217,16 @@ static ssize_t disk_show(struct kobject *kobj, struct kobj_attribute *attr,
 			continue;
 		}
 		if (i == hibernation_mode)
-			buf += sprintf(buf, "[%s] ", hibernation_modes[i]);
+			count += sysfs_emit_at(buf, count, "[%s] ", hibernation_modes[i]);
 		else
-			buf += sprintf(buf, "%s ", hibernation_modes[i]);
+			count += sysfs_emit_at(buf, count, "%s ", hibernation_modes[i]);
 	}
-	buf += sprintf(buf, "\n");
-	return buf-start;
+
+	/* Convert the last space to a newline if needed. */
+	if (count > 0)
+		buf[count - 1] = '\n';
+
+	return count;
 }
 
 static ssize_t disk_store(struct kobject *kobj, struct kobj_attribute *attr,
@@ -1158,8 +1284,8 @@ power_attr(disk);
 static ssize_t resume_show(struct kobject *kobj, struct kobj_attribute *attr,
 			   char *buf)
 {
-	return sprintf(buf, "%d:%d\n", MAJOR(swsusp_resume_device),
-		       MINOR(swsusp_resume_device));
+	return sysfs_emit(buf, "%d:%d\n", MAJOR(swsusp_resume_device),
+			  MINOR(swsusp_resume_device));
 }
 
 static ssize_t resume_store(struct kobject *kobj, struct kobj_attribute *attr,
@@ -1218,7 +1344,7 @@ power_attr(resume);
 static ssize_t resume_offset_show(struct kobject *kobj,
 				  struct kobj_attribute *attr, char *buf)
 {
-	return sprintf(buf, "%llu\n", (unsigned long long)swsusp_resume_block);
+	return sysfs_emit(buf, "%llu\n", (unsigned long long)swsusp_resume_block);
 }
 
 static ssize_t resume_offset_store(struct kobject *kobj,
@@ -1241,7 +1367,7 @@ power_attr(resume_offset);
 static ssize_t image_size_show(struct kobject *kobj, struct kobj_attribute *attr,
 			       char *buf)
 {
-	return sprintf(buf, "%lu\n", image_size);
+	return sysfs_emit(buf, "%lu\n", image_size);
 }
 
 static ssize_t image_size_store(struct kobject *kobj, struct kobj_attribute *attr,
@@ -1262,7 +1388,7 @@ power_attr(image_size);
 static ssize_t reserved_size_show(struct kobject *kobj,
 				  struct kobj_attribute *attr, char *buf)
 {
-	return sprintf(buf, "%lu\n", reserved_size);
+	return sysfs_emit(buf, "%lu\n", reserved_size);
 }
 
 static ssize_t reserved_size_store(struct kobject *kobj,
@@ -1309,7 +1435,7 @@ static int __init resume_setup(char *str)
 	if (noresume)
 		return 1;
 
-	strncpy(resume_file, str, 255);
+	strscpy(resume_file, str);
 	return 1;
 }
 
@@ -1369,6 +1495,56 @@ static int __init nohibernate_setup(char *str)
 	nohibernate = 1;
 	return 1;
 }
+
+static const char * const comp_alg_enabled[] = {
+#if IS_ENABLED(CONFIG_CRYPTO_LZO)
+	COMPRESSION_ALGO_LZO,
+#endif
+#if IS_ENABLED(CONFIG_CRYPTO_LZ4)
+	COMPRESSION_ALGO_LZ4,
+#endif
+};
+
+static int hibernate_compressor_param_set(const char *compressor,
+		const struct kernel_param *kp)
+{
+	int index, ret;
+
+	if (!mutex_trylock(&system_transition_mutex))
+		return -EBUSY;
+
+	index = sysfs_match_string(comp_alg_enabled, compressor);
+	if (index >= 0) {
+		ret = param_set_copystring(comp_alg_enabled[index], kp);
+		if (!ret)
+			strscpy(hib_comp_algo, comp_alg_enabled[index]);
+	} else {
+		ret = index;
+	}
+
+	mutex_unlock(&system_transition_mutex);
+
+	if (ret)
+		pr_debug("Cannot set specified compressor %s\n",
+			 compressor);
+
+	return ret;
+}
+
+static const struct kernel_param_ops hibernate_compressor_param_ops = {
+	.set    = hibernate_compressor_param_set,
+	.get    = param_get_string,
+};
+
+static struct kparam_string hibernate_compressor_param_string = {
+	.maxlen = sizeof(hibernate_compressor),
+	.string = hibernate_compressor,
+};
+
+module_param_cb(compressor, &hibernate_compressor_param_ops,
+		&hibernate_compressor_param_string, 0644);
+MODULE_PARM_DESC(compressor,
+		 "Compression algorithm to be used with hibernation");
 
 __setup("noresume", noresume_setup);
 __setup("resume_offset=", resume_offset_setup);

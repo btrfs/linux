@@ -6,7 +6,7 @@
  * Note that, due to trying to use names similar to the protocol specifications,
  * there are many mixed case field names in the structures below.  Although
  * this does not match typical Linux kernel style, it is necessary to be
- * able to match against the protocol specfication.
+ * able to match against the protocol specification.
  *
  * SMB2 commands
  * Some commands have minimal (wct=0,bcc=0), or uninteresting, responses
@@ -94,6 +94,9 @@
  * fill a single wsize request with a single call.
  */
 #define SMB3_DEFAULT_IOSIZE (4 * 1024 * 1024)
+
+/* According to MS-SMB2 specification The minimum recommended value is 65536.*/
+#define CIFS_MIN_DEFAULT_IOSIZE (65536)
 
 /*
  * SMB2 Header Definition
@@ -208,38 +211,45 @@ struct smb2_transform_hdr {
 	__le64  SessionId;
 } __packed;
 
-
-/* See MS-SMB2 2.2.42 */
-struct smb2_compression_transform_hdr_unchained {
-	__le32 ProtocolId;	/* 0xFC 'S' 'M' 'B' */
-	__le32 OriginalCompressedSegmentSize;
-	__le16 CompressionAlgorithm;
-	__le16 Flags;
-	__le16 Length; /* if chained it is length, else offset */
-} __packed;
-
-/* See MS-SMB2 2.2.42.1 */
+/*
+ * These are simplified versions from the spec, as we don't need a fully fledged
+ * form of both unchained and chained structs.
+ *
+ * Moreover, even in chained compressed payloads, the initial compression header
+ * has the form of the unchained one -- i.e. it never has the
+ * OriginalPayloadSize field and ::Offset field always represent an offset
+ * (instead of a length, as it is in the chained header).
+ *
+ * See MS-SMB2 2.2.42 for more details.
+ */
 #define SMB2_COMPRESSION_FLAG_NONE	0x0000
 #define SMB2_COMPRESSION_FLAG_CHAINED	0x0001
 
-struct compression_payload_header {
+struct smb2_compression_hdr {
+	__le32 ProtocolId; /* 0xFC 'S' 'M' 'B' */
+	__le32 OriginalCompressedSegmentSize;
+	__le16 CompressionAlgorithm;
+	__le16 Flags;
+	__le32 Offset; /* this is the size of the uncompressed SMB2 header below */
+	/* uncompressed SMB2 header (READ or WRITE) goes here */
+	/* compressed data goes here */
+} __packed;
+
+/*
+ * ... OTOH, set compression payload header to always have OriginalPayloadSize
+ * as it's easier to pass the struct size minus sizeof(OriginalPayloadSize)
+ * than to juggle around the header/data memory.
+ */
+struct smb2_compression_payload_hdr {
 	__le16	CompressionAlgorithm;
 	__le16	Flags;
 	__le32	Length; /* length of compressed playload including field below if present */
-	/* __le32 OriginalPayloadSize; */ /* optional, present when LZNT1, LZ77, LZ77+Huffman */
+	__le32 OriginalPayloadSize; /* accounted when LZNT1, LZ77, LZ77+Huffman */
 } __packed;
 
-/* See MS-SMB2 2.2.42.2 */
-struct smb2_compression_transform_hdr_chained {
-	__le32 ProtocolId;	/* 0xFC 'S' 'M' 'B' */
-	__le32 OriginalCompressedSegmentSize;
-	/* struct compression_payload_header[] */
-} __packed;
-
-/* See MS-SMB2 2.2.42.2.2 */
-struct compression_pattern_payload_v1 {
-	__le16	Pattern;
-	__le16	Reserved1;
+struct smb2_compression_pattern_v1 {
+	__u8	Pattern;
+	__u8	Reserved1;
 	__le16	Reserved2;
 	__le32	Repetitions;
 } __packed;
@@ -273,15 +283,16 @@ struct smb3_blob_data {
 #define SE_GROUP_RESOURCE		0x20000000
 #define SE_GROUP_LOGON_ID		0xC0000000
 
-/* struct sid_attr_data is SidData array in BlobData format then le32 Attr */
-
 struct sid_array_data {
 	__le16 SidAttrCount;
 	/* SidAttrList - array of sid_attr_data structs */
 } __packed;
 
-struct luid_attr_data {
-
+/* struct sid_attr_data is SidData array in BlobData format then le32 Attr */
+struct sid_attr_data {
+	__le16 BlobSize;
+	__u8 BlobData[];
+	/* __le32 Attr */
 } __packed;
 
 /*
@@ -483,7 +494,7 @@ struct smb2_encryption_neg_context {
 	__le16	ContextType; /* 2 */
 	__le16	DataLength;
 	__le32	Reserved;
-	/* CipherCount usally 2, but can be 3 when AES256-GCM enabled */
+	/* CipherCount usually 2, but can be 3 when AES256-GCM enabled */
 	__le16	CipherCount; /* AES128-GCM and AES128-CCM by default */
 	__le16	Ciphers[];
 } __packed;
@@ -495,6 +506,7 @@ struct smb2_encryption_neg_context {
 #define SMB3_COMPRESS_LZ77_HUFF	cpu_to_le16(0x0003)
 /* Pattern scanning algorithm See MS-SMB2 3.1.4.4.1 */
 #define SMB3_COMPRESS_PATTERN	cpu_to_le16(0x0004) /* Pattern_V1 */
+#define SMB3_COMPRESS_LZ4	cpu_to_le16(0x0005)
 
 /* Compression Flags */
 #define SMB2_COMPRESSION_CAPABILITIES_FLAG_NONE		cpu_to_le32(0x00000000)
@@ -702,7 +714,7 @@ struct smb2_close_rsp {
 	__le16 StructureSize; /* 60 */
 	__le16 Flags;
 	__le32 Reserved;
-	struct_group(network_open_info,
+	struct_group_attr(network_open_info, __packed,
 		__le64 CreationTime;
 		__le64 LastAccessTime;
 		__le64 LastWriteTime;
@@ -908,6 +920,40 @@ struct smb2_query_directory_rsp {
 	__u8   Buffer[];
 } __packed;
 
+/* DeviceType Flags */
+#define FILE_DEVICE_CD_ROM              0x00000002
+#define FILE_DEVICE_CD_ROM_FILE_SYSTEM  0x00000003
+#define FILE_DEVICE_DFS                 0x00000006
+#define FILE_DEVICE_DISK                0x00000007
+#define FILE_DEVICE_DISK_FILE_SYSTEM    0x00000008
+#define FILE_DEVICE_FILE_SYSTEM         0x00000009
+#define FILE_DEVICE_NAMED_PIPE          0x00000011
+#define FILE_DEVICE_NETWORK             0x00000012
+#define FILE_DEVICE_NETWORK_FILE_SYSTEM 0x00000014
+#define FILE_DEVICE_NULL                0x00000015
+#define FILE_DEVICE_PARALLEL_PORT       0x00000016
+#define FILE_DEVICE_PRINTER             0x00000018
+#define FILE_DEVICE_SERIAL_PORT         0x0000001b
+#define FILE_DEVICE_STREAMS             0x0000001e
+#define FILE_DEVICE_TAPE                0x0000001f
+#define FILE_DEVICE_TAPE_FILE_SYSTEM    0x00000020
+#define FILE_DEVICE_VIRTUAL_DISK        0x00000024
+#define FILE_DEVICE_NETWORK_REDIRECTOR  0x00000028
+
+/* Device Characteristics */
+#define FILE_REMOVABLE_MEDIA			0x00000001
+#define FILE_READ_ONLY_DEVICE			0x00000002
+#define FILE_FLOPPY_DISKETTE			0x00000004
+#define FILE_WRITE_ONCE_MEDIA			0x00000008
+#define FILE_REMOTE_DEVICE			0x00000010
+#define FILE_DEVICE_IS_MOUNTED			0x00000020
+#define FILE_VIRTUAL_VOLUME			0x00000040
+#define FILE_DEVICE_SECURE_OPEN			0x00000100
+#define FILE_CHARACTERISTIC_TS_DEVICE		0x00001000
+#define FILE_CHARACTERISTIC_WEBDAV_DEVICE	0x00002000
+#define FILE_PORTABLE_DEVICE			0x00004000
+#define FILE_DEVICE_ALLOW_APPCONTAINER_TRAVERSAL 0x00020000
+
 /*
  * Maximum number of iovs we need for a set-info request.
  * The largest one is rename/hardlink
@@ -1018,7 +1064,7 @@ struct smb2_server_client_notification {
 #define IL_IMPERSONATION	cpu_to_le32(0x00000002)
 #define IL_DELEGATE		cpu_to_le32(0x00000003)
 
-/* File Attrubutes */
+/* File Attributes */
 #define FILE_ATTRIBUTE_READONLY			0x00000001
 #define FILE_ATTRIBUTE_HIDDEN			0x00000002
 #define FILE_ATTRIBUTE_SYSTEM			0x00000004
@@ -1162,14 +1208,19 @@ struct smb2_server_client_notification {
 #define SMB2_CREATE_FLAG_REPARSEPOINT 0x01
 
 struct create_context {
-	__le32 Next;
-	__le16 NameOffset;
-	__le16 NameLength;
-	__le16 Reserved;
-	__le16 DataOffset;
-	__le32 DataLength;
+	/* New members must be added within the struct_group() macro below. */
+	__struct_group(create_context_hdr, hdr, __packed,
+		__le32 Next;
+		__le16 NameOffset;
+		__le16 NameLength;
+		__le16 Reserved;
+		__le16 DataOffset;
+		__le32 DataLength;
+	);
 	__u8 Buffer[];
 } __packed;
+static_assert(offsetof(struct create_context, Buffer) == sizeof(struct create_context_hdr),
+	      "struct member likely outside of __struct_group()");
 
 struct smb2_create_req {
 	struct smb2_hdr hdr;
@@ -1213,7 +1264,7 @@ struct smb2_create_rsp {
 } __packed;
 
 struct create_posix {
-	struct create_context ccontext;
+	struct create_context_hdr ccontext;
 	__u8    Name[16];
 	__le32  Mode;
 	__u32   Reserved;
@@ -1221,7 +1272,7 @@ struct create_posix {
 
 /* See MS-SMB2 2.2.13.2.3 and MS-SMB2 2.2.13.2.4 */
 struct create_durable {
-	struct create_context ccontext;
+	struct create_context_hdr ccontext;
 	__u8   Name[8];
 	union {
 		__u8  Reserved[16];
@@ -1234,14 +1285,14 @@ struct create_durable {
 
 /* See MS-SMB2 2.2.13.2.5 */
 struct create_mxac_req {
-	struct create_context ccontext;
+	struct create_context_hdr ccontext;
 	__u8   Name[8];
 	__le64 Timestamp;
 } __packed;
 
 /* See MS-SMB2 2.2.14.2.5 */
 struct create_mxac_rsp {
-	struct create_context ccontext;
+	struct create_context_hdr ccontext;
 	__u8   Name[8];
 	__le32 QueryStatus;
 	__le32 MaximalAccess;
@@ -1277,13 +1328,13 @@ struct lease_context_v2 {
 } __packed;
 
 struct create_lease {
-	struct create_context ccontext;
+	struct create_context_hdr ccontext;
 	__u8   Name[8];
 	struct lease_context lcontext;
 } __packed;
 
 struct create_lease_v2 {
-	struct create_context ccontext;
+	struct create_context_hdr ccontext;
 	__u8   Name[8];
 	struct lease_context_v2 lcontext;
 	__u8   Pad[4];
@@ -1291,7 +1342,7 @@ struct create_lease_v2 {
 
 /* See MS-SMB2 2.2.14.2.9 */
 struct create_disk_id_rsp {
-	struct create_context ccontext;
+	struct create_context_hdr ccontext;
 	__u8   Name[8];
 	__le64 DiskFileId;
 	__le64 VolumeId;
@@ -1300,7 +1351,7 @@ struct create_disk_id_rsp {
 
 /* See MS-SMB2 2.2.13.2.13 */
 struct create_app_inst_id {
-	struct create_context ccontext;
+	struct create_context_hdr ccontext;
 	__u8 Name[16];
 	__le32 StructureSize; /* Must be 20 */
 	__u16 Reserved;
@@ -1309,7 +1360,7 @@ struct create_app_inst_id {
 
 /* See MS-SMB2 2.2.13.2.15 */
 struct create_app_inst_id_vers {
-	struct create_context ccontext;
+	struct create_context_hdr ccontext;
 	__u8 Name[16];
 	__le32 StructureSize; /* Must be 24 */
 	__u16 Reserved;
@@ -1502,7 +1553,28 @@ struct reparse_symlink_data_buffer {
 	__u8	PathBuffer[]; /* Variable Length */
 } __packed;
 
-/* See MS-FSCC 2.1.2.6 and cifspdu.h for struct reparse_posix_data */
+/* For IO_REPARSE_TAG_NFS - see MS-FSCC 2.1.2.6 */
+#define NFS_SPECFILE_LNK	0x00000000014B4E4C
+#define NFS_SPECFILE_CHR	0x0000000000524843
+#define NFS_SPECFILE_BLK	0x00000000004B4C42
+#define NFS_SPECFILE_FIFO	0x000000004F464946
+#define NFS_SPECFILE_SOCK	0x000000004B434F53
+struct reparse_nfs_data_buffer {
+	__le32	ReparseTag;
+	__le16	ReparseDataLength;
+	__u16	Reserved;
+	__le64	InodeType; /* NFS_SPECFILE_* */
+	__u8	DataBuffer[];
+} __packed;
+
+/* For IO_REPARSE_TAG_LX_SYMLINK - see MS-FSCC 2.1.2.7 */
+struct reparse_wsl_symlink_data_buffer {
+	__le32	ReparseTag;
+	__le16	ReparseDataLength;
+	__u16	Reserved;
+	__le32	Version; /* Always 2 */
+	__u8	Target[]; /* Variable Length UTF-8 string without nul-term */
+} __packed;
 
 struct validate_negotiate_info_req {
 	__le32 Capabilities;
@@ -1638,23 +1710,33 @@ struct smb2_file_internal_info {
 } __packed; /* level 6 Query */
 
 struct smb2_file_rename_info { /* encoding of request for level 10 */
-	__u8   ReplaceIfExists; /* 1 = replace existing target with new */
-				/* 0 = fail if target already exists */
-	__u8   Reserved[7];
-	__u64  RootDirectory;  /* MBZ for network operations (why says spec?) */
-	__le32 FileNameLength;
+	/* New members MUST be added within the struct_group() macro below. */
+	__struct_group(smb2_file_rename_info_hdr, __hdr, __packed,
+		__u8   ReplaceIfExists; /* 1 = replace existing target with new */
+					/* 0 = fail if target already exists */
+		__u8   Reserved[7];
+		__u64  RootDirectory;  /* MBZ for network operations (why says spec?) */
+		__le32 FileNameLength;
+	);
 	char   FileName[];     /* New name to be assigned */
 	/* padding - overall struct size must be >= 24 so filename + pad >= 6 */
 } __packed; /* level 10 Set */
+static_assert(offsetof(struct smb2_file_rename_info, FileName) == sizeof(struct smb2_file_rename_info_hdr),
+	      "struct member likely outside of __struct_group()");
 
 struct smb2_file_link_info { /* encoding of request for level 11 */
-	__u8   ReplaceIfExists; /* 1 = replace existing link with new */
-				/* 0 = fail if link already exists */
-	__u8   Reserved[7];
-	__u64  RootDirectory;  /* MBZ for network operations (why says spec?) */
-	__le32 FileNameLength;
+	/* New members MUST be added within the struct_group() macro below. */
+	__struct_group(smb2_file_link_info_hdr, __hdr, __packed,
+		__u8   ReplaceIfExists; /* 1 = replace existing link with new */
+					/* 0 = fail if link already exists */
+		__u8   Reserved[7];
+		__u64  RootDirectory;  /* MBZ for network operations (why says spec?) */
+		__le32 FileNameLength;
+	);
 	char   FileName[];     /* Name to be assigned to new link */
 } __packed; /* level 11 Set */
+static_assert(offsetof(struct smb2_file_link_info, FileName) == sizeof(struct smb2_file_link_info_hdr),
+	      "struct member likely outside of __struct_group()");
 
 /*
  * This level 18, although with struct with same name is different from cifs

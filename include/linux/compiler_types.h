@@ -57,7 +57,7 @@ static inline void __chk_io_ptr(const volatile void __iomem *ptr) { }
 #  define __user	BTF_TYPE_TAG(user)
 # endif
 # define __iomem
-# define __percpu	BTF_TYPE_TAG(percpu)
+# define __percpu	__percpu_qual BTF_TYPE_TAG(percpu)
 # define __rcu		BTF_TYPE_TAG(rcu)
 
 # define __chk_user_ptr(x)	(void)0
@@ -99,17 +99,17 @@ static inline void __chk_io_ptr(const volatile void __iomem *ptr) { }
  *   gcc: https://gcc.gnu.org/onlinedocs/gcc/Label-Attributes.html#index-cold-label-attribute
  *
  * When -falign-functions=N is in use, we must avoid the cold attribute as
- * contemporary versions of GCC drop the alignment for cold functions. Worse,
- * GCC can implicitly mark callees of cold functions as cold themselves, so
- * it's not sufficient to add __function_aligned here as that will not ensure
- * that callees are correctly aligned.
+ * GCC drops the alignment for cold functions. Worse, GCC can implicitly mark
+ * callees of cold functions as cold themselves, so it's not sufficient to add
+ * __function_aligned here as that will not ensure that callees are correctly
+ * aligned.
  *
  * See:
  *
  *   https://lore.kernel.org/lkml/Y77%2FqVgvaJidFpYt@FVFF77S0Q05N
  *   https://gcc.gnu.org/bugzilla/show_bug.cgi?id=88345#c9
  */
-#if !defined(CONFIG_CC_IS_GCC) || (CONFIG_FUNCTION_ALIGNMENT == 0)
+#if defined(CONFIG_CC_HAS_SANE_FUNCTION_ALIGNMENT) || (CONFIG_FUNCTION_ALIGNMENT == 0)
 #define __cold				__attribute__((__cold__))
 #else
 #define __cold
@@ -141,6 +141,29 @@ static inline void __chk_io_ptr(const volatile void __iomem *ptr) { }
 # define __preserve_most notrace __attribute__((__preserve_most__))
 #else
 # define __preserve_most
+#endif
+
+/*
+ * Annotating a function/variable with __retain tells the compiler to place
+ * the object in its own section and set the flag SHF_GNU_RETAIN. This flag
+ * instructs the linker to retain the object during garbage-cleanup or LTO
+ * phases.
+ *
+ * Note that the __used macro is also used to prevent functions or data
+ * being optimized out, but operates at the compiler/IR-level and may still
+ * allow unintended removal of objects during linking.
+ *
+ * Optional: only supported since gcc >= 11, clang >= 13
+ *
+ *   gcc: https://gcc.gnu.org/onlinedocs/gcc/Common-Function-Attributes.html#index-retain-function-attribute
+ * clang: https://clang.llvm.org/docs/AttributeReference.html#retain
+ */
+#if __has_attribute(__retain__) && \
+	(defined(CONFIG_LD_DEAD_CODE_DATA_ELIMINATION) || \
+	 defined(CONFIG_LTO_CLANG))
+# define __retain			__attribute__((__retain__))
+#else
+# define __retain
 #endif
 
 /* Compiler specific macros. */
@@ -243,6 +266,12 @@ struct ftrace_likely_data {
 #define noinline_for_stack noinline
 
 /*
+ * Use noinline_for_tracing for functions that should not be inlined.
+ * For tracing reasons.
+ */
+#define noinline_for_tracing noinline
+
+/*
  * Sanitizer helper attributes: Because using __always_inline and
  * __no_sanitize_* conflict, provide helper attributes that will either expand
  * to __no_sanitize_* in compilation units where instrumentation is enabled
@@ -273,20 +302,110 @@ struct ftrace_likely_data {
  * disable all instrumentation. See Kconfig.kcsan where this is mandatory.
  */
 # define __no_kcsan __no_sanitize_thread __disable_sanitizer_instrumentation
+/*
+ * Type qualifier to mark variables where all data-racy accesses should be
+ * ignored by KCSAN. Note, the implementation simply marks these variables as
+ * volatile, since KCSAN will treat such accesses as "marked".
+ */
+# define __data_racy volatile
 # define __no_sanitize_or_inline __no_kcsan notrace __maybe_unused
 #else
 # define __no_kcsan
+# define __data_racy
+#endif
+
+#ifdef __SANITIZE_MEMORY__
+/*
+ * Similarly to KASAN and KCSAN, KMSAN loses function attributes of inlined
+ * functions, therefore disabling KMSAN checks also requires disabling inlining.
+ *
+ * __no_sanitize_or_inline effectively prevents KMSAN from reporting errors
+ * within the function and marks all its outputs as initialized.
+ */
+# define __no_sanitize_or_inline __no_kmsan_checks notrace __maybe_unused
 #endif
 
 #ifndef __no_sanitize_or_inline
 #define __no_sanitize_or_inline __always_inline
 #endif
 
+/*
+ * The assume attribute is used to indicate that a certain condition is
+ * assumed to be true. If this condition is violated at runtime, the behavior
+ * is undefined. Compilers may or may not use this indication to generate
+ * optimized code.
+ *
+ * Note that the clang documentation states that optimizers may react
+ * differently to this attribute, and this may even have a negative
+ * performance impact. Therefore this attribute should be used with care.
+ *
+ * Optional: only supported since gcc >= 13
+ * Optional: only supported since clang >= 19
+ *
+ *   gcc: https://gcc.gnu.org/onlinedocs/gcc/Statement-Attributes.html#index-assume-statement-attribute
+ * clang: https://clang.llvm.org/docs/AttributeReference.html#id13
+ *
+ */
+#ifdef CONFIG_CC_HAS_ASSUME
+# define __assume(expr)			__attribute__((__assume__(expr)))
+#else
+# define __assume(expr)
+#endif
+
+/*
+ * Optional: only supported since gcc >= 15
+ * Optional: only supported since clang >= 18
+ *
+ *   gcc: https://gcc.gnu.org/bugzilla/show_bug.cgi?id=108896
+ * clang: https://github.com/llvm/llvm-project/pull/76348
+ *
+ * __bdos on clang < 19.1.2 can erroneously return 0:
+ * https://github.com/llvm/llvm-project/pull/110497
+ *
+ * __bdos on clang < 19.1.3 can be off by 4:
+ * https://github.com/llvm/llvm-project/pull/112636
+ */
+#ifdef CONFIG_CC_HAS_COUNTED_BY
+# define __counted_by(member)		__attribute__((__counted_by__(member)))
+#else
+# define __counted_by(member)
+#endif
+
+/*
+ * Optional: only supported since gcc >= 15
+ * Optional: not supported by Clang
+ *
+ * gcc: https://gcc.gnu.org/bugzilla/show_bug.cgi?id=117178
+ */
+#ifdef CONFIG_CC_HAS_MULTIDIMENSIONAL_NONSTRING
+# define __nonstring_array		__attribute__((__nonstring__))
+#else
+# define __nonstring_array
+#endif
+
+/*
+ * Apply __counted_by() when the Endianness matches to increase test coverage.
+ */
+#ifdef __LITTLE_ENDIAN
+#define __counted_by_le(member)	__counted_by(member)
+#define __counted_by_be(member)
+#else
+#define __counted_by_le(member)
+#define __counted_by_be(member)	__counted_by(member)
+#endif
+
+/* Do not trap wrapping arithmetic within an annotated function. */
+#ifdef CONFIG_UBSAN_INTEGER_WRAP
+# define __signed_wrap __attribute__((no_sanitize("signed-integer-overflow")))
+#else
+# define __signed_wrap
+#endif
+
 /* Section for code which can't be instrumented at all */
 #define __noinstr_section(section)					\
 	noinline notrace __attribute((__section__(section)))		\
 	__no_kcsan __no_sanitize_address __no_profile __no_sanitize_coverage \
-	__no_sanitize_memory
+	__no_sanitize_memory __signed_wrap
 
 #define noinstr __noinstr_section(".noinstr.text")
 
@@ -328,11 +447,17 @@ struct ftrace_likely_data {
 # define randomized_struct_fields_end
 #endif
 
+#ifndef __no_kstack_erase
+# define __no_kstack_erase
+#endif
+
 #ifndef __noscs
 # define __noscs
 #endif
 
-#ifndef __nocfi
+#if defined(CONFIG_CFI)
+# define __nocfi		__attribute__((__no_sanitize__("kcfi")))
+#else
 # define __nocfi
 #endif
 
@@ -353,6 +478,11 @@ struct ftrace_likely_data {
 /*
  * When the size of an allocated object is needed, use the best available
  * mechanism to find it. (For cases where sizeof() cannot be used.)
+ *
+ * Optional: only supported since gcc >= 12
+ *
+ *   gcc: https://gcc.gnu.org/onlinedocs/gcc/Object-Size-Checking.html
+ * clang: https://clang.llvm.org/docs/LanguageExtensions.html#evaluating-object-size
  */
 #if __has_builtin(__builtin_dynamic_object_size)
 #define __struct_size(p)	__builtin_dynamic_object_size(p, 0)
@@ -362,8 +492,34 @@ struct ftrace_likely_data {
 #define __member_size(p)	__builtin_object_size(p, 1)
 #endif
 
-#ifndef asm_volatile_goto
-#define asm_volatile_goto(x...) asm goto(x)
+/*
+ * Determine if an attribute has been applied to a variable.
+ * Using __annotated needs to check for __annotated being available,
+ * or negative tests may fail when annotation cannot be checked. For
+ * example, see the definition of __is_cstr().
+ */
+#if __has_builtin(__builtin_has_attribute)
+#define __annotated(var, attr)	__builtin_has_attribute(var, attr)
+#endif
+
+/*
+ * Some versions of gcc do not mark 'asm goto' volatile:
+ *
+ *  https://gcc.gnu.org/bugzilla/show_bug.cgi?id=103979
+ *
+ * We do it here by hand, because it doesn't hurt.
+ */
+#ifndef asm_goto_output
+#define asm_goto_output(x...) asm volatile goto(x)
+#endif
+
+/*
+ * Clang has trouble with constraints with multiple
+ * alternative behaviors (mainly "g" and "rm").
+ */
+#ifndef ASM_INPUT_G
+  #define ASM_INPUT_G "g"
+  #define ASM_INPUT_RM "rm"
 #endif
 
 #ifdef CONFIG_CC_HAS_ASM_INLINE
@@ -403,6 +559,12 @@ struct ftrace_likely_data {
 	 sizeof(t) == sizeof(int) || sizeof(t) == sizeof(long))
 
 #ifdef __OPTIMIZE__
+/*
+ * #ifdef __OPTIMIZE__ is only a good approximation; for instance "make
+ * CFLAGS_foo.o=-Og" defines __OPTIMIZE__, does not elide the conditional code
+ * and can break compilation with wrong error message(s). Combine with
+ * -U__OPTIMIZE__ when needed.
+ */
 # define __compiletime_assert(condition, msg, prefix, suffix)		\
 	do {								\
 		/*							\
@@ -416,7 +578,7 @@ struct ftrace_likely_data {
 			prefix ## suffix();				\
 	} while (0)
 #else
-# define __compiletime_assert(condition, msg, prefix, suffix) do { } while (0)
+# define __compiletime_assert(condition, msg, prefix, suffix) ((void)(condition))
 #endif
 
 #define _compiletime_assert(condition, msg, prefix, suffix) \

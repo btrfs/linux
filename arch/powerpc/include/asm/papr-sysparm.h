@@ -21,6 +21,7 @@ typedef struct {
 #define PAPR_SYSPARM_COOP_MEM_OVERCOMMIT_ATTRS     mk_papr_sysparm(44)
 #define PAPR_SYSPARM_TLB_BLOCK_INVALIDATE_ATTRS    mk_papr_sysparm(50)
 #define PAPR_SYSPARM_LPAR_NAME                     mk_papr_sysparm(55)
+#define PAPR_SYSPARM_HVPIPE_ENABLE                 mk_papr_sysparm(64)
 
 /**
  * struct papr_sysparm_buf - RTAS work area layout for system parameter functions.
@@ -32,7 +33,7 @@ typedef struct {
  */
 struct papr_sysparm_buf {
 	__be16 len;
-	char val[PAPR_SYSPARM_MAX_OUTPUT];
+	u8 val[PAPR_SYSPARM_MAX_OUTPUT];
 };
 
 struct papr_sysparm_buf *papr_sysparm_buf_alloc(void);

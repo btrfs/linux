@@ -8,6 +8,7 @@
 #define pr_fmt(fmt) KMSG_COMPONENT ": " fmt
 
 #include <linux/stop_machine.h>
+#include <linux/cpufeature.h>
 #include <linux/bitops.h>
 #include <linux/kernel.h>
 #include <linux/random.h>
@@ -17,7 +18,9 @@
 #include <linux/mm_types.h>
 #include <linux/delay.h>
 #include <linux/cpu.h>
-
+#include <linux/smp.h>
+#include <asm/text-patching.h>
+#include <asm/machine.h>
 #include <asm/diag.h>
 #include <asm/facility.h>
 #include <asm/elf.h>
@@ -71,12 +74,29 @@ void notrace stop_machine_yield(const struct cpumask *cpumask)
 	this_cpu = smp_processor_id();
 	if (__this_cpu_inc_return(cpu_relax_retry) >= spin_retry) {
 		__this_cpu_write(cpu_relax_retry, 0);
-		cpu = cpumask_next_wrap(this_cpu, cpumask, this_cpu, false);
+		cpu = cpumask_next_wrap(this_cpu, cpumask);
 		if (cpu >= nr_cpu_ids)
 			return;
 		if (arch_vcpu_is_preempted(cpu))
 			smp_yield_cpu(cpu);
 	}
+}
+
+static void do_sync_core(void *info)
+{
+	sync_core();
+}
+
+void text_poke_sync(void)
+{
+	on_each_cpu(do_sync_core, NULL, 1);
+}
+
+void text_poke_sync_lock(void)
+{
+	cpus_read_lock();
+	text_poke_sync();
+	cpus_read_unlock();
 }
 
 /*
@@ -191,14 +211,14 @@ static int __init setup_hwcaps(void)
 		elf_hwcap |= HWCAP_DFP;
 
 	/* huge page support */
-	if (MACHINE_HAS_EDAT1)
+	if (cpu_has_edat1())
 		elf_hwcap |= HWCAP_HPAGE;
 
 	/* 64-bit register support for 31-bit processes */
 	elf_hwcap |= HWCAP_HIGH_GPRS;
 
 	/* transactional execution */
-	if (MACHINE_HAS_TE)
+	if (machine_has_tx())
 		elf_hwcap |= HWCAP_TE;
 
 	/* vector */
@@ -226,10 +246,10 @@ static int __init setup_hwcaps(void)
 		elf_hwcap |= HWCAP_NNPA;
 
 	/* guarded storage */
-	if (MACHINE_HAS_GS)
+	if (cpu_has_gs())
 		elf_hwcap |= HWCAP_GS;
 
-	if (MACHINE_HAS_PCI_MIO)
+	if (test_machine_feature(MFEATURE_PCI_MIO))
 		elf_hwcap |= HWCAP_PCI_MIO;
 
 	/* virtualization support */
@@ -248,31 +268,35 @@ static int __init setup_elf_platform(void)
 	add_device_randomness(&cpu_id, sizeof(cpu_id));
 	switch (cpu_id.machine) {
 	default:	/* Use "z10" as default. */
-		strcpy(elf_platform, "z10");
+		strscpy(elf_platform, "z10");
 		break;
 	case 0x2817:
 	case 0x2818:
-		strcpy(elf_platform, "z196");
+		strscpy(elf_platform, "z196");
 		break;
 	case 0x2827:
 	case 0x2828:
-		strcpy(elf_platform, "zEC12");
+		strscpy(elf_platform, "zEC12");
 		break;
 	case 0x2964:
 	case 0x2965:
-		strcpy(elf_platform, "z13");
+		strscpy(elf_platform, "z13");
 		break;
 	case 0x3906:
 	case 0x3907:
-		strcpy(elf_platform, "z14");
+		strscpy(elf_platform, "z14");
 		break;
 	case 0x8561:
 	case 0x8562:
-		strcpy(elf_platform, "z15");
+		strscpy(elf_platform, "z15");
 		break;
 	case 0x3931:
 	case 0x3932:
-		strcpy(elf_platform, "z16");
+		strscpy(elf_platform, "z16");
+		break;
+	case 0x9175:
+	case 0x9176:
+		strscpy(elf_platform, "z17");
 		break;
 	}
 	return 0;

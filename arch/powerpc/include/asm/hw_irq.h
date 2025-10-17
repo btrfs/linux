@@ -59,11 +59,11 @@
 #define IRQS_PMI_DISABLED	2
 #define IRQS_ALL_DISABLED	(IRQS_DISABLED | IRQS_PMI_DISABLED)
 
-#ifndef __ASSEMBLY__
+#ifndef __ASSEMBLER__
 
 static inline void __hard_irq_enable(void)
 {
-	if (IS_ENABLED(CONFIG_BOOKE_OR_40x))
+	if (IS_ENABLED(CONFIG_BOOKE))
 		wrtee(MSR_EE);
 	else if (IS_ENABLED(CONFIG_PPC_8xx))
 		wrtspr(SPRN_EIE);
@@ -75,7 +75,7 @@ static inline void __hard_irq_enable(void)
 
 static inline void __hard_irq_disable(void)
 {
-	if (IS_ENABLED(CONFIG_BOOKE_OR_40x))
+	if (IS_ENABLED(CONFIG_BOOKE))
 		wrtee(0);
 	else if (IS_ENABLED(CONFIG_PPC_8xx))
 		wrtspr(SPRN_EID);
@@ -87,7 +87,7 @@ static inline void __hard_irq_disable(void)
 
 static inline void __hard_EE_RI_disable(void)
 {
-	if (IS_ENABLED(CONFIG_BOOKE_OR_40x))
+	if (IS_ENABLED(CONFIG_BOOKE))
 		wrtee(0);
 	else if (IS_ENABLED(CONFIG_PPC_8xx))
 		wrtspr(SPRN_NRI);
@@ -99,7 +99,7 @@ static inline void __hard_EE_RI_disable(void)
 
 static inline void __hard_RI_enable(void)
 {
-	if (IS_ENABLED(CONFIG_BOOKE_OR_40x))
+	if (IS_ENABLED(CONFIG_BOOKE))
 		return;
 
 	if (IS_ENABLED(CONFIG_PPC_8xx))
@@ -516,6 +516,6 @@ static inline unsigned long mtmsr_isync_irqsafe(unsigned long msr)
 
 #define ARCH_IRQ_INIT_FLAGS	IRQ_NOREQUEST
 
-#endif  /* __ASSEMBLY__ */
+#endif  /* __ASSEMBLER__ */
 #endif	/* __KERNEL__ */
 #endif	/* _ASM_POWERPC_HW_IRQ_H */

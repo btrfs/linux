@@ -554,7 +554,7 @@ static unsigned long aligned_access_size(size_t offset, size_t count)
 }
 
 static ssize_t fsi_slave_sysfs_raw_read(struct file *file,
-		struct kobject *kobj, struct bin_attribute *attr, char *buf,
+		struct kobject *kobj, const struct bin_attribute *attr, char *buf,
 		loff_t off, size_t count)
 {
 	struct fsi_slave *slave = to_fsi_slave(kobj_to_dev(kobj));
@@ -581,7 +581,7 @@ static ssize_t fsi_slave_sysfs_raw_read(struct file *file,
 }
 
 static ssize_t fsi_slave_sysfs_raw_write(struct file *file,
-		struct kobject *kobj, struct bin_attribute *attr,
+		struct kobject *kobj, const struct bin_attribute *attr,
 		char *buf, loff_t off, size_t count)
 {
 	struct fsi_slave *slave = to_fsi_slave(kobj_to_dev(kobj));
@@ -1361,10 +1361,10 @@ EXPORT_SYMBOL_GPL(fsi_master_unregister);
 
 /* FSI core & Linux bus type definitions */
 
-static int fsi_bus_match(struct device *dev, struct device_driver *drv)
+static int fsi_bus_match(struct device *dev, const struct device_driver *drv)
 {
 	struct fsi_device *fsi_dev = to_fsi_dev(dev);
-	struct fsi_driver *fsi_drv = to_fsi_drv(drv);
+	const struct fsi_driver *fsi_drv = to_fsi_drv(drv);
 	const struct fsi_device_id *id;
 
 	if (!fsi_drv->id_table)
@@ -1404,7 +1404,7 @@ void fsi_driver_unregister(struct fsi_driver *fsi_drv)
 }
 EXPORT_SYMBOL_GPL(fsi_driver_unregister);
 
-struct bus_type fsi_bus_type = {
+const struct bus_type fsi_bus_type = {
 	.name		= "fsi",
 	.match		= fsi_bus_match,
 };
@@ -1444,5 +1444,6 @@ static void fsi_exit(void)
 }
 module_exit(fsi_exit);
 module_param(discard_errors, int, 0664);
+MODULE_DESCRIPTION("FSI core driver");
 MODULE_LICENSE("GPL");
 MODULE_PARM_DESC(discard_errors, "Don't invoke error handling on bus accesses");

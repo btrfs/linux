@@ -7,13 +7,13 @@
 #ifndef __ASM_ARC_ENTRY_H
 #define __ASM_ARC_ENTRY_H
 
-#include <asm/unistd.h>		/* For NR_syscalls defination */
+#include <asm/unistd.h>		/* For NR_syscalls definition */
 #include <asm/arcregs.h>
 #include <asm/ptrace.h>
 #include <asm/processor.h>	/* For VMALLOC_START */
 #include <asm/mmu.h>
 
-#ifdef __ASSEMBLY__
+#ifdef __ASSEMBLER__
 
 #ifdef CONFIG_ISA_ARCOMPACT
 #include <asm/entry-compact.h>	/* ISA specific bits */
@@ -56,7 +56,7 @@
 .endm
 
 /*-------------------------------------------------------------
- * given a tsk struct, get to the base of it's kernel mode stack
+ * given a tsk struct, get to the base of its kernel mode stack
  * tsk->thread_info is really a PAGE, whose bottom hoists stack
  * which grows upwards towards thread_info
  *------------------------------------------------------------*/
@@ -146,7 +146,7 @@
 
 #endif	/* CONFIG_ARC_CURR_IN_REG */
 
-#else	/* !__ASSEMBLY__ */
+#else	/* !__ASSEMBLER__ */
 
 extern void do_signal(struct pt_regs *);
 extern void do_notify_resume(struct pt_regs *);

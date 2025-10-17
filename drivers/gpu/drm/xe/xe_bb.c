@@ -6,7 +6,7 @@
 #include "xe_bb.h"
 
 #include "instructions/xe_mi_commands.h"
-#include "regs/xe_gpu_commands.h"
+#include "xe_assert.h"
 #include "xe_device.h"
 #include "xe_exec_queue_types.h"
 #include "xe_gt.h"
@@ -19,7 +19,7 @@ static int bb_prefetch(struct xe_gt *gt)
 {
 	struct xe_device *xe = gt_to_xe(gt);
 
-	if (GRAPHICS_VERx100(xe) >= 1250 && !xe_gt_is_media_type(gt))
+	if (GRAPHICS_VERx100(xe) >= 1250 && xe_gt_is_main_type(gt))
 		/*
 		 * RCS and CCS require 1K, although other engines would be
 		 * okay with 512.
@@ -41,11 +41,46 @@ struct xe_bb *xe_bb_new(struct xe_gt *gt, u32 dwords, bool usm)
 	/*
 	 * We need to allocate space for the requested number of dwords,
 	 * one additional MI_BATCH_BUFFER_END dword, and additional buffer
-	 * space to accomodate the platform-specific hardware prefetch
+	 * space to accommodate the platform-specific hardware prefetch
 	 * requirements.
 	 */
 	bb->bo = xe_sa_bo_new(!usm ? tile->mem.kernel_bb_pool : gt->usm.bb_pool,
 			      4 * (dwords + 1) + bb_prefetch(gt));
+	if (IS_ERR(bb->bo)) {
+		err = PTR_ERR(bb->bo);
+		goto err;
+	}
+
+	bb->cs = xe_sa_bo_cpu_addr(bb->bo);
+	bb->len = 0;
+
+	return bb;
+err:
+	kfree(bb);
+	return ERR_PTR(err);
+}
+
+struct xe_bb *xe_bb_ccs_new(struct xe_gt *gt, u32 dwords,
+			    enum xe_sriov_vf_ccs_rw_ctxs ctx_id)
+{
+	struct xe_bb *bb = kmalloc(sizeof(*bb), GFP_KERNEL);
+	struct xe_device *xe = gt_to_xe(gt);
+	struct xe_sa_manager *bb_pool;
+	int err;
+
+	if (!bb)
+		return ERR_PTR(-ENOMEM);
+	/*
+	 * We need to allocate space for the requested number of dwords &
+	 * one additional MI_BATCH_BUFFER_END dword. Since the whole SA
+	 * is submitted to HW, we need to make sure that the last instruction
+	 * is not over written when the last chunk of SA is allocated for BB.
+	 * So, this extra DW acts as a guard here.
+	 */
+
+	bb_pool = xe->sriov.vf.ccs.contexts[ctx_id].mem.ccs_bb_pool;
+	bb->bo = xe_sa_bo_new(bb_pool, 4 * (dwords + 1));
+
 	if (IS_ERR(bb->bo)) {
 		err = PTR_ERR(bb->bo);
 		goto err;
@@ -65,7 +100,8 @@ __xe_bb_create_job(struct xe_exec_queue *q, struct xe_bb *bb, u64 *addr)
 {
 	u32 size = drm_suballoc_size(bb->bo);
 
-	bb->cs[bb->len++] = MI_BATCH_BUFFER_END;
+	if (bb->len == 0 || bb->cs[bb->len - 1] != MI_BATCH_BUFFER_END)
+		bb->cs[bb->len++] = MI_BATCH_BUFFER_END;
 
 	xe_gt_assert(q->gt, bb->len * 4 + bb_prefetch(q->gt) <= size);
 
@@ -86,7 +122,8 @@ struct xe_sched_job *xe_bb_create_migration_job(struct xe_exec_queue *q,
 	};
 
 	xe_gt_assert(q->gt, second_idx <= bb->len);
-	xe_gt_assert(q->gt, q->vm->flags & XE_VM_FLAG_MIGRATION);
+	xe_gt_assert(q->gt, xe_sched_job_is_migration(q));
+	xe_gt_assert(q->gt, q->width == 1);
 
 	return __xe_bb_create_job(q, bb, addr);
 }
@@ -96,7 +133,8 @@ struct xe_sched_job *xe_bb_create_job(struct xe_exec_queue *q,
 {
 	u64 addr = xe_sa_bo_gpu_addr(bb->bo);
 
-	xe_gt_assert(q->gt, !(q->vm && q->vm->flags & XE_VM_FLAG_MIGRATION));
+	xe_gt_assert(q->gt, !xe_sched_job_is_migration(q));
+	xe_gt_assert(q->gt, q->width == 1);
 	return __xe_bb_create_job(q, bb, &addr);
 }
 

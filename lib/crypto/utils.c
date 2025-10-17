@@ -5,9 +5,10 @@
  * Copyright (c) 2006 Herbert Xu <herbert@gondor.apana.org.au>
  */
 
-#include <asm/unaligned.h>
 #include <crypto/utils.h>
+#include <linux/export.h>
 #include <linux/module.h>
+#include <linux/unaligned.h>
 
 /*
  * XOR @len bytes from @src1 and @src2 together, writing the result to @dst
@@ -85,4 +86,5 @@ void __crypto_xor(u8 *dst, const u8 *src1, const u8 *src2, unsigned int len)
 }
 EXPORT_SYMBOL_GPL(__crypto_xor);
 
+MODULE_DESCRIPTION("Crypto library utility functions");
 MODULE_LICENSE("GPL");

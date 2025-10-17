@@ -366,8 +366,7 @@ static int cttimeout_default_set(struct sk_buff *skb,
 	__u8 l4num;
 	int ret;
 
-	if (!cda[CTA_TIMEOUT_L3PROTO] ||
-	    !cda[CTA_TIMEOUT_L4PROTO] ||
+	if (!cda[CTA_TIMEOUT_L4PROTO] ||
 	    !cda[CTA_TIMEOUT_DATA])
 		return -EINVAL;
 
@@ -461,11 +460,6 @@ static int cttimeout_default_get(struct sk_buff *skb,
 	case IPPROTO_UDP:
 	case IPPROTO_UDPLITE:
 		timeouts = nf_udp_pernet(info->net)->timeouts;
-		break;
-	case IPPROTO_DCCP:
-#ifdef CONFIG_NF_CT_PROTO_DCCP
-		timeouts = nf_dccp_pernet(info->net)->dccp_timeout;
-#endif
 		break;
 	case IPPROTO_ICMPV6:
 		timeouts = &nf_icmpv6_pernet(info->net)->timeout;

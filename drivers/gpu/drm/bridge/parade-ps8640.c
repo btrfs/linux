@@ -20,7 +20,6 @@
 #include <drm/drm_edid.h>
 #include <drm/drm_mipi_dsi.h>
 #include <drm/drm_of.h>
-#include <drm/drm_panel.h>
 #include <drm/drm_print.h>
 
 #define PAGE0_AUXCH_CFG3	0x76
@@ -107,6 +106,7 @@ struct ps8640 {
 	struct device_link *link;
 	bool pre_enabled;
 	bool need_post_hpd_delay;
+	struct mutex aux_lock;
 };
 
 static const struct regmap_config ps8640_regmap_config[] = {
@@ -345,10 +345,19 @@ static ssize_t ps8640_aux_transfer(struct drm_dp_aux *aux,
 	struct device *dev = &ps_bridge->page[PAGE0_DP_CNTL]->dev;
 	int ret;
 
+	mutex_lock(&ps_bridge->aux_lock);
 	pm_runtime_get_sync(dev);
+	ret = _ps8640_wait_hpd_asserted(ps_bridge, 200 * 1000);
+	if (ret) {
+		pm_runtime_put_sync_suspend(dev);
+		goto exit;
+	}
 	ret = ps8640_aux_transfer_msg(aux, msg);
 	pm_runtime_mark_last_busy(dev);
 	pm_runtime_put_autosuspend(dev);
+
+exit:
+	mutex_unlock(&ps_bridge->aux_lock);
 
 	return ret;
 }
@@ -428,7 +437,7 @@ static const struct dev_pm_ops ps8640_pm_ops = {
 };
 
 static void ps8640_atomic_pre_enable(struct drm_bridge *bridge,
-				     struct drm_bridge_state *old_bridge_state)
+				     struct drm_atomic_state *state)
 {
 	struct ps8640 *ps_bridge = bridge_to_ps8640(bridge);
 	struct regmap *map = ps_bridge->regmap[PAGE2_TOP_CNTL];
@@ -463,17 +472,29 @@ static void ps8640_atomic_pre_enable(struct drm_bridge *bridge,
 }
 
 static void ps8640_atomic_post_disable(struct drm_bridge *bridge,
-				       struct drm_bridge_state *old_bridge_state)
+				       struct drm_atomic_state *state)
 {
 	struct ps8640 *ps_bridge = bridge_to_ps8640(bridge);
 
 	ps_bridge->pre_enabled = false;
 
 	ps8640_bridge_vdo_control(ps_bridge, DISABLE);
+
+	/*
+	 * The bridge seems to expect everything to be power cycled at the
+	 * disable process, so grab a lock here to make sure
+	 * ps8640_aux_transfer() is not holding a runtime PM reference and
+	 * preventing the bridge from suspend.
+	 */
+	mutex_lock(&ps_bridge->aux_lock);
+
 	pm_runtime_put_sync_suspend(&ps_bridge->page[PAGE0_DP_CNTL]->dev);
+
+	mutex_unlock(&ps_bridge->aux_lock);
 }
 
 static int ps8640_bridge_attach(struct drm_bridge *bridge,
+				struct drm_encoder *encoder,
 				enum drm_bridge_attach_flags flags)
 {
 	struct ps8640 *ps_bridge = bridge_to_ps8640(bridge);
@@ -498,7 +519,7 @@ static int ps8640_bridge_attach(struct drm_bridge *bridge,
 	}
 
 	/* Attach the panel-bridge to the dsi bridge */
-	ret = drm_bridge_attach(bridge->encoder, ps_bridge->panel_bridge,
+	ret = drm_bridge_attach(encoder, ps_bridge->panel_bridge,
 				&ps_bridge->bridge, flags);
 	if (ret)
 		goto err_bridge_attach;
@@ -615,9 +636,12 @@ static int ps8640_probe(struct i2c_client *client)
 	int ret;
 	u32 i;
 
-	ps_bridge = devm_kzalloc(dev, sizeof(*ps_bridge), GFP_KERNEL);
-	if (!ps_bridge)
-		return -ENOMEM;
+	ps_bridge = devm_drm_bridge_alloc(dev, struct ps8640, bridge,
+					  &ps8640_bridge_funcs);
+	if (IS_ERR(ps_bridge))
+		return PTR_ERR(ps_bridge);
+
+	mutex_init(&ps_bridge->aux_lock);
 
 	ps_bridge->supplies[0].supply = "vdd12";
 	ps_bridge->supplies[1].supply = "vdd33";
@@ -639,7 +663,6 @@ static int ps8640_probe(struct i2c_client *client)
 	if (IS_ERR(ps_bridge->gpio_reset))
 		return PTR_ERR(ps_bridge->gpio_reset);
 
-	ps_bridge->bridge.funcs = &ps8640_bridge_funcs;
 	ps_bridge->bridge.of_node = dev->of_node;
 	ps_bridge->bridge.type = DRM_MODE_CONNECTOR_eDP;
 

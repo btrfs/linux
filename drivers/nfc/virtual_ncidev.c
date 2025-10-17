@@ -2,7 +2,7 @@
 /*
  * Virtual NCI device simulation driver
  *
- * Copyright (C) 2020 Samsung Electrnoics
+ * Copyright (C) 2020 Samsung Electronics
  * Bongsu Jeon <bongsu.jeon@samsung.com>
  */
 
@@ -124,6 +124,10 @@ static ssize_t virtual_ncidev_write(struct file *file,
 	if (copy_from_user(skb_put(skb, count), buf, count)) {
 		kfree_skb(skb);
 		return -EFAULT;
+	}
+	if (strnlen(skb->data, count) != count) {
+		kfree_skb(skb);
+		return -EINVAL;
 	}
 
 	nci_recv_frame(vdev->ndev, skb);

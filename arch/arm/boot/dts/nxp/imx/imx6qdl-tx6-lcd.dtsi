@@ -1,42 +1,6 @@
+// SPDX-License-Identifier: (GPL-2.0-only OR MIT)
 /*
  * Copyright 2017 Lothar Waßmann <LW@KARO-electronics.de>
- *
- * This file is dual-licensed: you can use it either under the terms
- * of the GPL or the X11 license, at your option. Note that this dual
- * licensing only applies to this file, and not this project as a
- * whole.
- *
- *  a) This file is free software; you can redistribute it and/or
- *     modify it under the terms of the GNU General Public License
- *     version 2 as published by the Free Software Foundation.
- *
- *     This file is distributed in the hope that it will be useful,
- *     but WITHOUT ANY WARRANTY; without even the implied warranty of
- *     MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *     GNU General Public License for more details.
- *
- * Or, alternatively,
- *
- *  b) Permission is hereby granted, free of charge, to any person
- *     obtaining a copy of this software and associated documentation
- *     files (the "Software"), to deal in the Software without
- *     restriction, including without limitation the rights to use,
- *     copy, modify, merge, publish, distribute, sublicense, and/or
- *     sell copies of the Software, and to permit persons to whom the
- *     Software is furnished to do so, subject to the following
- *     conditions:
- *
- *     The above copyright notice and this permission notice shall be
- *     included in all copies or substantial portions of the Software.
- *
- *     THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
- *     EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES
- *     OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
- *     NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT
- *     HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY,
- *     WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- *     FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
- *     OTHER DEALINGS IN THE SOFTWARE.
  */
 
 / {
@@ -51,7 +15,6 @@
 		pinctrl-0 = <&pinctrl_lcd1_pwr>;
 		enable-gpios = <&gpio2 31 GPIO_ACTIVE_HIGH>;
 		power-supply = <&reg_3v3>;
-		turn-on-delay-ms = <35>;
 		/*
 		 * a poor man's way to create a 1:1 relationship between
 		 * the PWM value and the actual duty cycle
@@ -110,7 +73,7 @@
 		};
 
 		display-timings {
-			VGA {
+			timing-vga {
 				clock-frequency = <25200000>;
 				hactive = <640>;
 				vactive = <480>;
@@ -126,8 +89,7 @@
 				pixelclk-active = <0>;
 			};
 
-			ETV570 {
-				u-boot,panel-name = "edt,et057090dhu";
+			timing-etv570 {
 				clock-frequency = <25200000>;
 				hactive = <640>;
 				vactive = <480>;
@@ -143,8 +105,7 @@
 				pixelclk-active = <0>;
 			};
 
-			ET0350 {
-				u-boot,panel-name = "edt,et0350g0dh6";
+			timing-et0350 {
 				clock-frequency = <6413760>;
 				hactive = <320>;
 				vactive = <240>;
@@ -160,8 +121,7 @@
 				pixelclk-active = <0>;
 			};
 
-			ET0430 {
-				u-boot,panel-name = "edt,et0430g0dh6";
+			timing-et0430 {
 				clock-frequency = <9009000>;
 				hactive = <480>;
 				vactive = <272>;
@@ -177,7 +137,7 @@
 				pixelclk-active = <1>;
 			};
 
-			ET0500 {
+			timing-et0500 {
 				clock-frequency = <33264000>;
 				hactive = <800>;
 				vactive = <480>;
@@ -193,8 +153,7 @@
 				pixelclk-active = <0>;
 			};
 
-			ET0700 { /* same as ET0500 */
-				u-boot,panel-name = "edt,etm0700g0dh6";
+			timing-et0700 { /* same as ET0500 */
 				clock-frequency = <33264000>;
 				hactive = <800>;
 				vactive = <480>;
@@ -210,7 +169,7 @@
 				pixelclk-active = <0>;
 			};
 
-			ETQ570 {
+			timing-etq570 {
 				clock-frequency = <6596040>;
 				hactive = <320>;
 				vactive = <240>;
@@ -226,8 +185,7 @@
 				pixelclk-active = <0>;
 			};
 
-			CoMTFT { /* same as ET0700 but with inverted pixel clock */
-				u-boot,panel-name = "edt,etm0700g0edh6";
+			timing-comtft { /* same as ET0700 but with inverted pixel clock */
 				clock-frequency = <33264000>;
 				hactive = <800>;
 				vactive = <480>;

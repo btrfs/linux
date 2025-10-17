@@ -54,7 +54,7 @@ properties:
       - compatible
 
   wifi:
-    additionalProperties: false
+    unevaluatedProperties: false
     type: object
     properties:
       compatible:
@@ -88,6 +88,9 @@ properties:
       - qcom,smem-states
       - qcom,smem-state-names
 
+    allOf:
+      - $ref: /schemas/net/wireless/wireless-controller.yaml#
+
 required:
   - compatible
   - qcom,mmio
@@ -116,8 +119,8 @@ examples:
 
             bluetooth {
                 compatible = "qcom,wcnss-bt";
-                /* BD address 00:11:22:33:44:55 */
-                local-bd-address = [ 55 44 33 22 11 00 ];
+                /* Updated by boot firmware (little-endian order) */
+                local-bd-address = [ 00 00 00 00 00 00 ];
             };
 
             wifi {

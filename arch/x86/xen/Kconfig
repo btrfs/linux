@@ -8,8 +8,9 @@ config XEN
 	depends on PARAVIRT
 	select PARAVIRT_CLOCK
 	select X86_HV_CALLBACK_VECTOR
+	select HIBERNATE_CALLBACKS
 	depends on X86_64 || (X86_32 && X86_PAE)
-	depends on X86_64 || (X86_GENERIC || MPENTIUM4 || MCORE2 || MATOM || MK8)
+	depends on X86_64 || (X86_GENERIC || MPENTIUM4 || MATOM)
 	depends on X86_LOCAL_APIC && X86_TSC
 	help
 	  This is the Linux Xen port.  Enabling this will allow the
@@ -64,12 +65,6 @@ config XEN_PVHVM_GUEST
 	help
 	  Support running as a Xen PVHVM guest.
 
-config XEN_SAVE_RESTORE
-	bool
-	depends on XEN
-	select HIBERNATE_CALLBACKS
-	default y
-
 config XEN_DEBUG_FS
 	bool "Enable Xen debug and tuning parameters in debugfs"
 	depends on XEN && DEBUG_FS
@@ -81,7 +76,6 @@ config XEN_PVH
 	bool "Xen PVH guest support"
 	depends on XEN && XEN_PVHVM && ACPI
 	select PVH
-	def_bool n
 	help
 	  Support for running as a Xen PVH guest.
 

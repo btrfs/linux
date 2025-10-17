@@ -72,7 +72,7 @@
 #include "dml/display_mode_vba.h"
 #include "dcn32/dcn32_dccg.h"
 #include "dcn10/dcn10_resource.h"
-#include "link.h"
+#include "link_service.h"
 #include "dcn31/dcn31_panel_cntl.h"
 
 #include "dcn30/dcn30_dwb.h"
@@ -686,7 +686,6 @@ static const struct dc_plane_cap plane_cap = {
 static const struct dc_debug_options debug_defaults_drv = {
 	.disable_dmcu = true,
 	.force_abm_enable = false,
-	.timing_trace = false,
 	.clock_trace = true,
 	.disable_pplib_clock_request = false,
 	.pipe_split_policy = MPC_SPLIT_AVOID,
@@ -1035,7 +1034,7 @@ static struct link_encoder *dcn321_link_encoder_create(
 	struct dcn20_link_encoder *enc20 =
 		kzalloc(sizeof(struct dcn20_link_encoder), GFP_KERNEL);
 
-	if (!enc20)
+	if (!enc20 || enc_init_data->hpd_source >= ARRAY_SIZE(link_enc_hpd_regs))
 		return NULL;
 
 #undef REG_STRUCT
@@ -1288,6 +1287,8 @@ static struct hpo_dp_link_encoder *dcn321_hpo_dp_link_encoder_create(
 
 	/* allocate HPO link encoder */
 	hpo_dp_enc31 = kzalloc(sizeof(struct dcn31_hpo_dp_link_encoder), GFP_KERNEL);
+	if (!hpo_dp_enc31)
+		return NULL; /* out of memory */
 
 #undef REG_STRUCT
 #define REG_STRUCT hpo_dp_link_enc_regs
@@ -1580,7 +1581,15 @@ static struct dc_cap_funcs cap_funcs = {
 static void dcn321_update_bw_bounding_box(struct dc *dc, struct clk_bw_params *bw_params)
 {
 	DC_FP_START();
+
 	dcn321_update_bw_bounding_box_fpu(dc, bw_params);
+
+	if (dc->debug.using_dml2 && dc->current_state && dc->current_state->bw_ctx.dml2)
+		dml2_reinit(dc, &dc->dml2_options, &dc->current_state->bw_ctx.dml2);
+
+	if (dc->debug.using_dml2 && dc->current_state && dc->current_state->bw_ctx.dml2_dc_power_source)
+		dml2_reinit(dc, &dc->dml2_dc_power_options, &dc->current_state->bw_ctx.dml2_dc_power_source);
+
 	DC_FP_END();
 }
 
@@ -1608,6 +1617,9 @@ static struct resource_funcs dcn321_res_pool_funcs = {
 	.update_soc_for_wm_a = dcn30_update_soc_for_wm_a,
 	.add_phantom_pipes = dcn32_add_phantom_pipes,
 	.build_pipe_pix_clk_params = dcn20_build_pipe_pix_clk_params,
+	.calculate_mall_ways_from_bytes = dcn32_calculate_mall_ways_from_bytes,
+	.get_vstartup_for_pipe = dcn10_get_vstartup_for_pipe,
+	.get_max_hw_cursor_size = dcn32_get_max_hw_cursor_size,
 };
 
 static uint32_t read_pipe_fuses(struct dc_context *ctx)
@@ -1692,10 +1704,13 @@ static bool dcn321_resource_construct(
 	dc->caps.i2c_speed_in_khz_hdcp = 100; /*1.4 w/a applied by default*/
 	/* TODO: Bring max cursor size back to 256 after subvp cursor corruption is fixed*/
 	dc->caps.max_cursor_size = 64;
+	dc->caps.max_buffered_cursor_size = 64; // sqrt(16 * 1024 / 4)
 	dc->caps.min_horizontal_blanking_period = 80;
 	dc->caps.dmdata_alloc_size = 2048;
 	dc->caps.mall_size_per_mem_channel = 4;
-	dc->caps.mall_size_total = 0;
+	/* total size = mall per channel * num channels * 1024 * 1024 */
+	dc->caps.mall_size_total = dc->caps.mall_size_per_mem_channel * dc->ctx->dc_bios->vram_info.num_chans * 1048576;
+
 	dc->caps.cursor_cache_size = dc->caps.max_cursor_size * dc->caps.max_cursor_size * 8;
 	dc->caps.cache_line_size = 64;
 	dc->caps.cache_num_ways = 16;
@@ -1724,6 +1739,7 @@ static bool dcn321_resource_construct(
 	dc->caps.extended_aux_timeout_support = true;
 	dc->caps.dmcub_support = true;
 	dc->caps.max_v_total = (1 << 15) - 1;
+	dc->caps.vtotal_limited_by_fp2 = true;
 
 	/* Color pipeline capabilities */
 	dc->caps.color.dpp.dcn_arch = 1;
@@ -1739,8 +1755,8 @@ static bool dcn321_resource_construct(
 	dc->caps.color.dpp.gamma_corr = 1;
 	dc->caps.color.dpp.dgam_rom_for_yuv = 0;
 
-	dc->caps.color.dpp.hw_3d_lut = 1;
-	dc->caps.color.dpp.ogam_ram = 1;
+	dc->caps.color.dpp.hw_3d_lut = 0;
+	dc->caps.color.dpp.ogam_ram = 0;
 	// no OGAM ROM on DCN2 and later ASICs
 	dc->caps.color.dpp.ogam_rom_caps.srgb = 0;
 	dc->caps.color.dpp.ogam_rom_caps.bt2020 = 0;
@@ -1758,8 +1774,14 @@ static bool dcn321_resource_construct(
 	dc->caps.color.mpc.ogam_rom_caps.pq = 0;
 	dc->caps.color.mpc.ogam_rom_caps.hlg = 0;
 	dc->caps.color.mpc.ocsc = 1;
+	dc->caps.color.mpc.preblend = true;
+
+	/* Use pipe context based otg sync logic */
+	dc->config.use_pipe_ctx_sync_logic = true;
 
 	dc->config.dc_mode_clk_limit_support = true;
+	dc->config.enable_windowed_mpo_odm = true;
+	dc->config.disable_hbr_audio_dp2 = true;
 	/* read VBIOS LTTPR caps */
 	{
 		if (ctx->dc_bios->funcs->get_lttpr_caps) {
@@ -1977,6 +1999,8 @@ static bool dcn321_resource_construct(
 	for (i = 0; i < dc->caps.max_planes; ++i)
 		dc->caps.planes[i] = plane_cap;
 
+	dc->caps.max_odm_combine_factor = 4;
+
 	dc->cap_funcs = cap_funcs;
 
 	if (dc->ctx->dc_bios->fw_info.oem_i2c_present) {
@@ -1991,34 +2015,13 @@ static bool dcn321_resource_construct(
 	}
 
 	dc->dml2_options.dcn_pipe_count = pool->base.pipe_count;
-	dc->dml2_options.use_native_pstate_optimization = false;
 	dc->dml2_options.use_native_soc_bb_construction = true;
 	dc->dml2_options.minimize_dispclk_using_odm = true;
 
-	dc->dml2_options.callbacks.dc = dc;
-	dc->dml2_options.callbacks.build_scaling_params = &resource_build_scaling_params;
+	resource_init_common_dml2_callbacks(dc, &dc->dml2_options);
 	dc->dml2_options.callbacks.can_support_mclk_switch_using_fw_based_vblank_stretch = &dcn30_can_support_mclk_switch_using_fw_based_vblank_stretch;
-	dc->dml2_options.callbacks.acquire_secondary_pipe_for_mpc_odm = &dc_resource_acquire_secondary_pipe_for_mpc_odm_legacy;
-	dc->dml2_options.callbacks.update_pipes_for_stream_with_slice_count = &resource_update_pipes_for_stream_with_slice_count;
-	dc->dml2_options.callbacks.update_pipes_for_plane_with_slice_count = &resource_update_pipes_for_plane_with_slice_count;
-	dc->dml2_options.callbacks.get_mpc_slice_index = &resource_get_mpc_slice_index;
-	dc->dml2_options.callbacks.get_odm_slice_index = &resource_get_odm_slice_index;
-	dc->dml2_options.callbacks.get_opp_head = &resource_get_opp_head;
-
-	dc->dml2_options.svp_pstate.callbacks.dc = dc;
-	dc->dml2_options.svp_pstate.callbacks.add_phantom_plane = &dc_state_add_phantom_plane;
-	dc->dml2_options.svp_pstate.callbacks.add_phantom_stream = &dc_state_add_phantom_stream;
-	dc->dml2_options.svp_pstate.callbacks.build_scaling_params = &resource_build_scaling_params;
-	dc->dml2_options.svp_pstate.callbacks.create_phantom_plane = &dc_state_create_phantom_plane;
-	dc->dml2_options.svp_pstate.callbacks.remove_phantom_plane = &dc_state_remove_phantom_plane;
-	dc->dml2_options.svp_pstate.callbacks.remove_phantom_stream = &dc_state_remove_phantom_stream;
-	dc->dml2_options.svp_pstate.callbacks.create_phantom_stream = &dc_state_create_phantom_stream;
-	dc->dml2_options.svp_pstate.callbacks.release_phantom_plane = &dc_state_release_phantom_plane;
-	dc->dml2_options.svp_pstate.callbacks.release_phantom_stream = &dc_state_release_phantom_stream;
 	dc->dml2_options.svp_pstate.callbacks.release_dsc = &dcn20_release_dsc;
-	dc->dml2_options.svp_pstate.callbacks.get_pipe_subvp_type = &dc_state_get_pipe_subvp_type;
-	dc->dml2_options.svp_pstate.callbacks.get_stream_subvp_type = &dc_state_get_stream_subvp_type;
-	dc->dml2_options.svp_pstate.callbacks.get_paired_subvp_stream = &dc_state_get_paired_subvp_stream;
+	dc->dml2_options.svp_pstate.callbacks.calculate_mall_ways_from_bytes = pool->base.funcs->calculate_mall_ways_from_bytes;
 
 	dc->dml2_options.svp_pstate.subvp_fw_processing_delay_us = dc->caps.subvp_fw_processing_delay_us;
 	dc->dml2_options.svp_pstate.subvp_prefetch_end_to_mall_start_us = dc->caps.subvp_prefetch_end_to_mall_start_us;
@@ -2038,6 +2041,10 @@ static bool dcn321_resource_construct(
 
 	dc->dml2_options.max_segments_per_hubp = 18;
 	dc->dml2_options.det_segment_size = DCN3_2_DET_SEG_SIZE;
+
+	/* init DC limited DML2 options */
+	memcpy(&dc->dml2_dc_power_options, &dc->dml2_options, sizeof(struct dml2_configuration_options));
+	dc->dml2_dc_power_options.use_clock_dc_limits = true;
 
 	return true;
 

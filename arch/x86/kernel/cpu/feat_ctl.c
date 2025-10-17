@@ -4,6 +4,7 @@
 #include <asm/cpu.h>
 #include <asm/cpufeature.h>
 #include <asm/msr-index.h>
+#include <asm/msr.h>
 #include <asm/processor.h>
 #include <asm/vmx.h>
 
@@ -72,6 +73,8 @@ static void init_vmx_capabilities(struct cpuinfo_x86 *c)
 		c->vmx_capability[MISC_FEATURES] |= VMX_F(EPT_AD);
 	if (ept & VMX_EPT_1GB_PAGE_BIT)
 		c->vmx_capability[MISC_FEATURES] |= VMX_F(EPT_1GB);
+	if (ept & VMX_EPT_PAGE_WALK_5_BIT)
+		c->vmx_capability[MISC_FEATURES] |= VMX_F(EPT_5LEVEL);
 
 	/* Synthetic APIC features that are aggregates of multiple features. */
 	if ((c->vmx_capability[PRIMARY_CTLS] & VMX_F(VIRTUAL_TPR)) &&
@@ -116,7 +119,7 @@ void init_ia32_feat_ctl(struct cpuinfo_x86 *c)
 	bool enable_vmx;
 	u64 msr;
 
-	if (rdmsrl_safe(MSR_IA32_FEAT_CTL, &msr)) {
+	if (rdmsrq_safe(MSR_IA32_FEAT_CTL, &msr)) {
 		clear_cpu_cap(c, X86_FEATURE_VMX);
 		clear_cpu_cap(c, X86_FEATURE_SGX);
 		return;
@@ -163,7 +166,7 @@ void init_ia32_feat_ctl(struct cpuinfo_x86 *c)
 			msr |= FEAT_CTL_SGX_LC_ENABLED;
 	}
 
-	wrmsrl(MSR_IA32_FEAT_CTL, msr);
+	wrmsrq(MSR_IA32_FEAT_CTL, msr);
 
 update_caps:
 	set_cpu_cap(c, X86_FEATURE_MSR_IA32_FEAT_CTL);
@@ -186,7 +189,7 @@ update_caps:
 update_sgx:
 	if (!(msr & FEAT_CTL_SGX_ENABLED)) {
 		if (enable_sgx_kvm || enable_sgx_driver)
-			pr_err_once("SGX disabled by BIOS.\n");
+			pr_err_once("SGX disabled or unsupported by BIOS.\n");
 		clear_cpu_cap(c, X86_FEATURE_SGX);
 		return;
 	}

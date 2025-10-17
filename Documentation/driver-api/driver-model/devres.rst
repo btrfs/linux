@@ -275,7 +275,6 @@ GPIO
   devm_gpiod_put()
   devm_gpiod_unhinge()
   devm_gpiochip_add_data()
-  devm_gpio_request()
   devm_gpio_request_one()
 
 I2C
@@ -391,13 +390,11 @@ PCI
   devm_pci_remap_cfgspace()	: ioremap PCI configuration space
   devm_pci_remap_cfg_resource()	: ioremap PCI configuration space resource
 
-  pcim_enable_device()		: after success, all PCI ops become managed
+  pcim_enable_device()		: after success, the PCI device gets disabled automatically on driver detach
   pcim_iomap()			: do iomap() on a single BAR
   pcim_iomap_regions()		: do request_region() and iomap() on multiple BARs
-  pcim_iomap_regions_request_all() : do request_region() on all and iomap() on multiple BARs
   pcim_iomap_table()		: array of mapped addresses indexed by BAR
   pcim_iounmap()		: do iounmap() on a single BAR
-  pcim_iounmap_regions()	: do iounmap() and release_region() on multiple BARs
   pcim_pin_device()		: keep PCI device enabled after release
   pcim_set_mwi()		: enable Memory-Write-Invalidate PCI transaction
 
@@ -405,7 +402,6 @@ PHY
   devm_usb_get_phy()
   devm_usb_get_phy_by_node()
   devm_usb_get_phy_by_phandle()
-  devm_usb_put_phy()
 
 PINCTRL
   devm_pinctrl_get()
@@ -420,6 +416,7 @@ POWER
   devm_reboot_mode_unregister()
 
 PWM
+  devm_pwmchip_alloc()
   devm_pwmchip_add()
   devm_pwm_get()
   devm_fwnode_pwm_get()
@@ -432,6 +429,7 @@ REGULATOR
   devm_regulator_bulk_put()
   devm_regulator_get()
   devm_regulator_get_enable()
+  devm_regulator_get_enable_read_voltage()
   devm_regulator_get_enable_optional()
   devm_regulator_get_exclusive()
   devm_regulator_get_optional()
@@ -457,12 +455,14 @@ SERDEV
 
 SLAVE DMA ENGINE
   devm_acpi_dma_controller_register()
-  devm_acpi_dma_controller_free()
 
 SPI
-  devm_spi_alloc_master()
-  devm_spi_alloc_slave()
-  devm_spi_register_master()
+  devm_spi_alloc_host()
+  devm_spi_alloc_target()
+  devm_spi_optimize_message()
+  devm_spi_register_controller()
+  devm_spi_register_host()
+  devm_spi_register_target()
 
 WATCHDOG
   devm_watchdog_register_device()

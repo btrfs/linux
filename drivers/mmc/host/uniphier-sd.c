@@ -9,11 +9,11 @@
 #include <linux/delay.h>
 #include <linux/dma-mapping.h>
 #include <linux/mfd/syscon.h>
-#include <linux/mfd/tmio.h>
 #include <linux/mmc/host.h>
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/pinctrl/consumer.h>
+#include <linux/platform_data/tmio.h>
 #include <linux/platform_device.h>
 #include <linux/regmap.h>
 #include <linux/reset.h>
@@ -90,9 +90,9 @@ static void uniphier_sd_dma_endisable(struct tmio_mmc_host *host, int enable)
 }
 
 /* external DMA engine */
-static void uniphier_sd_external_dma_issue(struct tasklet_struct *t)
+static void uniphier_sd_external_dma_issue(struct work_struct *t)
 {
-	struct tmio_mmc_host *host = from_tasklet(host, t, dma_issue);
+	struct tmio_mmc_host *host = from_work(host, t, dma_issue);
 	struct uniphier_sd_priv *priv = uniphier_sd_priv(host);
 
 	uniphier_sd_dma_endisable(host, 1);
@@ -199,7 +199,7 @@ static void uniphier_sd_external_dma_request(struct tmio_mmc_host *host,
 	host->chan_rx = chan;
 	host->chan_tx = chan;
 
-	tasklet_setup(&host->dma_issue, uniphier_sd_external_dma_issue);
+	INIT_WORK(&host->dma_issue, uniphier_sd_external_dma_issue);
 }
 
 static void uniphier_sd_external_dma_release(struct tmio_mmc_host *host)
@@ -236,9 +236,9 @@ static const struct tmio_mmc_dma_ops uniphier_sd_external_dma_ops = {
 	.dataend = uniphier_sd_external_dma_dataend,
 };
 
-static void uniphier_sd_internal_dma_issue(struct tasklet_struct *t)
+static void uniphier_sd_internal_dma_issue(struct work_struct *t)
 {
-	struct tmio_mmc_host *host = from_tasklet(host, t, dma_issue);
+	struct tmio_mmc_host *host = from_work(host, t, dma_issue);
 	unsigned long flags;
 
 	spin_lock_irqsave(&host->lock, flags);
@@ -317,7 +317,7 @@ static void uniphier_sd_internal_dma_request(struct tmio_mmc_host *host,
 
 	host->chan_tx = (void *)0xdeadbeaf;
 
-	tasklet_setup(&host->dma_issue, uniphier_sd_internal_dma_issue);
+	INIT_WORK(&host->dma_issue, uniphier_sd_internal_dma_issue);
 }
 
 static void uniphier_sd_internal_dma_release(struct tmio_mmc_host *host)
@@ -663,8 +663,7 @@ static int uniphier_sd_probe(struct platform_device *pdev)
 		priv->rst_hw = devm_reset_control_get_exclusive(dev, "hw");
 		if (IS_ERR(priv->rst_hw)) {
 			dev_err(dev, "failed to get hw reset\n");
-			ret = PTR_ERR(priv->rst_hw);
-			goto free_host;
+			return PTR_ERR(priv->rst_hw);
 		}
 		host->ops.card_hw_reset = uniphier_sd_hw_reset;
 	}
@@ -694,7 +693,7 @@ static int uniphier_sd_probe(struct platform_device *pdev)
 
 	ret = uniphier_sd_clk_enable(host);
 	if (ret)
-		goto free_host;
+		return ret;
 
 	uniphier_sd_host_init(host);
 
@@ -720,8 +719,6 @@ static int uniphier_sd_probe(struct platform_device *pdev)
 
 disable_clk:
 	uniphier_sd_clk_disable(host);
-free_host:
-	tmio_mmc_host_free(host);
 
 	return ret;
 }
@@ -732,7 +729,6 @@ static void uniphier_sd_remove(struct platform_device *pdev)
 
 	tmio_mmc_host_remove(host);
 	uniphier_sd_clk_disable(host);
-	tmio_mmc_host_free(host);
 }
 
 static const struct of_device_id uniphier_sd_match[] = {
@@ -754,7 +750,7 @@ MODULE_DEVICE_TABLE(of, uniphier_sd_match);
 
 static struct platform_driver uniphier_sd_driver = {
 	.probe = uniphier_sd_probe,
-	.remove_new = uniphier_sd_remove,
+	.remove = uniphier_sd_remove,
 	.driver = {
 		.name = "uniphier-sd",
 		.probe_type = PROBE_PREFER_ASYNCHRONOUS,

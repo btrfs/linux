@@ -552,9 +552,8 @@ static int __init ns_alloc_device(struct nandsim *ns)
 			err = -EINVAL;
 			goto err_close_filp;
 		}
-		ns->pages_written =
-			vzalloc(array_size(sizeof(unsigned long),
-					   BITS_TO_LONGS(ns->geom.pgnum)));
+		ns->pages_written = vcalloc(BITS_TO_LONGS(ns->geom.pgnum),
+					    sizeof(unsigned long));
 		if (!ns->pages_written) {
 			NS_ERR("alloc_device: unable to allocate pages written array\n");
 			err = -ENOMEM;
@@ -578,7 +577,7 @@ err_close_filp:
 		return err;
 	}
 
-	ns->pages = vmalloc(array_size(sizeof(union ns_mem), ns->geom.pgnum));
+	ns->pages = vmalloc_array(ns->geom.pgnum, sizeof(union ns_mem));
 	if (!ns->pages) {
 		NS_ERR("alloc_device: unable to allocate page array\n");
 		return -ENOMEM;
@@ -1381,7 +1380,7 @@ static inline union ns_mem *NS_GET_PAGE(struct nandsim *ns)
 }
 
 /*
- * Retuns a pointer to the current byte, within the current page.
+ * Returns a pointer to the current byte, within the current page.
  */
 static inline u_char *NS_PAGE_BYTE_OFF(struct nandsim *ns)
 {

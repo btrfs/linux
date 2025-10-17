@@ -51,6 +51,8 @@ static irqreturn_t ocelot_xtr_irq_handler(int irq, void *arg)
 	struct ocelot *ocelot = arg;
 	int grp = 0, err;
 
+	ocelot_lock_xtr_grp(ocelot, grp);
+
 	while (ocelot_read(ocelot, QS_XTR_DATA_PRESENT) & BIT(grp)) {
 		struct sk_buff *skb;
 
@@ -68,6 +70,8 @@ static irqreturn_t ocelot_xtr_irq_handler(int irq, void *arg)
 out:
 	if (err < 0)
 		ocelot_drain_cpu_queue(ocelot, 0);
+
+	ocelot_unlock_xtr_grp(ocelot, grp);
 
 	return IRQ_HANDLED;
 }
@@ -104,6 +108,8 @@ static struct ptp_clock_info ocelot_ptp_clock_info = {
 	.n_ext_ts	= 0,
 	.n_per_out	= OCELOT_PTP_PINS_NUM,
 	.n_pins		= OCELOT_PTP_PINS_NUM,
+	.supported_perout_flags = PTP_PEROUT_DUTY_CYCLE |
+				  PTP_PEROUT_PHASE,
 	.pps		= 0,
 	.gettime64	= ocelot_ptp_gettime64,
 	.settime64	= ocelot_ptp_settime64,
@@ -412,7 +418,7 @@ static void mscc_ocelot_remove(struct platform_device *pdev)
 
 static struct platform_driver mscc_ocelot_driver = {
 	.probe = mscc_ocelot_probe,
-	.remove_new = mscc_ocelot_remove,
+	.remove = mscc_ocelot_remove,
 	.driver = {
 		.name = "ocelot-switch",
 		.of_match_table = mscc_ocelot_match,

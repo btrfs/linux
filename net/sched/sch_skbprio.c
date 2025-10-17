@@ -79,7 +79,9 @@ static int skbprio_enqueue(struct sk_buff *skb, struct Qdisc *sch,
 	prio = min(skb->priority, max_priority);
 
 	qdisc = &q->qdiscs[prio];
-	if (sch->q.qlen < sch->limit) {
+
+	/* sch->limit can change under us from skbprio_change() */
+	if (sch->q.qlen < READ_ONCE(sch->limit)) {
 		__skb_queue_tail(qdisc, skb);
 		qdisc_qstats_backlog_inc(sch, skb);
 		q->qstats[prio].backlog += qdisc_pkt_len(skb);
@@ -121,8 +123,6 @@ static int skbprio_enqueue(struct sk_buff *skb, struct Qdisc *sch,
 	/* Check to update highest and lowest priorities. */
 	if (skb_queue_empty(lp_qdisc)) {
 		if (q->lowest_prio == q->highest_prio) {
-			/* The incoming packet is the only packet in queue. */
-			BUG_ON(sch->q.qlen != 1);
 			q->lowest_prio = prio;
 			q->highest_prio = prio;
 		} else {
@@ -154,7 +154,6 @@ static struct sk_buff *skbprio_dequeue(struct Qdisc *sch)
 	/* Update highest priority field. */
 	if (skb_queue_empty(hpq)) {
 		if (q->lowest_prio == q->highest_prio) {
-			BUG_ON(sch->q.qlen);
 			q->highest_prio = 0;
 			q->lowest_prio = SKBPRIO_MAX_PRIORITY - 1;
 		} else {
@@ -172,7 +171,7 @@ static int skbprio_change(struct Qdisc *sch, struct nlattr *opt,
 	if (opt->nla_len != nla_attr_size(sizeof(*ctl)))
 		return -EINVAL;
 
-	sch->limit = ctl->limit;
+	WRITE_ONCE(sch->limit, ctl->limit);
 	return 0;
 }
 
@@ -200,7 +199,7 @@ static int skbprio_dump(struct Qdisc *sch, struct sk_buff *skb)
 {
 	struct tc_skbprio_qopt opt;
 
-	opt.limit = sch->limit;
+	opt.limit = READ_ONCE(sch->limit);
 
 	if (nla_put(skb, TCA_OPTIONS, sizeof(opt), &opt))
 		return -1;
@@ -292,6 +291,7 @@ static struct Qdisc_ops skbprio_qdisc_ops __read_mostly = {
 	.destroy	=	skbprio_destroy,
 	.owner		=	THIS_MODULE,
 };
+MODULE_ALIAS_NET_SCH("skbprio");
 
 static int __init skbprio_module_init(void)
 {

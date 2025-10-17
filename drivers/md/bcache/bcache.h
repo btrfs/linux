@@ -200,6 +200,7 @@ struct bucket {
 	uint8_t		gen;
 	uint8_t		last_gc; /* Most out of date gen in the btree */
 	uint16_t	gc_mark; /* Bitfield used by GC. See below for field */
+	uint16_t	reclaimable_in_gc:1;
 };
 
 /*
@@ -300,7 +301,7 @@ struct cached_dev {
 	struct list_head	list;
 	struct bcache_device	disk;
 	struct block_device	*bdev;
-	struct bdev_handle	*bdev_handle;
+	struct file		*bdev_file;
 
 	struct cache_sb		sb;
 	struct cache_sb_disk	*sb_disk;
@@ -423,7 +424,7 @@ struct cache {
 
 	struct kobject		kobj;
 	struct block_device	*bdev;
-	struct bdev_handle	*bdev_handle;
+	struct file		*bdev_file;
 
 	struct task_struct	*alloc_thread;
 

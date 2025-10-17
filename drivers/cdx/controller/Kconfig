@@ -9,6 +9,7 @@ if CDX_BUS
 
 config CDX_CONTROLLER
 	tristate "CDX bus controller"
+	depends on HAS_DMA
 	select REMOTEPROC
 	select RPMSG
 	help

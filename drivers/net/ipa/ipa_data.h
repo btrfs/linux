@@ -1,16 +1,16 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 
 /* Copyright (c) 2012-2018, The Linux Foundation. All rights reserved.
- * Copyright (C) 2019-2023 Linaro Ltd.
+ * Copyright (C) 2019-2024 Linaro Ltd.
  */
 #ifndef _IPA_DATA_H_
 #define _IPA_DATA_H_
 
 #include <linux/types.h>
 
-#include "ipa_version.h"
 #include "ipa_endpoint.h"
 #include "ipa_mem.h"
+#include "ipa_version.h"
 
 /**
  * DOC: IPA/GSI Configuration Data
@@ -180,7 +180,6 @@ struct ipa_resource_data {
  * @local:		array of IPA-local memory region descriptors
  * @imem_addr:		physical address of IPA region within IMEM
  * @imem_size:		size in bytes of IPA IMEM region
- * @smem_id:		item identifier for IPA region within SMEM memory
  * @smem_size:		size in bytes of the IPA SMEM region
  */
 struct ipa_mem_data {
@@ -188,7 +187,6 @@ struct ipa_mem_data {
 	const struct ipa_mem *local;
 	u32 imem_addr;
 	u32 imem_size;
-	u32 smem_id;
 	u32 smem_size;
 };
 

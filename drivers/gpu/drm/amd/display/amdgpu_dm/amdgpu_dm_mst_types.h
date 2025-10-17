@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: MIT */
 /*
  * Copyright 2012-15 Advanced Micro Devices, Inc.
  *
@@ -46,8 +47,8 @@
 #define SYNAPTICS_CASCADED_HUB_ID  0x5A
 #define IS_SYNAPTICS_CASCADED_PANAMERA(devName, data) ((IS_SYNAPTICS_PANAMERA(devName) && ((int)data[2] == SYNAPTICS_CASCADED_HUB_ID)) ? 1 : 0)
 
-#define PBN_FEC_OVERHEAD_MULTIPLIER_8B_10B	1031
-#define PBN_FEC_OVERHEAD_MULTIPLIER_128B_132B	1000
+#define PBN_FEC_OVERHEAD_MULTIPLIER_8B_10B     1031
+#define PBN_FEC_OVERHEAD_MULTIPLIER_128B_132B  1000
 
 enum mst_msg_ready_type {
 	NONE_MSG_RDY_EVENT = 0,
@@ -59,7 +60,7 @@ enum mst_msg_ready_type {
 struct amdgpu_display_manager;
 struct amdgpu_dm_connector;
 
-int dm_mst_get_pbn_divider(struct dc_link *link);
+uint32_t dm_mst_get_pbn_divider(struct dc_link *link);
 
 void amdgpu_dm_initialize_dp_connector(struct amdgpu_display_manager *dm,
 				       struct amdgpu_dm_connector *aconnector,

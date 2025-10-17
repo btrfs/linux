@@ -75,7 +75,7 @@ Here are the main features of EROFS:
 
  - Support merging tail-end data into a special inode as fragments.
 
- - Support large folios for uncompressed files.
+ - Support large folios to make use of THPs (Transparent Hugepages);
 
  - Support direct I/O on uncompressed files to avoid double caching for loop
    devices;
@@ -116,7 +116,7 @@ cache_strategy=%s      Select a strategy for cached decompression from now on:
                                    cluster for further reading. It still does
                                    in-place I/O decompression for the rest
                                    compressed physical clusters;
-                       readaround  Cache the both ends of incomplete compressed
+                       readaround  Cache both ends of incomplete compressed
                                    physical clusters for further reading.
                                    It still does in-place I/O decompression
                                    for the rest compressed physical clusters.
@@ -128,6 +128,7 @@ device=%s              Specify a path to an extra device to be used together.
 fsid=%s                Specify a filesystem image ID for Fscache back-end.
 domain_id=%s           Specify a domain ID in fscache mode so that different images
                        with the same blobs under a given domain ID can share storage.
+fsoffset=%llu          Specify block-aligned filesystem offset for the primary device.
 ===================    =========================================================
 
 Sysfs Entries

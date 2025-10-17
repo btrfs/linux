@@ -30,8 +30,6 @@ PTE Page Table Helpers
 +---------------------------+--------------------------------------------------+
 | pte_protnone              | Tests a PROT_NONE PTE                            |
 +---------------------------+--------------------------------------------------+
-| pte_devmap                | Tests a ZONE_DEVICE mapped PTE                   |
-+---------------------------+--------------------------------------------------+
 | pte_soft_dirty            | Tests a soft dirty PTE                           |
 +---------------------------+--------------------------------------------------+
 | pte_swp_soft_dirty        | Tests a soft dirty swapped PTE                   |
@@ -53,8 +51,6 @@ PTE Page Table Helpers
 | pte_wrprotect             | Creates a write protected PTE                    |
 +---------------------------+--------------------------------------------------+
 | pte_mkspecial             | Creates a special PTE                            |
-+---------------------------+--------------------------------------------------+
-| pte_mkdevmap              | Creates a ZONE_DEVICE mapped PTE                 |
 +---------------------------+--------------------------------------------------+
 | pte_mksoft_dirty          | Creates a soft dirty PTE                         |
 +---------------------------+--------------------------------------------------+
@@ -90,8 +86,6 @@ PMD Page Table Helpers
 +---------------------------+--------------------------------------------------+
 | pmd_leaf                  | Tests a leaf mapped PMD                          |
 +---------------------------+--------------------------------------------------+
-| pmd_huge                  | Tests a HugeTLB mapped PMD                       |
-+---------------------------+--------------------------------------------------+
 | pmd_trans_huge            | Tests a Transparent Huge Page (THP) at PMD       |
 +---------------------------+--------------------------------------------------+
 | pmd_present               | Tests whether pmd_page() points to valid memory  |
@@ -105,8 +99,6 @@ PMD Page Table Helpers
 | pmd_special               | Tests a special PMD                              |
 +---------------------------+--------------------------------------------------+
 | pmd_protnone              | Tests a PROT_NONE PMD                            |
-+---------------------------+--------------------------------------------------+
-| pmd_devmap                | Tests a ZONE_DEVICE mapped PMD                   |
 +---------------------------+--------------------------------------------------+
 | pmd_soft_dirty            | Tests a soft dirty PMD                           |
 +---------------------------+--------------------------------------------------+
@@ -130,8 +122,6 @@ PMD Page Table Helpers
 +---------------------------+--------------------------------------------------+
 | pmd_mkspecial             | Creates a special PMD                            |
 +---------------------------+--------------------------------------------------+
-| pmd_mkdevmap              | Creates a ZONE_DEVICE mapped PMD                 |
-+---------------------------+--------------------------------------------------+
 | pmd_mksoft_dirty          | Creates a soft dirty PMD                         |
 +---------------------------+--------------------------------------------------+
 | pmd_clear_soft_dirty      | Clears a soft dirty PMD                          |
@@ -140,7 +130,8 @@ PMD Page Table Helpers
 +---------------------------+--------------------------------------------------+
 | pmd_swp_clear_soft_dirty  | Clears a soft dirty swapped PMD                  |
 +---------------------------+--------------------------------------------------+
-| pmd_mkinvalid             | Invalidates a mapped PMD [1]                     |
+| pmd_mkinvalid             | Invalidates a present PMD; do not call for       |
+|                           | non-present PMD [1]                              |
 +---------------------------+--------------------------------------------------+
 | pmd_set_huge              | Creates a PMD huge mapping                       |
 +---------------------------+--------------------------------------------------+
@@ -168,8 +159,6 @@ PUD Page Table Helpers
 +---------------------------+--------------------------------------------------+
 | pud_leaf                  | Tests a leaf mapped PUD                          |
 +---------------------------+--------------------------------------------------+
-| pud_huge                  | Tests a HugeTLB mapped PUD                       |
-+---------------------------+--------------------------------------------------+
 | pud_trans_huge            | Tests a Transparent Huge Page (THP) at PUD       |
 +---------------------------+--------------------------------------------------+
 | pud_present               | Tests a valid mapped PUD                         |
@@ -179,8 +168,6 @@ PUD Page Table Helpers
 | pud_dirty                 | Tests a dirty PUD                                |
 +---------------------------+--------------------------------------------------+
 | pud_write                 | Tests a writable PUD                             |
-+---------------------------+--------------------------------------------------+
-| pud_devmap                | Tests a ZONE_DEVICE mapped PUD                   |
 +---------------------------+--------------------------------------------------+
 | pud_mkyoung               | Creates a young PUD                              |
 +---------------------------+--------------------------------------------------+
@@ -194,9 +181,8 @@ PUD Page Table Helpers
 +---------------------------+--------------------------------------------------+
 | pud_wrprotect             | Creates a write protected PUD                    |
 +---------------------------+--------------------------------------------------+
-| pud_mkdevmap              | Creates a ZONE_DEVICE mapped PUD                 |
-+---------------------------+--------------------------------------------------+
-| pud_mkinvalid             | Invalidates a mapped PUD [1]                     |
+| pud_mkinvalid             | Invalidates a present PUD; do not call for       |
+|                           | non-present PUD [1]                              |
 +---------------------------+--------------------------------------------------+
 | pud_set_huge              | Creates a PUD huge mapping                       |
 +---------------------------+--------------------------------------------------+
@@ -244,13 +230,13 @@ SWAP Page Table Helpers
 ========================
 
 +---------------------------+--------------------------------------------------+
-| __pte_to_swp_entry        | Creates a swapped entry (arch) from a mapped PTE |
+| __pte_to_swp_entry        | Creates a swp_entry_t (arch) from a swap PTE     |
 +---------------------------+--------------------------------------------------+
-| __swp_to_pte_entry        | Creates a mapped PTE from a swapped entry (arch) |
+| __swp_entry_to_pte        | Creates a swap PTE from a swp_entry_t (arch)     |
 +---------------------------+--------------------------------------------------+
-| __pmd_to_swp_entry        | Creates a swapped entry (arch) from a mapped PMD |
+| __pmd_to_swp_entry        | Creates a swp_entry_t (arch) from a swap PMD     |
 +---------------------------+--------------------------------------------------+
-| __swp_to_pmd_entry        | Creates a mapped PMD from a swapped entry (arch) |
+| __swp_entry_to_pmd        | Creates a swap PMD from a swp_entry_t (arch)     |
 +---------------------------+--------------------------------------------------+
 | is_migration_entry        | Tests a migration (read or write) swapped entry  |
 +-------------------------------+----------------------------------------------+

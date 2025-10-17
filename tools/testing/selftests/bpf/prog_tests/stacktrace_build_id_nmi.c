@@ -35,7 +35,7 @@ retry:
 	pmu_fd = syscall(__NR_perf_event_open, &attr, -1 /* pid */,
 			 0 /* cpu 0 */, -1 /* group id */,
 			 0 /* flags */);
-	if (pmu_fd < 0 && errno == ENOENT) {
+	if (pmu_fd < 0 && (errno == ENOENT || errno == EOPNOTSUPP)) {
 		printf("%s:SKIP:no PERF_COUNT_HW_CPU_CYCLES\n", __func__);
 		test__skip();
 		goto cleanup;
@@ -66,7 +66,7 @@ retry:
 	bpf_map_update_elem(control_map_fd, &key, &val, 0);
 
 	/* for every element in stackid_hmap, we can find a corresponding one
-	 * in stackmap, and vise versa.
+	 * in stackmap, and vice versa.
 	 */
 	err = compare_map_keys(stackid_hmap_fd, stackmap_fd);
 	if (CHECK(err, "compare_map_keys stackid_hmap vs. stackmap",

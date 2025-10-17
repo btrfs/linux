@@ -23,7 +23,7 @@ MODULE_DEVICE_TABLE(pci, pdsc_id_table);
 
 static void pdsc_wdtimer_cb(struct timer_list *t)
 {
-	struct pdsc *pdsc = from_timer(pdsc, t, wdtimer);
+	struct pdsc *pdsc = timer_container_of(pdsc, t, wdtimer);
 
 	dev_dbg(pdsc->dev, "%s: jiffies %ld\n", __func__, jiffies);
 	mod_timer(&pdsc->wdtimer,
@@ -37,9 +37,15 @@ static void pdsc_unmap_bars(struct pdsc *pdsc)
 	struct pdsc_dev_bar *bars = pdsc->bars;
 	unsigned int i;
 
+	pdsc->info_regs = NULL;
+	pdsc->cmd_regs = NULL;
+	pdsc->intr_status = NULL;
+	pdsc->intr_ctrl = NULL;
+
 	for (i = 0; i < PDS_CORE_BARS_MAX; i++) {
 		if (bars[i].vaddr)
 			pci_iounmap(pdsc->pdev, bars[i].vaddr);
+		bars[i].vaddr = NULL;
 	}
 }
 
@@ -184,7 +190,8 @@ static int pdsc_init_vf(struct pdsc *vf)
 	devl_unlock(dl);
 
 	pf->vfs[vf->vf_id].vf = vf;
-	err = pdsc_auxbus_dev_add(vf, pf);
+	err = pdsc_auxbus_dev_add(vf, pf, PDS_DEV_TYPE_VDPA,
+				  &pf->vfs[vf->vf_id].padev);
 	if (err) {
 		devl_lock(dl);
 		devl_unregister(dl);
@@ -233,6 +240,7 @@ static int pdsc_init_pf(struct pdsc *pdsc)
 	snprintf(wq_name, sizeof(wq_name), "%s.%d", PDS_CORE_DRV_NAME, pdsc->uid);
 	pdsc->wq = create_singlethread_workqueue(wq_name);
 	INIT_WORK(&pdsc->health_work, pdsc_health_thread);
+	INIT_WORK(&pdsc->pci_reset_work, pdsc_pci_reset_thread);
 	timer_setup(&pdsc->wdtimer, pdsc_wdtimer_cb, 0);
 	pdsc->wdtimer_period = PDSC_WATCHDOG_SECS * HZ;
 
@@ -257,6 +265,10 @@ static int pdsc_init_pf(struct pdsc *pdsc)
 
 	mutex_unlock(&pdsc->config_lock);
 
+	err = pdsc_auxbus_dev_add(pdsc, pdsc, PDS_DEV_TYPE_FWCTL, &pdsc->padev);
+	if (err)
+		goto err_out_stop;
+
 	dl = priv_to_devlink(pdsc);
 	devl_lock(dl);
 	err = devl_params_register(dl, pdsc_dl_params,
@@ -265,10 +277,10 @@ static int pdsc_init_pf(struct pdsc *pdsc)
 		devl_unlock(dl);
 		dev_warn(pdsc->dev, "Failed to register devlink params: %pe\n",
 			 ERR_PTR(err));
-		goto err_out_stop;
+		goto err_out_del_dev;
 	}
 
-	hr = devl_health_reporter_create(dl, &pdsc_fw_reporter_ops, 0, pdsc);
+	hr = devl_health_reporter_create(dl, &pdsc_fw_reporter_ops, pdsc);
 	if (IS_ERR(hr)) {
 		devl_unlock(dl);
 		dev_warn(pdsc->dev, "Failed to create fw reporter: %pe\n", hr);
@@ -288,12 +300,14 @@ static int pdsc_init_pf(struct pdsc *pdsc)
 err_out_unreg_params:
 	devlink_params_unregister(dl, pdsc_dl_params,
 				  ARRAY_SIZE(pdsc_dl_params));
+err_out_del_dev:
+	pdsc_auxbus_dev_del(pdsc, pdsc, &pdsc->padev);
 err_out_stop:
 	pdsc_stop(pdsc);
 err_out_teardown:
 	pdsc_teardown(pdsc, PDSC_TEARDOWN_REMOVING);
 err_out_unmap_bars:
-	del_timer_sync(&pdsc->wdtimer);
+	timer_shutdown_sync(&pdsc->wdtimer);
 	if (pdsc->wq)
 		destroy_workqueue(pdsc->wq);
 	mutex_destroy(&pdsc->config_lock);
@@ -410,7 +424,7 @@ static void pdsc_remove(struct pci_dev *pdev)
 
 		pf = pdsc_get_pf_struct(pdsc->pdev);
 		if (!IS_ERR(pf)) {
-			pdsc_auxbus_dev_del(pdsc, pf);
+			pdsc_auxbus_dev_del(pdsc, pf, &pf->vfs[pdsc->vf_id].padev);
 			pf->vfs[pdsc->vf_id].vf = NULL;
 		}
 	} else {
@@ -419,8 +433,9 @@ static void pdsc_remove(struct pci_dev *pdev)
 		 * shut themselves down.
 		 */
 		pdsc_sriov_configure(pdev, 0);
+		pdsc_auxbus_dev_del(pdsc, pdsc, &pdsc->padev);
 
-		del_timer_sync(&pdsc->wdtimer);
+		timer_shutdown_sync(&pdsc->wdtimer);
 		if (pdsc->wq)
 			destroy_workqueue(pdsc->wq);
 
@@ -433,7 +448,6 @@ static void pdsc_remove(struct pci_dev *pdev)
 		mutex_destroy(&pdsc->config_lock);
 		mutex_destroy(&pdsc->devcmd_lock);
 
-		pci_free_irq_vectors(pdev);
 		pdsc_unmap_bars(pdsc);
 		pci_release_regions(pdev);
 	}
@@ -445,19 +459,50 @@ static void pdsc_remove(struct pci_dev *pdev)
 	devlink_free(dl);
 }
 
-void pdsc_reset_prepare(struct pci_dev *pdev)
+static void pdsc_stop_health_thread(struct pdsc *pdsc)
+{
+	if (pdsc->pdev->is_virtfn)
+		return;
+
+	timer_shutdown_sync(&pdsc->wdtimer);
+	if (pdsc->health_work.func)
+		cancel_work_sync(&pdsc->health_work);
+}
+
+static void pdsc_restart_health_thread(struct pdsc *pdsc)
+{
+	if (pdsc->pdev->is_virtfn)
+		return;
+
+	timer_setup(&pdsc->wdtimer, pdsc_wdtimer_cb, 0);
+	mod_timer(&pdsc->wdtimer, jiffies + 1);
+}
+
+static void pdsc_reset_prepare(struct pci_dev *pdev)
 {
 	struct pdsc *pdsc = pci_get_drvdata(pdev);
 
+	pdsc_stop_health_thread(pdsc);
 	pdsc_fw_down(pdsc);
 
-	pci_free_irq_vectors(pdev);
+	if (pdev->is_virtfn) {
+		struct pdsc *pf;
+
+		pf = pdsc_get_pf_struct(pdsc->pdev);
+		if (!IS_ERR(pf))
+			pdsc_auxbus_dev_del(pdsc, pf,
+					    &pf->vfs[pdsc->vf_id].padev);
+	} else {
+		pdsc_auxbus_dev_del(pdsc, pdsc, &pdsc->padev);
+	}
+
 	pdsc_unmap_bars(pdsc);
 	pci_release_regions(pdev);
-	pci_disable_device(pdev);
+	if (pci_is_enabled(pdev))
+		pci_disable_device(pdev);
 }
 
-void pdsc_reset_done(struct pci_dev *pdev)
+static void pdsc_reset_done(struct pci_dev *pdev)
 {
 	struct pdsc *pdsc = pci_get_drvdata(pdev);
 	struct device *dev = pdsc->dev;
@@ -486,12 +531,48 @@ void pdsc_reset_done(struct pci_dev *pdev)
 	}
 
 	pdsc_fw_up(pdsc);
+	pdsc_restart_health_thread(pdsc);
+
+	if (pdev->is_virtfn) {
+		struct pdsc *pf;
+
+		pf = pdsc_get_pf_struct(pdsc->pdev);
+		if (!IS_ERR(pf))
+			pdsc_auxbus_dev_add(pdsc, pf, PDS_DEV_TYPE_VDPA,
+					    &pf->vfs[pdsc->vf_id].padev);
+	} else {
+		pdsc_auxbus_dev_add(pdsc, pdsc, PDS_DEV_TYPE_FWCTL,
+				    &pdsc->padev);
+	}
+}
+
+static pci_ers_result_t pdsc_pci_error_detected(struct pci_dev *pdev,
+						pci_channel_state_t error)
+{
+	if (error == pci_channel_io_frozen) {
+		pdsc_reset_prepare(pdev);
+		return PCI_ERS_RESULT_NEED_RESET;
+	}
+
+	return PCI_ERS_RESULT_NONE;
+}
+
+static void pdsc_pci_error_resume(struct pci_dev *pdev)
+{
+	struct pdsc *pdsc = pci_get_drvdata(pdev);
+
+	if (test_bit(PDSC_S_FW_DEAD, &pdsc->state))
+		pci_reset_function_locked(pdev);
 }
 
 static const struct pci_error_handlers pdsc_err_handler = {
 	/* FLR handling */
 	.reset_prepare      = pdsc_reset_prepare,
 	.reset_done         = pdsc_reset_done,
+
+	/* AER handling */
+	.error_detected     = pdsc_pci_error_detected,
+	.resume             = pdsc_pci_error_resume,
 };
 
 static struct pci_driver pdsc_driver = {

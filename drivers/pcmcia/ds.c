@@ -900,7 +900,7 @@ static inline int pcmcia_devmatch(struct pcmcia_device *dev,
 }
 
 
-static int pcmcia_bus_match(struct device *dev, struct device_driver *drv)
+static int pcmcia_bus_match(struct device *dev, const struct device_driver *drv)
 {
 	struct pcmcia_device *p_dev = to_pcmcia_dev(dev);
 	struct pcmcia_driver *p_drv = to_pcmcia_drv(drv);
@@ -1308,7 +1308,7 @@ static int pcmcia_bus_early_resume(struct pcmcia_socket *skt)
  * physically present, even if the call to this function returns
  * non-NULL. Furthermore, the device driver most likely is unbound
  * almost immediately, so the timeframe where pcmcia_dev_present
- * returns NULL is probably really really small.
+ * returns NULL is probably really, really small.
  */
 struct pcmcia_device *pcmcia_dev_present(struct pcmcia_device *_p_dev)
 {
@@ -1406,7 +1406,7 @@ static const struct dev_pm_ops pcmcia_bus_pm_ops = {
 	SET_SYSTEM_SLEEP_PM_OPS(pcmcia_dev_suspend, pcmcia_dev_resume)
 };
 
-struct bus_type pcmcia_bus_type = {
+const struct bus_type pcmcia_bus_type = {
 	.name = "pcmcia",
 	.uevent = pcmcia_bus_uevent,
 	.match = pcmcia_bus_match,

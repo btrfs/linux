@@ -9,17 +9,11 @@
 
 #include "../common.h"
 
-extern struct bus_type mhi_bus_type;
+extern const struct bus_type mhi_bus_type;
 
 /* Host request register */
 #define MHI_SOC_RESET_REQ_OFFSET			0xb0
 #define MHI_SOC_RESET_REQ				BIT(0)
-
-#define SOC_HW_VERSION_OFFS				0x224
-#define SOC_HW_VERSION_FAM_NUM_BMSK			GENMASK(31, 28)
-#define SOC_HW_VERSION_DEV_NUM_BMSK			GENMASK(27, 16)
-#define SOC_HW_VERSION_MAJOR_VER_BMSK			GENMASK(15, 8)
-#define SOC_HW_VERSION_MINOR_VER_BMSK			GENMASK(7, 0)
 
 struct mhi_ctxt {
 	struct mhi_event_ctxt *er_ctxt;
@@ -31,8 +25,15 @@ struct mhi_ctxt {
 };
 
 struct bhi_vec_entry {
-	u64 dma_addr;
-	u64 size;
+	__le64 dma_addr;
+	__le64 size;
+};
+
+enum mhi_fw_load_type {
+	MHI_FW_LOAD_BHI,	/* BHI only in PBL */
+	MHI_FW_LOAD_BHIE,	/* BHIe only in PBL */
+	MHI_FW_LOAD_FBC,	/* BHI in PBL followed by BHIe in SBL */
+	MHI_FW_LOAD_MAX,
 };
 
 enum mhi_ch_state_type {
@@ -42,6 +43,11 @@ enum mhi_ch_state_type {
 	MHI_CH_STATE_TYPE_MAX,
 };
 
+#define MHI_CH_STATE_TYPE_LIST				\
+	ch_state_type(RESET,		"RESET")	\
+	ch_state_type(STOP,		"STOP")		\
+	ch_state_type_end(START,	"START")
+
 extern const char * const mhi_ch_state_type_str[MHI_CH_STATE_TYPE_MAX];
 #define TO_CH_STATE_TYPE_STR(state) (((state) >= MHI_CH_STATE_TYPE_MAX) ? \
 				     "INVALID_STATE" : \
@@ -49,6 +55,18 @@ extern const char * const mhi_ch_state_type_str[MHI_CH_STATE_TYPE_MAX];
 
 #define MHI_INVALID_BRSTMODE(mode) (mode != MHI_DB_BRST_DISABLE && \
 				    mode != MHI_DB_BRST_ENABLE)
+
+#define MHI_EE_LIST						\
+	mhi_ee(PBL,			"PRIMARY BOOTLOADER")	\
+	mhi_ee(SBL,			"SECONDARY BOOTLOADER")	\
+	mhi_ee(AMSS,			"MISSION MODE")		\
+	mhi_ee(RDDM,			"RAMDUMP DOWNLOAD MODE")\
+	mhi_ee(WFW,			"WLAN FIRMWARE")	\
+	mhi_ee(PTHRU,			"PASS THROUGH")		\
+	mhi_ee(EDL,			"EMERGENCY DOWNLOAD")	\
+	mhi_ee(FP,			"FLASH PROGRAMMER")	\
+	mhi_ee(DISABLE_TRANSITION,	"DISABLE")		\
+	mhi_ee_end(NOT_SUPPORTED,	"NOT SUPPORTED")
 
 extern const char * const mhi_ee_str[MHI_EE_MAX];
 #define TO_MHI_EXEC_STR(ee) (((ee) >= MHI_EE_MAX) ? \
@@ -69,8 +87,19 @@ enum dev_st_transition {
 	DEV_ST_TRANSITION_FP,
 	DEV_ST_TRANSITION_SYS_ERR,
 	DEV_ST_TRANSITION_DISABLE,
+	DEV_ST_TRANSITION_DISABLE_DESTROY_DEVICE,
 	DEV_ST_TRANSITION_MAX,
 };
+
+#define DEV_ST_TRANSITION_LIST					\
+	dev_st_trans(PBL,		"PBL")			\
+	dev_st_trans(READY,		"READY")		\
+	dev_st_trans(SBL,		"SBL")			\
+	dev_st_trans(MISSION_MODE,	"MISSION MODE")		\
+	dev_st_trans(FP,		"FLASH PROGRAMMER")	\
+	dev_st_trans(SYS_ERR,		"SYS ERROR")		\
+	dev_st_trans(DISABLE,		"DISABLE")		\
+	dev_st_trans_end(DISABLE_DESTROY_DEVICE, "DISABLE (DESTROY DEVICE)")
 
 extern const char * const dev_state_tran_str[DEV_ST_TRANSITION_MAX];
 #define TO_DEV_STATE_TRANS_STR(state) (((state) >= DEV_ST_TRANSITION_MAX) ? \
@@ -88,10 +117,26 @@ enum mhi_pm_state {
 	MHI_PM_STATE_FW_DL_ERR,
 	MHI_PM_STATE_SYS_ERR_DETECT,
 	MHI_PM_STATE_SYS_ERR_PROCESS,
+	MHI_PM_STATE_SYS_ERR_FAIL,
 	MHI_PM_STATE_SHUTDOWN_PROCESS,
 	MHI_PM_STATE_LD_ERR_FATAL_DETECT,
 	MHI_PM_STATE_MAX
 };
+
+#define MHI_PM_STATE_LIST							\
+	mhi_pm_state(DISABLE,			"DISABLE")			\
+	mhi_pm_state(POR,			"POWER ON RESET")		\
+	mhi_pm_state(M0,			"M0")				\
+	mhi_pm_state(M2,			"M2")				\
+	mhi_pm_state(M3_ENTER,			"M?->M3")			\
+	mhi_pm_state(M3,			"M3")				\
+	mhi_pm_state(M3_EXIT,			"M3->M0")			\
+	mhi_pm_state(FW_DL_ERR,			"Firmware Download Error")	\
+	mhi_pm_state(SYS_ERR_DETECT,		"SYS ERROR Detect")		\
+	mhi_pm_state(SYS_ERR_PROCESS,		"SYS ERROR Process")		\
+	mhi_pm_state(SYS_ERR_FAIL,		"SYS ERROR Failure")		\
+	mhi_pm_state(SHUTDOWN_PROCESS,		"SHUTDOWN Process")		\
+	mhi_pm_state_end(LD_ERR_FATAL_DETECT,	"Linkdown or Error Fatal Detect")
 
 #define MHI_PM_DISABLE					BIT(0)
 #define MHI_PM_POR					BIT(1)
@@ -104,14 +149,16 @@ enum mhi_pm_state {
 #define MHI_PM_FW_DL_ERR				BIT(7)
 #define MHI_PM_SYS_ERR_DETECT				BIT(8)
 #define MHI_PM_SYS_ERR_PROCESS				BIT(9)
-#define MHI_PM_SHUTDOWN_PROCESS				BIT(10)
+#define MHI_PM_SYS_ERR_FAIL				BIT(10)
+#define MHI_PM_SHUTDOWN_PROCESS				BIT(11)
 /* link not accessible */
-#define MHI_PM_LD_ERR_FATAL_DETECT			BIT(11)
+#define MHI_PM_LD_ERR_FATAL_DETECT			BIT(12)
 
 #define MHI_REG_ACCESS_VALID(pm_state)			((pm_state & (MHI_PM_POR | MHI_PM_M0 | \
 						MHI_PM_M2 | MHI_PM_M3_ENTER | MHI_PM_M3_EXIT | \
 						MHI_PM_SYS_ERR_DETECT | MHI_PM_SYS_ERR_PROCESS | \
-						MHI_PM_SHUTDOWN_PROCESS | MHI_PM_FW_DL_ERR)))
+						MHI_PM_SYS_ERR_FAIL | MHI_PM_SHUTDOWN_PROCESS |  \
+						MHI_PM_FW_DL_ERR)))
 #define MHI_PM_IN_ERROR_STATE(pm_state)			(pm_state >= MHI_PM_FW_DL_ERR)
 #define MHI_PM_IN_FATAL_STATE(pm_state)			(pm_state == MHI_PM_LD_ERR_FATAL_DETECT)
 #define MHI_DB_ACCESS_VALID(mhi_cntrl)			(mhi_cntrl->pm_state & mhi_cntrl->db_access)
@@ -123,6 +170,8 @@ enum mhi_pm_state {
 							MHI_PM_IN_ERROR_STATE(pm_state))
 #define MHI_PM_IN_SUSPEND_STATE(pm_state)		(pm_state & \
 							(MHI_PM_M3_ENTER | MHI_PM_M3))
+#define MHI_PM_FATAL_ERROR(pm_state)			((pm_state == MHI_PM_FW_DL_ERR) || \
+							(pm_state >= MHI_PM_SYS_ERR_FAIL))
 
 #define NR_OF_CMD_RINGS					1
 #define CMD_EL_PER_RING					128
@@ -215,7 +264,7 @@ struct mhi_chan {
 	/*
 	 * Important: When consuming, increment tre_ring first and when
 	 * releasing, decrement buf_ring first. If tre_ring has space, buf_ring
-	 * is guranteed to have space so we do not need to check both rings.
+	 * is guaranteed to have space so we do not need to check both rings.
 	 */
 	struct mhi_ring buf_ring;
 	struct mhi_ring tre_ring;
@@ -336,19 +385,12 @@ void mhi_ring_chan_db(struct mhi_controller *mhi_cntrl,
 
 /* Initialization methods */
 int mhi_init_mmio(struct mhi_controller *mhi_cntrl);
-int mhi_init_dev_ctxt(struct mhi_controller *mhi_cntrl);
-void mhi_deinit_dev_ctxt(struct mhi_controller *mhi_cntrl);
-int mhi_init_irq_setup(struct mhi_controller *mhi_cntrl);
-void mhi_deinit_free_irq(struct mhi_controller *mhi_cntrl);
 int mhi_rddm_prepare(struct mhi_controller *mhi_cntrl,
 		      struct image_info *img_info);
 void mhi_fw_load_handler(struct mhi_controller *mhi_cntrl);
 
 /* Automatically allocate and queue inbound buffers */
 #define MHI_CH_INBOUND_ALLOC_BUFS BIT(0)
-int mhi_prepare_channel(struct mhi_controller *mhi_cntrl,
-			struct mhi_chan *mhi_chan, unsigned int flags);
-
 int mhi_init_chan_ctxt(struct mhi_controller *mhi_cntrl,
 		       struct mhi_chan *mhi_chan);
 void mhi_deinit_chan_ctxt(struct mhi_controller *mhi_cntrl,
@@ -363,6 +405,7 @@ int mhi_process_data_event_ring(struct mhi_controller *mhi_cntrl,
 				struct mhi_event *mhi_event, u32 event_quota);
 int mhi_process_ctrl_ev_ring(struct mhi_controller *mhi_cntrl,
 			     struct mhi_event *mhi_event, u32 event_quota);
+void mhi_uevent_notify(struct mhi_controller *mhi_cntrl, enum mhi_ee_type ee);
 
 /* ISR handlers */
 irqreturn_t mhi_irq_handler(int irq_number, void *dev);

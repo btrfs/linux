@@ -88,7 +88,7 @@ static ssize_t status_show(struct gfs2_sbd *sdp, char *buf)
 		     "Withdraw In Prog:         %d\n"
 		     "Remote Withdraw:          %d\n"
 		     "Withdraw Recovery:        %d\n"
-		     "Deactivating:             %d\n"
+		     "Killing:                  %d\n"
 		     "sd_log_error:             %d\n"
 		     "sd_log_flush_lock:        %d\n"
 		     "sd_log_num_revoke:        %u\n"
@@ -174,10 +174,10 @@ static ssize_t freeze_store(struct gfs2_sbd *sdp, const char *buf, size_t len)
 
 	switch (n) {
 	case 0:
-		error = thaw_super(sdp->sd_vfs, FREEZE_HOLDER_USERSPACE);
+		error = thaw_super(sdp->sd_vfs, FREEZE_HOLDER_USERSPACE, NULL);
 		break;
 	case 1:
-		error = freeze_super(sdp->sd_vfs, FREEZE_HOLDER_USERSPACE);
+		error = freeze_super(sdp->sd_vfs, FREEZE_HOLDER_USERSPACE, NULL);
 		break;
 	default:
 		return -EINVAL;
@@ -336,7 +336,7 @@ static ssize_t demote_rq_store(struct gfs2_sbd *sdp, const char *buf, size_t len
 		return -EINVAL;
 	if (!test_and_set_bit(SDF_DEMOTE, &sdp->sd_flags))
 		fs_info(sdp, "demote interface used\n");
-	rv = gfs2_glock_get(sdp, glnum, glops, 0, &gl);
+	rv = gfs2_glock_get(sdp, glnum, glops, NO_CREATE, &gl);
 	if (rv)
 		return rv;
 	gfs2_glock_cb(gl, glmode);
@@ -764,7 +764,6 @@ fail_reg:
 	fs_err(sdp, "error %d adding sysfs files\n", error);
 	kobject_put(&sdp->sd_kobj);
 	wait_for_completion(&sdp->sd_kobj_unregister);
-	sb->s_fs_info = NULL;
 	return error;
 }
 

@@ -41,12 +41,9 @@ static int patch_build_controls(struct snd_ac97 * ac97, const struct snd_kcontro
 static void reset_tlv(struct snd_ac97 *ac97, const char *name,
 		      const unsigned int *tlv)
 {
-	struct snd_ctl_elem_id sid;
 	struct snd_kcontrol *kctl;
-	memset(&sid, 0, sizeof(sid));
-	strcpy(sid.name, name);
-	sid.iface = SNDRV_CTL_ELEM_IFACE_MIXER;
-	kctl = snd_ctl_find_id(ac97->bus->card, &sid);
+
+	kctl = snd_ctl_find_id_mixer(ac97->bus->card, name);
 	if (kctl && kctl->tlv.p)
 		kctl->tlv.p = tlv;
 }
@@ -57,12 +54,11 @@ static int ac97_update_bits_page(struct snd_ac97 *ac97, unsigned short reg, unsi
 	unsigned short page_save;
 	int ret;
 
-	mutex_lock(&ac97->page_mutex);
+	guard(mutex)(&ac97->page_mutex);
 	page_save = snd_ac97_read(ac97, AC97_INT_PAGING) & AC97_PAGE_MASK;
 	snd_ac97_update_bits(ac97, AC97_INT_PAGING, AC97_PAGE_MASK, page);
 	ret = snd_ac97_update_bits(ac97, reg, mask, value);
 	snd_ac97_update_bits(ac97, AC97_INT_PAGING, AC97_PAGE_MASK, page_save);
-	mutex_unlock(&ac97->page_mutex); /* unlock paging */
 	return ret;
 }
 
@@ -301,7 +297,7 @@ static int patch_yamaha_ymf7x3_3d(struct snd_ac97 *ac97)
 	err = snd_ctl_add(ac97->bus->card, kctl);
 	if (err < 0)
 		return err;
-	strcpy(kctl->id.name, "3D Control - Wide");
+	strscpy(kctl->id.name, "3D Control - Wide");
 	kctl->private_value = AC97_SINGLE_VALUE(AC97_3D_CONTROL, 9, 7, 0);
 	snd_ac97_write_cache(ac97, AC97_3D_CONTROL, 0x0000);
 	err = snd_ctl_add(ac97->bus->card,
@@ -894,7 +890,7 @@ static int patch_sigmatel_stac9700_3d(struct snd_ac97 * ac97)
 	err = snd_ctl_add(ac97->bus->card, kctl = snd_ac97_cnew(&snd_ac97_controls_3d[0], ac97));
 	if (err < 0)
 		return err;
-	strcpy(kctl->id.name, "3D Control Sigmatel - Depth");
+	strscpy(kctl->id.name, "3D Control Sigmatel - Depth");
 	kctl->private_value = AC97_SINGLE_VALUE(AC97_3D_CONTROL, 2, 3, 0);
 	snd_ac97_write_cache(ac97, AC97_3D_CONTROL, 0x0000);
 	return 0;
@@ -909,13 +905,13 @@ static int patch_sigmatel_stac9708_3d(struct snd_ac97 * ac97)
 	err = snd_ctl_add(ac97->bus->card, kctl);
 	if (err < 0)
 		return err;
-	strcpy(kctl->id.name, "3D Control Sigmatel - Depth");
+	strscpy(kctl->id.name, "3D Control Sigmatel - Depth");
 	kctl->private_value = AC97_SINGLE_VALUE(AC97_3D_CONTROL, 0, 3, 0);
 	kctl = snd_ac97_cnew(&snd_ac97_controls_3d[0], ac97);
 	err = snd_ctl_add(ac97->bus->card, kctl);
 	if (err < 0)
 		return err;
-	strcpy(kctl->id.name, "3D Control Sigmatel - Rear Depth");
+	strscpy(kctl->id.name, "3D Control Sigmatel - Rear Depth");
 	kctl->private_value = AC97_SINGLE_VALUE(AC97_3D_CONTROL, 2, 3, 0);
 	snd_ac97_write_cache(ac97, AC97_3D_CONTROL, 0x0000);
 	return 0;
@@ -979,12 +975,11 @@ static int snd_ac97_stac9708_put_bias(struct snd_kcontrol *kcontrol, struct snd_
 	struct snd_ac97 *ac97 = snd_kcontrol_chip(kcontrol);
 	int err;
 
-	mutex_lock(&ac97->page_mutex);
+	guard(mutex)(&ac97->page_mutex);
 	snd_ac97_write(ac97, AC97_SIGMATEL_BIAS1, 0xabba);
 	err = snd_ac97_update_bits(ac97, AC97_SIGMATEL_BIAS2, 0x0010,
 				   (ucontrol->value.integer.value[0] & 1) << 4);
 	snd_ac97_write(ac97, AC97_SIGMATEL_BIAS1, 0);
-	mutex_unlock(&ac97->page_mutex);
 	return err;
 }
 
@@ -3702,7 +3697,7 @@ static int snd_ac97_vt1618_UAJ_get(struct snd_kcontrol *kcontrol,
 	unsigned short datpag, uaj;
 	struct snd_ac97 *pac97 = snd_kcontrol_chip(kcontrol);
 
-	mutex_lock(&pac97->page_mutex);
+	guard(mutex)(&pac97->page_mutex);
 
 	datpag = snd_ac97_read(pac97, AC97_INT_PAGING) & AC97_PAGE_MASK;
 	snd_ac97_update_bits(pac97, AC97_INT_PAGING, AC97_PAGE_MASK, 0);
@@ -3711,7 +3706,6 @@ static int snd_ac97_vt1618_UAJ_get(struct snd_kcontrol *kcontrol,
 		vt1618_uaj[kcontrol->private_value].mask;
 
 	snd_ac97_update_bits(pac97, AC97_INT_PAGING, AC97_PAGE_MASK, datpag);
-	mutex_unlock(&pac97->page_mutex);
 
 	ucontrol->value.enumerated.item[0] = uaj >>
 		vt1618_uaj[kcontrol->private_value].shift;

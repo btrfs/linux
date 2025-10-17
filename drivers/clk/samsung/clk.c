@@ -6,13 +6,13 @@
  *
  * This file includes utility functions to register clocks to common
  * clock framework for Samsung platforms.
-*/
+ */
 
 #include <linux/slab.h>
 #include <linux/clkdev.h>
-#include <linux/clk.h>
 #include <linux/clk-provider.h>
 #include <linux/io.h>
+#include <linux/mod_devicetable.h>
 #include <linux/of_address.h>
 #include <linux/syscore_ops.h>
 
@@ -74,12 +74,12 @@ struct samsung_clk_provider * __init samsung_clk_init(struct device *dev,
 	if (!ctx)
 		panic("could not allocate clock provider context.\n");
 
+	ctx->clk_data.num = nr_clks;
 	for (i = 0; i < nr_clks; ++i)
 		ctx->clk_data.hws[i] = ERR_PTR(-ENOENT);
 
 	ctx->dev = dev;
 	ctx->reg_base = base;
-	ctx->clk_data.num = nr_clks;
 	spin_lock_init(&ctx->lock);
 
 	return ctx;
@@ -139,7 +139,7 @@ void __init samsung_clk_register_fixed_rate(struct samsung_clk_provider *ctx,
 		unsigned int nr_clk)
 {
 	struct clk_hw *clk_hw;
-	unsigned int idx, ret;
+	unsigned int idx;
 
 	for (idx = 0; idx < nr_clk; idx++, list++) {
 		clk_hw = clk_hw_register_fixed_rate(ctx->dev, list->name,
@@ -151,15 +151,6 @@ void __init samsung_clk_register_fixed_rate(struct samsung_clk_provider *ctx,
 		}
 
 		samsung_clk_add_lookup(ctx, clk_hw, list->id);
-
-		/*
-		 * Unconditionally add a clock lookup for the fixed rate clocks.
-		 * There are not many of these on any of Samsung platforms.
-		 */
-		ret = clk_hw_register_clkdev(clk_hw, list->name, NULL);
-		if (ret)
-			pr_err("%s: failed to register clock lookup for %s",
-				__func__, list->name);
 	}
 }
 

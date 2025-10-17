@@ -760,7 +760,8 @@ static void ath9k_htc_tx_cleanup_queue(struct ath9k_htc_priv *priv,
 
 void ath9k_htc_tx_cleanup_timer(struct timer_list *t)
 {
-	struct ath9k_htc_priv *priv = from_timer(priv, t, tx.cleanup_timer);
+	struct ath9k_htc_priv *priv = timer_container_of(priv, t,
+							 tx.cleanup_timer);
 	struct ath_common *common = ath9k_hw_common(priv->ah);
 	struct ath9k_htc_tx_event *event, *tmp;
 	struct sk_buff *skb;
@@ -814,10 +815,6 @@ int ath9k_tx_init(struct ath9k_htc_priv *priv)
 	skb_queue_head_init(&priv->tx.data_vi_queue);
 	skb_queue_head_init(&priv->tx.data_vo_queue);
 	skb_queue_head_init(&priv->tx.tx_failed);
-
-	/* Allow ath9k_wmi_event_tasklet(WMI_TXSTATUS_EVENTID) to operate. */
-	smp_wmb();
-	priv->tx.initialized = true;
 
 	return 0;
 }

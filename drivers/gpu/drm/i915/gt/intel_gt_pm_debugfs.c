@@ -22,7 +22,7 @@
 #include "intel_rps.h"
 #include "intel_runtime_pm.h"
 #include "intel_uncore.h"
-#include "vlv_sideband.h"
+#include "vlv_iosf_sb.h"
 
 void intel_gt_pm_debugfs_forcewake_user_open(struct intel_gt *gt)
 {
@@ -71,6 +71,8 @@ static int fw_domains_show(struct seq_file *m, void *data)
 	struct intel_uncore_forcewake_domain *fw_domain;
 	unsigned int tmp;
 
+	spin_lock_irq(&uncore->lock);
+
 	seq_printf(m, "user.bypass_count = %u\n",
 		   uncore->user_forcewake_count);
 
@@ -78,6 +80,8 @@ static int fw_domains_show(struct seq_file *m, void *data)
 		seq_printf(m, "%s.wake_count = %u\n",
 			   intel_uncore_forcewake_domain_to_str(fw_domain->id),
 			   READ_ONCE(fw_domain->wake_count));
+
+	spin_unlock_irq(&uncore->lock);
 
 	return 0;
 }
@@ -362,12 +366,11 @@ void intel_gt_pm_frequency_dump(struct intel_gt *gt, struct drm_printer *p)
 		drm_printf(p, "SW control enabled: %s\n",
 			   str_yes_no((rpmodectl & GEN6_RP_MEDIA_MODE_MASK) == GEN6_RP_MEDIA_SW_MODE));
 
-		vlv_punit_get(i915);
-		freq_sts = vlv_punit_read(i915, PUNIT_REG_GPU_FREQ_STS);
-		vlv_punit_put(i915);
+		vlv_iosf_sb_get(&i915->drm, BIT(VLV_IOSF_SB_PUNIT));
+		freq_sts = vlv_iosf_sb_read(&i915->drm, VLV_IOSF_SB_PUNIT, PUNIT_REG_GPU_FREQ_STS);
+		vlv_iosf_sb_put(&i915->drm, BIT(VLV_IOSF_SB_PUNIT));
 
 		drm_printf(p, "PUNIT_REG_GPU_FREQ_STS: 0x%08x\n", freq_sts);
-		drm_printf(p, "DDR freq: %d MHz\n", i915->mem_freq);
 
 		drm_printf(p, "actual GPU freq: %d MHz\n",
 			   intel_gpu_freq(rps, (freq_sts >> 8) & 0xff));
@@ -391,10 +394,6 @@ void intel_gt_pm_frequency_dump(struct intel_gt *gt, struct drm_printer *p)
 	} else {
 		drm_puts(p, "no P-state info available\n");
 	}
-
-	drm_printf(p, "Current CD clock frequency: %d kHz\n", i915->display.cdclk.hw.cdclk);
-	drm_printf(p, "Max CD clock frequency: %d kHz\n", i915->display.cdclk.max_cdclk_freq);
-	drm_printf(p, "Max pixel clock frequency: %d kHz\n", i915->max_dotclk_freq);
 
 	intel_runtime_pm_put(uncore->rpm, wakeref);
 }
@@ -432,7 +431,7 @@ static int llc_show(struct seq_file *m, void *data)
 		max_gpu_freq /= GEN9_FREQ_SCALER;
 	}
 
-	seq_puts(m, "GPU freq (MHz)\tEffective CPU freq (MHz)\tEffective Ring freq (MHz)\n");
+	seq_puts(m, "GPU freq (MHz)\tEffective GPU freq (MHz)\tEffective Ring freq (MHz)\n");
 
 	wakeref = intel_runtime_pm_get(gt->uncore->rpm);
 	for (gpu_freq = min_gpu_freq; gpu_freq <= max_gpu_freq; gpu_freq++) {
@@ -538,7 +537,7 @@ static bool rps_eval(void *data)
 {
 	struct intel_gt *gt = data;
 
-	if (intel_guc_slpc_is_used(&gt->uc.guc))
+	if (intel_guc_slpc_is_used(gt_to_guc(gt)))
 		return false;
 	else
 		return HAS_RPS(gt->i915);

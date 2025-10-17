@@ -152,7 +152,7 @@ static int hci_uart_close(struct hci_dev *hdev)
 	 * BT SOC is completely powered OFF during BT OFF, holding port
 	 * open may drain the battery.
 	 */
-	if (test_bit(HCI_QUIRK_NON_PERSISTENT_SETUP, &hdev->quirks)) {
+	if (hci_test_quirk(hdev, HCI_QUIRK_NON_PERSISTENT_SETUP)) {
 		clear_bit(HCI_UART_PROTO_READY, &hu->flags);
 		serdev_device_close(hu->serdev);
 	}
@@ -271,8 +271,8 @@ static void hci_uart_write_wakeup(struct serdev_device *serdev)
  *
  * Return: number of processed bytes
  */
-static ssize_t hci_uart_receive_buf(struct serdev_device *serdev,
-				    const u8 *data, size_t count)
+static size_t hci_uart_receive_buf(struct serdev_device *serdev,
+				   const u8 *data, size_t count)
 {
 	struct hci_uart *hu = serdev_device_get_drvdata(serdev);
 
@@ -300,8 +300,9 @@ static const struct serdev_device_ops hci_serdev_client_ops = {
 	.write_wakeup = hci_uart_write_wakeup,
 };
 
-int hci_uart_register_device(struct hci_uart *hu,
-			     const struct hci_uart_proto *p)
+int hci_uart_register_device_priv(struct hci_uart *hu,
+			     const struct hci_uart_proto *p,
+			     int sizeof_priv)
 {
 	int err;
 	struct hci_dev *hdev;
@@ -325,7 +326,7 @@ int hci_uart_register_device(struct hci_uart *hu,
 	set_bit(HCI_UART_PROTO_READY, &hu->flags);
 
 	/* Initialize and register HCI device */
-	hdev = hci_alloc_dev();
+	hdev = hci_alloc_dev_priv(sizeof_priv);
 	if (!hdev) {
 		BT_ERR("Can't allocate HCI device");
 		err = -ENOMEM;
@@ -357,18 +358,13 @@ int hci_uart_register_device(struct hci_uart *hu,
 	SET_HCIDEV_DEV(hdev, &hu->serdev->dev);
 
 	if (test_bit(HCI_UART_NO_SUSPEND_NOTIFIER, &hu->flags))
-		set_bit(HCI_QUIRK_NO_SUSPEND_NOTIFIER, &hdev->quirks);
+		hci_set_quirk(hdev, HCI_QUIRK_NO_SUSPEND_NOTIFIER);
 
 	if (test_bit(HCI_UART_RAW_DEVICE, &hu->hdev_flags))
-		set_bit(HCI_QUIRK_RAW_DEVICE, &hdev->quirks);
+		hci_set_quirk(hdev, HCI_QUIRK_RAW_DEVICE);
 
 	if (test_bit(HCI_UART_EXT_CONFIG, &hu->hdev_flags))
-		set_bit(HCI_QUIRK_EXTERNAL_CONFIG, &hdev->quirks);
-
-	if (test_bit(HCI_UART_CREATE_AMP, &hu->hdev_flags))
-		hdev->dev_type = HCI_AMP;
-	else
-		hdev->dev_type = HCI_PRIMARY;
+		hci_set_quirk(hdev, HCI_QUIRK_EXTERNAL_CONFIG);
 
 	if (test_bit(HCI_UART_INIT_PENDING, &hu->hdev_flags))
 		return 0;
@@ -394,7 +390,7 @@ err_rwsem:
 	percpu_free_rwsem(&hu->proto_lock);
 	return err;
 }
-EXPORT_SYMBOL_GPL(hci_uart_register_device);
+EXPORT_SYMBOL_GPL(hci_uart_register_device_priv);
 
 void hci_uart_unregister_device(struct hci_uart *hu)
 {

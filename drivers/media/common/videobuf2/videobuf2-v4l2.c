@@ -231,7 +231,7 @@ static int vb2_fill_vb2_v4l2_buffer(struct vb2_buffer *vb, struct v4l2_buffer *b
 			break;
 		}
 
-		/* Fill in driver-provided information for OUTPUT types */
+		/* Fill in user-provided information for OUTPUT types */
 		if (V4L2_TYPE_IS_OUTPUT(b->type)) {
 			/*
 			 * Will have to go up to b->length when API starts
@@ -671,9 +671,21 @@ int vb2_querybuf(struct vb2_queue *q, struct v4l2_buffer *b)
 }
 EXPORT_SYMBOL(vb2_querybuf);
 
-static void fill_buf_caps(struct vb2_queue *q, u32 *caps)
+static void vb2_set_flags_and_caps(struct vb2_queue *q, u32 memory,
+				   u32 *flags, u32 *caps, u32 *max_num_bufs)
 {
-	*caps = V4L2_BUF_CAP_SUPPORTS_ORPHANED_BUFS;
+	if (!q->allow_cache_hints || memory != V4L2_MEMORY_MMAP) {
+		/*
+		 * This needs to clear V4L2_MEMORY_FLAG_NON_COHERENT only,
+		 * but in order to avoid bugs we zero out all bits.
+		 */
+		*flags = 0;
+	} else {
+		/* Clear all unknown flags. */
+		*flags &= V4L2_MEMORY_FLAG_NON_COHERENT;
+	}
+
+	*caps |= V4L2_BUF_CAP_SUPPORTS_ORPHANED_BUFS;
 	if (q->io_modes & VB2_MMAP)
 		*caps |= V4L2_BUF_CAP_SUPPORTS_MMAP;
 	if (q->io_modes & VB2_USERPTR)
@@ -686,21 +698,9 @@ static void fill_buf_caps(struct vb2_queue *q, u32 *caps)
 		*caps |= V4L2_BUF_CAP_SUPPORTS_MMAP_CACHE_HINTS;
 	if (q->supports_requests)
 		*caps |= V4L2_BUF_CAP_SUPPORTS_REQUESTS;
-}
-
-static void validate_memory_flags(struct vb2_queue *q,
-				  int memory,
-				  u32 *flags)
-{
-	if (!q->allow_cache_hints || memory != V4L2_MEMORY_MMAP) {
-		/*
-		 * This needs to clear V4L2_MEMORY_FLAG_NON_COHERENT only,
-		 * but in order to avoid bugs we zero out all bits.
-		 */
-		*flags = 0;
-	} else {
-		/* Clear all unknown flags. */
-		*flags &= V4L2_MEMORY_FLAG_NON_COHERENT;
+	if (max_num_bufs) {
+		*max_num_bufs = q->max_num_buffers;
+		*caps |= V4L2_BUF_CAP_SUPPORTS_MAX_NUM_BUFFERS;
 	}
 }
 
@@ -709,8 +709,8 @@ int vb2_reqbufs(struct vb2_queue *q, struct v4l2_requestbuffers *req)
 	int ret = vb2_verify_memory_type(q, req->memory, req->type);
 	u32 flags = req->flags;
 
-	fill_buf_caps(q, &req->capabilities);
-	validate_memory_flags(q, req->memory, &flags);
+	vb2_set_flags_and_caps(q, req->memory, &flags,
+			       &req->capabilities, NULL);
 	req->flags = flags;
 	return ret ? ret : vb2_core_reqbufs(q, req->memory,
 					    req->flags, &req->count);
@@ -751,11 +751,9 @@ int vb2_create_bufs(struct vb2_queue *q, struct v4l2_create_buffers *create)
 	int ret = vb2_verify_memory_type(q, create->memory, f->type);
 	unsigned i;
 
-	fill_buf_caps(q, &create->capabilities);
-	validate_memory_flags(q, create->memory, &create->flags);
 	create->index = vb2_get_num_buffers(q);
-	create->max_num_buffers = q->max_num_buffers;
-	create->capabilities |= V4L2_BUF_CAP_SUPPORTS_MAX_NUM_BUFFERS;
+	vb2_set_flags_and_caps(q, create->memory, &create->flags,
+			       &create->capabilities, &create->max_num_buffers);
 	if (create->count == 0)
 		return ret != -EBUSY ? ret : 0;
 
@@ -797,11 +795,15 @@ int vb2_create_bufs(struct vb2_queue *q, struct v4l2_create_buffers *create)
 	for (i = 0; i < requested_planes; i++)
 		if (requested_sizes[i] == 0)
 			return -EINVAL;
-	return ret ? ret : vb2_core_create_bufs(q, create->memory,
-						create->flags,
-						&create->count,
-						requested_planes,
-						requested_sizes);
+	if (ret)
+		return ret;
+
+	return vb2_core_create_bufs(q, create->memory,
+				    create->flags,
+				    &create->count,
+				    requested_planes,
+				    requested_sizes,
+				    &create->index);
 }
 EXPORT_SYMBOL_GPL(vb2_create_bufs);
 
@@ -901,6 +903,11 @@ EXPORT_SYMBOL_GPL(vb2_expbuf);
 
 int vb2_queue_init_name(struct vb2_queue *q, const char *name)
 {
+	/* vb2_memory should match with v4l2_memory */
+	BUILD_BUG_ON(VB2_MEMORY_MMAP != (int)V4L2_MEMORY_MMAP);
+	BUILD_BUG_ON(VB2_MEMORY_USERPTR != (int)V4L2_MEMORY_USERPTR);
+	BUILD_BUG_ON(VB2_MEMORY_DMABUF != (int)V4L2_MEMORY_DMABUF);
+
 	/*
 	 * Sanity check
 	 */
@@ -913,12 +920,6 @@ int vb2_queue_init_name(struct vb2_queue *q, const char *name)
 	/* Warn that the driver should choose an appropriate timestamp type */
 	WARN_ON((q->timestamp_flags & V4L2_BUF_FLAG_TIMESTAMP_MASK) ==
 		V4L2_BUF_FLAG_TIMESTAMP_UNKNOWN);
-
-	/* Warn that vb2_memory should match with v4l2_memory */
-	if (WARN_ON(VB2_MEMORY_MMAP != (int)V4L2_MEMORY_MMAP)
-		|| WARN_ON(VB2_MEMORY_USERPTR != (int)V4L2_MEMORY_USERPTR)
-		|| WARN_ON(VB2_MEMORY_DMABUF != (int)V4L2_MEMORY_DMABUF))
-		return -EINVAL;
 
 	if (q->buf_struct_size == 0)
 		q->buf_struct_size = sizeof(struct vb2_v4l2_buffer);
@@ -972,18 +973,14 @@ EXPORT_SYMBOL_GPL(vb2_queue_change_type);
 
 __poll_t vb2_poll(struct vb2_queue *q, struct file *file, poll_table *wait)
 {
-	struct video_device *vfd = video_devdata(file);
+	struct v4l2_fh *fh = file_to_v4l2_fh(file);
 	__poll_t res;
 
 	res = vb2_core_poll(q, file, wait);
 
-	if (test_bit(V4L2_FL_USES_V4L2_FH, &vfd->flags)) {
-		struct v4l2_fh *fh = file->private_data;
-
-		poll_wait(file, &fh->wait, wait);
-		if (v4l2_event_pending(fh))
-			res |= EPOLLPRI;
-	}
+	poll_wait(file, &fh->wait, wait);
+	if (v4l2_event_pending(fh))
+		res |= EPOLLPRI;
 
 	return res;
 }
@@ -999,6 +996,24 @@ EXPORT_SYMBOL_GPL(vb2_poll);
 
 /* vb2 ioctl helpers */
 
+int vb2_ioctl_remove_bufs(struct file *file, void *priv,
+			  struct v4l2_remove_buffers *d)
+{
+	struct video_device *vdev = video_devdata(file);
+
+	if (vdev->queue->type != d->type)
+		return -EINVAL;
+
+	if (d->count == 0)
+		return 0;
+
+	if (vb2_queue_is_busy(vdev->queue, file))
+		return -EBUSY;
+
+	return vb2_core_remove_bufs(vdev->queue, d->index, d->count);
+}
+EXPORT_SYMBOL_GPL(vb2_ioctl_remove_bufs);
+
 int vb2_ioctl_reqbufs(struct file *file, void *priv,
 			  struct v4l2_requestbuffers *p)
 {
@@ -1006,8 +1021,8 @@ int vb2_ioctl_reqbufs(struct file *file, void *priv,
 	int res = vb2_verify_memory_type(vdev->queue, p->memory, p->type);
 	u32 flags = p->flags;
 
-	fill_buf_caps(vdev->queue, &p->capabilities);
-	validate_memory_flags(vdev->queue, p->memory, &flags);
+	vb2_set_flags_and_caps(vdev->queue, p->memory, &flags,
+			       &p->capabilities, NULL);
 	p->flags = flags;
 	if (res)
 		return res;
@@ -1026,12 +1041,11 @@ int vb2_ioctl_create_bufs(struct file *file, void *priv,
 			  struct v4l2_create_buffers *p)
 {
 	struct video_device *vdev = video_devdata(file);
-	int res = vb2_verify_memory_type(vdev->queue, p->memory,
-			p->format.type);
+	int res = vb2_verify_memory_type(vdev->queue, p->memory, p->format.type);
 
-	p->index = vdev->queue->num_buffers;
-	fill_buf_caps(vdev->queue, &p->capabilities);
-	validate_memory_flags(vdev->queue, p->memory, &p->flags);
+	p->index = vb2_get_num_buffers(vdev->queue);
+	vb2_set_flags_and_caps(vdev->queue, p->memory, &p->flags,
+			       &p->capabilities, &p->max_num_buffers);
 	/*
 	 * If count == 0, then just check if memory and type are valid.
 	 * Any -EBUSY result from vb2_verify_memory_type can be mapped to 0.

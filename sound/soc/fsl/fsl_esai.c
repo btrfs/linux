@@ -119,10 +119,10 @@ static irqreturn_t esai_isr(int irq, void *devid)
 		dev_dbg(&pdev->dev, "isr: Transmission Initialized\n");
 
 	if (esr & ESAI_ESR_RFF_MASK)
-		dev_warn(&pdev->dev, "isr: Receiving overrun\n");
+		dev_dbg(&pdev->dev, "isr: Receiving overrun\n");
 
 	if (esr & ESAI_ESR_TFE_MASK)
-		dev_warn(&pdev->dev, "isr: Transmission underrun\n");
+		dev_dbg(&pdev->dev, "isr: Transmission underrun\n");
 
 	if (esr & ESAI_ESR_TLS_MASK)
 		dev_dbg(&pdev->dev, "isr: Just transmitted the last slot\n");
@@ -1189,19 +1189,16 @@ static int fsl_esai_runtime_suspend(struct device *dev)
 }
 
 static const struct dev_pm_ops fsl_esai_pm_ops = {
-	SET_RUNTIME_PM_OPS(fsl_esai_runtime_suspend,
-			   fsl_esai_runtime_resume,
-			   NULL)
-	SET_SYSTEM_SLEEP_PM_OPS(pm_runtime_force_suspend,
-				pm_runtime_force_resume)
+	RUNTIME_PM_OPS(fsl_esai_runtime_suspend, fsl_esai_runtime_resume, NULL)
+	SYSTEM_SLEEP_PM_OPS(pm_runtime_force_suspend, pm_runtime_force_resume)
 };
 
 static struct platform_driver fsl_esai_driver = {
 	.probe = fsl_esai_probe,
-	.remove_new = fsl_esai_remove,
+	.remove = fsl_esai_remove,
 	.driver = {
 		.name = "fsl-esai-dai",
-		.pm = &fsl_esai_pm_ops,
+		.pm = pm_ptr(&fsl_esai_pm_ops),
 		.of_match_table = fsl_esai_dt_ids,
 	},
 };

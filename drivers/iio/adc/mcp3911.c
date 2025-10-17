@@ -6,11 +6,13 @@
  * Copyright (C) 2018 Kent Gustavsson <kent@minoris.se>
  */
 #include <linux/bitfield.h>
-#include <linux/bits.h>
+#include <linux/bitops.h>
 #include <linux/cleanup.h>
 #include <linux/clk.h>
 #include <linux/delay.h>
+#include <linux/dev_printk.h>
 #include <linux/err.h>
+#include <linux/gpio/consumer.h>
 #include <linux/module.h>
 #include <linux/mod_devicetable.h>
 #include <linux/property.h>
@@ -23,7 +25,7 @@
 #include <linux/iio/trigger_consumer.h>
 #include <linux/iio/trigger.h>
 
-#include <asm/unaligned.h>
+#include <linux/unaligned.h>
 
 #define MCP3911_REG_CHANNEL0		0x00
 #define MCP3911_REG_CHANNEL1		0x03
@@ -79,6 +81,8 @@
 #define MCP3910_CONFIG1_CLKEXT		BIT(6)
 #define MCP3910_CONFIG1_VREFEXT		BIT(7)
 
+#define MCP3910_CHANNEL(ch)		(MCP3911_REG_CHANNEL0 + (ch))
+
 #define MCP3910_REG_OFFCAL_CH0		0x0f
 #define MCP3910_OFFCAL(ch)		(MCP3910_REG_OFFCAL_CH0 + (ch) * 6)
 
@@ -103,19 +107,19 @@ struct mcp3911_chip_info {
 	const struct iio_chan_spec *channels;
 	unsigned int num_channels;
 
-	int (*config)(struct mcp3911 *adc);
+	int (*config)(struct mcp3911 *adc, bool external_vref);
 	int (*get_osr)(struct mcp3911 *adc, u32 *val);
 	int (*set_osr)(struct mcp3911 *adc, u32 val);
 	int (*enable_offset)(struct mcp3911 *adc, bool enable);
 	int (*get_offset)(struct mcp3911 *adc, int channel, int *val);
 	int (*set_offset)(struct mcp3911 *adc, int channel, int val);
 	int (*set_scale)(struct mcp3911 *adc, int channel, u32 val);
+	int (*get_raw)(struct mcp3911 *adc, int channel, int *val);
 };
 
 struct mcp3911 {
 	struct spi_device *spi;
 	struct mutex lock;
-	struct regulator *vref;
 	struct clk *clki;
 	u32 dev_addr;
 	struct iio_trigger *trig;
@@ -123,7 +127,7 @@ struct mcp3911 {
 	const struct mcp3911_chip_info *chip;
 	struct {
 		u32 channels[MCP39XX_MAX_NUM_CHANNELS];
-		s64 ts __aligned(8);
+		aligned_s64 ts;
 	} scan;
 
 	u8 tx_buf __aligned(IIO_DMA_MINALIGN);
@@ -171,6 +175,18 @@ static int mcp3911_update(struct mcp3911 *adc, u8 reg, u32 mask, u32 val, u8 len
 	return mcp3911_write(adc, reg, val, len);
 }
 
+static int mcp3911_read_s24(struct mcp3911 *const adc, u8 const reg, s32 *const val)
+{
+	u32 uval;
+	int const ret = mcp3911_read(adc, reg, &uval, 3);
+
+	if (ret)
+		return ret;
+
+	*val = sign_extend32(uval, 23);
+	return ret;
+}
+
 static int mcp3910_enable_offset(struct mcp3911 *adc, bool enable)
 {
 	unsigned int mask = MCP3910_CONFIG0_EN_OFFCAL;
@@ -195,6 +211,11 @@ static int mcp3910_set_offset(struct mcp3911 *adc, int channel, int val)
 	return adc->chip->enable_offset(adc, 1);
 }
 
+static int mcp3910_get_raw(struct mcp3911 *adc, int channel, s32 *val)
+{
+	return mcp3911_read_s24(adc, MCP3910_CHANNEL(channel), val);
+}
+
 static int mcp3911_enable_offset(struct mcp3911 *adc, bool enable)
 {
 	unsigned int mask = MCP3911_STATUSCOM_EN_OFFCAL;
@@ -217,6 +238,11 @@ static int mcp3911_set_offset(struct mcp3911 *adc, int channel, int val)
 		return ret;
 
 	return adc->chip->enable_offset(adc, 1);
+}
+
+static int mcp3911_get_raw(struct mcp3911 *adc, int channel, s32 *val)
+{
+	return mcp3911_read_s24(adc, MCP3911_CHANNEL(channel), val);
 }
 
 static int mcp3910_get_osr(struct mcp3911 *adc, u32 *val)
@@ -322,12 +348,9 @@ static int mcp3911_read_raw(struct iio_dev *indio_dev,
 	guard(mutex)(&adc->lock);
 	switch (mask) {
 	case IIO_CHAN_INFO_RAW:
-		ret = mcp3911_read(adc,
-				   MCP3911_CHANNEL(channel->channel), val, 3);
+		ret = adc->chip->get_raw(adc, channel->channel, val);
 		if (ret)
 			return ret;
-
-		*val = sign_extend32(*val, 23);
 		return IIO_VAL_INT;
 	case IIO_CHAN_INFO_OFFSET:
 		ret = adc->chip->get_offset(adc, channel->channel, val);
@@ -385,22 +408,10 @@ static int mcp3911_write_raw(struct iio_dev *indio_dev,
 	}
 }
 
-static int mcp3911_calc_scale_table(struct mcp3911 *adc)
+static int mcp3911_calc_scale_table(u32 vref_mv)
 {
-	struct device *dev = &adc->spi->dev;
-	u32 ref = MCP3911_INT_VREF_MV;
 	u32 div;
-	int ret;
 	u64 tmp;
-
-	if (adc->vref) {
-		ret = regulator_get_voltage(adc->vref);
-		if (ret < 0) {
-			return dev_err_probe(dev, ret, "failed to get vref voltage\n");
-		}
-
-		ref = ret / 1000;
-	}
 
 	/*
 	 * For 24-bit Conversion
@@ -412,7 +423,7 @@ static int mcp3911_calc_scale_table(struct mcp3911 *adc)
 	 */
 	for (int i = 0; i < MCP3911_NUM_SCALES; i++) {
 		div = 12582912 * BIT(i);
-		tmp = div_s64((s64)ref * 1000000000LL, div);
+		tmp = div_s64((s64)vref_mv * 1000000000LL, div);
 
 		mcp3911_scale_table[i][0] = 0;
 		mcp3911_scale_table[i][1] = tmp;
@@ -523,14 +534,14 @@ static irqreturn_t mcp3911_trigger_handler(int irq, void *p)
 		goto out;
 	}
 
-	for_each_set_bit(scan_index, indio_dev->active_scan_mask, indio_dev->masklength) {
+	iio_for_each_active_channel(indio_dev, scan_index) {
 		const struct iio_chan_spec *scan_chan = &indio_dev->channels[scan_index];
 
 		adc->scan.channels[i] = get_unaligned_be24(&adc->rx_buf[scan_chan->channel * 3]);
 		i++;
 	}
-	iio_push_to_buffers_with_timestamp(indio_dev, &adc->scan,
-					   iio_get_time_ns(indio_dev));
+	iio_push_to_buffers_with_ts(indio_dev, &adc->scan, sizeof(adc->scan),
+				    iio_get_time_ns(indio_dev));
 out:
 	iio_trigger_notify_done(indio_dev->trig);
 
@@ -544,7 +555,7 @@ static const struct iio_info mcp3911_info = {
 	.write_raw_get_fmt = mcp3911_write_raw_get_fmt,
 };
 
-static int mcp3911_config(struct mcp3911 *adc)
+static int mcp3911_config(struct mcp3911 *adc, bool external_vref)
 {
 	struct device *dev = &adc->spi->dev;
 	u32 regval;
@@ -555,7 +566,7 @@ static int mcp3911_config(struct mcp3911 *adc)
 		return ret;
 
 	regval &= ~MCP3911_CONFIG_VREFEXT;
-	if (adc->vref) {
+	if (external_vref) {
 		dev_dbg(dev, "use external voltage reference\n");
 		regval |= FIELD_PREP(MCP3911_CONFIG_VREFEXT, 1);
 	} else {
@@ -610,7 +621,7 @@ static int mcp3911_config(struct mcp3911 *adc)
 	return mcp3911_write(adc, MCP3911_REG_GAIN, regval, 1);
 }
 
-static int mcp3910_config(struct mcp3911 *adc)
+static int mcp3910_config(struct mcp3911 *adc, bool external_vref)
 {
 	struct device *dev = &adc->spi->dev;
 	u32 regval;
@@ -621,7 +632,7 @@ static int mcp3910_config(struct mcp3911 *adc)
 		return ret;
 
 	regval &= ~MCP3910_CONFIG1_VREFEXT;
-	if (adc->vref) {
+	if (external_vref) {
 		dev_dbg(dev, "use external voltage reference\n");
 		regval |= FIELD_PREP(MCP3910_CONFIG1_VREFEXT, 1);
 	} else {
@@ -677,11 +688,6 @@ static int mcp3910_config(struct mcp3911 *adc)
 	return adc->chip->enable_offset(adc, 0);
 }
 
-static void mcp3911_cleanup_regulator(void *vref)
-{
-	regulator_disable(vref);
-}
-
 static int mcp3911_set_trigger_state(struct iio_trigger *trig, bool enable)
 {
 	struct mcp3911 *adc = iio_trigger_get_drvdata(trig);
@@ -702,8 +708,11 @@ static const struct iio_trigger_ops mcp3911_trigger_ops = {
 static int mcp3911_probe(struct spi_device *spi)
 {
 	struct device *dev = &spi->dev;
+	struct gpio_desc *gpio_reset;
 	struct iio_dev *indio_dev;
 	struct mcp3911 *adc;
+	bool external_vref;
+	u32 vref_mv;
 	int ret;
 
 	indio_dev = devm_iio_device_alloc(dev, sizeof(*adc));
@@ -714,23 +723,12 @@ static int mcp3911_probe(struct spi_device *spi)
 	adc->spi = spi;
 	adc->chip = spi_get_device_match_data(spi);
 
-	adc->vref = devm_regulator_get_optional(dev, "vref");
-	if (IS_ERR(adc->vref)) {
-		if (PTR_ERR(adc->vref) == -ENODEV) {
-			adc->vref = NULL;
-		} else {
-			return dev_err_probe(dev, PTR_ERR(adc->vref), "failed to get regulator\n");
-		}
+	ret = devm_regulator_get_enable_read_voltage(dev, "vref");
+	if (ret < 0 && ret != -ENODEV)
+		return dev_err_probe(dev, ret, "failed to get vref voltage\n");
 
-	} else {
-		ret = regulator_enable(adc->vref);
-		if (ret)
-			return ret;
-
-		ret = devm_add_action_or_reset(dev, mcp3911_cleanup_regulator, adc->vref);
-		if (ret)
-			return ret;
-	}
+	external_vref = ret != -ENODEV;
+	vref_mv = external_vref ? ret / 1000 : MCP3911_INT_VREF_MV;
 
 	adc->clki = devm_clk_get_enabled(dev, NULL);
 	if (IS_ERR(adc->clki)) {
@@ -755,11 +753,27 @@ static int mcp3911_probe(struct spi_device *spi)
 	}
 	dev_dbg(dev, "use device address %i\n", adc->dev_addr);
 
-	ret = adc->chip->config(adc);
+	gpio_reset = devm_gpiod_get_optional(&spi->dev, "reset", GPIOD_OUT_HIGH);
+	if (IS_ERR(gpio_reset))
+		return dev_err_probe(dev, PTR_ERR(gpio_reset),
+				     "Cannot get reset GPIO\n");
+
+	if (gpio_reset) {
+		gpiod_set_value_cansleep(gpio_reset, 0);
+
+		/*
+		 * Settling time after Hard Reset Mode (determined experimentally):
+		 * 330 micro-seconds are too few; 470 micro-seconds are sufficient.
+		 * Just in case, we add some safety factor...
+		 */
+		fsleep(600);
+	}
+
+	ret = adc->chip->config(adc, external_vref);
 	if (ret)
 		return ret;
 
-	ret = mcp3911_calc_scale_table(adc);
+	ret = mcp3911_calc_scale_table(vref_mv);
 	if (ret)
 		return ret;
 
@@ -826,6 +840,7 @@ static const struct mcp3911_chip_info mcp3911_chip_info[] = {
 		.get_offset = mcp3910_get_offset,
 		.set_offset = mcp3910_set_offset,
 		.set_scale = mcp3910_set_scale,
+		.get_raw = mcp3910_get_raw,
 	},
 	[MCP3911] = {
 		.channels = mcp3911_channels,
@@ -837,6 +852,7 @@ static const struct mcp3911_chip_info mcp3911_chip_info[] = {
 		.get_offset = mcp3911_get_offset,
 		.set_offset = mcp3911_set_offset,
 		.set_scale = mcp3911_set_scale,
+		.get_raw = mcp3911_get_raw,
 	},
 	[MCP3912] = {
 		.channels = mcp3912_channels,
@@ -848,6 +864,7 @@ static const struct mcp3911_chip_info mcp3911_chip_info[] = {
 		.get_offset = mcp3910_get_offset,
 		.set_offset = mcp3910_set_offset,
 		.set_scale = mcp3910_set_scale,
+		.get_raw = mcp3910_get_raw,
 	},
 	[MCP3913] = {
 		.channels = mcp3913_channels,
@@ -859,6 +876,7 @@ static const struct mcp3911_chip_info mcp3911_chip_info[] = {
 		.get_offset = mcp3910_get_offset,
 		.set_offset = mcp3910_set_offset,
 		.set_scale = mcp3910_set_scale,
+		.get_raw = mcp3910_get_raw,
 	},
 	[MCP3914] = {
 		.channels = mcp3914_channels,
@@ -870,6 +888,7 @@ static const struct mcp3911_chip_info mcp3911_chip_info[] = {
 		.get_offset = mcp3910_get_offset,
 		.set_offset = mcp3910_set_offset,
 		.set_scale = mcp3910_set_scale,
+		.get_raw = mcp3910_get_raw,
 	},
 	[MCP3918] = {
 		.channels = mcp3918_channels,
@@ -881,6 +900,7 @@ static const struct mcp3911_chip_info mcp3911_chip_info[] = {
 		.get_offset = mcp3910_get_offset,
 		.set_offset = mcp3910_set_offset,
 		.set_scale = mcp3910_set_scale,
+		.get_raw = mcp3910_get_raw,
 	},
 	[MCP3919] = {
 		.channels = mcp3919_channels,
@@ -892,6 +912,7 @@ static const struct mcp3911_chip_info mcp3911_chip_info[] = {
 		.get_offset = mcp3910_get_offset,
 		.set_offset = mcp3910_set_offset,
 		.set_scale = mcp3910_set_scale,
+		.get_raw = mcp3910_get_raw,
 	},
 };
 static const struct of_device_id mcp3911_dt_ids[] = {

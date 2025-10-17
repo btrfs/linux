@@ -91,7 +91,7 @@
 
 		compatible = "gpio-leds";
 
-		led@1 {
+		led-1 {
 			label = "apq8016-sbc:green:user1";
 			function = LED_FUNCTION_HEARTBEAT;
 			color = <LED_COLOR_ID_GREEN>;
@@ -100,7 +100,7 @@
 			default-state = "off";
 		};
 
-		led@2 {
+		led-2 {
 			label = "apq8016-sbc:green:user2";
 			function = LED_FUNCTION_DISK_ACTIVITY;
 			color = <LED_COLOR_ID_GREEN>;
@@ -109,7 +109,7 @@
 			default-state = "off";
 		};
 
-		led@3 {
+		led-3 {
 			label = "apq8016-sbc:green:user3";
 			function = LED_FUNCTION_DISK_ACTIVITY;
 			color = <LED_COLOR_ID_GREEN>;
@@ -118,7 +118,7 @@
 			default-state = "off";
 		};
 
-		led@4 {
+		led-4 {
 			label = "apq8016-sbc:green:user4";
 			color = <LED_COLOR_ID_GREEN>;
 			gpios = <&pm8916_gpios 2 GPIO_ACTIVE_HIGH>;
@@ -127,7 +127,7 @@
 			default-state = "off";
 		};
 
-		led@5 {
+		led-5 {
 			label = "apq8016-sbc:yellow:wlan";
 			function = LED_FUNCTION_WLAN;
 			color = <LED_COLOR_ID_YELLOW>;
@@ -136,7 +136,7 @@
 			default-state = "off";
 		};
 
-		led@6 {
+		led-6 {
 			label = "apq8016-sbc:blue:bt";
 			function = LED_FUNCTION_BLUETOOTH;
 			color = <LED_COLOR_ID_BLUE>;
@@ -157,8 +157,6 @@
 	status = "okay";
 
 	adv_bridge: bridge@39 {
-		status = "okay";
-
 		compatible = "adi,adv7533";
 		reg = <0x39>;
 
@@ -181,7 +179,7 @@
 		pinctrl-names = "default","sleep";
 		pinctrl-0 = <&adv7533_int_active &adv7533_switch_active>;
 		pinctrl-1 = <&adv7533_int_suspend &adv7533_switch_suspend>;
-		#sound-dai-cells = <1>;
+		#sound-dai-cells = <0>;
 
 		ports {
 			#address-cells = <1>;
@@ -222,11 +220,17 @@
 &blsp_uart1 {
 	status = "okay";
 	label = "LS-UART0";
+	pinctrl-0 = <&blsp_uart1_default>;
+	pinctrl-1 = <&blsp_uart1_sleep>;
+	pinctrl-names = "default", "sleep";
 };
 
 &blsp_uart2 {
 	status = "okay";
 	label = "LS-UART1";
+	pinctrl-0 = <&blsp_uart2_console_default>;
+	pinctrl-1 = <&blsp_uart2_console_sleep>;
+	pinctrl-names = "default", "sleep";
 };
 
 &camss {
@@ -340,7 +344,7 @@
 			sound-dai = <&lpass MI2S_QUATERNARY>;
 		};
 		codec {
-			sound-dai = <&adv_bridge 0>;
+			sound-dai = <&adv_bridge>;
 		};
 	};
 
@@ -590,6 +594,21 @@
 		"[DSI2HDMI_MI2S_DATA0]",
 		"USR_LED_2_CTRL", /* GPIO 120 */
 		"SB_HS_ID";
+
+	blsp_uart1_default: blsp-uart1-default-state {
+		/* TX, RX, CTS_N, RTS_N */
+		pins = "gpio0", "gpio1", "gpio2", "gpio3";
+		function = "blsp_uart1";
+		drive-strength = <16>;
+		bias-disable;
+	};
+
+	blsp_uart1_sleep: blsp-uart1-sleep-state {
+		pins = "gpio0", "gpio1", "gpio2", "gpio3";
+		function = "gpio";
+		drive-strength = <2>;
+		bias-pull-down;
+	};
 
 	sdc2_cd_default: sdc2-cd-default-state {
 		pins = "gpio38";

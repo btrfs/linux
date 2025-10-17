@@ -3,6 +3,7 @@
  * Copyright (C) 2016 Noralf Trønnes
  */
 
+#include <linux/export.h>
 #include <linux/module.h>
 #include <linux/slab.h>
 
@@ -453,4 +454,5 @@ int drm_simple_display_pipe_init(struct drm_device *dev,
 }
 EXPORT_SYMBOL(drm_simple_display_pipe_init);
 
+MODULE_DESCRIPTION("Helpers for drivers for simple display hardware");
 MODULE_LICENSE("GPL");

@@ -9,7 +9,7 @@
 
 #define NR_syscalls	__NR_syscalls
 
-#ifndef __ASSEMBLY__
+#ifndef __ASSEMBLER__
 
 #include <linux/types.h>
 #include <linux/compiler.h>
@@ -51,7 +51,6 @@
 #define __ARCH_WANT_SYS_FORK
 #define __ARCH_WANT_SYS_VFORK
 #define __ARCH_WANT_SYS_CLONE
-#define __ARCH_WANT_SYS_CLONE3
 
-#endif		/* __ASSEMBLY__ */
+#endif		/* __ASSEMBLER__ */
 #endif /* _ASM_POWERPC_UNISTD_H_ */

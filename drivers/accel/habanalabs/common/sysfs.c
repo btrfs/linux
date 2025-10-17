@@ -96,14 +96,21 @@ static ssize_t vrm_ver_show(struct device *dev, struct device_attribute *attr, c
 	infineon_second_stage_third_instance =
 					(infineon_second_stage_version >> 16) & mask;
 
-	if (cpucp_info->infineon_second_stage_version)
+	if (cpucp_info->infineon_version && cpucp_info->infineon_second_stage_version)
 		return sprintf(buf, "%#04x %#04x:%#04x:%#04x\n",
 				le32_to_cpu(cpucp_info->infineon_version),
 				infineon_second_stage_first_instance,
 				infineon_second_stage_second_instance,
 				infineon_second_stage_third_instance);
-	else
+	else if (cpucp_info->infineon_second_stage_version)
+		return sprintf(buf, "%#04x:%#04x:%#04x\n",
+				infineon_second_stage_first_instance,
+				infineon_second_stage_second_instance,
+				infineon_second_stage_third_instance);
+	else if (cpucp_info->infineon_version)
 		return sprintf(buf, "%#04x\n", le32_to_cpu(cpucp_info->infineon_version));
+
+	return 0;
 }
 
 static DEVICE_ATTR_RO(vrm_ver);
@@ -142,8 +149,9 @@ static ssize_t cpld_ver_show(struct device *dev, struct device_attribute *attr,
 {
 	struct hl_device *hdev = dev_get_drvdata(dev);
 
-	return sprintf(buf, "0x%08x\n",
-			le32_to_cpu(hdev->asic_prop.cpucp_info.cpld_version));
+	return sprintf(buf, "0x%08x%08x\n",
+		le32_to_cpu(hdev->asic_prop.cpucp_info.cpld_timestamp),
+		le32_to_cpu(hdev->asic_prop.cpucp_info.cpld_version));
 }
 
 static ssize_t cpucp_kernel_ver_show(struct device *dev,
@@ -270,6 +278,9 @@ static ssize_t device_type_show(struct device *dev,
 	case ASIC_GAUDI2C:
 		str = "GAUDI2C";
 		break;
+	case ASIC_GAUDI2D:
+		str = "GAUDI2D";
+		break;
 	default:
 		dev_err(hdev->dev, "Unrecognized ASIC type %d\n",
 				hdev->asic_type);
@@ -364,7 +375,7 @@ out:
 }
 
 static ssize_t eeprom_read_handler(struct file *filp, struct kobject *kobj,
-			struct bin_attribute *attr, char *buf, loff_t offset,
+			const struct bin_attribute *attr, char *buf, loff_t offset,
 			size_t max_size)
 {
 	struct device *dev = kobj_to_dev(kobj);
@@ -439,7 +450,7 @@ static DEVICE_ATTR_RO(security_enabled);
 static DEVICE_ATTR_RO(module_id);
 static DEVICE_ATTR_RO(parent_device);
 
-static struct bin_attribute bin_attr_eeprom = {
+static const struct bin_attribute bin_attr_eeprom = {
 	.attr = {.name = "eeprom", .mode = (0444)},
 	.size = PAGE_SIZE,
 	.read = eeprom_read_handler
@@ -468,7 +479,7 @@ static struct attribute *hl_dev_attrs[] = {
 	NULL,
 };
 
-static struct bin_attribute *hl_dev_bin_attrs[] = {
+static const struct bin_attribute *const hl_dev_bin_attrs[] = {
 	&bin_attr_eeprom,
 	NULL
 };

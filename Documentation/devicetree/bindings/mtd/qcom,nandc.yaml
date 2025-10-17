@@ -11,12 +11,18 @@ maintainers:
 
 properties:
   compatible:
-    enum:
-      - qcom,ipq806x-nand
-      - qcom,ipq4019-nand
-      - qcom,ipq6018-nand
-      - qcom,ipq8074-nand
-      - qcom,sdx55-nand
+    oneOf:
+      - items:
+          - enum:
+              - qcom,sdx75-nand
+          - const: qcom,sdx55-nand
+      - items:
+          - enum:
+              - qcom,ipq806x-nand
+              - qcom,ipq4019-nand
+              - qcom,ipq6018-nand
+              - qcom,ipq8074-nand
+              - qcom,sdx55-nand
 
   reg:
     maxItems: 1
@@ -30,6 +36,18 @@ properties:
     items:
       - const: core
       - const: aon
+
+  qcom,cmd-crci:
+    $ref: /schemas/types.yaml#/definitions/uint32
+    description:
+      Must contain the ADM command type CRCI block instance number specified for
+      the NAND controller on the given platform
+
+  qcom,data-crci:
+    $ref: /schemas/types.yaml#/definitions/uint32
+    description:
+      Must contain the ADM data type CRCI block instance number specified for
+      the NAND controller on the given platform
 
 patternProperties:
   "^nand@[a-f0-9]$":
@@ -83,17 +101,17 @@ allOf:
           items:
             - const: rxtx
 
-        qcom,cmd-crci:
-          $ref: /schemas/types.yaml#/definitions/uint32
-          description:
-            Must contain the ADM command type CRCI block instance number
-            specified for the NAND controller on the given platform
+  - if:
+      properties:
+        compatible:
+          contains:
+            enum:
+              - qcom,sdx75-nand
 
-        qcom,data-crci:
-          $ref: /schemas/types.yaml#/definitions/uint32
-          description:
-            Must contain the ADM data type CRCI block instance number
-            specified for the NAND controller on the given platform
+    then:
+      properties:
+        iommus:
+          maxItems: 1
 
   - if:
       properties:
@@ -119,19 +137,9 @@ allOf:
             - const: rx
             - const: cmd
 
-  - if:
-      properties:
-        compatible:
-          contains:
-            enum:
-              - qcom,ipq806x-nand
+        qcom,cmd-crci: false
+        qcom,data-crci: false
 
-    then:
-      patternProperties:
-        "^nand@[a-f0-9]$":
-          properties:
-            qcom,boot-partitions: true
-    else:
       patternProperties:
         "^nand@[a-f0-9]$":
           properties:

@@ -22,8 +22,7 @@
 #include <linux/platform_data/cros_ec_commands.h>
 #include <linux/platform_data/cros_ec_proto.h>
 #include <linux/platform_device.h>
-#include <linux/pm_wakeup.h>
-#include <asm/unaligned.h>
+#include <linux/unaligned.h>
 
 #include "hid-ids.h"
 #include "hid-vivaldi-common.h"
@@ -255,7 +254,7 @@ out:
 	return retval;
 }
 
-static int cbas_ec_remove(struct platform_device *pdev)
+static void cbas_ec_remove(struct platform_device *pdev)
 {
 	struct cros_ec_device *ec = dev_get_drvdata(pdev->dev.parent);
 
@@ -266,14 +265,15 @@ static int cbas_ec_remove(struct platform_device *pdev)
 	cbas_ec_set_input(NULL);
 
 	mutex_unlock(&cbas_ec_reglock);
-	return 0;
 }
 
+#ifdef CONFIG_ACPI
 static const struct acpi_device_id cbas_ec_acpi_ids[] = {
 	{ "GOOG000B", 0 },
 	{ }
 };
 MODULE_DEVICE_TABLE(acpi, cbas_ec_acpi_ids);
+#endif
 
 #ifdef CONFIG_OF
 static const struct of_device_id cbas_ec_of_match[] = {
@@ -419,38 +419,15 @@ static int hammer_event(struct hid_device *hid, struct hid_field *field,
 	return 0;
 }
 
-static bool hammer_has_usage(struct hid_device *hdev, unsigned int report_type,
-			unsigned application, unsigned usage)
-{
-	struct hid_report_enum *re = &hdev->report_enum[report_type];
-	struct hid_report *report;
-	int i, j;
-
-	list_for_each_entry(report, &re->report_list, list) {
-		if (report->application != application)
-			continue;
-
-		for (i = 0; i < report->maxfield; i++) {
-			struct hid_field *field = report->field[i];
-
-			for (j = 0; j < field->maxusage; j++)
-				if (field->usage[j].hid == usage)
-					return true;
-		}
-	}
-
-	return false;
-}
-
 static bool hammer_has_folded_event(struct hid_device *hdev)
 {
-	return hammer_has_usage(hdev, HID_INPUT_REPORT,
+	return !!hid_find_field(hdev, HID_INPUT_REPORT,
 				HID_GD_KEYBOARD, HID_USAGE_KBD_FOLDED);
 }
 
 static bool hammer_has_backlight_control(struct hid_device *hdev)
 {
-	return hammer_has_usage(hdev, HID_OUTPUT_REPORT,
+	return !!hid_find_field(hdev, HID_OUTPUT_REPORT,
 				HID_GD_KEYBOARD, HID_AD_BRIGHTNESS);
 }
 
@@ -642,4 +619,5 @@ static void __exit hammer_exit(void)
 }
 module_exit(hammer_exit);
 
+MODULE_DESCRIPTION("HID driver for Google Hammer device.");
 MODULE_LICENSE("GPL");

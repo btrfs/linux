@@ -179,7 +179,23 @@ Phase offset measurement and adjustment
 Device may provide ability to measure a phase difference between signals
 on a pin and its parent dpll device. If pin-dpll phase offset measurement
 is supported, it shall be provided with ``DPLL_A_PIN_PHASE_OFFSET``
-attribute for each parent dpll device.
+attribute for each parent dpll device. The reported phase offset may be
+computed as the average of prior values and the current measurement, using
+the following formula:
+
+.. math::
+   curr\_avg = prev\_avg * \frac{2^N-1}{2^N} + new\_val * \frac{1}{2^N}
+
+where `curr_avg` is the current reported phase offset, `prev_avg` is the
+previously reported value, `new_val` is the current measurement, and `N` is
+the averaging factor. Configured averaging factor value is provided with
+``DPLL_A_PHASE_OFFSET_AVG_FACTOR`` attribute of a device and value change can
+be requested with the same attribute with ``DPLL_CMD_DEVICE_SET`` command.
+
+  ================================== ======================================
+  ``DPLL_A_PHASE_OFFSET_AVG_FACTOR`` attr configured value of phase offset
+                                     averaging factor
+  ================================== ======================================
 
 Device may also provide ability to adjust a signal phase on a pin.
 If pin phase adjustment is supported, minimal and maximal values that pin
@@ -213,6 +229,70 @@ Phase adjust (also min and max) values are integers, but measured phase
 offset values are fractional with 3-digit decimal places and shell be
 divided with ``DPLL_PIN_PHASE_OFFSET_DIVIDER`` to get integer part and
 modulo divided to get fractional part.
+
+Phase offset monitor
+====================
+
+Phase offset measurement is typically performed against the current active
+source. However, some DPLL (Digital Phase-Locked Loop) devices may offer
+the capability to monitor phase offsets across all available inputs.
+The attribute and current feature state shall be included in the response
+message of the ``DPLL_CMD_DEVICE_GET`` command for supported DPLL devices.
+In such cases, users can also control the feature using the
+``DPLL_CMD_DEVICE_SET`` command by setting the ``enum dpll_feature_state``
+values for the attribute.
+Once enabled the phase offset measurements for the input shall be returned
+in the ``DPLL_A_PIN_PHASE_OFFSET`` attribute.
+
+  =============================== ========================
+  ``DPLL_A_PHASE_OFFSET_MONITOR`` attr state of a feature
+  =============================== ========================
+
+Embedded SYNC
+=============
+
+Device may provide ability to use Embedded SYNC feature. It allows
+to embed additional SYNC signal into the base frequency of a pin - a one
+special pulse of base frequency signal every time SYNC signal pulse
+happens. The user can configure the frequency of Embedded SYNC.
+The Embedded SYNC capability is always related to a given base frequency
+and HW capabilities. The user is provided a range of Embedded SYNC
+frequencies supported, depending on current base frequency configured for
+the pin.
+
+  ========================================= =================================
+  ``DPLL_A_PIN_ESYNC_FREQUENCY``            current Embedded SYNC frequency
+  ``DPLL_A_PIN_ESYNC_FREQUENCY_SUPPORTED``  nest available Embedded SYNC
+                                            frequency ranges
+    ``DPLL_A_PIN_FREQUENCY_MIN``            attr minimum value of frequency
+    ``DPLL_A_PIN_FREQUENCY_MAX``            attr maximum value of frequency
+  ``DPLL_A_PIN_ESYNC_PULSE``                pulse type of Embedded SYNC
+  ========================================= =================================
+
+Reference SYNC
+==============
+
+The device may support the Reference SYNC feature, which allows the combination
+of two inputs into a input pair. In this configuration, clock signals
+from both inputs are used to synchronize the DPLL device. The higher frequency
+signal is utilized for the loop bandwidth of the DPLL, while the lower frequency
+signal is used to syntonize the output signal of the DPLL device. This feature
+enables the provision of a high-quality loop bandwidth signal from an external
+source.
+
+A capable input provides a list of inputs that can be bound with to create
+Reference SYNC. To control this feature, the user must request a desired
+state for a target pin: use ``DPLL_PIN_STATE_CONNECTED`` to enable or
+``DPLL_PIN_STATE_DISCONNECTED`` to disable the feature. An input pin can be
+bound to only one other pin at any given time.
+
+  ============================== ==========================================
+  ``DPLL_A_PIN_REFERENCE_SYNC``  nested attribute for providing info or
+                                 requesting configuration of the Reference
+                                 SYNC feature
+    ``DPLL_A_PIN_ID``            target pin id for Reference SYNC feature
+    ``DPLL_A_PIN_STATE``         state of Reference SYNC connection
+  ============================== ==========================================
 
 Configuration commands group
 ============================
@@ -545,7 +625,7 @@ In such scenario, dpll device input signal shall be also configurable
 to drive dpll with signal recovered from the PHY netdevice.
 This is done by exposing a pin to the netdevice - attaching pin to the
 netdevice itself with
-``netdev_dpll_pin_set(struct net_device *dev, struct dpll_pin *dpll_pin)``.
+``dpll_netdev_pin_set(struct net_device *dev, struct dpll_pin *dpll_pin)``.
 Exposed pin id handle ``DPLL_A_PIN_ID`` is then identifiable by the user
 as it is attached to rtnetlink respond to get ``RTM_NEWLINK`` command in
 nested attribute ``IFLA_DPLL_PIN``.

@@ -206,6 +206,14 @@ the standard procedure for using FunctionFS (mount it, run the userspace
 process which implements the function proper). The gadget should be enabled
 by writing a suitable string to usb_gadget/<gadget>/UDC.
 
+The FFS function provides just one attribute in its function directory:
+
+	ready
+
+The attribute is read-only and signals if the function is ready (1) to be
+used, E.G. if userspace has written descriptors and strings to ep0, so
+the gadget can be enabled.
+
 Testing the FFS function
 ------------------------
 
@@ -448,17 +456,17 @@ Function-specific configfs interface
 The function name to use when creating the function directory is "ncm".
 The NCM function provides these attributes in its function directory:
 
-	===============   ==================================================
-	ifname		  network device interface name associated with this
-			  function instance
-	qmult		  queue length multiplier for high and super speed
-	host_addr	  MAC address of host's end of this
-			  Ethernet over USB link
-	dev_addr	  MAC address of device's end of this
-			  Ethernet over USB link
-	max_segment_size  Segment size required for P2P connections. This
-			  will set MTU to (max_segment_size - 14 bytes)
-	===============   ==================================================
+	======================= ==================================================
+	ifname			network device interface name associated with this
+				function instance
+	qmult			queue length multiplier for high and super speed
+	host_addr		MAC address of host's end of this
+				Ethernet over USB link
+	dev_addr		MAC address of device's end of this
+				Ethernet over USB link
+	max_segment_size	Segment size required for P2P connections. This
+				will set MTU to 14 bytes
+	======================= ==================================================
 
 and after creating the functions/ncm.<instance name> they contain default
 values: qmult is 5, dev_addr and host_addr are randomly selected.
@@ -757,6 +765,17 @@ The uac2 function provides these attributes in its function directory:
 	req_number       the number of pre-allocated request for both capture
 	                 and playback
 	function_name    name of the interface
+	if_ctrl_name     topology control name
+	clksrc_in_name   input clock name
+	clksrc_out_name  output clock name
+	p_it_name        playback input terminal name
+	p_it_ch_name     playback input first channel name
+	p_ot_name        playback output terminal name
+	p_fu_vol_name    playback function unit name
+	c_it_name        capture input terminal name
+	c_it_ch_name     capture input first channel name
+	c_ot_name        capture output terminal name
+	c_fu_vol_name    capture functional unit name
 	c_terminal_type  code of the capture terminal type
 	p_terminal_type  code of the playback terminal type
 	================ ====================================================
@@ -855,7 +874,7 @@ where uvc-gadget is this program:
 
 with these patches:
 
-	http://www.spinics.net/lists/linux-usb/msg99220.html
+	https://lore.kernel.org/r/1386675637-18243-1-git-send-email-r.baldyga@samsung.com/
 
 host::
 
@@ -949,6 +968,14 @@ The uac1 function provides these attributes in its function directory:
 	req_number       the number of pre-allocated requests for both capture
 	                 and playback
 	function_name    name of the interface
+	p_it_name        playback input terminal name
+	p_it_ch_name     playback channels name
+	p_ot_name        playback output terminal name
+	p_fu_vol_name    playback mute/volume functional unit name
+	c_it_name        capture input terminal name
+	c_it_ch_name     capture channels name
+	c_ot_name        capture output terminal name
+	c_fu_vol_name    capture mute/volume functional unit name
 	================ ====================================================
 
 The attributes have sane default values.
@@ -1023,7 +1050,7 @@ Its attributes are:
 	midi1_num_groups	The number of groups for MIDI 1.0 (0-16)
 	ui_hint			UI-hint of this FB
 				0: unknown, 1: receiver, 2: sender, 3: both
-	midi_ci_verison		Supported MIDI-CI version number (8 bit)
+	midi_ci_version		Supported MIDI-CI version number (8 bit)
 	is_midi1		Legacy MIDI 1.0 device (0-2)
 				0: MIDI 2.0 device,
 				1: MIDI 1.0 without restriction, or

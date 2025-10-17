@@ -2,6 +2,7 @@
 
 #include <errno.h>
 #include <error.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -19,12 +20,6 @@
 
 #include "linux/mptcp.h"
 
-#ifndef MPTCP_PM_NAME
-#define MPTCP_PM_NAME		"mptcp_pm"
-#endif
-#ifndef MPTCP_PM_EVENTS
-#define MPTCP_PM_EVENTS		"mptcp_pm_events"
-#endif
 #ifndef IPPROTO_MPTCP
 #define IPPROTO_MPTCP 262
 #endif
@@ -116,9 +111,11 @@ static int capture_events(int fd, int event_group)
 
 	if (setsockopt(fd, SOL_NETLINK, NETLINK_ADD_MEMBERSHIP,
 		       &event_group, sizeof(event_group)) < 0)
-		error(1, errno, "could not join the " MPTCP_PM_EVENTS " mcast group");
+		error(1, errno, "could not join the " MPTCP_PM_EV_GRP_NAME " mcast group");
 
 	do {
+		bool server_side = false;
+
 		FD_ZERO(&rfds);
 		FD_SET(fd, &rfds);
 		res_len = NLMSG_ALIGN(sizeof(struct nlmsghdr)) +
@@ -193,11 +190,22 @@ static int capture_events(int fd, int event_group)
 				else if (attrs->rta_type == MPTCP_ATTR_ERROR)
 					fprintf(stderr, ",error:%u", *(__u8 *)RTA_DATA(attrs));
 				else if (attrs->rta_type == MPTCP_ATTR_SERVER_SIDE)
-					fprintf(stderr, ",server_side:%u", *(__u8 *)RTA_DATA(attrs));
+					server_side = !!*(__u8 *)RTA_DATA(attrs);
+				else if (attrs->rta_type == MPTCP_ATTR_FLAGS) {
+					__u16 flags = *(__u16 *)RTA_DATA(attrs);
+
+					/* only print when present, easier */
+					if (flags & MPTCP_PM_EV_FLAG_DENY_JOIN_ID0)
+						fprintf(stderr, ",deny_join_id0:1");
+					if (flags & MPTCP_PM_EV_FLAG_SERVER_SIDE)
+						server_side = true;
+				}
 
 				attrs = RTA_NEXT(attrs, msg_len);
 			}
 		}
+		if (server_side)
+			fprintf(stderr, ",server_side:1");
 		fprintf(stderr, "\n");
 	} while (1);
 
@@ -288,7 +296,7 @@ static int genl_parse_getfamily(struct nlmsghdr *nlh, int *pm_family,
 					if (grp->rta_type == CTRL_ATTR_MCAST_GRP_ID)
 						*events_mcast_grp = *(__u32 *)RTA_DATA(grp);
 					else if (grp->rta_type == CTRL_ATTR_MCAST_GRP_NAME &&
-						 !strcmp(RTA_DATA(grp), MPTCP_PM_EVENTS))
+						 !strcmp(RTA_DATA(grp), MPTCP_PM_EV_GRP_NAME))
 						got_events_grp = 1;
 
 					grp = RTA_NEXT(grp, grp_len);
@@ -453,6 +461,7 @@ int csf(int fd, int pm_family, int argc, char *argv[])
 	char data[NLMSG_ALIGN(sizeof(struct nlmsghdr)) +
 		  NLMSG_ALIGN(sizeof(struct genlmsghdr)) +
 		  1024];
+	u_int32_t flags = MPTCP_PM_ADDR_FLAG_SUBFLOW;
 	const char *params[5];
 	struct nlmsghdr *nh;
 	struct rtattr *addr;
@@ -557,6 +566,13 @@ int csf(int fd, int pm_family, int argc, char *argv[])
 			memcpy(RTA_DATA(rta), &id, 1);
 			off += NLMSG_ALIGN(rta->rta_len);
 		}
+
+		/* addr flags */
+		rta = (void *)(data + off);
+		rta->rta_type = MPTCP_PM_ADDR_ATTR_FLAGS;
+		rta->rta_len = RTA_LENGTH(4);
+		memcpy(RTA_DATA(rta), &flags, 4);
+		off += NLMSG_ALIGN(rta->rta_len);
 
 		addr->rta_len = off - addr_start;
 	}
@@ -814,6 +830,8 @@ int add_addr(int fd, int pm_family, int argc, char *argv[])
 					flags |= MPTCP_PM_ADDR_FLAG_SUBFLOW;
 				else if (!strcmp(tok, "signal"))
 					flags |= MPTCP_PM_ADDR_FLAG_SIGNAL;
+				else if (!strcmp(tok, "laminar"))
+					flags |= MPTCP_PM_ADDR_FLAG_LAMINAR;
 				else if (!strcmp(tok, "backup"))
 					flags |= MPTCP_PM_ADDR_FLAG_BACKUP;
 				else if (!strcmp(tok, "fullmesh"))
@@ -1002,6 +1020,13 @@ static void print_addr(struct rtattr *attrs, int len)
 					printf(",");
 			}
 
+			if (flags & MPTCP_PM_ADDR_FLAG_LAMINAR) {
+				printf("laminar");
+				flags &= ~MPTCP_PM_ADDR_FLAG_LAMINAR;
+				if (flags)
+					printf(",");
+			}
+
 			if (flags & MPTCP_PM_ADDR_FLAG_BACKUP) {
 				printf("backup");
 				flags &= ~MPTCP_PM_ADDR_FLAG_BACKUP;
@@ -1079,6 +1104,7 @@ int get_addr(int fd, int pm_family, int argc, char *argv[])
 		  1024];
 	struct rtattr *rta, *nest;
 	struct nlmsghdr *nh;
+	u_int32_t token = 0;
 	int nest_start;
 	u_int8_t id;
 	int off = 0;
@@ -1089,10 +1115,12 @@ int get_addr(int fd, int pm_family, int argc, char *argv[])
 			    MPTCP_PM_VER);
 
 	/* the only argument is the address id */
-	if (argc != 3)
+	if (argc != 3 && argc != 5)
 		syntax(argv);
 
 	id = atoi(argv[2]);
+	if (argc == 5 && !strcmp(argv[3], "token"))
+		token = strtoul(argv[4], NULL, 10);
 
 	nest_start = off;
 	nest = (void *)(data + off);
@@ -1108,6 +1136,15 @@ int get_addr(int fd, int pm_family, int argc, char *argv[])
 	off += NLMSG_ALIGN(rta->rta_len);
 	nest->rta_len = off - nest_start;
 
+	/* token */
+	if (token) {
+		rta = (void *)(data + off);
+		rta->rta_type = MPTCP_PM_ATTR_TOKEN;
+		rta->rta_len = RTA_LENGTH(4);
+		memcpy(RTA_DATA(rta), &token, 4);
+		off += NLMSG_ALIGN(rta->rta_len);
+	}
+
 	print_addrs(nh, pm_family, do_nl_req(fd, nh, off, sizeof(data)));
 	return 0;
 }
@@ -1119,7 +1156,15 @@ int dump_addrs(int fd, int pm_family, int argc, char *argv[])
 		  1024];
 	pid_t pid = getpid();
 	struct nlmsghdr *nh;
+	u_int32_t token = 0;
+	struct rtattr *rta;
 	int off = 0;
+
+	if (argc != 2 && argc != 4)
+		syntax(argv);
+
+	if (argc == 4 && !strcmp(argv[2], "token"))
+		token = strtoul(argv[3], NULL, 10);
 
 	memset(data, 0, sizeof(data));
 	nh = (void *)data;
@@ -1129,6 +1174,15 @@ int dump_addrs(int fd, int pm_family, int argc, char *argv[])
 	nh->nlmsg_seq = 1;
 	nh->nlmsg_pid = pid;
 	nh->nlmsg_len = off;
+
+	/* token */
+	if (token) {
+		rta = (void *)(data + off);
+		rta->rta_type = MPTCP_PM_ATTR_TOKEN;
+		rta->rta_len = RTA_LENGTH(4);
+		memcpy(RTA_DATA(rta), &token, 4);
+		off += NLMSG_ALIGN(rta->rta_len);
+	}
 
 	print_addrs(nh, pm_family, do_nl_req(fd, nh, off, sizeof(data)));
 	return 0;
@@ -1239,7 +1293,7 @@ int add_listener(int argc, char *argv[])
 	struct sockaddr_storage addr;
 	struct sockaddr_in6 *a6;
 	struct sockaddr_in *a4;
-	u_int16_t family;
+	u_int16_t family = AF_UNSPEC;
 	int enable = 1;
 	int sock;
 	int err;

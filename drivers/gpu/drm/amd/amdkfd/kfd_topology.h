@@ -24,6 +24,7 @@
 #ifndef __KFD_TOPOLOGY_H__
 #define __KFD_TOPOLOGY_H__
 
+#include <linux/dmi.h>
 #include <linux/types.h>
 #include <linux/list.h>
 #include <linux/kfd_sysfs.h>
@@ -50,6 +51,7 @@ struct kfd_node_properties {
 	uint32_t cpu_core_id_base;
 	uint32_t simd_id_base;
 	uint32_t capability;
+	uint32_t capability2;
 	uint64_t debug_prop;
 	uint32_t max_waves_per_simd;
 	uint32_t lds_size_in_kb;
@@ -74,6 +76,10 @@ struct kfd_node_properties {
 	uint32_t num_sdma_xgmi_engines;
 	uint32_t num_sdma_queues_per_engine;
 	uint32_t num_cp_queues;
+	uint32_t cwsr_size;
+	uint32_t ctl_stack_size;
+	uint32_t eop_buffer_size;
+	uint32_t debug_memory_size;
 	char name[KFD_TOPOLOGY_PUBLIC_NAME_SIZE];
 };
 
@@ -121,6 +127,7 @@ struct kfd_iolink_properties {
 	uint32_t		min_bandwidth;
 	uint32_t		max_bandwidth;
 	uint32_t		rec_transfer_size;
+	uint32_t		rec_sdma_eng_id_mask;
 	uint32_t		flags;
 	struct kfd_node		*gpu;
 	struct kobject		*kobj;
@@ -154,7 +161,10 @@ struct kfd_topology_device {
 	struct attribute		attr_gpuid;
 	struct attribute		attr_name;
 	struct attribute		attr_props;
-	uint8_t				oem_id[CRAT_OEMID_LENGTH];
+	union {
+		uint8_t				oem_id[CRAT_OEMID_LENGTH];
+		uint64_t			oem_id64;
+	};
 	uint8_t				oem_table_id[CRAT_OEMTABLEID_LENGTH];
 	uint32_t			oem_revision;
 };
@@ -170,6 +180,22 @@ struct kfd_system_properties {
 	struct attribute	attr_genid;
 	struct attribute	attr_props;
 };
+
+struct dmi_mem_device {
+	struct dmi_header header;
+	u16 physical_handle;
+	u16 error_handle;
+	u16 total_width;
+	u16 data_width;
+	u16 size;
+	u8 form_factor;
+	u8 device_set;
+	u8 device_locator;
+	u8 bank_locator;
+	u8 memory_type;
+	u16 type_detail;
+	u16 speed;
+} __packed;
 
 struct kfd_topology_device *kfd_create_topology_device(
 		struct list_head *device_list);

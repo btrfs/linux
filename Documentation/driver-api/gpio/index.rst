@@ -12,8 +12,8 @@ Contents:
    driver
    consumer
    board
+   legacy-boards
    drivers-on-gpio
-   legacy
    bt8xxgpio
 
 Core
@@ -28,7 +28,7 @@ Core
 ACPI support
 ============
 
-.. kernel-doc:: drivers/gpio/gpiolib-acpi.c
+.. kernel-doc:: drivers/gpio/gpiolib-acpi-core.c
    :export:
 
 Device tree support

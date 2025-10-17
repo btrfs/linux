@@ -23,8 +23,10 @@
 #include <linux/delay.h>
 #include <linux/interrupt.h>
 #include <linux/list.h>
+#include <linux/printk.h>
 #include <linux/spinlock.h>
 #include <linux/slab.h>
+#include <linux/string.h>
 #include <linux/suspend.h>
 #include <linux/acpi.h>
 #include <linux/dmi.h>
@@ -525,10 +527,12 @@ static void acpi_ec_clear(struct acpi_ec *ec)
 
 static void acpi_ec_enable_event(struct acpi_ec *ec)
 {
-	spin_lock(&ec->lock);
+	unsigned long flags;
+
+	spin_lock_irqsave(&ec->lock, flags);
 	if (acpi_ec_started(ec))
 		__acpi_ec_enable_event(ec);
-	spin_unlock(&ec->lock);
+	spin_unlock_irqrestore(&ec->lock, flags);
 
 	/* Drain additional events if hardware requires that */
 	if (EC_FLAGS_CLEAR_ON_RESUME)
@@ -544,9 +548,11 @@ static void __acpi_ec_flush_work(void)
 
 static void acpi_ec_disable_event(struct acpi_ec *ec)
 {
-	spin_lock(&ec->lock);
+	unsigned long flags;
+
+	spin_lock_irqsave(&ec->lock, flags);
 	__acpi_ec_disable_event(ec);
-	spin_unlock(&ec->lock);
+	spin_unlock_irqrestore(&ec->lock, flags);
 
 	/*
 	 * When ec_freeze_events is true, we need to flush events in
@@ -567,9 +573,10 @@ void acpi_ec_flush_work(void)
 
 static bool acpi_ec_guard_event(struct acpi_ec *ec)
 {
+	unsigned long flags;
 	bool guarded;
 
-	spin_lock(&ec->lock);
+	spin_lock_irqsave(&ec->lock, flags);
 	/*
 	 * If firmware SCI_EVT clearing timing is "event", we actually
 	 * don't know when the SCI_EVT will be cleared by firmware after
@@ -585,29 +592,31 @@ static bool acpi_ec_guard_event(struct acpi_ec *ec)
 	guarded = ec_event_clearing == ACPI_EC_EVT_TIMING_EVENT &&
 		ec->event_state != EC_EVENT_READY &&
 		(!ec->curr || ec->curr->command != ACPI_EC_COMMAND_QUERY);
-	spin_unlock(&ec->lock);
+	spin_unlock_irqrestore(&ec->lock, flags);
 	return guarded;
 }
 
 static int ec_transaction_polled(struct acpi_ec *ec)
 {
+	unsigned long flags;
 	int ret = 0;
 
-	spin_lock(&ec->lock);
+	spin_lock_irqsave(&ec->lock, flags);
 	if (ec->curr && (ec->curr->flags & ACPI_EC_COMMAND_POLL))
 		ret = 1;
-	spin_unlock(&ec->lock);
+	spin_unlock_irqrestore(&ec->lock, flags);
 	return ret;
 }
 
 static int ec_transaction_completed(struct acpi_ec *ec)
 {
+	unsigned long flags;
 	int ret = 0;
 
-	spin_lock(&ec->lock);
+	spin_lock_irqsave(&ec->lock, flags);
 	if (ec->curr && (ec->curr->flags & ACPI_EC_COMMAND_COMPLETE))
 		ret = 1;
-	spin_unlock(&ec->lock);
+	spin_unlock_irqrestore(&ec->lock, flags);
 	return ret;
 }
 
@@ -749,6 +758,7 @@ static int ec_guard(struct acpi_ec *ec)
 
 static int ec_poll(struct acpi_ec *ec)
 {
+	unsigned long flags;
 	int repeat = 5; /* number of command restarts */
 
 	while (repeat--) {
@@ -757,14 +767,14 @@ static int ec_poll(struct acpi_ec *ec)
 		do {
 			if (!ec_guard(ec))
 				return 0;
-			spin_lock(&ec->lock);
+			spin_lock_irqsave(&ec->lock, flags);
 			advance_transaction(ec, false);
-			spin_unlock(&ec->lock);
+			spin_unlock_irqrestore(&ec->lock, flags);
 		} while (time_before(jiffies, delay));
 		pr_debug("controller reset, restart transaction\n");
-		spin_lock(&ec->lock);
+		spin_lock_irqsave(&ec->lock, flags);
 		start_transaction(ec);
-		spin_unlock(&ec->lock);
+		spin_unlock_irqrestore(&ec->lock, flags);
 	}
 	return -ETIME;
 }
@@ -772,10 +782,14 @@ static int ec_poll(struct acpi_ec *ec)
 static int acpi_ec_transaction_unlocked(struct acpi_ec *ec,
 					struct transaction *t)
 {
+	unsigned long tmp;
 	int ret = 0;
 
+	if (t->rdata)
+		memset(t->rdata, 0, t->rlen);
+
 	/* start transaction */
-	spin_lock(&ec->lock);
+	spin_lock_irqsave(&ec->lock, tmp);
 	/* Enable GPE for command processing (IBF=0/OBF=1) */
 	if (!acpi_ec_submit_flushable_request(ec)) {
 		ret = -EINVAL;
@@ -786,11 +800,11 @@ static int acpi_ec_transaction_unlocked(struct acpi_ec *ec,
 	ec->curr = t;
 	ec_dbg_req("Command(%s) started", acpi_ec_cmd_string(t->command));
 	start_transaction(ec);
-	spin_unlock(&ec->lock);
+	spin_unlock_irqrestore(&ec->lock, tmp);
 
 	ret = ec_poll(ec);
 
-	spin_lock(&ec->lock);
+	spin_lock_irqsave(&ec->lock, tmp);
 	if (t->irq_count == ec_storm_threshold)
 		acpi_ec_unmask_events(ec);
 	ec_dbg_req("Command(%s) stopped", acpi_ec_cmd_string(t->command));
@@ -799,7 +813,7 @@ static int acpi_ec_transaction_unlocked(struct acpi_ec *ec,
 	acpi_ec_complete_request(ec);
 	ec_dbg_ref(ec, "Decrease command");
 unlock:
-	spin_unlock(&ec->lock);
+	spin_unlock_irqrestore(&ec->lock, tmp);
 	return ret;
 }
 
@@ -810,8 +824,6 @@ static int acpi_ec_transaction(struct acpi_ec *ec, struct transaction *t)
 
 	if (!ec || (!t) || (t->wlen && !t->wdata) || (t->rlen && !t->rdata))
 		return -EINVAL;
-	if (t->rdata)
-		memset(t->rdata, 0, t->rlen);
 
 	mutex_lock(&ec->mutex);
 	if (ec->global_lock) {
@@ -838,7 +850,7 @@ static int acpi_ec_burst_enable(struct acpi_ec *ec)
 				.wdata = NULL, .rdata = &d,
 				.wlen = 0, .rlen = 1};
 
-	return acpi_ec_transaction(ec, &t);
+	return acpi_ec_transaction_unlocked(ec, &t);
 }
 
 static int acpi_ec_burst_disable(struct acpi_ec *ec)
@@ -848,7 +860,7 @@ static int acpi_ec_burst_disable(struct acpi_ec *ec)
 				.wlen = 0, .rlen = 0};
 
 	return (acpi_ec_read_status(ec) & ACPI_EC_FLAG_BURST) ?
-				acpi_ec_transaction(ec, &t) : 0;
+				acpi_ec_transaction_unlocked(ec, &t) : 0;
 }
 
 static int acpi_ec_read(struct acpi_ec *ec, u8 address, u8 *data)
@@ -864,6 +876,19 @@ static int acpi_ec_read(struct acpi_ec *ec, u8 address, u8 *data)
 	return result;
 }
 
+static int acpi_ec_read_unlocked(struct acpi_ec *ec, u8 address, u8 *data)
+{
+	int result;
+	u8 d;
+	struct transaction t = {.command = ACPI_EC_COMMAND_READ,
+				.wdata = &address, .rdata = &d,
+				.wlen = 1, .rlen = 1};
+
+	result = acpi_ec_transaction_unlocked(ec, &t);
+	*data = d;
+	return result;
+}
+
 static int acpi_ec_write(struct acpi_ec *ec, u8 address, u8 data)
 {
 	u8 wdata[2] = { address, data };
@@ -872,6 +897,16 @@ static int acpi_ec_write(struct acpi_ec *ec, u8 address, u8 data)
 				.wlen = 2, .rlen = 0};
 
 	return acpi_ec_transaction(ec, &t);
+}
+
+static int acpi_ec_write_unlocked(struct acpi_ec *ec, u8 address, u8 data)
+{
+	u8 wdata[2] = { address, data };
+	struct transaction t = {.command = ACPI_EC_COMMAND_WRITE,
+				.wdata = wdata, .rdata = NULL,
+				.wlen = 2, .rlen = 0};
+
+	return acpi_ec_transaction_unlocked(ec, &t);
 }
 
 int ec_read(u8 addr, u8 *val)
@@ -927,7 +962,9 @@ EXPORT_SYMBOL(ec_get_handle);
 
 static void acpi_ec_start(struct acpi_ec *ec, bool resuming)
 {
-	spin_lock(&ec->lock);
+	unsigned long flags;
+
+	spin_lock_irqsave(&ec->lock, flags);
 	if (!test_and_set_bit(EC_FLAGS_STARTED, &ec->flags)) {
 		ec_dbg_drv("Starting EC");
 		/* Enable GPE for event processing (SCI_EVT=1) */
@@ -937,28 +974,31 @@ static void acpi_ec_start(struct acpi_ec *ec, bool resuming)
 		}
 		ec_log_drv("EC started");
 	}
-	spin_unlock(&ec->lock);
+	spin_unlock_irqrestore(&ec->lock, flags);
 }
 
 static bool acpi_ec_stopped(struct acpi_ec *ec)
 {
+	unsigned long flags;
 	bool flushed;
 
-	spin_lock(&ec->lock);
+	spin_lock_irqsave(&ec->lock, flags);
 	flushed = acpi_ec_flushed(ec);
-	spin_unlock(&ec->lock);
+	spin_unlock_irqrestore(&ec->lock, flags);
 	return flushed;
 }
 
 static void acpi_ec_stop(struct acpi_ec *ec, bool suspending)
 {
-	spin_lock(&ec->lock);
+	unsigned long flags;
+
+	spin_lock_irqsave(&ec->lock, flags);
 	if (acpi_ec_started(ec)) {
 		ec_dbg_drv("Stopping EC");
 		set_bit(EC_FLAGS_STOPPED, &ec->flags);
-		spin_unlock(&ec->lock);
+		spin_unlock_irqrestore(&ec->lock, flags);
 		wait_event(ec->wait, acpi_ec_stopped(ec));
-		spin_lock(&ec->lock);
+		spin_lock_irqsave(&ec->lock, flags);
 		/* Disable GPE for event processing (SCI_EVT=1) */
 		if (!suspending) {
 			acpi_ec_complete_request(ec);
@@ -969,25 +1009,29 @@ static void acpi_ec_stop(struct acpi_ec *ec, bool suspending)
 		clear_bit(EC_FLAGS_STOPPED, &ec->flags);
 		ec_log_drv("EC stopped");
 	}
-	spin_unlock(&ec->lock);
+	spin_unlock_irqrestore(&ec->lock, flags);
 }
 
 static void acpi_ec_enter_noirq(struct acpi_ec *ec)
 {
-	spin_lock(&ec->lock);
+	unsigned long flags;
+
+	spin_lock_irqsave(&ec->lock, flags);
 	ec->busy_polling = true;
 	ec->polling_guard = 0;
 	ec_log_drv("interrupt blocked");
-	spin_unlock(&ec->lock);
+	spin_unlock_irqrestore(&ec->lock, flags);
 }
 
 static void acpi_ec_leave_noirq(struct acpi_ec *ec)
 {
-	spin_lock(&ec->lock);
+	unsigned long flags;
+
+	spin_lock_irqsave(&ec->lock, flags);
 	ec->busy_polling = ec_busy_polling;
 	ec->polling_guard = ec_polling_guard;
 	ec_log_drv("interrupt unblocked");
-	spin_unlock(&ec->lock);
+	spin_unlock_irqrestore(&ec->lock, flags);
 }
 
 void acpi_ec_block_transactions(void)
@@ -1119,9 +1163,9 @@ static void acpi_ec_event_processor(struct work_struct *work)
 
 	ec_dbg_evt("Query(0x%02x) stopped", handler->query_bit);
 
-	spin_lock(&ec->lock);
+	spin_lock_irq(&ec->lock);
 	ec->queries_in_progress--;
-	spin_unlock(&ec->lock);
+	spin_unlock_irq(&ec->lock);
 
 	acpi_ec_put_query_handler(handler);
 	kfree(q);
@@ -1184,12 +1228,12 @@ static int acpi_ec_submit_query(struct acpi_ec *ec)
 	 */
 	ec_dbg_evt("Query(0x%02x) scheduled", value);
 
-	spin_lock(&ec->lock);
+	spin_lock_irq(&ec->lock);
 
 	ec->queries_in_progress++;
 	queue_work(ec_query_wq, &q->work);
 
-	spin_unlock(&ec->lock);
+	spin_unlock_irq(&ec->lock);
 
 	return 0;
 
@@ -1205,14 +1249,14 @@ static void acpi_ec_event_handler(struct work_struct *work)
 
 	ec_dbg_evt("Event started");
 
-	spin_lock(&ec->lock);
+	spin_lock_irq(&ec->lock);
 
 	while (ec->events_to_process) {
-		spin_unlock(&ec->lock);
+		spin_unlock_irq(&ec->lock);
 
 		acpi_ec_submit_query(ec);
 
-		spin_lock(&ec->lock);
+		spin_lock_irq(&ec->lock);
 
 		ec->events_to_process--;
 	}
@@ -1229,11 +1273,11 @@ static void acpi_ec_event_handler(struct work_struct *work)
 
 		ec_dbg_evt("Event stopped");
 
-		spin_unlock(&ec->lock);
+		spin_unlock_irq(&ec->lock);
 
 		guard_timeout = !!ec_guard(ec);
 
-		spin_lock(&ec->lock);
+		spin_lock_irq(&ec->lock);
 
 		/* Take care of SCI_EVT unless someone else is doing that. */
 		if (guard_timeout && !ec->curr)
@@ -1246,7 +1290,7 @@ static void acpi_ec_event_handler(struct work_struct *work)
 
 	ec->events_in_progress--;
 
-	spin_unlock(&ec->lock);
+	spin_unlock_irq(&ec->lock);
 }
 
 static void clear_gpe_and_advance_transaction(struct acpi_ec *ec, bool interrupt)
@@ -1271,11 +1315,13 @@ static void clear_gpe_and_advance_transaction(struct acpi_ec *ec, bool interrupt
 
 static void acpi_ec_handle_interrupt(struct acpi_ec *ec)
 {
-	spin_lock(&ec->lock);
+	unsigned long flags;
+
+	spin_lock_irqsave(&ec->lock, flags);
 
 	clear_gpe_and_advance_transaction(ec, true);
 
-	spin_unlock(&ec->lock);
+	spin_unlock_irqrestore(&ec->lock, flags);
 }
 
 static u32 acpi_ec_gpe_handler(acpi_handle gpe_device,
@@ -1303,6 +1349,7 @@ acpi_ec_space_handler(u32 function, acpi_physical_address address,
 	struct acpi_ec *ec = handler_context;
 	int result = 0, i, bytes = bits / 8;
 	u8 *value = (u8 *)value64;
+	u32 glk;
 
 	if ((address > 0xFF) || !value || !handler_context)
 		return AE_BAD_PARAMETER;
@@ -1310,16 +1357,37 @@ acpi_ec_space_handler(u32 function, acpi_physical_address address,
 	if (function != ACPI_READ && function != ACPI_WRITE)
 		return AE_BAD_PARAMETER;
 
+	mutex_lock(&ec->mutex);
+
+	if (ec->global_lock) {
+		acpi_status status;
+
+		status = acpi_acquire_global_lock(ACPI_EC_UDELAY_GLK, &glk);
+		if (ACPI_FAILURE(status)) {
+			result = -ENODEV;
+			goto unlock;
+		}
+	}
+
 	if (ec->busy_polling || bits > 8)
 		acpi_ec_burst_enable(ec);
 
-	for (i = 0; i < bytes; ++i, ++address, ++value)
+	for (i = 0; i < bytes; ++i, ++address, ++value) {
 		result = (function == ACPI_READ) ?
-			acpi_ec_read(ec, address, value) :
-			acpi_ec_write(ec, address, *value);
+			acpi_ec_read_unlocked(ec, address, value) :
+			acpi_ec_write_unlocked(ec, address, *value);
+		if (result < 0)
+			break;
+	}
 
 	if (ec->busy_polling || bits > 8)
 		acpi_ec_burst_disable(ec);
+
+	if (ec->global_lock)
+		acpi_release_global_lock(glk);
+
+unlock:
+	mutex_unlock(&ec->mutex);
 
 	switch (result) {
 	case -EINVAL:
@@ -1328,8 +1396,10 @@ acpi_ec_space_handler(u32 function, acpi_physical_address address,
 		return AE_NOT_FOUND;
 	case -ETIME:
 		return AE_TIME;
-	default:
+	case 0:
 		return AE_OK;
+	default:
+		return AE_ERROR;
 	}
 }
 
@@ -1467,8 +1537,10 @@ static int ec_install_handlers(struct acpi_ec *ec, struct acpi_device *device,
 	acpi_ec_start(ec, false);
 
 	if (!test_bit(EC_FLAGS_EC_HANDLER_INSTALLED, &ec->flags)) {
+		acpi_handle scope_handle = ec == first_ec ? ACPI_ROOT_OBJECT : ec->handle;
+
 		acpi_ec_enter_noirq(ec);
-		status = acpi_install_address_space_handler_no_reg(ec->handle,
+		status = acpi_install_address_space_handler_no_reg(scope_handle,
 								   ACPI_ADR_SPACE_EC,
 								   &acpi_ec_space_handler,
 								   NULL, ec);
@@ -1477,11 +1549,10 @@ static int ec_install_handlers(struct acpi_ec *ec, struct acpi_device *device,
 			return -ENODEV;
 		}
 		set_bit(EC_FLAGS_EC_HANDLER_INSTALLED, &ec->flags);
-		ec->address_space_handler_holder = ec->handle;
 	}
 
 	if (call_reg && !test_bit(EC_FLAGS_EC_REG_CALLED, &ec->flags)) {
-		acpi_execute_reg_methods(ec->handle, ACPI_ADR_SPACE_EC);
+		acpi_execute_reg_methods(ec->handle, ACPI_UINT32_MAX, ACPI_ADR_SPACE_EC);
 		set_bit(EC_FLAGS_EC_REG_CALLED, &ec->flags);
 	}
 
@@ -1533,10 +1604,13 @@ static int ec_install_handlers(struct acpi_ec *ec, struct acpi_device *device,
 
 static void ec_remove_handlers(struct acpi_ec *ec)
 {
+	acpi_handle scope_handle = ec == first_ec ? ACPI_ROOT_OBJECT : ec->handle;
+
 	if (test_bit(EC_FLAGS_EC_HANDLER_INSTALLED, &ec->flags)) {
 		if (ACPI_FAILURE(acpi_remove_address_space_handler(
-					ec->address_space_handler_holder,
-					ACPI_ADR_SPACE_EC, &acpi_ec_space_handler)))
+						scope_handle,
+						ACPI_ADR_SPACE_EC,
+						&acpi_ec_space_handler)))
 			pr_err("failed to remove space handler\n");
 		clear_bit(EC_FLAGS_EC_HANDLER_INSTALLED, &ec->flags);
 	}
@@ -1575,13 +1649,17 @@ static int acpi_ec_setup(struct acpi_ec *ec, struct acpi_device *device, bool ca
 {
 	int ret;
 
-	ret = ec_install_handlers(ec, device, call_reg);
-	if (ret)
-		return ret;
-
 	/* First EC capable of handling transactions */
 	if (!first_ec)
 		first_ec = ec;
+
+	ret = ec_install_handlers(ec, device, call_reg);
+	if (ret) {
+		if (ec == first_ec)
+			first_ec = NULL;
+
+		return ret;
+	}
 
 	pr_info("EC_CMD/EC_SC=0x%lx, EC_DATA=0x%lx\n", ec->command_addr,
 		ec->data_addr);
@@ -1601,8 +1679,8 @@ static int acpi_ec_add(struct acpi_device *device)
 	struct acpi_ec *ec;
 	int ret;
 
-	strcpy(acpi_device_name(device), ACPI_EC_DEVICE_NAME);
-	strcpy(acpi_device_class(device), ACPI_EC_CLASS);
+	strscpy(acpi_device_name(device), ACPI_EC_DEVICE_NAME);
+	strscpy(acpi_device_class(device), ACPI_EC_CLASS);
 
 	if (boot_ec && (boot_ec->handle == device->handle ||
 	    !strcmp(acpi_device_hid(device), ACPI_ECDT_HID))) {
@@ -1687,6 +1765,12 @@ static void acpi_ec_remove(struct acpi_device *device)
 		ec_remove_handlers(ec);
 		acpi_ec_free(ec);
 	}
+}
+
+void acpi_ec_register_opregions(struct acpi_device *adev)
+{
+	if (first_ec && first_ec->handle != adev->handle)
+		acpi_execute_reg_methods(adev->handle, 1, ACPI_ADR_SPACE_EC);
 }
 
 static acpi_status
@@ -1949,6 +2033,25 @@ void __init acpi_ec_ecdt_probe(void)
 		goto out;
 	}
 
+	if (!strlen(ecdt_ptr->id)) {
+		/*
+		 * The ECDT table on some MSI notebooks contains invalid data, together
+		 * with an empty ID string ("").
+		 *
+		 * Section 5.2.15 of the ACPI specification requires the ID string to be
+		 * a "fully qualified reference to the (...) embedded controller device",
+		 * so this string always has to start with a backslash.
+		 *
+		 * However some ThinkBook machines have a ECDT table with a valid EC
+		 * description but an invalid ID string ("_SB.PC00.LPCB.EC0").
+		 *
+		 * Because of this we only check if the ID string is empty in order to
+		 * avoid the obvious cases.
+		 */
+		pr_err(FW_BUG "Ignoring ECDT due to empty ID string\n");
+		goto out;
+	}
+
 	ec = acpi_ec_alloc();
 	if (!ec)
 		goto out;
@@ -2085,7 +2188,7 @@ bool acpi_ec_dispatch_gpe(void)
 	 * Dispatch the EC GPE in-band, but do not report wakeup in any case
 	 * to allow the caller to process events properly after that.
 	 */
-	spin_lock(&first_ec->lock);
+	spin_lock_irq(&first_ec->lock);
 
 	if (acpi_ec_gpe_status_set(first_ec)) {
 		pm_pr_dbg("ACPI EC GPE status set\n");
@@ -2094,7 +2197,7 @@ bool acpi_ec_dispatch_gpe(void)
 		work_in_progress = acpi_ec_work_in_progress(first_ec);
 	}
 
-	spin_unlock(&first_ec->lock);
+	spin_unlock_irq(&first_ec->lock);
 
 	if (!work_in_progress)
 		return false;
@@ -2107,11 +2210,11 @@ bool acpi_ec_dispatch_gpe(void)
 
 		pm_pr_dbg("ACPI EC work flushed\n");
 
-		spin_lock(&first_ec->lock);
+		spin_lock_irq(&first_ec->lock);
 
 		work_in_progress = acpi_ec_work_in_progress(first_ec);
 
-		spin_unlock(&first_ec->lock);
+		spin_unlock_irq(&first_ec->lock);
 	} while (work_in_progress && !pm_wakeup_pending());
 
 	return false;
@@ -2217,6 +2320,40 @@ static const struct dmi_system_id acpi_ec_no_wakeup[] = {
 		.matches = {
 			DMI_MATCH(DMI_SYS_VENDOR, "HP"),
 			DMI_MATCH(DMI_PRODUCT_FAMILY, "103C_5336AN HP ZHAN 66 Pro"),
+		},
+	},
+	/*
+	 * Lenovo Legion Go S; touchscreen blocks HW sleep when woken up from EC
+	 * https://gitlab.freedesktop.org/drm/amd/-/issues/3929
+	 */
+	{
+		.matches = {
+			DMI_MATCH(DMI_BOARD_VENDOR, "LENOVO"),
+			DMI_MATCH(DMI_PRODUCT_NAME, "83L3"),
+		}
+	},
+	{
+		.matches = {
+			DMI_MATCH(DMI_BOARD_VENDOR, "LENOVO"),
+			DMI_MATCH(DMI_PRODUCT_NAME, "83N6"),
+		}
+	},
+	{
+		.matches = {
+			DMI_MATCH(DMI_BOARD_VENDOR, "LENOVO"),
+			DMI_MATCH(DMI_PRODUCT_NAME, "83Q2"),
+		}
+	},
+	{
+		.matches = {
+			DMI_MATCH(DMI_BOARD_VENDOR, "LENOVO"),
+			DMI_MATCH(DMI_PRODUCT_NAME, "83Q3"),
+		}
+	},
+	{
+		// TUXEDO InfinityBook Pro AMD Gen9
+		.matches = {
+			DMI_MATCH(DMI_BOARD_NAME, "GXxHRXx"),
 		},
 	},
 	{ },

@@ -27,7 +27,7 @@
 			dlg,btn-cfg = <50>;
 			dlg,mic-det-thr = <500>;
 			dlg,jack-ins-deb = <20>;
-			dlg,jack-det-rate = "32ms_64ms";
+			dlg,jack-det-rate = "32_64";
 			dlg,jack-rem-deb = <1>;
 
 			dlg,a-d-btn-thr = <0xa>;
@@ -39,8 +39,8 @@
 };
 
 &pio {
-	da7219_pins: da7219_pins {
-		pins1 {
+	da7219_pins: da7219-pins {
+		pins-intn {
 			pinmux = <PINMUX_GPIO165__FUNC_GPIO165>;
 			input-enable;
 			bias-pull-up;

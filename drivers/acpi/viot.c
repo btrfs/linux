@@ -19,11 +19,11 @@
 #define pr_fmt(fmt) "ACPI: VIOT: " fmt
 
 #include <linux/acpi_viot.h>
-#include <linux/fwnode.h>
 #include <linux/iommu.h>
 #include <linux/list.h>
 #include <linux/pci.h>
 #include <linux/platform_device.h>
+#include <linux/property.h>
 
 struct viot_iommu {
 	/* Node offset within the table */
@@ -307,21 +307,14 @@ void __init acpi_viot_init(void)
 static int viot_dev_iommu_init(struct device *dev, struct viot_iommu *viommu,
 			       u32 epid)
 {
-	const struct iommu_ops *ops;
-
-	if (!viommu)
+	if (!viommu || !IS_ENABLED(CONFIG_VIRTIO_IOMMU))
 		return -ENODEV;
 
 	/* We're not translating ourself */
 	if (device_match_fwnode(dev, viommu->fwnode))
 		return -EINVAL;
 
-	ops = iommu_ops_from_fwnode(viommu->fwnode);
-	if (!ops)
-		return IS_ENABLED(CONFIG_VIRTIO_IOMMU) ?
-			-EPROBE_DEFER : -ENODEV;
-
-	return acpi_iommu_fwspec_init(dev, epid, viommu->fwnode, ops);
+	return acpi_iommu_fwspec_init(dev, epid, viommu->fwnode);
 }
 
 static int viot_pci_dev_iommu_init(struct pci_dev *pdev, u16 dev_id, void *data)

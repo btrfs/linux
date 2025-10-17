@@ -70,6 +70,8 @@ static int vfio_amba_probe(struct amba_device *adev, const struct amba_id *id)
 	struct vfio_platform_device *vdev;
 	int ret;
 
+	dev_err_once(&adev->dev, "DEPRECATION: vfio-amba is deprecated and will be removed in a future kernel release\n");
+
 	vdev = vfio_alloc_device(vfio_platform_device, vdev, &adev->dev,
 				 &vfio_amba_ops);
 	if (IS_ERR(vdev))
@@ -122,19 +124,18 @@ static const struct vfio_device_ops vfio_amba_ops = {
 	.detach_ioas	= vfio_iommufd_physical_detach_ioas,
 };
 
-static const struct amba_id pl330_ids[] = {
+static const struct amba_id vfio_amba_ids[] = {
 	{ 0, 0 },
 };
 
-MODULE_DEVICE_TABLE(amba, pl330_ids);
+MODULE_DEVICE_TABLE(amba, vfio_amba_ids);
 
 static struct amba_driver vfio_amba_driver = {
 	.probe = vfio_amba_probe,
 	.remove = vfio_amba_remove,
-	.id_table = pl330_ids,
+	.id_table = vfio_amba_ids,
 	.drv = {
 		.name = "vfio-amba",
-		.owner = THIS_MODULE,
 	},
 	.driver_managed_dma = true,
 };

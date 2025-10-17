@@ -4,6 +4,7 @@ config OPTEE
 	tristate "OP-TEE"
 	depends on HAVE_ARM_SMCCC
 	depends on MMU
+	depends on RPMB || !RPMB
 	help
 	  This implements the OP-TEE Trusted Execution Environment (TEE)
 	  driver.
@@ -24,3 +25,8 @@ config OPTEE_INSECURE_LOAD_IMAGE
 
 	  Additional documentation on kernel security risks are at
 	  Documentation/tee/op-tee.rst.
+
+config OPTEE_STATIC_PROTMEM_POOL
+	bool
+	depends on HAS_IOMEM && TEE_DMABUF_HEAPS
+	default y

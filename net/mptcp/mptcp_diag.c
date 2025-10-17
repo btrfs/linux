@@ -10,15 +10,14 @@
 #include <linux/net.h>
 #include <linux/inet_diag.h>
 #include <net/netlink.h>
-#include <uapi/linux/mptcp.h>
 #include "protocol.h"
 
 static int sk_diag_dump(struct sock *sk, struct sk_buff *skb,
 			struct netlink_callback *cb,
 			const struct inet_diag_req_v2 *req,
-			struct nlattr *bc, bool net_admin)
+			bool net_admin)
 {
-	if (!inet_diag_bc_sk(bc, sk))
+	if (!inet_diag_bc_sk(cb->data, sk))
 		return 0;
 
 	return inet_sk_diag_fill(sk, inet_csk(sk), skb, cb, req, NLM_F_MULTI,
@@ -77,9 +76,7 @@ static void mptcp_diag_dump_listeners(struct sk_buff *skb, struct netlink_callba
 				      const struct inet_diag_req_v2 *r,
 				      bool net_admin)
 {
-	struct inet_diag_dump_data *cb_data = cb->data;
 	struct mptcp_diag_ctx *diag_ctx = (void *)cb->ctx;
-	struct nlattr *bc = cb_data->inet_diag_nla_bc;
 	struct net *net = sock_net(skb->sk);
 	struct inet_hashinfo *hinfo;
 	int i;
@@ -122,7 +119,7 @@ static void mptcp_diag_dump_listeners(struct sk_buff *skb, struct netlink_callba
 			if (!refcount_inc_not_zero(&sk->sk_refcnt))
 				goto next_listen;
 
-			ret = sk_diag_dump(sk, skb, cb, r, bc, net_admin);
+			ret = sk_diag_dump(sk, skb, cb, r, net_admin);
 
 			sock_put(sk);
 
@@ -155,14 +152,9 @@ static void mptcp_diag_dump(struct sk_buff *skb, struct netlink_callback *cb,
 	bool net_admin = netlink_net_capable(cb->skb, CAP_NET_ADMIN);
 	struct mptcp_diag_ctx *diag_ctx = (void *)cb->ctx;
 	struct net *net = sock_net(skb->sk);
-	struct inet_diag_dump_data *cb_data;
 	struct mptcp_sock *msk;
-	struct nlattr *bc;
 
 	BUILD_BUG_ON(sizeof(cb->ctx) < sizeof(*diag_ctx));
-
-	cb_data = cb->data;
-	bc = cb_data->inet_diag_nla_bc;
 
 	while ((msk = mptcp_token_iter_next(net, &diag_ctx->s_slot,
 					    &diag_ctx->s_num)) != NULL) {
@@ -182,7 +174,7 @@ static void mptcp_diag_dump(struct sk_buff *skb, struct netlink_callback *cb,
 		    r->id.idiag_dport)
 			goto next;
 
-		ret = sk_diag_dump(sk, skb, cb, r, bc, net_admin);
+		ret = sk_diag_dump(sk, skb, cb, r, net_admin);
 next:
 		sock_put(sk);
 		if (ret < 0) {
@@ -225,6 +217,7 @@ static void mptcp_diag_get_info(struct sock *sk, struct inet_diag_msg *r,
 }
 
 static const struct inet_diag_handler mptcp_diag_handler = {
+	.owner		 = THIS_MODULE,
 	.dump		 = mptcp_diag_dump,
 	.dump_one	 = mptcp_diag_dump_one,
 	.idiag_get_info  = mptcp_diag_get_info,

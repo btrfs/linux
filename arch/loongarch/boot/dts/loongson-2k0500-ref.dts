@@ -41,17 +41,26 @@
 	};
 };
 
+&apbdma3 {
+	status = "okay";
+};
+
+&mmc0 {
+	status = "okay";
+	bus-width = <4>;
+};
+
 &gmac0 {
 	status = "okay";
 
-	phy-mode = "rgmii";
+	phy-mode = "rgmii-id";
 	bus_id = <0x0>;
 };
 
 &gmac1 {
 	status = "okay";
 
-	phy-mode = "rgmii";
+	phy-mode = "rgmii-id";
 	bus_id = <0x1>;
 };
 
@@ -60,7 +69,7 @@
 
 	#address-cells = <1>;
 	#size-cells = <0>;
-	eeprom@57{
+	eeprom@57 {
 		compatible = "atmel,24c16";
 		reg = <0x57>;
 		pagesize = <16>;

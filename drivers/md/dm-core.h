@@ -22,6 +22,8 @@
 #include "dm-ima.h"
 
 #define DM_RESERVED_MAX_IOS		1024
+#define DM_MAX_TARGETS			1048576
+#define DM_MAX_TARGET_PARAMS		1024
 
 struct dm_io;
 
@@ -138,7 +140,8 @@ struct mapped_device {
 
 #ifdef CONFIG_BLK_DEV_ZONED
 	unsigned int nr_zones;
-	unsigned int *zwp_offset;
+	void *zone_revalidate_map;
+	struct task_struct *revalidate_map_task;
 #endif
 
 #ifdef CONFIG_IMA
@@ -159,9 +162,7 @@ struct mapped_device {
 #define DMF_SUSPENDED_INTERNALLY 7
 #define DMF_POST_SUSPENDING 8
 #define DMF_EMULATE_ZONE_APPEND 9
-
-void disable_discard(struct mapped_device *md);
-void disable_write_zeroes(struct mapped_device *md);
+#define DMF_QUEUE_STOPPED 10
 
 static inline sector_t dm_get_size(struct mapped_device *md)
 {
@@ -204,7 +205,8 @@ struct dm_table {
 
 	bool integrity_supported:1;
 	bool singleton:1;
-	unsigned integrity_added:1;
+	/* set if all the targets in the table have "flush_bypasses_map" set */
+	bool flush_bypasses_map:1;
 
 	/*
 	 * Indicates the rw permissions for the new logical device.  This
@@ -290,6 +292,7 @@ struct dm_io {
 	struct dm_io *next;
 	struct dm_stats_aux stats_aux;
 	blk_status_t status;
+	bool requeue_flush_with_data;
 	atomic_t io_count;
 	struct mapped_device *md;
 

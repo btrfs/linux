@@ -174,6 +174,9 @@ struct slpc_task_state_data {
 	};
 } __packed;
 
+#define SLPC_CTX_FREQ_REQ_IS_COMPUTE		REG_BIT(28)
+#define SLPC_OPTIMIZED_STRATEGY_COMPUTE		REG_BIT(0)
+
 struct slpc_shared_data_header {
 	/* Total size in bytes of this shared buffer. */
 	u32 size;
@@ -206,6 +209,11 @@ struct slpc_shared_data {
 	/* PAGE 2 (4096 bytes), mode based parameter will be removed soon */
 	u8 reserved_mode_definition[4096];
 } __packed;
+
+enum slpc_power_profile {
+	SLPC_POWER_PROFILE_BASE = 0x0,
+	SLPC_POWER_PROFILE_POWER_SAVING = 0x1
+};
 
 /**
  * DOC: SLPC H2G MESSAGE FORMAT
@@ -242,8 +250,30 @@ struct slpc_shared_data {
 		(HOST2GUC_PC_SLPC_REQUEST_REQUEST_MSG_MIN_LEN + \
 			HOST2GUC_PC_SLPC_EVENT_MAX_INPUT_ARGS)
 #define HOST2GUC_PC_SLPC_REQUEST_MSG_0_MBZ		GUC_HXG_REQUEST_MSG_0_DATA0
-#define HOST2GUC_PC_SLPC_REQUEST_MSG_1_EVENT_ID		(0xff << 8)
-#define HOST2GUC_PC_SLPC_REQUEST_MSG_1_EVENT_ARGC	(0xff << 0)
+#define HOST2GUC_PC_SLPC_REQUEST_MSG_1_EVENT_ID		(0xffu << 8)
+#define HOST2GUC_PC_SLPC_REQUEST_MSG_1_EVENT_ARGC	(0xffu << 0)
 #define HOST2GUC_PC_SLPC_REQUEST_MSG_N_EVENT_DATA_N	GUC_HXG_REQUEST_MSG_n_DATAn
+
+/**
+ * DOC: SETUP_PC_GUCRC
+ *
+ *  +---+-------+--------------------------------------------------------------+
+ *  |   | Bits  | Description                                                  |
+ *  +===+=======+==============================================================+
+ *  | 0 |    31 | ORIGIN = GUC_HXG_ORIGIN_HOST_                                |
+ *  |   +-------+--------------------------------------------------------------+
+ *  |   | 30:28 | TYPE = GUC_HXG_TYPE_FAST_REQUEST_                            |
+ *  |   +-------+--------------------------------------------------------------+
+ *  |   | 27:16 | DATA0 = MBZ                                                  |
+ *  |   +-------+--------------------------------------------------------------+
+ *  |   |  15:0 | ACTION = _`GUC_ACTION_HOST2GUC_SETUP_PC_GUCRC` = 0x3004      |
+ *  +---+-------+--------------------------------------------------------------+
+ *  | 1 |  31:0 | **MODE** = GUCRC_HOST_CONTROL(0), GUCRC_FIRMWARE_CONTROL(1)  |
+ *  +---+-------+--------------------------------------------------------------+
+ */
+
+#define GUC_ACTION_HOST2GUC_SETUP_PC_GUCRC		0x3004u
+#define   GUCRC_HOST_CONTROL				0u
+#define   GUCRC_FIRMWARE_CONTROL			1u
 
 #endif

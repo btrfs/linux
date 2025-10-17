@@ -25,6 +25,7 @@ properties:
           - enum:
               - asus,rt-ac56u
               - asus,rt-ac68u
+              - buffalo,wxr-1750dhp
               - buffalo,wzr-1166dhp
               - buffalo,wzr-1166dhp2
               - buffalo,wzr-1750dhp
@@ -53,6 +54,7 @@ properties:
       - description: BCM4709 based boards
         items:
           - enum:
+              - asus,rt-ac3200
               - asus,rt-ac87u
               - buffalo,wxr-1900dhp
               - linksys,ea9200
@@ -67,6 +69,7 @@ properties:
         items:
           - enum:
               - asus,rt-ac3100
+              - asus,rt-ac5300
               - asus,rt-ac88u
               - dlink,dir-885l
               - dlink,dir-890l

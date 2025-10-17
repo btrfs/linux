@@ -3,7 +3,7 @@
  * mac80211_hwsim - software simulator of 802.11 radio(s) for mac80211
  * Copyright (c) 2008, Jouni Malinen <j@w1.fi>
  * Copyright (c) 2011, Javier Lopez <jlopex@gmail.com>
- * Copyright (C) 2020, 2022-2023 Intel Corporation
+ * Copyright (C) 2020, 2022-2025 Intel Corporation
  */
 
 #ifndef __MAC80211_HWSIM_H
@@ -62,7 +62,7 @@ enum hwsim_tx_control_flags {
  * @HWSIM_CMD_TX_INFO_FRAME: Transmission info report from user space to
  *	kernel, uses:
  *	%HWSIM_ATTR_ADDR_TRANSMITTER, %HWSIM_ATTR_FLAGS,
- *	%HWSIM_ATTR_TX_INFO, %WSIM_ATTR_TX_INFO_FLAGS,
+ *	%HWSIM_ATTR_TX_INFO, %HWSIM_ATTR_TX_INFO_FLAGS,
  *	%HWSIM_ATTR_SIGNAL, %HWSIM_ATTR_COOKIE
  * @HWSIM_CMD_NEW_RADIO: create a new radio with the given parameters,
  *	returns the radio ID (>= 0) or negative on errors, if successful
@@ -84,6 +84,8 @@ enum hwsim_tx_control_flags {
  * @HWSIM_CMD_START_PMSR: request to start peer measurement with the
  *	%HWSIM_ATTR_PMSR_REQUEST. Result will be sent back asynchronously
  *	with %HWSIM_CMD_REPORT_PMSR.
+ * @HWSIM_CMD_ABORT_PMSR: Abort previously started peer measurement.
+ * @HWSIM_CMD_REPORT_PMSR: Report peer measurement data.
  * @__HWSIM_CMD_MAX: enum limit
  */
 enum hwsim_commands {
@@ -124,24 +126,24 @@ enum hwsim_commands {
  *	space
  * @HWSIM_ATTR_TX_INFO: ieee80211_tx_rate array
  * @HWSIM_ATTR_COOKIE: sk_buff cookie to identify the frame
- * @HWSIM_ATTR_CHANNELS: u32 attribute used with the %HWSIM_CMD_CREATE_RADIO
+ * @HWSIM_ATTR_CHANNELS: u32 attribute used with the %HWSIM_CMD_NEW_RADIO
  *	command giving the number of channels supported by the new radio
  * @HWSIM_ATTR_RADIO_ID: u32 attribute used with %HWSIM_CMD_DESTROY_RADIO
  *	only to destroy a radio
- * @HWSIM_ATTR_REG_HINT_ALPHA2: alpha2 for regulatoro driver hint
+ * @HWSIM_ATTR_REG_HINT_ALPHA2: alpha2 for regulatory driver hint
  *	(nla string, length 2)
  * @HWSIM_ATTR_REG_CUSTOM_REG: custom regulatory domain index (u32 attribute)
  * @HWSIM_ATTR_REG_STRICT_REG: request REGULATORY_STRICT_REG (flag attribute)
  * @HWSIM_ATTR_SUPPORT_P2P_DEVICE: support P2P Device virtual interface (flag)
- * @HWSIM_ATTR_USE_CHANCTX: used with the %HWSIM_CMD_CREATE_RADIO
+ * @HWSIM_ATTR_USE_CHANCTX: used with the %HWSIM_CMD_NEW_RADIO
  *	command to force use of channel contexts even when only a
  *	single channel is supported
- * @HWSIM_ATTR_DESTROY_RADIO_ON_CLOSE: used with the %HWSIM_CMD_CREATE_RADIO
+ * @HWSIM_ATTR_DESTROY_RADIO_ON_CLOSE: used with the %HWSIM_CMD_NEW_RADIO
  *	command to force radio removal when process that created the radio dies
  * @HWSIM_ATTR_RADIO_NAME: Name of radio, e.g. phy666
  * @HWSIM_ATTR_NO_VIF:  Do not create vif (wlanX) when creating radio.
- * @HWSIM_ATTR_PAD: padding attribute for 64-bit values, ignore
  * @HWSIM_ATTR_FREQ: Frequency at which packet is transmitted or received.
+ * @HWSIM_ATTR_PAD: padding attribute for 64-bit values, ignore
  * @HWSIM_ATTR_TX_INFO_FLAGS: additional flags for corresponding
  *	rates of %HWSIM_ATTR_TX_INFO
  * @HWSIM_ATTR_PERM_ADDR: permanent mac address of new radio
@@ -149,12 +151,16 @@ enum hwsim_commands {
  * @HWSIM_ATTR_CIPHER_SUPPORT: u32 array of supported cipher types
  * @HWSIM_ATTR_MLO_SUPPORT: claim MLO support (exact parameters TBD) for
  *	the new radio
- * @HWSIM_ATTR_PMSR_SUPPORT: nested attribute used with %HWSIM_CMD_CREATE_RADIO
+ * @HWSIM_ATTR_PMSR_SUPPORT: nested attribute used with %HWSIM_CMD_NEW_RADIO
  *	to provide peer measurement capabilities. (nl80211_peer_measurement_attrs)
  * @HWSIM_ATTR_PMSR_REQUEST: nested attribute used with %HWSIM_CMD_START_PMSR
  *	to provide details about peer measurement request (nl80211_peer_measurement_attrs)
  * @HWSIM_ATTR_PMSR_RESULT: nested attributed used with %HWSIM_CMD_REPORT_PMSR
  *	to provide peer measurement result (nl80211_peer_measurement_attrs)
+ * @HWSIM_ATTR_MULTI_RADIO: Register multiple wiphy radios (flag).
+ *	Adds one radio for each band. Number of supported channels will be set for
+ *	each radio instead of for the wiphy.
+ * @HWSIM_ATTR_SUPPORT_NAN_DEVICE: support NAN Device virtual interface (flag)
  * @__HWSIM_ATTR_MAX: enum limit
  */
 enum hwsim_attrs {
@@ -187,6 +193,8 @@ enum hwsim_attrs {
 	HWSIM_ATTR_PMSR_SUPPORT,
 	HWSIM_ATTR_PMSR_REQUEST,
 	HWSIM_ATTR_PMSR_RESULT,
+	HWSIM_ATTR_MULTI_RADIO,
+	HWSIM_ATTR_SUPPORT_NAN_DEVICE,
 	__HWSIM_ATTR_MAX,
 };
 #define HWSIM_ATTR_MAX (__HWSIM_ATTR_MAX - 1)
@@ -255,7 +263,7 @@ enum hwsim_tx_rate_flags {
 };
 
 /**
- * struct hwsim_tx_rate - rate selection/status
+ * struct hwsim_tx_rate_flag - rate selection/status
  *
  * @idx: rate index to attempt to send with
  * @flags: the rate flags according to &enum hwsim_tx_rate_flags
@@ -293,11 +301,12 @@ enum hwsim_vqs {
 };
 
 /**
- * enum hwsim_rate_info -- bitrate information.
+ * enum hwsim_rate_info_attributes - bitrate information.
  *
  * Information about a receiving or transmitting bitrate
  * that can be mapped to struct rate_info
  *
+ * @__HWSIM_RATE_INFO_ATTR_INVALID: reserved, netlink attribute 0 is invalid
  * @HWSIM_RATE_INFO_ATTR_FLAGS: bitflag of flags from &enum rate_info_flags
  * @HWSIM_RATE_INFO_ATTR_MCS: mcs index if struct describes an HT/VHT/HE rate
  * @HWSIM_RATE_INFO_ATTR_LEGACY: bitrate in 100kbit/s for 802.11abg

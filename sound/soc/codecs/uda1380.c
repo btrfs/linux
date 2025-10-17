@@ -766,10 +766,8 @@ static int uda1380_i2c_probe(struct i2c_client *i2c)
 			return ret;
 	}
 
-	uda1380->reg_cache = devm_kmemdup(&i2c->dev,
-					uda1380_reg,
-					ARRAY_SIZE(uda1380_reg) * sizeof(u16),
-					GFP_KERNEL);
+	uda1380->reg_cache = devm_kmemdup_array(&i2c->dev, uda1380_reg, ARRAY_SIZE(uda1380_reg),
+						sizeof(uda1380_reg[0]), GFP_KERNEL);
 	if (!uda1380->reg_cache)
 		return -ENOMEM;
 
@@ -782,7 +780,7 @@ static int uda1380_i2c_probe(struct i2c_client *i2c)
 }
 
 static const struct i2c_device_id uda1380_i2c_id[] = {
-	{ "uda1380", 0 },
+	{ "uda1380" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, uda1380_i2c_id);

@@ -3,7 +3,7 @@
 // This file is provided under a dual BSD/GPLv2 license.  When using or
 // redistributing this file, you may do so under either license.
 //
-// Copyright(c) 2021 Intel Corporation. All rights reserved.
+// Copyright(c) 2021 Intel Corporation
 //
 //
 
@@ -117,22 +117,23 @@ static int sof_ipc3_pcm_hw_params(struct snd_soc_component *component,
 	if (platform_params->cont_update_posn)
 		pcm.params.cont_update_posn = 1;
 
-	dev_dbg(component->dev, "stream_tag %d", pcm.params.stream_tag);
+	spcm_dbg(spcm, substream->stream, "stream_tag %d\n",
+		 pcm.params.stream_tag);
 
 	/* send hw_params IPC to the DSP */
 	ret = sof_ipc_tx_message(sdev->ipc, &pcm, sizeof(pcm),
 				 &ipc_params_reply, sizeof(ipc_params_reply));
 	if (ret < 0) {
-		dev_err(component->dev, "HW params ipc failed for stream %d\n",
-			pcm.params.stream_tag);
+		spcm_err(spcm, substream->stream,
+			 "STREAM_PCM_PARAMS ipc failed for stream_tag %d\n",
+			 pcm.params.stream_tag);
 		return ret;
 	}
 
 	ret = snd_sof_set_stream_data_offset(sdev, &spcm->stream[substream->stream],
 					     ipc_params_reply.posn_offset);
 	if (ret < 0) {
-		dev_err(component->dev, "%s: invalid stream data offset for PCM %d\n",
-			__func__, spcm->pcm.pcm_id);
+		spcm_err(spcm, substream->stream, "invalid stream data offset\n");
 		return ret;
 	}
 
@@ -171,7 +172,7 @@ static int sof_ipc3_pcm_trigger(struct snd_soc_component *component,
 		stream.hdr.cmd |= SOF_IPC_STREAM_TRIG_STOP;
 		break;
 	default:
-		dev_err(component->dev, "Unhandled trigger cmd %d\n", cmd);
+		spcm_err(spcm, substream->stream, "Unhandled trigger cmd %d\n", cmd);
 		return -EINVAL;
 	}
 
@@ -395,6 +396,31 @@ static int sof_ipc3_pcm_dai_link_fixup(struct snd_soc_pcm_runtime *rtd,
 		dev_dbg(component->dev, "MICFIL PDM channels_min: %d channels_max: %d\n",
 			channels->min, channels->max);
 		break;
+	case SOF_DAI_AMD_SDW:
+		/* change the default trigger sequence as per HW implementation */
+		for_each_dpcm_fe(rtd, SNDRV_PCM_STREAM_PLAYBACK, dpcm) {
+			struct snd_soc_pcm_runtime *fe = dpcm->fe;
+
+			fe->dai_link->trigger[SNDRV_PCM_STREAM_PLAYBACK] =
+					SND_SOC_DPCM_TRIGGER_POST;
+		}
+
+		for_each_dpcm_fe(rtd, SNDRV_PCM_STREAM_CAPTURE, dpcm) {
+			struct snd_soc_pcm_runtime *fe = dpcm->fe;
+
+			fe->dai_link->trigger[SNDRV_PCM_STREAM_CAPTURE] =
+					SND_SOC_DPCM_TRIGGER_POST;
+		}
+		rate->min = private->dai_config->acp_sdw.rate;
+		rate->max = private->dai_config->acp_sdw.rate;
+		channels->min = private->dai_config->acp_sdw.channels;
+		channels->max = private->dai_config->acp_sdw.channels;
+
+		dev_dbg(component->dev,
+			"AMD_SDW rate_min: %d rate_max: %d\n", rate->min, rate->max);
+		dev_dbg(component->dev, "AMD_SDW channels_min: %d channels_max: %d\n",
+			channels->min, channels->max);
+		break;
 	default:
 		dev_err(component->dev, "Invalid DAI type %d\n", private->dai_config->type);
 		break;
@@ -409,4 +435,5 @@ const struct sof_ipc_pcm_ops ipc3_pcm_ops = {
 	.trigger = sof_ipc3_pcm_trigger,
 	.dai_link_fixup = sof_ipc3_pcm_dai_link_fixup,
 	.reset_hw_params_during_stop = true,
+	.d0i3_supported_in_s0ix = true,
 };

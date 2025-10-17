@@ -17,10 +17,8 @@
 #include <linux/slab.h>
 #include <linux/clk.h>
 #include <linux/io.h>
-#include <linux/gpio.h>
 #include <linux/module.h>
 #include <linux/of.h>
-#include <linux/of_gpio.h>
 #include <linux/pm.h>
 #include <linux/pm_runtime.h>
 
@@ -132,14 +130,16 @@ struct sdhci_s3c {
  * struct sdhci_s3c_drv_data - S3C SDHCI platform specific driver data
  * @sdhci_quirks: sdhci host specific quirks.
  * @no_divider: no or non-standard internal clock divider.
+ * @ops: sdhci_ops to use for this variant
  *
  * Specifies platform specific configuration of sdhci controller.
  * Note: A structure for driver specific platform data is used for future
  * expansion of its usage.
  */
 struct sdhci_s3c_drv_data {
-	unsigned int	sdhci_quirks;
-	bool		no_divider;
+	unsigned int		sdhci_quirks;
+	bool			no_divider;
+	const struct sdhci_ops	*ops;
 };
 
 static inline struct sdhci_s3c *to_s3c(struct sdhci_host *host)
@@ -414,10 +414,19 @@ static void sdhci_cmu_set_clock(struct sdhci_host *host, unsigned int clock)
 	sdhci_writew(host, clk, SDHCI_CLOCK_CONTROL);
 }
 
-static struct sdhci_ops sdhci_s3c_ops = {
+static const struct sdhci_ops sdhci_s3c_ops_s3c6410 = {
 	.get_max_clock		= sdhci_s3c_get_max_clk,
 	.set_clock		= sdhci_s3c_set_clock,
 	.get_min_clock		= sdhci_s3c_get_min_clock,
+	.set_bus_width		= sdhci_set_bus_width,
+	.reset			= sdhci_reset,
+	.set_uhs_signaling	= sdhci_set_uhs_signaling,
+};
+
+static const struct sdhci_ops sdhci_s3c_ops_exynos4 __maybe_unused = {
+	.get_max_clock		= sdhci_cmu_get_max_clock,
+	.set_clock		= sdhci_cmu_set_clock,
+	.get_min_clock		= sdhci_cmu_get_min_clock,
 	.set_bus_width		= sdhci_set_bus_width,
 	.reset			= sdhci_reset,
 	.set_uhs_signaling	= sdhci_set_uhs_signaling,
@@ -446,7 +455,7 @@ static int sdhci_s3c_parse_dt(struct device *dev,
 		return 0;
 	}
 
-	if (of_get_named_gpio(node, "cd-gpios", 0))
+	if (of_property_present(node, "cd-gpios"))
 		return 0;
 
 	/* assuming internal card detect that will be configured by pinctrl */
@@ -498,15 +507,13 @@ static int sdhci_s3c_probe(struct platform_device *pdev)
 	sc = sdhci_priv(host);
 
 	pdata = devm_kzalloc(&pdev->dev, sizeof(*pdata), GFP_KERNEL);
-	if (!pdata) {
-		ret = -ENOMEM;
-		goto err_pdata_io_clk;
-	}
+	if (!pdata)
+		return -ENOMEM;
 
 	if (pdev->dev.of_node) {
 		ret = sdhci_s3c_parse_dt(&pdev->dev, host, pdata);
 		if (ret)
-			goto err_pdata_io_clk;
+			return ret;
 	} else {
 		memcpy(pdata, pdev->dev.platform_data, sizeof(*pdata));
 	}
@@ -523,8 +530,7 @@ static int sdhci_s3c_probe(struct platform_device *pdev)
 	sc->clk_io = devm_clk_get(dev, "hsmmc");
 	if (IS_ERR(sc->clk_io)) {
 		dev_err(dev, "failed to get io clock\n");
-		ret = PTR_ERR(sc->clk_io);
-		goto err_pdata_io_clk;
+		return PTR_ERR(sc->clk_io);
 	}
 
 	/* enable the local io clock and keep it running for the moment. */
@@ -562,7 +568,7 @@ static int sdhci_s3c_probe(struct platform_device *pdev)
 		pdata->cfg_gpio(pdev, pdata->max_width);
 
 	host->hw_name = "samsung-hsmmc";
-	host->ops = &sdhci_s3c_ops;
+	host->ops = &sdhci_s3c_ops_s3c6410;
 	host->quirks = 0;
 	host->quirks2 = 0;
 	host->irq = irq;
@@ -572,6 +578,7 @@ static int sdhci_s3c_probe(struct platform_device *pdev)
 	host->quirks |= SDHCI_QUIRK_NO_HISPD_BIT;
 	if (drv_data) {
 		host->quirks |= drv_data->sdhci_quirks;
+		host->ops = drv_data->ops;
 		sc->no_divider = drv_data->no_divider;
 	}
 
@@ -619,16 +626,6 @@ static int sdhci_s3c_probe(struct platform_device *pdev)
 	/* HSMMC on Samsung SoCs uses SDCLK as timeout clock */
 	host->quirks |= SDHCI_QUIRK_DATA_TIMEOUT_USES_SDCLK;
 
-	/*
-	 * If controller does not have internal clock divider,
-	 * we can use overriding functions instead of default.
-	 */
-	if (sc->no_divider) {
-		sdhci_s3c_ops.set_clock = sdhci_cmu_set_clock;
-		sdhci_s3c_ops.get_min_clock = sdhci_cmu_get_min_clock;
-		sdhci_s3c_ops.get_max_clock = sdhci_cmu_get_max_clock;
-	}
-
 	/* It supports additional host capabilities if needed */
 	if (pdata->host_caps)
 		host->mmc->caps |= pdata->host_caps;
@@ -661,9 +658,6 @@ static int sdhci_s3c_probe(struct platform_device *pdev)
  err_no_busclks:
 	clk_disable_unprepare(sc->clk_io);
 
- err_pdata_io_clk:
-	sdhci_free_host(host);
-
 	return ret;
 }
 
@@ -685,11 +679,8 @@ static void sdhci_s3c_remove(struct platform_device *pdev)
 	pm_runtime_disable(&pdev->dev);
 
 	clk_disable_unprepare(sc->clk_io);
-
-	sdhci_free_host(host);
 }
 
-#ifdef CONFIG_PM_SLEEP
 static int sdhci_s3c_suspend(struct device *dev)
 {
 	struct sdhci_host *host = dev_get_drvdata(dev);
@@ -706,17 +697,14 @@ static int sdhci_s3c_resume(struct device *dev)
 
 	return sdhci_resume_host(host);
 }
-#endif
 
-#ifdef CONFIG_PM
 static int sdhci_s3c_runtime_suspend(struct device *dev)
 {
 	struct sdhci_host *host = dev_get_drvdata(dev);
 	struct sdhci_s3c *ourhost = to_s3c(host);
 	struct clk *busclk = ourhost->clk_io;
-	int ret;
 
-	ret = sdhci_runtime_suspend_host(host);
+	sdhci_runtime_suspend_host(host);
 
 	if (host->tuning_mode != SDHCI_TUNING_MODE_3)
 		mmc_retune_needed(host->mmc);
@@ -724,7 +712,7 @@ static int sdhci_s3c_runtime_suspend(struct device *dev)
 	if (ourhost->cur_clk >= 0)
 		clk_disable_unprepare(ourhost->clk_bus[ourhost->cur_clk]);
 	clk_disable_unprepare(busclk);
-	return ret;
+	return 0;
 }
 
 static int sdhci_s3c_runtime_resume(struct device *dev)
@@ -732,20 +720,17 @@ static int sdhci_s3c_runtime_resume(struct device *dev)
 	struct sdhci_host *host = dev_get_drvdata(dev);
 	struct sdhci_s3c *ourhost = to_s3c(host);
 	struct clk *busclk = ourhost->clk_io;
-	int ret;
 
 	clk_prepare_enable(busclk);
 	if (ourhost->cur_clk >= 0)
 		clk_prepare_enable(ourhost->clk_bus[ourhost->cur_clk]);
-	ret = sdhci_runtime_resume_host(host, 0);
-	return ret;
+	sdhci_runtime_resume_host(host, 0);
+	return 0;
 }
-#endif
 
 static const struct dev_pm_ops sdhci_s3c_pmops = {
-	SET_SYSTEM_SLEEP_PM_OPS(sdhci_s3c_suspend, sdhci_s3c_resume)
-	SET_RUNTIME_PM_OPS(sdhci_s3c_runtime_suspend, sdhci_s3c_runtime_resume,
-			   NULL)
+	SYSTEM_SLEEP_PM_OPS(sdhci_s3c_suspend, sdhci_s3c_resume)
+	RUNTIME_PM_OPS(sdhci_s3c_runtime_suspend, sdhci_s3c_runtime_resume, NULL)
 };
 
 static const struct platform_device_id sdhci_s3c_driver_ids[] = {
@@ -760,6 +745,7 @@ MODULE_DEVICE_TABLE(platform, sdhci_s3c_driver_ids);
 #ifdef CONFIG_OF
 static const struct sdhci_s3c_drv_data exynos4_sdhci_drv_data = {
 	.no_divider = true,
+	.ops = &sdhci_s3c_ops_exynos4,
 };
 
 static const struct of_device_id sdhci_s3c_dt_match[] = {
@@ -773,13 +759,13 @@ MODULE_DEVICE_TABLE(of, sdhci_s3c_dt_match);
 
 static struct platform_driver sdhci_s3c_driver = {
 	.probe		= sdhci_s3c_probe,
-	.remove_new	= sdhci_s3c_remove,
+	.remove		= sdhci_s3c_remove,
 	.id_table	= sdhci_s3c_driver_ids,
 	.driver		= {
 		.name	= "s3c-sdhci",
 		.probe_type = PROBE_PREFER_ASYNCHRONOUS,
 		.of_match_table = of_match_ptr(sdhci_s3c_dt_match),
-		.pm	= &sdhci_s3c_pmops,
+		.pm	= pm_ptr(&sdhci_s3c_pmops),
 	},
 };
 

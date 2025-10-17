@@ -9,12 +9,10 @@
  */
 #include <linux/module.h>
 #include <linux/phy.h>
-#include <linux/gpio.h>
 #include <linux/delay.h>
 #include <linux/mdio.h>
 #include <linux/marvell_phy.h>
 #include <linux/of.h>
-#include <linux/of_gpio.h>
 #include <linux/sfp.h>
 #include <linux/netdevice.h>
 
@@ -477,21 +475,20 @@ static int mv2222_config_init(struct phy_device *phydev)
 
 static int mv2222_sfp_insert(void *upstream, const struct sfp_eeprom_id *id)
 {
-	DECLARE_PHY_INTERFACE_MASK(interfaces);
 	struct phy_device *phydev = upstream;
+	const struct sfp_module_caps *caps;
 	phy_interface_t sfp_interface;
 	struct mv2222_data *priv;
 	struct device *dev;
 	int ret;
 
-	__ETHTOOL_DECLARE_LINK_MODE_MASK(sfp_supported) = { 0, };
-
 	priv = phydev->priv;
 	dev = &phydev->mdio.dev;
 
-	sfp_parse_support(phydev->sfp_bus, id, sfp_supported, interfaces);
-	phydev->port = sfp_parse_port(phydev->sfp_bus, id, sfp_supported);
-	sfp_interface = sfp_select_interface(phydev->sfp_bus, sfp_supported);
+	caps = sfp_get_module_caps(phydev->sfp_bus);
+
+	phydev->port = caps->port;
+	sfp_interface = sfp_select_interface(phydev->sfp_bus, caps->link_modes);
 
 	dev_info(dev, "%s SFP module inserted\n", phy_modes(sfp_interface));
 
@@ -504,7 +501,7 @@ static int mv2222_sfp_insert(void *upstream, const struct sfp_eeprom_id *id)
 	}
 
 	priv->line_interface = sfp_interface;
-	linkmode_and(priv->supported, phydev->supported, sfp_supported);
+	linkmode_and(priv->supported, phydev->supported, caps->link_modes);
 
 	ret = mv2222_config_line(phydev);
 	if (ret < 0)
@@ -555,6 +552,8 @@ static const struct sfp_upstream_ops sfp_phy_ops = {
 	.link_down = mv2222_sfp_link_down,
 	.attach = phy_sfp_attach,
 	.detach = phy_sfp_detach,
+	.connect_phy = phy_sfp_connect_phy,
+	.disconnect_phy = phy_sfp_disconnect_phy,
 };
 
 static int mv2222_probe(struct phy_device *phydev)
@@ -613,7 +612,7 @@ static struct phy_driver mv2222_drivers[] = {
 };
 module_phy_driver(mv2222_drivers);
 
-static struct mdio_device_id __maybe_unused mv2222_tbl[] = {
+static const struct mdio_device_id __maybe_unused mv2222_tbl[] = {
 	{ MARVELL_PHY_ID_88X2222, MARVELL_PHY_ID_MASK },
 	{ }
 };

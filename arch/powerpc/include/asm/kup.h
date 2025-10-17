@@ -6,7 +6,7 @@
 #define KUAP_WRITE	2
 #define KUAP_READ_WRITE	(KUAP_READ | KUAP_WRITE)
 
-#ifndef __ASSEMBLY__
+#ifndef __ASSEMBLER__
 #include <linux/types.h>
 
 static __always_inline bool kuap_is_disabled(void);
@@ -20,7 +20,7 @@ static __always_inline bool kuap_is_disabled(void);
 #include <asm/nohash/32/kup-8xx.h>
 #endif
 
-#ifdef CONFIG_BOOKE_OR_40x
+#ifdef CONFIG_BOOKE
 #include <asm/nohash/kup-booke.h>
 #endif
 
@@ -28,14 +28,14 @@ static __always_inline bool kuap_is_disabled(void);
 #include <asm/book3s/32/kup.h>
 #endif
 
-#ifdef __ASSEMBLY__
+#ifdef __ASSEMBLER__
 #ifndef CONFIG_PPC_KUAP
 .macro kuap_check_amr	gpr1, gpr2
 .endm
 
 #endif
 
-#else /* !__ASSEMBLY__ */
+#else /* !__ASSEMBLER__ */
 
 extern bool disable_kuep;
 extern bool disable_kuap;
@@ -181,6 +181,6 @@ static __always_inline void prevent_current_write_to_user(void)
 	prevent_user_access(KUAP_WRITE);
 }
 
-#endif /* !__ASSEMBLY__ */
+#endif /* !__ASSEMBLER__ */
 
 #endif /* _ASM_POWERPC_KUAP_H_ */

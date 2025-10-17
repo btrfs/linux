@@ -846,14 +846,6 @@ struct drm_color_ctm {
 	__u64 matrix[9];
 };
 
-struct drm_color_ctm_3x4 {
-	/*
-	 * Conversion matrix with 3x4 dimensions in S31.32 sign-magnitude
-	 * (not two's complement!) format.
-	 */
-	__u64 matrix[12];
-};
-
 struct drm_color_lut {
 	/*
 	 * Values are mapped linearly to 0.0 - 1.0 range, with 0x0 == 0.0 and
@@ -863,6 +855,19 @@ struct drm_color_lut {
 	__u16 green;
 	__u16 blue;
 	__u16 reserved;
+};
+
+/**
+ * struct drm_plane_size_hint - Plane size hints
+ * @width: The width of the plane in pixel
+ * @height: The height of the plane in pixel
+ *
+ * The plane SIZE_HINTS property blob contains an
+ * array of struct drm_plane_size_hint.
+ */
+struct drm_plane_size_hint {
+	__u16 width;
+	__u16 height;
 };
 
 /**
@@ -957,6 +962,14 @@ struct hdr_output_metadata {
  * Request that the kernel sends back a vblank event (see
  * struct drm_event_vblank) with the &DRM_EVENT_FLIP_COMPLETE type when the
  * page-flip is done.
+ *
+ * When used with atomic uAPI, one event will be delivered per CRTC included in
+ * the atomic commit. A CRTC is included in an atomic commit if one of its
+ * properties is set, or if a property is set on a connector or plane linked
+ * via the CRTC_ID property to the CRTC. At least one CRTC must be included,
+ * and all pulled in CRTCs must be either previously or newly powered on (in
+ * other words, a powered off CRTC which stays off cannot be included in the
+ * atomic commit).
  */
 #define DRM_MODE_PAGE_FLIP_EVENT 0x01
 /**

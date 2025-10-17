@@ -107,7 +107,7 @@ static int v9fs_file_lock(struct file *filp, int cmd, struct file_lock *fl)
 
 	p9_debug(P9_DEBUG_VFS, "filp: %p lock: %p\n", filp, fl);
 
-	if ((IS_SETLK(cmd) || IS_SETLKW(cmd)) && fl->fl_type != F_UNLCK) {
+	if ((IS_SETLK(cmd) || IS_SETLKW(cmd)) && fl->c.flc_type != F_UNLCK) {
 		filemap_write_and_wait(inode->i_mapping);
 		invalidate_mapping_pages(&inode->i_data, 0, -1);
 	}
@@ -121,13 +121,12 @@ static int v9fs_file_do_lock(struct file *filp, int cmd, struct file_lock *fl)
 	struct p9_fid *fid;
 	uint8_t status = P9_LOCK_ERROR;
 	int res = 0;
-	unsigned char fl_type;
 	struct v9fs_session_info *v9ses;
 
 	fid = filp->private_data;
 	BUG_ON(fid == NULL);
 
-	BUG_ON((fl->fl_flags & FL_POSIX) != FL_POSIX);
+	BUG_ON((fl->c.flc_flags & FL_POSIX) != FL_POSIX);
 
 	res = locks_lock_file_wait(filp, fl);
 	if (res < 0)
@@ -136,7 +135,7 @@ static int v9fs_file_do_lock(struct file *filp, int cmd, struct file_lock *fl)
 	/* convert posix lock to p9 tlock args */
 	memset(&flock, 0, sizeof(flock));
 	/* map the lock type */
-	switch (fl->fl_type) {
+	switch (fl->c.flc_type) {
 	case F_RDLCK:
 		flock.type = P9_LOCK_TYPE_RDLCK;
 		break;
@@ -152,7 +151,7 @@ static int v9fs_file_do_lock(struct file *filp, int cmd, struct file_lock *fl)
 		flock.length = 0;
 	else
 		flock.length = fl->fl_end - fl->fl_start + 1;
-	flock.proc_id = fl->fl_pid;
+	flock.proc_id = fl->c.flc_pid;
 	flock.client_id = fid->clnt->name;
 	if (IS_SETLKW(cmd))
 		flock.flags = P9_LOCK_FLAGS_BLOCK;
@@ -207,12 +206,13 @@ out_unlock:
 	 * incase server returned error for lock request, revert
 	 * it locally
 	 */
-	if (res < 0 && fl->fl_type != F_UNLCK) {
-		fl_type = fl->fl_type;
-		fl->fl_type = F_UNLCK;
+	if (res < 0 && fl->c.flc_type != F_UNLCK) {
+		unsigned char type = fl->c.flc_type;
+
+		fl->c.flc_type = F_UNLCK;
 		/* Even if this fails we want to return the remote error */
 		locks_lock_file_wait(filp, fl);
-		fl->fl_type = fl_type;
+		fl->c.flc_type = type;
 	}
 	if (flock.client_id != fid->clnt->name)
 		kfree(flock.client_id);
@@ -234,7 +234,7 @@ static int v9fs_file_getlock(struct file *filp, struct file_lock *fl)
 	 * if we have a conflicting lock locally, no need to validate
 	 * with server
 	 */
-	if (fl->fl_type != F_UNLCK)
+	if (fl->c.flc_type != F_UNLCK)
 		return res;
 
 	/* convert posix lock to p9 tgetlock args */
@@ -245,7 +245,7 @@ static int v9fs_file_getlock(struct file *filp, struct file_lock *fl)
 		glock.length = 0;
 	else
 		glock.length = fl->fl_end - fl->fl_start + 1;
-	glock.proc_id = fl->fl_pid;
+	glock.proc_id = fl->c.flc_pid;
 	glock.client_id = fid->clnt->name;
 
 	res = p9_client_getlock_dotl(fid, &glock);
@@ -254,13 +254,13 @@ static int v9fs_file_getlock(struct file *filp, struct file_lock *fl)
 	/* map 9p lock type to os lock type */
 	switch (glock.type) {
 	case P9_LOCK_TYPE_RDLCK:
-		fl->fl_type = F_RDLCK;
+		fl->c.flc_type = F_RDLCK;
 		break;
 	case P9_LOCK_TYPE_WRLCK:
-		fl->fl_type = F_WRLCK;
+		fl->c.flc_type = F_WRLCK;
 		break;
 	case P9_LOCK_TYPE_UNLCK:
-		fl->fl_type = F_UNLCK;
+		fl->c.flc_type = F_UNLCK;
 		break;
 	}
 	if (glock.type != P9_LOCK_TYPE_UNLCK) {
@@ -269,7 +269,7 @@ static int v9fs_file_getlock(struct file *filp, struct file_lock *fl)
 			fl->fl_end = OFFSET_MAX;
 		else
 			fl->fl_end = glock.start + glock.length - 1;
-		fl->fl_pid = -glock.proc_id;
+		fl->c.flc_pid = -glock.proc_id;
 	}
 out:
 	if (glock.client_id != fid->clnt->name)
@@ -293,7 +293,7 @@ static int v9fs_file_lock_dotl(struct file *filp, int cmd, struct file_lock *fl)
 	p9_debug(P9_DEBUG_VFS, "filp: %p cmd:%d lock: %p name: %pD\n",
 		 filp, cmd, fl, filp);
 
-	if ((IS_SETLK(cmd) || IS_SETLKW(cmd)) && fl->fl_type != F_UNLCK) {
+	if ((IS_SETLK(cmd) || IS_SETLKW(cmd)) && fl->c.flc_type != F_UNLCK) {
 		filemap_write_and_wait(inode->i_mapping);
 		invalidate_mapping_pages(&inode->i_data, 0, -1);
 	}
@@ -324,16 +324,16 @@ static int v9fs_file_flock_dotl(struct file *filp, int cmd,
 	p9_debug(P9_DEBUG_VFS, "filp: %p cmd:%d lock: %p name: %pD\n",
 		 filp, cmd, fl, filp);
 
-	if (!(fl->fl_flags & FL_FLOCK))
+	if (!(fl->c.flc_flags & FL_FLOCK))
 		goto out_err;
 
-	if ((IS_SETLK(cmd) || IS_SETLKW(cmd)) && fl->fl_type != F_UNLCK) {
+	if ((IS_SETLK(cmd) || IS_SETLKW(cmd)) && fl->c.flc_type != F_UNLCK) {
 		filemap_write_and_wait(inode->i_mapping);
 		invalidate_mapping_pages(&inode->i_data, 0, -1);
 	}
 	/* Convert flock to posix lock */
-	fl->fl_flags |= FL_POSIX;
-	fl->fl_flags ^= FL_FLOCK;
+	fl->c.flc_flags |= FL_POSIX;
+	fl->c.flc_flags ^= FL_FLOCK;
 
 	if (IS_SETLK(cmd) | IS_SETLKW(cmd))
 		ret = v9fs_file_do_lock(filp, cmd, fl);
@@ -454,9 +454,10 @@ int v9fs_file_fsync_dotl(struct file *filp, loff_t start, loff_t end,
 }
 
 static int
-v9fs_file_mmap(struct file *filp, struct vm_area_struct *vma)
+v9fs_file_mmap_prepare(struct vm_area_desc *desc)
 {
 	int retval;
+	struct file *filp = desc->file;
 	struct inode *inode = file_inode(filp);
 	struct v9fs_session_info *v9ses = v9fs_inode2v9ses(inode);
 
@@ -464,12 +465,12 @@ v9fs_file_mmap(struct file *filp, struct vm_area_struct *vma)
 
 	if (!(v9ses->cache & CACHE_WRITEBACK)) {
 		p9_debug(P9_DEBUG_CACHE, "(read-only mmap mode)");
-		return generic_file_readonly_mmap(filp, vma);
+		return generic_file_readonly_mmap_prepare(desc);
 	}
 
-	retval = generic_file_mmap(filp, vma);
+	retval = generic_file_mmap_prepare(desc);
 	if (!retval)
-		vma->vm_ops = &v9fs_mmap_file_vm_ops;
+		desc->vm_ops = &v9fs_mmap_file_vm_ops;
 
 	return retval;
 }
@@ -516,10 +517,11 @@ const struct file_operations v9fs_file_operations = {
 	.open = v9fs_file_open,
 	.release = v9fs_dir_release,
 	.lock = v9fs_file_lock,
-	.mmap = generic_file_readonly_mmap,
+	.mmap_prepare = generic_file_readonly_mmap_prepare,
 	.splice_read = v9fs_file_splice_read,
 	.splice_write = iter_file_splice_write,
 	.fsync = v9fs_file_fsync,
+	.setlease = simple_nosetlease,
 };
 
 const struct file_operations v9fs_file_operations_dotl = {
@@ -530,8 +532,9 @@ const struct file_operations v9fs_file_operations_dotl = {
 	.release = v9fs_dir_release,
 	.lock = v9fs_file_lock_dotl,
 	.flock = v9fs_file_flock_dotl,
-	.mmap = v9fs_file_mmap,
+	.mmap_prepare = v9fs_file_mmap_prepare,
 	.splice_read = v9fs_file_splice_read,
 	.splice_write = iter_file_splice_write,
 	.fsync = v9fs_file_fsync_dotl,
+	.setlease = simple_nosetlease,
 };

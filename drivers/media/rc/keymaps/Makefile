@@ -84,6 +84,7 @@ obj-$(CONFIG_RC_MAP) += \
 			rc-msi-digivox-ii.o \
 			rc-msi-tvanywhere.o \
 			rc-msi-tvanywhere-plus.o \
+			rc-mygica-utv3.o \
 			rc-nebula.o \
 			rc-nec-terratec-cinergy-xs.o \
 			rc-norwood.o \
@@ -105,6 +106,7 @@ obj-$(CONFIG_RC_MAP) += \
 			rc-rc6-mce.o \
 			rc-real-audio-220-32-keys.o \
 			rc-reddo.o \
+			rc-siemens-gigaset-rc20.o \
 			rc-snapstream-firefly.o \
 			rc-streamzap.o \
 			rc-su3000.o \

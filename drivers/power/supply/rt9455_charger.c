@@ -192,6 +192,7 @@ static const int rt9455_voreg_values[] = {
 	4450000, 4450000, 4450000, 4450000, 4450000, 4450000, 4450000, 4450000
 };
 
+#if IS_ENABLED(CONFIG_USB_PHY)
 /*
  * When the charger is in boost mode, REG02[7:2] represent boost output
  * voltage.
@@ -207,6 +208,7 @@ static const int rt9455_boost_voltage_values[] = {
 	5600000, 5600000, 5600000, 5600000, 5600000, 5600000, 5600000, 5600000,
 	5600000, 5600000, 5600000, 5600000, 5600000, 5600000, 5600000, 5600000,
 };
+#endif
 
 /* REG07[3:0] (VMREG) in uV */
 static const int rt9455_vmreg_values[] = {
@@ -1577,7 +1579,7 @@ static const struct regmap_config rt9455_regmap_config = {
 	.writeable_reg	= rt9455_is_writeable_reg,
 	.volatile_reg	= rt9455_is_volatile_reg,
 	.max_register	= RT9455_REG_MASK3,
-	.cache_type	= REGCACHE_RBTREE,
+	.cache_type	= REGCACHE_MAPLE,
 };
 
 static int rt9455_probe(struct i2c_client *client)
@@ -1656,7 +1658,7 @@ static int rt9455_probe(struct i2c_client *client)
 	INIT_DEFERRABLE_WORK(&info->batt_presence_work,
 			     rt9455_batt_presence_work_callback);
 
-	rt9455_charger_config.of_node		= dev->of_node;
+	rt9455_charger_config.fwnode		= dev_fwnode(dev);
 	rt9455_charger_config.drv_data		= info;
 	rt9455_charger_config.supplied_to	= rt9455_charger_supplied_to;
 	rt9455_charger_config.num_supplicants	=
@@ -1716,8 +1718,8 @@ static void rt9455_remove(struct i2c_client *client)
 }
 
 static const struct i2c_device_id rt9455_i2c_id_table[] = {
-	{ RT9455_DRIVER_NAME, 0 },
-	{ },
+	{ RT9455_DRIVER_NAME },
+	{ }
 };
 MODULE_DEVICE_TABLE(i2c, rt9455_i2c_id_table);
 

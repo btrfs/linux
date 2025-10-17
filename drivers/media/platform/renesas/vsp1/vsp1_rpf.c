@@ -48,6 +48,7 @@ static inline void vsp1_rpf_write(struct vsp1_rwpf *rpf,
  */
 
 static void rpf_configure_stream(struct vsp1_entity *entity,
+				 struct v4l2_subdev_state *state,
 				 struct vsp1_pipeline *pipe,
 				 struct vsp1_dl_list *dl,
 				 struct vsp1_dl_body *dlb)
@@ -80,14 +81,10 @@ static void rpf_configure_stream(struct vsp1_entity *entity,
 	vsp1_rpf_write(rpf, dlb, VI6_RPF_SRCM_PSTRIDE, pstride);
 
 	/* Format */
-	sink_format = vsp1_entity_get_pad_format(&rpf->entity,
-						 rpf->entity.state,
-						 RWPF_PAD_SINK);
-	source_format = vsp1_entity_get_pad_format(&rpf->entity,
-						   rpf->entity.state,
-						   RWPF_PAD_SOURCE);
+	sink_format = v4l2_subdev_state_get_format(state, RWPF_PAD_SINK);
+	source_format = v4l2_subdev_state_get_format(state, RWPF_PAD_SOURCE);
 
-	infmt = VI6_RPF_INFMT_CIPM
+	infmt = (pipe->iif ? 0 : VI6_RPF_INFMT_CIPM)
 	      | (fmtinfo->hwfmt << VI6_RPF_INFMT_RDFMT_SHIFT);
 
 	if (fmtinfo->swap_yc)
@@ -95,11 +92,43 @@ static void rpf_configure_stream(struct vsp1_entity *entity,
 	if (fmtinfo->swap_uv)
 		infmt |= VI6_RPF_INFMT_SPUVS;
 
-	if (sink_format->code != source_format->code)
-		infmt |= VI6_RPF_INFMT_CSC;
+	if (sink_format->code != source_format->code) {
+		u16 ycbcr_enc;
+		u16 quantization;
+		u32 rdtm;
+
+		if (sink_format->code == MEDIA_BUS_FMT_AYUV8_1X32) {
+			ycbcr_enc = sink_format->ycbcr_enc;
+			quantization = sink_format->quantization;
+		} else {
+			ycbcr_enc = source_format->ycbcr_enc;
+			quantization = source_format->quantization;
+		}
+
+		if (ycbcr_enc == V4L2_YCBCR_ENC_601 &&
+		    quantization == V4L2_QUANTIZATION_LIM_RANGE)
+			rdtm = VI6_RPF_INFMT_RDTM_BT601;
+		else if (ycbcr_enc == V4L2_YCBCR_ENC_601 &&
+			 quantization == V4L2_QUANTIZATION_FULL_RANGE)
+			rdtm = VI6_RPF_INFMT_RDTM_BT601_EXT;
+		else if (ycbcr_enc == V4L2_YCBCR_ENC_709 &&
+			 quantization == V4L2_QUANTIZATION_LIM_RANGE)
+			rdtm = VI6_RPF_INFMT_RDTM_BT709;
+		else
+			rdtm = VI6_RPF_INFMT_RDTM_BT709_EXT;
+
+		infmt |= VI6_RPF_INFMT_CSC | rdtm;
+	}
 
 	vsp1_rpf_write(rpf, dlb, VI6_RPF_INFMT, infmt);
 	vsp1_rpf_write(rpf, dlb, VI6_RPF_DSWAP, fmtinfo->swap);
+
+	/* No further configuration for VSPX. */
+	if (pipe->iif) {
+		/* VSPX wants alpha_sel to be set to 0. */
+		vsp1_rpf_write(rpf, dlb, VI6_RPF_ALPH_SEL, 0);
+		return;
+	}
 
 	if (entity->vsp1->info->gen == 4) {
 		u32 ext_infmt0;
@@ -157,10 +186,8 @@ static void rpf_configure_stream(struct vsp1_entity *entity,
 	if (pipe->brx) {
 		const struct v4l2_rect *compose;
 
-		compose = vsp1_entity_get_pad_selection(pipe->brx,
-							pipe->brx->state,
-							rpf->brx_input,
-							V4L2_SEL_TGT_COMPOSE);
+		compose = v4l2_subdev_state_get_compose(pipe->brx->state,
+							rpf->brx_input);
 		left = compose->left;
 		top = compose->top;
 	}
@@ -284,6 +311,7 @@ static void rpf_configure_frame(struct vsp1_entity *entity,
 
 static void rpf_configure_partition(struct vsp1_entity *entity,
 				    struct vsp1_pipeline *pipe,
+				    const struct vsp1_partition *partition,
 				    struct vsp1_dl_list *dl,
 				    struct vsp1_dl_body *dlb)
 {
@@ -292,7 +320,7 @@ static void rpf_configure_partition(struct vsp1_entity *entity,
 	struct vsp1_device *vsp1 = rpf->entity.vsp1;
 	const struct vsp1_format_info *fmtinfo = rpf->fmtinfo;
 	const struct v4l2_pix_format_mplane *format = &rpf->format;
-	struct v4l2_rect crop;
+	struct v4l2_rect crop = partition->rpf[rpf->entity.index];
 
 	/*
 	 * Source size and crop offsets.
@@ -302,22 +330,6 @@ static void rpf_configure_partition(struct vsp1_entity *entity,
 	 * offsets are needed, as planes 2 and 3 always have identical
 	 * strides.
 	 */
-	crop = *vsp1_rwpf_get_crop(rpf, rpf->entity.state);
-
-	/*
-	 * Partition Algorithm Control
-	 *
-	 * The partition algorithm can split this frame into multiple
-	 * slices. We must scale our partition window based on the pipe
-	 * configuration to match the destination partition window.
-	 * To achieve this, we adjust our crop to provide a 'sub-crop'
-	 * matching the expected partition window. Only 'left' and
-	 * 'width' need to be adjusted.
-	 */
-	if (pipe->partitions > 1) {
-		crop.width = pipe->partition->rpf.width;
-		crop.left += pipe->partition->rpf.left;
-	}
 
 	if (pipe->interlaced) {
 		crop.height = round_down(crop.height / 2, fmtinfo->vsub);
@@ -366,12 +378,30 @@ static void rpf_configure_partition(struct vsp1_entity *entity,
 }
 
 static void rpf_partition(struct vsp1_entity *entity,
+			  struct v4l2_subdev_state *state,
 			  struct vsp1_pipeline *pipe,
 			  struct vsp1_partition *partition,
 			  unsigned int partition_idx,
-			  struct vsp1_partition_window *window)
+			  struct v4l2_rect *window)
 {
-	partition->rpf = *window;
+	struct vsp1_rwpf *rpf = to_rwpf(&entity->subdev);
+	struct v4l2_rect *rpf_rect = &partition->rpf[rpf->entity.index];
+
+	/*
+	 * Partition Algorithm Control
+	 *
+	 * The partition algorithm can split this frame into multiple slices. We
+	 * must adjust our partition window based on the pipe configuration to
+	 * match the destination partition window. To achieve this, we adjust
+	 * our crop to provide a 'sub-crop' matching the expected partition
+	 * window.
+	 */
+	*rpf_rect = *v4l2_subdev_state_get_crop(state, RWPF_PAD_SINK);
+
+	if (pipe->partitions > 1) {
+		rpf_rect->width = window->width;
+		rpf_rect->left += window->left;
+	}
 }
 
 static const struct vsp1_entity_operations rpf_entity_ops = {

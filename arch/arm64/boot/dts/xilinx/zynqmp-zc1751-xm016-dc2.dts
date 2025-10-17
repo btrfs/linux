@@ -135,7 +135,6 @@
 	status = "okay";
 	pinctrl-names = "default";
 	pinctrl-0 = <&pinctrl_nand0_default>;
-	arasan,has-mdma;
 
 	nand@0 {
 		reg = <0x0>;
@@ -219,7 +218,7 @@
 		};
 	};
 
-	pinctrl_i2c0_gpio: i2c0-gpio {
+	pinctrl_i2c0_gpio: i2c0-gpio-grp {
 		mux {
 			groups = "gpio0_6_grp", "gpio0_7_grp";
 			function = "gpio0";

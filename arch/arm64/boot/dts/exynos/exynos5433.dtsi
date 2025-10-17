@@ -937,6 +937,7 @@
 
 		gic: interrupt-controller@11001000 {
 			compatible = "arm,gic-400";
+			#address-cells = <0>;
 			#interrupt-cells = <3>;
 			interrupt-controller;
 			reg = <0x11001000 0x1000>,
@@ -1468,6 +1469,7 @@
 			pinctrl-names = "default";
 			pinctrl-0 = <&spi0_bus>;
 			num-cs = <1>;
+			fifo-depth = <256>;
 			status = "disabled";
 		};
 
@@ -1487,6 +1489,7 @@
 			pinctrl-names = "default";
 			pinctrl-0 = <&spi1_bus>;
 			num-cs = <1>;
+			fifo-depth = <64>;
 			status = "disabled";
 		};
 
@@ -1506,6 +1509,7 @@
 			pinctrl-names = "default";
 			pinctrl-0 = <&spi2_bus>;
 			num-cs = <1>;
+			fifo-depth = <64>;
 			status = "disabled";
 		};
 
@@ -1525,6 +1529,7 @@
 			pinctrl-names = "default";
 			pinctrl-0 = <&spi3_bus>;
 			num-cs = <1>;
+			fifo-depth = <64>;
 			status = "disabled";
 		};
 
@@ -1544,6 +1549,7 @@
 			pinctrl-names = "default";
 			pinctrl-0 = <&spi4_bus>;
 			num-cs = <1>;
+			fifo-depth = <64>;
 			status = "disabled";
 		};
 

@@ -4,7 +4,7 @@
  * Copyright (C) 2022 Jonathan Lemon <jonathan.lemon@gmail.com>
  */
 
-#include <asm/unaligned.h>
+#include <linux/unaligned.h>
 #include <linux/mii.h>
 #include <linux/phy.h>
 #include <linux/ptp_classify.h>
@@ -597,9 +597,6 @@ static int bcm_ptp_perout_locked(struct bcm_ptp_private *priv,
 
 	period = BCM_MAX_PERIOD_8NS;	/* write nonzero value */
 
-	if (req->flags & PTP_PEROUT_PHASE)
-		return -EOPNOTSUPP;
-
 	if (req->flags & PTP_PEROUT_DUTY_CYCLE)
 		pulse = ktime_to_ns(ktime_set(req->on.sec, req->on.nsec));
 	else
@@ -740,6 +737,8 @@ static const struct ptp_clock_info bcm_ptp_clock_info = {
 	.n_pins		= 1,
 	.n_per_out	= 1,
 	.n_ext_ts	= 1,
+	.supported_perout_flags = PTP_PEROUT_DUTY_CYCLE,
+	.supported_extts_flags = PTP_STRICT_FLAGS | PTP_RISING_EDGE,
 };
 
 static void bcm_ptp_txtstamp(struct mii_timestamper *mii_ts,
@@ -841,7 +840,7 @@ static int bcm_ptp_hwtstamp(struct mii_timestamper *mii_ts,
 }
 
 static int bcm_ptp_ts_info(struct mii_timestamper *mii_ts,
-			   struct ethtool_ts_info *ts_info)
+			   struct kernel_ethtool_ts_info *ts_info)
 {
 	struct bcm_ptp_private *priv = mii2priv(mii_ts);
 
@@ -930,6 +929,9 @@ struct bcm_ptp_private *bcm_ptp_probe(struct phy_device *phydev)
 	if (IS_ERR(clock))
 		return ERR_CAST(clock);
 	priv->ptp_clock = clock;
+
+	/* Timestamp selected by default to keep legacy API */
+	phydev->default_timestamp = true;
 
 	priv->phydev = phydev;
 	bcm_ptp_init(priv);

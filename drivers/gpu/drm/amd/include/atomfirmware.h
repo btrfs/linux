@@ -183,6 +183,7 @@ enum atom_dgpu_vram_type {
   ATOM_DGPU_VRAM_TYPE_HBM2E = 0x61,
   ATOM_DGPU_VRAM_TYPE_GDDR6 = 0x70,
   ATOM_DGPU_VRAM_TYPE_HBM3 = 0x80,
+	ATOM_DGPU_VRAM_TYPE_HBM3E = 0x81,
 };
 
 enum atom_dp_vs_preemph_def{
@@ -210,7 +211,7 @@ atom_bios_string          = "ATOM"
 };
 */
 
-#pragma pack(1)                          /* BIOS data must use byte aligment*/
+#pragma pack(1)                          /* BIOS data must use byte alignment*/
 
 enum atombios_image_offset{
   OFFSET_TO_ATOM_ROM_HEADER_POINTER          = 0x00000048,
@@ -254,8 +255,8 @@ struct atom_rom_header_v2_2
   uint16_t subsystem_vendor_id;
   uint16_t subsystem_id;
   uint16_t pci_info_offset;
-  uint16_t masterhwfunction_offset;      //Offest for SW to get all command function offsets, Don't change the position
-  uint16_t masterdatatable_offset;       //Offest for SW to get all data table offsets, Don't change the position
+  uint16_t masterhwfunction_offset;      //Offset for SW to get all command function offsets, Don't change the position
+  uint16_t masterdatatable_offset;       //Offset for SW to get all data table offsets, Don't change the position
   uint16_t reserved;
   uint32_t pspdirtableoffset;
 };
@@ -452,7 +453,7 @@ struct atom_dtd_format
   uint8_t   refreshrate;
 };
 
-/* atom_dtd_format.modemiscinfo defintion */
+/* atom_dtd_format.modemiscinfo definition */
 enum atom_dtd_format_modemiscinfo{
   ATOM_HSYNC_POLARITY    = 0x0002,
   ATOM_VSYNC_POLARITY    = 0x0004,
@@ -610,6 +611,38 @@ struct atom_firmware_info_v3_4 {
         uint32_t reserved[2];
 };
 
+struct atom_firmware_info_v3_5 {
+  struct atom_common_table_header table_header;
+  uint32_t firmware_revision;
+  uint32_t bootup_clk_reserved[2];
+  uint32_t firmware_capability;             // enum atombios_firmware_capability
+  uint32_t fw_protect_region_size_in_kb;    /* FW allocate a write protect region at top of FB. */
+  uint32_t bios_scratch_reg_startaddr;      // 1st bios scratch register dword address
+  uint32_t bootup_voltage_reserved[2];
+  uint8_t  mem_module_id;
+  uint8_t  coolingsolution_id;              /*0: Air cooling; 1: Liquid cooling ... */
+  uint8_t  hw_blt_mode;                     //0:HW_BLT_DMA_PIO_MODE; 1:HW_BLT_LITE_SDMA_MODE; 2:HW_BLT_PCI_IO_MODE
+  uint8_t  reserved1;
+  uint32_t mc_baseaddr_high;
+  uint32_t mc_baseaddr_low;
+  uint8_t  board_i2c_feature_id;            // enum of atom_board_i2c_feature_id_def
+  uint8_t  board_i2c_feature_gpio_id;       // i2c id find in gpio_lut data table gpio_id
+  uint8_t  board_i2c_feature_slave_addr;
+  uint8_t  ras_rom_i2c_slave_addr;
+  uint32_t bootup_voltage_reserved1;
+  uint32_t zfb_reserved;
+  // if pplib_pptable_id!=0, pplib get powerplay table inside driver instead of from VBIOS
+  uint32_t pplib_pptable_id;
+  uint32_t hw_voltage_reserved[3];
+  uint32_t maco_pwrlimit_mw;                // bomaco mode power limit in unit of m-watt
+  uint32_t usb_pwrlimit_mw;                 // power limit when USB is enable in unit of m-watt
+  uint32_t fw_reserved_size_in_kb;          // VBIOS reserved extra fw size in unit of kb.
+  uint32_t pspbl_init_reserved[3];
+  uint32_t spi_rom_size;                    // GPU spi rom size
+  uint16_t support_dev_in_objinfo;
+  uint16_t disp_phy_tunning_size;
+  uint32_t reserved[16];
+};
 /* 
   ***************************************************************************
     Data Table lcd_info  structure
@@ -645,7 +678,7 @@ struct lcd_info_v2_1
   uint32_t reserved1[8];
 };
 
-/* lcd_info_v2_1.panel_misc defintion */
+/* lcd_info_v2_1.panel_misc definition */
 enum atom_lcd_info_panel_misc{
   ATOM_PANEL_MISC_FPDI            =0x0002,
 };
@@ -683,7 +716,7 @@ enum atom_gpio_pin_assignment_gpio_id {
   /* gpio_id pre-define id for multiple usage */
   /* GPIO use to control PCIE_VDDC in certain SLT board */
   PCIE_VDDC_CONTROL_GPIO_PINID = 56,
-  /* if PP_AC_DC_SWITCH_GPIO_PINID in Gpio_Pin_LutTable, AC/DC swithing feature is enable */
+  /* if PP_AC_DC_SWITCH_GPIO_PINID in Gpio_Pin_LutTable, AC/DC switching feature is enable */
   PP_AC_DC_SWITCH_GPIO_PINID = 60,
   /* VDDC_REGULATOR_VRHOT_GPIO_PINID in Gpio_Pin_LutTable, VRHot feature is enable */
   VDDC_VRHOT_GPIO_PINID = 61,
@@ -701,8 +734,8 @@ enum atom_gpio_pin_assignment_gpio_id {
 struct atom_gpio_pin_lut_v2_1
 {
   struct  atom_common_table_header  table_header;
-  /*the real number of this included in the structure is calcualted by using the (whole structure size - the header size)/size of atom_gpio_pin_lut  */
-  struct  atom_gpio_pin_assignment  gpio_pin[8];
+  /*the real number of this included in the structure is calculated by using the (whole structure size - the header size)/size of atom_gpio_pin_lut  */
+  struct  atom_gpio_pin_assignment  gpio_pin[];
 };
 
 
@@ -964,7 +997,7 @@ enum atom_connector_layout_info_mini_type_def {
 
 enum atom_display_device_tag_def{
   ATOM_DISPLAY_LCD1_SUPPORT            = 0x0002, //an embedded display is either an LVDS or eDP signal type of display
-  ATOM_DISPLAY_LCD2_SUPPORT			       = 0x0020, //second edp device tag 0x0020 for backward compability
+  ATOM_DISPLAY_LCD2_SUPPORT            = 0x0020, //second edp device tag 0x0020 for backward compatibility
   ATOM_DISPLAY_DFP1_SUPPORT            = 0x0008,
   ATOM_DISPLAY_DFP2_SUPPORT            = 0x0080,
   ATOM_DISPLAY_DFP3_SUPPORT            = 0x0200,
@@ -978,7 +1011,7 @@ struct atom_display_object_path_v2
 {
   uint16_t display_objid;                  //Connector Object ID or Misc Object ID
   uint16_t disp_recordoffset;
-  uint16_t encoderobjid;                   //first encoder closer to the connector, could be either an external or intenal encoder
+  uint16_t encoderobjid;                   //first encoder closer to the connector, could be either an external or internal encoder
   uint16_t extencoderobjid;                //2nd encoder after the first encoder, from the connector point of view;
   uint16_t encoder_recordoffset;
   uint16_t extencoder_recordoffset;
@@ -990,7 +1023,7 @@ struct atom_display_object_path_v2
 struct atom_display_object_path_v3 {
 	uint16_t display_objid; //Connector Object ID or Misc Object ID
 	uint16_t disp_recordoffset;
-	uint16_t encoderobjid; //first encoder closer to the connector, could be either an external or intenal encoder
+	uint16_t encoderobjid; //first encoder closer to the connector, could be either an external or internal encoder
 	uint16_t reserved1; //only on USBC case, otherwise always = 0
 	uint16_t reserved2; //reserved and always = 0
 	uint16_t reserved3; //reserved and always = 0
@@ -1006,7 +1039,7 @@ struct display_object_info_table_v1_4
   uint16_t  supporteddevices;
   uint8_t   number_of_path;
   uint8_t   reserved;
-  struct    atom_display_object_path_v2 display_path[8];   //the real number of this included in the structure is calculated by using the (whole structure size - the header size- number_of_path)/size of atom_display_object_path
+  struct    atom_display_object_path_v2 display_path[];   //the real number of this included in the structure is calculated by using the (whole structure size - the header size- number_of_path)/size of atom_display_object_path
 };
 
 struct display_object_info_table_v1_5 {
@@ -1016,7 +1049,7 @@ struct display_object_info_table_v1_5 {
 	uint8_t reserved;
 	// the real number of this included in the structure is calculated by using the
 	// (whole structure size - the header size- number_of_path)/size of atom_display_object_path
-	struct atom_display_object_path_v3 display_path[8];
+	struct atom_display_object_path_v3 display_path[];
 };
 
 /* 
@@ -1268,12 +1301,17 @@ struct atom_ext_display_path
 
 //usCaps
 enum ext_display_path_cap_def {
-	EXT_DISPLAY_PATH_CAPS__HBR2_DISABLE =           0x0001,
-	EXT_DISPLAY_PATH_CAPS__DP_FIXED_VS_EN =         0x0002,
-	EXT_DISPLAY_PATH_CAPS__EXT_CHIP_MASK =          0x007C,
-	EXT_DISPLAY_PATH_CAPS__HDMI20_PI3EQX1204 =      (0x01 << 2), //PI redriver chip
-	EXT_DISPLAY_PATH_CAPS__HDMI20_TISN65DP159RSBT = (0x02 << 2), //TI retimer chip
-	EXT_DISPLAY_PATH_CAPS__HDMI20_PARADE_PS175 =    (0x03 << 2)  //Parade DP->HDMI recoverter chip
+  EXT_DISPLAY_PATH_CAPS__EXT_CHIP_MASK =		0x007E,
+  AMD_EXT_DISPLAY_PATH_CAPS__EXT_CHIP_MASK =		0x007E,
+  AMD_EXT_DISPLAY_PATH_CAPS__DP_FIXED_VS_EN =		(0x01 << 1),
+  AMD_EXT_DISPLAY_PATH_CAPS__HDMI20_PI3EQX1204 =	(0x02 << 1),
+  AMD_EXT_DISPLAY_PATH_CAPS__DP_EARLY_8B10B_TPS2 =	(0x03 << 1),
+  AMD_EXT_DISPLAY_PATH_CAPS__HDMI20_TISN65DP159RSBT =	(0x04 << 1),
+  AMD_EXT_DISPLAY_PATH_CAPS__HDMI20_PARADE_PS175 =	(0x06 << 1),
+  EXT_DISPLAY_PATH_CAPS__DP_FIXED_VS_EN =		(0x07 << 1),
+  EXT_DISPLAY_PATH_CAPS__HDMI20_PI3EQX1204 =		(0x08 << 1),   //PI redriver chip
+  EXT_DISPLAY_PATH_CAPS__HDMI20_TISN65DP159RSBT =	(0x09 << 1),   //TI retimer chip
+  EXT_DISPLAY_PATH_CAPS__AMD_INTERNAL =		(0x0a << 1),   //AMD internal customer chip placeholder
 };
 
 struct atom_external_display_connection_info
@@ -1625,6 +1663,49 @@ struct atom_integrated_system_info_v2_2
 	uint32_t  reserved4[189];
 };
 
+struct uma_carveout_option {
+  char       optionName[29];        //max length of string is 28chars + '\0'. Current design is for "minimum", "Medium", "High". This makes entire struct size 64bits
+  uint8_t    memoryCarvedGb;        //memory carved out with setting
+  uint8_t    memoryRemainingGb;     //memory remaining on system
+  union {
+    struct _flags {
+      uint8_t Auto     : 1;
+      uint8_t Custom   : 1;
+      uint8_t Reserved : 6;
+    } flags;
+    uint8_t all8;
+  } uma_carveout_option_flags;
+};
+
+struct atom_integrated_system_info_v2_3 {
+  struct  atom_common_table_header table_header;
+  uint32_t  vbios_misc; // enum of atom_system_vbiosmisc_def
+  uint32_t  gpucapinfo; // enum of atom_system_gpucapinf_def
+  uint32_t  system_config;
+  uint32_t  cpucapinfo;
+  uint16_t  gpuclk_ss_percentage; // unit of 0.001%,   1000 mean 1%
+  uint16_t  gpuclk_ss_type;
+  uint16_t  dpphy_override;  // bit vector, enum of atom_sysinfo_dpphy_override_def
+  uint8_t memorytype;       // enum of atom_dmi_t17_mem_type_def, APU memory type indication.
+  uint8_t umachannelnumber; // number of memory channels
+  uint8_t htc_hyst_limit;
+  uint8_t htc_tmp_limit;
+  uint8_t reserved1; // dp_ss_control
+  uint8_t gpu_package_id;
+  struct  edp_info_table  edp1_info;
+  struct  edp_info_table  edp2_info;
+  uint32_t  reserved2[8];
+  struct  atom_external_display_connection_info extdispconninfo;
+  uint8_t UMACarveoutVersion;
+  uint8_t UMACarveoutIndexMax;
+  uint8_t UMACarveoutTypeDefault;
+  uint8_t UMACarveoutIndexDefault;
+  uint8_t UMACarveoutType;           //Auto or Custom
+  uint8_t UMACarveoutIndex;
+  struct  uma_carveout_option UMASizeControlOption[20];
+  uint8_t reserved3[110];
+};
+
 // system_config
 enum atom_system_vbiosmisc_def{
   INTEGRATED_SYSTEM_INFO__GET_EDID_CALLBACK_FUNC_SUPPORT = 0x01,
@@ -1633,7 +1714,7 @@ enum atom_system_vbiosmisc_def{
 
 // gpucapinfo
 enum atom_system_gpucapinf_def{
-  SYS_INFO_GPUCAPS__ENABEL_DFS_BYPASS  = 0x10,
+  SYS_INFO_GPUCAPS__ENABLE_DFS_BYPASS  = 0x10,
 };
 
 //dpphy_override
@@ -3466,7 +3547,7 @@ struct atom_voltage_object_header_v4{
 enum atom_voltage_object_mode 
 {
    VOLTAGE_OBJ_GPIO_LUT              =  0,        //VOLTAGE and GPIO Lookup table ->atom_gpio_voltage_object_v4
-   VOLTAGE_OBJ_VR_I2C_INIT_SEQ       =  3,        //VOLTAGE REGULATOR INIT sequece through I2C -> atom_i2c_voltage_object_v4
+   VOLTAGE_OBJ_VR_I2C_INIT_SEQ       =  3,        //VOLTAGE REGULATOR INIT sequence through I2C -> atom_i2c_voltage_object_v4
    VOLTAGE_OBJ_PHASE_LUT             =  4,        //Set Vregulator Phase lookup table ->atom_gpio_voltage_object_v4
    VOLTAGE_OBJ_SVID2                 =  7,        //Indicate voltage control by SVID2 ->atom_svid2_voltage_object_v4
    VOLTAGE_OBJ_EVV                   =  8, 
@@ -3504,11 +3585,11 @@ struct atom_gpio_voltage_object_v4
 {
    struct atom_voltage_object_header_v4 header;  // voltage mode = VOLTAGE_OBJ_GPIO_LUT or VOLTAGE_OBJ_PHASE_LUT
    uint8_t  gpio_control_id;                     // default is 0 which indicate control through CG VID mode 
-   uint8_t  gpio_entry_num;                      // indiate the entry numbers of Votlage/Gpio value Look up table
+   uint8_t  gpio_entry_num;                      // indicate the entry numbers of Votlage/Gpio value Look up table
    uint8_t  phase_delay_us;                      // phase delay in unit of micro second
    uint8_t  reserved;   
    uint32_t gpio_mask_val;                         // GPIO Mask value
-   struct atom_voltage_gpio_map_lut voltage_gpio_lut[1];
+   struct atom_voltage_gpio_map_lut voltage_gpio_lut[] __counted_by(gpio_entry_num);
 };
 
 struct  atom_svid2_voltage_object_v4
@@ -4426,8 +4507,8 @@ struct amd_acpi_description_header{
 struct uefi_acpi_vfct{
   struct   amd_acpi_description_header sheader;
   uint8_t  tableUUID[16];    //0x24
-  uint32_t vbiosimageoffset; //0x34. Offset to the first GOP_VBIOS_CONTENT block from the beginning of the stucture.
-  uint32_t lib1Imageoffset;  //0x38. Offset to the first GOP_LIB1_CONTENT block from the beginning of the stucture.
+  uint32_t vbiosimageoffset; //0x34. Offset to the first GOP_VBIOS_CONTENT block from the beginning of the structure.
+  uint32_t lib1Imageoffset;  //0x38. Offset to the first GOP_LIB1_CONTENT block from the beginning of the structure.
   uint32_t reserved[4];      //0x3C
 };
 
@@ -4459,7 +4540,7 @@ struct gop_lib1_content {
 /* 
   ***************************************************************************
                    Scratch Register definitions
-  Each number below indicates which scratch regiser request, Active and 
+  Each number below indicates which scratch register request, Active and
   Connect all share the same definitions as display_device_tag defines
   *************************************************************************** 
 */   

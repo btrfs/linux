@@ -12,14 +12,11 @@
 /**
  * ice_tc_count_lkups - determine lookup count for switch filter
  * @flags: TC-flower flags
- * @headers: Pointer to TC flower filter header structure
  * @fltr: Pointer to outer TC filter structure
  *
- * Determine lookup count based on TC flower input for switch filter.
+ * Return: lookup count based on TC flower input for a switch filter.
  */
-static int
-ice_tc_count_lkups(u32 flags, struct ice_tc_flower_lyr_2_4_hdrs *headers,
-		   struct ice_tc_flower_fltr *fltr)
+static int ice_tc_count_lkups(u32 flags, struct ice_tc_flower_fltr *fltr)
 {
 	int lkups_cnt = 1; /* 0th lookup is metadata */
 
@@ -28,6 +25,8 @@ ice_tc_count_lkups(u32 flags, struct ice_tc_flower_lyr_2_4_hdrs *headers,
 	 * - ICE_TC_FLWR_FIELD_VLAN_TPID (present if specified)
 	 * - Tunnel flag (present if tunnel)
 	 */
+	if (fltr->direction == ICE_ESWITCH_FLTR_EGRESS)
+		lkups_cnt++;
 
 	if (flags & ICE_TC_FLWR_FIELD_TENANT_ID)
 		lkups_cnt++;
@@ -35,7 +34,10 @@ ice_tc_count_lkups(u32 flags, struct ice_tc_flower_lyr_2_4_hdrs *headers,
 	if (flags & ICE_TC_FLWR_FIELD_ENC_DST_MAC)
 		lkups_cnt++;
 
-	if (flags & ICE_TC_FLWR_FIELD_ENC_OPTS)
+	if (flags & ICE_TC_FLWR_FIELD_GTP_OPTS)
+		lkups_cnt++;
+
+	if (flags & ICE_TC_FLWR_FIELD_PFCP_OPTS)
 		lkups_cnt++;
 
 	if (flags & (ICE_TC_FLWR_FIELD_ENC_SRC_IPV4 |
@@ -138,6 +140,8 @@ ice_proto_type_from_tunnel(enum ice_tunnel_type type)
 		return ICE_GTP;
 	case TNL_GTPC:
 		return ICE_GTP_NO_PAY;
+	case TNL_PFCP:
+		return ICE_PFCP;
 	default:
 		return 0;
 	}
@@ -157,6 +161,8 @@ ice_sw_type_from_tunnel(enum ice_tunnel_type type)
 		return ICE_SW_TUN_GTPU;
 	case TNL_GTPC:
 		return ICE_SW_TUN_GTPC;
+	case TNL_PFCP:
+		return ICE_SW_TUN_PFCP;
 	default:
 		return ICE_NON_TUN;
 	}
@@ -219,8 +225,7 @@ ice_tc_fill_tunnel_outer(u32 flags, struct ice_tc_flower_fltr *fltr,
 		i++;
 	}
 
-	if (flags & ICE_TC_FLWR_FIELD_ENC_OPTS &&
-	    (fltr->tunnel_type == TNL_GTPU || fltr->tunnel_type == TNL_GTPC)) {
+	if (flags & ICE_TC_FLWR_FIELD_GTP_OPTS) {
 		list[i].type = ice_proto_type_from_tunnel(fltr->tunnel_type);
 
 		if (fltr->gtp_pdu_info_masks.pdu_type) {
@@ -233,6 +238,22 @@ ice_tc_fill_tunnel_outer(u32 flags, struct ice_tc_flower_fltr *fltr,
 			list[i].h_u.gtp_hdr.qfi = fltr->gtp_pdu_info_keys.qfi;
 			memcpy(&list[i].m_u.gtp_hdr.qfi, "\x3f", 1);
 		}
+
+		i++;
+	}
+
+	if (flags & ICE_TC_FLWR_FIELD_PFCP_OPTS) {
+		struct ice_pfcp_hdr *hdr_h, *hdr_m;
+
+		hdr_h = &list[i].h_u.pfcp_hdr;
+		hdr_m = &list[i].m_u.pfcp_hdr;
+		list[i].type = ICE_PFCP;
+
+		hdr_h->flags = fltr->pfcp_meta_keys.type;
+		hdr_m->flags = fltr->pfcp_meta_masks.type & 0x01;
+
+		hdr_h->seid = fltr->pfcp_meta_keys.seid;
+		hdr_m->seid = fltr->pfcp_meta_masks.seid;
 
 		i++;
 	}
@@ -363,12 +384,20 @@ ice_tc_fill_rules(struct ice_hw *hw, u32 flags,
 	/* Always add direction metadata */
 	ice_rule_add_direction_metadata(&list[ICE_TC_METADATA_LKUP_IDX]);
 
+	if (tc_fltr->direction == ICE_ESWITCH_FLTR_EGRESS) {
+		ice_rule_add_src_vsi_metadata(&list[i]);
+		i++;
+	}
+
 	rule_info->tun_type = ice_sw_type_from_tunnel(tc_fltr->tunnel_type);
 	if (tc_fltr->tunnel_type != TNL_LAST) {
 		i = ice_tc_fill_tunnel_outer(flags, tc_fltr, list, i);
 
-		headers = &tc_fltr->inner_headers;
-		inner = true;
+		/* PFCP is considered non-tunneled - don't swap headers. */
+		if (tc_fltr->tunnel_type != TNL_PFCP) {
+			headers = &tc_fltr->inner_headers;
+			inner = true;
+		}
 	}
 
 	if (flags & ICE_TC_FLWR_FIELD_ETH_TYPE_ID) {
@@ -622,6 +651,8 @@ static int ice_tc_tun_get_type(struct net_device *tunnel_dev)
 	 */
 	if (netif_is_gtp(tunnel_dev))
 		return TNL_GTPU;
+	if (netif_is_pfcp(tunnel_dev))
+		return TNL_PFCP;
 	return TNL_LAST;
 }
 
@@ -635,35 +666,41 @@ static bool ice_tc_is_dev_uplink(struct net_device *dev)
 	return netif_is_ice(dev) || ice_is_tunnel_supported(dev);
 }
 
-static int ice_tc_setup_redirect_action(struct net_device *filter_dev,
-					struct ice_tc_flower_fltr *fltr,
-					struct net_device *target_dev)
+static int ice_tc_setup_action(struct net_device *filter_dev,
+			       struct ice_tc_flower_fltr *fltr,
+			       struct net_device *target_dev,
+			       enum ice_sw_fwd_act_type action)
 {
 	struct ice_repr *repr;
 
-	fltr->action.fltr_act = ICE_FWD_TO_VSI;
+	if (action != ICE_FWD_TO_VSI && action != ICE_MIRROR_PACKET) {
+		NL_SET_ERR_MSG_MOD(fltr->extack, "Unsupported action to setup provided");
+		return -EINVAL;
+	}
+
+	fltr->action.fltr_act = action;
 
 	if (ice_is_port_repr_netdev(filter_dev) &&
-	    ice_is_port_repr_netdev(target_dev)) {
+	    ice_is_port_repr_netdev(target_dev) &&
+	    fltr->direction == ICE_ESWITCH_FLTR_EGRESS) {
 		repr = ice_netdev_to_repr(target_dev);
 
 		fltr->dest_vsi = repr->src_vsi;
-		fltr->direction = ICE_ESWITCH_FLTR_EGRESS;
 	} else if (ice_is_port_repr_netdev(filter_dev) &&
-		   ice_tc_is_dev_uplink(target_dev)) {
+		   ice_tc_is_dev_uplink(target_dev) &&
+		   fltr->direction == ICE_ESWITCH_FLTR_EGRESS) {
 		repr = ice_netdev_to_repr(filter_dev);
 
 		fltr->dest_vsi = repr->src_vsi->back->eswitch.uplink_vsi;
-		fltr->direction = ICE_ESWITCH_FLTR_EGRESS;
 	} else if (ice_tc_is_dev_uplink(filter_dev) &&
-		   ice_is_port_repr_netdev(target_dev)) {
+		   ice_is_port_repr_netdev(target_dev) &&
+		   fltr->direction == ICE_ESWITCH_FLTR_INGRESS) {
 		repr = ice_netdev_to_repr(target_dev);
 
 		fltr->dest_vsi = repr->src_vsi;
-		fltr->direction = ICE_ESWITCH_FLTR_INGRESS;
 	} else {
 		NL_SET_ERR_MSG_MOD(fltr->extack,
-				   "Unsupported netdevice in switchdev mode");
+				   "The action is not supported for this netdevice");
 		return -EINVAL;
 	}
 
@@ -676,48 +713,11 @@ ice_tc_setup_drop_action(struct net_device *filter_dev,
 {
 	fltr->action.fltr_act = ICE_DROP_PACKET;
 
-	if (ice_is_port_repr_netdev(filter_dev)) {
-		fltr->direction = ICE_ESWITCH_FLTR_EGRESS;
-	} else if (ice_tc_is_dev_uplink(filter_dev)) {
-		fltr->direction = ICE_ESWITCH_FLTR_INGRESS;
-	} else {
+	if (!ice_tc_is_dev_uplink(filter_dev) &&
+	    !(ice_is_port_repr_netdev(filter_dev) &&
+	      fltr->direction == ICE_ESWITCH_FLTR_INGRESS)) {
 		NL_SET_ERR_MSG_MOD(fltr->extack,
-				   "Unsupported netdevice in switchdev mode");
-		return -EINVAL;
-	}
-
-	return 0;
-}
-
-static int ice_tc_setup_mirror_action(struct net_device *filter_dev,
-				      struct ice_tc_flower_fltr *fltr,
-				      struct net_device *target_dev)
-{
-	struct ice_repr *repr;
-
-	fltr->action.fltr_act = ICE_MIRROR_PACKET;
-
-	if (ice_is_port_repr_netdev(filter_dev) &&
-	    ice_is_port_repr_netdev(target_dev)) {
-		repr = ice_netdev_to_repr(target_dev);
-
-		fltr->dest_vsi = repr->src_vsi;
-		fltr->direction = ICE_ESWITCH_FLTR_EGRESS;
-	} else if (ice_is_port_repr_netdev(filter_dev) &&
-		   ice_tc_is_dev_uplink(target_dev)) {
-		repr = ice_netdev_to_repr(filter_dev);
-
-		fltr->dest_vsi = repr->src_vsi->back->eswitch.uplink_vsi;
-		fltr->direction = ICE_ESWITCH_FLTR_EGRESS;
-	} else if (ice_tc_is_dev_uplink(filter_dev) &&
-		   ice_is_port_repr_netdev(target_dev)) {
-		repr = ice_netdev_to_repr(target_dev);
-
-		fltr->dest_vsi = repr->src_vsi;
-		fltr->direction = ICE_ESWITCH_FLTR_INGRESS;
-	} else {
-		NL_SET_ERR_MSG_MOD(fltr->extack,
-				   "Unsupported netdevice in switchdev mode");
+				   "The action is not supported for this netdevice");
 		return -EINVAL;
 	}
 
@@ -739,16 +739,19 @@ static int ice_eswitch_tc_parse_action(struct net_device *filter_dev,
 		break;
 
 	case FLOW_ACTION_REDIRECT:
-		err = ice_tc_setup_redirect_action(filter_dev, fltr, act->dev);
+		err = ice_tc_setup_action(filter_dev, fltr,
+					  act->dev, ICE_FWD_TO_VSI);
 		if (err)
 			return err;
 
 		break;
 
 	case FLOW_ACTION_MIRRED:
-		err = ice_tc_setup_mirror_action(filter_dev, fltr, act->dev);
+		err = ice_tc_setup_action(filter_dev, fltr,
+					  act->dev, ICE_MIRROR_PACKET);
 		if (err)
 			return err;
+
 		break;
 
 	default:
@@ -759,10 +762,157 @@ static int ice_eswitch_tc_parse_action(struct net_device *filter_dev,
 	return 0;
 }
 
+static bool ice_is_fltr_lldp(struct ice_tc_flower_fltr *fltr)
+{
+	return fltr->outer_headers.l2_key.n_proto == htons(ETH_P_LLDP);
+}
+
+static bool ice_is_fltr_pf_tx_lldp(struct ice_tc_flower_fltr *fltr)
+{
+	struct ice_vsi *vsi = fltr->src_vsi, *uplink;
+
+	if (!ice_is_switchdev_running(vsi->back))
+		return false;
+
+	uplink = vsi->back->eswitch.uplink_vsi;
+	return vsi == uplink && fltr->action.fltr_act == ICE_DROP_PACKET &&
+	       ice_is_fltr_lldp(fltr) &&
+	       fltr->direction == ICE_ESWITCH_FLTR_EGRESS &&
+	       fltr->flags == ICE_TC_FLWR_FIELD_ETH_TYPE_ID;
+}
+
+static bool ice_is_fltr_vf_tx_lldp(struct ice_tc_flower_fltr *fltr)
+{
+	struct ice_vsi *vsi = fltr->src_vsi, *uplink;
+
+	uplink = vsi->back->eswitch.uplink_vsi;
+	return fltr->src_vsi->type == ICE_VSI_VF && ice_is_fltr_lldp(fltr) &&
+	       fltr->direction == ICE_ESWITCH_FLTR_EGRESS &&
+	       fltr->dest_vsi == uplink;
+}
+
+static struct ice_tc_flower_fltr *
+ice_find_pf_tx_lldp_fltr(struct ice_pf *pf)
+{
+	struct ice_tc_flower_fltr *fltr;
+
+	hlist_for_each_entry(fltr, &pf->tc_flower_fltr_list, tc_flower_node)
+		if (ice_is_fltr_pf_tx_lldp(fltr))
+			return fltr;
+
+	return NULL;
+}
+
+static bool ice_any_vf_lldp_tx_ena(struct ice_pf *pf)
+{
+	struct ice_vf *vf;
+	unsigned int bkt;
+
+	ice_for_each_vf(pf, bkt, vf)
+		if (vf->lldp_tx_ena)
+			return true;
+
+	return false;
+}
+
+int ice_pass_vf_tx_lldp(struct ice_vsi *vsi, bool deinit)
+{
+	struct ice_rule_query_data remove_entry = {
+		.rid = vsi->vf->lldp_recipe_id,
+		.rule_id = vsi->vf->lldp_rule_id,
+		.vsi_handle = vsi->idx,
+	};
+	struct ice_pf *pf = vsi->back;
+	int err;
+
+	if (vsi->vf->lldp_tx_ena)
+		return 0;
+
+	if (!deinit && !ice_find_pf_tx_lldp_fltr(vsi->back))
+		return -EINVAL;
+
+	if (!deinit && ice_any_vf_lldp_tx_ena(pf))
+		return -EINVAL;
+
+	err = ice_rem_adv_rule_by_id(&pf->hw, &remove_entry);
+	if (!err)
+		vsi->vf->lldp_tx_ena = true;
+
+	return err;
+}
+
+int ice_drop_vf_tx_lldp(struct ice_vsi *vsi, bool init)
+{
+	struct ice_rule_query_data rule_added;
+	struct ice_adv_rule_info rinfo = {
+		.priority = 7,
+		.src_vsi = vsi->idx,
+		.sw_act = {
+			.src = vsi->idx,
+			.flag = ICE_FLTR_TX,
+			.fltr_act = ICE_DROP_PACKET,
+			.vsi_handle = vsi->idx,
+		},
+		.flags_info.act_valid = true,
+	};
+	struct ice_adv_lkup_elem list[3];
+	struct ice_pf *pf = vsi->back;
+	int err;
+
+	if (!init && !vsi->vf->lldp_tx_ena)
+		return 0;
+
+	memset(list, 0, sizeof(list));
+	ice_rule_add_direction_metadata(&list[0]);
+	ice_rule_add_src_vsi_metadata(&list[1]);
+	list[2].type = ICE_ETYPE_OL;
+	list[2].h_u.ethertype.ethtype_id = htons(ETH_P_LLDP);
+	list[2].m_u.ethertype.ethtype_id = htons(0xFFFF);
+
+	err = ice_add_adv_rule(&pf->hw, list, ARRAY_SIZE(list), &rinfo,
+			       &rule_added);
+	if (err) {
+		dev_err(&pf->pdev->dev,
+			"Failed to add an LLDP rule to VSI 0x%X: %d\n",
+			vsi->idx, err);
+	} else {
+		vsi->vf->lldp_recipe_id = rule_added.rid;
+		vsi->vf->lldp_rule_id = rule_added.rule_id;
+		vsi->vf->lldp_tx_ena = false;
+	}
+
+	return err;
+}
+
+static void ice_handle_add_pf_lldp_drop_rule(struct ice_vsi *vsi)
+{
+	struct ice_tc_flower_fltr *fltr;
+	struct ice_pf *pf = vsi->back;
+
+	hlist_for_each_entry(fltr, &pf->tc_flower_fltr_list, tc_flower_node) {
+		if (!ice_is_fltr_vf_tx_lldp(fltr))
+			continue;
+		ice_pass_vf_tx_lldp(fltr->src_vsi, true);
+		break;
+	}
+}
+
+static void ice_handle_del_pf_lldp_drop_rule(struct ice_pf *pf)
+{
+	int i;
+
+	/* Make the VF LLDP fwd to uplink rule dormant */
+	ice_for_each_vsi(pf, i) {
+		struct ice_vsi *vf_vsi = pf->vsi[i];
+
+		if (vf_vsi && vf_vsi->type == ICE_VSI_VF)
+			ice_drop_vf_tx_lldp(vf_vsi, false);
+	}
+}
+
 static int
 ice_eswitch_add_tc_fltr(struct ice_vsi *vsi, struct ice_tc_flower_fltr *fltr)
 {
-	struct ice_tc_flower_lyr_2_4_hdrs *headers = &fltr->outer_headers;
 	struct ice_adv_rule_info rule_info = { 0 };
 	struct ice_rule_query_data rule_added;
 	struct ice_hw *hw = &vsi->back->hw;
@@ -772,12 +922,15 @@ ice_eswitch_add_tc_fltr(struct ice_vsi *vsi, struct ice_tc_flower_fltr *fltr)
 	int ret;
 	int i;
 
-	if (!flags || (flags & ICE_TC_FLWR_FIELD_ENC_SRC_L4_PORT)) {
+	if (flags & ICE_TC_FLWR_FIELD_ENC_SRC_L4_PORT) {
 		NL_SET_ERR_MSG_MOD(fltr->extack, "Unsupported encap field(s)");
 		return -EOPNOTSUPP;
 	}
 
-	lkups_cnt = ice_tc_count_lkups(flags, headers, fltr);
+	if (ice_is_fltr_vf_tx_lldp(fltr))
+		return ice_pass_vf_tx_lldp(vsi, false);
+
+	lkups_cnt = ice_tc_count_lkups(flags, fltr);
 	list = kcalloc(lkups_cnt, sizeof(*list), GFP_ATOMIC);
 	if (!list)
 		return -ENOMEM;
@@ -806,11 +959,27 @@ ice_eswitch_add_tc_fltr(struct ice_vsi *vsi, struct ice_tc_flower_fltr *fltr)
 		rule_info.sw_act.src = hw->pf_id;
 		rule_info.flags_info.act = ICE_SINGLE_ACT_LB_ENABLE;
 	} else if (fltr->direction == ICE_ESWITCH_FLTR_EGRESS &&
+		   !fltr->dest_vsi && vsi == vsi->back->eswitch.uplink_vsi) {
+		/* PF to Uplink */
+		rule_info.sw_act.flag |= ICE_FLTR_TX;
+		rule_info.sw_act.src = vsi->idx;
+	} else if (fltr->direction == ICE_ESWITCH_FLTR_EGRESS &&
 		   fltr->dest_vsi == vsi->back->eswitch.uplink_vsi) {
 		/* VF to Uplink */
 		rule_info.sw_act.flag |= ICE_FLTR_TX;
 		rule_info.sw_act.src = vsi->idx;
 		rule_info.flags_info.act = ICE_SINGLE_ACT_LAN_ENABLE;
+		/* This is a specific case. The destination VSI index is
+		 * overwritten by the source VSI index. This type of filter
+		 * should allow the packet to go to the LAN, not to the
+		 * VSI passed here. It should set LAN_EN bit only. However,
+		 * the VSI must be a valid one. Setting source VSI index
+		 * here is safe. Even if the result from switch is set LAN_EN
+		 * and LB_EN (which normally will pass the packet to this VSI)
+		 * packet won't be seen on the VSI, because local loopback is
+		 * turned off.
+		 */
+		rule_info.sw_act.vsi_handle = vsi->idx;
 	} else {
 		/* VF to VF */
 		rule_info.sw_act.flag |= ICE_FLTR_TX;
@@ -820,16 +989,23 @@ ice_eswitch_add_tc_fltr(struct ice_vsi *vsi, struct ice_tc_flower_fltr *fltr)
 
 	/* specify the cookie as filter_rule_id */
 	rule_info.fltr_rule_id = fltr->cookie;
+	rule_info.src_vsi = vsi->idx;
 
 	ret = ice_add_adv_rule(hw, list, lkups_cnt, &rule_info, &rule_added);
 	if (ret == -EEXIST) {
 		NL_SET_ERR_MSG_MOD(fltr->extack, "Unable to add filter because it already exist");
 		ret = -EINVAL;
 		goto exit;
+	} else if (ret == -ENOSPC) {
+		NL_SET_ERR_MSG_MOD(fltr->extack, "Unable to add filter: insufficient space available.");
+		goto exit;
 	} else if (ret) {
 		NL_SET_ERR_MSG_MOD(fltr->extack, "Unable to add filter due to error");
 		goto exit;
 	}
+
+	if (ice_is_fltr_pf_tx_lldp(fltr))
+		ice_handle_add_pf_lldp_drop_rule(vsi);
 
 	/* store the output params, which are needed later for removing
 	 * advanced switch filter
@@ -965,7 +1141,6 @@ static int
 ice_add_tc_flower_adv_fltr(struct ice_vsi *vsi,
 			   struct ice_tc_flower_fltr *tc_fltr)
 {
-	struct ice_tc_flower_lyr_2_4_hdrs *headers = &tc_fltr->outer_headers;
 	struct ice_adv_rule_info rule_info = {0};
 	struct ice_rule_query_data rule_added;
 	struct ice_adv_lkup_elem *list;
@@ -1001,7 +1176,7 @@ ice_add_tc_flower_adv_fltr(struct ice_vsi *vsi,
 			return PTR_ERR(dest_vsi);
 	}
 
-	lkups_cnt = ice_tc_count_lkups(flags, headers, tc_fltr);
+	lkups_cnt = ice_tc_count_lkups(flags, tc_fltr);
 	list = kcalloc(lkups_cnt, sizeof(*list), GFP_ATOMIC);
 	if (!list)
 		return -ENOMEM;
@@ -1036,8 +1211,13 @@ ice_add_tc_flower_adv_fltr(struct ice_vsi *vsi,
 			tc_fltr->action.fwd.q.hw_queue, lkups_cnt);
 		break;
 	case ICE_DROP_PACKET:
-		rule_info.sw_act.flag |= ICE_FLTR_RX;
-		rule_info.sw_act.src = hw->pf_id;
+		if (tc_fltr->direction == ICE_ESWITCH_FLTR_EGRESS) {
+			rule_info.sw_act.flag |= ICE_FLTR_TX;
+			rule_info.sw_act.src = vsi->idx;
+		} else {
+			rule_info.sw_act.flag |= ICE_FLTR_RX;
+			rule_info.sw_act.src = hw->pf_id;
+		}
 		rule_info.priority = ICE_SWITCH_FLTR_PRIO_VSI;
 		break;
 	default:
@@ -1050,6 +1230,10 @@ ice_add_tc_flower_adv_fltr(struct ice_vsi *vsi,
 		NL_SET_ERR_MSG_MOD(tc_fltr->extack,
 				   "Unable to add filter because it already exist");
 		ret = -EINVAL;
+		goto exit;
+	} else if (ret == -ENOSPC) {
+		NL_SET_ERR_MSG_MOD(tc_fltr->extack,
+				   "Unable to add filter: insufficient space available.");
 		goto exit;
 	} else if (ret) {
 		NL_SET_ERR_MSG_MOD(tc_fltr->extack,
@@ -1344,6 +1528,7 @@ ice_parse_tunnel_attr(struct net_device *dev, struct flow_rule *rule,
 		      struct ice_tc_flower_fltr *fltr)
 {
 	struct ice_tc_flower_lyr_2_4_hdrs *headers = &fltr->outer_headers;
+	struct netlink_ext_ack *extack = fltr->extack;
 	struct flow_match_control enc_control;
 
 	fltr->tunnel_type = ice_tc_tun_get_type(dev);
@@ -1363,6 +1548,9 @@ ice_parse_tunnel_attr(struct net_device *dev, struct flow_rule *rule,
 	}
 
 	flow_rule_match_enc_control(rule, &enc_control);
+
+	if (flow_rule_has_enc_control_flags(enc_control.mask->flags, extack))
+		return -EOPNOTSUPP;
 
 	if (enc_control.key->addr_type == FLOW_DISSECTOR_KEY_IPV4_ADDRS) {
 		struct flow_match_ipv4_addrs match;
@@ -1401,7 +1589,8 @@ ice_parse_tunnel_attr(struct net_device *dev, struct flow_rule *rule,
 		}
 	}
 
-	if (flow_rule_match_key(rule, FLOW_DISSECTOR_KEY_ENC_OPTS)) {
+	if (flow_rule_match_key(rule, FLOW_DISSECTOR_KEY_ENC_OPTS) &&
+	    (fltr->tunnel_type == TNL_GTPU || fltr->tunnel_type == TNL_GTPC)) {
 		struct flow_match_enc_opts match;
 
 		flow_rule_match_enc_opts(rule, &match);
@@ -1412,7 +1601,21 @@ ice_parse_tunnel_attr(struct net_device *dev, struct flow_rule *rule,
 		memcpy(&fltr->gtp_pdu_info_masks, &match.mask->data[0],
 		       sizeof(struct gtp_pdu_session_info));
 
-		fltr->flags |= ICE_TC_FLWR_FIELD_ENC_OPTS;
+		fltr->flags |= ICE_TC_FLWR_FIELD_GTP_OPTS;
+	}
+
+	if (flow_rule_match_key(rule, FLOW_DISSECTOR_KEY_ENC_OPTS) &&
+	    fltr->tunnel_type == TNL_PFCP) {
+		struct flow_match_enc_opts match;
+
+		flow_rule_match_enc_opts(rule, &match);
+
+		memcpy(&fltr->pfcp_meta_keys, match.key->data,
+		       sizeof(struct pfcp_metadata));
+		memcpy(&fltr->pfcp_meta_masks, match.mask->data,
+		       sizeof(struct pfcp_metadata));
+
+		fltr->flags |= ICE_TC_FLWR_FIELD_PFCP_OPTS;
 	}
 
 	return 0;
@@ -1424,11 +1627,16 @@ ice_parse_tunnel_attr(struct net_device *dev, struct flow_rule *rule,
  * @filter_dev: Pointer to device on which filter is being added
  * @f: Pointer to struct flow_cls_offload
  * @fltr: Pointer to filter structure
+ * @ingress: if the rule is added to an ingress block
+ *
+ * Return: 0 if the flower was parsed successfully, -EINVAL if the flower
+ *	   cannot be parsed, -EOPNOTSUPP if such filter cannot be configured
+ *	   for the given VSI.
  */
 static int
 ice_parse_cls_flower(struct net_device *filter_dev, struct ice_vsi *vsi,
 		     struct flow_cls_offload *f,
-		     struct ice_tc_flower_fltr *fltr)
+		     struct ice_tc_flower_fltr *fltr, bool ingress)
 {
 	struct ice_tc_flower_lyr_2_4_hdrs *headers = &fltr->outer_headers;
 	struct flow_rule *rule = flow_cls_offload_flow_rule(f);
@@ -1473,15 +1681,22 @@ ice_parse_cls_flower(struct net_device *filter_dev, struct ice_vsi *vsi,
 			return err;
 		}
 
-		/* header pointers should point to the inner headers, outer
-		 * header were already set by ice_parse_tunnel_attr
-		 */
-		headers = &fltr->inner_headers;
+		/* PFCP is considered non-tunneled - don't swap headers. */
+		if (fltr->tunnel_type != TNL_PFCP) {
+			/* Header pointers should point to the inner headers,
+			 * outer header were already set by
+			 * ice_parse_tunnel_attr().
+			 */
+			headers = &fltr->inner_headers;
+		}
 	} else if (dissector->used_keys &
 		  (BIT_ULL(FLOW_DISSECTOR_KEY_ENC_IPV4_ADDRS) |
 		   BIT_ULL(FLOW_DISSECTOR_KEY_ENC_IPV6_ADDRS) |
 		   BIT_ULL(FLOW_DISSECTOR_KEY_ENC_KEYID) |
-		   BIT_ULL(FLOW_DISSECTOR_KEY_ENC_PORTS))) {
+		   BIT_ULL(FLOW_DISSECTOR_KEY_ENC_PORTS) |
+		   BIT_ULL(FLOW_DISSECTOR_KEY_ENC_IP) |
+		   BIT_ULL(FLOW_DISSECTOR_KEY_ENC_OPTS) |
+		   BIT_ULL(FLOW_DISSECTOR_KEY_ENC_CONTROL))) {
 		NL_SET_ERR_MSG_MOD(fltr->extack, "Tunnel key used, but device isn't a tunnel");
 		return -EOPNOTSUPP;
 	} else {
@@ -1503,6 +1718,20 @@ ice_parse_cls_flower(struct net_device *filter_dev, struct ice_vsi *vsi,
 			n_proto_mask = 0;
 		} else {
 			fltr->flags |= ICE_TC_FLWR_FIELD_ETH_TYPE_ID;
+		}
+
+		if (!ingress) {
+			bool switchdev =
+				ice_is_eswitch_mode_switchdev(vsi->back);
+
+			if (switchdev != (n_proto_key == ETH_P_LLDP)) {
+				NL_SET_ERR_MSG_FMT_MOD(fltr->extack,
+						       "%sLLDP filtering is not supported on egress in %s mode",
+						       switchdev ? "Non-" : "",
+						       switchdev ? "switchdev" :
+								   "legacy");
+				return -EOPNOTSUPP;
+			}
 		}
 
 		headers->l2_key.n_proto = cpu_to_be16(n_proto_key);
@@ -1627,6 +1856,10 @@ ice_parse_cls_flower(struct net_device *filter_dev, struct ice_vsi *vsi,
 		flow_rule_match_control(rule, &match);
 
 		addr_type = match.key->addr_type;
+
+		if (flow_rule_has_control_flags(match.mask->flags,
+						fltr->extack))
+			return -EOPNOTSUPP;
 	}
 
 	if (addr_type == FLOW_DISSECTOR_KEY_IPV4_ADDRS) {
@@ -1676,6 +1909,14 @@ ice_parse_cls_flower(struct net_device *filter_dev, struct ice_vsi *vsi,
 			return -EINVAL;
 		}
 	}
+
+	/* Ingress filter on representor results in an egress filter in HW
+	 * and vice versa
+	 */
+	ingress = ice_is_port_repr_netdev(filter_dev) ? !ingress : ingress;
+	fltr->direction = ingress ? ICE_ESWITCH_FLTR_INGRESS :
+				    ICE_ESWITCH_FLTR_EGRESS;
+
 	return 0;
 }
 
@@ -1889,6 +2130,12 @@ static int ice_del_tc_fltr(struct ice_vsi *vsi, struct ice_tc_flower_fltr *fltr)
 	struct ice_pf *pf = vsi->back;
 	int err;
 
+	if (ice_is_fltr_pf_tx_lldp(fltr))
+		ice_handle_del_pf_lldp_drop_rule(pf);
+
+	if (ice_is_fltr_vf_tx_lldp(fltr))
+		return ice_drop_vf_tx_lldp(vsi, false);
+
 	rule_rem.rid = fltr->rid;
 	rule_rem.rule_id = fltr->rule_id;
 	rule_rem.vsi_handle = fltr->dest_vsi_handle;
@@ -1925,14 +2172,18 @@ static int ice_del_tc_fltr(struct ice_vsi *vsi, struct ice_tc_flower_fltr *fltr)
  * @vsi: Pointer to VSI
  * @f: Pointer to flower offload structure
  * @__fltr: Pointer to struct ice_tc_flower_fltr
+ * @ingress: if the rule is added to an ingress block
  *
  * This function parses TC-flower input fields, parses action,
  * and adds a filter.
+ *
+ * Return: 0 if the filter was successfully added,
+ *	   negative error code otherwise.
  */
 static int
 ice_add_tc_fltr(struct net_device *netdev, struct ice_vsi *vsi,
 		struct flow_cls_offload *f,
-		struct ice_tc_flower_fltr **__fltr)
+		struct ice_tc_flower_fltr **__fltr, bool ingress)
 {
 	struct ice_tc_flower_fltr *fltr;
 	int err;
@@ -1949,7 +2200,7 @@ ice_add_tc_fltr(struct net_device *netdev, struct ice_vsi *vsi,
 	fltr->src_vsi = vsi;
 	INIT_HLIST_NODE(&fltr->tc_flower_node);
 
-	err = ice_parse_cls_flower(netdev, vsi, f, fltr);
+	err = ice_parse_cls_flower(netdev, vsi, f, fltr, ingress);
 	if (err < 0)
 		goto err;
 
@@ -1992,10 +2243,13 @@ ice_find_tc_flower_fltr(struct ice_pf *pf, unsigned long cookie)
  * @netdev: Pointer to filter device
  * @vsi: Pointer to VSI
  * @cls_flower: Pointer to flower offload structure
+ * @ingress: if the rule is added to an ingress block
+ *
+ * Return: 0 if the flower was successfully added,
+ *	   negative error code otherwise.
  */
-int
-ice_add_cls_flower(struct net_device *netdev, struct ice_vsi *vsi,
-		   struct flow_cls_offload *cls_flower)
+int ice_add_cls_flower(struct net_device *netdev, struct ice_vsi *vsi,
+		       struct flow_cls_offload *cls_flower, bool ingress)
 {
 	struct netlink_ext_ack *extack = cls_flower->common.extack;
 	struct net_device *vsi_netdev = vsi->netdev;
@@ -2030,7 +2284,7 @@ ice_add_cls_flower(struct net_device *netdev, struct ice_vsi *vsi,
 	}
 
 	/* prep and add TC-flower filter in HW */
-	err = ice_add_tc_fltr(netdev, vsi, cls_flower, &fltr);
+	err = ice_add_tc_fltr(netdev, vsi, cls_flower, &fltr, ingress);
 	if (err)
 		return err;
 

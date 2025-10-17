@@ -267,7 +267,7 @@ resync_post_get_progress_params(struct mlx5e_icosq *sq,
 		goto err_out;
 	}
 
-	pdev = mlx5_core_dma_dev(sq->channel->priv->mdev);
+	pdev = mlx5_core_dma_dev(sq->channel->mdev);
 	buf->dma_addr = dma_map_single(pdev, &buf->progress,
 				       PROGRESS_PARAMS_PADDED_SIZE, DMA_FROM_DEVICE);
 	if (unlikely(dma_mapping_error(pdev, buf->dma_addr))) {
@@ -425,14 +425,12 @@ void mlx5e_ktls_handle_get_psv_completion(struct mlx5e_icosq_wqe_info *wi,
 {
 	struct mlx5e_ktls_rx_resync_buf *buf = wi->tls_get_params.buf;
 	struct mlx5e_ktls_offload_context_rx *priv_rx;
-	struct mlx5e_ktls_rx_resync_ctx *resync;
 	u8 tracker_state, auth_state, *ctx;
 	struct device *dev;
 	u32 hw_seq;
 
 	priv_rx = buf->priv_rx;
-	resync = &priv_rx->resync;
-	dev = mlx5_core_dma_dev(resync->priv->mdev);
+	dev = mlx5_core_dma_dev(sq->channel->mdev);
 	if (unlikely(test_bit(MLX5E_PRIV_RX_FLAG_DELETING, priv_rx->flags)))
 		goto out;
 
@@ -500,9 +498,9 @@ static void resync_update_sn(struct mlx5e_rq *rq, struct sk_buff *skb)
 		depth += sizeof(struct iphdr);
 		th = (void *)iph + sizeof(struct iphdr);
 
-		sk = inet_lookup_established(net, net->ipv4.tcp_death_row.hashinfo,
-					     iph->saddr, th->source, iph->daddr,
-					     th->dest, netdev->ifindex);
+		sk = inet_lookup_established(net, iph->saddr, th->source,
+					     iph->daddr, th->dest,
+					     netdev->ifindex);
 #if IS_ENABLED(CONFIG_IPV6)
 	} else {
 		struct ipv6hdr *ipv6h = (struct ipv6hdr *)iph;
@@ -510,8 +508,7 @@ static void resync_update_sn(struct mlx5e_rq *rq, struct sk_buff *skb)
 		depth += sizeof(struct ipv6hdr);
 		th = (void *)ipv6h + sizeof(struct ipv6hdr);
 
-		sk = __inet6_lookup_established(net, net->ipv4.tcp_death_row.hashinfo,
-						&ipv6h->saddr, th->source,
+		sk = __inet6_lookup_established(net, &ipv6h->saddr, th->source,
 						&ipv6h->daddr, ntohs(th->dest),
 						netdev->ifindex, 0);
 #endif

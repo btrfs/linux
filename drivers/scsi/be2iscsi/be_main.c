@@ -5240,7 +5240,7 @@ static void beiscsi_eqd_update_work(struct work_struct *work)
 
 static void beiscsi_hw_tpe_check(struct timer_list *t)
 {
-	struct beiscsi_hba *phba = from_timer(phba, t, hw_check);
+	struct beiscsi_hba *phba = timer_container_of(phba, t, hw_check);
 	u32 wait;
 
 	/* if not TPE, do nothing */
@@ -5257,7 +5257,7 @@ static void beiscsi_hw_tpe_check(struct timer_list *t)
 
 static void beiscsi_hw_health_check(struct timer_list *t)
 {
-	struct beiscsi_hba *phba = from_timer(phba, t, hw_check);
+	struct beiscsi_hba *phba = timer_container_of(phba, t, hw_check);
 
 	beiscsi_detect_ue(phba);
 	if (beiscsi_detect_ue(phba)) {
@@ -5448,7 +5448,7 @@ static pci_ers_result_t beiscsi_eeh_err_detected(struct pci_dev *pdev,
 		    "BM_%d : EEH error detected\n");
 
 	/* first stop UE detection when PCI error detected */
-	del_timer_sync(&phba->hw_check);
+	timer_delete_sync(&phba->hw_check);
 	cancel_delayed_work_sync(&phba->recover_port);
 
 	/* sessions are no longer valid, so first fail the sessions */
@@ -5528,7 +5528,6 @@ static int beiscsi_dev_probe(struct pci_dev *pcidev,
 	struct beiscsi_hba *phba = NULL;
 	struct be_eq_obj *pbe_eq;
 	unsigned int s_handle;
-	char wq_name[20];
 	int ret, i;
 
 	ret = beiscsi_enable_pci(pcidev);
@@ -5634,9 +5633,8 @@ static int beiscsi_dev_probe(struct pci_dev *pcidev,
 
 	phba->ctrl.mcc_alloc_index = phba->ctrl.mcc_free_index = 0;
 
-	snprintf(wq_name, sizeof(wq_name), "beiscsi_%02x_wq",
-		 phba->shost->host_no);
-	phba->wq = alloc_workqueue("%s", WQ_MEM_RECLAIM, 1, wq_name);
+	phba->wq = alloc_workqueue("beiscsi_%02x_wq", WQ_MEM_RECLAIM, 1,
+				   phba->shost->host_no);
 	if (!phba->wq) {
 		beiscsi_log(phba, KERN_ERR, BEISCSI_LOG_INIT,
 			    "BM_%d : beiscsi_dev_probe-"
@@ -5748,7 +5746,7 @@ static void beiscsi_remove(struct pci_dev *pcidev)
 	}
 
 	/* first stop UE detection before unloading */
-	del_timer_sync(&phba->hw_check);
+	timer_delete_sync(&phba->hw_check);
 	cancel_delayed_work_sync(&phba->recover_port);
 	cancel_work_sync(&phba->sess_work);
 
@@ -5778,7 +5776,7 @@ static void beiscsi_remove(struct pci_dev *pcidev)
 }
 
 
-static struct pci_error_handlers beiscsi_eeh_handlers = {
+static const struct pci_error_handlers beiscsi_eeh_handlers = {
 	.error_detected = beiscsi_eeh_err_detected,
 	.slot_reset = beiscsi_eeh_reset,
 	.resume = beiscsi_eeh_resume,

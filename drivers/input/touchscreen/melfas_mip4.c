@@ -18,7 +18,7 @@
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/slab.h>
-#include <asm/unaligned.h>
+#include <linux/unaligned.h>
 
 #define MIP4_DEVICE_NAME	"mip4_ts"
 
@@ -1554,7 +1554,7 @@ static DEFINE_SIMPLE_DEV_PM_OPS(mip4_pm_ops, mip4_suspend, mip4_resume);
 
 #ifdef CONFIG_OF
 static const struct of_device_id mip4_of_match[] = {
-	{ .compatible = "melfas,"MIP4_DEVICE_NAME, },
+	{ .compatible = "melfas,mip4_ts", },
 	{ },
 };
 MODULE_DEVICE_TABLE(of, mip4_of_match);
@@ -1569,8 +1569,8 @@ MODULE_DEVICE_TABLE(acpi, mip4_acpi_match);
 #endif
 
 static const struct i2c_device_id mip4_i2c_ids[] = {
-	{ MIP4_DEVICE_NAME, 0 },
-	{ },
+	{ MIP4_DEVICE_NAME },
+	{ }
 };
 MODULE_DEVICE_TABLE(i2c, mip4_i2c_ids);
 

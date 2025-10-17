@@ -103,7 +103,7 @@ struct ap_tapq_hwinfo {
 			unsigned int accel :  1; /* A */
 			unsigned int ep11  :  1; /* X */
 			unsigned int apxa  :  1; /* APXA */
-			unsigned int	   :  1;
+			unsigned int slcf  :  1; /* Cmd filtering avail. */
 			unsigned int class :  8;
 			unsigned int bs	   :  2; /* SE bind/assoc */
 			unsigned int	   : 14;
@@ -143,7 +143,7 @@ static inline struct ap_queue_status ap_tapq(ap_qid_t qid,
 		"	lghi	2,0\n"			/* 0 into gr2 */
 		"	.insn	rre,0xb2af0000,0,0\n"	/* PQAP(TAPQ) */
 		"	lgr	%[reg1],1\n"		/* gr1 (status) into reg1 */
-		"	lgr	%[reg2],2\n"		/* gr2 into reg2 */
+		"	lgr	%[reg2],2"		/* gr2 into reg2 */
 		: [reg1] "=&d" (reg1.value), [reg2] "=&d" (reg2)
 		: [qid] "d" (qid)
 		: "cc", "0", "1", "2");
@@ -186,7 +186,7 @@ static inline struct ap_queue_status ap_rapq(ap_qid_t qid, int fbit)
 	asm volatile(
 		"	lgr	0,%[reg0]\n"		/* qid arg into gr0 */
 		"	.insn	rre,0xb2af0000,0,0\n"	/* PQAP(RAPQ) */
-		"	lgr	%[reg1],1\n"		/* gr1 (status) into reg1 */
+		"	lgr	%[reg1],1"		/* gr1 (status) into reg1 */
 		: [reg1] "=&d" (reg1.value)
 		: [reg0] "d" (reg0)
 		: "cc", "0", "1");
@@ -211,7 +211,7 @@ static inline struct ap_queue_status ap_zapq(ap_qid_t qid, int fbit)
 	asm volatile(
 		"	lgr	0,%[reg0]\n"		/* qid arg into gr0 */
 		"	.insn	rre,0xb2af0000,0,0\n"	/* PQAP(ZAPQ) */
-		"	lgr	%[reg1],1\n"		/* gr1 (status) into reg1 */
+		"	lgr	%[reg1],1"		/* gr1 (status) into reg1 */
 		: [reg1] "=&d" (reg1.value)
 		: [reg0] "d" (reg0)
 		: "cc", "0", "1");
@@ -223,13 +223,18 @@ static inline struct ap_queue_status ap_zapq(ap_qid_t qid, int fbit)
  * config info as returned by the ap_qci() function.
  */
 struct ap_config_info {
-	unsigned int apsc	 : 1;	/* S bit */
-	unsigned int apxa	 : 1;	/* N bit */
-	unsigned int qact	 : 1;	/* C bit */
-	unsigned int rc8a	 : 1;	/* R bit */
-	unsigned int		 : 4;
-	unsigned int apsb	 : 1;	/* B bit */
-	unsigned int		 : 23;
+	union {
+		unsigned int flags;
+		struct {
+			unsigned int apsc	 : 1;	/* S bit */
+			unsigned int apxa	 : 1;	/* N bit */
+			unsigned int qact	 : 1;	/* C bit */
+			unsigned int rc8a	 : 1;	/* R bit */
+			unsigned int		 : 4;
+			unsigned int apsb	 : 1;	/* B bit */
+			unsigned int		 : 23;
+		};
+	};
 	unsigned char na;		/* max # of APs - 1 */
 	unsigned char nd;		/* max # of Domains - 1 */
 	unsigned char _reserved0[10];
@@ -310,7 +315,7 @@ static inline struct ap_queue_status ap_aqic(ap_qid_t qid,
 		"	lgr	1,%[reg1]\n"		/* irq ctrl into gr1 */
 		"	lgr	2,%[reg2]\n"		/* ni addr into gr2 */
 		"	.insn	rre,0xb2af0000,0,0\n"	/* PQAP(AQIC) */
-		"	lgr	%[reg1],1\n"		/* gr1 (status) into reg1 */
+		"	lgr	%[reg1],1"		/* gr1 (status) into reg1 */
 		: [reg1] "+&d" (reg1.value)
 		: [reg0] "d" (reg0), [reg2] "d" (reg2)
 		: "cc", "memory", "0", "1", "2");
@@ -358,7 +363,7 @@ static inline struct ap_queue_status ap_qact(ap_qid_t qid, int ifbit,
 		"	lgr	1,%[reg1]\n"		/* qact in info into gr1 */
 		"	.insn	rre,0xb2af0000,0,0\n"	/* PQAP(QACT) */
 		"	lgr	%[reg1],1\n"		/* gr1 (status) into reg1 */
-		"	lgr	%[reg2],2\n"		/* qact out info into reg2 */
+		"	lgr	%[reg2],2"		/* qact out info into reg2 */
 		: [reg1] "+&d" (reg1.value), [reg2] "=&d" (reg2)
 		: [reg0] "d" (reg0)
 		: "cc", "0", "1", "2");
@@ -383,7 +388,7 @@ static inline struct ap_queue_status ap_bapq(ap_qid_t qid)
 	asm volatile(
 		"	lgr	0,%[reg0]\n"		/* qid arg into gr0 */
 		"	.insn	rre,0xb2af0000,0,0\n"	/* PQAP(BAPQ) */
-		"	lgr	%[reg1],1\n"		/* gr1 (status) into reg1 */
+		"	lgr	%[reg1],1"		/* gr1 (status) into reg1 */
 		: [reg1] "=&d" (reg1.value)
 		: [reg0] "d" (reg0)
 		: "cc", "0", "1");
@@ -411,7 +416,7 @@ static inline struct ap_queue_status ap_aapq(ap_qid_t qid, unsigned int sec_idx)
 		"	lgr	0,%[reg0]\n"		/* qid arg into gr0 */
 		"	lgr	2,%[reg2]\n"		/* secret index into gr2 */
 		"	.insn	rre,0xb2af0000,0,0\n"	/* PQAP(AAPQ) */
-		"	lgr	%[reg1],1\n"		/* gr1 (status) into reg1 */
+		"	lgr	%[reg1],1"		/* gr1 (status) into reg1 */
 		: [reg1] "=&d" (reg1.value)
 		: [reg0] "d" (reg0), [reg2] "d" (reg2)
 		: "cc", "0", "1", "2");
@@ -448,7 +453,7 @@ static inline struct ap_queue_status ap_nqap(ap_qid_t qid,
 		"	lgr	0,%[reg0]\n"  /* qid param in gr0 */
 		"0:	.insn	rre,0xb2ad0000,%[nqap_r1],%[nqap_r2]\n"
 		"	brc	2,0b\n"       /* handle partial completion */
-		"	lgr	%[reg1],1\n"  /* gr1 (status) into reg1 */
+		"	lgr	%[reg1],1"    /* gr1 (status) into reg1 */
 		: [reg0] "+&d" (reg0), [reg1] "=&d" (reg1.value),
 		  [nqap_r2] "+&d" (nqap_r2.pair)
 		: [nqap_r1] "d" (nqap_r1.pair)
@@ -513,7 +518,7 @@ static inline struct ap_queue_status ap_dqap(ap_qid_t qid,
 		"	brc	6,0b\n"        /* handle partial complete */
 		"2:	lgr	%[reg0],0\n"   /* gr0 (qid + info) into reg0 */
 		"	lgr	%[reg1],1\n"   /* gr1 (status) into reg1 */
-		"	lgr	%[reg2],2\n"   /* gr2 (res length) into reg2 */
+		"	lgr	%[reg2],2"     /* gr2 (res length) into reg2 */
 		: [reg0] "+&d" (reg0), [reg1] "=&d" (reg1.value),
 		  [reg2] "=&d" (reg2), [rp1] "+&d" (rp1.pair),
 		  [rp2] "+&d" (rp2.pair)
@@ -543,16 +548,5 @@ static inline struct ap_queue_status ap_dqap(ap_qid_t qid,
 
 	return reg1.status;
 }
-
-/*
- * Interface to tell the AP bus code that a configuration
- * change has happened. The bus code should at least do
- * an ap bus resource rescan.
- */
-#if IS_ENABLED(CONFIG_ZCRYPT)
-void ap_bus_cfg_chg(void);
-#else
-static inline void ap_bus_cfg_chg(void){}
-#endif
 
 #endif /* _ASM_S390_AP_H_ */

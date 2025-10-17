@@ -7,7 +7,8 @@
 #define KVM_POSSIBLE_CR0_GUEST_BITS	(X86_CR0_TS | X86_CR0_WP)
 #define KVM_POSSIBLE_CR4_GUEST_BITS				  \
 	(X86_CR4_PVI | X86_CR4_DE | X86_CR4_PCE | X86_CR4_OSFXSR  \
-	 | X86_CR4_OSXMMEXCPT | X86_CR4_PGE | X86_CR4_TSD | X86_CR4_FSGSBASE)
+	 | X86_CR4_OSXMMEXCPT | X86_CR4_PGE | X86_CR4_TSD | X86_CR4_FSGSBASE \
+	 | X86_CR4_CET)
 
 #define X86_CR0_PDPTR_BITS    (X86_CR0_CD | X86_CR0_NW | X86_CR0_PG)
 #define X86_CR4_TLBFLUSH_BITS (X86_CR4_PGE | X86_CR4_PCIDE | X86_CR4_PAE | X86_CR4_SMEP)
@@ -44,6 +45,18 @@ BUILD_KVM_GPR_ACCESSORS(r15, R15)
 #endif
 
 /*
+ * Using the register cache from interrupt context is generally not allowed, as
+ * caching a register and marking it available/dirty can't be done atomically,
+ * i.e. accesses from interrupt context may clobber state or read stale data if
+ * the vCPU task is in the process of updating the cache.  The exception is if
+ * KVM is handling a PMI IRQ/NMI VM-Exit, as that bound code sequence doesn't
+ * touch the cache, it runs after the cache is reset (post VM-Exit), and PMIs
+ * need to access several registers that are cacheable.
+ */
+#define kvm_assert_register_caching_allowed(vcpu)		\
+	lockdep_assert_once(in_task() || kvm_arch_pmi_in_guest(vcpu))
+
+/*
  * avail  dirty
  * 0	  0	  register in VMCS/VMCB
  * 0	  1	  *INVALID*
@@ -53,24 +66,28 @@ BUILD_KVM_GPR_ACCESSORS(r15, R15)
 static inline bool kvm_register_is_available(struct kvm_vcpu *vcpu,
 					     enum kvm_reg reg)
 {
+	kvm_assert_register_caching_allowed(vcpu);
 	return test_bit(reg, (unsigned long *)&vcpu->arch.regs_avail);
 }
 
 static inline bool kvm_register_is_dirty(struct kvm_vcpu *vcpu,
 					 enum kvm_reg reg)
 {
+	kvm_assert_register_caching_allowed(vcpu);
 	return test_bit(reg, (unsigned long *)&vcpu->arch.regs_dirty);
 }
 
 static inline void kvm_register_mark_available(struct kvm_vcpu *vcpu,
 					       enum kvm_reg reg)
 {
+	kvm_assert_register_caching_allowed(vcpu);
 	__set_bit(reg, (unsigned long *)&vcpu->arch.regs_avail);
 }
 
 static inline void kvm_register_mark_dirty(struct kvm_vcpu *vcpu,
 					   enum kvm_reg reg)
 {
+	kvm_assert_register_caching_allowed(vcpu);
 	__set_bit(reg, (unsigned long *)&vcpu->arch.regs_avail);
 	__set_bit(reg, (unsigned long *)&vcpu->arch.regs_dirty);
 }
@@ -84,6 +101,7 @@ static inline void kvm_register_mark_dirty(struct kvm_vcpu *vcpu,
 static __always_inline bool kvm_register_test_and_mark_available(struct kvm_vcpu *vcpu,
 								 enum kvm_reg reg)
 {
+	kvm_assert_register_caching_allowed(vcpu);
 	return arch___test_and_set_bit(reg, (unsigned long *)&vcpu->arch.regs_avail);
 }
 
@@ -98,7 +116,7 @@ static inline unsigned long kvm_register_read_raw(struct kvm_vcpu *vcpu, int reg
 		return 0;
 
 	if (!kvm_register_is_available(vcpu, reg))
-		static_call(kvm_x86_cache_reg)(vcpu, reg);
+		kvm_x86_call(cache_reg)(vcpu, reg);
 
 	return vcpu->arch.regs[reg];
 }
@@ -138,7 +156,7 @@ static inline u64 kvm_pdptr_read(struct kvm_vcpu *vcpu, int index)
 	might_sleep();  /* on svm */
 
 	if (!kvm_register_is_available(vcpu, VCPU_EXREG_PDPTR))
-		static_call(kvm_x86_cache_reg)(vcpu, VCPU_EXREG_PDPTR);
+		kvm_x86_call(cache_reg)(vcpu, VCPU_EXREG_PDPTR);
 
 	return vcpu->arch.walk_mmu->pdptrs[index];
 }
@@ -153,7 +171,7 @@ static inline ulong kvm_read_cr0_bits(struct kvm_vcpu *vcpu, ulong mask)
 	ulong tmask = mask & KVM_POSSIBLE_CR0_GUEST_BITS;
 	if ((tmask & vcpu->arch.cr0_guest_owned_bits) &&
 	    !kvm_register_is_available(vcpu, VCPU_EXREG_CR0))
-		static_call(kvm_x86_cache_reg)(vcpu, VCPU_EXREG_CR0);
+		kvm_x86_call(cache_reg)(vcpu, VCPU_EXREG_CR0);
 	return vcpu->arch.cr0 & mask;
 }
 
@@ -175,7 +193,7 @@ static inline ulong kvm_read_cr4_bits(struct kvm_vcpu *vcpu, ulong mask)
 	ulong tmask = mask & KVM_POSSIBLE_CR4_GUEST_BITS;
 	if ((tmask & vcpu->arch.cr4_guest_owned_bits) &&
 	    !kvm_register_is_available(vcpu, VCPU_EXREG_CR4))
-		static_call(kvm_x86_cache_reg)(vcpu, VCPU_EXREG_CR4);
+		kvm_x86_call(cache_reg)(vcpu, VCPU_EXREG_CR4);
 	return vcpu->arch.cr4 & mask;
 }
 
@@ -190,7 +208,7 @@ static __always_inline bool kvm_is_cr4_bit_set(struct kvm_vcpu *vcpu,
 static inline ulong kvm_read_cr3(struct kvm_vcpu *vcpu)
 {
 	if (!kvm_register_is_available(vcpu, VCPU_EXREG_CR3))
-		static_call(kvm_x86_cache_reg)(vcpu, VCPU_EXREG_CR3);
+		kvm_x86_call(cache_reg)(vcpu, VCPU_EXREG_CR3);
 	return vcpu->arch.cr3;
 }
 

@@ -11,6 +11,10 @@ config APERTURE_HELPERS
 	  Support tracking and hand-over of aperture ownership. Required
 	  by graphics drivers for firmware-provided framebuffers.
 
+config SCREEN_INFO
+	bool
+	default n
+
 config STI_CORE
 	bool
 	depends on PARISC
@@ -18,10 +22,7 @@ config STI_CORE
 	  STI refers to the HP "Standard Text Interface" which is a set of
 	  BIOS routines contained in a ROM chip in HP PA-RISC based machines.
 
-config VIDEO_CMDLINE
-	bool
-
-config VIDEO_NOMODESET
+config VIDEO
 	bool
 	default n
 
@@ -38,6 +39,7 @@ source "drivers/gpu/vga/Kconfig"
 
 source "drivers/gpu/host1x/Kconfig"
 source "drivers/gpu/ipu-v3/Kconfig"
+source "drivers/gpu/nova-core/Kconfig"
 
 source "drivers/gpu/drm/Kconfig"
 
@@ -59,6 +61,23 @@ config HDMI
 
 endif # HAS_IOMEM
 
+config FIRMWARE_EDID
+	bool "Enable firmware EDID"
+	depends on X86
+	help
+	  This enables access to the EDID transferred from the firmware.
+	  On x86, this is from the VESA BIOS. DRM display drivers will
+	  be able to export the information to userspace.
+
+	  Also enable this if DDC/I2C transfers do not work for your driver
+	  and if you are using nvidiafb, i810fb or savagefb.
+
+	  In general, choosing Y for this option is safe.  If you
+	  experience extremely long delays while booting before you get
+	  something on your display, try setting this to N.  Matrox cards in
+	  combination with certain motherboards and monitors are known to
+	  suffer from this problem.
+
 if VT
 	source "drivers/video/console/Kconfig"
 endif
@@ -68,5 +87,6 @@ if FB_CORE || SGI_NEWPORT_CONSOLE
 
 endif
 
+source "drivers/gpu/trace/Kconfig"
 
 endmenu

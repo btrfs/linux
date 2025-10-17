@@ -11,6 +11,7 @@
 #include <linux/init.h>
 #include <linux/module.h>
 #include <linux/fs_context.h>
+#include <linux/namei.h>
 
 #define FUSE_CTL_SUPER_MAGIC 0x65735543
 
@@ -174,11 +175,7 @@ static ssize_t fuse_conn_congestion_threshold_write(struct file *file,
 	if (!fc)
 		goto out;
 
-	down_read(&fc->killsb);
-	spin_lock(&fc->bg_lock);
-	fc->congestion_threshold = val;
-	spin_unlock(&fc->bg_lock);
-	up_read(&fc->killsb);
+	WRITE_ONCE(fc->congestion_threshold, val);
 	fuse_conn_put(fc);
 out:
 	return ret;
@@ -187,27 +184,23 @@ out:
 static const struct file_operations fuse_ctl_abort_ops = {
 	.open = nonseekable_open,
 	.write = fuse_conn_abort_write,
-	.llseek = no_llseek,
 };
 
 static const struct file_operations fuse_ctl_waiting_ops = {
 	.open = nonseekable_open,
 	.read = fuse_conn_waiting_read,
-	.llseek = no_llseek,
 };
 
 static const struct file_operations fuse_conn_max_background_ops = {
 	.open = nonseekable_open,
 	.read = fuse_conn_max_background_read,
 	.write = fuse_conn_max_background_write,
-	.llseek = no_llseek,
 };
 
 static const struct file_operations fuse_conn_congestion_threshold_ops = {
 	.open = nonseekable_open,
 	.read = fuse_conn_congestion_threshold_read,
 	.write = fuse_conn_congestion_threshold_write,
-	.llseek = no_llseek,
 };
 
 static struct dentry *fuse_ctl_add_dentry(struct dentry *parent,
@@ -220,7 +213,6 @@ static struct dentry *fuse_ctl_add_dentry(struct dentry *parent,
 	struct dentry *dentry;
 	struct inode *inode;
 
-	BUG_ON(fc->ctl_ndents >= FUSE_CTL_NUM_DENTRIES);
 	dentry = d_alloc_name(parent, name);
 	if (!dentry)
 		return NULL;
@@ -243,8 +235,6 @@ static struct dentry *fuse_ctl_add_dentry(struct dentry *parent,
 	set_nlink(inode, nlink);
 	inode->i_private = fc;
 	d_add(dentry, inode);
-
-	fc->ctl_dentry[fc->ctl_ndents++] = dentry;
 
 	return dentry;
 }
@@ -288,27 +278,29 @@ int fuse_ctl_add_conn(struct fuse_conn *fc)
 	return -ENOMEM;
 }
 
+static void remove_one(struct dentry *dentry)
+{
+	d_inode(dentry)->i_private = NULL;
+}
+
 /*
  * Remove a connection from the control filesystem (if it exists).
  * Caller must hold fuse_mutex
  */
 void fuse_ctl_remove_conn(struct fuse_conn *fc)
 {
-	int i;
+	struct dentry *dentry;
+	char name[32];
 
 	if (!fuse_control_sb || fc->no_control)
 		return;
 
-	for (i = fc->ctl_ndents - 1; i >= 0; i--) {
-		struct dentry *dentry = fc->ctl_dentry[i];
-		d_inode(dentry)->i_private = NULL;
-		if (!i) {
-			/* Get rid of submounts: */
-			d_invalidate(dentry);
-		}
-		dput(dentry);
+	sprintf(name, "%u", fc->dev);
+	dentry = lookup_noperm_positive_unlocked(&QSTR(name), fuse_control_sb->s_root);
+	if (!IS_ERR(dentry)) {
+		simple_recursive_removal(dentry, remove_one);
+		dput(dentry);	// paired with lookup_noperm_positive_unlocked()
 	}
-	drop_nlink(d_inode(fuse_control_sb->s_root));
 }
 
 static int fuse_ctl_fill_super(struct super_block *sb, struct fs_context *fsc)
@@ -354,12 +346,8 @@ static int fuse_ctl_init_fs_context(struct fs_context *fsc)
 
 static void fuse_ctl_kill_sb(struct super_block *sb)
 {
-	struct fuse_conn *fc;
-
 	mutex_lock(&fuse_mutex);
 	fuse_control_sb = NULL;
-	list_for_each_entry(fc, &fuse_conn_list, entry)
-		fc->ctl_ndents = 0;
 	mutex_unlock(&fuse_mutex);
 
 	kill_litter_super(sb);

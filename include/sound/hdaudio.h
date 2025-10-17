@@ -18,7 +18,7 @@
 #include <sound/pcm.h>
 #include <sound/memalloc.h>
 #include <sound/hda_verbs.h>
-#include <drm/i915_component.h>
+#include <drm/intel/i915_component.h>
 
 /* codec node id */
 typedef u16 hda_nid_t;
@@ -223,7 +223,7 @@ struct hdac_driver {
 	struct device_driver driver;
 	int type;
 	const struct hda_device_id *id_table;
-	int (*match)(struct hdac_device *dev, struct hdac_driver *drv);
+	int (*match)(struct hdac_device *dev, const struct hdac_driver *drv);
 	void (*unsol_event)(struct hdac_device *dev, unsigned int event);
 
 	/* fields used by ext bus APIs */
@@ -235,7 +235,7 @@ struct hdac_driver {
 #define drv_to_hdac_driver(_drv) container_of(_drv, struct hdac_driver, driver)
 
 const struct hda_device_id *
-hdac_get_device_id(struct hdac_device *hdev, struct hdac_driver *drv);
+hdac_get_device_id(struct hdac_device *hdev, const struct hdac_driver *drv);
 
 /*
  * Bus verb operators
@@ -351,6 +351,7 @@ struct hdac_bus {
 	bool needs_damn_long_delay:1;
 	bool not_use_interrupts:1;	/* prohibiting the RIRB IRQ */
 	bool access_sdnctl_in_dword:1;	/* accessing the sdnctl register by dword */
+	bool use_pio_for_commands:1;	/* Use PIO instead of CORB for commands */
 
 	int poll_count;
 
@@ -589,7 +590,7 @@ void snd_hdac_stream_sync_trigger(struct hdac_stream *azx_dev, bool set,
 void snd_hdac_stream_sync(struct hdac_stream *azx_dev, bool start,
 			  unsigned int streams);
 void snd_hdac_stream_timecounter_init(struct hdac_stream *azx_dev,
-				      unsigned int streams);
+				      unsigned int streams, bool start);
 int snd_hdac_get_stream_stripe_ctl(struct hdac_bus *bus,
 				struct snd_pcm_substream *substream);
 
@@ -597,8 +598,6 @@ void snd_hdac_stream_spbcap_enable(struct hdac_bus *chip,
 				   bool enable, int index);
 int snd_hdac_stream_set_spib(struct hdac_bus *bus,
 			     struct hdac_stream *azx_dev, u32 value);
-int snd_hdac_stream_get_spbmaxfifo(struct hdac_bus *bus,
-				   struct hdac_stream *azx_dev);
 void snd_hdac_stream_drsm_enable(struct hdac_bus *bus,
 				 bool enable, int index);
 int snd_hdac_stream_wait_drsm(struct hdac_stream *azx_dev);
@@ -652,6 +651,7 @@ int snd_hdac_stream_set_lpib(struct hdac_stream *azx_dev, u32 value);
 #define snd_hdac_dsp_lock(dev)		mutex_lock(&(dev)->dsp_mutex)
 #define snd_hdac_dsp_unlock(dev)	mutex_unlock(&(dev)->dsp_mutex)
 #define snd_hdac_stream_is_locked(dev)	((dev)->locked)
+DEFINE_GUARD(snd_hdac_dsp_lock, struct hdac_stream *, snd_hdac_dsp_lock(_T), snd_hdac_dsp_unlock(_T))
 /* DSP loader helpers */
 int snd_hdac_dsp_prepare(struct hdac_stream *azx_dev, unsigned int format,
 			 unsigned int byte_size, struct snd_dma_buffer *bufp);
@@ -681,6 +681,30 @@ static inline void snd_hdac_dsp_cleanup(struct hdac_stream *azx_dev,
 }
 #endif /* CONFIG_SND_HDA_DSP_LOADER */
 
+/*
+ * Easy macros for widget capabilities
+ */
+#define snd_hdac_get_wcaps(codec, nid) \
+	snd_hdac_read_parm(codec, nid, AC_PAR_AUDIO_WIDGET_CAP)
+
+/* get the widget type from widget capability bits */
+static inline int snd_hdac_get_wcaps_type(unsigned int wcaps)
+{
+	if (!wcaps)
+		return -1; /* invalid type */
+	return (wcaps & AC_WCAP_TYPE) >> AC_WCAP_TYPE_SHIFT;
+}
+
+/* get the number of supported channels */
+static inline unsigned int snd_hdac_get_wcaps_channels(u32 wcaps)
+{
+	unsigned int chans;
+
+	chans = (wcaps & AC_WCAP_CHAN_CNT_EXT) >> 13;
+	chans = (chans + 1) * 2;
+
+	return chans;
+}
 
 /*
  * generic array helpers
@@ -731,6 +755,7 @@ static inline unsigned int snd_array_index(struct snd_array *array, void *ptr)
 			{ PCI_DEVICE(PCI_VENDOR_ID_INTEL, PCI_DEVICE_ID_INTEL_HDA_DG2_0) }, \
 			{ PCI_DEVICE(PCI_VENDOR_ID_INTEL, PCI_DEVICE_ID_INTEL_HDA_DG2_1) }, \
 			{ PCI_DEVICE(PCI_VENDOR_ID_INTEL, PCI_DEVICE_ID_INTEL_HDA_DG2_2) }, \
+			{ PCI_DEVICE(PCI_VENDOR_ID_INTEL, PCI_DEVICE_ID_INTEL_HDA_BMG) }, \
 			{ } \
 		}, pci) || HDA_CONTROLLER_IS_HSW(pci))
 

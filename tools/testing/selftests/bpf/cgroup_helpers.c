@@ -4,6 +4,7 @@
 #include <sys/mount.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <sys/xattr.h>
 #include <linux/limits.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -319,6 +320,26 @@ int join_parent_cgroup(const char *relative_path)
 }
 
 /**
+ * set_cgroup_xattr() - Set xattr on a cgroup dir
+ * @relative_path: The cgroup path, relative to the workdir, to set xattr
+ * @name: xattr name
+ * @value: xattr value
+ *
+ * This function set xattr on cgroup dir.
+ *
+ * On success, it returns 0, otherwise on failure it returns -1.
+ */
+int set_cgroup_xattr(const char *relative_path,
+		     const char *name,
+		     const char *value)
+{
+	char cgroup_path[PATH_MAX + 1];
+
+	format_cgroup_path(cgroup_path, relative_path);
+	return setxattr(cgroup_path, name, value, strlen(value) + 1, 0);
+}
+
+/**
  * __cleanup_cgroup_environment() - Delete temporary cgroups
  *
  * This is a helper for cleanup_cgroup_environment() that is responsible for
@@ -391,6 +412,26 @@ void remove_cgroup(const char *relative_path)
 		log_err("rmdiring cgroup %s .. %s", relative_path, cgroup_path);
 }
 
+/*
+ * remove_cgroup_pid() - Remove a cgroup setup by process identified by PID
+ * @relative_path: The cgroup path, relative to the workdir, to remove
+ * @pid: PID to be used to find cgroup_path
+ *
+ * This function expects a cgroup to already be created, relative to the cgroup
+ * work dir. It also expects the cgroup doesn't have any children or live
+ * processes and it removes the cgroup.
+ *
+ * On failure, it will print an error to stderr.
+ */
+void remove_cgroup_pid(const char *relative_path, int pid)
+{
+	char cgroup_path[PATH_MAX + 1];
+
+	format_cgroup_path_pid(cgroup_path, relative_path, pid);
+	if (rmdir(cgroup_path))
+		log_err("rmdiring cgroup %s .. %s", relative_path, cgroup_path);
+}
+
 /**
  * create_and_get_cgroup() - Create a cgroup, relative to workdir, and get the FD
  * @relative_path: The cgroup path, relative to the workdir, to join
@@ -429,7 +470,7 @@ int create_and_get_cgroup(const char *relative_path)
  * which is an invalid cgroup id.
  * If there is a failure, it prints the error to stderr.
  */
-unsigned long long get_cgroup_id_from_path(const char *cgroup_workdir)
+static unsigned long long get_cgroup_id_from_path(const char *cgroup_workdir)
 {
 	int dirfd, err, flags, mount_id, fhsize;
 	union {
@@ -507,6 +548,9 @@ int cgroup_setup_and_join(const char *path) {
 
 /**
  * setup_classid_environment() - Setup the cgroupv1 net_cls environment
+ *
+ * This function should only be called in a custom mount namespace, e.g.
+ * created by running setup_cgroup_environment.
  *
  * After calling this function, cleanup_classid_environment should be called
  * once testing is complete.
@@ -641,7 +685,7 @@ unsigned long long get_classid_cgroup_id(void)
 /**
  * get_cgroup1_hierarchy_id - Retrieves the ID of a cgroup1 hierarchy from the cgroup1 subsys name.
  * @subsys_name: The cgroup1 subsys name, which can be retrieved from /proc/self/cgroup. It can be
- * a named cgroup like "name=systemd", a controller name like "net_cls", or multi-contollers like
+ * a named cgroup like "name=systemd", a controller name like "net_cls", or multi-controllers like
  * "net_cls,net_prio".
  */
 int get_cgroup1_hierarchy_id(const char *subsys_name)

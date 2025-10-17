@@ -166,7 +166,7 @@ fail:
 }
 
 static struct posix_acl *__f2fs_get_acl(struct inode *inode, int type,
-						struct page *dpage)
+						struct folio *dfolio)
 {
 	int name_index = F2FS_XATTR_INDEX_POSIX_ACL_DEFAULT;
 	void *value = NULL;
@@ -176,13 +176,13 @@ static struct posix_acl *__f2fs_get_acl(struct inode *inode, int type,
 	if (type == ACL_TYPE_ACCESS)
 		name_index = F2FS_XATTR_INDEX_POSIX_ACL_ACCESS;
 
-	retval = f2fs_getxattr(inode, name_index, "", NULL, 0, dpage);
+	retval = f2fs_getxattr(inode, name_index, "", NULL, 0, dfolio);
 	if (retval > 0) {
 		value = f2fs_kmalloc(F2FS_I_SB(inode), retval, GFP_F2FS_ZERO);
 		if (!value)
 			return ERR_PTR(-ENOMEM);
 		retval = f2fs_getxattr(inode, name_index, "", value,
-							retval, dpage);
+							retval, dfolio);
 	}
 
 	if (retval > 0)
@@ -219,8 +219,7 @@ static int f2fs_acl_update_mode(struct mnt_idmap *idmap,
 		return error;
 	if (error == 0)
 		*acl = NULL;
-	if (!vfsgid_in_group_p(i_gid_into_vfsgid(idmap, inode)) &&
-	    !capable_wrt_inode_uidgid(idmap, inode, CAP_FSETID))
+	if (!in_group_or_capable(idmap, inode, i_gid_into_vfsgid(idmap, inode)))
 		mode &= ~S_ISGID;
 	*mode_p = mode;
 	return 0;
@@ -228,7 +227,7 @@ static int f2fs_acl_update_mode(struct mnt_idmap *idmap,
 
 static int __f2fs_set_acl(struct mnt_idmap *idmap,
 			struct inode *inode, int type,
-			struct posix_acl *acl, struct page *ipage)
+			struct posix_acl *acl, struct folio *ifolio)
 {
 	int name_index;
 	void *value = NULL;
@@ -239,9 +238,8 @@ static int __f2fs_set_acl(struct mnt_idmap *idmap,
 	switch (type) {
 	case ACL_TYPE_ACCESS:
 		name_index = F2FS_XATTR_INDEX_POSIX_ACL_ACCESS;
-		if (acl && !ipage) {
-			error = f2fs_acl_update_mode(idmap, inode,
-								&mode, &acl);
+		if (acl && !ifolio) {
+			error = f2fs_acl_update_mode(idmap, inode, &mode, &acl);
 			if (error)
 				return error;
 			set_acl_inode(inode, mode);
@@ -266,7 +264,7 @@ static int __f2fs_set_acl(struct mnt_idmap *idmap,
 		}
 	}
 
-	error = f2fs_setxattr(inode, name_index, "", value, size, ipage, 0);
+	error = f2fs_setxattr(inode, name_index, "", value, size, ifolio, 0);
 
 	kfree(value);
 	if (!error)
@@ -297,9 +295,8 @@ static struct posix_acl *f2fs_acl_clone(const struct posix_acl *acl,
 	struct posix_acl *clone = NULL;
 
 	if (acl) {
-		int size = sizeof(struct posix_acl) + acl->a_count *
-				sizeof(struct posix_acl_entry);
-		clone = kmemdup(acl, size, flags);
+		clone = kmemdup(acl, struct_size(acl, a_entries, acl->a_count),
+				flags);
 		if (clone)
 			refcount_set(&clone->a_refcount, 1);
 	}
@@ -362,7 +359,7 @@ static int f2fs_acl_create_masq(struct posix_acl *acl, umode_t *mode_p)
 
 static int f2fs_acl_create(struct inode *dir, umode_t *mode,
 		struct posix_acl **default_acl, struct posix_acl **acl,
-		struct page *dpage)
+		struct folio *dfolio)
 {
 	struct posix_acl *p;
 	struct posix_acl *clone;
@@ -374,7 +371,7 @@ static int f2fs_acl_create(struct inode *dir, umode_t *mode,
 	if (S_ISLNK(*mode) || !IS_POSIXACL(dir))
 		return 0;
 
-	p = __f2fs_get_acl(dir, ACL_TYPE_DEFAULT, dpage);
+	p = __f2fs_get_acl(dir, ACL_TYPE_DEFAULT, dfolio);
 	if (!p || p == ERR_PTR(-EOPNOTSUPP)) {
 		*mode &= ~current_umask();
 		return 0;
@@ -411,29 +408,29 @@ release_acl:
 	return ret;
 }
 
-int f2fs_init_acl(struct inode *inode, struct inode *dir, struct page *ipage,
-							struct page *dpage)
+int f2fs_init_acl(struct inode *inode, struct inode *dir, struct folio *ifolio,
+							struct folio *dfolio)
 {
 	struct posix_acl *default_acl = NULL, *acl = NULL;
 	int error;
 
-	error = f2fs_acl_create(dir, &inode->i_mode, &default_acl, &acl, dpage);
+	error = f2fs_acl_create(dir, &inode->i_mode, &default_acl, &acl, dfolio);
 	if (error)
 		return error;
 
 	f2fs_mark_inode_dirty_sync(inode, true);
 
 	if (default_acl) {
-		error = __f2fs_set_acl(NULL, inode, ACL_TYPE_DEFAULT, default_acl,
-				       ipage);
+		error = __f2fs_set_acl(NULL, inode, ACL_TYPE_DEFAULT,
+				default_acl, ifolio);
 		posix_acl_release(default_acl);
 	} else {
 		inode->i_default_acl = NULL;
 	}
 	if (acl) {
 		if (!error)
-			error = __f2fs_set_acl(NULL, inode, ACL_TYPE_ACCESS, acl,
-					       ipage);
+			error = __f2fs_set_acl(NULL, inode, ACL_TYPE_ACCESS,
+					acl, ifolio);
 		posix_acl_release(acl);
 	} else {
 		inode->i_acl = NULL;

@@ -215,8 +215,7 @@ static void mxc_isi_channel_set_csc(struct mxc_isi_pipe *pipe,
 		[MXC_ISI_ENC_RGB] = "RGB",
 		[MXC_ISI_ENC_YUV] = "YUV",
 	};
-	const u32 *coeffs;
-	bool cscen = true;
+	const u32 *coeffs = NULL;
 	u32 val;
 
 	val = mxc_isi_read(pipe, CHNL_IMG_CTRL);
@@ -235,14 +234,13 @@ static void mxc_isi_channel_set_csc(struct mxc_isi_pipe *pipe,
 		val |= CHNL_IMG_CTRL_CSC_MODE(CHNL_IMG_CTRL_CSC_MODE_RGB2YCBCR);
 	} else {
 		/* Bypass CSC */
-		cscen = false;
 		val |= CHNL_IMG_CTRL_CSC_BYPASS;
 	}
 
 	dev_dbg(pipe->isi->dev, "CSC: %s -> %s\n",
 		encodings[in_encoding], encodings[out_encoding]);
 
-	if (cscen) {
+	if (coeffs) {
 		mxc_isi_write(pipe, CHNL_CSC_COEFF0, coeffs[0]);
 		mxc_isi_write(pipe, CHNL_CSC_COEFF1, coeffs[1]);
 		mxc_isi_write(pipe, CHNL_CSC_COEFF2, coeffs[2]);
@@ -253,7 +251,7 @@ static void mxc_isi_channel_set_csc(struct mxc_isi_pipe *pipe,
 
 	mxc_isi_write(pipe, CHNL_IMG_CTRL, val);
 
-	*bypass = !cscen;
+	*bypass = !coeffs;
 }
 
 void mxc_isi_channel_set_alpha(struct mxc_isi_pipe *pipe, u8 alpha)
@@ -589,7 +587,7 @@ void mxc_isi_channel_release(struct mxc_isi_pipe *pipe)
  *
  * TODO: Support secondary line buffer for downscaling YUV420 images.
  */
-int mxc_isi_channel_chain(struct mxc_isi_pipe *pipe, bool bypass)
+int mxc_isi_channel_chain(struct mxc_isi_pipe *pipe)
 {
 	/* Channel chaining requires both line and output buffer. */
 	const u8 resources = MXC_ISI_CHANNEL_RES_OUTPUT_BUF

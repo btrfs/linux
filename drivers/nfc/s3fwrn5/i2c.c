@@ -2,7 +2,7 @@
 /*
  * I2C Link Layer for Samsung S3FWRN5 NCI based Driver
  *
- * Copyright (C) 2015 Samsung Electrnoics
+ * Copyright (C) 2015 Samsung Electronics
  * Robert Baldyga <r.baldyga@samsung.com>
  */
 
@@ -245,7 +245,7 @@ static void s3fwrn5_i2c_remove(struct i2c_client *client)
 }
 
 static const struct i2c_device_id s3fwrn5_i2c_id_table[] = {
-	{S3FWRN5_I2C_DRIVER_NAME, 0},
+	{ S3FWRN5_I2C_DRIVER_NAME },
 	{}
 };
 MODULE_DEVICE_TABLE(i2c, s3fwrn5_i2c_id_table);

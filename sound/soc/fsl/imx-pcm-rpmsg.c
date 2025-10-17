@@ -16,7 +16,7 @@
 #include "fsl_rpmsg.h"
 #include "imx-pcm-rpmsg.h"
 
-static struct snd_pcm_hardware imx_rpmsg_pcm_hardware = {
+static const struct snd_pcm_hardware imx_rpmsg_pcm_hardware = {
 	.info = SNDRV_PCM_INFO_INTERLEAVED |
 		SNDRV_PCM_INFO_BLOCK_TRANSFER |
 		SNDRV_PCM_INFO_BATCH |
@@ -209,7 +209,7 @@ static snd_pcm_uframes_t imx_rpmsg_pcm_pointer(struct snd_soc_component *compone
 static void imx_rpmsg_timer_callback(struct timer_list *t)
 {
 	struct stream_timer  *stream_timer =
-			from_timer(stream_timer, t, timer);
+			timer_container_of(stream_timer, t, timer);
 	struct snd_pcm_substream *substream = stream_timer->substream;
 	struct rpmsg_info *info = stream_timer->info;
 	struct rpmsg_msg *msg;
@@ -261,7 +261,7 @@ static int imx_rpmsg_pcm_open(struct snd_soc_component *component,
 	info->send_message(msg, info);
 
 	pcm_hardware = imx_rpmsg_pcm_hardware;
-	pcm_hardware.buffer_bytes_max = rpmsg->buffer_size;
+	pcm_hardware.buffer_bytes_max = rpmsg->buffer_size[substream->stream];
 	pcm_hardware.period_bytes_max = pcm_hardware.buffer_bytes_max / 2;
 
 	snd_soc_set_runtime_hwparams(substream, &pcm_hardware);
@@ -301,7 +301,7 @@ static int imx_rpmsg_pcm_close(struct snd_soc_component *component,
 
 	info->send_message(msg, info);
 
-	del_timer(&info->stream_timer[substream->stream].timer);
+	timer_delete(&info->stream_timer[substream->stream].timer);
 
 	rtd->dai_link->ignore_suspend = 0;
 
@@ -316,7 +316,7 @@ static int imx_rpmsg_pcm_prepare(struct snd_soc_component *component,
 				 struct snd_pcm_substream *substream)
 {
 	struct snd_pcm_runtime *runtime = substream->runtime;
-	struct snd_soc_pcm_runtime *rtd = substream->private_data;
+	struct snd_soc_pcm_runtime *rtd = snd_soc_substream_to_rtd(substream);
 	struct snd_soc_dai *cpu_dai = snd_soc_rtd_to_cpu(rtd, 0);
 	struct fsl_rpmsg *rpmsg = dev_get_drvdata(cpu_dai->dev);
 
@@ -452,7 +452,7 @@ static int imx_rpmsg_terminate_all(struct snd_soc_component *component,
 		info->msg[RX_POINTER].r_msg.param.buffer_offset = 0;
 	}
 
-	del_timer(&info->stream_timer[substream->stream].timer);
+	timer_delete(&info->stream_timer[substream->stream].timer);
 
 	return imx_rpmsg_insert_workqueue(substream, msg, info);
 }
@@ -461,7 +461,7 @@ static int imx_rpmsg_pcm_trigger(struct snd_soc_component *component,
 				 struct snd_pcm_substream *substream, int cmd)
 {
 	struct snd_pcm_runtime *runtime = substream->runtime;
-	struct snd_soc_pcm_runtime *rtd = substream->private_data;
+	struct snd_soc_pcm_runtime *rtd = snd_soc_substream_to_rtd(substream);
 	struct snd_soc_dai *cpu_dai = snd_soc_rtd_to_cpu(rtd, 0);
 	struct fsl_rpmsg *rpmsg = dev_get_drvdata(cpu_dai->dev);
 	int ret = 0;
@@ -515,7 +515,7 @@ static int imx_rpmsg_pcm_ack(struct snd_soc_component *component,
 			     struct snd_pcm_substream *substream)
 {
 	struct snd_pcm_runtime *runtime = substream->runtime;
-	struct snd_soc_pcm_runtime *rtd = substream->private_data;
+	struct snd_soc_pcm_runtime *rtd = snd_soc_substream_to_rtd(substream);
 	struct snd_soc_dai *cpu_dai = snd_soc_rtd_to_cpu(rtd, 0);
 	struct fsl_rpmsg *rpmsg = dev_get_drvdata(cpu_dai->dev);
 	struct rpmsg_info *info = dev_get_drvdata(component->dev);
@@ -597,14 +597,29 @@ static int imx_rpmsg_pcm_new(struct snd_soc_component *component,
 	struct snd_pcm *pcm = rtd->pcm;
 	struct snd_soc_dai *cpu_dai = snd_soc_rtd_to_cpu(rtd, 0);
 	struct fsl_rpmsg *rpmsg = dev_get_drvdata(cpu_dai->dev);
+	struct snd_pcm_substream *substream;
 	int ret;
 
 	ret = dma_coerce_mask_and_coherent(card->dev, DMA_BIT_MASK(32));
 	if (ret)
 		return ret;
 
-	return snd_pcm_set_fixed_buffer_all(pcm, SNDRV_DMA_TYPE_DEV_WC,
-					    pcm->card->dev, rpmsg->buffer_size);
+	substream = pcm->streams[SNDRV_PCM_STREAM_PLAYBACK].substream;
+	if (substream) {
+		ret = snd_pcm_set_fixed_buffer(substream, SNDRV_DMA_TYPE_DEV_WC, pcm->card->dev,
+					       rpmsg->buffer_size[SNDRV_PCM_STREAM_PLAYBACK]);
+		if (ret < 0)
+			return ret;
+	}
+	substream = pcm->streams[SNDRV_PCM_STREAM_CAPTURE].substream;
+	if (substream) {
+		ret = snd_pcm_set_fixed_buffer(substream, SNDRV_DMA_TYPE_DEV_WC, pcm->card->dev,
+					       rpmsg->buffer_size[SNDRV_PCM_STREAM_CAPTURE]);
+		if (ret < 0)
+			return ret;
+	}
+
+	return ret;
 }
 
 static const struct snd_soc_component_driver imx_rpmsg_soc_component = {
@@ -732,9 +747,6 @@ static int imx_rpmsg_pcm_probe(struct platform_device *pdev)
 		goto fail;
 	}
 
-	/* platform component name is used by machine driver to link with */
-	component->name = info->rpdev->id.name;
-
 #ifdef CONFIG_DEBUG_FS
 	component->debugfs_prefix = "rpmsg";
 #endif
@@ -756,7 +768,6 @@ static void imx_rpmsg_pcm_remove(struct platform_device *pdev)
 		destroy_workqueue(info->rpmsg_wq);
 }
 
-#ifdef CONFIG_PM
 static int imx_rpmsg_pcm_runtime_resume(struct device *dev)
 {
 	struct rpmsg_info *info = dev_get_drvdata(dev);
@@ -774,9 +785,7 @@ static int imx_rpmsg_pcm_runtime_suspend(struct device *dev)
 
 	return 0;
 }
-#endif
 
-#ifdef CONFIG_PM_SLEEP
 static int imx_rpmsg_pcm_suspend(struct device *dev)
 {
 	struct rpmsg_info *info = dev_get_drvdata(dev);
@@ -812,22 +821,27 @@ static int imx_rpmsg_pcm_resume(struct device *dev)
 
 	return 0;
 }
-#endif /* CONFIG_PM_SLEEP */
 
 static const struct dev_pm_ops imx_rpmsg_pcm_pm_ops = {
-	SET_RUNTIME_PM_OPS(imx_rpmsg_pcm_runtime_suspend,
-			   imx_rpmsg_pcm_runtime_resume,
-			   NULL)
-	SET_SYSTEM_SLEEP_PM_OPS(imx_rpmsg_pcm_suspend,
-				imx_rpmsg_pcm_resume)
+	RUNTIME_PM_OPS(imx_rpmsg_pcm_runtime_suspend,
+		       imx_rpmsg_pcm_runtime_resume, NULL)
+	SYSTEM_SLEEP_PM_OPS(imx_rpmsg_pcm_suspend, imx_rpmsg_pcm_resume)
 };
+
+static const struct platform_device_id imx_rpmsg_pcm_id_table[] = {
+	{ .name	= "rpmsg-audio-channel" },
+	{ .name	= "rpmsg-micfil-channel" },
+	{ },
+};
+MODULE_DEVICE_TABLE(platform, imx_rpmsg_pcm_id_table);
 
 static struct platform_driver imx_pcm_rpmsg_driver = {
 	.probe  = imx_rpmsg_pcm_probe,
-	.remove_new = imx_rpmsg_pcm_remove,
+	.remove = imx_rpmsg_pcm_remove,
+	.id_table = imx_rpmsg_pcm_id_table,
 	.driver = {
 		.name = IMX_PCM_DRV_NAME,
-		.pm = &imx_rpmsg_pcm_pm_ops,
+		.pm = pm_ptr(&imx_rpmsg_pcm_pm_ops),
 	},
 };
 module_platform_driver(imx_pcm_rpmsg_driver);

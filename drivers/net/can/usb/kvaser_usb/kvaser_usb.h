@@ -22,9 +22,12 @@
  */
 
 #include <linux/completion.h>
+#include <linux/ktime.h>
+#include <linux/math64.h>
 #include <linux/spinlock.h>
 #include <linux/types.h>
 #include <linux/usb.h>
+#include <net/devlink.h>
 
 #include <linux/can.h>
 #include <linux/can/dev.h>
@@ -39,18 +42,26 @@
 #define KVASER_USB_QUIRK_HAS_SILENT_MODE	BIT(0)
 #define KVASER_USB_QUIRK_HAS_TXRX_ERRORS	BIT(1)
 #define KVASER_USB_QUIRK_IGNORE_CLK_FREQ	BIT(2)
-#define KVASER_USB_QUIRK_HAS_HARDWARE_TIMESTAMP	BIT(3)
 
 /* Device capabilities */
 #define KVASER_USB_CAP_BERR_CAP			0x01
 #define KVASER_USB_CAP_EXT_CAP			0x02
 #define KVASER_USB_HYDRA_CAP_EXT_CMD		0x04
 
+#define KVASER_USB_SW_VERSION_MAJOR_MASK GENMASK(31, 24)
+#define KVASER_USB_SW_VERSION_MINOR_MASK GENMASK(23, 16)
+#define KVASER_USB_SW_VERSION_BUILD_MASK GENMASK(15, 0)
+
 struct kvaser_usb_dev_cfg;
 
 enum kvaser_usb_leaf_family {
 	KVASER_LEAF,
 	KVASER_USBCAN,
+};
+
+enum kvaser_usb_led_state {
+	KVASER_USB_LED_ON = 0,
+	KVASER_USB_LED_OFF = 1,
 };
 
 #define KVASER_USB_HYDRA_MAX_CMD_LEN		128
@@ -68,12 +79,19 @@ struct kvaser_usb_dev_card_data {
 	u32 ctrlmode_supported;
 	u32 capabilities;
 	struct kvaser_usb_dev_card_data_hydra hydra;
+	u32 usbcan_timestamp_msb;
 };
 
 /* Context for an outstanding, not yet ACKed, transmission */
 struct kvaser_usb_tx_urb_context {
 	struct kvaser_usb_net_priv *priv;
 	u32 echo_index;
+};
+
+struct kvaser_usb_fw_version {
+	u8 major;
+	u8 minor;
+	u16 build;
 };
 
 struct kvaser_usb_busparams {
@@ -94,12 +112,15 @@ struct kvaser_usb {
 	struct usb_endpoint_descriptor *bulk_in, *bulk_out;
 	struct usb_anchor rx_submitted;
 
+	u32 ean[2];
+	u32 serial_number;
+	struct kvaser_usb_fw_version fw_version;
+	u8 hw_revision;
+	unsigned int nchannels;
 	/* @max_tx_urbs: Firmware-reported maximum number of outstanding,
 	 * not yet ACKed, transmissions on this device. This value is
 	 * also used as a sentinel for marking free tx contexts.
 	 */
-	u32 fw_version;
-	unsigned int nchannels;
 	unsigned int max_tx_urbs;
 	struct kvaser_usb_dev_card_data card_data;
 
@@ -110,6 +131,7 @@ struct kvaser_usb {
 
 struct kvaser_usb_net_priv {
 	struct can_priv can;
+	struct devlink_port devlink_port;
 	struct can_berr_counter bec;
 
 	/* subdriver-specific data */
@@ -135,7 +157,7 @@ struct kvaser_usb_net_priv {
  * @dev_set_mode:		used for can.do_set_mode
  * @dev_set_bittiming:		used for can.do_set_bittiming
  * @dev_get_busparams:		readback arbitration busparams
- * @dev_set_data_bittiming:	used for can.do_set_data_bittiming
+ * @dev_set_data_bittiming:	used for can.fd.do_set_data_bittiming
  * @dev_get_data_busparams:	readback data busparams
  * @dev_get_berr_counter:	used for can.do_get_berr_counter
  *
@@ -147,6 +169,7 @@ struct kvaser_usb_net_priv {
  * @dev_get_software_details:	get software details
  * @dev_get_card_info:		get card info
  * @dev_get_capabilities:	discover device capabilities
+ * @dev_set_led:		turn on/off device LED
  *
  * @dev_set_opt_mode:		set ctrlmod
  * @dev_start_chip:		start the CAN controller
@@ -174,6 +197,9 @@ struct kvaser_usb_dev_ops {
 	int (*dev_get_software_details)(struct kvaser_usb *dev);
 	int (*dev_get_card_info)(struct kvaser_usb *dev);
 	int (*dev_get_capabilities)(struct kvaser_usb *dev);
+	int (*dev_set_led)(struct kvaser_usb_net_priv *priv,
+			   enum kvaser_usb_led_state state,
+			   u16 duration_ms);
 	int (*dev_set_opt_mode)(const struct kvaser_usb_net_priv *priv);
 	int (*dev_start_chip)(struct kvaser_usb_net_priv *priv);
 	int (*dev_stop_chip)(struct kvaser_usb_net_priv *priv);
@@ -202,6 +228,11 @@ struct kvaser_usb_dev_cfg {
 extern const struct kvaser_usb_dev_ops kvaser_usb_hydra_dev_ops;
 extern const struct kvaser_usb_dev_ops kvaser_usb_leaf_dev_ops;
 
+extern const struct devlink_ops kvaser_usb_devlink_ops;
+
+int kvaser_usb_devlink_port_register(struct kvaser_usb_net_priv *priv);
+void kvaser_usb_devlink_port_unregister(struct kvaser_usb_net_priv *priv);
+
 void kvaser_usb_unlink_tx_urbs(struct kvaser_usb_net_priv *priv);
 
 int kvaser_usb_recv_cmd(const struct kvaser_usb *dev, void *cmd, int len,
@@ -215,5 +246,27 @@ int kvaser_usb_send_cmd_async(struct kvaser_usb_net_priv *priv, void *cmd,
 int kvaser_usb_can_rx_over_error(struct net_device *netdev);
 
 extern const struct can_bittiming_const kvaser_usb_flexc_bittiming_const;
+
+static inline ktime_t kvaser_usb_ticks_to_ktime(const struct kvaser_usb_dev_cfg *cfg,
+						u64 ticks)
+{
+	return ns_to_ktime(div_u64(ticks * 1000, cfg->timestamp_freq));
+}
+
+static inline ktime_t kvaser_usb_timestamp48_to_ktime(const struct kvaser_usb_dev_cfg *cfg,
+						      const __le16 *timestamp)
+{
+	u64 ticks = le16_to_cpu(timestamp[0]) |
+		    (u64)(le16_to_cpu(timestamp[1])) << 16 |
+		    (u64)(le16_to_cpu(timestamp[2])) << 32;
+
+	return kvaser_usb_ticks_to_ktime(cfg, ticks);
+}
+
+static inline ktime_t kvaser_usb_timestamp64_to_ktime(const struct kvaser_usb_dev_cfg *cfg,
+						      __le64 timestamp)
+{
+	return kvaser_usb_ticks_to_ktime(cfg, le64_to_cpu(timestamp));
+}
 
 #endif /* KVASER_USB_H */

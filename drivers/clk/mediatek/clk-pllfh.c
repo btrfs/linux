@@ -42,7 +42,7 @@ static const struct clk_ops mtk_pllfh_ops = {
 	.prepare	= mtk_pll_prepare,
 	.unprepare	= mtk_pll_unprepare,
 	.recalc_rate	= mtk_pll_recalc_rate,
-	.round_rate	= mtk_pll_round_rate,
+	.determine_rate = mtk_pll_determine_rate,
 	.set_rate	= mtk_fhctl_set_rate,
 };
 
@@ -68,7 +68,7 @@ void fhctl_parse_dt(const u8 *compatible_node, struct mtk_pllfh_data *pllfhs,
 
 	node = of_find_compatible_node(NULL, NULL, compatible_node);
 	if (!node) {
-		pr_err("cannot find \"%s\"\n", compatible_node);
+		pr_warn("cannot find \"%s\"\n", compatible_node);
 		return;
 	}
 

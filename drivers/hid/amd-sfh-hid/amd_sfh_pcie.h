@@ -79,6 +79,7 @@ enum sensor_idx {
 	accel_idx = 0,
 	gyro_idx = 1,
 	mag_idx = 2,
+	op_idx = 15,
 	als_idx = 19
 };
 
@@ -90,10 +91,10 @@ enum mem_use_type {
 struct hpd_status {
 	union {
 		struct {
-			u32 human_presence_report : 4;
-			u32 human_presence_actual : 4;
-			u32 probablity		  : 8;
 			u32 object_distance       : 16;
+			u32 probablity		  : 8;
+			u32 human_presence_actual : 4;
+			u32 human_presence_report : 4;
 		} shpd;
 		u32 val;
 	};

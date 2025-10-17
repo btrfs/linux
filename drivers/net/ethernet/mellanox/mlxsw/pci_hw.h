@@ -42,8 +42,8 @@
 	((offset) + (type_offset) + (num) * 4)
 
 #define MLXSW_PCI_CQS_MAX	96
-#define MLXSW_PCI_EQS_COUNT	2
-#define MLXSW_PCI_EQ_ASYNC_NUM	0
+#define MLXSW_PCI_EQS_MAX	2
+#define MLXSW_PCI_EQS_COUNT	1
 #define MLXSW_PCI_EQ_COMP_NUM	1
 
 #define MLXSW_PCI_SDQS_MIN	2 /* EMAD and control traffic */
@@ -89,6 +89,11 @@ MLXSW_ITEM32(pci, wqe, lp, 0x00, 30, 1);
  * Packet type.
  */
 MLXSW_ITEM32(pci, wqe, type, 0x00, 23, 4);
+
+/* pci_wqe_ipcs
+ * Calculate IPv4 and TCP / UDP checksums.
+ */
+MLXSW_ITEM32(pci, wqe, ipcs, 0x00, 14, 1);
 
 /* pci_wqe_byte_count
  * Size of i-th scatter/gather entry, 0 if entry is unused.

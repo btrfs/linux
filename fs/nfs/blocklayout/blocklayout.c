@@ -149,8 +149,8 @@ do_add_page_to_bio(struct bio *bio, int npg, enum req_op op, sector_t isect,
 
 	/* limit length to what the device mapping allows */
 	end = disk_addr + *len;
-	if (end >= map->start + map->len)
-		*len = map->start + map->len - disk_addr;
+	if (end >= map->disk_offset + map->len)
+		*len = map->disk_offset + map->len - disk_addr;
 
 retry:
 	if (!bio) {
@@ -564,25 +564,45 @@ bl_find_get_deviceid(struct nfs_server *server,
 		gfp_t gfp_mask)
 {
 	struct nfs4_deviceid_node *node;
-	unsigned long start, end;
+	int err = -ENODEV;
 
 retry:
 	node = nfs4_find_get_deviceid(server, id, cred, gfp_mask);
 	if (!node)
 		return ERR_PTR(-ENODEV);
 
-	if (test_bit(NFS_DEVICEID_UNAVAILABLE, &node->flags) == 0)
-		return node;
+	/*
+	 * Devices that are marked unavailable are left in the cache with a
+	 * timeout to avoid sending GETDEVINFO after every LAYOUTGET, or
+	 * constantly attempting to register the device.  Once marked as
+	 * unavailable they must be deleted and never reused.
+	 */
+	if (test_bit(NFS_DEVICEID_UNAVAILABLE, &node->flags)) {
+		unsigned long end = jiffies;
+		unsigned long start = end - PNFS_DEVICE_RETRY_TIMEOUT;
 
-	end = jiffies;
-	start = end - PNFS_DEVICE_RETRY_TIMEOUT;
-	if (!time_in_range(node->timestamp_unavailable, start, end)) {
-		nfs4_delete_deviceid(node->ld, node->nfs_client, id);
-		goto retry;
+		if (!time_in_range(node->timestamp_unavailable, start, end)) {
+			/* Uncork subsequent GETDEVINFO operations for this device */
+			nfs4_delete_deviceid(node->ld, node->nfs_client, id);
+			goto retry;
+		}
+		goto out_put;
 	}
 
+	if (!bl_register_dev(container_of(node, struct pnfs_block_dev, node))) {
+		/*
+		 * If we cannot register, treat this device as transient:
+		 * Make a negative cache entry for the device
+		 */
+		nfs4_mark_deviceid_unavailable(node);
+		goto out_put;
+	}
+
+	return node;
+
+out_put:
 	nfs4_put_deviceid_node(node);
-	return ERR_PTR(-ENODEV);
+	return ERR_PTR(err);
 }
 
 static int
@@ -656,7 +676,7 @@ bl_alloc_lseg(struct pnfs_layout_hdr *lo, struct nfs4_layoutget_res *lgr,
 	struct pnfs_layout_segment *lseg;
 	struct xdr_buf buf;
 	struct xdr_stream xdr;
-	struct page *scratch;
+	struct folio *scratch;
 	int status, i;
 	uint32_t count;
 	__be32 *p;
@@ -669,13 +689,13 @@ bl_alloc_lseg(struct pnfs_layout_hdr *lo, struct nfs4_layoutget_res *lgr,
 		return ERR_PTR(-ENOMEM);
 
 	status = -ENOMEM;
-	scratch = alloc_page(gfp_mask);
+	scratch = folio_alloc(gfp_mask, 0);
 	if (!scratch)
 		goto out;
 
 	xdr_init_decode_pages(&xdr, &buf,
 			lgr->layoutp->pages, lgr->layoutp->len);
-	xdr_set_scratch_page(&xdr, scratch);
+	xdr_set_scratch_folio(&xdr, scratch);
 
 	status = -EIO;
 	p = xdr_inline_decode(&xdr, 4);
@@ -724,7 +744,7 @@ process_extents:
 	}
 
 out_free_scratch:
-	__free_page(scratch);
+	folio_put(scratch);
 out:
 	dprintk("%s returns %d\n", __func__, status);
 	switch (status) {

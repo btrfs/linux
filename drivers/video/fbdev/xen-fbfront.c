@@ -390,7 +390,7 @@ static int xenfb_probe(struct xenbus_device *dev,
 
 	info->nr_pages = (fb_size + PAGE_SIZE - 1) >> PAGE_SHIFT;
 
-	info->gfns = vmalloc(array_size(sizeof(unsigned long), info->nr_pages));
+	info->gfns = vmalloc_array(info->nr_pages, sizeof(unsigned long));
 	if (!info->gfns)
 		goto error_nomem;
 
@@ -407,6 +407,7 @@ static int xenfb_probe(struct xenbus_device *dev,
 	/* complete the abuse: */
 	fb_info->pseudo_palette = fb_info->par;
 	fb_info->par = info;
+	fb_info->device = &dev->dev;
 
 	fb_info->screen_buffer = info->fb;
 

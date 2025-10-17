@@ -47,10 +47,6 @@
 	readl((m)->mbase + ((m)->hbm_mc ? 0xef8 :	\
 	(res_cfg->type == GNR ? 0xaf8 : 0x20ef8)) +	\
 	(i) * (m)->chan_mmio_sz)
-#define I10NM_GET_AMAP(m, i)		\
-	readl((m)->mbase + ((m)->hbm_mc ? 0x814 :	\
-	(res_cfg->type == GNR ? 0xc14 : 0x20814)) +	\
-	(i) * (m)->chan_mmio_sz)
 #define I10NM_GET_REG32(m, i, offset)	\
 	readl((m)->mbase + (i) * (m)->chan_mmio_sz + (offset))
 #define I10NM_GET_REG64(m, i, offset)	\
@@ -66,6 +62,7 @@
 	((GET_BITFIELD(reg, 0, 10) << 12) + 0x140000)
 
 #define I10NM_GNR_IMC_MMIO_OFFSET	0x24c000
+#define I10NM_GNR_D_IMC_MMIO_OFFSET	0x206000
 #define I10NM_GNR_IMC_MMIO_SIZE		0x4000
 #define I10NM_HBM_IMC_MMIO_SIZE		0x9000
 #define I10NM_DDR_IMC_CH_CNT(reg)	GET_BITFIELD(reg, 21, 24)
@@ -76,12 +73,6 @@
 #define I10NM_SAD_ENABLE(reg)		GET_BITFIELD(reg, 0, 0)
 #define I10NM_SAD_NM_CACHEABLE(reg)	GET_BITFIELD(reg, 5, 5)
 
-#define RETRY_RD_ERR_LOG_UC		BIT(1)
-#define RETRY_RD_ERR_LOG_NOOVER		BIT(14)
-#define RETRY_RD_ERR_LOG_EN		BIT(15)
-#define RETRY_RD_ERR_LOG_NOOVER_UC	(BIT(14) | BIT(1))
-#define RETRY_RD_ERR_LOG_OVER_UC_V	(BIT(2) | BIT(1) | BIT(0))
-
 static struct list_head *i10nm_edac_list;
 
 static struct res_config *res_cfg;
@@ -89,227 +80,319 @@ static int retry_rd_err_log;
 static int decoding_via_mca;
 static bool mem_cfg_2lm;
 
-static u32 offsets_scrub_icx[]  = {0x22c60, 0x22c54, 0x22c5c, 0x22c58, 0x22c28, 0x20ed8};
-static u32 offsets_scrub_spr[]  = {0x22c60, 0x22c54, 0x22f08, 0x22c58, 0x22c28, 0x20ed8};
-static u32 offsets_scrub_spr_hbm0[]  = {0x2860, 0x2854, 0x2b08, 0x2858, 0x2828, 0x0ed8};
-static u32 offsets_scrub_spr_hbm1[]  = {0x2c60, 0x2c54, 0x2f08, 0x2c58, 0x2c28, 0x0fa8};
-static u32 offsets_demand_icx[] = {0x22e54, 0x22e60, 0x22e64, 0x22e58, 0x22e5c, 0x20ee0};
-static u32 offsets_demand_spr[] = {0x22e54, 0x22e60, 0x22f10, 0x22e58, 0x22e5c, 0x20ee0};
-static u32 offsets_demand2_spr[] = {0x22c70, 0x22d80, 0x22f18, 0x22d58, 0x22c64, 0x20f10};
-static u32 offsets_demand_spr_hbm0[] = {0x2a54, 0x2a60, 0x2b10, 0x2a58, 0x2a5c, 0x0ee0};
-static u32 offsets_demand_spr_hbm1[] = {0x2e54, 0x2e60, 0x2f10, 0x2e58, 0x2e5c, 0x0fb0};
+static struct reg_rrl icx_reg_rrl_ddr = {
+	.set_num = 2,
+	.reg_num = 6,
+	.modes = {LRE_SCRUB, LRE_DEMAND},
+	.offsets = {
+		{0x22c60, 0x22c54, 0x22c5c, 0x22c58, 0x22c28, 0x20ed8},
+		{0x22e54, 0x22e60, 0x22e64, 0x22e58, 0x22e5c, 0x20ee0},
+	},
+	.widths		= {4, 4, 4, 4, 4, 8},
+	.v_mask		= BIT(0),
+	.uc_mask	= BIT(1),
+	.over_mask	= BIT(2),
+	.en_patspr_mask	= BIT(13),
+	.noover_mask	= BIT(14),
+	.en_mask	= BIT(15),
 
-static void __enable_retry_rd_err_log(struct skx_imc *imc, int chan, bool enable,
-				      u32 *offsets_scrub, u32 *offsets_demand,
-				      u32 *offsets_demand2)
+	.cecnt_num	= 4,
+	.cecnt_offsets	= {0x22c18, 0x22c1c, 0x22c20, 0x22c24},
+	.cecnt_widths	= {4, 4, 4, 4},
+};
+
+static struct reg_rrl spr_reg_rrl_ddr = {
+	.set_num = 3,
+	.reg_num = 6,
+	.modes = {LRE_SCRUB, LRE_DEMAND, FRE_DEMAND},
+	.offsets = {
+		{0x22c60, 0x22c54, 0x22f08, 0x22c58, 0x22c28, 0x20ed8},
+		{0x22e54, 0x22e60, 0x22f10, 0x22e58, 0x22e5c, 0x20ee0},
+		{0x22c70, 0x22d80, 0x22f18, 0x22d58, 0x22c64, 0x20f10},
+	},
+	.widths		= {4, 4, 8, 4, 4, 8},
+	.v_mask		= BIT(0),
+	.uc_mask	= BIT(1),
+	.over_mask	= BIT(2),
+	.en_patspr_mask	= BIT(13),
+	.noover_mask	= BIT(14),
+	.en_mask	= BIT(15),
+
+	.cecnt_num	= 4,
+	.cecnt_offsets	= {0x22c18, 0x22c1c, 0x22c20, 0x22c24},
+	.cecnt_widths	= {4, 4, 4, 4},
+};
+
+static struct reg_rrl spr_reg_rrl_hbm_pch0 = {
+	.set_num = 2,
+	.reg_num = 6,
+	.modes = {LRE_SCRUB, LRE_DEMAND},
+	.offsets = {
+		{0x2860, 0x2854, 0x2b08, 0x2858, 0x2828, 0x0ed8},
+		{0x2a54, 0x2a60, 0x2b10, 0x2a58, 0x2a5c, 0x0ee0},
+	},
+	.widths		= {4, 4, 8, 4, 4, 8},
+	.v_mask		= BIT(0),
+	.uc_mask	= BIT(1),
+	.over_mask	= BIT(2),
+	.en_patspr_mask	= BIT(13),
+	.noover_mask	= BIT(14),
+	.en_mask	= BIT(15),
+
+	.cecnt_num	= 4,
+	.cecnt_offsets	= {0x2818, 0x281c, 0x2820, 0x2824},
+	.cecnt_widths	= {4, 4, 4, 4},
+};
+
+static struct reg_rrl spr_reg_rrl_hbm_pch1 = {
+	.set_num = 2,
+	.reg_num = 6,
+	.modes = {LRE_SCRUB, LRE_DEMAND},
+	.offsets = {
+		{0x2c60, 0x2c54, 0x2f08, 0x2c58, 0x2c28, 0x0fa8},
+		{0x2e54, 0x2e60, 0x2f10, 0x2e58, 0x2e5c, 0x0fb0},
+	},
+	.widths		= {4, 4, 8, 4, 4, 8},
+	.v_mask		= BIT(0),
+	.uc_mask	= BIT(1),
+	.over_mask	= BIT(2),
+	.en_patspr_mask	= BIT(13),
+	.noover_mask	= BIT(14),
+	.en_mask	= BIT(15),
+
+	.cecnt_num	= 4,
+	.cecnt_offsets	= {0x2c18, 0x2c1c, 0x2c20, 0x2c24},
+	.cecnt_widths	= {4, 4, 4, 4},
+};
+
+static struct reg_rrl gnr_reg_rrl_ddr = {
+	.set_num = 4,
+	.reg_num = 6,
+	.modes = {FRE_SCRUB, FRE_DEMAND, LRE_SCRUB, LRE_DEMAND},
+	.offsets = {
+		{0x2f10, 0x2f20, 0x2f30, 0x2f50, 0x2f60, 0xba0},
+		{0x2f14, 0x2f24, 0x2f38, 0x2f54, 0x2f64, 0xba8},
+		{0x2f18, 0x2f28, 0x2f40, 0x2f58, 0x2f68, 0xbb0},
+		{0x2f1c, 0x2f2c, 0x2f48, 0x2f5c, 0x2f6c, 0xbb8},
+	},
+	.widths		= {4, 4, 8, 4, 4, 8},
+	.v_mask		= BIT(0),
+	.uc_mask	= BIT(1),
+	.over_mask	= BIT(2),
+	.en_patspr_mask	= BIT(14),
+	.noover_mask	= BIT(15),
+	.en_mask	= BIT(12),
+
+	.cecnt_num	= 8,
+	.cecnt_offsets	= {0x2c10, 0x2c14, 0x2c18, 0x2c1c, 0x2c20, 0x2c24, 0x2c28, 0x2c2c},
+	.cecnt_widths	= {4, 4, 4, 4, 4, 4, 4, 4},
+};
+
+static u64 read_imc_reg(struct skx_imc *imc, int chan, u32 offset, u8 width)
 {
-	u32 s, d, d2;
+	switch (width) {
+	case 4:
+		return I10NM_GET_REG32(imc, chan, offset);
+	case 8:
+		return I10NM_GET_REG64(imc, chan, offset);
+	default:
+		i10nm_printk(KERN_ERR, "Invalid readd RRL 0x%x width %d\n", offset, width);
+		return 0;
+	}
+}
 
-	s = I10NM_GET_REG32(imc, chan, offsets_scrub[0]);
-	d = I10NM_GET_REG32(imc, chan, offsets_demand[0]);
-	if (offsets_demand2)
-		d2 = I10NM_GET_REG32(imc, chan, offsets_demand2[0]);
+static void write_imc_reg(struct skx_imc *imc, int chan, u32 offset, u8 width, u64 val)
+{
+	switch (width) {
+	case 4:
+		return I10NM_SET_REG32(imc, chan, offset, (u32)val);
+	default:
+		i10nm_printk(KERN_ERR, "Invalid write RRL 0x%x width %d\n", offset, width);
+	}
+}
+
+static void enable_rrl(struct skx_imc *imc, int chan, struct reg_rrl *rrl,
+		       int rrl_set, bool enable, u32 *rrl_ctl)
+{
+	enum rrl_mode mode = rrl->modes[rrl_set];
+	u32 offset = rrl->offsets[rrl_set][0], v;
+	u8 width = rrl->widths[0];
+	bool first, scrub;
+
+	/* First or last read error. */
+	first = (mode == FRE_SCRUB || mode == FRE_DEMAND);
+	/* Patrol scrub or on-demand read error. */
+	scrub = (mode == FRE_SCRUB || mode == LRE_SCRUB);
+
+	v = read_imc_reg(imc, chan, offset, width);
 
 	if (enable) {
-		/* Save default configurations */
-		imc->chan[chan].retry_rd_err_log_s = s;
-		imc->chan[chan].retry_rd_err_log_d = d;
-		if (offsets_demand2)
-			imc->chan[chan].retry_rd_err_log_d2 = d2;
+		/* Save default configurations. */
+		*rrl_ctl = v;
+		v &= ~rrl->uc_mask;
 
-		s &= ~RETRY_RD_ERR_LOG_NOOVER_UC;
-		s |=  RETRY_RD_ERR_LOG_EN;
-		d &= ~RETRY_RD_ERR_LOG_NOOVER_UC;
-		d |=  RETRY_RD_ERR_LOG_EN;
+		if (first)
+			v |= rrl->noover_mask;
+		else
+			v &= ~rrl->noover_mask;
 
-		if (offsets_demand2) {
-			d2 &= ~RETRY_RD_ERR_LOG_UC;
-			d2 |=  RETRY_RD_ERR_LOG_NOOVER;
-			d2 |=  RETRY_RD_ERR_LOG_EN;
-		}
+		if (scrub)
+			v |= rrl->en_patspr_mask;
+		else
+			v &= ~rrl->en_patspr_mask;
+
+		v |= rrl->en_mask;
 	} else {
-		/* Restore default configurations */
-		if (imc->chan[chan].retry_rd_err_log_s & RETRY_RD_ERR_LOG_UC)
-			s |=  RETRY_RD_ERR_LOG_UC;
-		if (imc->chan[chan].retry_rd_err_log_s & RETRY_RD_ERR_LOG_NOOVER)
-			s |=  RETRY_RD_ERR_LOG_NOOVER;
-		if (!(imc->chan[chan].retry_rd_err_log_s & RETRY_RD_ERR_LOG_EN))
-			s &= ~RETRY_RD_ERR_LOG_EN;
-		if (imc->chan[chan].retry_rd_err_log_d & RETRY_RD_ERR_LOG_UC)
-			d |=  RETRY_RD_ERR_LOG_UC;
-		if (imc->chan[chan].retry_rd_err_log_d & RETRY_RD_ERR_LOG_NOOVER)
-			d |=  RETRY_RD_ERR_LOG_NOOVER;
-		if (!(imc->chan[chan].retry_rd_err_log_d & RETRY_RD_ERR_LOG_EN))
-			d &= ~RETRY_RD_ERR_LOG_EN;
+		/* Restore default configurations. */
+		if (*rrl_ctl & rrl->uc_mask)
+			v |= rrl->uc_mask;
 
-		if (offsets_demand2) {
-			if (imc->chan[chan].retry_rd_err_log_d2 & RETRY_RD_ERR_LOG_UC)
-				d2 |=  RETRY_RD_ERR_LOG_UC;
-			if (!(imc->chan[chan].retry_rd_err_log_d2 & RETRY_RD_ERR_LOG_NOOVER))
-				d2 &=  ~RETRY_RD_ERR_LOG_NOOVER;
-			if (!(imc->chan[chan].retry_rd_err_log_d2 & RETRY_RD_ERR_LOG_EN))
-				d2 &= ~RETRY_RD_ERR_LOG_EN;
+		if (first) {
+			if (!(*rrl_ctl & rrl->noover_mask))
+				v &= ~rrl->noover_mask;
+		} else {
+			if (*rrl_ctl & rrl->noover_mask)
+				v |= rrl->noover_mask;
 		}
+
+		if (scrub) {
+			if (!(*rrl_ctl & rrl->en_patspr_mask))
+				v &= ~rrl->en_patspr_mask;
+		} else {
+			if (*rrl_ctl & rrl->en_patspr_mask)
+				v |= rrl->en_patspr_mask;
+		}
+
+		if (!(*rrl_ctl & rrl->en_mask))
+			v &= ~rrl->en_mask;
 	}
 
-	I10NM_SET_REG32(imc, chan, offsets_scrub[0], s);
-	I10NM_SET_REG32(imc, chan, offsets_demand[0], d);
-	if (offsets_demand2)
-		I10NM_SET_REG32(imc, chan, offsets_demand2[0], d2);
+	write_imc_reg(imc, chan, offset, width, v);
+}
+
+static void enable_rrls(struct skx_imc *imc, int chan, struct reg_rrl *rrl,
+			bool enable, u32 *rrl_ctl)
+{
+	for (int i = 0; i < rrl->set_num; i++)
+		enable_rrl(imc, chan, rrl, i, enable, rrl_ctl + i);
+}
+
+static void enable_rrls_ddr(struct skx_imc *imc, bool enable)
+{
+	struct reg_rrl *rrl_ddr = res_cfg->reg_rrl_ddr;
+	int i, chan_num = res_cfg->ddr_chan_num;
+	struct skx_channel *chan = imc->chan;
+
+	if (!imc->mbase)
+		return;
+
+	for (i = 0; i < chan_num; i++)
+		enable_rrls(imc, i, rrl_ddr, enable, chan[i].rrl_ctl[0]);
+}
+
+static void enable_rrls_hbm(struct skx_imc *imc, bool enable)
+{
+	struct reg_rrl **rrl_hbm = res_cfg->reg_rrl_hbm;
+	int i, chan_num = res_cfg->hbm_chan_num;
+	struct skx_channel *chan = imc->chan;
+
+	if (!imc->mbase || !imc->hbm_mc || !rrl_hbm[0] || !rrl_hbm[1])
+		return;
+
+	for (i = 0; i < chan_num; i++) {
+		enable_rrls(imc, i, rrl_hbm[0], enable, chan[i].rrl_ctl[0]);
+		enable_rrls(imc, i, rrl_hbm[1], enable, chan[i].rrl_ctl[1]);
+	}
 }
 
 static void enable_retry_rd_err_log(bool enable)
 {
-	int i, j, imc_num, chan_num;
-	struct skx_imc *imc;
 	struct skx_dev *d;
+	int i, imc_num;
 
 	edac_dbg(2, "\n");
 
 	list_for_each_entry(d, i10nm_edac_list, list) {
 		imc_num  = res_cfg->ddr_imc_num;
-		chan_num = res_cfg->ddr_chan_num;
-
-		for (i = 0; i < imc_num; i++) {
-			imc = &d->imc[i];
-			if (!imc->mbase)
-				continue;
-
-			for (j = 0; j < chan_num; j++)
-				__enable_retry_rd_err_log(imc, j, enable,
-							  res_cfg->offsets_scrub,
-							  res_cfg->offsets_demand,
-							  res_cfg->offsets_demand2);
-		}
+		for (i = 0; i < imc_num; i++)
+			enable_rrls_ddr(&d->imc[i], enable);
 
 		imc_num += res_cfg->hbm_imc_num;
-		chan_num = res_cfg->hbm_chan_num;
-
-		for (; i < imc_num; i++) {
-			imc = &d->imc[i];
-			if (!imc->mbase || !imc->hbm_mc)
-				continue;
-
-			for (j = 0; j < chan_num; j++) {
-				__enable_retry_rd_err_log(imc, j, enable,
-							  res_cfg->offsets_scrub_hbm0,
-							  res_cfg->offsets_demand_hbm0,
-							  NULL);
-				__enable_retry_rd_err_log(imc, j, enable,
-							  res_cfg->offsets_scrub_hbm1,
-							  res_cfg->offsets_demand_hbm1,
-							  NULL);
-			}
-		}
+		for (; i < imc_num; i++)
+			enable_rrls_hbm(&d->imc[i], enable);
 	}
 }
 
 static void show_retry_rd_err_log(struct decoded_addr *res, char *msg,
 				  int len, bool scrub_err)
 {
+	int i, j, n, ch = res->channel, pch = res->cs & 1;
 	struct skx_imc *imc = &res->dev->imc[res->imc];
-	u32 log0, log1, log2, log3, log4;
-	u32 corr0, corr1, corr2, corr3;
-	u32 lxg0, lxg1, lxg3, lxg4;
-	u32 *xffsets = NULL;
-	u64 log2a, log5;
-	u64 lxg2a, lxg5;
-	u32 *offsets;
-	int n, pch;
+	u64 log, corr, status_mask;
+	struct reg_rrl *rrl;
+	bool scrub;
+	u32 offset;
+	u8 width;
 
 	if (!imc->mbase)
 		return;
 
-	if (imc->hbm_mc) {
-		pch = res->cs & 1;
+	rrl = imc->hbm_mc ? res_cfg->reg_rrl_hbm[pch] : res_cfg->reg_rrl_ddr;
 
-		if (pch)
-			offsets = scrub_err ? res_cfg->offsets_scrub_hbm1 :
-					      res_cfg->offsets_demand_hbm1;
-		else
-			offsets = scrub_err ? res_cfg->offsets_scrub_hbm0 :
-					      res_cfg->offsets_demand_hbm0;
-	} else {
-		if (scrub_err) {
-			offsets = res_cfg->offsets_scrub;
-		} else {
-			offsets = res_cfg->offsets_demand;
-			xffsets = res_cfg->offsets_demand2;
+	if (!rrl)
+		return;
+
+	status_mask = rrl->over_mask | rrl->uc_mask | rrl->v_mask;
+
+	n = scnprintf(msg, len, " retry_rd_err_log[");
+	for (i = 0; i < rrl->set_num; i++) {
+		scrub = (rrl->modes[i] == FRE_SCRUB || rrl->modes[i] == LRE_SCRUB);
+		if (scrub_err != scrub)
+			continue;
+
+		for (j = 0; j < rrl->reg_num && len - n > 0; j++) {
+			offset = rrl->offsets[i][j];
+			width = rrl->widths[j];
+			log = read_imc_reg(imc, ch, offset, width);
+
+			if (width == 4)
+				n += scnprintf(msg + n, len - n, "%.8llx ", log);
+			else
+				n += scnprintf(msg + n, len - n, "%.16llx ", log);
+
+			/* Clear RRL status if RRL in Linux control mode. */
+			if (retry_rd_err_log == 2 && !j && (log & status_mask))
+				write_imc_reg(imc, ch, offset, width, log & ~status_mask);
 		}
 	}
 
-	log0 = I10NM_GET_REG32(imc, res->channel, offsets[0]);
-	log1 = I10NM_GET_REG32(imc, res->channel, offsets[1]);
-	log3 = I10NM_GET_REG32(imc, res->channel, offsets[3]);
-	log4 = I10NM_GET_REG32(imc, res->channel, offsets[4]);
-	log5 = I10NM_GET_REG64(imc, res->channel, offsets[5]);
+	/* Move back one space. */
+	n--;
+	n += scnprintf(msg + n, len - n, "]");
 
-	if (xffsets) {
-		lxg0 = I10NM_GET_REG32(imc, res->channel, xffsets[0]);
-		lxg1 = I10NM_GET_REG32(imc, res->channel, xffsets[1]);
-		lxg3 = I10NM_GET_REG32(imc, res->channel, xffsets[3]);
-		lxg4 = I10NM_GET_REG32(imc, res->channel, xffsets[4]);
-		lxg5 = I10NM_GET_REG64(imc, res->channel, xffsets[5]);
-	}
+	if (len - n > 0) {
+		n += scnprintf(msg + n, len - n, " correrrcnt[");
+		for (i = 0; i < rrl->cecnt_num && len - n > 0; i++) {
+			offset = rrl->cecnt_offsets[i];
+			width = rrl->cecnt_widths[i];
+			corr = read_imc_reg(imc, ch, offset, width);
 
-	if (res_cfg->type == SPR) {
-		log2a = I10NM_GET_REG64(imc, res->channel, offsets[2]);
-		n = snprintf(msg, len, " retry_rd_err_log[%.8x %.8x %.16llx %.8x %.8x %.16llx",
-			     log0, log1, log2a, log3, log4, log5);
-
-		if (len - n > 0) {
-			if (xffsets) {
-				lxg2a = I10NM_GET_REG64(imc, res->channel, xffsets[2]);
-				n += snprintf(msg + n, len - n, " %.8x %.8x %.16llx %.8x %.8x %.16llx]",
-					     lxg0, lxg1, lxg2a, lxg3, lxg4, lxg5);
+			/* CPUs {ICX,SPR} encode two counters per 4-byte CORRERRCNT register. */
+			if (res_cfg->type <= SPR) {
+				n += scnprintf(msg + n, len - n, "%.4llx %.4llx ",
+					      corr & 0xffff, corr >> 16);
 			} else {
-				n += snprintf(msg + n, len - n, "]");
+			/* CPUs {GNR} encode one counter per CORRERRCNT register. */
+				if (width == 4)
+					n += scnprintf(msg + n, len - n, "%.8llx ", corr);
+				else
+					n += scnprintf(msg + n, len - n, "%.16llx ", corr);
 			}
 		}
-	} else {
-		log2 = I10NM_GET_REG32(imc, res->channel, offsets[2]);
-		n = snprintf(msg, len, " retry_rd_err_log[%.8x %.8x %.8x %.8x %.8x %.16llx]",
-			     log0, log1, log2, log3, log4, log5);
-	}
 
-	if (imc->hbm_mc) {
-		if (pch) {
-			corr0 = I10NM_GET_REG32(imc, res->channel, 0x2c18);
-			corr1 = I10NM_GET_REG32(imc, res->channel, 0x2c1c);
-			corr2 = I10NM_GET_REG32(imc, res->channel, 0x2c20);
-			corr3 = I10NM_GET_REG32(imc, res->channel, 0x2c24);
-		} else {
-			corr0 = I10NM_GET_REG32(imc, res->channel, 0x2818);
-			corr1 = I10NM_GET_REG32(imc, res->channel, 0x281c);
-			corr2 = I10NM_GET_REG32(imc, res->channel, 0x2820);
-			corr3 = I10NM_GET_REG32(imc, res->channel, 0x2824);
-		}
-	} else {
-		corr0 = I10NM_GET_REG32(imc, res->channel, 0x22c18);
-		corr1 = I10NM_GET_REG32(imc, res->channel, 0x22c1c);
-		corr2 = I10NM_GET_REG32(imc, res->channel, 0x22c20);
-		corr3 = I10NM_GET_REG32(imc, res->channel, 0x22c24);
-	}
-
-	if (len - n > 0)
-		snprintf(msg + n, len - n,
-			 " correrrcnt[%.4x %.4x %.4x %.4x %.4x %.4x %.4x %.4x]",
-			 corr0 & 0xffff, corr0 >> 16,
-			 corr1 & 0xffff, corr1 >> 16,
-			 corr2 & 0xffff, corr2 >> 16,
-			 corr3 & 0xffff, corr3 >> 16);
-
-	/* Clear status bits */
-	if (retry_rd_err_log == 2) {
-		if (log0 & RETRY_RD_ERR_LOG_OVER_UC_V) {
-			log0 &= ~RETRY_RD_ERR_LOG_OVER_UC_V;
-			I10NM_SET_REG32(imc, res->channel, offsets[0], log0);
-		}
-
-		if (xffsets && (lxg0 & RETRY_RD_ERR_LOG_OVER_UC_V)) {
-			lxg0 &= ~RETRY_RD_ERR_LOG_OVER_UC_V;
-			I10NM_SET_REG32(imc, res->channel, xffsets[0], lxg0);
-		}
+		/* Move back one space. */
+		n--;
+		n += scnprintf(msg + n, len - n, "]");
 	}
 }
 
@@ -385,17 +468,18 @@ static int i10nm_get_imc_num(struct res_config *cfg)
 			return -ENODEV;
 		}
 
-		if (imc_num > I10NM_NUM_DDR_IMC) {
-			i10nm_printk(KERN_ERR, "Need to make I10NM_NUM_DDR_IMC >= %d\n", imc_num);
-			return -EINVAL;
-		}
-
 		if (cfg->ddr_imc_num != imc_num) {
 			/*
-			 * Store the number of present DDR memory controllers.
+			 * Update the configuration data to reflect the number of
+			 * present DDR memory controllers.
 			 */
 			cfg->ddr_imc_num = imc_num;
 			edac_dbg(2, "Set DDR MC number: %d", imc_num);
+
+			/* Release and reallocate skx_dev list with the updated number. */
+			skx_remove();
+			if (skx_get_all_bus_mappings(cfg, &i10nm_edac_list) <= 0)
+				return -ENODEV;
 		}
 
 		return 0;
@@ -605,6 +689,14 @@ static struct pci_dev *get_gnr_mdev(struct skx_dev *d, int logical_idx, int *phy
 	return NULL;
 }
 
+static u32 get_gnr_imc_mmio_offset(void)
+{
+	if (boot_cpu_data.x86_vfm == INTEL_GRANITERAPIDS_D)
+		return I10NM_GNR_D_IMC_MMIO_OFFSET;
+
+	return I10NM_GNR_IMC_MMIO_OFFSET;
+}
+
 /**
  * get_ddr_munit() - Get the resource of the i-th DDR memory controller.
  *
@@ -633,7 +725,7 @@ static struct pci_dev *get_ddr_munit(struct skx_dev *d, int i, u32 *offset, unsi
 			return NULL;
 
 		*offset = I10NM_GET_IMC_MMIO_OFFSET(reg) +
-			  I10NM_GNR_IMC_MMIO_OFFSET +
+			  get_gnr_imc_mmio_offset() +
 			  physical_idx * I10NM_GNR_IMC_MMIO_SIZE;
 		*size   = I10NM_GNR_IMC_MMIO_SIZE;
 
@@ -755,6 +847,8 @@ static int i10nm_get_ddr_munits(void)
 				continue;
 			} else {
 				d->imc[lmc].mdev = mdev;
+				if (res_cfg->type == SPR)
+					skx_set_mc_mapping(d, i, lmc);
 				lmc++;
 			}
 		}
@@ -872,8 +966,7 @@ static struct res_config i10nm_cfg0 = {
 	.ddr_mdev_bdf		= {0, 12, 0},
 	.hbm_mdev_bdf		= {0, 12, 1},
 	.sad_all_offset		= 0x108,
-	.offsets_scrub		= offsets_scrub_icx,
-	.offsets_demand		= offsets_demand_icx,
+	.reg_rrl_ddr		= &icx_reg_rrl_ddr,
 };
 
 static struct res_config i10nm_cfg1 = {
@@ -891,8 +984,7 @@ static struct res_config i10nm_cfg1 = {
 	.ddr_mdev_bdf		= {0, 12, 0},
 	.hbm_mdev_bdf		= {0, 12, 1},
 	.sad_all_offset		= 0x108,
-	.offsets_scrub		= offsets_scrub_icx,
-	.offsets_demand		= offsets_demand_icx,
+	.reg_rrl_ddr		= &icx_reg_rrl_ddr,
 };
 
 static struct res_config spr_cfg = {
@@ -915,13 +1007,9 @@ static struct res_config spr_cfg = {
 	.ddr_mdev_bdf		= {0, 12, 0},
 	.hbm_mdev_bdf		= {0, 12, 1},
 	.sad_all_offset		= 0x300,
-	.offsets_scrub		= offsets_scrub_spr,
-	.offsets_scrub_hbm0	= offsets_scrub_spr_hbm0,
-	.offsets_scrub_hbm1	= offsets_scrub_spr_hbm1,
-	.offsets_demand		= offsets_demand_spr,
-	.offsets_demand2	= offsets_demand2_spr,
-	.offsets_demand_hbm0	= offsets_demand_spr_hbm0,
-	.offsets_demand_hbm1	= offsets_demand_spr_hbm1,
+	.reg_rrl_ddr		= &spr_reg_rrl_ddr,
+	.reg_rrl_hbm[0]		= &spr_reg_rrl_hbm_pch0,
+	.reg_rrl_hbm[1]		= &spr_reg_rrl_hbm_pch1,
 };
 
 static struct res_config gnr_cfg = {
@@ -939,18 +1027,23 @@ static struct res_config gnr_cfg = {
 	.uracu_bdf		= {0, 0, 1},
 	.ddr_mdev_bdf		= {0, 5, 1},
 	.sad_all_offset		= 0x300,
+	.reg_rrl_ddr		= &gnr_reg_rrl_ddr,
 };
 
 static const struct x86_cpu_id i10nm_cpuids[] = {
-	X86_MATCH_INTEL_FAM6_MODEL_STEPPINGS(ATOM_TREMONT_D,	X86_STEPPINGS(0x0, 0x3), &i10nm_cfg0),
-	X86_MATCH_INTEL_FAM6_MODEL_STEPPINGS(ATOM_TREMONT_D,	X86_STEPPINGS(0x4, 0xf), &i10nm_cfg1),
-	X86_MATCH_INTEL_FAM6_MODEL_STEPPINGS(ICELAKE_X,		X86_STEPPINGS(0x0, 0x3), &i10nm_cfg0),
-	X86_MATCH_INTEL_FAM6_MODEL_STEPPINGS(ICELAKE_X,		X86_STEPPINGS(0x4, 0xf), &i10nm_cfg1),
-	X86_MATCH_INTEL_FAM6_MODEL_STEPPINGS(ICELAKE_D,		X86_STEPPINGS(0x0, 0xf), &i10nm_cfg1),
-	X86_MATCH_INTEL_FAM6_MODEL_STEPPINGS(SAPPHIRERAPIDS_X,	X86_STEPPINGS(0x0, 0xf), &spr_cfg),
-	X86_MATCH_INTEL_FAM6_MODEL_STEPPINGS(EMERALDRAPIDS_X,	X86_STEPPINGS(0x0, 0xf), &spr_cfg),
-	X86_MATCH_INTEL_FAM6_MODEL_STEPPINGS(GRANITERAPIDS_X,	X86_STEPPINGS(0x0, 0xf), &gnr_cfg),
-	X86_MATCH_INTEL_FAM6_MODEL_STEPPINGS(ATOM_CRESTMONT_X,	X86_STEPPINGS(0x0, 0xf), &gnr_cfg),
+	X86_MATCH_VFM_STEPS(INTEL_ATOM_TREMONT_D, X86_STEP_MIN,		 0x3, &i10nm_cfg0),
+	X86_MATCH_VFM_STEPS(INTEL_ATOM_TREMONT_D,	   0x4,	X86_STEP_MAX, &i10nm_cfg1),
+	X86_MATCH_VFM_STEPS(INTEL_ICELAKE_X,	  X86_STEP_MIN,		 0x3, &i10nm_cfg0),
+	X86_MATCH_VFM_STEPS(INTEL_ICELAKE_X,		   0x4, X86_STEP_MAX, &i10nm_cfg1),
+	X86_MATCH_VFM(	    INTEL_ICELAKE_D,				      &i10nm_cfg1),
+
+	X86_MATCH_VFM(INTEL_SAPPHIRERAPIDS_X, &spr_cfg),
+	X86_MATCH_VFM(INTEL_EMERALDRAPIDS_X,  &spr_cfg),
+	X86_MATCH_VFM(INTEL_GRANITERAPIDS_X,  &gnr_cfg),
+	X86_MATCH_VFM(INTEL_GRANITERAPIDS_D,  &gnr_cfg),
+	X86_MATCH_VFM(INTEL_ATOM_CRESTMONT_X, &gnr_cfg),
+	X86_MATCH_VFM(INTEL_ATOM_CRESTMONT,   &gnr_cfg),
+	X86_MATCH_VFM(INTEL_ATOM_DARKMONT_X,  &gnr_cfg),
 	{}
 };
 MODULE_DEVICE_TABLE(x86cpu, i10nm_cpuids);
@@ -965,12 +1058,21 @@ static bool i10nm_check_ecc(struct skx_imc *imc, int chan)
 	return !!GET_BITFIELD(mcmtr, 2, 2);
 }
 
+static bool i10nm_channel_disabled(struct skx_imc *imc, int chan)
+{
+	u32 mcmtr = I10NM_GET_MCMTR(imc, chan);
+
+	edac_dbg(1, "mc%d ch%d mcmtr reg %x\n", imc->mc, chan, mcmtr);
+
+	return (mcmtr == ~0 || GET_BITFIELD(mcmtr, 18, 18));
+}
+
 static int i10nm_get_dimm_config(struct mem_ctl_info *mci,
 				 struct res_config *cfg)
 {
 	struct skx_pvt *pvt = mci->pvt_info;
 	struct skx_imc *imc = pvt->imc;
-	u32 mtr, amap, mcddrtcfg = 0;
+	u32 mtr, mcddrtcfg = 0;
 	struct dimm_info *dimm;
 	int i, j, ndimms;
 
@@ -978,8 +1080,12 @@ static int i10nm_get_dimm_config(struct mem_ctl_info *mci,
 		if (!imc->mbase)
 			continue;
 
+		if (i10nm_channel_disabled(imc, i)) {
+			edac_dbg(1, "mc%d ch%d is disabled.\n", imc->mc, i);
+			continue;
+		}
+
 		ndimms = 0;
-		amap = I10NM_GET_AMAP(imc, i);
 
 		if (res_cfg->type != GNR)
 			mcddrtcfg = I10NM_GET_MCDDRTCFG(imc, i);
@@ -991,7 +1097,7 @@ static int i10nm_get_dimm_config(struct mem_ctl_info *mci,
 				 mtr, mcddrtcfg, imc->mc, i, j);
 
 			if (IS_DIMM_PRESENT(mtr))
-				ndimms += skx_get_dimm_info(mtr, 0, amap, dimm,
+				ndimms += skx_get_dimm_info(mtr, 0, 0, dimm,
 							    imc, i, j, cfg);
 			else if (IS_NVDIMM_PRESENT(mcddrtcfg, j))
 				ndimms += skx_get_nvdimm_info(dimm, imc, i, j,
@@ -1012,57 +1118,9 @@ static struct notifier_block i10nm_mce_dec = {
 	.priority	= MCE_PRIO_EDAC,
 };
 
-#ifdef CONFIG_EDAC_DEBUG
-/*
- * Debug feature.
- * Exercise the address decode logic by writing an address to
- * /sys/kernel/debug/edac/i10nm_test/addr.
- */
-static struct dentry *i10nm_test;
-
-static int debugfs_u64_set(void *data, u64 val)
-{
-	struct mce m;
-
-	pr_warn_once("Fake error to 0x%llx injected via debugfs\n", val);
-
-	memset(&m, 0, sizeof(m));
-	/* ADDRV + MemRd + Unknown channel */
-	m.status = MCI_STATUS_ADDRV + 0x90;
-	/* One corrected error */
-	m.status |= BIT_ULL(MCI_STATUS_CEC_SHIFT);
-	m.addr = val;
-	skx_mce_check_error(NULL, 0, &m);
-
-	return 0;
-}
-DEFINE_SIMPLE_ATTRIBUTE(fops_u64_wo, NULL, debugfs_u64_set, "%llu\n");
-
-static void setup_i10nm_debug(void)
-{
-	i10nm_test = edac_debugfs_create_dir("i10nm_test");
-	if (!i10nm_test)
-		return;
-
-	if (!edac_debugfs_create_file("addr", 0200, i10nm_test,
-				      NULL, &fops_u64_wo)) {
-		debugfs_remove(i10nm_test);
-		i10nm_test = NULL;
-	}
-}
-
-static void teardown_i10nm_debug(void)
-{
-	debugfs_remove_recursive(i10nm_test);
-}
-#else
-static inline void setup_i10nm_debug(void) {}
-static inline void teardown_i10nm_debug(void) {}
-#endif /*CONFIG_EDAC_DEBUG*/
-
 static int __init i10nm_init(void)
 {
-	u8 mc = 0, src_id = 0, node_id = 0;
+	u8 mc = 0, src_id = 0;
 	const struct x86_cpu_id *id;
 	struct res_config *cfg;
 	const char *owner;
@@ -1088,6 +1146,7 @@ static int __init i10nm_init(void)
 		return -ENODEV;
 
 	cfg = (struct res_config *)id->driver_data;
+	skx_set_res_cfg(cfg);
 	res_cfg = cfg;
 
 	rc = skx_get_hi_lo(0x09a2, off, &tolm, &tohm);
@@ -1121,19 +1180,14 @@ static int __init i10nm_init(void)
 		if (rc < 0)
 			goto fail;
 
-		rc = skx_get_node_id(d, &node_id);
-		if (rc < 0)
-			goto fail;
-
-		edac_dbg(2, "src_id = %d node_id = %d\n", src_id, node_id);
+		edac_dbg(2, "src_id = %d\n", src_id);
 		for (i = 0; i < imc_num; i++) {
 			if (!d->imc[i].mdev)
 				continue;
 
 			d->imc[i].mc  = mc++;
 			d->imc[i].lmc = i;
-			d->imc[i].src_id  = src_id;
-			d->imc[i].node_id = node_id;
+			d->imc[i].src_id = src_id;
 			if (d->imc[i].hbm_mc) {
 				d->imc[i].chan_mmio_sz = cfg->hbm_chan_mmio_sz;
 				d->imc[i].num_channels = cfg->hbm_chan_num;
@@ -1158,9 +1212,9 @@ static int __init i10nm_init(void)
 
 	opstate_init();
 	mce_register_decode_chain(&i10nm_mce_dec);
-	setup_i10nm_debug();
+	skx_setup_debug("i10nm_test");
 
-	if (retry_rd_err_log && res_cfg->offsets_scrub && res_cfg->offsets_demand) {
+	if (retry_rd_err_log && res_cfg->reg_rrl_ddr) {
 		skx_set_decode(i10nm_mc_decode, show_retry_rd_err_log);
 		if (retry_rd_err_log == 2)
 			enable_retry_rd_err_log(true);
@@ -1180,13 +1234,13 @@ static void __exit i10nm_exit(void)
 {
 	edac_dbg(2, "\n");
 
-	if (retry_rd_err_log && res_cfg->offsets_scrub && res_cfg->offsets_demand) {
+	if (retry_rd_err_log && res_cfg->reg_rrl_ddr) {
 		skx_set_decode(NULL, NULL);
 		if (retry_rd_err_log == 2)
 			enable_retry_rd_err_log(false);
 	}
 
-	teardown_i10nm_debug();
+	skx_teardown_debug();
 	mce_unregister_decode_chain(&i10nm_mce_dec);
 	skx_adxl_put();
 	skx_remove();

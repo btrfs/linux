@@ -125,7 +125,7 @@ static void probe_console(void *ignore, const char *buf, size_t len)
 				goto out;
 
 			/* No second line of interest. */
-			strcpy(observed.lines[nlines++], "<none>");
+			strscpy(observed.lines[nlines++], "<none>");
 		}
 	}
 
@@ -231,7 +231,7 @@ static bool __report_matches(const struct expect_report *r)
 
 			if (!r->access[1].fn) {
 				/* Dummy string if no second access is available. */
-				strcpy(cur, "<none>");
+				strscpy(expect[2], "<none>");
 				break;
 			}
 		}
@@ -304,6 +304,7 @@ static long test_array[3 * PAGE_SIZE / sizeof(long)];
 static struct {
 	long val[8];
 } test_struct;
+static long __data_racy test_data_racy;
 static DEFINE_SEQLOCK(test_seqlock);
 static DEFINE_SPINLOCK(test_spinlock);
 static DEFINE_MUTEX(test_mutex);
@@ -357,6 +358,8 @@ __no_kcsan
 static noinline void test_kernel_write_uninstrumented(void) { test_var++; }
 
 static noinline void test_kernel_data_race(void) { data_race(test_var++); }
+
+static noinline void test_kernel_data_racy_qualifier(void) { test_data_racy++; }
 
 static noinline void test_kernel_assert_writer(void)
 {
@@ -530,7 +533,7 @@ static void test_barrier_nothreads(struct kunit *test)
 	struct kcsan_scoped_access *reorder_access = NULL;
 #endif
 	arch_spinlock_t arch_spinlock = __ARCH_SPIN_LOCK_UNLOCKED;
-	atomic_t dummy;
+	atomic_t dummy = ATOMIC_INIT(0);
 
 	KCSAN_TEST_REQUIRES(test, reorder_access != NULL);
 	KCSAN_TEST_REQUIRES(test, IS_ENABLED(CONFIG_SMP));
@@ -1009,6 +1012,19 @@ static void test_data_race(struct kunit *test)
 	KUNIT_EXPECT_FALSE(test, match_never);
 }
 
+/* Test the __data_racy type qualifier. */
+__no_kcsan
+static void test_data_racy_qualifier(struct kunit *test)
+{
+	bool match_never = false;
+
+	begin_test_checks(test_kernel_data_racy_qualifier, test_kernel_data_racy_qualifier);
+	do {
+		match_never = report_available();
+	} while (!end_test_checks(match_never));
+	KUNIT_EXPECT_FALSE(test, match_never);
+}
+
 __no_kcsan
 static void test_assert_exclusive_writer(struct kunit *test)
 {
@@ -1367,7 +1383,7 @@ static void test_atomic_builtins_missing_barrier(struct kunit *test)
  * The thread counts are chosen to cover potentially interesting boundaries and
  * corner cases (2 to 5), and then stress the system with larger counts.
  */
-static const void *nthreads_gen_params(const void *prev, char *desc)
+static const void *nthreads_gen_params(struct kunit *test, const void *prev, char *desc)
 {
 	long nthreads = (long)prev;
 
@@ -1424,6 +1440,7 @@ static struct kunit_case kcsan_test_cases[] = {
 	KCSAN_KUNIT_CASE(test_read_plain_atomic_rmw),
 	KCSAN_KUNIT_CASE(test_zero_size_access),
 	KCSAN_KUNIT_CASE(test_data_race),
+	KCSAN_KUNIT_CASE(test_data_racy_qualifier),
 	KCSAN_KUNIT_CASE(test_assert_exclusive_writer),
 	KCSAN_KUNIT_CASE(test_assert_exclusive_access),
 	KCSAN_KUNIT_CASE(test_assert_exclusive_access_writer),
@@ -1483,8 +1500,8 @@ static int access_thread(void *arg)
 				func();
 		}
 	} while (!torture_must_stop());
-	del_timer_sync(&timer);
-	destroy_timer_on_stack(&timer);
+	timer_delete_sync(&timer);
+	timer_destroy_on_stack(&timer);
 
 	torture_kthread_stopping("access_thread");
 	return 0;
@@ -1603,5 +1620,6 @@ static struct kunit_suite kcsan_test_suite = {
 
 kunit_test_suites(&kcsan_test_suite);
 
+MODULE_DESCRIPTION("KCSAN test suite");
 MODULE_LICENSE("GPL v2");
 MODULE_AUTHOR("Marco Elver <elver@google.com>");

@@ -3363,10 +3363,10 @@ static int rt5659_set_dai_fmt(struct snd_soc_dai *dai, unsigned int fmt)
 	unsigned int reg_val = 0;
 
 	switch (fmt & SND_SOC_DAIFMT_MASTER_MASK) {
-	case SND_SOC_DAIFMT_CBM_CFM:
+	case SND_SOC_DAIFMT_CBP_CFP:
 		rt5659->master[dai->id] = 1;
 		break;
-	case SND_SOC_DAIFMT_CBS_CFS:
+	case SND_SOC_DAIFMT_CBC_CFC:
 		reg_val |= RT5659_I2S_MS_S;
 		rt5659->master[dai->id] = 0;
 		break;
@@ -3815,8 +3815,8 @@ static const struct regmap_config rt5659_regmap = {
 };
 
 static const struct i2c_device_id rt5659_i2c_id[] = {
-	{ "rt5658", 0 },
-	{ "rt5659", 0 },
+	{ "rt5658" },
+	{ "rt5659" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, rt5659_i2c_id);
@@ -4292,7 +4292,7 @@ static int rt5659_i2c_probe(struct i2c_client *i2c)
 			rt5659_irq, IRQF_TRIGGER_RISING | IRQF_TRIGGER_FALLING
 			| IRQF_ONESHOT, "rt5659", rt5659);
 		if (ret)
-			dev_err(&i2c->dev, "Failed to reguest IRQ: %d\n", ret);
+			dev_err(&i2c->dev, "Failed to request IRQ: %d\n", ret);
 
 		/* Enable IRQ output for GPIO1 pin any way */
 		regmap_update_bits(rt5659->regmap, RT5659_GPIO_CTRL_1,
@@ -4315,16 +4315,16 @@ static void rt5659_i2c_shutdown(struct i2c_client *client)
 static const struct of_device_id rt5659_of_match[] = {
 	{ .compatible = "realtek,rt5658", },
 	{ .compatible = "realtek,rt5659", },
-	{ },
+	{ }
 };
 MODULE_DEVICE_TABLE(of, rt5659_of_match);
 #endif
 
 #ifdef CONFIG_ACPI
 static const struct acpi_device_id rt5659_acpi_match[] = {
-	{ "10EC5658", 0, },
-	{ "10EC5659", 0, },
-	{ },
+	{ "10EC5658" },
+	{ "10EC5659" },
+	{ }
 };
 MODULE_DEVICE_TABLE(acpi, rt5659_acpi_match);
 #endif

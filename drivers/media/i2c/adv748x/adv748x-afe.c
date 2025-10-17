@@ -114,7 +114,7 @@ static void adv748x_afe_fill_format(struct adv748x_afe *afe,
 {
 	memset(fmt, 0, sizeof(*fmt));
 
-	fmt->code = MEDIA_BUS_FMT_UYVY8_2X8;
+	fmt->code = MEDIA_BUS_FMT_UYVY8_1X16;
 	fmt->colorspace = V4L2_COLORSPACE_SMPTE170M;
 	fmt->field = V4L2_FIELD_ALTERNATE;
 
@@ -159,22 +159,6 @@ int adv748x_afe_s_input(struct adv748x_afe *afe, unsigned int input)
 	struct adv748x_state *state = adv748x_afe_to_state(afe);
 
 	return sdp_write(state, ADV748X_SDP_INSEL, input);
-}
-
-static int adv748x_afe_g_pixelaspect(struct v4l2_subdev *sd,
-				     struct v4l2_fract *aspect)
-{
-	struct adv748x_afe *afe = adv748x_sd_to_afe(sd);
-
-	if (afe->curr_norm & V4L2_STD_525_60) {
-		aspect->numerator = 11;
-		aspect->denominator = 10;
-	} else {
-		aspect->numerator = 54;
-		aspect->denominator = 59;
-	}
-
-	return 0;
 }
 
 /* -----------------------------------------------------------------------------
@@ -307,7 +291,6 @@ static const struct v4l2_subdev_video_ops adv748x_afe_video_ops = {
 	.g_tvnorms = adv748x_afe_g_tvnorms,
 	.g_input_status = adv748x_afe_g_input_status,
 	.s_stream = adv748x_afe_s_stream,
-	.g_pixelaspect = adv748x_afe_g_pixelaspect,
 };
 
 /* -----------------------------------------------------------------------------
@@ -337,7 +320,7 @@ static int adv748x_afe_enum_mbus_code(struct v4l2_subdev *sd,
 	if (code->index != 0)
 		return -EINVAL;
 
-	code->code = MEDIA_BUS_FMT_UYVY8_2X8;
+	code->code = MEDIA_BUS_FMT_UYVY8_1X16;
 
 	return 0;
 }

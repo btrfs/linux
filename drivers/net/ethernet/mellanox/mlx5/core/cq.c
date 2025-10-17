@@ -71,6 +71,7 @@ static void mlx5_add_cq_to_tasklet(struct mlx5_core_cq *cq,
 {
 	unsigned long flags;
 	struct mlx5_eq_tasklet *tasklet_ctx = cq->tasklet_ctx.priv;
+	bool schedule_tasklet = false;
 
 	spin_lock_irqsave(&tasklet_ctx->lock, flags);
 	/* When migrating CQs between EQs will be implemented, please note
@@ -80,9 +81,19 @@ static void mlx5_add_cq_to_tasklet(struct mlx5_core_cq *cq,
 	 */
 	if (list_empty_careful(&cq->tasklet_ctx.list)) {
 		mlx5_cq_hold(cq);
+		/* If the tasklet CQ work list isn't empty, mlx5_cq_tasklet_cb()
+		 * is scheduled/running and hasn't processed the list yet, so it
+		 * will see this added CQ when it runs. If the list is empty,
+		 * the tasklet needs to be scheduled to pick up the CQ. The
+		 * spinlock avoids any race with the tasklet accessing the list.
+		 */
+		schedule_tasklet = list_empty(&tasklet_ctx->list);
 		list_add_tail(&cq->tasklet_ctx.list, &tasklet_ctx->list);
 	}
 	spin_unlock_irqrestore(&tasklet_ctx->lock, flags);
+
+	if (schedule_tasklet)
+		tasklet_schedule(&tasklet_ctx->task);
 }
 
 /* Callers must verify outbox status in case of err */
@@ -134,7 +145,6 @@ int mlx5_create_cq(struct mlx5_core_dev *dev, struct mlx5_core_cq *cq,
 		mlx5_core_dbg(dev, "failed adding CP 0x%x to debug file system\n",
 			      cq->cqn);
 
-	cq->uar = dev->priv.uar;
 	cq->irqn = eq->core.irqn;
 
 	return 0;

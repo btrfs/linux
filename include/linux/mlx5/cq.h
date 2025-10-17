@@ -41,7 +41,6 @@ struct mlx5_core_cq {
 	int			cqe_sz;
 	__be32		       *set_ci_db;
 	__be32		       *arm_db;
-	struct mlx5_uars_page  *uar;
 	refcount_t		refcount;
 	struct completion	free;
 	unsigned		vector;
@@ -95,9 +94,10 @@ enum {
 };
 
 enum {
-	MLX5_CQ_MODIFY_PERIOD	= 1 << 0,
-	MLX5_CQ_MODIFY_COUNT	= 1 << 1,
-	MLX5_CQ_MODIFY_OVERRUN	= 1 << 2,
+	MLX5_CQ_MODIFY_PERIOD		= BIT(0),
+	MLX5_CQ_MODIFY_COUNT		= BIT(1),
+	MLX5_CQ_MODIFY_OVERRUN		= BIT(2),
+	MLX5_CQ_MODIFY_PERIOD_MODE	= BIT(4),
 };
 
 enum {

@@ -3,10 +3,13 @@
 
 #include "idpf.h"
 #include "idpf_devids.h"
+#include "idpf_virtchnl.h"
 
 #define DRV_SUMMARY	"Intel(R) Infrastructure Data Path Function Linux Driver"
 
 MODULE_DESCRIPTION(DRV_SUMMARY);
+MODULE_IMPORT_NS("LIBETH");
+MODULE_IMPORT_NS("LIBETH_XDP");
 MODULE_LICENSE("GPL");
 
 /**
@@ -30,6 +33,7 @@ static void idpf_remove(struct pci_dev *pdev)
 		idpf_sriov_configure(pdev, 0);
 
 	idpf_vc_core_deinit(adapter);
+
 	/* Be a good citizen and leave the device clean on exit */
 	adapter->dev_ops.reg_ops.trigger_reset(adapter, IDPF_HR_FUNC_RESET);
 	idpf_deinit_dflt_mbx(adapter);
@@ -59,6 +63,7 @@ destroy_wqs:
 	destroy_workqueue(adapter->vc_event_wq);
 
 	for (i = 0; i < adapter->max_vports; i++) {
+		kfree(adapter->vport_config[i]->user_config.q_coalesce);
 		kfree(adapter->vport_config[i]);
 		adapter->vport_config[i] = NULL;
 	}
@@ -66,6 +71,8 @@ destroy_wqs:
 	adapter->vport_config = NULL;
 	kfree(adapter->netdevs);
 	adapter->netdevs = NULL;
+	kfree(adapter->vcxn_mngr);
+	adapter->vcxn_mngr = NULL;
 
 	mutex_destroy(&adapter->vport_ctrl_lock);
 	mutex_destroy(&adapter->vector_lock);
@@ -82,7 +89,12 @@ destroy_wqs:
  */
 static void idpf_shutdown(struct pci_dev *pdev)
 {
-	idpf_remove(pdev);
+	struct idpf_adapter *adapter = pci_get_drvdata(pdev);
+
+	cancel_delayed_work_sync(&adapter->serv_task);
+	cancel_delayed_work_sync(&adapter->vc_event_task);
+	idpf_vc_core_deinit(adapter);
+	idpf_deinit_dflt_mbx(adapter);
 
 	if (system_state == SYSTEM_POWER_OFF)
 		pci_set_power_state(pdev, PCI_D3hot);
@@ -96,15 +108,37 @@ static void idpf_shutdown(struct pci_dev *pdev)
  */
 static int idpf_cfg_hw(struct idpf_adapter *adapter)
 {
+	resource_size_t res_start, mbx_start, rstat_start;
 	struct pci_dev *pdev = adapter->pdev;
 	struct idpf_hw *hw = &adapter->hw;
+	struct device *dev = &pdev->dev;
+	long len;
 
-	hw->hw_addr = pcim_iomap_table(pdev)[0];
-	if (!hw->hw_addr) {
-		pci_err(pdev, "failed to allocate PCI iomap table\n");
+	res_start = pci_resource_start(pdev, 0);
+
+	/* Map mailbox space for virtchnl communication */
+	mbx_start = res_start + adapter->dev_ops.static_reg_info[0].start;
+	len = resource_size(&adapter->dev_ops.static_reg_info[0]);
+	hw->mbx.vaddr = devm_ioremap(dev, mbx_start, len);
+	if (!hw->mbx.vaddr) {
+		pci_err(pdev, "failed to allocate BAR0 mbx region\n");
 
 		return -ENOMEM;
 	}
+	hw->mbx.addr_start = adapter->dev_ops.static_reg_info[0].start;
+	hw->mbx.addr_len = len;
+
+	/* Map rstat space for resets */
+	rstat_start = res_start + adapter->dev_ops.static_reg_info[1].start;
+	len = resource_size(&adapter->dev_ops.static_reg_info[1]);
+	hw->rstat.vaddr = devm_ioremap(dev, rstat_start, len);
+	if (!hw->rstat.vaddr) {
+		pci_err(pdev, "failed to allocate BAR0 rstat region\n");
+
+		return -ENOMEM;
+	}
+	hw->rstat.addr_start = adapter->dev_ops.static_reg_info[1].start;
+	hw->rstat.addr_len = len;
 
 	hw->back = adapter;
 
@@ -151,12 +185,16 @@ static int idpf_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 	if (err)
 		goto err_free;
 
-	err = pcim_iomap_regions(pdev, BIT(0), pci_name(pdev));
+	err = pcim_request_region(pdev, 0, pci_name(pdev));
 	if (err) {
-		pci_err(pdev, "pcim_iomap_regions failed %pe\n", ERR_PTR(err));
+		pci_err(pdev, "pcim_request_region failed %pe\n", ERR_PTR(err));
 
 		goto err_free;
 	}
+
+	err = pci_enable_ptm(pdev, NULL);
+	if (err)
+		pci_dbg(pdev, "PCIe PTM is not supported by PCIe bus/controller\n");
 
 	/* set up for high or low dma */
 	err = dma_set_mask_and_coherent(dev, DMA_BIT_MASK(64));
@@ -169,7 +207,8 @@ static int idpf_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 	pci_set_master(pdev);
 	pci_set_drvdata(pdev, adapter);
 
-	adapter->init_wq = alloc_workqueue("%s-%s-init", 0, 0,
+	adapter->init_wq = alloc_workqueue("%s-%s-init",
+					   WQ_UNBOUND | WQ_MEM_RECLAIM, 0,
 					   dev_driver_string(dev),
 					   dev_name(dev));
 	if (!adapter->init_wq) {
@@ -178,7 +217,8 @@ static int idpf_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 		goto err_free;
 	}
 
-	adapter->serv_wq = alloc_workqueue("%s-%s-service", 0, 0,
+	adapter->serv_wq = alloc_workqueue("%s-%s-service",
+					   WQ_UNBOUND | WQ_MEM_RECLAIM, 0,
 					   dev_driver_string(dev),
 					   dev_name(dev));
 	if (!adapter->serv_wq) {
@@ -187,8 +227,8 @@ static int idpf_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 		goto err_serv_wq_alloc;
 	}
 
-	adapter->mbx_wq = alloc_workqueue("%s-%s-mbx", 0, 0,
-					  dev_driver_string(dev),
+	adapter->mbx_wq = alloc_workqueue("%s-%s-mbx", WQ_UNBOUND | WQ_HIGHPRI,
+					  0, dev_driver_string(dev),
 					  dev_name(dev));
 	if (!adapter->mbx_wq) {
 		dev_err(dev, "Failed to allocate mailbox workqueue\n");
@@ -196,7 +236,8 @@ static int idpf_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 		goto err_mbx_wq_alloc;
 	}
 
-	adapter->stats_wq = alloc_workqueue("%s-%s-stats", 0, 0,
+	adapter->stats_wq = alloc_workqueue("%s-%s-stats",
+					    WQ_UNBOUND | WQ_MEM_RECLAIM, 0,
 					    dev_driver_string(dev),
 					    dev_name(dev));
 	if (!adapter->stats_wq) {
@@ -205,7 +246,8 @@ static int idpf_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 		goto err_stats_wq_alloc;
 	}
 
-	adapter->vc_event_wq = alloc_workqueue("%s-%s-vc_event", 0, 0,
+	adapter->vc_event_wq = alloc_workqueue("%s-%s-vc_event",
+					       WQ_UNBOUND | WQ_MEM_RECLAIM, 0,
 					       dev_driver_string(dev),
 					       dev_name(dev));
 	if (!adapter->vc_event_wq) {
@@ -228,8 +270,6 @@ static int idpf_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 	mutex_init(&adapter->vector_lock);
 	mutex_init(&adapter->queue_lock);
 	mutex_init(&adapter->vc_buf_lock);
-
-	init_waitqueue_head(&adapter->vchnl_wq);
 
 	INIT_DELAYED_WORK(&adapter->init_task, idpf_init_task);
 	INIT_DELAYED_WORK(&adapter->serv_task, idpf_service_task);

@@ -139,6 +139,50 @@ static const char *delim_end[] = {
 	[TYPE_STRING] = "",
 };
 
+/*
+ * The invariants in the marker list are:
+ *  - offsets are non-strictly monotonically increasing
+ *  - for a single offset there is at most one type marker
+ *  - for a single offset that has both a type marker and non-type markers, the
+ *    type marker appears before the others.
+ */
+static struct marker **add_marker(struct marker **mi,
+				  enum markertype type, unsigned int offset, char *ref)
+{
+	struct marker *nm;
+
+	while (*mi && (*mi)->offset < offset)
+		mi = &(*mi)->next;
+
+	if (*mi && (*mi)->offset == offset && is_type_marker((*mi)->type)) {
+		if (is_type_marker(type))
+			return mi;
+		mi = &(*mi)->next;
+	}
+
+	if (*mi && (*mi)->offset == offset && type == (*mi)->type)
+		return mi;
+
+	nm = xmalloc(sizeof(*nm));
+	nm->type = type;
+	nm->offset = offset;
+	nm->ref = ref;
+	nm->next = *mi;
+	*mi = nm;
+
+	return &nm->next;
+}
+
+static void add_string_markers(struct property *prop)
+{
+	int l, len = prop->val.len;
+	const char *p = prop->val.val;
+	struct marker **mi = &prop->val.markers;
+
+	for (l = strlen(p) + 1; l < len; l += strlen(p + l) + 1)
+		mi = add_marker(mi, TYPE_STRING, l, NULL);
+}
+
 static enum markertype guess_value_type(struct property *prop)
 {
 	int len = prop->val.len;
@@ -164,6 +208,8 @@ static enum markertype guess_value_type(struct property *prop)
 
 	if ((p[len-1] == '\0') && (nnotstring == 0) && (nnul <= (len-nnul))
 	    && (nnotstringlbl == 0)) {
+		if (nnul > 1)
+			add_string_markers(prop);
 		return TYPE_STRING;
 	} else if (((len % sizeof(cell_t)) == 0) && (nnotcelllbl == 0)) {
 		return TYPE_UINT32;
@@ -241,6 +287,8 @@ static void write_propval(FILE *f, struct property *prop)
 			} else {
 				write_propval_int(f, p, chunk_len, 4);
 			}
+			if (data_len > chunk_len)
+				fputc(' ', f);
 			break;
 		case TYPE_UINT64:
 			write_propval_int(f, p, chunk_len, 8);

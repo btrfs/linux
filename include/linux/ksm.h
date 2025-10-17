@@ -13,13 +13,12 @@
 #include <linux/pagemap.h>
 #include <linux/rmap.h>
 #include <linux/sched.h>
-#include <linux/sched/coredump.h>
 
 #ifdef CONFIG_KSM
 int ksm_madvise(struct vm_area_struct *vma, unsigned long start,
-		unsigned long end, int advice, unsigned long *vm_flags);
-
-void ksm_add_vma(struct vm_area_struct *vma);
+		unsigned long end, int advice, vm_flags_t *vm_flags);
+vm_flags_t ksm_vma_flags(const struct mm_struct *mm, const struct file *file,
+			 vm_flags_t vm_flags);
 int ksm_enable_merge_any(struct mm_struct *mm);
 int ksm_disable_merge_any(struct mm_struct *mm);
 int ksm_disable(struct mm_struct *mm);
@@ -33,35 +32,51 @@ void __ksm_exit(struct mm_struct *mm);
  */
 #define is_ksm_zero_pte(pte)	(is_zero_pfn(pte_pfn(pte)) && pte_dirty(pte))
 
-extern unsigned long ksm_zero_pages;
+extern atomic_long_t ksm_zero_pages;
+
+static inline void ksm_map_zero_page(struct mm_struct *mm)
+{
+	atomic_long_inc(&ksm_zero_pages);
+	atomic_long_inc(&mm->ksm_zero_pages);
+}
 
 static inline void ksm_might_unmap_zero_page(struct mm_struct *mm, pte_t pte)
 {
 	if (is_ksm_zero_pte(pte)) {
-		ksm_zero_pages--;
-		mm->ksm_zero_pages--;
+		atomic_long_dec(&ksm_zero_pages);
+		atomic_long_dec(&mm->ksm_zero_pages);
 	}
 }
 
-static inline int ksm_fork(struct mm_struct *mm, struct mm_struct *oldmm)
+static inline long mm_ksm_zero_pages(struct mm_struct *mm)
 {
-	int ret;
+	return atomic_long_read(&mm->ksm_zero_pages);
+}
 
-	if (test_bit(MMF_VM_MERGEABLE, &oldmm->flags)) {
-		ret = __ksm_enter(mm);
-		if (ret)
-			return ret;
+static inline void ksm_fork(struct mm_struct *mm, struct mm_struct *oldmm)
+{
+	/* Adding mm to ksm is best effort on fork. */
+	if (mm_flags_test(MMF_VM_MERGEABLE, oldmm)) {
+		long nr_ksm_zero_pages = atomic_long_read(&mm->ksm_zero_pages);
+
+		mm->ksm_merging_pages = 0;
+		mm->ksm_rmap_items = 0;
+		atomic_long_add(nr_ksm_zero_pages, &ksm_zero_pages);
+		__ksm_enter(mm);
 	}
+}
 
-	if (test_bit(MMF_VM_MERGE_ANY, &oldmm->flags))
-		set_bit(MMF_VM_MERGE_ANY, &mm->flags);
+static inline int ksm_execve(struct mm_struct *mm)
+{
+	if (mm_flags_test(MMF_VM_MERGE_ANY, mm))
+		return __ksm_enter(mm);
 
 	return 0;
 }
 
 static inline void ksm_exit(struct mm_struct *mm)
 {
-	if (test_bit(MMF_VM_MERGEABLE, &mm->flags))
+	if (mm_flags_test(MMF_VM_MERGEABLE, mm))
 		__ksm_exit(mm);
 }
 
@@ -81,20 +96,17 @@ struct folio *ksm_might_need_to_copy(struct folio *folio,
 
 void rmap_walk_ksm(struct folio *folio, struct rmap_walk_control *rwc);
 void folio_migrate_ksm(struct folio *newfolio, struct folio *folio);
-
-#ifdef CONFIG_MEMORY_FAILURE
-void collect_procs_ksm(struct page *page, struct list_head *to_kill,
-		       int force_early);
-#endif
-
-#ifdef CONFIG_PROC_FS
+void collect_procs_ksm(const struct folio *folio, const struct page *page,
+		struct list_head *to_kill, int force_early);
 long ksm_process_profit(struct mm_struct *);
-#endif /* CONFIG_PROC_FS */
+bool ksm_process_mergeable(struct mm_struct *mm);
 
 #else  /* !CONFIG_KSM */
 
-static inline void ksm_add_vma(struct vm_area_struct *vma)
+static inline vm_flags_t ksm_vma_flags(const struct mm_struct *mm,
+		const struct file *file, vm_flags_t vm_flags)
 {
+	return vm_flags;
 }
 
 static inline int ksm_disable(struct mm_struct *mm)
@@ -102,7 +114,11 @@ static inline int ksm_disable(struct mm_struct *mm)
 	return 0;
 }
 
-static inline int ksm_fork(struct mm_struct *mm, struct mm_struct *oldmm)
+static inline void ksm_fork(struct mm_struct *mm, struct mm_struct *oldmm)
+{
+}
+
+static inline int ksm_execve(struct mm_struct *mm)
 {
 	return 0;
 }
@@ -115,16 +131,15 @@ static inline void ksm_might_unmap_zero_page(struct mm_struct *mm, pte_t pte)
 {
 }
 
-#ifdef CONFIG_MEMORY_FAILURE
-static inline void collect_procs_ksm(struct page *page,
-				     struct list_head *to_kill, int force_early)
+static inline void collect_procs_ksm(const struct folio *folio,
+		const struct page *page, struct list_head *to_kill,
+		int force_early)
 {
 }
-#endif
 
 #ifdef CONFIG_MMU
 static inline int ksm_madvise(struct vm_area_struct *vma, unsigned long start,
-		unsigned long end, int advice, unsigned long *vm_flags)
+		unsigned long end, int advice, vm_flags_t *vm_flags)
 {
 	return 0;
 }

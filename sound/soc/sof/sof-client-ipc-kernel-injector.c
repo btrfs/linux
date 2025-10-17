@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 //
-// Copyright(c) 2023 Google Inc. All rights reserved.
+// Copyright(c) 2023 Google Inc
 //
 // Author: Curtis Malainey <cujomalainey@chromium.org>
 //
@@ -65,7 +65,6 @@ static ssize_t sof_kernel_msg_inject_dfs_write(struct file *file, const char __u
 
 	sof_client_ipc_rx_message(cdev, hdr, priv->kernel_buffer);
 
-	pm_runtime_mark_last_busy(dev);
 	ret = pm_runtime_put_autosuspend(dev);
 	if (ret < 0)
 		dev_err_ratelimited(dev, "debugfs write failed to idle %d\n", ret);
@@ -157,6 +156,6 @@ static struct auxiliary_driver sof_msg_inject_client_drv = {
 
 module_auxiliary_driver(sof_msg_inject_client_drv);
 
-MODULE_DESCRIPTION("SOF IPC Kernel Injector Client Driver");
 MODULE_LICENSE("GPL");
-MODULE_IMPORT_NS(SND_SOC_SOF_CLIENT);
+MODULE_DESCRIPTION("SOF IPC Kernel Injector Client Driver");
+MODULE_IMPORT_NS("SND_SOC_SOF_CLIENT");

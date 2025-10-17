@@ -3,17 +3,17 @@
  * Copyright © 2022 Intel Corporation
  */
 
-#include "i915_selftest.h"
-
 #include "gem/i915_gem_internal.h"
 #include "gem/i915_gem_lmem.h"
 #include "gem/i915_gem_region.h"
 
 #include "gen8_engine_cs.h"
 #include "i915_gem_ww.h"
+#include "i915_selftest.h"
+#include "i915_wait_util.h"
+#include "intel_context.h"
 #include "intel_engine_regs.h"
 #include "intel_gpu_commands.h"
-#include "intel_context.h"
 #include "intel_gt.h"
 #include "intel_ring.h"
 
@@ -143,7 +143,7 @@ pte_tlbinv(struct intel_context *ce,
 	if (ce->engine->class == OTHER_CLASS)
 		msleep(200);
 	else
-		msleep(10);
+		usleep_range(10000, 20000);
 
 	if (va == vb) {
 		if (!i915_request_completed(rq)) {
@@ -206,8 +206,8 @@ static struct drm_i915_gem_object *create_lmem(struct intel_gt *gt)
 	 * of pages. To succeed with both allocations, especially in case of Small
 	 * BAR, try to allocate no more than quarter of mappable memory.
 	 */
-	if (mr && size > mr->io_size / 4)
-		size = mr->io_size / 4;
+	if (mr && size > resource_size(&mr->io) / 4)
+		size = resource_size(&mr->io) / 4;
 
 	return i915_gem_object_create_lmem(gt->i915, size, I915_BO_ALLOC_CONTIGUOUS);
 }

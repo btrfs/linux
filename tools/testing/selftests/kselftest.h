@@ -16,15 +16,20 @@
  * For each test, report any progress, debugging, etc with:
  *
  *     ksft_print_msg(fmt, ...);
+ *     ksft_perror(msg);
  *
- * and finally report the pass/fail/skip/xfail state of the test with one of:
+ * and finally report the pass/fail/skip/xfail/xpass state of the test
+ * with one of:
  *
  *     ksft_test_result(condition, fmt, ...);
+ *     ksft_test_result_report(result, fmt, ...);
  *     ksft_test_result_pass(fmt, ...);
  *     ksft_test_result_fail(fmt, ...);
  *     ksft_test_result_skip(fmt, ...);
  *     ksft_test_result_xfail(fmt, ...);
+ *     ksft_test_result_xpass(fmt, ...);
  *     ksft_test_result_error(fmt, ...);
+ *     ksft_test_result_code(exit_code, test_name, fmt, ...);
  *
  * When all tests are finished, clean up and exit the program with one of:
  *
@@ -38,6 +43,7 @@
  * the program is aborting before finishing all tests):
  *
  *    ksft_exit_fail_msg(fmt, ...);
+ *    ksft_exit_fail_perror(msg);
  *
  */
 #ifndef __KSELFTEST_H
@@ -48,14 +54,17 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <stdarg.h>
+#include <stdbool.h>
 #include <string.h>
 #include <stdio.h>
+#include <sys/utsname.h>
 #endif
 
 #ifndef ARRAY_SIZE
 #define ARRAY_SIZE(arr) (sizeof(arr) / sizeof((arr)[0]))
 #endif
 
+#if defined(__i386__) || defined(__x86_64__) /* arch */
 /*
  * gcc cpuid.h provides __cpuid_count() since v4.4.
  * Clang/LLVM cpuid.h provides  __cpuid_count() since v3.4.0.
@@ -70,6 +79,7 @@
 			      : "=a" (a), "=b" (b), "=c" (c), "=d" (d)	\
 			      : "0" (level), "2" (count))
 #endif
+#endif /* end arch */
 
 /* define kselftest exit codes */
 #define KSFT_PASS  0
@@ -78,7 +88,18 @@
 #define KSFT_XPASS 3
 #define KSFT_SKIP  4
 
+#ifndef __noreturn
+#define __noreturn       __attribute__((__noreturn__))
+#endif
 #define __printf(a, b)   __attribute__((format(printf, a, b)))
+
+#ifndef __always_unused
+#define __always_unused __attribute__((__unused__))
+#endif
+
+#ifndef __maybe_unused
+#define __maybe_unused __attribute__((__unused__))
+#endif
 
 /* counters */
 struct ksft_count {
@@ -92,6 +113,7 @@ struct ksft_count {
 
 static struct ksft_count ksft_cnt;
 static unsigned int ksft_plan;
+static bool ksft_debug_enabled;
 
 static inline unsigned int ksft_test_num(void)
 {
@@ -137,6 +159,11 @@ static inline void ksft_set_plan(unsigned int plan)
 
 static inline void ksft_print_cnts(void)
 {
+	if (ksft_cnt.ksft_xskip > 0)
+		printf(
+			"# %u skipped test(s) detected. Consider enabling relevant config options to improve coverage.\n",
+			ksft_cnt.ksft_xskip
+		);
 	if (ksft_plan != ksft_test_num())
 		printf("# Planned tests != run tests (%u != %u)\n",
 			ksft_plan, ksft_test_num());
@@ -158,17 +185,21 @@ static inline __printf(1, 2) void ksft_print_msg(const char *msg, ...)
 	va_end(args);
 }
 
+static inline void ksft_print_dbg_msg(const char *msg, ...)
+{
+	va_list args;
+
+	if (!ksft_debug_enabled)
+		return;
+
+	va_start(args, msg);
+	ksft_print_msg(msg, args);
+	va_end(args);
+}
+
 static inline void ksft_perror(const char *msg)
 {
-#ifndef NOLIBC
 	ksft_print_msg("%s: %s (%d)\n", msg, strerror(errno), errno);
-#else
-	/*
-	 * nolibc doesn't provide strerror() and it seems
-	 * inappropriate to add one, just print the errno.
-	 */
-	ksft_print_msg("%s: %d)\n", msg, errno);
-#endif
 }
 
 static inline __printf(1, 2) void ksft_test_result_pass(const char *msg, ...)
@@ -225,6 +256,20 @@ static inline __printf(1, 2) void ksft_test_result_xfail(const char *msg, ...)
 	va_end(args);
 }
 
+static inline __printf(1, 2) void ksft_test_result_xpass(const char *msg, ...)
+{
+	int saved_errno = errno;
+	va_list args;
+
+	ksft_cnt.ksft_xpass++;
+
+	va_start(args, msg);
+	printf("ok %u # XPASS ", ksft_test_num());
+	errno = saved_errno;
+	vprintf(msg, args);
+	va_end(args);
+}
+
 static inline __printf(1, 2) void ksft_test_result_skip(const char *msg, ...)
 {
 	int saved_errno = errno;
@@ -254,13 +299,83 @@ static inline __printf(1, 2) void ksft_test_result_error(const char *msg, ...)
 	va_end(args);
 }
 
-static inline int ksft_exit_pass(void)
+static inline __printf(3, 4)
+void ksft_test_result_code(int exit_code, const char *test_name,
+			   const char *msg, ...)
+{
+	const char *tap_code = "ok";
+	const char *directive = "";
+	int saved_errno = errno;
+	va_list args;
+
+	switch (exit_code) {
+	case KSFT_PASS:
+		ksft_cnt.ksft_pass++;
+		break;
+	case KSFT_XFAIL:
+		directive = " # XFAIL ";
+		ksft_cnt.ksft_xfail++;
+		break;
+	case KSFT_XPASS:
+		directive = " # XPASS ";
+		ksft_cnt.ksft_xpass++;
+		break;
+	case KSFT_SKIP:
+		directive = " # SKIP ";
+		ksft_cnt.ksft_xskip++;
+		break;
+	case KSFT_FAIL:
+	default:
+		tap_code = "not ok";
+		ksft_cnt.ksft_fail++;
+		break;
+	}
+
+	/* Docs seem to call for double space if directive is absent */
+	if (!directive[0] && msg)
+		directive = " #  ";
+
+	printf("%s %u %s%s", tap_code, ksft_test_num(), test_name, directive);
+	errno = saved_errno;
+	if (msg) {
+		va_start(args, msg);
+		vprintf(msg, args);
+		va_end(args);
+	}
+	printf("\n");
+}
+
+/**
+ * ksft_test_result() - Report test success based on truth of condition
+ *
+ * @condition: if true, report test success, otherwise failure.
+ */
+#define ksft_test_result_report(result, fmt, ...) do {		\
+	switch (result) {					\
+	case KSFT_PASS:						\
+		ksft_test_result_pass(fmt, ##__VA_ARGS__);	\
+		break;						\
+	case KSFT_FAIL:						\
+		ksft_test_result_fail(fmt, ##__VA_ARGS__);	\
+		break;						\
+	case KSFT_XFAIL:					\
+		ksft_test_result_xfail(fmt, ##__VA_ARGS__);	\
+		break;						\
+	case KSFT_XPASS:					\
+		ksft_test_result_xpass(fmt, ##__VA_ARGS__);	\
+		break;						\
+	case KSFT_SKIP:						\
+		ksft_test_result_skip(fmt, ##__VA_ARGS__);	\
+		break;						\
+	} } while (0)
+
+static inline __noreturn void ksft_exit_pass(void)
 {
 	ksft_print_cnts();
 	exit(KSFT_PASS);
 }
 
-static inline int ksft_exit_fail(void)
+static inline __noreturn void ksft_exit_fail(void)
 {
 	ksft_print_cnts();
 	exit(KSFT_FAIL);
@@ -287,7 +402,7 @@ static inline int ksft_exit_fail(void)
 		  ksft_cnt.ksft_xfail +	\
 		  ksft_cnt.ksft_xskip)
 
-static inline __printf(1, 2) int ksft_exit_fail_msg(const char *msg, ...)
+static inline __noreturn __printf(1, 2) void ksft_exit_fail_msg(const char *msg, ...)
 {
 	int saved_errno = errno;
 	va_list args;
@@ -302,19 +417,24 @@ static inline __printf(1, 2) int ksft_exit_fail_msg(const char *msg, ...)
 	exit(KSFT_FAIL);
 }
 
-static inline int ksft_exit_xfail(void)
+static inline __noreturn void ksft_exit_fail_perror(const char *msg)
+{
+	ksft_exit_fail_msg("%s: %s (%d)\n", msg, strerror(errno), errno);
+}
+
+static inline __noreturn void ksft_exit_xfail(void)
 {
 	ksft_print_cnts();
 	exit(KSFT_XFAIL);
 }
 
-static inline int ksft_exit_xpass(void)
+static inline __noreturn void ksft_exit_xpass(void)
 {
 	ksft_print_cnts();
 	exit(KSFT_XPASS);
 }
 
-static inline __printf(1, 2) int ksft_exit_skip(const char *msg, ...)
+static inline __noreturn __printf(1, 2) void ksft_exit_skip(const char *msg, ...)
 {
 	int saved_errno = errno;
 	va_list args;
@@ -329,7 +449,7 @@ static inline __printf(1, 2) int ksft_exit_skip(const char *msg, ...)
 	 */
 	if (ksft_plan || ksft_test_num()) {
 		ksft_cnt.ksft_xskip++;
-		printf("ok %d # SKIP ", 1 + ksft_test_num());
+		printf("ok %u # SKIP ", 1 + ksft_test_num());
 	} else {
 		printf("1..0 # SKIP ");
 	}
@@ -341,6 +461,18 @@ static inline __printf(1, 2) int ksft_exit_skip(const char *msg, ...)
 	if (ksft_test_num())
 		ksft_print_cnts();
 	exit(KSFT_SKIP);
+}
+
+static inline int ksft_min_kernel_version(unsigned int min_major,
+					  unsigned int min_minor)
+{
+	unsigned int major, minor;
+	struct utsname info;
+
+	if (uname(&info) || sscanf(info.release, "%u.%u.", &major, &minor) != 2)
+		ksft_exit_fail_msg("Can't parse kernel version\n");
+
+	return major > min_major || (major == min_major && minor >= min_minor);
 }
 
 #endif /* __KSELFTEST_H */

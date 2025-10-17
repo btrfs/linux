@@ -10,13 +10,18 @@
 
 / {
 	model = "Benign BV07 Netbook";
+
+	memory@0 {
+		device_type = "memory";
+		reg = <0x0 0x8000000>;
+	};
 };
 
 &fb {
 	bits-per-pixel = <16>;
 	display-timings {
 		native-mode = <&timing0>;
-		timing0: 800x480 {
+		timing0: timing-800x480 {
 			clock-frequency = <0>; /* unused but required */
 			hactive = <800>;
 			vactive = <480>;

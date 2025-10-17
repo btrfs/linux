@@ -286,14 +286,20 @@ static int brcmstb_set_trips(struct thermal_zone_device *tz, int low, int high)
 	return 0;
 }
 
-static const struct thermal_zone_device_ops brcmstb_16nm_of_ops = {
+static const struct thermal_zone_device_ops brcmstb_of_ops = {
 	.get_temp	= brcmstb_get_temp,
+};
+
+static const struct brcmstb_thermal_params brcmstb_8nm_params = {
+	.offset	= 418670,
+	.mult	= 509,
+	.of_ops	= &brcmstb_of_ops,
 };
 
 static const struct brcmstb_thermal_params brcmstb_16nm_params = {
 	.offset	= 457829,
 	.mult	= 557,
-	.of_ops	= &brcmstb_16nm_of_ops,
+	.of_ops	= &brcmstb_of_ops,
 };
 
 static const struct thermal_zone_device_ops brcmstb_28nm_of_ops = {
@@ -308,6 +314,7 @@ static const struct brcmstb_thermal_params brcmstb_28nm_params = {
 };
 
 static const struct of_device_id brcmstb_thermal_id_table[] = {
+	{ .compatible = "brcm,avs-tmon-bcm74110", .data = &brcmstb_8nm_params },
 	{ .compatible = "brcm,avs-tmon-bcm7216", .data = &brcmstb_16nm_params },
 	{ .compatible = "brcm,avs-tmon", .data = &brcmstb_28nm_params },
 	{},
@@ -338,11 +345,9 @@ static int brcmstb_thermal_probe(struct platform_device *pdev)
 
 	thermal = devm_thermal_of_zone_register(&pdev->dev, 0, priv,
 						of_ops);
-	if (IS_ERR(thermal)) {
-		ret = PTR_ERR(thermal);
-		dev_err(&pdev->dev, "could not register sensor: %d\n", ret);
-		return ret;
-	}
+	if (IS_ERR(thermal))
+		return dev_err_probe(&pdev->dev, PTR_ERR(thermal),
+					"could not register sensor\n");
 
 	priv->thermal = thermal;
 
@@ -352,10 +357,9 @@ static int brcmstb_thermal_probe(struct platform_device *pdev)
 						brcmstb_tmon_irq_thread,
 						IRQF_ONESHOT,
 						DRV_NAME, priv);
-		if (ret < 0) {
-			dev_err(&pdev->dev, "could not request IRQ: %d\n", ret);
-			return ret;
-		}
+		if (ret < 0)
+			return dev_err_probe(&pdev->dev, ret,
+						"could not request IRQ\n");
 	}
 
 	dev_info(&pdev->dev, "registered AVS TMON of-sensor driver\n");

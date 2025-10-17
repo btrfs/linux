@@ -430,7 +430,7 @@ static int ipmmu_domain_init_context(struct ipmmu_vmsa_domain *domain)
 	 * non-secure mode.
 	 */
 	domain->cfg.quirks = IO_PGTABLE_QUIRK_ARM_NS;
-	domain->cfg.pgsize_bitmap = SZ_1G | SZ_2M | SZ_4K;
+	domain->cfg.pgsize_bitmap = domain->io_domain.pgsize_bitmap;
 	domain->cfg.ias = 32;
 	domain->cfg.oas = 40;
 	domain->cfg.tlb = &ipmmu_flush_ops;
@@ -571,6 +571,7 @@ static struct iommu_domain *ipmmu_domain_alloc_paging(struct device *dev)
 		return NULL;
 
 	mutex_init(&domain->mutex);
+	domain->io_domain.pgsize_bitmap = SZ_1G | SZ_2M | SZ_4K;
 
 	return &domain->io_domain;
 }
@@ -709,7 +710,7 @@ static phys_addr_t ipmmu_iova_to_phys(struct iommu_domain *io_domain,
 }
 
 static int ipmmu_init_platform_device(struct device *dev,
-				      struct of_phandle_args *args)
+				      const struct of_phandle_args *args)
 {
 	struct platform_device *ipmmu_pdev;
 
@@ -773,7 +774,7 @@ static bool ipmmu_device_is_allowed(struct device *dev)
 }
 
 static int ipmmu_of_xlate(struct device *dev,
-			  struct of_phandle_args *spec)
+			  const struct of_phandle_args *spec)
 {
 	if (!ipmmu_device_is_allowed(dev))
 		return -ENODEV;
@@ -804,8 +805,7 @@ static int ipmmu_init_arm_mapping(struct device *dev)
 	if (!mmu->mapping) {
 		struct dma_iommu_mapping *mapping;
 
-		mapping = arm_iommu_create_mapping(&platform_bus_type,
-						   SZ_1G, SZ_2G);
+		mapping = arm_iommu_create_mapping(dev, SZ_1G, SZ_2G);
 		if (IS_ERR(mapping)) {
 			dev_err(mmu->dev, "failed to create ARM IOMMU mapping\n");
 			ret = PTR_ERR(mapping);
@@ -883,7 +883,6 @@ static const struct iommu_ops ipmmu_ops = {
 	 */
 	.device_group = IS_ENABLED(CONFIG_ARM) && !IS_ENABLED(CONFIG_IOMMU_DMA)
 			? generic_device_group : generic_single_device_group,
-	.pgsize_bitmap = SZ_1G | SZ_2M | SZ_4K,
 	.of_xlate = ipmmu_of_xlate,
 	.default_domain_ops = &(const struct iommu_domain_ops) {
 		.attach_dev	= ipmmu_attach_device,
@@ -1005,7 +1004,6 @@ static const struct of_device_id ipmmu_of_ids[] = {
 static int ipmmu_probe(struct platform_device *pdev)
 {
 	struct ipmmu_vmsa_device *mmu;
-	struct resource *res;
 	int irq;
 	int ret;
 
@@ -1025,8 +1023,7 @@ static int ipmmu_probe(struct platform_device *pdev)
 		return ret;
 
 	/* Map I/O memory and request IRQ. */
-	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
-	mmu->base = devm_ioremap_resource(&pdev->dev, res);
+	mmu->base = devm_platform_ioremap_resource(pdev, 0);
 	if (IS_ERR(mmu->base))
 		return PTR_ERR(mmu->base);
 
@@ -1084,31 +1081,25 @@ static int ipmmu_probe(struct platform_device *pdev)
 		}
 	}
 
+	platform_set_drvdata(pdev, mmu);
 	/*
 	 * Register the IPMMU to the IOMMU subsystem in the following cases:
 	 * - R-Car Gen2 IPMMU (all devices registered)
 	 * - R-Car Gen3 IPMMU (leaf devices only - skip root IPMMU-MM device)
 	 */
-	if (!mmu->features->has_cache_leaf_nodes || !ipmmu_is_root(mmu)) {
-		ret = iommu_device_sysfs_add(&mmu->iommu, &pdev->dev, NULL,
-					     dev_name(&pdev->dev));
-		if (ret)
-			return ret;
+	if (mmu->features->has_cache_leaf_nodes && ipmmu_is_root(mmu))
+		return 0;
 
-		ret = iommu_device_register(&mmu->iommu, &ipmmu_ops, &pdev->dev);
-		if (ret)
-			return ret;
-	}
+	ret = iommu_device_sysfs_add(&mmu->iommu, &pdev->dev, NULL, "%s",
+				     dev_name(&pdev->dev));
+	if (ret)
+		return ret;
 
-	/*
-	 * We can't create the ARM mapping here as it requires the bus to have
-	 * an IOMMU, which only happens when bus_set_iommu() is called in
-	 * ipmmu_init() after the probe function returns.
-	 */
+	ret = iommu_device_register(&mmu->iommu, &ipmmu_ops, &pdev->dev);
+	if (ret)
+		iommu_device_sysfs_remove(&mmu->iommu);
 
-	platform_set_drvdata(pdev, mmu);
-
-	return 0;
+	return ret;
 }
 
 static void ipmmu_remove(struct platform_device *pdev)
@@ -1123,7 +1114,6 @@ static void ipmmu_remove(struct platform_device *pdev)
 	ipmmu_device_reset(mmu);
 }
 
-#ifdef CONFIG_PM_SLEEP
 static int ipmmu_resume_noirq(struct device *dev)
 {
 	struct ipmmu_vmsa_device *mmu = dev_get_drvdata(dev);
@@ -1153,20 +1143,16 @@ static int ipmmu_resume_noirq(struct device *dev)
 }
 
 static const struct dev_pm_ops ipmmu_pm  = {
-	SET_NOIRQ_SYSTEM_SLEEP_PM_OPS(NULL, ipmmu_resume_noirq)
+	NOIRQ_SYSTEM_SLEEP_PM_OPS(NULL, ipmmu_resume_noirq)
 };
-#define DEV_PM_OPS	&ipmmu_pm
-#else
-#define DEV_PM_OPS	NULL
-#endif /* CONFIG_PM_SLEEP */
 
 static struct platform_driver ipmmu_driver = {
 	.driver = {
 		.name = "ipmmu-vmsa",
-		.of_match_table = of_match_ptr(ipmmu_of_ids),
-		.pm = DEV_PM_OPS,
+		.of_match_table = ipmmu_of_ids,
+		.pm = pm_sleep_ptr(&ipmmu_pm),
 	},
 	.probe = ipmmu_probe,
-	.remove_new = ipmmu_remove,
+	.remove = ipmmu_remove,
 };
 builtin_platform_driver(ipmmu_driver);

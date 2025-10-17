@@ -48,7 +48,7 @@ DECLARE_EVENT_CLASS(cdnsp_log_ep,
 		__field(u8, drbls_count)
 	),
 	TP_fast_assign(
-		__assign_str(name, pep->name);
+		__assign_str(name);
 		__entry->state = pep->ep_state;
 		__entry->stream_id = stream_id;
 		__entry->enabled = pep->ep_state & EP_HAS_STREAMS;
@@ -138,7 +138,7 @@ DECLARE_EVENT_CLASS(cdnsp_log_simple,
 		__string(text, msg)
 	),
 	TP_fast_assign(
-		__assign_str(text, msg);
+		__assign_str(text);
 	),
 	TP_printk("%s", __get_str(text))
 );
@@ -174,11 +174,6 @@ DEFINE_EVENT(cdnsp_log_simple, cdnsp_ep0_request,
 );
 
 DEFINE_EVENT(cdnsp_log_simple, cdnsp_ep0_set_config,
-	TP_PROTO(char *msg),
-	TP_ARGS(msg)
-);
-
-DEFINE_EVENT(cdnsp_log_simple, cdnsp_ep0_halted,
 	TP_PROTO(char *msg),
 	TP_ARGS(msg)
 );
@@ -303,7 +298,7 @@ DECLARE_EVENT_CLASS(cdnsp_log_bounce,
 		__field(unsigned int, unalign)
 	),
 	TP_fast_assign(
-		__assign_str(name, preq->pep->name);
+		__assign_str(name);
 		__entry->new_buf_len = new_buf_len;
 		__entry->offset = offset;
 		__entry->dma = dma;
@@ -399,11 +394,6 @@ DEFINE_EVENT(cdnsp_log_trb, cdnsp_cmd_timeout,
 	TP_ARGS(ring, trb)
 );
 
-DEFINE_EVENT(cdnsp_log_trb, cdnsp_defered_event,
-	TP_PROTO(struct cdnsp_ring *ring, struct cdnsp_generic_trb *trb),
-	TP_ARGS(ring, trb)
-);
-
 DECLARE_EVENT_CLASS(cdnsp_log_pdev,
 	TP_PROTO(struct cdnsp_device *pdev),
 	TP_ARGS(pdev),
@@ -429,16 +419,6 @@ DECLARE_EVENT_CLASS(cdnsp_log_pdev,
 );
 
 DEFINE_EVENT(cdnsp_log_pdev, cdnsp_alloc_priv_device,
-	TP_PROTO(struct cdnsp_device *vdev),
-	TP_ARGS(vdev)
-);
-
-DEFINE_EVENT(cdnsp_log_pdev, cdnsp_free_priv_device,
-	TP_PROTO(struct cdnsp_device *vdev),
-	TP_ARGS(vdev)
-);
-
-DEFINE_EVENT(cdnsp_log_pdev, cdnsp_setup_device,
 	TP_PROTO(struct cdnsp_device *vdev),
 	TP_ARGS(vdev)
 );
@@ -470,7 +450,7 @@ DECLARE_EVENT_CLASS(cdnsp_log_request,
 
 	),
 	TP_fast_assign(
-		__assign_str(name, req->pep->name);
+		__assign_str(name);
 		__entry->request = &req->request;
 		__entry->preq = req;
 		__entry->buf = req->request.buf;
@@ -575,11 +555,6 @@ DEFINE_EVENT(cdnsp_log_ep_ctx, cdnsp_handle_cmd_stop_ep,
 	TP_ARGS(ctx)
 );
 
-DEFINE_EVENT(cdnsp_log_ep_ctx, cdnsp_handle_cmd_flush_ep,
-	TP_PROTO(struct cdnsp_ep_ctx *ctx),
-	TP_ARGS(ctx)
-);
-
 DEFINE_EVENT(cdnsp_log_ep_ctx, cdnsp_handle_cmd_set_deq_ep,
 	TP_PROTO(struct cdnsp_ep_ctx *ctx),
 	TP_ARGS(ctx)
@@ -674,7 +649,7 @@ DECLARE_EVENT_CLASS(cdnsp_log_td_info,
 		__field(dma_addr_t, trb_dma)
 	),
 	TP_fast_assign(
-		__assign_str(name, preq->pep->name);
+		__assign_str(name);
 		__entry->request = &preq->request;
 		__entry->preq = preq;
 		__entry->first_trb = preq->td.first_trb;

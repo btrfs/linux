@@ -39,6 +39,7 @@ static const struct i2c_device_id pcm512x_i2c_id[] = {
 	{ "pcm5122", },
 	{ "pcm5141", },
 	{ "pcm5142", },
+	{ "pcm5242", },
 	{ "tas5754", },
 	{ "tas5756", },
 	{ }
@@ -51,6 +52,7 @@ static const struct of_device_id pcm512x_of_match[] = {
 	{ .compatible = "ti,pcm5122", },
 	{ .compatible = "ti,pcm5141", },
 	{ .compatible = "ti,pcm5142", },
+	{ .compatible = "ti,pcm5242", },
 	{ .compatible = "ti,tas5754", },
 	{ .compatible = "ti,tas5756", },
 	{ }
@@ -77,7 +79,7 @@ static struct i2c_driver pcm512x_i2c_driver = {
 		.name	= "pcm512x",
 		.of_match_table = of_match_ptr(pcm512x_of_match),
 		.acpi_match_table = ACPI_PTR(pcm512x_acpi_match),
-		.pm     = &pcm512x_pm_ops,
+		.pm     = pm_ptr(&pcm512x_pm_ops),
 	},
 };
 

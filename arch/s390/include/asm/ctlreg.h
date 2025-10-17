@@ -80,7 +80,7 @@
 #define CR14_EXTERNAL_DAMAGE_SUBMASK		BIT(CR14_EXTERNAL_DAMAGE_SUBMASK_BIT)
 #define CR14_WARNING_SUBMASK			BIT(CR14_WARNING_SUBMASK_BIT)
 
-#ifndef __ASSEMBLY__
+#ifndef __ASSEMBLER__
 
 #include <linux/bug.h>
 
@@ -100,7 +100,7 @@ struct ctlreg {
 	BUILD_BUG_ON(sizeof(struct addrtype) != _esize);		\
 	typecheck(struct ctlreg, array[0]);				\
 	asm volatile(							\
-		"	lctlg	%[_low],%[_high],%[_arr]\n"		\
+		"	lctlg	%[_low],%[_high],%[_arr]"		\
 		:							\
 		: [_arr] "Q" (*(struct addrtype *)(&array)),		\
 		  [_low] "i" (low), [_high] "i" (high)			\
@@ -119,7 +119,7 @@ struct ctlreg {
 	BUILD_BUG_ON(sizeof(struct addrtype) != _esize);		\
 	typecheck(struct ctlreg, array[0]);				\
 	asm volatile(							\
-		"	stctg	%[_low],%[_high],%[_arr]\n"		\
+		"	stctg	%[_low],%[_high],%[_arr]"		\
 		: [_arr] "=Q" (*(struct addrtype *)(&array))		\
 		: [_low] "i" (low), [_high] "i" (high));		\
 } while (0)
@@ -127,7 +127,7 @@ struct ctlreg {
 static __always_inline void local_ctl_load(unsigned int cr, struct ctlreg *reg)
 {
 	asm volatile(
-		"	lctlg	%[cr],%[cr],%[reg]\n"
+		"	lctlg	%[cr],%[cr],%[reg]"
 		:
 		: [reg] "Q" (*reg), [cr] "i" (cr)
 		: "memory");
@@ -136,7 +136,7 @@ static __always_inline void local_ctl_load(unsigned int cr, struct ctlreg *reg)
 static __always_inline void local_ctl_store(unsigned int cr, struct ctlreg *reg)
 {
 	asm volatile(
-		"	stctg	%[cr],%[cr],%[reg]\n"
+		"	stctg	%[cr],%[cr],%[reg]"
 		: [reg] "=Q" (*reg)
 		: [cr] "i" (cr));
 }
@@ -202,8 +202,9 @@ union ctlreg0 {
 		unsigned long	   : 3;
 		unsigned long ccc  : 1; /* Cryptography counter control */
 		unsigned long pec  : 1; /* PAI extension control */
-		unsigned long	   : 17;
-		unsigned long	   : 3;
+		unsigned long	   : 15;
+		unsigned long wti  : 1; /* Warning-track */
+		unsigned long	   : 4;
 		unsigned long lap  : 1; /* Low-address-protection control */
 		unsigned long	   : 4;
 		unsigned long edat : 1; /* Enhanced-DAT-enablement control */
@@ -251,5 +252,5 @@ union ctlreg15 {
 	};
 };
 
-#endif /* __ASSEMBLY__ */
+#endif /* __ASSEMBLER__ */
 #endif /* __ASM_S390_CTLREG_H */

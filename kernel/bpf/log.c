@@ -9,6 +9,7 @@
 #include <linux/bpf.h>
 #include <linux/bpf_verifier.h>
 #include <linux/math64.h>
+#include <linux/string.h>
 
 #define verbose(env, fmt, args...) bpf_verifier_log_write(env, fmt, ##args)
 
@@ -90,7 +91,7 @@ void bpf_verifier_vlog(struct bpf_verifier_log *log, const char *fmt,
 			goto fail;
 	} else {
 		u64 new_end, new_start;
-		u32 buf_start, buf_end, new_n;
+		u32 buf_start, buf_end;
 
 		new_end = log->end_pos + n;
 		if (new_end - log->start_pos >= log->len_total)
@@ -333,7 +334,8 @@ find_linfo(const struct bpf_verifier_env *env, u32 insn_off)
 {
 	const struct bpf_line_info *linfo;
 	const struct bpf_prog *prog;
-	u32 i, nr_linfo;
+	u32 nr_linfo;
+	int l, r, m;
 
 	prog = env->prog;
 	nr_linfo = prog->aux->nr_linfo;
@@ -342,11 +344,30 @@ find_linfo(const struct bpf_verifier_env *env, u32 insn_off)
 		return NULL;
 
 	linfo = prog->aux->linfo;
-	for (i = 1; i < nr_linfo; i++)
-		if (insn_off < linfo[i].insn_off)
-			break;
+	/* Loop invariant: linfo[l].insn_off <= insns_off.
+	 * linfo[0].insn_off == 0 which always satisfies above condition.
+	 * Binary search is searching for rightmost linfo entry that satisfies
+	 * the above invariant, giving us the desired record that covers given
+	 * instruction offset.
+	 */
+	l = 0;
+	r = nr_linfo - 1;
+	while (l < r) {
+		/* (r - l + 1) / 2 means we break a tie to the right, so if:
+		 * l=1, r=2, linfo[l].insn_off <= insn_off, linfo[r].insn_off > insn_off,
+		 * then m=2, we see that linfo[m].insn_off > insn_off, and so
+		 * r becomes 1 and we exit the loop with correct l==1.
+		 * If the tie was broken to the left, m=1 would end us up in
+		 * an endless loop where l and m stay at 1 and r stays at 2.
+		 */
+		m = l + (r - l + 1) / 2;
+		if (linfo[m].insn_off <= insn_off)
+			l = m;
+		else
+			r = m - 1;
+	}
 
-	return &linfo[i - 1];
+	return &linfo[l];
 }
 
 static const char *ltrim(const char *s)
@@ -361,13 +382,28 @@ __printf(3, 4) void verbose_linfo(struct bpf_verifier_env *env,
 				  u32 insn_off,
 				  const char *prefix_fmt, ...)
 {
-	const struct bpf_line_info *linfo;
+	const struct bpf_line_info *linfo, *prev_linfo;
+	const struct btf *btf;
+	const char *s, *fname;
 
 	if (!bpf_verifier_log_needed(&env->log))
 		return;
 
+	prev_linfo = env->prev_linfo;
 	linfo = find_linfo(env, insn_off);
-	if (!linfo || linfo == env->prev_linfo)
+	if (!linfo || linfo == prev_linfo)
+		return;
+
+	/* It often happens that two separate linfo records point to the same
+	 * source code line, but have differing column numbers. Given verifier
+	 * log doesn't emit column information, from user perspective we just
+	 * end up emitting the same source code line twice unnecessarily.
+	 * So instead check that previous and current linfo record point to
+	 * the same file (file_name_offs match) and the same line number, and
+	 * avoid emitting duplicated source code line in such case.
+	 */
+	if (prev_linfo && linfo->file_name_off == prev_linfo->file_name_off &&
+	    BPF_LINE_INFO_LINE_NUM(linfo->line_col) == BPF_LINE_INFO_LINE_NUM(prev_linfo->line_col))
 		return;
 
 	if (prefix_fmt) {
@@ -378,9 +414,15 @@ __printf(3, 4) void verbose_linfo(struct bpf_verifier_env *env,
 		va_end(args);
 	}
 
-	verbose(env, "%s\n",
-		ltrim(btf_name_by_offset(env->prog->aux->btf,
-					 linfo->line_off)));
+	btf = env->prog->aux->btf;
+	s = ltrim(btf_name_by_offset(btf, linfo->line_off));
+	verbose(env, "%s", s); /* source code line */
+
+	s = btf_name_by_offset(btf, linfo->file_name_off);
+	/* leave only file name */
+	fname = strrchr(s, '/');
+	fname = fname ? fname + 1 : s;
+	verbose(env, " @ %s:%u\n", fname, BPF_LINE_INFO_LINE_NUM(linfo->line_col));
 
 	env->prev_linfo = linfo;
 }
@@ -416,6 +458,7 @@ const char *reg_type_str(struct bpf_verifier_env *env, enum bpf_reg_type type)
 		[PTR_TO_XDP_SOCK]	= "xdp_sock",
 		[PTR_TO_BTF_ID]		= "ptr_",
 		[PTR_TO_MEM]		= "mem",
+		[PTR_TO_ARENA]		= "arena",
 		[PTR_TO_BUF]		= "buf",
 		[PTR_TO_FUNC]		= "func",
 		[PTR_TO_MAP_KEY]	= "map_key",
@@ -424,9 +467,9 @@ const char *reg_type_str(struct bpf_verifier_env *env, enum bpf_reg_type type)
 
 	if (type & PTR_MAYBE_NULL) {
 		if (base_type(type) == PTR_TO_BTF_ID)
-			strncpy(postfix, "or_null_", 16);
+			strscpy(postfix, "or_null_");
 		else
-			strncpy(postfix, "_or_null", 16);
+			strscpy(postfix, "_or_null");
 	}
 
 	snprintf(prefix, sizeof(prefix), "%s%s%s%s%s%s%s",
@@ -455,6 +498,8 @@ const char *dynptr_type_str(enum bpf_dynptr_type type)
 		return "skb";
 	case BPF_DYNPTR_TYPE_XDP:
 		return "xdp";
+	case BPF_DYNPTR_TYPE_SKB_META:
+		return "skb_meta";
 	case BPF_DYNPTR_TYPE_INVALID:
 		return "<invalid>";
 	default:
@@ -494,20 +539,8 @@ static char slot_type_char[] = {
 	[STACK_ZERO]	= '0',
 	[STACK_DYNPTR]	= 'd',
 	[STACK_ITER]	= 'i',
+	[STACK_IRQ_FLAG] = 'f'
 };
-
-static void print_liveness(struct bpf_verifier_env *env,
-			   enum bpf_reg_liveness live)
-{
-	if (live & (REG_LIVE_READ | REG_LIVE_WRITTEN | REG_LIVE_DONE))
-	    verbose(env, "_");
-	if (live & REG_LIVE_READ)
-		verbose(env, "r");
-	if (live & REG_LIVE_WRITTEN)
-		verbose(env, "w");
-	if (live & REG_LIVE_DONE)
-		verbose(env, "D");
-}
 
 #define UNUM_MAX_DECIMAL U16_MAX
 #define SNUM_MAX_DECIMAL S16_MAX
@@ -645,12 +678,13 @@ static void print_reg_state(struct bpf_verifier_env *env,
 	if (t == SCALAR_VALUE && reg->precise)
 		verbose(env, "P");
 	if (t == SCALAR_VALUE && tnum_is_const(reg->var_off)) {
-		/* reg->off should be 0 for SCALAR_VALUE */
-		verbose_snum(env, reg->var_off.value + reg->off);
+		verbose_snum(env, reg->var_off.value);
 		return;
 	}
 
 	verbose(env, "%s", reg_type_str(env, t));
+	if (t == PTR_TO_ARENA)
+		return;
 	if (t == PTR_TO_STACK) {
 		if (state->frameno != reg->frameno)
 			verbose(env, "[%d]", reg->frameno);
@@ -663,7 +697,9 @@ static void print_reg_state(struct bpf_verifier_env *env,
 		verbose(env, "%s", btf_type_name(reg->btf, reg->btf_id));
 	verbose(env, "(");
 	if (reg->id)
-		verbose_a("id=%d", reg->id);
+		verbose_a("id=%d", reg->id & ~BPF_ADD_CONST);
+	if (reg->id & BPF_ADD_CONST)
+		verbose(env, "%+d", reg->off);
 	if (reg->ref_obj_id)
 		verbose_a("ref_obj_id=%d", reg->ref_obj_id);
 	if (type_is_non_owning_ref(reg->type))
@@ -707,9 +743,10 @@ static void print_reg_state(struct bpf_verifier_env *env,
 	verbose(env, ")");
 }
 
-void print_verifier_state(struct bpf_verifier_env *env, const struct bpf_func_state *state,
-			  bool print_all)
+void print_verifier_state(struct bpf_verifier_env *env, const struct bpf_verifier_state *vstate,
+			  u32 frameno, bool print_all)
 {
+	const struct bpf_func_state *state = vstate->frame[frameno];
 	const struct bpf_reg_state *reg;
 	int i;
 
@@ -722,7 +759,6 @@ void print_verifier_state(struct bpf_verifier_env *env, const struct bpf_func_st
 		if (!print_all && !reg_scratched(env, i))
 			continue;
 		verbose(env, " R%d", i);
-		print_liveness(env, reg->live);
 		verbose(env, "=");
 		print_reg_state(env, state, reg);
 	}
@@ -755,9 +791,7 @@ void print_verifier_state(struct bpf_verifier_env *env, const struct bpf_func_st
 					break;
 			types_buf[j] = '\0';
 
-			verbose(env, " fp%d", (-i - 1) * BPF_REG_SIZE);
-			print_liveness(env, reg->live);
-			verbose(env, "=%s", types_buf);
+			verbose(env, " fp%d=%s", (-i - 1) * BPF_REG_SIZE, types_buf);
 			print_reg_state(env, state, reg);
 			break;
 		case STACK_DYNPTR:
@@ -766,7 +800,6 @@ void print_verifier_state(struct bpf_verifier_env *env, const struct bpf_func_st
 			reg = &state->stack[i].spilled_ptr;
 
 			verbose(env, " fp%d", (-i - 1) * BPF_REG_SIZE);
-			print_liveness(env, reg->live);
 			verbose(env, "=dynptr_%s(", dynptr_type_str(reg->dynptr.type));
 			if (reg->id)
 				verbose_a("id=%d", reg->id);
@@ -781,9 +814,8 @@ void print_verifier_state(struct bpf_verifier_env *env, const struct bpf_func_st
 			if (!reg->ref_obj_id)
 				continue;
 
-			verbose(env, " fp%d", (-i - 1) * BPF_REG_SIZE);
-			print_liveness(env, reg->live);
-			verbose(env, "=iter_%s(ref_id=%d,state=%s,depth=%u)",
+			verbose(env, " fp%d=iter_%s(ref_id=%d,state=%s,depth=%u)",
+				(-i - 1) * BPF_REG_SIZE,
 				iter_type_str(reg->iter.btf, reg->iter.btf_id),
 				reg->ref_obj_id, iter_state_str(reg->iter.state),
 				reg->iter.depth);
@@ -791,17 +823,15 @@ void print_verifier_state(struct bpf_verifier_env *env, const struct bpf_func_st
 		case STACK_MISC:
 		case STACK_ZERO:
 		default:
-			verbose(env, " fp%d", (-i - 1) * BPF_REG_SIZE);
-			print_liveness(env, reg->live);
-			verbose(env, "=%s", types_buf);
+			verbose(env, " fp%d=%s", (-i - 1) * BPF_REG_SIZE, types_buf);
 			break;
 		}
 	}
-	if (state->acquired_refs && state->refs[0].id) {
-		verbose(env, " refs=%d", state->refs[0].id);
-		for (i = 1; i < state->acquired_refs; i++)
-			if (state->refs[i].id)
-				verbose(env, ",%d", state->refs[i].id);
+	if (vstate->acquired_refs && vstate->refs[0].id) {
+		verbose(env, " refs=%d", vstate->refs[0].id);
+		for (i = 1; i < vstate->acquired_refs; i++)
+			if (vstate->refs[i].id)
+				verbose(env, ",%d", vstate->refs[i].id);
 	}
 	if (state->in_callback_fn)
 		verbose(env, " cb");
@@ -818,7 +848,8 @@ static inline u32 vlog_alignment(u32 pos)
 			BPF_LOG_MIN_ALIGNMENT) - pos - 1;
 }
 
-void print_insn_state(struct bpf_verifier_env *env, const struct bpf_func_state *state)
+void print_insn_state(struct bpf_verifier_env *env, const struct bpf_verifier_state *vstate,
+		      u32 frameno)
 {
 	if (env->prev_log_pos && env->prev_log_pos == env->log.end_pos) {
 		/* remove new line character */
@@ -827,5 +858,5 @@ void print_insn_state(struct bpf_verifier_env *env, const struct bpf_func_state 
 	} else {
 		verbose(env, "%d:", env->insn_idx);
 	}
-	print_verifier_state(env, state, false);
+	print_verifier_state(env, vstate, frameno, false);
 }

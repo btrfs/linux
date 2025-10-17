@@ -233,14 +233,19 @@ static int da8xx_rproc_get_internal_memories(struct platform_device *pdev,
 	return 0;
 }
 
+static void da8xx_rproc_mem_release(void *data)
+{
+	struct device *dev = data;
+
+	of_reserved_mem_device_release(dev);
+}
+
 static int da8xx_rproc_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
 	struct da8xx_rproc *drproc;
 	struct rproc *rproc;
 	struct irq_data *irq_data;
-	struct resource *bootreg_res;
-	struct resource *chipsig_res;
 	struct clk *dsp_clk;
 	struct reset_control *dsp_reset;
 	void __iomem *chipsig;
@@ -253,54 +258,36 @@ static int da8xx_rproc_probe(struct platform_device *pdev)
 		return irq;
 
 	irq_data = irq_get_irq_data(irq);
-	if (!irq_data) {
-		dev_err(dev, "irq_get_irq_data(%d): NULL\n", irq);
-		return -EINVAL;
-	}
+	if (!irq_data)
+		return dev_err_probe(dev, -EINVAL, "irq_get_irq_data(%d): NULL\n", irq);
 
-	bootreg_res = platform_get_resource_byname(pdev, IORESOURCE_MEM,
-						   "host1cfg");
-	bootreg = devm_ioremap_resource(dev, bootreg_res);
+	bootreg = devm_platform_ioremap_resource_byname(pdev, "host1cfg");
 	if (IS_ERR(bootreg))
 		return PTR_ERR(bootreg);
 
-	chipsig_res = platform_get_resource_byname(pdev, IORESOURCE_MEM,
-						   "chipsig");
-	chipsig = devm_ioremap_resource(dev, chipsig_res);
+	chipsig = devm_platform_ioremap_resource_byname(pdev, "chipsig");
 	if (IS_ERR(chipsig))
 		return PTR_ERR(chipsig);
 
 	dsp_clk = devm_clk_get(dev, NULL);
-	if (IS_ERR(dsp_clk)) {
-		dev_err(dev, "clk_get error: %ld\n", PTR_ERR(dsp_clk));
-
-		return PTR_ERR(dsp_clk);
-	}
+	if (IS_ERR(dsp_clk))
+		return dev_err_probe(dev, PTR_ERR(dsp_clk), "clk_get error\n");
 
 	dsp_reset = devm_reset_control_get_exclusive(dev, NULL);
-	if (IS_ERR(dsp_reset)) {
-		if (PTR_ERR(dsp_reset) != -EPROBE_DEFER)
-			dev_err(dev, "unable to get reset control: %ld\n",
-				PTR_ERR(dsp_reset));
-
-		return PTR_ERR(dsp_reset);
-	}
+	if (IS_ERR(dsp_reset))
+		return dev_err_probe(dev, PTR_ERR(dsp_reset), "unable to get reset control\n");
 
 	if (dev->of_node) {
 		ret = of_reserved_mem_device_init(dev);
-		if (ret) {
-			dev_err(dev, "device does not have specific CMA pool: %d\n",
-				ret);
-			return ret;
-		}
+		if (ret)
+			return dev_err_probe(dev, ret, "device does not have specific CMA pool\n");
+		devm_add_action_or_reset(&pdev->dev, da8xx_rproc_mem_release, &pdev->dev);
 	}
 
-	rproc = rproc_alloc(dev, "dsp", &da8xx_rproc_ops, da8xx_fw_name,
-		sizeof(*drproc));
-	if (!rproc) {
-		ret = -ENOMEM;
-		goto free_mem;
-	}
+	rproc = devm_rproc_alloc(dev, "dsp", &da8xx_rproc_ops, da8xx_fw_name,
+				 sizeof(*drproc));
+	if (!rproc)
+		return -ENOMEM;
 
 	/* error recovery is not supported at present */
 	rproc->recovery_disabled = true;
@@ -313,9 +300,7 @@ static int da8xx_rproc_probe(struct platform_device *pdev)
 
 	ret = da8xx_rproc_get_internal_memories(pdev, drproc);
 	if (ret)
-		goto free_rproc;
-
-	platform_set_drvdata(pdev, rproc);
+		return ret;
 
 	/* everything the ISR needs is now setup, so hook it up */
 	ret = devm_request_threaded_irq(dev, irq, da8xx_rproc_callback,
@@ -323,7 +308,7 @@ static int da8xx_rproc_probe(struct platform_device *pdev)
 					rproc);
 	if (ret) {
 		dev_err(dev, "devm_request_threaded_irq error: %d\n", ret);
-		goto free_rproc;
+		return ret;
 	}
 
 	/*
@@ -333,7 +318,7 @@ static int da8xx_rproc_probe(struct platform_device *pdev)
 	 */
 	ret = reset_control_assert(dsp_reset);
 	if (ret)
-		goto free_rproc;
+		return ret;
 
 	drproc->chipsig = chipsig;
 	drproc->bootreg = bootreg;
@@ -341,39 +326,13 @@ static int da8xx_rproc_probe(struct platform_device *pdev)
 	drproc->irq_data = irq_data;
 	drproc->irq = irq;
 
-	ret = rproc_add(rproc);
+	ret = devm_rproc_add(dev, rproc);
 	if (ret) {
 		dev_err(dev, "rproc_add failed: %d\n", ret);
-		goto free_rproc;
+		return ret;
 	}
 
 	return 0;
-
-free_rproc:
-	rproc_free(rproc);
-free_mem:
-	if (dev->of_node)
-		of_reserved_mem_device_release(dev);
-	return ret;
-}
-
-static void da8xx_rproc_remove(struct platform_device *pdev)
-{
-	struct rproc *rproc = platform_get_drvdata(pdev);
-	struct da8xx_rproc *drproc = rproc->priv;
-	struct device *dev = &pdev->dev;
-
-	/*
-	 * The devm subsystem might end up releasing things before
-	 * freeing the irq, thus allowing an interrupt to sneak in while
-	 * the device is being removed.  This should prevent that.
-	 */
-	disable_irq(drproc->irq);
-
-	rproc_del(rproc);
-	rproc_free(rproc);
-	if (dev->of_node)
-		of_reserved_mem_device_release(dev);
 }
 
 static const struct of_device_id davinci_rproc_of_match[] __maybe_unused = {
@@ -384,7 +343,6 @@ MODULE_DEVICE_TABLE(of, davinci_rproc_of_match);
 
 static struct platform_driver da8xx_rproc_driver = {
 	.probe = da8xx_rproc_probe,
-	.remove_new = da8xx_rproc_remove,
 	.driver = {
 		.name = "davinci-rproc",
 		.of_match_table = of_match_ptr(davinci_rproc_of_match),

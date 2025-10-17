@@ -1105,7 +1105,7 @@ static int smc_close(struct net_device *dev)
     outw(CTL_POWERDOWN, ioaddr + CONTROL );
 
     link->open--;
-    del_timer_sync(&smc->media);
+    timer_delete_sync(&smc->media);
 
     return 0;
 } /* smc_close */
@@ -1595,7 +1595,7 @@ static int s9k_config(struct net_device *dev, struct ifmap *map)
 	    return -EOPNOTSUPP;
 	else if (map->port > 2)
 	    return -EINVAL;
-	dev->if_port = map->port;
+	WRITE_ONCE(dev->if_port, map->port);
 	netdev_info(dev, "switched to %s port\n", if_names[dev->if_port]);
 	smc_reset(dev);
     }
@@ -1713,7 +1713,7 @@ static void smc_reset(struct net_device *dev)
 
 static void media_check(struct timer_list *t)
 {
-    struct smc_private *smc = from_timer(smc, t, media);
+    struct smc_private *smc = timer_container_of(smc, t, media);
     struct net_device *dev = smc->mii_if.dev;
     unsigned int ioaddr = dev->base_addr;
     u_short i, media, saved_bank;

@@ -21,6 +21,7 @@
 #define NUM_COUNTERS_NB		4
 #define NUM_COUNTERS_L2		4
 #define NUM_COUNTERS_L3		6
+#define NUM_COUNTERS_MAX	64
 
 #define RDPMC_BASE_NB		6
 #define RDPMC_BASE_LLC		10
@@ -38,7 +39,10 @@ struct amd_uncore_ctx {
 	int refcnt;
 	int cpu;
 	struct perf_event **events;
-	struct hlist_node node;
+	unsigned long active_mask[BITS_TO_LONGS(NUM_COUNTERS_MAX)];
+	int nr_active;
+	struct hrtimer hrtimer;
+	u64 hrtimer_duration;
 };
 
 struct amd_uncore_pmu {
@@ -71,7 +75,7 @@ union amd_uncore_info {
 };
 
 struct amd_uncore {
-	union amd_uncore_info * __percpu info;
+	union amd_uncore_info  __percpu *info;
 	struct amd_uncore_pmu *pmus;
 	unsigned int num_pmus;
 	bool init_done;
@@ -83,9 +87,49 @@ struct amd_uncore {
 
 static struct amd_uncore uncores[UNCORE_TYPE_MAX];
 
+/* Interval for hrtimer, defaults to 60000 milliseconds */
+static unsigned int update_interval = 60 * MSEC_PER_SEC;
+module_param(update_interval, uint, 0444);
+
 static struct amd_uncore_pmu *event_to_amd_uncore_pmu(struct perf_event *event)
 {
 	return container_of(event->pmu, struct amd_uncore_pmu, pmu);
+}
+
+static enum hrtimer_restart amd_uncore_hrtimer(struct hrtimer *hrtimer)
+{
+	struct amd_uncore_ctx *ctx;
+	struct perf_event *event;
+	int bit;
+
+	ctx = container_of(hrtimer, struct amd_uncore_ctx, hrtimer);
+
+	if (!ctx->nr_active || ctx->cpu != smp_processor_id())
+		return HRTIMER_NORESTART;
+
+	for_each_set_bit(bit, ctx->active_mask, NUM_COUNTERS_MAX) {
+		event = ctx->events[bit];
+		event->pmu->read(event);
+	}
+
+	hrtimer_forward_now(hrtimer, ns_to_ktime(ctx->hrtimer_duration));
+	return HRTIMER_RESTART;
+}
+
+static void amd_uncore_start_hrtimer(struct amd_uncore_ctx *ctx)
+{
+	hrtimer_start(&ctx->hrtimer, ns_to_ktime(ctx->hrtimer_duration),
+		      HRTIMER_MODE_REL_PINNED_HARD);
+}
+
+static void amd_uncore_cancel_hrtimer(struct amd_uncore_ctx *ctx)
+{
+	hrtimer_cancel(&ctx->hrtimer);
+}
+
+static void amd_uncore_init_hrtimer(struct amd_uncore_ctx *ctx)
+{
+	hrtimer_setup(&ctx->hrtimer, amd_uncore_hrtimer, CLOCK_MONOTONIC, HRTIMER_MODE_REL_HARD);
 }
 
 static void amd_uncore_read(struct perf_event *event)
@@ -106,9 +150,9 @@ static void amd_uncore_read(struct perf_event *event)
 	 * read counts directly from the corresponding PERF_CTR.
 	 */
 	if (hwc->event_base_rdpmc < 0)
-		rdmsrl(hwc->event_base, new);
+		rdmsrq(hwc->event_base, new);
 	else
-		rdpmcl(hwc->event_base_rdpmc, new);
+		new = rdpmc(hwc->event_base_rdpmc);
 
 	local64_set(&hwc->prev_count, new);
 	delta = (new << COUNTER_SHIFT) - (prev << COUNTER_SHIFT);
@@ -118,27 +162,40 @@ static void amd_uncore_read(struct perf_event *event)
 
 static void amd_uncore_start(struct perf_event *event, int flags)
 {
+	struct amd_uncore_pmu *pmu = event_to_amd_uncore_pmu(event);
+	struct amd_uncore_ctx *ctx = *per_cpu_ptr(pmu->ctx, event->cpu);
 	struct hw_perf_event *hwc = &event->hw;
 
+	if (!ctx->nr_active++)
+		amd_uncore_start_hrtimer(ctx);
+
 	if (flags & PERF_EF_RELOAD)
-		wrmsrl(hwc->event_base, (u64)local64_read(&hwc->prev_count));
+		wrmsrq(hwc->event_base, (u64)local64_read(&hwc->prev_count));
 
 	hwc->state = 0;
-	wrmsrl(hwc->config_base, (hwc->config | ARCH_PERFMON_EVENTSEL_ENABLE));
+	__set_bit(hwc->idx, ctx->active_mask);
+	wrmsrq(hwc->config_base, (hwc->config | ARCH_PERFMON_EVENTSEL_ENABLE));
 	perf_event_update_userpage(event);
 }
 
 static void amd_uncore_stop(struct perf_event *event, int flags)
 {
+	struct amd_uncore_pmu *pmu = event_to_amd_uncore_pmu(event);
+	struct amd_uncore_ctx *ctx = *per_cpu_ptr(pmu->ctx, event->cpu);
 	struct hw_perf_event *hwc = &event->hw;
 
-	wrmsrl(hwc->config_base, hwc->config);
+	wrmsrq(hwc->config_base, hwc->config);
 	hwc->state |= PERF_HES_STOPPED;
 
 	if ((flags & PERF_EF_UPDATE) && !(hwc->state & PERF_HES_UPTODATE)) {
 		event->pmu->read(event);
 		hwc->state |= PERF_HES_UPTODATE;
 	}
+
+	if (!--ctx->nr_active)
+		amd_uncore_cancel_hrtimer(ctx);
+
+	__clear_bit(hwc->idx, ctx->active_mask);
 }
 
 static int amd_uncore_add(struct perf_event *event, int flags)
@@ -162,7 +219,9 @@ static int amd_uncore_add(struct perf_event *event, int flags)
 	/* if not, take the first available counter */
 	hwc->idx = -1;
 	for (i = 0; i < pmu->num_counters; i++) {
-		if (cmpxchg(&ctx->events[i], NULL, event) == NULL) {
+		struct perf_event *tmp = NULL;
+
+		if (try_cmpxchg(&ctx->events[i], &tmp, event)) {
 			hwc->idx = i;
 			break;
 		}
@@ -196,7 +255,9 @@ static void amd_uncore_del(struct perf_event *event, int flags)
 	event->pmu->stop(event, PERF_EF_UPDATE);
 
 	for (i = 0; i < pmu->num_counters; i++) {
-		if (cmpxchg(&ctx->events[i], event, NULL) == event)
+		struct perf_event *tmp = event;
+
+		if (try_cmpxchg(&ctx->events[i], &tmp, NULL))
 			break;
 	}
 
@@ -487,6 +548,9 @@ static int amd_uncore_ctx_init(struct amd_uncore *uncore, unsigned int cpu)
 				goto fail;
 			}
 
+			amd_uncore_init_hrtimer(curr);
+			curr->hrtimer_duration = (u64)update_interval * NSEC_PER_MSEC;
+
 			cpumask_set_cpu(cpu, &pmu->active_mask);
 		}
 
@@ -639,7 +703,7 @@ void amd_uncore_df_ctx_scan(struct amd_uncore *uncore, unsigned int cpu)
 	info.split.aux_data = 0;
 	info.split.num_pmcs = NUM_COUNTERS_NB;
 	info.split.gid = 0;
-	info.split.cid = topology_die_id(cpu);
+	info.split.cid = topology_logical_package_id(cpu);
 
 	if (pmu_version >= 2) {
 		ebx.full = cpuid_ebx(EXT_PERFMON_DEBUG_FEATURES);
@@ -654,17 +718,20 @@ int amd_uncore_df_ctx_init(struct amd_uncore *uncore, unsigned int cpu)
 {
 	struct attribute **df_attr = amd_uncore_df_format_attr;
 	struct amd_uncore_pmu *pmu;
+	int num_counters;
 
 	/* Run just once */
 	if (uncore->init_done)
 		return amd_uncore_ctx_init(uncore, cpu);
 
+	num_counters = amd_uncore_ctx_num_pmcs(uncore, cpu);
+	if (!num_counters)
+		goto done;
+
 	/* No grouping, single instance for a system */
 	uncore->pmus = kzalloc(sizeof(*uncore->pmus), GFP_KERNEL);
-	if (!uncore->pmus) {
-		uncore->num_pmus = 0;
+	if (!uncore->pmus)
 		goto done;
-	}
 
 	/*
 	 * For Family 17h and above, the Northbridge counters are repurposed
@@ -674,7 +741,7 @@ int amd_uncore_df_ctx_init(struct amd_uncore *uncore, unsigned int cpu)
 	pmu = &uncore->pmus[0];
 	strscpy(pmu->name, boot_cpu_data.x86 >= 0x17 ? "amd_df" : "amd_nb",
 		sizeof(pmu->name));
-	pmu->num_counters = amd_uncore_ctx_num_pmcs(uncore, cpu);
+	pmu->num_counters = num_counters;
 	pmu->msr_base = MSR_F15H_NB_PERF_CTL;
 	pmu->rdpmc_base = RDPMC_BASE_NB;
 	pmu->group = amd_uncore_ctx_gid(uncore, cpu);
@@ -785,17 +852,20 @@ int amd_uncore_l3_ctx_init(struct amd_uncore *uncore, unsigned int cpu)
 {
 	struct attribute **l3_attr = amd_uncore_l3_format_attr;
 	struct amd_uncore_pmu *pmu;
+	int num_counters;
 
 	/* Run just once */
 	if (uncore->init_done)
 		return amd_uncore_ctx_init(uncore, cpu);
 
+	num_counters = amd_uncore_ctx_num_pmcs(uncore, cpu);
+	if (!num_counters)
+		goto done;
+
 	/* No grouping, single instance for a system */
 	uncore->pmus = kzalloc(sizeof(*uncore->pmus), GFP_KERNEL);
-	if (!uncore->pmus) {
-		uncore->num_pmus = 0;
+	if (!uncore->pmus)
 		goto done;
-	}
 
 	/*
 	 * For Family 17h and above, L3 cache counters are available instead
@@ -805,7 +875,7 @@ int amd_uncore_l3_ctx_init(struct amd_uncore *uncore, unsigned int cpu)
 	pmu = &uncore->pmus[0];
 	strscpy(pmu->name, boot_cpu_data.x86 >= 0x17 ? "amd_l3" : "amd_l2",
 		sizeof(pmu->name));
-	pmu->num_counters = amd_uncore_ctx_num_pmcs(uncore, cpu);
+	pmu->num_counters = num_counters;
 	pmu->msr_base = MSR_F16H_L2I_PERF_CTL;
 	pmu->rdpmc_base = RDPMC_BASE_LLC;
 	pmu->group = amd_uncore_ctx_gid(uncore, cpu);
@@ -870,14 +940,53 @@ static int amd_uncore_umc_event_init(struct perf_event *event)
 
 static void amd_uncore_umc_start(struct perf_event *event, int flags)
 {
+	struct amd_uncore_pmu *pmu = event_to_amd_uncore_pmu(event);
+	struct amd_uncore_ctx *ctx = *per_cpu_ptr(pmu->ctx, event->cpu);
 	struct hw_perf_event *hwc = &event->hw;
 
+	if (!ctx->nr_active++)
+		amd_uncore_start_hrtimer(ctx);
+
 	if (flags & PERF_EF_RELOAD)
-		wrmsrl(hwc->event_base, (u64)local64_read(&hwc->prev_count));
+		wrmsrq(hwc->event_base, (u64)local64_read(&hwc->prev_count));
 
 	hwc->state = 0;
-	wrmsrl(hwc->config_base, (hwc->config | AMD64_PERFMON_V2_ENABLE_UMC));
+	__set_bit(hwc->idx, ctx->active_mask);
+	wrmsrq(hwc->config_base, (hwc->config | AMD64_PERFMON_V2_ENABLE_UMC));
 	perf_event_update_userpage(event);
+}
+
+static void amd_uncore_umc_read(struct perf_event *event)
+{
+	struct hw_perf_event *hwc = &event->hw;
+	u64 prev, new, shift;
+	s64 delta;
+
+	shift = COUNTER_SHIFT + 1;
+	prev = local64_read(&hwc->prev_count);
+
+	/*
+	 * UMC counters do not have RDPMC assignments. Read counts directly
+	 * from the corresponding PERF_CTR.
+	 */
+	rdmsrl(hwc->event_base, new);
+
+	/*
+	 * Unlike the other uncore counters, UMC counters saturate and set the
+	 * Overflow bit (bit 48) on overflow. Since they do not roll over,
+	 * proactively reset the corresponding PERF_CTR when bit 47 is set so
+	 * that the counter never gets a chance to saturate.
+	 */
+	if (new & BIT_ULL(63 - COUNTER_SHIFT)) {
+		wrmsrl(hwc->event_base, 0);
+		local64_set(&hwc->prev_count, 0);
+	} else {
+		local64_set(&hwc->prev_count, new);
+	}
+
+	delta = (new << shift) - (prev << shift);
+	delta >>= shift;
+	local64_add(delta, &event->count);
 }
 
 static
@@ -893,8 +1002,8 @@ void amd_uncore_umc_ctx_scan(struct amd_uncore *uncore, unsigned int cpu)
 	cpuid(EXT_PERFMON_DEBUG_FEATURES, &eax, &ebx.full, &ecx, &edx);
 	info.split.aux_data = ecx;	/* stash active mask */
 	info.split.num_pmcs = ebx.split.num_umc_pmc;
-	info.split.gid = topology_die_id(cpu);
-	info.split.cid = topology_die_id(cpu);
+	info.split.gid = topology_logical_package_id(cpu);
+	info.split.cid = topology_logical_package_id(cpu);
 	*per_cpu_ptr(uncore->info, cpu) = info;
 }
 
@@ -906,7 +1015,8 @@ int amd_uncore_umc_ctx_init(struct amd_uncore *uncore, unsigned int cpu)
 	u8 group_num_pmcs[UNCORE_GROUP_MAX] = { 0 };
 	union amd_uncore_info info;
 	struct amd_uncore_pmu *pmu;
-	int index = 0, gid, i;
+	int gid, i;
+	u16 index = 0;
 
 	if (pmu_version < 2)
 		return 0;
@@ -938,7 +1048,7 @@ int amd_uncore_umc_ctx_init(struct amd_uncore *uncore, unsigned int cpu)
 	for_each_set_bit(gid, gmask, UNCORE_GROUP_MAX) {
 		for (i = 0; i < group_num_pmus[gid]; i++) {
 			pmu = &uncore->pmus[index];
-			snprintf(pmu->name, sizeof(pmu->name), "amd_umc_%d", index);
+			snprintf(pmu->name, sizeof(pmu->name), "amd_umc_%hu", index);
 			pmu->num_counters = group_num_pmcs[gid] / group_num_pmus[gid];
 			pmu->msr_base = MSR_F19H_UMC_PERF_CTL + i * pmu->num_counters * 2;
 			pmu->rdpmc_base = -1;
@@ -957,7 +1067,7 @@ int amd_uncore_umc_ctx_init(struct amd_uncore *uncore, unsigned int cpu)
 				.del		= amd_uncore_del,
 				.start		= amd_uncore_umc_start,
 				.stop		= amd_uncore_stop,
-				.read		= amd_uncore_read,
+				.read		= amd_uncore_umc_read,
 				.capabilities	= PERF_PMU_CAP_NO_EXCLUDE | PERF_PMU_CAP_NO_INTERRUPT,
 				.module		= THIS_MODULE,
 			};

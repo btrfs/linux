@@ -3,6 +3,7 @@
 #define _IPV6_H
 
 #include <uapi/linux/ipv6.h>
+#include <linux/cache.h>
 
 #define ipv6_optlen(p)  (((p)->hdrlen+1) << 3)
 #define ipv6_authlen(p) (((p)->hdrlen+2) << 2)
@@ -10,9 +11,17 @@
  * This structure contains configuration options per IPv6 link.
  */
 struct ipv6_devconf {
-	__s32		forwarding;
+	/* RX & TX fastpath fields. */
+	__cacheline_group_begin(ipv6_devconf_read_txrx);
+	__s32		disable_ipv6;
 	__s32		hop_limit;
 	__s32		mtu6;
+	__s32		forwarding;
+	__s32		force_forwarding;
+	__s32		disable_policy;
+	__s32		proxy_ndp;
+	__cacheline_group_end(ipv6_devconf_read_txrx);
+
 	__s32		accept_ra;
 	__s32		accept_redirects;
 	__s32		autoconf;
@@ -27,6 +36,7 @@ struct ipv6_devconf {
 	__s32		use_tempaddr;
 	__s32		temp_valid_lft;
 	__s32		temp_prefered_lft;
+	__s32		regen_min_advance;
 	__s32		regen_max_retry;
 	__s32		max_desync_factor;
 	__s32		max_addresses;
@@ -44,7 +54,6 @@ struct ipv6_devconf {
 	__s32		accept_ra_rt_info_max_plen;
 #endif
 #endif
-	__s32		proxy_ndp;
 	__s32		accept_source_route;
 	__s32		accept_ra_from_local;
 #ifdef CONFIG_IPV6_OPTIMISTIC_DAD
@@ -54,7 +63,6 @@ struct ipv6_devconf {
 #ifdef CONFIG_IPV6_MROUTE
 	atomic_t	mc_forwarding;
 #endif
-	__s32		disable_ipv6;
 	__s32		drop_unicast_in_l2_multicast;
 	__s32		accept_dad;
 	__s32		force_tllao;
@@ -75,7 +83,6 @@ struct ipv6_devconf {
 #endif
 	__u32		enhanced_dad;
 	__u32		addr_gen_mode;
-	__s32		disable_policy;
 	__s32           ndisc_tclass;
 	__s32		rpl_seg_enabled;
 	__u32		ioam6_id;
@@ -83,6 +90,7 @@ struct ipv6_devconf {
 	__u8		ioam6_enabled;
 	__u8		ndisc_evict_nocarrier;
 	__u8		ra_honor_pio_life;
+	__u8		ra_honor_pio_pflag;
 
 	struct ctl_table_header *sysctl_header;
 };
@@ -149,6 +157,7 @@ struct inet6_skb_parm {
 #define IP6SKB_SEG6	      256
 #define IP6SKB_FAKEJUMBO      512
 #define IP6SKB_MULTIPATH      1024
+#define IP6SKB_MCROUTE        2048
 };
 
 #if defined(CONFIG_NET_L3_MASTER_DEV)
@@ -200,22 +209,26 @@ struct inet6_cork {
 	struct ipv6_txoptions *opt;
 	u8 hop_limit;
 	u8 tclass;
+	u8 dontfrag:1;
 };
 
 /* struct ipv6_pinfo - ipv6 private area */
 struct ipv6_pinfo {
+	/* Used in tx path (inet6_csk_route_socket(), ip6_xmit()) */
 	struct in6_addr 	saddr;
-	struct in6_pktinfo	sticky_pktinfo;
-	const struct in6_addr		*daddr_cache;
-#ifdef CONFIG_IPV6_SUBTREES
-	const struct in6_addr		*saddr_cache;
-#endif
-
 	__be32			flow_label;
-	__u32			frag_size;
-
+	u32			dst_cookie;
+	struct ipv6_txoptions __rcu	*opt;
 	s16			hop_limit;
+	u8			pmtudisc;
+	u8			tclass;
+#ifdef CONFIG_IPV6_SUBTREES
+	bool			saddr_cache;
+#endif
+	bool			daddr_cache;
+
 	u8			mcast_hops;
+	u32			frag_size;
 
 	int			ucast_oif;
 	int			mcast_oif;
@@ -223,7 +236,7 @@ struct ipv6_pinfo {
 	/* pktoption flags */
 	union {
 		struct {
-			__u16	srcrt:1,
+			u16	srcrt:1,
 				osrcrt:1,
 			        rxinfo:1,
 			        rxoinfo:1,
@@ -240,29 +253,25 @@ struct ipv6_pinfo {
 				recvfragsize:1;
 				/* 1 bits hole */
 		} bits;
-		__u16		all;
+		u16		all;
 	} rxopt;
 
 	/* sockopt flags */
-	__u8			srcprefs;	/* 001: prefer temporary address
+	u8			srcprefs;	/* 001: prefer temporary address
 						 * 010: prefer public address
 						 * 100: prefer care-of address
 						 */
-	__u8			pmtudisc;
-	__u8			min_hopcount;
-	__u8			tclass;
+	u8			min_hopcount;
 	__be32			rcv_flowinfo;
+	struct in6_pktinfo	sticky_pktinfo;
 
-	__u32			dst_cookie;
+	struct sk_buff		*pktoptions;
+	struct sk_buff		*rxpmtu;
+	struct inet6_cork	cork;
 
 	struct ipv6_mc_socklist	__rcu *ipv6_mc_list;
 	struct ipv6_ac_socklist	*ipv6_ac_list;
 	struct ipv6_fl_socklist __rcu *ipv6_fl_list;
-
-	struct ipv6_txoptions __rcu	*opt;
-	struct sk_buff		*pktoptions;
-	struct sk_buff		*rxpmtu;
-	struct inet6_cork	cork;
 };
 
 /* We currently use available bits from inet_sk(sk)->inet_flags,
@@ -285,7 +294,7 @@ struct raw6_sock {
 	__u32			offset;		/* checksum offset  */
 	struct icmp6_filter	filter;
 	__u32			ip6mr_table;
-
+	struct numa_drop_counters drop_counters;
 	struct ipv6_pinfo	inet6;
 };
 

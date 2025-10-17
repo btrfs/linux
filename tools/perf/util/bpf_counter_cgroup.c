@@ -13,6 +13,7 @@
 #include <linux/zalloc.h>
 #include <linux/perf_event.h>
 #include <api/fs/fs.h>
+#include <bpf/bpf.h>
 #include <perf/bpf_perf.h>
 
 #include "affinity.h"
@@ -61,6 +62,9 @@ static int bperf_load_program(struct evlist *evlist)
 	skel->rodata->num_cpus = total_cpus;
 	skel->rodata->num_events = evlist->core.nr_entries / nr_cgroups;
 
+	if (cgroup_is_v2("perf_event") > 0)
+		skel->rodata->use_cgroup_v2 = 1;
+
 	BUG_ON(evlist->core.nr_entries % nr_cgroups != 0);
 
 	/* we need one copy of events per cpu for reading */
@@ -81,9 +85,6 @@ static int bperf_load_program(struct evlist *evlist)
 		pr_err("Failed to load cgroup skeleton\n");
 		goto out;
 	}
-
-	if (cgroup_is_v2("perf_event") > 0)
-		skel->bss->use_cgroup_v2 = 1;
 
 	err = -1;
 
@@ -136,9 +137,8 @@ static int bperf_load_program(struct evlist *evlist)
 		cgrp = evsel->cgrp;
 
 		if (read_cgroup_id(cgrp) < 0) {
-			pr_err("Failed to get cgroup id\n");
-			err = -1;
-			goto out;
+			pr_debug("Failed to get cgroup id for %s\n", cgrp->name);
+			cgrp->id = 0;
 		}
 
 		map_fd = bpf_map__fd(skel->maps.cgrp_idx);
@@ -186,7 +186,8 @@ static int bperf_cgrp__load(struct evsel *evsel,
 }
 
 static int bperf_cgrp__install_pe(struct evsel *evsel __maybe_unused,
-				  int cpu __maybe_unused, int fd __maybe_unused)
+				  int cpu_map_idx __maybe_unused,
+				  int fd __maybe_unused)
 {
 	/* nothing to do */
 	return 0;

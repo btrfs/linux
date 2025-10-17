@@ -11,6 +11,7 @@
 #include <linux/fs.h>
 #include <linux/hashtable.h>
 #include <linux/init.h>
+#include <linux/jiffies.h>
 #include <linux/kmsan-checks.h>
 #include <linux/mm.h>
 #include <linux/preempt.h>
@@ -161,6 +162,15 @@ static void kcov_remote_area_put(struct kcov_remote_area *area,
 	kmsan_unpoison_memory(&area->list, sizeof(area->list));
 }
 
+/*
+ * Unlike in_serving_softirq(), this function returns false when called during
+ * a hardirq or an NMI that happened in the softirq context.
+ */
+static __always_inline bool in_softirq_really(void)
+{
+	return in_serving_softirq() && !in_hardirq() && !in_nmi();
+}
+
 static notrace bool check_kcov_mode(enum kcov_mode needed_mode, struct task_struct *t)
 {
 	unsigned int mode;
@@ -170,7 +180,7 @@ static notrace bool check_kcov_mode(enum kcov_mode needed_mode, struct task_stru
 	 * so we ignore code executed in interrupts, unless we are in a remote
 	 * coverage collection section in a softirq.
 	 */
-	if (!in_task() && !(in_serving_softirq() && t->kcov_softirq))
+	if (!in_task() && !(in_softirq_really() && t->kcov_softirq))
 		return false;
 	mode = READ_ONCE(t->kcov_mode);
 	/*
@@ -542,7 +552,7 @@ static int kcov_get_mode(unsigned long arg)
 
 /*
  * Fault in a lazily-faulted vmalloc area before it can be used by
- * __santizer_cov_trace_pc(), to avoid recursion issues if any code on the
+ * __sanitizer_cov_trace_pc(), to avoid recursion issues if any code on the
  * vmalloc fault handling path is instrumented.
  */
 static void kcov_fault_in_area(struct kcov *kcov)
@@ -627,10 +637,12 @@ static int kcov_ioctl_locked(struct kcov *kcov, unsigned int cmd,
 		mode = kcov_get_mode(remote_arg->trace_mode);
 		if (mode < 0)
 			return mode;
-		if (remote_arg->area_size > LONG_MAX / sizeof(unsigned long))
+		if ((unsigned long)remote_arg->area_size >
+		    LONG_MAX / sizeof(unsigned long))
 			return -EINVAL;
 		kcov->mode = mode;
 		t->kcov = kcov;
+	        t->kcov_mode = KCOV_MODE_REMOTE;
 		kcov->t = t;
 		kcov->remote = true;
 		kcov->remote_size = remote_arg->area_size;
@@ -847,7 +859,7 @@ void kcov_remote_start(u64 handle)
 
 	if (WARN_ON(!kcov_check_handle(handle, true, true, true)))
 		return;
-	if (!in_task() && !in_serving_softirq())
+	if (!in_task() && !in_softirq_really())
 		return;
 
 	local_lock_irqsave(&kcov_percpu_data.lock, flags);
@@ -966,6 +978,15 @@ static void kcov_move_area(enum kcov_mode mode, void *dst_area,
 	memcpy(dst_entries, src_entries, bytes_to_move);
 	entries_moved = bytes_to_move >> entry_size_log;
 
+	/*
+	 * A write memory barrier is required here, to ensure
+	 * that the writes from the memcpy() are visible before
+	 * the count is updated. Without this, it is possible for
+	 * a user to observe a new count value but stale
+	 * coverage data.
+	 */
+	smp_wmb();
+
 	switch (mode) {
 	case KCOV_MODE_TRACE_PC:
 		WRITE_ONCE(*(unsigned long *)dst_area, dst_len + entries_moved);
@@ -989,7 +1010,7 @@ void kcov_remote_stop(void)
 	int sequence;
 	unsigned long flags;
 
-	if (!in_task() && !in_serving_softirq())
+	if (!in_task() && !in_softirq_really())
 		return;
 
 	local_lock_irqsave(&kcov_percpu_data.lock, flags);
@@ -1056,6 +1077,32 @@ u64 kcov_common_handle(void)
 }
 EXPORT_SYMBOL(kcov_common_handle);
 
+#ifdef CONFIG_KCOV_SELFTEST
+static void __init selftest(void)
+{
+	unsigned long start;
+
+	pr_err("running self test\n");
+	/*
+	 * Test that interrupts don't produce spurious coverage.
+	 * The coverage callback filters out interrupt code, but only
+	 * after the handler updates preempt count. Some code periodically
+	 * leaks out of that section and leads to spurious coverage.
+	 * It's hard to call the actual interrupt handler directly,
+	 * so we just loop here for a bit waiting for a timer interrupt.
+	 * We set kcov_mode to enable tracing, but don't setup the area,
+	 * so any attempt to trace will crash. Note: we must not call any
+	 * potentially traced functions in this region.
+	 */
+	start = jiffies;
+	current->kcov_mode = KCOV_MODE_TRACE_PC;
+	while ((jiffies - start) * MSEC_PER_SEC / HZ < 300)
+		;
+	current->kcov_mode = 0;
+	pr_err("done running self test\n");
+}
+#endif
+
 static int __init kcov_init(void)
 {
 	int cpu;
@@ -1074,6 +1121,10 @@ static int __init kcov_init(void)
 	 * use of debugfs_create_file_unsafe() is actually safe here.
 	 */
 	debugfs_create_file_unsafe("kcov", 0600, NULL, NULL, &kcov_fops);
+
+#ifdef CONFIG_KCOV_SELFTEST
+	selftest();
+#endif
 
 	return 0;
 }

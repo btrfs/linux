@@ -206,7 +206,7 @@ struct dm_region_hash *dm_region_hash_create(
 	rh->shift = RH_HASH_SHIFT;
 	rh->prime = RH_HASH_MULT;
 
-	rh->buckets = vmalloc(array_size(nr_buckets, sizeof(*rh->buckets)));
+	rh->buckets = vmalloc_array(nr_buckets, sizeof(*rh->buckets));
 	if (!rh->buckets) {
 		DMERR("unable to allocate region hash bucket memory");
 		kfree(rh);
@@ -723,5 +723,5 @@ void dm_rh_start_recovery(struct dm_region_hash *rh)
 EXPORT_SYMBOL_GPL(dm_rh_start_recovery);
 
 MODULE_DESCRIPTION(DM_NAME " region hash");
-MODULE_AUTHOR("Joe Thornber/Heinz Mauelshagen <dm-devel@redhat.com>");
+MODULE_AUTHOR("Joe Thornber/Heinz Mauelshagen <dm-devel@lists.linux.dev>");
 MODULE_LICENSE("GPL");

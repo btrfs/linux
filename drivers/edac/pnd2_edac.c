@@ -372,7 +372,7 @@ static int gen_asym_mask(struct b_cr_slice_channel_hash *p,
 			 struct b_cr_asym_mem_region1_mchbar *as1,
 			 struct b_cr_asym_2way_mem_region_mchbar *as2way)
 {
-	const int intlv[] = { 0x5, 0xA, 0x3, 0xC };
+	static const int intlv[] = { 0x5, 0xA, 0x3, 0xC };
 	int mask = 0;
 
 	if (as2way->asym_2way_interleave_enable)
@@ -489,7 +489,7 @@ static int dnv_get_registers(void)
  */
 static int get_registers(void)
 {
-	const int intlv[] = { 10, 11, 12, 12 };
+	static const int intlv[] = { 10, 11, 12, 12 };
 
 	if (RD_REG(&tolud, b_cr_tolud_pci) ||
 		RD_REG(&touud_lo, b_cr_touud_lo_pci) ||
@@ -1511,8 +1511,8 @@ static struct dunit_ops dnv_ops = {
 };
 
 static const struct x86_cpu_id pnd2_cpuids[] = {
-	X86_MATCH_INTEL_FAM6_MODEL(ATOM_GOLDMONT,	&apl_ops),
-	X86_MATCH_INTEL_FAM6_MODEL(ATOM_GOLDMONT_D,	&dnv_ops),
+	X86_MATCH_VFM(INTEL_ATOM_GOLDMONT,	&apl_ops),
+	X86_MATCH_VFM(INTEL_ATOM_GOLDMONT_D,	&dnv_ops),
 	{ }
 };
 MODULE_DEVICE_TABLE(x86cpu, pnd2_cpuids);

@@ -39,9 +39,9 @@ config HIBERNATION
 	bool "Hibernation (aka 'suspend to disk')"
 	depends on SWAP && ARCH_HIBERNATION_POSSIBLE
 	select HIBERNATE_CALLBACKS
-	select LZO_COMPRESS
-	select LZO_DECOMPRESS
 	select CRC32
+	select CRYPTO
+	select CRYPTO_LZO
 	help
 	  Enable the suspend to disk (STD) functionality, which is usually
 	  called "hibernation" in user interfaces.  STD checkpoints the
@@ -91,6 +91,28 @@ config HIBERNATION_SNAPSHOT_DEV
 	  reduces the attack surface of the kernel.
 
 	  If in doubt, say Y.
+
+choice
+	prompt "Default compressor"
+	default HIBERNATION_COMP_LZO
+	depends on HIBERNATION
+
+config HIBERNATION_COMP_LZO
+	bool "lzo"
+	depends on CRYPTO_LZO
+
+config HIBERNATION_COMP_LZ4
+	bool "lz4"
+	depends on CRYPTO_LZ4
+
+endchoice
+
+config HIBERNATION_DEF_COMP
+	string
+	default "lzo" if HIBERNATION_COMP_LZO
+	default "lz4" if HIBERNATION_COMP_LZ4
+	help
+	  Default compressor to be used for hibernation.
 
 config PM_STD_PARTITION
 	string "Default resume partition"
@@ -235,10 +257,29 @@ config DPM_WATCHDOG
 	  boot session.
 
 config DPM_WATCHDOG_TIMEOUT
-	int "Watchdog timeout in seconds"
+	int "Watchdog timeout to panic in seconds"
 	range 1 120
 	default 120
 	depends on DPM_WATCHDOG
+
+config DPM_WATCHDOG_WARNING_TIMEOUT
+	int "Watchdog timeout to warn in seconds"
+	range 1 DPM_WATCHDOG_TIMEOUT
+	default DPM_WATCHDOG_TIMEOUT
+	depends on DPM_WATCHDOG
+	help
+	  If the DPM watchdog warning timeout and main timeout are
+	  different then a non-fatal warning (with a stack trace of
+	  the stuck suspend routine) will be printed when the warning
+	  timeout expires. If the suspend routine gets un-stuck
+	  before the main timeout expires then no other action is
+	  taken. If the routine continues to be stuck and the main
+	  timeout expires then an emergency-level message and stack
+	  trace will be printed and the system will panic.
+
+	  If the warning timeout is equal to the main timeout (the
+	  default) then the warning will never happen and the system
+	  will jump straight to panic when the main timeout expires.
 
 config PM_TRACE
 	bool
@@ -339,8 +380,7 @@ config CPU_PM
 
 config ENERGY_MODEL
 	bool "Energy Model for devices with DVFS (CPUs, GPUs, etc)"
-	depends on SMP
-	depends on CPU_FREQ
+	depends on CPU_FREQ || PM_DEVFREQ
 	help
 	  Several subsystems (thermal and/or the task scheduler for example)
 	  can leverage information about the energy consumed by devices to

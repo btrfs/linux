@@ -30,7 +30,7 @@ description: |
 maintainers:
   - Mike Leach <mike.leach@linaro.org>
   - Suzuki K Poulose <suzuki.poulose@arm.com>
-  - James Clark <james.clark@arm.com>
+  - James Clark <james.clark@linaro.org>
   - Mao Jinlong <quic_jinlmao@quicinc.com>
   - Hao Zhang <quic_hazha@quicinc.com>
 
@@ -38,6 +38,10 @@ properties:
   compatible:
     enum:
       - arm,coresight-dummy-sink
+
+  label:
+    description:
+      Description of a coresight device.
 
   in-ports:
     $ref: /schemas/graph.yaml#/properties/ports

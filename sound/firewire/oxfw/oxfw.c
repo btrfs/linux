@@ -21,6 +21,7 @@
 #define VENDOR_TASCAM		0x00022e
 #define OUI_STANTON		0x001260
 #define OUI_APOGEE		0x0003db
+#define OUI_OXFORD		0x0030e0
 
 #define MODEL_SATELLITE		0x00200f
 #define MODEL_SCS1M		0x001000
@@ -104,9 +105,9 @@ static int name_card(struct snd_oxfw *oxfw, const struct ieee1394_device_id *ent
 		m = model;
 	}
 
-	strcpy(oxfw->card->driver, d);
-	strcpy(oxfw->card->mixername, m);
-	strcpy(oxfw->card->shortname, m);
+	strscpy(oxfw->card->driver, d);
+	strscpy(oxfw->card->mixername, m);
+	strscpy(oxfw->card->shortname, m);
 
 	scnprintf(oxfw->card->longname, sizeof(oxfw->card->longname),
 		  "%s %s (OXFW%x %04x), GUID %08x%08x at %s, S%d",
@@ -232,6 +233,11 @@ static int oxfw_probe(struct fw_unit *unit, const struct ieee1394_device_id *ent
 	if (err < 0)
 		goto error;
 
+	if (entry->vendor_id == OUI_OXFORD && entry->model_id == 0x00f970) {
+		oxfw->quirks |= SND_OXFW_QUIRK_STREAM_FORMAT_INFO_UNSUPPORTED |
+				SND_OXFW_QUIRK_DBC_IS_TOTAL_PAYLOAD_QUADLETS;
+	}
+
 	err = snd_oxfw_stream_discover(oxfw);
 	if (err < 0)
 		goto error;
@@ -277,9 +283,8 @@ static void oxfw_bus_reset(struct fw_unit *unit)
 	fcp_bus_reset(oxfw->unit);
 
 	if (oxfw->has_output || oxfw->has_input) {
-		mutex_lock(&oxfw->mutex);
+		guard(mutex)(&oxfw->mutex);
 		snd_oxfw_stream_update_duplex(oxfw);
-		mutex_unlock(&oxfw->mutex);
 	}
 
 	if (oxfw->quirks & SND_OXFW_QUIRK_SCS_TRANSACTION)
@@ -330,6 +335,9 @@ static const struct ieee1394_device_id oxfw_id_table[] = {
 	//
 	OXFW_DEV_ENTRY(VENDOR_GRIFFIN, 0x00f970, &griffin_firewave),
 	OXFW_DEV_ENTRY(VENDOR_LACIE, 0x00f970, &lacie_speakers),
+	// Miglia HarmonyAudio (HA02). The numeric vendor ID is ASIC vendor and the model ID is the
+	// default value of ASIC.
+	OXFW_DEV_ENTRY(OUI_OXFORD, 0x00f970, NULL),
 	// Behringer,F-Control Audio 202. The value of SYT field is not reliable at all.
 	OXFW_DEV_ENTRY(VENDOR_BEHRINGER, 0x00fc22, NULL),
 	// Loud Technologies, Tapco Link.FireWire 4x6. The value of SYT field is always 0xffff.
@@ -337,7 +345,6 @@ static const struct ieee1394_device_id oxfw_id_table[] = {
 	// Loud Technologies, Mackie Onyx Satellite. Although revised version of firmware is
 	// installed to avoid the postpone, the value of SYT field is always 0xffff.
 	OXFW_DEV_ENTRY(VENDOR_LOUD, MODEL_SATELLITE, NULL),
-	// Miglia HarmonyAudio. Not yet identified.
 
 	//
 	// OXFW971 devices:

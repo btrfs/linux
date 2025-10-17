@@ -45,6 +45,7 @@ enum ceph_sparse_read_state {
 	CEPH_SPARSE_READ_HDR	= 0,
 	CEPH_SPARSE_READ_EXTENTS,
 	CEPH_SPARSE_READ_DATA_LEN,
+	CEPH_SPARSE_READ_DATA_PRE,
 	CEPH_SPARSE_READ_DATA,
 };
 
@@ -64,7 +65,7 @@ struct ceph_sparse_read {
 	u64				sr_req_len;  /* orig request length */
 	u64				sr_pos;      /* current pos in buffer */
 	int				sr_index;    /* current extent index */
-	__le32				sr_datalen;  /* length of actual data */
+	u32				sr_datalen;  /* length of actual data */
 	u32				sr_count;    /* extent count in reply */
 	int				sr_ext_len;  /* length of extent array */
 	struct ceph_sparse_extent	*sr_extent;  /* extent array */
@@ -448,8 +449,6 @@ extern int ceph_osdc_init(struct ceph_osd_client *osdc,
 extern void ceph_osdc_stop(struct ceph_osd_client *osdc);
 extern void ceph_osdc_reopen_osds(struct ceph_osd_client *osdc);
 
-extern void ceph_osdc_handle_reply(struct ceph_osd_client *osdc,
-				   struct ceph_msg *msg);
 extern void ceph_osdc_handle_map(struct ceph_osd_client *osdc,
 				 struct ceph_msg *msg);
 void ceph_osdc_update_epoch_barrier(struct ceph_osd_client *osdc, u32 eb);
@@ -491,9 +490,6 @@ extern void osd_req_op_extent_osd_data_pages(struct ceph_osd_request *,
 					struct page **pages, u64 length,
 					u32 alignment, bool pages_from_pool,
 					bool own_pages);
-extern void osd_req_op_extent_osd_data_pagelist(struct ceph_osd_request *,
-					unsigned int which,
-					struct ceph_pagelist *pagelist);
 #ifdef CONFIG_BLOCK
 void osd_req_op_extent_osd_data_bio(struct ceph_osd_request *osd_req,
 				    unsigned int which,
@@ -510,9 +506,6 @@ void osd_req_op_extent_osd_data_bvec_pos(struct ceph_osd_request *osd_req,
 void osd_req_op_extent_osd_iter(struct ceph_osd_request *osd_req,
 				unsigned int which, struct iov_iter *iter);
 
-extern void osd_req_op_cls_request_data_pagelist(struct ceph_osd_request *,
-					unsigned int which,
-					struct ceph_pagelist *pagelist);
 extern void osd_req_op_cls_request_data_pages(struct ceph_osd_request *,
 					unsigned int which,
 					struct page **pages, u64 length,
@@ -627,8 +620,6 @@ int ceph_osdc_notify(struct ceph_osd_client *osdc,
 		     u32 timeout,
 		     struct page ***preply_pages,
 		     size_t *preply_len);
-int ceph_osdc_watch_check(struct ceph_osd_client *osdc,
-			  struct ceph_osd_linger_request *lreq);
 int ceph_osdc_list_watchers(struct ceph_osd_client *osdc,
 			    struct ceph_object_id *oid,
 			    struct ceph_object_locator *oloc,

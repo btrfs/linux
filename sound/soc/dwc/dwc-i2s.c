@@ -199,12 +199,10 @@ static void i2s_start(struct dw_i2s_dev *dev,
 	else
 		i2s_write_reg(dev->i2s_base, IRER, 1);
 
-	/* I2S needs to enable IRQ to make a handshake with DMAC on the JH7110 SoC */
-	if (dev->use_pio || dev->is_jh7110)
-		i2s_enable_irqs(dev, substream->stream, config->chan_nr);
-	else
+	if (!(dev->use_pio || dev->is_jh7110))
 		i2s_enable_dma(dev, substream->stream);
 
+	i2s_enable_irqs(dev, substream->stream, config->chan_nr);
 	i2s_write_reg(dev->i2s_base, CER, 1);
 }
 
@@ -218,10 +216,11 @@ static void i2s_stop(struct dw_i2s_dev *dev,
 	else
 		i2s_write_reg(dev->i2s_base, IRER, 0);
 
-	if (dev->use_pio || dev->is_jh7110)
-		i2s_disable_irqs(dev, substream->stream, 8);
-	else
+	if (!(dev->use_pio || dev->is_jh7110))
 		i2s_disable_dma(dev, substream->stream);
+
+	i2s_disable_irqs(dev, substream->stream, 8);
+
 
 	if (!dev->active) {
 		i2s_write_reg(dev->i2s_base, CER, 0);
@@ -478,7 +477,6 @@ static const struct snd_soc_dai_ops dw_i2s_dai_ops = {
 	.set_tdm_slot	= dw_i2s_set_tdm_slot,
 };
 
-#ifdef CONFIG_PM
 static int dw_i2s_runtime_suspend(struct device *dev)
 {
 	struct dw_i2s_dev *dw_dev = dev_get_drvdata(dev);
@@ -501,6 +499,7 @@ static int dw_i2s_runtime_resume(struct device *dev)
 	return 0;
 }
 
+#ifdef CONFIG_PM
 static int dw_i2s_suspend(struct snd_soc_component *component)
 {
 	struct dw_i2s_dev *dev = snd_soc_component_get_drvdata(component);
@@ -995,16 +994,12 @@ static int dw_i2s_probe(struct platform_device *pdev)
 				goto err_assert_reset;
 			}
 		}
-		dev->clk = devm_clk_get(&pdev->dev, clk_id);
+		dev->clk = devm_clk_get_enabled(&pdev->dev, clk_id);
 
 		if (IS_ERR(dev->clk)) {
 			ret = PTR_ERR(dev->clk);
 			goto err_assert_reset;
 		}
-
-		ret = clk_prepare_enable(dev->clk);
-		if (ret < 0)
-			goto err_assert_reset;
 	}
 
 	dev_set_drvdata(&pdev->dev, dev);
@@ -1012,7 +1007,7 @@ static int dw_i2s_probe(struct platform_device *pdev)
 					 dw_i2s_dai, 1);
 	if (ret != 0) {
 		dev_err(&pdev->dev, "not able to register dai\n");
-		goto err_clk_disable;
+		goto err_assert_reset;
 	}
 
 	if (!pdata || dev->is_jh7110) {
@@ -1030,16 +1025,13 @@ static int dw_i2s_probe(struct platform_device *pdev)
 		if (ret) {
 			dev_err(&pdev->dev, "could not register pcm: %d\n",
 					ret);
-			goto err_clk_disable;
+			goto err_assert_reset;
 		}
 	}
 
 	pm_runtime_enable(&pdev->dev);
 	return 0;
 
-err_clk_disable:
-	if (dev->capability & DW_I2S_MASTER)
-		clk_disable_unprepare(dev->clk);
 err_assert_reset:
 	reset_control_assert(dev->reset);
 	return ret;
@@ -1048,9 +1040,6 @@ err_assert_reset:
 static void dw_i2s_remove(struct platform_device *pdev)
 {
 	struct dw_i2s_dev *dev = dev_get_drvdata(&pdev->dev);
-
-	if (dev->capability & DW_I2S_MASTER)
-		clk_disable_unprepare(dev->clk);
 
 	reset_control_assert(dev->reset);
 	pm_runtime_disable(&pdev->dev);
@@ -1094,16 +1083,16 @@ MODULE_DEVICE_TABLE(of, dw_i2s_of_match);
 #endif
 
 static const struct dev_pm_ops dwc_pm_ops = {
-	SET_RUNTIME_PM_OPS(dw_i2s_runtime_suspend, dw_i2s_runtime_resume, NULL)
+	RUNTIME_PM_OPS(dw_i2s_runtime_suspend, dw_i2s_runtime_resume, NULL)
 };
 
 static struct platform_driver dw_i2s_driver = {
 	.probe		= dw_i2s_probe,
-	.remove_new	= dw_i2s_remove,
+	.remove		= dw_i2s_remove,
 	.driver		= {
 		.name	= "designware-i2s",
 		.of_match_table = of_match_ptr(dw_i2s_of_match),
-		.pm = &dwc_pm_ops,
+		.pm = pm_ptr(&dwc_pm_ops),
 	},
 };
 

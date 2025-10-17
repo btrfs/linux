@@ -16,7 +16,6 @@
 #include <drm/drm_modeset_helper_vtables.h>
 #include <drm/drm_print.h>
 #include <drm/drm_probe_helper.h>
-#include <drm/drm_simple_kms_helper.h>
 #include <drm/gud.h>
 
 #include "gud_internal.h"
@@ -221,7 +220,7 @@ static int gud_connector_get_modes(struct drm_connector *connector)
 	struct gud_display_mode_req *reqmodes = NULL;
 	struct gud_connector_get_edid_ctx edid_ctx;
 	unsigned int i, num_modes = 0;
-	struct edid *edid = NULL;
+	const struct drm_edid *drm_edid = NULL;
 	int idx, ret;
 
 	if (!drm_dev_enter(connector->dev, &idx))
@@ -238,13 +237,13 @@ static int gud_connector_get_modes(struct drm_connector *connector)
 		gud_conn_err(connector, "Invalid EDID size", ret);
 	} else if (ret > 0) {
 		edid_ctx.len = ret;
-		edid = drm_do_get_edid(connector, gud_connector_get_edid_block, &edid_ctx);
+		drm_edid = drm_edid_read_custom(connector, gud_connector_get_edid_block, &edid_ctx);
 	}
 
 	kfree(edid_ctx.buf);
-	drm_connector_update_edid_property(connector, edid);
+	drm_edid_connector_update(connector, drm_edid);
 
-	if (edid && edid_ctx.edid_override)
+	if (drm_edid && edid_ctx.edid_override)
 		goto out;
 
 	reqmodes = kmalloc_array(GUD_CONNECTOR_MAX_NUM_MODES, sizeof(*reqmodes), GFP_KERNEL);
@@ -276,10 +275,10 @@ static int gud_connector_get_modes(struct drm_connector *connector)
 	}
 out:
 	if (!num_modes)
-		num_modes = drm_add_edid_modes(connector, edid);
+		num_modes = drm_edid_connector_add_modes(connector);
 
 	kfree(reqmodes);
-	kfree(edid);
+	drm_edid_free(drm_edid);
 	drm_dev_exit(idx);
 
 	return num_modes;
@@ -607,13 +606,16 @@ int gud_connector_fill_properties(struct drm_connector_state *connector_state,
 	return gconn->num_properties;
 }
 
+static const struct drm_encoder_funcs gud_drm_simple_encoder_funcs_cleanup = {
+	.destroy = drm_encoder_cleanup,
+};
+
 static int gud_connector_create(struct gud_device *gdrm, unsigned int index,
 				struct gud_connector_descriptor_req *desc)
 {
 	struct drm_device *drm = &gdrm->drm;
 	struct gud_connector *gconn;
 	struct drm_connector *connector;
-	struct drm_encoder *encoder;
 	int ret, connector_type;
 	u32 flags;
 
@@ -681,20 +683,13 @@ static int gud_connector_create(struct gud_device *gdrm, unsigned int index,
 		return ret;
 	}
 
-	/* The first connector is attached to the existing simple pipe encoder */
-	if (!connector->index) {
-		encoder = &gdrm->pipe.encoder;
-	} else {
-		encoder = &gconn->encoder;
+	gconn->encoder.possible_crtcs = drm_crtc_mask(&gdrm->crtc);
+	ret = drm_encoder_init(drm, &gconn->encoder, &gud_drm_simple_encoder_funcs_cleanup,
+			       DRM_MODE_ENCODER_NONE, NULL);
+	if (ret)
+		return ret;
 
-		ret = drm_simple_encoder_init(drm, encoder, DRM_MODE_ENCODER_NONE);
-		if (ret)
-			return ret;
-
-		encoder->possible_crtcs = 1;
-	}
-
-	return drm_connector_attach_encoder(connector, encoder);
+	return drm_connector_attach_encoder(connector, &gconn->encoder);
 }
 
 int gud_get_connectors(struct gud_device *gdrm)

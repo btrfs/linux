@@ -38,11 +38,12 @@ register/unregister functions::
 
   void hwmon_device_unregister(struct device *dev);
 
-  void devm_hwmon_device_unregister(struct device *dev);
-
   char *hwmon_sanitize_name(const char *name);
 
   char *devm_hwmon_sanitize_name(struct device *dev, const char *name);
+
+  void hwmon_lock(struct device *dev);
+  void hwmon_unlock(struct device *dev);
 
 hwmon_device_register_with_info registers a hardware monitoring device.
 It creates the standard sysfs attributes in the hardware monitoring core,
@@ -64,14 +65,10 @@ monitoring device structure. This function must be called from the driver
 remove function if the hardware monitoring device was registered with
 hwmon_device_register_with_info.
 
-devm_hwmon_device_unregister does not normally have to be called. It is only
-needed for error handling, and only needed if the driver probe fails after
-the call to devm_hwmon_device_register_with_info and if the automatic (device
-managed) removal would be too late.
-
 All supported hwmon device registration functions only accept valid device
 names. Device names including invalid characters (whitespace, '*', or '-')
-will be rejected. The 'name' parameter is mandatory.
+will be rejected. If NULL is passed as name parameter, the hardware monitoring
+device name will be derived from the parent device name.
 
 If the driver doesn't use a static device name (for example it uses
 dev_name()), and therefore cannot make sure the name only contains valid
@@ -84,6 +81,13 @@ removed.
 devm_hwmon_sanitize_name is the resource managed version of
 hwmon_sanitize_name; the memory will be freed automatically on device
 removal.
+
+When using ``[devm_]hwmon_device_register_with_info()`` to register the
+hardware monitoring device, accesses using the associated access functions
+are serialised by the hardware monitoring core. If a driver needs locking
+for other functions such as interrupt handlers or for attributes which are
+fully implemented in the driver, hwmon_lock() and hwmon_unlock() can be used
+to ensure that calls to those functions are serialized.
 
 Using devm_hwmon_device_register_with_info()
 --------------------------------------------
@@ -165,6 +169,7 @@ It contains following fields:
      hwmon_curr		Current sensor
      hwmon_power		Power sensor
      hwmon_energy	Energy sensor
+     hwmon_energy64	Energy sensor, reported as 64-bit signed value
      hwmon_humidity	Humidity sensor
      hwmon_fan		Fan speed sensor
      hwmon_pwm		PWM control
@@ -294,6 +299,8 @@ Parameters:
 		The sensor channel number.
 	val:
 		Pointer to attribute value.
+		For hwmon_energy64, `'val`' is passed as `long *` but needs
+		a typecast to `s64 *`.
 
 Return value:
 	0 on success, a negative error number otherwise.

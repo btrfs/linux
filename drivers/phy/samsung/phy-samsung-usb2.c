@@ -87,7 +87,7 @@ static const struct phy_ops samsung_usb2_phy_ops = {
 };
 
 static struct phy *samsung_usb2_phy_xlate(struct device *dev,
-					struct of_phandle_args *args)
+					const struct of_phandle_args *args)
 {
 	struct samsung_usb2_phy_driver *drv;
 
@@ -258,4 +258,3 @@ module_platform_driver(samsung_usb2_phy_driver);
 MODULE_DESCRIPTION("Samsung S5P/Exynos SoC USB PHY driver");
 MODULE_AUTHOR("Kamil Debski <k.debski@samsung.com>");
 MODULE_LICENSE("GPL v2");
-MODULE_ALIAS("platform:samsung-usb2-phy");

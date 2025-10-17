@@ -3,7 +3,7 @@
  *
  * Module Name: utdebug - Debug print/trace routines
  *
- * Copyright (C) 2000 - 2023, Intel Corp.
+ * Copyright (C) 2000 - 2025, Intel Corp.
  *
  *****************************************************************************/
 
@@ -62,7 +62,12 @@ void acpi_ut_track_stack_ptr(void)
 	acpi_size current_sp;
 
 	if (&current_sp < acpi_gbl_lowest_stack_pointer) {
+#pragma GCC diagnostic push
+#if defined(__GNUC__) && __GNUC__ >= 12
+#pragma GCC diagnostic ignored "-Wdangling-pointer="
+#endif
 		acpi_gbl_lowest_stack_pointer = &current_sp;
+#pragma GCC diagnostic pop
 	}
 
 	if (acpi_gbl_nesting_level > acpi_gbl_deepest_nesting) {

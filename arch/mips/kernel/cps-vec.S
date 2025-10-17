@@ -4,6 +4,7 @@
  * Author: Paul Burton <paul.burton@mips.com>
  */
 
+#include <linux/init.h>
 #include <asm/addrspace.h>
 #include <asm/asm.h>
 #include <asm/asm-offsets.h>
@@ -18,6 +19,10 @@
 #define GCR_CPC_BASE_OFS	0x0088
 #define GCR_CL_COHERENCE_OFS	0x2008
 #define GCR_CL_ID_OFS		0x2028
+#define  CM3_GCR_Cx_ID_CLUSTER_SHF	8
+#define  CM3_GCR_Cx_ID_CLUSTER_MSK	(0xff << 8)
+#define  CM3_GCR_Cx_ID_CORENUM_SHF	0
+#define  CM3_GCR_Cx_ID_CORENUM_MSK	(0xff << 0)
 
 #define CPC_CL_VC_STOP_OFS	0x2020
 #define CPC_CL_VC_RUN_OFS	0x2028
@@ -82,39 +87,10 @@
 	.endm
 
 
-.balign 0x1000
-
-LEAF(mips_cps_core_entry)
-	/*
-	 * These first several instructions will be patched by cps_smp_setup to load the
-	 * CCA to use into register s0 and GCR base address to register s1.
-	 */
-	.rept   CPS_ENTRY_PATCH_INSNS
-	nop
-	.endr
-
-	.global mips_cps_core_entry_patch_end
-mips_cps_core_entry_patch_end:
-
-	/* Check whether we're here due to an NMI */
-	mfc0	k0, CP0_STATUS
-	and	k0, k0, ST0_NMI
-	beqz	k0, not_nmi
-	 nop
-
-	/* This is an NMI */
-	PTR_LA	k0, nmi_handler
-	jr	k0
-	 nop
-
-not_nmi:
-	/* Setup Cause */
-	li	t0, CAUSEF_IV
-	mtc0	t0, CP0_CAUSE
-
-	/* Setup Status */
-	li	t0, ST0_CU1 | ST0_CU0 | ST0_BEV | STATUS_BITDEPS
-	mtc0	t0, CP0_STATUS
+LEAF(mips_cps_core_boot)
+	/* Save  CCA and GCR base */
+	move   s0, a0
+	move   s1, a1
 
 	/* We don't know how to do coherence setup on earlier ISA */
 #if MIPS_ISA_REV > 0
@@ -178,49 +154,45 @@ not_nmi:
 	PTR_L	sp, VPEBOOTCFG_SP(v1)
 	jr	t1
 	 nop
-	END(mips_cps_core_entry)
+	END(mips_cps_core_boot)
 
-.org 0x200
+	__INIT
 LEAF(excep_tlbfill)
 	DUMP_EXCEP("TLB Fill")
 	b	.
 	 nop
 	END(excep_tlbfill)
 
-.org 0x280
 LEAF(excep_xtlbfill)
 	DUMP_EXCEP("XTLB Fill")
 	b	.
 	 nop
 	END(excep_xtlbfill)
 
-.org 0x300
 LEAF(excep_cache)
 	DUMP_EXCEP("Cache")
 	b	.
 	 nop
 	END(excep_cache)
 
-.org 0x380
 LEAF(excep_genex)
 	DUMP_EXCEP("General")
 	b	.
 	 nop
 	END(excep_genex)
 
-.org 0x400
 LEAF(excep_intex)
 	DUMP_EXCEP("Interrupt")
 	b	.
 	 nop
 	END(excep_intex)
 
-.org 0x480
 LEAF(excep_ejtag)
 	PTR_LA	k0, ejtag_debug_handler
 	jr	k0
 	 nop
 	END(excep_ejtag)
+	__FINIT
 
 LEAF(mips_cps_core_init)
 #ifdef CONFIG_MIPS_MT_SMP
@@ -303,12 +275,21 @@ LEAF(mips_cps_core_init)
  */
 LEAF(mips_cps_get_bootcfg)
 	/* Calculate a pointer to this cores struct core_boot_config */
+	PTR_LA	v0, mips_cps_cluster_bootcfg
+	PTR_L	v0, 0(v0)
 	lw	t0, GCR_CL_ID_OFS(s1)
+#ifdef CONFIG_CPU_MIPSR6
+	ext	t1, t0, CM3_GCR_Cx_ID_CLUSTER_SHF, 8
+	li	t2, CLUSTERBOOTCFG_SIZE
+	mul	t1, t1, t2
+	PTR_ADDU \
+		v0, v0, t1
+#endif
+	PTR_L	v0, CLUSTERBOOTCFG_CORECONFIG(v0)
+	andi	t0, t0, CM3_GCR_Cx_ID_CORENUM_MSK
 	li	t1, COREBOOTCFG_SIZE
 	mul	t0, t0, t1
-	PTR_LA	t1, mips_cps_core_bootcfg
-	PTR_L	t1, 0(t1)
-	PTR_ADDU v0, t0, t1
+	PTR_ADDU v0, v0, t0
 
 	/* Calculate this VPEs ID. If the core doesn't support MT use 0 */
 	li	t9, 0
@@ -428,7 +409,7 @@ LEAF(mips_cps_boot_vpes)
 	/* Calculate a pointer to the VPEs struct vpe_boot_config */
 	li	t0, VPEBOOTCFG_SIZE
 	mul	t0, t0, ta1
-	addu	t0, t0, ta3
+	PTR_ADDU t0, t0, ta3
 
 	/* Set the TC restart PC */
 	lw	t1, VPEBOOTCFG_PC(t0)
@@ -603,10 +584,10 @@ dcache_done:
 	lw	$1, TI_CPU(gp)
 	sll	$1, $1, LONGLOG
 	PTR_LA	\dest, __per_cpu_offset
-	addu	$1, $1, \dest
+	PTR_ADDU $1, $1, \dest
 	lw	$1, 0($1)
 	PTR_LA	\dest, cps_cpu_state
-	addu	\dest, \dest, $1
+	PTR_ADDU \dest, \dest, $1
 	.set	pop
 	.endm
 

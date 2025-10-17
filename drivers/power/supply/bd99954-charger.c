@@ -70,13 +70,6 @@
 
 #include "bd99954-charger.h"
 
-struct battery_data {
-	u16 precharge_current;	/* Trickle-charge Current */
-	u16 fc_reg_voltage;	/* Fast Charging Regulation Voltage */
-	u16 voltage_min;
-	u16 voltage_max;
-};
-
 /* Initial field values, converted to initial register values */
 struct bd9995x_init_data {
 	u16 vsysreg_set;	/* VSYS Regulation Setting */
@@ -163,7 +156,7 @@ static const struct regmap_config bd9995x_regmap_config = {
 	.reg_stride = 1,
 
 	.max_register = 3 * 0x100,
-	.cache_type = REGCACHE_RBTREE,
+	.cache_type = REGCACHE_MAPLE,
 
 	.ranges = regmap_range_cfg,
 	.num_ranges = ARRAY_SIZE(regmap_range_cfg),
@@ -989,7 +982,7 @@ static int bd9995x_probe(struct i2c_client *client)
 	bd->client = client;
 	bd->dev = dev;
 	psy_cfg.drv_data = bd;
-	psy_cfg.of_node = dev->of_node;
+	psy_cfg.fwnode = dev_fwnode(dev);
 
 	mutex_init(&bd->lock);
 

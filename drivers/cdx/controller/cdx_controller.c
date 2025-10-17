@@ -9,11 +9,12 @@
 #include <linux/platform_device.h>
 #include <linux/slab.h>
 #include <linux/cdx/cdx_bus.h>
+#include <linux/irqdomain.h>
 
 #include "cdx_controller.h"
 #include "../cdx.h"
 #include "mcdi_functions.h"
-#include "mcdi.h"
+#include "mcdid.h"
 
 static unsigned int cdx_mcdi_rpc_timeout(struct cdx_mcdi *cdx, unsigned int cmd)
 {
@@ -60,15 +61,28 @@ static int cdx_configure_device(struct cdx_controller *cdx,
 				u8 bus_num, u8 dev_num,
 				struct cdx_device_config *dev_config)
 {
+	u16 msi_index;
 	int ret = 0;
+	u32 data;
+	u64 addr;
 
 	switch (dev_config->type) {
+	case CDX_DEV_MSI_CONF:
+		msi_index = dev_config->msi.msi_index;
+		data = dev_config->msi.data;
+		addr = dev_config->msi.addr;
+
+		ret = cdx_mcdi_write_msi(cdx->priv, bus_num, dev_num, msi_index, addr, data);
+		break;
 	case CDX_DEV_RESET_CONF:
 		ret = cdx_mcdi_reset_device(cdx->priv, bus_num, dev_num);
 		break;
 	case CDX_DEV_BUS_MASTER_CONF:
 		ret = cdx_mcdi_bus_master_enable(cdx->priv, bus_num, dev_num,
 						 dev_config->bus_master_enable);
+		break;
+	case CDX_DEV_MSI_ENABLE:
+		ret = cdx_mcdi_msi_enable(cdx->priv, bus_num, dev_num, dev_config->msi_enable);
 		break;
 	default:
 		ret = -EINVAL;
@@ -178,17 +192,25 @@ static int xlnx_cdx_probe(struct platform_device *pdev)
 	cdx->priv = cdx_mcdi;
 	cdx->ops = &cdx_ops;
 
+	/* Create MSI domain */
+	if (IS_ENABLED(CONFIG_GENERIC_MSI_IRQ))
+		cdx->msi_domain = cdx_msi_domain_init(&pdev->dev);
+	if (!cdx->msi_domain) {
+		ret = dev_err_probe(&pdev->dev, -ENODEV, "cdx_msi_domain_init() failed");
+		goto cdx_msi_fail;
+	}
+
 	ret = cdx_setup_rpmsg(pdev);
 	if (ret) {
-		if (ret != -EPROBE_DEFER)
-			dev_err(&pdev->dev, "Failed to register CDX RPMsg transport\n");
+		dev_err_probe(&pdev->dev, ret, "Failed to register CDX RPMsg transport\n");
 		goto cdx_rpmsg_fail;
 	}
 
-	dev_info(&pdev->dev, "Successfully registered CDX controller with RPMsg as transport\n");
 	return 0;
 
 cdx_rpmsg_fail:
+	irq_domain_remove(cdx->msi_domain);
+cdx_msi_fail:
 	kfree(cdx);
 cdx_alloc_fail:
 	cdx_mcdi_finish(cdx_mcdi);
@@ -198,19 +220,18 @@ mcdi_init_fail:
 	return ret;
 }
 
-static int xlnx_cdx_remove(struct platform_device *pdev)
+static void xlnx_cdx_remove(struct platform_device *pdev)
 {
 	struct cdx_controller *cdx = platform_get_drvdata(pdev);
 	struct cdx_mcdi *cdx_mcdi = cdx->priv;
 
 	cdx_destroy_rpmsg(pdev);
 
+	irq_domain_remove(cdx->msi_domain);
 	kfree(cdx);
 
 	cdx_mcdi_finish(cdx_mcdi);
 	kfree(cdx_mcdi);
-
-	return 0;
 }
 
 static const struct of_device_id cdx_match_table[] = {
@@ -223,33 +244,15 @@ MODULE_DEVICE_TABLE(of, cdx_match_table);
 static struct platform_driver cdx_pdriver = {
 	.driver = {
 		   .name = "cdx-controller",
-		   .pm = NULL,
 		   .of_match_table = cdx_match_table,
 		   },
 	.probe = xlnx_cdx_probe,
 	.remove = xlnx_cdx_remove,
 };
 
-static int __init cdx_controller_init(void)
-{
-	int ret;
-
-	ret = platform_driver_register(&cdx_pdriver);
-	if (ret)
-		pr_err("platform_driver_register() failed: %d\n", ret);
-
-	return ret;
-}
-
-static void __exit cdx_controller_exit(void)
-{
-	platform_driver_unregister(&cdx_pdriver);
-}
-
-module_init(cdx_controller_init);
-module_exit(cdx_controller_exit);
+module_platform_driver(cdx_pdriver);
 
 MODULE_AUTHOR("AMD Inc.");
 MODULE_DESCRIPTION("CDX controller for AMD devices");
 MODULE_LICENSE("GPL");
-MODULE_IMPORT_NS(CDX_BUS_CONTROLLER);
+MODULE_IMPORT_NS("CDX_BUS_CONTROLLER");

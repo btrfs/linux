@@ -5,13 +5,12 @@
  */
 
 #include <linux/clk-provider.h>
+#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
-#include <linux/property.h>
 #include <linux/pm_clock.h>
 #include <linux/pm_runtime.h>
 #include <linux/regmap.h>
-#include <linux/reset-controller.h>
 
 #include <dt-bindings/clock/qcom,dispcc-sc8280xp.h>
 
@@ -3114,7 +3113,7 @@ static const struct regmap_config disp_cc_sc8280xp_regmap_config = {
 	.fast_io = true,
 };
 
-static struct qcom_cc_desc disp0_cc_sc8280xp_desc = {
+static const struct qcom_cc_desc disp0_cc_sc8280xp_desc = {
 	.config = &disp_cc_sc8280xp_regmap_config,
 	.clks = disp0_cc_sc8280xp_clocks,
 	.num_clks = ARRAY_SIZE(disp0_cc_sc8280xp_clocks),
@@ -3124,7 +3123,7 @@ static struct qcom_cc_desc disp0_cc_sc8280xp_desc = {
 	.num_gdscs = ARRAY_SIZE(disp0_cc_sc8280xp_gdscs),
 };
 
-static struct qcom_cc_desc disp1_cc_sc8280xp_desc = {
+static const struct qcom_cc_desc disp1_cc_sc8280xp_desc = {
 	.config = &disp_cc_sc8280xp_regmap_config,
 	.clks = disp1_cc_sc8280xp_clocks,
 	.num_clks = ARRAY_SIZE(disp1_cc_sc8280xp_clocks),
@@ -3172,14 +3171,14 @@ static int disp_cc_sc8280xp_probe(struct platform_device *pdev)
 	clk_lucid_pll_configure(clkr_to_alpha_clk_pll(desc->clks[DISP_CC_PLL1]), regmap, &disp_cc_pll1_config);
 	clk_lucid_pll_configure(clkr_to_alpha_clk_pll(desc->clks[DISP_CC_PLL2]), regmap, &disp_cc_pll2_config);
 
-	ret = qcom_cc_really_probe(pdev, desc, regmap);
+	ret = qcom_cc_really_probe(&pdev->dev, desc, regmap);
 	if (ret) {
 		dev_err(&pdev->dev, "Failed to register display clock controller\n");
 		goto out_pm_runtime_put;
 	}
 
-	/* DISP_CC_XO_CLK always-on */
-	regmap_update_bits(regmap, 0x605c, BIT(0), BIT(0));
+	/* Keep some clocks always-on */
+	qcom_branch_set_clk_en(regmap, 0x605c); /* DISP_CC_XO_CLK */
 
 out_pm_runtime_put:
 	pm_runtime_put_sync(&pdev->dev);
@@ -3202,17 +3201,7 @@ static struct platform_driver disp_cc_sc8280xp_driver = {
 	},
 };
 
-static int __init disp_cc_sc8280xp_init(void)
-{
-	return platform_driver_register(&disp_cc_sc8280xp_driver);
-}
-subsys_initcall(disp_cc_sc8280xp_init);
-
-static void __exit disp_cc_sc8280xp_exit(void)
-{
-	platform_driver_unregister(&disp_cc_sc8280xp_driver);
-}
-module_exit(disp_cc_sc8280xp_exit);
+module_platform_driver(disp_cc_sc8280xp_driver);
 
 MODULE_DESCRIPTION("Qualcomm SC8280XP dispcc driver");
 MODULE_LICENSE("GPL");

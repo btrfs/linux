@@ -412,6 +412,8 @@
 &lpass_va_macro {
 	status = "okay";
 	vdd-micb-supply = <&vreg_bob>;
+	pinctrl-0 = <&lpass_dmic01_clk>, <&lpass_dmic01_data>;
+	pinctrl-names = "default";
 };
 
 &pcie1 {
@@ -495,7 +497,6 @@
 };
 
 &uart5 {
-	compatible = "qcom,geni-debug-uart";
 	status = "okay";
 };
 
@@ -519,11 +520,9 @@
 };
 
 &usb_1 {
-	status = "okay";
-};
-
-&usb_1_dwc3 {
 	dr_mode = "host";
+
+	status = "okay";
 };
 
 &usb_1_hsphy {

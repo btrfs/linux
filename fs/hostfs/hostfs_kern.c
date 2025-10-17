@@ -16,10 +16,16 @@
 #include <linux/seq_file.h>
 #include <linux/writeback.h>
 #include <linux/mount.h>
+#include <linux/fs_context.h>
+#include <linux/fs_parser.h>
 #include <linux/namei.h>
 #include "hostfs.h"
 #include <init.h>
 #include <kern.h>
+
+struct hostfs_fs_info {
+	char *host_root_path;
+};
 
 struct hostfs_inode_info {
 	int fd;
@@ -27,6 +33,7 @@ struct hostfs_inode_info {
 	struct inode vfs_inode;
 	struct mutex open_mutex;
 	dev_t dev;
+	struct hostfs_timespec btime;
 };
 
 static inline struct hostfs_inode_info *HOSTFS_I(struct inode *inode)
@@ -51,6 +58,7 @@ static int __init hostfs_args(char *options, int *add)
 {
 	char *ptr;
 
+	*add = 0;
 	ptr = strchr(options, ',');
 	if (ptr != NULL)
 		*ptr++ = '\0';
@@ -88,30 +96,17 @@ __uml_setup("hostfs=", hostfs_args,
 static char *__dentry_name(struct dentry *dentry, char *name)
 {
 	char *p = dentry_path_raw(dentry, name, PATH_MAX);
-	char *root;
-	size_t len;
+	struct hostfs_fs_info *fsi = dentry->d_sb->s_fs_info;
+	char *root = fsi->host_root_path;
+	size_t len = strlen(root);
 
-	root = dentry->d_sb->s_fs_info;
-	len = strlen(root);
-	if (IS_ERR(p)) {
+	if (IS_ERR(p) || len > p - name) {
 		__putname(name);
 		return NULL;
 	}
 
-	/*
-	 * This function relies on the fact that dentry_path_raw() will place
-	 * the path name at the end of the provided buffer.
-	 */
-	BUG_ON(p + strlen(p) + 1 != name + PATH_MAX);
-
-	strscpy(name, root, PATH_MAX);
-	if (len > p - name) {
-		__putname(name);
-		return NULL;
-	}
-
-	if (p > name + len)
-		strcpy(name + len, p);
+	memcpy(name, root, len);
+	memmove(name + len, p, name + PATH_MAX - p);
 
 	return name;
 }
@@ -196,8 +191,10 @@ static int hostfs_statfs(struct dentry *dentry, struct kstatfs *sf)
 	long long f_bavail;
 	long long f_files;
 	long long f_ffree;
+	struct hostfs_fs_info *fsi;
 
-	err = do_statfs(dentry->d_sb->s_fs_info,
+	fsi = dentry->d_sb->s_fs_info;
+	err = do_statfs(fsi->host_root_path,
 			&sf->f_bsize, &f_blocks, &f_bfree, &f_bavail, &f_files,
 			&f_ffree, &sf->f_fsid, sizeof(sf->f_fsid),
 			&sf->f_namelen);
@@ -245,7 +242,11 @@ static void hostfs_free_inode(struct inode *inode)
 
 static int hostfs_show_options(struct seq_file *seq, struct dentry *root)
 {
-	const char *root_path = root->d_sb->s_fs_info;
+	struct hostfs_fs_info *fsi;
+	const char *root_path;
+
+	fsi = root->d_sb->s_fs_info;
+	root_path = fsi->host_root_path;
 	size_t offset = strlen(root_ino) + 1;
 
 	if (strlen(root_path) > offset)
@@ -260,7 +261,7 @@ static int hostfs_show_options(struct seq_file *seq, struct dentry *root)
 static const struct super_operations hostfs_sbops = {
 	.alloc_inode	= hostfs_alloc_inode,
 	.free_inode	= hostfs_free_inode,
-	.drop_inode	= generic_delete_inode,
+	.drop_inode	= inode_just_drop,
 	.evict_inode	= hostfs_evict_inode,
 	.statfs		= hostfs_statfs,
 	.show_options	= hostfs_show_options,
@@ -381,7 +382,7 @@ static const struct file_operations hostfs_file_fops = {
 	.splice_write	= iter_file_splice_write,
 	.read_iter	= generic_file_read_iter,
 	.write_iter	= generic_file_write_iter,
-	.mmap		= generic_file_mmap,
+	.mmap_prepare	= generic_file_mmap_prepare,
 	.open		= hostfs_open,
 	.release	= hostfs_file_release,
 	.fsync		= hostfs_fsync,
@@ -395,98 +396,85 @@ static const struct file_operations hostfs_dir_fops = {
 	.fsync		= hostfs_fsync,
 };
 
-static int hostfs_writepage(struct page *page, struct writeback_control *wbc)
+static int hostfs_writepages(struct address_space *mapping,
+		struct writeback_control *wbc)
 {
-	struct address_space *mapping = page->mapping;
 	struct inode *inode = mapping->host;
-	char *buffer;
-	loff_t base = page_offset(page);
-	int count = PAGE_SIZE;
-	int end_index = inode->i_size >> PAGE_SHIFT;
-	int err;
+	struct folio *folio = NULL;
+	loff_t i_size = i_size_read(inode);
+	int err = 0;
 
-	if (page->index >= end_index)
-		count = inode->i_size & (PAGE_SIZE-1);
+	while ((folio = writeback_iter(mapping, wbc, folio, &err))) {
+		loff_t pos = folio_pos(folio);
+		size_t count = folio_size(folio);
+		char *buffer;
+		int ret;
 
-	buffer = kmap_local_page(page);
+		if (count > i_size - pos)
+			count = i_size - pos;
 
-	err = write_file(HOSTFS_I(inode)->fd, &base, buffer, count);
-	if (err != count) {
-		if (err >= 0)
-			err = -EIO;
-		mapping_set_error(mapping, err);
-		goto out;
+		buffer = kmap_local_folio(folio, 0);
+		ret = write_file(HOSTFS_I(inode)->fd, &pos, buffer, count);
+		kunmap_local(buffer);
+		folio_unlock(folio);
+		if (ret != count) {
+			err = ret < 0 ? ret : -EIO;
+			mapping_set_error(mapping, err);
+		}
 	}
-
-	if (base > inode->i_size)
-		inode->i_size = base;
-
-	err = 0;
-
- out:
-	kunmap_local(buffer);
-	unlock_page(page);
 
 	return err;
 }
 
 static int hostfs_read_folio(struct file *file, struct folio *folio)
 {
-	struct page *page = &folio->page;
 	char *buffer;
-	loff_t start = page_offset(page);
+	loff_t start = folio_pos(folio);
 	int bytes_read, ret = 0;
 
-	buffer = kmap_local_page(page);
+	buffer = kmap_local_folio(folio, 0);
 	bytes_read = read_file(FILE_HOSTFS_I(file)->fd, &start, buffer,
 			PAGE_SIZE);
-	if (bytes_read < 0) {
-		ClearPageUptodate(page);
-		SetPageError(page);
+	if (bytes_read < 0)
 		ret = bytes_read;
-		goto out;
-	}
-
-	memset(buffer + bytes_read, 0, PAGE_SIZE - bytes_read);
-
-	ClearPageError(page);
-	SetPageUptodate(page);
-
- out:
-	flush_dcache_page(page);
+	else
+		buffer = folio_zero_tail(folio, bytes_read, buffer + bytes_read);
 	kunmap_local(buffer);
-	unlock_page(page);
 
+	folio_end_read(folio, ret == 0);
 	return ret;
 }
 
-static int hostfs_write_begin(struct file *file, struct address_space *mapping,
+static int hostfs_write_begin(const struct kiocb *iocb,
+			      struct address_space *mapping,
 			      loff_t pos, unsigned len,
-			      struct page **pagep, void **fsdata)
+			      struct folio **foliop, void **fsdata)
 {
 	pgoff_t index = pos >> PAGE_SHIFT;
 
-	*pagep = grab_cache_page_write_begin(mapping, index);
-	if (!*pagep)
-		return -ENOMEM;
+	*foliop = __filemap_get_folio(mapping, index, FGP_WRITEBEGIN,
+			mapping_gfp_mask(mapping));
+	if (IS_ERR(*foliop))
+		return PTR_ERR(*foliop);
 	return 0;
 }
 
-static int hostfs_write_end(struct file *file, struct address_space *mapping,
+static int hostfs_write_end(const struct kiocb *iocb,
+			    struct address_space *mapping,
 			    loff_t pos, unsigned len, unsigned copied,
-			    struct page *page, void *fsdata)
+			    struct folio *folio, void *fsdata)
 {
 	struct inode *inode = mapping->host;
 	void *buffer;
-	unsigned from = pos & (PAGE_SIZE - 1);
+	size_t from = offset_in_folio(folio, pos);
 	int err;
 
-	buffer = kmap_local_page(page);
-	err = write_file(FILE_HOSTFS_I(file)->fd, &pos, buffer + from, copied);
+	buffer = kmap_local_folio(folio, from);
+	err = write_file(FILE_HOSTFS_I(iocb->ki_filp)->fd, &pos, buffer, copied);
 	kunmap_local(buffer);
 
-	if (!PageUptodate(page) && err == PAGE_SIZE)
-		SetPageUptodate(page);
+	if (!folio_test_uptodate(folio) && err == folio_size(folio))
+		folio_mark_uptodate(folio);
 
 	/*
 	 * If err > 0, write_file has added err to pos, so we are comparing
@@ -494,18 +482,19 @@ static int hostfs_write_end(struct file *file, struct address_space *mapping,
 	 */
 	if (err > 0 && (pos > inode->i_size))
 		inode->i_size = pos;
-	unlock_page(page);
-	put_page(page);
+	folio_unlock(folio);
+	folio_put(folio);
 
 	return err;
 }
 
 static const struct address_space_operations hostfs_aops = {
-	.writepage 	= hostfs_writepage,
+	.writepages 	= hostfs_writepages,
 	.read_folio	= hostfs_read_folio,
 	.dirty_folio	= filemap_dirty_folio,
 	.write_begin	= hostfs_write_begin,
 	.write_end	= hostfs_write_end,
+	.migrate_folio	= filemap_migrate_folio,
 };
 
 static int hostfs_inode_update(struct inode *ino, const struct hostfs_stat *st)
@@ -530,10 +519,11 @@ static int hostfs_inode_update(struct inode *ino, const struct hostfs_stat *st)
 static int hostfs_inode_set(struct inode *ino, void *data)
 {
 	struct hostfs_stat *st = data;
-	dev_t rdev;
+	dev_t dev, rdev;
 
 	/* Reencode maj and min with the kernel encoding.*/
-	rdev = MKDEV(st->maj, st->min);
+	rdev = MKDEV(st->rdev.maj, st->rdev.min);
+	dev = MKDEV(st->dev.maj, st->dev.min);
 
 	switch (st->mode & S_IFMT) {
 	case S_IFLNK:
@@ -559,7 +549,8 @@ static int hostfs_inode_set(struct inode *ino, void *data)
 		return -EIO;
 	}
 
-	HOSTFS_I(ino)->dev = st->dev;
+	HOSTFS_I(ino)->dev = dev;
+	HOSTFS_I(ino)->btime = st->btime;
 	ino->i_ino = st->ino;
 	ino->i_mode = st->mode;
 	return hostfs_inode_update(ino, st);
@@ -568,8 +559,12 @@ static int hostfs_inode_set(struct inode *ino, void *data)
 static int hostfs_inode_test(struct inode *inode, void *data)
 {
 	const struct hostfs_stat *st = data;
+	dev_t dev = MKDEV(st->dev.maj, st->dev.min);
 
-	return inode->i_ino == st->ino && HOSTFS_I(inode)->dev == st->dev;
+	return inode->i_ino == st->ino && HOSTFS_I(inode)->dev == dev &&
+	       (inode->i_mode & S_IFMT) == (st->mode & S_IFMT) &&
+	       HOSTFS_I(inode)->btime.tv_sec == st->btime.tv_sec &&
+	       HOSTFS_I(inode)->btime.tv_nsec == st->btime.tv_nsec;
 }
 
 static struct inode *hostfs_iget(struct super_block *sb, char *name)
@@ -691,17 +686,25 @@ static int hostfs_symlink(struct mnt_idmap *idmap, struct inode *ino,
 	return err;
 }
 
-static int hostfs_mkdir(struct mnt_idmap *idmap, struct inode *ino,
-			struct dentry *dentry, umode_t mode)
+static struct dentry *hostfs_mkdir(struct mnt_idmap *idmap, struct inode *ino,
+				   struct dentry *dentry, umode_t mode)
 {
+	struct inode *inode;
 	char *file;
 	int err;
 
 	if ((file = dentry_name(dentry)) == NULL)
-		return -ENOMEM;
+		return ERR_PTR(-ENOMEM);
 	err = do_mkdir(file, mode);
+	if (err) {
+		dentry = ERR_PTR(err);
+	} else {
+		inode = hostfs_iget(dentry->d_sb, file);
+		d_drop(dentry);
+		dentry = d_splice_alias(inode, dentry);
+	}
 	__putname(file);
-	return err;
+	return dentry;
 }
 
 static int hostfs_rmdir(struct inode *ino, struct dentry *dentry)
@@ -922,32 +925,23 @@ static const struct inode_operations hostfs_link_iops = {
 	.get_link	= hostfs_get_link,
 };
 
-static int hostfs_fill_sb_common(struct super_block *sb, void *d, int silent)
+static int hostfs_fill_super(struct super_block *sb, struct fs_context *fc)
 {
+	struct hostfs_fs_info *fsi = sb->s_fs_info;
 	struct inode *root_inode;
-	char *host_root_path, *req_root = d;
 	int err;
 
 	sb->s_blocksize = 1024;
 	sb->s_blocksize_bits = 10;
 	sb->s_magic = HOSTFS_SUPER_MAGIC;
 	sb->s_op = &hostfs_sbops;
-	sb->s_d_op = &simple_dentry_operations;
+	sb->s_d_flags = DCACHE_DONTCACHE;
 	sb->s_maxbytes = MAX_LFS_FILESIZE;
 	err = super_setup_bdi(sb);
 	if (err)
 		return err;
 
-	/* NULL is printed as '(null)' by printf(): avoid that. */
-	if (req_root == NULL)
-		req_root = "";
-
-	sb->s_fs_info = host_root_path =
-		kasprintf(GFP_KERNEL, "%s/%s", root_ino, req_root);
-	if (host_root_path == NULL)
-		return -ENOMEM;
-
-	root_inode = hostfs_iget(sb, host_root_path);
+	root_inode = hostfs_iget(sb, fsi->host_root_path);
 	if (IS_ERR(root_inode))
 		return PTR_ERR(root_inode);
 
@@ -955,7 +949,7 @@ static int hostfs_fill_sb_common(struct super_block *sb, void *d, int silent)
 		char *name;
 
 		iput(root_inode);
-		name = follow_link(host_root_path);
+		name = follow_link(fsi->host_root_path);
 		if (IS_ERR(name))
 			return PTR_ERR(name);
 
@@ -972,11 +966,92 @@ static int hostfs_fill_sb_common(struct super_block *sb, void *d, int silent)
 	return 0;
 }
 
-static struct dentry *hostfs_read_sb(struct file_system_type *type,
-			  int flags, const char *dev_name,
-			  void *data)
+enum hostfs_parma {
+	Opt_hostfs,
+};
+
+static const struct fs_parameter_spec hostfs_param_specs[] = {
+	fsparam_string_empty("hostfs",		Opt_hostfs),
+	{}
+};
+
+static int hostfs_parse_param(struct fs_context *fc, struct fs_parameter *param)
 {
-	return mount_nodev(type, flags, data, hostfs_fill_sb_common);
+	struct hostfs_fs_info *fsi = fc->s_fs_info;
+	struct fs_parse_result result;
+	char *host_root;
+	int opt;
+
+	opt = fs_parse(fc, hostfs_param_specs, param, &result);
+	if (opt < 0)
+		return opt;
+
+	switch (opt) {
+	case Opt_hostfs:
+		host_root = param->string;
+		if (!*host_root)
+			host_root = "";
+		fsi->host_root_path =
+			kasprintf(GFP_KERNEL, "%s/%s", root_ino, host_root);
+		if (fsi->host_root_path == NULL)
+			return -ENOMEM;
+		break;
+	}
+
+	return 0;
+}
+
+static int hostfs_parse_monolithic(struct fs_context *fc, void *data)
+{
+	struct hostfs_fs_info *fsi = fc->s_fs_info;
+	char *host_root = (char *)data;
+
+	/* NULL is printed as '(null)' by printf(): avoid that. */
+	if (host_root == NULL)
+		host_root = "";
+
+	fsi->host_root_path =
+		kasprintf(GFP_KERNEL, "%s/%s", root_ino, host_root);
+	if (fsi->host_root_path == NULL)
+		return -ENOMEM;
+
+	return 0;
+}
+
+static int hostfs_fc_get_tree(struct fs_context *fc)
+{
+	return get_tree_nodev(fc, hostfs_fill_super);
+}
+
+static void hostfs_fc_free(struct fs_context *fc)
+{
+	struct hostfs_fs_info *fsi = fc->s_fs_info;
+
+	if (!fsi)
+		return;
+
+	kfree(fsi->host_root_path);
+	kfree(fsi);
+}
+
+static const struct fs_context_operations hostfs_context_ops = {
+	.parse_monolithic = hostfs_parse_monolithic,
+	.parse_param	= hostfs_parse_param,
+	.get_tree	= hostfs_fc_get_tree,
+	.free		= hostfs_fc_free,
+};
+
+static int hostfs_init_fs_context(struct fs_context *fc)
+{
+	struct hostfs_fs_info *fsi;
+
+	fsi = kzalloc(sizeof(*fsi), GFP_KERNEL);
+	if (!fsi)
+		return -ENOMEM;
+
+	fc->s_fs_info = fsi;
+	fc->ops = &hostfs_context_ops;
+	return 0;
 }
 
 static void hostfs_kill_sb(struct super_block *s)
@@ -986,11 +1061,11 @@ static void hostfs_kill_sb(struct super_block *s)
 }
 
 static struct file_system_type hostfs_type = {
-	.owner 		= THIS_MODULE,
-	.name 		= "hostfs",
-	.mount	 	= hostfs_read_sb,
-	.kill_sb	= hostfs_kill_sb,
-	.fs_flags 	= 0,
+	.owner			= THIS_MODULE,
+	.name			= "hostfs",
+	.init_fs_context	= hostfs_init_fs_context,
+	.kill_sb		= hostfs_kill_sb,
+	.fs_flags		= 0,
 };
 MODULE_ALIAS_FS("hostfs");
 
@@ -1010,4 +1085,5 @@ static void __exit exit_hostfs(void)
 
 module_init(init_hostfs)
 module_exit(exit_hostfs)
+MODULE_DESCRIPTION("User-Mode Linux Host filesystem");
 MODULE_LICENSE("GPL");

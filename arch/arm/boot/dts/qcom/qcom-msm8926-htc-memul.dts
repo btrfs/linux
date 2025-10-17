@@ -5,10 +5,12 @@
 
 /dts-v1/;
 
-#include "qcom-msm8226.dtsi"
+#include "msm8926.dtsi"
 #include "pm8226.dtsi"
 
 /delete-node/ &adsp_region;
+/delete-node/ &mba_region;
+/delete-node/ &mpss_region;
 /delete-node/ &smem_region;
 
 / {
@@ -107,7 +109,20 @@
 		};
 
 		unknown@fb00000 {
-			reg = <0x0fb00000 0x1b00000>;
+			reg = <0x0fb00000 0x280000>;
+			no-map;
+		};
+
+		rmtfs@fd80000 {
+			compatible = "qcom,rmtfs-mem";
+			reg = <0x0fd80000 0x180000>;
+			no-map;
+
+			qcom,client-id = <1>;
+		};
+
+		unknown@ff00000 {
+			reg = <0x0ff00000 0x1700000>;
 			no-map;
 		};
 	};
@@ -178,6 +193,16 @@
 	/* NCP6924 Camera Regulators @ 10 */
 	/* PN544 NFC @ 28 */
 	/* TPS61310 Flash/Torch @ 33 */
+};
+
+&modem {
+	mx-supply = <&pm8226_l3>;
+	pll-supply = <&pm8226_l8>;
+	mss-supply = <&pm8226_s5>;
+
+	firmware-name = "qcom/msm8926/memul/mba.b00", "qcom/msm8926/memul/modem.mdt";
+
+	status = "okay";
 };
 
 &pm8226_vib {

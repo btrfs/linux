@@ -20,6 +20,7 @@
 #include <linux/uaccess.h>
 #include <linux/sched.h>
 #include <linux/slab.h>
+#include <linux/string_choices.h>
 #include <linux/poll.h>
 #include <linux/kthread.h>
 #include <linux/aio.h>
@@ -705,7 +706,6 @@ static const struct file_operations ep_io_operations = {
 
 	.open =		ep_open,
 	.release =	ep_release,
-	.llseek =	no_llseek,
 	.unlocked_ioctl = ep_ioctl,
 	.read_iter =	ep_read_iter,
 	.write_iter =	ep_write_iter,
@@ -1183,7 +1183,7 @@ ep0_fasync (int f, struct file *fd, int on)
 {
 	struct dev_data		*dev = fd->private_data;
 	// caller must F_SETOWN before signal delivery happens
-	VDEBUG (dev, "%s %s\n", __func__, on ? "on" : "off");
+	VDEBUG(dev, "%s %s\n", __func__, str_on_off(on));
 	return fasync_helper (f, fd, on, &dev->fasync);
 }
 
@@ -1561,7 +1561,6 @@ static void destroy_ep_files (struct dev_data *dev)
 	spin_lock_irq (&dev->lock);
 	while (!list_empty(&dev->epfiles)) {
 		struct ep_data	*ep;
-		struct inode	*parent;
 		struct dentry	*dentry;
 
 		/* break link to FS */
@@ -1571,7 +1570,6 @@ static void destroy_ep_files (struct dev_data *dev)
 
 		dentry = ep->dentry;
 		ep->dentry = NULL;
-		parent = d_inode(dentry->d_parent);
 
 		/* break link to controller */
 		mutex_lock(&ep->lock);
@@ -1586,10 +1584,7 @@ static void destroy_ep_files (struct dev_data *dev)
 		put_ep (ep);
 
 		/* break link to dcache */
-		inode_lock(parent);
-		d_delete (dentry);
-		dput (dentry);
-		inode_unlock(parent);
+		simple_recursive_removal(dentry, NULL);
 
 		spin_lock_irq (&dev->lock);
 	}
@@ -1615,7 +1610,7 @@ static int activate_ep_files (struct dev_data *dev)
 		mutex_init(&data->lock);
 		init_waitqueue_head (&data->wait);
 
-		strncpy (data->name, ep->name, sizeof (data->name) - 1);
+		strscpy(data->name, ep->name);
 		refcount_set (&data->count, 1);
 		data->dev = dev;
 		get_dev (dev);
@@ -1939,7 +1934,6 @@ gadget_dev_open (struct inode *inode, struct file *fd)
 }
 
 static const struct file_operations ep0_operations = {
-	.llseek =	no_llseek,
 
 	.open =		gadget_dev_open,
 	.read =		ep0_read,
@@ -2017,7 +2011,7 @@ gadgetfs_create_file (struct super_block *sb, char const *name,
 
 static const struct super_operations gadget_fs_operations = {
 	.statfs =	simple_statfs,
-	.drop_inode =	generic_delete_inode,
+	.drop_inode =	inode_just_drop,
 };
 
 static int

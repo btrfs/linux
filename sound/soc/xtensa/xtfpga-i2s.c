@@ -629,17 +629,17 @@ MODULE_DEVICE_TABLE(of, xtfpga_i2s_of_match);
 #endif
 
 static const struct dev_pm_ops xtfpga_i2s_pm_ops = {
-	SET_RUNTIME_PM_OPS(xtfpga_i2s_runtime_suspend,
-			   xtfpga_i2s_runtime_resume, NULL)
+	RUNTIME_PM_OPS(xtfpga_i2s_runtime_suspend,
+		       xtfpga_i2s_runtime_resume, NULL)
 };
 
 static struct platform_driver xtfpga_i2s_driver = {
 	.probe   = xtfpga_i2s_probe,
-	.remove_new = xtfpga_i2s_remove,
+	.remove = xtfpga_i2s_remove,
 	.driver  = {
 		.name = "xtfpga-i2s",
 		.of_match_table = of_match_ptr(xtfpga_i2s_of_match),
-		.pm = &xtfpga_i2s_pm_ops,
+		.pm = pm_ptr(&xtfpga_i2s_pm_ops),
 	},
 };
 

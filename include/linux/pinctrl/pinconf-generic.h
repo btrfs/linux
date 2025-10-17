@@ -81,14 +81,20 @@ struct pinctrl_map;
  * @PIN_CONFIG_INPUT_SCHMITT_ENABLE: control schmitt-trigger mode on the pin.
  *      If the argument != 0, schmitt-trigger mode is enabled. If it's 0,
  *      schmitt-trigger mode is disabled.
+ * @PIN_CONFIG_INPUT_SCHMITT_UV: this will configure an input pin to run in
+ *	schmitt-trigger mode. The argument is in uV.
  * @PIN_CONFIG_MODE_LOW_POWER: this will configure the pin for low power
  *	operation, if several modes of operation are supported these can be
  *	passed in the argument on a custom form, else just use argument 1
  *	to indicate low power mode, argument 0 turns low power mode off.
  * @PIN_CONFIG_MODE_PWM: this will configure the pin for PWM
- * @PIN_CONFIG_OUTPUT: this will configure the pin as an output and drive a
- * 	value on the line. Use argument 1 to indicate high level, argument 0 to
- *	indicate low level. (Please see Documentation/driver-api/pin-control.rst,
+ * @PIN_CONFIG_LEVEL: setting this will configure the pin as an output and
+ *	drive a value on the line. Use argument 1 to indicate high level,
+ *	argument 0 to indicate low level. Conversely the value of the line
+ *	can be read using this parameter, if and only if that value can be
+ *	represented as a binary 0 or 1 where 0 indicate a low voltage level
+ *	and 1 indicate a high voltage level.
+ *	(Please see Documentation/driver-api/pin-control.rst,
  *	section "GPIO mode pitfalls" for a discussion around this parameter.)
  * @PIN_CONFIG_OUTPUT_ENABLE: this will enable the pin's output mode
  * 	without driving a value there. For most platforms this reduces to
@@ -132,9 +138,10 @@ enum pin_config_param {
 	PIN_CONFIG_INPUT_ENABLE,
 	PIN_CONFIG_INPUT_SCHMITT,
 	PIN_CONFIG_INPUT_SCHMITT_ENABLE,
+	PIN_CONFIG_INPUT_SCHMITT_UV,
 	PIN_CONFIG_MODE_LOW_POWER,
 	PIN_CONFIG_MODE_PWM,
-	PIN_CONFIG_OUTPUT,
+	PIN_CONFIG_LEVEL,
 	PIN_CONFIG_OUTPUT_ENABLE,
 	PIN_CONFIG_OUTPUT_IMPEDANCE_OHMS,
 	PIN_CONFIG_PERSIST_STATE,
@@ -229,4 +236,8 @@ static inline int pinconf_generic_dt_node_to_map_all(struct pinctrl_dev *pctldev
 			PIN_MAP_TYPE_INVALID);
 }
 
+int pinconf_generic_dt_node_to_map_pinmux(struct pinctrl_dev *pctldev,
+					  struct device_node *np,
+					  struct pinctrl_map **map,
+					  unsigned int *num_maps);
 #endif /* __LINUX_PINCTRL_PINCONF_GENERIC_H */

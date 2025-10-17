@@ -5,6 +5,7 @@
 
 #include "i915_selftest.h"
 
+#include "display/intel_display_device.h"
 #include "gt/intel_context.h"
 #include "gt/intel_engine_regs.h"
 #include "gt/intel_engine_user.h"
@@ -109,6 +110,7 @@ struct tiled_blits {
 
 static bool fastblit_supports_x_tiling(const struct drm_i915_private *i915)
 {
+	struct intel_display *display = i915->display;
 	int gen = GRAPHICS_VER(i915);
 
 	/* XY_FAST_COPY_BLT does not exist on pre-gen9 platforms */
@@ -117,10 +119,10 @@ static bool fastblit_supports_x_tiling(const struct drm_i915_private *i915)
 	if (gen < 12)
 		return true;
 
-	if (GRAPHICS_VER_FULL(i915) < IP_VER(12, 50))
+	if (GRAPHICS_VER_FULL(i915) < IP_VER(12, 55))
 		return false;
 
-	return HAS_DISPLAY(i915);
+	return intel_display_device_present(display);
 }
 
 static bool fast_blit_ok(const struct blit_buffer *buf)
@@ -166,7 +168,7 @@ static int prepare_blit(const struct tiled_blits *t,
 		src_pitch = t->width; /* in dwords */
 		if (src->tiling == CLIENT_TILING_Y) {
 			src_tiles = XY_FAST_COPY_BLT_D0_SRC_TILE_MODE(YMAJOR);
-			if (GRAPHICS_VER_FULL(to_i915(batch->base.dev)) >= IP_VER(12, 50))
+			if (GRAPHICS_VER_FULL(to_i915(batch->base.dev)) >= IP_VER(12, 55))
 				src_4t = XY_FAST_COPY_BLT_D1_SRC_TILE4;
 		} else if (src->tiling == CLIENT_TILING_X) {
 			src_tiles = XY_FAST_COPY_BLT_D0_SRC_TILE_MODE(TILE_X);
@@ -177,7 +179,7 @@ static int prepare_blit(const struct tiled_blits *t,
 		dst_pitch = t->width; /* in dwords */
 		if (dst->tiling == CLIENT_TILING_Y) {
 			dst_tiles = XY_FAST_COPY_BLT_D0_DST_TILE_MODE(YMAJOR);
-			if (GRAPHICS_VER_FULL(to_i915(batch->base.dev)) >= IP_VER(12, 50))
+			if (GRAPHICS_VER_FULL(to_i915(batch->base.dev)) >= IP_VER(12, 55))
 				dst_4t = XY_FAST_COPY_BLT_D1_DST_TILE4;
 		} else if (dst->tiling == CLIENT_TILING_X) {
 			dst_tiles = XY_FAST_COPY_BLT_D0_DST_TILE_MODE(TILE_X);
@@ -365,7 +367,7 @@ static u64 tiled_offset(const struct intel_gt *gt,
 		v += x;
 
 		swizzle = gt->ggtt->bit_6_swizzle_x;
-	} else if (GRAPHICS_VER_FULL(gt->i915) >= IP_VER(12, 50)) {
+	} else if (GRAPHICS_VER_FULL(gt->i915) >= IP_VER(12, 55)) {
 		/* Y-major tiling layout is Tile4 for Xe_HP and beyond */
 		v = linear_x_y_to_ftiled_pos(x_pos, y_pos, stride, 32);
 

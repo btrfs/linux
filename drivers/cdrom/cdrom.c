@@ -624,9 +624,6 @@ int register_cdrom(struct gendisk *disk, struct cdrom_device_info *cdi)
 	if (check_media_type == 1)
 		cdi->options |= (int) CDO_CHECK_TYPE;
 
-	if (CDROM_CAN(CDC_MRW_W))
-		cdi->exit = cdrom_mrw_exit;
-
 	if (cdi->ops->read_cdda_bpc)
 		cdi->cdda_method = CDDA_BPC_FULL;
 	else
@@ -650,9 +647,6 @@ void unregister_cdrom(struct cdrom_device_info *cdi)
 	mutex_lock(&cdrom_mutex);
 	list_del(&cdi->list);
 	mutex_unlock(&cdrom_mutex);
-
-	if (cdi->exit)
-		cdi->exit(cdi);
 
 	cd_dbg(CD_REG_UNREG, "drive \"/dev/%s\" unregistered\n", cdi->name);
 }
@@ -1106,7 +1100,7 @@ int open_for_data(struct cdrom_device_info *cdi)
 		}
 	}
 
-	cd_dbg(CD_OPEN, "all seems well, opening the devicen");
+	cd_dbg(CD_OPEN, "all seems well, opening the device\n");
 
 	/* all seems well, we can open the device */
 	ret = cdo->open(cdi, 0); /* open for data */
@@ -1264,6 +1258,8 @@ void cdrom_release(struct cdrom_device_info *cdi)
 		cd_dbg(CD_CLOSE, "Use count for \"/dev/%s\" now zero\n",
 		       cdi->name);
 		cdrom_dvd_rw_close_write(cdi);
+		if (CDROM_CAN(CDC_MRW_W))
+			cdrom_mrw_exit(cdi);
 
 		if ((cdo->capability & CDC_LOCK) && !cdi->keeplocked) {
 			cd_dbg(CD_CLOSE, "Unlocking door!\n");
@@ -2313,7 +2309,7 @@ static int cdrom_ioctl_media_changed(struct cdrom_device_info *cdi,
 		return -EINVAL;
 
 	/* Prevent arg from speculatively bypassing the length check */
-	barrier_nospec();
+	arg = array_index_nospec(arg, cdi->capacity);
 
 	info = kmalloc(sizeof(*info), GFP_KERNEL);
 	if (!info)
@@ -2358,7 +2354,7 @@ static int cdrom_ioctl_timed_media_change(struct cdrom_device_info *cdi,
 		return -EFAULT;
 
 	tmp_info.media_flags = 0;
-	if (tmp_info.last_media_change - cdi->last_media_change_ms < 0)
+	if (cdi->last_media_change_ms > tmp_info.last_media_change)
 		tmp_info.media_flags |= MEDIA_CHANGED_FLAG;
 
 	tmp_info.last_media_change = cdi->last_media_change_ms;
@@ -3473,7 +3469,7 @@ static int cdrom_print_info(const char *header, int val, char *info,
 	return 0;
 }
 
-static int cdrom_sysctl_info(struct ctl_table *ctl, int write,
+static int cdrom_sysctl_info(const struct ctl_table *ctl, int write,
                            void *buffer, size_t *lenp, loff_t *ppos)
 {
 	int pos;
@@ -3586,7 +3582,7 @@ static void cdrom_update_settings(void)
 	mutex_unlock(&cdrom_mutex);
 }
 
-static int cdrom_sysctl_handler(struct ctl_table *ctl, int write,
+static int cdrom_sysctl_handler(const struct ctl_table *ctl, int write,
 				void *buffer, size_t *lenp, loff_t *ppos)
 {
 	int ret;
@@ -3612,7 +3608,7 @@ static int cdrom_sysctl_handler(struct ctl_table *ctl, int write,
 }
 
 /* Place files in /proc/sys/dev/cdrom */
-static struct ctl_table cdrom_table[] = {
+static const struct ctl_table cdrom_table[] = {
 	{
 		.procname	= "info",
 		.data		= &cdrom_sysctl_settings.info, 
@@ -3677,8 +3673,7 @@ static void cdrom_sysctl_register(void)
 
 static void cdrom_sysctl_unregister(void)
 {
-	if (cdrom_sysctl_header)
-		unregister_sysctl_table(cdrom_sysctl_header);
+	unregister_sysctl_table(cdrom_sysctl_header);
 }
 
 #else /* CONFIG_SYSCTL */
@@ -3708,4 +3703,5 @@ static void __exit cdrom_exit(void)
 
 module_init(cdrom_init);
 module_exit(cdrom_exit);
+MODULE_DESCRIPTION("Uniform CD-ROM driver");
 MODULE_LICENSE("GPL");

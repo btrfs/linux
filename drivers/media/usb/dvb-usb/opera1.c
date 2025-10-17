@@ -32,10 +32,6 @@
 struct opera1_state {
 	u32 last_key_pressed;
 };
-struct rc_map_opera_table {
-	u32 keycode;
-	u32 event;
-};
 
 static int dvb_usb_opera1_debug;
 module_param_named(debug, dvb_usb_opera1_debug, int, 0644);
@@ -159,7 +155,7 @@ static u32 opera1_i2c_func(struct i2c_adapter *adapter)
 	return I2C_FUNC_I2C;
 }
 
-static struct i2c_algorithm opera1_i2c_algo = {
+static const struct i2c_algorithm opera1_i2c_algo = {
 	.master_xfer = opera1_i2c_xfer,
 	.functionality = opera1_i2c_func,
 };
@@ -429,7 +425,7 @@ enum {
 	OPERA1_WARM,
 };
 
-static struct usb_device_id opera1_table[] = {
+static const struct usb_device_id opera1_table[] = {
 	DVB_USB_DEV(CYPRESS, CYPRESS_OPERA1_COLD),
 	DVB_USB_DEV(OPERA1, OPERA1_WARM),
 	{ }

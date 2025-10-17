@@ -199,10 +199,7 @@ static ssize_t eic_read(struct sht21 *sht21)
 	eic[6] = rx[0];
 	eic[7] = rx[1];
 
-	ret = snprintf(sht21->eic, sizeof(sht21->eic),
-		       "%02x%02x%02x%02x%02x%02x%02x%02x\n",
-		       eic[0], eic[1], eic[2], eic[3],
-		       eic[4], eic[5], eic[6], eic[7]);
+	ret = snprintf(sht21->eic, sizeof(sht21->eic), "%8phN\n", eic);
 out:
 	if (ret < 0)
 		sht21->eic[0] = 0;
@@ -278,13 +275,26 @@ static int sht21_probe(struct i2c_client *client)
 
 /* Device ID table */
 static const struct i2c_device_id sht21_id[] = {
-	{ "sht21", 0 },
+	{ "sht20" },
+	{ "sht21" },
+	{ "sht25" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, sht21_id);
 
+static const struct of_device_id sht21_of_match[] = {
+	{ .compatible = "sensirion,sht20" },
+	{ .compatible = "sensirion,sht21" },
+	{ .compatible = "sensirion,sht25" },
+	{ }
+};
+MODULE_DEVICE_TABLE(of, sht21_of_match);
+
 static struct i2c_driver sht21_driver = {
-	.driver.name = "sht21",
+	.driver = {
+		.name = "sht21",
+		.of_match_table = sht21_of_match,
+	},
 	.probe       = sht21_probe,
 	.id_table    = sht21_id,
 };

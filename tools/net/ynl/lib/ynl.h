@@ -2,6 +2,7 @@
 #ifndef __YNL_C_H
 #define __YNL_C_H 1
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <linux/genetlink.h>
 #include <linux/types.h>
@@ -12,6 +13,7 @@ enum ynl_error_code {
 	YNL_ERROR_NONE = 0,
 	__YNL_ERRNO_END = 4096,
 	YNL_ERROR_INTERNAL,
+	YNL_ERROR_DUMP_INTER,
 	YNL_ERROR_EXPECT_ACK,
 	YNL_ERROR_EXPECT_MSG,
 	YNL_ERROR_UNEXPECT_MSG,
@@ -19,6 +21,9 @@ enum ynl_error_code {
 	YNL_ERROR_ATTR_INVALID,
 	YNL_ERROR_UNKNOWN_NTF,
 	YNL_ERROR_INV_RESP,
+	YNL_ERROR_INPUT_INVALID,
+	YNL_ERROR_INPUT_TOO_BIG,
+	YNL_ERROR_SUBMSG_KEY,
 };
 
 /**
@@ -45,6 +50,8 @@ struct ynl_family {
 /* private: */
 	const char *name;
 	size_t hdr_len;
+	bool is_classic;
+	__u16 classic_id;
 	const struct ynl_ntf_info *ntf_info;
 	unsigned int ntf_info_size;
 };
@@ -58,7 +65,7 @@ struct ynl_sock {
 
 /* private: */
 	const struct ynl_family *family;
-	struct mnl_socket *sock;
+	int socket;
 	__u32 seq;
 	__u32 portid;
 	__u16 family_id;
@@ -73,10 +80,24 @@ struct ynl_sock {
 	struct ynl_ntf_base_type **ntf_last_next;
 
 	struct nlmsghdr *nlh;
-	struct ynl_policy_nest *req_policy;
+	const struct ynl_policy_nest *req_policy;
+	size_t req_hdr_len;
 	unsigned char *tx_buf;
 	unsigned char *rx_buf;
 	unsigned char raw_buf[];
+};
+
+/**
+ * struct ynl_string - parsed individual string
+ * @len: length of the string (excluding terminating character)
+ * @str: value of the string
+ *
+ * Parsed and nul-terminated string. This struct is only used for arrays of
+ * strings. Non-array string members are placed directly in respective types.
+ */
+struct ynl_string {
+	unsigned int len;
+	char str[];
 };
 
 struct ynl_sock *
@@ -87,6 +108,18 @@ void ynl_sock_destroy(struct ynl_sock *ys);
 	for (typeof(dump->obj) *iter = &dump->obj;			\
 	     !ynl_dump_obj_is_last(iter);				\
 	     iter = ynl_dump_obj_next(iter))
+
+/**
+ * ynl_dump_empty() - does the dump have no entries
+ * @dump: pointer to the dump list, as returned by a dump call
+ *
+ * Check if the dump is empty, i.e. contains no objects.
+ * Dump calls return NULL on error, and terminator element if empty.
+ */
+static inline bool ynl_dump_empty(void *dump)
+{
+	return dump == (void *)YNL_LIST_END;
+}
 
 int ynl_subscribe(struct ynl_sock *ys, const char *grp_name);
 int ynl_socket_get_fd(struct ynl_sock *ys);

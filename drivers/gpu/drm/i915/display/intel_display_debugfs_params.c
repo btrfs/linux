@@ -3,12 +3,13 @@
  * Copyright © 2023 Intel Corporation
  */
 
+#include <linux/debugfs.h>
 #include <linux/kernel.h>
 
 #include <drm/drm_drv.h>
 
+#include "intel_display_core.h"
 #include "intel_display_debugfs_params.h"
-#include "i915_drv.h"
 #include "intel_display_params.h"
 
 /* int param */
@@ -150,16 +151,16 @@ intel_display_debugfs_create_uint(const char *name, umode_t mode,
 	} while (0)
 
 /* add a subdirectory with files for each intel display param */
-void intel_display_debugfs_params(struct drm_i915_private *i915)
+void intel_display_debugfs_params(struct intel_display *display)
 {
-	struct drm_minor *minor = i915->drm.primary;
+	struct dentry *debugfs_root = display->drm->debugfs_root;
 	struct dentry *dir;
 	char dirname[16];
 
-	snprintf(dirname, sizeof(dirname), "%s_params", i915->drm.driver->name);
-	dir = debugfs_lookup(dirname, minor->debugfs_root);
+	snprintf(dirname, sizeof(dirname), "%s_params", display->drm->driver->name);
+	dir = debugfs_lookup(dirname, debugfs_root);
 	if (!dir)
-		dir = debugfs_create_dir(dirname, minor->debugfs_root);
+		dir = debugfs_create_dir(dirname, debugfs_root);
 	if (IS_ERR(dir))
 		return;
 
@@ -170,7 +171,7 @@ void intel_display_debugfs_params(struct drm_i915_private *i915)
 	 */
 
 #define REGISTER(T, x, unused, mode, ...) _intel_display_param_create_file( \
-		dir, #x, mode, &i915->display.params.x);
+		dir, #x, mode, &display->params.x);
 	INTEL_DISPLAY_PARAMS_FOR_EACH(REGISTER);
 #undef REGISTER
 }

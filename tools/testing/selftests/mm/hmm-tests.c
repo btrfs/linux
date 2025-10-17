@@ -138,7 +138,7 @@ FIXTURE_SETUP(hmm)
 
 	self->fd = hmm_open(variant->device_number);
 	if (self->fd < 0 && hmm_is_coherent_type(variant->device_number))
-		SKIP(exit(0), "DEVICE_COHERENT not available");
+		SKIP(return, "DEVICE_COHERENT not available");
 	ASSERT_GE(self->fd, 0);
 }
 
@@ -149,7 +149,7 @@ FIXTURE_SETUP(hmm2)
 
 	self->fd0 = hmm_open(variant->device_number0);
 	if (self->fd0 < 0 && hmm_is_coherent_type(variant->device_number0))
-		SKIP(exit(0), "DEVICE_COHERENT not available");
+		SKIP(return, "DEVICE_COHERENT not available");
 	ASSERT_GE(self->fd0, 0);
 	self->fd1 = hmm_open(variant->device_number1);
 	ASSERT_GE(self->fd1, 0);
@@ -1657,7 +1657,7 @@ TEST_F(hmm2, double_map)
 
 	buffer->fd = -1;
 	buffer->size = size;
-	buffer->mirror = malloc(npages);
+	buffer->mirror = malloc(size);
 	ASSERT_NE(buffer->mirror, NULL);
 
 	/* Reserve a range of addresses. */
@@ -2027,11 +2027,10 @@ TEST_F(hmm, hmm_cow_in_device)
 	if (pid == -1)
 		ASSERT_EQ(pid, 0);
 	if (!pid) {
-		/* Child process waitd for SIGTERM from the parent. */
+		/* Child process waits for SIGTERM from the parent. */
 		while (1) {
 		}
-		perror("Should not reach this\n");
-		exit(0);
+		/* Should not reach this */
 	}
 	/* Parent process writes to COW pages(s) and gets a
 	 * new copy in system. In case of device private pages,

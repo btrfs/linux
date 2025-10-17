@@ -160,15 +160,13 @@ static void output_urb_complete(struct urb *urb)
 {
 	struct snd_usb_midi2_urb *ctx = urb->context;
 	struct snd_usb_midi2_endpoint *ep = ctx->ep;
-	unsigned long flags;
 
-	spin_lock_irqsave(&ep->lock, flags);
+	guard(spinlock_irqsave)(&ep->lock);
 	set_bit(ctx->index, &ep->urb_free);
 	if (urb->status >= 0 && atomic_read(&ep->running))
 		submit_output_urbs_locked(ep);
 	if (ep->urb_free == ep->urb_free_mask)
 		wake_up(&ep->wait);
-	spin_unlock_irqrestore(&ep->lock, flags);
 }
 
 /* prepare for input submission: just set the buffer length */
@@ -189,10 +187,9 @@ static void input_urb_complete(struct urb *urb)
 {
 	struct snd_usb_midi2_urb *ctx = urb->context;
 	struct snd_usb_midi2_endpoint *ep = ctx->ep;
-	unsigned long flags;
 	int len;
 
-	spin_lock_irqsave(&ep->lock, flags);
+	guard(spinlock_irqsave)(&ep->lock);
 	if (ep->disconnected || urb->status < 0)
 		goto dequeue;
 	len = urb->actual_length;
@@ -208,22 +205,18 @@ static void input_urb_complete(struct urb *urb)
 	submit_input_urbs_locked(ep);
 	if (ep->urb_free == ep->urb_free_mask)
 		wake_up(&ep->wait);
-	spin_unlock_irqrestore(&ep->lock, flags);
 }
 
 /* URB submission helper; for both direction */
 static void submit_io_urbs(struct snd_usb_midi2_endpoint *ep)
 {
-	unsigned long flags;
-
 	if (!ep)
 		return;
-	spin_lock_irqsave(&ep->lock, flags);
+	guard(spinlock_irqsave)(&ep->lock);
 	if (ep->direction == STR_IN)
 		submit_input_urbs_locked(ep);
 	else
 		submit_output_urbs_locked(ep);
-	spin_unlock_irqrestore(&ep->lock, flags);
 }
 
 /* kill URBs for close, suspend and disconnect */
@@ -248,13 +241,12 @@ static void drain_urb_queue(struct snd_usb_midi2_endpoint *ep)
 {
 	if (!ep)
 		return;
-	spin_lock_irq(&ep->lock);
+	guard(spinlock_irq)(&ep->lock);
 	atomic_set(&ep->running, 0);
 	wait_event_lock_irq_timeout(ep->wait,
 				    ep->disconnected ||
 				    ep->urb_free == ep->urb_free_mask,
 				    ep->lock, msecs_to_jiffies(500));
-	spin_unlock_irq(&ep->lock);
 }
 
 /* release URBs for an EP */
@@ -607,12 +599,8 @@ static int parse_group_terminal_block(struct snd_usb_midi2_ump *rmidi,
 		return 0;
 	}
 
-	if (ump->info.protocol && ump->info.protocol != protocol)
-		usb_audio_info(rmidi->umidi->chip,
-			       "Overriding preferred MIDI protocol in GTB %d: %x -> %x\n",
-			       rmidi->usb_block_id, ump->info.protocol,
-			       protocol);
-	ump->info.protocol = protocol;
+	if (!ump->info.protocol)
+		ump->info.protocol = protocol;
 
 	protocol_caps = protocol;
 	switch (desc->bMIDIProtocol) {
@@ -624,13 +612,7 @@ static int parse_group_terminal_block(struct snd_usb_midi2_ump *rmidi,
 		break;
 	}
 
-	if (ump->info.protocol_caps && ump->info.protocol_caps != protocol_caps)
-		usb_audio_info(rmidi->umidi->chip,
-			       "Overriding MIDI protocol caps in GTB %d: %x -> %x\n",
-			       rmidi->usb_block_id, ump->info.protocol_caps,
-			       protocol_caps);
-	ump->info.protocol_caps = protocol_caps;
-
+	ump->info.protocol_caps |= protocol_caps;
 	return 0;
 }
 
@@ -873,9 +855,25 @@ static int create_gtb_block(struct snd_usb_midi2_ump *rmidi, int dir, int blk)
 		fb->info.flags |= SNDRV_UMP_BLOCK_IS_MIDI1 |
 			SNDRV_UMP_BLOCK_IS_LOWSPEED;
 
+	/* if MIDI 2.0 protocol is supported and yet the GTB shows MIDI 1.0,
+	 * treat it as a MIDI 1.0-specific block
+	 */
+	if (rmidi->ump->info.protocol_caps & SNDRV_UMP_EP_INFO_PROTO_MIDI2) {
+		switch (desc->bMIDIProtocol) {
+		case USB_MS_MIDI_PROTO_1_0_64:
+		case USB_MS_MIDI_PROTO_1_0_64_JRTS:
+		case USB_MS_MIDI_PROTO_1_0_128:
+		case USB_MS_MIDI_PROTO_1_0_128_JRTS:
+			fb->info.flags |= SNDRV_UMP_BLOCK_IS_MIDI1;
+			break;
+		}
+	}
+
+	snd_ump_update_group_attrs(rmidi->ump);
+
 	usb_audio_dbg(umidi->chip,
-		      "Created a UMP block %d from GTB, name=%s\n",
-		      blk, fb->info.name);
+		      "Created a UMP block %d from GTB, name=%s, flags=0x%x\n",
+		      blk, fb->info.name, fb->info.flags);
 	return 0;
 }
 
@@ -1052,7 +1050,8 @@ static void set_fallback_rawmidi_names(struct snd_usb_midi2_interface *umidi)
 			fill_ump_ep_name(ump, dev, dev->descriptor.iProduct);
 		/* fill fallback name */
 		if (!*ump->info.name)
-			sprintf(ump->info.name, "USB MIDI %d", rmidi->index);
+			scnprintf(ump->info.name, sizeof(ump->info.name),
+				  "USB MIDI %d", rmidi->index);
 		/* copy as rawmidi name if not set */
 		if (!*ump->core.name)
 			strscpy(ump->core.name, ump->info.name,
@@ -1085,7 +1084,7 @@ int snd_usb_midi_v2_create(struct snd_usb_audio *chip,
 	}
 	if ((quirk && quirk->type != QUIRK_MIDI_STANDARD_INTERFACE) ||
 	    iface->num_altsetting < 2) {
-		usb_audio_info(chip, "Quirk or no altest; falling back to MIDI 1.0\n");
+		usb_audio_info(chip, "Quirk or no altset; falling back to MIDI 1.0\n");
 		goto fallback_to_midi1;
 	}
 	hostif = &iface->altsetting[1];

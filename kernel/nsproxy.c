@@ -64,7 +64,7 @@ static inline struct nsproxy *create_nsproxy(void)
  * Return the newly created nsproxy.  Do not attach this to the task,
  * leave it to the caller to do proper locking and attach it to task.
  */
-static struct nsproxy *create_new_namespaces(unsigned long flags,
+static struct nsproxy *create_new_namespaces(u64 flags,
 	struct task_struct *tsk, struct user_namespace *user_ns,
 	struct fs_struct *new_fs)
 {
@@ -128,17 +128,13 @@ out_time:
 out_net:
 	put_cgroup_ns(new_nsp->cgroup_ns);
 out_cgroup:
-	if (new_nsp->pid_ns_for_children)
-		put_pid_ns(new_nsp->pid_ns_for_children);
+	put_pid_ns(new_nsp->pid_ns_for_children);
 out_pid:
-	if (new_nsp->ipc_ns)
-		put_ipc_ns(new_nsp->ipc_ns);
+	put_ipc_ns(new_nsp->ipc_ns);
 out_ipc:
-	if (new_nsp->uts_ns)
-		put_uts_ns(new_nsp->uts_ns);
+	put_uts_ns(new_nsp->uts_ns);
 out_uts:
-	if (new_nsp->mnt_ns)
-		put_mnt_ns(new_nsp->mnt_ns);
+	put_mnt_ns(new_nsp->mnt_ns);
 out_ns:
 	kmem_cache_free(nsproxy_cachep, new_nsp);
 	return ERR_PTR(err);
@@ -148,7 +144,7 @@ out_ns:
  * called from clone.  This now handles copy for nsproxy and all
  * namespaces therein.
  */
-int copy_namespaces(unsigned long flags, struct task_struct *tsk)
+int copy_namespaces(u64 flags, struct task_struct *tsk)
 {
 	struct nsproxy *old_ns = tsk->nsproxy;
 	struct user_namespace *user_ns = task_cred_xxx(tsk, user_ns);
@@ -189,18 +185,12 @@ int copy_namespaces(unsigned long flags, struct task_struct *tsk)
 
 void free_nsproxy(struct nsproxy *ns)
 {
-	if (ns->mnt_ns)
-		put_mnt_ns(ns->mnt_ns);
-	if (ns->uts_ns)
-		put_uts_ns(ns->uts_ns);
-	if (ns->ipc_ns)
-		put_ipc_ns(ns->ipc_ns);
-	if (ns->pid_ns_for_children)
-		put_pid_ns(ns->pid_ns_for_children);
-	if (ns->time_ns)
-		put_time_ns(ns->time_ns);
-	if (ns->time_ns_for_children)
-		put_time_ns(ns->time_ns_for_children);
+	put_mnt_ns(ns->mnt_ns);
+	put_uts_ns(ns->uts_ns);
+	put_ipc_ns(ns->ipc_ns);
+	put_pid_ns(ns->pid_ns_for_children);
+	put_time_ns(ns->time_ns);
+	put_time_ns(ns->time_ns_for_children);
 	put_cgroup_ns(ns->cgroup_ns);
 	put_net(ns->net_ns);
 	kmem_cache_free(nsproxy_cachep, ns);
@@ -545,20 +535,20 @@ static void commit_nsset(struct nsset *nsset)
 
 SYSCALL_DEFINE2(setns, int, fd, int, flags)
 {
-	struct fd f = fdget(fd);
+	CLASS(fd, f)(fd);
 	struct ns_common *ns = NULL;
 	struct nsset nsset = {};
 	int err = 0;
 
-	if (!f.file)
+	if (fd_empty(f))
 		return -EBADF;
 
-	if (proc_ns_file(f.file)) {
-		ns = get_proc_ns(file_inode(f.file));
-		if (flags && (ns->ops->type != flags))
+	if (proc_ns_file(fd_file(f))) {
+		ns = get_proc_ns(file_inode(fd_file(f)));
+		if (flags && (ns->ns_type != flags))
 			err = -EINVAL;
-		flags = ns->ops->type;
-	} else if (!IS_ERR(pidfd_pid(f.file))) {
+		flags = ns->ns_type;
+	} else if (!IS_ERR(pidfd_pid(fd_file(f)))) {
 		err = check_setns_flags(flags);
 	} else {
 		err = -EINVAL;
@@ -570,17 +560,16 @@ SYSCALL_DEFINE2(setns, int, fd, int, flags)
 	if (err)
 		goto out;
 
-	if (proc_ns_file(f.file))
+	if (proc_ns_file(fd_file(f)))
 		err = validate_ns(&nsset, ns);
 	else
-		err = validate_nsset(&nsset, f.file->private_data);
+		err = validate_nsset(&nsset, pidfd_pid(fd_file(f)));
 	if (!err) {
 		commit_nsset(&nsset);
 		perf_event_namespaces(current);
 	}
 	put_nsset(&nsset);
 out:
-	fdput(f);
 	return err;
 }
 

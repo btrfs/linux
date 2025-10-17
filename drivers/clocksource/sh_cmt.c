@@ -528,6 +528,7 @@ static void sh_cmt_set_next(struct sh_cmt_channel *ch, unsigned long delta)
 static irqreturn_t sh_cmt_interrupt(int irq, void *dev_id)
 {
 	struct sh_cmt_channel *ch = dev_id;
+	unsigned long flags;
 
 	/* clear flags */
 	sh_cmt_write_cmcsr(ch, sh_cmt_read_cmcsr(ch) &
@@ -558,6 +559,8 @@ static irqreturn_t sh_cmt_interrupt(int irq, void *dev_id)
 
 	ch->flags &= ~FLAG_SKIPEVENT;
 
+	raw_spin_lock_irqsave(&ch->lock, flags);
+
 	if (ch->flags & FLAG_REPROGRAM) {
 		ch->flags &= ~FLAG_REPROGRAM;
 		sh_cmt_clock_event_program_verify(ch, 1);
@@ -570,40 +573,38 @@ static irqreturn_t sh_cmt_interrupt(int irq, void *dev_id)
 
 	ch->flags &= ~FLAG_IRQCONTEXT;
 
+	raw_spin_unlock_irqrestore(&ch->lock, flags);
+
 	return IRQ_HANDLED;
 }
 
-static int sh_cmt_start(struct sh_cmt_channel *ch, unsigned long flag)
+static int sh_cmt_start_clocksource(struct sh_cmt_channel *ch)
 {
 	int ret = 0;
 	unsigned long flags;
 
-	if (flag & FLAG_CLOCKSOURCE)
-		pm_runtime_get_sync(&ch->cmt->pdev->dev);
+	pm_runtime_get_sync(&ch->cmt->pdev->dev);
 
 	raw_spin_lock_irqsave(&ch->lock, flags);
 
-	if (!(ch->flags & (FLAG_CLOCKEVENT | FLAG_CLOCKSOURCE))) {
-		if (flag & FLAG_CLOCKEVENT)
-			pm_runtime_get_sync(&ch->cmt->pdev->dev);
+	if (!(ch->flags & (FLAG_CLOCKEVENT | FLAG_CLOCKSOURCE)))
 		ret = sh_cmt_enable(ch);
-	}
 
 	if (ret)
 		goto out;
-	ch->flags |= flag;
+
+	ch->flags |= FLAG_CLOCKSOURCE;
 
 	/* setup timeout if no clockevent */
-	if (ch->cmt->num_channels == 1 &&
-	    flag == FLAG_CLOCKSOURCE && (!(ch->flags & FLAG_CLOCKEVENT)))
+	if (ch->cmt->num_channels == 1 && !(ch->flags & FLAG_CLOCKEVENT))
 		__sh_cmt_set_next(ch, ch->max_match_value);
- out:
+out:
 	raw_spin_unlock_irqrestore(&ch->lock, flags);
 
 	return ret;
 }
 
-static void sh_cmt_stop(struct sh_cmt_channel *ch, unsigned long flag)
+static void sh_cmt_stop_clocksource(struct sh_cmt_channel *ch)
 {
 	unsigned long flags;
 	unsigned long f;
@@ -611,22 +612,60 @@ static void sh_cmt_stop(struct sh_cmt_channel *ch, unsigned long flag)
 	raw_spin_lock_irqsave(&ch->lock, flags);
 
 	f = ch->flags & (FLAG_CLOCKEVENT | FLAG_CLOCKSOURCE);
-	ch->flags &= ~flag;
 
-	if (f && !(ch->flags & (FLAG_CLOCKEVENT | FLAG_CLOCKSOURCE))) {
+	ch->flags &= ~FLAG_CLOCKSOURCE;
+
+	if (f && !(ch->flags & (FLAG_CLOCKEVENT | FLAG_CLOCKSOURCE)))
 		sh_cmt_disable(ch);
-		if (flag & FLAG_CLOCKEVENT)
-			pm_runtime_put(&ch->cmt->pdev->dev);
-	}
-
-	/* adjust the timeout to maximum if only clocksource left */
-	if ((flag == FLAG_CLOCKEVENT) && (ch->flags & FLAG_CLOCKSOURCE))
-		__sh_cmt_set_next(ch, ch->max_match_value);
 
 	raw_spin_unlock_irqrestore(&ch->lock, flags);
 
-	if (flag & FLAG_CLOCKSOURCE)
+	pm_runtime_put(&ch->cmt->pdev->dev);
+}
+
+static int sh_cmt_start_clockevent(struct sh_cmt_channel *ch)
+{
+	int ret = 0;
+	unsigned long flags;
+
+	raw_spin_lock_irqsave(&ch->lock, flags);
+
+	if (!(ch->flags & (FLAG_CLOCKEVENT | FLAG_CLOCKSOURCE))) {
+		pm_runtime_get_sync(&ch->cmt->pdev->dev);
+		ret = sh_cmt_enable(ch);
+	}
+
+	if (ret)
+		goto out;
+
+	ch->flags |= FLAG_CLOCKEVENT;
+ out:
+	raw_spin_unlock_irqrestore(&ch->lock, flags);
+
+	return ret;
+}
+
+static void sh_cmt_stop_clockevent(struct sh_cmt_channel *ch)
+{
+	unsigned long flags;
+	unsigned long f;
+
+	raw_spin_lock_irqsave(&ch->lock, flags);
+
+	f = ch->flags & (FLAG_CLOCKEVENT | FLAG_CLOCKSOURCE);
+
+	ch->flags &= ~FLAG_CLOCKEVENT;
+
+	if (f && !(ch->flags & (FLAG_CLOCKEVENT | FLAG_CLOCKSOURCE))) {
+		sh_cmt_disable(ch);
 		pm_runtime_put(&ch->cmt->pdev->dev);
+	}
+
+	/* adjust the timeout to maximum if only clocksource left */
+	if (ch->flags & FLAG_CLOCKSOURCE)
+		__sh_cmt_set_next(ch, ch->max_match_value);
+
+	raw_spin_unlock_irqrestore(&ch->lock, flags);
 }
 
 static struct sh_cmt_channel *cs_to_sh_cmt(struct clocksource *cs)
@@ -667,7 +706,7 @@ static int sh_cmt_clocksource_enable(struct clocksource *cs)
 
 	ch->total_cycles = 0;
 
-	ret = sh_cmt_start(ch, FLAG_CLOCKSOURCE);
+	ret = sh_cmt_start_clocksource(ch);
 	if (!ret)
 		ch->cs_enabled = true;
 
@@ -680,7 +719,7 @@ static void sh_cmt_clocksource_disable(struct clocksource *cs)
 
 	WARN_ON(!ch->cs_enabled);
 
-	sh_cmt_stop(ch, FLAG_CLOCKSOURCE);
+	sh_cmt_stop_clocksource(ch);
 	ch->cs_enabled = false;
 }
 
@@ -691,7 +730,7 @@ static void sh_cmt_clocksource_suspend(struct clocksource *cs)
 	if (!ch->cs_enabled)
 		return;
 
-	sh_cmt_stop(ch, FLAG_CLOCKSOURCE);
+	sh_cmt_stop_clocksource(ch);
 	dev_pm_genpd_suspend(&ch->cmt->pdev->dev);
 }
 
@@ -703,7 +742,7 @@ static void sh_cmt_clocksource_resume(struct clocksource *cs)
 		return;
 
 	dev_pm_genpd_resume(&ch->cmt->pdev->dev);
-	sh_cmt_start(ch, FLAG_CLOCKSOURCE);
+	sh_cmt_start_clocksource(ch);
 }
 
 static int sh_cmt_register_clocksource(struct sh_cmt_channel *ch,
@@ -735,7 +774,7 @@ static struct sh_cmt_channel *ced_to_sh_cmt(struct clock_event_device *ced)
 
 static void sh_cmt_clock_event_start(struct sh_cmt_channel *ch, int periodic)
 {
-	sh_cmt_start(ch, FLAG_CLOCKEVENT);
+	sh_cmt_start_clockevent(ch);
 
 	if (periodic)
 		sh_cmt_set_next(ch, ((ch->cmt->rate + HZ/2) / HZ) - 1);
@@ -747,7 +786,7 @@ static int sh_cmt_clock_event_shutdown(struct clock_event_device *ced)
 {
 	struct sh_cmt_channel *ch = ced_to_sh_cmt(ced);
 
-	sh_cmt_stop(ch, FLAG_CLOCKEVENT);
+	sh_cmt_stop_clockevent(ch);
 	return 0;
 }
 
@@ -758,7 +797,7 @@ static int sh_cmt_clock_event_set_state(struct clock_event_device *ced,
 
 	/* deal with old setting first */
 	if (clockevent_state_oneshot(ced) || clockevent_state_periodic(ced))
-		sh_cmt_stop(ch, FLAG_CLOCKEVENT);
+		sh_cmt_stop_clockevent(ch);
 
 	dev_info(&ch->cmt->pdev->dev, "ch%u: used for %s clock events\n",
 		 ch->index, periodic ? "periodic" : "oneshot");
@@ -780,12 +819,18 @@ static int sh_cmt_clock_event_next(unsigned long delta,
 				   struct clock_event_device *ced)
 {
 	struct sh_cmt_channel *ch = ced_to_sh_cmt(ced);
+	unsigned long flags;
 
 	BUG_ON(!clockevent_state_oneshot(ced));
+
+	raw_spin_lock_irqsave(&ch->lock, flags);
+
 	if (likely(ch->flags & FLAG_IRQCONTEXT))
 		ch->next_match_value = delta - 1;
 	else
-		sh_cmt_set_next(ch, delta - 1);
+		__sh_cmt_set_next(ch, delta - 1);
+
+	raw_spin_unlock_irqrestore(&ch->lock, flags);
 
 	return 0;
 }

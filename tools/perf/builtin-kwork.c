@@ -6,6 +6,7 @@
  */
 
 #include "builtin.h"
+#include "perf.h"
 
 #include "util/data.h"
 #include "util/evlist.h"
@@ -23,7 +24,7 @@
 
 #include <subcmd/pager.h>
 #include <subcmd/parse-options.h>
-#include <traceevent/event-parse.h>
+#include <event-parse.h>
 
 #include <errno.h>
 #include <inttypes.h>
@@ -958,7 +959,7 @@ static int top_sched_switch_event(struct perf_kwork *kwork,
 }
 
 static struct kwork_class kwork_irq;
-static int process_irq_handler_entry_event(struct perf_tool *tool,
+static int process_irq_handler_entry_event(const struct perf_tool *tool,
 					   struct evsel *evsel,
 					   struct perf_sample *sample,
 					   struct machine *machine)
@@ -971,7 +972,7 @@ static int process_irq_handler_entry_event(struct perf_tool *tool,
 	return 0;
 }
 
-static int process_irq_handler_exit_event(struct perf_tool *tool,
+static int process_irq_handler_exit_event(const struct perf_tool *tool,
 					  struct evsel *evsel,
 					  struct perf_sample *sample,
 					  struct machine *machine)
@@ -1037,7 +1038,7 @@ static struct kwork_class kwork_irq = {
 };
 
 static struct kwork_class kwork_softirq;
-static int process_softirq_raise_event(struct perf_tool *tool,
+static int process_softirq_raise_event(const struct perf_tool *tool,
 				       struct evsel *evsel,
 				       struct perf_sample *sample,
 				       struct machine *machine)
@@ -1051,7 +1052,7 @@ static int process_softirq_raise_event(struct perf_tool *tool,
 	return 0;
 }
 
-static int process_softirq_entry_event(struct perf_tool *tool,
+static int process_softirq_entry_event(const struct perf_tool *tool,
 				       struct evsel *evsel,
 				       struct perf_sample *sample,
 				       struct machine *machine)
@@ -1065,7 +1066,7 @@ static int process_softirq_entry_event(struct perf_tool *tool,
 	return 0;
 }
 
-static int process_softirq_exit_event(struct perf_tool *tool,
+static int process_softirq_exit_event(const struct perf_tool *tool,
 				      struct evsel *evsel,
 				      struct perf_sample *sample,
 				      struct machine *machine)
@@ -1103,7 +1104,8 @@ static char *evsel__softirq_name(struct evsel *evsel, u64 num)
 	char *name = NULL;
 	bool found = false;
 	struct tep_print_flag_sym *sym = NULL;
-	struct tep_print_arg *args = evsel->tp_format->print_fmt.args;
+	const struct tep_event *tp_format = evsel__tp_format(evsel);
+	struct tep_print_arg *args = tp_format ? tp_format->print_fmt.args : NULL;
 
 	if ((args == NULL) || (args->next == NULL))
 		return NULL;
@@ -1167,7 +1169,7 @@ static struct kwork_class kwork_softirq = {
 };
 
 static struct kwork_class kwork_workqueue;
-static int process_workqueue_activate_work_event(struct perf_tool *tool,
+static int process_workqueue_activate_work_event(const struct perf_tool *tool,
 						 struct evsel *evsel,
 						 struct perf_sample *sample,
 						 struct machine *machine)
@@ -1181,7 +1183,7 @@ static int process_workqueue_activate_work_event(struct perf_tool *tool,
 	return 0;
 }
 
-static int process_workqueue_execute_start_event(struct perf_tool *tool,
+static int process_workqueue_execute_start_event(const struct perf_tool *tool,
 						 struct evsel *evsel,
 						 struct perf_sample *sample,
 						 struct machine *machine)
@@ -1195,7 +1197,7 @@ static int process_workqueue_execute_start_event(struct perf_tool *tool,
 	return 0;
 }
 
-static int process_workqueue_execute_end_event(struct perf_tool *tool,
+static int process_workqueue_execute_end_event(const struct perf_tool *tool,
 					       struct evsel *evsel,
 					       struct perf_sample *sample,
 					       struct machine *machine)
@@ -1266,7 +1268,7 @@ static struct kwork_class kwork_workqueue = {
 };
 
 static struct kwork_class kwork_sched;
-static int process_sched_switch_event(struct perf_tool *tool,
+static int process_sched_switch_event(const struct perf_tool *tool,
 				      struct evsel *evsel,
 				      struct perf_sample *sample,
 				      struct machine *machine)
@@ -1802,7 +1804,7 @@ static int perf_kwork__read_events(struct perf_kwork *kwork)
 		return PTR_ERR(session);
 	}
 
-	symbol__init(&session->header.env);
+	symbol__init(perf_session__env(session));
 
 	if (perf_kwork__check_config(kwork, session) != 0)
 		goto out_delete;
@@ -1846,7 +1848,7 @@ static void process_skipped_events(struct perf_kwork *kwork,
 	}
 }
 
-struct kwork_work *perf_kwork_add_work(struct perf_kwork *kwork,
+static struct kwork_work *perf_kwork_add_work(struct perf_kwork *kwork,
 				       struct kwork_class *class,
 				       struct kwork_work *key)
 {
@@ -1945,12 +1947,12 @@ static int perf_kwork__report(struct perf_kwork *kwork)
 	return 0;
 }
 
-typedef int (*tracepoint_handler)(struct perf_tool *tool,
+typedef int (*tracepoint_handler)(const struct perf_tool *tool,
 				  struct evsel *evsel,
 				  struct perf_sample *sample,
 				  struct machine *machine);
 
-static int perf_kwork__process_tracepoint_sample(struct perf_tool *tool,
+static int perf_kwork__process_tracepoint_sample(const struct perf_tool *tool,
 						 union perf_event *event __maybe_unused,
 						 struct perf_sample *sample,
 						 struct evsel *evsel,
@@ -2230,7 +2232,7 @@ static int perf_kwork__top(struct perf_kwork *kwork)
 	perf_kwork__top_report(kwork);
 
 out:
-	free(kwork->top_stat.cpus_runtime);
+	zfree(&kwork->top_stat.cpus_runtime);
 	return ret;
 }
 
@@ -2271,12 +2273,23 @@ static void setup_event_list(struct perf_kwork *kwork,
 	pr_debug("\n");
 }
 
+#define STRDUP_FAIL_EXIT(s)		\
+	({	char *_p;		\
+		_p = strdup(s);		\
+		if (!_p) {		\
+			ret = -ENOMEM;	\
+			goto EXIT;	\
+		}			\
+		_p;			\
+	})
+
 static int perf_kwork__record(struct perf_kwork *kwork,
 			      int argc, const char **argv)
 {
 	const char **rec_argv;
 	unsigned int rec_argc, i, j;
 	struct kwork_class *class;
+	int ret;
 
 	const char *const record_args[] = {
 		"record",
@@ -2296,17 +2309,17 @@ static int perf_kwork__record(struct perf_kwork *kwork,
 		return -ENOMEM;
 
 	for (i = 0; i < ARRAY_SIZE(record_args); i++)
-		rec_argv[i] = strdup(record_args[i]);
+		rec_argv[i] = STRDUP_FAIL_EXIT(record_args[i]);
 
 	list_for_each_entry(class, &kwork->class_list, list) {
 		for (j = 0; j < class->nr_tracepoints; j++) {
-			rec_argv[i++] = strdup("-e");
-			rec_argv[i++] = strdup(class->tp_handlers[j].name);
+			rec_argv[i++] = STRDUP_FAIL_EXIT("-e");
+			rec_argv[i++] = STRDUP_FAIL_EXIT(class->tp_handlers[j].name);
 		}
 	}
 
 	for (j = 1; j < (unsigned int)argc; j++, i++)
-		rec_argv[i] = argv[j];
+		rec_argv[i] = STRDUP_FAIL_EXIT(argv[j]);
 
 	BUG_ON(i != rec_argc);
 
@@ -2315,19 +2328,19 @@ static int perf_kwork__record(struct perf_kwork *kwork,
 		pr_debug("%s ", rec_argv[j]);
 	pr_debug("\n");
 
-	return cmd_record(i, rec_argv);
+	ret = cmd_record(i, rec_argv);
+
+EXIT:
+	for (i = 0; i < rec_argc; i++)
+		free((void *)rec_argv[i]);
+	free(rec_argv);
+	return ret;
 }
 
 int cmd_kwork(int argc, const char **argv)
 {
 	static struct perf_kwork kwork = {
 		.class_list          = LIST_HEAD_INIT(kwork.class_list),
-		.tool = {
-			.mmap		= perf_event__process_mmap,
-			.mmap2		= perf_event__process_mmap2,
-			.sample		= perf_kwork__process_tracepoint_sample,
-			.ordered_events = true,
-		},
 		.atom_page_list      = LIST_HEAD_INIT(kwork.atom_page_list),
 		.sort_list           = LIST_HEAD_INIT(kwork.sort_list),
 		.cmp_id              = LIST_HEAD_INIT(kwork.cmp_id),
@@ -2350,6 +2363,7 @@ int cmd_kwork(int argc, const char **argv)
 		.all_runtime         = 0,
 		.all_count           = 0,
 		.nr_skipped_events   = { 0 },
+		.add_work            = perf_kwork_add_work,
 	};
 	static const char default_report_sort_order[] = "runtime, max, count";
 	static const char default_latency_sort_order[] = "avg, max, count";
@@ -2462,6 +2476,11 @@ int cmd_kwork(int argc, const char **argv)
 		"record", "report", "latency", "timehist", "top", NULL
 	};
 
+	perf_tool__init(&kwork.tool, /*ordered_events=*/true);
+	kwork.tool.mmap	  = perf_event__process_mmap;
+	kwork.tool.mmap2  = perf_event__process_mmap2;
+	kwork.tool.sample = perf_kwork__process_tracepoint_sample;
+
 	argc = parse_options_subcommand(argc, argv, kwork_options,
 					kwork_subcommands, kwork_usage,
 					PARSE_OPT_STOP_AT_NON_OPTION);
@@ -2519,6 +2538,9 @@ int cmd_kwork(int argc, const char **argv)
 		return perf_kwork__top(&kwork);
 	} else
 		usage_with_options(kwork_usage, kwork_options);
+
+	/* free usage string allocated by parse_options_subcommand */
+	free((void *)kwork_usage[0]);
 
 	return 0;
 }

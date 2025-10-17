@@ -59,7 +59,7 @@ static void klp_find_object_module(struct klp_object *obj)
 	if (!klp_is_module(obj))
 		return;
 
-	rcu_read_lock_sched();
+	guard(rcu)();
 	/*
 	 * We do not want to block removal of patched modules and therefore
 	 * we do not take a reference here. The patches are removed by
@@ -75,8 +75,6 @@ static void klp_find_object_module(struct klp_object *obj)
 	 */
 	if (mod && mod->klp_alive)
 		obj->mod = mod;
-
-	rcu_read_unlock_sched();
 }
 
 static bool klp_initialized(void)
@@ -346,6 +344,8 @@ int klp_apply_section_relocs(struct module *pmod, Elf_Shdr *sechdrs,
  * /sys/kernel/livepatch/<patch>/enabled
  * /sys/kernel/livepatch/<patch>/transition
  * /sys/kernel/livepatch/<patch>/force
+ * /sys/kernel/livepatch/<patch>/replace
+ * /sys/kernel/livepatch/<patch>/stack_order
  * /sys/kernel/livepatch/<patch>/<object>
  * /sys/kernel/livepatch/<patch>/<object>/patched
  * /sys/kernel/livepatch/<patch>/<object>/<function,sympos>
@@ -401,7 +401,7 @@ static ssize_t enabled_show(struct kobject *kobj,
 	struct klp_patch *patch;
 
 	patch = container_of(kobj, struct klp_patch, kobj);
-	return snprintf(buf, PAGE_SIZE-1, "%d\n", patch->enabled);
+	return sysfs_emit(buf, "%d\n", patch->enabled);
 }
 
 static ssize_t transition_show(struct kobject *kobj,
@@ -410,8 +410,7 @@ static ssize_t transition_show(struct kobject *kobj,
 	struct klp_patch *patch;
 
 	patch = container_of(kobj, struct klp_patch, kobj);
-	return snprintf(buf, PAGE_SIZE-1, "%d\n",
-			patch == klp_transition_patch);
+	return sysfs_emit(buf, "%d\n", patch == klp_transition_patch);
 }
 
 static ssize_t force_store(struct kobject *kobj, struct kobj_attribute *attr,
@@ -443,13 +442,47 @@ static ssize_t force_store(struct kobject *kobj, struct kobj_attribute *attr,
 	return count;
 }
 
+static ssize_t replace_show(struct kobject *kobj,
+			    struct kobj_attribute *attr, char *buf)
+{
+	struct klp_patch *patch;
+
+	patch = container_of(kobj, struct klp_patch, kobj);
+	return sysfs_emit(buf, "%d\n", patch->replace);
+}
+
+static ssize_t stack_order_show(struct kobject *kobj,
+				struct kobj_attribute *attr, char *buf)
+{
+	struct klp_patch *patch, *this_patch;
+	int stack_order = 0;
+
+	this_patch = container_of(kobj, struct klp_patch, kobj);
+
+	mutex_lock(&klp_mutex);
+
+	klp_for_each_patch(patch) {
+		stack_order++;
+		if (patch == this_patch)
+			break;
+	}
+
+	mutex_unlock(&klp_mutex);
+
+	return sysfs_emit(buf, "%d\n", stack_order);
+}
+
 static struct kobj_attribute enabled_kobj_attr = __ATTR_RW(enabled);
 static struct kobj_attribute transition_kobj_attr = __ATTR_RO(transition);
 static struct kobj_attribute force_kobj_attr = __ATTR_WO(force);
+static struct kobj_attribute replace_kobj_attr = __ATTR_RO(replace);
+static struct kobj_attribute stack_order_kobj_attr = __ATTR_RO(stack_order);
 static struct attribute *klp_patch_attrs[] = {
 	&enabled_kobj_attr.attr,
 	&transition_kobj_attr.attr,
 	&force_kobj_attr.attr,
+	&replace_kobj_attr.attr,
+	&stack_order_kobj_attr.attr,
 	NULL
 };
 ATTRIBUTE_GROUPS(klp_patch);
@@ -566,9 +599,12 @@ static int klp_add_object_nops(struct klp_patch *patch,
 }
 
 /*
- * Add 'nop' functions which simply return to the caller to run
- * the original function. The 'nop' functions are added to a
- * patch to facilitate a 'replace' mode.
+ * Add 'nop' functions which simply return to the caller to run the
+ * original function.
+ *
+ * They are added only when the atomic replace mode is used and only for
+ * functions which are currently livepatched but are no longer included
+ * in the new livepatch.
  */
 static int klp_add_nops(struct klp_patch *patch)
 {
@@ -973,7 +1009,7 @@ static int __klp_disable_patch(struct klp_patch *patch)
 	if (klp_transition_patch)
 		return -EBUSY;
 
-	klp_init_transition(patch, KLP_UNPATCHED);
+	klp_init_transition(patch, KLP_TRANSITION_UNPATCHED);
 
 	klp_for_each_object(patch, obj)
 		if (obj->patched)
@@ -1008,7 +1044,7 @@ static int __klp_enable_patch(struct klp_patch *patch)
 
 	pr_notice("enabling patch '%s'\n", patch->mod->name);
 
-	klp_init_transition(patch, KLP_PATCHED);
+	klp_init_transition(patch, KLP_TRANSITION_PATCHED);
 
 	/*
 	 * Enforce the order of the func->transition writes in

@@ -22,6 +22,7 @@
 #include <linux/stat.h>
 #include <linux/slab.h>
 #include <linux/xarray.h>
+#include <linux/export.h>
 
 #include <linux/atomic.h>
 #include <linux/uaccess.h>
@@ -48,22 +49,8 @@ int mhp_online_type_from_str(const char *str)
 
 #define to_memory_block(dev) container_of(dev, struct memory_block, dev)
 
-static int sections_per_block;
-
-static inline unsigned long memory_block_id(unsigned long section_nr)
-{
-	return section_nr / sections_per_block;
-}
-
-static inline unsigned long pfn_to_block_id(unsigned long pfn)
-{
-	return memory_block_id(pfn_to_section_nr(pfn));
-}
-
-static inline unsigned long phys_to_block_id(unsigned long phys)
-{
-	return pfn_to_block_id(PFN_DOWN(phys));
-}
+int sections_per_block;
+EXPORT_SYMBOL(sections_per_block);
 
 static int memory_subsys_online(struct device *dev);
 static int memory_subsys_offline(struct device *dev);
@@ -108,6 +95,57 @@ static void memory_block_release(struct device *dev)
 	/* Verify that the altmap is freed */
 	WARN_ON(mem->altmap);
 	kfree(mem);
+}
+
+
+/* Max block size to be set by memory_block_advise_max_size */
+static unsigned long memory_block_advised_size;
+static bool memory_block_advised_size_queried;
+
+/**
+ * memory_block_advise_max_size() - advise memory hotplug on the max suggested
+ *				    block size, usually for alignment.
+ * @size: suggestion for maximum block size. must be aligned on power of 2.
+ *
+ * Early boot software (pre-allocator init) may advise archs on the max block
+ * size. This value can only decrease after initialization, as the intent is
+ * to identify the largest supported alignment for all sources.
+ *
+ * Use of this value is arch-defined, as is min/max block size.
+ *
+ * Return: 0 on success
+ *	   -EINVAL if size is 0 or not pow2 aligned
+ *	   -EBUSY if value has already been probed
+ */
+int __init memory_block_advise_max_size(unsigned long size)
+{
+	if (!size || !is_power_of_2(size))
+		return -EINVAL;
+
+	if (memory_block_advised_size_queried)
+		return -EBUSY;
+
+	if (memory_block_advised_size)
+		memory_block_advised_size = min(memory_block_advised_size, size);
+	else
+		memory_block_advised_size = size;
+
+	return 0;
+}
+
+/**
+ * memory_block_advised_max_size() - query advised max hotplug block size.
+ *
+ * After the first call, the value can never change. Callers looking for the
+ * actual block size should use memory_block_size_bytes. This interface is
+ * intended for use by arch-init when initializing the hotplug block size.
+ *
+ * Return: advised size in bytes, or 0 if never set.
+ */
+unsigned long memory_block_advised_max_size(void)
+{
+	memory_block_advised_size_queried = true;
+	return memory_block_advised_size;
 }
 
 unsigned long __weak memory_block_size_bytes(void)
@@ -188,6 +226,7 @@ static int memory_block_online(struct memory_block *mem)
 	unsigned long start_pfn = section_nr_to_pfn(mem->start_section_nr);
 	unsigned long nr_pages = PAGES_PER_SECTION * sections_per_block;
 	unsigned long nr_vmemmap_pages = 0;
+	struct memory_notify arg;
 	struct zone *zone;
 	int ret;
 
@@ -207,9 +246,19 @@ static int memory_block_online(struct memory_block *mem)
 	if (mem->altmap)
 		nr_vmemmap_pages = mem->altmap->free;
 
+	arg.altmap_start_pfn = start_pfn;
+	arg.altmap_nr_pages = nr_vmemmap_pages;
+	arg.start_pfn = start_pfn + nr_vmemmap_pages;
+	arg.nr_pages = nr_pages - nr_vmemmap_pages;
 	mem_hotplug_begin();
+	ret = memory_notify(MEM_PREPARE_ONLINE, &arg);
+	ret = notifier_to_errno(ret);
+	if (ret)
+		goto out_notifier;
+
 	if (nr_vmemmap_pages) {
-		ret = mhp_init_memmap_on_memory(start_pfn, nr_vmemmap_pages, zone);
+		ret = mhp_init_memmap_on_memory(start_pfn, nr_vmemmap_pages,
+						zone, mem->altmap->inaccessible);
 		if (ret)
 			goto out;
 	}
@@ -231,7 +280,11 @@ static int memory_block_online(struct memory_block *mem)
 					  nr_vmemmap_pages);
 
 	mem->zone = zone;
+	mem_hotplug_done();
+	return ret;
 out:
+	memory_notify(MEM_FINISH_OFFLINE, &arg);
+out_notifier:
 	mem_hotplug_done();
 	return ret;
 }
@@ -244,6 +297,7 @@ static int memory_block_offline(struct memory_block *mem)
 	unsigned long start_pfn = section_nr_to_pfn(mem->start_section_nr);
 	unsigned long nr_pages = PAGES_PER_SECTION * sections_per_block;
 	unsigned long nr_vmemmap_pages = 0;
+	struct memory_notify arg;
 	int ret;
 
 	if (!mem->zone)
@@ -275,6 +329,11 @@ static int memory_block_offline(struct memory_block *mem)
 		mhp_deinit_memmap_on_memory(start_pfn, nr_vmemmap_pages);
 
 	mem->zone = NULL;
+	arg.altmap_start_pfn = start_pfn;
+	arg.altmap_nr_pages = nr_vmemmap_pages;
+	arg.start_pfn = start_pfn + nr_vmemmap_pages;
+	arg.nr_pages = nr_pages - nr_vmemmap_pages;
+	memory_notify(MEM_FINISH_OFFLINE, &arg);
 out:
 	mem_hotplug_done();
 	return ret;
@@ -434,7 +493,7 @@ static ssize_t valid_zones_show(struct device *dev,
 	struct memory_group *group = mem->group;
 	struct zone *default_zone;
 	int nid = mem->nid;
-	int len = 0;
+	int len;
 
 	/*
 	 * Check the existing zone. Make sure that we do that only on the
@@ -445,22 +504,18 @@ static ssize_t valid_zones_show(struct device *dev,
 		 * If !mem->zone, the memory block spans multiple zones and
 		 * cannot get offlined.
 		 */
-		default_zone = mem->zone;
-		if (!default_zone)
-			return sysfs_emit(buf, "%s\n", "none");
-		len += sysfs_emit_at(buf, len, "%s", default_zone->name);
-		goto out;
+		return sysfs_emit(buf, "%s\n",
+				  mem->zone ? mem->zone->name : "none");
 	}
 
 	default_zone = zone_for_pfn_range(MMOP_ONLINE, nid, group,
 					  start_pfn, nr_pages);
 
-	len += sysfs_emit_at(buf, len, "%s", default_zone->name);
+	len = sysfs_emit(buf, "%s", default_zone->name);
 	len += print_allowed_zone(buf, len, nid, group, start_pfn, nr_pages,
 				  MMOP_ONLINE_KERNEL, default_zone);
 	len += print_allowed_zone(buf, len, nid, group, start_pfn, nr_pages,
 				  MMOP_ONLINE_MOVABLE, default_zone);
-out:
 	len += sysfs_emit_at(buf, len, "\n");
 	return len;
 }
@@ -491,7 +546,7 @@ static ssize_t auto_online_blocks_show(struct device *dev,
 				       struct device_attribute *attr, char *buf)
 {
 	return sysfs_emit(buf, "%s\n",
-			  online_type_to_str[mhp_default_online_type]);
+			  online_type_to_str[mhp_get_default_online_type()]);
 }
 
 static ssize_t auto_online_blocks_store(struct device *dev,
@@ -503,7 +558,7 @@ static ssize_t auto_online_blocks_store(struct device *dev,
 	if (online_type < 0)
 		return -EINVAL;
 
-	mhp_default_online_type = online_type;
+	mhp_set_default_online_type(online_type);
 	return count;
 }
 
@@ -514,7 +569,7 @@ static DEVICE_ATTR_RW(auto_online_blocks);
 static ssize_t crash_hotplug_show(struct device *dev,
 				       struct device_attribute *attr, char *buf)
 {
-	return sysfs_emit(buf, "%d\n", crash_hotplug_memory_support());
+	return sysfs_emit(buf, "%d\n", crash_check_hotplug_support());
 }
 static DEVICE_ATTR_RO(crash_hotplug);
 #endif
@@ -615,7 +670,7 @@ int __weak arch_get_memory_phys_device(unsigned long start_pfn)
  *
  * Called under device_hotplug_lock.
  */
-static struct memory_block *find_memory_block_by_id(unsigned long block_id)
+struct memory_block *find_memory_block_by_id(unsigned long block_id)
 {
 	struct memory_block *mem;
 
@@ -714,21 +769,22 @@ static struct zone *early_node_zone_for_memory_block(struct memory_block *mem,
 
 #ifdef CONFIG_NUMA
 /**
- * memory_block_add_nid() - Indicate that system RAM falling into this memory
- *			    block device (partially) belongs to the given node.
+ * memory_block_add_nid_early() - Indicate that early system RAM falling into
+ *				  this memory block device (partially) belongs
+ *				  to the given node.
  * @mem: The memory block device.
  * @nid: The node id.
- * @context: The memory initialization context.
  *
- * Indicate that system RAM falling into this memory block (partially) belongs
- * to the given node. If the context indicates ("early") that we are adding the
- * node during node device subsystem initialization, this will also properly
- * set/adjust mem->zone based on the zone ranges of the given node.
+ * Indicate that early system RAM falling into this memory block (partially)
+ * belongs to the given node. This will also properly set/adjust mem->zone based
+ * on the zone ranges of the given node.
+ *
+ * Memory hotplug handles this on memory block creation, where we can only have
+ * a single nid span a memory block.
  */
-void memory_block_add_nid(struct memory_block *mem, int nid,
-			  enum meminit_context context)
+void memory_block_add_nid_early(struct memory_block *mem, int nid)
 {
-	if (context == MEMINIT_EARLY && mem->nid != nid) {
+	if (mem->nid != nid) {
 		/*
 		 * For early memory we have to determine the zone when setting
 		 * the node id and handle multiple nodes spanning a single
@@ -742,19 +798,18 @@ void memory_block_add_nid(struct memory_block *mem, int nid,
 			mem->zone = early_node_zone_for_memory_block(mem, nid);
 		else
 			mem->zone = NULL;
+		/*
+		 * If this memory block spans multiple nodes, we only indicate
+		 * the last processed node. If we span multiple nodes (not applicable
+		 * to hotplugged memory), zone == NULL will prohibit memory offlining
+		 * and consequently unplug.
+		 */
+		mem->nid = nid;
 	}
-
-	/*
-	 * If this memory block spans multiple nodes, we only indicate
-	 * the last processed node. If we span multiple nodes (not applicable
-	 * to hotplugged memory), zone == NULL will prohibit memory offlining
-	 * and consequently unplug.
-	 */
-	mem->nid = nid;
 }
 #endif
 
-static int add_memory_block(unsigned long block_id, unsigned long state,
+static int add_memory_block(unsigned long block_id, int nid, unsigned long state,
 			    struct vmem_altmap *altmap,
 			    struct memory_group *group)
 {
@@ -772,7 +827,7 @@ static int add_memory_block(unsigned long block_id, unsigned long state,
 
 	mem->start_section_nr = block_id * sections_per_block;
 	mem->state = state;
-	mem->nid = NUMA_NO_NODE;
+	mem->nid = nid;
 	mem->altmap = altmap;
 	INIT_LIST_HEAD(&mem->group_next);
 
@@ -797,29 +852,6 @@ static int add_memory_block(unsigned long block_id, unsigned long state,
 	}
 
 	return 0;
-}
-
-static int __init add_boot_memory_block(unsigned long base_section_nr)
-{
-	int section_count = 0;
-	unsigned long nr;
-
-	for (nr = base_section_nr; nr < base_section_nr + sections_per_block;
-	     nr++)
-		if (present_section_nr(nr))
-			section_count++;
-
-	if (section_count == 0)
-		return 0;
-	return add_memory_block(memory_block_id(base_section_nr),
-				MEM_ONLINE, NULL,  NULL);
-}
-
-static int add_hotplug_memory_block(unsigned long block_id,
-				    struct vmem_altmap *altmap,
-				    struct memory_group *group)
-{
-	return add_memory_block(block_id, MEM_OFFLINE, altmap, group);
 }
 
 static void remove_memory_block(struct memory_block *memory)
@@ -847,7 +879,7 @@ static void remove_memory_block(struct memory_block *memory)
  * Called under device_hotplug_lock.
  */
 int create_memory_block_devices(unsigned long start, unsigned long size,
-				struct vmem_altmap *altmap,
+				int nid, struct vmem_altmap *altmap,
 				struct memory_group *group)
 {
 	const unsigned long start_block_id = pfn_to_block_id(PFN_DOWN(start));
@@ -861,7 +893,7 @@ int create_memory_block_devices(unsigned long start, unsigned long size,
 		return -EINVAL;
 
 	for (block_id = start_block_id; block_id != end_block_id; block_id++) {
-		ret = add_hotplug_memory_block(block_id, altmap, group);
+		ret = add_memory_block(block_id, nid, MEM_OFFLINE, altmap, group);
 		if (ret)
 			break;
 	}
@@ -941,7 +973,7 @@ static const struct attribute_group *memory_root_attr_groups[] = {
 void __init memory_dev_init(void)
 {
 	int ret;
-	unsigned long block_sz, nr;
+	unsigned long block_sz, block_id, nr;
 
 	/* Validate the configured memory block size */
 	block_sz = memory_block_size_bytes();
@@ -954,15 +986,23 @@ void __init memory_dev_init(void)
 		panic("%s() failed to register subsystem: %d\n", __func__, ret);
 
 	/*
-	 * Create entries for memory sections that were found
-	 * during boot and have been initialized
+	 * Create entries for memory sections that were found during boot
+	 * and have been initialized. Use @block_id to track the last
+	 * handled block and initialize it to an invalid value (ULONG_MAX)
+	 * to bypass the block ID matching check for the first present
+	 * block so that it can be covered.
 	 */
-	for (nr = 0; nr <= __highest_present_section_nr;
-	     nr += sections_per_block) {
-		ret = add_boot_memory_block(nr);
-		if (ret)
-			panic("%s() failed to add memory block: %d\n", __func__,
-			      ret);
+	block_id = ULONG_MAX;
+	for_each_present_section_nr(0, nr) {
+		if (block_id != ULONG_MAX && memory_block_id(nr) == block_id)
+			continue;
+
+		block_id = memory_block_id(nr);
+		ret = add_memory_block(block_id, NUMA_NO_NODE, MEM_ONLINE, NULL, NULL);
+		if (ret) {
+			panic("%s() failed to add memory block: %d\n",
+			      __func__, ret);
+		}
 	}
 }
 

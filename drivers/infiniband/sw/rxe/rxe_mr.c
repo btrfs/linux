@@ -34,7 +34,7 @@ int mr_check_range(struct rxe_mr *mr, u64 iova, size_t length)
 	case IB_MR_TYPE_MEM_REG:
 		if (iova < mr->ibmr.iova ||
 		    iova + length > mr->ibmr.iova + mr->ibmr.length) {
-			rxe_dbg_mr(mr, "iova/length out of range");
+			rxe_dbg_mr(mr, "iova/length out of range\n");
 			return -EINVAL;
 		}
 		return 0;
@@ -45,7 +45,7 @@ int mr_check_range(struct rxe_mr *mr, u64 iova, size_t length)
 	}
 }
 
-static void rxe_mr_init(int access, struct rxe_mr *mr)
+void rxe_mr_init(int access, struct rxe_mr *mr)
 {
 	u32 key = mr->elem.index << 8 | rxe_get_next_key(-1);
 
@@ -126,7 +126,7 @@ static int rxe_mr_fill_pages_from_sgt(struct rxe_mr *mr, struct sg_table *sgt)
 	return xas_error(&xas);
 }
 
-int rxe_mr_init_user(struct rxe_dev *rxe, u64 start, u64 length, u64 iova,
+int rxe_mr_init_user(struct rxe_dev *rxe, u64 start, u64 length,
 		     int access, struct rxe_mr *mr)
 {
 	struct ib_umem *umem;
@@ -319,11 +319,14 @@ int rxe_mr_copy(struct rxe_mr *mr, u64 iova, void *addr,
 
 	err = mr_check_range(mr, iova, length);
 	if (unlikely(err)) {
-		rxe_dbg_mr(mr, "iova out of range");
+		rxe_dbg_mr(mr, "iova out of range\n");
 		return err;
 	}
 
-	return rxe_mr_copy_xarray(mr, iova, addr, length, dir);
+	if (is_odp_mr(mr))
+		return rxe_odp_mr_copy(mr, iova, addr, length, dir);
+	else
+		return rxe_mr_copy_xarray(mr, iova, addr, length, dir);
 }
 
 /* copy data in or out of a wqe, i.e. sg list
@@ -421,7 +424,7 @@ err1:
 	return err;
 }
 
-int rxe_flush_pmem_iova(struct rxe_mr *mr, u64 iova, unsigned int length)
+static int rxe_mr_flush_pmem_iova(struct rxe_mr *mr, u64 iova, unsigned int length)
 {
 	unsigned int page_offset;
 	unsigned long index;
@@ -429,16 +432,6 @@ int rxe_flush_pmem_iova(struct rxe_mr *mr, u64 iova, unsigned int length)
 	unsigned int bytes;
 	int err;
 	u8 *va;
-
-	/* mr must be valid even if length is zero */
-	if (WARN_ON(!mr))
-		return -EINVAL;
-
-	if (length == 0)
-		return 0;
-
-	if (mr->ibmr.type == IB_MR_TYPE_DMA)
-		return -EFAULT;
 
 	err = mr_check_range(mr, iova, length);
 	if (err)
@@ -451,7 +444,7 @@ int rxe_flush_pmem_iova(struct rxe_mr *mr, u64 iova, unsigned int length)
 		if (!page)
 			return -EFAULT;
 		bytes = min_t(unsigned int, length,
-				mr_page_size(mr) - page_offset);
+			      mr_page_size(mr) - page_offset);
 
 		va = kmap_local_page(page);
 		arch_wb_cache_pmem(va + page_offset, bytes);
@@ -465,11 +458,33 @@ int rxe_flush_pmem_iova(struct rxe_mr *mr, u64 iova, unsigned int length)
 	return 0;
 }
 
-/* Guarantee atomicity of atomic operations at the machine level. */
-static DEFINE_SPINLOCK(atomic_ops_lock);
+int rxe_flush_pmem_iova(struct rxe_mr *mr, u64 start, unsigned int length)
+{
+	int err;
 
-int rxe_mr_do_atomic_op(struct rxe_mr *mr, u64 iova, int opcode,
-			u64 compare, u64 swap_add, u64 *orig_val)
+	/* mr must be valid even if length is zero */
+	if (WARN_ON(!mr))
+		return -EINVAL;
+
+	if (length == 0)
+		return 0;
+
+	if (mr->ibmr.type == IB_MR_TYPE_DMA)
+		return -EFAULT;
+
+	if (is_odp_mr(mr))
+		err = rxe_odp_flush_pmem_iova(mr, start, length);
+	else
+		err = rxe_mr_flush_pmem_iova(mr, start, length);
+
+	return err;
+}
+
+/* Guarantee atomicity of atomic operations at the machine level. */
+DEFINE_SPINLOCK(atomic_ops_lock);
+
+enum resp_states rxe_mr_do_atomic_op(struct rxe_mr *mr, u64 iova, int opcode,
+				     u64 compare, u64 swap_add, u64 *orig_val)
 {
 	unsigned int page_offset;
 	struct page *page;
@@ -477,7 +492,7 @@ int rxe_mr_do_atomic_op(struct rxe_mr *mr, u64 iova, int opcode,
 	u64 *va;
 
 	if (unlikely(mr->state != RXE_MR_STATE_VALID)) {
-		rxe_dbg_mr(mr, "mr not in valid state");
+		rxe_dbg_mr(mr, "mr not in valid state\n");
 		return RESPST_ERR_RKEY_VIOLATION;
 	}
 
@@ -490,7 +505,7 @@ int rxe_mr_do_atomic_op(struct rxe_mr *mr, u64 iova, int opcode,
 
 		err = mr_check_range(mr, iova, sizeof(value));
 		if (err) {
-			rxe_dbg_mr(mr, "iova out of range");
+			rxe_dbg_mr(mr, "iova out of range\n");
 			return RESPST_ERR_RKEY_VIOLATION;
 		}
 		page_offset = rxe_mr_iova_to_page_offset(mr, iova);
@@ -501,7 +516,7 @@ int rxe_mr_do_atomic_op(struct rxe_mr *mr, u64 iova, int opcode,
 	}
 
 	if (unlikely(page_offset & 0x7)) {
-		rxe_dbg_mr(mr, "iova not aligned");
+		rxe_dbg_mr(mr, "iova not aligned\n");
 		return RESPST_ERR_MISALIGNED_ATOMIC;
 	}
 
@@ -521,22 +536,14 @@ int rxe_mr_do_atomic_op(struct rxe_mr *mr, u64 iova, int opcode,
 
 	kunmap_local(va);
 
-	return 0;
+	return RESPST_NONE;
 }
 
-#if defined CONFIG_64BIT
-/* only implemented or called for 64 bit architectures */
-int rxe_mr_do_atomic_write(struct rxe_mr *mr, u64 iova, u64 value)
+enum resp_states rxe_mr_do_atomic_write(struct rxe_mr *mr, u64 iova, u64 value)
 {
 	unsigned int page_offset;
 	struct page *page;
 	u64 *va;
-
-	/* See IBA oA19-28 */
-	if (unlikely(mr->state != RXE_MR_STATE_VALID)) {
-		rxe_dbg_mr(mr, "mr not in valid state");
-		return RESPST_ERR_RKEY_VIOLATION;
-	}
 
 	if (mr->ibmr.type == IB_MR_TYPE_DMA) {
 		page_offset = iova & (PAGE_SIZE - 1);
@@ -548,7 +555,7 @@ int rxe_mr_do_atomic_write(struct rxe_mr *mr, u64 iova, u64 value)
 		/* See IBA oA19-28 */
 		err = mr_check_range(mr, iova, sizeof(value));
 		if (unlikely(err)) {
-			rxe_dbg_mr(mr, "iova out of range");
+			rxe_dbg_mr(mr, "iova out of range\n");
 			return RESPST_ERR_RKEY_VIOLATION;
 		}
 		page_offset = rxe_mr_iova_to_page_offset(mr, iova);
@@ -560,25 +567,17 @@ int rxe_mr_do_atomic_write(struct rxe_mr *mr, u64 iova, u64 value)
 
 	/* See IBA A19.4.2 */
 	if (unlikely(page_offset & 0x7)) {
-		rxe_dbg_mr(mr, "misaligned address");
+		rxe_dbg_mr(mr, "misaligned address\n");
 		return RESPST_ERR_MISALIGNED_ATOMIC;
 	}
 
 	va = kmap_local_page(page);
-
 	/* Do atomic write after all prior operations have completed */
 	smp_store_release(&va[page_offset >> 3], value);
-
 	kunmap_local(va);
 
-	return 0;
+	return RESPST_NONE;
 }
-#else
-int rxe_mr_do_atomic_write(struct rxe_mr *mr, u64 iova, u64 value)
-{
-	return RESPST_ERR_UNSUPPORTED_OPCODE;
-}
-#endif
 
 int advance_dma_data(struct rxe_dma_info *dma, unsigned int length)
 {

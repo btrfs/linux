@@ -274,7 +274,6 @@ struct pch_udc_cfg_data {
  * @td_data:		for data request
  * @dev:		reference to device struct
  * @offset_addr:	offset address of ep register
- * @desc:		for this ep
  * @queue:		queue for requests
  * @num:		endpoint number
  * @in:			endpoint is IN
@@ -989,7 +988,7 @@ static void pch_udc_ep_enable(struct pch_udc_ep *ep,
 	pch_udc_ep_fifo_flush(ep, ep->in);
 	/* Configure the endpoint */
 	val = ep->num << UDC_CSR_NE_NUM_SHIFT | ep->in << UDC_CSR_NE_DIR_SHIFT |
-	      ((desc->bmAttributes & USB_ENDPOINT_XFERTYPE_MASK) <<
+	      (usb_endpoint_type(desc) <<
 		UDC_CSR_NE_TYPE_SHIFT) |
 	      (cfg->cur_cfg << UDC_CSR_NE_CFG_SHIFT) |
 	      (cfg->cur_intf << UDC_CSR_NE_INTF_SHIFT) |

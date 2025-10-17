@@ -65,6 +65,7 @@ static struct bench mem_benchmarks[] = {
 	{ "memcpy",	"Benchmark for memcpy() functions",		bench_mem_memcpy	},
 	{ "memset",	"Benchmark for memset() functions",		bench_mem_memset	},
 	{ "find_bit",	"Benchmark for find_bit() functions",		bench_mem_find_bit	},
+	{ "mmap",	"Benchmark for mmap() mappings",		bench_mem_mmap		},
 	{ "all",	"Run all memory access benchmarks",		NULL			},
 	{ NULL,		NULL,						NULL			}
 };
@@ -109,6 +110,8 @@ static struct bench uprobe_benchmarks[] = {
 	{ "baseline",	"Baseline libc usleep(1000) call",				bench_uprobe_baseline,	},
 	{ "empty",	"Attach empty BPF prog to uprobe on usleep, system wide",	bench_uprobe_empty,	},
 	{ "trace_printk", "Attach trace_printk BPF prog to uprobe on usleep syswide",	bench_uprobe_trace_printk,	},
+	{ "empty_ret",	"Attach empty BPF prog to uretprobe on usleep, system wide",	bench_uprobe_empty_ret,	},
+	{ "trace_printk_ret", "Attach trace_printk BPF prog to uretprobe on usleep syswide", bench_uprobe_trace_printk_ret,},
 	{ NULL,	NULL, NULL },
 };
 

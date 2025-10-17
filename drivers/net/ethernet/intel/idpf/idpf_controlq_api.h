@@ -69,6 +69,11 @@ struct idpf_ctlq_msg {
 			u8 context[IDPF_INDIRECT_CTX_SIZE];
 			struct idpf_dma_mem *payload;
 		} indirect;
+		struct {
+			u32 rsvd;
+			u16 data;
+			u16 flags;
+		} sw_cookie;
 	} ctx;
 };
 
@@ -94,7 +99,7 @@ struct idpf_ctlq_info {
 
 	enum idpf_ctlq_type cq_type;
 	int q_id;
-	struct mutex cq_lock;		/* control queue lock */
+	spinlock_t cq_lock;		/* control queue lock */
 	/* used for interrupt processing */
 	u16 next_to_use;
 	u16 next_to_clean;
@@ -118,9 +123,12 @@ struct idpf_ctlq_info {
 /**
  * enum idpf_mbx_opc - PF/VF mailbox commands
  * @idpf_mbq_opc_send_msg_to_cp: used by PF or VF to send a message to its CP
+ * @idpf_mbq_opc_send_msg_to_peer_drv: used by PF or VF to send a message to
+ *				       any peer driver
  */
 enum idpf_mbx_opc {
 	idpf_mbq_opc_send_msg_to_cp		= 0x0801,
+	idpf_mbq_opc_send_msg_to_peer_drv	= 0x0804,
 };
 
 /* API supported for control queue management */

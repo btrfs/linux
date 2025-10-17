@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: GPL-2.0+
 #include <linux/extcon.h>
+#include <linux/gpio/consumer.h>
 #include <linux/iio/consumer.h>
 #include <linux/input-event-codes.h>
 #include <linux/mfd/wm8994/registers.h>
 #include <linux/module.h>
 #include <linux/of.h>
-#include <linux/of_gpio.h>
 #include <linux/regulator/consumer.h>
 #include <sound/jack.h>
 #include <sound/pcm_params.h>
@@ -474,7 +474,7 @@ static struct snd_soc_dai_link aries_dai[] = {
 		.name = "WM8994 AIF1",
 		.stream_name = "HiFi",
 		.dai_fmt = SND_SOC_DAIFMT_I2S | SND_SOC_DAIFMT_NB_NF |
-			SND_SOC_DAIFMT_CBM_CFM,
+			SND_SOC_DAIFMT_CBP_CFP,
 		.ops = &aries_ops,
 		SND_SOC_DAILINK_REG(aif1),
 	},
@@ -510,13 +510,13 @@ static struct snd_soc_card aries_card = {
 };
 
 static const struct aries_wm8994_variant fascinate4g_variant = {
-	.modem_dai_fmt = SND_SOC_DAIFMT_DSP_A | SND_SOC_DAIFMT_CBS_CFS
+	.modem_dai_fmt = SND_SOC_DAIFMT_DSP_A | SND_SOC_DAIFMT_CBC_CFC
 		| SND_SOC_DAIFMT_IB_NF,
 	.has_fm_radio = false,
 };
 
 static const struct aries_wm8994_variant aries_variant = {
-	.modem_dai_fmt = SND_SOC_DAIFMT_DSP_A | SND_SOC_DAIFMT_CBM_CFM
+	.modem_dai_fmt = SND_SOC_DAIFMT_DSP_A | SND_SOC_DAIFMT_CBP_CFP
 		| SND_SOC_DAIFMT_IB_NF,
 	.has_fm_radio = true,
 };

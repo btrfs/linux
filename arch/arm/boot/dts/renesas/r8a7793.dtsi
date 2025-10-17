@@ -117,6 +117,7 @@
 		#clock-cells = <0>;
 		/* This value must be overridden by the board. */
 		clock-frequency = <0>;
+		bootph-all;
 	};
 
 	pmu {
@@ -137,6 +138,7 @@
 	soc {
 		compatible = "simple-bus";
 		interrupt-parent = <&gic>;
+		bootph-all;
 
 		#address-cells = <2>;
 		#size-cells = <2>;
@@ -276,6 +278,7 @@
 		pfc: pinctrl@e6060000 {
 			compatible = "renesas,pfc-r8a7793";
 			reg = <0 0xe6060000 0 0x250>;
+			bootph-all;
 		};
 
 		/* Special CPG clocks */
@@ -287,6 +290,7 @@
 			#clock-cells = <2>;
 			#power-domain-cells = <0>;
 			#reset-cells = <1>;
+			bootph-all;
 		};
 
 		apmu@e6152000 {
@@ -298,6 +302,7 @@
 		rst: reset-controller@e6160000 {
 			compatible = "renesas,r8a7793-rst";
 			reg = <0 0xe6160000 0 0x0100>;
+			bootph-all;
 		};
 
 		sysc: system-controller@e6180000 {
@@ -324,6 +329,64 @@
 			clocks = <&cpg CPG_MOD 407>;
 			power-domains = <&sysc R8A7793_PD_ALWAYS_ON>;
 			resets = <&cpg 407>;
+		};
+
+		tmu0: timer@e61e0000 {
+			compatible = "renesas,tmu-r8a7793", "renesas,tmu";
+			reg = <0 0xe61e0000 0 0x30>;
+			interrupts = <GIC_SPI 136 IRQ_TYPE_LEVEL_HIGH>,
+				     <GIC_SPI 137 IRQ_TYPE_LEVEL_HIGH>,
+				     <GIC_SPI 138 IRQ_TYPE_LEVEL_HIGH>;
+			interrupt-names = "tuni0", "tuni1", "tuni2";
+			clocks = <&cpg CPG_MOD 125>;
+			clock-names = "fck";
+			power-domains = <&sysc R8A7793_PD_ALWAYS_ON>;
+			resets = <&cpg 125>;
+			status = "disabled";
+		};
+
+		tmu1: timer@fff60000 {
+			compatible = "renesas,tmu-r8a7793", "renesas,tmu";
+			reg = <0 0xfff60000 0 0x30>;
+			interrupts = <GIC_SPI 128 IRQ_TYPE_LEVEL_HIGH>,
+				     <GIC_SPI 129 IRQ_TYPE_LEVEL_HIGH>,
+				     <GIC_SPI 130 IRQ_TYPE_LEVEL_HIGH>,
+				     <GIC_SPI 147 IRQ_TYPE_LEVEL_HIGH>;
+			interrupt-names = "tuni0", "tuni1", "tuni2", "ticpi2";
+			clocks = <&cpg CPG_MOD 111>;
+			clock-names = "fck";
+			power-domains = <&sysc R8A7793_PD_ALWAYS_ON>;
+			resets = <&cpg 111>;
+			status = "disabled";
+		};
+
+		tmu2: timer@fff70000 {
+			compatible = "renesas,tmu-r8a7793", "renesas,tmu";
+			reg = <0 0xfff70000 0 0x30>;
+			interrupts = <GIC_SPI 303 IRQ_TYPE_LEVEL_HIGH>,
+				     <GIC_SPI 304 IRQ_TYPE_LEVEL_HIGH>,
+				     <GIC_SPI 305 IRQ_TYPE_LEVEL_HIGH>,
+				     <GIC_SPI 306 IRQ_TYPE_LEVEL_HIGH>;
+			interrupt-names = "tuni0", "tuni1", "tuni2", "ticpi2";
+			clocks = <&cpg CPG_MOD 122>;
+			clock-names = "fck";
+			power-domains = <&sysc R8A7793_PD_ALWAYS_ON>;
+			resets = <&cpg 122>;
+			status = "disabled";
+		};
+
+		tmu3: timer@fff80000 {
+			compatible = "renesas,tmu-r8a7793", "renesas,tmu";
+			reg = <0 0xfff80000 0 0x30>;
+			interrupts = <GIC_SPI 131 IRQ_TYPE_LEVEL_HIGH>,
+				     <GIC_SPI 132 IRQ_TYPE_LEVEL_HIGH>,
+				     <GIC_SPI 133 IRQ_TYPE_LEVEL_HIGH>;
+			interrupt-names = "tuni0", "tuni1", "tuni2";
+			clocks = <&cpg CPG_MOD 121>;
+			clock-names = "fck";
+			power-domains = <&sysc R8A7793_PD_ALWAYS_ON>;
+			resets = <&cpg 121>;
+			status = "disabled";
 		};
 
 		thermal: thermal@e61f0000 {
@@ -1285,7 +1348,6 @@
 			dma-names = "tx", "rx", "tx", "rx";
 			power-domains = <&sysc R8A7793_PD_ALWAYS_ON>;
 			resets = <&cpg 315>;
-			reg-io-width = <4>;
 			status = "disabled";
 			max-frequency = <97500000>;
 		};
@@ -1397,6 +1459,7 @@
 		prr: chipid@ff000044 {
 			compatible = "renesas,prr";
 			reg = <0 0xff000044 0 4>;
+			bootph-all;
 		};
 
 		cmt0: timer@ffca0000 {
@@ -1459,6 +1522,7 @@
 				      <&gic GIC_PPI 14 (GIC_CPU_MASK_SIMPLE(2) | IRQ_TYPE_LEVEL_LOW)>,
 				      <&gic GIC_PPI 11 (GIC_CPU_MASK_SIMPLE(2) | IRQ_TYPE_LEVEL_LOW)>,
 				      <&gic GIC_PPI 10 (GIC_CPU_MASK_SIMPLE(2) | IRQ_TYPE_LEVEL_LOW)>;
+		interrupt-names = "sec-phys", "phys", "virt", "hyp-phys";
 	};
 
 	/* External USB clock - can be overridden by the board */
@@ -1466,5 +1530,6 @@
 		compatible = "fixed-clock";
 		#clock-cells = <0>;
 		clock-frequency = <48000000>;
+		bootph-all;
 	};
 };

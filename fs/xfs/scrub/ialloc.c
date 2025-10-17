@@ -76,7 +76,7 @@ xchk_inobt_xref_finobt(
 	int			has_record;
 	int			error;
 
-	ASSERT(cur->bc_btnum == XFS_BTNUM_FINO);
+	ASSERT(xfs_btree_is_fino(cur->bc_ops));
 
 	error = xfs_inobt_lookup(cur, agino, XFS_LOOKUP_LE, &has_record);
 	if (error)
@@ -179,7 +179,7 @@ xchk_finobt_xref_inobt(
 	int			has_record;
 	int			error;
 
-	ASSERT(cur->bc_btnum == XFS_BTNUM_INO);
+	ASSERT(xfs_btree_is_ino(cur->bc_ops));
 
 	error = xfs_inobt_lookup(cur, agino, XFS_LOOKUP_LE, &has_record);
 	if (error)
@@ -258,7 +258,7 @@ xchk_iallocbt_chunk(
 {
 	struct xfs_scrub		*sc = bs->sc;
 	struct xfs_mount		*mp = bs->cur->bc_mp;
-	struct xfs_perag		*pag = bs->cur->bc_ag.pag;
+	struct xfs_perag		*pag = to_perag(bs->cur->bc_group);
 	xfs_agblock_t			agbno;
 	xfs_extlen_t			len;
 
@@ -303,7 +303,6 @@ xchk_iallocbt_check_cluster_ifree(
 	unsigned int			irec_ino,
 	struct xfs_dinode		*dip)
 {
-	struct xfs_mount		*mp = bs->cur->bc_mp;
 	xfs_ino_t			fsino;
 	xfs_agino_t			agino;
 	bool				irec_free;
@@ -319,7 +318,7 @@ xchk_iallocbt_check_cluster_ifree(
 	 * the record, compute which fs inode we're talking about.
 	 */
 	agino = irec->ir_startino + irec_ino;
-	fsino = XFS_AGINO_TO_INO(mp, bs->cur->bc_ag.pag->pag_agno, agino);
+	fsino = xfs_agino_to_ino(to_perag(bs->cur->bc_group), agino);
 	irec_free = (irec->ir_free & XFS_INOBT_MASK(irec_ino));
 
 	if (be16_to_cpu(dip->di_magic) != XFS_DINODE_MAGIC ||
@@ -368,7 +367,6 @@ xchk_iallocbt_check_cluster(
 	struct xfs_mount		*mp = bs->cur->bc_mp;
 	struct xfs_buf			*cluster_bp;
 	unsigned int			nr_inodes;
-	xfs_agnumber_t			agno = bs->cur->bc_ag.pag->pag_agno;
 	xfs_agblock_t			agbno;
 	unsigned int			cluster_index;
 	uint16_t			cluster_mask = 0;
@@ -396,7 +394,7 @@ xchk_iallocbt_check_cluster(
 	 * ir_startino can be large enough to make im_boffset nonzero.
 	 */
 	ir_holemask = (irec->ir_holemask & cluster_mask);
-	imap.im_blkno = XFS_AGB_TO_DADDR(mp, agno, agbno);
+	imap.im_blkno = xfs_agbno_to_daddr(to_perag(bs->cur->bc_group), agbno);
 	imap.im_len = XFS_FSB_TO_BB(mp, M_IGEO(mp)->blocks_per_cluster);
 	imap.im_boffset = XFS_INO_TO_OFFSET(mp, irec->ir_startino) <<
 			mp->m_sb.sb_inodelog;
@@ -407,9 +405,9 @@ xchk_iallocbt_check_cluster(
 		return 0;
 	}
 
-	trace_xchk_iallocbt_check_cluster(mp, agno, irec->ir_startino,
-			imap.im_blkno, imap.im_len, cluster_base, nr_inodes,
-			cluster_mask, ir_holemask,
+	trace_xchk_iallocbt_check_cluster(to_perag(bs->cur->bc_group),
+			irec->ir_startino, imap.im_blkno, imap.im_len,
+			cluster_base, nr_inodes, cluster_mask, ir_holemask,
 			XFS_INO_TO_OFFSET(mp, irec->ir_startino +
 					  cluster_base));
 
@@ -514,7 +512,7 @@ xchk_iallocbt_rec_alignment(
 	 * Otherwise, we expect that the finobt record is aligned to the
 	 * cluster alignment as told by the superblock.
 	 */
-	if (bs->cur->bc_btnum == XFS_BTNUM_FINO) {
+	if (xfs_btree_is_fino(bs->cur->bc_ops)) {
 		unsigned int	imask;
 
 		imask = min_t(unsigned int, XFS_INODES_PER_CHUNK,
@@ -585,7 +583,7 @@ xchk_iallocbt_rec(
 	uint16_t			holemask;
 
 	xfs_inobt_btrec_to_irec(mp, rec, &irec);
-	if (xfs_inobt_check_irec(bs->cur->bc_ag.pag, &irec) != NULL) {
+	if (xfs_inobt_check_irec(to_perag(bs->cur->bc_group), &irec) != NULL) {
 		xchk_btree_set_corrupt(bs->sc, bs->cur, 0);
 		return 0;
 	}
@@ -649,12 +647,11 @@ out:
  */
 STATIC void
 xchk_iallocbt_xref_rmap_btreeblks(
-	struct xfs_scrub	*sc,
-	int			which)
+	struct xfs_scrub	*sc)
 {
 	xfs_filblks_t		blocks;
-	xfs_extlen_t		inobt_blocks = 0;
-	xfs_extlen_t		finobt_blocks = 0;
+	xfs_filblks_t		inobt_blocks = 0;
+	xfs_filblks_t		finobt_blocks = 0;
 	int			error;
 
 	if (!sc->sa.ino_cur || !sc->sa.rmap_cur ||
@@ -688,7 +685,6 @@ xchk_iallocbt_xref_rmap_btreeblks(
 STATIC void
 xchk_iallocbt_xref_rmap_inodes(
 	struct xfs_scrub	*sc,
-	int			which,
 	unsigned long long	inodes)
 {
 	xfs_filblks_t		blocks;
@@ -719,17 +715,14 @@ xchk_iallocbt(
 		.next_startino	= NULLAGINO,
 		.next_cluster_ino = NULLAGINO,
 	};
-	xfs_btnum_t		which;
 	int			error;
 
 	switch (sc->sm->sm_type) {
 	case XFS_SCRUB_TYPE_INOBT:
 		cur = sc->sa.ino_cur;
-		which = XFS_BTNUM_INO;
 		break;
 	case XFS_SCRUB_TYPE_FINOBT:
 		cur = sc->sa.fino_cur;
-		which = XFS_BTNUM_FINO;
 		break;
 	default:
 		ASSERT(0);
@@ -741,7 +734,7 @@ xchk_iallocbt(
 	if (error)
 		return error;
 
-	xchk_iallocbt_xref_rmap_btreeblks(sc, which);
+	xchk_iallocbt_xref_rmap_btreeblks(sc);
 
 	/*
 	 * If we're scrubbing the inode btree, inode_blocks is the number of
@@ -750,9 +743,8 @@ xchk_iallocbt(
 	 * knows about.  We can't do this for the finobt since it only points
 	 * to inode chunks with free inodes.
 	 */
-	if (which == XFS_BTNUM_INO)
-		xchk_iallocbt_xref_rmap_inodes(sc, which, iabt.inodes);
-
+	if (sc->sm->sm_type == XFS_SCRUB_TYPE_INOBT)
+		xchk_iallocbt_xref_rmap_inodes(sc, iabt.inodes);
 	return error;
 }
 

@@ -50,6 +50,9 @@ properties:
       - const: hclk
       - const: cclk
 
+  resets:
+    maxItems: 1
+
   bosch,mram-cfg:
     description: |
       Message RAM configuration data.
@@ -117,6 +120,10 @@ properties:
 
   phys:
     maxItems: 1
+
+  access-controllers:
+    minItems: 1
+    maxItems: 2
 
 required:
   - compatible

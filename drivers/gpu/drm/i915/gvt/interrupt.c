@@ -33,6 +33,7 @@
 
 #include "i915_drv.h"
 #include "i915_reg.h"
+#include "display/intel_display_regs.h"
 #include "gvt.h"
 #include "trace.h"
 
@@ -40,7 +41,6 @@ struct intel_gvt_irq_info {
 	char *name;
 	i915_reg_t reg_base;
 	enum intel_gvt_event_type bit_to_event[INTEL_GVT_IRQ_BITWIDTH];
-	unsigned long warned;
 	int group;
 	DECLARE_BITMAP(downstream_irq_bitmap, INTEL_GVT_IRQ_BITWIDTH);
 	bool has_upstream_irq;

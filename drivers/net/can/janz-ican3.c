@@ -1867,7 +1867,7 @@ static ssize_t fwinfo_show(struct device *dev,
 {
 	struct ican3_dev *mod = netdev_priv(to_net_dev(dev));
 
-	return scnprintf(buf, PAGE_SIZE, "%s\n", mod->fwinfo);
+	return sysfs_emit(buf, "%s\n", mod->fwinfo);
 }
 
 static DEVICE_ATTR_RW(termination);
@@ -2049,7 +2049,7 @@ static struct platform_driver ican3_driver = {
 		.name	= DRV_NAME,
 	},
 	.probe		= ican3_probe,
-	.remove_new	= ican3_remove,
+	.remove		= ican3_remove,
 };
 
 module_platform_driver(ican3_driver);

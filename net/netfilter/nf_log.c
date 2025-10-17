@@ -31,10 +31,10 @@ static struct nf_logger *__find_logger(int pf, const char *str_logger)
 	int i;
 
 	for (i = 0; i < NF_LOG_TYPE_MAX; i++) {
-		if (loggers[pf][i] == NULL)
+		log = nft_log_dereference(loggers[pf][i]);
+		if (!log)
 			continue;
 
-		log = nft_log_dereference(loggers[pf][i]);
 		if (!strncasecmp(str_logger, log->name, strlen(log->name)))
 			return log;
 	}
@@ -125,6 +125,32 @@ void nf_log_unregister(struct nf_logger *logger)
 }
 EXPORT_SYMBOL(nf_log_unregister);
 
+/**
+ * nf_log_is_registered - Check if any logger is registered for a given
+ * protocol family.
+ *
+ * @pf: Protocol family
+ *
+ * Returns: true if at least one logger is active for @pf, false otherwise.
+ */
+bool nf_log_is_registered(u_int8_t pf)
+{
+	int i;
+
+	if (pf >= NFPROTO_NUMPROTO) {
+		WARN_ON_ONCE(1);
+		return false;
+	}
+
+	for (i = 0; i < NF_LOG_TYPE_MAX; i++) {
+		if (rcu_access_pointer(loggers[pf][i]))
+			return true;
+	}
+
+	return false;
+}
+EXPORT_SYMBOL(nf_log_is_registered);
+
 int nf_log_bind_pf(struct net *net, u_int8_t pf,
 		   const struct nf_logger *logger)
 {
@@ -155,6 +181,11 @@ int nf_logger_find_get(int pf, enum nf_log_type type)
 {
 	struct nf_logger *logger;
 	int ret = -ENOENT;
+
+	if (pf >= ARRAY_SIZE(loggers))
+		return -EINVAL;
+	if (type >= NF_LOG_TYPE_MAX)
+		return -EINVAL;
 
 	if (pf == NFPROTO_INET) {
 		ret = nf_logger_find_get(NFPROTO_IPV4, type);
@@ -193,11 +224,12 @@ void nf_logger_put(int pf, enum nf_log_type type)
 		return;
 	}
 
-	BUG_ON(loggers[pf][type] == NULL);
-
 	rcu_read_lock();
 	logger = rcu_dereference(loggers[pf][type]);
-	module_put(logger->me);
+	if (!logger)
+		WARN_ON_ONCE(1);
+	else
+		module_put(logger->me);
 	rcu_read_unlock();
 }
 EXPORT_SYMBOL_GPL(nf_logger_put);
@@ -389,7 +421,7 @@ static const struct seq_operations nflog_seq_ops = {
 
 #ifdef CONFIG_SYSCTL
 static char nf_log_sysctl_fnames[NFPROTO_NUMPROTO-NFPROTO_UNSPEC][3];
-static struct ctl_table nf_log_sysctl_table[NFPROTO_NUMPROTO+1];
+static struct ctl_table nf_log_sysctl_table[NFPROTO_NUMPROTO];
 static struct ctl_table_header *nf_log_sysctl_fhdr;
 
 static struct ctl_table nf_log_sysctl_ftable[] = {
@@ -400,10 +432,9 @@ static struct ctl_table nf_log_sysctl_ftable[] = {
 		.mode		= 0644,
 		.proc_handler	= proc_dointvec,
 	},
-	{ }
 };
 
-static int nf_log_proc_dostring(struct ctl_table *table, int write,
+static int nf_log_proc_dostring(const struct ctl_table *table, int write,
 			 void *buffer, size_t *lenp, loff_t *ppos)
 {
 	const struct nf_logger *logger;
@@ -508,7 +539,7 @@ err_alloc:
 
 static void netfilter_log_sysctl_exit(struct net *net)
 {
-	struct ctl_table *table;
+	const struct ctl_table *table;
 
 	table = net->nf.nf_log_dir_header->ctl_table_arg;
 	unregister_net_sysctl_table(net->nf.nf_log_dir_header);

@@ -10,6 +10,7 @@
 
 #define pr_fmt(fmt) "kprobes: " fmt
 
+#include <linux/execmem.h>
 #include <linux/extable.h>
 #include <linux/kasan.h>
 #include <linux/kernel.h>
@@ -27,7 +28,7 @@
 #include <asm/debug-monitors.h>
 #include <asm/insn.h>
 #include <asm/irq.h>
-#include <asm/patching.h>
+#include <asm/text-patching.h>
 #include <asm/ptrace.h>
 #include <asm/sections.h>
 #include <asm/system_misc.h>
@@ -41,9 +42,20 @@ DEFINE_PER_CPU(struct kprobe_ctlblk, kprobe_ctlblk);
 static void __kprobes
 post_kprobe_handler(struct kprobe *, struct kprobe_ctlblk *, struct pt_regs *);
 
+void *alloc_insn_page(void)
+{
+	void *addr;
+
+	addr = execmem_alloc(EXECMEM_KPROBES, PAGE_SIZE);
+	if (!addr)
+		return NULL;
+	set_memory_rox((unsigned long)addr, 1);
+	return addr;
+}
+
 static void __kprobes arch_prepare_ss_slot(struct kprobe *p)
 {
-	kprobe_opcode_t *addr = p->ainsn.api.insn;
+	kprobe_opcode_t *addr = p->ainsn.xol_insn;
 
 	/*
 	 * Prepare insn slot, Mark Rutland points out it depends on a coupe of
@@ -64,20 +76,20 @@ static void __kprobes arch_prepare_ss_slot(struct kprobe *p)
 	 * the BRK exception handler, so it is unnecessary to generate
 	 * Contex-Synchronization-Event via ISB again.
 	 */
-	aarch64_insn_patch_text_nosync(addr, p->opcode);
+	aarch64_insn_patch_text_nosync(addr, le32_to_cpu(p->opcode));
 	aarch64_insn_patch_text_nosync(addr + 1, BRK64_OPCODE_KPROBES_SS);
 
 	/*
 	 * Needs restoring of return address after stepping xol.
 	 */
-	p->ainsn.api.restore = (unsigned long) p->addr +
+	p->ainsn.xol_restore = (unsigned long) p->addr +
 	  sizeof(kprobe_opcode_t);
 }
 
 static void __kprobes arch_prepare_simulate(struct kprobe *p)
 {
 	/* This instructions is not executed xol. No need to adjust the PC */
-	p->ainsn.api.restore = 0;
+	p->ainsn.xol_restore = 0;
 }
 
 static void __kprobes arch_simulate_insn(struct kprobe *p, struct pt_regs *regs)
@@ -85,7 +97,7 @@ static void __kprobes arch_simulate_insn(struct kprobe *p, struct pt_regs *regs)
 	struct kprobe_ctlblk *kcb = get_kprobe_ctlblk();
 
 	if (p->ainsn.api.handler)
-		p->ainsn.api.handler((u32)p->opcode, (long)p->addr, regs);
+		p->ainsn.api.handler(le32_to_cpu(p->opcode), (long)p->addr, regs);
 
 	/* single step simulated, now go for post processing */
 	post_kprobe_handler(p, kcb, regs);
@@ -99,7 +111,7 @@ int __kprobes arch_prepare_kprobe(struct kprobe *p)
 		return -EINVAL;
 
 	/* copy instruction */
-	p->opcode = le32_to_cpu(*p->addr);
+	p->opcode = *p->addr;
 
 	if (search_exception_tables(probe_addr))
 		return -EINVAL;
@@ -110,30 +122,23 @@ int __kprobes arch_prepare_kprobe(struct kprobe *p)
 		return -EINVAL;
 
 	case INSN_GOOD_NO_SLOT:	/* insn need simulation */
-		p->ainsn.api.insn = NULL;
+		p->ainsn.xol_insn = NULL;
 		break;
 
 	case INSN_GOOD:	/* instruction uses slot */
-		p->ainsn.api.insn = get_insn_slot();
-		if (!p->ainsn.api.insn)
+		p->ainsn.xol_insn = get_insn_slot();
+		if (!p->ainsn.xol_insn)
 			return -ENOMEM;
 		break;
 	}
 
 	/* prepare the instruction */
-	if (p->ainsn.api.insn)
+	if (p->ainsn.xol_insn)
 		arch_prepare_ss_slot(p);
 	else
 		arch_prepare_simulate(p);
 
 	return 0;
-}
-
-void *alloc_insn_page(void)
-{
-	return __vmalloc_node_range(PAGE_SIZE, 1, VMALLOC_START, VMALLOC_END,
-			GFP_KERNEL, PAGE_KERNEL_ROX, VM_FLUSH_RESET_PERMS,
-			NUMA_NO_NODE, __builtin_return_address(0));
 }
 
 /* arm kprobe: install breakpoint in text */
@@ -149,15 +154,16 @@ void __kprobes arch_arm_kprobe(struct kprobe *p)
 void __kprobes arch_disarm_kprobe(struct kprobe *p)
 {
 	void *addr = p->addr;
+	u32 insn = le32_to_cpu(p->opcode);
 
-	aarch64_insn_patch_text(&addr, &p->opcode, 1);
+	aarch64_insn_patch_text(&addr, &insn, 1);
 }
 
 void __kprobes arch_remove_kprobe(struct kprobe *p)
 {
-	if (p->ainsn.api.insn) {
-		free_insn_slot(p->ainsn.api.insn, 0);
-		p->ainsn.api.insn = NULL;
+	if (p->ainsn.xol_insn) {
+		free_insn_slot(p->ainsn.xol_insn, 0);
+		p->ainsn.xol_insn = NULL;
 	}
 }
 
@@ -212,9 +218,9 @@ static void __kprobes setup_singlestep(struct kprobe *p,
 	}
 
 
-	if (p->ainsn.api.insn) {
+	if (p->ainsn.xol_insn) {
 		/* prepare for single stepping */
-		slot = (unsigned long)p->ainsn.api.insn;
+		slot = (unsigned long)p->ainsn.xol_insn;
 
 		kprobes_save_local_irqflag(kcb, regs);
 		instruction_pointer_set(regs, slot);
@@ -252,8 +258,8 @@ static void __kprobes
 post_kprobe_handler(struct kprobe *cur, struct kprobe_ctlblk *kcb, struct pt_regs *regs)
 {
 	/* return addr restore if non-branching insn */
-	if (cur->ainsn.api.restore != 0)
-		instruction_pointer_set(regs, cur->ainsn.api.restore);
+	if (cur->ainsn.xol_restore != 0)
+		instruction_pointer_set(regs, cur->ainsn.xol_restore);
 
 	/* restore back original saved kprobe variables and continue */
 	if (kcb->kprobe_status == KPROBE_REENTER) {
@@ -298,8 +304,8 @@ int __kprobes kprobe_fault_handler(struct pt_regs *regs, unsigned int fsr)
 	return 0;
 }
 
-static int __kprobes
-kprobe_breakpoint_handler(struct pt_regs *regs, unsigned long esr)
+int __kprobes
+kprobe_brk_handler(struct pt_regs *regs, unsigned long esr)
 {
 	struct kprobe *p, *cur_kprobe;
 	struct kprobe_ctlblk *kcb;
@@ -342,20 +348,15 @@ kprobe_breakpoint_handler(struct pt_regs *regs, unsigned long esr)
 	return DBG_HOOK_HANDLED;
 }
 
-static struct break_hook kprobes_break_hook = {
-	.imm = KPROBES_BRK_IMM,
-	.fn = kprobe_breakpoint_handler,
-};
-
-static int __kprobes
-kprobe_breakpoint_ss_handler(struct pt_regs *regs, unsigned long esr)
+int __kprobes
+kprobe_ss_brk_handler(struct pt_regs *regs, unsigned long esr)
 {
 	struct kprobe_ctlblk *kcb = get_kprobe_ctlblk();
 	unsigned long addr = instruction_pointer(regs);
 	struct kprobe *cur = kprobe_running();
 
 	if (cur && (kcb->kprobe_status & (KPROBE_HIT_SS | KPROBE_REENTER)) &&
-	    ((unsigned long)&cur->ainsn.api.insn[1] == addr)) {
+	    ((unsigned long)&cur->ainsn.xol_insn[1] == addr)) {
 		kprobes_restore_local_irqflag(kcb, regs);
 		post_kprobe_handler(cur, kcb, regs);
 
@@ -366,10 +367,15 @@ kprobe_breakpoint_ss_handler(struct pt_regs *regs, unsigned long esr)
 	return DBG_HOOK_ERROR;
 }
 
-static struct break_hook kprobes_break_ss_hook = {
-	.imm = KPROBES_BRK_SS_IMM,
-	.fn = kprobe_breakpoint_ss_handler,
-};
+int __kprobes
+kretprobe_brk_handler(struct pt_regs *regs, unsigned long esr)
+{
+	if (regs->pc != (unsigned long)__kretprobe_trampoline)
+		return DBG_HOOK_ERROR;
+
+	regs->pc = kretprobe_trampoline_handler(regs, (void *)regs->regs[29]);
+	return DBG_HOOK_HANDLED;
+}
 
 /*
  * Provide a blacklist of symbols identifying ranges which cannot be kprobed.
@@ -396,11 +402,6 @@ int __init arch_populate_kprobe_blacklist(void)
 	return ret;
 }
 
-void __kprobes __used *trampoline_probe_handler(struct pt_regs *regs)
-{
-	return (void *)kretprobe_trampoline_handler(regs, (void *)regs->regs[29]);
-}
-
 void __kprobes arch_prepare_kretprobe(struct kretprobe_instance *ri,
 				      struct pt_regs *regs)
 {
@@ -418,8 +419,5 @@ int __kprobes arch_trampoline_kprobe(struct kprobe *p)
 
 int __init arch_init_kprobes(void)
 {
-	register_kernel_break_hook(&kprobes_break_hook);
-	register_kernel_break_hook(&kprobes_break_ss_hook);
-
 	return 0;
 }

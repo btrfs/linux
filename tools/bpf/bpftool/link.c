@@ -107,7 +107,7 @@ static int link_parse_fd(int *argc, char ***argv)
 
 		fd = bpf_link_get_fd_by_id(id);
 		if (fd < 0)
-			p_err("failed to get link with ID %d: %s", id, strerror(errno));
+			p_err("failed to get link with ID %u: %s", id, strerror(errno));
 		return fd;
 	} else if (is_prefix(**argv, "pinned")) {
 		char *path;
@@ -117,7 +117,7 @@ static int link_parse_fd(int *argc, char ***argv)
 		path = **argv;
 		NEXT_ARGP();
 
-		return open_obj_pinned_any(path, BPF_OBJ_LINK);
+		return open_obj_pinned_any(path, BPF_OBJ_LINK, NULL);
 	}
 
 	p_err("expected 'id' or 'pinned', got: '%s'?", **argv);
@@ -249,18 +249,85 @@ static int get_prog_info(int prog_id, struct bpf_prog_info *info)
 	return err;
 }
 
-static int cmp_u64(const void *A, const void *B)
-{
-	const __u64 *a = A, *b = B;
+struct addr_cookie {
+	__u64 addr;
+	__u64 cookie;
+};
 
-	return *a - *b;
+static int cmp_addr_cookie(const void *A, const void *B)
+{
+	const struct addr_cookie *a = A, *b = B;
+
+	if (a->addr == b->addr)
+		return 0;
+	return a->addr < b->addr ? -1 : 1;
+}
+
+static struct addr_cookie *
+get_addr_cookie_array(__u64 *addrs, __u64 *cookies, __u32 count)
+{
+	struct addr_cookie *data;
+	__u32 i;
+
+	data = calloc(count, sizeof(data[0]));
+	if (!data) {
+		p_err("mem alloc failed");
+		return NULL;
+	}
+	for (i = 0; i < count; i++) {
+		data[i].addr = addrs[i];
+		data[i].cookie = cookies[i];
+	}
+	qsort(data, count, sizeof(data[0]), cmp_addr_cookie);
+	return data;
+}
+
+static bool is_x86_ibt_enabled(void)
+{
+#if defined(__x86_64__)
+	struct kernel_config_option options[] = {
+		{ "CONFIG_X86_KERNEL_IBT", },
+	};
+	char *values[ARRAY_SIZE(options)] = { };
+	bool ret;
+
+	if (read_kernel_config(options, ARRAY_SIZE(options), values, NULL))
+		return false;
+
+	ret = !!values[0];
+	free(values[0]);
+	return ret;
+#else
+	return false;
+#endif
+}
+
+static bool
+symbol_matches_target(__u64 sym_addr, __u64 target_addr, bool is_ibt_enabled)
+{
+	if (sym_addr == target_addr)
+		return true;
+
+	/*
+	 * On x86_64 architectures with CET (Control-flow Enforcement Technology),
+	 * function entry points have a 4-byte 'endbr' instruction prefix.
+	 * This causes kprobe hooks to target the address *after* 'endbr'
+	 * (symbol address + 4), preserving the CET instruction.
+	 * Here we check if the symbol address matches the hook target address
+	 * minus 4, indicating a CET-enabled function entry point.
+	 */
+	if (is_ibt_enabled && sym_addr == target_addr - 4)
+		return true;
+
+	return false;
 }
 
 static void
 show_kprobe_multi_json(struct bpf_link_info *info, json_writer_t *wtr)
 {
+	struct addr_cookie *data;
 	__u32 i, j = 0;
-	__u64 *addrs;
+	bool is_ibt_enabled;
 
 	jsonw_bool_field(json_wtr, "retprobe",
 			 info->kprobe_multi.flags & BPF_F_KPROBE_MULTI_RETURN);
@@ -268,17 +335,25 @@ show_kprobe_multi_json(struct bpf_link_info *info, json_writer_t *wtr)
 	jsonw_uint_field(json_wtr, "missed", info->kprobe_multi.missed);
 	jsonw_name(json_wtr, "funcs");
 	jsonw_start_array(json_wtr);
-	addrs = u64_to_ptr(info->kprobe_multi.addrs);
-	qsort(addrs, info->kprobe_multi.count, sizeof(addrs[0]), cmp_u64);
+	data = get_addr_cookie_array(u64_to_ptr(info->kprobe_multi.addrs),
+				     u64_to_ptr(info->kprobe_multi.cookies),
+				     info->kprobe_multi.count);
+	if (!data)
+		return;
 
 	/* Load it once for all. */
 	if (!dd.sym_count)
 		kernel_syms_load(&dd);
+	if (!dd.sym_count)
+		goto error;
+
+	is_ibt_enabled = is_x86_ibt_enabled();
 	for (i = 0; i < dd.sym_count; i++) {
-		if (dd.sym_mapping[i].address != addrs[j])
+		if (!symbol_matches_target(dd.sym_mapping[i].address,
+					   data[j].addr, is_ibt_enabled))
 			continue;
 		jsonw_start_object(json_wtr);
-		jsonw_uint_field(json_wtr, "addr", dd.sym_mapping[i].address);
+		jsonw_uint_field(json_wtr, "addr", (unsigned long)data[j].addr);
 		jsonw_string_field(json_wtr, "func", dd.sym_mapping[i].name);
 		/* Print null if it is vmlinux */
 		if (dd.sym_mapping[i].module[0] == '\0') {
@@ -287,11 +362,14 @@ show_kprobe_multi_json(struct bpf_link_info *info, json_writer_t *wtr)
 		} else {
 			jsonw_string_field(json_wtr, "module", dd.sym_mapping[i].module);
 		}
+		jsonw_uint_field(json_wtr, "cookie", data[j].cookie);
 		jsonw_end_object(json_wtr);
 		if (j++ == info->kprobe_multi.count)
 			break;
 	}
 	jsonw_end_array(json_wtr);
+error:
+	free(data);
 }
 
 static __u64 *u64_to_arr(__u64 val)
@@ -334,6 +412,7 @@ show_perf_event_kprobe_json(struct bpf_link_info *info, json_writer_t *wtr)
 			   u64_to_ptr(info->perf_event.kprobe.func_name));
 	jsonw_uint_field(wtr, "offset", info->perf_event.kprobe.offset);
 	jsonw_uint_field(wtr, "missed", info->perf_event.kprobe.missed);
+	jsonw_uint_field(wtr, "cookie", info->perf_event.kprobe.cookie);
 }
 
 static void
@@ -343,6 +422,8 @@ show_perf_event_uprobe_json(struct bpf_link_info *info, json_writer_t *wtr)
 	jsonw_string_field(wtr, "file",
 			   u64_to_ptr(info->perf_event.uprobe.file_name));
 	jsonw_uint_field(wtr, "offset", info->perf_event.uprobe.offset);
+	jsonw_uint_field(wtr, "cookie", info->perf_event.uprobe.cookie);
+	jsonw_uint_field(wtr, "ref_ctr_offset", info->perf_event.uprobe.ref_ctr_offset);
 }
 
 static void
@@ -350,6 +431,7 @@ show_perf_event_tracepoint_json(struct bpf_link_info *info, json_writer_t *wtr)
 {
 	jsonw_string_field(wtr, "tracepoint",
 			   u64_to_ptr(info->perf_event.tracepoint.tp_name));
+	jsonw_uint_field(wtr, "cookie", info->perf_event.tracepoint.cookie);
 }
 
 static char *perf_config_hw_cache_str(__u64 config)
@@ -366,7 +448,7 @@ static char *perf_config_hw_cache_str(__u64 config)
 	if (hw_cache)
 		snprintf(str, PERF_HW_CACHE_LEN, "%s-", hw_cache);
 	else
-		snprintf(str, PERF_HW_CACHE_LEN, "%lld-", config & 0xff);
+		snprintf(str, PERF_HW_CACHE_LEN, "%llu-", config & 0xff);
 
 	op = perf_event_name(evsel__hw_cache_op, (config >> 8) & 0xff);
 	if (op)
@@ -374,7 +456,7 @@ static char *perf_config_hw_cache_str(__u64 config)
 			 "%s-", op);
 	else
 		snprintf(str + strlen(str), PERF_HW_CACHE_LEN - strlen(str),
-			 "%lld-", (config >> 8) & 0xff);
+			 "%llu-", (config >> 8) & 0xff);
 
 	result = perf_event_name(evsel__hw_cache_result, config >> 16);
 	if (result)
@@ -382,7 +464,7 @@ static char *perf_config_hw_cache_str(__u64 config)
 			 "%s", result);
 	else
 		snprintf(str + strlen(str), PERF_HW_CACHE_LEN - strlen(str),
-			 "%lld", config >> 16);
+			 "%llu", config >> 16);
 	return str;
 }
 
@@ -426,6 +508,8 @@ show_perf_event_event_json(struct bpf_link_info *info, json_writer_t *wtr)
 	else
 		jsonw_uint_field(wtr, "event_config", config);
 
+	jsonw_uint_field(wtr, "cookie", info->perf_event.event.cookie);
+
 	if (type == PERF_TYPE_HW_CACHE && perf_config)
 		free((void *)perf_config);
 }
@@ -444,6 +528,7 @@ static int show_link_close_json(int fd, struct bpf_link_info *info)
 	case BPF_LINK_TYPE_RAW_TRACEPOINT:
 		jsonw_string_field(json_wtr, "tp_name",
 				   u64_to_ptr(info->raw_tracepoint.tp_name));
+		jsonw_uint_field(json_wtr, "cookie", info->raw_tracepoint.cookie);
 		break;
 	case BPF_LINK_TYPE_TRACING:
 		err = get_prog_info(info->prog_id, &prog_info);
@@ -461,6 +546,7 @@ static int show_link_close_json(int fd, struct bpf_link_info *info)
 					   json_wtr);
 		jsonw_uint_field(json_wtr, "target_obj_id", info->tracing.target_obj_id);
 		jsonw_uint_field(json_wtr, "target_btf_id", info->tracing.target_btf_id);
+		jsonw_uint_field(json_wtr, "cookie", info->tracing.cookie);
 		break;
 	case BPF_LINK_TYPE_CGROUP:
 		jsonw_lluint_field(json_wtr, "cgroup_id",
@@ -485,6 +571,10 @@ static int show_link_close_json(int fd, struct bpf_link_info *info)
 	case BPF_LINK_TYPE_NETKIT:
 		show_link_ifindex_json(info->netkit.ifindex, json_wtr);
 		show_link_attach_type_json(info->netkit.attach_type, json_wtr);
+		break;
+	case BPF_LINK_TYPE_SOCKMAP:
+		jsonw_uint_field(json_wtr, "map_id", info->sockmap.map_id);
+		show_link_attach_type_json(info->sockmap.attach_type, json_wtr);
 		break;
 	case BPF_LINK_TYPE_XDP:
 		show_link_ifindex_json(info->xdp.ifindex, json_wtr);
@@ -579,7 +669,7 @@ static void show_link_ifindex_plain(__u32 ifindex)
 	else
 		snprintf(devname, sizeof(devname), "(detached)");
 	if (ret)
-		snprintf(devname, sizeof(devname), "%s(%d)",
+		snprintf(devname, sizeof(devname), "%s(%u)",
 			 tmpname, ifindex);
 	printf("ifindex %s  ", devname);
 }
@@ -655,7 +745,7 @@ void netfilter_dump_plain(const struct bpf_link_info *info)
 	if (pfname)
 		printf("\n\t%s", pfname);
 	else
-		printf("\n\tpf: %d", pf);
+		printf("\n\tpf: %u", pf);
 
 	if (hookname)
 		printf(" %s", hookname);
@@ -670,8 +760,9 @@ void netfilter_dump_plain(const struct bpf_link_info *info)
 
 static void show_kprobe_multi_plain(struct bpf_link_info *info)
 {
+	struct addr_cookie *data;
 	__u32 i, j = 0;
-	__u64 *addrs;
+	bool is_ibt_enabled;
 
 	if (!info->kprobe_multi.count)
 		return;
@@ -683,21 +774,26 @@ static void show_kprobe_multi_plain(struct bpf_link_info *info)
 	printf("func_cnt %u  ", info->kprobe_multi.count);
 	if (info->kprobe_multi.missed)
 		printf("missed %llu  ", info->kprobe_multi.missed);
-	addrs = (__u64 *)u64_to_ptr(info->kprobe_multi.addrs);
-	qsort(addrs, info->kprobe_multi.count, sizeof(__u64), cmp_u64);
+	data = get_addr_cookie_array(u64_to_ptr(info->kprobe_multi.addrs),
+				     u64_to_ptr(info->kprobe_multi.cookies),
+				     info->kprobe_multi.count);
+	if (!data)
+		return;
 
 	/* Load it once for all. */
 	if (!dd.sym_count)
 		kernel_syms_load(&dd);
 	if (!dd.sym_count)
-		return;
+		goto error;
 
-	printf("\n\t%-16s %s", "addr", "func [module]");
+	is_ibt_enabled = is_x86_ibt_enabled();
+	printf("\n\t%-16s %-16s %s", "addr", "cookie", "func [module]");
 	for (i = 0; i < dd.sym_count; i++) {
-		if (dd.sym_mapping[i].address != addrs[j])
+		if (!symbol_matches_target(dd.sym_mapping[i].address,
+					   data[j].addr, is_ibt_enabled))
 			continue;
-		printf("\n\t%016lx %s",
-		       dd.sym_mapping[i].address, dd.sym_mapping[i].name);
+		printf("\n\t%016lx %-16llx %s",
+		       (unsigned long)data[j].addr, data[j].cookie, dd.sym_mapping[i].name);
 		if (dd.sym_mapping[i].module[0] != '\0')
 			printf(" [%s]  ", dd.sym_mapping[i].module);
 		else
@@ -706,6 +802,8 @@ static void show_kprobe_multi_plain(struct bpf_link_info *info)
 		if (j++ == info->kprobe_multi.count)
 			break;
 	}
+error:
+	free(data);
 }
 
 static void show_uprobe_multi_plain(struct bpf_link_info *info)
@@ -724,7 +822,7 @@ static void show_uprobe_multi_plain(struct bpf_link_info *info)
 	printf("func_cnt %u  ", info->uprobe_multi.count);
 
 	if (info->uprobe_multi.pid)
-		printf("pid %d  ", info->uprobe_multi.pid);
+		printf("pid %u  ", info->uprobe_multi.pid);
 
 	printf("\n\t%-16s   %-16s   %-16s", "offset", "ref_ctr_offset", "cookies");
 	for (i = 0; i < info->uprobe_multi.count; i++) {
@@ -754,6 +852,8 @@ static void show_perf_event_kprobe_plain(struct bpf_link_info *info)
 		printf("+%#x", info->perf_event.kprobe.offset);
 	if (info->perf_event.kprobe.missed)
 		printf("  missed %llu", info->perf_event.kprobe.missed);
+	if (info->perf_event.kprobe.cookie)
+		printf("  cookie %llu", info->perf_event.kprobe.cookie);
 	printf("  ");
 }
 
@@ -770,6 +870,10 @@ static void show_perf_event_uprobe_plain(struct bpf_link_info *info)
 	else
 		printf("\n\tuprobe ");
 	printf("%s+%#x  ", buf, info->perf_event.uprobe.offset);
+	if (info->perf_event.uprobe.cookie)
+		printf("cookie %llu  ", info->perf_event.uprobe.cookie);
+	if (info->perf_event.uprobe.ref_ctr_offset)
+		printf("ref_ctr_offset 0x%llx  ", info->perf_event.uprobe.ref_ctr_offset);
 }
 
 static void show_perf_event_tracepoint_plain(struct bpf_link_info *info)
@@ -781,6 +885,8 @@ static void show_perf_event_tracepoint_plain(struct bpf_link_info *info)
 		return;
 
 	printf("\n\ttracepoint %s  ", buf);
+	if (info->perf_event.tracepoint.cookie)
+		printf("cookie %llu  ", info->perf_event.tracepoint.cookie);
 }
 
 static void show_perf_event_event_plain(struct bpf_link_info *info)
@@ -802,6 +908,9 @@ static void show_perf_event_event_plain(struct bpf_link_info *info)
 	else
 		printf("%llu  ", config);
 
+	if (info->perf_event.event.cookie)
+		printf("cookie %llu  ", info->perf_event.event.cookie);
+
 	if (type == PERF_TYPE_HW_CACHE && perf_config)
 		free((void *)perf_config);
 }
@@ -818,6 +927,8 @@ static int show_link_close_plain(int fd, struct bpf_link_info *info)
 	case BPF_LINK_TYPE_RAW_TRACEPOINT:
 		printf("\n\ttp '%s'  ",
 		       (const char *)u64_to_ptr(info->raw_tracepoint.tp_name));
+		if (info->raw_tracepoint.cookie)
+			printf("cookie %llu  ", info->raw_tracepoint.cookie);
 		break;
 	case BPF_LINK_TYPE_TRACING:
 		err = get_prog_info(info->prog_id, &prog_info);
@@ -836,6 +947,8 @@ static int show_link_close_plain(int fd, struct bpf_link_info *info)
 			printf("\n\ttarget_obj_id %u  target_btf_id %u  ",
 			       info->tracing.target_obj_id,
 			       info->tracing.target_btf_id);
+		if (info->tracing.cookie)
+			printf("\n\tcookie %llu  ", info->tracing.cookie);
 		break;
 	case BPF_LINK_TYPE_CGROUP:
 		printf("\n\tcgroup_id %zu  ", (size_t)info->cgroup.cgroup_id);
@@ -860,6 +973,11 @@ static int show_link_close_plain(int fd, struct bpf_link_info *info)
 		printf("\n\t");
 		show_link_ifindex_plain(info->netkit.ifindex);
 		show_link_attach_type_plain(info->netkit.attach_type);
+		break;
+	case BPF_LINK_TYPE_SOCKMAP:
+		printf("\n\t");
+		printf("map_id %u  ", info->sockmap.map_id);
+		show_link_attach_type_plain(info->sockmap.attach_type);
 		break;
 	case BPF_LINK_TYPE_XDP:
 		printf("\n\t");
@@ -952,6 +1070,14 @@ again:
 				return -ENOMEM;
 			}
 			info.kprobe_multi.addrs = ptr_to_u64(addrs);
+			cookies = calloc(count, sizeof(__u64));
+			if (!cookies) {
+				p_err("mem alloc failed");
+				free(addrs);
+				close(fd);
+				return -ENOMEM;
+			}
+			info.kprobe_multi.cookies = ptr_to_u64(cookies);
 			goto again;
 		}
 	}
@@ -977,7 +1103,7 @@ again:
 			cookies = calloc(count, sizeof(__u64));
 			if (!cookies) {
 				p_err("mem alloc failed");
-				free(cookies);
+				free(ref_ctr_offsets);
 				free(offsets);
 				close(fd);
 				return -ENOMEM;

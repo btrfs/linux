@@ -6,11 +6,23 @@
 #ifndef BTRFS_BACKREF_H
 #define BTRFS_BACKREF_H
 
-#include <linux/btrfs.h>
+#include <linux/types.h>
+#include <linux/rbtree.h>
+#include <linux/list.h>
+#include <linux/slab.h>
+#include <uapi/linux/btrfs.h>
+#include <uapi/linux/btrfs_tree.h>
 #include "messages.h"
-#include "ulist.h"
+#include "locking.h"
 #include "disk-io.h"
 #include "extent_io.h"
+#include "ctree.h"
+
+struct extent_inode_elem;
+struct ulist;
+struct btrfs_extent_item;
+struct btrfs_trans_handle;
+struct btrfs_fs_info;
 
 /*
  * Used by implementations of iterate_extent_inodes_t (see definition below) to
@@ -178,7 +190,7 @@ struct btrfs_backref_share_check_ctx {
 	 * It's very common to have several file extent items that point to the
 	 * same extent (bytenr) but with different offsets and lengths. This
 	 * typically happens for COW writes, partial writes into prealloc
-	 * extents, NOCOW writes after snapshoting a root, hole punching or
+	 * extents, NOCOW writes after snapshotting a root, hole punching or
 	 * reflinking within the same file (less common perhaps).
 	 * So keep a small cache with the lookup results for the extent pointed
 	 * by the last few file extent items. This cache is checked, with a
@@ -214,8 +226,7 @@ int iterate_extent_inodes(struct btrfs_backref_walk_ctx *ctx,
 			  iterate_extent_inodes_t *iterate, void *user_ctx);
 
 int iterate_inodes_from_logical(u64 logical, struct btrfs_fs_info *fs_info,
-				struct btrfs_path *path, void *ctx,
-				bool ignore_offset);
+				void *ctx, bool ignore_offset);
 
 int paths_from_inode(u64 inum, struct inode_fs_paths *ipath);
 
@@ -271,22 +282,6 @@ struct btrfs_backref_iter {
 
 struct btrfs_backref_iter *btrfs_backref_iter_alloc(struct btrfs_fs_info *fs_info);
 
-static inline void btrfs_backref_iter_free(struct btrfs_backref_iter *iter)
-{
-	if (!iter)
-		return;
-	btrfs_free_path(iter->path);
-	kfree(iter);
-}
-
-static inline struct extent_buffer *btrfs_backref_get_eb(
-		struct btrfs_backref_iter *iter)
-{
-	if (!iter)
-		return NULL;
-	return iter->path->nodes[0];
-}
-
 /*
  * For metadata with EXTENT_ITEM key (non-skinny) case, the first inline data
  * is btrfs_tree_block_info, without a btrfs_extent_inline_ref header.
@@ -306,25 +301,6 @@ int btrfs_backref_iter_start(struct btrfs_backref_iter *iter, u64 bytenr);
 
 int btrfs_backref_iter_next(struct btrfs_backref_iter *iter);
 
-static inline bool btrfs_backref_iter_is_inline_ref(
-		struct btrfs_backref_iter *iter)
-{
-	if (iter->cur_key.type == BTRFS_EXTENT_ITEM_KEY ||
-	    iter->cur_key.type == BTRFS_METADATA_ITEM_KEY)
-		return true;
-	return false;
-}
-
-static inline void btrfs_backref_iter_release(struct btrfs_backref_iter *iter)
-{
-	iter->bytenr = 0;
-	iter->item_ptr = 0;
-	iter->cur_ptr = 0;
-	iter->end_ptr = 0;
-	btrfs_release_path(iter->path);
-	memset(&iter->cur_key, 0, sizeof(iter->cur_key));
-}
-
 /*
  * Backref cache related structures
  *
@@ -336,11 +312,22 @@ static inline void btrfs_backref_iter_release(struct btrfs_backref_iter *iter)
  * Represent a tree block in the backref cache
  */
 struct btrfs_backref_node {
-	struct {
-		struct rb_node rb_node;
-		u64 bytenr;
-	}; /* Use rb_simple_node for search/insert */
+	union{
+		/* Use rb_simple_node for search/insert */
+		struct {
+			struct rb_node rb_node;
+			u64 bytenr;
+		};
 
+		struct rb_simple_node simple_node;
+	};
+
+	/*
+	 * This is a sanity check, whenever we COW a block we will update
+	 * new_bytenr with it's current location, and we will check this in
+	 * various places to validate that the cache makes sense, it shouldn't
+	 * be used for anything else.
+	 */
 	u64 new_bytenr;
 	/* Objectid of tree block owner, can be not uptodate */
 	u64 owner;
@@ -358,10 +345,6 @@ struct btrfs_backref_node {
 	struct extent_buffer *eb;
 	/* Level of the tree block */
 	unsigned int level:8;
-	/* Is the block in a non-shareable tree */
-	unsigned int cowonly:1;
-	/* 1 if no child node is in the cache */
-	unsigned int lowest:1;
 	/* Is the extent buffer locked */
 	unsigned int locked:1;
 	/* Has the block been processed */
@@ -414,12 +397,6 @@ struct btrfs_backref_cache {
 	 * level blocks may not reflect the new location
 	 */
 	struct list_head pending[BTRFS_MAX_LEVEL];
-	/* List of backref nodes with no child node */
-	struct list_head leaves;
-	/* List of blocks that have been COWed in current transaction */
-	struct list_head changed;
-	/* List of detached backref node. */
-	struct list_head detached;
 
 	u64 last_trans;
 
@@ -437,7 +414,7 @@ struct btrfs_backref_cache {
 	/*
 	 * Whether this cache is for relocation
 	 *
-	 * Reloction backref cache require more info for reloc root compared
+	 * Relocation backref cache require more info for reloc root compared
 	 * to generic backref cache.
 	 */
 	bool is_reloc;
@@ -450,85 +427,17 @@ struct btrfs_backref_node *btrfs_backref_alloc_node(
 struct btrfs_backref_edge *btrfs_backref_alloc_edge(
 		struct btrfs_backref_cache *cache);
 
-#define		LINK_LOWER	(1 << 0)
-#define		LINK_UPPER	(1 << 1)
-static inline void btrfs_backref_link_edge(struct btrfs_backref_edge *edge,
-					   struct btrfs_backref_node *lower,
-					   struct btrfs_backref_node *upper,
-					   int link_which)
-{
-	ASSERT(upper && lower && upper->level == lower->level + 1);
-	edge->node[LOWER] = lower;
-	edge->node[UPPER] = upper;
-	if (link_which & LINK_LOWER)
-		list_add_tail(&edge->list[LOWER], &lower->upper);
-	if (link_which & LINK_UPPER)
-		list_add_tail(&edge->list[UPPER], &upper->lower);
-}
-
-static inline void btrfs_backref_free_node(struct btrfs_backref_cache *cache,
-					   struct btrfs_backref_node *node)
-{
-	if (node) {
-		ASSERT(list_empty(&node->list));
-		ASSERT(list_empty(&node->lower));
-		ASSERT(node->eb == NULL);
-		cache->nr_nodes--;
-		btrfs_put_root(node->root);
-		kfree(node);
-	}
-}
-
-static inline void btrfs_backref_free_edge(struct btrfs_backref_cache *cache,
-					   struct btrfs_backref_edge *edge)
-{
-	if (edge) {
-		cache->nr_edges--;
-		kfree(edge);
-	}
-}
-
-static inline void btrfs_backref_unlock_node_buffer(
-		struct btrfs_backref_node *node)
-{
-	if (node->locked) {
-		btrfs_tree_unlock(node->eb);
-		node->locked = 0;
-	}
-}
-
-static inline void btrfs_backref_drop_node_buffer(
-		struct btrfs_backref_node *node)
-{
-	if (node->eb) {
-		btrfs_backref_unlock_node_buffer(node);
-		free_extent_buffer(node->eb);
-		node->eb = NULL;
-	}
-}
-
-/*
- * Drop the backref node from cache without cleaning up its children
- * edges.
- *
- * This can only be called on node without parent edges.
- * The children edges are still kept as is.
- */
-static inline void btrfs_backref_drop_node(struct btrfs_backref_cache *tree,
-					   struct btrfs_backref_node *node)
-{
-	ASSERT(list_empty(&node->upper));
-
-	btrfs_backref_drop_node_buffer(node);
-	list_del_init(&node->list);
-	list_del_init(&node->lower);
-	if (!RB_EMPTY_NODE(&node->rb_node))
-		rb_erase(&node->rb_node, &tree->rb_root);
-	btrfs_backref_free_node(tree, node);
-}
+void btrfs_backref_free_node(struct btrfs_backref_cache *cache,
+			     struct btrfs_backref_node *node);
+void btrfs_backref_free_edge(struct btrfs_backref_cache *cache,
+			     struct btrfs_backref_edge *edge);
+void btrfs_backref_unlock_node_buffer(struct btrfs_backref_node *node);
+void btrfs_backref_drop_node_buffer(struct btrfs_backref_node *node);
 
 void btrfs_backref_cleanup_node(struct btrfs_backref_cache *cache,
 				struct btrfs_backref_node *node);
+void btrfs_backref_drop_node(struct btrfs_backref_cache *tree,
+			     struct btrfs_backref_node *node);
 
 void btrfs_backref_release_cache(struct btrfs_backref_cache *cache);
 

@@ -72,22 +72,24 @@ static int erofs_init_inode_xattrs(struct inode *inode)
 			ret = -EFSCORRUPTED;
 			goto out_unlock;	/* xattr ondisk layout error */
 		}
-		ret = -ENOATTR;
+		ret = -ENODATA;
 		goto out_unlock;
 	}
 
 	it.buf = __EROFS_BUF_INITIALIZER;
-	erofs_init_metabuf(&it.buf, sb);
+	ret = erofs_init_metabuf(&it.buf, sb, erofs_inode_in_metabox(inode));
+	if (ret)
+		goto out_unlock;
 	it.pos = erofs_iloc(inode) + vi->inode_isize;
 
 	/* read in shared xattr array (non-atomic, see kmalloc below) */
-	it.kaddr = erofs_bread(&it.buf, erofs_blknr(sb, it.pos), EROFS_KMAP);
+	it.kaddr = erofs_bread(&it.buf, it.pos, true);
 	if (IS_ERR(it.kaddr)) {
 		ret = PTR_ERR(it.kaddr);
 		goto out_unlock;
 	}
 
-	ih = it.kaddr + erofs_blkoff(sb, it.pos);
+	ih = it.kaddr;
 	vi->xattr_name_filter = le32_to_cpu(ih->h_name_filter);
 	vi->xattr_shared_count = ih->h_shared_count;
 	vi->xattr_shared_xattrs = kmalloc_array(vi->xattr_shared_count,
@@ -102,16 +104,14 @@ static int erofs_init_inode_xattrs(struct inode *inode)
 	it.pos += sizeof(struct erofs_xattr_ibody_header);
 
 	for (i = 0; i < vi->xattr_shared_count; ++i) {
-		it.kaddr = erofs_bread(&it.buf, erofs_blknr(sb, it.pos),
-				       EROFS_KMAP);
+		it.kaddr = erofs_bread(&it.buf, it.pos, true);
 		if (IS_ERR(it.kaddr)) {
 			kfree(vi->xattr_shared_xattrs);
 			vi->xattr_shared_xattrs = NULL;
 			ret = PTR_ERR(it.kaddr);
 			goto out_unlock;
 		}
-		vi->xattr_shared_xattrs[i] = le32_to_cpu(*(__le32 *)
-				(it.kaddr + erofs_blkoff(sb, it.pos)));
+		vi->xattr_shared_xattrs[i] = le32_to_cpu(*(__le32 *)it.kaddr);
 		it.pos += sizeof(__le32);
 	}
 	erofs_put_metabuf(&it.buf);
@@ -185,12 +185,11 @@ static int erofs_xattr_copy_to_buffer(struct erofs_xattr_iter *it,
 	void *src;
 
 	for (processed = 0; processed < len; processed += slice) {
-		it->kaddr = erofs_bread(&it->buf, erofs_blknr(sb, it->pos),
-					EROFS_KMAP);
+		it->kaddr = erofs_bread(&it->buf, it->pos, true);
 		if (IS_ERR(it->kaddr))
 			return PTR_ERR(it->kaddr);
 
-		src = it->kaddr + erofs_blkoff(sb, it->pos);
+		src = it->kaddr;
 		slice = min_t(unsigned int, sb->s_blocksize -
 				erofs_blkoff(sb, it->pos), len - processed);
 		memcpy(it->buffer + it->buffer_ofs, src, slice);
@@ -208,8 +207,7 @@ static int erofs_listxattr_foreach(struct erofs_xattr_iter *it)
 	int err;
 
 	/* 1. handle xattr entry */
-	entry = *(struct erofs_xattr_entry *)
-			(it->kaddr + erofs_blkoff(it->sb, it->pos));
+	entry = *(struct erofs_xattr_entry *)it->kaddr;
 	it->pos += sizeof(struct erofs_xattr_entry);
 
 	base_index = entry.e_name_index;
@@ -259,8 +257,7 @@ static int erofs_getxattr_foreach(struct erofs_xattr_iter *it)
 	unsigned int slice, processed, value_sz;
 
 	/* 1. handle xattr entry */
-	entry = *(struct erofs_xattr_entry *)
-			(it->kaddr + erofs_blkoff(sb, it->pos));
+	entry = *(struct erofs_xattr_entry *)it->kaddr;
 	it->pos += sizeof(struct erofs_xattr_entry);
 	value_sz = le16_to_cpu(entry.e_value_size);
 
@@ -271,28 +268,27 @@ static int erofs_getxattr_foreach(struct erofs_xattr_iter *it)
 			(entry.e_name_index & EROFS_XATTR_LONG_PREFIX_MASK);
 
 		if (pf >= sbi->xattr_prefixes + sbi->xattr_prefix_count)
-			return -ENOATTR;
+			return -ENODATA;
 
 		if (it->index != pf->prefix->base_index ||
 		    it->name.len != entry.e_name_len + pf->infix_len)
-			return -ENOATTR;
+			return -ENODATA;
 
 		if (memcmp(it->name.name, pf->prefix->infix, pf->infix_len))
-			return -ENOATTR;
+			return -ENODATA;
 
 		it->infix_len = pf->infix_len;
 	} else {
 		if (it->index != entry.e_name_index ||
 		    it->name.len != entry.e_name_len)
-			return -ENOATTR;
+			return -ENODATA;
 
 		it->infix_len = 0;
 	}
 
 	/* 2. handle xattr name */
 	for (processed = 0; processed < entry.e_name_len; processed += slice) {
-		it->kaddr = erofs_bread(&it->buf, erofs_blknr(sb, it->pos),
-					EROFS_KMAP);
+		it->kaddr = erofs_bread(&it->buf, it->pos, true);
 		if (IS_ERR(it->kaddr))
 			return PTR_ERR(it->kaddr);
 
@@ -300,8 +296,8 @@ static int erofs_getxattr_foreach(struct erofs_xattr_iter *it)
 				sb->s_blocksize - erofs_blkoff(sb, it->pos),
 				entry.e_name_len - processed);
 		if (memcmp(it->name.name + it->infix_len + processed,
-			   it->kaddr + erofs_blkoff(sb, it->pos), slice))
-			return -ENOATTR;
+			   it->kaddr, slice))
+			return -ENODATA;
 		it->pos += slice;
 	}
 
@@ -329,20 +325,21 @@ static int erofs_xattr_iter_inline(struct erofs_xattr_iter *it,
 			  sizeof(u32) * vi->xattr_shared_count;
 	if (xattr_header_sz >= vi->xattr_isize) {
 		DBG_BUGON(xattr_header_sz > vi->xattr_isize);
-		return -ENOATTR;
+		return -ENODATA;
 	}
 
+	ret = erofs_init_metabuf(&it->buf, it->sb, erofs_inode_in_metabox(inode));
+	if (ret)
+		return ret;
 	remaining = vi->xattr_isize - xattr_header_sz;
 	it->pos = erofs_iloc(inode) + vi->inode_isize + xattr_header_sz;
 
 	while (remaining) {
-		it->kaddr = erofs_bread(&it->buf, erofs_blknr(it->sb, it->pos),
-					EROFS_KMAP);
+		it->kaddr = erofs_bread(&it->buf, it->pos, true);
 		if (IS_ERR(it->kaddr))
 			return PTR_ERR(it->kaddr);
 
-		entry_sz = erofs_xattr_entry_size(it->kaddr +
-				erofs_blkoff(it->sb, it->pos));
+		entry_sz = erofs_xattr_entry_size(it->kaddr);
 		/* xattr on-disk corruption: xattr entry beyond xattr_isize */
 		if (remaining < entry_sz) {
 			DBG_BUGON(1);
@@ -355,7 +352,7 @@ static int erofs_xattr_iter_inline(struct erofs_xattr_iter *it,
 			ret = erofs_getxattr_foreach(it);
 		else
 			ret = erofs_listxattr_foreach(it);
-		if ((getxattr && ret != -ENOATTR) || (!getxattr && ret))
+		if ((getxattr && ret != -ENODATA) || (!getxattr && ret))
 			break;
 
 		it->pos = next_pos;
@@ -369,14 +366,18 @@ static int erofs_xattr_iter_shared(struct erofs_xattr_iter *it,
 	struct erofs_inode *const vi = EROFS_I(inode);
 	struct super_block *const sb = it->sb;
 	struct erofs_sb_info *sbi = EROFS_SB(sb);
-	unsigned int i;
-	int ret = -ENOATTR;
+	unsigned int i = 0;
+	int ret;
 
-	for (i = 0; i < vi->xattr_shared_count; ++i) {
+	ret = erofs_init_metabuf(&it->buf, sb,
+				 erofs_sb_has_shared_ea_in_metabox(sbi));
+	if (ret)
+		return ret;
+
+	while (i < vi->xattr_shared_count) {
 		it->pos = erofs_pos(sb, sbi->xattr_blkaddr) +
-				vi->xattr_shared_xattrs[i] * sizeof(__le32);
-		it->kaddr = erofs_bread(&it->buf, erofs_blknr(sb, it->pos),
-					EROFS_KMAP);
+				vi->xattr_shared_xattrs[i++] * sizeof(__le32);
+		it->kaddr = erofs_bread(&it->buf, it->pos, true);
 		if (IS_ERR(it->kaddr))
 			return PTR_ERR(it->kaddr);
 
@@ -384,10 +385,10 @@ static int erofs_xattr_iter_shared(struct erofs_xattr_iter *it,
 			ret = erofs_getxattr_foreach(it);
 		else
 			ret = erofs_listxattr_foreach(it);
-		if ((getxattr && ret != -ENOATTR) || (!getxattr && ret))
+		if ((getxattr && ret != -ENODATA) || (!getxattr && ret))
 			break;
 	}
-	return ret;
+	return i ? ret : -ENODATA;
 }
 
 int erofs_getxattr(struct inode *inode, int index, const char *name,
@@ -412,23 +413,22 @@ int erofs_getxattr(struct inode *inode, int index, const char *name,
 				EROFS_XATTR_FILTER_SEED + index);
 		hashbit &= EROFS_XATTR_FILTER_BITS - 1;
 		if (vi->xattr_name_filter & (1U << hashbit))
-			return -ENOATTR;
+			return -ENODATA;
 	}
 
 	it.index = index;
-	it.name = (struct qstr)QSTR_INIT(name, strlen(name));
+	it.name = QSTR(name);
 	if (it.name.len > EROFS_NAME_LEN)
 		return -ERANGE;
 
 	it.sb = inode->i_sb;
 	it.buf = __EROFS_BUF_INITIALIZER;
-	erofs_init_metabuf(&it.buf, it.sb);
 	it.buffer = buffer;
 	it.buffer_size = buffer_size;
 	it.buffer_ofs = 0;
 
 	ret = erofs_xattr_iter_inline(&it, inode, true);
-	if (ret == -ENOATTR)
+	if (ret == -ENODATA)
 		ret = erofs_xattr_iter_shared(&it, inode, true);
 	erofs_put_metabuf(&it.buf);
 	return ret ? ret : it.buffer_ofs;
@@ -441,23 +441,22 @@ ssize_t erofs_listxattr(struct dentry *dentry, char *buffer, size_t buffer_size)
 	struct inode *inode = d_inode(dentry);
 
 	ret = erofs_init_inode_xattrs(inode);
-	if (ret == -ENOATTR)
+	if (ret == -ENODATA)
 		return 0;
 	if (ret)
 		return ret;
 
 	it.sb = dentry->d_sb;
 	it.buf = __EROFS_BUF_INITIALIZER;
-	erofs_init_metabuf(&it.buf, it.sb);
 	it.dentry = dentry;
 	it.buffer = buffer;
 	it.buffer_size = buffer_size;
 	it.buffer_ofs = 0;
 
 	ret = erofs_xattr_iter_inline(&it, inode, false);
-	if (!ret || ret == -ENOATTR)
+	if (!ret || ret == -ENODATA)
 		ret = erofs_xattr_iter_shared(&it, inode, false);
-	if (ret == -ENOATTR)
+	if (ret == -ENODATA)
 		ret = 0;
 	erofs_put_metabuf(&it.buf);
 	return ret ? ret : it.buffer_ofs;
@@ -483,18 +482,25 @@ int erofs_xattr_prefixes_init(struct super_block *sb)
 	erofs_off_t pos = (erofs_off_t)sbi->xattr_prefix_start << 2;
 	struct erofs_xattr_prefix_item *pfs;
 	int ret = 0, i, len;
+	bool plain = erofs_sb_has_plain_xattr_pfx(sbi);
 
 	if (!sbi->xattr_prefix_count)
 		return 0;
 
-	pfs = kzalloc(sbi->xattr_prefix_count * sizeof(*pfs), GFP_KERNEL);
+	pfs = kcalloc(sbi->xattr_prefix_count, sizeof(*pfs), GFP_KERNEL);
 	if (!pfs)
 		return -ENOMEM;
 
-	if (sbi->packed_inode)
-		buf.inode = sbi->packed_inode;
-	else
-		erofs_init_metabuf(&buf, sb);
+	if (!plain) {
+		if (erofs_sb_has_metabox(sbi))
+			(void)erofs_init_metabuf(&buf, sb, true);
+		else if (sbi->packed_inode)
+			buf.mapping = sbi->packed_inode->i_mapping;
+		else
+			plain = true;
+	}
+	if (plain)
+		(void)erofs_init_metabuf(&buf, sb, false);
 
 	for (i = 0; i < sbi->xattr_prefix_count; i++) {
 		void *ptr = erofs_read_metadata(sb, &buf, &pos, &len);
@@ -548,7 +554,7 @@ struct posix_acl *erofs_get_acl(struct inode *inode, int type, bool rcu)
 		rc = erofs_getxattr(inode, prefix, "", value, rc);
 	}
 
-	if (rc == -ENOATTR)
+	if (rc == -ENODATA)
 		acl = NULL;
 	else if (rc < 0)
 		acl = ERR_PTR(rc);

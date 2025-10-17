@@ -18,6 +18,7 @@
 #include <linux/kobject.h>
 
 #include <linux/uaccess.h>
+#include <asm/machine.h>
 #include <asm/cio.h>
 #include <asm/ccwdev.h>
 #include <asm/debug.h>
@@ -48,7 +49,9 @@ MODULE_DESCRIPTION("s390 z/VM virtual unit record device driver");
 MODULE_LICENSE("GPL");
 
 static dev_t ur_first_dev_maj_min;
-static struct class *vmur_class;
+static const struct class vmur_class = {
+	.name = "vmur",
+};
 static struct debug_info *vmur_dbf;
 
 /* We put the device's record length (for writes) in the driver_info field */
@@ -195,7 +198,7 @@ static void free_chan_prog(struct ccw1 *cpa)
 	struct ccw1 *ptr = cpa;
 
 	while (ptr->cda) {
-		kfree((void *)(addr_t) ptr->cda);
+		kfree(dma32_to_virt(ptr->cda));
 		ptr++;
 	}
 	kfree(cpa);
@@ -237,7 +240,7 @@ static struct ccw1 *alloc_chan_prog(const char __user *ubuf, int rec_count,
 			free_chan_prog(cpa);
 			return ERR_PTR(-ENOMEM);
 		}
-		cpa[i].cda = (u32)(addr_t) kbuf;
+		cpa[i].cda = virt_to_dma32(kbuf);
 		if (copy_from_user(kbuf, ubuf, reclen)) {
 			free_chan_prog(cpa);
 			return ERR_PTR(-EFAULT);
@@ -343,7 +346,7 @@ static ssize_t ur_attr_reclen_show(struct device *dev,
 	urd = urdev_get_from_cdev(to_ccwdev(dev));
 	if (!urd)
 		return -ENODEV;
-	rc = sprintf(buf, "%zu\n", urd->reclen);
+	rc = sysfs_emit(buf, "%zu\n", urd->reclen);
 	urdev_put(urd);
 	return rc;
 }
@@ -912,7 +915,7 @@ static int ur_set_online(struct ccw_device *cdev)
 		goto fail_free_cdev;
 	}
 
-	urd->device = device_create(vmur_class, &cdev->dev,
+	urd->device = device_create(&vmur_class, &cdev->dev,
 				    urd->char_device->dev, NULL, "%s", node_id);
 	if (IS_ERR(urd->device)) {
 		rc = PTR_ERR(urd->device);
@@ -958,7 +961,7 @@ static int ur_set_offline_force(struct ccw_device *cdev, int force)
 		/* Work not run yet - need to release reference here */
 		urdev_put(urd);
 	}
-	device_destroy(vmur_class, urd->char_device->dev);
+	device_destroy(&vmur_class, urd->char_device->dev);
 	cdev_del(urd->char_device);
 	urd->char_device = NULL;
 	rc = 0;
@@ -1007,7 +1010,7 @@ static int __init ur_init(void)
 	int rc;
 	dev_t dev;
 
-	if (!MACHINE_IS_VM) {
+	if (!machine_is_vm()) {
 		pr_err("The %s cannot be loaded without z/VM\n",
 		       ur_banner);
 		return -ENODEV;
@@ -1022,11 +1025,9 @@ static int __init ur_init(void)
 
 	debug_set_level(vmur_dbf, 6);
 
-	vmur_class = class_create("vmur");
-	if (IS_ERR(vmur_class)) {
-		rc = PTR_ERR(vmur_class);
+	rc = class_register(&vmur_class);
+	if (rc)
 		goto fail_free_dbf;
-	}
 
 	rc = ccw_driver_register(&ur_driver);
 	if (rc)
@@ -1046,7 +1047,7 @@ static int __init ur_init(void)
 fail_unregister_driver:
 	ccw_driver_unregister(&ur_driver);
 fail_class_destroy:
-	class_destroy(vmur_class);
+	class_unregister(&vmur_class);
 fail_free_dbf:
 	debug_unregister(vmur_dbf);
 	return rc;
@@ -1056,7 +1057,7 @@ static void __exit ur_exit(void)
 {
 	unregister_chrdev_region(ur_first_dev_maj_min, NUM_MINORS);
 	ccw_driver_unregister(&ur_driver);
-	class_destroy(vmur_class);
+	class_unregister(&vmur_class);
 	debug_unregister(vmur_dbf);
 	pr_info("%s unloaded.\n", ur_banner);
 }

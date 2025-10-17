@@ -39,13 +39,18 @@ static int force_tjmax;
 module_param_named(tjmax, force_tjmax, int, 0444);
 MODULE_PARM_DESC(tjmax, "TjMax value in degrees Celsius");
 
-#define PKG_SYSFS_ATTR_NO	1	/* Sysfs attribute for package temp */
-#define BASE_SYSFS_ATTR_NO	2	/* Sysfs Base attr no for coretemp */
-#define NUM_REAL_CORES		128	/* Number of Real cores per cpu */
+#define NUM_REAL_CORES		512	/* Number of Real cores per cpu */
 #define CORETEMP_NAME_LENGTH	28	/* String Length of attrs */
-#define MAX_CORE_ATTRS		4	/* Maximum no of basic attrs */
-#define TOTAL_ATTRS		(MAX_CORE_ATTRS + 1)
-#define MAX_CORE_DATA		(NUM_REAL_CORES + BASE_SYSFS_ATTR_NO)
+
+enum coretemp_attr_index {
+	ATTR_LABEL,
+	ATTR_CRIT_ALARM,
+	ATTR_TEMP,
+	ATTR_TJMAX,
+	ATTR_TTARGET,
+	MAX_CORE_ATTRS = ATTR_TJMAX + 1,	/* Maximum no of basic attrs */
+	TOTAL_ATTRS = ATTR_TTARGET + 1		/* Maximum no of possible attrs */
+};
 
 #ifdef CONFIG_SMP
 #define for_each_sibling(i, cpu) \
@@ -65,19 +70,17 @@ MODULE_PARM_DESC(tjmax, "TjMax value in degrees Celsius");
  * @status_reg: One of IA32_THERM_STATUS or IA32_PACKAGE_THERM_STATUS,
  *		from where the temperature values should be read.
  * @attr_size:  Total number of pre-core attrs displayed in the sysfs.
- * @is_pkg_data: If this is 1, the temp_data holds pkgtemp data.
- *		Otherwise, temp_data holds coretemp data.
  */
 struct temp_data {
 	int temp;
 	int tjmax;
 	unsigned long last_updated;
 	unsigned int cpu;
+	int index;
 	u32 cpu_core_id;
 	u32 status_reg;
 	int attr_size;
-	bool is_pkg_data;
-	struct sensor_device_attribute sd_attrs[TOTAL_ATTRS];
+	struct device_attribute sd_attrs[TOTAL_ATTRS];
 	char attr_name[TOTAL_ATTRS][CORETEMP_NAME_LENGTH];
 	struct attribute *attrs[TOTAL_ATTRS + 1];
 	struct attribute_group attr_group;
@@ -88,10 +91,11 @@ struct temp_data {
 struct platform_data {
 	struct device		*hwmon_dev;
 	u16			pkg_id;
-	u16			cpu_map[NUM_REAL_CORES];
+	int			nr_cores;
 	struct ida		ida;
 	struct cpumask		cpumask;
-	struct temp_data	*core_data[MAX_CORE_DATA];
+	struct temp_data	*pkg_data;
+	struct temp_data	**core_data;
 	struct device_attribute name_attr;
 };
 
@@ -118,30 +122,35 @@ static const struct tjmax tjmax_table[] = {
 };
 
 struct tjmax_model {
-	u8 model;
-	u8 mask;
+	u32 vfm;
+	u8 stepping_mask;
 	int tjmax;
 };
 
 #define ANY 0xff
 
 static const struct tjmax_model tjmax_model_table[] = {
-	{ 0x1c, 10, 100000 },	/* D4xx, K4xx, N4xx, D5xx, K5xx, N5xx */
-	{ 0x1c, ANY, 90000 },	/* Z5xx, N2xx, possibly others
-				 * Note: Also matches 230 and 330,
-				 * which are covered by tjmax_table
-				 */
-	{ 0x26, ANY, 90000 },	/* Atom Tunnel Creek (Exx), Lincroft (Z6xx)
-				 * Note: TjMax for E6xxT is 110C, but CPU type
-				 * is undetectable by software
-				 */
-	{ 0x27, ANY, 90000 },	/* Atom Medfield (Z2460) */
-	{ 0x35, ANY, 90000 },	/* Atom Clover Trail/Cloverview (Z27x0) */
-	{ 0x36, ANY, 100000 },	/* Atom Cedar Trail/Cedarview (N2xxx, D2xxx)
-				 * Also matches S12x0 (stepping 9), covered by
-				 * PCI table
-				 */
+	{ INTEL_ATOM_BONNELL,	      10,  100000 },	/* D4xx, K4xx, N4xx, D5xx, K5xx, N5xx */
+	{ INTEL_ATOM_BONNELL,	      ANY, 90000 },	/* Z5xx, N2xx, possibly others
+							 * Note: Also matches 230 and 330,
+							 * which are covered by tjmax_table
+							 */
+	{ INTEL_ATOM_BONNELL_MID,     ANY, 90000 },	/* Atom Tunnel Creek (Exx), Lincroft (Z6xx)
+							 * Note: TjMax for E6xxT is 110C, but CPU type
+							 * is undetectable by software
+							 */
+	{ INTEL_ATOM_SALTWELL_MID,    ANY, 90000 },	/* Atom Medfield (Z2460) */
+	{ INTEL_ATOM_SALTWELL_TABLET, ANY, 90000 },	/* Atom Clover Trail/Cloverview (Z27x0) */
+	{ INTEL_ATOM_SALTWELL,	      ANY, 100000 },	/* Atom Cedar Trail/Cedarview (N2xxx, D2xxx)
+							 * Also matches S12x0 (stepping 9), covered by
+							 * PCI table
+							 */
 };
+
+static bool is_pkg_temp_data(struct temp_data *tdata)
+{
+	return tdata->index < 0;
+}
 
 static int adjust_tjmax(struct cpuinfo_x86 *c, u32 id, struct device *dev)
 {
@@ -171,6 +180,11 @@ static int adjust_tjmax(struct cpuinfo_x86 *c, u32 id, struct device *dev)
 	}
 	pci_dev_put(host_bridge);
 
+	/*
+	 * This is literally looking for "CPU  XXX" in the model string.
+	 * Not checking it against the model as well. Just purely a
+	 * string search.
+	 */
 	for (i = 0; i < ARRAY_SIZE(tjmax_table); i++) {
 		if (strstr(c->x86_model_id, tjmax_table[i].id))
 			return tjmax_table[i].tjmax;
@@ -178,17 +192,18 @@ static int adjust_tjmax(struct cpuinfo_x86 *c, u32 id, struct device *dev)
 
 	for (i = 0; i < ARRAY_SIZE(tjmax_model_table); i++) {
 		const struct tjmax_model *tm = &tjmax_model_table[i];
-		if (c->x86_model == tm->model &&
-		    (tm->mask == ANY || c->x86_stepping == tm->mask))
+		if (c->x86_vfm == tm->vfm &&
+		    (tm->stepping_mask == ANY ||
+		     tm->stepping_mask == c->x86_stepping))
 			return tm->tjmax;
 	}
 
 	/* Early chips have no MSR for TjMax */
 
-	if (c->x86_model == 0xf && c->x86_stepping < 4)
+	if (c->x86_vfm == INTEL_CORE2_MEROM && c->x86_stepping < 4)
 		usemsr_ee = 0;
 
-	if (c->x86_model > 0xe && usemsr_ee) {
+	if (c->x86_vfm > INTEL_CORE_YONAH && usemsr_ee) {
 		u8 platform_id;
 
 		/*
@@ -202,7 +217,8 @@ static int adjust_tjmax(struct cpuinfo_x86 *c, u32 id, struct device *dev)
 				 "Unable to access MSR 0x17, assuming desktop"
 				 " CPU\n");
 			usemsr_ee = 0;
-		} else if (c->x86_model < 0x17 && !(eax & 0x10000000)) {
+		} else if (c->x86_vfm < INTEL_CORE2_PENRYN &&
+			   !(eax & 0x10000000)) {
 			/*
 			 * Trust bit 28 up to Penryn, I could not find any
 			 * documentation on that; if you happen to know
@@ -217,7 +233,7 @@ static int adjust_tjmax(struct cpuinfo_x86 *c, u32 id, struct device *dev)
 			 * Mobile Penryn CPU seems to be platform ID 7 or 5
 			 * (guesswork)
 			 */
-			if (c->x86_model == 0x17 &&
+			if (c->x86_vfm == INTEL_CORE2_PENRYN &&
 			    (platform_id == 5 || platform_id == 7)) {
 				/*
 				 * If MSR EE bit is set, set it to 90 degrees C,
@@ -249,18 +265,6 @@ static int adjust_tjmax(struct cpuinfo_x86 *c, u32 id, struct device *dev)
 	return tjmax;
 }
 
-static bool cpu_has_tjmax(struct cpuinfo_x86 *c)
-{
-	u8 model = c->x86_model;
-
-	return model > 0xe &&
-	       model != 0x1c &&
-	       model != 0x26 &&
-	       model != 0x27 &&
-	       model != 0x35 &&
-	       model != 0x36;
-}
-
 static int get_tjmax(struct temp_data *tdata, struct device *dev)
 {
 	struct cpuinfo_x86 *c = &cpu_data(tdata->cpu);
@@ -278,8 +282,7 @@ static int get_tjmax(struct temp_data *tdata, struct device *dev)
 	 */
 	err = rdmsr_safe_on_cpu(tdata->cpu, MSR_IA32_TEMPERATURE_TARGET, &eax, &edx);
 	if (err) {
-		if (cpu_has_tjmax(c))
-			dev_warn(dev, "Unable to read TjMax from CPU %u\n", tdata->cpu);
+		dev_warn_once(dev, "Unable to read TjMax from CPU %u\n", tdata->cpu);
 	} else {
 		val = (eax >> 16) & 0xff;
 		if (val)
@@ -332,11 +335,10 @@ static struct platform_device **zone_devices;
 static ssize_t show_label(struct device *dev,
 				struct device_attribute *devattr, char *buf)
 {
-	struct sensor_device_attribute *attr = to_sensor_dev_attr(devattr);
 	struct platform_data *pdata = dev_get_drvdata(dev);
-	struct temp_data *tdata = pdata->core_data[attr->index];
+	struct temp_data *tdata = container_of(devattr, struct temp_data, sd_attrs[ATTR_LABEL]);
 
-	if (tdata->is_pkg_data)
+	if (is_pkg_temp_data(tdata))
 		return sprintf(buf, "Package id %u\n", pdata->pkg_id);
 
 	return sprintf(buf, "Core %u\n", tdata->cpu_core_id);
@@ -346,9 +348,8 @@ static ssize_t show_crit_alarm(struct device *dev,
 				struct device_attribute *devattr, char *buf)
 {
 	u32 eax, edx;
-	struct sensor_device_attribute *attr = to_sensor_dev_attr(devattr);
-	struct platform_data *pdata = dev_get_drvdata(dev);
-	struct temp_data *tdata = pdata->core_data[attr->index];
+	struct temp_data *tdata = container_of(devattr, struct temp_data,
+						sd_attrs[ATTR_CRIT_ALARM]);
 
 	mutex_lock(&tdata->update_lock);
 	rdmsr_on_cpu(tdata->cpu, tdata->status_reg, &eax, &edx);
@@ -360,9 +361,7 @@ static ssize_t show_crit_alarm(struct device *dev,
 static ssize_t show_tjmax(struct device *dev,
 			struct device_attribute *devattr, char *buf)
 {
-	struct sensor_device_attribute *attr = to_sensor_dev_attr(devattr);
-	struct platform_data *pdata = dev_get_drvdata(dev);
-	struct temp_data *tdata = pdata->core_data[attr->index];
+	struct temp_data *tdata = container_of(devattr, struct temp_data, sd_attrs[ATTR_TJMAX]);
 	int tjmax;
 
 	mutex_lock(&tdata->update_lock);
@@ -375,9 +374,7 @@ static ssize_t show_tjmax(struct device *dev,
 static ssize_t show_ttarget(struct device *dev,
 				struct device_attribute *devattr, char *buf)
 {
-	struct sensor_device_attribute *attr = to_sensor_dev_attr(devattr);
-	struct platform_data *pdata = dev_get_drvdata(dev);
-	struct temp_data *tdata = pdata->core_data[attr->index];
+	struct temp_data *tdata = container_of(devattr, struct temp_data, sd_attrs[ATTR_TTARGET]);
 	int ttarget;
 
 	mutex_lock(&tdata->update_lock);
@@ -393,9 +390,7 @@ static ssize_t show_temp(struct device *dev,
 			struct device_attribute *devattr, char *buf)
 {
 	u32 eax, edx;
-	struct sensor_device_attribute *attr = to_sensor_dev_attr(devattr);
-	struct platform_data *pdata = dev_get_drvdata(dev);
-	struct temp_data *tdata = pdata->core_data[attr->index];
+	struct temp_data *tdata = container_of(devattr, struct temp_data, sd_attrs[ATTR_TEMP]);
 	int tjmax;
 
 	mutex_lock(&tdata->update_lock);
@@ -410,7 +405,7 @@ static ssize_t show_temp(struct device *dev,
 		 * Return it instead of reporting an error which doesn't
 		 * really help at all.
 		 */
-		tdata->temp = tjmax - ((eax >> 16) & 0x7f) * 1000;
+		tdata->temp = tjmax - ((eax >> 16) & 0xff) * 1000;
 		tdata->last_updated = jiffies;
 	}
 
@@ -418,8 +413,7 @@ static ssize_t show_temp(struct device *dev,
 	return sprintf(buf, "%d\n", tdata->temp);
 }
 
-static int create_core_attrs(struct temp_data *tdata, struct device *dev,
-			     int attr_no)
+static int create_core_attrs(struct temp_data *tdata, struct device *dev)
 {
 	int i;
 	static ssize_t (*const rd_ptr[TOTAL_ATTRS]) (struct device *dev,
@@ -431,14 +425,20 @@ static int create_core_attrs(struct temp_data *tdata, struct device *dev,
 	};
 
 	for (i = 0; i < tdata->attr_size; i++) {
+		/*
+		 * We map the attr number to core id of the CPU
+		 * The attr number is always core id + 2
+		 * The Pkgtemp will always show up as temp1_*, if available
+		 */
+		int attr_no = is_pkg_temp_data(tdata) ? 1 : tdata->cpu_core_id + 2;
+
 		snprintf(tdata->attr_name[i], CORETEMP_NAME_LENGTH,
 			 "temp%d_%s", attr_no, suffixes[i]);
-		sysfs_attr_init(&tdata->sd_attrs[i].dev_attr.attr);
-		tdata->sd_attrs[i].dev_attr.attr.name = tdata->attr_name[i];
-		tdata->sd_attrs[i].dev_attr.attr.mode = 0444;
-		tdata->sd_attrs[i].dev_attr.show = rd_ptr[i];
-		tdata->sd_attrs[i].index = attr_no;
-		tdata->attrs[i] = &tdata->sd_attrs[i].dev_attr.attr;
+		sysfs_attr_init(&tdata->sd_attrs[i].attr);
+		tdata->sd_attrs[i].attr.name = tdata->attr_name[i];
+		tdata->sd_attrs[i].attr.mode = 0444;
+		tdata->sd_attrs[i].show = rd_ptr[i];
+		tdata->attrs[i] = &tdata->sd_attrs[i].attr;
 	}
 	tdata->attr_group.attrs = tdata->attrs;
 	return sysfs_create_group(&dev->kobj, &tdata->attr_group);
@@ -454,7 +454,7 @@ static int chk_ucode_version(unsigned int cpu)
 	 * Readings might stop update when processor visited too deep sleep,
 	 * fixed for stepping D0 (6EC).
 	 */
-	if (c->x86_model == 0xe && c->x86_stepping < 0xc && c->microcode < 0x39) {
+	if (c->x86_vfm == INTEL_CORE_YONAH && c->x86_stepping < 0xc && c->microcode < 0x39) {
 		pr_err("Errata AE18 not fixed, update BIOS or microcode of the CPU!\n");
 		return -ENODEV;
 	}
@@ -470,22 +470,79 @@ static struct platform_device *coretemp_get_pdev(unsigned int cpu)
 	return NULL;
 }
 
-static struct temp_data *init_temp_data(unsigned int cpu, int pkg_flag)
+static struct temp_data *
+init_temp_data(struct platform_data *pdata, unsigned int cpu, int pkg_flag)
 {
 	struct temp_data *tdata;
+
+	if (!pdata->core_data) {
+		/*
+		 * TODO:
+		 * The information of actual possible cores in a package is broken for now.
+		 * Will replace hardcoded NUM_REAL_CORES with actual per package core count
+		 * when this information becomes available.
+		 */
+		pdata->nr_cores = NUM_REAL_CORES;
+		pdata->core_data = kcalloc(pdata->nr_cores, sizeof(struct temp_data *),
+					   GFP_KERNEL);
+		if (!pdata->core_data)
+			return NULL;
+	}
 
 	tdata = kzalloc(sizeof(struct temp_data), GFP_KERNEL);
 	if (!tdata)
 		return NULL;
 
+	if (pkg_flag) {
+		pdata->pkg_data = tdata;
+		/* Use tdata->index as indicator of package temp data */
+		tdata->index = -1;
+	} else {
+		tdata->index = ida_alloc_max(&pdata->ida, pdata->nr_cores - 1, GFP_KERNEL);
+		if (tdata->index < 0) {
+			kfree(tdata);
+			return NULL;
+		}
+		pdata->core_data[tdata->index] = tdata;
+	}
+
 	tdata->status_reg = pkg_flag ? MSR_IA32_PACKAGE_THERM_STATUS :
 							MSR_IA32_THERM_STATUS;
-	tdata->is_pkg_data = pkg_flag;
 	tdata->cpu = cpu;
 	tdata->cpu_core_id = topology_core_id(cpu);
 	tdata->attr_size = MAX_CORE_ATTRS;
 	mutex_init(&tdata->update_lock);
 	return tdata;
+}
+
+static void destroy_temp_data(struct platform_data *pdata, struct temp_data *tdata)
+{
+	if (is_pkg_temp_data(tdata)) {
+		pdata->pkg_data = NULL;
+		kfree(pdata->core_data);
+		pdata->core_data = NULL;
+		pdata->nr_cores = 0;
+	} else {
+		pdata->core_data[tdata->index] = NULL;
+		ida_free(&pdata->ida, tdata->index);
+	}
+	kfree(tdata);
+}
+
+static struct temp_data *get_temp_data(struct platform_data *pdata, int cpu)
+{
+	int i;
+
+	/* cpu < 0 means get pkg temp_data */
+	if (cpu < 0)
+		return pdata->pkg_data;
+
+	for (i = 0; i < pdata->nr_cores; i++) {
+		if (pdata->core_data[i] &&
+		    pdata->core_data[i]->cpu_core_id == topology_core_id(cpu))
+			return pdata->core_data[i];
+	}
+	return NULL;
 }
 
 static int create_core_data(struct platform_device *pdev, unsigned int cpu,
@@ -495,42 +552,19 @@ static int create_core_data(struct platform_device *pdev, unsigned int cpu,
 	struct platform_data *pdata = platform_get_drvdata(pdev);
 	struct cpuinfo_x86 *c = &cpu_data(cpu);
 	u32 eax, edx;
-	int err, index, attr_no;
+	int err;
 
 	if (!housekeeping_cpu(cpu, HK_TYPE_MISC))
 		return 0;
 
-	/*
-	 * Find attr number for sysfs:
-	 * We map the attr number to core id of the CPU
-	 * The attr number is always core id + 2
-	 * The Pkgtemp will always show up as temp1_*, if available
-	 */
-	if (pkg_flag) {
-		attr_no = PKG_SYSFS_ATTR_NO;
-	} else {
-		index = ida_alloc(&pdata->ida, GFP_KERNEL);
-		if (index < 0)
-			return index;
-		pdata->cpu_map[index] = topology_core_id(cpu);
-		attr_no = index + BASE_SYSFS_ATTR_NO;
-	}
-
-	if (attr_no > MAX_CORE_DATA - 1) {
-		err = -ERANGE;
-		goto ida_free;
-	}
-
-	tdata = init_temp_data(cpu, pkg_flag);
-	if (!tdata) {
-		err = -ENOMEM;
-		goto ida_free;
-	}
+	tdata = init_temp_data(pdata, cpu, pkg_flag);
+	if (!tdata)
+		return -ENOMEM;
 
 	/* Test if we can access the status register */
 	err = rdmsr_safe_on_cpu(cpu, tdata->status_reg, &eax, &edx);
 	if (err)
-		goto exit_free;
+		goto err;
 
 	/* Make sure tdata->tjmax is a valid indicator for dynamic/static tjmax */
 	get_tjmax(tdata, &pdev->dev);
@@ -540,24 +574,19 @@ static int create_core_data(struct platform_device *pdev, unsigned int cpu,
 	 * MSR_IA32_TEMPERATURE_TARGET register. Atoms don't have the register
 	 * at all.
 	 */
-	if (c->x86_model > 0xe && c->x86_model != 0x1c)
+	if (c->x86_vfm > INTEL_CORE_YONAH && c->x86_vfm != INTEL_ATOM_BONNELL)
 		if (get_ttarget(tdata, &pdev->dev) >= 0)
 			tdata->attr_size++;
 
-	pdata->core_data[attr_no] = tdata;
-
 	/* Create sysfs interfaces */
-	err = create_core_attrs(tdata, pdata->hwmon_dev, attr_no);
+	err = create_core_attrs(tdata, pdata->hwmon_dev);
 	if (err)
-		goto exit_free;
+		goto err;
 
 	return 0;
-exit_free:
-	pdata->core_data[attr_no] = NULL;
-	kfree(tdata);
-ida_free:
-	if (!pkg_flag)
-		ida_free(&pdata->ida, index);
+
+err:
+	destroy_temp_data(pdata, tdata);
 	return err;
 }
 
@@ -568,10 +597,8 @@ coretemp_add_core(struct platform_device *pdev, unsigned int cpu, int pkg_flag)
 		dev_err(&pdev->dev, "Adding Core %u failed\n", cpu);
 }
 
-static void coretemp_remove_core(struct platform_data *pdata, int indx)
+static void coretemp_remove_core(struct platform_data *pdata, struct temp_data *tdata)
 {
-	struct temp_data *tdata = pdata->core_data[indx];
-
 	/* if we errored on add then this is already gone */
 	if (!tdata)
 		return;
@@ -579,11 +606,7 @@ static void coretemp_remove_core(struct platform_data *pdata, int indx)
 	/* Remove the sysfs attributes */
 	sysfs_remove_group(&pdata->hwmon_dev->kobj, &tdata->attr_group);
 
-	kfree(pdata->core_data[indx]);
-	pdata->core_data[indx] = NULL;
-
-	if (indx >= BASE_SYSFS_ATTR_NO)
-		ida_free(&pdata->ida, indx - BASE_SYSFS_ATTR_NO);
+	destroy_temp_data(pdata, tdata);
 }
 
 static int coretemp_device_add(int zoneid)
@@ -696,7 +719,7 @@ static int coretemp_cpu_offline(unsigned int cpu)
 	struct platform_device *pdev = coretemp_get_pdev(cpu);
 	struct platform_data *pd;
 	struct temp_data *tdata;
-	int i, indx = -1, target;
+	int target;
 
 	/* No need to tear down any interfaces for suspend */
 	if (cpuhp_tasks_frozen)
@@ -707,18 +730,7 @@ static int coretemp_cpu_offline(unsigned int cpu)
 	if (!pd->hwmon_dev)
 		return 0;
 
-	for (i = 0; i < NUM_REAL_CORES; i++) {
-		if (pd->cpu_map[i] == topology_core_id(cpu)) {
-			indx = i + BASE_SYSFS_ATTR_NO;
-			break;
-		}
-	}
-
-	/* Too many cores and this core is not populated, just return */
-	if (indx < 0)
-		return 0;
-
-	tdata = pd->core_data[indx];
+	tdata = get_temp_data(pd, cpu);
 
 	cpumask_clear_cpu(cpu, &pd->cpumask);
 
@@ -729,7 +741,7 @@ static int coretemp_cpu_offline(unsigned int cpu)
 	 */
 	target = cpumask_any_and(&pd->cpumask, topology_sibling_cpumask(cpu));
 	if (target >= nr_cpu_ids) {
-		coretemp_remove_core(pd, indx);
+		coretemp_remove_core(pd, tdata);
 	} else if (tdata && tdata->cpu == cpu) {
 		mutex_lock(&tdata->update_lock);
 		tdata->cpu = target;
@@ -739,10 +751,10 @@ static int coretemp_cpu_offline(unsigned int cpu)
 	/*
 	 * If all cores in this pkg are offline, remove the interface.
 	 */
-	tdata = pd->core_data[PKG_SYSFS_ATTR_NO];
+	tdata = get_temp_data(pd, -1);
 	if (cpumask_empty(&pd->cpumask)) {
 		if (tdata)
-			coretemp_remove_core(pd, PKG_SYSFS_ATTR_NO);
+			coretemp_remove_core(pd, tdata);
 		hwmon_device_unregister(pd->hwmon_dev);
 		pd->hwmon_dev = NULL;
 		return 0;
@@ -775,12 +787,14 @@ static int __init coretemp_init(void)
 	/*
 	 * CPUID.06H.EAX[0] indicates whether the CPU has thermal
 	 * sensors. We check this bit only, all the early CPUs
-	 * without thermal sensors will be filtered out.
+	 * without thermal sensors will be filtered out. This
+	 * includes all the Family 5 and Family 15 (Pentium 4)
+	 * models, since they never set the CPUID bit.
 	 */
 	if (!x86_match_cpu(coretemp_ids))
 		return -ENODEV;
 
-	max_zones = topology_max_packages() * topology_max_die_per_package();
+	max_zones = topology_max_packages() * topology_max_dies_per_package();
 	zone_devices = kcalloc(max_zones, sizeof(struct platform_device *),
 			      GFP_KERNEL);
 	if (!zone_devices)

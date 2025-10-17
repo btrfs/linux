@@ -20,9 +20,7 @@
 #include <linux/acpi.h>
 #include <linux/gpio/consumer.h>
 
-struct ufs_host {
-	void (*late_init)(struct ufs_hba *hba);
-};
+#define MAX_SUPP_MAC 64
 
 enum intel_ufs_dsm_func_id {
 	INTEL_DSM_FNS		=  0,
@@ -30,7 +28,6 @@ enum intel_ufs_dsm_func_id {
 };
 
 struct intel_host {
-	struct ufs_host ufs_host;
 	u32		dsm_fns;
 	u32		active_ltr;
 	u32		idle_ltr;
@@ -155,7 +152,7 @@ static int ufs_intel_set_lanes(struct ufs_hba *hba, u32 lanes)
 
 static int ufs_intel_lkf_pwr_change_notify(struct ufs_hba *hba,
 				enum ufs_notify_change_status status,
-				struct ufs_pa_layer_attr *dev_max_params,
+				const struct ufs_pa_layer_attr *dev_max_params,
 				struct ufs_pa_layer_attr *dev_req_params)
 {
 	int err = 0;
@@ -406,8 +403,14 @@ static int ufs_intel_ehl_init(struct ufs_hba *hba)
 	return ufs_intel_common_init(hba);
 }
 
-static void ufs_intel_lkf_late_init(struct ufs_hba *hba)
+static int ufs_intel_lkf_init(struct ufs_hba *hba)
 {
+	int err;
+
+	hba->nop_out_timeout = 200;
+	hba->quirks |= UFSHCD_QUIRK_BROKEN_AUTO_HIBERN8;
+	hba->caps |= UFSHCD_CAP_CRYPTO;
+	err = ufs_intel_common_init(hba);
 	/* LKF always needs a full reset, so set PM accordingly */
 	if (hba->caps & UFSHCD_CAP_DEEPSLEEP) {
 		hba->spm_lvl = UFS_PM_LVL_6;
@@ -416,19 +419,6 @@ static void ufs_intel_lkf_late_init(struct ufs_hba *hba)
 		hba->spm_lvl = UFS_PM_LVL_5;
 		hba->rpm_lvl = UFS_PM_LVL_5;
 	}
-}
-
-static int ufs_intel_lkf_init(struct ufs_hba *hba)
-{
-	struct ufs_host *ufs_host;
-	int err;
-
-	hba->nop_out_timeout = 200;
-	hba->quirks |= UFSHCD_QUIRK_BROKEN_AUTO_HIBERN8;
-	hba->caps |= UFSHCD_CAP_CRYPTO;
-	err = ufs_intel_common_init(hba);
-	ufs_host = ufshcd_get_variant(hba);
-	ufs_host->late_init = ufs_intel_lkf_late_init;
 	return err;
 }
 
@@ -442,9 +432,54 @@ static int ufs_intel_adl_init(struct ufs_hba *hba)
 
 static int ufs_intel_mtl_init(struct ufs_hba *hba)
 {
+	hba->rpm_lvl = UFS_PM_LVL_2;
+	hba->spm_lvl = UFS_PM_LVL_2;
 	hba->caps |= UFSHCD_CAP_CRYPTO | UFSHCD_CAP_WB_EN;
 	return ufs_intel_common_init(hba);
 }
+
+static int ufs_qemu_get_hba_mac(struct ufs_hba *hba)
+{
+	return MAX_SUPP_MAC;
+}
+
+static int ufs_qemu_mcq_config_resource(struct ufs_hba *hba)
+{
+	hba->mcq_base = hba->mmio_base + ufshcd_mcq_queue_cfg_addr(hba);
+
+	return 0;
+}
+
+static int ufs_qemu_op_runtime_config(struct ufs_hba *hba)
+{
+	struct ufshcd_mcq_opr_info_t *opr;
+	int i;
+
+	u32 sqdao = ufsmcq_readl(hba, ufshcd_mcq_cfg_offset(REG_SQDAO, 0));
+	u32 sqisao = ufsmcq_readl(hba, ufshcd_mcq_cfg_offset(REG_SQISAO, 0));
+	u32 cqdao = ufsmcq_readl(hba, ufshcd_mcq_cfg_offset(REG_CQDAO, 0));
+	u32 cqisao = ufsmcq_readl(hba, ufshcd_mcq_cfg_offset(REG_CQISAO, 0));
+
+	hba->mcq_opr[OPR_SQD].offset = sqdao;
+	hba->mcq_opr[OPR_SQIS].offset = sqisao;
+	hba->mcq_opr[OPR_CQD].offset = cqdao;
+	hba->mcq_opr[OPR_CQIS].offset = cqisao;
+
+	for (i = 0; i < OPR_MAX; i++) {
+		opr = &hba->mcq_opr[i];
+		opr->stride = 48;
+		opr->base = hba->mmio_base + opr->offset;
+	}
+
+	return 0;
+}
+
+static struct ufs_hba_variant_ops ufs_qemu_hba_vops = {
+	.name                   = "qemu-pci",
+	.get_hba_mac		= ufs_qemu_get_hba_mac,
+	.mcq_config_resource	= ufs_qemu_mcq_config_resource,
+	.op_runtime_config	= ufs_qemu_op_runtime_config,
+};
 
 static struct ufs_hba_variant_ops ufs_intel_cnl_hba_vops = {
 	.name                   = "intel-pci",
@@ -517,7 +552,6 @@ static void ufshcd_pci_remove(struct pci_dev *pdev)
 	pm_runtime_forbid(&pdev->dev);
 	pm_runtime_get_noresume(&pdev->dev);
 	ufshcd_remove(hba);
-	ufshcd_dealloc_host(hba);
 }
 
 /**
@@ -530,7 +564,6 @@ static void ufshcd_pci_remove(struct pci_dev *pdev)
 static int
 ufshcd_pci_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 {
-	struct ufs_host *ufs_host;
 	struct ufs_hba *hba;
 	void __iomem *mmio_base;
 	int err;
@@ -543,13 +576,11 @@ ufshcd_pci_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 
 	pci_set_master(pdev);
 
-	err = pcim_iomap_regions(pdev, 1 << 0, UFSHCD);
-	if (err < 0) {
+	mmio_base = pcim_iomap_region(pdev, 0, UFSHCD);
+	if (IS_ERR(mmio_base)) {
 		dev_err(&pdev->dev, "request and iomap failed\n");
-		return err;
+		return PTR_ERR(mmio_base);
 	}
-
-	mmio_base = pcim_iomap_table(pdev)[0];
 
 	err = ufshcd_alloc_host(&pdev->dev, &hba);
 	if (err) {
@@ -562,13 +593,8 @@ ufshcd_pci_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	err = ufshcd_init(hba, mmio_base, pdev->irq);
 	if (err) {
 		dev_err(&pdev->dev, "Initialization failed\n");
-		ufshcd_dealloc_host(hba);
 		return err;
 	}
-
-	ufs_host = ufshcd_get_variant(hba);
-	if (ufs_host && ufs_host->late_init)
-		ufs_host->late_init(hba);
 
 	pm_runtime_put_noidle(&pdev->dev);
 	pm_runtime_allow(&pdev->dev);
@@ -591,7 +617,8 @@ static const struct dev_pm_ops ufshcd_pci_pm_ops = {
 };
 
 static const struct pci_device_id ufshcd_pci_tbl[] = {
-	{ PCI_VENDOR_ID_REDHAT, 0x0013, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0 },
+	{ PCI_VENDOR_ID_REDHAT, 0x0013, PCI_ANY_ID, PCI_ANY_ID, 0, 0,
+		(kernel_ulong_t)&ufs_qemu_hba_vops },
 	{ PCI_VENDOR_ID_SAMSUNG, 0xC00C, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0 },
 	{ PCI_VDEVICE(INTEL, 0x9DFA), (kernel_ulong_t)&ufs_intel_cnl_hba_vops },
 	{ PCI_VDEVICE(INTEL, 0x4B41), (kernel_ulong_t)&ufs_intel_ehl_hba_vops },
@@ -602,6 +629,8 @@ static const struct pci_device_id ufshcd_pci_tbl[] = {
 	{ PCI_VDEVICE(INTEL, 0x7E47), (kernel_ulong_t)&ufs_intel_mtl_hba_vops },
 	{ PCI_VDEVICE(INTEL, 0xA847), (kernel_ulong_t)&ufs_intel_mtl_hba_vops },
 	{ PCI_VDEVICE(INTEL, 0x7747), (kernel_ulong_t)&ufs_intel_mtl_hba_vops },
+	{ PCI_VDEVICE(INTEL, 0xE447), (kernel_ulong_t)&ufs_intel_mtl_hba_vops },
+	{ PCI_VDEVICE(INTEL, 0x4D47), (kernel_ulong_t)&ufs_intel_mtl_hba_vops },
 	{ }	/* terminate list */
 };
 

@@ -992,7 +992,7 @@ static int aha1542_host_reset(struct scsi_cmnd *cmd)
 }
 
 static int aha1542_biosparam(struct scsi_device *sdev,
-		struct block_device *bdev, sector_t capacity, int geom[])
+		struct gendisk *unused, sector_t capacity, int geom[])
 {
 	struct aha1542_hostdata *aha1542 = shost_priv(sdev->host);
 
@@ -1009,6 +1009,8 @@ static int aha1542_biosparam(struct scsi_device *sdev,
 
 	return 0;
 }
+
+MODULE_DESCRIPTION("Adaptec AHA-1542 SCSI host adapter driver");
 MODULE_LICENSE("GPL");
 
 static int aha1542_init_cmd_priv(struct Scsi_Host *shost, struct scsi_cmnd *cmd)

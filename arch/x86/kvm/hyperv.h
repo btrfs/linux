@@ -103,7 +103,8 @@ static inline bool kvm_hv_hypercall_enabled(struct kvm_vcpu *vcpu)
 int kvm_hv_hypercall(struct kvm_vcpu *vcpu);
 
 void kvm_hv_irq_routing_update(struct kvm *kvm);
-int kvm_hv_synic_set_irq(struct kvm *kvm, u32 vcpu_id, u32 sint);
+int kvm_hv_synic_set_irq(struct kvm_kernel_irq_routing_entry *e, struct kvm *kvm,
+			 int irq_source_id, int level, bool line_status);
 void kvm_hv_synic_send_eoi(struct kvm_vcpu *vcpu, int vector);
 int kvm_hv_activate_synic(struct kvm_vcpu *vcpu, bool dont_zero_synic_pages);
 
@@ -181,6 +182,8 @@ void kvm_hv_process_stimers(struct kvm_vcpu *vcpu);
 void kvm_hv_setup_tsc_page(struct kvm *kvm,
 			   struct pvclock_vcpu_time_info *hv_clock);
 void kvm_hv_request_tsc_page_update(struct kvm *kvm);
+
+void kvm_hv_xsaves_xsavec_maybe_warn(struct kvm_vcpu *vcpu);
 
 void kvm_hv_init_vm(struct kvm *kvm);
 void kvm_hv_destroy_vm(struct kvm *kvm);
@@ -267,6 +270,7 @@ int kvm_hv_vcpu_flush_tlb(struct kvm_vcpu *vcpu);
 static inline void kvm_hv_setup_tsc_page(struct kvm *kvm,
 					 struct pvclock_vcpu_time_info *hv_clock) {}
 static inline void kvm_hv_request_tsc_page_update(struct kvm *kvm) {}
+static inline void kvm_hv_xsaves_xsavec_maybe_warn(struct kvm_vcpu *vcpu) {}
 static inline void kvm_hv_init_vm(struct kvm *kvm) {}
 static inline void kvm_hv_destroy_vm(struct kvm *kvm) {}
 static inline int kvm_hv_vcpu_init(struct kvm_vcpu *vcpu)
@@ -283,7 +287,6 @@ static inline int kvm_hv_hypercall(struct kvm_vcpu *vcpu)
 	return HV_STATUS_ACCESS_DENIED;
 }
 static inline void kvm_hv_vcpu_purge_flush_tlb(struct kvm_vcpu *vcpu) {}
-static inline void kvm_hv_free_pa_page(struct kvm *kvm) {}
 static inline bool kvm_hv_synic_has_vector(struct kvm_vcpu *vcpu, int vector)
 {
 	return false;

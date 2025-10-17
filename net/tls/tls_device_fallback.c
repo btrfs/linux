@@ -33,19 +33,9 @@
 #include <crypto/aead.h>
 #include <crypto/scatterwalk.h>
 #include <net/ip6_checksum.h>
+#include <linux/skbuff_ref.h>
 
 #include "tls.h"
-
-static void chain_to_walk(struct scatterlist *sg, struct scatter_walk *walk)
-{
-	struct scatterlist *src = walk->sg;
-	int diff = walk->offset - src->offset;
-
-	sg_set_page(sg, sg_page(src),
-		    src->length - diff, walk->offset);
-
-	scatterwalk_crypto_chain(sg, sg_next(src), 2);
-}
 
 static int tls_enc_record(struct aead_request *aead_req,
 			  struct crypto_aead *aead, char *aad,
@@ -68,15 +58,12 @@ static int tls_enc_record(struct aead_request *aead_req,
 	buf_size = TLS_HEADER_SIZE + cipher_desc->iv;
 	len = min_t(int, *in_len, buf_size);
 
-	scatterwalk_copychunks(buf, in, len, 0);
-	scatterwalk_copychunks(buf, out, len, 1);
+	memcpy_from_scatterwalk(buf, in, len);
+	memcpy_to_scatterwalk(out, buf, len);
 
 	*in_len -= len;
 	if (!*in_len)
 		return 0;
-
-	scatterwalk_pagedone(in, 0, 1);
-	scatterwalk_pagedone(out, 1, 1);
 
 	len = buf[4] | (buf[3] << 8);
 	len -= cipher_desc->iv;
@@ -89,8 +76,8 @@ static int tls_enc_record(struct aead_request *aead_req,
 	sg_init_table(sg_out, ARRAY_SIZE(sg_out));
 	sg_set_buf(sg_in, aad, TLS_AAD_SPACE_SIZE);
 	sg_set_buf(sg_out, aad, TLS_AAD_SPACE_SIZE);
-	chain_to_walk(sg_in + 1, in);
-	chain_to_walk(sg_out + 1, out);
+	scatterwalk_get_sglist(in, sg_in + 1);
+	scatterwalk_get_sglist(out, sg_out + 1);
 
 	*in_len -= len;
 	if (*in_len < 0) {
@@ -109,10 +96,8 @@ static int tls_enc_record(struct aead_request *aead_req,
 	}
 
 	if (*in_len) {
-		scatterwalk_copychunks(NULL, in, len, 2);
-		scatterwalk_pagedone(in, 0, 1);
-		scatterwalk_copychunks(NULL, out, len, 2);
-		scatterwalk_pagedone(out, 1, 1);
+		scatterwalk_skip(in, len);
+		scatterwalk_skip(out, len);
 	}
 
 	len -= cipher_desc->tag;
@@ -160,9 +145,6 @@ static int tls_enc_records(struct aead_request *aead_req,
 		rcd_sn++;
 
 	} while (rc == 0 && len);
-
-	scatterwalk_done(&in, 0, 0);
-	scatterwalk_done(&out, 1, 0);
 
 	return rc;
 }

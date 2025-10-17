@@ -404,10 +404,10 @@ static int wm8737_set_dai_fmt(struct snd_soc_dai *codec_dai,
 	u16 af = 0;
 
 	switch (fmt & SND_SOC_DAIFMT_MASTER_MASK) {
-	case SND_SOC_DAIFMT_CBM_CFM:
+	case SND_SOC_DAIFMT_CBP_CFP:
 		af |= WM8737_MS;
 		break;
-	case SND_SOC_DAIFMT_CBS_CFS:
+	case SND_SOC_DAIFMT_CBC_CFC:
 		break;
 	default:
 		return -EINVAL;
@@ -639,7 +639,7 @@ static int wm8737_i2c_probe(struct i2c_client *i2c)
 }
 
 static const struct i2c_device_id wm8737_i2c_id[] = {
-	{ "wm8737", 0 },
+	{ "wm8737" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, wm8737_i2c_id);

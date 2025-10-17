@@ -3103,9 +3103,6 @@ static int ni_init_simplified_leakage_table(struct radeon_device *rdev,
 	u32 smc_leakage, max_leakage = 0;
 	u32 scaling_factor;
 
-	if (!leakage_table)
-		return -EINVAL;
-
 	table_size = leakage_table->count;
 
 	if (eg_pi->vddc_voltage_table.count != table_size)
@@ -3400,7 +3397,7 @@ static int ni_enable_smc_cac(struct radeon_device *rdev,
 				if (PPSMC_Result_OK != smc_result)
 					ret = -EINVAL;
 
-				ni_pi->cac_enabled = (PPSMC_Result_OK == smc_result) ? true : false;
+				ni_pi->cac_enabled = PPSMC_Result_OK == smc_result;
 			}
 		} else if (ni_pi->cac_enabled) {
 			smc_result = rv770_send_msg_to_smc(rdev, PPSMC_MSG_DisableCac);

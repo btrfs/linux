@@ -1,10 +1,33 @@
 // SPDX-License-Identifier: GPL-2.0
-/* Author: Dmitry Safonov <dima@arista.com> */
+/*
+ * The test checks that both active and passive reset have correct TCP-AO
+ * signature. An "active" reset (abort) here is procured from closing
+ * listen() socket with non-accepted connections in the queue:
+ * inet_csk_listen_stop() => inet_child_forget() =>
+ *                        => tcp_disconnect() => tcp_send_active_reset()
+ *
+ * The passive reset is quite hard to get on established TCP connections.
+ * It could be procured from non-established states, but the synchronization
+ * part from userspace in order to reliably get RST seems uneasy.
+ * So, instead it's procured by corrupting SEQ number on TIMED-WAIT state.
+ *
+ * It's important to test both passive and active RST as they go through
+ * different code-paths:
+ * - tcp_send_active_reset() makes no-data skb, sends it with tcp_transmit_skb()
+ * - tcp_v*_send_reset() create their reply skbs and send them with
+ *   ip_send_unicast_reply()
+ *
+ * In both cases TCP-AO signatures have to be correct, which is verified by
+ * (1) checking that the TCP-AO connection was reset and (2) TCP-AO counters.
+ *
+ * Author: Dmitry Safonov <dima@arista.com>
+ */
 #include <inttypes.h>
 #include "../../../../include/linux/kernel.h"
 #include "aolib.h"
 
 const size_t quota = 1000;
+const size_t packet_sz = 100;
 /*
  * Backlog == 0 means 1 connection in queue, see:
  * commit 64a146513f8f ("[NET]: Revert incorrect accept queue...")
@@ -59,37 +82,17 @@ static void close_forced(int sk)
 	close(sk);
 }
 
-static int test_wait_for_exception(int sk, time_t sec)
-{
-	struct timeval tv = { .tv_sec = sec };
-	struct timeval *ptv = NULL;
-	fd_set efds;
-	int ret;
-
-	FD_ZERO(&efds);
-	FD_SET(sk, &efds);
-
-	if (sec)
-		ptv = &tv;
-
-	errno = 0;
-	ret = select(sk + 1, NULL, NULL, &efds, ptv);
-	if (ret < 0)
-		return -errno;
-	return ret ? sk : 0;
-}
-
 static void test_server_active_rst(unsigned int port)
 {
-	struct tcp_ao_counters cnt1, cnt2;
+	struct tcp_counters cnt1, cnt2;
 	ssize_t bytes;
 	int sk, lsk;
 
 	lsk = test_listen_socket(this_ip_addr, port, backlog);
 	if (test_add_key(lsk, DEFAULT_TEST_PASSWORD, this_ip_dest, -1, 100, 100))
 		test_error("setsockopt(TCP_AO_ADD_KEY)");
-	if (test_get_tcp_ao_counters(lsk, &cnt1))
-		test_error("test_get_tcp_ao_counters()");
+	if (test_get_tcp_counters(lsk, &cnt1))
+		test_error("test_get_tcp_counters()");
 
 	synchronize_threads(); /* 1: MKT added */
 	if (test_wait_fd(lsk, TEST_TIMEOUT_SEC, 0))
@@ -100,8 +103,8 @@ static void test_server_active_rst(unsigned int port)
 		test_error("accept()");
 
 	synchronize_threads(); /* 2: connection accept()ed, another queued */
-	if (test_get_tcp_ao_counters(lsk, &cnt2))
-		test_error("test_get_tcp_ao_counters()");
+	if (test_get_tcp_counters(lsk, &cnt2))
+		test_error("test_get_tcp_counters()");
 
 	synchronize_threads(); /* 3: close listen socket */
 	close(lsk);
@@ -117,7 +120,7 @@ static void test_server_active_rst(unsigned int port)
 	synchronize_threads(); /* 5: closed active sk */
 
 	synchronize_threads(); /* 6: counters checks */
-	if (test_tcp_ao_counters_cmp("active RST server", &cnt1, &cnt2, TEST_CNT_GOOD))
+	if (test_assert_counters("active RST server", &cnt1, &cnt2, TEST_CNT_GOOD))
 		test_fail("MKT counters (server) have not only good packets");
 	else
 		test_ok("MKT counters are good on server");
@@ -125,7 +128,7 @@ static void test_server_active_rst(unsigned int port)
 
 static void test_server_passive_rst(unsigned int port)
 {
-	struct tcp_ao_counters ao1, ao2;
+	struct tcp_counters cnt1, cnt2;
 	int sk, lsk;
 	ssize_t bytes;
 
@@ -144,8 +147,8 @@ static void test_server_passive_rst(unsigned int port)
 
 	synchronize_threads(); /* 2: accepted => send data */
 	close(lsk);
-	if (test_get_tcp_ao_counters(sk, &ao1))
-		test_error("test_get_tcp_ao_counters()");
+	if (test_get_tcp_counters(sk, &cnt1))
+		test_error("test_get_tcp_counters()");
 
 	bytes = test_server_run(sk, quota, TEST_TIMEOUT_SEC);
 	if (bytes != quota) {
@@ -155,17 +158,16 @@ static void test_server_passive_rst(unsigned int port)
 			test_fail("server returned %zd", bytes);
 	}
 
-	synchronize_threads(); /* 3: chekpoint/restore the connection */
-	if (test_get_tcp_ao_counters(sk, &ao2))
-		test_error("test_get_tcp_ao_counters()");
-
-	synchronize_threads(); /* 4: terminate server + send more on client */
-	bytes = test_server_run(sk, quota, TEST_RETRANSMIT_SEC);
+	synchronize_threads(); /* 3: checkpoint the client */
+	synchronize_threads(); /* 4: close the server, creating twsk */
+	if (test_get_tcp_counters(sk, &cnt2))
+		test_error("test_get_tcp_counters()");
 	close(sk);
-	test_tcp_ao_counters_cmp("passive RST server", &ao1, &ao2, TEST_CNT_GOOD);
 
-	synchronize_threads(); /* 5: verified => closed */
-	close(sk);
+	synchronize_threads(); /* 5: restore the socket, send more data */
+	test_assert_counters("passive RST server", &cnt1, &cnt2, TEST_CNT_GOOD);
+
+	synchronize_threads(); /* 6: server exits */
 }
 
 static void *server_fn(void *arg)
@@ -254,8 +256,6 @@ static int test_wait_fds(int sk[], size_t nr, bool is_writable[],
 
 static void test_client_active_rst(unsigned int port)
 {
-	/* one in queue, another accept()ed */
-	unsigned int wait_for = backlog + 2;
 	int i, sk[3], err;
 	bool is_writable[ARRAY_SIZE(sk)] = {false};
 	unsigned int last = ARRAY_SIZE(sk) - 1;
@@ -271,32 +271,36 @@ static void test_client_active_rst(unsigned int port)
 
 	synchronize_threads(); /* 1: MKT added */
 	for (i = 0; i < last; i++) {
-		err = _test_connect_socket(sk[i], this_ip_dest, port,
-					       (i == 0) ? TEST_TIMEOUT_SEC : -1);
-
+		err = _test_connect_socket(sk[i], this_ip_dest, port, i != 0);
 		if (err < 0)
 			test_error("failed to connect()");
 	}
 
-	synchronize_threads(); /* 2: connection accept()ed, another queued */
-	err = test_wait_fds(sk, last, is_writable, wait_for, TEST_TIMEOUT_SEC);
+	synchronize_threads(); /* 2: two connections: one accept()ed, another queued */
+	err = test_wait_fds(sk, last, is_writable, last, TEST_TIMEOUT_SEC);
 	if (err < 0)
 		test_error("test_wait_fds(): %d", err);
 
+	/* async connect() with third sk to get into request_sock_queue */
+	err = _test_connect_socket(sk[last], this_ip_dest, port, 1);
+	if (err < 0)
+		test_error("failed to connect()");
+
 	synchronize_threads(); /* 3: close listen socket */
-	if (test_client_verify(sk[0], 100, quota / 100, TEST_TIMEOUT_SEC))
+	if (test_client_verify(sk[0], packet_sz, quota / packet_sz))
 		test_fail("Failed to send data on connected socket");
 	else
 		test_ok("Verified established tcp connection");
 
 	synchronize_threads(); /* 4: finishing up */
-	err = _test_connect_socket(sk[last], this_ip_dest, port, -1);
-	if (err < 0)
-		test_error("failed to connect()");
 
 	synchronize_threads(); /* 5: closed active sk */
-	err = test_wait_fds(sk, ARRAY_SIZE(sk), NULL,
-			    wait_for, TEST_TIMEOUT_SEC);
+	/*
+	 * Wait for 2 connections: one accepted, another in the accept queue,
+	 * the one in request_sock_queue won't get fully established, so
+	 * doesn't receive an active RST, see inet_csk_listen_stop().
+	 */
+	err = test_wait_fds(sk, last, NULL, last, TEST_TIMEOUT_SEC);
 	if (err < 0)
 		test_error("select(): %d", err);
 
@@ -318,12 +322,11 @@ static void test_client_active_rst(unsigned int port)
 
 static void test_client_passive_rst(unsigned int port)
 {
-	struct tcp_ao_counters ao1, ao2;
+	struct tcp_counters cnt1, cnt2;
 	struct tcp_ao_repair ao_img;
 	struct tcp_sock_state img;
 	sockaddr_af saddr;
 	int sk, err;
-	socklen_t slen = sizeof(err);
 
 	sk = socket(test_family, SOCK_STREAM, IPPROTO_TCP);
 	if (sk < 0)
@@ -337,18 +340,51 @@ static void test_client_passive_rst(unsigned int port)
 		test_error("failed to connect()");
 
 	synchronize_threads(); /* 2: accepted => send data */
-	if (test_client_verify(sk, 100, quota / 100, TEST_TIMEOUT_SEC))
+	if (test_client_verify(sk, packet_sz, quota / packet_sz))
 		test_fail("Failed to send data on connected socket");
 	else
 		test_ok("Verified established tcp connection");
 
-	synchronize_threads(); /* 3: chekpoint/restore the connection */
+	synchronize_threads(); /* 3: checkpoint the client */
 	test_enable_repair(sk);
 	test_sock_checkpoint(sk, &img, &saddr);
 	test_ao_checkpoint(sk, &ao_img);
-	test_kill_sk(sk);
+	test_disable_repair(sk);
 
-	img.out.seq += quota;
+	synchronize_threads(); /* 4: close the server, creating twsk */
+
+	/*
+	 * The "corruption" in SEQ has to be small enough to fit into TCP
+	 * window, see tcp_timewait_state_process() for out-of-window
+	 * segments.
+	 */
+	img.out.seq += 5; /* 5 is more noticeable in tcpdump than 1 */
+
+	/*
+	 * FIXME: This is kind-of ugly and dirty, but it works.
+	 *
+	 * At this moment, the server has close'ed(sk).
+	 * The passive RST that is being targeted here is new data after
+	 * half-duplex close, see tcp_timewait_state_process() => TCP_TW_RST
+	 *
+	 * What is needed here is:
+	 * (1) wait for FIN from the server
+	 * (2) make sure that the ACK from the client went out
+	 * (3) make sure that the ACK was received and processed by the server
+	 *
+	 * Otherwise, the data that will be sent from "repaired" socket
+	 * post SEQ corruption may get to the server before it's in
+	 * TCP_FIN_WAIT2.
+	 *
+	 * (1) is easy with select()/poll()
+	 * (2) is possible by polling tcpi_state from TCP_INFO
+	 * (3) is quite complex: as server's socket was already closed,
+	 *     probably the way to do it would be tcp-diag.
+	 */
+	sleep(TEST_RETRANSMIT_SEC);
+
+	synchronize_threads(); /* 5: restore the socket, send more data */
+	test_kill_sk(sk);
 
 	sk = socket(test_family, SOCK_STREAM, IPPROTO_TCP);
 	if (sk < 0)
@@ -360,33 +396,41 @@ static void test_client_passive_rst(unsigned int port)
 		test_error("setsockopt(TCP_AO_ADD_KEY)");
 	test_ao_restore(sk, &ao_img);
 
-	if (test_get_tcp_ao_counters(sk, &ao1))
-		test_error("test_get_tcp_ao_counters()");
+	if (test_get_tcp_counters(sk, &cnt1))
+		test_error("test_get_tcp_counters()");
 
 	test_disable_repair(sk);
 	test_sock_state_free(&img);
 
-	synchronize_threads(); /* 4: terminate server + send more on client */
-	if (test_client_verify(sk, 100, quota / 100, 2 * TEST_TIMEOUT_SEC))
-		test_ok("client connection broken post-seq-adjust");
+	/*
+	 * This is how "passive reset" is acquired in this test from TCP_TW_RST:
+	 *
+	 * IP 10.0.254.1.7011 > 10.0.1.1.59772: Flags [P.], seq 901:1001, ack 1001, win 249,
+	 *    options [tcp-ao keyid 100 rnextkeyid 100 mac 0x10217d6c36a22379086ef3b1], length 100
+	 * IP 10.0.254.1.7011 > 10.0.1.1.59772: Flags [F.], seq 1001, ack 1001, win 249,
+	 *    options [tcp-ao keyid 100 rnextkeyid 100 mac 0x104ffc99b98c10a5298cc268], length 0
+	 * IP 10.0.1.1.59772 > 10.0.254.1.7011: Flags [.], ack 1002, win 251,
+	 *    options [tcp-ao keyid 100 rnextkeyid 100 mac 0xe496dd4f7f5a8a66873c6f93,nop,nop,sack 1 {1001:1002}], length 0
+	 * IP 10.0.1.1.59772 > 10.0.254.1.7011: Flags [P.], seq 1006:1106, ack 1001, win 251,
+	 *    options [tcp-ao keyid 100 rnextkeyid 100 mac 0x1b5f3330fb23fbcd0c77d0ca], length 100
+	 * IP 10.0.254.1.7011 > 10.0.1.1.59772: Flags [R], seq 3215596252, win 0,
+	 *    options [tcp-ao keyid 100 rnextkeyid 100 mac 0x0bcfbbf497bce844312304b2], length 0
+	 */
+	err = test_client_verify(sk, packet_sz, quota / packet_sz);
+	/* Make sure that the connection was reset, not timeouted */
+	if (err && err == -ECONNRESET)
+		test_ok("client sock was passively reset post-seq-adjust");
+	else if (err)
+		test_fail("client sock was not reset post-seq-adjust: %d", err);
 	else
-		test_fail("client connection still works post-seq-adjust");
+		test_fail("client sock is yet connected post-seq-adjust");
 
-	test_wait_for_exception(sk, TEST_TIMEOUT_SEC);
+	if (test_get_tcp_counters(sk, &cnt2))
+		test_error("test_get_tcp_counters()");
 
-	if (getsockopt(sk, SOL_SOCKET, SO_ERROR, &err, &slen))
-		test_error("getsockopt()");
-	if (err != ECONNRESET && err != EPIPE)
-		test_fail("client connection was not reset: %d", err);
-	else
-		test_ok("client connection was reset");
-
-	if (test_get_tcp_ao_counters(sk, &ao2))
-		test_error("test_get_tcp_ao_counters()");
-
-	synchronize_threads(); /* 5: verified => closed */
+	synchronize_threads(); /* 6: server exits */
 	close(sk);
-	test_tcp_ao_counters_cmp("client passive RST", &ao1, &ao2, TEST_CNT_GOOD);
+	test_assert_counters("client passive RST", &cnt1, &cnt2, TEST_CNT_GOOD);
 }
 
 static void *client_fn(void *arg)

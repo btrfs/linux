@@ -55,6 +55,12 @@ properties:
     description: |
       Regulator for supply voltage to VIN pin
 
+  ti,rx-gain-reduction-db:
+    description: |
+      Specify an RX gain reduction to reduce antenna sensitivity with 5dB per
+      increment, with a maximum of 15dB.
+    enum: [ 0, 5, 10, 15]
+
 required:
   - compatible
   - interrupts
@@ -73,7 +79,7 @@ examples:
     #include <dt-bindings/gpio/gpio.h>
     #include <dt-bindings/interrupt-controller/irq.h>
 
-    i2c {
+    spi {
         #address-cells = <1>;
         #size-cells = <0>;
 
@@ -95,5 +101,6 @@ examples:
             irq-status-read-quirk;
             en2-rf-quirk;
             clock-frequency = <27120000>;
+            ti,rx-gain-reduction-db = <15>;
         };
     };

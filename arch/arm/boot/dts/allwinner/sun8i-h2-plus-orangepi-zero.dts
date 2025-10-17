@@ -80,7 +80,7 @@
 		};
 	};
 
-	reg_vcc_wifi: reg_vcc_wifi {
+	reg_vcc_wifi: reg-vcc-wifi {
 		compatible = "regulator-fixed";
 		regulator-min-microvolt = <3300000>;
 		regulator-max-microvolt = <3300000>;
@@ -105,11 +105,25 @@
 		states = <1100000 0>, <1300000 1>;
 	};
 
-	wifi_pwrseq: wifi_pwrseq {
+	wifi_pwrseq: pwrseq {
 		compatible = "mmc-pwrseq-simple";
 		reset-gpios = <&r_pio 0 7 GPIO_ACTIVE_LOW>;
 		post-power-on-delay-ms = <200>;
 	};
+};
+
+/*
+ * Audio input/output is exposed on the 13-pin header and can't be used for
+ * anything else. However, adapter boards may use different audio routing.
+ * - https://linux-sunxi.org/Xunlong_Orange_Pi_Zero#Expansion_Port
+ * - Allwinner H3 Datasheet, section 3.1. Pin Characteristics
+ */
+&codec {
+	allwinner,audio-routing =
+		"Line Out", "LINEOUT",
+		"MIC1", "Mic",
+		"Mic",  "MBIAS";
+	status = "disabled";
 };
 
 &cpu0 {
@@ -149,7 +163,7 @@
 	 * Explicitly define the sdio device, so that we can add an ethernet
 	 * alias for it (which e.g. makes u-boot set a mac-address).
 	 */
-	xr819: sdio_wifi@1 {
+	xr819: wifi@1 {
 		reg = <1>;
 	};
 };

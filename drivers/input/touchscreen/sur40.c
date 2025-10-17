@@ -421,7 +421,7 @@ static void sur40_report_blob(struct sur40_blob *blob, struct input_dev *input)
 	if (blob->type != SUR40_TOUCH)
 		return;
 
-	slotnum = input_mt_get_slot_by_key(input, blob->blob_id);
+	slotnum = input_mt_get_slot_by_key(input, le16_to_cpu(blob->blob_id));
 	if (slotnum < 0 || slotnum >= MAX_CONTACTS)
 		return;
 
@@ -672,7 +672,7 @@ static int sur40_probe(struct usb_interface *interface,
 		return -ENODEV;
 
 	/* Allocate memory for our device state and initialize it. */
-	sur40 = kzalloc(sizeof(struct sur40_state), GFP_KERNEL);
+	sur40 = kzalloc(sizeof(*sur40), GFP_KERNEL);
 	if (!sur40)
 		return -ENOMEM;
 
@@ -1108,8 +1108,6 @@ static const struct vb2_ops sur40_queue_ops = {
 	.buf_queue		= sur40_buffer_queue,
 	.start_streaming	= sur40_start_streaming,
 	.stop_streaming		= sur40_stop_streaming,
-	.wait_prepare		= vb2_ops_wait_prepare,
-	.wait_finish		= vb2_ops_wait_finish,
 };
 
 static const struct vb2_queue sur40_queue = {

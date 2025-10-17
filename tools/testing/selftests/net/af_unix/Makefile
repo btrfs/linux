@@ -1,4 +1,12 @@
-CFLAGS += $(KHDR_INCLUDES)
-TEST_GEN_PROGS := diag_uid test_unix_oob unix_connect scm_pidfd
+CFLAGS += $(KHDR_INCLUDES) -Wall -Wflex-array-member-not-at-end
+
+TEST_GEN_PROGS := \
+	diag_uid \
+	msg_oob \
+	scm_inq \
+	scm_pidfd \
+	scm_rights \
+	unix_connect \
+# end of TEST_GEN_PROGS
 
 include ../../lib.mk

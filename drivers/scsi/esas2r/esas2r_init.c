@@ -311,9 +311,8 @@ int esas2r_init_adapter(struct Scsi_Host *host, struct pci_dev *pcid,
 	sema_init(&a->nvram_semaphore, 1);
 
 	esas2r_fw_event_off(a);
-	snprintf(a->fw_event_q_name, ESAS2R_KOBJ_NAME_LEN, "esas2r/%d",
-		 a->index);
-	a->fw_event_q = create_singlethread_workqueue(a->fw_event_q_name);
+	a->fw_event_q =
+		alloc_ordered_workqueue("esas2r/%d", WQ_MEM_RECLAIM, a->index);
 
 	init_waitqueue_head(&a->buffered_ioctl_waiter);
 	init_waitqueue_head(&a->nvram_waiter);
@@ -440,7 +439,7 @@ static void esas2r_adapter_power_down(struct esas2r_adapter *a,
 	if ((test_bit(AF2_INIT_DONE, &a->flags2))
 	    &&  (!test_bit(AF_DEGRADED_MODE, &a->flags))) {
 		if (!power_management) {
-			del_timer_sync(&a->timer);
+			timer_delete_sync(&a->timer);
 			tasklet_kill(&a->tasklet);
 		}
 		esas2r_power_down(a);

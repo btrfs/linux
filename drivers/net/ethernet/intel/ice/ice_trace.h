@@ -69,7 +69,7 @@ DECLARE_EVENT_CLASS(ice_rx_dim_template,
 
 		    TP_fast_assign(__entry->q_vector = q_vector;
 				   __entry->dim = dim;
-				   __assign_str(devname, q_vector->rx.rx_ring->netdev->name);),
+				   __assign_str(devname);),
 
 		    TP_printk("netdev: %s Rx-Q: %d dim-state: %d dim-profile: %d dim-tune: %d dim-st-right: %d dim-st-left: %d dim-tired: %d",
 			      __get_str(devname),
@@ -96,7 +96,7 @@ DECLARE_EVENT_CLASS(ice_tx_dim_template,
 
 		    TP_fast_assign(__entry->q_vector = q_vector;
 				   __entry->dim = dim;
-				   __assign_str(devname, q_vector->tx.tx_ring->netdev->name);),
+				   __assign_str(devname);),
 
 		    TP_printk("netdev: %s Tx-Q: %d dim-state: %d dim-profile: %d dim-tune: %d dim-st-right: %d dim-st-left: %d dim-tired: %d",
 			      __get_str(devname),
@@ -128,9 +128,9 @@ DECLARE_EVENT_CLASS(ice_tx_template,
 		    TP_fast_assign(__entry->ring = ring;
 				   __entry->desc = desc;
 				   __entry->buf = buf;
-				   __assign_str(devname, ring->netdev->name);),
+				   __assign_str(devname);),
 
-		    TP_printk("netdev: %s ring: %pK desc: %pK buf %pK", __get_str(devname),
+		    TP_printk("netdev: %s ring: %p desc: %p buf %p", __get_str(devname),
 			      __entry->ring, __entry->desc, __entry->buf)
 );
 
@@ -156,9 +156,9 @@ DECLARE_EVENT_CLASS(ice_rx_template,
 
 		    TP_fast_assign(__entry->ring = ring;
 				   __entry->desc = desc;
-				   __assign_str(devname, ring->netdev->name);),
+				   __assign_str(devname);),
 
-		    TP_printk("netdev: %s ring: %pK desc: %pK", __get_str(devname),
+		    TP_printk("netdev: %s ring: %p desc: %p", __get_str(devname),
 			      __entry->ring, __entry->desc)
 );
 DEFINE_EVENT(ice_rx_template, ice_clean_rx_irq,
@@ -180,9 +180,9 @@ DECLARE_EVENT_CLASS(ice_rx_indicate_template,
 		    TP_fast_assign(__entry->ring = ring;
 				   __entry->desc = desc;
 				   __entry->skb = skb;
-				   __assign_str(devname, ring->netdev->name);),
+				   __assign_str(devname);),
 
-		    TP_printk("netdev: %s ring: %pK desc: %pK skb %pK", __get_str(devname),
+		    TP_printk("netdev: %s ring: %p desc: %p skb %p", __get_str(devname),
 			      __entry->ring, __entry->desc, __entry->skb)
 );
 
@@ -203,9 +203,9 @@ DECLARE_EVENT_CLASS(ice_xmit_template,
 
 		    TP_fast_assign(__entry->ring = ring;
 				   __entry->skb = skb;
-				   __assign_str(devname, ring->netdev->name);),
+				   __assign_str(devname);),
 
-		    TP_printk("netdev: %s skb: %pK ring: %pK", __get_str(devname),
+		    TP_printk("netdev: %s skb: %p ring: %p", __get_str(devname),
 			      __entry->skb, __entry->ring)
 );
 
@@ -228,7 +228,7 @@ DECLARE_EVENT_CLASS(ice_tx_tstamp_template,
 		    TP_fast_assign(__entry->skb = skb;
 				   __entry->idx = idx;),
 
-		    TP_printk("skb %pK idx %d",
+		    TP_printk("skb %p idx %d",
 			      __entry->skb, __entry->idx)
 );
 #define DEFINE_TX_TSTAMP_OP_EVENT(name) \
@@ -328,6 +328,24 @@ DEFINE_EVENT(ice_esw_br_port_template,
 	     ice_eswitch_br_port_unlink,
 	     TP_PROTO(struct ice_esw_br_port *port),
 	     TP_ARGS(port)
+);
+
+DECLARE_EVENT_CLASS(ice_switch_stats_template,
+		    TP_PROTO(struct ice_switch_info *sw_info),
+		    TP_ARGS(sw_info),
+		    TP_STRUCT__entry(__field(u16, rule_cnt)
+				     __field(u8, recp_cnt)),
+		    TP_fast_assign(__entry->rule_cnt = sw_info->rule_cnt;
+				   __entry->recp_cnt = sw_info->recp_cnt;),
+		    TP_printk("rules=%u recipes=%u",
+			      __entry->rule_cnt,
+			      __entry->recp_cnt)
+);
+
+DEFINE_EVENT(ice_switch_stats_template,
+	     ice_aq_sw_rules,
+	     TP_PROTO(struct ice_switch_info *sw_info),
+	     TP_ARGS(sw_info)
 );
 
 /* End tracepoints */

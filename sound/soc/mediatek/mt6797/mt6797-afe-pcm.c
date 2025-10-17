@@ -704,18 +704,6 @@ static int mt6797_afe_runtime_resume(struct device *dev)
 	return 0;
 }
 
-static int mt6797_afe_component_probe(struct snd_soc_component *component)
-{
-	return mtk_afe_add_sub_dai_control(component);
-}
-
-static const struct snd_soc_component_driver mt6797_afe_component = {
-	.name		= AFE_PCM_NAME,
-	.probe		= mt6797_afe_component_probe,
-	.pointer	= mtk_afe_pcm_pointer,
-	.pcm_construct	= mtk_afe_pcm_new,
-};
-
 static int mt6797_dai_memif_register(struct mtk_base_afe *afe)
 {
 	struct mtk_base_afe_dai *dai;
@@ -852,7 +840,7 @@ static int mt6797_afe_pcm_dev_probe(struct platform_device *pdev)
 	pm_runtime_get_sync(&pdev->dev);
 
 	/* register component */
-	ret = devm_snd_soc_register_component(dev, &mt6797_afe_component,
+	ret = devm_snd_soc_register_component(dev, &mtk_afe_pcm_platform,
 					      NULL, 0);
 	if (ret) {
 		dev_warn(dev, "err_platform\n");
@@ -891,18 +879,18 @@ static const struct of_device_id mt6797_afe_pcm_dt_match[] = {
 MODULE_DEVICE_TABLE(of, mt6797_afe_pcm_dt_match);
 
 static const struct dev_pm_ops mt6797_afe_pm_ops = {
-	SET_RUNTIME_PM_OPS(mt6797_afe_runtime_suspend,
-			   mt6797_afe_runtime_resume, NULL)
+	RUNTIME_PM_OPS(mt6797_afe_runtime_suspend,
+		       mt6797_afe_runtime_resume, NULL)
 };
 
 static struct platform_driver mt6797_afe_pcm_driver = {
 	.driver = {
 		   .name = "mt6797-audio",
 		   .of_match_table = mt6797_afe_pcm_dt_match,
-		   .pm = &mt6797_afe_pm_ops,
+		   .pm = pm_ptr(&mt6797_afe_pm_ops),
 	},
 	.probe = mt6797_afe_pcm_dev_probe,
-	.remove_new = mt6797_afe_pcm_dev_remove,
+	.remove = mt6797_afe_pcm_dev_remove,
 };
 
 module_platform_driver(mt6797_afe_pcm_driver);

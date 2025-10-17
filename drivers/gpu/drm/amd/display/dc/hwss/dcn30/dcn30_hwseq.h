@@ -27,8 +27,9 @@
 #define __DC_HWSS_DCN30_H__
 
 #include "hw_sequencer_private.h"
-#include "dcn20/dcn20_hwseq.h"
+
 struct dc;
+struct dc_underflow_debug_data;
 
 void dcn30_init_hw(struct dc *dc);
 void dcn30_program_all_writeback_pipes_in_tree(
@@ -52,6 +53,9 @@ bool dcn30_mmhubbub_warmup(
 	unsigned int num_dwb,
 	struct dc_writeback_info *wb_info);
 
+void dcn30_log_color_state(struct dc *dc,
+			   struct dc_log_buffer_ctx *log_ctx);
+
 bool dcn30_set_blend_lut(struct pipe_ctx *pipe_ctx,
 		const struct dc_plane_state *plane_state);
 
@@ -68,7 +72,10 @@ void dcn30_set_avmute(struct pipe_ctx *pipe_ctx, bool enable);
 void dcn30_update_info_frame(struct pipe_ctx *pipe_ctx);
 void dcn30_program_dmdata_engine(struct pipe_ctx *pipe_ctx);
 
-bool dcn30_does_plane_fit_in_mall(struct dc *dc, struct dc_plane_state *plane,
+bool dcn30_does_plane_fit_in_mall(struct dc *dc,
+		unsigned int pitch,
+		unsigned int height,
+		enum surface_pixel_format format,
 		struct dc_cursor_attributes *cursor_attr);
 
 bool dcn30_apply_idle_power_optimizations(struct dc *dc, bool enable);
@@ -90,7 +97,10 @@ void dcn30_set_hubp_blank(const struct dc *dc,
 void dcn30_prepare_bandwidth(struct dc *dc,
 	struct dc_state *context);
 
-void dcn30_set_static_screen_control(struct pipe_ctx **pipe_ctx,
-		int num_pipes, const struct dc_static_screen_params *params);
+void dcn30_wait_for_all_pending_updates(const struct pipe_ctx *pipe_ctx);
+
+void dcn30_get_underflow_debug_data(const struct dc *dc,
+	struct timing_generator *tg,
+	struct dc_underflow_debug_data *out_data);
 
 #endif /* __DC_HWSS_DCN30_H__ */

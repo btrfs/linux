@@ -486,7 +486,7 @@ static void ath6kl_sdio_irq_handler(struct sdio_func *func)
 	ar_sdio = sdio_get_drvdata(func);
 	atomic_set(&ar_sdio->irq_handling, 1);
 	/*
-	 * Release the host during interrups so we can pick it back up when
+	 * Release the host during interrupts so we can pick it back up when
 	 * we process commands.
 	 */
 	sdio_release_host(ar_sdio->func);
@@ -1427,25 +1427,7 @@ static struct sdio_driver ath6kl_sdio_driver = {
 	.remove = ath6kl_sdio_remove,
 	.drv.pm = ATH6KL_SDIO_PM_OPS,
 };
-
-static int __init ath6kl_sdio_init(void)
-{
-	int ret;
-
-	ret = sdio_register_driver(&ath6kl_sdio_driver);
-	if (ret)
-		ath6kl_err("sdio driver registration failed: %d\n", ret);
-
-	return ret;
-}
-
-static void __exit ath6kl_sdio_exit(void)
-{
-	sdio_unregister_driver(&ath6kl_sdio_driver);
-}
-
-module_init(ath6kl_sdio_init);
-module_exit(ath6kl_sdio_exit);
+module_sdio_driver(ath6kl_sdio_driver);
 
 MODULE_AUTHOR("Atheros Communications, Inc.");
 MODULE_DESCRIPTION("Driver support for Atheros AR600x SDIO devices");

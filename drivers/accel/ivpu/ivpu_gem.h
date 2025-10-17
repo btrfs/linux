@@ -17,20 +17,22 @@ struct ivpu_bo {
 	struct list_head bo_list_node;
 	struct drm_mm_node mm_node;
 
-	struct mutex lock; /* Protects: ctx, mmu_mapped, vpu_addr */
 	u64 vpu_addr;
-	u32 handle;
 	u32 flags;
 	u32 job_status; /* Valid only for command buffer */
+	u32 ctx_id;
 	bool mmu_mapped;
 };
 
 int ivpu_bo_pin(struct ivpu_bo *bo);
-void ivpu_bo_remove_all_bos_from_context(struct ivpu_device *vdev, struct ivpu_mmu_context *ctx);
+void ivpu_bo_unbind_all_bos_from_context(struct ivpu_device *vdev, struct ivpu_mmu_context *ctx);
 
 struct drm_gem_object *ivpu_gem_create_object(struct drm_device *dev, size_t size);
-struct ivpu_bo *ivpu_bo_alloc_internal(struct ivpu_device *vdev, u64 vpu_addr, u64 size, u32 flags);
-void ivpu_bo_free_internal(struct ivpu_bo *bo);
+struct drm_gem_object *ivpu_gem_prime_import(struct drm_device *dev, struct dma_buf *dma_buf);
+struct ivpu_bo *ivpu_bo_create(struct ivpu_device *vdev, struct ivpu_mmu_context *ctx,
+			       struct ivpu_addr_range *range, u64 size, u32 flags);
+struct ivpu_bo *ivpu_bo_create_global(struct ivpu_device *vdev, u64 size, u32 flags);
+void ivpu_bo_free(struct ivpu_bo *bo);
 
 int ivpu_bo_create_ioctl(struct drm_device *dev, void *data, struct drm_file *file);
 int ivpu_bo_info_ioctl(struct drm_device *dev, void *data, struct drm_file *file);
@@ -59,14 +61,17 @@ static inline u32 ivpu_bo_cache_mode(struct ivpu_bo *bo)
 	return bo->flags & DRM_IVPU_BO_CACHE_MASK;
 }
 
-static inline bool ivpu_bo_is_snooped(struct ivpu_bo *bo)
-{
-	return ivpu_bo_cache_mode(bo) == DRM_IVPU_BO_CACHED;
-}
-
 static inline struct ivpu_device *ivpu_bo_to_vdev(struct ivpu_bo *bo)
 {
 	return to_ivpu_device(bo->base.base.dev);
+}
+
+static inline bool ivpu_bo_is_snooped(struct ivpu_bo *bo)
+{
+	if (ivpu_is_force_snoop_enabled(ivpu_bo_to_vdev(bo)))
+		return true;
+
+	return ivpu_bo_cache_mode(bo) == DRM_IVPU_BO_CACHED;
 }
 
 static inline void *ivpu_to_cpu_addr(struct ivpu_bo *bo, u32 vpu_addr)

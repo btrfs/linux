@@ -42,6 +42,7 @@
 #define SUBVP_ACTIVE_MARGIN_LIST_LEN 2
 #define DCN3_2_MAX_SUBVP_PIXEL_RATE_MHZ 1800
 #define DCN3_2_VMIN_DISPCLK_HZ 717000000
+#define MIN_SUBVP_DCFCLK_KHZ 400000
 
 #define TO_DCN32_RES_POOL(pool)\
 	container_of(pool, struct dcn32_resource_pool, base)
@@ -97,24 +98,20 @@ void dcn32_add_phantom_pipes(struct dc *dc,
 		unsigned int pipe_cnt,
 		unsigned int index);
 
-bool dcn32_validate_bandwidth(struct dc *dc,
+enum dc_status dcn32_validate_bandwidth(struct dc *dc,
 		struct dc_state *context,
-		bool fast_validate);
+		enum dc_validate_mode validate_mode);
 
 int dcn32_populate_dml_pipes_from_context(
 	struct dc *dc, struct dc_state *context,
 	display_e2e_pipe_params_st *pipes,
-	bool fast_validate);
+	enum dc_validate_mode validate_mode);
 
 void dcn32_calculate_wm_and_dlg(
 		struct dc *dc, struct dc_state *context,
 		display_e2e_pipe_params_st *pipes,
 		int pipe_cnt,
 		int vlevel);
-
-uint32_t dcn32_helper_mall_bytes_to_ways(
-		struct dc *dc,
-		uint32_t total_size_in_mall_bytes);
 
 uint32_t dcn32_helper_calculate_mall_bytes_for_cursor(
 		struct dc *dc,
@@ -139,6 +136,12 @@ bool dcn32_mpo_in_use(struct dc_state *context);
 bool dcn32_any_surfaces_rotated(struct dc *dc, struct dc_state *context);
 bool dcn32_is_center_timing(struct pipe_ctx *pipe);
 bool dcn32_is_psr_capable(struct pipe_ctx *pipe);
+
+int dcn32_find_optimal_free_pipe_as_secondary_dpp_pipe(
+		const struct resource_context *cur_res_ctx,
+		struct resource_context *new_res_ctx,
+		const struct resource_pool *pool,
+		const struct pipe_ctx *new_opp_head);
 
 struct pipe_ctx *dcn32_acquire_free_pipe_as_secondary_dpp_pipe(
 		const struct dc_state *cur_ctx,
@@ -180,6 +183,14 @@ bool dcn32_subvp_drr_admissable(struct dc *dc, struct dc_state *context);
 bool dcn32_subvp_vblank_admissable(struct dc *dc, struct dc_state *context, int vlevel);
 
 void dcn32_update_dml_pipes_odm_policy_based_on_context(struct dc *dc, struct dc_state *context, display_e2e_pipe_params_st *pipes);
+
+void dcn32_override_min_req_dcfclk(struct dc *dc, struct dc_state *context);
+
+unsigned int dcn32_calculate_mall_ways_from_bytes(const struct dc *dc, unsigned int total_size_in_mall_bytes);
+
+unsigned int dcn32_get_max_hw_cursor_size(const struct dc *dc,
+			struct dc_state *state,
+			const struct dc_stream_state *stream);
 
 /* definitions for run time init of reg offsets */
 
@@ -498,6 +509,8 @@ void dcn32_update_dml_pipes_odm_policy_based_on_context(struct dc *dc, struct dc
       SRI_ARR(CM_POST_CSC_B_C11_C12, CM, id),                                  \
       SRI_ARR(CM_POST_CSC_B_C33_C34, CM, id),                                  \
       SRI_ARR(CM_MEM_PWR_CTRL, CM, id), SRI_ARR(CM_CONTROL, CM, id),           \
+      SRI_ARR(CM_TEST_DEBUG_INDEX, CM, id),                                    \
+      SRI_ARR(CM_TEST_DEBUG_DATA, CM, id),                                     \
       SRI_ARR(FORMAT_CONTROL, CNVC_CFG, id),                                   \
       SRI_ARR(CNVC_SURFACE_PIXEL_FORMAT, CNVC_CFG, id),                        \
       SRI_ARR(CURSOR0_CONTROL, CNVC_CUR, id),                                  \
@@ -754,6 +767,7 @@ void dcn32_update_dml_pipes_odm_policy_based_on_context(struct dc *dc, struct dc
       SRI_ARR(DSCC_RATE_CONTROL_BUFFER1_MAX_FULLNESS_LEVEL, DSCC, id),         \
       SRI_ARR(DSCC_RATE_CONTROL_BUFFER2_MAX_FULLNESS_LEVEL, DSCC, id),         \
       SRI_ARR(DSCC_RATE_CONTROL_BUFFER3_MAX_FULLNESS_LEVEL, DSCC, id),         \
+      SRI_ARR(DSCC_TEST_DEBUG_BUS_ROTATE, DSCC, id),                           \
       SRI_ARR(DSCCIF_CONFIG0, DSCCIF, id),                                     \
       SRI_ARR(DSCCIF_CONFIG1, DSCCIF, id),                                     \
       SRI_ARR(DSCRM_DSC_FORWARD_CONFIG, DSCRM, id)
@@ -1044,7 +1058,9 @@ void dcn32_update_dml_pipes_odm_policy_based_on_context(struct dc *dc, struct dc
       SRI_ARR(OPTC_BYTES_PER_PIXEL, ODM, inst),                                \
       SRI_ARR(OPTC_WIDTH_CONTROL, ODM, inst),                                  \
       SRI_ARR(OPTC_MEMORY_CONFIG, ODM, inst),                                  \
-      SRI_ARR(OTG_DRR_CONTROL, OTG, inst)
+      SRI_ARR(OTG_DRR_CONTROL, OTG, inst),                                     \
+      SRI_ARR(OTG_PIPE_UPDATE_STATUS, OTG, inst),                              \
+      SRI_ARR(INTERRUPT_DEST, OTG, inst)
 
 /* HUBP */
 
@@ -1125,7 +1141,8 @@ void dcn32_update_dml_pipes_odm_policy_based_on_context(struct dc *dc, struct dc
       SRI_ARR(DCN_SURF1_TTU_CNTL1, HUBPREQ, id),                               \
       SRI_ARR(DCN_CUR0_TTU_CNTL0, HUBPREQ, id),                                \
       SRI_ARR(DCN_CUR0_TTU_CNTL1, HUBPREQ, id),                                \
-      SRI_ARR(HUBP_CLK_CNTL, HUBP, id)
+      SRI_ARR(HUBP_CLK_CNTL, HUBP, id),                                        \
+      SRI_ARR(HUBPRET_READ_LINE_VALUE, HUBPRET, id)
 #define HUBP_REG_LIST_DCN2_COMMON_RI(id)                                       \
   HUBP_REG_LIST_DCN_RI(id), HUBP_REG_LIST_DCN_VM_RI(id),                       \
       SRI_ARR(PREFETCH_SETTINGS, HUBPREQ, id),                                 \
@@ -1178,6 +1195,8 @@ void dcn32_update_dml_pipes_odm_policy_based_on_context(struct dc *dc, struct dc
       SR(DCHUBBUB_ARB_WATERMARK_CHANGE_CNTL),                                  \
       SR(DCHUBBUB_ARB_DRAM_STATE_CNTL), SR(DCHUBBUB_ARB_SAT_LEVEL),            \
       SR(DCHUBBUB_ARB_DF_REQ_OUTSTAND), SR(DCHUBBUB_GLOBAL_TIMER_CNTL),        \
+      SR(DCHUBBUB_TEST_DEBUG_INDEX),                                           \
+      SR(DCHUBBUB_TEST_DEBUG_DATA),                                            \
       SR(DCHUBBUB_SOFT_RESET), SR(DCHUBBUB_CRC_CTRL),                          \
       SR(DCN_VM_FB_LOCATION_BASE), SR(DCN_VM_FB_LOCATION_TOP),                 \
       SR(DCN_VM_FB_OFFSET), SR(DCN_VM_AGP_BOT), SR(DCN_VM_AGP_TOP),            \
@@ -1211,7 +1230,8 @@ void dcn32_update_dml_pipes_odm_policy_based_on_context(struct dc *dc, struct dc
       SR(DCHUBBUB_ARB_MALL_CNTL),                                              \
       SR(DCN_VM_FAULT_ADDR_MSB), SR(DCN_VM_FAULT_ADDR_LSB),                    \
       SR(DCN_VM_FAULT_CNTL), SR(DCN_VM_FAULT_STATUS),                          \
-      SR(SDPIF_REQUEST_RATE_LIMIT)
+      SR(SDPIF_REQUEST_RATE_LIMIT),                                            \
+      SR(DCHUBBUB_SDPIF_CFG0)
 
 /* DCCG */
 

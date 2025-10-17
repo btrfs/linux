@@ -63,11 +63,6 @@ static const DECLARE_TLV_DB_SCALE(adc_tlv, -7400, 100, 0);
 static const DECLARE_TLV_DB_SCALE(dac_tlv, -7400, 100, 0);
 static const DECLARE_TLV_DB_SCALE(boost_tlv, 0, 1200, 0);
 
-struct cx2072x_eq_ctrl {
-	u8 ch;
-	u8 band;
-};
-
 static const DECLARE_TLV_DB_RANGE(hpf_tlv,
 	0, 0, TLV_DB_SCALE_ITEM(120, 0, 0),
 	1, 63, TLV_DB_SCALE_ITEM(30, 30, 0)
@@ -1616,7 +1611,7 @@ static const struct regmap_config cx2072x_regmap = {
 	.reg_write = cx2072x_reg_write,
 };
 
-static int __maybe_unused cx2072x_runtime_suspend(struct device *dev)
+static int cx2072x_runtime_suspend(struct device *dev)
 {
 	struct cx2072x_priv *cx2072x = dev_get_drvdata(dev);
 
@@ -1624,7 +1619,7 @@ static int __maybe_unused cx2072x_runtime_suspend(struct device *dev)
 	return 0;
 }
 
-static int __maybe_unused cx2072x_runtime_resume(struct device *dev)
+static int cx2072x_runtime_resume(struct device *dev)
 {
 	struct cx2072x_priv *cx2072x = dev_get_drvdata(dev);
 
@@ -1686,8 +1681,8 @@ static void cx2072x_i2c_remove(struct i2c_client *i2c)
 }
 
 static const struct i2c_device_id cx2072x_i2c_id[] = {
-	{ "cx20721", 0 },
-	{ "cx20723", 0 },
+	{ "cx20721" },
+	{ "cx20723" },
 	{}
 };
 MODULE_DEVICE_TABLE(i2c, cx2072x_i2c_id);
@@ -1701,17 +1696,15 @@ MODULE_DEVICE_TABLE(acpi, cx2072x_acpi_match);
 #endif
 
 static const struct dev_pm_ops cx2072x_runtime_pm = {
-	SET_RUNTIME_PM_OPS(cx2072x_runtime_suspend, cx2072x_runtime_resume,
-			   NULL)
-	SET_SYSTEM_SLEEP_PM_OPS(pm_runtime_force_suspend,
-				pm_runtime_force_resume)
+	RUNTIME_PM_OPS(cx2072x_runtime_suspend, cx2072x_runtime_resume, NULL)
+	SYSTEM_SLEEP_PM_OPS(pm_runtime_force_suspend, pm_runtime_force_resume)
 };
 
 static struct i2c_driver cx2072x_i2c_driver = {
 	.driver = {
 		.name = "cx2072x",
 		.acpi_match_table = ACPI_PTR(cx2072x_acpi_match),
-		.pm = &cx2072x_runtime_pm,
+		.pm = pm_ptr(&cx2072x_runtime_pm),
 	},
 	.probe = cx2072x_i2c_probe,
 	.remove = cx2072x_i2c_remove,

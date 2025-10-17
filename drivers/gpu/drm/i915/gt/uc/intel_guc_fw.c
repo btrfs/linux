@@ -13,9 +13,11 @@
 #include "gt/intel_gt_mcr.h"
 #include "gt/intel_gt_regs.h"
 #include "gt/intel_rps.h"
+
+#include "i915_drv.h"
+#include "i915_wait_util.h"
 #include "intel_guc_fw.h"
 #include "intel_guc_print.h"
-#include "i915_drv.h"
 
 static void guc_prepare_xfer(struct intel_gt *gt)
 {
@@ -26,7 +28,7 @@ static void guc_prepare_xfer(struct intel_gt *gt)
 			 GUC_ENABLE_READ_CACHE_FOR_WOPCM_DATA |
 			 GUC_ENABLE_MIA_CLOCK_GATING;
 
-	if (GRAPHICS_VER_FULL(uncore->i915) < IP_VER(12, 50))
+	if (GRAPHICS_VER_FULL(uncore->i915) < IP_VER(12, 55))
 		shim_flags |= GUC_DISABLE_SRAM_INIT_TO_ZEROES |
 			      GUC_ENABLE_MIA_CACHING;
 
@@ -46,6 +48,14 @@ static void guc_prepare_xfer(struct intel_gt *gt)
 		/* allows for 5us (in 10ns units) before GT can go to RC6 */
 		intel_uncore_write(uncore, GUC_ARAT_C6DIS, 0x1FF);
 	}
+
+	/*
+	 * Starting from IP 12.50 we need to enable the mirroring of GuC
+	 * internal state to debug registers. This is always enabled on previous
+	 * IPs.
+	 */
+	if (GRAPHICS_VER_FULL(uncore->i915) >= IP_VER(12, 50))
+		intel_uncore_rmw(uncore, GUC_SHIM_CONTROL2, 0, GUC_ENABLE_DEBUG_REG);
 }
 
 static int guc_xfer_rsa_mmio(struct intel_uc_fw *guc_fw,
@@ -115,6 +125,7 @@ static inline bool guc_load_done(struct intel_uncore *uncore, u32 *status, bool 
 	case INTEL_GUC_LOAD_STATUS_INIT_DATA_INVALID:
 	case INTEL_GUC_LOAD_STATUS_MPU_DATA_INVALID:
 	case INTEL_GUC_LOAD_STATUS_INIT_MMIO_SAVE_RESTORE_INVALID:
+	case INTEL_GUC_LOAD_STATUS_KLV_WORKAROUND_INIT_ERROR:
 		*success = false;
 		return true;
 	}
@@ -144,7 +155,7 @@ static inline bool guc_load_done(struct intel_uncore *uncore, u32 *status, bool 
  * an end user should hit the timeout is in case of extreme thermal throttling.
  * And a system that is that hot during boot is probably dead anyway!
  */
-#if defined(CONFIG_DRM_I915_DEBUG_GEM)
+#if IS_ENABLED(CONFIG_DRM_I915_DEBUG_GEM)
 #define GUC_LOAD_RETRY_LIMIT	20
 #else
 #define GUC_LOAD_RETRY_LIMIT	3
@@ -184,7 +195,7 @@ static int guc_wait_ucode(struct intel_guc *guc)
 	 * in the seconds range. However, there is a limit on how long an
 	 * individual wait_for() can wait. So wrap it in a loop.
 	 */
-	before_freq = intel_rps_read_actual_frequency(&uncore->gt->rps);
+	before_freq = intel_rps_read_actual_frequency(&gt->rps);
 	before = ktime_get();
 	for (count = 0; count < GUC_LOAD_RETRY_LIMIT; count++) {
 		ret = wait_for(guc_load_done(uncore, &status, &success), 1000);
@@ -192,7 +203,7 @@ static int guc_wait_ucode(struct intel_guc *guc)
 			break;
 
 		guc_dbg(guc, "load still in progress, count = %d, freq = %dMHz, status = 0x%08X [0x%02X/%02X]\n",
-			count, intel_rps_read_actual_frequency(&uncore->gt->rps), status,
+			count, intel_rps_read_actual_frequency(&gt->rps), status,
 			REG_FIELD_GET(GS_BOOTROM_MASK, status),
 			REG_FIELD_GET(GS_UKERNEL_MASK, status));
 	}
@@ -204,7 +215,7 @@ static int guc_wait_ucode(struct intel_guc *guc)
 		u32 bootrom = REG_FIELD_GET(GS_BOOTROM_MASK, status);
 
 		guc_info(guc, "load failed: status = 0x%08X, time = %lldms, freq = %dMHz, ret = %d\n",
-			 status, delta_ms, intel_rps_read_actual_frequency(&uncore->gt->rps), ret);
+			 status, delta_ms, intel_rps_read_actual_frequency(&gt->rps), ret);
 		guc_info(guc, "load failed: status: Reset = %d, BootROM = 0x%02X, UKernel = 0x%02X, MIA = 0x%02X, Auth = 0x%02X\n",
 			 REG_FIELD_GET(GS_MIA_IN_RESET, status),
 			 bootrom, ukernel,
@@ -241,6 +252,11 @@ static int guc_wait_ucode(struct intel_guc *guc)
 			ret = -EPERM;
 			break;
 
+		case INTEL_GUC_LOAD_STATUS_KLV_WORKAROUND_INIT_ERROR:
+			guc_info(guc, "invalid w/a KLV entry\n");
+			ret = -EINVAL;
+			break;
+
 		case INTEL_GUC_LOAD_STATUS_HWCONFIG_START:
 			guc_info(guc, "still extracting hwconfig table.\n");
 			ret = -ETIMEDOUT;
@@ -253,13 +269,14 @@ static int guc_wait_ucode(struct intel_guc *guc)
 	} else if (delta_ms > 200) {
 		guc_warn(guc, "excessive init time: %lldms! [status = 0x%08X, count = %d, ret = %d]\n",
 			 delta_ms, status, count, ret);
-		guc_warn(guc, "excessive init time: [freq = %dMHz, before = %dMHz, perf_limit_reasons = 0x%08X]\n",
-			 intel_rps_read_actual_frequency(&uncore->gt->rps), before_freq,
+		guc_warn(guc, "excessive init time: [freq = %dMHz -> %dMHz vs %dMHz, perf_limit_reasons = 0x%08X]\n",
+			 before_freq, intel_rps_read_actual_frequency(&gt->rps),
+			 intel_rps_get_requested_frequency(&gt->rps),
 			 intel_uncore_read(uncore, intel_gt_perf_limit_reasons_reg(gt)));
 	} else {
-		guc_dbg(guc, "init took %lldms, freq = %dMHz, before = %dMHz, status = 0x%08X, count = %d, ret = %d\n",
-			delta_ms, intel_rps_read_actual_frequency(&uncore->gt->rps),
-			before_freq, status, count, ret);
+		guc_dbg(guc, "init took %lldms, freq = %dMHz -> %dMHz vs %dMHz, status = 0x%08X, count = %d, ret = %d\n",
+			delta_ms, before_freq, intel_rps_read_actual_frequency(&gt->rps),
+			intel_rps_get_requested_frequency(&gt->rps), status, count, ret);
 	}
 
 	return ret;

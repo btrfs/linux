@@ -51,6 +51,8 @@ enum iio_chan_type {
 	IIO_DELTA_VELOCITY,
 	IIO_COLORTEMP,
 	IIO_CHROMATICITY,
+	IIO_ATTENTION,
+	IIO_ALTCURRENT,
 };
 
 enum iio_modifier {
@@ -91,8 +93,6 @@ enum iio_modifier {
 	IIO_MOD_CO2,
 	IIO_MOD_VOC,
 	IIO_MOD_LIGHT_UV,
-	IIO_MOD_LIGHT_UVA,
-	IIO_MOD_LIGHT_UVB,
 	IIO_MOD_LIGHT_DUV,
 	IIO_MOD_PM1,
 	IIO_MOD_PM2P5,
@@ -107,6 +107,12 @@ enum iio_modifier {
 	IIO_MOD_PITCH,
 	IIO_MOD_YAW,
 	IIO_MOD_ROLL,
+	IIO_MOD_LIGHT_UVA,
+	IIO_MOD_LIGHT_UVB,
+	IIO_MOD_RMS,
+	IIO_MOD_ACTIVE,
+	IIO_MOD_REACTIVE,
+	IIO_MOD_APPARENT,
 };
 
 enum iio_event_type {
@@ -118,6 +124,7 @@ enum iio_event_type {
 	IIO_EV_TYPE_CHANGE,
 	IIO_EV_TYPE_MAG_REFERENCED,
 	IIO_EV_TYPE_GESTURE,
+	IIO_EV_TYPE_FAULT,
 };
 
 enum iio_event_direction {
@@ -127,6 +134,7 @@ enum iio_event_direction {
 	IIO_EV_DIR_NONE,
 	IIO_EV_DIR_SINGLETAP,
 	IIO_EV_DIR_DOUBLETAP,
+	IIO_EV_DIR_FAULT_OPENWIRE,
 };
 
 #endif /* _UAPI_IIO_TYPES_H_ */

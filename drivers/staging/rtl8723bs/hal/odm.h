@@ -76,7 +76,7 @@
 
 /* Remove DIG by Yuchen */
 
-/* Remoce BB power saving by Yuchn */
+/* Remove BB power saving by Yuchn */
 
 /* Remove DIG by yuchen */
 
@@ -878,7 +878,7 @@ struct dm_odm_t { /* DM_Out_Source_Dynamic_Mechanism_Structure */
 	struct odm_mac_status_info *pMacInfo;
 	/* MAC_INFO_88E		MacInfo; */
 
-	/*  Different Team independt structure?? */
+	/*  Different Team independent structure?? */
 
 	/*  */
 	/* TX_RTP_CMN		TX_retrpo; */
@@ -1080,15 +1080,9 @@ enum { /* tag_RF_Type_Definition */
 /*  */
 /*  Extern Global Variables. */
 /*  */
-extern	u32 OFDMSwingTable[OFDM_TABLE_SIZE];
-extern	u8 CCKSwingTable_Ch1_Ch13[CCK_TABLE_SIZE][8];
-extern	u8 CCKSwingTable_Ch14[CCK_TABLE_SIZE][8];
-
 extern	u32 OFDMSwingTable_New[OFDM_TABLE_SIZE];
 extern	u8 CCKSwingTable_Ch1_Ch13_New[CCK_TABLE_SIZE][8];
 extern	u8 CCKSwingTable_Ch14_New[CCK_TABLE_SIZE][8];
-
-extern  u32 TxScalingTable_Jaguar[TXSCALE_TABLE_SIZE];
 
 /*  */
 /*  check Sta pointer valid or not */

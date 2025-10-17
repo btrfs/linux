@@ -73,7 +73,7 @@ void mlx5e_accel_fs_del_sk(struct mlx5_flow_handle *rule)
 
 struct mlx5_flow_handle *mlx5e_accel_fs_add_sk(struct mlx5e_flow_steering *fs,
 					       struct sock *sk, u32 tirn,
-					       uint32_t flow_tag)
+					       u32 flow_tag)
 {
 	struct mlx5e_accel_fs_tcp *fs_tcp = mlx5e_fs_get_accel_tcp(fs);
 	struct mlx5_flow_destination dest = {};
@@ -138,7 +138,7 @@ struct mlx5_flow_handle *mlx5e_accel_fs_add_sk(struct mlx5e_flow_steering *fs,
 	flow = mlx5_add_flow_rules(ft->t, spec, &flow_act, &dest, 1);
 
 	if (IS_ERR(flow))
-		fs_err(fs, "mlx5_add_flow_rules() failed, flow is %ld\n", PTR_ERR(flow));
+		fs_err(fs, "mlx5_add_flow_rules() failed, flow is %pe\n", flow);
 
 out:
 	kvfree(spec);

@@ -3,16 +3,6 @@
  * Support for GalaxyCore GC2235 2M camera sensor.
  *
  * Copyright (c) 2014 Intel Corporation. All Rights Reserved.
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License version
- * 2 as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
  */
 
 #include <linux/module.h>
@@ -789,8 +779,6 @@ static void gc2235_remove(struct i2c_client *client)
 	struct v4l2_subdev *sd = i2c_get_clientdata(client);
 	struct gc2235_device *dev = to_gc2235_sensor(sd);
 
-	dev_dbg(&client->dev, "gc2235_remove...\n");
-
 	dev->platform_data->csi_cfg(sd, 0);
 
 	v4l2_device_unregister_subdev(sd);
@@ -852,7 +840,7 @@ static int gc2235_probe(struct i2c_client *client)
 	if (ret)
 		gc2235_remove(client);
 
-	return atomisp_register_i2c_module(&dev->sd, gcpdev, RAW_CAMERA);
+	return atomisp_register_i2c_module(&dev->sd, gcpdev);
 
 out_free:
 	v4l2_device_unregister_subdev(&dev->sd);

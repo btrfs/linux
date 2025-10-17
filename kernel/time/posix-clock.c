@@ -90,26 +90,6 @@ static long posix_clock_ioctl(struct file *fp,
 	return err;
 }
 
-#ifdef CONFIG_COMPAT
-static long posix_clock_compat_ioctl(struct file *fp,
-				     unsigned int cmd, unsigned long arg)
-{
-	struct posix_clock_context *pccontext = fp->private_data;
-	struct posix_clock *clk = get_posix_clock(fp);
-	int err = -ENOTTY;
-
-	if (!clk)
-		return -ENODEV;
-
-	if (clk->ops.ioctl)
-		err = clk->ops.ioctl(pccontext, cmd, arg);
-
-	put_posix_clock(clk);
-
-	return err;
-}
-#endif
-
 static int posix_clock_open(struct inode *inode, struct file *fp)
 {
 	int err;
@@ -129,15 +109,18 @@ static int posix_clock_open(struct inode *inode, struct file *fp)
 		goto out;
 	}
 	pccontext->clk = clk;
-	fp->private_data = pccontext;
-	if (clk->ops.open)
+	pccontext->fp = fp;
+	if (clk->ops.open) {
 		err = clk->ops.open(pccontext, fp->f_mode);
-	else
-		err = 0;
-
-	if (!err) {
-		get_device(clk->dev);
+		if (err) {
+			kfree(pccontext);
+			goto out;
+		}
 	}
+
+	fp->private_data = pccontext;
+	get_device(clk->dev);
+	err = 0;
 out:
 	up_read(&clk->rwsem);
 	return err;
@@ -166,15 +149,12 @@ static int posix_clock_release(struct inode *inode, struct file *fp)
 
 static const struct file_operations posix_clock_file_operations = {
 	.owner		= THIS_MODULE,
-	.llseek		= no_llseek,
 	.read		= posix_clock_read,
 	.poll		= posix_clock_poll,
 	.unlocked_ioctl	= posix_clock_ioctl,
+	.compat_ioctl	= posix_clock_ioctl,
 	.open		= posix_clock_open,
 	.release	= posix_clock_release,
-#ifdef CONFIG_COMPAT
-	.compat_ioctl	= posix_clock_compat_ioctl,
-#endif
 };
 
 int posix_clock_register(struct posix_clock *clk, struct device *dev)
@@ -250,7 +230,7 @@ static int pc_clock_adjtime(clockid_t id, struct __kernel_timex *tx)
 	if (err)
 		return err;
 
-	if ((cd.fp->f_mode & FMODE_WRITE) == 0) {
+	if (tx->modes && (cd.fp->f_mode & FMODE_WRITE) == 0) {
 		err = -EACCES;
 		goto out;
 	}
@@ -307,6 +287,9 @@ static int pc_clock_settime(clockid_t id, const struct timespec64 *ts)
 {
 	struct posix_clock_desc cd;
 	int err;
+
+	if (!timespec64_valid_strict(ts))
+		return -EINVAL;
 
 	err = get_clock_desc(id, &cd);
 	if (err)

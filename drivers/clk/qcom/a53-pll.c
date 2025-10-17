@@ -33,7 +33,6 @@ static const struct regmap_config a53pll_regmap_config = {
 	.reg_stride		= 4,
 	.val_bits		= 32,
 	.max_register		= 0x40,
-	.fast_io		= true,
 };
 
 static struct pll_freq_tbl *qcom_a53pll_get_freq_tbl(struct device *dev)
@@ -151,6 +150,7 @@ static int qcom_a53pll_probe(struct platform_device *pdev)
 }
 
 static const struct of_device_id qcom_a53pll_match_table[] = {
+	{ .compatible = "qcom,msm8226-a7pll" },
 	{ .compatible = "qcom,msm8916-a53pll" },
 	{ .compatible = "qcom,msm8939-a53pll" },
 	{ }

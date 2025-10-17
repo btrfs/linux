@@ -13,9 +13,7 @@
 #include <linux/err.h>
 #include <linux/idr.h>
 #include <linux/of.h>
-#include <linux/of_gpio.h>
 #include <linux/pagemap.h>
-#include <linux/pm_wakeup.h>
 #include <linux/export.h>
 #include <linux/leds.h>
 #include <linux/slab.h>
@@ -76,7 +74,7 @@ static void mmc_host_classdev_release(struct device *dev)
 	struct mmc_host *host = cls_dev_to_mmc_host(dev);
 	wakeup_source_unregister(host->ws);
 	if (of_alias_get_id(host->parent->of_node, "mmc") < 0)
-		ida_simple_remove(&mmc_host_ida, host->index);
+		ida_free(&mmc_host_ida, host->index);
 	kfree(host);
 }
 
@@ -88,7 +86,7 @@ static int mmc_host_classdev_shutdown(struct device *dev)
 	return 0;
 }
 
-static struct class mmc_host_class = {
+static const struct class mmc_host_class = {
 	.name		= "mmc_host",
 	.dev_release	= mmc_host_classdev_release,
 	.shutdown_pre	= mmc_host_classdev_shutdown,
@@ -149,13 +147,13 @@ void mmc_retune_disable(struct mmc_host *host)
 {
 	mmc_retune_unpause(host);
 	host->can_retune = 0;
-	del_timer_sync(&host->retune_timer);
+	timer_delete_sync(&host->retune_timer);
 	mmc_retune_clear(host);
 }
 
 void mmc_retune_timer_stop(struct mmc_host *host)
 {
-	del_timer_sync(&host->retune_timer);
+	timer_delete_sync(&host->retune_timer);
 }
 EXPORT_SYMBOL(mmc_retune_timer_stop);
 
@@ -214,7 +212,7 @@ out:
 
 static void mmc_retune_timer(struct timer_list *t)
 {
-	struct mmc_host *host = from_timer(host, t, retune_timer);
+	struct mmc_host *host = timer_container_of(host, t, retune_timer);
 
 	mmc_retune_needed(host);
 }
@@ -234,10 +232,8 @@ static void mmc_of_parse_timing_phase(struct device *dev, const char *prop,
 }
 
 void
-mmc_of_parse_clk_phase(struct mmc_host *host, struct mmc_clk_phase_map *map)
+mmc_of_parse_clk_phase(struct device *dev, struct mmc_clk_phase_map *map)
 {
-	struct device *dev = host->parent;
-
 	mmc_of_parse_timing_phase(dev, "clk-phase-legacy",
 				  &map->phase[MMC_TIMING_LEGACY]);
 	mmc_of_parse_timing_phase(dev, "clk-phase-mmc-hs",
@@ -305,6 +301,8 @@ int mmc_of_parse(struct mmc_host *host)
 
 	/* f_max is obtained from the optional "max-frequency" property */
 	device_property_read_u32(dev, "max-frequency", &host->f_max);
+
+	device_property_read_u32(dev, "max-sd-hs-hz", &host->max_sd_hs_hz);
 
 	/*
 	 * Configure CD and WP pins. They are both by default active low to
@@ -538,7 +536,8 @@ struct mmc_host *mmc_alloc_host(int extra, struct device *dev)
 		min_idx = mmc_first_nonreserved_index();
 		max_idx = 0;
 
-		index = ida_simple_get(&mmc_host_ida, min_idx, max_idx, GFP_KERNEL);
+		index = ida_alloc_range(&mmc_host_ida, min_idx, max_idx - 1,
+					GFP_KERNEL);
 		if (index < 0) {
 			kfree(host);
 			return NULL;
@@ -566,6 +565,8 @@ struct mmc_host *mmc_alloc_host(int extra, struct device *dev)
 	INIT_DELAYED_WORK(&host->detect, mmc_rescan);
 	INIT_WORK(&host->sdio_irq_work, sdio_irq_work);
 	timer_setup(&host->retune_timer, mmc_retune_timer, 0);
+
+	INIT_WORK(&host->supply.uv_work, mmc_undervoltage_workfn);
 
 	/*
 	 * By default, hosts do not support SGIO or large requests.

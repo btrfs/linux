@@ -2,7 +2,7 @@
 #ifndef _ASM_POWERPC_NOHASH_PGTABLE_H
 #define _ASM_POWERPC_NOHASH_PGTABLE_H
 
-#ifndef __ASSEMBLY__
+#ifndef __ASSEMBLER__
 static inline pte_basic_t pte_update(struct mm_struct *mm, unsigned long addr, pte_t *p,
 				     unsigned long clr, unsigned long set, int huge);
 #endif
@@ -27,9 +27,16 @@ static inline pte_basic_t pte_update(struct mm_struct *mm, unsigned long addr, p
 #define PAGE_KERNEL_RO	__pgprot(_PAGE_BASE | _PAGE_KERNEL_RO)
 #define PAGE_KERNEL_ROX	__pgprot(_PAGE_BASE | _PAGE_KERNEL_ROX)
 
-#ifndef __ASSEMBLY__
+#ifndef __ASSEMBLER__
 
 extern int icache_44x_need_flush;
+
+#ifndef pte_huge_size
+static inline unsigned long pte_huge_size(pte_t pte)
+{
+	return PAGE_SIZE;
+}
+#endif
 
 /*
  * PTE updates. This function is called whenever an existing
@@ -52,11 +59,34 @@ static inline pte_basic_t pte_update(struct mm_struct *mm, unsigned long addr, p
 {
 	pte_basic_t old = pte_val(*p);
 	pte_basic_t new = (old & ~(pte_basic_t)clr) | set;
+	unsigned long sz;
+	unsigned long pdsize;
+	int i;
 
 	if (new == old)
 		return old;
 
-	*p = __pte(new);
+	if (huge)
+		sz = pte_huge_size(__pte(old));
+	else
+		sz = PAGE_SIZE;
+
+	if (sz < PMD_SIZE)
+		pdsize = PAGE_SIZE;
+	else if (sz < PUD_SIZE)
+		pdsize = PMD_SIZE;
+	else if (sz < P4D_SIZE)
+		pdsize = PUD_SIZE;
+	else if (sz < PGDIR_SIZE)
+		pdsize = P4D_SIZE;
+	else
+		pdsize = PGDIR_SIZE;
+
+	for (i = 0; i < sz / pdsize; i++, p++) {
+		*p = __pte(new);
+		if (new)
+			new += (unsigned long long)(pdsize / PAGE_SIZE) << PTE_RPN_SHIFT;
+	}
 
 	if (IS_ENABLED(CONFIG_44x) && !is_kernel_addr(addr) && (old & _PAGE_EXEC))
 		icache_44x_need_flush = 1;
@@ -256,7 +286,7 @@ static inline pte_t pte_modify(pte_t pte, pgprot_t newprot)
 	return __pte((pte_val(pte) & _PAGE_CHG_MASK) | pgprot_val(newprot));
 }
 
-static inline int pte_swp_exclusive(pte_t pte)
+static inline bool pte_swp_exclusive(pte_t pte)
 {
 	return pte_val(pte) & _PAGE_SWP_EXCLUSIVE;
 }
@@ -340,32 +370,8 @@ static inline void __set_pte_at(struct mm_struct *mm, unsigned long addr,
 
 #define pgprot_writecombine pgprot_noncached_wc
 
-#ifdef CONFIG_HUGETLB_PAGE
-static inline int hugepd_ok(hugepd_t hpd)
-{
-#ifdef CONFIG_PPC_8xx
-	return ((hpd_val(hpd) & _PMD_PAGE_MASK) == _PMD_PAGE_8M);
-#else
-	/* We clear the top bit to indicate hugepd */
-	return (hpd_val(hpd) && (hpd_val(hpd) & PD_HUGE) == 0);
-#endif
-}
-
-static inline int pmd_huge(pmd_t pmd)
-{
-	return 0;
-}
-
-static inline int pud_huge(pud_t pud)
-{
-	return 0;
-}
-
-#define is_hugepd(hpd)		(hugepd_ok(hpd))
-#endif
-
 int map_kernel_page(unsigned long va, phys_addr_t pa, pgprot_t prot);
 void unmap_kernel_page(unsigned long va);
 
-#endif /* __ASSEMBLY__ */
+#endif /* __ASSEMBLER__ */
 #endif

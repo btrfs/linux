@@ -24,6 +24,17 @@ config KUNIT_DEBUGFS
 	  test suite, which allow users to see results of the last test suite
 	  run that occurred.
 
+config KUNIT_FAULT_TEST
+	bool "Enable KUnit tests which print BUG stacktraces"
+	depends on KUNIT_TEST
+	depends on !UML
+	default y
+	help
+	  Enables fault handling tests for the KUnit framework. These tests may
+	  trigger a kernel BUG(), and the associated stack trace, even when they
+	  pass. If this conflicts with your test infrastrcture (or is confusing
+	  or annoying), they can be disabled by setting this to N.
+
 config KUNIT_TEST
 	tristate "KUnit test for KUnit" if !KUNIT_ALL_TESTS
 	default KUNIT_ALL_TESTS
@@ -69,5 +80,41 @@ config KUNIT_DEFAULT_ENABLED
 
 	  In most cases this should be left as Y. Only if additional opt-in
 	  behavior is needed should this be set to N.
+
+config KUNIT_AUTORUN_ENABLED
+	bool "Default value of kunit.autorun"
+	default y
+	help
+	  Sets the default value of kunit.autorun. If set to N then KUnit
+	  tests will not run after initialization unless kunit.autorun=1 is
+	  passed to the kernel command line. The test can still be run manually
+	  via debugfs interface.
+
+	  In most cases this should be left as Y. Only if additional opt-in
+	  behavior is needed should this be set to N.
+
+config KUNIT_DEFAULT_TIMEOUT
+	int "Default value of the timeout module parameter"
+	default 300
+	help
+	  Sets the default timeout, in seconds, for Kunit test cases. This value
+	  is further multiplied by a factor determined by the assigned speed
+	  setting: 1x for `DEFAULT`, 3x for `KUNIT_SPEED_SLOW`, and 12x for
+	  `KUNIT_SPEED_VERY_SLOW`. This allows slower tests on slower machines
+	  sufficient time to complete.
+
+	  If unsure, the default timeout of 300 seconds is suitable for most
+	  cases.
+
+config KUNIT_UML_PCI
+	bool "KUnit UML PCI Support"
+	depends on UML
+	select UML_PCI
+	help
+	  Enables the PCI subsystem on UML for use by KUnit tests.
+	  Some KUnit tests require the PCI core which is not enabled by
+	  default on UML.
+
+	  If unsure, say N.
 
 endif # KUNIT

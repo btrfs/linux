@@ -99,7 +99,7 @@ static bool afs_start_fs_iteration(struct afs_operation *op,
 		write_seqlock(&vnode->cb_lock);
 		ASSERTCMP(cb_server, ==, vnode->cb_server);
 		vnode->cb_server = NULL;
-		if (atomic64_xchg(&vnode->cb_expires_at, AFS_NO_CB_PROMISE) != AFS_NO_CB_PROMISE)
+		if (afs_clear_cb_promise(vnode, afs_cb_promise_clear_rotate_server))
 			vnode->cb_break++;
 		write_sequnlock(&vnode->cb_lock);
 	}
@@ -432,6 +432,16 @@ bool afs_select_fileserver(struct afs_operation *op)
 			afs_op_set_error(op, -EDQUOT);
 			goto failed_but_online;
 
+		case RX_INVALID_OPERATION:
+		case RXGEN_OPCODE:
+			/* Handle downgrading to an older operation. */
+			afs_op_set_error(op, -ENOTSUPP);
+			if (op->flags & AFS_OPERATION_DOWNGRADE) {
+				op->flags &= ~AFS_OPERATION_DOWNGRADE;
+				goto go_again;
+			}
+			goto failed_but_online;
+
 		default:
 			afs_op_accumulate_error(op, error, abort_code);
 		failed_but_online:
@@ -541,11 +551,13 @@ pick_server:
 		    test_bit(AFS_SE_EXCLUDED, &se->flags) ||
 		    !test_bit(AFS_SERVER_FL_RESPONDING, &s->flags))
 			continue;
-		es = op->server_states->endpoint_state;
+		es = op->server_states[i].endpoint_state;
 		sal = es->addresses;
 
 		afs_get_address_preferences_rcu(op->net, sal);
 		for (j = 0; j < sal->nr_addrs; j++) {
+			if (es->failed_set & (1 << j))
+				continue;
 			if (!sal->addrs[j].peer)
 				continue;
 			if (sal->addrs[j].prio > best_prio) {
@@ -581,7 +593,7 @@ selected_server:
 	if (vnode->cb_server != server) {
 		vnode->cb_server = server;
 		vnode->cb_v_check = atomic_read(&vnode->volume->cb_v_break);
-		atomic64_set(&vnode->cb_expires_at, AFS_NO_CB_PROMISE);
+		afs_clear_cb_promise(vnode, afs_cb_promise_clear_server_change);
 	}
 
 retry_server:
@@ -602,34 +614,39 @@ iterate_address:
 		goto wait_for_more_probe_results;
 
 	alist = op->estate->addresses;
+	best_prio = -1;
+	addr_index = 0;
 	for (i = 0; i < alist->nr_addrs; i++) {
+		if (!(set & (1 << i)))
+			continue;
 		if (alist->addrs[i].prio > best_prio) {
 			addr_index = i;
 			best_prio = alist->addrs[i].prio;
 		}
 	}
 
-	addr_index = READ_ONCE(alist->preferred);
-	if (!test_bit(addr_index, &set))
-		addr_index = __ffs(set);
+	alist->preferred = addr_index;
 
 	op->addr_index = addr_index;
 	set_bit(addr_index, &op->addr_tried);
 
-	op->volsync.creation = TIME64_MIN;
-	op->volsync.update = TIME64_MIN;
-	op->call_responded = false;
 	_debug("address [%u] %u/%u %pISp",
 	       op->server_index, addr_index, alist->nr_addrs,
 	       rxrpc_kernel_remote_addr(alist->addrs[op->addr_index].peer));
+go_again:
+	op->volsync.creation = TIME64_MIN;
+	op->volsync.update = TIME64_MIN;
+	op->call_responded = false;
 	_leave(" = t");
 	return true;
 
 wait_for_more_probe_results:
 	error = afs_wait_for_one_fs_probe(op->server, op->estate, op->addr_tried,
 					  !(op->flags & AFS_OPERATION_UNINTR));
-	if (!error)
+	if (error == 1)
 		goto iterate_address;
+	if (!error)
+		goto restart_from_beginning;
 
 	/* We've now had a failure to respond on all of a server's addresses -
 	 * immediately probe them again and consider retrying the server.
@@ -640,10 +657,13 @@ wait_for_more_probe_results:
 		error = afs_wait_for_one_fs_probe(op->server, op->estate, op->addr_tried,
 						  !(op->flags & AFS_OPERATION_UNINTR));
 		switch (error) {
-		case 0:
+		case 1:
 			op->flags &= ~AFS_OPERATION_RETRY_SERVER;
-			trace_afs_rotate(op, afs_rotate_trace_retry_server, 0);
+			trace_afs_rotate(op, afs_rotate_trace_retry_server, 1);
 			goto retry_server;
+		case 0:
+			trace_afs_rotate(op, afs_rotate_trace_retry_server, 0);
+			goto restart_from_beginning;
 		case -ERESTARTSYS:
 			afs_op_set_error(op, error);
 			goto failed;
@@ -656,12 +676,6 @@ wait_for_more_probe_results:
 next_server:
 	trace_afs_rotate(op, afs_rotate_trace_next_server, 0);
 	_debug("next");
-	ASSERT(op->estate);
-	alist = op->estate->addresses;
-	if (op->call_responded &&
-	    op->addr_index != READ_ONCE(alist->preferred) &&
-	    test_bit(alist->preferred, &op->addr_tried))
-		WRITE_ONCE(alist->preferred, op->addr_index);
 	op->estate = NULL;
 	goto pick_server;
 
@@ -680,7 +694,7 @@ no_more_servers:
 	for (i = 0; i < op->server_list->nr_servers; i++) {
 		struct afs_endpoint_state *estate;
 
-		estate = op->server_states->endpoint_state;
+		estate = op->server_states[i].endpoint_state;
 		error = READ_ONCE(estate->error);
 		if (error < 0)
 			afs_op_accumulate_error(op, error, estate->abort_code);
@@ -690,14 +704,7 @@ no_more_servers:
 failed:
 	trace_afs_rotate(op, afs_rotate_trace_failed, 0);
 	op->flags |= AFS_OPERATION_STOP;
-	if (op->estate) {
-		alist = op->estate->addresses;
-		if (op->call_responded &&
-		    op->addr_index != READ_ONCE(alist->preferred) &&
-		    test_bit(alist->preferred, &op->addr_tried))
-			WRITE_ONCE(alist->preferred, op->addr_index);
-		op->estate = NULL;
-	}
+	op->estate = NULL;
 	_leave(" = f [failed %d]", afs_op_error(op));
 	return false;
 }

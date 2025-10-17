@@ -155,7 +155,7 @@ mISDN_poll(struct file *filep, poll_table *wait)
 static void
 dev_expire_timer(struct timer_list *t)
 {
-	struct mISDNtimer *timer = from_timer(timer, t, tl);
+	struct mISDNtimer *timer = timer_container_of(timer, t, tl);
 	u_long			flags;
 
 	spin_lock_irqsave(&timer->dev->lock, flags);
@@ -266,7 +266,6 @@ static const struct file_operations mISDN_fops = {
 	.unlocked_ioctl	= mISDN_ioctl,
 	.open		= mISDN_open,
 	.release	= mISDN_close,
-	.llseek		= no_llseek,
 };
 
 static struct miscdevice mISDNtimer = {

@@ -7,7 +7,6 @@
 #include <net/bluetooth/hci_core.h>
 #include <net/bluetooth/mgmt.h>
 
-#include "hci_request.h"
 #include "mgmt_util.h"
 #include "msft.h"
 
@@ -769,7 +768,7 @@ void msft_register(struct hci_dev *hdev)
 	mutex_init(&msft->filter_lock);
 }
 
-void msft_unregister(struct hci_dev *hdev)
+void msft_release(struct hci_dev *hdev)
 {
 	struct msft_data *msft = hdev->msft_data;
 
@@ -875,6 +874,7 @@ static int msft_add_address_filter_sync(struct hci_dev *hdev, void *data)
 		remove = true;
 		goto done;
 	}
+
 	cp->sub_opcode           = MSFT_OP_LE_MONITOR_ADVERTISEMENT;
 	cp->rssi_high		 = address_filter->rssi_high;
 	cp->rssi_low		 = address_filter->rssi_low;
@@ -887,6 +887,8 @@ static int msft_add_address_filter_sync(struct hci_dev *hdev, void *data)
 
 	skb = __hci_cmd_sync(hdev, hdev->msft_opcode, size, cp,
 			     HCI_CMD_TIMEOUT);
+	kfree(cp);
+
 	if (IS_ERR(skb)) {
 		bt_dev_err(hdev, "Failed to enable address %pMR filter",
 			   &address_filter->bdaddr);
@@ -987,7 +989,7 @@ static void msft_monitor_device_evt(struct hci_dev *hdev, struct sk_buff *skb)
 
 	handle_data = msft_find_handle_data(hdev, ev->monitor_handle, false);
 
-	if (!test_bit(HCI_QUIRK_USE_MSFT_EXT_ADDRESS_FILTER, &hdev->quirks)) {
+	if (!hci_test_quirk(hdev, HCI_QUIRK_USE_MSFT_EXT_ADDRESS_FILTER)) {
 		if (!handle_data)
 			return;
 		mgmt_handle = handle_data->mgmt_handle;

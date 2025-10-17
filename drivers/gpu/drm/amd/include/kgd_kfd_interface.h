@@ -71,6 +71,11 @@ enum kgd_memory_pool {
 	KGD_POOL_FRAMEBUFFER = 3,
 };
 
+struct kfd_cu_occupancy {
+	u32 wave_cnt;
+	u32 doorbell_off;
+};
+
 /**
  * enum kfd_sched_policy
  *
@@ -308,16 +313,26 @@ struct kfd2kgd_calls {
 	void (*get_iq_wait_times)(struct amdgpu_device *adev,
 			uint32_t *wait_times,
 			uint32_t inst);
-	void (*build_grace_period_packet_info)(struct amdgpu_device *adev,
+	void (*build_dequeue_wait_counts_packet_info)(struct amdgpu_device *adev,
 			uint32_t wait_times,
-			uint32_t grace_period,
+			uint32_t sch_wave,
+			uint32_t que_sleep,
 			uint32_t *reg_offset,
 			uint32_t *reg_data);
-	void (*get_cu_occupancy)(struct amdgpu_device *adev, int pasid,
-			int *wave_cnt, int *max_waves_per_cu, uint32_t inst);
+	void (*get_cu_occupancy)(struct amdgpu_device *adev,
+				 struct kfd_cu_occupancy *cu_occupancy,
+				 int *max_waves_per_cu, uint32_t inst);
 	void (*program_trap_handler_settings)(struct amdgpu_device *adev,
 			uint32_t vmid, uint64_t tba_addr, uint64_t tma_addr,
 			uint32_t inst);
+	uint64_t (*hqd_get_pq_addr)(struct amdgpu_device *adev,
+				    uint32_t pipe_id, uint32_t queue_id,
+				    uint32_t inst);
+	uint64_t (*hqd_reset)(struct amdgpu_device *adev,
+			      uint32_t pipe_id, uint32_t queue_id,
+			      uint32_t inst, unsigned int utimeout);
+	uint32_t (*hqd_sdma_get_doorbell)(struct amdgpu_device *adev,
+					  int engine, int queue);
 };
 
 #endif	/* KGD_KFD_INTERFACE_H_INCLUDED */

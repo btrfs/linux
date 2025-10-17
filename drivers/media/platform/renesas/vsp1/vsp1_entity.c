@@ -63,19 +63,25 @@ void vsp1_entity_route_setup(struct vsp1_entity *entity,
 	/*
 	 * The ILV and BRS share the same data path route. The extra BRSSEL bit
 	 * selects between the ILV and BRS.
+	 *
+	 * The BRU and IIF share the same data path route. The extra IIFSEL bit
+	 * selects between the IIF and BRU.
 	 */
 	if (source->type == VSP1_ENTITY_BRS)
 		route |= VI6_DPR_ROUTE_BRSSEL;
+	else if (source->type == VSP1_ENTITY_IIF)
+		route |= VI6_DPR_ROUTE_IIFSEL;
 	vsp1_dl_body_write(dlb, source->route->reg, route);
 }
 
 void vsp1_entity_configure_stream(struct vsp1_entity *entity,
+				  struct v4l2_subdev_state *state,
 				  struct vsp1_pipeline *pipe,
 				  struct vsp1_dl_list *dl,
 				  struct vsp1_dl_body *dlb)
 {
 	if (entity->ops->configure_stream)
-		entity->ops->configure_stream(entity, pipe, dl, dlb);
+		entity->ops->configure_stream(entity, state, pipe, dl, dlb);
 }
 
 void vsp1_entity_configure_frame(struct vsp1_entity *entity,
@@ -89,11 +95,27 @@ void vsp1_entity_configure_frame(struct vsp1_entity *entity,
 
 void vsp1_entity_configure_partition(struct vsp1_entity *entity,
 				     struct vsp1_pipeline *pipe,
+				     const struct vsp1_partition *partition,
 				     struct vsp1_dl_list *dl,
 				     struct vsp1_dl_body *dlb)
 {
 	if (entity->ops->configure_partition)
-		entity->ops->configure_partition(entity, pipe, dl, dlb);
+		entity->ops->configure_partition(entity, pipe, partition,
+						 dl, dlb);
+}
+
+void vsp1_entity_adjust_color_space(struct v4l2_mbus_framefmt *format)
+{
+	u8 xfer_func = format->xfer_func;
+	u8 ycbcr_enc = format->ycbcr_enc;
+	u8 quantization = format->quantization;
+
+	vsp1_adjust_color_space(format->code, &format->colorspace, &xfer_func,
+				&ycbcr_enc, &quantization);
+
+	format->xfer_func = xfer_func;
+	format->ycbcr_enc = ycbcr_enc;
+	format->quantization = quantization;
 }
 
 /* -----------------------------------------------------------------------------
@@ -127,49 +149,6 @@ vsp1_entity_get_state(struct vsp1_entity *entity,
 	}
 }
 
-/**
- * vsp1_entity_get_pad_format - Get a pad format from storage for an entity
- * @entity: the entity
- * @sd_state: the state storage
- * @pad: the pad number
- *
- * Return the format stored in the given configuration for an entity's pad. The
- * configuration can be an ACTIVE or TRY configuration.
- */
-struct v4l2_mbus_framefmt *
-vsp1_entity_get_pad_format(struct vsp1_entity *entity,
-			   struct v4l2_subdev_state *sd_state,
-			   unsigned int pad)
-{
-	return v4l2_subdev_state_get_format(sd_state, pad);
-}
-
-/**
- * vsp1_entity_get_pad_selection - Get a pad selection from storage for entity
- * @entity: the entity
- * @sd_state: the state storage
- * @pad: the pad number
- * @target: the selection target
- *
- * Return the selection rectangle stored in the given configuration for an
- * entity's pad. The configuration can be an ACTIVE or TRY configuration. The
- * selection target can be COMPOSE or CROP.
- */
-struct v4l2_rect *
-vsp1_entity_get_pad_selection(struct vsp1_entity *entity,
-			      struct v4l2_subdev_state *sd_state,
-			      unsigned int pad, unsigned int target)
-{
-	switch (target) {
-	case V4L2_SEL_TGT_COMPOSE:
-		return v4l2_subdev_state_get_compose(sd_state, pad);
-	case V4L2_SEL_TGT_CROP:
-		return v4l2_subdev_state_get_crop(sd_state, pad);
-	default:
-		return NULL;
-	}
-}
-
 /*
  * vsp1_subdev_get_pad_format - Subdev pad get_fmt handler
  * @subdev: V4L2 subdevice
@@ -191,7 +170,7 @@ int vsp1_subdev_get_pad_format(struct v4l2_subdev *subdev,
 		return -EINVAL;
 
 	mutex_lock(&entity->lock);
-	fmt->format = *vsp1_entity_get_pad_format(entity, state, fmt->pad);
+	fmt->format = *v4l2_subdev_state_get_format(state, fmt->pad);
 	mutex_unlock(&entity->lock);
 
 	return 0;
@@ -238,7 +217,7 @@ int vsp1_subdev_enum_mbus_code(struct v4l2_subdev *subdev,
 			return -EINVAL;
 
 		mutex_lock(&entity->lock);
-		format = vsp1_entity_get_pad_format(entity, state, 0);
+		format = v4l2_subdev_state_get_format(state, 0);
 		code->code = format->code;
 		mutex_unlock(&entity->lock);
 	}
@@ -276,7 +255,7 @@ int vsp1_subdev_enum_frame_size(struct v4l2_subdev *subdev,
 	if (!state)
 		return -EINVAL;
 
-	format = vsp1_entity_get_pad_format(entity, state, fse->pad);
+	format = v4l2_subdev_state_get_format(state, fse->pad);
 
 	mutex_lock(&entity->lock);
 
@@ -346,7 +325,7 @@ int vsp1_subdev_set_pad_format(struct v4l2_subdev *subdev,
 		goto done;
 	}
 
-	format = vsp1_entity_get_pad_format(entity, state, fmt->pad);
+	format = v4l2_subdev_state_get_format(state, fmt->pad);
 
 	if (fmt->pad == entity->source_pad) {
 		/* The output format can't be modified. */
@@ -369,24 +348,28 @@ int vsp1_subdev_set_pad_format(struct v4l2_subdev *subdev,
 	format->height = clamp_t(unsigned int, fmt->format.height,
 				 min_height, max_height);
 	format->field = V4L2_FIELD_NONE;
-	format->colorspace = V4L2_COLORSPACE_SRGB;
+
+	format->colorspace = fmt->format.colorspace;
+	format->xfer_func = fmt->format.xfer_func;
+	format->ycbcr_enc = fmt->format.ycbcr_enc;
+	format->quantization = fmt->format.quantization;
+
+	vsp1_entity_adjust_color_space(format);
 
 	fmt->format = *format;
 
 	/* Propagate the format to the source pad. */
-	format = vsp1_entity_get_pad_format(entity, state, entity->source_pad);
+	format = v4l2_subdev_state_get_format(state, entity->source_pad);
 	*format = fmt->format;
 
 	/* Reset the crop and compose rectangles. */
-	selection = vsp1_entity_get_pad_selection(entity, state, fmt->pad,
-						  V4L2_SEL_TGT_CROP);
+	selection = v4l2_subdev_state_get_crop(state, fmt->pad);
 	selection->left = 0;
 	selection->top = 0;
 	selection->width = format->width;
 	selection->height = format->height;
 
-	selection = vsp1_entity_get_pad_selection(entity, state, fmt->pad,
-						  V4L2_SEL_TGT_COMPOSE);
+	selection = v4l2_subdev_state_get_compose(state, fmt->pad);
 	selection->left = 0;
 	selection->top = 0;
 	selection->width = format->width;
@@ -570,6 +553,9 @@ struct media_pad *vsp1_entity_remote_pad(struct media_pad *pad)
 	  { VI6_DPR_NODE_WPF(idx) }, VI6_DPR_NODE_WPF(idx) }
 
 static const struct vsp1_route vsp1_routes[] = {
+	{ VSP1_ENTITY_IIF, 0, VI6_DPR_BRU_ROUTE,
+	  { VI6_DPR_NODE_BRU_IN(0), VI6_DPR_NODE_BRU_IN(1),
+	    VI6_DPR_NODE_BRU_IN(3) }, VI6_DPR_NODE_WPF(0) },
 	{ VSP1_ENTITY_BRS, 0, VI6_DPR_ILV_BRS_ROUTE,
 	  { VI6_DPR_NODE_BRS_IN(0), VI6_DPR_NODE_BRS_IN(1) }, 0 },
 	{ VSP1_ENTITY_BRU, 0, VI6_DPR_BRU_ROUTE,

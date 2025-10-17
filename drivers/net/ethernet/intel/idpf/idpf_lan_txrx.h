@@ -4,6 +4,8 @@
 #ifndef _IDPF_LAN_TXRX_H_
 #define _IDPF_LAN_TXRX_H_
 
+#include <linux/bits.h>
+
 enum idpf_rss_hash {
 	IDPF_HASH_INVALID			= 0,
 	/* Values 1 - 28 are reserved for future use */
@@ -184,13 +186,17 @@ struct idpf_base_tx_desc {
 	__le64 qw1; /* type_cmd_offset_bsz_l2tag1 */
 }; /* read used with buffer queues */
 
-struct idpf_splitq_tx_compl_desc {
+struct idpf_splitq_4b_tx_compl_desc {
 	/* qid=[10:0] comptype=[13:11] rsvd=[14] gen=[15] */
 	__le16 qid_comptype_gen;
 	union {
 		__le16 q_head; /* Queue head */
 		__le16 compl_tag; /* Completion tag */
 	} q_head_compl_tag;
+}; /* writeback used with completion queues */
+
+struct idpf_splitq_tx_compl_desc {
+	struct idpf_splitq_4b_tx_compl_desc common;
 	u8 ts[3];
 	u8 rsvd; /* Reserved */
 }; /* writeback used with completion queues */
@@ -280,7 +286,18 @@ struct idpf_flex_tx_tso_ctx_qw {
 	u8 flex;
 };
 
-struct idpf_flex_tx_ctx_desc {
+union idpf_flex_tx_ctx_desc {
+	/* DTYPE = IDPF_TX_DESC_DTYPE_CTX (0x01) */
+	struct {
+		__le64 qw0;
+#define IDPF_TX_CTX_L2TAG2_M	GENMASK_ULL(47, 32)
+		__le64 qw1;
+#define IDPF_TX_CTX_DTYPE_M	GENMASK_ULL(3, 0)
+#define IDPF_TX_CTX_CMD_M	GENMASK_ULL(15, 4)
+#define IDPF_TX_CTX_TSYN_REG_M	GENMASK_ULL(47, 30)
+#define IDPF_TX_CTX_MSS_M	GENMASK_ULL(50, 63)
+	} tsyn;
+
 	/* DTYPE = IDPF_TX_DESC_DTYPE_FLEX_TSO_CTX (0x05) */
 	struct {
 		struct idpf_flex_tx_tso_ctx_qw qw0;

@@ -847,12 +847,16 @@ static void build_user_pbes(struct ocrdma_dev *dev, struct ocrdma_mr *mr)
 }
 
 struct ib_mr *ocrdma_reg_user_mr(struct ib_pd *ibpd, u64 start, u64 len,
-				 u64 usr_addr, int acc, struct ib_udata *udata)
+				 u64 usr_addr, int acc, struct ib_dmah *dmah,
+				 struct ib_udata *udata)
 {
 	int status = -ENOMEM;
 	struct ocrdma_dev *dev = get_ocrdma_dev(ibpd->device);
 	struct ocrdma_mr *mr;
 	struct ocrdma_pd *pd;
+
+	if (dmah)
+		return ERR_PTR(-EOPNOTSUPP);
 
 	pd = get_ocrdma_pd(ibpd);
 
@@ -963,8 +967,9 @@ err:
 }
 
 int ocrdma_create_cq(struct ib_cq *ibcq, const struct ib_cq_init_attr *attr,
-		     struct ib_udata *udata)
+		     struct uverbs_attr_bundle *attrs)
 {
+	struct ib_udata *udata = &attrs->driver_udata;
 	struct ib_device *ibdev = ibcq->device;
 	int entries = attr->cqe;
 	struct ocrdma_cq *cq = get_ocrdma_cq(ibcq);

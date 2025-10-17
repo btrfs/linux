@@ -279,7 +279,7 @@ union perf_event *perf_mmap__read_event(struct perf_mmap *map)
 	if (!refcount_read(&map->refcnt))
 		return NULL;
 
-	/* non-overwirte doesn't pause the ringbuffer */
+	/* non-overwrite doesn't pause the ringbuffer */
 	if (!map->overwrite)
 		map->end = perf_mmap__read_head(map);
 
@@ -508,7 +508,7 @@ int perf_mmap__read_self(struct perf_mmap *map, struct perf_counts_values *count
 		idx = READ_ONCE(pc->index);
 		cnt = READ_ONCE(pc->offset);
 		if (pc->cap_user_rdpmc && idx) {
-			s64 evcnt = read_perf_counter(idx - 1);
+			u64 evcnt = read_perf_counter(idx - 1);
 			u16 width = READ_ONCE(pc->pmc_width);
 
 			evcnt <<= 64 - width;

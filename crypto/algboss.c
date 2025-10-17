@@ -51,7 +51,7 @@ static int cryptomgr_probe(void *data)
 {
 	struct cryptomgr_param *param = data;
 	struct crypto_template *tmpl;
-	int err;
+	int err = -ENOENT;
 
 	tmpl = crypto_lookup_template(param->template);
 	if (!tmpl)
@@ -64,6 +64,8 @@ static int cryptomgr_probe(void *data)
 	crypto_tmpl_put(tmpl);
 
 out:
+	param->larval->adult = ERR_PTR(err);
+	param->larval->alg.cra_flags |= CRYPTO_ALG_DEAD;
 	complete_all(&param->larval->completion);
 	crypto_alg_put(&param->larval->alg);
 	kfree(param);
@@ -138,9 +140,6 @@ static int cryptomgr_schedule_probe(struct crypto_larval *larval)
 			goto err_free_param;
 	}
 
-	if (!i)
-		goto err_free_param;
-
 	param->tb[i + 1] = NULL;
 
 	param->type.attr.rta_len = sizeof(param->type);
@@ -190,7 +189,7 @@ static int cryptomgr_schedule_test(struct crypto_alg *alg)
 	struct task_struct *thread;
 	struct crypto_test_param *param;
 
-	if (IS_ENABLED(CONFIG_CRYPTO_MANAGER_DISABLE_TESTS))
+	if (!IS_ENABLED(CONFIG_CRYPTO_SELFTESTS))
 		return NOTIFY_DONE;
 
 	if (!try_module_get(THIS_MODULE))
@@ -248,13 +247,7 @@ static void __exit cryptomgr_exit(void)
 	BUG_ON(err);
 }
 
-/*
- * This is arch_initcall() so that the crypto self-tests are run on algorithms
- * registered early by subsys_initcall().  subsys_initcall() is needed for
- * generic implementations so that they're available for comparison tests when
- * other implementations are registered later by module_init().
- */
-arch_initcall(cryptomgr_init);
+module_init(cryptomgr_init);
 module_exit(cryptomgr_exit);
 
 MODULE_LICENSE("GPL");

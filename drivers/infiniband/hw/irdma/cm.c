@@ -1263,7 +1263,8 @@ static void irdma_cm_timer_tick(struct timer_list *t)
 	struct irdma_timer_entry *send_entry, *close_entry;
 	struct list_head *list_core_temp;
 	struct list_head *list_node;
-	struct irdma_cm_core *cm_core = from_timer(cm_core, t, tcp_timer);
+	struct irdma_cm_core *cm_core = timer_container_of(cm_core, t,
+							   tcp_timer);
 	struct irdma_sc_vsi *vsi;
 	u32 settimer = 0;
 	unsigned long timetosend;
@@ -1985,7 +1986,8 @@ static int irdma_addr_resolve_neigh(struct irdma_device *iwdev, u32 src_ip,
 	__be32 dst_ipaddr = htonl(dst_ip);
 	__be32 src_ipaddr = htonl(src_ip);
 
-	rt = ip_route_output(&init_net, dst_ipaddr, src_ipaddr, 0, 0);
+	rt = ip_route_output(&init_net, dst_ipaddr, src_ipaddr, 0, 0,
+			     RT_SCOPE_UNIVERSE);
 	if (IS_ERR(rt)) {
 		ibdev_dbg(&iwdev->ibdev, "CM: ip_route_output fail\n");
 		return -EINVAL;
@@ -3302,7 +3304,7 @@ void irdma_cleanup_cm_core(struct irdma_cm_core *cm_core)
 	if (!cm_core)
 		return;
 
-	del_timer_sync(&cm_core->tcp_timer);
+	timer_delete_sync(&cm_core->tcp_timer);
 
 	destroy_workqueue(cm_core->event_wq);
 	cm_core->dev->ws_reset(&cm_core->iwdev->vsi);
@@ -3630,7 +3632,7 @@ void irdma_free_lsmm_rsrc(struct irdma_qp *iwqp)
 /**
  * irdma_accept - registered call for connection to be accepted
  * @cm_id: cm information for passive connection
- * @conn_param: accpet parameters
+ * @conn_param: accept parameters
  */
 int irdma_accept(struct iw_cm_id *cm_id, struct iw_cm_conn_param *conn_param)
 {

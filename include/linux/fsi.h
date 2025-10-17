@@ -44,7 +44,7 @@ struct fsi_driver {
 };
 
 #define to_fsi_dev(devp) container_of(devp, struct fsi_device, dev)
-#define to_fsi_drv(drvp) container_of(drvp, struct fsi_driver, drv)
+#define to_fsi_drv(drvp) container_of_const(drvp, struct fsi_driver, drv)
 
 extern int fsi_driver_register(struct fsi_driver *fsi_drv);
 extern void fsi_driver_unregister(struct fsi_driver *fsi_drv);
@@ -68,7 +68,7 @@ extern int fsi_slave_read(struct fsi_slave *slave, uint32_t addr,
 extern int fsi_slave_write(struct fsi_slave *slave, uint32_t addr,
 		const void *val, size_t size);
 
-extern struct bus_type fsi_bus_type;
+extern const struct bus_type fsi_bus_type;
 extern const struct device_type fsi_cdev_type;
 
 enum fsi_dev_type {

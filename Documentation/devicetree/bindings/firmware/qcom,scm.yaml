@@ -26,14 +26,17 @@ properties:
           - qcom,scm-ipq4019
           - qcom,scm-ipq5018
           - qcom,scm-ipq5332
+          - qcom,scm-ipq5424
           - qcom,scm-ipq6018
           - qcom,scm-ipq806x
           - qcom,scm-ipq8074
           - qcom,scm-ipq9574
           - qcom,scm-mdm9607
+          - qcom,scm-milos
           - qcom,scm-msm8226
           - qcom,scm-msm8660
           - qcom,scm-msm8916
+          - qcom,scm-msm8937
           - qcom,scm-msm8953
           - qcom,scm-msm8960
           - qcom,scm-msm8974
@@ -42,8 +45,12 @@ properties:
           - qcom,scm-msm8996
           - qcom,scm-msm8998
           - qcom,scm-qcm2290
+          - qcom,scm-qcs615
+          - qcom,scm-qcs8300
           - qcom,scm-qdu1000
+          - qcom,scm-sa8255p
           - qcom,scm-sa8775p
+          - qcom,scm-sar2130p
           - qcom,scm-sc7180
           - qcom,scm-sc7280
           - qcom,scm-sc8180x
@@ -64,6 +71,7 @@ properties:
           - qcom,scm-sm8450
           - qcom,scm-sm8550
           - qcom,scm-sm8650
+          - qcom,scm-sm8750
           - qcom,scm-qcs404
           - qcom,scm-x1e80100
       - const: qcom,scm
@@ -91,6 +99,11 @@ properties:
     description:
       The wait-queue interrupt that firmware raises as part of handshake
       protocol to handle sleeping SCM calls.
+    maxItems: 1
+
+  memory-region:
+    description:
+      Phandle to the memory region reserved for the shared memory bridge to TZ.
     maxItems: 1
 
   qcom,sdi-enabled:
@@ -122,6 +135,7 @@ allOf:
               - qcom,scm-msm8226
               - qcom,scm-msm8660
               - qcom,scm-msm8916
+              - qcom,scm-msm8937
               - qcom,scm-msm8953
               - qcom,scm-msm8960
               - qcom,scm-msm8974
@@ -165,6 +179,7 @@ allOf:
               - qcom,scm-mdm9607
               - qcom,scm-msm8226
               - qcom,scm-msm8916
+              - qcom,scm-msm8937
               - qcom,scm-msm8953
               - qcom,scm-msm8974
               - qcom,scm-msm8976
@@ -187,12 +202,25 @@ allOf:
           compatible:
             contains:
               enum:
+                - qcom,scm-milos
                 - qcom,scm-sm8450
                 - qcom,scm-sm8550
                 - qcom,scm-sm8650
+                - qcom,scm-sm8750
     then:
       properties:
         interrupts: false
+  - if:
+      not:
+        properties:
+          compatible:
+            contains:
+              enum:
+                - qcom,scm-sa8255p
+                - qcom,scm-sa8775p
+    then:
+      properties:
+        memory-region: false
 
 required:
   - compatible

@@ -22,6 +22,7 @@
  * Authors: AMD
  *
  */
+#include "dc_types.h"
 #include "core_types.h"
 #include "core_status.h"
 #include "dc_state.h"
@@ -33,8 +34,10 @@
 #include "resource.h"
 #include "link_enc_cfg.h"
 
+#if defined(CONFIG_DRM_AMD_DC_FP)
 #include "dml2/dml2_wrapper.h"
 #include "dml2/dml2_internal_types.h"
+#endif
 
 #define DC_LOGGER \
 	dc->ctx->logger
@@ -188,20 +191,31 @@ static void init_state(struct dc *dc, struct dc_state *state)
 }
 
 /* Public dc_state functions */
-struct dc_state *dc_state_create(struct dc *dc)
+struct dc_state *dc_state_create(struct dc *dc, struct dc_state_create_params *params)
 {
-	struct dc_state *state = kvzalloc(sizeof(struct dc_state),
-			GFP_KERNEL);
+	struct dc_state *state;
+
+	state = kvzalloc(sizeof(struct dc_state), GFP_KERNEL);
 
 	if (!state)
 		return NULL;
 
 	init_state(dc, state);
 	dc_state_construct(dc, state);
+	state->power_source = params ? params->power_source : DC_POWER_SOURCE_AC;
 
 #ifdef CONFIG_DRM_AMD_DC_FP
-	if (dc->debug.using_dml2)
-		dml2_create(dc, &dc->dml2_options, &state->bw_ctx.dml2);
+	if (dc->debug.using_dml2) {
+		if (!dml2_create(dc, &dc->dml2_options, &state->bw_ctx.dml2)) {
+			dc_state_release(state);
+			return NULL;
+		}
+
+		if (dc->caps.dcmode_power_limits_present && !dml2_create(dc, &dc->dml2_dc_power_options, &state->bw_ctx.dml2_dc_power_source)) {
+			dc_state_release(state);
+			return NULL;
+		}
+	}
 #endif
 
 	kref_init(&state->refcount);
@@ -214,6 +228,7 @@ void dc_state_copy(struct dc_state *dst_state, struct dc_state *src_state)
 	struct kref refcount = dst_state->refcount;
 #ifdef CONFIG_DRM_AMD_DC_FP
 	struct dml2_context *dst_dml2 = dst_state->bw_ctx.dml2;
+	struct dml2_context *dst_dml2_dc_power_source = dst_state->bw_ctx.dml2_dc_power_source;
 #endif
 
 	dc_state_copy_internal(dst_state, src_state);
@@ -222,6 +237,10 @@ void dc_state_copy(struct dc_state *dst_state, struct dc_state *src_state)
 	dst_state->bw_ctx.dml2 = dst_dml2;
 	if (src_state->bw_ctx.dml2)
 		dml2_copy(dst_state->bw_ctx.dml2, src_state->bw_ctx.dml2);
+
+	dst_state->bw_ctx.dml2_dc_power_source = dst_dml2_dc_power_source;
+	if (src_state->bw_ctx.dml2_dc_power_source)
+		dml2_copy(dst_state->bw_ctx.dml2_dc_power_source, src_state->bw_ctx.dml2_dc_power_source);
 #endif
 
 	/* context refcount should not be overridden */
@@ -240,8 +259,17 @@ struct dc_state *dc_state_create_copy(struct dc_state *src_state)
 	dc_state_copy_internal(new_state, src_state);
 
 #ifdef CONFIG_DRM_AMD_DC_FP
+	new_state->bw_ctx.dml2 = NULL;
+	new_state->bw_ctx.dml2_dc_power_source = NULL;
+
 	if (src_state->bw_ctx.dml2 &&
 			!dml2_create_copy(&new_state->bw_ctx.dml2, src_state->bw_ctx.dml2)) {
+		dc_state_release(new_state);
+		return NULL;
+	}
+
+	if (src_state->bw_ctx.dml2_dc_power_source &&
+			!dml2_create_copy(&new_state->bw_ctx.dml2_dc_power_source, src_state->bw_ctx.dml2_dc_power_source)) {
 		dc_state_release(new_state);
 		return NULL;
 	}
@@ -291,11 +319,14 @@ void dc_state_destruct(struct dc_state *state)
 		dc_stream_release(state->phantom_streams[i]);
 		state->phantom_streams[i] = NULL;
 	}
+	state->phantom_stream_count = 0;
 
 	for (i = 0; i < state->phantom_plane_count; i++) {
 		dc_plane_state_release(state->phantom_planes[i]);
 		state->phantom_planes[i] = NULL;
 	}
+	state->phantom_plane_count = 0;
+
 	state->stream_mask = 0;
 	memset(&state->res_ctx, 0, sizeof(state->res_ctx));
 	memset(&state->pp_display_cfg, 0, sizeof(state->pp_display_cfg));
@@ -307,7 +338,6 @@ void dc_state_destruct(struct dc_state *state)
 	memset(state->dc_dmub_cmd, 0, sizeof(state->dc_dmub_cmd));
 	state->dmub_cmd_count = 0;
 	memset(&state->perf_params, 0, sizeof(state->perf_params));
-	memset(&state->scratch, 0, sizeof(state->scratch));
 }
 
 void dc_state_retain(struct dc_state *state)
@@ -324,6 +354,9 @@ static void dc_state_free(struct kref *kref)
 #ifdef CONFIG_DRM_AMD_DC_FP
 	dml2_destroy(state->bw_ctx.dml2);
 	state->bw_ctx.dml2 = 0;
+
+	dml2_destroy(state->bw_ctx.dml2_dc_power_source);
+	state->bw_ctx.dml2_dc_power_source = 0;
 #endif
 
 	kvfree(state);
@@ -331,13 +364,14 @@ static void dc_state_free(struct kref *kref)
 
 void dc_state_release(struct dc_state *state)
 {
-	kref_put(&state->refcount, dc_state_free);
+	if (state != NULL)
+		kref_put(&state->refcount, dc_state_free);
 }
 /*
  * dc_state_add_stream() - Add a new dc_stream_state to a dc_state.
  */
 enum dc_status dc_state_add_stream(
-		struct dc *dc,
+		const struct dc *dc,
 		struct dc_state *state,
 		struct dc_stream_state *stream)
 {
@@ -366,7 +400,7 @@ enum dc_status dc_state_add_stream(
  * dc_state_remove_stream() - Remove a stream from a dc_state.
  */
 enum dc_status dc_state_remove_stream(
-		struct dc *dc,
+		const struct dc *dc,
 		struct dc_state *state,
 		struct dc_stream_state *stream)
 {
@@ -393,6 +427,8 @@ enum dc_status dc_state_remove_stream(
 		return DC_ERROR_UNEXPECTED;
 	}
 
+	dc_stream_release_3dlut_for_stream(dc, stream);
+
 	dc_stream_release(state->streams[i]);
 	state->stream_count--;
 
@@ -411,6 +447,19 @@ enum dc_status dc_state_remove_stream(
 	return DC_OK;
 }
 
+static void remove_mpc_combine_for_stream(const struct dc *dc,
+		struct dc_state *new_ctx,
+		const struct dc_state *cur_ctx,
+		struct dc_stream_status *status)
+{
+	int i;
+
+	for (i = 0; i < status->plane_count; i++)
+		resource_update_pipes_for_plane_with_slice_count(
+				new_ctx, cur_ctx, dc->res_pool,
+				status->plane_states[i], 1);
+}
+
 bool dc_state_add_plane(
 		const struct dc *dc,
 		struct dc_stream_state *stream,
@@ -421,22 +470,52 @@ bool dc_state_add_plane(
 	struct pipe_ctx *otg_master_pipe;
 	struct dc_stream_status *stream_status = NULL;
 	bool added = false;
+	int odm_slice_count;
+	int i;
 
 	stream_status = dc_state_get_stream_status(state, stream);
+	otg_master_pipe = resource_get_otg_master_for_stream(
+			&state->res_ctx, stream);
 	if (stream_status == NULL) {
 		dm_error("Existing stream not found; failed to attach surface!\n");
 		goto out;
-	} else if (stream_status->plane_count == MAX_SURFACE_NUM) {
+	} else if (stream_status->plane_count == MAX_SURFACES) {
 		dm_error("Surface: can not attach plane_state %p! Maximum is: %d\n",
-				plane_state, MAX_SURFACE_NUM);
+				plane_state, MAX_SURFACES);
+		goto out;
+	} else if (!otg_master_pipe) {
 		goto out;
 	}
 
-	otg_master_pipe = resource_get_otg_master_for_stream(
-			&state->res_ctx, stream);
-	if (otg_master_pipe)
+	added = resource_append_dpp_pipes_for_plane_composition(state,
+			dc->current_state, pool, otg_master_pipe, plane_state);
+
+	if (!added) {
+		/* try to remove MPC combine to free up pipes */
+		for (i = 0; i < state->stream_count; i++)
+			remove_mpc_combine_for_stream(dc, state,
+					dc->current_state,
+					&state->stream_status[i]);
 		added = resource_append_dpp_pipes_for_plane_composition(state,
-				dc->current_state, pool, otg_master_pipe, plane_state);
+					dc->current_state, pool,
+					otg_master_pipe, plane_state);
+	}
+
+	if (!added) {
+		/* try to decrease ODM slice count gradually to free up pipes */
+		odm_slice_count = resource_get_odm_slice_count(otg_master_pipe);
+		for (i = odm_slice_count - 1; i > 0; i--) {
+			resource_update_pipes_for_stream_with_slice_count(state,
+					dc->current_state, dc->res_pool, stream,
+					i);
+			added = resource_append_dpp_pipes_for_plane_composition(
+					state,
+					dc->current_state, pool,
+					otg_master_pipe, plane_state);
+			if (added)
+				break;
+		}
+	}
 
 	if (added) {
 		stream_status->plane_states[stream_status->plane_count] =
@@ -496,15 +575,6 @@ bool dc_state_remove_plane(
 
 	stream_status->plane_states[stream_status->plane_count] = NULL;
 
-	if (stream_status->plane_count == 0 && dc->config.enable_windowed_mpo_odm)
-		/* ODM combine could prevent us from supporting more planes
-		 * we will reset ODM slice count back to 1 when all planes have
-		 * been removed to maximize the amount of planes supported when
-		 * new planes are added.
-		 */
-		resource_update_pipes_for_stream_with_slice_count(
-				state, dc->current_state, dc->res_pool, stream, 1);
-
 	return true;
 }
 
@@ -526,7 +596,7 @@ bool dc_state_rem_all_planes_for_stream(
 {
 	int i, old_plane_count;
 	struct dc_stream_status *stream_status = NULL;
-	struct dc_plane_state *del_planes[MAX_SURFACE_NUM] = { 0 };
+	struct dc_plane_state *del_planes[MAX_SURFACES] = { 0 };
 
 	for (i = 0; i < state->stream_count; i++)
 		if (state->streams[i] == stream) {
@@ -582,7 +652,7 @@ bool dc_state_add_all_planes_for_stream(
  */
 struct dc_stream_status *dc_state_get_stream_status(
 		struct dc_state *state,
-		struct dc_stream_state *stream)
+		const struct dc_stream_state *stream)
 {
 	uint8_t i;
 
@@ -676,7 +746,7 @@ void dc_state_release_phantom_stream(const struct dc *dc,
 	dc_stream_release(phantom_stream);
 }
 
-struct dc_plane_state *dc_state_create_phantom_plane(struct dc *dc,
+struct dc_plane_state *dc_state_create_phantom_plane(const struct dc *dc,
 		struct dc_state *state,
 		struct dc_plane_state *main_plane)
 {
@@ -712,7 +782,7 @@ void dc_state_release_phantom_plane(const struct dc *dc,
 }
 
 /* add phantom streams to context and generate correct meta inside dc_state */
-enum dc_status dc_state_add_phantom_stream(struct dc *dc,
+enum dc_status dc_state_add_phantom_stream(const struct dc *dc,
 		struct dc_state *state,
 		struct dc_stream_state *phantom_stream,
 		struct dc_stream_state *main_stream)
@@ -729,27 +799,39 @@ enum dc_status dc_state_add_phantom_stream(struct dc *dc,
 
 	/* setup subvp meta */
 	main_stream_status = dc_state_get_stream_status(state, main_stream);
+	if (main_stream_status) {
+		main_stream_status->mall_stream_config.type = SUBVP_MAIN;
+		main_stream_status->mall_stream_config.paired_stream = phantom_stream;
+	}
+
 	phantom_stream_status = dc_state_get_stream_status(state, phantom_stream);
-	phantom_stream_status->mall_stream_config.type = SUBVP_PHANTOM;
-	phantom_stream_status->mall_stream_config.paired_stream = main_stream;
-	main_stream_status->mall_stream_config.type = SUBVP_MAIN;
-	main_stream_status->mall_stream_config.paired_stream = phantom_stream;
+	if (phantom_stream_status) {
+		phantom_stream_status->mall_stream_config.type = SUBVP_PHANTOM;
+		phantom_stream_status->mall_stream_config.paired_stream = main_stream;
+		phantom_stream_status->mall_stream_config.subvp_limit_cursor_size = false;
+		phantom_stream_status->mall_stream_config.cursor_size_limit_subvp = false;
+	}
+
+	dc_state_set_stream_subvp_cursor_limit(main_stream, state, true);
 
 	return res;
 }
 
-enum dc_status dc_state_remove_phantom_stream(struct dc *dc,
+enum dc_status dc_state_remove_phantom_stream(const struct dc *dc,
 		struct dc_state *state,
 		struct dc_stream_state *phantom_stream)
 {
-	struct dc_stream_status *main_stream_status;
+	struct dc_stream_status *main_stream_status = NULL;
 	struct dc_stream_status *phantom_stream_status;
 
 	/* reset subvp meta */
 	phantom_stream_status = dc_state_get_stream_status(state, phantom_stream);
-	main_stream_status = dc_state_get_stream_status(state, phantom_stream_status->mall_stream_config.paired_stream);
-	phantom_stream_status->mall_stream_config.type = SUBVP_NONE;
-	phantom_stream_status->mall_stream_config.paired_stream = NULL;
+	if (phantom_stream_status) {
+		main_stream_status = dc_state_get_stream_status(state, phantom_stream_status->mall_stream_config.paired_stream);
+		phantom_stream_status->mall_stream_config.type = SUBVP_NONE;
+		phantom_stream_status->mall_stream_config.paired_stream = NULL;
+	}
+
 	if (main_stream_status) {
 		main_stream_status->mall_stream_config.type = SUBVP_NONE;
 		main_stream_status->mall_stream_config.paired_stream = NULL;
@@ -793,7 +875,7 @@ bool dc_state_rem_all_phantom_planes_for_stream(
 {
 	int i, old_plane_count;
 	struct dc_stream_status *stream_status = NULL;
-	struct dc_plane_state *del_planes[MAX_SURFACE_NUM] = { 0 };
+	struct dc_plane_state *del_planes[MAX_SURFACES] = { 0 };
 
 	for (i = 0; i < state->stream_count; i++)
 		if (state->streams[i] == phantom_stream) {
@@ -832,7 +914,7 @@ bool dc_state_add_all_phantom_planes_for_stream(
 }
 
 bool dc_state_remove_phantom_streams_and_planes(
-	struct dc *dc,
+	const struct dc *dc,
 	struct dc_state *state)
 {
 	int i;
@@ -854,14 +936,142 @@ bool dc_state_remove_phantom_streams_and_planes(
 }
 
 void dc_state_release_phantom_streams_and_planes(
-		struct dc *dc,
+		const struct dc *dc,
 		struct dc_state *state)
 {
+	unsigned int phantom_count;
+	struct dc_stream_state *phantom_streams[MAX_PHANTOM_PIPES];
+	struct dc_plane_state *phantom_planes[MAX_PHANTOM_PIPES];
 	int i;
 
-	for (i = 0; i < state->phantom_stream_count; i++)
-		dc_state_release_phantom_stream(dc, state, state->phantom_streams[i]);
+	phantom_count = state->phantom_stream_count;
+	memcpy(phantom_streams, state->phantom_streams, sizeof(struct dc_stream_state *) * MAX_PHANTOM_PIPES);
+	for (i = 0; i < phantom_count; i++)
+		dc_state_release_phantom_stream(dc, state, phantom_streams[i]);
 
-	for (i = 0; i < state->phantom_plane_count; i++)
-		dc_state_release_phantom_plane(dc, state, state->phantom_planes[i]);
+	phantom_count = state->phantom_plane_count;
+	memcpy(phantom_planes, state->phantom_planes, sizeof(struct dc_plane_state *) * MAX_PHANTOM_PIPES);
+	for (i = 0; i < phantom_count; i++)
+		dc_state_release_phantom_plane(dc, state, phantom_planes[i]);
+}
+
+struct dc_stream_state *dc_state_get_stream_from_id(const struct dc_state *state, unsigned int id)
+{
+	struct dc_stream_state *stream = NULL;
+	int i;
+
+	for (i = 0; i < state->stream_count; i++) {
+		if (state->streams[i] && state->streams[i]->stream_id == id) {
+			stream = state->streams[i];
+			break;
+		}
+	}
+
+	return stream;
+}
+
+bool dc_state_is_fams2_in_use(
+		const struct dc *dc,
+		const struct dc_state *state)
+{
+	bool is_fams2_in_use = false;
+
+	if (state)
+		is_fams2_in_use |= state->bw_ctx.bw.dcn.fams2_global_config.features.bits.enable;
+
+	if (dc->current_state)
+		is_fams2_in_use |= dc->current_state->bw_ctx.bw.dcn.fams2_global_config.features.bits.enable;
+
+	return is_fams2_in_use;
+}
+
+void dc_state_set_stream_subvp_cursor_limit(const struct dc_stream_state *stream,
+		struct dc_state *state,
+		bool limit)
+{
+	struct dc_stream_status *stream_status;
+
+	stream_status = dc_state_get_stream_status(state, stream);
+
+	if (stream_status) {
+		stream_status->mall_stream_config.subvp_limit_cursor_size = limit;
+	}
+}
+
+bool dc_state_get_stream_subvp_cursor_limit(const struct dc_stream_state *stream,
+		struct dc_state *state)
+{
+	bool limit = false;
+
+	struct dc_stream_status *stream_status;
+
+	stream_status = dc_state_get_stream_status(state, stream);
+
+	if (stream_status) {
+		limit = stream_status->mall_stream_config.subvp_limit_cursor_size;
+	}
+
+	return limit;
+}
+
+void dc_state_set_stream_cursor_subvp_limit(const struct dc_stream_state *stream,
+		struct dc_state *state,
+		bool limit)
+{
+	struct dc_stream_status *stream_status;
+
+	stream_status = dc_state_get_stream_status(state, stream);
+
+	if (stream_status) {
+		stream_status->mall_stream_config.cursor_size_limit_subvp = limit;
+	}
+}
+
+bool dc_state_get_stream_cursor_subvp_limit(const struct dc_stream_state *stream,
+		struct dc_state *state)
+{
+	bool limit = false;
+
+	struct dc_stream_status *stream_status;
+
+	stream_status = dc_state_get_stream_status(state, stream);
+
+	if (stream_status) {
+		limit = stream_status->mall_stream_config.cursor_size_limit_subvp;
+	}
+
+	return limit;
+}
+
+bool dc_state_can_clear_stream_cursor_subvp_limit(const struct dc_stream_state *stream,
+		struct dc_state *state)
+{
+	bool can_clear_limit = false;
+
+	struct dc_stream_status *stream_status;
+
+	stream_status = dc_state_get_stream_status(state, stream);
+
+	if (stream_status) {
+		can_clear_limit = dc_state_get_stream_cursor_subvp_limit(stream, state) &&
+				(stream_status->mall_stream_config.type == SUBVP_PHANTOM ||
+				stream->hw_cursor_req ||
+				!stream_status->mall_stream_config.subvp_limit_cursor_size ||
+				!stream->cursor_position.enable ||
+				dc_stream_check_cursor_attributes(stream, state, &stream->cursor_attributes));
+	}
+
+	return can_clear_limit;
+}
+
+bool dc_state_is_subvp_in_use(struct dc_state *state)
+{
+	uint32_t i;
+
+	for (i = 0; i < state->stream_count; i++) {
+		if (dc_state_get_stream_subvp_type(state, state->streams[i]) != SUBVP_NONE)
+			return true;
+	}
+
+	return false;
 }

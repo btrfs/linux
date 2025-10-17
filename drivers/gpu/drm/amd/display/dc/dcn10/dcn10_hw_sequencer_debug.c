@@ -40,13 +40,13 @@
 #include "ipp.h"
 #include "mpc.h"
 #include "reg_helper.h"
-#include "dcn10_hubp.h"
-#include "dcn10_hubbub.h"
+#include "dcn10/dcn10_hubp.h"
+#include "dcn10/dcn10_hubbub.h"
 #include "dcn10_cm_common.h"
 #include "clk_mgr.h"
 
 __printf(3, 4)
-unsigned int snprintf_count(char *pbuf, unsigned int bufsize, char *fmt, ...)
+unsigned int snprintf_count(char *pbuf, unsigned int bufsize, const char *fmt, ...)
 {
 	int ret_vsnprintf;
 	unsigned int chars_printed;
@@ -392,7 +392,7 @@ static unsigned int dcn10_get_mpcc_states(struct dc *dc, char *pBuf, unsigned in
 	remaining_buffer -= chars_printed;
 	pBuf += chars_printed;
 
-	for (i = 0; i < pool->pipe_count; i++) {
+	for (i = 0; i < pool->mpcc_count; i++) {
 		struct mpcc_state s = {0};
 
 		pool->mpc->funcs->read_mpcc_state(pool->mpc, i, &s);
@@ -429,7 +429,9 @@ static unsigned int dcn10_get_otg_states(struct dc *dc, char *pBuf, unsigned int
 		struct dcn_otg_state s = {0};
 		int pix_clk = 0;
 
-		optc1_read_otg_state(DCN10TG_FROM_TG(tg), &s);
+		if (tg->funcs->read_otg_state)
+			tg->funcs->read_otg_state(tg, &s);
+
 		pix_clk = dc->current_state->res_ctx.pipe_ctx[i].stream_res.pix_clk_params.requested_pix_clk_100hz / 10;
 
 		//only print if OTG master is enabled
@@ -495,7 +497,8 @@ static void dcn10_clear_otpc_underflow(struct dc *dc)
 		struct timing_generator *tg = pool->timing_generators[i];
 		struct dcn_otg_state s = {0};
 
-		optc1_read_otg_state(DCN10TG_FROM_TG(tg), &s);
+		if (tg->funcs->read_otg_state)
+			tg->funcs->read_otg_state(tg, &s);
 
 		if (s.otg_enabled & 1)
 			tg->funcs->clear_optc_underflow(tg);

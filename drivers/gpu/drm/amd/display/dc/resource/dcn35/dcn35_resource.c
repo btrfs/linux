@@ -61,7 +61,7 @@
 #include "dcn31/dcn31_hpo_dp_stream_encoder.h"
 #include "dcn31/dcn31_hpo_dp_link_encoder.h"
 #include "dcn32/dcn32_hpo_dp_link_encoder.h"
-#include "link.h"
+#include "link_service.h"
 #include "dcn31/dcn31_apg.h"
 #include "dcn32/dcn32_dio_link_encoder.h"
 #include "dcn31/dcn31_vpg.h"
@@ -701,7 +701,7 @@ static const struct dc_plane_cap plane_cap = {
 
 	// 6:1 downscaling ratio: 1000/6 = 166.666
 	.max_downscale_factor = {
-			.argb8888 = 167,
+			.argb8888 = 250,
 			.nv12 = 167,
 			.fp16 = 167
 	},
@@ -712,7 +712,6 @@ static const struct dc_plane_cap plane_cap = {
 static const struct dc_debug_options debug_defaults_drv = {
 	.disable_dmcu = true,
 	.force_abm_enable = false,
-	.timing_trace = false,
 	.clock_trace = true,
 	.disable_pplib_clock_request = false,
 	.pipe_split_policy = MPC_SPLIT_AVOID,
@@ -758,17 +757,18 @@ static const struct dc_debug_options debug_defaults_drv = {
 			.symclk32_se = true,
 			.symclk32_le = true,
 			.symclk_fe = true,
-			.physymclk = true,
+			.physymclk = false,
 			.dpiasymclk = true,
 		}
 	},
 	.seamless_boot_odm_combine = DML_FAIL_SOURCE_PIXEL_FORMAT,
 	.enable_z9_disable_interface = true, /* Allow support for the PMFW interface for disable Z9*/
+	.minimum_z8_residency_time = 1, /* Always allow when other conditions are met */
 	.using_dml2 = true,
 	.support_eDP1_5 = true,
 	.enable_hpo_pg_support = false,
 	.enable_legacy_fast_update = true,
-	.enable_single_display_2to1_odm_policy = false,
+	.enable_single_display_2to1_odm_policy = true,
 	.disable_idle_power_optimizations = false,
 	.dmcub_emulation = false,
 	.disable_boot_optimizations = false,
@@ -780,9 +780,12 @@ static const struct dc_debug_options debug_defaults_drv = {
 	.disable_z10 = false,
 	.ignore_pg = true,
 	.psp_disabled_wa = true,
-	.ips2_eval_delay_us = 200,
-	.ips2_entry_delay_us = 400,
+	.ips2_eval_delay_us = 2000,
+	.ips2_entry_delay_us = 800,
+	.disable_dmub_reallow_idle = false,
 	.static_screen_wait_frames = 2,
+	.disable_timeout = true,
+	.min_disp_clk_khz = 50000,
 };
 
 static const struct dc_panel_config panel_config_defaults = {
@@ -1070,7 +1073,7 @@ static struct link_encoder *dcn35_link_encoder_create(
 	struct dcn20_link_encoder *enc20 =
 		kzalloc(sizeof(struct dcn20_link_encoder), GFP_KERNEL);
 
-	if (!enc20)
+	if (!enc20 || enc_init_data->hpd_source >= ARRAY_SIZE(link_enc_hpd_regs))
 		return NULL;
 
 #undef REG_STRUCT
@@ -1366,6 +1369,8 @@ static struct hpo_dp_link_encoder *dcn31_hpo_dp_link_encoder_create(
 
 	/* allocate HPO link encoder */
 	hpo_dp_enc31 = kzalloc(sizeof(struct dcn31_hpo_dp_link_encoder), GFP_KERNEL);
+	if (!hpo_dp_enc31)
+		return NULL; /* out of memory */
 
 #undef REG_STRUCT
 #define REG_STRUCT hpo_dp_link_enc_regs
@@ -1712,6 +1717,7 @@ static struct clock_source *dcn35_clock_source_create(
 		return &clk_src->base;
 	}
 
+	kfree(clk_src);
 	BREAK_TO_DEBUGGER();
 	return NULL;
 }
@@ -1726,24 +1732,47 @@ static void dcn35_get_panel_config_defaults(struct dc_panel_config *panel_config
 }
 
 
-static bool dcn35_validate_bandwidth(struct dc *dc,
+static enum dc_status dcn35_validate_bandwidth(struct dc *dc,
 		struct dc_state *context,
-		bool fast_validate)
+		enum dc_validate_mode validate_mode)
 {
 	bool out = false;
 
-	out = dml2_validate(dc, context, fast_validate);
+	out = dml2_validate(dc, context,
+			context->power_source == DC_POWER_SOURCE_DC ? context->bw_ctx.dml2_dc_power_source : context->bw_ctx.dml2,
+			validate_mode);
 
-	if (fast_validate)
-		return out;
+	if (validate_mode != DC_VALIDATE_MODE_AND_PROGRAMMING)
+		return out ? DC_OK : DC_FAIL_BANDWIDTH_VALIDATE;
 
 	DC_FP_START();
 	dcn35_decide_zstate_support(dc, context);
 	DC_FP_END();
 
-	return out;
+	return out ? DC_OK : DC_FAIL_BANDWIDTH_VALIDATE;
 }
 
+enum dc_status dcn35_patch_unknown_plane_state(struct dc_plane_state *plane_state)
+{
+	plane_state->tiling_info.gfxversion = DcGfxVersion9;
+	dcn20_patch_unknown_plane_state(plane_state);
+	return DC_OK;
+}
+
+
+static int populate_dml_pipes_from_context_fpu(struct dc *dc,
+					       struct dc_state *context,
+					       display_e2e_pipe_params_st *pipes,
+					       enum dc_validate_mode validate_mode)
+{
+	int ret;
+
+	DC_FP_START();
+	ret = dcn35_populate_dml_pipes_from_context_fpu(dc, context, pipes, validate_mode);
+	DC_FP_END();
+
+	return ret;
+}
 
 static struct resource_funcs dcn35_res_pool_funcs = {
 	.destroy = dcn35_destroy_resource_pool,
@@ -1755,7 +1784,7 @@ static struct resource_funcs dcn35_res_pool_funcs = {
 	.validate_bandwidth = dcn35_validate_bandwidth,
 	.calculate_wm_and_dlg = NULL,
 	.update_soc_for_wm_a = dcn31_update_soc_for_wm_a,
-	.populate_dml_pipes = dcn35_populate_dml_pipes_from_context_fpu,
+	.populate_dml_pipes = populate_dml_pipes_from_context_fpu,
 	.acquire_free_pipe_as_secondary_dpp_pipe = dcn20_acquire_free_pipe_for_layer,
 	.release_pipe = dcn20_release_pipe,
 	.add_stream_to_ctx = dcn30_add_stream_to_ctx,
@@ -1767,9 +1796,13 @@ static struct resource_funcs dcn35_res_pool_funcs = {
 	.acquire_post_bldn_3dlut = dcn30_acquire_post_bldn_3dlut,
 	.release_post_bldn_3dlut = dcn30_release_post_bldn_3dlut,
 	.update_bw_bounding_box = dcn35_update_bw_bounding_box_fpu,
-	.patch_unknown_plane_state = dcn20_patch_unknown_plane_state,
+	.patch_unknown_plane_state = dcn35_patch_unknown_plane_state,
 	.get_panel_config_defaults = dcn35_get_panel_config_defaults,
 	.get_preferred_eng_id_dpia = dcn35_get_preferred_eng_id_dpia,
+	.get_det_buffer_size = dcn31_get_det_buffer_size,
+	.get_vstartup_for_pipe = dcn10_get_vstartup_for_pipe,
+	.update_dc_state_for_encoder_switch = dcn31_update_dc_state_for_encoder_switch,
+	.build_pipe_pix_clk_params = dcn20_build_pipe_pix_clk_params
 };
 
 static bool dcn35_resource_construct(
@@ -1822,9 +1855,9 @@ static bool dcn35_resource_construct(
 	dc->caps.max_cursor_size = 256;
 	dc->caps.min_horizontal_blanking_period = 80;
 	dc->caps.dmdata_alloc_size = 2048;
-	dc->caps.max_slave_planes = 2;
-	dc->caps.max_slave_yuv_planes = 2;
-	dc->caps.max_slave_rgb_planes = 2;
+	dc->caps.max_slave_planes = 3;
+	dc->caps.max_slave_yuv_planes = 3;
+	dc->caps.max_slave_rgb_planes = 3;
 	dc->caps.post_blend_color_processing = true;
 	dc->caps.force_dp_tps4_for_cp2520 = true;
 	if (dc->config.forceHBR2CP2520)
@@ -1841,6 +1874,7 @@ static bool dcn35_resource_construct(
 	dc->caps.zstate_support = true;
 	dc->caps.ips_support = true;
 	dc->caps.max_v_total = (1 << 15) - 1;
+	dc->caps.vtotal_limited_by_fp2 = true;
 
 	/* Color pipeline capabilities */
 	dc->caps.color.dpp.dcn_arch = 1;
@@ -1856,7 +1890,7 @@ static bool dcn35_resource_construct(
 	dc->caps.color.dpp.gamma_corr = 1;
 	dc->caps.color.dpp.dgam_rom_for_yuv = 0;
 
-	dc->caps.color.dpp.hw_3d_lut = 1;
+	dc->caps.color.dpp.hw_3d_lut = 0;
 	dc->caps.color.dpp.ogam_ram = 0;  // no OGAM in DPP since DCN1
 	// no OGAM ROM on DCN301
 	dc->caps.color.dpp.ogam_rom_caps.srgb = 0;
@@ -1875,6 +1909,10 @@ static bool dcn35_resource_construct(
 	dc->caps.color.mpc.ogam_rom_caps.pq = 0;
 	dc->caps.color.mpc.ogam_rom_caps.hlg = 0;
 	dc->caps.color.mpc.ocsc = 1;
+	dc->caps.color.mpc.preblend = true;
+
+	dc->caps.num_of_host_routers = 2;
+	dc->caps.num_of_dpias_per_host_router = 2;
 
 	/* max_disp_clock_khz_at_vmin is slightly lower than the STA value in order
 	 * to provide some margin.
@@ -1884,9 +1922,15 @@ static bool dcn35_resource_construct(
 	 */
 	dc->caps.max_disp_clock_khz_at_vmin = 650000;
 
+	/* Sequential ONO is based on ASIC. */
+	if (dc->ctx->asic_id.hw_internal_rev >= 0x40)
+		dc->caps.sequential_ono = true;
+
 	/* Use pipe context based otg sync logic */
 	dc->config.use_pipe_ctx_sync_logic = true;
 
+
+	dc->config.disable_hbr_audio_dp2 = true;
 	/* read VBIOS LTTPR caps */
 	{
 		if (ctx->dc_bios->funcs->get_lttpr_caps) {
@@ -1905,7 +1949,8 @@ static bool dcn35_resource_construct(
 
 	if (dc->ctx->dce_environment == DCE_ENV_PRODUCTION_DRV)
 		dc->debug = debug_defaults_drv;
-
+	/*HW default is to have all the FGCG enabled, SW no need to program them*/
+	dc->debug.enable_fine_grain_clock_gating.u32All = 0xFFFF;
 	// Init the vm_helper
 	if (dc->vm_helper)
 		vm_helper_init(dc->vm_helper, 16);
@@ -2123,29 +2168,25 @@ static bool dcn35_resource_construct(
 	for (i = 0; i < dc->caps.max_planes; ++i)
 		dc->caps.planes[i] = plane_cap;
 
+	dc->caps.max_odm_combine_factor = 4;
+
 	dc->cap_funcs = cap_funcs;
 
 	dc->dcn_ip->max_num_dpp = pool->base.pipe_count;
 
 	dc->dml2_options.dcn_pipe_count = pool->base.pipe_count;
-	dc->dml2_options.use_native_pstate_optimization = true;
 	dc->dml2_options.use_native_soc_bb_construction = true;
+	dc->dml2_options.minimize_dispclk_using_odm = false;
 	if (dc->config.EnableMinDispClkODM)
 		dc->dml2_options.minimize_dispclk_using_odm = true;
 	dc->dml2_options.enable_windowed_mpo_odm = dc->config.enable_windowed_mpo_odm;
 
-	dc->dml2_options.callbacks.dc = dc;
-	dc->dml2_options.callbacks.build_scaling_params = &resource_build_scaling_params;
+	resource_init_common_dml2_callbacks(dc, &dc->dml2_options);
 	dc->dml2_options.callbacks.can_support_mclk_switch_using_fw_based_vblank_stretch = &dcn30_can_support_mclk_switch_using_fw_based_vblank_stretch;
-	dc->dml2_options.callbacks.acquire_secondary_pipe_for_mpc_odm = &dc_resource_acquire_secondary_pipe_for_mpc_odm_legacy;
-	dc->dml2_options.callbacks.update_pipes_for_stream_with_slice_count = &resource_update_pipes_for_stream_with_slice_count;
-	dc->dml2_options.callbacks.update_pipes_for_plane_with_slice_count = &resource_update_pipes_for_plane_with_slice_count;
-	dc->dml2_options.callbacks.get_mpc_slice_index = &resource_get_mpc_slice_index;
-	dc->dml2_options.callbacks.get_odm_slice_index = &resource_get_odm_slice_index;
-	dc->dml2_options.callbacks.get_opp_head = &resource_get_opp_head;
-	dc->dml2_options.max_segments_per_hubp = 24;
 
+	dc->dml2_options.max_segments_per_hubp = 24;
 	dc->dml2_options.det_segment_size = DCN3_2_DET_SEG_SIZE;/*todo*/
+	dc->dml2_options.override_det_buffer_size_kbytes = true;
 
 	if (dc->config.sdpif_request_limit_words_per_umc == 0)
 		dc->config.sdpif_request_limit_words_per_umc = 16;/*todo*/

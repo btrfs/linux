@@ -147,6 +147,7 @@ static union acpi_object *amdgpu_atif_call(struct amdgpu_atif *atif,
 					   struct acpi_buffer *params)
 {
 	acpi_status status;
+	union acpi_object *obj;
 	union acpi_object atif_arg_elements[2];
 	struct acpi_object_list atif_arg;
 	struct acpi_buffer buffer = { ACPI_ALLOCATE_BUFFER, NULL };
@@ -169,16 +170,24 @@ static union acpi_object *amdgpu_atif_call(struct amdgpu_atif *atif,
 
 	status = acpi_evaluate_object(atif->handle, NULL, &atif_arg,
 				      &buffer);
+	obj = (union acpi_object *)buffer.pointer;
 
-	/* Fail only if calling the method fails and ATIF is supported */
-	if (ACPI_FAILURE(status) && status != AE_NOT_FOUND) {
+	/* Fail if calling the method fails */
+	if (ACPI_FAILURE(status)) {
 		DRM_DEBUG_DRIVER("failed to evaluate ATIF got %s\n",
 				 acpi_format_exception(status));
-		kfree(buffer.pointer);
+		kfree(obj);
 		return NULL;
 	}
 
-	return buffer.pointer;
+	if (obj->type != ACPI_TYPE_BUFFER) {
+		DRM_DEBUG_DRIVER("bad object returned from ATIF: %d\n",
+				 obj->type);
+		kfree(obj);
+		return NULL;
+	}
+
+	return obj;
 }
 
 /**
@@ -383,6 +392,12 @@ static int amdgpu_atif_query_backlight_caps(struct amdgpu_atif *atif)
 			characteristics.min_input_signal;
 	atif->backlight_caps.max_input_signal =
 			characteristics.max_input_signal;
+	atif->backlight_caps.ac_level = characteristics.ac_level;
+	atif->backlight_caps.dc_level = characteristics.dc_level;
+	atif->backlight_caps.data_points = characteristics.number_of_points;
+	memcpy(atif->backlight_caps.luminance_data,
+	       characteristics.data_points,
+	       sizeof(atif->backlight_caps.luminance_data));
 out:
 	kfree(info);
 	return err;
@@ -789,24 +804,25 @@ int amdgpu_acpi_power_shift_control(struct amdgpu_device *adev,
 		return -EIO;
 	}
 
+	kfree(info);
 	return 0;
 }
 
 /**
  * amdgpu_acpi_smart_shift_update - update dGPU device state to SBIOS
  *
- * @dev: drm_device pointer
+ * @adev: amdgpu device pointer
  * @ss_state: current smart shift event
  *
  * returns 0 on success,
  * otherwise return error number.
  */
-int amdgpu_acpi_smart_shift_update(struct drm_device *dev, enum amdgpu_ss ss_state)
+int amdgpu_acpi_smart_shift_update(struct amdgpu_device *adev,
+				   enum amdgpu_ss ss_state)
 {
-	struct amdgpu_device *adev = drm_to_adev(dev);
 	int r;
 
-	if (!amdgpu_device_supports_smart_shift(dev))
+	if (!amdgpu_device_supports_smart_shift(adev))
 		return 0;
 
 	switch (ss_state) {
@@ -1265,9 +1281,7 @@ void amdgpu_acpi_get_backlight_caps(struct amdgpu_dm_backlight_caps *caps)
 {
 	struct amdgpu_atif *atif = &amdgpu_acpi_priv.atif;
 
-	caps->caps_valid = atif->backlight_caps.caps_valid;
-	caps->min_input_signal = atif->backlight_caps.min_input_signal;
-	caps->max_input_signal = atif->backlight_caps.max_input_signal;
+	memcpy(caps, &atif->backlight_caps, sizeof(*caps));
 }
 
 /**
@@ -1518,5 +1532,35 @@ bool amdgpu_acpi_is_s0ix_active(struct amdgpu_device *adev)
 	return true;
 #endif /* CONFIG_AMD_PMC */
 }
-
 #endif /* CONFIG_SUSPEND */
+
+#if IS_ENABLED(CONFIG_DRM_AMD_ISP)
+static const struct acpi_device_id isp_sensor_ids[] = {
+	{ "OMNI5C10" },
+	{ }
+};
+
+static int isp_match_acpi_device_ids(struct device *dev, const void *data)
+{
+	return acpi_match_device(data, dev) ? 1 : 0;
+}
+
+int amdgpu_acpi_get_isp4_dev(struct acpi_device **dev)
+{
+	struct device *pdev __free(put_device) = NULL;
+	struct acpi_device *acpi_pdev;
+
+	pdev = bus_find_device(&platform_bus_type, NULL, isp_sensor_ids,
+			       isp_match_acpi_device_ids);
+	if (!pdev)
+		return -EINVAL;
+
+	acpi_pdev = ACPI_COMPANION(pdev);
+	if (!acpi_pdev)
+		return -ENODEV;
+
+	*dev = acpi_pdev;
+
+	return 0;
+}
+#endif /* CONFIG_DRM_AMD_ISP */

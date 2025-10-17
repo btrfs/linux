@@ -35,35 +35,33 @@
 #include <asm/nospec-branch.h>
 #include <asm/microcode.h>
 #include <asm/sev.h>
+#include <asm/fred.h>
 
 #define CREATE_TRACE_POINTS
 #include <trace/events/nmi.h>
 
+/*
+ * An emergency handler can be set in any context including NMI
+ */
 struct nmi_desc {
 	raw_spinlock_t lock;
+	nmi_handler_t emerg_handler;
 	struct list_head head;
 };
 
-static struct nmi_desc nmi_desc[NMI_MAX] = 
-{
-	{
-		.lock = __RAW_SPIN_LOCK_UNLOCKED(&nmi_desc[0].lock),
-		.head = LIST_HEAD_INIT(nmi_desc[0].head),
-	},
-	{
-		.lock = __RAW_SPIN_LOCK_UNLOCKED(&nmi_desc[1].lock),
-		.head = LIST_HEAD_INIT(nmi_desc[1].head),
-	},
-	{
-		.lock = __RAW_SPIN_LOCK_UNLOCKED(&nmi_desc[2].lock),
-		.head = LIST_HEAD_INIT(nmi_desc[2].head),
-	},
-	{
-		.lock = __RAW_SPIN_LOCK_UNLOCKED(&nmi_desc[3].lock),
-		.head = LIST_HEAD_INIT(nmi_desc[3].head),
-	},
+#define NMI_DESC_INIT(type) { \
+	.lock = __RAW_SPIN_LOCK_UNLOCKED(&nmi_desc[type].lock), \
+	.head = LIST_HEAD_INIT(nmi_desc[type].head), \
+}
 
+static struct nmi_desc nmi_desc[NMI_MAX] = {
+	NMI_DESC_INIT(NMI_LOCAL),
+	NMI_DESC_INIT(NMI_UNKNOWN),
+	NMI_DESC_INIT(NMI_SERR),
+	NMI_DESC_INIT(NMI_IO_CHECK),
 };
+
+#define nmi_to_desc(type) (&nmi_desc[type])
 
 struct nmi_stats {
 	unsigned int normal;
@@ -86,6 +84,9 @@ static DEFINE_PER_CPU(struct nmi_stats, nmi_stats);
 static int ignore_nmis __read_mostly;
 
 int unknown_nmi_panic;
+int panic_on_unrecovered_nmi;
+int panic_on_io_nmi;
+
 /*
  * Prevent NMI reason port (0x61) being accessed simultaneously, can
  * only be used in NMI handler.
@@ -98,8 +99,6 @@ static int __init setup_unknown_nmi_panic(char *str)
 	return 1;
 }
 __setup("unknown_nmi_panic", setup_unknown_nmi_panic);
-
-#define nmi_to_desc(type) (&nmi_desc[type])
 
 static u64 nmi_longest_ns = 1 * NSEC_PER_MSEC;
 
@@ -120,19 +119,32 @@ static void nmi_check_duration(struct nmiaction *action, u64 duration)
 
 	action->max_duration = duration;
 
-	remainder_ns = do_div(duration, (1000 * 1000));
-	decimal_msecs = remainder_ns / 1000;
+	/* Convert duration from nsec to msec */
+	remainder_ns = do_div(duration, NSEC_PER_MSEC);
+	decimal_msecs = remainder_ns / NSEC_PER_USEC;
 
-	printk_ratelimited(KERN_INFO
-		"INFO: NMI handler (%ps) took too long to run: %lld.%03d msecs\n",
-		action->handler, duration, decimal_msecs);
+	pr_info_ratelimited("INFO: NMI handler (%ps) took too long to run: %lld.%03d msecs\n",
+			    action->handler, duration, decimal_msecs);
 }
 
 static int nmi_handle(unsigned int type, struct pt_regs *regs)
 {
 	struct nmi_desc *desc = nmi_to_desc(type);
+	nmi_handler_t ehandler;
 	struct nmiaction *a;
 	int handled=0;
+
+	/*
+	 * Call the emergency handler, if set
+	 *
+	 * In the case of crash_nmi_callback() emergency handler, it will
+	 * return in the case of the crashing CPU to enable it to complete
+	 * other necessary crashing actions ASAP. Other handlers in the
+	 * linked list won't need to be run.
+	 */
+	ehandler = desc->emerg_handler;
+	if (ehandler)
+		return ehandler(type, regs);
 
 	rcu_read_lock();
 
@@ -223,6 +235,31 @@ void unregister_nmi_handler(unsigned int type, const char *name)
 }
 EXPORT_SYMBOL_GPL(unregister_nmi_handler);
 
+/**
+ * set_emergency_nmi_handler - Set emergency handler
+ * @type:    NMI type
+ * @handler: the emergency handler to be stored
+ *
+ * Set an emergency NMI handler which, if set, will preempt all the other
+ * handlers in the linked list. If a NULL handler is passed in, it will clear
+ * it. It is expected that concurrent calls to this function will not happen
+ * or the system is screwed beyond repair.
+ */
+void set_emergency_nmi_handler(unsigned int type, nmi_handler_t handler)
+{
+	struct nmi_desc *desc = nmi_to_desc(type);
+
+	if (WARN_ON_ONCE(desc->emerg_handler == handler))
+		return;
+	desc->emerg_handler = handler;
+
+	/*
+	 * Ensure the emergency handler is visible to other CPUs before
+	 * function return
+	 */
+	smp_wmb();
+}
+
 static void
 pci_serr_error(unsigned char reason, struct pt_regs *regs)
 {
@@ -290,10 +327,9 @@ unknown_nmi_error(unsigned char reason, struct pt_regs *regs)
 	int handled;
 
 	/*
-	 * Use 'false' as back-to-back NMIs are dealt with one level up.
-	 * Of course this makes having multiple 'unknown' handlers useless
-	 * as only the first one is ever run (unless it can actually determine
-	 * if it caused the NMI)
+	 * As a last resort, let the "unknown" handlers make a
+	 * best-effort attempt to figure out if they can claim
+	 * responsibility for this Unknown NMI.
 	 */
 	handled = nmi_handle(NMI_UNKNOWN, regs);
 	if (handled) {
@@ -303,13 +339,13 @@ unknown_nmi_error(unsigned char reason, struct pt_regs *regs)
 
 	__this_cpu_add(nmi_stats.unknown, 1);
 
-	pr_emerg("Uhhuh. NMI received for unknown reason %02x on CPU %d.\n",
-		 reason, smp_processor_id());
+	pr_emerg_ratelimited("Uhhuh. NMI received for unknown reason %02x on CPU %d.\n",
+			     reason, smp_processor_id());
 
 	if (unknown_nmi_panic || panic_on_unrecovered_nmi)
 		nmi_panic(regs, "NMI: Not continuing");
 
-	pr_emerg("Dazed and confused, but trying to continue\n");
+	pr_emerg_ratelimited("Dazed and confused, but trying to continue\n");
 }
 NOKPROBE_SYMBOL(unknown_nmi_error);
 
@@ -323,17 +359,18 @@ static noinstr void default_do_nmi(struct pt_regs *regs)
 	bool b2b = false;
 
 	/*
-	 * CPU-specific NMI must be processed before non-CPU-specific
-	 * NMI, otherwise we may lose it, because the CPU-specific
-	 * NMI can not be detected/processed on other CPUs.
-	 */
-
-	/*
-	 * Back-to-back NMIs are interesting because they can either
-	 * be two NMI or more than two NMIs (any thing over two is dropped
-	 * due to NMI being edge-triggered).  If this is the second half
-	 * of the back-to-back NMI, assume we dropped things and process
-	 * more handlers.  Otherwise reset the 'swallow' NMI behaviour
+	 * Back-to-back NMIs are detected by comparing the RIP of the
+	 * current NMI with that of the previous NMI. If it is the same,
+	 * it is assumed that the CPU did not have a chance to jump back
+	 * into a non-NMI context and execute code in between the two
+	 * NMIs.
+	 *
+	 * They are interesting because even if there are more than two,
+	 * only a maximum of two can be detected (anything over two is
+	 * dropped due to NMI being edge-triggered). If this is the
+	 * second half of the back-to-back NMI, assume we dropped things
+	 * and process more handlers. Otherwise, reset the 'swallow' NMI
+	 * behavior.
 	 */
 	if (regs->ip == __this_cpu_read(last_nmi_rip))
 		b2b = true;
@@ -347,6 +384,11 @@ static noinstr void default_do_nmi(struct pt_regs *regs)
 	if (microcode_nmi_handler_enabled() && microcode_nmi_handler())
 		goto out;
 
+	/*
+	 * CPU-specific NMI must be processed before non-CPU-specific
+	 * NMI, otherwise we may lose it, because the CPU-specific
+	 * NMI can not be detected/processed on other CPUs.
+	 */
 	handled = nmi_handle(NMI_LOCAL, regs);
 	__this_cpu_add(nmi_stats.normal, handled);
 	if (handled) {
@@ -383,13 +425,14 @@ static noinstr void default_do_nmi(struct pt_regs *regs)
 			pci_serr_error(reason, regs);
 		else if (reason & NMI_REASON_IOCHK)
 			io_check_error(reason, regs);
-#ifdef CONFIG_X86_32
+
 		/*
 		 * Reassert NMI in case it became active
 		 * meanwhile as it's edge-triggered:
 		 */
-		reassert_nmi();
-#endif
+		if (IS_ENABLED(CONFIG_X86_32))
+			reassert_nmi();
+
 		__this_cpu_add(nmi_stats.external, 1);
 		raw_spin_unlock(&nmi_reason_lock);
 		goto out;
@@ -502,7 +545,7 @@ DEFINE_IDTENTRY_RAW(exc_nmi)
 	if (IS_ENABLED(CONFIG_NMI_CHECK_CPU))
 		raw_atomic_long_inc(&nsp->idt_calls);
 
-	if (IS_ENABLED(CONFIG_SMP) && arch_cpu_is_offline(smp_processor_id())) {
+	if (arch_cpu_is_offline(smp_processor_id())) {
 		if (microcode_nmi_handler_enabled())
 			microcode_offline_nmi_handler();
 		return;
@@ -563,9 +606,6 @@ nmi_restart:
 	}
 	if (this_cpu_dec_return(nmi_state))
 		goto nmi_restart;
-
-	if (user_mode(regs))
-		mds_user_clear_cpu_buffers();
 }
 
 #if IS_ENABLED(CONFIG_KVM_INTEL)
@@ -582,7 +622,7 @@ EXPORT_SYMBOL_GPL(asm_exc_nmi_kvm_vmx);
 
 static char *nmi_check_stall_msg[] = {
 /*									*/
-/* +--------- nsp->idt_seq_snap & 0x1: CPU is in NMI handler.		*/
+/* +--------- nmi_seq & 0x1: CPU is currently in NMI handler.		*/
 /* | +------ cpu_is_offline(cpu)					*/
 /* | | +--- nsp->idt_calls_snap != atomic_long_read(&nsp->idt_calls):	*/
 /* | | |	NMI handler has been invoked.				*/
@@ -630,25 +670,70 @@ void nmi_backtrace_stall_check(const struct cpumask *btp)
 		nmi_seq = READ_ONCE(nsp->idt_nmi_seq);
 		if (nsp->idt_nmi_seq_snap + 1 == nmi_seq && (nmi_seq & 0x1)) {
 			msgp = "CPU entered NMI handler function, but has not exited";
-		} else if ((nsp->idt_nmi_seq_snap & 0x1) != (nmi_seq & 0x1)) {
-			msgp = "CPU is handling NMIs";
-		} else {
-			idx = ((nsp->idt_seq_snap & 0x1) << 2) |
+		} else if (nsp->idt_nmi_seq_snap == nmi_seq ||
+			   nsp->idt_nmi_seq_snap + 1 == nmi_seq) {
+			idx = ((nmi_seq & 0x1) << 2) |
 			      (cpu_is_offline(cpu) << 1) |
 			      (nsp->idt_calls_snap != atomic_long_read(&nsp->idt_calls));
 			msgp = nmi_check_stall_msg[idx];
 			if (nsp->idt_ignored_snap != READ_ONCE(nsp->idt_ignored) && (idx & 0x1))
 				modp = ", but OK because ignore_nmis was set";
-			if (nmi_seq & ~0x1)
-				msghp = " (CPU currently in NMI handler function)";
-			else if (nsp->idt_nmi_seq_snap + 1 == nmi_seq)
+			if (nsp->idt_nmi_seq_snap + 1 == nmi_seq)
 				msghp = " (CPU exited one NMI handler function)";
+			else if (nmi_seq & 0x1)
+				msghp = " (CPU currently in NMI handler function)";
+			else
+				msghp = " (CPU was never in an NMI handler function)";
+		} else {
+			msgp = "CPU is handling NMIs";
 		}
-		pr_alert("%s: CPU %d: %s%s%s, last activity: %lu jiffies ago.\n",
-			 __func__, cpu, msgp, modp, msghp, j - READ_ONCE(nsp->recv_jiffies));
+		pr_alert("%s: CPU %d: %s%s%s\n", __func__, cpu, msgp, modp, msghp);
+		pr_alert("%s: last activity: %lu jiffies ago.\n",
+			 __func__, j - READ_ONCE(nsp->recv_jiffies));
 	}
 }
 
+#endif
+
+#ifdef CONFIG_X86_FRED
+/*
+ * With FRED, CR2/DR6 is pushed to #PF/#DB stack frame during FRED
+ * event delivery, i.e., there is no problem of transient states.
+ * And NMI unblocking only happens when the stack frame indicates
+ * that so should happen.
+ *
+ * Thus, the NMI entry stub for FRED is really straightforward and
+ * as simple as most exception handlers. As such, #DB is allowed
+ * during NMI handling.
+ */
+DEFINE_FREDENTRY_NMI(exc_nmi)
+{
+	irqentry_state_t irq_state;
+
+	if (arch_cpu_is_offline(smp_processor_id())) {
+		if (microcode_nmi_handler_enabled())
+			microcode_offline_nmi_handler();
+		return;
+	}
+
+	/*
+	 * Save CR2 for eventual restore to cover the case where the NMI
+	 * hits the VMENTER/VMEXIT region where guest CR2 is life. This
+	 * prevents guest state corruption in case that the NMI handler
+	 * takes a page fault.
+	 */
+	this_cpu_write(nmi_cr2, read_cr2());
+
+	irq_state = irqentry_nmi_enter(regs);
+
+	inc_irq_stat(__nmi_count);
+	default_do_nmi(regs);
+
+	irqentry_nmi_exit(regs, irq_state);
+
+	if (unlikely(this_cpu_read(nmi_cr2) != read_cr2()))
+		write_cr2(this_cpu_read(nmi_cr2));
+}
 #endif
 
 void stop_nmi(void)
@@ -666,4 +751,3 @@ void local_touch_nmi(void)
 {
 	__this_cpu_write(last_nmi_rip, 0);
 }
-EXPORT_SYMBOL_GPL(local_touch_nmi);

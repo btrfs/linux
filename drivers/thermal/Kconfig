@@ -40,6 +40,15 @@ config THERMAL_DEBUGFS
 	  Say Y to allow the thermal subsystem to collect diagnostic
 	  information that can be accessed via debugfs.
 
+config THERMAL_CORE_TESTING
+	tristate "Thermal core testing facility"
+	depends on DEBUG_FS
+	help
+	  Say Y to add a debugfs-based thermal core testing facility.
+	  It allows test thermal zones to be created and populated
+	  with trip points in order to exercise the thermal core
+	  functionality in a controlled way.
+
 config THERMAL_EMERGENCY_POWEROFF_DELAY_MS
 	int "Emergency poweroff delay in milli-seconds"
 	default 0
@@ -82,17 +91,6 @@ config THERMAL_OF
 
 	  Say 'Y' here if you need to build thermal infrastructure
 	  based on device tree.
-
-config THERMAL_WRITABLE_TRIPS
-	bool "Enable writable trip points"
-	help
-	  This option allows the system integrator to choose whether
-	  trip temperatures can be changed from userspace. The
-	  writable trips need to be specified when setting up the
-	  thermal zone but the choice here takes precedence.
-
-	  Say 'Y' here if you would like to allow userspace tools to
-	  change trip temperatures.
 
 choice
 	prompt "Default Thermal governor"
@@ -222,6 +220,15 @@ config DEVFREQ_THERMAL
 
 	  If you want this support, you should say Y here.
 
+config PCIE_THERMAL
+	bool "PCIe cooling support"
+	depends on PCIEPORTBUS
+	help
+	  This implements PCIe cooling mechanism through bandwidth reduction
+	  for PCIe devices.
+
+	  If you want this support, you should say Y here.
+
 config THERMAL_EMULATION
 	bool "Thermal emulation mode support"
 	help
@@ -250,7 +257,7 @@ config HISI_THERMAL
 	depends on ARCH_HISI || COMPILE_TEST
 	depends on HAS_IOMEM
 	depends on OF
-	default y
+	default ARCH_HISI
 	help
 	  Enable this to plug hisilicon's thermal sensor driver into the Linux
 	  thermal framework. cpufreq is used as the cooling device to throttle
@@ -320,6 +327,15 @@ config QORIQ_THERMAL
 	  cpufreq is used as the cooling device to throttle CPUs when the
 	  passive trip is crossed.
 
+config AIROHA_THERMAL
+	tristate "Airoha thermal sensor driver"
+	depends on ARCH_AIROHA || COMPILE_TEST
+	depends on MFD_SYSCON
+	depends on OF
+	help
+	  Enable this to plug the Airoha thermal sensor driver into the Linux
+	  thermal framework.
+
 config SPEAR_THERMAL
 	tristate "SPEAr thermal sensor driver"
 	depends on PLAT_SPEAR || COMPILE_TEST
@@ -353,32 +369,6 @@ config ROCKCHIP_THERMAL
 	  ADC (TS-ADC) found on Rockchip SoCs. It supports one critical
 	  trip point. Cpufreq is used as the cooling device and will throttle
 	  CPUs when the Temperature crosses the passive trip point.
-
-config RCAR_THERMAL
-	tristate "Renesas R-Car thermal driver"
-	depends on ARCH_RENESAS || COMPILE_TEST
-	depends on HAS_IOMEM
-	help
-	  Enable this to plug the R-Car thermal sensor driver into the Linux
-	  thermal framework.
-
-config RCAR_GEN3_THERMAL
-	tristate "Renesas R-Car Gen3 and RZ/G2 thermal driver"
-	depends on ARCH_RENESAS || COMPILE_TEST
-	depends on HAS_IOMEM
-	depends on OF
-	help
-	  Enable this to plug the R-Car Gen3 or RZ/G2 thermal sensor driver into
-	  the Linux thermal framework.
-
-config RZG2L_THERMAL
-	tristate "Renesas RZ/G2L thermal driver"
-	depends on ARCH_RENESAS || COMPILE_TEST
-	depends on HAS_IOMEM
-	depends on OF
-	help
-	  Enable this to plug the RZ/G2L thermal sensor driver into the Linux
-	  thermal framework.
 
 config KIRKWOOD_THERMAL
 	tristate "Temperature sensor on Marvell Kirkwood SoCs"
@@ -466,9 +456,11 @@ source "drivers/thermal/samsung/Kconfig"
 endmenu
 
 menu "STMicroelectronics thermal drivers"
-depends on (ARCH_STI || ARCH_STM32) && OF
+depends on (ARCH_STI || ARCH_STM32) && THERMAL_OF
 source "drivers/thermal/st/Kconfig"
 endmenu
+
+source "drivers/thermal/renesas/Kconfig"
 
 source "drivers/thermal/tegra/Kconfig"
 

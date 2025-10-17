@@ -14,6 +14,7 @@
 #include <linux/kernel.h>
 #include <linux/init.h>
 #include <linux/string.h>
+#include <linux/string_choices.h>
 #include <linux/blkdev.h>
 #include <linux/bio.h>
 #include <linux/proc_fs.h>
@@ -75,7 +76,7 @@ static void simdisk_transfer(struct simdisk *dev, unsigned long sector,
 
 	if (offset > dev->size || dev->size - offset < nbytes) {
 		pr_notice("Beyond-end %s (%ld %ld)\n",
-				write ? "write" : "read", offset, nbytes);
+				str_write_read(write), offset, nbytes);
 		return;
 	}
 
@@ -230,10 +231,14 @@ static ssize_t proc_read_simdisk(struct file *file, char __user *buf,
 static ssize_t proc_write_simdisk(struct file *file, const char __user *buf,
 			size_t count, loff_t *ppos)
 {
-	char *tmp = memdup_user_nul(buf, count);
+	char *tmp;
 	struct simdisk *dev = pde_data(file_inode(file));
 	int err;
 
+	if (count == 0 || count > PAGE_SIZE)
+		return -EINVAL;
+
+	tmp = memdup_user_nul(buf, count);
 	if (IS_ERR(tmp))
 		return PTR_ERR(tmp);
 
@@ -263,17 +268,22 @@ static const struct proc_ops simdisk_proc_ops = {
 static int __init simdisk_setup(struct simdisk *dev, int which,
 		struct proc_dir_entry *procdir)
 {
+	struct queue_limits lim = {
+		.features		= BLK_FEAT_ROTATIONAL,
+	};
 	char tmp[2] = { '0' + which, 0 };
-	int err = -ENOMEM;
+	int err;
 
 	dev->fd = -1;
 	dev->filename = NULL;
 	spin_lock_init(&dev->lock);
 	dev->users = 0;
 
-	dev->gd = blk_alloc_disk(NUMA_NO_NODE);
-	if (!dev->gd)
+	dev->gd = blk_alloc_disk(&lim, NUMA_NO_NODE);
+	if (IS_ERR(dev->gd)) {
+		err = PTR_ERR(dev->gd);
 		goto out;
+	}
 	dev->gd->major = simdisk_major;
 	dev->gd->first_minor = which;
 	dev->gd->minors = SIMDISK_MINORS;

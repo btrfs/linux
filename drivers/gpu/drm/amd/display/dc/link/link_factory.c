@@ -100,7 +100,8 @@ static void construct_link_service_validation(struct link_service *link_srv)
 {
 	link_srv->validate_mode_timing = link_validate_mode_timing;
 	link_srv->dp_link_bandwidth_kbps = dp_link_bandwidth_kbps;
-	link_srv->validate_dpia_bandwidth = link_validate_dpia_bandwidth;
+	link_srv->validate_dp_tunnel_bandwidth = link_validate_dp_tunnel_bandwidth;
+	link_srv->dp_required_hblank_size_bytes = dp_required_hblank_size_bytes;
 }
 
 /* link dpms owns the programming sequence of stream's dpms state associated
@@ -155,6 +156,7 @@ static void construct_link_service_dp_capability(struct link_service *link_srv)
 	link_srv->dp_get_encoding_format = link_dp_get_encoding_format;
 	link_srv->dp_should_enable_fec = dp_should_enable_fec;
 	link_srv->dp_decide_link_settings = link_decide_link_settings;
+	link_srv->dp_decide_tunnel_settings = link_decide_dp_tunnel_settings;
 	link_srv->mst_decide_link_encoding_format =
 			mst_decide_link_encoding_format;
 	link_srv->edp_decide_link_settings = edp_decide_link_settings;
@@ -163,6 +165,8 @@ static void construct_link_service_dp_capability(struct link_service *link_srv)
 	link_srv->dp_overwrite_extended_receiver_cap =
 			dp_overwrite_extended_receiver_cap;
 	link_srv->dp_decide_lttpr_mode = dp_decide_lttpr_mode;
+	link_srv->dp_get_lttpr_count = dp_get_lttpr_count;
+	link_srv->edp_get_alpm_support = edp_get_alpm_support;
 }
 
 /* link dp phy/dpia implements basic dp phy/dpia functionality such as
@@ -174,7 +178,6 @@ static void construct_link_service_dp_phy_or_dpia(struct link_service *link_srv)
 {
 	link_srv->dpia_handle_usb4_bandwidth_allocation_for_link =
 			dpia_handle_usb4_bandwidth_allocation_for_link;
-	link_srv->dpia_handle_bw_alloc_response = dpia_handle_bw_alloc_response;
 	link_srv->dp_set_drive_settings = dp_set_drive_settings;
 	link_srv->dpcd_write_rx_power_ctrl = dpcd_write_rx_power_ctrl;
 }
@@ -370,30 +373,6 @@ static enum transmitter translate_encoder_to_transmitter(
 	}
 }
 
-static uint8_t translate_dig_inst_to_pwrseq_inst(struct dc_link *link)
-{
-	uint8_t pwrseq_inst = 0xF;
-	struct dc_context *dc_ctx = link->dc->ctx;
-
-	DC_LOGGER_INIT(dc_ctx->logger);
-
-	switch (link->eng_id) {
-	case ENGINE_ID_DIGA:
-		pwrseq_inst = 0;
-		break;
-	case ENGINE_ID_DIGB:
-		pwrseq_inst = 1;
-		break;
-	default:
-		DC_LOG_WARNING("Unsupported pwrseq engine id: %d!\n", link->eng_id);
-		ASSERT(false);
-		break;
-	}
-
-	return pwrseq_inst;
-}
-
-
 static void link_destruct(struct dc_link *link)
 {
 	int i;
@@ -409,12 +388,12 @@ static void link_destruct(struct dc_link *link)
 	if (link->panel_cntl)
 		link->panel_cntl->funcs->destroy(&link->panel_cntl);
 
-	if (link->link_enc) {
+	if (link->link_enc && !link->is_dig_mapping_flexible) {
 		/* Update link encoder resource tracking variables. These are used for
 		 * the dynamic assignment of link encoders to streams. Virtual links
 		 * are not assigned encoder resources on creation.
 		 */
-		if (link->link_id.id != CONNECTOR_ID_VIRTUAL) {
+		if (link->link_id.id != CONNECTOR_ID_VIRTUAL && link->eng_id != ENGINE_ID_UNKNOWN) {
 			link->dc->res_pool->link_encoders[link->eng_id - ENGINE_ID_DIGA] = NULL;
 			link->dc->res_pool->dig_link_enc_count--;
 		}
@@ -480,7 +459,6 @@ static bool construct_phy(struct dc_link *link,
 	struct dc_context *dc_ctx = init_params->ctx;
 	struct encoder_init_data enc_init_data = { 0 };
 	struct panel_cntl_init_data panel_cntl_init_data = { 0 };
-	struct integrated_info info = { 0 };
 	struct dc_bios *bios = init_params->dc->ctx->dc_bios;
 	const struct dc_vbios_funcs *bp_funcs = bios->funcs;
 	struct bp_disp_connector_caps_info disp_connect_caps_info = { 0 };
@@ -489,6 +467,7 @@ static bool construct_phy(struct dc_link *link,
 
 	link->irq_source_hpd = DC_IRQ_SOURCE_INVALID;
 	link->irq_source_hpd_rx = DC_IRQ_SOURCE_INVALID;
+	link->irq_source_read_request = DC_IRQ_SOURCE_INVALID;
 	link->link_status.dpcd_caps = &link->dpcd_caps;
 
 	link->dc = init_params->dc;
@@ -539,6 +518,9 @@ static bool construct_phy(struct dc_link *link,
 	case CONNECTOR_ID_HDMI_TYPE_A:
 		link->connector_signal = SIGNAL_TYPE_HDMI_TYPE_A;
 
+		if (link->hpd_gpio)
+			link->irq_source_read_request =
+					dal_irq_get_read_request(link->hpd_gpio);
 		break;
 	case CONNECTOR_ID_SINGLE_LINK_DVID:
 	case CONNECTOR_ID_SINGLE_LINK_DVII:
@@ -549,6 +531,7 @@ static bool construct_phy(struct dc_link *link,
 		link->connector_signal = SIGNAL_TYPE_DVI_DUAL_LINK;
 		break;
 	case CONNECTOR_ID_DISPLAY_PORT:
+	case CONNECTOR_ID_MXM:
 	case CONNECTOR_ID_USBC:
 		link->connector_signal = SIGNAL_TYPE_DISPLAY_PORT;
 
@@ -558,10 +541,16 @@ static bool construct_phy(struct dc_link *link,
 
 		break;
 	case CONNECTOR_ID_EDP:
+		// If smartmux is supported, only create the link on the primary eDP.
+		// Dual eDP is not supported with smartmux.
+		if (!(!link->dc->config.smart_mux_version || dc_ctx->dc_edp_id_count == 0))
+			goto create_fail;
+
 		link->connector_signal = SIGNAL_TYPE_EDP;
 
 		if (link->hpd_gpio) {
-			if (!link->dc->config.allow_edp_hotplug_detection)
+			if (!link->dc->config.allow_edp_hotplug_detection
+				&& !is_smartmux_suported(link))
 				link->irq_source_hpd = DC_IRQ_SOURCE_INVALID;
 
 			switch (link->dc->config.allow_edp_hotplug_detection) {
@@ -635,13 +624,13 @@ static bool construct_phy(struct dc_link *link,
 	link->link_enc =
 		link->dc->res_pool->funcs->link_enc_create(dc_ctx, &enc_init_data);
 
-	DC_LOG_DC("BIOS object table - DP_IS_USB_C: %d", link->link_enc->features.flags.bits.DP_IS_USB_C);
-	DC_LOG_DC("BIOS object table - IS_DP2_CAPABLE: %d", link->link_enc->features.flags.bits.IS_DP2_CAPABLE);
-
 	if (!link->link_enc) {
 		DC_ERROR("Failed to create link encoder!\n");
 		goto link_enc_create_fail;
 	}
+
+	DC_LOG_DC("BIOS object table - DP_IS_USB_C: %d", link->link_enc->features.flags.bits.DP_IS_USB_C);
+	DC_LOG_DC("BIOS object table - IS_DP2_CAPABLE: %d", link->link_enc->features.flags.bits.IS_DP2_CAPABLE);
 
 	/* Update link encoder tracking variables. These are used for the dynamic
 	 * assignment of link encoders to streams.
@@ -657,7 +646,7 @@ static bool construct_phy(struct dc_link *link,
 			link->link_id.id == CONNECTOR_ID_LVDS)) {
 		panel_cntl_init_data.ctx = dc_ctx;
 		panel_cntl_init_data.inst = panel_cntl_init_data.ctx->dc_edp_id_count;
-		panel_cntl_init_data.pwrseq_inst = translate_dig_inst_to_pwrseq_inst(link);
+		panel_cntl_init_data.eng_id = link->eng_id;
 		link->panel_cntl =
 			link->dc->res_pool->funcs->panel_cntl_create(
 								&panel_cntl_init_data);
@@ -677,7 +666,7 @@ static bool construct_phy(struct dc_link *link,
 		}
 
 		/* Look for device tag that matches connector signal,
-		 * CRT for rgb, LCD for other supported signal tyes
+		 * CRT for rgb, LCD for other supported signal types
 		 */
 		if (!bp_funcs->is_device_id_supported(dc_ctx->dc_bios,
 						      link->device_tag.dev_id))
@@ -695,42 +684,44 @@ static bool construct_phy(struct dc_link *link,
 		break;
 	}
 
-	if (bios->integrated_info)
-		info = *bios->integrated_info;
+	if (bios->integrated_info) {
+		/* Look for channel mapping corresponding to connector and device tag */
+		for (i = 0; i < MAX_NUMBER_OF_EXT_DISPLAY_PATH; i++) {
+			struct external_display_path *path =
+				&bios->integrated_info->ext_disp_conn_info.path[i];
 
-	/* Look for channel mapping corresponding to connector and device tag */
-	for (i = 0; i < MAX_NUMBER_OF_EXT_DISPLAY_PATH; i++) {
-		struct external_display_path *path =
-			&info.ext_disp_conn_info.path[i];
+			if (path->device_connector_id.enum_id == link->link_id.enum_id &&
+			    path->device_connector_id.id == link->link_id.id &&
+			    path->device_connector_id.type == link->link_id.type) {
+				if (link->device_tag.acpi_device != 0 &&
+				    path->device_acpi_enum == link->device_tag.acpi_device) {
+					link->ddi_channel_mapping = path->channel_mapping;
+					link->chip_caps = path->caps;
+					DC_LOG_DC("BIOS object table - ddi_channel_mapping: 0x%04X",
+						  link->ddi_channel_mapping.raw);
+					DC_LOG_DC("BIOS object table - chip_caps: %d",
+						  link->chip_caps);
+				} else if (path->device_tag ==
+					   link->device_tag.dev_id.raw_device_tag) {
+					link->ddi_channel_mapping = path->channel_mapping;
+					link->chip_caps = path->caps;
+					DC_LOG_DC("BIOS object table - ddi_channel_mapping: 0x%04X",
+						  link->ddi_channel_mapping.raw);
+					DC_LOG_DC("BIOS object table - chip_caps: %d",
+						  link->chip_caps);
+				}
 
-		if (path->device_connector_id.enum_id == link->link_id.enum_id &&
-		    path->device_connector_id.id == link->link_id.id &&
-		    path->device_connector_id.type == link->link_id.type) {
-			if (link->device_tag.acpi_device != 0 &&
-			    path->device_acpi_enum == link->device_tag.acpi_device) {
-				link->ddi_channel_mapping = path->channel_mapping;
-				link->chip_caps = path->caps;
-				DC_LOG_DC("BIOS object table - ddi_channel_mapping: 0x%04X", link->ddi_channel_mapping.raw);
-				DC_LOG_DC("BIOS object table - chip_caps: %d", link->chip_caps);
-			} else if (path->device_tag ==
-				   link->device_tag.dev_id.raw_device_tag) {
-				link->ddi_channel_mapping = path->channel_mapping;
-				link->chip_caps = path->caps;
-				DC_LOG_DC("BIOS object table - ddi_channel_mapping: 0x%04X", link->ddi_channel_mapping.raw);
-				DC_LOG_DC("BIOS object table - chip_caps: %d", link->chip_caps);
+				if ((link->chip_caps & AMD_EXT_DISPLAY_PATH_CAPS__EXT_CHIP_MASK) == AMD_EXT_DISPLAY_PATH_CAPS__DP_FIXED_VS_EN) {
+					link->bios_forced_drive_settings.VOLTAGE_SWING =
+						(bios->integrated_info->ext_disp_conn_info.fixdpvoltageswing & 0x3);
+					link->bios_forced_drive_settings.PRE_EMPHASIS =
+						((bios->integrated_info->ext_disp_conn_info.fixdpvoltageswing >> 2) & 0x3);
+				}
+
+				break;
 			}
-
-			if (link->chip_caps & EXT_DISPLAY_PATH_CAPS__DP_FIXED_VS_EN) {
-				link->bios_forced_drive_settings.VOLTAGE_SWING =
-						(info.ext_disp_conn_info.fixdpvoltageswing & 0x3);
-				link->bios_forced_drive_settings.PRE_EMPHASIS =
-						((info.ext_disp_conn_info.fixdpvoltageswing >> 2) & 0x3);
-			}
-
-			break;
 		}
 	}
-
 	if (bios->funcs->get_atom_dc_golden_table)
 		bios->funcs->get_atom_dc_golden_table(bios);
 

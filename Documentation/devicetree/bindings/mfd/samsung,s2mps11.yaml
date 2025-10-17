@@ -20,14 +20,16 @@ description: |
 properties:
   compatible:
     enum:
+      - samsung,s2mpg10-pmic
       - samsung,s2mps11-pmic
       - samsung,s2mps13-pmic
       - samsung,s2mps14-pmic
       - samsung,s2mps15-pmic
       - samsung,s2mpu02-pmic
+      - samsung,s2mpu05-pmic
 
   clocks:
-    $ref: ../clock/samsung,s2mps11.yaml
+    $ref: /schemas/clock/samsung,s2mps11.yaml
     description:
       Child node describing clock provider.
 
@@ -53,15 +55,16 @@ properties:
   samsung,s2mps11-wrstbi-ground:
     description: |
       Indicates that WRSTBI pin of PMIC is pulled down. When the system is
-      suspended it will always go down thus triggerring unwanted buck warm
+      suspended it will always go down thus triggering unwanted buck warm
       reset (setting buck voltages to default values).
     type: boolean
+
+  system-power-controller: true
 
   wakeup-source: true
 
 required:
   - compatible
-  - reg
   - regulators
 
 additionalProperties: false
@@ -71,11 +74,36 @@ allOf:
       properties:
         compatible:
           contains:
+            const: samsung,s2mpg10-pmic
+    then:
+      properties:
+        reg: false
+        samsung,s2mps11-acokb-ground: false
+        samsung,s2mps11-wrstbi-ground: false
+
+      # oneOf is required, because dtschema's fixups.py doesn't handle this
+      # nesting here. Its special treatment to allow either interrupt property
+      # when only one is specified in the binding works at the top level only.
+      oneOf:
+        - required: [interrupts]
+        - required: [interrupts-extended]
+
+    else:
+      properties:
+        system-power-controller: false
+
+      required:
+        - reg
+
+  - if:
+      properties:
+        compatible:
+          contains:
             const: samsung,s2mps11-pmic
     then:
       properties:
         regulators:
-          $ref: ../regulator/samsung,s2mps11.yaml
+          $ref: /schemas/regulator/samsung,s2mps11.yaml
         samsung,s2mps11-wrstbi-ground: false
 
   - if:
@@ -86,7 +114,7 @@ allOf:
     then:
       properties:
         regulators:
-          $ref: ../regulator/samsung,s2mps13.yaml
+          $ref: /schemas/regulator/samsung,s2mps13.yaml
         samsung,s2mps11-acokb-ground: false
 
   - if:
@@ -97,7 +125,7 @@ allOf:
     then:
       properties:
         regulators:
-          $ref: ../regulator/samsung,s2mps14.yaml
+          $ref: /schemas/regulator/samsung,s2mps14.yaml
         samsung,s2mps11-acokb-ground: false
         samsung,s2mps11-wrstbi-ground: false
 
@@ -109,7 +137,7 @@ allOf:
     then:
       properties:
         regulators:
-          $ref: ../regulator/samsung,s2mps15.yaml
+          $ref: /schemas/regulator/samsung,s2mps15.yaml
         samsung,s2mps11-acokb-ground: false
         samsung,s2mps11-wrstbi-ground: false
 
@@ -121,7 +149,19 @@ allOf:
     then:
       properties:
         regulators:
-          $ref: ../regulator/samsung,s2mpu02.yaml
+          $ref: /schemas/regulator/samsung,s2mpu02.yaml
+        samsung,s2mps11-acokb-ground: false
+        samsung,s2mps11-wrstbi-ground: false
+
+  - if:
+      properties:
+        compatible:
+          contains:
+            const: samsung,s2mpu05-pmic
+    then:
+      properties:
+        regulators:
+          $ref: /schemas/regulator/samsung,s2mpu05.yaml
         samsung,s2mps11-acokb-ground: false
         samsung,s2mps11-wrstbi-ground: false
 

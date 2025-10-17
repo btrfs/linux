@@ -30,6 +30,7 @@
 #include <linux/hw_breakpoint.h>
 #include <linux/entry-common.h>
 #include <asm/cpu.h>
+#include <asm/cpuid/api.h>
 #include <asm/apic.h>
 #include <linux/uaccess.h>
 #include <asm/mwait.h>
@@ -51,6 +52,7 @@
 #include <asm/unwind.h>
 #include <asm/tdx.h>
 #include <asm/mmu_context.h>
+#include <asm/msr.h>
 #include <asm/shstk.h>
 
 #include "process.h"
@@ -87,17 +89,27 @@ DEFINE_PER_CPU(bool, __tss_limit_invalid);
 EXPORT_PER_CPU_SYMBOL_GPL(__tss_limit_invalid);
 
 /*
+ * The cache may be in an incoherent state and needs flushing during kexec.
+ * E.g., on SME/TDX platforms, dirty cacheline aliases with and without
+ * encryption bit(s) can coexist and the cache needs to be flushed before
+ * booting to the new kernel to avoid the silent memory corruption due to
+ * dirty cachelines with different encryption property being written back
+ * to the memory.
+ */
+DEFINE_PER_CPU(bool, cache_state_incoherent);
+
+/*
  * this gets called so that we can store lazy state into memory and copy the
  * current task into the new thread.
  */
 int arch_dup_task_struct(struct task_struct *dst, struct task_struct *src)
 {
-	memcpy(dst, src, arch_task_struct_size);
+	/* fpu_clone() will initialize the "dst_fpu" memory */
+	memcpy_and_pad(dst, arch_task_struct_size, src, sizeof(*dst), 0);
+
 #ifdef CONFIG_VM86
 	dst->thread.vm86 = NULL;
 #endif
-	/* Drop the copied pointer to current's fpstate */
-	dst->thread.fpu.fpstate = NULL;
 
 	return 0;
 }
@@ -105,8 +117,8 @@ int arch_dup_task_struct(struct task_struct *dst, struct task_struct *src)
 #ifdef CONFIG_X86_64
 void arch_release_task_struct(struct task_struct *tsk)
 {
-	if (fpu_state_size_dynamic())
-		fpstate_free(&tsk->thread.fpu);
+	if (fpu_state_size_dynamic() && !(tsk->flags & (PF_KTHREAD | PF_USER_WORKER)))
+		fpstate_free(x86_task_fpu(tsk));
 }
 #endif
 
@@ -116,7 +128,6 @@ void arch_release_task_struct(struct task_struct *tsk)
 void exit_thread(struct task_struct *tsk)
 {
 	struct thread_struct *t = &tsk->thread;
-	struct fpu *fpu = &t->fpu;
 
 	if (test_thread_flag(TIF_IO_BITMAP))
 		io_bitmap_exit(tsk);
@@ -124,7 +135,7 @@ void exit_thread(struct task_struct *tsk)
 	free_vm86(t);
 
 	shstk_free(tsk);
-	fpu__drop(fpu);
+	fpu__drop(tsk);
 }
 
 static int set_new_tls(struct task_struct *p, unsigned long tls)
@@ -158,7 +169,7 @@ __visible void ret_from_fork(struct task_struct *prev, struct pt_regs *regs,
 
 int copy_thread(struct task_struct *p, const struct kernel_clone_args *args)
 {
-	unsigned long clone_flags = args->flags;
+	u64 clone_flags = args->flags;
 	unsigned long sp = args->stack;
 	unsigned long tls = args->tls;
 	struct inactive_task_frame *frame;
@@ -175,6 +186,7 @@ int copy_thread(struct task_struct *p, const struct kernel_clone_args *args)
 	frame->ret_addr = (unsigned long) ret_from_fork_asm;
 	p->thread.sp = (unsigned long) fork_frame;
 	p->thread.io_bitmap = NULL;
+	clear_tsk_thread_flag(p, TIF_IO_BITMAP);
 	p->thread.iopl_warn = 0;
 	memset(p->thread.ptrace_bps, 0, sizeof(p->thread.ptrace_bps));
 
@@ -332,13 +344,21 @@ DEFINE_PER_CPU(u64, msr_misc_features_shadow);
 
 static void set_cpuid_faulting(bool on)
 {
-	u64 msrval;
 
-	msrval = this_cpu_read(msr_misc_features_shadow);
-	msrval &= ~MSR_MISC_FEATURES_ENABLES_CPUID_FAULT;
-	msrval |= (on << MSR_MISC_FEATURES_ENABLES_CPUID_FAULT_BIT);
-	this_cpu_write(msr_misc_features_shadow, msrval);
-	wrmsrl(MSR_MISC_FEATURES_ENABLES, msrval);
+	if (boot_cpu_data.x86_vendor == X86_VENDOR_INTEL) {
+		u64 msrval;
+
+		msrval = this_cpu_read(msr_misc_features_shadow);
+		msrval &= ~MSR_MISC_FEATURES_ENABLES_CPUID_FAULT;
+		msrval |= (on << MSR_MISC_FEATURES_ENABLES_CPUID_FAULT_BIT);
+		this_cpu_write(msr_misc_features_shadow, msrval);
+		wrmsrq(MSR_MISC_FEATURES_ENABLES, msrval);
+	} else if (boot_cpu_data.x86_vendor == X86_VENDOR_AMD) {
+		if (on)
+			msr_set_bit(MSR_K7_HWCR, MSR_K7_HWCR_CPUID_USER_DIS_BIT);
+		else
+			msr_clear_bit(MSR_K7_HWCR, MSR_K7_HWCR_CPUID_USER_DIS_BIT);
+	}
 }
 
 static void disable_cpuid(void)
@@ -463,6 +483,11 @@ void native_tss_update_io_bitmap(void)
 	} else {
 		struct io_bitmap *iobm = t->io_bitmap;
 
+		if (WARN_ON_ONCE(!iobm)) {
+			clear_thread_flag(TIF_IO_BITMAP);
+			native_tss_invalidate_io_bitmap();
+		}
+
 		/*
 		 * Only copy bitmap data when the sequence number differs. The
 		 * update time is accounted to the incoming task.
@@ -555,7 +580,7 @@ static __always_inline void amd_set_core_ssb_state(unsigned long tifn)
 
 	if (!static_cpu_has(X86_FEATURE_ZEN)) {
 		msr |= ssbd_tif_to_amd_ls_cfg(tifn);
-		wrmsrl(MSR_AMD64_LS_CFG, msr);
+		wrmsrq(MSR_AMD64_LS_CFG, msr);
 		return;
 	}
 
@@ -572,7 +597,7 @@ static __always_inline void amd_set_core_ssb_state(unsigned long tifn)
 		raw_spin_lock(&st->shared_state->lock);
 		/* First sibling enables SSBD: */
 		if (!st->shared_state->disable_state)
-			wrmsrl(MSR_AMD64_LS_CFG, msr);
+			wrmsrq(MSR_AMD64_LS_CFG, msr);
 		st->shared_state->disable_state++;
 		raw_spin_unlock(&st->shared_state->lock);
 	} else {
@@ -582,7 +607,7 @@ static __always_inline void amd_set_core_ssb_state(unsigned long tifn)
 		raw_spin_lock(&st->shared_state->lock);
 		st->shared_state->disable_state--;
 		if (!st->shared_state->disable_state)
-			wrmsrl(MSR_AMD64_LS_CFG, msr);
+			wrmsrq(MSR_AMD64_LS_CFG, msr);
 		raw_spin_unlock(&st->shared_state->lock);
 	}
 }
@@ -591,7 +616,7 @@ static __always_inline void amd_set_core_ssb_state(unsigned long tifn)
 {
 	u64 msr = x86_amd_ls_cfg_base | ssbd_tif_to_amd_ls_cfg(tifn);
 
-	wrmsrl(MSR_AMD64_LS_CFG, msr);
+	wrmsrq(MSR_AMD64_LS_CFG, msr);
 }
 #endif
 
@@ -601,7 +626,7 @@ static __always_inline void amd_set_ssb_virt_state(unsigned long tifn)
 	 * SSBD has the same definition in SPEC_CTRL and VIRT_SPEC_CTRL,
 	 * so ssbd_tif_to_spec_ctrl() just works.
 	 */
-	wrmsrl(MSR_AMD64_VIRT_SPEC_CTRL, ssbd_tif_to_spec_ctrl(tifn));
+	wrmsrq(MSR_AMD64_VIRT_SPEC_CTRL, ssbd_tif_to_spec_ctrl(tifn));
 }
 
 /*
@@ -704,11 +729,11 @@ void __switch_to_xtra(struct task_struct *prev_p, struct task_struct *next_p)
 	    arch_has_block_step()) {
 		unsigned long debugctl, msk;
 
-		rdmsrl(MSR_IA32_DEBUGCTLMSR, debugctl);
+		rdmsrq(MSR_IA32_DEBUGCTLMSR, debugctl);
 		debugctl &= ~DEBUGCTLMSR_BTF;
 		msk = tifn & _TIF_BLOCKSTEP;
 		debugctl |= (msk >> TIF_BLOCKSTEP) << DEBUGCTLMSR_BTF_SHIFT;
-		wrmsrl(MSR_IA32_DEBUGCTLMSR, debugctl);
+		wrmsrq(MSR_IA32_DEBUGCTLMSR, debugctl);
 	}
 
 	if ((tifp ^ tifn) & _TIF_NOTSC)
@@ -812,20 +837,8 @@ void __noreturn stop_this_cpu(void *dummy)
 	disable_local_APIC();
 	mcheck_cpu_clear(c);
 
-	/*
-	 * Use wbinvd on processors that support SME. This provides support
-	 * for performing a successful kexec when going from SME inactive
-	 * to SME active (or vice-versa). The cache must be cleared so that
-	 * if there are entries with the same physical address, both with and
-	 * without the encryption bit, they don't race each other when flushed
-	 * and potentially end up with the wrong entry being committed to
-	 * memory.
-	 *
-	 * Test the CPUID bit directly because the machine might've cleared
-	 * X86_FEATURE_SME due to cmdline options.
-	 */
-	if (c->extended_cpuid_level >= 0x8000001f && (cpuid_eax(0x8000001f) & BIT(0)))
-		native_wbinvd();
+	if (this_cpu_read(cache_state_incoherent))
+		wbinvd();
 
 	/*
 	 * This brings a cache line back and dirties it, but
@@ -835,39 +848,21 @@ void __noreturn stop_this_cpu(void *dummy)
 	 */
 	cpumask_clear_cpu(cpu, &cpus_stop_mask);
 
+#ifdef CONFIG_SMP
+	if (smp_ops.stop_this_cpu) {
+		smp_ops.stop_this_cpu();
+		BUG();
+	}
+#endif
+
 	for (;;) {
 		/*
 		 * Use native_halt() so that memory contents don't change
 		 * (stack usage and variables) after possibly issuing the
-		 * native_wbinvd() above.
+		 * wbinvd() above.
 		 */
 		native_halt();
 	}
-}
-
-/*
- * AMD Erratum 400 aware idle routine. We handle it the same way as C3 power
- * states (local apic timer and TSC stop).
- *
- * XXX this function is completely buggered vs RCU and tracing.
- */
-static void amd_e400_idle(void)
-{
-	/*
-	 * We cannot use static_cpu_has_bug() here because X86_BUG_AMD_APIC_C1E
-	 * gets set after static_cpu_has() places have been converted via
-	 * alternatives.
-	 */
-	if (!boot_cpu_has_bug(X86_BUG_AMD_APIC_C1E)) {
-		default_idle();
-		return;
-	}
-
-	tick_broadcast_enter();
-
-	default_idle();
-
-	tick_broadcast_exit();
 }
 
 /*
@@ -878,36 +873,37 @@ static void amd_e400_idle(void)
  * Do not prefer MWAIT if MONITOR instruction has a bug or idle=nomwait
  * is passed to kernel commandline parameter.
  */
-static int prefer_mwait_c1_over_halt(const struct cpuinfo_x86 *c)
+static __init bool prefer_mwait_c1_over_halt(void)
 {
+	const struct cpuinfo_x86 *c = &boot_cpu_data;
 	u32 eax, ebx, ecx, edx;
 
-	/* User has disallowed the use of MWAIT. Fallback to HALT */
-	if (boot_option_idle_override == IDLE_NOMWAIT)
-		return 0;
+	/* If override is enforced on the command line, fall back to HALT. */
+	if (boot_option_idle_override != IDLE_NO_OVERRIDE)
+		return false;
 
 	/* MWAIT is not supported on this platform. Fallback to HALT */
 	if (!cpu_has(c, X86_FEATURE_MWAIT))
-		return 0;
+		return false;
 
-	/* Monitor has a bug. Fallback to HALT */
-	if (boot_cpu_has_bug(X86_BUG_MONITOR))
-		return 0;
+	/* Monitor has a bug or APIC stops in C1E. Fallback to HALT */
+	if (boot_cpu_has_bug(X86_BUG_MONITOR) || boot_cpu_has_bug(X86_BUG_AMD_APIC_C1E))
+		return false;
 
-	cpuid(CPUID_MWAIT_LEAF, &eax, &ebx, &ecx, &edx);
+	cpuid(CPUID_LEAF_MWAIT, &eax, &ebx, &ecx, &edx);
 
 	/*
 	 * If MWAIT extensions are not available, it is safe to use MWAIT
 	 * with EAX=0, ECX=0.
 	 */
 	if (!(ecx & CPUID5_ECX_EXTENSIONS_SUPPORTED))
-		return 1;
+		return true;
 
 	/*
 	 * If MWAIT extensions are available, there should be at least one
 	 * MWAIT C1 substate present.
 	 */
-	return (edx & MWAIT_C1_SUBSTATE_MASK);
+	return !!(edx & MWAIT_C1_SUBSTATE_MASK);
 }
 
 /*
@@ -917,42 +913,48 @@ static int prefer_mwait_c1_over_halt(const struct cpuinfo_x86 *c)
  */
 static __cpuidle void mwait_idle(void)
 {
-	if (!current_set_polling_and_test()) {
-		if (this_cpu_has(X86_BUG_CLFLUSH_MONITOR)) {
-			mb(); /* quirk */
-			clflush((void *)&current_thread_info()->flags);
-			mb(); /* quirk */
-		}
+	if (need_resched())
+		return;
 
-		__monitor((void *)&current_thread_info()->flags, 0, 0);
-		if (!need_resched()) {
-			__sti_mwait(0, 0);
-			raw_local_irq_disable();
-		}
+	x86_idle_clear_cpu_buffers();
+
+	if (!current_set_polling_and_test()) {
+		const void *addr = &current_thread_info()->flags;
+
+		alternative_input("", "clflush (%[addr])", X86_BUG_CLFLUSH_MONITOR, [addr] "a" (addr));
+		__monitor(addr, 0, 0);
+		if (need_resched())
+			goto out;
+
+		__sti_mwait(0, 0);
+		raw_local_irq_disable();
 	}
+
+out:
 	__current_clr_polling();
 }
 
-void select_idle_routine(const struct cpuinfo_x86 *c)
+void __init select_idle_routine(void)
 {
-#ifdef CONFIG_SMP
-	if (boot_option_idle_override == IDLE_POLL && smp_num_siblings > 1)
-		pr_warn_once("WARNING: polling idle and HT enabled, performance may degrade\n");
-#endif
-	if (x86_idle_set() || boot_option_idle_override == IDLE_POLL)
+	if (boot_option_idle_override == IDLE_POLL) {
+		if (IS_ENABLED(CONFIG_SMP) && __max_threads_per_core > 1)
+			pr_warn_once("WARNING: polling idle and HT enabled, performance may degrade\n");
+		return;
+	}
+
+	/* Required to guard against xen_set_default_idle() */
+	if (x86_idle_set())
 		return;
 
-	if (boot_cpu_has_bug(X86_BUG_AMD_E400)) {
-		pr_info("using AMD E400 aware idle routine\n");
-		static_call_update(x86_idle, amd_e400_idle);
-	} else if (prefer_mwait_c1_over_halt(c)) {
+	if (prefer_mwait_c1_over_halt()) {
 		pr_info("using mwait in idle threads\n");
 		static_call_update(x86_idle, mwait_idle);
 	} else if (cpu_feature_enabled(X86_FEATURE_TDX_GUEST)) {
 		pr_info("using TDX aware idle routine\n");
-		static_call_update(x86_idle, tdx_safe_halt);
-	} else
+		static_call_update(x86_idle, tdx_halt);
+	} else {
 		static_call_update(x86_idle, default_idle);
+	}
 }
 
 void amd_e400_c1e_apic_setup(void)
@@ -985,7 +987,10 @@ void __init arch_post_acpi_subsys_init(void)
 
 	if (!boot_cpu_has(X86_FEATURE_NONSTOP_TSC))
 		mark_tsc_unstable("TSC halt in AMD C1E");
-	pr_info("System has AMD C1E enabled\n");
+
+	if (IS_ENABLED(CONFIG_GENERIC_CLOCKEVENTS_BROADCAST_IDLE))
+		static_branch_enable(&arch_needs_tick_broadcast);
+	pr_info("System has AMD C1E erratum E400. Workaround enabled.\n");
 }
 
 static int __init idle_setup(char *str)
@@ -998,24 +1003,14 @@ static int __init idle_setup(char *str)
 		boot_option_idle_override = IDLE_POLL;
 		cpu_idle_poll_ctrl(true);
 	} else if (!strcmp(str, "halt")) {
-		/*
-		 * When the boot option of idle=halt is added, halt is
-		 * forced to be used for CPU idle. In such case CPU C2/C3
-		 * won't be used again.
-		 * To continue to load the CPU idle driver, don't touch
-		 * the boot_option_idle_override.
-		 */
-		static_call_update(x86_idle, default_idle);
+		/* 'idle=halt' HALT for idle. C-states are disabled. */
 		boot_option_idle_override = IDLE_HALT;
 	} else if (!strcmp(str, "nomwait")) {
-		/*
-		 * If the boot option of "idle=nomwait" is added,
-		 * it means that mwait will be disabled for CPU C1/C2/C3
-		 * states.
-		 */
+		/* 'idle=nomwait' disables MWAIT for idle */
 		boot_option_idle_override = IDLE_NOMWAIT;
-	} else
-		return -1;
+	} else {
+		return -EINVAL;
+	}
 
 	return 0;
 }
@@ -1030,7 +1025,10 @@ unsigned long arch_align_stack(unsigned long sp)
 
 unsigned long arch_randomize_brk(struct mm_struct *mm)
 {
-	return randomize_page(mm->brk, 0x02000000);
+	if (mmap_is_ia32())
+		return randomize_page(mm->brk, SZ_32M);
+
+	return randomize_page(mm->brk, SZ_1G);
 }
 
 /*
@@ -1062,7 +1060,7 @@ unsigned long __get_wchan(struct task_struct *p)
 	return addr;
 }
 
-long do_arch_prctl_common(int option, unsigned long arg2)
+SYSCALL_DEFINE2(arch_prctl, int, option, unsigned long, arg2)
 {
 	switch (option) {
 	case ARCH_GET_CPUID:
@@ -1077,5 +1075,13 @@ long do_arch_prctl_common(int option, unsigned long arg2)
 		return fpu_xstate_prctl(option, arg2);
 	}
 
+	if (!in_ia32_syscall())
+		return do_arch_prctl_64(current, option, arg2);
+
 	return -EINVAL;
+}
+
+SYSCALL_DEFINE0(ni_syscall)
+{
+	return -ENOSYS;
 }

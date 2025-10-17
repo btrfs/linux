@@ -76,7 +76,6 @@ struct dc_perf_trace {
 	unsigned long last_entry_write;
 };
 
-#define MAX_SURFACE_NUM 6
 #define NUM_PIXEL_FORMATS 10
 
 enum tiling_mode {
@@ -176,8 +175,14 @@ struct dc_panel_patch {
 	unsigned int embedded_tiled_slave;
 	unsigned int disable_fams;
 	unsigned int skip_avmute;
+	unsigned int skip_audio_sab_check;
 	unsigned int mst_start_top_delay;
 	unsigned int remove_sink_ext_caps;
+	unsigned int disable_colorimetry;
+	uint8_t blankstream_before_otg_off;
+	bool oled_optimize_display_on;
+	unsigned int force_mst_blocked_discovery;
+	unsigned int wait_after_dpcd_poweroff_ms;
 };
 
 struct dc_edid_caps {
@@ -206,6 +211,7 @@ struct dc_edid_caps {
 
 	bool edid_hdmi;
 	bool hdr_supported;
+	bool rr_capable;
 
 	struct dc_panel_patch panel_patch;
 };
@@ -258,6 +264,7 @@ enum dc_timing_source {
 	TIMING_SOURCE_EDID_4BYTE,
 	TIMING_SOURCE_EDID_CEA_DISPLAYID_VTDB,
 	TIMING_SOURCE_EDID_CEA_RID,
+	TIMING_SOURCE_EDID_DISPLAYID_TYPE5,
 	TIMING_SOURCE_VBIOS,
 	TIMING_SOURCE_CV,
 	TIMING_SOURCE_TV,
@@ -422,7 +429,7 @@ struct dc_dwb_params {
 	enum dwb_capture_rate		capture_rate;	/* controls the frame capture rate */
 	struct scaling_taps 		scaler_taps;	/* Scaling taps */
 	enum dwb_subsample_position	subsample_position;
-	struct dc_transfer_func *out_transfer_func;
+	const struct dc_transfer_func *out_transfer_func;
 };
 
 /* audio*/
@@ -556,12 +563,24 @@ struct dc_info_packet_128 {
 	uint8_t sb[128];
 };
 
+struct dc_edid_read_policy {
+	uint32_t max_retry_count;
+	uint32_t delay_time_ms;
+	uint32_t ignore_checksum;
+};
+
 #define DC_PLANE_UPDATE_TIMES_MAX 10
 
 struct dc_plane_flip_time {
 	unsigned int time_elapsed_in_us[DC_PLANE_UPDATE_TIMES_MAX];
 	unsigned int index;
 	unsigned int prev_update_time_in_us;
+};
+
+enum dc_alpm_mode {
+	DC_ALPM_AUXWAKE = 0,
+	DC_ALPM_AUXLESS = 1,
+	DC_ALPM_UNSUPPORTED = 0xF,
 };
 
 enum dc_psr_state {
@@ -590,6 +609,7 @@ enum dc_psr_state {
 	PSR_STATE5c,
 	PSR_STATE_HWLOCK_MGR,
 	PSR_STATE_POLLVUPDATE,
+	PSR_STATE_RELEASE_HWLOCK_MGR_FULL_FRAME,
 	PSR_STATE_INVALID = 0xFF
 };
 
@@ -608,6 +628,7 @@ struct psr_config {
 	unsigned int line_time_in_us;
 	uint8_t rate_control_caps;
 	uint16_t dsc_slice_height;
+	bool os_request_force_ffu;
 };
 
 union dmcu_psr_level {
@@ -720,6 +741,7 @@ struct psr_context {
 	unsigned int line_time_in_us;
 	uint8_t rate_control_caps;
 	uint16_t dsc_slice_height;
+	bool os_request_force_ffu;
 };
 
 struct colorspace_transform {
@@ -870,6 +892,14 @@ struct dsc_dec_dpcd_caps {
 	bool is_dp; /* Decoded format */
 };
 
+struct hblank_expansion_dpcd_caps {
+	bool expansion_supported;
+	bool reduction_supported;
+	bool buffer_unit_bytes; /* True: buffer size in bytes. False: buffer size in pixels*/
+	bool buffer_per_port; /* True: buffer size per port. False: buffer size per lane*/
+	uint32_t buffer_size; /* Add 1 to value and multiply by 32 */
+};
+
 struct dc_golden_table {
 	uint16_t dc_golden_table_ver;
 	uint32_t aux_dphy_rx_control0_val;
@@ -920,10 +950,23 @@ struct display_endpoint_id {
 	enum display_endpoint_type ep_type;
 };
 
+enum backlight_control_type {
+	BACKLIGHT_CONTROL_PWM = 0,
+	BACKLIGHT_CONTROL_VESA_AUX = 1,
+	BACKLIGHT_CONTROL_AMD_AUX = 2,
+};
+
 #if defined(CONFIG_DRM_AMD_SECURE_DISPLAY)
+#define MAX_CRC_WINDOW_NUM	2
+
 struct otg_phy_mux {
 	uint8_t phy_output_num;
 	uint8_t otg_output_num;
+};
+
+struct crc_window {
+	struct rect rect;
+	bool enable;
 };
 #endif
 
@@ -1008,6 +1051,13 @@ struct psr_settings {
 	unsigned int psr_sdp_transmit_line_num_deadline;
 	uint8_t force_ffu_mode;
 	unsigned int psr_power_opt;
+
+	/**
+	 * Some panels cannot handle idle pattern during PSR entry.
+	 * To power down phy before disable stream to avoid sending
+	 * idle pattern.
+	 */
+	uint8_t power_down_phy_before_disable_stream;
 };
 
 enum replay_coasting_vtotal_type {
@@ -1034,21 +1084,47 @@ enum replay_FW_Message_type {
 	Replay_Msg_Not_Support = -1,
 	Replay_Set_Timing_Sync_Supported,
 	Replay_Set_Residency_Frameupdate_Timer,
+	Replay_Set_Pseudo_VTotal,
+	Replay_Disabled_Adaptive_Sync_SDP,
+	Replay_Set_General_Cmd,
 };
 
 union replay_error_status {
 	struct {
-		unsigned char STATE_TRANSITION_ERROR    :1;
-		unsigned char LINK_CRC_ERROR            :1;
-		unsigned char DESYNC_ERROR              :1;
-		unsigned char RESERVED                  :5;
+		unsigned int STATE_TRANSITION_ERROR     :1;
+		unsigned int LINK_CRC_ERROR             :1;
+		unsigned int DESYNC_ERROR               :1;
+		unsigned int RESERVED_3                 :1;
+		unsigned int LOW_RR_INCORRECT_VTOTAL    :1;
+		unsigned int NO_DOUBLED_RR              :1;
+		unsigned int RESERVED_6_7               :2;
 	} bits;
 	unsigned char raw;
+};
+
+union replay_low_refresh_rate_enable_options {
+	struct {
+	//BIT[0-3]: Replay Low Hz Support control
+		unsigned int ENABLE_LOW_RR_SUPPORT          :1;
+		unsigned int SKIP_ASIC_CHECK                :1;
+		unsigned int RESERVED_2_3                   :2;
+	//BIT[4-15]: Replay Low Hz Enable Scenarios
+		unsigned int ENABLE_STATIC_SCREEN           :1;
+		unsigned int ENABLE_FULL_SCREEN_VIDEO       :1;
+		unsigned int ENABLE_GENERAL_UI              :1;
+		unsigned int RESERVED_7_15                  :9;
+	//BIT[16-31]: Replay Low Hz Enable Check
+		unsigned int ENABLE_STATIC_FLICKER_CHECK    :1;
+		unsigned int RESERVED_17_31                 :15;
+	} bits;
+	unsigned int raw;
 };
 
 struct replay_config {
 	/* Replay feature is supported */
 	bool replay_supported;
+	/* Replay caps support DPCD & EDID caps*/
+	bool replay_cap_support;
 	/* Power opt flags that are supported */
 	unsigned int replay_power_opt_supported;
 	/* SMU optimization is supported */
@@ -1067,6 +1143,18 @@ struct replay_config {
 	bool replay_support_fast_resync_in_ultra_sleep_mode;
 	/* Replay error status */
 	union replay_error_status replay_error_status;
+	/* Replay Low Hz enable Options */
+	union replay_low_refresh_rate_enable_options low_rr_enable_options;
+	/* Replay coasting vtotal is within low refresh rate range. */
+	bool low_rr_activated;
+	/* Replay low refresh rate supported*/
+	bool low_rr_supported;
+	/* Replay Video Conferencing Optimization Enabled */
+	bool replay_video_conferencing_optimization_enabled;
+	/* Replay alpm mode */
+	enum dc_alpm_mode alpm_mode;
+	/* Replay full screen only */
+	bool os_request_force_ffu;
 };
 
 /* Replay feature flags*/
@@ -1084,11 +1172,19 @@ struct replay_settings {
 	/* SMU optimization is enabled */
 	bool replay_smu_opt_enable;
 	/* Current Coasting vtotal */
-	uint16_t coasting_vtotal;
+	uint32_t coasting_vtotal;
 	/* Coasting vtotal table */
-	uint16_t coasting_vtotal_table[PR_COASTING_TYPE_NUM];
+	uint32_t coasting_vtotal_table[PR_COASTING_TYPE_NUM];
+	/* Defer Update Coasting vtotal table */
+	uint32_t defer_update_coasting_vtotal_table[PR_COASTING_TYPE_NUM];
 	/* Maximum link off frame count */
-	enum replay_link_off_frame_count_level link_off_frame_count_level;
+	uint32_t link_off_frame_count;
+	/* Replay pseudo vtotal for low refresh rate*/
+	uint16_t low_rr_full_screen_video_pseudo_vtotal;
+	/* Replay last pseudo vtotal set to DMUB */
+	uint16_t last_pseudo_vtotal;
+	/* Replay desync error */
+	uint32_t replay_desync_error_fail_count;
 };
 
 /* To split out "global" and "per-panel" config settings.
@@ -1121,6 +1217,7 @@ struct dc_panel_config {
 		bool rc_disable;
 		bool rc_allow_static_screen;
 		bool rc_allow_fullscreen_VPB;
+		bool read_psrcap_again;
 		unsigned int replay_enable_option;
 	} psr;
 	/* ABM */
@@ -1154,7 +1251,6 @@ struct dc_dpia_bw_alloc {
 	int bw_granularity;    // BW Granularity
 	int dp_overhead;       // DP overhead in dp tunneling
 	bool bw_alloc_enabled; // The BW Alloc Mode Support is turned ON for all 3:  DP-Tx & Dpia & CM
-	bool response_ready;   // Response ready from the CM side
 	uint8_t nrd_max_lane_count; // Non-reduced max lane count
 	uint8_t nrd_max_link_rate; // Non-reduced max link rate
 };
@@ -1165,9 +1261,150 @@ enum dc_hpd_enable_select {
 	HPD_EN_FOR_SECONDARY_EDP_ONLY,
 };
 
+enum dc_cm2_shaper_3dlut_setting {
+	DC_CM2_SHAPER_3DLUT_SETTING_BYPASS_ALL,
+	DC_CM2_SHAPER_3DLUT_SETTING_ENABLE_SHAPER,
+	/* Bypassing Shaper will always bypass 3DLUT */
+	DC_CM2_SHAPER_3DLUT_SETTING_ENABLE_SHAPER_3DLUT
+};
+
+enum dc_cm2_gpu_mem_layout {
+	DC_CM2_GPU_MEM_LAYOUT_3D_SWIZZLE_LINEAR_RGB,
+	DC_CM2_GPU_MEM_LAYOUT_3D_SWIZZLE_LINEAR_BGR,
+	DC_CM2_GPU_MEM_LAYOUT_1D_PACKED_LINEAR
+};
+
+enum dc_cm2_gpu_mem_pixel_component_order {
+	DC_CM2_GPU_MEM_PIXEL_COMPONENT_ORDER_RGBA,
+};
+
+enum dc_cm2_gpu_mem_format {
+	DC_CM2_GPU_MEM_FORMAT_16161616_UNORM_12MSB,
+	DC_CM2_GPU_MEM_FORMAT_16161616_UNORM_12LSB,
+	DC_CM2_GPU_MEM_FORMAT_16161616_FLOAT_FP1_5_10
+};
+
+struct dc_cm2_gpu_mem_format_parameters {
+	enum dc_cm2_gpu_mem_format format;
+	union {
+		struct {
+			/* bias & scale for float only */
+			uint16_t bias;
+			uint16_t scale;
+		} float_params;
+	};
+};
+
+enum dc_cm2_gpu_mem_size {
+	DC_CM2_GPU_MEM_SIZE_171717,
+	DC_CM2_GPU_MEM_SIZE_TRANSFORMED,
+};
+
+struct dc_cm2_gpu_mem_parameters {
+	struct dc_plane_address addr;
+	enum dc_cm2_gpu_mem_layout layout;
+	struct dc_cm2_gpu_mem_format_parameters format_params;
+	enum dc_cm2_gpu_mem_pixel_component_order component_order;
+	enum dc_cm2_gpu_mem_size  size;
+	uint16_t bit_depth;
+};
+
+enum dc_cm2_transfer_func_source {
+	DC_CM2_TRANSFER_FUNC_SOURCE_SYSMEM,
+	DC_CM2_TRANSFER_FUNC_SOURCE_VIDMEM
+};
+
+struct dc_cm2_component_settings {
+	enum dc_cm2_shaper_3dlut_setting shaper_3dlut_setting;
+	bool lut1d_enable;
+};
+
+/*
+ * All pointers in this struct must remain valid for as long as the 3DLUTs are used
+ */
+struct dc_cm2_func_luts {
+	const struct dc_transfer_func *shaper;
+	struct {
+		enum dc_cm2_transfer_func_source lut3d_src;
+		union {
+			const struct dc_3dlut *lut3d_func;
+			struct dc_cm2_gpu_mem_parameters gpu_mem_params;
+		};
+		bool rmcm_3dlut_shaper_select;
+		bool mpc_3dlut_enable;
+		bool rmcm_3dlut_enable;
+		bool mpc_mcm_post_blend;
+		uint8_t rmcm_tmz;
+	} lut3d_data;
+	const struct dc_transfer_func *lut1d_func;
+};
+
+struct dc_cm2_parameters {
+	struct dc_cm2_component_settings component_settings;
+	struct dc_cm2_func_luts cm2_luts;
+};
+
 enum mall_stream_type {
 	SUBVP_NONE, // subvp not in use
 	SUBVP_MAIN, // subvp in use, this stream is main stream
 	SUBVP_PHANTOM, // subvp in use, this stream is a phantom stream
 };
+
+enum dc_power_source_type {
+	DC_POWER_SOURCE_AC, // wall power
+	DC_POWER_SOURCE_DC, // battery power
+};
+
+struct dc_state_create_params {
+	enum dc_power_source_type power_source;
+};
+
+struct dc_commit_streams_params {
+	struct dc_stream_state **streams;
+	uint8_t stream_count;
+	enum dc_power_source_type power_source;
+};
+
+struct set_backlight_level_params {
+	/* backlight in pwm */
+	uint32_t backlight_pwm_u16_16;
+	/* brightness ramping */
+	uint32_t frame_ramp;
+	/* backlight control type
+	 * 0: PWM backlight control
+	 * 1: VESA AUX backlight control
+	 * 2: AMD AUX backlight control
+	 */
+	enum backlight_control_type control_type;
+	/* backlight in millinits */
+	uint32_t backlight_millinits;
+	/* transition time in ms */
+	uint32_t transition_time_in_ms;
+	/* minimum luminance in nits */
+	uint32_t min_luminance;
+	/* maximum luminance in nits */
+	uint32_t max_luminance;
+	/* minimum backlight in pwm */
+	uint32_t min_backlight_pwm;
+	/* maximum backlight in pwm */
+	uint32_t max_backlight_pwm;
+	/* AUX HW instance */
+	uint8_t aux_inst;
+};
+
+enum dc_validate_mode {
+	/* validate the mode and program HW */
+	DC_VALIDATE_MODE_AND_PROGRAMMING = 0,
+	/* only validate the mode */
+	DC_VALIDATE_MODE_ONLY = 1,
+	/* validate the mode and get the max state (voltage level) */
+	DC_VALIDATE_MODE_AND_STATE_INDEX = 2,
+};
+
+struct dc_validation_dpia_set {
+	const struct dc_link *link;
+	const struct dc_tunnel_settings *tunnel_settings;
+	uint32_t required_bw;
+};
+
 #endif /* DC_TYPES_H_ */

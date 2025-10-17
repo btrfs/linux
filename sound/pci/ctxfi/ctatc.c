@@ -105,23 +105,20 @@ static struct {
 			    .public_name = "Mixer"}
 };
 
-typedef int (*create_t)(struct hw *, void **);
-typedef int (*destroy_t)(void *);
-
 static struct {
 	int (*create)(struct hw *hw, void **rmgr);
 	int (*destroy)(void *mgr);
 } rsc_mgr_funcs[NUM_RSCTYP] = {
-	[SRC] 		= { .create 	= (create_t)src_mgr_create,
-			    .destroy 	= (destroy_t)src_mgr_destroy	},
-	[SRCIMP] 	= { .create 	= (create_t)srcimp_mgr_create,
-			    .destroy 	= (destroy_t)srcimp_mgr_destroy	},
-	[AMIXER]	= { .create	= (create_t)amixer_mgr_create,
-			    .destroy	= (destroy_t)amixer_mgr_destroy	},
-	[SUM]		= { .create	= (create_t)sum_mgr_create,
-			    .destroy	= (destroy_t)sum_mgr_destroy	},
-	[DAIO]		= { .create	= (create_t)daio_mgr_create,
-			    .destroy	= (destroy_t)daio_mgr_destroy	}
+	[SRC] 		= { .create 	= src_mgr_create,
+			    .destroy 	= src_mgr_destroy	},
+	[SRCIMP] 	= { .create 	= srcimp_mgr_create,
+			    .destroy 	= srcimp_mgr_destroy	},
+	[AMIXER]	= { .create	= amixer_mgr_create,
+			    .destroy	= amixer_mgr_destroy	},
+	[SUM]		= { .create	= sum_mgr_create,
+			    .destroy	= sum_mgr_destroy	},
+	[DAIO]		= { .create	= daio_mgr_create,
+			    .destroy	= daio_mgr_destroy	}
 };
 
 static int
@@ -298,10 +295,10 @@ static int atc_pcm_playback_prepare(struct ct_atc *atc, struct ct_atc_pcm *apcm)
 	src = apcm->src;
 	for (i = 0; i < n_amixer; i++) {
 		amixer = apcm->amixers[i];
-		mutex_lock(&atc->atc_mutex);
-		amixer->ops->setup(amixer, &src->rsc,
-					INIT_VOL, atc->pcm[i+device*2]);
-		mutex_unlock(&atc->atc_mutex);
+		scoped_guard(mutex, &atc->atc_mutex) {
+			amixer->ops->setup(amixer, &src->rsc,
+					   INIT_VOL, atc->pcm[i+device*2]);
+		}
 		src = src->ops->next_interleave(src);
 		if (!src)
 			src = apcm->src;
@@ -877,7 +874,7 @@ spdif_passthru_playback_setup(struct ct_atc *atc, struct ct_atc_pcm *apcm)
 		return -ENOENT;
 	}
 
-	mutex_lock(&atc->atc_mutex);
+	guard(mutex)(&atc->atc_mutex);
 	dao->ops->get_spos(dao, &status);
 	if (((status >> 24) & IEC958_AES3_CON_FS) != iec958_con_fs) {
 		status &= ~(IEC958_AES3_CON_FS << 24);
@@ -887,7 +884,6 @@ spdif_passthru_playback_setup(struct ct_atc *atc, struct ct_atc_pcm *apcm)
 	}
 	if ((rate != atc->pll_rate) && (32000 != rate))
 		err = atc_pll_init(atc, rate);
-	mutex_unlock(&atc->atc_mutex);
 
 	return err;
 }
@@ -924,13 +920,13 @@ spdif_passthru_playback_prepare(struct ct_atc *atc, struct ct_atc_pcm *apcm)
 			src = apcm->src;
 	}
 	/* Connect to SPDIFOO */
-	mutex_lock(&atc->atc_mutex);
-	dao = container_of(atc->daios[SPDIFOO], struct dao, daio);
-	amixer = apcm->amixers[0];
-	dao->ops->set_left_input(dao, &amixer->rsc);
-	amixer = apcm->amixers[1];
-	dao->ops->set_right_input(dao, &amixer->rsc);
-	mutex_unlock(&atc->atc_mutex);
+	scoped_guard(mutex, &atc->atc_mutex) {
+		dao = container_of(atc->daios[SPDIFOO], struct dao, daio);
+		amixer = apcm->amixers[0];
+		dao->ops->set_left_input(dao, &amixer->rsc);
+		amixer = apcm->amixers[1];
+		dao->ops->set_right_input(dao, &amixer->rsc);
+	}
 
 	ct_timer_prepare(apcm->timer);
 
@@ -1118,7 +1114,7 @@ static int atc_spdif_out_passthru(struct ct_atc *atc, unsigned char state)
 	struct rsc *rscs[2] = {NULL};
 	unsigned int spos = 0;
 
-	mutex_lock(&atc->atc_mutex);
+	guard(mutex)(&atc->atc_mutex);
 	dao = container_of(atc->daios[SPDIFOO], struct dao, daio);
 	da_dsc.msr = state ? 1 : atc->msr;
 	da_dsc.passthru = state ? 1 : 0;
@@ -1136,7 +1132,6 @@ static int atc_spdif_out_passthru(struct ct_atc *atc, unsigned char state)
 	}
 	dao->ops->set_spos(dao, spos);
 	dao->ops->commit_write(dao);
-	mutex_unlock(&atc->atc_mutex);
 
 	return err;
 }

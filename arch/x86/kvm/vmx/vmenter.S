@@ -59,8 +59,7 @@
 	 * without the explicit restore, thinks the stack is getting walloped.
 	 * Using an unwind hint is problematic due to x86-64's dynamic alignment.
 	 */
-	mov %_ASM_BP, %_ASM_SP
-	pop %_ASM_BP
+	leave
 	RET
 .endm
 
@@ -139,7 +138,7 @@ SYM_FUNC_START(__vmx_vcpu_run)
 	mov (%_ASM_SP), %_ASM_AX
 
 	/* Check if vmlaunch or vmresume is needed */
-	test $VMX_RUN_VMRESUME, %ebx
+	bt   $VMX_RUN_VMRESUME_SHIFT, %ebx
 
 	/* Load guest registers.  Don't clobber flags. */
 	mov VCPU_RCX(%_ASM_AX), %_ASM_CX
@@ -161,8 +160,11 @@ SYM_FUNC_START(__vmx_vcpu_run)
 	/* Load guest RAX.  This kills the @regs pointer! */
 	mov VCPU_RAX(%_ASM_AX), %_ASM_AX
 
-	/* Check EFLAGS.ZF from 'test VMX_RUN_VMRESUME' above */
-	jz .Lvmlaunch
+	/* Clobbers EFLAGS.ZF */
+	CLEAR_CPU_BUFFERS
+
+	/* Check EFLAGS.CF from the VMX_RUN_VMRESUME bit test above. */
+	jnc .Lvmlaunch
 
 	/*
 	 * After a successful VMRESUME/VMLAUNCH, control flow "magically"
@@ -272,6 +274,8 @@ SYM_INNER_LABEL_ALIGN(vmx_vmexit, SYM_L_GLOBAL)
 
 	call vmx_spec_ctrl_restore_host
 
+	CLEAR_BRANCH_HISTORY_VMEXIT
+
 	/* Put return value in AX */
 	mov %_ASM_BX, %_ASM_AX
 
@@ -357,6 +361,10 @@ SYM_FUNC_END(vmread_error_trampoline)
 
 .section .text, "ax"
 
+#ifndef CONFIG_X86_FRED
+
 SYM_FUNC_START(vmx_do_interrupt_irqoff)
 	VMX_DO_EVENT_IRQOFF CALL_NOSPEC _ASM_ARG1
 SYM_FUNC_END(vmx_do_interrupt_irqoff)
+
+#endif

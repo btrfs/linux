@@ -1368,10 +1368,6 @@ static int __s5c73m3_power_on(struct s5c73m3 *state)
 			goto err_reg_dis;
 	}
 
-	ret = clk_set_rate(state->clock, state->mclk_frequency);
-	if (ret < 0)
-		goto err_reg_dis;
-
 	ret = clk_prepare_enable(state->clock);
 	if (ret < 0)
 		goto err_reg_dis;
@@ -1390,6 +1386,16 @@ err_reg_dis:
 	for (--i; i >= 0; i--)
 		regulator_disable(state->supplies[i].consumer);
 	return ret;
+}
+
+/*
+ * This function has been created just to avoid a smatch warning,
+ * please do not merge into __s5c73m3_power_off() until you have
+ * confirmed that it does not introduce a new warning.
+ */
+static void s5c73m3_enable_clk(struct s5c73m3 *state)
+{
+	clk_prepare_enable(state->clock);
 }
 
 static int __s5c73m3_power_off(struct s5c73m3 *state)
@@ -1421,7 +1427,8 @@ err:
 				 state->supplies[i].supply, r);
 	}
 
-	clk_prepare_enable(state->clock);
+	s5c73m3_enable_clk(state);
+
 	return ret;
 }
 
@@ -1545,16 +1552,13 @@ static int s5c73m3_get_dt_data(struct s5c73m3 *state)
 	if (!node)
 		return -EINVAL;
 
-	state->clock = devm_clk_get(dev, S5C73M3_CLK_NAME);
+	state->clock = devm_v4l2_sensor_clk_get_legacy(dev, S5C73M3_CLK_NAME,
+						       false,
+						       S5C73M3_DEFAULT_MCLK_FREQ);
 	if (IS_ERR(state->clock))
-		return PTR_ERR(state->clock);
-
-	if (of_property_read_u32(node, "clock-frequency",
-				 &state->mclk_frequency)) {
-		state->mclk_frequency = S5C73M3_DEFAULT_MCLK_FREQ;
-		dev_info(dev, "using default %u Hz clock frequency\n",
-					state->mclk_frequency);
-	}
+		return dev_err_probe(dev, PTR_ERR(state->clock),
+				     "Failed to get the clock %s\n",
+				     S5C73M3_CLK_NAME);
 
 	/* Request GPIO lines asserted */
 	state->stby = devm_gpiod_get(dev, "standby", GPIOD_OUT_HIGH);
@@ -1568,7 +1572,7 @@ static int s5c73m3_get_dt_data(struct s5c73m3 *state)
 				     "failed to request gpio S5C73M3_RST\n");
 	gpiod_set_consumer_name(state->reset, "S5C73M3_RST");
 
-	node_ep = of_graph_get_next_endpoint(node, NULL);
+	node_ep = of_graph_get_endpoint_by_regs(node, 0, -1);
 	if (!node_ep) {
 		dev_warn(dev, "no endpoint defined for node: %pOF\n", node);
 		return 0;
@@ -1724,7 +1728,7 @@ static void s5c73m3_remove(struct i2c_client *client)
 }
 
 static const struct i2c_device_id s5c73m3_id[] = {
-	{ DRIVER_NAME, 0 },
+	{ DRIVER_NAME },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, s5c73m3_id);

@@ -141,6 +141,7 @@ enum s5p_mfc_inst_state {
 	MFCINST_RES_CHANGE_INIT,
 	MFCINST_RES_CHANGE_FLUSH,
 	MFCINST_RES_CHANGE_END,
+	MFCINST_NAL_ABORT,
 };
 
 /*
@@ -221,15 +222,15 @@ struct s5p_mfc_buf_size_v6 {
 struct s5p_mfc_buf_size {
 	unsigned int fw;
 	unsigned int cpb;
-	void *priv;
+	const void *priv;
 };
 
 struct s5p_mfc_variant {
 	unsigned int version;
 	unsigned int port_num;
 	u32 version_bit;
-	struct s5p_mfc_buf_size *buf_size;
-	char	*fw_name[MFC_FW_MAX_VERSIONS];
+	const struct s5p_mfc_buf_size *buf_size;
+	const char	*fw_name[MFC_FW_MAX_VERSIONS];
 	const char	*clk_names[MFC_MAX_CLOCKS];
 	int		num_clocks;
 	bool		use_clock_gating;
@@ -340,8 +341,8 @@ struct s5p_mfc_dev {
 
 	struct s5p_mfc_priv_buf ctx_buf;
 	int warn_start;
-	struct s5p_mfc_hw_ops *mfc_ops;
-	struct s5p_mfc_hw_cmds *mfc_cmds;
+	const struct s5p_mfc_hw_ops *mfc_ops;
+	const struct s5p_mfc_hw_cmds *mfc_cmds;
 	const struct s5p_mfc_regs *mfc_regs;
 	enum s5p_mfc_fw_ver fw_ver;
 	bool fw_get_done;
@@ -612,7 +613,6 @@ struct s5p_mfc_codec_ops {
  * @chroma_dpb_size:	dpb buffer size for chroma
  * @me_buffer_size:	size of the motion estimation buffer
  * @tmv_buffer_size:	size of temporal predictor motion vector buffer
- * @frame_type:		used to force the type of the next encoded frame
  * @ref_queue:		list of the reference buffers for encoding
  * @force_frame_type:	encoder's frame type forcing control
  * @ref_queue_cnt:	number of the buffers in the reference list
@@ -639,8 +639,8 @@ struct s5p_mfc_ctx {
 	unsigned int int_err;
 	wait_queue_head_t queue;
 
-	struct s5p_mfc_fmt *src_fmt;
-	struct s5p_mfc_fmt *dst_fmt;
+	const struct s5p_mfc_fmt *src_fmt;
+	const struct s5p_mfc_fmt *dst_fmt;
 
 	struct vb2_queue vq_src;
 	struct vb2_queue vq_dst;
@@ -767,7 +767,11 @@ struct mfc_control {
 #define s5p_mfc_hw_call(f, op, args...) \
 	((f && f->op) ? f->op(args) : (typeof(f->op(args)))(-ENODEV))
 
-#define fh_to_ctx(__fh) container_of(__fh, struct s5p_mfc_ctx, fh)
+static inline struct s5p_mfc_ctx *file_to_ctx(struct file *filp)
+{
+	return container_of(file_to_v4l2_fh(filp), struct s5p_mfc_ctx, fh);
+}
+
 #define ctrl_to_ctx(__ctrl) \
 	container_of((__ctrl)->handler, struct s5p_mfc_ctx, ctrl_handler)
 

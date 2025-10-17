@@ -4,9 +4,9 @@
  *
  * Based partially on Intel IPU4 driver written by
  *  Sakari Ailus <sakari.ailus@linux.intel.com>
- *  Samu Onkalo <samu.onkalo@intel.com>
+ *  Samu Onkalo
  *  Jouni Högander <jouni.hogander@intel.com>
- *  Jouni Ukkonen <jouni.ukkonen@intel.com>
+ *  Jouni Ukkonen
  *  Antti Laakso <antti.laakso@intel.com>
  * et al.
  */
@@ -28,6 +28,7 @@
 #include <media/v4l2-device.h>
 #include <media/v4l2-event.h>
 #include <media/v4l2-fwnode.h>
+#include <media/v4l2-mc.h>
 #include <media/v4l2-ioctl.h>
 #include <media/videobuf2-dma-sg.h>
 
@@ -308,12 +309,17 @@ static int cio2_csi2_calc_timing(struct cio2_device *cio2, struct cio2_queue *q,
 				 unsigned int bpp, unsigned int lanes)
 {
 	struct device *dev = &cio2->pci_dev->dev;
+	struct media_pad *src_pad;
 	s64 freq;
 
-	if (!q->sensor)
-		return -ENODEV;
+	src_pad = media_entity_remote_source_pad_unique(&q->subdev.entity);
+	if (IS_ERR(src_pad)) {
+		dev_err(dev, "can't get source pad of %s (%ld)\n",
+			q->subdev.name, PTR_ERR(src_pad));
+		return PTR_ERR(src_pad);
+	}
 
-	freq = v4l2_get_link_freq(q->sensor->ctrl_handler, bpp, lanes * 2);
+	freq = v4l2_get_link_freq(src_pad, bpp, lanes * 2);
 	if (freq < 0) {
 		dev_err(dev, "error %lld, invalid link_freq\n", freq);
 		return freq;
@@ -352,6 +358,8 @@ static int cio2_hw_init(struct cio2_device *cio2, struct cio2_queue *q)
 	static const int FBPT_WIDTH = DIV_ROUND_UP(CIO2_MAX_LOPS,
 					CIO2_FBPT_SUBENTRY_UNIT);
 	const u32 num_buffers1 = CIO2_MAX_BUFFERS - 1;
+	struct v4l2_subdev_state *state;
+	const struct v4l2_mbus_framefmt *format;
 	const struct ipu3_cio2_fmt *fmt;
 	void __iomem *const base = cio2->base;
 	u8 lanes, csi2bus = q->csi2.port;
@@ -359,7 +367,13 @@ static int cio2_hw_init(struct cio2_device *cio2, struct cio2_queue *q)
 	struct cio2_csi2_timing timing = { 0 };
 	int i, r;
 
-	fmt = cio2_find_format(NULL, &q->subdev_fmt.code);
+	state = v4l2_subdev_lock_and_get_active_state(&q->subdev);
+	format = v4l2_subdev_state_get_format(state, CIO2_PAD_SINK);
+
+	fmt = cio2_find_format(NULL, &format->code);
+
+	v4l2_subdev_unlock_state(state);
+
 	if (!fmt)
 		return -EINVAL;
 
@@ -1044,8 +1058,6 @@ static const struct vb2_ops cio2_vb2_ops = {
 	.queue_setup = cio2_vb2_queue_setup,
 	.start_streaming = cio2_vb2_start_streaming,
 	.stop_streaming = cio2_vb2_stop_streaming,
-	.wait_prepare = vb2_ops_wait_prepare,
-	.wait_finish = vb2_ops_wait_finish,
 };
 
 /**************** V4L2 interface ****************/
@@ -1190,9 +1202,9 @@ static int cio2_subdev_subscribe_event(struct v4l2_subdev *sd,
 	return v4l2_event_subscribe(fh, sub, 0, NULL);
 }
 
-static int cio2_subdev_open(struct v4l2_subdev *sd, struct v4l2_subdev_fh *fh)
+static int cio2_subdev_init_state(struct v4l2_subdev *sd,
+				  struct v4l2_subdev_state *state)
 {
-	struct v4l2_mbus_framefmt *format;
 	const struct v4l2_mbus_framefmt fmt_default = {
 		.width = 1936,
 		.height = 1096,
@@ -1203,33 +1215,15 @@ static int cio2_subdev_open(struct v4l2_subdev *sd, struct v4l2_subdev_fh *fh)
 		.quantization = V4L2_QUANTIZATION_DEFAULT,
 		.xfer_func = V4L2_XFER_FUNC_DEFAULT,
 	};
+	struct v4l2_mbus_framefmt *format;
 
-	/* Initialize try_fmt */
-	format = v4l2_subdev_state_get_format(fh->state, CIO2_PAD_SINK);
+	/* Initialize the format on the sink and source pads. */
+	format = v4l2_subdev_state_get_format(state, CIO2_PAD_SINK);
 	*format = fmt_default;
 
 	/* same as sink */
-	format = v4l2_subdev_state_get_format(fh->state, CIO2_PAD_SOURCE);
+	format = v4l2_subdev_state_get_format(state, CIO2_PAD_SOURCE);
 	*format = fmt_default;
-
-	return 0;
-}
-
-static int cio2_subdev_get_fmt(struct v4l2_subdev *sd,
-			       struct v4l2_subdev_state *sd_state,
-			       struct v4l2_subdev_format *fmt)
-{
-	struct cio2_queue *q = container_of(sd, struct cio2_queue, subdev);
-
-	mutex_lock(&q->subdev_lock);
-
-	if (fmt->which == V4L2_SUBDEV_FORMAT_TRY)
-		fmt->format = *v4l2_subdev_state_get_format(sd_state,
-							    fmt->pad);
-	else
-		fmt->format = q->subdev_fmt;
-
-	mutex_unlock(&q->subdev_lock);
 
 	return 0;
 }
@@ -1238,7 +1232,6 @@ static int cio2_subdev_set_fmt(struct v4l2_subdev *sd,
 			       struct v4l2_subdev_state *sd_state,
 			       struct v4l2_subdev_format *fmt)
 {
-	struct cio2_queue *q = container_of(sd, struct cio2_queue, subdev);
 	struct v4l2_mbus_framefmt *mbus;
 	u32 mbus_code = fmt->format.code;
 	unsigned int i;
@@ -1248,12 +1241,7 @@ static int cio2_subdev_set_fmt(struct v4l2_subdev *sd,
 	 * source always propagates from sink
 	 */
 	if (fmt->pad == CIO2_PAD_SOURCE)
-		return cio2_subdev_get_fmt(sd, sd_state, fmt);
-
-	if (fmt->which == V4L2_SUBDEV_FORMAT_TRY)
-		mbus = v4l2_subdev_state_get_format(sd_state, fmt->pad);
-	else
-		mbus = &q->subdev_fmt;
+		return v4l2_subdev_get_fmt(sd, sd_state, fmt);
 
 	fmt->format.code = formats[0].mbus_code;
 
@@ -1268,9 +1256,12 @@ static int cio2_subdev_set_fmt(struct v4l2_subdev *sd,
 	fmt->format.height = min(fmt->format.height, CIO2_IMAGE_MAX_HEIGHT);
 	fmt->format.field = V4L2_FIELD_NONE;
 
-	mutex_lock(&q->subdev_lock);
+	mbus = v4l2_subdev_state_get_format(sd_state, CIO2_PAD_SINK);
 	*mbus = fmt->format;
-	mutex_unlock(&q->subdev_lock);
+
+	/* Propagate the format to the source pad. */
+	mbus = v4l2_subdev_state_get_format(sd_state, CIO2_PAD_SOURCE);
+	*mbus = fmt->format;
 
 	return 0;
 }
@@ -1341,12 +1332,12 @@ static const struct v4l2_subdev_core_ops cio2_subdev_core_ops = {
 };
 
 static const struct v4l2_subdev_internal_ops cio2_subdev_internal_ops = {
-	.open = cio2_subdev_open,
+	.init_state = cio2_subdev_init_state,
 };
 
 static const struct v4l2_subdev_pad_ops cio2_subdev_pad_ops = {
 	.link_validate = v4l2_subdev_link_validate_default,
-	.get_fmt = cio2_subdev_get_fmt,
+	.get_fmt = v4l2_subdev_get_fmt,
 	.set_fmt = cio2_subdev_set_fmt,
 	.enum_mbus_code = cio2_subdev_enum_mbus_code,
 };
@@ -1407,7 +1398,6 @@ static void cio2_notifier_unbind(struct v4l2_async_notifier *notifier,
 static int cio2_notifier_complete(struct v4l2_async_notifier *notifier)
 {
 	struct cio2_device *cio2 = to_cio2_device(notifier);
-	struct device *dev = &cio2->pci_dev->dev;
 	struct sensor_async_subdev *s_asd;
 	struct v4l2_async_connection *asd;
 	struct cio2_queue *q;
@@ -1417,23 +1407,10 @@ static int cio2_notifier_complete(struct v4l2_async_notifier *notifier)
 		s_asd = to_sensor_asd(asd);
 		q = &cio2->queue[s_asd->csi2.port];
 
-		ret = media_entity_get_fwnode_pad(&q->sensor->entity,
-						  s_asd->asd.match.fwnode,
-						  MEDIA_PAD_FL_SOURCE);
-		if (ret < 0) {
-			dev_err(dev, "no pad for endpoint %pfw (%d)\n",
-				s_asd->asd.match.fwnode, ret);
+		ret = v4l2_create_fwnode_links_to_pad(asd->sd,
+						      &q->subdev_pads[CIO2_PAD_SINK], 0);
+		if (ret)
 			return ret;
-		}
-
-		ret = media_create_pad_link(&q->sensor->entity, ret,
-					    &q->subdev.entity, CIO2_PAD_SINK,
-					    0);
-		if (ret) {
-			dev_err(dev, "failed to create link for %s (endpoint %pfw, error %d)\n",
-				q->sensor->name, s_asd->asd.match.fwnode, ret);
-			return ret;
-		}
 	}
 
 	return v4l2_device_register_subdev_nodes(&cio2->v4l2_dev);
@@ -1512,28 +1489,18 @@ static int cio2_queue_init(struct cio2_device *cio2, struct cio2_queue *q)
 {
 	static const u32 default_width = 1936;
 	static const u32 default_height = 1096;
-	const struct ipu3_cio2_fmt dflt_fmt = formats[0];
 	struct device *dev = &cio2->pci_dev->dev;
 	struct video_device *vdev = &q->vdev;
 	struct vb2_queue *vbq = &q->vbq;
 	struct v4l2_subdev *subdev = &q->subdev;
-	struct v4l2_mbus_framefmt *fmt;
 	int r;
 
 	/* Initialize miscellaneous variables */
 	mutex_init(&q->lock);
-	mutex_init(&q->subdev_lock);
-
-	/* Initialize formats to default values */
-	fmt = &q->subdev_fmt;
-	fmt->width = default_width;
-	fmt->height = default_height;
-	fmt->code = dflt_fmt.mbus_code;
-	fmt->field = V4L2_FIELD_NONE;
 
 	q->format.width = default_width;
 	q->format.height = default_height;
-	q->format.pixelformat = dflt_fmt.fourcc;
+	q->format.pixelformat = formats[0].fourcc;
 	q->format.colorspace = V4L2_COLORSPACE_RAW;
 	q->format.field = V4L2_FIELD_NONE;
 	q->format.num_planes = 1;
@@ -1572,13 +1539,21 @@ static int cio2_queue_init(struct cio2_device *cio2, struct cio2_queue *q)
 	v4l2_subdev_init(subdev, &cio2_subdev_ops);
 	subdev->flags = V4L2_SUBDEV_FL_HAS_DEVNODE | V4L2_SUBDEV_FL_HAS_EVENTS;
 	subdev->owner = THIS_MODULE;
+	subdev->dev = dev;
 	snprintf(subdev->name, sizeof(subdev->name),
 		 CIO2_ENTITY_NAME " %td", q - cio2->queue);
 	subdev->entity.function = MEDIA_ENT_F_VID_IF_BRIDGE;
 	v4l2_set_subdevdata(subdev, cio2);
+
+	r = v4l2_subdev_init_finalize(subdev);
+	if (r) {
+		dev_err(dev, "failed to initialize subdev (%d)\n", r);
+		goto fail_subdev;
+	}
+
 	r = v4l2_device_register_subdev(&cio2->v4l2_dev, subdev);
 	if (r) {
-		dev_err(dev, "failed initialize subdev (%d)\n", r);
+		dev_err(dev, "failed to register subdev (%d)\n", r);
 		goto fail_subdev;
 	}
 
@@ -1635,7 +1610,6 @@ fail_vdev_media_entity:
 fail_subdev_media_entity:
 	cio2_fbpt_exit(q, dev);
 fail_fbpt:
-	mutex_destroy(&q->subdev_lock);
 	mutex_destroy(&q->lock);
 
 	return r;
@@ -1648,7 +1622,6 @@ static void cio2_queue_exit(struct cio2_device *cio2, struct cio2_queue *q)
 	v4l2_device_unregister_subdev(&q->subdev);
 	media_entity_cleanup(&q->subdev.entity);
 	cio2_fbpt_exit(q, &cio2->pci_dev->dev);
-	mutex_destroy(&q->subdev_lock);
 	mutex_destroy(&q->lock);
 }
 
@@ -1679,29 +1652,12 @@ static void cio2_queues_exit(struct cio2_device *cio2)
 		cio2_queue_exit(cio2, &cio2->queue[i]);
 }
 
-static int cio2_check_fwnode_graph(struct fwnode_handle *fwnode)
-{
-	struct fwnode_handle *endpoint;
-
-	if (IS_ERR_OR_NULL(fwnode))
-		return -EINVAL;
-
-	endpoint = fwnode_graph_get_next_endpoint(fwnode, NULL);
-	if (endpoint) {
-		fwnode_handle_put(endpoint);
-		return 0;
-	}
-
-	return cio2_check_fwnode_graph(fwnode->secondary);
-}
-
 /**************** PCI interface ****************/
 
 static int cio2_pci_probe(struct pci_dev *pci_dev,
 			  const struct pci_device_id *id)
 {
 	struct device *dev = &pci_dev->dev;
-	struct fwnode_handle *fwnode = dev_fwnode(dev);
 	struct cio2_device *cio2;
 	int r;
 
@@ -1710,17 +1666,9 @@ static int cio2_pci_probe(struct pci_dev *pci_dev,
 	 * if the device has no endpoints then we can try to build those as
 	 * software_nodes parsed from SSDB.
 	 */
-	r = cio2_check_fwnode_graph(fwnode);
-	if (r) {
-		if (fwnode && !IS_ERR_OR_NULL(fwnode->secondary)) {
-			dev_err(dev, "fwnode graph has no endpoints connected\n");
-			return -EINVAL;
-		}
-
-		r = ipu_bridge_init(dev, ipu_bridge_parse_ssdb);
-		if (r)
-			return r;
-	}
+	r = ipu_bridge_init(dev, ipu_bridge_parse_ssdb);
+	if (r)
+		return r;
 
 	cio2 = devm_kzalloc(dev, sizeof(*cio2), GFP_KERNEL);
 	if (!cio2)
@@ -1736,13 +1684,12 @@ static int cio2_pci_probe(struct pci_dev *pci_dev,
 	dev_info(dev, "device 0x%x (rev: 0x%x)\n",
 		 pci_dev->device, pci_dev->revision);
 
-	r = pcim_iomap_regions(pci_dev, 1 << CIO2_PCI_BAR, pci_name(pci_dev));
+	cio2->base = pcim_iomap_region(pci_dev, CIO2_PCI_BAR, CIO2_NAME);
+	r = PTR_ERR_OR_ZERO(cio2->base);
 	if (r) {
 		dev_err(dev, "failed to remap I/O memory (%d)\n", r);
 		return -ENODEV;
 	}
-
-	cio2->base = pcim_iomap_table(pci_dev)[CIO2_PCI_BAR];
 
 	pci_set_drvdata(pci_dev, cio2);
 
@@ -1789,17 +1736,17 @@ static int cio2_pci_probe(struct pci_dev *pci_dev,
 
 	v4l2_async_nf_init(&cio2->notifier, &cio2->v4l2_dev);
 
-	/* Register notifier for subdevices we care */
-	r = cio2_parse_firmware(cio2);
-	if (r)
-		goto fail_clean_notifier;
-
 	r = devm_request_irq(dev, pci_dev->irq, cio2_irq, IRQF_SHARED,
 			     CIO2_NAME, cio2);
 	if (r) {
 		dev_err(dev, "failed to request IRQ (%d)\n", r);
 		goto fail_clean_notifier;
 	}
+
+	/* Register notifier for subdevices we care */
+	r = cio2_parse_firmware(cio2);
+	if (r)
+		goto fail_clean_notifier;
 
 	pm_runtime_put_noidle(dev);
 	pm_runtime_allow(dev);
@@ -1844,15 +1791,9 @@ static int __maybe_unused cio2_runtime_suspend(struct device *dev)
 	struct pci_dev *pci_dev = to_pci_dev(dev);
 	struct cio2_device *cio2 = pci_get_drvdata(pci_dev);
 	void __iomem *const base = cio2->base;
-	u16 pm;
 
 	writel(CIO2_D0I3C_I3, base + CIO2_REG_D0I3C);
 	dev_dbg(dev, "cio2 runtime suspend.\n");
-
-	pci_read_config_word(pci_dev, pci_dev->pm_cap + CIO2_PMCSR_OFFSET, &pm);
-	pm = (pm >> CIO2_PMCSR_D0D3_SHIFT) << CIO2_PMCSR_D0D3_SHIFT;
-	pm |= CIO2_PMCSR_D3;
-	pci_write_config_word(pci_dev, pci_dev->pm_cap + CIO2_PMCSR_OFFSET, pm);
 
 	return 0;
 }
@@ -1862,14 +1803,9 @@ static int __maybe_unused cio2_runtime_resume(struct device *dev)
 	struct pci_dev *pci_dev = to_pci_dev(dev);
 	struct cio2_device *cio2 = pci_get_drvdata(pci_dev);
 	void __iomem *const base = cio2->base;
-	u16 pm;
 
 	writel(CIO2_D0I3C_RR, base + CIO2_REG_D0I3C);
 	dev_dbg(dev, "cio2 runtime resume.\n");
-
-	pci_read_config_word(pci_dev, pci_dev->pm_cap + CIO2_PMCSR_OFFSET, &pm);
-	pm = (pm >> CIO2_PMCSR_D0D3_SHIFT) << CIO2_PMCSR_D0D3_SHIFT;
-	pci_write_config_word(pci_dev, pci_dev->pm_cap + CIO2_PMCSR_OFFSET, pm);
 
 	return 0;
 }
@@ -2043,11 +1979,11 @@ static struct pci_driver cio2_pci_driver = {
 
 module_pci_driver(cio2_pci_driver);
 
-MODULE_AUTHOR("Tuukka Toivonen <tuukka.toivonen@intel.com>");
+MODULE_AUTHOR("Tuukka Toivonen");
 MODULE_AUTHOR("Tianshu Qiu <tian.shu.qiu@intel.com>");
 MODULE_AUTHOR("Jian Xu Zheng");
-MODULE_AUTHOR("Yuning Pu <yuning.pu@intel.com>");
+MODULE_AUTHOR("Yuning Pu");
 MODULE_AUTHOR("Yong Zhi <yong.zhi@intel.com>");
 MODULE_LICENSE("GPL v2");
 MODULE_DESCRIPTION("IPU3 CIO2 driver");
-MODULE_IMPORT_NS(INTEL_IPU_BRIDGE);
+MODULE_IMPORT_NS("INTEL_IPU_BRIDGE");

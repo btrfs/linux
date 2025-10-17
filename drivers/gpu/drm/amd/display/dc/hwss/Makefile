@@ -27,6 +27,24 @@
 #  DCE
 ###############################################################################
 
+ifdef CONFIG_DRM_AMD_DC_SI
+HWSS_DCE60 = dce60_hwseq.o
+
+AMD_DAL_HWSS_DCE60 = $(addprefix $(AMDDALPATH)/dc/hwss/dce60/,$(HWSS_DCE60))
+
+AMD_DISPLAY_FILES += $(AMD_DAL_HWSS_DCE60)
+endif
+
+###############################################################################
+
+HWSS_DCE80 = dce80_hwseq.o
+
+AMD_DAL_HWSS_DCE80 = $(addprefix $(AMDDALPATH)/dc/hwss/dce80/,$(HWSS_DCE80))
+
+AMD_DISPLAY_FILES += $(AMD_DAL_HWSS_DCE80)
+
+###############################################################################
+
 HWSS_DCE = dce_hwseq.o
 
 AMD_DAL_HWSS_DCE = $(addprefix $(AMDDALPATH)/dc/hwss/dce/,$(HWSS_DCE))
@@ -65,14 +83,6 @@ AMD_DAL_HWSS_DCE120 = $(addprefix $(AMDDALPATH)/dc/hwss/dce120/,$(HWSS_DCE120))
 
 AMD_DISPLAY_FILES += $(AMD_DAL_HWSS_DCE120)
 
-###############################################################################
-
-HWSS_DCE80 = dce80_hwseq.o
-
-AMD_DAL_HWSS_DCE80 = $(addprefix $(AMDDALPATH)/dc/hwss/dce80/,$(HWSS_DCE80))
-
-AMD_DISPLAY_FILES += $(AMD_DAL_HWSS_DCE80)
-
 ifdef CONFIG_DRM_AMD_DC_FP
 ###############################################################################
 # DCN
@@ -107,10 +117,6 @@ HWSS_DCN21 = dcn21_hwseq.o dcn21_init.o
 AMD_DAL_HWSS_DCN21 = $(addprefix $(AMDDALPATH)/dc/hwss/dcn21/,$(HWSS_DCN21))
 
 AMD_DISPLAY_FILES += $(AMD_DAL_HWSS_DCN21)
-
-###############################################################################
-
-###############################################################################
 
 ###############################################################################
 
@@ -180,6 +186,17 @@ AMD_DISPLAY_FILES += $(AMD_DAL_HWSS_DCN35)
 
 ###############################################################################
 
+HWSS_DCN351 = dcn351_hwseq.o dcn351_init.o
+
+AMD_DAL_HWSS_DCN351 = $(addprefix $(AMDDALPATH)/dc/hwss/dcn351/,$(HWSS_DCN351))
+
+AMD_DISPLAY_FILES += $(AMD_DAL_HWSS_DCN351)
+
 ###############################################################################
 
+HWSS_DCN401 = dcn401_hwseq.o dcn401_init.o
+
+AMD_DAL_HWSS_DCN401 = $(addprefix $(AMDDALPATH)/dc/hwss/dcn401/,$(HWSS_DCN401))
+
+AMD_DISPLAY_FILES += $(AMD_DAL_HWSS_DCN401)
 endif

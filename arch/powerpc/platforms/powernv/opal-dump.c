@@ -210,7 +210,7 @@ static struct attribute *dump_default_attrs[] = {
 };
 ATTRIBUTE_GROUPS(dump_default);
 
-static struct kobj_type dump_ktype = {
+static const struct kobj_type dump_ktype = {
 	.sysfs_ops = &dump_sysfs_ops,
 	.release = &dump_release,
 	.default_groups = dump_default_groups,
@@ -286,7 +286,7 @@ out:
 }
 
 static ssize_t dump_attr_read(struct file *filep, struct kobject *kobj,
-			      struct bin_attribute *bin_attr,
+			      const struct bin_attribute *bin_attr,
 			      char *buffer, loff_t pos, size_t count)
 {
 	ssize_t rc;

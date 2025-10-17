@@ -958,10 +958,10 @@ static int wm8991_set_dai_fmt(struct snd_soc_dai *codec_dai,
 
 	/* set master/slave audio interface */
 	switch (fmt & SND_SOC_DAIFMT_MASTER_MASK) {
-	case SND_SOC_DAIFMT_CBS_CFS:
+	case SND_SOC_DAIFMT_CBC_CFC:
 		audio3 &= ~WM8991_AIF_MSTR1;
 		break;
-	case SND_SOC_DAIFMT_CBM_CFM:
+	case SND_SOC_DAIFMT_CBP_CFP:
 		audio3 |= WM8991_AIF_MSTR1;
 		break;
 	default:
@@ -1314,7 +1314,7 @@ static int wm8991_i2c_probe(struct i2c_client *i2c)
 }
 
 static const struct i2c_device_id wm8991_i2c_id[] = {
-	{ "wm8991", 0 },
+	{ "wm8991" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, wm8991_i2c_id);

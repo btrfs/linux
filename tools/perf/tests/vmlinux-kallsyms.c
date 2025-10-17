@@ -26,7 +26,6 @@ static bool is_ignored_symbol(const char *name, char type)
 		 * when --all-symbols is specified so exclude them to get a
 		 * stable symbol list.
 		 */
-		"kallsyms_addresses",
 		"kallsyms_offsets",
 		"kallsyms_relative_base",
 		"kallsyms_num_syms",
@@ -129,11 +128,12 @@ static int test__vmlinux_matches_kallsyms_cb1(struct map *map, void *data)
 	 * cases.
 	 */
 	struct map *pair = maps__find_by_name(args->kallsyms.kmaps,
-					(dso->kernel ? dso->short_name : dso->name));
+					(dso__kernel(dso) ? dso__short_name(dso) : dso__name(dso)));
 
-	if (pair)
-		map__set_priv(pair, 1);
-	else {
+	if (pair) {
+		map__set_priv(pair);
+		map__put(pair);
+	} else {
 		if (!args->header_printed) {
 			pr_info("WARN: Maps only in vmlinux:\n");
 			args->header_printed = true;
@@ -151,10 +151,8 @@ static int test__vmlinux_matches_kallsyms_cb2(struct map *map, void *data)
 	u64 mem_end = map__unmap_ip(args->vmlinux_map, map__end(map));
 
 	pair = maps__find(args->kallsyms.kmaps, mem_start);
-	if (pair == NULL || map__priv(pair))
-		return 0;
 
-	if (map__start(pair) == mem_start) {
+	if (pair != NULL && !map__priv(pair) && map__start(pair) == mem_start) {
 		struct dso *dso = map__dso(map);
 
 		if (!args->header_printed) {
@@ -163,13 +161,14 @@ static int test__vmlinux_matches_kallsyms_cb2(struct map *map, void *data)
 		}
 
 		pr_info("WARN: %" PRIx64 "-%" PRIx64 " %" PRIx64 " %s in kallsyms as",
-			map__start(map), map__end(map), map__pgoff(map), dso->name);
+			map__start(map), map__end(map), map__pgoff(map), dso__name(dso));
 		if (mem_end != map__end(pair))
 			pr_info(":\nWARN: *%" PRIx64 "-%" PRIx64 " %" PRIx64,
 				map__start(pair), map__end(pair), map__pgoff(pair));
-		pr_info(" %s\n", dso->name);
-		map__set_priv(pair, 1);
+		pr_info(" %s\n", dso__name(dso));
+		map__set_priv(pair);
 	}
+	map__put(pair);
 	return 0;
 }
 

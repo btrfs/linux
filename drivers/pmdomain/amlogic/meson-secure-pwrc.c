@@ -14,6 +14,11 @@
 #include <dt-bindings/power/amlogic,c3-pwrc.h>
 #include <dt-bindings/power/meson-s4-power.h>
 #include <dt-bindings/power/amlogic,t7-pwrc.h>
+#include <dt-bindings/power/amlogic,a4-pwrc.h>
+#include <dt-bindings/power/amlogic,a5-pwrc.h>
+#include <dt-bindings/power/amlogic,s6-pwrc.h>
+#include <dt-bindings/power/amlogic,s7-pwrc.h>
+#include <dt-bindings/power/amlogic,s7d-pwrc.h>
 #include <linux/arm-smccc.h>
 #include <linux/firmware/meson/meson_sm.h>
 #include <linux/module.h>
@@ -45,7 +50,7 @@ struct meson_secure_pwrc_domain_desc {
 
 struct meson_secure_pwrc_domain_data {
 	unsigned int count;
-	struct meson_secure_pwrc_domain_desc *domains;
+	const struct meson_secure_pwrc_domain_desc *domains;
 };
 
 static bool pwrc_secure_is_off(struct meson_secure_pwrc_domain *pwrc_domain)
@@ -109,7 +114,7 @@ static int meson_secure_pwrc_on(struct generic_pm_domain *domain)
 	.parent = __parent,			\
 }
 
-static struct meson_secure_pwrc_domain_desc a1_pwrc_domains[] = {
+static const struct meson_secure_pwrc_domain_desc a1_pwrc_domains[] = {
 	SEC_PD(DSPA,	0),
 	SEC_PD(DSPB,	0),
 	/* UART should keep working in ATF after suspend and before resume */
@@ -136,7 +141,41 @@ static struct meson_secure_pwrc_domain_desc a1_pwrc_domains[] = {
 	SEC_PD(RSA,	0),
 };
 
-static struct meson_secure_pwrc_domain_desc c3_pwrc_domains[] = {
+static const struct meson_secure_pwrc_domain_desc a4_pwrc_domains[] = {
+	SEC_PD(A4_AUDIO,	0),
+	SEC_PD(A4_SDIOA,	0),
+	SEC_PD(A4_EMMC,	0),
+	SEC_PD(A4_USB_COMB,	0),
+	SEC_PD(A4_ETH,		0),
+	SEC_PD(A4_VOUT,		0),
+	SEC_PD(A4_AUDIO_PDM,	0),
+	/* DMC is for DDR PHY ana/dig and DMC, and should be always on */
+	SEC_PD(A4_DMC,	GENPD_FLAG_ALWAYS_ON),
+	/* WRAP is secure_top, a lot of modules are included, and should be always on */
+	SEC_PD(A4_SYS_WRAP,	GENPD_FLAG_ALWAYS_ON),
+	SEC_PD(A4_AO_I2C_S,	0),
+	SEC_PD(A4_AO_UART,	0),
+	/* IR is wake up trigger source, and should be always on */
+	SEC_PD(A4_AO_IR,	GENPD_FLAG_ALWAYS_ON),
+};
+
+static const struct meson_secure_pwrc_domain_desc a5_pwrc_domains[] = {
+	SEC_PD(A5_NNA,		0),
+	SEC_PD(A5_AUDIO,	0),
+	SEC_PD(A5_SDIOA,	0),
+	SEC_PD(A5_EMMC,		0),
+	SEC_PD(A5_USB_COMB,	0),
+	SEC_PD(A5_ETH,		0),
+	SEC_PD(A5_RSA,		0),
+	SEC_PD(A5_AUDIO_PDM,	0),
+	/* DMC is for DDR PHY ana/dig and DMC, and should be always on */
+	SEC_PD(A5_DMC,		GENPD_FLAG_ALWAYS_ON),
+	/* WRAP is secure_top, a lot of modules are included, and should be always on */
+	SEC_PD(A5_SYS_WRAP,	GENPD_FLAG_ALWAYS_ON),
+	SEC_PD(A5_DSPA,		0),
+};
+
+static const struct meson_secure_pwrc_domain_desc c3_pwrc_domains[] = {
 	SEC_PD(C3_NNA,		0),
 	SEC_PD(C3_AUDIO,	0),
 	SEC_PD(C3_SDIOA,	0),
@@ -153,7 +192,7 @@ static struct meson_secure_pwrc_domain_desc c3_pwrc_domains[] = {
 	SEC_PD(C3_VCODEC,	0),
 };
 
-static struct meson_secure_pwrc_domain_desc s4_pwrc_domains[] = {
+static const struct meson_secure_pwrc_domain_desc s4_pwrc_domains[] = {
 	SEC_PD(S4_DOS_HEVC,	0),
 	SEC_PD(S4_DOS_VDEC,	0),
 	SEC_PD(S4_VPU_HDMI,	0),
@@ -165,7 +204,72 @@ static struct meson_secure_pwrc_domain_desc s4_pwrc_domains[] = {
 	SEC_PD(S4_AUDIO,	0),
 };
 
-static struct meson_secure_pwrc_domain_desc t7_pwrc_domains[] = {
+static const struct meson_secure_pwrc_domain_desc s6_pwrc_domains[] = {
+	SEC_PD(S6_DSPA,		0),
+	SEC_PD(S6_DOS_HEVC,	0),
+	SEC_PD(S6_DOS_VDEC,	0),
+	SEC_PD(S6_VPU_HDMI,	0),
+	SEC_PD(S6_U2DRD,	0),
+	SEC_PD(S6_U3DRD,	0),
+	SEC_PD(S6_SD_EMMC_C,	0),
+	SEC_PD(S6_GE2D,		0),
+	SEC_PD(S6_AMFC,		0),
+	SEC_PD(S6_VC9000E,	0),
+	SEC_PD(S6_DEWARP,	0),
+	SEC_PD(S6_VICP,		0),
+	SEC_PD(S6_SD_EMMC_A,	0),
+	SEC_PD(S6_SD_EMMC_B,	0),
+	/* ETH is for ethernet online wakeup, and should be always on */
+	SEC_PD(S6_ETH,		GENPD_FLAG_ALWAYS_ON),
+	SEC_PD(S6_PCIE,		0),
+	SEC_PD(S6_NNA_4T,	0),
+	SEC_PD(S6_AUDIO,	0),
+	SEC_PD(S6_AUCPU,	0),
+	SEC_PD(S6_ADAPT,	0),
+};
+
+static const struct meson_secure_pwrc_domain_desc s7_pwrc_domains[] = {
+	SEC_PD(S7_DOS_HEVC,	0),
+	SEC_PD(S7_DOS_VDEC,	0),
+	SEC_PD(S7_VPU_HDMI,	0),
+	SEC_PD(S7_USB_COMB,	0),
+	SEC_PD(S7_SD_EMMC_C,	0),
+	SEC_PD(S7_GE2D,		0),
+	SEC_PD(S7_SD_EMMC_A,	0),
+	SEC_PD(S7_SD_EMMC_B,	0),
+	/* ETH is for ethernet online wakeup, and should be always on */
+	SEC_PD(S7_ETH,		GENPD_FLAG_ALWAYS_ON),
+	SEC_PD(S7_AUCPU,	0),
+	SEC_PD(S7_AUDIO,	0),
+};
+
+static const struct meson_secure_pwrc_domain_desc s7d_pwrc_domains[] = {
+	SEC_PD(S7D_DOS_HCODEC,	0),
+	SEC_PD(S7D_DOS_HEVC,	0),
+	SEC_PD(S7D_DOS_VDEC,	0),
+	SEC_PD(S7D_VPU_HDMI,	0),
+	SEC_PD(S7D_USB_U2DRD,	0),
+	SEC_PD(S7D_USB_U2H,	0),
+	SEC_PD(S7D_SSD_EMMC_C,	0),
+	SEC_PD(S7D_GE2D,	0),
+	SEC_PD(S7D_AMFC,	0),
+	SEC_PD(S7D_EMMC_A,	0),
+	SEC_PD(S7D_EMMC_B,	0),
+	/* ETH is for ethernet online wakeup, and should be always on */
+	SEC_PD(S7D_ETH,		GENPD_FLAG_ALWAYS_ON),
+	SEC_PD(S7D_AUCPU,	0),
+	SEC_PD(S7D_AUDIO,	0),
+	/* SRAMA is used as ATF runtime memory, and should be always on */
+	SEC_PD(S7D_SRAMA,	GENPD_FLAG_ALWAYS_ON),
+	/* DMC0 is for DDR PHY ana/dig and DMC, and should be always on */
+	SEC_PD(S7D_DMC0,	GENPD_FLAG_ALWAYS_ON),
+	/* DMC1 is for DDR PHY ana/dig and DMC, and should be always on */
+	SEC_PD(S7D_DMC1,	GENPD_FLAG_ALWAYS_ON),
+	/* DDR should be always on */
+	SEC_PD(S7D_DDR,		GENPD_FLAG_ALWAYS_ON),
+};
+
+static const struct meson_secure_pwrc_domain_desc t7_pwrc_domains[] = {
 	SEC_PD(T7_DSPA,		0),
 	SEC_PD(T7_DSPB,		0),
 	TOP_PD(T7_DOS_HCODEC,	0, PWRC_T7_NIC3_ID),
@@ -185,7 +289,7 @@ static struct meson_secure_pwrc_domain_desc t7_pwrc_domains[] = {
 	SEC_PD(T7_VI_CLK2,	0),
 	/* ETH is for ethernet online wakeup, and should be always on */
 	SEC_PD(T7_ETH,		GENPD_FLAG_ALWAYS_ON),
-	SEC_PD(T7_ISP,		0),
+	TOP_PD(T7_ISP,		0, PWRC_T7_MIPI_ISP_ID),
 	SEC_PD(T7_MIPI_ISP,	0),
 	TOP_PD(T7_GDC,		0, PWRC_T7_NIC3_ID),
 	TOP_PD(T7_DEWARP,	0, PWRC_T7_NIC3_ID),
@@ -306,22 +410,47 @@ static int meson_secure_pwrc_probe(struct platform_device *pdev)
 	return of_genpd_add_provider_onecell(pdev->dev.of_node, &pwrc->xlate);
 }
 
-static struct meson_secure_pwrc_domain_data meson_secure_a1_pwrc_data = {
+static const struct meson_secure_pwrc_domain_data meson_secure_a1_pwrc_data = {
 	.domains = a1_pwrc_domains,
 	.count = ARRAY_SIZE(a1_pwrc_domains),
 };
 
-static struct meson_secure_pwrc_domain_data amlogic_secure_c3_pwrc_data = {
+static const struct meson_secure_pwrc_domain_data amlogic_secure_a4_pwrc_data = {
+	.domains = a4_pwrc_domains,
+	.count = ARRAY_SIZE(a4_pwrc_domains),
+};
+
+static const struct meson_secure_pwrc_domain_data amlogic_secure_a5_pwrc_data = {
+	.domains = a5_pwrc_domains,
+	.count = ARRAY_SIZE(a5_pwrc_domains),
+};
+
+static const struct meson_secure_pwrc_domain_data amlogic_secure_c3_pwrc_data = {
 	.domains = c3_pwrc_domains,
 	.count = ARRAY_SIZE(c3_pwrc_domains),
 };
 
-static struct meson_secure_pwrc_domain_data meson_secure_s4_pwrc_data = {
+static const struct meson_secure_pwrc_domain_data meson_secure_s4_pwrc_data = {
 	.domains = s4_pwrc_domains,
 	.count = ARRAY_SIZE(s4_pwrc_domains),
 };
 
-static struct meson_secure_pwrc_domain_data amlogic_secure_t7_pwrc_data = {
+static const struct meson_secure_pwrc_domain_data amlogic_secure_s6_pwrc_data = {
+	.domains = s6_pwrc_domains,
+	.count = ARRAY_SIZE(s6_pwrc_domains),
+};
+
+static const struct meson_secure_pwrc_domain_data amlogic_secure_s7_pwrc_data = {
+	.domains = s7_pwrc_domains,
+	.count = ARRAY_SIZE(s7_pwrc_domains),
+};
+
+static const struct meson_secure_pwrc_domain_data amlogic_secure_s7d_pwrc_data = {
+	.domains = s7d_pwrc_domains,
+	.count = ARRAY_SIZE(s7d_pwrc_domains),
+};
+
+static const struct meson_secure_pwrc_domain_data amlogic_secure_t7_pwrc_data = {
 	.domains = t7_pwrc_domains,
 	.count = ARRAY_SIZE(t7_pwrc_domains),
 };
@@ -332,12 +461,32 @@ static const struct of_device_id meson_secure_pwrc_match_table[] = {
 		.data = &meson_secure_a1_pwrc_data,
 	},
 	{
+		.compatible = "amlogic,a4-pwrc",
+		.data = &amlogic_secure_a4_pwrc_data,
+	},
+	{
+		.compatible = "amlogic,a5-pwrc",
+		.data = &amlogic_secure_a5_pwrc_data,
+	},
+	{
 		.compatible = "amlogic,c3-pwrc",
 		.data = &amlogic_secure_c3_pwrc_data,
 	},
 	{
 		.compatible = "amlogic,meson-s4-pwrc",
 		.data = &meson_secure_s4_pwrc_data,
+	},
+	{
+		.compatible = "amlogic,s6-pwrc",
+		.data = &amlogic_secure_s6_pwrc_data,
+	},
+	{
+		.compatible = "amlogic,s7-pwrc",
+		.data = &amlogic_secure_s7_pwrc_data,
+	},
+	{
+		.compatible = "amlogic,s7d-pwrc",
+		.data = &amlogic_secure_s7d_pwrc_data,
 	},
 	{
 		.compatible = "amlogic,t7-pwrc",
@@ -355,4 +504,5 @@ static struct platform_driver meson_secure_pwrc_driver = {
 	},
 };
 module_platform_driver(meson_secure_pwrc_driver);
+MODULE_DESCRIPTION("Amlogic Meson Secure Power Domains driver");
 MODULE_LICENSE("Dual MIT/GPL");

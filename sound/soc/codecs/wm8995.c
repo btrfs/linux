@@ -1448,9 +1448,9 @@ static int wm8995_set_dai_fmt(struct snd_soc_dai *dai, unsigned int fmt)
 
 	master = 0;
 	switch (fmt & SND_SOC_DAIFMT_MASTER_MASK) {
-	case SND_SOC_DAIFMT_CBS_CFS:
+	case SND_SOC_DAIFMT_CBC_CFC:
 		break;
-	case SND_SOC_DAIFMT_CBM_CFM:
+	case SND_SOC_DAIFMT_CBP_CFP:
 		master = WM8995_AIF1_MSTR;
 		break;
 	default:
@@ -2258,7 +2258,7 @@ static int wm8995_i2c_probe(struct i2c_client *i2c)
 }
 
 static const struct i2c_device_id wm8995_i2c_id[] = {
-	{"wm8995", 0},
+	{"wm8995"},
 	{}
 };
 

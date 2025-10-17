@@ -80,6 +80,7 @@ struct lock_class_key {
 };
 
 extern struct lock_class_key __lockdep_no_validate__;
+extern struct lock_class_key __lockdep_no_track__;
 
 struct lock_trace;
 
@@ -174,7 +175,7 @@ struct lock_class_stats {
 	unsigned long			bounces[nr_bounce_types];
 };
 
-struct lock_class_stats lock_stats(struct lock_class *class);
+void lock_stats(struct lock_class *class, struct lock_class_stats *stats);
 void clear_lock_stats(struct lock_class *class);
 #endif
 

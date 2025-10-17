@@ -37,7 +37,7 @@ static int atkbd_set = 2;
 module_param_named(set, atkbd_set, int, 0);
 MODULE_PARM_DESC(set, "Select keyboard code set (2 = default, 3 = PS/2 native)");
 
-#if defined(__i386__) || defined(__x86_64__) || defined(__hppa__)
+#if defined(__i386__) || defined(__x86_64__) || defined(__hppa__) || defined(__loongarch__)
 static bool atkbd_reset;
 #else
 static bool atkbd_reset = true;
@@ -84,12 +84,12 @@ static const unsigned short atkbd_set2_keycode[ATKBD_KEYMAP_SIZE] = {
 #include "hpps2atkbd.h"	/* include the keyboard scancodes */
 
 #else
-	  0, 67, 65, 63, 61, 59, 60, 88,  0, 68, 66, 64, 62, 15, 41,117,
-	  0, 56, 42, 93, 29, 16,  2,  0,  0,  0, 44, 31, 30, 17,  3,  0,
-	  0, 46, 45, 32, 18,  5,  4, 95,  0, 57, 47, 33, 20, 19,  6,183,
-	  0, 49, 48, 35, 34, 21,  7,184,  0,  0, 50, 36, 22,  8,  9,185,
-	  0, 51, 37, 23, 24, 11, 10,  0,  0, 52, 53, 38, 39, 25, 12,  0,
-	  0, 89, 40,  0, 26, 13,  0,  0, 58, 54, 28, 27,  0, 43,  0, 85,
+	  0, 67, 65, 63, 61, 59, 60, 88,183, 68, 66, 64, 62, 15, 41,117,
+	184, 56, 42, 93, 29, 16,  2,  0,185,  0, 44, 31, 30, 17,  3,  0,
+	186, 46, 45, 32, 18,  5,  4, 95,187, 57, 47, 33, 20, 19,  6,183,
+	188, 49, 48, 35, 34, 21,  7,184,189,  0, 50, 36, 22,  8,  9,185,
+	190, 51, 37, 23, 24, 11, 10,  0,191, 52, 53, 38, 39, 25, 12,  0,
+	192, 89, 40,  0, 26, 13,  0,193, 58, 54, 28, 27,  0, 43,  0,194,
 	  0, 86, 91, 90, 92,  0, 14, 94,  0, 79,124, 75, 71,121,  0,  0,
 	 82, 83, 80, 76, 77, 72,  1, 69, 87, 78, 81, 74, 55, 73, 70, 99,
 
@@ -639,7 +639,7 @@ static void atkbd_event_work(struct work_struct *work)
 {
 	struct atkbd *atkbd = container_of(work, struct atkbd, event_work.work);
 
-	mutex_lock(&atkbd->mutex);
+	guard(mutex)(&atkbd->mutex);
 
 	if (!atkbd->enabled) {
 		/*
@@ -657,8 +657,6 @@ static void atkbd_event_work(struct work_struct *work)
 		if (test_and_clear_bit(ATKBD_REP_EVENT_BIT, &atkbd->event_mask))
 			atkbd_set_repeat_rate(atkbd);
 	}
-
-	mutex_unlock(&atkbd->mutex);
 }
 
 /*
@@ -715,9 +713,9 @@ static int atkbd_event(struct input_dev *dev,
 
 static inline void atkbd_enable(struct atkbd *atkbd)
 {
-	serio_pause_rx(atkbd->ps2dev.serio);
+	guard(serio_pause_rx)(atkbd->ps2dev.serio);
+
 	atkbd->enabled = true;
-	serio_continue_rx(atkbd->ps2dev.serio);
 }
 
 /*
@@ -727,9 +725,9 @@ static inline void atkbd_enable(struct atkbd *atkbd)
 
 static inline void atkbd_disable(struct atkbd *atkbd)
 {
-	serio_pause_rx(atkbd->ps2dev.serio);
+	guard(serio_pause_rx)(atkbd->ps2dev.serio);
+
 	atkbd->enabled = false;
-	serio_continue_rx(atkbd->ps2dev.serio);
 }
 
 static int atkbd_activate(struct atkbd *atkbd)
@@ -811,7 +809,6 @@ static int atkbd_probe(struct atkbd *atkbd)
 {
 	struct ps2dev *ps2dev = &atkbd->ps2dev;
 	unsigned char param[2];
-	bool skip_getid;
 
 /*
  * Some systems, where the bit-twiddling when testing the io-lines of the
@@ -825,6 +822,11 @@ static int atkbd_probe(struct atkbd *atkbd)
 				 "keyboard reset failed on %s\n",
 				 ps2dev->serio->phys);
 
+	if (atkbd_skip_getid(atkbd)) {
+		atkbd->id = 0xab83;
+		goto deactivate_kbd;
+	}
+
 /*
  * Then we check the keyboard ID. We should get 0xab83 under normal conditions.
  * Some keyboards report different values, but the first byte is always 0xab or
@@ -833,18 +835,17 @@ static int atkbd_probe(struct atkbd *atkbd)
  */
 
 	param[0] = param[1] = 0xa5;	/* initialize with invalid values */
-	skip_getid = atkbd_skip_getid(atkbd);
-	if (skip_getid || ps2_command(ps2dev, param, ATKBD_CMD_GETID)) {
+	if (ps2_command(ps2dev, param, ATKBD_CMD_GETID)) {
 
 /*
- * If the get ID command was skipped or failed, we check if we can at least set
+ * If the get ID command failed, we check if we can at least set
  * the LEDs on the keyboard. This should work on every keyboard out there.
  * It also turns the LEDs off, which we want anyway.
  */
 		param[0] = 0;
 		if (ps2_command(ps2dev, param, ATKBD_CMD_SETLEDS))
 			return -1;
-		atkbd->id = skip_getid ? 0xab83 : 0xabba;
+		atkbd->id = 0xabba;
 		return 0;
 	}
 
@@ -860,6 +861,7 @@ static int atkbd_probe(struct atkbd *atkbd)
 		return -1;
 	}
 
+deactivate_kbd:
 /*
  * Make sure nothing is coming from the keyboard and disturbs our
  * internal state.
@@ -1189,8 +1191,8 @@ static void atkbd_set_device_attrs(struct atkbd *atkbd)
 			 "AT %s Set %d keyboard",
 			 atkbd->translated ? "Translated" : "Raw", atkbd->set);
 
-	snprintf(atkbd->phys, sizeof(atkbd->phys),
-		 "%s/input0", atkbd->ps2dev.serio->phys);
+	scnprintf(atkbd->phys, sizeof(atkbd->phys),
+		  "%s/input0", atkbd->ps2dev.serio->phys);
 
 	input_dev->name = atkbd->name;
 	input_dev->phys = atkbd->phys;
@@ -1275,7 +1277,7 @@ static int atkbd_connect(struct serio *serio, struct serio_driver *drv)
 	struct input_dev *dev;
 	int err = -ENOMEM;
 
-	atkbd = kzalloc(sizeof(struct atkbd), GFP_KERNEL);
+	atkbd = kzalloc(sizeof(*atkbd), GFP_KERNEL);
 	dev = input_allocate_device();
 	if (!atkbd || !dev)
 		goto fail1;
@@ -1357,7 +1359,7 @@ static int atkbd_reconnect(struct serio *serio)
 {
 	struct atkbd *atkbd = atkbd_from_serio(serio);
 	struct serio_driver *drv = serio->drv;
-	int retval = -1;
+	int error;
 
 	if (!atkbd || !drv) {
 		dev_dbg(&serio->dev,
@@ -1365,16 +1367,17 @@ static int atkbd_reconnect(struct serio *serio)
 		return -1;
 	}
 
-	mutex_lock(&atkbd->mutex);
+	guard(mutex)(&atkbd->mutex);
 
 	atkbd_disable(atkbd);
 
 	if (atkbd->write) {
-		if (atkbd_probe(atkbd))
-			goto out;
+		error = atkbd_probe(atkbd);
+		if (error)
+			return error;
 
 		if (atkbd->set != atkbd_select_set(atkbd, atkbd->set, atkbd->extra))
-			goto out;
+			return -EIO;
 
 		/*
 		 * Restore LED state and repeat rate. While input core
@@ -1400,11 +1403,7 @@ static int atkbd_reconnect(struct serio *serio)
 	if (atkbd->write)
 		atkbd_activate(atkbd);
 
-	retval = 0;
-
- out:
-	mutex_unlock(&atkbd->mutex);
-	return retval;
+	return 0;
 }
 
 static const struct serio_device_id atkbd_serio_ids[] = {
@@ -1461,17 +1460,15 @@ static ssize_t atkbd_attr_set_helper(struct device *dev, const char *buf, size_t
 	struct atkbd *atkbd = atkbd_from_serio(serio);
 	int retval;
 
-	retval = mutex_lock_interruptible(&atkbd->mutex);
-	if (retval)
+	scoped_guard(mutex_intr, &atkbd->mutex) {
+		atkbd_disable(atkbd);
+		retval = handler(atkbd, buf, count);
+		atkbd_enable(atkbd);
+
 		return retval;
+	}
 
-	atkbd_disable(atkbd);
-	retval = handler(atkbd, buf, count);
-	atkbd_enable(atkbd);
-
-	mutex_unlock(&atkbd->mutex);
-
-	return retval;
+	return -EINTR;
 }
 
 static ssize_t atkbd_show_extra(struct atkbd *atkbd, char *buf)

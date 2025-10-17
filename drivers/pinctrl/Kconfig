@@ -49,6 +49,20 @@ config PINCTRL_AMD
 	  Requires ACPI/FDT device enumeration code to set up a platform
 	  device.
 
+config PINCTRL_AMDISP
+	tristate "AMDISP GPIO pin control"
+	depends on DRM_AMD_ISP || COMPILE_TEST
+	depends on HAS_IOMEM
+	select GPIOLIB
+	select PINCONF
+	select GENERIC_PINCONF
+	help
+	  The driver for memory mapped GPIO functionality on AMD platforms
+	  with ISP support. All the pins are output controlled only
+
+	  Requires AMDGPU to MFD add device for enumeration to set up as
+	  platform device.
+
 config PINCTRL_APPLE_GPIO
 	tristate "Apple SoC GPIO pin controller driver"
 	depends on ARCH_APPLE
@@ -89,12 +103,10 @@ config PINCTRL_AS3722
 
 config PINCTRL_AT91
 	bool "AT91 pinctrl driver"
-	depends on OF
-	depends on ARCH_AT91
+	depends on (OF && ARCH_AT91) || COMPILE_TEST
 	select PINMUX
 	select PINCONF
 	select GPIOLIB
-	select OF_GPIO
 	select GPIOLIB_IRQCHIP
 	help
 	  Say Y here to enable the at91 pinctrl driver
@@ -126,6 +138,24 @@ config PINCTRL_AXP209
 	  muxing and a GPIO driver to handle the GPIO when the GPIO function is
 	  selected.
 	  Say Y to enable pinctrl and GPIO support for the AXP209 PMIC.
+
+config PINCTRL_AW9523
+	tristate "Awinic AW9523/AW9523B I2C GPIO expander pinctrl driver"
+	depends on OF && I2C
+	select PINMUX
+	select PINCONF
+	select GENERIC_PINCONF
+	select GPIOLIB
+	select GPIOLIB_IRQCHIP
+	select REGMAP
+	select REGMAP_I2C
+	help
+	  The Awinic AW9523/AW9523B is a multi-function I2C GPIO
+	  expander with PWM functionality. This driver bundles a
+	  pinctrl driver to select the function muxing and a GPIO
+	  driver to handle GPIO, when the GPIO function is selected.
+
+	  Say yes to enable pinctrl and GPIO support for the AW9523(B).
 
 config PINCTRL_BM1880
 	bool "Bitmain BM1880 Pinctrl driver"
@@ -176,6 +206,26 @@ config PINCTRL_DIGICOLOR
 	select PINMUX
 	select GENERIC_PINCONF
 
+config PINCTRL_EIC7700
+	tristate "EIC7700 PINCTRL driver"
+	depends on ARCH_ESWIN || COMPILE_TEST
+	select PINMUX
+	select GENERIC_PINCONF
+	select REGULATOR
+	select REGULATOR_FIXED_VOLTAGE
+	help
+	  This driver support for the pin controller in ESWIN's EIC7700 SoC,
+	  which supports pin multiplexing, pin configuration,and rgmii voltage
+	  control.
+	  Say Y here to enable the eic7700 pinctrl driver
+
+config PINCTRL_EP93XX
+	bool
+	depends on ARCH_EP93XX || COMPILE_TEST
+	select PINMUX
+	select GENERIC_PINCONF
+	select MFD_SYSCON
+
 config PINCTRL_EQUILIBRIUM
 	tristate "Generic pinctrl and GPIO driver for Intel Lightning Mountain SoC"
 	depends on OF && HAS_IOMEM
@@ -194,6 +244,21 @@ config PINCTRL_EQUILIBRIUM
 	  control frameworks. It provides interfaces to setup pin muxing, assign
 	  desired pin functions, configure GPIO attributes for LGM SoC pins.
 	  Pin muxing and pin config settings are retrieved from device tree.
+
+config PINCTRL_EYEQ5
+	bool "Mobileye EyeQ5 pinctrl driver"
+	depends on OF
+	depends on MACH_EYEQ5 || COMPILE_TEST
+	select PINMUX
+	select GENERIC_PINCONF
+	select AUXILIARY_BUS
+	default MACH_EYEQ5
+	help
+	  Pin controller driver for the Mobileye EyeQ5 platform. It does both
+	  pin config & pin muxing. It does not handle GPIO.
+
+	  Pin muxing supports two functions for each pin: first is GPIO, second
+	  is pin-dependent. Pin config is about bias & drive strength.
 
 config PINCTRL_GEMINI
 	bool
@@ -217,16 +282,28 @@ config PINCTRL_INGENIC
 
 config PINCTRL_K210
 	bool "Pinctrl driver for the Canaan Kendryte K210 SoC"
-	depends on RISCV && SOC_CANAAN && OF
+	depends on RISCV && SOC_CANAAN_K210 || COMPILE_TEST
+	depends on OF
 	select GENERIC_PINMUX_FUNCTIONS
 	select GENERIC_PINCONF
 	select GPIOLIB
 	select OF_GPIO
 	select REGMAP_MMIO
-	default SOC_CANAAN
+	default SOC_CANAAN_K210
 	help
 	  Add support for the Canaan Kendryte K210 RISC-V SOC Field
 	  Programmable IO Array (FPIOA) controller.
+
+config PINCTRL_K230
+	bool "Pinctrl driver for the Canaan Kendryte K230 SoC"
+	depends on OF
+	depends on ARCH_CANAAN || COMPILE_TEST
+	select GENERIC_PINCTRL_GROUPS
+	select GENERIC_PINMUX_FUNCTIONS
+	select GENERIC_PINCONF
+	select REGMAP_MMIO
+	help
+	  Add support for the Canaan Kendryte K230 RISC-V SOC pin controller.
 
 config PINCTRL_KEEMBAY
 	tristate "Pinctrl driver for Intel Keem Bay SoC"
@@ -282,6 +359,17 @@ config PINCTRL_LPC18XX
 	select GENERIC_PINCONF
 	help
 	  Pinctrl driver for NXP LPC18xx/43xx System Control Unit (SCU).
+
+config PINCTRL_MAX7360
+	tristate "MAX7360 Pincontrol support"
+	depends on MFD_MAX7360
+	select PINMUX
+	select GENERIC_PINCONF
+	help
+	  Say Y here to enable pin control support for Maxim MAX7360 keypad
+	  controller.
+	  This keypad controller has 8 GPIO pins that may work as GPIO, or PWM,
+	  or rotary encoder alternate modes.
 
 config PINCTRL_MAX77620
 	tristate "MAX77620/MAX20024 Pincontrol support"
@@ -432,6 +520,17 @@ config PINCTRL_ROCKCHIP
 	help
           This support pinctrl and GPIO driver for Rockchip SoCs.
 
+config PINCTRL_SCMI
+	tristate "Pinctrl driver using SCMI protocol interface"
+	depends on ARM_SCMI_PROTOCOL || COMPILE_TEST
+	select PINMUX
+	select GENERIC_PINCONF
+	help
+	  This driver provides support for pinctrl which is controlled
+	  by firmware that implements the SCMI interface.
+	  It uses SCMI Message Protocol to interact with the
+	  firmware providing all the pinctrl controls.
+
 config PINCTRL_SINGLE
 	tristate "One-register-per-pin type device tree based pinctrl driver"
 	depends on OF
@@ -453,6 +552,7 @@ config PINCTRL_STMFX
 	tristate "STMicroelectronics STMFX GPIO expander pinctrl driver"
 	depends on I2C
 	depends on OF_GPIO
+	depends on HAS_IOMEM
 	select GENERIC_PINCONF
 	select GPIOLIB_IRQCHIP
 	select MFD_STMFX
@@ -464,7 +564,7 @@ config PINCTRL_STMFX
 	  interrupt-controller.
 
 config PINCTRL_SX150X
-	bool "Semtech SX150x I2C GPIO expander pinctrl driver"
+	tristate "Semtech SX150x I2C GPIO expander pinctrl driver"
 	depends on I2C=y
 	select PINMUX
 	select PINCONF
@@ -480,8 +580,8 @@ config PINCTRL_SX150X
 	  - 16 bits: sx1509q, sx1506q
 
 config PINCTRL_TB10X
-	bool
-	depends on OF && ARC_PLAT_TB10X
+	bool "Pinctrl for TB10X" if COMPILE_TEST
+	depends on OF && ARC_PLAT_TB10X || COMPILE_TEST
 	select GPIOLIB
 
 config PINCTRL_TPS6594
@@ -500,9 +600,43 @@ config PINCTRL_TPS6594
 	  This driver can also be built as a module
 	  called tps6594-pinctrl.
 
+config PINCTRL_TH1520
+	tristate "Pinctrl driver for the T-Head TH1520 SoC"
+	depends on ARCH_THEAD || COMPILE_TEST
+	depends on OF
+	select GENERIC_PINMUX_FUNCTIONS
+	select GENERIC_PINCONF
+	select PINMUX
+	help
+	  This is the driver for the pin controller blocks on the
+	  T-Head TH1520 SoC.
+
+	  This driver is needed for RISC-V development boards like
+	  the BeagleV Ahead and the LicheePi 4A.
+
+config PINCTRL_UPBOARD
+	tristate "AAeon UP board FPGA pin controller"
+	depends on MFD_UPBOARD_FPGA
+	select PINMUX
+	select GENERIC_PINCTRL_GROUPS
+	select GENERIC_PINMUX_FUNCTIONS
+	select GPIOLIB
+	select GPIO_AGGREGATOR
+	help
+	  Pin controller for the FPGA GPIO lines on UP boards. Due to the
+	  hardware layout, the driver controls the FPGA pins in tandem with
+	  their corresponding Intel SoC GPIOs.
+
+	  Currently supported:
+	  - UP Squared
+
+	  To compile this driver as a module, choose M here: the module
+	  will be called pinctrl-upboard.
+
 config PINCTRL_ZYNQ
 	bool "Pinctrl driver for Xilinx Zynq"
-	depends on ARCH_ZYNQ
+	depends on ARCH_ZYNQ || COMPILE_TEST
+	depends on OF
 	select PINMUX
 	select GENERIC_PINCONF
 	help
@@ -536,6 +670,17 @@ config PINCTRL_MLXBF3
 	  each pin. This driver can also be built as a module called
 	  pinctrl-mlxbf3.
 
+config PINCTRL_RP1
+	tristate "Pinctrl driver for RP1"
+	depends on MISC_RP1
+	default MISC_RP1
+	select PINMUX
+	select PINCONF
+	select GENERIC_PINCONF
+	help
+	  Enable the gpio and pinctrl/mux driver for RaspberryPi RP1
+	  multi function device.
+
 source "drivers/pinctrl/actions/Kconfig"
 source "drivers/pinctrl/aspeed/Kconfig"
 source "drivers/pinctrl/bcm/Kconfig"
@@ -554,6 +699,8 @@ source "drivers/pinctrl/qcom/Kconfig"
 source "drivers/pinctrl/realtek/Kconfig"
 source "drivers/pinctrl/renesas/Kconfig"
 source "drivers/pinctrl/samsung/Kconfig"
+source "drivers/pinctrl/sophgo/Kconfig"
+source "drivers/pinctrl/spacemit/Kconfig"
 source "drivers/pinctrl/spear/Kconfig"
 source "drivers/pinctrl/sprd/Kconfig"
 source "drivers/pinctrl/starfive/Kconfig"

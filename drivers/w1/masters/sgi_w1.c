@@ -105,13 +105,11 @@ static int sgi_w1_probe(struct platform_device *pdev)
 /*
  * disassociate the w1 device from the driver
  */
-static int sgi_w1_remove(struct platform_device *pdev)
+static void sgi_w1_remove(struct platform_device *pdev)
 {
 	struct sgi_w1_device *sdev = platform_get_drvdata(pdev);
 
 	w1_remove_master_device(&sdev->bus_master);
-
-	return 0;
 }
 
 static struct platform_driver sgi_w1_driver = {

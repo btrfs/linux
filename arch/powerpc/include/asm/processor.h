@@ -29,14 +29,14 @@
 #ifdef CONFIG_PPC64
 /* Default SMT priority is set to 3. Use 11- 13bits to save priority. */
 #define PPR_PRIORITY 3
-#ifdef __ASSEMBLY__
+#ifdef __ASSEMBLER__
 #define DEFAULT_PPR (PPR_PRIORITY << 50)
 #else
 #define DEFAULT_PPR ((u64)PPR_PRIORITY << 50)
-#endif /* __ASSEMBLY__ */
+#endif /* __ASSEMBLER__ */
 #endif /* CONFIG_PPC64 */
 
-#ifndef __ASSEMBLY__
+#ifndef __ASSEMBLER__
 #include <linux/types.h>
 #include <linux/thread_info.h>
 #include <asm/ptrace.h>
@@ -159,7 +159,7 @@ struct thread_struct {
 	unsigned long	sr0;
 #endif
 #endif /* CONFIG_PPC32 */
-#if defined(CONFIG_BOOKE_OR_40x) && defined(CONFIG_PPC_KUAP)
+#if defined(CONFIG_BOOKE) && defined(CONFIG_PPC_KUAP)
 	unsigned long	pid;	/* value written in PID reg. at interrupt exit */
 #endif
 	/* Debug Registers */
@@ -260,7 +260,8 @@ struct thread_struct {
 	unsigned long   sier2;
 	unsigned long   sier3;
 	unsigned long	hashkeyr;
-
+	unsigned long	dexcr;
+	unsigned long	dexcr_onexec;	/* Reset value to load on exec */
 #endif
 };
 
@@ -332,6 +333,16 @@ extern int set_endian(struct task_struct *tsk, unsigned int val);
 
 extern int get_unalign_ctl(struct task_struct *tsk, unsigned long adr);
 extern int set_unalign_ctl(struct task_struct *tsk, unsigned int val);
+
+#ifdef CONFIG_PPC_BOOK3S_64
+
+#define PPC_GET_DEXCR_ASPECT(tsk, asp) get_dexcr_prctl((tsk), (asp))
+#define PPC_SET_DEXCR_ASPECT(tsk, asp, val) set_dexcr_prctl((tsk), (asp), (val))
+
+int get_dexcr_prctl(struct task_struct *tsk, unsigned long asp);
+int set_dexcr_prctl(struct task_struct *tsk, unsigned long asp, unsigned long val);
+
+#endif
 
 extern void load_fp_state(struct thread_fp_state *fp);
 extern void store_fp_state(struct thread_fp_state *fp);
@@ -449,5 +460,5 @@ int enter_vmx_ops(void);
 void *exit_vmx_ops(void *dest);
 
 #endif /* __KERNEL__ */
-#endif /* __ASSEMBLY__ */
+#endif /* __ASSEMBLER__ */
 #endif /* _ASM_POWERPC_PROCESSOR_H */

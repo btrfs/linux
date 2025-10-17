@@ -949,8 +949,7 @@ static void layout_attached_codec(struct aoa_codec *codec)
 				ldev->gpio.methods->set_lineout(codec->gpio, 1);
 			ctl = snd_ctl_new1(&lineout_ctl, codec->gpio);
 			if (cc->connected & CC_LINEOUT_LABELLED_HEADPHONE)
-				strscpy(ctl->id.name,
-					"Headphone Switch", sizeof(ctl->id.name));
+				strscpy(ctl->id.name, "Headphone Switch");
 			ldev->lineout_ctrl = ctl;
 			aoa_snd_ctl_add(ctl);
 			ldev->have_lineout_detect =
@@ -964,15 +963,13 @@ static void layout_attached_codec(struct aoa_codec *codec)
 						   ldev);
 				if (cc->connected & CC_LINEOUT_LABELLED_HEADPHONE)
 					strscpy(ctl->id.name,
-						"Headphone Detect Autoswitch",
-						sizeof(ctl->id.name));
+						"Headphone Detect Autoswitch");
 				aoa_snd_ctl_add(ctl);
 				ctl = snd_ctl_new1(&lineout_detected,
 						   ldev);
 				if (cc->connected & CC_LINEOUT_LABELLED_HEADPHONE)
 					strscpy(ctl->id.name,
-						"Headphone Detected",
-						sizeof(ctl->id.name));
+						"Headphone Detected");
 				ldev->lineout_detected_ctrl = ctl;
 				aoa_snd_ctl_add(ctl);
 			}
@@ -1126,7 +1123,6 @@ static void aoa_fabric_layout_remove(struct soundbus_dev *sdev)
 	sdev->pcmname = NULL;
 }
 
-#ifdef CONFIG_PM_SLEEP
 static int aoa_fabric_layout_suspend(struct device *dev)
 {
 	struct layout_dev *ldev = dev_get_drvdata(dev);
@@ -1147,10 +1143,8 @@ static int aoa_fabric_layout_resume(struct device *dev)
 	return 0;
 }
 
-static SIMPLE_DEV_PM_OPS(aoa_fabric_layout_pm_ops,
+static DEFINE_SIMPLE_DEV_PM_OPS(aoa_fabric_layout_pm_ops,
 	aoa_fabric_layout_suspend, aoa_fabric_layout_resume);
-
-#endif
 
 static struct soundbus_driver aoa_soundbus_driver = {
 	.name = "snd_aoa_soundbus_drv",
@@ -1159,9 +1153,7 @@ static struct soundbus_driver aoa_soundbus_driver = {
 	.remove = aoa_fabric_layout_remove,
 	.driver = {
 		.owner = THIS_MODULE,
-#ifdef CONFIG_PM_SLEEP
 		.pm = &aoa_fabric_layout_pm_ops,
-#endif
 	}
 };
 

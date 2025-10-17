@@ -7,12 +7,11 @@ ifdef CONFIG_FUNCTION_TRACER
 # Do not trace early boot code and low level code
 CFLAGS_REMOVE_timer.o = -pg
 CFLAGS_REMOVE_intc.o = -pg
-CFLAGS_REMOVE_early_printk.o = -pg
 CFLAGS_REMOVE_ftrace.o = -pg
 CFLAGS_REMOVE_process.o = -pg
 endif
 
-extra-y := vmlinux.lds
+always-$(KBUILD_BUILTIN) := vmlinux.lds
 
 obj-y += head.o dma.o exceptions.o \
 	hw_exception_handler.o irq.o \

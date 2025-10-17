@@ -876,7 +876,6 @@ static const struct dc_debug_options debug_defaults_drv = {
 	.replay_skip_crtc_disabled = true,
 	.disable_dmcu = true,
 	.force_abm_enable = false,
-	.timing_trace = false,
 	.clock_trace = true,
 	.disable_dpp_power_gate = false,
 	.disable_hubp_power_gate = false,
@@ -889,7 +888,7 @@ static const struct dc_debug_options debug_defaults_drv = {
 	.max_downscale_src_width = 4096,/*upto true 4k*/
 	.disable_pplib_wm_range = false,
 	.scl_reset_length10 = true,
-	.sanity_checks = true,
+	.sanity_checks = false,
 	.underflow_assert_delay_us = 0xFFFFFFFF,
 	.dwb_fi_phase = -1, // -1 = disable,
 	.dmub_command_table = true,
@@ -925,25 +924,10 @@ static const struct dc_debug_options debug_defaults_drv = {
 	},
 
 	.seamless_boot_odm_combine = true,
+	.enable_legacy_fast_update = true,
 	.using_dml2 = false,
-};
-
-static const struct dc_debug_options debug_defaults_diags = {
-	.disable_dmcu = true,
-	.force_abm_enable = false,
-	.timing_trace = true,
-	.clock_trace = true,
-	.disable_dpp_power_gate = true,
-	.disable_hubp_power_gate = true,
-	.disable_clock_gate = true,
-	.disable_pplib_clock_request = true,
-	.disable_pplib_wm_range = true,
-	.disable_stutter = false,
-	.scl_reset_length10 = true,
-	.dwb_fi_phase = -1, // -1 = disable
-	.dmub_command_table = true,
-	.enable_tri_buf = true,
-	.use_max_lb = true
+	.disable_dsc_power_gate = true,
+	.min_disp_clk_khz = 100000,
 };
 
 static const struct dc_panel_config panel_config_defaults = {
@@ -1166,7 +1150,7 @@ static struct link_encoder *dcn31_link_encoder_create(
 	struct dcn20_link_encoder *enc20 =
 		kzalloc(sizeof(struct dcn20_link_encoder), GFP_KERNEL);
 
-	if (!enc20)
+	if (!enc20 || enc_init_data->hpd_source >= ARRAY_SIZE(link_enc_hpd_regs))
 		return NULL;
 
 	dcn31_link_encoder_construct(enc20,
@@ -1384,6 +1368,8 @@ static struct hpo_dp_link_encoder *dcn31_hpo_dp_link_encoder_create(
 
 	/* allocate HPO link encoder */
 	hpo_dp_enc31 = kzalloc(sizeof(struct dcn31_hpo_dp_link_encoder), GFP_KERNEL);
+	if (!hpo_dp_enc31)
+		return NULL; /* out of memory */
 
 	hpo_dp_link_encoder31_construct(hpo_dp_enc31, ctx, inst,
 					&hpo_dp_link_enc_regs[inst],
@@ -1675,20 +1661,20 @@ static struct clock_source *dcn31_clock_source_create(
 		return &clk_src->base;
 	}
 
-	BREAK_TO_DEBUGGER();
 	kfree(clk_src);
+	BREAK_TO_DEBUGGER();
 	return NULL;
 }
 
 static int dcn314_populate_dml_pipes_from_context(
 	struct dc *dc, struct dc_state *context,
 	display_e2e_pipe_params_st *pipes,
-	bool fast_validate)
+	enum dc_validate_mode validate_mode)
 {
 	int pipe_cnt;
 
 	DC_FP_START();
-	pipe_cnt = dcn314_populate_dml_pipes_from_context_fpu(dc, context, pipes, fast_validate);
+	pipe_cnt = dcn314_populate_dml_pipes_from_context_fpu(dc, context, pipes, validate_mode);
 	DC_FP_END();
 
 	return pipe_cnt;
@@ -1710,28 +1696,9 @@ static void dcn314_get_panel_config_defaults(struct dc_panel_config *panel_confi
 	*panel_config = panel_config_defaults;
 }
 
-static bool filter_modes_for_single_channel_workaround(struct dc *dc,
-		struct dc_state *context)
-{
-	// Filter 2K@240Hz+8K@24fps above combination timing if memory only has single dimm LPDDR
-	if (dc->clk_mgr->bw_params->vram_type == 34 &&
-	    dc->clk_mgr->bw_params->num_channels < 2 &&
-	    context->stream_count > 1) {
-		int total_phy_pix_clk = 0;
-
-		for (int i = 0; i < context->stream_count; i++)
-			if (context->res_ctx.pipe_ctx[i].stream)
-				total_phy_pix_clk += context->res_ctx.pipe_ctx[i].stream->phy_pix_clk;
-
-		if (total_phy_pix_clk >= (1148928+826260)) //2K@240Hz+8K@24fps
-			return true;
-	}
-	return false;
-}
-
-bool dcn314_validate_bandwidth(struct dc *dc,
+enum dc_status dcn314_validate_bandwidth(struct dc *dc,
 		struct dc_state *context,
-		bool fast_validate)
+		enum dc_validate_mode validate_mode)
 {
 	bool out = false;
 
@@ -1739,29 +1706,30 @@ bool dcn314_validate_bandwidth(struct dc *dc,
 
 	int vlevel = 0;
 	int pipe_cnt = 0;
-	display_e2e_pipe_params_st *pipes = kzalloc(dc->res_pool->pipe_count * sizeof(display_e2e_pipe_params_st), GFP_KERNEL);
+	display_e2e_pipe_params_st *pipes = kcalloc(dc->res_pool->pipe_count,
+			sizeof(display_e2e_pipe_params_st), GFP_KERNEL);
 	DC_LOGGER_INIT(dc->ctx->logger);
 
 	BW_VAL_TRACE_COUNT();
 
-	if (filter_modes_for_single_channel_workaround(dc, context))
+	if (!pipes)
 		goto validate_fail;
 
 	DC_FP_START();
 	// do not support self refresh only
-	out = dcn30_internal_validate_bw(dc, context, pipes, &pipe_cnt, &vlevel, fast_validate, false);
+	out = dcn30_internal_validate_bw(dc, context, pipes, &pipe_cnt, &vlevel, validate_mode, false);
 	DC_FP_END();
 
-	// Disable fast_validate to set min dcfclk in calculate_wm_and_dlg
+	// Disable DC_VALIDATE_MODE_ONLY and DC_VALIDATE_MODE_AND_STATE_INDEX to set min dcfclk in calculate_wm_and_dlg
 	if (pipe_cnt == 0)
-		fast_validate = false;
+		validate_mode = DC_VALIDATE_MODE_AND_PROGRAMMING;
 
 	if (!out)
 		goto validate_fail;
 
 	BW_VAL_TRACE_END_VOLTAGE_LEVEL();
 
-	if (fast_validate) {
+	if (validate_mode != DC_VALIDATE_MODE_AND_PROGRAMMING) {
 		BW_VAL_TRACE_SKIP(fast);
 		goto validate_out;
 	}
@@ -1784,7 +1752,7 @@ validate_out:
 
 	BW_VAL_TRACE_FINISH();
 
-	return out;
+	return out ? DC_OK : DC_FAIL_BANDWIDTH_VALIDATE;
 }
 
 static struct resource_funcs dcn314_res_pool_funcs = {
@@ -1812,6 +1780,10 @@ static struct resource_funcs dcn314_res_pool_funcs = {
 	.patch_unknown_plane_state = dcn20_patch_unknown_plane_state,
 	.get_panel_config_defaults = dcn314_get_panel_config_defaults,
 	.get_preferred_eng_id_dpia = dcn314_get_preferred_eng_id_dpia,
+	.get_det_buffer_size = dcn31_get_det_buffer_size,
+	.get_vstartup_for_pipe = dcn10_get_vstartup_for_pipe,
+	.update_dc_state_for_encoder_switch = dcn31_update_dc_state_for_encoder_switch,
+	.build_pipe_pix_clk_params = dcn20_build_pipe_pix_clk_params
 };
 
 static struct clock_source *dcn30_clock_source_create(
@@ -1833,8 +1805,8 @@ static struct clock_source *dcn30_clock_source_create(
 		return &clk_src->base;
 	}
 
-	BREAK_TO_DEBUGGER();
 	kfree(clk_src);
+	BREAK_TO_DEBUGGER();
 	return NULL;
 }
 
@@ -1917,6 +1889,9 @@ static bool dcn314_resource_construct(
 
 	dc->caps.max_disp_clock_khz_at_vmin = 650000;
 
+	dc->caps.num_of_host_routers = 2;
+	dc->caps.num_of_dpias_per_host_router = 2;
+
 	/* Use pipe context based otg sync logic */
 	dc->config.use_pipe_ctx_sync_logic = true;
 
@@ -1938,8 +1913,6 @@ static bool dcn314_resource_construct(
 
 	if (dc->ctx->dce_environment == DCE_ENV_PRODUCTION_DRV)
 		dc->debug = debug_defaults_drv;
-	else
-		dc->debug = debug_defaults_diags;
 
 	/* Disable pipe power gating */
 	dc->debug.disable_dpp_power_gate = true;
@@ -2147,6 +2120,8 @@ static bool dcn314_resource_construct(
 
 	for (i = 0; i < dc->caps.max_planes; ++i)
 		dc->caps.planes[i] = plane_cap;
+
+	dc->caps.max_odm_combine_factor = 4;
 
 	dc->cap_funcs = cap_funcs;
 

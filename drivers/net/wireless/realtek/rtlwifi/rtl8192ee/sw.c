@@ -31,7 +31,7 @@ static void rtl92ee_init_aspm_vars(struct ieee80211_hw *hw)
 	 * 2 - Enable ASPM with Clock Req,
 	 * 3 - Alwyas Enable ASPM with Clock Req,
 	 * 4 - Always Enable ASPM without Clock Req.
-	 * set defult to RTL8192CE:3 RTL8192E:2
+	 * set default to RTL8192CE:3 RTL8192E:2
 	 */
 	rtlpci->const_pci_aspm = 3;
 
@@ -176,7 +176,7 @@ static bool rtl92ee_get_btc_status(void)
 	return true;
 }
 
-static struct rtl_hal_ops rtl8192ee_hal_ops = {
+static const struct rtl_hal_ops rtl8192ee_hal_ops = {
 	.init_sw_vars = rtl92ee_init_sw_vars,
 	.deinit_sw_vars = rtl92ee_deinit_sw_vars,
 	.read_eeprom_info = rtl92ee_read_eeprom_info,

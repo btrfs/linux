@@ -232,6 +232,7 @@ static const char * const iio_ev_type_text[] = {
 	[IIO_EV_TYPE_CHANGE] = "change",
 	[IIO_EV_TYPE_MAG_REFERENCED] = "mag_referenced",
 	[IIO_EV_TYPE_GESTURE] = "gesture",
+	[IIO_EV_TYPE_FAULT] = "fault",
 };
 
 static const char * const iio_ev_dir_text[] = {
@@ -240,6 +241,7 @@ static const char * const iio_ev_dir_text[] = {
 	[IIO_EV_DIR_FALLING] = "falling",
 	[IIO_EV_DIR_SINGLETAP] = "singletap",
 	[IIO_EV_DIR_DOUBLETAP] = "doubletap",
+	[IIO_EV_DIR_FAULT_OPENWIRE] = "openwire",
 };
 
 static const char * const iio_ev_info_text[] = {
@@ -285,6 +287,9 @@ static ssize_t iio_ev_state_store(struct device *dev,
 	if (ret < 0)
 		return ret;
 
+	if (!indio_dev->info->write_event_config)
+		return -EINVAL;
+
 	ret = indio_dev->info->write_event_config(indio_dev,
 		this_attr->c, iio_ev_attr_type(this_attr),
 		iio_ev_attr_dir(this_attr), val);
@@ -299,6 +304,9 @@ static ssize_t iio_ev_state_show(struct device *dev,
 	struct iio_dev *indio_dev = dev_to_iio_dev(dev);
 	struct iio_dev_attr *this_attr = to_iio_dev_attr(attr);
 	int val;
+
+	if (!indio_dev->info->read_event_config)
+		return -EINVAL;
 
 	val = indio_dev->info->read_event_config(indio_dev,
 		this_attr->c, iio_ev_attr_type(this_attr),
@@ -317,6 +325,9 @@ static ssize_t iio_ev_value_show(struct device *dev,
 	struct iio_dev_attr *this_attr = to_iio_dev_attr(attr);
 	int val, val2, val_arr[2];
 	int ret;
+
+	if (!indio_dev->info->read_event_value)
+		return -EINVAL;
 
 	ret = indio_dev->info->read_event_value(indio_dev,
 		this_attr->c, iio_ev_attr_type(this_attr),
@@ -572,8 +583,8 @@ int iio_device_register_eventset(struct iio_dev *indio_dev)
 	      iio_check_for_dynamic_events(indio_dev)))
 		return 0;
 
-	ev_int = kzalloc(sizeof(struct iio_event_interface), GFP_KERNEL);
-	if (ev_int == NULL)
+	ev_int = kzalloc(sizeof(*ev_int), GFP_KERNEL);
+	if (!ev_int)
 		return -ENOMEM;
 
 	iio_dev_opaque->event_interface = ev_int;

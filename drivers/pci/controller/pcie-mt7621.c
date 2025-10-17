@@ -202,7 +202,7 @@ static int mt7621_pcie_parse_port(struct mt7621_pcie *pcie,
 	struct mt7621_pcie_port *port;
 	struct device *dev = pcie->dev;
 	struct platform_device *pdev = to_platform_device(dev);
-	char name[10];
+	char name[11];
 	int err;
 
 	port = devm_kzalloc(dev, sizeof(*port), GFP_KERNEL);
@@ -258,30 +258,25 @@ static int mt7621_pcie_parse_dt(struct mt7621_pcie *pcie)
 {
 	struct device *dev = pcie->dev;
 	struct platform_device *pdev = to_platform_device(dev);
-	struct device_node *node = dev->of_node, *child;
+	struct device_node *node = dev->of_node;
 	int err;
 
 	pcie->base = devm_platform_ioremap_resource(pdev, 0);
 	if (IS_ERR(pcie->base))
 		return PTR_ERR(pcie->base);
 
-	for_each_available_child_of_node(node, child) {
+	for_each_available_child_of_node_scoped(node, child) {
 		int slot;
 
 		err = of_pci_get_devfn(child);
-		if (err < 0) {
-			of_node_put(child);
-			dev_err(dev, "failed to parse devfn: %d\n", err);
-			return err;
-		}
+		if (err < 0)
+			return dev_err_probe(dev, err, "failed to parse devfn\n");
 
 		slot = PCI_SLOT(err);
 
 		err = mt7621_pcie_parse_port(pcie, child, slot);
-		if (err) {
-			of_node_put(child);
+		if (err)
 			return err;
-		}
 	}
 
 	return 0;
@@ -541,7 +536,7 @@ MODULE_DEVICE_TABLE(of, mt7621_pcie_ids);
 
 static struct platform_driver mt7621_pcie_driver = {
 	.probe = mt7621_pcie_probe,
-	.remove_new = mt7621_pcie_remove,
+	.remove = mt7621_pcie_remove,
 	.driver = {
 		.name = "mt7621-pci",
 		.of_match_table = mt7621_pcie_ids,
@@ -549,4 +544,5 @@ static struct platform_driver mt7621_pcie_driver = {
 };
 builtin_platform_driver(mt7621_pcie_driver);
 
+MODULE_DESCRIPTION("MediaTek MT7621 PCIe host controller driver");
 MODULE_LICENSE("GPL v2");

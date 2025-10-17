@@ -3,6 +3,9 @@
  * Copyright (c) 2022, Linaro Limited
  */
 
+#include <dt-bindings/iio/qcom,spmi-adc7-pm8350.h>
+#include <dt-bindings/iio/qcom,spmi-adc7-pmk8350.h>
+#include <dt-bindings/iio/qcom,spmi-adc7-pmr735a.h>
 #include <dt-bindings/input/input.h>
 #include <dt-bindings/interrupt-controller/irq.h>
 #include <dt-bindings/spmi/spmi.h>
@@ -11,8 +14,28 @@
 	thermal-zones {
 		pm8280_1_thermal: pm8280-1-thermal {
 			polling-delay-passive = <100>;
-			polling-delay = <0>;
+
 			thermal-sensors = <&pm8280_1_temp_alarm>;
+
+			trips {
+				trip0 {
+					temperature = <95000>;
+					hysteresis = <0>;
+					type = "passive";
+				};
+
+				trip1 {
+					temperature = <115000>;
+					hysteresis = <0>;
+					type = "critical";
+				};
+			};
+		};
+
+		pmc8280c_thermal: pmc8280c-thermal {
+			polling-delay-passive = <100>;
+
+			thermal-sensors = <&pmc8280c_temp_alarm>;
 
 			trips {
 				trip0 {
@@ -31,8 +54,28 @@
 
 		pm8280_2_thermal: pm8280-2-thermal {
 			polling-delay-passive = <100>;
-			polling-delay = <0>;
+
 			thermal-sensors = <&pm8280_2_temp_alarm>;
+
+			trips {
+				trip0 {
+					temperature = <95000>;
+					hysteresis = <0>;
+					type = "passive";
+				};
+
+				trip1 {
+					temperature = <115000>;
+					hysteresis = <0>;
+					type = "critical";
+				};
+			};
+		};
+
+		pmr735a_thermal: pmr735a-thermal {
+			polling-delay-passive = <100>;
+
+			thermal-sensors = <&pmr735a_temp_alarm>;
 
 			trips {
 				trip0 {
@@ -84,7 +127,37 @@
 			#address-cells = <1>;
 			#size-cells = <0>;
 			#io-channel-cells = <1>;
-			status = "disabled";
+
+			channel@3 {
+				reg = <PMK8350_ADC7_DIE_TEMP>;
+				qcom,pre-scaling = <1 1>;
+				label = "pmk8350_die_temp";
+			};
+
+			channel@44 {
+				reg = <PMK8350_ADC7_AMUX_THM1_100K_PU>;
+				qcom,hw-settle-time = <200>;
+				qcom,ratiometric;
+				label = "pmk8350_xo_therm";
+			};
+
+			channel@103 {
+				reg = <PM8350_ADC7_DIE_TEMP(1)>;
+				qcom,pre-scaling = <1 1>;
+				label = "pmc8280_1_die_temp";
+			};
+
+			channel@303 {
+				reg = <PM8350_ADC7_DIE_TEMP(3)>;
+				qcom,pre-scaling = <1 1>;
+				label = "pmc8280_2_die_temp";
+			};
+
+			channel@403 {
+				reg = <PMR735A_ADC7_DIE_TEMP>;
+				qcom,pre-scaling = <1 1>;
+				label = "pmr735a_die_temp";
+			};
 		};
 
 		pmk8280_adc_tm: adc-tm@3400 {
@@ -126,6 +199,8 @@
 			compatible = "qcom,spmi-temp-alarm";
 			reg = <0xa00>;
 			interrupts-extended = <&spmi_bus 0x1 0xa 0x0 IRQ_TYPE_EDGE_BOTH>;
+			io-channels = <&pmk8280_vadc PM8350_ADC7_DIE_TEMP(1)>;
+			io-channel-names = "thermal";
 			#thermal-sensor-cells = <0>;
 		};
 
@@ -145,6 +220,13 @@
 		reg = <0x2 SPMI_USID>;
 		#address-cells = <1>;
 		#size-cells = <0>;
+
+		pmc8280c_temp_alarm: temp-alarm@a00 {
+			compatible = "qcom,spmi-temp-alarm";
+			reg = <0xa00>;
+			interrupts-extended = <&spmi_bus 0x2 0xa 0x0 IRQ_TYPE_EDGE_BOTH>;
+			#thermal-sensor-cells = <0>;
+		};
 
 		pmc8280c_gpios: gpio@8800 {
 			compatible = "qcom,pm8350c-gpio", "qcom,spmi-gpio";
@@ -177,7 +259,9 @@
 		pm8280_2_temp_alarm: temp-alarm@a00 {
 			compatible = "qcom,spmi-temp-alarm";
 			reg = <0xa00>;
-			interrupts-extended = <&spmi_bus 0x2 0xa 0x0 IRQ_TYPE_EDGE_BOTH>;
+			interrupts-extended = <&spmi_bus 0x3 0xa 0x0 IRQ_TYPE_EDGE_BOTH>;
+			io-channels = <&pmk8280_vadc PM8350_ADC7_DIE_TEMP(3)>;
+			io-channel-names = "thermal";
 			#thermal-sensor-cells = <0>;
 		};
 
@@ -197,6 +281,15 @@
 		reg = <0x4 SPMI_USID>;
 		#address-cells = <1>;
 		#size-cells = <0>;
+
+		pmr735a_temp_alarm: temp-alarm@a00 {
+			compatible = "qcom,spmi-temp-alarm";
+			reg = <0xa00>;
+			interrupts-extended = <&spmi_bus 0x4 0xa 0x0 IRQ_TYPE_EDGE_BOTH>;
+			io-channels = <&pmk8280_vadc PMR735A_ADC7_DIE_TEMP>;
+			io-channel-names = "thermal";
+			#thermal-sensor-cells = <0>;
+		};
 
 		pmr735a_gpios: gpio@8800 {
 			compatible = "qcom,pmr735a-gpio", "qcom,spmi-gpio";

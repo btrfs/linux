@@ -27,7 +27,7 @@
 #include <linux/platform_data/cros_ec_commands.h>
 #include <linux/platform_data/cros_ec_proto.h>
 
-#include <asm/unaligned.h>
+#include <linux/unaligned.h>
 
 /**
  * struct cros_ec_keyb - Structure representing EC keyboard device
@@ -35,7 +35,6 @@
  * @rows: Number of rows in the keypad
  * @cols: Number of columns in the keypad
  * @row_shift: log2 or number of rows, rounded up
- * @keymap_data: Matrix keymap data used to convert to keyscan values
  * @ghost_filter: true to enable the matrix key-ghosting filter
  * @valid_keys: bitmap of existing keys for each matrix column
  * @old_kb_state: bitmap of keys pressed last scan
@@ -50,7 +49,6 @@ struct cros_ec_keyb {
 	unsigned int rows;
 	unsigned int cols;
 	int row_shift;
-	const struct matrix_keymap_data *keymap_data;
 	bool ghost_filter;
 	uint8_t *valid_keys;
 	uint8_t *old_kb_state;
@@ -707,6 +705,12 @@ static int cros_ec_keyb_probe(struct platform_device *pdev)
 	ec = dev_get_drvdata(pdev->dev.parent);
 	if (!ec)
 		return -EPROBE_DEFER;
+	/*
+	 * Even if the cros_ec_device pointer is available, still need to check
+	 * if the device is fully registered before using it.
+	 */
+	if (!cros_ec_device_registered(ec))
+		return -EPROBE_DEFER;
 
 	ckdev = devm_kzalloc(dev, sizeof(*ckdev), GFP_KERNEL);
 	if (!ckdev)
@@ -772,7 +776,7 @@ static DEFINE_SIMPLE_DEV_PM_OPS(cros_ec_keyb_pm_ops, NULL, cros_ec_keyb_resume);
 
 static struct platform_driver cros_ec_keyb_driver = {
 	.probe = cros_ec_keyb_probe,
-	.remove_new = cros_ec_keyb_remove,
+	.remove = cros_ec_keyb_remove,
 	.driver = {
 		.name = "cros-ec-keyb",
 		.dev_groups = cros_ec_keyb_groups,

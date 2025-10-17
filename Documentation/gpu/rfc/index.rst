@@ -18,6 +18,10 @@ host such documentation:
 
 .. toctree::
 
+    gpusvm.rst
+
+.. toctree::
+
     i915_gem_lmem.rst
 
 .. toctree::
@@ -31,7 +35,3 @@ host such documentation:
 .. toctree::
 
     i915_vm_bind.rst
-
-.. toctree::
-
-   xe.rst

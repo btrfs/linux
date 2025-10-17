@@ -8,7 +8,7 @@
 #include <asm/asmmacro.h>
 #include <asm/loongarch.h>
 #include <asm/regdef.h>
-#include <asm/stackframe.h>
+#include <asm/unwind_hints.h>
 
 #define HGPR_OFFSET(x)		(PT_R0 + 8*x)
 #define GGPR_OFFSET(x)		(KVM_ARCH_GGPR + 8*x)
@@ -60,16 +60,8 @@
 	ld.d	t0, a2, KVM_ARCH_GPC
 	csrwr	t0, LOONGARCH_CSR_ERA
 
-	/* Save host PGDL */
-	csrrd	t0, LOONGARCH_CSR_PGDL
-	st.d	t0, a2, KVM_ARCH_HPGD
-
-	/* Switch to kvm */
-	ld.d	t1, a2, KVM_VCPU_KVM - KVM_VCPU_ARCH
-
-	/* Load guest PGDL */
-	li.w    t0, KVM_GPGD
-	ldx.d   t0, t1, t0
+	/* Load PGD for KVM hypervisor */
+	ld.d	t0, a2, KVM_ARCH_KVMPGD
 	csrwr	t0, LOONGARCH_CSR_PGDL
 
 	/* Mix GID and RID */
@@ -85,7 +77,7 @@
 	 * Guest CRMD comes from separate GCSR_CRMD register
 	 */
 	ori	t0, zero, CSR_PRMD_PIE
-	csrxchg	t0, t0,   LOONGARCH_CSR_PRMD
+	csrwr	t0, LOONGARCH_CSR_PRMD
 
 	/* Set PVM bit to setup ertn to guest context */
 	ori	t0, zero, CSR_GSTAT_PVM
@@ -112,6 +104,7 @@
 	.text
 	.cfi_sections	.debug_frame
 SYM_CODE_START(kvm_exc_entry)
+	UNWIND_HINT_UNDEFINED
 	csrwr	a2,   KVM_TEMP_KS
 	csrrd	a2,   KVM_VCPU_KS
 	addi.d	a2,   a2, KVM_VCPU_ARCH
@@ -213,12 +206,6 @@ SYM_FUNC_START(kvm_enter_guest)
 	/* Save host GPRs */
 	kvm_save_host_gpr a2
 
-	/* Save host CRMD, PRMD to stack */
-	csrrd	a3, LOONGARCH_CSR_CRMD
-	st.d	a3, a2, PT_CRMD
-	csrrd	a3, LOONGARCH_CSR_PRMD
-	st.d	a3, a2, PT_PRMD
-
 	addi.d	a2, a1, KVM_VCPU_ARCH
 	st.d	sp, a2, KVM_ARCH_HSP
 	st.d	tp, a2, KVM_ARCH_HTP
@@ -279,3 +266,13 @@ SYM_FUNC_END(kvm_restore_lasx)
 	.section ".rodata"
 SYM_DATA(kvm_exception_size, .quad kvm_exc_entry_end - kvm_exc_entry)
 SYM_DATA(kvm_enter_guest_size, .quad kvm_enter_guest_end - kvm_enter_guest)
+
+#ifdef CONFIG_CPU_HAS_LBT
+STACK_FRAME_NON_STANDARD kvm_restore_fpu
+#ifdef CONFIG_CPU_HAS_LSX
+STACK_FRAME_NON_STANDARD kvm_restore_lsx
+#endif
+#ifdef CONFIG_CPU_HAS_LASX
+STACK_FRAME_NON_STANDARD kvm_restore_lasx
+#endif
+#endif

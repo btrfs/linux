@@ -100,6 +100,9 @@ void xe_hw_fence_irq_finish(struct xe_hw_fence_irq *irq)
 		spin_unlock_irqrestore(&irq->lock, flags);
 		dma_fence_end_signalling(tmp);
 	}
+
+	/* Safe release of the irq->lock used in dma_fence_init. */
+	synchronize_rcu();
 }
 
 void xe_hw_fence_irq_run(struct xe_hw_fence_irq *irq)
@@ -130,7 +133,7 @@ void xe_hw_fence_ctx_init(struct xe_hw_fence_ctx *ctx, struct xe_gt *gt,
 	ctx->irq = irq;
 	ctx->dma_fence_ctx = dma_fence_context_alloc(1);
 	ctx->next_seqno = XE_FENCE_INITIAL_SEQNO;
-	sprintf(ctx->name, "%s", name);
+	snprintf(ctx->name, sizeof(ctx->name), "%s", name);
 }
 
 void xe_hw_fence_ctx_finish(struct xe_hw_fence_ctx *ctx)
@@ -148,24 +151,24 @@ static const char *xe_hw_fence_get_driver_name(struct dma_fence *dma_fence)
 {
 	struct xe_hw_fence *fence = to_xe_hw_fence(dma_fence);
 
-	return dev_name(gt_to_xe(fence->ctx->gt)->drm.dev);
+	return dev_name(fence->xe->drm.dev);
 }
 
 static const char *xe_hw_fence_get_timeline_name(struct dma_fence *dma_fence)
 {
 	struct xe_hw_fence *fence = to_xe_hw_fence(dma_fence);
 
-	return fence->ctx->name;
+	return fence->name;
 }
 
 static bool xe_hw_fence_signaled(struct dma_fence *dma_fence)
 {
 	struct xe_hw_fence *fence = to_xe_hw_fence(dma_fence);
-	struct xe_device *xe = gt_to_xe(fence->ctx->gt);
+	struct xe_device *xe = fence->xe;
 	u32 seqno = xe_map_rd(xe, &fence->seqno_map, 0, u32);
 
 	return dma_fence->error ||
-		!__dma_fence_is_later(dma_fence->seqno, seqno, dma_fence->ops);
+		!__dma_fence_is_later(dma_fence, dma_fence->seqno, seqno);
 }
 
 static bool xe_hw_fence_enable_signaling(struct dma_fence *dma_fence)
@@ -187,7 +190,6 @@ static void xe_hw_fence_release(struct dma_fence *dma_fence)
 {
 	struct xe_hw_fence *fence = to_xe_hw_fence(dma_fence);
 
-	trace_xe_hw_fence_free(fence);
 	XE_WARN_ON(!list_empty(&fence->irq_link));
 	call_rcu(&dma_fence->rcu, fence_free);
 }
@@ -208,23 +210,59 @@ static struct xe_hw_fence *to_xe_hw_fence(struct dma_fence *fence)
 	return container_of(fence, struct xe_hw_fence, dma);
 }
 
-struct xe_hw_fence *xe_hw_fence_create(struct xe_hw_fence_ctx *ctx,
-				       struct iosys_map seqno_map)
+/**
+ * xe_hw_fence_alloc() -  Allocate an hw fence.
+ *
+ * Allocate but don't initialize an hw fence.
+ *
+ * Return: Pointer to the allocated fence or
+ * negative error pointer on error.
+ */
+struct dma_fence *xe_hw_fence_alloc(void)
 {
-	struct xe_hw_fence *fence;
+	struct xe_hw_fence *hw_fence = fence_alloc();
 
-	fence = fence_alloc();
-	if (!fence)
+	if (!hw_fence)
 		return ERR_PTR(-ENOMEM);
 
-	dma_fence_init(&fence->dma, &xe_hw_fence_ops, &ctx->irq->lock,
+	return &hw_fence->dma;
+}
+
+/**
+ * xe_hw_fence_free() - Free an hw fence.
+ * @fence: Pointer to the fence to free.
+ *
+ * Frees an hw fence that hasn't yet been
+ * initialized.
+ */
+void xe_hw_fence_free(struct dma_fence *fence)
+{
+	fence_free(&fence->rcu);
+}
+
+/**
+ * xe_hw_fence_init() - Initialize an hw fence.
+ * @fence: Pointer to the fence to initialize.
+ * @ctx: Pointer to the struct xe_hw_fence_ctx fence context.
+ * @seqno_map: Pointer to the map into where the seqno is blitted.
+ *
+ * Initializes a pre-allocated hw fence.
+ * After initialization, the fence is subject to normal
+ * dma-fence refcounting.
+ */
+void xe_hw_fence_init(struct dma_fence *fence, struct xe_hw_fence_ctx *ctx,
+		      struct iosys_map seqno_map)
+{
+	struct  xe_hw_fence *hw_fence =
+		container_of(fence, typeof(*hw_fence), dma);
+
+	hw_fence->xe = gt_to_xe(ctx->gt);
+	snprintf(hw_fence->name, sizeof(hw_fence->name), "%s", ctx->name);
+	hw_fence->seqno_map = seqno_map;
+	INIT_LIST_HEAD(&hw_fence->irq_link);
+
+	dma_fence_init(fence, &xe_hw_fence_ops, &ctx->irq->lock,
 		       ctx->dma_fence_ctx, ctx->next_seqno++);
 
-	fence->ctx = ctx;
-	fence->seqno_map = seqno_map;
-	INIT_LIST_HEAD(&fence->irq_link);
-
-	trace_xe_hw_fence_create(fence);
-
-	return fence;
+	trace_xe_hw_fence_create(hw_fence);
 }

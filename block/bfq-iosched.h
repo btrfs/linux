@@ -427,9 +427,6 @@ struct bfq_iocq_bfqq_data {
 	 */
 	bool saved_IO_bound;
 
-	u64 saved_io_start_time;
-	u64 saved_tot_idle_time;
-
 	/*
 	 * Same purpose as the previous fields for the values of the
 	 * field keeping the queue's belonging to a large burst
@@ -450,6 +447,9 @@ struct bfq_iocq_bfqq_data {
 	 */
 	unsigned int saved_weight;
 
+	u64 saved_io_start_time;
+	u64 saved_tot_idle_time;
+
 	/*
 	 * Similar to previous fields: save wr information.
 	 */
@@ -457,13 +457,13 @@ struct bfq_iocq_bfqq_data {
 	unsigned long saved_last_wr_start_finish;
 	unsigned long saved_service_from_wr;
 	unsigned long saved_wr_start_at_switch_to_srt;
-	unsigned int saved_wr_cur_max_time;
 	struct bfq_ttime saved_ttime;
+	unsigned int saved_wr_cur_max_time;
 
 	/* Save also injection state */
-	u64 saved_last_serv_time_ns;
 	unsigned int saved_inject_limit;
 	unsigned long saved_decrease_time_jif;
+	u64 saved_last_serv_time_ns;
 
 	/* candidate queue for a stable merge (due to close creation time) */
 	struct bfq_queue *stable_merge_bfqq;
@@ -813,8 +813,7 @@ struct bfq_data {
 	 * Depth limits used in bfq_limit_depth (see comments on the
 	 * function)
 	 */
-	unsigned int word_depths[2][2];
-	unsigned int full_depth_shift;
+	unsigned int async_depths[2][2];
 
 	/*
 	 * Number of independent actuators. This is equal to 1 in
@@ -1003,9 +1002,6 @@ struct bfq_group {
 	/* must be the first member */
 	struct blkg_policy_data pd;
 
-	/* cached path for this blkg (see comments in bfq_bic_update_cgroup) */
-	char blkg_path[128];
-
 	/* reference counter (see comments in bfq_bic_update_cgroup) */
 	refcount_t ref;
 
@@ -1159,6 +1155,8 @@ void bfq_del_bfqq_busy(struct bfq_queue *bfqq, bool expiration);
 void bfq_add_bfqq_busy(struct bfq_queue *bfqq);
 void bfq_add_bfqq_in_groups_with_pending_reqs(struct bfq_queue *bfqq);
 void bfq_del_bfqq_in_groups_with_pending_reqs(struct bfq_queue *bfqq);
+void bfq_reassign_last_bfqq(struct bfq_queue *cur_bfqq,
+			    struct bfq_queue *new_bfqq);
 
 /* --------------- end of interface of B-WF2Q+ ---------------- */
 
@@ -1186,11 +1184,6 @@ struct bfq_group *bfqq_group(struct bfq_queue *bfqq);
 			"%s " fmt, pid_str, ##args);			\
 } while (0)
 
-#define bfq_log_bfqg(bfqd, bfqg, fmt, args...)	do {			\
-	blk_add_cgroup_trace_msg((bfqd)->queue,				\
-		&bfqg_to_blkg(bfqg)->blkcg->css, fmt, ##args);		\
-} while (0)
-
 #else /* CONFIG_BFQ_GROUP_IOSCHED */
 
 #define bfq_log_bfqq(bfqd, bfqq, fmt, args...) do {	\
@@ -1200,7 +1193,6 @@ struct bfq_group *bfqq_group(struct bfq_queue *bfqq);
 	bfq_bfqq_name((bfqq), pid_str, MAX_BFQQ_NAME_LENGTH);		\
 	blk_add_trace_msg((bfqd)->queue, "%s " fmt, pid_str, ##args);	\
 } while (0)
-#define bfq_log_bfqg(bfqd, bfqg, fmt, args...)		do {} while (0)
 
 #endif /* CONFIG_BFQ_GROUP_IOSCHED */
 

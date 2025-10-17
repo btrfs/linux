@@ -123,7 +123,6 @@ static struct ctl_table vs_vars_table[] = {
 		.mode		= 0644,
 		.proc_handler	= proc_dointvec_jiffies,
 	},
-	{ }
 };
 #endif
 
@@ -293,7 +292,8 @@ static inline void ip_vs_lblc_full_check(struct ip_vs_service *svc)
  */
 static void ip_vs_lblc_check_expire(struct timer_list *t)
 {
-	struct ip_vs_lblc_table *tbl = from_timer(tbl, t, periodic_timer);
+	struct ip_vs_lblc_table *tbl = timer_container_of(tbl, t,
+							  periodic_timer);
 	struct ip_vs_service *svc = tbl->svc;
 	unsigned long now = jiffies;
 	int goal;
@@ -563,10 +563,8 @@ static int __net_init __ip_vs_lblc_init(struct net *net)
 			return -ENOMEM;
 
 		/* Don't export sysctls to unprivileged users */
-		if (net->user_ns != &init_user_ns) {
-			ipvs->lblc_ctl_table[0].procname = NULL;
+		if (net->user_ns != &init_user_ns)
 			vars_table_size = 0;
-		}
 
 	} else
 		ipvs->lblc_ctl_table = vs_vars_table;

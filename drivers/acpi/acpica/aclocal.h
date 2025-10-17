@@ -3,7 +3,7 @@
  *
  * Name: aclocal.h - Internal data types used across the ACPI subsystem
  *
- * Copyright (C) 2000 - 2023, Intel Corp.
+ * Copyright (C) 2000 - 2025, Intel Corp.
  *
  *****************************************************************************/
 
@@ -293,7 +293,7 @@ acpi_status (*acpi_internal_method) (struct acpi_walk_state * walk_state);
  * expected_return_btypes - Allowed type(s) for the return value
  */
 struct acpi_name_info {
-	char name[ACPI_NAMESEG_SIZE];
+	char name[ACPI_NAMESEG_SIZE] ACPI_NONSTRING;
 	u16 argument_list;
 	u8 expected_btypes;
 };
@@ -370,7 +370,7 @@ typedef acpi_status (*acpi_object_converter) (struct acpi_namespace_node *
 					      converted_object);
 
 struct acpi_simple_repair_info {
-	char name[ACPI_NAMESEG_SIZE];
+	char name[ACPI_NAMESEG_SIZE] ACPI_NONSTRING;
 	u32 unexpected_btypes;
 	u32 package_index;
 	acpi_object_converter object_converter;
@@ -547,7 +547,7 @@ struct acpi_field_info {
 
 struct acpi_ged_handler_info {
 	struct acpi_ged_handler_info *next;
-	u32 int_id;		/* The interrupt ID that triggers the execution ofthe evt_method. */
+	u32 int_id;		/* The interrupt ID that triggers the execution of the evt_method. */
 	struct acpi_namespace_node *evt_method;	/* The _EVT method to be executed when an interrupt with ID = int_ID is received */
 };
 
@@ -1090,6 +1090,8 @@ struct acpi_port_info {
 #define ACPI_ADDRESS_TYPE_IO_RANGE              1
 #define ACPI_ADDRESS_TYPE_BUS_NUMBER_RANGE      2
 
+#define ACPI_ADDRESS_TYPE_PCC_NUMBER            0xA
+
 /* Resource descriptor types and masks */
 
 #define ACPI_RESOURCE_NAME_LARGE                0x80
@@ -1139,7 +1141,7 @@ struct acpi_port_info {
 #define ACPI_RESOURCE_NAME_PIN_GROUP_FUNCTION   0x91
 #define ACPI_RESOURCE_NAME_PIN_GROUP_CONFIG     0x92
 #define ACPI_RESOURCE_NAME_CLOCK_INPUT          0x93
-#define ACPI_RESOURCE_NAME_LARGE_MAX            0x94
+#define ACPI_RESOURCE_NAME_LARGE_MAX            0x93
 
 /*****************************************************************************
  *

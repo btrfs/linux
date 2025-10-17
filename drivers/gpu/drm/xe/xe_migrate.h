@@ -6,14 +6,16 @@
 #ifndef _XE_MIGRATE_
 #define _XE_MIGRATE_
 
-#include <drm/drm_mm.h>
+#include <linux/types.h>
 
 struct dma_fence;
+struct drm_pagemap_addr;
 struct iosys_map;
 struct ttm_resource;
 
 struct xe_bo;
 struct xe_gt;
+struct xe_tlb_inval_job;
 struct xe_exec_queue;
 struct xe_migrate;
 struct xe_migrate_pt_update;
@@ -23,6 +25,8 @@ struct xe_tile;
 struct xe_vm;
 struct xe_vm_pgtable_update;
 struct xe_vma;
+
+enum xe_sriov_vf_ccs_rw_ctxs;
 
 /**
  * struct xe_migrate_pt_update_ops - Callbacks for the
@@ -47,6 +51,24 @@ struct xe_migrate_pt_update_ops {
 			 struct xe_tile *tile, struct iosys_map *map,
 			 void *pos, u32 ofs, u32 num_qwords,
 			 const struct xe_vm_pgtable_update *update);
+	/**
+	 * @clear: Clear a command buffer or page-table with ptes.
+	 * @pt_update: Embeddable callback argument.
+	 * @tile: The tile for the current operation.
+	 * @map: struct iosys_map into the memory to be populated.
+	 * @pos: If @map is NULL, map into the memory to be populated.
+	 * @ofs: qword offset into @map, unused if @map is NULL.
+	 * @num_qwords: Number of qwords to write.
+	 * @update: Information about the PTEs to be inserted.
+	 *
+	 * This interface is intended to be used as a callback into the
+	 * page-table system to populate command buffers or shared
+	 * page-tables with PTEs.
+	 */
+	void (*clear)(struct xe_migrate_pt_update *pt_update,
+		      struct xe_tile *tile, struct iosys_map *map,
+		      void *pos, u32 ofs, u32 num_qwords,
+		      const struct xe_vm_pgtable_update *update);
 
 	/**
 	 * @pre_commit: Callback to be called just before arming the
@@ -67,19 +89,34 @@ struct xe_migrate_pt_update_ops {
 struct xe_migrate_pt_update {
 	/** @ops: Pointer to the struct xe_migrate_pt_update_ops callbacks */
 	const struct xe_migrate_pt_update_ops *ops;
-	/** @vma: The vma we're updating the pagetable for. */
-	struct xe_vma *vma;
+	/** @vops: VMA operations */
+	struct xe_vma_ops *vops;
 	/** @job: The job if a GPU page-table update. NULL otherwise */
 	struct xe_sched_job *job;
-	/** @start: Start of update for the range fence */
-	u64 start;
-	/** @last: Last of update for the range fence */
-	u64 last;
+	/**
+	 * @ijob: The TLB invalidation job for primary GT. NULL otherwise
+	 */
+	struct xe_tlb_inval_job *ijob;
+	/**
+	 * @mjob: The TLB invalidation job for media GT. NULL otherwise
+	 */
+	struct xe_tlb_inval_job *mjob;
 	/** @tile_id: Tile ID of the update */
 	u8 tile_id;
 };
 
-struct xe_migrate *xe_migrate_init(struct xe_tile *tile);
+struct xe_migrate *xe_migrate_alloc(struct xe_tile *tile);
+int xe_migrate_init(struct xe_migrate *m);
+
+struct dma_fence *xe_migrate_to_vram(struct xe_migrate *m,
+				     unsigned long npages,
+				     struct drm_pagemap_addr *src_addr,
+				     u64 dst_addr);
+
+struct dma_fence *xe_migrate_from_vram(struct xe_migrate *m,
+				       unsigned long npages,
+				       u64 src_addr,
+				       struct drm_pagemap_addr *dst_addr);
 
 struct dma_fence *xe_migrate_copy(struct xe_migrate *m,
 				  struct xe_bo *src_bo,
@@ -88,23 +125,34 @@ struct dma_fence *xe_migrate_copy(struct xe_migrate *m,
 				  struct ttm_resource *dst,
 				  bool copy_only_ccs);
 
+int xe_migrate_ccs_rw_copy(struct xe_tile *tile, struct xe_exec_queue *q,
+			   struct xe_bo *src_bo,
+			   enum xe_sriov_vf_ccs_rw_ctxs read_write);
+
+struct xe_lrc *xe_migrate_lrc(struct xe_migrate *migrate);
+struct xe_exec_queue *xe_migrate_exec_queue(struct xe_migrate *migrate);
+int xe_migrate_access_memory(struct xe_migrate *m, struct xe_bo *bo,
+			     unsigned long offset, void *buf, int len,
+			     int write);
+
+#define XE_MIGRATE_CLEAR_FLAG_BO_DATA		BIT(0)
+#define XE_MIGRATE_CLEAR_FLAG_CCS_DATA		BIT(1)
+#define XE_MIGRATE_CLEAR_FLAG_FULL	(XE_MIGRATE_CLEAR_FLAG_BO_DATA | \
+					XE_MIGRATE_CLEAR_FLAG_CCS_DATA)
 struct dma_fence *xe_migrate_clear(struct xe_migrate *m,
 				   struct xe_bo *bo,
-				   struct ttm_resource *dst);
+				   struct ttm_resource *dst,
+				   u32 clear_flags);
 
 struct xe_vm *xe_migrate_get_vm(struct xe_migrate *m);
 
 struct dma_fence *
 xe_migrate_update_pgtables(struct xe_migrate *m,
-			   struct xe_vm *vm,
-			   struct xe_bo *bo,
-			   struct xe_exec_queue *q,
-			   const struct xe_vm_pgtable_update *updates,
-			   u32 num_updates,
-			   struct xe_sync_entry *syncs, u32 num_syncs,
 			   struct xe_migrate_pt_update *pt_update);
 
 void xe_migrate_wait(struct xe_migrate *m);
 
-struct xe_exec_queue *xe_tile_migrate_engine(struct xe_tile *tile);
+void xe_migrate_job_lock(struct xe_migrate *m, struct xe_exec_queue *q);
+void xe_migrate_job_unlock(struct xe_migrate *m, struct xe_exec_queue *q);
+
 #endif

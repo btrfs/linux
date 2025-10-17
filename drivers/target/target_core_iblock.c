@@ -26,7 +26,7 @@
 #include <linux/pr.h>
 #include <scsi/scsi_proto.h>
 #include <scsi/scsi_common.h>
-#include <asm/unaligned.h>
+#include <linux/unaligned.h>
 
 #include <target/target_core_base.h>
 #include <target/target_core_backend.h>
@@ -64,6 +64,7 @@ static struct se_device *iblock_alloc_device(struct se_hba *hba, const char *nam
 		pr_err("Unable to allocate struct iblock_dev\n");
 		return NULL;
 	}
+	ib_dev->ibd_exclusive = true;
 
 	ib_dev->ibd_plug = kcalloc(nr_cpu_ids, sizeof(*ib_dev->ibd_plug),
 				   GFP_KERNEL);
@@ -91,10 +92,11 @@ static int iblock_configure_device(struct se_device *dev)
 {
 	struct iblock_dev *ib_dev = IBLOCK_DEV(dev);
 	struct request_queue *q;
-	struct bdev_handle *bdev_handle;
+	struct file *bdev_file;
 	struct block_device *bd;
 	struct blk_integrity *bi;
 	blk_mode_t mode = BLK_OPEN_READ;
+	void *holder = ib_dev;
 	unsigned int max_write_zeroes_sectors;
 	int ret;
 
@@ -109,22 +111,25 @@ static int iblock_configure_device(struct se_device *dev)
 		goto out;
 	}
 
-	pr_debug( "IBLOCK: Claiming struct block_device: %s\n",
-			ib_dev->ibd_udev_path);
+	pr_debug("IBLOCK: Claiming struct block_device: %s: %d\n",
+		 ib_dev->ibd_udev_path, ib_dev->ibd_exclusive);
 
 	if (!ib_dev->ibd_readonly)
 		mode |= BLK_OPEN_WRITE;
 	else
 		dev->dev_flags |= DF_READ_ONLY;
 
-	bdev_handle = bdev_open_by_path(ib_dev->ibd_udev_path, mode, ib_dev,
+	if (!ib_dev->ibd_exclusive)
+		holder = NULL;
+
+	bdev_file = bdev_file_open_by_path(ib_dev->ibd_udev_path, mode, holder,
 					NULL);
-	if (IS_ERR(bdev_handle)) {
-		ret = PTR_ERR(bdev_handle);
+	if (IS_ERR(bdev_file)) {
+		ret = PTR_ERR(bdev_file);
 		goto out_free_bioset;
 	}
-	ib_dev->ibd_bdev_handle = bdev_handle;
-	ib_dev->ibd_bd = bd = bdev_handle->bdev;
+	ib_dev->ibd_bdev_file = bdev_file;
+	ib_dev->ibd_bd = bd = file_bdev(bdev_file);
 
 	q = bdev_get_queue(bd);
 
@@ -148,39 +153,30 @@ static int iblock_configure_device(struct se_device *dev)
 		dev->dev_attrib.is_nonrot = 1;
 
 	bi = bdev_get_integrity(bd);
-	if (bi) {
-		struct bio_set *bs = &ib_dev->ibd_bio_set;
+	if (!bi)
+		return 0;
 
-		if (!strcmp(bi->profile->name, "T10-DIF-TYPE3-IP") ||
-		    !strcmp(bi->profile->name, "T10-DIF-TYPE1-IP")) {
-			pr_err("IBLOCK export of blk_integrity: %s not"
-			       " supported\n", bi->profile->name);
-			ret = -ENOSYS;
-			goto out_blkdev_put;
-		}
-
-		if (!strcmp(bi->profile->name, "T10-DIF-TYPE3-CRC")) {
-			dev->dev_attrib.pi_prot_type = TARGET_DIF_TYPE3_PROT;
-		} else if (!strcmp(bi->profile->name, "T10-DIF-TYPE1-CRC")) {
+	switch (bi->csum_type) {
+	case BLK_INTEGRITY_CSUM_IP:
+		pr_err("IBLOCK export of blk_integrity: %s not supported\n",
+			blk_integrity_profile_name(bi));
+		ret = -ENOSYS;
+		goto out_blkdev_put;
+	case BLK_INTEGRITY_CSUM_CRC:
+		if (bi->flags & BLK_INTEGRITY_REF_TAG)
 			dev->dev_attrib.pi_prot_type = TARGET_DIF_TYPE1_PROT;
-		}
-
-		if (dev->dev_attrib.pi_prot_type) {
-			if (bioset_integrity_create(bs, IBLOCK_BIO_POOL_SIZE) < 0) {
-				pr_err("Unable to allocate bioset for PI\n");
-				ret = -ENOMEM;
-				goto out_blkdev_put;
-			}
-			pr_debug("IBLOCK setup BIP bs->bio_integrity_pool: %p\n",
-				 &bs->bio_integrity_pool);
-		}
-		dev->dev_attrib.hw_pi_prot_type = dev->dev_attrib.pi_prot_type;
+		else
+			dev->dev_attrib.pi_prot_type = TARGET_DIF_TYPE3_PROT;
+		break;
+	default:
+		break;
 	}
 
+	dev->dev_attrib.hw_pi_prot_type = dev->dev_attrib.pi_prot_type;
 	return 0;
 
 out_blkdev_put:
-	bdev_release(ib_dev->ibd_bdev_handle);
+	fput(ib_dev->ibd_bdev_file);
 out_free_bioset:
 	bioset_exit(&ib_dev->ibd_bio_set);
 out:
@@ -205,8 +201,8 @@ static void iblock_destroy_device(struct se_device *dev)
 {
 	struct iblock_dev *ib_dev = IBLOCK_DEV(dev);
 
-	if (ib_dev->ibd_bdev_handle)
-		bdev_release(ib_dev->ibd_bdev_handle);
+	if (ib_dev->ibd_bdev_file)
+		fput(ib_dev->ibd_bdev_file);
 	bioset_exit(&ib_dev->ibd_bio_set);
 }
 
@@ -569,13 +565,14 @@ fail:
 }
 
 enum {
-	Opt_udev_path, Opt_readonly, Opt_force, Opt_err
+	Opt_udev_path, Opt_readonly, Opt_force, Opt_exclusive, Opt_err,
 };
 
 static match_table_t tokens = {
 	{Opt_udev_path, "udev_path=%s"},
 	{Opt_readonly, "readonly=%d"},
 	{Opt_force, "force=%d"},
+	{Opt_exclusive, "exclusive=%d"},
 	{Opt_err, NULL}
 };
 
@@ -585,7 +582,7 @@ static ssize_t iblock_set_configfs_dev_params(struct se_device *dev,
 	struct iblock_dev *ib_dev = IBLOCK_DEV(dev);
 	char *orig, *ptr, *arg_p, *opts;
 	substring_t args[MAX_OPT_ARGS];
-	int ret = 0, token;
+	int ret = 0, token, tmp_exclusive;
 	unsigned long tmp_readonly;
 
 	opts = kstrdup(page, GFP_KERNEL);
@@ -632,6 +629,22 @@ static ssize_t iblock_set_configfs_dev_params(struct se_device *dev,
 			ib_dev->ibd_readonly = tmp_readonly;
 			pr_debug("IBLOCK: readonly: %d\n", ib_dev->ibd_readonly);
 			break;
+		case Opt_exclusive:
+			arg_p = match_strdup(&args[0]);
+			if (!arg_p) {
+				ret = -ENOMEM;
+				break;
+			}
+			ret = kstrtoint(arg_p, 0, &tmp_exclusive);
+			kfree(arg_p);
+			if (ret < 0) {
+				pr_err("kstrtoul() failed for exclusive=\n");
+				goto out;
+			}
+			ib_dev->ibd_exclusive = tmp_exclusive;
+			pr_debug("IBLOCK: exclusive: %d\n",
+				 ib_dev->ibd_exclusive);
+			break;
 		case Opt_force:
 			break;
 		default:
@@ -656,6 +669,7 @@ static ssize_t iblock_show_configfs_dev_params(struct se_device *dev, char *b)
 		bl += sprintf(b + bl, "  UDEV PATH: %s",
 				ib_dev->ibd_udev_path);
 	bl += sprintf(b + bl, "  readonly: %d\n", ib_dev->ibd_readonly);
+	bl += sprintf(b + bl, "  exclusive: %d\n", ib_dev->ibd_exclusive);
 
 	bl += sprintf(b + bl, "        ");
 	if (bd) {

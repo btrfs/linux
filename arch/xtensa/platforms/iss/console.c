@@ -48,7 +48,7 @@ static int rs_open(struct tty_struct *tty, struct file * filp)
 static void rs_close(struct tty_struct *tty, struct file * filp)
 {
 	if (tty->count == 1)
-		del_timer_sync(&serial_timer);
+		timer_delete_sync(&serial_timer);
 }
 
 
@@ -166,10 +166,8 @@ late_initcall(rs_init);
 
 static void iss_console_write(struct console *co, const char *s, unsigned count)
 {
-	if (s && *s != 0) {
-		int len = strlen(s);
-		simc_write(1, s, count < len ? count : len);
-	}
+	if (s && *s != 0)
+		simc_write(1, s, min(count, strlen(s)));
 }
 
 static struct tty_driver* iss_console_device(struct console *c, int *index)

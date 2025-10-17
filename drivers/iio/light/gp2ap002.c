@@ -271,7 +271,6 @@ static int gp2ap002_read_raw(struct iio_dev *indio_dev,
 	}
 
 out:
-	pm_runtime_mark_last_busy(gp2ap002->dev);
 	pm_runtime_put_autosuspend(gp2ap002->dev);
 
 	return ret;
@@ -340,7 +339,7 @@ static int gp2ap002_write_event_config(struct iio_dev *indio_dev,
 				       const struct iio_chan_spec *chan,
 				       enum iio_event_type type,
 				       enum iio_event_direction dir,
-				       int state)
+				       bool state)
 {
 	struct gp2ap002 *gp2ap002 = iio_priv(indio_dev);
 
@@ -353,7 +352,6 @@ static int gp2ap002_write_event_config(struct iio_dev *indio_dev,
 		pm_runtime_get_sync(gp2ap002->dev);
 		gp2ap002->enabled = true;
 	} else {
-		pm_runtime_mark_last_busy(gp2ap002->dev);
 		pm_runtime_put_autosuspend(gp2ap002->dev);
 		gp2ap002->enabled = false;
 	}
@@ -420,7 +418,7 @@ static int gp2ap002_regmap_i2c_write(void *context, unsigned int reg,
 	return i2c_smbus_write_byte_data(i2c, reg, val);
 }
 
-static struct regmap_bus gp2ap002_regmap_bus = {
+static const struct regmap_bus gp2ap002_regmap_bus = {
 	.reg_read = gp2ap002_regmap_i2c_read,
 	.reg_write = gp2ap002_regmap_i2c_write,
 };
@@ -692,15 +690,15 @@ static DEFINE_RUNTIME_DEV_PM_OPS(gp2ap002_dev_pm_ops, gp2ap002_runtime_suspend,
 				 gp2ap002_runtime_resume, NULL);
 
 static const struct i2c_device_id gp2ap002_id_table[] = {
-	{ "gp2ap002", 0 },
-	{ },
+	{ "gp2ap002" },
+	{ }
 };
 MODULE_DEVICE_TABLE(i2c, gp2ap002_id_table);
 
 static const struct of_device_id gp2ap002_of_match[] = {
 	{ .compatible = "sharp,gp2ap002a00f" },
 	{ .compatible = "sharp,gp2ap002s00f" },
-	{ },
+	{ }
 };
 MODULE_DEVICE_TABLE(of, gp2ap002_of_match);
 

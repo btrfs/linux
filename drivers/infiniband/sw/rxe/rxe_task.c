@@ -85,17 +85,17 @@ static bool is_done(struct rxe_task *task)
 
 /* do_task is a wrapper for the three tasks (requester,
  * completer, responder) and calls them in a loop until
- * they return a non-zero value. It is called either
- * directly by rxe_run_task or indirectly if rxe_sched_task
- * schedules the task. They must call __reserve_if_idle to
- * move the task to busy before calling or scheduling.
- * The task can also be moved to drained or invalid
- * by calls to rxe_cleanup_task or rxe_disable_task.
- * In that case tasks which get here are not executed but
- * just flushed. The tasks are designed to look to see if
- * there is work to do and then do part of it before returning
- * here with a return value of zero until all the work
- * has been consumed then it returns a non-zero value.
+ * they return a non-zero value. It is called indirectly
+ * when rxe_sched_task schedules the task. They must
+ * call __reserve_if_idle to move the task to busy before
+ * calling or scheduling. The task can also be moved to
+ * drained or invalid by calls to rxe_cleanup_task or
+ * rxe_disable_task. In that case tasks which get here
+ * are not executed but just flushed. The tasks are
+ * designed to look to see if there is work to do and
+ * then do part of it before returning here with a return
+ * value of zero until all the work has been consumed then
+ * it returns a non-zero value.
  * The number of times the task can be run is limited by
  * max iterations so one task cannot hold the cpu forever.
  * If the limit is hit and work remains the task is rescheduled.
@@ -132,8 +132,12 @@ static void do_task(struct rxe_task *task)
 		 * yield the cpu and reschedule the task
 		 */
 		if (!ret) {
-			task->state = TASK_STATE_IDLE;
-			resched = 1;
+			if (task->state != TASK_STATE_DRAINING) {
+				task->state = TASK_STATE_IDLE;
+				resched = 1;
+			} else {
+				cont = 1;
+			}
 			goto exit;
 		}
 
@@ -156,7 +160,7 @@ static void do_task(struct rxe_task *task)
 
 		default:
 			WARN_ON(1);
-			rxe_dbg_qp(task->qp, "unexpected task state = %d",
+			rxe_dbg_qp(task->qp, "unexpected task state = %d\n",
 				   task->state);
 			task->state = TASK_STATE_IDLE;
 		}
@@ -167,7 +171,7 @@ exit:
 			if (WARN_ON(task->num_done != task->num_sched))
 				rxe_dbg_qp(
 					task->qp,
-					"%ld tasks scheduled, %ld tasks done",
+					"%ld tasks scheduled, %ld tasks done\n",
 					task->num_sched, task->num_done);
 		}
 		spin_unlock_irqrestore(&task->lock, flags);
@@ -232,24 +236,6 @@ void rxe_cleanup_task(struct rxe_task *task)
 	spin_lock_irqsave(&task->lock, flags);
 	task->state = TASK_STATE_INVALID;
 	spin_unlock_irqrestore(&task->lock, flags);
-}
-
-/* run the task inline if it is currently idle
- * cannot call do_task holding the lock
- */
-void rxe_run_task(struct rxe_task *task)
-{
-	unsigned long flags;
-	bool run;
-
-	WARN_ON(rxe_read(task->qp) <= 0);
-
-	spin_lock_irqsave(&task->lock, flags);
-	run = __reserve_if_idle(task);
-	spin_unlock_irqrestore(&task->lock, flags);
-
-	if (run)
-		do_task(task);
 }
 
 /* schedule the task to run later as a work queue entry.

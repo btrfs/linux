@@ -6,6 +6,9 @@
  * Author: Heiner Kallweit <hkallweit1@gmail.com>
  */
 
+#ifndef AQUANTIA_H
+#define AQUANTIA_H
+
 #include <linux/device.h>
 #include <linux/phy.h>
 
@@ -52,6 +55,7 @@
 #define VEND1_GLOBAL_CFG_SERDES_MODE_SGMII	3
 #define VEND1_GLOBAL_CFG_SERDES_MODE_OCSGMII	4
 #define VEND1_GLOBAL_CFG_SERDES_MODE_XFI5G	6
+#define VEND1_GLOBAL_CFG_AUTONEG_ENA		BIT(3)
 #define VEND1_GLOBAL_CFG_RATE_ADAPT		GENMASK(8, 7)
 #define VEND1_GLOBAL_CFG_RATE_ADAPT_NONE	0
 #define VEND1_GLOBAL_CFG_RATE_ADAPT_USX		1
@@ -62,6 +66,28 @@
 #define VEND1_GLOBAL_CONTROL2_UP_RUN_STALL_RST	BIT(15)
 #define VEND1_GLOBAL_CONTROL2_UP_RUN_STALL_OVD	BIT(6)
 #define VEND1_GLOBAL_CONTROL2_UP_RUN_STALL	BIT(0)
+
+#define VEND1_GLOBAL_LED_PROV			0xc430
+#define AQR_LED_PROV(x)				(VEND1_GLOBAL_LED_PROV + (x))
+#define VEND1_GLOBAL_LED_PROV_LINK2500		BIT(14)
+#define VEND1_GLOBAL_LED_PROV_LINK5000		BIT(15)
+#define VEND1_GLOBAL_LED_PROV_FORCE_ON		BIT(8)
+#define VEND1_GLOBAL_LED_PROV_LINK10000		BIT(7)
+#define VEND1_GLOBAL_LED_PROV_LINK1000		BIT(6)
+#define VEND1_GLOBAL_LED_PROV_LINK100		BIT(5)
+#define VEND1_GLOBAL_LED_PROV_RX_ACT		BIT(3)
+#define VEND1_GLOBAL_LED_PROV_TX_ACT		BIT(2)
+#define VEND1_GLOBAL_LED_PROV_ACT_STRETCH	GENMASK(0, 1)
+
+#define VEND1_GLOBAL_LED_PROV_LINK_MASK		(VEND1_GLOBAL_LED_PROV_LINK100 | \
+						 VEND1_GLOBAL_LED_PROV_LINK1000 | \
+						 VEND1_GLOBAL_LED_PROV_LINK10000 | \
+						 VEND1_GLOBAL_LED_PROV_LINK5000 | \
+						 VEND1_GLOBAL_LED_PROV_LINK2500)
+
+#define VEND1_GLOBAL_LED_DRIVE			0xc438
+#define VEND1_GLOBAL_LED_DRIVE_VDD		BIT(1)
+#define AQR_LED_DRIVE(x)			(VEND1_GLOBAL_LED_DRIVE + (x))
 
 #define VEND1_THERMAL_PROV_HIGH_TEMP_FAIL	0xc421
 #define VEND1_THERMAL_PROV_LOW_TEMP_FAIL	0xc422
@@ -86,6 +112,18 @@
 #define VEND1_GLOBAL_RSVD_STAT9			0xc88d
 #define VEND1_GLOBAL_RSVD_STAT9_MODE		GENMASK(7, 0)
 #define VEND1_GLOBAL_RSVD_STAT9_1000BT2		0x23
+
+/* MDIO_MMD_C22EXT */
+#define MDIO_C22EXT_STAT_SGMII_RX_GOOD_FRAMES		0xd292
+#define MDIO_C22EXT_STAT_SGMII_RX_BAD_FRAMES		0xd294
+#define MDIO_C22EXT_STAT_SGMII_RX_FALSE_CARRIER		0xd297
+#define MDIO_C22EXT_STAT_SGMII_TX_GOOD_FRAMES		0xd313
+#define MDIO_C22EXT_STAT_SGMII_TX_BAD_FRAMES		0xd315
+#define MDIO_C22EXT_STAT_SGMII_TX_FALSE_CARRIER		0xd317
+#define MDIO_C22EXT_STAT_SGMII_TX_COLLISIONS		0xd318
+#define MDIO_C22EXT_STAT_SGMII_TX_LINE_COLLISIONS	0xd319
+#define MDIO_C22EXT_STAT_SGMII_TX_FRAME_ALIGN_ERR	0xd31a
+#define MDIO_C22EXT_STAT_SGMII_TX_RUNT_FRAMES		0xd31b
 
 #define VEND1_GLOBAL_INT_STD_STATUS		0xfc00
 #define VEND1_GLOBAL_INT_VEND_STATUS		0xfc01
@@ -113,6 +151,87 @@
 #define VEND1_GLOBAL_INT_VEND_MASK_GLOBAL2	BIT(1)
 #define VEND1_GLOBAL_INT_VEND_MASK_GLOBAL3	BIT(0)
 
+#define AQR_MAX_LEDS				3
+
+/* Custom driver definitions for constructing a single variable out of
+ * aggregate firmware build information. These do not represent hardware
+ * fields.
+ */
+#define AQR_FW_FINGERPRINT_MAJOR		GENMASK_ULL(63, 56)
+#define AQR_FW_FINGERPRINT_MINOR		GENMASK_ULL(55, 48)
+#define AQR_FW_FINGERPRINT_BUILD_ID		GENMASK_ULL(47, 40)
+#define AQR_FW_FINGERPRINT_PROV_ID		GENMASK_ULL(39, 32)
+#define AQR_FW_FINGERPRINT_MISC_ID		GENMASK_ULL(31, 16)
+#define AQR_FW_FINGERPRINT_MISC_VER		GENMASK_ULL(15, 0)
+#define AQR_FW_FINGERPRINT(major, minor, build_id, prov_id, misc_id, misc_ver) \
+	(FIELD_PREP(AQR_FW_FINGERPRINT_MAJOR, major) | \
+	 FIELD_PREP(AQR_FW_FINGERPRINT_MINOR, minor) | \
+	 FIELD_PREP(AQR_FW_FINGERPRINT_BUILD_ID, build_id) | \
+	 FIELD_PREP(AQR_FW_FINGERPRINT_PROV_ID, prov_id) | \
+	 FIELD_PREP(AQR_FW_FINGERPRINT_MISC_ID, misc_id) | \
+	 FIELD_PREP(AQR_FW_FINGERPRINT_MISC_VER, misc_ver))
+
+/* 10G-QXGMII firmware for NXP SPF-30841 riser board (AQR412C) */
+#define AQR_G3_V4_3_C_AQR_NXP_SPF_30841_MUSX_ID40019_VER1198 \
+	AQR_FW_FINGERPRINT(4, 3, 0xc, 1, 40019, 1198)
+
+struct aqr107_hw_stat {
+	const char *name;
+	int reg;
+	int size;
+};
+
+#define SGMII_STAT(n, r, s) { n, MDIO_C22EXT_STAT_SGMII_ ## r, s }
+static const struct aqr107_hw_stat aqr107_hw_stats[] = {
+	SGMII_STAT("sgmii_rx_good_frames",	    RX_GOOD_FRAMES,	26),
+	SGMII_STAT("sgmii_rx_bad_frames",	    RX_BAD_FRAMES,	26),
+	SGMII_STAT("sgmii_rx_false_carrier_events", RX_FALSE_CARRIER,	 8),
+	SGMII_STAT("sgmii_tx_good_frames",	    TX_GOOD_FRAMES,	26),
+	SGMII_STAT("sgmii_tx_bad_frames",	    TX_BAD_FRAMES,	26),
+	SGMII_STAT("sgmii_tx_false_carrier_events", TX_FALSE_CARRIER,	 8),
+	SGMII_STAT("sgmii_tx_collisions",	    TX_COLLISIONS,	 8),
+	SGMII_STAT("sgmii_tx_line_collisions",	    TX_LINE_COLLISIONS,	 8),
+	SGMII_STAT("sgmii_tx_frame_alignment_err",  TX_FRAME_ALIGN_ERR,	16),
+	SGMII_STAT("sgmii_tx_runt_frames",	    TX_RUNT_FRAMES,	22),
+};
+
+#define AQR107_SGMII_STAT_SZ ARRAY_SIZE(aqr107_hw_stats)
+
+static const struct {
+	int speed;
+	u16 reg;
+} aqr_global_cfg_regs[] = {
+	{ SPEED_10,	VEND1_GLOBAL_CFG_10M, },
+	{ SPEED_100,	VEND1_GLOBAL_CFG_100M, },
+	{ SPEED_1000,	VEND1_GLOBAL_CFG_1G, },
+	{ SPEED_2500,	VEND1_GLOBAL_CFG_2_5G, },
+	{ SPEED_5000,	VEND1_GLOBAL_CFG_5G, },
+	{ SPEED_10000,	VEND1_GLOBAL_CFG_10G, },
+};
+
+#define AQR_NUM_GLOBAL_CFG ARRAY_SIZE(aqr_global_cfg_regs)
+
+enum aqr_rate_adaptation {
+	AQR_RATE_ADAPT_NONE,
+	AQR_RATE_ADAPT_USX,
+	AQR_RATE_ADAPT_PAUSE,
+};
+
+struct aqr_global_syscfg {
+	int speed;
+	phy_interface_t interface;
+	enum aqr_rate_adaptation rate_adapt;
+};
+
+struct aqr107_priv {
+	u64 sgmii_stats[AQR107_SGMII_STAT_SZ];
+	u64 fingerprint;
+	unsigned long leds_active_low;
+	unsigned long leds_active_high;
+	bool wait_on_global_cfg;
+	struct aqr_global_syscfg global_cfg[AQR_NUM_GLOBAL_CFG];
+};
+
 #if IS_REACHABLE(CONFIG_HWMON)
 int aqr_hwmon_probe(struct phy_device *phydev);
 #else
@@ -120,3 +239,21 @@ static inline int aqr_hwmon_probe(struct phy_device *phydev) { return 0; }
 #endif
 
 int aqr_firmware_load(struct phy_device *phydev);
+
+int aqr_phy_led_blink_set(struct phy_device *phydev, u8 index,
+			  unsigned long *delay_on,
+			  unsigned long *delay_off);
+int aqr_phy_led_brightness_set(struct phy_device *phydev,
+			       u8 index, enum led_brightness value);
+int aqr_phy_led_hw_is_supported(struct phy_device *phydev, u8 index,
+				unsigned long rules);
+int aqr_phy_led_hw_control_get(struct phy_device *phydev, u8 index,
+			       unsigned long *rules);
+int aqr_phy_led_hw_control_set(struct phy_device *phydev, u8 index,
+			       unsigned long rules);
+int aqr_phy_led_active_low_set(struct phy_device *phydev, int index, bool enable);
+int aqr_phy_led_polarity_set(struct phy_device *phydev, int index,
+			     unsigned long modes);
+int aqr_wait_reset_complete(struct phy_device *phydev);
+
+#endif /* AQUANTIA_H */

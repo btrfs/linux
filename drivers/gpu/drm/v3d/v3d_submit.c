@@ -11,10 +11,11 @@
 #include "v3d_trace.h"
 
 /* Takes the reservation lock on all the BOs being referenced, so that
- * at queue submit time we can update the reservations.
+ * we can attach fences and update the reservations after pushing the job
+ * to the queue.
  *
  * We don't lock the RCL the tile alloc/state BOs, or overflow memory
- * (all of which are on exec->unref_list).  They're entirely private
+ * (all of which are on render->unref_list). They're entirely private
  * to v3d, so we don't attach dma-buf fences to them.
  */
 static int
@@ -55,11 +56,11 @@ fail:
  * @bo_count: Number of GEM handles passed in
  *
  * The command validator needs to reference BOs by their index within
- * the submitted job's BO list.  This does the validation of the job's
+ * the submitted job's BO list. This does the validation of the job's
  * BO list and reference counting for the lifetime of the job.
  *
  * Note that this function doesn't need to unreference the BOs on
- * failure, because that will happen at v3d_exec_cleanup() time.
+ * failure, because that will happen at `v3d_job_free()`.
  */
 static int
 v3d_lookup_bos(struct drm_device *dev,
@@ -147,6 +148,13 @@ v3d_job_allocate(void **container, size_t size)
 	return 0;
 }
 
+static void
+v3d_job_deallocate(void **container)
+{
+	kfree(*container);
+	*container = NULL;
+}
+
 static int
 v3d_job_init(struct v3d_dev *v3d, struct drm_file *file_priv,
 	     struct v3d_job *job, void (*free)(struct kref *ref),
@@ -158,10 +166,10 @@ v3d_job_init(struct v3d_dev *v3d, struct drm_file *file_priv,
 
 	job->v3d = v3d;
 	job->free = free;
-	job->file = file_priv;
+	job->file_priv = v3d_priv;
 
 	ret = drm_sched_job_init(&job->base, &v3d_priv->sched_entity[queue],
-				 1, v3d_priv);
+				 1, v3d_priv, file_priv->client_id);
 	if (ret)
 		return ret;
 
@@ -273,8 +281,10 @@ v3d_setup_csd_jobs_and_bos(struct drm_file *file_priv,
 
 	ret = v3d_job_init(v3d, file_priv, &(*job)->base,
 			   v3d_job_free, args->in_sync, se, V3D_CSD);
-	if (ret)
+	if (ret) {
+		v3d_job_deallocate((void *)job);
 		return ret;
+	}
 
 	ret = v3d_job_allocate((void *)clean_job, sizeof(**clean_job));
 	if (ret)
@@ -282,8 +292,10 @@ v3d_setup_csd_jobs_and_bos(struct drm_file *file_priv,
 
 	ret = v3d_job_init(v3d, file_priv, *clean_job,
 			   v3d_job_free, 0, NULL, V3D_CACHE_CLEAN);
-	if (ret)
+	if (ret) {
+		v3d_job_deallocate((void *)clean_job);
 		return ret;
+	}
 
 	(*job)->args = *args;
 
@@ -441,6 +453,9 @@ v3d_get_cpu_timestamp_query_params(struct drm_file *file_priv,
 {
 	u32 __user *offsets, *syncs;
 	struct drm_v3d_timestamp_query timestamp;
+	struct v3d_timestamp_query_info *query_info = &job->timestamp_query;
+	unsigned int i;
+	int err;
 
 	if (!job) {
 		DRM_DEBUG("CPU job extension was attached to a GPU job.\n");
@@ -460,35 +475,44 @@ v3d_get_cpu_timestamp_query_params(struct drm_file *file_priv,
 
 	job->job_type = V3D_CPU_JOB_TYPE_TIMESTAMP_QUERY;
 
-	job->timestamp_query.queries = kvmalloc_array(timestamp.count,
-						      sizeof(struct v3d_timestamp_query),
-						      GFP_KERNEL);
-	if (!job->timestamp_query.queries)
+	query_info->queries = kvmalloc_array(timestamp.count,
+					     sizeof(struct v3d_timestamp_query),
+					     GFP_KERNEL);
+	if (!query_info->queries)
 		return -ENOMEM;
 
 	offsets = u64_to_user_ptr(timestamp.offsets);
 	syncs = u64_to_user_ptr(timestamp.syncs);
 
-	for (int i = 0; i < timestamp.count; i++) {
+	for (i = 0; i < timestamp.count; i++) {
 		u32 offset, sync;
 
-		if (copy_from_user(&offset, offsets++, sizeof(offset))) {
-			kvfree(job->timestamp_query.queries);
-			return -EFAULT;
+		if (get_user(offset, offsets++)) {
+			err = -EFAULT;
+			goto error;
 		}
 
-		job->timestamp_query.queries[i].offset = offset;
+		query_info->queries[i].offset = offset;
 
-		if (copy_from_user(&sync, syncs++, sizeof(sync))) {
-			kvfree(job->timestamp_query.queries);
-			return -EFAULT;
+		if (get_user(sync, syncs++)) {
+			err = -EFAULT;
+			goto error;
 		}
 
-		job->timestamp_query.queries[i].syncobj = drm_syncobj_find(file_priv, sync);
+		query_info->queries[i].syncobj = drm_syncobj_find(file_priv,
+								  sync);
+		if (!query_info->queries[i].syncobj) {
+			err = -ENOENT;
+			goto error;
+		}
 	}
-	job->timestamp_query.count = timestamp.count;
+	query_info->count = timestamp.count;
 
 	return 0;
+
+error:
+	v3d_timestamp_query_info_free(&job->timestamp_query, i);
+	return err;
 }
 
 static int
@@ -498,6 +522,9 @@ v3d_get_cpu_reset_timestamp_params(struct drm_file *file_priv,
 {
 	u32 __user *syncs;
 	struct drm_v3d_reset_timestamp_query reset;
+	struct v3d_timestamp_query_info *query_info = &job->timestamp_query;
+	unsigned int i;
+	int err;
 
 	if (!job) {
 		DRM_DEBUG("CPU job extension was attached to a GPU job.\n");
@@ -514,29 +541,38 @@ v3d_get_cpu_reset_timestamp_params(struct drm_file *file_priv,
 
 	job->job_type = V3D_CPU_JOB_TYPE_RESET_TIMESTAMP_QUERY;
 
-	job->timestamp_query.queries = kvmalloc_array(reset.count,
-						      sizeof(struct v3d_timestamp_query),
-						      GFP_KERNEL);
-	if (!job->timestamp_query.queries)
+	query_info->queries = kvmalloc_array(reset.count,
+					     sizeof(struct v3d_timestamp_query),
+					     GFP_KERNEL);
+	if (!query_info->queries)
 		return -ENOMEM;
 
 	syncs = u64_to_user_ptr(reset.syncs);
 
-	for (int i = 0; i < reset.count; i++) {
+	for (i = 0; i < reset.count; i++) {
 		u32 sync;
 
-		job->timestamp_query.queries[i].offset = reset.offset + 8 * i;
+		query_info->queries[i].offset = reset.offset + 8 * i;
 
-		if (copy_from_user(&sync, syncs++, sizeof(sync))) {
-			kvfree(job->timestamp_query.queries);
-			return -EFAULT;
+		if (get_user(sync, syncs++)) {
+			err = -EFAULT;
+			goto error;
 		}
 
-		job->timestamp_query.queries[i].syncobj = drm_syncobj_find(file_priv, sync);
+		query_info->queries[i].syncobj = drm_syncobj_find(file_priv,
+								  sync);
+		if (!query_info->queries[i].syncobj) {
+			err = -ENOENT;
+			goto error;
+		}
 	}
-	job->timestamp_query.count = reset.count;
+	query_info->count = reset.count;
 
 	return 0;
+
+error:
+	v3d_timestamp_query_info_free(&job->timestamp_query, i);
+	return err;
 }
 
 /* Get data for the copy timestamp query results job submission. */
@@ -547,7 +583,9 @@ v3d_get_cpu_copy_query_results_params(struct drm_file *file_priv,
 {
 	u32 __user *offsets, *syncs;
 	struct drm_v3d_copy_timestamp_query copy;
-	int i;
+	struct v3d_timestamp_query_info *query_info = &job->timestamp_query;
+	unsigned int i;
+	int err;
 
 	if (!job) {
 		DRM_DEBUG("CPU job extension was attached to a GPU job.\n");
@@ -567,10 +605,10 @@ v3d_get_cpu_copy_query_results_params(struct drm_file *file_priv,
 
 	job->job_type = V3D_CPU_JOB_TYPE_COPY_TIMESTAMP_QUERY;
 
-	job->timestamp_query.queries = kvmalloc_array(copy.count,
-						      sizeof(struct v3d_timestamp_query),
-						      GFP_KERNEL);
-	if (!job->timestamp_query.queries)
+	query_info->queries = kvmalloc_array(copy.count,
+					     sizeof(struct v3d_timestamp_query),
+					     GFP_KERNEL);
+	if (!query_info->queries)
 		return -ENOMEM;
 
 	offsets = u64_to_user_ptr(copy.offsets);
@@ -579,21 +617,26 @@ v3d_get_cpu_copy_query_results_params(struct drm_file *file_priv,
 	for (i = 0; i < copy.count; i++) {
 		u32 offset, sync;
 
-		if (copy_from_user(&offset, offsets++, sizeof(offset))) {
-			kvfree(job->timestamp_query.queries);
-			return -EFAULT;
+		if (get_user(offset, offsets++)) {
+			err = -EFAULT;
+			goto error;
 		}
 
-		job->timestamp_query.queries[i].offset = offset;
+		query_info->queries[i].offset = offset;
 
-		if (copy_from_user(&sync, syncs++, sizeof(sync))) {
-			kvfree(job->timestamp_query.queries);
-			return -EFAULT;
+		if (get_user(sync, syncs++)) {
+			err = -EFAULT;
+			goto error;
 		}
 
-		job->timestamp_query.queries[i].syncobj = drm_syncobj_find(file_priv, sync);
+		query_info->queries[i].syncobj = drm_syncobj_find(file_priv,
+								  sync);
+		if (!query_info->queries[i].syncobj) {
+			err = -ENOENT;
+			goto error;
+		}
 	}
-	job->timestamp_query.count = copy.count;
+	query_info->count = copy.count;
 
 	job->copy.do_64bit = copy.do_64bit;
 	job->copy.do_partial = copy.do_partial;
@@ -602,6 +645,73 @@ v3d_get_cpu_copy_query_results_params(struct drm_file *file_priv,
 	job->copy.stride = copy.stride;
 
 	return 0;
+
+error:
+	v3d_timestamp_query_info_free(&job->timestamp_query, i);
+	return err;
+}
+
+static int
+v3d_copy_query_info(struct v3d_performance_query_info *query_info,
+		    unsigned int count,
+		    unsigned int nperfmons,
+		    u32 __user *syncs,
+		    u64 __user *kperfmon_ids,
+		    struct drm_file *file_priv)
+{
+	unsigned int i, j;
+	int err;
+
+	for (i = 0; i < count; i++) {
+		struct v3d_performance_query *query = &query_info->queries[i];
+		u32 __user *ids_pointer;
+		u32 sync, id;
+		u64 ids;
+
+		if (get_user(sync, syncs++)) {
+			err = -EFAULT;
+			goto error;
+		}
+
+		if (get_user(ids, kperfmon_ids++)) {
+			err = -EFAULT;
+			goto error;
+		}
+
+		query->kperfmon_ids =
+			kvmalloc_array(nperfmons,
+				       sizeof(struct v3d_performance_query *),
+				       GFP_KERNEL);
+		if (!query->kperfmon_ids) {
+			err = -ENOMEM;
+			goto error;
+		}
+
+		ids_pointer = u64_to_user_ptr(ids);
+
+		for (j = 0; j < nperfmons; j++) {
+			if (get_user(id, ids_pointer++)) {
+				kvfree(query->kperfmon_ids);
+				err = -EFAULT;
+				goto error;
+			}
+
+			query->kperfmon_ids[j] = id;
+		}
+
+		query->syncobj = drm_syncobj_find(file_priv, sync);
+		if (!query->syncobj) {
+			kvfree(query->kperfmon_ids);
+			err = -ENOENT;
+			goto error;
+		}
+	}
+
+	return 0;
+
+error:
+	v3d_performance_query_info_free(query_info, i);
+	return err;
 }
 
 static int
@@ -609,9 +719,9 @@ v3d_get_cpu_reset_performance_params(struct drm_file *file_priv,
 				     struct drm_v3d_extension __user *ext,
 				     struct v3d_cpu_job *job)
 {
-	u32 __user *syncs;
-	u64 __user *kperfmon_ids;
+	struct v3d_performance_query_info *query_info = &job->performance_query;
 	struct drm_v3d_reset_performance_query reset;
+	int err;
 
 	if (!job) {
 		DRM_DEBUG("CPU job extension was attached to a GPU job.\n");
@@ -628,46 +738,24 @@ v3d_get_cpu_reset_performance_params(struct drm_file *file_priv,
 
 	job->job_type = V3D_CPU_JOB_TYPE_RESET_PERFORMANCE_QUERY;
 
-	job->performance_query.queries = kvmalloc_array(reset.count,
-							sizeof(struct v3d_performance_query),
-							GFP_KERNEL);
-	if (!job->performance_query.queries)
+	query_info->queries =
+		kvmalloc_array(reset.count,
+			       sizeof(struct v3d_performance_query),
+			       GFP_KERNEL);
+	if (!query_info->queries)
 		return -ENOMEM;
 
-	syncs = u64_to_user_ptr(reset.syncs);
-	kperfmon_ids = u64_to_user_ptr(reset.kperfmon_ids);
+	err = v3d_copy_query_info(query_info,
+				  reset.count,
+				  reset.nperfmons,
+				  u64_to_user_ptr(reset.syncs),
+				  u64_to_user_ptr(reset.kperfmon_ids),
+				  file_priv);
+	if (err)
+		return err;
 
-	for (int i = 0; i < reset.count; i++) {
-		u32 sync;
-		u64 ids;
-		u32 __user *ids_pointer;
-		u32 id;
-
-		if (copy_from_user(&sync, syncs++, sizeof(sync))) {
-			kvfree(job->performance_query.queries);
-			return -EFAULT;
-		}
-
-		job->performance_query.queries[i].syncobj = drm_syncobj_find(file_priv, sync);
-
-		if (copy_from_user(&ids, kperfmon_ids++, sizeof(ids))) {
-			kvfree(job->performance_query.queries);
-			return -EFAULT;
-		}
-
-		ids_pointer = u64_to_user_ptr(ids);
-
-		for (int j = 0; j < reset.nperfmons; j++) {
-			if (copy_from_user(&id, ids_pointer++, sizeof(id))) {
-				kvfree(job->performance_query.queries);
-				return -EFAULT;
-			}
-
-			job->performance_query.queries[i].kperfmon_ids[j] = id;
-		}
-	}
-	job->performance_query.count = reset.count;
-	job->performance_query.nperfmons = reset.nperfmons;
+	query_info->count = reset.count;
+	query_info->nperfmons = reset.nperfmons;
 
 	return 0;
 }
@@ -677,9 +765,9 @@ v3d_get_cpu_copy_performance_query_params(struct drm_file *file_priv,
 					  struct drm_v3d_extension __user *ext,
 					  struct v3d_cpu_job *job)
 {
-	u32 __user *syncs;
-	u64 __user *kperfmon_ids;
+	struct v3d_performance_query_info *query_info = &job->performance_query;
 	struct drm_v3d_copy_performance_query copy;
+	int err;
 
 	if (!job) {
 		DRM_DEBUG("CPU job extension was attached to a GPU job.\n");
@@ -699,47 +787,25 @@ v3d_get_cpu_copy_performance_query_params(struct drm_file *file_priv,
 
 	job->job_type = V3D_CPU_JOB_TYPE_COPY_PERFORMANCE_QUERY;
 
-	job->performance_query.queries = kvmalloc_array(copy.count,
-							sizeof(struct v3d_performance_query),
-							GFP_KERNEL);
-	if (!job->performance_query.queries)
+	query_info->queries =
+		kvmalloc_array(copy.count,
+			       sizeof(struct v3d_performance_query),
+			       GFP_KERNEL);
+	if (!query_info->queries)
 		return -ENOMEM;
 
-	syncs = u64_to_user_ptr(copy.syncs);
-	kperfmon_ids = u64_to_user_ptr(copy.kperfmon_ids);
+	err = v3d_copy_query_info(query_info,
+				  copy.count,
+				  copy.nperfmons,
+				  u64_to_user_ptr(copy.syncs),
+				  u64_to_user_ptr(copy.kperfmon_ids),
+				  file_priv);
+	if (err)
+		return err;
 
-	for (int i = 0; i < copy.count; i++) {
-		u32 sync;
-		u64 ids;
-		u32 __user *ids_pointer;
-		u32 id;
-
-		if (copy_from_user(&sync, syncs++, sizeof(sync))) {
-			kvfree(job->performance_query.queries);
-			return -EFAULT;
-		}
-
-		job->performance_query.queries[i].syncobj = drm_syncobj_find(file_priv, sync);
-
-		if (copy_from_user(&ids, kperfmon_ids++, sizeof(ids))) {
-			kvfree(job->performance_query.queries);
-			return -EFAULT;
-		}
-
-		ids_pointer = u64_to_user_ptr(ids);
-
-		for (int j = 0; j < copy.nperfmons; j++) {
-			if (copy_from_user(&id, ids_pointer++, sizeof(id))) {
-				kvfree(job->performance_query.queries);
-				return -EFAULT;
-			}
-
-			job->performance_query.queries[i].kperfmon_ids[j] = id;
-		}
-	}
-	job->performance_query.count = copy.count;
-	job->performance_query.nperfmons = copy.nperfmons;
-	job->performance_query.ncounters = copy.ncounters;
+	query_info->count = copy.count;
+	query_info->nperfmons = copy.nperfmons;
+	query_info->ncounters = copy.ncounters;
 
 	job->copy.do_64bit = copy.do_64bit;
 	job->copy.do_partial = copy.do_partial;
@@ -860,8 +926,10 @@ v3d_submit_cl_ioctl(struct drm_device *dev, void *data,
 
 	ret = v3d_job_init(v3d, file_priv, &render->base,
 			   v3d_render_job_free, args->in_sync_rcl, &se, V3D_RENDER);
-	if (ret)
+	if (ret) {
+		v3d_job_deallocate((void *)&render);
 		goto fail;
+	}
 
 	render->start = args->rcl_start;
 	render->end = args->rcl_end;
@@ -874,8 +942,10 @@ v3d_submit_cl_ioctl(struct drm_device *dev, void *data,
 
 		ret = v3d_job_init(v3d, file_priv, &bin->base,
 				   v3d_job_free, args->in_sync_bcl, &se, V3D_BIN);
-		if (ret)
+		if (ret) {
+			v3d_job_deallocate((void *)&bin);
 			goto fail;
+		}
 
 		bin->start = args->bcl_start;
 		bin->end = args->bcl_end;
@@ -892,8 +962,10 @@ v3d_submit_cl_ioctl(struct drm_device *dev, void *data,
 
 		ret = v3d_job_init(v3d, file_priv, clean_job,
 				   v3d_job_free, 0, NULL, V3D_CACHE_CLEAN);
-		if (ret)
+		if (ret) {
+			v3d_job_deallocate((void *)&clean_job);
 			goto fail;
+		}
 
 		last_job = clean_job;
 	} else {
@@ -910,6 +982,11 @@ v3d_submit_cl_ioctl(struct drm_device *dev, void *data,
 		goto fail;
 
 	if (args->perfmon_id) {
+		if (v3d->global_perfmon) {
+			ret = -EAGAIN;
+			goto fail_perfmon;
+		}
+
 		render->base.perfmon = v3d_perfmon_find(v3d_priv,
 							args->perfmon_id);
 
@@ -1015,8 +1092,10 @@ v3d_submit_tfu_ioctl(struct drm_device *dev, void *data,
 
 	ret = v3d_job_init(v3d, file_priv, &job->base,
 			   v3d_job_free, args->in_sync, &se, V3D_TFU);
-	if (ret)
+	if (ret) {
+		v3d_job_deallocate((void *)&job);
 		goto fail;
+	}
 
 	job->base.bo = kcalloc(ARRAY_SIZE(args->bo_handles),
 			       sizeof(*job->base.bo), GFP_KERNEL);
@@ -1123,6 +1202,11 @@ v3d_submit_csd_ioctl(struct drm_device *dev, void *data,
 		goto fail;
 
 	if (args->perfmon_id) {
+		if (v3d->global_perfmon) {
+			ret = -EAGAIN;
+			goto fail_perfmon;
+		}
+
 		job->base.perfmon = v3d_perfmon_find(v3d_priv,
 						     args->perfmon_id);
 		if (!job->base.perfmon) {
@@ -1233,8 +1317,10 @@ v3d_submit_cpu_ioctl(struct drm_device *dev, void *data,
 
 	ret = v3d_job_init(v3d, file_priv, &cpu_job->base,
 			   v3d_job_free, 0, &se, V3D_CPU);
-	if (ret)
+	if (ret) {
+		v3d_job_deallocate((void *)&cpu_job);
 		goto fail;
+	}
 
 	clean_job = cpu_job->indirect_csd.clean_job;
 	csd_job = cpu_job->indirect_csd.job;

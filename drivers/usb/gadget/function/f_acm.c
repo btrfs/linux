@@ -11,11 +11,14 @@
 
 /* #define VERBOSE_DEBUG */
 
+#include <linux/cleanup.h>
 #include <linux/slab.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/device.h>
 #include <linux/err.h>
+
+#include <linux/usb/gadget.h>
 
 #include "u_serial.h"
 
@@ -41,6 +44,7 @@ struct f_acm {
 	struct gserial			port;
 	u8				ctrl_id, data_id;
 	u8				port_num;
+	u8				bInterfaceProtocol;
 
 	u8				pending;
 
@@ -89,7 +93,7 @@ acm_iad_descriptor = {
 	.bInterfaceCount = 	2,	// control + data
 	.bFunctionClass =	USB_CLASS_COMM,
 	.bFunctionSubClass =	USB_CDC_SUBCLASS_ACM,
-	.bFunctionProtocol =	USB_CDC_ACM_PROTO_AT_V25TER,
+	/* .bFunctionProtocol = DYNAMIC */
 	/* .iFunction =		DYNAMIC */
 };
 
@@ -101,7 +105,7 @@ static struct usb_interface_descriptor acm_control_interface_desc = {
 	.bNumEndpoints =	1,
 	.bInterfaceClass =	USB_CLASS_COMM,
 	.bInterfaceSubClass =	USB_CDC_SUBCLASS_ACM,
-	.bInterfaceProtocol =	USB_CDC_ACM_PROTO_AT_V25TER,
+	/* .bInterfaceProtocol = DYNAMIC */
 	/* .iInterface = DYNAMIC */
 };
 
@@ -612,6 +616,7 @@ acm_bind(struct usb_configuration *c, struct usb_function *f)
 	struct usb_string	*us;
 	int			status;
 	struct usb_ep		*ep;
+	struct usb_request	*request __free(free_usb_request) = NULL;
 
 	/* REVISIT might want instance-specific strings to help
 	 * distinguish instances ...
@@ -629,7 +634,7 @@ acm_bind(struct usb_configuration *c, struct usb_function *f)
 	/* allocate instance-specific interface IDs, and patch descriptors */
 	status = usb_interface_id(c, f);
 	if (status < 0)
-		goto fail;
+		return status;
 	acm->ctrl_id = status;
 	acm_iad_descriptor.bFirstInterface = status;
 
@@ -638,40 +643,41 @@ acm_bind(struct usb_configuration *c, struct usb_function *f)
 
 	status = usb_interface_id(c, f);
 	if (status < 0)
-		goto fail;
+		return status;
 	acm->data_id = status;
 
 	acm_data_interface_desc.bInterfaceNumber = status;
 	acm_union_desc.bSlaveInterface0 = status;
 	acm_call_mgmt_descriptor.bDataInterface = status;
 
-	status = -ENODEV;
-
 	/* allocate instance-specific endpoints */
 	ep = usb_ep_autoconfig(cdev->gadget, &acm_fs_in_desc);
 	if (!ep)
-		goto fail;
+		return -ENODEV;
 	acm->port.in = ep;
 
 	ep = usb_ep_autoconfig(cdev->gadget, &acm_fs_out_desc);
 	if (!ep)
-		goto fail;
+		return -ENODEV;
 	acm->port.out = ep;
 
 	ep = usb_ep_autoconfig(cdev->gadget, &acm_fs_notify_desc);
 	if (!ep)
-		goto fail;
+		return -ENODEV;
 	acm->notify = ep;
 
-	/* allocate notification */
-	acm->notify_req = gs_alloc_req(ep,
-			sizeof(struct usb_cdc_notification) + 2,
-			GFP_KERNEL);
-	if (!acm->notify_req)
-		goto fail;
+	acm_iad_descriptor.bFunctionProtocol = acm->bInterfaceProtocol;
+	acm_control_interface_desc.bInterfaceProtocol = acm->bInterfaceProtocol;
 
-	acm->notify_req->complete = acm_cdc_notify_complete;
-	acm->notify_req->context = acm;
+	/* allocate notification */
+	request = gs_alloc_req(ep,
+			       sizeof(struct usb_cdc_notification) + 2,
+			       GFP_KERNEL);
+	if (!request)
+		return -ENODEV;
+
+	request->complete = acm_cdc_notify_complete;
+	request->context = acm;
 
 	/* support all relevant hardware speeds... we expect that when
 	 * hardware is dual speed, all bulk-capable endpoints work at
@@ -688,7 +694,9 @@ acm_bind(struct usb_configuration *c, struct usb_function *f)
 	status = usb_assign_descriptors(f, acm_fs_function, acm_hs_function,
 			acm_ss_function, acm_ss_function);
 	if (status)
-		goto fail;
+		return status;
+
+	acm->notify_req = no_free_ptr(request);
 
 	dev_dbg(&cdev->gadget->dev,
 		"acm ttyGS%d: IN/%s OUT/%s NOTIFY/%s\n",
@@ -696,14 +704,6 @@ acm_bind(struct usb_configuration *c, struct usb_function *f)
 		acm->port.in->name, acm->port.out->name,
 		acm->notify->name);
 	return 0;
-
-fail:
-	if (acm->notify_req)
-		gs_free_req(acm->notify, acm->notify_req);
-
-	ERROR(cdev, "%s/%p: can't bind, err %d\n", f->name, f, status);
-
-	return status;
 }
 
 static void acm_unbind(struct usb_configuration *c, struct usb_function *f)
@@ -719,8 +719,14 @@ static void acm_unbind(struct usb_configuration *c, struct usb_function *f)
 static void acm_free_func(struct usb_function *f)
 {
 	struct f_acm		*acm = func_to_acm(f);
+	struct f_serial_opts	*opts;
+
+	opts = container_of(f->fi, struct f_serial_opts, func_inst);
 
 	kfree(acm);
+	mutex_lock(&opts->lock);
+	opts->instances--;
+	mutex_unlock(&opts->lock);
 }
 
 static void acm_resume(struct usb_function *f)
@@ -761,7 +767,11 @@ static struct usb_function *acm_alloc_func(struct usb_function_instance *fi)
 	acm->port.func.disable = acm_disable;
 
 	opts = container_of(fi, struct f_serial_opts, func_inst);
+	mutex_lock(&opts->lock);
 	acm->port_num = opts->port_num;
+	acm->bInterfaceProtocol = opts->protocol;
+	opts->instances++;
+	mutex_unlock(&opts->lock);
 	acm->port.func.unbind = acm_unbind;
 	acm->port.func.free_func = acm_free_func;
 	acm->port.func.resume = acm_resume;
@@ -812,11 +822,42 @@ static ssize_t f_acm_port_num_show(struct config_item *item, char *page)
 
 CONFIGFS_ATTR_RO(f_acm_, port_num);
 
+static ssize_t f_acm_protocol_show(struct config_item *item, char *page)
+{
+	return sprintf(page, "%u\n", to_f_serial_opts(item)->protocol);
+}
+
+static ssize_t f_acm_protocol_store(struct config_item *item,
+		const char *page, size_t count)
+{
+	struct f_serial_opts *opts = to_f_serial_opts(item);
+	int ret;
+
+	mutex_lock(&opts->lock);
+
+	if (opts->instances) {
+		ret = -EBUSY;
+		goto out;
+	}
+
+	ret = kstrtou8(page, 0, &opts->protocol);
+	if (ret)
+		goto out;
+	ret = count;
+
+out:
+	mutex_unlock(&opts->lock);
+	return ret;
+}
+
+CONFIGFS_ATTR(f_acm_, protocol);
+
 static struct configfs_attribute *acm_attrs[] = {
 #ifdef CONFIG_U_SERIAL_CONSOLE
 	&f_acm_attr_console,
 #endif
 	&f_acm_attr_port_num,
+	&f_acm_attr_protocol,
 	NULL,
 };
 
@@ -832,6 +873,7 @@ static void acm_free_instance(struct usb_function_instance *fi)
 
 	opts = container_of(fi, struct f_serial_opts, func_inst);
 	gserial_free_line(opts->port_num);
+	mutex_destroy(&opts->lock);
 	kfree(opts);
 }
 
@@ -843,7 +885,9 @@ static struct usb_function_instance *acm_alloc_instance(void)
 	opts = kzalloc(sizeof(*opts), GFP_KERNEL);
 	if (!opts)
 		return ERR_PTR(-ENOMEM);
+	opts->protocol = USB_CDC_ACM_PROTO_AT_V25TER;
 	opts->func_inst.free_func_inst = acm_free_instance;
+	mutex_init(&opts->lock);
 	ret = gserial_alloc_line(&opts->port_num);
 	if (ret) {
 		kfree(opts);
@@ -854,4 +898,5 @@ static struct usb_function_instance *acm_alloc_instance(void)
 	return &opts->func_inst;
 }
 DECLARE_USB_FUNCTION_INIT(acm, acm_alloc_instance, acm_alloc_func);
+MODULE_DESCRIPTION("USB CDC serial (ACM) function driver");
 MODULE_LICENSE("GPL");

@@ -7,10 +7,11 @@
 #define __TEGRA_USB_PHY_H
 
 #include <linux/clk.h>
-#include <linux/gpio.h>
 #include <linux/regmap.h>
 #include <linux/reset.h>
 #include <linux/usb/otg.h>
+
+struct gpio_desc;
 
 /*
  * utmi_pll_config_in_car_module: true if the UTMI PLL configuration registers
@@ -78,14 +79,5 @@ struct tegra_usb_phy {
 	bool pad_wakeup;
 	bool powered_on;
 };
-
-void tegra_usb_phy_preresume(struct usb_phy *phy);
-
-void tegra_usb_phy_postresume(struct usb_phy *phy);
-
-void tegra_ehci_phy_restore_start(struct usb_phy *phy,
-				 enum tegra_usb_phy_port_speed port_speed);
-
-void tegra_ehci_phy_restore_end(struct usb_phy *phy);
 
 #endif /* __TEGRA_USB_PHY_H */

@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 /*
- * Copyright(c) 2023 Intel Corporation. All rights reserved.
+ * Copyright(c) 2023 Intel Corporation
  *
  * Authors: Cezary Rojewski <cezary.rojewski@intel.com>
  *          Amadeusz Slawinski <amadeuszx.slawinski@linux.intel.com>
@@ -10,6 +10,16 @@
 #define __SOUND_SOC_INTEL_AVS_UTILS_H
 
 #include <sound/soc-acpi.h>
+
+extern bool obsolete_card_names;
+
+struct avs_mach_pdata {
+	struct hda_codec *codec;
+	unsigned long *tdms;
+	char *codec_name; /* DMIC only */
+
+	bool obsolete_card_names;
+};
 
 static inline bool avs_mach_singular_ssp(struct snd_soc_acpi_mach *mach)
 {
@@ -23,14 +33,16 @@ static inline u32 avs_mach_ssp_port(struct snd_soc_acpi_mach *mach)
 
 static inline bool avs_mach_singular_tdm(struct snd_soc_acpi_mach *mach, u32 port)
 {
-	unsigned long *tdms = mach->pdata;
+	struct avs_mach_pdata *pdata = mach->pdata;
+	unsigned long *tdms = pdata->tdms;
 
 	return !tdms || (hweight_long(tdms[port]) == 1);
 }
 
 static inline u32 avs_mach_ssp_tdm(struct snd_soc_acpi_mach *mach, u32 port)
 {
-	unsigned long *tdms = mach->pdata;
+	struct avs_mach_pdata *pdata = mach->pdata;
+	unsigned long *tdms = pdata->tdms;
 
 	return tdms ? __ffs(tdms[port]) : 0;
 }

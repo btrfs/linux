@@ -35,7 +35,7 @@
 static int
 nv84_fence_emit32(struct nouveau_channel *chan, u64 virtual, u32 sequence)
 {
-	struct nvif_push *push = chan->chan.push;
+	struct nvif_push *push = &chan->chan.push;
 	int ret = PUSH_WAIT(push, 8);
 	if (ret == 0) {
 		PUSH_MTHD(push, NV826F, SET_CONTEXT_DMA_SEMAPHORE, chan->vram.handle);
@@ -58,7 +58,7 @@ nv84_fence_emit32(struct nouveau_channel *chan, u64 virtual, u32 sequence)
 static int
 nv84_fence_sync32(struct nouveau_channel *chan, u64 virtual, u32 sequence)
 {
-	struct nvif_push *push = chan->chan.push;
+	struct nvif_push *push = &chan->chan.push;
 	int ret = PUSH_WAIT(push, 7);
 	if (ret == 0) {
 		PUSH_MTHD(push, NV826F, SET_CONTEXT_DMA_SEMAPHORE, chan->vram.handle);
@@ -79,7 +79,7 @@ nv84_fence_sync32(struct nouveau_channel *chan, u64 virtual, u32 sequence)
 static inline u32
 nv84_fence_chid(struct nouveau_channel *chan)
 {
-	return chan->drm->runl[chan->runlist].chan_id_base + chan->chid;
+	return chan->cli->drm->runl[chan->runlist].chan_id_base + chan->chid;
 }
 
 static int
@@ -105,14 +105,14 @@ nv84_fence_sync(struct nouveau_fence *fence,
 static u32
 nv84_fence_read(struct nouveau_channel *chan)
 {
-	struct nv84_fence_priv *priv = chan->drm->fence;
+	struct nv84_fence_priv *priv = chan->cli->drm->fence;
 	return nouveau_bo_rd32(priv->bo, nv84_fence_chid(chan) * 16/4);
 }
 
 static void
 nv84_fence_context_del(struct nouveau_channel *chan)
 {
-	struct nv84_fence_priv *priv = chan->drm->fence;
+	struct nv84_fence_priv *priv = chan->cli->drm->fence;
 	struct nv84_fence_chan *fctx = chan->fence;
 
 	nouveau_bo_wr32(priv->bo, nv84_fence_chid(chan) * 16 / 4, fctx->base.sequence);
@@ -127,7 +127,7 @@ nv84_fence_context_del(struct nouveau_channel *chan)
 int
 nv84_fence_context_new(struct nouveau_channel *chan)
 {
-	struct nv84_fence_priv *priv = chan->drm->fence;
+	struct nv84_fence_priv *priv = chan->cli->drm->fence;
 	struct nv84_fence_chan *fctx;
 	int ret;
 
@@ -185,10 +185,8 @@ static void
 nv84_fence_destroy(struct nouveau_drm *drm)
 {
 	struct nv84_fence_priv *priv = drm->fence;
-	nouveau_bo_unmap(priv->bo);
-	if (priv->bo)
-		nouveau_bo_unpin(priv->bo);
-	nouveau_bo_ref(NULL, &priv->bo);
+
+	nouveau_bo_unpin_del(&priv->bo);
 	drm->fence = NULL;
 	kfree(priv);
 }
@@ -222,19 +220,8 @@ nv84_fence_create(struct nouveau_drm *drm)
 		  * will lose CPU/GPU coherency!
 		  */
 		NOUVEAU_GEM_DOMAIN_GART | NOUVEAU_GEM_DOMAIN_COHERENT;
-	ret = nouveau_bo_new(&drm->client, 16 * drm->chan_total, 0,
-			     domain, 0, 0, NULL, NULL, &priv->bo);
-	if (ret == 0) {
-		ret = nouveau_bo_pin(priv->bo, domain, false);
-		if (ret == 0) {
-			ret = nouveau_bo_map(priv->bo);
-			if (ret)
-				nouveau_bo_unpin(priv->bo);
-		}
-		if (ret)
-			nouveau_bo_ref(NULL, &priv->bo);
-	}
 
+	ret = nouveau_bo_new_map(&drm->client, domain, 16 * drm->chan_total, &priv->bo);
 	if (ret)
 		nv84_fence_destroy(drm);
 	return ret;

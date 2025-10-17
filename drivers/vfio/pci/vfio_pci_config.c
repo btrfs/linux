@@ -313,6 +313,10 @@ static int vfio_virt_config_read(struct vfio_pci_core_device *vdev, int pos,
 	return count;
 }
 
+static struct perm_bits direct_ro_perms = {
+	.readfn = vfio_direct_config_read,
+};
+
 /* Default capability regions to read-only, no-virtualization */
 static struct perm_bits cap_perms[PCI_CAP_ID_MAX + 1] = {
 	[0 ... PCI_CAP_ID_MAX] = { .readfn = vfio_direct_config_read }
@@ -507,13 +511,13 @@ static void vfio_bar_fixup(struct vfio_pci_core_device *vdev)
 		mask = ~(pci_resource_len(pdev, PCI_ROM_RESOURCE) - 1);
 		mask |= PCI_ROM_ADDRESS_ENABLE;
 		*vbar &= cpu_to_le32((u32)mask);
-	} else if (pdev->resource[PCI_ROM_RESOURCE].flags &
-					IORESOURCE_ROM_SHADOW) {
-		mask = ~(0x20000 - 1);
+	} else if (pdev->rom && pdev->romlen) {
+		mask = ~(roundup_pow_of_two(pdev->romlen) - 1);
 		mask |= PCI_ROM_ADDRESS_ENABLE;
 		*vbar &= cpu_to_le32((u32)mask);
-	} else
+	} else {
 		*vbar = 0;
+	}
 
 	vdev->bardirty = false;
 }
@@ -1385,11 +1389,12 @@ static int vfio_ext_cap_len(struct vfio_pci_core_device *vdev, u16 ecap, u16 epo
 
 	switch (ecap) {
 	case PCI_EXT_CAP_ID_VNDR:
-		ret = pci_read_config_dword(pdev, epos + PCI_VSEC_HDR, &dword);
+		ret = pci_read_config_dword(pdev, epos + PCI_VNDR_HEADER,
+					    &dword);
 		if (ret)
 			return pcibios_err_to_errno(ret);
 
-		return dword >> PCI_VSEC_HDR_LEN_SHIFT;
+		return PCI_VNDR_HEADER_LEN(dword);
 	case PCI_EXT_CAP_ID_VC:
 	case PCI_EXT_CAP_ID_VC9:
 	case PCI_EXT_CAP_ID_MFVC:
@@ -1809,7 +1814,8 @@ int vfio_config_init(struct vfio_pci_core_device *vdev)
 					cpu_to_le16(PCI_COMMAND_MEMORY);
 	}
 
-	if (!IS_ENABLED(CONFIG_VFIO_PCI_INTX) || vdev->nointx)
+	if (!IS_ENABLED(CONFIG_VFIO_PCI_INTX) || vdev->nointx ||
+	    !vdev->pdev->irq || vdev->pdev->irq == IRQ_NOTCONNECTED)
 		vconfig[PCI_INTERRUPT_PIN] = 0;
 
 	ret = vfio_cap_init(vdev);
@@ -1897,9 +1903,17 @@ static ssize_t vfio_config_do_rw(struct vfio_pci_core_device *vdev, char __user 
 		cap_start = *ppos;
 	} else {
 		if (*ppos >= PCI_CFG_SPACE_SIZE) {
-			WARN_ON(cap_id > PCI_EXT_CAP_ID_MAX);
+			/*
+			 * We can get a cap_id that exceeds PCI_EXT_CAP_ID_MAX
+			 * if we're hiding an unknown capability at the start
+			 * of the extended capability list.  Use default, ro
+			 * access, which will virtualize the id and next values.
+			 */
+			if (cap_id > PCI_EXT_CAP_ID_MAX)
+				perm = &direct_ro_perms;
+			else
+				perm = &ecap_perms[cap_id];
 
-			perm = &ecap_perms[cap_id];
 			cap_start = vfio_find_cap_start(vdev, *ppos);
 		} else {
 			WARN_ON(cap_id > PCI_CAP_ID_MAX);
@@ -1966,3 +1980,45 @@ ssize_t vfio_pci_config_rw(struct vfio_pci_core_device *vdev, char __user *buf,
 
 	return done;
 }
+
+/**
+ * vfio_pci_core_range_intersect_range() - Determine overlap between a buffer
+ *					   and register offset ranges.
+ * @buf_start:		start offset of the buffer
+ * @buf_cnt:		number of buffer bytes
+ * @reg_start:		start register offset
+ * @reg_cnt:		number of register bytes
+ * @buf_offset:	start offset of overlap in the buffer
+ * @intersect_count:	number of overlapping bytes
+ * @register_offset:	start offset of overlap in register
+ *
+ * Returns: true if there is overlap, false if not.
+ * The overlap start and size is returned through function args.
+ */
+bool vfio_pci_core_range_intersect_range(loff_t buf_start, size_t buf_cnt,
+					 loff_t reg_start, size_t reg_cnt,
+					 loff_t *buf_offset,
+					 size_t *intersect_count,
+					 size_t *register_offset)
+{
+	if (buf_start <= reg_start &&
+	    buf_start + buf_cnt > reg_start) {
+		*buf_offset = reg_start - buf_start;
+		*intersect_count = min_t(size_t, reg_cnt,
+					 buf_start + buf_cnt - reg_start);
+		*register_offset = 0;
+		return true;
+	}
+
+	if (buf_start > reg_start &&
+	    buf_start < reg_start + reg_cnt) {
+		*buf_offset = 0;
+		*intersect_count = min_t(size_t, buf_cnt,
+					 reg_start + reg_cnt - buf_start);
+		*register_offset = buf_start - reg_start;
+		return true;
+	}
+
+	return false;
+}
+EXPORT_SYMBOL_GPL(vfio_pci_core_range_intersect_range);

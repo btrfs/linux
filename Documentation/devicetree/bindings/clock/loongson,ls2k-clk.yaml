@@ -16,14 +16,16 @@ description: |
 properties:
   compatible:
     enum:
-      - loongson,ls2k-clk
+      - loongson,ls2k0300-clk
+      - loongson,ls2k0500-clk
+      - loongson,ls2k-clk  # This is for Loongson-2K1000
+      - loongson,ls2k2000-clk
 
   reg:
     maxItems: 1
 
   clocks:
-    items:
-      - description: 100m ref
+    maxItems: 1
 
   clock-names:
     items:
@@ -36,11 +38,23 @@ properties:
       ID in its "clocks" phandle cell. See include/dt-bindings/clock/loongson,ls2k-clk.h
       for the full list of Loongson-2 SoC clock IDs.
 
+allOf:
+  - if:
+      properties:
+        compatible:
+          contains:
+            const: loongson,ls2k0300-clk
+    then:
+      properties:
+        clock-names: false
+    else:
+      required:
+        - clock-names
+
 required:
   - compatible
   - reg
   - clocks
-  - clock-names
   - '#clock-cells'
 
 additionalProperties: false

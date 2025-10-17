@@ -69,29 +69,19 @@ model features for SME is included in Appendix A.
   vectors from 0 to VL/8-1 stored in the same endianness invariant format as is
   used for SVE vectors.
 
-* On thread creation TPIDR2_EL0 is preserved unless CLONE_SETTLS is specified,
-  in which case it is set to 0.
+* On thread creation PSTATE.ZA and TPIDR2_EL0 are preserved unless CLONE_VM
+  is specified, in which case PSTATE.ZA is set to 0 and TPIDR2_EL0 is set to 0.
 
 2.  Vector lengths
 ------------------
 
-SME defines a second vector length similar to the SVE vector length which is
+SME defines a second vector length similar to the SVE vector length which
 controls the size of the streaming mode SVE vectors and the ZA matrix array.
 The ZA matrix is square with each side having as many bytes as a streaming
 mode SVE vector.
 
 
-3.  Sharing of streaming and non-streaming mode SVE state
----------------------------------------------------------
-
-It is implementation defined which if any parts of the SVE state are shared
-between streaming and non-streaming modes.  When switching between modes
-via software interfaces such as ptrace if no register content is provided as
-part of switching no state will be assumed to be shared and everything will
-be zeroed.
-
-
-4.  System call behaviour
+3.  System call behaviour
 -------------------------
 
 * On syscall PSTATE.ZA is preserved, if PSTATE.ZA==1 then the contents of the
@@ -112,10 +102,10 @@ be zeroed.
   exceptions for execve() described in section 6.
 
 
-5.  Signal handling
+4.  Signal handling
 -------------------
 
-* Signal handlers are invoked with streaming mode and ZA disabled.
+* Signal handlers are invoked with PSTATE.SM=0, PSTATE.ZA=0, and TPIDR2_EL0=0.
 
 * A new signal frame record TPIDR2_MAGIC is added formatted as a struct
   tpidr2_context to allow access to TPIDR2_EL0 from signal handlers.
@@ -238,12 +228,12 @@ prctl(PR_SME_SET_VL, unsigned long arg)
       bits of Z0..Z31 except for Z0 bits [127:0] .. Z31 bits [127:0] to become
       unspecified, including both streaming and non-streaming SVE state.
       Calling PR_SME_SET_VL with vl equal to the thread's current vector
-      length, or calling PR_SME_SET_VL with the PR_SVE_SET_VL_ONEXEC flag,
+      length, or calling PR_SME_SET_VL with the PR_SME_SET_VL_ONEXEC flag,
       does not constitute a change to the vector length for this purpose.
 
-    * Changing the vector length causes PSTATE.ZA and PSTATE.SM to be cleared.
+    * Changing the vector length causes PSTATE.ZA to be cleared.
       Calling PR_SME_SET_VL with vl equal to the thread's current vector
-      length, or calling PR_SME_SET_VL with the PR_SVE_SET_VL_ONEXEC flag,
+      length, or calling PR_SME_SET_VL with the PR_SME_SET_VL_ONEXEC flag,
       does not constitute a change to the vector length for this purpose.
 
 
@@ -346,6 +336,10 @@ The regset data starts with struct user_za_header, containing:
 
 * Writes to NT_ARM_ZT will set PSTATE.ZA to 1.
 
+* If any register data is provided along with SME_PT_VL_ONEXEC then the
+  registers data will be interpreted with the current vector length, not
+  the vector length configured for use on exec.
+
 
 8.  ELF coredump extensions
 ---------------------------
@@ -379,9 +373,8 @@ The regset data starts with struct user_za_header, containing:
 /proc/sys/abi/sme_default_vector_length
 
     Writing the text representation of an integer to this file sets the system
-    default vector length to the specified value, unless the value is greater
-    than the maximum vector length supported by the system in which case the
-    default vector length is set to that maximum.
+    default vector length to the specified value rounded to a supported value
+    using the same rules as for setting vector length via PR_SME_SET_VL.
 
     The result can be determined by reopening the file and reading its
     contents.

@@ -13,8 +13,8 @@ else
 endif
 
 ifdef CONFIG_CC_IS_GCC
-RETPOLINE_CFLAGS	:= $(call cc-option,-mindirect-branch=thunk-extern -mindirect-branch-register)
-RETPOLINE_VDSO_CFLAGS	:= $(call cc-option,-mindirect-branch=thunk-inline -mindirect-branch-register)
+RETPOLINE_CFLAGS	:= -mindirect-branch=thunk-extern -mindirect-branch-register
+RETPOLINE_VDSO_CFLAGS	:= -mindirect-branch=thunk-inline -mindirect-branch-register
 endif
 ifdef CONFIG_CC_IS_CLANG
 RETPOLINE_CFLAGS	:= -mretpoline-external-thunk
@@ -22,21 +22,26 @@ RETPOLINE_VDSO_CFLAGS	:= -mretpoline
 endif
 RETPOLINE_CFLAGS	+= $(call cc-option,-mindirect-branch-cs-prefix)
 
-ifdef CONFIG_RETHUNK
+ifdef CONFIG_MITIGATION_RETHUNK
 RETHUNK_CFLAGS		:= -mfunction-return=thunk-extern
+RETHUNK_RUSTFLAGS	:= -Zfunction-return=thunk-extern
 RETPOLINE_CFLAGS	+= $(RETHUNK_CFLAGS)
+RETPOLINE_RUSTFLAGS	+= $(RETHUNK_RUSTFLAGS)
 endif
 
 export RETHUNK_CFLAGS
+export RETHUNK_RUSTFLAGS
 export RETPOLINE_CFLAGS
+export RETPOLINE_RUSTFLAGS
 export RETPOLINE_VDSO_CFLAGS
 
 # For gcc stack alignment is specified with -mpreferred-stack-boundary,
 # clang has the option -mstack-alignment for that purpose.
-ifneq ($(call cc-option, -mpreferred-stack-boundary=4),)
+ifdef CONFIG_CC_IS_GCC
       cc_stack_align4 := -mpreferred-stack-boundary=2
       cc_stack_align8 := -mpreferred-stack-boundary=3
-else ifneq ($(call cc-option, -mstack-alignment=16),)
+endif
+ifdef CONFIG_CC_IS_CLANG
       cc_stack_align4 := -mstack-alignment=4
       cc_stack_align8 := -mstack-alignment=8
 endif
@@ -53,6 +58,9 @@ REALMODE_CFLAGS += -fno-stack-protector
 REALMODE_CFLAGS += -Wno-address-of-packed-member
 REALMODE_CFLAGS += $(cc_stack_align4)
 REALMODE_CFLAGS += $(CLANG_FLAGS)
+ifdef CONFIG_CC_IS_CLANG
+REALMODE_CFLAGS += -Wno-gnu
+endif
 export REALMODE_CFLAGS
 
 # BITS is used as extension for files which are available in a 32 bit
@@ -68,7 +76,16 @@ export BITS
 #    https://gcc.gnu.org/bugzilla/show_bug.cgi?id=53383
 #
 KBUILD_CFLAGS += -mno-sse -mno-mmx -mno-sse2 -mno-3dnow -mno-avx
+KBUILD_RUSTFLAGS += --target=$(objtree)/scripts/target.json
 KBUILD_RUSTFLAGS += -Ctarget-feature=-sse,-sse2,-sse3,-ssse3,-sse4.1,-sse4.2,-avx,-avx2
+
+#
+# CFLAGS for compiling floating point code inside the kernel.
+#
+CC_FLAGS_FPU := -msse -msse2
+ifdef CONFIG_CC_IS_GCC
+CC_FLAGS_FPU += -mhard-float
+endif
 
 ifeq ($(CONFIG_X86_KERNEL_IBT),y)
 #
@@ -109,16 +126,12 @@ ifeq ($(CONFIG_X86_32),y)
         include $(srctree)/arch/x86/Makefile_32.cpu
         KBUILD_CFLAGS += $(cflags-y)
 
-        # temporary until string.h is fixed
+    ifneq ($(call clang-min-version, 160000),y)
+        # https://github.com/llvm/llvm-project/issues/53645
         KBUILD_CFLAGS += -ffreestanding
+    endif
 
-	ifeq ($(CONFIG_STACKPROTECTOR),y)
-		ifeq ($(CONFIG_SMP),y)
-			KBUILD_CFLAGS += -mstack-protector-guard-reg=fs -mstack-protector-guard-symbol=__stack_chk_guard
-		else
-			KBUILD_CFLAGS += -mstack-protector-guard=global
-		endif
-	endif
+        percpu_seg := fs
 else
         BITS := 64
         UTS_MACHINE := x86_64
@@ -135,7 +148,7 @@ else
 
         # Don't autogenerate traditional x87 instructions
         KBUILD_CFLAGS += -mno-80387
-        KBUILD_CFLAGS += $(call cc-option,-mno-fp-ret-in-387)
+        KBUILD_CFLAGS += -mno-fp-ret-in-387
 
         # By default gcc and clang use a stack alignment of 16 bytes for x86.
         # However the standard kernel entry on x86-64 leaves the stack on an
@@ -147,27 +160,31 @@ else
         KBUILD_CFLAGS += $(cc_stack_align8)
 
 	# Use -mskip-rax-setup if supported.
-	KBUILD_CFLAGS += $(call cc-option,-mskip-rax-setup)
+	KBUILD_CFLAGS += -mskip-rax-setup
 
-        # FIXME - should be integrated in Makefile.cpu (Makefile_32.cpu)
-        cflags-$(CONFIG_MK8)		+= -march=k8
-        cflags-$(CONFIG_MPSC)		+= -march=nocona
-        cflags-$(CONFIG_MCORE2)		+= -march=core2
-        cflags-$(CONFIG_MATOM)		+= -march=atom
-        cflags-$(CONFIG_GENERIC_CPU)	+= -mtune=generic
-        KBUILD_CFLAGS += $(cflags-y)
-
-        rustflags-$(CONFIG_MK8)		+= -Ctarget-cpu=k8
-        rustflags-$(CONFIG_MPSC)	+= -Ctarget-cpu=nocona
-        rustflags-$(CONFIG_MCORE2)	+= -Ctarget-cpu=core2
-        rustflags-$(CONFIG_MATOM)	+= -Ctarget-cpu=atom
-        rustflags-$(CONFIG_GENERIC_CPU)	+= -Ztune-cpu=generic
-        KBUILD_RUSTFLAGS += $(rustflags-y)
+ifdef CONFIG_X86_NATIVE_CPU
+        KBUILD_CFLAGS += -march=native
+        KBUILD_RUSTFLAGS += -Ctarget-cpu=native
+else
+        KBUILD_CFLAGS += -march=x86-64 -mtune=generic
+        KBUILD_RUSTFLAGS += -Ctarget-cpu=x86-64 -Ztune-cpu=generic
+endif
 
         KBUILD_CFLAGS += -mno-red-zone
         KBUILD_CFLAGS += -mcmodel=kernel
         KBUILD_RUSTFLAGS += -Cno-redzone=y
         KBUILD_RUSTFLAGS += -Ccode-model=kernel
+
+        percpu_seg := gs
+endif
+
+ifeq ($(CONFIG_STACKPROTECTOR),y)
+    ifeq ($(CONFIG_SMP),y)
+	KBUILD_CFLAGS += -mstack-protector-guard-reg=$(percpu_seg)
+	KBUILD_CFLAGS += -mstack-protector-guard-symbol=__ref_stack_chk_guard
+    else
+	KBUILD_CFLAGS += -mstack-protector-guard=global
+    endif
 endif
 
 #
@@ -192,11 +209,12 @@ KBUILD_CFLAGS += -Wno-sign-compare
 KBUILD_CFLAGS += -fno-asynchronous-unwind-tables
 
 # Avoid indirect branches in kernel to deal with Spectre
-ifdef CONFIG_RETPOLINE
+ifdef CONFIG_MITIGATION_RETPOLINE
   KBUILD_CFLAGS += $(RETPOLINE_CFLAGS)
+  KBUILD_RUSTFLAGS += $(RETPOLINE_RUSTFLAGS)
   # Additionally, avoid generating expensive indirect jumps which
   # are subject to retpolines for small number of switch cases.
-  # clang turns off jump table generation by default when under
+  # LLVM turns off jump table generation by default when under
   # retpoline builds, however, gcc does not for x86. This has
   # only been fixed starting from gcc stable version 8.4.0 and
   # onwards, but not for older ones. See gcc bug #86952.
@@ -205,7 +223,7 @@ ifdef CONFIG_RETPOLINE
   endif
 endif
 
-ifdef CONFIG_SLS
+ifdef CONFIG_MITIGATION_SLS
   KBUILD_CFLAGS += -mharden-sls=all
 endif
 
@@ -213,21 +231,13 @@ ifdef CONFIG_CALL_PADDING
 PADDING_CFLAGS := -fpatchable-function-entry=$(CONFIG_FUNCTION_PADDING_BYTES),$(CONFIG_FUNCTION_PADDING_BYTES)
 KBUILD_CFLAGS += $(PADDING_CFLAGS)
 export PADDING_CFLAGS
+
+PADDING_RUSTFLAGS := -Zpatchable-function-entry=$(CONFIG_FUNCTION_PADDING_BYTES),$(CONFIG_FUNCTION_PADDING_BYTES)
+KBUILD_RUSTFLAGS += $(PADDING_RUSTFLAGS)
+export PADDING_RUSTFLAGS
 endif
 
 KBUILD_LDFLAGS += -m elf_$(UTS_MACHINE)
-
-ifdef CONFIG_LTO_CLANG
-ifeq ($(call test-lt, $(CONFIG_LLD_VERSION), 130000),y)
-KBUILD_LDFLAGS	+= -plugin-opt=-stack-alignment=$(if $(CONFIG_X86_32),4,8)
-endif
-endif
-
-ifdef CONFIG_X86_NEED_RELOCS
-LDFLAGS_vmlinux := --emit-relocs --discard-none
-else
-LDFLAGS_vmlinux :=
-endif
 
 #
 # The 64-bit kernel must be aligned to 2MB.  Pass -z max-page-size=0x200000 to
@@ -249,11 +259,23 @@ archheaders:
 	$(Q)$(MAKE) $(build)=arch/x86/entry/syscalls all
 
 ###
+# <asm/cpufeaturemasks.h> header generation
+
+cpufeaturemasks.hdr := arch/x86/include/generated/asm/cpufeaturemasks.h
+cpufeaturemasks.awk := $(srctree)/arch/x86/tools/cpufeaturemasks.awk
+cpufeatures_hdr := $(srctree)/arch/x86/include/asm/cpufeatures.h
+targets += $(cpufeaturemasks.hdr)
+      filechk_gen_featuremasks = $(AWK) -f $(cpufeaturemasks.awk) $(cpufeatures_hdr) $(KCONFIG_CONFIG)
+
+$(cpufeaturemasks.hdr): $(cpufeaturemasks.awk) $(cpufeatures_hdr) $(KCONFIG_CONFIG) FORCE
+	$(shell mkdir -p $(dir $@))
+	$(call filechk,gen_featuremasks)
+archprepare: $(cpufeaturemasks.hdr)
+
+###
 # Kernel objects
 
 libs-y  += arch/x86/lib/
-
-core-y += arch/x86/virt/
 
 # drivers-y are linked after core-y
 drivers-$(CONFIG_MATH_EMULATION) += arch/x86/math-emu/
@@ -262,7 +284,7 @@ drivers-$(CONFIG_PCI)            += arch/x86/pci/
 # suspend and hibernation support
 drivers-$(CONFIG_PM) += arch/x86/power/
 
-drivers-$(CONFIG_FB_CORE) += arch/x86/video/
+drivers-$(CONFIG_VIDEO) += arch/x86/video/
 
 ####
 # boot loader support. Several targets are kept for legacy purposes
@@ -296,12 +318,11 @@ install:
 
 vdso-install-$(CONFIG_X86_64)		+= arch/x86/entry/vdso/vdso64.so.dbg
 vdso-install-$(CONFIG_X86_X32_ABI)	+= arch/x86/entry/vdso/vdsox32.so.dbg
-vdso-install-$(CONFIG_X86_32)		+= arch/x86/entry/vdso/vdso32.so.dbg
-vdso-install-$(CONFIG_IA32_EMULATION)	+= arch/x86/entry/vdso/vdso32.so.dbg
+vdso-install-$(CONFIG_COMPAT_32)	+= arch/x86/entry/vdso/vdso32.so.dbg
 
 archprepare: checkbin
 checkbin:
-ifdef CONFIG_RETPOLINE
+ifdef CONFIG_MITIGATION_RETPOLINE
 ifeq ($(RETPOLINE_CFLAGS),)
 	@echo "You are building kernel with non-retpoline compiler." >&2
 	@echo "Please update your compiler." >&2

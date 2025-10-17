@@ -1836,9 +1836,9 @@ static int create_pv_sqp(struct mlx4_ib_demux_pv_ctx *ctx,
 	tun_qp->qp = ib_create_qp(ctx->pd, &qp_init_attr.init_attr);
 	if (IS_ERR(tun_qp->qp)) {
 		ret = PTR_ERR(tun_qp->qp);
+		pr_err("Couldn't create %s QP (%pe)\n",
+		       create_tun ? "tunnel" : "special", tun_qp->qp);
 		tun_qp->qp = NULL;
-		pr_err("Couldn't create %s QP (%d)\n",
-		       create_tun ? "tunnel" : "special", ret);
 		return ret;
 	}
 
@@ -2017,14 +2017,14 @@ static int create_pv_resources(struct ib_device *ibdev, int slave, int port,
 			       NULL, ctx, &cq_attr);
 	if (IS_ERR(ctx->cq)) {
 		ret = PTR_ERR(ctx->cq);
-		pr_err("Couldn't create tunnel CQ (%d)\n", ret);
+		pr_err("Couldn't create tunnel CQ (%pe)\n", ctx->cq);
 		goto err_buf;
 	}
 
 	ctx->pd = ib_alloc_pd(ctx->ib_dev, 0);
 	if (IS_ERR(ctx->pd)) {
 		ret = PTR_ERR(ctx->pd);
-		pr_err("Couldn't create tunnel PD (%d)\n", ret);
+		pr_err("Couldn't create tunnel PD (%pe)\n", ctx->pd);
 		goto err_cq;
 	}
 
@@ -2158,7 +2158,6 @@ static int mlx4_ib_alloc_demux_ctx(struct mlx4_ib_dev *dev,
 				       struct mlx4_ib_demux_ctx *ctx,
 				       int port)
 {
-	char name[12];
 	int ret = 0;
 	int i;
 
@@ -2194,24 +2193,21 @@ static int mlx4_ib_alloc_demux_ctx(struct mlx4_ib_dev *dev,
 		goto err_mcg;
 	}
 
-	snprintf(name, sizeof(name), "mlx4_ibt%d", port);
-	ctx->wq = alloc_ordered_workqueue(name, WQ_MEM_RECLAIM);
+	ctx->wq = alloc_ordered_workqueue("mlx4_ibt%d", WQ_MEM_RECLAIM, port);
 	if (!ctx->wq) {
 		pr_err("Failed to create tunnelling WQ for port %d\n", port);
 		ret = -ENOMEM;
 		goto err_wq;
 	}
 
-	snprintf(name, sizeof(name), "mlx4_ibwi%d", port);
-	ctx->wi_wq = alloc_ordered_workqueue(name, WQ_MEM_RECLAIM);
+	ctx->wi_wq = alloc_ordered_workqueue("mlx4_ibwi%d", WQ_MEM_RECLAIM, port);
 	if (!ctx->wi_wq) {
 		pr_err("Failed to create wire WQ for port %d\n", port);
 		ret = -ENOMEM;
 		goto err_wiwq;
 	}
 
-	snprintf(name, sizeof(name), "mlx4_ibud%d", port);
-	ctx->ud_wq = alloc_ordered_workqueue(name, WQ_MEM_RECLAIM);
+	ctx->ud_wq = alloc_ordered_workqueue("mlx4_ibud%d", WQ_MEM_RECLAIM, port);
 	if (!ctx->ud_wq) {
 		pr_err("Failed to create up/down WQ for port %d\n", port);
 		ret = -ENOMEM;

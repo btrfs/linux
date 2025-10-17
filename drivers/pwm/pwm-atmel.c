@@ -77,7 +77,6 @@ struct atmel_pwm_data {
 };
 
 struct atmel_pwm_chip {
-	struct pwm_chip chip;
 	struct clk *clk;
 	void __iomem *base;
 	const struct atmel_pwm_data *data;
@@ -92,14 +91,11 @@ struct atmel_pwm_chip {
 	 * hardware.
 	 */
 	u32 update_pending;
-
-	/* Protects .update_pending */
-	spinlock_t lock;
 };
 
 static inline struct atmel_pwm_chip *to_atmel_pwm_chip(struct pwm_chip *chip)
 {
-	return container_of(chip, struct atmel_pwm_chip, chip);
+	return pwmchip_get_drvdata(chip);
 }
 
 static inline u32 atmel_pwm_readl(struct atmel_pwm_chip *chip,
@@ -146,8 +142,6 @@ static void atmel_pwm_update_pending(struct atmel_pwm_chip *chip)
 
 static void atmel_pwm_set_pending(struct atmel_pwm_chip *chip, unsigned int ch)
 {
-	spin_lock(&chip->lock);
-
 	/*
 	 * Clear pending flags in hardware because otherwise there might still
 	 * be a stale flag in ISR.
@@ -155,15 +149,11 @@ static void atmel_pwm_set_pending(struct atmel_pwm_chip *chip, unsigned int ch)
 	atmel_pwm_update_pending(chip);
 
 	chip->update_pending |= (1 << ch);
-
-	spin_unlock(&chip->lock);
 }
 
 static int atmel_pwm_test_pending(struct atmel_pwm_chip *chip, unsigned int ch)
 {
 	int ret = 0;
-
-	spin_lock(&chip->lock);
 
 	if (chip->update_pending & (1 << ch)) {
 		atmel_pwm_update_pending(chip);
@@ -171,8 +161,6 @@ static int atmel_pwm_test_pending(struct atmel_pwm_chip *chip, unsigned int ch)
 		if (chip->update_pending & (1 << ch))
 			ret = 1;
 	}
-
-	spin_unlock(&chip->lock);
 
 	return ret;
 }
@@ -210,7 +198,7 @@ static int atmel_pwm_calculate_cprd_and_pres(struct pwm_chip *chip,
 	shift = fls(cycles) - atmel_pwm->data->cfg.period_bits;
 
 	if (shift > PWM_MAX_PRES) {
-		dev_err(chip->dev, "pres exceeds the maximum value\n");
+		dev_err(pwmchip_parent(chip), "pres exceeds the maximum value\n");
 		return -EINVAL;
 	} else if (shift > 0) {
 		*pres = shift;
@@ -294,19 +282,16 @@ static int atmel_pwm_apply(struct pwm_chip *chip, struct pwm_device *pwm,
 			   const struct pwm_state *state)
 {
 	struct atmel_pwm_chip *atmel_pwm = to_atmel_pwm_chip(chip);
-	struct pwm_state cstate;
 	unsigned long cprd, cdty;
 	u32 pres, val;
 	int ret;
 
-	pwm_get_state(pwm, &cstate);
-
 	if (state->enabled) {
 		unsigned long clkrate = clk_get_rate(atmel_pwm->clk);
 
-		if (cstate.enabled &&
-		    cstate.polarity == state->polarity &&
-		    cstate.period == state->period) {
+		if (pwm->state.enabled &&
+		    pwm->state.polarity == state->polarity &&
+		    pwm->state.period == state->period) {
 			u32 cmr = atmel_pwm_ch_readl(atmel_pwm, pwm->hwpwm, PWM_CMR);
 
 			cprd = atmel_pwm_ch_readl(atmel_pwm, pwm->hwpwm,
@@ -321,19 +306,19 @@ static int atmel_pwm_apply(struct pwm_chip *chip, struct pwm_device *pwm,
 		ret = atmel_pwm_calculate_cprd_and_pres(chip, clkrate, state, &cprd,
 							&pres);
 		if (ret) {
-			dev_err(chip->dev,
+			dev_err(pwmchip_parent(chip),
 				"failed to calculate cprd and prescaler\n");
 			return ret;
 		}
 
 		atmel_pwm_calculate_cdty(state, clkrate, cprd, pres, &cdty);
 
-		if (cstate.enabled) {
+		if (pwm->state.enabled) {
 			atmel_pwm_disable(chip, pwm, false);
 		} else {
 			ret = clk_enable(atmel_pwm->clk);
 			if (ret) {
-				dev_err(chip->dev, "failed to enable clock\n");
+				dev_err(pwmchip_parent(chip), "failed to enable clock\n");
 				return ret;
 			}
 		}
@@ -348,7 +333,7 @@ static int atmel_pwm_apply(struct pwm_chip *chip, struct pwm_device *pwm,
 		atmel_pwm_ch_writel(atmel_pwm, pwm->hwpwm, PWM_CMR, val);
 		atmel_pwm_set_cprd_cdty(chip, pwm, cprd, cdty);
 		atmel_pwm_writel(atmel_pwm, PWM_ENA, 1 << pwm->hwpwm);
-	} else if (cstate.enabled) {
+	} else if (pwm->state.enabled) {
 		atmel_pwm_disable(chip, pwm, true);
 	}
 
@@ -462,8 +447,9 @@ static const struct of_device_id atmel_pwm_dt_ids[] = {
 };
 MODULE_DEVICE_TABLE(of, atmel_pwm_dt_ids);
 
-static int atmel_pwm_enable_clk_if_on(struct atmel_pwm_chip *atmel_pwm, bool on)
+static int atmel_pwm_enable_clk_if_on(struct pwm_chip *chip, bool on)
 {
+	struct atmel_pwm_chip *atmel_pwm = to_atmel_pwm_chip(chip);
 	unsigned int i, cnt = 0;
 	unsigned long sr;
 	int ret = 0;
@@ -472,7 +458,7 @@ static int atmel_pwm_enable_clk_if_on(struct atmel_pwm_chip *atmel_pwm, bool on)
 	if (!sr)
 		return 0;
 
-	cnt = bitmap_weight(&sr, atmel_pwm->chip.npwm);
+	cnt = bitmap_weight(&sr, chip->npwm);
 
 	if (!on)
 		goto disable_clk;
@@ -480,7 +466,7 @@ static int atmel_pwm_enable_clk_if_on(struct atmel_pwm_chip *atmel_pwm, bool on)
 	for (i = 0; i < cnt; i++) {
 		ret = clk_enable(atmel_pwm->clk);
 		if (ret) {
-			dev_err(atmel_pwm->chip.dev,
+			dev_err(pwmchip_parent(chip),
 				"failed to enable clock for pwm %pe\n",
 				ERR_PTR(ret));
 
@@ -501,16 +487,17 @@ disable_clk:
 static int atmel_pwm_probe(struct platform_device *pdev)
 {
 	struct atmel_pwm_chip *atmel_pwm;
+	struct pwm_chip *chip;
 	int ret;
 
-	atmel_pwm = devm_kzalloc(&pdev->dev, sizeof(*atmel_pwm), GFP_KERNEL);
-	if (!atmel_pwm)
-		return -ENOMEM;
+	chip = devm_pwmchip_alloc(&pdev->dev, 4, sizeof(*atmel_pwm));
+	if (IS_ERR(chip))
+		return PTR_ERR(chip);
 
+	atmel_pwm = to_atmel_pwm_chip(chip);
 	atmel_pwm->data = of_device_get_match_data(&pdev->dev);
 
 	atmel_pwm->update_pending = 0;
-	spin_lock_init(&atmel_pwm->lock);
 
 	atmel_pwm->base = devm_platform_ioremap_resource(pdev, 0);
 	if (IS_ERR(atmel_pwm->base))
@@ -521,15 +508,13 @@ static int atmel_pwm_probe(struct platform_device *pdev)
 		return dev_err_probe(&pdev->dev, PTR_ERR(atmel_pwm->clk),
 				     "failed to get prepared PWM clock\n");
 
-	atmel_pwm->chip.dev = &pdev->dev;
-	atmel_pwm->chip.ops = &atmel_pwm_ops;
-	atmel_pwm->chip.npwm = 4;
+	chip->ops = &atmel_pwm_ops;
 
-	ret = atmel_pwm_enable_clk_if_on(atmel_pwm, true);
+	ret = atmel_pwm_enable_clk_if_on(chip, true);
 	if (ret < 0)
 		return ret;
 
-	ret = devm_pwmchip_add(&pdev->dev, &atmel_pwm->chip);
+	ret = devm_pwmchip_add(&pdev->dev, chip);
 	if (ret < 0) {
 		dev_err_probe(&pdev->dev, ret, "failed to add PWM chip\n");
 		goto disable_clk;
@@ -538,7 +523,7 @@ static int atmel_pwm_probe(struct platform_device *pdev)
 	return 0;
 
 disable_clk:
-	atmel_pwm_enable_clk_if_on(atmel_pwm, false);
+	atmel_pwm_enable_clk_if_on(chip, false);
 
 	return ret;
 }

@@ -6,19 +6,14 @@
  *                         Cirrus Logic International Semiconductor Ltd.
  */
 
-#include <linux/clk.h>
-#include <linux/completion.h>
-#include <linux/device.h>
-#include <linux/mutex.h>
-#include <linux/regmap.h>
-#include <linux/soundwire/sdw.h>
-#include <linux/types.h>
-#include <sound/cs42l43.h>
-#include <sound/pcm.h>
-#include <sound/soc-jack.h>
-
 #ifndef CS42L43_ASOC_INT_H
 #define CS42L43_ASOC_INT_H
+
+#include <linux/completion.h>
+#include <linux/mutex.h>
+#include <linux/types.h>
+#include <linux/workqueue.h>
+#include <sound/pcm.h>
 
 #define CS42L43_INTERNAL_SYSCLK		24576000
 #define CS42L43_DEFAULT_SLOTS		0x3F
@@ -37,10 +32,20 @@
 
 #define CS42L43_N_BUTTONS	6
 
+struct clk;
+struct device;
+
+struct snd_soc_component;
+struct snd_soc_jack;
+
+struct cs42l43;
+
 struct cs42l43_codec {
 	struct device *dev;
 	struct cs42l43 *core;
 	struct snd_soc_component *component;
+	struct irq_domain *dom;
+	unsigned int shutter_irqs[4];
 
 	struct clk *mclk;
 
@@ -75,6 +80,8 @@ struct cs42l43_codec {
 
 	bool use_ring_sense;
 	unsigned int tip_debounce_ms;
+	unsigned int tip_fall_db_ms;
+	unsigned int tip_rise_db_ms;
 	unsigned int bias_low;
 	unsigned int bias_sense_ua;
 	unsigned int bias_ramp_ms;
@@ -83,8 +90,6 @@ struct cs42l43_codec {
 
 	struct delayed_work tip_sense_work;
 	struct delayed_work bias_sense_timeout;
-	struct delayed_work button_press_work;
-	struct work_struct button_release_work;
 	struct completion type_detect;
 	struct completion load_detect;
 
@@ -92,11 +97,13 @@ struct cs42l43_codec {
 	bool button_detect_running;
 	bool jack_present;
 	int jack_override;
+	bool suspend_jack_debounce;
 
-	struct work_struct hp_ilimit_work;
 	struct delayed_work hp_ilimit_clear_work;
 	bool hp_ilimited;
 	int hp_ilimit_count;
+
+	struct snd_kcontrol *kctl[5];
 };
 
 #if IS_REACHABLE(CONFIG_SND_SOC_CS42L43_SDW)
@@ -125,9 +132,8 @@ static inline int cs42l43_sdw_add_peripheral(struct snd_pcm_substream *substream
 int cs42l43_set_jack(struct snd_soc_component *component,
 		     struct snd_soc_jack *jack, void *d);
 void cs42l43_bias_sense_timeout(struct work_struct *work);
+void cs42l43_clear_jack(struct cs42l43_codec *priv);
 void cs42l43_tip_sense_work(struct work_struct *work);
-void cs42l43_button_press_work(struct work_struct *work);
-void cs42l43_button_release_work(struct work_struct *work);
 irqreturn_t cs42l43_bias_detect_clamp(int irq, void *data);
 irqreturn_t cs42l43_button_press(int irq, void *data);
 irqreturn_t cs42l43_button_release(int irq, void *data);

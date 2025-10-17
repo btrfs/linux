@@ -17,6 +17,7 @@
 #include <linux/poll.h>
 #include <linux/sched.h>
 #include <linux/slab.h>
+#include <linux/srcu.h>
 #include <linux/string.h>
 #include <linux/workqueue.h>
 #include <linux/errno.h>
@@ -45,9 +46,13 @@
 #include <xen/page.h>
 #include <xen/xen-ops.h>
 #include <xen/balloon.h>
+#ifdef CONFIG_XEN_ACPI
+#include <xen/acpi.h>
+#endif
 
 #include "privcmd.h"
 
+MODULE_DESCRIPTION("Xen hypercall passthrough driver");
 MODULE_LICENSE("GPL");
 
 #define PRIV_VMA_LOCKED ((void *)1)
@@ -266,7 +271,7 @@ static long privcmd_ioctl_mmap(struct file *file, void __user *udata)
 	struct mmap_gfn_state state;
 
 	/* We only support privcmd_ioctl_mmap_batch for non-auto-translated. */
-	if (xen_feature(XENFEAT_auto_translated_physmap))
+	if (!xen_pv_domain())
 		return -ENOSYS;
 
 	if (copy_from_user(&mmapcmd, udata, sizeof(mmapcmd)))
@@ -348,7 +353,7 @@ static int mmap_batch_fn(void *data, int nr, void *state)
 	struct page **cur_pages = NULL;
 	int ret;
 
-	if (xen_feature(XENFEAT_auto_translated_physmap))
+	if (!xen_pv_domain())
 		cur_pages = &pages[st->index];
 
 	BUG_ON(nr < 0);
@@ -530,7 +535,7 @@ static long privcmd_ioctl_mmap_batch(
 			ret = -EINVAL;
 			goto out_unlock;
 		}
-		if (xen_feature(XENFEAT_auto_translated_physmap)) {
+		if (!xen_pv_domain()) {
 			ret = alloc_empty_pages(vma, nr_pages);
 			if (ret < 0)
 				goto out_unlock;
@@ -774,8 +779,7 @@ static long privcmd_ioctl_mmap_resource(struct file *file,
 		goto out;
 	}
 
-	if (IS_ENABLED(CONFIG_XEN_AUTO_XLATE) &&
-	    xen_feature(XENFEAT_auto_translated_physmap)) {
+	if (IS_ENABLED(CONFIG_XEN_AUTO_XLATE) && !xen_pv_domain()) {
 		unsigned int nr = DIV_ROUND_UP(kdata.num, XEN_PFN_PER_PAGE);
 		struct page **pages;
 		unsigned int i;
@@ -806,8 +810,7 @@ static long privcmd_ioctl_mmap_resource(struct file *file,
 	if (rc)
 		goto out;
 
-	if (IS_ENABLED(CONFIG_XEN_AUTO_XLATE) &&
-	    xen_feature(XENFEAT_auto_translated_physmap)) {
+	if (IS_ENABLED(CONFIG_XEN_AUTO_XLATE) && !xen_pv_domain()) {
 		rc = xen_remap_vma_range(vma, kdata.addr, kdata.num << PAGE_SHIFT);
 	} else {
 		unsigned int domid =
@@ -842,10 +845,34 @@ out:
 	return rc;
 }
 
+static long privcmd_ioctl_pcidev_get_gsi(struct file *file, void __user *udata)
+{
+#if defined(CONFIG_XEN_ACPI)
+	int rc;
+	struct privcmd_pcidev_get_gsi kdata;
+
+	if (copy_from_user(&kdata, udata, sizeof(kdata)))
+		return -EFAULT;
+
+	rc = xen_acpi_get_gsi_from_sbdf(kdata.sbdf);
+	if (rc < 0)
+		return rc;
+
+	kdata.gsi = rc;
+	if (copy_to_user(udata, &kdata, sizeof(kdata)))
+		return -EFAULT;
+
+	return 0;
+#else
+	return -EINVAL;
+#endif
+}
+
 #ifdef CONFIG_XEN_PRIVCMD_EVENTFD
 /* Irqfd support */
 static struct workqueue_struct *irqfd_cleanup_wq;
-static DEFINE_MUTEX(irqfds_lock);
+static DEFINE_SPINLOCK(irqfds_lock);
+DEFINE_STATIC_SRCU(irqfds_srcu);
 static LIST_HEAD(irqfds_list);
 
 struct privcmd_kernel_irqfd {
@@ -872,6 +899,9 @@ static void irqfd_shutdown(struct work_struct *work)
 	struct privcmd_kernel_irqfd *kirqfd =
 		container_of(work, struct privcmd_kernel_irqfd, shutdown);
 	u64 cnt;
+
+	/* Make sure irqfd has been initialized in assign path */
+	synchronize_srcu(&irqfds_srcu);
 
 	eventfd_ctx_remove_wait_queue(kirqfd->eventfd, &kirqfd->wait, &cnt);
 	eventfd_ctx_put(kirqfd->eventfd);
@@ -909,9 +939,11 @@ irqfd_wakeup(wait_queue_entry_t *wait, unsigned int mode, int sync, void *key)
 		irqfd_inject(kirqfd);
 
 	if (flags & EPOLLHUP) {
-		mutex_lock(&irqfds_lock);
+		unsigned long flags;
+
+		spin_lock_irqsave(&irqfds_lock, flags);
 		irqfd_deactivate(kirqfd);
-		mutex_unlock(&irqfds_lock);
+		spin_unlock_irqrestore(&irqfds_lock, flags);
 	}
 
 	return 0;
@@ -929,10 +961,12 @@ irqfd_poll_func(struct file *file, wait_queue_head_t *wqh, poll_table *pt)
 static int privcmd_irqfd_assign(struct privcmd_irqfd *irqfd)
 {
 	struct privcmd_kernel_irqfd *kirqfd, *tmp;
+	unsigned long flags;
 	__poll_t events;
-	struct fd f;
 	void *dm_op;
-	int ret;
+	int ret, idx;
+
+	CLASS(fd, f)(irqfd->fd);
 
 	kirqfd = kzalloc(sizeof(*kirqfd) + irqfd->size, GFP_KERNEL);
 	if (!kirqfd)
@@ -949,16 +983,15 @@ static int privcmd_irqfd_assign(struct privcmd_irqfd *irqfd)
 	kirqfd->dom = irqfd->dom;
 	INIT_WORK(&kirqfd->shutdown, irqfd_shutdown);
 
-	f = fdget(irqfd->fd);
-	if (!f.file) {
+	if (fd_empty(f)) {
 		ret = -EBADF;
 		goto error_kfree;
 	}
 
-	kirqfd->eventfd = eventfd_ctx_fileget(f.file);
+	kirqfd->eventfd = eventfd_ctx_fileget(fd_file(f));
 	if (IS_ERR(kirqfd->eventfd)) {
 		ret = PTR_ERR(kirqfd->eventfd);
-		goto error_fd_put;
+		goto error_kfree;
 	}
 
 	/*
@@ -968,39 +1001,33 @@ static int privcmd_irqfd_assign(struct privcmd_irqfd *irqfd)
 	init_waitqueue_func_entry(&kirqfd->wait, irqfd_wakeup);
 	init_poll_funcptr(&kirqfd->pt, irqfd_poll_func);
 
-	mutex_lock(&irqfds_lock);
+	spin_lock_irqsave(&irqfds_lock, flags);
 
 	list_for_each_entry(tmp, &irqfds_list, list) {
 		if (kirqfd->eventfd == tmp->eventfd) {
 			ret = -EBUSY;
-			mutex_unlock(&irqfds_lock);
+			spin_unlock_irqrestore(&irqfds_lock, flags);
 			goto error_eventfd;
 		}
 	}
 
+	idx = srcu_read_lock(&irqfds_srcu);
 	list_add_tail(&kirqfd->list, &irqfds_list);
-	mutex_unlock(&irqfds_lock);
+	spin_unlock_irqrestore(&irqfds_lock, flags);
 
 	/*
 	 * Check if there was an event already pending on the eventfd before we
 	 * registered, and trigger it as if we didn't miss it.
 	 */
-	events = vfs_poll(f.file, &kirqfd->pt);
+	events = vfs_poll(fd_file(f), &kirqfd->pt);
 	if (events & EPOLLIN)
 		irqfd_inject(kirqfd);
 
-	/*
-	 * Do not drop the file until the kirqfd is fully initialized, otherwise
-	 * we might race against the EPOLLHUP.
-	 */
-	fdput(f);
+	srcu_read_unlock(&irqfds_srcu, idx);
 	return 0;
 
 error_eventfd:
 	eventfd_ctx_put(kirqfd->eventfd);
-
-error_fd_put:
-	fdput(f);
 
 error_kfree:
 	kfree(kirqfd);
@@ -1011,12 +1038,13 @@ static int privcmd_irqfd_deassign(struct privcmd_irqfd *irqfd)
 {
 	struct privcmd_kernel_irqfd *kirqfd;
 	struct eventfd_ctx *eventfd;
+	unsigned long flags;
 
 	eventfd = eventfd_ctx_fdget(irqfd->fd);
 	if (IS_ERR(eventfd))
 		return PTR_ERR(eventfd);
 
-	mutex_lock(&irqfds_lock);
+	spin_lock_irqsave(&irqfds_lock, flags);
 
 	list_for_each_entry(kirqfd, &irqfds_list, list) {
 		if (kirqfd->eventfd == eventfd) {
@@ -1025,7 +1053,7 @@ static int privcmd_irqfd_deassign(struct privcmd_irqfd *irqfd)
 		}
 	}
 
-	mutex_unlock(&irqfds_lock);
+	spin_unlock_irqrestore(&irqfds_lock, flags);
 
 	eventfd_ctx_put(eventfd);
 
@@ -1073,13 +1101,14 @@ static int privcmd_irqfd_init(void)
 static void privcmd_irqfd_exit(void)
 {
 	struct privcmd_kernel_irqfd *kirqfd, *tmp;
+	unsigned long flags;
 
-	mutex_lock(&irqfds_lock);
+	spin_lock_irqsave(&irqfds_lock, flags);
 
 	list_for_each_entry_safe(kirqfd, tmp, &irqfds_list, list)
 		irqfd_deactivate(kirqfd);
 
-	mutex_unlock(&irqfds_lock);
+	spin_unlock_irqrestore(&irqfds_lock, flags);
 
 	destroy_workqueue(irqfd_cleanup_wq);
 }
@@ -1223,16 +1252,11 @@ struct privcmd_kernel_ioreq *alloc_ioreq(struct privcmd_ioeventfd *ioeventfd)
 	kioreq->ioreq = (struct ioreq *)(page_to_virt(pages[0]));
 	mmap_write_unlock(mm);
 
-	size = sizeof(*ports) * kioreq->vcpus;
-	ports = kzalloc(size, GFP_KERNEL);
-	if (!ports) {
-		ret = -ENOMEM;
+	ports = memdup_array_user(u64_to_user_ptr(ioeventfd->ports),
+				  kioreq->vcpus, sizeof(*ports));
+	if (IS_ERR(ports)) {
+		ret = PTR_ERR(ports);
 		goto error_kfree;
-	}
-
-	if (copy_from_user(ports, u64_to_user_ptr(ioeventfd->ports), size)) {
-		ret = -EFAULT;
-		goto error_kfree_ports;
 	}
 
 	for (i = 0; i < kioreq->vcpus; i++) {
@@ -1256,7 +1280,7 @@ struct privcmd_kernel_ioreq *alloc_ioreq(struct privcmd_ioeventfd *ioeventfd)
 error_unbind:
 	while (--i >= 0)
 		unbind_from_irqhandler(irq_from_evtchn(ports[i]), &kioreq->ports[i]);
-error_kfree_ports:
+
 	kfree(ports);
 error_kfree:
 	kfree(kioreq);
@@ -1315,7 +1339,6 @@ static int privcmd_ioeventfd_assign(struct privcmd_ioeventfd *ioeventfd)
 	struct privcmd_kernel_ioeventfd *kioeventfd;
 	struct privcmd_kernel_ioreq *kioreq;
 	unsigned long flags;
-	struct fd f;
 	int ret;
 
 	/* Check for range overflow */
@@ -1335,15 +1358,7 @@ static int privcmd_ioeventfd_assign(struct privcmd_ioeventfd *ioeventfd)
 	if (!kioeventfd)
 		return -ENOMEM;
 
-	f = fdget(ioeventfd->event_fd);
-	if (!f.file) {
-		ret = -EBADF;
-		goto error_kfree;
-	}
-
-	kioeventfd->eventfd = eventfd_ctx_fileget(f.file);
-	fdput(f);
-
+	kioeventfd->eventfd = eventfd_ctx_fdget(ioeventfd->event_fd);
 	if (IS_ERR(kioeventfd->eventfd)) {
 		ret = PTR_ERR(kioeventfd->eventfd);
 		goto error_kfree;
@@ -1534,6 +1549,10 @@ static long privcmd_ioctl(struct file *file,
 		ret = privcmd_ioctl_ioeventfd(file, udata);
 		break;
 
+	case IOCTL_PRIVCMD_PCIDEV_GET_GSI:
+		ret = privcmd_ioctl_pcidev_get_gsi(file, udata);
+		break;
+
 	default:
 		break;
 	}
@@ -1570,7 +1589,7 @@ static void privcmd_close(struct vm_area_struct *vma)
 	int numgfns = (vma->vm_end - vma->vm_start) >> XEN_PAGE_SHIFT;
 	int rc;
 
-	if (!xen_feature(XENFEAT_auto_translated_physmap) || !numpgs || !pages)
+	if (xen_pv_domain() || !numpgs || !pages)
 		return;
 
 	rc = xen_unmap_domain_gfn_range(vma, numgfns, pages);

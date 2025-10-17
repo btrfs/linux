@@ -11,8 +11,8 @@
 
 #include <linux/types.h>
 
-/* 15 pointers + header align the folio_batch structure to a power of two */
-#define PAGEVEC_SIZE	15
+/* 31 pointers + header align the folio_batch structure to a power of two */
+#define PAGEVEC_SIZE	31
 
 struct folio;
 
@@ -27,6 +27,7 @@ struct folio;
  */
 struct folio_batch {
 	unsigned char nr;
+	unsigned char i;
 	bool percpu_pvec_drained;
 	struct folio *folios[PAGEVEC_SIZE];
 };
@@ -40,20 +41,22 @@ struct folio_batch {
 static inline void folio_batch_init(struct folio_batch *fbatch)
 {
 	fbatch->nr = 0;
+	fbatch->i = 0;
 	fbatch->percpu_pvec_drained = false;
 }
 
 static inline void folio_batch_reinit(struct folio_batch *fbatch)
 {
 	fbatch->nr = 0;
+	fbatch->i = 0;
 }
 
-static inline unsigned int folio_batch_count(struct folio_batch *fbatch)
+static inline unsigned int folio_batch_count(const struct folio_batch *fbatch)
 {
 	return fbatch->nr;
 }
 
-static inline unsigned int folio_batch_space(struct folio_batch *fbatch)
+static inline unsigned int folio_batch_space(const struct folio_batch *fbatch)
 {
 	return PAGEVEC_SIZE - fbatch->nr;
 }
@@ -73,6 +76,21 @@ static inline unsigned folio_batch_add(struct folio_batch *fbatch,
 {
 	fbatch->folios[fbatch->nr++] = folio;
 	return folio_batch_space(fbatch);
+}
+
+/**
+ * folio_batch_next - Return the next folio to process.
+ * @fbatch: The folio batch being processed.
+ *
+ * Use this function to implement a queue of folios.
+ *
+ * Return: The next folio in the queue, or NULL if the queue is empty.
+ */
+static inline struct folio *folio_batch_next(struct folio_batch *fbatch)
+{
+	if (fbatch->i == fbatch->nr)
+		return NULL;
+	return fbatch->folios[fbatch->i++];
 }
 
 void __folio_batch_release(struct folio_batch *pvec);

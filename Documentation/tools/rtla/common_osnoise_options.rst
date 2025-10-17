@@ -1,3 +1,11 @@
+.. |threshold|  replace:: **-a/--auto**, **-s/--stop**, or **-S/--stop-total**
+.. |thresharg|  replace:: -s
+.. |tracer|     replace:: osnoise
+
+.. |actionsperf| replace::
+        Due to implementational limitations, actions might be delayed
+        up to one second after tracing is stopped.
+
 **-a**, **--auto** *us*
 
         Set the automatic trace mode. This mode sets some commonly used options
@@ -25,3 +33,7 @@
 
         Specify the minimum delta between two time reads to be considered noise.
         The default threshold is *5 us*.
+
+**-t**, **--trace** \[*file*]
+
+        Save the stopped trace to [*file|osnoise_trace.txt*].

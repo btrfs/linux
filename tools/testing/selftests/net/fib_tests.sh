@@ -11,7 +11,7 @@ TESTS="unregister down carrier nexthop suppress ipv6_notify ipv4_notify \
        ipv6_rt ipv4_rt ipv6_addr_metric ipv4_addr_metric ipv6_route_metrics \
        ipv4_route_metrics ipv4_route_v6_gw rp_filter ipv4_del_addr \
        ipv6_del_addr ipv4_mangle ipv6_mangle ipv4_bcast_neigh fib6_gc_test \
-       ipv4_mpath_list ipv6_mpath_list"
+       ipv4_mpath_list ipv6_mpath_list ipv4_mpath_balance ipv6_mpath_balance"
 
 VERBOSE=0
 PAUSE_ON_FAIL=no
@@ -689,7 +689,7 @@ fib6_notify_test()
 
 	log_test $ret 0 "ipv6 route add notify"
 
-	{ kill %% && wait %%; } 2>/dev/null
+	kill_process %%
 
 	#rm errors.txt
 
@@ -736,11 +736,48 @@ fib_notify_test()
 
 	log_test $ret 0 "ipv4 route add notify"
 
-	{ kill %% && wait %%; } 2>/dev/null
+	kill_process %%
 
 	rm  errors.txt
 
 	cleanup &> /dev/null
+}
+
+# Create a new dummy_10 to remove all associated routes.
+reset_dummy_10()
+{
+	$IP link del dev dummy_10
+
+	$IP link add dummy_10 type dummy
+	$IP link set dev dummy_10 up
+	$IP -6 address add 2001:10::1/64 dev dummy_10
+}
+
+check_rt_num()
+{
+    local expected=$1
+    local num=$2
+
+    if [ $num -ne $expected ]; then
+	echo "FAIL: Expected $expected routes, got $num"
+	ret=1
+    else
+	ret=0
+    fi
+}
+
+check_rt_num_clean()
+{
+    local expected=$1
+    local num=$2
+
+    if [ $num -ne $expected ]; then
+	log_test 1 0 "expected $expected routes, got $num"
+	set +e
+	cleanup &> /dev/null
+	return 1
+    fi
+    return 0
 }
 
 fib6_gc_test()
@@ -751,7 +788,8 @@ fib6_gc_test()
 	echo "Fib6 garbage collection test"
 	set -e
 
-	EXPIRE=3
+	EXPIRE=5
+	GC_WAIT_TIME=$((EXPIRE * 2 + 2))
 
 	# Check expiration of routes every $EXPIRE seconds (GC)
 	$NS_EXEC sysctl -wq net.ipv6.route.gc_interval=$EXPIRE
@@ -763,44 +801,110 @@ fib6_gc_test()
 	$NS_EXEC sysctl -wq net.ipv6.route.flush=1
 
 	# Temporary routes
-	for i in $(seq 1 1000); do
+	for i in $(seq 1 5); do
 	    # Expire route after $EXPIRE seconds
 	    $IP -6 route add 2001:20::$i \
 		via 2001:10::2 dev dummy_10 expires $EXPIRE
 	done
-	sleep $(($EXPIRE * 2))
-	N_EXP_SLEEP=$($IP -6 route list |grep expires|wc -l)
-	if [ $N_EXP_SLEEP -ne 0 ]; then
-	    echo "FAIL: expected 0 routes with expires, got $N_EXP_SLEEP"
-	    ret=1
-	else
-	    ret=0
-	fi
+	sleep $GC_WAIT_TIME
+	$NS_EXEC sysctl -wq net.ipv6.route.flush=1
+	check_rt_num 0 $($IP -6 route list |grep expires|wc -l)
+	log_test $ret 0 "ipv6 route garbage collection"
+
+	reset_dummy_10
 
 	# Permanent routes
-	for i in $(seq 1 5000); do
+	for i in $(seq 1 5); do
 	    $IP -6 route add 2001:30::$i \
 		via 2001:10::2 dev dummy_10
 	done
 	# Temporary routes
-	for i in $(seq 1 1000); do
+	for i in $(seq 1 5); do
 	    # Expire route after $EXPIRE seconds
 	    $IP -6 route add 2001:20::$i \
 		via 2001:10::2 dev dummy_10 expires $EXPIRE
 	done
-	sleep $(($EXPIRE * 2))
-	N_EXP_SLEEP=$($IP -6 route list |grep expires|wc -l)
-	if [ $N_EXP_SLEEP -ne 0 ]; then
-	    echo "FAIL: expected 0 routes with expires," \
-		 "got $N_EXP_SLEEP (5000 permanent routes)"
-	    ret=1
-	else
-	    ret=0
+	# Wait for GC
+	sleep $GC_WAIT_TIME
+	check_rt_num 0 $($IP -6 route list |grep expires|wc -l)
+	log_test $ret 0 "ipv6 route garbage collection (with permanent routes)"
+
+	reset_dummy_10
+
+	# Permanent routes
+	for i in $(seq 1 5); do
+	    $IP -6 route add 2001:20::$i \
+		via 2001:10::2 dev dummy_10
+	done
+	# Replace with temporary routes
+	for i in $(seq 1 5); do
+	    # Expire route after $EXPIRE seconds
+	    $IP -6 route replace 2001:20::$i \
+		via 2001:10::2 dev dummy_10 expires $EXPIRE
+	done
+	# Wait for GC
+	sleep $GC_WAIT_TIME
+	check_rt_num 0 $($IP -6 route list |grep expires|wc -l)
+	log_test $ret 0 "ipv6 route garbage collection (replace with expires)"
+
+	reset_dummy_10
+
+	# Temporary routes
+	for i in $(seq 1 5); do
+	    # Expire route after $EXPIRE seconds
+	    $IP -6 route add 2001:20::$i \
+		via 2001:10::2 dev dummy_10 expires $EXPIRE
+	done
+	# Replace with permanent routes
+	for i in $(seq 1 5); do
+	    $IP -6 route replace 2001:20::$i \
+		via 2001:10::2 dev dummy_10
+	done
+	check_rt_num_clean 0 $($IP -6 route list |grep expires|wc -l) || return
+
+	# Wait for GC
+	sleep $GC_WAIT_TIME
+	check_rt_num 5 $($IP -6 route list |grep -v expires|grep 2001:20::|wc -l)
+	log_test $ret 0 "ipv6 route garbage collection (replace with permanent)"
+
+	# ra6 is required for the next test. (ipv6toolkit)
+	if [ ! -x "$(command -v ra6)" ]; then
+	    echo "SKIP: ra6 not found."
+	    set +e
+	    cleanup &> /dev/null
+	    return
 	fi
 
-	set +e
+	# Delete dummy_10 and remove all routes
+	$IP link del dev dummy_10
 
-	log_test $ret 0 "ipv6 route garbage collection"
+	# Create a pair of veth devices to send a RA message from one
+	# device to another.
+	$IP link add veth1 type veth peer name veth2
+	$IP link set dev veth1 up
+	$IP link set dev veth2 up
+	$IP -6 address add 2001:10::1/64 dev veth1 nodad
+	$IP -6 address add 2001:10::2/64 dev veth2 nodad
+
+	# Make veth1 ready to receive RA messages.
+	$NS_EXEC sysctl -wq net.ipv6.conf.veth1.accept_ra=2
+
+	# Send a RA message with a route from veth2 to veth1.
+	$NS_EXEC ra6 -i veth2 -d 2001:10::1 -t $EXPIRE
+
+	# Wait for the RA message.
+	sleep 1
+
+	# systemd may mess up the test.  You syould make sure that
+	# systemd-networkd.service and systemd-networkd.socket are stopped.
+	check_rt_num_clean 1 $($IP -6 route list|grep expires|wc -l) || return
+
+	# Wait for GC
+	sleep $GC_WAIT_TIME
+	check_rt_num 0 $($IP -6 route list |grep expires|wc -l)
+	log_test $ret 0 "ipv6 route garbage collection (RA message)"
+
+	set +e
 
 	cleanup &> /dev/null
 }
@@ -979,6 +1083,35 @@ route_setup()
 	ip -netns $ns2 addr add 172.16.104.1/24 dev dummy1
 
 	set +e
+}
+
+forwarding_cleanup()
+{
+	cleanup_ns $ns3
+
+	route_cleanup
+}
+
+# extend route_setup with an ns3 reachable through ns2 over both devices
+forwarding_setup()
+{
+	forwarding_cleanup
+
+	route_setup
+
+	setup_ns ns3
+
+	ip link add veth5 netns $ns3 type veth peer name veth6 netns $ns2
+	ip -netns $ns3 link set veth5 up
+	ip -netns $ns2 link set veth6 up
+
+	ip -netns $ns3 -4 addr add dev veth5 172.16.105.1/24
+	ip -netns $ns2 -4 addr add dev veth6 172.16.105.2/24
+	ip -netns $ns3 -4 route add 172.16.100.0/22 via 172.16.105.2
+
+	ip -netns $ns3 -6 addr add dev veth5 2001:db8:105::1/64 nodad
+	ip -netns $ns2 -6 addr add dev veth6 2001:db8:105::2/64 nodad
+	ip -netns $ns3 -6 route add 2001:db8:101::/33 via 2001:db8:105::2
 }
 
 # assumption is that basic add of a single path route works
@@ -1633,53 +1766,53 @@ ipv4_rt_dsfield()
 
 	# DSCP 0x10 should match the specific route, no matter the ECN bits
 	$IP route get fibmatch 172.16.102.1 dsfield 0x10 | \
-		grep -q "via 172.16.103.2"
+		grep -q "172.16.102.0/24 tos 0x10 via 172.16.103.2"
 	log_test $? 0 "IPv4 route with DSCP and ECN:Not-ECT"
 
 	$IP route get fibmatch 172.16.102.1 dsfield 0x11 | \
-		grep -q "via 172.16.103.2"
+		grep -q "172.16.102.0/24 tos 0x10 via 172.16.103.2"
 	log_test $? 0 "IPv4 route with DSCP and ECN:ECT(1)"
 
 	$IP route get fibmatch 172.16.102.1 dsfield 0x12 | \
-		grep -q "via 172.16.103.2"
+		grep -q "172.16.102.0/24 tos 0x10 via 172.16.103.2"
 	log_test $? 0 "IPv4 route with DSCP and ECN:ECT(0)"
 
 	$IP route get fibmatch 172.16.102.1 dsfield 0x13 | \
-		grep -q "via 172.16.103.2"
+		grep -q "172.16.102.0/24 tos 0x10 via 172.16.103.2"
 	log_test $? 0 "IPv4 route with DSCP and ECN:CE"
 
 	# Unknown DSCP should match the generic route, no matter the ECN bits
 	$IP route get fibmatch 172.16.102.1 dsfield 0x14 | \
-		grep -q "via 172.16.101.2"
+		grep -q "172.16.102.0/24 via 172.16.101.2"
 	log_test $? 0 "IPv4 route with unknown DSCP and ECN:Not-ECT"
 
 	$IP route get fibmatch 172.16.102.1 dsfield 0x15 | \
-		grep -q "via 172.16.101.2"
+		grep -q "172.16.102.0/24 via 172.16.101.2"
 	log_test $? 0 "IPv4 route with unknown DSCP and ECN:ECT(1)"
 
 	$IP route get fibmatch 172.16.102.1 dsfield 0x16 | \
-		grep -q "via 172.16.101.2"
+		grep -q "172.16.102.0/24 via 172.16.101.2"
 	log_test $? 0 "IPv4 route with unknown DSCP and ECN:ECT(0)"
 
 	$IP route get fibmatch 172.16.102.1 dsfield 0x17 | \
-		grep -q "via 172.16.101.2"
+		grep -q "172.16.102.0/24 via 172.16.101.2"
 	log_test $? 0 "IPv4 route with unknown DSCP and ECN:CE"
 
 	# Null DSCP should match the generic route, no matter the ECN bits
 	$IP route get fibmatch 172.16.102.1 dsfield 0x00 | \
-		grep -q "via 172.16.101.2"
+		grep -q "172.16.102.0/24 via 172.16.101.2"
 	log_test $? 0 "IPv4 route with no DSCP and ECN:Not-ECT"
 
 	$IP route get fibmatch 172.16.102.1 dsfield 0x01 | \
-		grep -q "via 172.16.101.2"
+		grep -q "172.16.102.0/24 via 172.16.101.2"
 	log_test $? 0 "IPv4 route with no DSCP and ECN:ECT(1)"
 
 	$IP route get fibmatch 172.16.102.1 dsfield 0x02 | \
-		grep -q "via 172.16.101.2"
+		grep -q "172.16.102.0/24 via 172.16.101.2"
 	log_test $? 0 "IPv4 route with no DSCP and ECN:ECT(0)"
 
 	$IP route get fibmatch 172.16.102.1 dsfield 0x03 | \
-		grep -q "via 172.16.101.2"
+		grep -q "172.16.102.0/24 via 172.16.101.2"
 	log_test $? 0 "IPv4 route with no DSCP and ECN:CE"
 }
 
@@ -2224,7 +2357,7 @@ ipv4_mangle_test()
 	$IP route del table 123 172.16.101.0/24 dev veth1
 	$IP rule del pref 100
 
-	{ kill %% && wait %%; } 2>/dev/null
+	kill_process %%
 	rm $tmp_file
 
 	route_cleanup
@@ -2282,7 +2415,7 @@ ipv6_mangle_test()
 	$IP -6 route del table 123 2001:db8:101::/64 dev veth1
 	$IP -6 rule del pref 100
 
-	{ kill %% && wait %%; } 2>/dev/null
+	kill_process %%
 	rm $tmp_file
 
 	route_cleanup
@@ -2427,9 +2560,6 @@ ipv4_mpath_list_test()
 	run_cmd "ip -n $ns2 route add 203.0.113.0/24
 		nexthop via 172.16.201.2 nexthop via 172.16.202.2"
 	run_cmd "ip netns exec $ns2 sysctl -qw net.ipv4.fib_multipath_hash_policy=1"
-	run_cmd "ip netns exec $ns2 sysctl -qw net.ipv4.conf.veth2.rp_filter=0"
-	run_cmd "ip netns exec $ns2 sysctl -qw net.ipv4.conf.all.rp_filter=0"
-	run_cmd "ip netns exec $ns2 sysctl -qw net.ipv4.conf.default.rp_filter=0"
 	set +e
 
 	local dmac=$(ip -n $ns2 -j link show dev veth2 | jq -r '.[]["address"]')
@@ -2494,6 +2624,93 @@ ipv6_mpath_list_test()
 
 	rm $tmp_file
 	route_cleanup
+}
+
+tc_set_flower_counter__saddr_syn() {
+	tc_set_flower_counter $1 $2 $3 "src_ip $4 ip_proto tcp tcp_flags 0x2"
+}
+
+ip_mpath_balance_dep_check()
+{
+	if [ ! -x "$(command -v socat)" ]; then
+		echo "socat command not found. Skipping test"
+		return 1
+	fi
+
+	if [ ! -x "$(command -v jq)" ]; then
+		echo "jq command not found. Skipping test"
+		return 1
+	fi
+}
+
+ip_mpath_balance() {
+	local -r ipver=$1
+	local -r daddr=$2
+	local -r num_conn=20
+
+	for i in $(seq 1 $num_conn); do
+		ip netns exec $ns3 socat $ipver TCP-LISTEN:8000 STDIO >/dev/null &
+		sleep 0.02
+		echo -n a | ip netns exec $ns1 socat $ipver STDIO TCP:$daddr:8000
+	done
+
+	local -r syn0="$(tc_get_flower_counter $ns1 veth1)"
+	local -r syn1="$(tc_get_flower_counter $ns1 veth3)"
+	local -r syns=$((syn0+syn1))
+
+	[ "$VERBOSE" = "1" ] && echo "multipath: syns seen: ($syn0,$syn1)"
+
+	[[ $syns -ge $num_conn ]] && [[ $syn0 -gt 0 ]] && [[ $syn1 -gt 0 ]]
+}
+
+ipv4_mpath_balance_test()
+{
+	echo
+	echo "IPv4 multipath load balance test"
+
+	ip_mpath_balance_dep_check || return 1
+	forwarding_setup
+
+	$IP route add 172.16.105.1 \
+		nexthop via 172.16.101.2 \
+		nexthop via 172.16.103.2
+
+	ip netns exec $ns1 \
+		sysctl -q -w net.ipv4.fib_multipath_hash_policy=1
+
+	tc_set_flower_counter__saddr_syn $ns1 4 veth1 172.16.101.1
+	tc_set_flower_counter__saddr_syn $ns1 4 veth3 172.16.103.1
+
+	ip_mpath_balance -4 172.16.105.1
+
+	log_test $? 0 "IPv4 multipath loadbalance"
+
+	forwarding_cleanup
+}
+
+ipv6_mpath_balance_test()
+{
+	echo
+	echo "IPv6 multipath load balance test"
+
+	ip_mpath_balance_dep_check || return 1
+	forwarding_setup
+
+	$IP route add 2001:db8:105::1\
+		nexthop via 2001:db8:101::2 \
+		nexthop via 2001:db8:103::2
+
+	ip netns exec $ns1 \
+		sysctl -q -w net.ipv6.fib_multipath_hash_policy=1
+
+	tc_set_flower_counter__saddr_syn $ns1 6 veth1 2001:db8:101::1
+	tc_set_flower_counter__saddr_syn $ns1 6 veth3 2001:db8:103::1
+
+	ip_mpath_balance -6 "[2001:db8:105::1]"
+
+	log_test $? 0 "IPv6 multipath loadbalance"
+
+	forwarding_cleanup
 }
 
 ################################################################################
@@ -2579,6 +2796,8 @@ do
 	fib6_gc_test|ipv6_gc)		fib6_gc_test;;
 	ipv4_mpath_list)		ipv4_mpath_list_test;;
 	ipv6_mpath_list)		ipv6_mpath_list_test;;
+	ipv4_mpath_balance)		ipv4_mpath_balance_test;;
+	ipv6_mpath_balance)		ipv6_mpath_balance_test;;
 
 	help) echo "Test names: $TESTS"; exit 0;;
 	esac

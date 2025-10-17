@@ -18,11 +18,13 @@
 #include <linux/bits.h>
 #include <linux/compiler_attributes.h>
 #include <linux/compiler_types.h>
+#include <linux/device.h>
 #include <linux/io.h>
 #include <linux/iopoll.h>
 #include <linux/kernel.h>
 #include <linux/math.h>
 #include <linux/mutex.h>
+#include <linux/spinlock_types.h>
 #include <linux/timer.h>
 #include <linux/types.h>
 #include <linux/wait.h>
@@ -34,6 +36,9 @@ struct clk;
 
 /* Forward declaration from <linux/firmware.h>. */
 struct firmware;
+
+/* Forward declaration from <linux/pwrseq/consumer.h> */
+struct pwrseq_desc;
 
 /**
  * struct pvr_gpu_id - Hardware GPU ID information for a PowerVR device
@@ -53,6 +58,14 @@ struct pvr_gpu_id {
  */
 struct pvr_fw_version {
 	u16 major, minor;
+};
+
+/**
+ * struct pvr_device_data - Platform specific data associated with a compatible string.
+ * @pwr_ops: Pointer to a structure with platform-specific power functions.
+ */
+struct pvr_device_data {
+	const struct pvr_power_sequence_ops *pwr_ops;
 };
 
 /**
@@ -96,6 +109,9 @@ struct pvr_device {
 	/** @fw_version: Firmware version detected at runtime. */
 	struct pvr_fw_version fw_version;
 
+	/** @device_data: Pointer to platform-specific data. */
+	const struct pvr_device_data *device_data;
+
 	/** @regs_resource: Resource representing device control registers. */
 	struct resource *regs_resource;
 
@@ -129,6 +145,25 @@ struct pvr_device {
 	 * Interface (MEMIF). If present, this needs to be enabled/disabled together with @core_clk.
 	 */
 	struct clk *mem_clk;
+
+	struct pvr_device_power {
+		struct device **domain_devs;
+		struct device_link **domain_links;
+
+		u32 domain_count;
+	} power;
+
+	/**
+	 * @reset: Optional reset line.
+	 *
+	 * This may be used on some platforms to provide a reset line that needs to be de-asserted
+	 * after power-up procedure. It would also need to be asserted after the power-down
+	 * procedure.
+	 */
+	struct reset_control *reset;
+
+	/** @pwrseq: Pointer to a power sequencer, if one is used. */
+	struct pwrseq_desc *pwrseq;
 
 	/** @irq: IRQ number. */
 	int irq;
@@ -293,6 +328,15 @@ struct pvr_device {
 
 	/** @sched_wq: Workqueue for schedulers. */
 	struct workqueue_struct *sched_wq;
+
+	/**
+	 * @ctx_list_lock: Lock to be held when accessing the context list in
+	 *  struct pvr_file.
+	 */
+	spinlock_t ctx_list_lock;
+
+	/** @has_safety_events: Whether this device can raise safety events. */
+	bool has_safety_events;
 };
 
 /**
@@ -344,6 +388,9 @@ struct pvr_file {
 	 * This array is used to allocate handles returned to userspace.
 	 */
 	struct xarray vm_ctx_handles;
+
+	/** @contexts: PVR context list. */
+	struct list_head contexts;
 };
 
 /**
@@ -668,7 +715,7 @@ pvr_ioctl_union_padding_check(void *instance, size_t union_offset,
 	void *padding_start = ((u8 *)instance) + union_offset + member_size;
 	size_t padding_size = union_size - member_size;
 
-	return !memchr_inv(padding_start, 0, padding_size);
+	return mem_is_zero(padding_start, padding_size);
 }
 
 /**
@@ -718,8 +765,22 @@ pvr_ioctl_union_padding_check(void *instance, size_t union_offset,
 					      __union_size, __member_size);  \
 	})
 
-#define PVR_FW_PROCESSOR_TYPE_META  0
-#define PVR_FW_PROCESSOR_TYPE_MIPS  1
-#define PVR_FW_PROCESSOR_TYPE_RISCV 2
+/*
+ * These utility functions should more properly be placed in pvr_fw.h, but that
+ * would cause a dependency cycle between that header and this one. Since
+ * they're primarily used in pvr_device.c, let's put them in here for now.
+ */
+
+static __always_inline bool
+pvr_fw_irq_pending(struct pvr_device *pvr_dev)
+{
+	return pvr_dev->fw_dev.defs->irq_pending(pvr_dev);
+}
+
+static __always_inline void
+pvr_fw_irq_clear(struct pvr_device *pvr_dev)
+{
+	pvr_dev->fw_dev.defs->irq_clear(pvr_dev);
+}
 
 #endif /* PVR_DEVICE_H */

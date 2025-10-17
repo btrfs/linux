@@ -14,7 +14,11 @@
 #include <linux/irqdomain.h>
 #include <linux/irqchip/chained_irq.h>
 #include <linux/kernel.h>
+#include <linux/kvm_para.h>
 #include <linux/syscore_ops.h>
+#include <asm/numa.h>
+
+#include "irq-loongson.h"
 
 #define EIOINTC_REG_NODEMAP	0x14a0
 #define EIOINTC_REG_IPMAP	0x14c0
@@ -23,16 +27,47 @@
 #define EIOINTC_REG_ISR		0x1800
 #define EIOINTC_REG_ROUTE	0x1c00
 
+#define EXTIOI_VIRT_FEATURES           0x40000000
+#define  EXTIOI_HAS_VIRT_EXTENSION     BIT(0)
+#define  EXTIOI_HAS_ENABLE_OPTION      BIT(1)
+#define  EXTIOI_HAS_INT_ENCODE         BIT(2)
+#define  EXTIOI_HAS_CPU_ENCODE         BIT(3)
+#define EXTIOI_VIRT_CONFIG             0x40000004
+#define  EXTIOI_ENABLE                 BIT(1)
+#define  EXTIOI_ENABLE_INT_ENCODE      BIT(2)
+#define  EXTIOI_ENABLE_CPU_ENCODE      BIT(3)
+
 #define VEC_REG_COUNT		4
 #define VEC_COUNT_PER_REG	64
 #define VEC_COUNT		(VEC_REG_COUNT * VEC_COUNT_PER_REG)
 #define VEC_REG_IDX(irq_id)	((irq_id) / VEC_COUNT_PER_REG)
 #define VEC_REG_BIT(irq_id)     ((irq_id) % VEC_COUNT_PER_REG)
 #define EIOINTC_ALL_ENABLE	0xffffffff
+#define EIOINTC_ALL_ENABLE_VEC_MASK(vector)	(EIOINTC_ALL_ENABLE & ~BIT(vector & 0x1f))
+#define EIOINTC_REG_ENABLE_VEC(vector)		(EIOINTC_REG_ENABLE + ((vector >> 5) << 2))
+#define EIOINTC_USE_CPU_ENCODE			BIT(0)
+#define EIOINTC_ROUTE_MULT_IP			BIT(1)
 
 #define MAX_EIO_NODES		(NR_CPUS / CORES_PER_EIO_NODE)
 
+/*
+ * Routing registers are 32bit, and there is 8-bit route setting for every
+ * interrupt vector. So one Route register contains four vectors routing
+ * information.
+ */
+#define EIOINTC_REG_ROUTE_VEC(vector)		(EIOINTC_REG_ROUTE + (vector & ~0x03))
+#define EIOINTC_REG_ROUTE_VEC_SHIFT(vector)	((vector & 0x03) << 3)
+#define EIOINTC_REG_ROUTE_VEC_MASK(vector)	(0xff << EIOINTC_REG_ROUTE_VEC_SHIFT(vector))
+
 static int nr_pics;
+struct eiointc_priv;
+
+struct eiointc_ip_route {
+	struct eiointc_priv	*priv;
+	/* Offset Routed destination IP */
+	int			start;
+	int			end;
+};
 
 struct eiointc_priv {
 	u32			node;
@@ -41,6 +76,9 @@ struct eiointc_priv {
 	cpumask_t		cpuspan_map;
 	struct fwnode_handle	*domain_handle;
 	struct irq_domain	*eiointc_domain;
+	int			flags;
+	irq_hw_number_t		parent_hwirq;
+	struct eiointc_ip_route	route_info[VEC_REG_COUNT];
 };
 
 static struct eiointc_priv *eiointc_priv[MAX_IO_PICS];
@@ -56,9 +94,13 @@ static void eiointc_enable(void)
 
 static int cpu_to_eio_node(int cpu)
 {
-	return cpu_logical_map(cpu) / CORES_PER_EIO_NODE;
+	if (!kvm_para_has_feature(KVM_FEATURE_VIRT_EXTIOI))
+		return cpu_logical_map(cpu) / CORES_PER_EIO_NODE;
+	else
+		return cpu_logical_map(cpu) / CORES_PER_VEIO_NODE;
 }
 
+#ifdef CONFIG_SMP
 static void eiointc_set_irq_route(int pos, unsigned int cpu, unsigned int mnode, nodemask_t *node_map)
 {
 	int i, node, cpu_node, route_node;
@@ -85,6 +127,17 @@ static void eiointc_set_irq_route(int pos, unsigned int cpu, unsigned int mnode,
 	}
 }
 
+static void veiointc_set_irq_route(unsigned int vector, unsigned int cpu)
+{
+	unsigned long reg = EIOINTC_REG_ROUTE_VEC(vector);
+	unsigned int data;
+
+	data = iocsr_read32(reg);
+	data &= ~EIOINTC_REG_ROUTE_VEC_MASK(vector);
+	data |= cpu_logical_map(cpu) << EIOINTC_REG_ROUTE_VEC_SHIFT(vector);
+	iocsr_write32(data, reg);
+}
+
 static DEFINE_RAW_SPINLOCK(affinity_lock);
 
 static int eiointc_set_irq_affinity(struct irq_data *d, const struct cpumask *affinity, bool force)
@@ -92,33 +145,35 @@ static int eiointc_set_irq_affinity(struct irq_data *d, const struct cpumask *af
 	unsigned int cpu;
 	unsigned long flags;
 	uint32_t vector, regaddr;
-	struct cpumask intersect_affinity;
 	struct eiointc_priv *priv = d->domain->host_data;
 
 	raw_spin_lock_irqsave(&affinity_lock, flags);
 
-	cpumask_and(&intersect_affinity, affinity, cpu_online_mask);
-	cpumask_and(&intersect_affinity, &intersect_affinity, &priv->cpuspan_map);
-
-	if (cpumask_empty(&intersect_affinity)) {
+	cpu = cpumask_first_and_and(&priv->cpuspan_map, affinity, cpu_online_mask);
+	if (cpu >= nr_cpu_ids) {
 		raw_spin_unlock_irqrestore(&affinity_lock, flags);
 		return -EINVAL;
 	}
-	cpu = cpumask_first(&intersect_affinity);
 
 	vector = d->hwirq;
-	regaddr = EIOINTC_REG_ENABLE + ((vector >> 5) << 2);
+	regaddr = EIOINTC_REG_ENABLE_VEC(vector);
 
-	/* Mask target vector */
-	csr_any_send(regaddr, EIOINTC_ALL_ENABLE & (~BIT(vector & 0x1F)),
-			0x0, priv->node * CORES_PER_EIO_NODE);
+	if (priv->flags & EIOINTC_USE_CPU_ENCODE) {
+		iocsr_write32(EIOINTC_ALL_ENABLE_VEC_MASK(vector), regaddr);
+		veiointc_set_irq_route(vector, cpu);
+		iocsr_write32(EIOINTC_ALL_ENABLE, regaddr);
+	} else {
+		/* Mask target vector */
+		csr_any_send(regaddr, EIOINTC_ALL_ENABLE_VEC_MASK(vector),
+			     0x0, priv->node * CORES_PER_EIO_NODE);
 
-	/* Set route for target vector */
-	eiointc_set_irq_route(vector, cpu, priv->node, &priv->node_map);
+		/* Set route for target vector */
+		eiointc_set_irq_route(vector, cpu, priv->node, &priv->node_map);
 
-	/* Unmask target vector */
-	csr_any_send(regaddr, EIOINTC_ALL_ENABLE,
-			0x0, priv->node * CORES_PER_EIO_NODE);
+		/* Unmask target vector */
+		csr_any_send(regaddr, EIOINTC_ALL_ENABLE,
+			     0x0, priv->node * CORES_PER_EIO_NODE);
+	}
 
 	irq_data_update_effective_affinity(d, cpumask_of(cpu));
 
@@ -126,6 +181,7 @@ static int eiointc_set_irq_affinity(struct irq_data *d, const struct cpumask *af
 
 	return IRQ_SET_MASK_OK;
 }
+#endif
 
 static int eiointc_index(int node)
 {
@@ -141,17 +197,31 @@ static int eiointc_index(int node)
 
 static int eiointc_router_init(unsigned int cpu)
 {
-	int i, bit;
-	uint32_t data;
-	uint32_t node = cpu_to_eio_node(cpu);
-	int index = eiointc_index(node);
+	int i, bit, cores, index, node;
+	unsigned int data;
+	int hwirq, mask;
+
+	node = cpu_to_eio_node(cpu);
+	index = eiointc_index(node);
 
 	if (index < 0) {
 		pr_err("Error: invalid nodemap!\n");
-		return -1;
+		return -EINVAL;
 	}
 
-	if ((cpu_logical_map(cpu) % CORES_PER_EIO_NODE) == 0) {
+	/* Enable cpu interrupt pin from eiointc */
+	hwirq = eiointc_priv[index]->parent_hwirq;
+	mask = BIT(hwirq);
+	if (eiointc_priv[index]->flags & EIOINTC_ROUTE_MULT_IP)
+		mask |= BIT(hwirq + 1) | BIT(hwirq + 2) | BIT(hwirq + 3);
+	set_csr_ecfg(mask);
+
+	if (!(eiointc_priv[index]->flags & EIOINTC_USE_CPU_ENCODE))
+		cores = CORES_PER_EIO_NODE;
+	else
+		cores = CORES_PER_VEIO_NODE;
+
+	if ((cpu_logical_map(cpu) % cores) == 0) {
 		eiointc_enable();
 
 		for (i = 0; i < eiointc_priv[0]->vec_count / 32; i++) {
@@ -160,14 +230,39 @@ static int eiointc_router_init(unsigned int cpu)
 		}
 
 		for (i = 0; i < eiointc_priv[0]->vec_count / 32 / 4; i++) {
-			bit = BIT(1 + index); /* Route to IP[1 + index] */
-			data = bit | (bit << 8) | (bit << 16) | (bit << 24);
+			/*
+			 * Route to interrupt pin, relative offset used here
+			 * Offset 0 means routing to IP0 and so on
+			 *
+			 * If flags is set with EIOINTC_ROUTE_MULT_IP,
+			 * every 64 vector routes to different consecutive
+			 * IPs, otherwise all vector routes to the same IP
+			 */
+			if (eiointc_priv[index]->flags & EIOINTC_ROUTE_MULT_IP) {
+				/* The first 64 vectors route to hwirq */
+				bit = BIT(hwirq++ - INT_HWI0);
+				data = bit | (bit << 8);
+
+				/* The second 64 vectors route to hwirq + 1 */
+				bit = BIT(hwirq++ - INT_HWI0);
+				data |= (bit << 16) | (bit << 24);
+
+				/*
+				 * Route to hwirq + 2/hwirq + 3 separately
+				 * in next loop
+				 */
+			} else  {
+				bit = BIT(hwirq - INT_HWI0);
+				data = bit | (bit << 8) | (bit << 16) | (bit << 24);
+			}
 			iocsr_write32(data, EIOINTC_REG_IPMAP + i * 4);
 		}
 
 		for (i = 0; i < eiointc_priv[0]->vec_count / 4; i++) {
 			/* Route to Node-0 Core-0 */
-			if (index == 0)
+			if (eiointc_priv[index]->flags & EIOINTC_USE_CPU_ENCODE)
+				bit = cpu_logical_map(0);
+			else if (index == 0)
 				bit = BIT(cpu_logical_map(0));
 			else
 				bit = (eiointc_priv[index]->node << 4) | 1;
@@ -188,22 +283,35 @@ static int eiointc_router_init(unsigned int cpu)
 
 static void eiointc_irq_dispatch(struct irq_desc *desc)
 {
-	int i;
-	u64 pending;
-	bool handled = false;
+	struct eiointc_ip_route *info = irq_desc_get_handler_data(desc);
 	struct irq_chip *chip = irq_desc_get_chip(desc);
-	struct eiointc_priv *priv = irq_desc_get_handler_data(desc);
+	bool handled = false;
+	u64 pending;
+	int i;
 
 	chained_irq_enter(chip, desc);
 
-	for (i = 0; i < eiointc_priv[0]->vec_count / VEC_COUNT_PER_REG; i++) {
+	/*
+	 * If EIOINTC_ROUTE_MULT_IP is set, every 64 interrupt vectors in
+	 * eiointc interrupt controller routes to different cpu interrupt pins
+	 *
+	 * Every cpu interrupt pin has its own irq handler, it is ok to
+	 * read ISR for these 64 interrupt vectors rather than all vectors
+	 */
+	for (i = info->start; i < info->end; i++) {
 		pending = iocsr_read64(EIOINTC_REG_ISR + (i << 3));
+
+		/* Skip handling if pending bitmap is zero */
+		if (!pending)
+			continue;
+
+		/* Clear the IRQs */
 		iocsr_write64(pending, EIOINTC_REG_ISR + (i << 3));
 		while (pending) {
 			int bit = __ffs(pending);
 			int irq = bit + VEC_COUNT_PER_REG * i;
 
-			generic_handle_domain_irq(priv->eiointc_domain, irq);
+			generic_handle_domain_irq(info->priv->eiointc_domain, irq);
 			pending &= ~BIT(bit);
 			handled = true;
 		}
@@ -232,7 +340,9 @@ static struct irq_chip eiointc_irq_chip = {
 	.irq_ack		= eiointc_ack_irq,
 	.irq_mask		= eiointc_mask_irq,
 	.irq_unmask		= eiointc_unmask_irq,
+#ifdef CONFIG_SMP
 	.irq_set_affinity	= eiointc_set_irq_affinity,
+#endif
 };
 
 static int eiointc_domain_alloc(struct irq_domain *domain, unsigned int virq,
@@ -241,7 +351,7 @@ static int eiointc_domain_alloc(struct irq_domain *domain, unsigned int virq,
 	int ret;
 	unsigned int i, type;
 	unsigned long hwirq = 0;
-	struct eiointc *priv = domain->host_data;
+	struct eiointc_priv *priv = domain->host_data;
 
 	ret = irq_domain_translate_onecell(domain, arg, &hwirq, &type);
 	if (ret)
@@ -304,23 +414,7 @@ static int eiointc_suspend(void)
 
 static void eiointc_resume(void)
 {
-	int i, j;
-	struct irq_desc *desc;
-	struct irq_data *irq_data;
-
 	eiointc_router_init(0);
-
-	for (i = 0; i < nr_pics; i++) {
-		for (j = 0; j < eiointc_priv[0]->vec_count; j++) {
-			desc = irq_resolve_mapping(eiointc_priv[i]->eiointc_domain, j);
-			if (desc && desc->handle_irq && desc->handle_irq != handle_bad_irq) {
-				raw_spin_lock(&desc->lock);
-				irq_data = irq_domain_get_irq_data(eiointc_priv[i]->eiointc_domain, irq_desc_get_irq(desc));
-				eiointc_set_irq_affinity(irq_data, irq_data->common->affinity, 0);
-				raw_spin_unlock(&desc->lock);
-			}
-		}
-	}
 }
 
 static struct syscore_ops eiointc_syscore_ops = {
@@ -349,7 +443,7 @@ static int __init pch_msi_parse_madt(union acpi_subtable_headers *header,
 	int node;
 
 	if (cpu_has_flatmode)
-		node = cpu_to_node(eiointc_priv[nr_pics - 1]->node * CORES_PER_EIO_NODE);
+		node = early_cpu_to_node(eiointc_priv[nr_pics - 1]->node * CORES_PER_EIO_NODE);
 	else
 		node = eiointc_priv[nr_pics - 1]->node;
 
@@ -369,6 +463,9 @@ static int __init acpi_cascade_irqdomain_init(void)
 	if (r < 0)
 		return r;
 
+	if (cpu_has_avecint)
+		return 0;
+
 	r = acpi_table_parse_madt(ACPI_MADT_TYPE_MSI_PIC, pch_msi_parse_madt, 1);
 	if (r < 0)
 		return r;
@@ -379,7 +476,7 @@ static int __init acpi_cascade_irqdomain_init(void)
 static int __init eiointc_init(struct eiointc_priv *priv, int parent_irq,
 			       u64 node_map)
 {
-	int i;
+	int i, val;
 
 	node_map = node_map ? node_map : -1ULL;
 	for_each_possible_cpu(i) {
@@ -399,14 +496,53 @@ static int __init eiointc_init(struct eiointc_priv *priv, int parent_irq,
 		return -ENOMEM;
 	}
 
+	if (kvm_para_has_feature(KVM_FEATURE_VIRT_EXTIOI)) {
+		val = iocsr_read32(EXTIOI_VIRT_FEATURES);
+		/*
+		 * With EXTIOI_ENABLE_CPU_ENCODE set
+		 * interrupts can route to 256 vCPUs.
+		 */
+		if (val & EXTIOI_HAS_CPU_ENCODE) {
+			val = iocsr_read32(EXTIOI_VIRT_CONFIG);
+			val |= EXTIOI_ENABLE_CPU_ENCODE;
+			iocsr_write32(val, EXTIOI_VIRT_CONFIG);
+			priv->flags = EIOINTC_USE_CPU_ENCODE;
+		}
+	}
+
 	eiointc_priv[nr_pics++] = priv;
+	/*
+	 * Only the first eiointc device on VM supports routing to
+	 * different CPU interrupt pins. The later eiointc devices use
+	 * generic method if there are multiple eiointc devices in future
+	 */
+	if (cpu_has_hypervisor && (nr_pics == 1)) {
+		priv->flags |= EIOINTC_ROUTE_MULT_IP;
+		priv->parent_hwirq = INT_HWI0;
+	}
+
+	if (priv->flags & EIOINTC_ROUTE_MULT_IP) {
+		for (i = 0; i < priv->vec_count / VEC_COUNT_PER_REG; i++) {
+			priv->route_info[i].start  = priv->parent_hwirq - INT_HWI0 + i;
+			priv->route_info[i].end    = priv->route_info[i].start + 1;
+			priv->route_info[i].priv   = priv;
+			parent_irq = get_percpu_irq(priv->parent_hwirq + i);
+			irq_set_chained_handler_and_data(parent_irq, eiointc_irq_dispatch,
+							 &priv->route_info[i]);
+		}
+	} else {
+		priv->route_info[0].start  = 0;
+		priv->route_info[0].end    = priv->vec_count / VEC_COUNT_PER_REG;
+		priv->route_info[0].priv   = priv;
+		irq_set_chained_handler_and_data(parent_irq, eiointc_irq_dispatch,
+						 &priv->route_info[0]);
+	}
 	eiointc_router_init(0);
-	irq_set_chained_handler_and_data(parent_irq, eiointc_irq_dispatch, priv);
 
 	if (nr_pics == 1) {
 		register_syscore_ops(&eiointc_syscore_ops);
-		cpuhp_setup_state_nocalls(CPUHP_AP_IRQ_LOONGARCH_STARTING,
-					  "irqchip/loongarch/intc:starting",
+		cpuhp_setup_state_nocalls(CPUHP_AP_IRQ_EIOINTC_STARTING,
+					  "irqchip/loongarch/eiointc:starting",
 					  eiointc_router_init, NULL);
 	}
 
@@ -433,7 +569,7 @@ int __init eiointc_acpi_init(struct irq_domain *parent,
 
 	priv->vec_count = VEC_COUNT;
 	priv->node = acpi_eiointc->node;
-
+	priv->parent_hwirq = acpi_eiointc->cascade;
 	parent_irq = irq_create_mapping(parent, acpi_eiointc->cascade);
 
 	ret = eiointc_init(priv, parent_irq, acpi_eiointc->node_map);
@@ -441,7 +577,7 @@ int __init eiointc_acpi_init(struct irq_domain *parent,
 		goto out_free_handle;
 
 	if (cpu_has_flatmode)
-		node = cpu_to_node(acpi_eiointc->node * CORES_PER_EIO_NODE);
+		node = early_cpu_to_node(acpi_eiointc->node * CORES_PER_EIO_NODE);
 	else
 		node = acpi_eiointc->node;
 	acpi_set_vec_parent(node, priv->eiointc_domain, pch_group);
@@ -465,8 +601,9 @@ out_free_priv:
 static int __init eiointc_of_init(struct device_node *of_node,
 				  struct device_node *parent)
 {
-	int parent_irq, ret;
 	struct eiointc_priv *priv;
+	struct irq_data *irq_data;
+	int parent_irq, ret;
 
 	priv = kzalloc(sizeof(*priv), GFP_KERNEL);
 	if (!priv)
@@ -482,6 +619,12 @@ static int __init eiointc_of_init(struct device_node *of_node,
 	if (ret < 0)
 		goto out_free_priv;
 
+	irq_data = irq_get_irq_data(parent_irq);
+	if (!irq_data) {
+		ret = -ENODEV;
+		goto out_free_priv;
+	}
+
 	/*
 	 * In particular, the number of devices supported by the LS2K0500
 	 * extended I/O interrupt vector is 128.
@@ -490,9 +633,9 @@ static int __init eiointc_of_init(struct device_node *of_node,
 		priv->vec_count = 128;
 	else
 		priv->vec_count = VEC_COUNT;
-
+	priv->parent_hwirq = irqd_to_hwirq(irq_data);
 	priv->node = 0;
-	priv->domain_handle = of_node_to_fwnode(of_node);
+	priv->domain_handle = of_fwnode_handle(of_node);
 
 	ret = eiointc_init(priv, parent_irq, 0);
 	if (ret < 0)

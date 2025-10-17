@@ -21,25 +21,22 @@
 #include <net/netfilter/nf_log.h>
 #include <net/netfilter/nft_meta.h>
 
-#if defined(CONFIG_RETPOLINE) && defined(CONFIG_X86)
-
+#ifdef CONFIG_MITIGATION_RETPOLINE
 static struct static_key_false nf_tables_skip_direct_calls;
 
-static bool nf_skip_indirect_calls(void)
+static inline bool nf_skip_indirect_calls(void)
 {
 	return static_branch_likely(&nf_tables_skip_direct_calls);
 }
 
-static void __init nf_skip_indirect_calls_enable(void)
+static inline void __init nf_skip_indirect_calls_enable(void)
 {
 	if (!cpu_feature_enabled(X86_FEATURE_RETPOLINE))
 		static_branch_enable(&nf_tables_skip_direct_calls);
 }
 #else
-static inline bool nf_skip_indirect_calls(void) { return false; }
-
 static inline void nf_skip_indirect_calls_enable(void) { }
-#endif
+#endif /* CONFIG_MITIGATION_RETPOLINE */
 
 static noinline void __nft_trace_packet(const struct nft_pktinfo *pkt,
 					const struct nft_verdict *verdict,
@@ -207,7 +204,7 @@ static void expr_call_ops_eval(const struct nft_expr *expr,
 			       struct nft_regs *regs,
 			       struct nft_pktinfo *pkt)
 {
-#ifdef CONFIG_RETPOLINE
+#ifdef CONFIG_MITIGATION_RETPOLINE
 	unsigned long e;
 
 	if (nf_skip_indirect_calls())
@@ -236,7 +233,7 @@ static void expr_call_ops_eval(const struct nft_expr *expr,
 	X(e, nft_objref_map_eval);
 #undef  X
 indirect_call:
-#endif /* CONFIG_RETPOLINE */
+#endif /* CONFIG_MITIGATION_RETPOLINE */
 	expr->ops->eval(expr, regs, pkt);
 }
 
@@ -256,7 +253,7 @@ nft_do_chain(struct nft_pktinfo *pkt, void *priv)
 	const struct net *net = nft_net(pkt);
 	const struct nft_expr *expr, *last;
 	const struct nft_rule_dp *rule;
-	struct nft_regs regs = {};
+	struct nft_regs regs;
 	unsigned int stackptr = 0;
 	struct nft_jumpstack jumpstack[NFT_JUMP_STACK_SIZE];
 	bool genbit = READ_ONCE(net->nft.gencursor);

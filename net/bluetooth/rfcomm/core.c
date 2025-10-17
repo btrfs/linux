@@ -28,7 +28,7 @@
 #include <linux/module.h>
 #include <linux/debugfs.h>
 #include <linux/kthread.h>
-#include <asm/unaligned.h>
+#include <linux/unaligned.h>
 
 #include <net/bluetooth/bluetooth.h>
 #include <net/bluetooth/hci_core.h>
@@ -235,7 +235,7 @@ static int rfcomm_check_security(struct rfcomm_dlc *d)
 
 static void rfcomm_session_timeout(struct timer_list *t)
 {
-	struct rfcomm_session *s = from_timer(s, t, timer);
+	struct rfcomm_session *s = timer_container_of(s, t, timer);
 
 	BT_DBG("session %p state %ld", s, s->state);
 
@@ -254,13 +254,13 @@ static void rfcomm_session_clear_timer(struct rfcomm_session *s)
 {
 	BT_DBG("session %p state %ld", s, s->state);
 
-	del_timer_sync(&s->timer);
+	timer_delete_sync(&s->timer);
 }
 
 /* ---- RFCOMM DLCs ---- */
 static void rfcomm_dlc_timeout(struct timer_list *t)
 {
-	struct rfcomm_dlc *d = from_timer(d, t, timer);
+	struct rfcomm_dlc *d = timer_container_of(d, t, timer);
 
 	BT_DBG("dlc %p state %ld", d, d->state);
 
@@ -281,7 +281,7 @@ static void rfcomm_dlc_clear_timer(struct rfcomm_dlc *d)
 {
 	BT_DBG("dlc %p state %ld", d, d->state);
 
-	if (del_timer(&d->timer))
+	if (timer_delete(&d->timer))
 		rfcomm_dlc_put(d);
 }
 
@@ -1941,7 +1941,7 @@ static struct rfcomm_session *rfcomm_process_rx(struct rfcomm_session *s)
 	/* Get data directly from socket receive queue without copying it. */
 	while ((skb = skb_dequeue(&sk->sk_receive_queue))) {
 		skb_orphan(skb);
-		if (!skb_linearize(skb)) {
+		if (!skb_linearize(skb) && sk->sk_state != BT_CLOSED) {
 			s = rfcomm_recv_frame(s, skb);
 			if (!s)
 				break;
@@ -1962,7 +1962,8 @@ static void rfcomm_accept_connection(struct rfcomm_session *s)
 	int err;
 
 	/* Fast check for a new connection.
-	 * Avoids unnesesary socket allocations. */
+	 * Avoids unnecessary socket allocations.
+	 */
 	if (list_empty(&bt_sk(sock->sk)->accept_q))
 		return;
 

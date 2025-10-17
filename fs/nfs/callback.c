@@ -76,6 +76,8 @@ nfs4_callback_svc(void *vrqstp)
 {
 	struct svc_rqst *rqstp = vrqstp;
 
+	svc_thread_init_status(rqstp, 0);
+
 	set_freezable();
 
 	while (!svc_thread_should_stop(rqstp))
@@ -134,7 +136,7 @@ static void nfs_callback_down_net(u32 minorversion, struct svc_serv *serv, struc
 		return;
 
 	dprintk("NFS: destroy per-net callback data; net=%x\n", net->ns.inum);
-	svc_xprt_destroy_all(serv, net);
+	svc_xprt_destroy_all(serv, net, false);
 }
 
 static int nfs_callback_up_net(int minorversion, struct svc_serv *serv,
@@ -151,7 +153,7 @@ static int nfs_callback_up_net(int minorversion, struct svc_serv *serv,
 	ret = svc_bind(serv, net);
 	if (ret < 0) {
 		printk(KERN_WARNING "NFS: bind callback service failed\n");
-		goto err_bind;
+		goto err;
 	}
 
 	ret = 0;
@@ -164,13 +166,11 @@ static int nfs_callback_up_net(int minorversion, struct svc_serv *serv,
 
 	if (ret < 0) {
 		printk(KERN_ERR "NFS: callback service start failed\n");
-		goto err_socks;
+		goto err;
 	}
 	return 0;
 
-err_socks:
-	svc_rpcb_cleanup(serv, net);
-err_bind:
+err:
 	nn->cb_users[minorversion]--;
 	dprintk("NFS: Couldn't create callback socket: err = %d; "
 			"net = %x\n", ret, net->ns.inum);
@@ -209,10 +209,6 @@ static struct svc_serv *nfs_callback_create_svc(int minorversion)
 		return ERR_PTR(-ENOMEM);
 	}
 	cb_info->serv = serv;
-	/* As there is only one thread we need to over-ride the
-	 * default maximum of 80 connections
-	 */
-	serv->sv_maxconn = 1024;
 	dprintk("nfs_callback_create_svc: service created\n");
 	return serv;
 }
@@ -356,15 +352,12 @@ static const struct svc_version *nfs4_callback_version[] = {
 	[4] = &nfs4_callback_version4,
 };
 
-static struct svc_stat nfs4_callback_stats;
-
 static struct svc_program nfs4_callback_program = {
 	.pg_prog = NFS4_CALLBACK,			/* RPC service number */
 	.pg_nvers = ARRAY_SIZE(nfs4_callback_version),	/* Number of entries */
 	.pg_vers = nfs4_callback_version,		/* version table */
 	.pg_name = "NFSv4 callback",			/* service name */
 	.pg_class = "nfs",				/* authentication class */
-	.pg_stats = &nfs4_callback_stats,
 	.pg_authenticate = nfs_callback_authenticate,
 	.pg_init_request = svc_generic_init_request,
 	.pg_rpcbind_set	= svc_generic_rpcbind_set,

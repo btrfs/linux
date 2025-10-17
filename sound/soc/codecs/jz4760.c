@@ -314,37 +314,13 @@ static const struct snd_kcontrol_new jz4760_codec_snd_controls[] = {
 };
 
 static const struct snd_kcontrol_new jz4760_codec_pcm_playback_controls[] = {
-	{
-		.iface = SNDRV_CTL_ELEM_IFACE_MIXER,
-		.name = "Volume",
-		.info = snd_soc_info_volsw,
-		.access = SNDRV_CTL_ELEM_ACCESS_TLV_READ
-			| SNDRV_CTL_ELEM_ACCESS_READWRITE,
-		.tlv.p = dac_tlv,
-		.get = snd_soc_dapm_get_volsw,
-		.put = snd_soc_dapm_put_volsw,
-		.private_value = SOC_DOUBLE_R_VALUE(JZ4760_CODEC_REG_GCR6,
-						    JZ4760_CODEC_REG_GCR5,
-						    REG_GCR_GAIN_OFFSET,
-						    REG_GCR_GAIN_MAX, 1),
-	},
+	SOC_DAPM_DOUBLE_R_TLV("Volume", JZ4760_CODEC_REG_GCR6, JZ4760_CODEC_REG_GCR5,
+			      REG_GCR_GAIN_OFFSET, REG_GCR_GAIN_MAX, 1, dac_tlv),
 };
 
 static const struct snd_kcontrol_new jz4760_codec_hp_playback_controls[] = {
-	{
-		.iface = SNDRV_CTL_ELEM_IFACE_MIXER,
-		.name = "Volume",
-		.info = snd_soc_info_volsw,
-		.access = SNDRV_CTL_ELEM_ACCESS_TLV_READ
-			| SNDRV_CTL_ELEM_ACCESS_READWRITE,
-		.tlv.p = out_tlv,
-		.get = snd_soc_dapm_get_volsw,
-		.put = snd_soc_dapm_put_volsw,
-		.private_value = SOC_DOUBLE_R_VALUE(JZ4760_CODEC_REG_GCR2,
-						    JZ4760_CODEC_REG_GCR1,
-						    REG_GCR_GAIN_OFFSET,
-						    REG_GCR_GAIN_MAX, 1),
-	},
+	SOC_DAPM_DOUBLE_R_TLV("Volume", JZ4760_CODEC_REG_GCR2, JZ4760_CODEC_REG_GCR1,
+			      REG_GCR_GAIN_OFFSET, REG_GCR_GAIN_MAX, 1, out_tlv),
 };
 
 static int hpout_event(struct snd_soc_dapm_widget *w,
@@ -821,7 +797,7 @@ static const u8 jz4760_codec_reg_defaults[] = {
 	0x1F, 0x00, 0x00, 0x00
 };
 
-static struct regmap_config jz4760_codec_regmap_config = {
+static const struct regmap_config jz4760_codec_regmap_config = {
 	.reg_bits = 7,
 	.val_bits = 8,
 

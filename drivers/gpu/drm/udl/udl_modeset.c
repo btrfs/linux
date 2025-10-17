@@ -25,6 +25,7 @@
 #include <drm/drm_vblank.h>
 
 #include "udl_drv.h"
+#include "udl_edid.h"
 #include "udl_proto.h"
 
 /*
@@ -204,6 +205,7 @@ static int udl_handle_damage(struct drm_framebuffer *fb,
 			     const struct drm_rect *clip)
 {
 	struct drm_device *dev = fb->dev;
+	struct udl_device *udl = to_udl(dev);
 	void *vaddr = map->vaddr; /* TODO: Use mapping abstraction properly */
 	int i, ret;
 	char *cmd;
@@ -215,7 +217,7 @@ static int udl_handle_damage(struct drm_framebuffer *fb,
 		return ret;
 	log_bpp = ret;
 
-	urb = udl_get_urb(dev);
+	urb = udl_get_urb(udl);
 	if (!urb)
 		return -ENOMEM;
 	cmd = urb->transfer_buffer;
@@ -225,7 +227,7 @@ static int udl_handle_damage(struct drm_framebuffer *fb,
 		const int byte_offset = line_offset + (clip->x1 << log_bpp);
 		const int dev_byte_offset = (fb->width * i + clip->x1) << log_bpp;
 		const int byte_width = drm_rect_width(clip) << log_bpp;
-		ret = udl_render_hline(dev, log_bpp, &urb, (char *)vaddr,
+		ret = udl_render_hline(udl, log_bpp, &urb, (char *)vaddr,
 				       &cmd, byte_offset, dev_byte_offset,
 				       byte_width);
 		if (ret)
@@ -238,7 +240,7 @@ static int udl_handle_damage(struct drm_framebuffer *fb,
 		if (cmd < (char *)urb->transfer_buffer + urb->transfer_buffer_length)
 			*cmd++ = UDL_MSG_BULK;
 		len = cmd - (char *)urb->transfer_buffer;
-		ret = udl_submit_urb(dev, urb, len);
+		ret = udl_submit_urb(udl, urb, len);
 	} else {
 		udl_urb_completion(urb);
 	}
@@ -329,6 +331,7 @@ static const struct drm_plane_funcs udl_primary_plane_funcs = {
 static void udl_crtc_helper_atomic_enable(struct drm_crtc *crtc, struct drm_atomic_state *state)
 {
 	struct drm_device *dev = crtc->dev;
+	struct udl_device *udl = to_udl(dev);
 	struct drm_crtc_state *crtc_state = drm_atomic_get_new_crtc_state(state, crtc);
 	struct drm_display_mode *mode = &crtc_state->mode;
 	struct urb *urb;
@@ -338,7 +341,7 @@ static void udl_crtc_helper_atomic_enable(struct drm_crtc *crtc, struct drm_atom
 	if (!drm_dev_enter(dev, &idx))
 		return;
 
-	urb = udl_get_urb(dev);
+	urb = udl_get_urb(udl);
 	if (!urb)
 		goto out;
 
@@ -354,7 +357,7 @@ static void udl_crtc_helper_atomic_enable(struct drm_crtc *crtc, struct drm_atom
 	buf = udl_vidreg_unlock(buf);
 	buf = udl_dummy_render(buf);
 
-	udl_submit_urb(dev, urb, buf - (char *)urb->transfer_buffer);
+	udl_submit_urb(udl, urb, buf - (char *)urb->transfer_buffer);
 
 out:
 	drm_dev_exit(idx);
@@ -363,6 +366,7 @@ out:
 static void udl_crtc_helper_atomic_disable(struct drm_crtc *crtc, struct drm_atomic_state *state)
 {
 	struct drm_device *dev = crtc->dev;
+	struct udl_device *udl = to_udl(dev);
 	struct urb *urb;
 	char *buf;
 	int idx;
@@ -370,7 +374,7 @@ static void udl_crtc_helper_atomic_disable(struct drm_crtc *crtc, struct drm_ato
 	if (!drm_dev_enter(dev, &idx))
 		return;
 
-	urb = udl_get_urb(dev);
+	urb = udl_get_urb(udl);
 	if (!urb)
 		goto out;
 
@@ -380,7 +384,7 @@ static void udl_crtc_helper_atomic_disable(struct drm_crtc *crtc, struct drm_ato
 	buf = udl_vidreg_unlock(buf);
 	buf = udl_dummy_render(buf);
 
-	udl_submit_urb(dev, urb, buf - (char *)urb->transfer_buffer);
+	udl_submit_urb(udl, urb, buf - (char *)urb->transfer_buffer);
 
 out:
 	drm_dev_exit(idx);
@@ -415,128 +419,41 @@ static const struct drm_encoder_funcs udl_encoder_funcs = {
 
 static int udl_connector_helper_get_modes(struct drm_connector *connector)
 {
-	struct udl_connector *udl_connector = to_udl_connector(connector);
+	const struct drm_edid *drm_edid;
+	int count;
 
-	drm_connector_update_edid_property(connector, udl_connector->edid);
-	if (udl_connector->edid)
-		return drm_add_edid_modes(connector, udl_connector->edid);
+	drm_edid = udl_edid_read(connector);
+	drm_edid_connector_update(connector, drm_edid);
+	count = drm_edid_connector_add_modes(connector);
+	drm_edid_free(drm_edid);
 
-	return 0;
+	return count;
+}
+
+static int udl_connector_helper_detect_ctx(struct drm_connector *connector,
+					   struct drm_modeset_acquire_ctx *ctx,
+					   bool force)
+{
+	struct udl_device *udl = to_udl(connector->dev);
+
+	if (udl_probe_edid(udl))
+		return connector_status_connected;
+
+	return connector_status_disconnected;
 }
 
 static const struct drm_connector_helper_funcs udl_connector_helper_funcs = {
 	.get_modes = udl_connector_helper_get_modes,
+	.detect_ctx = udl_connector_helper_detect_ctx,
 };
-
-static int udl_get_edid_block(void *data, u8 *buf, unsigned int block, size_t len)
-{
-	struct udl_device *udl = data;
-	struct drm_device *dev = &udl->drm;
-	struct usb_device *udev = udl_to_usb_device(udl);
-	u8 *read_buff;
-	int ret;
-	size_t i;
-
-	read_buff = kmalloc(2, GFP_KERNEL);
-	if (!read_buff)
-		return -ENOMEM;
-
-	for (i = 0; i < len; i++) {
-		int bval = (i + block * EDID_LENGTH) << 8;
-
-		ret = usb_control_msg(udev, usb_rcvctrlpipe(udev, 0),
-				      0x02, (0x80 | (0x02 << 5)), bval,
-				      0xA1, read_buff, 2, USB_CTRL_GET_TIMEOUT);
-		if (ret < 0) {
-			drm_err(dev, "Read EDID byte %zu failed err %x\n", i, ret);
-			goto err_kfree;
-		} else if (ret < 1) {
-			ret = -EIO;
-			drm_err(dev, "Read EDID byte %zu failed\n", i);
-			goto err_kfree;
-		}
-
-		buf[i] = read_buff[1];
-	}
-
-	kfree(read_buff);
-
-	return 0;
-
-err_kfree:
-	kfree(read_buff);
-	return ret;
-}
-
-static enum drm_connector_status udl_connector_detect(struct drm_connector *connector, bool force)
-{
-	struct drm_device *dev = connector->dev;
-	struct udl_device *udl = to_udl(dev);
-	struct udl_connector *udl_connector = to_udl_connector(connector);
-	enum drm_connector_status status = connector_status_disconnected;
-	int idx;
-
-	/* cleanup previous EDID */
-	kfree(udl_connector->edid);
-	udl_connector->edid = NULL;
-
-	if (!drm_dev_enter(dev, &idx))
-		return connector_status_disconnected;
-
-	udl_connector->edid = drm_do_get_edid(connector, udl_get_edid_block, udl);
-	if (udl_connector->edid)
-		status = connector_status_connected;
-
-	drm_dev_exit(idx);
-
-	return status;
-}
-
-static void udl_connector_destroy(struct drm_connector *connector)
-{
-	struct udl_connector *udl_connector = to_udl_connector(connector);
-
-	drm_connector_cleanup(connector);
-	kfree(udl_connector->edid);
-	kfree(udl_connector);
-}
 
 static const struct drm_connector_funcs udl_connector_funcs = {
 	.reset = drm_atomic_helper_connector_reset,
-	.detect = udl_connector_detect,
 	.fill_modes = drm_helper_probe_single_connector_modes,
-	.destroy = udl_connector_destroy,
+	.destroy = drm_connector_cleanup,
 	.atomic_duplicate_state = drm_atomic_helper_connector_duplicate_state,
 	.atomic_destroy_state = drm_atomic_helper_connector_destroy_state,
 };
-
-struct drm_connector *udl_connector_init(struct drm_device *dev)
-{
-	struct udl_connector *udl_connector;
-	struct drm_connector *connector;
-	int ret;
-
-	udl_connector = kzalloc(sizeof(*udl_connector), GFP_KERNEL);
-	if (!udl_connector)
-		return ERR_PTR(-ENOMEM);
-
-	connector = &udl_connector->connector;
-	ret = drm_connector_init(dev, connector, &udl_connector_funcs, DRM_MODE_CONNECTOR_VGA);
-	if (ret)
-		goto err_kfree;
-
-	drm_connector_helper_add(connector, &udl_connector_helper_funcs);
-
-	connector->polled = DRM_CONNECTOR_POLL_HPD |
-			    DRM_CONNECTOR_POLL_CONNECT |
-			    DRM_CONNECTOR_POLL_DISCONNECT;
-
-	return connector;
-
-err_kfree:
-	kfree(udl_connector);
-	return ERR_PTR(ret);
-}
 
 /*
  * Modesetting
@@ -562,9 +479,9 @@ static const struct drm_mode_config_funcs udl_mode_config_funcs = {
 	.atomic_commit = drm_atomic_helper_commit,
 };
 
-int udl_modeset_init(struct drm_device *dev)
+int udl_modeset_init(struct udl_device *udl)
 {
-	struct udl_device *udl = to_udl(dev);
+	struct drm_device *dev = &udl->drm;
 	struct drm_plane *primary_plane;
 	struct drm_crtc *crtc;
 	struct drm_encoder *encoder;
@@ -607,14 +524,21 @@ int udl_modeset_init(struct drm_device *dev)
 		return ret;
 	encoder->possible_crtcs = drm_crtc_mask(crtc);
 
-	connector = udl_connector_init(dev);
-	if (IS_ERR(connector))
-		return PTR_ERR(connector);
+	connector = &udl->connector;
+	ret = drm_connector_init(dev, connector, &udl_connector_funcs, DRM_MODE_CONNECTOR_VGA);
+	if (ret)
+		return ret;
+	drm_connector_helper_add(connector, &udl_connector_helper_funcs);
+
+	connector->polled = DRM_CONNECTOR_POLL_CONNECT |
+			    DRM_CONNECTOR_POLL_DISCONNECT;
+
 	ret = drm_connector_attach_encoder(connector, encoder);
 	if (ret)
 		return ret;
 
 	drm_mode_config_reset(dev);
+	drmm_kms_helper_poll_init(dev);
 
 	return 0;
 }

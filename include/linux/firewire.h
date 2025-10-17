@@ -88,23 +88,30 @@ struct fw_card {
 
 	int node_id;
 	int generation;
-	int current_tlabel;
-	u64 tlabel_mask;
-	struct list_head transaction_list;
 	u64 reset_jiffies;
 
-	u32 split_timeout_hi;
-	u32 split_timeout_lo;
-	unsigned int split_timeout_cycles;
-	unsigned int split_timeout_jiffies;
+	struct {
+		int current_tlabel;
+		u64 tlabel_mask;
+		struct list_head list;
+		spinlock_t lock;
+	} transactions;
+
+	struct {
+		u32 hi;
+		u32 lo;
+		unsigned int cycles;
+		unsigned int jiffies;
+		spinlock_t lock;
+	} split_timeout;
 
 	unsigned long long guid;
 	unsigned max_receive;
 	int link_speed;
 	int config_rom_generation;
 
-	spinlock_t lock; /* Take this lock when handling the lists in
-			  * this struct. */
+	spinlock_t lock;
+
 	struct fw_node *local_node;
 	struct fw_node *root_node;
 	struct fw_node *irm_node;
@@ -114,8 +121,6 @@ struct fw_card {
 
 	int index;
 	struct list_head link;
-
-	struct list_head phy_receiver_list;
 
 	struct delayed_work br_work; /* bus reset job */
 	bool br_short;
@@ -131,9 +136,16 @@ struct fw_card {
 
 	bool broadcast_channel_allocated;
 	u32 broadcast_channel;
-	__be32 topology_map[(CSR_TOPOLOGY_MAP_END - CSR_TOPOLOGY_MAP) / 4];
+
+	struct {
+		__be32 buffer[(CSR_TOPOLOGY_MAP_END - CSR_TOPOLOGY_MAP) / 4];
+		spinlock_t lock;
+	} topology_map;
 
 	__be32 maint_utility_register;
+
+	struct workqueue_struct *isoc_wq;
+	struct workqueue_struct *async_wq;
 };
 
 static inline struct fw_card *fw_card_get(struct fw_card *card)
@@ -305,8 +317,7 @@ struct fw_packet {
 	 * For successful transmission, the status code is the ack received
 	 * from the destination.  Otherwise it is one of the juju-specific
 	 * rcodes:  RCODE_SEND_ERROR, _CANCELLED, _BUSY, _GENERATION, _NO_ACK.
-	 * The callback can be called from tasklet context and thus
-	 * must never block.
+	 * The callback can be called from workqueue and thus must never block.
 	 */
 	fw_packet_callback_t callback;
 	int ack;
@@ -339,7 +350,11 @@ struct fw_address_handler {
 	u64 length;
 	fw_address_callback_t address_callback;
 	void *callback_data;
+
+	// Only for core functions.
 	struct list_head link;
+	struct kref kref;
+	struct completion done;
 };
 
 struct fw_address_region {
@@ -379,6 +394,10 @@ void __fw_send_request(struct fw_card *card, struct fw_transaction *t, int tcode
  *
  * A variation of __fw_send_request() to generate callback for response subaction without time
  * stamp.
+ *
+ * The callback is invoked in the workqueue context in most cases. However, if an error is detected
+ * before queueing or the destination address refers to the local node, it is invoked in the
+ * current context instead.
  */
 static inline void fw_send_request(struct fw_card *card, struct fw_transaction *t, int tcode,
 				   int destination_id, int generation, int speed,
@@ -408,6 +427,10 @@ static inline void fw_send_request(struct fw_card *card, struct fw_transaction *
  * @callback_data:	data to be passed to the transaction completion callback
  *
  * A variation of __fw_send_request() to generate callback for response subaction with time stamp.
+ *
+ * The callback is invoked in the workqueue context in most cases. However, if an error is detected
+ * before queueing or the destination address refers to the local node, it is invoked in the current
+ * context instead.
  */
 static inline void fw_send_request_with_tstamp(struct fw_card *card, struct fw_transaction *t,
 	int tcode, int destination_id, int generation, int speed, unsigned long long offset,
@@ -462,7 +485,7 @@ struct fw_iso_packet {
 				/* rx: Sync bit, wait for matching sy	*/
 	u32 tag:2;		/* tx: Tag in packet header		*/
 	u32 sy:4;		/* tx: Sy in packet header		*/
-	u32 header_length:8;	/* Length of immediate header		*/
+	u32 header_length:8;	/* Size of immediate header		*/
 	u32 header[];		/* tx: Top of 1394 isoch. data_block	*/
 };
 
@@ -509,6 +532,7 @@ union fw_iso_callback {
 
 struct fw_iso_context {
 	struct fw_card *card;
+	struct work_struct work;
 	int type;
 	int channel;
 	int speed;
@@ -528,6 +552,25 @@ int fw_iso_context_queue(struct fw_iso_context *ctx,
 			 unsigned long payload);
 void fw_iso_context_queue_flush(struct fw_iso_context *ctx);
 int fw_iso_context_flush_completions(struct fw_iso_context *ctx);
+
+/**
+ * fw_iso_context_schedule_flush_completions() - schedule work item to process isochronous context.
+ * @ctx: the isochronous context
+ *
+ * Schedule a work item on workqueue to process the isochronous context. The registered callback
+ * function is called by the worker when a queued packet buffer with the interrupt flag is
+ * completed, either after transmission in the IT context or after being filled in the IR context.
+ * The callback function is also called when the header buffer in the context becomes full, If it
+ * is required to process the context in the current context, fw_iso_context_flush_completions() is
+ * available instead.
+ *
+ * Context: Any context.
+ */
+static inline void fw_iso_context_schedule_flush_completions(struct fw_iso_context *ctx)
+{
+	queue_work(ctx->card->isoc_wq, &ctx->work);
+}
+
 int fw_iso_context_start(struct fw_iso_context *ctx,
 			 int cycle, int sync, int tags);
 int fw_iso_context_stop(struct fw_iso_context *ctx);

@@ -24,7 +24,7 @@
 
 /* forward declaration */
 struct i40e_hw;
-typedef void (*I40E_ADMINQ_CALLBACK)(struct i40e_hw *, struct i40e_aq_desc *);
+typedef void (*I40E_ADMINQ_CALLBACK)(struct i40e_hw *, struct libie_aq_desc *);
 
 /* Data type manipulation macros. */
 
@@ -555,8 +555,8 @@ struct i40e_hw {
 
 	/* state of nvm update process */
 	enum i40e_nvmupd_state nvmupd_state;
-	struct i40e_aq_desc nvm_wb_desc;
-	struct i40e_aq_desc nvm_aq_event_desc;
+	struct libie_aq_desc nvm_wb_desc;
+	struct libie_aq_desc nvm_aq_event_desc;
 	struct i40e_virt_mem nvm_buff;
 	bool nvm_release_on_done;
 	u16 nvm_wait_opcode;
@@ -745,94 +745,6 @@ enum i40e_rx_desc_error_l3l4e_fcoe_masks {
 #define I40E_RXD_QW1_PTYPE_SHIFT	30
 #define I40E_RXD_QW1_PTYPE_MASK		(0xFFULL << I40E_RXD_QW1_PTYPE_SHIFT)
 
-/* Packet type non-ip values */
-enum i40e_rx_l2_ptype {
-	I40E_RX_PTYPE_L2_RESERVED			= 0,
-	I40E_RX_PTYPE_L2_MAC_PAY2			= 1,
-	I40E_RX_PTYPE_L2_TIMESYNC_PAY2			= 2,
-	I40E_RX_PTYPE_L2_FIP_PAY2			= 3,
-	I40E_RX_PTYPE_L2_OUI_PAY2			= 4,
-	I40E_RX_PTYPE_L2_MACCNTRL_PAY2			= 5,
-	I40E_RX_PTYPE_L2_LLDP_PAY2			= 6,
-	I40E_RX_PTYPE_L2_ECP_PAY2			= 7,
-	I40E_RX_PTYPE_L2_EVB_PAY2			= 8,
-	I40E_RX_PTYPE_L2_QCN_PAY2			= 9,
-	I40E_RX_PTYPE_L2_EAPOL_PAY2			= 10,
-	I40E_RX_PTYPE_L2_ARP				= 11,
-	I40E_RX_PTYPE_L2_FCOE_PAY3			= 12,
-	I40E_RX_PTYPE_L2_FCOE_FCDATA_PAY3		= 13,
-	I40E_RX_PTYPE_L2_FCOE_FCRDY_PAY3		= 14,
-	I40E_RX_PTYPE_L2_FCOE_FCRSP_PAY3		= 15,
-	I40E_RX_PTYPE_L2_FCOE_FCOTHER_PA		= 16,
-	I40E_RX_PTYPE_L2_FCOE_VFT_PAY3			= 17,
-	I40E_RX_PTYPE_L2_FCOE_VFT_FCDATA		= 18,
-	I40E_RX_PTYPE_L2_FCOE_VFT_FCRDY			= 19,
-	I40E_RX_PTYPE_L2_FCOE_VFT_FCRSP			= 20,
-	I40E_RX_PTYPE_L2_FCOE_VFT_FCOTHER		= 21,
-	I40E_RX_PTYPE_GRENAT4_MAC_PAY3			= 58,
-	I40E_RX_PTYPE_GRENAT4_MACVLAN_IPV6_ICMP_PAY4	= 87,
-	I40E_RX_PTYPE_GRENAT6_MAC_PAY3			= 124,
-	I40E_RX_PTYPE_GRENAT6_MACVLAN_IPV6_ICMP_PAY4	= 153
-};
-
-struct i40e_rx_ptype_decoded {
-	u32 known:1;
-	u32 outer_ip:1;
-	u32 outer_ip_ver:1;
-	u32 outer_frag:1;
-	u32 tunnel_type:3;
-	u32 tunnel_end_prot:2;
-	u32 tunnel_end_frag:1;
-	u32 inner_prot:4;
-	u32 payload_layer:3;
-};
-
-enum i40e_rx_ptype_outer_ip {
-	I40E_RX_PTYPE_OUTER_L2	= 0,
-	I40E_RX_PTYPE_OUTER_IP	= 1
-};
-
-enum i40e_rx_ptype_outer_ip_ver {
-	I40E_RX_PTYPE_OUTER_NONE	= 0,
-	I40E_RX_PTYPE_OUTER_IPV4	= 0,
-	I40E_RX_PTYPE_OUTER_IPV6	= 1
-};
-
-enum i40e_rx_ptype_outer_fragmented {
-	I40E_RX_PTYPE_NOT_FRAG	= 0,
-	I40E_RX_PTYPE_FRAG	= 1
-};
-
-enum i40e_rx_ptype_tunnel_type {
-	I40E_RX_PTYPE_TUNNEL_NONE		= 0,
-	I40E_RX_PTYPE_TUNNEL_IP_IP		= 1,
-	I40E_RX_PTYPE_TUNNEL_IP_GRENAT		= 2,
-	I40E_RX_PTYPE_TUNNEL_IP_GRENAT_MAC	= 3,
-	I40E_RX_PTYPE_TUNNEL_IP_GRENAT_MAC_VLAN	= 4,
-};
-
-enum i40e_rx_ptype_tunnel_end_prot {
-	I40E_RX_PTYPE_TUNNEL_END_NONE	= 0,
-	I40E_RX_PTYPE_TUNNEL_END_IPV4	= 1,
-	I40E_RX_PTYPE_TUNNEL_END_IPV6	= 2,
-};
-
-enum i40e_rx_ptype_inner_prot {
-	I40E_RX_PTYPE_INNER_PROT_NONE		= 0,
-	I40E_RX_PTYPE_INNER_PROT_UDP		= 1,
-	I40E_RX_PTYPE_INNER_PROT_TCP		= 2,
-	I40E_RX_PTYPE_INNER_PROT_SCTP		= 3,
-	I40E_RX_PTYPE_INNER_PROT_ICMP		= 4,
-	I40E_RX_PTYPE_INNER_PROT_TIMESYNC	= 5
-};
-
-enum i40e_rx_ptype_payload_layer {
-	I40E_RX_PTYPE_PAYLOAD_LAYER_NONE	= 0,
-	I40E_RX_PTYPE_PAYLOAD_LAYER_PAY2	= 1,
-	I40E_RX_PTYPE_PAYLOAD_LAYER_PAY3	= 2,
-	I40E_RX_PTYPE_PAYLOAD_LAYER_PAY4	= 3,
-};
-
 #define I40E_RXD_QW1_LENGTH_PBUF_SHIFT	38
 #define I40E_RXD_QW1_LENGTH_PBUF_MASK	(0x3FFFULL << \
 					 I40E_RXD_QW1_LENGTH_PBUF_SHIFT)
@@ -1016,38 +928,6 @@ struct i40e_filter_program_desc {
 #define I40E_TXD_FLTR_QW0_PCTYPE_SHIFT	17
 #define I40E_TXD_FLTR_QW0_PCTYPE_MASK	(0x3FUL << \
 					 I40E_TXD_FLTR_QW0_PCTYPE_SHIFT)
-
-/* Packet Classifier Types for filters */
-enum i40e_filter_pctype {
-	/* Note: Values 0-28 are reserved for future use.
-	 * Value 29, 30, 32 are not supported on XL710 and X710.
-	 */
-	I40E_FILTER_PCTYPE_NONF_UNICAST_IPV4_UDP	= 29,
-	I40E_FILTER_PCTYPE_NONF_MULTICAST_IPV4_UDP	= 30,
-	I40E_FILTER_PCTYPE_NONF_IPV4_UDP		= 31,
-	I40E_FILTER_PCTYPE_NONF_IPV4_TCP_SYN_NO_ACK	= 32,
-	I40E_FILTER_PCTYPE_NONF_IPV4_TCP		= 33,
-	I40E_FILTER_PCTYPE_NONF_IPV4_SCTP		= 34,
-	I40E_FILTER_PCTYPE_NONF_IPV4_OTHER		= 35,
-	I40E_FILTER_PCTYPE_FRAG_IPV4			= 36,
-	/* Note: Values 37-38 are reserved for future use.
-	 * Value 39, 40, 42 are not supported on XL710 and X710.
-	 */
-	I40E_FILTER_PCTYPE_NONF_UNICAST_IPV6_UDP	= 39,
-	I40E_FILTER_PCTYPE_NONF_MULTICAST_IPV6_UDP	= 40,
-	I40E_FILTER_PCTYPE_NONF_IPV6_UDP		= 41,
-	I40E_FILTER_PCTYPE_NONF_IPV6_TCP_SYN_NO_ACK	= 42,
-	I40E_FILTER_PCTYPE_NONF_IPV6_TCP		= 43,
-	I40E_FILTER_PCTYPE_NONF_IPV6_SCTP		= 44,
-	I40E_FILTER_PCTYPE_NONF_IPV6_OTHER		= 45,
-	I40E_FILTER_PCTYPE_FRAG_IPV6			= 46,
-	/* Note: Value 47 is reserved for future use */
-	I40E_FILTER_PCTYPE_FCOE_OX			= 48,
-	I40E_FILTER_PCTYPE_FCOE_RX			= 49,
-	I40E_FILTER_PCTYPE_FCOE_OTHER			= 50,
-	/* Note: Values 51-62 are reserved for future use */
-	I40E_FILTER_PCTYPE_L2_PAYLOAD			= 63,
-};
 
 enum i40e_filter_program_desc_dest {
 	I40E_FILTER_PROGRAM_DESC_DEST_DROP_PACKET		= 0x0,

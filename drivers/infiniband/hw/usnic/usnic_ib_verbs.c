@@ -577,7 +577,7 @@ out_unlock:
 }
 
 int usnic_ib_create_cq(struct ib_cq *ibcq, const struct ib_cq_init_attr *attr,
-		       struct ib_udata *udata)
+		       struct uverbs_attr_bundle *attrs)
 {
 	if (attr->flags)
 		return -EOPNOTSUPP;
@@ -592,6 +592,7 @@ int usnic_ib_destroy_cq(struct ib_cq *cq, struct ib_udata *udata)
 
 struct ib_mr *usnic_ib_reg_mr(struct ib_pd *pd, u64 start, u64 length,
 					u64 virt_addr, int access_flags,
+					struct ib_dmah *dmah,
 					struct ib_udata *udata)
 {
 	struct usnic_ib_mr *mr;
@@ -599,6 +600,9 @@ struct ib_mr *usnic_ib_reg_mr(struct ib_pd *pd, u64 start, u64 length,
 
 	usnic_dbg("start 0x%llx va 0x%llx length 0x%llx\n", start,
 			virt_addr, length);
+
+	if (dmah)
+		return ERR_PTR(-EOPNOTSUPP);
 
 	mr = kzalloc(sizeof(*mr), GFP_KERNEL);
 	if (!mr)

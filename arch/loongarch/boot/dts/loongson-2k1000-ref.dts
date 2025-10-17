@@ -5,6 +5,7 @@
 
 /dts-v1/;
 
+#include "dt-bindings/thermal/thermal.h"
 #include "loongson-2k1000.dtsi"
 
 / {
@@ -38,12 +39,32 @@
 			linux,cma-default;
 		};
 	};
+
+	fan0: pwm-fan {
+		compatible = "pwm-fan";
+		cooling-levels = <255 153 85 25>;
+		pwms = <&pwm1 0 100000 0>;
+		#cooling-cells = <2>;
+	};
+};
+
+&apbdma1 {
+	status = "okay";
+};
+
+&mmc {
+	status = "okay";
+
+	pinctrl-0 = <&sdio_pins_default>;
+	pinctrl-names = "default";
+	bus-width = <4>;
+	cd-gpios = <&gpio0 22 GPIO_ACTIVE_LOW>;
 };
 
 &gmac0 {
 	status = "okay";
 
-	phy-mode = "rgmii";
+	phy-mode = "rgmii-id";
 	phy-handle = <&phy0>;
 	mdio {
 		compatible = "snps,dwmac-mdio";
@@ -58,7 +79,7 @@
 &gmac1 {
 	status = "okay";
 
-	phy-mode = "rgmii";
+	phy-mode = "rgmii-id";
 	phy-handle = <&phy1>;
 	mdio {
 		compatible = "snps,dwmac-mdio";
@@ -78,7 +99,7 @@
 
 	#address-cells = <1>;
 	#size-cells = <0>;
-	eeprom@57{
+	eeprom@57 {
 		compatible = "atmel,24c16";
 		reg = <0x57>;
 		pagesize = <16>;
@@ -90,10 +111,21 @@
 
 	#address-cells = <1>;
 	#size-cells = <0>;
-	spidev@0 {
-		compatible = "rohm,dh2228fv";
-		spi-max-frequency = <100000000>;
-		reg = <0>;
+};
+
+&pwm1 {
+	status = "okay";
+
+	pinctrl-0 = <&pwm1_pins_default>;
+	pinctrl-names = "default";
+};
+
+&cpu_thermal {
+	cooling-maps {
+		map0 {
+			trip = <&cpu_alert>;
+			cooling-device = <&fan0 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
+		};
 	};
 };
 
@@ -110,10 +142,6 @@
 };
 
 &uart0 {
-	status = "okay";
-};
-
-&clk {
 	status = "okay";
 };
 

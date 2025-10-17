@@ -5,6 +5,7 @@
  *	       Martin Schwidefsky <schwidefsky@de.ibm.com>,
  */
 
+#include <linux/cpufeature.h>
 #include <linux/debugfs.h>
 #include <linux/kernel.h>
 #include <linux/mm.h>
@@ -15,53 +16,16 @@
 #include <linux/export.h>
 #include <linux/slab.h>
 #include <asm/asm-extable.h>
+#include <asm/machine.h>
 #include <asm/ebcdic.h>
 #include <asm/debug.h>
 #include <asm/sysinfo.h>
 #include <asm/cpcmd.h>
 #include <asm/topology.h>
-#include <asm/fpu/api.h>
+#include <asm/fpu.h>
+#include <asm/asm.h>
 
 int topology_max_mnest;
-
-static inline int __stsi(void *sysinfo, int fc, int sel1, int sel2, int *lvl)
-{
-	int r0 = (fc << 28) | sel1;
-	int rc = 0;
-
-	asm volatile(
-		"	lr	0,%[r0]\n"
-		"	lr	1,%[r1]\n"
-		"	stsi	0(%[sysinfo])\n"
-		"0:	jz	2f\n"
-		"1:	lhi	%[rc],%[retval]\n"
-		"2:	lr	%[r0],0\n"
-		EX_TABLE(0b, 1b)
-		: [r0] "+d" (r0), [rc] "+d" (rc)
-		: [r1] "d" (sel2),
-		  [sysinfo] "a" (sysinfo),
-		  [retval] "K" (-EOPNOTSUPP)
-		: "cc", "0", "1", "memory");
-	*lvl = ((unsigned int) r0) >> 28;
-	return rc;
-}
-
-/*
- * stsi - store system information
- *
- * Returns the current configuration level if function code 0 was specified.
- * Otherwise returns 0 on success or a negative value on error.
- */
-int stsi(void *sysinfo, int fc, int sel1, int sel2)
-{
-	int lvl, rc;
-
-	rc = __stsi(sysinfo, fc, sel1, sel2, &lvl);
-	if (rc)
-		return rc;
-	return fc ? 0 : lvl;
-}
-EXPORT_SYMBOL(stsi);
 
 #ifdef CONFIG_PROC_FS
 
@@ -154,7 +118,7 @@ static void stsi_15_1_x(struct seq_file *m, struct sysinfo_15_1_x *info)
 	int i;
 
 	seq_putc(m, '\n');
-	if (!MACHINE_HAS_TOPOLOGY)
+	if (!cpu_has_topology())
 		return;
 	if (stsi(info, 15, 1, topology_max_mnest))
 		return;
@@ -397,7 +361,7 @@ static void service_level_vm_print(struct seq_file *m,
 {
 	char *query_buffer, *str;
 
-	query_buffer = kmalloc(1024, GFP_KERNEL | GFP_DMA);
+	query_buffer = kmalloc(1024, GFP_KERNEL);
 	if (!query_buffer)
 		return;
 	cpcmd("QUERY CPLEVEL", query_buffer, 1024, NULL);
@@ -415,7 +379,7 @@ static struct service_level service_level_vm = {
 static __init int create_proc_service_level(void)
 {
 	proc_create_seq("service_levels", 0, NULL, &service_level_seq_ops);
-	if (MACHINE_IS_VM)
+	if (machine_is_vm())
 		register_service_level(&service_level_vm);
 	return 0;
 }
@@ -426,9 +390,9 @@ subsys_initcall(create_proc_service_level);
  */
 void s390_adjust_jiffies(void)
 {
+	DECLARE_KERNEL_FPU_ONSTACK16(fpu);
 	struct sysinfo_1_2_2 *info;
 	unsigned long capability;
-	struct kernel_fpu fpu;
 
 	info = (void *) get_zeroed_page(GFP_KERNEL);
 	if (!info)
@@ -447,21 +411,14 @@ void s390_adjust_jiffies(void)
 		 * point division ..
 		 */
 		kernel_fpu_begin(&fpu, KERNEL_FPR);
-		asm volatile(
-			"	sfpc	%3\n"
-			"	l	%0,%1\n"
-			"	tmlh	%0,0xff80\n"
-			"	jnz	0f\n"
-			"	cefbr	%%f2,%0\n"
-			"	j	1f\n"
-			"0:	le	%%f2,%1\n"
-			"1:	cefbr	%%f0,%2\n"
-			"	debr	%%f0,%%f2\n"
-			"	cgebr	%0,5,%%f0\n"
-			: "=&d" (capability)
-			: "Q" (info->capability), "d" (10000000), "d" (0)
-			: "cc"
-			);
+		fpu_sfpc(0);
+		if (info->capability & 0xff800000)
+			fpu_ldgr(2, info->capability);
+		else
+			fpu_cefbr(2, info->capability);
+		fpu_cefbr(0, 10000000);
+		fpu_debr(0, 2);
+		capability = fpu_cgebr(0, 5);
 		kernel_fpu_end(&fpu, KERNEL_FPR);
 	} else
 		/*
@@ -505,7 +462,6 @@ static const struct file_operations stsi_##fc##_##s1##_##s2##_fs_ops = {       \
 	.open		= stsi_open_##fc##_##s1##_##s2,			       \
 	.release	= stsi_release,					       \
 	.read		= stsi_read,					       \
-	.llseek		= no_llseek,					       \
 };
 
 static int stsi_release(struct inode *inode, struct file *file)
@@ -567,7 +523,7 @@ static __init int stsi_init_debugfs(void)
 		sf = &stsi_file[i];
 		debugfs_create_file(sf->name, 0400, stsi_root, NULL, sf->fops);
 	}
-	if (IS_ENABLED(CONFIG_SCHED_TOPOLOGY) && MACHINE_HAS_TOPOLOGY) {
+	if (IS_ENABLED(CONFIG_SCHED_TOPOLOGY) && cpu_has_topology()) {
 		char link_to[10];
 
 		sprintf(link_to, "15_1_%d", topology_mnest_limit());

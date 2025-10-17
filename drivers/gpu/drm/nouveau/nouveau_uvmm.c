@@ -812,15 +812,15 @@ op_remap(struct drm_gpuva_op_remap *r,
 	struct drm_gpuva_op_unmap *u = r->unmap;
 	struct nouveau_uvma *uvma = uvma_from_va(u->va);
 	u64 addr = uvma->va.va.addr;
-	u64 range = uvma->va.va.range;
+	u64 end = uvma->va.va.addr + uvma->va.va.range;
 
 	if (r->prev)
 		addr = r->prev->va.addr + r->prev->va.range;
 
 	if (r->next)
-		range = r->next->va.addr - addr;
+		end = r->next->va.addr;
 
-	op_unmap_range(u, addr, range);
+	op_unmap_range(u, addr, end - addr);
 }
 
 static int
@@ -1276,6 +1276,12 @@ nouveau_uvmm_bind_job_submit(struct nouveau_job *job,
 			break;
 		case OP_MAP: {
 			struct nouveau_uvma_region *reg;
+			struct drm_gpuvm_map_req map_req = {
+				.map.va.addr = op->va.addr,
+				.map.va.range = op->va.range,
+				.map.gem.obj = op->gem.obj,
+				.map.gem.offset = op->gem.offset,
+			};
 
 			reg = nouveau_uvma_region_find_first(uvmm,
 							     op->va.addr,
@@ -1301,10 +1307,7 @@ nouveau_uvmm_bind_job_submit(struct nouveau_job *job,
 			}
 
 			op->ops = drm_gpuvm_sm_map_ops_create(&uvmm->base,
-							      op->va.addr,
-							      op->va.range,
-							      op->gem.obj,
-							      op->gem.offset);
+							      &map_req);
 			if (IS_ERR(op->ops)) {
 				ret = PTR_ERR(op->ops);
 				goto unwind_continue;
@@ -1534,7 +1537,7 @@ nouveau_uvmm_bind_job_cleanup(struct nouveau_job *job)
 	nouveau_uvmm_bind_job_put(bind_job);
 }
 
-static struct nouveau_job_ops nouveau_bind_job_ops = {
+static const struct nouveau_job_ops nouveau_bind_job_ops = {
 	.submit = nouveau_uvmm_bind_job_submit,
 	.armed_submit = nouveau_uvmm_bind_job_armed_submit,
 	.run = nouveau_uvmm_bind_job_run,
@@ -1740,7 +1743,7 @@ nouveau_uvmm_ioctl_vm_bind(struct drm_device *dev,
 	if (ret)
 		return ret;
 
-	args.sched = &cli->sched;
+	args.sched = cli->sched;
 	args.file_priv = file_priv;
 
 	ret = nouveau_uvmm_vm_bind(&args);
@@ -1803,6 +1806,7 @@ nouveau_uvmm_bo_validate(struct drm_gpuvm_bo *vm_bo, struct drm_exec *exec)
 {
 	struct nouveau_bo *nvbo = nouveau_gem_object(vm_bo->obj);
 
+	nouveau_bo_placement_set(nvbo, nvbo->valid_domains, 0);
 	return nouveau_bo_validate(nvbo, true, false);
 }
 

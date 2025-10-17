@@ -11,8 +11,22 @@
 #include "xe_hw_engine_types.h"
 #include "xe_macros.h"
 
+/*
+ * GuC version number components are defined to be only 8-bit size,
+ * so converting to a 32bit 8.8.8 integer allows simple (and safe)
+ * numerical comparisons.
+ */
+#define MAKE_GUC_VER(maj, min, pat)	(((maj) << 16) | ((min) << 8) | (pat))
+#define MAKE_GUC_VER_STRUCT(ver)	MAKE_GUC_VER((ver).major, (ver).minor, (ver).patch)
+#define GUC_SUBMIT_VER(guc) \
+	MAKE_GUC_VER_STRUCT((guc)->fw.versions.found[XE_UC_FW_VER_COMPATIBILITY])
+#define GUC_FIRMWARE_VER(guc) \
+	MAKE_GUC_VER_STRUCT((guc)->fw.versions.found[XE_UC_FW_VER_RELEASE])
+
 struct drm_printer;
 
+void xe_guc_comm_init_early(struct xe_guc *guc);
+int xe_guc_init_noalloc(struct xe_guc *guc);
 int xe_guc_init(struct xe_guc *guc);
 int xe_guc_init_post_hwconfig(struct xe_guc *guc);
 int xe_guc_post_load_init(struct xe_guc *guc);
@@ -20,6 +34,7 @@ int xe_guc_reset(struct xe_guc *guc);
 int xe_guc_upload(struct xe_guc *guc);
 int xe_guc_min_load_for_hwconfig(struct xe_guc *guc);
 int xe_guc_enable_communication(struct xe_guc *guc);
+int xe_guc_opt_in_features_enable(struct xe_guc *guc);
 int xe_guc_suspend(struct xe_guc *guc);
 void xe_guc_notify(struct xe_guc *guc);
 int xe_guc_auth_huc(struct xe_guc *guc, u32 rsa_addr);
@@ -34,9 +49,13 @@ void xe_guc_print_info(struct xe_guc *guc, struct drm_printer *p);
 int xe_guc_reset_prepare(struct xe_guc *guc);
 void xe_guc_reset_wait(struct xe_guc *guc);
 void xe_guc_stop_prepare(struct xe_guc *guc);
-int xe_guc_stop(struct xe_guc *guc);
+void xe_guc_stop(struct xe_guc *guc);
 int xe_guc_start(struct xe_guc *guc);
-bool xe_guc_in_reset(struct xe_guc *guc);
+void xe_guc_declare_wedged(struct xe_guc *guc);
+
+#if IS_ENABLED(CONFIG_DRM_XE_KUNIT_TEST)
+int xe_guc_g2g_test_notification(struct xe_guc *guc, u32 *payload, u32 len);
+#endif
 
 static inline u16 xe_engine_class_to_guc_class(enum xe_engine_class class)
 {
@@ -67,6 +86,11 @@ static inline struct xe_gt *guc_to_gt(struct xe_guc *guc)
 static inline struct xe_device *guc_to_xe(struct xe_guc *guc)
 {
 	return gt_to_xe(guc_to_gt(guc));
+}
+
+static inline struct drm_device *guc_to_drm(struct xe_guc *guc)
+{
+	return &guc_to_xe(guc)->drm;
 }
 
 #endif

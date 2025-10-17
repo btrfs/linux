@@ -369,7 +369,7 @@ static const enum counter_synapse_action ecap_cnt_input_actions[] = {
 };
 
 static struct counter_comp ecap_cnt_clock_ext[] = {
-	COUNTER_COMP_SIGNAL_U64("frequency", ecap_cnt_clk_get_freq, NULL),
+	COUNTER_COMP_FREQUENCY(ecap_cnt_clk_get_freq),
 };
 
 static const enum counter_signal_polarity ecap_cnt_pol_avail[] = {
@@ -465,11 +465,6 @@ static irqreturn_t ecap_cnt_isr(int irq, void *dev_id)
 	return IRQ_HANDLED;
 }
 
-static void ecap_cnt_pm_disable(void *dev)
-{
-	pm_runtime_disable(dev);
-}
-
 static int ecap_cnt_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
@@ -523,12 +518,9 @@ static int ecap_cnt_probe(struct platform_device *pdev)
 
 	platform_set_drvdata(pdev, counter_dev);
 
-	pm_runtime_enable(dev);
-
-	/* Register a cleanup callback to care for disabling PM */
-	ret = devm_add_action_or_reset(dev, ecap_cnt_pm_disable, dev);
+	ret = devm_pm_runtime_enable(dev);
 	if (ret)
-		return dev_err_probe(dev, ret, "failed to add pm disable action\n");
+		return ret;
 
 	ret = devm_counter_add(dev, counter_dev);
 	if (ret)
@@ -537,15 +529,13 @@ static int ecap_cnt_probe(struct platform_device *pdev)
 	return 0;
 }
 
-static int ecap_cnt_remove(struct platform_device *pdev)
+static void ecap_cnt_remove(struct platform_device *pdev)
 {
 	struct counter_device *counter_dev = platform_get_drvdata(pdev);
 	struct ecap_cnt_dev *ecap_dev = counter_priv(counter_dev);
 
 	if (ecap_dev->enabled)
 		ecap_cnt_capture_disable(counter_dev);
-
-	return 0;
 }
 
 static int ecap_cnt_suspend(struct device *dev)
@@ -576,8 +566,13 @@ static int ecap_cnt_resume(struct device *dev)
 {
 	struct counter_device *counter_dev = dev_get_drvdata(dev);
 	struct ecap_cnt_dev *ecap_dev = counter_priv(counter_dev);
+	int ret;
 
-	clk_enable(ecap_dev->clk);
+	ret = clk_enable(ecap_dev->clk);
+	if (ret) {
+		dev_err(dev, "Cannot enable clock %d\n", ret);
+		return ret;
+	}
 
 	ecap_cnt_capture_set_evmode(counter_dev, ecap_dev->pm_ctx.ev_mode);
 
@@ -612,4 +607,4 @@ module_platform_driver(ecap_cnt_driver);
 MODULE_DESCRIPTION("ECAP Capture driver");
 MODULE_AUTHOR("Julien Panis <jpanis@baylibre.com>");
 MODULE_LICENSE("GPL");
-MODULE_IMPORT_NS(COUNTER);
+MODULE_IMPORT_NS("COUNTER");

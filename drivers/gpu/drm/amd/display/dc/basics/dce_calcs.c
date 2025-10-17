@@ -23,8 +23,6 @@
  *
  */
 
-#include <linux/slab.h>
-
 #include "resource.h"
 #include "dm_services.h"
 #include "dce_calcs.h"
@@ -94,7 +92,7 @@ static void calculate_bandwidth(
 	const uint32_t s_high = 7;
 	const uint32_t dmif_chunk_buff_margin = 1;
 
-	uint32_t max_chunks_fbc_mode;
+	uint32_t max_chunks_fbc_mode = 0;
 	int32_t num_cursor_lines;
 
 	int32_t i, j, k;
@@ -571,7 +569,7 @@ static void calculate_bandwidth(
 				break;
 			}
 			data->lb_partitions[i] = bw_floor2(bw_div(data->lb_size_per_component[i], data->lb_line_pitch), bw_int_to_fixed(1));
-			/*clamp the partitions to the maxium number supported by the lb*/
+			/* clamp the partitions to the maximum number supported by the lb */
 			if ((surface_type[i] != bw_def_graphics || dceip->graphics_lb_nodownscaling_multi_line_prefetching == 1)) {
 				data->lb_partitions_max[i] = bw_int_to_fixed(10);
 			}
@@ -1138,7 +1136,7 @@ static void calculate_bandwidth(
 			}
 		}
 	}
-	data->total_dmifmc_urgent_trips = bw_ceil2(bw_div(data->total_requests_for_adjusted_dmif_size, (bw_add(dceip->dmif_request_buffer_size, bw_int_to_fixed(vbios->number_of_request_slots_gmc_reserves_for_dmif_per_channel * data->number_of_dram_channels)))), bw_int_to_fixed(1));
+	data->total_dmifmc_urgent_trips = bw_ceil2(bw_div(data->total_requests_for_adjusted_dmif_size, (bw_add(dceip->dmif_request_buffer_size, bw_int_to_fixed((uint64_t)vbios->number_of_request_slots_gmc_reserves_for_dmif_per_channel * data->number_of_dram_channels)))), bw_int_to_fixed(1));
 	data->total_dmifmc_urgent_latency = bw_mul(vbios->dmifmc_urgent_latency, data->total_dmifmc_urgent_trips);
 	data->total_display_reads_required_data = bw_int_to_fixed(0);
 	data->total_display_reads_required_dram_access_data = bw_int_to_fixed(0);
@@ -1395,7 +1393,7 @@ static void calculate_bandwidth(
 						if ((bw_mtn(data->dram_speed_change_margin, bw_int_to_fixed(0)) && bw_ltn(data->dram_speed_change_margin, bw_int_to_fixed(9999)))) {
 							/*determine the minimum dram clock change margin for each set of clock frequencies*/
 							data->min_dram_speed_change_margin[i][j] = bw_min2(data->min_dram_speed_change_margin[i][j], data->dram_speed_change_margin);
-							/*compute the maximum clock frequuency required for the dram clock change at each set of clock frequencies*/
+							/*compute the maximum clock frequency required for the dram clock change at each set of clock frequencies*/
 							data->dispclk_required_for_dram_speed_change_pipe[i][j] = bw_max2(bw_div(bw_div(bw_mul(data->src_pixels_for_first_output_pixel[k], dceip->display_pipe_throughput_factor), dceip->lb_write_pixels_per_dispclk), (bw_sub(bw_sub(bw_sub(data->maximum_latency_hiding_with_cursor[k], vbios->nbp_state_change_latency), data->dmif_burst_time[i][j]), data->dram_speed_change_line_source_transfer_time[k][i][j]))), bw_div(bw_div(bw_mul(data->src_pixels_for_last_output_pixel[k], dceip->display_pipe_throughput_factor), dceip->lb_write_pixels_per_dispclk), (bw_add(bw_sub(bw_sub(bw_sub(data->maximum_latency_hiding_with_cursor[k], vbios->nbp_state_change_latency), data->dmif_burst_time[i][j]), data->dram_speed_change_line_source_transfer_time[k][i][j]), data->active_time[k]))));
 							if ((bw_ltn(data->dispclk_required_for_dram_speed_change_pipe[i][j], vbios->high_voltage_max_dispclk))) {
 								data->display_pstate_change_enable[k] = 1;
@@ -1409,7 +1407,7 @@ static void calculate_bandwidth(
 						if ((bw_mtn(data->dram_speed_change_margin, bw_int_to_fixed(0)) && bw_ltn(data->dram_speed_change_margin, bw_int_to_fixed(9999)))) {
 							/*determine the minimum dram clock change margin for each display pipe*/
 							data->min_dram_speed_change_margin[i][j] = bw_min2(data->min_dram_speed_change_margin[i][j], data->dram_speed_change_margin);
-							/*compute the maximum clock frequuency required for the dram clock change at each set of clock frequencies*/
+							/*compute the maximum clock frequency required for the dram clock change at each set of clock frequencies*/
 							data->dispclk_required_for_dram_speed_change_pipe[i][j] = bw_max2(bw_div(bw_div(bw_mul(data->src_pixels_for_first_output_pixel[k], dceip->display_pipe_throughput_factor), dceip->lb_write_pixels_per_dispclk), (bw_sub(bw_sub(bw_sub(bw_sub(data->maximum_latency_hiding_with_cursor[k], vbios->nbp_state_change_latency), data->dmif_burst_time[i][j]), data->dram_speed_change_line_source_transfer_time[k][i][j]), data->mcifwr_burst_time[i][j]))), bw_div(bw_div(bw_mul(data->src_pixels_for_last_output_pixel[k], dceip->display_pipe_throughput_factor), dceip->lb_write_pixels_per_dispclk), (bw_add(bw_sub(bw_sub(bw_sub(bw_sub(data->maximum_latency_hiding_with_cursor[k], vbios->nbp_state_change_latency), data->dmif_burst_time[i][j]), data->dram_speed_change_line_source_transfer_time[k][i][j]), data->mcifwr_burst_time[i][j]), data->active_time[k]))));
 							if ((bw_ltn(data->dispclk_required_for_dram_speed_change_pipe[i][j], vbios->high_voltage_max_dispclk))) {
 								data->display_pstate_change_enable[k] = 1;
@@ -1855,7 +1853,7 @@ static void calculate_bandwidth(
 	/*compute total time to request one chunk from each active display pipe*/
 	for (i = 0; i <= maximum_number_of_surfaces - 1; i++) {
 		if (data->enable[i]) {
-			data->chunk_request_time = bw_add(data->chunk_request_time, (bw_div((bw_div(bw_int_to_fixed(pixels_per_chunk * data->bytes_per_pixel[i]), data->useful_bytes_per_request[i])), bw_min2(sclk[data->sclk_level], bw_div(data->dispclk, bw_int_to_fixed(2))))));
+			data->chunk_request_time = bw_add(data->chunk_request_time, (bw_div((bw_div(bw_int_to_fixed(pixels_per_chunk * (int64_t)data->bytes_per_pixel[i]), data->useful_bytes_per_request[i])), bw_min2(sclk[data->sclk_level], bw_div(data->dispclk, bw_int_to_fixed(2))))));
 		}
 	}
 	/*compute total time to request cursor data*/

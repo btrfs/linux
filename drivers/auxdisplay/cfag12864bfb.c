@@ -96,7 +96,7 @@ none:
 	return ret;
 }
 
-static int cfag12864bfb_remove(struct platform_device *device)
+static void cfag12864bfb_remove(struct platform_device *device)
 {
 	struct fb_info *info = platform_get_drvdata(device);
 
@@ -104,8 +104,6 @@ static int cfag12864bfb_remove(struct platform_device *device)
 		unregister_framebuffer(info);
 		framebuffer_release(info);
 	}
-
-	return 0;
 }
 
 static struct platform_driver cfag12864bfb_driver = {

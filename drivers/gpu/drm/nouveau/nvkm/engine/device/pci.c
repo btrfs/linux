@@ -1560,18 +1560,42 @@ nvkm_device_pci(struct nvkm_device *device)
 	return container_of(device, struct nvkm_device_pci, device);
 }
 
-static resource_size_t
-nvkm_device_pci_resource_addr(struct nvkm_device *device, unsigned bar)
+static int
+nvkm_device_pci_resource_idx(struct nvkm_device_pci *pdev, enum nvkm_bar_id bar)
 {
-	struct nvkm_device_pci *pdev = nvkm_device_pci(device);
-	return pci_resource_start(pdev->pdev, bar);
+	int idx = 0;
+
+	if (bar == NVKM_BAR0_PRI)
+		return idx;
+
+	idx += (pci_resource_flags(pdev->pdev, idx) & IORESOURCE_MEM_64) ? 2 : 1;
+	if (bar == NVKM_BAR1_FB)
+		return idx;
+
+	idx += (pci_resource_flags(pdev->pdev, idx) & IORESOURCE_MEM_64) ? 2 : 1;
+	if (bar == NVKM_BAR2_INST)
+		return idx;
+
+	WARN_ON(1);
+	return -1;
 }
 
 static resource_size_t
-nvkm_device_pci_resource_size(struct nvkm_device *device, unsigned bar)
+nvkm_device_pci_resource_addr(struct nvkm_device *device, enum nvkm_bar_id bar)
 {
 	struct nvkm_device_pci *pdev = nvkm_device_pci(device);
-	return pci_resource_len(pdev->pdev, bar);
+	int idx = nvkm_device_pci_resource_idx(pdev, bar);
+
+	return idx >= 0 ? pci_resource_start(pdev->pdev, idx) : 0;
+}
+
+static resource_size_t
+nvkm_device_pci_resource_size(struct nvkm_device *device, enum nvkm_bar_id bar)
+{
+	struct nvkm_device_pci *pdev = nvkm_device_pci(device);
+	int idx = nvkm_device_pci_resource_idx(pdev, bar);
+
+	return idx >= 0 ? pci_resource_len(pdev->pdev, idx) : 0;
 }
 
 static int
@@ -1626,7 +1650,6 @@ nvkm_device_pci_func = {
 
 int
 nvkm_device_pci_new(struct pci_dev *pci_dev, const char *cfg, const char *dbg,
-		    bool detect, bool mmio, u64 subdev_mask,
 		    struct nvkm_device **pdevice)
 {
 	const struct nvkm_device_quirk *quirk = NULL;
@@ -1680,8 +1703,7 @@ nvkm_device_pci_new(struct pci_dev *pci_dev, const char *cfg, const char *dbg,
 				    pci_dev->bus->number << 16 |
 				    PCI_SLOT(pci_dev->devfn) << 8 |
 				    PCI_FUNC(pci_dev->devfn), name,
-			       cfg, dbg, detect, mmio, subdev_mask,
-			       &pdev->device);
+			       cfg, dbg, &pdev->device);
 
 	if (ret)
 		return ret;

@@ -19,6 +19,7 @@
 #include <linux/pm_runtime.h>
 #include <linux/regmap.h>
 #include <linux/remoteproc.h>
+#include <linux/reset.h>
 #include <linux/slab.h>
 
 #include "imx_rproc.h"
@@ -35,8 +36,17 @@ module_param_named(no_mailboxes, no_mailboxes, int, 0644);
 MODULE_PARM_DESC(no_mailboxes,
 		 "There is no mailbox between cores, so ignore remote proc reply after start, default is 0 (off).");
 
+/* Flag indicating that the remote is up and running */
 #define REMOTE_IS_READY				BIT(0)
+/* Flag indicating that the host should wait for a firmware-ready response */
+#define WAIT_FW_READY				BIT(1)
 #define REMOTE_READY_WAIT_MAX_RETRIES		500
+
+/*
+ * This flag is set in the DSP resource table's features field to indicate
+ * that the firmware requires the host NOT to wait for a FW_READY response.
+ */
+#define FEATURE_DONT_WAIT_FW_READY		BIT(0)
 
 /* att flags */
 /* DSP own area */
@@ -72,6 +82,10 @@ MODULE_PARM_DESC(no_mailboxes,
 
 #define IMX8ULP_SIP_HIFI_XRDC			0xc200000e
 
+#define FW_RSC_NXP_S_MAGIC			((uint32_t)'n' << 24 |	\
+						 (uint32_t)'x' << 16 |	\
+						 (uint32_t)'p' << 8 |	\
+						 (uint32_t)'s')
 /*
  * enum - Predefined Mailbox Messages
  *
@@ -95,6 +109,7 @@ enum imx_dsp_rp_mbox_messages {
 /**
  * struct imx_dsp_rproc - DSP remote processor state
  * @regmap: regmap handler
+ * @run_stall: reset control handle used for Run/Stall operation
  * @rproc: rproc handler
  * @dsp_dcfg: device configuration pointer
  * @clks: clocks needed by this device
@@ -103,16 +118,15 @@ enum imx_dsp_rp_mbox_messages {
  * @tx_ch: mailbox tx channel handle
  * @rx_ch: mailbox rx channel handle
  * @rxdb_ch: mailbox rx doorbell channel handle
- * @pd_dev: power domain device
- * @pd_dev_link: power domain device link
+ * @pd_list: power domain list
  * @ipc_handle: System Control Unit ipc handle
  * @rproc_work: work for processing virtio interrupts
  * @pm_comp: completion primitive to sync for suspend response
- * @num_domains: power domain number
  * @flags: control flags
  */
 struct imx_dsp_rproc {
 	struct regmap				*regmap;
+	struct reset_control			*run_stall;
 	struct rproc				*rproc;
 	const struct imx_dsp_rproc_dcfg		*dsp_dcfg;
 	struct clk_bulk_data			clks[DSP_RPROC_CLK_MAX];
@@ -121,12 +135,10 @@ struct imx_dsp_rproc {
 	struct mbox_chan			*tx_ch;
 	struct mbox_chan			*rx_ch;
 	struct mbox_chan			*rxdb_ch;
-	struct device				**pd_dev;
-	struct device_link			**pd_dev_link;
+	struct dev_pm_domain_list		*pd_list;
 	struct imx_sc_ipc			*ipc_handle;
 	struct work_struct			rproc_work;
 	struct completion			pm_comp;
-	int					num_domains;
 	u32					flags;
 };
 
@@ -139,6 +151,24 @@ struct imx_dsp_rproc_dcfg {
 	const struct imx_rproc_dcfg		*dcfg;
 	int (*reset)(struct imx_dsp_rproc *priv);
 };
+
+/**
+ * struct fw_rsc_imx_dsp - i.MX DSP specific info
+ *
+ * @len: length of the resource entry
+ * @magic_num: 32-bit magic number
+ * @version: version of data structure
+ * @features: feature flags supported by the i.MX DSP firmware
+ *
+ * This represents a DSP-specific resource in the firmware's
+ * resource table, providing information on supported features.
+ */
+struct fw_rsc_imx_dsp {
+	uint32_t len;
+	uint32_t magic_num;
+	uint32_t version;
+	uint32_t features;
+} __packed;
 
 static const struct imx_rproc_att imx_dsp_rproc_att_imx8qm[] = {
 	/* dev addr , sys addr  , size	    , flags */
@@ -196,9 +226,7 @@ static int imx8mp_dsp_reset(struct imx_dsp_rproc *priv)
 	/* Keep reset asserted for 10 cycles */
 	usleep_range(1, 2);
 
-	regmap_update_bits(priv->regmap, IMX8M_AudioDSP_REG2,
-			   IMX8M_AudioDSP_REG2_RUNSTALL,
-			   IMX8M_AudioDSP_REG2_RUNSTALL);
+	reset_control_assert(priv->run_stall);
 
 	/* Take the DSP out of reset and keep stalled for FW loading */
 	pwrctl = readl(dap + IMX8M_DAP_PWRCTL);
@@ -235,13 +263,9 @@ static int imx8ulp_dsp_reset(struct imx_dsp_rproc *priv)
 
 /* Specific configuration for i.MX8MP */
 static const struct imx_rproc_dcfg dsp_rproc_cfg_imx8mp = {
-	.src_reg	= IMX8M_AudioDSP_REG2,
-	.src_mask	= IMX8M_AudioDSP_REG2_RUNSTALL,
-	.src_start	= 0,
-	.src_stop	= IMX8M_AudioDSP_REG2_RUNSTALL,
 	.att		= imx_dsp_rproc_att_imx8mp,
 	.att_size	= ARRAY_SIZE(imx_dsp_rproc_att_imx8mp),
-	.method		= IMX_RPROC_MMIO,
+	.method		= IMX_RPROC_RESET_CONTROLLER,
 };
 
 static const struct imx_dsp_rproc_dcfg imx_dsp_rproc_cfg_imx8mp = {
@@ -304,6 +328,66 @@ static int imx_dsp_rproc_ready(struct rproc *rproc)
 	return -ETIMEDOUT;
 }
 
+/**
+ * imx_dsp_rproc_handle_rsc() - Handle DSP-specific resource table entries
+ * @rproc: remote processor instance
+ * @rsc_type: resource type identifier
+ * @rsc: pointer to the resource entry
+ * @offset: offset of the resource entry
+ * @avail: available space in the resource table
+ *
+ * Parse the DSP-specific resource entry and update flags accordingly.
+ * If the WAIT_FW_READY feature is set, the host must wait for the firmware
+ * to signal readiness before proceeding with execution.
+ *
+ * Return: RSC_HANDLED if processed successfully, RSC_IGNORED otherwise.
+ */
+static int imx_dsp_rproc_handle_rsc(struct rproc *rproc, u32 rsc_type,
+				    void *rsc, int offset, int avail)
+{
+	struct imx_dsp_rproc *priv = rproc->priv;
+	struct fw_rsc_imx_dsp *imx_dsp_rsc = rsc;
+	struct device *dev = rproc->dev.parent;
+
+	if (!imx_dsp_rsc) {
+		dev_dbg(dev, "Invalid fw_rsc_imx_dsp.\n");
+		return RSC_IGNORED;
+	}
+
+	/* Make sure resource isn't truncated */
+	if (sizeof(struct fw_rsc_imx_dsp) > avail ||
+	    sizeof(struct fw_rsc_imx_dsp) != imx_dsp_rsc->len) {
+		dev_dbg(dev, "Resource fw_rsc_imx_dsp is truncated.\n");
+		return RSC_IGNORED;
+	}
+
+	/*
+	 * If FW_RSC_NXP_S_MAGIC number is not found then
+	 * wait for fw_ready reply (default work flow)
+	 */
+	if (imx_dsp_rsc->magic_num != FW_RSC_NXP_S_MAGIC) {
+		dev_dbg(dev, "Invalid resource table magic number.\n");
+		return RSC_IGNORED;
+	}
+
+	/*
+	 * For now, in struct fw_rsc_imx_dsp, version 0,
+	 * only FEATURE_DONT_WAIT_FW_READY is valid.
+	 *
+	 * When adding new features, please upgrade version.
+	 */
+	if (imx_dsp_rsc->version > 0) {
+		dev_warn(dev, "Unexpected fw_rsc_imx_dsp version %d.\n",
+			 imx_dsp_rsc->version);
+		return RSC_IGNORED;
+	}
+
+	if (imx_dsp_rsc->features & FEATURE_DONT_WAIT_FW_READY)
+		priv->flags &= ~WAIT_FW_READY;
+
+	return RSC_HANDLED;
+}
+
 /*
  * Start function for rproc_ops
  *
@@ -333,14 +417,17 @@ static int imx_dsp_rproc_start(struct rproc *rproc)
 					  true,
 					  rproc->bootaddr);
 		break;
+	case IMX_RPROC_RESET_CONTROLLER:
+		ret = reset_control_deassert(priv->run_stall);
+		break;
 	default:
 		return -EOPNOTSUPP;
 	}
 
 	if (ret)
 		dev_err(dev, "Failed to enable remote core!\n");
-	else
-		ret = imx_dsp_rproc_ready(rproc);
+	else if (priv->flags & WAIT_FW_READY)
+		return imx_dsp_rproc_ready(rproc);
 
 	return ret;
 }
@@ -372,6 +459,9 @@ static int imx_dsp_rproc_stop(struct rproc *rproc)
 					  IMX_SC_R_DSP,
 					  false,
 					  rproc->bootaddr);
+		break;
+	case IMX_RPROC_RESET_CONTROLLER:
+		ret = reset_control_assert(priv->run_stall);
 		break;
 	default:
 		return -EOPNOTSUPP;
@@ -513,7 +603,7 @@ static int imx_dsp_rproc_mbox_alloc(struct imx_dsp_rproc *priv)
 	struct mbox_client *cl;
 	int ret;
 
-	if (!of_get_property(dev->of_node, "mbox-names", NULL))
+	if (!of_property_present(dev->of_node, "mbox-names"))
 		return 0;
 
 	cl = &priv->cl;
@@ -684,7 +774,6 @@ static int imx_dsp_rproc_prepare(struct rproc *rproc)
 {
 	struct imx_dsp_rproc *priv = rproc->priv;
 	struct device *dev = rproc->dev.parent;
-	struct rproc_mem_entry *carveout;
 	int ret;
 
 	ret = imx_dsp_rproc_add_carveout(priv);
@@ -694,15 +783,6 @@ static int imx_dsp_rproc_prepare(struct rproc *rproc)
 	}
 
 	pm_runtime_get_sync(dev);
-
-	/*
-	 * Clear buffers after pm rumtime for internal ocram is not
-	 * accessible if power and clock are not enabled.
-	 */
-	list_for_each_entry(carveout, &rproc->carveouts, node) {
-		if (carveout->va)
-			memset(carveout->va, 0, carveout->len);
-	}
 
 	return  0;
 }
@@ -932,14 +1012,41 @@ static int imx_dsp_rproc_parse_fw(struct rproc *rproc, const struct firmware *fw
 	return 0;
 }
 
+static int imx_dsp_rproc_load(struct rproc *rproc, const struct firmware *fw)
+{
+	struct imx_dsp_rproc *priv = rproc->priv;
+	const struct imx_dsp_rproc_dcfg *dsp_dcfg = priv->dsp_dcfg;
+	struct rproc_mem_entry *carveout;
+	int ret;
+
+	/* Reset DSP if needed */
+	if (dsp_dcfg->reset)
+		dsp_dcfg->reset(priv);
+	/*
+	 * Clear buffers after pm rumtime for internal ocram is not
+	 * accessible if power and clock are not enabled.
+	 */
+	list_for_each_entry(carveout, &rproc->carveouts, node) {
+		if (carveout->va)
+			memset(carveout->va, 0, carveout->len);
+	}
+
+	ret = imx_dsp_rproc_elf_load_segments(rproc, fw);
+	if (ret)
+		return ret;
+
+	return 0;
+}
+
 static const struct rproc_ops imx_dsp_rproc_ops = {
 	.prepare	= imx_dsp_rproc_prepare,
 	.unprepare	= imx_dsp_rproc_unprepare,
 	.start		= imx_dsp_rproc_start,
 	.stop		= imx_dsp_rproc_stop,
 	.kick		= imx_dsp_rproc_kick,
-	.load		= imx_dsp_rproc_elf_load_segments,
+	.load		= imx_dsp_rproc_load,
 	.parse_fw	= imx_dsp_rproc_parse_fw,
+	.handle_rsc	= imx_dsp_rproc_handle_rsc,
 	.find_loaded_rsc_table = rproc_elf_find_loaded_rsc_table,
 	.sanity_check	= rproc_elf_sanity_check,
 	.get_boot_addr	= rproc_elf_get_boot_addr,
@@ -955,74 +1062,14 @@ static const struct rproc_ops imx_dsp_rproc_ops = {
 static int imx_dsp_attach_pm_domains(struct imx_dsp_rproc *priv)
 {
 	struct device *dev = priv->rproc->dev.parent;
-	int ret, i;
+	int ret;
 
-	priv->num_domains = of_count_phandle_with_args(dev->of_node,
-						       "power-domains",
-						       "#power-domain-cells");
-
-	/* If only one domain, then no need to link the device */
-	if (priv->num_domains <= 1)
+	/* A single PM domain is already attached. */
+	if (dev->pm_domain)
 		return 0;
 
-	priv->pd_dev = devm_kmalloc_array(dev, priv->num_domains,
-					  sizeof(*priv->pd_dev),
-					  GFP_KERNEL);
-	if (!priv->pd_dev)
-		return -ENOMEM;
-
-	priv->pd_dev_link = devm_kmalloc_array(dev, priv->num_domains,
-					       sizeof(*priv->pd_dev_link),
-					       GFP_KERNEL);
-	if (!priv->pd_dev_link)
-		return -ENOMEM;
-
-	for (i = 0; i < priv->num_domains; i++) {
-		priv->pd_dev[i] = dev_pm_domain_attach_by_id(dev, i);
-		if (IS_ERR(priv->pd_dev[i])) {
-			ret = PTR_ERR(priv->pd_dev[i]);
-			goto detach_pm;
-		}
-
-		/*
-		 * device_link_add will check priv->pd_dev[i], if it is
-		 * NULL, then will break.
-		 */
-		priv->pd_dev_link[i] = device_link_add(dev,
-						       priv->pd_dev[i],
-						       DL_FLAG_STATELESS |
-						       DL_FLAG_PM_RUNTIME);
-		if (!priv->pd_dev_link[i]) {
-			dev_pm_domain_detach(priv->pd_dev[i], false);
-			ret = -EINVAL;
-			goto detach_pm;
-		}
-	}
-
-	return 0;
-
-detach_pm:
-	while (--i >= 0) {
-		device_link_del(priv->pd_dev_link[i]);
-		dev_pm_domain_detach(priv->pd_dev[i], false);
-	}
-
-	return ret;
-}
-
-static int imx_dsp_detach_pm_domains(struct imx_dsp_rproc *priv)
-{
-	int i;
-
-	if (priv->num_domains <= 1)
-		return 0;
-
-	for (i = 0; i < priv->num_domains; i++) {
-		device_link_del(priv->pd_dev_link[i]);
-		dev_pm_domain_detach(priv->pd_dev[i], false);
-	}
-
-	return 0;
+	ret = dev_pm_domain_attach_list(dev, NULL, &priv->pd_list);
+	return ret < 0 ? ret : 0;
 }
 
 /**
@@ -1058,6 +1105,13 @@ static int imx_dsp_rproc_detect_mode(struct imx_dsp_rproc *priv)
 		}
 
 		priv->regmap = regmap;
+		break;
+	case IMX_RPROC_RESET_CONTROLLER:
+		priv->run_stall = devm_reset_control_get_exclusive(dev, "runstall");
+		if (IS_ERR(priv->run_stall)) {
+			dev_err(dev, "Failed to get DSP runstall reset control\n");
+			return PTR_ERR(priv->run_stall);
+		}
 		break;
 	default:
 		ret = -EOPNOTSUPP;
@@ -1104,14 +1158,16 @@ static int imx_dsp_rproc_probe(struct platform_device *pdev)
 		return ret;
 	}
 
-	rproc = rproc_alloc(dev, "imx-dsp-rproc", &imx_dsp_rproc_ops, fw_name,
-			    sizeof(*priv));
+	rproc = devm_rproc_alloc(dev, "imx-dsp-rproc", &imx_dsp_rproc_ops,
+				 fw_name, sizeof(*priv));
 	if (!rproc)
 		return -ENOMEM;
 
 	priv = rproc->priv;
 	priv->rproc = rproc;
 	priv->dsp_dcfg = dsp_dcfg;
+	/* By default, host waits for fw_ready reply */
+	priv->flags |= WAIT_FW_READY;
 
 	if (no_mailboxes)
 		imx_dsp_rproc_mbox_init = imx_dsp_rproc_mbox_no_alloc;
@@ -1125,14 +1181,14 @@ static int imx_dsp_rproc_probe(struct platform_device *pdev)
 	ret = imx_dsp_rproc_detect_mode(priv);
 	if (ret) {
 		dev_err(dev, "failed on imx_dsp_rproc_detect_mode\n");
-		goto err_put_rproc;
+		return ret;
 	}
 
 	/* There are multiple power domains required by DSP on some platform */
 	ret = imx_dsp_attach_pm_domains(priv);
 	if (ret) {
 		dev_err(dev, "failed on imx_dsp_attach_pm_domains\n");
-		goto err_put_rproc;
+		return ret;
 	}
 	/* Get clocks */
 	ret = imx_dsp_rproc_clk_get(priv);
@@ -1149,14 +1205,14 @@ static int imx_dsp_rproc_probe(struct platform_device *pdev)
 		goto err_detach_domains;
 	}
 
+	rproc_coredump_set_elf_info(rproc, ELFCLASS32, EM_XTENSA);
+
 	pm_runtime_enable(dev);
 
 	return 0;
 
 err_detach_domains:
-	imx_dsp_detach_pm_domains(priv);
-err_put_rproc:
-	rproc_free(rproc);
+	dev_pm_domain_detach_list(priv->pd_list);
 
 	return ret;
 }
@@ -1168,8 +1224,7 @@ static void imx_dsp_rproc_remove(struct platform_device *pdev)
 
 	pm_runtime_disable(&pdev->dev);
 	rproc_del(rproc);
-	imx_dsp_detach_pm_domains(priv);
-	rproc_free(rproc);
+	dev_pm_domain_detach_list(priv->pd_list);
 }
 
 /* pm runtime functions */
@@ -1177,7 +1232,6 @@ static int imx_dsp_runtime_resume(struct device *dev)
 {
 	struct rproc *rproc = dev_get_drvdata(dev);
 	struct imx_dsp_rproc *priv = rproc->priv;
-	const struct imx_dsp_rproc_dcfg *dsp_dcfg = priv->dsp_dcfg;
 	int ret;
 
 	/*
@@ -1197,10 +1251,6 @@ static int imx_dsp_runtime_resume(struct device *dev)
 		dev_err(dev, "failed on clk_bulk_prepare_enable\n");
 		return ret;
 	}
-
-	/* Reset DSP if needed */
-	if (dsp_dcfg->reset)
-		dsp_dcfg->reset(priv);
 
 	return 0;
 }
@@ -1325,7 +1375,7 @@ MODULE_DEVICE_TABLE(of, imx_dsp_rproc_of_match);
 
 static struct platform_driver imx_dsp_rproc_driver = {
 	.probe = imx_dsp_rproc_probe,
-	.remove_new = imx_dsp_rproc_remove,
+	.remove = imx_dsp_rproc_remove,
 	.driver = {
 		.name = "imx-dsp-rproc",
 		.of_match_table = imx_dsp_rproc_of_match,

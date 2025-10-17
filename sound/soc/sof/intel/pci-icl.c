@@ -3,7 +3,7 @@
 // This file is provided under a dual BSD/GPLv2 license.  When using or
 // redistributing this file, you may do so under either license.
 //
-// Copyright(c) 2018-2021 Intel Corporation. All rights reserved.
+// Copyright(c) 2018-2021 Intel Corporation
 //
 // Author: Liam Girdwood <liam.r.girdwood@linux.intel.com>
 //
@@ -102,11 +102,14 @@ static struct pci_driver snd_sof_pci_intel_icl_driver = {
 	.remove = sof_pci_remove,
 	.shutdown = sof_pci_shutdown,
 	.driver = {
-		.pm = &sof_pci_pm,
+		.pm = pm_ptr(&sof_pci_pm),
 	},
 };
 module_pci_driver(snd_sof_pci_intel_icl_driver);
 
 MODULE_LICENSE("Dual BSD/GPL");
-MODULE_IMPORT_NS(SND_SOC_SOF_INTEL_HDA_COMMON);
-MODULE_IMPORT_NS(SND_SOC_SOF_PCI_DEV);
+MODULE_DESCRIPTION("SOF support for IceLake platforms");
+MODULE_IMPORT_NS("SND_SOC_SOF_INTEL_HDA_GENERIC");
+MODULE_IMPORT_NS("SND_SOC_SOF_INTEL_HDA_COMMON");
+MODULE_IMPORT_NS("SND_SOC_SOF_INTEL_CNL");
+MODULE_IMPORT_NS("SND_SOC_SOF_PCI_DEV");

@@ -152,8 +152,6 @@ static const struct mtk_stateless_control mtk_stateless_controls[] = {
 			.id = V4L2_CID_MPEG_VIDEO_HEVC_PROFILE,
 			.def = V4L2_MPEG_VIDEO_HEVC_PROFILE_MAIN,
 			.max = V4L2_MPEG_VIDEO_HEVC_PROFILE_MAIN_10,
-			.menu_skip_mask =
-				BIT(V4L2_MPEG_VIDEO_HEVC_PROFILE_MAIN_STILL_PICTURE),
 		},
 		.codec_type = V4L2_PIX_FMT_HEVC_SLICE,
 	},
@@ -566,7 +564,7 @@ static void mtk_vcodec_dec_fill_h264_level(struct v4l2_ctrl_config *cfg,
 	default:
 		cfg->max = V4L2_MPEG_VIDEO_H264_LEVEL_4_1;
 		break;
-	};
+	}
 }
 
 static void mtk_vcodec_dec_fill_h264_profile(struct v4l2_ctrl_config *cfg,
@@ -580,7 +578,7 @@ static void mtk_vcodec_dec_fill_h264_profile(struct v4l2_ctrl_config *cfg,
 	default:
 		cfg->max = V4L2_MPEG_VIDEO_H264_PROFILE_HIGH;
 		break;
-	};
+	}
 }
 
 static void mtk_vcodec_dec_fill_h265_level(struct v4l2_ctrl_config *cfg,
@@ -596,7 +594,7 @@ static void mtk_vcodec_dec_fill_h265_level(struct v4l2_ctrl_config *cfg,
 	default:
 		cfg->max = V4L2_MPEG_VIDEO_HEVC_LEVEL_4;
 		break;
-	};
+	}
 }
 
 static void mtk_vcodec_dec_fill_h265_profile(struct v4l2_ctrl_config *cfg,
@@ -610,7 +608,7 @@ static void mtk_vcodec_dec_fill_h265_profile(struct v4l2_ctrl_config *cfg,
 	default:
 		cfg->max = V4L2_MPEG_VIDEO_HEVC_PROFILE_MAIN_STILL_PICTURE;
 		break;
-	};
+	}
 }
 
 static void mtk_vcodec_dec_fill_vp9_level(struct v4l2_ctrl_config *cfg,
@@ -630,7 +628,7 @@ static void mtk_vcodec_dec_fill_vp9_level(struct v4l2_ctrl_config *cfg,
 	default:
 		cfg->max = V4L2_MPEG_VIDEO_VP9_LEVEL_4_0;
 		break;
-	};
+	}
 }
 
 static void mtk_vcodec_dec_fill_vp9_profile(struct v4l2_ctrl_config *cfg,
@@ -644,7 +642,7 @@ static void mtk_vcodec_dec_fill_vp9_profile(struct v4l2_ctrl_config *cfg,
 	default:
 		cfg->max = V4L2_MPEG_VIDEO_VP9_PROFILE_1;
 		break;
-	};
+	}
 }
 
 static void mtk_vcodec_dec_reset_controls(struct v4l2_ctrl_config *cfg,
@@ -680,7 +678,7 @@ static void mtk_vcodec_dec_reset_controls(struct v4l2_ctrl_config *cfg,
 		break;
 	default:
 		break;
-	};
+	}
 }
 
 static int mtk_vcodec_dec_ctrls_setup(struct mtk_vcodec_dec_ctx *ctx)
@@ -854,10 +852,8 @@ static int vb2ops_vdec_out_buf_validate(struct vb2_buffer *vb)
 	return 0;
 }
 
-static struct vb2_ops mtk_vdec_request_vb2_ops = {
+static const struct vb2_ops mtk_vdec_request_vb2_ops = {
 	.queue_setup	= vb2ops_vdec_queue_setup,
-	.wait_prepare	= vb2_ops_wait_prepare,
-	.wait_finish	= vb2_ops_wait_finish,
 	.start_streaming	= vb2ops_vdec_start_streaming,
 	.stop_streaming	= vb2ops_vdec_stop_streaming,
 

@@ -6,7 +6,7 @@ config AS_HAS_ULEB128
 
 menuconfig RUNTIME_KERNEL_TESTING_MENU
        bool "arch/riscv/kernel runtime Testing"
-       def_bool y
+       default y
        help
          Enable riscv kernel runtime testing.
 
@@ -27,6 +27,18 @@ config RISCV_MODULE_LINKING_KUNIT
 
          For more information on KUnit and unit tests in general please refer
          to the KUnit documentation in Documentation/dev-tools/kunit/.
+
+         If unsure, say N.
+
+config RISCV_KPROBES_KUNIT
+       bool "KUnit test for riscv kprobes" if !KUNIT_ALL_TESTS
+       depends on KUNIT
+       depends on KPROBES
+       default KUNIT_ALL_TESTS
+       help
+         Enable testing for riscv kprobes. Useful for riscv and/or kprobes
+         development. The test verifies that kprobes do not change the behaviour
+         of some sample functions.
 
          If unsure, say N.
 

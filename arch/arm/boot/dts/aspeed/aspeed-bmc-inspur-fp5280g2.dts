@@ -54,10 +54,9 @@
 	};
 
 	fsi: gpio-fsi {
-		compatible = "aspeed,ast2500-cf-fsi-master", "fsi-master";
+		compatible = "aspeed,ast2500-cf-fsi-master";
 		#address-cells = <2>;
 		#size-cells = <0>;
-		no-gpio-delays;
 
 		memory-region = <&coldfire_memory>;
 		aspeed,sram = <&sram>;
@@ -812,10 +811,6 @@
 &gfx {
 	status = "okay";
 	memory-region = <&gfx_memory>;
-};
-
-&pinctrl {
-	aspeed,external-nodes = <&gfx &lhc>;
 };
 
 &wdt1 {

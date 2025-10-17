@@ -52,6 +52,48 @@ static inline void cpu_set_fpu_fcsr_mask(struct cpuinfo_loongarch *c)
 	c->fpu_mask = ~(fcsr0 ^ fcsr1) & ~mask;
 }
 
+/* simd = -1/0/128/256 */
+static unsigned int simd = -1U;
+
+static int __init cpu_setup_simd(char *str)
+{
+	get_option(&str, &simd);
+	pr_info("Set SIMD width = %u\n", simd);
+
+	return 0;
+}
+
+early_param("simd", cpu_setup_simd);
+
+static int __init cpu_final_simd(void)
+{
+	struct cpuinfo_loongarch *c = &cpu_data[0];
+
+	if (simd < 128) {
+		c->options &= ~LOONGARCH_CPU_LSX;
+		elf_hwcap &= ~HWCAP_LOONGARCH_LSX;
+	}
+
+	if (simd < 256) {
+		c->options &= ~LOONGARCH_CPU_LASX;
+		elf_hwcap &= ~HWCAP_LOONGARCH_LASX;
+	}
+
+	simd = 0;
+
+	if (c->options & LOONGARCH_CPU_LSX)
+		simd = 128;
+
+	if (c->options & LOONGARCH_CPU_LASX)
+		simd = 256;
+
+	pr_info("Final SIMD width = %u\n", simd);
+
+	return 0;
+}
+
+arch_initcall(cpu_final_simd);
+
 static inline void set_elf_platform(int cpu, const char *plat)
 {
 	if (cpu == 0)
@@ -91,12 +133,30 @@ static void cpu_probe_common(struct cpuinfo_loongarch *c)
 	unsigned int config;
 	unsigned long asid_mask;
 
-	c->options = LOONGARCH_CPU_CPUCFG | LOONGARCH_CPU_CSR |
-		     LOONGARCH_CPU_TLB | LOONGARCH_CPU_VINT | LOONGARCH_CPU_WATCH;
+	c->options = LOONGARCH_CPU_CPUCFG | LOONGARCH_CPU_CSR | LOONGARCH_CPU_VINT;
 
 	elf_hwcap = HWCAP_LOONGARCH_CPUCFG;
 
 	config = read_cpucfg(LOONGARCH_CPUCFG1);
+
+	switch (config & CPUCFG1_ISA) {
+	case 0:
+		set_isa(c, LOONGARCH_CPU_ISA_LA32R);
+		break;
+	case 1:
+		set_isa(c, LOONGARCH_CPU_ISA_LA32S);
+		break;
+	case 2:
+		set_isa(c, LOONGARCH_CPU_ISA_LA64);
+		break;
+	default:
+		pr_warn("Warning: unknown ISA level\n");
+	}
+
+	if (config & CPUCFG1_PAGING)
+		c->options |= LOONGARCH_CPU_TLB;
+	if (config & CPUCFG1_IOCSR)
+		c->options |= LOONGARCH_CPU_IOCSR;
 	if (config & CPUCFG1_UAL) {
 		c->options |= LOONGARCH_CPU_UAL;
 		elf_hwcap |= HWCAP_LOONGARCH_UAL;
@@ -105,7 +165,6 @@ static void cpu_probe_common(struct cpuinfo_loongarch *c)
 		c->options |= LOONGARCH_CPU_CRC32;
 		elf_hwcap |= HWCAP_LOONGARCH_CRC32;
 	}
-
 
 	config = read_cpucfg(LOONGARCH_CPUCFG2);
 	if (config & CPUCFG2_LAM) {
@@ -117,13 +176,13 @@ static void cpu_probe_common(struct cpuinfo_loongarch *c)
 		elf_hwcap |= HWCAP_LOONGARCH_FPU;
 	}
 #ifdef CONFIG_CPU_HAS_LSX
-	if (config & CPUCFG2_LSX) {
+	if ((config & CPUCFG2_LSX) && (simd >= 128)) {
 		c->options |= LOONGARCH_CPU_LSX;
 		elf_hwcap |= HWCAP_LOONGARCH_LSX;
 	}
 #endif
 #ifdef CONFIG_CPU_HAS_LASX
-	if (config & CPUCFG2_LASX) {
+	if ((config & CPUCFG2_LASX) && (simd >= 256)) {
 		c->options |= LOONGARCH_CPU_LASX;
 		elf_hwcap |= HWCAP_LOONGARCH_LASX;
 	}
@@ -139,6 +198,10 @@ static void cpu_probe_common(struct cpuinfo_loongarch *c)
 	if (config & CPUCFG2_PTW) {
 		c->options |= LOONGARCH_CPU_PTW;
 		elf_hwcap |= HWCAP_LOONGARCH_PTW;
+	}
+	if (config & CPUCFG2_LSPW) {
+		c->options |= LOONGARCH_CPU_LSPW;
+		elf_hwcap |= HWCAP_LOONGARCH_LSPW;
 	}
 	if (config & CPUCFG2_LVZP) {
 		c->options |= LOONGARCH_CPU_LVZ;
@@ -163,26 +226,13 @@ static void cpu_probe_common(struct cpuinfo_loongarch *c)
 	if (config & CPUCFG6_PMP)
 		c->options |= LOONGARCH_CPU_PMP;
 
-	config = iocsr_read32(LOONGARCH_IOCSR_FEATURES);
-	if (config & IOCSRF_CSRIPI)
-		c->options |= LOONGARCH_CPU_CSRIPI;
-	if (config & IOCSRF_EXTIOI)
-		c->options |= LOONGARCH_CPU_EXTIOI;
-	if (config & IOCSRF_FREQSCALE)
-		c->options |= LOONGARCH_CPU_SCALEFREQ;
-	if (config & IOCSRF_FLATMODE)
-		c->options |= LOONGARCH_CPU_FLATMODE;
-	if (config & IOCSRF_EIODECODE)
-		c->options |= LOONGARCH_CPU_EIODECODE;
-	if (config & IOCSRF_VM)
-		c->options |= LOONGARCH_CPU_HYPERVISOR;
-
 	config = csr_read32(LOONGARCH_CSR_ASID);
 	config = (config & CSR_ASID_BIT) >> CSR_ASID_BIT_SHIFT;
 	asid_mask = GENMASK(config - 1, 0);
 	set_cpu_asid_mask(c, asid_mask);
 
 	config = read_csr_prcfg1();
+	c->timerbits = (config & CSR_CONF1_TMRBITS) >> CSR_CONF1_TMRBITS_SHIFT;
 	c->ksave_mask = GENMASK((config & CSR_CONF1_KSNUM) - 1, 0);
 	c->ksave_mask &= ~(EXC_KSAVE_MASK | PERCPU_KSAVE_MASK | KVM_KSAVE_MASK);
 
@@ -209,6 +259,9 @@ static void cpu_probe_common(struct cpuinfo_loongarch *c)
 	default:
 		pr_warn("Warning: unknown TLB type\n");
 	}
+
+	if (get_num_brps() + get_num_wrps())
+		c->options |= LOONGARCH_CPU_WATCH;
 }
 
 #define MAX_NAME_LEN	32
@@ -219,8 +272,45 @@ static char cpu_full_name[MAX_NAME_LEN] = "        -        ";
 
 static inline void cpu_probe_loongson(struct cpuinfo_loongarch *c, unsigned int cpu)
 {
+	uint32_t config;
 	uint64_t *vendor = (void *)(&cpu_full_name[VENDOR_OFFSET]);
 	uint64_t *cpuname = (void *)(&cpu_full_name[CPUNAME_OFFSET]);
+	const char *core_name = "Unknown";
+
+	switch (BIT(fls(c->isa_level) - 1)) {
+	case LOONGARCH_CPU_ISA_LA32R:
+	case LOONGARCH_CPU_ISA_LA32S:
+		c->cputype = CPU_LOONGSON32;
+		__cpu_family[cpu] = "Loongson-32bit";
+		break;
+	case LOONGARCH_CPU_ISA_LA64:
+		c->cputype = CPU_LOONGSON64;
+		__cpu_family[cpu] = "Loongson-64bit";
+		break;
+	}
+
+	switch (c->processor_id & PRID_SERIES_MASK) {
+	case PRID_SERIES_LA132:
+		core_name = "LA132";
+		break;
+	case PRID_SERIES_LA264:
+		core_name = "LA264";
+		break;
+	case PRID_SERIES_LA364:
+		core_name = "LA364";
+		break;
+	case PRID_SERIES_LA464:
+		core_name = "LA464";
+		break;
+	case PRID_SERIES_LA664:
+		core_name = "LA664";
+		break;
+	}
+
+	pr_info("%s Processor probed (%s Core)\n", __cpu_family[cpu], core_name);
+
+	if (!cpu_has_iocsr)
+		return;
 
 	if (!__cpu_full_name[cpu])
 		__cpu_full_name[cpu] = cpu_full_name;
@@ -228,43 +318,21 @@ static inline void cpu_probe_loongson(struct cpuinfo_loongarch *c, unsigned int 
 	*vendor = iocsr_read64(LOONGARCH_IOCSR_VENDOR);
 	*cpuname = iocsr_read64(LOONGARCH_IOCSR_CPUNAME);
 
-	switch (c->processor_id & PRID_SERIES_MASK) {
-	case PRID_SERIES_LA132:
-		c->cputype = CPU_LOONGSON32;
-		set_isa(c, LOONGARCH_CPU_ISA_LA32S);
-		__cpu_family[cpu] = "Loongson-32bit";
-		pr_info("32-bit Loongson Processor probed (LA132 Core)\n");
-		break;
-	case PRID_SERIES_LA264:
-		c->cputype = CPU_LOONGSON64;
-		set_isa(c, LOONGARCH_CPU_ISA_LA64);
-		__cpu_family[cpu] = "Loongson-64bit";
-		pr_info("64-bit Loongson Processor probed (LA264 Core)\n");
-		break;
-	case PRID_SERIES_LA364:
-		c->cputype = CPU_LOONGSON64;
-		set_isa(c, LOONGARCH_CPU_ISA_LA64);
-		__cpu_family[cpu] = "Loongson-64bit";
-		pr_info("64-bit Loongson Processor probed (LA364 Core)\n");
-		break;
-	case PRID_SERIES_LA464:
-		c->cputype = CPU_LOONGSON64;
-		set_isa(c, LOONGARCH_CPU_ISA_LA64);
-		__cpu_family[cpu] = "Loongson-64bit";
-		pr_info("64-bit Loongson Processor probed (LA464 Core)\n");
-		break;
-	case PRID_SERIES_LA664:
-		c->cputype = CPU_LOONGSON64;
-		set_isa(c, LOONGARCH_CPU_ISA_LA64);
-		__cpu_family[cpu] = "Loongson-64bit";
-		pr_info("64-bit Loongson Processor probed (LA664 Core)\n");
-		break;
-	default: /* Default to 64 bit */
-		c->cputype = CPU_LOONGSON64;
-		set_isa(c, LOONGARCH_CPU_ISA_LA64);
-		__cpu_family[cpu] = "Loongson-64bit";
-		pr_info("64-bit Loongson Processor probed (Unknown Core)\n");
-	}
+	config = iocsr_read32(LOONGARCH_IOCSR_FEATURES);
+	if (config & IOCSRF_CSRIPI)
+		c->options |= LOONGARCH_CPU_CSRIPI;
+	if (config & IOCSRF_EXTIOI)
+		c->options |= LOONGARCH_CPU_EXTIOI;
+	if (config & IOCSRF_FREQSCALE)
+		c->options |= LOONGARCH_CPU_SCALEFREQ;
+	if (config & IOCSRF_FLATMODE)
+		c->options |= LOONGARCH_CPU_FLATMODE;
+	if (config & IOCSRF_EIODECODE)
+		c->options |= LOONGARCH_CPU_EIODECODE;
+	if (config & IOCSRF_AVEC)
+		c->options |= LOONGARCH_CPU_AVECINT;
+	if (config & IOCSRF_VM)
+		c->options |= LOONGARCH_CPU_HYPERVISOR;
 }
 
 #ifdef CONFIG_64BIT

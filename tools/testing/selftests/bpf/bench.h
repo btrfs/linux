@@ -10,6 +10,7 @@
 #include <math.h>
 #include <time.h>
 #include <sys/syscall.h>
+#include <limits.h>
 
 struct cpu_set {
 	bool *cpus;
@@ -45,6 +46,7 @@ struct bench_res {
 	unsigned long gp_ns;
 	unsigned long gp_ct;
 	unsigned int stime;
+	unsigned long duration_ns;
 };
 
 struct bench {

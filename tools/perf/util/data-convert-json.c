@@ -28,7 +28,7 @@
 #include "util/tool.h"
 
 #ifdef HAVE_LIBTRACEEVENT
-#include <traceevent/event-parse.h>
+#include <event-parse.h>
 #endif
 
 struct convert_json {
@@ -118,7 +118,7 @@ static void output_json_key_format(FILE *out, bool comma, int depth,
 	va_end(args);
 }
 
-static void output_sample_callchain_entry(struct perf_tool *tool,
+static void output_sample_callchain_entry(const struct perf_tool *tool,
 		u64 ip, struct addr_location *al)
 {
 	struct convert_json *c = container_of(tool, struct convert_json, tool);
@@ -134,7 +134,7 @@ static void output_sample_callchain_entry(struct perf_tool *tool,
 		output_json_key_string(out, false, 5, "symbol", al->sym->name);
 
 		if (dso) {
-			const char *dso_name = dso->short_name;
+			const char *dso_name = dso__short_name(dso);
 
 			if (dso_name && strlen(dso_name) > 0) {
 				fputc(',', out);
@@ -146,7 +146,7 @@ static void output_sample_callchain_entry(struct perf_tool *tool,
 	output_json_format(out, false, 4, "}");
 }
 
-static int process_sample_event(struct perf_tool *tool,
+static int process_sample_event(const struct perf_tool *tool,
 				union perf_event *event __maybe_unused,
 				struct perf_sample *sample,
 				struct evsel *evsel __maybe_unused,
@@ -230,12 +230,12 @@ static int process_sample_event(struct perf_tool *tool,
 
 #ifdef HAVE_LIBTRACEEVENT
 	if (sample->raw_data) {
-		int i;
-		struct tep_format_field **fields;
+		struct tep_event *tp_format = evsel__tp_format(evsel);
+		struct tep_format_field **fields = tp_format ? tep_event_fields(tp_format) : NULL;
 
-		fields = tep_event_fields(evsel->tp_format);
 		if (fields) {
-			i = 0;
+			int i = 0;
+
 			while (fields[i]) {
 				struct trace_seq s;
 
@@ -257,7 +257,8 @@ static int process_sample_event(struct perf_tool *tool,
 static void output_headers(struct perf_session *session, struct convert_json *c)
 {
 	struct stat st;
-	struct perf_header *header = &session->header;
+	const struct perf_header *header = &session->header;
+	const struct perf_env *env = perf_session__env(session);
 	int ret;
 	int fd = perf_data__fd(session->data);
 	int i;
@@ -280,30 +281,32 @@ static void output_headers(struct perf_session *session, struct convert_json *c)
 	output_json_key_format(out, true, 2, "data-size", "%" PRIu64, header->data_size);
 	output_json_key_format(out, true, 2, "feat-offset", "%" PRIu64, header->feat_offset);
 
-	output_json_key_string(out, true, 2, "hostname", header->env.hostname);
-	output_json_key_string(out, true, 2, "os-release", header->env.os_release);
-	output_json_key_string(out, true, 2, "arch", header->env.arch);
+	output_json_key_string(out, true, 2, "hostname", env->hostname);
+	output_json_key_string(out, true, 2, "os-release", env->os_release);
+	output_json_key_string(out, true, 2, "arch", env->arch);
 
-	output_json_key_string(out, true, 2, "cpu-desc", header->env.cpu_desc);
-	output_json_key_string(out, true, 2, "cpuid", header->env.cpuid);
-	output_json_key_format(out, true, 2, "nrcpus-online", "%u", header->env.nr_cpus_online);
-	output_json_key_format(out, true, 2, "nrcpus-avail", "%u", header->env.nr_cpus_avail);
+	if (env->cpu_desc)
+		output_json_key_string(out, true, 2, "cpu-desc", env->cpu_desc);
 
-	if (header->env.clock.enabled) {
+	output_json_key_string(out, true, 2, "cpuid", env->cpuid);
+	output_json_key_format(out, true, 2, "nrcpus-online", "%u", env->nr_cpus_online);
+	output_json_key_format(out, true, 2, "nrcpus-avail", "%u", env->nr_cpus_avail);
+
+	if (env->clock.enabled) {
 		output_json_key_format(out, true, 2, "clockid",
-				"%u", header->env.clock.clockid);
+				"%u", env->clock.clockid);
 		output_json_key_format(out, true, 2, "clock-time",
-				"%" PRIu64, header->env.clock.clockid_ns);
+				"%" PRIu64, env->clock.clockid_ns);
 		output_json_key_format(out, true, 2, "real-time",
-				"%" PRIu64, header->env.clock.tod_ns);
+				"%" PRIu64, env->clock.tod_ns);
 	}
 
-	output_json_key_string(out, true, 2, "perf-version", header->env.version);
+	output_json_key_string(out, true, 2, "perf-version", env->version);
 
 	output_json_key_format(out, true, 2, "cmdline", "[");
-	for (i = 0; i < header->env.nr_cmdline; i++) {
+	for (i = 0; i < env->nr_cmdline; i++) {
 		output_json_delimiters(out, i != 0, 3);
-		output_json_string(c->out, header->env.cmdline_argv[i]);
+		output_json_string(c->out, env->cmdline_argv[i]);
 	}
 	output_json_format(out, false, 2, "]");
 }
@@ -314,38 +317,35 @@ int bt_convert__perf2json(const char *input_name, const char *output_name,
 	struct perf_session *session;
 	int fd;
 	int ret = -1;
-
 	struct convert_json c = {
-		.tool = {
-			.sample         = process_sample_event,
-			.mmap           = perf_event__process_mmap,
-			.mmap2          = perf_event__process_mmap2,
-			.comm           = perf_event__process_comm,
-			.namespaces     = perf_event__process_namespaces,
-			.cgroup         = perf_event__process_cgroup,
-			.exit           = perf_event__process_exit,
-			.fork           = perf_event__process_fork,
-			.lost           = perf_event__process_lost,
-#ifdef HAVE_LIBTRACEEVENT
-			.tracing_data   = perf_event__process_tracing_data,
-#endif
-			.build_id       = perf_event__process_build_id,
-			.id_index       = perf_event__process_id_index,
-			.auxtrace_info  = perf_event__process_auxtrace_info,
-			.auxtrace       = perf_event__process_auxtrace,
-			.event_update   = perf_event__process_event_update,
-			.ordered_events = true,
-			.ordering_requires_timestamps = true,
-		},
 		.first = true,
 		.events_count = 0,
 	};
-
 	struct perf_data data = {
 		.mode = PERF_DATA_MODE_READ,
 		.path = input_name,
 		.force = opts->force,
 	};
+
+	perf_tool__init(&c.tool, /*ordered_events=*/true);
+	c.tool.sample         = process_sample_event;
+	c.tool.mmap           = perf_event__process_mmap;
+	c.tool.mmap2          = perf_event__process_mmap2;
+	c.tool.comm           = perf_event__process_comm;
+	c.tool.namespaces     = perf_event__process_namespaces;
+	c.tool.cgroup         = perf_event__process_cgroup;
+	c.tool.exit           = perf_event__process_exit;
+	c.tool.fork           = perf_event__process_fork;
+	c.tool.lost           = perf_event__process_lost;
+#ifdef HAVE_LIBTRACEEVENT
+	c.tool.tracing_data   = perf_event__process_tracing_data;
+#endif
+	c.tool.build_id       = perf_event__process_build_id;
+	c.tool.id_index       = perf_event__process_id_index;
+	c.tool.auxtrace_info  = perf_event__process_auxtrace_info;
+	c.tool.auxtrace       = perf_event__process_auxtrace;
+	c.tool.event_update   = perf_event__process_event_update;
+	c.tool.ordering_requires_timestamps = true;
 
 	if (opts->all) {
 		pr_err("--all is currently unsupported for JSON output.\n");
@@ -377,8 +377,7 @@ int bt_convert__perf2json(const char *input_name, const char *output_name,
 		fprintf(stderr, "Error creating perf session!\n");
 		goto err_fclose;
 	}
-
-	if (symbol__init(&session->header.env) < 0) {
+	if (symbol__init(perf_session__env(session)) < 0) {
 		fprintf(stderr, "Symbol init error!\n");
 		goto err_session_delete;
 	}

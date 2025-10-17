@@ -5,6 +5,7 @@
 // Author: Stephen Barber <smbarber@chromium.org>
 
 #include <linux/kernel.h>
+#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/platform_data/cros_ec_commands.h>
 #include <linux/platform_data/cros_ec_proto.h>
@@ -34,21 +35,18 @@ struct cros_ec_rtc {
 static int cros_ec_rtc_get(struct cros_ec_device *cros_ec, u32 command,
 			   u32 *response)
 {
+	DEFINE_RAW_FLEX(struct cros_ec_command, msg, data,
+			sizeof(struct ec_response_rtc));
 	int ret;
-	struct {
-		struct cros_ec_command msg;
-		struct ec_response_rtc data;
-	} __packed msg;
 
-	memset(&msg, 0, sizeof(msg));
-	msg.msg.command = command;
-	msg.msg.insize = sizeof(msg.data);
+	msg->command = command;
+	msg->insize = sizeof(struct ec_response_rtc);
 
-	ret = cros_ec_cmd_xfer_status(cros_ec, &msg.msg);
+	ret = cros_ec_cmd_xfer_status(cros_ec, msg);
 	if (ret < 0)
 		return ret;
 
-	*response = msg.data.time;
+	*response = ((struct ec_response_rtc *)msg->data)->time;
 
 	return 0;
 }
@@ -56,18 +54,15 @@ static int cros_ec_rtc_get(struct cros_ec_device *cros_ec, u32 command,
 static int cros_ec_rtc_set(struct cros_ec_device *cros_ec, u32 command,
 			   u32 param)
 {
+	DEFINE_RAW_FLEX(struct cros_ec_command, msg, data,
+			sizeof(struct ec_response_rtc));
 	int ret;
-	struct {
-		struct cros_ec_command msg;
-		struct ec_response_rtc data;
-	} __packed msg;
 
-	memset(&msg, 0, sizeof(msg));
-	msg.msg.command = command;
-	msg.msg.outsize = sizeof(msg.data);
-	msg.data.time = param;
+	msg->command = command;
+	msg->outsize = sizeof(struct ec_response_rtc);
+	((struct ec_response_rtc *)msg->data)->time = param;
 
-	ret = cros_ec_cmd_xfer_status(cros_ec, &msg.msg);
+	ret = cros_ec_cmd_xfer_status(cros_ec, msg);
 	if (ret < 0)
 		return ret;
 	return 0;
@@ -336,7 +331,7 @@ static int cros_ec_rtc_probe(struct platform_device *pdev)
 		return ret;
 	}
 
-	ret = device_init_wakeup(&pdev->dev, 1);
+	ret = device_init_wakeup(&pdev->dev, true);
 	if (ret) {
 		dev_err(&pdev->dev, "failed to initialize wakeup\n");
 		return ret;
@@ -392,13 +387,20 @@ static void cros_ec_rtc_remove(struct platform_device *pdev)
 		dev_err(dev, "failed to unregister notifier\n");
 }
 
+static const struct platform_device_id cros_ec_rtc_id[] = {
+	{ DRV_NAME, 0 },
+	{}
+};
+MODULE_DEVICE_TABLE(platform, cros_ec_rtc_id);
+
 static struct platform_driver cros_ec_rtc_driver = {
 	.probe = cros_ec_rtc_probe,
-	.remove_new = cros_ec_rtc_remove,
+	.remove = cros_ec_rtc_remove,
 	.driver = {
 		.name = DRV_NAME,
 		.pm = &cros_ec_rtc_pm_ops,
 	},
+	.id_table = cros_ec_rtc_id,
 };
 
 module_platform_driver(cros_ec_rtc_driver);
@@ -406,4 +408,3 @@ module_platform_driver(cros_ec_rtc_driver);
 MODULE_DESCRIPTION("RTC driver for Chrome OS ECs");
 MODULE_AUTHOR("Stephen Barber <smbarber@chromium.org>");
 MODULE_LICENSE("GPL v2");
-MODULE_ALIAS("platform:" DRV_NAME);

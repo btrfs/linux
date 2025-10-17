@@ -1,4 +1,6 @@
 # SPDX-License-Identifier: GPL-2.0-only
+menu "Tegra"
+
 config SND_SOC_TEGRA
 	tristate "SoC Audio for the Tegra System-on-Chip"
 	depends on (ARCH_TEGRA && TEGRA20_APB_DMA) || COMPILE_TEST
@@ -78,6 +80,7 @@ config SND_SOC_TEGRA210_DMIC
 
 config SND_SOC_TEGRA210_I2S
 	tristate "Tegra210 I2S module"
+	select SND_SIMPLE_CARD_UTILS
 	help
 	  Config to enable the Inter-IC Sound (I2S) Controller which
 	  implements full-duplex and bidirectional and single direction
@@ -292,3 +295,5 @@ config SND_SOC_TEGRA_SGTL5000
 	  Colibri T30.
 
 endif
+
+endmenu

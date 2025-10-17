@@ -36,7 +36,6 @@
 #include <linux/ktime.h>
 #include <linux/math.h>
 #include <linux/module.h>
-#include <linux/mutex.h>
 #include <linux/of.h>
 #include <linux/platform_device.h>
 #include <linux/pwm.h>
@@ -54,10 +53,8 @@
 #define MCHPCOREPWM_TIMEOUT_MS	100u
 
 struct mchp_core_pwm_chip {
-	struct pwm_chip chip;
 	struct clk *clk;
 	void __iomem *base;
-	struct mutex lock; /* protects the shared period */
 	ktime_t update_timestamp;
 	u32 sync_update_mask;
 	u16 channel_enabled;
@@ -65,7 +62,7 @@ struct mchp_core_pwm_chip {
 
 static inline struct mchp_core_pwm_chip *to_mchp_core_pwm(struct pwm_chip *chip)
 {
-	return container_of(chip, struct mchp_core_pwm_chip, chip);
+	return pwmchip_get_drvdata(chip);
 }
 
 static void mchp_core_pwm_enable(struct pwm_chip *chip, struct pwm_device *pwm,
@@ -328,7 +325,7 @@ static int mchp_core_pwm_apply_locked(struct pwm_chip *chip, struct pwm_device *
 		 * mchp_core_pwm_calc_period().
 		 * The period is locked and we cannot change this, so we abort.
 		 */
-		if (hw_period_steps == MCHPCOREPWM_PERIOD_STEPS_MAX)
+		if (hw_period_steps > MCHPCOREPWM_PERIOD_STEPS_MAX)
 			return -EINVAL;
 
 		prescale = hw_prescale;
@@ -361,17 +358,10 @@ static int mchp_core_pwm_apply(struct pwm_chip *chip, struct pwm_device *pwm,
 			       const struct pwm_state *state)
 {
 	struct mchp_core_pwm_chip *mchp_core_pwm = to_mchp_core_pwm(chip);
-	int ret;
-
-	mutex_lock(&mchp_core_pwm->lock);
 
 	mchp_core_pwm_wait_for_sync_update(mchp_core_pwm, pwm->hwpwm);
 
-	ret = mchp_core_pwm_apply_locked(chip, pwm, state);
-
-	mutex_unlock(&mchp_core_pwm->lock);
-
-	return ret;
+	return mchp_core_pwm_apply_locked(chip, pwm, state);
 }
 
 static int mchp_core_pwm_get_state(struct pwm_chip *chip, struct pwm_device *pwm,
@@ -381,8 +371,6 @@ static int mchp_core_pwm_get_state(struct pwm_chip *chip, struct pwm_device *pwm
 	u64 rate;
 	u16 prescale, period_steps;
 	u8 duty_steps, posedge, negedge;
-
-	mutex_lock(&mchp_core_pwm->lock);
 
 	mchp_core_pwm_wait_for_sync_update(mchp_core_pwm, pwm->hwpwm);
 
@@ -416,8 +404,6 @@ static int mchp_core_pwm_get_state(struct pwm_chip *chip, struct pwm_device *pwm
 	posedge = readb_relaxed(mchp_core_pwm->base + MCHPCOREPWM_POSEDGE(pwm->hwpwm));
 	negedge = readb_relaxed(mchp_core_pwm->base + MCHPCOREPWM_NEGEDGE(pwm->hwpwm));
 
-	mutex_unlock(&mchp_core_pwm->lock);
-
 	if (negedge == posedge) {
 		state->duty_cycle = state->period;
 		state->period *= 2;
@@ -447,13 +433,15 @@ MODULE_DEVICE_TABLE(of, mchp_core_of_match);
 
 static int mchp_core_pwm_probe(struct platform_device *pdev)
 {
+	struct pwm_chip *chip;
 	struct mchp_core_pwm_chip *mchp_core_pwm;
 	struct resource *regs;
 	int ret;
 
-	mchp_core_pwm = devm_kzalloc(&pdev->dev, sizeof(*mchp_core_pwm), GFP_KERNEL);
-	if (!mchp_core_pwm)
-		return -ENOMEM;
+	chip = devm_pwmchip_alloc(&pdev->dev, 16, sizeof(*mchp_core_pwm));
+	if (IS_ERR(chip))
+		return PTR_ERR(chip);
+	mchp_core_pwm = to_mchp_core_pwm(chip);
 
 	mchp_core_pwm->base = devm_platform_get_and_ioremap_resource(pdev, 0, &regs);
 	if (IS_ERR(mchp_core_pwm->base))
@@ -468,11 +456,7 @@ static int mchp_core_pwm_probe(struct platform_device *pdev)
 				 &mchp_core_pwm->sync_update_mask))
 		mchp_core_pwm->sync_update_mask = 0;
 
-	mutex_init(&mchp_core_pwm->lock);
-
-	mchp_core_pwm->chip.dev = &pdev->dev;
-	mchp_core_pwm->chip.ops = &mchp_core_pwm_ops;
-	mchp_core_pwm->chip.npwm = 16;
+	chip->ops = &mchp_core_pwm_ops;
 
 	mchp_core_pwm->channel_enabled = readb_relaxed(mchp_core_pwm->base + MCHPCOREPWM_EN(0));
 	mchp_core_pwm->channel_enabled |=
@@ -485,7 +469,7 @@ static int mchp_core_pwm_probe(struct platform_device *pdev)
 	writel_relaxed(1U, mchp_core_pwm->base + MCHPCOREPWM_SYNC_UPD);
 	mchp_core_pwm->update_timestamp = ktime_get();
 
-	ret = devm_pwmchip_add(&pdev->dev, &mchp_core_pwm->chip);
+	ret = devm_pwmchip_add(&pdev->dev, chip);
 	if (ret)
 		return dev_err_probe(&pdev->dev, ret, "Failed to add pwmchip\n");
 

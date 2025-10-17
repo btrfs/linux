@@ -10,7 +10,7 @@
 #include <linux/netdevice.h>
 #include <linux/moduleparam.h>
 #include <net/net_namespace.h>
-#include <asm/unaligned.h>
+#include <linux/unaligned.h>
 #include "aoe.h"
 
 #define NECODES 5
@@ -63,6 +63,7 @@ tx(int id) __must_hold(&txlock)
 			pr_warn("aoe: packet could not be sent on %s.  %s\n",
 				ifp ? ifp->name : "netif",
 				"consider increasing tx_queue_len");
+		dev_put(ifp);
 		spin_lock_irq(&txlock);
 	}
 	return 0;

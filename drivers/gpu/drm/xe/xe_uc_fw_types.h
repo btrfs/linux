@@ -50,7 +50,8 @@ enum xe_uc_fw_status {
 	XE_UC_FIRMWARE_LOADABLE, /* all fw-required objects are ready */
 	XE_UC_FIRMWARE_LOAD_FAIL, /* failed to xfer or init/auth the fw */
 	XE_UC_FIRMWARE_TRANSFERRED, /* dma xfer done */
-	XE_UC_FIRMWARE_RUNNING /* init/auth done */
+	XE_UC_FIRMWARE_RUNNING, /* init/auth done */
+	XE_UC_FIRMWARE_PRELOADED, /* preloaded by the PF driver */
 };
 
 enum xe_uc_fw_type {
@@ -64,6 +65,8 @@ enum xe_uc_fw_type {
  * struct xe_uc_fw_version - Version for XE micro controller firmware
  */
 struct xe_uc_fw_version {
+	/** @branch: branch version of the FW (not always available) */
+	u16 branch;
 	/** @major: major version of the FW */
 	u16 major;
 	/** @minor: minor version of the FW */
@@ -91,7 +94,7 @@ struct xe_uc_fw {
 		const enum xe_uc_fw_status status;
 		/**
 		 * @__status: private firmware load status - only to be used
-		 * by firmware laoding code
+		 * by firmware loading code
 		 */
 		enum xe_uc_fw_status __status;
 	};
@@ -124,11 +127,14 @@ struct xe_uc_fw {
 
 	/** @versions: FW versions wanted and found */
 	struct {
-		/** @wanted: firmware version wanted by platform */
+		/** @versions.wanted: firmware version wanted by platform */
 		struct xe_uc_fw_version wanted;
-		/** @wanted_type: type of firmware version wanted (release vs compatibility) */
+		/**
+		 * @versions.wanted_type: type of firmware version wanted
+		 * (release vs compatibility)
+		 */
 		enum xe_uc_fw_version_types wanted_type;
-		/** @found: fw versions found in firmware blob */
+		/** @versions.found: fw versions found in firmware blob */
 		struct xe_uc_fw_version found[XE_UC_FW_VER_TYPE_COUNT];
 	} versions;
 
@@ -141,6 +147,9 @@ struct xe_uc_fw {
 
 	/** @private_data_size: size of private data found in uC css header */
 	u32 private_data_size;
+
+	/** @build_type: Firmware build type (see CSS_UKERNEL_INFO_BUILDTYPE for definitions) */
+	u32 build_type;
 };
 
 #endif

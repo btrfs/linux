@@ -102,7 +102,7 @@ match_fps:
 			break;
 	}
 	if (i == fan->fps_count) {
-		dev_dbg(&device->dev, "Invalid control value returned\n");
+		dev_dbg(&device->dev, "No matching fps control value\n");
 		return -EINVAL;
 	}
 
@@ -202,14 +202,6 @@ static const struct thermal_cooling_device_ops fan_cooling_ops = {
  *                               Driver Interface
  * --------------------------------------------------------------------------
 */
-
-static bool acpi_fan_is_acpi4(struct acpi_device *device)
-{
-	return acpi_has_method(device->handle, "_FIF") &&
-	       acpi_has_method(device->handle, "_FPS") &&
-	       acpi_has_method(device->handle, "_FSL") &&
-	       acpi_has_method(device->handle, "_FST");
-}
 
 static int acpi_fan_get_fif(struct acpi_device *device)
 {
@@ -327,7 +319,14 @@ static int acpi_fan_probe(struct platform_device *pdev)
 	device->driver_data = fan;
 	platform_set_drvdata(pdev, fan);
 
-	if (acpi_fan_is_acpi4(device)) {
+	if (acpi_has_method(device->handle, "_FST")) {
+		fan->has_fst = true;
+		fan->acpi4 = acpi_has_method(device->handle, "_FIF") &&
+				acpi_has_method(device->handle, "_FPS") &&
+				acpi_has_method(device->handle, "_FSL");
+	}
+
+	if (fan->acpi4) {
 		result = acpi_fan_get_fif(device);
 		if (result)
 			return result;
@@ -335,13 +334,19 @@ static int acpi_fan_probe(struct platform_device *pdev)
 		result = acpi_fan_get_fps(device);
 		if (result)
 			return result;
+	}
+
+	if (fan->has_fst) {
+		result = devm_acpi_fan_create_hwmon(device);
+		if (result)
+			return result;
 
 		result = acpi_fan_create_attributes(device);
 		if (result)
 			return result;
+	}
 
-		fan->acpi4 = true;
-	} else {
+	if (!fan->acpi4) {
 		result = acpi_device_update_power(device, NULL);
 		if (result) {
 			dev_err(&device->dev, "Failed to set initial power state\n");
@@ -367,31 +372,37 @@ static int acpi_fan_probe(struct platform_device *pdev)
 	result = sysfs_create_link(&pdev->dev.kobj,
 				   &cdev->device.kobj,
 				   "thermal_cooling");
-	if (result)
+	if (result) {
 		dev_err(&pdev->dev, "Failed to create sysfs link 'thermal_cooling'\n");
+		goto err_unregister;
+	}
 
 	result = sysfs_create_link(&cdev->device.kobj,
 				   &pdev->dev.kobj,
 				   "device");
 	if (result) {
 		dev_err(&pdev->dev, "Failed to create sysfs link 'device'\n");
-		goto err_end;
+		goto err_remove_link;
 	}
 
 	return 0;
 
+err_remove_link:
+	sysfs_remove_link(&pdev->dev.kobj, "thermal_cooling");
+err_unregister:
+	thermal_cooling_device_unregister(cdev);
 err_end:
-	if (fan->acpi4)
+	if (fan->has_fst)
 		acpi_fan_delete_attributes(device);
 
 	return result;
 }
 
-static int acpi_fan_remove(struct platform_device *pdev)
+static void acpi_fan_remove(struct platform_device *pdev)
 {
 	struct acpi_fan *fan = platform_get_drvdata(pdev);
 
-	if (fan->acpi4) {
+	if (fan->has_fst) {
 		struct acpi_device *device = ACPI_COMPANION(&pdev->dev);
 
 		acpi_fan_delete_attributes(device);
@@ -399,8 +410,6 @@ static int acpi_fan_remove(struct platform_device *pdev)
 	sysfs_remove_link(&pdev->dev.kobj, "thermal_cooling");
 	sysfs_remove_link(&fan->cdev->device.kobj, "device");
 	thermal_cooling_device_unregister(fan->cdev);
-
-	return 0;
 }
 
 #ifdef CONFIG_PM_SLEEP
