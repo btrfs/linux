@@ -3,6 +3,7 @@
 
 #include <uapi/linux/bpf.h>
 
+#include <linux/debugfs.h>
 #include <linux/inetdevice.h>
 #include <linux/etherdevice.h>
 #include <linux/ethtool.h>
@@ -12,6 +13,7 @@
 
 #include <net/checksum.h>
 #include <net/ip6_checksum.h>
+#include <net/netdev_lock.h>
 #include <net/page_pool/helpers.h>
 #include <net/xdp.h>
 
@@ -30,16 +32,33 @@ static void mana_adev_idx_free(int idx)
 	ida_free(&mana_adev_ida, idx);
 }
 
+static ssize_t mana_dbg_q_read(struct file *filp, char __user *buf, size_t count,
+			       loff_t *pos)
+{
+	struct gdma_queue *gdma_q = filp->private_data;
+
+	return simple_read_from_buffer(buf, count, pos, gdma_q->queue_mem_ptr,
+				       gdma_q->queue_size);
+}
+
+static const struct file_operations mana_dbg_q_fops = {
+	.owner  = THIS_MODULE,
+	.open   = simple_open,
+	.read   = mana_dbg_q_read,
+};
+
 /* Microsoft Azure Network Adapter (MANA) functions */
 
 static int mana_open(struct net_device *ndev)
 {
 	struct mana_port_context *apc = netdev_priv(ndev);
 	int err;
-
 	err = mana_alloc_queues(ndev);
-	if (err)
+
+	if (err) {
+		netdev_err(ndev, "%s failed to allocate queues: %d\n", __func__, err);
 		return err;
+	}
 
 	apc->port_is_up = true;
 
@@ -48,7 +67,7 @@ static int mana_open(struct net_device *ndev)
 
 	netif_carrier_on(ndev);
 	netif_tx_wake_all_queues(ndev);
-
+	netdev_dbg(ndev, "%s successful\n", __func__);
 	return 0;
 }
 
@@ -160,6 +179,9 @@ static int mana_map_skb(struct sk_buff *skb, struct mana_port_context *apc,
 	return 0;
 
 frag_err:
+	if (net_ratelimit())
+		netdev_err(apc->ndev, "Failed to map skb of size %u to DMA\n",
+			   skb->len);
 	for (i = sg_i - 1; i >= hsg; i--)
 		dma_unmap_page(dev, ash->dma_handle[i], ash->size[i],
 			       DMA_TO_DEVICE);
@@ -238,6 +260,9 @@ netdev_tx_t mana_start_xmit(struct sk_buff *skb, struct net_device *ndev)
 		goto tx_drop;
 
 	if (skb_cow_head(skb, MANA_HEADROOM))
+		goto tx_drop_count;
+
+	if (unlikely(ipv6_hopopt_jumbo_remove(skb)))
 		goto tx_drop_count;
 
 	txq = &apc->tx_qp[txq_idx].txq;
@@ -636,30 +661,16 @@ int mana_pre_alloc_rxbufs(struct mana_port_context *mpc, int new_mtu, int num_qu
 	mpc->rxbpre_total = 0;
 
 	for (i = 0; i < num_rxb; i++) {
-		if (mpc->rxbpre_alloc_size > PAGE_SIZE) {
-			va = netdev_alloc_frag(mpc->rxbpre_alloc_size);
-			if (!va)
-				goto error;
+		page = dev_alloc_pages(get_order(mpc->rxbpre_alloc_size));
+		if (!page)
+			goto error;
 
-			page = virt_to_head_page(va);
-			/* Check if the frag falls back to single page */
-			if (compound_order(page) <
-			    get_order(mpc->rxbpre_alloc_size)) {
-				put_page(page);
-				goto error;
-			}
-		} else {
-			page = dev_alloc_page();
-			if (!page)
-				goto error;
-
-			va = page_to_virt(page);
-		}
+		va = page_to_virt(page);
 
 		da = dma_map_single(dev, va + mpc->rxbpre_headroom,
 				    mpc->rxbpre_datasize, DMA_FROM_DEVICE);
 		if (dma_mapping_error(dev, da)) {
-			put_page(virt_to_head_page(va));
+			put_page(page);
 			goto error;
 		}
 
@@ -671,6 +682,7 @@ int mana_pre_alloc_rxbufs(struct mana_port_context *mpc, int new_mtu, int num_qu
 	return 0;
 
 error:
+	netdev_err(mpc->ndev, "Failed to pre-allocate RX buffers for %d queues\n", num_queues);
 	mana_pre_dealloc_rxbufs(mpc);
 	return -ENOMEM;
 }
@@ -721,6 +733,12 @@ static const struct net_device_ops mana_devops = {
 
 static void mana_cleanup_port_context(struct mana_port_context *apc)
 {
+	/*
+	 * make sure subsequent cleanup attempts don't end up removing already
+	 * cleaned dentry pointer
+	 */
+	debugfs_remove(apc->mana_port_debugfs);
+	apc->mana_port_debugfs = NULL;
 	kfree(apc->rxqs);
 	apc->rxqs = NULL;
 }
@@ -943,6 +961,8 @@ static int mana_query_device_cfg(struct mana_context *ac, u32 proto_major_ver,
 	else
 		gc->adapter_mtu = ETH_FRAME_LEN;
 
+	debugfs_create_u16("adapter-MTU", 0400, gc->mana_pci_debugfs, &gc->adapter_mtu);
+
 	return 0;
 }
 
@@ -997,7 +1017,7 @@ void mana_uncfg_vport(struct mana_port_context *apc)
 	WARN_ON(apc->vport_use_count < 0);
 	mutex_unlock(&apc->vport_mutex);
 }
-EXPORT_SYMBOL_NS(mana_uncfg_vport, NET_MANA);
+EXPORT_SYMBOL_NS(mana_uncfg_vport, "NET_MANA");
 
 int mana_cfg_vport(struct mana_port_context *apc, u32 protection_dom_id,
 		   u32 doorbell_pg_id)
@@ -1067,7 +1087,7 @@ out:
 
 	return err;
 }
-EXPORT_SYMBOL_NS(mana_cfg_vport, NET_MANA);
+EXPORT_SYMBOL_NS(mana_cfg_vport, "NET_MANA");
 
 static int mana_cfg_vport_steering(struct mana_port_context *apc,
 				   enum TRI_STATE rx,
@@ -1189,7 +1209,7 @@ int mana_create_wq_obj(struct mana_port_context *apc,
 out:
 	return err;
 }
-EXPORT_SYMBOL_NS(mana_create_wq_obj, NET_MANA);
+EXPORT_SYMBOL_NS(mana_create_wq_obj, "NET_MANA");
 
 void mana_destroy_wq_obj(struct mana_port_context *apc, u32 wq_type,
 			 mana_handle_t wq_obj)
@@ -1217,7 +1237,7 @@ void mana_destroy_wq_obj(struct mana_port_context *apc, u32 wq_type,
 		netdev_err(ndev, "Failed to destroy WQ object: %d, 0x%x\n", err,
 			   resp.hdr.status);
 }
-EXPORT_SYMBOL_NS(mana_destroy_wq_obj, NET_MANA);
+EXPORT_SYMBOL_NS(mana_destroy_wq_obj, "NET_MANA");
 
 static void mana_destroy_eq(struct mana_context *ac)
 {
@@ -1227,6 +1247,9 @@ static void mana_destroy_eq(struct mana_context *ac)
 
 	if (!ac->eqs)
 		return;
+
+	debugfs_remove_recursive(ac->mana_eqs_debugfs);
+	ac->mana_eqs_debugfs = NULL;
 
 	for (i = 0; i < gc->max_num_queues; i++) {
 		eq = ac->eqs[i].eq;
@@ -1238,6 +1261,18 @@ static void mana_destroy_eq(struct mana_context *ac)
 
 	kfree(ac->eqs);
 	ac->eqs = NULL;
+}
+
+static void mana_create_eq_debugfs(struct mana_context *ac, int i)
+{
+	struct mana_eq eq = ac->eqs[i];
+	char eqnum[32];
+
+	sprintf(eqnum, "eq%d", i);
+	eq.mana_eq_debugfs = debugfs_create_dir(eqnum, ac->mana_eqs_debugfs);
+	debugfs_create_u32("head", 0400, eq.mana_eq_debugfs, &eq.eq->head);
+	debugfs_create_u32("tail", 0400, eq.mana_eq_debugfs, &eq.eq->tail);
+	debugfs_create_file("eq_dump", 0400, eq.mana_eq_debugfs, eq.eq, &mana_dbg_q_fops);
 }
 
 static int mana_create_eq(struct mana_context *ac)
@@ -1260,11 +1295,16 @@ static int mana_create_eq(struct mana_context *ac)
 	spec.eq.context = ac->eqs;
 	spec.eq.log2_throttle_limit = LOG2_EQ_THROTTLE;
 
+	ac->mana_eqs_debugfs = debugfs_create_dir("EQs", gc->mana_pci_debugfs);
+
 	for (i = 0; i < gc->max_num_queues; i++) {
 		spec.eq.msix_index = (i + 1) % gc->num_msix_usable;
 		err = mana_gd_create_mana_eq(gd, &spec, &ac->eqs[i].eq);
-		if (err)
+		if (err) {
+			dev_err(gc->dev, "Failed to create EQ %d : %d\n", i, err);
 			goto out;
+		}
+		mana_create_eq_debugfs(ac, i);
 	}
 
 	return 0;
@@ -1505,8 +1545,12 @@ static struct sk_buff *mana_build_skb(struct mana_rxq *rxq, void *buf_va,
 		return NULL;
 
 	if (xdp->data_hard_start) {
+		u32 metasize = xdp->data - xdp->data_meta;
+
 		skb_reserve(skb, xdp->data - xdp->data_hard_start);
 		skb_put(skb, xdp->data_end - xdp->data);
+		if (metasize)
+			skb_metadata_set(skb, metasize);
 		return skb;
 	}
 
@@ -1618,7 +1662,7 @@ drop:
 }
 
 static void *mana_get_rxfrag(struct mana_rxq *rxq, struct device *dev,
-			     dma_addr_t *da, bool *from_pool, bool is_napi)
+			     dma_addr_t *da, bool *from_pool)
 {
 	struct page *page;
 	void *va;
@@ -1629,21 +1673,6 @@ static void *mana_get_rxfrag(struct mana_rxq *rxq, struct device *dev,
 	if (rxq->xdp_save_va) {
 		va = rxq->xdp_save_va;
 		rxq->xdp_save_va = NULL;
-	} else if (rxq->alloc_size > PAGE_SIZE) {
-		if (is_napi)
-			va = napi_alloc_frag(rxq->alloc_size);
-		else
-			va = netdev_alloc_frag(rxq->alloc_size);
-
-		if (!va)
-			return NULL;
-
-		page = virt_to_head_page(va);
-		/* Check if the frag falls back to single page */
-		if (compound_order(page) < get_order(rxq->alloc_size)) {
-			put_page(page);
-			return NULL;
-		}
 	} else {
 		page = page_pool_dev_alloc_pages(rxq->page_pool);
 		if (!page)
@@ -1676,7 +1705,7 @@ static void mana_refill_rx_oob(struct device *dev, struct mana_rxq *rxq,
 	dma_addr_t da;
 	void *va;
 
-	va = mana_get_rxfrag(rxq, dev, &da, &from_pool, true);
+	va = mana_get_rxfrag(rxq, dev, &da, &from_pool);
 	if (!va)
 		return;
 
@@ -1871,6 +1900,9 @@ static void mana_destroy_txq(struct mana_port_context *apc)
 		return;
 
 	for (i = 0; i < apc->num_queues; i++) {
+		debugfs_remove_recursive(apc->tx_qp[i].mana_tx_debugfs);
+		apc->tx_qp[i].mana_tx_debugfs = NULL;
+
 		napi = &apc->tx_qp[i].tx_cq.napi;
 		if (apc->tx_qp[i].txq.napi_initialized) {
 			napi_synchronize(napi);
@@ -1887,6 +1919,31 @@ static void mana_destroy_txq(struct mana_port_context *apc)
 
 	kfree(apc->tx_qp);
 	apc->tx_qp = NULL;
+}
+
+static void mana_create_txq_debugfs(struct mana_port_context *apc, int idx)
+{
+	struct mana_tx_qp *tx_qp = &apc->tx_qp[idx];
+	char qnum[32];
+
+	sprintf(qnum, "TX-%d", idx);
+	tx_qp->mana_tx_debugfs = debugfs_create_dir(qnum, apc->mana_port_debugfs);
+	debugfs_create_u32("sq_head", 0400, tx_qp->mana_tx_debugfs,
+			   &tx_qp->txq.gdma_sq->head);
+	debugfs_create_u32("sq_tail", 0400, tx_qp->mana_tx_debugfs,
+			   &tx_qp->txq.gdma_sq->tail);
+	debugfs_create_u32("sq_pend_skb_qlen", 0400, tx_qp->mana_tx_debugfs,
+			   &tx_qp->txq.pending_skbs.qlen);
+	debugfs_create_u32("cq_head", 0400, tx_qp->mana_tx_debugfs,
+			   &tx_qp->tx_cq.gdma_cq->head);
+	debugfs_create_u32("cq_tail", 0400, tx_qp->mana_tx_debugfs,
+			   &tx_qp->tx_cq.gdma_cq->tail);
+	debugfs_create_u32("cq_budget", 0400, tx_qp->mana_tx_debugfs,
+			   &tx_qp->tx_cq.budget);
+	debugfs_create_file("txq_dump", 0400, tx_qp->mana_tx_debugfs,
+			    tx_qp->txq.gdma_sq, &mana_dbg_q_fops);
+	debugfs_create_file("cq_dump", 0400, tx_qp->mana_tx_debugfs,
+			    tx_qp->tx_cq.gdma_cq, &mana_dbg_q_fops);
 }
 
 static int mana_create_txq(struct mana_port_context *apc,
@@ -2000,6 +2057,8 @@ static int mana_create_txq(struct mana_port_context *apc,
 
 		gc->cq_table[cq->gdma_id] = cq->gdma_cq;
 
+		mana_create_txq_debugfs(apc, i);
+
 		netif_napi_add_tx(net, &cq->napi, mana_poll);
 		napi_enable(&cq->napi);
 		txq->napi_initialized = true;
@@ -2009,6 +2068,8 @@ static int mana_create_txq(struct mana_port_context *apc,
 
 	return 0;
 out:
+	netdev_err(net, "Failed to create %d TX queues, %d\n",
+		   apc->num_queues, err);
 	mana_destroy_txq(apc);
 	return err;
 }
@@ -2026,6 +2087,9 @@ static void mana_destroy_rxq(struct mana_port_context *apc,
 
 	if (!rxq)
 		return;
+
+	debugfs_remove_recursive(rxq->mana_rx_debugfs);
+	rxq->mana_rx_debugfs = NULL;
 
 	napi = &rxq->rx_cq.napi;
 
@@ -2083,7 +2147,7 @@ static int mana_fill_rx_oob(struct mana_recv_buf_oob *rx_oob, u32 mem_key,
 	if (mpc->rxbufs_pre)
 		va = mana_get_rxbuf_pre(rxq, &da);
 	else
-		va = mana_get_rxfrag(rxq, dev, &da, &from_pool, false);
+		va = mana_get_rxfrag(rxq, dev, &da, &from_pool);
 
 	if (!va)
 		return -ENOMEM;
@@ -2169,6 +2233,7 @@ static int mana_create_page_pool(struct mana_rxq *rxq, struct gdma_context *gc)
 	pprm.nid = gc->numa_node;
 	pprm.napi = &rxq->rx_cq.napi;
 	pprm.netdev = rxq->ndev;
+	pprm.order = get_order(rxq->alloc_size);
 
 	rxq->page_pool = page_pool_create(&pprm);
 
@@ -2308,6 +2373,28 @@ out:
 	return NULL;
 }
 
+static void mana_create_rxq_debugfs(struct mana_port_context *apc, int idx)
+{
+	struct mana_rxq *rxq;
+	char qnum[32];
+
+	rxq = apc->rxqs[idx];
+
+	sprintf(qnum, "RX-%d", idx);
+	rxq->mana_rx_debugfs = debugfs_create_dir(qnum, apc->mana_port_debugfs);
+	debugfs_create_u32("rq_head", 0400, rxq->mana_rx_debugfs, &rxq->gdma_rq->head);
+	debugfs_create_u32("rq_tail", 0400, rxq->mana_rx_debugfs, &rxq->gdma_rq->tail);
+	debugfs_create_u32("rq_nbuf", 0400, rxq->mana_rx_debugfs, &rxq->num_rx_buf);
+	debugfs_create_u32("cq_head", 0400, rxq->mana_rx_debugfs,
+			   &rxq->rx_cq.gdma_cq->head);
+	debugfs_create_u32("cq_tail", 0400, rxq->mana_rx_debugfs,
+			   &rxq->rx_cq.gdma_cq->tail);
+	debugfs_create_u32("cq_budget", 0400, rxq->mana_rx_debugfs, &rxq->rx_cq.budget);
+	debugfs_create_file("rxq_dump", 0400, rxq->mana_rx_debugfs, rxq->gdma_rq, &mana_dbg_q_fops);
+	debugfs_create_file("cq_dump", 0400, rxq->mana_rx_debugfs, rxq->rx_cq.gdma_cq,
+			    &mana_dbg_q_fops);
+}
+
 static int mana_add_rx_queues(struct mana_port_context *apc,
 			      struct net_device *ndev)
 {
@@ -2320,12 +2407,15 @@ static int mana_add_rx_queues(struct mana_port_context *apc,
 		rxq = mana_create_rxq(apc, i, &ac->eqs[i], ndev);
 		if (!rxq) {
 			err = -ENOMEM;
+			netdev_err(ndev, "Failed to create rxq %d : %d\n", i, err);
 			goto out;
 		}
 
 		u64_stats_init(&rxq->stats.syncp);
 
 		apc->rxqs[i] = rxq;
+
+		mana_create_rxq_debugfs(apc, i);
 	}
 
 	apc->default_rxobj = apc->rxqs[0]->rxobj;
@@ -2439,6 +2529,7 @@ void mana_query_gf_stats(struct mana_port_context *apc)
 
 	mana_gd_init_req_hdr(&req.hdr, MANA_QUERY_GF_STAT,
 			     sizeof(req), sizeof(resp));
+	req.hdr.resp.msg_version = GDMA_MESSAGE_V2;
 	req.req_stats = STATISTICS_FLAGS_RX_DISCARDS_NO_WQE |
 			STATISTICS_FLAGS_RX_ERRORS_VPORT_DISABLED |
 			STATISTICS_FLAGS_HC_RX_BYTES |
@@ -2518,13 +2609,18 @@ void mana_query_gf_stats(struct mana_port_context *apc)
 static int mana_init_port(struct net_device *ndev)
 {
 	struct mana_port_context *apc = netdev_priv(ndev);
+	struct gdma_dev *gd = apc->ac->gdma_dev;
 	u32 max_txq, max_rxq, max_queues;
 	int port_idx = apc->port_idx;
+	struct gdma_context *gc;
+	char vport[32];
 	int err;
 
 	err = mana_init_port_context(apc);
 	if (err)
 		return err;
+
+	gc = gd->gdma_context;
 
 	err = mana_query_vport_cfg(apc, port_idx, &max_txq, &max_rxq,
 				   &apc->indir_table_sz);
@@ -2542,7 +2638,8 @@ static int mana_init_port(struct net_device *ndev)
 		apc->num_queues = apc->max_queues;
 
 	eth_hw_addr_set(ndev, apc->mac_addr);
-
+	sprintf(vport, "vport%d", port_idx);
+	apc->mana_port_debugfs = debugfs_create_dir(vport, gc->mana_pci_debugfs);
 	return 0;
 
 reset_apc:
@@ -2557,12 +2654,18 @@ int mana_alloc_queues(struct net_device *ndev)
 	int err;
 
 	err = mana_create_vport(apc, ndev);
-	if (err)
+	if (err) {
+		netdev_err(ndev, "Failed to create vPort %u : %d\n", apc->port_idx, err);
 		return err;
+	}
 
 	err = netif_set_real_num_tx_queues(ndev, apc->num_queues);
-	if (err)
+	if (err) {
+		netdev_err(ndev,
+			   "netif_set_real_num_tx_queues () failed for ndev with num_queues %u : %d\n",
+			   apc->num_queues, err);
 		goto destroy_vport;
+	}
 
 	err = mana_add_rx_queues(apc, ndev);
 	if (err)
@@ -2571,14 +2674,20 @@ int mana_alloc_queues(struct net_device *ndev)
 	apc->rss_state = apc->num_queues > 1 ? TRI_STATE_TRUE : TRI_STATE_FALSE;
 
 	err = netif_set_real_num_rx_queues(ndev, apc->num_queues);
-	if (err)
+	if (err) {
+		netdev_err(ndev,
+			   "netif_set_real_num_rx_queues () failed for ndev with num_queues %u : %d\n",
+			   apc->num_queues, err);
 		goto destroy_vport;
+	}
 
 	mana_rss_table_init(apc);
 
 	err = mana_config_rss(apc, TRI_STATE_TRUE, true, true);
-	if (err)
+	if (err) {
+		netdev_err(ndev, "Failed to configure RSS table: %d\n", err);
 		goto destroy_vport;
+	}
 
 	if (gd->gdma_context->is_pf) {
 		err = mana_pf_register_filter(apc);
@@ -2719,8 +2828,10 @@ int mana_detach(struct net_device *ndev, bool from_close)
 
 	if (apc->port_st_save) {
 		err = mana_dealloc_queues(ndev);
-		if (err)
+		if (err) {
+			netdev_err(ndev, "%s failed to deallocate queues: %d\n", __func__, err);
 			return err;
+		}
 	}
 
 	if (!from_close) {
@@ -2768,6 +2879,8 @@ static int mana_probe_port(struct mana_context *ac, int port_idx,
 	ndev->needed_headroom = MANA_HEADROOM;
 	ndev->dev_port = port_idx;
 	SET_NETDEV_DEV(ndev, gc->dev);
+
+	netif_set_tso_max_size(ndev, GSO_MAX_SIZE);
 
 	netif_carrier_off(ndev);
 
@@ -2864,6 +2977,8 @@ static int add_adev(struct gdma_dev *gd)
 		goto add_fail;
 
 	gd->adev = adev;
+	dev_dbg(gd->gdma_context->dev,
+		"Auxiliary device added successfully\n");
 	return 0;
 
 add_fail:
@@ -2905,8 +3020,10 @@ int mana_probe(struct gdma_dev *gd, bool resuming)
 	}
 
 	err = mana_create_eq(ac);
-	if (err)
+	if (err) {
+		dev_err(dev, "Failed to create EQs: %d\n", err);
 		goto out;
+	}
 
 	err = mana_query_device_cfg(ac, MANA_MAJOR_VERSION, MANA_MINOR_VERSION,
 				    MANA_MICRO_VERSION, &num_ports);
@@ -2962,8 +3079,14 @@ int mana_probe(struct gdma_dev *gd, bool resuming)
 
 	err = add_adev(gd);
 out:
-	if (err)
+	if (err) {
 		mana_remove(gd, false);
+	} else {
+		dev_dbg(dev, "gd=%p, id=%u, num_ports=%d, type=%u, instance=%u\n",
+			gd, gd->dev_id.as_uint32, ac->num_ports,
+			gd->dev_id.type, gd->dev_id.instance);
+		dev_dbg(dev, "%s succeeded\n", __func__);
+	}
 
 	return err;
 }
@@ -3025,23 +3148,30 @@ out:
 	gd->driver_data = NULL;
 	gd->gdma_context = NULL;
 	kfree(ac);
+	dev_dbg(dev, "%s succeeded\n", __func__);
 }
 
-struct net_device *mana_get_primary_netdev_rcu(struct mana_context *ac, u32 port_index)
+struct net_device *mana_get_primary_netdev(struct mana_context *ac,
+					   u32 port_index,
+					   netdevice_tracker *tracker)
 {
 	struct net_device *ndev;
 
-	RCU_LOCKDEP_WARN(!rcu_read_lock_held(),
-			 "Taking primary netdev without holding the RCU read lock");
 	if (port_index >= ac->num_ports)
 		return NULL;
 
-	/* When mana is used in netvsc, the upper netdevice should be returned. */
-	if (ac->ports[port_index]->flags & IFF_SLAVE)
-		ndev = netdev_master_upper_dev_get_rcu(ac->ports[port_index]);
-	else
+	rcu_read_lock();
+
+	/* If mana is used in netvsc, the upper netdevice should be returned. */
+	ndev = netdev_master_upper_dev_get_rcu(ac->ports[port_index]);
+
+	/* If there is no upper device, use the parent Ethernet device */
+	if (!ndev)
 		ndev = ac->ports[port_index];
+
+	netdev_hold(ndev, tracker, GFP_ATOMIC);
+	rcu_read_unlock();
 
 	return ndev;
 }
-EXPORT_SYMBOL_NS(mana_get_primary_netdev_rcu, NET_MANA);
+EXPORT_SYMBOL_NS(mana_get_primary_netdev, "NET_MANA");

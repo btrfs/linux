@@ -726,7 +726,7 @@ static int xive_irq_set_affinity(struct irq_data *d,
 	pr_debug("%s: irq %d/0x%x\n", __func__, d->irq, hw_irq);
 
 	/* Is this valid ? */
-	if (cpumask_any_and(cpumask, cpu_online_mask) >= nr_cpu_ids)
+	if (!cpumask_intersects(cpumask, cpu_online_mask))
 		return -EINVAL;
 
 	/*
@@ -1467,7 +1467,7 @@ static void __init xive_init_host(struct device_node *np)
 	xive_irq_domain = irq_domain_add_tree(np, &xive_irq_domain_ops, NULL);
 	if (WARN_ON(xive_irq_domain == NULL))
 		return;
-	irq_set_default_host(xive_irq_domain);
+	irq_set_default_domain(xive_irq_domain);
 }
 
 static void xive_cleanup_cpu_queues(unsigned int cpu, struct xive_cpu *xc)

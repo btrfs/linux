@@ -194,25 +194,35 @@ static ssize_t mode_show(struct device *dev, struct device_attribute *attr,
 			 char *buf)
 {
 	struct cxl_endpoint_decoder *cxled = to_cxl_endpoint_decoder(dev);
+	struct cxl_memdev *cxlmd = cxled_to_memdev(cxled);
+	struct cxl_dev_state *cxlds = cxlmd->cxlds;
+	/* without @cxl_dpa_rwsem, make sure @part is not reloaded */
+	int part = READ_ONCE(cxled->part);
+	const char *desc;
 
-	return sysfs_emit(buf, "%s\n", cxl_decoder_mode_name(cxled->mode));
+	if (part < 0)
+		desc = "none";
+	else
+		desc = cxlds->part[part].res.name;
+
+	return sysfs_emit(buf, "%s\n", desc);
 }
 
 static ssize_t mode_store(struct device *dev, struct device_attribute *attr,
 			  const char *buf, size_t len)
 {
 	struct cxl_endpoint_decoder *cxled = to_cxl_endpoint_decoder(dev);
-	enum cxl_decoder_mode mode;
+	enum cxl_partition_mode mode;
 	ssize_t rc;
 
 	if (sysfs_streq(buf, "pmem"))
-		mode = CXL_DECODER_PMEM;
+		mode = CXL_PARTMODE_PMEM;
 	else if (sysfs_streq(buf, "ram"))
-		mode = CXL_DECODER_RAM;
+		mode = CXL_PARTMODE_RAM;
 	else
 		return -EINVAL;
 
-	rc = cxl_dpa_set_mode(cxled, mode);
+	rc = cxl_dpa_set_part(cxled, mode);
 	if (rc)
 		return rc;
 
@@ -437,7 +447,7 @@ struct cxl_root_decoder *to_cxl_root_decoder(struct device *dev)
 		return NULL;
 	return container_of(dev, struct cxl_root_decoder, cxlsd.cxld.dev);
 }
-EXPORT_SYMBOL_NS_GPL(to_cxl_root_decoder, CXL);
+EXPORT_SYMBOL_NS_GPL(to_cxl_root_decoder, "CXL");
 
 static void cxl_root_decoder_release(struct device *dev)
 {
@@ -471,19 +481,19 @@ bool is_endpoint_decoder(struct device *dev)
 {
 	return dev->type == &cxl_decoder_endpoint_type;
 }
-EXPORT_SYMBOL_NS_GPL(is_endpoint_decoder, CXL);
+EXPORT_SYMBOL_NS_GPL(is_endpoint_decoder, "CXL");
 
 bool is_root_decoder(struct device *dev)
 {
 	return dev->type == &cxl_decoder_root_type;
 }
-EXPORT_SYMBOL_NS_GPL(is_root_decoder, CXL);
+EXPORT_SYMBOL_NS_GPL(is_root_decoder, "CXL");
 
 bool is_switch_decoder(struct device *dev)
 {
 	return is_root_decoder(dev) || dev->type == &cxl_decoder_switch_type;
 }
-EXPORT_SYMBOL_NS_GPL(is_switch_decoder, CXL);
+EXPORT_SYMBOL_NS_GPL(is_switch_decoder, "CXL");
 
 struct cxl_decoder *to_cxl_decoder(struct device *dev)
 {
@@ -493,7 +503,7 @@ struct cxl_decoder *to_cxl_decoder(struct device *dev)
 		return NULL;
 	return container_of(dev, struct cxl_decoder, dev);
 }
-EXPORT_SYMBOL_NS_GPL(to_cxl_decoder, CXL);
+EXPORT_SYMBOL_NS_GPL(to_cxl_decoder, "CXL");
 
 struct cxl_endpoint_decoder *to_cxl_endpoint_decoder(struct device *dev)
 {
@@ -502,7 +512,7 @@ struct cxl_endpoint_decoder *to_cxl_endpoint_decoder(struct device *dev)
 		return NULL;
 	return container_of(dev, struct cxl_endpoint_decoder, cxld.dev);
 }
-EXPORT_SYMBOL_NS_GPL(to_cxl_endpoint_decoder, CXL);
+EXPORT_SYMBOL_NS_GPL(to_cxl_endpoint_decoder, "CXL");
 
 struct cxl_switch_decoder *to_cxl_switch_decoder(struct device *dev)
 {
@@ -511,7 +521,7 @@ struct cxl_switch_decoder *to_cxl_switch_decoder(struct device *dev)
 		return NULL;
 	return container_of(dev, struct cxl_switch_decoder, cxld.dev);
 }
-EXPORT_SYMBOL_NS_GPL(to_cxl_switch_decoder, CXL);
+EXPORT_SYMBOL_NS_GPL(to_cxl_switch_decoder, "CXL");
 
 static void cxl_ep_release(struct cxl_ep *ep)
 {
@@ -549,13 +559,9 @@ static ssize_t decoders_committed_show(struct device *dev,
 				       struct device_attribute *attr, char *buf)
 {
 	struct cxl_port *port = to_cxl_port(dev);
-	int rc;
 
-	down_read(&cxl_region_rwsem);
-	rc = sysfs_emit(buf, "%d\n", cxl_num_decoders_committed(port));
-	up_read(&cxl_region_rwsem);
-
-	return rc;
+	guard(rwsem_read)(&cxl_region_rwsem);
+	return sysfs_emit(buf, "%d\n", cxl_num_decoders_committed(port));
 }
 
 static DEVICE_ATTR_RO(decoders_committed);
@@ -585,7 +591,7 @@ bool is_cxl_port(const struct device *dev)
 {
 	return dev->type == &cxl_port_type;
 }
-EXPORT_SYMBOL_NS_GPL(is_cxl_port, CXL);
+EXPORT_SYMBOL_NS_GPL(is_cxl_port, "CXL");
 
 struct cxl_port *to_cxl_port(const struct device *dev)
 {
@@ -594,7 +600,7 @@ struct cxl_port *to_cxl_port(const struct device *dev)
 		return NULL;
 	return container_of(dev, struct cxl_port, dev);
 }
-EXPORT_SYMBOL_NS_GPL(to_cxl_port, CXL);
+EXPORT_SYMBOL_NS_GPL(to_cxl_port, "CXL");
 
 static void unregister_port(void *_port)
 {
@@ -942,7 +948,7 @@ struct cxl_port *devm_cxl_add_port(struct device *host,
 
 	return port;
 }
-EXPORT_SYMBOL_NS_GPL(devm_cxl_add_port, CXL);
+EXPORT_SYMBOL_NS_GPL(devm_cxl_add_port, "CXL");
 
 struct cxl_root *devm_cxl_add_root(struct device *host,
 				   const struct cxl_root_ops *ops)
@@ -958,7 +964,7 @@ struct cxl_root *devm_cxl_add_root(struct device *host,
 	cxl_root->ops = ops;
 	return cxl_root;
 }
-EXPORT_SYMBOL_NS_GPL(devm_cxl_add_root, CXL);
+EXPORT_SYMBOL_NS_GPL(devm_cxl_add_root, "CXL");
 
 struct pci_bus *cxl_port_to_pci_bus(struct cxl_port *port)
 {
@@ -974,7 +980,7 @@ struct pci_bus *cxl_port_to_pci_bus(struct cxl_port *port)
 
 	return xa_load(&cxl_root_buses, (unsigned long)port->uport_dev);
 }
-EXPORT_SYMBOL_NS_GPL(cxl_port_to_pci_bus, CXL);
+EXPORT_SYMBOL_NS_GPL(cxl_port_to_pci_bus, "CXL");
 
 static void unregister_pci_bus(void *uport_dev)
 {
@@ -995,7 +1001,7 @@ int devm_cxl_register_pci_bus(struct device *host, struct device *uport_dev,
 		return rc;
 	return devm_add_action_or_reset(host, unregister_pci_bus, uport_dev);
 }
-EXPORT_SYMBOL_NS_GPL(devm_cxl_register_pci_bus, CXL);
+EXPORT_SYMBOL_NS_GPL(devm_cxl_register_pci_bus, "CXL");
 
 static bool dev_is_cxl_root_child(struct device *dev)
 {
@@ -1027,7 +1033,7 @@ struct cxl_root *find_cxl_root(struct cxl_port *port)
 	get_device(&iter->dev);
 	return to_cxl_root(iter);
 }
-EXPORT_SYMBOL_NS_GPL(find_cxl_root, CXL);
+EXPORT_SYMBOL_NS_GPL(find_cxl_root, "CXL");
 
 void put_cxl_root(struct cxl_root *cxl_root)
 {
@@ -1036,7 +1042,7 @@ void put_cxl_root(struct cxl_root *cxl_root)
 
 	put_device(&cxl_root->port.dev);
 }
-EXPORT_SYMBOL_NS_GPL(put_cxl_root, CXL);
+EXPORT_SYMBOL_NS_GPL(put_cxl_root, "CXL");
 
 static struct cxl_dport *find_dport(struct cxl_port *port, int id)
 {
@@ -1230,7 +1236,7 @@ struct cxl_dport *devm_cxl_add_dport(struct cxl_port *port,
 
 	return dport;
 }
-EXPORT_SYMBOL_NS_GPL(devm_cxl_add_dport, CXL);
+EXPORT_SYMBOL_NS_GPL(devm_cxl_add_dport, "CXL");
 
 /**
  * devm_cxl_add_rch_dport - append RCH downstream port data to a cxl_port
@@ -1264,7 +1270,7 @@ struct cxl_dport *devm_cxl_add_rch_dport(struct cxl_port *port,
 
 	return dport;
 }
-EXPORT_SYMBOL_NS_GPL(devm_cxl_add_rch_dport, CXL);
+EXPORT_SYMBOL_NS_GPL(devm_cxl_add_rch_dport, "CXL");
 
 static int add_ep(struct cxl_ep *new)
 {
@@ -1421,7 +1427,7 @@ int cxl_endpoint_autoremove(struct cxl_memdev *cxlmd, struct cxl_port *endpoint)
 	cxlmd->depth = endpoint->depth;
 	return devm_add_action_or_reset(dev, delete_endpoint, cxlmd);
 }
-EXPORT_SYMBOL_NS_GPL(cxl_endpoint_autoremove, CXL);
+EXPORT_SYMBOL_NS_GPL(cxl_endpoint_autoremove, "CXL");
 
 /*
  * The natural end of life of a non-root 'cxl_port' is when its parent port goes
@@ -1672,6 +1678,8 @@ retry:
 			if (rc && rc != -EBUSY)
 				return rc;
 
+			cxl_gpf_port_setup(dport_dev, port);
+
 			/* Any more ports to add between this one and the root? */
 			if (!dev_is_cxl_root_child(&port->dev))
 				continue;
@@ -1692,21 +1700,21 @@ retry:
 
 	return 0;
 }
-EXPORT_SYMBOL_NS_GPL(devm_cxl_enumerate_ports, CXL);
+EXPORT_SYMBOL_NS_GPL(devm_cxl_enumerate_ports, "CXL");
 
 struct cxl_port *cxl_pci_find_port(struct pci_dev *pdev,
 				   struct cxl_dport **dport)
 {
 	return find_cxl_port(pdev->dev.parent, dport);
 }
-EXPORT_SYMBOL_NS_GPL(cxl_pci_find_port, CXL);
+EXPORT_SYMBOL_NS_GPL(cxl_pci_find_port, "CXL");
 
 struct cxl_port *cxl_mem_find_port(struct cxl_memdev *cxlmd,
 				   struct cxl_dport **dport)
 {
 	return find_cxl_port(grandparent(&cxlmd->dev), dport);
 }
-EXPORT_SYMBOL_NS_GPL(cxl_mem_find_port, CXL);
+EXPORT_SYMBOL_NS_GPL(cxl_mem_find_port, "CXL");
 
 static int decoder_populate_targets(struct cxl_switch_decoder *cxlsd,
 				    struct cxl_port *port, int *target_map)
@@ -1840,7 +1848,7 @@ struct cxl_root_decoder *cxl_root_decoder_alloc(struct cxl_port *port,
 	cxlrd->qos_class = CXL_QOS_CLASS_INVALID;
 	return cxlrd;
 }
-EXPORT_SYMBOL_NS_GPL(cxl_root_decoder_alloc, CXL);
+EXPORT_SYMBOL_NS_GPL(cxl_root_decoder_alloc, "CXL");
 
 /**
  * cxl_switch_decoder_alloc - Allocate a switch level decoder
@@ -1877,7 +1885,7 @@ struct cxl_switch_decoder *cxl_switch_decoder_alloc(struct cxl_port *port,
 	cxld->dev.type = &cxl_decoder_switch_type;
 	return cxlsd;
 }
-EXPORT_SYMBOL_NS_GPL(cxl_switch_decoder_alloc, CXL);
+EXPORT_SYMBOL_NS_GPL(cxl_switch_decoder_alloc, "CXL");
 
 /**
  * cxl_endpoint_decoder_alloc - Allocate an endpoint decoder
@@ -1899,6 +1907,7 @@ struct cxl_endpoint_decoder *cxl_endpoint_decoder_alloc(struct cxl_port *port)
 		return ERR_PTR(-ENOMEM);
 
 	cxled->pos = -1;
+	cxled->part = -1;
 	cxld = &cxled->cxld;
 	rc = cxl_decoder_init(port, cxld);
 	if (rc)	 {
@@ -1909,7 +1918,7 @@ struct cxl_endpoint_decoder *cxl_endpoint_decoder_alloc(struct cxl_port *port)
 	cxld->dev.type = &cxl_decoder_endpoint_type;
 	return cxled;
 }
-EXPORT_SYMBOL_NS_GPL(cxl_endpoint_decoder_alloc, CXL);
+EXPORT_SYMBOL_NS_GPL(cxl_endpoint_decoder_alloc, "CXL");
 
 /**
  * cxl_decoder_add_locked - Add a decoder with targets
@@ -1965,7 +1974,7 @@ int cxl_decoder_add_locked(struct cxl_decoder *cxld, int *target_map)
 
 	return device_add(dev);
 }
-EXPORT_SYMBOL_NS_GPL(cxl_decoder_add_locked, CXL);
+EXPORT_SYMBOL_NS_GPL(cxl_decoder_add_locked, "CXL");
 
 /**
  * cxl_decoder_add - Add a decoder with targets
@@ -1995,7 +2004,7 @@ int cxl_decoder_add(struct cxl_decoder *cxld, int *target_map)
 	guard(device)(&port->dev);
 	return cxl_decoder_add_locked(cxld, target_map);
 }
-EXPORT_SYMBOL_NS_GPL(cxl_decoder_add, CXL);
+EXPORT_SYMBOL_NS_GPL(cxl_decoder_add, "CXL");
 
 static void cxld_unregister(void *dev)
 {
@@ -2013,7 +2022,7 @@ int cxl_decoder_autoremove(struct device *host, struct cxl_decoder *cxld)
 {
 	return devm_add_action_or_reset(host, cxld_unregister, &cxld->dev);
 }
-EXPORT_SYMBOL_NS_GPL(cxl_decoder_autoremove, CXL);
+EXPORT_SYMBOL_NS_GPL(cxl_decoder_autoremove, "CXL");
 
 /**
  * __cxl_driver_register - register a driver for the cxl bus
@@ -2046,13 +2055,13 @@ int __cxl_driver_register(struct cxl_driver *cxl_drv, struct module *owner,
 
 	return driver_register(&cxl_drv->drv);
 }
-EXPORT_SYMBOL_NS_GPL(__cxl_driver_register, CXL);
+EXPORT_SYMBOL_NS_GPL(__cxl_driver_register, "CXL");
 
 void cxl_driver_unregister(struct cxl_driver *cxl_drv)
 {
 	driver_unregister(&cxl_drv->drv);
 }
-EXPORT_SYMBOL_NS_GPL(cxl_driver_unregister, CXL);
+EXPORT_SYMBOL_NS_GPL(cxl_driver_unregister, "CXL");
 
 static int cxl_bus_uevent(const struct device *dev, struct kobj_uevent_env *env)
 {
@@ -2104,19 +2113,19 @@ void cxl_bus_rescan(void)
 
 	queue_work(cxl_bus_wq, &rescan_work);
 }
-EXPORT_SYMBOL_NS_GPL(cxl_bus_rescan, CXL);
+EXPORT_SYMBOL_NS_GPL(cxl_bus_rescan, "CXL");
 
 void cxl_bus_drain(void)
 {
 	drain_workqueue(cxl_bus_wq);
 }
-EXPORT_SYMBOL_NS_GPL(cxl_bus_drain, CXL);
+EXPORT_SYMBOL_NS_GPL(cxl_bus_drain, "CXL");
 
 bool schedule_cxl_memdev_detach(struct cxl_memdev *cxlmd)
 {
 	return queue_work(cxl_bus_wq, &cxlmd->detach_work);
 }
-EXPORT_SYMBOL_NS_GPL(schedule_cxl_memdev_detach, CXL);
+EXPORT_SYMBOL_NS_GPL(schedule_cxl_memdev_detach, "CXL");
 
 static void add_latency(struct access_coordinate *c, long latency)
 {
@@ -2242,7 +2251,7 @@ int cxl_endpoint_get_perf_coordinates(struct cxl_port *port,
 
 	return 0;
 }
-EXPORT_SYMBOL_NS_GPL(cxl_endpoint_get_perf_coordinates, CXL);
+EXPORT_SYMBOL_NS_GPL(cxl_endpoint_get_perf_coordinates, "CXL");
 
 int cxl_port_get_switch_dport_bandwidth(struct cxl_port *port,
 					struct access_coordinate *c)
@@ -2299,7 +2308,7 @@ struct bus_type cxl_bus_type = {
 	.remove = cxl_bus_remove,
 	.bus_groups = cxl_bus_attribute_groups,
 };
-EXPORT_SYMBOL_NS_GPL(cxl_bus_type, CXL);
+EXPORT_SYMBOL_NS_GPL(cxl_bus_type, "CXL");
 
 static struct dentry *cxl_debugfs;
 
@@ -2307,7 +2316,7 @@ struct dentry *cxl_debugfs_create_dir(const char *dir)
 {
 	return debugfs_create_dir(dir, cxl_debugfs);
 }
-EXPORT_SYMBOL_NS_GPL(cxl_debugfs_create_dir, CXL);
+EXPORT_SYMBOL_NS_GPL(cxl_debugfs_create_dir, "CXL");
 
 static __init int cxl_core_init(void)
 {
@@ -2339,8 +2348,14 @@ static __init int cxl_core_init(void)
 	if (rc)
 		goto err_region;
 
+	rc = cxl_ras_init();
+	if (rc)
+		goto err_ras;
+
 	return 0;
 
+err_ras:
+	cxl_region_exit();
 err_region:
 	bus_unregister(&cxl_bus_type);
 err_bus:
@@ -2352,6 +2367,7 @@ err_wq:
 
 static void cxl_core_exit(void)
 {
+	cxl_ras_exit();
 	cxl_region_exit();
 	bus_unregister(&cxl_bus_type);
 	destroy_workqueue(cxl_bus_wq);
@@ -2363,4 +2379,4 @@ subsys_initcall(cxl_core_init);
 module_exit(cxl_core_exit);
 MODULE_DESCRIPTION("CXL: Core Compute Express Link support");
 MODULE_LICENSE("GPL v2");
-MODULE_IMPORT_NS(CXL);
+MODULE_IMPORT_NS("CXL");

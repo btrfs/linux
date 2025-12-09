@@ -802,8 +802,6 @@ static umode_t arm_cmn_event_attr_is_visible(struct kobject *kobj,
 	CMN_EVENT_ATTR(_model, ccha_##_name, CMN_TYPE_CCHA, _event)
 #define CMN_EVENT_CCLA(_name, _event)				\
 	CMN_EVENT_ATTR(CMN_ANY, ccla_##_name, CMN_TYPE_CCLA, _event)
-#define CMN_EVENT_CCLA_RNI(_name, _event)				\
-	CMN_EVENT_ATTR(CMN_ANY, ccla_rni_##_name, CMN_TYPE_CCLA_RNI, _event)
 #define CMN_EVENT_HNS(_name, _event)				\
 	CMN_EVENT_ATTR(CMN_ANY, hns_##_name, CMN_TYPE_HNS, _event)
 
@@ -1713,8 +1711,8 @@ static int arm_cmn_validate_group(struct arm_cmn *cmn, struct perf_event *event)
 		goto done;
 	}
 
-	for (i = 0; i < CMN_MAX_DTCS; i++)
-		if (val->dtc_count[i] == CMN_DT_NUM_COUNTERS)
+	for_each_hw_dtc_idx(hw, dtc, idx)
+		if (val->dtc_count[dtc] == CMN_DT_NUM_COUNTERS)
 			goto done;
 
 	for_each_hw_dn(hw, dn, i) {
@@ -1798,6 +1796,9 @@ static int arm_cmn_event_init(struct perf_event *event)
 	} else if (type == CMN_TYPE_XP &&
 		   (cmn->part == PART_CMN700 || cmn->part == PART_CMN_S3)) {
 		hw->wide_sel = true;
+	} else if (type == CMN_TYPE_RND) {
+		/* Secretly permit this as an alias for "rnid" events */
+		type = CMN_TYPE_RNI;
 	}
 
 	/* This is sufficiently annoying to recalculate, so cache it */
@@ -2178,8 +2179,6 @@ static int arm_cmn_init_dtcs(struct arm_cmn *cmn)
 			continue;
 
 		xp = arm_cmn_node_to_xp(cmn, dn);
-		dn->portid_bits = xp->portid_bits;
-		dn->deviceid_bits = xp->deviceid_bits;
 		dn->dtc = xp->dtc;
 		dn->dtm = xp->dtm;
 		if (cmn->multi_dtm)
@@ -2420,6 +2419,8 @@ static int arm_cmn_discover(struct arm_cmn *cmn, unsigned int rgn_offset)
 			}
 
 			arm_cmn_init_node_info(cmn, reg & CMN_CHILD_NODE_ADDR, dn);
+			dn->portid_bits = xp->portid_bits;
+			dn->deviceid_bits = xp->deviceid_bits;
 
 			switch (dn->type) {
 			case CMN_TYPE_DTC:
@@ -2662,7 +2663,7 @@ static struct platform_driver arm_cmn_driver = {
 		.acpi_match_table = ACPI_PTR(arm_cmn_acpi_match),
 	},
 	.probe = arm_cmn_probe,
-	.remove_new = arm_cmn_remove,
+	.remove = arm_cmn_remove,
 };
 
 static int __init arm_cmn_init(void)

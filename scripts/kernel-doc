@@ -26,7 +26,7 @@ kernel-doc - Print formatted kernel documentation to stdout
 
  kernel-doc [-h] [-v] [-Werror] [-Wall] [-Wreturn] [-Wshort-desc[ription]] [-Wcontents-before-sections]
    [ -man |
-     -rst [-sphinx-version VERSION] [-enable-lineno] |
+     -rst [-enable-lineno] |
      -none
    ]
    [
@@ -130,7 +130,6 @@ if ($#ARGV == -1) {
 }
 
 my $kernelversion;
-my ($sphinx_major, $sphinx_minor, $sphinx_patch);
 
 my $dohighlight = "";
 
@@ -138,7 +137,6 @@ my $verbose = 0;
 my $Werror = 0;
 my $Wreturn = 0;
 my $Wshort_desc = 0;
-my $Wcontents_before_sections = 0;
 my $output_mode = "rst";
 my $output_preformatted = 0;
 my $no_doc_sections = 0;
@@ -160,7 +158,7 @@ my @export_file_list;
 
 my @build_time;
 if (defined($ENV{'KBUILD_BUILD_TIMESTAMP'}) &&
-    (my $seconds = `date -d"${ENV{'KBUILD_BUILD_TIMESTAMP'}}" +%s`) ne '') {
+    (my $seconds = `date -d "${ENV{'KBUILD_BUILD_TIMESTAMP'}}" +%s`) ne '') {
     @build_time = gmtime($seconds);
 } else {
     @build_time = localtime;
@@ -179,7 +177,7 @@ my ($function, %function_table, %parametertypes, $declaration_purpose);
 my %nosymbol_table = ();
 my $declaration_start_line;
 my ($type, $declaration_name, $return_type);
-my ($newsection, $newcontents, $prototype, $brcount, %source_map);
+my ($newsection, $newcontents, $prototype, $brcount);
 
 if (defined($ENV{'KBUILD_VERBOSE'}) && $ENV{'KBUILD_VERBOSE'} =~ '1') {
     $verbose = 1;
@@ -224,7 +222,6 @@ use constant {
     STATE_INLINE        => 7,        # gathering doc outside main block
 };
 my $state;
-my $in_doc_sect;
 my $leading_space;
 
 # Inline documentation state
@@ -267,7 +264,7 @@ my $doc_inline_sect = '\s*\*\s*(@\s*[\w][\w\.]*\s*):(.*)';
 my $doc_inline_end = '^\s*\*/\s*$';
 my $doc_inline_oneline = '^\s*/\*\*\s*(@[\w\s]+):\s*(.*)\s*\*/\s*$';
 my $export_symbol = '^\s*EXPORT_SYMBOL(_GPL)?\s*\(\s*(\w+)\s*\)\s*;';
-my $export_symbol_ns = '^\s*EXPORT_SYMBOL_NS(_GPL)?\s*\(\s*(\w+)\s*,\s*\w+\)\s*;';
+my $export_symbol_ns = '^\s*EXPORT_SYMBOL_NS(_GPL)?\s*\(\s*(\w+)\s*,\s*"\S+"\)\s*;';
 my $function_pointer = qr{([^\(]*\(\*)\s*\)\s*\(([^\)]*)\)};
 my $attribute = qr{__attribute__\s*\(\([a-z0-9,_\*\s\(\)]*\)\)}i;
 
@@ -333,12 +330,9 @@ while ($ARGV[0] =~ m/^--?(.*)/) {
         $Wreturn = 1;
     } elsif ($cmd eq "Wshort-desc" or $cmd eq "Wshort-description") {
         $Wshort_desc = 1;
-    } elsif ($cmd eq "Wcontents-before-sections") {
-        $Wcontents_before_sections = 1;
     } elsif ($cmd eq "Wall") {
         $Wreturn = 1;
         $Wshort_desc = 1;
-        $Wcontents_before_sections = 1;
     } elsif (($cmd eq "h") || ($cmd eq "help")) {
         pod2usage(-exitval => 0, -verbose => 2);
     } elsif ($cmd eq 'no-doc-sections') {
@@ -347,23 +341,6 @@ while ($ARGV[0] =~ m/^--?(.*)/) {
         $enable_lineno = 1;
     } elsif ($cmd eq 'show-not-found') {
         $show_not_found = 1;  # A no-op but don't fail
-    } elsif ($cmd eq "sphinx-version") {
-        my $ver_string = shift @ARGV;
-        if ($ver_string =~ m/^(\d+)(\.\d+)?(\.\d+)?/) {
-            $sphinx_major = $1;
-            if (defined($2)) {
-                $sphinx_minor = substr($2,1);
-            } else {
-                $sphinx_minor = 0;
-            }
-            if (defined($3)) {
-                $sphinx_patch = substr($3,1)
-            } else {
-                $sphinx_patch = 0;
-            }
-        } else {
-            die "Sphinx version should either major.minor or major.minor.patch format\n";
-        }
     } else {
         # Unknown argument
         pod2usage(
@@ -387,49 +364,11 @@ while ($ARGV[0] =~ m/^--?(.*)/) {
 
 # continue execution near EOF;
 
-# The C domain dialect changed on Sphinx 3. So, we need to check the
-# version in order to produce the right tags.
 sub findprog($)
 {
     foreach(split(/:/, $ENV{PATH})) {
         return "$_/$_[0]" if(-x "$_/$_[0]");
     }
-}
-
-sub get_sphinx_version()
-{
-    my $ver;
-
-    my $cmd = "sphinx-build";
-    if (!findprog($cmd)) {
-        my $cmd = "sphinx-build3";
-        if (!findprog($cmd)) {
-            $sphinx_major = 1;
-            $sphinx_minor = 2;
-            $sphinx_patch = 0;
-            printf STDERR "Warning: Sphinx version not found. Using default (Sphinx version %d.%d.%d)\n",
-                   $sphinx_major, $sphinx_minor, $sphinx_patch;
-            return;
-        }
-    }
-
-    open IN, "$cmd --version 2>&1 |";
-    while (<IN>) {
-        if (m/^\s*sphinx-build\s+([\d]+)\.([\d\.]+)(\+\/[\da-f]+)?$/) {
-            $sphinx_major = $1;
-            $sphinx_minor = $2;
-            $sphinx_patch = $3;
-            last;
-        }
-        # Sphinx 1.2.x uses a different format
-        if (m/^\s*Sphinx.*\s+([\d]+)\.([\d\.]+)$/) {
-            $sphinx_major = $1;
-            $sphinx_minor = $2;
-            $sphinx_patch = $3;
-            last;
-        }
-    }
-    close IN;
 }
 
 # get kernel version from env
@@ -569,6 +508,8 @@ sub output_function_man(%) {
     my %args = %{$_[0]};
     my ($parameter, $section);
     my $count;
+    my $func_macro = $args{'func_macro'};
+    my $paramcount = $#{$args{'parameterlist'}}; # -1 is empty
 
     print ".TH \"$args{'function'}\" 9 \"$args{'function'}\" \"$man_date\" \"Kernel Hacker's Manual\" LINUX\n";
 
@@ -600,7 +541,10 @@ sub output_function_man(%) {
         $parenth = "";
     }
 
-    print ".SH ARGUMENTS\n";
+    $paramcount = $#{$args{'parameterlist'}}; # -1 is empty
+    if ($paramcount >= 0) {
+    	print ".SH ARGUMENTS\n";
+	}
     foreach $parameter (@{$args{'parameterlist'}}) {
         my $parameter_name = $parameter;
         $parameter_name =~ s/\[.*//;
@@ -811,6 +755,10 @@ sub output_highlight_rst {
     if ($block) {
         $output .= highlight_block($block);
     }
+
+    $output =~ s/^\n+//g;
+    $output =~ s/\n+$//g;
+
     foreach $line (split "\n", $output) {
         print $lineprefix . $line . "\n";
     }
@@ -822,10 +770,16 @@ sub output_function_rst(%) {
     my $oldprefix = $lineprefix;
 
     my $signature = "";
-    if ($args{'functiontype'} ne "") {
-        $signature = $args{'functiontype'} . " " . $args{'function'} . " (";
-    } else {
-        $signature = $args{'function'} . " (";
+    my $func_macro = $args{'func_macro'};
+    my $paramcount = $#{$args{'parameterlist'}}; # -1 is empty
+
+	if ($func_macro) {
+        $signature = $args{'function'};
+	} else {
+		if ($args{'functiontype'}) {
+        	$signature = $args{'functiontype'} . " ";
+		}
+		$signature .= $args{'function'} . " (";
     }
 
     my $count = 0;
@@ -844,11 +798,14 @@ sub output_function_rst(%) {
         }
     }
 
-    $signature .= ")";
+    if (!$func_macro) {
+    	$signature .= ")";
+    }
 
-    if ($sphinx_major < 3) {
+    if ($args{'typedef'} || $args{'functiontype'} eq "") {
+        print ".. c:macro:: ". $args{'function'} . "\n\n";
+
         if ($args{'typedef'}) {
-            print ".. c:type:: ". $args{'function'} . "\n\n";
             print_lineno($declaration_start_line);
             print "   **Typedef**: ";
             $lineprefix = "";
@@ -856,25 +813,10 @@ sub output_function_rst(%) {
             print "\n\n**Syntax**\n\n";
             print "  ``$signature``\n\n";
         } else {
-            print ".. c:function:: $signature\n\n";
+            print "``$signature``\n\n";
         }
     } else {
-        if ($args{'typedef'} || $args{'functiontype'} eq "") {
-            print ".. c:macro:: ". $args{'function'} . "\n\n";
-
-            if ($args{'typedef'}) {
-                print_lineno($declaration_start_line);
-                print "   **Typedef**: ";
-                $lineprefix = "";
-                output_highlight_rst($args{'purpose'});
-                print "\n\n**Syntax**\n\n";
-                print "  ``$signature``\n\n";
-            } else {
-                print "``$signature``\n\n";
-            }
-        } else {
-            print ".. c:function:: $signature\n\n";
-        }
+        print ".. c:function:: $signature\n\n";
     }
 
     if (!$args{'typedef'}) {
@@ -888,9 +830,11 @@ sub output_function_rst(%) {
     # Put our descriptive text into a container (thus an HTML <div>) to help
     # set the function prototypes apart.
     #
-    print ".. container:: kernelindent\n\n";
     $lineprefix = "  ";
-    print $lineprefix . "**Parameters**\n\n";
+	if ($paramcount >= 0) {
+    	print ".. container:: kernelindent\n\n";
+   		print $lineprefix . "**Parameters**\n\n";
+    }
     foreach $parameter (@{$args{'parameterlist'}}) {
         my $parameter_name = $parameter;
         $parameter_name =~ s/\[.*//;
@@ -940,13 +884,9 @@ sub output_enum_rst(%) {
     my $count;
     my $outer;
 
-    if ($sphinx_major < 3) {
-        my $name = "enum " . $args{'enum'};
-        print "\n\n.. c:type:: " . $name . "\n\n";
-    } else {
-        my $name = $args{'enum'};
-        print "\n\n.. c:enum:: " . $name . "\n\n";
-    }
+    my $name = $args{'enum'};
+    print "\n\n.. c:enum:: " . $name . "\n\n";
+
     print_lineno($declaration_start_line);
     $lineprefix = "  ";
     output_highlight_rst($args{'purpose'});
@@ -977,11 +917,8 @@ sub output_typedef_rst(%) {
     my $oldprefix = $lineprefix;
     my $name;
 
-    if ($sphinx_major < 3) {
-        $name = "typedef " . $args{'typedef'};
-    } else {
-        $name = $args{'typedef'};
-    }
+    $name = $args{'typedef'};
+
     print "\n\n.. c:type:: " . $name . "\n\n";
     print_lineno($declaration_start_line);
     $lineprefix = "   ";
@@ -997,17 +934,13 @@ sub output_struct_rst(%) {
     my ($parameter);
     my $oldprefix = $lineprefix;
 
-    if ($sphinx_major < 3) {
-        my $name = $args{'type'} . " " . $args{'struct'};
-        print "\n\n.. c:type:: " . $name . "\n\n";
+    my $name = $args{'struct'};
+    if ($args{'type'} eq 'union') {
+        print "\n\n.. c:union:: " . $name . "\n\n";
     } else {
-        my $name = $args{'struct'};
-        if ($args{'type'} eq 'union') {
-            print "\n\n.. c:union:: " . $name . "\n\n";
-        } else {
-            print "\n\n.. c:struct:: " . $name . "\n\n";
-        }
+        print "\n\n.. c:struct:: " . $name . "\n\n";
     }
+
     print_lineno($declaration_start_line);
     $lineprefix = "  ";
     output_highlight_rst($args{'purpose'});
@@ -1704,7 +1637,7 @@ sub check_return_section {
 sub dump_function($$) {
     my $prototype = shift;
     my $file = shift;
-    my $noret = 0;
+    my $func_macro = 0;
 
     print_lineno($new_start_line);
 
@@ -1769,7 +1702,7 @@ sub dump_function($$) {
         # declaration_name and opening parenthesis (notice the \s+).
         $return_type = $1;
         $declaration_name = $2;
-        $noret = 1;
+        $func_macro = 1;
     } elsif ($prototype =~ m/^()($name)\s*$prototype_end/ ||
         $prototype =~ m/^($type1)\s+($name)\s*$prototype_end/ ||
         $prototype =~ m/^($type2+)\s*($name)\s*$prototype_end/)  {
@@ -1796,7 +1729,7 @@ sub dump_function($$) {
     # of warnings goes sufficiently down, the check is only performed in
     # -Wreturn mode.
     # TODO: always perform the check.
-    if ($Wreturn && !$noret) {
+    if ($Wreturn && !$func_macro) {
         check_return_section($file, $declaration_name, $return_type);
     }
 
@@ -1814,7 +1747,8 @@ sub dump_function($$) {
                             'parametertypes' => \%parametertypes,
                             'sectionlist' => \@sectionlist,
                             'sections' => \%sections,
-                            'purpose' => $declaration_purpose
+                            'purpose' => $declaration_purpose,
+							'func_macro' => $func_macro
                            });
     } else {
         output_declaration($declaration_name,
@@ -1827,7 +1761,8 @@ sub dump_function($$) {
                             'parametertypes' => \%parametertypes,
                             'sectionlist' => \@sectionlist,
                             'sections' => \%sections,
-                            'purpose' => $declaration_purpose
+                            'purpose' => $declaration_purpose,
+							'func_macro' => $func_macro
                            });
     }
 }
@@ -1988,10 +1923,6 @@ sub map_filename($) {
         $file = $orig_file;
     }
 
-    if (defined($source_map{$file})) {
-        $file = $source_map{$file};
-    }
-
     return $file;
 }
 
@@ -2027,7 +1958,6 @@ sub process_export_file($) {
 sub process_normal() {
     if (/$doc_start/o) {
         $state = STATE_NAME;        # next line is always the function name
-        $in_doc_sect = 0;
         $declaration_start_line = $. + 1;
     }
 }
@@ -2068,7 +1998,7 @@ sub process_name($$) {
         # Look for foo() or static void foo() - description; or misspelt
         # identifier
         elsif (/^$decl_start$fn_type?(\w+)\s*$parenthesis?\s*$decl_end?$/ ||
-            /^$decl_start$fn_type?(\w+.*)$parenthesis?\s*$decl_end$/) {
+            /^$decl_start$fn_type?(\w+[^-:]*)$parenthesis?\s*$decl_end$/) {
             $identifier = $1;
             $decl_type = 'function';
             $identifier =~ s/^define\s+//;
@@ -2132,7 +2062,6 @@ sub process_body($$) {
     }
 
     if (/$doc_sect/i) { # case insensitive for supported section names
-        $in_doc_sect = 1;
         $newsection = $1;
         $newcontents = $2;
 
@@ -2149,14 +2078,10 @@ sub process_body($$) {
         }
 
         if (($contents ne "") && ($contents ne "\n")) {
-            if (!$in_doc_sect && $Wcontents_before_sections) {
-                emit_warning("${file}:$.", "contents before sections\n");
-            }
             dump_section($file, $section, $contents);
             $section = $section_default;
         }
 
-        $in_doc_sect = 1;
         $state = STATE_BODY;
         $contents = $newcontents;
         $new_start_line = $.;
@@ -2322,7 +2247,6 @@ sub process_inline($$) {
 
 sub process_file($) {
     my $file;
-    my $initial_section_counter = $section_counter;
     my ($orig_file) = @_;
 
     $file = map_filename($orig_file);
@@ -2360,8 +2284,7 @@ sub process_file($) {
     }
 
     # Make sure we got something interesting.
-    if ($initial_section_counter == $section_counter && $
-        output_mode ne "none") {
+    if (!$section_counter && $output_mode ne "none") {
         if ($output_selection == OUTPUT_INCLUDE) {
             emit_warning("${file}:1", "'$_' not found\n")
                 for keys %function_table;
@@ -2370,11 +2293,6 @@ sub process_file($) {
         }
     }
     close IN_FILE;
-}
-
-
-if ($output_mode eq "rst") {
-    get_sphinx_version() if (!$sphinx_major);
 }
 
 $kernelversion = get_kernel_version();
@@ -2386,19 +2304,6 @@ for (my $k = 0; $k < @highlights; $k++) {
     my $result = $highlights[$k][1];
 #   print STDERR "scanning pattern:$pattern, highlight:($result)\n";
     $dohighlight .=  "\$contents =~ s:$pattern:$result:gs;\n";
-}
-
-# Read the file that maps relative names to absolute names for
-# separate source and object directories and for shadow trees.
-if (open(SOURCE_MAP, "<.tmp_filelist.txt")) {
-    my ($relname, $absname);
-    while(<SOURCE_MAP>) {
-        chop();
-        ($relname, $absname) = (split())[0..1];
-        $relname =~ s:^/+::;
-        $source_map{$relname} = $absname;
-    }
-    close(SOURCE_MAP);
 }
 
 if ($output_selection == OUTPUT_EXPORTED ||
@@ -2455,17 +2360,6 @@ Do not output documentation, only warnings.
 =head2 Output format modifiers
 
 =head3 reStructuredText only
-
-=over 8
-
-=item -sphinx-version VERSION
-
-Use the ReST C domain dialect compatible with a specific Sphinx Version.
-
-If not specified, kernel-doc will auto-detect using the sphinx-build version
-found on PATH.
-
-=back
 
 =head2 Output selection (mutually exclusive):
 

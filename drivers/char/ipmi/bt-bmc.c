@@ -465,7 +465,7 @@ static void bt_bmc_remove(struct platform_device *pdev)
 
 	misc_deregister(&bt_bmc->miscdev);
 	if (bt_bmc->irq < 0)
-		del_timer_sync(&bt_bmc->poll_timer);
+		timer_delete_sync(&bt_bmc->poll_timer);
 }
 
 static const struct of_device_id bt_bmc_match[] = {
@@ -481,7 +481,7 @@ static struct platform_driver bt_bmc_driver = {
 		.of_match_table = bt_bmc_match,
 	},
 	.probe = bt_bmc_probe,
-	.remove_new = bt_bmc_remove,
+	.remove = bt_bmc_remove,
 };
 
 module_platform_driver(bt_bmc_driver);

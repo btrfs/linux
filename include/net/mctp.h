@@ -212,7 +212,7 @@ static inline struct mctp_skb_cb *mctp_cb(struct sk_buff *skb)
 
 	BUILD_BUG_ON(sizeof(struct mctp_skb_cb) > sizeof(skb->cb));
 	WARN_ON(cb->magic != 0x4d435450);
-	return (void *)(skb->cb);
+	return cb;
 }
 
 /* If CONFIG_MCTP_FLOWS, we may add one of these as a SKB extension,
@@ -297,5 +297,23 @@ void mctp_routes_exit(void);
 
 int mctp_device_init(void);
 void mctp_device_exit(void);
+
+/* MCTP IDs and Codes from DMTF specification
+ * "DSP0239 Management Component Transport Protocol (MCTP) IDs and Codes"
+ * https://www.dmtf.org/sites/default/files/standards/documents/DSP0239_1.11.1.pdf
+ */
+enum mctp_phys_binding {
+	MCTP_PHYS_BINDING_UNSPEC	= 0x00,
+	MCTP_PHYS_BINDING_SMBUS		= 0x01,
+	MCTP_PHYS_BINDING_PCIE_VDM	= 0x02,
+	MCTP_PHYS_BINDING_USB		= 0x03,
+	MCTP_PHYS_BINDING_KCS		= 0x04,
+	MCTP_PHYS_BINDING_SERIAL	= 0x05,
+	MCTP_PHYS_BINDING_I3C		= 0x06,
+	MCTP_PHYS_BINDING_MMBI		= 0x07,
+	MCTP_PHYS_BINDING_PCC		= 0x08,
+	MCTP_PHYS_BINDING_UCIE		= 0x09,
+	MCTP_PHYS_BINDING_VENDOR	= 0xFF,
+};
 
 #endif /* __NET_MCTP_H */

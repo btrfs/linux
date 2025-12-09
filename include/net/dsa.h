@@ -885,21 +885,6 @@ struct dsa_switch_ops {
 	 */
 	void	(*phylink_get_caps)(struct dsa_switch *ds, int port,
 				    struct phylink_config *config);
-	struct phylink_pcs *(*phylink_mac_select_pcs)(struct dsa_switch *ds,
-						      int port,
-						      phy_interface_t iface);
-	void	(*phylink_mac_config)(struct dsa_switch *ds, int port,
-				      unsigned int mode,
-				      const struct phylink_link_state *state);
-	void	(*phylink_mac_link_down)(struct dsa_switch *ds, int port,
-					 unsigned int mode,
-					 phy_interface_t interface);
-	void	(*phylink_mac_link_up)(struct dsa_switch *ds, int port,
-				       unsigned int mode,
-				       phy_interface_t interface,
-				       struct phy_device *phydev,
-				       int speed, int duplex,
-				       bool tx_pause, bool rx_pause);
 	void	(*phylink_fixed_state)(struct dsa_switch *ds, int port,
 				       struct phylink_link_state *state);
 	/*
@@ -921,6 +906,8 @@ struct dsa_switch_ops {
 	void	(*get_rmon_stats)(struct dsa_switch *ds, int port,
 				  struct ethtool_rmon_stats *rmon_stats,
 				  const struct ethtool_rmon_hist_range **ranges);
+	void	(*get_ts_stats)(struct dsa_switch *ds, int port,
+				struct ethtool_ts_stats *ts_stats);
 	void	(*get_stats64)(struct dsa_switch *ds, int port,
 				   struct rtnl_link_stats64 *s);
 	void	(*get_pause_stats)(struct dsa_switch *ds, int port,
@@ -1003,9 +990,8 @@ struct dsa_switch_ops {
 	/*
 	 * Port's MAC EEE settings
 	 */
+	bool	(*support_eee)(struct dsa_switch *ds, int port);
 	int	(*set_mac_eee)(struct dsa_switch *ds, int port,
-			       struct ethtool_keee *e);
-	int	(*get_mac_eee)(struct dsa_switch *ds, int port,
 			       struct ethtool_keee *e);
 
 	/* EEPROM access */
@@ -1398,5 +1384,6 @@ static inline bool dsa_user_dev_check(const struct net_device *dev)
 
 netdev_tx_t dsa_enqueue_skb(struct sk_buff *skb, struct net_device *dev);
 void dsa_port_phylink_mac_change(struct dsa_switch *ds, int port, bool up);
+bool dsa_supports_eee(struct dsa_switch *ds, int port);
 
 #endif

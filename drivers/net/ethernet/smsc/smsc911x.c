@@ -43,7 +43,6 @@
 #include <linux/smsc911x.h>
 #include <linux/device.h>
 #include <linux/of.h>
-#include <linux/of_gpio.h>
 #include <linux/of_net.h>
 #include <linux/acpi.h>
 #include <linux/pm_runtime.h>
@@ -2667,7 +2666,7 @@ MODULE_DEVICE_TABLE(acpi, smsc911x_acpi_match);
 
 static struct platform_driver smsc911x_driver = {
 	.probe = smsc911x_drv_probe,
-	.remove_new = smsc911x_drv_remove,
+	.remove = smsc911x_drv_remove,
 	.driver = {
 		.name	= SMSC_CHIPNAME,
 		.pm	= SMSC911X_PM_OPS,

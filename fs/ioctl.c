@@ -41,7 +41,7 @@
  *
  * Returns 0 on success, -errno on error.
  */
-long vfs_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
+int vfs_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 {
 	int error = -ENOTTY;
 
@@ -228,14 +228,14 @@ static int ioctl_fiemap(struct file *filp, struct fiemap __user *ufiemap)
 	return error;
 }
 
-static long ioctl_file_clone(struct file *dst_file, unsigned long srcfd,
-			     u64 off, u64 olen, u64 destoff)
+static int ioctl_file_clone(struct file *dst_file, unsigned long srcfd,
+			    u64 off, u64 olen, u64 destoff)
 {
-	struct fd src_file = fdget(srcfd);
+	CLASS(fd, src_file)(srcfd);
 	loff_t cloned;
 	int ret;
 
-	if (!fd_file(src_file))
+	if (fd_empty(src_file))
 		return -EBADF;
 	cloned = vfs_clone_file_range(fd_file(src_file), off, dst_file, destoff,
 				      olen, 0);
@@ -245,12 +245,11 @@ static long ioctl_file_clone(struct file *dst_file, unsigned long srcfd,
 		ret = -EINVAL;
 	else
 		ret = 0;
-	fdput(src_file);
 	return ret;
 }
 
-static long ioctl_file_clone_range(struct file *file,
-				   struct file_clone_range __user *argp)
+static int ioctl_file_clone_range(struct file *file,
+				  struct file_clone_range __user *argp)
 {
 	struct file_clone_range args;
 
@@ -892,22 +891,20 @@ static int do_vfs_ioctl(struct file *filp, unsigned int fd,
 
 SYSCALL_DEFINE3(ioctl, unsigned int, fd, unsigned int, cmd, unsigned long, arg)
 {
-	struct fd f = fdget(fd);
+	CLASS(fd, f)(fd);
 	int error;
 
-	if (!fd_file(f))
+	if (fd_empty(f))
 		return -EBADF;
 
 	error = security_file_ioctl(fd_file(f), cmd, arg);
 	if (error)
-		goto out;
+		return error;
 
 	error = do_vfs_ioctl(fd_file(f), fd, cmd, arg);
 	if (error == -ENOIOCTLCMD)
 		error = vfs_ioctl(fd_file(f), cmd, arg);
 
-out:
-	fdput(f);
 	return error;
 }
 
@@ -950,15 +947,15 @@ EXPORT_SYMBOL(compat_ptr_ioctl);
 COMPAT_SYSCALL_DEFINE3(ioctl, unsigned int, fd, unsigned int, cmd,
 		       compat_ulong_t, arg)
 {
-	struct fd f = fdget(fd);
+	CLASS(fd, f)(fd);
 	int error;
 
-	if (!fd_file(f))
+	if (fd_empty(f))
 		return -EBADF;
 
 	error = security_file_ioctl_compat(fd_file(f), cmd, arg);
 	if (error)
-		goto out;
+		return error;
 
 	switch (cmd) {
 	/* FICLONE takes an int argument, so don't use compat_ptr() */
@@ -1009,10 +1006,6 @@ COMPAT_SYSCALL_DEFINE3(ioctl, unsigned int, fd, unsigned int, cmd,
 			error = -ENOTTY;
 		break;
 	}
-
- out:
-	fdput(f);
-
 	return error;
 }
 #endif

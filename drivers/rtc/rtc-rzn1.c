@@ -7,7 +7,7 @@
  * - 2022 Schneider Electric
  *
  * Authors:
- * - Michel Pollet <michel.pollet@bp.renesas.com>, <buserror@gmail.com>
+ * - Michel Pollet <buserror@gmail.com>
  * - Miquel Raynal <miquel.raynal@bootlin.com>
  */
 
@@ -19,6 +19,7 @@
 #include <linux/platform_device.h>
 #include <linux/pm_runtime.h>
 #include <linux/rtc.h>
+#include <linux/spinlock.h>
 
 #define RZN1_RTC_CTL0 0x00
 #define   RZN1_RTC_CTL0_SLSB_SUBU 0
@@ -27,6 +28,7 @@
 #define   RZN1_RTC_CTL0_CE BIT(7)
 
 #define RZN1_RTC_CTL1 0x04
+#define   RZN1_RTC_CTL1_1SE BIT(3)
 #define   RZN1_RTC_CTL1_ALME BIT(4)
 
 #define RZN1_RTC_CTL2 0x08
@@ -35,13 +37,13 @@
 #define   RZN1_RTC_CTL2_WUST BIT(5)
 #define   RZN1_RTC_CTL2_STOPPED (RZN1_RTC_CTL2_WAIT | RZN1_RTC_CTL2_WST)
 
-#define RZN1_RTC_SEC 0x14
-#define RZN1_RTC_MIN 0x18
-#define RZN1_RTC_HOUR 0x1c
-#define RZN1_RTC_WEEK 0x20
-#define RZN1_RTC_DAY 0x24
-#define RZN1_RTC_MONTH 0x28
-#define RZN1_RTC_YEAR 0x2c
+#define RZN1_RTC_TIME 0x30
+#define RZN1_RTC_TIME_MIN_SHIFT 8
+#define RZN1_RTC_TIME_HOUR_SHIFT 16
+#define RZN1_RTC_CAL 0x34
+#define RZN1_RTC_CAL_DAY_SHIFT 8
+#define RZN1_RTC_CAL_MON_SHIFT 16
+#define RZN1_RTC_CAL_YEAR_SHIFT 24
 
 #define RZN1_RTC_SUBU 0x38
 #define   RZN1_RTC_SUBU_DEV BIT(7)
@@ -52,40 +54,35 @@
 #define RZN1_RTC_ALW 0x48
 
 #define RZN1_RTC_SECC 0x4c
-#define RZN1_RTC_MINC 0x50
-#define RZN1_RTC_HOURC 0x54
-#define RZN1_RTC_WEEKC 0x58
-#define RZN1_RTC_DAYC 0x5c
-#define RZN1_RTC_MONTHC 0x60
-#define RZN1_RTC_YEARC 0x64
+#define RZN1_RTC_TIMEC 0x68
+#define RZN1_RTC_CALC 0x6c
 
 struct rzn1_rtc {
 	struct rtc_device *rtcdev;
 	void __iomem *base;
+	/*
+	 * Protects access to RZN1_RTC_CTL1 reg. rtc_lock with threaded_irqs
+	 * would introduce race conditions when switching interrupts because
+	 * of potential sleeps
+	 */
+	spinlock_t ctl1_access_lock;
+	struct rtc_time tm_alarm;
 };
 
 static void rzn1_rtc_get_time_snapshot(struct rzn1_rtc *rtc, struct rtc_time *tm)
 {
-	tm->tm_sec = readl(rtc->base + RZN1_RTC_SECC);
-	tm->tm_min = readl(rtc->base + RZN1_RTC_MINC);
-	tm->tm_hour = readl(rtc->base + RZN1_RTC_HOURC);
-	tm->tm_wday = readl(rtc->base + RZN1_RTC_WEEKC);
-	tm->tm_mday = readl(rtc->base + RZN1_RTC_DAYC);
-	tm->tm_mon = readl(rtc->base + RZN1_RTC_MONTHC);
-	tm->tm_year = readl(rtc->base + RZN1_RTC_YEARC);
-}
+	u32 val;
 
-static unsigned int rzn1_rtc_tm_to_wday(struct rtc_time *tm)
-{
-	time64_t time;
-	unsigned int days;
-	u32 secs;
+	val = readl(rtc->base + RZN1_RTC_TIMEC);
+	tm->tm_sec = bcd2bin(val);
+	tm->tm_min = bcd2bin(val >> RZN1_RTC_TIME_MIN_SHIFT);
+	tm->tm_hour = bcd2bin(val >> RZN1_RTC_TIME_HOUR_SHIFT);
 
-	time = rtc_tm_to_time64(tm);
-	days = div_s64_rem(time, 86400, &secs);
-
-	/* day of the week, 1970-01-01 was a Thursday */
-	return (days + 4) % 7;
+	val = readl(rtc->base + RZN1_RTC_CALC);
+	tm->tm_wday = val & 0x0f;
+	tm->tm_mday = bcd2bin(val >> RZN1_RTC_CAL_DAY_SHIFT);
+	tm->tm_mon = bcd2bin(val >> RZN1_RTC_CAL_MON_SHIFT) - 1;
+	tm->tm_year = bcd2bin(val >> RZN1_RTC_CAL_YEAR_SHIFT) + 100;
 }
 
 static int rzn1_rtc_read_time(struct device *dev, struct rtc_time *tm)
@@ -103,16 +100,8 @@ static int rzn1_rtc_read_time(struct device *dev, struct rtc_time *tm)
 
 	rzn1_rtc_get_time_snapshot(rtc, tm);
 	secs = readl(rtc->base + RZN1_RTC_SECC);
-	if (tm->tm_sec != secs)
+	if (tm->tm_sec != bcd2bin(secs))
 		rzn1_rtc_get_time_snapshot(rtc, tm);
-
-	tm->tm_sec = bcd2bin(tm->tm_sec);
-	tm->tm_min = bcd2bin(tm->tm_min);
-	tm->tm_hour = bcd2bin(tm->tm_hour);
-	tm->tm_wday = bcd2bin(tm->tm_wday);
-	tm->tm_mday = bcd2bin(tm->tm_mday);
-	tm->tm_mon = bcd2bin(tm->tm_mon);
-	tm->tm_year = bcd2bin(tm->tm_year);
 
 	return 0;
 }
@@ -122,14 +111,6 @@ static int rzn1_rtc_set_time(struct device *dev, struct rtc_time *tm)
 	struct rzn1_rtc *rtc = dev_get_drvdata(dev);
 	u32 val;
 	int ret;
-
-	tm->tm_sec = bin2bcd(tm->tm_sec);
-	tm->tm_min = bin2bcd(tm->tm_min);
-	tm->tm_hour = bin2bcd(tm->tm_hour);
-	tm->tm_wday = bin2bcd(rzn1_rtc_tm_to_wday(tm));
-	tm->tm_mday = bin2bcd(tm->tm_mday);
-	tm->tm_mon = bin2bcd(tm->tm_mon);
-	tm->tm_year = bin2bcd(tm->tm_year);
 
 	val = readl(rtc->base + RZN1_RTC_CTL2);
 	if (!(val & RZN1_RTC_CTL2_STOPPED)) {
@@ -144,13 +125,17 @@ static int rzn1_rtc_set_time(struct device *dev, struct rtc_time *tm)
 			return ret;
 	}
 
-	writel(tm->tm_sec, rtc->base + RZN1_RTC_SEC);
-	writel(tm->tm_min, rtc->base + RZN1_RTC_MIN);
-	writel(tm->tm_hour, rtc->base + RZN1_RTC_HOUR);
-	writel(tm->tm_wday, rtc->base + RZN1_RTC_WEEK);
-	writel(tm->tm_mday, rtc->base + RZN1_RTC_DAY);
-	writel(tm->tm_mon, rtc->base + RZN1_RTC_MONTH);
-	writel(tm->tm_year, rtc->base + RZN1_RTC_YEAR);
+	val = bin2bcd(tm->tm_sec);
+	val |= bin2bcd(tm->tm_min) << RZN1_RTC_TIME_MIN_SHIFT;
+	val |= bin2bcd(tm->tm_hour) << RZN1_RTC_TIME_HOUR_SHIFT;
+	writel(val, rtc->base + RZN1_RTC_TIME);
+
+	val = tm->tm_wday;
+	val |= bin2bcd(tm->tm_mday) << RZN1_RTC_CAL_DAY_SHIFT;
+	val |= bin2bcd(tm->tm_mon + 1) << RZN1_RTC_CAL_MON_SHIFT;
+	val |= bin2bcd(tm->tm_year - 100) << RZN1_RTC_CAL_YEAR_SHIFT;
+	writel(val, rtc->base + RZN1_RTC_CAL);
+
 	writel(0, rtc->base + RZN1_RTC_CTL2);
 
 	return 0;
@@ -159,8 +144,38 @@ static int rzn1_rtc_set_time(struct device *dev, struct rtc_time *tm)
 static irqreturn_t rzn1_rtc_alarm_irq(int irq, void *dev_id)
 {
 	struct rzn1_rtc *rtc = dev_id;
+	u32 ctl1, set_irq_bits = 0;
 
-	rtc_update_irq(rtc->rtcdev, 1, RTC_AF | RTC_IRQF);
+	if (rtc->tm_alarm.tm_sec == 0)
+		rtc_update_irq(rtc->rtcdev, 1, RTC_AF | RTC_IRQF);
+	else
+		/* Switch to 1s interrupts */
+		set_irq_bits = RZN1_RTC_CTL1_1SE;
+
+	guard(spinlock)(&rtc->ctl1_access_lock);
+
+	ctl1 = readl(rtc->base + RZN1_RTC_CTL1);
+	ctl1 &= ~RZN1_RTC_CTL1_ALME;
+	ctl1 |= set_irq_bits;
+	writel(ctl1, rtc->base + RZN1_RTC_CTL1);
+
+	return IRQ_HANDLED;
+}
+
+static irqreturn_t rzn1_rtc_1s_irq(int irq, void *dev_id)
+{
+	struct rzn1_rtc *rtc = dev_id;
+	u32 ctl1;
+
+	if (readl(rtc->base + RZN1_RTC_SECC) == bin2bcd(rtc->tm_alarm.tm_sec)) {
+		guard(spinlock)(&rtc->ctl1_access_lock);
+
+		ctl1 = readl(rtc->base + RZN1_RTC_CTL1);
+		ctl1 &= ~RZN1_RTC_CTL1_1SE;
+		writel(ctl1, rtc->base + RZN1_RTC_CTL1);
+
+		rtc_update_irq(rtc->rtcdev, 1, RTC_AF | RTC_IRQF);
+	}
 
 	return IRQ_HANDLED;
 }
@@ -168,14 +183,38 @@ static irqreturn_t rzn1_rtc_alarm_irq(int irq, void *dev_id)
 static int rzn1_rtc_alarm_irq_enable(struct device *dev, unsigned int enable)
 {
 	struct rzn1_rtc *rtc = dev_get_drvdata(dev);
-	u32 ctl1 = readl(rtc->base + RZN1_RTC_CTL1);
+	struct rtc_time *tm = &rtc->tm_alarm, tm_now;
+	u32 ctl1;
+	int ret;
 
-	if (enable)
-		ctl1 |= RZN1_RTC_CTL1_ALME;
-	else
-		ctl1 &= ~RZN1_RTC_CTL1_ALME;
+	guard(spinlock_irqsave)(&rtc->ctl1_access_lock);
 
-	writel(ctl1, rtc->base + RZN1_RTC_CTL1);
+	ctl1 = readl(rtc->base + RZN1_RTC_CTL1);
+
+	if (enable) {
+		/*
+		 * Use alarm interrupt if alarm time is at least a minute away
+		 * or less than a minute but in the next minute. Otherwise use
+		 * 1 second interrupt to wait for the proper second
+		 */
+		do {
+			ctl1 &= ~(RZN1_RTC_CTL1_ALME | RZN1_RTC_CTL1_1SE);
+
+			ret = rzn1_rtc_read_time(dev, &tm_now);
+			if (ret)
+				return ret;
+
+			if (rtc_tm_sub(tm, &tm_now) > 59 || tm->tm_min != tm_now.tm_min)
+				ctl1 |= RZN1_RTC_CTL1_ALME;
+			else
+				ctl1 |= RZN1_RTC_CTL1_1SE;
+
+			writel(ctl1, rtc->base + RZN1_RTC_CTL1);
+		} while (readl(rtc->base + RZN1_RTC_SECC) != bin2bcd(tm_now.tm_sec));
+	} else {
+		ctl1 &= ~(RZN1_RTC_CTL1_ALME | RZN1_RTC_CTL1_1SE);
+		writel(ctl1, rtc->base + RZN1_RTC_CTL1);
+	}
 
 	return 0;
 }
@@ -209,7 +248,7 @@ static int rzn1_rtc_read_alarm(struct device *dev, struct rtc_wkalrm *alrm)
 	}
 
 	ctl1 = readl(rtc->base + RZN1_RTC_CTL1);
-	alrm->enabled = !!(ctl1 & RZN1_RTC_CTL1_ALME);
+	alrm->enabled = !!(ctl1 & (RZN1_RTC_CTL1_ALME | RZN1_RTC_CTL1_1SE));
 
 	return 0;
 }
@@ -239,6 +278,8 @@ static int rzn1_rtc_set_alarm(struct device *dev, struct rtc_wkalrm *alrm)
 	writel(bin2bcd(tm->tm_min), rtc->base + RZN1_RTC_ALM);
 	writel(bin2bcd(tm->tm_hour), rtc->base + RZN1_RTC_ALH);
 	writel(BIT(wday), rtc->base + RZN1_RTC_ALW);
+
+	rtc->tm_alarm = alrm->time;
 
 	rzn1_rtc_alarm_irq_enable(dev, alrm->enabled);
 
@@ -328,7 +369,7 @@ static const struct rtc_class_ops rzn1_rtc_ops = {
 static int rzn1_rtc_probe(struct platform_device *pdev)
 {
 	struct rzn1_rtc *rtc;
-	int alarm_irq;
+	int irq;
 	int ret;
 
 	rtc = devm_kzalloc(&pdev->dev, sizeof(*rtc), GFP_KERNEL);
@@ -341,9 +382,9 @@ static int rzn1_rtc_probe(struct platform_device *pdev)
 	if (IS_ERR(rtc->base))
 		return dev_err_probe(&pdev->dev, PTR_ERR(rtc->base), "Missing reg\n");
 
-	alarm_irq = platform_get_irq(pdev, 0);
-	if (alarm_irq < 0)
-		return alarm_irq;
+	irq = platform_get_irq_byname(pdev, "alarm");
+	if (irq < 0)
+		return irq;
 
 	rtc->rtcdev = devm_rtc_allocate_device(&pdev->dev);
 	if (IS_ERR(rtc->rtcdev))
@@ -353,8 +394,6 @@ static int rzn1_rtc_probe(struct platform_device *pdev)
 	rtc->rtcdev->range_max = RTC_TIMESTAMP_END_2099;
 	rtc->rtcdev->alarm_offset_max = 7 * 86400;
 	rtc->rtcdev->ops = &rzn1_rtc_ops;
-	set_bit(RTC_FEATURE_ALARM_RES_MINUTE, rtc->rtcdev->features);
-	clear_bit(RTC_FEATURE_UPDATE_INTERRUPT, rtc->rtcdev->features);
 
 	ret = devm_pm_runtime_enable(&pdev->dev);
 	if (ret < 0)
@@ -373,11 +412,22 @@ static int rzn1_rtc_probe(struct platform_device *pdev)
 	/* Disable all interrupts */
 	writel(0, rtc->base + RZN1_RTC_CTL1);
 
-	ret = devm_request_irq(&pdev->dev, alarm_irq, rzn1_rtc_alarm_irq, 0,
-			       dev_name(&pdev->dev), rtc);
+	spin_lock_init(&rtc->ctl1_access_lock);
+
+	ret = devm_request_irq(&pdev->dev, irq, rzn1_rtc_alarm_irq, 0, "RZN1 RTC Alarm", rtc);
 	if (ret) {
-		dev_err(&pdev->dev, "RTC timer interrupt not available\n");
+		dev_err(&pdev->dev, "RTC alarm interrupt not available\n");
 		goto dis_runtime_pm;
+	}
+
+	irq = platform_get_irq_byname_optional(pdev, "pps");
+	if (irq >= 0)
+		ret = devm_request_irq(&pdev->dev, irq, rzn1_rtc_1s_irq, 0, "RZN1 RTC 1s", rtc);
+
+	if (irq < 0 || ret) {
+		set_bit(RTC_FEATURE_ALARM_RES_MINUTE, rtc->rtcdev->features);
+		clear_bit(RTC_FEATURE_UPDATE_INTERRUPT, rtc->rtcdev->features);
+		dev_warn(&pdev->dev, "RTC pps interrupt not available. Alarm has only minute accuracy\n");
 	}
 
 	ret = devm_rtc_register_device(rtc->rtcdev);
@@ -405,7 +455,7 @@ MODULE_DEVICE_TABLE(of, rzn1_rtc_of_match);
 
 static struct platform_driver rzn1_rtc_driver = {
 	.probe = rzn1_rtc_probe,
-	.remove_new = rzn1_rtc_remove,
+	.remove = rzn1_rtc_remove,
 	.driver = {
 		.name	= "rzn1-rtc",
 		.of_match_table = rzn1_rtc_of_match,
@@ -413,7 +463,7 @@ static struct platform_driver rzn1_rtc_driver = {
 };
 module_platform_driver(rzn1_rtc_driver);
 
-MODULE_AUTHOR("Michel Pollet <Michel.Pollet@bp.renesas.com");
+MODULE_AUTHOR("Michel Pollet <buserror@gmail.com>");
 MODULE_AUTHOR("Miquel Raynal <miquel.raynal@bootlin.com");
 MODULE_DESCRIPTION("RZ/N1 RTC driver");
 MODULE_LICENSE("GPL");

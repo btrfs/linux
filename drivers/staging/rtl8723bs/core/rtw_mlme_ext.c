@@ -412,9 +412,9 @@ void free_mlme_ext_priv(struct mlme_ext_priv *pmlmeext)
 		return;
 
 	if (padapter->bDriverStopped) {
-		del_timer_sync(&pmlmeext->survey_timer);
-		del_timer_sync(&pmlmeext->link_timer);
-		/* del_timer_sync(&pmlmeext->ADDBA_timer); */
+		timer_delete_sync(&pmlmeext->survey_timer);
+		timer_delete_sync(&pmlmeext->link_timer);
+		/* timer_delete_sync(&pmlmeext->ADDBA_timer); */
 	}
 }
 
@@ -1390,7 +1390,7 @@ unsigned int OnAssocRsp(struct adapter *padapter, union recv_frame *precv_frame)
 	if (pmlmeinfo->state & WIFI_FW_ASSOC_SUCCESS)
 		return _SUCCESS;
 
-	del_timer_sync(&pmlmeext->link_timer);
+	timer_delete_sync(&pmlmeext->link_timer);
 
 	/* status */
 	status = le16_to_cpu(*(__le16 *)(pframe + WLAN_HDR_A3_LEN + 2));
@@ -1862,7 +1862,7 @@ unsigned int OnAction_sa_query(struct adapter *padapter, union recv_frame *precv
 		break;
 
 	case 1: /* SA Query rsp */
-		del_timer_sync(&pmlmeext->sa_query_timer);
+		timer_delete_sync(&pmlmeext->sa_query_timer);
 		break;
 	default:
 		break;
@@ -1870,10 +1870,10 @@ unsigned int OnAction_sa_query(struct adapter *padapter, union recv_frame *precv
 	if (0) {
 		int pp;
 
-		printk("pattrib->pktlen = %d =>", pattrib->pkt_len);
+		netdev_dbg(padapter->pnetdev, "pattrib->pktlen = %d =>", pattrib->pkt_len);
 		for (pp = 0; pp < pattrib->pkt_len; pp++)
-			printk(" %02x ", pframe[pp]);
-		printk("\n");
+			pr_cont(" %02x ", pframe[pp]);
+		pr_cont("\n");
 	}
 
 	return _SUCCESS;
@@ -4185,7 +4185,7 @@ void start_clnt_auth(struct adapter *padapter)
 	struct mlme_ext_priv *pmlmeext = &padapter->mlmeextpriv;
 	struct mlme_ext_info *pmlmeinfo = &(pmlmeext->mlmext_info);
 
-	del_timer_sync(&pmlmeext->link_timer);
+	timer_delete_sync(&pmlmeext->link_timer);
 
 	pmlmeinfo->state &= (~WIFI_FW_AUTH_NULL);
 	pmlmeinfo->state |= WIFI_FW_AUTH_STATE;
@@ -4210,7 +4210,7 @@ void start_clnt_assoc(struct adapter *padapter)
 	struct mlme_ext_priv *pmlmeext = &padapter->mlmeextpriv;
 	struct mlme_ext_info *pmlmeinfo = &(pmlmeext->mlmext_info);
 
-	del_timer_sync(&pmlmeext->link_timer);
+	timer_delete_sync(&pmlmeext->link_timer);
 
 	pmlmeinfo->state &= (~(WIFI_FW_AUTH_NULL | WIFI_FW_AUTH_STATE));
 	pmlmeinfo->state |= (WIFI_FW_AUTH_SUCCESS | WIFI_FW_ASSOC_STATE);
@@ -4792,7 +4792,7 @@ static void rtw_mlmeext_disconnect(struct adapter *padapter)
 
 	flush_all_cam_entry(padapter);
 
-	del_timer_sync(&pmlmeext->link_timer);
+	timer_delete_sync(&pmlmeext->link_timer);
 
 	/* pmlmepriv->LinkDetectInfo.TrafficBusyState = false; */
 	pmlmepriv->LinkDetectInfo.TrafficTransitionCount = 0;
@@ -4872,8 +4872,7 @@ void mlmeext_joinbss_event_callback(struct adapter *padapter, int join_res)
 		/* set_link_timer(pmlmeext, DISCONNECT_TO); */
 	}
 
-	if (get_iface_type(padapter) == IFACE_PORT0)
-		rtw_lps_ctrl_wk_cmd(padapter, LPS_CTRL_CONNECT, 0);
+	rtw_lps_ctrl_wk_cmd(padapter, LPS_CTRL_CONNECT, 0);
 }
 
 /* currently only adhoc mode will go here */
@@ -4960,7 +4959,6 @@ void _linked_info_dump(struct adapter *padapter)
 					rtw_hal_get_def_var(padapter, HW_DEF_RA_INFO_DUMP, &i);
 			}
 		}
-		rtw_hal_set_def_var(padapter, HAL_DEF_DBG_RX_INFO_DUMP, NULL);
 	}
 }
 
@@ -5270,7 +5268,7 @@ u8 createbss_hdl(struct adapter *padapter, u8 *pbuf)
 		/* rtw_hal_set_hwreg(padapter, HW_VAR_INITIAL_GAIN, (u8 *)(&initialgain)); */
 
 		/* cancel link timer */
-		del_timer_sync(&pmlmeext->link_timer);
+		timer_delete_sync(&pmlmeext->link_timer);
 
 		/* clear CAM */
 		flush_all_cam_entry(padapter);
@@ -5314,7 +5312,7 @@ u8 join_cmd_hdl(struct adapter *padapter, u8 *pbuf)
 		/* clear CAM */
 		flush_all_cam_entry(padapter);
 
-		del_timer_sync(&pmlmeext->link_timer);
+		timer_delete_sync(&pmlmeext->link_timer);
 
 		/* set MSR to nolink -> infra. mode */
 		/* Set_MSR(padapter, _HW_STATE_NOLINK_); */
@@ -5427,7 +5425,7 @@ u8 join_cmd_hdl(struct adapter *padapter, u8 *pbuf)
 	set_channel_bwmode(padapter, ch, offset, bw);
 
 	/* cancel link timer */
-	del_timer_sync(&pmlmeext->link_timer);
+	timer_delete_sync(&pmlmeext->link_timer);
 
 	start_clnt_join(padapter);
 
@@ -5638,7 +5636,7 @@ u8 setkey_hdl(struct adapter *padapter, u8 *pbuf)
 		rtw_hal_set_hwreg(padapter, HW_VAR_SEC_DK_CFG, (u8 *)true);
 
 	/* allow multicast packets to driver */
-	padapter->HalFunc.SetHwRegHandler(padapter, HW_VAR_ON_RCR_AM, null_addr);
+	SetHwReg8723BS(padapter, HW_VAR_ON_RCR_AM, null_addr);
 
 	return H2C_SUCCESS;
 }

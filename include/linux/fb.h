@@ -21,6 +21,7 @@ struct fb_info;
 struct file;
 struct i2c_adapter;
 struct inode;
+struct lcd_device;
 struct module;
 struct notifier_block;
 struct page;
@@ -224,6 +225,7 @@ struct fb_deferred_io {
 	int open_count; /* number of opened files; protected by fb_info lock */
 	struct mutex lock; /* mutex that protects the pageref list */
 	struct list_head pagereflist; /* list of pagerefs for touched pages */
+	struct address_space *mapping; /* page cache object for fb device */
 	/* callback */
 	struct page *(*get_page)(struct fb_info *info, unsigned long offset);
 	void (*deferred_io)(struct fb_info *info, struct list_head *pagelist);
@@ -480,6 +482,13 @@ struct fb_info {
 	struct mutex bl_curve_mutex;
 	u8 bl_curve[FB_BACKLIGHT_LEVELS];
 #endif
+
+	/*
+	 * Assigned LCD device; set before framebuffer
+	 * registration, remove after unregister
+	 */
+	struct lcd_device *lcd_dev;
+
 #ifdef CONFIG_FB_DEFERRED_IO
 	struct delayed_work deferred_work;
 	unsigned long npagerefs;
@@ -753,6 +762,11 @@ static inline struct backlight_device *fb_bl_device(struct fb_info *info)
 	return NULL;
 }
 #endif
+
+static inline struct lcd_device *fb_lcd_device(struct fb_info *info)
+{
+	return info->lcd_dev;
+}
 
 /* fbmon.c */
 #define FB_MAXTIMINGS		0

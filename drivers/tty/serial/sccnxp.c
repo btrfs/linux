@@ -1033,7 +1033,7 @@ static void sccnxp_remove(struct platform_device *pdev)
 	if (!s->poll)
 		devm_free_irq(&pdev->dev, s->irq, s);
 	else
-		del_timer_sync(&s->timer);
+		timer_delete_sync(&s->timer);
 
 	for (i = 0; i < s->uart.nr; i++)
 		uart_remove_one_port(&s->uart, &s->port[i]);
@@ -1052,7 +1052,7 @@ static struct platform_driver sccnxp_uart_driver = {
 		.name	= SCCNXP_NAME,
 	},
 	.probe		= sccnxp_probe,
-	.remove_new	= sccnxp_remove,
+	.remove		= sccnxp_remove,
 	.id_table	= sccnxp_id_table,
 };
 module_platform_driver(sccnxp_uart_driver);

@@ -16,6 +16,7 @@
 #include <linux/gfp.h>
 #include <linux/overflow.h>
 #include <linux/types.h>
+#include <linux/rcupdate.h>
 #include <linux/workqueue.h>
 #include <linux/percpu-refcount.h>
 #include <linux/cleanup.h>
@@ -77,7 +78,17 @@ enum _slab_flag_bits {
 #define SLAB_POISON		__SLAB_FLAG_BIT(_SLAB_POISON)
 /* Indicate a kmalloc slab */
 #define SLAB_KMALLOC		__SLAB_FLAG_BIT(_SLAB_KMALLOC)
-/* Align objs on cache lines */
+/**
+ * define SLAB_HWCACHE_ALIGN - Align objects on cache line boundaries.
+ *
+ * Sufficiently large objects are aligned on cache line boundary. For object
+ * size smaller than a half of cache line size, the alignment is on the half of
+ * cache line size. In general, if object size is smaller than 1/2^n of cache
+ * line size, the alignment is adjusted to 1/2^n.
+ *
+ * If explicit alignment is also requested by the respective
+ * &struct kmem_cache_args field, the greater of both is alignments is applied.
+ */
 #define SLAB_HWCACHE_ALIGN	__SLAB_FLAG_BIT(_SLAB_HWCACHE_ALIGN)
 /* Use GFP_DMA memory */
 #define SLAB_CACHE_DMA		__SLAB_FLAG_BIT(_SLAB_CACHE_DMA)
@@ -87,8 +98,8 @@ enum _slab_flag_bits {
 #define SLAB_STORE_USER		__SLAB_FLAG_BIT(_SLAB_STORE_USER)
 /* Panic if kmem_cache_create() fails */
 #define SLAB_PANIC		__SLAB_FLAG_BIT(_SLAB_PANIC)
-/*
- * SLAB_TYPESAFE_BY_RCU - **WARNING** READ THIS!
+/**
+ * define SLAB_TYPESAFE_BY_RCU - **WARNING** READ THIS!
  *
  * This delays freeing the SLAB page by a grace period, it does _NOT_
  * delay object freeing. This means that if you do kmem_cache_free()
@@ -99,20 +110,22 @@ enum _slab_flag_bits {
  * stays valid, the trick to using this is relying on an independent
  * object validation pass. Something like:
  *
- * begin:
- *  rcu_read_lock();
- *  obj = lockless_lookup(key);
- *  if (obj) {
- *    if (!try_get_ref(obj)) // might fail for free objects
- *      rcu_read_unlock();
- *      goto begin;
+ * ::
  *
- *    if (obj->key != key) { // not the object we expected
- *      put_ref(obj);
- *      rcu_read_unlock();
- *      goto begin;
- *    }
- *  }
+ *  begin:
+ *   rcu_read_lock();
+ *   obj = lockless_lookup(key);
+ *   if (obj) {
+ *     if (!try_get_ref(obj)) // might fail for free objects
+ *       rcu_read_unlock();
+ *       goto begin;
+ *
+ *     if (obj->key != key) { // not the object we expected
+ *       put_ref(obj);
+ *       rcu_read_unlock();
+ *       goto begin;
+ *     }
+ *   }
  *  rcu_read_unlock();
  *
  * This is useful if we need to approach a kernel structure obliquely,
@@ -123,6 +136,15 @@ enum _slab_flag_bits {
  *
  * rcu_read_lock before reading the address, then rcu_read_unlock after
  * taking the spinlock within the structure expected at that address.
+ *
+ * Note that object identity check has to be done *after* acquiring a
+ * reference, therefore user has to ensure proper ordering for loads.
+ * Similarly, when initializing objects allocated with SLAB_TYPESAFE_BY_RCU,
+ * the newly allocated object has to be fully initialized *before* its
+ * refcount gets initialized and proper ordering for stores is required.
+ * refcount_{add|inc}_not_zero_acquire() and refcount_set_release() are
+ * designed with the proper fences required for reference counting objects
+ * allocated with SLAB_TYPESAFE_BY_RCU.
  *
  * Note that it is not possible to acquire a lock within a structure
  * allocated with SLAB_TYPESAFE_BY_RCU without first acquiring a reference
@@ -137,7 +159,6 @@ enum _slab_flag_bits {
  *
  * Note that SLAB_TYPESAFE_BY_RCU was originally named SLAB_DESTROY_BY_RCU.
  */
-/* Defer freeing slabs to RCU */
 #define SLAB_TYPESAFE_BY_RCU	__SLAB_FLAG_BIT(_SLAB_TYPESAFE_BY_RCU)
 /* Trace allocations and frees */
 #define SLAB_TRACE		__SLAB_FLAG_BIT(_SLAB_TRACE)
@@ -170,7 +191,12 @@ enum _slab_flag_bits {
 #else
 # define SLAB_FAILSLAB		__SLAB_FLAG_UNUSED
 #endif
-/* Account to memcg */
+/**
+ * define SLAB_ACCOUNT - Account allocations to memcg.
+ *
+ * All object allocations from this cache will be memcg accounted, regardless of
+ * __GFP_ACCOUNT being or not being passed to individual allocations.
+ */
 #ifdef CONFIG_MEMCG
 # define SLAB_ACCOUNT		__SLAB_FLAG_BIT(_SLAB_ACCOUNT)
 #else
@@ -197,7 +223,13 @@ enum _slab_flag_bits {
 #endif
 
 /* The following flags affect the page allocator grouping pages by mobility */
-/* Objects are reclaimable */
+/**
+ * define SLAB_RECLAIM_ACCOUNT - Objects are reclaimable.
+ *
+ * Use this flag for caches that have an associated shrinker. As a result, slab
+ * pages are allocated with __GFP_RECLAIMABLE, which affects grouping pages by
+ * mobility, and are accounted in SReclaimable counter in /proc/meminfo
+ */
 #ifndef CONFIG_SLUB_TINY
 #define SLAB_RECLAIM_ACCOUNT	__SLAB_FLAG_BIT(_SLAB_RECLAIM_ACCOUNT)
 #else
@@ -211,12 +243,6 @@ enum _slab_flag_bits {
 #else
 #define SLAB_NO_OBJ_EXT		__SLAB_FLAG_UNUSED
 #endif
-
-/*
- * freeptr_t represents a SLUB freelist pointer, which might be encoded
- * and not dereferenceable if CONFIG_SLAB_FREELIST_HARDENED is enabled.
- */
-typedef struct { unsigned long v; } freeptr_t;
 
 /*
  * ZERO_SIZE_PTR will be returned for zero sized kmalloc requests.
@@ -448,6 +474,7 @@ void kfree_sensitive(const void *objp);
 size_t __ksize(const void *objp);
 
 DEFINE_FREE(kfree, void *, if (!IS_ERR_OR_NULL(_T)) kfree(_T))
+DEFINE_FREE(kfree_sensitive, void *, if (_T) kfree_sensitive(_T))
 
 /**
  * ksize - Report actual allocation size of associated object
@@ -918,8 +945,6 @@ static inline __alloc_size(1, 2) void *kmalloc_array_noprof(size_t n, size_t siz
 
 	if (unlikely(check_mul_overflow(n, size, &bytes)))
 		return NULL;
-	if (__builtin_constant_p(n) && __builtin_constant_p(size))
-		return kmalloc_noprof(bytes, flags);
 	return kmalloc_noprof(bytes, flags);
 }
 #define kmalloc_array(...)			alloc_hooks(kmalloc_array_noprof(__VA_ARGS__))
@@ -1059,6 +1084,19 @@ extern void kvfree_sensitive(const void *addr, size_t len);
 
 unsigned int kmem_cache_size(struct kmem_cache *s);
 
+#ifndef CONFIG_KVFREE_RCU_BATCHED
+static inline void kvfree_rcu_barrier(void)
+{
+	rcu_barrier();
+}
+
+static inline void kfree_rcu_scheduler_running(void) { }
+#else
+void kvfree_rcu_barrier(void);
+
+void kfree_rcu_scheduler_running(void);
+#endif
+
 /**
  * kmalloc_size_roundup - Report allocation bucket size for the given size
  *
@@ -1076,5 +1114,6 @@ unsigned int kmem_cache_size(struct kmem_cache *s);
 size_t kmalloc_size_roundup(size_t size);
 
 void __init kmem_cache_init_late(void);
+void __init kvfree_rcu_init(void);
 
 #endif	/* _LINUX_SLAB_H */

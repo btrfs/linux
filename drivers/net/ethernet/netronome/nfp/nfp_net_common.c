@@ -227,7 +227,7 @@ static void nfp_net_reconfig_sync_enter(struct nfp_net *nn)
 	spin_unlock_bh(&nn->reconfig_lock);
 
 	if (cancelled_timer) {
-		del_timer_sync(&nn->reconfig_timer);
+		timer_delete_sync(&nn->reconfig_timer);
 		nfp_net_reconfig_wait(nn, nn->reconfig_timer.expires);
 	}
 
@@ -829,7 +829,7 @@ nfp_net_prepare_vector(struct nfp_net *nn, struct nfp_net_r_vector *r_vec,
 		return err;
 	}
 
-	irq_set_affinity_hint(r_vec->irq_vector, &r_vec->affinity_mask);
+	irq_update_affinity_hint(r_vec->irq_vector, &r_vec->affinity_mask);
 
 	nn_dbg(nn, "RV%02d: irq=%03d/%03d\n", idx, r_vec->irq_vector,
 	       r_vec->irq_entry);
@@ -840,7 +840,7 @@ nfp_net_prepare_vector(struct nfp_net *nn, struct nfp_net_r_vector *r_vec,
 static void
 nfp_net_cleanup_vector(struct nfp_net *nn, struct nfp_net_r_vector *r_vec)
 {
-	irq_set_affinity_hint(r_vec->irq_vector, NULL);
+	irq_update_affinity_hint(r_vec->irq_vector, NULL);
 	nfp_net_napi_del(&nn->dp, r_vec);
 	free_irq(r_vec->irq_vector, r_vec);
 }
@@ -2779,7 +2779,7 @@ static void nfp_net_netdev_init(struct nfp_net *nn)
 		break;
 	}
 
-	netdev->watchdog_timeo = msecs_to_jiffies(5 * 1000);
+	netdev->watchdog_timeo = secs_to_jiffies(5);
 
 	/* MTU range: 68 - hw-specific max */
 	netdev->min_mtu = ETH_MIN_MTU;

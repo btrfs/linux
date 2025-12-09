@@ -126,7 +126,7 @@ static int adf_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 	adf_init_hw_data_dh895xcc(accel_dev->hw_device);
 	pci_read_config_byte(pdev, PCI_REVISION_ID, &accel_pci_dev->revid);
 	pci_read_config_dword(pdev, ADF_DEVICE_FUSECTL_OFFSET,
-			      &hw_data->fuses);
+			      &hw_data->fuses[ADF_FUSECTL0]);
 
 	/* Get Accelerators and Accelerators Engines masks */
 	hw_data->accel_mask = hw_data->get_accel_mask(hw_data);
@@ -252,4 +252,4 @@ MODULE_FIRMWARE(ADF_DH895XCC_FW);
 MODULE_FIRMWARE(ADF_DH895XCC_MMP);
 MODULE_DESCRIPTION("Intel(R) QuickAssist Technology");
 MODULE_VERSION(ADF_DRV_VERSION);
-MODULE_IMPORT_NS(CRYPTO_QAT);
+MODULE_IMPORT_NS("CRYPTO_QAT");

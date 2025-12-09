@@ -79,7 +79,7 @@ DEFINE_NFSD_XDR_ERR_EVENT(cant_encode);
 		{ NFSD_MAY_READ,		"READ" },		\
 		{ NFSD_MAY_SATTR,		"SATTR" },		\
 		{ NFSD_MAY_TRUNC,		"TRUNC" },		\
-		{ NFSD_MAY_LOCK,		"LOCK" },		\
+		{ NFSD_MAY_NLM,			"NLM" },		\
 		{ NFSD_MAY_OWNER_OVERRIDE,	"OWNER_OVERRIDE" },	\
 		{ NFSD_MAY_LOCAL_ACCESS,	"LOCAL_ACCESS" },	\
 		{ NFSD_MAY_BYPASS_GSS_ON_ROOT,	"BYPASS_GSS_ON_ROOT" },	\
@@ -163,7 +163,7 @@ TRACE_EVENT(nfsd_compound_decode_err,
 		__entry->opnum, __entry->status)
 );
 
-TRACE_EVENT(nfsd_compound_encode_err,
+DECLARE_EVENT_CLASS(nfsd_compound_err_class,
 	TP_PROTO(
 		const struct svc_rqst *rqstp,
 		u32 opnum,
@@ -183,6 +183,18 @@ TRACE_EVENT(nfsd_compound_encode_err,
 	TP_printk("opnum=%u status=%lu",
 		__entry->opnum, __entry->status)
 );
+
+#define DEFINE_NFSD_COMPOUND_ERR_EVENT(name)				\
+DEFINE_EVENT(nfsd_compound_err_class, nfsd_compound_##name##_err,	\
+	TP_PROTO(							\
+		const struct svc_rqst *rqstp,				\
+		u32 opnum,						\
+		__be32 status						\
+	),								\
+	TP_ARGS(rqstp, opnum, status))
+
+DEFINE_NFSD_COMPOUND_ERR_EVENT(op);
+DEFINE_NFSD_COMPOUND_ERR_EVENT(encode);
 
 #define show_fs_file_type(x) \
 	__print_symbolic(x, \
@@ -614,7 +626,6 @@ DEFINE_STATEID_EVENT(open);
 DEFINE_STATEID_EVENT(deleg_read);
 DEFINE_STATEID_EVENT(deleg_write);
 DEFINE_STATEID_EVENT(deleg_return);
-DEFINE_STATEID_EVENT(deleg_recall);
 
 DECLARE_EVENT_CLASS(nfsd_stateseqid_class,
 	TP_PROTO(u32 seqid, const stateid_t *stp),
@@ -792,6 +803,14 @@ DEFINE_EVENT(nfsd_cs_slot_class, nfsd_##name, \
 DEFINE_CS_SLOT_EVENT(slot_seqid_conf);
 DEFINE_CS_SLOT_EVENT(slot_seqid_unconf);
 
+#define show_nfs_slot_flags(val)					\
+	__print_flags(val, "|",						\
+		{ NFSD4_SLOT_INUSE,		"INUSE" },		\
+		{ NFSD4_SLOT_CACHETHIS,		"CACHETHIS" },		\
+		{ NFSD4_SLOT_INITIALIZED,	"INITIALIZED" },	\
+		{ NFSD4_SLOT_CACHED,		"CACHED" },		\
+		{ NFSD4_SLOT_REUSED,		"REUSED" })
+
 TRACE_EVENT(nfsd_slot_seqid_sequence,
 	TP_PROTO(
 		const struct nfs4_client *clp,
@@ -802,10 +821,11 @@ TRACE_EVENT(nfsd_slot_seqid_sequence,
 	TP_STRUCT__entry(
 		__field(u32, seqid)
 		__field(u32, slot_seqid)
+		__field(u32, slot_index)
+		__field(unsigned long, slot_flags)
 		__field(u32, cl_boot)
 		__field(u32, cl_id)
 		__sockaddr(addr, clp->cl_cb_conn.cb_addrlen)
-		__field(bool, in_use)
 	),
 	TP_fast_assign(
 		__entry->cl_boot = clp->cl_clientid.cl_boot;
@@ -814,11 +834,13 @@ TRACE_EVENT(nfsd_slot_seqid_sequence,
 				  clp->cl_cb_conn.cb_addrlen);
 		__entry->seqid = seq->seqid;
 		__entry->slot_seqid = slot->sl_seqid;
+		__entry->slot_index = seq->slotid;
+		__entry->slot_flags = slot->sl_flags;
 	),
-	TP_printk("addr=%pISpc client %08x:%08x seqid=%u slot_seqid=%u (%sin use)",
+	TP_printk("addr=%pISpc client %08x:%08x idx=%u seqid=%u slot_seqid=%u flags=%s",
 		__get_sockaddr(addr), __entry->cl_boot, __entry->cl_id,
-		__entry->seqid, __entry->slot_seqid,
-		__entry->in_use ? "" : "not "
+		__entry->slot_index, __entry->seqid, __entry->slot_seqid,
+		show_nfs_slot_flags(__entry->slot_flags)
 	)
 );
 
@@ -1028,6 +1050,7 @@ DEFINE_CLID_EVENT(confirmed_r);
 		{ 1 << NFSD_FILE_HASHED,	"HASHED" },		\
 		{ 1 << NFSD_FILE_PENDING,	"PENDING" },		\
 		{ 1 << NFSD_FILE_REFERENCED,	"REFERENCED" },		\
+		{ 1 << NFSD_FILE_RECENT,	"RECENT" },		\
 		{ 1 << NFSD_FILE_GC,		"GC" })
 
 DECLARE_EVENT_CLASS(nfsd_file_class,
@@ -1306,6 +1329,7 @@ DEFINE_NFSD_FILE_GC_EVENT(nfsd_file_lru_del_disposed);
 DEFINE_NFSD_FILE_GC_EVENT(nfsd_file_gc_in_use);
 DEFINE_NFSD_FILE_GC_EVENT(nfsd_file_gc_writeback);
 DEFINE_NFSD_FILE_GC_EVENT(nfsd_file_gc_referenced);
+DEFINE_NFSD_FILE_GC_EVENT(nfsd_file_gc_aged);
 DEFINE_NFSD_FILE_GC_EVENT(nfsd_file_gc_disposed);
 
 DECLARE_EVENT_CLASS(nfsd_file_lruwalk_class,
@@ -1335,6 +1359,7 @@ DEFINE_EVENT(nfsd_file_lruwalk_class, name,				\
 	TP_ARGS(removed, remaining))
 
 DEFINE_NFSD_FILE_LRUWALK_EVENT(nfsd_file_gc_removed);
+DEFINE_NFSD_FILE_LRUWALK_EVENT(nfsd_file_gc_recent);
 DEFINE_NFSD_FILE_LRUWALK_EVENT(nfsd_file_shrinker_removed);
 
 TRACE_EVENT(nfsd_file_close,
@@ -1591,7 +1616,7 @@ DECLARE_EVENT_CLASS(nfsd_cb_lifetime_class,
 		__entry->cl_id = clp->cl_clientid.cl_id;
 		__entry->cb = cb;
 		__entry->opcode = cb->cb_ops ? cb->cb_ops->opcode : _CB_NULL;
-		__entry->need_restart = cb->cb_need_restart;
+		__entry->need_restart = test_bit(NFSD4_CALLBACK_REQUEUE, &cb->cb_flags);
 		__assign_sockaddr(addr, &clp->cl_cb_conn.cb_addr,
 				  clp->cl_cb_conn.cb_addrlen)
 	),
@@ -1685,7 +1710,7 @@ TRACE_EVENT(nfsd_cb_free_slot,
 		__entry->cl_id = sid->clientid.cl_id;
 		__entry->seqno = sid->sequence;
 		__entry->reserved = sid->reserved;
-		__entry->slot_seqno = session->se_cb_seq_nr;
+		__entry->slot_seqno = session->se_cb_seq_nr[cb->cb_held_slot];
 	),
 	TP_printk(SUNRPC_TRACE_TASK_SPECIFIER
 		" sessionid=%08x:%08x:%08x:%08x new slot seqno=%u",
@@ -2232,7 +2257,7 @@ TRACE_EVENT(nfsd_copy_done,
 	)
 );
 
-TRACE_EVENT(nfsd_copy_async_done,
+DECLARE_EVENT_CLASS(nfsd_copy_async_done_class,
 	TP_PROTO(
 		const struct nfsd4_copy *copy
 	),
@@ -2300,6 +2325,15 @@ TRACE_EVENT(nfsd_copy_async_done,
 		__entry->src_cp_pos, __entry->dst_cp_pos, __entry->cp_count
 	)
 );
+
+#define DEFINE_COPY_ASYNC_DONE_EVENT(name)		\
+DEFINE_EVENT(nfsd_copy_async_done_class,		\
+	nfsd_copy_async_##name,				\
+	TP_PROTO(const struct nfsd4_copy *copy),	\
+	TP_ARGS(copy))
+
+DEFINE_COPY_ASYNC_DONE_EVENT(done);
+DEFINE_COPY_ASYNC_DONE_EVENT(cancel);
 
 #endif /* _NFSD_TRACE_H */
 

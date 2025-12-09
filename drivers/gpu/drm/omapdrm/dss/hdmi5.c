@@ -339,10 +339,9 @@ static void hdmi5_bridge_mode_set(struct drm_bridge *bridge,
 }
 
 static void hdmi5_bridge_enable(struct drm_bridge *bridge,
-				struct drm_bridge_state *bridge_state)
+				struct drm_atomic_state *state)
 {
 	struct omap_hdmi *hdmi = drm_bridge_to_hdmi(bridge);
-	struct drm_atomic_state *state = bridge_state->base.state;
 	struct drm_connector_state *conn_state;
 	struct drm_connector *connector;
 	struct drm_crtc_state *crtc_state;
@@ -408,7 +407,7 @@ done:
 }
 
 static void hdmi5_bridge_disable(struct drm_bridge *bridge,
-				 struct drm_bridge_state *bridge_state)
+				 struct drm_atomic_state *state)
 {
 	struct omap_hdmi *hdmi = drm_bridge_to_hdmi(bridge);
 	unsigned long flags;
@@ -819,7 +818,7 @@ static const struct of_device_id hdmi_of_match[] = {
 
 struct platform_driver omapdss_hdmi5hw_driver = {
 	.probe		= hdmi5_probe,
-	.remove_new	= hdmi5_remove,
+	.remove		= hdmi5_remove,
 	.driver         = {
 		.name   = "omapdss_hdmi5",
 		.of_match_table = hdmi_of_match,

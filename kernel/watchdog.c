@@ -190,7 +190,7 @@ void watchdog_hardlockup_check(unsigned int cpu, struct pt_regs *regs)
 		 * with printk_cpu_sync_get_irqsave() that we can still at least
 		 * get the message about the lockup out.
 		 */
-		pr_emerg("Watchdog detected hard LOCKUP on cpu %d\n", cpu);
+		pr_emerg("CPU%u: Watchdog detected hard LOCKUP on cpu %u\n", this_cpu, cpu);
 		printk_cpu_sync_get_irqsave(flags);
 
 		print_modules();
@@ -346,8 +346,6 @@ static int __init watchdog_thresh_setup(char *str)
 	return 1;
 }
 __setup("watchdog_thresh=", watchdog_thresh_setup);
-
-static void __lockup_detector_cleanup(void);
 
 #ifdef CONFIG_SOFTLOCKUP_DETECTOR_INTR_STORM
 enum stats_per_group {
@@ -644,6 +642,14 @@ static int is_softlockup(unsigned long touch_ts,
 		    need_counting_irqs())
 			start_counting_irqs();
 
+		/*
+		 * A poorly behaving BPF scheduler can live-lock the system into
+		 * soft lockups. Tell sched_ext to try ejecting the BPF
+		 * scheduler when close to a soft lockup.
+		 */
+		if (time_after_eq(now, period_ts + get_softlockup_thresh() * 3 / 4))
+			scx_softlockup(now - touch_ts);
+
 		/* Warn about unreasonable delays. */
 		if (time_after(now, period_ts + get_softlockup_thresh()))
 			return now - touch_ts;
@@ -789,8 +795,7 @@ static void watchdog_enable(unsigned int cpu)
 	 * Start the timer first to prevent the hardlockup watchdog triggering
 	 * before the timer has a chance to fire.
 	 */
-	hrtimer_init(hrtimer, CLOCK_MONOTONIC, HRTIMER_MODE_REL_HARD);
-	hrtimer->function = watchdog_timer_fn;
+	hrtimer_setup(hrtimer, watchdog_timer_fn, CLOCK_MONOTONIC, HRTIMER_MODE_REL_HARD);
 	hrtimer_start(hrtimer, ns_to_ktime(sample_period),
 		      HRTIMER_MODE_REL_PINNED_HARD);
 
@@ -878,11 +883,6 @@ static void __lockup_detector_reconfigure(void)
 
 	watchdog_hardlockup_start();
 	cpus_read_unlock();
-	/*
-	 * Must be called outside the cpus locked section to prevent
-	 * recursive locking in the perf code.
-	 */
-	__lockup_detector_cleanup();
 }
 
 void lockup_detector_reconfigure(void)
@@ -932,24 +932,6 @@ static inline void lockup_detector_setup(void)
 }
 #endif /* !CONFIG_SOFTLOCKUP_DETECTOR */
 
-static void __lockup_detector_cleanup(void)
-{
-	lockdep_assert_held(&watchdog_mutex);
-	hardlockup_detector_perf_cleanup();
-}
-
-/**
- * lockup_detector_cleanup - Cleanup after cpu hotplug or sysctl changes
- *
- * Caller must not hold the cpu hotplug rwsem.
- */
-void lockup_detector_cleanup(void)
-{
-	mutex_lock(&watchdog_mutex);
-	__lockup_detector_cleanup();
-	mutex_unlock(&watchdog_mutex);
-}
-
 /**
  * lockup_detector_soft_poweroff - Interface to stop lockup detector(s)
  *
@@ -990,6 +972,7 @@ static int proc_watchdog_common(int which, const struct ctl_table *table, int wr
 
 	mutex_lock(&watchdog_mutex);
 
+	old = *param;
 	if (!write) {
 		/*
 		 * On read synchronize the userspace interface. This is a
@@ -997,8 +980,8 @@ static int proc_watchdog_common(int which, const struct ctl_table *table, int wr
 		 */
 		*param = (watchdog_enabled & which) != 0;
 		err = proc_dointvec_minmax(table, write, buffer, lenp, ppos);
+		*param = old;
 	} else {
-		old = READ_ONCE(*param);
 		err = proc_dointvec_minmax(table, write, buffer, lenp, ppos);
 		if (!err && old != READ_ONCE(*param))
 			proc_watchdog_update();
@@ -1085,7 +1068,7 @@ static int proc_watchdog_cpumask(const struct ctl_table *table, int write,
 
 static const int sixty = 60;
 
-static struct ctl_table watchdog_sysctls[] = {
+static const struct ctl_table watchdog_sysctls[] = {
 	{
 		.procname       = "watchdog",
 		.data		= &watchdog_user_enabled,

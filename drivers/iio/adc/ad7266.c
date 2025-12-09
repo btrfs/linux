@@ -153,11 +153,10 @@ static int ad7266_read_raw(struct iio_dev *indio_dev,
 
 	switch (m) {
 	case IIO_CHAN_INFO_RAW:
-		ret = iio_device_claim_direct_mode(indio_dev);
-		if (ret)
-			return ret;
+		if (!iio_device_claim_direct(indio_dev))
+			return -EBUSY;
 		ret = ad7266_read_single(st, val, chan->address);
-		iio_device_release_direct_mode(indio_dev);
+		iio_device_release_direct(indio_dev);
 
 		if (ret < 0)
 			return ret;
@@ -383,7 +382,7 @@ static const char * const ad7266_gpio_labels[] = {
 
 static int ad7266_probe(struct spi_device *spi)
 {
-	struct ad7266_platform_data *pdata = spi->dev.platform_data;
+	const struct ad7266_platform_data *pdata = dev_get_platdata(&spi->dev);
 	struct iio_dev *indio_dev;
 	struct ad7266_state *st;
 	unsigned int i;

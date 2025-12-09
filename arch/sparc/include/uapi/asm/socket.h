@@ -139,6 +139,10 @@
 #define SCM_DEVMEM_DMABUF        SO_DEVMEM_DMABUF
 #define SO_DEVMEM_DONTNEED       0x0059
 
+#define SCM_TS_OPT_ID            0x005a
+
+#define SO_RCVPRIORITY           0x005b
+
 #if !defined(__KERNEL__)
 
 

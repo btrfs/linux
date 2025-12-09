@@ -860,7 +860,7 @@ static void atmci_send_stop_cmd(struct atmel_mci *host, struct mmc_data *data)
 }
 
 /*
- * Configure given PDC buffer taking care of alignement issues.
+ * Configure given PDC buffer taking care of alignment issues.
  * Update host->data_size and host->sg.
  */
 static void atmci_pdc_set_single_buf(struct atmel_mci *host,
@@ -1592,7 +1592,7 @@ static void atmci_request_end(struct atmel_mci *host, struct mmc_request *mrq)
 
 	WARN_ON(host->cmd || host->data);
 
-	del_timer(&host->timer);
+	timer_delete(&host->timer);
 
 	/*
 	 * Update the MMC clock rate if necessary. This may be
@@ -2357,7 +2357,7 @@ static void atmci_cleanup_slot(struct atmel_mci_slot *slot,
 
 	if (slot->detect_pin) {
 		free_irq(gpiod_to_irq(slot->detect_pin), slot);
-		del_timer_sync(&slot->detect_timer);
+		timer_delete_sync(&slot->detect_timer);
 	}
 
 	slot->host->slot[id] = NULL;
@@ -2499,8 +2499,10 @@ static int atmci_probe(struct platform_device *pdev)
 	/* Get MCI capabilities and set operations according to it */
 	atmci_get_cap(host);
 	ret = atmci_configure_dma(host);
-	if (ret == -EPROBE_DEFER)
+	if (ret == -EPROBE_DEFER) {
+		clk_disable_unprepare(host->mck);
 		goto err_dma_probe_defer;
+	}
 	if (ret == 0) {
 		host->prepare_data = &atmci_prepare_data_dma;
 		host->submit_data = &atmci_submit_data_dma;
@@ -2583,7 +2585,7 @@ err_init_slot:
 	pm_runtime_disable(dev);
 	pm_runtime_put_noidle(dev);
 
-	del_timer_sync(&host->timer);
+	timer_delete_sync(&host->timer);
 	if (!IS_ERR(host->dma.chan))
 		dma_release_channel(host->dma.chan);
 err_dma_probe_defer:
@@ -2611,7 +2613,7 @@ static void atmci_remove(struct platform_device *pdev)
 	atmci_writel(host, ATMCI_CR, ATMCI_CR_MCIDIS);
 	atmci_readl(host, ATMCI_SR);
 
-	del_timer_sync(&host->timer);
+	timer_delete_sync(&host->timer);
 	if (!IS_ERR(host->dma.chan))
 		dma_release_channel(host->dma.chan);
 
@@ -2653,7 +2655,7 @@ static const struct dev_pm_ops atmci_dev_pm_ops = {
 
 static struct platform_driver atmci_driver = {
 	.probe		= atmci_probe,
-	.remove_new	= atmci_remove,
+	.remove		= atmci_remove,
 	.driver		= {
 		.name		= "atmel_mci",
 		.probe_type	= PROBE_PREFER_ASYNCHRONOUS,

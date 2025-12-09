@@ -10,6 +10,12 @@
 /* Device IDs */
 #define TXGBE_DEV_ID_SP1000                     0x1001
 #define TXGBE_DEV_ID_WX1820                     0x2001
+#define TXGBE_DEV_ID_AML5010                    0x5010
+#define TXGBE_DEV_ID_AML5110                    0x5110
+#define TXGBE_DEV_ID_AML5025                    0x5025
+#define TXGBE_DEV_ID_AML5125                    0x5125
+#define TXGBE_DEV_ID_AML5040                    0x5040
+#define TXGBE_DEV_ID_AML5140                    0x5140
 
 /* Subsystem IDs */
 /* SFP */
@@ -75,8 +81,7 @@
 #define TXGBE_PX_MISC_IEN_MASK                            \
 	(TXGBE_PX_MISC_ETH_LKDN | TXGBE_PX_MISC_DEV_RST | \
 	 TXGBE_PX_MISC_ETH_EVENT | TXGBE_PX_MISC_ETH_LK | \
-	 TXGBE_PX_MISC_ETH_AN | TXGBE_PX_MISC_INT_ERR |   \
-	 TXGBE_PX_MISC_GPIO)
+	 TXGBE_PX_MISC_ETH_AN | TXGBE_PX_MISC_INT_ERR)
 
 /* Port cfg registers */
 #define TXGBE_CFG_PORT_ST                       0x14404
@@ -137,6 +142,14 @@
 #define TXGBE_RDB_FDIR_FLEX_CFG_BASE_MAC        FIELD_PREP(GENMASK(1, 0), 0)
 #define TXGBE_RDB_FDIR_FLEX_CFG_MSK             BIT(2)
 #define TXGBE_RDB_FDIR_FLEX_CFG_OFST(v)         FIELD_PREP(GENMASK(7, 3), v)
+
+/*************************** Amber Lite Registers ****************************/
+#define TXGBE_PX_PF_BME                         0x4B8
+#define TXGBE_AML_MAC_TX_CFG                    0x11000
+#define TXGBE_AML_MAC_TX_CFG_SPEED_MASK         GENMASK(30, 27)
+#define TXGBE_AML_MAC_TX_CFG_SPEED_25G          BIT(28)
+#define TXGBE_RDM_RSC_CTL                       0x1200C
+#define TXGBE_RDM_RSC_CTL_FREE_CTL              BIT(7)
 
 /* Checksum and EEPROM pointers */
 #define TXGBE_EEPROM_LAST_WORD                  0x800
@@ -313,8 +326,7 @@ struct txgbe_nodes {
 };
 
 enum txgbe_misc_irqs {
-	TXGBE_IRQ_GPIO = 0,
-	TXGBE_IRQ_LINK,
+	TXGBE_IRQ_LINK = 0,
 	TXGBE_IRQ_MAX
 };
 
@@ -329,13 +341,12 @@ struct txgbe {
 	struct wx *wx;
 	struct txgbe_nodes nodes;
 	struct txgbe_irq misc;
-	struct dw_xpcs *xpcs;
+	struct phylink_pcs *pcs;
 	struct platform_device *sfp_dev;
 	struct platform_device *i2c_dev;
 	struct clk_lookup *clock;
 	struct clk *clk;
 	struct gpio_chip *gpio;
-	unsigned int gpio_irq;
 	unsigned int link_irq;
 
 	/* flow director */

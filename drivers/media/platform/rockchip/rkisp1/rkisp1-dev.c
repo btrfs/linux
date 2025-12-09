@@ -228,6 +228,9 @@ static int rkisp1_subdev_notifier_register(struct rkisp1_device *rkisp1)
 			break;
 		}
 
+		if (ret)
+			break;
+
 		/* Parse the endpoint and validate the bus type. */
 		ret = v4l2_fwnode_endpoint_parse(ep, &vep);
 		if (ret) {
@@ -752,7 +755,7 @@ static struct platform_driver rkisp1_drv = {
 		.pm = &rkisp1_pm_ops,
 	},
 	.probe = rkisp1_probe,
-	.remove_new = rkisp1_remove,
+	.remove = rkisp1_remove,
 };
 
 module_platform_driver(rkisp1_drv);

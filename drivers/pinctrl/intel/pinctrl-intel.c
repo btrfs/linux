@@ -85,6 +85,18 @@
 #define PADCFG1_TERM_UP			BIT(13)
 #define PADCFG1_TERM_SHIFT		10
 #define PADCFG1_TERM_MASK		GENMASK(12, 10)
+/*
+ * Bit 0  Bit 1  Bit 2			Value, Ohms
+ *
+ *   0      0      0			-
+ *   0      0      1			20000
+ *   0      1      0			5000
+ *   0      1      1			~4000
+ *   1      0      0			1000 (if supported)
+ *   1      0      1			~952 (if supported)
+ *   1      1      0			~833 (if supported)
+ *   1      1      1			~800 (if supported)
+ */
 #define PADCFG1_TERM_20K		BIT(2)
 #define PADCFG1_TERM_5K			BIT(1)
 #define PADCFG1_TERM_4K			(BIT(2) | BIT(1))
@@ -146,7 +158,7 @@ const struct intel_community *intel_get_community(const struct intel_pinctrl *pc
 	dev_warn(pctrl->dev, "failed to find community for pin %u\n", pin);
 	return NULL;
 }
-EXPORT_SYMBOL_NS_GPL(intel_get_community, PINCTRL_INTEL);
+EXPORT_SYMBOL_NS_GPL(intel_get_community, "PINCTRL_INTEL");
 
 static const struct intel_padgroup *
 intel_community_get_padgroup(const struct intel_community *community,
@@ -303,7 +315,7 @@ int intel_get_groups_count(struct pinctrl_dev *pctldev)
 
 	return pctrl->soc->ngroups;
 }
-EXPORT_SYMBOL_NS_GPL(intel_get_groups_count, PINCTRL_INTEL);
+EXPORT_SYMBOL_NS_GPL(intel_get_groups_count, "PINCTRL_INTEL");
 
 const char *intel_get_group_name(struct pinctrl_dev *pctldev, unsigned int group)
 {
@@ -311,7 +323,7 @@ const char *intel_get_group_name(struct pinctrl_dev *pctldev, unsigned int group
 
 	return pctrl->soc->groups[group].grp.name;
 }
-EXPORT_SYMBOL_NS_GPL(intel_get_group_name, PINCTRL_INTEL);
+EXPORT_SYMBOL_NS_GPL(intel_get_group_name, "PINCTRL_INTEL");
 
 int intel_get_group_pins(struct pinctrl_dev *pctldev, unsigned int group,
 			 const unsigned int **pins, unsigned int *npins)
@@ -322,7 +334,7 @@ int intel_get_group_pins(struct pinctrl_dev *pctldev, unsigned int group,
 	*npins = pctrl->soc->groups[group].grp.npins;
 	return 0;
 }
-EXPORT_SYMBOL_NS_GPL(intel_get_group_pins, PINCTRL_INTEL);
+EXPORT_SYMBOL_NS_GPL(intel_get_group_pins, "PINCTRL_INTEL");
 
 static void intel_pin_dbg_show(struct pinctrl_dev *pctldev, struct seq_file *s,
 			       unsigned int pin)
@@ -388,7 +400,7 @@ int intel_get_functions_count(struct pinctrl_dev *pctldev)
 
 	return pctrl->soc->nfunctions;
 }
-EXPORT_SYMBOL_NS_GPL(intel_get_functions_count, PINCTRL_INTEL);
+EXPORT_SYMBOL_NS_GPL(intel_get_functions_count, "PINCTRL_INTEL");
 
 const char *intel_get_function_name(struct pinctrl_dev *pctldev, unsigned int function)
 {
@@ -396,7 +408,7 @@ const char *intel_get_function_name(struct pinctrl_dev *pctldev, unsigned int fu
 
 	return pctrl->soc->functions[function].func.name;
 }
-EXPORT_SYMBOL_NS_GPL(intel_get_function_name, PINCTRL_INTEL);
+EXPORT_SYMBOL_NS_GPL(intel_get_function_name, "PINCTRL_INTEL");
 
 int intel_get_function_groups(struct pinctrl_dev *pctldev, unsigned int function,
 			      const char * const **groups, unsigned int * const ngroups)
@@ -407,7 +419,7 @@ int intel_get_function_groups(struct pinctrl_dev *pctldev, unsigned int function
 	*ngroups = pctrl->soc->functions[function].func.ngroups;
 	return 0;
 }
-EXPORT_SYMBOL_NS_GPL(intel_get_function_groups, PINCTRL_INTEL);
+EXPORT_SYMBOL_NS_GPL(intel_get_function_groups, "PINCTRL_INTEL");
 
 static int intel_pinmux_set_mux(struct pinctrl_dev *pctldev,
 				unsigned int function, unsigned int group)
@@ -1531,7 +1543,6 @@ static int intel_pinctrl_probe_pwm(struct intel_pinctrl *pctrl,
 		.clk_rate = 19200000,
 		.npwm = 1,
 		.base_unit_bits = 22,
-		.bypass = true,
 	};
 	struct pwm_chip *chip;
 
@@ -1565,8 +1576,8 @@ int intel_pinctrl_probe(struct platform_device *pdev,
 	 * to the registers.
 	 */
 	pctrl->ncommunities = pctrl->soc->ncommunities;
-	pctrl->communities = devm_kcalloc(dev, pctrl->ncommunities,
-					  sizeof(*pctrl->communities), GFP_KERNEL);
+	pctrl->communities = devm_kmemdup_array(dev, pctrl->soc->communities, pctrl->ncommunities,
+						sizeof(*pctrl->soc->communities), GFP_KERNEL);
 	if (!pctrl->communities)
 		return -ENOMEM;
 
@@ -1575,8 +1586,6 @@ int intel_pinctrl_probe(struct platform_device *pdev,
 		void __iomem *regs;
 		u32 offset;
 		u32 value;
-
-		*community = pctrl->soc->communities[i];
 
 		regs = devm_platform_ioremap_resource(pdev, community->barno);
 		if (IS_ERR(regs))
@@ -1664,7 +1673,7 @@ int intel_pinctrl_probe(struct platform_device *pdev,
 
 	return 0;
 }
-EXPORT_SYMBOL_NS_GPL(intel_pinctrl_probe, PINCTRL_INTEL);
+EXPORT_SYMBOL_NS_GPL(intel_pinctrl_probe, "PINCTRL_INTEL");
 
 int intel_pinctrl_probe_by_hid(struct platform_device *pdev)
 {
@@ -1676,7 +1685,7 @@ int intel_pinctrl_probe_by_hid(struct platform_device *pdev)
 
 	return intel_pinctrl_probe(pdev, data);
 }
-EXPORT_SYMBOL_NS_GPL(intel_pinctrl_probe_by_hid, PINCTRL_INTEL);
+EXPORT_SYMBOL_NS_GPL(intel_pinctrl_probe_by_hid, "PINCTRL_INTEL");
 
 int intel_pinctrl_probe_by_uid(struct platform_device *pdev)
 {
@@ -1688,7 +1697,7 @@ int intel_pinctrl_probe_by_uid(struct platform_device *pdev)
 
 	return intel_pinctrl_probe(pdev, data);
 }
-EXPORT_SYMBOL_NS_GPL(intel_pinctrl_probe_by_uid, PINCTRL_INTEL);
+EXPORT_SYMBOL_NS_GPL(intel_pinctrl_probe_by_uid, "PINCTRL_INTEL");
 
 const struct intel_pinctrl_soc_data *intel_pinctrl_get_soc_data(struct platform_device *pdev)
 {
@@ -1719,7 +1728,7 @@ const struct intel_pinctrl_soc_data *intel_pinctrl_get_soc_data(struct platform_
 
 	return data ?: ERR_PTR(-ENODATA);
 }
-EXPORT_SYMBOL_NS_GPL(intel_pinctrl_get_soc_data, PINCTRL_INTEL);
+EXPORT_SYMBOL_NS_GPL(intel_pinctrl_get_soc_data, "PINCTRL_INTEL");
 
 static bool __intel_gpio_is_direct_irq(u32 value)
 {
@@ -1929,3 +1938,4 @@ MODULE_AUTHOR("Mathias Nyman <mathias.nyman@linux.intel.com>");
 MODULE_AUTHOR("Mika Westerberg <mika.westerberg@linux.intel.com>");
 MODULE_DESCRIPTION("Intel pinctrl/GPIO core driver");
 MODULE_LICENSE("GPL v2");
+MODULE_IMPORT_NS("PWM_LPSS");

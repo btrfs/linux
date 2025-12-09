@@ -5,6 +5,10 @@
 #define XSTR(s) STR(s)
 #define STR(s) #s
 
+/* Expand a macro and then stringize the expansion */
+#define QUOTE(str) #str
+#define EXPAND_QUOTE(str) QUOTE(str)
+
 /* This set of attributes controls behavior of the
  * test_loader.c:test_loader__run_subtests().
  *
@@ -106,6 +110,7 @@
  * __arch_*          Specify on which architecture the test case should be tested.
  *                   Several __arch_* annotations could be specified at once.
  *                   When test case is not run on current arch it is marked as skipped.
+ * __caps_unpriv     Specify the capabilities that should be set when running the test.
  */
 #define __msg(msg)		__attribute__((btf_decl_tag("comment:test_expect_msg=" XSTR(__COUNTER__) "=" msg)))
 #define __xlated(msg)		__attribute__((btf_decl_tag("comment:test_expect_xlated=" XSTR(__COUNTER__) "=" msg)))
@@ -129,6 +134,15 @@
 #define __arch_x86_64		__arch("X86_64")
 #define __arch_arm64		__arch("ARM64")
 #define __arch_riscv64		__arch("RISCV64")
+#define __caps_unpriv(caps)	__attribute__((btf_decl_tag("comment:test_caps_unpriv=" EXPAND_QUOTE(caps))))
+#define __load_if_JITed()	__attribute__((btf_decl_tag("comment:load_mode=jited")))
+#define __load_if_no_JITed()	__attribute__((btf_decl_tag("comment:load_mode=no_jited")))
+
+/* Define common capabilities tested using __caps_unpriv */
+#define CAP_NET_ADMIN		12
+#define CAP_SYS_ADMIN		21
+#define CAP_PERFMON		38
+#define CAP_BPF			39
 
 /* Convenience macro for use with 'asm volatile' blocks */
 #define __naked __attribute__((naked))
@@ -160,6 +174,9 @@
 #elif defined(__TARGET_ARCH_riscv)
 #define SYSCALL_WRAPPER 1
 #define SYS_PREFIX "__riscv_"
+#elif defined(__TARGET_ARCH_powerpc)
+#define SYSCALL_WRAPPER 1
+#define SYS_PREFIX ""
 #else
 #define SYSCALL_WRAPPER 0
 #define SYS_PREFIX "__se_"
@@ -194,6 +211,23 @@
 
 #ifndef ARRAY_SIZE
 #define ARRAY_SIZE(x) (sizeof(x) / sizeof((x)[0]))
+#endif
+
+#if (defined(__TARGET_ARCH_arm64) || defined(__TARGET_ARCH_x86) ||	\
+     (defined(__TARGET_ARCH_riscv) && __riscv_xlen == 64) ||		\
+     defined(__TARGET_ARCH_arm) || defined(__TARGET_ARCH_s390) ||	\
+     defined(__TARGET_ARCH_loongarch)) &&				\
+	__clang_major__ >= 18
+#define CAN_USE_GOTOL
+#endif
+
+#if _clang_major__ >= 18
+#define CAN_USE_BPF_ST
+#endif
+
+#if __clang_major__ >= 18 && defined(ENABLE_ATOMICS_TESTS) && \
+	(defined(__TARGET_ARCH_arm64) || defined(__TARGET_ARCH_x86))
+#define CAN_USE_LOAD_ACQ_STORE_REL
 #endif
 
 #endif

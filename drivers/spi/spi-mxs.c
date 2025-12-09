@@ -381,6 +381,8 @@ static int mxs_spi_transfer_one(struct spi_controller *host,
 		if (status)
 			break;
 
+		t->effective_speed_hz = ssp->clk_rate;
+
 		/* De-assert on last transfer, inverted by cs_change flag */
 		flag = (&t->transfer_list == m->transfers.prev) ^ t->cs_change ?
 		       TXRX_DEASSERT_CS : 0;
@@ -657,7 +659,7 @@ static void mxs_spi_remove(struct platform_device *pdev)
 
 static struct platform_driver mxs_spi_driver = {
 	.probe	= mxs_spi_probe,
-	.remove_new = mxs_spi_remove,
+	.remove = mxs_spi_remove,
 	.driver	= {
 		.name	= DRIVER_NAME,
 		.of_match_table = mxs_spi_dt_ids,

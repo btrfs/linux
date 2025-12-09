@@ -73,8 +73,13 @@
  * If no ancestor relationship:
  * arbitrary, since it's serialized on rename_lock
  */
-int sysctl_vfs_cache_pressure __read_mostly = 100;
-EXPORT_SYMBOL_GPL(sysctl_vfs_cache_pressure);
+static int sysctl_vfs_cache_pressure __read_mostly = 100;
+
+unsigned long vfs_pressure_ratio(unsigned long val)
+{
+	return mult_frac(val, sysctl_vfs_cache_pressure, 100);
+}
+EXPORT_SYMBOL_GPL(vfs_pressure_ratio);
 
 __cacheline_aligned_in_smp DEFINE_SEQLOCK(rename_lock);
 
@@ -135,6 +140,7 @@ struct dentry_stat_t {
 static DEFINE_PER_CPU(long, nr_dentry);
 static DEFINE_PER_CPU(long, nr_dentry_unused);
 static DEFINE_PER_CPU(long, nr_dentry_negative);
+static int dentry_negative_policy;
 
 #if defined(CONFIG_SYSCTL) && defined(CONFIG_PROC_FS)
 /* Statistics gathering. */
@@ -191,7 +197,7 @@ static int proc_nr_dentry(const struct ctl_table *table, int write, void *buffer
 	return proc_doulongvec_minmax(table, write, buffer, lenp, ppos);
 }
 
-static struct ctl_table fs_dcache_sysctls[] = {
+static const struct ctl_table fs_dcache_sysctls[] = {
 	{
 		.procname	= "dentry-state",
 		.data		= &dentry_stat,
@@ -199,10 +205,31 @@ static struct ctl_table fs_dcache_sysctls[] = {
 		.mode		= 0444,
 		.proc_handler	= proc_nr_dentry,
 	},
+	{
+		.procname	= "dentry-negative",
+		.data		= &dentry_negative_policy,
+		.maxlen		= sizeof(dentry_negative_policy),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec_minmax,
+		.extra1		= SYSCTL_ZERO,
+		.extra2		= SYSCTL_ONE,
+	},
+};
+
+static const struct ctl_table vm_dcache_sysctls[] = {
+	{
+		.procname	= "vfs_cache_pressure",
+		.data		= &sysctl_vfs_cache_pressure,
+		.maxlen		= sizeof(sysctl_vfs_cache_pressure),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec_minmax,
+		.extra1		= SYSCTL_ZERO,
+	},
 };
 
 static int __init init_fs_dcache_sysctls(void)
 {
+	register_sysctl_init("vm", vm_dcache_sysctls);
 	register_sysctl_init("fs", fs_dcache_sysctls);
 	return 0;
 }
@@ -285,12 +312,16 @@ static inline int dentry_cmp(const struct dentry *dentry, const unsigned char *c
 	return dentry_string_cmp(cs, ct, tcount);
 }
 
+/*
+ * long names are allocated separately from dentry and never modified.
+ * Refcounted, freeing is RCU-delayed.  See take_dentry_name_snapshot()
+ * for the reason why ->count and ->head can't be combined into a union.
+ * dentry_string_cmp() relies upon ->name[] being word-aligned.
+ */
 struct external_name {
-	union {
-		atomic_t count;
-		struct rcu_head head;
-	} u;
-	unsigned char name[];
+	atomic_t count;
+	struct rcu_head head;
+	unsigned char name[] __aligned(sizeof(unsigned long));
 };
 
 static inline struct external_name *external_name(struct dentry *dentry)
@@ -314,31 +345,45 @@ static void __d_free_external(struct rcu_head *head)
 
 static inline int dname_external(const struct dentry *dentry)
 {
-	return dentry->d_name.name != dentry->d_iname;
+	return dentry->d_name.name != dentry->d_shortname.string;
 }
 
 void take_dentry_name_snapshot(struct name_snapshot *name, struct dentry *dentry)
 {
-	spin_lock(&dentry->d_lock);
-	name->name = dentry->d_name;
-	if (unlikely(dname_external(dentry))) {
-		atomic_inc(&external_name(dentry)->u.count);
+	unsigned seq;
+	const unsigned char *s;
+
+	rcu_read_lock();
+retry:
+	seq = read_seqcount_begin(&dentry->d_seq);
+	s = READ_ONCE(dentry->d_name.name);
+	name->name.hash_len = dentry->d_name.hash_len;
+	name->name.name = name->inline_name.string;
+	if (likely(s == dentry->d_shortname.string)) {
+		name->inline_name = dentry->d_shortname;
 	} else {
-		memcpy(name->inline_name, dentry->d_iname,
-		       dentry->d_name.len + 1);
-		name->name.name = name->inline_name;
+		struct external_name *p;
+		p = container_of(s, struct external_name, name[0]);
+		// get a valid reference
+		if (unlikely(!atomic_inc_not_zero(&p->count)))
+			goto retry;
+		name->name.name = s;
 	}
-	spin_unlock(&dentry->d_lock);
+	if (read_seqcount_retry(&dentry->d_seq, seq)) {
+		release_dentry_name_snapshot(name);
+		goto retry;
+	}
+	rcu_read_unlock();
 }
 EXPORT_SYMBOL(take_dentry_name_snapshot);
 
 void release_dentry_name_snapshot(struct name_snapshot *name)
 {
-	if (unlikely(name->name.name != name->inline_name)) {
+	if (unlikely(name->name.name != name->inline_name.string)) {
 		struct external_name *p;
 		p = container_of(name->name.name, struct external_name, name[0]);
-		if (unlikely(atomic_dec_and_test(&p->u.count)))
-			kfree_rcu(p, u.head);
+		if (unlikely(atomic_dec_and_test(&p->count)))
+			kfree_rcu(p, head);
 	}
 }
 EXPORT_SYMBOL(release_dentry_name_snapshot);
@@ -376,7 +421,7 @@ static void dentry_free(struct dentry *dentry)
 	WARN_ON(!hlist_unhashed(&dentry->d_u.d_alias));
 	if (unlikely(dname_external(dentry))) {
 		struct external_name *p = external_name(dentry);
-		if (likely(atomic_dec_and_test(&p->u.count))) {
+		if (likely(atomic_dec_and_test(&p->count))) {
 			call_rcu(&dentry->d_u.d_rcu, __d_free_external);
 			return;
 		}
@@ -1089,7 +1134,7 @@ void shrink_dentry_list(struct list_head *list)
 }
 
 static enum lru_status dentry_lru_isolate(struct list_head *item,
-		struct list_lru_one *lru, spinlock_t *lru_lock, void *arg)
+		struct list_lru_one *lru, void *arg)
 {
 	struct list_head *freeable = arg;
 	struct dentry	*dentry = container_of(item, struct dentry, d_lru);
@@ -1170,7 +1215,7 @@ long prune_dcache_sb(struct super_block *sb, struct shrink_control *sc)
 }
 
 static enum lru_status dentry_lru_isolate_shrink(struct list_head *item,
-		struct list_lru_one *lru, spinlock_t *lru_lock, void *arg)
+		struct list_lru_one *lru, void *arg)
 {
 	struct list_head *freeable = arg;
 	struct dentry	*dentry = container_of(item, struct dentry, d_lru);
@@ -1644,10 +1689,10 @@ static struct dentry *__d_alloc(struct super_block *sb, const struct qstr *name)
 	 * will still always have a NUL at the end, even if we might
 	 * be overwriting an internal NUL character
 	 */
-	dentry->d_iname[DNAME_INLINE_LEN-1] = 0;
+	dentry->d_shortname.string[DNAME_INLINE_LEN-1] = 0;
 	if (unlikely(!name)) {
 		name = &slash_name;
-		dname = dentry->d_iname;
+		dname = dentry->d_shortname.string;
 	} else if (name->len > DNAME_INLINE_LEN-1) {
 		size_t size = offsetof(struct external_name, name[1]);
 		struct external_name *p = kmalloc(size + name->len,
@@ -1657,10 +1702,10 @@ static struct dentry *__d_alloc(struct super_block *sb, const struct qstr *name)
 			kmem_cache_free(dentry_cache, dentry); 
 			return NULL;
 		}
-		atomic_set(&p->u.count, 1);
+		atomic_set(&p->count, 1);
 		dname = p->name;
 	} else  {
-		dname = dentry->d_iname;
+		dname = dentry->d_shortname.string;
 	}	
 
 	dentry->d_name.len = name->len;
@@ -1671,9 +1716,8 @@ static struct dentry *__d_alloc(struct super_block *sb, const struct qstr *name)
 	/* Make sure we always see the terminating NUL character */
 	smp_store_release(&dentry->d_name.name, dname); /* ^^^ */
 
-	dentry->d_lockref.count = 1;
 	dentry->d_flags = 0;
-	spin_lock_init(&dentry->d_lock);
+	lockref_init(&dentry->d_lockref);
 	seqcount_spinlock_init(&dentry->d_seq, &dentry->d_lock);
 	dentry->d_inode = NULL;
 	dentry->d_parent = dentry;
@@ -2039,8 +2083,8 @@ EXPORT_SYMBOL(d_obtain_root);
 
 /**
  * d_add_ci - lookup or allocate new dentry with case-exact name
- * @inode:  the inode case-insensitive lookup has found
  * @dentry: the negative dentry that was passed to the parent's lookup func
+ * @inode:  the inode case-insensitive lookup has found
  * @name:   the case-exact name to be associated with the returned dentry
  *
  * This is to avoid filling the dcache with case-insensitive names to the
@@ -2093,8 +2137,8 @@ EXPORT_SYMBOL(d_add_ci);
 
 /**
  * d_same_name - compare dentry name with case-exact name
- * @parent: parent dentry
  * @dentry: the negative dentry that was passed to the parent's lookup func
+ * @parent: parent dentry
  * @name:   the case-exact name to be associated with the returned dentry
  *
  * Return: true if names are same, or false
@@ -2401,6 +2445,8 @@ void d_delete(struct dentry * dentry)
 	 * Are we the only user?
 	 */
 	if (dentry->d_lockref.count == 1) {
+		if (dentry_negative_policy)
+			__d_drop(dentry);
 		dentry->d_flags &= ~DCACHE_CANT_MOUNT;
 		dentry_unlink_inode(dentry);
 	} else {
@@ -2451,7 +2497,8 @@ static inline void end_dir_add(struct inode *dir, unsigned int n,
 {
 	smp_store_release(&dir->i_dir_seq, n + 2);
 	preempt_enable_nested();
-	wake_up_all(d_wait);
+	if (wq_has_sleeper(d_wait))
+		wake_up_all(d_wait);
 }
 
 static void d_wait_lookup(struct dentry *dentry)
@@ -2658,52 +2705,6 @@ void d_add(struct dentry *entry, struct inode *inode)
 }
 EXPORT_SYMBOL(d_add);
 
-/**
- * d_exact_alias - find and hash an exact unhashed alias
- * @entry: dentry to add
- * @inode: The inode to go with this dentry
- *
- * If an unhashed dentry with the same name/parent and desired
- * inode already exists, hash and return it.  Otherwise, return
- * NULL.
- *
- * Parent directory should be locked.
- */
-struct dentry *d_exact_alias(struct dentry *entry, struct inode *inode)
-{
-	struct dentry *alias;
-	unsigned int hash = entry->d_name.hash;
-
-	spin_lock(&inode->i_lock);
-	hlist_for_each_entry(alias, &inode->i_dentry, d_u.d_alias) {
-		/*
-		 * Don't need alias->d_lock here, because aliases with
-		 * d_parent == entry->d_parent are not subject to name or
-		 * parent changes, because the parent inode i_mutex is held.
-		 */
-		if (alias->d_name.hash != hash)
-			continue;
-		if (alias->d_parent != entry->d_parent)
-			continue;
-		if (!d_same_name(alias, entry->d_parent, &entry->d_name))
-			continue;
-		spin_lock(&alias->d_lock);
-		if (!d_unhashed(alias)) {
-			spin_unlock(&alias->d_lock);
-			alias = NULL;
-		} else {
-			dget_dlock(alias);
-			__d_rehash(alias);
-			spin_unlock(&alias->d_lock);
-		}
-		spin_unlock(&inode->i_lock);
-		return alias;
-	}
-	spin_unlock(&inode->i_lock);
-	return NULL;
-}
-EXPORT_SYMBOL(d_exact_alias);
-
 static void swap_names(struct dentry *dentry, struct dentry *target)
 {
 	if (unlikely(dname_external(target))) {
@@ -2717,10 +2718,9 @@ static void swap_names(struct dentry *dentry, struct dentry *target)
 			 * dentry:internal, target:external.  Steal target's
 			 * storage and make target internal.
 			 */
-			memcpy(target->d_iname, dentry->d_name.name,
-					dentry->d_name.len + 1);
 			dentry->d_name.name = target->d_name.name;
-			target->d_name.name = target->d_iname;
+			target->d_shortname = dentry->d_shortname;
+			target->d_name.name = target->d_shortname.string;
 		}
 	} else {
 		if (unlikely(dname_external(dentry))) {
@@ -2728,20 +2728,16 @@ static void swap_names(struct dentry *dentry, struct dentry *target)
 			 * dentry:external, target:internal.  Give dentry's
 			 * storage to target and make dentry internal
 			 */
-			memcpy(dentry->d_iname, target->d_name.name,
-					target->d_name.len + 1);
 			target->d_name.name = dentry->d_name.name;
-			dentry->d_name.name = dentry->d_iname;
+			dentry->d_shortname = target->d_shortname;
+			dentry->d_name.name = dentry->d_shortname.string;
 		} else {
 			/*
 			 * Both are internal.
 			 */
-			unsigned int i;
-			BUILD_BUG_ON(!IS_ALIGNED(DNAME_INLINE_LEN, sizeof(long)));
-			for (i = 0; i < DNAME_INLINE_LEN / sizeof(long); i++) {
-				swap(((long *) &dentry->d_iname)[i],
-				     ((long *) &target->d_iname)[i]);
-			}
+			for (int i = 0; i < DNAME_INLINE_WORDS; i++)
+				swap(dentry->d_shortname.words[i],
+				     target->d_shortname.words[i]);
 		}
 	}
 	swap(dentry->d_name.hash_len, target->d_name.hash_len);
@@ -2753,16 +2749,15 @@ static void copy_name(struct dentry *dentry, struct dentry *target)
 	if (unlikely(dname_external(dentry)))
 		old_name = external_name(dentry);
 	if (unlikely(dname_external(target))) {
-		atomic_inc(&external_name(target)->u.count);
+		atomic_inc(&external_name(target)->count);
 		dentry->d_name = target->d_name;
 	} else {
-		memcpy(dentry->d_iname, target->d_name.name,
-				target->d_name.len + 1);
-		dentry->d_name.name = dentry->d_iname;
+		dentry->d_shortname = target->d_shortname;
+		dentry->d_name.name = dentry->d_shortname.string;
 		dentry->d_name.hash_len = target->d_name.hash_len;
 	}
-	if (old_name && likely(atomic_dec_and_test(&old_name->u.count)))
-		kfree_rcu(old_name, u.head);
+	if (old_name && likely(atomic_dec_and_test(&old_name->count)))
+		kfree_rcu(old_name, head);
 }
 
 /*
@@ -2943,7 +2938,12 @@ static int __d_unalias(struct dentry *dentry, struct dentry *alias)
 		goto out_err;
 	m2 = &alias->d_parent->d_inode->i_rwsem;
 out_unalias:
+	if (alias->d_op && alias->d_op->d_unalias_trylock &&
+	    !alias->d_op->d_unalias_trylock(alias))
+		goto out_err;
 	__d_move(alias, dentry, false);
+	if (alias->d_op && alias->d_op->d_unalias_unlock)
+		alias->d_op->d_unalias_unlock(alias);
 	ret = 0;
 out_err:
 	if (m2)
@@ -3091,12 +3091,12 @@ void d_mark_tmpfile(struct file *file, struct inode *inode)
 {
 	struct dentry *dentry = file->f_path.dentry;
 
-	BUG_ON(dentry->d_name.name != dentry->d_iname ||
+	BUG_ON(dname_external(dentry) ||
 		!hlist_unhashed(&dentry->d_u.d_alias) ||
 		!d_unlinked(dentry));
 	spin_lock(&dentry->d_parent->d_lock);
 	spin_lock_nested(&dentry->d_lock, DENTRY_D_LOCK_NESTED);
-	dentry->d_name.len = sprintf(dentry->d_iname, "#%llu",
+	dentry->d_name.len = sprintf(dentry->d_shortname.string, "#%llu",
 				(unsigned long long)inode->i_ino);
 	spin_unlock(&dentry->d_lock);
 	spin_unlock(&dentry->d_parent->d_lock);
@@ -3184,7 +3184,7 @@ static void __init dcache_init(void)
 	 */
 	dentry_cache = KMEM_CACHE_USERCOPY(dentry,
 		SLAB_RECLAIM_ACCOUNT|SLAB_PANIC|SLAB_ACCOUNT,
-		d_iname);
+		d_shortname.string);
 
 	/* Hash may have been set up in dcache_init_early */
 	if (!hashdist)

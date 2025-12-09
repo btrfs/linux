@@ -1422,7 +1422,7 @@ static void mvebu_pcie_powerdown(struct mvebu_pcie_port *port)
 }
 
 /*
- * devm_of_pci_get_host_bridge_resources() only sets up translateable resources,
+ * devm_of_pci_get_host_bridge_resources() only sets up translatable resources,
  * so we need extra resource setup parsing our special DT properties encoding
  * the MEM and IO apertures.
  */
@@ -1715,6 +1715,7 @@ static const struct of_device_id mvebu_pcie_of_match_table[] = {
 	{ .compatible = "marvell,kirkwood-pcie", },
 	{},
 };
+MODULE_DEVICE_TABLE(of, mvebu_pcie_of_match_table);
 
 static const struct dev_pm_ops mvebu_pcie_pm_ops = {
 	NOIRQ_SYSTEM_SLEEP_PM_OPS(mvebu_pcie_suspend, mvebu_pcie_resume)
@@ -1727,7 +1728,7 @@ static struct platform_driver mvebu_pcie_driver = {
 		.pm = &mvebu_pcie_pm_ops,
 	},
 	.probe = mvebu_pcie_probe,
-	.remove_new = mvebu_pcie_remove,
+	.remove = mvebu_pcie_remove,
 };
 module_platform_driver(mvebu_pcie_driver);
 

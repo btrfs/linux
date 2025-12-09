@@ -16,7 +16,7 @@ btrfs filesystems.  Like fscrypt, not too much filesystem-specific
 code is needed to support fs-verity.
 
 fs-verity is similar to `dm-verity
-<https://www.kernel.org/doc/Documentation/device-mapper/verity.txt>`_
+<https://www.kernel.org/doc/Documentation/admin-guide/device-mapper/verity.rst>`_
 but works on files rather than block devices.  On regular files on
 filesystems supporting fs-verity, userspace can execute an ioctl that
 causes the filesystem to build a Merkle tree for the file and persist
@@ -248,11 +248,17 @@ FS_IOC_READ_VERITY_METADATA
 The FS_IOC_READ_VERITY_METADATA ioctl reads verity metadata from a
 verity file.  This ioctl is available since Linux v5.12.
 
-This ioctl allows writing a server program that takes a verity file
-and serves it to a client program, such that the client can do its own
-fs-verity compatible verification of the file.  This only makes sense
-if the client doesn't trust the server and if the server needs to
-provide the storage for the client.
+This ioctl is useful for cases where the verity verification should be
+performed somewhere other than the currently running kernel.
+
+One example is a server program that takes a verity file and serves it
+to a client program, such that the client can do its own fs-verity
+compatible verification of the file.  This only makes sense if the
+client doesn't trust the server and if the server needs to provide the
+storage for the client.
+
+Another example is copying verity metadata when creating filesystem
+images in userspace (such as with ``mkfs.ext4 -d``).
 
 This is a fairly specialized use case, and most fs-verity users won't
 need this ioctl.

@@ -64,9 +64,9 @@ struct btrfs_delayed_node {
 	struct mutex mutex;
 	struct btrfs_inode_item inode_item;
 	refcount_t refs;
+	int count;
 	u64 index_cnt;
 	unsigned long flags;
-	int count;
 	/*
 	 * The size of the next batch of dir index items to insert (if this
 	 * node is from a directory inode). Protected by @mutex.
@@ -133,7 +133,7 @@ int btrfs_commit_inode_delayed_inode(struct btrfs_inode *inode);
 
 int btrfs_delayed_update_inode(struct btrfs_trans_handle *trans,
 			       struct btrfs_inode *inode);
-int btrfs_fill_inode(struct inode *inode, u32 *rdev);
+int btrfs_fill_inode(struct btrfs_inode *inode, u32 *rdev);
 int btrfs_delayed_delete_inode_ref(struct btrfs_inode *inode);
 
 /* Used for drop dead root */

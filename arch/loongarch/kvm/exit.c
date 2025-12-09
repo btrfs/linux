@@ -156,8 +156,8 @@ static int kvm_handle_csr(struct kvm_vcpu *vcpu, larch_inst inst)
 
 int kvm_emu_iocsr(larch_inst inst, struct kvm_run *run, struct kvm_vcpu *vcpu)
 {
-	int ret;
-	unsigned long val;
+	int idx, ret;
+	unsigned long *val;
 	u32 addr, rd, rj, opcode;
 
 	/*
@@ -167,9 +167,9 @@ int kvm_emu_iocsr(larch_inst inst, struct kvm_run *run, struct kvm_vcpu *vcpu)
 	rj = inst.reg2_format.rj;
 	opcode = inst.reg2_format.opcode;
 	addr = vcpu->arch.gprs[rj];
-	ret = EMULATE_DO_IOCSR;
 	run->iocsr_io.phys_addr = addr;
 	run->iocsr_io.is_write = 0;
+	val = &vcpu->arch.gprs[rd];
 
 	/* LoongArch is Little endian */
 	switch (opcode) {
@@ -202,16 +202,33 @@ int kvm_emu_iocsr(larch_inst inst, struct kvm_run *run, struct kvm_vcpu *vcpu)
 		run->iocsr_io.is_write = 1;
 		break;
 	default:
-		ret = EMULATE_FAIL;
-		break;
+		return EMULATE_FAIL;
 	}
 
-	if (ret == EMULATE_DO_IOCSR) {
-		if (run->iocsr_io.is_write) {
-			val = vcpu->arch.gprs[rd];
-			memcpy(run->iocsr_io.data, &val, run->iocsr_io.len);
+	if (run->iocsr_io.is_write) {
+		idx = srcu_read_lock(&vcpu->kvm->srcu);
+		ret = kvm_io_bus_write(vcpu, KVM_IOCSR_BUS, addr, run->iocsr_io.len, val);
+		srcu_read_unlock(&vcpu->kvm->srcu, idx);
+		if (ret == 0)
+			ret = EMULATE_DONE;
+		else {
+			ret = EMULATE_DO_IOCSR;
+			/* Save data and let user space to write it */
+			memcpy(run->iocsr_io.data, val, run->iocsr_io.len);
 		}
-		vcpu->arch.io_gpr = rd;
+		trace_kvm_iocsr(KVM_TRACE_IOCSR_WRITE, run->iocsr_io.len, addr, val);
+	} else {
+		idx = srcu_read_lock(&vcpu->kvm->srcu);
+		ret = kvm_io_bus_read(vcpu, KVM_IOCSR_BUS, addr, run->iocsr_io.len, val);
+		srcu_read_unlock(&vcpu->kvm->srcu, idx);
+		if (ret == 0)
+			ret = EMULATE_DONE;
+		else {
+			ret = EMULATE_DO_IOCSR;
+			/* Save register id for iocsr read completion */
+			vcpu->arch.io_gpr = rd;
+		}
+		trace_kvm_iocsr(KVM_TRACE_IOCSR_READ, run->iocsr_io.len, addr, NULL);
 	}
 
 	return ret;
@@ -349,7 +366,7 @@ static int kvm_handle_gspr(struct kvm_vcpu *vcpu)
 
 int kvm_emu_mmio_read(struct kvm_vcpu *vcpu, larch_inst inst)
 {
-	int ret;
+	int idx, ret;
 	unsigned int op8, opcode, rd;
 	struct kvm_run *run = vcpu->run;
 
@@ -447,18 +464,34 @@ int kvm_emu_mmio_read(struct kvm_vcpu *vcpu, larch_inst inst)
 	}
 
 	if (ret == EMULATE_DO_MMIO) {
+		trace_kvm_mmio(KVM_TRACE_MMIO_READ, run->mmio.len, run->mmio.phys_addr, NULL);
+
+		/*
+		 * If mmio device such as PCH-PIC is emulated in KVM,
+		 * it need not return to user space to handle the mmio
+		 * exception.
+		 */
+		idx = srcu_read_lock(&vcpu->kvm->srcu);
+		ret = kvm_io_bus_read(vcpu, KVM_MMIO_BUS, vcpu->arch.badv,
+				      run->mmio.len, &vcpu->arch.gprs[rd]);
+		srcu_read_unlock(&vcpu->kvm->srcu, idx);
+		if (!ret) {
+			update_pc(&vcpu->arch);
+			vcpu->mmio_needed = 0;
+			return EMULATE_DONE;
+		}
+
 		/* Set for kvm_complete_mmio_read() use */
 		vcpu->arch.io_gpr = rd;
 		run->mmio.is_write = 0;
 		vcpu->mmio_is_write = 0;
-		trace_kvm_mmio(KVM_TRACE_MMIO_READ_UNSATISFIED, run->mmio.len,
-				run->mmio.phys_addr, NULL);
-	} else {
-		kvm_err("Read not supported Inst=0x%08x @%lx BadVaddr:%#lx\n",
-			inst.word, vcpu->arch.pc, vcpu->arch.badv);
-		kvm_arch_vcpu_dump_regs(vcpu);
-		vcpu->mmio_needed = 0;
+		return EMULATE_DO_MMIO;
 	}
+
+	kvm_err("Read not supported Inst=0x%08x @%lx BadVaddr:%#lx\n",
+			inst.word, vcpu->arch.pc, vcpu->arch.badv);
+	kvm_arch_vcpu_dump_regs(vcpu);
+	vcpu->mmio_needed = 0;
 
 	return ret;
 }
@@ -507,7 +540,7 @@ int kvm_complete_mmio_read(struct kvm_vcpu *vcpu, struct kvm_run *run)
 
 int kvm_emu_mmio_write(struct kvm_vcpu *vcpu, larch_inst inst)
 {
-	int ret;
+	int idx, ret;
 	unsigned int rd, op8, opcode;
 	unsigned long curr_pc, rd_val = 0;
 	struct kvm_run *run = vcpu->run;
@@ -600,18 +633,30 @@ int kvm_emu_mmio_write(struct kvm_vcpu *vcpu, larch_inst inst)
 	}
 
 	if (ret == EMULATE_DO_MMIO) {
+		trace_kvm_mmio(KVM_TRACE_MMIO_WRITE, run->mmio.len, run->mmio.phys_addr, data);
+
+		/*
+		 * If mmio device such as PCH-PIC is emulated in KVM,
+		 * it need not return to user space to handle the mmio
+		 * exception.
+		 */
+		idx = srcu_read_lock(&vcpu->kvm->srcu);
+		ret = kvm_io_bus_write(vcpu, KVM_MMIO_BUS, vcpu->arch.badv, run->mmio.len, data);
+		srcu_read_unlock(&vcpu->kvm->srcu, idx);
+		if (!ret)
+			return EMULATE_DONE;
+
 		run->mmio.is_write = 1;
 		vcpu->mmio_needed = 1;
 		vcpu->mmio_is_write = 1;
-		trace_kvm_mmio(KVM_TRACE_MMIO_WRITE, run->mmio.len,
-				run->mmio.phys_addr, data);
-	} else {
-		vcpu->arch.pc = curr_pc;
-		kvm_err("Write not supported Inst=0x%08x @%lx BadVaddr:%#lx\n",
-			inst.word, vcpu->arch.pc, vcpu->arch.badv);
-		kvm_arch_vcpu_dump_regs(vcpu);
-		/* Rollback PC if emulation was unsuccessful */
+		return EMULATE_DO_MMIO;
 	}
+
+	vcpu->arch.pc = curr_pc;
+	kvm_err("Write not supported Inst=0x%08x @%lx BadVaddr:%#lx\n",
+			inst.word, vcpu->arch.pc, vcpu->arch.badv);
+	kvm_arch_vcpu_dump_regs(vcpu);
+	/* Rollback PC if emulation was unsuccessful */
 
 	return ret;
 }
@@ -623,6 +668,12 @@ static int kvm_handle_rdwr_fault(struct kvm_vcpu *vcpu, bool write)
 	enum emulation_result er = EMULATE_DONE;
 	struct kvm_run *run = vcpu->run;
 	unsigned long badv = vcpu->arch.badv;
+
+	/* Inject ADE exception if exceed max GPA size */
+	if (unlikely(badv >= vcpu->kvm->arch.gpa_size)) {
+		kvm_queue_exception(vcpu, EXCCODE_ADE, EXSUBCODE_ADEM);
+		return RESUME_GUEST;
+	}
 
 	ret = kvm_handle_mm_fault(vcpu, badv, write);
 	if (ret) {
@@ -662,6 +713,14 @@ static int kvm_handle_read_fault(struct kvm_vcpu *vcpu)
 static int kvm_handle_write_fault(struct kvm_vcpu *vcpu)
 {
 	return kvm_handle_rdwr_fault(vcpu, true);
+}
+
+int kvm_complete_user_service(struct kvm_vcpu *vcpu, struct kvm_run *run)
+{
+	update_pc(&vcpu->arch);
+	kvm_write_reg(vcpu, LOONGARCH_GPR_A0, run->hypercall.ret);
+
+	return 0;
 }
 
 /**
@@ -827,6 +886,28 @@ static int kvm_handle_hypercall(struct kvm_vcpu *vcpu)
 	case KVM_HCALL_SERVICE:
 		vcpu->stat.hypercall_exits++;
 		kvm_handle_service(vcpu);
+		break;
+	case KVM_HCALL_USER_SERVICE:
+		if (!kvm_guest_has_pv_feature(vcpu, KVM_FEATURE_USER_HCALL)) {
+			kvm_write_reg(vcpu, LOONGARCH_GPR_A0, KVM_HCALL_INVALID_CODE);
+			break;
+		}
+
+		vcpu->stat.hypercall_exits++;
+		vcpu->run->exit_reason = KVM_EXIT_HYPERCALL;
+		vcpu->run->hypercall.nr = KVM_HCALL_USER_SERVICE;
+		vcpu->run->hypercall.args[0] = kvm_read_reg(vcpu, LOONGARCH_GPR_A0);
+		vcpu->run->hypercall.args[1] = kvm_read_reg(vcpu, LOONGARCH_GPR_A1);
+		vcpu->run->hypercall.args[2] = kvm_read_reg(vcpu, LOONGARCH_GPR_A2);
+		vcpu->run->hypercall.args[3] = kvm_read_reg(vcpu, LOONGARCH_GPR_A3);
+		vcpu->run->hypercall.args[4] = kvm_read_reg(vcpu, LOONGARCH_GPR_A4);
+		vcpu->run->hypercall.args[5] = kvm_read_reg(vcpu, LOONGARCH_GPR_A5);
+		vcpu->run->hypercall.flags = 0;
+		/*
+		 * Set invalid return value by default, let user-mode VMM modify it.
+		 */
+		vcpu->run->hypercall.ret = KVM_HCALL_INVALID_CODE;
+		ret = RESUME_HOST;
 		break;
 	case KVM_HCALL_SWDBG:
 		/* KVM_HCALL_SWDBG only in effective when SW_BP is enabled */

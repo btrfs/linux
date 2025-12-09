@@ -26,6 +26,7 @@
 #include <linux/notifier.h>
 #include <linux/kthread.h>
 #include <linux/mutex.h>
+#include <asm/machine.h>
 #include <asm/airq.h>
 #include <asm/tpi.h>
 #include <linux/atomic.h>
@@ -453,7 +454,7 @@ static void ap_tasklet_fn(unsigned long dummy)
 	 * important that no requests on any AP get lost.
 	 */
 	if (ap_irq_flag)
-		xchg(ap_airq.lsi_ptr, 0);
+		WRITE_ONCE(*ap_airq.lsi_ptr, 0);
 
 	spin_lock_bh(&ap_queues_lock);
 	hash_for_each(ap_queues, bkt, aq, hnode) {
@@ -2324,10 +2325,9 @@ static inline int __init ap_async_init(void)
 	 * Setup the high resolution poll timer.
 	 * If we are running under z/VM adjust polling to z/VM polling rate.
 	 */
-	if (MACHINE_IS_VM)
+	if (machine_is_vm())
 		poll_high_timeout = 1500000;
-	hrtimer_init(&ap_poll_timer, CLOCK_MONOTONIC, HRTIMER_MODE_ABS);
-	ap_poll_timer.function = ap_poll_timeout;
+	hrtimer_setup(&ap_poll_timer, ap_poll_timeout, CLOCK_MONOTONIC, HRTIMER_MODE_ABS);
 
 	queue_work(system_long_wq, &ap_scan_bus_work);
 

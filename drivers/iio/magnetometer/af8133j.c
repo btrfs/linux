@@ -312,10 +312,11 @@ static int af8133j_set_scale(struct af8133j_data *data,
 	 * When suspended, just store the new range to data->range to be
 	 * applied later during power up.
 	 */
-	if (!pm_runtime_status_suspended(dev))
+	if (!pm_runtime_status_suspended(dev)) {
 		scoped_guard(mutex, &data->mutex)
 			ret = regmap_write(data->regmap,
 					   AF8133J_REG_RANGE, range);
+	}
 
 	pm_runtime_enable(dev);
 
@@ -359,7 +360,7 @@ static irqreturn_t af8133j_trigger_handler(int irq, void *p)
 	s64 timestamp = iio_get_time_ns(indio_dev);
 	struct {
 		__le16 values[3];
-		s64 timestamp __aligned(8);
+		aligned_s64 timestamp;
 	} sample;
 	int ret;
 
@@ -382,7 +383,6 @@ static const struct regmap_config af8133j_regmap_config = {
 	.reg_bits = 8,
 	.val_bits = 8,
 	.max_register = AF8133J_REG_SWR,
-	.cache_type = REGCACHE_NONE,
 };
 
 static void af8133j_power_down_action(void *ptr)

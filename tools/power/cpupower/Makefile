@@ -52,12 +52,15 @@ DESTDIR ?=
 # and _should_ modify the PACKAGE_BUGREPORT definition
 
 VERSION:=			$(shell ./utils/version-gen.sh)
-LIB_MAJ=			0.0.1
-LIB_MIN=			1
+LIB_FIX=			1
+LIB_MIN=			0
+LIB_MAJ=			1
+LIB_VER=			$(LIB_MAJ).$(LIB_MIN).$(LIB_FIX)
+
 
 PACKAGE =			cpupower
 PACKAGE_BUGREPORT =		linux-pm@vger.kernel.org
-LANGUAGES = 			de fr it cs pt ka
+LANGUAGES = 			de fr it cs pt ka zh_CN
 
 
 # Directory definitions. These are default and most probably
@@ -86,12 +89,20 @@ INSTALL_SCRIPT = ${INSTALL} -m 644
 # If you are running a cross compiler, you may want to set this
 # to something more interesting, like "arm-linux-".  If you want
 # to compile vs uClibc, that can be done here as well.
-CROSS = #/usr/i386-linux-uclibc/usr/bin/i386-uclibc-
+CROSS ?= #/usr/i386-linux-uclibc/usr/bin/i386-uclibc-
+ifneq ($(CROSS), )
 CC = $(CROSS)gcc
 LD = $(CROSS)gcc
 AR = $(CROSS)ar
 STRIP = $(CROSS)strip
 RANLIB = $(CROSS)ranlib
+else
+CC ?= $(CROSS)gcc
+LD ?= $(CROSS)gcc
+AR ?= $(CROSS)ar
+STRIP ?= $(CROSS)strip
+RANLIB ?= $(CROSS)ranlib
+endif
 HOSTCC = gcc
 MKDIR = mkdir
 
@@ -192,14 +203,14 @@ $(OUTPUT)lib/%.o: $(LIB_SRC) $(LIB_HEADERS)
 	$(ECHO) "  CC      " $@
 	$(QUIET) $(CC) $(CFLAGS) -fPIC -o $@ -c lib/$*.c
 
-$(OUTPUT)libcpupower.so.$(LIB_MAJ): $(LIB_OBJS)
+$(OUTPUT)libcpupower.so.$(LIB_VER): $(LIB_OBJS)
 	$(ECHO) "  LD      " $@
 	$(QUIET) $(CC) -shared $(CFLAGS) $(LDFLAGS) -o $@ \
-		-Wl,-soname,libcpupower.so.$(LIB_MIN) $(LIB_OBJS)
+		-Wl,-soname,libcpupower.so.$(LIB_MAJ) $(LIB_OBJS)
 	@ln -sf $(@F) $(OUTPUT)libcpupower.so
-	@ln -sf $(@F) $(OUTPUT)libcpupower.so.$(LIB_MIN)
+	@ln -sf $(@F) $(OUTPUT)libcpupower.so.$(LIB_MAJ)
 
-libcpupower: $(OUTPUT)libcpupower.so.$(LIB_MAJ)
+libcpupower: $(OUTPUT)libcpupower.so.$(LIB_VER)
 
 # Let all .o files depend on its .c file and all headers
 # Might be worth to put this into utils/Makefile at some point of time
@@ -209,7 +220,7 @@ $(OUTPUT)%.o: %.c
 	$(ECHO) "  CC      " $@
 	$(QUIET) $(CC) $(CFLAGS) -I./lib -I ./utils -o $@ -c $*.c
 
-$(OUTPUT)cpupower: $(UTIL_OBJS) $(OUTPUT)libcpupower.so.$(LIB_MAJ)
+$(OUTPUT)cpupower: $(UTIL_OBJS) $(OUTPUT)libcpupower.so.$(LIB_VER)
 	$(ECHO) "  CC      " $@
 ifeq ($(strip $(STATIC)),true)
 	$(QUIET) $(CC) $(CFLAGS) $(LDFLAGS) $(UTIL_OBJS) -lrt -lpci -L$(OUTPUT) -o $@
@@ -218,17 +229,28 @@ else
 endif
 	$(QUIET) $(STRIPCMD) $@
 
+ifeq (, $(shell which xgettext))
+$(warning "Install xgettext to extract translatable strings.")
+else
 $(OUTPUT)po/$(PACKAGE).pot: $(UTIL_SRC)
 	$(ECHO) "  GETTEXT " $@
 	$(QUIET) xgettext --default-domain=$(PACKAGE) --add-comments \
 		--keyword=_ --keyword=N_ $(UTIL_SRC) -p $(@D) -o $(@F)
+endif
 
+ifeq (, $(shell which msgfmt))
+$(warning "Install msgfmt to generate binary message catalogs.")
+else
 $(OUTPUT)po/%.gmo: po/%.po
 	$(ECHO) "  MSGFMT  " $@
 	$(QUIET) msgfmt -o $@ po/$*.po
+endif
 
 create-gmo: ${GMO_FILES}
 
+ifeq (, $(shell which msgmerge))
+$(warning "Install msgmerge to merge translations.")
+else
 update-po: $(OUTPUT)po/$(PACKAGE).pot
 	$(ECHO) "  MSGMRG  " $@
 	$(QUIET) @for HLANG in $(LANGUAGES); do \
@@ -241,8 +263,9 @@ update-po: $(OUTPUT)po/$(PACKAGE).pot
 			rm -f $(OUTPUT)po/$$HLANG.new.po; \
 		fi; \
 	done;
+endif
 
-compile-bench: $(OUTPUT)libcpupower.so.$(LIB_MAJ)
+compile-bench: $(OUTPUT)libcpupower.so.$(LIB_VER)
 	@V=$(V) confdir=$(confdir) $(MAKE) -C bench O=$(OUTPUT)
 
 # we compile into subdirectories. if the target directory is not the

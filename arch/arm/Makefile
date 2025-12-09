@@ -150,6 +150,7 @@ endif
 KBUILD_CPPFLAGS	+=$(cpp-y)
 KBUILD_CFLAGS	+=$(CFLAGS_ABI) $(CFLAGS_ISA) $(arch-y) $(tune-y) $(call cc-option,-mshort-load-bytes,$(call cc-option,-malignment-traps,)) -msoft-float -Uarm
 KBUILD_AFLAGS	+=$(CFLAGS_ABI) $(AFLAGS_ISA) -Wa,$(arch-y) $(tune-y) -include asm/unified.h -msoft-float
+KBUILD_RUSTFLAGS += --target=arm-unknown-linux-gnueabi
 
 CHECKFLAGS	+= -D__arm__
 
@@ -264,13 +265,13 @@ stack_protector_prepare: prepare0
 		-mstack-protector-guard=tls \
 		-mstack-protector-guard-offset=$(shell	\
 			awk '{if ($$2 == "TSK_STACK_CANARY") print $$3;}'\
-				include/generated/asm-offsets.h))
+				$(objtree)/include/generated/asm-offsets.h))
 else
 stack_protector_prepare: prepare0
 	$(eval SSP_PLUGIN_CFLAGS := \
 		-fplugin-arg-arm_ssp_per_task_plugin-offset=$(shell	\
 			awk '{if ($$2 == "TSK_STACK_CANARY") print $$3;}'\
-				include/generated/asm-offsets.h))
+				$(objtree)/include/generated/asm-offsets.h))
 	$(eval KBUILD_CFLAGS += $(SSP_PLUGIN_CFLAGS))
 	$(eval GCC_PLUGINS_CFLAGS += $(SSP_PLUGIN_CFLAGS))
 endif

@@ -64,6 +64,8 @@ struct drm_scanout_buffer {
 
 };
 
+#ifdef CONFIG_DRM_PANIC
+
 /**
  * drm_panic_trylock - try to enter the panic printing critical section
  * @dev: struct drm_device
@@ -148,5 +150,24 @@ struct drm_scanout_buffer {
  */
 #define drm_panic_unlock(dev, flags) \
 	raw_spin_unlock_irqrestore(&(dev)->mode_config.panic_lock, flags)
+
+#else
+
+static inline bool drm_panic_trylock(struct drm_device *dev, unsigned long flags)
+{
+	return true;
+}
+
+static inline void drm_panic_lock(struct drm_device *dev, unsigned long flags) {}
+static inline void drm_panic_unlock(struct drm_device *dev, unsigned long flags) {}
+
+#endif
+
+#if defined(CONFIG_DRM_PANIC_SCREEN_QR_CODE)
+size_t drm_panic_qr_max_data_size(u8 version, size_t url_len);
+
+u8 drm_panic_qr_generate(const char *url, u8 *data, size_t data_len, size_t data_size,
+			 u8 *tmp, size_t tmp_size);
+#endif
 
 #endif /* __DRM_PANIC_H__ */

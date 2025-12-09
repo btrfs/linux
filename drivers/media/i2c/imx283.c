@@ -32,7 +32,6 @@
 #include <media/v4l2-cci.h>
 #include <media/v4l2-ctrls.h>
 #include <media/v4l2-device.h>
-#include <media/v4l2-event.h>
 #include <media/v4l2-fwnode.h>
 #include <media/v4l2-mediabus.h>
 
@@ -1171,8 +1170,10 @@ static int imx283_disable_streams(struct v4l2_subdev *sd,
 }
 
 /* Power/clock management functions */
-static int imx283_power_on(struct imx283 *imx283)
+static int imx283_power_on(struct device *dev)
 {
+	struct v4l2_subdev *sd = dev_get_drvdata(dev);
+	struct imx283 *imx283 = to_imx283(sd);
 	int ret;
 
 	ret = regulator_bulk_enable(ARRAY_SIZE(imx283_supply_name),
@@ -1200,29 +1201,14 @@ reg_off:
 	return ret;
 }
 
-static int imx283_power_off(struct imx283 *imx283)
+static int imx283_power_off(struct device *dev)
 {
+	struct v4l2_subdev *sd = dev_get_drvdata(dev);
+	struct imx283 *imx283 = to_imx283(sd);
+
 	gpiod_set_value_cansleep(imx283->reset_gpio, 1);
 	regulator_bulk_disable(ARRAY_SIZE(imx283_supply_name), imx283->supplies);
 	clk_disable_unprepare(imx283->xclk);
-
-	return 0;
-}
-
-static int imx283_runtime_resume(struct device *dev)
-{
-	struct v4l2_subdev *sd = dev_get_drvdata(dev);
-	struct imx283 *imx283 = to_imx283(sd);
-
-	return imx283_power_on(imx283);
-}
-
-static int imx283_runtime_suspend(struct device *dev)
-{
-	struct v4l2_subdev *sd = dev_get_drvdata(dev);
-	struct imx283 *imx283 = to_imx283(sd);
-
-	imx283_power_off(imx283);
 
 	return 0;
 }
@@ -1284,11 +1270,6 @@ static int imx283_get_selection(struct v4l2_subdev *sd,
 	}
 }
 
-static const struct v4l2_subdev_core_ops imx283_core_ops = {
-	.subscribe_event = v4l2_ctrl_subdev_subscribe_event,
-	.unsubscribe_event = v4l2_event_subdev_unsubscribe,
-};
-
 static const struct v4l2_subdev_video_ops imx283_video_ops = {
 	.s_stream = v4l2_subdev_s_stream_helper,
 };
@@ -1308,7 +1289,6 @@ static const struct v4l2_subdev_internal_ops imx283_internal_ops = {
 };
 
 static const struct v4l2_subdev_ops imx283_subdev_ops = {
-	.core = &imx283_core_ops,
 	.video = &imx283_video_ops,
 	.pad = &imx283_pad_ops,
 };
@@ -1523,7 +1503,7 @@ static int imx283_probe(struct i2c_client *client)
 	 * The sensor must be powered for imx283_identify_module()
 	 * to be able to read the CHIP_ID register
 	 */
-	ret = imx283_power_on(imx283);
+	ret = imx283_power_on(imx283->dev);
 	if (ret)
 		return ret;
 
@@ -1548,8 +1528,7 @@ static int imx283_probe(struct i2c_client *client)
 		goto error_pm;
 
 	/* Initialize subdev */
-	imx283->sd.flags |= V4L2_SUBDEV_FL_HAS_DEVNODE |
-			    V4L2_SUBDEV_FL_HAS_EVENTS;
+	imx283->sd.flags |= V4L2_SUBDEV_FL_HAS_DEVNODE;
 	imx283->sd.entity.function = MEDIA_ENT_F_CAM_SENSOR;
 	imx283->sd.internal_ops = &imx283_internal_ops;
 
@@ -1597,7 +1576,7 @@ error_pm:
 	pm_runtime_disable(imx283->dev);
 	pm_runtime_set_suspended(imx283->dev);
 error_power_off:
-	imx283_power_off(imx283);
+	imx283_power_off(imx283->dev);
 
 	return ret;
 }
@@ -1614,12 +1593,12 @@ static void imx283_remove(struct i2c_client *client)
 
 	pm_runtime_disable(imx283->dev);
 	if (!pm_runtime_status_suspended(imx283->dev))
-		imx283_power_off(imx283);
+		imx283_power_off(imx283->dev);
 	pm_runtime_set_suspended(imx283->dev);
 }
 
-static DEFINE_RUNTIME_DEV_PM_OPS(imx283_pm_ops, imx283_runtime_suspend,
-				 imx283_runtime_resume, NULL);
+static DEFINE_RUNTIME_DEV_PM_OPS(imx283_pm_ops, imx283_power_off,
+				 imx283_power_on, NULL);
 
 static const struct of_device_id imx283_dt_ids[] = {
 	{ .compatible = "sony,imx283" },

@@ -20,6 +20,7 @@
 #include <linux/pm.h>
 #include <linux/regmap.h>
 
+#include <drm/clients/drm_client_setup.h>
 #include <drm/drm_atomic.h>
 #include <drm/drm_atomic_helper.h>
 #include <drm/drm_bridge.h>
@@ -228,7 +229,7 @@ static int ingenic_drm_update_pixclk(struct notifier_block *nb,
 }
 
 static void ingenic_drm_bridge_atomic_enable(struct drm_bridge *bridge,
-					     struct drm_bridge_state *old_bridge_state)
+					     struct drm_atomic_state *state)
 {
 	struct ingenic_drm *priv = drm_device_get_priv(bridge->dev);
 
@@ -259,7 +260,7 @@ static void ingenic_drm_crtc_atomic_enable(struct drm_crtc *crtc,
 }
 
 static void ingenic_drm_bridge_atomic_disable(struct drm_bridge *bridge,
-					      struct drm_bridge_state *old_bridge_state)
+					      struct drm_atomic_state *state)
 {
 	struct ingenic_drm *priv = drm_device_get_priv(bridge->dev);
 	unsigned int var;
@@ -952,7 +953,6 @@ static const struct drm_driver ingenic_drm_driver_data = {
 	.driver_features	= DRIVER_MODESET | DRIVER_GEM | DRIVER_ATOMIC,
 	.name			= "ingenic-drm",
 	.desc			= "DRM module for Ingenic SoCs",
-	.date			= "20200716",
 	.major			= 1,
 	.minor			= 1,
 	.patchlevel		= 0,
@@ -960,6 +960,7 @@ static const struct drm_driver ingenic_drm_driver_data = {
 	.fops			= &ingenic_drm_fops,
 	.gem_create_object	= ingenic_drm_gem_create_object,
 	DRM_GEM_DMA_DRIVER_OPS,
+	DRM_FBDEV_DMA_DRIVER_OPS,
 };
 
 static const struct drm_plane_funcs ingenic_drm_primary_plane_funcs = {
@@ -1399,7 +1400,7 @@ static int ingenic_drm_bind(struct device *dev, bool has_components)
 		goto err_clk_notifier_unregister;
 	}
 
-	drm_fbdev_dma_setup(drm, 32);
+	drm_client_setup(drm, NULL);
 
 	return 0;
 
@@ -1630,7 +1631,7 @@ static struct platform_driver ingenic_drm_driver = {
 		.of_match_table = of_match_ptr(ingenic_drm_of_match),
 	},
 	.probe = ingenic_drm_probe,
-	.remove_new = ingenic_drm_remove,
+	.remove = ingenic_drm_remove,
 	.shutdown = ingenic_drm_shutdown,
 };
 

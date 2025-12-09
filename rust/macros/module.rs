@@ -56,7 +56,7 @@ impl<'a> ModInfoBuilder<'a> {
             "
                 {cfg}
                 #[doc(hidden)]
-                #[link_section = \".modinfo\"]
+                #[cfg_attr(not(target_os = \"macos\"), link_section = \".modinfo\")]
                 #[used]
                 pub static __{module}_{counter}: [u8; {length}] = *{string};
             ",
@@ -95,6 +95,7 @@ struct ModuleInfo {
     license: String,
     name: String,
     author: Option<String>,
+    authors: Option<Vec<String>>,
     description: Option<String>,
     alias: Option<Vec<String>>,
     firmware: Option<Vec<String>>,
@@ -108,6 +109,7 @@ impl ModuleInfo {
             "type",
             "name",
             "author",
+            "authors",
             "description",
             "license",
             "alias",
@@ -136,6 +138,7 @@ impl ModuleInfo {
                 "type" => info.type_ = expect_ident(it),
                 "name" => info.name = expect_string_ascii(it),
                 "author" => info.author = Some(expect_string(it)),
+                "authors" => info.authors = Some(expect_string_array(it)),
                 "description" => info.description = Some(expect_string(it)),
                 "license" => info.license = expect_string_ascii(it),
                 "alias" => info.alias = Some(expect_string_array(it)),
@@ -186,6 +189,11 @@ pub(crate) fn module(ts: TokenStream) -> TokenStream {
     if let Some(author) = info.author {
         modinfo.emit("author", &author);
     }
+    if let Some(authors) = info.authors {
+        for author in authors {
+            modinfo.emit("author", &author);
+        }
+    }
     if let Some(description) = info.description {
         modinfo.emit("description", &description);
     }
@@ -228,10 +236,19 @@ pub(crate) fn module(ts: TokenStream) -> TokenStream {
                 kernel::ThisModule::from_ptr(core::ptr::null_mut())
             }};
 
+            /// The `LocalModule` type is the type of the module created by `module!`,
+            /// `module_pci_driver!`, `module_platform_driver!`, etc.
+            type LocalModule = {type_};
+
+            impl kernel::ModuleMetadata for {type_} {{
+                const NAME: &'static kernel::str::CStr = kernel::c_str!(\"{name}\");
+            }}
+
             // Double nested modules, since then nobody can access the public items inside.
             mod __module_init {{
                 mod __module_init {{
                     use super::super::{type_};
+                    use pin_init::PinInit;
 
                     /// The \"Rust loadable module\" mark.
                     //
@@ -242,7 +259,8 @@ pub(crate) fn module(ts: TokenStream) -> TokenStream {
                     #[used]
                     static __IS_RUST_MODULE: () = ();
 
-                    static mut __MOD: Option<{type_}> = None;
+                    static mut __MOD: core::mem::MaybeUninit<{type_}> =
+                        core::mem::MaybeUninit::uninit();
 
                     // Loadable modules need to export the `{{init,cleanup}}_module` identifiers.
                     /// # Safety
@@ -253,7 +271,7 @@ pub(crate) fn module(ts: TokenStream) -> TokenStream {
                     #[doc(hidden)]
                     #[no_mangle]
                     #[link_section = \".init.text\"]
-                    pub unsafe extern \"C\" fn init_module() -> core::ffi::c_int {{
+                    pub unsafe extern \"C\" fn init_module() -> kernel::ffi::c_int {{
                         // SAFETY: This function is inaccessible to the outside due to the double
                         // module wrapping it. It is called exactly once by the C side via its
                         // unique name.
@@ -292,7 +310,7 @@ pub(crate) fn module(ts: TokenStream) -> TokenStream {
                     #[doc(hidden)]
                     #[link_section = \"{initcall_section}\"]
                     #[used]
-                    pub static __{name}_initcall: extern \"C\" fn() -> core::ffi::c_int = __{name}_init;
+                    pub static __{name}_initcall: extern \"C\" fn() -> kernel::ffi::c_int = __{name}_init;
 
                     #[cfg(not(MODULE))]
                     #[cfg(CONFIG_HAVE_ARCH_PREL32_RELOCATIONS)]
@@ -307,7 +325,7 @@ pub(crate) fn module(ts: TokenStream) -> TokenStream {
                     #[cfg(not(MODULE))]
                     #[doc(hidden)]
                     #[no_mangle]
-                    pub extern \"C\" fn __{name}_init() -> core::ffi::c_int {{
+                    pub extern \"C\" fn __{name}_init() -> kernel::ffi::c_int {{
                         // SAFETY: This function is inaccessible to the outside due to the double
                         // module wrapping it. It is called exactly once by the C side via its
                         // placement above in the initcall section.
@@ -330,21 +348,15 @@ pub(crate) fn module(ts: TokenStream) -> TokenStream {
                     /// # Safety
                     ///
                     /// This function must only be called once.
-                    unsafe fn __init() -> core::ffi::c_int {{
-                        match <{type_} as kernel::Module>::init(&super::super::THIS_MODULE) {{
-                            Ok(m) => {{
-                                // SAFETY: No data race, since `__MOD` can only be accessed by this
-                                // module and there only `__init` and `__exit` access it. These
-                                // functions are only called once and `__exit` cannot be called
-                                // before or during `__init`.
-                                unsafe {{
-                                    __MOD = Some(m);
-                                }}
-                                return 0;
-                            }}
-                            Err(e) => {{
-                                return e.to_errno();
-                            }}
+                    unsafe fn __init() -> kernel::ffi::c_int {{
+                        let initer =
+                            <{type_} as kernel::InPlaceModule>::init(&super::super::THIS_MODULE);
+                        // SAFETY: No data race, since `__MOD` can only be accessed by this module
+                        // and there only `__init` and `__exit` access it. These functions are only
+                        // called once and `__exit` cannot be called before or during `__init`.
+                        match unsafe {{ initer.__pinned_init(__MOD.as_mut_ptr()) }} {{
+                            Ok(m) => 0,
+                            Err(e) => e.to_errno(),
                         }}
                     }}
 
@@ -359,7 +371,7 @@ pub(crate) fn module(ts: TokenStream) -> TokenStream {
                         // called once and `__init` was already called.
                         unsafe {{
                             // Invokes `drop()` on `__MOD`, which should be used for cleanup.
-                            __MOD = None;
+                            __MOD.assume_init_drop();
                         }}
                     }}
 

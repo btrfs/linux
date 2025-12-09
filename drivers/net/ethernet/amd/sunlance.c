@@ -963,7 +963,7 @@ static int lance_close(struct net_device *dev)
 	struct lance_private *lp = netdev_priv(dev);
 
 	netif_stop_queue(dev);
-	del_timer_sync(&lp->multicast_timer);
+	timer_delete_sync(&lp->multicast_timer);
 
 	STOP_LANCE(lp);
 
@@ -1514,7 +1514,7 @@ static struct platform_driver sunlance_sbus_driver = {
 		.of_match_table = sunlance_sbus_match,
 	},
 	.probe		= sunlance_sbus_probe,
-	.remove_new	= sunlance_sbus_remove,
+	.remove		= sunlance_sbus_remove,
 };
 
 module_platform_driver(sunlance_sbus_driver);

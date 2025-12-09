@@ -377,7 +377,7 @@ struct reg_value {
 struct ov5640_timings {
 	/* Analog crop rectangle. */
 	struct v4l2_rect analog_crop;
-	/* Visibile crop: from analog crop top-left corner. */
+	/* Visible crop: from analog crop top-left corner. */
 	struct v4l2_rect crop;
 	/* Total pixels per line: width + fixed hblank. */
 	u32 htot;
@@ -1982,6 +1982,7 @@ static int ov5640_get_light_freq(struct ov5640_dev *sensor)
 			light_freq = 50;
 		} else {
 			/* 60Hz */
+			light_freq = 60;
 		}
 	}
 

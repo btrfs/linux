@@ -4,7 +4,7 @@
 
 #include <asm/sparsemem.h>
 
-#ifndef __ASSEMBLY__
+#ifndef __ASSEMBLER__
 #include <linux/types.h>
 #include <asm/kaslr.h>
 
@@ -44,7 +44,7 @@ static inline bool pgtable_l5_enabled(void)
 extern unsigned int pgdir_shift;
 extern unsigned int ptrs_per_p4d;
 
-#endif	/* !__ASSEMBLY__ */
+#endif	/* !__ASSEMBLER__ */
 
 #define SHARED_KERNEL_PMD	0
 
@@ -141,7 +141,7 @@ extern unsigned int ptrs_per_p4d;
 #endif /* CONFIG_DYNAMIC_MEMORY_LAYOUT */
 
 #ifdef CONFIG_RANDOMIZE_MEMORY
-# define PHYSMEM_END		physmem_end
+# define DIRECT_MAP_PHYSMEM_END	direct_map_physmem_end
 #endif
 
 /*

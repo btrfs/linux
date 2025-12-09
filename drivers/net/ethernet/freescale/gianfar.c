@@ -1647,19 +1647,10 @@ static void gfar_configure_serdes(struct net_device *dev)
  */
 static int init_phy(struct net_device *dev)
 {
-	__ETHTOOL_DECLARE_LINK_MODE_MASK(mask) = { 0, };
 	struct gfar_private *priv = netdev_priv(dev);
 	phy_interface_t interface = priv->interface;
 	struct phy_device *phydev;
 	struct ethtool_keee edata;
-
-	linkmode_set_bit_array(phy_10_100_features_array,
-			       ARRAY_SIZE(phy_10_100_features_array),
-			       mask);
-	linkmode_set_bit(ETHTOOL_LINK_MODE_Autoneg_BIT, mask);
-	linkmode_set_bit(ETHTOOL_LINK_MODE_MII_BIT, mask);
-	if (priv->device_flags & FSL_GIANFAR_DEV_HAS_GIGABIT)
-		linkmode_set_bit(ETHTOOL_LINK_MODE_1000baseT_Full_BIT, mask);
 
 	priv->oldlink = 0;
 	priv->oldspeed = 0;
@@ -1675,9 +1666,8 @@ static int init_phy(struct net_device *dev)
 	if (interface == PHY_INTERFACE_MODE_SGMII)
 		gfar_configure_serdes(dev);
 
-	/* Remove any features not supported by the controller */
-	linkmode_and(phydev->supported, phydev->supported, mask);
-	linkmode_copy(phydev->advertising, phydev->supported);
+	if (!(priv->device_flags & FSL_GIANFAR_DEV_HAS_GIGABIT))
+		phy_set_max_speed(phydev, SPEED_100);
 
 	/* Add support for flow control */
 	phy_support_asym_pause(phydev);
@@ -2207,8 +2197,9 @@ static void gfar_clean_tx_ring(struct gfar_priv_tx_q *tx_queue)
 
 		if (unlikely(do_tstamp)) {
 			struct skb_shared_hwtstamps shhwtstamps;
-			u64 *ns = (u64 *)(((uintptr_t)skb->data + 0x10) &
-					  ~0x7UL);
+			__be64 *ns;
+
+			ns = (__be64 *)(((uintptr_t)skb->data + 0x10) & ~0x7UL);
 
 			memset(&shhwtstamps, 0, sizeof(shhwtstamps));
 			shhwtstamps.hwtstamp = ns_to_ktime(be64_to_cpu(*ns));
@@ -2471,7 +2462,7 @@ static void gfar_process_frame(struct net_device *ndev, struct sk_buff *skb)
 	/* Get receive timestamp from the skb */
 	if (priv->hwts_rx_en) {
 		struct skb_shared_hwtstamps *shhwtstamps = skb_hwtstamps(skb);
-		u64 *ns = (u64 *) skb->data;
+		__be64 *ns = (__be64 *)skb->data;
 
 		memset(shhwtstamps, 0, sizeof(*shhwtstamps));
 		shhwtstamps->hwtstamp = ns_to_ktime(be64_to_cpu(*ns));
@@ -3642,7 +3633,7 @@ static struct platform_driver gfar_driver = {
 		.of_match_table = gfar_match,
 	},
 	.probe = gfar_probe,
-	.remove_new = gfar_remove,
+	.remove = gfar_remove,
 };
 
 module_platform_driver(gfar_driver);

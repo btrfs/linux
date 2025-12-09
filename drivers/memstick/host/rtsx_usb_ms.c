@@ -813,6 +813,7 @@ static void rtsx_usb_ms_drv_remove(struct platform_device *pdev)
 
 	host->eject = true;
 	cancel_work_sync(&host->handle_req);
+	cancel_delayed_work_sync(&host->poll_card);
 
 	mutex_lock(&host->host_mutex);
 	if (host->req) {
@@ -853,7 +854,7 @@ MODULE_DEVICE_TABLE(platform, rtsx_usb_ms_ids);
 
 static struct platform_driver rtsx_usb_ms_driver = {
 	.probe		= rtsx_usb_ms_drv_probe,
-	.remove_new	= rtsx_usb_ms_drv_remove,
+	.remove		= rtsx_usb_ms_drv_remove,
 	.id_table       = rtsx_usb_ms_ids,
 	.driver		= {
 		.name	= "rtsx_usb_ms",

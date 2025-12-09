@@ -298,7 +298,7 @@ static void univ8250_release_irq(struct uart_8250_port *up)
 {
 	struct uart_port *port = &up->port;
 
-	del_timer_sync(&up->timer);
+	timer_delete_sync(&up->timer);
 	up->timer.function = serial8250_timeout;
 	if (port->irq)
 		serial_unlink_irq_chain(up);
@@ -675,7 +675,6 @@ static void serial_8250_overrun_backoff_work(struct work_struct *work)
 
 	uart_port_lock_irqsave(port, &flags);
 	up->ier |= UART_IER_RLSI | UART_IER_RDI;
-	up->port.read_status_mask |= UART_LSR_DR;
 	serial_out(up, UART_IER, up->ier);
 	uart_port_unlock_irqrestore(port, flags);
 }
@@ -812,6 +811,9 @@ int serial8250_register_8250_port(const struct uart_8250_port *up)
 			uart->dl_write = up->dl_write;
 
 		if (uart->port.type != PORT_8250_CIR) {
+			if (uart_console_registered(&uart->port))
+				pm_runtime_get_sync(uart->port.dev);
+
 			if (serial8250_isa_config != NULL)
 				serial8250_isa_config(0, &uart->port,
 						&uart->capabilities);

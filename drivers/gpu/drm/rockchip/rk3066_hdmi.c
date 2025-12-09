@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * Copyright (C) Fuzhou Rockchip Electronics Co.Ltd
+ * Copyright (C) Rockchip Electronics Co., Ltd.
  *    Zheng Yang <zhengyang@rock-chips.com>
  */
 
@@ -482,7 +482,7 @@ static int rk3066_hdmi_connector_get_modes(struct drm_connector *connector)
 
 static enum drm_mode_status
 rk3066_hdmi_connector_mode_valid(struct drm_connector *connector,
-				 struct drm_display_mode *mode)
+				 const struct drm_display_mode *mode)
 {
 	u32 vic = drm_match_cea_mode(mode);
 
@@ -858,7 +858,7 @@ MODULE_DEVICE_TABLE(of, rk3066_hdmi_dt_ids);
 
 struct platform_driver rk3066_hdmi_driver = {
 	.probe  = rk3066_hdmi_probe,
-	.remove_new = rk3066_hdmi_remove,
+	.remove = rk3066_hdmi_remove,
 	.driver = {
 		.name = "rockchip-rk3066-hdmi",
 		.of_match_table = rk3066_hdmi_dt_ids,

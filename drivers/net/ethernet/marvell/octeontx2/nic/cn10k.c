@@ -72,7 +72,7 @@ int cn10k_lmtst_init(struct otx2_nic *pfvf)
 }
 EXPORT_SYMBOL(cn10k_lmtst_init);
 
-int cn10k_sq_aq_init(void *dev, u16 qidx, u16 sqb_aura)
+int cn10k_sq_aq_init(void *dev, u16 qidx, u8 chan_offset, u16 sqb_aura)
 {
 	struct nix_cn10k_aq_enq_req *aq;
 	struct otx2_nic *pfvf = dev;
@@ -88,7 +88,7 @@ int cn10k_sq_aq_init(void *dev, u16 qidx, u16 sqb_aura)
 	aq->sq.ena = 1;
 	aq->sq.smq = otx2_get_smq_idx(pfvf, qidx);
 	aq->sq.smq_rr_weight = mtu_to_dwrr_weight(pfvf, pfvf->tx_max_pktlen);
-	aq->sq.default_chan = pfvf->hw.tx_chan_base;
+	aq->sq.default_chan = pfvf->hw.tx_chan_base + chan_offset;
 	aq->sq.sqe_stype = NIX_STYPE_STF; /* Cache SQB */
 	aq->sq.sqb_aura = sqb_aura;
 	aq->sq.sq_int_ena = NIX_SQINT_BITS;
@@ -112,8 +112,11 @@ int cn10k_refill_pool_ptrs(void *dev, struct otx2_cq_queue *cq)
 	struct otx2_nic *pfvf = dev;
 	int cnt = cq->pool_ptrs;
 	u64 ptrs[NPA_MAX_BURST];
+	struct otx2_pool *pool;
 	dma_addr_t bufptr;
 	int num_ptrs = 1;
+
+	pool = &pfvf->qset.pool[cq->cq_idx];
 
 	/* Refill pool with new buffers */
 	while (cq->pool_ptrs) {
@@ -124,7 +127,9 @@ int cn10k_refill_pool_ptrs(void *dev, struct otx2_cq_queue *cq)
 			break;
 		}
 		cq->pool_ptrs--;
-		ptrs[num_ptrs] = (u64)bufptr + OTX2_HEAD_ROOM;
+		ptrs[num_ptrs] = pool->xsk_pool ?
+				 (u64)bufptr : (u64)bufptr + OTX2_HEAD_ROOM;
+
 		num_ptrs++;
 		if (num_ptrs == NPA_MAX_BURST || cq->pool_ptrs == 0) {
 			__cn10k_aura_freeptr(pfvf, cq->cq_idx, ptrs,
@@ -203,6 +208,11 @@ int cn10k_alloc_leaf_profile(struct otx2_nic *pfvf, u16 *leaf)
 
 	rsp = (struct  nix_bandprof_alloc_rsp *)
 	       otx2_mbox_get_rsp(&pfvf->mbox.mbox, 0, &req->hdr);
+	if (IS_ERR(rsp)) {
+		rc = PTR_ERR(rsp);
+		goto out;
+	}
+
 	if (!rsp->prof_count[BAND_PROF_LEAF_LAYER]) {
 		rc = -EIO;
 		goto out;

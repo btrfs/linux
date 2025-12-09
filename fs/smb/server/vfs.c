@@ -113,11 +113,6 @@ static int ksmbd_vfs_path_lookup_locked(struct ksmbd_share_config *share_conf,
 	if (IS_ERR(d))
 		goto err_out;
 
-	if (d_is_negative(d)) {
-		dput(d);
-		goto err_out;
-	}
-
 	path->dentry = d;
 	path->mnt = mntget(parent_path->mnt);
 
@@ -211,8 +206,8 @@ int ksmbd_vfs_mkdir(struct ksmbd_work *work, const char *name, umode_t mode)
 {
 	struct mnt_idmap *idmap;
 	struct path path;
-	struct dentry *dentry;
-	int err;
+	struct dentry *dentry, *d;
+	int err = 0;
 
 	dentry = ksmbd_vfs_kern_path_create(work, name,
 					    LOOKUP_NO_SYMLINKS | LOOKUP_DIRECTORY,
@@ -227,27 +222,15 @@ int ksmbd_vfs_mkdir(struct ksmbd_work *work, const char *name, umode_t mode)
 
 	idmap = mnt_idmap(path.mnt);
 	mode |= S_IFDIR;
-	err = vfs_mkdir(idmap, d_inode(path.dentry), dentry, mode);
-	if (!err && d_unhashed(dentry)) {
-		struct dentry *d;
+	d = dentry;
+	dentry = vfs_mkdir(idmap, d_inode(path.dentry), dentry, mode);
+	if (IS_ERR(dentry))
+		err = PTR_ERR(dentry);
+	else if (d_is_negative(dentry))
+		err = -ENOENT;
+	if (!err && dentry != d)
+		ksmbd_vfs_inherit_owner(work, d_inode(path.dentry), d_inode(dentry));
 
-		d = lookup_one(idmap, dentry->d_name.name, dentry->d_parent,
-			       dentry->d_name.len);
-		if (IS_ERR(d)) {
-			err = PTR_ERR(d);
-			goto out_err;
-		}
-		if (unlikely(d_is_negative(d))) {
-			dput(d);
-			err = -ENOENT;
-			goto out_err;
-		}
-
-		ksmbd_vfs_inherit_owner(work, d_inode(path.dentry), d_inode(d));
-		dput(d);
-	}
-
-out_err:
 	done_path_create(&path, dentry);
 	if (err)
 		pr_err("mkdir(%s): creation failed (err:%d)\n", name, err);
@@ -444,7 +427,7 @@ static int ksmbd_vfs_stream_write(struct ksmbd_file *fp, char *buf, loff_t *pos,
 	}
 
 	if (v_len < size) {
-		wbuf = kvzalloc(size, GFP_KERNEL);
+		wbuf = kvzalloc(size, KSMBD_DEFAULT_GFP);
 		if (!wbuf) {
 			err = -ENOMEM;
 			goto out;
@@ -496,7 +479,8 @@ int ksmbd_vfs_write(struct ksmbd_work *work, struct ksmbd_file *fp,
 	int err = 0;
 
 	if (work->conn->connection_type) {
-		if (!(fp->daccess & (FILE_WRITE_DATA_LE | FILE_APPEND_DATA_LE))) {
+		if (!(fp->daccess & (FILE_WRITE_DATA_LE | FILE_APPEND_DATA_LE)) ||
+		    S_ISDIR(file_inode(fp->filp)->i_mode)) {
 			pr_err("no right to write(%pD)\n", fp->filp);
 			err = -EACCES;
 			goto out;
@@ -693,6 +677,7 @@ int ksmbd_vfs_rename(struct ksmbd_work *work, const struct path *old_path,
 	struct ksmbd_file *parent_fp;
 	int new_type;
 	int err, lookup_flags = LOOKUP_NO_SYMLINKS;
+	int target_lookup_flags = LOOKUP_RENAME_TARGET;
 
 	if (ksmbd_override_fsids(work))
 		return -ENOMEM;
@@ -702,6 +687,14 @@ int ksmbd_vfs_rename(struct ksmbd_work *work, const struct path *old_path,
 		err = PTR_ERR(to);
 		goto revert_fsids;
 	}
+
+	/*
+	 * explicitly handle file overwrite case, for compatibility with
+	 * filesystems that may not support rename flags (e.g: fuse)
+	 */
+	if (flags & RENAME_NOREPLACE)
+		target_lookup_flags |= LOOKUP_EXCL;
+	flags &= ~(RENAME_NOREPLACE);
 
 retry:
 	err = vfs_path_parent_lookup(to, lookup_flags | LOOKUP_BENEATH,
@@ -743,7 +736,7 @@ retry:
 	}
 
 	new_dentry = lookup_one_qstr_excl(&new_last, new_path.dentry,
-					  lookup_flags | LOOKUP_RENAME_TARGET);
+					  lookup_flags | target_lookup_flags);
 	if (IS_ERR(new_dentry)) {
 		err = PTR_ERR(new_dentry);
 		goto out3;
@@ -753,16 +746,6 @@ retry:
 		err = -EACCES;
 		goto out4;
 	}
-
-	/*
-	 * explicitly handle file overwrite case, for compatibility with
-	 * filesystems that may not support rename flags (e.g: fuse)
-	 */
-	if ((flags & RENAME_NOREPLACE) && d_is_positive(new_dentry)) {
-		err = -EEXIST;
-		goto out4;
-	}
-	flags &= ~(RENAME_NOREPLACE);
 
 	if (old_child == trap) {
 		err = -EINVAL;
@@ -865,7 +848,7 @@ ssize_t ksmbd_vfs_listxattr(struct dentry *dentry, char **list)
 	if (size <= 0)
 		return size;
 
-	vlist = kvzalloc(size, GFP_KERNEL);
+	vlist = kvzalloc(size, KSMBD_DEFAULT_GFP);
 	if (!vlist)
 		return -ENOMEM;
 
@@ -907,7 +890,7 @@ ssize_t ksmbd_vfs_getxattr(struct mnt_idmap *idmap,
 	if (xattr_len < 0)
 		return xattr_len;
 
-	buf = kmalloc(xattr_len + 1, GFP_KERNEL);
+	buf = kmalloc(xattr_len + 1, KSMBD_DEFAULT_GFP);
 	if (!buf)
 		return -ENOMEM;
 
@@ -1264,6 +1247,8 @@ int ksmbd_vfs_kern_path_locked(struct ksmbd_work *work, char *name,
 					      filepath,
 					      flags,
 					      path);
+			if (!is_last)
+				next[0] = '/';
 			if (err)
 				goto out2;
 			else if (is_last)
@@ -1271,7 +1256,6 @@ int ksmbd_vfs_kern_path_locked(struct ksmbd_work *work, char *name,
 			path_put(parent_path);
 			*parent_path = *path;
 
-			next[0] = '/';
 			remain_len -= filename_len + 1;
 		}
 
@@ -1411,7 +1395,7 @@ static struct xattr_smb_acl *ksmbd_vfs_make_xattr_posix_acl(struct mnt_idmap *id
 
 	smb_acl = kzalloc(sizeof(struct xattr_smb_acl) +
 			  sizeof(struct xattr_acl_entry) * posix_acls->a_count,
-			  GFP_KERNEL);
+			  KSMBD_DEFAULT_GFP);
 	if (!smb_acl)
 		goto out;
 
@@ -1767,7 +1751,7 @@ int ksmbd_vfs_xattr_stream_name(char *stream_name, char **xattr_stream_name,
 	else
 		type = ":$DATA";
 
-	buf = kasprintf(GFP_KERNEL, "%s%s%s",
+	buf = kasprintf(KSMBD_DEFAULT_GFP, "%s%s%s",
 			XATTR_NAME_STREAM, stream_name,	type);
 	if (!buf)
 		return -ENOMEM;
@@ -1855,13 +1839,6 @@ void ksmbd_vfs_posix_lock_wait(struct file_lock *flock)
 	wait_event(flock->c.flc_wait, !flock->c.flc_blocker);
 }
 
-int ksmbd_vfs_posix_lock_wait_timeout(struct file_lock *flock, long timeout)
-{
-	return wait_event_interruptible_timeout(flock->c.flc_wait,
-						!flock->c.flc_blocker,
-						timeout);
-}
-
 void ksmbd_vfs_posix_lock_unblock(struct file_lock *flock)
 {
 	locks_delete_block(flock);
@@ -1896,7 +1873,7 @@ int ksmbd_vfs_set_init_posix_acl(struct mnt_idmap *idmap,
 		acl_state.group.allow;
 	acl_state.mask.allow = 0x07;
 
-	acls = posix_acl_alloc(6, GFP_KERNEL);
+	acls = posix_acl_alloc(6, KSMBD_DEFAULT_GFP);
 	if (!acls) {
 		free_acl_state(&acl_state);
 		return -ENOMEM;

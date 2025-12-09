@@ -73,6 +73,11 @@ struct slab {
 						struct {
 							unsigned inuse:16;
 							unsigned objects:15;
+							/*
+							 * If slab debugging is enabled then the
+							 * frozen bit can be reused to indicate
+							 * that the slab was corrupted
+							 */
 							unsigned frozen:1;
 						};
 					};
@@ -123,7 +128,7 @@ static_assert(IS_ALIGNED(offsetof(struct slab, freelist), sizeof(freelist_aba_t)
 
 /**
  * slab_folio - The folio allocated for a slab
- * @slab: The slab.
+ * @s: The slab.
  *
  * Slabs are allocated as folios that contain the individual objects and are
  * using some fields in the first struct page of the folio - those fields are
@@ -154,7 +159,7 @@ static_assert(IS_ALIGNED(offsetof(struct slab, freelist), sizeof(freelist_aba_t)
 
 /**
  * slab_page - The first struct page allocated for a slab
- * @slab: The slab.
+ * @s: The slab.
  *
  * A convenience wrapper for converting slab to the first struct page of the
  * underlying folio, to communicate with code not yet converted to folio or
@@ -452,39 +457,17 @@ static inline bool is_kmalloc_normal(struct kmem_cache *s)
 	return !(s->flags & (SLAB_CACHE_DMA|SLAB_ACCOUNT|SLAB_RECLAIM_ACCOUNT));
 }
 
-/* Legal flag mask for kmem_cache_create(), for various configurations */
 #define SLAB_CORE_FLAGS (SLAB_HWCACHE_ALIGN | SLAB_CACHE_DMA | \
 			 SLAB_CACHE_DMA32 | SLAB_PANIC | \
-			 SLAB_TYPESAFE_BY_RCU | SLAB_DEBUG_OBJECTS )
+			 SLAB_TYPESAFE_BY_RCU | SLAB_DEBUG_OBJECTS | \
+			 SLAB_NOLEAKTRACE | SLAB_RECLAIM_ACCOUNT | \
+			 SLAB_TEMPORARY | SLAB_ACCOUNT | \
+			 SLAB_NO_USER_FLAGS | SLAB_KMALLOC | SLAB_NO_MERGE)
 
-#ifdef CONFIG_SLUB_DEBUG
 #define SLAB_DEBUG_FLAGS (SLAB_RED_ZONE | SLAB_POISON | SLAB_STORE_USER | \
 			  SLAB_TRACE | SLAB_CONSISTENCY_CHECKS)
-#else
-#define SLAB_DEBUG_FLAGS (0)
-#endif
 
-#define SLAB_CACHE_FLAGS (SLAB_NOLEAKTRACE | SLAB_RECLAIM_ACCOUNT | \
-			  SLAB_TEMPORARY | SLAB_ACCOUNT | \
-			  SLAB_NO_USER_FLAGS | SLAB_KMALLOC | SLAB_NO_MERGE)
-
-/* Common flags available with current configuration */
-#define CACHE_CREATE_MASK (SLAB_CORE_FLAGS | SLAB_DEBUG_FLAGS | SLAB_CACHE_FLAGS)
-
-/* Common flags permitted for kmem_cache_create */
-#define SLAB_FLAGS_PERMITTED (SLAB_CORE_FLAGS | \
-			      SLAB_RED_ZONE | \
-			      SLAB_POISON | \
-			      SLAB_STORE_USER | \
-			      SLAB_TRACE | \
-			      SLAB_CONSISTENCY_CHECKS | \
-			      SLAB_NOLEAKTRACE | \
-			      SLAB_RECLAIM_ACCOUNT | \
-			      SLAB_TEMPORARY | \
-			      SLAB_ACCOUNT | \
-			      SLAB_KMALLOC | \
-			      SLAB_NO_MERGE | \
-			      SLAB_NO_USER_FLAGS)
+#define SLAB_FLAGS_PERMITTED (SLAB_CORE_FLAGS | SLAB_DEBUG_FLAGS)
 
 bool __kmem_cache_empty(struct kmem_cache *);
 int __kmem_cache_shutdown(struct kmem_cache *);
@@ -599,6 +582,8 @@ void __memcg_slab_free_hook(struct kmem_cache *s, struct slab *slab,
 			    void **p, int objects, struct slabobj_ext *obj_exts);
 #endif
 
+void kvfree_rcu_cb(struct rcu_head *head);
+
 size_t __ksize(const void *objp);
 
 static inline size_t slab_ksize(const struct kmem_cache *s)
@@ -694,6 +679,12 @@ void __kmem_obj_info(struct kmem_obj_info *kpp, void *object, struct slab *slab)
 
 void __check_heap_object(const void *ptr, unsigned long n,
 			 const struct slab *slab, bool to_user);
+
+static inline bool slub_debug_orig_size(struct kmem_cache *s)
+{
+	return (kmem_cache_debug_flags(s, SLAB_STORE_USER) &&
+			(s->flags & SLAB_KMALLOC));
+}
 
 #ifdef CONFIG_SLUB_DEBUG
 void skip_orig_size_check(struct kmem_cache *s, const void *object);

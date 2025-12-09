@@ -5,6 +5,7 @@
 
 #define pr_fmt(fmt)	"[drm:%s:%d] " fmt, __func__, __LINE__
 #include <linux/delay.h>
+#include <linux/string_choices.h>
 #include "dpu_encoder_phys.h"
 #include "dpu_hw_interrupts.h"
 #include "dpu_hw_pingpong.h"
@@ -261,7 +262,7 @@ static int dpu_encoder_phys_cmd_control_vblank_irq(
 
 	DRM_DEBUG_KMS("id:%u pp:%d enable=%s/%d\n", DRMID(phys_enc->parent),
 		      phys_enc->hw_pp->idx - PINGPONG_0,
-		      enable ? "true" : "false", refcount);
+		      str_true_false(enable), refcount);
 
 	if (enable) {
 		if (phys_enc->vblank_refcount == 0)
@@ -285,7 +286,7 @@ end:
 		DRM_ERROR("vblank irq err id:%u pp:%d ret:%d, enable %s/%d\n",
 			  DRMID(phys_enc->parent),
 			  phys_enc->hw_pp->idx - PINGPONG_0, ret,
-			  enable ? "true" : "false", refcount);
+			  str_true_false(enable), refcount);
 	}
 
 	return ret;
@@ -720,6 +721,12 @@ static void dpu_encoder_phys_cmd_init_ops(
 	ops->get_line_count = dpu_encoder_phys_cmd_get_line_count;
 }
 
+/**
+ * dpu_encoder_phys_cmd_init - Construct a new command mode physical encoder
+ * @dev:  Corresponding device for devres management
+ * @p:	Pointer to init params structure
+ * Return: Error code or newly allocated encoder
+ */
 struct dpu_encoder_phys *dpu_encoder_phys_cmd_init(struct drm_device *dev,
 		struct dpu_enc_phys_init_params *p)
 {

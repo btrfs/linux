@@ -60,6 +60,8 @@ static u64 parse_audio_format_i_type(struct snd_usb_audio *chip,
 			pcm_formats |= SNDRV_PCM_FMTBIT_SPECIAL;
 			/* flag potentially raw DSD capable altsettings */
 			fp->dsd_raw = true;
+			/* clear special format bit to avoid "unsupported format" msg below */
+			format &= ~UAC2_FORMAT_TYPE_I_RAW_DATA;
 		}
 
 		format <<= 1;
@@ -71,8 +73,11 @@ static u64 parse_audio_format_i_type(struct snd_usb_audio *chip,
 		sample_width = as->bBitResolution;
 		sample_bytes = as->bSubslotSize;
 
-		if (format & UAC3_FORMAT_TYPE_I_RAW_DATA)
+		if (format & UAC3_FORMAT_TYPE_I_RAW_DATA) {
 			pcm_formats |= SNDRV_PCM_FMTBIT_SPECIAL;
+			/* clear special format bit to avoid "unsupported format" msg below */
+			format &= ~UAC3_FORMAT_TYPE_I_RAW_DATA;
+		}
 
 		format <<= 1;
 		break;
@@ -377,6 +382,10 @@ static int parse_uac2_sample_rate_range(struct snd_usb_audio *chip,
 
 			/* Filter out invalid rates on Presonus Studio 1810c */
 			if (chip->usb_id == USB_ID(0x194f, 0x010c) &&
+			    !s1810c_valid_sample_rate(fp, rate))
+				goto skip_rate;
+			/* Filter out invalid rates on Presonus Studio 1824c */
+			if (chip->usb_id == USB_ID(0x194f, 0x010d) &&
 			    !s1810c_valid_sample_rate(fp, rate))
 				goto skip_rate;
 

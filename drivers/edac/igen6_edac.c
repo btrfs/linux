@@ -125,7 +125,7 @@
 #define MEM_SLICE_HASH_MASK(v)		(GET_BITFIELD(v, 6, 19) << 6)
 #define MEM_SLICE_HASH_LSB_MASK_BIT(v)	GET_BITFIELD(v, 24, 26)
 
-static struct res_config {
+static const struct res_config {
 	bool machine_check;
 	int num_imc;
 	u32 imc_base;
@@ -262,6 +262,11 @@ static struct work_struct ecclog_work;
 #define DID_ARL_UH_SKU1	0x7d06
 #define DID_ARL_UH_SKU2	0x7d20
 #define DID_ARL_UH_SKU3	0x7d30
+
+/* Compute die IDs for Panther Lake-H with IBECC */
+#define DID_PTL_H_SKU1	0xb000
+#define DID_PTL_H_SKU2	0xb001
+#define DID_PTL_H_SKU3	0xb002
 
 static int get_mchbar(struct pci_dev *pdev, u64 *mchbar)
 {
@@ -467,7 +472,7 @@ static u64 rpl_p_err_addr(u64 ecclog)
 	return ECC_ERROR_LOG_ADDR45(ecclog);
 }
 
-static struct res_config ehl_cfg = {
+static const struct res_config ehl_cfg = {
 	.num_imc		= 1,
 	.imc_base		= 0x5000,
 	.ibecc_base		= 0xdc00,
@@ -477,7 +482,7 @@ static struct res_config ehl_cfg = {
 	.err_addr_to_imc_addr	= ehl_err_addr_to_imc_addr,
 };
 
-static struct res_config icl_cfg = {
+static const struct res_config icl_cfg = {
 	.num_imc		= 1,
 	.imc_base		= 0x5000,
 	.ibecc_base		= 0xd800,
@@ -487,7 +492,7 @@ static struct res_config icl_cfg = {
 	.err_addr_to_imc_addr	= ehl_err_addr_to_imc_addr,
 };
 
-static struct res_config tgl_cfg = {
+static const struct res_config tgl_cfg = {
 	.machine_check		= true,
 	.num_imc		= 2,
 	.imc_base		= 0x5000,
@@ -501,7 +506,7 @@ static struct res_config tgl_cfg = {
 	.err_addr_to_imc_addr	= tgl_err_addr_to_imc_addr,
 };
 
-static struct res_config adl_cfg = {
+static const struct res_config adl_cfg = {
 	.machine_check		= true,
 	.num_imc		= 2,
 	.imc_base		= 0xd800,
@@ -512,7 +517,7 @@ static struct res_config adl_cfg = {
 	.err_addr_to_imc_addr	= adl_err_addr_to_imc_addr,
 };
 
-static struct res_config adl_n_cfg = {
+static const struct res_config adl_n_cfg = {
 	.machine_check		= true,
 	.num_imc		= 1,
 	.imc_base		= 0xd800,
@@ -523,7 +528,7 @@ static struct res_config adl_n_cfg = {
 	.err_addr_to_imc_addr	= adl_err_addr_to_imc_addr,
 };
 
-static struct res_config rpl_p_cfg = {
+static const struct res_config rpl_p_cfg = {
 	.machine_check		= true,
 	.num_imc		= 2,
 	.imc_base		= 0xd800,
@@ -535,7 +540,7 @@ static struct res_config rpl_p_cfg = {
 	.err_addr_to_imc_addr	= adl_err_addr_to_imc_addr,
 };
 
-static struct res_config mtl_ps_cfg = {
+static const struct res_config mtl_ps_cfg = {
 	.machine_check		= true,
 	.num_imc		= 2,
 	.imc_base		= 0xd800,
@@ -546,7 +551,7 @@ static struct res_config mtl_ps_cfg = {
 	.err_addr_to_imc_addr	= adl_err_addr_to_imc_addr,
 };
 
-static struct res_config mtl_p_cfg = {
+static const struct res_config mtl_p_cfg = {
 	.machine_check		= true,
 	.num_imc		= 2,
 	.imc_base		= 0xd800,
@@ -605,6 +610,9 @@ static const struct pci_device_id igen6_pci_tbl[] = {
 	{ PCI_VDEVICE(INTEL, DID_ARL_UH_SKU1), (kernel_ulong_t)&mtl_p_cfg },
 	{ PCI_VDEVICE(INTEL, DID_ARL_UH_SKU2), (kernel_ulong_t)&mtl_p_cfg },
 	{ PCI_VDEVICE(INTEL, DID_ARL_UH_SKU3), (kernel_ulong_t)&mtl_p_cfg },
+	{ PCI_VDEVICE(INTEL, DID_PTL_H_SKU1), (kernel_ulong_t)&mtl_p_cfg },
+	{ PCI_VDEVICE(INTEL, DID_PTL_H_SKU2), (kernel_ulong_t)&mtl_p_cfg },
+	{ PCI_VDEVICE(INTEL, DID_PTL_H_SKU3), (kernel_ulong_t)&mtl_p_cfg },
 	{ },
 };
 MODULE_DEVICE_TABLE(pci, igen6_pci_tbl);
@@ -777,13 +785,22 @@ static u64 ecclog_read_and_clear(struct igen6_imc *imc)
 {
 	u64 ecclog = readq(imc->window + ECC_ERROR_LOG_OFFSET);
 
-	if (ecclog & (ECC_ERROR_LOG_CE | ECC_ERROR_LOG_UE)) {
-		/* Clear CE/UE bits by writing 1s */
-		writeq(ecclog, imc->window + ECC_ERROR_LOG_OFFSET);
-		return ecclog;
-	}
+	/*
+	 * Quirk: The ECC_ERROR_LOG register of certain SoCs may contain
+	 *        the invalid value ~0. This will result in a flood of invalid
+	 *        error reports in polling mode. Skip it.
+	 */
+	if (ecclog == ~0)
+		return 0;
 
-	return 0;
+	/* Neither a CE nor a UE. Skip it.*/
+	if (!(ecclog & (ECC_ERROR_LOG_CE | ECC_ERROR_LOG_UE)))
+		return 0;
+
+	/* Clear CE/UE bits by writing 1s */
+	writeq(ecclog, imc->window + ECC_ERROR_LOG_OFFSET);
+
+	return ecclog;
 }
 
 static void errsts_clear(struct igen6_imc *imc)
@@ -1170,6 +1187,20 @@ fail:
 	return -ENODEV;
 }
 
+static void igen6_check(struct mem_ctl_info *mci)
+{
+	struct igen6_imc *imc = mci->pvt_info;
+	u64 ecclog;
+
+	/* errsts_clear() isn't NMI-safe. Delay it in the IRQ context */
+	ecclog = ecclog_read_and_clear(imc);
+	if (!ecclog)
+		return;
+
+	if (!ecclog_gen_pool_add(imc->mc, ecclog))
+		irq_work_queue(&ecclog_irq_work);
+}
+
 static int igen6_register_mci(int mc, u64 mchbar, struct pci_dev *pdev)
 {
 	struct edac_mc_layer layers[2];
@@ -1211,6 +1242,8 @@ static int igen6_register_mci(int mc, u64 mchbar, struct pci_dev *pdev)
 	mci->edac_cap = EDAC_FLAG_SECDED;
 	mci->mod_name = EDAC_MOD_STR;
 	mci->dev_name = pci_name(pdev);
+	if (edac_op_state == EDAC_OPSTATE_POLL)
+		mci->edac_check = igen6_check;
 	mci->pvt_info = &igen6_pvt->imc[mc];
 
 	imc = mci->pvt_info;
@@ -1245,6 +1278,7 @@ static int igen6_register_mci(int mc, u64 mchbar, struct pci_dev *pdev)
 	imc->mci = mci;
 	return 0;
 fail3:
+	mci->pvt_info = NULL;
 	kfree(mci->ctl_name);
 fail2:
 	edac_mc_free(mci);
@@ -1269,6 +1303,7 @@ static void igen6_unregister_mcis(void)
 
 		edac_mc_del_mc(mci->pdev);
 		kfree(mci->ctl_name);
+		mci->pvt_info = NULL;
 		edac_mc_free(mci);
 		iounmap(imc->window);
 	}
@@ -1348,6 +1383,25 @@ static void unregister_err_handler(void)
 	unregister_nmi_handler(NMI_SERR, IGEN6_NMI_NAME);
 }
 
+static void opstate_set(const struct res_config *cfg, const struct pci_device_id *ent)
+{
+	/*
+	 * Quirk: Certain SoCs' error reporting interrupts don't work.
+	 *        Force polling mode for them to ensure that memory error
+	 *        events can be handled.
+	 */
+	if (ent->device == DID_ADL_N_SKU4) {
+		edac_op_state = EDAC_OPSTATE_POLL;
+		return;
+	}
+
+	/* Set the mode according to the configuration data. */
+	if (cfg->machine_check)
+		edac_op_state = EDAC_OPSTATE_INT;
+	else
+		edac_op_state = EDAC_OPSTATE_NMI;
+}
+
 static int igen6_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 {
 	u64 mchbar;
@@ -1364,6 +1418,8 @@ static int igen6_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 	rc = igen6_pci_setup(pdev, &mchbar);
 	if (rc)
 		goto fail;
+
+	opstate_set(res_cfg, ent);
 
 	for (i = 0; i < res_cfg->num_imc; i++) {
 		rc = igen6_register_mci(i, mchbar, pdev);
@@ -1447,8 +1503,6 @@ static int __init igen6_init(void)
 	owner = edac_get_owner();
 	if (owner && strncmp(owner, EDAC_MOD_STR, sizeof(EDAC_MOD_STR)))
 		return -EBUSY;
-
-	edac_op_state = EDAC_OPSTATE_NMI;
 
 	rc = pci_register_driver(&igen6_driver);
 	if (rc)

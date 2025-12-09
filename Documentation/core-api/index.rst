@@ -52,6 +52,8 @@ Library functionality that is used throughout the kernel.
    wrappers/atomic_bitops
    floating-point
    union_find
+   min_heap
+   parser
 
 Low level entry and exit
 ========================
@@ -108,6 +110,7 @@ more memory-management documentation in Documentation/mm/index.rst.
    dma-isa-lpc
    swiotlb
    mm-api
+   cgroup
    genalloc
    pin_user_pages
    boot-time-mm

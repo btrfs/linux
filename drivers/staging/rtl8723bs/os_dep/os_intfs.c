@@ -381,34 +381,6 @@ u16 rtw_recv_select_queue(struct sk_buff *skb)
 	return rtw_1d_to_queue[priority];
 }
 
-static int rtw_ndev_notifier_call(struct notifier_block *nb, unsigned long state, void *ptr)
-{
-	struct net_device *dev = netdev_notifier_info_to_dev(ptr);
-
-	if (dev->netdev_ops->ndo_do_ioctl != rtw_ioctl)
-		return NOTIFY_DONE;
-
-	netdev_dbg(dev, FUNC_NDEV_FMT " state:%lu\n", FUNC_NDEV_ARG(dev),
-		    state);
-
-	return NOTIFY_DONE;
-}
-
-static struct notifier_block rtw_ndev_notifier = {
-	.notifier_call = rtw_ndev_notifier_call,
-};
-
-int rtw_ndev_notifier_register(void)
-{
-	return register_netdevice_notifier(&rtw_ndev_notifier);
-}
-
-void rtw_ndev_notifier_unregister(void)
-{
-	unregister_netdevice_notifier(&rtw_ndev_notifier);
-}
-
-
 static int rtw_ndev_init(struct net_device *dev)
 {
 	struct adapter *adapter = rtw_netdev_priv(dev);
@@ -435,7 +407,6 @@ static const struct net_device_ops rtw_netdev_ops = {
 	.ndo_select_queue	= rtw_select_queue,
 	.ndo_set_mac_address = rtw_net_set_mac_address,
 	.ndo_get_stats = rtw_net_get_stats,
-	.ndo_do_ioctl = rtw_ioctl,
 };
 
 int rtw_init_netdev_name(struct net_device *pnetdev, const char *ifname)
@@ -633,8 +604,7 @@ void rtw_reset_drv_sw(struct adapter *padapter)
 	struct pwrctrl_priv *pwrctrlpriv = adapter_to_pwrctl(padapter);
 
 	/* hal_priv */
-	if (is_primary_adapter(padapter))
-		rtw_hal_def_value_init(padapter);
+	rtw_hal_def_value_init(padapter);
 
 	RTW_ENABLE_FUNC(padapter, DF_RX_BIT);
 	RTW_ENABLE_FUNC(padapter, DF_TX_BIT);
@@ -727,18 +697,18 @@ free_cmd_priv:
 
 void rtw_cancel_all_timer(struct adapter *padapter)
 {
-	del_timer_sync(&padapter->mlmepriv.assoc_timer);
+	timer_delete_sync(&padapter->mlmepriv.assoc_timer);
 
-	del_timer_sync(&padapter->mlmepriv.scan_to_timer);
+	timer_delete_sync(&padapter->mlmepriv.scan_to_timer);
 
-	del_timer_sync(&padapter->mlmepriv.dynamic_chk_timer);
+	timer_delete_sync(&padapter->mlmepriv.dynamic_chk_timer);
 
-	del_timer_sync(&(adapter_to_pwrctl(padapter)->pwr_state_check_timer));
+	timer_delete_sync(&(adapter_to_pwrctl(padapter)->pwr_state_check_timer));
 
-	del_timer_sync(&padapter->mlmepriv.set_scan_deny_timer);
+	timer_delete_sync(&padapter->mlmepriv.set_scan_deny_timer);
 	rtw_clear_scan_deny(padapter);
 
-	del_timer_sync(&padapter->recvpriv.signal_stat_timer);
+	timer_delete_sync(&padapter->recvpriv.signal_stat_timer);
 
 	/* cancel dm timer */
 	rtw_hal_dm_deinit(padapter);
@@ -753,8 +723,6 @@ u8 rtw_free_drv_sw(struct adapter *padapter)
 	rtw_free_evt_priv(&padapter->evtpriv);
 
 	rtw_free_mlme_priv(&padapter->mlmepriv);
-
-	/* free_io_queue(padapter); */
 
 	_rtw_free_xmit_priv(&padapter->xmitpriv);
 

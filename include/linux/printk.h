@@ -166,6 +166,9 @@ __printf(1, 2) __cold int _printk_deferred(const char *fmt, ...);
 extern void __printk_deferred_enter(void);
 extern void __printk_deferred_exit(void);
 
+extern void printk_force_console_enter(void);
+extern void printk_force_console_exit(void);
+
 /*
  * The printk_deferred_enter/exit macros are available only as a hack for
  * some code paths that need to defer all printk console printing. Interrupts
@@ -204,6 +207,7 @@ void printk_legacy_allow_panic_sync(void);
 extern bool nbcon_device_try_acquire(struct console *con);
 extern void nbcon_device_release(struct console *con);
 void nbcon_atomic_flush_unsafe(void);
+bool pr_flush(int timeout_ms, bool reset_on_progress);
 #else
 static inline __printf(1, 0)
 int vprintk(const char *s, va_list args)
@@ -226,6 +230,14 @@ static inline void printk_deferred_enter(void)
 }
 
 static inline void printk_deferred_exit(void)
+{
+}
+
+static inline void printk_force_console_enter(void)
+{
+}
+
+static inline void printk_force_console_exit(void)
 {
 }
 
@@ -302,6 +314,11 @@ static inline void nbcon_device_release(struct console *con)
 
 static inline void nbcon_atomic_flush_unsafe(void)
 {
+}
+
+static inline bool pr_flush(int timeout_ms, bool reset_on_progress)
+{
+	return true;
 }
 
 #endif

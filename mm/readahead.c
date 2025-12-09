@@ -158,20 +158,10 @@ static void read_pages(struct readahead_control *rac)
 
 	if (aops->readahead) {
 		aops->readahead(rac);
-		/*
-		 * Clean up the remaining folios.  The sizes in ->ra
-		 * may be used to size the next readahead, so make sure
-		 * they accurately reflect what happened.
-		 */
+		/* Clean up the remaining folios. */
 		while ((folio = readahead_folio(rac)) != NULL) {
-			unsigned long nr = folio_nr_pages(folio);
-
 			folio_get(folio);
-			rac->ra->size -= nr;
-			if (rac->ra->async_size >= nr) {
-				rac->ra->async_size -= nr;
-				filemap_remove_folio(folio);
-			}
+			filemap_remove_folio(folio);
 			folio_unlock(folio);
 			folio_put(folio);
 		}
@@ -186,6 +176,18 @@ static void read_pages(struct readahead_control *rac)
 	rac->_workingset = false;
 
 	BUG_ON(readahead_count(rac));
+}
+
+static struct folio *ractl_alloc_folio(struct readahead_control *ractl,
+				       gfp_t gfp_mask, unsigned int order)
+{
+	struct folio *folio;
+
+	folio = filemap_alloc_folio(gfp_mask, order);
+	if (folio && ractl->dropbehind)
+		__folio_set_dropbehind(folio);
+
+	return folio;
 }
 
 /**
@@ -206,9 +208,9 @@ void page_cache_ra_unbounded(struct readahead_control *ractl,
 		unsigned long nr_to_read, unsigned long lookahead_size)
 {
 	struct address_space *mapping = ractl->mapping;
-	unsigned long ra_folio_index, index = readahead_index(ractl);
+	unsigned long index = readahead_index(ractl);
 	gfp_t gfp_mask = readahead_gfp_mask(mapping);
-	unsigned long mark, i = 0;
+	unsigned long mark = ULONG_MAX, i = 0;
 	unsigned int min_nrpages = mapping_min_folio_nrpages(mapping);
 
 	/*
@@ -232,9 +234,14 @@ void page_cache_ra_unbounded(struct readahead_control *ractl,
 	 * index that only has lookahead or "async_region" to set the
 	 * readahead flag.
 	 */
-	ra_folio_index = round_up(readahead_index(ractl) + nr_to_read - lookahead_size,
-				  min_nrpages);
-	mark = ra_folio_index - index;
+	if (lookahead_size <= nr_to_read) {
+		unsigned long ra_folio_index;
+
+		ra_folio_index = round_up(readahead_index(ractl) +
+					  nr_to_read - lookahead_size,
+					  min_nrpages);
+		mark = ra_folio_index - index;
+	}
 	nr_to_read += readahead_index(ractl) - index;
 	ractl->_index = index;
 
@@ -260,8 +267,8 @@ void page_cache_ra_unbounded(struct readahead_control *ractl,
 			continue;
 		}
 
-		folio = filemap_alloc_folio(gfp_mask,
-					    mapping_min_folio_order(mapping));
+		folio = ractl_alloc_folio(ractl, gfp_mask,
+					mapping_min_folio_order(mapping));
 		if (!folio)
 			break;
 
@@ -431,7 +438,7 @@ static inline int ra_alloc_folio(struct readahead_control *ractl, pgoff_t index,
 		pgoff_t mark, unsigned int order, gfp_t gfp)
 {
 	int err;
-	struct folio *folio = filemap_alloc_folio(gfp, order);
+	struct folio *folio = ractl_alloc_folio(ractl, gfp, order);
 
 	if (!folio)
 		return -ENOMEM;
@@ -512,12 +519,18 @@ void page_cache_ra_order(struct readahead_control *ractl,
 	/*
 	 * If there were already pages in the page cache, then we may have
 	 * left some gaps.  Let the regular readahead code take care of this
-	 * situation.
+	 * situation below.
 	 */
 	if (!err)
 		return;
 fallback:
-	do_page_cache_ra(ractl, ra->size - (index - start), ra->async_size);
+	/*
+	 * ->readahead() may have updated readahead window size so we have to
+	 * check there's still something to read.
+	 */
+	if (ra->size > index - start)
+		do_page_cache_ra(ractl, ra->size - (index - start),
+				 ra->async_size);
 }
 
 static unsigned long ractl_max_pages(struct readahead_control *ractl,
@@ -642,7 +655,11 @@ void page_cache_async_ra(struct readahead_control *ractl,
 			1UL << order);
 	if (index == expected) {
 		ra->start += ra->size;
-		ra->size = get_next_ra_size(ra, max_pages);
+		/*
+		 * In the case of MADV_HUGEPAGE, the actual size might exceed
+		 * the readahead window.
+		 */
+		ra->size = max(ra->size, get_next_ra_size(ra, max_pages));
 		ra->async_size = ra->size;
 		goto readit;
 	}
@@ -673,29 +690,22 @@ EXPORT_SYMBOL_GPL(page_cache_async_ra);
 
 ssize_t ksys_readahead(int fd, loff_t offset, size_t count)
 {
-	ssize_t ret;
-	struct fd f;
+	CLASS(fd, f)(fd);
 
-	ret = -EBADF;
-	f = fdget(fd);
-	if (!fd_file(f) || !(fd_file(f)->f_mode & FMODE_READ))
-		goto out;
+	if (fd_empty(f) || !(fd_file(f)->f_mode & FMODE_READ))
+		return -EBADF;
 
 	/*
 	 * The readahead() syscall is intended to run only on files
 	 * that can execute readahead. If readahead is not possible
 	 * on this file, then we must return -EINVAL.
 	 */
-	ret = -EINVAL;
 	if (!fd_file(f)->f_mapping || !fd_file(f)->f_mapping->a_ops ||
 	    (!S_ISREG(file_inode(fd_file(f))->i_mode) &&
 	    !S_ISBLK(file_inode(fd_file(f))->i_mode)))
-		goto out;
+		return -EINVAL;
 
-	ret = vfs_fadvise(fd_file(f), offset, count, POSIX_FADV_WILLNEED);
-out:
-	fdput(f);
-	return ret;
+	return vfs_fadvise(fd_file(f), offset, count, POSIX_FADV_WILLNEED);
 }
 
 SYSCALL_DEFINE3(readahead, int, fd, loff_t, offset, size_t, count)
@@ -753,7 +763,7 @@ void readahead_expand(struct readahead_control *ractl,
 		if (folio && !xa_is_value(folio))
 			return; /* Folio apparently present */
 
-		folio = filemap_alloc_folio(gfp_mask, min_order);
+		folio = ractl_alloc_folio(ractl, gfp_mask, min_order);
 		if (!folio)
 			return;
 
@@ -782,7 +792,7 @@ void readahead_expand(struct readahead_control *ractl,
 		if (folio && !xa_is_value(folio))
 			return; /* Folio apparently present */
 
-		folio = filemap_alloc_folio(gfp_mask, min_order);
+		folio = ractl_alloc_folio(ractl, gfp_mask, min_order);
 		if (!folio)
 			return;
 

@@ -130,7 +130,7 @@ config BLK_DEV_UBD_SYNC
           kernel command line option.  Alternatively, you can say Y here to
           turn on synchronous operation by default for all block devices.
 
-          If you're running a journalling file system (like reiserfs, for
+          If you're running a journalling file system (like xfs, for
           example) in your virtual machine, you will want to say Y here.  If
           you care for the safety of the data in your virtual machine, Y is a
           wise choice too.  In all other cases (for example, if you're just
@@ -367,7 +367,7 @@ config BLK_DEV_RBD
 	tristate "Rados block device (RBD)"
 	depends on INET && BLOCK
 	select CEPH_LIB
-	select LIBCRC32C
+	select CRC32
 	select CRYPTO_AES
 	select CRYPTO
 	help
@@ -387,12 +387,6 @@ config BLK_DEV_UBLK
 	  has been working well, but interface with userspace or command data
 	  definition isn't finalized yet, and might change according to future
 	  requirement, so mark is as experimental now.
-
-	  Say Y if you want to get better performance because task_work_add()
-	  can be used in IO path for replacing io_uring cmd, which will become
-	  shared between IO tasks and ubq daemon, meantime task_work_add() can
-	  can handle batch more effectively, but task_work_add() isn't exported
-	  for module, so ublk has to be built to kernel.
 
 config BLKDEV_UBLK_LEGACY_OPCODES
 	bool "Support legacy command opcode"

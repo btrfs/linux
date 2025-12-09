@@ -21,7 +21,7 @@ struct nand_device;
  * @oobsize: OOB area size
  * @pages_per_eraseblock: number of pages per eraseblock
  * @eraseblocks_per_lun: number of eraseblocks per LUN (Logical Unit Number)
- * @max_bad_eraseblocks_per_lun: maximum number of eraseblocks per LUN
+ * @max_bad_eraseblocks_per_lun: maximum number of bad eraseblocks per LUN
  * @planes_per_lun: number of planes per LUN
  * @luns_per_target: number of LUN per target (target is a synonym for die)
  * @ntargets: total number of targets exposed by the NAND device
@@ -293,7 +293,7 @@ enum nand_ecc_engine_integration {
 struct nand_ecc_engine {
 	struct device *dev;
 	struct list_head node;
-	struct nand_ecc_engine_ops *ops;
+	const struct nand_ecc_engine_ops *ops;
 	enum nand_ecc_engine_integration integration;
 	void *priv;
 };

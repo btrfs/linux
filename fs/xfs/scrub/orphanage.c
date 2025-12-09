@@ -167,10 +167,11 @@ xrep_orphanage_create(
 	 * directory to control access to a file we put in here.
 	 */
 	if (d_really_is_negative(orphanage_dentry)) {
-		error = vfs_mkdir(&nop_mnt_idmap, root_inode, orphanage_dentry,
-				0750);
-		if (error)
-			goto out_dput_orphanage;
+		orphanage_dentry = vfs_mkdir(&nop_mnt_idmap, root_inode,
+					     orphanage_dentry, 0750);
+		error = PTR_ERR(orphanage_dentry);
+		if (IS_ERR(orphanage_dentry))
+			goto out_unlock_root;
 	}
 
 	/* Not a directory? Bail out. */
@@ -295,7 +296,9 @@ xrep_orphanage_can_adopt(
 		return false;
 	if (sc->ip == sc->orphanage)
 		return false;
-	if (xfs_internal_inum(sc->mp, sc->ip->i_ino))
+	if (xchk_inode_is_sb_rooted(sc->ip))
+		return false;
+	if (xfs_is_internal_inode(sc->ip))
 		return false;
 	return true;
 }

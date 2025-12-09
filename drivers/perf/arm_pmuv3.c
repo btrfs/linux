@@ -770,27 +770,31 @@ static void armv8pmu_enable_user_access(struct arm_pmu *cpu_pmu)
 	int i;
 	struct pmu_hw_events *cpuc = this_cpu_ptr(cpu_pmu->hw_events);
 
-	/* Clear any unused counters to avoid leaking their contents */
-	for_each_andnot_bit(i, cpu_pmu->cntr_mask, cpuc->used_mask,
-			    ARMPMU_MAX_HWEVENTS) {
-		if (i == ARMV8_PMU_CYCLE_IDX)
-			write_pmccntr(0);
-		else if (i == ARMV8_PMU_INSTR_IDX)
-			write_pmicntr(0);
-		else
-			armv8pmu_write_evcntr(i, 0);
+	if (is_pmuv3p9(cpu_pmu->pmuver)) {
+		u64 mask = 0;
+		for_each_set_bit(i, cpuc->used_mask, ARMPMU_MAX_HWEVENTS) {
+			if (armv8pmu_event_has_user_read(cpuc->events[i]))
+				mask |= BIT(i);
+		}
+		write_pmuacr(mask);
+	} else {
+		/* Clear any unused counters to avoid leaking their contents */
+		for_each_andnot_bit(i, cpu_pmu->cntr_mask, cpuc->used_mask,
+				    ARMPMU_MAX_HWEVENTS) {
+			if (i == ARMV8_PMU_CYCLE_IDX)
+				write_pmccntr(0);
+			else if (i == ARMV8_PMU_INSTR_IDX)
+				write_pmicntr(0);
+			else
+				armv8pmu_write_evcntr(i, 0);
+		}
 	}
 
-	update_pmuserenr(ARMV8_PMU_USERENR_ER | ARMV8_PMU_USERENR_CR);
+	update_pmuserenr(ARMV8_PMU_USERENR_ER | ARMV8_PMU_USERENR_CR | ARMV8_PMU_USERENR_UEN);
 }
 
 static void armv8pmu_enable_event(struct perf_event *event)
 {
-	/*
-	 * Enable counter and interrupt, and set the counter to count
-	 * the event that we're interested in.
-	 */
-	armv8pmu_disable_event_counter(event);
 	armv8pmu_write_event_type(event);
 	armv8pmu_enable_event_irq(event);
 	armv8pmu_enable_event_counter(event);
@@ -816,10 +820,10 @@ static void armv8pmu_start(struct arm_pmu *cpu_pmu)
 	else
 		armv8pmu_disable_user_access();
 
+	kvm_vcpu_pmu_resync_el0();
+
 	/* Enable all counters */
 	armv8pmu_pmcr_write(armv8pmu_pmcr_read() | ARMV8_PMU_PMCR_E);
-
-	kvm_vcpu_pmu_resync_el0();
 }
 
 static void armv8pmu_stop(struct arm_pmu *cpu_pmu)
@@ -1270,7 +1274,7 @@ static int armv8pmu_proc_user_access_handler(const struct ctl_table *table, int 
 	return 0;
 }
 
-static struct ctl_table armv8_pmu_sysctl_table[] = {
+static const struct ctl_table armv8_pmu_sysctl_table[] = {
 	{
 		.procname       = "perf_user_access",
 		.data		= &sysctl_perf_user_access,
@@ -1360,9 +1364,12 @@ PMUV3_INIT_SIMPLE(armv8_neoverse_v1)
 PMUV3_INIT_SIMPLE(armv8_neoverse_v2)
 PMUV3_INIT_SIMPLE(armv8_neoverse_v3)
 PMUV3_INIT_SIMPLE(armv8_neoverse_v3ae)
+PMUV3_INIT_SIMPLE(armv8_rainier)
 
 PMUV3_INIT_SIMPLE(armv8_nvidia_carmel)
 PMUV3_INIT_SIMPLE(armv8_nvidia_denver)
+
+PMUV3_INIT_SIMPLE(armv8_samsung_mongoose)
 
 PMUV3_INIT_MAP_EVENT(armv8_cortex_a35, armv8_a53_map_event)
 PMUV3_INIT_MAP_EVENT(armv8_cortex_a53, armv8_a53_map_event)
@@ -1405,10 +1412,12 @@ static const struct of_device_id armv8_pmu_of_device_ids[] = {
 	{.compatible = "arm,neoverse-v2-pmu",	.data = armv8_neoverse_v2_pmu_init},
 	{.compatible = "arm,neoverse-v3-pmu",	.data = armv8_neoverse_v3_pmu_init},
 	{.compatible = "arm,neoverse-v3ae-pmu",	.data = armv8_neoverse_v3ae_pmu_init},
+	{.compatible = "arm,rainier-pmu",	.data = armv8_rainier_pmu_init},
 	{.compatible = "cavium,thunder-pmu",	.data = armv8_cavium_thunder_pmu_init},
 	{.compatible = "brcm,vulcan-pmu",	.data = armv8_brcm_vulcan_pmu_init},
 	{.compatible = "nvidia,carmel-pmu",	.data = armv8_nvidia_carmel_pmu_init},
 	{.compatible = "nvidia,denver-pmu",	.data = armv8_nvidia_denver_pmu_init},
+	{.compatible = "samsung,mongoose-pmu",	.data = armv8_samsung_mongoose_pmu_init},
 	{},
 };
 

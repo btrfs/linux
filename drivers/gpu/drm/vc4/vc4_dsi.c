@@ -800,7 +800,7 @@ dsi_esc_timing(u32 ns)
 }
 
 static void vc4_dsi_bridge_disable(struct drm_bridge *bridge,
-				   struct drm_bridge_state *state)
+				   struct drm_atomic_state *state)
 {
 	struct vc4_dsi *dsi = bridge_to_vc4_dsi(bridge);
 	u32 disp0_ctrl;
@@ -811,7 +811,7 @@ static void vc4_dsi_bridge_disable(struct drm_bridge *bridge,
 }
 
 static void vc4_dsi_bridge_post_disable(struct drm_bridge *bridge,
-					struct drm_bridge_state *state)
+					struct drm_atomic_state *state)
 {
 	struct vc4_dsi *dsi = bridge_to_vc4_dsi(bridge);
 	struct device *dev = &dsi->pdev->dev;
@@ -873,9 +873,8 @@ static bool vc4_dsi_bridge_mode_fixup(struct drm_bridge *bridge,
 }
 
 static void vc4_dsi_bridge_pre_enable(struct drm_bridge *bridge,
-				      struct drm_bridge_state *old_state)
+				      struct drm_atomic_state *state)
 {
-	struct drm_atomic_state *state = old_state->base.state;
 	struct vc4_dsi *dsi = bridge_to_vc4_dsi(bridge);
 	const struct drm_crtc_state *crtc_state;
 	struct device *dev = &dsi->pdev->dev;
@@ -1143,7 +1142,7 @@ static void vc4_dsi_bridge_pre_enable(struct drm_bridge *bridge,
 }
 
 static void vc4_dsi_bridge_enable(struct drm_bridge *bridge,
-				  struct drm_bridge_state *old_state)
+				  struct drm_atomic_state *state)
 {
 	struct vc4_dsi *dsi = bridge_to_vc4_dsi(bridge);
 	bool debug_dump_regs = false;
@@ -1841,7 +1840,7 @@ static void vc4_dsi_dev_remove(struct platform_device *pdev)
 
 struct platform_driver vc4_dsi_driver = {
 	.probe = vc4_dsi_dev_probe,
-	.remove_new = vc4_dsi_dev_remove,
+	.remove = vc4_dsi_dev_remove,
 	.driver = {
 		.name = "vc4_dsi",
 		.of_match_table = vc4_dsi_dt_match,

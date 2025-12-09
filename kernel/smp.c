@@ -170,9 +170,9 @@ static DEFINE_PER_CPU(smp_call_func_t, cur_csd_func);
 static DEFINE_PER_CPU(void *, cur_csd_info);
 
 static ulong csd_lock_timeout = 5000;  /* CSD lock timeout in milliseconds. */
-module_param(csd_lock_timeout, ulong, 0444);
+module_param(csd_lock_timeout, ulong, 0644);
 static int panic_on_ipistall;  /* CSD panic timeout in milliseconds, 300000 for five minutes. */
-module_param(panic_on_ipistall, int, 0444);
+module_param(panic_on_ipistall, int, 0644);
 
 static atomic_t csd_bug_count = ATOMIC_INIT(0);
 
@@ -246,7 +246,7 @@ static bool csd_lock_wait_toolong(call_single_data_t *csd, u64 ts0, u64 *ts1, in
 		return true;
 	}
 
-	ts2 = sched_clock();
+	ts2 = ktime_get_mono_fast_ns();
 	/* How long since we last checked for a stuck CSD lock.*/
 	ts_delta = ts2 - *ts1;
 	if (likely(ts_delta <= csd_lock_timeout_ns * (*nmessages + 1) *
@@ -321,7 +321,7 @@ static void __csd_lock_wait(call_single_data_t *csd)
 	int bug_id = 0;
 	u64 ts0, ts1;
 
-	ts1 = ts0 = sched_clock();
+	ts1 = ts0 = ktime_get_mono_fast_ns();
 	for (;;) {
 		if (csd_lock_wait_toolong(csd, ts0, &ts1, &bug_id, &nmessages))
 			break;
@@ -815,7 +815,8 @@ static void smp_call_function_many_cond(const struct cpumask *mask,
 	WARN_ON_ONCE(!in_task());
 
 	/* Check if we need local execution. */
-	if ((scf_flags & SCF_RUN_LOCAL) && cpumask_test_cpu(this_cpu, mask))
+	if ((scf_flags & SCF_RUN_LOCAL) && cpumask_test_cpu(this_cpu, mask) &&
+	    (!cond_func || cond_func(this_cpu, info)))
 		run_local = true;
 
 	/* Check if we need remote execution, i.e., any CPU excluding this one. */
@@ -868,7 +869,7 @@ static void smp_call_function_many_cond(const struct cpumask *mask,
 			send_call_function_ipi_mask(cfd->cpumask_ipi);
 	}
 
-	if (run_local && (!cond_func || cond_func(this_cpu, info))) {
+	if (run_local) {
 		unsigned long flags;
 
 		local_irq_save(flags);

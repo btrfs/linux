@@ -25,11 +25,21 @@
 #include <linux/platform_device.h>
 #include <linux/slab.h>
 #include <linux/spinlock.h>
+#include <linux/string_choices.h>
 #include <asm/barrier.h>
-#include <asm/dma-iommu.h>
 #include <dt-bindings/memory/mtk-memory-port.h>
 #include <dt-bindings/memory/mt2701-larb-port.h>
 #include <soc/mediatek/smi.h>
+
+#if defined(CONFIG_ARM)
+#include <asm/dma-iommu.h>
+#else
+#define arm_iommu_create_mapping(...) NULL
+#define arm_iommu_attach_device(...)	-ENODEV
+struct dma_iommu_mapping {
+	struct iommu_domain *domain;
+};
+#endif
 
 #define REG_MMU_PT_BASE_ADDR			0x000
 
@@ -243,7 +253,7 @@ static void mtk_iommu_v1_config(struct mtk_iommu_v1_data *data,
 		larb_mmu = &data->larb_imu[larbid];
 
 		dev_dbg(dev, "%s iommu port: %d\n",
-			enable ? "enable" : "disable", portid);
+			str_enable_disable(enable), portid);
 
 		if (enable)
 			larb_mmu->mmu |= MTK_SMI_MMU_EN(portid);
@@ -445,21 +455,12 @@ static int mtk_iommu_v1_create_mapping(struct device *dev,
 
 static struct iommu_device *mtk_iommu_v1_probe_device(struct device *dev)
 {
-	struct iommu_fwspec *fwspec = dev_iommu_fwspec_get(dev);
+	struct iommu_fwspec *fwspec = NULL;
 	struct of_phandle_args iommu_spec;
 	struct mtk_iommu_v1_data *data;
 	int err, idx = 0, larbid, larbidx;
 	struct device_link *link;
 	struct device *larbdev;
-
-	/*
-	 * In the deferred case, free the existed fwspec.
-	 * Always initialize the fwspec internally.
-	 */
-	if (fwspec) {
-		iommu_fwspec_free(dev);
-		fwspec = dev_iommu_fwspec_get(dev);
-	}
 
 	while (!of_parse_phandle_with_args(dev->of_node, "iommus",
 					   "#iommu-cells",
@@ -474,6 +475,9 @@ static struct iommu_device *mtk_iommu_v1_probe_device(struct device *dev)
 		fwspec = dev_iommu_fwspec_get(dev);
 		idx++;
 	}
+
+	if (!fwspec)
+		return ERR_PTR(-ENODEV);
 
 	data = dev_iommu_priv_get(dev);
 
@@ -745,7 +749,7 @@ static const struct dev_pm_ops mtk_iommu_v1_pm_ops = {
 
 static struct platform_driver mtk_iommu_v1_driver = {
 	.probe	= mtk_iommu_v1_probe,
-	.remove_new = mtk_iommu_v1_remove,
+	.remove = mtk_iommu_v1_remove,
 	.driver	= {
 		.name = "mtk-iommu-v1",
 		.of_match_table = mtk_iommu_v1_of_ids,

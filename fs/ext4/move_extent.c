@@ -213,7 +213,7 @@ static int mext_page_mkuptodate(struct folio *folio, size_t from, size_t to)
 			unlock_buffer(bh);
 			continue;
 		}
-		ext4_read_bh_nowait(bh, 0, NULL);
+		ext4_read_bh_nowait(bh, 0, NULL, false);
 		nr++;
 	} while (block++, (bh = bh->b_this_page) != head);
 
@@ -399,7 +399,7 @@ data_copy:
 		bh = bh->b_this_page;
 	}
 
-	block_commit_write(&folio[0]->page, from, from + replaced_size);
+	block_commit_write(folio[0], from, from + replaced_size);
 
 	/* Even in case of data=writeback it is reasonable to pin
 	 * inode to transaction, to prevent unexpected data loss */

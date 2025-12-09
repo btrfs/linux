@@ -771,6 +771,18 @@ definitions:
         name: to
         type: u32
   -
+    name: ifla-geneve-port-range
+    type: struct
+    members:
+      -
+        name: low
+        type: u16
+        byte-order: big-endian
+      -
+        name: high
+        type: u16
+        byte-order: big-endian
+  -
     name: ifla-vf-mac
     type: struct
     members:
@@ -919,6 +931,13 @@ definitions:
     entries:
       - name: l2
       - name: l3
+
+  -
+    name: netkit-scrub
+    type: enum
+    entries:
+      - name: none
+      - name: default
 
 attribute-sets:
   -
@@ -1094,11 +1113,10 @@ attribute-sets:
       -
         name: prop-list
         type: nest
-        nested-attributes: link-attrs
+        nested-attributes: prop-list-link-attrs
       -
         name: alt-ifname
         type: string
-        multi-attr: true
       -
         name: perm-address
         type: binary
@@ -1137,6 +1155,20 @@ attribute-sets:
         name: dpll-pin
         type: nest
         nested-attributes: link-dpll-pin-attrs
+      -
+        name: max-pacing-offload-horizon
+        type: uint
+        doc: EDT offload horizon supported by the device (in nsec).
+      -
+        name: netns-immutable
+        type: u8
+  -
+    name: prop-list-link-attrs
+    subset-of: link-attrs
+    attributes:
+      -
+        name: alt-ifname
+        multi-attr: true
   -
     name: af-spec-attrs
     attributes:
@@ -1559,7 +1591,7 @@ attribute-sets:
         name: nf-call-iptables
         type: u8
       -
-        name: nf-call-ip6-tables
+        name: nf-call-ip6tables
         type: u8
       -
         name: nf-call-arptables
@@ -1815,6 +1847,48 @@ attribute-sets:
         name: erspan-hwid
         type: u16
   -
+    name: linkinfo-vti-attrs
+    name-prefix: ifla-vti-
+    attributes:
+      -
+        name: link
+        type: u32
+      -
+        name: ikey
+        type: u32
+      -
+        name: okey
+        type: u32
+      -
+        name: local
+        type: binary
+        display-hint: ipv4
+      -
+        name: remote
+        type: binary
+        display-hint: ipv4
+      -
+        name: fwmark
+        type: u32
+  -
+    name: linkinfo-vti6-attrs
+    subset-of: linkinfo-vti-attrs
+    attributes:
+      -
+        name: link
+      -
+        name: ikey
+      -
+        name: okey
+      -
+        name: local
+        display-hint: ipv6
+      -
+        name: remote
+        display-hint: ipv6
+      -
+        name: fwmark
+  -
     name: linkinfo-geneve-attrs
     name-prefix: ifla-geneve-
     attributes:
@@ -1862,6 +1936,10 @@ attribute-sets:
       -
         name: inner-proto-inherit
         type: flag
+      -
+        name: port-range
+        type: binary
+        struct: ifla-geneve-port-range
   -
     name: linkinfo-iptun-attrs
     name-prefix: ifla-iptun-
@@ -1931,6 +2009,42 @@ attribute-sets:
         name: fwmark
         type: u32
   -
+    name: linkinfo-ip6tnl-attrs
+    subset-of: linkinfo-iptun-attrs
+    attributes:
+      -
+        name: link
+      -
+        name: local
+        display-hint: ipv6
+      -
+        name: remote
+        display-hint: ipv6
+      -
+        name: ttl
+      -
+        name: encap-limit
+      -
+        name: flowinfo
+      -
+        name: flags
+        # ip6tnl unlike ipip and sit has 32b flags
+        type: u32
+      -
+        name: proto
+      -
+        name: encap-type
+      -
+        name: encap-flags
+      -
+        name: encap-sport
+      -
+        name: encap-dport
+      -
+        name: collect-metadata
+      -
+        name: fwmark
+  -
     name: linkinfo-tun-attrs
     name-prefix: ifla-tun-
     attributes:
@@ -1969,7 +2083,7 @@ attribute-sets:
         name: id
         type: u16
       -
-        name: flag
+        name: flags
         type: binary
         struct: ifla-vlan-flags
       -
@@ -2057,7 +2171,7 @@ attribute-sets:
         type: binary
         struct: ifla-cacheinfo
       -
-        name: icmp6-stats
+        name: icmp6stats
         type: binary
         struct: ifla-icmp6-stats
       -
@@ -2071,10 +2185,14 @@ attribute-sets:
         type: u32
   -
     name: mctp-attrs
+    name-prefix: ifla-mctp-
     attributes:
       -
-        name: mctp-net
+        name: net
         type: u32
+      -
+        name: phys-binding
+        type: u8
   -
     name: stats-attrs
     name-prefix: ifla-stats-
@@ -2147,6 +2265,20 @@ attribute-sets:
         name: mode
         type: u32
         enum: netkit-mode
+      -
+        name: scrub
+        type: u32
+        enum: netkit-scrub
+      -
+        name: peer-scrub
+        type: u32
+        enum: netkit-scrub
+      -
+        name: headroom
+        type: u16
+      -
+        name: tailroom
+        type: u16
 
 sub-messages:
   -
@@ -2174,6 +2306,9 @@ sub-messages:
         value: ipip
         attribute-set: linkinfo-iptun-attrs
       -
+        value: ip6tnl
+        attribute-set: linkinfo-ip6tnl-attrs
+      -
         value: sit
         attribute-set: linkinfo-iptun-attrs
       -
@@ -2185,6 +2320,12 @@ sub-messages:
       -
         value: vrf
         attribute-set: linkinfo-vrf-attrs
+      -
+        value: vti
+        attribute-set: linkinfo-vti-attrs
+      -
+        value: vti6
+        attribute-set: linkinfo-vti6-attrs
       -
         value: netkit
         attribute-set: linkinfo-netkit-attrs
@@ -2319,7 +2460,6 @@ operations:
             - min-mtu
             - max-mtu
             - prop-list
-            - alt-ifname
             - perm-address
             - proto-down-reason
             - parent-dev-name

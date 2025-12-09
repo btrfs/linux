@@ -21,6 +21,7 @@
 #include <linux/ioport.h>
 #include <linux/refcount.h>
 #include <linux/pgtable.h>
+#include <asm/machine.h>
 #include <asm/diag.h>
 #include <asm/page.h>
 #include <asm/ebcdic.h>
@@ -28,6 +29,7 @@
 #include <asm/extmem.h>
 #include <asm/cpcmd.h>
 #include <asm/setup.h>
+#include <asm/asm.h>
 
 #define DCSS_PURGESEG   0x08
 #define DCSS_LOADSHRX	0x20
@@ -134,20 +136,21 @@ dcss_diag(int *func, void *parameter,
            unsigned long *ret1, unsigned long *ret2)
 {
 	unsigned long rx, ry;
-	int rc;
+	int cc;
 
 	rx = virt_to_phys(parameter);
 	ry = (unsigned long) *func;
 
 	diag_stat_inc(DIAG_STAT_X064);
 	asm volatile(
-		"	diag	%0,%1,0x64\n"
-		"	ipm	%2\n"
-		"	srl	%2,28\n"
-		: "+d" (rx), "+d" (ry), "=d" (rc) : : "cc");
+		"	diag	%[rx],%[ry],0x64\n"
+		CC_IPM(cc)
+		: CC_OUT(cc, cc), [rx] "+d" (rx), [ry] "+d" (ry)
+		:
+		: CC_CLOBBER);
 	*ret1 = rx;
 	*ret2 = ry;
-	return rc;
+	return CC_TRANSFORM(cc);
 }
 
 static inline int
@@ -253,7 +256,7 @@ segment_type (char* name)
 	int rc;
 	struct dcss_segment seg;
 
-	if (!MACHINE_IS_VM)
+	if (!machine_is_vm())
 		return -ENOSYS;
 
 	dcss_mkname(name, seg.dcss_name);
@@ -416,7 +419,7 @@ segment_load (char *name, int do_nonshared, unsigned long *addr,
 	struct dcss_segment *seg;
 	int rc;
 
-	if (!MACHINE_IS_VM)
+	if (!machine_is_vm())
 		return -ENOSYS;
 
 	mutex_lock(&dcss_lock);
@@ -538,7 +541,7 @@ segment_unload(char *name)
 	unsigned long dummy;
 	struct dcss_segment *seg;
 
-	if (!MACHINE_IS_VM)
+	if (!machine_is_vm())
 		return;
 
 	mutex_lock(&dcss_lock);
@@ -570,7 +573,7 @@ segment_save(char *name)
 	char cmd2[80];
 	int i, response;
 
-	if (!MACHINE_IS_VM)
+	if (!machine_is_vm())
 		return;
 
 	mutex_lock(&dcss_lock);

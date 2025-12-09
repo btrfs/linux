@@ -706,7 +706,6 @@ static const struct resource_caps res_cap_nv14 = {
 static const struct dc_debug_options debug_defaults_drv = {
 		.disable_dmcu = false,
 		.force_abm_enable = false,
-		.timing_trace = false,
 		.clock_trace = true,
 		.disable_pplib_clock_request = true,
 		.pipe_split_policy = MPC_SPLIT_AVOID_MULT_DISP,
@@ -920,7 +919,7 @@ struct link_encoder *dcn20_link_encoder_create(
 		kzalloc(sizeof(struct dcn20_link_encoder), GFP_KERNEL);
 	int link_regs_id;
 
-	if (!enc20)
+	if (!enc20 || enc_init_data->hpd_source >= ARRAY_SIZE(link_enc_hpd_regs))
 		return NULL;
 
 	link_regs_id =
@@ -1221,7 +1220,7 @@ static void get_pixel_clock_parameters(
 	struct pipe_ctx *odm_pipe;
 	int opp_cnt = 1;
 	struct dc_link *link = stream->link;
-	struct link_encoder *link_enc = NULL;
+	struct link_encoder *link_enc = pipe_ctx->link_res.dio_link_enc;
 	struct dc *dc = pipe_ctx->stream->ctx->dc;
 	struct dce_hwseq *hws = dc->hwseq;
 
@@ -1230,7 +1229,8 @@ static void get_pixel_clock_parameters(
 
 	pixel_clk_params->requested_pix_clk_100hz = stream->timing.pix_clk_100hz;
 
-	link_enc = link_enc_cfg_get_link_enc(link);
+	if (!dc->config.unify_link_enc_assignment)
+		link_enc = link_enc_cfg_get_link_enc(link);
 	if (link_enc)
 		pixel_clk_params->encoder_object_id = link_enc->id;
 
@@ -1510,41 +1510,12 @@ bool dcn20_split_stream_for_odm(
 	next_odm_pipe->prev_odm_pipe = prev_odm_pipe;
 
 	if (prev_odm_pipe->plane_state) {
-		struct scaler_data *sd = &prev_odm_pipe->plane_res.scl_data;
-		int new_width;
-
-		/* HACTIVE halved for odm combine */
-		sd->h_active /= 2;
-		/* Calculate new vp and recout for left pipe */
-		/* Need at least 16 pixels width per side */
-		if (sd->recout.x + 16 >= sd->h_active)
-			return false;
-		new_width = sd->h_active - sd->recout.x;
-		sd->viewport.width -= dc_fixpt_floor(dc_fixpt_mul_int(
-				sd->ratios.horz, sd->recout.width - new_width));
-		sd->viewport_c.width -= dc_fixpt_floor(dc_fixpt_mul_int(
-				sd->ratios.horz_c, sd->recout.width - new_width));
-		sd->recout.width = new_width;
-
-		/* Calculate new vp and recout for right pipe */
-		sd = &next_odm_pipe->plane_res.scl_data;
-		/* HACTIVE halved for odm combine */
-		sd->h_active /= 2;
-		/* Need at least 16 pixels width per side */
-		if (new_width <= 16)
-			return false;
-		new_width = sd->recout.width + sd->recout.x - sd->h_active;
-		sd->viewport.width -= dc_fixpt_floor(dc_fixpt_mul_int(
-				sd->ratios.horz, sd->recout.width - new_width));
-		sd->viewport_c.width -= dc_fixpt_floor(dc_fixpt_mul_int(
-				sd->ratios.horz_c, sd->recout.width - new_width));
-		sd->recout.width = new_width;
-		sd->viewport.x += dc_fixpt_floor(dc_fixpt_mul_int(
-				sd->ratios.horz, sd->h_active - sd->recout.x));
-		sd->viewport_c.x += dc_fixpt_floor(dc_fixpt_mul_int(
-				sd->ratios.horz_c, sd->h_active - sd->recout.x));
-		sd->recout.x = 0;
+		if (!resource_build_scaling_params(prev_odm_pipe) ||
+			!resource_build_scaling_params(next_odm_pipe)) {
+				return false;
+		}
 	}
+
 	if (!next_odm_pipe->top_pipe)
 		next_odm_pipe->stream_res.opp = pool->opps[next_odm_pipe->pipe_idx];
 	else
@@ -2133,6 +2104,7 @@ bool dcn20_fast_validate_bw(
 			ASSERT(0);
 		}
 	}
+
 	/* Actual dsc count per stream dsc validation*/
 	if (!dcn20_validate_dsc(dc, context)) {
 		context->bw_ctx.dml.vba.ValidationStatus[context->bw_ctx.dml.vba.soc.num_states] =
@@ -2258,7 +2230,8 @@ static const struct resource_funcs dcn20_res_pool_funcs = {
 	.patch_unknown_plane_state = dcn20_patch_unknown_plane_state,
 	.set_mcif_arb_params = dcn20_set_mcif_arb_params,
 	.populate_dml_pipes = dcn20_populate_dml_pipes_from_context,
-	.find_first_free_match_stream_enc_for_link = dcn10_find_first_free_match_stream_enc_for_link
+	.find_first_free_match_stream_enc_for_link = dcn10_find_first_free_match_stream_enc_for_link,
+	.get_vstartup_for_pipe = dcn10_get_vstartup_for_pipe
 };
 
 bool dcn20_dwbc_create(struct dc_context *ctx, struct resource_pool *pool)

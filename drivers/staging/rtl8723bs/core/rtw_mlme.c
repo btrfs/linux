@@ -681,7 +681,7 @@ void rtw_surveydone_event_callback(struct adapter	*adapter, u8 *pbuf)
 
 	if (check_fwstate(pmlmepriv, _FW_UNDER_SURVEY)) {
 		spin_unlock_bh(&pmlmepriv->lock);
-		del_timer_sync(&pmlmepriv->scan_to_timer);
+		timer_delete_sync(&pmlmepriv->scan_to_timer);
 		spin_lock_bh(&pmlmepriv->lock);
 		_clr_fwstate_(pmlmepriv, _FW_UNDER_SURVEY);
 	}
@@ -911,8 +911,7 @@ inline void rtw_indicate_scan_done(struct adapter *padapter, bool aborted)
 {
 	rtw_os_indicate_scan_done(padapter, aborted);
 
-	if (is_primary_adapter(padapter) &&
-	    (!adapter_to_pwrctl(padapter)->bInSuspend) &&
+	if ((!adapter_to_pwrctl(padapter)->bInSuspend) &&
 	    (!check_fwstate(&padapter->mlmepriv,
 			    WIFI_ASOC_STATE|WIFI_UNDER_LINKING))) {
 		rtw_set_ips_deny(padapter, 0);
@@ -1167,7 +1166,7 @@ void rtw_joinbss_event_prehandle(struct adapter *adapter, u8 *pbuf)
 
 			spin_unlock_bh(&pmlmepriv->lock);
 			/* s5. Cancel assoc_timer */
-			del_timer_sync(&pmlmepriv->assoc_timer);
+			timer_delete_sync(&pmlmepriv->assoc_timer);
 			spin_lock_bh(&pmlmepriv->lock);
 		} else {
 			spin_unlock_bh(&(pmlmepriv->scanned_queue.lock));
@@ -1589,8 +1588,7 @@ void rtw_dynamic_check_timer_handler(struct adapter *adapter)
 		}
 
 	} else {
-		if (is_primary_adapter(adapter))
-			rtw_dynamic_chk_wk_cmd(adapter);
+		rtw_dynamic_chk_wk_cmd(adapter);
 	}
 
 	/* auto site survey */

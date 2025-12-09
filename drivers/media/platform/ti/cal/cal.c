@@ -798,7 +798,6 @@ static int cal_async_notifier_bound(struct v4l2_async_notifier *notifier,
 		return 0;
 	}
 
-	phy->source = subdev;
 	phy_dbg(1, phy, "Using source %s for capture\n", subdev->name);
 
 	pad = media_entity_get_fwnode_pad(&subdev->entity,
@@ -819,6 +818,9 @@ static int cal_async_notifier_bound(struct v4l2_async_notifier *notifier,
 			subdev->name);
 		return ret;
 	}
+
+	phy->source = subdev;
+	phy->source_pad = pad;
 
 	return 0;
 }
@@ -1332,7 +1334,7 @@ static const struct dev_pm_ops cal_pm_ops = {
 
 static struct platform_driver cal_pdrv = {
 	.probe		= cal_probe,
-	.remove_new	= cal_remove,
+	.remove		= cal_remove,
 	.driver		= {
 		.name	= CAL_MODULE_NAME,
 		.pm	= &cal_pm_ops,

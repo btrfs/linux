@@ -98,7 +98,7 @@ static int cxl_endpoint_port_probe(struct cxl_port *port)
 	struct cxl_port *root;
 	int rc;
 
-	rc = cxl_dvsec_rr_decode(cxlds->dev, port, &info);
+	rc = cxl_dvsec_rr_decode(cxlds, &info);
 	if (rc < 0)
 		return rc;
 
@@ -153,7 +153,7 @@ static int cxl_port_probe(struct device *dev)
 }
 
 static ssize_t CDAT_read(struct file *filp, struct kobject *kobj,
-			 struct bin_attribute *bin_attr, char *buf,
+			 const struct bin_attribute *bin_attr, char *buf,
 			 loff_t offset, size_t count)
 {
 	struct device *dev = kobj_to_dev(kobj);
@@ -170,10 +170,10 @@ static ssize_t CDAT_read(struct file *filp, struct kobject *kobj,
 				       port->cdat.length);
 }
 
-static BIN_ATTR_ADMIN_RO(CDAT, 0);
+static const BIN_ATTR_ADMIN_RO(CDAT, 0);
 
 static umode_t cxl_port_bin_attr_is_visible(struct kobject *kobj,
-					    struct bin_attribute *attr, int i)
+					    const struct bin_attribute *attr, int i)
 {
 	struct device *dev = kobj_to_dev(kobj);
 	struct cxl_port *port = to_cxl_port(dev);
@@ -184,13 +184,13 @@ static umode_t cxl_port_bin_attr_is_visible(struct kobject *kobj,
 	return 0;
 }
 
-static struct bin_attribute *cxl_cdat_bin_attributes[] = {
+static const struct bin_attribute *const cxl_cdat_bin_attributes[] = {
 	&bin_attr_CDAT,
 	NULL,
 };
 
-static struct attribute_group cxl_cdat_attribute_group = {
-	.bin_attrs = cxl_cdat_bin_attributes,
+static const struct attribute_group cxl_cdat_attribute_group = {
+	.bin_attrs_new = cxl_cdat_bin_attributes,
 	.is_bin_visible = cxl_port_bin_attr_is_visible,
 };
 
@@ -226,5 +226,5 @@ module_exit(cxl_port_exit);
 
 MODULE_DESCRIPTION("CXL: Port enumeration and services");
 MODULE_LICENSE("GPL v2");
-MODULE_IMPORT_NS(CXL);
+MODULE_IMPORT_NS("CXL");
 MODULE_ALIAS_CXL(CXL_DEVICE_PORT);

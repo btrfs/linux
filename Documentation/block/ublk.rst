@@ -199,23 +199,35 @@ managing and controlling ublk devices with help of several control commands:
 
 - user recovery feature description
 
-  Two new features are added for user recovery: ``UBLK_F_USER_RECOVERY`` and
-  ``UBLK_F_USER_RECOVERY_REISSUE``.
+  Three new features are added for user recovery: ``UBLK_F_USER_RECOVERY``,
+  ``UBLK_F_USER_RECOVERY_REISSUE``, and ``UBLK_F_USER_RECOVERY_FAIL_IO``. To
+  enable recovery of ublk devices after the ublk server exits, the ublk server
+  should specify the ``UBLK_F_USER_RECOVERY`` flag when creating the device. The
+  ublk server may additionally specify at most one of
+  ``UBLK_F_USER_RECOVERY_REISSUE`` and ``UBLK_F_USER_RECOVERY_FAIL_IO`` to
+  modify how I/O is handled while the ublk server is dying/dead (this is called
+  the ``nosrv`` case in the driver code).
 
-  With ``UBLK_F_USER_RECOVERY`` set, after one ubq_daemon(ublk server's io
+  With just ``UBLK_F_USER_RECOVERY`` set, after one ubq_daemon(ublk server's io
   handler) is dying, ublk does not delete ``/dev/ublkb*`` during the whole
   recovery stage and ublk device ID is kept. It is ublk server's
   responsibility to recover the device context by its own knowledge.
   Requests which have not been issued to userspace are requeued. Requests
   which have been issued to userspace are aborted.
 
-  With ``UBLK_F_USER_RECOVERY_REISSUE`` set, after one ubq_daemon(ublk
-  server's io handler) is dying, contrary to ``UBLK_F_USER_RECOVERY``,
+  With ``UBLK_F_USER_RECOVERY_REISSUE`` additionally set, after one ubq_daemon
+  (ublk server's io handler) is dying, contrary to ``UBLK_F_USER_RECOVERY``,
   requests which have been issued to userspace are requeued and will be
   re-issued to the new process after handling ``UBLK_CMD_END_USER_RECOVERY``.
   ``UBLK_F_USER_RECOVERY_REISSUE`` is designed for backends who tolerate
   double-write since the driver may issue the same I/O request twice. It
   might be useful to a read-only FS or a VM backend.
+
+  With ``UBLK_F_USER_RECOVERY_FAIL_IO`` additionally set, after the ublk server
+  exits, requests which have issued to userspace are failed, as are any
+  subsequently issued requests. Applications continuously issuing I/O against
+  devices with this flag set will see a stream of I/O errors until a new ublk
+  server recovers the device.
 
 Unprivileged ublk device is supported by passing ``UBLK_F_UNPRIVILEGED_DEV``.
 Once the flag is set, all control commands can be sent by unprivileged
@@ -297,18 +309,35 @@ with specified IO tag in the command data:
   ``UBLK_IO_COMMIT_AND_FETCH_REQ`` to the server, ublkdrv needs to copy
   the server buffer (pages) read to the IO request pages.
 
-Future development
-==================
-
 Zero copy
 ---------
 
-Zero copy is a generic requirement for nbd, fuse or similar drivers. A
-problem [#xiaoguang]_ Xiaoguang mentioned is that pages mapped to userspace
-can't be remapped any more in kernel with existing mm interfaces. This can
-occurs when destining direct IO to ``/dev/ublkb*``. Also, he reported that
-big requests (IO size >= 256 KB) may benefit a lot from zero copy.
+ublk zero copy relies on io_uring's fixed kernel buffer, which provides
+two APIs: `io_buffer_register_bvec()` and `io_buffer_unregister_bvec`.
 
+ublk adds IO command of `UBLK_IO_REGISTER_IO_BUF` to call
+`io_buffer_register_bvec()` for ublk server to register client request
+buffer into io_uring buffer table, then ublk server can submit io_uring
+IOs with the registered buffer index. IO command of `UBLK_IO_UNREGISTER_IO_BUF`
+calls `io_buffer_unregister_bvec()` to unregister the buffer, which is
+guaranteed to be live between calling `io_buffer_register_bvec()` and
+`io_buffer_unregister_bvec()`. Any io_uring operation which supports this
+kind of kernel buffer will grab one reference of the buffer until the
+operation is completed.
+
+ublk server implementing zero copy or user copy has to be CAP_SYS_ADMIN and
+be trusted, because it is ublk server's responsibility to make sure IO buffer
+filled with data for handling read command, and ublk server has to return
+correct result to ublk driver when handling READ command, and the result
+has to match with how many bytes filled to the IO buffer. Otherwise,
+uninitialized kernel IO buffer will be exposed to client application.
+
+ublk server needs to align the parameter of `struct ublk_param_dma_align`
+with backend for zero copy to work correctly.
+
+For reaching best IO performance, ublk server should align its segment
+parameter of `struct ublk_param_segment` with backend for avoiding
+unnecessary IO split, which usually hurts io_uring performance.
 
 References
 ==========
@@ -320,7 +349,3 @@ References
 .. [#userspace_nbdublk] https://gitlab.com/rwmjones/libnbd/-/tree/nbdublk
 
 .. [#userspace_readme] https://github.com/ming1/ubdsrv/blob/master/README
-
-.. [#stefan] https://lore.kernel.org/linux-block/YoOr6jBfgVm8GvWg@stefanha-x1.localdomain/
-
-.. [#xiaoguang] https://lore.kernel.org/linux-block/YoOr6jBfgVm8GvWg@stefanha-x1.localdomain/

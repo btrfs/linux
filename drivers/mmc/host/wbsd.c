@@ -1261,7 +1261,7 @@ static void wbsd_free_mmc(struct device *dev)
 	host = mmc_priv(mmc);
 	BUG_ON(host == NULL);
 
-	del_timer_sync(&host->ignore_timer);
+	timer_delete_sync(&host->ignore_timer);
 
 	mmc_free_host(mmc);
 }
@@ -1896,7 +1896,7 @@ static struct platform_device *wbsd_device;
 
 static struct platform_driver wbsd_driver = {
 	.probe		= wbsd_probe,
-	.remove_new	= wbsd_remove,
+	.remove		= wbsd_remove,
 	.suspend	= wbsd_platform_suspend,
 	.resume		= wbsd_platform_resume,
 	.driver		= {

@@ -29,6 +29,7 @@
 #include <linux/bpf.h>
 
 #include <net/arp.h>
+#include <net/netdev_lock.h>
 #include <net/route.h>
 #include <net/sock.h>
 #include <net/pkt_sched.h>
@@ -1557,7 +1558,7 @@ static void netvsc_get_ethtool_stats(struct net_device *dev,
 		data[i++] = xdp_tx;
 	}
 
-	pcpu_sum = kvmalloc_array(num_possible_cpus(),
+	pcpu_sum = kvmalloc_array(nr_cpu_ids,
 				  sizeof(struct netvsc_ethtool_pcpu_stats),
 				  GFP_KERNEL);
 	if (!pcpu_sum)
@@ -2461,6 +2462,21 @@ static int netvsc_vf_changed(struct net_device *vf_netdev, unsigned long event)
 	} else {
 		netdev_info(ndev, "Data path switched %s VF: %s\n",
 			    vf_is_up ? "to" : "from", vf_netdev->name);
+
+		/* In Azure, when accelerated networking in enabled, other NICs
+		 * like MANA, MLX, are configured as a bonded nic with
+		 * Netvsc(failover) NIC. For bonded NICs, the min of the max
+		 * pkt aggregate size of the members is propagated in the stack.
+		 * In order to allow these NICs (MANA/MLX) to use up to
+		 * GSO_MAX_SIZE gso packet size, we need to allow Netvsc NIC to
+		 * also support this in the guest.
+		 * This value is only increased for netvsc NIC when datapath is
+		 * switched over to the VF
+		 */
+		if (vf_is_up)
+			netif_set_tso_max_size(ndev, vf_netdev->tso_max_size);
+		else
+			netif_set_tso_max_size(ndev, netvsc_dev->netvsc_gso_max_size);
 	}
 
 	return NOTIFY_OK;

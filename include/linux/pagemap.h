@@ -536,26 +536,6 @@ struct address_space *folio_mapping(struct folio *);
 struct address_space *swapcache_mapping(struct folio *);
 
 /**
- * folio_file_mapping - Find the mapping this folio belongs to.
- * @folio: The folio.
- *
- * For folios which are in the page cache, return the mapping that this
- * page belongs to.  Folios in the swap cache return the mapping of the
- * swap file or swap device where the data is stored.  This is different
- * from the mapping returned by folio_mapping().  The only reason to
- * use it is if, like NFS, you return 0 from ->activate_swapfile.
- *
- * Do not call this for folios which aren't in the page cache or swap cache.
- */
-static inline struct address_space *folio_file_mapping(struct folio *folio)
-{
-	if (unlikely(folio_test_swapcache(folio)))
-		return swapcache_mapping(folio);
-
-	return folio->mapping;
-}
-
-/**
  * folio_flush_mapping - Find the file mapping this folio belongs to.
  * @folio: The folio.
  *
@@ -573,11 +553,6 @@ static inline struct address_space *folio_flush_mapping(struct folio *folio)
 		return NULL;
 
 	return folio_mapping(folio);
-}
-
-static inline struct address_space *page_file_mapping(struct page *page)
-{
-	return folio_file_mapping(page_folio(page));
 }
 
 /**
@@ -710,6 +685,7 @@ pgoff_t page_cache_prev_miss(struct address_space *mapping,
  * * %FGP_NOFS - __GFP_FS will get cleared in gfp.
  * * %FGP_NOWAIT - Don't block on the folio lock.
  * * %FGP_STABLE - Wait for the folio to be stable (finished writeback)
+ * * %FGP_DONTCACHE - Uncached buffered IO
  * * %FGP_WRITEBEGIN - The flags to use in a filesystem write_begin()
  *   implementation.
  */
@@ -723,9 +699,20 @@ typedef unsigned int __bitwise fgf_t;
 #define FGP_NOWAIT		((__force fgf_t)0x00000020)
 #define FGP_FOR_MMAP		((__force fgf_t)0x00000040)
 #define FGP_STABLE		((__force fgf_t)0x00000080)
+#define FGP_DONTCACHE		((__force fgf_t)0x00000100)
 #define FGF_GET_ORDER(fgf)	(((__force unsigned)fgf) >> 26)	/* top 6 bits */
 
 #define FGP_WRITEBEGIN		(FGP_LOCK | FGP_WRITE | FGP_CREAT | FGP_STABLE)
+
+static inline unsigned int filemap_get_order(size_t size)
+{
+	unsigned int shift = ilog2(size);
+
+	if (shift <= PAGE_SHIFT)
+		return 0;
+
+	return shift - PAGE_SHIFT;
+}
 
 /**
  * fgf_set_order - Encode a length in the fgf_t flags.
@@ -740,11 +727,11 @@ typedef unsigned int __bitwise fgf_t;
  */
 static inline fgf_t fgf_set_order(size_t size)
 {
-	unsigned int shift = ilog2(size);
+	unsigned int order = filemap_get_order(size);
 
-	if (shift <= PAGE_SHIFT)
+	if (!order)
 		return 0;
-	return (__force fgf_t)((shift - PAGE_SHIFT) << 26);
+	return (__force fgf_t)(order << 26);
 }
 
 void *filemap_get_entry(struct address_space *mapping, pgoff_t index);
@@ -978,9 +965,6 @@ unsigned filemap_get_folios_contig(struct address_space *mapping,
 unsigned filemap_get_folios_tag(struct address_space *mapping, pgoff_t *start,
 		pgoff_t end, xa_mark_t tag, struct folio_batch *fbatch);
 
-struct page *grab_cache_page_write_begin(struct address_space *mapping,
-			pgoff_t index);
-
 /*
  * Returns locked page at given index in given cache, creating it if needed.
  */
@@ -1011,22 +995,34 @@ static inline struct folio *read_mapping_folio(struct address_space *mapping,
 	return read_cache_folio(mapping, index, NULL, file);
 }
 
-/*
- * Get the offset in PAGE_SIZE (even for hugetlb pages).
+/**
+ * page_pgoff - Calculate the logical page offset of this page.
+ * @folio: The folio containing this page.
+ * @page: The page which we need the offset of.
+ *
+ * For file pages, this is the offset from the beginning of the file
+ * in units of PAGE_SIZE.  For anonymous pages, this is the offset from
+ * the beginning of the anon_vma in units of PAGE_SIZE.  This will
+ * return nonsense for KSM pages.
+ *
+ * Context: Caller must have a reference on the folio or otherwise
+ * prevent it from being split or freed.
+ *
+ * Return: The offset in units of PAGE_SIZE.
  */
-static inline pgoff_t page_to_pgoff(struct page *page)
+static inline pgoff_t page_pgoff(const struct folio *folio,
+		const struct page *page)
 {
-	struct page *head;
+	return folio->index + folio_page_idx(folio, page);
+}
 
-	if (likely(!PageTransTail(page)))
-		return page->index;
-
-	head = compound_head(page);
-	/*
-	 *  We don't initialize ->index for tail pages: calculate based on
-	 *  head page
-	 */
-	return head->index + page - head;
+/**
+ * folio_pos - Returns the byte position of this folio in its file.
+ * @folio: The folio.
+ */
+static inline loff_t folio_pos(const struct folio *folio)
+{
+	return ((loff_t)folio->index) * PAGE_SIZE;
 }
 
 /*
@@ -1034,16 +1030,9 @@ static inline pgoff_t page_to_pgoff(struct page *page)
  */
 static inline loff_t page_offset(struct page *page)
 {
-	return ((loff_t)page->index) << PAGE_SHIFT;
-}
+	struct folio *folio = page_folio(page);
 
-/**
- * folio_pos - Returns the byte position of this folio in its file.
- * @folio: The folio.
- */
-static inline loff_t folio_pos(struct folio *folio)
-{
-	return page_offset(&folio->page);
+	return folio_pos(folio) + folio_page_idx(folio, page) * PAGE_SIZE;
 }
 
 /*
@@ -1230,18 +1219,12 @@ static inline int folio_wait_locked_killable(struct folio *folio)
 	return folio_wait_bit_killable(folio, PG_locked);
 }
 
-static inline void wait_on_page_locked(struct page *page)
-{
-	folio_wait_locked(page_folio(page));
-}
-
 void folio_end_read(struct folio *folio, bool success);
 void wait_on_page_writeback(struct page *page);
 void folio_wait_writeback(struct folio *folio);
 int folio_wait_writeback_killable(struct folio *folio);
 void end_page_writeback(struct page *page);
 void folio_end_writeback(struct folio *folio);
-void wait_for_stable_page(struct page *page);
 void folio_wait_stable(struct folio *folio);
 void __folio_mark_dirty(struct folio *folio, struct address_space *, int warn);
 void folio_account_cleaned(struct folio *folio, struct bdi_writeback *wb);
@@ -1266,11 +1249,6 @@ int filemap_migrate_folio(struct address_space *mapping, struct folio *dst,
 void folio_end_private_2(struct folio *folio);
 void folio_wait_private_2(struct folio *folio);
 int folio_wait_private_2_killable(struct folio *folio);
-
-/*
- * Add an arbitrary waiter to a page's wait queue
- */
-void folio_add_wait_queue(struct folio *folio, wait_queue_entry_t *waiter);
 
 /*
  * Fault in userspace address range.
@@ -1350,6 +1328,7 @@ struct readahead_control {
 	pgoff_t _index;
 	unsigned int _nr_pages;
 	unsigned int _batch_count;
+	bool dropbehind;
 	bool _workingset;
 	unsigned long _pflags;
 };
@@ -1588,34 +1567,6 @@ static inline ssize_t folio_mkwrite_check_truncate(struct folio *folio,
 	if (folio->index > index || !offset)
 		return -EFAULT;
 	/* folio is partially inside EOF */
-	return offset;
-}
-
-/**
- * page_mkwrite_check_truncate - check if page was truncated
- * @page: the page to check
- * @inode: the inode to check the page against
- *
- * Returns the number of bytes in the page up to EOF,
- * or -EFAULT if the page was truncated.
- */
-static inline int page_mkwrite_check_truncate(struct page *page,
-					      struct inode *inode)
-{
-	loff_t size = i_size_read(inode);
-	pgoff_t index = size >> PAGE_SHIFT;
-	int offset = offset_in_page(size);
-
-	if (page->mapping != inode->i_mapping)
-		return -EFAULT;
-
-	/* page is wholly inside EOF */
-	if (page->index < index)
-		return PAGE_SIZE;
-	/* page is wholly past EOF */
-	if (page->index > index || !offset)
-		return -EFAULT;
-	/* page is partially inside EOF */
 	return offset;
 }
 

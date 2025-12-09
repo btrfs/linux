@@ -249,7 +249,7 @@ __weak long __pmem_direct_access(struct pmem_device *pmem, pgoff_t pgoff,
 	unsigned int num = PFN_PHYS(nr_pages) >> SECTOR_SHIFT;
 	struct badblocks *bb = &pmem->bb;
 	sector_t first_bad;
-	int num_bad;
+	sector_t num_bad;
 
 	if (kaddr)
 		*kaddr = pmem->virt_addr + offset;
@@ -316,7 +316,7 @@ static long pmem_dax_direct_access(struct dax_device *dax_dev,
  * range, filesystem turns the normal pwrite to a dax_recovery_write.
  *
  * The recovery write consists of clearing media poison, clearing page
- * HWPoison bit, reenable page-wide read-write permission, flush the
+ * HWPoison bit, re-enable page-wide read-write permission, flush the
  * caches and finally write.  A competing pread thread will be held
  * off during the recovery process since data read back might not be
  * valid, and this is achieved by clearing the badblock records after
@@ -513,7 +513,7 @@ static int pmem_attach_disk(struct device *dev,
 
 	pmem->disk = disk;
 	pmem->pgmap.owner = pmem;
-	pmem->pfn_flags = PFN_DEV;
+	pmem->pfn_flags = 0;
 	if (is_nd_pfn(dev)) {
 		pmem->pgmap.type = MEMORY_DEVICE_FS_DAX;
 		pmem->pgmap.ops = &fsdax_pagemap_ops;
@@ -522,7 +522,6 @@ static int pmem_attach_disk(struct device *dev,
 		pmem->data_offset = le64_to_cpu(pfn_sb->dataoff);
 		pmem->pfn_pad = resource_size(res) -
 			range_len(&pmem->pgmap.range);
-		pmem->pfn_flags |= PFN_MAP;
 		bb_range = pmem->pgmap.range;
 		bb_range.start += pmem->data_offset;
 	} else if (pmem_should_map_pages(dev)) {
@@ -532,7 +531,6 @@ static int pmem_attach_disk(struct device *dev,
 		pmem->pgmap.type = MEMORY_DEVICE_FS_DAX;
 		pmem->pgmap.ops = &fsdax_pagemap_ops;
 		addr = devm_memremap_pages(dev, &pmem->pgmap);
-		pmem->pfn_flags |= PFN_MAP;
 		bb_range = pmem->pgmap.range;
 	} else {
 		addr = devm_memremap(dev, pmem->phys_addr,

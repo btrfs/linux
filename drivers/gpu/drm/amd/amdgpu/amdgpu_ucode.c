@@ -1216,6 +1216,7 @@ static const char *amdgpu_ucode_legacy_naming(struct amdgpu_device *adev, int bl
 		case IP_VERSION(11, 0, 13):
 			return "beige_goby";
 		case IP_VERSION(11, 5, 0):
+		case IP_VERSION(11, 5, 2):
 			return "vangogh";
 		case IP_VERSION(12, 0, 1):
 			return "green_sardine";
@@ -1434,6 +1435,7 @@ void amdgpu_ucode_ip_version_decode(struct amdgpu_device *adev, int block_type, 
  *
  * @adev: amdgpu device
  * @fw: pointer to load firmware to
+ * @required: whether the firmware is required
  * @fmt: firmware name format string
  * @...: variable arguments
  *
@@ -1442,7 +1444,7 @@ void amdgpu_ucode_ip_version_decode(struct amdgpu_device *adev, int block_type, 
  * the error code to -ENODEV, so that early_init functions will fail to load.
  */
 int amdgpu_ucode_request(struct amdgpu_device *adev, const struct firmware **fw,
-			 const char *fmt, ...)
+			 enum amdgpu_ucode_required required, const char *fmt, ...)
 {
 	char fname[AMDGPU_UCODE_NAME_MAX];
 	va_list ap;
@@ -1456,16 +1458,24 @@ int amdgpu_ucode_request(struct amdgpu_device *adev, const struct firmware **fw,
 		return -EOVERFLOW;
 	}
 
-	r = request_firmware(fw, fname, adev->dev);
+	if (required == AMDGPU_UCODE_REQUIRED)
+		r = request_firmware(fw, fname, adev->dev);
+	else {
+		r = firmware_request_nowarn(fw, fname, adev->dev);
+		if (r)
+			drm_info(&adev->ddev, "Optional firmware \"%s\" was not found\n", fname);
+	}
 	if (r)
 		return -ENODEV;
 
 	r = amdgpu_ucode_validate(*fw);
-	if (r) {
+	if (r)
+		/*
+		 * The amdgpu_ucode_request() should be paired with amdgpu_ucode_release()
+		 * regardless of success/failure, and the amdgpu_ucode_release() takes care of
+		 * firmware release and need to avoid redundant release FW operation here.
+		 */
 		dev_dbg(adev->dev, "\"%s\" failed to validate\n", fname);
-		release_firmware(*fw);
-		*fw = NULL;
-	}
 
 	return r;
 }

@@ -23,13 +23,7 @@ int __fbnic_open(struct fbnic_net *fbn)
 	if (err)
 		goto free_napi_vectors;
 
-	err = netif_set_real_num_tx_queues(fbn->netdev,
-					   fbn->num_tx_queues);
-	if (err)
-		goto free_resources;
-
-	err = netif_set_real_num_rx_queues(fbn->netdev,
-					   fbn->num_rx_queues);
+	err = fbnic_set_netif_queues(fbn);
 	if (err)
 		goto free_resources;
 
@@ -42,18 +36,24 @@ int __fbnic_open(struct fbnic_net *fbn)
 		goto free_resources;
 	}
 
-	err = fbnic_fw_init_heartbeat(fbd, false);
+	err = fbnic_time_start(fbn);
 	if (err)
 		goto release_ownership;
 
+	err = fbnic_fw_init_heartbeat(fbd, false);
+	if (err)
+		goto time_stop;
+
 	err = fbnic_pcs_irq_enable(fbd);
 	if (err)
-		goto release_ownership;
+		goto time_stop;
 	/* Pull the BMC config and initialize the RPC */
 	fbnic_bmc_rpc_init(fbd);
 	fbnic_rss_reinit(fbd, fbn);
 
 	return 0;
+time_stop:
+	fbnic_time_stop(fbn);
 release_ownership:
 	fbnic_fw_xmit_ownership_msg(fbn->fbd, false);
 free_resources:
@@ -67,6 +67,8 @@ static int fbnic_open(struct net_device *netdev)
 {
 	struct fbnic_net *fbn = netdev_priv(netdev);
 	int err;
+
+	fbnic_napi_name_irqs(fbn->fbd);
 
 	err = __fbnic_open(fbn);
 	if (!err)
@@ -82,8 +84,10 @@ static int fbnic_stop(struct net_device *netdev)
 	fbnic_down(fbn);
 	fbnic_pcs_irq_disable(fbn->fbd);
 
+	fbnic_time_stop(fbn);
 	fbnic_fw_xmit_ownership_msg(fbn->fbd, false);
 
+	fbnic_reset_netif_queues(fbn);
 	fbnic_free_resources(fbn);
 	fbnic_free_napi_vectors(fbn);
 
@@ -266,6 +270,7 @@ void __fbnic_set_rx_mode(struct net_device *netdev)
 	/* Write updates to hardware */
 	fbnic_write_rules(fbd);
 	fbnic_write_macda(fbd);
+	fbnic_write_tce_tcam(fbd);
 }
 
 static void fbnic_set_rx_mode(struct net_device *netdev)
@@ -315,6 +320,84 @@ void fbnic_clear_rx_mode(struct net_device *netdev)
 
 	__dev_uc_unsync(netdev, NULL);
 	__dev_mc_unsync(netdev, NULL);
+}
+
+static int fbnic_hwtstamp_get(struct net_device *netdev,
+			      struct kernel_hwtstamp_config *config)
+{
+	struct fbnic_net *fbn = netdev_priv(netdev);
+
+	*config = fbn->hwtstamp_config;
+
+	return 0;
+}
+
+static int fbnic_hwtstamp_set(struct net_device *netdev,
+			      struct kernel_hwtstamp_config *config,
+			      struct netlink_ext_ack *extack)
+{
+	struct fbnic_net *fbn = netdev_priv(netdev);
+	int old_rx_filter;
+
+	if (config->source != HWTSTAMP_SOURCE_NETDEV)
+		return -EOPNOTSUPP;
+
+	if (!kernel_hwtstamp_config_changed(config, &fbn->hwtstamp_config))
+		return 0;
+
+	/* Upscale the filters */
+	switch (config->rx_filter) {
+	case HWTSTAMP_FILTER_NONE:
+	case HWTSTAMP_FILTER_ALL:
+	case HWTSTAMP_FILTER_PTP_V1_L4_EVENT:
+	case HWTSTAMP_FILTER_PTP_V2_L4_EVENT:
+	case HWTSTAMP_FILTER_PTP_V2_L2_EVENT:
+	case HWTSTAMP_FILTER_PTP_V2_EVENT:
+		break;
+	case HWTSTAMP_FILTER_NTP_ALL:
+		config->rx_filter = HWTSTAMP_FILTER_ALL;
+		break;
+	case HWTSTAMP_FILTER_PTP_V1_L4_SYNC:
+	case HWTSTAMP_FILTER_PTP_V1_L4_DELAY_REQ:
+		config->rx_filter = HWTSTAMP_FILTER_PTP_V1_L4_EVENT;
+		break;
+	case HWTSTAMP_FILTER_PTP_V2_L4_SYNC:
+	case HWTSTAMP_FILTER_PTP_V2_L4_DELAY_REQ:
+		config->rx_filter = HWTSTAMP_FILTER_PTP_V2_L4_EVENT;
+		break;
+	case HWTSTAMP_FILTER_PTP_V2_L2_SYNC:
+	case HWTSTAMP_FILTER_PTP_V2_L2_DELAY_REQ:
+		config->rx_filter = HWTSTAMP_FILTER_PTP_V2_L2_EVENT;
+		break;
+	case HWTSTAMP_FILTER_PTP_V2_SYNC:
+	case HWTSTAMP_FILTER_PTP_V2_DELAY_REQ:
+		config->rx_filter = HWTSTAMP_FILTER_PTP_V2_EVENT;
+		break;
+	default:
+		return -ERANGE;
+	}
+
+	/* Configure */
+	old_rx_filter = fbn->hwtstamp_config.rx_filter;
+	memcpy(&fbn->hwtstamp_config, config, sizeof(*config));
+
+	if (old_rx_filter != config->rx_filter && netif_running(fbn->netdev)) {
+		fbnic_rss_reinit(fbn->fbd, fbn);
+		fbnic_write_rules(fbn->fbd);
+	}
+
+	/* Save / report back filter configuration
+	 * Note that our filter configuration is inexact. Instead of
+	 * filtering for a specific UDP port or L2 Ethertype we are
+	 * filtering in all UDP or all non-IP packets for timestamping. So
+	 * if anything other than FILTER_ALL is requested we report
+	 * FILTER_SOME indicating that we will be timestamping a few
+	 * additional packets.
+	 */
+	if (config->rx_filter > HWTSTAMP_FILTER_ALL)
+		config->rx_filter = HWTSTAMP_FILTER_SOME;
+
+	return 0;
 }
 
 static void fbnic_get_stats64(struct net_device *dev,
@@ -394,6 +477,8 @@ static const struct net_device_ops fbnic_netdev_ops = {
 	.ndo_set_mac_address	= fbnic_set_mac,
 	.ndo_set_rx_mode	= fbnic_set_rx_mode,
 	.ndo_get_stats64	= fbnic_get_stats64,
+	.ndo_hwtstamp_get	= fbnic_hwtstamp_get,
+	.ndo_hwtstamp_set	= fbnic_hwtstamp_set,
 };
 
 static void fbnic_get_queue_stats_rx(struct net_device *dev, int idx,
@@ -402,8 +487,9 @@ static void fbnic_get_queue_stats_rx(struct net_device *dev, int idx,
 	struct fbnic_net *fbn = netdev_priv(dev);
 	struct fbnic_ring *rxr = fbn->rx[idx];
 	struct fbnic_queue_stats *stats;
+	u64 bytes, packets, alloc_fail;
+	u64 csum_complete, csum_none;
 	unsigned int start;
-	u64 bytes, packets;
 
 	if (!rxr)
 		return;
@@ -413,10 +499,16 @@ static void fbnic_get_queue_stats_rx(struct net_device *dev, int idx,
 		start = u64_stats_fetch_begin(&stats->syncp);
 		bytes = stats->bytes;
 		packets = stats->packets;
+		alloc_fail = stats->rx.alloc_failed;
+		csum_complete = stats->rx.csum_complete;
+		csum_none = stats->rx.csum_none;
 	} while (u64_stats_fetch_retry(&stats->syncp, start));
 
 	rx->bytes = bytes;
 	rx->packets = packets;
+	rx->alloc_fail = alloc_fail;
+	rx->csum_complete = csum_complete;
+	rx->csum_none = csum_none;
 }
 
 static void fbnic_get_queue_stats_tx(struct net_device *dev, int idx,
@@ -425,6 +517,7 @@ static void fbnic_get_queue_stats_tx(struct net_device *dev, int idx,
 	struct fbnic_net *fbn = netdev_priv(dev);
 	struct fbnic_ring *txr = fbn->tx[idx];
 	struct fbnic_queue_stats *stats;
+	u64 stop, wake, csum, lso;
 	unsigned int start;
 	u64 bytes, packets;
 
@@ -436,10 +529,18 @@ static void fbnic_get_queue_stats_tx(struct net_device *dev, int idx,
 		start = u64_stats_fetch_begin(&stats->syncp);
 		bytes = stats->bytes;
 		packets = stats->packets;
+		csum = stats->twq.csum_partial;
+		lso = stats->twq.lso;
+		stop = stats->twq.stop;
+		wake = stats->twq.wake;
 	} while (u64_stats_fetch_retry(&stats->syncp, start));
 
 	tx->bytes = bytes;
 	tx->packets = packets;
+	tx->needs_csum = csum + lso;
+	tx->hw_gso_wire_packets = lso;
+	tx->stop = stop;
+	tx->wake = wake;
 }
 
 static void fbnic_get_base_stats(struct net_device *dev,
@@ -450,9 +551,16 @@ static void fbnic_get_base_stats(struct net_device *dev,
 
 	tx->bytes = fbn->tx_stats.bytes;
 	tx->packets = fbn->tx_stats.packets;
+	tx->needs_csum = fbn->tx_stats.twq.csum_partial + fbn->tx_stats.twq.lso;
+	tx->hw_gso_wire_packets = fbn->tx_stats.twq.lso;
+	tx->stop = fbn->tx_stats.twq.stop;
+	tx->wake = fbn->tx_stats.twq.wake;
 
 	rx->bytes = fbn->rx_stats.bytes;
 	rx->packets = fbn->rx_stats.packets;
+	rx->alloc_fail = fbn->rx_stats.rx.alloc_failed;
+	rx->csum_complete = fbn->rx_stats.rx.csum_complete;
+	rx->csum_none = fbn->rx_stats.rx.csum_none;
 }
 
 static const struct netdev_stat_ops fbnic_stat_ops = {
@@ -503,7 +611,7 @@ void fbnic_netdev_free(struct fbnic_dev *fbd)
  * Allocate and initialize the netdev and netdev private structure. Bind
  * together the hardware, netdev, and pci data structures.
  *
- *  Return: 0 on success, negative on failure
+ *  Return: Pointer to net_device on success, NULL on failure
  **/
 struct net_device *fbnic_netdev_alloc(struct fbnic_dev *fbd)
 {
@@ -527,12 +635,15 @@ struct net_device *fbnic_netdev_alloc(struct fbnic_dev *fbd)
 
 	fbn->netdev = netdev;
 	fbn->fbd = fbd;
-	INIT_LIST_HEAD(&fbn->napis);
 
 	fbn->txq_size = FBNIC_TXQ_SIZE_DEFAULT;
 	fbn->hpq_size = FBNIC_HPQ_SIZE_DEFAULT;
 	fbn->ppq_size = FBNIC_PPQ_SIZE_DEFAULT;
 	fbn->rcq_size = FBNIC_RCQ_SIZE_DEFAULT;
+
+	fbn->tx_usecs = FBNIC_TX_USECS_DEFAULT;
+	fbn->rx_usecs = FBNIC_RX_USECS_DEFAULT;
+	fbn->rx_max_frames = FBNIC_RX_FRAMES_DEFAULT;
 
 	default_queues = netif_get_num_default_rss_queues();
 	if (default_queues > fbd->max_num_queues)
@@ -544,15 +655,32 @@ struct net_device *fbnic_netdev_alloc(struct fbnic_dev *fbd)
 	fbnic_rss_key_fill(fbn->rss_key);
 	fbnic_rss_init_en_mask(fbn);
 
+	netdev->priv_flags |= IFF_UNICAST_FLT;
+
+	netdev->gso_partial_features =
+		NETIF_F_GSO_GRE |
+		NETIF_F_GSO_GRE_CSUM |
+		NETIF_F_GSO_IPXIP4 |
+		NETIF_F_GSO_UDP_TUNNEL |
+		NETIF_F_GSO_UDP_TUNNEL_CSUM;
+
 	netdev->features |=
+		netdev->gso_partial_features |
+		FBNIC_TUN_GSO_FEATURES |
 		NETIF_F_RXHASH |
 		NETIF_F_SG |
 		NETIF_F_HW_CSUM |
-		NETIF_F_RXCSUM;
+		NETIF_F_RXCSUM |
+		NETIF_F_TSO |
+		NETIF_F_TSO_ECN |
+		NETIF_F_TSO6 |
+		NETIF_F_GSO_PARTIAL |
+		NETIF_F_GSO_UDP_L4;
 
 	netdev->hw_features |= netdev->features;
 	netdev->vlan_features |= netdev->features;
 	netdev->hw_enc_features |= netdev->features;
+	netdev->features |= NETIF_F_NTUPLE;
 
 	netdev->min_mtu = IPV6_MIN_MTU;
 	netdev->max_mtu = FBNIC_MAX_JUMBO_FRAME_SIZE - ETH_HLEN;

@@ -1584,8 +1584,6 @@ static const struct vb2_ops bttv_video_qops = {
 	.buf_cleanup    = buf_cleanup,
 	.start_streaming = start_streaming,
 	.stop_streaming = stop_streaming,
-	.wait_prepare   = vb2_ops_wait_prepare,
-	.wait_finish    = vb2_ops_wait_finish,
 };
 
 static void radio_enable(struct bttv *btv)
@@ -3493,7 +3491,7 @@ static void bttv_remove(struct pci_dev *pci_dev)
 
 	/* free resources */
 	free_irq(btv->c.pci->irq,btv);
-	del_timer_sync(&btv->timeout);
+	timer_delete_sync(&btv->timeout);
 	iounmap(btv->bt848_mmio);
 	release_mem_region(pci_resource_start(btv->c.pci,0),
 			   pci_resource_len(btv->c.pci,0));

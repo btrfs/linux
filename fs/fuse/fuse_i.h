@@ -35,17 +35,37 @@
 /** Default max number of pages that can be used in a single read request */
 #define FUSE_DEFAULT_MAX_PAGES_PER_REQ 32
 
-/** Maximum of max_pages received in init_out */
-#define FUSE_MAX_MAX_PAGES 256
-
 /** Bias for fi->writectr, meaning new writepages must not be sent */
 #define FUSE_NOWRITE INT_MIN
 
-/** It could be as large as PATH_MAX, but would that have any uses? */
-#define FUSE_NAME_MAX 1024
+/** Maximum length of a filename, not including terminating null */
+
+/* maximum, small enough for FUSE_MIN_READ_BUFFER*/
+#define FUSE_NAME_LOW_MAX 1024
+/* maximum, but needs a request buffer > FUSE_MIN_READ_BUFFER */
+#define FUSE_NAME_MAX (PATH_MAX - 1)
 
 /** Number of dentries for each connection in the control filesystem */
 #define FUSE_CTL_NUM_DENTRIES 5
+
+/* Frequency (in seconds) of request timeout checks, if opted into */
+#define FUSE_TIMEOUT_TIMER_FREQ 15
+
+/** Frequency (in jiffies) of request timeout checks, if opted into */
+extern const unsigned long fuse_timeout_timer_freq;
+
+/** Maximum of max_pages received in init_out */
+extern unsigned int fuse_max_pages_limit;
+/*
+ * Default timeout (in seconds) for the server to reply to a request
+ * before the connection is aborted, if no timeout was specified on mount.
+ */
+extern unsigned int fuse_default_req_timeout;
+/*
+ * Max timeout (in seconds) for the server to reply to a request before
+ * the connection is aborted.
+ */
+extern unsigned int fuse_max_req_timeout;
 
 /** List of active connections */
 extern struct list_head fuse_conn_list;
@@ -285,8 +305,8 @@ struct fuse_arg {
 	void *value;
 };
 
-/** FUSE page descriptor */
-struct fuse_page_desc {
+/** FUSE folio descriptor */
+struct fuse_folio_desc {
 	unsigned int length;
 	unsigned int offset;
 };
@@ -309,16 +329,19 @@ struct fuse_args {
 	bool may_block:1;
 	bool is_ext:1;
 	bool is_pinned:1;
-	struct fuse_in_arg in_args[3];
+	bool invalidate_vmap:1;
+	struct fuse_in_arg in_args[4];
 	struct fuse_arg out_args[2];
 	void (*end)(struct fuse_mount *fm, struct fuse_args *args, int error);
+	/* Used for kvec iter backed by vmalloc address */
+	void *vmap_base;
 };
 
 struct fuse_args_pages {
 	struct fuse_args args;
-	struct page **pages;
-	struct fuse_page_desc *descs;
-	unsigned int num_pages;
+	struct folio **folios;
+	struct fuse_folio_desc *descs;
+	unsigned int num_folios;
 };
 
 struct fuse_release_args {
@@ -375,6 +398,7 @@ struct fuse_io_priv {
  * FR_FINISHED:		request is finished
  * FR_PRIVATE:		request is on private list
  * FR_ASYNC:		request is asynchronous
+ * FR_URING:		request is handled through fuse-io-uring
  */
 enum fuse_req_flag {
 	FR_ISREPLY,
@@ -389,6 +413,7 @@ enum fuse_req_flag {
 	FR_FINISHED,
 	FR_PRIVATE,
 	FR_ASYNC,
+	FR_URING,
 };
 
 /**
@@ -435,6 +460,13 @@ struct fuse_req {
 
 	/** fuse_mount this request belongs to */
 	struct fuse_mount *fm;
+
+#ifdef CONFIG_FUSE_IO_URING
+	void *ring_entry;
+	void *ring_queue;
+#endif
+	/** When (in jiffies) the request was created */
+	unsigned long create_time;
 };
 
 struct fuse_iqueue;
@@ -857,6 +889,15 @@ struct fuse_conn {
 	/** Passthrough support for read/write IO */
 	unsigned int passthrough:1;
 
+	/* Use pages instead of pointer for kernel I/O */
+	unsigned int use_pages_for_kvec_io:1;
+
+	/* Is link not implemented by fs? */
+	unsigned int no_link:1;
+
+	/* Use io_uring for communication */
+	unsigned int io_uring;
+
 	/** Maximum stack depth for passthrough backing files */
 	int max_stack_depth;
 
@@ -883,6 +924,12 @@ struct fuse_conn {
 
 	/** Version counter for attribute changes */
 	atomic64_t attr_version;
+
+	/** Version counter for evict inode */
+	atomic64_t evict_ctr;
+
+	/* maximum file name length */
+	u32 name_max;
 
 	/** Called on final put */
 	void (*release)(struct fuse_conn *);
@@ -914,6 +961,20 @@ struct fuse_conn {
 	/** IDR for backing files ids */
 	struct idr backing_files_map;
 #endif
+
+#ifdef CONFIG_FUSE_IO_URING
+	/**  uring connection information*/
+	struct fuse_ring *ring;
+#endif
+
+	/** Only used if the connection opts into request timeouts */
+	struct {
+		/* Worker for checking if any requests have timed out */
+		struct delayed_work work;
+
+		/* Request timeout (in jiffies). 0 = no timeout */
+		unsigned int req_timeout;
+	} timeout;
 };
 
 /*
@@ -937,6 +998,19 @@ struct fuse_mount {
 	struct list_head fc_entry;
 	struct rcu_head rcu;
 };
+
+/*
+ * Empty header for FUSE opcodes without specific header needs.
+ * Used as a placeholder in args->in_args[0] for consistency
+ * across all FUSE operations, simplifying request handling.
+ */
+struct fuse_zero_header {};
+
+static inline void fuse_set_zero_arg0(struct fuse_args *args)
+{
+	args->in_args[0].size = sizeof(struct fuse_zero_header);
+	args->in_args[0].value = NULL;
+}
 
 static inline struct fuse_mount *get_fuse_mount_super(struct super_block *sb)
 {
@@ -978,6 +1052,11 @@ static inline u64 fuse_get_attr_version(struct fuse_conn *fc)
 	return atomic64_read(&fc->attr_version);
 }
 
+static inline u64 fuse_get_evict_ctr(struct fuse_conn *fc)
+{
+	return atomic64_read(&fc->evict_ctr);
+}
+
 static inline bool fuse_stale_inode(const struct inode *inode, int generation,
 				    struct fuse_attr *attr)
 {
@@ -995,25 +1074,25 @@ static inline bool fuse_is_bad(struct inode *inode)
 	return unlikely(test_bit(FUSE_I_BAD, &get_fuse_inode(inode)->state));
 }
 
-static inline struct page **fuse_pages_alloc(unsigned int npages, gfp_t flags,
-					     struct fuse_page_desc **desc)
+static inline struct folio **fuse_folios_alloc(unsigned int nfolios, gfp_t flags,
+					       struct fuse_folio_desc **desc)
 {
-	struct page **pages;
+	struct folio **folios;
 
-	pages = kzalloc(npages * (sizeof(struct page *) +
-				  sizeof(struct fuse_page_desc)), flags);
-	*desc = (void *) (pages + npages);
+	folios = kzalloc(nfolios * (sizeof(struct folio *) +
+				    sizeof(struct fuse_folio_desc)), flags);
+	*desc = (void *) (folios + nfolios);
 
-	return pages;
+	return folios;
 }
 
-static inline void fuse_page_descs_length_init(struct fuse_page_desc *descs,
-					       unsigned int index,
-					       unsigned int nr_pages)
+static inline void fuse_folio_descs_length_init(struct fuse_folio_desc *descs,
+						unsigned int index,
+						unsigned int nr_folios)
 {
 	int i;
 
-	for (i = index; i < index + nr_pages; i++)
+	for (i = index; i < index + nr_folios; i++)
 		descs[i].length = PAGE_SIZE - descs[i].offset;
 }
 
@@ -1037,7 +1116,8 @@ extern const struct dentry_operations fuse_root_dentry_operations;
  */
 struct inode *fuse_iget(struct super_block *sb, u64 nodeid,
 			int generation, struct fuse_attr *attr,
-			u64 attr_valid, u64 attr_version);
+			u64 attr_valid, u64 attr_version,
+			u64 evict_ctr);
 
 int fuse_lookup_name(struct super_block *sb, u64 nodeid, const struct qstr *name,
 		     struct fuse_entry_out *outarg, struct inode **inode);
@@ -1062,7 +1142,7 @@ struct fuse_io_args {
 		struct {
 			struct fuse_write_in in;
 			struct fuse_write_out out;
-			bool page_locked;
+			bool folio_locked;
 		} write;
 	};
 	struct fuse_args_pages ap;
@@ -1127,7 +1207,8 @@ void fuse_change_attributes(struct inode *inode, struct fuse_attr *attr,
 
 void fuse_change_attributes_common(struct inode *inode, struct fuse_attr *attr,
 				   struct fuse_statx *sx,
-				   u64 attr_valid, u32 cache_mask);
+				   u64 attr_valid, u32 cache_mask,
+				   u64 evict_ctr);
 
 u32 fuse_get_cache_mask(struct inode *inode);
 
@@ -1175,6 +1256,9 @@ void fuse_request_end(struct fuse_req *req);
 void fuse_abort_conn(struct fuse_conn *fc);
 void fuse_wait_aborted(struct fuse_conn *fc);
 
+/* Check if any requests timed out */
+void fuse_check_timeout(struct work_struct *work);
+
 /**
  * Invalidate inode attributes
  */
@@ -1202,6 +1286,11 @@ void fuse_change_entry_timeout(struct dentry *entry, struct fuse_entry_out *o);
  * Acquire reference to fuse_conn
  */
 struct fuse_conn *fuse_conn_get(struct fuse_conn *fc);
+
+/**
+ * Initialize the fuse processing queue
+ */
+void fuse_pqueue_init(struct fuse_pqueue *fpq);
 
 /**
  * Initialize fuse_conn
@@ -1479,5 +1568,13 @@ ssize_t fuse_passthrough_splice_write(struct pipe_inode_info *pipe,
 				      struct file *out, loff_t *ppos,
 				      size_t len, unsigned int flags);
 ssize_t fuse_passthrough_mmap(struct file *file, struct vm_area_struct *vma);
+
+#ifdef CONFIG_SYSCTL
+extern int fuse_sysctl_register(void);
+extern void fuse_sysctl_unregister(void);
+#else
+#define fuse_sysctl_register()		(0)
+#define fuse_sysctl_unregister()	do { } while (0)
+#endif /* CONFIG_SYSCTL */
 
 #endif /* _FS_FUSE_I_H */

@@ -164,6 +164,8 @@ static void csi2rx_reset(struct csi2rx_priv *csi2rx)
 
 static int csi2rx_configure_ext_dphy(struct csi2rx_priv *csi2rx)
 {
+	struct media_pad *src_pad =
+		&csi2rx->source_subdev->entity.pads[csi2rx->source_pad];
 	union phy_configure_opts opts = { };
 	struct phy_configure_opts_mipi_dphy *cfg = &opts.mipi_dphy;
 	struct v4l2_subdev_format sd_fmt = {
@@ -181,7 +183,7 @@ static int csi2rx_configure_ext_dphy(struct csi2rx_priv *csi2rx)
 
 	fmt = csi2rx_get_fmt_by_code(sd_fmt.format.code);
 
-	link_freq = v4l2_get_link_freq(csi2rx->source_subdev->ctrl_handler,
+	link_freq = v4l2_get_link_freq(src_pad,
 				       fmt->bpp, 2 * csi2rx->num_lanes);
 	if (link_freq < 0)
 		return link_freq;
@@ -751,7 +753,7 @@ MODULE_DEVICE_TABLE(of, csi2rx_of_table);
 
 static struct platform_driver csi2rx_driver = {
 	.probe	= csi2rx_probe,
-	.remove_new = csi2rx_remove,
+	.remove = csi2rx_remove,
 
 	.driver	= {
 		.name		= "cdns-csi2rx",

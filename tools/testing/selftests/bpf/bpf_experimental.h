@@ -368,12 +368,12 @@ l_true:												\
 	ret;						\
 	})
 
-#define cond_break					\
+#define __cond_break(expr)				\
 	({ __label__ l_break, l_continue;		\
 	asm volatile goto("may_goto %l[l_break]"	\
 		      :::: l_break);			\
 	goto l_continue;				\
-	l_break: break;					\
+	l_break: expr;					\
 	l_continue:;					\
 	})
 #else
@@ -392,7 +392,7 @@ l_true:												\
 	ret;						\
 	})
 
-#define cond_break					\
+#define __cond_break(expr)				\
 	({ __label__ l_break, l_continue;		\
 	asm volatile goto("1:.byte 0xe5;		\
 		      .byte 0;				\
@@ -400,7 +400,7 @@ l_true:												\
 		      .short 0"				\
 		      :::: l_break);			\
 	goto l_continue;				\
-	l_break: break;					\
+	l_break: expr;					\
 	l_continue:;					\
 	})
 #else
@@ -418,7 +418,7 @@ l_true:												\
 	ret;						\
 	})
 
-#define cond_break					\
+#define __cond_break(expr)				\
 	({ __label__ l_break, l_continue;		\
 	asm volatile goto("1:.byte 0xe5;		\
 		      .byte 0;				\
@@ -426,11 +426,14 @@ l_true:												\
 		      .short 0"				\
 		      :::: l_break);			\
 	goto l_continue;				\
-	l_break: break;					\
+	l_break: expr;					\
 	l_continue:;					\
 	})
 #endif
 #endif
+
+#define cond_break __cond_break(break)
+#define cond_break_label(label) __cond_break(goto label)
 
 #ifndef bpf_nop_mov
 #define bpf_nop_mov(var) \
@@ -582,4 +585,10 @@ extern int bpf_wq_set_callback_impl(struct bpf_wq *wq,
 		unsigned int flags__k, void *aux__ign) __ksym;
 #define bpf_wq_set_callback(timer, cb, flags) \
 	bpf_wq_set_callback_impl(timer, cb, flags, NULL)
+
+struct bpf_iter_kmem_cache;
+extern int bpf_iter_kmem_cache_new(struct bpf_iter_kmem_cache *it) __weak __ksym;
+extern struct kmem_cache *bpf_iter_kmem_cache_next(struct bpf_iter_kmem_cache *it) __weak __ksym;
+extern void bpf_iter_kmem_cache_destroy(struct bpf_iter_kmem_cache *it) __weak __ksym;
+
 #endif

@@ -359,13 +359,8 @@ xfsaild_resubmit_item(
 	}
 
 	/* protected by ail_lock */
-	list_for_each_entry(lip, &bp->b_li_list, li_bio_list) {
-		if (bp->b_flags & _XBF_INODES)
-			clear_bit(XFS_LI_FAILED, &lip->li_flags);
-		else
-			xfs_clear_li_failed(lip);
-	}
-
+	list_for_each_entry(lip, &bp->b_li_list, li_bio_list)
+		clear_bit(XFS_LI_FAILED, &lip->li_flags);
 	xfs_buf_unlock(bp);
 	return XFS_ITEM_SUCCESS;
 }
@@ -914,10 +909,9 @@ xfs_trans_ail_delete(
 		return;
 	}
 
-	/* xfs_ail_update_finish() drops the AIL lock */
-	xfs_clear_li_failed(lip);
+	clear_bit(XFS_LI_FAILED, &lip->li_flags);
 	tail_lsn = xfs_ail_delete_one(ailp, lip);
-	xfs_ail_update_finish(ailp, tail_lsn);
+	xfs_ail_update_finish(ailp, tail_lsn);	/* drops the AIL lock */
 }
 
 int

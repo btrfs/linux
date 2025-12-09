@@ -737,6 +737,15 @@ static void b53_enable_mib(struct b53_device *dev)
 	b53_write8(dev, B53_MGMT_PAGE, B53_GLOBAL_CONFIG, gc);
 }
 
+static void b53_enable_stp(struct b53_device *dev)
+{
+	u8 gc;
+
+	b53_read8(dev, B53_MGMT_PAGE, B53_GLOBAL_CONFIG, &gc);
+	gc |= GC_RX_BPDU_EN;
+	b53_write8(dev, B53_MGMT_PAGE, B53_GLOBAL_CONFIG, gc);
+}
+
 static u16 b53_default_pvid(struct b53_device *dev)
 {
 	if (is5325(dev) || is5365(dev))
@@ -876,6 +885,7 @@ static int b53_switch_reset(struct b53_device *dev)
 	}
 
 	b53_enable_mib(dev);
+	b53_enable_stp(dev);
 
 	return b53_flush_arl(dev, FAST_AGE_STATIC);
 }
@@ -989,8 +999,7 @@ void b53_get_strings(struct dsa_switch *ds, int port, u32 stringset,
 
 	if (stringset == ETH_SS_STATS) {
 		for (i = 0; i < mib_size; i++)
-			strscpy(data + i * ETH_GSTRING_LEN,
-				mibs[i].name, ETH_GSTRING_LEN);
+			ethtool_puts(&data, mibs[i].name);
 	} else if (stringset == ETH_SS_PHY_STATS) {
 		phydev = b53_get_phy_device(ds, port);
 		if (!phydev)
@@ -2225,24 +2234,18 @@ int b53_eee_init(struct dsa_switch *ds, int port, struct phy_device *phy)
 }
 EXPORT_SYMBOL(b53_eee_init);
 
-int b53_get_mac_eee(struct dsa_switch *ds, int port, struct ethtool_keee *e)
+bool b53_support_eee(struct dsa_switch *ds, int port)
 {
 	struct b53_device *dev = ds->priv;
 
-	if (is5325(dev) || is5365(dev))
-		return -EOPNOTSUPP;
-
-	return 0;
+	return !is5325(dev) && !is5365(dev);
 }
-EXPORT_SYMBOL(b53_get_mac_eee);
+EXPORT_SYMBOL(b53_support_eee);
 
 int b53_set_mac_eee(struct dsa_switch *ds, int port, struct ethtool_keee *e)
 {
 	struct b53_device *dev = ds->priv;
 	struct ethtool_keee *p = &dev->ports[port].eee;
-
-	if (is5325(dev) || is5365(dev))
-		return -EOPNOTSUPP;
 
 	p->eee_enabled = e->eee_enabled;
 	b53_eee_enable_set(ds, port, e->eee_enabled);
@@ -2299,7 +2302,7 @@ static const struct dsa_switch_ops b53_switch_ops = {
 	.phylink_get_caps	= b53_phylink_get_caps,
 	.port_enable		= b53_enable_port,
 	.port_disable		= b53_disable_port,
-	.get_mac_eee		= b53_get_mac_eee,
+	.support_eee		= b53_support_eee,
 	.set_mac_eee		= b53_set_mac_eee,
 	.port_bridge_join	= b53_br_join,
 	.port_bridge_leave	= b53_br_leave,
@@ -2412,6 +2415,19 @@ static const struct b53_chip_data b53_switch_chips[] = {
 		.arl_buckets = 1024,
 		.imp_port = 8,
 		.vta_regs = B53_VTA_REGS_9798,
+		.duplex_reg = B53_DUPLEX_STAT_GE,
+		.jumbo_pm_reg = B53_JUMBO_PORT_MASK,
+		.jumbo_size_reg = B53_JUMBO_MAX_SIZE,
+	},
+	{
+		.chip_id = BCM53101_DEVICE_ID,
+		.dev_name = "BCM53101",
+		.vlans = 4096,
+		.enabled_ports = 0x11f,
+		.arl_bins = 4,
+		.arl_buckets = 512,
+		.vta_regs = B53_VTA_REGS,
+		.imp_port = 8,
 		.duplex_reg = B53_DUPLEX_STAT_GE,
 		.jumbo_pm_reg = B53_JUMBO_PORT_MASK,
 		.jumbo_size_reg = B53_JUMBO_MAX_SIZE,
@@ -2796,6 +2812,7 @@ int b53_switch_detect(struct b53_device *dev)
 			return ret;
 
 		switch (id32) {
+		case BCM53101_DEVICE_ID:
 		case BCM53115_DEVICE_ID:
 		case BCM53125_DEVICE_ID:
 		case BCM53128_DEVICE_ID:

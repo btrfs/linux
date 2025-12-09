@@ -197,7 +197,7 @@ struct ak8974 {
 	/* Ensure timestamp is naturally aligned */
 	struct {
 		__le16 channels[3];
-		s64 ts __aligned(8);
+		aligned_s64 ts;
 	} scan;
 };
 
@@ -535,8 +535,8 @@ static int ak8974_detect(struct ak8974 *ak8974)
 				       fab_data2, sizeof(fab_data2));
 
 		for (i = 0; i < 3; ++i) {
-			static const char axis[3] = "XYZ";
-			static const char pgaxis[6] = "ZYZXYX";
+			static const char axis[] = "XYZ";
+			static const char pgaxis[] = "ZYZXYX";
 			unsigned offz = le16_to_cpu(fab_data2[i]) & 0x7F;
 			unsigned fine = le16_to_cpu(fab_data1[i]);
 			unsigned sens = le16_to_cpu(fab_data1[i + 3]);
@@ -910,7 +910,7 @@ static int ak8974_probe(struct i2c_client *i2c)
 
 	/* If we have a valid DRDY IRQ, make use of it */
 	if (irq > 0) {
-		irq_trig = irqd_get_trigger_type(irq_get_irq_data(irq));
+		irq_trig = irq_get_trigger_type(irq);
 		if (irq_trig == IRQF_TRIGGER_RISING) {
 			dev_info(&i2c->dev, "enable rising edge DRDY IRQ\n");
 		} else if (irq_trig == IRQF_TRIGGER_FALLING) {

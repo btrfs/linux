@@ -119,6 +119,13 @@ static const struct dmi_system_id button_array_table[] = {
 		},
 	},
 	{
+		.ident = "Lenovo ThinkPad X1 Tablet Gen 1",
+		.matches = {
+			DMI_MATCH(DMI_SYS_VENDOR, "LENOVO"),
+			DMI_MATCH(DMI_PRODUCT_FAMILY, "ThinkPad X12 Detachable Gen 1"),
+		},
+	},
+	{
 		.ident = "Lenovo ThinkPad X1 Tablet Gen 2",
 		.matches = {
 			DMI_MATCH(DMI_SYS_VENDOR, "LENOVO"),
@@ -130,6 +137,13 @@ static const struct dmi_system_id button_array_table[] = {
 		.matches = {
 			DMI_MATCH(DMI_SYS_VENDOR, "Microsoft Corporation"),
 			DMI_MATCH(DMI_PRODUCT_NAME, "Surface Go 3"),
+		},
+	},
+	{
+		.ident = "Microsoft Surface Go 4",
+		.matches = {
+			DMI_MATCH(DMI_SYS_VENDOR, "Microsoft Corporation"),
+			DMI_MATCH(DMI_PRODUCT_NAME, "Surface Go 4"),
 		},
 	},
 	{ }
@@ -747,7 +761,7 @@ static struct platform_driver intel_hid_pl_driver = {
 		.pm = &intel_hid_pl_pm_ops,
 	},
 	.probe = intel_hid_probe,
-	.remove_new = intel_hid_remove,
+	.remove = intel_hid_remove,
 };
 
 /*

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * Copyright (C) Fuzhou Rockchip Electronics Co.Ltd
+ * Copyright (C) Rockchip Electronics Co., Ltd.
  *    Zheng Yang <zhengyang@rock-chips.com>
  *    Yakir Yang <ykk@rock-chips.com>
  */
@@ -471,7 +471,7 @@ static int inno_hdmi_setup(struct inno_hdmi *hdmi,
 }
 
 static enum drm_mode_status inno_hdmi_display_mode_valid(struct inno_hdmi *hdmi,
-							 struct drm_display_mode *mode)
+							 const struct drm_display_mode *mode)
 {
 	unsigned long mpixelclk, max_tolerance;
 	long rounded_refclk;
@@ -577,7 +577,7 @@ static int inno_hdmi_connector_get_modes(struct drm_connector *connector)
 
 static enum drm_mode_status
 inno_hdmi_connector_mode_valid(struct drm_connector *connector,
-			       struct drm_display_mode *mode)
+			       const struct drm_display_mode *mode)
 {
 	struct inno_hdmi *hdmi = connector_to_inno_hdmi(connector);
 
@@ -1017,7 +1017,7 @@ MODULE_DEVICE_TABLE(of, inno_hdmi_dt_ids);
 
 struct platform_driver inno_hdmi_driver = {
 	.probe  = inno_hdmi_probe,
-	.remove_new = inno_hdmi_remove,
+	.remove = inno_hdmi_remove,
 	.driver = {
 		.name = "innohdmi-rockchip",
 		.of_match_table = inno_hdmi_dt_ids,

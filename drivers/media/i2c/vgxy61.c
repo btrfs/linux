@@ -892,8 +892,8 @@ static u32 vgxy61_get_expo_long_max(struct vgxy61_dev *sensor,
 	third_rot_max_expo = (sensor->frame_length / 71) * short_expo_ratio;
 
 	/* Take the minimum from all rules */
-	return min(min(first_rot_max_expo, second_rot_max_expo),
-		   third_rot_max_expo);
+	return min3(first_rot_max_expo, second_rot_max_expo,
+		    third_rot_max_expo);
 }
 
 static int vgxy61_update_exposure(struct vgxy61_dev *sensor, u16 new_expo_long,
@@ -1617,7 +1617,7 @@ static int vgxy61_detect(struct vgxy61_dev *sensor)
 
 	ret = cci_read(sensor->regmap, VGXY61_REG_NVM, &st, NULL);
 	if (ret < 0)
-		return st;
+		return ret;
 	if (st != VGXY61_NVM_OK)
 		dev_warn(&client->dev, "Bad nvm state got %u\n", (u8)st);
 

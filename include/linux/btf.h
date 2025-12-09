@@ -75,6 +75,10 @@
 #define KF_ITER_NEXT    (1 << 9) /* kfunc implements BPF iter next method */
 #define KF_ITER_DESTROY (1 << 10) /* kfunc implements BPF iter destructor */
 #define KF_RCU_PROTECTED (1 << 11) /* kfunc should be protected by rcu cs when they are invoked */
+#define KF_FASTCALL     (1 << 12) /* kfunc supports bpf_fastcall protocol */
+#define KF_ARENA_RET    (1 << 13) /* kfunc returns an arena pointer */
+#define KF_ARENA_ARG1   (1 << 14) /* kfunc takes an arena pointer as its first argument */
+#define KF_ARENA_ARG2   (1 << 15) /* kfunc takes an arena pointer as its second argument */
 
 /*
  * Tag marking a kernel function as a kfunc. This is meant to minimize the
@@ -352,6 +356,11 @@ static inline bool btf_type_is_scalar(const struct btf_type *t)
 	return btf_type_is_int(t) || btf_type_is_enum(t);
 }
 
+static inline bool btf_type_is_fwd(const struct btf_type *t)
+{
+	return BTF_INFO_KIND(t->info) == BTF_KIND_FWD;
+}
+
 static inline bool btf_type_is_typedef(const struct btf_type *t)
 {
 	return BTF_INFO_KIND(t->info) == BTF_KIND_TYPEDEF;
@@ -581,6 +590,16 @@ int get_kern_ctx_btf_id(struct bpf_verifier_log *log, enum bpf_prog_type prog_ty
 bool btf_types_are_same(const struct btf *btf1, u32 id1,
 			const struct btf *btf2, u32 id2);
 int btf_check_iter_arg(struct btf *btf, const struct btf_type *func, int arg_idx);
+
+static inline bool btf_type_is_struct_ptr(struct btf *btf, const struct btf_type *t)
+{
+	if (!btf_type_is_ptr(t))
+		return false;
+
+	t = btf_type_skip_modifiers(btf, t->type, NULL);
+
+	return btf_type_is_struct(t);
+}
 #else
 static inline const struct btf_type *btf_type_by_id(const struct btf *btf,
 						    u32 type_id)
@@ -660,15 +679,4 @@ static inline int btf_check_iter_arg(struct btf *btf, const struct btf_type *fun
 	return -EOPNOTSUPP;
 }
 #endif
-
-static inline bool btf_type_is_struct_ptr(struct btf *btf, const struct btf_type *t)
-{
-	if (!btf_type_is_ptr(t))
-		return false;
-
-	t = btf_type_skip_modifiers(btf, t->type, NULL);
-
-	return btf_type_is_struct(t);
-}
-
 #endif

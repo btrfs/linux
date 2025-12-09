@@ -48,7 +48,7 @@
 #define PARF_DBI_BASE_ADDR_HI			0x354
 #define PARF_SLV_ADDR_SPACE_SIZE		0x358
 #define PARF_SLV_ADDR_SPACE_SIZE_HI		0x35c
-#define PARF_NO_SNOOP_OVERIDE			0x3d4
+#define PARF_NO_SNOOP_OVERRIDE			0x3d4
 #define PARF_ATU_BASE_ADDR			0x634
 #define PARF_ATU_BASE_ADDR_HI			0x638
 #define PARF_SRIS_MODE				0x644
@@ -89,9 +89,9 @@
 #define PARF_DEBUG_INT_CFG_BUS_MASTER_EN	BIT(2)
 #define PARF_DEBUG_INT_RADM_PM_TURNOFF		BIT(3)
 
-/* PARF_NO_SNOOP_OVERIDE register fields */
-#define WR_NO_SNOOP_OVERIDE_EN                 BIT(1)
-#define RD_NO_SNOOP_OVERIDE_EN                 BIT(3)
+/* PARF_NO_SNOOP_OVERRIDE register fields */
+#define WR_NO_SNOOP_OVERRIDE_EN			BIT(1)
+#define RD_NO_SNOOP_OVERRIDE_EN			BIT(3)
 
 /* PARF_DEVICE_TYPE register fields */
 #define PARF_DEVICE_TYPE_EP			0x0
@@ -396,6 +396,10 @@ static int qcom_pcie_perst_deassert(struct dw_pcie *pci)
 		return ret;
 	}
 
+	/* Perform cleanup that requires refclk */
+	pci_epc_deinit_notify(pci->ep.epc);
+	dw_pcie_ep_cleanup(&pci->ep);
+
 	/* Assert WAKE# to RC to indicate device is ready */
 	gpiod_set_value_cansleep(pcie_ep->wake, 1);
 	usleep_range(WAKE_DELAY_US, WAKE_DELAY_US + 500);
@@ -525,8 +529,8 @@ static int qcom_pcie_perst_deassert(struct dw_pcie *pci)
 	writel_relaxed(val, pcie_ep->parf + PARF_LTSSM);
 
 	if (pcie_ep->cfg && pcie_ep->cfg->override_no_snoop)
-		writel_relaxed(WR_NO_SNOOP_OVERIDE_EN | RD_NO_SNOOP_OVERIDE_EN,
-				pcie_ep->parf + PARF_NO_SNOOP_OVERIDE);
+		writel_relaxed(WR_NO_SNOOP_OVERRIDE_EN | RD_NO_SNOOP_OVERRIDE_EN,
+				pcie_ep->parf + PARF_NO_SNOOP_OVERRIDE);
 
 	return 0;
 
@@ -540,8 +544,6 @@ static void qcom_pcie_perst_assert(struct dw_pcie *pci)
 {
 	struct qcom_pcie_ep *pcie_ep = to_pcie_ep(pci);
 
-	pci_epc_deinit_notify(pci->ep.epc);
-	dw_pcie_ep_cleanup(&pci->ep);
 	qcom_pcie_disable_resources(pcie_ep);
 	pcie_ep->link_status = QCOM_PCIE_EP_LINK_DISABLED;
 }
@@ -823,6 +825,10 @@ static const struct pci_epc_features qcom_pcie_epc_features = {
 	.msi_capable = true,
 	.msix_capable = false,
 	.align = SZ_4K,
+	.bar[BAR_0] = { .only_64bit = true, },
+	.bar[BAR_1] = { .type = BAR_RESERVED, },
+	.bar[BAR_2] = { .only_64bit = true, },
+	.bar[BAR_3] = { .type = BAR_RESERVED, },
 };
 
 static const struct pci_epc_features *
@@ -931,13 +937,14 @@ static const struct of_device_id qcom_pcie_ep_match[] = {
 	{ .compatible = "qcom,sa8775p-pcie-ep", .data = &cfg_1_34_0},
 	{ .compatible = "qcom,sdx55-pcie-ep", },
 	{ .compatible = "qcom,sm8450-pcie-ep", },
+	{ .compatible = "qcom,sar2130p-pcie-ep", },
 	{ }
 };
 MODULE_DEVICE_TABLE(of, qcom_pcie_ep_match);
 
 static struct platform_driver qcom_pcie_ep_driver = {
 	.probe	= qcom_pcie_ep_probe,
-	.remove_new = qcom_pcie_ep_remove,
+	.remove = qcom_pcie_ep_remove,
 	.driver	= {
 		.name = "qcom-pcie-ep",
 		.of_match_table	= qcom_pcie_ep_match,

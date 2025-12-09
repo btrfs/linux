@@ -15,7 +15,6 @@
 #include <linux/irq.h>
 #include <linux/irqdomain.h>
 #include <linux/module.h>
-#include <linux/of.h>
 #include <linux/pinctrl/consumer.h>
 #include <linux/platform_device.h>
 #include <linux/property.h>
@@ -140,7 +139,7 @@ static int davinci_gpio_get(struct gpio_chip *chip, unsigned offset)
 /*
  * Assuming the pin is muxed as a gpio output, set its output value.
  */
-static void
+static int
 davinci_gpio_set(struct gpio_chip *chip, unsigned offset, int value)
 {
 	struct davinci_gpio_controller *d = gpiochip_get_data(chip);
@@ -151,6 +150,8 @@ davinci_gpio_set(struct gpio_chip *chip, unsigned offset, int value)
 
 	writel_relaxed(__gpio_mask(offset),
 		       value ? &g->set_data : &g->clr_data);
+
+	return 0;
 }
 
 static int davinci_gpio_probe(struct platform_device *pdev)
@@ -159,14 +160,13 @@ static int davinci_gpio_probe(struct platform_device *pdev)
 	unsigned int ngpio, nbank, nirq, gpio_unbanked;
 	struct davinci_gpio_controller *chips;
 	struct device *dev = &pdev->dev;
-	struct device_node *dn = dev_of_node(dev);
 
 	/*
 	 * The gpio banks conceptually expose a segmented bitmap,
 	 * and "ngpio" is one more than the largest zero-based
 	 * bit index that's valid.
 	 */
-	ret = of_property_read_u32(dn, "ti,ngpio", &ngpio);
+	ret = device_property_read_u32(dev, "ti,ngpio", &ngpio);
 	if (ret)
 		return dev_err_probe(dev, ret, "Failed to get the number of GPIOs\n");
 	if (ngpio == 0)
@@ -177,8 +177,8 @@ static int davinci_gpio_probe(struct platform_device *pdev)
 	 * interrupts is equal to number of gpios else all are banked so
 	 * number of interrupts is equal to number of banks(each with 16 gpios)
 	 */
-	ret = of_property_read_u32(dn, "ti,davinci-gpio-unbanked",
-				   &gpio_unbanked);
+	ret = device_property_read_u32(dev, "ti,davinci-gpio-unbanked",
+				       &gpio_unbanked);
 	if (ret)
 		return dev_err_probe(dev, ret, "Failed to get the unbanked GPIOs property\n");
 
@@ -211,7 +211,7 @@ static int davinci_gpio_probe(struct platform_device *pdev)
 	chips->chip.direction_input = davinci_direction_in;
 	chips->chip.get = davinci_gpio_get;
 	chips->chip.direction_output = davinci_direction_out;
-	chips->chip.set = davinci_gpio_set;
+	chips->chip.set_rv = davinci_gpio_set;
 
 	chips->chip.ngpio = ngpio;
 	chips->chip.base = -1;
@@ -662,7 +662,7 @@ static struct platform_driver davinci_gpio_driver = {
 	.driver		= {
 		.name		= "davinci_gpio",
 		.pm = pm_sleep_ptr(&davinci_gpio_dev_pm_ops),
-		.of_match_table	= of_match_ptr(davinci_gpio_ids),
+		.of_match_table	= davinci_gpio_ids,
 	},
 };
 

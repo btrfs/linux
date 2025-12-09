@@ -201,6 +201,14 @@ vmxnet3_check_link(struct vmxnet3_adapter *adapter, bool affectTxQueue)
 
 	adapter->link_speed = ret >> 16;
 	if (ret & 1) { /* Link is up. */
+		/*
+		 * From vmxnet3 v9, the hypervisor reports the speed in Gbps.
+		 * Convert the speed to Mbps before rporting it to the kernel.
+		 * Max link speed supported is 10000G.
+		 */
+		if (VMXNET3_VERSION_GE_9(adapter) &&
+		    adapter->link_speed < 10000)
+			adapter->link_speed = adapter->link_speed * 1000;
 		netdev_info(adapter->netdev, "NIC Link is Up %d Mbps\n",
 			    adapter->link_speed);
 		netif_carrier_on(adapter->netdev);
@@ -2025,6 +2033,11 @@ vmxnet3_rq_cleanup(struct vmxnet3_rx_queue *rq,
 
 	rq->comp_ring.gen = VMXNET3_INIT_GEN;
 	rq->comp_ring.next2proc = 0;
+
+	if (xdp_rxq_info_is_reg(&rq->xdp_rxq))
+		xdp_rxq_info_unreg(&rq->xdp_rxq);
+	page_pool_destroy(rq->page_pool);
+	rq->page_pool = NULL;
 }
 
 
@@ -2064,11 +2077,6 @@ static void vmxnet3_rq_destroy(struct vmxnet3_rx_queue *rq,
 			rq->rx_ring[i].base = NULL;
 		}
 	}
-
-	if (xdp_rxq_info_is_reg(&rq->xdp_rxq))
-		xdp_rxq_info_unreg(&rq->xdp_rxq);
-	page_pool_destroy(rq->page_pool);
-	rq->page_pool = NULL;
 
 	if (rq->data_ring.base) {
 		dma_free_coherent(&adapter->pdev->dev,

@@ -546,7 +546,7 @@ static struct uuid_entry *uuid_find(struct cache_set *c, const char *uuid)
 
 static struct uuid_entry *uuid_find_empty(struct cache_set *c)
 {
-	static const char zero_uuid[16] = "\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0";
+	static const char zero_uuid[16] = { 0 };
 
 	return uuid_find(c, zero_uuid);
 }
@@ -1718,7 +1718,7 @@ static CLOSURE_CALLBACK(cache_set_flush)
 	if (!IS_ERR_OR_NULL(c->gc_thread))
 		kthread_stop(c->gc_thread);
 
-	if (!IS_ERR(c->root))
+	if (!IS_ERR_OR_NULL(c->root))
 		list_add(&c->root->list, &c->btree_cache);
 
 	/*

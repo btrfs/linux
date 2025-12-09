@@ -95,6 +95,7 @@ static const char * const iio_chan_type_name_spec[] = {
 	[IIO_DELTA_VELOCITY] = "deltavelocity",
 	[IIO_COLORTEMP] = "colortemp",
 	[IIO_CHROMATICITY] = "chromaticity",
+	[IIO_ATTENTION] = "attention",
 };
 
 static const char * const iio_modifier_names[] = {
@@ -409,11 +410,12 @@ static ssize_t iio_debugfs_write_reg(struct file *file,
 	char buf[80];
 	int ret;
 
-	count = min(count, sizeof(buf) - 1);
-	if (copy_from_user(buf, userbuf, count))
-		return -EFAULT;
+	ret = simple_write_to_buffer(buf, sizeof(buf) - 1, ppos, userbuf,
+				     count);
+	if (ret < 0)
+		return ret;
 
-	buf[count] = 0;
+	buf[count] = '\0';
 
 	ret = sscanf(buf, "%i %i", &reg, &val);
 
@@ -1665,7 +1667,7 @@ struct iio_dev *iio_device_alloc(struct device *parent, int sizeof_priv)
 	indio_dev = &iio_dev_opaque->indio_dev;
 
 	if (sizeof_priv)
-		indio_dev->priv = (char *)iio_dev_opaque +
+		ACCESS_PRIVATE(indio_dev, priv) = (char *)iio_dev_opaque +
 			ALIGN(sizeof(*iio_dev_opaque), IIO_DMA_MINALIGN);
 
 	indio_dev->dev.parent = parent;

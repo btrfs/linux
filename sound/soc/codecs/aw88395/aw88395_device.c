@@ -424,7 +424,7 @@ static int aw_dev_dsp_set_crc32(struct aw_device *aw_dev)
 		return -EINVAL;
 	}
 
-	crc_value = __crc32c_le(0xFFFFFFFF, crc_dsp_cfg->data, crc_data_len) ^ 0xFFFFFFFF;
+	crc_value = crc32c(0xFFFFFFFF, crc_dsp_cfg->data, crc_data_len) ^ 0xFFFFFFFF;
 
 	return aw_dev_dsp_write(aw_dev, AW88395_DSP_REG_CRC_ADDR, crc_value,
 						AW88395_DSP_32_DATA);
@@ -703,7 +703,7 @@ static int aw_dev_set_vcalb(struct aw_device *aw_dev)
 				AW88395_VSCAL_FACTOR_DAC, icalk, vcalk);
 		break;
 	default:
-		dev_err(aw_dev->dev, "unsupport vsense status");
+		dev_err(aw_dev->dev, "unsupported vsense status");
 		return -EINVAL;
 	}
 

@@ -130,16 +130,18 @@ retry:
 			goto mkdir_error;
 		ret = cachefiles_inject_write_error();
 		if (ret == 0)
-			ret = vfs_mkdir(&nop_mnt_idmap, d_inode(dir), subdir, 0700);
-		if (ret < 0) {
+			subdir = vfs_mkdir(&nop_mnt_idmap, d_inode(dir), subdir, 0700);
+		else
+			subdir = ERR_PTR(ret);
+		if (IS_ERR(subdir)) {
 			trace_cachefiles_vfs_error(NULL, d_inode(dir), ret,
 						   cachefiles_trace_mkdir_error);
 			goto mkdir_error;
 		}
 		trace_cachefiles_mkdir(dir, subdir);
 
-		if (unlikely(d_unhashed(subdir))) {
-			cachefiles_put_directory(subdir);
+		if (unlikely(d_unhashed(subdir) || d_is_negative(subdir))) {
+			dput(subdir);
 			goto retry;
 		}
 		ASSERT(d_backing_inode(subdir));
@@ -195,7 +197,8 @@ mark_error:
 
 mkdir_error:
 	inode_unlock(d_inode(dir));
-	dput(subdir);
+	if (!IS_ERR(subdir))
+		dput(subdir);
 	pr_err("mkdir %s failed with error %d\n", dirname, ret);
 	return ERR_PTR(ret);
 
@@ -691,11 +694,6 @@ bool cachefiles_commit_tmpfile(struct cachefiles_cache *cache,
 	}
 
 	if (!d_is_negative(dentry)) {
-		if (d_backing_inode(dentry) == file_inode(object->file)) {
-			success = true;
-			goto out_dput;
-		}
-
 		ret = cachefiles_unlink(volume->cache, object, fan, dentry,
 					FSCACHE_OBJECT_IS_STALE);
 		if (ret < 0)

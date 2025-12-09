@@ -28,7 +28,6 @@
 #define ACP70_REG_END			0x125C000
 
 static const struct sof_amd_acp_desc acp70_chip_info = {
-	.host_bridge_id = HOST_BRIDGE_ACP70,
 	.pgfsm_base	= ACP70_PGFSM_BASE,
 	.ext_intr_enb = ACP70_EXTERNAL_INTR_ENB,
 	.ext_intr_cntl = ACP70_EXTERNAL_INTR_CNTL,
@@ -101,12 +100,12 @@ static struct pci_driver snd_sof_pci_amd_acp70_driver = {
 	.probe = acp70_pci_probe,
 	.remove = acp70_pci_remove,
 	.driver = {
-		.pm = &sof_pci_pm,
+		.pm = pm_ptr(&sof_pci_pm),
 	},
 };
 module_pci_driver(snd_sof_pci_amd_acp70_driver);
 
 MODULE_LICENSE("Dual BSD/GPL");
 MODULE_DESCRIPTION("ACP70 SOF Driver");
-MODULE_IMPORT_NS(SND_SOC_SOF_AMD_COMMON);
-MODULE_IMPORT_NS(SND_SOC_SOF_PCI_DEV);
+MODULE_IMPORT_NS("SND_SOC_SOF_AMD_COMMON");
+MODULE_IMPORT_NS("SND_SOC_SOF_PCI_DEV");

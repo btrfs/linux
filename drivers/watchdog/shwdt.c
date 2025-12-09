@@ -129,7 +129,7 @@ static int sh_wdt_stop(struct watchdog_device *wdt_dev)
 
 	spin_lock_irqsave(&wdt->lock, flags);
 
-	del_timer(&wdt->timer);
+	timer_delete(&wdt->timer);
 
 	csr = sh_wdt_read_csr();
 	csr &= ~WTCSR_TME;
@@ -297,7 +297,7 @@ static struct platform_driver sh_wdt_driver = {
 	},
 
 	.probe		= sh_wdt_probe,
-	.remove_new	= sh_wdt_remove,
+	.remove		= sh_wdt_remove,
 	.shutdown	= sh_wdt_shutdown,
 };
 

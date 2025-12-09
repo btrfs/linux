@@ -309,12 +309,17 @@ static int cio2_csi2_calc_timing(struct cio2_device *cio2, struct cio2_queue *q,
 				 unsigned int bpp, unsigned int lanes)
 {
 	struct device *dev = &cio2->pci_dev->dev;
+	struct media_pad *src_pad;
 	s64 freq;
 
-	if (!q->sensor)
-		return -ENODEV;
+	src_pad = media_entity_remote_source_pad_unique(&q->subdev.entity);
+	if (IS_ERR(src_pad)) {
+		dev_err(dev, "can't get source pad of %s (%ld)\n",
+			q->subdev.name, PTR_ERR(src_pad));
+		return PTR_ERR(src_pad);
+	}
 
-	freq = v4l2_get_link_freq(q->sensor->ctrl_handler, bpp, lanes * 2);
+	freq = v4l2_get_link_freq(src_pad, bpp, lanes * 2);
 	if (freq < 0) {
 		dev_err(dev, "error %lld, invalid link_freq\n", freq);
 		return freq;
@@ -1045,8 +1050,6 @@ static const struct vb2_ops cio2_vb2_ops = {
 	.queue_setup = cio2_vb2_queue_setup,
 	.start_streaming = cio2_vb2_start_streaming,
 	.stop_streaming = cio2_vb2_stop_streaming,
-	.wait_prepare = vb2_ops_wait_prepare,
-	.wait_finish = vb2_ops_wait_finish,
 };
 
 /**************** V4L2 interface ****************/
@@ -2002,4 +2005,4 @@ MODULE_AUTHOR("Yuning Pu");
 MODULE_AUTHOR("Yong Zhi <yong.zhi@intel.com>");
 MODULE_LICENSE("GPL v2");
 MODULE_DESCRIPTION("IPU3 CIO2 driver");
-MODULE_IMPORT_NS(INTEL_IPU_BRIDGE);
+MODULE_IMPORT_NS("INTEL_IPU_BRIDGE");

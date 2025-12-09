@@ -565,8 +565,8 @@ static int nci_close_device(struct nci_dev *ndev)
 		 * there is a queued/running cmd_work
 		 */
 		flush_workqueue(ndev->cmd_wq);
-		del_timer_sync(&ndev->cmd_timer);
-		del_timer_sync(&ndev->data_timer);
+		timer_delete_sync(&ndev->cmd_timer);
+		timer_delete_sync(&ndev->data_timer);
 		mutex_unlock(&ndev->req_lock);
 		return 0;
 	}
@@ -597,7 +597,7 @@ static int nci_close_device(struct nci_dev *ndev)
 	/* Flush cmd wq */
 	flush_workqueue(ndev->cmd_wq);
 
-	del_timer_sync(&ndev->cmd_timer);
+	timer_delete_sync(&ndev->cmd_timer);
 
 	/* Clear flags except NCI_UNREG */
 	ndev->flags &= BIT(NCI_UNREG);
@@ -756,6 +756,14 @@ int nci_core_conn_close(struct nci_dev *ndev, u8 conn_id)
 			     msecs_to_jiffies(NCI_CMD_TIMEOUT));
 }
 EXPORT_SYMBOL(nci_core_conn_close);
+
+static void nci_set_target_ats(struct nfc_target *target, struct nci_dev *ndev)
+{
+	if (ndev->target_ats_len > 0) {
+		target->ats_len = ndev->target_ats_len;
+		memcpy(target->ats, ndev->target_ats, target->ats_len);
+	}
+}
 
 static int nci_set_local_general_bytes(struct nfc_dev *nfc_dev)
 {
@@ -939,8 +947,11 @@ static int nci_activate_target(struct nfc_dev *nfc_dev,
 				 msecs_to_jiffies(NCI_RF_DISC_SELECT_TIMEOUT));
 	}
 
-	if (!rc)
+	if (!rc) {
 		ndev->target_active_prot = protocol;
+		if (protocol == NFC_PROTO_ISO14443)
+			nci_set_target_ats(target, ndev);
+	}
 
 	return rc;
 }

@@ -44,7 +44,10 @@ struct x86_instruction_info {
 	u64 dst_val;            /* value of destination operand         */
 	u8  src_bytes;          /* size of source operand               */
 	u8  dst_bytes;          /* size of destination operand          */
+	u8  src_type;		/* type of source operand		*/
+	u8  dst_type;		/* type of destination operand		*/
 	u8  ad_bytes;           /* size of src/dst address              */
+	u64 rip;		/* rip of the instruction		*/
 	u64 next_rip;           /* rip following the instruction        */
 };
 
@@ -88,12 +91,16 @@ struct x86_instruction_info {
 #define X86EMUL_CMPXCHG_FAILED  4 /* cmpxchg did not see expected value */
 #define X86EMUL_IO_NEEDED       5 /* IO is needed to complete emulation */
 #define X86EMUL_INTERCEPTED     6 /* Intercepted by nested VMCB/VMCS */
+/* Emulation during event vectoring is unhandleable. */
+#define X86EMUL_UNHANDLEABLE_VECTORING	7
 
 /* x86-specific emulation flags */
 #define X86EMUL_F_WRITE			BIT(0)
 #define X86EMUL_F_FETCH			BIT(1)
 #define X86EMUL_F_IMPLICIT		BIT(2)
 #define X86EMUL_F_INVLPG		BIT(3)
+#define X86EMUL_F_MSR			BIT(4)
+#define X86EMUL_F_DT_LOAD		BIT(5)
 
 struct x86_emulate_ops {
 	void (*vm_bugged)(struct x86_emulate_ctxt *ctxt);
@@ -235,6 +242,9 @@ struct x86_emulate_ops {
 
 	gva_t (*get_untagged_addr)(struct x86_emulate_ctxt *ctxt, gva_t addr,
 				   unsigned int flags);
+
+	bool (*is_canonical_addr)(struct x86_emulate_ctxt *ctxt, gva_t addr,
+				  unsigned int flags);
 };
 
 /* Type, address-of, and value of an instruction's operand. */
@@ -265,8 +275,10 @@ struct operand {
 	};
 };
 
+#define X86_MAX_INSTRUCTION_LENGTH	15
+
 struct fetch_cache {
-	u8 data[15];
+	u8 data[X86_MAX_INSTRUCTION_LENGTH];
 	u8 *ptr;
 	u8 *end;
 };

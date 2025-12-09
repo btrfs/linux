@@ -28,6 +28,7 @@
  *   - SOC_SDW_CODEC_SPKR | SOF_SIDECAR_AMPS - Not currently supported
  */
 #define SOC_SDW_SIDECAR_AMPS		BIT(16)
+#define SOC_SDW_CODEC_MIC		BIT(17)
 
 #define SOC_SDW_UNUSED_DAI_ID		-1
 #define SOC_SDW_JACK_OUT_DAI_ID		0
@@ -59,6 +60,7 @@ struct asoc_sdw_dai_info {
 	int (*rtd_init)(struct snd_soc_pcm_runtime *rtd, struct snd_soc_dai *dai);
 	bool rtd_init_done; /* Indicate that the rtd_init callback is done */
 	unsigned long quirk;
+	bool quirk_exclude;
 };
 
 struct asoc_sdw_codec_info {
@@ -150,14 +152,15 @@ void asoc_sdw_init_dai_link(struct device *dev, struct snd_soc_dai_link *dai_lin
 			    struct snd_soc_dai_link_component *cpus, int cpus_num,
 			    struct snd_soc_dai_link_component *platform_component,
 			    int num_platforms, struct snd_soc_dai_link_component *codecs,
-			    int codecs_num, int (*init)(struct snd_soc_pcm_runtime *rtd),
+			    int codecs_num, int no_pcm,
+			    int (*init)(struct snd_soc_pcm_runtime *rtd),
 			    const struct snd_soc_ops *ops);
 
 int asoc_sdw_init_simple_dai_link(struct device *dev, struct snd_soc_dai_link *dai_links,
 				  int *be_id, char *name, int playback, int capture,
 				  const char *cpu_dai_name, const char *platform_comp_name,
 				  int num_platforms, const char *codec_name,
-				  const char *codec_dai_name,
+				  const char *codec_dai_name, int no_pcm,
 				  int (*init)(struct snd_soc_pcm_runtime *rtd),
 				  const struct snd_soc_ops *ops);
 
@@ -221,6 +224,8 @@ int asoc_sdw_cs_amp_init(struct snd_soc_card *card,
 			 struct snd_soc_dai_link *dai_links,
 			 struct asoc_sdw_codec_info *info,
 			 bool playback);
+int asoc_sdw_cs_spk_feedback_rtd_init(struct snd_soc_pcm_runtime *rtd,
+				      struct snd_soc_dai *dai);
 
 /* MAXIM codec support */
 int asoc_sdw_maxim_init(struct snd_soc_card *card,
@@ -234,8 +239,7 @@ int asoc_sdw_rt_sdca_jack_rtd_init(struct snd_soc_pcm_runtime *rtd, struct snd_s
 int asoc_sdw_rt_amp_spk_rtd_init(struct snd_soc_pcm_runtime *rtd, struct snd_soc_dai *dai);
 int asoc_sdw_rt700_rtd_init(struct snd_soc_pcm_runtime *rtd, struct snd_soc_dai *dai);
 int asoc_sdw_rt711_rtd_init(struct snd_soc_pcm_runtime *rtd, struct snd_soc_dai *dai);
-int asoc_sdw_rt712_spk_rtd_init(struct snd_soc_pcm_runtime *rtd, struct snd_soc_dai *dai);
-int asoc_sdw_rt722_spk_rtd_init(struct snd_soc_pcm_runtime *rtd, struct snd_soc_dai *dai);
+int asoc_sdw_rt_mf_sdca_spk_rtd_init(struct snd_soc_pcm_runtime *rtd, struct snd_soc_dai *dai);
 int asoc_sdw_rt5682_rtd_init(struct snd_soc_pcm_runtime *rtd, struct snd_soc_dai *dai);
 int asoc_sdw_cs42l42_rtd_init(struct snd_soc_pcm_runtime *rtd, struct snd_soc_dai *dai);
 int asoc_sdw_cs42l43_hs_rtd_init(struct snd_soc_pcm_runtime *rtd, struct snd_soc_dai *dai);

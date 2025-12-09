@@ -195,7 +195,7 @@ static void stm_enable_hw(struct stm_drvdata *drvdata)
 
 static int stm_enable(struct coresight_device *csdev, struct perf_event *event,
 		      enum cs_mode mode,
-		      __maybe_unused struct coresight_trace_id_map *trace_id)
+		      __maybe_unused struct coresight_path *path)
 {
 	struct stm_drvdata *drvdata = dev_get_drvdata(csdev->dev.parent);
 
@@ -281,12 +281,23 @@ static void stm_disable(struct coresight_device *csdev,
 	}
 }
 
+static int stm_trace_id(struct coresight_device *csdev, __maybe_unused enum cs_mode mode,
+			__maybe_unused struct coresight_device *sink)
+{
+	struct stm_drvdata *drvdata;
+
+	drvdata = dev_get_drvdata(csdev->dev.parent);
+
+	return drvdata->traceid;
+}
+
 static const struct coresight_ops_source stm_source_ops = {
 	.enable		= stm_enable,
 	.disable	= stm_disable,
 };
 
 static const struct coresight_ops stm_cs_ops = {
+	.trace_id	= stm_trace_id,
 	.source_ops	= &stm_source_ops,
 };
 
@@ -1036,7 +1047,7 @@ MODULE_DEVICE_TABLE(acpi, stm_acpi_ids);
 
 static struct platform_driver stm_platform_driver = {
 	.probe	= stm_platform_probe,
-	.remove_new = stm_platform_remove,
+	.remove = stm_platform_remove,
 	.driver	= {
 		.name			= "coresight-stm-platform",
 		.acpi_match_table	= ACPI_PTR(stm_acpi_ids),

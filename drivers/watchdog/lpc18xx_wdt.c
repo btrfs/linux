@@ -135,7 +135,7 @@ static int lpc18xx_wdt_start(struct watchdog_device *wdt_dev)
 	unsigned int val;
 
 	if (timer_pending(&lpc18xx_wdt->timer))
-		del_timer(&lpc18xx_wdt->timer);
+		timer_delete(&lpc18xx_wdt->timer);
 
 	val = readl(lpc18xx_wdt->base + LPC18XX_WDT_MOD);
 	val |= LPC18XX_WDT_MOD_WDEN;
@@ -266,7 +266,7 @@ static void lpc18xx_wdt_remove(struct platform_device *pdev)
 	struct lpc18xx_wdt_dev *lpc18xx_wdt = platform_get_drvdata(pdev);
 
 	dev_warn(&pdev->dev, "I quit now, hardware will probably reboot!\n");
-	del_timer_sync(&lpc18xx_wdt->timer);
+	timer_delete_sync(&lpc18xx_wdt->timer);
 }
 
 static const struct of_device_id lpc18xx_wdt_match[] = {
@@ -281,7 +281,7 @@ static struct platform_driver lpc18xx_wdt_driver = {
 		.of_match_table	= lpc18xx_wdt_match,
 	},
 	.probe = lpc18xx_wdt_probe,
-	.remove_new = lpc18xx_wdt_remove,
+	.remove = lpc18xx_wdt_remove,
 };
 module_platform_driver(lpc18xx_wdt_driver);
 

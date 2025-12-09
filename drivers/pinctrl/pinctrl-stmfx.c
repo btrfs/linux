@@ -380,7 +380,7 @@ static void stmfx_pinconf_dbg_show(struct pinctrl_dev *pctldev,
 		seq_printf(s, "input %s ", str_high_low(val));
 		if (type)
 			seq_printf(s, "with internal pull-%s ",
-				   pupd ? "up" : "down");
+				   str_up_down(pupd));
 		else
 			seq_printf(s, "%s ", pupd ? "floating" : "analog");
 	}
@@ -599,7 +599,7 @@ static void stmfx_pinctrl_irq_print_chip(struct irq_data *d, struct seq_file *p)
 	struct gpio_chip *gpio_chip = irq_data_get_irq_chip_data(d);
 	struct stmfx_pinctrl *pctl = gpiochip_get_data(gpio_chip);
 
-	seq_printf(p, dev_name(pctl->dev));
+	seq_puts(p, dev_name(pctl->dev));
 }
 
 static const struct irq_chip stmfx_pinctrl_irq_chip = {
@@ -855,7 +855,7 @@ static struct platform_driver stmfx_pinctrl_driver = {
 		.pm = &stmfx_pinctrl_dev_pm_ops,
 	},
 	.probe = stmfx_pinctrl_probe,
-	.remove_new = stmfx_pinctrl_remove,
+	.remove = stmfx_pinctrl_remove,
 };
 module_platform_driver(stmfx_pinctrl_driver);
 

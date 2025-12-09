@@ -36,7 +36,6 @@
 #include <linux/profile.h>
 #include <linux/timex.h>
 #include <linux/notifier.h>
-#include <linux/timekeeper_internal.h>
 #include <linux/clockchips.h>
 #include <linux/gfp.h>
 #include <linux/kprobes.h>
@@ -55,10 +54,10 @@
 #include <asm/cio.h>
 #include "entry.h"
 
-union tod_clock tod_clock_base __section(".data");
+union tod_clock __bootdata_preserved(tod_clock_base);
 EXPORT_SYMBOL_GPL(tod_clock_base);
 
-u64 clock_comparator_max = -1ULL;
+u64 __bootdata_preserved(clock_comparator_max);
 EXPORT_SYMBOL_GPL(clock_comparator_max);
 
 static DEFINE_PER_CPU(struct clock_event_device, comparators);
@@ -80,12 +79,10 @@ void __init time_early_init(void)
 {
 	struct ptff_qto qto;
 	struct ptff_qui qui;
-	int cs;
 
 	/* Initialize TOD steering parameters */
 	tod_steering_end = tod_clock_base.tod;
-	for (cs = 0; cs < CS_BASES; cs++)
-		vdso_data[cs].arch_data.tod_steering_end = tod_steering_end;
+	vdso_k_time_data->arch_data.tod_steering_end = tod_steering_end;
 
 	if (!test_facility(28))
 		return;
@@ -255,6 +252,7 @@ static struct clocksource clocksource_tod = {
 	.shift		= 24,
 	.flags		= CLOCK_SOURCE_IS_CONTINUOUS,
 	.vdso_clock_mode = VDSO_CLOCKMODE_TOD,
+	.id		= CSID_S390_TOD,
 };
 
 struct clocksource * __init clocksource_default_clock(void)
@@ -373,7 +371,6 @@ static void clock_sync_global(long delta)
 {
 	unsigned long now, adj;
 	struct ptff_qto qto;
-	int cs;
 
 	/* Fixup the monotonic sched clock. */
 	tod_clock_base.eitod += delta;
@@ -389,10 +386,8 @@ static void clock_sync_global(long delta)
 		panic("TOD clock sync offset %li is too large to drift\n",
 		      tod_steering_delta);
 	tod_steering_end = now + (abs(tod_steering_delta) << 15);
-	for (cs = 0; cs < CS_BASES; cs++) {
-		vdso_data[cs].arch_data.tod_steering_end = tod_steering_end;
-		vdso_data[cs].arch_data.tod_steering_delta = tod_steering_delta;
-	}
+	vdso_k_time_data->arch_data.tod_steering_end = tod_steering_end;
+	vdso_k_time_data->arch_data.tod_steering_delta = tod_steering_delta;
 
 	/* Update LPAR offset. */
 	if (ptff_query(PTFF_QTO) && ptff(&qto, sizeof(qto), PTFF_QTO) == 0)
@@ -467,6 +462,12 @@ static void __init stp_reset(void)
 		stp_online = false;
 	}
 }
+
+bool stp_enabled(void)
+{
+	return test_bit(CLOCK_SYNC_HAS_STP, &clock_sync_flags) && stp_online;
+}
+EXPORT_SYMBOL(stp_enabled);
 
 static void stp_timeout(struct timer_list *unused)
 {
@@ -656,12 +657,12 @@ static void stp_check_leap(void)
 		if (ret < 0)
 			pr_err("failed to set leap second flags\n");
 		/* arm Timer to clear leap second flags */
-		mod_timer(&stp_timer, jiffies + msecs_to_jiffies(14400 * MSEC_PER_SEC));
+		mod_timer(&stp_timer, jiffies + secs_to_jiffies(14400));
 	} else {
 		/* The day the leap second is scheduled for hasn't been reached. Retry
 		 * in one hour.
 		 */
-		mod_timer(&stp_timer, jiffies + msecs_to_jiffies(3600 * MSEC_PER_SEC));
+		mod_timer(&stp_timer, jiffies + secs_to_jiffies(3600));
 	}
 }
 
@@ -679,7 +680,7 @@ static void stp_work_fn(struct work_struct *work)
 
 	if (!stp_online) {
 		chsc_sstpc(stp_page, STP_OP_CTRL, 0x0000, NULL);
-		del_timer_sync(&stp_timer);
+		timer_delete_sync(&stp_timer);
 		goto out_unlock;
 	}
 
@@ -729,8 +730,8 @@ static ssize_t ctn_id_show(struct device *dev,
 
 	mutex_lock(&stp_mutex);
 	if (stpinfo_valid())
-		ret = sprintf(buf, "%016lx\n",
-			      *(unsigned long *) stp_info.ctnid);
+		ret = sysfs_emit(buf, "%016lx\n",
+				 *(unsigned long *)stp_info.ctnid);
 	mutex_unlock(&stp_mutex);
 	return ret;
 }
@@ -745,7 +746,7 @@ static ssize_t ctn_type_show(struct device *dev,
 
 	mutex_lock(&stp_mutex);
 	if (stpinfo_valid())
-		ret = sprintf(buf, "%i\n", stp_info.ctn);
+		ret = sysfs_emit(buf, "%i\n", stp_info.ctn);
 	mutex_unlock(&stp_mutex);
 	return ret;
 }
@@ -760,7 +761,7 @@ static ssize_t dst_offset_show(struct device *dev,
 
 	mutex_lock(&stp_mutex);
 	if (stpinfo_valid() && (stp_info.vbits & 0x2000))
-		ret = sprintf(buf, "%i\n", (int)(s16) stp_info.dsto);
+		ret = sysfs_emit(buf, "%i\n", (int)(s16)stp_info.dsto);
 	mutex_unlock(&stp_mutex);
 	return ret;
 }
@@ -775,7 +776,7 @@ static ssize_t leap_seconds_show(struct device *dev,
 
 	mutex_lock(&stp_mutex);
 	if (stpinfo_valid() && (stp_info.vbits & 0x8000))
-		ret = sprintf(buf, "%i\n", (int)(s16) stp_info.leaps);
+		ret = sysfs_emit(buf, "%i\n", (int)(s16)stp_info.leaps);
 	mutex_unlock(&stp_mutex);
 	return ret;
 }
@@ -801,11 +802,11 @@ static ssize_t leap_seconds_scheduled_show(struct device *dev,
 		return ret;
 
 	if (!stzi.lsoib.p)
-		return sprintf(buf, "0,0\n");
+		return sysfs_emit(buf, "0,0\n");
 
-	return sprintf(buf, "%lu,%d\n",
-		       tod_to_ns(stzi.lsoib.nlsout - TOD_UNIX_EPOCH) / NSEC_PER_SEC,
-		       stzi.lsoib.nlso - stzi.lsoib.also);
+	return sysfs_emit(buf, "%lu,%d\n",
+			  tod_to_ns(stzi.lsoib.nlsout - TOD_UNIX_EPOCH) / NSEC_PER_SEC,
+			  stzi.lsoib.nlso - stzi.lsoib.also);
 }
 
 static DEVICE_ATTR_RO(leap_seconds_scheduled);
@@ -818,7 +819,7 @@ static ssize_t stratum_show(struct device *dev,
 
 	mutex_lock(&stp_mutex);
 	if (stpinfo_valid())
-		ret = sprintf(buf, "%i\n", (int)(s16) stp_info.stratum);
+		ret = sysfs_emit(buf, "%i\n", (int)(s16)stp_info.stratum);
 	mutex_unlock(&stp_mutex);
 	return ret;
 }
@@ -833,7 +834,7 @@ static ssize_t time_offset_show(struct device *dev,
 
 	mutex_lock(&stp_mutex);
 	if (stpinfo_valid() && (stp_info.vbits & 0x0800))
-		ret = sprintf(buf, "%i\n", (int) stp_info.tto);
+		ret = sysfs_emit(buf, "%i\n", (int)stp_info.tto);
 	mutex_unlock(&stp_mutex);
 	return ret;
 }
@@ -848,7 +849,7 @@ static ssize_t time_zone_offset_show(struct device *dev,
 
 	mutex_lock(&stp_mutex);
 	if (stpinfo_valid() && (stp_info.vbits & 0x4000))
-		ret = sprintf(buf, "%i\n", (int)(s16) stp_info.tzo);
+		ret = sysfs_emit(buf, "%i\n", (int)(s16)stp_info.tzo);
 	mutex_unlock(&stp_mutex);
 	return ret;
 }
@@ -863,7 +864,7 @@ static ssize_t timing_mode_show(struct device *dev,
 
 	mutex_lock(&stp_mutex);
 	if (stpinfo_valid())
-		ret = sprintf(buf, "%i\n", stp_info.tmd);
+		ret = sysfs_emit(buf, "%i\n", stp_info.tmd);
 	mutex_unlock(&stp_mutex);
 	return ret;
 }
@@ -878,7 +879,7 @@ static ssize_t timing_state_show(struct device *dev,
 
 	mutex_lock(&stp_mutex);
 	if (stpinfo_valid())
-		ret = sprintf(buf, "%i\n", stp_info.tst);
+		ret = sysfs_emit(buf, "%i\n", stp_info.tst);
 	mutex_unlock(&stp_mutex);
 	return ret;
 }
@@ -889,7 +890,7 @@ static ssize_t online_show(struct device *dev,
 				struct device_attribute *attr,
 				char *buf)
 {
-	return sprintf(buf, "%i\n", stp_online);
+	return sysfs_emit(buf, "%i\n", stp_online);
 }
 
 static ssize_t online_store(struct device *dev,

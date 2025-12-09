@@ -11,8 +11,8 @@
 #include <linux/device.h>
 #include <linux/errno.h>
 #include <linux/export.h>
-#include <linux/fwnode.h>
 #include <linux/module.h>
+#include <linux/property.h>
 #include <linux/soundwire/sdw_intel.h>
 #include <linux/string.h>
 
@@ -198,7 +198,7 @@ int sdw_intel_acpi_scan(acpi_handle *parent_handle,
 
 	return sdw_intel_scan_controller(info);
 }
-EXPORT_SYMBOL_NS(sdw_intel_acpi_scan, SND_INTEL_SOUNDWIRE_ACPI);
+EXPORT_SYMBOL_NS(sdw_intel_acpi_scan, "SND_INTEL_SOUNDWIRE_ACPI");
 
 MODULE_LICENSE("Dual BSD/GPL");
 MODULE_DESCRIPTION("Intel Soundwire ACPI helpers");

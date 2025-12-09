@@ -40,6 +40,7 @@
 #include "xfs_file.h"
 #include "xfs_exchrange.h"
 #include "xfs_handle.h"
+#include "xfs_rtgroup.h"
 
 #include <linux/mount.h>
 #include <linux/fileattr.h>
@@ -233,6 +234,10 @@ xfs_bulk_ireq_setup(
 	if (hdr->flags & XFS_BULK_IREQ_NREXT64)
 		breq->flags |= XFS_IBULK_NREXT64;
 
+	/* Caller wants to see metadata directories in bulkstat output. */
+	if (hdr->flags & XFS_BULK_IREQ_METADIR)
+		breq->flags |= XFS_IBULK_METADIR;
+
 	return 0;
 }
 
@@ -323,6 +328,9 @@ xfs_ioc_inumbers(
 	if (copy_from_user(&hdr, &arg->hdr, sizeof(hdr)))
 		return -EFAULT;
 
+	if (hdr.flags & XFS_BULK_IREQ_METADIR)
+		return -EINVAL;
+
 	error = xfs_bulk_ireq_setup(mp, &hdr, &breq, arg->inumbers);
 	if (error == -ECANCELED)
 		goto out_teardown;
@@ -396,6 +404,38 @@ xfs_ioc_ag_geometry(
 	return 0;
 }
 
+STATIC int
+xfs_ioc_rtgroup_geometry(
+	struct xfs_mount	*mp,
+	void			__user *arg)
+{
+	struct xfs_rtgroup	*rtg;
+	struct xfs_rtgroup_geometry rgeo;
+	int			error;
+
+	if (copy_from_user(&rgeo, arg, sizeof(rgeo)))
+		return -EFAULT;
+	if (rgeo.rg_flags)
+		return -EINVAL;
+	if (memchr_inv(&rgeo.rg_reserved, 0, sizeof(rgeo.rg_reserved)))
+		return -EINVAL;
+	if (!xfs_has_rtgroups(mp))
+		return -EINVAL;
+
+	rtg = xfs_rtgroup_get(mp, rgeo.rg_number);
+	if (!rtg)
+		return -EINVAL;
+
+	error = xfs_rtgroup_get_geometry(rtg, &rgeo);
+	xfs_rtgroup_put(rtg);
+	if (error)
+		return error;
+
+	if (copy_to_user(arg, &rgeo, sizeof(rgeo)))
+		return -EFAULT;
+	return 0;
+}
+
 /*
  * Linux extended inode flags interface.
  */
@@ -429,8 +469,21 @@ xfs_fill_fsxattr(
 		}
 	}
 
-	if (ip->i_diflags2 & XFS_DIFLAG2_COWEXTSIZE)
-		fa->fsx_cowextsize = XFS_FSB_TO_B(mp, ip->i_cowextsize);
+	if (ip->i_diflags2 & XFS_DIFLAG2_COWEXTSIZE) {
+		/*
+		 * Don't let a misaligned CoW extent size hint on a directory
+		 * escape to userspace if it won't pass the setattr checks
+		 * later.
+		 */
+		if ((ip->i_diflags & XFS_DIFLAG_RTINHERIT) &&
+		    ip->i_cowextsize % mp->m_sb.sb_rextsize > 0) {
+			fa->fsx_xflags &= ~FS_XFLAG_COWEXTSIZE;
+			fa->fsx_cowextsize = 0;
+		} else {
+			fa->fsx_cowextsize = XFS_FSB_TO_B(mp, ip->i_cowextsize);
+		}
+	}
+
 	fa->fsx_projid = ip->i_projid;
 	if (ifp && !xfs_need_iread_extents(ifp))
 		fa->fsx_nextents = xfs_iext_count(ifp);
@@ -501,10 +554,6 @@ xfs_ioctl_setattr_xflags(
 		if (mp->m_sb.sb_rblocks == 0 || mp->m_sb.sb_rextsize == 0 ||
 		    xfs_extlen_to_rtxmod(mp, ip->i_extsize))
 			return -EINVAL;
-
-		/* Clear reflink if we are actually able to set the rt flag. */
-		if (xfs_is_reflink_inode(ip))
-			ip->i_diflags2 &= ~XFS_DIFLAG2_REFLINK;
 	}
 
 	/* diflags2 only valid for v3 inodes. */
@@ -881,41 +930,29 @@ xfs_ioc_swapext(
 	xfs_swapext_t	*sxp)
 {
 	xfs_inode_t     *ip, *tip;
-	struct fd	f, tmp;
-	int		error = 0;
 
 	/* Pull information for the target fd */
-	f = fdget((int)sxp->sx_fdtarget);
-	if (!fd_file(f)) {
-		error = -EINVAL;
-		goto out;
-	}
+	CLASS(fd, f)((int)sxp->sx_fdtarget);
+	if (fd_empty(f))
+		return -EINVAL;
 
 	if (!(fd_file(f)->f_mode & FMODE_WRITE) ||
 	    !(fd_file(f)->f_mode & FMODE_READ) ||
-	    (fd_file(f)->f_flags & O_APPEND)) {
-		error = -EBADF;
-		goto out_put_file;
-	}
+	    (fd_file(f)->f_flags & O_APPEND))
+		return -EBADF;
 
-	tmp = fdget((int)sxp->sx_fdtmp);
-	if (!fd_file(tmp)) {
-		error = -EINVAL;
-		goto out_put_file;
-	}
+	CLASS(fd, tmp)((int)sxp->sx_fdtmp);
+	if (fd_empty(tmp))
+		return -EINVAL;
 
 	if (!(fd_file(tmp)->f_mode & FMODE_WRITE) ||
 	    !(fd_file(tmp)->f_mode & FMODE_READ) ||
-	    (fd_file(tmp)->f_flags & O_APPEND)) {
-		error = -EBADF;
-		goto out_put_tmp_file;
-	}
+	    (fd_file(tmp)->f_flags & O_APPEND))
+		return -EBADF;
 
 	if (IS_SWAPFILE(file_inode(fd_file(f))) ||
-	    IS_SWAPFILE(file_inode(fd_file(tmp)))) {
-		error = -EINVAL;
-		goto out_put_tmp_file;
-	}
+	    IS_SWAPFILE(file_inode(fd_file(tmp))))
+		return -EINVAL;
 
 	/*
 	 * We need to ensure that the fds passed in point to XFS inodes
@@ -923,37 +960,22 @@ xfs_ioc_swapext(
 	 * control over what the user passes us here.
 	 */
 	if (fd_file(f)->f_op != &xfs_file_operations ||
-	    fd_file(tmp)->f_op != &xfs_file_operations) {
-		error = -EINVAL;
-		goto out_put_tmp_file;
-	}
+	    fd_file(tmp)->f_op != &xfs_file_operations)
+		return -EINVAL;
 
 	ip = XFS_I(file_inode(fd_file(f)));
 	tip = XFS_I(file_inode(fd_file(tmp)));
 
-	if (ip->i_mount != tip->i_mount) {
-		error = -EINVAL;
-		goto out_put_tmp_file;
-	}
+	if (ip->i_mount != tip->i_mount)
+		return -EINVAL;
 
-	if (ip->i_ino == tip->i_ino) {
-		error = -EINVAL;
-		goto out_put_tmp_file;
-	}
+	if (ip->i_ino == tip->i_ino)
+		return -EINVAL;
 
-	if (xfs_is_shutdown(ip->i_mount)) {
-		error = -EIO;
-		goto out_put_tmp_file;
-	}
+	if (xfs_is_shutdown(ip->i_mount))
+		return -EIO;
 
-	error = xfs_swap_extents(ip, tip, sxp);
-
- out_put_tmp_file:
-	fdput(tmp);
- out_put_file:
-	fdput(f);
- out:
-	return error;
+	return xfs_swap_extents(ip, tip, sxp);
 }
 
 static int
@@ -1021,7 +1043,7 @@ xfs_ioc_setlabel(
 	 * buffered reads from userspace (i.e. from blkid) are invalidated,
 	 * and userspace will see the newly-written label.
 	 */
-	error = xfs_sync_sb_buf(mp);
+	error = xfs_sync_sb_buf(mp, true);
 	if (error)
 		goto out;
 	/*
@@ -1032,6 +1054,8 @@ xfs_ioc_setlabel(
 	mutex_unlock(&mp->m_growlock);
 
 	invalidate_bdev(mp->m_ddev_targp->bt_bdev);
+	if (xfs_has_rtsb(mp) && mp->m_rtdev_targp)
+		invalidate_bdev(mp->m_rtdev_targp->bt_bdev);
 
 out:
 	mnt_drop_write_file(filp);
@@ -1107,15 +1131,15 @@ xfs_ioctl_getset_resblocks(
 		error = mnt_want_write_file(filp);
 		if (error)
 			return error;
-		error = xfs_reserve_blocks(mp, fsop.resblks);
+		error = xfs_reserve_blocks(mp, XC_FREE_BLOCKS, fsop.resblks);
 		mnt_drop_write_file(filp);
 		if (error)
 			return error;
 	}
 
 	spin_lock(&mp->m_sb_lock);
-	fsop.resblks = mp->m_resblks;
-	fsop.resblks_avail = mp->m_resblks_avail;
+	fsop.resblks = mp->m_free[XC_FREE_BLOCKS].res_total;
+	fsop.resblks_avail = mp->m_free[XC_FREE_BLOCKS].res_avail;
 	spin_unlock(&mp->m_sb_lock);
 
 	if (copy_to_user(arg, &fsop, sizeof(fsop)))
@@ -1131,9 +1155,9 @@ xfs_ioctl_fs_counts(
 	struct xfs_fsop_counts	out = {
 		.allocino = percpu_counter_read_positive(&mp->m_icount),
 		.freeino  = percpu_counter_read_positive(&mp->m_ifree),
-		.freedata = percpu_counter_read_positive(&mp->m_fdblocks) -
-				xfs_fdblocks_unavailable(mp),
-		.freertx  = percpu_counter_read_positive(&mp->m_frextents),
+		.freedata = xfs_estimate_freecounter(mp, XC_FREE_BLOCKS) -
+				xfs_freecounter_unavailable(mp, XC_FREE_BLOCKS),
+		.freertx  = xfs_estimate_freecounter(mp, XC_FREE_RTEXTENTS),
 	};
 
 	if (copy_to_user(uarg, &out, sizeof(out)))
@@ -1189,7 +1213,16 @@ xfs_file_ioctl(
 		struct xfs_buftarg	*target = xfs_inode_buftarg(ip);
 		struct dioattr		da;
 
-		da.d_mem =  da.d_miniosz = target->bt_logical_sectorsize;
+		da.d_mem = target->bt_logical_sectorsize;
+
+		/*
+		 * See xfs_report_dioalign() for an explanation about why this
+		 * reports a value larger than the sector size for COW inodes.
+		 */
+		if (xfs_is_cow_inode(ip))
+			da.d_miniosz = xfs_inode_alloc_unitsize(ip);
+		else
+			da.d_miniosz = target->bt_logical_sectorsize;
 		da.d_maxiosz = INT_MAX & ~(da.d_miniosz - 1);
 
 		if (copy_to_user(arg, &da, sizeof(da)))
@@ -1216,6 +1249,8 @@ xfs_file_ioctl(
 
 	case XFS_IOC_AG_GEOMETRY:
 		return xfs_ioc_ag_geometry(mp, arg);
+	case XFS_IOC_RTGROUP_GEOMETRY:
+		return xfs_ioc_rtgroup_geometry(mp, arg);
 
 	case XFS_IOC_GETVERSION:
 		return put_user(inode->i_generation, (int __user *)arg);

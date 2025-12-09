@@ -33,6 +33,20 @@ config AD4000
 	  To compile this driver as a module, choose M here: the module will be
 	  called ad4000.
 
+config AD4030
+	tristate "Analog Devices AD4030 ADC Driver"
+	depends on SPI
+	depends on GPIOLIB
+	select REGMAP
+	select IIO_BUFFER
+	select IIO_TRIGGERED_BUFFER
+	help
+	  Say yes here to build support for Analog Devices AD4030 and AD4630 high speed
+	  SPI analog to digital converters (ADC).
+
+	  To compile this driver as a module, choose M here: the module will be
+	  called ad4030.
+
 config AD4130
 	tristate "Analog Device AD4130 ADC Driver"
 	depends on SPI
@@ -51,15 +65,31 @@ config AD4130
 config AD4695
 	tristate "Analog Device AD4695 ADC Driver"
 	depends on SPI
-	select REGMAP_SPI
 	select IIO_BUFFER
+	select IIO_BUFFER_DMAENGINE
 	select IIO_TRIGGERED_BUFFER
+	select REGMAP
+	select SPI_OFFLOAD
 	help
 	  Say yes here to build support for Analog Devices AD4695 and similar
 	  analog to digital converters (ADC).
 
 	  To compile this driver as a module, choose M here: the module will be
 	  called ad4695.
+
+config AD4851
+	tristate "Analog Device AD4851 DAS Driver"
+	depends on SPI
+	depends on PWM
+	select REGMAP_SPI
+	select IIO_BACKEND
+	help
+	  Say yes here to build support for Analog Devices AD4851, AD4852,
+	  AD4853, AD4854, AD4855, AD4856, AD4857, AD4858, AD4858I high speed
+	  data acquisition system (DAS).
+
+	  To compile this driver as a module, choose M here: the module will be
+	  called ad4851.
 
 config AD7091R
 	tristate
@@ -111,6 +141,16 @@ config AD7173
 
 	  To compile this driver as a module, choose M here: the module will be
 	  called ad7173.
+
+config AD7191
+	tristate "Analog Devices AD7191 ADC driver"
+	depends on SPI
+	select AD_SIGMA_DELTA
+	help
+	  Say yes here to build support for Analog Devices AD7191.
+
+	  To compile this driver as a module, choose M here: the
+	  module will be called ad7191.
 
 config AD7192
 	tristate "Analog Devices AD7192 and similar ADC driver"
@@ -188,7 +228,9 @@ config AD7298
 config AD7380
 	tristate "Analog Devices AD7380 ADC driver"
 	depends on SPI_MASTER
+	select SPI_OFFLOAD
 	select IIO_BUFFER
+	select IIO_BUFFER_DMAENGINE
 	select IIO_TRIGGER
 	select IIO_TRIGGERED_BUFFER
 	help
@@ -226,12 +268,14 @@ config AD7606_IFACE_PARALLEL
 	tristate "Analog Devices AD7606 ADC driver with parallel interface support"
 	depends on HAS_IOPORT
 	select AD7606
+	select IIO_BACKEND
 	help
 	  Say yes here to build parallel interface support for Analog Devices:
 	  ad7605-4, ad7606, ad7606-6, ad7606-4 analog to digital converters (ADC).
+	  It also support iio_backended devices for AD7606B.
 
 	  To compile this driver as a module, choose M here: the
-	  module will be called ad7606_parallel.
+	  module will be called ad7606_par.
 
 config AD7606_IFACE_SPI
 	tristate "Analog Devices AD7606 ADC driver with spi interface support"
@@ -243,6 +287,22 @@ config AD7606_IFACE_SPI
 
 	  To compile this driver as a module, choose M here: the
 	  module will be called ad7606_spi.
+
+config AD7625
+	tristate "Analog Devices AD7625/AD7626 High Speed ADC driver"
+	depends on PWM
+	select IIO_BACKEND
+	help
+	  Say yes here to build support for Analog Devices:
+	  * AD7625 16-Bit, 6 MSPS PulSAR Analog-to-Digital Converter
+	  * AD7626 16-Bit, 10 MSPS PulSAR Analog-to-Digital Converter
+	  * AD7960 18-Bit, 5 MSPS PulSAR Analog-to-Digital Converter
+	  * AD7961 16-Bit, 5 MSPS PulSAR Analog-to-Digital Converter
+
+	  The driver requires the assistance of the AXI ADC IP core to operate.
+
+	  To compile this driver as a module, choose M here: the module will be
+	  called ad7625.
 
 config AD7766
 	tristate "Analog Devices AD7766/AD7767 ADC driver"
@@ -268,6 +328,18 @@ config AD7768_1
 
 	  To compile this driver as a module, choose M here: the module will be
 	  called ad7768-1.
+
+config AD7779
+	tristate "Analog Devices AD7779 ADC driver"
+	depends on SPI
+	select CRC8
+	select IIO_BUFFER
+	help
+	  Say yes here to build support for Analog Devices AD777X family
+	  (AD7770, AD7771, AD7779) analog to digital converter (ADC).
+
+	  To compile this driver as a module, choose M here: the module will be
+	  called ad7779.
 
 config AD7780
 	tristate "Analog Devices AD7780 and similar ADCs driver"
@@ -330,7 +402,9 @@ config AD7923
 config AD7944
 	tristate "Analog Devices AD7944 and similar ADCs driver"
 	depends on SPI
+	select SPI_OFFLOAD
 	select IIO_BUFFER
+	select IIO_BUFFER_DMAENGINE
 	select IIO_TRIGGERED_BUFFER
 	help
 	  Say yes here to build support for Analog Devices
@@ -574,6 +648,16 @@ config FSL_MX25_ADC
 	help
 	  Generic Conversion Queue driver used for general purpose ADC in the
 	  MX25. This driver supports single measurements using the MX25 ADC.
+
+config GEHC_PMC_ADC
+	tristate "GE HealthCare PMC ADC driver"
+	depends on I2C
+	help
+	  Say yes here to build support for the GE HealthCare PMC 16-bit
+	  16-Channel ADC.
+
+	  To compile this driver as a module, choose M here: the module will be
+	  called gehc-pmc-adc.
 
 config HI8435
 	tristate "Holt Integrated Circuits HI-8435 threshold detector"
@@ -1427,6 +1511,16 @@ config TI_ADS1119
          This driver can also be built as a module. If so, the module will be
          called ti-ads1119.
 
+config TI_ADS7138
+	tristate "Texas Instruments ADS7128 and ADS7138 ADC driver"
+	depends on I2C
+	help
+	  If you say yes here you get support for Texas Instruments ADS7128 and
+	  ADS7138 8-channel A/D converters with 12-bit resolution.
+
+	  This driver can also be built as a module. If so, the module will be
+	  called ti-ads7138.
+
 config TI_ADS7924
 	tristate "Texas Instruments ADS7924 ADC"
 	depends on I2C
@@ -1580,7 +1674,6 @@ config TWL4030_MADC
 config TWL6030_GPADC
 	tristate "TWL6030 GPADC (General Purpose A/D Converter) Support"
 	depends on TWL4030_CORE
-	default n
 	help
 	  Say yes here if you want support for the TWL6030/TWL6032 General
 	  Purpose A/D Converter. This will add support for battery type

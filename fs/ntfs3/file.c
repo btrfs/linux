@@ -101,8 +101,26 @@ int ntfs_fileattr_set(struct mnt_idmap *idmap, struct dentry *dentry,
 	/* Allowed to change compression for empty files and for directories only. */
 	if (!is_dedup(ni) && !is_encrypted(ni) &&
 	    (S_ISREG(inode->i_mode) || S_ISDIR(inode->i_mode))) {
-		/* Change compress state. */
-		int err = ni_set_compress(inode, flags & FS_COMPR_FL);
+		int err = 0;
+		struct address_space *mapping = inode->i_mapping;
+
+		/* write out all data and wait. */
+		filemap_invalidate_lock(mapping);
+		err = filemap_write_and_wait(mapping);
+
+		if (err >= 0) {
+			/* Change compress state. */
+			bool compr = flags & FS_COMPR_FL;
+			err = ni_set_compress(inode, compr);
+
+			/* For files change a_ops too. */
+			if (!err)
+				mapping->a_ops = compr ? &ntfs_aops_cmpr :
+							 &ntfs_aops;
+		}
+
+		filemap_invalidate_unlock(mapping);
+
 		if (err)
 			return err;
 	}
@@ -182,13 +200,15 @@ static int ntfs_extend_initialized_size(struct file *file,
 	loff_t pos = valid;
 	int err;
 
+	if (valid >= new_valid)
+		return 0;
+
 	if (is_resident(ni)) {
 		ni->i_valid = new_valid;
 		return 0;
 	}
 
 	WARN_ON(is_compressed(ni));
-	WARN_ON(valid >= new_valid);
 
 	for (;;) {
 		u32 zerofrom, len;
@@ -222,7 +242,7 @@ static int ntfs_extend_initialized_size(struct file *file,
 		if (err)
 			goto out;
 
-		folio_zero_range(folio, zerofrom, folio_size(folio));
+		folio_zero_range(folio, zerofrom, folio_size(folio) - zerofrom);
 
 		err = ntfs_write_end(file, mapping, pos, len, len, folio, NULL);
 		if (err < 0)
@@ -410,6 +430,7 @@ static int ntfs_extend(struct inode *inode, loff_t pos, size_t count,
 	}
 
 	if (extend_init && !is_compressed(ni)) {
+		WARN_ON(ni->i_valid >= pos);
 		err = ntfs_extend_initialized_size(file, ni, ni->i_valid, pos);
 		if (err)
 			goto out;
@@ -987,6 +1008,7 @@ static ssize_t ntfs_compress_write(struct kiocb *iocb, struct iov_iter *from)
 	u64 frame_vbo;
 	pgoff_t index;
 	bool frame_uptodate;
+	struct folio *folio;
 
 	if (frame_size < PAGE_SIZE) {
 		/*
@@ -1041,8 +1063,9 @@ static ssize_t ntfs_compress_write(struct kiocb *iocb, struct iov_iter *from)
 			if (err) {
 				for (ip = 0; ip < pages_per_frame; ip++) {
 					page = pages[ip];
-					unlock_page(page);
-					put_page(page);
+					folio = page_folio(page);
+					folio_unlock(folio);
+					folio_put(folio);
 				}
 				goto out;
 			}
@@ -1052,9 +1075,10 @@ static ssize_t ntfs_compress_write(struct kiocb *iocb, struct iov_iter *from)
 		off = offset_in_page(valid);
 		for (; ip < pages_per_frame; ip++, off = 0) {
 			page = pages[ip];
+			folio = page_folio(page);
 			zero_user_segment(page, off, PAGE_SIZE);
 			flush_dcache_page(page);
-			SetPageUptodate(page);
+			folio_mark_uptodate(folio);
 		}
 
 		ni_lock(ni);
@@ -1063,9 +1087,10 @@ static ssize_t ntfs_compress_write(struct kiocb *iocb, struct iov_iter *from)
 
 		for (ip = 0; ip < pages_per_frame; ip++) {
 			page = pages[ip];
-			SetPageUptodate(page);
-			unlock_page(page);
-			put_page(page);
+			folio = page_folio(page);
+			folio_mark_uptodate(folio);
+			folio_unlock(folio);
+			folio_put(folio);
 		}
 
 		if (err)
@@ -1107,8 +1132,9 @@ static ssize_t ntfs_compress_write(struct kiocb *iocb, struct iov_iter *from)
 					for (ip = 0; ip < pages_per_frame;
 					     ip++) {
 						page = pages[ip];
-						unlock_page(page);
-						put_page(page);
+						folio = page_folio(page);
+						folio_unlock(folio);
+						folio_put(folio);
 					}
 					goto out;
 				}
@@ -1149,9 +1175,10 @@ static ssize_t ntfs_compress_write(struct kiocb *iocb, struct iov_iter *from)
 		for (ip = 0; ip < pages_per_frame; ip++) {
 			page = pages[ip];
 			ClearPageDirty(page);
-			SetPageUptodate(page);
-			unlock_page(page);
-			put_page(page);
+			folio = page_folio(page);
+			folio_mark_uptodate(folio);
+			folio_unlock(folio);
+			folio_put(folio);
 		}
 
 		if (err)
@@ -1220,19 +1247,20 @@ static ssize_t ntfs_file_write_iter(struct kiocb *iocb, struct iov_iter *from)
 	ssize_t ret;
 	int err;
 
-	err = check_write_restriction(inode);
-	if (err)
-		return err;
-
-	if (is_compressed(ni) && (iocb->ki_flags & IOCB_DIRECT)) {
-		ntfs_inode_warn(inode, "direct i/o + compressed not supported");
-		return -EOPNOTSUPP;
-	}
-
 	if (!inode_trylock(inode)) {
 		if (iocb->ki_flags & IOCB_NOWAIT)
 			return -EAGAIN;
 		inode_lock(inode);
+	}
+
+	ret = check_write_restriction(inode);
+	if (ret)
+		goto out;
+
+	if (is_compressed(ni) && (iocb->ki_flags & IOCB_DIRECT)) {
+		ntfs_inode_warn(inode, "direct i/o + compressed not supported");
+		ret = -EOPNOTSUPP;
+		goto out;
 	}
 
 	ret = generic_write_checks(iocb, from);

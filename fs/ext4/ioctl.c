@@ -142,7 +142,7 @@ static int ext4_update_backup_sb(struct super_block *sb,
 
 	es = (struct ext4_super_block *) (bh->b_data + offset);
 	lock_buffer(bh);
-	if (ext4_has_metadata_csum(sb) &&
+	if (ext4_has_feature_metadata_csum(sb) &&
 	    es->s_checksum != ext4_superblock_csum(sb, es)) {
 		ext4_msg(sb, KERN_ERR, "Invalid checksum for backup "
 		"superblock %llu", sb_block);
@@ -150,7 +150,7 @@ static int ext4_update_backup_sb(struct super_block *sb,
 		goto out_bh;
 	}
 	func(es, arg);
-	if (ext4_has_metadata_csum(sb))
+	if (ext4_has_feature_metadata_csum(sb))
 		es->s_checksum = ext4_superblock_csum(sb, es);
 	set_buffer_uptodate(bh);
 	unlock_buffer(bh);
@@ -351,7 +351,7 @@ void ext4_reset_inode_seed(struct inode *inode)
 	__le32 gen = cpu_to_le32(inode->i_generation);
 	__u32 csum;
 
-	if (!ext4_has_metadata_csum(inode->i_sb))
+	if (!ext4_has_feature_metadata_csum(inode->i_sb))
 		return;
 
 	csum = ext4_chksum(sbi, sbi->s_csum_seed, (__u8 *)&inum, sizeof(inum));
@@ -1205,7 +1205,8 @@ static int ext4_ioctl_setuuid(struct file *filp,
 	 * If any checksums (group descriptors or metadata) are being used
 	 * then the checksum seed feature is required to change the UUID.
 	 */
-	if (((ext4_has_feature_gdt_csum(sb) || ext4_has_metadata_csum(sb))
+	if (((ext4_has_feature_gdt_csum(sb) ||
+	      ext4_has_feature_metadata_csum(sb))
 			&& !ext4_has_feature_csum_seed(sb))
 		|| ext4_has_feature_stable_inodes(sb))
 		return -EOPNOTSUPP;
@@ -1253,7 +1254,7 @@ static long __ext4_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 		if (!inode_owner_or_capable(idmap, inode))
 			return -EPERM;
 
-		if (ext4_has_metadata_csum(inode->i_sb)) {
+		if (ext4_has_feature_metadata_csum(inode->i_sb)) {
 			ext4_warning(sb, "Setting inode version is not "
 				     "supported with metadata_csum enabled.");
 			return -ENOTTY;
@@ -1330,7 +1331,6 @@ group_extend_out:
 
 	case EXT4_IOC_MOVE_EXT: {
 		struct move_extent me;
-		struct fd donor;
 		int err;
 
 		if (!(filp->f_mode & FMODE_READ) ||
@@ -1342,30 +1342,26 @@ group_extend_out:
 			return -EFAULT;
 		me.moved_len = 0;
 
-		donor = fdget(me.donor_fd);
-		if (!fd_file(donor))
+		CLASS(fd, donor)(me.donor_fd);
+		if (fd_empty(donor))
 			return -EBADF;
 
-		if (!(fd_file(donor)->f_mode & FMODE_WRITE)) {
-			err = -EBADF;
-			goto mext_out;
-		}
+		if (!(fd_file(donor)->f_mode & FMODE_WRITE))
+			return -EBADF;
 
 		if (ext4_has_feature_bigalloc(sb)) {
 			ext4_msg(sb, KERN_ERR,
 				 "Online defrag not supported with bigalloc");
-			err = -EOPNOTSUPP;
-			goto mext_out;
+			return -EOPNOTSUPP;
 		} else if (IS_DAX(inode)) {
 			ext4_msg(sb, KERN_ERR,
 				 "Online defrag not supported with DAX");
-			err = -EOPNOTSUPP;
-			goto mext_out;
+			return -EOPNOTSUPP;
 		}
 
 		err = mnt_want_write_file(filp);
 		if (err)
-			goto mext_out;
+			return err;
 
 		err = ext4_move_extents(filp, fd_file(donor), me.orig_start,
 					me.donor_start, me.len, &me.moved_len);
@@ -1374,8 +1370,6 @@ group_extend_out:
 		if (copy_to_user((struct move_extent __user *)arg,
 				 &me, sizeof(me)))
 			err = -EFAULT;
-mext_out:
-		fdput(donor);
 		return err;
 	}
 
@@ -1712,7 +1706,7 @@ int ext4_update_overhead(struct super_block *sb, bool force)
 {
 	struct ext4_sb_info *sbi = EXT4_SB(sb);
 
-	if (sb_rdonly(sb))
+	if (ext4_emergency_state(sb) || sb_rdonly(sb))
 		return 0;
 	if (!force &&
 	    (sbi->s_overhead == 0 ||

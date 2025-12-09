@@ -184,15 +184,16 @@ static int pfcp_add_sock(struct pfcp_dev *pfcp)
 	return PTR_ERR_OR_ZERO(pfcp->sock);
 }
 
-static int pfcp_newlink(struct net *net, struct net_device *dev,
-			struct nlattr *tb[], struct nlattr *data[],
+static int pfcp_newlink(struct net_device *dev,
+			struct rtnl_newlink_params *params,
 			struct netlink_ext_ack *extack)
 {
+	struct net *link_net = rtnl_newlink_link_net(params);
 	struct pfcp_dev *pfcp = netdev_priv(dev);
 	struct pfcp_net *pn;
 	int err;
 
-	pfcp->net = net;
+	pfcp->net = link_net;
 
 	err = pfcp_add_sock(pfcp);
 	if (err) {
@@ -206,8 +207,8 @@ static int pfcp_newlink(struct net *net, struct net_device *dev,
 		goto exit_del_pfcp_sock;
 	}
 
-	pn = net_generic(dev_net(dev), pfcp_net_id);
-	list_add_rcu(&pfcp->list, &pn->pfcp_dev_list);
+	pn = net_generic(link_net, pfcp_net_id);
+	list_add(&pfcp->list, &pn->pfcp_dev_list);
 
 	netdev_dbg(dev, "registered new PFCP interface\n");
 
@@ -224,7 +225,7 @@ static void pfcp_dellink(struct net_device *dev, struct list_head *head)
 {
 	struct pfcp_dev *pfcp = netdev_priv(dev);
 
-	list_del_rcu(&pfcp->list);
+	list_del(&pfcp->list);
 	unregister_netdevice_queue(dev, head);
 }
 
@@ -247,11 +248,16 @@ static int __net_init pfcp_net_init(struct net *net)
 static void __net_exit pfcp_net_exit(struct net *net)
 {
 	struct pfcp_net *pn = net_generic(net, pfcp_net_id);
-	struct pfcp_dev *pfcp;
+	struct pfcp_dev *pfcp, *pfcp_next;
+	struct net_device *dev;
 	LIST_HEAD(list);
 
 	rtnl_lock();
-	list_for_each_entry(pfcp, &pn->pfcp_dev_list, list)
+	for_each_netdev(net, dev)
+		if (dev->rtnl_link_ops == &pfcp_link_ops)
+			pfcp_dellink(dev, &list);
+
+	list_for_each_entry_safe(pfcp, pfcp_next, &pn->pfcp_dev_list, list)
 		pfcp_dellink(pfcp->dev, &list);
 
 	unregister_netdevice_many(&list);

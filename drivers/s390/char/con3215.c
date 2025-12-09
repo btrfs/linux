@@ -23,6 +23,7 @@
 #include <linux/reboot.h>
 #include <linux/serial.h> /* ASYNC_* flags */
 #include <linux/slab.h>
+#include <asm/machine.h>
 #include <asm/ccwdev.h>
 #include <asm/cio.h>
 #include <linux/io.h>
@@ -803,7 +804,6 @@ static struct attribute *con3215_drv_attrs[] = {
 
 static struct attribute_group con3215_drv_attr_group = {
 	.attrs = con3215_drv_attrs,
-	NULL,
 };
 
 static const struct attribute_group *con3215_drv_attr_groups[] = {
@@ -908,7 +908,7 @@ static int __init con3215_init(void)
 		return -ENODEV;
 
 	/* Set the console mode for VM */
-	if (MACHINE_IS_VM) {
+	if (machine_is_vm()) {
 		cpcmd("TERM CONMODE 3215", NULL, 0, NULL);
 		cpcmd("TERM AUTOCR OFF", NULL, 0, NULL);
 	}

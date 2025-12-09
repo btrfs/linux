@@ -41,6 +41,7 @@
 #include <asm/kvm_host.h>
 #include <asm/memory.h>
 #include <asm/numa.h>
+#include <asm/rsi.h>
 #include <asm/sections.h>
 #include <asm/setup.h>
 #include <linux/sizes.h>
@@ -97,34 +98,23 @@ static void __init arch_reserve_crashkernel(void)
 {
 	unsigned long long low_size = 0;
 	unsigned long long crash_base, crash_size;
-	char *cmdline = boot_command_line;
 	bool high = false;
 	int ret;
 
 	if (!IS_ENABLED(CONFIG_CRASH_RESERVE))
 		return;
 
-	ret = parse_crashkernel(cmdline, memblock_phys_mem_size(),
+	ret = parse_crashkernel(boot_command_line, memblock_phys_mem_size(),
 				&crash_size, &crash_base,
 				&low_size, &high);
 	if (ret)
 		return;
 
-	reserve_crashkernel_generic(cmdline, crash_size, crash_base,
-				    low_size, high);
+	reserve_crashkernel_generic(crash_size, crash_base, low_size, high);
 }
 
 static phys_addr_t __init max_zone_phys(phys_addr_t zone_limit)
 {
-	/**
-	 * Information we get from firmware (e.g. DT dma-ranges) describe DMA
-	 * bus constraints. Devices using DMA might have their own limitations.
-	 * Some of them rely on DMA zone in low 32-bit memory. Keep low RAM
-	 * DMA zone on platforms that have RAM there.
-	 */
-	if (memblock_start_of_DRAM() < U32_MAX)
-		zone_limit = min(zone_limit, U32_MAX);
-
 	return min(zone_limit, memblock_end_of_DRAM() - 1) + 1;
 }
 
@@ -140,6 +130,14 @@ static void __init zone_sizes_init(void)
 	acpi_zone_dma_limit = acpi_iort_dma_get_max_cpu_address();
 	dt_zone_dma_limit = of_dma_get_max_cpu_address(NULL);
 	zone_dma_limit = min(dt_zone_dma_limit, acpi_zone_dma_limit);
+	/*
+	 * Information we get from firmware (e.g. DT dma-ranges) describe DMA
+	 * bus constraints. Devices using DMA might have their own limitations.
+	 * Some of them rely on DMA zone in low 32-bit memory. Keep low RAM
+	 * DMA zone on platforms that have RAM there.
+	 */
+	if (memblock_start_of_DRAM() < U32_MAX)
+		zone_dma_limit = min(zone_dma_limit, U32_MAX);
 	arm64_dma_phys_limit = max_zone_phys(zone_dma_limit);
 	max_zone_pfns[ZONE_DMA] = PFN_DOWN(arm64_dma_phys_limit);
 #endif
@@ -309,8 +307,6 @@ void __init arm64_memblock_init(void)
 	}
 
 	early_init_fdt_scan_reserved_mem();
-
-	high_memory = __va(memblock_end_of_DRAM() - 1) + 1;
 }
 
 void __init bootmem_init(void)
@@ -359,14 +355,15 @@ void __init bootmem_init(void)
 	memblock_dump_all();
 }
 
-/*
- * mem_init() marks the free areas in the mem_map and tells us how much memory
- * is free.  This is done after various parts of the system have claimed their
- * memory after the kernel image.
- */
-void __init mem_init(void)
+void __init arch_mm_preinit(void)
 {
+	unsigned int flags = SWIOTLB_VERBOSE;
 	bool swiotlb = max_pfn > PFN_DOWN(arm64_dma_phys_limit);
+
+	if (is_realm_world()) {
+		swiotlb = true;
+		flags |= SWIOTLB_FORCE;
+	}
 
 	if (IS_ENABLED(CONFIG_DMA_BOUNCE_UNALIGNED_KMALLOC) && !swiotlb) {
 		/*
@@ -379,10 +376,8 @@ void __init mem_init(void)
 		swiotlb = true;
 	}
 
-	swiotlb_init(swiotlb, SWIOTLB_VERBOSE);
-
-	/* this will put all unused low memory onto the freelists */
-	memblock_free_all();
+	swiotlb_init(swiotlb, flags);
+	swiotlb_update_mem_attributes();
 
 	/*
 	 * Check boundaries twice: Some fundamental inconsistencies can be

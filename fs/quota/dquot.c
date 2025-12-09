@@ -80,7 +80,6 @@
 #include <linux/quotaops.h>
 #include <linux/blkdev.h>
 #include <linux/sched/mm.h>
-#include "../internal.h" /* ugh */
 
 #include <linux/uaccess.h>
 
@@ -688,6 +687,8 @@ int dquot_writeback_dquots(struct super_block *sb, int type)
 	int err, ret = 0;
 
 	WARN_ON_ONCE(!rwsem_is_locked(&sb->s_umount));
+
+	flush_delayed_work(&quota_release_work);
 
 	for (cnt = 0; cnt < MAXQUOTAS; cnt++) {
 		if (type != -1 && cnt != type)
@@ -2925,7 +2926,7 @@ static int do_proc_dqstats(const struct ctl_table *table, int write,
 	return proc_doulongvec_minmax(table, write, buffer, lenp, ppos);
 }
 
-static struct ctl_table fs_dqstats_table[] = {
+static const struct ctl_table fs_dqstats_table[] = {
 	{
 		.procname	= "lookups",
 		.data		= &dqstats.stat[DQST_LOOKUPS],

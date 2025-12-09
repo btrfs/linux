@@ -911,7 +911,7 @@ static void ath10k_snoc_buffer_cleanup(struct ath10k *ar)
 	struct ath10k_snoc_pipe *pipe_info;
 	int pipe_num;
 
-	del_timer_sync(&ar_snoc->rx_post_retry);
+	timer_delete_sync(&ar_snoc->rx_post_retry);
 	for (pipe_num = 0; pipe_num < CE_COUNT; pipe_num++) {
 		pipe_info = &ar_snoc->pipe_info[pipe_num];
 		ath10k_snoc_rx_pipe_cleanup(pipe_info);
@@ -1885,11 +1885,11 @@ static void ath10k_snoc_shutdown(struct platform_device *pdev)
 }
 
 static struct platform_driver ath10k_snoc_driver = {
-	.probe  = ath10k_snoc_probe,
-	.remove_new = ath10k_snoc_remove,
+	.probe = ath10k_snoc_probe,
+	.remove = ath10k_snoc_remove,
 	.shutdown = ath10k_snoc_shutdown,
 	.driver = {
-		.name   = "ath10k_snoc",
+		.name = "ath10k_snoc",
 		.of_match_table = ath10k_snoc_dt_match,
 	},
 };

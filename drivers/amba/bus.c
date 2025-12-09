@@ -364,7 +364,8 @@ static int amba_dma_configure(struct device *dev)
 		ret = acpi_dma_configure(dev, attr);
 	}
 
-	if (!ret && !drv->driver_managed_dma) {
+	/* @drv may not be valid when we're called from the IOMMU layer */
+	if (!ret && dev->driver && !drv->driver_managed_dma) {
 		ret = iommu_device_use_default_domain(dev);
 		if (ret)
 			arch_teardown_dma_ops(dev);
@@ -448,6 +449,12 @@ const struct bus_type amba_bustype = {
 	.pm		= &amba_pm,
 };
 EXPORT_SYMBOL_GPL(amba_bustype);
+
+bool dev_is_amba(const struct device *dev)
+{
+	return dev->bus == &amba_bustype;
+}
+EXPORT_SYMBOL_GPL(dev_is_amba);
 
 static int __init amba_init(void)
 {

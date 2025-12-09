@@ -126,10 +126,8 @@ static struct dentry *reconnect_one(struct vfsmount *mnt,
 	int err;
 
 	parent = ERR_PTR(-EACCES);
-	inode_lock(dentry->d_inode);
 	if (mnt->mnt_sb->s_export_op->get_parent)
 		parent = mnt->mnt_sb->s_export_op->get_parent(dentry);
-	inode_unlock(dentry->d_inode);
 
 	if (IS_ERR(parent)) {
 		dprintk("get_parent of %lu failed, err %ld\n",
@@ -382,14 +380,24 @@ int exportfs_encode_inode_fh(struct inode *inode, struct fid *fid,
 			     int *max_len, struct inode *parent, int flags)
 {
 	const struct export_operations *nop = inode->i_sb->s_export_op;
+	enum fid_type type;
 
 	if (!exportfs_can_encode_fh(nop, flags))
 		return -EOPNOTSUPP;
 
 	if (!nop && (flags & EXPORT_FH_FID))
-		return exportfs_encode_ino64_fid(inode, fid, max_len);
+		type = exportfs_encode_ino64_fid(inode, fid, max_len);
+	else
+		type = nop->encode_fh(inode, fid->raw, max_len, parent);
 
-	return nop->encode_fh(inode, fid->raw, max_len, parent);
+	if (type > 0 && FILEID_USER_FLAGS(type)) {
+		pr_warn_once("%s: unexpected fh type value 0x%x from fstype %s.\n",
+			     __func__, type, inode->i_sb->s_type->name);
+		return -EINVAL;
+	}
+
+	return type;
+
 }
 EXPORT_SYMBOL_GPL(exportfs_encode_inode_fh);
 
@@ -435,6 +443,9 @@ exportfs_decode_fh_raw(struct vfsmount *mnt, struct fid *fid, int fh_len,
 	struct dentry *result, *alias;
 	char nbuf[NAME_MAX+1];
 	int err;
+
+	if (fileid_type < 0 || FILEID_USER_FLAGS(fileid_type))
+		return ERR_PTR(-EINVAL);
 
 	/*
 	 * Try to get any dentry for the given file handle from the filesystem.
@@ -597,4 +608,5 @@ struct dentry *exportfs_decode_fh(struct vfsmount *mnt, struct fid *fid,
 }
 EXPORT_SYMBOL_GPL(exportfs_decode_fh);
 
+MODULE_DESCRIPTION("Code mapping from inodes to file handles");
 MODULE_LICENSE("GPL");

@@ -37,6 +37,12 @@
 #include "internal.h"
 #include "swap.h"
 
+/*
+ * Maximum number of attempts we make to install guard pages before we give up
+ * and return -ERESTARTNOINTR to have userspace try again.
+ */
+#define MAX_MADVISE_GUARD_RETRIES 3
+
 struct madvise_walk_private {
 	struct mmu_gather *tlb;
 	bool pageout;
@@ -60,6 +66,8 @@ static int madvise_need_mmap_write(int behavior)
 	case MADV_POPULATE_READ:
 	case MADV_POPULATE_WRITE:
 	case MADV_COLLAPSE:
+	case MADV_GUARD_INSTALL:
+	case MADV_GUARD_REMOVE:
 		return 0;
 	default:
 		/* be safe, default to 1. list exceptions explicitly */
@@ -379,7 +387,7 @@ static int madvise_cold_or_pageout_pte_range(pmd_t *pmd,
 		folio = pmd_folio(orig_pmd);
 
 		/* Do not interfere with other mappings of this folio */
-		if (folio_likely_mapped_shared(folio))
+		if (folio_maybe_mapped_shared(folio))
 			goto huge_unlock;
 
 		if (pageout_anon_only_filter && !folio_test_anon(folio))
@@ -478,7 +486,7 @@ restart:
 			if (nr < folio_nr_pages(folio)) {
 				int err;
 
-				if (folio_likely_mapped_shared(folio))
+				if (folio_maybe_mapped_shared(folio))
 					continue;
 				if (pageout_anon_only_filter && !folio_test_anon(folio))
 					continue;
@@ -713,7 +721,7 @@ static int madvise_free_pte_range(pmd_t *pmd, unsigned long addr,
 			if (nr < folio_nr_pages(folio)) {
 				int err;
 
-				if (folio_likely_mapped_shared(folio))
+				if (folio_maybe_mapped_shared(folio))
 					continue;
 				if (!folio_trylock(folio))
 					continue;
@@ -843,7 +851,12 @@ static int madvise_free_single_vma(struct vm_area_struct *vma,
 static long madvise_dontneed_single_vma(struct vm_area_struct *vma,
 					unsigned long start, unsigned long end)
 {
-	zap_page_range_single(vma, start, end - start, NULL);
+	struct zap_details details = {
+		.reclaim_pt = true,
+		.even_cows = true,
+	};
+
+	zap_page_range_single(vma, start, end - start, &details);
 	return 0;
 }
 
@@ -920,7 +933,16 @@ static long madvise_dontneed_free(struct vm_area_struct *vma,
 			 */
 			end = vma->vm_end;
 		}
-		VM_WARN_ON(start >= end);
+		/*
+		 * If the memory region between start and end was
+		 * originally backed by 4kB pages and then remapped to
+		 * be backed by hugepages while mmap_lock was dropped,
+		 * the adjustment for hugetlb vma above may have rounded
+		 * end down to the start address.
+		 */
+		if (start == end)
+			return 0;
+		VM_WARN_ON(start > end);
 	}
 
 	if (behavior == MADV_DONTNEED || behavior == MADV_DONTNEED_LOCKED)
@@ -1017,6 +1039,208 @@ static long madvise_remove(struct vm_area_struct *vma,
 	return error;
 }
 
+static bool is_valid_guard_vma(struct vm_area_struct *vma, bool allow_locked)
+{
+	vm_flags_t disallowed = VM_SPECIAL | VM_HUGETLB;
+
+	/*
+	 * A user could lock after setting a guard range but that's fine, as
+	 * they'd not be able to fault in. The issue arises when we try to zap
+	 * existing locked VMAs. We don't want to do that.
+	 */
+	if (!allow_locked)
+		disallowed |= VM_LOCKED;
+
+	return !(vma->vm_flags & disallowed);
+}
+
+static bool is_guard_pte_marker(pte_t ptent)
+{
+	return is_pte_marker(ptent) &&
+		is_guard_swp_entry(pte_to_swp_entry(ptent));
+}
+
+static int guard_install_pud_entry(pud_t *pud, unsigned long addr,
+				   unsigned long next, struct mm_walk *walk)
+{
+	pud_t pudval = pudp_get(pud);
+
+	/* If huge return >0 so we abort the operation + zap. */
+	return pud_trans_huge(pudval) || pud_devmap(pudval);
+}
+
+static int guard_install_pmd_entry(pmd_t *pmd, unsigned long addr,
+				   unsigned long next, struct mm_walk *walk)
+{
+	pmd_t pmdval = pmdp_get(pmd);
+
+	/* If huge return >0 so we abort the operation + zap. */
+	return pmd_trans_huge(pmdval) || pmd_devmap(pmdval);
+}
+
+static int guard_install_pte_entry(pte_t *pte, unsigned long addr,
+				   unsigned long next, struct mm_walk *walk)
+{
+	pte_t pteval = ptep_get(pte);
+	unsigned long *nr_pages = (unsigned long *)walk->private;
+
+	/* If there is already a guard page marker, we have nothing to do. */
+	if (is_guard_pte_marker(pteval)) {
+		(*nr_pages)++;
+
+		return 0;
+	}
+
+	/* If populated return >0 so we abort the operation + zap. */
+	return 1;
+}
+
+static int guard_install_set_pte(unsigned long addr, unsigned long next,
+				 pte_t *ptep, struct mm_walk *walk)
+{
+	unsigned long *nr_pages = (unsigned long *)walk->private;
+
+	/* Simply install a PTE marker, this causes segfault on access. */
+	*ptep = make_pte_marker(PTE_MARKER_GUARD);
+	(*nr_pages)++;
+
+	return 0;
+}
+
+static const struct mm_walk_ops guard_install_walk_ops = {
+	.pud_entry		= guard_install_pud_entry,
+	.pmd_entry		= guard_install_pmd_entry,
+	.pte_entry		= guard_install_pte_entry,
+	.install_pte		= guard_install_set_pte,
+	.walk_lock		= PGWALK_RDLOCK,
+};
+
+static long madvise_guard_install(struct vm_area_struct *vma,
+				 struct vm_area_struct **prev,
+				 unsigned long start, unsigned long end)
+{
+	long err;
+	int i;
+
+	*prev = vma;
+	if (!is_valid_guard_vma(vma, /* allow_locked = */false))
+		return -EINVAL;
+
+	/*
+	 * If we install guard markers, then the range is no longer
+	 * empty from a page table perspective and therefore it's
+	 * appropriate to have an anon_vma.
+	 *
+	 * This ensures that on fork, we copy page tables correctly.
+	 */
+	err = anon_vma_prepare(vma);
+	if (err)
+		return err;
+
+	/*
+	 * Optimistically try to install the guard marker pages first. If any
+	 * non-guard pages are encountered, give up and zap the range before
+	 * trying again.
+	 *
+	 * We try a few times before giving up and releasing back to userland to
+	 * loop around, releasing locks in the process to avoid contention. This
+	 * would only happen if there was a great many racing page faults.
+	 *
+	 * In most cases we should simply install the guard markers immediately
+	 * with no zap or looping.
+	 */
+	for (i = 0; i < MAX_MADVISE_GUARD_RETRIES; i++) {
+		unsigned long nr_pages = 0;
+
+		/* Returns < 0 on error, == 0 if success, > 0 if zap needed. */
+		err = walk_page_range_mm(vma->vm_mm, start, end,
+					 &guard_install_walk_ops, &nr_pages);
+		if (err < 0)
+			return err;
+
+		if (err == 0) {
+			unsigned long nr_expected_pages = PHYS_PFN(end - start);
+
+			VM_WARN_ON(nr_pages != nr_expected_pages);
+			return 0;
+		}
+
+		/*
+		 * OK some of the range have non-guard pages mapped, zap
+		 * them. This leaves existing guard pages in place.
+		 */
+		zap_page_range_single(vma, start, end - start, NULL);
+	}
+
+	/*
+	 * We were unable to install the guard pages due to being raced by page
+	 * faults. This should not happen ordinarily. We return to userspace and
+	 * immediately retry, relieving lock contention.
+	 */
+	return restart_syscall();
+}
+
+static int guard_remove_pud_entry(pud_t *pud, unsigned long addr,
+				  unsigned long next, struct mm_walk *walk)
+{
+	pud_t pudval = pudp_get(pud);
+
+	/* If huge, cannot have guard pages present, so no-op - skip. */
+	if (pud_trans_huge(pudval) || pud_devmap(pudval))
+		walk->action = ACTION_CONTINUE;
+
+	return 0;
+}
+
+static int guard_remove_pmd_entry(pmd_t *pmd, unsigned long addr,
+				  unsigned long next, struct mm_walk *walk)
+{
+	pmd_t pmdval = pmdp_get(pmd);
+
+	/* If huge, cannot have guard pages present, so no-op - skip. */
+	if (pmd_trans_huge(pmdval) || pmd_devmap(pmdval))
+		walk->action = ACTION_CONTINUE;
+
+	return 0;
+}
+
+static int guard_remove_pte_entry(pte_t *pte, unsigned long addr,
+				  unsigned long next, struct mm_walk *walk)
+{
+	pte_t ptent = ptep_get(pte);
+
+	if (is_guard_pte_marker(ptent)) {
+		/* Simply clear the PTE marker. */
+		pte_clear_not_present_full(walk->mm, addr, pte, false);
+		update_mmu_cache(walk->vma, addr, pte);
+	}
+
+	return 0;
+}
+
+static const struct mm_walk_ops guard_remove_walk_ops = {
+	.pud_entry		= guard_remove_pud_entry,
+	.pmd_entry		= guard_remove_pmd_entry,
+	.pte_entry		= guard_remove_pte_entry,
+	.walk_lock		= PGWALK_RDLOCK,
+};
+
+static long madvise_guard_remove(struct vm_area_struct *vma,
+				 struct vm_area_struct **prev,
+				 unsigned long start, unsigned long end)
+{
+	*prev = vma;
+	/*
+	 * We're ok with removing guards in mlock()'d ranges, as this is a
+	 * non-destructive action.
+	 */
+	if (!is_valid_guard_vma(vma, /* allow_locked = */true))
+		return -EINVAL;
+
+	return walk_page_range(vma->vm_mm, start, end,
+			       &guard_remove_walk_ops, NULL);
+}
+
 /*
  * Apply an madvise behavior to a region of a vma.  madvise_update_vma
  * will handle splitting a vm area into separate areas, each area with its own
@@ -1098,6 +1322,10 @@ static int madvise_vma_behavior(struct vm_area_struct *vma,
 		break;
 	case MADV_COLLAPSE:
 		return madvise_collapse(vma, prev, start, end);
+	case MADV_GUARD_INSTALL:
+		return madvise_guard_install(vma, prev, start, end);
+	case MADV_GUARD_REMOVE:
+		return madvise_guard_remove(vma, prev, start, end);
 	}
 
 	anon_name = anon_vma_name(vma);
@@ -1164,7 +1392,32 @@ static int madvise_inject_error(int behavior,
 
 	return 0;
 }
-#endif
+
+static bool is_memory_failure(int behavior)
+{
+	switch (behavior) {
+	case MADV_HWPOISON:
+	case MADV_SOFT_OFFLINE:
+		return true;
+	default:
+		return false;
+	}
+}
+
+#else
+
+static int madvise_inject_error(int behavior,
+		unsigned long start, unsigned long end)
+{
+	return 0;
+}
+
+static bool is_memory_failure(int behavior)
+{
+	return false;
+}
+
+#endif	/* CONFIG_MEMORY_FAILURE */
 
 static bool
 madvise_behavior_valid(int behavior)
@@ -1197,6 +1450,8 @@ madvise_behavior_valid(int behavior)
 	case MADV_DODUMP:
 	case MADV_WIPEONFORK:
 	case MADV_KEEPONFORK:
+	case MADV_GUARD_INSTALL:
+	case MADV_GUARD_REMOVE:
 #ifdef CONFIG_MEMORY_FAILURE
 	case MADV_SOFT_OFFLINE:
 	case MADV_HWPOISON:
@@ -1208,7 +1463,8 @@ madvise_behavior_valid(int behavior)
 	}
 }
 
-static bool process_madvise_behavior_valid(int behavior)
+/* Can we invoke process_madvise() on a remote mm for the specified behavior? */
+static bool process_madvise_remote_valid(int behavior)
 {
 	switch (behavior) {
 	case MADV_COLD:
@@ -1337,6 +1593,111 @@ int madvise_set_anon_name(struct mm_struct *mm, unsigned long start,
 				 madvise_vma_anon_name);
 }
 #endif /* CONFIG_ANON_VMA_NAME */
+
+static int madvise_lock(struct mm_struct *mm, int behavior)
+{
+	if (is_memory_failure(behavior))
+		return 0;
+
+	if (madvise_need_mmap_write(behavior)) {
+		if (mmap_write_lock_killable(mm))
+			return -EINTR;
+	} else {
+		mmap_read_lock(mm);
+	}
+	return 0;
+}
+
+static void madvise_unlock(struct mm_struct *mm, int behavior)
+{
+	if (is_memory_failure(behavior))
+		return;
+
+	if (madvise_need_mmap_write(behavior))
+		mmap_write_unlock(mm);
+	else
+		mmap_read_unlock(mm);
+}
+
+static bool is_valid_madvise(unsigned long start, size_t len_in, int behavior)
+{
+	size_t len;
+
+	if (!madvise_behavior_valid(behavior))
+		return false;
+
+	if (!PAGE_ALIGNED(start))
+		return false;
+	len = PAGE_ALIGN(len_in);
+
+	/* Check to see whether len was rounded up from small -ve to zero */
+	if (len_in && !len)
+		return false;
+
+	if (start + len < start)
+		return false;
+
+	return true;
+}
+
+/*
+ * madvise_should_skip() - Return if the request is invalid or nothing.
+ * @start:	Start address of madvise-requested address range.
+ * @len_in:	Length of madvise-requested address range.
+ * @behavior:	Requested madvise behavor.
+ * @err:	Pointer to store an error code from the check.
+ *
+ * If the specified behaviour is invalid or nothing would occur, we skip the
+ * operation.  This function returns true in the cases, otherwise false.  In
+ * the former case we store an error on @err.
+ */
+static bool madvise_should_skip(unsigned long start, size_t len_in,
+		int behavior, int *err)
+{
+	if (!is_valid_madvise(start, len_in, behavior)) {
+		*err = -EINVAL;
+		return true;
+	}
+	if (start + PAGE_ALIGN(len_in) == start) {
+		*err = 0;
+		return true;
+	}
+	return false;
+}
+
+static bool is_madvise_populate(int behavior)
+{
+	switch (behavior) {
+	case MADV_POPULATE_READ:
+	case MADV_POPULATE_WRITE:
+		return true;
+	default:
+		return false;
+	}
+}
+
+static int madvise_do_behavior(struct mm_struct *mm,
+		unsigned long start, size_t len_in, int behavior)
+{
+	struct blk_plug plug;
+	unsigned long end;
+	int error;
+
+	if (is_memory_failure(behavior))
+		return madvise_inject_error(behavior, start, start + len_in);
+	start = untagged_addr_remote(mm, start);
+	end = start + PAGE_ALIGN(len_in);
+
+	blk_start_plug(&plug);
+	if (is_madvise_populate(behavior))
+		error = madvise_populate(mm, start, end, behavior);
+	else
+		error = madvise_walk_vmas(mm, start, end, behavior,
+					  madvise_vma_behavior);
+	blk_finish_plug(&plug);
+	return error;
+}
+
 /*
  * The madvise(2) system call.
  *
@@ -1411,63 +1772,15 @@ int madvise_set_anon_name(struct mm_struct *mm, unsigned long start,
  */
 int do_madvise(struct mm_struct *mm, unsigned long start, size_t len_in, int behavior)
 {
-	unsigned long end;
 	int error;
-	int write;
-	size_t len;
-	struct blk_plug plug;
 
-	if (!madvise_behavior_valid(behavior))
-		return -EINVAL;
-
-	if (!PAGE_ALIGNED(start))
-		return -EINVAL;
-	len = PAGE_ALIGN(len_in);
-
-	/* Check to see whether len was rounded up from small -ve to zero */
-	if (len_in && !len)
-		return -EINVAL;
-
-	end = start + len;
-	if (end < start)
-		return -EINVAL;
-
-	if (end == start)
-		return 0;
-
-#ifdef CONFIG_MEMORY_FAILURE
-	if (behavior == MADV_HWPOISON || behavior == MADV_SOFT_OFFLINE)
-		return madvise_inject_error(behavior, start, start + len_in);
-#endif
-
-	write = madvise_need_mmap_write(behavior);
-	if (write) {
-		if (mmap_write_lock_killable(mm))
-			return -EINTR;
-	} else {
-		mmap_read_lock(mm);
-	}
-
-	start = untagged_addr_remote(mm, start);
-	end = start + len;
-
-	blk_start_plug(&plug);
-	switch (behavior) {
-	case MADV_POPULATE_READ:
-	case MADV_POPULATE_WRITE:
-		error = madvise_populate(mm, start, end, behavior);
-		break;
-	default:
-		error = madvise_walk_vmas(mm, start, end, behavior,
-					  madvise_vma_behavior);
-		break;
-	}
-	blk_finish_plug(&plug);
-
-	if (write)
-		mmap_write_unlock(mm);
-	else
-		mmap_read_unlock(mm);
+	if (madvise_should_skip(start, len_in, behavior, &error))
+		return error;
+	error = madvise_lock(mm, behavior);
+	if (error)
+		return error;
+	error = madvise_do_behavior(mm, start, len_in, behavior);
+	madvise_unlock(mm, behavior);
 
 	return error;
 }
@@ -1475,6 +1788,60 @@ int do_madvise(struct mm_struct *mm, unsigned long start, size_t len_in, int beh
 SYSCALL_DEFINE3(madvise, unsigned long, start, size_t, len_in, int, behavior)
 {
 	return do_madvise(current->mm, start, len_in, behavior);
+}
+
+/* Perform an madvise operation over a vector of addresses and lengths. */
+static ssize_t vector_madvise(struct mm_struct *mm, struct iov_iter *iter,
+			      int behavior)
+{
+	ssize_t ret = 0;
+	size_t total_len;
+
+	total_len = iov_iter_count(iter);
+
+	ret = madvise_lock(mm, behavior);
+	if (ret)
+		return ret;
+
+	while (iov_iter_count(iter)) {
+		unsigned long start = (unsigned long)iter_iov_addr(iter);
+		size_t len_in = iter_iov_len(iter);
+		int error;
+
+		if (madvise_should_skip(start, len_in, behavior, &error))
+			ret = error;
+		else
+			ret = madvise_do_behavior(mm, start, len_in, behavior);
+		/*
+		 * An madvise operation is attempting to restart the syscall,
+		 * but we cannot proceed as it would not be correct to repeat
+		 * the operation in aggregate, and would be surprising to the
+		 * user.
+		 *
+		 * We drop and reacquire locks so it is safe to just loop and
+		 * try again. We check for fatal signals in case we need exit
+		 * early anyway.
+		 */
+		if (ret == -ERESTARTNOINTR) {
+			if (fatal_signal_pending(current)) {
+				ret = -EINTR;
+				break;
+			}
+
+			/* Drop and reacquire lock to unwind race. */
+			madvise_unlock(mm, behavior);
+			madvise_lock(mm, behavior);
+			continue;
+		}
+		if (ret < 0)
+			break;
+		iov_iter_advance(iter, iter_iov_len(iter));
+	}
+	madvise_unlock(mm, behavior);
+
+	ret = (total_len - iov_iter_count(iter)) ? : ret;
+
+	return ret;
 }
 
 SYSCALL_DEFINE5(process_madvise, int, pidfd, const struct iovec __user *, vec,
@@ -1486,7 +1853,6 @@ SYSCALL_DEFINE5(process_madvise, int, pidfd, const struct iovec __user *, vec,
 	struct iov_iter iter;
 	struct task_struct *task;
 	struct mm_struct *mm;
-	size_t total_len;
 	unsigned int f_flags;
 
 	if (flags != 0) {
@@ -1504,38 +1870,33 @@ SYSCALL_DEFINE5(process_madvise, int, pidfd, const struct iovec __user *, vec,
 		goto free_iov;
 	}
 
-	if (!process_madvise_behavior_valid(behavior)) {
-		ret = -EINVAL;
-		goto release_task;
-	}
-
 	/* Require PTRACE_MODE_READ to avoid leaking ASLR metadata. */
 	mm = mm_access(task, PTRACE_MODE_READ_FSCREDS);
-	if (IS_ERR_OR_NULL(mm)) {
-		ret = IS_ERR(mm) ? PTR_ERR(mm) : -ESRCH;
+	if (IS_ERR(mm)) {
+		ret = PTR_ERR(mm);
 		goto release_task;
 	}
 
 	/*
+	 * We need only perform this check if we are attempting to manipulate a
+	 * remote process's address space.
+	 */
+	if (mm != current->mm && !process_madvise_remote_valid(behavior)) {
+		ret = -EINVAL;
+		goto release_mm;
+	}
+
+	/*
 	 * Require CAP_SYS_NICE for influencing process performance. Note that
-	 * only non-destructive hints are currently supported.
+	 * only non-destructive hints are currently supported for remote
+	 * processes.
 	 */
 	if (mm != current->mm && !capable(CAP_SYS_NICE)) {
 		ret = -EPERM;
 		goto release_mm;
 	}
 
-	total_len = iov_iter_count(&iter);
-
-	while (iov_iter_count(&iter)) {
-		ret = do_madvise(mm, (unsigned long)iter_iov_addr(&iter),
-					iter_iov_len(&iter), behavior);
-		if (ret < 0)
-			break;
-		iov_iter_advance(&iter, iter_iov_len(&iter));
-	}
-
-	ret = (total_len - iov_iter_count(&iter)) ? : ret;
+	ret = vector_madvise(mm, &iter, behavior);
 
 release_mm:
 	mmput(mm);
