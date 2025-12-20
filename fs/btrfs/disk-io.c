@@ -18,7 +18,6 @@
 #include <linux/crc32c.h>
 #include <linux/sched/mm.h>
 #include <linux/unaligned.h>
-#include <crypto/hash.h>
 #include "ctree.h"
 #include "disk-io.h"
 #include "transaction.h"
@@ -50,6 +49,7 @@
 #include "relocation.h"
 #include "scrub.h"
 #include "super.h"
+#include "delayed-inode.h"
 
 #define BTRFS_SUPER_FLAG_SUPP	(BTRFS_HEADER_FLAG_WRITTEN |\
 				 BTRFS_HEADER_FLAG_RELOC |\
@@ -61,12 +61,6 @@
 static int btrfs_cleanup_transaction(struct btrfs_fs_info *fs_info);
 static void btrfs_error_commit_super(struct btrfs_fs_info *fs_info);
 
-static void btrfs_free_csum_hash(struct btrfs_fs_info *fs_info)
-{
-	if (fs_info->csum_shash)
-		crypto_free_shash(fs_info->csum_shash);
-}
-
 /*
  * Compute the csum of a btree block and store the result to provided buffer.
  */
@@ -75,12 +69,11 @@ static void csum_tree_block(struct extent_buffer *buf, u8 *result)
 	struct btrfs_fs_info *fs_info = buf->fs_info;
 	int num_pages;
 	u32 first_page_part;
-	SHASH_DESC_ON_STACK(shash, fs_info->csum_shash);
+	struct btrfs_csum_ctx csum;
 	char *kaddr;
 	int i;
 
-	shash->tfm = fs_info->csum_shash;
-	crypto_shash_init(shash);
+	btrfs_csum_init(&csum, fs_info->csum_type);
 
 	if (buf->addr) {
 		/* Pages are contiguous, handle them as a big one. */
@@ -93,21 +86,21 @@ static void csum_tree_block(struct extent_buffer *buf, u8 *result)
 		num_pages = num_extent_pages(buf);
 	}
 
-	crypto_shash_update(shash, kaddr + BTRFS_CSUM_SIZE,
-			    first_page_part - BTRFS_CSUM_SIZE);
+	btrfs_csum_update(&csum, kaddr + BTRFS_CSUM_SIZE,
+			  first_page_part - BTRFS_CSUM_SIZE);
 
 	/*
 	 * Multiple single-page folios case would reach here.
 	 *
 	 * nodesize <= PAGE_SIZE and large folio all handled by above
-	 * crypto_shash_update() already.
+	 * btrfs_csum_update() already.
 	 */
 	for (i = 1; i < num_pages && INLINE_EXTENT_BUFFER_PAGES > 1; i++) {
 		kaddr = folio_address(buf->folios[i]);
-		crypto_shash_update(shash, kaddr, PAGE_SIZE);
+		btrfs_csum_update(&csum, kaddr, PAGE_SIZE);
 	}
 	memset(result, 0, BTRFS_CSUM_SIZE);
-	crypto_shash_final(shash, result);
+	btrfs_csum_final(&csum, result);
 }
 
 /*
@@ -159,18 +152,15 @@ static bool btrfs_supported_super_csum(u16 csum_type)
 int btrfs_check_super_csum(struct btrfs_fs_info *fs_info,
 			   const struct btrfs_super_block *disk_sb)
 {
-	char result[BTRFS_CSUM_SIZE];
-	SHASH_DESC_ON_STACK(shash, fs_info->csum_shash);
-
-	shash->tfm = fs_info->csum_shash;
+	u8 result[BTRFS_CSUM_SIZE];
 
 	/*
 	 * The super_block structure does not span the whole
 	 * BTRFS_SUPER_INFO_SIZE range, we expect that the unused space is
 	 * filled with zeros and is included in the checksum.
 	 */
-	crypto_shash_digest(shash, (const u8 *)disk_sb + BTRFS_CSUM_SIZE,
-			    BTRFS_SUPER_INFO_SIZE - BTRFS_CSUM_SIZE, result);
+	btrfs_csum(fs_info->csum_type, (const u8 *)disk_sb + BTRFS_CSUM_SIZE,
+		   BTRFS_SUPER_INFO_SIZE - BTRFS_CSUM_SIZE, result);
 
 	if (memcmp(disk_sb->csum, result, fs_info->csum_size))
 		return 1;
@@ -182,27 +172,32 @@ static int btrfs_repair_eb_io_failure(const struct extent_buffer *eb,
 				      int mirror_num)
 {
 	struct btrfs_fs_info *fs_info = eb->fs_info;
-	int ret = 0;
+	const u32 step = min(fs_info->nodesize, PAGE_SIZE);
+	const u32 nr_steps = eb->len / step;
+	phys_addr_t paddrs[BTRFS_MAX_BLOCKSIZE / PAGE_SIZE];
 
 	if (sb_rdonly(fs_info->sb))
 		return -EROFS;
 
-	for (int i = 0; i < num_extent_folios(eb); i++) {
+	for (int i = 0; i < num_extent_pages(eb); i++) {
 		struct folio *folio = eb->folios[i];
-		u64 start = max_t(u64, eb->start, folio_pos(folio));
-		u64 end = min_t(u64, eb->start + eb->len,
-				folio_pos(folio) + eb->folio_size);
-		u32 len = end - start;
-		phys_addr_t paddr = PFN_PHYS(folio_pfn(folio)) +
-				    offset_in_folio(folio, start);
 
-		ret = btrfs_repair_io_failure(fs_info, 0, start, len, start,
-					      paddr, mirror_num);
-		if (ret)
-			break;
+		/* No large folio support yet. */
+		ASSERT(folio_order(folio) == 0);
+		ASSERT(i < nr_steps);
+
+		/*
+		 * For nodesize < page size, there is just one paddr, with some
+		 * offset inside the page.
+		 *
+		 * For nodesize >= page size, it's one or more paddrs, and eb->start
+		 * must be aligned to page boundary.
+		 */
+		paddrs[i] = page_to_phys(&folio->page) + offset_in_page(eb->start);
 	}
 
-	return ret;
+	return btrfs_repair_io_failure(fs_info, 0, eb->start, eb->len,
+				       eb->start, paddrs, step, mirror_num);
 }
 
 /*
@@ -398,10 +393,10 @@ int btrfs_validate_extent_buffer(struct extent_buffer *eb,
 
 	if (memcmp(result, header_csum, csum_size) != 0) {
 		btrfs_warn_rl(fs_info,
-"checksum verify failed on logical %llu mirror %u wanted " CSUM_FMT " found " CSUM_FMT " level %d%s",
+"checksum verify failed on logical %llu mirror %u wanted " BTRFS_CSUM_FMT " found " BTRFS_CSUM_FMT " level %d%s",
 			      eb->start, eb->read_mirror,
-			      CSUM_FMT_VALUE(csum_size, header_csum),
-			      CSUM_FMT_VALUE(csum_size, result),
+			      BTRFS_CSUM_FMT_VALUE(csum_size, header_csum),
+			      BTRFS_CSUM_FMT_VALUE(csum_size, result),
 			      btrfs_header_level(eb),
 			      ignore_csum ? ", ignored" : "");
 		if (unlikely(!ignore_csum)) {
@@ -644,20 +639,10 @@ static struct btrfs_root *btrfs_alloc_root(struct btrfs_fs_info *fs_info,
 	if (!root)
 		return NULL;
 
-	memset(&root->root_key, 0, sizeof(root->root_key));
-	memset(&root->root_item, 0, sizeof(root->root_item));
-	memset(&root->defrag_progress, 0, sizeof(root->defrag_progress));
 	root->fs_info = fs_info;
 	root->root_key.objectid = objectid;
-	root->node = NULL;
-	root->commit_root = NULL;
-	root->state = 0;
 	RB_CLEAR_NODE(&root->rb_node);
 
-	btrfs_set_root_last_trans(root, 0);
-	root->free_objectid = 0;
-	root->nr_delalloc_inodes = 0;
-	root->nr_ordered_extents = 0;
 	xa_init(&root->inodes);
 	xa_init(&root->delayed_nodes);
 
@@ -691,10 +676,7 @@ static struct btrfs_root *btrfs_alloc_root(struct btrfs_fs_info *fs_info,
 	refcount_set(&root->refs, 1);
 	atomic_set(&root->snapshot_force_cow, 0);
 	atomic_set(&root->nr_swapfiles, 0);
-	btrfs_set_root_log_transid(root, 0);
 	root->log_transid_committed = -1;
-	btrfs_set_root_last_log_commit(root, 0);
-	root->anon_dev = 0;
 	if (!btrfs_is_testing(fs_info)) {
 		btrfs_extent_io_tree_init(fs_info, &root->dirty_log_pages,
 					  IO_TREE_ROOT_DIRTY_LOG_PAGES);
@@ -842,7 +824,6 @@ struct btrfs_root *btrfs_create_tree(struct btrfs_trans_handle *trans,
 	struct extent_buffer *leaf;
 	struct btrfs_root *tree_root = fs_info->tree_root;
 	struct btrfs_root *root;
-	struct btrfs_key key;
 	unsigned int nofs_flag;
 	int ret = 0;
 
@@ -891,10 +872,7 @@ struct btrfs_root *btrfs_create_tree(struct btrfs_trans_handle *trans,
 
 	btrfs_tree_unlock(leaf);
 
-	key.objectid = objectid;
-	key.type = BTRFS_ROOT_ITEM_KEY;
-	key.offset = 0;
-	ret = btrfs_insert_root(trans, tree_root, &key, &root->root_item);
+	ret = btrfs_insert_root(trans, tree_root, &root->root_key, &root->root_item);
 	if (ret)
 		goto fail;
 
@@ -1256,7 +1234,6 @@ void btrfs_free_fs_info(struct btrfs_fs_info *fs_info)
 		ASSERT(percpu_counter_sum_positive(em_counter) == 0);
 	percpu_counter_destroy(em_counter);
 	percpu_counter_destroy(&fs_info->dev_replace.bio_counter);
-	btrfs_free_csum_hash(fs_info);
 	btrfs_free_stripe_hash_table(fs_info);
 	btrfs_free_ref_cache(fs_info);
 	kfree(fs_info->balance_ctl);
@@ -1773,8 +1750,6 @@ static void btrfs_stop_all_workers(struct btrfs_fs_info *fs_info)
 		destroy_workqueue(fs_info->endio_workers);
 	if (fs_info->rmw_workers)
 		destroy_workqueue(fs_info->rmw_workers);
-	if (fs_info->compressed_write_workers)
-		destroy_workqueue(fs_info->compressed_write_workers);
 	btrfs_destroy_workqueue(fs_info->endio_write_workers);
 	btrfs_destroy_workqueue(fs_info->endio_freespace_worker);
 	btrfs_destroy_workqueue(fs_info->delayed_workers);
@@ -1986,8 +1961,6 @@ static int btrfs_init_workqueues(struct btrfs_fs_info *fs_info)
 	fs_info->endio_write_workers =
 		btrfs_alloc_workqueue(fs_info, "endio-write", flags,
 				      max_active, 2);
-	fs_info->compressed_write_workers =
-		alloc_workqueue("btrfs-compressed-write", flags, max_active);
 	fs_info->endio_freespace_worker =
 		btrfs_alloc_workqueue(fs_info, "freespace-write", flags,
 				      max_active, 0);
@@ -2003,7 +1976,6 @@ static int btrfs_init_workqueues(struct btrfs_fs_info *fs_info)
 	if (!(fs_info->workers &&
 	      fs_info->delalloc_workers && fs_info->flush_workers &&
 	      fs_info->endio_workers && fs_info->endio_meta_workers &&
-	      fs_info->compressed_write_workers &&
 	      fs_info->endio_write_workers &&
 	      fs_info->endio_freespace_worker && fs_info->rmw_workers &&
 	      fs_info->caching_workers && fs_info->fixup_workers &&
@@ -2015,21 +1987,8 @@ static int btrfs_init_workqueues(struct btrfs_fs_info *fs_info)
 	return 0;
 }
 
-static int btrfs_init_csum_hash(struct btrfs_fs_info *fs_info, u16 csum_type)
+static void btrfs_init_csum_hash(struct btrfs_fs_info *fs_info, u16 csum_type)
 {
-	struct crypto_shash *csum_shash;
-	const char *csum_driver = btrfs_super_csum_driver(csum_type);
-
-	csum_shash = crypto_alloc_shash(csum_driver, 0, 0);
-
-	if (IS_ERR(csum_shash)) {
-		btrfs_err(fs_info, "error allocating %s hash for checksum",
-			  csum_driver);
-		return PTR_ERR(csum_shash);
-	}
-
-	fs_info->csum_shash = csum_shash;
-
 	/* Check if the checksum implementation is a fast accelerated one. */
 	switch (csum_type) {
 	case BTRFS_CSUM_TYPE_CRC32:
@@ -2043,10 +2002,8 @@ static int btrfs_init_csum_hash(struct btrfs_fs_info *fs_info, u16 csum_type)
 		break;
 	}
 
-	btrfs_info(fs_info, "using %s (%s) checksum algorithm",
-			btrfs_super_csum_name(csum_type),
-			crypto_shash_driver_name(csum_shash));
-	return 0;
+	btrfs_info(fs_info, "using %s checksum algorithm",
+		   btrfs_super_csum_name(csum_type));
 }
 
 static int btrfs_replay_log(struct btrfs_fs_info *fs_info,
@@ -2204,11 +2161,10 @@ static int load_global_roots(struct btrfs_root *tree_root)
 		return ret;
 	if (!btrfs_fs_compat_ro(tree_root->fs_info, FREE_SPACE_TREE))
 		return ret;
-	ret = load_global_roots_objectid(tree_root, path,
-					 BTRFS_FREE_SPACE_TREE_OBJECTID,
-					 "free space");
 
-	return ret;
+	return load_global_roots_objectid(tree_root, path,
+					  BTRFS_FREE_SPACE_TREE_OBJECTID,
+					  "free space");
 }
 
 static int btrfs_read_roots(struct btrfs_fs_info *fs_info)
@@ -2265,6 +2221,7 @@ static int btrfs_read_roots(struct btrfs_fs_info *fs_info)
 				 BTRFS_DATA_RELOC_TREE_OBJECTID, true);
 	if (IS_ERR(root)) {
 		if (!btrfs_test_opt(fs_info, IGNOREBADROOTS)) {
+			location.objectid = BTRFS_DATA_RELOC_TREE_OBJECTID;
 			ret = PTR_ERR(root);
 			goto out;
 		}
@@ -3255,12 +3212,6 @@ int btrfs_check_features(struct btrfs_fs_info *fs_info, bool is_rw_mount)
 			   PAGE_SIZE, fs_info->sectorsize);
 		return -EINVAL;
 	}
-	if (fs_info->sectorsize > PAGE_SIZE && btrfs_fs_incompat(fs_info, RAID56)) {
-		btrfs_err(fs_info,
-		"RAID56 is not supported for page size %lu with sectorsize %u",
-			  PAGE_SIZE, fs_info->sectorsize);
-		return -EINVAL;
-	}
 
 	/* This can be called by remount, we need to protect the super block. */
 	spin_lock(&fs_info->super_lock);
@@ -3330,12 +3281,9 @@ int __cold open_ctree(struct super_block *sb, struct btrfs_fs_devices *fs_device
 	}
 
 	fs_info->csum_size = btrfs_super_csum_size(disk_super);
+	fs_info->csum_type = csum_type;
 
-	ret = btrfs_init_csum_hash(fs_info, csum_type);
-	if (ret) {
-		btrfs_release_disk_super(disk_super);
-		goto fail_alloc;
-	}
+	btrfs_init_csum_hash(fs_info, csum_type);
 
 	/*
 	 * We want to check superblock checksum, the type is stored inside.
@@ -3729,7 +3677,6 @@ static int write_dev_supers(struct btrfs_device *device,
 {
 	struct btrfs_fs_info *fs_info = device->fs_info;
 	struct address_space *mapping = device->bdev->bd_mapping;
-	SHASH_DESC_ON_STACK(shash, fs_info->csum_shash);
 	int i;
 	int ret;
 	u64 bytenr, bytenr_orig;
@@ -3738,8 +3685,6 @@ static int write_dev_supers(struct btrfs_device *device,
 
 	if (max_mirrors == 0)
 		max_mirrors = BTRFS_SUPER_MIRROR_MAX;
-
-	shash->tfm = fs_info->csum_shash;
 
 	for (i = 0; i < max_mirrors; i++) {
 		struct folio *folio;
@@ -3764,9 +3709,8 @@ static int write_dev_supers(struct btrfs_device *device,
 
 		btrfs_set_super_bytenr(sb, bytenr_orig);
 
-		crypto_shash_digest(shash, (const char *)sb + BTRFS_CSUM_SIZE,
-				    BTRFS_SUPER_INFO_SIZE - BTRFS_CSUM_SIZE,
-				    sb->csum);
+		btrfs_csum(fs_info->csum_type, (const u8 *)sb + BTRFS_CSUM_SIZE,
+			   BTRFS_SUPER_INFO_SIZE - BTRFS_CSUM_SIZE, sb->csum);
 
 		folio = __filemap_get_folio(mapping, bytenr >> PAGE_SHIFT,
 					    FGP_LOCK | FGP_ACCESSED | FGP_CREAT,
@@ -4290,7 +4234,7 @@ void __cold close_ctree(struct btrfs_fs_info *fs_info)
 
 	/*
 	 * When finishing a compressed write bio we schedule a work queue item
-	 * to finish an ordered extent - btrfs_finish_compressed_write_work()
+	 * to finish an ordered extent - end_bbio_compressed_write()
 	 * calls btrfs_finish_ordered_extent() which in turns does a call to
 	 * btrfs_queue_ordered_fn(), and that queues the ordered extent
 	 * completion either in the endio_write_workers work queue or in the
@@ -4298,7 +4242,7 @@ void __cold close_ctree(struct btrfs_fs_info *fs_info)
 	 * below, so before we flush them we must flush this queue for the
 	 * workers of compressed writes.
 	 */
-	flush_workqueue(fs_info->compressed_write_workers);
+	flush_workqueue(fs_info->endio_workers);
 
 	/*
 	 * After we parked the cleaner kthread, ordered extents may have

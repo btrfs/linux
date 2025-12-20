@@ -10,7 +10,7 @@
 #include <linux/completion.h>
 #include <linux/bug.h>
 #include <linux/list.h>
-#include <crypto/hash.h>
+#include <linux/string_choices.h>
 #include "messages.h"
 #include "ctree.h"
 #include "discard.h"
@@ -1252,10 +1252,9 @@ static ssize_t btrfs_checksum_show(struct kobject *kobj,
 {
 	struct btrfs_fs_info *fs_info = to_fs_info(kobj);
 	u16 csum_type = btrfs_super_csum_type(fs_info->super_copy);
+	const char *csum_name = btrfs_super_csum_name(csum_type);
 
-	return sysfs_emit(buf, "%s (%s)\n",
-			  btrfs_super_csum_name(csum_type),
-			  crypto_shash_driver_name(fs_info->csum_shash));
+	return sysfs_emit(buf, "%s (%s-lib)\n", csum_name, csum_name);
 }
 
 BTRFS_ATTR(, checksum, btrfs_checksum_show);
@@ -1981,13 +1980,12 @@ static const char *alloc_name(struct btrfs_space_info *space_info)
  * Create a sysfs entry for a space info type at path
  * /sys/fs/btrfs/UUID/allocation/TYPE
  */
-int btrfs_sysfs_add_space_info_type(struct btrfs_fs_info *fs_info,
-				    struct btrfs_space_info *space_info)
+int btrfs_sysfs_add_space_info_type(struct btrfs_space_info *space_info)
 {
 	int ret;
 
 	ret = kobject_init_and_add(&space_info->kobj, &space_info_ktype,
-				   fs_info->space_info_kobj, "%s",
+				   space_info->fs_info->space_info_kobj, "%s",
 				   alloc_name(space_info));
 	if (ret) {
 		kobject_put(&space_info->kobj);
