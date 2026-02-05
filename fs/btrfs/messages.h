@@ -84,11 +84,7 @@ void _btrfs_printk(const struct btrfs_fs_info *fs_info, unsigned int level, cons
 #ifdef CONFIG_PRINTK
 
 #define btrfs_printk_in_rcu(fs_info, level, fmt, args...)	\
-do {								\
-	rcu_read_lock();					\
-	_btrfs_printk(fs_info, level, fmt, ##args);		\
-	rcu_read_unlock();					\
-} while (0)
+	_btrfs_printk(fs_info, level, fmt, ##args)
 
 #define btrfs_printk_rl_in_rcu(fs_info, level, fmt, args...)	\
 do {								\
@@ -96,10 +92,8 @@ do {								\
 		DEFAULT_RATELIMIT_INTERVAL,			\
 		DEFAULT_RATELIMIT_BURST);			\
 								\
-	rcu_read_lock();					\
 	if (__ratelimit(&_rs))					\
 		_btrfs_printk(fs_info, level, fmt, ##args);	\
-	rcu_read_unlock();					\
 } while (0)
 
 #endif

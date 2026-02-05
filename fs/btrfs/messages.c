@@ -219,6 +219,8 @@ void _btrfs_printk(const struct btrfs_fs_info *fs_info, unsigned int level, cons
 	const char *type = logtypes[level];
 	struct ratelimit_state *ratelimit = &printk_limits[level];
 
+	rcu_read_lock();
+
 #ifdef CONFIG_PRINTK_INDEX
 	printk_index_subsys_emit("%sBTRFS %s (device %s): ", NULL, fmt);
 #endif
@@ -241,6 +243,8 @@ void _btrfs_printk(const struct btrfs_fs_info *fs_info, unsigned int level, cons
 	}
 
 	va_end(args);
+
+	rcu_read_unlock();
 }
 #endif
 
