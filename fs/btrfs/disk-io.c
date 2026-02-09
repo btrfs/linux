@@ -1993,7 +1993,7 @@ static int btrfs_replay_log(struct btrfs_fs_info *fs_info,
 	int level = btrfs_super_log_root_level(disk_super);
 
 	if (unlikely(fs_devices->rw_devices == 0)) {
-		btrfs_warn(fs_info, "log replay required on RO media");
+		btrfs_err(fs_info, "log replay required on RO media");
 		return -EIO;
 	}
 
@@ -2007,9 +2007,9 @@ static int btrfs_replay_log(struct btrfs_fs_info *fs_info,
 	check.owner_root = BTRFS_TREE_LOG_OBJECTID;
 	log_tree_root->node = read_tree_block(fs_info, bytenr, &check);
 	if (IS_ERR(log_tree_root->node)) {
-		btrfs_warn(fs_info, "failed to read log tree");
 		ret = PTR_ERR(log_tree_root->node);
 		log_tree_root->node = NULL;
+		btrfs_err(fs_info, "failed to read log tree with error: %d", ret);
 		btrfs_put_root(log_tree_root);
 		return ret;
 	}
