@@ -14,6 +14,13 @@
 #include <linux/bio.h>
 
 /*
+ * Convenience macros to define a pointer with the __free(kfree) and
+ * __free(kvfree) cleanup attributes and initialized to NULL.
+ */
+#define AUTO_KFREE(name)       *name __free(kfree) = NULL
+#define AUTO_KVFREE(name)      *name __free(kvfree) = NULL
+
+/*
  * Enumerate bits using enum autoincrement. Define the @name as the n-th bit.
  */
 #define ENUM_BIT(name)                                  \
@@ -21,7 +28,8 @@
 	name = (1U << __ ## name ## _BIT),              \
 	__ ## name ## _SEQ = __ ## name ## _BIT
 
-static inline phys_addr_t bio_iter_phys(struct bio *bio, struct bvec_iter *iter)
+static inline phys_addr_t bio_iter_phys(const struct bio *bio,
+					const struct bvec_iter *iter)
 {
 	struct bio_vec bv = bio_iter_iovec(bio, *iter);
 
@@ -207,11 +215,6 @@ static inline bool bitmap_test_range_all_zero(const unsigned long *addr,
 
 	found_set = find_next_bit(addr, start + nbits, start);
 	return (found_set == start + nbits);
-}
-
-static inline u64 folio_end(struct folio *folio)
-{
-	return folio_pos(folio) + folio_size(folio);
 }
 
 #endif
