@@ -27,9 +27,8 @@ jobs:
         echo "CACHETAG=$(make kernelversion)" >> "$GITHUB_ENV"
     - run: ccache -s
     - name: Restore build ccache
-      uses: actions/cache@v5
+      uses: actions/cache/restore@v5
       with:
-        save-always: true
         path: "/home/runner/ccache"
         key: kernel-build-ccache-${{ env.CACHETAG }}
     - name: Build kernel for virtme
@@ -40,6 +39,11 @@ jobs:
         make olddefconfig
         vng --verbose --build
     - run: ccache -s
+    - name: Save build ccache
+      uses: actions/cache/save@v5
+      with:
+        path: "/home/runner/ccache"
+        key: kernel-build-ccache-${{ env.CACHETAG }}
     - name: Test boot of built kernel
       run: sudo vng -- uname -a
 
@@ -84,9 +88,8 @@ jobs:
         echo "CCACHE_DIR=/home/runner/ccache" >> "$GITHUB_ENV"
         echo "CACHETAG=$(make kernelversion)" >> "$GITHUB_ENV"
     - name: Restore build ccache
-      uses: actions/cache@v5
+      uses: actions/cache/restore@v5
       with:
-        save-always: true
         path: "/home/runner/ccache"
         key: kernel-build-ccache-${{ env.CACHETAG }}
     - run: ccache -s
