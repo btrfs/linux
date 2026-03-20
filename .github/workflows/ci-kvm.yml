@@ -174,7 +174,7 @@ jobs:
     - name: Sanitize mask before publishing results
       if: success() || failure()
       run: |
-        echo SANITIZED=$(echo "${{ matrix.mask }}" | tr -s "]*/[" '-') >> "$GITHUB_ENV"
+        echo SANITIZED=$(echo "${{ matrix.mask }}${{ matrix.mount }}${{ matrix.mkfs }}" | tr -s "]- */[" '-') >> "$GITHUB_ENV"
         grep SANITIZED "$GITHUB_ENV"
     - name: Save results as artifacts
       uses: actions/upload-artifact@v7
