@@ -46,10 +46,12 @@ jobs:
   build-and-test:
     if: github.ref != 'refs/heads/ci-kvm'
     needs: setup
+    # Exception entries need to be synced to check run
     strategy:
       matrix:
         mask:
           - "btrfs/[0-1]*"
+          - "btrfs/010"
           - "btrfs/[2-9]*"
           - "generic/[0-2]*"
           - "generic/[3-5]*"
@@ -141,6 +143,10 @@ jobs:
         echo export FSTYP=btrfs >> local.config
         echo export MKFS_OPTIONS="'-K -f ${{ matrix.mkfs }}'" >> local.config
         echo export MOUNT_OPTIONS="'${{ matrix.mount }}'" >> local.config
+        # Mask accepts excludes, special entries must not exclude themselves
+        if ! echo "${{ matrix.mask }}" | grep -q '[]*[]'; then \
+          echo "btrfs/010" >> EXCLUDE-GH; \
+        fi
         popd
     # With --rw we have full access to the host
     # FIXME: the mkfs.btrfs should run inside VM and take the MKFS_OPTIONS and TEST_DEV from config
@@ -155,7 +161,7 @@ jobs:
         --user root --network user -- \
         "cd $HOME/xfstests; lscpu; free -m; cat /proc/partitions; cat local.config; \
          mkfs.btrfs /dev/vda ; \
-         env --default-signal=PIPE ./check -R xunit -b -T ${{ matrix.mask }}; \
+         env --default-signal=PIPE ./check -R xunit -b -T -E EXCLUDE-GH ${{ matrix.mask }}; \
          echo FSTESTS FINISHED"
     - name: Generate report
       uses: mikepenz/action-junit-report@v6
