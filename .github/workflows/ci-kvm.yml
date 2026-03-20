@@ -33,6 +33,7 @@ jobs:
         key: kernel-build-ccache-${{ env.CACHETAG }}
     - name: Build kernel for virtme
       run: |
+        vng --version
         vng --verbose --kconfig --config .github/workflows/kconfig.btrfs --config .github/workflows/kconfig.fstests
         #make localmodconfig
         cat .github/workflows/kconfig.btrfs .github/workflows/kconfig.fstests >> .config
@@ -98,8 +99,6 @@ jobs:
       run: |
         sudo chmod 0644 /boot/vmlinuz-*
         sudo chmod 0666 /dev/kvm
-        vng --version
-        sudo vng --verbose -r -- uname -a
     # Pass the configs for initial setup and then again if localmod drops some something
     - name: Build kernel for virtme
       run: |
