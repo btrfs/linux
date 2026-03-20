@@ -48,7 +48,19 @@ jobs:
     needs: setup
     strategy:
       matrix:
-        mask: [ "btrfs/[0-9]*", "generic/[0-3]*", "generic/[4-9]*" ]
+        mask:
+          - "btrfs/[0-1]*"
+          - "btrfs/[2-9]*"
+          - "generic/[0-2]*"
+          - "generic/[3-5]*"
+          - "generic/[6-9]*"
+        mount:
+          - ""
+          - "-o compress"
+          - "-o compress=zstd"
+        mkfs:
+          - ""
+          - "-O bgt"
       fail-fast: false
     runs-on: ubuntu-latest
     steps:
@@ -127,8 +139,8 @@ jobs:
         echo export LOGWRITES_DEV=/dev/vdi >> local.config
         echo export SCRATCH_MNT=/mnt/scratch >> local.config
         echo export FSTYP=btrfs >> local.config
-        echo export MKFS_OPTIONS="'-K -f'" >> local.config
-        echo export MOUNT_OPTIONS= >> local.config
+        echo export MKFS_OPTIONS="'-K -f ${{ matrix.mkfs }}'" >> local.config
+        echo export MOUNT_OPTIONS="'${{ matrix.mount }}'" >> local.config
         popd
     # With --rw we have full access to the host
     # FIXME: the mkfs.btrfs should run inside VM and take the MKFS_OPTIONS and TEST_DEV from config
