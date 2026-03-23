@@ -146,7 +146,7 @@ jobs:
         echo export MKFS_OPTIONS="'-K -f ${{ matrix.mkfs }}'" >> local.config
         echo export MOUNT_OPTIONS="'${{ matrix.mount }}'" >> local.config
         # Mask accepts excludes, special entries must not exclude themselves
-        if ! echo "${{ matrix.mask }}" | grep -q '[]*[]'; then \
+        if echo "${{ matrix.mask }}" | grep -q '[]*[]'; then \
           echo "btrfs/010" >> EXCLUDE-GH; \
         fi
         popd
@@ -174,7 +174,7 @@ jobs:
     - name: Sanitize mask before publishing results
       if: success() || failure()
       run: |
-        echo SANITIZED=$(echo "${{ matrix.mask }}${{ matrix.mount }}${{ matrix.mkfs }}" | tr -s "]- */[" '-') >> "$GITHUB_ENV"
+        echo SANITIZED=$(echo "${{ matrix.mask }}${{ matrix.mount }}${{ matrix.mkfs }}" | tr -s "] */[-" '-') >> "$GITHUB_ENV"
         grep SANITIZED "$GITHUB_ENV"
     - name: Save results as artifacts
       uses: actions/upload-artifact@v7
