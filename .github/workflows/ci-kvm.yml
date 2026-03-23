@@ -59,8 +59,8 @@ jobs:
           - "btrfs/010"
           - "btrfs/[2-9]*"
           - "generic/[0-2]*"
-          - "generic/[3-5]*"
-          - "generic/[6-9]*"
+          - "generic/[3-4]*"
+          - "generic/[5-9]*"
         mount:
           - ""
           - "-o compress"
