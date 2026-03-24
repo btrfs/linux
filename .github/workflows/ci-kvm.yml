@@ -164,7 +164,8 @@ jobs:
         --user root --network user -- \
         "cd $HOME/xfstests; lscpu; free -m; cat /proc/partitions; cat local.config; \
          mkfs.btrfs /dev/vda ; \
-         env --default-signal=PIPE ./check -R xunit -b -T -E EXCLUDE-GH ${{ matrix.mask }}; \
+         env --default-signal=PIPE GITHUB_ACTIONS='${{ env.GITHUB_ACTIONS }}' \
+           ./check -R xunit -b -T -E EXCLUDE-GH ${{ matrix.mask }}; \
          echo FSTESTS FINISHED"
     - name: Generate report
       uses: mikepenz/action-junit-report@v6
