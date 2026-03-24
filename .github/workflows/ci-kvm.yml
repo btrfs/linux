@@ -79,6 +79,7 @@ jobs:
         free -m
         df -h /
         lsblk
+        ulimit -a
     - name: Update package cache
       run: sudo apt-get update -y
     - name: Install build and runtime dependencies
