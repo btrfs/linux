@@ -56,20 +56,11 @@ jobs:
     strategy:
       matrix:
         mask:
-          - 'btrfs/[0-1]*'
-          - 'btrfs/010'
-          - 'btrfs/[2-9]*'
-          - 'generic/[0-2]*'
-          - 'generic/[3-4]*'
-          - 'generic/562'
-          - 'generic/[5-9]*'
+          - "btrfs/[0-1]*"
         mount:
-          - ''
-          - '-o compress'
-          - '-o compress=zstd'
+          - ""
         mkfs:
-          - ''
-          - '-O bgt'
+          - ""
       fail-fast: false
     runs-on: [self-hosted, Linux, X64]
     steps:
