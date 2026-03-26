@@ -13,13 +13,17 @@ on:
 jobs:
   setup:
     if: github.ref != 'refs/heads/ci-kvm'
-    runs-on: [self-hosted, linux, x86, ubuntu-latest]
+    runs-on: [self-hosted, Linux, X64]
     steps:
+    - name: Fixup permissions
+      run: |
+        pwd
+        sudo chown runner:runner -R .
     - uses: actions/checkout@v6
     - name: Update package cache
       run: sudo apt-get update -y
     - name: Install build and runtime dependencies
-      run: sudo apt-get install -y bc gawk gcc git indent make sed flex bison libelf-dev udev ccache virtme-ng
+      run: sudo apt-get install -y bc gawk gcc git indent make sed flex bison libelf-dev libssl-dev udev ccache virtme-ng
     - name: Set up ccache environment
       run: |
         echo "PATH=/usr/lib64/ccache:/usr/lib/ccache:$PATH" >> "$GITHUB_ENV"
@@ -46,7 +50,7 @@ jobs:
         path: "/home/runner/ccache"
         key: kernel-build-ccache-${{ env.CACHETAG }}
     - name: Test boot of built kernel
-      run: sudo vng -- uname -a
+      run: sudo vng --verbose -o=-enable-kvm -- 'uname -a; ulimit -a'
 
   build-and-test:
     if: github.ref != 'refs/heads/ci-kvm'
@@ -69,8 +73,12 @@ jobs:
           - ""
           - "-O bgt"
       fail-fast: false
-    runs-on: [self-hosted, linux, x86, ubuntu-latest]
+    runs-on: [self-hosted, Linux, X64]
     steps:
+    - name: Fixup permissions
+      run: |
+        pwd
+        sudo chown runner:runner -R .
     - uses: actions/checkout@v6
     - name: Host info
       run: |
@@ -83,7 +91,7 @@ jobs:
     - name: Update package cache
       run: sudo apt-get update -y
     - name: Install build and runtime dependencies
-      run: sudo apt-get install -y bc gawk gcc git indent make sed flex bison libelf-dev udev ccache virtme-ng
+      run: sudo apt-get install -y bc gawk gcc git indent make sed flex bison libelf-dev libssl-dev udev ccache virtme-ng
     - name: Set up ccache environment
       run: |
         echo "PATH=/usr/lib64/ccache:/usr/lib/ccache:$PATH" >> "$GITHUB_ENV"
@@ -95,11 +103,11 @@ jobs:
         path: "/home/runner/ccache"
         key: kernel-build-ccache-${{ env.CACHETAG }}
     - run: ccache -s
-    - name: Setup KVM and virtme
+    - name: Check KVM and virtme
       # Check version and that it can actually run on the host VM
       run: |
-        sudo chmod 0644 /boot/vmlinuz-*
-        sudo chmod 0666 /dev/kvm
+        #sudo chmod 0666 /dev/kvm
+        ls -l /dev/kvm
     # Pass the configs for initial setup and then again if localmod drops some something
     - name: Build kernel for virtme
       run: |
@@ -109,20 +117,27 @@ jobs:
         make olddefconfig
         vng --verbose --build
     - name: Test boot of built kernel
-      run: sudo vng -- uname -a
+      run: sudo vng -o=-enable-kvm -- uname -a
     # Note: post-update could drop permissions from /dev/kvm
     - name: Install dependencies for fstests
       run: |
         sudo apt-get install -y acl attr autoconf automake bc dbench dump e2fsprogs fio gawk \
             gcc git indent libacl1-dev libaio-dev libcap-dev libgdbm-dev libtool \
             libtool-bin liburing-dev libuuid1 lvm2 make psmisc python3 quota sed \
-            uuid-dev uuid-runtime xfsprogs linux-headers-$(uname -r) sqlite3 libgdbm-compat-dev \
-            xfsdump xfslibs-dev btrfs-progs pkg-config duperemove
-        sudo chmod 0666 /dev/kvm
+            uuid-dev uuid-runtime xfsprogs sqlite3 libgdbm-compat-dev \
+            xfsdump xfslibs-dev libbtrfs-dev libbtrfsutil-dev btrfs-progs pkg-config duperemove
+        #sudo chmod 0666 /dev/kvm
+        ls -l /dev/kvm
+    - name: Checkout fstests.git
+      uses: actions/checkout@v6
+      with:
+        path: xfstests
+        repository: kdave/xfstests
+        ref: local
     - name: Build fstests
       run: |
-        git clone --depth 1 -b local https://github.com/kdave/xfstests $HOME/xfstests
-        pushd $HOME/xfstests
+        pwd
+        pushd ${{ github.workspace }}/xfstests
         autoreconf -vfi
         ./configure
         make -j$(nproc)
@@ -132,12 +147,13 @@ jobs:
     - name: Setup fstests environment
       run: |
         truncate -s 12g disk{1..9}
-        pushd $HOME/xfstests
-        sudo useradd --create-home fsgqa
-        sudo useradd fsgqa2
-        sudo useradd 123456-fsgqa
-        sudo mkdir /mnt/test
-        sudo mkdir /mnt/scratch
+        pushd ${{ github.workspace }}/xfstests
+        id fsgqa || sudo useradd --create-home fsgqa
+        id fsgqa2 || sudo useradd fsgqa2
+        id 123456-fsgqa || sudo useradd 123456-fsgqa
+        sudo mkdir -p /mnt/test
+        sudo mkdir -p /mnt/scratch
+        truncate -s 0 local.config
         echo export TEST_DEV=/dev/vda >> local.config
         echo export TEST_DIR=/mnt/test >> local.config
         echo export SCRATCH_DEV_POOL="'/dev/vdb /dev/vdc /dev/vdd /dev/vde /dev/vdf /dev/vdg /dev/vdh /dev/vdi'" >> local.config
@@ -158,13 +174,17 @@ jobs:
     # - cpus all from host (usually 4)
     - name: "Start fstests in VM: ${{ matrix.mask }}"
       run: |
-        sudo vng --memory 4096 --rw \
+        set | grep GITHUB
+        ulimit -n
+        sudo vng -o=-enable-kvm --name "$RUNNER_NAME" \
+        --memory 4096 --cpus 4 --rw \
         --disk disk1 --disk disk2 --disk disk3 --disk disk4 --disk disk5 \
         --disk disk6 --disk disk7 --disk disk8 --disk disk9 \
         --user root --network user -- \
-        "cd $HOME/xfstests; lscpu; free -m; cat /proc/partitions; ulimit -a; cat local.config; \
+        "cd ${{ github.workspace }}/xfstests; lscpu; free -m; cat /proc/partitions; ulimit -n 65536; ulimit -a; \
+         cat local.config; \
          mkfs.btrfs /dev/vda ; \
-         env --default-signal=PIPE GITHUB_ACTIONS='${{ env.GITHUB_ACTIONS }}' \
+         env --default-signal=PIPE GITHUB_ACTIONS=$GITHUB_ACTIONS \
            ./check -R xunit -b -T -E EXCLUDE-GH ${{ matrix.mask }}; \
          echo FSTESTS FINISHED"
     - name: Generate report
@@ -172,7 +192,7 @@ jobs:
       if: success() || failure()
       with:
         annotate_only: true
-        report_paths: "/home/runner/xfstests/results/result.xml"
+        report_paths: "${{ github.workspace }}/xfstests/results/result.xml"
     - name: Sanitize mask before publishing results
       if: success() || failure()
       run: |
@@ -183,7 +203,7 @@ jobs:
       if: success() || failure()
       with:
         name: "results-${{ env.SANITIZED }}"
-        path: "/home/runner/xfstests/results/"
+        path: "${{ github.workspace }}/xfstests/results/"
     - name: Collect not run tests to summary
       if: success() || failure()
-      run: /home/runner/xfstests/collect-notrun-to-summary.sh /home/runner/xfstests >> $GITHUB_STEP_SUMMARY
+      run: ${{ github.workspace }}/xfstests/collect-notrun-to-summary.sh ${{ github.workspace }}/xfstests >> $GITHUB_STEP_SUMMARY
