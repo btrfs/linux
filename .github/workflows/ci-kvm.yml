@@ -55,6 +55,8 @@ jobs:
   build-and-test:
     if: github.ref != 'refs/heads/ci-kvm'
     needs: setup
+    # 20h timeout
+    timeout-minutes: 1200
     # Exception entries need to be synced to check run
     strategy:
       matrix:
