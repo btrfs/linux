@@ -80,14 +80,6 @@ jobs:
         pwd
         sudo chown runner:runner -R .
     - uses: actions/checkout@v6
-    - name: Host info
-      run: |
-        uname -a
-        lscpu
-        free -m
-        df -h /
-        lsblk
-        ulimit -a
     - name: Update package cache
       run: sudo apt-get update -y
     - name: Install build and runtime dependencies
@@ -174,8 +166,6 @@ jobs:
     # - cpus all from host (usually 4)
     - name: "Start fstests in VM: ${{ matrix.mask }}"
       run: |
-        set | grep GITHUB
-        ulimit -n
         sudo vng -o=-enable-kvm --name "$RUNNER_NAME" \
         --memory 4096 --cpus 4 --rw \
         --disk disk1 --disk disk2 --disk disk3 --disk disk4 --disk disk5 \
