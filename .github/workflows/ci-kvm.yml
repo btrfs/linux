@@ -1,24 +1,26 @@
-# CI with KVM virtualization on GH actions infra (slow, low storage, 6h timeout)
+# CI with KVM virtualization on GH actions infra (4 CPUS, 16G RAM, 150G storage, 6h timeout)
 # - virualization provided by virtme
 # - only x86_64, ARM virtualization not available
+# - build of kernel base version cached
+# - branch itself does not trigger the tests
 
-name: CI KVM
+name: CI GH
 
 on:
   push:
-    branches: [ "ci-kvm**" ]
+    branches:
+      - 'ci-gh'
+      - 'ci-gh-**'
   pull_request:
-    branches: [ "ci-kvm**" ]
+    branches:
+      - 'ci-gh'
+      - 'ci-gh-**'
 
 jobs:
   setup:
-    if: github.ref != 'refs/heads/ci-kvm'
-    runs-on: [self-hosted, Linux, X64]
+    if: github.ref != 'refs/heads/ci-gh'
+    runs-on: ubuntu-latest
     steps:
-    - name: Fixup permissions
-      run: |
-        pwd
-        sudo chown runner:runner -R .
     - uses: actions/checkout@v6
     - name: Update package cache
       run: sudo apt-get update -y
@@ -33,7 +35,7 @@ jobs:
     - name: Restore build ccache
       uses: actions/cache/restore@v5
       with:
-        path: "/home/runner/ccache"
+        path: '/home/runner/ccache'
         key: kernel-build-ccache-${{ env.CACHETAG }}
     - name: Build kernel for virtme
       run: |
@@ -47,7 +49,7 @@ jobs:
     - name: Save build ccache
       uses: actions/cache/save@v5
       with:
-        path: "/home/runner/ccache"
+        path: '/home/runner/ccache'
         key: kernel-build-ccache-${{ env.CACHETAG }}
     - name: Test boot of built kernel
       run: sudo vng --verbose -o=-enable-kvm -- 'uname -a; ulimit -a'
@@ -59,26 +61,23 @@ jobs:
     strategy:
       matrix:
         mask:
-          - "btrfs/[0-1]*"
-          - "btrfs/010"
-          - "btrfs/[2-9]*"
-          - "generic/[0-2]*"
-          - "generic/[3-4]*"
-          - "generic/[5-9]*"
+          - 'btrfs/[0-1]*'
+          - 'btrfs/010'
+          - 'btrfs/[2-9]*'
+          - 'generic/[0-2]*'
+          - 'generic/[3-4]*'
+          - 'generic/[5-9]*'
         mount:
-          - ""
-          - "-o compress"
-          - "-o compress=zstd"
+          - ''
+          - '-o compress'
+          - '-o compress=zstd'
         mkfs:
-          - ""
-          - "-O bgt"
+          - ''
+          - '-O bgt'
+      # Let all tests continue even if some ends early
       fail-fast: false
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: ubuntu-latest
     steps:
-    - name: Fixup permissions
-      run: |
-        pwd
-        sudo chown runner:runner -R .
     - uses: actions/checkout@v6
     - name: Update package cache
       run: sudo apt-get update -y
@@ -92,7 +91,7 @@ jobs:
     - name: Restore build ccache
       uses: actions/cache/restore@v5
       with:
-        path: "/home/runner/ccache"
+        path: '/home/runner/ccache'
         key: kernel-build-ccache-${{ env.CACHETAG }}
     - run: ccache -s
     - name: Check KVM and virtme
@@ -164,7 +163,7 @@ jobs:
     # VM setup:
     # - memory 4GiB
     # - cpus all from host (usually 4)
-    - name: "Start fstests in VM: ${{ matrix.mask }}"
+    - name: 'Start fstests in VM: ${{ matrix.mask }}'
       run: |
         sudo vng -o=-enable-kvm --name "$RUNNER_NAME" \
         --memory 4096 --cpus 4 --rw \
@@ -182,7 +181,7 @@ jobs:
       if: success() || failure()
       with:
         annotate_only: true
-        report_paths: "${{ github.workspace }}/xfstests/results/result.xml"
+        report_paths: '${{ github.workspace }}/xfstests/results/result.xml'
     - name: Sanitize mask before publishing results
       if: success() || failure()
       run: |
@@ -192,8 +191,8 @@ jobs:
       uses: actions/upload-artifact@v7
       if: success() || failure()
       with:
-        name: "results-${{ env.SANITIZED }}"
-        path: "${{ github.workspace }}/xfstests/results/"
+        name: 'results-${{ env.SANITIZED }}'
+        path: '${{ github.workspace }}/xfstests/results/'
     - name: Collect not run tests to summary
       if: success() || failure()
       run: ${{ github.workspace }}/xfstests/collect-notrun-to-summary.sh ${{ github.workspace }}/xfstests >> $GITHUB_STEP_SUMMARY
