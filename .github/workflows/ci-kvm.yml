@@ -1,14 +1,20 @@
-# CI with KVM virtualization on GH actions infra (slow, low storage, 6h timeout)
+# CI on self-hosted runners with KVM virtualization (4 CPUs, 4G RAM, 20h timeout)
+# similar to the GH hosted build config (branch ci-gh)
+#
 # - virualization provided by virtme
-# - only x86_64, ARM virtualization not available
+# - x86_64
 
 name: CI KVM
 
 on:
   push:
-    branches: [ "ci-kvm**" ]
+    branches:
+      - 'ci-kvm'
+      - 'ci-kvm-**'
   pull_request:
-    branches: [ "ci-kvm**" ]
+    branches:
+      - 'ci-kvm'
+      - 'ci-kvm-**'
 
 jobs:
   setup:
@@ -33,7 +39,7 @@ jobs:
     - name: Restore build ccache
       uses: actions/cache/restore@v5
       with:
-        path: "/home/runner/ccache"
+        path: '/home/runner/ccache'
         key: kernel-build-ccache-${{ env.CACHETAG }}
     - name: Build kernel for virtme
       run: |
@@ -47,7 +53,7 @@ jobs:
     - name: Save build ccache
       uses: actions/cache/save@v5
       with:
-        path: "/home/runner/ccache"
+        path: '/home/runner/ccache'
         key: kernel-build-ccache-${{ env.CACHETAG }}
     - name: Test boot of built kernel
       run: sudo vng --verbose -o=-enable-kvm -- 'uname -a; ulimit -a'
@@ -61,19 +67,19 @@ jobs:
     strategy:
       matrix:
         mask:
-          - "btrfs/[0-1]*"
-          - "btrfs/010"
-          - "btrfs/[2-9]*"
-          - "generic/[0-2]*"
-          - "generic/[3-4]*"
-          - "generic/[5-9]*"
+          - 'btrfs/[0-1]*'
+          - 'btrfs/010'
+          - 'btrfs/[2-9]*'
+          - 'generic/[0-2]*'
+          - 'generic/[3-4]*'
+          - 'generic/[5-9]*'
         mount:
-          - ""
-          - "-o compress"
-          - "-o compress=zstd"
+          - ''
+          - '-o compress'
+          - '-o compress=zstd'
         mkfs:
-          - ""
-          - "-O bgt"
+          - ''
+          - '-O bgt'
       fail-fast: false
     runs-on: [self-hosted, Linux, X64]
     steps:
@@ -94,7 +100,7 @@ jobs:
     - name: Restore build ccache
       uses: actions/cache/restore@v5
       with:
-        path: "/home/runner/ccache"
+        path: '/home/runner/ccache'
         key: kernel-build-ccache-${{ env.CACHETAG }}
     - run: ccache -s
     - name: Check KVM and virtme
@@ -166,7 +172,7 @@ jobs:
     # VM setup:
     # - memory 4GiB
     # - cpus all from host (usually 4)
-    - name: "Start fstests in VM: ${{ matrix.mask }}"
+    - name: 'Start fstests in VM: ${{ matrix.mask }}'
       run: |
         sudo vng -o=-enable-kvm --name "$RUNNER_NAME" \
         --memory 4096 --cpus 4 --rw \
@@ -184,7 +190,7 @@ jobs:
       if: success() || failure()
       with:
         annotate_only: true
-        report_paths: "${{ github.workspace }}/xfstests/results/result.xml"
+        report_paths: '${{ github.workspace }}/xfstests/results/result.xml'
     - name: Sanitize mask before publishing results
       if: success() || failure()
       run: |
@@ -194,8 +200,8 @@ jobs:
       uses: actions/upload-artifact@v7
       if: success() || failure()
       with:
-        name: "results-${{ env.SANITIZED }}"
-        path: "${{ github.workspace }}/xfstests/results/"
+        name: 'results-${{ env.SANITIZED }}'
+        path: '${{ github.workspace }}/xfstests/results/'
     - name: Collect not run tests to summary
       if: success() || failure()
       run: ${{ github.workspace }}/xfstests/collect-notrun-to-summary.sh ${{ github.workspace }}/xfstests >> $GITHUB_STEP_SUMMARY
