@@ -30,17 +30,11 @@ jobs:
       run: sudo apt-get update -y
     - name: Install build and runtime dependencies
       run: sudo apt-get install -y bc gawk gcc git indent make sed flex bison libelf-dev libssl-dev udev ccache virtme-ng
-    - name: Set up ccache environment
+    - name: Set up local ccache environment
       run: |
         echo "PATH=/usr/lib64/ccache:/usr/lib/ccache:$PATH" >> "$GITHUB_ENV"
-        echo "CCACHE_DIR=/home/runner/ccache" >> "$GITHUB_ENV"
-        echo "CACHETAG=$(make kernelversion)" >> "$GITHUB_ENV"
+        echo "CCACHE_DIR=/home/runner/_work/_ccache" >> "$GITHUB_ENV"
     - run: ccache -s
-    - name: Restore build ccache
-      uses: actions/cache/restore@v5
-      with:
-        path: '/home/runner/ccache'
-        key: kernel-build-ccache-${{ env.CACHETAG }}
     - name: Build kernel for virtme
       run: |
         vng --version
@@ -50,11 +44,6 @@ jobs:
         make olddefconfig
         vng --verbose --build
     - run: ccache -s
-    - name: Save build ccache
-      uses: actions/cache/save@v5
-      with:
-        path: '/home/runner/ccache'
-        key: kernel-build-ccache-${{ env.CACHETAG }}
     - name: Test boot of built kernel
       run: sudo vng --verbose -o=-enable-kvm -- 'uname -a; ulimit -a'
 
@@ -92,16 +81,10 @@ jobs:
       run: sudo apt-get update -y
     - name: Install build and runtime dependencies
       run: sudo apt-get install -y bc gawk gcc git indent make sed flex bison libelf-dev libssl-dev udev ccache virtme-ng
-    - name: Set up ccache environment
+    - name: Set up local ccache environment
       run: |
         echo "PATH=/usr/lib64/ccache:/usr/lib/ccache:$PATH" >> "$GITHUB_ENV"
-        echo "CCACHE_DIR=/home/runner/ccache" >> "$GITHUB_ENV"
-        echo "CACHETAG=$(make kernelversion)" >> "$GITHUB_ENV"
-    - name: Restore build ccache
-      uses: actions/cache/restore@v5
-      with:
-        path: '/home/runner/ccache'
-        key: kernel-build-ccache-${{ env.CACHETAG }}
+        echo "CCACHE_DIR=/home/runner/_work/_ccache" >> "$GITHUB_ENV"
     - run: ccache -s
     - name: Check KVM and virtme
       # Check version and that it can actually run on the host VM
