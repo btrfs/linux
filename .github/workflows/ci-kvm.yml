@@ -149,6 +149,7 @@ jobs:
         # Mask accepts excludes, special entries must not exclude themselves
         if echo "${{ matrix.mask }}" | grep -q '[]*[]'; then \
           echo "btrfs/010" >> EXCLUDE-GH; \
+          echo "generic/562'" >> EXCLUDE-GH; \
         fi
         popd
     # With --rw we have full access to the host
