@@ -29,7 +29,7 @@ jobs:
     - name: Update package cache
       run: sudo apt-get update -y
     - name: Install build and runtime dependencies
-      run: sudo apt-get install -y bc gawk gcc git indent make sed flex bison libelf-dev libssl-dev udev ccache virtme-ng
+      run: sudo apt-get install -y bc gawk gcc git indent make sed flex bison libelf-dev libssl-dev udev ccache virtme-ng iproute2
     - name: Set up local ccache environment
       run: |
         echo "PATH=/usr/lib64/ccache:/usr/lib/ccache:$PATH" >> "$GITHUB_ENV"
@@ -109,7 +109,7 @@ jobs:
             gcc git indent libacl1-dev libaio-dev libcap-dev libgdbm-dev libtool \
             libtool-bin liburing-dev libuuid1 lvm2 make psmisc python3 quota sed \
             uuid-dev uuid-runtime xfsprogs sqlite3 libgdbm-compat-dev \
-            fsverity parted keyctl fscrypt \
+            fsverity parted fscrypt \
             xfsdump xfslibs-dev libbtrfs-dev libbtrfsutil-dev btrfs-progs pkg-config duperemove \
             liblzo2-dev libzstd-dev libblkid-dev zlib1g-dev libext2fs-dev libudev-dev
         ls -l /dev/kvm
@@ -184,6 +184,9 @@ jobs:
         --user root --network user -- \
         "cd ${{ github.workspace }}/xfstests; lscpu; free -m; cat /proc/partitions; ulimit -n 65536; ulimit -a; \
          cat local.config; \
+         PATH="/usr/local/bin:/usr/local/sbin:$PATH"; \
+         echo "PATH=$PATH"; \
+         btrfs --version ; \
          mkfs.btrfs /dev/vda ; \
          env --default-signal=PIPE GITHUB_ACTIONS=$GITHUB_ACTIONS \
            ./check -R xunit -b -T -E EXCLUDE-GH ${{ matrix.mask }}; \
