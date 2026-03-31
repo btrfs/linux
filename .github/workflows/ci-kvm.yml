@@ -177,6 +177,8 @@ jobs:
          cat local.config; \
          ls -l /usr/local/bin /usr/local/sbin; \
          echo "PATH=$PATH"; \
+         PATH="/usr/local/bin:/usr/local/sbin:$PATH"; \
+         echo "PATH=$PATH"; \
          type -p btrfs; \
          type -P btrfs; \
          readlink -f /bin/btrfs; \
