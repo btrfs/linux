@@ -45,7 +45,7 @@ jobs:
         vng --verbose --build
     - run: ccache -s
     - name: Test boot of built kernel
-      run: sudo vng --verbose -o=-enable-kvm -- 'uname -a; ulimit -a'
+      run: sudo vng --verbose -o=-enable-kvm -- 'uname -a; echo PATH=$PATH; ulimit -a'
 
   build-and-test:
     if: github.ref != 'refs/heads/ci-kvm'
