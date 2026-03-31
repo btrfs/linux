@@ -103,15 +103,32 @@ jobs:
     - name: Test boot of built kernel
       run: sudo vng -o=-enable-kvm -- uname -a
     # Note: post-update could drop permissions from /dev/kvm
-    - name: Install dependencies for fstests
+    - name: "Install dependencies for deps (btrfs-progs, fstests)"
       run: |
         sudo apt-get install -y acl attr autoconf automake bc dbench dump e2fsprogs fio gawk \
             gcc git indent libacl1-dev libaio-dev libcap-dev libgdbm-dev libtool \
             libtool-bin liburing-dev libuuid1 lvm2 make psmisc python3 quota sed \
             uuid-dev uuid-runtime xfsprogs sqlite3 libgdbm-compat-dev \
-            xfsdump xfslibs-dev libbtrfs-dev libbtrfsutil-dev btrfs-progs pkg-config duperemove
-        #sudo chmod 0666 /dev/kvm
+            xfsdump xfslibs-dev libbtrfs-dev libbtrfsutil-dev btrfs-progs pkg-config duperemove \
+            liblzo2-dev libzstd-dev libblkid-dev zlib1g-dev libext2fs-dev libudev-dev
         ls -l /dev/kvm
+    - name: Checkout btrfs-progs.git
+      uses: actions/checkout@v6
+      with:
+        path: btrfs-progs
+        repository: kdave/btrfs-progs
+        ref: devel
+    - name: Build btrfs-progs (devel + experimental)
+      run: |
+        pwd
+        pushd ${{ github.workspace }}/btrfs-progs
+        ./autogen.sh
+        ./configure --disable-documentation --disable-python --enable-experimental
+        make -j8
+        sudo make install
+        popd
+        type -p btrfs
+        btrfs --version
     - name: Checkout fstests.git
       uses: actions/checkout@v6
       with:
