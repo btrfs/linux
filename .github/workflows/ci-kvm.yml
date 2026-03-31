@@ -179,6 +179,13 @@ jobs:
          echo "PATH=$PATH"; \
          type -p btrfs; \
          type -P btrfs; \
+         readlink -f /bin/btrfs; \
+         ls -l /bin/*btrfs* ; \
+         ls -l /sbin/*btrfs* ; \
+         ls -l /usr/bin/*btrfs* ; \
+         ls -l /usr/sbin/*btrfs* ; \
+         /bin/bash --version ; \
+         btrfs --version ; \
          mkfs.btrfs /dev/vda ; \
          env --default-signal=PIPE GITHUB_ACTIONS=$GITHUB_ACTIONS \
            ./check -R xunit -b -T -E EXCLUDE-GH ${{ matrix.mask }}; \
