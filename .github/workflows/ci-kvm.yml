@@ -117,9 +117,28 @@ jobs:
             gcc git indent libacl1-dev libaio-dev libcap-dev libgdbm-dev libtool \
             libtool-bin liburing-dev libuuid1 lvm2 make psmisc python3 quota sed \
             uuid-dev uuid-runtime xfsprogs sqlite3 libgdbm-compat-dev \
-            xfsdump xfslibs-dev libbtrfs-dev libbtrfsutil-dev btrfs-progs pkg-config duperemove
+            fsverity parted fscrypt \
+            xfsdump xfslibs-dev libbtrfs-dev libbtrfsutil-dev btrfs-progs pkg-config duperemove \
+            liblzo2-dev libzstd-dev libblkid-dev zlib1g-dev libext2fs-dev libudev-dev
         #sudo chmod 0666 /dev/kvm
         ls -l /dev/kvm
+    - name: Checkout btrfs-progs.git
+      uses: actions/checkout@v6
+      with:
+        path: btrfs-progs
+        repository: kdave/btrfs-progs
+        ref: devel
+    - name: Build btrfs-progs (devel + experimental)
+      run: |
+        pwd
+        pushd ${{ github.workspace }}/btrfs-progs
+        ./autogen.sh
+        ./configure --disable-documentation --disable-python --enable-experimental
+        make -j8
+        sudo make install
+        popd
+        type -p btrfs
+        btrfs --version
     - name: Checkout fstests.git
       uses: actions/checkout@v6
       with:
@@ -174,6 +193,9 @@ jobs:
         --user root --network user -- \
         "cd ${{ github.workspace }}/xfstests; lscpu; free -m; cat /proc/partitions; ulimit -n 65536; ulimit -a; \
          cat local.config; \
+         PATH="/usr/local/bin:/usr/local/sbin:$PATH"; \
+         echo "PATH=$PATH"; \
+         btrfs --version ; \
          mkfs.btrfs /dev/vda ; \
          env --default-signal=PIPE GITHUB_ACTIONS=$GITHUB_ACTIONS \
            ./check -R xunit -b -T -E EXCLUDE-GH ${{ matrix.mask }}; \
