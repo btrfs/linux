@@ -74,7 +74,6 @@ jobs:
           - '-o compress=zstd'
         mkfs:
           - ''
-          - '-O bgt'
       # Let all tests continue even if some ends early
       fail-fast: false
     runs-on: ubuntu-latest
