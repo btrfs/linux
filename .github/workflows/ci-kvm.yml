@@ -135,6 +135,7 @@ jobs:
         ./configure --disable-documentation --disable-python --enable-experimental
         make -j8
         sudo make install
+        sudo cp btrfs-corrupt-block /usr/local/sbin
         popd
         type -p btrfs
         btrfs --version
