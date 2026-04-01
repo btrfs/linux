@@ -47,7 +47,7 @@ jobs:
     - name: Test boot of built kernel
       run: sudo vng --verbose -o=-enable-kvm -- 'uname -a; echo PATH=$PATH; ulimit -a'
 
-  build-and-test:
+  test:
     if: github.ref != 'refs/heads/ci-kvm'
     needs: setup
     # 20h timeout
