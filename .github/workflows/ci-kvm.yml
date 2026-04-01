@@ -54,7 +54,7 @@ jobs:
     - name: Test boot of built kernel
       run: sudo vng --verbose -o=-enable-kvm -- 'uname -a; ulimit -a'
 
-  build-and-test:
+  test:
     if: github.ref != 'refs/heads/ci-kvm'
     needs: setup
     # Exception entries need to be synced to check run
