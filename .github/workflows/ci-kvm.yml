@@ -39,12 +39,11 @@ jobs:
       run: |
         vng --version
         vng --verbose --kconfig --config .github/workflows/kconfig.btrfs --config .github/workflows/kconfig.fstests
-        #make localmodconfig
         cat .github/workflows/kconfig.btrfs .github/workflows/kconfig.fstests >> .config
+        scripts/config -d SOUND -d DRM -d KVM -d SQUASHFS -d PCMCIA -d PCCARD -d CARDBUS
+        scripts/config -d ATA -d INPUT_MOUSE -d MOUSE_PS2 -d FB -d HDMI -d SND -d BPF
         make olddefconfig
-        # Fixup parallelism
-        sudo sed -i -e 's/os.cpu_count()/8/' /usr/lib/python3/dist-packages/virtme_ng/run.py
-        vng --verbose --build
+        make -j 8
     - run: ccache -s
     - name: Test boot of built kernel
       run: sudo vng --verbose -o=-enable-kvm -- 'uname -a; echo PATH=$PATH; ulimit -a'
@@ -97,10 +96,11 @@ jobs:
     - name: Build kernel for virtme
       run: |
         vng --verbose --kconfig --config .github/workflows/kconfig.btrfs --config .github/workflows/kconfig.fstests
-        #make localmodconfig
         cat .github/workflows/kconfig.btrfs .github/workflows/kconfig.fstests >> .config
+        scripts/config -d SOUND -d DRM -d KVM -d SQUASHFS -d PCMCIA -d PCCARD -d CARDBUS
+        scripts/config -d ATA -d INPUT_MOUSE -d MOUSE_PS2 -d FB -d HDMI -d SND -d BPF
         make olddefconfig
-        vng --verbose --build
+        make -j 8
     - name: Test boot of built kernel
       run: sudo vng -o=-enable-kvm -- uname -a
     # Note: post-update could drop permissions from /dev/kvm
