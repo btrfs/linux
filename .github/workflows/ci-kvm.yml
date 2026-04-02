@@ -43,7 +43,7 @@ jobs:
         scripts/config -d SOUND -d DRM -d KVM -d SQUASHFS -d PCMCIA -d PCCARD -d CARDBUS
         scripts/config -d ATA -d INPUT_MOUSE -d MOUSE_PS2 -d FB -d HDMI -d SND -d BPF
         make olddefconfig
-        make -j 8
+        make -j 16
     - run: ccache -s
     - name: Test boot of built kernel
       run: sudo vng --verbose -o=-enable-kvm -- 'uname -a; echo PATH=$PATH; ulimit -a'
@@ -100,7 +100,8 @@ jobs:
         scripts/config -d SOUND -d DRM -d KVM -d SQUASHFS -d PCMCIA -d PCCARD -d CARDBUS
         scripts/config -d ATA -d INPUT_MOUSE -d MOUSE_PS2 -d FB -d HDMI -d SND -d BPF
         make olddefconfig
-        make -j 8
+        # Second build is from cache
+        make -j 32
     - name: Test boot of built kernel
       run: sudo vng -o=-enable-kvm -- uname -a
     # Note: post-update could drop permissions from /dev/kvm
@@ -126,7 +127,7 @@ jobs:
         pushd ${{ github.workspace }}/btrfs-progs
         ./autogen.sh
         ./configure --disable-documentation --disable-python --enable-experimental
-        make -j8
+        make -j 16
         sudo make install
         sudo cp btrfs-corrupt-block /usr/local/sbin
         popd
@@ -144,7 +145,7 @@ jobs:
         pushd ${{ github.workspace }}/xfstests
         autoreconf -vfi
         ./configure
-        make -j$(nproc)
+        make -j 16
         popd
 
     # Tests
