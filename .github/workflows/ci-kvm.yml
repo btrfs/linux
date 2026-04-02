@@ -33,7 +33,7 @@ jobs:
     - name: Set up local ccache environment
       run: |
         echo "PATH=/usr/lib64/ccache:/usr/lib/ccache:$PATH" >> "$GITHUB_ENV"
-        echo "CCACHE_DIR=/home/runner/_work/_ccache" >> "$GITHUB_ENV"
+        echo "CCACHE_DIR=/home/runner/_ccache" >> "$GITHUB_ENV"
     - run: ccache -s
     - name: Build kernel for virtme
       run: |
@@ -86,7 +86,7 @@ jobs:
     - name: Set up local ccache environment
       run: |
         echo "PATH=/usr/lib64/ccache:/usr/lib/ccache:$PATH" >> "$GITHUB_ENV"
-        echo "CCACHE_DIR=/home/runner/_work/_ccache" >> "$GITHUB_ENV"
+        echo "CCACHE_DIR=/home/runner/_ccache" >> "$GITHUB_ENV"
     - run: ccache -s
     - name: Check KVM and virtme
       # Check version and that it can actually run on the host VM
