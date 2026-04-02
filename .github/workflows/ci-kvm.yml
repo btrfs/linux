@@ -42,6 +42,8 @@ jobs:
         #make localmodconfig
         cat .github/workflows/kconfig.btrfs .github/workflows/kconfig.fstests >> .config
         make olddefconfig
+        # Fixup parallelism
+        sudo sed -i -e 's/os.cpu_count()/8/' /usr/lib/python3/dist-packages/virtme_ng/run.py
         vng --verbose --build
     - run: ccache -s
     - name: Test boot of built kernel
