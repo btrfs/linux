@@ -44,6 +44,8 @@ jobs:
         #make localmodconfig
         cat .github/workflows/kconfig.btrfs .github/workflows/kconfig.fstests >> .config
         make olddefconfig
+        # Fixup parallelism
+        sudo sed -i -e 's/{cpu_count}/8/' /usr/lib/python3/dist-packages/virtme/commands/configkernel.py
         vng --verbose --build
     - run: ccache -s
     - name: Save build ccache
