@@ -206,7 +206,7 @@ jobs:
       if: success() || failure()
       with:
         annotate_only: true
-        report_paths: '${{ github.workspace }}/xfstests/results/result.xml'
+        report_paths: '${{ github.workspace }}/xfstests/results/result.xml*'
     - name: Sanitize mask before publishing results
       if: success() || failure()
       run: |
