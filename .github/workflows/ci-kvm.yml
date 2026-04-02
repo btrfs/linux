@@ -110,7 +110,7 @@ jobs:
             gcc git indent libacl1-dev libaio-dev libcap-dev libgdbm-dev libtool \
             libtool-bin liburing-dev libuuid1 lvm2 make psmisc python3 quota sed \
             uuid-dev uuid-runtime xfsprogs sqlite3 libgdbm-compat-dev \
-            fsverity parted fscrypt \
+            fsverity parted fscrypt keyutils \
             xfsdump xfslibs-dev libbtrfs-dev libbtrfsutil-dev btrfs-progs pkg-config duperemove \
             liblzo2-dev libzstd-dev libblkid-dev zlib1g-dev libext2fs-dev libudev-dev
         ls -l /dev/kvm
