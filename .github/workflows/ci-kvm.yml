@@ -19,7 +19,7 @@ on:
 jobs:
   setup:
     if: github.ref != 'refs/heads/ci-kvm'
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: [self-hosted, Linux, ARM64]
     steps:
     - name: Fixup permissions
       run: |
@@ -29,7 +29,7 @@ jobs:
     - name: Update package cache
       run: sudo apt-get update -y
     - name: Install build and runtime dependencies
-      run: sudo apt-get install -y bc gawk gcc git indent make sed flex bison libelf-dev libssl-dev udev ccache virtme-ng iproute2
+      run: sudo apt-get install -y bc gawk gcc git indent make sed flex bison libelf-dev libssl-dev udev ccache virtme-ng iproute2 qemu-system-arm
     - name: Set up local ccache environment
       run: |
         echo "PATH=/usr/lib64/ccache:/usr/lib/ccache:$PATH" >> "$GITHUB_ENV"
@@ -38,15 +38,15 @@ jobs:
     - name: Build kernel for virtme
       run: |
         vng --version
-        vng --verbose --kconfig --config .github/workflows/kconfig.btrfs --config .github/workflows/kconfig.fstests
-        cat .github/workflows/kconfig.btrfs .github/workflows/kconfig.fstests >> .config
+        vng --verbose --kconfig --config .github/workflows/kconfig.btrfs --config .github/workflows/kconfig.fstests --config .github/workflows/kconfig.arm64-64k
+        cat .github/workflows/kconfig.btrfs .github/workflows/kconfig.fstests .github/workflows/kconfig.arm64-64k >> .config
         scripts/config -d SOUND -d DRM -d KVM -d SQUASHFS -d PCMCIA -d PCCARD -d CARDBUS
         scripts/config -d ATA -d INPUT_MOUSE -d MOUSE_PS2 -d FB -d HDMI -d SND -d BPF
         make olddefconfig
         make -j 16
     - run: ccache -s
     - name: Test boot of built kernel
-      run: sudo vng --verbose -o=-enable-kvm -- 'uname -a; echo PATH=$PATH; ulimit -a'
+      run: sudo vng --cpus 4 --memory 4096 --verbose -o=-enable-kvm -- 'uname -a; echo PATH=$PATH; ulimit -a; getconf PAGE_SIZE'
 
   test:
     if: github.ref != 'refs/heads/ci-kvm'
@@ -63,7 +63,7 @@ jobs:
         mkfs:
           - ""
       fail-fast: false
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: [self-hosted, Linux, ARM64]
     steps:
     - name: Fixup permissions
       run: |
@@ -87,14 +87,14 @@ jobs:
     # Pass the configs for initial setup and then again if localmod drops some something
     - name: Build kernel for virtme
       run: |
-        vng --verbose --kconfig --config .github/workflows/kconfig.btrfs --config .github/workflows/kconfig.fstests
-        cat .github/workflows/kconfig.btrfs .github/workflows/kconfig.fstests >> .config
+        vng --verbose --kconfig --config .github/workflows/kconfig.btrfs --config .github/workflows/kconfig.fstests --config .github/workflows/kconfig.arm64-64k
+        cat .github/workflows/kconfig.btrfs .github/workflows/kconfig.fstests .github/workflows/kconfig.arm64-64k >> .config
         scripts/config -d SOUND -d DRM -d KVM -d SQUASHFS -d PCMCIA -d PCCARD -d CARDBUS
         scripts/config -d ATA -d INPUT_MOUSE -d MOUSE_PS2 -d FB -d HDMI -d SND -d BPF
         make olddefconfig
         make -j 16
     - name: Test boot of built kernel
-      run: sudo vng -o=-enable-kvm -- uname -a
+      run: sudo vng --cpus 4 --memory 4096 --verbose -o=-enable-kvm -- uname -a
     # Note: post-update could drop permissions from /dev/kvm
     - name: "Install dependencies for deps (btrfs-progs, fstests)"
       run: |
