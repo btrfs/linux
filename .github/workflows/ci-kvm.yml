@@ -46,18 +46,18 @@ jobs:
         make -j 16
     - run: ccache -s
     - name: Test boot of built kernel
-      run: sudo vng --cpus 4 --memory 4096 --verbose -o=-enable-kvm -- 'uname -a; echo PATH=$PATH; ulimit -a; getconf PAGE_SIZE'
+      run: sudo vng --cpus 16 --memory 16384 --verbose -o=-enable-kvm -- 'uname -a; echo PATH=$PATH; ulimit -a; getconf PAGE_SIZE'
 
   test:
     if: github.ref != 'refs/heads/ci-kvm'
     needs: setup
-    # 20h timeout
-    timeout-minutes: 1200
+    # 24h timeout
+    timeout-minutes: 1440
     # Exception entries need to be synced to check run
     strategy:
       matrix:
         mask:
-          - "btrfs/001"
+          - "-g all"
         mount:
           - ""
         mkfs:
@@ -94,7 +94,7 @@ jobs:
         make olddefconfig
         make -j 16
     - name: Test boot of built kernel
-      run: sudo vng --cpus 4 --memory 4096 --verbose -o=-enable-kvm -- uname -a
+      run: sudo vng --cpus 16 --memory 16384 --verbose -o=-enable-kvm -- uname -a
     # Note: post-update could drop permissions from /dev/kvm
     - name: "Install dependencies for deps (btrfs-progs, fstests)"
       run: |
@@ -171,7 +171,7 @@ jobs:
     - name: 'Start fstests in VM: ${{ matrix.mask }}'
       run: |
         sudo vng -o=-enable-kvm --name "$RUNNER_NAME" \
-        --memory 4096 --cpus 4 --rw \
+        --memory 16384 --cpus 16 --rw \
         --disk disk1 --disk disk2 --disk disk3 --disk disk4 --disk disk5 \
         --disk disk6 --disk disk7 --disk disk8 --disk disk9 \
         --user root --network user -- \
@@ -182,7 +182,7 @@ jobs:
          btrfs --version ; \
          mkfs.btrfs /dev/vda ; \
          env --default-signal=PIPE GITHUB_ACTIONS=\"$GITHUB_ACTIONS\" \
-           ./check -R xunit -b -T -E EXCLUDE-GH btrfs/001 btrfs/075 btrfs/291; \
+           ./check -R xunit -b -T -E EXCLUDE-GH ${{ matrix.mask }}; \
          echo FSTESTS FINISHED"
     - name: Clean up VM environment
       if: always()
