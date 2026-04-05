@@ -171,6 +171,7 @@ jobs:
     - name: 'Start fstests in VM: ${{ matrix.mask }}'
       run: |
         sudo vng -o=-enable-kvm --name "$RUNNER_NAME" \
+        --verbose \
         --memory 16384 --cpus 16 --rw \
         --disk disk1 --disk disk2 --disk disk3 --disk disk4 --disk disk5 \
         --disk disk6 --disk disk7 --disk disk8 --disk disk9 \
