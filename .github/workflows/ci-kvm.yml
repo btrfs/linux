@@ -34,6 +34,8 @@ jobs:
       run: sudo apt-get update -y
     - name: Install build and runtime dependencies
       run: sudo apt-get install -y bc gawk gcc git indent make sed flex bison libelf-dev libssl-dev udev ccache virtme-ng iproute2 qemu-system-arm
+    - name: qemu arm fixup
+      run: sudo apt-get install -y qemu-system-arm
     - name: Set up local ccache environment
       run: |
         echo "PATH=/usr/lib64/ccache:/usr/lib/ccache:$PATH" >> "$GITHUB_ENV"
