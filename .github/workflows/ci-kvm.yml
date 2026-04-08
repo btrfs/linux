@@ -16,6 +16,10 @@ on:
       - 'ci-kvm'
       - 'ci-kvm-**'
 
+env:
+  VMCPUS: 4
+  VMMEM: 4096
+
 jobs:
   setup:
     if: github.ref != 'refs/heads/ci-kvm'
@@ -46,7 +50,7 @@ jobs:
         make -j 16
     - run: ccache -s
     - name: Test boot of built kernel
-      run: sudo vng --cpus 16 --memory 16384 --verbose -o=-enable-kvm -- 'uname -a; echo PATH=$PATH; ulimit -a; getconf PAGE_SIZE'
+      run: sudo vng --cpus ${{ env.VMCPUS }} --memory ${{ env.VMMEM }} --verbose -o=-enable-kvm -- 'uname -a; echo PATH=$PATH; ulimit -a; getconf PAGE_SIZE'
 
   test:
     if: github.ref != 'refs/heads/ci-kvm'
@@ -57,11 +61,17 @@ jobs:
     strategy:
       matrix:
         mask:
-          - "-g all"
+          - 'btrfs/[0-1]*'
+          - 'btrfs/010'
+          - 'btrfs/[2-9]*'
+          - 'generic/[0-2]*'
+          - 'generic/[3-4]*'
+          - 'generic/[5-9]*'
         mount:
           - ""
         mkfs:
-          - ""
+          - "--sectorsize 4k"
+          - "--sectorsize 64k"
       fail-fast: false
     runs-on: [self-hosted, Linux, ARM64]
     steps:
@@ -94,7 +104,7 @@ jobs:
         make olddefconfig
         make -j 16
     - name: Test boot of built kernel
-      run: sudo vng --cpus 16 --memory 16384 --verbose -o=-enable-kvm -- uname -a
+      run: sudo vng --cpus ${{ env.VMCPUS }} --memory ${{ env.VMMEM }} --verbose -o=-enable-kvm -- uname -a
     # Note: post-update could drop permissions from /dev/kvm
     - name: "Install dependencies for deps (btrfs-progs, fstests)"
       run: |
@@ -172,7 +182,7 @@ jobs:
       run: |
         sudo vng -o=-enable-kvm --name "$RUNNER_NAME" \
         --verbose \
-        --memory 16384 --cpus 16 --rw \
+        --memory ${{ env.VMMEM }} --cpus ${{ env.VMCPUS }}  --rw \
         --disk disk1 --disk disk2 --disk disk3 --disk disk4 --disk disk5 \
         --disk disk6 --disk disk7 --disk disk8 --disk disk9 \
         --user root --network user -- \
