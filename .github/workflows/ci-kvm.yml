@@ -83,7 +83,7 @@ jobs:
     - name: Update package cache
       run: sudo apt-get update -y
     - name: Install build and runtime dependencies
-      run: sudo apt-get install -y bc gawk gcc git indent make sed flex bison libelf-dev libssl-dev udev ccache virtme-ng qemu-system-arm
+      run: sudo apt-get install -y bc gawk gcc git indent make sed flex bison libelf-dev libssl-dev udev ccache virtme-ng iproute2 qemu-system-arm
     - name: Set up local ccache environment
       run: |
         echo "PATH=/usr/lib64/ccache:/usr/lib/ccache:$PATH" >> "$GITHUB_ENV"
@@ -167,6 +167,8 @@ jobs:
         echo export SCRATCH_MNT=/mnt/scratch >> local.config
         echo export FSTYP=btrfs >> local.config
         echo export MKFS_OPTIONS="'-K -f ${{ matrix.mkfs }}'" >> local.config
+        # Dup to env
+        echo MKFS_OPTIONS="'-K -f ${{ matrix.mkfs }}'" >> "$GITHUB_ENV"
         echo export MOUNT_OPTIONS="'${{ matrix.mount }}'" >> local.config
         # Mask accepts excludes, special entries must not exclude themselves
         if echo "${{ matrix.mask }}" | grep -q '[]*[]'; then \
@@ -191,7 +193,7 @@ jobs:
          PATH=\"/usr/local/bin:/usr/local/sbin:$PATH\"; \
          echo \"PATH=$PATH\"; \
          btrfs --version ; \
-         mkfs.btrfs /dev/vda ; \
+         mkfs.btrfs ${{ env.MKFS_OPTIONS }} /dev/vda ; \
          env --default-signal=PIPE GITHUB_ACTIONS=\"$GITHUB_ACTIONS\" \
            ./check -R xunit -b -T -E EXCLUDE-GH ${{ matrix.mask }}; \
          echo FSTESTS FINISHED"
