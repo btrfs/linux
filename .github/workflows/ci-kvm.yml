@@ -193,7 +193,7 @@ jobs:
          PATH=\"/usr/local/bin:/usr/local/sbin:$PATH\"; \
          echo \"PATH=$PATH\"; \
          btrfs --version ; \
-         mkfs.btrfs ${{ env.MKFS_OPTIONS }} /dev/vda ; \
+         mkfs.btrfs $(echo ${{ env.MKFS_OPTIONS }} ) /dev/vda ; \
          env --default-signal=PIPE GITHUB_ACTIONS=\"$GITHUB_ACTIONS\" \
            ./check -R xunit -b -T -E EXCLUDE-GH ${{ matrix.mask }}; \
          echo FSTESTS FINISHED"
