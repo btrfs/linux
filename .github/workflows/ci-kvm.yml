@@ -46,7 +46,7 @@ jobs:
         make -j 16
     - run: ccache -s
     - name: Test boot of built kernel
-      run: sudo vng --verbose -o=-enable-kvm -- 'uname -a; echo PATH=$PATH; ulimit -a'
+      run: sudo vng --cpus 64 --verbose -o=-enable-kvm -- 'uname -a; echo PATH=$PATH; ulimit -a'
 
   test:
     if: github.ref != 'refs/heads/ci-kvm'
@@ -103,7 +103,7 @@ jobs:
         # Second build is from cache
         make -j 32
     - name: Test boot of built kernel
-      run: sudo vng -o=-enable-kvm -- uname -a
+      run: sudo vng --cpus 64 -o=-enable-kvm -- uname -a
     # Note: post-update could drop permissions from /dev/kvm
     - name: "Install dependencies for deps (btrfs-progs, fstests)"
       run: |
