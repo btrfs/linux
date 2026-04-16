@@ -65,10 +65,10 @@ jobs:
           - 'generic/[5-9]*'
         mount:
           - ''
-          - '-o compress'
           - '-o compress=zstd'
         mkfs:
           - ''
+          - '-O rst'
       # Let all tests continue even if some ends early
       fail-fast: false
     runs-on: [self-hosted, Linux, X64]
