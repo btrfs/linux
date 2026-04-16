@@ -1,0 +1,224 @@
+# CI on self-hosted runners with KVM virtualization (4 CPUs, 4G RAM, 20h timeout)
+# similar to the GH hosted build config (branch ci-gh)
+#
+# - virualization provided by virtme
+# - x86_64
+
+name: CI KVM
+
+on:
+  push:
+    branches:
+      - 'ci-kvm'
+      - 'ci-kvm-**'
+  pull_request:
+    branches:
+      - 'ci-kvm'
+      - 'ci-kvm-**'
+
+jobs:
+  setup:
+    if: github.ref != 'refs/heads/ci-kvm'
+    runs-on: [self-hosted, Linux, X64]
+    steps:
+    - name: Fixup permissions
+      run: |
+        pwd
+        sudo chown runner:runner -R .
+    - uses: actions/checkout@v6
+    - name: Update package cache
+      run: sudo apt-get update -y
+    - name: Install build and runtime dependencies
+      run: sudo apt-get install -y bc gawk gcc git indent make sed flex bison libelf-dev libssl-dev udev ccache virtme-ng iproute2
+    - name: Set up local ccache environment
+      run: |
+        echo "PATH=/usr/lib64/ccache:/usr/lib/ccache:$PATH" >> "$GITHUB_ENV"
+        echo "CCACHE_DIR=/home/runner/_ccache" >> "$GITHUB_ENV"
+    - run: ccache -s
+    - name: Build kernel for virtme
+      run: |
+        vng --version
+        vng --verbose --kconfig --config .github/workflows/kconfig.btrfs --config .github/workflows/kconfig.fstests
+        cat .github/workflows/kconfig.btrfs .github/workflows/kconfig.fstests >> .config
+        scripts/config -d SOUND -d DRM -d KVM -d SQUASHFS -d PCMCIA -d PCCARD -d CARDBUS
+        scripts/config -d ATA -d INPUT_MOUSE -d MOUSE_PS2 -d FB -d HDMI -d SND -d BPF
+        make olddefconfig
+        make -j 16
+    - run: ccache -s
+    - name: Test boot of built kernel
+      run: sudo vng --verbose -o=-enable-kvm -- 'uname -a; echo PATH=$PATH; ulimit -a'
+
+  test:
+    if: github.ref != 'refs/heads/ci-kvm'
+    needs: setup
+    # 20h timeout
+    timeout-minutes: 1200
+    # Exception entries need to be synced to check run
+    strategy:
+      matrix:
+        mask:
+          - 'btrfs/[0-1]*'
+          - 'btrfs/010'
+          - 'btrfs/[2-9]*'
+          - 'generic/[0-2]*'
+          - 'generic/[3-4]*'
+          - 'generic/[5-9]*'
+        mount:
+          - ''
+          - '-o compress=zstd'
+        mkfs:
+          - ''
+          - '-O rst'
+      # Let all tests continue even if some ends early
+      fail-fast: false
+    runs-on: [self-hosted, Linux, X64]
+    steps:
+    - name: Fixup permissions
+      run: |
+        pwd
+        sudo chown runner:runner -R .
+    - uses: actions/checkout@v6
+    - name: Update package cache
+      run: sudo apt-get update -y
+    - name: Install build and runtime dependencies
+      run: sudo apt-get install -y bc gawk gcc git indent make sed flex bison libelf-dev libssl-dev udev ccache virtme-ng
+    - name: Set up local ccache environment
+      run: |
+        echo "PATH=/usr/lib64/ccache:/usr/lib/ccache:$PATH" >> "$GITHUB_ENV"
+        echo "CCACHE_DIR=/home/runner/_ccache" >> "$GITHUB_ENV"
+    - run: ccache -s
+    - name: Check KVM and virtme
+      # Check version and that it can actually run on the host VM
+      run: |
+        #sudo chmod 0666 /dev/kvm
+        ls -l /dev/kvm
+    # Pass the configs for initial setup and then again if localmod drops some something
+    - name: Build kernel for virtme
+      run: |
+        vng --verbose --kconfig --config .github/workflows/kconfig.btrfs --config .github/workflows/kconfig.fstests
+        cat .github/workflows/kconfig.btrfs .github/workflows/kconfig.fstests >> .config
+        scripts/config -d SOUND -d DRM -d KVM -d SQUASHFS -d PCMCIA -d PCCARD -d CARDBUS
+        scripts/config -d ATA -d INPUT_MOUSE -d MOUSE_PS2 -d FB -d HDMI -d SND -d BPF
+        make olddefconfig
+        # Second build is from cache
+        make -j 32
+    - name: Test boot of built kernel
+      run: sudo vng -o=-enable-kvm -- uname -a
+    # Note: post-update could drop permissions from /dev/kvm
+    - name: "Install dependencies for deps (btrfs-progs, fstests)"
+      run: |
+        sudo apt-get install -y acl attr autoconf automake bc dbench dump e2fsprogs fio gawk \
+            gcc git indent libacl1-dev libaio-dev libcap-dev libgdbm-dev libtool \
+            libtool-bin liburing-dev libuuid1 lvm2 make psmisc python3 quota sed \
+            uuid-dev uuid-runtime xfsprogs sqlite3 libgdbm-compat-dev \
+            fsverity parted fscrypt keyutils \
+            xfsdump xfslibs-dev libbtrfs-dev libbtrfsutil-dev btrfs-progs pkg-config duperemove \
+            liblzo2-dev libzstd-dev libblkid-dev zlib1g-dev libext2fs-dev libudev-dev
+        ls -l /dev/kvm
+    - name: Checkout btrfs-progs.git
+      uses: actions/checkout@v6
+      with:
+        path: btrfs-progs
+        repository: kdave/btrfs-progs
+        ref: devel
+    - name: Build btrfs-progs (devel + experimental)
+      run: |
+        pwd
+        pushd ${{ github.workspace }}/btrfs-progs
+        ./autogen.sh
+        ./configure --disable-documentation --disable-python --enable-experimental
+        make -j 16
+        sudo make install
+        sudo cp btrfs-corrupt-block /usr/local/sbin
+        popd
+        type -p btrfs
+        btrfs --version
+    - name: Checkout fstests.git
+      uses: actions/checkout@v6
+      with:
+        path: xfstests
+        repository: kdave/xfstests
+        ref: local
+    - name: Build fstests
+      run: |
+        pwd
+        pushd ${{ github.workspace }}/xfstests
+        autoreconf -vfi
+        ./configure
+        make -j 16
+        popd
+
+    # Tests
+    - name: Setup fstests environment
+      run: |
+        truncate -s 12g disk{1..9}
+        pushd ${{ github.workspace }}/xfstests
+        id fsgqa || sudo useradd --create-home fsgqa
+        id fsgqa2 || sudo useradd fsgqa2
+        id 123456-fsgqa || sudo useradd 123456-fsgqa
+        sudo mkdir -p /mnt/test
+        sudo mkdir -p /mnt/scratch
+        truncate -s 0 local.config
+        echo export TEST_DEV=/dev/vda >> local.config
+        echo export TEST_DIR=/mnt/test >> local.config
+        echo export SCRATCH_DEV_POOL="'/dev/vdb /dev/vdc /dev/vdd /dev/vde /dev/vdf /dev/vdg /dev/vdh /dev/vdi'" >> local.config
+        echo export LOGWRITES_DEV=/dev/vdi >> local.config
+        echo export SCRATCH_MNT=/mnt/scratch >> local.config
+        echo export FSTYP=btrfs >> local.config
+        echo export MKFS_OPTIONS="'-K -f ${{ matrix.mkfs }}'" >> local.config
+        echo export MOUNT_OPTIONS="'${{ matrix.mount }}'" >> local.config
+        # Mask accepts excludes, special entries must not exclude themselves
+        if echo "${{ matrix.mask }}" | grep -q '[]*[]'; then \
+          echo "btrfs/010" >> EXCLUDE-GH; \
+        fi
+        popd
+    # With --rw we have full access to the host
+    # FIXME: the mkfs.btrfs should run inside VM and take the MKFS_OPTIONS and TEST_DEV from config
+    # VM setup:
+    # - memory 4GiB
+    # - cpus all from host (usually 4)
+    - name: 'Start fstests in VM: ${{ matrix.mask }}'
+      run: |
+        sudo vng -o=-enable-kvm --name "$RUNNER_NAME" \
+        --memory 4096 --cpus 4 --rw \
+        --disk disk1 --disk disk2 --disk disk3 --disk disk4 --disk disk5 \
+        --disk disk6 --disk disk7 --disk disk8 --disk disk9 \
+        --user root --network user -- \
+        "cd ${{ github.workspace }}/xfstests; lscpu; free -m; cat /proc/partitions; ulimit -n 65536; ulimit -a; \
+         cat local.config; \
+         PATH=\"/usr/local/bin:/usr/local/sbin:$PATH\"; \
+         echo \"PATH=$PATH\"; \
+         btrfs --version ; \
+         mkfs.btrfs $(echo ${{ env.MKFS_OPTIONS }} ) /dev/vda ; \
+         env --default-signal=PIPE GITHUB_ACTIONS=\"$GITHUB_ACTIONS\" \
+           ./check -R xunit -b -T -E EXCLUDE-GH ${{ matrix.mask }}; \
+         echo FSTESTS FINISHED"
+    - name: Clean up VM environment
+      if: always()
+      run: |
+        if pgrep -f "$RUNNER_NAME"; then \
+          pgrep -af "$RUNNER_NAME" | grep qemu-system | grep -w "$RUNNER_NAME" | \
+            grep -v "grep" | awk '{print $1}' | sudo xargs kill -9; \
+          sleep 1; \
+          pgrep -af "$RUNNER_NAME" || true; \
+        fi
+    - name: Generate report
+      uses: mikepenz/action-junit-report@v6
+      if: success() || failure()
+      with:
+        annotate_only: true
+        report_paths: '${{ github.workspace }}/xfstests/results/result.xml*'
+    - name: Sanitize mask before publishing results
+      if: success() || failure()
+      run: |
+        echo SANITIZED=$(echo "${{ matrix.mask }}${{ matrix.mount }}${{ matrix.mkfs }}" | tr -s "] */[-" '-') >> "$GITHUB_ENV"
+        grep SANITIZED "$GITHUB_ENV"
+    - name: Save results as artifacts
+      uses: actions/upload-artifact@v7
+      if: success() || failure()
+      with:
+        name: 'results-${{ env.SANITIZED }}'
+        path: '${{ github.workspace }}/xfstests/results/'
+    - name: Collect not run tests to summary
+      if: success() || failure()
+      run: ${{ github.workspace }}/xfstests/collect-notrun-to-summary.sh ${{ github.workspace }}/xfstests >> $GITHUB_STEP_SUMMARY
