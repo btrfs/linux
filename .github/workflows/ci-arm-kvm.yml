@@ -2,19 +2,19 @@
 # similar to the GH hosted build config (branch ci-gh)
 #
 # - virualization provided by virtme
-# - x86_64
+# - ARM64
 
-name: CI KVM
+name: CI KVM (ARM64, 64K page)
 
 on:
   push:
     branches:
-      - 'ci-kvm'
-      - 'ci-kvm-**'
+      - 'ci-arm-kvm'
+      - 'ci-arm-kvm-**'
   pull_request:
     branches:
-      - 'ci-kvm'
-      - 'ci-kvm-**'
+      - 'ci-arm-kvm'
+      - 'ci-arm-kvm-**'
 
 env:
   VMCPUS: 4
@@ -22,7 +22,7 @@ env:
 
 jobs:
   setup:
-    if: github.ref != 'refs/heads/ci-kvm'
+    if: github.ref != 'refs/heads/ci-arm-kvm'
     runs-on: [self-hosted, Linux, ARM64]
     steps:
     - name: Fixup permissions
@@ -53,7 +53,7 @@ jobs:
       run: sudo vng --cpus ${{ env.VMCPUS }} --memory ${{ env.VMMEM }} --verbose -o=-enable-kvm -- 'uname -a; echo PATH=$PATH; ulimit -a; getconf PAGE_SIZE'
 
   test:
-    if: github.ref != 'refs/heads/ci-kvm'
+    if: github.ref != 'refs/heads/ci-arm-kvm'
     needs: setup
     # 24h timeout
     timeout-minutes: 1440
