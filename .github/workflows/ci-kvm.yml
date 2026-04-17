@@ -151,6 +151,7 @@ jobs:
     # Tests
     - name: Setup fstests environment
       run: |
+        truncate -s 0g disk{1..9}
         truncate -s 12g disk{1..9}
         pushd ${{ github.workspace }}/xfstests
         id fsgqa || sudo useradd --create-home fsgqa
