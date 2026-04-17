@@ -51,8 +51,9 @@ jobs:
   test:
     if: github.ref != 'refs/heads/ci-kvm'
     needs: setup
-    # 20h timeout
-    timeout-minutes: 1200
+    # 20h timeout is long enough but too long for runaway jobs,
+    # 14h
+    timeout-minutes: 840
     # Exception entries need to be synced to check run
     strategy:
       matrix:
