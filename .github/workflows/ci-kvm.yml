@@ -179,9 +179,10 @@ jobs:
     # VM setup:
     # - memory 4GiB
     # - cpus all from host (usually 4)
+    # - syslog printed inline with fstests messages
     - name: 'Start fstests in VM: ${{ matrix.mask }}'
       run: |
-        sudo vng -o=-enable-kvm --name "$RUNNER_NAME" \
+        sudo vng --verbose -o=-enable-kvm --name "$RUNNER_NAME" \
         --memory 4096 --cpus 4 --rw \
         --disk disk1 --disk disk2 --disk disk3 --disk disk4 --disk disk5 \
         --disk disk6 --disk disk7 --disk disk8 --disk disk9 \
