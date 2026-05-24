@@ -119,6 +119,17 @@ void __ns_common_free(struct ns_common *ns);
 		struct user_namespace *:   CLONE_NEWUSER,   \
 		struct uts_namespace *:    CLONE_NEWUTS)
 
+#define NS_COMMON_INIT(nsname, refs)							\
+{											\
+	.ns_type		= ns_common_type(&nsname),				\
+	.ns_id			= 0,							\
+	.inum			= ns_init_inum(&nsname),				\
+	.ops			= to_ns_operations(&nsname),				\
+	.stashed		= NULL,							\
+	.__ns_ref		= REFCOUNT_INIT(refs),					\
+	.ns_list_node		= LIST_HEAD_INIT(nsname.ns.ns_list_node),		\
+}
+
 #define ns_common_init(__ns)                     \
 	__ns_common_init(to_ns_common(__ns),     \
 			 ns_common_type(__ns),   \
@@ -132,6 +143,8 @@ void __ns_common_free(struct ns_common *ns);
 			 __inum)
 
 #define ns_common_free(__ns) __ns_common_free(to_ns_common((__ns)))
+
+bool may_see_all_namespaces(void);
 
 static __always_inline __must_check bool __ns_ref_put(struct ns_common *ns)
 {

@@ -1413,6 +1413,7 @@ static int __mlx5_lag_dev_add_mdev(struct mlx5_core_dev *dev)
 static void mlx5_lag_unregister_hca_devcom_comp(struct mlx5_core_dev *dev)
 {
 	mlx5_devcom_unregister_component(dev->priv.hca_devcom_comp);
+	dev->priv.hca_devcom_comp = NULL;
 }
 
 static int mlx5_lag_register_hca_devcom_comp(struct mlx5_core_dev *dev)
@@ -1651,8 +1652,12 @@ void mlx5_lag_disable_change(struct mlx5_core_dev *dev)
 	mutex_lock(&ldev->lock);
 
 	ldev->mode_changes_in_progress++;
-	if (__mlx5_lag_is_active(ldev))
-		mlx5_disable_lag(ldev);
+	if (__mlx5_lag_is_active(ldev)) {
+		if (ldev->mode == MLX5_LAG_MODE_MPESW)
+			mlx5_lag_disable_mpesw(ldev);
+		else
+			mlx5_disable_lag(ldev);
+	}
 
 	mutex_unlock(&ldev->lock);
 	mlx5_devcom_comp_unlock(dev->priv.hca_devcom_comp);
