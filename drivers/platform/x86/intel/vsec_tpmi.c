@@ -622,11 +622,11 @@ static int tpmi_create_device(struct intel_tpmi_info *tpmi_info,
 	if (!name)
 		return -EOPNOTSUPP;
 
-	res = kcalloc(pfs->pfs_header.num_entries, sizeof(*res), GFP_KERNEL);
+	res = kzalloc_objs(*res, pfs->pfs_header.num_entries);
 	if (!res)
 		return -ENOMEM;
 
-	feature_vsec_dev = kzalloc(sizeof(*feature_vsec_dev), GFP_KERNEL);
+	feature_vsec_dev = kzalloc_obj(*feature_vsec_dev);
 	if (!feature_vsec_dev) {
 		kfree(res);
 		return -ENOMEM;
@@ -813,10 +813,6 @@ static int intel_vsec_tpmi_init(struct auxiliary_device *auxdev)
 
 	auxiliary_set_drvdata(auxdev, tpmi_info);
 
-	ret = tpmi_create_devices(tpmi_info);
-	if (ret)
-		return ret;
-
 	/*
 	 * Allow debugfs when security policy allows. Everything this debugfs
 	 * interface provides, can also be done via /dev/mem access. If
@@ -825,6 +821,12 @@ static int intel_vsec_tpmi_init(struct auxiliary_device *auxdev)
 	 */
 	if (!security_locked_down(LOCKDOWN_DEV_MEM) && capable(CAP_SYS_RAWIO))
 		tpmi_dbgfs_register(tpmi_info);
+
+	ret = tpmi_create_devices(tpmi_info);
+	if (ret) {
+		debugfs_remove_recursive(tpmi_info->dbgfs_dir);
+		return ret;
+	}
 
 	return 0;
 }

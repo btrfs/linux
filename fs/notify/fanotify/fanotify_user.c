@@ -1210,6 +1210,7 @@ static int fanotify_find_path(int dfd, const char __user *filename,
 
 		*path = fd_file(f)->f_path;
 		path_get(path);
+		ret = 0;
 	} else {
 		unsigned int lookup_flags = 0;
 
@@ -1219,22 +1220,7 @@ static int fanotify_find_path(int dfd, const char __user *filename,
 			lookup_flags |= LOOKUP_DIRECTORY;
 
 		ret = user_path_at(dfd, filename, lookup_flags, path);
-		if (ret)
-			goto out;
 	}
-
-	/* you can only watch an inode if you have read permissions on it */
-	ret = path_permission(path, MAY_READ);
-	if (ret) {
-		path_put(path);
-		goto out;
-	}
-
-	ret = security_path_notify(path, mask, obj_type);
-	if (ret)
-		path_put(path);
-
-out:
 	return ret;
 }
 
@@ -1573,7 +1559,7 @@ static struct fsnotify_event *fanotify_alloc_overflow_event(void)
 {
 	struct fanotify_event *oevent;
 
-	oevent = kmalloc(sizeof(*oevent), GFP_KERNEL_ACCOUNT);
+	oevent = kmalloc_obj(*oevent, GFP_KERNEL_ACCOUNT);
 	if (!oevent)
 		return NULL;
 
@@ -1597,31 +1583,36 @@ static struct hlist_head *fanotify_alloc_merge_hash(void)
 	return hash;
 }
 
+DEFINE_CLASS(fsnotify_group,
+	     struct fsnotify_group *,
+	     if (!IS_ERR_OR_NULL(_T)) fsnotify_destroy_group(_T),
+	     fsnotify_alloc_group(ops, flags),
+	     const struct fsnotify_ops *ops, int flags)
+
 /* fanotify syscalls */
 SYSCALL_DEFINE2(fanotify_init, unsigned int, flags, unsigned int, event_f_flags)
 {
 	struct user_namespace *user_ns = current_user_ns();
-	struct fsnotify_group *group;
 	int f_flags, fd;
 	unsigned int fid_mode = flags & FANOTIFY_FID_BITS;
 	unsigned int class = flags & FANOTIFY_CLASS_BITS;
 	unsigned int internal_flags = 0;
-	struct file *file;
 
 	pr_debug("%s: flags=%x event_f_flags=%x\n",
 		 __func__, flags, event_f_flags);
 
-	if (!capable(CAP_SYS_ADMIN)) {
-		/*
-		 * An unprivileged user can setup an fanotify group with
-		 * limited functionality - an unprivileged group is limited to
-		 * notification events with file handles or mount ids and it
-		 * cannot use unlimited queue/marks.
-		 */
-		if ((flags & FANOTIFY_ADMIN_INIT_FLAGS) ||
-		    !(flags & (FANOTIFY_FID_BITS | FAN_REPORT_MNT)))
-			return -EPERM;
+	/*
+	 * An unprivileged user can setup an fanotify group with limited
+	 * functionality - an unprivileged group is limited to notification
+	 * events with file handles or mount ids and it cannot use unlimited
+	 * queue/marks.
+	 */
+	if (((flags & FANOTIFY_ADMIN_INIT_FLAGS) ||
+	     !(flags & (FANOTIFY_FID_BITS | FAN_REPORT_MNT))) &&
+	    !capable(CAP_SYS_ADMIN))
+		return -EPERM;
 
+	if (!ns_capable_noaudit(&init_user_ns, CAP_SYS_ADMIN)) {
 		/*
 		 * Setting the internal flag FANOTIFY_UNPRIV on the group
 		 * prevents setting mount/filesystem marks on this group and
@@ -1690,36 +1681,29 @@ SYSCALL_DEFINE2(fanotify_init, unsigned int, flags, unsigned int, event_f_flags)
 	if (flags & FAN_NONBLOCK)
 		f_flags |= O_NONBLOCK;
 
-	/* fsnotify_alloc_group takes a ref.  Dropped in fanotify_release */
-	group = fsnotify_alloc_group(&fanotify_fsnotify_ops,
+	CLASS(fsnotify_group, group)(&fanotify_fsnotify_ops,
 				     FSNOTIFY_GROUP_USER);
-	if (IS_ERR(group)) {
+	/* fsnotify_alloc_group takes a ref.  Dropped in fanotify_release */
+	if (IS_ERR(group))
 		return PTR_ERR(group);
-	}
 
 	/* Enforce groups limits per user in all containing user ns */
 	group->fanotify_data.ucounts = inc_ucount(user_ns, current_euid(),
 						  UCOUNT_FANOTIFY_GROUPS);
-	if (!group->fanotify_data.ucounts) {
-		fd = -EMFILE;
-		goto out_destroy_group;
-	}
+	if (!group->fanotify_data.ucounts)
+		return -EMFILE;
 
 	group->fanotify_data.flags = flags | internal_flags;
 	group->memcg = get_mem_cgroup_from_mm(current->mm);
 	group->user_ns = get_user_ns(user_ns);
 
 	group->fanotify_data.merge_hash = fanotify_alloc_merge_hash();
-	if (!group->fanotify_data.merge_hash) {
-		fd = -ENOMEM;
-		goto out_destroy_group;
-	}
+	if (!group->fanotify_data.merge_hash)
+		return -ENOMEM;
 
 	group->overflow_event = fanotify_alloc_overflow_event();
-	if (unlikely(!group->overflow_event)) {
-		fd = -ENOMEM;
-		goto out_destroy_group;
-	}
+	if (unlikely(!group->overflow_event))
+		return -ENOMEM;
 
 	if (force_o_largefile())
 		event_f_flags |= O_LARGEFILE;
@@ -1738,8 +1722,7 @@ SYSCALL_DEFINE2(fanotify_init, unsigned int, flags, unsigned int, event_f_flags)
 		group->priority = FSNOTIFY_PRIO_PRE_CONTENT;
 		break;
 	default:
-		fd = -EINVAL;
-		goto out_destroy_group;
+		return -EINVAL;
 	}
 
 	BUILD_BUG_ON(!(FANOTIFY_ADMIN_INIT_FLAGS & FAN_UNLIMITED_QUEUE));
@@ -1750,27 +1733,15 @@ SYSCALL_DEFINE2(fanotify_init, unsigned int, flags, unsigned int, event_f_flags)
 	}
 
 	if (flags & FAN_ENABLE_AUDIT) {
-		fd = -EPERM;
 		if (!capable(CAP_AUDIT_WRITE))
-			goto out_destroy_group;
+			return -EPERM;
 	}
 
-	fd = get_unused_fd_flags(f_flags);
-	if (fd < 0)
-		goto out_destroy_group;
-
-	file = anon_inode_getfile_fmode("[fanotify]", &fanotify_fops, group,
-					f_flags, FMODE_NONOTIFY);
-	if (IS_ERR(file)) {
-		put_unused_fd(fd);
-		fd = PTR_ERR(file);
-		goto out_destroy_group;
-	}
-	fd_install(fd, file);
-	return fd;
-
-out_destroy_group:
-	fsnotify_destroy_group(group);
+	fd = FD_ADD(f_flags,
+		    anon_inode_getfile_fmode("[fanotify]", &fanotify_fops,
+					     group, f_flags, FMODE_NONOTIFY));
+	if (fd >= 0)
+		retain_and_null_ptr(group);
 	return fd;
 }
 
@@ -2006,8 +1977,8 @@ static int do_fanotify_mark(int fanotify_fd, unsigned int flags, __u64 mask,
 	 * A user is allowed to setup sb/mount/mntns marks only if it is
 	 * capable in the user ns where the group was created.
 	 */
-	if (!ns_capable(group->user_ns, CAP_SYS_ADMIN) &&
-	    mark_type != FAN_MARK_INODE)
+	if (mark_type != FAN_MARK_INODE &&
+	    !ns_capable(group->user_ns, CAP_SYS_ADMIN))
 		return -EPERM;
 
 	/*
@@ -2072,6 +2043,15 @@ static int do_fanotify_mark(int fanotify_fd, unsigned int flags, __u64 mask,
 		if (ret)
 			goto path_put_and_out;
 	}
+
+	/* you can only watch an inode if you have read permissions on it */
+	ret = path_permission(&path, MAY_READ);
+	if (ret)
+		goto path_put_and_out;
+
+	ret = security_path_notify(&path, mask, obj_type);
+	if (ret)
+		goto path_put_and_out;
 
 	if (fid_mode) {
 		ret = fanotify_test_fsid(path.dentry, flags, &__fsid);

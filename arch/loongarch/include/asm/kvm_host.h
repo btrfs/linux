@@ -37,6 +37,7 @@
 #define KVM_REQ_TLB_FLUSH_GPA		KVM_ARCH_REQ(0)
 #define KVM_REQ_STEAL_UPDATE		KVM_ARCH_REQ(1)
 #define KVM_REQ_PMU			KVM_ARCH_REQ(2)
+#define KVM_REQ_AUX_LOAD		KVM_ARCH_REQ(3)
 
 #define KVM_GUESTDBG_SW_BP_MASK		\
 	(KVM_GUESTDBG_ENABLE | KVM_GUESTDBG_USE_SW_BP)
@@ -85,7 +86,6 @@ struct kvm_context {
 struct kvm_world_switch {
 	int (*exc_entry)(void);
 	int (*enter_guest)(struct kvm_run *run, struct kvm_vcpu *vcpu);
-	unsigned long page_order;
 };
 
 #define MAX_PGTABLE_LEVELS	4
@@ -126,6 +126,8 @@ struct kvm_arch {
 	struct kvm_phyid_map  *phyid_map;
 	/* Enabled PV features */
 	unsigned long pv_features;
+	/* Supported KVM features */
+	unsigned long kvm_features;
 
 	s64 time_offset;
 	struct kvm_context __percpu *vmcs;
@@ -162,6 +164,7 @@ enum emulation_result {
 
 #define LOONGARCH_PV_FEAT_UPDATED	BIT_ULL(63)
 #define LOONGARCH_PV_FEAT_MASK		(BIT(KVM_FEATURE_IPI) |		\
+					 BIT(KVM_FEATURE_PREEMPT) |	\
 					 BIT(KVM_FEATURE_STEAL_TIME) |	\
 					 BIT(KVM_FEATURE_USER_HCALL) |	\
 					 BIT(KVM_FEATURE_VIRT_EXTIOI))
@@ -198,6 +201,7 @@ struct kvm_vcpu_arch {
 
 	/* Which auxiliary state is loaded (KVM_LARCH_*) */
 	unsigned int aux_inuse;
+	unsigned int aux_ldtype;
 
 	/* FPU state */
 	struct loongarch_fpu fpu FPU_ALIGN;
@@ -250,6 +254,7 @@ struct kvm_vcpu_arch {
 		u64 guest_addr;
 		u64 last_steal;
 		struct gfn_to_hva_cache cache;
+		u8  preempted;
 	} st;
 };
 
@@ -261,6 +266,11 @@ static inline unsigned long readl_sw_gcsr(struct loongarch_csrs *csr, int reg)
 static inline void writel_sw_gcsr(struct loongarch_csrs *csr, int reg, unsigned long val)
 {
 	csr->csrs[reg] = val;
+}
+
+static inline bool kvm_guest_has_msgint(struct kvm_vcpu_arch *arch)
+{
+	return arch->cpucfg[1] & CPUCFG1_MSGINT;
 }
 
 static inline bool kvm_guest_has_fpu(struct kvm_vcpu_arch *arch)
@@ -291,6 +301,12 @@ static inline bool kvm_guest_has_pmu(struct kvm_vcpu_arch *arch)
 static inline int kvm_get_pmu_num(struct kvm_vcpu_arch *arch)
 {
 	return (arch->cpucfg[6] & CPUCFG6_PMNUM) >> CPUCFG6_PMNUM_SHIFT;
+}
+
+/* Check whether KVM support this feature (VMM may disable it) */
+static inline bool kvm_vm_support(struct kvm_arch *arch, int feature)
+{
+	return !!(arch->kvm_features & BIT_ULL(feature));
 }
 
 bool kvm_arch_pmi_in_guest(struct kvm_vcpu *vcpu);
@@ -339,8 +355,6 @@ void kvm_exc_entry(void);
 int  kvm_enter_guest(struct kvm_run *run, struct kvm_vcpu *vcpu);
 
 extern unsigned long vpid_mask;
-extern const unsigned long kvm_exception_size;
-extern const unsigned long kvm_enter_guest_size;
 extern struct kvm_world_switch *kvm_loongarch_ops;
 
 #define SW_GCSR		(1 << 0)

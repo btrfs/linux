@@ -1135,42 +1135,8 @@ EXPORT_SYMBOL(flush_dcache_folio);
 #endif
 
 /**
- * __compat_vma_mmap_prepare() - See description for compat_vma_mmap_prepare()
- * for details. This is the same operation, only with a specific file operations
- * struct which may or may not be the same as vma->vm_file->f_op.
- * @f_op: The file operations whose .mmap_prepare() hook is specified.
- * @file: The file which backs or will back the mapping.
- * @vma: The VMA to apply the .mmap_prepare() hook to.
- * Returns: 0 on success or error.
- */
-int __compat_vma_mmap_prepare(const struct file_operations *f_op,
-		struct file *file, struct vm_area_struct *vma)
-{
-	struct vm_area_desc desc = {
-		.mm = vma->vm_mm,
-		.file = file,
-		.start = vma->vm_start,
-		.end = vma->vm_end,
-
-		.pgoff = vma->vm_pgoff,
-		.vm_file = vma->vm_file,
-		.vm_flags = vma->vm_flags,
-		.page_prot = vma->vm_page_prot,
-	};
-	int err;
-
-	err = f_op->mmap_prepare(&desc);
-	if (err)
-		return err;
-	set_vma_from_desc(vma, &desc);
-
-	return 0;
-}
-EXPORT_SYMBOL(__compat_vma_mmap_prepare);
-
-/**
- * compat_vma_mmap_prepare() - Apply the file's .mmap_prepare() hook to an
- * existing VMA.
+ * compat_vma_mmap() - Apply the file's .mmap_prepare() hook to an
+ * existing VMA and execute any requested actions.
  * @file: The file which possesss an f_op->mmap_prepare() hook.
  * @vma: The VMA to apply the .mmap_prepare() hook to.
  *
@@ -1185,7 +1151,7 @@ EXPORT_SYMBOL(__compat_vma_mmap_prepare);
  * .mmap_prepare() hook, as we are in a different context when we invoke the
  * .mmap() hook, already having a VMA to deal with.
  *
- * compat_vma_mmap_prepare() is a compatibility function that takes VMA state,
+ * compat_vma_mmap() is a compatibility function that takes VMA state,
  * establishes a struct vm_area_desc descriptor, passes to the underlying
  * .mmap_prepare() hook and applies any changes performed by it.
  *
@@ -1194,11 +1160,42 @@ EXPORT_SYMBOL(__compat_vma_mmap_prepare);
  *
  * Returns: 0 on success or error.
  */
-int compat_vma_mmap_prepare(struct file *file, struct vm_area_struct *vma)
+int compat_vma_mmap(struct file *file, struct vm_area_struct *vma)
 {
-	return __compat_vma_mmap_prepare(file->f_op, file, vma);
+	struct vm_area_desc desc = {
+		.mm = vma->vm_mm,
+		.file = file,
+		.start = vma->vm_start,
+		.end = vma->vm_end,
+
+		.pgoff = vma->vm_pgoff,
+		.vm_file = vma->vm_file,
+		.vma_flags = vma->flags,
+		.page_prot = vma->vm_page_prot,
+
+		.action.type = MMAP_NOTHING, /* Default */
+	};
+	int err;
+
+	err = vfs_mmap_prepare(file, &desc);
+	if (err)
+		return err;
+
+	err = mmap_action_prepare(&desc);
+	if (err)
+		return err;
+
+	set_vma_from_desc(vma, &desc);
+	err = mmap_action_complete(vma, &desc.action,
+				   /*is_compat=*/true);
+	if (err) {
+		const size_t len = vma_pages(vma) << PAGE_SHIFT;
+
+		do_munmap(current->mm, vma->vm_start, len, NULL);
+	}
+	return err;
 }
-EXPORT_SYMBOL(compat_vma_mmap_prepare);
+EXPORT_SYMBOL(compat_vma_mmap);
 
 static void set_ps_flags(struct page_snapshot *ps, const struct folio *folio,
 			 const struct page *page)
@@ -1279,6 +1276,129 @@ again:
 		ps->idx = 0;
 	}
 }
+
+static int mmap_action_finish(struct vm_area_struct *vma,
+			      struct mmap_action *action, int err,
+			      bool is_compat)
+{
+	if (!err && action->success_hook)
+		err = action->success_hook(vma);
+
+	/*
+	 * If this is invoked from the compatibility layer, post-mmap() hook
+	 * logic will handle cleanup for us.
+	 */
+	if (!err || is_compat)
+		return err;
+
+	/*
+	 * If an error occurs, unmap the VMA altogether and return an error. We
+	 * only clear the newly allocated VMA, since this function is only
+	 * invoked if we do NOT merge, so we only clean up the VMA we created.
+	 */
+	if (action->error_hook) {
+		/* We may want to filter the error. */
+		err = action->error_hook(err);
+		/* The caller should not clear the error. */
+		VM_WARN_ON_ONCE(!err);
+	}
+	return err;
+}
+
+#ifdef CONFIG_MMU
+/**
+ * mmap_action_prepare - Perform preparatory setup for an VMA descriptor
+ * action which need to be performed.
+ * @desc: The VMA descriptor to prepare for its @desc->action.
+ *
+ * Returns: %0 on success, otherwise error.
+ */
+int mmap_action_prepare(struct vm_area_desc *desc)
+{
+	switch (desc->action.type) {
+	case MMAP_NOTHING:
+		return 0;
+	case MMAP_REMAP_PFN:
+		return remap_pfn_range_prepare(desc);
+	case MMAP_IO_REMAP_PFN:
+		return io_remap_pfn_range_prepare(desc);
+	}
+
+	WARN_ON_ONCE(1);
+	return -EINVAL;
+}
+EXPORT_SYMBOL(mmap_action_prepare);
+
+/**
+ * mmap_action_complete - Execute VMA descriptor action.
+ * @vma: The VMA to perform the action upon.
+ * @action: The action to perform.
+ * @is_compat: Is this being invoked from the compatibility layer?
+ *
+ * Similar to mmap_action_prepare().
+ *
+ * Return: 0 on success, or error, at which point the VMA will be unmapped if
+ * !@is_compat.
+ */
+int mmap_action_complete(struct vm_area_struct *vma,
+			 struct mmap_action *action,
+			 bool is_compat)
+{
+	int err = 0;
+
+	switch (action->type) {
+	case MMAP_NOTHING:
+		break;
+	case MMAP_REMAP_PFN:
+		err = remap_pfn_range_complete(vma, action);
+		break;
+	case MMAP_IO_REMAP_PFN:
+		/* Should have been delegated. */
+		WARN_ON_ONCE(1);
+		err = -EINVAL;
+		break;
+	}
+
+	return mmap_action_finish(vma, action, err, is_compat);
+}
+EXPORT_SYMBOL(mmap_action_complete);
+#else
+int mmap_action_prepare(struct vm_area_desc *desc)
+{
+	switch (desc->action.type) {
+	case MMAP_NOTHING:
+		break;
+	case MMAP_REMAP_PFN:
+	case MMAP_IO_REMAP_PFN:
+		WARN_ON_ONCE(1); /* nommu cannot handle these. */
+		break;
+	}
+
+	return 0;
+}
+EXPORT_SYMBOL(mmap_action_prepare);
+
+int mmap_action_complete(struct vm_area_struct *vma,
+			 struct mmap_action *action,
+			 bool is_compat)
+{
+	int err = 0;
+
+	switch (action->type) {
+	case MMAP_NOTHING:
+		break;
+	case MMAP_REMAP_PFN:
+	case MMAP_IO_REMAP_PFN:
+		WARN_ON_ONCE(1); /* nommu cannot handle this. */
+
+		err = -EINVAL;
+		break;
+	}
+
+	return mmap_action_finish(vma, action, err, is_compat);
+}
+EXPORT_SYMBOL(mmap_action_complete);
+#endif
 
 #ifdef CONFIG_MMU
 /**

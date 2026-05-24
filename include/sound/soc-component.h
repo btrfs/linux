@@ -90,6 +90,10 @@ struct snd_soc_component_driver {
 			     struct snd_soc_pcm_runtime *rtd);
 	void (*pcm_destruct)(struct snd_soc_component *component,
 			     struct snd_pcm *pcm);
+	int (*pcm_new)(struct snd_soc_component *component,
+		       struct snd_soc_pcm_runtime *rtd);
+	void (*pcm_free)(struct snd_soc_component *component,
+			 struct snd_pcm *pcm);
 
 	/* component wide operations */
 	int (*set_sysclk)(struct snd_soc_component *component,
@@ -237,8 +241,7 @@ struct snd_soc_component {
 	 * the driver will be marked as BROKEN when these fields are removed.
 	 */
 
-	/* Don't use these, use snd_soc_component_get_dapm() */
-	struct snd_soc_dapm_context dapm;
+	struct snd_soc_dapm_context *dapm;
 
 	/* machine specific init */
 	int (*init)(struct snd_soc_component *component);
@@ -268,11 +271,8 @@ struct snd_soc_component {
 static inline struct snd_soc_dapm_context *snd_soc_component_to_dapm(
 	struct snd_soc_component *component)
 {
-	return &component->dapm;
+	return component->dapm;
 }
-
-// FIXME
-#define snd_soc_component_get_dapm	snd_soc_component_to_dapm
 
 /**
  * snd_soc_component_cache_sync() - Sync the register cache with the hardware
@@ -367,27 +367,6 @@ snd_soc_component_active(struct snd_soc_component *component)
 {
 	return component->active;
 }
-
-/* component pin */
-int snd_soc_component_enable_pin(struct snd_soc_component *component,
-				 const char *pin);
-int snd_soc_component_enable_pin_unlocked(struct snd_soc_component *component,
-					  const char *pin);
-int snd_soc_component_disable_pin(struct snd_soc_component *component,
-				  const char *pin);
-int snd_soc_component_disable_pin_unlocked(struct snd_soc_component *component,
-					   const char *pin);
-int snd_soc_component_nc_pin(struct snd_soc_component *component,
-			     const char *pin);
-int snd_soc_component_nc_pin_unlocked(struct snd_soc_component *component,
-				      const char *pin);
-int snd_soc_component_get_pin_status(struct snd_soc_component *component,
-				     const char *pin);
-int snd_soc_component_force_enable_pin(struct snd_soc_component *component,
-				       const char *pin);
-int snd_soc_component_force_enable_pin_unlocked(
-	struct snd_soc_component *component,
-	const char *pin);
 
 /* component controls */
 struct snd_kcontrol *snd_soc_component_get_kcontrol(struct snd_soc_component *component,

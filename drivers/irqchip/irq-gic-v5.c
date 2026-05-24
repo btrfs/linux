@@ -5,6 +5,7 @@
 
 #define pr_fmt(fmt)	"GICv5: " fmt
 
+#include <linux/acpi_iort.h>
 #include <linux/cpuhotplug.h>
 #include <linux/idr.h>
 #include <linux/irqdomain.h>
@@ -56,16 +57,6 @@ static int alloc_lpi(void)
 static void release_lpi(u32 lpi)
 {
 	ida_free(&lpi_ida, lpi);
-}
-
-int gicv5_alloc_lpi(void)
-{
-	return alloc_lpi();
-}
-
-void gicv5_free_lpi(u32 lpi)
-{
-	release_lpi(lpi);
 }
 
 static void gicv5_ppi_priority_init(void)
@@ -579,16 +570,36 @@ static __always_inline int gicv5_irq_domain_translate(struct irq_domain *d,
 						      unsigned int *type,
 						      const u8 hwirq_type)
 {
-	if (!is_of_node(fwspec->fwnode))
-		return -EINVAL;
+	unsigned int hwirq_trigger;
+	u8 fwspec_irq_type;
 
-	if (fwspec->param_count < 3)
-		return -EINVAL;
+	if (is_of_node(fwspec->fwnode)) {
 
-	if (fwspec->param[0] != hwirq_type)
-		return -EINVAL;
+		if (fwspec->param_count < 3)
+			return -EINVAL;
 
-	*hwirq = fwspec->param[1];
+		fwspec_irq_type = fwspec->param[0];
+
+		if (fwspec->param[0] != hwirq_type)
+			return -EINVAL;
+
+		*hwirq = fwspec->param[1];
+		hwirq_trigger = fwspec->param[2];
+	}
+
+	if (is_fwnode_irqchip(fwspec->fwnode)) {
+
+		if (fwspec->param_count != 2)
+			return -EINVAL;
+
+		fwspec_irq_type = FIELD_GET(GICV5_HWIRQ_TYPE, fwspec->param[0]);
+
+		if (fwspec_irq_type != hwirq_type)
+			return -EINVAL;
+
+		*hwirq = FIELD_GET(GICV5_HWIRQ_ID, fwspec->param[0]);
+		hwirq_trigger = fwspec->param[1];
+	}
 
 	switch (hwirq_type) {
 	case GICV5_HWIRQ_TYPE_PPI:
@@ -600,7 +611,7 @@ static __always_inline int gicv5_irq_domain_translate(struct irq_domain *d,
 							 IRQ_TYPE_EDGE_RISING;
 		break;
 	case GICV5_HWIRQ_TYPE_SPI:
-		*type = fwspec->param[2] & IRQ_TYPE_SENSE_MASK;
+		*type = hwirq_trigger & IRQ_TYPE_SENSE_MASK;
 		break;
 	default:
 		BUILD_BUG_ON(1);
@@ -660,10 +671,18 @@ static void gicv5_irq_domain_free(struct irq_domain *domain, unsigned int virq,
 static int gicv5_irq_ppi_domain_select(struct irq_domain *d, struct irq_fwspec *fwspec,
 				       enum irq_domain_bus_token bus_token)
 {
+	u32 hwirq_type;
+
 	if (fwspec->fwnode != d->fwnode)
 		return 0;
 
-	if (fwspec->param[0] != GICV5_HWIRQ_TYPE_PPI)
+	if (is_of_node(fwspec->fwnode))
+		hwirq_type = fwspec->param[0];
+
+	if (is_fwnode_irqchip(fwspec->fwnode))
+		hwirq_type = FIELD_GET(GICV5_HWIRQ_TYPE, fwspec->param[0]);
+
+	if (hwirq_type != GICV5_HWIRQ_TYPE_PPI)
 		return 0;
 
 	return (d == gicv5_global_data.ppi_domain);
@@ -718,10 +737,18 @@ static int gicv5_irq_spi_domain_alloc(struct irq_domain *domain, unsigned int vi
 static int gicv5_irq_spi_domain_select(struct irq_domain *d, struct irq_fwspec *fwspec,
 				       enum irq_domain_bus_token bus_token)
 {
+	u32 hwirq_type;
+
 	if (fwspec->fwnode != d->fwnode)
 		return 0;
 
-	if (fwspec->param[0] != GICV5_HWIRQ_TYPE_SPI)
+	if (is_of_node(fwspec->fwnode))
+		hwirq_type = fwspec->param[0];
+
+	if (is_fwnode_irqchip(fwspec->fwnode))
+		hwirq_type = FIELD_GET(GICV5_HWIRQ_TYPE, fwspec->param[0]);
+
+	if (hwirq_type != GICV5_HWIRQ_TYPE_SPI)
 		return 0;
 
 	return (d == gicv5_global_data.spi_domain);
@@ -751,38 +778,64 @@ static void gicv5_lpi_config_reset(struct irq_data *d)
 	gicv5_lpi_irq_write_pending_state(d, false);
 }
 
+static void gicv5_irq_lpi_domain_free(struct irq_domain *domain, unsigned int virq,
+				      unsigned int nr_irqs)
+{
+	struct irq_data *d;
+
+	for (unsigned int i = 0; i < nr_irqs; i++, virq++) {
+		d = irq_domain_get_irq_data(domain, virq);
+
+		release_lpi(d->hwirq);
+
+		irq_set_handler(virq, NULL);
+		irq_domain_reset_irq_data(d);
+	}
+}
+
 static int gicv5_irq_lpi_domain_alloc(struct irq_domain *domain, unsigned int virq,
 				      unsigned int nr_irqs, void *arg)
 {
 	irq_hw_number_t hwirq;
 	struct irq_data *irqd;
-	u32 *lpi = arg;
+	unsigned int i;
 	int ret;
 
-	if (WARN_ON_ONCE(nr_irqs != 1))
-		return -EINVAL;
+	for (i = 0; i < nr_irqs; i++) {
+		ret = alloc_lpi();
+		if (ret < 0)
+			goto out_free_lpis;
+		hwirq = ret;
 
-	hwirq = *lpi;
+		ret = gicv5_irs_iste_alloc(hwirq);
+		if (ret < 0) {
+			/* Undo partial state first, then clean up the rest */
+			release_lpi(hwirq);
+			goto out_free_lpis;
+		}
 
-	irqd = irq_domain_get_irq_data(domain, virq);
+		irqd = irq_domain_get_irq_data(domain, virq + i);
 
-	irq_domain_set_info(domain, virq, hwirq, &gicv5_lpi_irq_chip, NULL,
-			    handle_fasteoi_irq, NULL, NULL);
-	irqd_set_single_target(irqd);
+		irq_domain_set_info(domain, virq + i, hwirq, &gicv5_lpi_irq_chip,
+				    NULL, handle_fasteoi_irq, NULL, NULL);
+		irqd_set_single_target(irqd);
 
-	ret = gicv5_irs_iste_alloc(hwirq);
-	if (ret < 0)
-		return ret;
-
-	gicv5_hwirq_init(hwirq, GICV5_IRQ_PRI_MI, GICV5_HWIRQ_TYPE_LPI);
-	gicv5_lpi_config_reset(irqd);
+		gicv5_hwirq_init(hwirq, GICV5_IRQ_PRI_MI, GICV5_HWIRQ_TYPE_LPI);
+		gicv5_lpi_config_reset(irqd);
+	}
 
 	return 0;
+
+out_free_lpis:
+	if (i)
+		gicv5_irq_lpi_domain_free(domain, virq, i);
+
+	return ret;
 }
 
 static const struct irq_domain_ops gicv5_irq_lpi_domain_ops = {
 	.alloc	= gicv5_irq_lpi_domain_alloc,
-	.free	= gicv5_irq_domain_free,
+	.free	= gicv5_irq_lpi_domain_free,
 };
 
 void __init gicv5_init_lpi_domain(void)
@@ -803,30 +856,21 @@ static int gicv5_irq_ipi_domain_alloc(struct irq_domain *domain, unsigned int vi
 				      unsigned int nr_irqs, void *arg)
 {
 	struct irq_data *irqd;
-	int ret, i;
-	u32 lpi;
+	int ret;
 
-	for (i = 0; i < nr_irqs; i++) {
-		ret = gicv5_alloc_lpi();
-		if (ret < 0)
-			return ret;
+	ret = irq_domain_alloc_irqs_parent(domain, virq, nr_irqs, arg);
+	if (ret)
+		return ret;
 
-		lpi = ret;
+	for (unsigned int i = 0; i < nr_irqs; i++, virq++) {
+		irqd = irq_domain_get_irq_data(domain, virq);
 
-		ret = irq_domain_alloc_irqs_parent(domain, virq + i, 1, &lpi);
-		if (ret) {
-			gicv5_free_lpi(lpi);
-			return ret;
-		}
-
-		irqd = irq_domain_get_irq_data(domain, virq + i);
-
-		irq_domain_set_hwirq_and_chip(domain, virq + i, i,
-				&gicv5_ipi_irq_chip, NULL);
+		irq_domain_set_hwirq_and_chip(domain, virq, i,
+					      &gicv5_ipi_irq_chip, NULL);
 
 		irqd_set_single_target(irqd);
 
-		irq_set_handler(virq + i, handle_percpu_irq);
+		irq_set_handler(virq, handle_percpu_irq);
 	}
 
 	return 0;
@@ -844,12 +888,11 @@ static void gicv5_irq_ipi_domain_free(struct irq_domain *domain, unsigned int vi
 		if (!d)
 			return;
 
-		gicv5_free_lpi(d->parent_data->hwirq);
-
 		irq_set_handler(virq + i, NULL);
 		irq_domain_reset_irq_data(d);
-		irq_domain_free_irqs_parent(domain, virq + i, 1);
 	}
+
+	irq_domain_free_irqs_parent(domain, virq, nr_irqs);
 }
 
 static const struct irq_domain_ops gicv5_irq_ipi_domain_ops = {
@@ -1064,6 +1107,16 @@ static struct gic_kvm_info gic_v5_kvm_info __initdata;
 
 static void __init gic_of_setup_kvm_info(struct device_node *node)
 {
+	/*
+	 * If we don't have native GICv5 virtualisation support, then
+	 * we also don't have FEAT_GCIE_LEGACY - the architecture
+	 * forbids this combination.
+	 */
+	if (!gicv5_global_data.virt_capable) {
+		pr_info("GIC implementation is not virtualization capable\n");
+		return;
+	}
+
 	gic_v5_kvm_info.type = GIC_V5;
 
 	/* GIC Virtual CPU interface maintenance interrupt */
@@ -1082,15 +1135,11 @@ static inline void __init gic_of_setup_kvm_info(struct device_node *node)
 }
 #endif // CONFIG_KVM
 
-static int __init gicv5_of_init(struct device_node *node, struct device_node *parent)
+static int __init gicv5_init_common(struct fwnode_handle *parent_domain)
 {
-	int ret = gicv5_irs_of_probe(node);
+	int ret = gicv5_init_domains(parent_domain);
 	if (ret)
 		return ret;
-
-	ret = gicv5_init_domains(of_fwnode_handle(node));
-	if (ret)
-		goto out_irs;
 
 	gicv5_set_cpuif_pribits();
 	gicv5_set_cpuif_idbits();
@@ -1113,18 +1162,85 @@ static int __init gicv5_of_init(struct device_node *node, struct device_node *pa
 	gicv5_smp_init();
 
 	gicv5_irs_its_probe();
-
-	gic_of_setup_kvm_info(node);
-
 	return 0;
 
 out_int:
 	gicv5_cpu_disable_interrupts();
 out_dom:
 	gicv5_free_domains();
+	return ret;
+}
+
+static int __init gicv5_of_init(struct device_node *node, struct device_node *parent)
+{
+	int ret = gicv5_irs_of_probe(node);
+	if (ret)
+		return ret;
+
+	ret = gicv5_init_common(of_fwnode_handle(node));
+	if (ret)
+		goto out_irs;
+
+	gic_of_setup_kvm_info(node);
+
+	return 0;
 out_irs:
 	gicv5_irs_remove();
 
 	return ret;
 }
 IRQCHIP_DECLARE(gic_v5, "arm,gic-v5", gicv5_of_init);
+
+#ifdef CONFIG_ACPI
+static bool __init acpi_validate_gic_table(struct acpi_subtable_header *header,
+					   struct acpi_probe_entry *ape)
+{
+	struct acpi_madt_gicv5_irs *irs = (struct acpi_madt_gicv5_irs *)header;
+
+	return (irs->version == ape->driver_data);
+}
+
+static struct fwnode_handle *gsi_domain_handle;
+
+static struct fwnode_handle *gic_v5_get_gsi_domain_id(u32 gsi)
+{
+	if (FIELD_GET(GICV5_GSI_IC_TYPE, gsi) == GICV5_GSI_IWB_TYPE)
+		return iort_iwb_handle(FIELD_GET(GICV5_GSI_IWB_FRAME_ID, gsi));
+
+	return gsi_domain_handle;
+}
+
+static int __init gic_acpi_init(union acpi_subtable_headers *header, const unsigned long end)
+{
+	struct acpi_madt_gicv5_irs *irs = (struct acpi_madt_gicv5_irs *)header;
+	int ret;
+
+	if (gsi_domain_handle)
+		return 0;
+
+	gsi_domain_handle = irq_domain_alloc_fwnode(&irs->config_base_address);
+	if (!gsi_domain_handle)
+		return -ENOMEM;
+
+	ret = gicv5_irs_acpi_probe();
+	if (ret)
+		goto out_fwnode;
+
+	ret = gicv5_init_common(gsi_domain_handle);
+	if (ret)
+		goto out_irs;
+
+	acpi_set_irq_model(ACPI_IRQ_MODEL_GIC_V5, gic_v5_get_gsi_domain_id);
+
+	return 0;
+
+out_irs:
+	gicv5_irs_remove();
+out_fwnode:
+	irq_domain_free_fwnode(gsi_domain_handle);
+	return ret;
+}
+IRQCHIP_ACPI_DECLARE(gic_v5, ACPI_MADT_TYPE_GICV5_IRS,
+		     acpi_validate_gic_table, ACPI_MADT_GIC_VERSION_V5,
+		     gic_acpi_init);
+#endif

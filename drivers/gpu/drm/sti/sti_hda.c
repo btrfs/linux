@@ -741,6 +741,7 @@ static int sti_hda_probe(struct platform_device *pdev)
 	struct device *dev = &pdev->dev;
 	struct sti_hda *hda;
 	struct resource *res;
+	int ret;
 
 	DRM_INFO("%s\n", __func__);
 
@@ -778,6 +779,10 @@ static int sti_hda_probe(struct platform_device *pdev)
 		DRM_ERROR("Cannot get hda_hddac clock\n");
 		return PTR_ERR(hda->clk_hddac);
 	}
+
+	ret = devm_drm_bridge_add(dev, &hda->bridge);
+	if (ret)
+		return ret;
 
 	platform_set_drvdata(pdev, hda);
 

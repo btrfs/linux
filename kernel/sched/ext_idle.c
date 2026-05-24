@@ -460,12 +460,6 @@ s32 scx_select_cpu_dfl(struct task_struct *p, s32 prev_cpu, u64 wake_flags,
 	preempt_disable();
 
 	/*
-	 * Check whether @prev_cpu is still within the allowed set. If not,
-	 * we can still try selecting a nearby CPU.
-	 */
-	is_prev_allowed = cpumask_test_cpu(prev_cpu, allowed);
-
-	/*
 	 * Determine the subset of CPUs usable by @p within @cpus_allowed.
 	 */
 	if (allowed != p->cpus_ptr) {
@@ -480,6 +474,12 @@ s32 scx_select_cpu_dfl(struct task_struct *p, s32 prev_cpu, u64 wake_flags,
 			goto out_enable;
 		}
 	}
+
+	/*
+	 * Check whether @prev_cpu is still within the allowed set. If not,
+	 * we can still try selecting a nearby CPU.
+	 */
+	is_prev_allowed = cpumask_test_cpu(prev_cpu, allowed);
 
 	/*
 	 * This is necessary to protect llc_cpus.
@@ -543,7 +543,7 @@ s32 scx_select_cpu_dfl(struct task_struct *p, s32 prev_cpu, u64 wake_flags,
 		 * piled up on it even if there is an idle core elsewhere on
 		 * the system.
 		 */
-		waker_node = cpu_to_node(cpu);
+		waker_node = scx_cpu_node_if_enabled(cpu);
 		if (!(current->flags & PF_EXITING) &&
 		    cpu_rq(cpu)->scx.local_dsq.nr == 0 &&
 		    (!(flags & SCX_PICK_IDLE_IN_NODE) || (waker_node == node)) &&
@@ -663,9 +663,8 @@ void scx_idle_init_masks(void)
 	BUG_ON(!alloc_cpumask_var(&scx_idle_global_masks.cpu, GFP_KERNEL));
 	BUG_ON(!alloc_cpumask_var(&scx_idle_global_masks.smt, GFP_KERNEL));
 
-	/* Allocate per-node idle cpumasks */
-	scx_idle_node_masks = kcalloc(num_possible_nodes(),
-				      sizeof(*scx_idle_node_masks), GFP_KERNEL);
+	/* Allocate per-node idle cpumasks (use nr_node_ids for non-contiguous NUMA nodes) */
+	scx_idle_node_masks = kzalloc_objs(*scx_idle_node_masks, nr_node_ids);
 	BUG_ON(!scx_idle_node_masks);
 
 	for_each_node(i) {
@@ -861,25 +860,32 @@ static bool check_builtin_idle_enabled(struct scx_sched *sch)
  * code.
  *
  * We can't simply check whether @p->migration_disabled is set in a
- * sched_ext callback, because migration is always disabled for the current
- * task while running BPF code.
+ * sched_ext callback, because the BPF prolog (__bpf_prog_enter) may disable
+ * migration for the current task while running BPF code.
  *
- * The prolog (__bpf_prog_enter) and epilog (__bpf_prog_exit) respectively
- * disable and re-enable migration. For this reason, the current task
- * inside a sched_ext callback is always a migration-disabled task.
+ * Since the BPF prolog calls migrate_disable() only when CONFIG_PREEMPT_RCU
+ * is enabled (via rcu_read_lock_dont_migrate()), migration_disabled == 1 for
+ * the current task is ambiguous only in that case: it could be from the BPF
+ * prolog rather than a real migrate_disable() call.
  *
- * Therefore, when @p->migration_disabled == 1, check whether @p is the
- * current task or not: if it is, then migration was not disabled before
- * entering the callback, otherwise migration was disabled.
+ * Without CONFIG_PREEMPT_RCU, the BPF prolog never calls migrate_disable(),
+ * so migration_disabled == 1 always means the task is truly
+ * migration-disabled.
+ *
+ * Therefore, when migration_disabled == 1 and CONFIG_PREEMPT_RCU is enabled,
+ * check whether @p is the current task or not: if it is, then migration was
+ * not disabled before entering the callback, otherwise migration was disabled.
  *
  * Returns true if @p is migration-disabled, false otherwise.
  */
 static bool is_bpf_migration_disabled(const struct task_struct *p)
 {
-	if (p->migration_disabled == 1)
-		return p != current;
-	else
-		return p->migration_disabled;
+	if (p->migration_disabled == 1) {
+		if (IS_ENABLED(CONFIG_PREEMPT_RCU))
+			return p != current;
+		return true;
+	}
+	return p->migration_disabled;
 }
 
 static s32 select_cpu_from_kfunc(struct scx_sched *sch, struct task_struct *p,
@@ -995,25 +1001,55 @@ __bpf_kfunc s32 scx_bpf_select_cpu_dfl(struct task_struct *p, s32 prev_cpu,
 	return prev_cpu;
 }
 
+struct scx_bpf_select_cpu_and_args {
+	/* @p and @cpus_allowed can't be packed together as KF_RCU is not transitive */
+	s32			prev_cpu;
+	u64			wake_flags;
+	u64			flags;
+};
+
 /**
- * scx_bpf_select_cpu_and - Pick an idle CPU usable by task @p,
- *			    prioritizing those in @cpus_allowed
+ * __scx_bpf_select_cpu_and - Arg-wrapped CPU selection with cpumask
  * @p: task_struct to select a CPU for
- * @prev_cpu: CPU @p was on previously
- * @wake_flags: %SCX_WAKE_* flags
  * @cpus_allowed: cpumask of allowed CPUs
- * @flags: %SCX_PICK_IDLE* flags
+ * @args: struct containing the rest of the arguments
+ *       @args->prev_cpu: CPU @p was on previously
+ *       @args->wake_flags: %SCX_WAKE_* flags
+ *       @args->flags: %SCX_PICK_IDLE* flags
+ *
+ * Wrapper kfunc that takes arguments via struct to work around BPF's 5 argument
+ * limit. BPF programs should use scx_bpf_select_cpu_and() which is provided
+ * as an inline wrapper in common.bpf.h.
  *
  * Can be called from ops.select_cpu(), ops.enqueue(), or from an unlocked
  * context such as a BPF test_run() call, as long as built-in CPU selection
  * is enabled: ops.update_idle() is missing or %SCX_OPS_KEEP_BUILTIN_IDLE
  * is set.
  *
- * @p, @prev_cpu and @wake_flags match ops.select_cpu().
+ * @p, @args->prev_cpu and @args->wake_flags match ops.select_cpu().
  *
  * Returns the selected idle CPU, which will be automatically awakened upon
  * returning from ops.select_cpu() and can be used for direct dispatch, or
  * a negative value if no idle CPU is available.
+ */
+__bpf_kfunc s32
+__scx_bpf_select_cpu_and(struct task_struct *p, const struct cpumask *cpus_allowed,
+			 struct scx_bpf_select_cpu_and_args *args)
+{
+	struct scx_sched *sch;
+
+	guard(rcu)();
+
+	sch = rcu_dereference(scx_root);
+	if (unlikely(!sch))
+		return -ENODEV;
+
+	return select_cpu_from_kfunc(sch, p, args->prev_cpu, args->wake_flags,
+				     cpus_allowed, args->flags);
+}
+
+/*
+ * COMPAT: Will be removed in v6.22.
  */
 __bpf_kfunc s32 scx_bpf_select_cpu_and(struct task_struct *p, s32 prev_cpu, u64 wake_flags,
 				       const struct cpumask *cpus_allowed, u64 flags)
@@ -1383,6 +1419,7 @@ BTF_ID_FLAGS(func, scx_bpf_pick_idle_cpu_node, KF_RCU)
 BTF_ID_FLAGS(func, scx_bpf_pick_idle_cpu, KF_RCU)
 BTF_ID_FLAGS(func, scx_bpf_pick_any_cpu_node, KF_RCU)
 BTF_ID_FLAGS(func, scx_bpf_pick_any_cpu, KF_RCU)
+BTF_ID_FLAGS(func, __scx_bpf_select_cpu_and, KF_RCU)
 BTF_ID_FLAGS(func, scx_bpf_select_cpu_and, KF_RCU)
 BTF_ID_FLAGS(func, scx_bpf_select_cpu_dfl, KF_RCU)
 BTF_KFUNCS_END(scx_kfunc_ids_idle)

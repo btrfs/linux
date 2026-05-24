@@ -209,6 +209,17 @@ static inline bool selinux_policycap_functionfs_seclabel(void)
 		selinux_state.policycap[POLICYDB_CAP_FUNCTIONFS_SECLABEL]);
 }
 
+static inline bool selinux_policycap_memfd_class(void)
+{
+	return READ_ONCE(selinux_state.policycap[POLICYDB_CAP_MEMFD_CLASS]);
+}
+
+static inline bool selinux_policycap_bpf_token_perms(void)
+{
+	return READ_ONCE(
+		selinux_state.policycap[POLICYDB_CAP_BPF_TOKEN_PERMS]);
+}
+
 struct selinux_policy_convert_data;
 
 struct selinux_load_state {
@@ -300,8 +311,6 @@ int security_context_to_sid_default(const char *scontext, u32 scontext_len,
 
 int security_context_to_sid_force(const char *scontext, u32 scontext_len,
 				  u32 *sid);
-
-int security_get_user_sids(u32 fromsid, const char *username, u32 **sids, u32 *nel);
 
 int security_port_sid(u8 protocol, u16 port, u32 *out_sid);
 

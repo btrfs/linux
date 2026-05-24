@@ -142,88 +142,6 @@ int snd_soc_component_set_bias_level(struct snd_soc_component *component,
 	return soc_component_ret(component, ret);
 }
 
-int snd_soc_component_enable_pin(struct snd_soc_component *component,
-				 const char *pin)
-{
-	struct snd_soc_dapm_context *dapm =
-		snd_soc_component_get_dapm(component);
-	return snd_soc_dapm_enable_pin(dapm, pin);
-}
-EXPORT_SYMBOL_GPL(snd_soc_component_enable_pin);
-
-int snd_soc_component_enable_pin_unlocked(struct snd_soc_component *component,
-					  const char *pin)
-{
-	struct snd_soc_dapm_context *dapm =
-		snd_soc_component_get_dapm(component);
-	return snd_soc_dapm_enable_pin_unlocked(dapm, pin);
-}
-EXPORT_SYMBOL_GPL(snd_soc_component_enable_pin_unlocked);
-
-int snd_soc_component_disable_pin(struct snd_soc_component *component,
-				  const char *pin)
-{
-	struct snd_soc_dapm_context *dapm =
-		snd_soc_component_get_dapm(component);
-	return snd_soc_dapm_disable_pin(dapm, pin);
-}
-EXPORT_SYMBOL_GPL(snd_soc_component_disable_pin);
-
-int snd_soc_component_disable_pin_unlocked(struct snd_soc_component *component,
-					   const char *pin)
-{
-	struct snd_soc_dapm_context *dapm = 
-		snd_soc_component_get_dapm(component);
-	return snd_soc_dapm_disable_pin_unlocked(dapm, pin);
-}
-EXPORT_SYMBOL_GPL(snd_soc_component_disable_pin_unlocked);
-
-int snd_soc_component_nc_pin(struct snd_soc_component *component,
-			     const char *pin)
-{
-	struct snd_soc_dapm_context *dapm =
-		snd_soc_component_get_dapm(component);
-	return snd_soc_dapm_nc_pin(dapm, pin);
-}
-EXPORT_SYMBOL_GPL(snd_soc_component_nc_pin);
-
-int snd_soc_component_nc_pin_unlocked(struct snd_soc_component *component,
-				      const char *pin)
-{
-	struct snd_soc_dapm_context *dapm =
-		snd_soc_component_get_dapm(component);
-	return snd_soc_dapm_nc_pin_unlocked(dapm, pin);
-}
-EXPORT_SYMBOL_GPL(snd_soc_component_nc_pin_unlocked);
-
-int snd_soc_component_get_pin_status(struct snd_soc_component *component,
-				     const char *pin)
-{
-	struct snd_soc_dapm_context *dapm =
-		snd_soc_component_get_dapm(component);
-	return snd_soc_dapm_get_pin_status(dapm, pin);
-}
-EXPORT_SYMBOL_GPL(snd_soc_component_get_pin_status);
-
-int snd_soc_component_force_enable_pin(struct snd_soc_component *component,
-				       const char *pin)
-{
-	struct snd_soc_dapm_context *dapm =
-		snd_soc_component_get_dapm(component);
-	return snd_soc_dapm_force_enable_pin(dapm, pin);
-}
-EXPORT_SYMBOL_GPL(snd_soc_component_force_enable_pin);
-
-int snd_soc_component_force_enable_pin_unlocked(
-	struct snd_soc_component *component,
-	const char *pin)
-{
-	struct snd_soc_dapm_context *dapm =
-		snd_soc_component_get_dapm(component);
-	return snd_soc_dapm_force_enable_pin_unlocked(dapm, pin);
-}
-EXPORT_SYMBOL_GPL(snd_soc_component_force_enable_pin_unlocked);
-
 static void soc_get_kcontrol_name(struct snd_soc_component *component,
 				  char *buf, int size, const char * const ctl)
 {
@@ -1124,6 +1042,11 @@ int snd_soc_pcm_component_new(struct snd_soc_pcm_runtime *rtd)
 			if (ret < 0)
 				return soc_component_ret(component, ret);
 		}
+		if (component->driver->pcm_new) {
+			ret = component->driver->pcm_new(component, rtd);
+			if (ret < 0)
+				return soc_component_ret(component, ret);
+		}
 	}
 
 	return 0;
@@ -1137,9 +1060,12 @@ void snd_soc_pcm_component_free(struct snd_soc_pcm_runtime *rtd)
 	if (!rtd->pcm)
 		return;
 
-	for_each_rtd_components(rtd, i, component)
+	for_each_rtd_components(rtd, i, component) {
 		if (component->driver->pcm_destruct)
 			component->driver->pcm_destruct(component, rtd->pcm);
+		if (component->driver->pcm_free)
+			component->driver->pcm_free(component, rtd->pcm);
+	}
 }
 
 int snd_soc_pcm_component_prepare(struct snd_pcm_substream *substream)

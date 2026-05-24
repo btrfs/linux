@@ -244,7 +244,7 @@ static int aq_pci_probe(struct pci_dev *pdev,
 	if (err)
 		goto err_ioremap;
 
-	self->aq_hw = kzalloc(sizeof(*self->aq_hw), GFP_KERNEL);
+	self->aq_hw = kzalloc_obj(*self->aq_hw);
 	if (!self->aq_hw) {
 		err = -ENOMEM;
 		goto err_ioremap;
@@ -371,7 +371,7 @@ static void aq_pci_shutdown(struct pci_dev *pdev)
 	pci_disable_device(pdev);
 
 	if (system_state == SYSTEM_POWER_OFF) {
-		pci_wake_from_d3(pdev, false);
+		pci_wake_from_d3(pdev, self->aq_hw->aq_nic_cfg->wol);
 		pci_set_power_state(pdev, PCI_D3hot);
 	}
 }

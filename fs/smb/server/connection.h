@@ -7,6 +7,7 @@
 #define __KSMBD_CONNECTION_H__
 
 #include <linux/list.h>
+#include <linux/inet.h>
 #include <linux/ip.h>
 #include <net/sock.h>
 #include <net/tcp.h>
@@ -33,7 +34,7 @@ enum {
 	KSMBD_SESS_RELEASING
 };
 
-struct ksmbd_stats {
+struct ksmbd_conn_stats {
 	atomic_t			open_files_count;
 	atomic64_t			request_served;
 };
@@ -48,6 +49,7 @@ struct ksmbd_conn {
 	struct mutex			srv_mutex;
 	int				status;
 	unsigned int			cli_cap;
+	bool				stop_called;
 	union {
 		__be32			inet_addr;
 #if IS_ENABLED(CONFIG_IPV6)
@@ -78,7 +80,7 @@ struct ksmbd_conn {
 	struct list_head		requests;
 	struct list_head		async_requests;
 	int				connection_type;
-	struct ksmbd_stats		stats;
+	struct ksmbd_conn_stats		stats;
 	char				ClientGUID[SMB2_CLIENT_GUID_SIZE];
 	struct ntlmssp_auth		ntlmssp;
 

@@ -974,6 +974,13 @@ static int detect_usb_format(struct ua101 *ua)
 
 	ua->capture.channels = fmt_capture->bNrChannels;
 	ua->playback.channels = fmt_playback->bNrChannels;
+	if (!ua->capture.channels || !ua->playback.channels) {
+		dev_err(&ua->dev->dev,
+			"invalid channel count: capture %u, playback %u\n",
+			ua->capture.channels, ua->playback.channels);
+		return -EINVAL;
+	}
+
 	ua->capture.frame_bytes =
 		fmt_capture->bSubframeSize * ua->capture.channels;
 	ua->playback.frame_bytes =
@@ -1062,7 +1069,7 @@ static int alloc_stream_urbs(struct ua101 *ua, struct ua101_stream *stream,
 		while (size >= max_packet_size) {
 			if (u >= stream->queue_length)
 				goto bufsize_error;
-			urb = kmalloc(sizeof(*urb), GFP_KERNEL);
+			urb = kmalloc_obj(*urb);
 			if (!urb)
 				return -ENOMEM;
 			usb_init_urb(&urb->urb);

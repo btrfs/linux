@@ -671,7 +671,19 @@ static int mmc_decode_ext_csd(struct mmc_card *card, u8 *ext_csd)
 		card->ext_csd.enhanced_rpmb_supported =
 					(card->ext_csd.rel_param &
 					 EXT_CSD_WR_REL_PARAM_EN_RPMB_REL_WR);
+
+		if (card->ext_csd.rev >= 9) {
+			/* Adjust production date as per JEDEC JESD84-B51B September 2025 */
+			if (card->cid.year < 2023)
+				card->cid.year += 16;
+		} else {
+			/* Handle vendors with broken MDT reporting */
+			if (mmc_card_broken_mdt(card) && card->cid.year >= 2010 &&
+			    card->cid.year <= 2012)
+				card->cid.year += 16;
+		}
 	}
+
 out:
 	return err;
 }
@@ -831,7 +843,7 @@ static ssize_t mmc_fwrev_show(struct device *dev,
 				  card->ext_csd.fwrev);
 }
 
-static DEVICE_ATTR(fwrev, S_IRUGO, mmc_fwrev_show, NULL);
+static DEVICE_ATTR(fwrev, 0444, mmc_fwrev_show, NULL);
 
 static ssize_t mmc_dsr_show(struct device *dev,
 			    struct device_attribute *attr,
@@ -847,7 +859,7 @@ static ssize_t mmc_dsr_show(struct device *dev,
 		return sysfs_emit(buf, "0x%x\n", 0x404);
 }
 
-static DEVICE_ATTR(dsr, S_IRUGO, mmc_dsr_show, NULL);
+static DEVICE_ATTR(dsr, 0444, mmc_dsr_show, NULL);
 
 static struct attribute *mmc_std_attrs[] = {
 	&dev_attr_cid.attr,

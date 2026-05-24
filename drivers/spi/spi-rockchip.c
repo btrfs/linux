@@ -357,7 +357,8 @@ static irqreturn_t rockchip_spi_isr(int irq, void *dev_id)
 	struct rockchip_spi *rs = spi_controller_get_devdata(ctlr);
 
 	/* When int_cs_inactive comes, spi target abort */
-	if (rs->cs_inactive && readl_relaxed(rs->regs + ROCKCHIP_SPI_IMR) & INT_CS_INACTIVE) {
+	if (rs->cs_inactive &&
+	    (readl_relaxed(rs->regs + ROCKCHIP_SPI_ISR) & INT_CS_INACTIVE)) {
 		ctlr->target_abort(ctlr);
 		writel_relaxed(0, rs->regs + ROCKCHIP_SPI_IMR);
 		writel_relaxed(0xffffffff, rs->regs + ROCKCHIP_SPI_ICR);
@@ -805,8 +806,8 @@ static int rockchip_spi_probe(struct platform_device *pdev)
 	if (ret < 0)
 		goto err_put_ctlr;
 
-	ret = devm_request_threaded_irq(&pdev->dev, ret, rockchip_spi_isr, NULL,
-					IRQF_ONESHOT, dev_name(&pdev->dev), ctlr);
+	ret = devm_request_irq(&pdev->dev, ret, rockchip_spi_isr, 0,
+			       dev_name(&pdev->dev), ctlr);
 	if (ret)
 		goto err_put_ctlr;
 
@@ -858,7 +859,6 @@ static int rockchip_spi_probe(struct platform_device *pdev)
 		ctlr->num_chipselect = num_cs;
 		ctlr->use_gpio_descriptors = true;
 	}
-	ctlr->dev.of_node = pdev->dev.of_node;
 	ctlr->bits_per_word_mask = SPI_BPW_MASK(16) | SPI_BPW_MASK(8) | SPI_BPW_MASK(4);
 	ctlr->min_speed_hz = rs->freq / BAUDR_SCKDV_MAX;
 	ctlr->max_speed_hz = min(rs->freq / BAUDR_SCKDV_MIN, MAX_SCLK_OUT);
@@ -909,7 +909,7 @@ static int rockchip_spi_probe(struct platform_device *pdev)
 		break;
 	}
 
-	ret = devm_spi_register_controller(&pdev->dev, ctlr);
+	ret = spi_register_controller(ctlr);
 	if (ret < 0) {
 		dev_err(&pdev->dev, "Failed to register controller\n");
 		goto err_free_dma_rx;
@@ -936,6 +936,8 @@ static void rockchip_spi_remove(struct platform_device *pdev)
 	struct spi_controller *ctlr = spi_controller_get(platform_get_drvdata(pdev));
 
 	pm_runtime_get_sync(&pdev->dev);
+
+	spi_unregister_controller(ctlr);
 
 	pm_runtime_put_noidle(&pdev->dev);
 	pm_runtime_disable(&pdev->dev);

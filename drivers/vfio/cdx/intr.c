@@ -27,7 +27,7 @@ static int vfio_cdx_msi_enable(struct vfio_cdx_device *vdev, int nvec)
 	struct device *dev = vdev->vdev.dev;
 	int msi_idx, ret;
 
-	vdev->cdx_irqs = kcalloc(nvec, sizeof(struct vfio_cdx_irq), GFP_KERNEL);
+	vdev->cdx_irqs = kzalloc_objs(struct vfio_cdx_irq, nvec);
 	if (!vdev->cdx_irqs)
 		return -ENOMEM;
 
@@ -152,6 +152,8 @@ static int vfio_cdx_set_msi_trigger(struct vfio_cdx_device *vdev,
 	if (start + count > cdx_dev->num_msi)
 		return -EINVAL;
 
+	guard(mutex)(&vdev->cdx_irqs_lock);
+
 	if (!count && (flags & VFIO_IRQ_SET_DATA_NONE)) {
 		vfio_cdx_msi_disable(vdev);
 		return 0;
@@ -174,6 +176,10 @@ static int vfio_cdx_set_msi_trigger(struct vfio_cdx_device *vdev,
 
 		return ret;
 	}
+
+	/* Ensure MSI is configured before accessing cdx_irqs */
+	if (!vdev->config_msi)
+		return -EINVAL;
 
 	for (i = start; i < start + count; i++) {
 		if (!vdev->cdx_irqs[i].trigger)
@@ -206,12 +212,5 @@ int vfio_cdx_set_irqs_ioctl(struct vfio_cdx_device *vdev,
 /* Free All IRQs for the given device */
 void vfio_cdx_irqs_cleanup(struct vfio_cdx_device *vdev)
 {
-	/*
-	 * Device does not support any interrupt or the interrupts
-	 * were not configured
-	 */
-	if (!vdev->cdx_irqs)
-		return;
-
 	vfio_cdx_set_msi_trigger(vdev, 0, 0, 0, VFIO_IRQ_SET_DATA_NONE, NULL);
 }

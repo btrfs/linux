@@ -218,7 +218,7 @@ static struct hash_cell *alloc_cell(const char *name, const char *uuid,
 {
 	struct hash_cell *hc;
 
-	hc = kmalloc(sizeof(*hc), GFP_KERNEL);
+	hc = kmalloc_obj(*hc);
 	if (!hc)
 		return NULL;
 
@@ -384,7 +384,7 @@ retry:
 
 	up_write(&_hash_lock);
 
-	if (dev_skipped)
+	if (dev_skipped && !only_deferred)
 		DMWARN("remove_all left %d open device(s)", dev_skipped);
 }
 
@@ -1341,6 +1341,10 @@ static void retrieve_status(struct dm_table *table,
 		used = param->data_start + (outptr - outbuf);
 
 		outptr = align_ptr(outptr);
+		if (!outptr || outptr > outbuf + len) {
+			param->flags |= DM_BUFFER_FULL_FLAG;
+			break;
+		}
 		spec->next = outptr - outbuf;
 	}
 
@@ -1648,8 +1652,6 @@ static void retrieve_deps(struct dm_table *table,
 	struct dm_dev_internal *dd;
 	struct dm_target_deps *deps;
 
-	down_read(&table->devices_lock);
-
 	deps = get_result_buffer(param, param_size, &len);
 
 	/*
@@ -1664,7 +1666,7 @@ static void retrieve_deps(struct dm_table *table,
 	needed = struct_size(deps, dev, count);
 	if (len < needed) {
 		param->flags |= DM_BUFFER_FULL_FLAG;
-		goto out;
+		return;
 	}
 
 	/*
@@ -1676,9 +1678,6 @@ static void retrieve_deps(struct dm_table *table,
 		deps->dev[count++] = huge_encode_dev(dd->dm_dev->bdev->bd_dev);
 
 	param->data_size = param->data_start + needed;
-
-out:
-	up_read(&table->devices_lock);
 }
 
 static int table_deps(struct file *filp, struct dm_ioctl *param, size_t param_size)
@@ -2141,7 +2140,7 @@ static int dm_open(struct inode *inode, struct file *filp)
 	if (unlikely(r))
 		return r;
 
-	priv = filp->private_data = kmalloc(sizeof(struct dm_file), GFP_KERNEL);
+	priv = filp->private_data = kmalloc_obj(struct dm_file);
 	if (!priv)
 		return -ENOMEM;
 

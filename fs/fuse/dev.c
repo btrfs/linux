@@ -570,6 +570,11 @@ static void request_wait_answer(struct fuse_req *req)
 		if (!err)
 			return;
 
+		if (req->args->abort_on_kill) {
+			fuse_abort_conn(fc);
+			return;
+		}
+
 		if (test_bit(FR_URING, &req->flags))
 			removed = fuse_uring_remove_pending_req(req);
 		else
@@ -676,7 +681,8 @@ ssize_t __fuse_simple_request(struct mnt_idmap *idmap,
 			fuse_force_creds(req);
 
 		__set_bit(FR_WAITING, &req->flags);
-		__set_bit(FR_FORCE, &req->flags);
+		if (!args->abort_on_kill)
+			__set_bit(FR_FORCE, &req->flags);
 	} else {
 		WARN_ON(args->nocreds);
 		req = fuse_get_req(idmap, fm, false);
@@ -846,7 +852,7 @@ void fuse_copy_init(struct fuse_copy_state *cs, bool write,
 }
 
 /* Unmap and put previous page of userspace buffer */
-static void fuse_copy_finish(struct fuse_copy_state *cs)
+void fuse_copy_finish(struct fuse_copy_state *cs)
 {
 	if (cs->currbuf) {
 		struct pipe_buffer *buf = cs->currbuf;
@@ -1010,6 +1016,9 @@ static int fuse_try_move_folio(struct fuse_copy_state *cs, struct folio **foliop
 
 	folio_clear_uptodate(newfolio);
 	folio_clear_mappedtodisk(newfolio);
+
+	if (folio_test_large(newfolio))
+		goto out_fallback_unlock;
 
 	if (fuse_check_folio(newfolio) != 0)
 		goto out_fallback_unlock;
@@ -1598,8 +1607,7 @@ static ssize_t fuse_dev_splice_read(struct file *in, loff_t *ppos,
 	if (IS_ERR(fud))
 		return PTR_ERR(fud);
 
-	bufs = kvmalloc_array(pipe->max_usage, sizeof(struct pipe_buffer),
-			      GFP_KERNEL);
+	bufs = kvmalloc_objs(struct pipe_buffer, pipe->max_usage);
 	if (!bufs)
 		return -ENOMEM;
 
@@ -1813,7 +1821,7 @@ static int fuse_notify_store(struct fuse_conn *fc, unsigned int size,
 			goto out_iput;
 
 		folio_offset = ((index - folio->index) << PAGE_SHIFT) + offset;
-		nr_bytes = min_t(unsigned, num, folio_size(folio) - folio_offset);
+		nr_bytes = min(num, folio_size(folio) - folio_offset);
 		nr_pages = (offset + nr_bytes + PAGE_SIZE - 1) >> PAGE_SHIFT;
 
 		err = fuse_copy_folio(cs, &folio, folio_offset, nr_bytes, 0);
@@ -2041,13 +2049,14 @@ static int fuse_notify_resend(struct fuse_conn *fc)
 
 /*
  * Increments the fuse connection epoch.  This will result of dentries from
- * previous epochs to be invalidated.
- *
- * XXX optimization: add call to shrink_dcache_sb()?
+ * previous epochs to be invalidated.  Additionally, if inval_wq is set, a work
+ * queue is scheduled to trigger the invalidation.
  */
 static int fuse_notify_inc_epoch(struct fuse_conn *fc)
 {
 	atomic_inc(&fc->epoch);
+	if (inval_wq)
+		schedule_work(&fc->epoch_work);
 
 	return 0;
 }
@@ -2310,7 +2319,7 @@ static ssize_t fuse_dev_splice_write(struct pipe_inode_info *pipe,
 	tail = pipe->tail;
 	count = pipe_occupancy(head, tail);
 
-	bufs = kvmalloc_array(count, sizeof(struct pipe_buffer), GFP_KERNEL);
+	bufs = kvmalloc_objs(struct pipe_buffer, count);
 	if (!bufs) {
 		pipe_unlock(pipe);
 		return -ENOMEM;
@@ -2590,9 +2599,8 @@ static int fuse_device_clone(struct fuse_conn *fc, struct file *new)
 
 static long fuse_dev_ioctl_clone(struct file *file, __u32 __user *argp)
 {
-	int res;
 	int oldfd;
-	struct fuse_dev *fud = NULL;
+	struct fuse_dev *fud;
 
 	if (get_user(oldfd, argp))
 		return -EFAULT;
@@ -2605,17 +2613,15 @@ static long fuse_dev_ioctl_clone(struct file *file, __u32 __user *argp)
 	 * Check against file->f_op because CUSE
 	 * uses the same ioctl handler.
 	 */
-	if (fd_file(f)->f_op == file->f_op)
-		fud = __fuse_get_dev(fd_file(f));
+	if (fd_file(f)->f_op != file->f_op)
+		return -EINVAL;
 
-	res = -EINVAL;
-	if (fud) {
-		mutex_lock(&fuse_mutex);
-		res = fuse_device_clone(fud->fc, file);
-		mutex_unlock(&fuse_mutex);
-	}
+	fud = fuse_get_dev(fd_file(f));
+	if (IS_ERR(fud))
+		return PTR_ERR(fud);
 
-	return res;
+	guard(mutex)(&fuse_mutex);
+	return fuse_device_clone(fud->fc, file);
 }
 
 static long fuse_dev_ioctl_backing_open(struct file *file,

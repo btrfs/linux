@@ -75,7 +75,7 @@ static int get_report(struct snp_guest_dev *snp_dev, struct snp_guest_request_io
 	if (!arg->req_data || !arg->resp_data)
 		return -EINVAL;
 
-	report_req = kzalloc(sizeof(*report_req), GFP_KERNEL_ACCOUNT);
+	report_req = kzalloc_obj(*report_req, GFP_KERNEL_ACCOUNT);
 	if (!report_req)
 		return -ENOMEM;
 
@@ -135,7 +135,7 @@ static int get_derived_key(struct snp_guest_dev *snp_dev, struct snp_guest_reque
 	if (!derived_key_resp)
 		return -ENOMEM;
 
-	derived_key_req = kzalloc(sizeof(*derived_key_req), GFP_KERNEL_ACCOUNT);
+	derived_key_req = kzalloc_obj(*derived_key_req, GFP_KERNEL_ACCOUNT);
 	if (!derived_key_req)
 		return -ENOMEM;
 
@@ -176,12 +176,11 @@ static int get_ext_report(struct snp_guest_dev *snp_dev, struct snp_guest_reques
 	struct snp_guest_req req = {};
 	int ret, npages = 0, resp_len;
 	sockptr_t certs_address;
-	struct page *page;
 
 	if (sockptr_is_null(io->req_data) || sockptr_is_null(io->resp_data))
 		return -EINVAL;
 
-	report_req = kzalloc(sizeof(*report_req), GFP_KERNEL_ACCOUNT);
+	report_req = kzalloc_obj(*report_req, GFP_KERNEL_ACCOUNT);
 	if (!report_req)
 		return -ENOMEM;
 
@@ -211,16 +210,15 @@ static int get_ext_report(struct snp_guest_dev *snp_dev, struct snp_guest_reques
 	 * zeros to indicate that certificate data was not provided.
 	 */
 	npages = report_req->certs_len >> PAGE_SHIFT;
-	page = alloc_pages(GFP_KERNEL_ACCOUNT | __GFP_ZERO,
-			   get_order(report_req->certs_len));
-	if (!page)
+	req.certs_data = alloc_pages_exact(npages << PAGE_SHIFT,
+					   GFP_KERNEL_ACCOUNT | __GFP_ZERO);
+	if (!req.certs_data)
 		return -ENOMEM;
 
-	req.certs_data = page_address(page);
 	ret = set_memory_decrypted((unsigned long)req.certs_data, npages);
 	if (ret) {
 		pr_err("failed to mark page shared, ret=%d\n", ret);
-		__free_pages(page, get_order(report_req->certs_len));
+		free_pages_exact(req.certs_data, npages << PAGE_SHIFT);
 		return -EFAULT;
 	}
 
@@ -277,7 +275,7 @@ e_free_data:
 		if (set_memory_encrypted((unsigned long)req.certs_data, npages))
 			WARN_ONCE(ret, "failed to restore encryption mask (leak it)\n");
 		else
-			__free_pages(page, get_order(report_req->certs_len));
+			free_pages_exact(req.certs_data, npages << PAGE_SHIFT);
 	}
 	return ret;
 }

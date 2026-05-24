@@ -1016,7 +1016,7 @@ static struct xive_irq_data *xive_irq_alloc_data(unsigned int virq, irq_hw_numbe
 	struct xive_irq_data *xd;
 	int rc;
 
-	xd = kzalloc(sizeof(struct xive_irq_data), GFP_KERNEL);
+	xd = kzalloc_obj(struct xive_irq_data);
 	if (!xd)
 		return ERR_PTR(-ENOMEM);
 	rc = xive_ops->populate_irq_data(hw, xd);
@@ -1038,13 +1038,19 @@ static struct xive_irq_data *xive_irq_alloc_data(unsigned int virq, irq_hw_numbe
 	return xd;
 }
 
-static void xive_irq_free_data(unsigned int virq)
+static void xive_irq_free_data(struct irq_domain *domain, unsigned int virq)
 {
-	struct xive_irq_data *xd = irq_get_chip_data(virq);
+	struct xive_irq_data *xd;
+	struct irq_data *data = irq_domain_get_irq_data(domain, virq);
 
+	if (!data)
+		return;
+
+	xd = irq_data_get_irq_chip_data(data);
 	if (!xd)
 		return;
-	irq_set_chip_data(virq, NULL);
+
+	irq_domain_reset_irq_data(data);
 	xive_cleanup_irq_data(xd);
 	kfree(xd);
 }
@@ -1144,7 +1150,8 @@ static int __init xive_init_ipis(void)
 	if (!ipi_domain)
 		goto out_free_fwnode;
 
-	xive_ipis = kcalloc(nr_node_ids, sizeof(*xive_ipis), GFP_KERNEL | __GFP_NOFAIL);
+	xive_ipis = kzalloc_objs(*xive_ipis, nr_node_ids,
+				 GFP_KERNEL | __GFP_NOFAIL);
 	if (!xive_ipis)
 		goto out_free_domain;
 
@@ -1304,7 +1311,7 @@ static int xive_irq_domain_map(struct irq_domain *h, unsigned int virq,
 
 static void xive_irq_domain_unmap(struct irq_domain *d, unsigned int virq)
 {
-	xive_irq_free_data(virq);
+	xive_irq_free_data(d, virq);
 }
 
 static int xive_irq_domain_xlate(struct irq_domain *h, struct device_node *ct,
@@ -1442,7 +1449,7 @@ static void xive_irq_domain_free(struct irq_domain *domain,
 	pr_debug("%s %d #%d\n", __func__, virq, nr_irqs);
 
 	for (i = 0; i < nr_irqs; i++)
-		xive_irq_free_data(virq + i);
+		xive_irq_free_data(domain, virq + i);
 }
 #endif
 

@@ -16,6 +16,7 @@
 #include <linux/minmax.h>
 #include <linux/module.h>
 #include <linux/overflow.h>
+#include <linux/pm_runtime.h>
 #include <linux/regmap.h>
 #include <linux/soundwire/sdw_registers.h>
 #include <linux/string_helpers.h>
@@ -50,6 +51,25 @@ static bool readonly_control(struct sdca_control *control)
 	return control->has_fixed || control->mode == SDCA_ACCESS_MODE_RO;
 }
 
+static int ge_count_routes(struct sdca_entity *entity)
+{
+	int count = 0;
+	int i, j;
+
+	for (i = 0; i < entity->ge.num_modes; i++) {
+		struct sdca_ge_mode *mode = &entity->ge.modes[i];
+
+		for (j = 0; j < mode->num_controls; j++) {
+			struct sdca_ge_control *affected = &mode->controls[j];
+
+			if (affected->sel != SDCA_CTL_SU_SELECTOR || affected->val)
+				count++;
+		}
+	}
+
+	return count;
+}
+
 /**
  * sdca_asoc_count_component - count the various component parts
  * @dev: Pointer to the device against which allocations will be done.
@@ -73,6 +93,7 @@ int sdca_asoc_count_component(struct device *dev, struct sdca_function_data *fun
 			      int *num_widgets, int *num_routes, int *num_controls,
 			      int *num_dais)
 {
+	struct sdca_control *control;
 	int i, j;
 
 	*num_widgets = function->num_entities - 1;
@@ -82,6 +103,7 @@ int sdca_asoc_count_component(struct device *dev, struct sdca_function_data *fun
 
 	for (i = 0; i < function->num_entities - 1; i++) {
 		struct sdca_entity *entity = &function->entities[i];
+		bool skip_primary_routes = false;
 
 		/* Add supply/DAI widget connections */
 		switch (entity->type) {
@@ -95,6 +117,17 @@ int sdca_asoc_count_component(struct device *dev, struct sdca_function_data *fun
 		case SDCA_ENTITY_TYPE_PDE:
 			*num_routes += entity->pde.num_managed;
 			break;
+		case SDCA_ENTITY_TYPE_GE:
+			*num_routes += ge_count_routes(entity);
+			skip_primary_routes = true;
+			break;
+		case SDCA_ENTITY_TYPE_SU:
+			control = sdca_selector_find_control(dev, entity, SDCA_CTL_SU_SELECTOR);
+			if (!control)
+				return -EINVAL;
+
+			skip_primary_routes = (control->layers == SDCA_ACCESS_LAYER_DEVICE);
+			break;
 		default:
 			break;
 		}
@@ -103,7 +136,8 @@ int sdca_asoc_count_component(struct device *dev, struct sdca_function_data *fun
 			(*num_routes)++;
 
 		/* Add primary entity connections from DisCo */
-		*num_routes += entity->num_sources;
+		if (!skip_primary_routes)
+			*num_routes += entity->num_sources;
 
 		for (j = 0; j < entity->num_controls; j++) {
 			if (exported_control(entity, &entity->controls[j]))
@@ -115,48 +149,39 @@ int sdca_asoc_count_component(struct device *dev, struct sdca_function_data *fun
 }
 EXPORT_SYMBOL_NS(sdca_asoc_count_component, "SND_SOC_SDCA");
 
-static const char *get_terminal_name(enum sdca_terminal_type type)
+static int ge_put_enum_double(struct snd_kcontrol *kcontrol,
+			      struct snd_ctl_elem_value *ucontrol)
 {
-	switch (type) {
-	case SDCA_TERM_TYPE_LINEIN_STEREO:
-		return SDCA_TERM_TYPE_LINEIN_STEREO_NAME;
-	case SDCA_TERM_TYPE_LINEIN_FRONT_LR:
-		return SDCA_TERM_TYPE_LINEIN_FRONT_LR_NAME;
-	case SDCA_TERM_TYPE_LINEIN_CENTER_LFE:
-		return SDCA_TERM_TYPE_LINEIN_CENTER_LFE_NAME;
-	case SDCA_TERM_TYPE_LINEIN_SURROUND_LR:
-		return SDCA_TERM_TYPE_LINEIN_SURROUND_LR_NAME;
-	case SDCA_TERM_TYPE_LINEIN_REAR_LR:
-		return SDCA_TERM_TYPE_LINEIN_REAR_LR_NAME;
-	case SDCA_TERM_TYPE_LINEOUT_STEREO:
-		return SDCA_TERM_TYPE_LINEOUT_STEREO_NAME;
-	case SDCA_TERM_TYPE_LINEOUT_FRONT_LR:
-		return SDCA_TERM_TYPE_LINEOUT_FRONT_LR_NAME;
-	case SDCA_TERM_TYPE_LINEOUT_CENTER_LFE:
-		return SDCA_TERM_TYPE_LINEOUT_CENTER_LFE_NAME;
-	case SDCA_TERM_TYPE_LINEOUT_SURROUND_LR:
-		return SDCA_TERM_TYPE_LINEOUT_SURROUND_LR_NAME;
-	case SDCA_TERM_TYPE_LINEOUT_REAR_LR:
-		return SDCA_TERM_TYPE_LINEOUT_REAR_LR_NAME;
-	case SDCA_TERM_TYPE_MIC_JACK:
-		return SDCA_TERM_TYPE_MIC_JACK_NAME;
-	case SDCA_TERM_TYPE_STEREO_JACK:
-		return SDCA_TERM_TYPE_STEREO_JACK_NAME;
-	case SDCA_TERM_TYPE_FRONT_LR_JACK:
-		return SDCA_TERM_TYPE_FRONT_LR_JACK_NAME;
-	case SDCA_TERM_TYPE_CENTER_LFE_JACK:
-		return SDCA_TERM_TYPE_CENTER_LFE_JACK_NAME;
-	case SDCA_TERM_TYPE_SURROUND_LR_JACK:
-		return SDCA_TERM_TYPE_SURROUND_LR_JACK_NAME;
-	case SDCA_TERM_TYPE_REAR_LR_JACK:
-		return SDCA_TERM_TYPE_REAR_LR_JACK_NAME;
-	case SDCA_TERM_TYPE_HEADPHONE_JACK:
-		return SDCA_TERM_TYPE_HEADPHONE_JACK_NAME;
-	case SDCA_TERM_TYPE_HEADSET_JACK:
-		return SDCA_TERM_TYPE_HEADSET_JACK_NAME;
-	default:
-		return NULL;
+	struct snd_soc_dapm_context *dapm = snd_soc_dapm_kcontrol_to_dapm(kcontrol);
+	struct snd_soc_component *component = snd_soc_dapm_to_component(dapm);
+	struct device *dev = component->dev;
+	struct soc_enum *e = (struct soc_enum *)kcontrol->private_value;
+	unsigned int *item = ucontrol->value.enumerated.item;
+	unsigned int reg = e->reg;
+	int ret;
+
+	reg &= ~SDW_SDCA_CTL_CSEL(0x3F);
+	reg |= SDW_SDCA_CTL_CSEL(SDCA_CTL_GE_DETECTED_MODE);
+
+	ret = pm_runtime_resume_and_get(dev);
+	if (ret < 0) {
+		dev_err(dev, "failed to resume writing %s: %d\n",
+			kcontrol->id.name, ret);
+		return ret;
 	}
+
+	ret = snd_soc_component_read(component, reg);
+	pm_runtime_put(dev);
+	if (ret < 0)
+		return ret;
+	else if (ret <= SDCA_DETECTED_MODE_DETECTION_IN_PROGRESS)
+		return -EBUSY;
+
+	ret = snd_soc_enum_item_to_val(e, item[0]);
+	if (ret <= SDCA_DETECTED_MODE_DETECTION_IN_PROGRESS)
+		return -EINVAL;
+
+	return snd_soc_dapm_put_enum_double(kcontrol, ucontrol);
 }
 
 static int entity_early_parse_ge(struct device *dev,
@@ -217,7 +242,7 @@ static int entity_early_parse_ge(struct device *dev,
 		type = sdca_range(range, SDCA_SELECTED_MODE_TERM_TYPE, i);
 
 		values[i + 3] = sdca_range(range, SDCA_SELECTED_MODE_INDEX, i);
-		texts[i + 3] = get_terminal_name(type);
+		texts[i + 3] = sdca_find_terminal_name(type);
 		if (!texts[i + 3]) {
 			dev_err(dev, "%s: unrecognised terminal type: %#x\n",
 				entity->label, type);
@@ -235,7 +260,7 @@ static int entity_early_parse_ge(struct device *dev,
 	kctl->name = control_name;
 	kctl->info = snd_soc_info_enum_double;
 	kctl->get = snd_soc_dapm_get_enum_double;
-	kctl->put = snd_soc_dapm_put_enum_double;
+	kctl->put = ge_put_enum_double;
 	kctl->private_value = (unsigned long)soc_enum;
 
 	entity->ge.kctl = kctl;
@@ -337,7 +362,7 @@ static int entity_parse_ot(struct device *dev,
 static int entity_pde_event(struct snd_soc_dapm_widget *widget,
 			    struct snd_kcontrol *kctl, int event)
 {
-	struct snd_soc_component *component = widget->dapm->component;
+	struct snd_soc_component *component = snd_soc_dapm_to_component(widget->dapm);
 	struct sdca_entity *entity = widget->priv;
 	static const int polls = 100;
 	unsigned int reg, val;
@@ -450,7 +475,6 @@ static int entity_parse_su_device(struct device *dev,
 				  struct snd_soc_dapm_route **route)
 {
 	struct sdca_control_range *range;
-	int num_routes = 0;
 	int i, j;
 
 	if (!entity->group) {
@@ -486,11 +510,6 @@ static int entity_parse_su_device(struct device *dev,
 				return -EINVAL;
 			}
 
-			if (++num_routes > entity->num_sources) {
-				dev_err(dev, "%s: too many input routes\n", entity->label);
-				return -EINVAL;
-			}
-
 			term = sdca_range_search(range, SDCA_SELECTED_MODE_INDEX,
 						 mode->val, SDCA_SELECTED_MODE_TERM_TYPE);
 			if (!term) {
@@ -499,7 +518,7 @@ static int entity_parse_su_device(struct device *dev,
 				return -EINVAL;
 			}
 
-			add_route(route, entity->label, get_terminal_name(term),
+			add_route(route, entity->label, sdca_find_terminal_name(term),
 				  entity->sources[affected->val - 1]->label);
 		}
 	}
@@ -655,7 +674,7 @@ static int entity_parse_mu(struct device *dev,
 static int entity_cs_event(struct snd_soc_dapm_widget *widget,
 			   struct snd_kcontrol *kctl, int event)
 {
-	struct snd_soc_component *component = widget->dapm->component;
+	struct snd_soc_component *component = snd_soc_dapm_to_component(widget->dapm);
 	struct sdca_entity *entity = widget->priv;
 
 	if (!component)
@@ -795,7 +814,6 @@ static int control_limit_kctl(struct device *dev,
 	struct sdca_control_range *range;
 	int min, max, step;
 	unsigned int *tlv;
-	int shift;
 
 	if (control->type != SDCA_CTL_DATATYPE_Q7P8DB)
 		return 0;
@@ -814,42 +832,69 @@ static int control_limit_kctl(struct device *dev,
 	min = sign_extend32(min, control->nbits - 1);
 	max = sign_extend32(max, control->nbits - 1);
 
-	/*
-	 * FIXME: Only support power of 2 step sizes as this can be supported
-	 * by a simple shift.
-	 */
-	if (hweight32(step) != 1) {
-		dev_err(dev, "%s: %s: currently unsupported step size\n",
-			entity->label, control->label);
-		return -EINVAL;
-	}
-
-	/*
-	 * The SDCA volumes are in steps of 1/256th of a dB, a step down of
-	 * 64 (shift of 6) gives 1/4dB. 1/4dB is the smallest unit that is also
-	 * representable in the ALSA TLVs which are in 1/100ths of a dB.
-	 */
-	shift = max(ffs(step) - 1, 6);
-
 	tlv = devm_kcalloc(dev, 4, sizeof(*tlv), GFP_KERNEL);
 	if (!tlv)
 		return -ENOMEM;
 
-	tlv[0] = SNDRV_CTL_TLVT_DB_SCALE;
+	tlv[0] = SNDRV_CTL_TLVT_DB_MINMAX;
 	tlv[1] = 2 * sizeof(*tlv);
 	tlv[2] = (min * 100) >> 8;
-	tlv[3] = ((1 << shift) * 100) >> 8;
+	tlv[3] = (max * 100) >> 8;
 
-	mc->min = min >> shift;
-	mc->max = max >> shift;
-	mc->shift = shift;
-	mc->rshift = shift;
-	mc->sign_bit = 15 - shift;
+	step = (step * 100) >> 8;
+
+	mc->min = ((int)tlv[2] / step);
+	mc->max = ((int)tlv[3] / step);
+	mc->shift = step;
+	mc->sign_bit = 15;
+	mc->sdca_q78 = 1;
 
 	kctl->tlv.p = tlv;
 	kctl->access |= SNDRV_CTL_ELEM_ACCESS_TLV_READ;
 
 	return 0;
+}
+
+static int volatile_get_volsw(struct snd_kcontrol *kcontrol,
+			      struct snd_ctl_elem_value *ucontrol)
+{
+	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
+	struct device *dev = component->dev;
+	int ret;
+
+	ret = pm_runtime_resume_and_get(dev);
+	if (ret < 0) {
+		dev_err(dev, "failed to resume reading %s: %d\n",
+			kcontrol->id.name, ret);
+		return ret;
+	}
+
+	ret = snd_soc_get_volsw(kcontrol, ucontrol);
+
+	pm_runtime_put(dev);
+
+	return ret;
+}
+
+static int volatile_put_volsw(struct snd_kcontrol *kcontrol,
+			      struct snd_ctl_elem_value *ucontrol)
+{
+	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
+	struct device *dev = component->dev;
+	int ret;
+
+	ret = pm_runtime_resume_and_get(dev);
+	if (ret < 0) {
+		dev_err(dev, "failed to resume writing %s: %d\n",
+			kcontrol->id.name, ret);
+		return ret;
+	}
+
+	ret = snd_soc_put_volsw(kcontrol, ucontrol);
+
+	pm_runtime_put(dev);
+
+	return ret;
 }
 
 static int populate_control(struct device *dev,
@@ -902,12 +947,20 @@ static int populate_control(struct device *dev,
 	mc->min = 0;
 	mc->max = clamp((0x1ull << control->nbits) - 1, 0, type_max(mc->max));
 
+	if (SDCA_CTL_TYPE(entity->type, control->sel) == SDCA_CTL_TYPE_S(FU, MUTE))
+		mc->invert = true;
+
 	(*kctl)->name = control_name;
 	(*kctl)->private_value = (unsigned long)mc;
 	(*kctl)->iface = SNDRV_CTL_ELEM_IFACE_MIXER;
 	(*kctl)->info = snd_soc_info_volsw;
-	(*kctl)->get = snd_soc_get_volsw;
-	(*kctl)->put = snd_soc_put_volsw;
+	if (control->is_volatile) {
+		(*kctl)->get = volatile_get_volsw;
+		(*kctl)->put = volatile_put_volsw;
+	} else {
+		(*kctl)->get = snd_soc_get_volsw;
+		(*kctl)->put = snd_soc_put_volsw;
+	}
 
 	if (readonly_control(control))
 		(*kctl)->access = SNDRV_CTL_ELEM_ACCESS_READ;
@@ -1323,7 +1376,7 @@ int sdca_asoc_set_constraints(struct device *dev, struct regmap *regmap,
 	dev_dbg(dev, "%s: set channel constraint mask: %#x\n",
 		entity->label, channel_mask);
 
-	constraint = kzalloc(sizeof(*constraint), GFP_KERNEL);
+	constraint = kzalloc_obj(*constraint);
 	if (!constraint)
 		return -ENOMEM;
 
@@ -1535,7 +1588,7 @@ static int set_usage(struct device *dev, struct regmap *regmap,
 		unsigned int rate = sdca_range(range, SDCA_USAGE_SAMPLE_RATE, i);
 		unsigned int width = sdca_range(range, SDCA_USAGE_SAMPLE_WIDTH, i);
 
-		if ((!rate || rate == target_rate) && width == target_width) {
+		if ((!rate || rate == target_rate) && (!width || width == target_width)) {
 			unsigned int usage = sdca_range(range, SDCA_USAGE_NUMBER, i);
 			unsigned int reg = SDW_SDCA_CTL(function->desc->adr,
 							entity->id, sel, 0);

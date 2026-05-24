@@ -145,7 +145,7 @@ struct simd_skcipher_alg *simd_skcipher_create_compat(struct skcipher_alg *ialg,
 	struct skcipher_alg *alg;
 	int err;
 
-	salg = kzalloc(sizeof(*salg), GFP_KERNEL);
+	salg = kzalloc_obj(*salg);
 	if (!salg) {
 		salg = ERR_PTR(-ENOMEM);
 		goto out;
@@ -214,13 +214,17 @@ int simd_register_skciphers_compat(struct skcipher_alg *algs, int count,
 	const char *basename;
 	struct simd_skcipher_alg *simd;
 
+	for (i = 0; i < count; i++) {
+		if (WARN_ON(strncmp(algs[i].base.cra_name, "__", 2) ||
+			    strncmp(algs[i].base.cra_driver_name, "__", 2)))
+			return -EINVAL;
+	}
+
 	err = crypto_register_skciphers(algs, count);
 	if (err)
 		return err;
 
 	for (i = 0; i < count; i++) {
-		WARN_ON(strncmp(algs[i].base.cra_name, "__", 2));
-		WARN_ON(strncmp(algs[i].base.cra_driver_name, "__", 2));
 		algname = algs[i].base.cra_name + 2;
 		drvname = algs[i].base.cra_driver_name + 2;
 		basename = algs[i].base.cra_driver_name;
@@ -352,8 +356,8 @@ static int simd_aead_init(struct crypto_aead *tfm)
 
 	ctx->cryptd_tfm = cryptd_tfm;
 
-	reqsize = crypto_aead_reqsize(cryptd_aead_child(cryptd_tfm));
-	reqsize = max(reqsize, crypto_aead_reqsize(&cryptd_tfm->base));
+	reqsize = max(crypto_aead_reqsize(cryptd_aead_child(cryptd_tfm)),
+		      crypto_aead_reqsize(&cryptd_tfm->base));
 	reqsize += sizeof(struct aead_request);
 
 	crypto_aead_set_reqsize(tfm, reqsize);
@@ -370,7 +374,7 @@ static struct simd_aead_alg *simd_aead_create_compat(struct aead_alg *ialg,
 	struct aead_alg *alg;
 	int err;
 
-	salg = kzalloc(sizeof(*salg), GFP_KERNEL);
+	salg = kzalloc_obj(*salg);
 	if (!salg) {
 		salg = ERR_PTR(-ENOMEM);
 		goto out;
@@ -437,13 +441,17 @@ int simd_register_aeads_compat(struct aead_alg *algs, int count,
 	const char *basename;
 	struct simd_aead_alg *simd;
 
+	for (i = 0; i < count; i++) {
+		if (WARN_ON(strncmp(algs[i].base.cra_name, "__", 2) ||
+			    strncmp(algs[i].base.cra_driver_name, "__", 2)))
+			return -EINVAL;
+	}
+
 	err = crypto_register_aeads(algs, count);
 	if (err)
 		return err;
 
 	for (i = 0; i < count; i++) {
-		WARN_ON(strncmp(algs[i].base.cra_name, "__", 2));
-		WARN_ON(strncmp(algs[i].base.cra_driver_name, "__", 2));
 		algname = algs[i].base.cra_name + 2;
 		drvname = algs[i].base.cra_driver_name + 2;
 		basename = algs[i].base.cra_driver_name;

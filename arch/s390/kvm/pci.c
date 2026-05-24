@@ -54,7 +54,7 @@ static int zpci_setup_aipb(u8 nisc)
 	struct page *page;
 	int size, rc;
 
-	zpci_aipb = kzalloc(sizeof(union zpci_sic_iib), GFP_KERNEL);
+	zpci_aipb = kzalloc_obj(union zpci_sic_iib);
 	if (!zpci_aipb)
 		return -ENOMEM;
 
@@ -126,8 +126,7 @@ int kvm_s390_pci_aen_init(u8 nisc)
 		return -EPERM;
 
 	mutex_lock(&aift->aift_lock);
-	aift->kzdev = kcalloc(ZPCI_NR_DEVICES, sizeof(struct kvm_zdev *),
-			      GFP_KERNEL);
+	aift->kzdev = kzalloc_objs(struct kvm_zdev *, ZPCI_NR_DEVICES);
 	if (!aift->kzdev) {
 		rc = -ENOMEM;
 		goto unlock;
@@ -291,8 +290,7 @@ static int kvm_s390_pci_aif_enable(struct zpci_dev *zdev, struct zpci_fib *fib,
 				    phys_to_virt(fib->fmt0.aibv));
 
 	spin_lock_irq(&aift->gait_lock);
-	gaite = (struct zpci_gaite *)aift->gait + (zdev->aisb *
-						   sizeof(struct zpci_gaite));
+	gaite = aift->gait + zdev->aisb;
 
 	/* If assist not requested, host will get all alerts */
 	if (assist)
@@ -358,8 +356,7 @@ static int kvm_s390_pci_aif_disable(struct zpci_dev *zdev, bool force)
 	if (zdev->kzdev->fib.fmt0.aibv == 0)
 		goto out;
 	spin_lock_irq(&aift->gait_lock);
-	gaite = (struct zpci_gaite *)aift->gait + (zdev->aisb *
-						   sizeof(struct zpci_gaite));
+	gaite = aift->gait + zdev->aisb;
 	isc = gaite->gisc;
 	gaite->count--;
 	if (gaite->count == 0) {
@@ -404,7 +401,7 @@ static int kvm_s390_pci_dev_open(struct zpci_dev *zdev)
 {
 	struct kvm_zdev *kzdev;
 
-	kzdev = kzalloc(sizeof(struct kvm_zdev), GFP_KERNEL);
+	kzdev = kzalloc_obj(struct kvm_zdev);
 	if (!kzdev)
 		return -ENOMEM;
 
@@ -666,7 +663,7 @@ int __init kvm_s390_pci_init(void)
 	if (!kvm_s390_pci_interp_allowed())
 		return 0;
 
-	aift = kzalloc(sizeof(struct zpci_aift), GFP_KERNEL);
+	aift = kzalloc_obj(struct zpci_aift);
 	if (!aift)
 		return -ENOMEM;
 

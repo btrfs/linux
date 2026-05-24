@@ -117,7 +117,7 @@ static int add_interval(struct resource_map *map, u_long base, u_long num)
 		if ((p->next == map) || (p->next->base > base+num-1))
 			break;
 	}
-	q = kmalloc(sizeof(struct resource_map), GFP_KERNEL);
+	q = kmalloc_obj(struct resource_map);
 	if (!q) {
 		printk(KERN_WARNING "out of memory to update resources\n");
 		return -ENOMEM;
@@ -155,8 +155,7 @@ static int sub_interval(struct resource_map *map, u_long base, u_long num)
 				q->num = base - q->base;
 			} else {
 				/* Split the block into two pieces */
-				p = kmalloc(sizeof(struct resource_map),
-					GFP_KERNEL);
+				p = kmalloc_obj(struct resource_map);
 				if (!p) {
 					printk(KERN_WARNING "out of memory to update resources\n");
 					return -ENOMEM;
@@ -188,7 +187,7 @@ static void do_io_probe(struct pcmcia_socket *s, unsigned int base,
 	int any;
 	u_char *b, hole, most;
 
-	dev_info(&s->dev, "cs: IO port probe %#x-%#x:", base, base+num-1);
+	pr_info("%s: cs: IO port probe %#x-%#x:", dev_name(&s->dev), base, base+num-1);
 
 	/* First, what does a floating port look like? */
 	b = kzalloc(256, GFP_KERNEL);
@@ -410,8 +409,8 @@ static int do_mem_probe(struct pcmcia_socket *s, u_long base, u_long num,
 	struct socket_data *s_data = s->resource_data;
 	u_long i, j, bad, fail, step;
 
-	dev_info(&s->dev, "cs: memory probe 0x%06lx-0x%06lx:",
-		 base, base+num-1);
+	pr_info("%s: cs: memory probe 0x%06lx-0x%06lx:",
+	       dev_name(&s->dev), base, base+num-1);
 	bad = fail = 0;
 	step = (num < 0x20000) ? 0x2000 : ((num>>4) & ~0x1fff);
 	/* don't allow too large steps */
@@ -1023,7 +1022,7 @@ static int nonstatic_init(struct pcmcia_socket *s)
 {
 	struct socket_data *data;
 
-	data = kzalloc(sizeof(struct socket_data), GFP_KERNEL);
+	data = kzalloc_obj(struct socket_data);
 	if (!data)
 		return -ENOMEM;
 
