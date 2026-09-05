@@ -538,19 +538,19 @@ static int __maybe_unused pca9685_pwm_runtime_resume(struct device *dev)
 }
 
 static const struct i2c_device_id pca9685_id[] = {
-	{ "pca9685" },
+	{ .name = "pca9685" },
 	{ /* sentinel */ }
 };
 MODULE_DEVICE_TABLE(i2c, pca9685_id);
 
 static const struct acpi_device_id pca9685_acpi_ids[] = {
-	{ "INT3492", 0 },
-	{ /* sentinel */ },
+	{ .id = "INT3492" },
+	{ /* sentinel */ }
 };
 MODULE_DEVICE_TABLE(acpi, pca9685_acpi_ids);
 
 static const struct of_device_id pca9685_dt_ids[] = {
-	{ .compatible = "nxp,pca9685-pwm", },
+	{ .compatible = "nxp,pca9685-pwm" },
 	{ /* sentinel */ }
 };
 MODULE_DEVICE_TABLE(of, pca9685_dt_ids);

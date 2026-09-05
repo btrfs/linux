@@ -4,12 +4,14 @@
 #include "pvr_ccb.h"
 #include "pvr_device.h"
 #include "pvr_drv.h"
+#include "pvr_dump.h"
 #include "pvr_free_list.h"
 #include "pvr_fw.h"
 #include "pvr_gem.h"
 #include "pvr_power.h"
 
 #include <drm/drm_managed.h>
+#include <drm/drm_print.h>
 #include <linux/compiler.h>
 #include <linux/delay.h>
 #include <linux/jiffies.h>
@@ -135,6 +137,14 @@ pvr_ccb_slot_available_locked(struct pvr_ccb *pvr_ccb, u32 *write_offset)
 static void
 process_fwccb_command(struct pvr_device *pvr_dev, struct rogue_fwif_fwccb_cmd *cmd)
 {
+	struct drm_device *drm_dev = from_pvr_device(pvr_dev);
+
+	if ((cmd->cmd_type & ROGUE_CMD_MAGIC_DWORD_MASK) != ROGUE_CMD_MAGIC_DWORD_SHIFTED) {
+		drm_warn_once(drm_dev, "Received FWCCB command with bad magic value; ignoring (type=0x%08x)\n",
+			      cmd->cmd_type);
+		return;
+	}
+
 	switch (cmd->cmd_type) {
 	case ROGUE_FWIF_FWCCB_CMD_REQUEST_GPU_RESTART:
 		pvr_power_reset(pvr_dev, false);
@@ -149,9 +159,21 @@ process_fwccb_command(struct pvr_device *pvr_dev, struct rogue_fwif_fwccb_cmd *c
 		pvr_free_list_process_grow_req(pvr_dev, &cmd->cmd_data.cmd_free_list_gs);
 		break;
 
+	case ROGUE_FWIF_FWCCB_CMD_UPDATE_STATS:
+		/*
+		 * We currently have no infrastructure for processing these
+		 * stats. It may be added in the future, but for now just
+		 * suppress the "unknown" warning when receiving this command.
+		 */
+		break;
+	case ROGUE_FWIF_FWCCB_CMD_CONTEXT_RESET_NOTIFICATION:
+		pvr_dump_context_reset_notification(pvr_dev,
+						    &cmd->cmd_data.cmd_context_reset_notification);
+		break;
+
 	default:
-		drm_info(from_pvr_device(pvr_dev), "Received unknown FWCCB command %x\n",
-			 cmd->cmd_type);
+		drm_info(drm_dev, "Received unknown FWCCB command (type=%d)\n",
+			 cmd->cmd_type & ~ROGUE_CMD_MAGIC_DWORD_MASK);
 		break;
 	}
 }
@@ -233,7 +255,7 @@ pvr_kccb_used_slot_count_locked(struct pvr_device *pvr_dev)
  * pvr_kccb_send_cmd_reserved_powered() - Send command to the KCCB, with the PM ref
  * held and a slot pre-reserved
  * @pvr_dev: Device pointer.
- * @cmd: Command to sent.
+ * @cmd: Command to send.
  * @kccb_slot: Address to store the KCCB slot for this command. May be %NULL.
  */
 void
@@ -339,7 +361,7 @@ static int pvr_kccb_reserve_slot_sync(struct pvr_device *pvr_dev)
 /**
  * pvr_kccb_send_cmd_powered() - Send command to the KCCB, with a PM ref held
  * @pvr_dev: Device pointer.
- * @cmd: Command to sent.
+ * @cmd: Command to send.
  * @kccb_slot: Address to store the KCCB slot for this command. May be %NULL.
  *
  * Returns:
@@ -363,7 +385,7 @@ pvr_kccb_send_cmd_powered(struct pvr_device *pvr_dev, struct rogue_fwif_kccb_cmd
 /**
  * pvr_kccb_send_cmd() - Send command to the KCCB
  * @pvr_dev: Device pointer.
- * @cmd: Command to sent.
+ * @cmd: Command to send.
  * @kccb_slot: Address to store the KCCB slot for this command. May be %NULL.
  *
  * Returns:
@@ -542,7 +564,7 @@ struct dma_fence *pvr_kccb_fence_alloc(void)
 {
 	struct pvr_kccb_fence *kccb_fence;
 
-	kccb_fence = kzalloc(sizeof(*kccb_fence), GFP_KERNEL);
+	kccb_fence = kzalloc_obj(*kccb_fence);
 	if (!kccb_fence)
 		return NULL;
 

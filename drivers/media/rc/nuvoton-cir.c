@@ -639,7 +639,7 @@ static int nvt_ir_raw_set_wakeup_filter(struct rc_dev *dev,
 	if (!sc_filter->mask)
 		return 0;
 
-	raw = kmalloc_array(WAKEUP_MAX_SIZE, sizeof(*raw), GFP_KERNEL);
+	raw = kmalloc_objs(*raw, WAKEUP_MAX_SIZE);
 	if (!raw)
 		return -ENOMEM;
 
@@ -1092,9 +1092,9 @@ static void nvt_shutdown(struct pnp_dev *pdev)
 }
 
 static const struct pnp_device_id nvt_ids[] = {
-	{ "WEC0530", 0 },   /* CIR */
-	{ "NTN0530", 0 },   /* CIR for new chip's pnp id*/
-	{ "", 0 },
+	{ .id = "WEC0530" },   /* CIR */
+	{ .id = "NTN0530" },   /* CIR for new chip's pnp id*/
+	{ }
 };
 
 static struct pnp_driver nvt_driver = {

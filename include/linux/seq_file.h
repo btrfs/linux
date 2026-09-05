@@ -104,7 +104,7 @@ static inline void seq_setwidth(struct seq_file *m, size_t size)
 }
 void seq_pad(struct seq_file *m, char c);
 
-char *mangle_path(char *s, const char *p, const char *esc);
+char *seq_mangle_path(char *s, const char *p, const char *esc);
 int seq_open(struct file *, const struct seq_operations *);
 ssize_t seq_read(struct file *, char __user *, size_t, loff_t *);
 ssize_t seq_read_iter(struct kiocb *iocb, struct iov_iter *iter);
@@ -181,7 +181,6 @@ int seq_open_private(struct file *, const struct seq_operations *, int);
 int seq_release_private(struct inode *, struct file *);
 
 #ifdef CONFIG_BINARY_PRINTF
-__printf(2, 0)
 void seq_bprintf(struct seq_file *m, const char *f, const u32 *binary);
 #endif
 

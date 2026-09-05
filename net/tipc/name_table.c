@@ -230,7 +230,7 @@ static struct publication *tipc_publ_create(struct tipc_uaddr *ua,
 					    struct tipc_socket_addr *sk,
 					    u32 key)
 {
-	struct publication *p = kzalloc(sizeof(*p), GFP_ATOMIC);
+	struct publication *p = kzalloc_obj(*p, GFP_ATOMIC);
 
 	if (!p)
 		return NULL;
@@ -261,7 +261,7 @@ static struct tipc_service *tipc_service_create(struct net *net,
 	struct tipc_service *service;
 	struct hlist_head *hd;
 
-	service = kzalloc(sizeof(*service), GFP_ATOMIC);
+	service = kzalloc_obj(*service, GFP_ATOMIC);
 	if (!service) {
 		pr_warn("Service creation failed, no memory\n");
 		return NULL;
@@ -314,7 +314,7 @@ static struct service_range *tipc_service_create_range(struct tipc_service *sc,
 		else
 			n = &parent->rb_right;
 	}
-	sr = kzalloc(sizeof(*sr), GFP_ATOMIC);
+	sr = kzalloc_obj(*sr, GFP_ATOMIC);
 	if (!sr)
 		return NULL;
 	sr->lower = lower;
@@ -348,7 +348,8 @@ static bool tipc_service_insert_publ(struct net *net,
 
 	/* Return if the publication already exists */
 	list_for_each_entry(_p, &sr->all_publ, all_publ) {
-		if (_p->key == key && (!_p->sk.node || _p->sk.node == node)) {
+		if (_p->key == key && _p->sk.ref == p->sk.ref &&
+		    (!_p->sk.node || _p->sk.node == node)) {
 			pr_debug("Failed to bind duplicate %u,%u,%u/%u:%u/%u\n",
 				 p->sr.type, p->sr.lower, p->sr.upper,
 				 node, p->sk.ref, key);
@@ -388,7 +389,8 @@ static struct publication *tipc_service_remove_publ(struct service_range *r,
 	u32 node = sk->node;
 
 	list_for_each_entry(p, &r->all_publ, all_publ) {
-		if (p->key != key || (node && node != p->sk.node))
+		if (p->key != key || p->sk.ref != sk->ref ||
+		    (node && node != p->sk.node))
 			continue;
 		list_del(&p->all_publ);
 		list_del(&p->local_publ);
@@ -761,21 +763,40 @@ struct publication *tipc_nametbl_publish(struct net *net, struct tipc_uaddr *ua,
 					 struct tipc_socket_addr *sk, u32 key)
 {
 	struct name_table *nt = tipc_name_table(net);
+	u32 max_user_pub = TIPC_MAX_PUBL - 1;
 	struct tipc_net *tn = tipc_net(net);
 	struct publication *p = NULL;
 	struct sk_buff *skb = NULL;
+	bool protocol_type = false;
 	u32 rc_dests;
 
-	spin_lock_bh(&tn->nametbl_lock);
+	if (ua->sr.type == TIPC_NODE_STATE || ua->sr.type == TIPC_LINK_STATE ||
+	    ua->sr.type == TIPC_TOP_SRV)
+		protocol_type = true;
 
-	if (nt->local_publ_count >= TIPC_MAX_PUBL) {
-		pr_warn("Bind failed, max limit %u reached\n", TIPC_MAX_PUBL);
+	spin_lock_bh(&tn->nametbl_lock);
+	if (protocol_type)
+		goto insert;
+
+	/* Reserve one entry for node state service type because it has cluster
+	 * scope and it is distributed in bulk. So, the maximum number of user's
+	 * publications is (TIPC_MAX_PUBL - 1).
+	 */
+	if (nt->local_publ_count >= max_user_pub) {
+		pr_warn("Bind failed, max limit %u reached\n", max_user_pub);
 		goto exit;
 	}
 
+insert:
 	p = tipc_nametbl_insert_publ(net, ua, sk, key);
 	if (p) {
-		nt->local_publ_count++;
+		/* Not count node state, link state and topology server types
+		 * so that maximum nt->local_publ_count does not prevent
+		 * protocol service types from being inserted into the name
+		 * table.
+		 */
+		if (!protocol_type)
+			nt->local_publ_count++;
 		skb = tipc_named_publish(net, p);
 	}
 	rc_dests = nt->rc_dests;
@@ -808,7 +829,10 @@ void tipc_nametbl_withdraw(struct net *net, struct tipc_uaddr *ua,
 
 	p = tipc_nametbl_remove_publ(net, ua, sk, key);
 	if (p) {
-		nt->local_publ_count--;
+		if (p->sr.type != TIPC_NODE_STATE &&
+		    p->sr.type != TIPC_LINK_STATE &&
+		    p->sr.type != TIPC_TOP_SRV)
+			nt->local_publ_count--;
 		skb = tipc_named_withdraw(net, p);
 		list_del_init(&p->binding_sock);
 		kfree_rcu(p, rcu);
@@ -888,7 +912,7 @@ int tipc_nametbl_init(struct net *net)
 	struct name_table *nt;
 	int i;
 
-	nt = kzalloc(sizeof(*nt), GFP_KERNEL);
+	nt = kzalloc_obj(*nt);
 	if (!nt)
 		return -ENOMEM;
 
@@ -1156,7 +1180,7 @@ bool tipc_dest_push(struct list_head *l, u32 node, u32 port)
 	if (tipc_dest_find(l, node, port))
 		return false;
 
-	dst = kmalloc(sizeof(*dst), GFP_ATOMIC);
+	dst = kmalloc_obj(*dst, GFP_ATOMIC);
 	if (unlikely(!dst))
 		return false;
 	dst->node = node;

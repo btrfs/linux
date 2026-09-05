@@ -6,16 +6,18 @@
 #include <linux/bitops.h>
 
 #include <drm/drm_print.h>
+#include <drm/intel/step.h>
 
-#include "i915_utils.h"
 #include "intel_atomic.h"
 #include "intel_bw.h"
 #include "intel_cdclk.h"
 #include "intel_de.h"
+#include "intel_display_jiffies.h"
 #include "intel_display_regs.h"
 #include "intel_display_trace.h"
+#include "intel_display_utils.h"
+#include "intel_display_wa.h"
 #include "intel_pmdemand.h"
-#include "intel_step.h"
 #include "skl_watermark.h"
 
 struct pmdemand_params {
@@ -120,7 +122,7 @@ int intel_pmdemand_init(struct intel_display *display)
 {
 	struct intel_pmdemand_state *pmdemand_state;
 
-	pmdemand_state = kzalloc(sizeof(*pmdemand_state), GFP_KERNEL);
+	pmdemand_state = kzalloc_obj(*pmdemand_state);
 	if (!pmdemand_state)
 		return -ENOMEM;
 
@@ -128,9 +130,10 @@ int intel_pmdemand_init(struct intel_display *display)
 				     &pmdemand_state->base,
 				     &intel_pmdemand_funcs);
 
-	if (IS_DISPLAY_VERx100_STEP(display, 1400, STEP_A0, STEP_C0))
-		/* Wa_14016740474 */
-		intel_de_rmw(display, XELPD_CHICKEN_DCPR_3, 0, DMD_RSP_TIMEOUT_DISABLE);
+	/* Wa_14016740474 */
+	if (intel_display_wa(display, INTEL_DISPLAY_WA_14016740474))
+		intel_de_rmw(display, XELPD_CHICKEN_DCPR_3, 0,
+			     DMD_RSP_TIMEOUT_DISABLE);
 
 	return 0;
 }
@@ -149,7 +152,7 @@ intel_pmdemand_update_phys_mask(struct intel_display *display,
 {
 	enum phy phy;
 
-	if (DISPLAY_VER(display) < 14)
+	if (!HAS_PMDEMAND(display))
 		return;
 
 	if (!encoder)
@@ -171,7 +174,7 @@ intel_pmdemand_update_port_clock(struct intel_display *display,
 				 struct intel_pmdemand_state *pmdemand_state,
 				 enum pipe pipe, int port_clock)
 {
-	if (DISPLAY_VER(display) < 14)
+	if (!HAS_PMDEMAND(display))
 		return;
 
 	pmdemand_state->ddi_clocks[pipe] = port_clock;
@@ -187,7 +190,7 @@ intel_pmdemand_update_max_ddiclk(struct intel_display *display,
 	struct intel_crtc *crtc;
 	int i;
 
-	for_each_new_intel_crtc_in_state(state, crtc, new_crtc_state, i)
+	for_each_new_intel_crtc_in_state(state, crtc, new_crtc_state)
 		intel_pmdemand_update_port_clock(display, pmdemand_state,
 						 crtc->pipe,
 						 new_crtc_state->port_clock);
@@ -296,7 +299,6 @@ static bool intel_pmdemand_needs_update(struct intel_atomic_state *state)
 {
 	const struct intel_crtc_state *new_crtc_state, *old_crtc_state;
 	struct intel_crtc *crtc;
-	int i;
 
 	if (intel_bw_pmdemand_needs_update(state))
 		return true;
@@ -307,8 +309,7 @@ static bool intel_pmdemand_needs_update(struct intel_atomic_state *state)
 	if (intel_cdclk_pmdemand_needs_update(state))
 		return true;
 
-	for_each_oldnew_intel_crtc_in_state(state, crtc, old_crtc_state,
-					    new_crtc_state, i)
+	for_each_oldnew_intel_crtc_in_state(state, crtc, old_crtc_state, new_crtc_state)
 		if (new_crtc_state->port_clock != old_crtc_state->port_clock)
 			return true;
 
@@ -323,7 +324,7 @@ int intel_pmdemand_atomic_check(struct intel_atomic_state *state)
 	const struct intel_dbuf_state *new_dbuf_state;
 	struct intel_pmdemand_state *new_pmdemand_state;
 
-	if (DISPLAY_VER(display) < 14)
+	if (!HAS_PMDEMAND(display))
 		return 0;
 
 	if (!intel_pmdemand_needs_update(state))
@@ -389,12 +390,12 @@ int intel_pmdemand_atomic_check(struct intel_atomic_state *state)
 
 static bool intel_pmdemand_check_prev_transaction(struct intel_display *display)
 {
-	return !(intel_de_wait_for_clear(display,
-					 XELPDP_INITIATE_PMDEMAND_REQUEST(1),
-					 XELPDP_PMDEMAND_REQ_ENABLE, 10) ||
-		 intel_de_wait_for_clear(display,
-					 GEN12_DCPR_STATUS_1,
-					 XELPDP_PMDEMAND_INFLIGHT_STATUS, 10));
+	return !(intel_de_wait_for_clear_ms(display,
+					    XELPDP_INITIATE_PMDEMAND_REQUEST(1),
+					    XELPDP_PMDEMAND_REQ_ENABLE, 10) ||
+		 intel_de_wait_for_clear_ms(display,
+					    GEN12_DCPR_STATUS_1,
+					    XELPDP_PMDEMAND_INFLIGHT_STATUS, 10));
 }
 
 void
@@ -403,7 +404,7 @@ intel_pmdemand_init_pmdemand_params(struct intel_display *display,
 {
 	u32 reg1, reg2;
 
-	if (DISPLAY_VER(display) < 14)
+	if (!HAS_PMDEMAND(display))
 		return;
 
 	mutex_lock(&display->pmdemand.lock);
@@ -461,9 +462,9 @@ static void intel_pmdemand_poll(struct intel_display *display)
 	u32 status;
 	int ret;
 
-	ret = intel_de_wait_custom(display, XELPDP_INITIATE_PMDEMAND_REQUEST(1),
-				   XELPDP_PMDEMAND_REQ_ENABLE, 0,
-				   50, timeout_ms, &status);
+	ret = intel_de_wait_ms(display, XELPDP_INITIATE_PMDEMAND_REQUEST(1),
+			       XELPDP_PMDEMAND_REQ_ENABLE, 0,
+			       timeout_ms, &status);
 
 	if (ret == -ETIMEDOUT)
 		drm_err(display->drm,
@@ -636,7 +637,7 @@ void intel_pmdemand_pre_plane_update(struct intel_atomic_state *state)
 	const struct intel_pmdemand_state *old_pmdemand_state =
 		intel_atomic_get_old_pmdemand_state(state);
 
-	if (DISPLAY_VER(display) < 14)
+	if (!HAS_PMDEMAND(display))
 		return;
 
 	if (!new_pmdemand_state ||
@@ -659,7 +660,7 @@ void intel_pmdemand_post_plane_update(struct intel_atomic_state *state)
 	const struct intel_pmdemand_state *old_pmdemand_state =
 		intel_atomic_get_old_pmdemand_state(state);
 
-	if (DISPLAY_VER(display) < 14)
+	if (!HAS_PMDEMAND(display))
 		return;
 
 	if (!new_pmdemand_state ||

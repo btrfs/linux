@@ -24,7 +24,7 @@ u8 rtw_hal_sdio_query_tx_freepage(
 {
 	struct hal_com_data	*pHalData = GET_HAL_DATA(padapter);
 
-	if ((pHalData->SdioTxFIFOFreePage[PageIdx]+pHalData->SdioTxFIFOFreePage[PUBLIC_QUEUE_IDX]) >= (RequiredPageNum))
+	if ((pHalData->SdioTxFIFOFreePage[PageIdx] + pHalData->SdioTxFIFOFreePage[PUBLIC_QUEUE_IDX]) >= (RequiredPageNum))
 		return true;
 	else
 		return false;
@@ -39,8 +39,6 @@ void rtw_hal_sdio_update_tx_freepage(
 	u8 RequiredPublicFreePgNum = 0;
 	/* _irqL irql; */
 
-	/* spin_lock_bh(&pHalData->SdioTxFIFOFreePageLock); */
-
 	DedicatedPgNum = pHalData->SdioTxFIFOFreePage[PageIdx];
 	if (RequiredPageNum <= DedicatedPgNum) {
 		pHalData->SdioTxFIFOFreePage[PageIdx] -= RequiredPageNum;
@@ -49,8 +47,6 @@ void rtw_hal_sdio_update_tx_freepage(
 		RequiredPublicFreePgNum = RequiredPageNum - DedicatedPgNum;
 		pHalData->SdioTxFIFOFreePage[PUBLIC_QUEUE_IDX] -= RequiredPublicFreePgNum;
 	}
-
-	/* spin_unlock_bh(&pHalData->SdioTxFIFOFreePageLock); */
 }
 
 void rtw_hal_set_sdio_tx_max_length(
@@ -80,7 +76,6 @@ u32 rtw_hal_get_sdio_tx_max_length(struct adapter *padapter, u8 queue_idx)
 	struct dvobj_priv *pdvobjpriv = adapter_to_dvobj(padapter);
 	struct hal_com_data	*pHalData = GET_HAL_DATA(padapter);
 	u32 deviceId, max_len;
-
 
 	deviceId = ffaddr2deviceId(pdvobjpriv, queue_idx);
 	switch (deviceId) {

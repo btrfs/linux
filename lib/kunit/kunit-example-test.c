@@ -283,7 +283,7 @@ static void example_slow_test(struct kunit *test)
  */
 static int example_resource_init(struct kunit_resource *res, void *context)
 {
-	int *info = kmalloc(sizeof(*info), GFP_KERNEL);
+	int *info = kmalloc_obj(*info);
 
 	if (!info)
 		return -ENOMEM;
@@ -590,6 +590,35 @@ static struct kunit_suite example_init_test_suite = {
  * and/or functions.
  */
 kunit_test_init_section_suites(&example_init_test_suite);
+
+/*
+ * This test should always be skipped.
+ */
+static void example_skip_suite_test(struct kunit *test)
+{
+	/* This line should never be seen */
+	KUNIT_FAIL(test, "You should not see a this.");
+}
+
+static struct kunit_case  example_skip_suite_test_cases[] = {
+	KUNIT_CASE(example_skip_suite_test),
+	{}
+};
+
+static int example_skip_suite_init(struct kunit_suite *suite)
+{
+	kunit_mark_skipped(suite, "Test suite expected to be skipped");
+	return 0;
+}
+
+static struct kunit_suite example_test_skip_suite = {
+	.name = "example_skip_suite",
+	.suite_init = example_skip_suite_init,
+	.test_cases = example_skip_suite_test_cases,
+};
+
+/* This registers a test suite that will be skipped */
+kunit_test_suite(example_test_skip_suite);
 
 MODULE_DESCRIPTION("Example KUnit test suite");
 MODULE_LICENSE("GPL v2");

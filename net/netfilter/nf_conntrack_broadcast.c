@@ -14,6 +14,7 @@
 #include <net/netfilter/nf_conntrack.h>
 #include <net/netfilter/nf_conntrack_helper.h>
 #include <net/netfilter/nf_conntrack_expect.h>
+#include <net/netfilter/nf_conntrack_ecache.h>
 
 int nf_conntrack_broadcast_help(struct sk_buff *skb,
 				struct nf_conn *ct,
@@ -21,12 +22,17 @@ int nf_conntrack_broadcast_help(struct sk_buff *skb,
 				unsigned int timeout)
 {
 	const struct nf_conntrack_helper *helper;
+	struct net *net = read_pnet(&ct->ct_net);
 	struct nf_conntrack_expect *exp;
 	struct iphdr *iph = ip_hdr(skb);
 	struct rtable *rt = skb_rtable(skb);
 	struct in_device *in_dev;
 	struct nf_conn_help *help = nfct_help(ct);
+	struct nf_conntrack_ecache *ecache;
 	__be32 mask = 0;
+
+	if (!help)
+		goto out;
 
 	/* we're only interested in locally generated packets */
 	if (skb->sk == NULL || !net_eq(nf_ct_net(ct), sock_net(skb->sk)))
@@ -58,11 +64,10 @@ int nf_conntrack_broadcast_help(struct sk_buff *skb,
 	if (exp == NULL)
 		goto out;
 
+	exp->master_tuple	  = ct->tuplehash[IP_CT_DIR_ORIGINAL].tuple;
 	exp->tuple                = ct->tuplehash[IP_CT_DIR_REPLY].tuple;
 
 	helper = rcu_dereference(help->helper);
-	if (helper)
-		exp->tuple.src.u.udp.port = helper->tuple.src.u.udp.port;
 
 	exp->mask.src.u3.ip       = mask;
 	exp->mask.src.u.udp.port  = htons(0xFFFF);
@@ -70,7 +75,15 @@ int nf_conntrack_broadcast_help(struct sk_buff *skb,
 	exp->expectfn             = NULL;
 	exp->flags                = NF_CT_EXPECT_PERMANENT;
 	exp->class		  = NF_CT_EXPECT_CLASS_DEFAULT;
-	exp->helper               = NULL;
+	rcu_assign_pointer(exp->helper, helper);
+	rcu_assign_pointer(exp->assign_helper, NULL);
+	write_pnet(&exp->net, net);
+#ifdef CONFIG_NF_CONNTRACK_ZONES
+	exp->zone = ct->zone;
+#endif
+	ecache = nf_ct_ecache_find(ct);
+	if (ecache)
+		exp->event_mask = ecache->expmask;
 
 	nf_ct_expect_related(exp, 0);
 	nf_ct_expect_put(exp);

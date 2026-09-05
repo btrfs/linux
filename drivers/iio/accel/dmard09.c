@@ -8,6 +8,7 @@
 #include <linux/unaligned.h>
 #include <linux/module.h>
 #include <linux/i2c.h>
+#include <linux/units.h>
 #include <linux/iio/iio.h>
 
 #define DMARD09_DRV_NAME	"dmard09"
@@ -79,6 +80,12 @@ static int dmard09_read_raw(struct iio_dev *indio_dev,
 		*val = accel;
 
 		return IIO_VAL_INT;
+	case IIO_CHAN_INFO_SCALE:
+		*val = 0;
+		/* 1 g / 32 LSB, in m/s^2 */
+		*val2 = IIO_G_TO_M_S_2(NANO / 32);
+
+		return IIO_VAL_INT_PLUS_NANO;
 	default:
 		return -EINVAL;
 	}
@@ -123,7 +130,7 @@ static int dmard09_probe(struct i2c_client *client)
 }
 
 static const struct i2c_device_id dmard09_id[] = {
-	{ "dmard09" },
+	{ .name = "dmard09" },
 	{ }
 };
 

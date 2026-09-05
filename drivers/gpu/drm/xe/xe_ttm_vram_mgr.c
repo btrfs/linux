@@ -1,32 +1,35 @@
 // SPDX-License-Identifier: MIT
 /*
  * Copyright © 2021-2022 Intel Corporation
- * Copyright (C) 2021-2002 Red Hat
+ * Copyright (C) 2021-2022 Red Hat
  */
+
+#include <linux/cgroup_dmem.h>
 
 #include <drm/drm_managed.h>
 #include <drm/drm_drv.h>
+#include <drm/drm_buddy.h>
 
 #include <drm/ttm/ttm_placement.h>
 #include <drm/ttm/ttm_range_manager.h>
 
 #include "xe_bo.h"
 #include "xe_device.h"
-#include "xe_gt.h"
+#include "xe_pm.h"
 #include "xe_res_cursor.h"
 #include "xe_ttm_vram_mgr.h"
 #include "xe_vram_types.h"
 
-static inline struct drm_buddy_block *
+static inline struct gpu_buddy_block *
 xe_ttm_vram_mgr_first_block(struct list_head *list)
 {
-	return list_first_entry_or_null(list, struct drm_buddy_block, link);
+	return list_first_entry_or_null(list, struct gpu_buddy_block, link);
 }
 
-static inline bool xe_is_vram_mgr_blocks_contiguous(struct drm_buddy *mm,
+static inline bool xe_is_vram_mgr_blocks_contiguous(struct gpu_buddy *mm,
 						    struct list_head *head)
 {
-	struct drm_buddy_block *block;
+	struct gpu_buddy_block *block;
 	u64 start, size;
 
 	block = xe_ttm_vram_mgr_first_block(head);
@@ -34,12 +37,12 @@ static inline bool xe_is_vram_mgr_blocks_contiguous(struct drm_buddy *mm,
 		return false;
 
 	while (head != block->link.next) {
-		start = drm_buddy_block_offset(block);
-		size = drm_buddy_block_size(mm, block);
+		start = gpu_buddy_block_offset(block);
+		size = gpu_buddy_block_size(mm, block);
 
-		block = list_entry(block->link.next, struct drm_buddy_block,
+		block = list_entry(block->link.next, struct gpu_buddy_block,
 				   link);
-		if (start + size != drm_buddy_block_offset(block))
+		if (start + size != gpu_buddy_block_offset(block))
 			return false;
 	}
 
@@ -53,7 +56,7 @@ static int xe_ttm_vram_mgr_new(struct ttm_resource_manager *man,
 {
 	struct xe_ttm_vram_mgr *mgr = to_xe_ttm_vram_mgr(man);
 	struct xe_ttm_vram_mgr_resource *vres;
-	struct drm_buddy *mm = &mgr->mm;
+	struct gpu_buddy *mm = &mgr->mm;
 	u64 size, min_page_size;
 	unsigned long lpfn;
 	int err;
@@ -65,7 +68,7 @@ static int xe_ttm_vram_mgr_new(struct ttm_resource_manager *man,
 	if (tbo->base.size >> PAGE_SHIFT > (lpfn - place->fpfn))
 		return -E2BIG; /* don't trigger eviction for the impossible */
 
-	vres = kzalloc(sizeof(*vres), GFP_KERNEL);
+	vres = kzalloc_obj(*vres);
 	if (!vres)
 		return -ENOMEM;
 
@@ -80,10 +83,13 @@ static int xe_ttm_vram_mgr_new(struct ttm_resource_manager *man,
 	INIT_LIST_HEAD(&vres->blocks);
 
 	if (place->flags & TTM_PL_FLAG_TOPDOWN)
-		vres->flags |= DRM_BUDDY_TOPDOWN_ALLOCATION;
+		vres->flags |= GPU_BUDDY_TOPDOWN_ALLOCATION;
+
+	if (place->flags & TTM_PL_FLAG_CONTIGUOUS)
+		vres->flags |= GPU_BUDDY_CONTIGUOUS_ALLOCATION;
 
 	if (place->fpfn || lpfn != man->size >> PAGE_SHIFT)
-		vres->flags |= DRM_BUDDY_RANGE_ALLOCATION;
+		vres->flags |= GPU_BUDDY_RANGE_ALLOCATION;
 
 	if (WARN_ON(!vres->base.size)) {
 		err = -EINVAL;
@@ -111,35 +117,22 @@ static int xe_ttm_vram_mgr_new(struct ttm_resource_manager *man,
 		goto error_unlock;
 	}
 
-	if (place->fpfn + (size >> PAGE_SHIFT) != lpfn &&
-	    place->flags & TTM_PL_FLAG_CONTIGUOUS) {
-		size = roundup_pow_of_two(size);
-		min_page_size = size;
-
-		lpfn = max_t(unsigned long, place->fpfn + (size >> PAGE_SHIFT), lpfn);
-	}
-
-	err = drm_buddy_alloc_blocks(mm, (u64)place->fpfn << PAGE_SHIFT,
+	err = gpu_buddy_alloc_blocks(mm, (u64)place->fpfn << PAGE_SHIFT,
 				     (u64)lpfn << PAGE_SHIFT, size,
 				     min_page_size, &vres->blocks, vres->flags);
 	if (err)
 		goto error_unlock;
 
-	if (place->flags & TTM_PL_FLAG_CONTIGUOUS) {
-		if (!drm_buddy_block_trim(mm, NULL, vres->base.size, &vres->blocks))
-			size = vres->base.size;
-	}
-
 	if (lpfn <= mgr->visible_size >> PAGE_SHIFT) {
 		vres->used_visible_size = size;
 	} else {
-		struct drm_buddy_block *block;
+		struct gpu_buddy_block *block;
 
 		list_for_each_entry(block, &vres->blocks, link) {
-			u64 start = drm_buddy_block_offset(block);
+			u64 start = gpu_buddy_block_offset(block);
 
 			if (start < mgr->visible_size) {
-				u64 end = start + drm_buddy_block_size(mm, block);
+				u64 end = start + gpu_buddy_block_size(mm, block);
 
 				vres->used_visible_size +=
 					min(end, mgr->visible_size) - start;
@@ -159,11 +152,11 @@ static int xe_ttm_vram_mgr_new(struct ttm_resource_manager *man,
 	 * the object.
 	 */
 	if (vres->base.placement & TTM_PL_FLAG_CONTIGUOUS) {
-		struct drm_buddy_block *block = list_first_entry(&vres->blocks,
+		struct gpu_buddy_block *block = list_first_entry(&vres->blocks,
 								 typeof(*block),
 								 link);
 
-		vres->base.start = drm_buddy_block_offset(block) >> PAGE_SHIFT;
+		vres->base.start = gpu_buddy_block_offset(block) >> PAGE_SHIFT;
 	} else {
 		vres->base.start = XE_BO_INVALID_OFFSET;
 	}
@@ -185,10 +178,10 @@ static void xe_ttm_vram_mgr_del(struct ttm_resource_manager *man,
 	struct xe_ttm_vram_mgr_resource *vres =
 		to_xe_ttm_vram_mgr_resource(res);
 	struct xe_ttm_vram_mgr *mgr = to_xe_ttm_vram_mgr(man);
-	struct drm_buddy *mm = &mgr->mm;
+	struct gpu_buddy *mm = &mgr->mm;
 
 	mutex_lock(&mgr->lock);
-	drm_buddy_free_list(mm, &vres->blocks, 0);
+	gpu_buddy_free_list(mm, &vres->blocks, 0);
 	mgr->visible_avail += vres->used_visible_size;
 	mutex_unlock(&mgr->lock);
 
@@ -201,7 +194,7 @@ static void xe_ttm_vram_mgr_debug(struct ttm_resource_manager *man,
 				  struct drm_printer *printer)
 {
 	struct xe_ttm_vram_mgr *mgr = to_xe_ttm_vram_mgr(man);
-	struct drm_buddy *mm = &mgr->mm;
+	struct gpu_buddy *mm = &mgr->mm;
 
 	mutex_lock(&mgr->lock);
 	drm_printf(printer, "default_page_size: %lluKiB\n",
@@ -224,8 +217,8 @@ static bool xe_ttm_vram_mgr_intersects(struct ttm_resource_manager *man,
 	struct xe_ttm_vram_mgr *mgr = to_xe_ttm_vram_mgr(man);
 	struct xe_ttm_vram_mgr_resource *vres =
 		to_xe_ttm_vram_mgr_resource(res);
-	struct drm_buddy *mm = &mgr->mm;
-	struct drm_buddy_block *block;
+	struct gpu_buddy *mm = &mgr->mm;
+	struct gpu_buddy_block *block;
 
 	if (!place->fpfn && !place->lpfn)
 		return true;
@@ -235,9 +228,9 @@ static bool xe_ttm_vram_mgr_intersects(struct ttm_resource_manager *man,
 
 	list_for_each_entry(block, &vres->blocks, link) {
 		unsigned long fpfn =
-			drm_buddy_block_offset(block) >> PAGE_SHIFT;
+			gpu_buddy_block_offset(block) >> PAGE_SHIFT;
 		unsigned long lpfn = fpfn +
-			(drm_buddy_block_size(mm, block) >> PAGE_SHIFT);
+			(gpu_buddy_block_size(mm, block) >> PAGE_SHIFT);
 
 		if (place->fpfn < lpfn && place->lpfn > fpfn)
 			return true;
@@ -254,8 +247,8 @@ static bool xe_ttm_vram_mgr_compatible(struct ttm_resource_manager *man,
 	struct xe_ttm_vram_mgr *mgr = to_xe_ttm_vram_mgr(man);
 	struct xe_ttm_vram_mgr_resource *vres =
 		to_xe_ttm_vram_mgr_resource(res);
-	struct drm_buddy *mm = &mgr->mm;
-	struct drm_buddy_block *block;
+	struct gpu_buddy *mm = &mgr->mm;
+	struct gpu_buddy_block *block;
 
 	if (!place->fpfn && !place->lpfn)
 		return true;
@@ -265,9 +258,9 @@ static bool xe_ttm_vram_mgr_compatible(struct ttm_resource_manager *man,
 
 	list_for_each_entry(block, &vres->blocks, link) {
 		unsigned long fpfn =
-			drm_buddy_block_offset(block) >> PAGE_SHIFT;
+			gpu_buddy_block_offset(block) >> PAGE_SHIFT;
 		unsigned long lpfn = fpfn +
-			(drm_buddy_block_size(mm, block) >> PAGE_SHIFT);
+			(gpu_buddy_block_size(mm, block) >> PAGE_SHIFT);
 
 		if (fpfn < place->fpfn || lpfn > place->lpfn)
 			return false;
@@ -284,26 +277,57 @@ static const struct ttm_resource_manager_func xe_ttm_vram_mgr_func = {
 	.debug	= xe_ttm_vram_mgr_debug
 };
 
-static void ttm_vram_mgr_fini(struct drm_device *dev, void *arg)
+static const struct dmem_cgroup_ops xe_ttm_vram_mgr_dmem_ops;
+
+static int xe_ttm_vram_mgr_dmem_reclaim(struct dmem_cgroup_pool_state *pool,
+					u64 target_bytes, void *priv)
+{
+	struct ttm_resource_manager *man = priv;
+	struct xe_device *xe = ttm_to_xe_device(man->bdev);
+	int ret, idx;
+
+	if (!drm_dev_enter(&xe->drm, &idx))
+		return -ENODEV;
+
+	{
+		ACQUIRE(xe_pm_runtime_ioctl, pm)(xe);
+
+		ret = ACQUIRE_ERR(xe_pm_runtime_ioctl, &pm);
+		if (ret >= 0)
+			ret = ttm_resource_manager_dmem_reclaim(pool, target_bytes, priv);
+	}
+
+	drm_dev_exit(idx);
+	return ret;
+}
+
+static const struct dmem_cgroup_ops xe_ttm_vram_mgr_dmem_ops = {
+	.reclaim = xe_ttm_vram_mgr_dmem_reclaim,
+};
+
+static void xe_ttm_vram_mgr_set_unused(struct drm_device *dev, void *arg)
+{
+	struct ttm_resource_manager *man = arg;
+
+	ttm_resource_manager_set_used(man, false);
+}
+
+static void xe_ttm_vram_mgr_fini(struct drm_device *dev, void *arg)
 {
 	struct xe_device *xe = to_xe_device(dev);
 	struct xe_ttm_vram_mgr *mgr = arg;
 	struct ttm_resource_manager *man = &mgr->manager;
-
-	ttm_resource_manager_set_used(man, false);
 
 	if (ttm_resource_manager_evict_all(&xe->ttm, man))
 		return;
 
 	WARN_ON_ONCE(mgr->visible_avail != mgr->visible_size);
 
-	drm_buddy_fini(&mgr->mm);
+	gpu_buddy_fini(&mgr->mm);
 
 	ttm_resource_manager_cleanup(&mgr->manager);
 
 	ttm_set_driver_manager(&xe->ttm, mgr->mem_type, NULL);
-
-	mutex_destroy(&mgr->lock);
 }
 
 int __xe_ttm_vram_mgr_init(struct xe_device *xe, struct xe_ttm_vram_mgr *mgr,
@@ -311,31 +335,50 @@ int __xe_ttm_vram_mgr_init(struct xe_device *xe, struct xe_ttm_vram_mgr *mgr,
 			   u64 default_page_size)
 {
 	struct ttm_resource_manager *man = &mgr->manager;
+	struct dmem_cgroup_region *cg;
+	const char *name;
 	int err;
-
-	if (mem_type != XE_PL_STOLEN) {
-		const char *name = mem_type == XE_PL_VRAM0 ? "vram0" : "vram1";
-		man->cg = drmm_cgroup_register_region(&xe->drm, name, size);
-		if (IS_ERR(man->cg))
-			return PTR_ERR(man->cg);
-	}
 
 	man->func = &xe_ttm_vram_mgr_func;
 	mgr->mem_type = mem_type;
-	mutex_init(&mgr->lock);
+	err = drmm_mutex_init(&xe->drm, &mgr->lock);
+	if (err)
+		return err;
 	mgr->default_page_size = default_page_size;
 	mgr->visible_size = io_size;
 	mgr->visible_avail = io_size;
 
 	ttm_resource_manager_init(man, &xe->ttm, size);
-	err = drm_buddy_init(&mgr->mm, man->size, default_page_size);
+	err = gpu_buddy_init(&mgr->mm, man->size, default_page_size);
 	if (err)
 		return err;
 
+	gpu_buddy_driver_set_lock(&mgr->mm, &mgr->lock);
 	ttm_set_driver_manager(&xe->ttm, mem_type, &mgr->manager);
-	ttm_resource_manager_set_used(&mgr->manager, true);
 
-	return drmm_add_action_or_reset(&xe->drm, ttm_vram_mgr_fini, mgr);
+	/*
+	 * Register the fini action before the cgroup region so that devres
+	 * LIFO teardown runs unregister_region before manager teardown
+	 * (draining any in-flight reclaim callbacks) and the manager fini second.
+	 */
+	err = drmm_add_action_or_reset(&xe->drm, xe_ttm_vram_mgr_fini, mgr);
+	if (err)
+		return err;
+
+	name = mem_type == XE_PL_VRAM0 ? "vram0" : "vram1";
+	cg = drmm_cgroup_register_region(&xe->drm, name,
+					 &(struct dmem_cgroup_init){
+						.size = size,
+						.ops = &xe_ttm_vram_mgr_dmem_ops,
+						.reclaim_priv = man,
+					 });
+	if (IS_ERR(cg))
+		return PTR_ERR(cg);
+
+	ttm_resource_manager_set_dmem_region(man, cg);
+	ttm_resource_manager_set_used(man, true);
+
+	return drmm_add_action_or_reset(&xe->drm, xe_ttm_vram_mgr_set_unused, man);
 }
 
 /**
@@ -372,11 +415,11 @@ int xe_ttm_vram_mgr_alloc_sgt(struct xe_device *xe,
 	if (vres->used_visible_size < res->size)
 		return -EOPNOTSUPP;
 
-	*sgt = kmalloc(sizeof(**sgt), GFP_KERNEL);
+	*sgt = kmalloc_obj(**sgt);
 	if (!*sgt)
 		return -ENOMEM;
 
-	/* Determine the number of DRM_BUDDY blocks to export */
+	/* Determine the number of GPU_BUDDY blocks to export */
 	xe_res_first(res, offset, length, &cursor);
 	while (cursor.remaining) {
 		num_entries++;
@@ -393,10 +436,10 @@ int xe_ttm_vram_mgr_alloc_sgt(struct xe_device *xe,
 		sg->length = 0;
 
 	/*
-	 * Walk down DRM_BUDDY blocks to populate scatterlist nodes
-	 * @note: Use iterator api to get first the DRM_BUDDY block
+	 * Walk down GPU_BUDDY blocks to populate scatterlist nodes
+	 * @note: Use iterator api to get first the GPU_BUDDY block
 	 * and the number of bytes from it. Access the following
-	 * DRM_BUDDY block(s) if more buffer needs to exported
+	 * GPU_BUDDY block(s) if more buffer needs to exported
 	 */
 	xe_res_first(res, offset, length, &cursor);
 	for_each_sgtable_sg((*sgt), sg, i) {

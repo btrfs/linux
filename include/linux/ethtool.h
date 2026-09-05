@@ -176,6 +176,8 @@ static inline u32 ethtool_rxfh_indir_default(u32 index, u32 n_rx_rings)
  * struct ethtool_rxfh_context - a custom RSS context configuration
  * @indir_size: Number of u32 entries in indirection table
  * @key_size: Size of hash key, in bytes
+ * @indir_user_size: number of user provided entries for the
+ *	indirection table
  * @priv_size: Size of driver private data, in bytes
  * @hfunc: RSS hash function identifier.  One of the %ETH_RSS_HASH_*
  * @input_xfrm: Defines how the input data is transformed. Valid values are one
@@ -186,6 +188,7 @@ static inline u32 ethtool_rxfh_indir_default(u32 index, u32 n_rx_rings)
 struct ethtool_rxfh_context {
 	u32 indir_size;
 	u32 key_size;
+	u32 indir_user_size;
 	u16 priv_size;
 	u8 hfunc;
 	u8 input_xfrm;
@@ -214,14 +217,51 @@ static inline u8 *ethtool_rxfh_context_key(struct ethtool_rxfh_context *ctx)
 }
 
 void ethtool_rxfh_context_lost(struct net_device *dev, u32 context_id);
+void ethtool_rxfh_indir_lost(struct net_device *dev);
+bool ethtool_rxfh_indir_can_resize(struct net_device *dev, const u32 *tbl,
+				   u32 old_size, u32 new_size);
+void ethtool_rxfh_indir_resize(struct net_device *dev, u32 *tbl,
+			       u32 old_size, u32 new_size);
+int ethtool_rxfh_ctxs_can_resize(struct net_device *dev, u32 new_indir_size);
+void ethtool_rxfh_ctxs_resize(struct net_device *dev, u32 new_indir_size);
 
 struct link_mode_info {
-	int                             speed;
-	u8                              lanes;
-	u8                              duplex;
+	int	speed;
+	u8	lanes;
+	u8	min_pairs;
+	u8	pairs;
+	u8	duplex;
+	u16	mediums;
 };
 
 extern const struct link_mode_info link_mode_params[];
+
+enum ethtool_link_medium {
+	ETHTOOL_LINK_MEDIUM_BASET = 0,
+	ETHTOOL_LINK_MEDIUM_BASEK,
+	ETHTOOL_LINK_MEDIUM_BASES,
+	ETHTOOL_LINK_MEDIUM_BASEC,
+	ETHTOOL_LINK_MEDIUM_BASEL,
+	ETHTOOL_LINK_MEDIUM_BASED,
+	ETHTOOL_LINK_MEDIUM_BASEE,
+	ETHTOOL_LINK_MEDIUM_BASEF,
+	ETHTOOL_LINK_MEDIUM_BASEV,
+	ETHTOOL_LINK_MEDIUM_BASEMLD,
+	ETHTOOL_LINK_MEDIUM_NONE,
+
+	__ETHTOOL_LINK_MEDIUM_LAST,
+};
+
+#define ETHTOOL_MEDIUM_FIBER_BITS (BIT(ETHTOOL_LINK_MEDIUM_BASES) | \
+				   BIT(ETHTOOL_LINK_MEDIUM_BASEL) | \
+				   BIT(ETHTOOL_LINK_MEDIUM_BASEF))
+
+enum ethtool_link_medium ethtool_str_to_medium(const char *str);
+
+static inline int ethtool_linkmode_n_pairs(unsigned int mode)
+{
+	return link_mode_params[mode].pairs;
+}
 
 /* declare a link mode bitmap */
 #define __ETHTOOL_DECLARE_LINK_MODE_MASK(name)		\
@@ -285,6 +325,8 @@ struct ethtool_link_ksettings {
 extern int
 __ethtool_get_link_ksettings(struct net_device *dev,
 			     struct ethtool_link_ksettings *link_ksettings);
+int netif_get_link_ksettings(struct net_device *dev,
+			     struct ethtool_link_ksettings *link_ksettings);
 
 struct ethtool_keee {
 	__ETHTOOL_DECLARE_LINK_MODE_MASK(supported);
@@ -302,6 +344,8 @@ struct kernel_ethtool_coalesce {
 	u32 tx_aggr_max_bytes;
 	u32 tx_aggr_max_frames;
 	u32 tx_aggr_time_usecs;
+	u32 rx_cqe_frames;
+	u32 rx_cqe_nsecs;
 };
 
 /**
@@ -350,7 +394,9 @@ bool ethtool_convert_link_mode_to_legacy_u32(u32 *legacy_u32,
 #define ETHTOOL_COALESCE_TX_AGGR_TIME_USECS	BIT(26)
 #define ETHTOOL_COALESCE_RX_PROFILE		BIT(27)
 #define ETHTOOL_COALESCE_TX_PROFILE		BIT(28)
-#define ETHTOOL_COALESCE_ALL_PARAMS		GENMASK(28, 0)
+#define ETHTOOL_COALESCE_RX_CQE_FRAMES		BIT(29)
+#define ETHTOOL_COALESCE_RX_CQE_NSECS		BIT(30)
+#define ETHTOOL_COALESCE_ALL_PARAMS		GENMASK(30, 0)
 
 #define ETHTOOL_COALESCE_USECS						\
 	(ETHTOOL_COALESCE_RX_USECS | ETHTOOL_COALESCE_TX_USECS)
@@ -482,12 +528,14 @@ struct ethtool_eth_ctrl_stats {
  *
  *	Equivalent to `30.3.4.3 aPAUSEMACCtrlFramesReceived`
  *	from the standard.
+ * @tx_pause_storm_events: TX pause storm event count (see ethtool.yaml).
  */
 struct ethtool_pause_stats {
 	enum ethtool_mac_stats_src src;
 	struct_group(stats,
 		u64 tx_pause_frames;
 		u64 rx_pause_frames;
+		u64 tx_pause_storm_events;
 	);
 };
 
@@ -514,6 +562,7 @@ struct ethtool_fec_hist {
 		u64 per_lane[ETHTOOL_MAX_LANES];
 	} values[ETHTOOL_FEC_HIST_MAX];
 	const struct ethtool_fec_hist_range *ranges;
+	struct ethtool_fec_hist_range ranges_buf[ETHTOOL_FEC_HIST_MAX];
 };
 /**
  * struct ethtool_fec_stats - statistics for IEEE 802.3 FEC
@@ -882,6 +931,20 @@ struct kernel_ethtool_ts_info {
 	u32 rx_filters;
 };
 
+/* Bits for ethtool_ops::op_needs_rtnl
+ * LINKSETTINGS cover a number of commands, but in most cases we want to keep
+ * these bits separate, per GET and SET. GET is much easier to "unlock".
+ */
+#define ETHTOOL_OP_NEEDS_RTNL_LINKSETTINGS	BIT(0)
+#define ETHTOOL_OP_NEEDS_RTNL_SPFLAGS		BIT(1)
+#define ETHTOOL_OP_NEEDS_RTNL_SRINGPARAM	BIT(2)
+#define ETHTOOL_OP_NEEDS_RTNL_SCHANNELS		BIT(3)
+#define ETHTOOL_OP_NEEDS_RTNL_SCOALESCE		BIT(4)
+#define ETHTOOL_OP_NEEDS_RTNL_GPAUSEPARAM	BIT(5)
+#define ETHTOOL_OP_NEEDS_RTNL_SPAUSEPARAM	BIT(6)
+#define ETHTOOL_OP_NEEDS_RTNL_RSS		BIT(7)
+#define ETHTOOL_OP_NEEDS_RTNL_GLINK		BIT(8)
+
 /**
  * struct ethtool_ops - optional netdev operations
  * @supported_input_xfrm: supported types of input xfrm from %RXH_XFRM_*.
@@ -908,6 +971,17 @@ struct kernel_ethtool_ts_info {
  * @supported_coalesce_params: supported types of interrupt coalescing.
  * @supported_ring_params: supported ring params.
  * @supported_hwtstamp_qualifiers: bitfield of supported hwtstamp qualifier.
+ * @op_needs_rtnl: mask of %ETHTOOL_OP_NEEDS_RTNL_* bits.
+ *	For use with ops-locked drivers (ignored otherwise). Selects which
+ *	ethtool callbacks driver needs to still be executed under rtnl_lock
+ *	(in addition to the netdev instance lock).
+ *	The following commonly used core APIs currently require rtnl_lock
+ *	(this list may not be exhaustive):
+ *	 - phylink helpers (note that phydev is currently unsupported!)
+ *	 - netdev_update_features()
+ *	 - netif_set_real_num_tx_queues()
+ *	 - ethtool_op_get_link() (syncs link watch under rtnl_lock)
+ *
  * @get_drvinfo: Report driver/device information. Modern drivers no
  *	longer have to implement this callback. Most fields are
  *	correctly filled in by the core using system information, or
@@ -1106,8 +1180,14 @@ struct kernel_ethtool_ts_info {
  * @get_mm_stats: Query the 802.3 MAC Merge layer statistics.
  *
  * All operations are optional (i.e. the function pointer may be set
- * to %NULL) and callers must take this into account.  Callers must
- * hold the RTNL lock.
+ * to %NULL) and callers must take this into account.
+ *
+ * For traditional drivers callers hold ``rtnl_lock`` across the call.
+ * For "ops locked" drivers (see Documentation/networking/netdevices.rst)
+ * callers instead hold the netdev instance lock (``netdev_lock_ops``);
+ * ``rtnl_lock`` is additionally held only for callbacks for which
+ * the driver opts in via the matching ``ETHTOOL_OP_NEEDS_RTNL_*`` bit
+ * in @op_needs_rtnl.
  *
  * See the structures used by these operations for further documentation.
  * Note that for all operations using a structure ending with a zero-
@@ -1130,6 +1210,7 @@ struct ethtool_ops {
 	u32	supported_coalesce_params;
 	u32	supported_ring_params;
 	u32	supported_hwtstamp_qualifiers;
+	u32	op_needs_rtnl;
 	void	(*get_drvinfo)(struct net_device *, struct ethtool_drvinfo *);
 	int	(*get_regs_len)(struct net_device *);
 	void	(*get_regs)(struct net_device *, struct ethtool_regs *, void *);
@@ -1301,12 +1382,17 @@ int ethtool_virtdev_set_link_ksettings(struct net_device *dev,
  * @rss_ctx:		XArray of custom RSS contexts
  * @rss_lock:		Protects entries in @rss_ctx.  May be taken from
  *			within RTNL.
+ * @rss_indir_user_size: Number of user provided entries for the default
+ *			 (context 0) indirection table.
+ * @phys_id_busy:	Loop blinking the device LED is running.
  * @wol_enabled:	Wake-on-LAN is enabled
  * @module_fw_flash_in_progress: Module firmware flashing is in progress.
  */
 struct ethtool_netdev_state {
 	struct xarray		rss_ctx;
 	struct mutex		rss_lock;
+	u32			rss_indir_user_size;
+	unsigned		phys_id_busy:1;
 	unsigned		wol_enabled:1;
 	unsigned		module_fw_flash_in_progress:1;
 };

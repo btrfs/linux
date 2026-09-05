@@ -34,6 +34,7 @@
 #define AMDGPU_NUM_VMID	16
 
 struct amdgpu_device;
+struct amdgpu_fpriv;
 struct amdgpu_vm;
 struct amdgpu_ring;
 struct amdgpu_sync;
@@ -70,10 +71,14 @@ struct amdgpu_vmid_mgr {
 	bool			reserved_vmid;
 };
 
-int amdgpu_pasid_alloc(unsigned int bits);
+int amdgpu_pasid_alloc(unsigned int bits, struct amdgpu_fpriv *fpriv);
+void amdgpu_pasid_lock(unsigned long *flags);
+void amdgpu_pasid_unlock(unsigned long flags);
+struct amdgpu_fpriv *amdgpu_pasid_get_fpriv_locked(u32 pasid);
 void amdgpu_pasid_free(u32 pasid);
 void amdgpu_pasid_free_delayed(struct dma_resv *resv,
 			       u32 pasid);
+void amdgpu_pasid_mgr_cleanup(void);
 
 bool amdgpu_vmid_had_gpu_reset(struct amdgpu_device *adev,
 			       struct amdgpu_vmid *id);

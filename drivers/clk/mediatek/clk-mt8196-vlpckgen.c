@@ -629,7 +629,6 @@ static const struct regmap_config vlpckgen_regmap_config = {
 	.val_bits = 32,
 	.reg_stride = 4,
 	.max_register = 0x1000,
-	.fast_io = true,
 };
 
 static int clk_mt8196_vlp_probe(struct platform_device *pdev)
@@ -664,7 +663,7 @@ static int clk_mt8196_vlp_probe(struct platform_device *pdev)
 	if (r)
 		goto unregister_factors;
 
-	r = mtk_clk_register_plls(node, vlp_plls, ARRAY_SIZE(vlp_plls),
+	r = mtk_clk_register_plls(dev, vlp_plls, ARRAY_SIZE(vlp_plls),
 				  clk_data);
 	if (r)
 		goto unregister_muxes;

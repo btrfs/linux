@@ -821,9 +821,8 @@ static int r600_parse_clk_voltage_dep_table(struct radeon_clock_voltage_dependen
 	int i;
 	ATOM_PPLIB_Clock_Voltage_Dependency_Record *entry;
 
-	radeon_table->entries = kcalloc(atom_table->ucNumEntries,
-					sizeof(struct radeon_clock_voltage_dependency_entry),
-					GFP_KERNEL);
+	radeon_table->entries = kzalloc_objs(struct radeon_clock_voltage_dependency_entry,
+					     atom_table->ucNumEntries);
 	if (!radeon_table->entries)
 		return -ENOMEM;
 
@@ -933,7 +932,7 @@ int r600_parse_extended_power_table(struct radeon_device *rdev)
 			ret = r600_parse_clk_voltage_dep_table(&rdev->pm.dpm.dyn_state.vddci_dependency_on_mclk,
 							       dep_table);
 			if (ret) {
-				kfree(rdev->pm.dpm.dyn_state.vddc_dependency_on_sclk.entries);
+				r600_free_extended_power_table(rdev);
 				return ret;
 			}
 		}
@@ -944,8 +943,7 @@ int r600_parse_extended_power_table(struct radeon_device *rdev)
 			ret = r600_parse_clk_voltage_dep_table(&rdev->pm.dpm.dyn_state.vddc_dependency_on_mclk,
 							       dep_table);
 			if (ret) {
-				kfree(rdev->pm.dpm.dyn_state.vddc_dependency_on_sclk.entries);
-				kfree(rdev->pm.dpm.dyn_state.vddci_dependency_on_mclk.entries);
+				r600_free_extended_power_table(rdev);
 				return ret;
 			}
 		}
@@ -956,9 +954,7 @@ int r600_parse_extended_power_table(struct radeon_device *rdev)
 			ret = r600_parse_clk_voltage_dep_table(&rdev->pm.dpm.dyn_state.mvdd_dependency_on_mclk,
 							       dep_table);
 			if (ret) {
-				kfree(rdev->pm.dpm.dyn_state.vddc_dependency_on_sclk.entries);
-				kfree(rdev->pm.dpm.dyn_state.vddci_dependency_on_mclk.entries);
-				kfree(rdev->pm.dpm.dyn_state.vddc_dependency_on_mclk.entries);
+				r600_free_extended_power_table(rdev);
 				return ret;
 			}
 		}
@@ -988,9 +984,8 @@ int r600_parse_extended_power_table(struct radeon_device *rdev)
 			ATOM_PPLIB_PhaseSheddingLimits_Record *entry;
 
 			rdev->pm.dpm.dyn_state.phase_shedding_limits_table.entries =
-				kcalloc(psl->ucNumEntries,
-					sizeof(struct radeon_phase_shedding_limits_entry),
-					GFP_KERNEL);
+				kzalloc_objs(struct radeon_phase_shedding_limits_entry,
+					     psl->ucNumEntries);
 			if (!rdev->pm.dpm.dyn_state.phase_shedding_limits_table.entries) {
 				r600_free_extended_power_table(rdev);
 				return -ENOMEM;
@@ -1198,7 +1193,7 @@ int r600_parse_extended_power_table(struct radeon_device *rdev)
 				(mode_info->atom_context->bios + data_offset +
 				 le16_to_cpu(ext_hdr->usPPMTableOffset));
 			rdev->pm.dpm.dyn_state.ppm_table =
-				kzalloc(sizeof(struct radeon_ppm_table), GFP_KERNEL);
+				kzalloc_obj(struct radeon_ppm_table);
 			if (!rdev->pm.dpm.dyn_state.ppm_table) {
 				r600_free_extended_power_table(rdev);
 				return -ENOMEM;
@@ -1256,7 +1251,7 @@ int r600_parse_extended_power_table(struct radeon_device *rdev)
 					 le16_to_cpu(ext_hdr->usPowerTuneTableOffset));
 			ATOM_PowerTune_Table *pt;
 			rdev->pm.dpm.dyn_state.cac_tdp_table =
-				kzalloc(sizeof(struct radeon_cac_tdp_table), GFP_KERNEL);
+				kzalloc_obj(struct radeon_cac_tdp_table);
 			if (!rdev->pm.dpm.dyn_state.cac_tdp_table) {
 				r600_free_extended_power_table(rdev);
 				return -ENOMEM;
@@ -1298,17 +1293,29 @@ void r600_free_extended_power_table(struct radeon_device *rdev)
 	struct radeon_dpm_dynamic_state *dyn_state = &rdev->pm.dpm.dyn_state;
 
 	kfree(dyn_state->vddc_dependency_on_sclk.entries);
+	dyn_state->vddc_dependency_on_sclk.entries = NULL;
 	kfree(dyn_state->vddci_dependency_on_mclk.entries);
+	dyn_state->vddci_dependency_on_mclk.entries = NULL;
 	kfree(dyn_state->vddc_dependency_on_mclk.entries);
+	dyn_state->vddc_dependency_on_mclk.entries = NULL;
 	kfree(dyn_state->mvdd_dependency_on_mclk.entries);
+	dyn_state->mvdd_dependency_on_mclk.entries = NULL;
 	kfree(dyn_state->cac_leakage_table.entries);
+	dyn_state->cac_leakage_table.entries = NULL;
 	kfree(dyn_state->phase_shedding_limits_table.entries);
+	dyn_state->phase_shedding_limits_table.entries = NULL;
 	kfree(dyn_state->ppm_table);
+	dyn_state->ppm_table = NULL;
 	kfree(dyn_state->cac_tdp_table);
+	dyn_state->cac_tdp_table = NULL;
 	kfree(dyn_state->vce_clock_voltage_dependency_table.entries);
+	dyn_state->vce_clock_voltage_dependency_table.entries = NULL;
 	kfree(dyn_state->uvd_clock_voltage_dependency_table.entries);
+	dyn_state->uvd_clock_voltage_dependency_table.entries = NULL;
 	kfree(dyn_state->samu_clock_voltage_dependency_table.entries);
+	dyn_state->samu_clock_voltage_dependency_table.entries = NULL;
 	kfree(dyn_state->acp_clock_voltage_dependency_table.entries);
+	dyn_state->acp_clock_voltage_dependency_table.entries = NULL;
 }
 
 enum radeon_pcie_gen r600_get_pcie_gen_support(struct radeon_device *rdev,

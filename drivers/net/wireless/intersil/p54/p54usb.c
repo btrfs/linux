@@ -36,7 +36,7 @@ static struct usb_driver p54u_driver;
  * Note:
  *
  * Always update our wiki's device list (located at:
- * http://wireless.wiki.kernel.org/en/users/Drivers/p54/devices ),
+ * https://wireless.docs.kernel.org/en/latest/en/users/drivers/p54/devices.html ),
  * whenever you add a new device.
  */
 
@@ -328,7 +328,7 @@ static void p54u_tx_net2280(struct ieee80211_hw *dev, struct sk_buff *skb)
 	struct net2280_reg_write *reg = NULL;
 	int err = -ENOMEM;
 
-	reg = kmalloc(sizeof(*reg), GFP_ATOMIC);
+	reg = kmalloc_obj(*reg, GFP_ATOMIC);
 	if (!reg)
 		goto out;
 

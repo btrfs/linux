@@ -241,7 +241,7 @@ static int tas571x_coefficient_info(struct snd_kcontrol *kcontrol,
 static int tas571x_coefficient_get(struct snd_kcontrol *kcontrol,
 				  struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_component *component = snd_soc_kcontrol_component(kcontrol);
+	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
 	struct i2c_client *i2c = to_i2c_client(component->dev);
 	int numcoef = kcontrol->private_value >> 16;
 	int index = kcontrol->private_value & 0xffff;
@@ -253,7 +253,7 @@ static int tas571x_coefficient_get(struct snd_kcontrol *kcontrol,
 static int tas571x_coefficient_put(struct snd_kcontrol *kcontrol,
 				  struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_component *component = snd_soc_kcontrol_component(kcontrol);
+	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
 	struct i2c_client *i2c = to_i2c_client(component->dev);
 	int numcoef = kcontrol->private_value >> 16;
 	int index = kcontrol->private_value & 0xffff;
@@ -322,6 +322,7 @@ static int tas571x_set_bias_level(struct snd_soc_component *component,
 				  enum snd_soc_bias_level level)
 {
 	struct tas571x_private *priv = snd_soc_component_get_drvdata(component);
+	struct snd_soc_dapm_context *dapm = snd_soc_component_to_dapm(component);
 	int ret;
 
 	switch (level) {
@@ -330,7 +331,7 @@ static int tas571x_set_bias_level(struct snd_soc_component *component,
 	case SND_SOC_BIAS_PREPARE:
 		break;
 	case SND_SOC_BIAS_STANDBY:
-		if (snd_soc_component_get_bias_level(component) == SND_SOC_BIAS_OFF) {
+		if (snd_soc_dapm_get_bias_level(dapm) == SND_SOC_BIAS_OFF) {
 			if (!IS_ERR(priv->mclk)) {
 				ret = clk_prepare_enable(priv->mclk);
 				if (ret) {
@@ -1063,13 +1064,13 @@ static const struct of_device_id tas571x_of_match[] __maybe_unused = {
 MODULE_DEVICE_TABLE(of, tas571x_of_match);
 
 static const struct i2c_device_id tas571x_i2c_id[] = {
-	{ "tas5707", (kernel_ulong_t) &tas5707_chip },
-	{ "tas5711", (kernel_ulong_t) &tas5711_chip },
-	{ "tas5717", (kernel_ulong_t) &tas5717_chip },
-	{ "tas5719", (kernel_ulong_t) &tas5717_chip },
-	{ "tas5721", (kernel_ulong_t) &tas5721_chip },
-	{ "tas5733", (kernel_ulong_t) &tas5733_chip },
-	{ "tas5753", (kernel_ulong_t) &tas5753_chip },
+	{ .name = "tas5707", .driver_data = (kernel_ulong_t)&tas5707_chip },
+	{ .name = "tas5711", .driver_data = (kernel_ulong_t)&tas5711_chip },
+	{ .name = "tas5717", .driver_data = (kernel_ulong_t)&tas5717_chip },
+	{ .name = "tas5719", .driver_data = (kernel_ulong_t)&tas5717_chip },
+	{ .name = "tas5721", .driver_data = (kernel_ulong_t)&tas5721_chip },
+	{ .name = "tas5733", .driver_data = (kernel_ulong_t)&tas5733_chip },
+	{ .name = "tas5753", .driver_data = (kernel_ulong_t)&tas5753_chip },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, tas571x_i2c_id);

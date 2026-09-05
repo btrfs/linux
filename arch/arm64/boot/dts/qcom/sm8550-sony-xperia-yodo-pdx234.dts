@@ -661,6 +661,22 @@
 	};
 };
 
+&pm8550vs_c {
+	status = "okay";
+};
+
+&pm8550vs_d {
+	status = "okay";
+};
+
+&pm8550vs_e {
+	status = "okay";
+};
+
+&pm8550vs_g {
+	status = "okay";
+};
+
 &pm8550vs_g_gpios {
 	cam_pwr_a_cs: cam-pwr-a-cs-state {
 		pins = "gpio4";
@@ -750,8 +766,8 @@
 };
 
 &usb_dp_qmpphy {
-	vdda-phy-supply = <&pm8550vs_2_l3>;
-	vdda-pll-supply = <&pm8550ve_l3>;
+	vdda-phy-supply = <&pm8550ve_l3>;
+	vdda-pll-supply = <&pm8550vs_2_l3>;
 
 	status = "okay";
 };

@@ -7,6 +7,7 @@
 
 #include "core_types.h"
 #include "dcn32/dcn32_resource.h"
+#include "dcn35/dcn35_resource.h"
 #include "dcn401/dcn401_hubp.h"
 
 #define TO_DCN401_RES_POOL(pool)\
@@ -28,6 +29,11 @@ enum dc_status dcn401_validate_bandwidth(struct dc *dc,
 
 void dcn401_prepare_mcache_programming(struct dc *dc, struct dc_state *context);
 
+void dcn401_get_default_tiling_info(struct dc_tiling_info *tiling_info);
+
+unsigned int dcn401_get_vstartup_for_pipe(struct pipe_ctx *pipe_ctx);
+
+int dcn401_get_power_profile(const struct dc_state *context);
 /* Following are definitions for run time init of reg offsets */
 
 /* HUBP */
@@ -227,7 +233,12 @@ void dcn401_prepare_mcache_programming(struct dc *dc, struct dc_state *context);
 #define LE_DCN401_REG_LIST_RI(id)                                            \
 	LE_DCN3_REG_LIST_RI(id), \
 	SRI_ARR(DP_DPHY_INTERNAL_CTRL, DP, id), \
-	SRI_ARR(DIG_BE_CLK_CNTL, DIG, id)
+	SRI_ARR(DIG_BE_CLK_CNTL, DIG, id),\
+	SR_ARR(DIO_CLK_CNTL, id)
+
+#define LE_DCN60_REG_LIST_RI(id)                                             \
+	SRI_ARR(HDCP_I2C_CONTROL_0, DIG, id),                                    \
+	SRI_ARR(HDCP_INT_CONTROL, DIG, id)
 
 /* DPP */
 #define DPP_REG_LIST_DCN401_COMMON_RI(id)                                    \
@@ -393,6 +404,7 @@ void dcn401_prepare_mcache_programming(struct dc *dc, struct dc_state *context);
 	SRI_ARR(DSCL_SC_MATRIX_C0C1, DSCL, id),                                  \
 	SRI_ARR(DSCL_SC_MATRIX_C2C3, DSCL, id),                                  \
 	SRI_ARR(ISHARP_MODE, DSCL, id),                                          \
+	SRI_ARR(ISHARP_DELTA_LUT_MEM_PWR_CTRL, DSCL, id),                                          \
 	SRI_ARR(ISHARP_NOISEDET_THRESHOLD, DSCL, id),                            \
 	SRI_ARR(ISHARP_NOISE_GAIN_PWL, DSCL, id),                                \
 	SRI_ARR(ISHARP_LBA_PWL_SEG0, DSCL, id),                                  \
@@ -615,7 +627,8 @@ void dcn401_prepare_mcache_programming(struct dc *dc, struct dc_state *context);
 	SR(DCHUBBUB_MEM_PWR_MODE_CTRL),                                          \
 	SR(DCHUBBUB_TIMEOUT_DETECTION_CTRL1),                                    \
 	SR(DCHUBBUB_TIMEOUT_DETECTION_CTRL2),									 \
-	SR(DCHUBBUB_CTRL_STATUS)
+	SR(DCHUBBUB_CTRL_STATUS),                                                \
+	SR(DCHUBBUB_ARB_MALL_CNTL)
 
 /* DCCG */
 
@@ -651,5 +664,8 @@ void dcn401_prepare_mcache_programming(struct dc *dc, struct dc_state *context);
 	SR(SYMCLKB_CLOCK_ENABLE),\
 	SR(SYMCLKC_CLOCK_ENABLE),\
 	SR(SYMCLKD_CLOCK_ENABLE)
+
+#define MCIF_WB_COMMON_REG_LIST_DCN4_01_RI(inst)  \
+	MCIF_WB_COMMON_REG_LIST_DCN3_5_RI(inst)
 
 #endif /* _DCN401_RESOURCE_H_ */

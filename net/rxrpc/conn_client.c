@@ -76,7 +76,7 @@ static struct rxrpc_bundle *rxrpc_alloc_bundle(struct rxrpc_call *call,
 	static atomic_t rxrpc_bundle_id;
 	struct rxrpc_bundle *bundle;
 
-	bundle = kzalloc(sizeof(*bundle), gfp);
+	bundle = kzalloc_obj(*bundle, gfp);
 	if (bundle) {
 		bundle->local		= call->local;
 		bundle->peer		= rxrpc_get_peer(call->peer, rxrpc_peer_get_bundle);
@@ -449,7 +449,7 @@ static void rxrpc_activate_one_channel(struct rxrpc_connection *conn,
 	trace_rxrpc_connect_call(call);
 	call->tx_last_sent = ktime_get_real();
 	rxrpc_start_call_timer(call);
-	rxrpc_set_call_state(call, RXRPC_CALL_CLIENT_SEND_REQUEST);
+	rxrpc_set_call_state(call, RXRPC_CALL_CLIENT_PRE_SEND);
 	wake_up(&call->waitq);
 }
 

@@ -2,12 +2,13 @@
 
 #include <linux/net_tstamp.h>
 #include <linux/ptp_clock_kernel.h>
+#include <net/netdev_lock.h>
 
-#include "netlink.h"
-#include "common.h"
 #include "bitset.h"
-#include "../core/dev.h"
+#include "common.h"
+#include "netlink.h"
 #include "ts.h"
+#include "../core/dev.h"
 
 struct tsconfig_req_info {
 	struct ethnl_req_info base;
@@ -57,7 +58,7 @@ static int tsconfig_prepare_data(const struct ethnl_req_info *req_base,
 	data->hwtst_config.flags = cfg.flags;
 
 	data->hwprov_desc.index = -1;
-	hwprov = rtnl_dereference(dev->hwprov);
+	hwprov = netdev_ops_lock_dereference(dev->hwprov, dev);
 	if (hwprov) {
 		data->hwprov_desc.index = hwprov->desc.index;
 		data->hwprov_desc.qualifier = hwprov->desc.qualifier;
@@ -69,8 +70,10 @@ static int tsconfig_prepare_data(const struct ethnl_req_info *req_base,
 		if (ret)
 			goto out;
 
-		if (ts_info.phc_index == -1)
-			return -ENODEV;
+		if (ts_info.phc_index == -1) {
+			ret = -ENODEV;
+			goto out;
+		}
 
 		data->hwprov_desc.index = ts_info.phc_index;
 		data->hwprov_desc.qualifier = ts_info.phc_qualifier;
@@ -202,16 +205,16 @@ static int tsconfig_send_reply(struct net_device *dev, struct genl_info *info)
 	int reply_len = 0;
 	int ret;
 
-	req_info = kzalloc(sizeof(*req_info), GFP_KERNEL);
+	req_info = kzalloc_obj(*req_info);
 	if (!req_info)
 		return -ENOMEM;
-	reply_data = kmalloc(sizeof(*reply_data), GFP_KERNEL);
+	reply_data = kmalloc_obj(*reply_data);
 	if (!reply_data) {
 		kfree(req_info);
 		return -ENOMEM;
 	}
 
-	ASSERT_RTNL();
+	netdev_assert_locked_ops_compat(dev);
 	reply_data->base.dev = dev;
 	ret = tsconfig_prepare_data(&req_info->base, &reply_data->base, info);
 	if (ret < 0)
@@ -224,16 +227,21 @@ static int tsconfig_send_reply(struct net_device *dev, struct genl_info *info)
 	reply_len = ret + ethnl_reply_header_size();
 	rskb = ethnl_reply_init(reply_len, dev, ETHTOOL_MSG_TSCONFIG_SET_REPLY,
 				ETHTOOL_A_TSCONFIG_HEADER, info, &reply_payload);
-	if (!rskb)
+	if (!rskb) {
+		ret = -ENOMEM;
 		goto err_cleanup;
+	}
 
 	ret = tsconfig_fill_reply(rskb, &req_info->base, &reply_data->base);
 	if (ret < 0)
-		goto err_cleanup;
+		goto err_free_msg;
 
 	genlmsg_end(rskb, reply_payload);
 	ret = genlmsg_reply(rskb, info);
+	rskb = NULL;
 
+err_free_msg:
+	nlmsg_free(rskb);
 err_cleanup:
 	kfree(reply_data);
 	kfree(req_info);
@@ -280,7 +288,7 @@ tsconfig_set_hwprov_from_desc(struct net_device *dev,
 		source = HWTSTAMP_SOURCE_PHYLIB;
 	}
 
-	hwprov = kzalloc(sizeof(*hwprov), GFP_KERNEL);
+	hwprov = kzalloc_obj(*hwprov);
 	if (!hwprov)
 		return ERR_PTR(-ENOMEM);
 
@@ -302,10 +310,6 @@ static int ethnl_set_tsconfig(struct ethnl_req_info *req_base,
 	struct nlattr **tb = info->attrs;
 	int ret;
 
-	BUILD_BUG_ON(__HWTSTAMP_TX_CNT >= 32);
-	BUILD_BUG_ON(__HWTSTAMP_FILTER_CNT >= 32);
-	BUILD_BUG_ON(__HWTSTAMP_FLAG_CNT > 32);
-
 	if (!netif_device_present(dev))
 		return -ENODEV;
 
@@ -313,7 +317,7 @@ static int ethnl_set_tsconfig(struct ethnl_req_info *req_base,
 		struct hwtstamp_provider_desc __hwprov_desc = {.index = -1};
 		struct hwtstamp_provider *__hwprov;
 
-		__hwprov = rtnl_dereference(dev->hwprov);
+		__hwprov = netdev_ops_lock_dereference(dev->hwprov, dev);
 		if (__hwprov) {
 			__hwprov_desc.index = __hwprov->desc.index;
 			__hwprov_desc.qualifier = __hwprov->desc.qualifier;
@@ -355,8 +359,10 @@ static int ethnl_set_tsconfig(struct ethnl_req_info *req_base,
 		if (ret < 0)
 			goto err_free_hwprov;
 
-		/* Select only one tx type at a time */
-		if (ffs(req_tx_type) != fls(req_tx_type)) {
+		/* Select exactly one tx type at a time */
+		if (hweight32(req_tx_type) != 1) {
+			NL_SET_BAD_ATTR(info->extack,
+					tb[ETHTOOL_A_TSCONFIG_TX_TYPES]);
 			ret = -EINVAL;
 			goto err_free_hwprov;
 		}
@@ -376,8 +382,10 @@ static int ethnl_set_tsconfig(struct ethnl_req_info *req_base,
 		if (ret < 0)
 			goto err_free_hwprov;
 
-		/* Select only one rx filter at a time */
-		if (ffs(req_rx_filter) != fls(req_rx_filter)) {
+		/* Select exactly one rx filter at a time */
+		if (hweight32(req_rx_filter) != 1) {
+			NL_SET_BAD_ATTR(info->extack,
+					tb[ETHTOOL_A_TSCONFIG_RX_FILTERS]);
 			ret = -EINVAL;
 			goto err_free_hwprov;
 		}
@@ -411,7 +419,8 @@ static int ethnl_set_tsconfig(struct ethnl_req_info *req_base,
 			goto err_free_hwprov;
 
 		/* Change the selected hwtstamp source */
-		__hwprov = rcu_replace_pointer_rtnl(dev->hwprov, hwprov);
+		__hwprov = rcu_replace_pointer(dev->hwprov, hwprov,
+					       netdev_is_locked_ops_compat(dev));
 		if (__hwprov)
 			kfree_rcu(__hwprov, rcu_head);
 	}

@@ -19,6 +19,7 @@
 #include <linux/cc_platform.h>
 
 #include <asm/hypervisor.h>
+#include <asm/timer.h>
 #include <asm/x86_init.h>
 #include <asm/kvmclock.h>
 
@@ -84,6 +85,27 @@ static u64 kvm_clock_read(void)
 static u64 kvm_clock_get_cycles(struct clocksource *cs)
 {
 	return kvm_clock_read();
+}
+
+static u64 kvm_clock_get_cycles_snapshot(struct clocksource *cs,
+					 struct clocksource_hw_snapshot *chs)
+{
+	struct pvclock_vcpu_time_info *src;
+	unsigned version;
+	u64 ret, tsc;
+
+	preempt_disable_notrace();
+	src = this_cpu_pvti();
+	do {
+		version = pvclock_read_begin(src);
+		tsc = rdtsc_ordered();
+		ret = __pvclock_read_cycles(src, tsc);
+	} while (pvclock_read_retry(src, version));
+	preempt_enable_notrace();
+
+	chs->hw_cycles = tsc;
+	chs->hw_csid = CSID_X86_TSC;
+	return ret;
 }
 
 static noinstr u64 kvm_sched_clock_read(void)
@@ -155,13 +177,14 @@ static int kvm_cs_enable(struct clocksource *cs)
 }
 
 static struct clocksource kvm_clock = {
-	.name	= "kvm-clock",
-	.read	= kvm_clock_get_cycles,
-	.rating	= 400,
-	.mask	= CLOCKSOURCE_MASK(64),
-	.flags	= CLOCK_SOURCE_IS_CONTINUOUS,
-	.id     = CSID_X86_KVM_CLK,
-	.enable	= kvm_cs_enable,
+	.name		= "kvm-clock",
+	.read		= kvm_clock_get_cycles,
+	.read_snapshot	= kvm_clock_get_cycles_snapshot,
+	.rating		= 400,
+	.mask		= CLOCKSOURCE_MASK(64),
+	.flags		= CLOCK_SOURCE_IS_CONTINUOUS,
+	.id		= CSID_X86_KVM_CLK,
+	.enable		= kvm_cs_enable,
 };
 
 static void kvm_register_clock(char *txt)

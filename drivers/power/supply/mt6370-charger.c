@@ -761,13 +761,6 @@ static int mt6370_chg_init_psy(struct mt6370_priv *priv)
 	return PTR_ERR_OR_ZERO(priv->psy);
 }
 
-static void mt6370_chg_destroy_wq(void *data)
-{
-	struct workqueue_struct *wq = data;
-
-	destroy_workqueue(wq);
-}
-
 static irqreturn_t mt6370_attach_i_handler(int irq, void *data)
 {
 	struct mt6370_priv *priv = data;
@@ -844,9 +837,7 @@ static int mt6370_chg_init_irq(struct mt6370_priv *priv)
 						IRQF_TRIGGER_FALLING,
 						dev_name(priv->dev), priv);
 		if (ret)
-			return dev_err_probe(priv->dev, ret,
-					     "Failed to request irq %s\n",
-					     mt6370_chg_irqs[i].name);
+			return ret;
 	}
 
 	return 0;
@@ -893,13 +884,9 @@ static int mt6370_chg_probe(struct platform_device *pdev)
 
 	priv->attach = MT6370_ATTACH_STAT_DETACH;
 
-	priv->wq = create_singlethread_workqueue(dev_name(priv->dev));
+	priv->wq = devm_alloc_ordered_workqueue(dev, "%s", 0, dev_name(priv->dev));
 	if (!priv->wq)
 		return -ENOMEM;
-
-	ret = devm_add_action_or_reset(dev, mt6370_chg_destroy_wq, priv->wq);
-	if (ret)
-		return ret;
 
 	ret = devm_work_autocancel(dev, &priv->bc12_work, mt6370_chg_bc12_work_func);
 	if (ret)
@@ -941,3 +928,4 @@ module_platform_driver(mt6370_chg_driver);
 MODULE_AUTHOR("ChiaEn Wu <chiaen_wu@richtek.com>");
 MODULE_DESCRIPTION("MediaTek MT6370 Charger Driver");
 MODULE_LICENSE("GPL v2");
+MODULE_IMPORT_NS("IIO_CONSUMER");

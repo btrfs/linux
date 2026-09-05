@@ -83,7 +83,7 @@ static ssize_t xspi_spi_mem_dirmap_write(struct spi_mem_dirmap_desc *desc,
 	if (offs + desc->info.offset + len > U32_MAX)
 		return -EINVAL;
 
-	rpcif_spi_mem_prepare(desc->mem->spi, &desc->info.op_tmpl, &offs, &len);
+	rpcif_spi_mem_prepare(desc->mem->spi, desc->info.op_tmpl, &offs, &len);
 
 	return xspi_dirmap_write(rpc->dev, offs, len, buf);
 }
@@ -97,7 +97,7 @@ static ssize_t rpcif_spi_mem_dirmap_read(struct spi_mem_dirmap_desc *desc,
 	if (offs + desc->info.offset + len > U32_MAX)
 		return -EINVAL;
 
-	rpcif_spi_mem_prepare(desc->mem->spi, &desc->info.op_tmpl, &offs, &len);
+	rpcif_spi_mem_prepare(desc->mem->spi, desc->info.op_tmpl, &offs, &len);
 
 	return rpcif_dirmap_read(rpc->dev, offs, len, buf);
 }
@@ -110,13 +110,13 @@ static int rpcif_spi_mem_dirmap_create(struct spi_mem_dirmap_desc *desc)
 	if (desc->info.offset + desc->info.length > U32_MAX)
 		return -EINVAL;
 
-	if (!rpcif_spi_mem_supports_op(desc->mem, &desc->info.op_tmpl))
+	if (!rpcif_spi_mem_supports_op(desc->mem, desc->info.op_tmpl))
 		return -EOPNOTSUPP;
 
 	if (!rpc->dirmap)
 		return -EOPNOTSUPP;
 
-	if (!rpc->xspi && desc->info.op_tmpl.data.dir != SPI_MEM_DATA_IN)
+	if (!rpc->xspi && desc->info.op_tmpl->data.dir != SPI_MEM_DATA_IN)
 		return -EOPNOTSUPP;
 
 	return 0;
@@ -161,6 +161,8 @@ static int rpcif_spi_probe(struct platform_device *pdev)
 
 	ctlr->dev.of_node = parent->of_node;
 
+	pm_runtime_set_autosuspend_delay(rpc->dev, 200);
+	pm_runtime_use_autosuspend(rpc->dev);
 	pm_runtime_enable(rpc->dev);
 
 	ctlr->num_chipselect = 1;
@@ -183,6 +185,7 @@ static int rpcif_spi_probe(struct platform_device *pdev)
 	return 0;
 
 out_disable_rpm:
+	pm_runtime_dont_use_autosuspend(rpc->dev);
 	pm_runtime_disable(rpc->dev);
 	return error;
 }
@@ -193,6 +196,7 @@ static void rpcif_spi_remove(struct platform_device *pdev)
 	struct rpcif *rpc = spi_controller_get_devdata(ctlr);
 
 	spi_unregister_controller(ctlr);
+	pm_runtime_dont_use_autosuspend(rpc->dev);
 	pm_runtime_disable(rpc->dev);
 }
 
@@ -206,8 +210,12 @@ static int rpcif_spi_suspend(struct device *dev)
 static int rpcif_spi_resume(struct device *dev)
 {
 	struct spi_controller *ctlr = dev_get_drvdata(dev);
+	struct rpcif *rpc = spi_controller_get_devdata(ctlr);
+	int ret;
 
-	rpcif_hw_init(dev, false);
+	ret = rpcif_hw_init(rpc->dev, false);
+	if (ret)
+		return ret;
 
 	return spi_controller_resume(ctlr);
 }

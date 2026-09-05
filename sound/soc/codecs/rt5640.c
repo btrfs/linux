@@ -1838,6 +1838,11 @@ static int rt5640_set_dai_sysclk(struct snd_soc_dai *dai,
 	unsigned int pll_bit = 0;
 	int ret;
 
+	if (!freq) {
+		rt5640->sysclk = 0;
+		return 0;
+	}
+
 	switch (clk_id) {
 	case RT5640_SCLK_S_MCLK:
 		ret = clk_set_rate(rt5640->mclk, freq);
@@ -1935,6 +1940,7 @@ static int rt5640_set_bias_level(struct snd_soc_component *component,
 			enum snd_soc_bias_level level)
 {
 	struct rt5640_priv *rt5640 = snd_soc_component_get_drvdata(component);
+	struct snd_soc_dapm_context *dapm = snd_soc_component_to_dapm(component);
 	int ret;
 
 	switch (level) {
@@ -1949,7 +1955,7 @@ static int rt5640_set_bias_level(struct snd_soc_component *component,
 		 * away from ON. Disable the clock in that case, otherwise
 		 * enable it.
 		 */
-		if (snd_soc_component_get_bias_level(component) == SND_SOC_BIAS_ON) {
+		if (snd_soc_dapm_get_bias_level(dapm) == SND_SOC_BIAS_ON) {
 			clk_disable_unprepare(rt5640->mclk);
 		} else {
 			ret = clk_prepare_enable(rt5640->mclk);
@@ -1959,7 +1965,7 @@ static int rt5640_set_bias_level(struct snd_soc_component *component,
 		break;
 
 	case SND_SOC_BIAS_STANDBY:
-		if (SND_SOC_BIAS_OFF == snd_soc_component_get_bias_level(component)) {
+		if (SND_SOC_BIAS_OFF == snd_soc_dapm_get_bias_level(dapm)) {
 			snd_soc_component_update_bits(component, RT5640_PWR_ANLG1,
 				RT5640_PWR_VREF1 | RT5640_PWR_MB |
 				RT5640_PWR_BG | RT5640_PWR_VREF2,
@@ -2098,7 +2104,7 @@ EXPORT_SYMBOL_GPL(rt5640_sel_asrc_clk_src);
 
 void rt5640_enable_micbias1_for_ovcd(struct snd_soc_component *component)
 {
-	struct snd_soc_dapm_context *dapm = snd_soc_component_get_dapm(component);
+	struct snd_soc_dapm_context *dapm = snd_soc_component_to_dapm(component);
 	struct rt5640_priv *rt5640 = snd_soc_component_get_drvdata(component);
 
 	snd_soc_dapm_mutex_lock(dapm);
@@ -2114,7 +2120,7 @@ EXPORT_SYMBOL_GPL(rt5640_enable_micbias1_for_ovcd);
 
 void rt5640_disable_micbias1_for_ovcd(struct snd_soc_component *component)
 {
-	struct snd_soc_dapm_context *dapm = snd_soc_component_get_dapm(component);
+	struct snd_soc_dapm_context *dapm = snd_soc_component_to_dapm(component);
 	struct rt5640_priv *rt5640 = snd_soc_component_get_drvdata(component);
 
 	snd_soc_dapm_mutex_lock(dapm);
@@ -2391,7 +2397,7 @@ static void rt5640_jack_work(struct work_struct *work)
 		 * disabled the OVCD IRQ, the IRQ pin will stay high and as
 		 * we react to edges, we miss the unplug event -> recheck.
 		 */
-		queue_delayed_work(system_long_wq, &rt5640->jack_work, 0);
+		queue_delayed_work(system_dfl_long_wq, &rt5640->jack_work, 0);
 	}
 }
 
@@ -2404,7 +2410,8 @@ static irqreturn_t rt5640_irq(int irq, void *data)
 		delay = 100;
 
 	if (rt5640->jack)
-		mod_delayed_work(system_long_wq, &rt5640->jack_work, delay);
+		mod_delayed_work(system_dfl_long_wq, &rt5640->jack_work,
+				 delay);
 
 	return IRQ_HANDLED;
 }
@@ -2413,7 +2420,7 @@ static irqreturn_t rt5640_jd_gpio_irq(int irq, void *data)
 {
 	struct rt5640_priv *rt5640 = data;
 
-	queue_delayed_work(system_long_wq, &rt5640->jack_work,
+	queue_delayed_work(system_dfl_long_wq, &rt5640->jack_work,
 			   msecs_to_jiffies(JACK_SETTLE_TIME));
 
 	return IRQ_HANDLED;
@@ -2547,10 +2554,12 @@ static void rt5640_enable_jack_detect(struct snd_soc_component *component,
 		rt5640->jd_gpio = jack_data->jd_gpio;
 		rt5640->jd_gpio_irq = gpiod_to_irq(rt5640->jd_gpio);
 
-		ret = request_irq(rt5640->jd_gpio_irq, rt5640_jd_gpio_irq,
-				  IRQF_TRIGGER_RISING | IRQF_TRIGGER_FALLING,
-				  "rt5640-jd-gpio", rt5640);
-		if (ret) {
+		ret = request_any_context_irq(rt5640->jd_gpio_irq,
+					      rt5640_jd_gpio_irq,
+					      IRQF_TRIGGER_RISING |
+					      IRQF_TRIGGER_FALLING,
+					      "rt5640-jd-gpio", rt5640);
+		if (ret < 0) {
 			dev_warn(component->dev, "Failed to request jd GPIO IRQ %d: %d\n",
 				 rt5640->jd_gpio_irq, ret);
 			rt5640_disable_jack_detect(component);
@@ -2562,10 +2571,10 @@ static void rt5640_enable_jack_detect(struct snd_soc_component *component,
 	if (jack_data && jack_data->use_platform_clock)
 		rt5640->use_platform_clock = jack_data->use_platform_clock;
 
-	ret = request_irq(rt5640->irq, rt5640_irq,
-			  IRQF_TRIGGER_RISING | IRQF_TRIGGER_FALLING | IRQF_ONESHOT,
-			  "rt5640", rt5640);
-	if (ret) {
+	ret = request_any_context_irq(rt5640->irq, rt5640_irq,
+				      IRQF_TRIGGER_RISING | IRQF_TRIGGER_FALLING,
+				      "rt5640", rt5640);
+	if (ret < 0) {
 		dev_warn(component->dev, "Failed to request IRQ %d: %d\n", rt5640->irq, ret);
 		rt5640_disable_jack_detect(component);
 		return;
@@ -2573,7 +2582,7 @@ static void rt5640_enable_jack_detect(struct snd_soc_component *component,
 	rt5640->irq_requested = true;
 
 	/* sync initial jack state */
-	queue_delayed_work(system_long_wq, &rt5640->jack_work, 0);
+	queue_delayed_work(system_dfl_long_wq, &rt5640->jack_work, 0);
 }
 
 static const struct snd_soc_dapm_route rt5640_hda_jack_dapm_routes[] = {
@@ -2586,8 +2595,7 @@ static void rt5640_enable_hda_jack_detect(
 	struct snd_soc_component *component, struct snd_soc_jack *jack)
 {
 	struct rt5640_priv *rt5640 = snd_soc_component_get_drvdata(component);
-	struct snd_soc_dapm_context *dapm =
-		snd_soc_component_get_dapm(component);
+	struct snd_soc_dapm_context *dapm = snd_soc_component_to_dapm(component);
 	int ret;
 
 	/* Select JD1 for Mic */
@@ -2617,9 +2625,9 @@ static void rt5640_enable_hda_jack_detect(
 
 	rt5640->jack = jack;
 
-	ret = request_irq(rt5640->irq, rt5640_irq,
-			  IRQF_TRIGGER_RISING | IRQF_ONESHOT, "rt5640", rt5640);
-	if (ret) {
+	ret = request_any_context_irq(rt5640->irq, rt5640_irq,
+				      IRQF_TRIGGER_RISING, "rt5640", rt5640);
+	if (ret < 0) {
 		dev_warn(component->dev, "Failed to request IRQ %d: %d\n", rt5640->irq, ret);
 		rt5640->jack = NULL;
 		return;
@@ -2627,7 +2635,7 @@ static void rt5640_enable_hda_jack_detect(
 	rt5640->irq_requested = true;
 
 	/* sync initial jack state */
-	queue_delayed_work(system_long_wq, &rt5640->jack_work, 0);
+	queue_delayed_work(system_dfl_long_wq, &rt5640->jack_work, 0);
 
 	snd_soc_dapm_add_routes(dapm, rt5640_hda_jack_dapm_routes,
 		ARRAY_SIZE(rt5640_hda_jack_dapm_routes));
@@ -2652,7 +2660,7 @@ static int rt5640_set_jack(struct snd_soc_component *component,
 
 static int rt5640_probe(struct snd_soc_component *component)
 {
-	struct snd_soc_dapm_context *dapm = snd_soc_component_get_dapm(component);
+	struct snd_soc_dapm_context *dapm = snd_soc_component_to_dapm(component);
 	struct rt5640_priv *rt5640 = snd_soc_component_get_drvdata(component);
 	u32 dmic1_data_pin = 0;
 	u32 dmic2_data_pin = 0;
@@ -2666,7 +2674,7 @@ static int rt5640_probe(struct snd_soc_component *component)
 
 	rt5640->component = component;
 
-	snd_soc_component_force_bias_level(component, SND_SOC_BIAS_OFF);
+	snd_soc_dapm_force_bias_level(dapm, SND_SOC_BIAS_OFF);
 
 	snd_soc_component_update_bits(component, RT5640_GCTL1, 0x0301, 0x0301);
 	snd_soc_component_update_bits(component, RT5640_MICBIAS, 0x0030, 0x0030);
@@ -2796,6 +2804,7 @@ static void rt5640_remove(struct snd_soc_component *component)
 static int rt5640_suspend(struct snd_soc_component *component)
 {
 	struct rt5640_priv *rt5640 = snd_soc_component_get_drvdata(component);
+	struct snd_soc_dapm_context *dapm = snd_soc_component_to_dapm(component);
 
 	if (rt5640->jack) {
 		/* disable jack interrupts during system suspend */
@@ -2804,7 +2813,7 @@ static int rt5640_suspend(struct snd_soc_component *component)
 		cancel_delayed_work_sync(&rt5640->bp_work);
 	}
 
-	snd_soc_component_force_bias_level(component, SND_SOC_BIAS_OFF);
+	snd_soc_dapm_force_bias_level(dapm, SND_SOC_BIAS_OFF);
 	rt5640_reset(component);
 	regcache_cache_only(rt5640->regmap, true);
 	regcache_mark_dirty(rt5640->regmap);
@@ -2854,7 +2863,7 @@ static int rt5640_resume(struct snd_soc_component *component)
 		}
 
 		enable_irq(rt5640->irq);
-		queue_delayed_work(system_long_wq, &rt5640->jack_work, 0);
+		queue_delayed_work(system_dfl_long_wq, &rt5640->jack_work, 0);
 	}
 
 	return 0;
@@ -2952,9 +2961,9 @@ static const struct regmap_config rt5640_regmap = {
 };
 
 static const struct i2c_device_id rt5640_i2c_id[] = {
-	{ "rt5640" },
-	{ "rt5639" },
-	{ "rt5642" },
+	{ .name = "rt5640" },
+	{ .name = "rt5639" },
+	{ .name = "rt5642" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, rt5640_i2c_id);

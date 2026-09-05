@@ -311,8 +311,7 @@ int gbaudio_module_update(struct gbaudio_codec_info *codec,
 	}
 
 	/* parse dai_id from AIF widget's stream_name */
-	ret = sscanf(w->sname, "%s %d %s", intf_name, &dai_id, dir);
-	if (ret < 3) {
+	if (sscanf(w->sname, "%s %d %s", intf_name, &dai_id, dir) != 3) {
 		dev_err(codec->dev, "Error while parsing dai_id for %s\n", w->name);
 		return -EINVAL;
 	}
@@ -323,7 +322,7 @@ int gbaudio_module_update(struct gbaudio_codec_info *codec,
 			ret = gbaudio_module_enable_tx(codec, module, dai_id);
 		else
 			ret = gbaudio_module_disable_tx(module, dai_id);
-	} else if (w->id == snd_soc_dapm_aif_out) {
+	} else {
 		if (enable)
 			ret = gbaudio_module_enable_rx(codec, module, dai_id);
 		else
@@ -781,7 +780,7 @@ static int gbaudio_init_jack(struct gbaudio_module_info *module,
 		ret = snd_jack_set_key(module->button.jack.jack, SND_JACK_BTN_3,
 				       KEY_VOLUMEDOWN);
 		if (ret) {
-			dev_err(module->dev, "Failed to set BTN_0\n");
+			dev_err(module->dev, "Failed to set BTN_3\n");
 			goto free_jacks;
 		}
 	}
@@ -807,6 +806,7 @@ int gbaudio_register_module(struct gbaudio_module_info *module)
 {
 	int ret;
 	struct snd_soc_component *comp;
+	struct snd_soc_dapm_context *dapm;
 	struct gbaudio_jack *jack = NULL;
 
 	if (!gbcodec) {
@@ -815,6 +815,7 @@ int gbaudio_register_module(struct gbaudio_module_info *module)
 	}
 
 	comp = gbcodec->component;
+	dapm = snd_soc_component_to_dapm(comp);
 
 	mutex_lock(&gbcodec->register_mutex);
 
@@ -833,18 +834,18 @@ int gbaudio_register_module(struct gbaudio_module_info *module)
 	}
 
 	if (module->dapm_widgets)
-		snd_soc_dapm_new_controls(&comp->dapm, module->dapm_widgets,
+		snd_soc_dapm_new_controls(dapm, module->dapm_widgets,
 					  module->num_dapm_widgets);
 	if (module->controls)
 		snd_soc_add_component_controls(comp, module->controls,
 					       module->num_controls);
 	if (module->dapm_routes)
-		snd_soc_dapm_add_routes(&comp->dapm, module->dapm_routes,
+		snd_soc_dapm_add_routes(dapm, module->dapm_routes,
 					module->num_dapm_routes);
 
 	/* card already instantiated, create widgets here only */
 	if (comp->card->instantiated) {
-		gbaudio_dapm_link_component_dai_widgets(comp->card, &comp->dapm);
+		gbaudio_dapm_link_component_dai_widgets(comp->card, dapm);
 #ifdef CONFIG_SND_JACK
 		/*
 		 * register jack devices for this module
@@ -966,9 +967,11 @@ void gbaudio_unregister_module(struct gbaudio_module_info *module)
 #endif
 
 	if (module->dapm_routes) {
+		struct snd_soc_dapm_context *dapm = snd_soc_component_to_dapm(comp);
+
 		dev_dbg(comp->dev, "Removing %d routes\n",
 			module->num_dapm_routes);
-		snd_soc_dapm_del_routes(&comp->dapm, module->dapm_routes,
+		snd_soc_dapm_del_routes(dapm, module->dapm_routes,
 					module->num_dapm_routes);
 	}
 	if (module->controls) {
@@ -979,9 +982,11 @@ void gbaudio_unregister_module(struct gbaudio_module_info *module)
 						  module->num_controls);
 	}
 	if (module->dapm_widgets) {
+		struct snd_soc_dapm_context *dapm = snd_soc_component_to_dapm(comp);
+
 		dev_dbg(comp->dev, "Removing %d widgets\n",
 			module->num_dapm_widgets);
-		gbaudio_dapm_free_controls(&comp->dapm, module->dapm_widgets,
+		gbaudio_dapm_free_controls(dapm, module->dapm_widgets,
 					   module->num_dapm_widgets);
 	}
 
