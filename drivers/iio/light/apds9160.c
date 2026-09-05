@@ -620,7 +620,7 @@ static int apds9160_set_ps_gain(struct apds9160_chip *data, int val)
 
 /*
  * The PS intelligent cancellation level register allows
- * for an on-chip substraction of the ADC count caused by
+ * for an on-chip subtraction of the ADC count caused by
  * unwanted reflected light from PS ADC output.
  */
 static int apds9160_set_ps_cancellation_level(struct apds9160_chip *data,
@@ -1545,11 +1545,8 @@ static int apds9160_probe(struct i2c_client *client)
 						apds9160_irq_handler,
 						IRQF_ONESHOT, "apds9160_event",
 						indio_dev);
-		if (ret) {
-			return dev_err_probe(dev, ret,
-					     "request irq (%d) failed\n",
-					     client->irq);
-		}
+		if (ret)
+			return ret;
 	} else {
 		indio_dev->info = &apds9160_info_no_events;
 		indio_dev->channels = apds9160_channels_without_events;
@@ -1572,7 +1569,7 @@ static const struct of_device_id apds9160_of_match[] = {
 MODULE_DEVICE_TABLE(of, apds9160_of_match);
 
 static const struct i2c_device_id apds9160_id[] = {
-	{ "apds9160", 0 },
+	{ .name = "apds9160" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, apds9160_id);

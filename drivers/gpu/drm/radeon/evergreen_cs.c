@@ -312,8 +312,10 @@ static int evergreen_surface_check(struct radeon_cs_parser *p,
 	case ARRAY_2D_TILED_THIN1:
 		return evergreen_surface_check_2d(p, surf, prefix);
 	default:
-		dev_warn(p->dev, "%s:%d %s invalid array mode %d\n",
-				__func__, __LINE__, prefix, surf->mode);
+		if (prefix) {
+			dev_warn(p->dev, "%s:%d %s invalid array mode %d\n",
+					__func__, __LINE__, prefix, surf->mode);
+		}
 		return -EINVAL;
 	}
 	return -EINVAL;
@@ -2769,7 +2771,7 @@ int evergreen_cs_parse(struct radeon_cs_parser *p)
 
 	if (p->track == NULL) {
 		/* initialize tracker, we are in kms */
-		track = kzalloc(sizeof(*track), GFP_KERNEL);
+		track = kzalloc_obj(*track);
 		if (track == NULL)
 			return -ENOMEM;
 		evergreen_cs_track_init(track);

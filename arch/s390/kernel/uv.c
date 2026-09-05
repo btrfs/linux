@@ -4,8 +4,7 @@
  *
  * Copyright IBM Corp. 2019, 2024
  */
-#define KMSG_COMPONENT "prot_virt"
-#define pr_fmt(fmt) KMSG_COMPONENT ": " fmt
+#define pr_fmt(fmt) "prot_virt: " fmt
 
 #include <linux/export.h>
 #include <linux/kernel.h>
@@ -17,6 +16,7 @@
 #include <linux/swap.h>
 #include <linux/pagewalk.h>
 #include <linux/backing-dev.h>
+#include <linux/vmalloc.h>
 #include <asm/facility.h>
 #include <asm/sections.h>
 #include <asm/uv.h>
@@ -135,14 +135,15 @@ static int uv_destroy(unsigned long paddr)
  */
 int uv_destroy_folio(struct folio *folio)
 {
+	unsigned long i;
 	int rc;
 
-	/* Large folios cannot be secure */
-	if (unlikely(folio_test_large(folio)))
-		return 0;
-
 	folio_get(folio);
-	rc = uv_destroy(folio_to_phys(folio));
+	for (i = 0; i < (1 << folio_order(folio)); i++) {
+		rc = uv_destroy(folio_to_phys(folio) + i * PAGE_SIZE);
+		if (rc)
+			break;
+	}
 	if (!rc)
 		clear_bit(PG_arch_1, &folio->flags.f);
 	folio_put(folio);
@@ -184,14 +185,15 @@ EXPORT_SYMBOL_GPL(uv_convert_from_secure);
  */
 int uv_convert_from_secure_folio(struct folio *folio)
 {
+	unsigned long i;
 	int rc;
 
-	/* Large folios cannot be secure */
-	if (unlikely(folio_test_large(folio)))
-		return 0;
-
 	folio_get(folio);
-	rc = uv_convert_from_secure(folio_to_phys(folio));
+	for (i = 0; i < (1 << folio_order(folio)); i++) {
+		rc = uv_convert_from_secure(folio_to_phys(folio) + i * PAGE_SIZE);
+		if (rc)
+			break;
+	}
 	if (!rc)
 		clear_bit(PG_arch_1, &folio->flags.f);
 	folio_put(folio);
@@ -208,38 +210,69 @@ int uv_convert_from_secure_pte(pte_t pte)
 	return uv_convert_from_secure_folio(pfn_folio(pte_pfn(pte)));
 }
 
-/**
- * should_export_before_import - Determine whether an export is needed
- * before an import-like operation
- * @uvcb: the Ultravisor control block of the UVC to be performed
- * @mm: the mm of the process
- *
- * Returns whether an export is needed before every import-like operation.
- * This is needed for shared pages, which don't trigger a secure storage
- * exception when accessed from a different guest.
- *
- * Although considered as one, the Unpin Page UVC is not an actual import,
- * so it is not affected.
- *
- * No export is needed also when there is only one protected VM, because the
- * page cannot belong to the wrong VM in that case (there is no "other VM"
- * it can belong to).
- *
- * Return: true if an export is needed before every import, otherwise false.
- */
-static bool should_export_before_import(struct uv_cb_header *uvcb, struct mm_struct *mm)
+static int uv_free_range_cb(pte_t *ptep, unsigned long addr, void *data)
 {
+	pte_t pte = ptep_get(ptep);
+
+	if (!pte_present(pte))
+		return 0;
 	/*
-	 * The misc feature indicates, among other things, that importing a
-	 * shared page from a different protected VM will automatically also
-	 * transfer its ownership.
+	 * Note: do not update the pte here, since there is no code which
+	 * accesses the memory range, besides bugs. The invalidation of ptes
+	 * and TLB flushing is deferred like for regular vfree() calls.
 	 */
-	if (uv_has_feature(BIT_UV_FEAT_MISC))
-		return false;
-	if (uvcb->cmd == UVC_CMD_UNPIN_PAGE_SHARED)
-		return false;
-	return atomic_read(&mm->context.protected_count) > 1;
+	__free_page(pte_page(pte));
+	return 0;
 }
+
+void uv_free_stor_var(void *stor_var)
+{
+	unsigned long addr, size;
+	struct vm_struct *area;
+
+	if (!stor_var)
+		return;
+	area = find_vm_area(stor_var);
+	if (WARN_ON_ONCE(!area || !(area->flags & VM_SPARSE)))
+		return;
+	size = get_vm_area_size(area);
+	addr = (unsigned long)area->addr;
+	apply_to_existing_page_range(&init_mm, addr, size, uv_free_range_cb, NULL);
+	free_vm_area(area);
+}
+EXPORT_SYMBOL_FOR_MODULES(uv_free_stor_var, "kvm");
+
+static int uv_alloc_range_cb(pte_t *ptep, unsigned long addr, void *data)
+{
+	struct page *page;
+	pte_t pte;
+
+	page = alloc_page(GFP_KERNEL_ACCOUNT | __GFP_ZERO);
+	if (!page)
+		return -ENOMEM;
+	pte = __pte(page_to_phys(page) | pgprot_val(PAGE_KERNEL));
+	set_pte(ptep, pte);
+	return 0;
+}
+
+void *uv_alloc_stor_var(unsigned long size)
+{
+	struct vm_struct *area;
+	unsigned long addr;
+
+	size = PAGE_ALIGN(size);
+	area = get_vm_area(size, VM_SPARSE);
+	if (!area)
+		return NULL;
+	addr = (unsigned long)area->addr;
+	if (apply_to_page_range(&init_mm, addr, size, uv_alloc_range_cb, NULL))
+		goto out;
+	return area->addr;
+out:
+	uv_free_stor_var(area->addr);
+	return NULL;
+}
+EXPORT_SYMBOL_FOR_MODULES(uv_alloc_stor_var, "kvm");
 
 /*
  * Calculate the expected ref_count for a folio that would otherwise have no
@@ -280,7 +313,7 @@ static int expected_folio_refs(struct folio *folio)
  *          (it's the same logic as split_folio()), and the folio must be
  *          locked.
  */
-static int __make_folio_secure(struct folio *folio, struct uv_cb_header *uvcb)
+int __make_folio_secure(struct folio *folio, struct uv_cb_header *uvcb)
 {
 	int expected, cc = 0;
 
@@ -310,20 +343,7 @@ static int __make_folio_secure(struct folio *folio, struct uv_cb_header *uvcb)
 		return -EAGAIN;
 	return uvcb->rc == 0x10a ? -ENXIO : -EINVAL;
 }
-
-static int make_folio_secure(struct mm_struct *mm, struct folio *folio, struct uv_cb_header *uvcb)
-{
-	int rc;
-
-	if (!folio_trylock(folio))
-		return -EAGAIN;
-	if (should_export_before_import(uvcb, mm))
-		uv_convert_from_secure(folio_to_phys(folio));
-	rc = __make_folio_secure(folio, uvcb);
-	folio_unlock(folio);
-
-	return rc;
-}
+EXPORT_SYMBOL(__make_folio_secure);
 
 /**
  * s390_wiggle_split_folio() - try to drain extra references to a folio and
@@ -338,7 +358,7 @@ static int make_folio_secure(struct mm_struct *mm, struct folio *folio, struct u
  *		   but another attempt can be made;
  *	   -EINVAL in case of other folio splitting errors. See split_folio().
  */
-static int s390_wiggle_split_folio(struct mm_struct *mm, struct folio *folio)
+int s390_wiggle_split_folio(struct mm_struct *mm, struct folio *folio)
 {
 	int rc, tried_splits;
 
@@ -410,56 +430,7 @@ static int s390_wiggle_split_folio(struct mm_struct *mm, struct folio *folio)
 	}
 	return -EAGAIN;
 }
-
-int make_hva_secure(struct mm_struct *mm, unsigned long hva, struct uv_cb_header *uvcb)
-{
-	struct vm_area_struct *vma;
-	struct folio_walk fw;
-	struct folio *folio;
-	int rc;
-
-	mmap_read_lock(mm);
-	vma = vma_lookup(mm, hva);
-	if (!vma) {
-		mmap_read_unlock(mm);
-		return -EFAULT;
-	}
-	folio = folio_walk_start(&fw, vma, hva, 0);
-	if (!folio) {
-		mmap_read_unlock(mm);
-		return -ENXIO;
-	}
-
-	folio_get(folio);
-	/*
-	 * Secure pages cannot be huge and userspace should not combine both.
-	 * In case userspace does it anyway this will result in an -EFAULT for
-	 * the unpack. The guest is thus never reaching secure mode.
-	 * If userspace plays dirty tricks and decides to map huge pages at a
-	 * later point in time, it will receive a segmentation fault or
-	 * KVM_RUN will return -EFAULT.
-	 */
-	if (folio_test_hugetlb(folio))
-		rc = -EFAULT;
-	else if (folio_test_large(folio))
-		rc = -E2BIG;
-	else if (!pte_write(fw.pte) || (pte_val(fw.pte) & _PAGE_INVALID))
-		rc = -ENXIO;
-	else
-		rc = make_folio_secure(mm, folio, uvcb);
-	folio_walk_end(&fw, vma);
-	mmap_read_unlock(mm);
-
-	if (rc == -E2BIG || rc == -EBUSY) {
-		rc = s390_wiggle_split_folio(mm, folio);
-		if (!rc)
-			rc = -EAGAIN;
-	}
-	folio_put(folio);
-
-	return rc;
-}
-EXPORT_SYMBOL_GPL(make_hva_secure);
+EXPORT_SYMBOL_GPL(s390_wiggle_split_folio);
 
 /*
  * To be called with the folio locked or with an extra reference! This will
@@ -471,20 +442,17 @@ int arch_make_folio_accessible(struct folio *folio)
 {
 	int rc = 0;
 
-	/* Large folios cannot be secure */
-	if (unlikely(folio_test_large(folio)))
-		return 0;
-
 	/*
-	 * PG_arch_1 is used in 2 places:
-	 * 1. for storage keys of hugetlb folios and KVM
-	 * 2. As an indication that this small folio might be secure. This can
-	 *    overindicate, e.g. we set the bit before calling
-	 *    convert_to_secure.
-	 * As secure pages are never large folios, both variants can co-exists.
+	 * PG_arch_1 is used as an indication that this small folio might be
+	 * secure. This can overindicate, e.g. we set the bit before calling
+	 * convert_to_secure.
 	 */
 	if (!test_bit(PG_arch_1, &folio->flags.f))
 		return 0;
+
+	/* Large folios cannot be secure. */
+	if (WARN_ON_ONCE(folio_test_large(folio)))
+		return -EFAULT;
 
 	rc = uv_pin_shared(folio_to_phys(folio));
 	if (!rc) {
@@ -928,7 +896,7 @@ int uv_retrieve_secret(u16 secret_idx, u8 *buf, size_t buf_size)
 		.buf_size = buf_size,
 	};
 
-	uv_call_sched(0, (u64)&uvcb);
+	uv_call(0, (u64)&uvcb);
 
 	switch (uvcb.header.rc) {
 	case UVC_RC_EXECUTED:

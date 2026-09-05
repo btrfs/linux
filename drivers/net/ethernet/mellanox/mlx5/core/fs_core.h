@@ -103,24 +103,6 @@ enum fs_node_type {
 	FS_TYPE_FLOW_DEST
 };
 
-enum fs_flow_table_type {
-	FS_FT_NIC_RX          = 0x0,
-	FS_FT_NIC_TX          = 0x1,
-	FS_FT_ESW_EGRESS_ACL  = 0x2,
-	FS_FT_ESW_INGRESS_ACL = 0x3,
-	FS_FT_FDB             = 0X4,
-	FS_FT_SNIFFER_RX	= 0X5,
-	FS_FT_SNIFFER_TX	= 0X6,
-	FS_FT_RDMA_RX		= 0X7,
-	FS_FT_RDMA_TX		= 0X8,
-	FS_FT_PORT_SEL		= 0X9,
-	FS_FT_FDB_RX		= 0xa,
-	FS_FT_FDB_TX		= 0xb,
-	FS_FT_RDMA_TRANSPORT_RX	= 0xd,
-	FS_FT_RDMA_TRANSPORT_TX	= 0xe,
-	FS_FT_MAX_TYPE = FS_FT_RDMA_TRANSPORT_TX,
-};
-
 enum fs_flow_table_op_mod {
 	FS_FT_OP_MOD_NORMAL,
 	FS_FT_OP_MOD_LAG_DEMUX,
@@ -205,6 +187,7 @@ struct mlx5_flow_table {
 	};
 	u32				id;
 	u16				vport;
+	u16				esw_owner_vhca_id;
 	unsigned int			max_fte;
 	unsigned int			level;
 	enum fs_flow_table_type		type;
@@ -231,17 +214,7 @@ struct mlx5_ft_underlay_qp {
 	u32 qpn;
 };
 
-#define MLX5_FTE_MATCH_PARAM_RESERVED	reserved_at_e00
-/* Calculate the fte_match_param length and without the reserved length.
- * Make sure the reserved field is the last.
- */
-#define MLX5_ST_SZ_DW_MATCH_PARAM					    \
-	((MLX5_BYTE_OFF(fte_match_param, MLX5_FTE_MATCH_PARAM_RESERVED) / sizeof(u32)) + \
-	 BUILD_BUG_ON_ZERO(MLX5_ST_SZ_BYTES(fte_match_param) !=		     \
-			   MLX5_FLD_SZ_BYTES(fte_match_param,		     \
-					     MLX5_FTE_MATCH_PARAM_RESERVED) +\
-			   MLX5_BYTE_OFF(fte_match_param,		     \
-					 MLX5_FTE_MATCH_PARAM_RESERVED)))
+#define MLX5_ST_SZ_DW_MATCH_PARAM MLX5_ST_SZ_DW(fte_match_param)
 
 struct fs_fte_action {
 	int				modify_mask;
@@ -325,7 +298,8 @@ struct mlx5_flow_root_namespace {
 };
 
 enum mlx5_fc_type {
-	MLX5_FC_TYPE_ACQUIRED = 0,
+	MLX5_FC_TYPE_POOL_ACQUIRED = 0,
+	MLX5_FC_TYPE_SINGLE,
 	MLX5_FC_TYPE_LOCAL,
 };
 

@@ -4,6 +4,7 @@
  * Copyright (c) 2015-2016 HGST, a Western Digital Company.
  */
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
+#include <linux/hex.h>
 #include <linux/kstrtox.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
@@ -16,7 +17,6 @@
 #include <linux/nvme-auth.h>
 #endif
 #include <linux/nvme-keyring.h>
-#include <crypto/hash.h>
 #include <crypto/kpp.h>
 #include <linux/nospec.h>
 
@@ -300,6 +300,33 @@ static ssize_t nvmet_param_max_queue_size_store(struct config_item *item,
 }
 
 CONFIGFS_ATTR(nvmet_, param_max_queue_size);
+
+static ssize_t nvmet_param_mdts_show(struct config_item *item, char *page)
+{
+	struct nvmet_port *port = to_nvmet_port(item);
+
+	return snprintf(page, PAGE_SIZE, "%d\n", port->mdts);
+}
+
+static ssize_t nvmet_param_mdts_store(struct config_item *item,
+		const char *page, size_t count)
+{
+	struct nvmet_port *port = to_nvmet_port(item);
+	int ret, mdts;
+
+	if (nvmet_is_port_enabled(port, __func__))
+		return -EACCES;
+	ret = kstrtoint(page, 0, &mdts);
+	if (ret || mdts < 0 || mdts > NVMET_MAX_MDTS) {
+		pr_err("Invalid value '%s' for mdts, should be 0-%d\n",
+		       page, NVMET_MAX_MDTS);
+		return -EINVAL;
+	}
+	port->mdts = mdts;
+	return count;
+}
+
+CONFIGFS_ATTR(nvmet_, param_mdts);
 
 #ifdef CONFIG_BLK_DEV_INTEGRITY
 static ssize_t nvmet_param_pi_enable_show(struct config_item *item,
@@ -787,7 +814,7 @@ static ssize_t nvmet_ns_resv_enable_store(struct config_item *item,
 
 	mutex_lock(&ns->subsys->lock);
 	if (ns->enabled) {
-		pr_err("the ns:%d is already enabled.\n", ns->nsid);
+		pr_err("the ns:%u is already enabled.\n", ns->nsid);
 		mutex_unlock(&ns->subsys->lock);
 		return -EINVAL;
 	}
@@ -853,7 +880,7 @@ static struct config_group *nvmet_ns_make(struct config_group *group,
 		goto out;
 	config_group_init_type_name(&ns->group, name, &nvmet_ns_type);
 
-	pr_info("adding nsid %d to subsystem %s\n", nsid, subsys->subsysnqn);
+	pr_info("adding nsid %u to subsystem %s\n", nsid, subsys->subsysnqn);
 
 	return &ns->group;
 out:
@@ -1039,7 +1066,7 @@ static int nvmet_port_subsys_allow_link(struct config_item *parent,
 		return -EINVAL;
 	}
 	subsys = to_subsys(target);
-	link = kmalloc(sizeof(*link), GFP_KERNEL);
+	link = kmalloc_obj(*link);
 	if (!link)
 		return -ENOMEM;
 	link->subsys = subsys;
@@ -1119,7 +1146,7 @@ static int nvmet_allowed_hosts_allow_link(struct config_item *parent,
 	}
 
 	host = to_host(target);
-	link = kmalloc(sizeof(*link), GFP_KERNEL);
+	link = kmalloc_obj(*link);
 	if (!link)
 		return -ENOMEM;
 	link->host = host;
@@ -1824,7 +1851,7 @@ static struct config_group *nvmet_referral_make(
 {
 	struct nvmet_port *port;
 
-	port = kzalloc(sizeof(*port), GFP_KERNEL);
+	port = kzalloc_obj(*port);
 	if (!port)
 		return ERR_PTR(-ENOMEM);
 
@@ -1942,7 +1969,7 @@ static struct config_group *nvmet_ana_groups_make_group(
 		goto out;
 
 	ret = -ENOMEM;
-	grp = kzalloc(sizeof(*grp), GFP_KERNEL);
+	grp = kzalloc_obj(*grp);
 	if (!grp)
 		goto out;
 	grp->port = port;
@@ -1982,7 +2009,6 @@ static void nvmet_port_release(struct config_item *item)
 	list_del(&port->global_entry);
 
 	key_put(port->keyring);
-	kfree(port->ana_state);
 	kfree(port);
 }
 
@@ -1995,6 +2021,7 @@ static struct configfs_attribute *nvmet_port_attrs[] = {
 	&nvmet_attr_addr_tsas,
 	&nvmet_attr_param_inline_data_size,
 	&nvmet_attr_param_max_queue_size,
+	&nvmet_attr_param_mdts,
 #ifdef CONFIG_BLK_DEV_INTEGRITY
 	&nvmet_attr_param_pi_enable,
 #endif
@@ -2021,16 +2048,9 @@ static struct config_group *nvmet_ports_make(struct config_group *group,
 	if (kstrtou16(name, 0, &portid))
 		return ERR_PTR(-EINVAL);
 
-	port = kzalloc(sizeof(*port), GFP_KERNEL);
+	port = kzalloc_flex(*port, ana_state, NVMET_MAX_ANAGRPS + 1);
 	if (!port)
 		return ERR_PTR(-ENOMEM);
-
-	port->ana_state = kcalloc(NVMET_MAX_ANAGRPS + 1,
-			sizeof(*port->ana_state), GFP_KERNEL);
-	if (!port->ana_state) {
-		kfree(port);
-		return ERR_PTR(-ENOMEM);
-	}
 
 	if (IS_ENABLED(CONFIG_NVME_TARGET_TCP_TLS) && nvme_keyring_id()) {
 		port->keyring = key_lookup(nvme_keyring_id());
@@ -2054,6 +2074,7 @@ static struct config_group *nvmet_ports_make(struct config_group *group,
 	INIT_LIST_HEAD(&port->referrals);
 	port->inline_data_size = -1;	/* < 0 == let the transport choose */
 	port->max_queue_size = -1;	/* < 0 == let the transport choose */
+	port->mdts = -1;		/* < 0 == let the transport choose */
 
 	port->disc_addr.trtype = NVMF_TRTYPE_MAX;
 	port->disc_addr.portid = cpu_to_le16(portid);
@@ -2181,8 +2202,6 @@ static ssize_t nvmet_host_dhchap_hash_store(struct config_item *item,
 	hmac_id = nvme_auth_hmac_id(page);
 	if (hmac_id == NVME_AUTH_HASH_INVALID)
 		return -EINVAL;
-	if (!crypto_has_shash(nvme_auth_hmac_name(hmac_id), 0, 0))
-		return -ENOTSUPP;
 	host->dhchap_hash_id = hmac_id;
 	return count;
 }
@@ -2256,7 +2275,7 @@ static struct config_group *nvmet_hosts_make_group(struct config_group *group,
 {
 	struct nvmet_host *host;
 
-	host = kzalloc(sizeof(*host), GFP_KERNEL);
+	host = kzalloc_obj(*host);
 	if (!host)
 		return ERR_PTR(-ENOMEM);
 

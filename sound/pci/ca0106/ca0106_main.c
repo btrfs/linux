@@ -543,7 +543,7 @@ static int snd_ca0106_pcm_open_playback_channel(struct snd_pcm_substream *substr
 	struct snd_pcm_runtime *runtime = substream->runtime;
 	int err;
 
-	epcm = kzalloc(sizeof(*epcm), GFP_KERNEL);
+	epcm = kzalloc_obj(*epcm);
 
 	if (epcm == NULL)
 		return -ENOMEM;
@@ -638,7 +638,7 @@ static int snd_ca0106_pcm_open_capture_channel(struct snd_pcm_substream *substre
 	struct snd_pcm_runtime *runtime = substream->runtime;
 	int err;
 
-	epcm = kzalloc(sizeof(*epcm), GFP_KERNEL);
+	epcm = kzalloc_obj(*epcm);
 	if (!epcm)
 		return -ENOMEM;
 
@@ -1820,8 +1820,8 @@ static SIMPLE_DEV_PM_OPS(snd_ca0106_pm, snd_ca0106_suspend, snd_ca0106_resume);
 
 // PCI IDs
 static const struct pci_device_id snd_ca0106_ids[] = {
-	{ PCI_VDEVICE(CREATIVE, 0x0007), 0 },	/* Audigy LS or Live 24bit */
-	{ 0, }
+	{ PCI_VDEVICE(CREATIVE, 0x0007) },	/* Audigy LS or Live 24bit */
+	{ }
 };
 MODULE_DEVICE_TABLE(pci, snd_ca0106_ids);
 

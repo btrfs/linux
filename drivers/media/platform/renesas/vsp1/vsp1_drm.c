@@ -57,6 +57,50 @@ static void vsp1_du_pipeline_frame_end(struct vsp1_pipeline *pipe,
  * Pipeline Configuration
  */
 
+/* Configure all entities in the pipeline. */
+static void vsp1_du_pipeline_configure(struct vsp1_pipeline *pipe)
+{
+	struct vsp1_drm_pipeline *drm_pipe = to_vsp1_drm_pipeline(pipe);
+	struct vsp1_entity *entity;
+	struct vsp1_entity *next;
+	struct vsp1_dl_list *dl;
+	struct vsp1_dl_body *dlb;
+	unsigned int dl_flags = 0;
+
+	vsp1_pipeline_calculate_partition(pipe, &pipe->part_table[0],
+					  drm_pipe->width, 0);
+
+	if (drm_pipe->force_brx_release)
+		dl_flags |= VSP1_DL_FRAME_END_INTERNAL;
+	if (pipe->output->writeback)
+		dl_flags |= VSP1_DL_FRAME_END_WRITEBACK;
+
+	dl = vsp1_dl_list_get(pipe->output->dlm);
+	dlb = vsp1_dl_list_get_body0(dl);
+
+	list_for_each_entry_safe(entity, next, &pipe->entities, list_pipe) {
+		/* Disconnect unused entities from the pipeline. */
+		if (!entity->pipe) {
+			vsp1_dl_body_write(dlb, entity->route->reg,
+					   VI6_DPR_NODE_UNUSED);
+
+			entity->sink = NULL;
+			list_del(&entity->list_pipe);
+
+			continue;
+		}
+
+		vsp1_entity_route_setup(entity, pipe, dlb);
+		vsp1_entity_configure_stream(entity, entity->state, pipe,
+					     dl, dlb);
+		vsp1_entity_configure_frame(entity, pipe, dl, dlb);
+		vsp1_entity_configure_partition(entity, pipe,
+						&pipe->part_table[0], dl, dlb);
+	}
+
+	vsp1_dl_list_commit(dl, dl_flags);
+}
+
 /*
  * Insert the UIF in the pipeline between the prev and next entities. If no UIF
  * is available connect the two entities directly.
@@ -224,8 +268,6 @@ static int vsp1_du_pipeline_setup_rpf(struct vsp1_device *vsp1,
 /* Setup the BRx source pad. */
 static int vsp1_du_pipeline_setup_inputs(struct vsp1_device *vsp1,
 					 struct vsp1_pipeline *pipe);
-static void vsp1_du_pipeline_configure(struct vsp1_pipeline *pipe);
-
 static int vsp1_du_pipeline_setup_brx(struct vsp1_device *vsp1,
 				      struct vsp1_pipeline *pipe)
 {
@@ -377,13 +419,12 @@ static int vsp1_du_pipeline_setup_inputs(struct vsp1_device *vsp1,
 	struct vsp1_entity *uif;
 	bool use_uif = false;
 	struct vsp1_brx *brx;
-	unsigned int i;
 	int ret;
 
 	/* Count the number of enabled inputs and sort them by Z-order. */
 	pipe->num_inputs = 0;
 
-	for (i = 0; i < vsp1->info->rpf_count; ++i) {
+	for (unsigned int i = 0; i < vsp1->info->rpf_count; ++i) {
 		struct vsp1_rwpf *rpf = vsp1->rpf[i];
 		unsigned int j;
 
@@ -415,7 +456,7 @@ static int vsp1_du_pipeline_setup_inputs(struct vsp1_device *vsp1,
 	brx = to_brx(&pipe->brx->subdev);
 
 	/* Setup the RPF input pipeline for every enabled input. */
-	for (i = 0; i < pipe->brx->source_pad; ++i) {
+	for (unsigned int i = 0; i < pipe->brx->source_pad; ++i) {
 		struct vsp1_rwpf *rpf = inputs[i];
 
 		if (!rpf) {
@@ -541,50 +582,6 @@ static int vsp1_du_pipeline_setup_output(struct vsp1_device *vsp1,
 	return 0;
 }
 
-/* Configure all entities in the pipeline. */
-static void vsp1_du_pipeline_configure(struct vsp1_pipeline *pipe)
-{
-	struct vsp1_drm_pipeline *drm_pipe = to_vsp1_drm_pipeline(pipe);
-	struct vsp1_entity *entity;
-	struct vsp1_entity *next;
-	struct vsp1_dl_list *dl;
-	struct vsp1_dl_body *dlb;
-	unsigned int dl_flags = 0;
-
-	vsp1_pipeline_calculate_partition(pipe, &pipe->part_table[0],
-					  drm_pipe->width, 0);
-
-	if (drm_pipe->force_brx_release)
-		dl_flags |= VSP1_DL_FRAME_END_INTERNAL;
-	if (pipe->output->writeback)
-		dl_flags |= VSP1_DL_FRAME_END_WRITEBACK;
-
-	dl = vsp1_dl_list_get(pipe->output->dlm);
-	dlb = vsp1_dl_list_get_body0(dl);
-
-	list_for_each_entry_safe(entity, next, &pipe->entities, list_pipe) {
-		/* Disconnect unused entities from the pipeline. */
-		if (!entity->pipe) {
-			vsp1_dl_body_write(dlb, entity->route->reg,
-					   VI6_DPR_NODE_UNUSED);
-
-			entity->sink = NULL;
-			list_del(&entity->list_pipe);
-
-			continue;
-		}
-
-		vsp1_entity_route_setup(entity, pipe, dlb);
-		vsp1_entity_configure_stream(entity, entity->state, pipe,
-					     dl, dlb);
-		vsp1_entity_configure_frame(entity, pipe, dl, dlb);
-		vsp1_entity_configure_partition(entity, pipe,
-						&pipe->part_table[0], dl, dlb);
-	}
-
-	vsp1_dl_list_commit(dl, dl_flags);
-}
-
 static int vsp1_du_pipeline_set_rwpf_format(struct vsp1_device *vsp1,
 					    struct vsp1_rwpf *rwpf,
 					    u32 pixelformat, unsigned int pitch)
@@ -631,14 +628,14 @@ int vsp1_du_init(struct device *dev)
 EXPORT_SYMBOL_GPL(vsp1_du_init);
 
 /**
- * vsp1_du_setup_lif - Setup the output part of the VSP pipeline
+ * vsp1_du_enable - Setup and enable a DU pipeline
  * @dev: the VSP device
  * @pipe_index: the DRM pipeline index
  * @cfg: the LIF configuration
  *
  * Configure the output part of VSP DRM pipeline for the given frame @cfg.width
  * and @cfg.height. This sets up formats on the BRx source pad, the WPF sink and
- * source pads, and the LIF sink pad.
+ * source pads, and the LIF sink pad, and then starts the pipeline.
  *
  * The @pipe_index argument selects which DRM pipeline to setup. The number of
  * available pipelines depend on the VSP instance.
@@ -651,14 +648,12 @@ EXPORT_SYMBOL_GPL(vsp1_du_init);
  *
  * Return 0 on success or a negative error code on failure.
  */
-int vsp1_du_setup_lif(struct device *dev, unsigned int pipe_index,
-		      const struct vsp1_du_lif_config *cfg)
+int vsp1_du_enable(struct device *dev, unsigned int pipe_index,
+		   const struct vsp1_du_lif_config *cfg)
 {
 	struct vsp1_device *vsp1 = dev_get_drvdata(dev);
 	struct vsp1_drm_pipeline *drm_pipe;
 	struct vsp1_pipeline *pipe;
-	unsigned long flags;
-	unsigned int i;
 	int ret;
 
 	if (pipe_index >= vsp1->info->lif_count)
@@ -667,22 +662,91 @@ int vsp1_du_setup_lif(struct device *dev, unsigned int pipe_index,
 	drm_pipe = &vsp1->drm->pipe[pipe_index];
 	pipe = &drm_pipe->pipe;
 
-	if (!cfg) {
-		struct vsp1_brx *brx;
+	/* Reset the underrun counter */
+	pipe->underrun_count = 0;
 
-		mutex_lock(&vsp1->drm->lock);
+	drm_pipe->width = cfg->width;
+	drm_pipe->height = cfg->height;
+	pipe->interlaced = cfg->interlaced;
 
-		brx = to_brx(&pipe->brx->subdev);
+	dev_dbg(vsp1->dev, "%s: configuring LIF%u with format %ux%u%s\n",
+		__func__, pipe_index, cfg->width, cfg->height,
+		pipe->interlaced ? "i" : "");
+
+	scoped_guard(mutex, &vsp1->drm->lock) {
+		/* Setup formats through the pipeline. */
+		ret = vsp1_du_pipeline_setup_inputs(vsp1, pipe);
+		if (ret < 0)
+			return ret;
+
+		ret = vsp1_du_pipeline_setup_output(vsp1, pipe);
+		if (ret < 0)
+			return ret;
+
+		vsp1_pipeline_dump(pipe, "DU enable");
+
+		/* Enable the VSP1. */
+		ret = vsp1_device_get(vsp1);
+		if (ret < 0)
+			return ret;
 
 		/*
-		 * NULL configuration means the CRTC is being disabled, stop
-		 * the pipeline and turn the light off.
+		 * Register a callback to allow us to notify the DRM driver of frame
+		 * completion events.
 		 */
+		drm_pipe->du_complete = cfg->callback;
+		drm_pipe->du_private = cfg->callback_data;
+
+		/* Disable the display interrupts. */
+		vsp1_write(vsp1, VI6_DISP_IRQ_STA(pipe_index), 0);
+		vsp1_write(vsp1, VI6_DISP_IRQ_ENB(pipe_index), 0);
+
+		/* Configure all entities in the pipeline. */
+		vsp1_du_pipeline_configure(pipe);
+	}
+
+	/* Start the pipeline. */
+	scoped_guard(spinlock_irqsave, &pipe->irqlock) {
+		vsp1_pipeline_run(pipe);
+	}
+
+	dev_dbg(vsp1->dev, "%s: pipeline enabled\n", __func__);
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(vsp1_du_enable);
+
+/**
+ * vsp1_du_disable - Disable and stop a DU pipeline
+ * @dev: the VSP device
+ * @pipe_index: the DRM pipeline index
+ *
+ * The @pipe_index argument selects which DRM pipeline to disable. The number
+ * of available pipelines depend on the VSP instance.
+ *
+ * Return 0 on success or a negative error code on failure.
+ */
+int vsp1_du_disable(struct device *dev, unsigned int pipe_index)
+{
+	struct vsp1_device *vsp1 = dev_get_drvdata(dev);
+	struct vsp1_drm_pipeline *drm_pipe;
+	struct vsp1_pipeline *pipe;
+	int ret;
+
+	if (pipe_index >= vsp1->info->lif_count)
+		return -EINVAL;
+
+	drm_pipe = &vsp1->drm->pipe[pipe_index];
+	pipe = &drm_pipe->pipe;
+
+	scoped_guard(mutex, &vsp1->drm->lock) {
+		struct vsp1_brx *brx = to_brx(&pipe->brx->subdev);
+
 		ret = vsp1_pipeline_stop(pipe);
 		if (ret == -ETIMEDOUT)
 			dev_err(vsp1->dev, "DRM pipeline stop timeout\n");
 
-		for (i = 0; i < ARRAY_SIZE(pipe->inputs); ++i) {
+		for (unsigned int i = 0; i < ARRAY_SIZE(pipe->inputs); ++i) {
 			struct vsp1_rwpf *rpf = pipe->inputs[i];
 
 			if (!rpf)
@@ -710,76 +774,16 @@ int vsp1_du_setup_lif(struct device *dev, unsigned int pipe_index,
 		list_del(&pipe->brx->list_pipe);
 		pipe->brx->pipe = NULL;
 		pipe->brx = NULL;
-
-		mutex_unlock(&vsp1->drm->lock);
-
-		vsp1_dlm_reset(pipe->output->dlm);
-		vsp1_device_put(vsp1);
-
-		dev_dbg(vsp1->dev, "%s: pipeline disabled\n", __func__);
-
-		return 0;
 	}
 
-	/* Reset the underrun counter */
-	pipe->underrun_count = 0;
+	vsp1_dlm_reset(pipe->output->dlm);
+	vsp1_device_put(vsp1);
 
-	drm_pipe->width = cfg->width;
-	drm_pipe->height = cfg->height;
-	pipe->interlaced = cfg->interlaced;
-
-	dev_dbg(vsp1->dev, "%s: configuring LIF%u with format %ux%u%s\n",
-		__func__, pipe_index, cfg->width, cfg->height,
-		pipe->interlaced ? "i" : "");
-
-	mutex_lock(&vsp1->drm->lock);
-
-	/* Setup formats through the pipeline. */
-	ret = vsp1_du_pipeline_setup_inputs(vsp1, pipe);
-	if (ret < 0)
-		goto unlock;
-
-	ret = vsp1_du_pipeline_setup_output(vsp1, pipe);
-	if (ret < 0)
-		goto unlock;
-
-	vsp1_pipeline_dump(pipe, "LIF setup");
-
-	/* Enable the VSP1. */
-	ret = vsp1_device_get(vsp1);
-	if (ret < 0)
-		goto unlock;
-
-	/*
-	 * Register a callback to allow us to notify the DRM driver of frame
-	 * completion events.
-	 */
-	drm_pipe->du_complete = cfg->callback;
-	drm_pipe->du_private = cfg->callback_data;
-
-	/* Disable the display interrupts. */
-	vsp1_write(vsp1, VI6_DISP_IRQ_STA(pipe_index), 0);
-	vsp1_write(vsp1, VI6_DISP_IRQ_ENB(pipe_index), 0);
-
-	/* Configure all entities in the pipeline. */
-	vsp1_du_pipeline_configure(pipe);
-
-unlock:
-	mutex_unlock(&vsp1->drm->lock);
-
-	if (ret < 0)
-		return ret;
-
-	/* Start the pipeline. */
-	spin_lock_irqsave(&pipe->irqlock, flags);
-	vsp1_pipeline_run(pipe);
-	spin_unlock_irqrestore(&pipe->irqlock, flags);
-
-	dev_dbg(vsp1->dev, "%s: pipeline enabled\n", __func__);
+	dev_dbg(vsp1->dev, "%s: pipeline disabled\n", __func__);
 
 	return 0;
 }
-EXPORT_SYMBOL_GPL(vsp1_du_setup_lif);
+EXPORT_SYMBOL_GPL(vsp1_du_disable);
 
 /**
  * vsp1_du_atomic_begin - Prepare for an atomic update
@@ -904,7 +908,7 @@ void vsp1_du_atomic_flush(struct device *dev, unsigned int pipe_index,
 
 	drm_pipe->crc = cfg->crc;
 
-	mutex_lock(&vsp1->drm->lock);
+	guard(mutex)(&vsp1->drm->lock);
 
 	if (cfg->writeback.pixelformat) {
 		const struct vsp1_du_writeback_config *wb_cfg = &cfg->writeback;
@@ -913,7 +917,7 @@ void vsp1_du_atomic_flush(struct device *dev, unsigned int pipe_index,
 						       wb_cfg->pixelformat,
 						       wb_cfg->pitch);
 		if (WARN_ON(ret < 0))
-			goto done;
+			return;
 
 		pipe->output->mem.addr[0] = wb_cfg->mem[0];
 		pipe->output->mem.addr[1] = wb_cfg->mem[1];
@@ -926,9 +930,6 @@ void vsp1_du_atomic_flush(struct device *dev, unsigned int pipe_index,
 	vsp1_pipeline_dump(pipe, "atomic update");
 
 	vsp1_du_pipeline_configure(pipe);
-
-done:
-	mutex_unlock(&vsp1->drm->lock);
 }
 EXPORT_SYMBOL_GPL(vsp1_du_atomic_flush);
 
@@ -961,8 +962,6 @@ EXPORT_SYMBOL_GPL(vsp1_du_unmap_sg);
 
 int vsp1_drm_init(struct vsp1_device *vsp1)
 {
-	unsigned int i;
-
 	vsp1->drm = devm_kzalloc(vsp1->dev, sizeof(*vsp1->drm), GFP_KERNEL);
 	if (!vsp1->drm)
 		return -ENOMEM;
@@ -970,7 +969,7 @@ int vsp1_drm_init(struct vsp1_device *vsp1)
 	mutex_init(&vsp1->drm->lock);
 
 	/* Create one DRM pipeline per LIF. */
-	for (i = 0; i < vsp1->info->lif_count; ++i) {
+	for (unsigned int i = 0; i < vsp1->info->lif_count; ++i) {
 		struct vsp1_drm_pipeline *drm_pipe = &vsp1->drm->pipe[i];
 		struct vsp1_pipeline *pipe = &drm_pipe->pipe;
 
@@ -1007,7 +1006,7 @@ int vsp1_drm_init(struct vsp1_device *vsp1)
 	}
 
 	/* Disable all RPFs initially. */
-	for (i = 0; i < vsp1->info->rpf_count; ++i) {
+	for (unsigned int i = 0; i < vsp1->info->rpf_count; ++i) {
 		struct vsp1_rwpf *input = vsp1->rpf[i];
 
 		INIT_LIST_HEAD(&input->entity.list_pipe);

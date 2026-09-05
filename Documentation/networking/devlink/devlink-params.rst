@@ -41,6 +41,16 @@ In order for ``driverinit`` parameters to take effect, the driver must
 support reloading via the ``devlink-reload`` command. This command will
 request a reload of the device driver.
 
+Default parameter values
+=========================
+
+Drivers may optionally export default values for parameters of cmode
+``runtime`` and ``permanent``. For ``driverinit`` parameters, the last
+value set by the driver will be used as the default value. Drivers can
+also support resetting params with cmode ``runtime`` and ``permanent``
+to their default values. Resetting ``driverinit`` params is supported
+by devlink core without additional driver support needed.
+
 .. _devlink_params_generic:
 
 Generic configuration parameters
@@ -112,7 +122,7 @@ own name.
    * - ``enable_iwarp``
      - Boolean
      - Enable handling of iWARP traffic in the device.
-   * - ``internal_err_reset``
+   * - ``internal_error_reset``
      - Boolean
      - When enabled, the device driver will reset the device on internal
        errors.
@@ -151,3 +161,13 @@ own name.
    * - ``num_doorbells``
      - u32
      - Controls the number of doorbells used by the device.
+   * - ``max_mac_per_vf``
+     - u32
+     - Controls the maximum number of MAC address filters that can be assigned
+       to a Virtual Function (VF).
+   * - ``max_sfs``
+     - u32
+     - The maximum number of subfunctions which can be created on the device.
+       Modifying this parameter may require a device restart and PCI bus
+       rescanning because the BAR layout may change. A value of 0 disables
+       subfunction creation.

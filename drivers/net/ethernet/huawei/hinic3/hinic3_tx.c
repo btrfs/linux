@@ -16,20 +16,39 @@
 
 #define MIN_SKB_LEN                32
 
+static void hinic3_txq_clean_stats(struct hinic3_txq_stats *txq_stats)
+{
+	u64_stats_update_begin(&txq_stats->syncp);
+	txq_stats->bytes = 0;
+	txq_stats->packets = 0;
+	txq_stats->busy = 0;
+	txq_stats->dropped = 0;
+
+	txq_stats->skb_pad_err = 0;
+	txq_stats->frag_len_overflow = 0;
+	txq_stats->offload_cow_skb_err = 0;
+	txq_stats->map_frag_err = 0;
+	txq_stats->unknown_tunnel_pkt = 0;
+	txq_stats->frag_size_err = 0;
+	u64_stats_update_end(&txq_stats->syncp);
+}
+
+static void hinic3_txq_stats_init(struct hinic3_txq *txq)
+{
+	struct hinic3_txq_stats *txq_stats = &txq->txq_stats;
+
+	u64_stats_init(&txq_stats->syncp);
+	hinic3_txq_clean_stats(txq_stats);
+}
+
 int hinic3_alloc_txqs(struct net_device *netdev)
 {
 	struct hinic3_nic_dev *nic_dev = netdev_priv(netdev);
-	struct hinic3_hwdev *hwdev = nic_dev->hwdev;
 	u16 q_id, num_txqs = nic_dev->max_qps;
 	struct pci_dev *pdev = nic_dev->pdev;
 	struct hinic3_txq *txq;
 
-	if (!num_txqs) {
-		dev_err(hwdev->dev, "Cannot allocate zero size txqs\n");
-		return -EINVAL;
-	}
-
-	nic_dev->txqs = kcalloc(num_txqs, sizeof(*nic_dev->txqs),  GFP_KERNEL);
+	nic_dev->txqs = kzalloc_objs(*nic_dev->txqs, num_txqs);
 	if (!nic_dev->txqs)
 		return -ENOMEM;
 
@@ -40,6 +59,8 @@ int hinic3_alloc_txqs(struct net_device *netdev)
 		txq->q_depth = nic_dev->q_params.sq_depth;
 		txq->q_mask = nic_dev->q_params.sq_depth - 1;
 		txq->dev = &pdev->dev;
+
+		hinic3_txq_stats_init(txq);
 	}
 
 	return 0;
@@ -240,8 +261,7 @@ static int hinic3_tx_csum(struct hinic3_txq *txq, struct hinic3_sq_task *task,
 		    ((struct udphdr *)skb_transport_header(skb))->dest !=
 		    VXLAN_OFFLOAD_PORT_LE) {
 			/* Unsupported tunnel packet, disable csum offload */
-			skb_checksum_help(skb);
-			return 0;
+			return skb_checksum_help(skb);
 		}
 	}
 
@@ -391,6 +411,10 @@ static u32 hinic3_tx_offload(struct sk_buff *skb, struct hinic3_sq_task *task,
 		offload |= HINIC3_TX_OFFLOAD_TSO;
 	} else {
 		tso_cs_en = hinic3_tx_csum(txq, task, skb);
+		if (tso_cs_en < 0) {
+			offload = HINIC3_TX_OFFLOAD_INVALID;
+			return offload;
+		}
 		if (tso_cs_en)
 			offload |= HINIC3_TX_OFFLOAD_CSUM;
 	}
@@ -524,6 +548,7 @@ static netdev_tx_t hinic3_send_one_skb(struct sk_buff *skb,
 		skb->len = MIN_SKB_LEN;
 	}
 
+	offload = hinic3_tx_offload(skb, &task, &queue_info, txq);
 	num_sge = skb_shinfo(skb)->nr_frags + 1;
 	/* assume normal wqe format + 1 wqebb for task info */
 	wqebb_cnt = num_sge + 1;
@@ -539,7 +564,6 @@ static netdev_tx_t hinic3_send_one_skb(struct sk_buff *skb,
 		return NETDEV_TX_BUSY;
 	}
 
-	offload = hinic3_tx_offload(skb, &task, &queue_info, txq);
 	if (unlikely(offload == HINIC3_TX_OFFLOAD_INVALID)) {
 		goto err_drop_pkt;
 	} else if (!offload) {
@@ -557,8 +581,6 @@ static netdev_tx_t hinic3_send_one_skb(struct sk_buff *skb,
 		*wqe_combo.task = task;
 
 	tx_info = &txq->tx_info[pi];
-	tx_info->skb = skb;
-	tx_info->wqebb_cnt = wqebb_cnt;
 
 	err = hinic3_tx_map_skb(netdev, skb, txq, tx_info, &wqe_combo);
 	if (err) {
@@ -567,6 +589,9 @@ static netdev_tx_t hinic3_send_one_skb(struct sk_buff *skb,
 		txq->sq->owner = saved_sq_owner;
 		goto err_drop_pkt;
 	}
+
+	tx_info->skb = skb;
+	tx_info->wqebb_cnt = wqebb_cnt;
 
 	netif_subqueue_sent(netdev, txq->sq->q_id, skb->len);
 	netif_subqueue_maybe_stop(netdev, txq->sq->q_id,
@@ -582,7 +607,6 @@ static netdev_tx_t hinic3_send_one_skb(struct sk_buff *skb,
 
 err_drop_pkt:
 	dev_kfree_skb_any(skb);
-
 err_out:
 	return NETDEV_TX_OK;
 }
@@ -661,14 +685,12 @@ int hinic3_alloc_txqs_res(struct net_device *netdev, u16 num_sq,
 	for (idx = 0; idx < num_sq; idx++) {
 		tqres = &txqs_res[idx];
 
-		tqres->tx_info = kcalloc(sq_depth, sizeof(*tqres->tx_info),
-					 GFP_KERNEL);
+		tqres->tx_info = kzalloc_objs(*tqres->tx_info, sq_depth);
 		if (!tqres->tx_info)
 			goto err_free_tqres;
 
-		tqres->bds = kcalloc(sq_depth * HINIC3_BDS_PER_SQ_WQEBB +
-				     HINIC3_MAX_SQ_SGE, sizeof(*tqres->bds),
-				     GFP_KERNEL);
+		tqres->bds = kzalloc_objs(*tqres->bds,
+					  sq_depth * HINIC3_BDS_PER_SQ_WQEBB + HINIC3_MAX_SQ_SGE);
 		if (!tqres->bds) {
 			kfree(tqres->tx_info);
 			goto err_free_tqres;

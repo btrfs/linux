@@ -47,7 +47,7 @@ int amd_sfh_get_report(struct hid_device *hid, int report_id, int report_type)
 	guard(mutex)(&mp2->lock);
 	for (i = 0; i < cli_data->num_hid_devices; i++) {
 		if (cli_data->hid_sensor_hubs[i] == hid) {
-			struct request_list *new = kzalloc(sizeof(*new), GFP_KERNEL);
+			struct request_list *new = kzalloc_obj(*new);
 
 			if (!new)
 				return -ENOMEM;
@@ -382,4 +382,20 @@ int amd_sfh_hid_client_deinit(struct amd_mp2_dev *privdata)
 	amdtp_hid_remove(cl_data);
 
 	return 0;
+}
+
+bool amd_sfh_op_idx_enabled(struct amd_mp2_dev *mp2)
+{
+	struct amdtp_cl_data *cl = mp2->cl_data;
+	int i;
+
+	if (!cl)
+		return false;
+
+	for (i = 0; i < cl->num_hid_devices; i++)
+		if (cl->sensor_idx[i] == op_idx &&
+		    READ_ONCE(cl->sensor_sts[i]) == SENSOR_ENABLED)
+			return true;
+
+	return false;
 }

@@ -52,7 +52,38 @@
 #define CMA_SIZE_MBYTES 0
 #endif
 
-struct cma *dma_contiguous_default_area;
+static struct cma *dma_contiguous_areas[MAX_CMA_AREAS];
+static unsigned int dma_contiguous_areas_num;
+
+static int dma_contiguous_insert_area(struct cma *cma)
+{
+	if (dma_contiguous_areas_num >= ARRAY_SIZE(dma_contiguous_areas))
+		return -EINVAL;
+
+	dma_contiguous_areas[dma_contiguous_areas_num++] = cma;
+
+	return 0;
+}
+
+/**
+ * dma_contiguous_get_area_by_idx() - Get contiguous area at given index
+ * @idx: index of the area we query
+ *
+ * Queries for the contiguous area located at index @idx.
+ *
+ * Returns:
+ * A pointer to the requested contiguous area, or NULL otherwise.
+ */
+struct cma *dma_contiguous_get_area_by_idx(unsigned int idx)
+{
+	if (idx >= dma_contiguous_areas_num)
+		return NULL;
+
+	return dma_contiguous_areas[idx];
+}
+EXPORT_SYMBOL_GPL(dma_contiguous_get_area_by_idx);
+
+static struct cma *dma_contiguous_default_area;
 
 /*
  * Default global CMA area size can be defined in kernel's .config.
@@ -90,31 +121,41 @@ static int __init early_cma(char *p)
 }
 early_param("cma", early_cma);
 
+struct cma *dev_get_cma_area(struct device *dev)
+{
+	if (dev && dev->cma_area)
+		return dev->cma_area;
+
+	return dma_contiguous_default_area;
+}
+EXPORT_SYMBOL_GPL(dev_get_cma_area);
+
 #ifdef CONFIG_DMA_NUMA_CMA
 
 static struct cma *dma_contiguous_numa_area[MAX_NUMNODES];
 static phys_addr_t numa_cma_size[MAX_NUMNODES] __initdata;
-static struct cma *dma_contiguous_pernuma_area[MAX_NUMNODES];
 static phys_addr_t pernuma_size_bytes __initdata;
+static bool numa_cma_configured __initdata;
 
 static int __init early_numa_cma(char *p)
 {
 	int nid, count = 0;
-	unsigned long tmp;
+	unsigned long node;
+	phys_addr_t size;
 	char *s = p;
 
 	while (*s) {
-		if (sscanf(s, "%lu%n", &tmp, &count) != 1)
+		if (sscanf(s, "%lu%n", &node, &count) != 1)
 			break;
 
 		if (s[count] == ':') {
-			if (tmp >= MAX_NUMNODES)
+			if (node >= MAX_NUMNODES)
 				break;
-			nid = array_index_nospec(tmp, MAX_NUMNODES);
+			nid = array_index_nospec(node, MAX_NUMNODES);
 
 			s += count + 1;
-			tmp = memparse(s, &s);
-			numa_cma_size[nid] = tmp;
+			size = memparse(s, &s);
+			numa_cma_size[nid] = size;
 
 			if (*s == ',')
 				s++;
@@ -124,6 +165,7 @@ static int __init early_numa_cma(char *p)
 			break;
 	}
 
+	numa_cma_configured = true;
 	return 0;
 }
 early_param("numa_cma", early_numa_cma);
@@ -131,6 +173,7 @@ early_param("numa_cma", early_numa_cma);
 static int __init early_cma_pernuma(char *p)
 {
 	pernuma_size_bytes = memparse(p, &p);
+	numa_cma_configured = true;
 	return 0;
 }
 early_param("cma_pernuma", early_cma_pernuma);
@@ -159,10 +202,16 @@ static void __init dma_numa_cma_reserve(void)
 {
 	int nid;
 
+	if (IS_ENABLED(CONFIG_CMA_SIZE_PERNUMA) &&
+	    !numa_cma_configured && dma_contiguous_default_area &&
+	    nr_online_nodes > 1)
+		pernuma_size_bytes = cma_get_size(dma_contiguous_default_area);
+
 	for_each_node(nid) {
-		int ret;
+		phys_addr_t size;
 		char name[CMA_MAX_NAME];
 		struct cma **cma;
+		int ret;
 
 		if (!node_online(nid)) {
 			if (pernuma_size_bytes || numa_cma_size[nid])
@@ -170,27 +219,17 @@ static void __init dma_numa_cma_reserve(void)
 			continue;
 		}
 
-		if (pernuma_size_bytes) {
+		/* per-node numa setting has the priority */
+		size = numa_cma_size[nid] ?: pernuma_size_bytes;
+		if (!size)
+			continue;
 
-			cma = &dma_contiguous_pernuma_area[nid];
-			snprintf(name, sizeof(name), "pernuma%d", nid);
-			ret = cma_declare_contiguous_nid(0, pernuma_size_bytes, 0, 0,
-							 0, false, name, cma, nid);
-			if (ret)
-				pr_warn("%s: reservation failed: err %d, node %d", __func__,
-					ret, nid);
-		}
-
-		if (numa_cma_size[nid]) {
-
-			cma = &dma_contiguous_numa_area[nid];
-			snprintf(name, sizeof(name), "numa%d", nid);
-			ret = cma_declare_contiguous_nid(0, numa_cma_size[nid], 0, 0, 0, false,
-							 name, cma, nid);
-			if (ret)
-				pr_warn("%s: reservation failed: err %d, node %d", __func__,
-					ret, nid);
-		}
+		cma = &dma_contiguous_numa_area[nid];
+		snprintf(name, sizeof(name), "numa%d", nid);
+		ret = cma_declare_contiguous_nid(0, size, 0, 0, 0, false, name, cma, nid);
+		if (ret)
+			pr_warn("%s: reservation failed: err %d, node %d", __func__,
+				ret, nid);
 	}
 }
 #else
@@ -214,8 +253,6 @@ void __init dma_contiguous_reserve(phys_addr_t limit)
 	phys_addr_t selected_base = 0;
 	phys_addr_t selected_limit = limit;
 	bool fixed = false;
-
-	dma_numa_cma_reserve();
 
 	pr_debug("%s(limit %08lx)\n", __func__, (unsigned long)limit);
 
@@ -241,14 +278,39 @@ void __init dma_contiguous_reserve(phys_addr_t limit)
 	}
 
 	if (selected_size && !dma_contiguous_default_area) {
+		int ret;
+
 		pr_debug("%s: reserving %ld MiB for global area\n", __func__,
 			 (unsigned long)selected_size / SZ_1M);
 
-		dma_contiguous_reserve_area(selected_size, selected_base,
-					    selected_limit,
-					    &dma_contiguous_default_area,
-					    fixed);
+		ret = dma_contiguous_reserve_area(selected_size, selected_base,
+						  selected_limit,
+						  &dma_contiguous_default_area,
+						  fixed);
+		if (ret)
+			return;
+
+		/*
+		 * We need to insert the new area in our list to avoid
+		 * any inconsistencies between having the default area
+		 * listed in the DT or not.
+		 *
+		 * The DT case is handled by rmem_cma_setup() and will
+		 * always insert all its areas in our list. However, if
+		 * it didn't run (because OF_RESERVED_MEM isn't set, or
+		 * there's no DT region specified), then we don't have a
+		 * default area yet, and no area in our list.
+		 *
+		 * This block creates the default area in such a case,
+		 * but we also need to insert it in our list to avoid
+		 * having a default area but an empty list.
+		 */
+		ret = dma_contiguous_insert_area(dma_contiguous_default_area);
+		if (ret)
+			pr_warn("Couldn't queue default CMA region for heap creation.");
 	}
+
+	dma_numa_cma_reserve();
 }
 
 void __weak
@@ -366,16 +428,8 @@ struct page *dma_alloc_contiguous(struct device *dev, size_t size, gfp_t gfp)
 
 #ifdef CONFIG_DMA_NUMA_CMA
 	if (nid != NUMA_NO_NODE && !(gfp & (GFP_DMA | GFP_DMA32))) {
-		struct cma *cma = dma_contiguous_pernuma_area[nid];
+		struct cma *cma = dma_contiguous_numa_area[nid];
 		struct page *page;
-
-		if (cma) {
-			page = cma_alloc_aligned(cma, size, gfp);
-			if (page)
-				return page;
-		}
-
-		cma = dma_contiguous_numa_area[nid];
 		if (cma) {
 			page = cma_alloc_aligned(cma, size, gfp);
 			if (page)
@@ -413,9 +467,6 @@ void dma_free_contiguous(struct device *dev, struct page *page, size_t size)
 		 * otherwise, page is from either per-numa cma or default cma
 		 */
 #ifdef CONFIG_DMA_NUMA_CMA
-		if (cma_release(dma_contiguous_pernuma_area[page_to_nid(page)],
-					page, count))
-			return;
 		if (cma_release(dma_contiguous_numa_area[page_to_nid(page)],
 					page, count))
 			return;
@@ -451,49 +502,89 @@ static void rmem_cma_device_release(struct reserved_mem *rmem,
 	dev->cma_area = NULL;
 }
 
-static const struct reserved_mem_ops rmem_cma_ops = {
-	.device_init	= rmem_cma_device_init,
-	.device_release = rmem_cma_device_release,
-};
-
-static int __init rmem_cma_setup(struct reserved_mem *rmem)
+static int __init __rmem_cma_verify_node(unsigned long node)
 {
-	unsigned long node = rmem->fdt_node;
-	bool default_cma = of_get_flat_dt_prop(node, "linux,cma-default", NULL);
-	struct cma *cma;
-	int err;
-
-	if (size_cmdline != -1 && default_cma) {
-		pr_info("Reserved memory: bypass %s node, using cmdline CMA params instead\n",
-			rmem->name);
-		return -EBUSY;
-	}
-
 	if (!of_get_flat_dt_prop(node, "reusable", NULL) ||
 	    of_get_flat_dt_prop(node, "no-map", NULL))
-		return -EINVAL;
+		return -ENODEV;
+
+	if (size_cmdline != -1 &&
+	    of_get_flat_dt_prop(node, "linux,cma-default", NULL)) {
+		pr_err("Skipping dt linux,cma-default node in favor for \"cma=\" kernel param.\n");
+		return -EBUSY;
+	}
+	return 0;
+}
+
+static int __init rmem_cma_validate(unsigned long node, phys_addr_t *align)
+{
+	int ret = __rmem_cma_verify_node(node);
+
+	if (ret)
+		return ret;
+
+	if (align)
+		*align = max_t(phys_addr_t, *align, CMA_MIN_ALIGNMENT_BYTES);
+
+	return 0;
+}
+
+static int __init rmem_cma_fixup(unsigned long node, phys_addr_t base,
+				    phys_addr_t size)
+{
+	int ret = __rmem_cma_verify_node(node);
+
+	if (ret)
+		return ret;
+
+	/* Architecture specific contiguous memory fixup. */
+	dma_contiguous_early_fixup(base, size);
+	return 0;
+}
+
+static int __init rmem_cma_setup(unsigned long node, struct reserved_mem *rmem)
+{
+	bool default_cma = of_get_flat_dt_prop(node, "linux,cma-default", NULL);
+	struct cma *cma;
+	int ret;
+
+	ret = __rmem_cma_verify_node(node);
+	if (ret)
+		return ret;
 
 	if (!IS_ALIGNED(rmem->base | rmem->size, CMA_MIN_ALIGNMENT_BYTES)) {
 		pr_err("Reserved memory: incorrect alignment of CMA region\n");
 		return -EINVAL;
 	}
 
-	err = cma_init_reserved_mem(rmem->base, rmem->size, 0, rmem->name, &cma);
-	if (err) {
+	ret = cma_init_reserved_mem(rmem->base, rmem->size, 0, rmem->name, &cma);
+	if (ret) {
 		pr_err("Reserved memory: unable to setup CMA region\n");
-		return err;
+		return ret;
 	}
 
 	if (default_cma)
 		dma_contiguous_default_area = cma;
 
-	rmem->ops = &rmem_cma_ops;
 	rmem->priv = cma;
 
 	pr_info("Reserved memory: created CMA memory pool at %pa, size %ld MiB\n",
 		&rmem->base, (unsigned long)rmem->size / SZ_1M);
 
+	ret = dma_contiguous_insert_area(cma);
+	if (ret)
+		pr_warn("Couldn't store CMA reserved area.");
+
 	return 0;
 }
-RESERVEDMEM_OF_DECLARE(cma, "shared-dma-pool", rmem_cma_setup);
+
+static const struct reserved_mem_ops rmem_cma_ops = {
+	.node_validate  = rmem_cma_validate,
+	.node_fixup	= rmem_cma_fixup,
+	.node_init	= rmem_cma_setup,
+	.device_init	= rmem_cma_device_init,
+	.device_release = rmem_cma_device_release,
+};
+
+RESERVEDMEM_OF_DECLARE(cma, "shared-dma-pool", &rmem_cma_ops);
 #endif

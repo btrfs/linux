@@ -207,6 +207,8 @@ static int iio_event_getfd(struct iio_dev *indio_dev)
 		goto unlock;
 	}
 
+	kfifo_reset_out(&ev_int->det_events);
+
 	iio_device_get(indio_dev);
 
 	fd = anon_inode_getfd("iio:event", &iio_event_chrdev_fileops,
@@ -214,10 +216,7 @@ static int iio_event_getfd(struct iio_dev *indio_dev)
 	if (fd < 0) {
 		clear_bit(IIO_BUSY_BIT_POS, &ev_int->flags);
 		iio_device_put(indio_dev);
-	} else {
-		kfifo_reset_out(&ev_int->det_events);
 	}
-
 unlock:
 	mutex_unlock(&iio_dev_opaque->mlock);
 	return fd;
@@ -256,6 +255,7 @@ static const char * const iio_ev_info_text[] = {
 	[IIO_EV_INFO_TAP2_MIN_DELAY] = "tap2_min_delay",
 	[IIO_EV_INFO_RUNNING_PERIOD] = "runningperiod",
 	[IIO_EV_INFO_RUNNING_COUNT] = "runningcount",
+	[IIO_EV_INFO_SCALE] = "scale",
 };
 
 static enum iio_event_direction iio_ev_attr_dir(struct iio_dev_attr *attr)
@@ -583,7 +583,7 @@ int iio_device_register_eventset(struct iio_dev *indio_dev)
 	      iio_check_for_dynamic_events(indio_dev)))
 		return 0;
 
-	ev_int = kzalloc(sizeof(*ev_int), GFP_KERNEL);
+	ev_int = kzalloc_obj(*ev_int);
 	if (!ev_int)
 		return -ENOMEM;
 
@@ -606,9 +606,8 @@ int iio_device_register_eventset(struct iio_dev *indio_dev)
 	}
 
 	ev_int->group.name = iio_event_group_name;
-	ev_int->group.attrs = kcalloc(attrcount + 1,
-				      sizeof(ev_int->group.attrs[0]),
-				      GFP_KERNEL);
+	ev_int->group.attrs = kzalloc_objs(ev_int->group.attrs[0],
+					   attrcount + 1);
 	if (ev_int->group.attrs == NULL) {
 		ret = -ENOMEM;
 		goto error_free_setup_event_lines;

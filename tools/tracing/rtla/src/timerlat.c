@@ -9,10 +9,11 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
-#include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
 #include <sched.h>
+
+#include <linux/compiler.h>
 
 #include "timerlat.h"
 #include "timerlat_aa.h"
@@ -29,12 +30,13 @@ int
 timerlat_apply_config(struct osnoise_tool *tool, struct timerlat_params *params)
 {
 	int retval;
+	const char *const rtla_no_bpf = getenv("RTLA_NO_BPF");
 
 	/*
 	 * Try to enable BPF, unless disabled explicitly.
 	 * If BPF enablement fails, fall back to tracefs mode.
 	 */
-	if (getenv("RTLA_NO_BPF") && strncmp(getenv("RTLA_NO_BPF"), "1", 2) == 0) {
+	if (rtla_no_bpf && strncmp_static(rtla_no_bpf, "1") == 0) {
 		debug_msg("RTLA_NO_BPF set, disabling BPF\n");
 		params->mode = TRACING_MODE_TRACEFS;
 	} else if (!tep_find_event_by_name(tool->trace.tep, "osnoise", "timerlat_sample")) {
@@ -48,24 +50,16 @@ timerlat_apply_config(struct osnoise_tool *tool, struct timerlat_params *params)
 		}
 	}
 
-	if (params->mode != TRACING_MODE_BPF) {
-		/*
-		 * In tracefs and mixed mode, timerlat tracer handles stopping
-		 * on threshold
-		 */
-		retval = osnoise_set_stop_us(tool->context, params->common.stop_us);
-		if (retval) {
-			err_msg("Failed to set stop us\n");
+	/* Check if BPF action program is requested but BPF is not available */
+	if (params->bpf_action_program) {
+		if (params->mode == TRACING_MODE_TRACEFS) {
+			err_msg("BPF actions are not supported in tracefs-only mode\n");
 			goto out_err;
 		}
 
-		retval = osnoise_set_stop_total_us(tool->context, params->common.stop_total_us);
-		if (retval) {
-			err_msg("Failed to set stop total us\n");
+		if (timerlat_load_bpf_action_program(params->bpf_action_program))
 			goto out_err;
-		}
 	}
-
 
 	retval = osnoise_set_timerlat_period_us(tool->context,
 						params->timerlat_period_us ?
@@ -81,6 +75,24 @@ timerlat_apply_config(struct osnoise_tool *tool, struct timerlat_params *params)
 	if (retval) {
 		err_msg("Failed to set print stack\n");
 		goto out_err;
+	}
+
+	retval = osnoise_set_timerlat_align(tool->context, params->timerlat_align);
+	if (retval && params->timerlat_align) {
+		/*
+		 * We might be running on a kernel that does not support timerlat align.
+		 * Unless user requested it explicitly, ignore the error.
+		 */
+		err_msg("Failed to enable timerlat align\n");
+		goto out_err;
+	}
+
+	if (params->timerlat_align) {
+		retval = osnoise_set_timerlat_align_us(tool->context, params->timerlat_align_us);
+		if (retval) {
+			err_msg("Failed to set timerlat align us\n");
+			goto out_err;
+		}
 	}
 
 	/*
@@ -108,7 +120,7 @@ out_err:
 int timerlat_enable(struct osnoise_tool *tool)
 {
 	struct timerlat_params *params = to_timerlat_params(tool->params);
-	int retval, nr_cpus, i;
+	int retval, i;
 
 	if (params->dma_latency >= 0) {
 		dma_latency_fd = set_cpu_dma_latency(params->dma_latency);
@@ -124,11 +136,7 @@ int timerlat_enable(struct osnoise_tool *tool)
 			return -1;
 		}
 
-		nr_cpus = sysconf(_SC_NPROCESSORS_CONF);
-
-		for (i = 0; i < nr_cpus; i++) {
-			if (params->common.cpus && !CPU_ISSET(i, &params->common.monitored_cpus))
-				continue;
+		for_each_monitored_cpu(i, &params->common) {
 			if (save_cpu_idle_disable_state(i) < 0) {
 				err_msg("Could not save cpu idle state.\n");
 				return -1;
@@ -145,7 +153,7 @@ int timerlat_enable(struct osnoise_tool *tool)
 		if (!tool->aa)
 			return -1;
 
-		retval = timerlat_aa_init(tool->aa, params->dump_tasks);
+		retval = timerlat_aa_init(tool->aa, params->dump_tasks, params->stack_format);
 		if (retval) {
 			err_msg("Failed to enable the auto analysis instance\n");
 			return retval;
@@ -186,6 +194,16 @@ int timerlat_enable(struct osnoise_tool *tool)
 		}
 	}
 
+	/*
+	 * In tracefs and mixed mode, timerlat tracer handles stopping
+	 * on threshold
+	 */
+	if (params->mode != TRACING_MODE_BPF) {
+		retval = osn_set_stop(tool);
+		if (retval)
+			return retval;
+	}
+
 	return 0;
 }
 
@@ -204,7 +222,7 @@ void timerlat_analyze(struct osnoise_tool *tool, bool stopped)
 		 * If the trace did not stop with --aa-only, at least print
 		 * the max known latency.
 		 */
-		max_lat = tracefs_instance_file_read(trace_inst->inst, "tracing_max_latency", NULL);
+		max_lat = tracefs_instance_file_read(tool->trace.inst, "tracing_max_latency", NULL);
 		if (max_lat) {
 			printf("  Max latency was %s\n", max_lat);
 			free(max_lat);
@@ -215,16 +233,13 @@ void timerlat_analyze(struct osnoise_tool *tool, bool stopped)
 void timerlat_free(struct osnoise_tool *tool)
 {
 	struct timerlat_params *params = to_timerlat_params(tool->params);
-	int nr_cpus, i;
+	int i;
 
 	timerlat_aa_destroy();
 	if (dma_latency_fd >= 0)
 		close(dma_latency_fd);
 	if (params->deepest_idle_state >= -1) {
-		for (i = 0; i < nr_cpus; i++) {
-			if (params->common.cpus &&
-			    !CPU_ISSET(i, &params->common.monitored_cpus))
-				continue;
+		for_each_monitored_cpu(i, &params->common) {
 			restore_cpu_idle_disable_state(i);
 		}
 	}
@@ -236,7 +251,7 @@ void timerlat_free(struct osnoise_tool *tool)
 	free_cpu_idle_disable_states();
 }
 
-static void timerlat_usage(int err)
+__noreturn static void timerlat_usage(int err)
 {
 	int i;
 
@@ -274,8 +289,8 @@ int timerlat_main(int argc, char *argv[])
 	}
 
 	if ((strcmp(argv[1], "-h") == 0) || (strcmp(argv[1], "--help") == 0)) {
-		timerlat_usage(0);
-	} else if (strncmp(argv[1], "-", 1) == 0) {
+		timerlat_usage(129);
+	} else if (str_has_prefix(argv[1], "-")) {
 		/* the user skipped the tool, call the default one */
 		run_tool(&timerlat_top_ops, argc, argv);
 		exit(0);
@@ -288,6 +303,5 @@ int timerlat_main(int argc, char *argv[])
 	}
 
 usage:
-	timerlat_usage(1);
-	exit(1);
+	timerlat_usage(129);
 }

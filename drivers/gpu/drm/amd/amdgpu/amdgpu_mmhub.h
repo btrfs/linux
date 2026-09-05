@@ -21,29 +21,6 @@
 #ifndef __AMDGPU_MMHUB_H__
 #define __AMDGPU_MMHUB_H__
 
-enum amdgpu_mmhub_ras_memory_id {
-	AMDGPU_MMHUB_WGMI_PAGEMEM = 0,
-	AMDGPU_MMHUB_RGMI_PAGEMEM = 1,
-	AMDGPU_MMHUB_WDRAM_PAGEMEM = 2,
-	AMDGPU_MMHUB_RDRAM_PAGEMEM = 3,
-	AMDGPU_MMHUB_WIO_CMDMEM = 4,
-	AMDGPU_MMHUB_RIO_CMDMEM = 5,
-	AMDGPU_MMHUB_WGMI_CMDMEM = 6,
-	AMDGPU_MMHUB_RGMI_CMDMEM = 7,
-	AMDGPU_MMHUB_WDRAM_CMDMEM = 8,
-	AMDGPU_MMHUB_RDRAM_CMDMEM = 9,
-	AMDGPU_MMHUB_MAM_DMEM0 = 10,
-	AMDGPU_MMHUB_MAM_DMEM1 = 11,
-	AMDGPU_MMHUB_MAM_DMEM2 = 12,
-	AMDGPU_MMHUB_MAM_DMEM3 = 13,
-	AMDGPU_MMHUB_WRET_TAGMEM = 19,
-	AMDGPU_MMHUB_RRET_TAGMEM = 20,
-	AMDGPU_MMHUB_WIO_DATAMEM = 21,
-	AMDGPU_MMHUB_WGMI_DATAMEM = 22,
-	AMDGPU_MMHUB_WDRAM_DATAMEM = 23,
-	AMDGPU_MMHUB_MEMORY_BLOCK_LAST,
-};
-
 struct amdgpu_mmhub_ras {
 	struct amdgpu_ras_block_object ras_block;
 };
@@ -63,13 +40,39 @@ struct amdgpu_mmhub_funcs {
 				uint64_t page_table_base);
 	void (*update_power_gating)(struct amdgpu_device *adev,
                                 bool enable);
+	int (*get_xgmi_info)(struct amdgpu_device *adev);
+};
+
+struct amdgpu_mmhub_client_ids {
+	const char * const (*names)[2];
+	unsigned int size;
 };
 
 struct amdgpu_mmhub {
 	struct ras_common_if *ras_if;
 	const struct amdgpu_mmhub_funcs *funcs;
 	struct amdgpu_mmhub_ras  *ras;
+	struct amdgpu_mmhub_client_ids client_ids;
 };
+
+static inline void
+amdgpu_mmhub_init_client_info(struct amdgpu_mmhub *mmhub,
+			      const char * const (*names)[2],
+			      unsigned int size)
+{
+	mmhub->client_ids.names = names;
+	mmhub->client_ids.size = size;
+}
+
+static inline const char *
+amdgpu_mmhub_client_name(struct amdgpu_mmhub *mmhub,
+			  u32 cid, bool is_write)
+{
+	if (cid < mmhub->client_ids.size)
+		return mmhub->client_ids.names[cid][is_write];
+
+	return NULL;
+}
 
 int amdgpu_mmhub_ras_sw_init(struct amdgpu_device *adev);
 

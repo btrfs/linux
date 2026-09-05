@@ -105,7 +105,7 @@ iser_create_fastreg_desc(struct iser_device *device,
 	enum ib_mr_type mr_type;
 	int ret;
 
-	desc = kzalloc(sizeof(*desc), GFP_KERNEL);
+	desc = kzalloc_obj(*desc);
 	if (!desc)
 		return ERR_PTR(-ENOMEM);
 
@@ -244,8 +244,7 @@ static int iser_create_ib_conn_res(struct ib_conn *ib_conn)
 		max_send_wr = ISER_QP_SIG_MAX_REQ_DTOS + 1;
 	else
 		max_send_wr = ISER_QP_MAX_REQ_DTOS + 1;
-	max_send_wr = min_t(unsigned int, max_send_wr,
-			    (unsigned int)ib_dev->attrs.max_qp_wr);
+	max_send_wr = min(max_send_wr, ib_dev->attrs.max_qp_wr);
 
 	cq_size = max_send_wr + ISER_QP_MAX_RECV_DTOS;
 	ib_conn->cq = ib_cq_pool_get(ib_dev, cq_size, -1, IB_POLL_SOFTIRQ);
@@ -305,7 +304,7 @@ struct iser_device *iser_device_find_by_ib_device(struct rdma_cm_id *cma_id)
 		if (device->ib_device->node_guid == cma_id->device->node_guid)
 			goto inc_refcnt;
 
-	device = kzalloc(sizeof *device, GFP_KERNEL);
+	device = kzalloc_obj(*device);
 	if (!device)
 		goto out;
 
@@ -589,7 +588,7 @@ static void iser_route_handler(struct rdma_cm_id *cma_id)
 		goto failure;
 
 	memset(&conn_param, 0, sizeof conn_param);
-	conn_param.responder_resources = ib_dev->attrs.max_qp_rd_atom;
+	conn_param.responder_resources = min(ib_dev->attrs.max_qp_rd_atom, U8_MAX);
 	conn_param.initiator_depth = 1;
 	conn_param.retry_count = 7;
 	conn_param.rnr_retry_count = 6;

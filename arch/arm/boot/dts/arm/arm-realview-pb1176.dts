@@ -53,7 +53,7 @@
 		regulator-min-microvolt = <3300000>;
 		regulator-max-microvolt = <3300000>;
 		regulator-boot-on;
-        };
+	};
 
 	veth: regulator-veth {
 		compatible = "regulator-fixed";
@@ -260,7 +260,7 @@
 				reg = <0x0c 0x04>;
 				#clock-cells = <0>;
 				lock-offset = <0x20>;
-				vco-offset = <0x0C>;
+				vco-offset = <0x0c>;
 				clocks = <&xtal24mhz>;
 			};
 			oscclk1: clock-controller@10 {

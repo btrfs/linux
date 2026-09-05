@@ -76,6 +76,9 @@
 /* Tracks RAID stripes in block groups. */
 #define BTRFS_RAID_STRIPE_TREE_OBJECTID 12ULL
 
+/* Holds details of remapped addresses after relocation. */
+#define BTRFS_REMAP_TREE_OBJECTID 13ULL
+
 /* device stats in the device tree */
 #define BTRFS_DEV_STATS_OBJECTID 0ULL
 
@@ -281,6 +284,10 @@
 #define BTRFS_CHUNK_ITEM_KEY	228
 
 #define BTRFS_RAID_STRIPE_KEY	230
+
+#define BTRFS_IDENTITY_REMAP_KEY 	234
+#define BTRFS_REMAP_KEY		 	235
+#define BTRFS_REMAP_BACKREF_KEY	 	236
 
 /*
  * Records the overall state of the qgroups.
@@ -714,9 +721,12 @@ struct btrfs_super_block {
 	__u8 metadata_uuid[BTRFS_FSID_SIZE];
 
 	__u64 nr_global_roots;
+	__le64 remap_root;
+	__le64 remap_root_generation;
+	__u8 remap_root_level;
 
 	/* Future expansion */
-	__le64 reserved[27];
+	__u8 reserved[199];
 	__u8 sys_chunk_array[BTRFS_SYSTEM_CHUNK_ARRAY_SIZE];
 	struct btrfs_root_backup super_roots[BTRFS_NUM_BACKUP_ROOTS];
 
@@ -1161,12 +1171,15 @@ struct btrfs_dev_replace_item {
 #define BTRFS_BLOCK_GROUP_RAID6         (1ULL << 8)
 #define BTRFS_BLOCK_GROUP_RAID1C3       (1ULL << 9)
 #define BTRFS_BLOCK_GROUP_RAID1C4       (1ULL << 10)
+#define BTRFS_BLOCK_GROUP_REMAPPED      (1ULL << 11)
+#define BTRFS_BLOCK_GROUP_METADATA_REMAP (1ULL << 12)
 #define BTRFS_BLOCK_GROUP_RESERVED	(BTRFS_AVAIL_ALLOC_BIT_SINGLE | \
 					 BTRFS_SPACE_INFO_GLOBAL_RSV)
 
 #define BTRFS_BLOCK_GROUP_TYPE_MASK	(BTRFS_BLOCK_GROUP_DATA |    \
 					 BTRFS_BLOCK_GROUP_SYSTEM |  \
-					 BTRFS_BLOCK_GROUP_METADATA)
+					 BTRFS_BLOCK_GROUP_METADATA | \
+					 BTRFS_BLOCK_GROUP_METADATA_REMAP)
 
 #define BTRFS_BLOCK_GROUP_PROFILE_MASK	(BTRFS_BLOCK_GROUP_RAID0 |   \
 					 BTRFS_BLOCK_GROUP_RAID1 |   \
@@ -1219,12 +1232,21 @@ struct btrfs_block_group_item {
 	__le64 flags;
 } __attribute__ ((__packed__));
 
+struct btrfs_block_group_item_v2 {
+	__le64 used;
+	__le64 chunk_objectid;
+	__le64 flags;
+	__le64 remap_bytes;
+	__le32 identity_remap_count;
+} __attribute__ ((__packed__));
+
 struct btrfs_free_space_info {
 	__le32 extent_count;
 	__le32 flags;
 } __attribute__ ((__packed__));
 
-#define BTRFS_FREE_SPACE_USING_BITMAPS (1ULL << 0)
+#define BTRFS_FREE_SPACE_USING_BITMAPS	(1UL << 0)
+#define BTRFS_FREE_SPACE_FLAGS_MASK	(BTRFS_FREE_SPACE_USING_BITMAPS)
 
 #define BTRFS_QGROUP_LEVEL_SHIFT		48
 static inline __u16 btrfs_qgroup_level(__u64 qgroupid)
@@ -1233,13 +1255,16 @@ static inline __u16 btrfs_qgroup_level(__u64 qgroupid)
 }
 
 /*
- * is subvolume quota turned on?
+ * The following BTRFS_QGROUP_STATUS_BIT_* are for * btrfs_qgroup_status_item::flags.
+ *
+ * Is subvolume quota turned on?
  */
-#define BTRFS_QGROUP_STATUS_FLAG_ON		(1ULL << 0)
-/*
- * RESCAN is set during the initialization phase
- */
-#define BTRFS_QGROUP_STATUS_FLAG_RESCAN		(1ULL << 1)
+#define BTRFS_QGROUP_STATUS_BIT_ON		(0)
+#define BTRFS_QGROUP_STATUS_FLAG_ON		(1UL << BTRFS_QGROUP_STATUS_BIT_ON)
+
+/* RESCAN is set during the initialization phase */
+#define BTRFS_QGROUP_STATUS_BIT_RESCAN		(1)
+#define BTRFS_QGROUP_STATUS_FLAG_RESCAN		(1UL << BTRFS_QGROUP_STATUS_BIT_RESCAN)
 /*
  * Some qgroup entries are known to be out of date,
  * either because the configuration has changed in a way that
@@ -1247,14 +1272,16 @@ static inline __u16 btrfs_qgroup_level(__u64 qgroupid)
  * with a non-qgroup-aware version.
  * Turning qouta off and on again makes it inconsistent, too.
  */
-#define BTRFS_QGROUP_STATUS_FLAG_INCONSISTENT	(1ULL << 2)
+#define BTRFS_QGROUP_STATUS_BIT_INCONSISTENT	(2)
+#define BTRFS_QGROUP_STATUS_FLAG_INCONSISTENT	(1UL << BTRFS_QGROUP_STATUS_BIT_INCONSISTENT)
 
 /*
  * Whether or not this filesystem is using simple quotas.  Not exactly the
  * incompat bit, because we support using simple quotas, disabling it, then
  * going back to full qgroup quotas.
  */
-#define BTRFS_QGROUP_STATUS_FLAG_SIMPLE_MODE	(1ULL << 3)
+#define BTRFS_QGROUP_STATUS_BIT_SIMPLE_MODE	(3)
+#define BTRFS_QGROUP_STATUS_FLAG_SIMPLE_MODE	(1UL << BTRFS_QGROUP_STATUS_BIT_SIMPLE_MODE)
 
 #define BTRFS_QGROUP_STATUS_FLAGS_MASK	(BTRFS_QGROUP_STATUS_FLAG_ON |		\
 					 BTRFS_QGROUP_STATUS_FLAG_RESCAN |	\
@@ -1321,6 +1348,15 @@ struct btrfs_verity_descriptor_item {
 	 */
 	__le64 reserved[2];
 	__u8 encryption;
+} __attribute__ ((__packed__));
+
+/*
+ * For a range identified by a BTRFS_REMAP_KEY item in the remap tree, gives
+ * the address that the start of the range will get remapped to.  This
+ * structure is also shared by BTRFS_REMAP_BACKREF_KEY.
+ */
+struct btrfs_remap_item {
+	__le64 address;
 } __attribute__ ((__packed__));
 
 #endif /* _BTRFS_CTREE_H_ */

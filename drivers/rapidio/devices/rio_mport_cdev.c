@@ -348,7 +348,7 @@ rio_mport_create_outbound_mapping(struct mport_dev *md, struct file *filp,
 
 	rmcd_debug(OBW, "did=%d ra=0x%llx sz=0x%x", rioid, raddr, size);
 
-	map = kzalloc(sizeof(*map), GFP_KERNEL);
+	map = kzalloc_obj(*map);
 	if (map == NULL)
 		return -ENOMEM;
 
@@ -564,9 +564,13 @@ static void dma_req_free(struct kref *ref)
 	}
 
 	if (req->map) {
-		mutex_lock(&req->map->md->buf_mutex);
-		kref_put(&req->map->ref, mport_release_mapping);
-		mutex_unlock(&req->map->md->buf_mutex);
+		struct rio_mport_mapping *map = req->map;
+		struct mport_dev *md = map->md;
+
+		mutex_lock(&md->buf_mutex);
+		req->map = NULL;
+		kref_put(&map->ref, mport_release_mapping);
+		mutex_unlock(&md->buf_mutex);
 	}
 
 	kref_put(&priv->dma_ref, mport_release_dma);
@@ -800,7 +804,7 @@ rio_dma_transfer(struct file *filp, u32 transfer_mode,
 
 	if (xfer->length == 0)
 		return -EINVAL;
-	req = kzalloc(sizeof(*req), GFP_KERNEL);
+	req = kzalloc_obj(*req);
 	if (!req)
 		return -ENOMEM;
 
@@ -835,8 +839,7 @@ rio_dma_transfer(struct file *filp, u32 transfer_mode,
 		offset = lower_32_bits(offset_in_page(xfer->loc_addr));
 		nr_pages = PAGE_ALIGN(xfer->length + offset) >> PAGE_SHIFT;
 
-		page_list = kmalloc_array(nr_pages,
-					  sizeof(*page_list), GFP_KERNEL);
+		page_list = kmalloc_objs(*page_list, nr_pages);
 		if (page_list == NULL) {
 			ret = -ENOMEM;
 			goto err_req;
@@ -1070,7 +1073,7 @@ static int rio_mport_create_dma_mapping(struct mport_dev *md, struct file *filp,
 {
 	struct rio_mport_mapping *map;
 
-	map = kzalloc(sizeof(*map), GFP_KERNEL);
+	map = kzalloc_obj(*map);
 	if (map == NULL)
 		return -ENOMEM;
 
@@ -1190,7 +1193,7 @@ rio_mport_create_inbound_mapping(struct mport_dev *md, struct file *filp,
 	if (size > 0xffffffff)
 		return -EINVAL;
 
-	map = kzalloc(sizeof(*map), GFP_KERNEL);
+	map = kzalloc_obj(*map);
 	if (map == NULL)
 		return -ENOMEM;
 
@@ -1432,7 +1435,7 @@ static int rio_mport_add_db_filter(struct mport_cdev_priv *priv,
 		return ret;
 	}
 
-	db_filter = kzalloc(sizeof(*db_filter), GFP_KERNEL);
+	db_filter = kzalloc_obj(*db_filter);
 	if (db_filter == NULL) {
 		rio_release_inb_dbell(md->mport, filter.low, filter.high);
 		return -ENOMEM;
@@ -1540,7 +1543,7 @@ static int rio_mport_add_pw_filter(struct mport_cdev_priv *priv,
 	if (copy_from_user(&filter, arg, sizeof(filter)))
 		return -EFAULT;
 
-	pw_filter = kzalloc(sizeof(*pw_filter), GFP_KERNEL);
+	pw_filter = kzalloc_obj(*pw_filter);
 	if (pw_filter == NULL)
 		return -ENOMEM;
 
@@ -1879,7 +1882,7 @@ static int mport_cdev_open(struct inode *inode, struct file *filp)
 
 	get_device(&chdev->dev);
 
-	priv = kzalloc(sizeof(*priv), GFP_KERNEL);
+	priv = kzalloc_obj(*priv);
 	if (!priv) {
 		put_device(&chdev->dev);
 		return -ENOMEM;
@@ -2349,7 +2352,7 @@ static struct mport_dev *mport_cdev_add(struct rio_mport *mport)
 	struct mport_dev *md;
 	struct rio_mport_attr attr;
 
-	md = kzalloc(sizeof(*md), GFP_KERNEL);
+	md = kzalloc_obj(*md);
 	if (!md) {
 		rmcd_error("Unable allocate a device object");
 		return NULL;

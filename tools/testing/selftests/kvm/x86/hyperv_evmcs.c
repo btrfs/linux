@@ -30,7 +30,7 @@ static void guest_nmi_handler(struct ex_regs *regs)
 {
 }
 
-static inline void rdmsr_from_l2(uint32_t msr)
+static inline void rdmsr_from_l2(u32 msr)
 {
 	/* Currently, L1 doesn't preserve GPRs during vmexits. */
 	__asm__ __volatile__ ("rdmsr" : : "c"(msr) :
@@ -76,11 +76,8 @@ void l2_guest_code(void)
 }
 
 void guest_code(struct vmx_pages *vmx_pages, struct hyperv_test_pages *hv_pages,
-		vm_vaddr_t hv_hcall_page_gpa)
+		gpa_t hv_hcall_page_gpa)
 {
-#define L2_GUEST_STACK_SIZE 64
-	unsigned long l2_guest_stack[L2_GUEST_STACK_SIZE];
-
 	wrmsr(HV_X64_MSR_GUEST_OS_ID, HYPERV_LINUX_OS_ID);
 	wrmsr(HV_X64_MSR_HYPERCALL, hv_hcall_page_gpa);
 
@@ -100,8 +97,7 @@ void guest_code(struct vmx_pages *vmx_pages, struct hyperv_test_pages *hv_pages,
 	GUEST_SYNC(4);
 	GUEST_ASSERT(vmptrstz() == hv_pages->enlightened_vmcs_gpa);
 
-	prepare_vmcs(vmx_pages, l2_guest_code,
-		     &l2_guest_stack[L2_GUEST_STACK_SIZE]);
+	prepare_vmcs(vmx_pages, l2_guest_code);
 
 	GUEST_SYNC(5);
 	GUEST_ASSERT(vmptrstz() == hv_pages->enlightened_vmcs_gpa);
@@ -129,7 +125,7 @@ void guest_code(struct vmx_pages *vmx_pages, struct hyperv_test_pages *hv_pages,
 	/*
 	 * NMI forces L2->L1 exit, resuming L2 and hope that EVMCS is
 	 * up-to-date (RIP points where it should and not at the beginning
-	 * of l2_guest_code(). GUEST_SYNC(9) checkes that.
+	 * of l2_guest_code(). GUEST_SYNC(9) checks that.
 	 */
 	GUEST_ASSERT(!vmresume());
 
@@ -231,8 +227,8 @@ static struct kvm_vcpu *save_restore_vm(struct kvm_vm *vm,
 
 int main(int argc, char *argv[])
 {
-	vm_vaddr_t vmx_pages_gva = 0, hv_pages_gva = 0;
-	vm_vaddr_t hcall_page;
+	gva_t vmx_pages_gva = 0, hv_pages_gva = 0;
+	gva_t hcall_page;
 
 	struct kvm_vcpu *vcpu;
 	struct kvm_vm *vm;
@@ -246,7 +242,7 @@ int main(int argc, char *argv[])
 
 	vm = vm_create_with_one_vcpu(&vcpu, guest_code);
 
-	hcall_page = vm_vaddr_alloc_pages(vm, 1);
+	hcall_page = vm_alloc_pages(vm, 1);
 	memset(addr_gva2hva(vm, hcall_page), 0x0,  getpagesize());
 
 	vcpu_set_hv_cpuid(vcpu);

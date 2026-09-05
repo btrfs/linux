@@ -1781,8 +1781,8 @@ out_return_cmd:
  * @shost:			adapter SCSI host
  * @scmd:			SCSI command to be queued
  */
-static int
-megasas_queue_command(struct Scsi_Host *shost, struct scsi_cmnd *scmd)
+static enum scsi_qc_status megasas_queue_command(struct Scsi_Host *shost,
+						 struct scsi_cmnd *scmd)
 {
 	struct megasas_instance *instance;
 	struct MR_PRIV_DEVICE *mr_device_priv_data;
@@ -1973,12 +1973,23 @@ megasas_set_nvme_device_properties(struct scsi_device *sdev,
 {
 	struct megasas_instance *instance;
 	u32 mr_nvme_pg_size;
+	u64 max_prp_io;
 
 	instance = (struct megasas_instance *)sdev->host->hostdata;
 	mr_nvme_pg_size = max_t(u32, instance->nvme_page_size,
 				MR_DEFAULT_NVME_PAGE_SIZE);
 
-	lim->max_hw_sectors = max_io_size / 512;
+	/*
+	 * megasas_make_prp_nvme() builds the PRP list in cmd->sg_frame without
+	 * bounding it against that buffer, and spends one entry per page of
+	 * it on the chain pointer. Cap the transfer at what the buffer holds,
+	 * less one page for lists that start off a page boundary.
+	 */
+	max_prp_io = (u64)((instance->max_chain_frame_sz / sizeof(u64)) -
+			   (instance->max_chain_frame_sz / mr_nvme_pg_size) - 1) *
+		     mr_nvme_pg_size;
+
+	lim->max_hw_sectors = min_t(u64, max_io_size, max_prp_io) >> SECTOR_SHIFT;
 	lim->virt_boundary_mask = mr_nvme_pg_size - 1;
 }
 
@@ -2137,8 +2148,7 @@ static int megasas_sdev_init(struct scsi_device *sdev)
 	}
 
 scan_target:
-	mr_device_priv_data = kzalloc(sizeof(*mr_device_priv_data),
-					GFP_KERNEL);
+	mr_device_priv_data = kzalloc_obj(*mr_device_priv_data);
 	if (!mr_device_priv_data)
 		return -ENOMEM;
 
@@ -3073,7 +3083,7 @@ static int megasas_reset_bus_host(struct scsi_cmnd *scmd)
 
 	scmd_printk(KERN_INFO, scmd,
 		"SCSI host state: %d  SCSI host busy: %d  FW outstanding: %d\n",
-		scmd->device->host->shost_state,
+		scsi_get_host_state(scmd->device->host),
 		scsi_host_busy(scmd->device->host),
 		atomic_read(&instance->fw_outstanding));
 	/*
@@ -3255,7 +3265,7 @@ megasas_service_aen(struct megasas_instance *instance, struct megasas_cmd *cmd)
 		((instance->issuepend_done == 1))) {
 		struct megasas_aen_event *ev;
 
-		ev = kzalloc(sizeof(*ev), GFP_ATOMIC);
+		ev = kzalloc_obj(*ev, GFP_ATOMIC);
 		if (!ev) {
 			dev_err(&instance->pdev->dev, "megasas_service_aen: out of memory\n");
 		} else {
@@ -4468,7 +4478,7 @@ int megasas_alloc_cmds(struct megasas_instance *instance)
 	 * Allocate the dynamic array first and then allocate individual
 	 * commands.
 	 */
-	instance->cmd_list = kcalloc(max_cmd, sizeof(struct megasas_cmd*), GFP_KERNEL);
+	instance->cmd_list = kzalloc_objs(struct megasas_cmd *, max_cmd);
 
 	if (!instance->cmd_list) {
 		dev_printk(KERN_DEBUG, &instance->pdev->dev, "out of memory\n");
@@ -4476,8 +4486,7 @@ int megasas_alloc_cmds(struct megasas_instance *instance)
 	}
 
 	for (i = 0; i < max_cmd; i++) {
-		instance->cmd_list[i] = kmalloc(sizeof(struct megasas_cmd),
-						GFP_KERNEL);
+		instance->cmd_list[i] = kmalloc_obj(struct megasas_cmd);
 
 		if (!instance->cmd_list[i]) {
 
@@ -6367,19 +6376,20 @@ static int megasas_init_fw(struct megasas_instance *instance)
 
 	megasas_setup_jbod_map(instance);
 
-	if (megasas_get_device_list(instance) != SUCCESS) {
-		dev_err(&instance->pdev->dev,
-			"%s: megasas_get_device_list failed\n",
-			__func__);
-		goto fail_get_ld_pd_list;
+	scoped_guard(mutex, &instance->reset_mutex) {
+		if (megasas_get_device_list(instance) != SUCCESS) {
+			dev_err(&instance->pdev->dev,
+				"%s: megasas_get_device_list failed\n",
+				__func__);
+			goto fail_get_ld_pd_list;
+		}
 	}
 
 	/* stream detection initialization */
 	if (instance->adapter_type >= VENTURA_SERIES) {
 		fusion->stream_detect_by_ld =
-			kcalloc(MAX_LOGICAL_DRIVES_EXT,
-				sizeof(struct LD_STREAM_DETECT *),
-				GFP_KERNEL);
+			kzalloc_objs(struct LD_STREAM_DETECT *,
+				     MAX_LOGICAL_DRIVES_EXT);
 		if (!fusion->stream_detect_by_ld) {
 			dev_err(&instance->pdev->dev,
 				"unable to allocate stream detection for pool of LDs\n");
@@ -6387,8 +6397,7 @@ static int megasas_init_fw(struct megasas_instance *instance)
 		}
 		for (i = 0; i < MAX_LOGICAL_DRIVES_EXT; ++i) {
 			fusion->stream_detect_by_ld[i] =
-				kzalloc(sizeof(struct LD_STREAM_DETECT),
-				GFP_KERNEL);
+				kzalloc_obj(struct LD_STREAM_DETECT);
 			if (!fusion->stream_detect_by_ld[i]) {
 				dev_err(&instance->pdev->dev,
 					"unable to allocate stream detect by LD\n");
@@ -6472,7 +6481,8 @@ static int megasas_init_fw(struct megasas_instance *instance)
 	}
 
 	if (instance->snapdump_wait_time) {
-		megasas_get_snapdump_properties(instance);
+		scoped_guard(mutex, &instance->reset_mutex)
+			megasas_get_snapdump_properties(instance);
 		dev_info(&instance->pdev->dev, "Snap dump wait time\t: %d\n",
 			 instance->snapdump_wait_time);
 	}
@@ -8496,7 +8506,7 @@ megasas_compat_iocpacket_get_user(void __user *arg)
 	int err = -EFAULT;
 	int i;
 
-	ioc = kzalloc(sizeof(*ioc), GFP_KERNEL);
+	ioc = kzalloc_obj(*ioc);
 	if (!ioc)
 		return ERR_PTR(-ENOMEM);
 	size = offsetof(struct megasas_iocpacket, frame) + sizeof(ioc->frame);

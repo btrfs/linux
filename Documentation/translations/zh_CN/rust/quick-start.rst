@@ -13,15 +13,135 @@
 
 本文介绍了如何开始使用Rust进行内核开发。
 
+安装内核开发所需的 Rust 工具链有几种方式。一种简单的方式是使用 Linux 发行版的软件包
+（如果它们合适的话）——下面的第一节解释了这种方法。这种方法的一个优势是，通常发行版会
+匹配 Rust 和 Clang 所使用的 LLVM。
+
+另一种方式是使用 `kernel.org <https://kernel.org/pub/tools/llvm/rust/>`_ 上提
+供的预构建稳定版本的 LLVM+Rust。这些与 :ref:`获取 LLVM <zh_cn_getting_llvm>` 中的精
+简快速 LLVM 工具链相同，并添加了 Rust for Linux 支持的 Rust 版本。提供了两套工具
+链："最新 LLVM" 和 "匹配 LLVM"（请参阅链接了解更多信息）。
+
+或者，接下来的两个 "依赖" 章节将解释每个组件以及如何通过 ``rustup``、Rust 的独立
+安装程序或从源码构建来安装它们。
+
+本文档的其余部分解释了有关如何入门的其他方面。
+
+
+发行版
+------
+
+Arch Linux
+**********
+
+Arch Linux 提供较新的 Rust 版本，因此通常开箱即用，例如::
+
+	pacman -S rust rust-src rust-bindgen
+
+
+Debian
+******
+
+Debian 13（Trixie）以及 Testing 和 Debian Unstable（Sid）提供较新的 Rust 版
+本，因此通常开箱即用，例如::
+
+	apt install rustc rust-src bindgen rustfmt rust-clippy
+
+
+Fedora Linux
+************
+
+Fedora Linux 提供较新的 Rust 版本，因此通常开箱即用，例如::
+
+	dnf install rust rust-src bindgen-cli rustfmt clippy
+
+
+Gentoo Linux
+************
+
+Gentoo Linux 提供较新的 Rust 版本，因此通常开箱即用，
+例如::
+
+	USE='rust-src rustfmt clippy' emerge dev-lang/rust dev-util/bindgen
+
+可能需要设置 ``LIBCLANG_PATH``。
+
+
+Nix
+***
+
+Nix 提供较新的 Rust 版本，因此通常开箱即用，例如::
+
+	{ pkgs ? import <nixpkgs> {} }:
+	pkgs.mkShell {
+	  nativeBuildInputs = with pkgs; [ rustc rust-bindgen rustfmt clippy ];
+	  RUST_LIB_SRC = "${pkgs.rust.packages.stable.rustPlatform.rustLibSrc}";
+	}
+
+
+openSUSE
+********
+
+openSUSE Slowroll 和 openSUSE Tumbleweed 提供较新的 Rust 版本，因此通常开箱
+即用，例如::
+
+	zypper install rust rust-src rust-bindgen clang
+
+
+Ubuntu
+******
+
+Ubuntu 25.10 和 26.04 LTS 提供较新的 Rust 版本，因此通常开箱即用，
+例如::
+
+	apt install rustc rust-src bindgen rustfmt rust-clippy
+
+此外，需要设置 ``RUST_LIB_SRC``，例如::
+
+	RUST_LIB_SRC=/usr/src/rustc-$(rustc --version | cut -d' ' -f2)/library
+
+为方便起见，可以将 ``RUST_LIB_SRC`` 导出到全局环境中。
+
+
+24.04 LTS 及更早版本
+~~~~~~~~~~~~~~~~~~~~
+
+虽然 Ubuntu 24.04 LTS 及更早版本仍然提供较新的 Rust 版本，但它们需要一些额外的配
+置，使用带版本号的软件包，例如::
+
+	apt install rustc-1.85 rust-1.85-src bindgen-0.71 rustfmt-1.85 \
+		rust-1.85-clippy
+	ln -s /usr/lib/rust-1.85/bin/rustfmt /usr/bin/rustfmt-1.85
+	ln -s /usr/lib/rust-1.85/bin/clippy-driver /usr/bin/clippy-driver-1.85
+
+这些软件包都不会将其工具设置为默认值；因此应该显式指定它们，例如::
+
+	make LLVM=1 RUSTC=rustc-1.85 RUSTDOC=rustdoc-1.85 RUSTFMT=rustfmt-1.85 \
+		CLIPPY_DRIVER=clippy-driver-1.85 BINDGEN=bindgen-0.71
+
+或者，修改 ``PATH`` 变量将 Rust 1.85 的二进制文件放在前面，并将 ``bindgen`` 设
+置为默认值，例如::
+
+	PATH=/usr/lib/rust-1.85/bin:$PATH
+	update-alternatives --install /usr/bin/bindgen bindgen \
+		/usr/bin/bindgen-0.71 100
+	update-alternatives --set bindgen /usr/bin/bindgen-0.71
+
+使用带版本号的软件包时可能需要设置 ``RUST_LIB_SRC``，例如::
+
+	RUST_LIB_SRC=/usr/src/rustc-$(rustc-1.85 --version | cut -d' ' -f2)/library
+
+为方便起见，可以将 ``RUST_LIB_SRC`` 导出到全局环境中。
+
+此外， ``bindgen-0.71`` 在较新的版本（24.04 LTS）中可用，但在更早的版本
+（20.04 LTS 和 22.04 LTS）中可能不可用，因此可能需要手动构建 ``bindgen``
+（请参见下文）。
+
 
 构建依赖
 --------
 
 本节描述了如何获取构建所需的工具。
-
-其中一些依赖也许可以从Linux发行版中获得，包名可能是 ``rustc`` , ``rust-src`` ,
-``rust-bindgen`` 等。然而，在写这篇文章的时候，它们很可能还不够新，除非发行版跟踪最
-新的版本。
 
 为了方便检查是否满足要求，可以使用以下目标::
 
@@ -34,15 +154,14 @@
 rustc
 *****
 
-需要一个特定版本的Rust编译器。较新的版本可能会也可能不会工作，因为就目前而言，内核依赖
-于一些不稳定的Rust特性。
+需要一个较新版本的Rust编译器。
 
 如果使用的是 ``rustup`` ，请进入内核编译目录（或者用 ``--path=<build-dir>`` 参数
-来 ``设置`` sub-command)并运行::
+来 ``设置`` sub-command)，例如运行::
 
-	rustup override set $(scripts/min-tool-version.sh rustc)
+	rustup override set stable
 
-+这将配置你的工作目录使用正确版本的 ``rustc``，而不影响你的默认工具链。
+这将配置你的工作目录使用给定版本的 ``rustc``，而不影响你的默认工具链。
 
 请注意覆盖应用当前的工作目录（和它的子目录）。
 
@@ -54,7 +173,7 @@ rustc
 Rust标准库源代码
 ****************
 
-Rust标准库的源代码是必需的，因为构建系统会交叉编译 ``core`` 和 ``alloc`` 。
+Rust标准库的源代码是必需的，因为构建系统会交叉编译 ``core`` 。
 
 如果正在使用 ``rustup`` ，请运行::
 
@@ -64,10 +183,10 @@ Rust标准库的源代码是必需的，因为构建系统会交叉编译 ``core
 
 否则，如果使用独立的安装程序，可以将Rust源码树下载到安装工具链的文件夹中::
 
-       curl -L "https://static.rust-lang.org/dist/rust-src-$(scripts/min-tool-version.sh rustc).tar.gz" |
-               tar -xzf - -C "$(rustc --print sysroot)/lib" \
-               "rust-src-$(scripts/min-tool-version.sh rustc)/rust-src/lib/" \
-               --strip-components=3
+	curl -L "https://static.rust-lang.org/dist/rust-src-$(rustc --version | cut -d' ' -f2).tar.gz" |
+		tar -xzf - -C "$(rustc --print sysroot)/lib" \
+		"rust-src-$(rustc --version | cut -d' ' -f2)/rust-src/lib/" \
+		--strip-components=3
 
 在这种情况下，以后升级Rust编译器版本需要手动更新这个源代码树（这可以通过移除
 ``$(rustc --print sysroot)/lib/rustlib/src/rust`` ，然后重新执行上
@@ -97,24 +216,21 @@ Linux发行版中可能会有合适的包，所以最好先检查一下。
 bindgen
 *******
 
-内核的C端绑定是在构建时使用 ``bindgen`` 工具生成的。这需要特定的版本。
+内核的C端绑定是在构建时使用 ``bindgen`` 工具生成的。
 
-通过以下方式安装它（注意，这将从源码下载并构建该工具）::
+例如，通过以下方式安装它（注意，这将从源码下载并构建该工具）::
 
-	cargo install --locked --version $(scripts/min-tool-version.sh bindgen) bindgen-cli
+	cargo install --locked bindgen-cli
 
-``bindgen`` 需要找到合适的 ``libclang`` 才能工作。如果没有找到（或者找到的
-``libclang`` 与应该使用的 ``libclang`` 不同），则可以使用 ``clang-sys``
-理解的环境变量（Rust绑定创建的 ``bindgen`` 用来访问 ``libclang``）:
+``bindgen`` 使用 ``clang-sys`` crate 来查找合适的 ``libclang`` （可以静态链
+接、动态链接或在运行时加载）。默认情况下，上面的 ``cargo`` 命令会生成一个在运行时
+加载 ``libclang`` 的 ``bindgen`` 二进制文件。如果没有找到（或者应该使用与找到的
+不同的 ``libclang``），可以调整该过程，例如使用 ``LIBCLANG_PATH`` 环境变量。详
+情请参阅 ``clang-sys`` 的文档：
 
+	https://github.com/KyleMayes/clang-sys#linking
 
-* ``LLVM_CONFIG_PATH`` 可以指向一个 ``llvm-config`` 可执行文件。
-
-* 或者 ``LIBCLANG_PATH`` 可以指向 ``libclang`` 共享库或包含它的目录。
-
-* 或者 ``CLANG_PATH`` 可以指向 ``clang`` 可执行文件。
-
-详情请参阅 ``clang-sys`` 的文档:
+	https://github.com/KyleMayes/clang-sys#environment-variables
 
 
 开发依赖
@@ -149,18 +265,6 @@ clippy
 	rustup component add clippy
 
 独立的安装程序也带有 ``clippy`` 。
-
-
-cargo
-*****
-
-``cargo`` 是Rust的本地构建系统。目前需要它来运行测试，因为它被用来构建一个自定义的标准
-库，其中包含了内核中自定义 ``alloc`` 所提供的设施。测试可以使用 ``rusttest`` Make 目标
-来运行。
-
-如果使用的是 ``rustup`` ，所有的配置文件都已经安装了该工具，因此不需要再做什么。
-
-独立的安装程序也带有 ``cargo`` 。
 
 
 rustdoc
@@ -219,11 +323,3 @@ Rust支持（CONFIG_RUST）需要在 ``General setup`` 菜单中启用。在其�
 
 要想深入了解，请看 ``samples/rust/`` 下的样例源代码、 ``rust/`` 下的Rust支持代码和
 ``Kernel hacking`` 下的 ``Rust hacking`` 菜单。
-
-如果使用的是GDB/Binutils，而Rust符号没有被demangled，原因是工具链还不支持Rust的新v0
-mangling方案。有几个办法可以解决：
-
-  - 安装一个较新的版本（GDB >= 10.2, Binutils >= 2.36）。
-
-  - 一些版本的GDB（例如vanilla GDB 10.1）能够使用嵌入在调试信息(``CONFIG_DEBUG_INFO``)
-    中的pre-demangled的名字。

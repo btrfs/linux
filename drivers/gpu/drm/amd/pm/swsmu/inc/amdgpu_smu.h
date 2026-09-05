@@ -34,12 +34,14 @@
 
 #define SMU_THERMAL_MINIMUM_ALERT_TEMP		0
 #define SMU_THERMAL_MAXIMUM_ALERT_TEMP		255
-#define SMU_TEMPERATURE_UNITS_PER_CENTIGRADES	1000
+#define SMU_TEMPERATURE_UNITS_PER_CENTIGRADES	MILLIDEGREE_PER_DEGREE
 #define SMU_FW_NAME_LEN			0x24
 
 #define SMU_DPM_USER_PROFILE_RESTORE (1 << 0)
 #define SMU_CUSTOM_FAN_SPEED_RPM     (1 << 1)
 #define SMU_CUSTOM_FAN_SPEED_PWM     (1 << 2)
+
+#define SMU_GPU_METRICS_CACHE_INTERVAL 5
 
 // Power Throttlers
 #define SMU_THROTTLER_PPT0_BIT			0
@@ -210,8 +212,12 @@ enum smu_power_src_type {
 };
 
 enum smu_ppt_limit_type {
-	SMU_DEFAULT_PPT_LIMIT = 0,
-	SMU_FAST_PPT_LIMIT,
+	SMU_PPT_LIMIT_PPT0 = 0,
+	SMU_PPT_LIMIT_PPT1,
+	SMU_LIMIT_TYPE_COUNT,
+	SMU_DEFAULT_PPT_LIMIT = SMU_PPT_LIMIT_PPT0,
+	SMU_SLOW_PPT_LIMIT = SMU_PPT_LIMIT_PPT0,
+	SMU_FAST_PPT_LIMIT = SMU_PPT_LIMIT_PPT1,
 };
 
 enum smu_ppt_limit_level {
@@ -219,6 +225,20 @@ enum smu_ppt_limit_level {
 	SMU_PPT_LIMIT_CURRENT,
 	SMU_PPT_LIMIT_DEFAULT,
 	SMU_PPT_LIMIT_MAX,
+};
+
+struct smu_ppt_limit_range {
+	uint32_t default_value;
+	uint32_t min;
+	uint32_t max;
+	uint32_t od_min;
+	uint32_t od_max;
+};
+
+struct smu_ppt_limit_context {
+	struct smu_ppt_limit_range
+		range[SMU_POWER_SOURCE_COUNT][SMU_LIMIT_TYPE_COUNT];
+	uint32_t supported_mask;
 };
 
 enum smu_memory_pool_size {
@@ -231,7 +251,8 @@ enum smu_memory_pool_size {
 
 struct smu_user_dpm_profile {
 	uint32_t fan_mode;
-	uint32_t power_limit;
+	uint32_t ppt_limits[SMU_POWER_SOURCE_COUNT][SMU_LIMIT_TYPE_COUNT];
+	uint32_t ppt_limit_user_mask[SMU_POWER_SOURCE_COUNT];
 	uint32_t fan_speed_pwm;
 	uint32_t fan_speed_rpm;
 	uint32_t flags;
@@ -268,6 +289,18 @@ struct smu_table {
 	struct smu_table_cache cache;
 };
 
+enum smu_driver_table_id {
+	SMU_DRIVER_TABLE_GPU_METRICS = 0,
+	SMU_DRIVER_TABLE_GPUBOARD_TEMP_METRICS,
+	SMU_DRIVER_TABLE_BASEBOARD_TEMP_METRICS,
+	SMU_DRIVER_TABLE_COUNT,
+};
+
+struct smu_driver_table {
+	enum smu_driver_table_id id;
+	struct smu_table_cache cache;
+};
+
 enum smu_perf_level_designation {
 	PERF_LEVEL_ACTIVITY,
 	PERF_LEVEL_POWER_CONTAINMENT,
@@ -289,6 +322,37 @@ struct smu_clock_info {
 	uint32_t max_eng_clk;
 	uint32_t min_bus_bandwidth;
 	uint32_t max_bus_bandwidth;
+};
+
+#define SMU_MAX_DPM_LEVELS 16
+
+struct smu_dpm_clk_level {
+	bool		enabled;
+	uint32_t	value;
+};
+
+#define SMU_DPM_TABLE_FINE_GRAINED	BIT(0)
+
+struct smu_dpm_table {
+	enum smu_clk_type	clk_type;
+	uint32_t		count;
+	uint32_t		flags;
+	struct smu_dpm_clk_level dpm_levels[SMU_MAX_DPM_LEVELS];
+};
+
+#define SMU_DPM_TABLE_MIN(table) \
+	((table)->count > 0 ? (table)->dpm_levels[0].value : 0)
+
+#define SMU_DPM_TABLE_MAX(table) \
+	((table)->count > 0 ? (table)->dpm_levels[(table)->count - 1].value : 0)
+
+#define SMU_MAX_PCIE_LEVELS 3
+
+struct smu_pcie_table {
+	uint8_t pcie_gen[SMU_MAX_PCIE_LEVELS];
+	uint8_t pcie_lane[SMU_MAX_PCIE_LEVELS];
+	uint16_t lclk_freq[SMU_MAX_PCIE_LEVELS];
+	uint32_t lclk_levels;
 };
 
 struct smu_bios_boot_up_values {
@@ -331,8 +395,6 @@ enum smu_table_id {
 	SMU_TABLE_ECCINFO,
 	SMU_TABLE_COMBO_PPTABLE,
 	SMU_TABLE_WIFIBAND,
-	SMU_TABLE_GPUBOARD_TEMP_METRICS,
-	SMU_TABLE_BASEBOARD_TEMP_METRICS,
 	SMU_TABLE_PMFW_SYSTEM_METRICS,
 	SMU_TABLE_COUNT,
 };
@@ -345,6 +407,7 @@ struct smu_table_context {
 	void				*metrics_table;
 	void				*clocks_table;
 	void				*watermarks_table;
+	struct mutex			metrics_lock;
 
 	void				*max_sustainable_clocks;
 	struct smu_bios_boot_up_values	boot_values;
@@ -370,8 +433,7 @@ struct smu_table_context {
 	void                            *boot_overdrive_table;
 	void				*user_overdrive_table;
 
-	uint32_t			gpu_metrics_table_size;
-	void				*gpu_metrics_table;
+	struct smu_driver_table driver_tables[SMU_DRIVER_TABLE_COUNT];
 };
 
 struct smu_context;
@@ -428,11 +490,39 @@ struct smu_power_context {
 	struct smu_power_gate power_gate;
 };
 
-#define SMU_FEATURE_MAX	(64)
+#define SMU_FEATURE_NUM_DEFAULT (64)
+#define SMU_FEATURE_MAX (128)
+
+struct smu_feature_bits {
+	DECLARE_BITMAP(bits, SMU_FEATURE_MAX);
+};
+
+/*
+ * Helpers for initializing smu_feature_bits statically.
+ * Use SMU_FEATURE_BIT_INIT() which automatically handles array indexing:
+ *   static const struct smu_feature_bits example = {
+ *       .bits = {
+ *           SMU_FEATURE_BIT_INIT(5),
+ *           SMU_FEATURE_BIT_INIT(10),
+ *           SMU_FEATURE_BIT_INIT(65),
+ *           SMU_FEATURE_BIT_INIT(100)
+ *       }
+ *   };
+ */
+#define SMU_FEATURE_BITS_ELEM(bit) ((bit) / BITS_PER_LONG)
+#define SMU_FEATURE_BITS_POS(bit) ((bit) % BITS_PER_LONG)
+#define SMU_FEATURE_BIT_INIT(bit) \
+	[SMU_FEATURE_BITS_ELEM(bit)] = (1UL << SMU_FEATURE_BITS_POS(bit))
+
+enum smu_feature_list {
+	SMU_FEATURE_LIST_SUPPORTED,
+	SMU_FEATURE_LIST_ALLOWED,
+	SMU_FEATURE_LIST_MAX,
+};
+
 struct smu_feature {
 	uint32_t feature_num;
-	DECLARE_BITMAP(supported, SMU_FEATURE_MAX);
-	DECLARE_BITMAP(allowed, SMU_FEATURE_MAX);
+	struct smu_feature_bits bits[SMU_FEATURE_LIST_MAX];
 };
 
 struct smu_clocks {
@@ -465,7 +555,6 @@ enum smu_reset_mode {
 enum smu_baco_state {
 	SMU_BACO_STATE_ENTER = 0,
 	SMU_BACO_STATE_EXIT,
-	SMU_BACO_STATE_NONE,
 };
 
 struct smu_baco_context {
@@ -508,6 +597,87 @@ struct cmn2asic_mapping {
 	int	map_to;
 };
 
+#define SMU_MSG_MAX_ARGS 4
+
+/* Message flags for smu_msg_args */
+#define SMU_MSG_FLAG_ASYNC	BIT(0) /* Async send - skip post-poll */
+#define SMU_MSG_FLAG_LOCK_HELD	BIT(1) /* Caller holds ctl->lock */
+#define SMU_MSG_FLAG_FORCE_READ_ARG	BIT(2)	/* force read smu arg from pmfw */
+
+/* smu_msg_ctl flags */
+#define SMU_MSG_CTL_DEBUG_MAILBOX	BIT(0) /* Debug mailbox supported */
+
+struct smu_msg_ctl;
+/**
+ * struct smu_msg_config - IP-level register configuration
+ * @msg_reg: Message register offset
+ * @resp_reg: Response register offset
+ * @arg_regs: Argument register offsets (up to SMU_MSG_MAX_ARGS)
+ * @num_arg_regs: Number of argument registers available
+ * @debug_msg_reg: Debug message register offset
+ * @debug_resp_reg: Debug response register offset
+ * @debug_param_reg: Debug parameter register offset
+ */
+struct smu_msg_config {
+	u32 msg_reg;
+	u32 resp_reg;
+	u32 arg_regs[SMU_MSG_MAX_ARGS];
+	int num_arg_regs;
+	u32 debug_msg_reg;
+	u32 debug_resp_reg;
+	u32 debug_param_reg;
+};
+
+/**
+ * struct smu_msg_args - Per-call message arguments
+ * @msg: Common message type (enum smu_message_type)
+ * @args: Input arguments
+ * @num_args: Number of input arguments
+ * @out_args: Output arguments (filled after successful send)
+ * @num_out_args: Number of output arguments to read
+ * @flags: Message flags (SMU_MSG_FLAG_*)
+ * @timeout: Per-message timeout in us (0 = use default)
+ */
+struct smu_msg_args {
+	enum smu_message_type msg;
+	u32 args[SMU_MSG_MAX_ARGS];
+	int num_args;
+	u32 out_args[SMU_MSG_MAX_ARGS];
+	int num_out_args;
+	u32 flags;
+	u32 timeout;
+};
+
+/**
+ * struct smu_msg_ops - IP-level protocol operations
+ * @send_msg: send message protocol
+ * @wait_response: wait for response (for split send/wait cases)
+ * @decode_response: Convert response register value to errno
+ * @send_debug_msg: send debug message
+ */
+struct smu_msg_ops {
+	int (*send_msg)(struct smu_msg_ctl *ctl, struct smu_msg_args *args);
+	int (*wait_response)(struct smu_msg_ctl *ctl, u32 timeout_us);
+	int (*decode_response)(u32 resp);
+	int (*send_debug_msg)(struct smu_msg_ctl *ctl, u32 msg, u32 param);
+};
+
+/**
+ * struct smu_msg_ctl - Per-device message control block
+ * This is a standalone control block that encapsulates everything
+ * needed for SMU messaging. The ops->send_msg implements the complete
+ * protocol including all filtering and error handling.
+ */
+struct smu_msg_ctl {
+	struct smu_context *smu;
+	struct mutex lock;
+	struct smu_msg_config config;
+	const struct smu_msg_ops *ops;
+	const struct cmn2asic_msg_mapping *message_map;
+	u32 default_timeout;
+	u32 flags;
+};
+
 struct stb_context {
 	uint32_t stb_buf_size;
 	bool enabled;
@@ -544,13 +714,11 @@ struct smu_context {
 	struct amdgpu_irq_src		irq_source;
 
 	const struct pptable_funcs	*ppt_funcs;
-	const struct cmn2asic_msg_mapping	*message_map;
 	const struct cmn2asic_mapping	*clock_map;
 	const struct cmn2asic_mapping	*feature_map;
 	const struct cmn2asic_mapping	*table_map;
 	const struct cmn2asic_mapping	*pwr_src_map;
 	const struct cmn2asic_mapping	*workload_map;
-	struct mutex			message_lock;
 	uint64_t pool_size;
 
 	struct smu_table_context	smu_table;
@@ -569,10 +737,7 @@ struct smu_context {
 	uint32_t pstate_mclk;
 
 	bool od_enabled;
-	uint32_t current_power_limit;
-	uint32_t default_power_limit;
-	uint32_t max_power_limit;
-	uint32_t min_power_limit;
+	struct smu_ppt_limit_context ppt_limits;
 
 	/* soft pptable */
 	uint32_t ppt_offset_bytes;
@@ -598,6 +763,9 @@ struct smu_context {
 	long *custom_profile_params;
 	bool pm_enabled;
 	bool is_apu;
+
+	/* Power dependency link from an integrated xHCI controller to the GPU */
+	struct device_link		*usb_power_link;
 
 	uint32_t smc_driver_if_version;
 	uint32_t smc_fw_if_version;
@@ -634,20 +802,15 @@ struct smu_context {
 
 	struct firmware pptable_firmware;
 
-	u32 param_reg;
-	u32 msg_reg;
-	u32 resp_reg;
-
-	u32 debug_param_reg;
-	u32 debug_msg_reg;
-	u32 debug_resp_reg;
-
 	struct delayed_work		swctf_delayed_work;
 
 	/* data structures for wbrf feature support */
 	bool				wbrf_supported;
 	struct notifier_block		wbrf_notifier;
 	struct delayed_work		wbrf_delayed_work;
+
+	/* SMU message control block */
+	struct smu_msg_ctl msg_ctl;
 };
 
 struct i2c_adapter;
@@ -686,11 +849,10 @@ struct pptable_funcs {
 	int (*run_btc)(struct smu_context *smu);
 
 	/**
-	 * @get_allowed_feature_mask: Get allowed feature mask.
-	 * &feature_mask: Array to store feature mask.
-	 * &num: Elements in &feature_mask.
+	 * @init_allowed_features: Initialize allowed features bitmap.
+	 * Directly sets allowed features using smu_feature wrapper functions.
 	 */
-	int (*get_allowed_feature_mask)(struct smu_context *smu, uint32_t *feature_mask, uint32_t num);
+	int (*init_allowed_features)(struct smu_context *smu);
 
 	/**
 	 * @get_current_power_state: Get the current power state.
@@ -705,22 +867,11 @@ struct pptable_funcs {
 	 */
 	int (*set_default_dpm_table)(struct smu_context *smu);
 
-	int (*set_power_state)(struct smu_context *smu);
-
 	/**
 	 * @populate_umd_state_clk: Populate the UMD power state table with
 	 *                          defaults.
 	 */
 	int (*populate_umd_state_clk)(struct smu_context *smu);
-
-	/**
-	 * @print_clk_levels: Print DPM clock levels for a clock domain
-	 *                    to buffer. Star current level.
-	 *
-	 * Used for sysfs interfaces.
-	 * Return: Number of characters written to the buffer
-	 */
-	int (*print_clk_levels)(struct smu_context *smu, enum smu_clk_type clk_type, char *buf);
 
 	/**
 	 * @emit_clk_levels: Print DPM clock levels for a clock domain
@@ -768,16 +919,6 @@ struct pptable_funcs {
 					      struct
 					      pp_clock_levels_with_latency
 					      *clocks);
-	/**
-	 * @get_clock_by_type_with_voltage: Get the speed and voltage of a clock
-	 *                                  domain.
-	 */
-	int (*get_clock_by_type_with_voltage)(struct smu_context *smu,
-					      enum amd_pp_clock_type type,
-					      struct
-					      pp_clock_levels_with_voltage
-					      *clocks);
-
 	/**
 	 * @get_power_profile_mode: Print all power profile modes to
 	 *                          buffer. Star current mode.
@@ -919,19 +1060,11 @@ struct pptable_funcs {
 	int (*display_disable_memory_clock_switch)(struct smu_context *smu, bool disable_memory_clock_switch);
 
 	/**
-	 * @get_power_limit: Get the device's power limits.
+	 * @get_ppt_limit: Get the effective runtime PPT0 or PPT1 limit.
 	 */
-	int (*get_power_limit)(struct smu_context *smu,
-					uint32_t *current_power_limit,
-					uint32_t *default_power_limit,
-					uint32_t *max_power_limit,
-					uint32_t *min_power_limit);
-
-	/**
-	 * @get_ppt_limit: Get the device's ppt limits.
-	 */
-	int (*get_ppt_limit)(struct smu_context *smu, uint32_t *ppt_limit,
-			enum smu_ppt_limit_type limit_type, enum smu_ppt_limit_level limit_level);
+	int (*get_ppt_limit)(struct smu_context *smu,
+			     enum smu_ppt_limit_type limit_type,
+			     uint32_t *current_ppt_limit);
 
 	/**
 	 * @set_df_cstate: Set data fabric cstate.
@@ -1080,24 +1213,6 @@ struct pptable_funcs {
 	int (*system_features_control)(struct smu_context *smu, bool en);
 
 	/**
-	 * @send_smc_msg_with_param: Send a message with a parameter to the SMU.
-	 * &msg: Type of message.
-	 * &param: Message parameter.
-	 * &read_arg: SMU response (optional).
-	 */
-	int (*send_smc_msg_with_param)(struct smu_context *smu,
-				       enum smu_message_type msg, uint32_t param, uint32_t *read_arg);
-
-	/**
-	 * @send_smc_msg: Send a message to the SMU.
-	 * &msg: Type of message.
-	 * &read_arg: SMU response (optional).
-	 */
-	int (*send_smc_msg)(struct smu_context *smu,
-			    enum smu_message_type msg,
-			    uint32_t *read_arg);
-
-	/**
 	 * @init_display_count: Notify the SMU of the number of display
 	 *                      components in current display configuration.
 	 */
@@ -1114,7 +1229,8 @@ struct pptable_funcs {
 	 *                    on the SMU.
 	 * &feature_mask: Enabled feature mask.
 	 */
-	int (*get_enabled_mask)(struct smu_context *smu, uint64_t *feature_mask);
+	int (*get_enabled_mask)(struct smu_context *smu,
+				struct smu_feature_bits *feature_mask);
 
 	/**
 	 * @feature_is_enabled: Test if a feature is enabled.
@@ -1136,11 +1252,11 @@ struct pptable_funcs {
 	int (*notify_display_change)(struct smu_context *smu);
 
 	/**
-	 * @set_power_limit: Set power limit in watts.
+	 * @set_ppt_limit: Set the PPT0 or PPT1 limit in watts.
 	 */
-	int (*set_power_limit)(struct smu_context *smu,
-			       enum smu_ppt_limit_type limit_type,
-			       uint32_t limit);
+	int (*set_ppt_limit)(struct smu_context *smu,
+			     enum smu_ppt_limit_type limit_type,
+			     uint32_t limit);
 
 	/**
 	 * @init_max_sustainable_clocks: Populate max sustainable clock speed
@@ -1227,7 +1343,7 @@ struct pptable_funcs {
 	u32 (*set_gfx_off_residency)(struct smu_context *smu, bool start);
 
 	/**
-	 * @get_gfx_off_residency: Average GFXOFF residency % during the logging interval
+	 * @get_gfx_off_residency: Live GFXOFF residency percentage
 	 */
 	u32 (*get_gfx_off_residency)(struct smu_context *smu, uint32_t *residency);
 
@@ -1235,11 +1351,6 @@ struct pptable_funcs {
 	 * @register_irq_handler: Register interupt request handlers.
 	 */
 	int (*register_irq_handler)(struct smu_context *smu);
-
-	/**
-	 * @set_azalia_d3_pme: Wake the audio decode engine from d3 sleep.
-	 */
-	int (*set_azalia_d3_pme)(struct smu_context *smu);
 
 	/**
 	 * @get_max_sustainable_clocks_by_dc: Get a copy of the max sustainable
@@ -1256,18 +1367,6 @@ struct pptable_funcs {
 	 * MACO: Memory Active, Chip Off
 	 */
 	int (*get_bamaco_support)(struct smu_context *smu);
-
-	/**
-	 * @baco_get_state: Get the current BACO state.
-	 *
-	 * Return: Current BACO state.
-	 */
-	enum smu_baco_state (*baco_get_state)(struct smu_context *smu);
-
-	/**
-	 * @baco_set_state: Enter/exit BACO.
-	 */
-	int (*baco_set_state)(struct smu_context *smu, enum smu_baco_state state);
 
 	/**
 	 * @baco_enter: Enter BACO.
@@ -1521,6 +1620,22 @@ struct pptable_funcs {
 	 */
 	ssize_t (*get_xcp_metrics)(struct smu_context *smu, int xcp_id,
 				   void *table);
+	/**
+	 * @ras_send_msg: Send a message with a parameter from Ras
+	 * &msg: Type of message.
+	 * &param: Message parameter.
+	 * &read_arg: SMU response (optional).
+	 */
+	int (*ras_send_msg)(struct smu_context *smu,
+			    enum smu_message_type msg, uint32_t param, uint32_t *read_arg);
+
+	/**
+	 * @set_power_dep: Create or destroy a power dependency link
+	 * from an integrated xHCI controller to the GPU so that the GPU is
+	 * resumed before the USB controller during PM resume. @enable is true
+	 * to create the link and false to tear it down.
+	 */
+	int (*set_power_dep)(struct smu_context *smu, bool enable);
 };
 
 typedef enum {
@@ -1574,6 +1689,7 @@ typedef enum {
 	METRICS_THROTTLER_RESIDENCY_THM_CORE,
 	METRICS_THROTTLER_RESIDENCY_THM_GFX,
 	METRICS_THROTTLER_RESIDENCY_THM_SOC,
+	METRICS_AVERAGE_NPUCLK,
 } MetricsMember_t;
 
 enum smu_cmn2asic_mapping_type {
@@ -1664,19 +1780,19 @@ typedef struct {
 struct smu_dpm_policy *smu_get_pm_policy(struct smu_context *smu,
 					 enum pp_pm_policy p_type);
 
-static inline enum smu_table_id
+static inline enum smu_driver_table_id
 smu_metrics_get_temp_table_id(enum smu_temp_metric_type type)
 {
 	switch (type) {
 	case SMU_TEMP_METRIC_BASEBOARD:
-		return SMU_TABLE_BASEBOARD_TEMP_METRICS;
+		return SMU_DRIVER_TABLE_BASEBOARD_TEMP_METRICS;
 	case SMU_TEMP_METRIC_GPUBOARD:
-		return SMU_TABLE_GPUBOARD_TEMP_METRICS;
+		return SMU_DRIVER_TABLE_GPUBOARD_TEMP_METRICS;
 	default:
-		return SMU_TABLE_COUNT;
+		return SMU_DRIVER_TABLE_COUNT;
 	}
 
-	return SMU_TABLE_COUNT;
+	return SMU_DRIVER_TABLE_COUNT;
 }
 
 static inline void smu_table_cache_update_time(struct smu_table *table,
@@ -1729,11 +1845,87 @@ static inline void smu_table_cache_fini(struct smu_context *smu,
 	}
 }
 
+static inline int smu_driver_table_init(struct smu_context *smu,
+					enum smu_driver_table_id table_id,
+					size_t size, uint32_t cache_interval)
+{
+	struct smu_table_context *smu_table = &smu->smu_table;
+	struct smu_driver_table *driver_tables = smu_table->driver_tables;
+
+	if (table_id >= SMU_DRIVER_TABLE_COUNT)
+		return -EINVAL;
+
+	driver_tables[table_id].id = table_id;
+	driver_tables[table_id].cache.buffer = kzalloc(size, GFP_KERNEL);
+	if (!driver_tables[table_id].cache.buffer)
+		return -ENOMEM;
+
+	driver_tables[table_id].cache.last_cache_time = 0;
+	driver_tables[table_id].cache.interval = cache_interval;
+	driver_tables[table_id].cache.size = size;
+
+	return 0;
+}
+
+static inline void smu_driver_table_fini(struct smu_context *smu,
+					 enum smu_driver_table_id table_id)
+{
+	struct smu_table_context *smu_table = &smu->smu_table;
+	struct smu_driver_table *driver_tables = smu_table->driver_tables;
+
+	if (table_id >= SMU_DRIVER_TABLE_COUNT)
+		return;
+
+	if (driver_tables[table_id].cache.buffer) {
+		kfree(driver_tables[table_id].cache.buffer);
+		driver_tables[table_id].cache.buffer = NULL;
+		driver_tables[table_id].cache.last_cache_time = 0;
+		driver_tables[table_id].cache.interval = 0;
+	}
+}
+
+static inline bool smu_driver_table_is_valid(struct smu_driver_table *table)
+{
+	if (!table->cache.buffer || !table->cache.last_cache_time ||
+	    !table->cache.interval || !table->cache.size ||
+	    time_after(jiffies,
+		       table->cache.last_cache_time +
+			       msecs_to_jiffies(table->cache.interval)))
+		return false;
+
+	return true;
+}
+
+static inline void *smu_driver_table_ptr(struct smu_context *smu,
+					 enum smu_driver_table_id table_id)
+{
+	struct smu_table_context *smu_table = &smu->smu_table;
+	struct smu_driver_table *driver_tables = smu_table->driver_tables;
+
+	if (table_id >= SMU_DRIVER_TABLE_COUNT)
+		return NULL;
+
+	return driver_tables[table_id].cache.buffer;
+}
+
+static inline void
+smu_driver_table_update_cache_time(struct smu_context *smu,
+				   enum smu_driver_table_id table_id)
+{
+	struct smu_table_context *smu_table = &smu->smu_table;
+	struct smu_driver_table *driver_tables = smu_table->driver_tables;
+
+	if (table_id >= SMU_DRIVER_TABLE_COUNT)
+		return;
+
+	driver_tables[table_id].cache.last_cache_time = jiffies;
+}
+
 #if !defined(SWSMU_CODE_LAYER_L2) && !defined(SWSMU_CODE_LAYER_L3) && !defined(SWSMU_CODE_LAYER_L4)
-int smu_get_power_limit(void *handle,
-			uint32_t *limit,
-			enum pp_power_limit_level pp_limit_level,
-			enum pp_power_type pp_power_type);
+int smu_get_ppt_limit(void *handle,
+		      uint32_t *limit,
+		      enum pp_power_limit_level pp_limit_level,
+		      enum pp_power_type pp_power_type);
 
 bool smu_mode1_reset_is_support(struct smu_context *smu);
 bool smu_link_reset_is_support(struct smu_context *smu);
@@ -1742,7 +1934,13 @@ int smu_link_reset(struct smu_context *smu);
 
 extern const struct amd_ip_funcs smu_ip_funcs;
 
-bool is_support_sw_smu(struct amdgpu_device *adev);
+void amdgpu_smu_early_init(struct amdgpu_device *adev);
+
+static inline bool is_support_sw_smu(struct amdgpu_device *adev)
+{
+	return adev->is_sw_smu;
+}
+
 bool is_support_cclk_dpm(struct amdgpu_device *adev);
 int smu_write_watermarks_table(struct smu_context *smu);
 
@@ -1754,7 +1952,7 @@ int smu_set_soft_freq_range(struct smu_context *smu, enum pp_clock_type clk_type
 
 int smu_set_gfx_power_up_by_imu(struct smu_context *smu);
 
-int smu_set_ac_dc(struct smu_context *smu);
+int smu_set_ac_dc(struct smu_context *smu, bool restore_ppt_policy);
 
 int smu_set_xgmi_plpd_mode(struct smu_context *smu,
 			   enum pp_xgmi_plpd_mode mode);
@@ -1786,8 +1984,189 @@ int smu_set_pm_policy(struct smu_context *smu, enum pp_pm_policy p_type,
 ssize_t smu_get_pm_policy_info(struct smu_context *smu,
 			       enum pp_pm_policy p_type, char *sysbuf);
 
+int amdgpu_smu_ras_send_msg(struct amdgpu_device *adev, enum smu_message_type msg,
+			    uint32_t param, uint32_t *readarg);
+int amdgpu_smu_ras_feature_is_enabled(struct amdgpu_device *adev,
+						enum smu_feature_mask mask);
 #endif
 
 void smu_feature_cap_set(struct smu_context *smu, enum smu_feature_cap_id fea_id);
 bool smu_feature_cap_test(struct smu_context *smu, enum smu_feature_cap_id fea_id);
+
+static inline bool smu_feature_bits_is_set(const struct smu_feature_bits *bits,
+					   unsigned int bit)
+{
+	if (bit >= SMU_FEATURE_MAX)
+		return false;
+
+	return test_bit(bit, bits->bits);
+}
+
+static inline void smu_feature_bits_set_bit(struct smu_feature_bits *bits,
+					    unsigned int bit)
+{
+	if (bit < SMU_FEATURE_MAX)
+		__set_bit(bit, bits->bits);
+}
+
+static inline void smu_feature_bits_clear_bit(struct smu_feature_bits *bits,
+					      unsigned int bit)
+{
+	if (bit < SMU_FEATURE_MAX)
+		__clear_bit(bit, bits->bits);
+}
+
+static inline void smu_feature_bits_clearall(struct smu_feature_bits *bits)
+{
+	bitmap_zero(bits->bits, SMU_FEATURE_MAX);
+}
+
+static inline void smu_feature_bits_fill(struct smu_feature_bits *bits)
+{
+	bitmap_fill(bits->bits, SMU_FEATURE_MAX);
+}
+
+static inline bool
+smu_feature_bits_test_mask(const struct smu_feature_bits *bits,
+			   const unsigned long *mask)
+{
+	return bitmap_intersects(bits->bits, mask, SMU_FEATURE_MAX);
+}
+
+static inline void smu_feature_bits_from_arr32(struct smu_feature_bits *bits,
+					       const uint32_t *arr,
+					       unsigned int nbits)
+{
+	bitmap_from_arr32(bits->bits, arr, nbits);
+}
+
+static inline void
+smu_feature_bits_to_arr32(const struct smu_feature_bits *bits, uint32_t *arr,
+			  unsigned int nbits)
+{
+	bitmap_to_arr32(arr, bits->bits, nbits);
+}
+
+static inline bool smu_feature_bits_empty(const struct smu_feature_bits *bits,
+					  unsigned int nbits)
+{
+	return bitmap_empty(bits->bits, nbits);
+}
+
+static inline bool smu_feature_bits_full(const struct smu_feature_bits *bits,
+					 unsigned int nbits)
+{
+	return bitmap_full(bits->bits, nbits);
+}
+
+static inline void smu_feature_bits_copy(struct smu_feature_bits *dst,
+					 const unsigned long *src,
+					 unsigned int nbits)
+{
+	bitmap_copy(dst->bits, src, nbits);
+}
+
+static inline struct smu_feature_bits *
+__smu_feature_get_list(struct smu_context *smu, enum smu_feature_list list)
+{
+	if (unlikely(list >= SMU_FEATURE_LIST_MAX)) {
+		dev_warn(smu->adev->dev, "Invalid feature list: %d\n", list);
+		return &smu->smu_feature.bits[SMU_FEATURE_LIST_SUPPORTED];
+	}
+
+	return &smu->smu_feature.bits[list];
+}
+
+static inline bool smu_feature_list_is_set(struct smu_context *smu,
+					   enum smu_feature_list list,
+					   unsigned int bit)
+{
+	if (bit >= smu->smu_feature.feature_num)
+		return false;
+
+	return smu_feature_bits_is_set(__smu_feature_get_list(smu, list), bit);
+}
+
+static inline void smu_feature_list_set_bit(struct smu_context *smu,
+					    enum smu_feature_list list,
+					    unsigned int bit)
+{
+	if (bit >= smu->smu_feature.feature_num)
+		return;
+
+	smu_feature_bits_set_bit(__smu_feature_get_list(smu, list), bit);
+}
+
+static inline void smu_feature_list_clear_bit(struct smu_context *smu,
+					      enum smu_feature_list list,
+					      unsigned int bit)
+{
+	if (bit >= smu->smu_feature.feature_num)
+		return;
+
+	smu_feature_bits_clear_bit(__smu_feature_get_list(smu, list), bit);
+}
+
+static inline void smu_feature_list_set_all(struct smu_context *smu,
+					    enum smu_feature_list list)
+{
+	smu_feature_bits_fill(__smu_feature_get_list(smu, list));
+}
+
+static inline void smu_feature_list_clear_all(struct smu_context *smu,
+					      enum smu_feature_list list)
+{
+	smu_feature_bits_clearall(__smu_feature_get_list(smu, list));
+}
+
+static inline bool smu_feature_list_is_empty(struct smu_context *smu,
+					     enum smu_feature_list list)
+{
+	return smu_feature_bits_empty(__smu_feature_get_list(smu, list),
+				      smu->smu_feature.feature_num);
+}
+
+static inline void smu_feature_list_set_bits(struct smu_context *smu,
+					     enum smu_feature_list dst_list,
+					     const unsigned long *src)
+{
+	smu_feature_bits_copy(__smu_feature_get_list(smu, dst_list), src,
+			      smu->smu_feature.feature_num);
+}
+
+static inline void smu_feature_list_to_arr32(struct smu_context *smu,
+					     enum smu_feature_list list,
+					     uint32_t *arr)
+{
+	smu_feature_bits_to_arr32(__smu_feature_get_list(smu, list), arr,
+				  smu->smu_feature.feature_num);
+}
+
+static inline void smu_feature_init(struct smu_context *smu, int feature_num)
+{
+	if (!feature_num || smu->smu_feature.feature_num != 0)
+		return;
+
+	smu->smu_feature.feature_num = feature_num;
+	smu_feature_list_clear_all(smu, SMU_FEATURE_LIST_SUPPORTED);
+	smu_feature_list_clear_all(smu, SMU_FEATURE_LIST_ALLOWED);
+}
+
+/*
+ * smu_safe_u16_nn - Make u16 safe by filtering negative overflow errors
+ * @val: Input u16 value, may contain invalid negative overflows
+ *
+ * Convert u16 to non-negative value. Cast to s16 to detect negative values
+ * caused by calculation errors. Return 0 for negative errors, return
+ * original value if valid.
+ *
+ * Return: Valid u16 value or 0
+ */
+static inline u16 smu_safe_u16_nn(u16 val)
+{
+	s16 tmp = (s16)val;
+
+	return tmp < 0 ? 0 : val;
+}
+
 #endif

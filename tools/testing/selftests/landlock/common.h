@@ -17,13 +17,15 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
-#include "../kselftest_harness.h"
+#include "kselftest_harness.h"
 #include "wrappers.h"
 
 #define TMP_DIR "tmp"
 
 /* TEST_F_FORK() should not be used for new tests. */
 #define TEST_F_FORK(fixture_name, test_name) TEST_F(fixture_name, test_name)
+
+#define LANDLOCK_MAX_NUM_LAYERS 16
 
 static const char bin_sandbox_and_launch[] = "./sandbox-and-launch";
 static const char bin_wait_pipe[] = "./wait-pipe";
@@ -237,6 +239,7 @@ struct service_fixture {
 			struct sockaddr_un unix_addr;
 			socklen_t unix_addr_len;
 		};
+		struct sockaddr_storage _largest;
 	};
 };
 
@@ -249,4 +252,51 @@ static void __maybe_unused set_unix_address(struct service_fixture *const srv,
 		index);
 	srv->unix_addr_len = SUN_LEN(&srv->unix_addr);
 	srv->unix_addr.sun_path[0] = '\0';
+}
+
+/**
+ * regex_escape - Escape BRE metacharacters in a string
+ *
+ * @src: Source string to escape.
+ * @dst: Destination buffer for the escaped string.
+ * @dst_size: Size of the destination buffer.
+ *
+ * Escapes characters that have special meaning in POSIX Basic Regular
+ * Expressions: $ * . [ \ ] ^
+ *
+ * Returns a pointer to the NUL terminator in @dst (cursor-style API for
+ * chaining), or (char *)-ENOMEM if the buffer is too small.
+ */
+static __maybe_unused char *regex_escape(const char *const src, char *dst,
+					 size_t dst_size)
+{
+	char *d = dst;
+
+	for (const char *s = src; *s; s++) {
+		switch (*s) {
+		case '$':
+		case '*':
+		case '.':
+		case '[':
+		case '\\':
+		case ']':
+		case '^':
+			if (d >= dst + dst_size - 2)
+				return (char *)-ENOMEM;
+
+			*d++ = '\\';
+			*d++ = *s;
+			break;
+		default:
+			if (d >= dst + dst_size - 1)
+				return (char *)-ENOMEM;
+
+			*d++ = *s;
+		}
+	}
+	if (d >= dst + dst_size - 1)
+		return (char *)-ENOMEM;
+
+	*d = '\0';
+	return d;
 }

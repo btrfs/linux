@@ -3216,7 +3216,7 @@ static int bttv_probe(struct pci_dev *dev, const struct pci_device_id *pci_id)
 	if (bttv_num == BTTV_MAX)
 		return -ENOMEM;
 	pr_info("Bt8xx card found (%d)\n", bttv_num);
-	bttvs[bttv_num] = btv = kzalloc(sizeof(*btv), GFP_KERNEL);
+	bttvs[bttv_num] = btv = kzalloc_obj(*btv);
 	if (btv == NULL) {
 		pr_err("out of memory\n");
 		return -ENOMEM;
@@ -3563,12 +3563,12 @@ static int __maybe_unused bttv_resume(struct device *dev)
 }
 
 static const struct pci_device_id bttv_pci_tbl[] = {
-	{PCI_VDEVICE(BROOKTREE, PCI_DEVICE_ID_BT848), 0},
-	{PCI_VDEVICE(BROOKTREE, PCI_DEVICE_ID_BT849), 0},
-	{PCI_VDEVICE(BROOKTREE, PCI_DEVICE_ID_BT878), 0},
-	{PCI_VDEVICE(BROOKTREE, PCI_DEVICE_ID_BT879), 0},
-	{PCI_VDEVICE(BROOKTREE, PCI_DEVICE_ID_FUSION879), 0},
-	{0,}
+	{ PCI_VDEVICE(BROOKTREE, PCI_DEVICE_ID_BT848) },
+	{ PCI_VDEVICE(BROOKTREE, PCI_DEVICE_ID_BT849) },
+	{ PCI_VDEVICE(BROOKTREE, PCI_DEVICE_ID_BT878) },
+	{ PCI_VDEVICE(BROOKTREE, PCI_DEVICE_ID_BT879) },
+	{ PCI_VDEVICE(BROOKTREE, PCI_DEVICE_ID_FUSION879) },
+	{ }
 };
 
 MODULE_DEVICE_TABLE(pci, bttv_pci_tbl);

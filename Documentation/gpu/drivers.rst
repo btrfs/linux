@@ -8,6 +8,7 @@ GPU Driver Documentation
    amdgpu/index
    i915
    imagination/index
+   intel-display/index
    mcde
    meson
    nouveau
@@ -26,10 +27,3 @@ GPU Driver Documentation
    panthor
    zynqmp
    nova/index
-
-.. only::  subproject and html
-
-   Indices
-   =======
-
-   * :ref:`genindex`

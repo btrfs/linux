@@ -57,7 +57,8 @@ static void netfs_dump_request(const struct netfs_io_request *rreq)
 int netfs_folio_written_back(struct folio *folio)
 {
 	enum netfs_folio_trace why = netfs_folio_trace_clear;
-	struct netfs_inode *ictx = netfs_inode(folio->mapping->host);
+	struct inode *inode = folio_inode(folio);
+	struct netfs_inode *ictx = netfs_inode(inode);
 	struct netfs_folio *finfo;
 	struct netfs_group *group = NULL;
 	int gcount = 0;
@@ -69,8 +70,10 @@ int netfs_folio_written_back(struct folio *folio)
 		unsigned long long fend;
 
 		fend = folio_pos(folio) + finfo->dirty_offset + finfo->dirty_len;
-		if (fend > ictx->zero_point)
-			ictx->zero_point = fend;
+		spin_lock(&ictx->inode.i_lock);
+		if (fend > ictx->_zero_point)
+			netfs_write_zero_point(inode, fend);
+		spin_unlock(&ictx->inode.i_lock);
 
 		folio_detach_private(folio);
 		group = finfo->netfs_group;
@@ -228,7 +231,10 @@ reassess_streams:
 		if (!smp_load_acquire(&stream->active))
 			continue;
 
-		front = stream->front;
+		front = list_first_entry_or_null_acquire(&stream->subrequests,
+							 struct netfs_io_subrequest, rreq_link);
+		/* Read first subreq pointer before IN_PROGRESS flag. */
+
 		while (front) {
 			trace_netfs_collect_sreq(wreq, front);
 			//_debug("sreq [%x] %llx %zx/%zx",
@@ -279,7 +285,6 @@ reassess_streams:
 			list_del_init(&front->rreq_link);
 			front = list_first_entry_or_null(&stream->subrequests,
 							 struct netfs_io_subrequest, rreq_link);
-			stream->front = front;
 			spin_unlock(&wreq->lock);
 			netfs_put_subrequest(remove,
 					     notes & SAW_FAILURE ?
@@ -399,30 +404,19 @@ bool netfs_write_collection(struct netfs_io_request *wreq)
 		ictx->ops->invalidate_cache(wreq);
 	}
 
-	if ((wreq->origin == NETFS_UNBUFFERED_WRITE ||
-	     wreq->origin == NETFS_DIO_WRITE) &&
-	    !wreq->error)
-		netfs_update_i_size(ictx, &ictx->inode, wreq->start, wreq->transferred);
-
-	if (wreq->origin == NETFS_DIO_WRITE &&
-	    wreq->mapping->nrpages) {
-		/* mmap may have got underfoot and we may now have folios
-		 * locally covering the region we just wrote.  Attempt to
-		 * discard the folios, but leave in place any modified locally.
-		 * ->write_iter() is prevented from interfering by the DIO
-		 * counter.
-		 */
-		pgoff_t first = wreq->start >> PAGE_SHIFT;
-		pgoff_t last = (wreq->start + wreq->transferred - 1) >> PAGE_SHIFT;
-		invalidate_inode_pages2_range(wreq->mapping, first, last);
-	}
-
-	if (wreq->origin == NETFS_DIO_WRITE)
-		inode_dio_end(wreq->inode);
-
 	_debug("finished");
 	netfs_wake_rreq_flag(wreq, NETFS_RREQ_IN_PROGRESS, netfs_rreq_trace_wake_ip);
 	/* As we cleared NETFS_RREQ_IN_PROGRESS, we acquired its ref. */
+
+	switch (wreq->origin) {
+	case NETFS_WRITEBACK:
+	case NETFS_WRITEBACK_SINGLE:
+	case NETFS_WRITETHROUGH:
+		netfs_wb_end(ictx);
+		break;
+	default:
+		break;
+	}
 
 	if (wreq->iocb) {
 		size_t written = min(wreq->transferred, wreq->len);
@@ -492,11 +486,11 @@ void netfs_write_subrequest_terminated(void *_op, ssize_t transferred_or_error)
 
 	if (IS_ERR_VALUE(transferred_or_error)) {
 		subreq->error = transferred_or_error;
-		if (subreq->error == -EAGAIN)
-			set_bit(NETFS_SREQ_NEED_RETRY, &subreq->flags);
-		else
+		/* if need retry is set, error should not matter */
+		if (!test_bit(NETFS_SREQ_NEED_RETRY, &subreq->flags)) {
 			set_bit(NETFS_SREQ_FAILED, &subreq->flags);
-		trace_netfs_failure(wreq, subreq, transferred_or_error, netfs_fail_write);
+			trace_netfs_failure(wreq, subreq, transferred_or_error, netfs_fail_write);
+		}
 
 		switch (subreq->source) {
 		case NETFS_WRITE_TO_CACHE:

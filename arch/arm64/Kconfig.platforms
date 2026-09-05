@@ -36,6 +36,7 @@ config ARCH_ALPINE
 config ARCH_APPLE
 	bool "Apple Silicon SoC family"
 	select APPLE_AIC
+	select APPLE_PMGR_PWRSTATE if PM
 	help
 	  This enables support for Apple's in-house ARM SoC family, such
 	  as the Apple M1.
@@ -46,6 +47,12 @@ config ARCH_ARTPEC
 	select ARM_GIC
 	help
 	   This enables support for the ARMv8 based ARTPEC SoC Family.
+
+config ARCH_ASPEED
+	bool "Aspeed SoC family"
+	help
+	  This enables support for ASPEED's SoC family, such as the
+	  ast27XX 8th generation Baseboard Management Controller (BMC).
 
 config ARCH_AXIADO
 	bool "Axiado SoC Family"
@@ -119,6 +126,14 @@ config ARCH_BLAIZE
 	help
 	  This enables support for the Blaize SoC family
 
+config ARCH_BST
+	bool "Black Sesame Technologies SoC Family"
+	help
+	  This enables support for Black Sesame Technologies (BST) SoC family.
+	  BST produces automotive-grade system-on-chips for intelligent driving,
+	  focusing on computer vision and AI capabilities. The BST C1200 family
+	  includes SoCs for ADAS and autonomous driving applications.
+
 config ARCH_CIX
 	bool "Cixtech SoC family"
 	help
@@ -179,16 +194,15 @@ config ARCH_MESON
 	  This enables support for the arm64 based Amlogic SoCs
 	  such as the s905, S905X/D, S912, A113X/D or S905X/D2
 
-menu "Microchip SoC support"
+menuconfig ARCH_MICROCHIP
+	bool "Microchip SoC support"
 
-config ARCH_MICROCHIP
-	bool
+if ARCH_MICROCHIP
 
 config ARCH_LAN969X
 	bool "Microchip LAN969X SoC family"
 	select PINCTRL
 	select DW_APB_TIMER_OF
-	select ARCH_MICROCHIP
 	help
 	  This enables support for the Microchip LAN969X ARMv8-based
 	  SoC family of TSN-capable gigabit switches.
@@ -203,7 +217,6 @@ config ARCH_SPARX5
 	bool "Microchip Sparx5 SoC family"
 	select PINCTRL
 	select DW_APB_TIMER_OF
-	select ARCH_MICROCHIP
 	help
 	  This enables support for the Microchip Sparx5 ARMv8-based
 	  SoC family of TSN-capable gigabit switches.
@@ -214,7 +227,7 @@ config ARCH_SPARX5
 	  security through TCAM-based frame processing using versatile
 	  content aware processor (VCAP).
 
-endmenu
+endif
 
 config ARCH_MMP
 	bool "Marvell MMP SoC Family"
@@ -236,7 +249,6 @@ config ARCH_MVEBU
 	select MVEBU_ODMI
 	select MVEBU_PIC
 	select MVEBU_SEI
-	select OF_GPIO
 	select PINCTRL
 	select PINCTRL_ARMADA_37XX
 	select PINCTRL_ARMADA_AP806
@@ -316,6 +328,7 @@ config ARCH_QCOM
 	select GPIOLIB
 	select PINCTRL
 	select HAVE_PWRCTRL if PCI
+	select HAVE_SHARED_GPIOS
 	help
 	  This enables support for the ARMv8 based Qualcomm chipsets.
 
@@ -363,7 +376,6 @@ config ARCH_STM32
 	bool "STMicroelectronics STM32 SoC Family"
 	select GPIOLIB
 	select PINCTRL
-	select ARM_SMC_MBOX
 	select ARM_SCMI_PROTOCOL
 	select REGULATOR
 	select REGULATOR_ARM_SCMI

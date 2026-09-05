@@ -22,6 +22,7 @@
 #include <drm/drm_gem_dma_helper.h>
 #include <drm/drm_module.h>
 #include <drm/drm_of.h>
+#include <drm/drm_print.h>
 #include <drm/drm_probe_helper.h>
 #include <drm/drm_vblank.h>
 
@@ -288,6 +289,8 @@ static void sun4i_drv_traverse_endpoints(struct endpoint_list *list,
 
 		kfifo_put(&list->fifo, remote);
 	}
+
+	of_node_put(port);
 }
 
 static int sun4i_drv_add_endpoints(struct device *dev,
@@ -393,6 +396,7 @@ static int sun4i_drv_probe(struct platform_device *pdev)
 		/* process this endpoint */
 		ret = sun4i_drv_add_endpoints(&pdev->dev, &list, &match,
 					      endpoint);
+		of_node_put(endpoint);
 
 		/* sun4i_drv_add_endpoints can fail to allocate memory */
 		if (ret < 0)

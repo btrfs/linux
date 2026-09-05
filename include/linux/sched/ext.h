@@ -17,7 +17,18 @@
 enum scx_public_consts {
 	SCX_OPS_NAME_LEN	= 128,
 
+	/*
+	 * %SCX_SLICE_DFL is used to refill slices when the BPF scheduler misses
+	 * to set the slice for a task that is selected for execution.
+	 * %SCX_EV_REFILL_SLICE_DFL counts the number of times the default slice
+	 * refill has been triggered.
+	 *
+	 * %SCX_SLICE_BYPASS is used as the slice for all tasks in the bypass
+	 * mode. As making forward progress for all tasks is the main goal of
+	 * the bypass mode, a shorter slice is used.
+	 */
 	SCX_SLICE_DFL		= 20 * 1000000,	/* 20ms */
+	SCX_SLICE_BYPASS	=  5 * 1000000, /*  5ms */
 	SCX_SLICE_INF		= U64_MAX,	/* infinite, implies nohz */
 };
 
@@ -46,8 +57,21 @@ enum scx_dsq_id_flags {
 	SCX_DSQ_INVALID		= SCX_DSQ_FLAG_BUILTIN | 0,
 	SCX_DSQ_GLOBAL		= SCX_DSQ_FLAG_BUILTIN | 1,
 	SCX_DSQ_LOCAL		= SCX_DSQ_FLAG_BUILTIN | 2,
+	SCX_DSQ_BYPASS		= SCX_DSQ_FLAG_BUILTIN | 3,
+	SCX_DSQ_REJECT		= SCX_DSQ_FLAG_BUILTIN | 4,	/* internal - see find_dsq_for_dispatch() */
+	SCX_DSQ_RESCUE		= SCX_DSQ_FLAG_BUILTIN | 5,	/* internal - see find_dsq_for_dispatch() */
 	SCX_DSQ_LOCAL_ON	= SCX_DSQ_FLAG_BUILTIN | SCX_DSQ_FLAG_LOCAL_ON,
 	SCX_DSQ_LOCAL_CPU_MASK	= 0xffffffffLLU,
+};
+
+struct scx_deferred_reenq_user {
+	struct list_head	node;
+	u64			flags;
+};
+
+struct scx_dsq_pcpu {
+	struct scx_dispatch_q	*dsq;
+	struct scx_deferred_reenq_user deferred_reenq_user;
 };
 
 /*
@@ -58,6 +82,7 @@ enum scx_dsq_id_flags {
  */
 struct scx_dispatch_q {
 	raw_spinlock_t		lock;
+	struct task_struct __rcu *first_task; /* lockless peek at head */
 	struct list_head	list;	/* tasks in dispatch order */
 	struct rb_root		priq;	/* used to order by p->scx.dsq_vtime */
 	u32			nr;
@@ -65,62 +90,70 @@ struct scx_dispatch_q {
 	u64			id;
 	struct rhash_head	hash_node;
 	struct llist_node	free_node;
+	struct scx_sched	*sched;
+	struct scx_dsq_pcpu __percpu *pcpu;
 	struct rcu_head		rcu;
 };
 
-/* scx_entity.flags */
+/* sched_ext_entity.flags */
 enum scx_ent_flags {
 	SCX_TASK_QUEUED		= 1 << 0, /* on ext runqueue */
+	SCX_TASK_IN_CUSTODY	= 1 << 1, /* in custody, needs ops.dequeue() when leaving */
 	SCX_TASK_RESET_RUNNABLE_AT = 1 << 2, /* runnable_at should be reset */
 	SCX_TASK_DEQD_FOR_SLEEP	= 1 << 3, /* last dequeue was for SLEEP */
+	SCX_TASK_SUB_INIT	= 1 << 4, /* task being initialized for a sub sched */
+	SCX_TASK_IMMED		= 1 << 5, /* task is on local DSQ with %SCX_ENQ_IMMED */
+	SCX_TASK_PROTECTED	= 1 << 6, /* slice and DSQ head position protected */
 
-	SCX_TASK_STATE_SHIFT	= 8,	  /* bit 8 and 9 are used to carry scx_task_state */
-	SCX_TASK_STATE_BITS	= 2,
+	/*
+	 * Bits 8 to 10 are used to carry task state:
+	 *
+	 * NONE		ops.init_task() not called yet
+	 * INIT_BEGIN	ops.init_task() in flight; see sched_ext_dead()
+	 * INIT		ops.init_task() succeeded, but task can be cancelled
+	 * READY	fully initialized, but not in sched_ext
+	 * ENABLED	fully initialized and in sched_ext
+	 * DEAD		terminal state set by sched_ext_dead()
+	 */
+	SCX_TASK_STATE_SHIFT	= 8,
+	SCX_TASK_STATE_BITS	= 3,
 	SCX_TASK_STATE_MASK	= ((1 << SCX_TASK_STATE_BITS) - 1) << SCX_TASK_STATE_SHIFT,
 
-	SCX_TASK_CURSOR		= 1 << 31, /* iteration cursor, not a task */
-};
+	SCX_TASK_NONE		= 0 << SCX_TASK_STATE_SHIFT,
+	SCX_TASK_INIT_BEGIN	= 1 << SCX_TASK_STATE_SHIFT,
+	SCX_TASK_INIT		= 2 << SCX_TASK_STATE_SHIFT,
+	SCX_TASK_READY		= 3 << SCX_TASK_STATE_SHIFT,
+	SCX_TASK_ENABLED	= 4 << SCX_TASK_STATE_SHIFT,
+	SCX_TASK_DEAD		= 5 << SCX_TASK_STATE_SHIFT,
 
-/* scx_entity.flags & SCX_TASK_STATE_MASK */
-enum scx_task_state {
-	SCX_TASK_NONE,		/* ops.init_task() not called yet */
-	SCX_TASK_INIT,		/* ops.init_task() succeeded, but task can be cancelled */
-	SCX_TASK_READY,		/* fully initialized, but not in sched_ext */
-	SCX_TASK_ENABLED,	/* fully initialized and in sched_ext */
+	/*
+	 * Bits 12 to 14 are used to carry reenqueue reason. In addition to
+	 * %SCX_ENQ_REENQ flag, ops.enqueue() can also test for
+	 * %SCX_TASK_REENQ_REASON_NONE to distinguish reenqueues.
+	 *
+	 * NONE		not being reenqueued
+	 * KFUNC	reenqueued by scx_bpf_dsq_reenq() and friends
+	 * IMMED	reenqueued due to failed ENQ_IMMED
+	 * PREEMPTED	preempted while running
+	 * CAP		sub-sched cap miss, see p->scx.reenq_reason_*
+	 */
+	SCX_TASK_REENQ_REASON_SHIFT = 12,
+	SCX_TASK_REENQ_REASON_BITS = 3,
+	SCX_TASK_REENQ_REASON_MASK = ((1 << SCX_TASK_REENQ_REASON_BITS) - 1) << SCX_TASK_REENQ_REASON_SHIFT,
 
-	SCX_TASK_NR_STATES,
+	SCX_TASK_REENQ_NONE	= 0 << SCX_TASK_REENQ_REASON_SHIFT,
+	SCX_TASK_REENQ_KFUNC	= 1 << SCX_TASK_REENQ_REASON_SHIFT,
+	SCX_TASK_REENQ_IMMED	= 2 << SCX_TASK_REENQ_REASON_SHIFT,
+	SCX_TASK_REENQ_PREEMPTED = 3 << SCX_TASK_REENQ_REASON_SHIFT,
+	SCX_TASK_REENQ_CAP	= 4 << SCX_TASK_REENQ_REASON_SHIFT,
+
+	/* iteration cursor, not a task */
+	SCX_TASK_CURSOR		= 1 << 31,
 };
 
 /* scx_entity.dsq_flags */
 enum scx_ent_dsq_flags {
 	SCX_TASK_DSQ_ON_PRIQ	= 1 << 0, /* task is queued on the priority queue of a dsq */
-};
-
-/*
- * Mask bits for scx_entity.kf_mask. Not all kfuncs can be called from
- * everywhere and the following bits track which kfunc sets are currently
- * allowed for %current. This simple per-task tracking works because SCX ops
- * nest in a limited way. BPF will likely implement a way to allow and disallow
- * kfuncs depending on the calling context which will replace this manual
- * mechanism. See scx_kf_allow().
- */
-enum scx_kf_mask {
-	SCX_KF_UNLOCKED		= 0,	  /* sleepable and not rq locked */
-	/* ENQUEUE and DISPATCH may be nested inside CPU_RELEASE */
-	SCX_KF_CPU_RELEASE	= 1 << 0, /* ops.cpu_release() */
-	/*
-	 * ops.dispatch() may release rq lock temporarily and thus ENQUEUE and
-	 * SELECT_CPU may be nested inside. ops.dequeue (in REST) may also be
-	 * nested inside DISPATCH.
-	 */
-	SCX_KF_DISPATCH		= 1 << 1, /* ops.dispatch() */
-	SCX_KF_ENQUEUE		= 1 << 2, /* ops.enqueue() and ops.select_cpu() */
-	SCX_KF_SELECT_CPU	= 1 << 3, /* ops.select_cpu() */
-	SCX_KF_REST		= 1 << 4, /* other rq-locked operations */
-
-	__SCX_KF_RQ_LOCKED	= SCX_KF_CPU_RELEASE | SCX_KF_DISPATCH |
-				  SCX_KF_ENQUEUE | SCX_KF_SELECT_CPU | SCX_KF_REST,
-	__SCX_KF_TERMINAL	= SCX_KF_ENQUEUE | SCX_KF_SELECT_CPU | SCX_KF_REST,
 };
 
 enum scx_dsq_lnode_flags {
@@ -136,41 +169,70 @@ struct scx_dsq_list_node {
 	u32			priv;		/* can be used by iter cursor */
 };
 
+#define INIT_DSQ_LIST_CURSOR(__cursor, __dsq, __flags)				\
+	(struct scx_dsq_list_node) {						\
+		.node = LIST_HEAD_INIT((__cursor).node),			\
+		.flags = SCX_DSQ_LNODE_ITER_CURSOR | (__flags),			\
+		.priv = READ_ONCE((__dsq)->seq),				\
+	}
+
+struct scx_sched;
+
 /*
  * The following is embedded in task_struct and contains all fields necessary
  * for a task to be scheduled by SCX.
  */
 struct sched_ext_entity {
+#ifdef CONFIG_CGROUPS
+	/*
+	 * Associated scx_sched. Updated either during fork or while holding
+	 * both p->pi_lock and rq lock.
+	 */
+	struct scx_sched __rcu	*sched;
+#endif
 	struct scx_dispatch_q	*dsq;
+	atomic_long_t		ops_state;
+	u64			ddsp_dsq_id;
+	u64			ddsp_enq_flags;
+	u64			ddsp_slice;
+	u64			ddsp_vtime;
 	struct scx_dsq_list_node dsq_list;	/* dispatch order */
 	struct rb_node		dsq_priq;	/* p->scx.dsq_vtime order */
 	u32			dsq_seq;
 	u32			dsq_flags;	/* protected by DSQ lock */
 	u32			flags;		/* protected by rq lock */
 	u32			weight;
+	u32			reenq_cnt;	/* reenqueues since last run */
 	s32			sticky_cpu;
 	s32			holding_cpu;
 	s32			selected_cpu;
-	u32			kf_mask;	/* see scx_kf_mask above */
+	s32			runnable_cpu;	/* cpu @p is runnable on, -1 if not */
 	struct task_struct	*kf_tasks[2];	/* see SCX_CALL_OP_TASK() */
-	atomic_long_t		ops_state;
 
 	struct list_head	runnable_node;	/* rq->scx.runnable_list */
 	unsigned long		runnable_at;
 
-#ifdef CONFIG_SCHED_CORE
-	u64			core_sched_at;	/* see scx_prio_less() */
+#ifdef CONFIG_EXT_SUB_SCHED
+	unsigned long		rescue_at;	/* queued on a rescue DSQ at, jiffies */
 #endif
-	u64			ddsp_dsq_id;
-	u64			ddsp_enq_flags;
+
+	/*
+	 * Unique non-zero task ID assigned at fork. Persists across exec and
+	 * is never reused. Lets BPF schedulers identify tasks without storing
+	 * kernel pointers - arena-backed schedulers being one example. See
+	 * scx_bpf_tid_to_task().
+	 */
+	u64			tid;
+	struct rhash_head	tid_hash_node;	/* see SCX_OPS_TID_TO_TASK */
 
 	/* BPF scheduler modifiable fields */
 
 	/*
-	 * Runtime budget in nsecs. This is usually set through
-	 * scx_bpf_dsq_insert() but can also be modified directly by the BPF
-	 * scheduler. Automatically decreased by SCX as the task executes. On
-	 * depletion, a scheduling event is triggered.
+	 * Runtime budget in nsecs - how long the task may hold its cpu. Owned
+	 * by the task's scheduler. Set it when enqueuing via
+	 * scx_bpf_dsq_insert(), or otherwise via scx_bpf_task_set_slice().
+	 * Automatically decreased as the task executes. On depletion a
+	 * scheduling event is triggered.
 	 *
 	 * This value is cleared to zero if the task is preempted by
 	 * %SCX_KICK_PREEMPT and shouldn't be used to determine how long the
@@ -188,15 +250,31 @@ struct sched_ext_entity {
 	u64			dsq_vtime;
 
 	/*
+	 * Out-of-band slice request from scx_bpf_task_set_slice() when the
+	 * caller does not hold the rq lock, applied under the rq lock at the
+	 * next slice consideration. One atomic64 packs the pending flag, the
+	 * issuing sch's id, and the requested slice. See scx_slice_oob_consts.
+	 */
+	atomic64_t		slice_oob;
+
+	/*
+	 * Sub-sched cap rejected reenq context, valid only while
+	 * %SCX_TASK_REENQ_CAP is set. @reenq_reason_caps is the SCX_CAP_* bits
+	 * that were needed but missing. @reenq_reason_cid is the target cid.
+	 */
+	u64			reenq_reason_caps;
+	s32			reenq_reason_cid;
+
+	/*
 	 * If set, reject future sched_setscheduler(2) calls updating the policy
 	 * to %SCHED_EXT with -%EACCES.
 	 *
 	 * Can be set from ops.init_task() while the BPF scheduler is being
-	 * loaded (!scx_init_task_args->fork). If set and the task's policy is
-	 * already %SCHED_EXT, the task's policy is rejected and forcefully
-	 * reverted to %SCHED_NORMAL. The number of such events are reported
-	 * through /sys/kernel/debug/sched_ext::nr_rejected. Setting this flag
-	 * during fork is not allowed.
+	 * loaded. If set and the task's policy is already %SCHED_EXT, the
+	 * task's policy is rejected and forcefully reverted to %SCHED_NORMAL.
+	 * The number of such events are reported through
+	 * /sys/kernel/sched_ext/nr_rejected. Setting this flag from any other
+	 * ops.init_task() invocation, such as during fork, fails the scheduler.
 	 */
 	bool			disallow;	/* reject switching into SCX */
 
@@ -207,27 +285,45 @@ struct sched_ext_entity {
 	struct list_head	tasks_node;
 };
 
-void sched_ext_free(struct task_struct *p);
+void sched_ext_dead(struct task_struct *p);
 void print_scx_info(const char *log_lvl, struct task_struct *p);
 void scx_softlockup(u32 dur_s);
-bool scx_rcu_cpu_stall(void);
+bool scx_hardlockup(int cpu);
+bool scx_rcu_cpu_stall(const struct cpumask *stalled_mask);
 
 #else	/* !CONFIG_SCHED_CLASS_EXT */
 
-static inline void sched_ext_free(struct task_struct *p) {}
+static inline void sched_ext_dead(struct task_struct *p) {}
 static inline void print_scx_info(const char *log_lvl, struct task_struct *p) {}
 static inline void scx_softlockup(u32 dur_s) {}
-static inline bool scx_rcu_cpu_stall(void) { return false; }
+static inline bool scx_hardlockup(int cpu) { return false; }
+static inline bool scx_rcu_cpu_stall(const struct cpumask *stalled_mask) { return false; }
 
 #endif	/* CONFIG_SCHED_CLASS_EXT */
 
 struct scx_task_group {
 #ifdef CONFIG_EXT_GROUP_SCHED
+	/*
+	 * The sched this tg is on, NULL if none. SCX_TG_INITED tracks whether
+	 * ops.cgroup_init() succeeded on it. When a child sched exits and its
+	 * tgs move to the parent, a failed init leaves the tg on the parent
+	 * with INITED clear (see scx_cgroup_return_subtree()).
+	 *
+	 * This is tracked separately from cgrp->scx_sched because the tg
+	 * hierarchy can diverge from the cgroup2 hierarchy in both lifetime and
+	 * shape. A tg stays online past its cgroup's removal while the
+	 * cgrp->scx_sched rewrites visit only live cgroups, leaving a removed
+	 * cgroup's pointer stale. The cpu controller can also be mounted on
+	 * cgroup1.
+	 */
+	struct scx_sched	*sched;
+
 	u32			flags;		/* SCX_TG_* */
 	u32			weight;
 	u64			bw_period_us;
 	u64			bw_quota_us;
 	u64			bw_burst_us;
+	bool			idle;
 #endif
 };
 

@@ -101,6 +101,7 @@
 #include <linux/bits.h>
 #include <linux/device.h>
 #include <linux/err.h>
+#include <linux/fwnode.h>
 #include <linux/i2c.h>
 #include <linux/init.h>
 #include <linux/interrupt.h>
@@ -108,8 +109,7 @@
 #include <linux/hwmon.h>
 #include <linux/kstrtox.h>
 #include <linux/module.h>
-#include <linux/mutex.h>
-#include <linux/of.h>
+#include <linux/property.h>
 #include <linux/regulator/consumer.h>
 #include <linux/slab.h>
 #include <linux/workqueue.h>
@@ -244,59 +244,59 @@ enum chips { adm1023, adm1032, adt7461, adt7461a, adt7481,
  */
 
 static const struct i2c_device_id lm90_id[] = {
-	{ "adm1020", max1617 },
-	{ "adm1021", max1617 },
-	{ "adm1023", adm1023 },
-	{ "adm1032", adm1032 },
-	{ "adt7421", adt7461a },
-	{ "adt7461", adt7461 },
-	{ "adt7461a", adt7461a },
-	{ "adt7481", adt7481 },
-	{ "adt7482", adt7481 },
-	{ "adt7483a", adt7481 },
-	{ "g781", g781 },
-	{ "gl523sm", max1617 },
-	{ "lm84", lm84 },
-	{ "lm86", lm90 },
-	{ "lm89", lm90 },
-	{ "lm90", lm90 },
-	{ "lm99", lm99 },
-	{ "max1617", max1617 },
-	{ "max6642", max6642 },
-	{ "max6646", max6646 },
-	{ "max6647", max6646 },
-	{ "max6648", max6648 },
-	{ "max6649", max6646 },
-	{ "max6654", max6654 },
-	{ "max6657", max6657 },
-	{ "max6658", max6657 },
-	{ "max6659", max6659 },
-	{ "max6680", max6680 },
-	{ "max6681", max6680 },
-	{ "max6690", max6654 },
-	{ "max6692", max6648 },
-	{ "max6695", max6696 },
-	{ "max6696", max6696 },
-	{ "mc1066", max1617 },
-	{ "nct1008", adt7461a },
-	{ "nct210", nct210 },
-	{ "nct214", nct72 },
-	{ "nct218", nct72 },
-	{ "nct72", nct72 },
-	{ "nct7716", nct7716 },
-	{ "nct7717", nct7717 },
-	{ "nct7718", nct7718 },
-	{ "ne1618", ne1618 },
-	{ "w83l771", w83l771 },
-	{ "sa56004", sa56004 },
-	{ "thmc10", max1617 },
-	{ "tmp451", tmp451 },
-	{ "tmp461", tmp461 },
+	{ .name = "adm1020", .driver_data = max1617 },
+	{ .name = "adm1021", .driver_data = max1617 },
+	{ .name = "adm1023", .driver_data = adm1023 },
+	{ .name = "adm1032", .driver_data = adm1032 },
+	{ .name = "adt7421", .driver_data = adt7461a },
+	{ .name = "adt7461", .driver_data = adt7461 },
+	{ .name = "adt7461a", .driver_data = adt7461a },
+	{ .name = "adt7481", .driver_data = adt7481 },
+	{ .name = "adt7482", .driver_data = adt7481 },
+	{ .name = "adt7483a", .driver_data = adt7481 },
+	{ .name = "g781", .driver_data = g781 },
+	{ .name = "gl523sm", .driver_data = max1617 },
+	{ .name = "lm84", .driver_data = lm84 },
+	{ .name = "lm86", .driver_data = lm90 },
+	{ .name = "lm89", .driver_data = lm90 },
+	{ .name = "lm90", .driver_data = lm90 },
+	{ .name = "lm99", .driver_data = lm99 },
+	{ .name = "max1617", .driver_data = max1617 },
+	{ .name = "max6642", .driver_data = max6642 },
+	{ .name = "max6646", .driver_data = max6646 },
+	{ .name = "max6647", .driver_data = max6646 },
+	{ .name = "max6648", .driver_data = max6648 },
+	{ .name = "max6649", .driver_data = max6646 },
+	{ .name = "max6654", .driver_data = max6654 },
+	{ .name = "max6657", .driver_data = max6657 },
+	{ .name = "max6658", .driver_data = max6657 },
+	{ .name = "max6659", .driver_data = max6659 },
+	{ .name = "max6680", .driver_data = max6680 },
+	{ .name = "max6681", .driver_data = max6680 },
+	{ .name = "max6690", .driver_data = max6654 },
+	{ .name = "max6692", .driver_data = max6648 },
+	{ .name = "max6695", .driver_data = max6696 },
+	{ .name = "max6696", .driver_data = max6696 },
+	{ .name = "mc1066", .driver_data = max1617 },
+	{ .name = "nct1008", .driver_data = adt7461a },
+	{ .name = "nct210", .driver_data = nct210 },
+	{ .name = "nct214", .driver_data = nct72 },
+	{ .name = "nct218", .driver_data = nct72 },
+	{ .name = "nct72", .driver_data = nct72 },
+	{ .name = "nct7716", .driver_data = nct7716 },
+	{ .name = "nct7717", .driver_data = nct7717 },
+	{ .name = "nct7718", .driver_data = nct7718 },
+	{ .name = "ne1618", .driver_data = ne1618 },
+	{ .name = "w83l771", .driver_data = w83l771 },
+	{ .name = "sa56004", .driver_data = sa56004 },
+	{ .name = "thmc10", .driver_data = max1617 },
+	{ .name = "tmp451", .driver_data = tmp451 },
+	{ .name = "tmp461", .driver_data = tmp461 },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, lm90_id);
 
-static const struct of_device_id __maybe_unused lm90_of_match[] = {
+static const struct of_device_id lm90_of_match[] = {
 	{
 		.compatible = "adi,adm1032",
 		.data = (void *)adm1032
@@ -735,9 +735,9 @@ struct lm90_data {
 	struct hwmon_channel_info temp_info;
 	const struct hwmon_channel_info *info[3];
 	struct hwmon_chip_info chip;
-	struct mutex update_lock;
 	struct delayed_work alert_work;
 	struct work_struct report_work;
+	bool shutdown;		/* true if shutting down */
 	bool valid;		/* true if register values are valid */
 	bool alarms_valid;	/* true if status register values are valid */
 	unsigned long last_updated; /* in jiffies */
@@ -1156,6 +1156,9 @@ static void lm90_report_alarms(struct work_struct *work)
 
 static int lm90_update_alarms_locked(struct lm90_data *data, bool force)
 {
+	if (data->shutdown)
+		return 0;
+
 	if (force || !data->alarms_valid ||
 	    time_after(jiffies, data->alarms_updated + msecs_to_jiffies(data->update_interval))) {
 		struct i2c_client *client = data->client;
@@ -1192,7 +1195,7 @@ static int lm90_update_alarms_locked(struct lm90_data *data, bool force)
 		check_enable = (client->irq || !(data->config_orig & 0x80)) &&
 			(data->config & 0x80);
 
-		if (force || check_enable)
+		if (data->hwmon_dev && (force || check_enable))
 			schedule_work(&data->report_work);
 
 		/*
@@ -1200,7 +1203,7 @@ static int lm90_update_alarms_locked(struct lm90_data *data, bool force)
 		 * alarms are all clear, and alerts are currently disabled.
 		 * Otherwise (re)schedule worker if needed.
 		 */
-		if (check_enable) {
+		if (check_enable && data->hwmon_dev) {
 			if (!(data->current_alarms & data->alert_alarms)) {
 				dev_dbg(&client->dev, "Re-enabling ALERT#\n");
 				lm90_update_confreg(data, data->config & ~0x80);
@@ -1224,13 +1227,8 @@ static int lm90_update_alarms_locked(struct lm90_data *data, bool force)
 
 static int lm90_update_alarms(struct lm90_data *data, bool force)
 {
-	int err;
-
-	mutex_lock(&data->update_lock);
-	err = lm90_update_alarms_locked(data, force);
-	mutex_unlock(&data->update_lock);
-
-	return err;
+	guard(hwmon_lock)(data->hwmon_dev);
+	return lm90_update_alarms_locked(data, force);
 }
 
 static void lm90_alert_work(struct work_struct *__work)
@@ -1519,9 +1517,7 @@ static int lm90_temp_read(struct device *dev, u32 attr, int channel, long *val)
 	int err;
 	u16 bit;
 
-	mutex_lock(&data->update_lock);
 	err = lm90_update_device(dev);
-	mutex_unlock(&data->update_lock);
 	if (err)
 		return err;
 
@@ -1590,11 +1586,9 @@ static int lm90_temp_write(struct device *dev, u32 attr, int channel, long val)
 	struct lm90_data *data = dev_get_drvdata(dev);
 	int err;
 
-	mutex_lock(&data->update_lock);
-
 	err = lm90_update_device(dev);
 	if (err)
-		goto error;
+		return err;
 
 	switch (attr) {
 	case hwmon_temp_min:
@@ -1624,9 +1618,6 @@ static int lm90_temp_write(struct device *dev, u32 attr, int channel, long val)
 		err = -EOPNOTSUPP;
 		break;
 	}
-error:
-	mutex_unlock(&data->update_lock);
-
 	return err;
 }
 
@@ -1662,9 +1653,7 @@ static int lm90_chip_read(struct device *dev, u32 attr, int channel, long *val)
 	struct lm90_data *data = dev_get_drvdata(dev);
 	int err;
 
-	mutex_lock(&data->update_lock);
 	err = lm90_update_device(dev);
-	mutex_unlock(&data->update_lock);
 	if (err)
 		return err;
 
@@ -1710,11 +1699,9 @@ static int lm90_chip_write(struct device *dev, u32 attr, int channel, long val)
 	struct i2c_client *client = data->client;
 	int err;
 
-	mutex_lock(&data->update_lock);
-
 	err = lm90_update_device(dev);
 	if (err)
-		goto error;
+		return err;
 
 	switch (attr) {
 	case hwmon_chip_update_interval:
@@ -1728,9 +1715,6 @@ static int lm90_chip_write(struct device *dev, u32 attr, int channel, long val)
 		err = -EOPNOTSUPP;
 		break;
 	}
-error:
-	mutex_unlock(&data->update_lock);
-
 	return err;
 }
 
@@ -2600,18 +2584,25 @@ static void lm90_restore_conf(void *_data)
 	struct lm90_data *data = _data;
 	struct i2c_client *client = data->client;
 
-	cancel_delayed_work_sync(&data->alert_work);
-	cancel_work_sync(&data->report_work);
-
 	/* Restore initial configuration */
 	if (data->flags & LM90_HAVE_CONVRATE)
 		lm90_write_convrate(data, data->convrate_orig);
 	lm90_write_reg(client, LM90_REG_CONFIG1, data->config_orig);
 }
 
+static void lm90_stop_work(void *_data)
+{
+	struct lm90_data *data = _data;
+
+	scoped_guard(hwmon_lock, data->hwmon_dev) {
+		data->shutdown = true;
+	}
+	cancel_delayed_work_sync(&data->alert_work);
+	cancel_work_sync(&data->report_work);
+}
+
 static int lm90_init_client(struct i2c_client *client, struct lm90_data *data)
 {
-	struct device_node *np = client->dev.of_node;
 	int config, convrate;
 
 	if (data->flags & LM90_HAVE_CONVRATE) {
@@ -2635,7 +2626,7 @@ static int lm90_init_client(struct i2c_client *client, struct lm90_data *data)
 
 	/* Check Temperature Range Select */
 	if (data->flags & LM90_HAVE_EXTENDED_TEMP) {
-		if (of_property_read_bool(np, "ti,extended-range-enable"))
+		if (device_property_read_bool(&client->dev, "ti,extended-range-enable"))
 			config |= 0x04;
 		if (!(config & 0x04))
 			data->flags &= ~LM90_HAVE_EXTENDED_TEMP;
@@ -2701,36 +2692,41 @@ static irqreturn_t lm90_irq_thread(int irq, void *dev_id)
 		return IRQ_NONE;
 }
 
-static int lm90_probe_channel_from_dt(struct i2c_client *client,
-				      struct device_node *child,
-				      struct lm90_data *data)
+static int lm90_probe_channel(struct i2c_client *client,
+			      struct fwnode_handle *child,
+			      struct lm90_data *data)
 {
 	u32 id;
 	s32 val;
 	int err;
 	struct device *dev = &client->dev;
 
-	err = of_property_read_u32(child, "reg", &id);
+	err = fwnode_property_read_u32(child, "reg", &id);
 	if (err) {
-		dev_err(dev, "missing reg property of %pOFn\n", child);
+		dev_err(dev, "missing reg property of %pfw\n", child);
 		return err;
 	}
 
 	if (id >= MAX_CHANNELS) {
-		dev_err(dev, "invalid reg property value %d in %pOFn\n", id, child);
+		dev_err(dev, "invalid reg property value %d in %pfw\n", id, child);
 		return -EINVAL;
 	}
 
-	err = of_property_read_string(child, "label", &data->channel_label[id]);
+	err = fwnode_property_read_string(child, "label", &data->channel_label[id]);
 	if (err == -ENODATA || err == -EILSEQ) {
-		dev_err(dev, "invalid label property in %pOFn\n", child);
+		dev_err(dev, "invalid label property in %pfw\n", child);
 		return err;
 	}
 
 	if (data->channel_label[id])
 		data->channel_config[id] |= HWMON_T_LABEL;
 
-	err = of_property_read_s32(child, "temperature-offset-millicelsius", &val);
+	/*
+	 * fwnode_property_read_u32() has no signed equivalent.
+	 * temperature-offset-millicelsius is signed, so read and reinterpret it as s32 to
+	 * preserve negative offsets values (same behavior as the old of_property_read_s32()).
+	 */
+	err = fwnode_property_read_u32(child, "temperature-offset-millicelsius", (u32 *)&val);
 	if (!err) {
 		if (id == 0) {
 			dev_err(dev, "temperature-offset-millicelsius can't be set for internal channel\n");
@@ -2748,18 +2744,17 @@ static int lm90_probe_channel_from_dt(struct i2c_client *client,
 	return 0;
 }
 
-static int lm90_parse_dt_channel_info(struct i2c_client *client,
-				      struct lm90_data *data)
+static int lm90_parse_channel_info(struct i2c_client *client,
+				   struct lm90_data *data)
 {
 	int err;
 	struct device *dev = &client->dev;
-	const struct device_node *np = dev->of_node;
 
-	for_each_child_of_node_scoped(np, child) {
-		if (strcmp(child->name, "channel"))
+	device_for_each_child_node_scoped(dev, child) {
+		if (!fwnode_name_eq(child, "channel"))
 			continue;
 
-		err = lm90_probe_channel_from_dt(client, child, data);
+		err = lm90_probe_channel(client, child, data);
 		if (err)
 			return err;
 	}
@@ -2793,7 +2788,6 @@ static int lm90_probe(struct i2c_client *client)
 
 	data->client = client;
 	i2c_set_clientdata(client, data);
-	mutex_init(&data->update_lock);
 	INIT_DELAYED_WORK(&data->alert_work, lm90_alert_work);
 	INIT_WORK(&data->report_work, lm90_report_alarms);
 
@@ -2897,12 +2891,10 @@ static int lm90_probe(struct i2c_client *client)
 	/* Set maximum conversion rate */
 	data->max_convrate = lm90_params[data->kind].max_convrate;
 
-	/* Parse device-tree channel information */
-	if (client->dev.of_node) {
-		err = lm90_parse_dt_channel_info(client, data);
-		if (err)
-			return err;
-	}
+	/* Parse channel information */
+	err = lm90_parse_channel_info(client, data);
+	if (err)
+		return err;
 
 	/* Initialize the LM90 chip */
 	err = lm90_init_client(client, data);
@@ -2919,15 +2911,17 @@ static int lm90_probe(struct i2c_client *client)
 
 	data->hwmon_dev = hwmon_dev;
 
+	err = devm_add_action_or_reset(&client->dev, lm90_stop_work, data);
+	if (err)
+		return err;
+
 	if (client->irq) {
 		dev_dbg(dev, "IRQ: %d\n", client->irq);
 		err = devm_request_threaded_irq(dev, client->irq,
 						NULL, lm90_irq_thread,
 						IRQF_ONESHOT, "lm90", client);
-		if (err < 0) {
-			dev_err(dev, "cannot request IRQ %d\n", client->irq);
+		if (err < 0)
 			return err;
-		}
 	}
 
 	return 0;
@@ -2947,14 +2941,16 @@ static void lm90_alert(struct i2c_client *client, enum i2c_alert_protocol type,
 		 */
 		struct lm90_data *data = i2c_get_clientdata(client);
 
-		if ((data->flags & LM90_HAVE_BROKEN_ALERT) &&
-		    (data->current_alarms & data->alert_alarms)) {
-			if (!(data->config & 0x80)) {
-				dev_dbg(&client->dev, "Disabling ALERT#\n");
-				lm90_update_confreg(data, data->config | 0x80);
+		scoped_guard(hwmon_lock, data->hwmon_dev) {
+			if (!data->shutdown && (data->flags & LM90_HAVE_BROKEN_ALERT) &&
+			    (data->current_alarms & data->alert_alarms)) {
+				if (!(data->config & 0x80)) {
+					dev_dbg(&client->dev, "Disabling ALERT#\n");
+					lm90_update_confreg(data, data->config | 0x80);
+				}
+				schedule_delayed_work(&data->alert_work,
+					max_t(int, HZ, msecs_to_jiffies(data->update_interval)));
 			}
-			schedule_delayed_work(&data->alert_work,
-				max_t(int, HZ, msecs_to_jiffies(data->update_interval)));
 		}
 	} else {
 		dev_dbg(&client->dev, "Everything OK\n");
@@ -2989,7 +2985,7 @@ static struct i2c_driver lm90_driver = {
 	.class		= I2C_CLASS_HWMON,
 	.driver = {
 		.name	= "lm90",
-		.of_match_table = of_match_ptr(lm90_of_match),
+		.of_match_table = lm90_of_match,
 		.pm	= pm_sleep_ptr(&lm90_pm_ops),
 	},
 	.probe		= lm90_probe,

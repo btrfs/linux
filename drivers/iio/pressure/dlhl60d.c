@@ -306,14 +306,11 @@ static int dlh_probe(struct i2c_client *client)
 	indio_dev->num_channels = ARRAY_SIZE(dlh_channels);
 
 	if (client->irq > 0) {
-		ret = devm_request_threaded_irq(&client->dev, client->irq,
-			dlh_interrupt, NULL,
-			IRQF_TRIGGER_RISING | IRQF_ONESHOT,
-			st->info->name, indio_dev);
-		if (ret) {
-			dev_err(&client->dev, "failed to allocate threaded irq");
+		ret = devm_request_irq(&client->dev, client->irq, dlh_interrupt,
+				       IRQF_TRIGGER_RISING | IRQF_NO_THREAD,
+				       st->info->name, indio_dev);
+		if (ret)
 			return ret;
-		}
 
 		st->use_interrupt = true;
 		init_completion(&st->completion);
@@ -341,8 +338,8 @@ static const struct of_device_id dlh_of_match[] = {
 MODULE_DEVICE_TABLE(of, dlh_of_match);
 
 static const struct i2c_device_id dlh_id[] = {
-	{ "dlhl60d", (kernel_ulong_t)&dlhl60d_info },
-	{ "dlhl60g", (kernel_ulong_t)&dlhl60g_info },
+	{ .name = "dlhl60d", .driver_data = (kernel_ulong_t)&dlhl60d_info },
+	{ .name = "dlhl60g", .driver_data = (kernel_ulong_t)&dlhl60g_info },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, dlh_id);

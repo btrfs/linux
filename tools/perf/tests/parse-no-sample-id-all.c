@@ -49,7 +49,7 @@ static int process_events(union perf_event **events, size_t count)
 	for (i = 0; i < count && !err; i++)
 		err = process_event(&evlist, events[i]);
 
-	evlist__delete(evlist);
+	evlist__put(evlist);
 
 	return err;
 }
@@ -82,12 +82,18 @@ static int test__parse_no_sample_id_all(struct test_suite *test __maybe_unused,
 			.type = PERF_RECORD_HEADER_ATTR,
 			.size = sizeof(struct test_attr_event),
 		},
+		.attr = {
+			.size = sizeof(struct perf_event_attr),
+		},
 		.id = 1,
 	};
 	struct test_attr_event event2 = {
 		.header = {
 			.type = PERF_RECORD_HEADER_ATTR,
 			.size = sizeof(struct test_attr_event),
+		},
+		.attr = {
+			.size = sizeof(struct perf_event_attr),
 		},
 		.id = 2,
 	};
