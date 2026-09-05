@@ -32,8 +32,9 @@
         "Unit": "cpu_core"
     },
     {
-        "BriefDescription": "Counts the number of active floating point and integer dividers per cycle.",
+        "BriefDescription": "This event is deprecated.",
         "Counter": "0,1,2,3,4,5",
+        "Deprecated": "1",
         "EventCode": "0xcd",
         "EventName": "ARITH.DIV_OCCUPANCY",
         "SampleAfterValue": "1000003",
@@ -41,8 +42,9 @@
         "Unit": "cpu_atom"
     },
     {
-        "BriefDescription": "Counts the number of floating point and integer divider uops executed per cycle.",
+        "BriefDescription": "This event is deprecated.",
         "Counter": "0,1,2,3,4,5",
+        "Deprecated": "1",
         "EventCode": "0xcd",
         "EventName": "ARITH.DIV_UOPS",
         "SampleAfterValue": "1000003",
@@ -243,6 +245,15 @@
         "Unit": "cpu_atom"
     },
     {
+        "BriefDescription": "Counts the number of near indirect JMP branch instructions retired.",
+        "Counter": "0,1,2,3,4,5",
+        "EventCode": "0xc4",
+        "EventName": "BR_INST_RETIRED.INDIRECT_JMP",
+        "SampleAfterValue": "200003",
+        "UMask": "0xef",
+        "Unit": "cpu_atom"
+    },
+    {
         "BriefDescription": "This event is deprecated. Refer to new event BR_INST_RETIRED.INDIRECT_CALL",
         "Counter": "0,1,2,3,4,5",
         "Deprecated": "1",
@@ -339,6 +350,15 @@
         "Unit": "cpu_atom"
     },
     {
+        "BriefDescription": "Counts the number of near relative JMP branch instructions retired.",
+        "Counter": "0,1,2,3,4,5",
+        "EventCode": "0xc4",
+        "EventName": "BR_INST_RETIRED.REL_JMP",
+        "SampleAfterValue": "200003",
+        "UMask": "0xdf",
+        "Unit": "cpu_atom"
+    },
+    {
         "BriefDescription": "This event is deprecated. Refer to new event BR_INST_RETIRED.NEAR_RETURN",
         "Counter": "0,1,2,3,4,5",
         "Deprecated": "1",
@@ -346,6 +366,15 @@
         "EventName": "BR_INST_RETIRED.RETURN",
         "SampleAfterValue": "200003",
         "UMask": "0xf7",
+        "Unit": "cpu_atom"
+    },
+    {
+        "BriefDescription": "Counts the number of taken branch instructions retired.",
+        "Counter": "0,1,2,3,4,5",
+        "EventCode": "0xc4",
+        "EventName": "BR_INST_RETIRED.TAKEN",
+        "SampleAfterValue": "200003",
+        "UMask": "0x80",
         "Unit": "cpu_atom"
     },
     {
@@ -463,6 +492,15 @@
         "Unit": "cpu_core"
     },
     {
+        "BriefDescription": "Counts the number of mispredicted near indirect JMP branch instructions retired.",
+        "Counter": "0,1,2,3,4,5",
+        "EventCode": "0xc5",
+        "EventName": "BR_MISP_RETIRED.INDIRECT_JMP",
+        "SampleAfterValue": "200003",
+        "UMask": "0xef",
+        "Unit": "cpu_atom"
+    },
+    {
         "BriefDescription": "This event is deprecated. Refer to new event BR_MISP_RETIRED.INDIRECT_CALL",
         "Counter": "0,1,2,3,4,5",
         "Deprecated": "1",
@@ -512,11 +550,11 @@
         "Unit": "cpu_atom"
     },
     {
-        "BriefDescription": "This event counts the number of mispredicted ret instructions retired. Non PEBS",
+        "BriefDescription": "This event counts the number of mispredicted ret instructions retired.",
         "Counter": "0,1,2,3,4,5,6,7",
         "EventCode": "0xc5",
         "EventName": "BR_MISP_RETIRED.RET",
-        "PublicDescription": "This is a non-precise version (that is, does not use PEBS) of the event that counts mispredicted return instructions retired. Available PDIST counters: 0",
+        "PublicDescription": "This event counts the number of mispredicted ret instructions retired. Available PDIST counters: 0",
         "SampleAfterValue": "100007",
         "UMask": "0x8",
         "Unit": "cpu_core"
@@ -538,6 +576,15 @@
         "EventName": "BR_MISP_RETIRED.TAKEN_JCC",
         "SampleAfterValue": "200003",
         "UMask": "0xfe",
+        "Unit": "cpu_atom"
+    },
+    {
+        "BriefDescription": "Counts the total number of BTCLEARS.",
+        "Counter": "0,1,2,3,4,5",
+        "EventCode": "0xe8",
+        "EventName": "BTCLEAR.ANY",
+        "PublicDescription": "Counts the total number of BTCLEARS which occurs when the Branch Target Buffer (BTB) predicts a taken branch.",
+        "SampleAfterValue": "200003",
         "Unit": "cpu_atom"
     },
     {
@@ -571,7 +618,7 @@
         "Unit": "cpu_core"
     },
     {
-        "BriefDescription": "Counts the number of unhalted core clock cycles. (Fixed event)",
+        "BriefDescription": "Fixed Counter: Counts the number of unhalted core clock cycles. [This event is alias to CPU_CLK_UNHALTED.THREAD]",
         "Counter": "Fixed counter 1",
         "EventName": "CPU_CLK_UNHALTED.CORE",
         "PublicDescription": "Counts the number of core cycles while the core is not in a halt state. The core enters the halt state when it is running the HLT instruction. The core frequency may change from time to time. For this reason this event may have a changing ratio with regards to time. This event uses fixed counter 1.",
@@ -580,7 +627,7 @@
         "Unit": "cpu_atom"
     },
     {
-        "BriefDescription": "Counts the number of unhalted core clock cycles.",
+        "BriefDescription": "Counts the number of unhalted core clock cycles. [This event is alias to CPU_CLK_UNHALTED.THREAD_P]",
         "Counter": "0,1,2,3,4,5",
         "EventCode": "0x3c",
         "EventName": "CPU_CLK_UNHALTED.CORE_P",
@@ -649,7 +696,7 @@
         "Unit": "cpu_core"
     },
     {
-        "BriefDescription": "Counts the number of unhalted reference clock cycles at TSC frequency. (Fixed event)",
+        "BriefDescription": "Fixed Counter: Counts the number of unhalted reference clock cycles at TSC frequency.",
         "Counter": "Fixed counter 2",
         "EventName": "CPU_CLK_UNHALTED.REF_TSC",
         "PublicDescription": "Counts the number of reference cycles that the core is not in a halt state. The core enters the halt state when it is running the HLT instruction. This event is not affected by core frequency changes and increments at a fixed frequency that is also used for the Time Stamp Counter (TSC). This event uses fixed counter 2.",
@@ -687,7 +734,7 @@
         "Unit": "cpu_core"
     },
     {
-        "BriefDescription": "Counts the number of unhalted core clock cycles. (Fixed event)",
+        "BriefDescription": "Fixed Counter: Counts the number of unhalted core clock cycles. [This event is alias to CPU_CLK_UNHALTED.CORE]",
         "Counter": "Fixed counter 1",
         "EventName": "CPU_CLK_UNHALTED.THREAD",
         "PublicDescription": "Counts the number of core cycles while the core is not in a halt state.  The core enters the halt state when it is running the HLT instruction. The core frequency may change from time to time. For this reason this event may have a changing ratio with regards to time.  This event uses fixed counter 1.",
@@ -705,7 +752,7 @@
         "Unit": "cpu_core"
     },
     {
-        "BriefDescription": "Counts the number of unhalted core clock cycles.",
+        "BriefDescription": "Counts the number of unhalted core clock cycles. [This event is alias to CPU_CLK_UNHALTED.CORE_P]",
         "Counter": "0,1,2,3,4,5",
         "EventCode": "0x3c",
         "EventName": "CPU_CLK_UNHALTED.THREAD_P",
@@ -873,7 +920,7 @@
         "Unit": "cpu_core"
     },
     {
-        "BriefDescription": "Counts the total number of instructions retired. (Fixed event)",
+        "BriefDescription": "Fixed Counter: Counts the total number of instructions retired.",
         "Counter": "Fixed counter 0",
         "EventName": "INST_RETIRED.ANY",
         "PublicDescription": "Counts the total number of instructions that retired. For instructions that consist of multiple uops, this event counts the retirement of the last uop of the instruction. This event continues counting during hardware interrupts, traps, and inside interrupt handlers. This event uses fixed counter 0. Available PDIST counters: 32",
@@ -941,7 +988,7 @@
         "Counter": "0,1,2,3,4,5,6,7",
         "EventCode": "0xc0",
         "EventName": "INST_RETIRED.REP_ITERATION",
-        "PublicDescription": "Number of iterations of Repeat (REP) string retired instructions such as MOVS, CMPS, and SCAS. Each has a byte, word, and doubleword version and string instructions can be repeated using a repetition prefix, REP, that allows their architectural execution to be repeated a number of times as specified by the RCX register. Note the number of iterations is implementation-dependent.",
+        "PublicDescription": "Number of iterations of Repeat (REP) string retired instructions such as MOVS, CMPS, and SCAS. Each has a byte, word, and doubleword version and string instructions can be repeated using a repetition prefix, REP, that allows their architectural execution to be repeated a number of times as specified by the RCX register. Note: Since the number of iterations within a REP instruction can be significantly affected by fast strings, this event may vary run to run and not match the architectural number of iterations (specified by RCX)",
         "SampleAfterValue": "2000003",
         "UMask": "0x8",
         "Unit": "cpu_core"
@@ -1195,6 +1242,24 @@
         "Unit": "cpu_atom"
     },
     {
+        "BriefDescription": "Counts the number of machine clears that flush the pipeline and restart the machine without the use of microcode.",
+        "Counter": "0,1,2,3,4,5",
+        "EventCode": "0xc3",
+        "EventName": "MACHINE_CLEARS.FAST",
+        "SampleAfterValue": "20003",
+        "UMask": "0x10",
+        "Unit": "cpu_atom"
+    },
+    {
+        "BriefDescription": "Counts the number of virtual traps taken.",
+        "Counter": "0,1,2,3,4,5",
+        "EventCode": "0xc3",
+        "EventName": "MACHINE_CLEARS.FPC_VIRTUAL_TRAP",
+        "SampleAfterValue": "20003",
+        "UMask": "0x40",
+        "Unit": "cpu_atom"
+    },
+    {
         "BriefDescription": "Counts the number of machines clears due to memory renaming.",
         "Counter": "0,1,2,3,4,5",
         "EventCode": "0xc3",
@@ -1270,6 +1335,42 @@
         "SampleAfterValue": "100003",
         "UMask": "0x20",
         "Unit": "cpu_core"
+    },
+    {
+        "BriefDescription": "Counts the number of CLFLUSH, CLWB, and CLDEMOTE instructions retired.",
+        "Counter": "0,1,2,3,4,5",
+        "EventCode": "0xe0",
+        "EventName": "MISC_RETIRED1.CL_INST",
+        "SampleAfterValue": "1000003",
+        "UMask": "0xff",
+        "Unit": "cpu_atom"
+    },
+    {
+        "BriefDescription": "Counts the number of LFENCE instructions retired.",
+        "Counter": "0,1,2,3,4,5",
+        "EventCode": "0xe0",
+        "EventName": "MISC_RETIRED1.LFENCE",
+        "SampleAfterValue": "1000003",
+        "UMask": "0x2",
+        "Unit": "cpu_atom"
+    },
+    {
+        "BriefDescription": "Counts the number of accesses to KeyLocker cache.",
+        "Counter": "0,1,2,3,4,5",
+        "EventCode": "0xe1",
+        "EventName": "MISC_RETIRED2.KEYLOCKER_ACCESS",
+        "SampleAfterValue": "1000003",
+        "UMask": "0x10",
+        "Unit": "cpu_atom"
+    },
+    {
+        "BriefDescription": "Counts the number of misses to KeyLocker cache.",
+        "Counter": "0,1,2,3,4,5",
+        "EventCode": "0xe1",
+        "EventName": "MISC_RETIRED2.KEYLOCKER_MISS",
+        "SampleAfterValue": "1000003",
+        "UMask": "0x11",
+        "Unit": "cpu_atom"
     },
     {
         "BriefDescription": "Cycles stalled due to no store buffers available. (not including draining form sync).",
@@ -1352,6 +1453,15 @@
         "EventName": "SERIALIZATION.C01_MS_SCB",
         "SampleAfterValue": "200003",
         "UMask": "0x4",
+        "Unit": "cpu_atom"
+    },
+    {
+        "BriefDescription": "Counts the number issue slots not consumed  due to a  color request for an FCW or MXCSR control register when all 4 colors (copies) are already in use.",
+        "Counter": "0,1,2,3,4,5",
+        "EventCode": "0x75",
+        "EventName": "SERIALIZATION.COLOR_STALLS",
+        "SampleAfterValue": "200003",
+        "UMask": "0x8",
         "Unit": "cpu_atom"
     },
     {

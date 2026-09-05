@@ -58,7 +58,7 @@ struct GUID {
  */
 struct cpu_str {
 	u8 len;
-	u8 unused;
+	u8 ads_len;
 	u16 name[];
 };
 
@@ -77,10 +77,14 @@ static_assert(sizeof(size_t) == 8);
 typedef u32 CLST;
 #endif
 
+/* On-disk sparsed cluster is marked as -1. */
 #define SPARSE_LCN64   ((u64)-1)
 #define SPARSE_LCN     ((CLST)-1)
+/* Below is virtual (not on-disk) values. */
 #define RESIDENT_LCN   ((CLST)-2)
 #define COMPRESSED_LCN ((CLST)-3)
+#define EOF_LCN       ((CLST)-4)
+#define DELALLOC_LCN   ((CLST)-5)
 
 enum RECORD_NUM {
 	MFT_REC_MFT		= 0,
@@ -166,6 +170,7 @@ extern const __le16 SDH_NAME[4];
 extern const __le16 SO_NAME[2];
 extern const __le16 SQ_NAME[2];
 extern const __le16 SR_NAME[2];
+extern const __le16 QUERY_STREAMS[13];
 
 extern const __le16 BAD_NAME[4];
 extern const __le16 SDS_NAME[4];

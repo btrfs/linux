@@ -25,7 +25,7 @@
 #include <linux/moduleparam.h>
 #include <linux/pci.h>
 #include <asm/msr.h>
-#include <asm/processor.h>
+#include <linux/processor.h>
 #include <asm/cpu_device_id.h>
 #include <linux/sched/isolation.h>
 
@@ -39,7 +39,6 @@ static int force_tjmax;
 module_param_named(tjmax, force_tjmax, int, 0444);
 MODULE_PARM_DESC(tjmax, "TjMax value in degrees Celsius");
 
-#define NUM_REAL_CORES		512	/* Number of Real cores per cpu */
 #define CORETEMP_NAME_LENGTH	28	/* String Length of attrs */
 
 enum coretemp_attr_index {
@@ -69,7 +68,7 @@ enum coretemp_attr_index {
  *		This value is passed as "id" field to rdmsr/wrmsr functions.
  * @status_reg: One of IA32_THERM_STATUS or IA32_PACKAGE_THERM_STATUS,
  *		from where the temperature values should be read.
- * @attr_size:  Total number of pre-core attrs displayed in the sysfs.
+ * @attr_size:  Number of sysfs attributes in this temperature data group.
  */
 struct temp_data {
 	int temp;
@@ -136,15 +135,24 @@ static const struct tjmax_model tjmax_model_table[] = {
 							 * which are covered by tjmax_table
 							 */
 	{ INTEL_ATOM_BONNELL_MID,     ANY, 90000 },	/* Atom Tunnel Creek (Exx), Lincroft (Z6xx)
-							 * Note: TjMax for E6xxT is 110C, but CPU type
-							 * is undetectable by software
+							 * Note: TjMax for E6xxT is 110C, but CPU
+							 * type is undetectable by software
 							 */
 	{ INTEL_ATOM_SALTWELL_MID,    ANY, 90000 },	/* Atom Medfield (Z2460) */
 	{ INTEL_ATOM_SALTWELL_TABLET, ANY, 90000 },	/* Atom Clover Trail/Cloverview (Z27x0) */
 	{ INTEL_ATOM_SALTWELL,	      ANY, 100000 },	/* Atom Cedar Trail/Cedarview (N2xxx, D2xxx)
-							 * Also matches S12x0 (stepping 9), covered by
-							 * PCI table
+							 * Also matches S12x0 (stepping 9), covered
+							 * by PCI table
 							 */
+	{ INTEL_ATOM_SILVERMONT,      9, 110000 },	/* Atom Bay Trail E38xx (embedded) */
+	{ INTEL_ATOM_SILVERMONT,      ANY, 90000 },	/* Atom Bay Trail Z37xx (tablet) */
+	{ INTEL_ATOM_SILVERMONT_MID,  ANY, 90000 },	/* Atom Merrifield (Z34xx) */
+	{ INTEL_ATOM_SILVERMONT_MID2, ANY, 90000 },	/* Atom Moorefield (Z35xx) */
+	{ INTEL_ATOM_AIRMONT,	      ANY, 90000 },	/* Atom Cherry Trail (Z8xxx) */
+	{ INTEL_ATOM_GOLDMONT,	      ANY, 105000 },	/* Atom Apollo Lake (J3xxx, N3xxx, E39xx) */
+	{ INTEL_ATOM_GOLDMONT_PLUS,   ANY, 105000 },	/* Atom Gemini Lake (J4xxx, N4xxx, N5xxx) */
+	{ INTEL_ATOM_TREMONT,	      ANY, 105000 },	/* Atom Elkhart Lake */
+	{ INTEL_ATOM_TREMONT_L,	      ANY, 105000 },	/* Atom Jasper Lake */
 };
 
 static bool is_pkg_temp_data(struct temp_data *tdata)
@@ -160,7 +168,7 @@ static int adjust_tjmax(struct cpuinfo_x86 *c, u32 id, struct device *dev)
 	int tjmax_ee = 85000;
 	int usemsr_ee = 1;
 	int err;
-	u32 eax, edx;
+	u64 val;
 	int i;
 	u16 devfn = PCI_DEVFN(0, 0);
 	struct pci_dev *host_bridge = pci_get_domain_bus_and_slot(0, 0, devfn);
@@ -192,6 +200,7 @@ static int adjust_tjmax(struct cpuinfo_x86 *c, u32 id, struct device *dev)
 
 	for (i = 0; i < ARRAY_SIZE(tjmax_model_table); i++) {
 		const struct tjmax_model *tm = &tjmax_model_table[i];
+
 		if (c->x86_vfm == tm->vfm &&
 		    (tm->stepping_mask == ANY ||
 		     tm->stepping_mask == c->x86_stepping))
@@ -211,14 +220,13 @@ static int adjust_tjmax(struct cpuinfo_x86 *c, u32 id, struct device *dev)
 		 * http://softwarecommunity.intel.com/Wiki/Mobility/720.htm
 		 * For Core2 cores, check MSR 0x17, bit 28 1 = Mobile CPU
 		 */
-		err = rdmsr_safe_on_cpu(id, 0x17, &eax, &edx);
+		err = rdmsrq_safe_on_cpu(id, 0x17, &val);
 		if (err) {
 			dev_warn(dev,
-				 "Unable to access MSR 0x17, assuming desktop"
-				 " CPU\n");
+				 "Unable to access MSR 0x17, assuming desktop CPU\n");
 			usemsr_ee = 0;
 		} else if (c->x86_vfm < INTEL_CORE2_PENRYN &&
-			   !(eax & 0x10000000)) {
+			   !(val & 0x10000000)) {
 			/*
 			 * Trust bit 28 up to Penryn, I could not find any
 			 * documentation on that; if you happen to know
@@ -226,8 +234,8 @@ static int adjust_tjmax(struct cpuinfo_x86 *c, u32 id, struct device *dev)
 			 */
 			usemsr_ee = 0;
 		} else {
-			/* Platform ID bits 52:50 (EDX starts at bit 32) */
-			platform_id = (edx >> 18) & 0x7;
+			/* Platform ID bits 52:50 */
+			platform_id = (val >> 50) & 0x7;
 
 			/*
 			 * Mobile Penryn CPU seems to be platform ID 7 or 5
@@ -246,12 +254,11 @@ static int adjust_tjmax(struct cpuinfo_x86 *c, u32 id, struct device *dev)
 	}
 
 	if (usemsr_ee) {
-		err = rdmsr_safe_on_cpu(id, 0xee, &eax, &edx);
+		err = rdmsrq_safe_on_cpu(id, 0xee, &val);
 		if (err) {
 			dev_warn(dev,
-				 "Unable to access MSR 0xEE, for Tjmax, left"
-				 " at default\n");
-		} else if (eax & 0x40000000) {
+				 "Unable to access MSR 0xEE, for Tjmax, left at default\n");
+		} else if (val & 0x40000000) {
 			tjmax = tjmax_ee;
 		}
 	} else if (tjmax == 100000) {
@@ -269,7 +276,7 @@ static int get_tjmax(struct temp_data *tdata, struct device *dev)
 {
 	struct cpuinfo_x86 *c = &cpu_data(tdata->cpu);
 	int err;
-	u32 eax, edx;
+	u64 msrval;
 	u32 val;
 
 	/* use static tjmax once it is set */
@@ -280,11 +287,11 @@ static int get_tjmax(struct temp_data *tdata, struct device *dev)
 	 * A new feature of current Intel(R) processors, the
 	 * IA32_TEMPERATURE_TARGET contains the TjMax value
 	 */
-	err = rdmsr_safe_on_cpu(tdata->cpu, MSR_IA32_TEMPERATURE_TARGET, &eax, &edx);
+	err = rdmsrq_safe_on_cpu(tdata->cpu, MSR_IA32_TEMPERATURE_TARGET, &msrval);
 	if (err) {
 		dev_warn_once(dev, "Unable to read TjMax from CPU %u\n", tdata->cpu);
 	} else {
-		val = (eax >> 16) & 0xff;
+		val = (msrval >> 16) & 0xff;
 		if (val)
 			return val * 1000;
 	}
@@ -305,7 +312,7 @@ static int get_tjmax(struct temp_data *tdata, struct device *dev)
 
 static int get_ttarget(struct temp_data *tdata, struct device *dev)
 {
-	u32 eax, edx;
+	u64 val;
 	int tjmax, ttarget_offset, ret;
 
 	/*
@@ -315,14 +322,14 @@ static int get_ttarget(struct temp_data *tdata, struct device *dev)
 	if (tdata->tjmax)
 		return -ENODEV;
 
-	ret = rdmsr_safe_on_cpu(tdata->cpu, MSR_IA32_TEMPERATURE_TARGET, &eax, &edx);
+	ret = rdmsrq_safe_on_cpu(tdata->cpu, MSR_IA32_TEMPERATURE_TARGET, &val);
 	if (ret)
 		return ret;
 
-	tjmax = (eax >> 16) & 0xff;
+	tjmax = (val >> 16) & 0xff;
 
 	/* Read the still undocumented bits 8:15 of IA32_TEMPERATURE_TARGET. */
-	ttarget_offset = (eax >> 8) & 0xff;
+	ttarget_offset = (val >> 8) & 0xff;
 
 	return (tjmax - ttarget_offset) * 1000;
 }
@@ -333,7 +340,7 @@ static int max_zones __read_mostly;
 static struct platform_device **zone_devices;
 
 static ssize_t show_label(struct device *dev,
-				struct device_attribute *devattr, char *buf)
+			  struct device_attribute *devattr, char *buf)
 {
 	struct platform_data *pdata = dev_get_drvdata(dev);
 	struct temp_data *tdata = container_of(devattr, struct temp_data, sd_attrs[ATTR_LABEL]);
@@ -345,21 +352,21 @@ static ssize_t show_label(struct device *dev,
 }
 
 static ssize_t show_crit_alarm(struct device *dev,
-				struct device_attribute *devattr, char *buf)
+			       struct device_attribute *devattr, char *buf)
 {
-	u32 eax, edx;
+	struct msr val;
 	struct temp_data *tdata = container_of(devattr, struct temp_data,
 						sd_attrs[ATTR_CRIT_ALARM]);
 
 	mutex_lock(&tdata->update_lock);
-	rdmsr_on_cpu(tdata->cpu, tdata->status_reg, &eax, &edx);
+	rdmsrq_on_cpu(tdata->cpu, tdata->status_reg, &val.q);
 	mutex_unlock(&tdata->update_lock);
 
-	return sprintf(buf, "%d\n", (eax >> 5) & 1);
+	return sprintf(buf, "%d\n", (val.l >> 5) & 1);
 }
 
 static ssize_t show_tjmax(struct device *dev,
-			struct device_attribute *devattr, char *buf)
+			  struct device_attribute *devattr, char *buf)
 {
 	struct temp_data *tdata = container_of(devattr, struct temp_data, sd_attrs[ATTR_TJMAX]);
 	int tjmax;
@@ -372,7 +379,7 @@ static ssize_t show_tjmax(struct device *dev,
 }
 
 static ssize_t show_ttarget(struct device *dev,
-				struct device_attribute *devattr, char *buf)
+			    struct device_attribute *devattr, char *buf)
 {
 	struct temp_data *tdata = container_of(devattr, struct temp_data, sd_attrs[ATTR_TTARGET]);
 	int ttarget;
@@ -387,9 +394,9 @@ static ssize_t show_ttarget(struct device *dev,
 }
 
 static ssize_t show_temp(struct device *dev,
-			struct device_attribute *devattr, char *buf)
+			 struct device_attribute *devattr, char *buf)
 {
-	u32 eax, edx;
+	struct msr val;
 	struct temp_data *tdata = container_of(devattr, struct temp_data, sd_attrs[ATTR_TEMP]);
 	int tjmax;
 
@@ -398,14 +405,14 @@ static ssize_t show_temp(struct device *dev,
 	tjmax = get_tjmax(tdata, dev);
 	/* Check whether the time interval has elapsed */
 	if (time_after(jiffies, tdata->last_updated + HZ)) {
-		rdmsr_on_cpu(tdata->cpu, tdata->status_reg, &eax, &edx);
+		rdmsrq_on_cpu(tdata->cpu, tdata->status_reg, &val.q);
 		/*
 		 * Ignore the valid bit. In all observed cases the register
 		 * value is either low or zero if the valid bit is 0.
 		 * Return it instead of reporting an error which doesn't
 		 * really help at all.
 		 */
-		tdata->temp = tjmax - ((eax >> 16) & 0xff) * 1000;
+		tdata->temp = tjmax - ((val.l >> 16) & 0xff) * 1000;
 		tdata->last_updated = jiffies;
 	}
 
@@ -415,7 +422,6 @@ static ssize_t show_temp(struct device *dev,
 
 static int create_core_attrs(struct temp_data *tdata, struct device *dev)
 {
-	int i;
 	static ssize_t (*const rd_ptr[TOTAL_ATTRS]) (struct device *dev,
 			struct device_attribute *devattr, char *buf) = {
 			show_label, show_crit_alarm, show_temp, show_tjmax,
@@ -423,6 +429,7 @@ static int create_core_attrs(struct temp_data *tdata, struct device *dev)
 	static const char *const suffixes[TOTAL_ATTRS] = {
 		"label", "crit_alarm", "input", "crit", "max"
 	};
+	int i;
 
 	for (i = 0; i < tdata->attr_size; i++) {
 		/*
@@ -443,7 +450,6 @@ static int create_core_attrs(struct temp_data *tdata, struct device *dev)
 	tdata->attr_group.attrs = tdata->attrs;
 	return sysfs_create_group(&dev->kobj, &tdata->attr_group);
 }
-
 
 static int chk_ucode_version(unsigned int cpu)
 {
@@ -476,20 +482,14 @@ init_temp_data(struct platform_data *pdata, unsigned int cpu, int pkg_flag)
 	struct temp_data *tdata;
 
 	if (!pdata->core_data) {
-		/*
-		 * TODO:
-		 * The information of actual possible cores in a package is broken for now.
-		 * Will replace hardcoded NUM_REAL_CORES with actual per package core count
-		 * when this information becomes available.
-		 */
-		pdata->nr_cores = NUM_REAL_CORES;
-		pdata->core_data = kcalloc(pdata->nr_cores, sizeof(struct temp_data *),
-					   GFP_KERNEL);
+		pdata->nr_cores = topology_num_cores_per_package();
+		pdata->core_data = kzalloc_objs(struct temp_data *,
+						pdata->nr_cores);
 		if (!pdata->core_data)
 			return NULL;
 	}
 
-	tdata = kzalloc(sizeof(struct temp_data), GFP_KERNEL);
+	tdata = kzalloc_obj(struct temp_data);
 	if (!tdata)
 		return NULL;
 
@@ -551,7 +551,7 @@ static int create_core_data(struct platform_device *pdev, unsigned int cpu,
 	struct temp_data *tdata;
 	struct platform_data *pdata = platform_get_drvdata(pdev);
 	struct cpuinfo_x86 *c = &cpu_data(cpu);
-	u32 eax, edx;
+	u64 val;
 	int err;
 
 	if (!housekeeping_cpu(cpu, HK_TYPE_MISC))
@@ -562,7 +562,7 @@ static int create_core_data(struct platform_device *pdev, unsigned int cpu,
 		return -ENOMEM;
 
 	/* Test if we can access the status register */
-	err = rdmsr_safe_on_cpu(cpu, tdata->status_reg, &eax, &edx);
+	err = rdmsrq_safe_on_cpu(cpu, tdata->status_reg, &val);
 	if (err)
 		goto err;
 
@@ -616,7 +616,7 @@ static int coretemp_device_add(int zoneid)
 	int err;
 
 	/* Initialize the per-zone data structures */
-	pdata = kzalloc(sizeof(*pdata), GFP_KERNEL);
+	pdata = kzalloc_obj(*pdata);
 	if (!pdata)
 		return -ENOMEM;
 
@@ -650,6 +650,7 @@ static void coretemp_device_remove(int zoneid)
 	struct platform_data *pdata = platform_get_drvdata(pdev);
 
 	ida_destroy(&pdata->ida);
+	kfree(pdata->core_data);
 	kfree(pdata);
 	platform_device_unregister(pdev);
 }
@@ -772,7 +773,8 @@ static int coretemp_cpu_offline(unsigned int cpu)
 	}
 	return 0;
 }
-static const struct x86_cpu_id __initconst coretemp_ids[] = {
+
+static const struct x86_cpu_id coretemp_ids[] __initconst = {
 	X86_MATCH_VENDOR_FEATURE(INTEL, X86_FEATURE_DTHERM, NULL),
 	{}
 };
@@ -795,8 +797,7 @@ static int __init coretemp_init(void)
 		return -ENODEV;
 
 	max_zones = topology_max_packages() * topology_max_dies_per_package();
-	zone_devices = kcalloc(max_zones, sizeof(struct platform_device *),
-			      GFP_KERNEL);
+	zone_devices = kzalloc_objs(struct platform_device *, max_zones);
 	if (!zone_devices)
 		return -ENOMEM;
 

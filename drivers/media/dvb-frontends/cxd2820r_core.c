@@ -594,7 +594,7 @@ static int cxd2820r_probe(struct i2c_client *client)
 
 	dev_dbg(&client->dev, "\n");
 
-	priv = kzalloc(sizeof(*priv), GFP_KERNEL);
+	priv = kzalloc_obj(*priv);
 	if (!priv) {
 		ret = -ENOMEM;
 		goto err;
@@ -723,8 +723,8 @@ static void cxd2820r_remove(struct i2c_client *client)
 }
 
 static const struct i2c_device_id cxd2820r_id_table[] = {
-	{ "cxd2820r" },
-	{}
+	{ .name = "cxd2820r" },
+	{ }
 };
 MODULE_DEVICE_TABLE(i2c, cxd2820r_id_table);
 

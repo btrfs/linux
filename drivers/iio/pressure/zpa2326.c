@@ -840,7 +840,7 @@ static irqreturn_t zpa2326_handle_threaded_irq(int irq, void *data)
 
 complete:
 	/*
-	 * Wake up direct or externaly triggered buffer mode waiters: see
+	 * Wake up direct or externally triggered buffer mode waiters: see
 	 * zpa2326_sample_oneshot() and zpa2326_trigger_handler().
 	 */
 	complete(&priv->data_ready);
@@ -911,11 +911,8 @@ static int zpa2326_init_managed_irq(struct device          *parent,
 					zpa2326_handle_threaded_irq,
 					IRQF_TRIGGER_RISING | IRQF_ONESHOT,
 					dev_name(parent), indio_dev);
-	if (err) {
-		dev_err(parent, "failed to request interrupt %d (%d)", irq,
-			err);
+	if (err)
 		return err;
-	}
 
 	dev_info(parent, "using interrupt %d", irq);
 

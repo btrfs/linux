@@ -3823,7 +3823,7 @@ static struct dwc2_hcd_urb *dwc2_hcd_urb_alloc(struct dwc2_hsotg *hsotg,
 {
 	struct dwc2_hcd_urb *urb;
 
-	urb = kzalloc(struct_size(urb, iso_descs, iso_desc_count), mem_flags);
+	urb = kzalloc_flex(*urb, iso_descs, iso_desc_count, mem_flags);
 	if (urb)
 		urb->packet_count = iso_desc_count;
 	return urb;
@@ -4743,7 +4743,7 @@ static int _dwc2_hcd_urb_enqueue(struct usb_hcd *hcd, struct urb *urb,
 		qh_allocated = true;
 	}
 
-	qtd = kzalloc(sizeof(*qtd), mem_flags);
+	qtd = kzalloc_obj(*qtd, mem_flags);
 	if (!qtd) {
 		retval = -ENOMEM;
 		goto fail1;
@@ -4804,6 +4804,7 @@ static int _dwc2_hcd_urb_dequeue(struct usb_hcd *hcd, struct urb *urb,
 	struct dwc2_hsotg *hsotg = dwc2_hcd_to_hsotg(hcd);
 	int rc;
 	unsigned long flags;
+	int urb_status;
 
 	dev_dbg(hsotg->dev, "DWC OTG HCD URB Dequeue\n");
 	dwc2_dump_urb_info(hcd, urb, "urb_dequeue");
@@ -4828,11 +4829,12 @@ static int _dwc2_hcd_urb_dequeue(struct usb_hcd *hcd, struct urb *urb,
 
 	/* Higher layer software sets URB status */
 	spin_unlock(&hsotg->lock);
+	urb_status = urb->status;
 	usb_hcd_giveback_urb(hcd, urb, status);
 	spin_lock(&hsotg->lock);
 
 	dev_dbg(hsotg->dev, "Called usb_hcd_giveback_urb()\n");
-	dev_dbg(hsotg->dev, "  urb->status = %d\n", urb->status);
+	dev_dbg(hsotg->dev, "  urb->status = %d\n", urb_status);
 out:
 	spin_unlock_irqrestore(&hsotg->lock, flags);
 
@@ -5218,7 +5220,7 @@ int dwc2_hcd_init(struct dwc2_hsotg *hsotg)
 	memset(&hsotg->hc_ptr_array[0], 0, sizeof(hsotg->hc_ptr_array));
 
 	for (i = 0; i < num_channels; i++) {
-		channel = kzalloc(sizeof(*channel), GFP_KERNEL);
+		channel = kzalloc_obj(*channel);
 		if (!channel)
 			goto error3;
 		channel->hc_num = i;

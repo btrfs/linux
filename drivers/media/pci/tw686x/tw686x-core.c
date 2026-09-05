@@ -243,22 +243,22 @@ static int tw686x_probe(struct pci_dev *pci_dev,
 	struct tw686x_dev *dev;
 	int err;
 
-	dev = kzalloc(sizeof(*dev), GFP_KERNEL);
+	dev = kzalloc_obj(*dev);
 	if (!dev)
 		return -ENOMEM;
 	dev->type = pci_id->driver_data;
 	dev->dma_mode = dma_mode;
 	sprintf(dev->name, "tw%04X", pci_dev->device);
 
-	dev->video_channels = kcalloc(max_channels(dev),
-		sizeof(*dev->video_channels), GFP_KERNEL);
+	dev->video_channels = kzalloc_objs(*dev->video_channels,
+					   max_channels(dev));
 	if (!dev->video_channels) {
 		err = -ENOMEM;
 		goto free_dev;
 	}
 
-	dev->audio_channels = kcalloc(max_channels(dev),
-		sizeof(*dev->audio_channels), GFP_KERNEL);
+	dev->audio_channels = kzalloc_objs(*dev->audio_channels,
+					   max_channels(dev));
 	if (!dev->audio_channels) {
 		err = -ENOMEM;
 		goto free_video;
@@ -416,25 +416,24 @@ static void tw686x_remove(struct pci_dev *pci_dev)
 /* driver_data is number of A/V channels */
 static const struct pci_device_id tw686x_pci_tbl[] = {
 	{
-		PCI_DEVICE(PCI_VENDOR_ID_TECHWELL, 0x6864),
-		.driver_data = 4
-	},
-	{
-		PCI_DEVICE(PCI_VENDOR_ID_TECHWELL, 0x6865), /* not tested */
-		.driver_data = 4 | TYPE_SECOND_GEN
+		PCI_VDEVICE(TECHWELL, 0x6864),
+		.driver_data = 4,
+	}, {
+		PCI_VDEVICE(TECHWELL, 0x6865), /* not tested */
+		.driver_data = 4 | TYPE_SECOND_GEN,
 	},
 	/*
 	 * TW6868 supports 8 A/V channels with an external TW2865 chip;
 	 * not supported by the driver.
 	 */
 	{
-		PCI_DEVICE(PCI_VENDOR_ID_TECHWELL, 0x6868), /* not tested */
-		.driver_data = 4
+		PCI_VDEVICE(TECHWELL, 0x6868), /* not tested */
+		.driver_data = 4,
+	}, {
+		PCI_VDEVICE(TECHWELL, 0x6869),
+		.driver_data = 8 | TYPE_SECOND_GEN
 	},
-	{
-		PCI_DEVICE(PCI_VENDOR_ID_TECHWELL, 0x6869),
-		.driver_data = 8 | TYPE_SECOND_GEN},
-	{}
+	{ }
 };
 MODULE_DEVICE_TABLE(pci, tw686x_pci_tbl);
 

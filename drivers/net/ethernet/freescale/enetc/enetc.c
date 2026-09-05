@@ -14,12 +14,21 @@
 
 u32 enetc_port_mac_rd(struct enetc_si *si, u32 reg)
 {
+	/* ENETC with pseudo MAC does not have Ethernet MAC
+	 * port registers.
+	 */
+	if (enetc_is_pseudo_mac(si))
+		return 0;
+
 	return enetc_port_rd(&si->hw, reg);
 }
 EXPORT_SYMBOL_GPL(enetc_port_mac_rd);
 
 void enetc_port_mac_wr(struct enetc_si *si, u32 reg, u32 val)
 {
+	if (enetc_is_pseudo_mac(si))
+		return;
+
 	enetc_port_wr(&si->hw, reg, val);
 	if (si->hw_features & ENETC_SI_F_QBU)
 		enetc_port_wr(&si->hw, reg + si->drvdata->pmac_offset, val);
@@ -71,6 +80,33 @@ void enetc_reset_mac_addr_filter(struct enetc_mac_filter *filter)
 		    ENETC_MADDR_HASH_TBL_SZ);
 }
 EXPORT_SYMBOL_GPL(enetc_reset_mac_addr_filter);
+
+void enetc_set_congestion_mode(struct enetc_ndev_priv *priv, bool enable)
+{
+	struct enetc_si *si = priv->si;
+	struct enetc_hw *hw = &si->hw;
+
+	spin_lock(&si->gen_lock);
+
+	if (enable)
+		set_bit(ENETC_RXBDR_CM, &priv->flags);
+	else
+		clear_bit(ENETC_RXBDR_CM, &priv->flags);
+
+	for (int i = 0; i < priv->num_rx_rings; i++) {
+		u32 old_rbmr = enetc_rxbdr_rd(hw, i, ENETC_RBMR);
+		u32 rbmr;
+
+		rbmr = u32_replace_bits(old_rbmr, enable, ENETC_RBMR_CM);
+		if (rbmr == old_rbmr)
+			continue;
+
+		enetc_rxbdr_wr(hw, i, ENETC_RBMR, rbmr);
+	}
+
+	spin_unlock(&si->gen_lock);
+}
+EXPORT_SYMBOL_GPL(enetc_set_congestion_mode);
 
 static int enetc_num_stack_tx_queues(struct enetc_ndev_priv *priv)
 {
@@ -1774,11 +1810,13 @@ int enetc_xdp_xmit(struct net_device *ndev, int num_frames,
 {
 	struct enetc_tx_swbd xdp_redirect_arr[ENETC_MAX_SKB_FRAGS] = {0};
 	struct enetc_ndev_priv *priv = netdev_priv(ndev);
+	struct skb_shared_info *shinfo;
 	struct enetc_bdr *tx_ring;
 	int xdp_tx_bd_cnt, i, k;
 	int xdp_tx_frm_cnt = 0;
 
-	if (unlikely(test_bit(ENETC_TX_DOWN, &priv->flags)))
+	if (unlikely(test_bit(ENETC_TX_DOWN, &priv->flags) ||
+		     !netif_carrier_ok(ndev)))
 		return -ENETDOWN;
 
 	enetc_lock_mdio();
@@ -1788,6 +1826,12 @@ int enetc_xdp_xmit(struct net_device *ndev, int num_frames,
 	prefetchw(ENETC_TXBD(*tx_ring, tx_ring->next_to_use));
 
 	for (k = 0; k < num_frames; k++) {
+		if (xdp_frame_has_frags(frames[k])) {
+			shinfo = xdp_get_shared_info_from_frame(frames[k]);
+			if (unlikely((shinfo->nr_frags + 1) > ENETC_MAX_SKB_FRAGS))
+				break;
+		}
+
 		xdp_tx_bd_cnt = enetc_xdp_frame_to_xdp_tx_swbd(tx_ring,
 							       xdp_redirect_arr,
 							       frames[k]);
@@ -2258,7 +2302,7 @@ enetc_alloc_tx_resources(struct enetc_ndev_priv *priv)
 	struct enetc_bdr_resource *tx_res;
 	int i, err;
 
-	tx_res = kcalloc(priv->num_tx_rings, sizeof(*tx_res), GFP_KERNEL);
+	tx_res = kzalloc_objs(*tx_res, priv->num_tx_rings);
 	if (!tx_res)
 		return ERR_PTR(-ENOMEM);
 
@@ -2330,7 +2374,7 @@ enetc_alloc_rx_resources(struct enetc_ndev_priv *priv, bool extended)
 	struct enetc_bdr_resource *rx_res;
 	int i, err;
 
-	rx_res = kcalloc(priv->num_rx_rings, sizeof(*rx_res), GFP_KERNEL);
+	rx_res = kzalloc_objs(*rx_res, priv->num_rx_rings);
 	if (!rx_res)
 		return ERR_PTR(-ENOMEM);
 
@@ -2459,7 +2503,7 @@ static int enetc_setup_default_rss_table(struct enetc_si *si, int num_groups)
 	int *rss_table;
 	int i;
 
-	rss_table = kmalloc_array(si->num_rss, sizeof(*rss_table), GFP_KERNEL);
+	rss_table = kmalloc_objs(*rss_table, si->num_rss);
 	if (!rss_table)
 		return -ENOMEM;
 
@@ -2502,10 +2546,13 @@ int enetc_configure_si(struct enetc_ndev_priv *priv)
 	struct enetc_hw *hw = &si->hw;
 	int err;
 
-	/* set SI cache attributes */
-	enetc_wr(hw, ENETC_SICAR0,
-		 ENETC_SICAR_RD_COHERENT | ENETC_SICAR_WR_COHERENT);
-	enetc_wr(hw, ENETC_SICAR1, ENETC_SICAR_MSI);
+	if (is_enetc_rev1(si)) {
+		/* set SI cache attributes */
+		enetc_wr(hw, ENETC_SICAR0,
+			 ENETC_SICAR_RD_COHERENT | ENETC_SICAR_WR_COHERENT);
+		enetc_wr(hw, ENETC_SICAR1, ENETC_SICAR_MSI);
+	}
+
 	/* enable SI */
 	enetc_wr(hw, ENETC_SIMR, ENETC_SIMR_EN);
 
@@ -2549,8 +2596,7 @@ int enetc_alloc_si_resources(struct enetc_ndev_priv *priv)
 {
 	struct enetc_si *si = priv->si;
 
-	priv->cls_rules = kcalloc(si->num_fs_entries, sizeof(*priv->cls_rules),
-				  GFP_KERNEL);
+	priv->cls_rules = kzalloc_objs(*priv->cls_rules, si->num_fs_entries);
 	if (!priv->cls_rules)
 		return -ENOMEM;
 
@@ -2566,6 +2612,7 @@ EXPORT_SYMBOL_GPL(enetc_free_si_resources);
 
 static void enetc_setup_txbdr(struct enetc_hw *hw, struct enetc_bdr *tx_ring)
 {
+	struct enetc_si *si = container_of(hw, struct enetc_si, hw);
 	int idx = tx_ring->index;
 	u32 tbmr;
 
@@ -2579,9 +2626,19 @@ static void enetc_setup_txbdr(struct enetc_hw *hw, struct enetc_bdr *tx_ring)
 	enetc_txbdr_wr(hw, idx, ENETC_TBLENR,
 		       ENETC_RTBLENR_LEN(tx_ring->bd_count));
 
-	/* clearing PI/CI registers for Tx not supported, adjust sw indexes */
+	/* For ENETC v1, clearing PI/CI registers for Tx not supported,
+	 * adjust sw indexes
+	 */
 	tx_ring->next_to_use = enetc_txbdr_rd(hw, idx, ENETC_TBPIR);
 	tx_ring->next_to_clean = enetc_txbdr_rd(hw, idx, ENETC_TBCIR);
+
+	if (tx_ring->next_to_use != tx_ring->next_to_clean &&
+	    !is_enetc_rev1(si)) {
+		tx_ring->next_to_use = 0;
+		tx_ring->next_to_clean = 0;
+		enetc_txbdr_wr(hw, idx, ENETC_TBPIR, 0);
+		enetc_txbdr_wr(hw, idx, ENETC_TBCIR, 0);
+	}
 
 	/* enable Tx ints by setting pkt thr to 1 */
 	enetc_txbdr_wr(hw, idx, ENETC_TBICR0, ENETC_TBICR0_ICEN | 0x1);
@@ -2602,7 +2659,6 @@ static void enetc_setup_rxbdr(struct enetc_hw *hw, struct enetc_bdr *rx_ring,
 			      bool extended)
 {
 	int idx = rx_ring->index;
-	u32 rbmr = 0;
 
 	enetc_rxbdr_wr(hw, idx, ENETC_RBBAR0,
 		       lower_32_bits(rx_ring->bd_dma_base));
@@ -2630,12 +2686,6 @@ static void enetc_setup_rxbdr(struct enetc_hw *hw, struct enetc_bdr *rx_ring,
 	enetc_rxbdr_wr(hw, idx, ENETC_RBICR0, ENETC_RBICR0_ICEN | 0x1);
 
 	rx_ring->ext_en = extended;
-	if (rx_ring->ext_en)
-		rbmr |= ENETC_RBMR_BDS;
-
-	if (rx_ring->ndev->features & NETIF_F_HW_VLAN_CTAG_RX)
-		rbmr |= ENETC_RBMR_VTE;
-
 	rx_ring->rcir = hw->reg + ENETC_BDR(RX, idx, ENETC_RBCIR);
 	rx_ring->idr = hw->reg + ENETC_SIRXIDR;
 
@@ -2646,8 +2696,6 @@ static void enetc_setup_rxbdr(struct enetc_hw *hw, struct enetc_bdr *rx_ring,
 	enetc_lock_mdio();
 	enetc_refill_rx_ring(rx_ring, enetc_bd_unused(rx_ring));
 	enetc_unlock_mdio();
-
-	enetc_rxbdr_wr(hw, idx, ENETC_RBMR, rbmr);
 }
 
 static void enetc_setup_bdrs(struct enetc_ndev_priv *priv, bool extended)
@@ -2674,21 +2722,34 @@ static void enetc_enable_txbdr(struct enetc_hw *hw, struct enetc_bdr *tx_ring)
 
 static void enetc_enable_rxbdr(struct enetc_hw *hw, struct enetc_bdr *rx_ring)
 {
+	struct enetc_ndev_priv *priv = netdev_priv(rx_ring->ndev);
 	int idx = rx_ring->index;
-	u32 rbmr;
+	u32 rbmr = ENETC_RBMR_EN;
 
-	rbmr = enetc_rxbdr_rd(hw, idx, ENETC_RBMR);
-	rbmr |= ENETC_RBMR_EN;
+	if (rx_ring->ext_en)
+		rbmr |= ENETC_RBMR_BDS;
+
+	if (rx_ring->ndev->features & NETIF_F_HW_VLAN_CTAG_RX)
+		rbmr |= ENETC_RBMR_VTE;
+
+	if (test_bit(ENETC_RXBDR_CM, &priv->flags))
+		rbmr |= ENETC_RBMR_CM;
+
 	enetc_rxbdr_wr(hw, idx, ENETC_RBMR, rbmr);
 }
 
 static void enetc_enable_rx_bdrs(struct enetc_ndev_priv *priv)
 {
-	struct enetc_hw *hw = &priv->si->hw;
+	struct enetc_si *si = priv->si;
+	struct enetc_hw *hw = &si->hw;
 	int i;
+
+	spin_lock(&si->gen_lock);
 
 	for (i = 0; i < priv->num_rx_rings; i++)
 		enetc_enable_rxbdr(hw, priv->rx_ring[i]);
+
+	spin_unlock(&si->gen_lock);
 }
 
 static void enetc_enable_tx_bdrs(struct enetc_ndev_priv *priv)
@@ -2718,11 +2779,16 @@ static void enetc_disable_txbdr(struct enetc_hw *hw, struct enetc_bdr *rx_ring)
 
 static void enetc_disable_rx_bdrs(struct enetc_ndev_priv *priv)
 {
-	struct enetc_hw *hw = &priv->si->hw;
+	struct enetc_si *si = priv->si;
+	struct enetc_hw *hw = &si->hw;
 	int i;
+
+	spin_lock(&si->gen_lock);
 
 	for (i = 0; i < priv->num_rx_rings; i++)
 		enetc_disable_rxbdr(hw, priv->rx_ring[i]);
+
+	spin_unlock(&si->gen_lock);
 }
 
 static void enetc_disable_tx_bdrs(struct enetc_ndev_priv *priv)
@@ -3314,11 +3380,16 @@ EXPORT_SYMBOL_GPL(enetc_get_stats);
 static void enetc_enable_rxvlan(struct net_device *ndev, bool en)
 {
 	struct enetc_ndev_priv *priv = netdev_priv(ndev);
-	struct enetc_hw *hw = &priv->si->hw;
+	struct enetc_si *si = priv->si;
+	struct enetc_hw *hw = &si->hw;
 	int i;
+
+	spin_lock(&si->gen_lock);
 
 	for (i = 0; i < priv->num_rx_rings; i++)
 		enetc_bdr_enable_rxvlan(hw, i, en);
+
+	spin_unlock(&si->gen_lock);
 }
 
 static void enetc_enable_txvlan(struct net_device *ndev, bool en)
@@ -3367,7 +3438,8 @@ int enetc_hwtstamp_set(struct net_device *ndev,
 		new_offloads |= ENETC_F_TX_TSTAMP;
 		break;
 	case HWTSTAMP_TX_ONESTEP_SYNC:
-		if (!enetc_si_is_pf(priv->si))
+		if (!enetc_si_is_pf(priv->si) ||
+		    enetc_is_pseudo_mac(priv->si))
 			return -EOPNOTSUPP;
 
 		new_offloads &= ~ENETC_F_TX_TSTAMP_MASK;
@@ -3440,7 +3512,7 @@ static int enetc_int_vector_init(struct enetc_ndev_priv *priv, int i,
 	struct enetc_bdr *bdr;
 	int j, err;
 
-	v = kzalloc(struct_size(v, tx_ring, v_tx_rings), GFP_KERNEL);
+	v = kzalloc_flex(*v, tx_ring, v_tx_rings);
 	if (!v)
 		return -ENOMEM;
 
@@ -3454,7 +3526,7 @@ static int enetc_int_vector_init(struct enetc_ndev_priv *priv, int i,
 	priv->rx_ring[i] = bdr;
 
 	err = __xdp_rxq_info_reg(&bdr->xdp.rxq, priv->ndev, i, 0,
-				 ENETC_RXB_DMA_SIZE_XDP);
+				 ENETC_RXB_TRUESIZE);
 	if (err)
 		goto free_vector;
 
@@ -3648,6 +3720,7 @@ int enetc_pci_probe(struct pci_dev *pdev, const char *name, int sizeof_priv)
 
 	si = PTR_ALIGN(p, ENETC_SI_ALIGN);
 	si->pad = (char *)si - (char *)p;
+	spin_lock_init(&si->gen_lock);
 
 	pci_set_drvdata(pdev, si);
 	si->pdev = pdev;
@@ -3708,6 +3781,13 @@ static const struct enetc_drvdata enetc4_pf_data = {
 	.eth_ops = &enetc4_pf_ethtool_ops,
 };
 
+static const struct enetc_drvdata enetc4_ppm_data = {
+	.sysclk_freq = ENETC_CLK_333M,
+	.tx_csum = true,
+	.max_frags = ENETC4_MAX_SKB_FRAGS,
+	.eth_ops = &enetc4_ppm_ethtool_ops,
+};
+
 static const struct enetc_drvdata enetc_vf_data = {
 	.sysclk_freq = ENETC_CLK_400M,
 	.max_frags = ENETC_MAX_SKB_FRAGS,
@@ -3726,6 +3806,15 @@ static const struct enetc_platform_info enetc_info[] = {
 	{ .revision = ENETC_REV_1_0,
 	  .dev_id = ENETC_DEV_ID_VF,
 	  .data = &enetc_vf_data,
+	},
+	{
+	  .revision = ENETC_REV_4_3,
+	  .dev_id = NXP_ENETC_PPM_DEV_ID,
+	  .data = &enetc4_ppm_data,
+	},
+	{ .revision = ENETC_REV_4_3,
+	  .dev_id = NXP_ENETC_PF_DEV_ID,
+	  .data = &enetc4_pf_data,
 	},
 };
 

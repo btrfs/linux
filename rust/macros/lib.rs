@@ -6,15 +6,18 @@
 // and thus add a dependency on `include/config/RUSTC_VERSION_TEXT`, which is
 // touched by Kconfig when the version string from the compiler changes.
 
+// Stable since Rust 1.87.0.
+#![feature(extract_if)]
+//
 // Stable since Rust 1.88.0 under a different name, `proc_macro_span_file`,
 // which was added in Rust 1.88.0. This is why `cfg_attr` is used here, i.e.
 // to avoid depending on the full `proc_macro_span` on Rust >= 1.88.0.
 #![cfg_attr(not(CONFIG_RUSTC_HAS_SPAN_FILE), feature(proc_macro_span))]
 
-#[macro_use]
-mod quote;
 mod concat_idents;
 mod export;
+mod fmt;
+mod for_lt;
 mod helpers;
 mod kunit;
 mod module;
@@ -23,10 +26,37 @@ mod vtable;
 
 use proc_macro::TokenStream;
 
+use syn::parse_macro_input;
+
 /// Declares a kernel module.
 ///
 /// The `type` argument should be a type which implements the [`Module`]
 /// trait. Also accepts various forms of kernel metadata.
+///
+/// The `params` field describe module parameters. Each entry has the form
+///
+/// ```ignore
+/// parameter_name: type {
+///     default: default_value,
+///     description: "Description",
+/// }
+/// ```
+///
+/// `type` may be one of
+///
+/// - [`i8`]
+/// - [`u8`]
+/// - [`i8`]
+/// - [`u8`]
+/// - [`i16`]
+/// - [`u16`]
+/// - [`i32`]
+/// - [`u32`]
+/// - [`i64`]
+/// - [`u64`]
+/// - [`isize`]
+/// - [`usize`]
+/// - [`bool`]
 ///
 /// C header: [`include/linux/moduleparam.h`](srctree/include/linux/moduleparam.h)
 ///
@@ -34,7 +64,7 @@ use proc_macro::TokenStream;
 ///
 /// # Examples
 ///
-/// ```
+/// ```ignore
 /// use kernel::prelude::*;
 ///
 /// module!{
@@ -44,6 +74,12 @@ use proc_macro::TokenStream;
 ///     description: "My very own kernel module!",
 ///     license: "GPL",
 ///     alias: ["alternate_module_name"],
+///     params: {
+///         my_parameter: i64 {
+///             default: 1,
+///             description: "This parameter has a default of 1",
+///         },
+///     },
 /// }
 ///
 /// struct MyModule(i32);
@@ -52,6 +88,7 @@ use proc_macro::TokenStream;
 ///     fn init(_module: &'static ThisModule) -> Result<Self> {
 ///         let foo: i32 = 42;
 ///         pr_info!("I contain:  {}\n", foo);
+///         pr_info!("i32 param is:  {}\n", module_parameters::my_parameter.read());
 ///         Ok(Self(foo))
 ///     }
 /// }
@@ -99,8 +136,10 @@ use proc_macro::TokenStream;
 ///   - `firmware`: array of ASCII string literals of the firmware files of
 ///     the kernel module.
 #[proc_macro]
-pub fn module(ts: TokenStream) -> TokenStream {
-    module::module(ts)
+pub fn module(input: TokenStream) -> TokenStream {
+    module::module(parse_macro_input!(input))
+        .unwrap_or_else(|e| e.into_compile_error())
+        .into()
 }
 
 /// Declares or implements a vtable trait.
@@ -122,7 +161,7 @@ pub fn module(ts: TokenStream) -> TokenStream {
 /// case the default implementation will never be executed. The reason for this
 /// is that the functions will be called through function pointers installed in
 /// C side vtables. When an optional method is not implemented on a `#[vtable]`
-/// trait, a NULL entry is installed in the vtable. Thus the default
+/// trait, a `NULL` entry is installed in the vtable. Thus the default
 /// implementation is never called. Since these traits are not designed to be
 /// used on the Rust side, it should not be possible to call the default
 /// implementation. This is done to ensure that we call the vtable methods
@@ -139,12 +178,29 @@ pub fn module(ts: TokenStream) -> TokenStream {
 ///
 /// This macro should not be used when all functions are required.
 ///
+/// Additionally, this macro automatically handles the `OwnerModule`
+/// associated type: on the trait side, `type OwnerModule: ModuleMetadata;`
+/// is added as a required associated type if not already defined; on the
+/// impl side, `type OwnerModule = LocalModule;` is automatically inserted
+/// if not explicitly defined.
+///
 /// # Examples
 ///
 /// ```
 /// use kernel::error::VTABLE_DEFAULT_ERROR;
 /// use kernel::prelude::*;
 ///
+/// # struct LocalModule;
+/// # impl kernel::ModuleMetadata for LocalModule {
+/// #     const NAME: &'static kernel::str::CStr = c"vtable_doctest";
+/// #
+/// #     // SAFETY: This doctest runs on the host: there is no `THIS_MODULE`.
+/// #     const THIS_MODULE: kernel::ThisModule = unsafe {
+/// #         kernel::ThisModule::from_ptr(core::ptr::null_mut())
+/// #     };
+/// # }
+/// #
+/// # fn main() {
 /// // Declares a `#[vtable]` trait
 /// #[vtable]
 /// pub trait Operations: Send + Sync + Sized {
@@ -170,12 +226,16 @@ pub fn module(ts: TokenStream) -> TokenStream {
 ///
 /// assert_eq!(<Foo as Operations>::HAS_FOO, true);
 /// assert_eq!(<Foo as Operations>::HAS_BAR, false);
+/// # }
 /// ```
 ///
 /// [`kernel::error::VTABLE_DEFAULT_ERROR`]: ../kernel/error/constant.VTABLE_DEFAULT_ERROR.html
 #[proc_macro_attribute]
-pub fn vtable(attr: TokenStream, ts: TokenStream) -> TokenStream {
-    vtable::vtable(attr, ts)
+pub fn vtable(attr: TokenStream, input: TokenStream) -> TokenStream {
+    parse_macro_input!(attr as syn::parse::Nothing);
+    vtable::vtable(parse_macro_input!(input))
+        .unwrap_or_else(|e| e.into_compile_error())
+        .into()
 }
 
 /// Export a function so that C code can call it via a header file.
@@ -197,8 +257,27 @@ pub fn vtable(attr: TokenStream, ts: TokenStream) -> TokenStream {
 /// This macro is *not* the same as the C macros `EXPORT_SYMBOL_*`. All Rust symbols are currently
 /// automatically exported with `EXPORT_SYMBOL_GPL`.
 #[proc_macro_attribute]
-pub fn export(attr: TokenStream, ts: TokenStream) -> TokenStream {
-    export::export(attr, ts)
+pub fn export(attr: TokenStream, input: TokenStream) -> TokenStream {
+    parse_macro_input!(attr as syn::parse::Nothing);
+    export::export(parse_macro_input!(input)).into()
+}
+
+/// Like [`core::format_args!`], but automatically wraps arguments in [`kernel::fmt::Adapter`].
+///
+/// This macro allows generating `fmt::Arguments` while ensuring that each argument is wrapped with
+/// `::kernel::fmt::Adapter`, which customizes formatting behavior for kernel logging.
+///
+/// Named arguments used in the format string (e.g. `{foo}`) are detected and resolved from local
+/// bindings. All positional and named arguments are automatically wrapped.
+///
+/// This macro is an implementation detail of other kernel logging macros like [`pr_info!`] and
+/// should not typically be used directly.
+///
+/// [`kernel::fmt::Adapter`]: ../kernel/fmt/struct.Adapter.html
+/// [`pr_info!`]: ../kernel/macro.pr_info.html
+#[proc_macro]
+pub fn fmt(input: TokenStream) -> TokenStream {
+    fmt::fmt(input.into()).into()
 }
 
 /// Concatenate two identifiers.
@@ -255,8 +334,8 @@ pub fn export(attr: TokenStream, ts: TokenStream) -> TokenStream {
 /// assert_eq!(BR_OK, binder_driver_return_protocol_BR_OK);
 /// ```
 #[proc_macro]
-pub fn concat_idents(ts: TokenStream) -> TokenStream {
-    concat_idents::concat_idents(ts)
+pub fn concat_idents(input: TokenStream) -> TokenStream {
+    concat_idents::concat_idents(parse_macro_input!(input)).into()
 }
 
 /// Paste identifiers together.
@@ -394,9 +473,12 @@ pub fn concat_idents(ts: TokenStream) -> TokenStream {
 /// [`paste`]: https://docs.rs/paste/
 #[proc_macro]
 pub fn paste(input: TokenStream) -> TokenStream {
-    let mut tokens = input.into_iter().collect();
+    let mut tokens = proc_macro2::TokenStream::from(input).into_iter().collect();
     paste::expand(&mut tokens);
-    tokens.into_iter().collect()
+    tokens
+        .into_iter()
+        .collect::<proc_macro2::TokenStream>()
+        .into()
 }
 
 /// Registers a KUnit test suite and its test cases using a user-space like syntax.
@@ -422,6 +504,36 @@ pub fn paste(input: TokenStream) -> TokenStream {
 /// }
 /// ```
 #[proc_macro_attribute]
-pub fn kunit_tests(attr: TokenStream, ts: TokenStream) -> TokenStream {
-    kunit::kunit_tests(attr, ts)
+pub fn kunit_tests(attr: TokenStream, input: TokenStream) -> TokenStream {
+    kunit::kunit_tests(parse_macro_input!(attr), parse_macro_input!(input))
+        .unwrap_or_else(|e| e.into_compile_error())
+        .into()
+}
+
+/// Obtain a type that implements [`ForLt`] for the given higher-ranked type.
+///
+/// Please refer to the documentation of the [`ForLt`] trait.
+///
+/// [`ForLt`]: trait.ForLt.html
+#[proc_macro]
+#[allow(non_snake_case)]
+pub fn ForLt(input: TokenStream) -> TokenStream {
+    for_lt::for_lt(parse_macro_input!(input)).into()
+}
+
+/// Obtain a type that implements [`CovariantForLt`] (and [`ForLt`]) for the given higher-ranked
+/// type.
+///
+/// Unlike [`ForLt!`], this macro additionally proves that the type is covariant over the lifetime,
+/// providing a safe [`CovariantForLt::cast_ref`] method.
+///
+/// Please refer to the documentation of the [`CovariantForLt`] trait.
+///
+/// [`CovariantForLt`]: trait.CovariantForLt.html
+/// [`CovariantForLt::cast_ref`]: trait.CovariantForLt.html#method.cast_ref
+/// [`ForLt`]: trait.ForLt.html
+#[proc_macro]
+#[allow(non_snake_case)]
+pub fn CovariantForLt(input: TokenStream) -> TokenStream {
+    for_lt::covariant_for_lt(parse_macro_input!(input)).into()
 }

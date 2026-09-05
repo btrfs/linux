@@ -67,14 +67,17 @@ struct test_program {
 	int insert_head;
 };
 #define LOAD_PROGRAMS(progs) \
-	load_programs(progs, ARRAY_SIZE(progs), _metadata, self, variant)
+	load_programs(progs, ARRAY_SIZE(progs), false, _metadata, self, variant)
+#define LOAD_PROGRAMS_MAY_FAIL(progs) \
+	load_programs(progs, ARRAY_SIZE(progs), true, _metadata, self, variant)
 #define LOAD_BPF \
-	load_programs(NULL, 0, _metadata, self, variant)
-static void load_programs(const struct test_program programs[],
-			  const size_t progs_count,
-			  struct __test_metadata *_metadata,
-			  FIXTURE_DATA(hid_bpf) * self,
-			  const FIXTURE_VARIANT(hid_bpf) * variant)
+	load_programs(NULL, 0, false, _metadata, self, variant)
+static int load_programs(const struct test_program programs[],
+			 const size_t progs_count,
+			 bool load_may_fail,
+			 struct __test_metadata *_metadata,
+			 FIXTURE_DATA(hid_bpf) * self,
+			 const FIXTURE_VARIANT(hid_bpf) * variant)
 {
 	struct bpf_map *iter_map;
 	int err = -EINVAL;
@@ -85,6 +88,20 @@ static void load_programs(const struct test_program programs[],
 	/* open the bpf file */
 	self->skel = hid__open();
 	ASSERT_OK_PTR(self->skel) TEARDOWN_LOG("Error while calling hid__open");
+
+	/*
+	 * Disable all struct_ops maps by default so libbpf does not autoload
+	 * programs referenced by maps that are unrelated to the current test.
+	 */
+	bpf_object__for_each_map(iter_map, *self->skel->skeleton->obj) {
+		if (bpf_map__type(iter_map) == BPF_MAP_TYPE_STRUCT_OPS) {
+			err = bpf_map__set_autocreate(iter_map, false);
+			ASSERT_OK(err) TH_LOG("can not disable struct_ops map '%s'",
+					      bpf_map__name(iter_map));
+		}
+
+		bpf_map__set_autoattach(iter_map, false);
+	}
 
 	for (int i = 0; i < progs_count; i++) {
 		struct bpf_program *prog;
@@ -102,6 +119,10 @@ static void load_programs(const struct test_program programs[],
 		ASSERT_OK_PTR(map) TH_LOG("can not find struct_ops by name '%s'",
 					  programs[i].name + 4);
 
+		err = bpf_map__set_autocreate(map, true);
+		ASSERT_OK(err) TH_LOG("can not enable struct_ops map '%s'",
+				      programs[i].name + 4);
+
 		/* hid_id is the first field of struct hid_bpf_ops */
 		ops_hid_id = bpf_map__initial_value(map, NULL);
 		ASSERT_OK_PTR(ops_hid_id) TH_LOG("unable to retrieve struct_ops data");
@@ -109,14 +130,10 @@ static void load_programs(const struct test_program programs[],
 		*ops_hid_id = self->hid.hid_id;
 	}
 
-	/* we disable the auto-attach feature of all maps because we
-	 * only want the tested one to be manually attached in the next
-	 * call to bpf_map__attach_struct_ops()
-	 */
-	bpf_object__for_each_map(iter_map, *self->skel->skeleton->obj)
-		bpf_map__set_autoattach(iter_map, false);
-
 	err = hid__load(self->skel);
+	if (err && load_may_fail)
+		return err;
+
 	ASSERT_OK(err) TH_LOG("hid_skel_load failed: %d", err);
 
 	for (int i = 0; i < progs_count; i++) {
@@ -136,6 +153,7 @@ static void load_programs(const struct test_program programs[],
 
 	self->hidraw_fd = open_hidraw(&self->hid);
 	ASSERT_GE(self->hidraw_fd, 0) TH_LOG("open_hidraw");
+	return 0;
 }
 
 /*
@@ -885,6 +903,45 @@ TEST_F(hid_bpf, test_rdesc_fixup)
 	ASSERT_GE(err, 0) TH_LOG("error while reading HIDIOCGRDESC: %d", err);
 
 	ASSERT_EQ(rpt_desc.value[4], 0x42);
+}
+
+TEST_F(hid_bpf, test_rdesc_fixup_get_data_overflow)
+{
+	const struct test_program progs[] = {
+		{ .name = "hid_rdesc_fixup_get_data_overflow" },
+	};
+
+	/* newer verifier can detect the overflow at load time */
+	if (LOAD_PROGRAMS_MAY_FAIL(progs))
+		return;
+
+	ASSERT_EQ(self->skel->bss->get_data_overflow_check, 1);
+}
+
+TEST_F(hid_bpf, test_rdesc_fixup_change_uniq_name_phys)
+{
+	const struct test_program progs[] = {
+		{ .name = "hid_rdesc_fixup_change_uniq_name_phys" },
+	};
+	char expected[256], buf[256] = {};
+	int err;
+
+	LOAD_PROGRAMS(progs);
+
+	err = ioctl(self->hidraw_fd, HIDIOCGRAWNAME(sizeof(buf)), buf);
+	ASSERT_GE(err, 0) TH_LOG("HIDIOCGRAWNAME");
+	ASSERT_STREQ("name coming from bpf", buf);
+
+	snprintf(expected, sizeof(expected), "%d phys:coming:from:bpf", self->hid.dev_id);
+
+	err = ioctl(self->hidraw_fd, HIDIOCGRAWPHYS(sizeof(buf)), buf);
+	ASSERT_GE(err, 0) TH_LOG("HIDIOCGRAWPHYS");
+	ASSERT_STREQ(expected, buf);
+
+	err = ioctl(self->hidraw_fd, HIDIOCGRAWUNIQ(sizeof(buf)), buf);
+	ASSERT_GE(err, 0) TH_LOG("HIDIOCGRAWUNIQ");
+	ASSERT_STREQ("uniq:coming:from:bpf", buf);
+
 }
 
 static int libbpf_print_fn(enum libbpf_print_level level,

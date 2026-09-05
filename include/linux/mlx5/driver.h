@@ -343,9 +343,11 @@ struct mlx5_cmd_mailbox {
 	struct mlx5_cmd_mailbox *next;
 };
 
+struct mlx5_dma_pool_page;
 struct mlx5_buf_list {
 	void		       *buf;
 	dma_addr_t		map;
+	struct mlx5_dma_pool_page *frag_page;
 };
 
 struct mlx5_frag_buf {
@@ -488,7 +490,6 @@ struct mlx5_devcom_dev;
 struct mlx5_fw_reset;
 struct mlx5_eq_table;
 struct mlx5_irq_table;
-struct mlx5_vhca_state_notifier;
 struct mlx5_sf_dev_table;
 struct mlx5_sf_hw_table;
 struct mlx5_sf_table;
@@ -546,19 +547,30 @@ struct mlx5_debugfs_entries {
 	struct dentry *eq_debugfs;
 	struct dentry *cq_debugfs;
 	struct dentry *cmdif_debugfs;
+	struct dentry *frag_buf_dma_pools_debugfs;
+	struct dentry *db_dma_pools_debugfs;
 	struct dentry *pages_debugfs;
 	struct dentry *lag_debugfs;
 };
 
 enum mlx5_func_type {
-	MLX5_PF,
+	MLX5_SELF,
 	MLX5_VF,
 	MLX5_SF,
 	MLX5_HOST_PF,
+	MLX5_SPF,
 	MLX5_EC_VF,
 	MLX5_FUNC_TYPE_NUM,
+	MLX5_FUNC_TYPE_NONE = MLX5_FUNC_TYPE_NUM,
 };
 
+enum mlx5_page_mgt_mode {
+	MLX5_PAGE_MGT_MODE_FUNC_ID,
+	MLX5_PAGE_MGT_MODE_VHCA_ID,
+};
+
+struct mlx5_frag_buf_node_pools;
+struct mlx5_dma_pool;
 struct mlx5_ft_pool;
 struct mlx5_priv {
 	/* IRQ table valid only for real pci devices PF or VF */
@@ -576,20 +588,21 @@ struct mlx5_priv {
 	u32			fw_pages_alloc_failed;
 	u32			give_pages_dropped;
 	u32			reclaim_pages_discard;
+	enum mlx5_page_mgt_mode	page_mgt_mode;
 
 	struct mlx5_core_health health;
 	struct list_head	traps;
 
 	struct mlx5_debugfs_entries dbg;
 
-	/* start: alloc staff */
+	/* start: alloc stuff */
 	/* protect buffer allocation according to numa node */
 	struct mutex            alloc_mutex;
 	int                     numa_node;
 
-	struct mutex            pgdir_mutex;
-	struct list_head        pgdir_list;
-	/* end: alloc staff */
+	struct mlx5_frag_buf_node_pools **frag_buf_node_pools;
+	struct mlx5_dma_pool **db_node_pools;
+	/* end: alloc stuff */
 
 	struct mlx5_adev       **adev;
 	int			adev_idx;
@@ -599,6 +612,7 @@ struct mlx5_priv {
 
 	struct mlx5_flow_steering *steering;
 	struct mlx5_mpfs        *mpfs;
+	struct blocking_notifier_head esw_n_head;
 	struct mlx5_eswitch     *eswitch;
 	struct mlx5_core_sriov	sriov;
 	struct mlx5_lag		*lag;
@@ -614,12 +628,18 @@ struct mlx5_priv {
 	struct mlx5_bfreg_data		bfregs;
 	struct mlx5_sq_bfreg bfreg;
 #ifdef CONFIG_MLX5_SF
-	struct mlx5_vhca_state_notifier *vhca_state_notifier;
+	struct mlx5_nb vhca_state_nb;
+	struct blocking_notifier_head vhca_state_n_head;
+	struct notifier_block sf_dev_nb;
 	struct mlx5_sf_dev_table *sf_dev_table;
 	struct mlx5_core_dev *parent_mdev;
 #endif
 #ifdef CONFIG_MLX5_SF_MANAGER
+	struct notifier_block sf_hw_table_vhca_nb;
 	struct mlx5_sf_hw_table *sf_hw_table;
+	struct notifier_block sf_table_esw_nb;
+	struct notifier_block sf_table_vhca_nb;
+	struct notifier_block sf_table_mdev_nb;
 	struct mlx5_sf_table *sf_table;
 #endif
 	struct blocking_notifier_head lag_nh;
@@ -699,23 +719,12 @@ struct mlx5_st;
 
 enum {
 	MLX5_PROF_MASK_QP_SIZE		= (u64)1 << 0,
-	MLX5_PROF_MASK_MR_CACHE		= (u64)1 << 1,
-};
-
-enum {
-	MKEY_CACHE_LAST_STD_ENTRY = 20,
-	MLX5_IMR_KSM_CACHE_ENTRY,
-	MAX_MKEY_CACHE_ENTRIES
 };
 
 struct mlx5_profile {
 	u64	mask;
 	u8	log_max_qp;
 	u8	num_cmd_caches;
-	struct {
-		int	size;
-		int	limit;
-	} mr_cache[MAX_MKEY_CACHE_ENTRIES];
 };
 
 struct mlx5_hca_cap {
@@ -749,7 +758,6 @@ struct mlx5_core_dev {
 	} caps;
 	struct mlx5_timeouts	*timeouts;
 	u64			sys_image_guid;
-	phys_addr_t		iseg_base;
 	struct mlx5_init_seg __iomem *iseg;
 	phys_addr_t             bar_addr;
 	enum mlx5_device_state	state;
@@ -792,12 +800,13 @@ struct mlx5_core_dev {
 	enum mlx5_wc_state wc_state;
 	/* sync write combining state */
 	struct mutex wc_state_lock;
+	struct devlink *shd;
 };
 
 struct mlx5_db {
 	__be32			*db;
 	union {
-		struct mlx5_db_pgdir		*pgdir;
+		struct mlx5_dma_pool_page	*pool_page;
 		struct mlx5_ib_user_db_page	*user_page;
 	}			u;
 	dma_addr_t		dma;
@@ -819,6 +828,7 @@ typedef void (*mlx5_cmd_cbk_t)(int status, void *context);
 
 enum {
 	MLX5_CMD_ENT_STATE_PENDING_COMP,
+	MLX5_CMD_ENT_STATE_TIMEDOUT,
 };
 
 struct mlx5_cmd_work_ent {
@@ -1038,6 +1048,8 @@ void mlx5_pagealloc_start(struct mlx5_core_dev *dev);
 void mlx5_pagealloc_stop(struct mlx5_core_dev *dev);
 void mlx5_pages_debugfs_init(struct mlx5_core_dev *dev);
 void mlx5_pages_debugfs_cleanup(struct mlx5_core_dev *dev);
+void mlx5_pages_by_func_type_debugfs_init(struct mlx5_core_dev *dev);
+void mlx5_pages_by_func_type_debugfs_cleanup(struct mlx5_core_dev *dev);
 int mlx5_satisfy_startup_pages(struct mlx5_core_dev *dev, int boot);
 int mlx5_reclaim_startup_pages(struct mlx5_core_dev *dev);
 void mlx5_register_debugfs(void);
@@ -1142,6 +1154,7 @@ int mlx5_cmd_destroy_vport_lag(struct mlx5_core_dev *dev);
 bool mlx5_lag_is_roce(struct mlx5_core_dev *dev);
 bool mlx5_lag_is_sriov(struct mlx5_core_dev *dev);
 bool mlx5_lag_is_active(struct mlx5_core_dev *dev);
+int mlx5_lag_query_bond_speed(struct mlx5_core_dev *dev, u32 *speed);
 bool mlx5_lag_mode_is_hash(struct mlx5_core_dev *dev);
 bool mlx5_lag_is_master(struct mlx5_core_dev *dev);
 bool mlx5_lag_is_shared_fdb(struct mlx5_core_dev *dev);
@@ -1274,12 +1287,12 @@ static inline bool mlx5_rl_is_supported(struct mlx5_core_dev *dev)
 static inline int mlx5_core_is_mp_slave(struct mlx5_core_dev *dev)
 {
 	return MLX5_CAP_GEN(dev, affiliate_nic_vport_criteria) &&
-	       MLX5_CAP_GEN(dev, num_vhca_ports) <= 1;
+	       MLX5_CAP_GEN_MAX(dev, num_vhca_ports) <= 1;
 }
 
 static inline int mlx5_core_is_mp_master(struct mlx5_core_dev *dev)
 {
-	return MLX5_CAP_GEN(dev, num_vhca_ports) > 1;
+	return MLX5_CAP_GEN_MAX(dev, num_vhca_ports) > 1;
 }
 
 static inline int mlx5_core_mp_enabled(struct mlx5_core_dev *dev)
@@ -1379,4 +1392,7 @@ static inline struct net *mlx5_core_net(struct mlx5_core_dev *dev)
 {
 	return devlink_net(priv_to_devlink(dev));
 }
+
+#define MLX5_SW_IMAGE_GUID_MAX_BYTES 9
+
 #endif /* MLX5_DRIVER_H */

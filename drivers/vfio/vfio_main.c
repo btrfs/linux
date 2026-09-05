@@ -49,7 +49,6 @@
 #define VFIO_MAGIC 0x5646494f /* "VFIO" */
 
 static struct vfio {
-	struct class			*device_class;
 	struct ida			device_ida;
 	struct vfsmount			*vfs_mount;
 	int				fs_count;
@@ -63,6 +62,16 @@ MODULE_PARM_DESC(enable_unsafe_noiommu_mode, "Enable UNSAFE, no-IOMMU mode.  Thi
 #endif
 
 static DEFINE_XARRAY(vfio_device_set_xa);
+
+static char *vfio_device_devnode(const struct device *dev, umode_t *mode)
+{
+	return kasprintf(GFP_KERNEL, "vfio/devices/%s", dev_name(dev));
+}
+
+static const struct class vfio_device_class = {
+	.name		= "vfio-dev",
+	.devnode	= vfio_device_devnode
+};
 
 int vfio_assign_device_set(struct vfio_device *device, void *set_id)
 {
@@ -82,7 +91,7 @@ int vfio_assign_device_set(struct vfio_device *device, void *set_id)
 		goto found_get_ref;
 	xa_unlock(&vfio_device_set_xa);
 
-	new_dev_set = kzalloc(sizeof(*new_dev_set), GFP_KERNEL);
+	new_dev_set = kzalloc_obj(*new_dev_set);
 	if (!new_dev_set)
 		return -ENOMEM;
 	mutex_init(&new_dev_set->lock);
@@ -172,11 +181,13 @@ void vfio_device_put_registration(struct vfio_device *device)
 	if (refcount_dec_and_test(&device->refcount))
 		complete(&device->comp);
 }
+EXPORT_SYMBOL_GPL(vfio_device_put_registration);
 
 bool vfio_device_try_get_registration(struct vfio_device *device)
 {
 	return refcount_inc_not_zero(&device->refcount);
 }
+EXPORT_SYMBOL_GPL(vfio_device_try_get_registration);
 
 /*
  * VFIO driver API
@@ -297,7 +308,7 @@ static int vfio_init_device(struct vfio_device *device, struct device *dev,
 
 	device_initialize(&device->device);
 	device->device.release = vfio_device_release;
-	device->device.class = vfio.device_class;
+	device->device.class = &vfio_device_class;
 	device->device.parent = device->dev;
 	return 0;
 
@@ -308,6 +319,24 @@ out_inode:
 	vfio_release_device_set(device);
 	ida_free(&vfio.device_ida, device->index);
 	return ret;
+}
+
+static int vfio_device_set_noiommu_and_name(struct vfio_device *device, enum vfio_group_type type)
+{
+	if (IS_ENABLED(CONFIG_IOMMUFD_NOIOMMU) && vfio_noiommu &&
+	    !device->dev->iommu && type == VFIO_IOMMU)
+		device->noiommu = true;
+
+	/*
+	 * device->noiommu records no-IOMMU support for the standalone cdev
+	 * interface. VFIO_NOIOMMU enables both group and cdev no-IOMMU; when
+	 * cdev no-IOMMU is available, device->noiommu is set before
+	 * vfio_device_set_group(), so the cdev is named noiommu-vfio%d up
+	 * front. If IOMMUFD_NOIOMMU is unavailable, no-IOMMU devices are
+	 * limited to the group interface and do not receive a device cdev.
+	 */
+	return dev_set_name(&device->device, "%svfio%d",
+		     device->noiommu ? "noiommu-" : "", device->index);
 }
 
 static int __vfio_register_dev(struct vfio_device *device,
@@ -329,13 +358,19 @@ static int __vfio_register_dev(struct vfio_device *device,
 	if (!device->dev_set)
 		vfio_assign_device_set(device, device);
 
-	ret = dev_set_name(&device->device, "vfio%d", device->index);
+	ret = vfio_device_set_noiommu_and_name(device, type);
 	if (ret)
 		return ret;
 
 	ret = vfio_device_set_group(device, type);
 	if (ret)
 		return ret;
+
+	if (vfio_device_is_noiommu(device) && IS_ENABLED(CONFIG_IOMMUFD_NOIOMMU)) {
+		add_taint(TAINT_USER, LOCKDEP_STILL_OK);
+		dev_warn(device->dev,
+			 "Adding kernel taint for vfio-noiommu cdev\n");
+	}
 
 	/*
 	 * VFIO always sets IOMMU_CACHE because we offer no way for userspace to
@@ -396,6 +431,13 @@ void vfio_unregister_group_dev(struct vfio_device *device)
 	vfio_device_group_unregister(device);
 
 	/*
+	 * Remove debugfs before device_del(), which releases devres.  Some
+	 * debugfs entries are created with debugfs_create_devm_seqfile() and
+	 * therefore rely on devres-managed inode private data.
+	 */
+	vfio_device_debugfs_exit(device);
+
+	/*
 	 * Balances vfio_device_add() in register path, also prevents
 	 * new device opened by userspace in the cdev path.
 	 */
@@ -424,7 +466,6 @@ void vfio_unregister_group_dev(struct vfio_device *device)
 		}
 	}
 
-	vfio_device_debugfs_exit(device);
 	/* Balances vfio_device_set_group in register path */
 	vfio_device_remove_group(device);
 }
@@ -493,7 +534,7 @@ vfio_allocate_device_file(struct vfio_device *device)
 {
 	struct vfio_device_file *df;
 
-	df = kzalloc(sizeof(*df), GFP_KERNEL_ACCOUNT);
+	df = kzalloc_obj(*df, GFP_KERNEL_ACCOUNT);
 	if (!df)
 		return ERR_PTR(-ENOMEM);
 
@@ -551,6 +592,7 @@ static void vfio_df_device_last_close(struct vfio_device_file *df)
 		vfio_df_iommufd_unbind(df);
 	else
 		vfio_device_group_unuse_iommu(device);
+	device->precopy_info_v2 = 0;
 	module_put(device->dev->driver->owner);
 }
 
@@ -846,7 +888,8 @@ int vfio_mig_get_next_state(struct vfio_device *device,
 	 * logical state, as per the above comment.
 	 */
 	*next_fsm = vfio_from_fsm_table[cur_fsm][new_fsm];
-	while ((state_flags_table[*next_fsm] & device->migration_flags) !=
+	while (*next_fsm != VFIO_DEVICE_STATE_ERROR &&
+	       (state_flags_table[*next_fsm] & device->migration_flags) !=
 			state_flags_table[*next_fsm])
 		*next_fsm = vfio_from_fsm_table[*next_fsm][new_fsm];
 
@@ -959,6 +1002,23 @@ vfio_ioctl_device_feature_migration_data_size(struct vfio_device *device,
 	if (copy_to_user(arg, &data_size, sizeof(data_size)))
 		return -EFAULT;
 
+	return 0;
+}
+
+static int
+vfio_ioctl_device_feature_migration_precopy_info_v2(struct vfio_device *device,
+						    u32 flags, size_t argsz)
+{
+	int ret;
+
+	if (!(device->migration_flags & VFIO_MIGRATION_PRE_COPY))
+		return -EINVAL;
+
+	ret = vfio_check_feature(flags, argsz, VFIO_DEVICE_FEATURE_SET, 0);
+	if (ret != 1)
+		return ret;
+
+	device->precopy_info_v2 = 1;
 	return 0;
 }
 
@@ -1081,8 +1141,7 @@ vfio_ioctl_device_feature_logging_start(struct vfio_device *device,
 		return -E2BIG;
 
 	ranges = u64_to_user_ptr(control.ranges);
-	nodes = kmalloc_array(nnodes, sizeof(struct interval_tree_node),
-			      GFP_KERNEL);
+	nodes = kmalloc_objs(struct interval_tree_node, nnodes);
 	if (!nodes)
 		return -ENOMEM;
 
@@ -1250,6 +1309,9 @@ static int vfio_ioctl_device_feature(struct vfio_device *device,
 		return vfio_ioctl_device_feature_migration_data_size(
 			device, feature.flags, arg->data,
 			feature.argsz - minsz);
+	case VFIO_DEVICE_FEATURE_MIG_PRECOPY_INFOv2:
+		return vfio_ioctl_device_feature_migration_precopy_info_v2(
+			device, feature.flags, feature.argsz - minsz);
 	default:
 		if (unlikely(!device->ops->device_feature))
 			return -ENOTTY;
@@ -1257,6 +1319,51 @@ static int vfio_ioctl_device_feature(struct vfio_device *device,
 						   arg->data,
 						   feature.argsz - minsz);
 	}
+}
+
+static long vfio_get_region_info(struct vfio_device *device,
+				 struct vfio_region_info __user *arg)
+{
+	unsigned long minsz = offsetofend(struct vfio_region_info, offset);
+	struct vfio_region_info info = {};
+	struct vfio_info_cap caps = {};
+	int ret;
+
+	if (unlikely(!device->ops->get_region_info_caps))
+		return -EINVAL;
+
+	if (copy_from_user(&info, arg, minsz))
+		return -EFAULT;
+	if (info.argsz < minsz)
+		return -EINVAL;
+
+	ret = device->ops->get_region_info_caps(device, &info, &caps);
+	if (ret)
+		goto out_free;
+
+	if (caps.size) {
+		info.flags |= VFIO_REGION_INFO_FLAG_CAPS;
+		if (info.argsz < sizeof(info) + caps.size) {
+			info.argsz = sizeof(info) + caps.size;
+			info.cap_offset = 0;
+		} else {
+			vfio_info_cap_shift(&caps, sizeof(info));
+			if (copy_to_user(arg + 1, caps.buf, caps.size)) {
+				ret = -EFAULT;
+				goto out_free;
+			}
+			info.cap_offset = sizeof(info);
+		}
+	}
+
+	if (copy_to_user(arg, &info, minsz)){
+		ret = -EFAULT;
+		goto out_free;
+	}
+
+out_free:
+	kfree(caps.buf);
+	return ret;
 }
 
 static long vfio_device_fops_unl_ioctl(struct file *filep,
@@ -1294,6 +1401,10 @@ static long vfio_device_fops_unl_ioctl(struct file *filep,
 	switch (cmd) {
 	case VFIO_DEVICE_FEATURE:
 		ret = vfio_ioctl_device_feature(device, uptr);
+		break;
+
+	case VFIO_DEVICE_GET_REGION_INFO:
+		ret = vfio_get_region_info(device, uptr);
 		break;
 
 	default:
@@ -1733,13 +1844,11 @@ static int __init vfio_init(void)
 		goto err_virqfd;
 
 	/* /sys/class/vfio-dev/vfioX */
-	vfio.device_class = class_create("vfio-dev");
-	if (IS_ERR(vfio.device_class)) {
-		ret = PTR_ERR(vfio.device_class);
+	ret = class_register(&vfio_device_class);
+	if (ret)
 		goto err_dev_class;
-	}
 
-	ret = vfio_cdev_init(vfio.device_class);
+	ret = vfio_cdev_init();
 	if (ret)
 		goto err_alloc_dev_chrdev;
 
@@ -1748,8 +1857,7 @@ static int __init vfio_init(void)
 	return 0;
 
 err_alloc_dev_chrdev:
-	class_destroy(vfio.device_class);
-	vfio.device_class = NULL;
+	class_unregister(&vfio_device_class);
 err_dev_class:
 	vfio_virqfd_exit();
 err_virqfd:
@@ -1762,8 +1870,7 @@ static void __exit vfio_cleanup(void)
 	vfio_debugfs_remove_root();
 	ida_destroy(&vfio.device_ida);
 	vfio_cdev_cleanup();
-	class_destroy(vfio.device_class);
-	vfio.device_class = NULL;
+	class_unregister(&vfio_device_class);
 	vfio_virqfd_exit();
 	vfio_group_cleanup();
 	xa_destroy(&vfio_device_set_xa);

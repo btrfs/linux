@@ -401,8 +401,8 @@ static void ef4_iterate_state(struct ef4_nic *efx)
 
 	/* Initialise udp header */
 	payload->udp.source = 0;
-	payload->udp.len = htons(sizeof(*payload) -
-				 offsetof(struct ef4_loopback_payload, udp));
+	udp_set_len_short(&payload->udp, sizeof(*payload) -
+			  offsetof(struct ef4_loopback_payload, udp));
 	payload->udp.check = 0;	/* checksum ignored */
 
 	/* Fill out payload */
@@ -545,8 +545,7 @@ ef4_test_loopback(struct ef4_tx_queue *tx_queue,
 		/* Determine how many packets to send */
 		state->packet_count = efx->txq_entries / 3;
 		state->packet_count = min(1 << (i << 2), state->packet_count);
-		state->skbs = kcalloc(state->packet_count,
-				      sizeof(state->skbs[0]), GFP_KERNEL);
+		state->skbs = kzalloc_objs(state->skbs[0], state->packet_count);
 		if (!state->skbs)
 			return -ENOMEM;
 		state->flush = false;
@@ -635,7 +634,7 @@ static int ef4_test_loopbacks(struct ef4_nic *efx, struct ef4_self_tests *tests,
 	/* Set the port loopback_selftest member. From this point on
 	 * all received packets will be dropped. Mark the state as
 	 * "flushing" so all inflight packets are dropped */
-	state = kzalloc(sizeof(*state), GFP_KERNEL);
+	state = kzalloc_obj(*state);
 	if (state == NULL)
 		return -ENOMEM;
 	BUG_ON(efx->loopback_selftest);

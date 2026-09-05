@@ -103,7 +103,6 @@ static unsigned long kvm_emu_xchg_csr(struct kvm_vcpu *vcpu, int csrid,
 		old = kvm_read_sw_gcsr(csr, csrid);
 		val = (old & ~csr_mask) | (val & csr_mask);
 		kvm_write_sw_gcsr(csr, csrid, val);
-		old = old & csr_mask;
 	} else
 		pr_warn_once("Unsupported csrxchg 0x%x with pc %lx\n", csrid, vcpu->arch.pc);
 
@@ -253,7 +252,7 @@ int kvm_complete_iocsr_read(struct kvm_vcpu *vcpu, struct kvm_run *run)
 		*gpr = *(s64 *)run->iocsr_io.data;
 		break;
 	default:
-		kvm_err("Bad IOCSR length: %d, addr is 0x%lx\n",
+		kvm_pr_unimpl("Bad IOCSR length: %d, addr is 0x%lx\n",
 				run->iocsr_io.len, vcpu->arch.badv);
 		er = EMULATE_FAIL;
 		break;
@@ -327,8 +326,8 @@ static int kvm_trap_handle_gspr(struct kvm_vcpu *vcpu)
 
 	/* Rollback PC only if emulation was unsuccessful */
 	if (er == EMULATE_FAIL) {
-		kvm_err("[%#lx]%s: unsupported gspr instruction 0x%08x\n",
-			curr_pc, __func__, inst.word);
+		kvm_pr_unimpl("[%#lx]%s: unsupported gspr instruction 0x%08x\n",
+				curr_pc, __func__, inst.word);
 
 		kvm_arch_vcpu_dump_regs(vcpu);
 		vcpu->arch.pc = curr_pc;
@@ -390,6 +389,7 @@ int kvm_emu_mmio_read(struct kvm_vcpu *vcpu, larch_inst inst)
 			run->mmio.len = 8;
 			break;
 		default:
+			ret = EMULATE_FAIL;
 			break;
 		}
 		break;
@@ -481,7 +481,6 @@ int kvm_emu_mmio_read(struct kvm_vcpu *vcpu, larch_inst inst)
 		srcu_read_unlock(&vcpu->kvm->srcu, idx);
 		if (!ret) {
 			kvm_complete_mmio_read(vcpu, run);
-			update_pc(&vcpu->arch);
 			vcpu->mmio_needed = 0;
 			return EMULATE_DONE;
 		}
@@ -491,7 +490,7 @@ int kvm_emu_mmio_read(struct kvm_vcpu *vcpu, larch_inst inst)
 		return EMULATE_DO_MMIO;
 	}
 
-	kvm_err("Read not supported Inst=0x%08x @%lx BadVaddr:%#lx\n",
+	kvm_pr_unimpl("Read not supported Inst=0x%08x @%lx BadVaddr:%#lx\n",
 			inst.word, vcpu->arch.pc, vcpu->arch.badv);
 	kvm_arch_vcpu_dump_regs(vcpu);
 	vcpu->mmio_needed = 0;
@@ -529,7 +528,7 @@ int kvm_complete_mmio_read(struct kvm_vcpu *vcpu, struct kvm_run *run)
 		*gpr = *(s64 *)run->mmio.data;
 		break;
 	default:
-		kvm_err("Bad MMIO length: %d, addr is 0x%lx\n",
+		kvm_pr_unimpl("Bad MMIO length: %d, addr is 0x%lx\n",
 				run->mmio.len, vcpu->arch.badv);
 		er = EMULATE_FAIL;
 		break;
@@ -656,7 +655,7 @@ int kvm_emu_mmio_write(struct kvm_vcpu *vcpu, larch_inst inst)
 	}
 
 	vcpu->arch.pc = curr_pc;
-	kvm_err("Write not supported Inst=0x%08x @%lx BadVaddr:%#lx\n",
+	kvm_pr_unimpl("Write not supported Inst=0x%08x @%lx BadVaddr:%#lx\n",
 			inst.word, vcpu->arch.pc, vcpu->arch.badv);
 	kvm_arch_vcpu_dump_regs(vcpu);
 	/* Rollback PC if emulation was unsuccessful */
@@ -748,13 +747,13 @@ static int kvm_handle_fpu_disabled(struct kvm_vcpu *vcpu, int ecode)
 	 * treated as a reserved instruction!
 	 * If FPU already in use, we shouldn't get this at all.
 	 */
-	if (WARN_ON(vcpu->arch.aux_inuse & KVM_LARCH_FPU)) {
-		kvm_err("%s internal error\n", __func__);
+	if (vcpu->arch.aux_inuse & KVM_LARCH_FPU) {
+		kvm_pr_unimpl("%s internal error\n", __func__);
 		run->exit_reason = KVM_EXIT_INTERNAL_ERROR;
 		return RESUME_HOST;
 	}
 
-	kvm_own_fpu(vcpu);
+	kvm_make_request(KVM_REQ_FPU_LOAD, vcpu);
 
 	return RESUME_GUEST;
 }
@@ -792,8 +791,10 @@ static long kvm_save_notify(struct kvm_vcpu *vcpu)
  */
 static int kvm_handle_lsx_disabled(struct kvm_vcpu *vcpu, int ecode)
 {
-	if (kvm_own_lsx(vcpu))
+	if (!kvm_guest_has_lsx(&vcpu->arch))
 		kvm_queue_exception(vcpu, EXCCODE_INE, 0);
+	else
+		kvm_make_request(KVM_REQ_FPU_LOAD, vcpu);
 
 	return RESUME_GUEST;
 }
@@ -808,16 +809,20 @@ static int kvm_handle_lsx_disabled(struct kvm_vcpu *vcpu, int ecode)
  */
 static int kvm_handle_lasx_disabled(struct kvm_vcpu *vcpu, int ecode)
 {
-	if (kvm_own_lasx(vcpu))
+	if (!kvm_guest_has_lasx(&vcpu->arch))
 		kvm_queue_exception(vcpu, EXCCODE_INE, 0);
+	else
+		kvm_make_request(KVM_REQ_FPU_LOAD, vcpu);
 
 	return RESUME_GUEST;
 }
 
 static int kvm_handle_lbt_disabled(struct kvm_vcpu *vcpu, int ecode)
 {
-	if (kvm_own_lbt(vcpu))
+	if (!kvm_guest_has_lbt(&vcpu->arch))
 		kvm_queue_exception(vcpu, EXCCODE_INE, 0);
+	else
+		kvm_make_request(KVM_REQ_LBT_LOAD, vcpu);
 
 	return RESUME_GUEST;
 }
@@ -937,7 +942,7 @@ static int kvm_fault_ni(struct kvm_vcpu *vcpu, int ecode)
 	/* Fetch the instruction */
 	inst = vcpu->arch.badi;
 	badv = vcpu->arch.badv;
-	kvm_err("ECode: %d PC=%#lx Inst=0x%08x BadVaddr=%#lx ESTAT=%#lx\n",
+	kvm_pr_unimpl("ECode: %d PC=%#lx Inst=0x%08x BadVaddr=%#lx ESTAT=%#lx\n",
 			ecode, vcpu->arch.pc, inst, badv, read_gcsr_estat());
 	kvm_arch_vcpu_dump_regs(vcpu);
 	kvm_queue_exception(vcpu, EXCCODE_INE, 0);

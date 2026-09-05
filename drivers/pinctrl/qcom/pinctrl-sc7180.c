@@ -41,7 +41,6 @@ enum {
 		.io_reg = 0x1000 * id + 0x4,		\
 		.intr_cfg_reg = 0x1000 * id + 0x8,	\
 		.intr_status_reg = 0x1000 * id + 0xc,	\
-		.intr_target_reg = 0x1000 * id + 0x8,	\
 		.tile = _tile,			\
 		.mux_bit = 2,			\
 		.pull_bit = 0,			\
@@ -68,7 +67,6 @@ enum {
 		.io_reg = 0,				\
 		.intr_cfg_reg = 0,			\
 		.intr_status_reg = 0,			\
-		.intr_target_reg = 0,			\
 		.tile = SOUTH,				\
 		.mux_bit = -1,				\
 		.pull_bit = pull,			\
@@ -94,7 +92,6 @@ enum {
 		.io_reg = offset + 0x4,			\
 		.intr_cfg_reg = 0,			\
 		.intr_status_reg = 0,			\
-		.intr_target_reg = 0,			\
 		.tile = SOUTH,				\
 		.mux_bit = -1,				\
 		.pull_bit = 3,				\
@@ -1151,6 +1148,7 @@ static const struct of_device_id sc7180_pinctrl_of_match[] = {
 	{ .compatible = "qcom,sc7180-pinctrl", },
 	{ },
 };
+MODULE_DEVICE_TABLE(of, sc7180_pinctrl_of_match);
 
 static struct platform_driver sc7180_pinctrl_driver = {
 	.driver = {
@@ -1175,4 +1173,3 @@ module_exit(sc7180_pinctrl_exit);
 
 MODULE_DESCRIPTION("QTI sc7180 pinctrl driver");
 MODULE_LICENSE("GPL v2");
-MODULE_DEVICE_TABLE(of, sc7180_pinctrl_of_match);

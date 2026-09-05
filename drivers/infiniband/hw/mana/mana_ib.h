@@ -8,7 +8,7 @@
 
 #include <rdma/ib_verbs.h>
 #include <rdma/ib_mad.h>
-#include <rdma/ib_umem.h>
+#include <rdma/iter.h>
 #include <rdma/mana-abi.h>
 #include <rdma/uverbs_ioctl.h>
 #include <linux/dmapool.h>
@@ -26,6 +26,8 @@
 
 /* Send queue ID mask */
 #define MANA_SENDQ_MASK	BIT(31)
+/* Queue ID encodes type in the lower 2 bits */
+#define MANA_QID_SUBTYPE_MASK 0x3
 
 /*
  * The hardware limit of number of MRs is greater than maximum number of MRs
@@ -102,6 +104,20 @@ struct mana_ib_pd {
 	struct mutex vport_mutex;
 	int vport_use_count;
 
+	/* Port bound to this PD for raw QP usage. Only valid when
+	 * vport_use_count > 0. A PD can only be associated with a
+	 * single physical port because per-port EQs and vport
+	 * configuration are tied to the PD's refcount.
+	 */
+	u32 vport_port;
+
+	/* Only one RSS QP is allowed per vport because each RSS QP
+	 * overwrites the vport steering config (indirection table /
+	 * hash key) and mana_disable_vport_rx() on destroy would
+	 * blackhole traffic for any other RSS QP on the same vport.
+	 */
+	bool has_rss_qp;
+
 	bool tx_shortform_allowed;
 	u32 tx_vp_offset;
 };
@@ -125,10 +141,20 @@ struct mana_ib_ah {
 	dma_addr_t dma_handle;
 };
 
+struct mana_ib_mw {
+	struct ib_mw ibmw;
+	mana_handle_t mw_handle;
+};
+
 struct mana_ib_mr {
 	struct ib_mr ibmr;
 	struct ib_umem *umem;
 	mana_handle_t mr_handle;
+};
+
+struct mana_ib_dm {
+	struct ib_dm ibdm;
+	mana_handle_t dm_handle;
 };
 
 struct mana_ib_cq {
@@ -156,6 +182,17 @@ struct mana_ib_rc_qp {
 	struct mana_ib_queue queues[MANA_RC_QUEUE_TYPE_MAX];
 };
 
+enum mana_uc_queue_type {
+	MANA_UC_SEND_QUEUE_REQUESTER = 0,
+	MANA_UC_RECV_QUEUE_RESPONDER,
+	MANA_UC_SEND_QUEUE_MMQ,
+	MANA_UC_QUEUE_TYPE_MAX,
+};
+
+struct mana_ib_uc_qp {
+	struct mana_ib_queue queues[MANA_UC_QUEUE_TYPE_MAX];
+};
+
 enum mana_ud_queue_type {
 	MANA_UD_SEND_QUEUE = 0,
 	MANA_UD_RECV_QUEUE,
@@ -174,6 +211,7 @@ struct mana_ib_qp {
 	union {
 		struct mana_ib_queue raw_sq;
 		struct mana_ib_rc_qp rc_qp;
+		struct mana_ib_uc_qp uc_qp;
 		struct mana_ib_ud_qp ud_qp;
 	};
 
@@ -209,8 +247,9 @@ enum mana_ib_command_code {
 	MANA_IB_CREATE_CQ       = 0x30008,
 	MANA_IB_DESTROY_CQ      = 0x30009,
 	MANA_IB_CREATE_RC_QP    = 0x3000a,
-	MANA_IB_DESTROY_RC_QP   = 0x3000b,
+	MANA_IB_DESTROY_RNIC_QP = 0x3000b,
 	MANA_IB_SET_QP_STATE	= 0x3000d,
+	MANA_IB_CREATE_UC_QP    = 0x30020,
 	MANA_IB_QUERY_VF_COUNTERS = 0x30022,
 	MANA_IB_QUERY_DEVICE_COUNTERS = 0x30023,
 };
@@ -360,15 +399,38 @@ struct mana_rnic_create_qp_resp {
 	u32 reserved;
 }; /* HW Data*/
 
-struct mana_rnic_destroy_rc_qp_req {
+struct mana_rnic_destroy_rnic_qp_req {
 	struct gdma_req_hdr hdr;
 	mana_handle_t adapter;
-	mana_handle_t rc_qp_handle;
+	mana_handle_t qp_handle;
 }; /* HW Data */
 
-struct mana_rnic_destroy_rc_qp_resp {
+struct mana_rnic_destroy_rnic_qp_resp {
 	struct gdma_resp_hdr hdr;
 }; /* HW Data */
+
+struct mana_rnic_create_uc_qp_req {
+	struct gdma_req_hdr hdr;
+	mana_handle_t adapter;
+	mana_handle_t pd_handle;
+	mana_handle_t send_cq_handle;
+	mana_handle_t recv_cq_handle;
+	u64 dma_region[MANA_UC_QUEUE_TYPE_MAX];
+	u64 flags;
+	u32 doorbell_page;
+	u32 max_send_wr;
+	u32 max_recv_wr;
+	u32 max_send_sge;
+	u32 max_recv_sge;
+	u32 reserved;
+}; /* HW Data */
+
+struct mana_rnic_create_uc_qp_resp {
+	struct gdma_resp_hdr hdr;
+	mana_handle_t qp_handle;
+	u32 queue_ids[MANA_UC_QUEUE_TYPE_MAX];
+	u32 reserved;
+}; /* HW Data*/
 
 struct mana_rnic_create_udqp_req {
 	struct gdma_req_hdr hdr;
@@ -558,12 +620,44 @@ static inline struct gdma_context *mdev_to_gc(struct mana_ib_dev *mdev)
 	return mdev->gdma_dev->gdma_context;
 }
 
+static inline struct mana_ib_queue *mana_qp_get_sq(struct mana_ib_qp *qp)
+{
+	switch (qp->ibqp.qp_type) {
+	case IB_QPT_RC:
+		return &qp->rc_qp.queues[MANA_RC_SEND_QUEUE_REQUESTER];
+	case IB_QPT_UC:
+		return &qp->uc_qp.queues[MANA_UC_SEND_QUEUE_REQUESTER];
+	case IB_QPT_UD:
+	case IB_QPT_GSI:
+		return &qp->ud_qp.queues[MANA_UD_SEND_QUEUE];
+	default:
+		return NULL;
+	}
+}
+
+static inline struct mana_ib_queue *mana_qp_get_rq(struct mana_ib_qp *qp)
+{
+	switch (qp->ibqp.qp_type) {
+	case IB_QPT_RC:
+		return &qp->rc_qp.queues[MANA_RC_RECV_QUEUE_RESPONDER];
+	case IB_QPT_UC:
+		return &qp->uc_qp.queues[MANA_UC_RECV_QUEUE_RESPONDER];
+	case IB_QPT_UD:
+	case IB_QPT_GSI:
+		return &qp->ud_qp.queues[MANA_UD_RECV_QUEUE];
+	default:
+		return NULL;
+	}
+}
+
 static inline struct mana_ib_qp *mana_get_qp_ref(struct mana_ib_dev *mdev,
 						 u32 qid, bool is_sq)
 {
 	struct mana_ib_qp *qp;
 	unsigned long flag;
 
+	/* Remove subtype bits */
+	qid &= ~MANA_QID_SUBTYPE_MASK;
 	if (is_sq)
 		qid |= MANA_SENDQ_MASK;
 
@@ -712,8 +806,9 @@ int mana_ib_gd_destroy_cq(struct mana_ib_dev *mdev, struct mana_ib_cq *cq);
 
 int mana_ib_gd_create_rc_qp(struct mana_ib_dev *mdev, struct mana_ib_qp *qp,
 			    struct ib_qp_init_attr *attr, u32 doorbell, u64 flags);
-int mana_ib_gd_destroy_rc_qp(struct mana_ib_dev *mdev, struct mana_ib_qp *qp);
-
+int mana_ib_gd_destroy_rnic_qp(struct mana_ib_dev *mdev, struct mana_ib_qp *qp);
+int mana_ib_gd_create_uc_qp(struct mana_ib_dev *mdev, struct mana_ib_qp *qp,
+			    struct ib_qp_init_attr *attr, u32 doorbell, u64 flags);
 int mana_ib_gd_create_ud_qp(struct mana_ib_dev *mdev, struct mana_ib_qp *qp,
 			    struct ib_qp_init_attr *attr, u32 doorbell, u32 type);
 int mana_ib_gd_destroy_ud_qp(struct mana_ib_dev *mdev, struct mana_ib_qp *qp);
@@ -731,8 +826,18 @@ void mana_drain_gsi_sqs(struct mana_ib_dev *mdev);
 int mana_ib_poll_cq(struct ib_cq *ibcq, int num_entries, struct ib_wc *wc);
 int mana_ib_arm_cq(struct ib_cq *ibcq, enum ib_cq_notify_flags flags);
 
+int mana_ib_alloc_mw(struct ib_mw *mw, struct ib_udata *udata);
+int mana_ib_dealloc_mw(struct ib_mw *mw);
+
 struct ib_mr *mana_ib_reg_user_mr_dmabuf(struct ib_pd *ibpd, u64 start, u64 length,
 					 u64 iova, int fd, int mr_access_flags,
 					 struct ib_dmah *dmah,
 					 struct uverbs_attr_bundle *attrs);
+
+struct ib_dm *mana_ib_alloc_dm(struct ib_device *dev, struct ib_ucontext *context,
+			       struct ib_dm_alloc_attr *attr, struct uverbs_attr_bundle *attrs);
+int mana_ib_dealloc_dm(struct ib_dm *dm, struct uverbs_attr_bundle *attrs);
+struct ib_mr *mana_ib_reg_dm_mr(struct ib_pd *pd, struct ib_dm *dm, struct ib_dm_mr_attr *attr,
+				struct uverbs_attr_bundle *attrs);
+
 #endif

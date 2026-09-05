@@ -331,6 +331,7 @@ enum hnae3_dbg_cmd {
 	HNAE3_DBG_CMD_TX_QUEUE_INFO,
 	HNAE3_DBG_CMD_FD_TCAM,
 	HNAE3_DBG_CMD_FD_COUNTER,
+	HNAE3_DBG_CMD_FD_RULE,
 	HNAE3_DBG_CMD_MAC_TNL_STATUS,
 	HNAE3_DBG_CMD_SERV_INFO,
 	HNAE3_DBG_CMD_UMV_INFO,
@@ -601,6 +602,10 @@ typedef int (*read_func)(struct seq_file *s, void *data);
  *   Config wake on lan
  * dbg_get_read_func
  *   Return the read func for debugfs seq file
+ * set_pfc_prevention_tout
+ *   Set PFC storm prevention timeout
+ * get_pfc_prevention_tout
+ *   Get PFC storm prevention timeout
  */
 struct hnae3_ae_ops {
 	int (*init_ae_dev)(struct hnae3_ae_dev *ae_dev);
@@ -778,7 +783,7 @@ struct hnae3_ae_ops {
 				 u32 len, u8 *data);
 	bool (*get_cmdq_stat)(struct hnae3_handle *handle);
 	int (*add_cls_flower)(struct hnae3_handle *handle,
-			      struct flow_cls_offload *cls_flower, int tc);
+			      struct flow_cls_offload *cls_flower);
 	int (*del_cls_flower)(struct hnae3_handle *handle,
 			      struct flow_cls_offload *cls_flower);
 	bool (*cls_flower_active)(struct hnae3_handle *handle);
@@ -804,6 +809,13 @@ struct hnae3_ae_ops {
 	int (*dbg_get_read_func)(struct hnae3_handle *handle,
 				 enum hnae3_dbg_cmd cmd,
 				 read_func *func);
+	int (*hwtstamp_get)(struct hnae3_handle *handle,
+			    struct kernel_hwtstamp_config *config);
+	int (*hwtstamp_set)(struct hnae3_handle *handle,
+			    struct kernel_hwtstamp_config *config,
+			    struct netlink_ext_ack *extack);
+	int (*set_pfc_prevention_tout)(struct hnae3_handle *handle, u16 times);
+	int (*get_pfc_prevention_tout)(struct hnae3_handle *handle, u16 *times);
 };
 
 struct hnae3_dcb_ops {
@@ -883,6 +895,14 @@ struct hnae3_roce_private_info {
 	unsigned long reset_state;
 	unsigned long instance_state;
 	unsigned long state;
+};
+
+struct hnae3_pfc_storm_para {
+	u32 dir;
+	u32 enable;
+	u32 period_ms;
+	u32 times;
+	u32 recovery_period_ms;
 };
 
 #define HNAE3_SUPPORT_APP_LOOPBACK    BIT(0)

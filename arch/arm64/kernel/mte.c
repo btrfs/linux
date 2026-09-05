@@ -8,6 +8,7 @@
 #include <linux/kernel.h>
 #include <linux/mm.h>
 #include <linux/prctl.h>
+#include <linux/ptrace.h>
 #include <linux/sched.h>
 #include <linux/sched/mm.h>
 #include <linux/string.h>
@@ -291,6 +292,9 @@ void mte_thread_switch(struct task_struct *next)
 	/* TCO may not have been disabled on exception entry for the current task. */
 	mte_disable_tco_entry(next);
 
+	if (!system_uses_mte_async_or_asymm_mode())
+		return;
+
 	/*
 	 * Check if an async tag exception occurred at EL1.
 	 *
@@ -315,8 +319,8 @@ void mte_cpu_setup(void)
 	 * CnP is not a boot feature so MTE gets enabled before CnP, but let's
 	 * make sure that is the case.
 	 */
-	BUG_ON(read_sysreg(ttbr0_el1) & TTBR_CNP_BIT);
-	BUG_ON(read_sysreg(ttbr1_el1) & TTBR_CNP_BIT);
+	BUG_ON(read_sysreg(ttbr0_el1) & TTBRx_EL1_CnP);
+	BUG_ON(read_sysreg(ttbr1_el1) & TTBRx_EL1_CnP);
 
 	/* Normal Tagged memory type at the corresponding MAIR index */
 	sysreg_clear_set(mair_el1,
@@ -348,6 +352,9 @@ void mte_cpu_setup(void)
 void mte_suspend_enter(void)
 {
 	if (!system_supports_mte())
+		return;
+
+	if (!system_uses_mte_async_or_asymm_mode())
 		return;
 
 	/*
@@ -531,16 +538,13 @@ static int access_remote_tags(struct task_struct *tsk, unsigned long addr,
 	if (!mm)
 		return -EPERM;
 
-	if (!tsk->ptrace || (current != tsk->parent) ||
-	    ((get_dumpable(mm) != SUID_DUMP_USER) &&
-	     !ptracer_capable(tsk, mm->user_ns))) {
+	if (!ptracer_access_allowed(tsk)) {
 		mmput(mm);
 		return -EPERM;
 	}
 
 	ret = __access_remote_tags(mm, addr, kiov, gup_flags);
 	mmput(mm);
-
 	return ret;
 }
 

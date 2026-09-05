@@ -59,24 +59,16 @@ static const struct v4l2_ctrl_ops brx_ctrl_ops = {
  * V4L2 Subdevice Operations
  */
 
+static const unsigned int brx_codes[] = {
+	MEDIA_BUS_FMT_ARGB8888_1X32,
+	MEDIA_BUS_FMT_AYUV8_1X32,
+};
+
 /*
  * The BRx can't perform format conversion, all sink and source formats must be
  * identical. We pick the format on the first sink pad (pad 0) and propagate it
  * to all other pads.
  */
-
-static int brx_enum_mbus_code(struct v4l2_subdev *subdev,
-			      struct v4l2_subdev_state *sd_state,
-			      struct v4l2_subdev_mbus_code_enum *code)
-{
-	static const unsigned int codes[] = {
-		MEDIA_BUS_FMT_ARGB8888_1X32,
-		MEDIA_BUS_FMT_AYUV8_1X32,
-	};
-
-	return vsp1_subdev_enum_mbus_code(subdev, sd_state, code, codes,
-					  ARRAY_SIZE(codes));
-}
 
 static int brx_enum_frame_size(struct v4l2_subdev *subdev,
 			       struct v4l2_subdev_state *sd_state,
@@ -138,15 +130,12 @@ static int brx_set_format(struct v4l2_subdev *subdev,
 	struct vsp1_brx *brx = to_brx(subdev);
 	struct v4l2_subdev_state *state;
 	struct v4l2_mbus_framefmt *format;
-	int ret = 0;
 
-	mutex_lock(&brx->entity.lock);
+	guard(mutex)(&brx->entity.lock);
 
 	state = vsp1_entity_get_state(&brx->entity, sd_state, fmt->which);
-	if (!state) {
-		ret = -EINVAL;
-		goto done;
-	}
+	if (!state)
+		return -EINVAL;
 
 	brx_try_format(brx, state, fmt->pad, &fmt->format);
 
@@ -166,17 +155,13 @@ static int brx_set_format(struct v4l2_subdev *subdev,
 
 	/* Propagate the format code to all pads. */
 	if (fmt->pad == BRX_PAD_SINK(0)) {
-		unsigned int i;
-
-		for (i = 0; i <= brx->entity.source_pad; ++i) {
+		for (unsigned int i = 0; i <= brx->entity.source_pad; ++i) {
 			format = v4l2_subdev_state_get_format(state, i);
 			format->code = fmt->format.code;
 		}
 	}
 
-done:
-	mutex_unlock(&brx->entity.lock);
-	return ret;
+	return 0;
 }
 
 static int brx_get_selection(struct v4l2_subdev *subdev,
@@ -203,9 +188,10 @@ static int brx_get_selection(struct v4l2_subdev *subdev,
 		if (!state)
 			return -EINVAL;
 
-		mutex_lock(&brx->entity.lock);
-		sel->r = *v4l2_subdev_state_get_compose(state, sel->pad);
-		mutex_unlock(&brx->entity.lock);
+		scoped_guard(mutex, &brx->entity.lock) {
+			sel->r = *v4l2_subdev_state_get_compose(state, sel->pad);
+		}
+
 		return 0;
 
 	default:
@@ -221,7 +207,6 @@ static int brx_set_selection(struct v4l2_subdev *subdev,
 	struct v4l2_subdev_state *state;
 	struct v4l2_mbus_framefmt *format;
 	struct v4l2_rect *compose;
-	int ret = 0;
 
 	if (sel->pad == brx->entity.source_pad)
 		return -EINVAL;
@@ -229,13 +214,11 @@ static int brx_set_selection(struct v4l2_subdev *subdev,
 	if (sel->target != V4L2_SEL_TGT_COMPOSE)
 		return -EINVAL;
 
-	mutex_lock(&brx->entity.lock);
+	guard(mutex)(&brx->entity.lock);
 
 	state = vsp1_entity_get_state(&brx->entity, sd_state, sel->which);
-	if (!state) {
-		ret = -EINVAL;
-		goto done;
-	}
+	if (!state)
+		return -EINVAL;
 
 	/*
 	 * The compose rectangle top left corner must be inside the output
@@ -256,13 +239,11 @@ static int brx_set_selection(struct v4l2_subdev *subdev,
 	compose = v4l2_subdev_state_get_compose(state, sel->pad);
 	*compose = sel->r;
 
-done:
-	mutex_unlock(&brx->entity.lock);
-	return ret;
+	return 0;
 }
 
 static const struct v4l2_subdev_pad_ops brx_pad_ops = {
-	.enum_mbus_code = brx_enum_mbus_code,
+	.enum_mbus_code = vsp1_subdev_enum_mbus_code,
 	.enum_frame_size = brx_enum_frame_size,
 	.get_fmt = vsp1_subdev_get_pad_format,
 	.set_fmt = brx_set_format,
@@ -271,6 +252,7 @@ static const struct v4l2_subdev_pad_ops brx_pad_ops = {
 };
 
 static const struct v4l2_subdev_ops brx_ops = {
+	.core	= &vsp1_entity_core_ops,
 	.pad    = &brx_pad_ops,
 };
 
@@ -287,7 +269,6 @@ static void brx_configure_stream(struct vsp1_entity *entity,
 	struct vsp1_brx *brx = to_brx(&entity->subdev);
 	struct v4l2_mbus_framefmt *format;
 	unsigned int flags;
-	unsigned int i;
 
 	format = v4l2_subdev_state_get_format(state, brx->entity.source_pad);
 
@@ -331,7 +312,7 @@ static void brx_configure_stream(struct vsp1_entity *entity,
 			       VI6_BRU_ROP_CROP(VI6_ROP_NOP) |
 			       VI6_BRU_ROP_AROP(VI6_ROP_NOP));
 
-	for (i = 0; i < brx->entity.source_pad; ++i) {
+	for (unsigned int i = 0; i < brx->entity.source_pad; ++i) {
 		bool premultiplied = false;
 		u32 ctrl = 0;
 
@@ -416,6 +397,12 @@ struct vsp1_brx *vsp1_brx_create(struct vsp1_device *vsp1,
 	brx->base = type == VSP1_ENTITY_BRU ? VI6_BRU_BASE : VI6_BRS_BASE;
 	brx->entity.ops = &brx_entity_ops;
 	brx->entity.type = type;
+	brx->entity.codes = brx_codes;
+	brx->entity.num_codes = ARRAY_SIZE(brx_codes);
+	brx->entity.min_width = BRX_MIN_SIZE;
+	brx->entity.max_width = BRX_MAX_SIZE;
+	brx->entity.min_height = BRX_MIN_SIZE;
+	brx->entity.max_height = BRX_MAX_SIZE;
 
 	if (type == VSP1_ENTITY_BRU) {
 		num_pads = vsp1->info->num_bru_inputs + 1;

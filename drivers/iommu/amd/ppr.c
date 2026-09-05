@@ -20,7 +20,7 @@
 int __init amd_iommu_alloc_ppr_log(struct amd_iommu *iommu)
 {
 	iommu->ppr_log = iommu_alloc_4k_pages(iommu, GFP_KERNEL | __GFP_ZERO,
-					      PPR_LOG_SIZE);
+					      amd_iommu_pprlog_size);
 	return iommu->ppr_log ? 0 : -ENOMEM;
 }
 
@@ -33,7 +33,9 @@ void amd_iommu_enable_ppr_log(struct amd_iommu *iommu)
 
 	iommu_feature_enable(iommu, CONTROL_PPR_EN);
 
-	entry = iommu_virt_to_phys(iommu->ppr_log) | PPR_LOG_SIZE_512;
+	entry = iommu_virt_to_phys(iommu->ppr_log);
+	entry |= (amd_iommu_pprlog_size == PPRLOG_SIZE_DEF) ?
+			PPRLOG_LEN_MASK_DEF : PPRLOG_LEN_MASK_MAX;
 
 	memcpy_toio(iommu->mmio_base + MMIO_PPR_LOG_OFFSET,
 		    &entry, sizeof(entry));
@@ -128,7 +130,7 @@ static void iommu_call_iopf_notifier(struct amd_iommu *iommu, u64 *raw)
 	event.fault.prm.perm = ppr_flag_to_fault_perm(PPR_FLAGS(raw[0]));
 	event.fault.prm.addr = (u64)(raw[1] & PAGE_MASK);
 	event.fault.prm.pasid = PPR_PASID(raw[0]);
-	event.fault.prm.grpid = PPR_TAG(raw[0]) & 0x1FF;
+	event.fault.prm.grpid = PPR_TAG(raw[0]);
 
 	/*
 	 * PASID zero is used for requests from the I/O device without
@@ -138,25 +140,25 @@ static void iommu_call_iopf_notifier(struct amd_iommu *iommu, u64 *raw)
 	if (event.fault.prm.pasid == 0 ||
 	    event.fault.prm.pasid >= dev_data->max_pasids) {
 		pr_info_ratelimited("Invalid PASID : 0x%x, device : 0x%x\n",
-				    event.fault.prm.pasid, pdev->dev.id);
+				    event.fault.prm.pasid, dev_data->devid);
 		goto out;
 	}
 
 	event.fault.prm.flags |= IOMMU_FAULT_PAGE_RESPONSE_NEEDS_PASID;
 	event.fault.prm.flags |= IOMMU_FAULT_PAGE_REQUEST_PASID_VALID;
-	if (PPR_TAG(raw[0]) & 0x200)
+	if (PPR_TAG_LAST_PAGE(raw[0]))
 		event.fault.prm.flags |= IOMMU_FAULT_PAGE_REQUEST_LAST_PAGE;
 
 	/* Submit event */
 	iommu_report_device_fault(&pdev->dev, &event);
-
+	pci_dev_put(pdev);
 	return;
 
 out:
 	/* Nobody cared, abort */
 	amd_iommu_complete_ppr(&pdev->dev, PPR_PASID(raw[0]),
-			       IOMMU_PAGE_RESP_FAILURE,
-			       PPR_TAG(raw[0]) & 0x1FF);
+			       IOMMU_PAGE_RESP_FAILURE, PPR_TAG(raw[0]));
+	pci_dev_put(pdev);
 }
 
 void amd_iommu_poll_ppr_log(struct amd_iommu *iommu)
@@ -201,7 +203,7 @@ void amd_iommu_poll_ppr_log(struct amd_iommu *iommu)
 			raw[0] = raw[1] = 0UL;
 
 		/* Update head pointer of hardware ring-buffer */
-		head = (head + PPR_ENTRY_SIZE) % PPR_LOG_SIZE;
+		head = (head + PPRLOG_ENTRY_SIZE) % amd_iommu_pprlog_size;
 		writel(head, iommu->mmio_base + MMIO_PPR_HEAD_OFFSET);
 
 		/* Handle PPR entry */

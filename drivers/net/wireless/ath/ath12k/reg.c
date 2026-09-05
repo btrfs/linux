@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause-Clear
 /*
  * Copyright (c) 2018-2021 The Linux Foundation. All rights reserved.
- * Copyright (c) 2021-2025 Qualcomm Innovation Center, Inc. All rights reserved.
+ * Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
  */
 #include <linux/rtnetlink.h>
 #include "core.h"
@@ -170,7 +170,7 @@ int ath12k_reg_update_chan_list(struct ath12k *ar, bool wait)
 		return -EINVAL;
 	}
 
-	arg = kzalloc(struct_size(arg, channel, num_channels), GFP_KERNEL);
+	arg = kzalloc_flex(*arg, channel, num_channels);
 
 	if (!arg)
 		return -ENOMEM;

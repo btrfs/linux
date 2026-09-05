@@ -6,6 +6,7 @@
 //          Amadeusz Slawinski <amadeuszx.slawinski@linux.intel.com>
 //
 
+#include <linux/cleanup.h>
 #include <linux/acpi.h>
 #include <acpi/nhlt.h>
 #include <sound/pcm_params.h>
@@ -69,16 +70,13 @@ avs_path_find_path(struct avs_dev *adev, const char *name, u32 template_id)
 	if (!template)
 		return NULL;
 
-	spin_lock(&adev->path_list_lock);
+	guard(spinlock)(&adev->path_list_lock);
 	/* Only one variant of given path template may be instantiated at a time. */
 	list_for_each_entry(path, &adev->path_list, node) {
-		if (path->template->owner == template) {
-			spin_unlock(&adev->path_list_lock);
+		if (path->template->owner == template)
 			return path;
-		}
 	}
 
-	spin_unlock(&adev->path_list_lock);
 	return NULL;
 }
 
@@ -134,7 +132,7 @@ static struct avs_tplg_path *avs_condpath_find_variant(struct avs_dev *adev,
 static bool avs_tplg_path_template_id_equal(struct avs_tplg_path_template_id *id,
 					    struct avs_tplg_path_template_id *id2)
 {
-	return id->id == id2->id && !strcmp(id->tplg_name, id2->tplg_name);
+	return id->id == id2->id && !sysfs_streq(id->tplg_name, id2->tplg_name);
 }
 
 static struct avs_path *avs_condpath_find_match(struct avs_dev *adev,
@@ -210,9 +208,11 @@ int avs_path_set_constraint(struct avs_dev *adev, struct avs_tplg_path_template 
 					continue;
 				}
 
-				blob = avs_nhlt_config_or_default(adev, module_template);
-				if (IS_ERR(blob))
-					continue;
+				if (!module_template->nhlt_config) {
+					blob = avs_nhlt_config_or_default(adev, module_template);
+					if (IS_ERR(blob))
+						continue;
+				}
 
 				rlist[i] = path_template->fe_fmt->sampling_freq;
 				clist[i] = path_template->fe_fmt->num_channels;
@@ -382,7 +382,10 @@ static int avs_fill_gtw_config(struct avs_dev *adev, struct avs_copier_gtw_cfg *
 	struct acpi_nhlt_config *blob;
 	size_t gtw_size;
 
-	blob = avs_nhlt_config_or_default(adev, t);
+	if (t->nhlt_config)
+		blob = t->nhlt_config->blob;
+	else
+		blob = avs_nhlt_config_or_default(adev, t);
 	if (IS_ERR(blob))
 		return PTR_ERR(blob);
 
@@ -875,7 +878,7 @@ avs_path_module_create(struct avs_dev *adev,
 	if (module_id < 0)
 		return ERR_PTR(module_id);
 
-	mod = kzalloc(sizeof(*mod), GFP_KERNEL);
+	mod = kzalloc_obj(*mod);
 	if (!mod)
 		return ERR_PTR(-ENOMEM);
 
@@ -963,7 +966,7 @@ static struct avs_path_binding *avs_path_binding_create(struct avs_dev *adev,
 {
 	struct avs_path_binding *binding;
 
-	binding = kzalloc(sizeof(*binding), GFP_KERNEL);
+	binding = kzalloc_obj(*binding);
 	if (!binding)
 		return ERR_PTR(-ENOMEM);
 
@@ -1038,7 +1041,7 @@ avs_path_pipeline_create(struct avs_dev *adev, struct avs_path *owner,
 	struct avs_tplg_module *tmod;
 	int ret, i;
 
-	ppl = kzalloc(sizeof(*ppl), GFP_KERNEL);
+	ppl = kzalloc_obj(*ppl);
 	if (!ppl)
 		return ERR_PTR(-ENOMEM);
 
@@ -1168,7 +1171,7 @@ static struct avs_path *avs_path_create_unlocked(struct avs_dev *adev, u32 dma_i
 	struct avs_path *path;
 	int ret;
 
-	path = kzalloc(sizeof(*path), GFP_KERNEL);
+	path = kzalloc_obj(*path);
 	if (!path)
 		return ERR_PTR(-ENOMEM);
 
@@ -1300,7 +1303,7 @@ void avs_path_free(struct avs_path *path)
 	struct avs_path *cpath, *csave;
 	struct avs_dev *adev = path->owner;
 
-	mutex_lock(&adev->path_mutex);
+	guard(mutex)(&adev->path_mutex);
 
 	/* Free all condpaths this path spawned. */
 	list_for_each_entry_safe(cpath, csave, &path->source_list, source_node)
@@ -1309,8 +1312,6 @@ void avs_path_free(struct avs_path *path)
 		avs_condpath_free(path->owner, cpath);
 
 	avs_path_free_unlocked(path);
-
-	mutex_unlock(&adev->path_mutex);
 }
 
 struct avs_path *avs_path_create(struct avs_dev *adev, u32 dma_id,
@@ -1329,23 +1330,19 @@ struct avs_path *avs_path_create(struct avs_dev *adev, u32 dma_id,
 	}
 
 	/* Serialize path and its components creation. */
-	mutex_lock(&adev->path_mutex);
+	guard(mutex)(&adev->path_mutex);
 	/* Satisfy needs of avs_path_find_tplg(). */
-	mutex_lock(&adev->comp_list_mutex);
+	guard(mutex)(&adev->comp_list_mutex);
 
 	path = avs_path_create_unlocked(adev, dma_id, variant);
 	if (IS_ERR(path))
-		goto exit;
+		return path;
 
 	ret = avs_condpaths_walk_all(adev, path);
 	if (ret) {
 		avs_path_free_unlocked(path);
 		path = ERR_PTR(ret);
 	}
-
-exit:
-	mutex_unlock(&adev->comp_list_mutex);
-	mutex_unlock(&adev->path_mutex);
 
 	return path;
 }
@@ -1491,15 +1488,13 @@ static void avs_condpaths_pause(struct avs_dev *adev, struct avs_path *path)
 {
 	struct avs_path *cpath;
 
-	mutex_lock(&adev->path_mutex);
+	guard(mutex)(&adev->path_mutex);
 
 	/* If either source or sink stops, so do the attached conditional paths. */
 	list_for_each_entry(cpath, &path->source_list, source_node)
 		avs_condpath_pause(adev, cpath);
 	list_for_each_entry(cpath, &path->sink_list, sink_node)
 		avs_condpath_pause(adev, cpath);
-
-	mutex_unlock(&adev->path_mutex);
 }
 
 int avs_path_pause(struct avs_path *path)
@@ -1555,7 +1550,7 @@ static void avs_condpaths_run(struct avs_dev *adev, struct avs_path *path, int t
 {
 	struct avs_path *cpath;
 
-	mutex_lock(&adev->path_mutex);
+	guard(mutex)(&adev->path_mutex);
 
 	/* Run conditional paths only if source and sink are both running. */
 	list_for_each_entry(cpath, &path->source_list, source_node)
@@ -1567,8 +1562,6 @@ static void avs_condpaths_run(struct avs_dev *adev, struct avs_path *path, int t
 		if (cpath->source->state == AVS_PPL_STATE_RUNNING &&
 		    cpath->sink->state == AVS_PPL_STATE_RUNNING)
 			avs_condpath_run(adev, cpath, trigger);
-
-	mutex_unlock(&adev->path_mutex);
 }
 
 int avs_path_run(struct avs_path *path, int trigger)

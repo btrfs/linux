@@ -12,6 +12,7 @@
 #include <sched.h>
 #include <signal.h>
 #include <stddef.h>
+#include <sys/mount.h>
 #include <sys/prctl.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -23,6 +24,9 @@
 #include "audit.h"
 #include "common.h"
 #include "scoped_common.h"
+#include "trace.h"
+
+#define TRACE_TASK "scoped_abstract"
 
 /* Number of pending connections queue to be hold. */
 const short backlog = 10;
@@ -293,6 +297,45 @@ FIXTURE_TEARDOWN_PARENT(scoped_audit)
 	EXPECT_EQ(0, audit_cleanup(-1, NULL));
 }
 
+FIXTURE_VARIANT(scoped_audit)
+{
+	const __u64 scoped;
+	const __u64 quiet_scoped;
+};
+
+/* clang-format off */
+FIXTURE_VARIANT_ADD(scoped_audit, no_quiet)
+{
+	/* clang-format on */
+	.scoped = LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET,
+	.quiet_scoped = 0,
+};
+
+/* clang-format off */
+FIXTURE_VARIANT_ADD(scoped_audit, quiet_abstract_socket)
+{
+	/* clang-format on */
+	.scoped = LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET,
+	.quiet_scoped = LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET,
+};
+
+/* clang-format off */
+FIXTURE_VARIANT_ADD(scoped_audit, quiet_abstract_socket_2)
+{
+	/* clang-format on */
+	.scoped = LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET | LANDLOCK_SCOPE_SIGNAL,
+	.quiet_scoped = LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET |
+			LANDLOCK_SCOPE_SIGNAL,
+};
+
+/* clang-format off */
+FIXTURE_VARIANT_ADD(scoped_audit, quiet_unrelated)
+{
+	/* clang-format on */
+	.scoped = LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET | LANDLOCK_SCOPE_SIGNAL,
+	.quiet_scoped = LANDLOCK_SCOPE_SIGNAL,
+};
+
 /* python -c 'print(b"\0selftests-landlock-abstract-unix-".hex().upper())' */
 #define ABSTRACT_SOCKET_PATH_PREFIX \
 	"0073656C6674657374732D6C616E646C6F636B2D61627374726163742D756E69782D"
@@ -308,6 +351,13 @@ TEST_F(scoped_audit, connect_to_child)
 	char buf;
 	int dgram_client;
 	struct audit_records records;
+	int ruleset_fd;
+	const struct landlock_ruleset_attr ruleset_attr = {
+		.scoped = variant->scoped,
+		.quiet_scoped = variant->quiet_scoped,
+	};
+	bool should_audit =
+		!(variant->quiet_scoped & LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET);
 
 	/* Makes sure there is no superfluous logged records. */
 	EXPECT_EQ(0, audit_count_records(self->audit_fd, &records));
@@ -345,7 +395,14 @@ TEST_F(scoped_audit, connect_to_child)
 	EXPECT_EQ(0, close(pipe_child[1]));
 	EXPECT_EQ(0, close(pipe_parent[0]));
 
-	create_scoped_domain(_metadata, LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET);
+	ruleset_fd =
+		landlock_create_ruleset(&ruleset_attr, sizeof(ruleset_attr), 0);
+	ASSERT_LE(0, ruleset_fd)
+	{
+		TH_LOG("Failed to create a ruleset: %s", strerror(errno));
+	}
+	enforce_ruleset(_metadata, ruleset_fd);
+	EXPECT_EQ(0, close(ruleset_fd));
 
 	/* Signals that the parent is in a domain, if any. */
 	ASSERT_EQ(1, write(pipe_parent[1], ".", 1));
@@ -360,14 +417,20 @@ TEST_F(scoped_audit, connect_to_child)
 	EXPECT_EQ(-1, err_dgram);
 	EXPECT_EQ(EPERM, errno);
 
-	EXPECT_EQ(
-		0,
-		audit_match_record(
-			self->audit_fd, AUDIT_LANDLOCK_ACCESS,
-			REGEX_LANDLOCK_PREFIX
-			" blockers=scope\\.abstract_unix_socket path=" ABSTRACT_SOCKET_PATH_PREFIX
-			"[0-9A-F]\\+$",
-			NULL));
+	if (should_audit) {
+		EXPECT_EQ(
+			0,
+			audit_match_record(
+				self->audit_fd, AUDIT_LANDLOCK_ACCESS,
+				REGEX_LANDLOCK_PREFIX
+				" blockers=scope\\.abstract_unix_socket path=" ABSTRACT_SOCKET_PATH_PREFIX
+				"[0-9A-F]\\+$",
+				NULL));
+	}
+
+	/* No other logs */
+	EXPECT_EQ(0, audit_count_records(self->audit_fd, &records));
+	EXPECT_EQ(0, records.access);
 
 	ASSERT_EQ(1, write(pipe_parent[1], ".", 1));
 	EXPECT_EQ(0, close(dgram_client));
@@ -543,7 +606,7 @@ TEST_F(scoped_vs_unscoped, unix_scoping)
 
 		ASSERT_EQ(1, write(pipe_child[1], ".", 1));
 		ASSERT_EQ(grand_child, waitpid(grand_child, &status, 0));
-		EXPECT_EQ(0, close(stream_server_child))
+		EXPECT_EQ(0, close(stream_server_child));
 		EXPECT_EQ(0, close(dgram_server_child));
 		return;
 	}
@@ -779,7 +842,6 @@ FIXTURE_TEARDOWN(various_address_sockets)
 
 TEST_F(various_address_sockets, scoped_pathname_sockets)
 {
-	socklen_t size_stream, size_dgram;
 	pid_t child;
 	int status;
 	char buf_child, buf_parent;
@@ -798,12 +860,8 @@ TEST_F(various_address_sockets, scoped_pathname_sockets)
 	/* Pathname address. */
 	snprintf(stream_pathname_addr.sun_path,
 		 sizeof(stream_pathname_addr.sun_path), "%s", stream_path);
-	size_stream = offsetof(struct sockaddr_un, sun_path) +
-		      strlen(stream_pathname_addr.sun_path);
 	snprintf(dgram_pathname_addr.sun_path,
 		 sizeof(dgram_pathname_addr.sun_path), "%s", dgram_path);
-	size_dgram = offsetof(struct sockaddr_un, sun_path) +
-		     strlen(dgram_pathname_addr.sun_path);
 
 	/* Abstract address. */
 	memset(&stream_abstract_addr, 0, sizeof(stream_abstract_addr));
@@ -841,8 +899,9 @@ TEST_F(various_address_sockets, scoped_pathname_sockets)
 		/* Connects with pathname sockets. */
 		stream_pathname_socket = socket(AF_UNIX, SOCK_STREAM, 0);
 		ASSERT_LE(0, stream_pathname_socket);
-		ASSERT_EQ(0, connect(stream_pathname_socket,
-				     &stream_pathname_addr, size_stream));
+		ASSERT_EQ(0,
+			  connect(stream_pathname_socket, &stream_pathname_addr,
+				  sizeof(stream_pathname_addr)));
 		ASSERT_EQ(1, write(stream_pathname_socket, "b", 1));
 		EXPECT_EQ(0, close(stream_pathname_socket));
 
@@ -850,12 +909,13 @@ TEST_F(various_address_sockets, scoped_pathname_sockets)
 		dgram_pathname_socket = socket(AF_UNIX, SOCK_DGRAM, 0);
 		ASSERT_LE(0, dgram_pathname_socket);
 		err = sendto(dgram_pathname_socket, "c", 1, 0,
-			     &dgram_pathname_addr, size_dgram);
+			     &dgram_pathname_addr, sizeof(dgram_pathname_addr));
 		EXPECT_EQ(1, err);
 
 		/* Sends with connection. */
-		ASSERT_EQ(0, connect(dgram_pathname_socket,
-				     &dgram_pathname_addr, size_dgram));
+		ASSERT_EQ(0,
+			  connect(dgram_pathname_socket, &dgram_pathname_addr,
+				  sizeof(dgram_pathname_addr)));
 		ASSERT_EQ(1, write(dgram_pathname_socket, "d", 1));
 		EXPECT_EQ(0, close(dgram_pathname_socket));
 
@@ -910,13 +970,13 @@ TEST_F(various_address_sockets, scoped_pathname_sockets)
 	stream_pathname_socket = socket(AF_UNIX, SOCK_STREAM, 0);
 	ASSERT_LE(0, stream_pathname_socket);
 	ASSERT_EQ(0, bind(stream_pathname_socket, &stream_pathname_addr,
-			  size_stream));
+			  sizeof(stream_pathname_addr)));
 	ASSERT_EQ(0, listen(stream_pathname_socket, backlog));
 
 	dgram_pathname_socket = socket(AF_UNIX, SOCK_DGRAM, 0);
 	ASSERT_LE(0, dgram_pathname_socket);
 	ASSERT_EQ(0, bind(dgram_pathname_socket, &dgram_pathname_addr,
-			  size_dgram));
+			  sizeof(dgram_pathname_addr)));
 
 	/* Sets up abstract servers. */
 	stream_abstract_socket = socket(AF_UNIX, SOCK_STREAM, 0);
@@ -1147,6 +1207,266 @@ TEST(self_connect)
 	if (WIFSIGNALED(status) || !WIFEXITED(status) ||
 	    WEXITSTATUS(status) != EXIT_SUCCESS)
 		_metadata->exit_code = KSFT_FAIL;
+}
+
+/* Trace tests */
+
+/* clang-format off */
+FIXTURE(trace_unix) {
+	/* clang-format on */
+	int tracefs_ok;
+};
+
+FIXTURE_SETUP(trace_unix)
+{
+	int ret;
+
+	set_cap(_metadata, CAP_SYS_ADMIN);
+	ASSERT_EQ(0, unshare(CLONE_NEWNS));
+	ASSERT_EQ(0, mount(NULL, "/", NULL, MS_REC | MS_PRIVATE, NULL));
+
+	ret = tracefs_fixture_setup();
+	if (ret) {
+		clear_cap(_metadata, CAP_SYS_ADMIN);
+		self->tracefs_ok = 0;
+		SKIP(return, "tracefs not available");
+	}
+	self->tracefs_ok = 1;
+
+	ASSERT_EQ(0, tracefs_enable_event(
+			     TRACEFS_DENY_SCOPE_ABSTRACT_UNIX_SOCKET_ENABLE,
+			     true));
+	ASSERT_EQ(0, tracefs_clear());
+	clear_cap(_metadata, CAP_SYS_ADMIN);
+}
+
+FIXTURE_TEARDOWN(trace_unix)
+{
+	if (!self->tracefs_ok)
+		return;
+
+	set_cap(_metadata, CAP_SYS_ADMIN);
+	tracefs_enable_event(TRACEFS_DENY_SCOPE_ABSTRACT_UNIX_SOCKET_ENABLE,
+			     false);
+	tracefs_fixture_teardown();
+	clear_cap(_metadata, CAP_SYS_ADMIN);
+}
+
+/* clang-format off */
+FIXTURE_VARIANT(trace_unix) {
+	/* clang-format on */
+	int sock_type; /* SOCK_STREAM (connect) or SOCK_DGRAM (sendto). */
+	bool sandbox;
+	bool sandbox_target; /* Peer owned by a domain: peer_domain != 0. */
+	int expect_denied;
+};
+
+/* clang-format off */
+
+/* Stream: sandboxed client connect() to an unsandboxed peer (peer_domain=0). */
+FIXTURE_VARIANT_ADD(trace_unix, stream_denied) {
+	.sock_type = SOCK_STREAM, .sandbox = true,
+	.sandbox_target = false, .expect_denied = 1,
+};
+
+/* Stream: peer socket owned by a domain, so peer_domain != 0. */
+FIXTURE_VARIANT_ADD(trace_unix, stream_denied_scoped_peer) {
+	.sock_type = SOCK_STREAM, .sandbox = true,
+	.sandbox_target = true, .expect_denied = 1,
+};
+
+/* Stream: unsandboxed client, connect() succeeds, no event. */
+FIXTURE_VARIANT_ADD(trace_unix, stream_allowed) {
+	.sock_type = SOCK_STREAM, .sandbox = false,
+	.sandbox_target = false, .expect_denied = 0,
+};
+
+/* Datagram: sandboxed client sendto() an unsandboxed peer (peer_domain=0). */
+FIXTURE_VARIANT_ADD(trace_unix, dgram_denied) {
+	.sock_type = SOCK_DGRAM, .sandbox = true,
+	.sandbox_target = false, .expect_denied = 1,
+};
+
+/* Datagram: peer socket owned by a domain, so peer_domain != 0. */
+FIXTURE_VARIANT_ADD(trace_unix, dgram_denied_scoped_peer) {
+	.sock_type = SOCK_DGRAM, .sandbox = true,
+	.sandbox_target = true, .expect_denied = 1,
+};
+
+/* Datagram: unsandboxed client, sendto() succeeds, no event. */
+FIXTURE_VARIANT_ADD(trace_unix, dgram_allowed) {
+	.sock_type = SOCK_DGRAM, .sandbox = false,
+	.sandbox_target = false, .expect_denied = 0,
+};
+
+/* clang-format on */
+
+/*
+ * A sandboxed thread reaching an abstract unix socket peer through connect(2)
+ * (stream) or sendto(2) (datagram) is denied and emits
+ * landlock_deny_scope_abstract_unix_socket.  The abstract name is crafted with
+ * a space and an embedded NUL followed by an "END" marker to check the
+ * tracepoint escaping and its length handling (a raw space would break the
+ * sun_path field regex; strlen() would truncate at the NUL and drop "END").
+ * peer_pid is only meaningful for a stream peer (a datagram peer has no
+ * SO_PEERCRED), so it is asserted only there.
+ */
+TEST_F(trace_unix, deny_scope_unix)
+{
+	struct sockaddr_un addr = {
+		.sun_family = AF_UNIX,
+	};
+	char *buf, field[128], expected_pid[16];
+	int server_fd, count, status, name_len, addr_len;
+	pid_t child;
+
+	if (!self->tracefs_ok)
+		SKIP(return, "tracefs not available");
+
+	/*
+	 * For the non-zero peer_domain case, sandbox the parent before it
+	 * creates the server socket, so the socket carries the parent's domain
+	 * and peer_domain= is non-zero.
+	 */
+	if (variant->sandbox_target)
+		create_scoped_domain(_metadata,
+				     LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET);
+
+	server_fd = socket(AF_UNIX, variant->sock_type | SOCK_CLOEXEC, 0);
+	ASSERT_LE(0, server_fd);
+
+	addr.sun_path[0] = '\0';
+	name_len = snprintf(addr.sun_path + 1, sizeof(addr.sun_path) - 1,
+			    "landlock_trace_test_%d ", getpid());
+	addr.sun_path[1 + name_len] = '\0';
+	memcpy(addr.sun_path + 1 + name_len + 1, "END", 3);
+	addr_len =
+		offsetof(struct sockaddr_un, sun_path) + 1 + name_len + 1 + 3;
+
+	ASSERT_EQ(0, bind(server_fd, (struct sockaddr *)&addr, addr_len));
+	if (variant->sock_type == SOCK_STREAM)
+		ASSERT_EQ(0, listen(server_fd, 1));
+
+	child = fork();
+	ASSERT_LE(0, child);
+
+	if (child == 0) {
+		int client_fd, ret;
+
+		if (variant->sandbox) {
+			struct landlock_ruleset_attr ruleset_attr = {
+				.scoped = LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET,
+			};
+			int ruleset_fd;
+
+			ruleset_fd = landlock_create_ruleset(
+				&ruleset_attr, sizeof(ruleset_attr), 0);
+			if (ruleset_fd < 0)
+				_exit(1);
+
+			prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
+			if (landlock_restrict_self(ruleset_fd, 0)) {
+				close(ruleset_fd);
+				_exit(1);
+			}
+			close(ruleset_fd);
+		}
+
+		client_fd =
+			socket(AF_UNIX, variant->sock_type | SOCK_CLOEXEC, 0);
+		if (client_fd < 0)
+			_exit(1);
+
+		if (variant->sock_type == SOCK_STREAM)
+			ret = connect(client_fd, (struct sockaddr *)&addr,
+				      addr_len);
+		else
+			ret = sendto(client_fd, ".", 1, 0,
+				     (struct sockaddr *)&addr, addr_len);
+
+		if (variant->sandbox) {
+			/* Reaching the peer should be denied. */
+			if (ret != -1 || errno != EPERM) {
+				close(client_fd);
+				_exit(2);
+			}
+		} else {
+			/* No sandbox: stream connect() == 0, sendto() == 1. */
+			int ok = variant->sock_type == SOCK_STREAM ? 0 : 1;
+
+			if (ret != ok) {
+				close(client_fd);
+				_exit(2);
+			}
+		}
+		close(client_fd);
+		_exit(0);
+	}
+
+	ASSERT_EQ(child, waitpid(child, &status, 0));
+	ASSERT_TRUE(WIFEXITED(status));
+	EXPECT_EQ(0, WEXITSTATUS(status));
+	close(server_fd);
+
+	buf = tracefs_read_buf();
+	ASSERT_NE(NULL, buf);
+
+	count = tracefs_count_matches(
+		buf, REGEX_DENY_SCOPE_ABSTRACT_UNIX_SOCKET(TRACE_TASK));
+	if (!variant->expect_denied) {
+		EXPECT_EQ(0, count)
+		{
+			TH_LOG("Expected 0 deny_scope events, got %d\n%s",
+			       count, buf);
+		}
+		free(buf);
+		return;
+	}
+
+	EXPECT_EQ(variant->expect_denied, count)
+	{
+		TH_LOG("Expected deny_scope_abstract_unix_socket event, "
+		       "got %d\n%s",
+		       count, buf);
+	}
+
+	/*
+	 * sun_path is escaped: a raw space would break this field's [^ ]*$
+	 * regex, so a successful extract proves the space was escaped, and its
+	 * full length is honored: the "END" marker after the embedded NUL must
+	 * survive (strlen() would truncate it at the NUL).
+	 */
+	ASSERT_EQ(0, tracefs_extract_field(
+			     buf,
+			     REGEX_DENY_SCOPE_ABSTRACT_UNIX_SOCKET(TRACE_TASK),
+			     "sun_path", field, sizeof(field)));
+	EXPECT_NE(NULL, strstr(field, "END"))
+	{
+		TH_LOG("sun_path truncated or unescaped: %s", field);
+	}
+
+	/* peer_pid is the parent's PID for a stream peer (0 for datagram). */
+	if (variant->sock_type == SOCK_STREAM) {
+		snprintf(expected_pid, sizeof(expected_pid), "%d", getpid());
+		ASSERT_EQ(0, tracefs_extract_field(
+				     buf,
+				     REGEX_DENY_SCOPE_ABSTRACT_UNIX_SOCKET(
+					     TRACE_TASK),
+				     "peer_pid", field, sizeof(field)));
+		EXPECT_STREQ(expected_pid, field);
+	}
+
+	/* peer_domain: 0 when the peer is unsandboxed, non-zero otherwise. */
+	ASSERT_EQ(0, tracefs_extract_field(
+			     buf,
+			     REGEX_DENY_SCOPE_ABSTRACT_UNIX_SOCKET(TRACE_TASK),
+			     "peer_domain", field, sizeof(field)));
+	EXPECT_EQ(variant->sandbox_target, strcmp("0", field) != 0)
+	{
+		TH_LOG("Unexpected peer_domain=%s", field);
+	}
+
+	free(buf);
 }
 
 TEST_HARNESS_MAIN

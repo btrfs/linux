@@ -7,6 +7,7 @@
 
 #include <linux/host1x.h>
 #include <linux/iommu.h>
+#include <linux/overflow.h>
 #include <linux/slab.h>
 
 #include <trace/events/host1x.h>
@@ -36,10 +37,9 @@ static void trace_write_gather(struct host1x_cdma *cdma, struct host1x_bo *bo,
 		for (i = 0; i < words; i += TRACE_MAX_LENGTH) {
 			u32 num_words = min(words - i, TRACE_MAX_LENGTH);
 
-			offset += i * sizeof(u32);
-
 			trace_host1x_cdma_push_gather(dev_name(dev), bo,
-						      num_words, offset,
+						      num_words,
+						      offset + i * sizeof(u32),
 						      mem);
 		}
 
@@ -47,8 +47,36 @@ static void trace_write_gather(struct host1x_cdma *cdma, struct host1x_bo *bo,
 	}
 }
 
-static void submit_wait(struct host1x_job *job, u32 id, u32 threshold,
-			u32 next_class)
+static void submit_wait(struct host1x_job *job, u32 id, u32 threshold)
+{
+	struct host1x_cdma *cdma = &job->channel->cdma;
+
+#if HOST1X_HW >= 2
+	host1x_cdma_push_wide(cdma,
+		host1x_opcode_setclass(
+			HOST1X_CLASS_HOST1X,
+			HOST1X_UCLASS_LOAD_SYNCPT_PAYLOAD_32,
+			/* WAIT_SYNCPT_32 is at SYNCPT_PAYLOAD_32+2 */
+			BIT(0) | BIT(2)
+		),
+		threshold,
+		id,
+		HOST1X_OPCODE_NOP
+	);
+#else
+	/* TODO add waitchk or use waitbases or other mitigation */
+	host1x_cdma_push(cdma,
+		host1x_opcode_setclass(
+			HOST1X_CLASS_HOST1X,
+			host1x_uclass_wait_syncpt_r(),
+			BIT(0)
+		),
+		host1x_class_host_wait_syncpt(id, threshold)
+	);
+#endif
+}
+
+static void submit_setclass(struct host1x_job *job, u32 next_class)
 {
 	struct host1x_cdma *cdma = &job->channel->cdma;
 
@@ -66,43 +94,11 @@ static void submit_wait(struct host1x_job *job, u32 id, u32 threshold,
 		stream_id = job->engine_fallback_streamid;
 
 	host1x_cdma_push_wide(cdma,
-		host1x_opcode_setclass(
-			HOST1X_CLASS_HOST1X,
-			HOST1X_UCLASS_LOAD_SYNCPT_PAYLOAD_32,
-			/* WAIT_SYNCPT_32 is at SYNCPT_PAYLOAD_32+2 */
-			BIT(0) | BIT(2)
-		),
-		threshold,
-		id,
-		HOST1X_OPCODE_NOP
-	);
-	host1x_cdma_push_wide(&job->channel->cdma,
-		host1x_opcode_setclass(job->class, 0, 0),
+		host1x_opcode_setclass(next_class, 0, 0),
 		host1x_opcode_setpayload(stream_id),
 		host1x_opcode_setstreamid(job->engine_streamid_offset / 4),
 		HOST1X_OPCODE_NOP);
-#elif HOST1X_HW >= 2
-	host1x_cdma_push_wide(cdma,
-		host1x_opcode_setclass(
-			HOST1X_CLASS_HOST1X,
-			HOST1X_UCLASS_LOAD_SYNCPT_PAYLOAD_32,
-			/* WAIT_SYNCPT_32 is at SYNCPT_PAYLOAD_32+2 */
-			BIT(0) | BIT(2)
-		),
-		threshold,
-		id,
-		host1x_opcode_setclass(next_class, 0, 0)
-	);
 #else
-	/* TODO add waitchk or use waitbases or other mitigation */
-	host1x_cdma_push(cdma,
-		host1x_opcode_setclass(
-			HOST1X_CLASS_HOST1X,
-			host1x_uclass_wait_syncpt_r(),
-			BIT(0)
-		),
-		host1x_class_host_wait_syncpt(id, threshold)
-	);
 	host1x_cdma_push(cdma,
 		host1x_opcode_setclass(next_class, 0, 0),
 		HOST1X_OPCODE_NOP
@@ -110,7 +106,8 @@ static void submit_wait(struct host1x_job *job, u32 id, u32 threshold,
 #endif
 }
 
-static void submit_gathers(struct host1x_job *job, u32 job_syncpt_base)
+static void submit_gathers(struct host1x_job *job, struct host1x_job_cmd *cmds, u32 num_cmds,
+			   u32 job_syncpt_base)
 {
 	struct host1x_cdma *cdma = &job->channel->cdma;
 #if HOST1X_HW < 6
@@ -119,16 +116,18 @@ static void submit_gathers(struct host1x_job *job, u32 job_syncpt_base)
 	unsigned int i;
 	u32 threshold;
 
-	for (i = 0; i < job->num_cmds; i++) {
-		struct host1x_job_cmd *cmd = &job->cmds[i];
+	for (i = 0; i < num_cmds; i++) {
+		struct host1x_job_cmd *cmd = &cmds[i];
 
 		if (cmd->is_wait) {
 			if (cmd->wait.relative)
-				threshold = job_syncpt_base + cmd->wait.threshold;
+				threshold = wrapping_add(u32, job_syncpt_base,
+							 cmd->wait.threshold);
 			else
 				threshold = cmd->wait.threshold;
 
-			submit_wait(job, cmd->wait.id, threshold, cmd->wait.next_class);
+			submit_wait(job, cmd->wait.id, threshold);
+			submit_setclass(job, cmd->wait.next_class);
 		} else {
 			struct host1x_job_gather *g = &cmd->gather;
 
@@ -216,7 +215,34 @@ static void channel_program_cdma(struct host1x_job *job)
 
 #if HOST1X_HW >= 6
 	u32 fence;
+	int i = 0;
 
+	if (job->num_cmds == 0)
+		goto prefences_done;
+	if (!job->cmds[0].is_wait || job->cmds[0].wait.relative)
+		goto prefences_done;
+
+	/* Enter host1x class with invalid stream ID for prefence waits. */
+	host1x_cdma_push_wide(cdma,
+		host1x_opcode_acquire_mlock(1),
+		host1x_opcode_setclass(1, 0, 0),
+		host1x_opcode_setpayload(0),
+		host1x_opcode_setstreamid(0x1fffff));
+
+	for (i = 0; i < job->num_cmds; i++) {
+		struct host1x_job_cmd *cmd = &job->cmds[i];
+
+		if (!cmd->is_wait || cmd->wait.relative)
+			break;
+
+		submit_wait(job, cmd->wait.id, cmd->wait.threshold);
+	}
+
+	host1x_cdma_push(cdma,
+		HOST1X_OPCODE_NOP,
+		host1x_opcode_release_mlock(1));
+
+prefences_done:
 	/* Enter engine class with invalid stream ID. */
 	host1x_cdma_push_wide(cdma,
 		host1x_opcode_acquire_mlock(job->class),
@@ -230,11 +256,13 @@ static void channel_program_cdma(struct host1x_job *job)
 		host1x_opcode_nonincr(HOST1X_UCLASS_INCR_SYNCPT, 1),
 		HOST1X_UCLASS_INCR_SYNCPT_INDX_F(job->syncpt->id) |
 			HOST1X_UCLASS_INCR_SYNCPT_COND_F(4));
-	submit_wait(job, job->syncpt->id, fence, job->class);
+	submit_wait(job, job->syncpt->id, fence);
+	submit_setclass(job, job->class);
 
 	/* Submit work. */
 	job->syncpt_end = host1x_syncpt_incr_max(sp, job->syncpt_incrs);
-	submit_gathers(job, job->syncpt_end - job->syncpt_incrs);
+	submit_gathers(job, job->cmds + i, job->num_cmds - i,
+		       wrapping_sub(u32, job->syncpt_end, job->syncpt_incrs));
 
 	/* Before releasing MLOCK, ensure engine is idle again. */
 	fence = host1x_syncpt_incr_max(sp, 1);
@@ -242,7 +270,7 @@ static void channel_program_cdma(struct host1x_job *job)
 		host1x_opcode_nonincr(HOST1X_UCLASS_INCR_SYNCPT, 1),
 		HOST1X_UCLASS_INCR_SYNCPT_INDX_F(job->syncpt->id) |
 			HOST1X_UCLASS_INCR_SYNCPT_COND_F(4));
-	submit_wait(job, job->syncpt->id, fence, job->class);
+	submit_wait(job, job->syncpt->id, fence);
 
 	/* Release MLOCK. */
 	host1x_cdma_push(cdma,
@@ -272,7 +300,8 @@ static void channel_program_cdma(struct host1x_job *job)
 
 	job->syncpt_end = host1x_syncpt_incr_max(sp, job->syncpt_incrs);
 
-	submit_gathers(job, job->syncpt_end - job->syncpt_incrs);
+	submit_gathers(job, job->cmds, job->num_cmds,
+		       wrapping_sub(u32, job->syncpt_end, job->syncpt_incrs));
 #endif
 }
 

@@ -19,6 +19,7 @@ enum tplg_device_id {
 	TPLG_DEVICE_SDCA_MIC,
 	TPLG_DEVICE_INTEL_PCH_DMIC,
 	TPLG_DEVICE_HDMI,
+	TPLG_DEVICE_LOOPBACK_VIRTUAL,
 	TPLG_DEVICE_MAX
 };
 
@@ -28,9 +29,14 @@ enum tplg_device_id {
 #define SOF_INTEL_PLATFORM_NAME_MAX 4
 
 int sof_sdw_get_tplg_files(struct snd_soc_card *card, const struct snd_soc_acpi_mach *mach,
-			   const char *prefix, const char ***tplg_files)
+			   const char *prefix, const char ***tplg_files, bool best_effort)
 {
-	struct snd_soc_acpi_mach_params mach_params = mach->mach_params;
+	struct snd_soc_acpi_mach *card_mach = dev_get_platdata(card->dev);
+	/*
+	 * Use the acpi mach from the machine driver because the machine driver
+	 * may change the dmic_num based on the machine driver quirk.
+	 */
+	struct snd_soc_acpi_mach_params mach_params = card_mach->mach_params;
 	struct snd_soc_dai_link *dai_link;
 	const struct firmware *fw;
 	char platform[SOF_INTEL_PLATFORM_NAME_MAX];
@@ -81,12 +87,23 @@ int sof_sdw_get_tplg_files(struct snd_soc_card *card, const struct snd_soc_acpi_
 		} else if (strstr(dai_link->name, "iDisp")) {
 			tplg_dev = TPLG_DEVICE_HDMI;
 			tplg_dev_name = "hdmi-pcm5";
-
+		} else if (strstr(dai_link->name, "Loopback_Virtual")) {
+			tplg_dev = TPLG_DEVICE_LOOPBACK_VIRTUAL;
+			/*
+			 * Mark the LOOPBACK_VIRTUAL device but no need to create the
+			 * LOOPBACK_VIRTUAL topology. Just to avoid the dai_link is not supported
+			 * error.
+			 */
+			tplg_mask |= BIT(tplg_dev);
+			continue;
 		} else {
 			/* The dai link is not supported by separated tplg yet */
 			dev_dbg(card->dev,
 				"dai_link %s is not supported by separated tplg yet\n",
 				dai_link->name);
+			if (best_effort)
+				continue;
+
 			return 0;
 		}
 		if (tplg_mask & BIT(tplg_dev))
@@ -126,11 +143,15 @@ int sof_sdw_get_tplg_files(struct snd_soc_card *card, const struct snd_soc_acpi_
 		if (!ret) {
 			release_firmware(fw);
 		} else {
-			dev_dbg(card->dev, "Failed to open topology file: %s\n", (*tplg_files)[i]);
+			dev_warn(card->dev,
+				 "Failed to open topology file: %s, you might need to\n",
+				 (*tplg_files)[i]);
+			dev_warn(card->dev,
+				 "download it from https://github.com/thesofproject/sof-bin/\n");
 			return 0;
 		}
 	}
 
 	return tplg_num;
 }
-
+EXPORT_SYMBOL_GPL(sof_sdw_get_tplg_files);

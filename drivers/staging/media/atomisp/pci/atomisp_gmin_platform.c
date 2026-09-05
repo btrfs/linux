@@ -11,8 +11,8 @@
 #include <linux/mfd/intel_soc_pmic.h>
 #include <linux/regulator/consumer.h>
 #include <linux/gpio/consumer.h>
-#include <linux/gpio.h>
 #include <linux/platform_device.h>
+#include <linux/string_choices.h>
 #include "../../include/linux/atomisp_platform.h"
 #include "../../include/linux/atomisp_gmin_platform.h"
 
@@ -917,7 +917,7 @@ static int gmin_acpi_pm_ctrl(struct v4l2_subdev *subdev, int on)
 		return 0;
 
 	dev_dbg(subdev->dev, "Setting power state to %s\n",
-		on ? "on" : "off");
+		str_on_off(on));
 
 	if (on)
 		ret = acpi_device_set_power(adev,
@@ -930,7 +930,7 @@ static int gmin_acpi_pm_ctrl(struct v4l2_subdev *subdev, int on)
 		gs->clock_on = on;
 	else
 		dev_err(subdev->dev, "Couldn't set power state to %s\n",
-			on ? "on" : "off");
+			str_on_off(on));
 
 	return ret;
 }
@@ -969,7 +969,7 @@ static int camera_sensor_csi_alloc(struct v4l2_subdev *sd, u32 port, u32 lanes,
 	struct i2c_client *client = v4l2_get_subdevdata(sd);
 	struct camera_mipi_info *csi;
 
-	csi = kzalloc(sizeof(*csi), GFP_KERNEL);
+	csi = kzalloc_obj(*csi);
 	if (!csi)
 		return -ENOMEM;
 

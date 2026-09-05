@@ -88,60 +88,60 @@ static const struct ixgbe_info *ixgbe_info_tbl[] = {
  *   Class, Class Mask, private data (not used) }
  */
 static const struct pci_device_id ixgbe_pci_tbl[] = {
-	{PCI_VDEVICE(INTEL, IXGBE_DEV_ID_82598), board_82598 },
-	{PCI_VDEVICE(INTEL, IXGBE_DEV_ID_82598AF_DUAL_PORT), board_82598 },
-	{PCI_VDEVICE(INTEL, IXGBE_DEV_ID_82598AF_SINGLE_PORT), board_82598 },
-	{PCI_VDEVICE(INTEL, IXGBE_DEV_ID_82598AT), board_82598 },
-	{PCI_VDEVICE(INTEL, IXGBE_DEV_ID_82598AT2), board_82598 },
-	{PCI_VDEVICE(INTEL, IXGBE_DEV_ID_82598EB_CX4), board_82598 },
-	{PCI_VDEVICE(INTEL, IXGBE_DEV_ID_82598_CX4_DUAL_PORT), board_82598 },
-	{PCI_VDEVICE(INTEL, IXGBE_DEV_ID_82598_DA_DUAL_PORT), board_82598 },
-	{PCI_VDEVICE(INTEL, IXGBE_DEV_ID_82598_SR_DUAL_PORT_EM), board_82598 },
-	{PCI_VDEVICE(INTEL, IXGBE_DEV_ID_82598EB_XF_LR), board_82598 },
-	{PCI_VDEVICE(INTEL, IXGBE_DEV_ID_82598EB_SFP_LOM), board_82598 },
-	{PCI_VDEVICE(INTEL, IXGBE_DEV_ID_82598_BX), board_82598 },
-	{PCI_VDEVICE(INTEL, IXGBE_DEV_ID_82599_KX4), board_82599 },
-	{PCI_VDEVICE(INTEL, IXGBE_DEV_ID_82599_XAUI_LOM), board_82599 },
-	{PCI_VDEVICE(INTEL, IXGBE_DEV_ID_82599_KR), board_82599 },
-	{PCI_VDEVICE(INTEL, IXGBE_DEV_ID_82599_SFP), board_82599 },
-	{PCI_VDEVICE(INTEL, IXGBE_DEV_ID_82599_SFP_EM), board_82599 },
-	{PCI_VDEVICE(INTEL, IXGBE_DEV_ID_82599_KX4_MEZZ), board_82599 },
-	{PCI_VDEVICE(INTEL, IXGBE_DEV_ID_82599_CX4), board_82599 },
-	{PCI_VDEVICE(INTEL, IXGBE_DEV_ID_82599_BACKPLANE_FCOE), board_82599 },
-	{PCI_VDEVICE(INTEL, IXGBE_DEV_ID_82599_SFP_FCOE), board_82599 },
-	{PCI_VDEVICE(INTEL, IXGBE_DEV_ID_82599_T3_LOM), board_82599 },
-	{PCI_VDEVICE(INTEL, IXGBE_DEV_ID_82599_COMBO_BACKPLANE), board_82599 },
-	{PCI_VDEVICE(INTEL, IXGBE_DEV_ID_X540T), board_X540 },
-	{PCI_VDEVICE(INTEL, IXGBE_DEV_ID_82599_SFP_SF2), board_82599 },
-	{PCI_VDEVICE(INTEL, IXGBE_DEV_ID_82599_LS), board_82599 },
-	{PCI_VDEVICE(INTEL, IXGBE_DEV_ID_82599_QSFP_SF_QP), board_82599 },
-	{PCI_VDEVICE(INTEL, IXGBE_DEV_ID_82599EN_SFP), board_82599 },
-	{PCI_VDEVICE(INTEL, IXGBE_DEV_ID_82599_SFP_SF_QP), board_82599 },
-	{PCI_VDEVICE(INTEL, IXGBE_DEV_ID_X540T1), board_X540 },
-	{PCI_VDEVICE(INTEL, IXGBE_DEV_ID_X550T), board_X550},
-	{PCI_VDEVICE(INTEL, IXGBE_DEV_ID_X550T1), board_X550},
-	{PCI_VDEVICE(INTEL, IXGBE_DEV_ID_X550EM_X_KX4), board_X550EM_x},
-	{PCI_VDEVICE(INTEL, IXGBE_DEV_ID_X550EM_X_XFI), board_X550EM_x},
-	{PCI_VDEVICE(INTEL, IXGBE_DEV_ID_X550EM_X_KR), board_X550EM_x},
-	{PCI_VDEVICE(INTEL, IXGBE_DEV_ID_X550EM_X_10G_T), board_X550EM_x},
-	{PCI_VDEVICE(INTEL, IXGBE_DEV_ID_X550EM_X_SFP), board_X550EM_x},
-	{PCI_VDEVICE(INTEL, IXGBE_DEV_ID_X550EM_X_1G_T), board_x550em_x_fw},
-	{PCI_VDEVICE(INTEL, IXGBE_DEV_ID_X550EM_A_KR), board_x550em_a },
-	{PCI_VDEVICE(INTEL, IXGBE_DEV_ID_X550EM_A_KR_L), board_x550em_a },
-	{PCI_VDEVICE(INTEL, IXGBE_DEV_ID_X550EM_A_SFP_N), board_x550em_a },
-	{PCI_VDEVICE(INTEL, IXGBE_DEV_ID_X550EM_A_SGMII), board_x550em_a },
-	{PCI_VDEVICE(INTEL, IXGBE_DEV_ID_X550EM_A_SGMII_L), board_x550em_a },
-	{PCI_VDEVICE(INTEL, IXGBE_DEV_ID_X550EM_A_10G_T), board_x550em_a},
-	{PCI_VDEVICE(INTEL, IXGBE_DEV_ID_X550EM_A_SFP), board_x550em_a },
-	{PCI_VDEVICE(INTEL, IXGBE_DEV_ID_X550EM_A_1G_T), board_x550em_a_fw },
-	{PCI_VDEVICE(INTEL, IXGBE_DEV_ID_X550EM_A_1G_T_L), board_x550em_a_fw },
-	{PCI_VDEVICE(INTEL, IXGBE_DEV_ID_E610_BACKPLANE), board_e610},
-	{PCI_VDEVICE(INTEL, IXGBE_DEV_ID_E610_SFP), board_e610},
-	{PCI_VDEVICE(INTEL, IXGBE_DEV_ID_E610_10G_T), board_e610},
-	{PCI_VDEVICE(INTEL, IXGBE_DEV_ID_E610_2_5G_T), board_e610},
-	{PCI_VDEVICE(INTEL, IXGBE_DEV_ID_E610_SGMII), board_e610},
+	{ PCI_VDEVICE(INTEL, IXGBE_DEV_ID_82598), .driver_data = board_82598 },
+	{ PCI_VDEVICE(INTEL, IXGBE_DEV_ID_82598AF_DUAL_PORT), .driver_data = board_82598 },
+	{ PCI_VDEVICE(INTEL, IXGBE_DEV_ID_82598AF_SINGLE_PORT), .driver_data = board_82598 },
+	{ PCI_VDEVICE(INTEL, IXGBE_DEV_ID_82598AT), .driver_data = board_82598 },
+	{ PCI_VDEVICE(INTEL, IXGBE_DEV_ID_82598AT2), .driver_data = board_82598 },
+	{ PCI_VDEVICE(INTEL, IXGBE_DEV_ID_82598EB_CX4), .driver_data = board_82598 },
+	{ PCI_VDEVICE(INTEL, IXGBE_DEV_ID_82598_CX4_DUAL_PORT), .driver_data = board_82598 },
+	{ PCI_VDEVICE(INTEL, IXGBE_DEV_ID_82598_DA_DUAL_PORT), .driver_data = board_82598 },
+	{ PCI_VDEVICE(INTEL, IXGBE_DEV_ID_82598_SR_DUAL_PORT_EM), .driver_data = board_82598 },
+	{ PCI_VDEVICE(INTEL, IXGBE_DEV_ID_82598EB_XF_LR), .driver_data = board_82598 },
+	{ PCI_VDEVICE(INTEL, IXGBE_DEV_ID_82598EB_SFP_LOM), .driver_data = board_82598 },
+	{ PCI_VDEVICE(INTEL, IXGBE_DEV_ID_82598_BX), .driver_data = board_82598 },
+	{ PCI_VDEVICE(INTEL, IXGBE_DEV_ID_82599_KX4), .driver_data = board_82599 },
+	{ PCI_VDEVICE(INTEL, IXGBE_DEV_ID_82599_XAUI_LOM), .driver_data = board_82599 },
+	{ PCI_VDEVICE(INTEL, IXGBE_DEV_ID_82599_KR), .driver_data = board_82599 },
+	{ PCI_VDEVICE(INTEL, IXGBE_DEV_ID_82599_SFP), .driver_data = board_82599 },
+	{ PCI_VDEVICE(INTEL, IXGBE_DEV_ID_82599_SFP_EM), .driver_data = board_82599 },
+	{ PCI_VDEVICE(INTEL, IXGBE_DEV_ID_82599_KX4_MEZZ), .driver_data = board_82599 },
+	{ PCI_VDEVICE(INTEL, IXGBE_DEV_ID_82599_CX4), .driver_data = board_82599 },
+	{ PCI_VDEVICE(INTEL, IXGBE_DEV_ID_82599_BACKPLANE_FCOE), .driver_data = board_82599 },
+	{ PCI_VDEVICE(INTEL, IXGBE_DEV_ID_82599_SFP_FCOE), .driver_data = board_82599 },
+	{ PCI_VDEVICE(INTEL, IXGBE_DEV_ID_82599_T3_LOM), .driver_data = board_82599 },
+	{ PCI_VDEVICE(INTEL, IXGBE_DEV_ID_82599_COMBO_BACKPLANE), .driver_data = board_82599 },
+	{ PCI_VDEVICE(INTEL, IXGBE_DEV_ID_X540T), .driver_data = board_X540 },
+	{ PCI_VDEVICE(INTEL, IXGBE_DEV_ID_82599_SFP_SF2), .driver_data = board_82599 },
+	{ PCI_VDEVICE(INTEL, IXGBE_DEV_ID_82599_LS), .driver_data = board_82599 },
+	{ PCI_VDEVICE(INTEL, IXGBE_DEV_ID_82599_QSFP_SF_QP), .driver_data = board_82599 },
+	{ PCI_VDEVICE(INTEL, IXGBE_DEV_ID_82599EN_SFP), .driver_data = board_82599 },
+	{ PCI_VDEVICE(INTEL, IXGBE_DEV_ID_82599_SFP_SF_QP), .driver_data = board_82599 },
+	{ PCI_VDEVICE(INTEL, IXGBE_DEV_ID_X540T1), .driver_data = board_X540 },
+	{ PCI_VDEVICE(INTEL, IXGBE_DEV_ID_X550T), .driver_data = board_X550 },
+	{ PCI_VDEVICE(INTEL, IXGBE_DEV_ID_X550T1), .driver_data = board_X550 },
+	{ PCI_VDEVICE(INTEL, IXGBE_DEV_ID_X550EM_X_KX4), .driver_data = board_X550EM_x },
+	{ PCI_VDEVICE(INTEL, IXGBE_DEV_ID_X550EM_X_XFI), .driver_data = board_X550EM_x },
+	{ PCI_VDEVICE(INTEL, IXGBE_DEV_ID_X550EM_X_KR), .driver_data = board_X550EM_x },
+	{ PCI_VDEVICE(INTEL, IXGBE_DEV_ID_X550EM_X_10G_T), .driver_data = board_X550EM_x },
+	{ PCI_VDEVICE(INTEL, IXGBE_DEV_ID_X550EM_X_SFP), .driver_data = board_X550EM_x },
+	{ PCI_VDEVICE(INTEL, IXGBE_DEV_ID_X550EM_X_1G_T), .driver_data = board_x550em_x_fw },
+	{ PCI_VDEVICE(INTEL, IXGBE_DEV_ID_X550EM_A_KR), .driver_data = board_x550em_a },
+	{ PCI_VDEVICE(INTEL, IXGBE_DEV_ID_X550EM_A_KR_L), .driver_data = board_x550em_a },
+	{ PCI_VDEVICE(INTEL, IXGBE_DEV_ID_X550EM_A_SFP_N), .driver_data = board_x550em_a },
+	{ PCI_VDEVICE(INTEL, IXGBE_DEV_ID_X550EM_A_SGMII), .driver_data = board_x550em_a },
+	{ PCI_VDEVICE(INTEL, IXGBE_DEV_ID_X550EM_A_SGMII_L), .driver_data = board_x550em_a },
+	{ PCI_VDEVICE(INTEL, IXGBE_DEV_ID_X550EM_A_10G_T), .driver_data = board_x550em_a },
+	{ PCI_VDEVICE(INTEL, IXGBE_DEV_ID_X550EM_A_SFP), .driver_data = board_x550em_a },
+	{ PCI_VDEVICE(INTEL, IXGBE_DEV_ID_X550EM_A_1G_T), .driver_data = board_x550em_a_fw },
+	{ PCI_VDEVICE(INTEL, IXGBE_DEV_ID_X550EM_A_1G_T_L), .driver_data = board_x550em_a_fw },
+	{ PCI_VDEVICE(INTEL, IXGBE_DEV_ID_E610_BACKPLANE), .driver_data = board_e610 },
+	{ PCI_VDEVICE(INTEL, IXGBE_DEV_ID_E610_SFP), .driver_data = board_e610 },
+	{ PCI_VDEVICE(INTEL, IXGBE_DEV_ID_E610_10G_T), .driver_data = board_e610 },
+	{ PCI_VDEVICE(INTEL, IXGBE_DEV_ID_E610_2_5G_T), .driver_data = board_e610 },
+	{ PCI_VDEVICE(INTEL, IXGBE_DEV_ID_E610_SGMII), .driver_data = board_e610 },
 	/* required last entry */
-	{0, }
+	{ }
 };
 MODULE_DEVICE_TABLE(pci, ixgbe_pci_tbl);
 
@@ -968,7 +968,7 @@ static void ixgbe_update_xoff_rx_lfc(struct ixgbe_adapter *adapter)
 
 	for (i = 0; i < adapter->num_tx_queues; i++)
 		clear_bit(__IXGBE_HANG_CHECK_ARMED,
-			  &adapter->tx_ring[i]->state);
+			  adapter->tx_ring[i]->state);
 }
 
 static void ixgbe_update_xoff_received(struct ixgbe_adapter *adapter)
@@ -1011,7 +1011,7 @@ static void ixgbe_update_xoff_received(struct ixgbe_adapter *adapter)
 
 		tc = tx_ring->dcb_tc;
 		if (xoff[tc])
-			clear_bit(__IXGBE_HANG_CHECK_ARMED, &tx_ring->state);
+			clear_bit(__IXGBE_HANG_CHECK_ARMED, tx_ring->state);
 	}
 
 	for (i = 0; i < adapter->num_xdp_queues; i++) {
@@ -1019,7 +1019,7 @@ static void ixgbe_update_xoff_received(struct ixgbe_adapter *adapter)
 
 		tc = xdp_ring->dcb_tc;
 		if (xoff[tc])
-			clear_bit(__IXGBE_HANG_CHECK_ARMED, &xdp_ring->state);
+			clear_bit(__IXGBE_HANG_CHECK_ARMED, xdp_ring->state);
 	}
 }
 
@@ -1103,11 +1103,11 @@ static bool ixgbe_check_tx_hang(struct ixgbe_ring *tx_ring)
 	if (tx_done_old == tx_done && tx_pending)
 		/* make sure it is true for two checks in a row */
 		return test_and_set_bit(__IXGBE_HANG_CHECK_ARMED,
-					&tx_ring->state);
+					tx_ring->state);
 	/* update completed stats and continue */
 	tx_ring->tx_stats.tx_done_old = tx_done;
 	/* reset the countdown */
-	clear_bit(__IXGBE_HANG_CHECK_ARMED, &tx_ring->state);
+	clear_bit(__IXGBE_HANG_CHECK_ARMED, tx_ring->state);
 
 	return false;
 }
@@ -1660,7 +1660,7 @@ static inline bool ixgbe_rx_is_fcoe(struct ixgbe_ring *ring,
 {
 	__le16 pkt_info = rx_desc->wb.lower.lo_dword.hs_rss.pkt_info;
 
-	return test_bit(__IXGBE_RX_FCOE, &ring->state) &&
+	return test_bit(__IXGBE_RX_FCOE, ring->state) &&
 	       ((pkt_info & cpu_to_le16(IXGBE_RXDADV_PKTTYPE_ETQF_MASK)) ==
 		(cpu_to_le16(IXGBE_ETQF_FILTER_FCOE <<
 			     IXGBE_RXDADV_PKTTYPE_ETQF_SHIFT)));
@@ -1708,7 +1708,7 @@ static inline void ixgbe_rx_checksum(struct ixgbe_ring *ring,
 		 * checksum errors.
 		 */
 		if ((pkt_info & cpu_to_le16(IXGBE_RXDADV_PKTTYPE_UDP)) &&
-		    test_bit(__IXGBE_RX_CSUM_UDP_ZERO_ERR, &ring->state))
+		    test_bit(__IXGBE_RX_CSUM_UDP_ZERO_ERR, ring->state))
 			return;
 
 		ring->rx_stats.csum_err++;
@@ -3526,7 +3526,7 @@ static irqreturn_t ixgbe_msix_other(int irq, void *data)
 			for (i = 0; i < adapter->num_tx_queues; i++) {
 				struct ixgbe_ring *ring = adapter->tx_ring[i];
 				if (test_and_clear_bit(__IXGBE_TX_FDIR_INIT_DONE,
-						       &ring->state))
+						       ring->state))
 					reinit_count++;
 			}
 			if (reinit_count) {
@@ -3952,13 +3952,14 @@ void ixgbe_configure_tx_ring(struct ixgbe_adapter *adapter,
 	if (adapter->flags & IXGBE_FLAG_FDIR_HASH_CAPABLE) {
 		ring->atr_sample_rate = adapter->atr_sample_rate;
 		ring->atr_count = 0;
-		set_bit(__IXGBE_TX_FDIR_INIT_DONE, &ring->state);
+		set_bit(__IXGBE_TX_FDIR_INIT_DONE, ring->state);
 	} else {
 		ring->atr_sample_rate = 0;
 	}
 
 	/* initialize XPS */
-	if (!test_and_set_bit(__IXGBE_TX_XPS_INIT_DONE, &ring->state)) {
+	if (!ring_is_xdp(ring) &&
+	    !test_and_set_bit(__IXGBE_TX_XPS_INIT_DONE, ring->state)) {
 		struct ixgbe_q_vector *q_vector = ring->q_vector;
 
 		if (q_vector)
@@ -3967,7 +3968,7 @@ void ixgbe_configure_tx_ring(struct ixgbe_adapter *adapter,
 					    ring->queue_index);
 	}
 
-	clear_bit(__IXGBE_HANG_CHECK_ARMED, &ring->state);
+	clear_bit(__IXGBE_HANG_CHECK_ARMED, ring->state);
 
 	/* reinitialize tx_buffer_info */
 	memset(ring->tx_buffer_info, 0,
@@ -4173,7 +4174,7 @@ static void ixgbe_configure_srrctl(struct ixgbe_adapter *adapter,
 			srrctl |= PAGE_SIZE >> IXGBE_SRRCTL_BSIZEPKT_SHIFT;
 		else
 			srrctl |= xsk_buf_len >> IXGBE_SRRCTL_BSIZEPKT_SHIFT;
-	} else if (test_bit(__IXGBE_RX_3K_BUFFER, &rx_ring->state)) {
+	} else if (test_bit(__IXGBE_RX_3K_BUFFER, rx_ring->state)) {
 		srrctl |= IXGBE_RXBUFFER_3K >> IXGBE_SRRCTL_BSIZEPKT_SHIFT;
 	} else {
 		srrctl |= IXGBE_RXBUFFER_2K >> IXGBE_SRRCTL_BSIZEPKT_SHIFT;
@@ -4558,7 +4559,7 @@ void ixgbe_configure_rx_ring(struct ixgbe_adapter *adapter,
 		 * higher than the MTU of the PF.
 		 */
 		if (ring_uses_build_skb(ring) &&
-		    !test_bit(__IXGBE_RX_3K_BUFFER, &ring->state))
+		    !test_bit(__IXGBE_RX_3K_BUFFER, ring->state))
 			rxdctl |= IXGBE_MAX_2K_FRAME_BUILD_SKB |
 				  IXGBE_RXDCTL_RLPML_EN;
 #endif
@@ -4733,27 +4734,27 @@ static void ixgbe_set_rx_buffer_len(struct ixgbe_adapter *adapter)
 		rx_ring = adapter->rx_ring[i];
 
 		clear_ring_rsc_enabled(rx_ring);
-		clear_bit(__IXGBE_RX_3K_BUFFER, &rx_ring->state);
-		clear_bit(__IXGBE_RX_BUILD_SKB_ENABLED, &rx_ring->state);
+		clear_bit(__IXGBE_RX_3K_BUFFER, rx_ring->state);
+		clear_bit(__IXGBE_RX_BUILD_SKB_ENABLED, rx_ring->state);
 
 		if (adapter->flags2 & IXGBE_FLAG2_RSC_ENABLED)
 			set_ring_rsc_enabled(rx_ring);
 
-		if (test_bit(__IXGBE_RX_FCOE, &rx_ring->state))
-			set_bit(__IXGBE_RX_3K_BUFFER, &rx_ring->state);
+		if (test_bit(__IXGBE_RX_FCOE, rx_ring->state))
+			set_bit(__IXGBE_RX_3K_BUFFER, rx_ring->state);
 
 		if (adapter->flags2 & IXGBE_FLAG2_RX_LEGACY)
 			continue;
 
-		set_bit(__IXGBE_RX_BUILD_SKB_ENABLED, &rx_ring->state);
+		set_bit(__IXGBE_RX_BUILD_SKB_ENABLED, rx_ring->state);
 
 #if (PAGE_SIZE < 8192)
 		if (adapter->flags2 & IXGBE_FLAG2_RSC_ENABLED)
-			set_bit(__IXGBE_RX_3K_BUFFER, &rx_ring->state);
+			set_bit(__IXGBE_RX_3K_BUFFER, rx_ring->state);
 
 		if (IXGBE_2K_TOO_SMALL_WITH_PADDING ||
 		    (max_frame > (ETH_FRAME_LEN + ETH_FCS_LEN)))
-			set_bit(__IXGBE_RX_3K_BUFFER, &rx_ring->state);
+			set_bit(__IXGBE_RX_3K_BUFFER, rx_ring->state);
 #endif
 	}
 }
@@ -6289,6 +6290,16 @@ void ixgbe_reinit_locked(struct ixgbe_adapter *adapter)
 	if (adapter->flags & IXGBE_FLAG_SRIOV_ENABLED)
 		msleep(2000);
 	ixgbe_up(adapter);
+
+	/* E610 has no FW event to notify all PFs of an EMPR reset, so
+	 * refresh the FW version here to pick up any new FW version after
+	 * a hardware reset (e.g. EMPR triggered by another PF's devlink
+	 * reload).  ixgbe_refresh_fw_version() updates both hw->flash and
+	 * adapter->eeprom_id so ethtool -i reports the correct string.
+	 */
+	if (adapter->hw.mac.type == ixgbe_mac_e610)
+		(void)ixgbe_refresh_fw_version(adapter);
+
 	clear_bit(__IXGBE_RESETTING, &adapter->state);
 }
 
@@ -6748,6 +6759,7 @@ void ixgbe_down(struct ixgbe_adapter *adapter)
 
 /**
  * ixgbe_set_eee_capable - helper function to determine EEE support on X550
+ * and E610
  * @adapter: board private structure
  */
 static void ixgbe_set_eee_capable(struct ixgbe_adapter *adapter)
@@ -6764,6 +6776,20 @@ static void ixgbe_set_eee_capable(struct ixgbe_adapter *adapter)
 			break;
 		adapter->flags2 |= IXGBE_FLAG2_EEE_ENABLED;
 		break;
+	case IXGBE_DEV_ID_E610_BACKPLANE:
+	case IXGBE_DEV_ID_E610_SFP:
+	case IXGBE_DEV_ID_E610_10G_T:
+	case IXGBE_DEV_ID_E610_2_5G_T:
+		if (hw->dev_caps.common_cap.eee_support &&
+		    hw->phy.eee_speeds_supported) {
+			adapter->flags2 |= IXGBE_FLAG2_EEE_CAPABLE;
+			/* For E610 adapters EEE should be enabled by default
+			 * if the feature is supported by FW.
+			 */
+			adapter->flags2 |= IXGBE_FLAG2_EEE_ENABLED;
+			break;
+		}
+		fallthrough;
 	default:
 		adapter->flags2 &= ~IXGBE_FLAG2_EEE_CAPABLE;
 		adapter->flags2 &= ~IXGBE_FLAG2_EEE_ENABLED;
@@ -6895,8 +6921,7 @@ static int ixgbe_sw_init(struct ixgbe_adapter *adapter,
 #endif /* IXGBE_FCOE */
 
 	/* initialize static ixgbe jump table entries */
-	adapter->jump_tables[0] = kzalloc(sizeof(*adapter->jump_tables[0]),
-					  GFP_KERNEL);
+	adapter->jump_tables[0] = kzalloc_obj(*adapter->jump_tables[0]);
 	if (!adapter->jump_tables[0])
 		return -ENOMEM;
 	adapter->jump_tables[0]->mat = ixgbe_ipv4_fields;
@@ -6904,9 +6929,8 @@ static int ixgbe_sw_init(struct ixgbe_adapter *adapter,
 	for (i = 1; i < IXGBE_MAX_LINK_HANDLE; i++)
 		adapter->jump_tables[i] = NULL;
 
-	adapter->mac_table = kcalloc(hw->mac.num_rar_entries,
-				     sizeof(struct ixgbe_mac_addr),
-				     GFP_KERNEL);
+	adapter->mac_table = kzalloc_objs(struct ixgbe_mac_addr,
+					  hw->mac.num_rar_entries);
 	if (!adapter->mac_table)
 		return -ENOMEM;
 
@@ -7449,7 +7473,7 @@ int ixgbe_open(struct net_device *netdev)
 					 adapter->hw.link.link_info.link_cfg_err);
 
 		err = ixgbe_non_sfp_link_config(&adapter->hw);
-		if (ixgbe_non_sfp_link_config(&adapter->hw))
+		if (err)
 			e_dev_err("Link setup failed, err %d.\n", err);
 	}
 
@@ -7946,10 +7970,10 @@ static void ixgbe_fdir_reinit_subtask(struct ixgbe_adapter *adapter)
 	if (ixgbe_reinit_fdir_tables_82599(hw) == 0) {
 		for (i = 0; i < adapter->num_tx_queues; i++)
 			set_bit(__IXGBE_TX_FDIR_INIT_DONE,
-				&(adapter->tx_ring[i]->state));
+				adapter->tx_ring[i]->state);
 		for (i = 0; i < adapter->num_xdp_queues; i++)
 			set_bit(__IXGBE_TX_FDIR_INIT_DONE,
-				&adapter->xdp_ring[i]->state);
+				adapter->xdp_ring[i]->state);
 		/* re-enable flow director interrupts */
 		IXGBE_WRITE_REG(hw, IXGBE_EIMS, IXGBE_EIMS_FLOW_DIR);
 	} else {
@@ -8074,6 +8098,7 @@ static void ixgbe_watchdog_link_is_up(struct ixgbe_adapter *adapter)
 	struct net_device *netdev = adapter->netdev;
 	struct ixgbe_hw *hw = &adapter->hw;
 	u32 link_speed = adapter->link_speed;
+	struct ethtool_keee keee = {};
 	const char *speed_str;
 	bool flow_rx, flow_tx;
 
@@ -8114,6 +8139,8 @@ static void ixgbe_watchdog_link_is_up(struct ixgbe_adapter *adapter)
 	if (test_bit(__IXGBE_PTP_RUNNING, &adapter->state))
 		ixgbe_ptp_start_cyclecounter(adapter);
 
+	netdev->ethtool_ops->get_eee(netdev, &keee);
+
 	switch (link_speed) {
 	case IXGBE_LINK_SPEED_10GB_FULL:
 		speed_str = "10 Gbps";
@@ -8137,10 +8164,11 @@ static void ixgbe_watchdog_link_is_up(struct ixgbe_adapter *adapter)
 		speed_str = "unknown speed";
 		break;
 	}
-	e_info(drv, "NIC Link is Up %s, Flow Control: %s\n", speed_str,
+	e_info(drv, "NIC Link is Up %s, Flow Control: %s, EEE: %s\n", speed_str,
 	       ((flow_rx && flow_tx) ? "RX/TX" :
 	       (flow_rx ? "RX" :
-	       (flow_tx ? "TX" : "None"))));
+	       (flow_tx ? "TX" : "None"))),
+	       str_on_off(keee.eee_enabled));
 
 	netif_carrier_on(netdev);
 	ixgbe_check_vf_rate_limit(adapter);
@@ -9245,10 +9273,11 @@ static u16 ixgbe_select_queue(struct net_device *dev, struct sk_buff *skb,
 	if (sb_dev) {
 		u8 tc = netdev_get_prio_tc_map(dev, skb->priority);
 		struct net_device *vdev = sb_dev;
+		struct netdev_tc_txq res;
 
-		txq = vdev->tc_to_txq[tc].offset;
-		txq += reciprocal_scale(skb_get_hash(skb),
-					vdev->tc_to_txq[tc].count);
+		res.combined = READ_ONCE(vdev->tc_to_txq[tc].combined);
+		txq = res.offset;
+		txq += reciprocal_scale(skb_get_hash(skb), res.count);
 
 		return txq;
 	}
@@ -9490,7 +9519,7 @@ netdev_tx_t ixgbe_xmit_frame_ring(struct sk_buff *skb,
 		ixgbe_tx_csum(tx_ring, first, &ipsec_tx);
 
 	/* add the ATR filter if ATR is on */
-	if (test_bit(__IXGBE_TX_FDIR_INIT_DONE, &tx_ring->state))
+	if (test_bit(__IXGBE_TX_FDIR_INIT_DONE, tx_ring->state))
 		ixgbe_atr(tx_ring, first);
 
 #ifdef IXGBE_FCOE
@@ -9530,7 +9559,7 @@ static netdev_tx_t __ixgbe_xmit_frame(struct sk_buff *skb,
 		return NETDEV_TX_OK;
 
 	tx_ring = ring ? ring : adapter->tx_ring[skb_get_queue_mapping(skb)];
-	if (unlikely(test_bit(__IXGBE_TX_DISABLED, &tx_ring->state)))
+	if (unlikely(test_bit(__IXGBE_TX_DISABLED, tx_ring->state)))
 		return NETDEV_TX_BUSY;
 
 	return ixgbe_xmit_frame_ring(skb, adapter, tx_ring);
@@ -10273,15 +10302,15 @@ static int ixgbe_configure_clsu32(struct ixgbe_adapter *adapter,
 			    (__force u32)cls->knode.sel->offmask)
 				return err;
 
-			jump = kzalloc(sizeof(*jump), GFP_KERNEL);
+			jump = kzalloc_obj(*jump);
 			if (!jump)
 				return -ENOMEM;
-			input = kzalloc(sizeof(*input), GFP_KERNEL);
+			input = kzalloc_obj(*input);
 			if (!input) {
 				err = -ENOMEM;
 				goto free_jump;
 			}
-			mask = kzalloc(sizeof(*mask), GFP_KERNEL);
+			mask = kzalloc_obj(*mask);
 			if (!mask) {
 				err = -ENOMEM;
 				goto free_input;
@@ -10305,10 +10334,10 @@ static int ixgbe_configure_clsu32(struct ixgbe_adapter *adapter,
 		return 0;
 	}
 
-	input = kzalloc(sizeof(*input), GFP_KERNEL);
+	input = kzalloc_obj(*input);
 	if (!input)
 		return -ENOMEM;
-	mask = kzalloc(sizeof(*mask), GFP_KERNEL);
+	mask = kzalloc_obj(*mask);
 	if (!mask) {
 		err = -ENOMEM;
 		goto free_input;
@@ -10786,7 +10815,7 @@ static void *ixgbe_fwd_add(struct net_device *pdev, struct net_device *vdev)
 			return ERR_PTR(-ENOMEM);
 	}
 
-	accel = kzalloc(sizeof(*accel), GFP_KERNEL);
+	accel = kzalloc_obj(*accel);
 	if (!accel)
 		return ERR_PTR(-ENOMEM);
 
@@ -11015,7 +11044,7 @@ static int ixgbe_xdp_xmit(struct net_device *dev, int n,
 	if (unlikely(!ring))
 		return -ENXIO;
 
-	if (unlikely(test_bit(__IXGBE_TX_DISABLED, &ring->state)))
+	if (unlikely(test_bit(__IXGBE_TX_DISABLED, ring->state)))
 		return -ENXIO;
 
 	if (static_branch_unlikely(&ixgbe_xdp_locking_key))
@@ -11121,7 +11150,7 @@ static void ixgbe_disable_txr_hw(struct ixgbe_adapter *adapter,
 static void ixgbe_disable_txr(struct ixgbe_adapter *adapter,
 			      struct ixgbe_ring *tx_ring)
 {
-	set_bit(__IXGBE_TX_DISABLED, &tx_ring->state);
+	set_bit(__IXGBE_TX_DISABLED, tx_ring->state);
 	ixgbe_disable_txr_hw(adapter, tx_ring);
 }
 
@@ -11275,9 +11304,9 @@ void ixgbe_txrx_ring_enable(struct ixgbe_adapter *adapter, int ring)
 		ixgbe_configure_tx_ring(adapter, xdp_ring);
 	ixgbe_configure_rx_ring(adapter, rx_ring);
 
-	clear_bit(__IXGBE_TX_DISABLED, &tx_ring->state);
+	clear_bit(__IXGBE_TX_DISABLED, tx_ring->state);
 	if (xdp_ring)
-		clear_bit(__IXGBE_TX_DISABLED, &xdp_ring->state);
+		clear_bit(__IXGBE_TX_DISABLED, xdp_ring->state);
 
 	/* Rx/Tx/XDP Tx share the same napi context. */
 	napi_enable(&rx_ring->q_vector->napi);
@@ -11468,20 +11497,17 @@ static void ixgbe_set_fw_version(struct ixgbe_adapter *adapter)
  */
 static int ixgbe_recovery_probe(struct ixgbe_adapter *adapter)
 {
-	struct net_device *netdev = adapter->netdev;
 	struct pci_dev *pdev = adapter->pdev;
 	struct ixgbe_hw *hw = &adapter->hw;
-	bool disable_dev;
 	int err = -EIO;
 
 	if (hw->mac.type != ixgbe_mac_e610)
-		goto clean_up_probe;
+		return err;
 
 	ixgbe_get_hw_control(adapter);
-	mutex_init(&hw->aci.lock);
 	err = ixgbe_get_flash_data(&adapter->hw);
 	if (err)
-		goto shutdown_aci;
+		goto err_release_hw_control;
 
 	timer_setup(&adapter->service_timer, ixgbe_service_timer, 0);
 	INIT_WORK(&adapter->service_task, ixgbe_recovery_service_task);
@@ -11504,16 +11530,8 @@ static int ixgbe_recovery_probe(struct ixgbe_adapter *adapter)
 	devl_unlock(adapter->devlink);
 
 	return 0;
-shutdown_aci:
-	mutex_destroy(&adapter->hw.aci.lock);
+err_release_hw_control:
 	ixgbe_release_hw_control(adapter);
-clean_up_probe:
-	disable_dev = !test_and_set_bit(__IXGBE_DISABLED, &adapter->state);
-	free_netdev(netdev);
-	devlink_free(adapter->devlink);
-	pci_release_mem_regions(pdev);
-	if (disable_dev)
-		pci_disable_device(pdev);
 	return err;
 }
 
@@ -11655,8 +11673,13 @@ static int ixgbe_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 	if (err)
 		goto err_sw_init;
 
-	if (ixgbe_check_fw_error(adapter))
-		return ixgbe_recovery_probe(adapter);
+	if (ixgbe_check_fw_error(adapter)) {
+		err = ixgbe_recovery_probe(adapter);
+		if (err)
+			goto err_sw_init;
+
+		return 0;
+	}
 
 	if (adapter->hw.mac.type == ixgbe_mac_e610) {
 		err = ixgbe_get_caps(&adapter->hw);
@@ -12001,6 +12024,13 @@ skip_sriov:
 	if (err)
 		goto err_netdev;
 
+	if (hw->mac.type == ixgbe_mac_e610 &&
+	    (adapter->flags2 & IXGBE_FLAG2_EEE_CAPABLE)) {
+		bool eee_enable = adapter->flags2 & IXGBE_FLAG2_EEE_ENABLED;
+
+		hw->mac.ops.setup_eee(hw, eee_enable);
+	}
+
 	ixgbe_devlink_init_regions(adapter);
 	devl_register(adapter->devlink);
 	devl_unlock(adapter->devlink);
@@ -12046,7 +12076,7 @@ err_dma:
  * @pdev: PCI device information struct
  *
  * ixgbe_remove is called by the PCI subsystem to alert the driver
- * that it should release a PCI device.  The could be caused by a
+ * that it should release a PCI device.  This could be caused by a
  * Hot-Plug event, or because the driver is going to be removed from
  * memory.
  **/
@@ -12298,7 +12328,6 @@ static pci_ers_result_t ixgbe_io_slot_reset(struct pci_dev *pdev)
 		adapter->hw.hw_addr = adapter->io_addr;
 		pci_set_master(pdev);
 		pci_restore_state(pdev);
-		pci_save_state(pdev);
 
 		pci_wake_from_d3(pdev, false);
 

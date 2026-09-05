@@ -383,7 +383,7 @@ static int isl29003_probe(struct i2c_client *client)
 	if (!i2c_check_functionality(adapter, I2C_FUNC_SMBUS_BYTE))
 		return -EIO;
 
-	data = kzalloc(sizeof(struct isl29003_data), GFP_KERNEL);
+	data = kzalloc_obj(struct isl29003_data);
 	if (!data)
 		return -ENOMEM;
 
@@ -449,8 +449,8 @@ static SIMPLE_DEV_PM_OPS(isl29003_pm_ops, isl29003_suspend, isl29003_resume);
 #endif /* CONFIG_PM_SLEEP */
 
 static const struct i2c_device_id isl29003_id[] = {
-	{ "isl29003" },
-	{}
+	{ .name = "isl29003" },
+	{ }
 };
 MODULE_DEVICE_TABLE(i2c, isl29003_id);
 

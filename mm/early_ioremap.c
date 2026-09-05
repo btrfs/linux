@@ -30,6 +30,14 @@ static int __init early_ioremap_debug_setup(char *str)
 }
 early_param("early_ioremap_debug", early_ioremap_debug_setup);
 
+#define early_ioremap_dbg(fmt, args...)			\
+	do {						\
+		if (unlikely(early_ioremap_debug)) {	\
+			pr_warn(fmt, ##args);		\
+			dump_stack();			\
+		}					\
+	} while (0)
+
 static int after_paging_init __initdata;
 
 pgprot_t __init __weak early_memremap_pgprot_adjust(resource_size_t phys_addr,
@@ -39,15 +47,19 @@ pgprot_t __init __weak early_memremap_pgprot_adjust(resource_size_t phys_addr,
 	return prot;
 }
 
+/*
+ * Only architectures whose early_ioremap() must stop using __early_set_fixmap()
+ * after paging_init() need to call this.
+ */
 void __init early_ioremap_reset(void)
 {
 	after_paging_init = 1;
 }
 
 /*
- * Generally, ioremap() is available after paging_init() has been called.
- * Architectures wanting to allow early_ioremap after paging_init() can
- * define __late_set_fixmap and __late_clear_fixmap to do the right thing.
+ * Only architectures that call early_ioremap_reset() need to define
+ * __late_set_fixmap() and __late_clear_fixmap(), which early_ioremap() uses
+ * instead of __early_set_fixmap() after the reset.
  */
 #ifndef __late_set_fixmap
 static inline void __init __late_set_fixmap(enum fixed_addresses idx,
@@ -139,6 +151,9 @@ __early_ioremap(resource_size_t phys_addr, unsigned long size, pgprot_t prot)
 	if (WARN_ON(nrpages > NR_FIX_BTMAPS))
 		return NULL;
 
+	early_ioremap_dbg("%s(%pa, %08lx) [%d] => %08lx + %08lx\n",
+			  __func__, &phys_addr, size, slot, slot_virt[slot], offset);
+
 	/*
 	 * Ok, go for it..
 	 */
@@ -152,8 +167,6 @@ __early_ioremap(resource_size_t phys_addr, unsigned long size, pgprot_t prot)
 		--idx;
 		--nrpages;
 	}
-	WARN(early_ioremap_debug, "%s(%pa, %08lx) [%d] => %08lx + %08lx\n",
-	     __func__, &phys_addr, size, slot, offset, slot_virt[slot]);
 
 	prev_map[slot] = (void __iomem *)(offset + slot_virt[slot]);
 	return prev_map[slot];
@@ -184,8 +197,7 @@ void __init early_iounmap(void __iomem *addr, unsigned long size)
 		  __func__, addr, size, slot, prev_size[slot]))
 		return;
 
-	WARN(early_ioremap_debug, "%s(%p, %08lx) [%d]\n",
-	      __func__, addr, size, slot);
+	early_ioremap_dbg("%s(%p, %08lx) [%d]\n", __func__, addr, size, slot);
 
 	virt_addr = (unsigned long)addr;
 	if (WARN_ON(virt_addr < fix_to_virt(FIX_BTMAP_BEGIN)))

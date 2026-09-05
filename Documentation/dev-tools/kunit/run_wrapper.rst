@@ -324,6 +324,9 @@ command line arguments:
 - ``--json``: If set, stores the test results in a JSON format and prints to `stdout` or
   saves to a file if a filename is specified.
 
+- ``--junit``: If set, stores the test results in JUnit XML format and prints to `stdout` or
+  saves to a file if a filename is specified.
+
 - ``--filter``: Specifies filters on test attributes, for example, ``speed!=slow``.
   Multiple filters can be used by wrapping input in quotes and separating filters
   by commas. Example: ``--filter "speed>slow, module=example"``.
@@ -335,3 +338,14 @@ command line arguments:
 
 - ``--list_tests_attr``: If set, lists all tests that will be run and all of their
   attributes.
+
+- ``--list_suites``: If set, lists all suites that will be run.
+
+Command-line completion
+==============================
+
+The kunit_tool comes with a bash completion script:
+
+.. code-block:: bash
+
+	source tools/testing/kunit/kunit-completion.sh

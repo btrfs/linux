@@ -2,16 +2,14 @@
 /*
  * Copyright (C) 2015 Intel Mobile Communications GmbH
  * Copyright (C) 2016-2017 Intel Deutschland GmbH
- * Copyright (C) 2019-2021, 2023-2025 Intel Corporation
+ * Copyright (C) 2019-2021, 2023-2026 Intel Corporation
  */
 #include <linux/kernel.h>
 #include <linux/bsearch.h>
 #include <linux/list.h>
 
-#include "fw/api/tx.h"
 #include "iwl-trans.h"
 #include "iwl-drv.h"
-#include "iwl-fh.h"
 #include <linux/dmapool.h>
 #include "fw/api/commands.h"
 #include "pcie/gen1_2/internal.h"
@@ -46,7 +44,7 @@ iwl_trans_get_restart_data(struct device *dev)
 	if (data)
 		return data;
 
-	data = kzalloc(struct_size(data, name, strlen(name) + 1), GFP_ATOMIC);
+	data = kzalloc_flex(*data, name, strlen(name) + 1, GFP_ATOMIC);
 	if (!data)
 		return NULL;
 
@@ -113,7 +111,7 @@ static void iwl_trans_schedule_reprobe(struct iwl_trans *trans,
 		return;
 	}
 
-	reprobe = kzalloc(sizeof(*reprobe), GFP_KERNEL);
+	reprobe = kzalloc_obj(*reprobe);
 	if (!reprobe) {
 		module_put(THIS_MODULE);
 		return;
@@ -129,7 +127,7 @@ static enum iwl_reset_mode
 iwl_trans_determine_restart_mode(struct iwl_trans *trans)
 {
 	struct iwl_trans_dev_restart_data *data;
-	enum iwl_reset_mode at_least = 0;
+	enum iwl_reset_mode min_mode = 0;
 	unsigned int index;
 	static const enum iwl_reset_mode escalation_list_old[] = {
 		IWL_RESET_MODE_SW_RESET,
@@ -138,7 +136,7 @@ iwl_trans_determine_restart_mode(struct iwl_trans *trans)
 		IWL_RESET_MODE_FUNC_RESET,
 		IWL_RESET_MODE_PROD_RESET,
 	};
-	static const enum iwl_reset_mode escalation_list_sc[] = {
+	static const enum iwl_reset_mode escalation_list_top[] = {
 		IWL_RESET_MODE_SW_RESET,
 		IWL_RESET_MODE_REPROBE,
 		IWL_RESET_MODE_REPROBE,
@@ -159,25 +157,25 @@ iwl_trans_determine_restart_mode(struct iwl_trans *trans)
 
 	if (trans->request_top_reset) {
 		trans->request_top_reset = 0;
-		if (trans->mac_cfg->device_family >= IWL_DEVICE_FAMILY_SC)
+		if (iwl_trans_is_top_reset_supported(trans))
 			return IWL_RESET_MODE_TOP_RESET;
 		return IWL_RESET_MODE_PROD_RESET;
 	}
 
-	if (trans->mac_cfg->device_family >= IWL_DEVICE_FAMILY_SC) {
-		escalation_list = escalation_list_sc;
-		escalation_list_size = ARRAY_SIZE(escalation_list_sc);
+	if (iwl_trans_is_top_reset_supported(trans)) {
+		escalation_list = escalation_list_top;
+		escalation_list_size = ARRAY_SIZE(escalation_list_top);
 	} else {
 		escalation_list = escalation_list_old;
 		escalation_list_size = ARRAY_SIZE(escalation_list_old);
 	}
 
 	if (trans->restart.during_reset)
-		at_least = IWL_RESET_MODE_REPROBE;
+		min_mode = IWL_RESET_MODE_REPROBE;
 
 	data = iwl_trans_get_restart_data(trans->dev);
 	if (!data)
-		return at_least;
+		return min_mode;
 
 	if (!data->backoff &&
 	    ktime_get_boottime_seconds() - data->last_error >=
@@ -194,7 +192,7 @@ iwl_trans_determine_restart_mode(struct iwl_trans *trans)
 		data->backoff = false;
 	}
 
-	return max(at_least, escalation_list[index]);
+	return max(min_mode, escalation_list[index]);
 }
 
 #define IWL_TRANS_TOP_FOLLOWER_WAIT	180 /* ms */
@@ -461,6 +459,12 @@ int iwl_trans_read_mem(struct iwl_trans *trans, u32 addr,
 }
 IWL_EXPORT_SYMBOL(iwl_trans_read_mem);
 
+int iwl_trans_read_mem_no_grab(struct iwl_trans *trans, u32 addr,
+			       void *buf, u32 dwords)
+{
+	return iwl_trans_pcie_read_mem_no_grab(trans, addr, buf, dwords);
+}
+
 int iwl_trans_write_mem(struct iwl_trans *trans, u32 addr,
 			const void *buf, int dwords)
 {
@@ -548,11 +552,16 @@ int iwl_trans_read_config32(struct iwl_trans *trans, u32 ofs,
 	return iwl_trans_pcie_read_config32(trans, ofs, val);
 }
 
-bool _iwl_trans_grab_nic_access(struct iwl_trans *trans)
+bool iwl_trans_grab_nic_access(struct iwl_trans *trans)
 {
 	return iwl_trans_pcie_grab_nic_access(trans);
 }
-IWL_EXPORT_SYMBOL(_iwl_trans_grab_nic_access);
+IWL_EXPORT_SYMBOL(iwl_trans_grab_nic_access);
+
+void iwl_trans_resched_with_nic_access(struct iwl_trans *trans)
+{
+	iwl_trans_pcie_resched_with_nic_access(trans);
+}
 
 void __releases(nic_access)
 iwl_trans_release_nic_access(struct iwl_trans *trans)
@@ -822,3 +831,10 @@ bool iwl_trans_is_ltr_enabled(struct iwl_trans *trans)
 	return iwl_pcie_gen1_2_is_ltr_enabled(trans);
 }
 IWL_EXPORT_SYMBOL(iwl_trans_is_ltr_enabled);
+
+int iwl_trans_activate_nic(struct iwl_trans *trans)
+{
+	return iwl_pcie_gen1_2_activate_nic(trans);
+}
+IWL_EXPORT_SYMBOL(iwl_trans_activate_nic);
+

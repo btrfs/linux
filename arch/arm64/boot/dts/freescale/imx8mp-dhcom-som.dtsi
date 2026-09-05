@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * Copyright (C) 2021-2022 Marek Vasut <marex@denx.de>
+ * Copyright (C) 2021-2026 Marek Vasut
  */
 
 #include "imx8mp.dtsi"
@@ -113,6 +113,7 @@
 		ethphy0f: ethernet-phy@1 { /* SMSC LAN8740Ai */
 			compatible = "ethernet-phy-id0007.c110",
 				     "ethernet-phy-ieee802.3-c22";
+			clocks = <&clk IMX8MP_CLK_ENET_QOS>;
 			interrupt-parent = <&gpio3>;
 			interrupts = <19 IRQ_TYPE_LEVEL_LOW>;
 			pinctrl-0 = <&pinctrl_ethphy0>;
@@ -397,7 +398,7 @@
 		};
 	};
 
-	touchscreen@49 {
+	touch_som: touchscreen@49 {
 		compatible = "ti,tsc2004";
 		reg = <0x49>;
 		interrupts-extended = <&gpio4 0 IRQ_TYPE_EDGE_FALLING>;
@@ -988,7 +989,7 @@
 	pinctrl_pmic: dhcom-pmic-grp {
 		fsl,pins = <
 			/* PMIC_nINT */
-			MX8MP_IOMUXC_GPIO1_IO03__GPIO1_IO03		0x40000090
+			MX8MP_IOMUXC_GPIO1_IO03__GPIO1_IO03		0x1c0
 		>;
 	};
 

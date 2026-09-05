@@ -46,8 +46,8 @@ int setattr_should_drop_sgid(struct mnt_idmap *idmap,
 EXPORT_SYMBOL(setattr_should_drop_sgid);
 
 /**
- * setattr_should_drop_suidgid - determine whether the set{g,u}id bit needs to
- *                               be dropped
+ * setattr_should_drop_suidgid - determine whether the set{g,u}id bit
+ *                               needs to be dropped
  * @idmap:	idmap of the mount @inode was found from
  * @inode:	inode to check
  *
@@ -165,11 +165,21 @@ int setattr_prepare(struct mnt_idmap *idmap, struct dentry *dentry,
 	unsigned int ia_valid = attr->ia_valid;
 
 	/*
-	 * First check size constraints.  These can't be overriden using
+	 * First check size constraints.  These can't be overridden using
 	 * ATTR_FORCE.
 	 */
 	if (ia_valid & ATTR_SIZE) {
-		int error = inode_newsize_ok(inode, attr->ia_size);
+		int error;
+
+		/*
+		 * Verity files are immutable, so deny truncates.  This isn't
+		 * covered by the open-time check because sys_truncate() takes a
+		 * path, not an open file.
+		 */
+		if (IS_VERITY(inode))
+			return -EPERM;
+
+		error = inode_newsize_ok(inode, attr->ia_size);
 		if (error)
 			return error;
 	}
@@ -415,7 +425,7 @@ EXPORT_SYMBOL(may_setattr);
  * performed on the raw inode simply pass @nop_mnt_idmap.
  */
 int notify_change(struct mnt_idmap *idmap, struct dentry *dentry,
-		  struct iattr *attr, struct inode **delegated_inode)
+		  struct iattr *attr, struct delegated_inode *delegated_inode)
 {
 	struct inode *inode = dentry->d_inode;
 	umode_t mode = inode->i_mode;
@@ -537,7 +547,7 @@ int notify_change(struct mnt_idmap *idmap, struct dentry *dentry,
 	 * breaking the delegation in this case.
 	 */
 	if (!(ia_valid & ATTR_DELEG)) {
-		error = try_break_deleg(inode, delegated_inode);
+		error = try_break_deleg(inode, 0, delegated_inode);
 		if (error)
 			return error;
 	}

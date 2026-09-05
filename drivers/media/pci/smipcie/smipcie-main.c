@@ -946,7 +946,7 @@ static int smi_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	if (pci_enable_device(pdev) < 0)
 		return -ENODEV;
 
-	dev = kzalloc(sizeof(struct smi_dev), GFP_KERNEL);
+	dev = kzalloc_obj(struct smi_dev);
 	if (!dev) {
 		ret = -ENOMEM;
 		goto err_pci_disable_device;
@@ -1097,8 +1097,7 @@ static const struct smi_cfg_info technotrend_s2_4200_cfg = {
 
 /* PCI IDs */
 #define SMI_ID(_subvend, _subdev, _driverdata) {	\
-	.vendor      = SMI_VID,    .device    = SMI_PID, \
-	.subvendor   = _subvend, .subdevice = _subdev, \
+	PCI_DEVICE_SUB(SMI_VID, SMI_PID, (_subvend), (_subdev)), \
 	.driver_data = (unsigned long)&_driverdata }
 
 static const struct pci_device_id smi_id_table[] = {
@@ -1106,7 +1105,7 @@ static const struct pci_device_id smi_id_table[] = {
 	SMI_ID(0x4254, 0x0552, dvbsky_s952_cfg),
 	SMI_ID(0x4254, 0x5580, dvbsky_t9580_cfg),
 	SMI_ID(0x13c2, 0x3016, technotrend_s2_4200_cfg),
-	{0}
+	{ }
 };
 MODULE_DEVICE_TABLE(pci, smi_id_table);
 

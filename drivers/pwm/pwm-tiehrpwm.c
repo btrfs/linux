@@ -237,8 +237,6 @@ static int ehrpwm_pwm_config(struct pwm_chip *chip, struct pwm_device *pwm,
 	if (period_cycles < 1)
 		period_cycles = 1;
 
-	pm_runtime_get_sync(pwmchip_parent(chip));
-
 	/* Update clock prescaler values */
 	ehrpwm_modify(pc->mmio_base, TBCTL, TBCTL_CLKDIV_MASK, tb_divval);
 
@@ -289,8 +287,6 @@ static int ehrpwm_pwm_config(struct pwm_chip *chip, struct pwm_device *pwm,
 
 	if (!(duty_cycles > period_cycles))
 		ehrpwm_write(pc->mmio_base, cmp_reg, duty_cycles);
-
-	pm_runtime_put_sync(pwmchip_parent(chip));
 
 	return 0;
 }
@@ -378,6 +374,8 @@ static int ehrpwm_pwm_apply(struct pwm_chip *chip, struct pwm_device *pwm,
 	int err;
 	bool enabled = pwm->state.enabled;
 
+	guard(pm_runtime_active)(pwmchip_parent(chip));
+
 	if (state->polarity != pwm->state.polarity) {
 		if (enabled) {
 			ehrpwm_pwm_disable(chip, pwm);
@@ -409,7 +407,7 @@ static const struct pwm_ops ehrpwm_pwm_ops = {
 static const struct of_device_id ehrpwm_of_match[] = {
 	{ .compatible = "ti,am3352-ehrpwm" },
 	{ .compatible = "ti,am33xx-ehrpwm" },
-	{},
+	{ }
 };
 MODULE_DEVICE_TABLE(of, ehrpwm_of_match);
 

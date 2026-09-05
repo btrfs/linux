@@ -2,14 +2,13 @@
 /*
  * Sensirion SPS30 particulate matter sensor serial driver
  *
- * Copyright (c) 2021 Tomasz Duszynski <tomasz.duszynski@octakon.com>
+ * Copyright (c) 2021 Tomasz Duszynski <tduszyns@gmail.com>
  */
 #include <linux/completion.h>
 #include <linux/device.h>
 #include <linux/errno.h>
 #include <linux/iio/iio.h>
 #include <linux/minmax.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/serdev.h>
 #include <linux/types.h>
@@ -303,7 +302,7 @@ static int sps30_serial_read_meas(struct sps30_state *state, __be32 *meas, size_
 	if (msleep_interruptible(1000))
 		return -EINTR;
 
-	ret = sps30_serial_command(state, SPS30_SERIAL_READ_MEAS, NULL, 0, meas, num * sizeof(num));
+	ret = sps30_serial_command(state, SPS30_SERIAL_READ_MEAS, NULL, 0, meas, num * sizeof(*meas));
 	if (ret < 0)
 		return ret;
 	/* if measurements aren't ready sensor returns empty frame */
@@ -426,7 +425,7 @@ static struct serdev_device_driver sps30_serial_driver = {
 };
 module_serdev_device_driver(sps30_serial_driver);
 
-MODULE_AUTHOR("Tomasz Duszynski <tomasz.duszynski@octakon.com>");
+MODULE_AUTHOR("Tomasz Duszynski <tduszyns@gmail.com>");
 MODULE_DESCRIPTION("Sensirion SPS30 particulate matter sensor serial driver");
 MODULE_LICENSE("GPL v2");
 MODULE_IMPORT_NS("IIO_SPS30");

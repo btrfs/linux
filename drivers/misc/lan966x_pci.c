@@ -58,7 +58,7 @@ static struct pci_dev_intr_ctrl *pci_dev_create_intr_ctrl(struct pci_dev *pdev)
 	if (!fwnode)
 		return ERR_PTR(-ENODEV);
 
-	intr_ctrl = kmalloc(sizeof(*intr_ctrl), GFP_KERNEL);
+	intr_ctrl = kmalloc_obj(*intr_ctrl);
 	if (!intr_ctrl)
 		return ERR_PTR(-ENOMEM);
 
@@ -183,6 +183,7 @@ static int lan966x_pci_probe(struct pci_dev *pdev, const struct pci_device_id *i
 	return 0;
 
 err_unload_overlay:
+	of_platform_depopulate(dev);
 	lan966x_pci_unload_overlay(data);
 	return ret;
 }

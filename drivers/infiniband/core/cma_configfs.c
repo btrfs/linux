@@ -65,6 +65,10 @@ static struct cma_dev_port_group *to_dev_port_group(struct config_item *item)
 	return container_of(group, struct cma_dev_port_group, group);
 }
 
+/*
+ * configfs is not net namespace aware, so a name shared by devices in
+ * different namespaces resolves to the first match here.
+ */
 static bool filter_by_name(struct ib_device *ib_dev, void *cookie)
 {
 	return !strcmp(dev_name(&ib_dev->dev), cookie);
@@ -210,8 +214,7 @@ static int make_cma_ports(struct cma_dev_group *cma_dev_group,
 		return -ENODEV;
 
 	ports_num = ibdev->phys_port_cnt;
-	ports = kcalloc(ports_num, sizeof(*cma_dev_group->ports),
-			GFP_KERNEL);
+	ports = kzalloc_objs(*cma_dev_group->ports, ports_num);
 
 	if (!ports)
 		return -ENOMEM;
@@ -256,7 +259,7 @@ static void release_cma_ports_group(struct config_item  *item)
 	cma_dev_group->ports = NULL;
 };
 
-static struct configfs_item_operations cma_ports_item_ops = {
+static const struct configfs_item_operations cma_ports_item_ops = {
 	.release = release_cma_ports_group
 };
 
@@ -265,7 +268,7 @@ static const struct config_item_type cma_ports_group_type = {
 	.ct_owner	= THIS_MODULE
 };
 
-static struct configfs_item_operations cma_device_item_ops = {
+static const struct configfs_item_operations cma_device_item_ops = {
 	.release = release_cma_dev
 };
 
@@ -285,7 +288,7 @@ static struct config_group *make_cma_dev(struct config_group *group,
 	if (!cma_dev)
 		goto fail;
 
-	cma_dev_group = kzalloc(sizeof(*cma_dev_group), GFP_KERNEL);
+	cma_dev_group = kzalloc_obj(*cma_dev_group);
 
 	if (!cma_dev_group) {
 		err = -ENOMEM;
@@ -328,7 +331,7 @@ static void drop_cma_dev(struct config_group *cgroup, struct config_item *item)
 	config_item_put(item);
 }
 
-static struct configfs_group_operations cma_subsys_group_ops = {
+static const struct configfs_group_operations cma_subsys_group_ops = {
 	.make_group	= make_cma_dev,
 	.drop_item	= drop_cma_dev,
 };

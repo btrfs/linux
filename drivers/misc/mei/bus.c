@@ -4,6 +4,7 @@
  * Intel Management Engine Interface (Intel MEI) Linux driver
  */
 
+#include <linux/cleanup.h>
 #include <linux/module.h>
 #include <linux/device.h>
 #include <linux/kernel.h>
@@ -600,6 +601,19 @@ void mei_cldev_set_drvdata(struct mei_cl_device *cldev, void *data)
 	dev_set_drvdata(&cldev->dev, data);
 }
 EXPORT_SYMBOL_GPL(mei_cldev_set_drvdata);
+
+/**
+ * mei_cldev_uuid - return uuid of the underlying me client
+ *
+ * @cldev: mei client device
+ *
+ * Return: me client uuid
+ */
+const uuid_le *mei_cldev_uuid(const struct mei_cl_device *cldev)
+{
+	return mei_me_cl_uuid(cldev->me_cl);
+}
+EXPORT_SYMBOL_GPL(mei_cldev_uuid);
 
 /**
  * mei_cldev_ver - return protocol version of the underlying me client
@@ -1317,15 +1331,16 @@ static void mei_dev_bus_put(struct mei_device *bus)
 static void mei_cl_bus_dev_release(struct device *dev)
 {
 	struct mei_cl_device *cldev = to_mei_cl_device(dev);
-	struct mei_device *mdev = cldev->cl->dev;
+	struct mei_device *bus = cldev->bus;
 	struct mei_cl *cl;
 
-	mei_cl_flush_queues(cldev->cl, NULL);
-	mei_me_cl_put(cldev->me_cl);
-	mei_dev_bus_put(cldev->bus);
-
-	list_for_each_entry(cl, &mdev->file_list, link)
-		WARN_ON(cl == cldev->cl);
+	scoped_guard(mutex, &bus->device_lock) {
+		mei_cl_flush_queues(cldev->cl, NULL);
+		mei_me_cl_put(cldev->me_cl);
+		list_for_each_entry(cl, &bus->file_list, link)
+			WARN_ON(cl == cldev->cl);
+	}
+	mei_dev_bus_put(bus);
 
 	kfree(cldev->cl);
 	kfree(cldev);
@@ -1363,7 +1378,7 @@ static struct mei_cl_device *mei_cl_bus_dev_alloc(struct mei_device *bus,
 	struct mei_cl_device *cldev;
 	struct mei_cl *cl;
 
-	cldev = kzalloc(sizeof(*cldev), GFP_KERNEL);
+	cldev = kzalloc_obj(*cldev);
 	if (!cldev)
 		return NULL;
 

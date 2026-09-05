@@ -136,13 +136,13 @@ static void *validate_and_copy_from_user(const void __user *user_buf,
 	if (!access_ok(user_buf, *count))
 		return ERR_PTR(-EFAULT);
 
-	buf = (void *)get_zeroed_page(GFP_KERNEL);
+	buf = kzalloc(PAGE_SIZE, GFP_KERNEL);
 	if (!buf)
 		return ERR_PTR(-ENOMEM);
 
 	nbytes = min_t(size_t, *count, PAGE_SIZE);
 	if (copy_from_user(buf, user_buf, nbytes)) {
-		free_page((unsigned long)buf);
+		kfree(buf);
 		return ERR_PTR(-EFAULT);
 	}
 
@@ -201,7 +201,7 @@ static bool parse_line(char **line, u32 *offs, u32 *val, int short_fmt_len,
 #if IS_ENABLED(CONFIG_USB4_DEBUGFS_WRITE)
 /*
  * Path registers need to be written in double word pairs and they both must be
- * read before written. This writes one double word in patch config space
+ * read before written. This writes one double word in path config space
  * following the spec flow.
  */
 static int path_write_one(struct tb_port *port, u32 val, u32 offset)
@@ -265,7 +265,7 @@ static ssize_t regs_write(struct tb_switch *sw, struct tb_port *port,
 out:
 	pm_runtime_mark_last_busy(&sw->dev);
 	pm_runtime_put_autosuspend(&sw->dev);
-	free_page((unsigned long)buf);
+	kfree(buf);
 
 	return ret < 0 ? ret : count;
 }
@@ -366,7 +366,7 @@ static ssize_t sb_regs_write(struct tb_port *port, const struct sb_reg *sb_regs,
 		if (!sb_reg)
 			return -EINVAL;
 
-		if (bytes_read > sb_regs->size)
+		if (bytes_read > sb_reg->size)
 			return -E2BIG;
 
 		ret = usb4_port_sb_write(port, target, index, sb_reg->reg, data,
@@ -406,7 +406,7 @@ static ssize_t port_sb_regs_write(struct file *file, const char __user *user_buf
 out:
 	pm_runtime_mark_last_busy(&sw->dev);
 	pm_runtime_put_autosuspend(&sw->dev);
-	free_page((unsigned long)buf);
+	kfree(buf);
 
 	return ret < 0 ? ret : count;
 }
@@ -439,7 +439,7 @@ static ssize_t retimer_sb_regs_write(struct file *file,
 out:
 	pm_runtime_mark_last_busy(&rt->dev);
 	pm_runtime_put_autosuspend(&rt->dev);
-	free_page((unsigned long)buf);
+	kfree(buf);
 
 	return ret < 0 ? ret : count;
 }
@@ -652,7 +652,7 @@ margining_ber_level_write(struct file *file, const char __user *user_buf,
 	margining->ber_level = val;
 
 out_free:
-	free_page((unsigned long)buf);
+	kfree(buf);
 out_unlock:
 	mutex_unlock(&tb->lock);
 
@@ -829,7 +829,7 @@ margining_lanes_write(struct file *file, const char __user *user_buf,
 		}
 	}
 
-	free_page((unsigned long)buf);
+	kfree(buf);
 
 	if (lane == -1)
 		return -EINVAL;
@@ -956,7 +956,9 @@ margining_error_counter_write(struct file *file, const char __user *user_buf,
 	else if (!strcmp(buf, "stop"))
 		error_counter = USB4_MARGIN_SW_ERROR_COUNTER_STOP;
 	else
-		return -EINVAL;
+		goto err_free;
+
+	kfree(buf);
 
 	scoped_cond_guard(mutex_intr, return -ERESTARTSYS, &tb->lock) {
 		if (!margining->software)
@@ -966,6 +968,10 @@ margining_error_counter_write(struct file *file, const char __user *user_buf,
 	}
 
 	return count;
+
+err_free:
+	kfree(buf);
+	return -EINVAL;
 }
 
 static int margining_error_counter_show(struct seq_file *s, void *not_used)
@@ -1110,7 +1116,7 @@ static ssize_t margining_mode_write(struct file *file,
 	mutex_unlock(&tb->lock);
 
 out_free:
-	free_page((unsigned long)buf);
+	kfree(buf);
 	return ret ? ret : count;
 }
 
@@ -1196,7 +1202,7 @@ static int validate_margining(struct tb_margining *margining)
 {
 	/*
 	 * For running on RX2 the link must be asymmetric with 3
-	 * receivers. Because this is can change dynamically, check it
+	 * receivers. Because this can change dynamically, check it
 	 * here before we start the margining and report back error if
 	 * expectations are not met.
 	 */
@@ -1497,7 +1503,7 @@ static ssize_t margining_test_write(struct file *file,
 	mutex_unlock(&tb->lock);
 
 out_free:
-	free_page((unsigned long)buf);
+	kfree(buf);
 	return ret ? ret : count;
 }
 
@@ -1563,7 +1569,7 @@ static ssize_t margining_margin_write(struct file *file,
 	mutex_unlock(&tb->lock);
 
 out_free:
-	free_page((unsigned long)buf);
+	kfree(buf);
 	return ret ? ret : count;
 }
 
@@ -1618,7 +1624,7 @@ static ssize_t margining_eye_write(struct file *file,
 			ret = -EINVAL;
 	}
 
-	free_page((unsigned long)buf);
+	kfree(buf);
 	return ret ? ret : count;
 }
 
@@ -1657,7 +1663,7 @@ static struct tb_margining *margining_alloc(struct tb_port *port,
 		return NULL;
 	}
 
-	margining = kzalloc(sizeof(*margining), GFP_KERNEL);
+	margining = kzalloc_obj(*margining);
 	if (!margining)
 		return NULL;
 
@@ -1779,6 +1785,8 @@ static void margining_port_remove(struct tb_port *port)
 	char dir_name[10];
 
 	if (!port->usb4)
+		return;
+	if (!port->usb4->margining)
 		return;
 
 	snprintf(dir_name, sizeof(dir_name), "port%d", port->port);
@@ -1926,7 +1934,7 @@ static ssize_t counters_write(struct file *file, const char __user *user_buf,
 out:
 	pm_runtime_mark_last_busy(&sw->dev);
 	pm_runtime_put_autosuspend(&sw->dev);
-	free_page((unsigned long)buf);
+	kfree(buf);
 
 	return ret < 0 ? ret : count;
 }
@@ -2361,8 +2369,10 @@ static int sb_regs_show(struct tb_port *port, const struct sb_reg *sb_regs,
 		memset(data, 0, sizeof(data));
 		ret = usb4_port_sb_read(port, target, index, regs->reg, data,
 					regs->size);
-		if (ret)
-			return ret;
+		if (ret) {
+			seq_printf(s, "0x%02x <not accessible>\n", regs->reg);
+			continue;
+		}
 
 		seq_printf(s, "0x%02x", regs->reg);
 		for (j = 0; j < regs->size; j++)
