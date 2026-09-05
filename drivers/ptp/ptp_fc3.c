@@ -55,8 +55,8 @@ static s64 tdc_meas2offset(struct idtfc3 *idtfc3, u64 meas_read)
 {
 	s64 coarse, fine;
 
-	fine = sign_extend64(FIELD_GET(FINE_MEAS_MASK, meas_read), 12);
-	coarse = sign_extend64(FIELD_GET(COARSE_MEAS_MASK, meas_read), (39 - 13));
+	fine = FIELD_GET_SIGNED(FINE_MEAS_MASK, meas_read);
+	coarse = FIELD_GET_SIGNED(COARSE_MEAS_MASK, meas_read);
 
 	fine = div64_s64(fine * NSEC_PER_SEC, idtfc3->tdc_apll_freq * 62LL);
 	coarse = div64_s64(coarse * NSEC_PER_SEC, idtfc3->time_ref_freq);
@@ -665,8 +665,6 @@ static int idtfc3_init_timecounter(struct idtfc3 *idtfc3)
 	if (err)
 		return err;
 
-	ptp_schedule_worker(idtfc3->ptp_clock, idtfc3->tc_update_period);
-
 	return 0;
 }
 
@@ -825,6 +823,14 @@ static int idtfc3_enable_ptp(struct idtfc3 *idtfc3)
 
 	idtfc3->caps = idtfc3_caps;
 	snprintf(idtfc3->caps.name, sizeof(idtfc3->caps.name), "IDT FC3W");
+	err = idtfc3_set_overhead(idtfc3);
+	if (err)
+		return err;
+
+	err = idtfc3_init_timecounter(idtfc3);
+	if (err)
+		return err;
+
 	idtfc3->ptp_clock = ptp_clock_register(&idtfc3->caps, NULL);
 
 	if (IS_ERR(idtfc3->ptp_clock)) {
@@ -833,13 +839,7 @@ static int idtfc3_enable_ptp(struct idtfc3 *idtfc3)
 		return err;
 	}
 
-	err = idtfc3_set_overhead(idtfc3);
-	if (err)
-		return err;
-
-	err = idtfc3_init_timecounter(idtfc3);
-	if (err)
-		return err;
+	ptp_schedule_worker(idtfc3->ptp_clock, idtfc3->tc_update_period);
 
 	dev_info(idtfc3->dev, "TIME_SYNC_CHANNEL registered as ptp%d",
 		 idtfc3->ptp_clock->index);

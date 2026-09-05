@@ -203,10 +203,10 @@ host controller or a device, it is important that the firmware can be
 upgraded to the latest where possible bugs in it have been fixed.
 Typically OEMs provide this firmware from their support site.
 
-There is also a central site which has links where to download firmware
-for some machines:
-
-  `Thunderbolt Updates <https://thunderbolttechnology.net/updates>`_
+Currently, recommended method of updating firmware is through "fwupd" tool.
+It uses LVFS (Linux Vendor Firmware Service) portal by default to get the
+latest firmware from hardware vendors and updates connected devices if found
+compatible. For details refer to: https://github.com/fwupd/fwupd.
 
 Before you upgrade firmware on a device, host or retimer, please make
 sure it is a suitable upgrade. Failing to do that may render the device
@@ -215,18 +215,40 @@ tools!
 
 Host NVM upgrade on Apple Macs is not supported.
 
-Once the NVM image has been downloaded, you need to plug in a
-Thunderbolt device so that the host controller appears. It does not
-matter which device is connected (unless you are upgrading NVM on a
-device - then you need to connect that particular device).
+Fwupd is installed by default. If you don't have it on your system, simply
+use your distro package manager to get it.
+
+To see possible updates through fwupd, you need to plug in a Thunderbolt
+device so that the host controller appears. It does not matter which
+device is connected (unless you are upgrading NVM on a device - then you
+need to connect that particular device).
 
 Note an OEM-specific method to power the controller up ("force power") may
 be available for your system in which case there is no need to plug in a
 Thunderbolt device.
 
-After that we can write the firmware to the non-active parts of the NVM
-of the host or device. As an example here is how Intel NUC6i7KYK (Skull
-Canyon) Thunderbolt controller NVM is upgraded::
+Updating firmware using fwupd is straightforward - refer to official
+readme on fwupd github.
+
+If firmware image is written successfully, the device shortly disappears.
+Once it comes back, the driver notices it and initiates a full power
+cycle. After a while device appears again and this time it should be
+fully functional.
+
+Device of interest should display new version under "Current version"
+and "Update State: Success" in fwupd's interface.
+
+Upgrading firmware manually
+---------------------------------------------------------------
+If possible, use fwupd to updated the firmware. However, if your device OEM
+has not uploaded the firmware to LVFS, but it is available for download
+from their side, you can use method below to directly upgrade the
+firmware.
+
+Manual firmware update can be done with 'dd' tool. To update firmware
+using this method, you need to write it to the non-active parts of NVM
+of the host or device. Example on how to update Intel NUC6i7KYK
+(Skull Canyon) Thunderbolt controller NVM::
 
   # dd if=KYK_TBT_FW_0018.bin of=/sys/bus/thunderbolt/devices/0-0/nvm_non_active0/nvmem
 
@@ -235,10 +257,8 @@ upgrade process as follows::
 
   # echo 1 > /sys/bus/thunderbolt/devices/0-0/nvm_authenticate
 
-If no errors are returned, the host controller shortly disappears. Once
-it comes back the driver notices it and initiates a full power cycle.
-After a while the host controller appears again and this time it should
-be fully functional.
+If no errors are returned, device should behave as described in previous
+section.
 
 We can verify that the new NVM firmware is active by running the following
 commands::
@@ -274,8 +294,8 @@ for the retimers::
 
 This enumerates and adds the on-board retimers. Now retimer NVM can be
 upgraded in the same way than with cable connected (see previous
-section). However, the retimer is not disconnected as we are offline
-mode) so after writing ``1`` to ``nvm_authenticate`` one should wait for
+section). However, the retimer is not disconnected as we are in offline
+mode, so after writing ``1`` to ``nvm_authenticate`` one should wait for
 5 or more seconds before running rescan again::
 
   # echo 1 > /sys/bus/thunderbolt/devices/0-0/usb4_port1/rescan
@@ -350,8 +370,69 @@ is built-in to the kernel image, there is no need to do anything.
 
 The driver will create one virtual ethernet interface per Thunderbolt
 port which are named like ``thunderbolt0`` and so on. From this point
-you can either use standard userspace tools like ``ifconfig`` to
+you can either use standard userspace tools like ``ip`` to
 configure the interface or let your GUI handle it automatically.
+
+Streaming data directly over Thunderbolt cable
+----------------------------------------------
+In addition to Thunderbolt networking (aka. USB4NET) Linux supports
+streaming data directly over a cable as well (aka. USB4STREAM). This is
+possible through ``thunderbolt-stream`` driver.
+
+Similarly to ``thunderbolt-net`` you load the driver first on one end::
+
+  host1 # modprobe thunderbolt-stream
+
+Then you configure it via ``ConfigFS``::
+
+  host1 # cd /sys/kernel/config/thunderbolt/stream
+  host1 # mkdir -p 0-1.0/data
+  host1 # cd 0-1.0
+  host1 # echo -1 > data/in_hopid
+  host1 # echo -1 > data/out_hopid
+
+This information is automatically announced to the other side via
+XDomain properties so if you have cable connected the other side knows
+that there is a stream named ``data`` available and can configure it for
+you automatically::
+
+  host2 # cd /sys/kernel/config/thunderbolt/stream
+  host2 # mkdir -p 0-3.0/data
+
+Here we used auto-configuration but you can configure it manually too.
+In that case you need to fill ``in_hopid`` and ``out_hopid`` accordingly.
+If you set them to ``-1`` the next available HopID is used which is
+typically what we want.
+
+Once they are configured you can use ``/dev/tbstreamX`` on both sides to
+transfer data::
+
+  host2 # cat /dev/tbstream0
+  host1 # dmesg > /dev/tbstream0
+
+Once you are done with the stream you can remove them::
+
+  host2 # cd /sys/kernel/config/thunderbolt/stream
+  host2 # rmdir -p 0-1.0/data
+  host1 # cd /sys/kernel/config/thunderbolt/stream
+  host1 # rmdir -p 0-3.0/data
+
+Since streams are essentially files you can use any existing application
+that supports ``read(2)`` and ``write(2)`` in some form.
+
+It is possible to have more than one stream and you can have both stream
+and ``thunderbolt-net`` in use simultaneously. For example we can create
+two streams with name ``control`` and ``data`` like this::
+
+  host1 # cd /sys/kernel/config/thunderbolt/stream
+  host1 # mkdir 0-1.0
+  host1 # cd 0-1.0
+  host1 # mkdir control
+  host1 # mkdir data
+
+Then you have ``/dev/tbstream0`` for ``control`` and ``/dev/tbstream1``
+for ``data``. Before you can use them you need to configure them as
+shown above for the one stream case.
 
 Forcing power
 -------------

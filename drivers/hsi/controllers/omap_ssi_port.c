@@ -7,7 +7,6 @@
  * Contact: Carlos Chinea <carlos.chinea@nokia.com>
  */
 
-#include <linux/mod_devicetable.h>
 #include <linux/platform_device.h>
 #include <linux/dma-mapping.h>
 #include <linux/pm_runtime.h>
@@ -452,7 +451,6 @@ static int ssi_setup(struct hsi_client *cl)
 	void __iomem *sst = omap_port->sst_base;
 	void __iomem *ssr = omap_port->ssr_base;
 	u32 div;
-	u32 val;
 	int err = 0;
 
 	pm_runtime_get_sync(omap_port->pdev);
@@ -470,7 +468,7 @@ static int ssi_setup(struct hsi_client *cl)
 	writel_relaxed(SSI_MODE_SLEEP, sst + SSI_SST_MODE_REG);
 	writel_relaxed(SSI_MODE_SLEEP, ssr + SSI_SSR_MODE_REG);
 	/* Flush posted write */
-	val = readl(ssr + SSI_SSR_MODE_REG);
+	readl(ssr + SSI_SSR_MODE_REG);
 	/* TX */
 	writel_relaxed(31, sst + SSI_SST_FRAMESIZE_REG);
 	writel_relaxed(div, sst + SSI_SST_DIVISOR_REG);
@@ -1026,9 +1024,6 @@ static int ssi_port_irq(struct hsi_port *port, struct platform_device *pd)
 	omap_port->irq = err;
 	err = devm_request_threaded_irq(&port->device, omap_port->irq, NULL,
 				ssi_pio_thread, IRQF_ONESHOT, "SSI PORT", port);
-	if (err < 0)
-		dev_err(&port->device, "Request IRQ %d failed (%d)\n",
-							omap_port->irq, err);
 	return err;
 }
 
@@ -1050,9 +1045,6 @@ static int ssi_wake_irq(struct hsi_port *port, struct platform_device *pd)
 		ssi_wake_thread,
 		IRQF_TRIGGER_RISING | IRQF_TRIGGER_FALLING | IRQF_ONESHOT,
 		"SSI cawake", port);
-	if (err < 0)
-		dev_err(&port->device, "Request Wake in IRQ %d failed %d\n",
-						cawake_irq, err);
 	err = enable_irq_wake(cawake_irq);
 	if (err < 0)
 		dev_err(&port->device, "Enable wake on the wakeline in irq %d failed %d\n",
@@ -1118,7 +1110,7 @@ static int ssi_port_probe(struct platform_device *pd)
 
 	dev_dbg(&pd->dev, "init ssi port...\n");
 
-	if (!ssi->port || !omap_ssi->port) {
+	if (!omap_ssi->port) {
 		dev_err(&pd->dev, "ssi controller not initialized!\n");
 		err = -ENODEV;
 		goto error;
@@ -1299,14 +1291,12 @@ static int ssi_restore_port_ctx(struct omap_ssi_port *omap_port)
 
 static int ssi_restore_port_mode(struct omap_ssi_port *omap_port)
 {
-	u32 mode;
-
 	writel_relaxed(omap_port->sst.mode,
 				omap_port->sst_base + SSI_SST_MODE_REG);
 	writel_relaxed(omap_port->ssr.mode,
 				omap_port->ssr_base + SSI_SSR_MODE_REG);
 	/* OCP barrier */
-	mode = readl(omap_port->ssr_base + SSI_SSR_MODE_REG);
+	readl(omap_port->ssr_base + SSI_SSR_MODE_REG);
 
 	return 0;
 }

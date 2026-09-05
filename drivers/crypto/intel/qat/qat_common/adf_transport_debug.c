@@ -2,6 +2,7 @@
 /* Copyright(c) 2014 - 2020 Intel Corporation */
 #include <linux/mutex.h>
 #include <linux/slab.h>
+#include <linux/string.h>
 #include <linux/seq_file.h>
 #include "adf_accel_devices.h"
 #include "adf_transport_internal.h"
@@ -99,11 +100,11 @@ int adf_ring_debugfs_add(struct adf_etr_ring_data *ring, const char *name)
 	struct adf_etr_ring_debug_entry *ring_debug;
 	char entry_name[16];
 
-	ring_debug = kzalloc(sizeof(*ring_debug), GFP_KERNEL);
+	ring_debug = kzalloc_obj(*ring_debug);
 	if (!ring_debug)
 		return -ENOMEM;
 
-	strscpy(ring_debug->ring_name, name, sizeof(ring_debug->ring_name));
+	strscpy(ring_debug->ring_name, name);
 	snprintf(entry_name, sizeof(entry_name), "ring_%02d",
 		 ring->ring_number);
 

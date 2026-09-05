@@ -12,7 +12,10 @@
  *  isofs directory handling functions
  */
 #include <linux/gfp.h>
+#include <linux/filelock.h>
+#include <linux/slab.h>
 #include "isofs.h"
+#include <linux/fileattr.h>
 
 int isofs_name_translate(struct iso_directory_record *de, char *new, struct inode *inode)
 {
@@ -81,7 +84,7 @@ int get_acorn_filename(struct iso_directory_record *de,
  */
 static int do_isofs_readdir(struct inode *inode, struct file *file,
 		struct dir_context *ctx,
-		char *tmpname, struct iso_directory_record *tmpde)
+		char *tmpname)
 {
 	unsigned long bufsize = ISOFS_BUFFER_SIZE(inode);
 	unsigned char bufbits = ISOFS_BUFFER_BITS(inode);
@@ -130,28 +133,9 @@ static int do_isofs_readdir(struct inode *inode, struct file *file,
 		offset_saved = offset;
 		offset += de_len;
 
-		/* Make sure we have a full directory entry */
-		if (offset >= bufsize) {
-			int slop = bufsize - offset + de_len;
-			memcpy(tmpde, de, slop);
-			offset &= bufsize - 1;
-			block++;
-			brelse(bh);
-			bh = NULL;
-			if (offset) {
-				bh = isofs_bread(inode, block);
-				if (!bh)
-					return 0;
-				memcpy((void *) tmpde + slop, bh->b_data, offset);
-			}
-			de = tmpde;
-		}
-		/* Basic sanity check, whether name doesn't exceed dir entry */
-		if (de_len < sizeof(struct iso_directory_record) ||
-		    de_len < de->name_len[0] +
-					sizeof(struct iso_directory_record)) {
+		if (!isofs_dir_record_valid(de, offset_saved, bufsize)) {
 			printk(KERN_NOTICE "iso9660: Corrupted directory entry"
-			       " in block %lu of inode %lu\n", block,
+			       " in block %lu of inode %llu\n", block,
 			       inode->i_ino);
 			brelse(bh);
 			return -EIO;
@@ -251,19 +235,30 @@ static int isofs_readdir(struct file *file, struct dir_context *ctx)
 {
 	int result;
 	char *tmpname;
-	struct iso_directory_record *tmpde;
 	struct inode *inode = file_inode(file);
 
-	tmpname = (char *)__get_free_page(GFP_KERNEL);
+	tmpname = kmalloc(1024, GFP_KERNEL);
 	if (tmpname == NULL)
 		return -ENOMEM;
 
-	tmpde = (struct iso_directory_record *) (tmpname+1024);
+	result = do_isofs_readdir(inode, file, ctx, tmpname);
 
-	result = do_isofs_readdir(inode, file, ctx, tmpname, tmpde);
-
-	free_page((unsigned long) tmpname);
+	kfree(tmpname);
 	return result;
+}
+
+int isofs_fileattr_get(struct dentry *dentry, struct file_kattr *fa)
+{
+	struct isofs_sb_info *sbi = ISOFS_SB(dentry->d_sb);
+
+	if (sbi->s_check == 'r') {
+		fa->fsx_xflags |= FS_XFLAG_CASEFOLD;
+		fa->flags |= FS_CASEFOLD_FL;
+	}
+	if (!sbi->s_joliet_level && !sbi->s_rock &&
+	    (sbi->s_mapping == 'n' || sbi->s_mapping == 'a'))
+		fa->fsx_xflags |= FS_XFLAG_CASENONPRESERVING;
+	return 0;
 }
 
 const struct file_operations isofs_dir_operations =
@@ -271,6 +266,7 @@ const struct file_operations isofs_dir_operations =
 	.llseek = generic_file_llseek,
 	.read = generic_read_dir,
 	.iterate_shared = isofs_readdir,
+	.setlease = generic_setlease,
 };
 
 /*
@@ -279,6 +275,6 @@ const struct file_operations isofs_dir_operations =
 const struct inode_operations isofs_dir_inode_operations =
 {
 	.lookup = isofs_lookup,
+	.fileattr_get = isofs_fileattr_get,
 };
-
 

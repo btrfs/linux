@@ -90,7 +90,7 @@ static inline void __hard_EE_RI_disable(void)
 	if (IS_ENABLED(CONFIG_BOOKE))
 		wrtee(0);
 	else if (IS_ENABLED(CONFIG_PPC_8xx))
-		wrtspr(SPRN_NRI);
+		wrtspr_sync(SPRN_NRI);
 	else if (IS_ENABLED(CONFIG_PPC_BOOK3S_64))
 		__mtmsrd(0, 1);
 	else
@@ -393,7 +393,7 @@ static inline void do_hard_irq_enable(void)
 	__hard_irq_enable();
 }
 
-static inline bool arch_irq_disabled_regs(struct pt_regs *regs)
+static inline bool regs_irqs_disabled(struct pt_regs *regs)
 {
 	return (regs->softe & IRQS_DISABLED);
 }
@@ -466,7 +466,7 @@ static inline bool arch_irqs_disabled(void)
 
 #define hard_irq_disable()		arch_local_irq_disable()
 
-static inline bool arch_irq_disabled_regs(struct pt_regs *regs)
+static inline bool regs_irqs_disabled(struct pt_regs *regs)
 {
 	return !(regs->msr & MSR_EE);
 }

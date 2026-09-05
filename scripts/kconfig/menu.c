@@ -127,8 +127,18 @@ static struct expr *rewrite_m(struct expr *e)
 	return e;
 }
 
-void menu_add_dep(struct expr *dep)
+void menu_add_dep(struct expr *dep, struct expr *cond)
 {
+	if (cond) {
+		/*
+		 * We have "depends on X if Y" and we want:
+		 *	Y != n --> X
+		 *	Y == n --> y
+		 * That simplifies to: (X || (Y == n))
+		 */
+		dep = expr_alloc_or(dep,
+				expr_trans_compare(cond, E_EQUAL, &symbol_no));
+	}
 	current_entry->dep = expr_alloc_and(current_entry->dep, dep);
 }
 
@@ -418,9 +428,19 @@ static void _menu_finalize(struct menu *parent, bool inside_choice)
 			if (!expr_contains_symbol(dep, sym))
 				/* No dependency, quit */
 				break;
+			/*
+			 * Note that it's actually possible to depend on both
+			 * 'SYM!=y' and 'SYM=y', so we need to first check if
+			 * it's a positive dependency before checking if it's
+			 * a negative dependency. See example:
+			 * 'SFC && MTD && !(SFC=y && MTD=m)'
+			 */
 			if (expr_depends_symbol(dep, sym))
 				/* Absolute dependency, put in submenu */
 				goto next;
+			if (expr_contains_symbol_negated(dep, sym))
+				/* Negative dependency, quit */
+				break;
 
 			/*
 			 * Also consider it a dependency on sym if our

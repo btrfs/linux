@@ -31,14 +31,16 @@
 #include <linux/iosys-map.h>
 #include <linux/dma-fence.h>
 
-#include <drm/drm_print.h>
 #include <drm/ttm/ttm_caching.h>
 #include <drm/ttm/ttm_kmap_iter.h>
 
 #define TTM_MAX_BO_PRIORITY	4U
 #define TTM_NUM_MEM_TYPES 9
 
+struct dentry;
 struct dmem_cgroup_device;
+struct dmem_cgroup_region;
+struct drm_printer;
 struct ttm_device;
 struct ttm_resource_manager;
 struct ttm_resource;
@@ -49,6 +51,15 @@ struct iosys_map;
 struct io_mapping;
 struct sg_table;
 struct scatterlist;
+
+/**
+ * define TTM_NUM_MOVE_FENCES - How many entities can be used for evictions
+ *
+ * Pipelined evictions can be spread on multiple entities. This
+ * is the max number of entities that can be used by the driver
+ * for that purpose.
+ */
+#define TTM_NUM_MOVE_FENCES 8
 
 /**
  * enum ttm_lru_item_type - enumerate ttm_lru_item subclasses
@@ -180,8 +191,8 @@ struct ttm_resource_manager_func {
  * @size: Size of the managed region.
  * @bdev: ttm device this manager belongs to
  * @func: structure pointer implementing the range manager. See above
- * @move_lock: lock for move fence
- * @move: The fence of the last pipelined move operation.
+ * @eviction_lock: lock for eviction fences
+ * @eviction_fences: The fences of the last pipelined move operation.
  * @lru: The lru list for this memory type.
  *
  * This structure is used to identify and manage memory types for a device.
@@ -195,12 +206,12 @@ struct ttm_resource_manager {
 	struct ttm_device *bdev;
 	uint64_t size;
 	const struct ttm_resource_manager_func *func;
-	spinlock_t move_lock;
 
-	/*
-	 * Protected by @move_lock.
+	/* This is very similar to a dma_resv object, but locking rules make
+	 * it difficult to use one in this context.
 	 */
-	struct dma_fence *move;
+	spinlock_t eviction_lock;
+	struct dma_fence *eviction_fences[TTM_NUM_MOVE_FENCES];
 
 	/*
 	 * Protected by the bdev->lru_lock.
@@ -421,8 +432,12 @@ static inline bool ttm_resource_manager_used(struct ttm_resource_manager *man)
 static inline void
 ttm_resource_manager_cleanup(struct ttm_resource_manager *man)
 {
-	dma_fence_put(man->move);
-	man->move = NULL;
+	int i;
+
+	for (i = 0; i < TTM_NUM_MOVE_FENCES; i++) {
+		dma_fence_put(man->eviction_fences[i]);
+		man->eviction_fences[i] = NULL;
+	}
 }
 
 void ttm_lru_bulk_move_init(struct ttm_lru_bulk_move *bulk);
@@ -434,6 +449,8 @@ void ttm_resource_add_bulk_move(struct ttm_resource *res,
 				struct ttm_buffer_object *bo);
 void ttm_resource_del_bulk_move(struct ttm_resource *res,
 				struct ttm_buffer_object *bo);
+void ttm_resource_del_bulk_move_unevictable(struct ttm_resource *res,
+					    struct ttm_buffer_object *bo);
 void ttm_resource_move_to_lru_tail(struct ttm_resource *res);
 
 void ttm_resource_init(struct ttm_buffer_object *bo,
@@ -442,10 +459,14 @@ void ttm_resource_init(struct ttm_buffer_object *bo,
 void ttm_resource_fini(struct ttm_resource_manager *man,
 		       struct ttm_resource *res);
 
+int ttm_resource_try_charge(struct ttm_buffer_object *bo,
+			    const struct ttm_place *place,
+			    struct dmem_cgroup_pool_state **ret_pool,
+			    struct dmem_cgroup_pool_state **ret_limit_pool);
 int ttm_resource_alloc(struct ttm_buffer_object *bo,
 		       const struct ttm_place *place,
 		       struct ttm_resource **res,
-		       struct dmem_cgroup_pool_state **ret_limit_pool);
+		       struct dmem_cgroup_pool_state *charge_pool);
 void ttm_resource_free(struct ttm_buffer_object *bo, struct ttm_resource **res);
 bool ttm_resource_intersects(struct ttm_device *bdev,
 			     struct ttm_resource *res,
@@ -460,6 +481,12 @@ void ttm_resource_set_bo(struct ttm_resource *res,
 void ttm_resource_manager_init(struct ttm_resource_manager *man,
 			       struct ttm_device *bdev,
 			       uint64_t size);
+
+void ttm_resource_manager_set_dmem_region(struct ttm_resource_manager *man,
+					  struct dmem_cgroup_region *region);
+
+int ttm_resource_manager_dmem_reclaim(struct dmem_cgroup_pool_state *pool,
+				      u64 target_bytes, void *priv);
 
 int ttm_resource_manager_evict_all(struct ttm_device *bdev,
 				   struct ttm_resource_manager *man);

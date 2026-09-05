@@ -279,7 +279,8 @@ char *d_path(const struct path *path, char *buf, int buflen)
 	 * and instead have d_path return the mounted path.
 	 */
 	if (path->dentry->d_op && path->dentry->d_op->d_dname &&
-	    (!IS_ROOT(path->dentry) || path->dentry != path->mnt->mnt_root))
+	    (!IS_ROOT(path->dentry) || path->dentry != path->mnt->mnt_root ||
+	     failfs_mnt(path->mnt)))
 		return path->dentry->d_op->d_dname(path->dentry, buf, buflen);
 
 	rcu_read_lock();
@@ -301,18 +302,19 @@ EXPORT_SYMBOL(d_path);
 char *dynamic_dname(char *buffer, int buflen, const char *fmt, ...)
 {
 	va_list args;
-	char temp[64];
+	char *start;
 	int sz;
 
 	va_start(args, fmt);
-	sz = vsnprintf(temp, sizeof(temp), fmt, args) + 1;
+	sz = vsnprintf(buffer, buflen, fmt, args) + 1;
 	va_end(args);
 
-	if (sz > sizeof(temp) || sz > buflen)
+	if (sz > NAME_MAX || sz > buflen)
 		return ERR_PTR(-ENAMETOOLONG);
 
-	buffer += buflen - sz;
-	return memcpy(buffer, temp, sz);
+	/* Move the formatted d_name to the end of the buffer. */
+	start = buffer + (buflen - sz);
+	return memmove(start, buffer, sz);
 }
 
 char *simple_dname(struct dentry *dentry, char *buffer, int buflen)

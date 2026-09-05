@@ -1,5 +1,5 @@
 /*
- * Copyright 2012-15 Advanced Micro Devices, Inc.
+ * Copyright 2012-2026 Advanced Micro Devices, Inc.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a
  * copy of this software and associated documentation files (the "Software"),
@@ -209,10 +209,65 @@
 	uint32_t OPTC_WIDTH_CONTROL2; \
 	uint32_t OTG_PSTATE_REGISTER; \
 	uint32_t OTG_PIPE_UPDATE_STATUS; \
-	uint32_t INTERRUPT_DEST
+	uint32_t INTERRUPT_DEST; \
+	uint32_t OPTC_INPUT_SPARE_REGISTER; \
+	uint32_t OPTC_RSMU_UNDERFLOW; \
+	uint32_t OPTC_UNDERFLOW_THRESHOLD; \
+	uint32_t OTG_COUNT_CONTROL; \
+	uint32_t OTG_COUNT_RESET; \
+	uint32_t OTG_CRC_SIG_BLUE_CONTROL_MASK; \
+	uint32_t OTG_CRC_SIG_RED_GREEN_MASK; \
+	uint32_t OTG_DLPC_CONTROL; \
+	uint32_t OTG_DRR_CONTOL2; \
+	uint32_t OTG_DRR_TIMING_INT_STATUS; \
+	uint32_t OTG_GLOBAL_CONTROL3; \
+	uint32_t OTG_GLOBAL_SYNC_STATUS; \
+	uint32_t OTG_GSL_VSYNC_GAP; \
+	uint32_t OTG_INTERLACE_STATUS; \
+	uint32_t OTG_INTERRUPT_CONTROL; \
+	uint32_t OTG_LONG_VBLANK_STATUS; \
+	uint32_t OTG_MANUAL_FORCE_VSYNC_NEXT_LINE; \
+	uint32_t OTG_MASTER_EN; \
+	uint32_t OTG_PIXEL_DATA_READBACK0; \
+	uint32_t OTG_PIXEL_DATA_READBACK1; \
+	uint32_t OTG_REQUEST_CONTROL; \
+	uint32_t OTG_SNAPSHOT_CONTROL; \
+	uint32_t OTG_SNAPSHOT_FRAME; \
+	uint32_t OTG_SNAPSHOT_POSITION; \
+	uint32_t OTG_SNAPSHOT_STATUS; \
+	uint32_t OTG_SPARE_REGISTER; \
+	uint32_t OTG_STATUS_HV_COUNT; \
+	uint32_t OTG_STATUS_VF_COUNT; \
+	uint32_t OTG_STEREO_FORCE_NEXT_EYE; \
+	uint32_t OTG_TRIG_MANUAL_CONTROL; \
+	uint32_t OTG_TRIGB_CNTL; \
+	uint32_t OTG_TRIGB_MANUAL_TRIG; \
+	uint32_t OTG_UPDATE_LOCK; \
+	uint32_t OTG_V_TOTAL_INT_STATUS; \
+	uint32_t OTG_VSYNC_NOM_INT_STATUS; \
+	uint32_t OTG_CRC0_DATA_R32; \
+	uint32_t OTG_CRC0_DATA_G32; \
+	uint32_t OTG_CRC0_DATA_B32; \
+	uint32_t OTG_CRC1_DATA_R32; \
+	uint32_t OTG_CRC1_DATA_G32; \
+	uint32_t OTG_CRC1_DATA_B32
+
+
+#define OPTC_REG_VARIABLE_LIST_DCN42 \
+	uint32_t OTG_PWA_FRAME_SYNC_CONTROL; \
+	uint32_t OTG_CRC0_DATA_R; \
+	uint32_t OTG_CRC1_DATA_R; \
+	uint32_t OTG_CRC2_DATA_R; \
+	uint32_t OTG_CRC3_DATA_R; \
+	uint32_t OTG_CRC0_DATA_G; \
+	uint32_t OTG_CRC1_DATA_G; \
+	uint32_t OTG_CRC2_DATA_G; \
+	uint32_t OTG_CRC3_DATA_G
 
 struct dcn_optc_registers {
 	OPTC_REG_VARIABLE_LIST_DCN;
+	uint32_t OTG_DRR_V_TOTAL_REACH_RANGE;
+	OPTC_REG_VARIABLE_LIST_DCN42;
 };
 
 #define TG_COMMON_MASK_SH_LIST_DCN(mask_sh)\
@@ -541,7 +596,9 @@ struct dcn_optc_registers {
 	type MANUAL_FLOW_CONTROL;\
 	type MANUAL_FLOW_CONTROL_SEL;
 
-#define V_TOTAL_REGS(type)
+#define V_TOTAL_REGS(type) \
+	type OTG_DRR_V_TOTAL_REACH_LOWER_RANGE;\
+	type OTG_DRR_V_TOTAL_REACH_UPPER_RANGE;
 
 #define TG_REG_FIELD_LIST(type) \
 	TG_REG_FIELD_LIST_DCN1_0(type)\
@@ -598,7 +655,8 @@ struct dcn_optc_registers {
 	type OTG0_IHC_OTG_VERTICAL_INTERRUPT2_DEST;
 
 #define TG_REG_FIELD_LIST_DCN3_2(type) \
-	type OTG_H_TIMING_DIV_MODE_MANUAL;
+	type OTG_H_TIMING_DIV_MODE_MANUAL;\
+	type OTG_CRC1_EN;
 
 #define TG_REG_FIELD_LIST_DCN3_5(type) \
 	type OTG_CRC0_WINDOWA_X_START_READBACK;\
@@ -621,6 +679,19 @@ struct dcn_optc_registers {
 	type OTG_V_COUNT_STOP;\
 	type OTG_V_COUNT_STOP_TIMER;
 
+#define TG_REG_FIELD_LIST_DCN3_6(type) \
+	type OPTC_RSMU_UNDERFLOW_CLEAR;\
+	type OPTC_RSMU_UNDERFLOW_OCCURRED_STATUS;\
+	type OPTC_RSMU_UNDERFLOW_INT_EN;\
+	type OPTC_RSMU_UNDERFLOW_INT_STATUS;\
+	type OTG_CRC_POLY_SEL; \
+	type CRC0_R_CR32; \
+	type CRC0_G_Y32; \
+	type CRC0_B_CB32; \
+	type CRC1_R_CR32; \
+	type CRC1_G_Y32; \
+	type CRC1_B_CB32;
+
 #define TG_REG_FIELD_LIST_DCN401(type) \
 	type OPTC_SEGMENT_WIDTH_LAST;\
 	type OTG_PSTATE_KEEPOUT_START;\
@@ -628,13 +699,19 @@ struct dcn_optc_registers {
 	type OTG_UNBLANK;\
 	type OTG_PSTATE_ALLOW_WIDTH_MIN;
 
+#define TG_REG_FIELD_LIST_DCN42(type) \
+	type OTG_PWA_FRAME_SYNC_EN;\
+	type OTG_PWA_FRAME_SYNC_VCOUNT_MODE;\
+	type OTG_PWA_FRAME_SYNC_LINE;
 
 struct dcn_optc_shift {
 	TG_REG_FIELD_LIST(uint8_t)
 	TG_REG_FIELD_LIST_DCN2_0(uint8_t)
 	TG_REG_FIELD_LIST_DCN3_2(uint8_t)
 	TG_REG_FIELD_LIST_DCN3_5(uint8_t)
+	TG_REG_FIELD_LIST_DCN3_6(uint8_t)
 	TG_REG_FIELD_LIST_DCN401(uint8_t)
+		TG_REG_FIELD_LIST_DCN42(uint8_t)
 };
 
 struct dcn_optc_mask {
@@ -642,7 +719,9 @@ struct dcn_optc_mask {
 	TG_REG_FIELD_LIST_DCN2_0(uint32_t)
 	TG_REG_FIELD_LIST_DCN3_2(uint32_t)
 	TG_REG_FIELD_LIST_DCN3_5(uint32_t)
+	TG_REG_FIELD_LIST_DCN3_6(uint32_t)
 	TG_REG_FIELD_LIST_DCN401(uint32_t)
+	TG_REG_FIELD_LIST_DCN42(uint32_t)
 };
 
 void dcn10_timing_generator_init(struct optc *optc);

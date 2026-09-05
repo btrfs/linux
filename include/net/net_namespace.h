@@ -37,6 +37,7 @@
 #include <net/netns/smc.h>
 #include <net/netns/bpf.h>
 #include <net/netns/mctp.h>
+#include <net/netns/vsock.h>
 #include <net/net_trackers.h>
 #include <linux/ns_common.h>
 #include <linux/idr.h>
@@ -120,6 +121,7 @@ struct net {
 	 * it is critical that it is on a read_mostly cache line.
 	 */
 	u32			hash_mix;
+	bool			is_dying;
 
 	struct net_device       *loopback_dev;          /* The loopback */
 
@@ -195,6 +197,12 @@ struct net {
 #ifdef CONFIG_DEBUG_NET_SMALL_RTNL
 	/* Move to a better place when the config guard is removed. */
 	struct mutex		rtnl_mutex;
+	struct work_struct	rtnl_work;
+	struct list_head	dev_unreg_head;
+	spinlock_t		dev_unreg_lock;
+#endif
+#if IS_ENABLED(CONFIG_VSOCKETS)
+	struct netns_vsock	vsock;
 #endif
 } __randomize_layout;
 
@@ -259,13 +267,13 @@ void ipx_unregister_sysctl(void);
 #define ipx_unregister_sysctl()
 #endif
 
-#ifdef CONFIG_NET_NS
-void __put_net(struct net *net);
-
 static inline struct net *to_net_ns(struct ns_common *ns)
 {
 	return container_of(ns, struct net, ns);
 }
+
+#ifdef CONFIG_NET_NS
+void __put_net(struct net *net);
 
 /* Try using get_net_track() instead */
 static inline struct net *get_net(struct net *net)
@@ -304,7 +312,7 @@ static inline int check_net(const struct net *net)
 	return ns_ref_read(net) != 0;
 }
 
-void net_drop_ns(void *);
+void net_drop_ns(struct ns_common *);
 void net_passive_dec(struct net *net);
 
 #else
@@ -517,12 +525,13 @@ struct ctl_table;
 #ifdef CONFIG_SYSCTL
 int net_sysctl_init(void);
 struct ctl_table_header *register_net_sysctl_sz(struct net *net, const char *path,
-					     struct ctl_table *table, size_t table_size);
+						const struct ctl_table *table,
+						size_t table_size);
 void unregister_net_sysctl_table(struct ctl_table_header *header);
 #else
 static inline int net_sysctl_init(void) { return 0; }
 static inline struct ctl_table_header *register_net_sysctl_sz(struct net *net,
-	const char *path, struct ctl_table *table, size_t table_size)
+	const char *path, const struct ctl_table *table, size_t table_size)
 {
 	return NULL;
 }

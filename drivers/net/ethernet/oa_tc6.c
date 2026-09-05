@@ -7,47 +7,10 @@
 
 #include <linux/bitfield.h>
 #include <linux/iopoll.h>
+#include <linux/interrupt.h>
 #include <linux/mdio.h>
 #include <linux/phy.h>
 #include <linux/oa_tc6.h>
-
-/* OPEN Alliance TC6 registers */
-/* Standard Capabilities Register */
-#define OA_TC6_REG_STDCAP			0x0002
-#define STDCAP_DIRECT_PHY_REG_ACCESS		BIT(8)
-
-/* Reset Control and Status Register */
-#define OA_TC6_REG_RESET			0x0003
-#define RESET_SWRESET				BIT(0)	/* Software Reset */
-
-/* Configuration Register #0 */
-#define OA_TC6_REG_CONFIG0			0x0004
-#define CONFIG0_SYNC				BIT(15)
-#define CONFIG0_ZARFE_ENABLE			BIT(12)
-
-/* Status Register #0 */
-#define OA_TC6_REG_STATUS0			0x0008
-#define STATUS0_RESETC				BIT(6)	/* Reset Complete */
-#define STATUS0_HEADER_ERROR			BIT(5)
-#define STATUS0_LOSS_OF_FRAME_ERROR		BIT(4)
-#define STATUS0_RX_BUFFER_OVERFLOW_ERROR	BIT(3)
-#define STATUS0_TX_PROTOCOL_ERROR		BIT(0)
-
-/* Buffer Status Register */
-#define OA_TC6_REG_BUFFER_STATUS		0x000B
-#define BUFFER_STATUS_TX_CREDITS_AVAILABLE	GENMASK(15, 8)
-#define BUFFER_STATUS_RX_CHUNKS_AVAILABLE	GENMASK(7, 0)
-
-/* Interrupt Mask Register #0 */
-#define OA_TC6_REG_INT_MASK0			0x000C
-#define INT_MASK0_HEADER_ERR_MASK		BIT(5)
-#define INT_MASK0_LOSS_OF_FRAME_ERR_MASK	BIT(4)
-#define INT_MASK0_RX_BUFFER_OVERFLOW_ERR_MASK	BIT(3)
-#define INT_MASK0_TX_PROTOCOL_ERR_MASK		BIT(0)
-
-/* PHY Clause 22 registers base address and mask */
-#define OA_TC6_PHY_STD_REG_ADDR_BASE		0xFF00
-#define OA_TC6_PHY_STD_REG_ADDR_MASK		0x1F
 
 /* Control command header */
 #define OA_TC6_CTRL_HEADER_DATA_NOT_CTRL	BIT(31)
@@ -78,23 +41,17 @@
 #define OA_TC6_DATA_FOOTER_END_BYTE_OFFSET	GENMASK(13, 8)
 #define OA_TC6_DATA_FOOTER_TX_CREDITS		GENMASK(5, 1)
 
-/* PHY – Clause 45 registers memory map selector (MMS) as per table 6 in the
- * OPEN Alliance specification.
- */
-#define OA_TC6_PHY_C45_PCS_MMS2			2	/* MMD 3 */
-#define OA_TC6_PHY_C45_PMA_PMD_MMS3		3	/* MMD 1 */
-#define OA_TC6_PHY_C45_VS_PLCA_MMS4		4	/* MMD 31 */
-#define OA_TC6_PHY_C45_AUTO_NEG_MMS5		5	/* MMD 7 */
-#define OA_TC6_PHY_C45_POWER_UNIT_MMS6		6	/* MMD 13 */
-
+#define OA_TC6_CTRL_PROT_REPLY_SIZE		4
 #define OA_TC6_CTRL_HEADER_SIZE			4
 #define OA_TC6_CTRL_REG_VALUE_SIZE		4
 #define OA_TC6_CTRL_IGNORED_SIZE		4
 #define OA_TC6_CTRL_MAX_REGISTERS		128
-#define OA_TC6_CTRL_SPI_BUF_SIZE		(OA_TC6_CTRL_HEADER_SIZE +\
-						(OA_TC6_CTRL_MAX_REGISTERS *\
-						OA_TC6_CTRL_REG_VALUE_SIZE) +\
-						OA_TC6_CTRL_IGNORED_SIZE)
+#define OA_TC6_CTRL_SPI_BUF_SIZE	(OA_TC6_CTRL_HEADER_SIZE +\
+					(OA_TC6_CTRL_MAX_REGISTERS *\
+					(OA_TC6_CTRL_REG_VALUE_SIZE +\
+					OA_TC6_CTRL_PROT_REPLY_SIZE)) +\
+					OA_TC6_CTRL_IGNORED_SIZE)
+
 #define OA_TC6_CHUNK_PAYLOAD_SIZE		64
 #define OA_TC6_DATA_HEADER_SIZE			4
 #define OA_TC6_CHUNK_SIZE			(OA_TC6_DATA_HEADER_SIZE +\
@@ -105,9 +62,10 @@
 #define STATUS0_RESETC_POLL_DELAY		1000
 #define STATUS0_RESETC_POLL_TIMEOUT		1000000
 
+#define OA_TC6_REG_MMS_MASK		GENMASK(19, 16)
+
 /* Internal structure for MAC-PHY drivers */
 struct oa_tc6 {
-	struct device *dev;
 	struct net_device *netdev;
 	struct phy_device *phydev;
 	struct mii_bus *mdiobus;
@@ -121,14 +79,15 @@ struct oa_tc6 {
 	struct sk_buff *ongoing_tx_skb;
 	struct sk_buff *waiting_tx_skb;
 	struct sk_buff *rx_skb;
-	struct task_struct *spi_thread;
-	wait_queue_head_t spi_wq;
 	u16 tx_skb_offset;
 	u16 spi_data_tx_buf_offset;
 	u16 tx_credits;
 	u8 rx_chunks_available;
 	bool rx_buf_overflow;
 	bool int_flag;
+	bool disable_traffic;
+	bool prot_ctrl;
+	enum oa_tc6_quirk_flag quirk_flags;
 };
 
 enum oa_tc6_header_type {
@@ -212,25 +171,36 @@ static void oa_tc6_update_ctrl_write_data(struct oa_tc6 *tc6, u32 value[],
 {
 	__be32 *tx_buf = tc6->spi_ctrl_tx_buf + OA_TC6_CTRL_HEADER_SIZE;
 
-	for (int i = 0; i < length; i++)
+	for (int i = 0; i < length; i++) {
 		*tx_buf++ = cpu_to_be32(value[i]);
+		if (tc6->prot_ctrl)
+			*tx_buf++ = cpu_to_be32(~value[i]);
+	}
 }
 
-static u16 oa_tc6_calculate_ctrl_buf_size(u8 length)
+static u16 oa_tc6_calculate_ctrl_buf_size(u8 length, bool ctrl_prot)
 {
+	u32 reply_size = OA_TC6_CTRL_REG_VALUE_SIZE;
+
+	if (ctrl_prot)
+		reply_size += OA_TC6_CTRL_PROT_REPLY_SIZE;
+
 	/* Control command consists 4 bytes header + 4 bytes register value for
-	 * each register + 4 bytes ignored value.
+	 * each register (+ 4 bytes for the register value complement in case
+	 * protected mode is used) + 4 bytes ignored value.
 	 */
-	return OA_TC6_CTRL_HEADER_SIZE + OA_TC6_CTRL_REG_VALUE_SIZE * length +
+	return OA_TC6_CTRL_HEADER_SIZE + reply_size * length +
 	       OA_TC6_CTRL_IGNORED_SIZE;
 }
 
 static void oa_tc6_prepare_ctrl_spi_buf(struct oa_tc6 *tc6, u32 address,
 					u32 value[], u8 length,
-					enum oa_tc6_register_op reg_op)
+					enum oa_tc6_register_op reg_op,
+					u16 buf_size)
 {
 	__be32 *tx_buf = tc6->spi_ctrl_tx_buf;
 
+	memset(tx_buf, 0, buf_size);
 	*tx_buf = oa_tc6_prepare_ctrl_header(address, length, reg_op);
 
 	if (reg_op == OA_TC6_CTRL_REG_WRITE)
@@ -253,16 +223,32 @@ static int oa_tc6_check_ctrl_write_reply(struct oa_tc6 *tc6, u8 size)
 	return 0;
 }
 
-static int oa_tc6_check_ctrl_read_reply(struct oa_tc6 *tc6, u8 size)
+static int oa_tc6_check_ctrl_read_reply(struct oa_tc6 *tc6, u8 length)
 {
-	u32 *rx_buf = tc6->spi_ctrl_rx_buf + OA_TC6_CTRL_IGNORED_SIZE;
-	u32 *tx_buf = tc6->spi_ctrl_tx_buf;
+	__be32 *rx_buf = tc6->spi_ctrl_rx_buf + OA_TC6_CTRL_IGNORED_SIZE;
+	__be32 *tx_buf = tc6->spi_ctrl_tx_buf;
+	u32 complement;
+	u32 reply;
 
 	/* The echoed control read header must match with the one that was
 	 * transmitted.
 	 */
 	if (*tx_buf != *rx_buf)
 		return -EPROTO;
+
+	if (tc6->prot_ctrl) {
+		/* Skip past the echoed header to the value/complement pairs */
+		rx_buf += 1;
+		for (int i = 0; i < length; i++) {
+			reply = be32_to_cpu(rx_buf[0]);
+			complement = be32_to_cpu(rx_buf[1]);
+
+			if (complement != ~reply)
+				return -EPROTO;
+
+			rx_buf += 2;
+		}
+	}
 
 	return 0;
 }
@@ -273,8 +259,13 @@ static void oa_tc6_copy_ctrl_read_data(struct oa_tc6 *tc6, u32 value[],
 	__be32 *rx_buf = tc6->spi_ctrl_rx_buf + OA_TC6_CTRL_IGNORED_SIZE +
 			 OA_TC6_CTRL_HEADER_SIZE;
 
-	for (int i = 0; i < length; i++)
+	for (int i = 0; i < length; i++) {
 		value[i] = be32_to_cpu(*rx_buf++);
+
+		/* skip complement word */
+		if (tc6->prot_ctrl)
+			rx_buf++;
+	}
 }
 
 static int oa_tc6_perform_ctrl(struct oa_tc6 *tc6, u32 address, u32 value[],
@@ -283,10 +274,10 @@ static int oa_tc6_perform_ctrl(struct oa_tc6 *tc6, u32 address, u32 value[],
 	u16 size;
 	int ret;
 
-	/* Prepare control command and copy to SPI control buffer */
-	oa_tc6_prepare_ctrl_spi_buf(tc6, address, value, length, reg_op);
+	size = oa_tc6_calculate_ctrl_buf_size(length, tc6->prot_ctrl);
 
-	size = oa_tc6_calculate_ctrl_buf_size(length);
+	/* Prepare control command and copy to SPI control buffer */
+	oa_tc6_prepare_ctrl_spi_buf(tc6, address, value, length, reg_op, size);
 
 	/* Perform SPI transfer */
 	ret = oa_tc6_spi_transfer(tc6, OA_TC6_CTRL_HEADER, size);
@@ -301,7 +292,7 @@ static int oa_tc6_perform_ctrl(struct oa_tc6 *tc6, u32 address, u32 value[],
 		return oa_tc6_check_ctrl_write_reply(tc6, size);
 
 	/* Check echoed/received control read command reply for errors */
-	ret = oa_tc6_check_ctrl_read_reply(tc6, size);
+	ret = oa_tc6_check_ctrl_read_reply(tc6, length);
 	if (ret)
 		return ret;
 
@@ -355,6 +346,27 @@ int oa_tc6_read_register(struct oa_tc6 *tc6, u32 address, u32 *value)
 EXPORT_SYMBOL_GPL(oa_tc6_read_register);
 
 /**
+ * oa_tc6_read_register_mms - function for reading a MAC-PHY register in a
+ * specified memory map.
+ * @tc6: oa_tc6 struct.
+ * @mms: Memory map selector for the register.
+ * @address: register address of the MAC-PHY to be read.
+ * @value: value read from the @address register address of the MAC-PHY.
+ *
+ * Return: 0 on success or a negative error code on failure.
+ */
+int oa_tc6_read_register_mms(struct oa_tc6 *tc6, u8 mms, u16 address,
+			     u32 *value)
+{
+	u32 mms_reg;
+
+	mms_reg = FIELD_PREP(OA_TC6_REG_MMS_MASK, mms) | address;
+
+	return oa_tc6_read_registers(tc6, mms_reg, value, 1);
+}
+EXPORT_SYMBOL_GPL(oa_tc6_read_register_mms);
+
+/**
  * oa_tc6_write_registers - function for writing multiple consecutive registers.
  * @tc6: oa_tc6 struct.
  * @address: address of the first register to be written in the MAC-PHY.
@@ -398,6 +410,27 @@ int oa_tc6_write_register(struct oa_tc6 *tc6, u32 address, u32 value)
 }
 EXPORT_SYMBOL_GPL(oa_tc6_write_register);
 
+/**
+ * oa_tc6_write_register_mms - function for writing a MAC-PHY register in a
+ * specified memory map.
+ * @tc6: oa_tc6 struct.
+ * @mms: Memory map selector for the register.
+ * @address: register address of the MAC-PHY to be written.
+ * @value: value to be written in the @address register address of the MAC-PHY.
+ *
+ * Return: 0 on success or a negative error code on failure.
+ */
+int oa_tc6_write_register_mms(struct oa_tc6 *tc6, u8 mms, u16 address,
+			      u32 value)
+{
+	u32 mms_reg;
+
+	mms_reg = FIELD_PREP(OA_TC6_REG_MMS_MASK, mms) | address;
+
+	return oa_tc6_write_registers(tc6, mms_reg, &value, 1);
+}
+EXPORT_SYMBOL_GPL(oa_tc6_write_register_mms);
+
 static int oa_tc6_check_phy_reg_direct_access_capability(struct oa_tc6 *tc6)
 {
 	u32 regval;
@@ -407,7 +440,7 @@ static int oa_tc6_check_phy_reg_direct_access_capability(struct oa_tc6 *tc6)
 	if (ret)
 		return ret;
 
-	if (!(regval & STDCAP_DIRECT_PHY_REG_ACCESS))
+	if (!(regval & OA_TC6_STDCAP_DIRECT_PHY_REG_ACCESS))
 		return -ENODEV;
 
 	return 0;
@@ -461,36 +494,39 @@ static int oa_tc6_get_phy_c45_mms(int devnum)
 	}
 }
 
-static int oa_tc6_mdiobus_read_c45(struct mii_bus *bus, int addr, int devnum,
-				   int regnum)
+int oa_tc6_mdiobus_read_c45(struct mii_bus *bus, int addr, int devnum,
+			    int regnum)
 {
 	struct oa_tc6 *tc6 = bus->priv;
 	u32 regval;
+	int mms;
 	int ret;
 
-	ret = oa_tc6_get_phy_c45_mms(devnum);
-	if (ret < 0)
-		return ret;
+	mms = oa_tc6_get_phy_c45_mms(devnum);
+	if (mms < 0)
+		return mms;
 
-	ret = oa_tc6_read_register(tc6, (ret << 16) | regnum, &regval);
+	ret = oa_tc6_read_register_mms(tc6, mms, regnum, &regval);
 	if (ret)
 		return ret;
 
 	return regval;
 }
+EXPORT_SYMBOL_GPL(oa_tc6_mdiobus_read_c45);
 
-static int oa_tc6_mdiobus_write_c45(struct mii_bus *bus, int addr, int devnum,
-				    int regnum, u16 val)
+int oa_tc6_mdiobus_write_c45(struct mii_bus *bus, int addr, int devnum,
+			     int regnum, u16 val)
 {
 	struct oa_tc6 *tc6 = bus->priv;
-	int ret;
+	int mms;
 
-	ret = oa_tc6_get_phy_c45_mms(devnum);
-	if (ret < 0)
-		return ret;
+	mms = oa_tc6_get_phy_c45_mms(devnum);
+	if (mms < 0)
+		return mms;
 
-	return oa_tc6_write_register(tc6, (ret << 16) | regnum, val);
+	return oa_tc6_write_register_mms(tc6, mms, regnum, val);
 }
+EXPORT_SYMBOL_GPL(oa_tc6_mdiobus_write_c45);
 
 static int oa_tc6_mdiobus_register(struct oa_tc6 *tc6)
 {
@@ -518,7 +554,7 @@ static int oa_tc6_mdiobus_register(struct oa_tc6 *tc6)
 	tc6->mdiobus->read_c45 = oa_tc6_mdiobus_read_c45;
 	tc6->mdiobus->write_c45 = oa_tc6_mdiobus_write_c45;
 	tc6->mdiobus->name = "oa-tc6-mdiobus";
-	tc6->mdiobus->parent = tc6->dev;
+	tc6->mdiobus->parent = &tc6->spi->dev;
 
 	snprintf(tc6->mdiobus->id, ARRAY_SIZE(tc6->mdiobus->id), "%s",
 		 dev_name(&tc6->spi->dev));
@@ -542,6 +578,9 @@ static void oa_tc6_mdiobus_unregister(struct oa_tc6 *tc6)
 static int oa_tc6_phy_init(struct oa_tc6 *tc6)
 {
 	int ret;
+
+	if (tc6->quirk_flags & OA_TC6_BROKEN_PHY)
+		return 0;
 
 	ret = oa_tc6_check_phy_reg_direct_access_capability(tc6);
 	if (ret) {
@@ -579,6 +618,9 @@ static int oa_tc6_phy_init(struct oa_tc6 *tc6)
 
 static void oa_tc6_phy_exit(struct oa_tc6 *tc6)
 {
+	if (tc6->quirk_flags & OA_TC6_BROKEN_PHY)
+		return;
+
 	phy_disconnect(tc6->phydev);
 	oa_tc6_mdiobus_unregister(tc6);
 }
@@ -600,7 +642,7 @@ static int oa_tc6_read_status0(struct oa_tc6 *tc6)
 
 static int oa_tc6_sw_reset_macphy(struct oa_tc6 *tc6)
 {
-	u32 regval = RESET_SWRESET;
+	u32 regval = OA_TC6_RESET_SWRESET;
 	int ret;
 
 	ret = oa_tc6_write_register(tc6, OA_TC6_REG_RESET, regval);
@@ -609,7 +651,7 @@ static int oa_tc6_sw_reset_macphy(struct oa_tc6 *tc6)
 
 	/* Poll for soft reset complete for every 1ms until 1s timeout */
 	ret = readx_poll_timeout(oa_tc6_read_status0, tc6, regval,
-				 regval & STATUS0_RESETC,
+				 regval & OA_TC6_STATUS0_RESETC,
 				 STATUS0_RESETC_POLL_DELAY,
 				 STATUS0_RESETC_POLL_TIMEOUT);
 	if (ret)
@@ -628,10 +670,10 @@ static int oa_tc6_unmask_macphy_error_interrupts(struct oa_tc6 *tc6)
 	if (ret)
 		return ret;
 
-	regval &= ~(INT_MASK0_TX_PROTOCOL_ERR_MASK |
-		    INT_MASK0_RX_BUFFER_OVERFLOW_ERR_MASK |
-		    INT_MASK0_LOSS_OF_FRAME_ERR_MASK |
-		    INT_MASK0_HEADER_ERR_MASK);
+	regval &= ~(OA_TC6_INT_MASK0_TX_PROTOCOL_ERR_MASK |
+		    OA_TC6_INT_MASK0_RX_BUFFER_OVERFLOW_ERR_MASK |
+		    OA_TC6_INT_MASK0_LOSS_OF_FRAME_ERR_MASK |
+		    OA_TC6_INT_MASK0_HEADER_ERR_MASK);
 
 	return oa_tc6_write_register(tc6, OA_TC6_REG_INT_MASK0, regval);
 }
@@ -646,7 +688,7 @@ static int oa_tc6_enable_data_transfer(struct oa_tc6 *tc6)
 		return ret;
 
 	/* Enable configuration synchronization for data transfer */
-	value |= CONFIG0_SYNC;
+	value |= OA_TC6_CONFIG0_SYNC;
 
 	return oa_tc6_write_register(tc6, OA_TC6_REG_CONFIG0, value);
 }
@@ -669,6 +711,38 @@ static void oa_tc6_cleanup_ongoing_tx_skb(struct oa_tc6 *tc6)
 	}
 }
 
+static void oa_tc6_cleanup_waiting_tx_skb(struct oa_tc6 *tc6)
+{
+	if (tc6->waiting_tx_skb) {
+		tc6->netdev->stats.tx_dropped++;
+		kfree_skb(tc6->waiting_tx_skb);
+		tc6->waiting_tx_skb = NULL;
+	}
+}
+
+static void oa_tc6_free_pending_skbs(struct oa_tc6 *tc6)
+{
+	oa_tc6_cleanup_ongoing_tx_skb(tc6);
+	oa_tc6_cleanup_ongoing_rx_skb(tc6);
+	oa_tc6_cleanup_waiting_tx_skb(tc6);
+}
+
+/* If the failure is at SPI interface level, masking and clearing
+ * the interrupt of the device won't work. Since SPI interrupt is
+ * disabled, it should stop the repeated interrupts.
+ */
+static void oa_tc6_disable_traffic(struct oa_tc6 *tc6)
+{
+	u32 regval = OA_TC6_INT_MASK0_ALL_INTERRUPTS;
+
+	tc6->disable_traffic = true;
+	oa_tc6_free_pending_skbs(tc6);
+	oa_tc6_write_register(tc6, OA_TC6_REG_INT_MASK0, regval);
+	oa_tc6_read_register(tc6, OA_TC6_REG_STATUS0, &regval);
+	oa_tc6_write_register(tc6, OA_TC6_REG_STATUS0, regval);
+	dev_err(&tc6->spi->dev, "Device interrupt disabled to avoid interrupt storm");
+}
+
 static int oa_tc6_process_extended_status(struct oa_tc6 *tc6)
 {
 	u32 value;
@@ -689,25 +763,25 @@ static int oa_tc6_process_extended_status(struct oa_tc6 *tc6)
 		return ret;
 	}
 
-	if (FIELD_GET(STATUS0_RX_BUFFER_OVERFLOW_ERROR, value)) {
+	if (FIELD_GET(OA_TC6_STATUS0_RX_BUFFER_OVERFLOW_ERROR, value)) {
 		tc6->rx_buf_overflow = true;
 		oa_tc6_cleanup_ongoing_rx_skb(tc6);
 		net_err_ratelimited("%s: Receive buffer overflow error\n",
 				    tc6->netdev->name);
 		return -EAGAIN;
 	}
-	if (FIELD_GET(STATUS0_TX_PROTOCOL_ERROR, value)) {
+	if (FIELD_GET(OA_TC6_STATUS0_TX_PROTOCOL_ERROR, value)) {
 		netdev_err(tc6->netdev, "Transmit protocol error\n");
 		return -ENODEV;
 	}
 	/* TODO: Currently loss of frame and header errors are treated as
 	 * non-recoverable errors. They will be handled in the next version.
 	 */
-	if (FIELD_GET(STATUS0_LOSS_OF_FRAME_ERROR, value)) {
+	if (FIELD_GET(OA_TC6_STATUS0_LOSS_OF_FRAME_ERROR, value)) {
 		netdev_err(tc6->netdev, "Loss of frame error\n");
 		return -ENODEV;
 	}
-	if (FIELD_GET(STATUS0_HEADER_ERROR, value)) {
+	if (FIELD_GET(OA_TC6_STATUS0_HEADER_ERROR, value)) {
 		netdev_err(tc6->netdev, "Header error\n");
 		return -ENODEV;
 	}
@@ -752,6 +826,17 @@ static int oa_tc6_process_rx_chunk_footer(struct oa_tc6 *tc6, u32 footer)
 
 static void oa_tc6_submit_rx_skb(struct oa_tc6 *tc6)
 {
+	/* MAC-PHY delivers each frame with its Ethernet FCS attached.
+	 * Strip it before handing over to the stack, unless the user
+	 * has asked to keep it via NETIF_F_RXFCS. Keeping the FCS
+	 * in the frame is harmless for IP traffic, but is parsed as
+	 * a (malformed) suffix TLV by PTP, which makes ptp4l reject
+	 * every message with "bad message" error.
+	 */
+	if (!(tc6->netdev->features & NETIF_F_RXFCS) &&
+	    tc6->rx_skb->len > ETH_FCS_LEN)
+		skb_trim(tc6->rx_skb, tc6->rx_skb->len - ETH_FCS_LEN);
+
 	tc6->rx_skb->protocol = eth_type_trans(tc6->rx_skb, tc6->netdev);
 	tc6->netdev->stats.rx_packets++;
 	tc6->netdev->stats.rx_bytes += tc6->rx_skb->len;
@@ -1105,29 +1190,29 @@ static int oa_tc6_try_spi_transfer(struct oa_tc6 *tc6)
 	return 0;
 }
 
-static int oa_tc6_spi_thread_handler(void *data)
+static irqreturn_t oa_tc6_macphy_threaded_irq(int irq, void *data)
 {
 	struct oa_tc6 *tc6 = data;
-	int ret;
+	int ret = 0;
 
-	while (likely(!kthread_should_stop())) {
-		/* This kthread will be waken up if there is a tx skb or mac-phy
-		 * interrupt to perform spi transfer with tx chunks.
-		 */
-		wait_event_interruptible(tc6->spi_wq, tc6->int_flag ||
-					 (tc6->waiting_tx_skb &&
-					 tc6->tx_credits) ||
-					 kthread_should_stop());
-
-		if (kthread_should_stop())
-			break;
-
-		ret = oa_tc6_try_spi_transfer(tc6);
-		if (ret)
-			return ret;
+	/* It is possible that interrupt woke the thread before it is
+	 * disabled. Until we come up with good recovery mechanism,
+	 * no need to attempt spi transfer, once it fails. Pending skbs
+	 * are already freed.
+	 */
+	if (!tc6->disable_traffic) {
+		while (tc6->int_flag ||
+		       (tc6->waiting_tx_skb && tc6->tx_credits)) {
+			ret = oa_tc6_try_spi_transfer(tc6);
+			if (ret) {
+				disable_irq_nosync(tc6->spi->irq);
+				oa_tc6_disable_traffic(tc6);
+				break;
+			}
+		}
 	}
 
-	return 0;
+	return IRQ_HANDLED;
 }
 
 static int oa_tc6_update_buffer_status_from_register(struct oa_tc6 *tc6)
@@ -1143,9 +1228,10 @@ static int oa_tc6_update_buffer_status_from_register(struct oa_tc6 *tc6)
 	if (ret)
 		return ret;
 
-	tc6->tx_credits = FIELD_GET(BUFFER_STATUS_TX_CREDITS_AVAILABLE, value);
-	tc6->rx_chunks_available = FIELD_GET(BUFFER_STATUS_RX_CHUNKS_AVAILABLE,
-					     value);
+	tc6->tx_credits = FIELD_GET(OA_TC6_BUFFER_STATUS_TX_CREDITS_AVAILABLE,
+				    value);
+	tc6->rx_chunks_available =
+		FIELD_GET(OA_TC6_BUFFER_STATUS_RX_CHUNKS_AVAILABLE, value);
 
 	return 0;
 }
@@ -1161,11 +1247,15 @@ static irqreturn_t oa_tc6_macphy_isr(int irq, void *data)
 	 *   the previous rx footer.
 	 * - extended status event not reported in the previous rx footer.
 	 */
-	tc6->int_flag = true;
-	/* Wake spi kthread to perform spi transfer */
-	wake_up_interruptible(&tc6->spi_wq);
-
-	return IRQ_HANDLED;
+	if (tc6->disable_traffic)
+		disable_irq_nosync(tc6->spi->irq);
+	else
+		tc6->int_flag = true;
+	/* Wake IRQ thread to perform spi transfer . In case
+	 * disable_traffic is set, threaded irq may run again
+	 * one more time.
+	 */
+	return IRQ_WAKE_THREAD;
 }
 
 /**
@@ -1185,7 +1275,7 @@ int oa_tc6_zero_align_receive_frame_enable(struct oa_tc6 *tc6)
 		return ret;
 
 	/* Set Zero-Align Receive Frame Enable */
-	regval |= CONFIG0_ZARFE_ENABLE;
+	regval |= OA_TC6_CONFIG0_ZARFE_ENABLE;
 
 	return oa_tc6_write_register(tc6, OA_TC6_REG_CONFIG0, regval);
 }
@@ -1202,7 +1292,7 @@ EXPORT_SYMBOL_GPL(oa_tc6_zero_align_receive_frame_enable);
  */
 netdev_tx_t oa_tc6_start_xmit(struct oa_tc6 *tc6, struct sk_buff *skb)
 {
-	if (tc6->waiting_tx_skb) {
+	if (tc6->disable_traffic || tc6->waiting_tx_skb) {
 		netif_stop_queue(tc6->netdev);
 		return NETDEV_TX_BUSY;
 	}
@@ -1217,22 +1307,38 @@ netdev_tx_t oa_tc6_start_xmit(struct oa_tc6 *tc6, struct sk_buff *skb)
 	tc6->waiting_tx_skb = skb;
 	spin_unlock_bh(&tc6->tx_skb_lock);
 
-	/* Wake spi kthread to perform spi transfer */
-	wake_up_interruptible(&tc6->spi_wq);
+	/* Wake the threaded IRQ to perform spi transfer. */
+	irq_wake_thread(tc6->spi->irq, tc6);
 
 	return NETDEV_TX_OK;
 }
 EXPORT_SYMBOL_GPL(oa_tc6_start_xmit);
 
+static int oa_tc6_check_ctrl_protection(struct oa_tc6 *tc6)
+{
+	u32 regval;
+	int ret;
+
+	ret = oa_tc6_read_register(tc6, OA_TC6_REG_CONFIG0, &regval);
+	if (ret)
+		return ret;
+
+	tc6->prot_ctrl = FIELD_GET(OA_TC6_CONFIG0_PROTE, regval);
+
+	return 0;
+}
+
 /**
  * oa_tc6_init - allocates and initializes oa_tc6 structure.
  * @spi: device with which data will be exchanged.
  * @netdev: network device interface structure.
+ * @quirks: device specific modifiers for the OA TC6 protocol.
  *
  * Return: pointer reference to the oa_tc6 structure if the MAC-PHY
  * initialization is successful otherwise NULL.
  */
-struct oa_tc6 *oa_tc6_init(struct spi_device *spi, struct net_device *netdev)
+struct oa_tc6 *oa_tc6_init(struct spi_device *spi, struct net_device *netdev,
+			   struct oa_tc6_quirks *quirks)
 {
 	struct oa_tc6 *tc6;
 	int ret;
@@ -1246,6 +1352,9 @@ struct oa_tc6 *oa_tc6_init(struct spi_device *spi, struct net_device *netdev)
 	SET_NETDEV_DEV(netdev, &spi->dev);
 	mutex_init(&tc6->spi_ctrl_lock);
 	spin_lock_init(&tc6->tx_skb_lock);
+
+	if (quirks)
+		tc6->quirk_flags = quirks->quirk_flags;
 
 	/* Set the SPI controller to pump at realtime priority */
 	tc6->spi->rt = true;
@@ -1275,6 +1384,14 @@ struct oa_tc6 *oa_tc6_init(struct spi_device *spi, struct net_device *netdev)
 					    GFP_KERNEL);
 	if (!tc6->spi_data_rx_buf)
 		return NULL;
+
+	/* Check the PROTE bit status so that we can reset the device */
+	ret = oa_tc6_check_ctrl_protection(tc6);
+	if (ret) {
+		dev_err(&tc6->spi->dev,
+			"Failed to check the protection mode: %d\n", ret);
+		return NULL;
+	}
 
 	ret = oa_tc6_sw_reset_macphy(tc6);
 	if (ret) {
@@ -1311,24 +1428,15 @@ struct oa_tc6 *oa_tc6_init(struct spi_device *spi, struct net_device *netdev)
 		goto phy_exit;
 	}
 
-	init_waitqueue_head(&tc6->spi_wq);
-
-	tc6->spi_thread = kthread_run(oa_tc6_spi_thread_handler, tc6,
-				      "oa-tc6-spi-thread");
-	if (IS_ERR(tc6->spi_thread)) {
-		dev_err(&tc6->spi->dev, "Failed to create SPI thread\n");
-		goto phy_exit;
-	}
-
-	sched_set_fifo(tc6->spi_thread);
-
-	ret = devm_request_irq(&tc6->spi->dev, tc6->spi->irq, oa_tc6_macphy_isr,
-			       IRQF_TRIGGER_FALLING, dev_name(&tc6->spi->dev),
-			       tc6);
+	ret = devm_request_threaded_irq(&tc6->spi->dev, tc6->spi->irq,
+					oa_tc6_macphy_isr,
+					oa_tc6_macphy_threaded_irq,
+					IRQF_TRIGGER_LOW | IRQF_ONESHOT,
+					dev_name(&tc6->spi->dev), tc6);
 	if (ret) {
 		dev_err(&tc6->spi->dev, "Failed to request macphy isr %d\n",
 			ret);
-		goto kthread_stop;
+		goto phy_exit;
 	}
 
 	/* oa_tc6_sw_reset_macphy() function resets and clears the MAC-PHY reset
@@ -1338,12 +1446,10 @@ struct oa_tc6 *oa_tc6_init(struct spi_device *spi, struct net_device *netdev)
 	 * 7.7 and 9.2.8.8 in the OPEN Alliance specification for more details.
 	 */
 	tc6->int_flag = true;
-	wake_up_interruptible(&tc6->spi_wq);
+	irq_wake_thread(tc6->spi->irq, tc6);
 
 	return tc6;
 
-kthread_stop:
-	kthread_stop(tc6->spi_thread);
 phy_exit:
 	oa_tc6_phy_exit(tc6);
 	return NULL;
@@ -1356,11 +1462,10 @@ EXPORT_SYMBOL_GPL(oa_tc6_init);
  */
 void oa_tc6_exit(struct oa_tc6 *tc6)
 {
+	tc6->disable_traffic = true;
+	disable_irq(tc6->spi->irq);
 	oa_tc6_phy_exit(tc6);
-	kthread_stop(tc6->spi_thread);
-	dev_kfree_skb_any(tc6->ongoing_tx_skb);
-	dev_kfree_skb_any(tc6->waiting_tx_skb);
-	dev_kfree_skb_any(tc6->rx_skb);
+	oa_tc6_free_pending_skbs(tc6);
 }
 EXPORT_SYMBOL_GPL(oa_tc6_exit);
 

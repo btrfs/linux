@@ -16,6 +16,24 @@
 #include <linux/net.h>
 #include <net/sock.h>
 
+static const struct af_alg_allowlist_entry hash_allowlist[] = {
+	{ "cmac(aes)" }, /* iwd, bluez */
+	{ "hmac(md5)" }, /* iwd */
+	{ "hmac(sha1)" }, /* iwd */
+	{ "hmac(sha224)" }, /* iwd */
+	{ "hmac(sha256)" }, /* iwd */
+	{ "hmac(sha384)" }, /* iwd */
+	{ "hmac(sha512)" }, /* iwd, sha512hmac */
+	{ "md4" }, /* iwd */
+	{ "md5" }, /* iwd */
+	{ "sha1", AF_ALG_UNPRIVILEGED }, /* iwd, iproute2 < 7.0 */
+	{ "sha224" }, /* iwd */
+	{ "sha256" }, /* iwd */
+	{ "sha384" }, /* iwd */
+	{ "sha512" }, /* iwd */
+	{},
+};
+
 struct hash_ctx {
 	struct af_alg_sgl sgl;
 
@@ -380,9 +398,15 @@ static struct proto_ops algif_hash_ops_nokey = {
 	.accept		=	hash_accept_nokey,
 };
 
-static void *hash_bind(const char *name, u32 type, u32 mask)
+static void *hash_bind(const char *name)
 {
-	return crypto_alloc_ahash(name, type, mask);
+	int err;
+
+	err = af_alg_check_restriction(name, hash_allowlist);
+	if (err)
+		return ERR_PTR(err);
+
+	return crypto_alloc_ahash(name, 0, AF_ALG_CRYPTOAPI_MASK);
 }
 
 static void hash_release(void *private)
@@ -416,9 +440,8 @@ static int hash_accept_parent_nokey(void *private, struct sock *sk)
 	if (!ctx)
 		return -ENOMEM;
 
-	ctx->result = NULL;
+	memset(ctx, 0, len);
 	ctx->len = len;
-	ctx->more = false;
 	crypto_init_wait(&ctx->wait);
 
 	ask->private = ctx;

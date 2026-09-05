@@ -835,6 +835,10 @@ static int et8ek8_power_on(struct et8ek8_sensor *sensor)
 
 	udelay(10); /* I wish this is a good value */
 
+	/*
+	 * Note: Misinterpretation of reset assertion - do not re-use this code.
+	 * The reset pin is using incorrect (for a reset signal) logical level.
+	 */
 	gpiod_set_value(sensor->reset, 1);
 
 	msleep(5000 * 1000 / sensor->xclk_freq + 1); /* Wait 5000 cycles */
@@ -1481,7 +1485,7 @@ static const struct of_device_id et8ek8_of_table[] = {
 MODULE_DEVICE_TABLE(of, et8ek8_of_table);
 
 static const struct i2c_device_id et8ek8_id_table[] = {
-	{ ET8EK8_NAME },
+	{ .name = ET8EK8_NAME },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, et8ek8_id_table);

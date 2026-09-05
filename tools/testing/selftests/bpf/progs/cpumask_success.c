@@ -785,7 +785,7 @@ int BPF_PROG(test_populate_reject_small_mask, struct task_struct *task, u64 clon
 		return 0;
 
 	/* The kfunc should prevent this operation */
-	ret = bpf_cpumask_populate((struct cpumask *)local, &toofewbits, sizeof(toofewbits));
+	ret = bpf_cpumask_populate(local, &toofewbits, sizeof(toofewbits));
 	if (ret != -EACCES)
 		err = 2;
 
@@ -824,7 +824,7 @@ int BPF_PROG(test_populate_reject_unaligned, struct task_struct *task, u64 clone
 	/* Misalign the source array by a byte. */
 	src = &((char *)bits)[1];
 
-	ret = bpf_cpumask_populate((struct cpumask *)mask, src, CPUMASK_TEST_MASKLEN);
+	ret = bpf_cpumask_populate(mask, src, CPUMASK_TEST_MASKLEN);
 	if (ret != -EINVAL)
 		err = 2;
 
@@ -855,7 +855,7 @@ int BPF_PROG(test_populate, struct task_struct *task, u64 clone_flags)
 	}
 
 	/* Pass the entire bits array, the kfunc will only copy the valid bits. */
-	ret = bpf_cpumask_populate((struct cpumask *)mask, bits, CPUMASK_TEST_MASKLEN);
+	ret = bpf_cpumask_populate(mask, bits, CPUMASK_TEST_MASKLEN);
 	if (ret) {
 		err = 2;
 		goto out;
@@ -866,7 +866,7 @@ int BPF_PROG(test_populate, struct task_struct *task, u64 clone_flags)
 	 * access NR_CPUS, the upper bound for nr_cpus, so we infer
 	 * it from the size of cpumask_t.
 	 */
-	if (nr_cpus < 0 || nr_cpus >= CPUMASK_TEST_MASKLEN * 8) {
+	if (nr_cpus < 0 || nr_cpus > CPUMASK_TEST_MASKLEN * 8) {
 		err = 3;
 		goto out;
 	}

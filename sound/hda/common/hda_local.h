@@ -221,6 +221,7 @@ struct hda_multi_out {
 	unsigned int spdif_rates;
 	unsigned int spdif_maxbps;
 	u64 spdif_formats;
+	struct snd_kcontrol *share_spdif_kctl; /* cached shared SPDIF switch */
 };
 
 int snd_hda_create_spdif_share_sw(struct hda_codec *codec,
@@ -424,7 +425,7 @@ int _snd_hda_set_pin_ctl(struct hda_codec *codec, hda_nid_t pin,
 			 unsigned int val, bool cached);
 
 /**
- * _snd_hda_set_pin_ctl - Set a pin-control value safely
+ * snd_hda_set_pin_ctl - Set a pin-control value safely
  * @codec: the codec instance
  * @pin: the pin NID to set the control
  * @val: the pin-control value (AC_PINCTL_* bits)
@@ -721,5 +722,12 @@ void snd_hda_codec_display_power(struct hda_codec *codec, bool enable);
 	dev_info(hda_codec_dev(codec), fmt, ##args)
 #define codec_dbg(codec, fmt, args...) \
 	dev_dbg(hda_codec_dev(codec), fmt, ##args)
+
+/* append a suffix string safely; equivalent with strlcat() */
+static inline void hda_append_suffix(char *str, const char *suffix, size_t size)
+{
+	size_t len = strnlen(str, size);
+	strscpy(str + len, suffix, size - len);
+}
 
 #endif /* __SOUND_HDA_LOCAL_H */

@@ -266,20 +266,17 @@ static int mlx5i_set_rxnfc(struct net_device *dev, struct ethtool_rxnfc *cmd)
 	return mlx5e_ethtool_set_rxnfc(priv, cmd);
 }
 
+static u32 mlx5i_get_rx_ring_count(struct net_device *dev)
+{
+	struct mlx5e_priv *priv = mlx5i_epriv(dev);
+
+	return priv->channels.params.num_channels;
+}
+
 static int mlx5i_get_rxnfc(struct net_device *dev, struct ethtool_rxnfc *info,
 			   u32 *rule_locs)
 {
 	struct mlx5e_priv *priv = mlx5i_epriv(dev);
-
-	/* ETHTOOL_GRXRINGS is needed by ethtool -x which is not part
-	 * of rxnfc. We keep this logic out of mlx5e_ethtool_get_rxnfc,
-	 * to avoid breaking "ethtool -x" when mlx5e_ethtool_get_rxnfc
-	 * is compiled out via CONFIG_MLX5_EN_RXNFC=n.
-	 */
-	if (info->cmd == ETHTOOL_GRXRINGS) {
-		info->data = priv->channels.params.num_channels;
-		return 0;
-	}
 
 	return mlx5e_ethtool_get_rxnfc(priv, info, rule_locs);
 }
@@ -288,6 +285,9 @@ const struct ethtool_ops mlx5i_ethtool_ops = {
 	.supported_coalesce_params = ETHTOOL_COALESCE_USECS |
 				     ETHTOOL_COALESCE_MAX_FRAMES |
 				     ETHTOOL_COALESCE_USE_ADAPTIVE,
+	.op_needs_rtnl	    = ETHTOOL_OP_NEEDS_RTNL_SCHANNELS |
+			      ETHTOOL_OP_NEEDS_RTNL_SRINGPARAM |
+			      ETHTOOL_OP_NEEDS_RTNL_GLINK,
 	.get_drvinfo        = mlx5i_get_drvinfo,
 	.get_strings        = mlx5i_get_strings,
 	.get_sset_count     = mlx5i_get_sset_count,
@@ -304,11 +304,13 @@ const struct ethtool_ops mlx5i_ethtool_ops = {
 	.set_rxfh_fields    = mlx5i_set_rxfh_fields,
 	.get_rxnfc          = mlx5i_get_rxnfc,
 	.set_rxnfc          = mlx5i_set_rxnfc,
+	.get_rx_ring_count  = mlx5i_get_rx_ring_count,
 	.get_link_ksettings = mlx5i_get_link_ksettings,
 	.get_link           = ethtool_op_get_link,
 };
 
 const struct ethtool_ops mlx5i_pkey_ethtool_ops = {
+	.op_needs_rtnl	    = ETHTOOL_OP_NEEDS_RTNL_GLINK,
 	.get_drvinfo        = mlx5i_get_drvinfo,
 	.get_link           = ethtool_op_get_link,
 	.get_ts_info        = mlx5i_get_ts_info,

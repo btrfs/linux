@@ -7,6 +7,7 @@
  */
 
 #include <linux/delay.h>
+#include <linux/hex.h>
 #include <linux/idr.h>
 #include <linux/module.h>
 #include <linux/nvmem-provider.h>
@@ -68,7 +69,7 @@ static void nvm_set_auth_status(const struct tb_switch *sw, u32 status)
 	st = __nvm_get_auth_status(sw);
 
 	if (!st) {
-		st = kzalloc(sizeof(*st), GFP_KERNEL);
+		st = kzalloc_obj(*st);
 		if (!st)
 			goto unlock;
 
@@ -208,30 +209,6 @@ static int nvm_authenticate_device_dma_port(struct tb_switch *sw)
 	return -ETIMEDOUT;
 }
 
-static void nvm_authenticate_start_dma_port(struct tb_switch *sw)
-{
-	struct pci_dev *root_port;
-
-	/*
-	 * During host router NVM upgrade we should not allow root port to
-	 * go into D3cold because some root ports cannot trigger PME
-	 * itself. To be on the safe side keep the root port in D0 during
-	 * the whole upgrade process.
-	 */
-	root_port = pcie_find_root_port(sw->tb->nhi->pdev);
-	if (root_port)
-		pm_runtime_get_noresume(&root_port->dev);
-}
-
-static void nvm_authenticate_complete_dma_port(struct tb_switch *sw)
-{
-	struct pci_dev *root_port;
-
-	root_port = pcie_find_root_port(sw->tb->nhi->pdev);
-	if (root_port)
-		pm_runtime_put(&root_port->dev);
-}
-
 static inline bool nvm_readable(struct tb_switch *sw)
 {
 	if (tb_switch_is_usb4(sw)) {
@@ -257,6 +234,7 @@ static inline bool nvm_upgradeable(struct tb_switch *sw)
 
 static int nvm_authenticate(struct tb_switch *sw, bool auth_only)
 {
+	struct tb_nhi *nhi = sw->tb->nhi;
 	int ret;
 
 	if (tb_switch_is_usb4(sw)) {
@@ -273,7 +251,8 @@ static int nvm_authenticate(struct tb_switch *sw, bool auth_only)
 
 	sw->nvm->authenticating = true;
 	if (!tb_route(sw)) {
-		nvm_authenticate_start_dma_port(sw);
+		if (nhi->ops->pre_nvm_auth)
+			nhi->ops->pre_nvm_auth(nhi);
 		ret = nvm_authenticate_host_dma_port(sw);
 	} else {
 		ret = nvm_authenticate_device_dma_port(sw);
@@ -346,7 +325,7 @@ static int nvm_write(void *priv, unsigned int offset, void *val, size_t bytes)
 	return ret;
 }
 
-static int tb_switch_nvm_add(struct tb_switch *sw)
+static int tb_switch_nvm_init(struct tb_switch *sw)
 {
 	struct tb_nvm *nvm;
 	int ret;
@@ -363,6 +342,26 @@ static int tb_switch_nvm_add(struct tb_switch *sw)
 	ret = tb_nvm_read_version(nvm);
 	if (ret)
 		goto err_nvm;
+
+	sw->nvm = nvm;
+	return 0;
+
+err_nvm:
+	tb_sw_dbg(sw, "NVM upgrade disabled\n");
+	sw->no_nvm_upgrade = true;
+	if (!IS_ERR(nvm))
+		tb_nvm_free(nvm);
+
+	return ret;
+}
+
+static int tb_switch_nvm_add(struct tb_switch *sw)
+{
+	struct tb_nvm *nvm = sw->nvm;
+	int ret;
+
+	if (!nvm)
+		return 0;
 
 	/*
 	 * If the switch is in safe-mode the only accessible portion of
@@ -382,14 +381,12 @@ static int tb_switch_nvm_add(struct tb_switch *sw)
 			goto err_nvm;
 	}
 
-	sw->nvm = nvm;
 	return 0;
 
 err_nvm:
 	tb_sw_dbg(sw, "NVM upgrade disabled\n");
 	sw->no_nvm_upgrade = true;
-	if (!IS_ERR(nvm))
-		tb_nvm_free(nvm);
+	tb_nvm_free(nvm);
 
 	return ret;
 }
@@ -685,7 +682,16 @@ int tb_port_disable(struct tb_port *port)
 	return __tb_port_enable(port, false);
 }
 
-static int tb_port_reset(struct tb_port *port)
+/**
+ * tb_port_reset() - Reset the port
+ * @port: Port to reset
+ *
+ * Resets @port. For USB4 ports this issues a USB4 port reset and for
+ * legacy ports the link controller port is reset.
+ *
+ * Return: %0 on success, negative errno otherwise.
+ */
+int tb_port_reset(struct tb_port *port)
 {
 	if (tb_switch_is_usb4(port->sw))
 		return port->cap_usb4 ? usb4_port_reset(port) : 0;
@@ -736,9 +742,9 @@ static int tb_init_port(struct tb_port *port)
 			port->cap_usb4 = cap;
 
 		/*
-		 * USB4 ports the buffers allocated for the control path
+		 * USB4 port buffers allocated for the control path
 		 * can be read from the path config space. Legacy
-		 * devices we use hard-coded value.
+		 * devices use hard-coded value.
 		 */
 		if (port->cap_usb4) {
 			struct tb_regs_hop hop;
@@ -1601,6 +1607,12 @@ static int tb_switch_reset_host(struct tb_switch *sw)
 				ret = tb_port_reset(port);
 				if (ret)
 					return ret;
+				/*
+				 * USB4 Lane 1 adapters do not have accessible
+				 * path config space.
+				 */
+				if (tb_switch_is_usb4(sw) && !port->usb4)
+					continue;
 			} else if (tb_port_is_usb3_down(port) ||
 				   tb_port_is_usb3_up(port)) {
 				tb_usb3_port_enable(port, false);
@@ -1742,8 +1754,6 @@ int tb_switch_wait_for_bit(struct tb_switch *sw, u32 offset, u32 bit,
 /*
  * tb_plug_events_active() - enable/disable plug events on a switch
  *
- * Also configures a sane plug_events_delay of 255ms.
- *
  * Return: %0 on success, negative errno otherwise.
  */
 static int tb_plug_events_active(struct tb_switch *sw, bool active)
@@ -1753,11 +1763,6 @@ static int tb_plug_events_active(struct tb_switch *sw, bool active)
 
 	if (tb_switch_is_icm(sw) || tb_switch_is_usb4(sw))
 		return 0;
-
-	sw->config.plug_events_delay = 0xff;
-	res = tb_sw_write(sw, ((u32 *) &sw->config) + 4, TB_CFG_SWITCH, 4, 1);
-	if (res)
-		return res;
 
 	res = tb_sw_read(sw, &data, TB_CFG_SWITCH, sw->cap_plug_events + 1, 1);
 	if (res)
@@ -2474,7 +2479,7 @@ struct tb_switch *tb_switch_alloc(struct tb *tb, struct device *parent,
 	if (upstream_port < 0)
 		return ERR_PTR(upstream_port);
 
-	sw = kzalloc(sizeof(*sw), GFP_KERNEL);
+	sw = kzalloc_obj(*sw);
 	if (!sw)
 		return ERR_PTR(-ENOMEM);
 
@@ -2502,8 +2507,7 @@ struct tb_switch *tb_switch_alloc(struct tb *tb, struct device *parent,
 	}
 
 	/* initialize ports */
-	sw->ports = kcalloc(sw->config.max_port_number + 1, sizeof(*sw->ports),
-				GFP_KERNEL);
+	sw->ports = kzalloc_objs(*sw->ports, sw->config.max_port_number + 1);
 	if (!sw->ports) {
 		ret = -ENOMEM;
 		goto err_free_sw_ports;
@@ -2576,7 +2580,7 @@ tb_switch_alloc_safe_mode(struct tb *tb, struct device *parent, u64 route)
 {
 	struct tb_switch *sw;
 
-	sw = kzalloc(sizeof(*sw), GFP_KERNEL);
+	sw = kzalloc_obj(*sw);
 	if (!sw)
 		return ERR_PTR(-ENOMEM);
 
@@ -2621,6 +2625,8 @@ int tb_switch_configure(struct tb_switch *sw)
 
 	sw->config.enabled = 1;
 
+	/* Set Notification Timeout to 255 ms for all routers */
+	sw->config.plug_events_delay = 0xff;
 	if (tb_switch_is_usb4(sw)) {
 		/*
 		 * For USB4 devices, we need to program the CM version
@@ -2632,7 +2638,6 @@ int tb_switch_configure(struct tb_switch *sw)
 			sw->config.cmuv = ROUTER_CS_4_CMUV_V1;
 		else
 			sw->config.cmuv = ROUTER_CS_4_CMUV_V2;
-		sw->config.plug_events_delay = 0xa;
 
 		/* Enumerate the switch */
 		ret = tb_sw_write(sw, (u32 *)&sw->config + 1, TB_CFG_SWITCH,
@@ -2653,7 +2658,7 @@ int tb_switch_configure(struct tb_switch *sw)
 
 		/* Enumerate the switch */
 		ret = tb_sw_write(sw, (u32 *)&sw->config + 1, TB_CFG_SWITCH,
-				  ROUTER_CS_1, 3);
+				  ROUTER_CS_1, 4);
 	}
 	if (ret)
 		return ret;
@@ -2725,6 +2730,7 @@ static int tb_switch_set_uuid(struct tb_switch *sw)
 
 static int tb_switch_add_dma_port(struct tb_switch *sw)
 {
+	struct tb_nhi *nhi = sw->tb->nhi;
 	u32 status;
 	int ret;
 
@@ -2784,8 +2790,10 @@ static int tb_switch_add_dma_port(struct tb_switch *sw)
 	 */
 	nvm_get_auth_status(sw, &status);
 	if (status) {
-		if (!tb_route(sw))
-			nvm_authenticate_complete_dma_port(sw);
+		if (!tb_route(sw)) {
+			if (nhi->ops->post_nvm_auth)
+				nhi->ops->post_nvm_auth(nhi);
+		}
 		return 0;
 	}
 
@@ -2799,8 +2807,10 @@ static int tb_switch_add_dma_port(struct tb_switch *sw)
 		return ret;
 
 	/* Now we can allow root port to suspend again */
-	if (!tb_route(sw))
-		nvm_authenticate_complete_dma_port(sw);
+	if (!tb_route(sw)) {
+		if (nhi->ops->post_nvm_auth)
+			nhi->ops->post_nvm_auth(nhi);
+	}
 
 	if (status) {
 		tb_sw_info(sw, "switch flash authentication failed\n");
@@ -2953,14 +2963,14 @@ static int tb_switch_lane_bonding_enable(struct tb_switch *sw)
 	int ret;
 
 	if (!tb_switch_lane_bonding_possible(sw))
-		return 0;
+		return -EOPNOTSUPP;
 
 	up = tb_upstream_port(sw);
 	down = tb_switch_downstream_port(sw);
 
 	if (!tb_port_width_supported(up, TB_LINK_WIDTH_DUAL) ||
 	    !tb_port_width_supported(down, TB_LINK_WIDTH_DUAL))
-		return 0;
+		return -EOPNOTSUPP;
 
 	/*
 	 * Both lanes need to be in CL0. Here we assume lane 0 already be in
@@ -3221,7 +3231,7 @@ int tb_switch_configure_link(struct tb_switch *sw)
  * @sw: Switch whose link is unconfigured
  *
  * Sets the link unconfigured so the @sw will be disconnected if the
- * domain exists sleep.
+ * domain exits sleep.
  */
 void tb_switch_unconfigure_link(struct tb_switch *sw)
 {
@@ -3310,6 +3320,10 @@ int tb_switch_add(struct tb_switch *sw)
 		dev_err(&sw->dev, "failed to add DMA port\n");
 		return ret;
 	}
+
+	ret = tb_switch_nvm_init(sw);
+	if (ret)
+		return ret;
 
 	if (!sw->safe_mode) {
 		tb_switch_credits_init(sw);
@@ -3603,6 +3617,20 @@ int tb_switch_resume(struct tb_switch *sw, bool runtime)
 				tb_port_warn(port,
 					     "lost during suspend, disconnecting\n");
 				tb_sw_set_unplugged(port->remote->sw);
+			} else if (port->xdomain) {
+				/*
+				 * If the user replaced the XDomain with
+				 * another router, this will succeed in
+				 * which case we must remove the XDomain
+				 * before adding the new router.
+				 */
+				err = tb_cfg_get_upstream_port(sw->tb->ctl,
+							       port->xdomain->route);
+				if (err > 0) {
+					tb_port_warn(port,
+						     "XDomain was disconnected\n");
+					port->xdomain->is_unplugged = true;
+				}
 			}
 		}
 	}

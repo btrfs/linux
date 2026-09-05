@@ -77,7 +77,7 @@ static struct pci_mmcfg_region *pci_mmconfig_alloc(int segment, int start,
 	if (addr == 0)
 		return NULL;
 
-	new = kzalloc(sizeof(*new), GFP_KERNEL);
+	new = kzalloc_obj(*new);
 	if (!new)
 		return NULL;
 
@@ -189,7 +189,7 @@ static const char *__init pci_mmcfg_intel_945(void)
 
 static const char *__init pci_mmcfg_amd_fam10h(void)
 {
-	u32 low, high, address;
+	u32 address;
 	u64 base, msr;
 	int i;
 	unsigned segnbits = 0, busnbits, end_bus;
@@ -198,12 +198,8 @@ static const char *__init pci_mmcfg_amd_fam10h(void)
 		return NULL;
 
 	address = MSR_FAM10H_MMIO_CONF_BASE;
-	if (rdmsr_safe(address, &low, &high))
+	if (rdmsrq_safe(address, &msr))
 		return NULL;
-
-	msr = high;
-	msr <<= 32;
-	msr |= low;
 
 	/* ECAM is not enabled */
 	if (!(msr & FAM10H_MMIO_CONF_ENABLE))

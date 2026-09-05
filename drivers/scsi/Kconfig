@@ -304,8 +304,6 @@ config ISCSI_TCP
 	tristate "iSCSI Initiator over TCP/IP"
 	depends on SCSI && INET
 	select CRC32
-	select CRYPTO
-	select CRYPTO_MD5
 	select SCSI_ISCSI_ATTRS
 	help
 	 The iSCSI Driver provides a host with the ability to access storage
@@ -476,7 +474,6 @@ config SCSI_ADVANSYS
 	tristate "AdvanSys SCSI support"
 	depends on SCSI
 	depends on (ISA || EISA || PCI) && HAS_IOPORT
-	depends on ISA_DMA_API || !ISA
 	help
 	  This is a driver for all SCSI host adapters manufactured by
 	  AdvanSys. It is documented in the kernel source in
@@ -502,6 +499,7 @@ source "drivers/scsi/esas2r/Kconfig"
 source "drivers/scsi/megaraid/Kconfig.megaraid"
 source "drivers/scsi/mpt3sas/Kconfig"
 source "drivers/scsi/mpi3mr/Kconfig"
+source "drivers/scsi/leapraid/Kconfig"
 source "drivers/scsi/smartpqi/Kconfig"
 
 config SCSI_HPTIOP
@@ -1151,6 +1149,7 @@ config SCSI_LPFC
 	depends on NVME_TARGET_FC || NVME_TARGET_FC=n
 	depends on NVME_FC || NVME_FC=n
 	select CRC_T10DIF
+	select CRC32
 	select IRQ_POLL
 	help
           This lpfc driver supports the Emulex LightPulse

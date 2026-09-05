@@ -63,8 +63,7 @@ pgd_alloc(struct mm_struct *mm)
 static inline unsigned long
 load_PCB(struct pcb_struct *pcb)
 {
-	register unsigned long sp __asm__("$30");
-	pcb->ksp = sp;
+	pcb->ksp = (unsigned long)current_stack_pointer;
 	return __reload_thread(pcb);
 }
 
@@ -208,12 +207,8 @@ callback_init(void * kernel_end)
 	return kernel_end;
 }
 
-/*
- * paging_init() sets up the memory map.
- */
-void __init paging_init(void)
+void __init arch_zone_limits_init(unsigned long *max_zone_pfn)
 {
-	unsigned long max_zone_pfn[MAX_NR_ZONES] = {0, };
 	unsigned long dma_pfn;
 
 	dma_pfn = virt_to_phys((char *)MAX_DMA_ADDRESS) >> PAGE_SHIFT;
@@ -221,11 +216,13 @@ void __init paging_init(void)
 
 	max_zone_pfn[ZONE_DMA] = dma_pfn;
 	max_zone_pfn[ZONE_NORMAL] = max_pfn;
+}
 
-	/* Initialize mem_map[].  */
-	free_area_init(max_zone_pfn);
-
-	/* Initialize the kernel's ZERO_PGE. */
+/*
+ * paging_init() initializes the kernel's ZERO_PGE.
+ */
+void __init paging_init(void)
+{
 	memset(absolute_pointer(ZERO_PGE), 0, PAGE_SIZE);
 }
 

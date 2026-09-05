@@ -16,7 +16,6 @@
 #define _MASTER_FILE
 #include "global.h"
 
-static char *viafb_name = "Via";
 static u32 pseudo_pal[17];
 
 /* video mode */
@@ -144,7 +143,7 @@ static void viafb_setup_fixinfo(struct fb_fix_screeninfo *fix,
 	struct viafb_par *viaparinfo)
 {
 	memset(fix, 0, sizeof(struct fb_fix_screeninfo));
-	strcpy(fix->id, viafb_name);
+	strcpy(fix->id, "Via");
 
 	fix->smem_start = viaparinfo->fbmem;
 	fix->smem_len = viaparinfo->fbmem_free;
@@ -840,7 +839,7 @@ static int viafb_cursor(struct fb_info *info, struct fb_cursor *cursor)
 		struct {
 			u8 data[CURSOR_SIZE];
 			u32 bak[CURSOR_SIZE / 4];
-		} *cr_data = kzalloc(sizeof(*cr_data), GFP_ATOMIC);
+		} *cr_data = kzalloc_obj(*cr_data, GFP_ATOMIC);
 		int size = ((cursor->image.width + 7) >> 3) *
 			cursor->image.height;
 

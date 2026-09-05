@@ -18,6 +18,7 @@
 #include <linux/trace_events.h>
 
 #include "trace.h"
+#include "trace_dynevent.h"
 
 #define MAX_BUF_LEN 256
 
@@ -61,7 +62,8 @@ trace_boot_set_instance_options(struct trace_array *tr, struct xbc_node *node)
 		v = memparse(p, NULL);
 		if (v < PAGE_SIZE)
 			pr_err("Buffer size is too small: %s\n", p);
-		if (tracing_resize_ring_buffer(tr, v, RING_BUFFER_ALL_CPUS) < 0)
+		if (trace_array_is_readonly(tr) ||
+		    tracing_resize_ring_buffer(tr, v, RING_BUFFER_ALL_CPUS) < 0)
 			pr_err("Failed to resize trace buffer to %s\n", p);
 	}
 
@@ -168,6 +170,93 @@ trace_boot_add_synth_event(struct xbc_node *node, const char *event)
 {
 	pr_err("Synthetic event is not supported.\n");
 	return -ENOTSUPP;
+}
+#endif
+
+#if defined(CONFIG_EPROBE_EVENTS) || defined(CONFIG_FPROBE_EVENTS)
+static int __init
+trace_boot_add_probe_event(struct xbc_node *node, const char *group,
+			    const char *event, char type, const char *type_name)
+{
+	struct xbc_node *anode;
+	char buf[MAX_BUF_LEN];
+	const char *val;
+	int ret = 0;
+
+	xbc_node_for_each_array_value(node, "probes", anode, val) {
+		if (val[0] == type && (val[1] == ':' || isspace(val[1]))) {
+			ret = strscpy(buf, val, MAX_BUF_LEN);
+			if (ret < 0) {
+				pr_err("%s command is too long: %s\n", type_name, val);
+				break;
+			}
+		} else {
+			ret = snprintf(buf, MAX_BUF_LEN, "%c:%s/%s %s", type, group, event, val);
+			if (ret >= MAX_BUF_LEN || ret < 0) {
+				pr_err("%s command is too long: %c:%s/%s %s\n",
+				       type_name, type, group, event, val);
+				ret = -E2BIG;
+				break;
+			}
+		}
+
+		ret = dyn_event_create(buf, NULL);
+		if (ret) {
+			pr_err("Failed to add %s: %s\n", type_name, buf);
+			break;
+		}
+	}
+
+	return ret;
+}
+#endif
+
+#ifdef CONFIG_EPROBE_EVENTS
+static inline int __init
+trace_boot_add_eprobe_event(struct xbc_node *node, const char *group,
+			    const char *event)
+{
+	return trace_boot_add_probe_event(node, group, event, 'e', "eprobe");
+}
+#else
+static inline int __init
+trace_boot_add_eprobe_event(struct xbc_node *node, const char *group,
+			    const char *event)
+{
+	pr_err("Event probe is not supported.\n");
+	return -EOPNOTSUPP;
+}
+#endif
+
+#ifdef CONFIG_FPROBE_EVENTS
+static inline int __init
+trace_boot_add_fprobe_event(struct xbc_node *node, const char *group,
+			    const char *event)
+{
+	return trace_boot_add_probe_event(node, group, event, 'f', "fprobe");
+}
+
+static inline int __init
+trace_boot_add_tprobe_event(struct xbc_node *node, const char *group,
+			    const char *event)
+{
+	return trace_boot_add_probe_event(node, group, event, 't', "tprobe");
+}
+#else
+static inline int __init
+trace_boot_add_fprobe_event(struct xbc_node *node, const char *group,
+			    const char *event)
+{
+	pr_err("Fprobe event is not supported.\n");
+	return -EOPNOTSUPP;
+}
+
+static inline int __init
+trace_boot_add_tprobe_event(struct xbc_node *node, const char *group,
+			    const char *event)
+{
+	pr_err("Tracepoint probe is not supported.\n");
+	return -EOPNOTSUPP;
 }
 #endif
 
@@ -476,6 +565,15 @@ trace_boot_init_one_event(struct trace_array *tr, struct xbc_node *gnode,
 	if (!strcmp(group, "synthetic"))
 		if (trace_boot_add_synth_event(enode, event) < 0)
 			return;
+	if (!strcmp(group, "eprobes"))
+		if (trace_boot_add_eprobe_event(enode, group, event) < 0)
+			return;
+	if (!strcmp(group, "fprobes"))
+		if (trace_boot_add_fprobe_event(enode, group, event) < 0)
+			return;
+	if (!strcmp(group, "tracepoints") || !strcmp(group, "tprobes"))
+		if (trace_boot_add_tprobe_event(enode, group, event) < 0)
+			return;
 
 	mutex_lock(&event_mutex);
 	file = find_event_file(tr, group, event);
@@ -597,7 +695,7 @@ trace_boot_enable_tracer(struct trace_array *tr, struct xbc_node *node)
 
 	p = xbc_node_find_value(node, "tracer", NULL);
 	if (p && *p != '\0') {
-		if (tracing_set_tracer(tr, p) < 0)
+		if (trace_array_is_readonly(tr) || tracing_set_tracer(tr, p) < 0)
 			pr_err("Failed to set given tracer: %s\n", p);
 	}
 

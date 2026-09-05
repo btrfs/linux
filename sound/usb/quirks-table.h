@@ -391,6 +391,20 @@ YAMAHA_DEVICE(0x105d, NULL),
 	}
 },
 {
+	USB_DEVICE(0x0499, 0x150d),
+	QUIRK_DRIVER_INFO {
+		/* .vendor_name = "Yamaha", */
+		/* .product_name = "CDS3000", */
+		QUIRK_DATA_COMPOSITE {
+			{ QUIRK_DATA_STANDARD_AUDIO(1) },
+			{ QUIRK_DATA_STANDARD_AUDIO(2) },
+			{ QUIRK_DATA_MIDI_YAMAHA(3) },
+			{ QUIRK_DATA_IGNORE(4) },
+			QUIRK_COMPOSITE_END
+		}
+	}
+},
+{
 	USB_DEVICE(0x0499, 0x1718),
 	QUIRK_DRIVER_INFO {
 		/* .vendor_name = "Yamaha", */
@@ -1800,6 +1814,28 @@ YAMAHA_DEVICE(0x7010, "UB99"),
 		}
 	}
 },
+{
+	/*
+	 * M-Audio Venom
+	 *
+	 * The AudioControl interface times out on every GET_CUR request,
+	 * which adds around 47 seconds to the card registration and
+	 * freezes the device, blocking streaming.
+	 * Using an explicit composite quirk to skip the mixer entirely.
+	 */
+	USB_DEVICE_VENDOR_SPEC(0x0763, 0x2084),
+	QUIRK_DRIVER_INFO {
+		.vendor_name = "M-Audio",
+		.product_name = "Venom",
+		QUIRK_DATA_COMPOSITE {
+			{ QUIRK_DATA_IGNORE(0) },
+			{ QUIRK_DATA_STANDARD_AUDIO(1) },
+			{ QUIRK_DATA_STANDARD_AUDIO(2) },
+			{ QUIRK_DATA_STANDARD_MIDI(3) },
+			QUIRK_COMPOSITE_END
+		}
+	}
+},
 
 /* Casio devices */
 {
@@ -2129,6 +2165,14 @@ YAMAHA_DEVICE(0x7010, "UB99"),
 			{ QUIRK_DATA_RAW_BYTES(1) },
 			QUIRK_COMPOSITE_END
 		}
+	}
+},
+{
+	USB_DEVICE(0x1235, 0x001e),
+	QUIRK_DRIVER_INFO {
+		/* .vendor_name = "Novation", */
+		/* .product_name = "Mininova", */
+		QUIRK_DATA_RAW_BYTES(0)
 	}
 },
 {
@@ -2652,7 +2696,67 @@ YAMAHA_DEVICE(0x7010, "UB99"),
 		}
 	}
 },
+
 #endif /* disabled */
+
+{
+	/*
+	 * The AudioBox USB advertises S24_3LE as the only supported format
+	 * for both playback and capture. It does not support S16_LE despite
+	 * being a USB full-speed device.
+	 */
+	USB_DEVICE(0x194f, 0x0301),
+	QUIRK_DRIVER_INFO {
+		.vendor_name = "PreSonus",
+		.product_name = "AudioBox USB",
+		QUIRK_DATA_COMPOSITE {
+			{ QUIRK_DATA_IGNORE(0) },
+			{
+				QUIRK_DATA_AUDIOFORMAT(2) {
+					.formats = SNDRV_PCM_FMTBIT_S24_3LE,
+					.fmt_bits = 24,
+					.channels = 2,
+					.iface = 2,
+					.altsetting = 1,
+					.altset_idx = 1,
+					.attributes = 0,
+					.endpoint = 0x01,
+					.ep_attr = USB_ENDPOINT_XFER_ISOC,
+					.rates = SNDRV_PCM_RATE_44100 |
+						 SNDRV_PCM_RATE_48000,
+					.rate_min = 44100,
+					.rate_max = 48000,
+					.nr_rates = 2,
+					.rate_table = (unsigned int[]) {
+						44100, 48000
+					},
+				}
+			},
+			{
+				QUIRK_DATA_AUDIOFORMAT(3) {
+					.formats = SNDRV_PCM_FMTBIT_S24_3LE,
+					.fmt_bits = 24,
+					.channels = 2,
+					.iface = 3,
+					.altsetting = 1,
+					.altset_idx = 1,
+					.attributes = 0,
+					.endpoint = 0x82,
+					.ep_attr = USB_ENDPOINT_XFER_ISOC,
+					.rates = SNDRV_PCM_RATE_44100 |
+						 SNDRV_PCM_RATE_48000,
+					.rate_min = 44100,
+					.rate_max = 48000,
+					.nr_rates = 2,
+					.rate_table = (unsigned int[]) {
+						44100, 48000
+					},
+				}
+			},
+			QUIRK_COMPOSITE_END
+		}
+	}
+},
 
 {
 	/*
@@ -3233,6 +3337,73 @@ YAMAHA_DEVICE(0x7010, "UB99"),
 					.nr_rates = 3,
 					.rate_table = (unsigned int[]) { 44100, 48000, 96000 }
 				}
+			},
+			QUIRK_COMPOSITE_END
+		}
+	}
+},
+{
+	/*
+	 * Pioneer DJ / AlphaTheta DJM-S11
+	 */
+	USB_DEVICE(0x2b73, 0x0037),
+	QUIRK_DRIVER_INFO {
+		QUIRK_DATA_COMPOSITE {
+			{
+				QUIRK_DATA_STANDARD_MIXER(0)
+			},
+			{
+				QUIRK_DATA_AUDIOFORMAT(1) {
+					.formats = SNDRV_PCM_FMTBIT_S24_3LE,
+					.channels = 14,
+					.iface = 1,
+					.altsetting = 1,
+					.altset_idx = 1,
+					.endpoint = 0x01,
+					.ep_attr = USB_ENDPOINT_XFER_ISOC |
+						   USB_ENDPOINT_SYNC_ASYNC,
+					.rates = SNDRV_PCM_RATE_48000,
+					.rate_min = 48000,
+					.rate_max = 48000,
+					.nr_rates = 1,
+					.rate_table = (unsigned int[]) { 48000 },
+					.clock = 1,
+					.fmt_type = UAC_FORMAT_TYPE_I
+				}
+			},
+			{
+				QUIRK_DATA_AUDIOFORMAT(2) {
+					.formats = SNDRV_PCM_FMTBIT_S24_3LE,
+					.channels = 10,
+					.iface = 2,
+					.altsetting = 1,
+					.altset_idx = 1,
+					.endpoint = 0x82,
+					.ep_attr = USB_ENDPOINT_XFER_ISOC |
+						   USB_ENDPOINT_SYNC_ASYNC |
+						   USB_ENDPOINT_USAGE_IMPLICIT_FB,
+					.rates = SNDRV_PCM_RATE_48000,
+					.rate_min = 48000,
+					.rate_max = 48000,
+					.nr_rates = 1,
+					.rate_table = (unsigned int[]) { 48000 },
+					.clock = 1,
+					.fmt_type = UAC_FORMAT_TYPE_I
+				}
+			},
+			{
+				/* Audio Control (unknown purpose) */
+				.ifnum = 3,
+				.type = QUIRK_IGNORE_INTERFACE
+			},
+			{
+				.ifnum = 4,
+				.type = QUIRK_MIDI_STANDARD_INTERFACE
+			},
+			{
+				/* HID */
+				.ifnum = 5,
+				.type = QUIRK_IGNORE_INTERFACE
 			},
 			QUIRK_COMPOSITE_END
 		}
@@ -3899,6 +4070,71 @@ YAMAHA_DEVICE(0x7010, "UB99"),
 
 QUIRK_RME_DIGIFACE(0x3f8c),
 QUIRK_RME_DIGIFACE(0x3fa0),
+
+#define QUIRK_AF16RIG(channel_count_, alt_setting_,			\
+	              low_rate_, high_rate_, pack_size_,		\
+		      clock_, interface_, endpoint_)			\
+	{ 								\
+		QUIRK_DATA_AUDIOFORMAT(interface_) {			\
+			.formats = SNDRV_PCM_FMTBIT_S32_LE,   		\
+			.channels = channel_count_,			\
+			.fmt_type = UAC_FORMAT_TYPE_I_PCM,		\
+			.fmt_bits = 24,					\
+			.fmt_sz = 4,					\
+			.iface = interface_,				\
+			.altsetting = alt_setting_,			\
+			.altset_idx = alt_setting_,			\
+			.endpoint = endpoint_,				\
+			.ep_attr = USB_ENDPOINT_XFER_ISOC |		\
+					USB_ENDPOINT_SYNC_ASYNC,	\
+			.datainterval = 1,				\
+			.protocol = UAC_VERSION_2,			\
+			.maxpacksize = pack_size_,			\
+			.rates = SNDRV_PCM_RATE_##low_rate_ |		\
+					SNDRV_PCM_RATE_##high_rate_,	\
+			.rate_min = low_rate_,				\
+			.rate_max = high_rate_,				\
+			.nr_rates = 2,					\
+			.rate_table = (unsigned int[]) {		\
+					low_rate_, high_rate_ },	\
+			.clock = clock_,				\
+		}							\
+	}
+
+#define QUIRK_AF16RIG_CLOCK(clock)					\
+	QUIRK_AF16RIG(34, 1,  44100,  48000, 0x3b8, clock, 1, 0x01),	\
+	QUIRK_AF16RIG(34, 1,  44100,  48000, 0x3b8, clock, 2, 0x81),	\
+	QUIRK_AF16RIG(18, 2,  88200,  96000, 0x3a8, clock, 1, 0x01),	\
+	QUIRK_AF16RIG(18, 2,  88200,  96000, 0x3a8, clock, 2, 0x81),	\
+	QUIRK_AF16RIG(10, 3, 176400, 192000, 0x3e8, clock, 1, 0x01),	\
+	QUIRK_AF16RIG(10, 3, 176400, 192000, 0x3e8, clock, 2, 0x81)
+
+/* Arturia AudioFuse 16Rig Audio */
+/* AF16Rig MIDI has USB PID 0xaf21 and appears to work OK without quirks */
+{
+	USB_DEVICE(0x1c75, 0xaf20),
+	QUIRK_DRIVER_INFO {
+		.vendor_name = "Arturia",
+		.product_name = "AF16Rig",
+		QUIRK_DATA_COMPOSITE {
+			{ QUIRK_DATA_STANDARD_MIXER(0) },
+			QUIRK_AF16RIG_CLOCK(41), /* Internal clock */
+#if 0
+/* These are disabled because I don't have the required hardware to test
+ * them. I suspect that the ADAT clock might not follow 176400 or 192000
+ * because the AF16Rig won't accept ADAT audio data at those rates.
+ */
+			QUIRK_AF16RIG_CLOCK(43), /* ADAT clock */
+			QUIRK_AF16RIG_CLOCK(44), /* BNC word clock */
+#endif
+			{ QUIRK_DATA_IGNORE(3) }, /* Firmware update */
+			QUIRK_COMPOSITE_END
+		}
+	}
+},
+
+#undef QUIRK_AF16RIG_CLOCK
+#undef QUIRK_AF16RIG
 
 #undef USB_DEVICE_VENDOR_SPEC
 #undef USB_AUDIO_DEVICE

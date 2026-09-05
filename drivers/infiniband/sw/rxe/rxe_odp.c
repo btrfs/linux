@@ -87,14 +87,9 @@ int rxe_odp_mr_init_user(struct rxe_dev *rxe, u64 start, u64 length,
 
 	rxe_mr_init(access_flags, mr);
 
-	if (!start && length == U64_MAX) {
-		if (iova != 0)
-			return -EINVAL;
-		if (!(rxe->attr.odp_caps.general_caps & IB_ODP_SUPPORT_IMPLICIT))
-			return -EINVAL;
-
-		/* Never reach here, for implicit ODP is not implemented. */
-	}
+	/* Implicit ODP (start=0, length=U64_MAX) is not implemented. */
+	if (!start && length == U64_MAX)
+		return -EOPNOTSUPP;
 
 	umem_odp = ib_umem_odp_get(&rxe->ib_dev, start, length, access_flags,
 				   &rxe_mn_ops);
@@ -110,11 +105,11 @@ int rxe_odp_mr_init_user(struct rxe_dev *rxe, u64 start, u64 length,
 	mr->access = access_flags;
 	mr->ibmr.length = length;
 	mr->ibmr.iova = iova;
-	mr->page_offset = ib_umem_offset(&umem_odp->umem);
 
 	err = rxe_odp_init_pages(mr);
 	if (err) {
 		ib_umem_odp_release(umem_odp);
+		mr->umem = NULL;
 		return err;
 	}
 
@@ -179,8 +174,10 @@ static int rxe_odp_map_range_and_lock(struct rxe_mr *mr, u64 iova, int length, u
 			return err;
 
 		need_fault = rxe_check_pagefault(umem_odp, iova, length);
-		if (need_fault)
+		if (need_fault) {
+			mutex_unlock(&umem_odp->umem_mutex);
 			return -EFAULT;
+		}
 	}
 
 	return 0;
@@ -358,7 +355,6 @@ int rxe_odp_flush_pmem_iova(struct rxe_mr *mr, u64 iova,
 
 		length -= bytes;
 		iova += bytes;
-		page_offset = 0;
 	}
 
 	mutex_unlock(&umem_odp->umem_mutex);
@@ -523,7 +519,7 @@ static int rxe_ib_advise_mr_prefetch(struct ib_pd *ibpd,
 					       num_sge);
 
 	/* Asynchronous call is "best-effort" and allowed to fail */
-	work = kvzalloc(struct_size(work, frags, num_sge), GFP_KERNEL);
+	work = kvzalloc_flex(*work, frags, num_sge);
 	if (!work)
 		return -ENOMEM;
 
@@ -545,7 +541,7 @@ static int rxe_ib_advise_mr_prefetch(struct ib_pd *ibpd,
 		work->frags[i].mr = mr;
 	}
 
-	queue_work(system_unbound_wq, &work->work);
+	queue_work(rxe_wq, &work->work);
 
 	return 0;
 

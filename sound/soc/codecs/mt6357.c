@@ -597,7 +597,7 @@ static int mt_mic_type_event(struct snd_soc_dapm_widget *w,
 {
 	struct snd_soc_component *cmpnt = snd_soc_dapm_to_component(w->dapm);
 	struct mt6357_priv *priv = snd_soc_component_get_drvdata(cmpnt);
-	unsigned int mic_type = dapm_kcontrol_get_value(w->kcontrols[0]);
+	unsigned int mic_type = snd_soc_dapm_kcontrol_get_value(w->kcontrols[0]);
 
 	switch (event) {
 	case SND_SOC_DAPM_PRE_PMU:
@@ -1834,8 +1834,8 @@ static int mt6357_platform_driver_probe(struct platform_device *pdev)
 }
 
 static const struct platform_device_id mt6357_platform_ids[] = {
-	{"mt6357-sound", 0},
-	{ /* sentinel */ },
+	{ .name = "mt6357-sound" },
+	{ /* sentinel */ }
 };
 MODULE_DEVICE_TABLE(platform, mt6357_platform_ids);
 
