@@ -442,7 +442,7 @@ to protect the cache and all the objects within it. Here's the code::
     {
             struct object *obj;
 
-            if ((obj = kmalloc(sizeof(*obj), GFP_KERNEL)) == NULL)
+            if ((obj = kmalloc_obj(*obj)) == NULL)
                     return -ENOMEM;
 
             strscpy(obj->name, name, sizeof(obj->name));
@@ -471,7 +471,7 @@ to protect the cache and all the objects within it. Here's the code::
             obj = __cache_find(id);
             if (obj) {
                     ret = 0;
-                    strcpy(name, obj->name);
+                    strscpy(name, obj->name);
             }
             mutex_unlock(&cache_lock);
             return ret;
@@ -517,7 +517,7 @@ which are taken away, and the ``+`` are lines which are added.
              struct object *obj;
     +        unsigned long flags;
 
-             if ((obj = kmalloc(sizeof(*obj), GFP_KERNEL)) == NULL)
+             if ((obj = kmalloc_obj(*obj)) == NULL)
                      return -ENOMEM;
     @@ -63,30 +64,33 @@
              obj->id = id;
@@ -553,7 +553,7 @@ which are taken away, and the ``+`` are lines which are added.
              obj = __cache_find(id);
              if (obj) {
                      ret = 0;
-                     strcpy(name, obj->name);
+                     strscpy(name, obj->name);
              }
     -        mutex_unlock(&cache_lock);
     +        spin_unlock_irqrestore(&cache_lock, flags);
@@ -676,7 +676,7 @@ Here is the code::
              obj = __cache_find(id);
     -        if (obj) {
     -                ret = 0;
-    -                strcpy(name, obj->name);
+    -                strscpy(name, obj->name);
     -        }
     +        if (obj)
     +                __object_get(obj);
@@ -1317,7 +1317,7 @@ from user context, and can sleep.
 
    -  put_user()
 
--  kmalloc(GP_KERNEL) <kmalloc>`
+-  kmalloc(GFP_KERNEL) <kmalloc>
 
 -  mutex_lock_interruptible() and
    mutex_lock()

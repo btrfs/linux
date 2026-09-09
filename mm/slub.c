@@ -1,13 +1,15 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * SLUB: A slab allocator that limits cache line use instead of queuing
- * objects in per cpu and per node lists.
+ * SLUB: A slab allocator with low overhead percpu array caches and mostly
+ * lockless freeing of objects to slabs in the slowpath.
  *
- * The allocator synchronizes using per slab locks or atomic operations
- * and only uses a centralized lock to manage a pool of partial slabs.
+ * The allocator synchronizes using spin_trylock for percpu arrays in the
+ * fastpath, and cmpxchg_double (or bit spinlock) for slowpath freeing.
+ * Uses a centralized lock to manage a pool of partial slabs.
  *
  * (C) 2007 SGI, Christoph Lameter
  * (C) 2011 Linux Foundation, Christoph Lameter
+ * (C) 2025 SUSE, Vlastimil Babka
  */
 
 #include <linux/mm.h>
@@ -41,6 +43,7 @@
 #include <linux/prefetch.h>
 #include <linux/memcontrol.h>
 #include <linux/random.h>
+#include <linux/prandom.h>
 #include <kunit/test.h>
 #include <kunit/test-bug.h>
 #include <linux/sort.h>
@@ -50,14 +53,17 @@
 #include <trace/events/kmem.h>
 
 #include "internal.h"
+#include "page_alloc.h"
 
 /*
  * Lock order:
- *   1. slab_mutex (Global Mutex)
- *   2. node->list_lock (Spinlock)
- *   3. kmem_cache->cpu_slab->lock (Local lock)
- *   4. slab_lock(slab) (Only on some arches)
- *   5. object_map_lock (Only for debugging)
+ *   0.  cpu_hotplug_lock
+ *   1.  slab_mutex (Global Mutex)
+ *   2a. kmem_cache->cpu_sheaves->lock (Local trylock)
+ *   2b. barn->lock (Spinlock)
+ *   2c. node->list_lock (Spinlock)
+ *   3.  slab_lock(slab) (Only on some arches)
+ *   4.  object_map_lock (Only for debugging)
  *
  *   slab_mutex
  *
@@ -78,31 +84,38 @@
  *	C. slab->objects	-> Number of objects in slab
  *	D. slab->frozen		-> frozen state
  *
+ *   SL_partial slabs
+ *
+ *   Slabs on node partial list have at least one free object. A limited number
+ *   of slabs on the list can be fully free (slab->inuse == 0), until we start
+ *   discarding them. These slabs are marked with SL_partial, and the flag is
+ *   cleared while removing them, usually to grab their freelist afterwards.
+ *   This clearing also exempts them from list management. Please see
+ *   __slab_free() for more details.
+ *
+ *   Full slabs
+ *
+ *   For caches without debugging enabled, full slabs (slab->inuse ==
+ *   slab->objects and slab->freelist == NULL) are not placed on any list.
+ *   The __slab_free() freeing the first object from such a slab will place
+ *   it on the partial list. Caches with debugging enabled place such slab
+ *   on the full list and use different allocation and freeing paths.
+ *
  *   Frozen slabs
  *
- *   If a slab is frozen then it is exempt from list management. It is
- *   the cpu slab which is actively allocated from by the processor that
- *   froze it and it is not on any list. The processor that froze the
- *   slab is the one who can perform list operations on the slab. Other
- *   processors may put objects onto the freelist but the processor that
- *   froze the slab is the only one that can retrieve the objects from the
- *   slab's freelist.
- *
- *   CPU partial slabs
- *
- *   The partially empty slabs cached on the CPU partial list are used
- *   for performance reasons, which speeds up the allocation process.
- *   These slabs are not frozen, but are also exempt from list management,
- *   by clearing the SL_partial flag when moving out of the node
- *   partial list. Please see __slab_free() for more details.
+ *   If a slab is frozen then it is exempt from list management. It is used to
+ *   indicate a slab that has failed consistency checks and thus cannot be
+ *   allocated from anymore - it is also marked as full. Any previously
+ *   allocated objects will be simply leaked upon freeing instead of attempting
+ *   to modify the potentially corrupted freelist and metadata.
  *
  *   To sum up, the current scheme is:
- *   - node partial slab: SL_partial && !frozen
- *   - cpu partial slab: !SL_partial && !frozen
- *   - cpu slab: !SL_partial && frozen
- *   - full slab: !SL_partial && !frozen
+ *   - node partial slab:            SL_partial && !full && !frozen
+ *   - taken off partial list:      !SL_partial && !full && !frozen
+ *   - full slab, not on any list:  !SL_partial &&  full && !frozen
+ *   - frozen due to inconsistency: !SL_partial &&  full &&  frozen
  *
- *   list_lock
+ *   node->list_lock (spinlock)
  *
  *   The list_lock protects the partial and full list on each node and
  *   the partial slab counter. If taken then no new slabs may be added or
@@ -112,47 +125,46 @@
  *
  *   The list_lock is a centralized lock and thus we avoid taking it as
  *   much as possible. As long as SLUB does not have to handle partial
- *   slabs, operations can continue without any centralized lock. F.e.
- *   allocating a long series of objects that fill up slabs does not require
- *   the list lock.
+ *   slabs, operations can continue without any centralized lock.
  *
  *   For debug caches, all allocations are forced to go through a list_lock
  *   protected region to serialize against concurrent validation.
  *
- *   cpu_slab->lock local lock
+ *   cpu_sheaves->lock (local_trylock)
  *
- *   This locks protect slowpath manipulation of all kmem_cache_cpu fields
- *   except the stat counters. This is a percpu structure manipulated only by
- *   the local cpu, so the lock protects against being preempted or interrupted
- *   by an irq. Fast path operations rely on lockless operations instead.
+ *   This lock protects fastpath operations on the percpu sheaves. On !RT it
+ *   only disables preemption and does no atomic operations. As long as the main
+ *   or spare sheaf can handle the allocation or free, there is no other
+ *   overhead.
  *
- *   On PREEMPT_RT, the local lock neither disables interrupts nor preemption
- *   which means the lockless fastpath cannot be used as it might interfere with
- *   an in-progress slow path operations. In this case the local lock is always
- *   taken but it still utilizes the freelist for the common operations.
+ *   barn->lock (spinlock)
  *
- *   lockless fastpaths
+ *   This lock protects the operations on per-NUMA-node barn. It can quickly
+ *   serve an empty or full sheaf if available, and avoid more expensive refill
+ *   or flush operation.
  *
- *   The fast path allocation (slab_alloc_node()) and freeing (do_slab_free())
- *   are fully lockless when satisfied from the percpu slab (and when
- *   cmpxchg_double is possible to use, otherwise slab_lock is taken).
- *   They also don't disable preemption or migration or irqs. They rely on
- *   the transaction id (tid) field to detect being preempted or moved to
- *   another cpu.
+ *   Lockless freeing
+ *
+ *   Objects may have to be freed to their slabs when they are from a remote
+ *   node (where we want to avoid filling local sheaves with remote objects)
+ *   or when there are too many full sheaves. On architectures supporting
+ *   cmpxchg_double this is done by a lockless update of slab's freelist and
+ *   counters, otherwise slab_lock is taken. This only needs to take the
+ *   list_lock if it's a first free to a full slab, or when a slab becomes empty
+ *   after the free.
  *
  *   irq, preemption, migration considerations
  *
- *   Interrupts are disabled as part of list_lock or local_lock operations, or
+ *   Interrupts are disabled as part of list_lock or barn lock operations, or
  *   around the slab_lock operation, in order to make the slab allocator safe
  *   to use in the context of an irq.
+ *   Preemption is disabled as part of local_trylock operations.
+ *   kmalloc_nolock() and kfree_nolock() are safe in NMI context but see
+ *   their limitations.
  *
- *   In addition, preemption (or migration on PREEMPT_RT) is disabled in the
- *   allocation slowpath, bulk allocation, and put_cpu_partial(), so that the
- *   local cpu doesn't change in the process and e.g. the kmem_cache_cpu pointer
- *   doesn't have to be revalidated in each section protected by the local lock.
- *
- * SLUB assigns one slab for allocation to each processor.
- * Allocations only occur from these slabs called cpu slabs.
+ * SLUB assigns two object arrays called sheaves for caching allocations and
+ * frees on each cpu, with a NUMA node shared barn for balancing between cpus.
+ * Allocations and frees are primarily served from these sheaves.
  *
  * Slabs with free elements are kept on a partial list and during regular
  * operations no list for full slabs is used. If an object in a full slab is
@@ -160,25 +172,8 @@
  * We track full slabs for debugging purposes though because otherwise we
  * cannot scan all objects.
  *
- * Slabs are freed when they become empty. Teardown and setup is
- * minimal so we rely on the page allocators per cpu caches for
- * fast frees and allocs.
- *
- * slab->frozen		The slab is frozen and exempt from list processing.
- * 			This means that the slab is dedicated to a purpose
- * 			such as satisfying allocations for a specific
- * 			processor. Objects may be freed in the slab while
- * 			it is frozen but slab_free will then skip the usual
- * 			list operations. It is up to the processor holding
- * 			the slab to integrate the slab into the slab lists
- * 			when the slab is no longer needed.
- *
- * 			One use of this flag is to mark slabs that are
- * 			used for allocations. Then such a slab becomes a cpu
- * 			slab. The cpu slab may be equipped with an additional
- * 			freelist that allows lockless access to
- * 			free objects in addition to the regular freelist
- * 			that requires the slab lock.
+ * Slabs are freed when they become empty. Teardown and setup is minimal so we
+ * rely on the page allocators per cpu caches for fast frees and allocs.
  *
  * SLAB_DEBUG_FLAGS	Slab requires special handling due to debug
  * 			options set. This moves	slab handling out of
@@ -201,28 +196,6 @@ enum slab_flags {
 	SL_pfmemalloc = PG_active,	/* Historical reasons for this bit */
 };
 
-/*
- * We could simply use migrate_disable()/enable() but as long as it's a
- * function call even on !PREEMPT_RT, use inline preempt_disable() there.
- */
-#ifndef CONFIG_PREEMPT_RT
-#define slub_get_cpu_ptr(var)		get_cpu_ptr(var)
-#define slub_put_cpu_ptr(var)		put_cpu_ptr(var)
-#define USE_LOCKLESS_FAST_PATH()	(true)
-#else
-#define slub_get_cpu_ptr(var)		\
-({					\
-	migrate_disable();		\
-	this_cpu_ptr(var);		\
-})
-#define slub_put_cpu_ptr(var)		\
-do {					\
-	(void)(var);			\
-	migrate_enable();		\
-} while (0)
-#define USE_LOCKLESS_FAST_PATH()	(false)
-#endif
-
 #ifndef CONFIG_SLUB_TINY
 #define __fastpath_inline __always_inline
 #else
@@ -241,11 +214,36 @@ DEFINE_STATIC_KEY_FALSE(slub_debug_enabled);
 static DEFINE_STATIC_KEY_FALSE(strict_numa);
 #endif
 
-/* Structure holding parameters for get_partial() call chain */
-struct partial_context {
+#ifdef CONFIG_MEM_ALLOC_PROFILING
+DEFINE_STATIC_KEY_MAYBE(CONFIG_MEM_ALLOC_PROFILING_ENABLED_BY_DEFAULT,
+			slab_obj_ext_has_codetag_key);
+#endif
+
+/* Structure holding extra parameters for slab allocations */
+struct slab_alloc_context {
+	unsigned long caller_addr;
+	size_t orig_size;
+	unsigned int alloc_flags;
+	struct list_lru *lru;
+};
+
+/* Structure holding parameters for get_partial_node_bulk() */
+struct partial_bulk_context {
 	gfp_t flags;
-	unsigned int orig_size;
-	void *object;
+	unsigned int min_objects;
+	unsigned int max_objects;
+	struct list_head slabs;
+};
+
+/* Structure used to iterate over objects within a slab */
+struct slab_obj_iter {
+	unsigned long pos;
+	void *start;
+#ifdef CONFIG_SLAB_FREELIST_RANDOM
+	unsigned long freelist_count;
+	unsigned long page_limit;
+	bool random;
+#endif
 };
 
 static inline bool kmem_cache_debug(struct kmem_cache *s)
@@ -259,15 +257,6 @@ void *fixup_red_left(struct kmem_cache *s, void *p)
 		p += s->red_left_pad;
 
 	return p;
-}
-
-static inline bool kmem_cache_has_cpu_partial(struct kmem_cache *s)
-{
-#ifdef CONFIG_SLUB_CPU_PARTIAL
-	return !kmem_cache_debug(s);
-#else
-	return false;
-#endif
 }
 
 /*
@@ -350,54 +339,45 @@ enum track_item { TRACK_ALLOC, TRACK_FREE };
 
 #ifdef SLAB_SUPPORTS_SYSFS
 static int sysfs_slab_add(struct kmem_cache *);
-static int sysfs_slab_alias(struct kmem_cache *, const char *);
+static int __init slab_kset_init(void);
+static void __init slab_sysfs_process_aliases(void);
 #else
 static inline int sysfs_slab_add(struct kmem_cache *s) { return 0; }
-static inline int sysfs_slab_alias(struct kmem_cache *s, const char *p)
-							{ return 0; }
+static inline int slab_kset_init(void) { return 0; }
+static inline void slab_sysfs_process_aliases(void) { }
 #endif
 
 #if defined(CONFIG_DEBUG_FS) && defined(CONFIG_SLUB_DEBUG)
 static void debugfs_slab_add(struct kmem_cache *);
+static void __init slab_debugfs_root_init(void);
 #else
 static inline void debugfs_slab_add(struct kmem_cache *s) { }
+static inline void slab_debugfs_root_init(void) { }
 #endif
 
+enum add_mode {
+	ADD_TO_HEAD,
+	ADD_TO_TAIL,
+};
+
 enum stat_item {
-	ALLOC_PCS,		/* Allocation from percpu sheaf */
-	ALLOC_FASTPATH,		/* Allocation from cpu slab */
-	ALLOC_SLOWPATH,		/* Allocation by getting a new cpu slab */
-	FREE_PCS,		/* Free to percpu sheaf */
+	ALLOC_FASTPATH,		/* Allocation from percpu sheaves */
+	ALLOC_SLOWPATH,		/* Allocation from partial or new slab */
 	FREE_RCU_SHEAF,		/* Free to rcu_free sheaf */
 	FREE_RCU_SHEAF_FAIL,	/* Failed to free to a rcu_free sheaf */
-	FREE_FASTPATH,		/* Free to cpu slab */
-	FREE_SLOWPATH,		/* Freeing not to cpu slab */
-	FREE_FROZEN,		/* Freeing to frozen slab */
+	FREE_FASTPATH,		/* Free to percpu sheaves */
+	FREE_SLOWPATH,		/* Free to a slab */
 	FREE_ADD_PARTIAL,	/* Freeing moves slab to partial list */
 	FREE_REMOVE_PARTIAL,	/* Freeing removes last object */
-	ALLOC_FROM_PARTIAL,	/* Cpu slab acquired from node partial list */
-	ALLOC_SLAB,		/* Cpu slab acquired from page allocator */
-	ALLOC_REFILL,		/* Refill cpu slab from slab freelist */
-	ALLOC_NODE_MISMATCH,	/* Switching cpu slab */
+	ALLOC_SLAB,		/* New slab acquired from page allocator */
+	ALLOC_NODE_MISMATCH,	/* Requested node different from cpu sheaf */
 	FREE_SLAB,		/* Slab freed to the page allocator */
-	CPUSLAB_FLUSH,		/* Abandoning of the cpu slab */
-	DEACTIVATE_FULL,	/* Cpu slab was full when deactivated */
-	DEACTIVATE_EMPTY,	/* Cpu slab was empty when deactivated */
-	DEACTIVATE_TO_HEAD,	/* Cpu slab was moved to the head of partials */
-	DEACTIVATE_TO_TAIL,	/* Cpu slab was moved to the tail of partials */
-	DEACTIVATE_REMOTE_FREES,/* Slab contained remotely freed objects */
-	DEACTIVATE_BYPASS,	/* Implicit deactivation */
 	ORDER_FALLBACK,		/* Number of times fallback was necessary */
-	CMPXCHG_DOUBLE_CPU_FAIL,/* Failures of this_cpu_cmpxchg_double */
 	CMPXCHG_DOUBLE_FAIL,	/* Failures of slab freelist update */
-	CPU_PARTIAL_ALLOC,	/* Used cpu partial on alloc */
-	CPU_PARTIAL_FREE,	/* Refill cpu partial on free */
-	CPU_PARTIAL_NODE,	/* Refill cpu partial from node partial */
-	CPU_PARTIAL_DRAIN,	/* Drain cpu partial to node partial */
 	SHEAF_FLUSH,		/* Objects flushed from a sheaf */
 	SHEAF_REFILL,		/* Objects refilled to a sheaf */
-	SHEAF_ALLOC,		/* Allocation of an empty sheaf */
-	SHEAF_FREE,		/* Freeing of an empty sheaf */
+	SHEAF_ALLOC,		/* Allocation of an empty sheaf including oversized ones */
+	SHEAF_FREE,		/* Freeing of an empty sheaf including oversized ones */
 	BARN_GET,		/* Got full sheaf from barn */
 	BARN_GET_FAIL,		/* Failed to get full sheaf from barn */
 	BARN_PUT,		/* Put full sheaf to barn */
@@ -410,29 +390,11 @@ enum stat_item {
 	NR_SLUB_STAT_ITEMS
 };
 
-#ifndef CONFIG_SLUB_TINY
-/*
- * When changing the layout, make sure freelist and tid are still compatible
- * with this_cpu_cmpxchg_double() alignment requirements.
- */
-struct kmem_cache_cpu {
-	union {
-		struct {
-			void **freelist;	/* Pointer to next available object */
-			unsigned long tid;	/* Globally unique transaction id */
-		};
-		freelist_aba_t freelist_tid;
-	};
-	struct slab *slab;	/* The slab from which we are allocating */
-#ifdef CONFIG_SLUB_CPU_PARTIAL
-	struct slab *partial;	/* Partially allocated slabs */
-#endif
-	local_trylock_t lock;	/* Protects the fields above */
 #ifdef CONFIG_SLUB_STATS
+struct kmem_cache_stats {
 	unsigned int stat[NR_SLUB_STAT_ITEMS];
-#endif
 };
-#endif /* CONFIG_SLUB_TINY */
+#endif
 
 static inline void stat(const struct kmem_cache *s, enum stat_item si)
 {
@@ -441,7 +403,7 @@ static inline void stat(const struct kmem_cache *s, enum stat_item si)
 	 * The rmw is racy on a preemptible kernel but this is acceptable, so
 	 * avoid this_cpu_add()'s irq-disable overhead.
 	 */
-	raw_cpu_inc(s->cpu_slab->stat[si]);
+	raw_cpu_inc(s->cpu_stats->stat[si]);
 #endif
 }
 
@@ -449,7 +411,7 @@ static inline
 void stat_add(const struct kmem_cache *s, enum stat_item si, int v)
 {
 #ifdef CONFIG_SLUB_STATS
-	raw_cpu_add(s->cpu_slab->stat[si], v);
+	raw_cpu_add(s->cpu_stats->stat[si], v);
 #endif
 }
 
@@ -468,8 +430,13 @@ struct slab_sheaf {
 	union {
 		struct rcu_head rcu_head;
 		struct list_head barn_list;
+		/* only used to defer call_rcu() in unknown context */
+		struct llist_node llnode;
 		/* only used for prefilled sheafs */
-		unsigned int capacity;
+		struct {
+			unsigned int capacity;
+			bool pfmemalloc;
+		};
 	};
 	struct kmem_cache *cache;
 	unsigned int size;
@@ -496,26 +463,24 @@ struct kmem_cache_node {
 	atomic_long_t total_objects;
 	struct list_head full;
 #endif
-	struct node_barn *barn;
 };
 
 static inline struct kmem_cache_node *get_node(struct kmem_cache *s, int node)
 {
-	return s->node[node];
+	return s->per_node[node].node;
+}
+
+static inline struct node_barn *get_barn_node(struct kmem_cache *s, int node)
+{
+	return s->per_node[node].barn;
 }
 
 /*
- * Get the barn of the current cpu's closest memory node. It may not exist on
- * systems with memoryless nodes but without CONFIG_HAVE_MEMORYLESS_NODES
+ * Get the barn of the current cpu's NUMA node. It may be a memoryless node.
  */
 static inline struct node_barn *get_barn(struct kmem_cache *s)
 {
-	struct kmem_cache_node *n = get_node(s, numa_mem_id());
-
-	if (!n)
-		return NULL;
-
-	return n->barn;
+	return get_barn_node(s, numa_node_id());
 }
 
 /*
@@ -535,7 +500,13 @@ static inline struct node_barn *get_barn(struct kmem_cache *s)
 static nodemask_t slab_nodes;
 
 /*
- * Workqueue used for flush_cpu_slab().
+ * Similar to slab_nodes but for where we have node_barn allocated.
+ * Corresponds to N_ONLINE nodes.
+ */
+static nodemask_t slab_barn_nodes;
+
+/*
+ * Workqueue used for flushing cpu and kfree_rcu sheaves.
  */
 static struct workqueue_struct *flushwq;
 
@@ -592,38 +563,6 @@ static inline void *get_freepointer(struct kmem_cache *s, void *object)
 	ptr_addr = (unsigned long)object + s->offset;
 	p = *(freeptr_t *)(ptr_addr);
 	return freelist_ptr_decode(s, p, ptr_addr);
-}
-
-#ifndef CONFIG_SLUB_TINY
-static void prefetch_freepointer(const struct kmem_cache *s, void *object)
-{
-	prefetchw(object + s->offset);
-}
-#endif
-
-/*
- * When running under KMSAN, get_freepointer_safe() may return an uninitialized
- * pointer value in the case the current thread loses the race for the next
- * memory chunk in the freelist. In that case this_cpu_cmpxchg_double() in
- * slab_alloc_node() will fail, so the uninitialized value won't be used, but
- * KMSAN will still check all arguments of cmpxchg because of imperfect
- * handling of inline assembly.
- * To work around this problem, we apply __no_kmsan_checks to ensure that
- * get_freepointer_safe() returns initialized memory.
- */
-__no_kmsan_checks
-static inline void *get_freepointer_safe(struct kmem_cache *s, void *object)
-{
-	unsigned long freepointer_addr;
-	freeptr_t p;
-
-	if (!debug_pagealloc_enabled_static())
-		return get_freepointer(s, object);
-
-	object = kasan_reset_tag(object);
-	freepointer_addr = (unsigned long)object + s->offset;
-	copy_from_kernel_nofault(&p, (freeptr_t *)freepointer_addr, sizeof(p));
-	return freelist_ptr_decode(s, p, freepointer_addr);
 }
 
 static inline void set_freepointer(struct kmem_cache *s, void *object, void *fp)
@@ -689,39 +628,6 @@ static inline unsigned int oo_objects(struct kmem_cache_order_objects x)
 	return x.x & OO_MASK;
 }
 
-#ifdef CONFIG_SLUB_CPU_PARTIAL
-static void slub_set_cpu_partial(struct kmem_cache *s, unsigned int nr_objects)
-{
-	unsigned int nr_slabs;
-
-	s->cpu_partial = nr_objects;
-
-	/*
-	 * We take the number of objects but actually limit the number of
-	 * slabs on the per cpu partial list, in order to limit excessive
-	 * growth of the list. For simplicity we assume that the slabs will
-	 * be half-full.
-	 */
-	nr_slabs = DIV_ROUND_UP(nr_objects * 2, oo_objects(s->oo));
-	s->cpu_partial_slabs = nr_slabs;
-}
-
-static inline unsigned int slub_get_cpu_partial(struct kmem_cache *s)
-{
-	return s->cpu_partial_slabs;
-}
-#else
-static inline void
-slub_set_cpu_partial(struct kmem_cache *s, unsigned int nr_objects)
-{
-}
-
-static inline unsigned int slub_get_cpu_partial(struct kmem_cache *s)
-{
-	return 0;
-}
-#endif /* CONFIG_SLUB_CPU_PARTIAL */
-
 /*
  * If network-based swap is enabled, slub must keep track of whether memory
  * were allocated from pfmemalloc reserves.
@@ -755,32 +661,30 @@ static __always_inline void slab_unlock(struct slab *slab)
 }
 
 static inline bool
-__update_freelist_fast(struct slab *slab,
-		      void *freelist_old, unsigned long counters_old,
-		      void *freelist_new, unsigned long counters_new)
+__update_freelist_fast(struct slab *slab, struct freelist_counters *old,
+		       struct freelist_counters *new)
 {
 #ifdef system_has_freelist_aba
-	freelist_aba_t old = { .freelist = freelist_old, .counter = counters_old };
-	freelist_aba_t new = { .freelist = freelist_new, .counter = counters_new };
-
-	return try_cmpxchg_freelist(&slab->freelist_counter.full, &old.full, new.full);
+	return try_cmpxchg_freelist(&slab->freelist_counters,
+				    &old->freelist_counters,
+				    new->freelist_counters);
 #else
 	return false;
 #endif
 }
 
 static inline bool
-__update_freelist_slow(struct slab *slab,
-		      void *freelist_old, unsigned long counters_old,
-		      void *freelist_new, unsigned long counters_new)
+__update_freelist_slow(struct slab *slab, struct freelist_counters *old,
+		       struct freelist_counters *new)
 {
 	bool ret = false;
 
 	slab_lock(slab);
-	if (slab->freelist == freelist_old &&
-	    slab->counters == counters_old) {
-		slab->freelist = freelist_new;
-		slab->counters = counters_new;
+	if (slab->freelist == old->freelist &&
+	    slab->counters == old->counters) {
+		slab->freelist = new->freelist;
+		/* prevent tearing for the read in get_partial_node_bulk() */
+		WRITE_ONCE(slab->counters, new->counters);
 		ret = true;
 	}
 	slab_unlock(slab);
@@ -796,22 +700,18 @@ __update_freelist_slow(struct slab *slab,
  * interrupt the operation.
  */
 static inline bool __slab_update_freelist(struct kmem_cache *s, struct slab *slab,
-		void *freelist_old, unsigned long counters_old,
-		void *freelist_new, unsigned long counters_new,
-		const char *n)
+		struct freelist_counters *old, struct freelist_counters *new, const char *n)
 {
 	bool ret;
 
-	if (USE_LOCKLESS_FAST_PATH())
+	if (!IS_ENABLED(CONFIG_PREEMPT_RT))
 		lockdep_assert_irqs_disabled();
 
-	if (s->flags & __CMPXCHG_DOUBLE) {
-		ret = __update_freelist_fast(slab, freelist_old, counters_old,
-				            freelist_new, counters_new);
-	} else {
-		ret = __update_freelist_slow(slab, freelist_old, counters_old,
-				            freelist_new, counters_new);
-	}
+	if (s->flags & __CMPXCHG_DOUBLE)
+		ret = __update_freelist_fast(slab, old, new);
+	else
+		ret = __update_freelist_slow(slab, old, new);
+
 	if (likely(ret))
 		return true;
 
@@ -826,21 +726,17 @@ static inline bool __slab_update_freelist(struct kmem_cache *s, struct slab *sla
 }
 
 static inline bool slab_update_freelist(struct kmem_cache *s, struct slab *slab,
-		void *freelist_old, unsigned long counters_old,
-		void *freelist_new, unsigned long counters_new,
-		const char *n)
+		struct freelist_counters *old, struct freelist_counters *new, const char *n)
 {
 	bool ret;
 
 	if (s->flags & __CMPXCHG_DOUBLE) {
-		ret = __update_freelist_fast(slab, freelist_old, counters_old,
-				            freelist_new, counters_new);
+		ret = __update_freelist_fast(slab, old, new);
 	} else {
 		unsigned long flags;
 
 		local_irq_save(flags);
-		ret = __update_freelist_slow(slab, freelist_old, counters_old,
-				            freelist_new, counters_new);
+		ret = __update_freelist_slow(slab, old, new);
 		local_irq_restore(flags);
 	}
 	if (likely(ret))
@@ -863,7 +759,7 @@ static inline bool slab_update_freelist(struct kmem_cache *s, struct slab *slab,
  * request size in the meta data area, for better debug and sanity check.
  */
 static inline void set_orig_size(struct kmem_cache *s,
-				void *object, unsigned int orig_size)
+				void *object, unsigned long orig_size)
 {
 	void *p = kasan_reset_tag(object);
 
@@ -873,10 +769,10 @@ static inline void set_orig_size(struct kmem_cache *s,
 	p += get_info_end(s);
 	p += sizeof(struct track) * 2;
 
-	*(unsigned int *)p = orig_size;
+	*(unsigned long *)p = orig_size;
 }
 
-static inline unsigned int get_orig_size(struct kmem_cache *s, void *object)
+static inline unsigned long get_orig_size(struct kmem_cache *s, void *object)
 {
 	void *p = kasan_reset_tag(object);
 
@@ -889,8 +785,152 @@ static inline unsigned int get_orig_size(struct kmem_cache *s, void *object)
 	p += get_info_end(s);
 	p += sizeof(struct track) * 2;
 
-	return *(unsigned int *)p;
+	return *(unsigned long *)p;
 }
+
+#ifdef CONFIG_SLAB_OBJ_EXT
+
+/*
+ * Check if memory cgroup or memory allocation profiling is enabled.
+ * If enabled, SLUB tries to reduce memory overhead of accounting
+ * slab objects. If neither is enabled when this function is called,
+ * the optimization is simply skipped to avoid affecting caches that do not
+ * need slabobj_ext metadata.
+ *
+ * However, this may disable optimization when memory cgroup or memory
+ * allocation profiling is used, but slabs are created too early
+ * even before those subsystems are initialized.
+ */
+static inline bool need_slab_obj_exts(struct kmem_cache *s)
+{
+	if (s->flags & SLAB_NO_OBJ_EXT)
+		return false;
+
+	if (memcg_kmem_online() && (s->flags & SLAB_ACCOUNT))
+		return true;
+
+	if (mem_alloc_profiling_enabled())
+		return true;
+
+	return false;
+}
+
+static inline unsigned int obj_exts_size_in_slab(struct slab *slab)
+{
+	return slab_obj_ext_size(slab) * slab->objects;
+}
+
+static inline unsigned long obj_exts_offset_in_slab(struct kmem_cache *s,
+						    struct slab *slab)
+{
+	unsigned long objext_offset;
+
+	objext_offset = s->size * slab->objects;
+	objext_offset = ALIGN(objext_offset, sizeof(struct slabobj_ext));
+	return objext_offset;
+}
+
+static inline bool obj_exts_fit_within_slab_leftover(struct kmem_cache *s,
+						     struct slab *slab)
+{
+	unsigned long objext_offset = obj_exts_offset_in_slab(s, slab);
+	unsigned long objext_size = obj_exts_size_in_slab(slab);
+
+	return objext_offset + objext_size <= slab_size(slab);
+}
+
+static inline bool obj_exts_in_slab(struct kmem_cache *s, struct slab *slab)
+{
+	unsigned long obj_exts;
+	unsigned long start;
+	unsigned long end;
+
+	obj_exts = slab_obj_exts(slab);
+	if (!obj_exts)
+		return false;
+
+	start = (unsigned long)slab_address(slab);
+	end = start + slab_size(slab);
+	return (obj_exts >= start) && (obj_exts < end);
+}
+#else
+static inline bool need_slab_obj_exts(struct kmem_cache *s)
+{
+	return false;
+}
+
+static inline unsigned int obj_exts_size_in_slab(struct slab *slab)
+{
+	return 0;
+}
+
+static inline unsigned long obj_exts_offset_in_slab(struct kmem_cache *s,
+						    struct slab *slab)
+{
+	return 0;
+}
+
+static inline bool obj_exts_fit_within_slab_leftover(struct kmem_cache *s,
+						     struct slab *slab)
+{
+	return false;
+}
+
+static inline bool obj_exts_in_slab(struct kmem_cache *s, struct slab *slab)
+{
+	return false;
+}
+
+#endif
+
+#if defined(CONFIG_SLAB_OBJ_EXT) && defined(CONFIG_64BIT)
+static unsigned int obj_exts_offset_in_object(struct kmem_cache *s)
+{
+	unsigned int offset = get_info_end(s);
+
+	if (kmem_cache_debug_flags(s, SLAB_STORE_USER))
+		offset += sizeof(struct track) * 2;
+
+	if (slub_debug_orig_size(s))
+		offset += sizeof(unsigned long);
+
+	offset += kasan_metadata_size(s, false);
+
+	return offset;
+}
+
+static inline void slab_set_obj_exts_in_object(struct slab *slab)
+{
+	slab->obj_exts_in_object = 1;
+}
+#else
+static inline unsigned int obj_exts_offset_in_object(struct kmem_cache *s)
+{
+	return 0;
+}
+
+static inline void slab_set_obj_exts_in_object(struct slab *slab)
+{
+}
+#endif
+
+/*
+ * A no-op function used to attach kprobe handlers in slub_kunit tests.
+ * The barrier is needed to prevent the compiler from optimizing out callsites.
+ */
+#if defined(CONFIG_DEBUG_VM) || defined(CONFIG_PROVE_LOCKING)
+static noinline void slab_attach_kprobe_locked(void)
+{
+	barrier();
+}
+#else
+static inline void slab_attach_kprobe_locked(void) { }
+#endif
+
+#define slab_lockdep_assert_held(lock) do {	\
+	lockdep_assert_held(lock);		\
+	slab_attach_kprobe_locked();	\
+} while (0)
 
 #ifdef CONFIG_SLUB_DEBUG
 
@@ -978,26 +1018,8 @@ static slab_flags_t slub_debug = DEBUG_DEFAULT_FLAGS;
 static slab_flags_t slub_debug;
 #endif
 
-static char *slub_debug_string;
+static const char *slub_debug_string __ro_after_init;
 static int disable_higher_order_debug;
-
-/*
- * slub is about to manipulate internal object metadata.  This memory lies
- * outside the range of the allocated object, so accessing it would normally
- * be reported by kasan as a bounds error.  metadata_access_enable() is used
- * to tell kasan that these accesses are OK.
- */
-static inline void metadata_access_enable(void)
-{
-	kasan_disable_current();
-	kmsan_disable_current();
-}
-
-static inline void metadata_access_disable(void)
-{
-	kmsan_enable_current();
-	kasan_enable_current();
-}
 
 /*
  * Object debugging
@@ -1071,7 +1093,7 @@ static void set_track_update(struct kmem_cache *s, void *object,
 	p->handle = handle;
 #endif
 	p->addr = addr;
-	p->cpu = smp_processor_id();
+	p->cpu = raw_smp_processor_id();
 	p->pid = current->pid;
 	p->when = jiffies;
 }
@@ -1204,9 +1226,12 @@ static void print_trailer(struct kmem_cache *s, struct slab *slab, u8 *p)
 		off += 2 * sizeof(struct track);
 
 	if (slub_debug_orig_size(s))
-		off += sizeof(unsigned int);
+		off += sizeof(unsigned long);
 
 	off += kasan_metadata_size(s, false);
+
+	if (obj_exts_in_object(slab))
+		off += slab_obj_ext_size(slab);
 
 	if (off != size_from_object(s))
 		/* Beginning of the filler is the free pointer */
@@ -1230,20 +1255,6 @@ static void object_err(struct kmem_cache *s, struct slab *slab,
 	add_taint(TAINT_BAD_PAGE, LOCKDEP_NOW_UNRELIABLE);
 
 	WARN_ON(1);
-}
-
-static bool freelist_corrupted(struct kmem_cache *s, struct slab *slab,
-			       void **freelist, void *nextfree)
-{
-	if ((s->flags & SLAB_CONSISTENCY_CHECKS) &&
-	    !check_valid_pointer(s, slab, nextfree) && freelist) {
-		object_err(s, slab, *freelist, "Freechain corrupt");
-		*freelist = NULL;
-		slab_fix(s, "Isolate corrupted freechain");
-		return true;
-	}
-
-	return false;
 }
 
 static void __slab_err(struct slab *slab)
@@ -1353,44 +1364,63 @@ skip_bug_print:
 }
 
 /*
- * Object layout:
+ * Object field layout:
  *
- * object address
- * 	Bytes of the object to be managed.
- * 	If the freepointer may overlay the object then the free
- *	pointer is at the middle of the object.
+ * [Left redzone padding] (if SLAB_RED_ZONE)
+ *   - Field size: s->red_left_pad
+ *   - Immediately precedes each object when SLAB_RED_ZONE is set.
+ *   - Filled with 0xbb (SLUB_RED_INACTIVE) for inactive objects and
+ *     0xcc (SLUB_RED_ACTIVE) for objects in use when SLAB_RED_ZONE.
  *
- * 	Poisoning uses 0x6b (POISON_FREE) and the last byte is
- * 	0xa5 (POISON_END)
+ * [Object bytes] (object address starts here)
+ *   - Field size: s->object_size
+ *   - Object payload bytes.
+ *   - If the freepointer may overlap the object, it is stored inside
+ *     the object (typically near the middle).
+ *   - Poisoning uses 0x6b (POISON_FREE) and the last byte is
+ *     0xa5 (POISON_END) when __OBJECT_POISON is enabled.
  *
- * object + s->object_size
- * 	Padding to reach word boundary. This is also used for Redzoning.
- * 	Padding is extended by another word if Redzoning is enabled and
- * 	object_size == inuse.
+ * [Word-align padding] (right redzone when SLAB_RED_ZONE is set)
+ *   - Field size: s->inuse - s->object_size
+ *   - If redzoning is enabled and ALIGN(size, sizeof(void *)) adds no
+ *     padding, explicitly extend by one word so the right redzone is
+ *     non-empty.
+ *   - Filled with 0xbb (SLUB_RED_INACTIVE) for inactive objects and
+ *     0xcc (SLUB_RED_ACTIVE) for objects in use when SLAB_RED_ZONE.
  *
- * 	We fill with 0xbb (SLUB_RED_INACTIVE) for inactive objects and with
- * 	0xcc (SLUB_RED_ACTIVE) for objects in use.
+ * [Metadata starts at object + s->inuse]
+ *   - A. freelist pointer (if freeptr_outside_object)
+ *   - B. alloc tracking (SLAB_STORE_USER)
+ *   - C. free tracking (SLAB_STORE_USER)
+ *   - D. original request size (SLAB_KMALLOC && SLAB_STORE_USER)
+ *   - E. KASAN metadata (if enabled)
  *
- * object + s->inuse
- * 	Meta data starts here.
+ * [Mandatory padding] (if CONFIG_SLUB_DEBUG && SLAB_RED_ZONE)
+ *   - One mandatory debug word to guarantee a minimum poisoned gap
+ *     between metadata and the next object, independent of alignment.
+ *   - Filled with 0x5a (POISON_INUSE) when SLAB_POISON is set.
+ * [Final alignment padding]
+ *   - Bytes added by ALIGN(size, s->align) to reach s->size.
+ *   - When the padding is large enough, it can be used to store
+ *     struct slabobj_ext for accounting metadata (obj_exts_in_object()).
+ *   - The remaining bytes (if any) are filled with 0x5a (POISON_INUSE)
+ *     when SLAB_POISON is set.
  *
- * 	A. Free pointer (if we cannot overwrite object on free)
- * 	B. Tracking data for SLAB_STORE_USER
- *	C. Original request size for kmalloc object (SLAB_STORE_USER enabled)
- *	D. Padding to reach required alignment boundary or at minimum
- * 		one word if debugging is on to be able to detect writes
- * 		before the word boundary.
+ * Notes:
+ * - Redzones are filled by init_object() with SLUB_RED_ACTIVE/INACTIVE.
+ * - Object contents are poisoned with POISON_FREE/END when __OBJECT_POISON.
+ * - The trailing padding is pre-filled with POISON_INUSE by
+ *   setup_slab_debug() when SLAB_POISON is set, and is validated by
+ *   check_pad_bytes().
+ * - The first object pointer is slab_address(slab) +
+ *   (s->red_left_pad if redzoning); subsequent objects are reached by
+ *   adding s->size each time.
  *
- *	Padding is done using 0x5a (POISON_INUSE)
- *
- * object + s->size
- * 	Nothing is used beyond s->size.
- *
- * If slabcaches are merged then the object_size and inuse boundaries are mostly
- * ignored. And therefore no slab options that rely on these boundaries
- * may be used with merged slabcaches.
+ * If a slab cache flag relies on specific metadata to exist at a fixed
+ * offset, the flag must be included in SLAB_NEVER_MERGE to prevent merging.
+ * Otherwise, the cache would misbehave as s->object_size and s->inuse are
+ * adjusted during cache merging (see __kmem_cache_alias()).
  */
-
 static int check_pad_bytes(struct kmem_cache *s, struct slab *slab, u8 *p)
 {
 	unsigned long off = get_info_end(s);	/* The end of info */
@@ -1400,10 +1430,13 @@ static int check_pad_bytes(struct kmem_cache *s, struct slab *slab, u8 *p)
 		off += 2 * sizeof(struct track);
 
 		if (s->flags & SLAB_KMALLOC)
-			off += sizeof(unsigned int);
+			off += sizeof(unsigned long);
 	}
 
 	off += kasan_metadata_size(s, false);
+
+	if (obj_exts_in_object(slab))
+		off += slab_obj_ext_size(slab);
 
 	if (size_from_object(s) == off)
 		return 1;
@@ -1429,7 +1462,15 @@ slab_pad_check(struct kmem_cache *s, struct slab *slab)
 	start = slab_address(slab);
 	length = slab_size(slab);
 	end = start + length;
-	remainder = length % s->size;
+
+	if (obj_exts_in_slab(s, slab) && !obj_exts_in_object(slab)) {
+		remainder = length;
+		remainder -= obj_exts_offset_in_slab(s, slab);
+		remainder -= obj_exts_size_in_slab(slab);
+	} else {
+		remainder = length % s->size;
+	}
+
 	if (!remainder)
 		return;
 
@@ -1648,7 +1689,7 @@ static void add_full(struct kmem_cache *s,
 	if (!(s->flags & SLAB_STORE_USER))
 		return;
 
-	lockdep_assert_held(&n->list_lock);
+	slab_lockdep_assert_held(&n->list_lock);
 	list_add(&slab->slab_list, &n->full);
 }
 
@@ -1657,7 +1698,7 @@ static void remove_full(struct kmem_cache *s, struct kmem_cache_node *n, struct 
 	if (!(s->flags & SLAB_STORE_USER))
 		return;
 
-	lockdep_assert_held(&n->list_lock);
+	slab_lockdep_assert_held(&n->list_lock);
 	list_del(&slab->slab_list);
 }
 
@@ -1785,8 +1826,8 @@ static inline int free_consistency_checks(struct kmem_cache *s,
  *
  * returns the start of next block if there's any, or NULL
  */
-static char *
-parse_slub_debug_flags(char *str, slab_flags_t *flags, char **slabs, bool init)
+static const char *
+parse_slub_debug_flags(const char *str, slab_flags_t *flags, const char **slabs, bool init)
 {
 	bool higher_order_disable = false;
 
@@ -1863,17 +1904,17 @@ check_slabs:
 		return NULL;
 }
 
-static int __init setup_slub_debug(char *str)
+static int __init setup_slub_debug(const char *str, const struct kernel_param *kp)
 {
 	slab_flags_t flags;
 	slab_flags_t global_flags;
-	char *saved_str;
-	char *slab_list;
+	const char *saved_str;
+	const char *slab_list;
 	bool global_slub_debug_changed = false;
 	bool slab_list_specified = false;
 
 	global_flags = DEBUG_DEFAULT_FLAGS;
-	if (*str++ != '=' || !*str)
+	if (!str || !*str)
 		/*
 		 * No options specified. Switch on full debugging.
 		 */
@@ -1917,11 +1958,15 @@ out:
 	     static_branch_unlikely(&init_on_free)) &&
 	    (slub_debug & SLAB_POISON))
 		pr_info("mem auto-init: SLAB_POISON will take precedence over init_on_alloc/init_on_free\n");
-	return 1;
+	return 0;
 }
 
-__setup("slab_debug", setup_slub_debug);
-__setup_param("slub_debug", slub_debug, setup_slub_debug, 0);
+static const struct kernel_param_ops param_ops_slab_debug __initconst = {
+	.flags = KERNEL_PARAM_OPS_FL_NOARG,
+	.set = setup_slub_debug,
+};
+__core_param_cb(slab_debug, &param_ops_slab_debug, NULL, 0);
+__core_param_cb(slub_debug, &param_ops_slab_debug, NULL, 0);
 
 /*
  * kmem_cache_flags - apply debugging options to the cache
@@ -1935,9 +1980,9 @@ __setup_param("slub_debug", slub_debug, setup_slub_debug, 0);
  */
 slab_flags_t kmem_cache_flags(slab_flags_t flags, const char *name)
 {
-	char *iter;
+	const char *iter;
 	size_t len;
-	char *next_block;
+	const char *next_block;
 	slab_flags_t block_flags;
 	slab_flags_t slub_debug_local = slub_debug;
 
@@ -1961,7 +2006,7 @@ slab_flags_t kmem_cache_flags(slab_flags_t flags, const char *name)
 			continue;
 		/* Found a block that has a slab list, search it */
 		while (*iter) {
-			char *end, *glob;
+			const char *end, *glob;
 			size_t cmplen;
 
 			end = strchrnul(iter, ',');
@@ -2023,36 +2068,51 @@ static inline void inc_slabs_node(struct kmem_cache *s, int node,
 							int objects) {}
 static inline void dec_slabs_node(struct kmem_cache *s, int node,
 							int objects) {}
-#ifndef CONFIG_SLUB_TINY
-static bool freelist_corrupted(struct kmem_cache *s, struct slab *slab,
-			       void **freelist, void *nextfree)
-{
-	return false;
-}
-#endif
 #endif /* CONFIG_SLUB_DEBUG */
+
+/*
+ * The allocated objcg pointers array or sheaf is not accounted directly.
+ * Moreover, it should not come from DMA buffer and is not readily
+ * reclaimable. Node restriction for the parent allocation also should
+ * not apply to the slab's internal objects, as well as __GFP_COMP used
+ * for new slab allocations.
+ * So those GFP bits should be masked off.
+ */
+#define OBJCGS_CLEAR_MASK	(__GFP_DMA | __GFP_RECLAIMABLE | \
+				__GFP_ACCOUNT | __GFP_NOFAIL | \
+				__GFP_THISNODE | __GFP_COMP)
 
 #ifdef CONFIG_SLAB_OBJ_EXT
 
 #ifdef CONFIG_MEM_ALLOC_PROFILING_DEBUG
 
-static inline void mark_objexts_empty(struct slabobj_ext *obj_exts)
+static inline void mark_obj_codetag_empty(const void *obj)
 {
-	struct slabobj_ext *slab_exts;
-	struct slab *obj_exts_slab;
+	struct slab *obj_slab;
+	unsigned long slab_exts;
 
-	obj_exts_slab = virt_to_slab(obj_exts);
-	slab_exts = slab_obj_exts(obj_exts_slab);
+	if (!slab_obj_ext_has_codetag())
+		return;
+
+	obj_slab = virt_to_slab(obj);
+	slab_exts = slab_obj_exts(obj_slab);
 	if (slab_exts) {
-		unsigned int offs = obj_to_index(obj_exts_slab->slab_cache,
-						 obj_exts_slab, obj_exts);
+		struct slabobj_ext *ext;
+		union codetag_ref *ref;
 
-		if (unlikely(is_codetag_empty(&slab_exts[offs].ref)))
+		get_slab_obj_exts(slab_exts);
+		ext = slab_obj_ext(obj_slab->slab_cache, obj_slab, slab_exts, obj);
+		ref = slab_obj_ext_codetag_ref(obj_slab, ext);
+
+		if (unlikely(is_codetag_empty(ref))) {
+			put_slab_obj_exts(slab_exts);
 			return;
+		}
 
 		/* codetag should be NULL here */
-		WARN_ON(slab_exts[offs].ref.ct);
-		set_codetag_empty(&slab_exts[offs].ref);
+		WARN_ON(ref->ct);
+		set_codetag_empty(ref);
+		put_slab_obj_exts(slab_exts);
 	}
 }
 
@@ -2061,38 +2121,40 @@ static inline bool mark_failed_objexts_alloc(struct slab *slab)
 	return cmpxchg(&slab->obj_exts, 0, OBJEXTS_ALLOC_FAIL) == 0;
 }
 
-static inline void handle_failed_objexts_alloc(unsigned long obj_exts,
-			struct slabobj_ext *vec, unsigned int objects)
+static inline void handle_failed_objexts_alloc(struct slab *slab,
+		unsigned long obj_exts, struct slabobj_ext *vec)
 {
+	unsigned int stride;
+
+	if (!slab_obj_ext_has_codetag())
+		return;
+
 	/*
 	 * If vector previously failed to allocate then we have live
 	 * objects with no tag reference. Mark all references in this
 	 * vector as empty to avoid warnings later on.
 	 */
-	if (obj_exts == OBJEXTS_ALLOC_FAIL) {
-		unsigned int i;
+	if (obj_exts != OBJEXTS_ALLOC_FAIL)
+		return;
 
-		for (i = 0; i < objects; i++)
-			set_codetag_empty(&vec[i].ref);
+	stride = slab_obj_ext_size(slab) / sizeof(*vec);
+
+	for (unsigned int i = 0; i < slab->objects; i++) {
+		union codetag_ref *ref = slab_obj_ext_codetag_ref(slab, vec);
+
+		set_codetag_empty(ref);
+		vec += stride;
 	}
 }
 
 #else /* CONFIG_MEM_ALLOC_PROFILING_DEBUG */
 
-static inline void mark_objexts_empty(struct slabobj_ext *obj_exts) {}
+static inline void mark_obj_codetag_empty(const void *obj) {}
 static inline bool mark_failed_objexts_alloc(struct slab *slab) { return false; }
-static inline void handle_failed_objexts_alloc(unsigned long obj_exts,
-			struct slabobj_ext *vec, unsigned int objects) {}
+static inline void handle_failed_objexts_alloc(struct slab *slab,
+		unsigned long obj_exts, struct slabobj_ext *vec) {}
 
 #endif /* CONFIG_MEM_ALLOC_PROFILING_DEBUG */
-
-/*
- * The allocated objcg pointers array is not accounted directly.
- * Moreover, it should not come from DMA buffer and is not readily
- * reclaimable. So those GFP bits should be masked off.
- */
-#define OBJCGS_CLEAR_MASK	(__GFP_DMA | __GFP_RECLAIMABLE | \
-				__GFP_ACCOUNT | __GFP_NOFAIL)
 
 static inline void init_slab_obj_exts(struct slab *slab)
 {
@@ -2100,33 +2162,29 @@ static inline void init_slab_obj_exts(struct slab *slab)
 }
 
 int alloc_slab_obj_exts(struct slab *slab, struct kmem_cache *s,
-		        gfp_t gfp, bool new_slab)
+			gfp_t gfp, unsigned int alloc_flags)
 {
-	bool allow_spin = gfpflags_allow_spinning(gfp);
-	unsigned int objects = objs_per_slab(s, slab);
+	const bool allow_spin = alloc_flags_allow_spinning(alloc_flags);
+	bool new_slab = alloc_flags & SLAB_ALLOC_NEW_SLAB;
 	unsigned long new_exts;
 	unsigned long old_exts;
 	struct slabobj_ext *vec;
+	size_t sz = slab_obj_ext_size(slab) * slab->objects;
 
 	gfp &= ~OBJCGS_CLEAR_MASK;
-	/* Prevent recursive extension vector allocation */
-	gfp |= __GFP_NO_OBJ_EXT;
-
 	/*
-	 * Note that allow_spin may be false during early boot and its
-	 * restricted GFP_BOOT_MASK. Due to kmalloc_nolock() only supporting
-	 * architectures with cmpxchg16b, early obj_exts will be missing for
-	 * very early allocations on those.
+	 * In most cases, obj_exts arrays are allocated from normal kmalloc.
+	 * However, normal kmalloc caches must allocate them from
+	 * KMALLOC_NO_OBJ_EXT caches to prevent recursion.
 	 */
-	if (unlikely(!allow_spin)) {
-		size_t sz = objects * sizeof(struct slabobj_ext);
+	if (is_kmalloc_normal(s))
+		alloc_flags |= SLAB_ALLOC_NO_OBJ_EXT;
 
-		vec = kmalloc_nolock(sz, __GFP_ZERO | __GFP_NO_OBJ_EXT,
-				     slab_nid(slab));
-	} else {
-		vec = kcalloc_node(objects, sizeof(struct slabobj_ext), gfp,
-				   slab_nid(slab));
-	}
+	alloc_flags &= ~SLAB_ALLOC_NEW_SLAB;
+
+	/* This will use kmalloc_nolock() if alloc_flags say so */
+	vec = kmalloc_flags(sz, gfp | __GFP_ZERO, alloc_flags, slab_nid(slab));
+
 	if (!vec) {
 		/*
 		 * Try to mark vectors which failed to allocate.
@@ -2140,15 +2198,30 @@ int alloc_slab_obj_exts(struct slab *slab, struct kmem_cache *s,
 		return -ENOMEM;
 	}
 
+	if (IS_ENABLED(CONFIG_DEBUG_VM)) {
+		struct kmem_cache *exts_cache;
+		struct slab *exts_slab;
+
+		exts_slab = virt_to_slab(vec);
+		if (exts_slab) {
+			/*
+			 * The vector must be allocated from either normal or
+			 * KMALLOC_NO_OBJ_EXT kmalloc caches to avoid cycles.
+			 */
+			exts_cache = exts_slab->slab_cache;
+			WARN_ON_ONCE(!is_kmalloc_normal(exts_cache) &&
+					!(exts_cache->flags & SLAB_NO_OBJ_EXT));
+		}
+	}
+
 	new_exts = (unsigned long)vec;
-	if (unlikely(!allow_spin))
-		new_exts |= OBJEXTS_NOSPIN_ALLOC;
 #ifdef CONFIG_MEMCG
 	new_exts |= MEMCG_DATA_OBJEXTS;
 #endif
 retry:
 	old_exts = READ_ONCE(slab->obj_exts);
-	handle_failed_objexts_alloc(old_exts, vec, objects);
+	handle_failed_objexts_alloc(slab, old_exts, vec);
+
 	if (new_slab) {
 		/*
 		 * If the slab is brand new and nobody can yet access its
@@ -2162,7 +2235,6 @@ retry:
 		 * assign slabobj_exts in parallel. In this case the existing
 		 * objcg vector should be reused.
 		 */
-		mark_objexts_empty(vec);
 		if (unlikely(!allow_spin))
 			kfree_nolock(vec);
 		else
@@ -2178,11 +2250,11 @@ retry:
 	return 0;
 }
 
-static inline void free_slab_obj_exts(struct slab *slab)
+static inline void free_slab_obj_exts(struct slab *slab, bool allow_spin)
 {
 	struct slabobj_ext *obj_exts;
 
-	obj_exts = slab_obj_exts(slab);
+	obj_exts = (struct slabobj_ext *)slab_obj_exts(slab);
 	if (!obj_exts) {
 		/*
 		 * If obj_exts allocation failed, slab->obj_exts is set to
@@ -2193,34 +2265,86 @@ static inline void free_slab_obj_exts(struct slab *slab)
 		return;
 	}
 
-	/*
-	 * obj_exts was created with __GFP_NO_OBJ_EXT flag, therefore its
-	 * corresponding extension will be NULL. alloc_tag_sub() will throw a
-	 * warning if slab has extensions but the extension of an object is
-	 * NULL, therefore replace NULL with CODETAG_EMPTY to indicate that
-	 * the extension for obj_exts is expected to be NULL.
-	 */
-	mark_objexts_empty(obj_exts);
-	if (unlikely(READ_ONCE(slab->obj_exts) & OBJEXTS_NOSPIN_ALLOC))
-		kfree_nolock(obj_exts);
-	else
+	if (obj_exts_in_slab(slab->slab_cache, slab)) {
+		slab->obj_exts = 0;
+		return;
+	}
+
+	if (allow_spin)
 		kfree(obj_exts);
+	else
+		kfree_nolock(obj_exts);
 	slab->obj_exts = 0;
 }
 
+/*
+ * Try to allocate slabobj_ext array from unused space.
+ * This function must be called on a freshly allocated slab to prevent
+ * concurrency problems.
+ */
+static void alloc_slab_obj_exts_early(struct kmem_cache *s, struct slab *slab)
+{
+	void *addr;
+	unsigned long obj_exts;
+
+	if (!need_slab_obj_exts(s))
+		return;
+
+	if (obj_exts_fit_within_slab_leftover(s, slab)) {
+		addr = slab_address(slab) + obj_exts_offset_in_slab(s, slab);
+		addr = kasan_reset_tag(addr);
+		obj_exts = (unsigned long)addr;
+
+		get_slab_obj_exts(obj_exts);
+		memset(addr, 0, obj_exts_size_in_slab(slab));
+		put_slab_obj_exts(obj_exts);
+
+#ifdef CONFIG_MEMCG
+		obj_exts |= MEMCG_DATA_OBJEXTS;
+#endif
+		slab->obj_exts = obj_exts;
+	} else if (s->flags & SLAB_OBJ_EXT_IN_OBJ) {
+		unsigned int offset = obj_exts_offset_in_object(s);
+
+		obj_exts = (unsigned long)slab_address(slab);
+		obj_exts += s->red_left_pad;
+		obj_exts += offset;
+
+		get_slab_obj_exts(obj_exts);
+		for_each_object(addr, s, slab_address(slab), slab->objects)
+			memset(kasan_reset_tag(addr) + offset, 0, slab_obj_ext_size(slab));
+		put_slab_obj_exts(obj_exts);
+
+#ifdef CONFIG_MEMCG
+		obj_exts |= MEMCG_DATA_OBJEXTS;
+#endif
+		slab->obj_exts = obj_exts;
+		slab_set_obj_exts_in_object(slab);
+	}
+}
+
 #else /* CONFIG_SLAB_OBJ_EXT */
+
+static inline void mark_obj_codetag_empty(const void *obj)
+{
+}
 
 static inline void init_slab_obj_exts(struct slab *slab)
 {
 }
 
 static int alloc_slab_obj_exts(struct slab *slab, struct kmem_cache *s,
-			       gfp_t gfp, bool new_slab)
+			       gfp_t gfp, unsigned int alloc_flags)
 {
 	return 0;
 }
 
-static inline void free_slab_obj_exts(struct slab *slab)
+static inline void free_slab_obj_exts(struct slab *slab, bool allow_spin)
+{
+}
+
+static inline void alloc_slab_obj_exts_early(struct kmem_cache *s,
+						       struct slab *slab)
 {
 }
 
@@ -2228,27 +2352,33 @@ static inline void free_slab_obj_exts(struct slab *slab)
 
 #ifdef CONFIG_MEM_ALLOC_PROFILING
 
-static inline struct slabobj_ext *
-prepare_slab_obj_exts_hook(struct kmem_cache *s, gfp_t flags, void *p)
+static inline unsigned long
+prepare_slab_obj_exts_hook(struct kmem_cache *s, struct slab *slab,
+			   gfp_t flags, unsigned int alloc_flags, void *p)
 {
-	struct slab *slab;
+	if (!slab_obj_exts(slab)) {
+		if (is_kfence_address(p))
+			return 0;
 
-	slab = virt_to_slab(p);
-	if (!slab_obj_exts(slab) &&
-	    alloc_slab_obj_exts(slab, s, flags, false)) {
-		pr_warn_once("%s, %s: Failed to create slab extension vector!\n",
-			     __func__, s->name);
-		return NULL;
+		if (alloc_slab_obj_exts(slab, s, flags, alloc_flags)) {
+			pr_warn_once("%s, %s: Failed to create slab extension vector!\n",
+				     __func__, s->name);
+			return 0;
+		}
 	}
 
-	return slab_obj_exts(slab) + obj_to_index(s, slab, p);
+	return slab_obj_exts(slab);
 }
+
 
 /* Should be called only if mem_alloc_profiling_enabled() */
 static noinline void
-__alloc_tagging_slab_alloc_hook(struct kmem_cache *s, void *object, gfp_t flags)
+__alloc_tagging_slab_alloc_hook(struct kmem_cache *s, void *object, gfp_t flags,
+				unsigned int alloc_flags)
 {
-	struct slabobj_ext *obj_exts;
+	unsigned long obj_exts;
+	struct slabobj_ext *obj_ext;
+	struct slab *slab;
 
 	if (!object)
 		return;
@@ -2256,26 +2386,44 @@ __alloc_tagging_slab_alloc_hook(struct kmem_cache *s, void *object, gfp_t flags)
 	if (s->flags & (SLAB_NO_OBJ_EXT | SLAB_NOLEAKTRACE))
 		return;
 
-	if (flags & __GFP_NO_OBJ_EXT)
+	if (alloc_flags & SLAB_ALLOC_NO_RECURSE)
 		return;
 
-	obj_exts = prepare_slab_obj_exts_hook(s, flags, object);
+	slab = virt_to_slab(object);
+	obj_exts = prepare_slab_obj_exts_hook(s, slab, flags, alloc_flags, object);
 	/*
 	 * Currently obj_exts is used only for allocation profiling.
 	 * If other users appear then mem_alloc_profiling_enabled()
 	 * check should be added before alloc_tag_add().
 	 */
-	if (likely(obj_exts))
-		alloc_tag_add(&obj_exts->ref, current->alloc_tag, s->size);
-	else
-		alloc_tag_set_inaccurate(current->alloc_tag);
+	if (obj_exts) {
+		union codetag_ref *ref;
+
+		get_slab_obj_exts(obj_exts);
+
+		obj_ext = slab_obj_ext(s, slab, obj_exts, object);
+		ref = slab_obj_ext_codetag_ref(slab, obj_ext);
+
+		alloc_tag_add(ref, current->alloc_tag, s->size);
+
+		put_slab_obj_exts(obj_exts);
+	} else {
+		/*
+		 * KFENCE allocations are rare and the amount of outstanding
+		 * ones is limited to a small number so it's not worth setting
+		 * tags as inaccurate because of them.
+		 */
+		if (!is_kfence_address(object))
+			alloc_tag_set_inaccurate(current->alloc_tag);
+	}
 }
 
 static inline void
-alloc_tagging_slab_alloc_hook(struct kmem_cache *s, void *object, gfp_t flags)
+alloc_tagging_slab_alloc_hook(struct kmem_cache *s, void *object, gfp_t flags,
+			      unsigned int alloc_flags)
 {
 	if (mem_alloc_profiling_enabled())
-		__alloc_tagging_slab_alloc_hook(s, object, flags);
+		__alloc_tagging_slab_alloc_hook(s, object, flags, alloc_flags);
 }
 
 /* Should be called only if mem_alloc_profiling_enabled() */
@@ -2283,8 +2431,7 @@ static noinline void
 __alloc_tagging_slab_free_hook(struct kmem_cache *s, struct slab *slab, void **p,
 			       int objects)
 {
-	struct slabobj_ext *obj_exts;
-	int i;
+	unsigned long obj_exts;
 
 	/* slab->obj_exts might not be NULL if it was created for MEMCG accounting. */
 	if (s->flags & (SLAB_NO_OBJ_EXT | SLAB_NOLEAKTRACE))
@@ -2294,11 +2441,14 @@ __alloc_tagging_slab_free_hook(struct kmem_cache *s, struct slab *slab, void **p
 	if (!obj_exts)
 		return;
 
-	for (i = 0; i < objects; i++) {
-		unsigned int off = obj_to_index(s, slab, p[i]);
+	get_slab_obj_exts(obj_exts);
+	for (int i = 0; i < objects; i++) {
+		struct slabobj_ext *ext;
 
-		alloc_tag_sub(&obj_exts[off].ref, s->size);
+		ext = slab_obj_ext(s, slab, obj_exts, p[i]);
+		alloc_tag_sub(slab_obj_ext_codetag_ref(slab, ext), s->size);
 	}
+	put_slab_obj_exts(obj_exts);
 }
 
 static inline void
@@ -2309,16 +2459,40 @@ alloc_tagging_slab_free_hook(struct kmem_cache *s, struct slab *slab, void **p,
 		__alloc_tagging_slab_free_hook(s, slab, p, objects);
 }
 
+/*
+ * Make sure the static key used by slab_obj_ext_has_codetag() reflects the
+ * value of !mem_alloc_profiling_permanently_disabled()
+ *
+ * Any later mem alloc profiling shutdown won't be reflected in the static key
+ * because obj_exts with codetags might already exist.
+ */
+static void __init slab_obj_ext_has_codetag_init(void)
+{
+	bool need_codetag = !mem_alloc_profiling_permanently_disabled();
+
+	if (need_codetag != static_key_enabled(&slab_obj_ext_has_codetag_key)) {
+		if (need_codetag)
+			static_branch_enable(&slab_obj_ext_has_codetag_key);
+		else
+			static_branch_disable(&slab_obj_ext_has_codetag_key);
+	}
+}
+
 #else /* CONFIG_MEM_ALLOC_PROFILING */
 
 static inline void
-alloc_tagging_slab_alloc_hook(struct kmem_cache *s, void *object, gfp_t flags)
+alloc_tagging_slab_alloc_hook(struct kmem_cache *s, void *object, gfp_t flags,
+			      unsigned int alloc_flags)
 {
 }
 
 static inline void
 alloc_tagging_slab_free_hook(struct kmem_cache *s, struct slab *slab, void **p,
 			     int objects)
+{
+}
+
+static inline void slab_obj_ext_has_codetag_init(void)
 {
 }
 
@@ -2330,8 +2504,9 @@ alloc_tagging_slab_free_hook(struct kmem_cache *s, struct slab *slab, void **p,
 static void memcg_alloc_abort_single(struct kmem_cache *s, void *object);
 
 static __fastpath_inline
-bool memcg_slab_post_alloc_hook(struct kmem_cache *s, struct list_lru *lru,
-				gfp_t flags, size_t size, void **p)
+bool memcg_slab_post_alloc_hook(struct kmem_cache *s, gfp_t flags,
+				size_t size, void **p,
+				const struct slab_alloc_context *ac)
 {
 	if (likely(!memcg_kmem_online()))
 		return true;
@@ -2339,7 +2514,8 @@ bool memcg_slab_post_alloc_hook(struct kmem_cache *s, struct list_lru *lru,
 	if (likely(!(flags & __GFP_ACCOUNT) && !(s->flags & SLAB_ACCOUNT)))
 		return true;
 
-	if (likely(__memcg_slab_post_alloc_hook(s, lru, flags, size, p)))
+	if (likely(__memcg_slab_post_alloc_hook(s, ac->lru, flags,
+						ac->alloc_flags, size, p)))
 		return true;
 
 	if (likely(size == 1)) {
@@ -2356,7 +2532,7 @@ static __fastpath_inline
 void memcg_slab_free_hook(struct kmem_cache *s, struct slab *slab, void **p,
 			  int objects)
 {
-	struct slabobj_ext *obj_exts;
+	unsigned long obj_exts;
 
 	if (!memcg_kmem_online())
 		return;
@@ -2365,41 +2541,47 @@ void memcg_slab_free_hook(struct kmem_cache *s, struct slab *slab, void **p,
 	if (likely(!obj_exts))
 		return;
 
+	if (!slab_needs_objcg(slab))
+		return;
+
+	get_slab_obj_exts(obj_exts);
 	__memcg_slab_free_hook(s, slab, p, objects, obj_exts);
+	put_slab_obj_exts(obj_exts);
 }
 
 static __fastpath_inline
 bool memcg_slab_post_charge(void *p, gfp_t flags)
 {
-	struct slabobj_ext *slab_exts;
+	unsigned long obj_exts;
+	struct slabobj_ext *obj_ext;
 	struct kmem_cache *s;
-	struct folio *folio;
+	struct page *page;
 	struct slab *slab;
-	unsigned long off;
 
-	folio = virt_to_folio(p);
-	if (!folio_test_slab(folio)) {
+	page = virt_to_page(p);
+	if (PageLargeKmalloc(page)) {
+		unsigned int order;
 		int size;
 
-		if (folio_memcg_kmem(folio))
+		if (PageMemcgKmem(page))
 			return true;
 
-		if (__memcg_kmem_charge_page(folio_page(folio, 0), flags,
-					     folio_order(folio)))
+		order = large_kmalloc_order(page);
+		if (__memcg_kmem_charge_page(page, flags, order))
 			return false;
 
 		/*
-		 * This folio has already been accounted in the global stats but
+		 * This page has already been accounted in the global stats but
 		 * not in the memcg stats. So, subtract from the global and use
 		 * the interface which adds to both global and memcg stats.
 		 */
-		size = folio_size(folio);
-		node_stat_mod_folio(folio, NR_SLAB_UNRECLAIMABLE_B, -size);
-		lruvec_stat_mod_folio(folio, NR_SLAB_UNRECLAIMABLE_B, size);
+		size = PAGE_SIZE << order;
+		mod_node_page_state(page_pgdat(page), NR_SLAB_UNRECLAIMABLE_B, -size);
+		mod_lruvec_page_state(page, NR_SLAB_UNRECLAIMABLE_B, size);
 		return true;
 	}
 
-	slab = folio_slab(folio);
+	slab = page_slab(page);
 	s = slab->slab_cache;
 
 	/*
@@ -2407,25 +2589,30 @@ bool memcg_slab_post_charge(void *p, gfp_t flags)
 	 * of slab_obj_exts being allocated from the same slab and thus the slab
 	 * becoming effectively unfreeable.
 	 */
-	if (is_kmalloc_normal(s))
+	if (!cache_needs_objcg(s))
 		return true;
 
 	/* Ignore already charged objects. */
-	slab_exts = slab_obj_exts(slab);
-	if (slab_exts) {
-		off = obj_to_index(s, slab, p);
-		if (unlikely(slab_exts[off].objcg))
+	obj_exts = slab_obj_exts(slab);
+	if (obj_exts) {
+		get_slab_obj_exts(obj_exts);
+		obj_ext = slab_obj_ext(s, slab, obj_exts, p);
+		if (unlikely(slab_obj_ext_objcg(slab, obj_ext))) {
+			put_slab_obj_exts(obj_exts);
 			return true;
+		}
+		put_slab_obj_exts(obj_exts);
 	}
 
-	return __memcg_slab_post_alloc_hook(s, NULL, flags, 1, &p);
+	return __memcg_slab_post_alloc_hook(s, NULL, flags, SLAB_ALLOC_DEFAULT,
+					    1, &p);
 }
 
 #else /* CONFIG_MEMCG */
 static inline bool memcg_slab_post_alloc_hook(struct kmem_cache *s,
-					      struct list_lru *lru,
-					      gfp_t flags, size_t size,
-					      void **p)
+					      gfp_t flags,
+					      size_t size, void **p,
+					      const struct slab_alloc_context *ac)
 {
 	return true;
 }
@@ -2457,6 +2644,24 @@ struct rcu_delayed_free {
  * Returns true if freeing of the object can proceed, false if its reuse
  * was delayed by CONFIG_SLUB_RCU_DEBUG or KASAN quarantine, or it was returned
  * to KFENCE.
+ *
+ * For objects allocated via kmalloc_nolock(), only a subset of alloc hooks
+ * are invoked, so some free hooks must handle asymmetric hook calls.
+ *
+ * Alloc hooks called for kmalloc_nolock():
+ * - kmsan_slab_alloc()
+ * - kasan_slab_alloc()
+ * - memcg_slab_post_alloc_hook()
+ * - alloc_tagging_slab_alloc_hook()
+ *
+ * Free hooks that must handle missing corresponding alloc hooks:
+ * - kmemleak_free_recursive()
+ * - kfence_free()
+ *
+ * Free hooks that have no alloc hook counterpart, and thus safe to call:
+ * - debug_check_no_locks_freed()
+ * - debug_check_no_obj_freed()
+ * - __kcsan_check_access()
  */
 static __always_inline
 bool slab_free_hook(struct kmem_cache *s, void *x, bool init,
@@ -2492,7 +2697,7 @@ bool slab_free_hook(struct kmem_cache *s, void *x, bool init,
 	if (still_accessible) {
 		struct rcu_delayed_free *delayed_free;
 
-		delayed_free = kmalloc(sizeof(*delayed_free), GFP_NOWAIT);
+		delayed_free = kmalloc_obj(*delayed_free, GFP_NOWAIT);
 		if (delayed_free) {
 			/*
 			 * Let KASAN track our call stack as a "related work
@@ -2533,7 +2738,7 @@ bool slab_free_hook(struct kmem_cache *s, void *x, bool init,
 		memset((char *)kasan_reset_tag(x) + inuse, 0,
 		       s->size - inuse - rsize);
 		/*
-		 * Restore orig_size, otherwize kmalloc redzone overwritten
+		 * Restore orig_size, otherwise kmalloc redzone overwritten
 		 * would be reported
 		 */
 		set_orig_size(s, x, orig_size);
@@ -2587,7 +2792,7 @@ bool slab_free_freelist_hook(struct kmem_cache *s, void **head, void **tail,
 	return *head != NULL;
 }
 
-static void *setup_object(struct kmem_cache *s, void *object)
+static inline void *setup_object(struct kmem_cache *s, void *object)
 {
 	setup_object_debug(s, object);
 	object = kasan_init_slab_obj(s, object);
@@ -2599,10 +2804,22 @@ static void *setup_object(struct kmem_cache *s, void *object)
 	return object;
 }
 
-static struct slab_sheaf *alloc_empty_sheaf(struct kmem_cache *s, gfp_t gfp)
+static struct slab_sheaf *__alloc_empty_sheaf(struct kmem_cache *s, gfp_t gfp,
+				unsigned int alloc_flags, unsigned int capacity)
 {
-	struct slab_sheaf *sheaf = kzalloc(struct_size(sheaf, objects,
-					s->sheaf_capacity), gfp);
+	struct slab_sheaf *sheaf;
+	size_t sheaf_size;
+
+	/*
+	 * Prevent recursion to the same cache, or a deep stack of kmallocs of
+	 * varying sizes (sheaf capacity might differ for each kmalloc size
+	 * bucket)
+	 */
+	if (s->flags & SLAB_KMALLOC)
+		alloc_flags |= SLAB_ALLOC_NO_RECURSE;
+
+	sheaf_size = struct_size(sheaf, objects, capacity);
+	sheaf = kmalloc_flags(sheaf_size, gfp | __GFP_ZERO, alloc_flags, NUMA_NO_NODE);
 
 	if (unlikely(!sheaf))
 		return NULL;
@@ -2614,16 +2831,47 @@ static struct slab_sheaf *alloc_empty_sheaf(struct kmem_cache *s, gfp_t gfp)
 	return sheaf;
 }
 
-static void free_empty_sheaf(struct kmem_cache *s, struct slab_sheaf *sheaf)
+static inline struct slab_sheaf *alloc_empty_sheaf(struct kmem_cache *s,
+				gfp_t gfp, unsigned int alloc_flags)
 {
-	kfree(sheaf);
+	if (alloc_flags & SLAB_ALLOC_NO_RECURSE)
+		return NULL;
+
+	gfp &= ~OBJCGS_CLEAR_MASK;
+
+	return __alloc_empty_sheaf(s, gfp, alloc_flags, s->sheaf_capacity);
+}
+
+static void __free_empty_sheaf(struct kmem_cache *s, struct slab_sheaf *sheaf,
+			       unsigned int free_flags)
+{
+	/*
+	 * If the sheaf was created with SLAB_ALLOC_NO_RECURSE flag then its
+	 * corresponding extension is NULL and alloc_tag_sub() will throw a
+	 * warning, therefore replace NULL with CODETAG_EMPTY to indicate
+	 * that the extension for this sheaf is expected to be NULL.
+	 */
+	if (s->flags & SLAB_KMALLOC)
+		mark_obj_codetag_empty(sheaf);
+
+	VM_WARN_ON_ONCE(sheaf->size > 0);
+
+	if (unlikely(free_flags & SLAB_FREE_NOLOCK))
+		kfree_nolock(sheaf);
+	else
+		kfree(sheaf);
 
 	stat(s, SHEAF_FREE);
 }
 
-static int __kmem_cache_alloc_bulk(struct kmem_cache *s, gfp_t flags,
-				   size_t size, void **p);
+static void free_empty_sheaf(struct kmem_cache *s, struct slab_sheaf *sheaf)
+{
+	__free_empty_sheaf(s, sheaf, SLAB_FREE_DEFAULT);
+}
 
+static unsigned int
+refill_objects(struct kmem_cache *s, void **p, gfp_t gfp, unsigned int min,
+	       unsigned int max);
 
 static int refill_sheaf(struct kmem_cache *s, struct slab_sheaf *sheaf,
 			 gfp_t gfp)
@@ -2634,8 +2882,8 @@ static int refill_sheaf(struct kmem_cache *s, struct slab_sheaf *sheaf,
 	if (!to_fill)
 		return 0;
 
-	filled = __kmem_cache_alloc_bulk(s, gfp, to_fill,
-					 &sheaf->objects[sheaf->size]);
+	filled = refill_objects(s, &sheaf->objects[sheaf->size], gfp, to_fill,
+				to_fill);
 
 	sheaf->size += filled;
 
@@ -2645,22 +2893,6 @@ static int refill_sheaf(struct kmem_cache *s, struct slab_sheaf *sheaf,
 		return -ENOMEM;
 
 	return 0;
-}
-
-
-static struct slab_sheaf *alloc_full_sheaf(struct kmem_cache *s, gfp_t gfp)
-{
-	struct slab_sheaf *sheaf = alloc_empty_sheaf(s, gfp);
-
-	if (!sheaf)
-		return NULL;
-
-	if (refill_sheaf(s, sheaf, gfp)) {
-		free_empty_sheaf(s, sheaf);
-		return NULL;
-	}
-
-	return sheaf;
 }
 
 /*
@@ -2677,19 +2909,19 @@ static void __kmem_cache_free_bulk(struct kmem_cache *s, size_t size, void **p);
  * object pointers are moved to a on-stack array under the lock. To bound the
  * stack usage, limit each batch to PCS_BATCH_MAX.
  *
- * returns true if at least partially flushed
+ * Must be called with s->cpu_sheaves->lock locked, returns with the lock
+ * unlocked.
+ *
+ * Returns how many objects are remaining to be flushed
  */
-static bool sheaf_flush_main(struct kmem_cache *s)
+static unsigned int __sheaf_flush_main_batch(struct kmem_cache *s)
 {
 	struct slub_percpu_sheaves *pcs;
 	unsigned int batch, remaining;
 	void *objects[PCS_BATCH_MAX];
 	struct slab_sheaf *sheaf;
-	bool ret = false;
 
-next_batch:
-	if (!local_trylock(&s->cpu_sheaves->lock))
-		return ret;
+	slab_lockdep_assert_held(this_cpu_ptr(&s->cpu_sheaves->lock));
 
 	pcs = this_cpu_ptr(s->cpu_sheaves);
 	sheaf = pcs->main;
@@ -2707,10 +2939,37 @@ next_batch:
 
 	stat_add(s, SHEAF_FLUSH, batch);
 
-	ret = true;
+	return remaining;
+}
 
-	if (remaining)
-		goto next_batch;
+static void sheaf_flush_main(struct kmem_cache *s)
+{
+	unsigned int remaining;
+
+	do {
+		local_lock(&s->cpu_sheaves->lock);
+
+		remaining = __sheaf_flush_main_batch(s);
+
+	} while (remaining);
+}
+
+/*
+ * Returns true if the main sheaf was at least partially flushed.
+ */
+static bool sheaf_try_flush_main(struct kmem_cache *s)
+{
+	unsigned int remaining;
+	bool ret = false;
+
+	do {
+		if (!local_trylock(&s->cpu_sheaves->lock))
+			return ret;
+
+		ret = true;
+		remaining = __sheaf_flush_main_batch(s);
+
+	} while (remaining);
 
 	return ret;
 }
@@ -2733,12 +2992,13 @@ static void sheaf_flush_unused(struct kmem_cache *s, struct slab_sheaf *sheaf)
 	sheaf->size = 0;
 }
 
-static void __rcu_free_sheaf_prepare(struct kmem_cache *s,
+static bool __rcu_free_sheaf_prepare(struct kmem_cache *s,
 				     struct slab_sheaf *sheaf)
 {
 	bool init = slab_want_init_on_free(s);
 	void **p = &sheaf->objects[0];
 	unsigned int i = 0;
+	bool pfmemalloc = false;
 
 	while (i < sheaf->size) {
 		struct slab *slab = virt_to_slab(p[i]);
@@ -2751,8 +3011,13 @@ static void __rcu_free_sheaf_prepare(struct kmem_cache *s,
 			continue;
 		}
 
+		if (slab_test_pfmemalloc(slab))
+			pfmemalloc = true;
+
 		i++;
 	}
+
+	return pfmemalloc;
 }
 
 static void rcu_free_sheaf_nobarn(struct rcu_head *head)
@@ -2830,12 +3095,23 @@ static void pcs_destroy(struct kmem_cache *s)
 {
 	int cpu;
 
+	/*
+	 * We may be unwinding cache creation that failed before or during the
+	 * allocation of this.
+	 */
+	if (!s->cpu_sheaves)
+		return;
+
+	/* pcs->main can only point to the bootstrap sheaf, nothing to free */
+	if (!cache_has_sheaves(s))
+		goto free_pcs;
+
 	for_each_possible_cpu(cpu) {
 		struct slub_percpu_sheaves *pcs;
 
 		pcs = per_cpu_ptr(s->cpu_sheaves, cpu);
 
-		/* can happen when unwinding failed create */
+		/* This can happen when unwinding failed cache creation. */
 		if (!pcs->main)
 			continue;
 
@@ -2857,11 +3133,13 @@ static void pcs_destroy(struct kmem_cache *s)
 		}
 	}
 
+free_pcs:
 	free_percpu(s->cpu_sheaves);
 	s->cpu_sheaves = NULL;
 }
 
-static struct slab_sheaf *barn_get_empty_sheaf(struct node_barn *barn)
+static struct slab_sheaf *barn_get_empty_sheaf(struct node_barn *barn,
+					       bool allow_spin)
 {
 	struct slab_sheaf *empty = NULL;
 	unsigned long flags;
@@ -2869,7 +3147,10 @@ static struct slab_sheaf *barn_get_empty_sheaf(struct node_barn *barn)
 	if (!data_race(barn->nr_empty))
 		return NULL;
 
-	spin_lock_irqsave(&barn->lock, flags);
+	if (likely(allow_spin))
+		spin_lock_irqsave(&barn->lock, flags);
+	else if (!spin_trylock_irqsave(&barn->lock, flags))
+		return NULL;
 
 	if (likely(barn->nr_empty)) {
 		empty = list_first_entry(&barn->sheaves_empty,
@@ -2946,7 +3227,8 @@ static struct slab_sheaf *barn_get_full_or_empty_sheaf(struct node_barn *barn)
  * change.
  */
 static struct slab_sheaf *
-barn_replace_empty_sheaf(struct node_barn *barn, struct slab_sheaf *empty)
+barn_replace_empty_sheaf(struct node_barn *barn, struct slab_sheaf *empty,
+			 bool allow_spin)
 {
 	struct slab_sheaf *full = NULL;
 	unsigned long flags;
@@ -2954,7 +3236,10 @@ barn_replace_empty_sheaf(struct node_barn *barn, struct slab_sheaf *empty)
 	if (!data_race(barn->nr_full))
 		return NULL;
 
-	spin_lock_irqsave(&barn->lock, flags);
+	if (likely(allow_spin))
+		spin_lock_irqsave(&barn->lock, flags);
+	else if (!spin_trylock_irqsave(&barn->lock, flags))
+		return NULL;
 
 	if (likely(barn->nr_full)) {
 		full = list_first_entry(&barn->sheaves_full, struct slab_sheaf,
@@ -2975,7 +3260,8 @@ barn_replace_empty_sheaf(struct node_barn *barn, struct slab_sheaf *empty)
  * barn. But if there are too many full sheaves, reject this with -E2BIG.
  */
 static struct slab_sheaf *
-barn_replace_full_sheaf(struct node_barn *barn, struct slab_sheaf *full)
+barn_replace_full_sheaf(struct node_barn *barn, struct slab_sheaf *full,
+			bool allow_spin)
 {
 	struct slab_sheaf *empty;
 	unsigned long flags;
@@ -2986,7 +3272,10 @@ barn_replace_full_sheaf(struct node_barn *barn, struct slab_sheaf *full)
 	if (!data_race(barn->nr_empty))
 		return ERR_PTR(-ENOMEM);
 
-	spin_lock_irqsave(&barn->lock, flags);
+	if (likely(allow_spin))
+		spin_lock_irqsave(&barn->lock, flags);
+	else if (!spin_trylock_irqsave(&barn->lock, flags))
+		return ERR_PTR(-EBUSY);
 
 	if (likely(barn->nr_empty)) {
 		empty = list_first_entry(&barn->sheaves_empty, struct slab_sheaf,
@@ -3015,13 +3304,10 @@ static void barn_init(struct node_barn *barn)
 
 static void barn_shrink(struct kmem_cache *s, struct node_barn *barn)
 {
-	struct list_head empty_list;
-	struct list_head full_list;
+	LIST_HEAD(empty_list);
+	LIST_HEAD(full_list);
 	struct slab_sheaf *sheaf, *sheaf2;
 	unsigned long flags;
-
-	INIT_LIST_HEAD(&empty_list);
-	INIT_LIST_HEAD(&full_list);
 
 	spin_lock_irqsave(&barn->lock, flags);
 
@@ -3048,24 +3334,25 @@ static inline struct slab *alloc_slab_page(gfp_t flags, int node,
 					   struct kmem_cache_order_objects oo,
 					   bool allow_spin)
 {
-	struct folio *folio;
+	struct page *page;
 	struct slab *slab;
 	unsigned int order = oo_order(oo);
 
 	if (unlikely(!allow_spin))
-		folio = (struct folio *)alloc_frozen_pages_nolock(0/* __GFP_COMP is implied */,
+		page = alloc_frozen_pages_nolock(0/* __GFP_COMP is implied */,
 								  node, order);
 	else if (node == NUMA_NO_NODE)
-		folio = (struct folio *)alloc_frozen_pages(flags, order);
+		page = alloc_frozen_pages(flags, order);
 	else
-		folio = (struct folio *)__alloc_frozen_pages(flags, order, node, NULL);
+		page = __alloc_frozen_pages(flags, order, node, NULL,
+					    ALLOC_DEFAULT);
 
-	if (!folio)
+	if (!page)
 		return NULL;
 
-	slab = folio_slab(folio);
-	__folio_set_slab(folio);
-	if (folio_is_pfmemalloc(folio))
+	__SetPageSlab(page);
+	slab = page_slab(page);
+	if (page_is_pfmemalloc(page))
 		slab_set_pfmemalloc(slab);
 
 	return slab;
@@ -3112,106 +3399,53 @@ static void __init init_freelist_randomization(void)
 	mutex_unlock(&slab_mutex);
 }
 
-/* Get the next entry on the pre-computed freelist randomized */
-static void *next_freelist_entry(struct kmem_cache *s,
-				unsigned long *pos, void *start,
-				unsigned long page_limit,
-				unsigned long freelist_count)
-{
-	unsigned int idx;
+static DEFINE_PER_CPU(struct rnd_state, slab_rnd_state);
 
-	/*
-	 * If the target page allocation failed, the number of objects on the
-	 * page might be smaller than the usual size defined by the cache.
-	 */
-	do {
-		idx = s->random_seq[*pos];
-		*pos += 1;
-		if (*pos >= freelist_count)
-			*pos = 0;
-	} while (unlikely(idx >= page_limit));
-
-	return (char *)start + idx;
-}
-
-/* Shuffle the single linked freelist based on a random pre-computed sequence */
-static bool shuffle_freelist(struct kmem_cache *s, struct slab *slab)
-{
-	void *start;
-	void *cur;
-	void *next;
-	unsigned long idx, pos, page_limit, freelist_count;
-
-	if (slab->objects < 2 || !s->random_seq)
-		return false;
-
-	freelist_count = oo_objects(s->oo);
-	pos = get_random_u32_below(freelist_count);
-
-	page_limit = slab->objects * s->size;
-	start = fixup_red_left(s, slab_address(slab));
-
-	/* First entry is used as the base of the freelist */
-	cur = next_freelist_entry(s, &pos, start, page_limit, freelist_count);
-	cur = setup_object(s, cur);
-	slab->freelist = cur;
-
-	for (idx = 1; idx < slab->objects; idx++) {
-		next = next_freelist_entry(s, &pos, start, page_limit,
-			freelist_count);
-		next = setup_object(s, next);
-		set_freepointer(s, cur, next);
-		cur = next;
-	}
-	set_freepointer(s, cur, NULL);
-
-	return true;
-}
 #else
 static inline int init_cache_random_seq(struct kmem_cache *s)
 {
 	return 0;
 }
 static inline void init_freelist_randomization(void) { }
-static inline bool shuffle_freelist(struct kmem_cache *s, struct slab *slab)
-{
-	return false;
-}
 #endif /* CONFIG_SLAB_FREELIST_RANDOM */
 
 static __always_inline void account_slab(struct slab *slab, int order,
-					 struct kmem_cache *s, gfp_t gfp)
+					 struct kmem_cache *s, gfp_t gfp,
+					 unsigned int alloc_flags)
 {
-	if (memcg_kmem_online() && (s->flags & SLAB_ACCOUNT))
-		alloc_slab_obj_exts(slab, s, gfp, true);
+	if (memcg_kmem_online() &&
+			(s->flags & SLAB_ACCOUNT) &&
+			!slab_obj_exts(slab))
+		alloc_slab_obj_exts(slab, s, gfp,
+				    alloc_flags | SLAB_ALLOC_NEW_SLAB);
 
 	mod_node_page_state(slab_pgdat(slab), cache_vmstat_idx(s),
 			    PAGE_SIZE << order);
 }
 
 static __always_inline void unaccount_slab(struct slab *slab, int order,
-					   struct kmem_cache *s)
+					   struct kmem_cache *s, bool allow_spin)
 {
 	/*
 	 * The slab object extensions should now be freed regardless of
 	 * whether mem_alloc_profiling_enabled() or not because profiling
 	 * might have been disabled after slab->obj_exts got allocated.
 	 */
-	free_slab_obj_exts(slab);
+	free_slab_obj_exts(slab, allow_spin);
 
 	mod_node_page_state(slab_pgdat(slab), cache_vmstat_idx(s),
 			    -(PAGE_SIZE << order));
 }
 
-static struct slab *allocate_slab(struct kmem_cache *s, gfp_t flags, int node)
+/* Allocate and initialize a slab without building its freelist. */
+static struct slab *allocate_slab(struct kmem_cache *s, gfp_t flags,
+				  unsigned int alloc_flags, int node)
 {
-	bool allow_spin = gfpflags_allow_spinning(flags);
+	bool allow_spin = alloc_flags_allow_spinning(alloc_flags);
 	struct slab *slab;
 	struct kmem_cache_order_objects oo = s->oo;
 	gfp_t alloc_gfp;
-	void *start, *p, *next;
-	int idx;
-	bool shuffle;
+	void *start;
 
 	flags &= gfp_allowed_mask;
 
@@ -3225,10 +3459,6 @@ static struct slab *allocate_slab(struct kmem_cache *s, gfp_t flags, int node)
 	if ((alloc_gfp & __GFP_DIRECT_RECLAIM) && oo_order(oo) > oo_order(s->min))
 		alloc_gfp = (alloc_gfp | __GFP_NOMEMALLOC) & ~__GFP_RECLAIM;
 
-	/*
-	 * __GFP_RECLAIM could be cleared on the first allocation attempt,
-	 * so pass allow_spin flag directly.
-	 */
 	slab = alloc_slab_page(alloc_gfp, node, oo, allow_spin);
 	if (unlikely(!slab)) {
 		oo = s->min;
@@ -3243,13 +3473,15 @@ static struct slab *allocate_slab(struct kmem_cache *s, gfp_t flags, int node)
 		stat(s, ORDER_FALLBACK);
 	}
 
+	/* Initializes frozen, inuse, and any extra 64bit-only flags */
+	slab->counters = 0;
+
 	slab->objects = oo_objects(oo);
-	slab->inuse = 0;
-	slab->frozen = 0;
-	init_slab_obj_exts(slab);
 
-	account_slab(slab, oo_order(oo), s, flags);
-
+#ifdef CONFIG_64BIT
+	if (cache_needs_objcg(s))
+		slab->obj_exts_needs_objcg = 1;
+#endif
 	slab->slab_cache = s;
 
 	kasan_poison_slab(slab);
@@ -3257,55 +3489,61 @@ static struct slab *allocate_slab(struct kmem_cache *s, gfp_t flags, int node)
 	start = slab_address(slab);
 
 	setup_slab_debug(s, slab, start);
-
-	shuffle = shuffle_freelist(s, slab);
-
-	if (!shuffle) {
-		start = fixup_red_left(s, start);
-		start = setup_object(s, start);
-		slab->freelist = start;
-		for (idx = 0, p = start; idx < slab->objects - 1; idx++) {
-			next = p + s->size;
-			next = setup_object(s, next);
-			set_freepointer(s, p, next);
-			p = next;
-		}
-		set_freepointer(s, p, NULL);
-	}
+	init_slab_obj_exts(slab);
+	/*
+	 * Poison the slab before initializing the slabobj_ext array
+	 * to prevent the array from being overwritten.
+	 */
+	alloc_slab_obj_exts_early(s, slab);
+	account_slab(slab, oo_order(oo), s, flags, alloc_flags);
 
 	return slab;
 }
 
-static struct slab *new_slab(struct kmem_cache *s, gfp_t flags, int node)
+static struct slab *new_slab(struct kmem_cache *s, gfp_t flags,
+			     unsigned int alloc_flags, int node)
 {
 	if (unlikely(flags & GFP_SLAB_BUG_MASK))
 		flags = kmalloc_fix_flags(flags);
 
 	WARN_ON_ONCE(s->ctor && (flags & __GFP_ZERO));
 
-	return allocate_slab(s,
-		flags & (GFP_RECLAIM_MASK | GFP_CONSTRAINT_MASK), node);
+	flags &= GFP_RECLAIM_MASK | GFP_CONSTRAINT_MASK;
+
+	return allocate_slab(s, flags, alloc_flags, node);
 }
 
-static void __free_slab(struct kmem_cache *s, struct slab *slab)
+static void __free_slab(struct kmem_cache *s, struct slab *slab, bool allow_spin)
 {
-	struct folio *folio = slab_folio(slab);
-	int order = folio_order(folio);
+	struct page *page = slab_page(slab);
+	int order = compound_order(page);
 	int pages = 1 << order;
 
 	__slab_clear_pfmemalloc(slab);
-	folio->mapping = NULL;
-	__folio_clear_slab(folio);
+	page->mapping = NULL;
+	__ClearPageSlab(page);
 	mm_account_reclaimed_pages(pages);
-	unaccount_slab(slab, order, s);
-	free_frozen_pages(&folio->page, order);
+	unaccount_slab(slab, order, s, allow_spin);
+	if (allow_spin)
+		free_frozen_pages(page, order);
+	else
+		free_frozen_pages_nolock(page, order);
+}
+
+static void free_new_slab_nolock(struct kmem_cache *s, struct slab *slab)
+{
+	/*
+	 * Since it was just allocated, we can skip the actions in
+	 * discard_slab() and free_slab().
+	 */
+	__free_slab(s, slab, false);
 }
 
 static void rcu_free_slab(struct rcu_head *h)
 {
 	struct slab *slab = container_of(h, struct slab, rcu_head);
 
-	__free_slab(slab->slab_cache, slab);
+	__free_slab(slab->slab_cache, slab, true);
 }
 
 static void free_slab(struct kmem_cache *s, struct slab *slab)
@@ -3321,7 +3559,7 @@ static void free_slab(struct kmem_cache *s, struct slab *slab)
 	if (unlikely(s->flags & SLAB_TYPESAFE_BY_RCU))
 		call_rcu(&slab->rcu_head, rcu_free_slab);
 	else
-		__free_slab(s, slab);
+		__free_slab(s, slab, true);
 }
 
 static void discard_slab(struct kmem_cache *s, struct slab *slab)
@@ -3348,31 +3586,43 @@ static inline void slab_clear_node_partial(struct slab *slab)
 /*
  * Management of partially allocated slabs.
  */
-static inline void
-__add_partial(struct kmem_cache_node *n, struct slab *slab, int tail)
+static inline void set_node_partial_state(struct kmem_cache_node *n,
+					struct slab *slab)
 {
+	slab_set_node_partial(slab);
 	n->nr_partial++;
-	if (tail == DEACTIVATE_TO_TAIL)
+}
+
+static inline void
+__add_partial(struct kmem_cache_node *n, struct slab *slab, enum add_mode mode)
+{
+	if (mode == ADD_TO_TAIL)
 		list_add_tail(&slab->slab_list, &n->partial);
 	else
 		list_add(&slab->slab_list, &n->partial);
-	slab_set_node_partial(slab);
+	set_node_partial_state(n, slab);
 }
 
 static inline void add_partial(struct kmem_cache_node *n,
-				struct slab *slab, int tail)
+				struct slab *slab, enum add_mode mode)
 {
-	lockdep_assert_held(&n->list_lock);
-	__add_partial(n, slab, tail);
+	slab_lockdep_assert_held(&n->list_lock);
+	__add_partial(n, slab, mode);
+}
+
+static inline void clear_node_partial_state(struct kmem_cache_node *n,
+					struct slab *slab)
+{
+	slab_clear_node_partial(slab);
+	n->nr_partial--;
 }
 
 static inline void remove_partial(struct kmem_cache_node *n,
 					struct slab *slab)
 {
-	lockdep_assert_held(&n->list_lock);
+	slab_lockdep_assert_held(&n->list_lock);
 	list_del(&slab->slab_list);
-	slab_clear_node_partial(slab);
-	n->nr_partial--;
+	clear_node_partial_state(n, slab);
 }
 
 /*
@@ -3386,7 +3636,7 @@ static void *alloc_single_from_partial(struct kmem_cache *s,
 {
 	void *object;
 
-	lockdep_assert_held(&n->list_lock);
+	slab_lockdep_assert_held(&n->list_lock);
 
 #ifdef CONFIG_SLUB_DEBUG
 	if (s->flags & SLAB_CONSISTENCY_CHECKS) {
@@ -3414,7 +3664,87 @@ static void *alloc_single_from_partial(struct kmem_cache *s,
 	return object;
 }
 
-static void defer_deactivate_slab(struct slab *slab, void *flush_freelist);
+/* Return the next free object in allocation order. */
+static inline void *next_slab_obj(struct kmem_cache *s,
+				  struct slab_obj_iter *iter)
+{
+#ifdef CONFIG_SLAB_FREELIST_RANDOM
+	if (iter->random) {
+		unsigned long idx;
+
+		/*
+		 * If the target page allocation failed, the number of objects on the
+		 * page might be smaller than the usual size defined by the cache.
+		 */
+		do {
+			idx = s->random_seq[iter->pos];
+			iter->pos++;
+			if (iter->pos >= iter->freelist_count)
+				iter->pos = 0;
+		} while (unlikely(idx >= iter->page_limit));
+
+		return setup_object(s, (char *)iter->start + idx);
+	}
+#endif
+	return setup_object(s, (char *)iter->start + iter->pos++ * s->size);
+}
+
+/* Build a freelist from the objects not yet allocated from a fresh slab. */
+static inline void build_slab_freelist(struct kmem_cache *s, struct slab *slab,
+				       struct slab_obj_iter *iter)
+{
+	unsigned int nr = slab->objects - slab->inuse;
+	unsigned int i;
+	void *cur, *next;
+
+	if (!nr) {
+		slab->freelist = NULL;
+		return;
+	}
+
+	cur = next_slab_obj(s, iter);
+	slab->freelist = cur;
+
+	for (i = 1; i < nr; i++) {
+		next = next_slab_obj(s, iter);
+		set_freepointer(s, cur, next);
+		cur = next;
+	}
+
+	set_freepointer(s, cur, NULL);
+}
+
+/* Initialize an iterator over free objects in allocation order. */
+static inline void init_slab_obj_iter(struct kmem_cache *s, struct slab *slab,
+				      struct slab_obj_iter *iter,
+				      bool allow_spin)
+{
+	iter->pos = 0;
+	iter->start = fixup_red_left(s, slab_address(slab));
+
+#ifdef CONFIG_SLAB_FREELIST_RANDOM
+	iter->random = (slab->objects >= 2 && s->random_seq);
+	if (!iter->random)
+		return;
+
+	iter->freelist_count = oo_objects(s->oo);
+	iter->page_limit = slab->objects * s->size;
+
+	if (allow_spin) {
+		iter->pos = get_random_u32_below(iter->freelist_count);
+	} else {
+		struct rnd_state *state;
+
+		/*
+		 * An interrupt or NMI handler might interrupt and change
+		 * the state in the middle, but that's safe.
+		 */
+		state = &get_cpu_var(slab_rnd_state);
+		iter->pos = prandom_u32_state(state) % iter->freelist_count;
+		put_cpu_var(slab_rnd_state);
+	}
+#endif
+}
 
 /*
  * Called only for kmem_cache_debug() caches to allocate from a freshly
@@ -3422,132 +3752,211 @@ static void defer_deactivate_slab(struct slab *slab, void *flush_freelist);
  * and put the slab to the partial (or full) list.
  */
 static void *alloc_single_from_new_slab(struct kmem_cache *s, struct slab *slab,
-					int orig_size, gfp_t gfpflags)
+					const struct slab_alloc_context *ac)
 {
-	bool allow_spin = gfpflags_allow_spinning(gfpflags);
-	int nid = slab_nid(slab);
-	struct kmem_cache_node *n = get_node(s, nid);
+	bool allow_spin = alloc_flags_allow_spinning(ac->alloc_flags);
+	struct kmem_cache_node *n;
+	struct slab_obj_iter iter;
+	bool needs_add_partial;
 	unsigned long flags;
 	void *object;
 
-	if (!allow_spin && !spin_trylock_irqsave(&n->list_lock, flags)) {
-		/* Unlucky, discard newly allocated slab */
-		defer_deactivate_slab(slab, NULL);
-		return NULL;
-	}
-
-	object = slab->freelist;
-	slab->freelist = get_freepointer(s, object);
+	init_slab_obj_iter(s, slab, &iter, allow_spin);
+	object = next_slab_obj(s, &iter);
 	slab->inuse = 1;
 
-	if (!alloc_debug_processing(s, slab, object, orig_size)) {
+	needs_add_partial = (slab->objects > 1);
+	build_slab_freelist(s, slab, &iter);
+
+	/* alloc_debug_processing() always expects a valid freepointer */
+	set_freepointer(s, object, slab->freelist);
+
+	if (!alloc_debug_processing(s, slab, object, ac->orig_size)) {
 		/*
 		 * It's not really expected that this would fail on a
 		 * freshly allocated slab, but a concurrent memory
 		 * corruption in theory could cause that.
 		 * Leak memory of allocated slab.
 		 */
-		if (!allow_spin)
-			spin_unlock_irqrestore(&n->list_lock, flags);
 		return NULL;
 	}
 
-	if (allow_spin)
+	n = get_node(s, slab_nid(slab));
+	if (allow_spin) {
 		spin_lock_irqsave(&n->list_lock, flags);
+	} else if (!spin_trylock_irqsave(&n->list_lock, flags)) {
+		/*
+		 * Unlucky, discard newly allocated slab.
+		 * The slab is not fully free, but it's fine as
+		 * objects are not allocated to users.
+		 */
+		free_new_slab_nolock(s, slab);
+		return NULL;
+	}
 
-	if (slab->inuse == slab->objects)
-		add_full(s, n, slab);
+	if (needs_add_partial)
+		add_partial(n, slab, ADD_TO_HEAD);
 	else
-		add_partial(n, slab, DEACTIVATE_TO_HEAD);
+		add_full(s, n, slab);
 
-	inc_slabs_node(s, nid, slab->objects);
+	/*
+	 * Debug caches require nr_slabs updates under n->list_lock so validation
+	 * cannot race with slab (de)allocations and observe inconsistent state.
+	 */
+	inc_slabs_node(s, slab_nid(slab), slab->objects);
 	spin_unlock_irqrestore(&n->list_lock, flags);
 
 	return object;
 }
 
-#ifdef CONFIG_SLUB_CPU_PARTIAL
-static void put_cpu_partial(struct kmem_cache *s, struct slab *slab, int drain);
-#else
-static inline void put_cpu_partial(struct kmem_cache *s, struct slab *slab,
-				   int drain) { }
-#endif
 static inline bool pfmemalloc_match(struct slab *slab, gfp_t gfpflags);
 
-/*
- * Try to allocate a partial slab from a specific node.
- */
-static struct slab *get_partial_node(struct kmem_cache *s,
-				     struct kmem_cache_node *n,
-				     struct partial_context *pc)
+static bool get_partial_node_bulk(struct kmem_cache *s,
+				  struct kmem_cache_node *n,
+				  struct partial_bulk_context *pc,
+				  bool allow_spin)
 {
-	struct slab *slab, *slab2, *partial = NULL;
+	struct slab *slab, *slab2;
+	struct slab *first = NULL, *last = NULL;
+	unsigned int total_free = 0;
 	unsigned long flags;
-	unsigned int partial_slabs = 0;
+
+	/* Racy check to avoid taking the lock unnecessarily. */
+	if (!n || data_race(!n->nr_partial))
+		return false;
+
+	INIT_LIST_HEAD(&pc->slabs);
+
+	if (allow_spin)
+		spin_lock_irqsave(&n->list_lock, flags);
+	else if (!spin_trylock_irqsave(&n->list_lock, flags))
+		return false;
+
+	list_for_each_entry_safe(slab, slab2, &n->partial, slab_list) {
+		struct freelist_counters flc;
+		unsigned int slab_free;
+
+		if (!pfmemalloc_match(slab, pc->flags)) {
+			if (first) {
+				list_bulk_move_tail(&pc->slabs,
+						    &first->slab_list,
+						    &last->slab_list);
+				first = NULL;
+			}
+			continue;
+		}
+
+		/*
+		 * determine the number of free objects in the slab racily
+		 *
+		 * slab_free is a lower bound due to possible subsequent
+		 * concurrent freeing, so the caller may get more objects than
+		 * requested and must handle that
+		 */
+		flc.counters = data_race(READ_ONCE(slab->counters));
+		slab_free = flc.objects - flc.inuse;
+
+		/* we have already min and this would get us over the max */
+		if (total_free >= pc->min_objects
+		    && total_free + slab_free > pc->max_objects)
+			break;
+
+		if (!first)
+			first = slab;
+		last = slab;
+		clear_node_partial_state(n, slab);
+
+		total_free += slab_free;
+		if (total_free >= pc->max_objects)
+			break;
+	}
+
+	if (first)
+		list_bulk_move_tail(&pc->slabs, &first->slab_list,
+				    &last->slab_list);
+
+	spin_unlock_irqrestore(&n->list_lock, flags);
+	return total_free > 0;
+}
+
+/*
+ * Try to allocate object from a partial slab on a specific node.
+ */
+static void *get_from_partial_node(struct kmem_cache *s,
+				   struct kmem_cache_node *n,
+				   gfp_t gfp_flags,
+				   const struct slab_alloc_context *ac)
+{
+	struct slab *slab, *slab2;
+	unsigned long flags;
+	void *object = NULL;
 
 	/*
 	 * Racy check. If we mistakenly see no partial slabs then we
 	 * just allocate an empty slab. If we mistakenly try to get a
-	 * partial slab and there is none available then get_partial()
+	 * partial slab and there is none available then get_from_partial()
 	 * will return NULL.
 	 */
 	if (!n || !n->nr_partial)
 		return NULL;
 
-	if (gfpflags_allow_spinning(pc->flags))
+	if (alloc_flags_allow_spinning(ac->alloc_flags))
 		spin_lock_irqsave(&n->list_lock, flags);
 	else if (!spin_trylock_irqsave(&n->list_lock, flags))
 		return NULL;
 	list_for_each_entry_safe(slab, slab2, &n->partial, slab_list) {
-		if (!pfmemalloc_match(slab, pc->flags))
+
+		struct freelist_counters old, new;
+
+		if (!pfmemalloc_match(slab, gfp_flags))
 			continue;
 
 		if (IS_ENABLED(CONFIG_SLUB_TINY) || kmem_cache_debug(s)) {
-			void *object = alloc_single_from_partial(s, n, slab,
-							pc->orig_size);
-			if (object) {
-				partial = slab;
-				pc->object = object;
+			object = alloc_single_from_partial(s, n, slab,
+							ac->orig_size);
+			if (object)
 				break;
-			}
 			continue;
 		}
 
-		remove_partial(n, slab);
+		/*
+		 * get a single object from the slab. This might race against
+		 * __slab_free(), which however has to take the list_lock if
+		 * it's about to make the slab fully free.
+		 */
+		do {
+			old.freelist = slab->freelist;
+			old.counters = slab->counters;
 
-		if (!partial) {
-			partial = slab;
-			stat(s, ALLOC_FROM_PARTIAL);
+			new.freelist = get_freepointer(s, old.freelist);
+			new.counters = old.counters;
+			new.inuse++;
 
-			if ((slub_get_cpu_partial(s) == 0)) {
-				break;
-			}
-		} else {
-			put_cpu_partial(s, slab, 0);
-			stat(s, CPU_PARTIAL_NODE);
+		} while (!__slab_update_freelist(s, slab, &old, &new, "get_from_partial_node"));
 
-			if (++partial_slabs > slub_get_cpu_partial(s) / 2) {
-				break;
-			}
-		}
+		object = old.freelist;
+		if (!new.freelist)
+			remove_partial(n, slab);
+
+		break;
 	}
 	spin_unlock_irqrestore(&n->list_lock, flags);
-	return partial;
+	return object;
 }
 
 /*
- * Get a slab from somewhere. Search in increasing NUMA distances.
+ * Get an object from somewhere. Search in increasing NUMA distances.
  */
-static struct slab *get_any_partial(struct kmem_cache *s,
-				    struct partial_context *pc)
+static void *get_from_any_partial(struct kmem_cache *s, gfp_t gfp_flags,
+				  const struct slab_alloc_context *ac)
 {
 #ifdef CONFIG_NUMA
 	struct zonelist *zonelist;
 	struct zoneref *z;
 	struct zone *zone;
-	enum zone_type highest_zoneidx = gfp_zone(pc->flags);
-	struct slab *slab;
+	enum zone_type highest_zoneidx = gfp_zone(gfp_flags);
 	unsigned int cpuset_mems_cookie;
+	bool allow_spin = alloc_flags_allow_spinning(ac->alloc_flags);
 
 	/*
 	 * The defrag ratio allows a configuration of the tradeoffs between
@@ -3572,17 +3981,28 @@ static struct slab *get_any_partial(struct kmem_cache *s,
 		return NULL;
 
 	do {
-		cpuset_mems_cookie = read_mems_allowed_begin();
-		zonelist = node_zonelist(mempolicy_slab_node(), pc->flags);
+		/*
+		 * read_mems_allowed_begin() accesses current->mems_allowed_seq,
+		 * a seqcount_spinlock_t that is not NMI-safe. Do not access
+		 * current->mems_allowed_seq and avoid retry when GFP flags
+		 * indicate spinning is not allowed.
+		 */
+		if (allow_spin)
+			cpuset_mems_cookie = read_mems_allowed_begin();
+
+		zonelist = node_zonelist(mempolicy_slab_node(), gfp_flags);
 		for_each_zone_zonelist(zone, z, zonelist, highest_zoneidx) {
 			struct kmem_cache_node *n;
 
 			n = get_node(s, zone_to_nid(zone));
 
-			if (n && cpuset_zone_allowed(zone, pc->flags) &&
+			if (n && cpuset_zone_allowed(zone, gfp_flags) &&
 					n->nr_partial > s->min_partial) {
-				slab = get_partial_node(s, n, pc);
-				if (slab) {
+
+				void *object = get_from_partial_node(s, n,
+								gfp_flags, ac);
+
+				if (object) {
 					/*
 					 * Don't check read_mems_allowed_retry()
 					 * here - if mems_allowed was updated in
@@ -3590,446 +4010,39 @@ static struct slab *get_any_partial(struct kmem_cache *s,
 					 * between allocation and the cpuset
 					 * update
 					 */
-					return slab;
+					return object;
 				}
 			}
 		}
-	} while (read_mems_allowed_retry(cpuset_mems_cookie));
+	} while (allow_spin && read_mems_allowed_retry(cpuset_mems_cookie));
 #endif	/* CONFIG_NUMA */
 	return NULL;
 }
 
 /*
- * Get a partial slab, lock it and return it.
+ * Get an object from a partial slab
  */
-static struct slab *get_partial(struct kmem_cache *s, int node,
-				struct partial_context *pc)
+static void *get_from_partial(struct kmem_cache *s, int node, gfp_t flags,
+			      const struct slab_alloc_context *ac)
 {
-	struct slab *slab;
 	int searchnode = node;
+	void *object;
 
 	if (node == NUMA_NO_NODE)
 		searchnode = numa_mem_id();
 
-	slab = get_partial_node(s, get_node(s, searchnode), pc);
-	if (slab || (node != NUMA_NO_NODE && (pc->flags & __GFP_THISNODE)))
-		return slab;
+	object = get_from_partial_node(s, get_node(s, searchnode), flags, ac);
+	if (object || (node != NUMA_NO_NODE && (flags & __GFP_THISNODE)))
+		return object;
 
-	return get_any_partial(s, pc);
+	return get_from_any_partial(s, flags, ac);
 }
-
-#ifndef CONFIG_SLUB_TINY
-
-#ifdef CONFIG_PREEMPTION
-/*
- * Calculate the next globally unique transaction for disambiguation
- * during cmpxchg. The transactions start with the cpu number and are then
- * incremented by CONFIG_NR_CPUS.
- */
-#define TID_STEP  roundup_pow_of_two(CONFIG_NR_CPUS)
-#else
-/*
- * No preemption supported therefore also no need to check for
- * different cpus.
- */
-#define TID_STEP 1
-#endif /* CONFIG_PREEMPTION */
-
-static inline unsigned long next_tid(unsigned long tid)
-{
-	return tid + TID_STEP;
-}
-
-#ifdef SLUB_DEBUG_CMPXCHG
-static inline unsigned int tid_to_cpu(unsigned long tid)
-{
-	return tid % TID_STEP;
-}
-
-static inline unsigned long tid_to_event(unsigned long tid)
-{
-	return tid / TID_STEP;
-}
-#endif
-
-static inline unsigned int init_tid(int cpu)
-{
-	return cpu;
-}
-
-static inline void note_cmpxchg_failure(const char *n,
-		const struct kmem_cache *s, unsigned long tid)
-{
-#ifdef SLUB_DEBUG_CMPXCHG
-	unsigned long actual_tid = __this_cpu_read(s->cpu_slab->tid);
-
-	pr_info("%s %s: cmpxchg redo ", n, s->name);
-
-	if (IS_ENABLED(CONFIG_PREEMPTION) &&
-	    tid_to_cpu(tid) != tid_to_cpu(actual_tid)) {
-		pr_warn("due to cpu change %d -> %d\n",
-			tid_to_cpu(tid), tid_to_cpu(actual_tid));
-	} else if (tid_to_event(tid) != tid_to_event(actual_tid)) {
-		pr_warn("due to cpu running other code. Event %ld->%ld\n",
-			tid_to_event(tid), tid_to_event(actual_tid));
-	} else {
-		pr_warn("for unknown reason: actual=%lx was=%lx target=%lx\n",
-			actual_tid, tid, next_tid(tid));
-	}
-#endif
-	stat(s, CMPXCHG_DOUBLE_CPU_FAIL);
-}
-
-static void init_kmem_cache_cpus(struct kmem_cache *s)
-{
-#ifdef CONFIG_PREEMPT_RT
-	/*
-	 * Register lockdep key for non-boot kmem caches to avoid
-	 * WARN_ON_ONCE(static_obj(key))) in lockdep_register_key()
-	 */
-	bool finegrain_lockdep = !init_section_contains(s, 1);
-#else
-	/*
-	 * Don't bother with different lockdep classes for each
-	 * kmem_cache, since we only use local_trylock_irqsave().
-	 */
-	bool finegrain_lockdep = false;
-#endif
-	int cpu;
-	struct kmem_cache_cpu *c;
-
-	if (finegrain_lockdep)
-		lockdep_register_key(&s->lock_key);
-	for_each_possible_cpu(cpu) {
-		c = per_cpu_ptr(s->cpu_slab, cpu);
-		local_trylock_init(&c->lock);
-		if (finegrain_lockdep)
-			lockdep_set_class(&c->lock, &s->lock_key);
-		c->tid = init_tid(cpu);
-	}
-}
-
-/*
- * Finishes removing the cpu slab. Merges cpu's freelist with slab's freelist,
- * unfreezes the slabs and puts it on the proper list.
- * Assumes the slab has been already safely taken away from kmem_cache_cpu
- * by the caller.
- */
-static void deactivate_slab(struct kmem_cache *s, struct slab *slab,
-			    void *freelist)
-{
-	struct kmem_cache_node *n = get_node(s, slab_nid(slab));
-	int free_delta = 0;
-	void *nextfree, *freelist_iter, *freelist_tail;
-	int tail = DEACTIVATE_TO_HEAD;
-	unsigned long flags = 0;
-	struct slab new;
-	struct slab old;
-
-	if (READ_ONCE(slab->freelist)) {
-		stat(s, DEACTIVATE_REMOTE_FREES);
-		tail = DEACTIVATE_TO_TAIL;
-	}
-
-	/*
-	 * Stage one: Count the objects on cpu's freelist as free_delta and
-	 * remember the last object in freelist_tail for later splicing.
-	 */
-	freelist_tail = NULL;
-	freelist_iter = freelist;
-	while (freelist_iter) {
-		nextfree = get_freepointer(s, freelist_iter);
-
-		/*
-		 * If 'nextfree' is invalid, it is possible that the object at
-		 * 'freelist_iter' is already corrupted.  So isolate all objects
-		 * starting at 'freelist_iter' by skipping them.
-		 */
-		if (freelist_corrupted(s, slab, &freelist_iter, nextfree))
-			break;
-
-		freelist_tail = freelist_iter;
-		free_delta++;
-
-		freelist_iter = nextfree;
-	}
-
-	/*
-	 * Stage two: Unfreeze the slab while splicing the per-cpu
-	 * freelist to the head of slab's freelist.
-	 */
-	do {
-		old.freelist = READ_ONCE(slab->freelist);
-		old.counters = READ_ONCE(slab->counters);
-		VM_BUG_ON(!old.frozen);
-
-		/* Determine target state of the slab */
-		new.counters = old.counters;
-		new.frozen = 0;
-		if (freelist_tail) {
-			new.inuse -= free_delta;
-			set_freepointer(s, freelist_tail, old.freelist);
-			new.freelist = freelist;
-		} else {
-			new.freelist = old.freelist;
-		}
-	} while (!slab_update_freelist(s, slab,
-		old.freelist, old.counters,
-		new.freelist, new.counters,
-		"unfreezing slab"));
-
-	/*
-	 * Stage three: Manipulate the slab list based on the updated state.
-	 */
-	if (!new.inuse && n->nr_partial >= s->min_partial) {
-		stat(s, DEACTIVATE_EMPTY);
-		discard_slab(s, slab);
-		stat(s, FREE_SLAB);
-	} else if (new.freelist) {
-		spin_lock_irqsave(&n->list_lock, flags);
-		add_partial(n, slab, tail);
-		spin_unlock_irqrestore(&n->list_lock, flags);
-		stat(s, tail);
-	} else {
-		stat(s, DEACTIVATE_FULL);
-	}
-}
-
-/*
- * ___slab_alloc()'s caller is supposed to check if kmem_cache::kmem_cache_cpu::lock
- * can be acquired without a deadlock before invoking the function.
- *
- * Without LOCKDEP we trust the code to be correct. kmalloc_nolock() is
- * using local_lock_is_locked() properly before calling local_lock_cpu_slab(),
- * and kmalloc() is not used in an unsupported context.
- *
- * With LOCKDEP, on PREEMPT_RT lockdep does its checking in local_lock_irqsave().
- * On !PREEMPT_RT we use trylock to avoid false positives in NMI, but
- * lockdep_assert() will catch a bug in case:
- * #1
- * kmalloc() -> ___slab_alloc() -> irqsave -> NMI -> bpf -> kmalloc_nolock()
- * or
- * #2
- * kmalloc() -> ___slab_alloc() -> irqsave -> tracepoint/kprobe -> bpf -> kmalloc_nolock()
- *
- * On PREEMPT_RT an invocation is not possible from IRQ-off or preempt
- * disabled context. The lock will always be acquired and if needed it
- * block and sleep until the lock is available.
- * #1 is possible in !PREEMPT_RT only.
- * #2 is possible in both with a twist that irqsave is replaced with rt_spinlock:
- * kmalloc() -> ___slab_alloc() -> rt_spin_lock(kmem_cache_A) ->
- *    tracepoint/kprobe -> bpf -> kmalloc_nolock() -> rt_spin_lock(kmem_cache_B)
- *
- * local_lock_is_locked() prevents the case kmem_cache_A == kmem_cache_B
- */
-#if defined(CONFIG_PREEMPT_RT) || !defined(CONFIG_LOCKDEP)
-#define local_lock_cpu_slab(s, flags)	\
-	local_lock_irqsave(&(s)->cpu_slab->lock, flags)
-#else
-#define local_lock_cpu_slab(s, flags)					       \
-	do {								       \
-		bool __l = local_trylock_irqsave(&(s)->cpu_slab->lock, flags); \
-		lockdep_assert(__l);					       \
-	} while (0)
-#endif
-
-#define local_unlock_cpu_slab(s, flags)	\
-	local_unlock_irqrestore(&(s)->cpu_slab->lock, flags)
-
-#ifdef CONFIG_SLUB_CPU_PARTIAL
-static void __put_partials(struct kmem_cache *s, struct slab *partial_slab)
-{
-	struct kmem_cache_node *n = NULL, *n2 = NULL;
-	struct slab *slab, *slab_to_discard = NULL;
-	unsigned long flags = 0;
-
-	while (partial_slab) {
-		slab = partial_slab;
-		partial_slab = slab->next;
-
-		n2 = get_node(s, slab_nid(slab));
-		if (n != n2) {
-			if (n)
-				spin_unlock_irqrestore(&n->list_lock, flags);
-
-			n = n2;
-			spin_lock_irqsave(&n->list_lock, flags);
-		}
-
-		if (unlikely(!slab->inuse && n->nr_partial >= s->min_partial)) {
-			slab->next = slab_to_discard;
-			slab_to_discard = slab;
-		} else {
-			add_partial(n, slab, DEACTIVATE_TO_TAIL);
-			stat(s, FREE_ADD_PARTIAL);
-		}
-	}
-
-	if (n)
-		spin_unlock_irqrestore(&n->list_lock, flags);
-
-	while (slab_to_discard) {
-		slab = slab_to_discard;
-		slab_to_discard = slab_to_discard->next;
-
-		stat(s, DEACTIVATE_EMPTY);
-		discard_slab(s, slab);
-		stat(s, FREE_SLAB);
-	}
-}
-
-/*
- * Put all the cpu partial slabs to the node partial list.
- */
-static void put_partials(struct kmem_cache *s)
-{
-	struct slab *partial_slab;
-	unsigned long flags;
-
-	local_lock_irqsave(&s->cpu_slab->lock, flags);
-	partial_slab = this_cpu_read(s->cpu_slab->partial);
-	this_cpu_write(s->cpu_slab->partial, NULL);
-	local_unlock_irqrestore(&s->cpu_slab->lock, flags);
-
-	if (partial_slab)
-		__put_partials(s, partial_slab);
-}
-
-static void put_partials_cpu(struct kmem_cache *s,
-			     struct kmem_cache_cpu *c)
-{
-	struct slab *partial_slab;
-
-	partial_slab = slub_percpu_partial(c);
-	c->partial = NULL;
-
-	if (partial_slab)
-		__put_partials(s, partial_slab);
-}
-
-/*
- * Put a slab into a partial slab slot if available.
- *
- * If we did not find a slot then simply move all the partials to the
- * per node partial list.
- */
-static void put_cpu_partial(struct kmem_cache *s, struct slab *slab, int drain)
-{
-	struct slab *oldslab;
-	struct slab *slab_to_put = NULL;
-	unsigned long flags;
-	int slabs = 0;
-
-	local_lock_cpu_slab(s, flags);
-
-	oldslab = this_cpu_read(s->cpu_slab->partial);
-
-	if (oldslab) {
-		if (drain && oldslab->slabs >= s->cpu_partial_slabs) {
-			/*
-			 * Partial array is full. Move the existing set to the
-			 * per node partial list. Postpone the actual unfreezing
-			 * outside of the critical section.
-			 */
-			slab_to_put = oldslab;
-			oldslab = NULL;
-		} else {
-			slabs = oldslab->slabs;
-		}
-	}
-
-	slabs++;
-
-	slab->slabs = slabs;
-	slab->next = oldslab;
-
-	this_cpu_write(s->cpu_slab->partial, slab);
-
-	local_unlock_cpu_slab(s, flags);
-
-	if (slab_to_put) {
-		__put_partials(s, slab_to_put);
-		stat(s, CPU_PARTIAL_DRAIN);
-	}
-}
-
-#else	/* CONFIG_SLUB_CPU_PARTIAL */
-
-static inline void put_partials(struct kmem_cache *s) { }
-static inline void put_partials_cpu(struct kmem_cache *s,
-				    struct kmem_cache_cpu *c) { }
-
-#endif	/* CONFIG_SLUB_CPU_PARTIAL */
-
-static inline void flush_slab(struct kmem_cache *s, struct kmem_cache_cpu *c)
-{
-	unsigned long flags;
-	struct slab *slab;
-	void *freelist;
-
-	local_lock_irqsave(&s->cpu_slab->lock, flags);
-
-	slab = c->slab;
-	freelist = c->freelist;
-
-	c->slab = NULL;
-	c->freelist = NULL;
-	c->tid = next_tid(c->tid);
-
-	local_unlock_irqrestore(&s->cpu_slab->lock, flags);
-
-	if (slab) {
-		deactivate_slab(s, slab, freelist);
-		stat(s, CPUSLAB_FLUSH);
-	}
-}
-
-static inline void __flush_cpu_slab(struct kmem_cache *s, int cpu)
-{
-	struct kmem_cache_cpu *c = per_cpu_ptr(s->cpu_slab, cpu);
-	void *freelist = c->freelist;
-	struct slab *slab = c->slab;
-
-	c->slab = NULL;
-	c->freelist = NULL;
-	c->tid = next_tid(c->tid);
-
-	if (slab) {
-		deactivate_slab(s, slab, freelist);
-		stat(s, CPUSLAB_FLUSH);
-	}
-
-	put_partials_cpu(s, c);
-}
-
-static inline void flush_this_cpu_slab(struct kmem_cache *s)
-{
-	struct kmem_cache_cpu *c = this_cpu_ptr(s->cpu_slab);
-
-	if (c->slab)
-		flush_slab(s, c);
-
-	put_partials(s);
-}
-
-static bool has_cpu_slab(int cpu, struct kmem_cache *s)
-{
-	struct kmem_cache_cpu *c = per_cpu_ptr(s->cpu_slab, cpu);
-
-	return c->slab || slub_percpu_partial(c);
-}
-
-#else /* CONFIG_SLUB_TINY */
-static inline void __flush_cpu_slab(struct kmem_cache *s, int cpu) { }
-static inline bool has_cpu_slab(int cpu, struct kmem_cache *s) { return false; }
-static inline void flush_this_cpu_slab(struct kmem_cache *s) { }
-#endif /* CONFIG_SLUB_TINY */
 
 static bool has_pcs_used(int cpu, struct kmem_cache *s)
 {
 	struct slub_percpu_sheaves *pcs;
 
-	if (!s->cpu_sheaves)
+	if (!cache_has_sheaves(s))
 		return false;
 
 	pcs = per_cpu_ptr(s->cpu_sheaves, cpu);
@@ -4038,11 +4051,11 @@ static bool has_pcs_used(int cpu, struct kmem_cache *s)
 }
 
 /*
- * Flush cpu slab.
+ * Flush percpu sheaves
  *
  * Called from CPU work handler with migration disabled.
  */
-static void flush_cpu_slab(struct work_struct *w)
+static void flush_cpu_sheaves(struct work_struct *w)
 {
 	struct kmem_cache *s;
 	struct slub_flush_work *sfw;
@@ -4051,10 +4064,8 @@ static void flush_cpu_slab(struct work_struct *w)
 
 	s = sfw->s;
 
-	if (s->cpu_sheaves)
+	if (cache_has_sheaves(s))
 		pcs_flush_all(s);
-
-	flush_this_cpu_slab(s);
 }
 
 static void flush_all_cpus_locked(struct kmem_cache *s)
@@ -4067,11 +4078,11 @@ static void flush_all_cpus_locked(struct kmem_cache *s)
 
 	for_each_online_cpu(cpu) {
 		sfw = &per_cpu(slub_flush, cpu);
-		if (!has_cpu_slab(cpu, s) && !has_pcs_used(cpu, s)) {
+		if (!has_pcs_used(cpu, s)) {
 			sfw->skip = true;
 			continue;
 		}
-		INIT_WORK(&sfw->work, flush_cpu_slab);
+		INIT_WORK(&sfw->work, flush_cpu_sheaves);
 		sfw->skip = false;
 		sfw->s = s;
 		queue_work_on(cpu, flushwq, &sfw->work);
@@ -4093,6 +4104,22 @@ static void flush_all(struct kmem_cache *s)
 	flush_all_cpus_locked(s);
 	cpus_read_unlock();
 }
+
+struct deferred_percpu_work {
+	struct llist_head objects;
+	struct llist_head objects_by_rcu;
+	struct llist_head rcu_sheaves;
+	struct irq_work work;
+};
+
+static void deferred_percpu_work_fn(struct irq_work *work);
+
+static DEFINE_PER_CPU(struct deferred_percpu_work, deferred_percpu_work) = {
+	.objects = LLIST_HEAD_INIT(objects),
+	.objects_by_rcu = LLIST_HEAD_INIT(objects_by_rcu),
+	.rcu_sheaves = LLIST_HEAD_INIT(rcu_sheaves),
+	.work = IRQ_WORK_INIT(deferred_percpu_work_fn),
+};
 
 static void flush_rcu_sheaf(struct work_struct *w)
 {
@@ -4118,48 +4145,101 @@ static void flush_rcu_sheaf(struct work_struct *w)
 
 
 /* needed for kvfree_rcu_barrier() */
-void flush_all_rcu_sheaves(void)
+void flush_rcu_sheaves_on_cache(struct kmem_cache *s)
 {
 	struct slub_flush_work *sfw;
-	struct kmem_cache *s;
 	unsigned int cpu;
+
+	lockdep_assert_cpus_held();
+	mutex_lock(&flush_lock);
+
+	for_each_online_cpu(cpu) {
+		sfw = &per_cpu(slub_flush, cpu);
+
+		/*
+		 * we don't check if rcu_free sheaf exists - racing
+		 * __kfree_rcu_sheaf() might have just removed it.
+		 * by executing flush_rcu_sheaf() on the cpu we make
+		 * sure the __kfree_rcu_sheaf() finished its call_rcu()
+		 */
+
+		INIT_WORK(&sfw->work, flush_rcu_sheaf);
+		sfw->s = s;
+		queue_work_on(cpu, flushwq, &sfw->work);
+	}
+
+	for_each_online_cpu(cpu) {
+		sfw = &per_cpu(slub_flush, cpu);
+		flush_work(&sfw->work);
+	}
+
+	mutex_unlock(&flush_lock);
+}
+
+void flush_all_rcu_sheaves(void)
+{
+	struct kmem_cache *s;
+
+	deferred_work_barrier();
 
 	cpus_read_lock();
 	mutex_lock(&slab_mutex);
 
 	list_for_each_entry(s, &slab_caches, list) {
-		if (!s->cpu_sheaves)
+		if (!cache_has_sheaves(s))
 			continue;
-
-		mutex_lock(&flush_lock);
-
-		for_each_online_cpu(cpu) {
-			sfw = &per_cpu(slub_flush, cpu);
-
-			/*
-			 * we don't check if rcu_free sheaf exists - racing
-			 * __kfree_rcu_sheaf() might have just removed it.
-			 * by executing flush_rcu_sheaf() on the cpu we make
-			 * sure the __kfree_rcu_sheaf() finished its call_rcu()
-			 */
-
-			INIT_WORK(&sfw->work, flush_rcu_sheaf);
-			sfw->s = s;
-			queue_work_on(cpu, flushwq, &sfw->work);
-		}
-
-		for_each_online_cpu(cpu) {
-			sfw = &per_cpu(slub_flush, cpu);
-			flush_work(&sfw->work);
-		}
-
-		mutex_unlock(&flush_lock);
+		flush_rcu_sheaves_on_cache(s);
 	}
 
 	mutex_unlock(&slab_mutex);
 	cpus_read_unlock();
 
 	rcu_barrier();
+}
+
+static int slub_cpu_setup(unsigned int cpu)
+{
+	int nid = cpu_to_node(cpu);
+	struct kmem_cache *s;
+	int ret = 0;
+
+	/*
+	 * we never clear a nid so it's safe to do a quick check before taking
+	 * the mutex, and then recheck to handle parallel cpu hotplug safely
+	 */
+	if (node_isset(nid, slab_barn_nodes))
+		return 0;
+
+	mutex_lock(&slab_mutex);
+
+	if (node_isset(nid, slab_barn_nodes))
+		goto out;
+
+	list_for_each_entry(s, &slab_caches, list) {
+		struct node_barn *barn;
+
+		/*
+		 * barn might already exist if a previous callback failed midway
+		 */
+		if (!cache_has_sheaves(s) || get_barn_node(s, nid))
+			continue;
+
+		barn = kmalloc_node(sizeof(*barn), GFP_KERNEL, nid);
+
+		if (!barn) {
+			ret = -ENOMEM;
+			goto out;
+		}
+
+		barn_init(barn);
+		s->per_node[nid].barn = barn;
+	}
+	node_set(nid, slab_barn_nodes);
+
+out:
+	mutex_unlock(&slab_mutex);
+
+	return ret;
 }
 
 /*
@@ -4172,25 +4252,11 @@ static int slub_cpu_dead(unsigned int cpu)
 
 	mutex_lock(&slab_mutex);
 	list_for_each_entry(s, &slab_caches, list) {
-		__flush_cpu_slab(s, cpu);
-		if (s->cpu_sheaves)
+		if (cache_has_sheaves(s))
 			__pcs_flush_all_cpu(s, cpu);
 	}
 	mutex_unlock(&slab_mutex);
 	return 0;
-}
-
-/*
- * Check if the objects in a per cpu structure fit numa
- * locality expectations.
- */
-static inline int node_match(struct slab *slab, int node)
-{
-#ifdef CONFIG_NUMA
-	if (node != NUMA_NO_NODE && slab_nid(slab) != node)
-		return 0;
-#endif
-	return 1;
 }
 
 #ifdef CONFIG_SLUB_DEBUG
@@ -4365,546 +4431,34 @@ static inline bool pfmemalloc_match(struct slab *slab, gfp_t gfpflags)
 	return true;
 }
 
-#ifndef CONFIG_SLUB_TINY
-static inline bool
-__update_cpu_freelist_fast(struct kmem_cache *s,
-			   void *freelist_old, void *freelist_new,
-			   unsigned long tid)
-{
-	freelist_aba_t old = { .freelist = freelist_old, .counter = tid };
-	freelist_aba_t new = { .freelist = freelist_new, .counter = next_tid(tid) };
-
-	return this_cpu_try_cmpxchg_freelist(s->cpu_slab->freelist_tid.full,
-					     &old.full, new.full);
-}
-
 /*
- * Check the slab->freelist and either transfer the freelist to the
- * per cpu freelist or deactivate the slab.
+ * Get the slab's freelist and do not freeze it.
  *
- * The slab is still frozen if the return value is not NULL.
+ * Assumes the slab is isolated from node partial list and not frozen.
  *
- * If this function returns NULL then the slab has been unfrozen.
+ * Assumes this is performed only for caches without debugging so we
+ * don't need to worry about adding the slab to the full list.
  */
-static inline void *get_freelist(struct kmem_cache *s, struct slab *slab)
+static inline void *get_freelist_nofreeze(struct kmem_cache *s, struct slab *slab,
+					  unsigned int *count)
 {
-	struct slab new;
-	unsigned long counters;
-	void *freelist;
-
-	lockdep_assert_held(this_cpu_ptr(&s->cpu_slab->lock));
+	struct freelist_counters old, new;
 
 	do {
-		freelist = slab->freelist;
-		counters = slab->counters;
+		old.freelist = slab->freelist;
+		old.counters = slab->counters;
 
-		new.counters = counters;
+		new.freelist = NULL;
+		new.counters = old.counters;
+		VM_WARN_ON_ONCE(new.frozen);
 
-		new.inuse = slab->objects;
-		new.frozen = freelist != NULL;
+		new.inuse = old.objects;
 
-	} while (!__slab_update_freelist(s, slab,
-		freelist, counters,
-		NULL, new.counters,
-		"get_freelist"));
+	} while (!slab_update_freelist(s, slab, &old, &new, "get_freelist_nofreeze"));
 
-	return freelist;
+	*count = old.objects - old.inuse;
+	return old.freelist;
 }
-
-/*
- * Freeze the partial slab and return the pointer to the freelist.
- */
-static inline void *freeze_slab(struct kmem_cache *s, struct slab *slab)
-{
-	struct slab new;
-	unsigned long counters;
-	void *freelist;
-
-	do {
-		freelist = slab->freelist;
-		counters = slab->counters;
-
-		new.counters = counters;
-		VM_BUG_ON(new.frozen);
-
-		new.inuse = slab->objects;
-		new.frozen = 1;
-
-	} while (!slab_update_freelist(s, slab,
-		freelist, counters,
-		NULL, new.counters,
-		"freeze_slab"));
-
-	return freelist;
-}
-
-/*
- * Slow path. The lockless freelist is empty or we need to perform
- * debugging duties.
- *
- * Processing is still very fast if new objects have been freed to the
- * regular freelist. In that case we simply take over the regular freelist
- * as the lockless freelist and zap the regular freelist.
- *
- * If that is not working then we fall back to the partial lists. We take the
- * first element of the freelist as the object to allocate now and move the
- * rest of the freelist to the lockless freelist.
- *
- * And if we were unable to get a new slab from the partial slab lists then
- * we need to allocate a new slab. This is the slowest path since it involves
- * a call to the page allocator and the setup of a new slab.
- *
- * Version of __slab_alloc to use when we know that preemption is
- * already disabled (which is the case for bulk allocation).
- */
-static void *___slab_alloc(struct kmem_cache *s, gfp_t gfpflags, int node,
-			  unsigned long addr, struct kmem_cache_cpu *c, unsigned int orig_size)
-{
-	bool allow_spin = gfpflags_allow_spinning(gfpflags);
-	void *freelist;
-	struct slab *slab;
-	unsigned long flags;
-	struct partial_context pc;
-	bool try_thisnode = true;
-
-	stat(s, ALLOC_SLOWPATH);
-
-reread_slab:
-
-	slab = READ_ONCE(c->slab);
-	if (!slab) {
-		/*
-		 * if the node is not online or has no normal memory, just
-		 * ignore the node constraint
-		 */
-		if (unlikely(node != NUMA_NO_NODE &&
-			     !node_isset(node, slab_nodes)))
-			node = NUMA_NO_NODE;
-		goto new_slab;
-	}
-
-	if (unlikely(!node_match(slab, node))) {
-		/*
-		 * same as above but node_match() being false already
-		 * implies node != NUMA_NO_NODE.
-		 *
-		 * We don't strictly honor pfmemalloc and NUMA preferences
-		 * when !allow_spin because:
-		 *
-		 * 1. Most kmalloc() users allocate objects on the local node,
-		 *    so kmalloc_nolock() tries not to interfere with them by
-		 *    deactivating the cpu slab.
-		 *
-		 * 2. Deactivating due to NUMA or pfmemalloc mismatch may cause
-		 *    unnecessary slab allocations even when n->partial list
-		 *    is not empty.
-		 */
-		if (!node_isset(node, slab_nodes) ||
-		    !allow_spin) {
-			node = NUMA_NO_NODE;
-		} else {
-			stat(s, ALLOC_NODE_MISMATCH);
-			goto deactivate_slab;
-		}
-	}
-
-	/*
-	 * By rights, we should be searching for a slab page that was
-	 * PFMEMALLOC but right now, we are losing the pfmemalloc
-	 * information when the page leaves the per-cpu allocator
-	 */
-	if (unlikely(!pfmemalloc_match(slab, gfpflags) && allow_spin))
-		goto deactivate_slab;
-
-	/* must check again c->slab in case we got preempted and it changed */
-	local_lock_cpu_slab(s, flags);
-
-	if (unlikely(slab != c->slab)) {
-		local_unlock_cpu_slab(s, flags);
-		goto reread_slab;
-	}
-	freelist = c->freelist;
-	if (freelist)
-		goto load_freelist;
-
-	freelist = get_freelist(s, slab);
-
-	if (!freelist) {
-		c->slab = NULL;
-		c->tid = next_tid(c->tid);
-		local_unlock_cpu_slab(s, flags);
-		stat(s, DEACTIVATE_BYPASS);
-		goto new_slab;
-	}
-
-	stat(s, ALLOC_REFILL);
-
-load_freelist:
-
-	lockdep_assert_held(this_cpu_ptr(&s->cpu_slab->lock));
-
-	/*
-	 * freelist is pointing to the list of objects to be used.
-	 * slab is pointing to the slab from which the objects are obtained.
-	 * That slab must be frozen for per cpu allocations to work.
-	 */
-	VM_BUG_ON(!c->slab->frozen);
-	c->freelist = get_freepointer(s, freelist);
-	c->tid = next_tid(c->tid);
-	local_unlock_cpu_slab(s, flags);
-	return freelist;
-
-deactivate_slab:
-
-	local_lock_cpu_slab(s, flags);
-	if (slab != c->slab) {
-		local_unlock_cpu_slab(s, flags);
-		goto reread_slab;
-	}
-	freelist = c->freelist;
-	c->slab = NULL;
-	c->freelist = NULL;
-	c->tid = next_tid(c->tid);
-	local_unlock_cpu_slab(s, flags);
-	deactivate_slab(s, slab, freelist);
-
-new_slab:
-
-#ifdef CONFIG_SLUB_CPU_PARTIAL
-	while (slub_percpu_partial(c)) {
-		local_lock_cpu_slab(s, flags);
-		if (unlikely(c->slab)) {
-			local_unlock_cpu_slab(s, flags);
-			goto reread_slab;
-		}
-		if (unlikely(!slub_percpu_partial(c))) {
-			local_unlock_cpu_slab(s, flags);
-			/* we were preempted and partial list got empty */
-			goto new_objects;
-		}
-
-		slab = slub_percpu_partial(c);
-		slub_set_percpu_partial(c, slab);
-
-		if (likely(node_match(slab, node) &&
-			   pfmemalloc_match(slab, gfpflags)) ||
-		    !allow_spin) {
-			c->slab = slab;
-			freelist = get_freelist(s, slab);
-			VM_BUG_ON(!freelist);
-			stat(s, CPU_PARTIAL_ALLOC);
-			goto load_freelist;
-		}
-
-		local_unlock_cpu_slab(s, flags);
-
-		slab->next = NULL;
-		__put_partials(s, slab);
-	}
-#endif
-
-new_objects:
-
-	pc.flags = gfpflags;
-	/*
-	 * When a preferred node is indicated but no __GFP_THISNODE
-	 *
-	 * 1) try to get a partial slab from target node only by having
-	 *    __GFP_THISNODE in pc.flags for get_partial()
-	 * 2) if 1) failed, try to allocate a new slab from target node with
-	 *    GPF_NOWAIT | __GFP_THISNODE opportunistically
-	 * 3) if 2) failed, retry with original gfpflags which will allow
-	 *    get_partial() try partial lists of other nodes before potentially
-	 *    allocating new page from other nodes
-	 */
-	if (unlikely(node != NUMA_NO_NODE && !(gfpflags & __GFP_THISNODE)
-		     && try_thisnode)) {
-		if (unlikely(!allow_spin))
-			/* Do not upgrade gfp to NOWAIT from more restrictive mode */
-			pc.flags = gfpflags | __GFP_THISNODE;
-		else
-			pc.flags = GFP_NOWAIT | __GFP_THISNODE;
-	}
-
-	pc.orig_size = orig_size;
-	slab = get_partial(s, node, &pc);
-	if (slab) {
-		if (kmem_cache_debug(s)) {
-			freelist = pc.object;
-			/*
-			 * For debug caches here we had to go through
-			 * alloc_single_from_partial() so just store the
-			 * tracking info and return the object.
-			 *
-			 * Due to disabled preemption we need to disallow
-			 * blocking. The flags are further adjusted by
-			 * gfp_nested_mask() in stack_depot itself.
-			 */
-			if (s->flags & SLAB_STORE_USER)
-				set_track(s, freelist, TRACK_ALLOC, addr,
-					  gfpflags & ~(__GFP_DIRECT_RECLAIM));
-
-			return freelist;
-		}
-
-		freelist = freeze_slab(s, slab);
-		goto retry_load_slab;
-	}
-
-	slub_put_cpu_ptr(s->cpu_slab);
-	slab = new_slab(s, pc.flags, node);
-	c = slub_get_cpu_ptr(s->cpu_slab);
-
-	if (unlikely(!slab)) {
-		if (node != NUMA_NO_NODE && !(gfpflags & __GFP_THISNODE)
-		    && try_thisnode) {
-			try_thisnode = false;
-			goto new_objects;
-		}
-		slab_out_of_memory(s, gfpflags, node);
-		return NULL;
-	}
-
-	stat(s, ALLOC_SLAB);
-
-	if (kmem_cache_debug(s)) {
-		freelist = alloc_single_from_new_slab(s, slab, orig_size, gfpflags);
-
-		if (unlikely(!freelist)) {
-			/* This could cause an endless loop. Fail instead. */
-			if (!allow_spin)
-				return NULL;
-			goto new_objects;
-		}
-
-		if (s->flags & SLAB_STORE_USER)
-			set_track(s, freelist, TRACK_ALLOC, addr,
-				  gfpflags & ~(__GFP_DIRECT_RECLAIM));
-
-		return freelist;
-	}
-
-	/*
-	 * No other reference to the slab yet so we can
-	 * muck around with it freely without cmpxchg
-	 */
-	freelist = slab->freelist;
-	slab->freelist = NULL;
-	slab->inuse = slab->objects;
-	slab->frozen = 1;
-
-	inc_slabs_node(s, slab_nid(slab), slab->objects);
-
-	if (unlikely(!pfmemalloc_match(slab, gfpflags) && allow_spin)) {
-		/*
-		 * For !pfmemalloc_match() case we don't load freelist so that
-		 * we don't make further mismatched allocations easier.
-		 */
-		deactivate_slab(s, slab, get_freepointer(s, freelist));
-		return freelist;
-	}
-
-retry_load_slab:
-
-	local_lock_cpu_slab(s, flags);
-	if (unlikely(c->slab)) {
-		void *flush_freelist = c->freelist;
-		struct slab *flush_slab = c->slab;
-
-		c->slab = NULL;
-		c->freelist = NULL;
-		c->tid = next_tid(c->tid);
-
-		local_unlock_cpu_slab(s, flags);
-
-		if (unlikely(!allow_spin)) {
-			/* Reentrant slub cannot take locks, defer */
-			defer_deactivate_slab(flush_slab, flush_freelist);
-		} else {
-			deactivate_slab(s, flush_slab, flush_freelist);
-		}
-
-		stat(s, CPUSLAB_FLUSH);
-
-		goto retry_load_slab;
-	}
-	c->slab = slab;
-
-	goto load_freelist;
-}
-/*
- * We disallow kprobes in ___slab_alloc() to prevent reentrance
- *
- * kmalloc() -> ___slab_alloc() -> local_lock_cpu_slab() protected part of
- * ___slab_alloc() manipulating c->freelist -> kprobe -> bpf ->
- * kmalloc_nolock() or kfree_nolock() -> __update_cpu_freelist_fast()
- * manipulating c->freelist without lock.
- *
- * This does not prevent kprobe in functions called from ___slab_alloc() such as
- * local_lock_irqsave() itself, and that is fine, we only need to protect the
- * c->freelist manipulation in ___slab_alloc() itself.
- */
-NOKPROBE_SYMBOL(___slab_alloc);
-
-/*
- * A wrapper for ___slab_alloc() for contexts where preemption is not yet
- * disabled. Compensates for possible cpu changes by refetching the per cpu area
- * pointer.
- */
-static void *__slab_alloc(struct kmem_cache *s, gfp_t gfpflags, int node,
-			  unsigned long addr, struct kmem_cache_cpu *c, unsigned int orig_size)
-{
-	void *p;
-
-#ifdef CONFIG_PREEMPT_COUNT
-	/*
-	 * We may have been preempted and rescheduled on a different
-	 * cpu before disabling preemption. Need to reload cpu area
-	 * pointer.
-	 */
-	c = slub_get_cpu_ptr(s->cpu_slab);
-#endif
-	if (unlikely(!gfpflags_allow_spinning(gfpflags))) {
-		if (local_lock_is_locked(&s->cpu_slab->lock)) {
-			/*
-			 * EBUSY is an internal signal to kmalloc_nolock() to
-			 * retry a different bucket. It's not propagated
-			 * to the caller.
-			 */
-			p = ERR_PTR(-EBUSY);
-			goto out;
-		}
-	}
-	p = ___slab_alloc(s, gfpflags, node, addr, c, orig_size);
-out:
-#ifdef CONFIG_PREEMPT_COUNT
-	slub_put_cpu_ptr(s->cpu_slab);
-#endif
-	return p;
-}
-
-static __always_inline void *__slab_alloc_node(struct kmem_cache *s,
-		gfp_t gfpflags, int node, unsigned long addr, size_t orig_size)
-{
-	struct kmem_cache_cpu *c;
-	struct slab *slab;
-	unsigned long tid;
-	void *object;
-
-redo:
-	/*
-	 * Must read kmem_cache cpu data via this cpu ptr. Preemption is
-	 * enabled. We may switch back and forth between cpus while
-	 * reading from one cpu area. That does not matter as long
-	 * as we end up on the original cpu again when doing the cmpxchg.
-	 *
-	 * We must guarantee that tid and kmem_cache_cpu are retrieved on the
-	 * same cpu. We read first the kmem_cache_cpu pointer and use it to read
-	 * the tid. If we are preempted and switched to another cpu between the
-	 * two reads, it's OK as the two are still associated with the same cpu
-	 * and cmpxchg later will validate the cpu.
-	 */
-	c = raw_cpu_ptr(s->cpu_slab);
-	tid = READ_ONCE(c->tid);
-
-	/*
-	 * Irqless object alloc/free algorithm used here depends on sequence
-	 * of fetching cpu_slab's data. tid should be fetched before anything
-	 * on c to guarantee that object and slab associated with previous tid
-	 * won't be used with current tid. If we fetch tid first, object and
-	 * slab could be one associated with next tid and our alloc/free
-	 * request will be failed. In this case, we will retry. So, no problem.
-	 */
-	barrier();
-
-	/*
-	 * The transaction ids are globally unique per cpu and per operation on
-	 * a per cpu queue. Thus they can be guarantee that the cmpxchg_double
-	 * occurs on the right processor and that there was no operation on the
-	 * linked list in between.
-	 */
-
-	object = c->freelist;
-	slab = c->slab;
-
-#ifdef CONFIG_NUMA
-	if (static_branch_unlikely(&strict_numa) &&
-			node == NUMA_NO_NODE) {
-
-		struct mempolicy *mpol = current->mempolicy;
-
-		if (mpol) {
-			/*
-			 * Special BIND rule support. If existing slab
-			 * is in permitted set then do not redirect
-			 * to a particular node.
-			 * Otherwise we apply the memory policy to get
-			 * the node we need to allocate on.
-			 */
-			if (mpol->mode != MPOL_BIND || !slab ||
-					!node_isset(slab_nid(slab), mpol->nodes))
-
-				node = mempolicy_slab_node();
-		}
-	}
-#endif
-
-	if (!USE_LOCKLESS_FAST_PATH() ||
-	    unlikely(!object || !slab || !node_match(slab, node))) {
-		object = __slab_alloc(s, gfpflags, node, addr, c, orig_size);
-	} else {
-		void *next_object = get_freepointer_safe(s, object);
-
-		/*
-		 * The cmpxchg will only match if there was no additional
-		 * operation and if we are on the right processor.
-		 *
-		 * The cmpxchg does the following atomically (without lock
-		 * semantics!)
-		 * 1. Relocate first pointer to the current per cpu area.
-		 * 2. Verify that tid and freelist have not been changed
-		 * 3. If they were not changed replace tid and freelist
-		 *
-		 * Since this is without lock semantics the protection is only
-		 * against code executing on this cpu *not* from access by
-		 * other cpus.
-		 */
-		if (unlikely(!__update_cpu_freelist_fast(s, object, next_object, tid))) {
-			note_cmpxchg_failure("slab_alloc", s, tid);
-			goto redo;
-		}
-		prefetch_freepointer(s, next_object);
-		stat(s, ALLOC_FASTPATH);
-	}
-
-	return object;
-}
-#else /* CONFIG_SLUB_TINY */
-static void *__slab_alloc_node(struct kmem_cache *s,
-		gfp_t gfpflags, int node, unsigned long addr, size_t orig_size)
-{
-	struct partial_context pc;
-	struct slab *slab;
-	void *object;
-
-	pc.flags = gfpflags;
-	pc.orig_size = orig_size;
-	slab = get_partial(s, node, &pc);
-
-	if (slab)
-		return pc.object;
-
-	slab = new_slab(s, gfpflags, node);
-	if (unlikely(!slab)) {
-		slab_out_of_memory(s, gfpflags, node);
-		return NULL;
-	}
-
-	object = alloc_single_from_new_slab(s, slab, orig_size, gfpflags);
-
-	return object;
-}
-#endif /* CONFIG_SLUB_TINY */
 
 /*
  * If the object has been wiped upon free, make sure it's fully initialized by
@@ -4921,6 +4475,159 @@ static __always_inline void maybe_wipe_obj_freeptr(struct kmem_cache *s,
 			0, sizeof(void *));
 }
 
+static unsigned int alloc_from_new_slab(struct kmem_cache *s, struct slab *slab,
+		void **p, unsigned int count, bool allow_spin)
+{
+	unsigned int allocated = 0;
+	struct slab_obj_iter iter;
+	bool needs_add_partial = true;
+	unsigned long flags;
+
+	/*
+	 * Are we going to put the slab on the partial list?
+	 * Note slab->inuse is 0 on a new slab.
+	 */
+	if (count >= slab->objects) {
+		needs_add_partial = false;
+		count = slab->objects;
+	}
+
+	init_slab_obj_iter(s, slab, &iter, allow_spin);
+
+	while (allocated < count) {
+		p[allocated] = next_slab_obj(s, &iter);
+		allocated++;
+	}
+	slab->inuse = count;
+	build_slab_freelist(s, slab, &iter);
+
+	if (needs_add_partial) {
+		struct kmem_cache_node *n = get_node(s, slab_nid(slab));
+
+		if (allow_spin) {
+			spin_lock_irqsave(&n->list_lock, flags);
+		} else if (!spin_trylock_irqsave(&n->list_lock, flags)) {
+			/*
+			 * Unlucky, discard newly allocated slab.
+			 * The slab is not fully free, but it's fine as
+			 * objects are not allocated to users.
+			 */
+			free_new_slab_nolock(s, slab);
+			return 0;
+		}
+		add_partial(n, slab, ADD_TO_HEAD);
+		spin_unlock_irqrestore(&n->list_lock, flags);
+	}
+
+	inc_slabs_node(s, slab_nid(slab), slab->objects);
+	return allocated;
+}
+
+/*
+ * Slow path. We failed to allocate via percpu sheaves or they are not available
+ * due to bootstrap or debugging enabled or SLUB_TINY.
+ *
+ * We try to allocate from partial slab lists and fall back to allocating a new
+ * slab.
+ */
+static void *___slab_alloc(struct kmem_cache *s, gfp_t gfpflags, int node,
+			   const struct slab_alloc_context *ac)
+{
+	bool allow_spin = alloc_flags_allow_spinning(ac->alloc_flags);
+	gfp_t trynode_flags;
+	void *object;
+	struct slab *slab;
+	bool try_thisnode = true;
+
+	stat(s, ALLOC_SLOWPATH);
+
+new_objects:
+
+	trynode_flags = gfpflags;
+	/*
+	 * When a preferred node is indicated but no __GFP_THISNODE
+	 *
+	 * 1) try to get a partial slab from target node only by having
+	 *    __GFP_THISNODE in trynode_flags for get_from_partial()
+	 * 2) if 1) failed, try to allocate a new slab from target node with
+	 *    (at most) GFP_NOWAIT | __GFP_THISNODE opportunistically
+	 * 3) if 2) failed, retry with original gfpflags which will allow
+	 *    get_from_partial() try partial lists of other nodes before
+	 *    potentially allocating new page from other nodes
+	 */
+	if (unlikely(node != NUMA_NO_NODE && !(gfpflags & __GFP_THISNODE)
+		     && try_thisnode)) {
+		trynode_flags &= GFP_NOWAIT | __GFP_NOMEMALLOC | __GFP_ACCOUNT;
+		trynode_flags |= __GFP_NOWARN | __GFP_THISNODE;
+	}
+
+	object = get_from_partial(s, node, trynode_flags, ac);
+	if (object)
+		goto success;
+
+	slab = new_slab(s, trynode_flags, ac->alloc_flags, node);
+
+	if (unlikely(!slab)) {
+		if (node != NUMA_NO_NODE && !(gfpflags & __GFP_THISNODE)
+		    && try_thisnode) {
+			try_thisnode = false;
+			goto new_objects;
+		}
+		slab_out_of_memory(s, gfpflags, node);
+		return NULL;
+	}
+
+	stat(s, ALLOC_SLAB);
+
+	if (IS_ENABLED(CONFIG_SLUB_TINY) || kmem_cache_debug(s)) {
+		object = alloc_single_from_new_slab(s, slab, ac);
+
+		if (likely(object))
+			goto success;
+	} else {
+		/* we don't need to check SLAB_STORE_USER here */
+		if (alloc_from_new_slab(s, slab, &object, 1, allow_spin))
+			return object;
+	}
+
+	if (allow_spin)
+		goto new_objects;
+
+	/* This could cause an endless loop. Fail instead. */
+	return NULL;
+
+success:
+	if (kmem_cache_debug_flags(s, SLAB_STORE_USER))
+		set_track(s, object, TRACK_ALLOC, ac->caller_addr, gfpflags);
+
+	return object;
+}
+
+static __always_inline int apply_strict_numa_policy(int node)
+{
+#ifdef CONFIG_NUMA
+	if (static_branch_unlikely(&strict_numa) &&
+			node == NUMA_NO_NODE) {
+
+		struct mempolicy *mpol = current->mempolicy;
+
+		if (mpol) {
+			/*
+			 * Special BIND rule support. If the local node
+			 * is in permitted set then do not redirect
+			 * to a particular node.
+			 * Otherwise we apply the memory policy to get
+			 * the node we need to allocate on.
+			 */
+			if (mpol->mode != MPOL_BIND ||
+					!node_isset(numa_mem_id(), mpol->nodes))
+				node = mempolicy_slab_node();
+		}
+	}
+#endif
+	return node;
+}
+
 static __fastpath_inline
 struct kmem_cache *slab_pre_alloc_hook(struct kmem_cache *s, gfp_t flags)
 {
@@ -4935,58 +4642,64 @@ struct kmem_cache *slab_pre_alloc_hook(struct kmem_cache *s, gfp_t flags)
 }
 
 static __fastpath_inline
-bool slab_post_alloc_hook(struct kmem_cache *s, struct list_lru *lru,
-			  gfp_t flags, size_t size, void **p, bool init,
-			  unsigned int orig_size)
+bool slab_post_alloc_hook(struct kmem_cache *s, gfp_t flags, size_t size,
+			  void **p, const struct slab_alloc_context *ac)
 {
+	bool init = slab_want_init_on_alloc(flags, s);
 	unsigned int zero_size = s->object_size;
-	bool kasan_init = init;
-	size_t i;
 	gfp_t init_flags = flags & gfp_allowed_mask;
+	bool kasan_init = false;
 
 	/*
-	 * For kmalloc object, the allocated memory size(object_size) is likely
-	 * larger than the requested size(orig_size). If redzone check is
-	 * enabled for the extra space, don't zero it, as it will be redzoned
-	 * soon. The redzone operation for this extra space could be seen as a
-	 * replacement of current poisoning under certain debug option, and
-	 * won't break other sanity checks.
+	 * For kmalloc object, the allocated size (object_size) can be larger
+	 * than the requested size (orig_size). We however need to zero the
+	 * whole object_size to handle possible later krealloc() with
+	 *__GFP_ZERO properly.
+	 *
+	 * But if we keep track of the requested size, krealloc() uses that
+	 * information. Additionally if red zoning is enabled, the extra space
+	 * is also red zone, so we should not overwrite it. So limit zeroing to
+	 * orig_size if we track it.
 	 */
-	if (kmem_cache_debug_flags(s, SLAB_STORE_USER | SLAB_RED_ZONE) &&
-	    (s->flags & SLAB_KMALLOC))
-		zero_size = orig_size;
+	if (slub_debug_orig_size(s))
+		zero_size = ac->orig_size;
 
 	/*
-	 * When slab_debug is enabled, avoid memory initialization integrated
-	 * into KASAN and instead zero out the memory via the memset below with
-	 * the proper size. Otherwise, KASAN might overwrite SLUB redzones and
-	 * cause false-positive reports. This does not lead to a performance
+	 * ARM64 can set memory tags and zero the memory using a single
+	 * instruction. Since HW_TAGS KASAN uses that while tagging the object,
+	 * separate zeroing is unnecessary.
+	 *
+	 * However, KASAN never zeroes memory when slab_debug is enabled to
+	 * avoid overwriting SLUB redzones. This does not lead to a performance
 	 * penalty on production builds, as slab_debug is not intended to be
 	 * enabled there.
 	 */
-	if (__slub_debug_enabled())
-		kasan_init = false;
+	if (kasan_has_integrated_init() && !__slub_debug_enabled()) {
+		kasan_init = init;
+		init = false;
+	}
 
-	/*
-	 * As memory initialization might be integrated into KASAN,
-	 * kasan_slab_alloc and initialization memset must be
-	 * kept together to avoid discrepancies in behavior.
-	 *
-	 * As p[i] might get tagged, memset and kmemleak hook come after KASAN.
-	 */
-	for (i = 0; i < size; i++) {
+	for (size_t i = 0; i < size; i++) {
 		p[i] = kasan_slab_alloc(s, p[i], init_flags, kasan_init);
-		if (p[i] && init && (!kasan_init ||
-				     !kasan_has_integrated_init()))
+
+		/*
+		 * memset and hooks come after KASAN as p[i] might get tagged
+		 *
+		 * kfence zeroes the object instead of SLUB to avoid overwriting
+		 * its own redzone starting at orig_size, which could happen
+		 * with SLUB zeroing full s->object_size
+		 */
+		if (init && p[i] && !is_kfence_address(p[i]))
 			memset(p[i], 0, zero_size);
-		if (gfpflags_allow_spinning(flags))
+
+		if (alloc_flags_allow_spinning(ac->alloc_flags))
 			kmemleak_alloc_recursive(p[i], s->object_size, 1,
 						 s->flags, init_flags);
 		kmsan_slab_alloc(s, p[i], init_flags);
-		alloc_tagging_slab_alloc_hook(s, p[i], flags);
+		alloc_tagging_slab_alloc_hook(s, p[i], flags, ac->alloc_flags);
 	}
 
-	return memcg_slab_post_alloc_hook(s, lru, flags, size, p);
+	return memcg_slab_post_alloc_hook(s, flags, size, p, ac);
 }
 
 /*
@@ -4998,14 +4711,21 @@ bool slab_post_alloc_hook(struct kmem_cache *s, struct list_lru *lru,
  * unlocked.
  */
 static struct slub_percpu_sheaves *
-__pcs_replace_empty_main(struct kmem_cache *s, struct slub_percpu_sheaves *pcs, gfp_t gfp)
+__pcs_replace_empty_main(struct kmem_cache *s, struct slub_percpu_sheaves *pcs,
+			 gfp_t gfp, unsigned int alloc_flags)
 {
 	struct slab_sheaf *empty = NULL;
 	struct slab_sheaf *full;
 	struct node_barn *barn;
-	bool can_alloc;
+	bool allow_spin;
 
-	lockdep_assert_held(this_cpu_ptr(&s->cpu_sheaves->lock));
+	slab_lockdep_assert_held(this_cpu_ptr(&s->cpu_sheaves->lock));
+
+	/* Bootstrap or debug cache, back off */
+	if (unlikely(!cache_has_sheaves(s))) {
+		local_unlock(&s->cpu_sheaves->lock);
+		return NULL;
+	}
 
 	if (pcs->spare && pcs->spare->size > 0) {
 		swap(pcs->main, pcs->spare);
@@ -5018,7 +4738,9 @@ __pcs_replace_empty_main(struct kmem_cache *s, struct slub_percpu_sheaves *pcs, 
 		return NULL;
 	}
 
-	full = barn_replace_empty_sheaf(barn, pcs->main);
+	allow_spin = alloc_flags_allow_spinning(alloc_flags);
+
+	full = barn_replace_empty_sheaf(barn, pcs->main, allow_spin);
 
 	if (full) {
 		stat(s, BARN_GET);
@@ -5028,56 +4750,57 @@ __pcs_replace_empty_main(struct kmem_cache *s, struct slub_percpu_sheaves *pcs, 
 
 	stat(s, BARN_GET_FAIL);
 
-	can_alloc = gfpflags_allow_blocking(gfp);
-
-	if (can_alloc) {
+	if (allow_spin) {
 		if (pcs->spare) {
 			empty = pcs->spare;
 			pcs->spare = NULL;
 		} else {
-			empty = barn_get_empty_sheaf(barn);
+			empty = barn_get_empty_sheaf(barn, true);
 		}
 	}
 
 	local_unlock(&s->cpu_sheaves->lock);
+	pcs = NULL;
 
-	if (!can_alloc)
+	if (!allow_spin)
 		return NULL;
 
-	if (empty) {
-		if (!refill_sheaf(s, empty, gfp)) {
-			full = empty;
-		} else {
-			/*
-			 * we must be very low on memory so don't bother
-			 * with the barn
-			 */
-			free_empty_sheaf(s, empty);
-		}
-	} else {
-		full = alloc_full_sheaf(s, gfp);
+	if (!empty) {
+		empty = alloc_empty_sheaf(s, gfp, alloc_flags);
+		if (!empty)
+			return NULL;
 	}
 
-	if (!full)
-		return NULL;
+	if (refill_sheaf(s, empty, gfp | __GFP_NOMEMALLOC | __GFP_NOWARN)) {
+		/*
+		 * we must be very low on memory so don't bother
+		 * with the barn
+		 */
+		sheaf_flush_unused(s, empty);
+		free_empty_sheaf(s, empty);
 
-	/*
-	 * we can reach here only when gfpflags_allow_blocking
-	 * so this must not be an irq
-	 */
-	local_lock(&s->cpu_sheaves->lock);
+		return NULL;
+	}
+
+	full = empty;
+	empty = NULL;
+
+	if (!local_trylock(&s->cpu_sheaves->lock))
+		goto barn_put;
 	pcs = this_cpu_ptr(s->cpu_sheaves);
 
 	/*
-	 * If we are returning empty sheaf, we either got it from the
-	 * barn or had to allocate one. If we are returning a full
-	 * sheaf, it's due to racing or being migrated to a different
-	 * cpu. Breaching the barn's sheaf limits should be thus rare
-	 * enough so just ignore them to simplify the recovery.
+	 * If we put any empty or full sheaf to the barn below, it's due to
+	 * racing or being migrated to a different cpu. Breaching the barn's
+	 * sheaf limits should be thus rare enough so just ignore them to
+	 * simplify the recovery.
 	 */
 
 	if (pcs->main->size == 0) {
-		barn_put_empty_sheaf(barn, pcs->main);
+		if (!pcs->spare)
+			pcs->spare = pcs->main;
+		else
+			barn_put_empty_sheaf(barn, pcs->main);
 		pcs->main = full;
 		return pcs;
 	}
@@ -5093,6 +4816,7 @@ __pcs_replace_empty_main(struct kmem_cache *s, struct slub_percpu_sheaves *pcs, 
 		return pcs;
 	}
 
+barn_put:
 	barn_put_full_sheaf(barn, full);
 	stat(s, BARN_PUT);
 
@@ -5100,33 +4824,11 @@ __pcs_replace_empty_main(struct kmem_cache *s, struct slub_percpu_sheaves *pcs, 
 }
 
 static __fastpath_inline
-void *alloc_from_pcs(struct kmem_cache *s, gfp_t gfp, int node)
+void *alloc_from_pcs(struct kmem_cache *s, gfp_t gfp, unsigned int alloc_flags, int node)
 {
 	struct slub_percpu_sheaves *pcs;
 	bool node_requested;
 	void *object;
-
-#ifdef CONFIG_NUMA
-	if (static_branch_unlikely(&strict_numa) &&
-			 node == NUMA_NO_NODE) {
-
-		struct mempolicy *mpol = current->mempolicy;
-
-		if (mpol) {
-			/*
-			 * Special BIND rule support. If the local node
-			 * is in permitted set then do not redirect
-			 * to a particular node.
-			 * Otherwise we apply the memory policy to get
-			 * the node we need to allocate on.
-			 */
-			if (mpol->mode != MPOL_BIND ||
-					!node_isset(numa_mem_id(), mpol->nodes))
-
-				node = mempolicy_slab_node();
-		}
-	}
-#endif
 
 	node_requested = IS_ENABLED(CONFIG_NUMA) && node != NUMA_NO_NODE;
 
@@ -5134,8 +4836,10 @@ void *alloc_from_pcs(struct kmem_cache *s, gfp_t gfp, int node)
 	 * We assume the percpu sheaves contain only local objects although it's
 	 * not completely guaranteed, so we verify later.
 	 */
-	if (unlikely(node_requested && node != numa_mem_id()))
+	if (unlikely(node_requested && node != numa_mem_id())) {
+		stat(s, ALLOC_NODE_MISMATCH);
 		return NULL;
+	}
 
 	if (!local_trylock(&s->cpu_sheaves->lock))
 		return NULL;
@@ -5143,7 +4847,7 @@ void *alloc_from_pcs(struct kmem_cache *s, gfp_t gfp, int node)
 	pcs = this_cpu_ptr(s->cpu_sheaves);
 
 	if (unlikely(pcs->main->size == 0)) {
-		pcs = __pcs_replace_empty_main(s, pcs, gfp);
+		pcs = __pcs_replace_empty_main(s, pcs, gfp, alloc_flags);
 		if (unlikely(!pcs))
 			return NULL;
 	}
@@ -5156,8 +4860,9 @@ void *alloc_from_pcs(struct kmem_cache *s, gfp_t gfp, int node)
 		 * be false because of cpu migration during an unlocked part of
 		 * the current allocation or previous freeing process.
 		 */
-		if (folio_nid(virt_to_folio(object)) != node) {
+		if (page_to_nid(virt_to_page(object)) != node) {
 			local_unlock(&s->cpu_sheaves->lock);
+			stat(s, ALLOC_NODE_MISMATCH);
 			return NULL;
 		}
 	}
@@ -5166,7 +4871,7 @@ void *alloc_from_pcs(struct kmem_cache *s, gfp_t gfp, int node)
 
 	local_unlock(&s->cpu_sheaves->lock);
 
-	stat(s, ALLOC_PCS);
+	stat(s, ALLOC_FASTPATH);
 
 	return object;
 }
@@ -5190,6 +4895,11 @@ next_batch:
 		struct slab_sheaf *full;
 		struct node_barn *barn;
 
+		if (unlikely(!cache_has_sheaves(s))) {
+			local_unlock(&s->cpu_sheaves->lock);
+			return allocated;
+		}
+
 		if (pcs->spare && pcs->spare->size > 0) {
 			swap(pcs->main, pcs->spare);
 			goto do_alloc;
@@ -5201,7 +4911,8 @@ next_batch:
 			return allocated;
 		}
 
-		full = barn_replace_empty_sheaf(barn, pcs->main);
+		full = barn_replace_empty_sheaf(barn, pcs->main,
+						/* allow_spin = */ true);
 
 		if (full) {
 			stat(s, BARN_GET);
@@ -5231,7 +4942,7 @@ do_alloc:
 
 	local_unlock(&s->cpu_sheaves->lock);
 
-	stat_add(s, ALLOC_PCS, batch);
+	stat_add(s, ALLOC_FASTPATH, batch);
 
 	allocated += batch;
 
@@ -5255,45 +4966,48 @@ do_alloc:
  *
  * Otherwise we can simply pick the next object from the lockless free list.
  */
-static __fastpath_inline void *slab_alloc_node(struct kmem_cache *s, struct list_lru *lru,
-		gfp_t gfpflags, int node, unsigned long addr, size_t orig_size)
+static __fastpath_inline void *slab_alloc_node(struct kmem_cache *s,
+		gfp_t gfpflags, int node, const struct slab_alloc_context *ac)
 {
 	void *object;
-	bool init = false;
 
 	s = slab_pre_alloc_hook(s, gfpflags);
 	if (unlikely(!s))
 		return NULL;
 
-	object = kfence_alloc(s, orig_size, gfpflags);
+	object = kfence_alloc(s, ac->orig_size, gfpflags);
 	if (unlikely(object))
 		goto out;
 
-	if (s->cpu_sheaves)
-		object = alloc_from_pcs(s, gfpflags, node);
+	node = apply_strict_numa_policy(node);
 
-	if (!object)
-		object = __slab_alloc_node(s, gfpflags, node, addr, orig_size);
+	object = alloc_from_pcs(s, gfpflags, ac->alloc_flags, node);
+
+	if (unlikely(!object))
+		object = ___slab_alloc(s, gfpflags, node, ac);
 
 	maybe_wipe_obj_freeptr(s, object);
-	init = slab_want_init_on_alloc(gfpflags, s);
 
 out:
 	/*
-	 * When init equals 'true', like for kzalloc() family, only
-	 * @orig_size bytes might be zeroed instead of s->object_size
 	 * In case this fails due to memcg_slab_post_alloc_hook(),
 	 * object is set to NULL
 	 */
-	slab_post_alloc_hook(s, lru, gfpflags, 1, &object, init, orig_size);
+	slab_post_alloc_hook(s, gfpflags, 1, &object, ac);
 
 	return object;
 }
 
 void *kmem_cache_alloc_noprof(struct kmem_cache *s, gfp_t gfpflags)
 {
-	void *ret = slab_alloc_node(s, NULL, gfpflags, NUMA_NO_NODE, _RET_IP_,
-				    s->object_size);
+	void *ret;
+	const struct slab_alloc_context ac = {
+		.caller_addr = _RET_IP_,
+		.orig_size = s->object_size,
+		.alloc_flags = SLAB_ALLOC_DEFAULT,
+	};
+
+	ret = slab_alloc_node(s, gfpflags, NUMA_NO_NODE, &ac);
 
 	trace_kmem_cache_alloc(_RET_IP_, ret, s, gfpflags, NUMA_NO_NODE);
 
@@ -5304,8 +5018,15 @@ EXPORT_SYMBOL(kmem_cache_alloc_noprof);
 void *kmem_cache_alloc_lru_noprof(struct kmem_cache *s, struct list_lru *lru,
 			   gfp_t gfpflags)
 {
-	void *ret = slab_alloc_node(s, lru, gfpflags, NUMA_NO_NODE, _RET_IP_,
-				    s->object_size);
+	void *ret;
+	const struct slab_alloc_context ac = {
+		.caller_addr = _RET_IP_,
+		.orig_size = s->object_size,
+		.alloc_flags = SLAB_ALLOC_DEFAULT,
+		.lru = lru,
+	};
+
+	ret = slab_alloc_node(s, gfpflags, NUMA_NO_NODE, &ac);
 
 	trace_kmem_cache_alloc(_RET_IP_, ret, s, gfpflags, NUMA_NO_NODE);
 
@@ -5337,13 +5058,48 @@ EXPORT_SYMBOL(kmem_cache_charge);
  */
 void *kmem_cache_alloc_node_noprof(struct kmem_cache *s, gfp_t gfpflags, int node)
 {
-	void *ret = slab_alloc_node(s, NULL, gfpflags, node, _RET_IP_, s->object_size);
+	void *ret;
+	const struct slab_alloc_context ac = {
+		.caller_addr = _RET_IP_,
+		.orig_size = s->object_size,
+		.alloc_flags = SLAB_ALLOC_DEFAULT,
+	};
+
+	ret = slab_alloc_node(s, gfpflags, node, &ac);
 
 	trace_kmem_cache_alloc(_RET_IP_, ret, s, gfpflags, node);
 
 	return ret;
 }
 EXPORT_SYMBOL(kmem_cache_alloc_node_noprof);
+
+static int __prefill_sheaf_pfmemalloc(struct kmem_cache *s,
+				      struct slab_sheaf *sheaf, gfp_t gfp)
+{
+	gfp_t gfp_nomemalloc;
+	int ret;
+
+	gfp_nomemalloc = gfp | __GFP_NOMEMALLOC;
+	if (gfp_pfmemalloc_allowed(gfp))
+		gfp_nomemalloc |= __GFP_NOWARN;
+
+	ret = refill_sheaf(s, sheaf, gfp_nomemalloc);
+
+	if (likely(!ret || !gfp_pfmemalloc_allowed(gfp)))
+		return ret;
+
+	/*
+	 * if we are allowed to, refill sheaf with pfmemalloc but then remember
+	 * it for when it's returned
+	 */
+	ret = refill_sheaf(s, sheaf, gfp);
+	sheaf->pfmemalloc = true;
+
+	return ret;
+}
+
+static bool __kmem_cache_alloc_bulk(struct kmem_cache *s, gfp_t flags,
+		size_t size, void **p);
 
 /*
  * returns a sheaf that has at least the requested size
@@ -5358,30 +5114,25 @@ kmem_cache_prefill_sheaf(struct kmem_cache *s, gfp_t gfp, unsigned int size)
 	struct slab_sheaf *sheaf = NULL;
 	struct node_barn *barn;
 
+	if (unlikely(!size))
+		return NULL;
+
 	if (unlikely(size > s->sheaf_capacity)) {
 
-		/*
-		 * slab_debug disables cpu sheaves intentionally so all
-		 * prefilled sheaves become "oversize" and we give up on
-		 * performance for the debugging. Same with SLUB_TINY.
-		 * Creating a cache without sheaves and then requesting a
-		 * prefilled sheaf is however not expected, so warn.
-		 */
-		WARN_ON_ONCE(s->sheaf_capacity == 0 &&
-			     !IS_ENABLED(CONFIG_SLUB_TINY) &&
-			     !(s->flags & SLAB_DEBUG_FLAGS));
-
-		sheaf = kzalloc(struct_size(sheaf, objects, size), gfp);
+		sheaf = __alloc_empty_sheaf(s, gfp, SLAB_ALLOC_DEFAULT, size);
 		if (!sheaf)
 			return NULL;
 
 		stat(s, SHEAF_PREFILL_OVERSIZE);
-		sheaf->cache = s;
 		sheaf->capacity = size;
 
+		/*
+		 * we do not need to care about pfmemalloc here because oversize
+		 * sheaves are always flushed and freed when returned
+		 */
 		if (!__kmem_cache_alloc_bulk(s, gfp, size,
 					     &sheaf->objects[0])) {
-			kfree(sheaf);
+			free_empty_sheaf(s, sheaf);
 			return NULL;
 		}
 
@@ -5413,18 +5164,19 @@ kmem_cache_prefill_sheaf(struct kmem_cache *s, gfp_t gfp, unsigned int size)
 
 
 	if (!sheaf)
-		sheaf = alloc_empty_sheaf(s, gfp);
+		sheaf = alloc_empty_sheaf(s, gfp, SLAB_ALLOC_DEFAULT);
 
-	if (sheaf && sheaf->size < size) {
-		if (refill_sheaf(s, sheaf, gfp)) {
+	if (sheaf) {
+		sheaf->capacity = s->sheaf_capacity;
+		sheaf->pfmemalloc = false;
+
+		if (sheaf->size < size &&
+		    __prefill_sheaf_pfmemalloc(s, sheaf, gfp)) {
 			sheaf_flush_unused(s, sheaf);
 			free_empty_sheaf(s, sheaf);
 			sheaf = NULL;
 		}
 	}
-
-	if (sheaf)
-		sheaf->capacity = s->sheaf_capacity;
 
 	return sheaf;
 }
@@ -5445,9 +5197,10 @@ void kmem_cache_return_sheaf(struct kmem_cache *s, gfp_t gfp,
 	struct slub_percpu_sheaves *pcs;
 	struct node_barn *barn;
 
-	if (unlikely(sheaf->capacity != s->sheaf_capacity)) {
+	if (unlikely((sheaf->capacity != s->sheaf_capacity)
+		     || sheaf->pfmemalloc)) {
 		sheaf_flush_unused(s, sheaf);
-		kfree(sheaf);
+		free_empty_sheaf(s, sheaf);
 		return;
 	}
 
@@ -5473,7 +5226,7 @@ void kmem_cache_return_sheaf(struct kmem_cache *s, gfp_t gfp,
 	 * simply flush and free it.
 	 */
 	if (!barn || data_race(barn->nr_full) >= MAX_FULL_SHEAVES ||
-	    refill_sheaf(s, sheaf, gfp)) {
+	    refill_sheaf(s, sheaf, gfp | __GFP_NOMEMALLOC | __GFP_NOWARN)) {
 		sheaf_flush_unused(s, sheaf);
 		free_empty_sheaf(s, sheaf);
 		return;
@@ -5484,12 +5237,15 @@ void kmem_cache_return_sheaf(struct kmem_cache *s, gfp_t gfp,
 }
 
 /*
- * refill a sheaf previously returned by kmem_cache_prefill_sheaf to at least
- * the given size
+ * Refill a sheaf previously returned by kmem_cache_prefill_sheaf to at least
+ * the given size.
  *
- * the sheaf might be replaced by a new one when requesting more than
- * s->sheaf_capacity objects if such replacement is necessary, but the refill
- * fails (returning -ENOMEM), the existing sheaf is left intact
+ * Return: 0 on success. The sheaf will contain at least @size objects.
+ * The sheaf might have been replaced with a new one if more than
+ * sheaf->capacity objects are requested.
+ *
+ * Return: -ENOMEM on failure. Some objects might have been added to the sheaf
+ * but the sheaf will not be replaced.
  *
  * In practice we always refill to full sheaf's capacity.
  */
@@ -5511,12 +5267,11 @@ int kmem_cache_refill_sheaf(struct kmem_cache *s, gfp_t gfp,
 
 	if (likely(sheaf->capacity >= size)) {
 		if (likely(sheaf->capacity == s->sheaf_capacity))
-			return refill_sheaf(s, sheaf, gfp);
+			return __prefill_sheaf_pfmemalloc(s, sheaf, gfp);
 
 		if (!__kmem_cache_alloc_bulk(s, gfp, sheaf->capacity - sheaf->size,
-					     &sheaf->objects[sheaf->size])) {
+					     &sheaf->objects[sheaf->size]))
 			return -ENOMEM;
-		}
 		sheaf->size = sheaf->capacity;
 
 		return 0;
@@ -5544,23 +5299,30 @@ int kmem_cache_refill_sheaf(struct kmem_cache *s, gfp_t gfp,
  *
  * The gfp parameter is meant only to specify __GFP_ZERO or __GFP_ACCOUNT
  * memcg charging is forced over limit if necessary, to avoid failure.
+ *
+ * It is possible that the allocation comes from kfence and then the sheaf
+ * size is not decreased.
  */
 void *
 kmem_cache_alloc_from_sheaf_noprof(struct kmem_cache *s, gfp_t gfp,
 				   struct slab_sheaf *sheaf)
 {
 	void *ret = NULL;
-	bool init;
+	const struct slab_alloc_context ac = {
+		.orig_size = s->object_size,
+		.alloc_flags = SLAB_ALLOC_DEFAULT,
+	};
 
 	if (sheaf->size == 0)
 		goto out;
 
-	ret = sheaf->objects[--sheaf->size];
+	ret = kfence_alloc(s, s->object_size, gfp);
 
-	init = slab_want_init_on_alloc(gfp, s);
+	if (likely(!ret))
+		ret = sheaf->objects[--sheaf->size];
 
 	/* add __GFP_NOFAIL to force successful memcg charging */
-	slab_post_alloc_hook(s, NULL, gfp | __GFP_NOFAIL, 1, &ret, init, s->object_size);
+	slab_post_alloc_hook(s, gfp | __GFP_NOFAIL, 1, &ret, &ac);
 out:
 	trace_kmem_cache_alloc(_RET_IP_, ret, s, gfp, NUMA_NO_NODE);
 
@@ -5578,7 +5340,7 @@ unsigned int kmem_cache_sheaf_size(struct slab_sheaf *sheaf)
  */
 static void *___kmalloc_large_node(size_t size, gfp_t flags, int node)
 {
-	struct folio *folio;
+	struct page *page;
 	void *ptr = NULL;
 	unsigned int order = get_order(size);
 
@@ -5588,15 +5350,16 @@ static void *___kmalloc_large_node(size_t size, gfp_t flags, int node)
 	flags |= __GFP_COMP;
 
 	if (node == NUMA_NO_NODE)
-		folio = (struct folio *)alloc_frozen_pages_noprof(flags, order);
+		page = alloc_frozen_pages_noprof(flags, order);
 	else
-		folio = (struct folio *)__alloc_frozen_pages_noprof(flags, order, node, NULL);
+		page = __alloc_frozen_pages_noprof(flags, order, node, NULL,
+						   ALLOC_DEFAULT);
 
-	if (folio) {
-		ptr = folio_address(folio);
-		lruvec_stat_mod_folio(folio, NR_SLAB_UNRECLAIMABLE_B,
+	if (page) {
+		ptr = page_address(page);
+		mod_lruvec_page_state(page, NR_SLAB_UNRECLAIMABLE_B,
 				      PAGE_SIZE << order);
-		__folio_set_large_kmalloc(folio);
+		__SetPageLargeKmalloc(page);
 	}
 
 	ptr = kasan_kmalloc_large(ptr, size, flags);
@@ -5628,15 +5391,16 @@ void *__kmalloc_large_node_noprof(size_t size, gfp_t flags, int node)
 EXPORT_SYMBOL(__kmalloc_large_node_noprof);
 
 static __always_inline
-void *__do_kmalloc_node(size_t size, kmem_buckets *b, gfp_t flags, int node,
-			unsigned long caller)
+void *__do_kmalloc_node(kmem_buckets *b, gfp_t flags, int node,
+			kmalloc_token_t token, const struct slab_alloc_context *ac)
 {
+	const size_t size = ac->orig_size;
 	struct kmem_cache *s;
 	void *ret;
 
 	if (unlikely(size > KMALLOC_MAX_CACHE_SIZE)) {
 		ret = __kmalloc_large_node_noprof(size, flags, node);
-		trace_kmalloc(caller, ret, size,
+		trace_kmalloc(ac->caller_addr, ret, size,
 			      PAGE_SIZE << get_order(size), flags, node);
 		return ret;
 	}
@@ -5644,127 +5408,155 @@ void *__do_kmalloc_node(size_t size, kmem_buckets *b, gfp_t flags, int node,
 	if (unlikely(!size))
 		return ZERO_SIZE_PTR;
 
-	s = kmalloc_slab(size, b, flags, caller);
+	s = kmalloc_slab(size, b, flags, token, ac->alloc_flags);
 
-	ret = slab_alloc_node(s, NULL, flags, node, caller, size);
+	ret = slab_alloc_node(s, flags, node, ac);
 	ret = kasan_kmalloc(s, ret, size, flags);
-	trace_kmalloc(caller, ret, size, s->size, flags, node);
+	trace_kmalloc(ac->caller_addr, ret, size, s->size, flags, node);
 	return ret;
 }
-void *__kmalloc_node_noprof(DECL_BUCKET_PARAMS(size, b), gfp_t flags, int node)
+void *__kmalloc_node_noprof(DECL_KMALLOC_PARAMS(size, b, token), gfp_t flags, int node)
 {
-	return __do_kmalloc_node(size, PASS_BUCKET_PARAM(b), flags, node, _RET_IP_);
+	const struct slab_alloc_context ac = {
+		.caller_addr = _RET_IP_,
+		.orig_size = size,
+		.alloc_flags = SLAB_ALLOC_DEFAULT,
+	};
+
+	return __do_kmalloc_node(PASS_BUCKET_PARAM(b), flags, node,
+				 PASS_TOKEN_PARAM(token), &ac);
 }
 EXPORT_SYMBOL(__kmalloc_node_noprof);
 
-void *__kmalloc_noprof(size_t size, gfp_t flags)
+void *__kmalloc_noprof(DECL_TOKEN_PARAMS(size, token), gfp_t flags)
 {
-	return __do_kmalloc_node(size, NULL, flags, NUMA_NO_NODE, _RET_IP_);
+	const struct slab_alloc_context ac = {
+		.caller_addr = _RET_IP_,
+		.orig_size = size,
+		.alloc_flags = SLAB_ALLOC_DEFAULT,
+	};
+
+	return __do_kmalloc_node(NULL, flags,  NUMA_NO_NODE,
+				 PASS_TOKEN_PARAM(token), &ac);
 }
 EXPORT_SYMBOL(__kmalloc_noprof);
 
-/**
- * kmalloc_nolock - Allocate an object of given size from any context.
- * @size: size to allocate
- * @gfp_flags: GFP flags. Only __GFP_ACCOUNT, __GFP_ZERO, __GFP_NO_OBJ_EXT
- * allowed.
- * @node: node number of the target node.
- *
- * Return: pointer to the new object or NULL in case of error.
- * NULL does not mean EBUSY or EAGAIN. It means ENOMEM.
- * There is no reason to call it again and expect !NULL.
- */
-void *kmalloc_nolock_noprof(size_t size, gfp_t gfp_flags, int node)
+static void *__kmalloc_nolock_noprof(DECL_TOKEN_PARAMS(size, token), gfp_t gfp_flags,
+				     int node, const struct slab_alloc_context *ac)
 {
-	gfp_t alloc_gfp = __GFP_NOWARN | __GFP_NOMEMALLOC | gfp_flags;
 	struct kmem_cache *s;
 	bool can_retry = true;
-	void *ret = ERR_PTR(-EBUSY);
+	void *ret;
 
+	VM_WARN_ON_ONCE(alloc_flags_allow_spinning(ac->alloc_flags));
 	VM_WARN_ON_ONCE(gfp_flags & ~(__GFP_ACCOUNT | __GFP_ZERO |
-				      __GFP_NO_OBJ_EXT));
+				      __GFP_NOWARN | __GFP_NOMEMALLOC));
+
+	gfp_flags |= __GFP_NOWARN | __GFP_NOMEMALLOC;
 
 	if (unlikely(!size))
 		return ZERO_SIZE_PTR;
 
-	if (IS_ENABLED(CONFIG_PREEMPT_RT) && (in_nmi() || in_hardirq()))
-		/* kmalloc_nolock() in PREEMPT_RT is not supported from irq */
+	if (!can_spin_trylock())
 		return NULL;
+
+	node = apply_strict_numa_policy(node);
+
 retry:
 	if (unlikely(size > KMALLOC_MAX_CACHE_SIZE))
 		return NULL;
-	s = kmalloc_slab(size, NULL, alloc_gfp, _RET_IP_);
+
+	s = kmalloc_slab(size, NULL, gfp_flags, PASS_TOKEN_PARAM(token),
+			 ac->alloc_flags);
 
 	if (!(s->flags & __CMPXCHG_DOUBLE) && !kmem_cache_debug(s))
 		/*
 		 * kmalloc_nolock() is not supported on architectures that
-		 * don't implement cmpxchg16b, but debug caches don't use
-		 * per-cpu slab and per-cpu partial slabs. They rely on
-		 * kmem_cache_node->list_lock, so kmalloc_nolock() can
-		 * attempt to allocate from debug caches by
+		 * don't implement cmpxchg16b and thus need slab_lock()
+		 * which could be preempted by a nmi.
+		 * But debug caches don't use that and only rely on
+		 * kmem_cache_node->list_lock, so kmalloc_nolock() can attempt
+		 * to allocate from debug caches by
 		 * spin_trylock_irqsave(&n->list_lock, ...)
 		 */
 		return NULL;
 
+	ret = alloc_from_pcs(s, gfp_flags, ac->alloc_flags, node);
+	if (ret)
+		goto success;
+
 	/*
 	 * Do not call slab_alloc_node(), since trylock mode isn't
 	 * compatible with slab_pre_alloc_hook/should_failslab and
-	 * kfence_alloc. Hence call __slab_alloc_node() (at most twice)
+	 * kfence_alloc. Hence call ___slab_alloc() (at most twice)
 	 * and slab_post_alloc_hook() directly.
-	 *
-	 * In !PREEMPT_RT ___slab_alloc() manipulates (freelist,tid) pair
-	 * in irq saved region. It assumes that the same cpu will not
-	 * __update_cpu_freelist_fast() into the same (freelist,tid) pair.
-	 * Therefore use in_nmi() to check whether particular bucket is in
-	 * irq protected section.
-	 *
-	 * If in_nmi() && local_lock_is_locked(s->cpu_slab) then it means that
-	 * this cpu was interrupted somewhere inside ___slab_alloc() after
-	 * it did local_lock_irqsave(&s->cpu_slab->lock, flags).
-	 * In this case fast path with __update_cpu_freelist_fast() is not safe.
 	 */
-#ifndef CONFIG_SLUB_TINY
-	if (!in_nmi() || !local_lock_is_locked(&s->cpu_slab->lock))
-#endif
-		ret = __slab_alloc_node(s, alloc_gfp, node, _RET_IP_, size);
+	ret = ___slab_alloc(s, gfp_flags, node, ac);
 
-	if (PTR_ERR(ret) == -EBUSY) {
-		if (can_retry) {
-			/* pick the next kmalloc bucket */
-			size = s->object_size + 1;
-			/*
-			 * Another alternative is to
-			 * if (memcg) alloc_gfp &= ~__GFP_ACCOUNT;
-			 * else if (!memcg) alloc_gfp |= __GFP_ACCOUNT;
-			 * to retry from bucket of the same size.
-			 */
-			can_retry = false;
-			goto retry;
-		}
-		ret = NULL;
+	/*
+	 * It's possible we failed due to trylock as we preempted someone with
+	 * the sheaves locked, and the list_lock is also held by another cpu.
+	 * But it should be rare that multiple kmalloc buckets would have
+	 * sheaves locked, so try a larger one.
+	 */
+	if (!ret && can_retry) {
+		/* pick the next kmalloc bucket */
+		size = s->object_size + 1;
+		/*
+		 * Another alternative is to
+		 * if (memcg) gfp_flags &= ~__GFP_ACCOUNT;
+		 * else if (!memcg) gfp_flags |= __GFP_ACCOUNT;
+		 * to retry from bucket of the same size.
+		 */
+		can_retry = false;
+		goto retry;
 	}
 
+success:
 	maybe_wipe_obj_freeptr(s, ret);
-	slab_post_alloc_hook(s, NULL, alloc_gfp, 1, &ret,
-			     slab_want_init_on_alloc(alloc_gfp, s), size);
+	slab_post_alloc_hook(s, gfp_flags, 1, &ret, ac);
 
-	ret = kasan_kmalloc(s, ret, size, alloc_gfp);
+	ret = kasan_kmalloc(s, ret, ac->orig_size, gfp_flags);
 	return ret;
 }
-EXPORT_SYMBOL_GPL(kmalloc_nolock_noprof);
 
-void *__kmalloc_node_track_caller_noprof(DECL_BUCKET_PARAMS(size, b), gfp_t flags,
+void *_kmalloc_nolock_noprof(DECL_TOKEN_PARAMS(size, token), gfp_t gfp_flags, int node)
+{
+	const struct slab_alloc_context ac = {
+		.caller_addr = _RET_IP_,
+		.orig_size = size,
+		.alloc_flags = SLAB_ALLOC_NOLOCK,
+	};
+
+	return __kmalloc_nolock_noprof(PASS_TOKEN_PARAMS(size, token),
+				       gfp_flags, node, &ac);
+}
+EXPORT_SYMBOL_GPL(_kmalloc_nolock_noprof);
+
+void *__kmalloc_node_track_caller_noprof(DECL_KMALLOC_PARAMS(size, b, token), gfp_t flags,
 					 int node, unsigned long caller)
 {
-	return __do_kmalloc_node(size, PASS_BUCKET_PARAM(b), flags, node, caller);
+	const struct slab_alloc_context ac = {
+		.caller_addr = caller,
+		.orig_size = size,
+		.alloc_flags = SLAB_ALLOC_DEFAULT,
+	};
 
+	return __do_kmalloc_node(PASS_BUCKET_PARAM(b), flags, node,
+				 PASS_TOKEN_PARAM(token), &ac);
 }
 EXPORT_SYMBOL(__kmalloc_node_track_caller_noprof);
 
 void *__kmalloc_cache_noprof(struct kmem_cache *s, gfp_t gfpflags, size_t size)
 {
-	void *ret = slab_alloc_node(s, NULL, gfpflags, NUMA_NO_NODE,
-					    _RET_IP_, size);
+	void *ret;
+	const struct slab_alloc_context ac = {
+		.caller_addr = _RET_IP_,
+		.orig_size = size,
+		.alloc_flags = SLAB_ALLOC_DEFAULT,
+	};
+
+	ret = slab_alloc_node(s, gfpflags, NUMA_NO_NODE, &ac);
 
 	trace_kmalloc(_RET_IP_, ret, size, s->size, gfpflags, NUMA_NO_NODE);
 
@@ -5776,7 +5568,14 @@ EXPORT_SYMBOL(__kmalloc_cache_noprof);
 void *__kmalloc_cache_node_noprof(struct kmem_cache *s, gfp_t gfpflags,
 				  int node, size_t size)
 {
-	void *ret = slab_alloc_node(s, NULL, gfpflags, node, _RET_IP_, size);
+	void *ret;
+	const struct slab_alloc_context ac = {
+		.caller_addr = _RET_IP_,
+		.orig_size = size,
+		.alloc_flags = SLAB_ALLOC_DEFAULT,
+	};
+
+	ret = slab_alloc_node(s, gfpflags, node, &ac);
 
 	trace_kmalloc(_RET_IP_, ret, size, s->size, gfpflags, node);
 
@@ -5784,6 +5583,30 @@ void *__kmalloc_cache_node_noprof(struct kmem_cache *s, gfp_t gfpflags,
 	return ret;
 }
 EXPORT_SYMBOL(__kmalloc_cache_node_noprof);
+
+/*
+ * The only version of kmalloc_node() that takes alloc_flags and thus can
+ * determine on its own whether to handle the allocation via kmalloc_nolock() or
+ * normally
+ */
+void *__kmalloc_flags_noprof(DECL_TOKEN_PARAMS(size, token), gfp_t flags,
+			     unsigned int alloc_flags, int node)
+{
+	const struct slab_alloc_context ac = {
+		.caller_addr = _RET_IP_,
+		.orig_size = size,
+		.alloc_flags = alloc_flags,
+	};
+
+	if (alloc_flags_allow_spinning(alloc_flags)) {
+		return __do_kmalloc_node(NULL, flags, node,
+				PASS_TOKEN_PARAM(token), &ac);
+	} else {
+		return __kmalloc_nolock_noprof(PASS_TOKEN_PARAMS(size, token),
+					       flags, node, &ac);
+	}
+}
+
 
 static noinline void free_to_partial_list(
 	struct kmem_cache *s, struct slab *slab,
@@ -5825,7 +5648,7 @@ static noinline void free_to_partial_list(
 			/* was on full list */
 			remove_full(s, n, slab);
 			if (!slab_free) {
-				add_partial(n, slab, DEACTIVATE_TO_TAIL);
+				add_partial(n, slab, ADD_TO_TAIL);
 				stat(s, FREE_ADD_PARTIAL);
 			}
 		} else if (slab_free) {
@@ -5851,6 +5674,34 @@ static noinline void free_to_partial_list(
 }
 
 /*
+ * Try returning (remainder of) the freelist that we just detached from the
+ * slab.  Optimistically assume the slab is still full, so we don't need to find
+ * the tail of the detached freelist.
+ *
+ * Fail if the slab isn't full anymore due to a concurrent free.
+ */
+static bool __slab_try_return_freelist(struct kmem_cache *s, struct slab *slab,
+				       void *head, int cnt)
+{
+	struct freelist_counters old, new;
+
+	old.freelist = slab->freelist;
+	old.counters = slab->counters;
+
+	if (old.freelist)
+		return false;
+
+	new.freelist = head;
+	new.counters = old.counters;
+	new.inuse -= cnt;
+
+	if (!slab_update_freelist(s, slab, &old, &new, "__slab_try_return_freelist"))
+		return false;
+
+	return true;
+}
+
+/*
  * Slow path handling. This may still be called frequently since objects
  * have a longer lifetime than the cpu slabs in most processing loads.
  *
@@ -5863,15 +5714,11 @@ static void __slab_free(struct kmem_cache *s, struct slab *slab,
 			unsigned long addr)
 
 {
-	void *prior;
-	int was_frozen;
-	struct slab new;
-	unsigned long counters;
+	bool was_full;
+	struct freelist_counters old, new;
 	struct kmem_cache_node *n = NULL;
 	unsigned long flags;
 	bool on_node_partial;
-
-	stat(s, FREE_SLOWPATH);
 
 	if (IS_ENABLED(CONFIG_SLUB_TINY) || kmem_cache_debug(s)) {
 		free_to_partial_list(s, slab, head, tail, cnt, addr);
@@ -5883,53 +5730,46 @@ static void __slab_free(struct kmem_cache *s, struct slab *slab,
 			spin_unlock_irqrestore(&n->list_lock, flags);
 			n = NULL;
 		}
-		prior = slab->freelist;
-		counters = slab->counters;
-		set_freepointer(s, tail, prior);
-		new.counters = counters;
-		was_frozen = new.frozen;
+
+		old.freelist = slab->freelist;
+		old.counters = slab->counters;
+
+		was_full = (old.freelist == NULL);
+
+		set_freepointer(s, tail, old.freelist);
+
+		new.freelist = head;
+		new.counters = old.counters;
 		new.inuse -= cnt;
-		if ((!new.inuse || !prior) && !was_frozen) {
-			/* Needs to be taken off a list */
-			if (!kmem_cache_has_cpu_partial(s) || prior) {
 
-				n = get_node(s, slab_nid(slab));
-				/*
-				 * Speculatively acquire the list_lock.
-				 * If the cmpxchg does not succeed then we may
-				 * drop the list_lock without any processing.
-				 *
-				 * Otherwise the list_lock will synchronize with
-				 * other processors updating the list of slabs.
-				 */
-				spin_lock_irqsave(&n->list_lock, flags);
+		/*
+		 * Might need to be taken off (due to becoming empty) or added
+		 * to (due to not being full anymore) the partial list.
+		 * Unless it's frozen.
+		 */
+		if (!new.inuse || was_full) {
 
-				on_node_partial = slab_test_node_partial(slab);
-			}
+			n = get_node(s, slab_nid(slab));
+			/*
+			 * Speculatively acquire the list_lock.
+			 * If the cmpxchg does not succeed then we may
+			 * drop the list_lock without any processing.
+			 *
+			 * Otherwise the list_lock will synchronize with
+			 * other processors updating the list of slabs.
+			 */
+			spin_lock_irqsave(&n->list_lock, flags);
+
+			on_node_partial = slab_test_node_partial(slab);
 		}
 
-	} while (!slab_update_freelist(s, slab,
-		prior, counters,
-		head, new.counters,
-		"__slab_free"));
+	} while (!slab_update_freelist(s, slab, &old, &new, "__slab_free"));
 
 	if (likely(!n)) {
-
-		if (likely(was_frozen)) {
-			/*
-			 * The list lock was not taken therefore no list
-			 * activity can be necessary.
-			 */
-			stat(s, FREE_FROZEN);
-		} else if (kmem_cache_has_cpu_partial(s) && !prior) {
-			/*
-			 * If we started with a full slab then put it onto the
-			 * per cpu partial list.
-			 */
-			put_cpu_partial(s, slab, 1);
-			stat(s, CPU_PARTIAL_FREE);
-		}
-
+		/*
+		 * We didn't take the list_lock because the slab was already on
+		 * the partial list and will remain there.
+		 */
 		return;
 	}
 
@@ -5937,11 +5777,15 @@ static void __slab_free(struct kmem_cache *s, struct slab *slab,
 	 * This slab was partially empty but not on the per-node partial list,
 	 * in which case we shouldn't manipulate its list, just return.
 	 */
-	if (prior && !on_node_partial) {
+	if (!was_full && !on_node_partial) {
 		spin_unlock_irqrestore(&n->list_lock, flags);
 		return;
 	}
 
+	/*
+	 * If slab became empty, should we add/keep it on the partial list or we
+	 * have enough?
+	 */
 	if (unlikely(!new.inuse && n->nr_partial >= s->min_partial))
 		goto slab_empty;
 
@@ -5949,18 +5793,19 @@ static void __slab_free(struct kmem_cache *s, struct slab *slab,
 	 * Objects left in the slab. If it was not on the partial list before
 	 * then add it.
 	 */
-	if (!kmem_cache_has_cpu_partial(s) && unlikely(!prior)) {
-		add_partial(n, slab, DEACTIVATE_TO_TAIL);
+	if (unlikely(was_full)) {
+		add_partial(n, slab, ADD_TO_TAIL);
 		stat(s, FREE_ADD_PARTIAL);
 	}
 	spin_unlock_irqrestore(&n->list_lock, flags);
 	return;
 
 slab_empty:
-	if (prior) {
-		/*
-		 * Slab on the partial list.
-		 */
+	/*
+	 * The slab could have a single object and thus go from full to empty in
+	 * a single free, but more likely it was on the partial list. Remove it.
+	 */
+	if (likely(!was_full)) {
 		remove_partial(n, slab);
 		stat(s, FREE_REMOVE_PARTIAL);
 	}
@@ -5992,7 +5837,7 @@ static void __pcs_install_empty_sheaf(struct kmem_cache *s,
 		struct slub_percpu_sheaves *pcs, struct slab_sheaf *empty,
 		struct node_barn *barn)
 {
-	lockdep_assert_held(this_cpu_ptr(&s->cpu_sheaves->lock));
+	slab_lockdep_assert_held(this_cpu_ptr(&s->cpu_sheaves->lock));
 
 	/* This is what we expect to find if nobody interrupted us. */
 	if (likely(!pcs->spare)) {
@@ -6035,14 +5880,21 @@ static void __pcs_install_empty_sheaf(struct kmem_cache *s,
  * unlocked.
  */
 static struct slub_percpu_sheaves *
-__pcs_replace_full_main(struct kmem_cache *s, struct slub_percpu_sheaves *pcs)
+__pcs_replace_full_main(struct kmem_cache *s, struct slub_percpu_sheaves *pcs,
+			bool allow_spin)
 {
 	struct slab_sheaf *empty;
 	struct node_barn *barn;
 	bool put_fail;
 
 restart:
-	lockdep_assert_held(this_cpu_ptr(&s->cpu_sheaves->lock));
+	slab_lockdep_assert_held(this_cpu_ptr(&s->cpu_sheaves->lock));
+
+	/* Bootstrap or debug cache, back off */
+	if (unlikely(!cache_has_sheaves(s))) {
+		local_unlock(&s->cpu_sheaves->lock);
+		return NULL;
+	}
 
 	barn = get_barn(s);
 	if (!barn) {
@@ -6053,7 +5905,7 @@ restart:
 	put_fail = false;
 
 	if (!pcs->spare) {
-		empty = barn_get_empty_sheaf(barn);
+		empty = barn_get_empty_sheaf(barn, allow_spin);
 		if (empty) {
 			pcs->spare = pcs->main;
 			pcs->main = empty;
@@ -6067,7 +5919,7 @@ restart:
 		return pcs;
 	}
 
-	empty = barn_replace_full_sheaf(barn, pcs->main);
+	empty = barn_replace_full_sheaf(barn, pcs->main, allow_spin);
 
 	if (!IS_ERR(empty)) {
 		stat(s, BARN_PUT);
@@ -6075,7 +5927,8 @@ restart:
 		return pcs;
 	}
 
-	if (PTR_ERR(empty) == -E2BIG) {
+	/* sheaf_flush_unused() doesn't support !allow_spin */
+	if (PTR_ERR(empty) == -E2BIG && allow_spin) {
 		/* Since we got here, spare exists and is full */
 		struct slab_sheaf *to_flush = pcs->spare;
 
@@ -6100,14 +5953,22 @@ restart:
 alloc_empty:
 	local_unlock(&s->cpu_sheaves->lock);
 
-	empty = alloc_empty_sheaf(s, GFP_NOWAIT);
+	/*
+	 * alloc_empty_sheaf() doesn't support !allow_spin and it's
+	 * easier to fall back to freeing directly without sheaves
+	 * than add the support (and to sheaf_flush_unused() above)
+	 */
+	if (!allow_spin)
+		return NULL;
+
+	empty = alloc_empty_sheaf(s, GFP_NOWAIT, SLAB_ALLOC_DEFAULT);
 	if (empty)
 		goto got_empty;
 
 	if (put_fail)
 		 stat(s, BARN_PUT_FAIL);
 
-	if (!sheaf_flush_main(s))
+	if (!sheaf_try_flush_main(s))
 		return NULL;
 
 	if (!local_trylock(&s->cpu_sheaves->lock))
@@ -6142,7 +6003,7 @@ got_empty:
  * The object is expected to have passed slab_free_hook() already.
  */
 static __fastpath_inline
-bool free_to_pcs(struct kmem_cache *s, void *object)
+bool free_to_pcs(struct kmem_cache *s, void *object, bool allow_spin)
 {
 	struct slub_percpu_sheaves *pcs;
 
@@ -6153,7 +6014,7 @@ bool free_to_pcs(struct kmem_cache *s, void *object)
 
 	if (unlikely(pcs->main->size == s->sheaf_capacity)) {
 
-		pcs = __pcs_replace_full_main(s, pcs);
+		pcs = __pcs_replace_full_main(s, pcs, allow_spin);
 		if (unlikely(!pcs))
 			return false;
 	}
@@ -6162,14 +6023,13 @@ bool free_to_pcs(struct kmem_cache *s, void *object)
 
 	local_unlock(&s->cpu_sheaves->lock);
 
-	stat(s, FREE_PCS);
+	stat(s, FREE_FASTPATH);
 
 	return true;
 }
 
 static void rcu_free_sheaf(struct rcu_head *head)
 {
-	struct kmem_cache_node *n;
 	struct slab_sheaf *sheaf;
 	struct node_barn *barn = NULL;
 	struct kmem_cache *s;
@@ -6185,14 +6045,16 @@ static void rcu_free_sheaf(struct rcu_head *head)
 	 * handles it fine. The only downside is that sheaf will serve fewer
 	 * allocations when reused. It only happens due to debugging, which is a
 	 * performance hit anyway.
+	 *
+	 * If it returns true, there was at least one object from pfmemalloc
+	 * slab so simply flush everything.
 	 */
-	__rcu_free_sheaf_prepare(s, sheaf);
-
-	n = get_node(s, sheaf->node);
-	if (!n)
+	if (__rcu_free_sheaf_prepare(s, sheaf))
 		goto flush;
 
-	barn = n->barn;
+	barn = get_barn_node(s, sheaf->node);
+	if (!barn)
+		goto flush;
 
 	/* due to slab_free_hook() */
 	if (unlikely(sheaf->size == 0))
@@ -6223,10 +6085,30 @@ empty:
 	free_empty_sheaf(s, sheaf);
 }
 
-bool __kfree_rcu_sheaf(struct kmem_cache *s, void *obj)
+/*
+ * kvfree_call_rcu() can be called while holding a raw_spinlock_t. Since
+ * __kfree_rcu_sheaf() may acquire a spinlock_t (sleeping lock on PREEMPT_RT),
+ * this would violate lock nesting rules. Therefore, kvfree_call_rcu() avoids
+ * this problem by passing SLAB_FREE_NOLOCK on PREEMPT_RT.
+ *
+ * However, lockdep still complains that it is invalid to acquire spinlock_t
+ * while holding raw_spinlock_t, even on !PREEMPT_RT where spinlock_t is a
+ * spinning lock. Tell lockdep that acquiring spinlock_t is valid here
+ * by temporarily raising the wait-type to LD_WAIT_CONFIG. Skip the lockdep map
+ * on PREEMPT_RT to avoid suppressing valid lockdep warnings.
+ */
+static DEFINE_WAIT_OVERRIDE_MAP(kfree_rcu_sheaf_map, LD_WAIT_CONFIG);
+
+bool __kfree_rcu_sheaf(struct kmem_cache *s, void *obj, unsigned int free_flags)
 {
 	struct slub_percpu_sheaves *pcs;
 	struct slab_sheaf *rcu_sheaf;
+	bool allow_spin = free_flags_allow_spinning(free_flags);
+
+	VM_WARN_ON_ONCE(IS_ENABLED(CONFIG_PREEMPT_RT) && allow_spin);
+
+	if (!IS_ENABLED(CONFIG_PREEMPT_RT))
+		lock_map_acquire_try(&kfree_rcu_sheaf_map);
 
 	if (!local_trylock(&s->cpu_sheaves->lock))
 		goto fail;
@@ -6234,9 +6116,16 @@ bool __kfree_rcu_sheaf(struct kmem_cache *s, void *obj)
 	pcs = this_cpu_ptr(s->cpu_sheaves);
 
 	if (unlikely(!pcs->rcu_free)) {
-
 		struct slab_sheaf *empty;
 		struct node_barn *barn;
+		unsigned int alloc_flags = to_alloc_flags(free_flags);
+		gfp_t gfp = allow_spin ? GFP_NOWAIT : __GFP_NOWARN;
+
+		/* Bootstrap or debug cache, fall back */
+		if (unlikely(!cache_has_sheaves(s))) {
+			local_unlock(&s->cpu_sheaves->lock);
+			goto fail;
+		}
 
 		if (pcs->spare && pcs->spare->size == 0) {
 			pcs->rcu_free = pcs->spare;
@@ -6250,7 +6139,7 @@ bool __kfree_rcu_sheaf(struct kmem_cache *s, void *obj)
 			goto fail;
 		}
 
-		empty = barn_get_empty_sheaf(barn);
+		empty = barn_get_empty_sheaf(barn, allow_spin);
 
 		if (empty) {
 			pcs->rcu_free = empty;
@@ -6259,20 +6148,20 @@ bool __kfree_rcu_sheaf(struct kmem_cache *s, void *obj)
 
 		local_unlock(&s->cpu_sheaves->lock);
 
-		empty = alloc_empty_sheaf(s, GFP_NOWAIT);
+		empty = alloc_empty_sheaf(s, gfp, alloc_flags);
 
 		if (!empty)
 			goto fail;
 
 		if (!local_trylock(&s->cpu_sheaves->lock)) {
-			barn_put_empty_sheaf(barn, empty);
+			__free_empty_sheaf(s, empty, free_flags);
 			goto fail;
 		}
 
 		pcs = this_cpu_ptr(s->cpu_sheaves);
 
 		if (unlikely(pcs->rcu_free))
-			barn_put_empty_sheaf(barn, empty);
+			__free_empty_sheaf(s, empty, free_flags);
 		else
 			pcs->rcu_free = empty;
 	}
@@ -6291,71 +6180,111 @@ do_free:
 		rcu_sheaf = NULL;
 	} else {
 		pcs->rcu_free = NULL;
-		rcu_sheaf->node = numa_mem_id();
+		rcu_sheaf->node = numa_node_id();
 	}
 
 	/*
 	 * we flush before local_unlock to make sure a racing
 	 * flush_all_rcu_sheaves() doesn't miss this sheaf
 	 */
-	if (rcu_sheaf)
-		call_rcu(&rcu_sheaf->rcu_head, rcu_free_sheaf);
+	if (rcu_sheaf) {
+		/*
+		 * With !allow_spin, we might have interrupted call_rcu()'s
+		 * IRQ-disabled critical section. If IRQs are not disabled,
+		 * we know that's not the case.
+		 */
+		if (unlikely(!allow_spin && irqs_disabled())) {
+			struct deferred_percpu_work *dpw;
+
+			dpw = this_cpu_ptr(&deferred_percpu_work);
+			if (llist_add(&rcu_sheaf->llnode, &dpw->rcu_sheaves))
+				irq_work_queue(&dpw->work);
+		} else {
+			call_rcu(&rcu_sheaf->rcu_head, rcu_free_sheaf);
+		}
+	}
 
 	local_unlock(&s->cpu_sheaves->lock);
 
 	stat(s, FREE_RCU_SHEAF);
+	if (!IS_ENABLED(CONFIG_PREEMPT_RT))
+		lock_map_release(&kfree_rcu_sheaf_map);
 	return true;
 
 fail:
 	stat(s, FREE_RCU_SHEAF_FAIL);
+	if (!IS_ENABLED(CONFIG_PREEMPT_RT))
+		lock_map_release(&kfree_rcu_sheaf_map);
 	return false;
 }
 
+static __always_inline bool can_free_to_pcs(struct slab *slab)
+{
+	int slab_node;
+	int numa_node;
+
+	if (!IS_ENABLED(CONFIG_NUMA))
+		goto check_pfmemalloc;
+
+	slab_node = slab_nid(slab);
+
+#ifdef CONFIG_HAVE_MEMORYLESS_NODES
+	/*
+	 * numa_mem_id() points to the closest node with memory so only allow
+	 * objects from that node to the percpu sheaves
+	 */
+	numa_node = numa_mem_id();
+
+	if (likely(slab_node == numa_node))
+		goto check_pfmemalloc;
+#else
+
+	/*
+	 * numa_mem_id() is only a wrapper to numa_node_id() which is where this
+	 * cpu belongs to, but it might be a memoryless node anyway. We don't
+	 * know what the closest node is.
+	 */
+	numa_node = numa_node_id();
+
+	/* freed object is from this cpu's node, proceed */
+	if (likely(slab_node == numa_node))
+		goto check_pfmemalloc;
+
+	/*
+	 * Freed object isn't from this cpu's node, but that node is memoryless
+	 * or only has ZONE_MOVABLE memory, which slab cannot allocate from.
+	 * Proceed as it's better to cache remote objects than falling back to
+	 * the slowpath for everything. The allocation side can never obtain
+	 * a local object anyway, if none exist. We don't have numa_mem_id() to
+	 * point to the closest node as we would on a proper memoryless node
+	 * setup.
+	 */
+	if (unlikely(!node_state(numa_node, N_NORMAL_MEMORY)))
+		goto check_pfmemalloc;
+#endif
+
+	return false;
+
+check_pfmemalloc:
+	return likely(!slab_test_pfmemalloc(slab));
+}
+
 /*
- * Bulk free objects to the percpu sheaves.
- * Unlike free_to_pcs() this includes the calls to all necessary hooks
- * and the fallback to freeing to slab pages.
+ * Try to free as many objects (already processed by free hooks) as possible to
+ * a single per-cpu sheaf.
+ *
+ * Returns how many objects were freed. Zero means failure and the caller should
+ * fall back to __kmem_cache_free_bulk().
  */
-static void free_to_pcs_bulk(struct kmem_cache *s, size_t size, void **p)
+static unsigned int __free_to_pcs_batch(struct kmem_cache *s, size_t size, void **p)
 {
 	struct slub_percpu_sheaves *pcs;
 	struct slab_sheaf *main, *empty;
-	bool init = slab_want_init_on_free(s);
-	unsigned int batch, i = 0;
 	struct node_barn *barn;
-	void *remote_objects[PCS_BATCH_MAX];
-	unsigned int remote_nr = 0;
-	int node = numa_mem_id();
+	unsigned int batch;
 
-next_remote_batch:
-	while (i < size) {
-		struct slab *slab = virt_to_slab(p[i]);
-
-		memcg_slab_free_hook(s, slab, p + i, 1);
-		alloc_tagging_slab_free_hook(s, slab, p + i, 1);
-
-		if (unlikely(!slab_free_hook(s, p[i], init, false))) {
-			p[i] = p[--size];
-			continue;
-		}
-
-		if (unlikely(IS_ENABLED(CONFIG_NUMA) && slab_nid(slab) != node)) {
-			remote_objects[remote_nr] = p[i];
-			p[i] = p[--size];
-			if (++remote_nr >= PCS_BATCH_MAX)
-				goto flush_remote;
-			continue;
-		}
-
-		i++;
-	}
-
-	if (!size)
-		goto flush_remote;
-
-next_batch:
 	if (!local_trylock(&s->cpu_sheaves->lock))
-		goto fallback;
+		return 0;
 
 	pcs = this_cpu_ptr(s->cpu_sheaves);
 
@@ -6367,7 +6296,7 @@ next_batch:
 		goto no_empty;
 
 	if (!pcs->spare) {
-		empty = barn_get_empty_sheaf(barn);
+		empty = barn_get_empty_sheaf(barn, true);
 		if (!empty)
 			goto no_empty;
 
@@ -6381,7 +6310,7 @@ next_batch:
 		goto do_free;
 	}
 
-	empty = barn_replace_full_sheaf(barn, pcs->main);
+	empty = barn_replace_full_sheaf(barn, pcs->main, true);
 	if (IS_ERR(empty)) {
 		stat(s, BARN_PUT_FAIL);
 		goto no_empty;
@@ -6399,67 +6328,97 @@ do_free:
 
 	local_unlock(&s->cpu_sheaves->lock);
 
-	stat_add(s, FREE_PCS, batch);
+	stat_add(s, FREE_FASTPATH, batch);
 
-	if (batch < size) {
-		p += batch;
-		size -= batch;
-		goto next_batch;
-	}
-
-	if (remote_nr)
-		goto flush_remote;
-
-	return;
+	return batch;
 
 no_empty:
 	local_unlock(&s->cpu_sheaves->lock);
 
-	/*
-	 * if we depleted all empty sheaves in the barn or there are too
-	 * many full sheaves, free the rest to slab pages
-	 */
-fallback:
-	__kmem_cache_free_bulk(s, size, p);
+	return 0;
+}
 
-flush_remote:
-	if (remote_nr) {
-		__kmem_cache_free_bulk(s, remote_nr, &remote_objects[0]);
-		if (i < size) {
-			remote_nr = 0;
-			goto next_remote_batch;
+/*
+ * Bulk free objects to the percpu sheaves.
+ * Unlike free_to_pcs() this includes the calls to all necessary hooks
+ * and the fallback to freeing to slab pages.
+ */
+static void free_to_pcs_bulk(struct kmem_cache *s, size_t size, void **p)
+{
+	bool init = slab_want_init_on_free(s);
+	void **remote_objects = p;
+	unsigned int remote_nr = 0;
+
+	/*
+	 * Process the free hooks and separate out remote objects by
+	 * partitioning the 'p' array in place:
+	 *
+	 * [0, remote_nr) - processed remote objects
+	 * [remote_nr, i) - processed local objects
+	 * [i, size)      - unprocessed objects
+	 */
+	for (unsigned int i = 0; i < size;) {
+		struct slab *slab = virt_to_slab(p[i]);
+
+		memcg_slab_free_hook(s, slab, p + i, 1);
+		alloc_tagging_slab_free_hook(s, slab, p + i, 1);
+
+		if (unlikely(!slab_free_hook(s, p[i], init, false))) {
+			p[i] = p[--size];
+			continue;
 		}
+
+		if (unlikely(!can_free_to_pcs(slab))) {
+			if (i != remote_nr)
+				swap(remote_objects[remote_nr], p[i]);
+			remote_nr++;
+		}
+
+		i++;
+	}
+
+	p += remote_nr;
+	size -= remote_nr;
+
+	while (size) {
+		unsigned int batch_freed = __free_to_pcs_batch(s, size, p);
+
+		if (!batch_freed) {
+			__kmem_cache_free_bulk(s, size, p);
+			stat_add(s, FREE_SLOWPATH, size);
+			break;
+		}
+
+		p += batch_freed;
+		size -= batch_freed;
+	}
+
+	/*
+	 * Processing remote objects last decreases the chances of cpu migration
+	 * while freeing to sheaves and compromising object locality
+	 */
+	if (remote_nr) {
+		__kmem_cache_free_bulk(s, remote_nr, remote_objects);
+		stat_add(s, FREE_SLOWPATH, remote_nr);
 	}
 }
 
-struct defer_free {
-	struct llist_head objects;
-	struct llist_head slabs;
-	struct irq_work work;
-};
-
-static void free_deferred_objects(struct irq_work *work);
-
-static DEFINE_PER_CPU(struct defer_free, defer_free_objects) = {
-	.objects = LLIST_HEAD_INIT(objects),
-	.slabs = LLIST_HEAD_INIT(slabs),
-	.work = IRQ_WORK_INIT(free_deferred_objects),
-};
-
 /*
  * In PREEMPT_RT irq_work runs in per-cpu kthread, so it's safe
- * to take sleeping spin_locks from __slab_free() and deactivate_slab().
+ * to take sleeping spin_locks from __slab_free().
  * In !PREEMPT_RT irq_work will run after local_unlock_irqrestore().
  */
-static void free_deferred_objects(struct irq_work *work)
+static void deferred_percpu_work_fn(struct irq_work *work)
 {
-	struct defer_free *df = container_of(work, struct defer_free, work);
-	struct llist_head *objs = &df->objects;
-	struct llist_head *slabs = &df->slabs;
+	struct deferred_percpu_work *dpw;
+	struct llist_head *objs, *objs_by_rcu, *rcu_sheaves;
 	struct llist_node *llnode, *pos, *t;
+	struct slab_sheaf *sheaf, *next;
 
-	if (llist_empty(objs) && llist_empty(slabs))
-		return;
+	dpw = container_of(work, struct deferred_percpu_work, work);
+	rcu_sheaves = &dpw->rcu_sheaves;
+	objs = &dpw->objects;
+	objs_by_rcu = &dpw->objects_by_rcu;
 
 	llnode = llist_del_all(objs);
 	llist_for_each_safe(pos, t, llnode) {
@@ -6481,156 +6440,54 @@ static void free_deferred_objects(struct irq_work *work)
 		set_freepointer(s, x, NULL);
 
 		__slab_free(s, slab, x, x, 1, _THIS_IP_);
+		stat(s, FREE_SLOWPATH);
 	}
 
-	llnode = llist_del_all(slabs);
+	llnode = llist_del_all(objs_by_rcu);
 	llist_for_each_safe(pos, t, llnode) {
-		struct slab *slab = container_of(pos, struct slab, llnode);
+		void *head = pos;
+		void *objp = kvmalloc_obj_start_addr(head);
 
-#ifdef CONFIG_SLUB_TINY
-		free_slab(slab->slab_cache, slab);
-#else
-		if (slab->frozen)
-			deactivate_slab(slab->slab_cache, slab, slab->flush_freelist);
-		else
-			free_slab(slab->slab_cache, slab);
-#endif
+		kvfree_call_rcu(head, objp);
 	}
+
+	llnode = llist_del_all(rcu_sheaves);
+	llist_for_each_entry_safe(sheaf, next, llnode, llnode)
+		call_rcu(&sheaf->rcu_head, rcu_free_sheaf);
 }
 
 static void defer_free(struct kmem_cache *s, void *head)
 {
-	struct defer_free *df;
+	struct deferred_percpu_work *dpw;
 
 	guard(preempt)();
 
-	df = this_cpu_ptr(&defer_free_objects);
-	if (llist_add(head + s->offset, &df->objects))
-		irq_work_queue(&df->work);
+	head = kasan_reset_tag(head);
+
+	dpw = this_cpu_ptr(&deferred_percpu_work);
+	if (llist_add(head + s->offset, &dpw->objects))
+		irq_work_queue(&dpw->work);
 }
 
-static void defer_deactivate_slab(struct slab *slab, void *flush_freelist)
+void defer_kfree_rcu(struct kvfree_rcu_head *head)
 {
-	struct defer_free *df;
-
-	slab->flush_freelist = flush_freelist;
+	struct deferred_percpu_work *dpw;
 
 	guard(preempt)();
 
-	df = this_cpu_ptr(&defer_free_objects);
-	if (llist_add(&slab->llnode, &df->slabs))
-		irq_work_queue(&df->work);
+	dpw = this_cpu_ptr(&deferred_percpu_work);
+	if (llist_add((struct llist_node *)head, &dpw->objects_by_rcu))
+		irq_work_queue(&dpw->work);
 }
 
-void defer_free_barrier(void)
+/* Must be called before flush_rcu_sheaves_on_cache() */
+void deferred_work_barrier(void)
 {
 	int cpu;
 
 	for_each_possible_cpu(cpu)
-		irq_work_sync(&per_cpu_ptr(&defer_free_objects, cpu)->work);
+		irq_work_sync(&per_cpu_ptr(&deferred_percpu_work, cpu)->work);
 }
-
-#ifndef CONFIG_SLUB_TINY
-/*
- * Fastpath with forced inlining to produce a kfree and kmem_cache_free that
- * can perform fastpath freeing without additional function calls.
- *
- * The fastpath is only possible if we are freeing to the current cpu slab
- * of this processor. This typically the case if we have just allocated
- * the item before.
- *
- * If fastpath is not possible then fall back to __slab_free where we deal
- * with all sorts of special processing.
- *
- * Bulk free of a freelist with several objects (all pointing to the
- * same slab) possible by specifying head and tail ptr, plus objects
- * count (cnt). Bulk free indicated by tail pointer being set.
- */
-static __always_inline void do_slab_free(struct kmem_cache *s,
-				struct slab *slab, void *head, void *tail,
-				int cnt, unsigned long addr)
-{
-	/* cnt == 0 signals that it's called from kfree_nolock() */
-	bool allow_spin = cnt;
-	struct kmem_cache_cpu *c;
-	unsigned long tid;
-	void **freelist;
-
-redo:
-	/*
-	 * Determine the currently cpus per cpu slab.
-	 * The cpu may change afterward. However that does not matter since
-	 * data is retrieved via this pointer. If we are on the same cpu
-	 * during the cmpxchg then the free will succeed.
-	 */
-	c = raw_cpu_ptr(s->cpu_slab);
-	tid = READ_ONCE(c->tid);
-
-	/* Same with comment on barrier() in __slab_alloc_node() */
-	barrier();
-
-	if (unlikely(slab != c->slab)) {
-		if (unlikely(!allow_spin)) {
-			/*
-			 * __slab_free() can locklessly cmpxchg16 into a slab,
-			 * but then it might need to take spin_lock or local_lock
-			 * in put_cpu_partial() for further processing.
-			 * Avoid the complexity and simply add to a deferred list.
-			 */
-			defer_free(s, head);
-		} else {
-			__slab_free(s, slab, head, tail, cnt, addr);
-		}
-		return;
-	}
-
-	if (unlikely(!allow_spin)) {
-		if ((in_nmi() || !USE_LOCKLESS_FAST_PATH()) &&
-		    local_lock_is_locked(&s->cpu_slab->lock)) {
-			defer_free(s, head);
-			return;
-		}
-		cnt = 1; /* restore cnt. kfree_nolock() frees one object at a time */
-	}
-
-	if (USE_LOCKLESS_FAST_PATH()) {
-		freelist = READ_ONCE(c->freelist);
-
-		set_freepointer(s, tail, freelist);
-
-		if (unlikely(!__update_cpu_freelist_fast(s, freelist, head, tid))) {
-			note_cmpxchg_failure("slab_free", s, tid);
-			goto redo;
-		}
-	} else {
-		__maybe_unused unsigned long flags = 0;
-
-		/* Update the free list under the local lock */
-		local_lock_cpu_slab(s, flags);
-		c = this_cpu_ptr(s->cpu_slab);
-		if (unlikely(slab != c->slab)) {
-			local_unlock_cpu_slab(s, flags);
-			goto redo;
-		}
-		tid = c->tid;
-		freelist = c->freelist;
-
-		set_freepointer(s, tail, freelist);
-		c->freelist = head;
-		c->tid = next_tid(tid);
-
-		local_unlock_cpu_slab(s, flags);
-	}
-	stat_add(s, FREE_FASTPATH, cnt);
-}
-#else /* CONFIG_SLUB_TINY */
-static void do_slab_free(struct kmem_cache *s,
-				struct slab *slab, void *head, void *tail,
-				int cnt, unsigned long addr)
-{
-	__slab_free(s, slab, head, tail, cnt, addr);
-}
-#endif /* CONFIG_SLUB_TINY */
 
 static __fastpath_inline
 void slab_free(struct kmem_cache *s, struct slab *slab, void *object,
@@ -6642,13 +6499,11 @@ void slab_free(struct kmem_cache *s, struct slab *slab, void *object,
 	if (unlikely(!slab_free_hook(s, object, slab_want_init_on_free(s), false)))
 		return;
 
-	if (s->cpu_sheaves && likely(!IS_ENABLED(CONFIG_NUMA) ||
-				     slab_nid(slab) == numa_mem_id())) {
-		if (likely(free_to_pcs(s, object)))
-			return;
-	}
+	if (likely(can_free_to_pcs(slab)) && likely(free_to_pcs(s, object, true)))
+		return;
 
-	do_slab_free(s, slab, object, object, 1, addr);
+	__slab_free(s, slab, object, object, 1, addr);
+	stat(s, FREE_SLOWPATH);
 }
 
 #ifdef CONFIG_MEMCG
@@ -6656,8 +6511,12 @@ void slab_free(struct kmem_cache *s, struct slab *slab, void *object,
 static noinline
 void memcg_alloc_abort_single(struct kmem_cache *s, void *object)
 {
+	struct slab *slab = virt_to_slab(object);
+
+	alloc_tagging_slab_free_hook(s, slab, &object, 1);
+
 	if (likely(slab_free_hook(s, object, slab_want_init_on_free(s), false)))
-		do_slab_free(s, virt_to_slab(object), object, object, 1, _RET_IP_);
+		__slab_free(s, slab, object, object, 1, _RET_IP_);
 }
 #endif
 
@@ -6671,8 +6530,10 @@ void slab_free_bulk(struct kmem_cache *s, struct slab *slab, void *head,
 	 * With KASAN enabled slab_free_freelist_hook modifies the freelist
 	 * to remove objects, whose reuse must be delayed.
 	 */
-	if (likely(slab_free_freelist_hook(s, &head, &tail, &cnt)))
-		do_slab_free(s, slab, head, tail, cnt, addr);
+	if (likely(slab_free_freelist_hook(s, &head, &tail, &cnt))) {
+		__slab_free(s, slab, head, tail, cnt, addr);
+		stat_add(s, FREE_SLOWPATH, cnt);
+	}
 }
 
 #ifdef CONFIG_SLUB_RCU_DEBUG
@@ -6697,42 +6558,41 @@ static void slab_free_after_rcu_debug(struct rcu_head *rcu_head)
 		return;
 
 	/* resume freeing */
-	if (slab_free_hook(s, object, slab_want_init_on_free(s), true))
-		do_slab_free(s, slab, object, object, 1, _THIS_IP_);
+	if (slab_free_hook(s, object, slab_want_init_on_free(s), true)) {
+		__slab_free(s, slab, object, object, 1, _THIS_IP_);
+		stat(s, FREE_SLOWPATH);
+	}
 }
 #endif /* CONFIG_SLUB_RCU_DEBUG */
 
 #ifdef CONFIG_KASAN_GENERIC
 void ___cache_free(struct kmem_cache *cache, void *x, unsigned long addr)
 {
-	do_slab_free(cache, virt_to_slab(x), x, x, 1, addr);
+	__slab_free(cache, virt_to_slab(x), x, x, 1, addr);
+	stat(cache, FREE_SLOWPATH);
 }
 #endif
 
-static inline struct kmem_cache *virt_to_cache(const void *obj)
+static noinline void warn_free_bad_obj(struct kmem_cache *s, void *obj)
 {
+	struct kmem_cache *cachep;
 	struct slab *slab;
 
 	slab = virt_to_slab(obj);
-	if (WARN_ONCE(!slab, "%s: Object is not a Slab page!\n", __func__))
-		return NULL;
-	return slab->slab_cache;
-}
+	if (WARN_ONCE(!slab,
+			"kmem_cache_free(%s, %p): object is not in a slab page\n",
+			s->name, obj))
+		return;
 
-static inline struct kmem_cache *cache_from_obj(struct kmem_cache *s, void *x)
-{
-	struct kmem_cache *cachep;
+	cachep = slab->slab_cache;
 
-	if (!IS_ENABLED(CONFIG_SLAB_FREELIST_HARDENED) &&
-	    !kmem_cache_debug_flags(s, SLAB_CONSISTENCY_CHECKS))
-		return s;
-
-	cachep = virt_to_cache(x);
-	if (WARN(cachep && cachep != s,
-		 "%s: Wrong slab cache. %s but object is from %s\n",
-		 __func__, s->name, cachep->name))
-		print_tracking(cachep, x);
-	return cachep;
+	if (WARN_ONCE(cachep != s,
+			"kmem_cache_free(%s, %p): object belongs to different cache %s\n",
+			s->name, obj, cachep ? cachep->name : "(NULL)")) {
+		if (cachep)
+			print_tracking(cachep, obj);
+		return;
+	}
 }
 
 /**
@@ -6745,20 +6605,124 @@ static inline struct kmem_cache *cache_from_obj(struct kmem_cache *s, void *x)
  */
 void kmem_cache_free(struct kmem_cache *s, void *x)
 {
-	s = cache_from_obj(s, x);
-	if (!s)
-		return;
+	struct slab *slab;
+
+	slab = virt_to_slab(x);
+
+	if (IS_ENABLED(CONFIG_SLAB_FREELIST_HARDENED) ||
+	    kmem_cache_debug_flags(s, SLAB_CONSISTENCY_CHECKS)) {
+
+		/*
+		 * Intentionally leak the object in these cases, because it
+		 * would be too dangerous to continue.
+		 */
+		if (unlikely(!slab || (slab->slab_cache != s))) {
+			warn_free_bad_obj(s, x);
+			return;
+		}
+	}
+
 	trace_kmem_cache_free(_RET_IP_, x, s);
-	slab_free(s, virt_to_slab(x), x, _RET_IP_);
+	slab_free(s, slab, x, _RET_IP_);
 }
 EXPORT_SYMBOL(kmem_cache_free);
 
-static void free_large_kmalloc(struct folio *folio, void *object)
+static inline size_t slab_ksize(struct slab *slab)
 {
-	unsigned int order = folio_order(folio);
+	struct kmem_cache *s = slab->slab_cache;
 
-	if (WARN_ON_ONCE(!folio_test_large_kmalloc(folio))) {
-		dump_page(&folio->page, "Not a kmalloc allocation");
+#ifdef CONFIG_SLUB_DEBUG
+	/*
+	 * Debugging requires use of the padding between object
+	 * and whatever may come after it.
+	 */
+	if (s->flags & (SLAB_RED_ZONE | SLAB_POISON))
+		return s->object_size;
+#endif
+	if (s->flags & SLAB_KASAN)
+		return s->object_size;
+	/*
+	 * If we have the need to store the freelist pointer
+	 * or any other metadata back there then we can
+	 * only use the space before that information.
+	 */
+	if (s->flags & (SLAB_TYPESAFE_BY_RCU | SLAB_STORE_USER))
+		return s->inuse;
+	else if (obj_exts_in_object(slab))
+		return s->inuse;
+	/*
+	 * Else we can use all the padding etc for the allocation
+	 */
+	return s->size;
+}
+
+static size_t __ksize(const void *object)
+{
+	struct page *page;
+	struct slab *slab;
+
+	if (unlikely(object == ZERO_SIZE_PTR))
+		return 0;
+
+	page = virt_to_page(object);
+
+	if (unlikely(PageLargeKmalloc(page)))
+		return large_kmalloc_size(page);
+
+	slab = page_slab(page);
+	/* Delete this after we're sure there are no users */
+	if (WARN_ON(!slab))
+		return page_size(page);
+
+#ifdef CONFIG_SLUB_DEBUG
+	skip_orig_size_check(slab->slab_cache, object);
+#endif
+
+	return slab_ksize(slab);
+}
+
+/**
+ * ksize -- Report full size of underlying allocation
+ * @objp: pointer to the object
+ *
+ * This should only be used internally to query the true size of allocations.
+ * It is not meant to be a way to discover the usable size of an allocation
+ * after the fact. Instead, use kmalloc_size_roundup(). Using memory beyond
+ * the originally requested allocation size may trigger KASAN, UBSAN_BOUNDS,
+ * and/or FORTIFY_SOURCE.
+ *
+ * Return: size of the actual memory used by @objp in bytes
+ */
+size_t ksize(const void *objp)
+{
+	/*
+	 * We need to first check that the pointer to the object is valid.
+	 * The KASAN report printed from ksize() is more useful, then when
+	 * it's printed later when the behaviour could be undefined due to
+	 * a potential use-after-free or double-free.
+	 *
+	 * We use kasan_check_byte(), which is supported for the hardware
+	 * tag-based KASAN mode, unlike kasan_check_read/write().
+	 *
+	 * If the pointed to memory is invalid, we return 0 to avoid users of
+	 * ksize() writing to and potentially corrupting the memory region.
+	 *
+	 * We want to perform the check before __ksize(), to avoid potentially
+	 * crashing in __ksize() due to accessing invalid metadata.
+	 */
+	if (unlikely(ZERO_OR_NULL_PTR(objp)) || !kasan_check_byte(objp))
+		return 0;
+
+	return kfence_ksize(objp) ?: __ksize(objp);
+}
+EXPORT_SYMBOL(ksize);
+
+static void free_large_kmalloc(struct page *page, void *object)
+{
+	unsigned int order = compound_order(page);
+
+	if (WARN_ON_ONCE(!PageLargeKmalloc(page))) {
+		dump_page(page, "Not a kmalloc allocation");
 		return;
 	}
 
@@ -6769,10 +6733,10 @@ static void free_large_kmalloc(struct folio *folio, void *object)
 	kasan_kfree_large(object);
 	kmsan_kfree_large(object);
 
-	lruvec_stat_mod_folio(folio, NR_SLAB_UNRECLAIMABLE_B,
+	mod_lruvec_page_state(page, NR_SLAB_UNRECLAIMABLE_B,
 			      -(PAGE_SIZE << order));
-	__folio_clear_large_kmalloc(folio);
-	free_frozen_pages(&folio->page, order);
+	__ClearPageLargeKmalloc(page);
+	free_frozen_pages(page, order);
 }
 
 /*
@@ -6781,54 +6745,32 @@ static void free_large_kmalloc(struct folio *folio, void *object)
  */
 void kvfree_rcu_cb(struct rcu_head *head)
 {
-	void *obj = head;
-	struct folio *folio;
-	struct slab *slab;
-	struct kmem_cache *s;
-	void *slab_addr;
+	void *obj;
+
+	obj = kvmalloc_obj_start_addr(head);
 
 	if (is_vmalloc_addr(obj)) {
-		obj = (void *) PAGE_ALIGN_DOWN((unsigned long)obj);
 		vfree(obj);
-		return;
-	}
-
-	folio = virt_to_folio(obj);
-	if (!folio_test_slab(folio)) {
-		/*
-		 * rcu_head offset can be only less than page size so no need to
-		 * consider folio order
-		 */
-		obj = (void *) PAGE_ALIGN_DOWN((unsigned long)obj);
-		free_large_kmalloc(folio, obj);
-		return;
-	}
-
-	slab = folio_slab(folio);
-	s = slab->slab_cache;
-	slab_addr = folio_address(folio);
-
-	if (is_kfence_address(obj)) {
-		obj = kfence_object_start(obj);
 	} else {
-		unsigned int idx = __obj_to_index(s, slab_addr, obj);
+		struct page *page = virt_to_page(obj);
+		struct slab *slab = page_slab(page);
 
-		obj = slab_addr + s->size * idx;
-		obj = fixup_red_left(s, obj);
+		if (slab)
+			slab_free(slab->slab_cache, slab, obj, _RET_IP_);
+		else
+			free_large_kmalloc(page, obj);
 	}
-
-	slab_free(s, slab, obj, _RET_IP_);
 }
 
 /**
  * kfree - free previously allocated memory
- * @object: pointer returned by kmalloc() or kmem_cache_alloc()
+ * @object: pointer returned by kmalloc(), kmalloc_nolock(), or kmem_cache_alloc()
  *
  * If @object is NULL, no operation is performed.
  */
 void kfree(const void *object)
 {
-	struct folio *folio;
+	struct page *page;
 	struct slab *slab;
 	struct kmem_cache *s;
 	void *x = (void *)object;
@@ -6838,13 +6780,14 @@ void kfree(const void *object)
 	if (unlikely(ZERO_OR_NULL_PTR(object)))
 		return;
 
-	folio = virt_to_folio(object);
-	if (unlikely(!folio_test_slab(folio))) {
-		free_large_kmalloc(folio, (void *)object);
+	page = virt_to_page(object);
+	slab = page_slab(page);
+	if (!slab) {
+		/* kmalloc_nolock() doesn't support large kmalloc */
+		free_large_kmalloc(page, (void *)object);
 		return;
 	}
 
-	slab = folio_slab(folio);
 	s = slab->slab_cache;
 	slab_free(s, slab, x, _RET_IP_);
 }
@@ -6861,7 +6804,6 @@ EXPORT_SYMBOL(kfree);
  */
 void kfree_nolock(const void *object)
 {
-	struct folio *folio;
 	struct slab *slab;
 	struct kmem_cache *s;
 	void *x = (void *)object;
@@ -6869,13 +6811,12 @@ void kfree_nolock(const void *object)
 	if (unlikely(ZERO_OR_NULL_PTR(object)))
 		return;
 
-	folio = virt_to_folio(object);
-	if (unlikely(!folio_test_slab(folio))) {
+	slab = virt_to_slab(object);
+	if (unlikely(!slab)) {
 		WARN_ONCE(1, "large_kmalloc is not supported by kfree_nolock()");
 		return;
 	}
 
-	slab = folio_slab(folio);
 	s = slab->slab_cache;
 
 	memcg_slab_free_hook(s, slab, &x, 1);
@@ -6907,16 +6848,21 @@ void kfree_nolock(const void *object)
 	 * since kasan quarantine takes locks and not supported from NMI.
 	 */
 	kasan_slab_free(s, x, false, false, /* skip quarantine */true);
-#ifndef CONFIG_SLUB_TINY
-	do_slab_free(s, slab, x, x, 0, _RET_IP_);
-#else
+
+	if (likely(can_free_to_pcs(slab)) && likely(free_to_pcs(s, x, false)))
+		return;
+
+	/*
+	 * __slab_free() can locklessly cmpxchg16 into a slab, but then it might
+	 * need to take spin_lock for further processing.
+	 * Avoid the complexity and simply add to a deferred list.
+	 */
 	defer_free(s, x);
-#endif
 }
 EXPORT_SYMBOL_GPL(kfree_nolock);
 
 static __always_inline __realloc_size(2) void *
-__do_krealloc(const void *p, size_t new_size, unsigned long align, gfp_t flags, int nid)
+__do_krealloc(const void *p, size_t new_size, unsigned long align, gfp_t flags, int nid, kmalloc_token_t token)
 {
 	void *ret;
 	size_t ks = 0;
@@ -6930,6 +6876,24 @@ __do_krealloc(const void *p, size_t new_size, unsigned long align, gfp_t flags, 
 	if (!kasan_check_byte(p))
 		return NULL;
 
+	if (is_kfence_address(p)) {
+		ks = orig_size = kfence_ksize(p);
+	} else {
+		struct page *page = virt_to_page(p);
+		struct slab *slab = page_slab(page);
+
+		if (!slab) {
+			/* Big kmalloc object */
+			ks = page_size(page);
+			WARN_ON(ks <= KMALLOC_MAX_CACHE_SIZE);
+			WARN_ON(p != page_address(page));
+		} else {
+			s = slab->slab_cache;
+			orig_size = get_orig_size(s, (void *)p);
+			ks = s->object_size;
+		}
+	}
+
 	/*
 	 * If reallocation is not necessary (e. g. the new size is less
 	 * than the current allocated size), the current allocation will be
@@ -6939,24 +6903,6 @@ __do_krealloc(const void *p, size_t new_size, unsigned long align, gfp_t flags, 
 	if (unlikely(flags & __GFP_THISNODE) && nid != NUMA_NO_NODE &&
 		     nid != page_to_nid(virt_to_page(p)))
 		goto alloc_new;
-
-	if (is_kfence_address(p)) {
-		ks = orig_size = kfence_ksize(p);
-	} else {
-		struct folio *folio;
-
-		folio = virt_to_folio(p);
-		if (unlikely(!folio_test_slab(folio))) {
-			/* Big kmalloc object */
-			WARN_ON(folio_size(folio) <= KMALLOC_MAX_CACHE_SIZE);
-			WARN_ON(p != folio_address(folio));
-			ks = folio_size(folio);
-		} else {
-			s = folio_slab(folio)->slab_cache;
-			orig_size = get_orig_size(s, (void *)p);
-			ks = s->object_size;
-		}
-	}
 
 	/* If the old object doesn't fit, allocate a bigger one */
 	if (new_size > ks)
@@ -6988,56 +6934,18 @@ __do_krealloc(const void *p, size_t new_size, unsigned long align, gfp_t flags, 
 	return (void *)p;
 
 alloc_new:
-	ret = kmalloc_node_track_caller_noprof(new_size, flags, nid, _RET_IP_);
+	ret = __kmalloc_node_track_caller_noprof(PASS_KMALLOC_PARAMS(new_size, NULL, token), flags, nid, _RET_IP_);
 	if (ret && p) {
 		/* Disable KASAN checks as the object's redzone is accessed. */
 		kasan_disable_current();
-		memcpy(ret, kasan_reset_tag(p), orig_size ?: ks);
+		memcpy(ret, kasan_reset_tag(p), min(new_size, (size_t)(orig_size ?: ks)));
 		kasan_enable_current();
 	}
 
 	return ret;
 }
 
-/**
- * krealloc_node_align - reallocate memory. The contents will remain unchanged.
- * @p: object to reallocate memory for.
- * @new_size: how many bytes of memory are required.
- * @align: desired alignment.
- * @flags: the type of memory to allocate.
- * @nid: NUMA node or NUMA_NO_NODE
- *
- * If @p is %NULL, krealloc() behaves exactly like kmalloc().  If @new_size
- * is 0 and @p is not a %NULL pointer, the object pointed to is freed.
- *
- * Only alignments up to those guaranteed by kmalloc() will be honored. Please see
- * Documentation/core-api/memory-allocation.rst for more details.
- *
- * If __GFP_ZERO logic is requested, callers must ensure that, starting with the
- * initial memory allocation, every subsequent call to this API for the same
- * memory allocation is flagged with __GFP_ZERO. Otherwise, it is possible that
- * __GFP_ZERO is not fully honored by this API.
- *
- * When slub_debug_orig_size() is off, krealloc() only knows about the bucket
- * size of an allocation (but not the exact size it was allocated with) and
- * hence implements the following semantics for shrinking and growing buffers
- * with __GFP_ZERO::
- *
- *           new             bucket
- *   0       size             size
- *   |--------|----------------|
- *   |  keep  |      zero      |
- *
- * Otherwise, the original allocation size 'orig_size' could be used to
- * precisely clear the requested size, and the new size will also be stored
- * as the new 'orig_size'.
- *
- * In any case, the contents of the object pointed to are preserved up to the
- * lesser of the new and old sizes.
- *
- * Return: pointer to the allocated memory or %NULL in case of error
- */
-void *krealloc_node_align_noprof(const void *p, size_t new_size, unsigned long align,
+void *krealloc_node_align_noprof(const void *p, DECL_TOKEN_PARAMS(new_size, token), unsigned long align,
 				 gfp_t flags, int nid)
 {
 	void *ret;
@@ -7047,7 +6955,7 @@ void *krealloc_node_align_noprof(const void *p, size_t new_size, unsigned long a
 		return ZERO_SIZE_PTR;
 	}
 
-	ret = __do_krealloc(p, new_size, align, flags, nid);
+	ret = __do_krealloc(p, new_size, align, flags, nid, PASS_TOKEN_PARAM(token));
 	if (ret && kasan_reset_tag(p) != kasan_reset_tag(ret))
 		kfree(p);
 
@@ -7079,45 +6987,26 @@ static gfp_t kmalloc_gfp_adjust(gfp_t flags, size_t size)
 	return flags;
 }
 
-/**
- * __kvmalloc_node - attempt to allocate physically contiguous memory, but upon
- * failure, fall back to non-contiguous (vmalloc) allocation.
- * @size: size of the request.
- * @b: which set of kmalloc buckets to allocate from.
- * @align: desired alignment.
- * @flags: gfp mask for the allocation - must be compatible (superset) with GFP_KERNEL.
- * @node: numa node to allocate from
- *
- * Only alignments up to those guaranteed by kmalloc() will be honored. Please see
- * Documentation/core-api/memory-allocation.rst for more details.
- *
- * Uses kmalloc to get the memory but if the allocation fails then falls back
- * to the vmalloc allocator. Use kvfree for freeing the memory.
- *
- * GFP_NOWAIT and GFP_ATOMIC are not supported, neither is the __GFP_NORETRY modifier.
- * __GFP_RETRY_MAYFAIL is supported, and it should be used only if kmalloc is
- * preferable to the vmalloc fallback, due to visible performance drawbacks.
- *
- * Return: pointer to the allocated memory of %NULL in case of failure
- */
-void *__kvmalloc_node_noprof(DECL_BUCKET_PARAMS(size, b), unsigned long align,
+void *__kvmalloc_node_noprof(DECL_KMALLOC_PARAMS(size, b, token), unsigned long align,
 			     gfp_t flags, int node)
 {
+	bool allow_block;
 	void *ret;
+	const struct slab_alloc_context ac = {
+		.caller_addr = _RET_IP_,
+		.orig_size = size,
+		.alloc_flags = SLAB_ALLOC_DEFAULT,
+	};
 
 	/*
 	 * It doesn't really make sense to fallback to vmalloc for sub page
 	 * requests
 	 */
-	ret = __do_kmalloc_node(size, PASS_BUCKET_PARAM(b),
+	ret = __do_kmalloc_node(PASS_BUCKET_PARAM(b),
 				kmalloc_gfp_adjust(flags, size),
-				node, _RET_IP_);
+				node, PASS_TOKEN_PARAM(token), &ac);
 	if (ret || size <= PAGE_SIZE)
 		return ret;
-
-	/* non-sleeping allocations are not supported by vmalloc */
-	if (!gfpflags_allow_blocking(flags))
-		return NULL;
 
 	/* Don't even allow crazy sizes */
 	if (unlikely(size > INT_MAX)) {
@@ -7126,13 +7015,23 @@ void *__kvmalloc_node_noprof(DECL_BUCKET_PARAMS(size, b), unsigned long align,
 	}
 
 	/*
+	 * For non-blocking the VM_ALLOW_HUGE_VMAP is not used
+	 * because the huge-mapping path in vmalloc contains at
+	 * least one might_sleep() call.
+	 *
+	 * TODO: Revise huge-mapping path to support non-blocking
+	 * flags.
+	 */
+	allow_block = gfpflags_allow_blocking(flags);
+
+	/*
 	 * kvmalloc() can always use VM_ALLOW_HUGE_VMAP,
 	 * since the callers already cannot assume anything
 	 * about the resulting pointer, and cannot play
 	 * protection games.
 	 */
 	return __vmalloc_node_range_noprof(size, align, VMALLOC_START, VMALLOC_END,
-			flags, PAGE_KERNEL, VM_ALLOW_HUGE_VMAP,
+			flags, PAGE_KERNEL, allow_block ? VM_ALLOW_HUGE_VMAP:0,
 			node, __builtin_return_address(0));
 }
 EXPORT_SYMBOL(__kvmalloc_node_noprof);
@@ -7157,6 +7056,22 @@ void kvfree(const void *addr)
 EXPORT_SYMBOL(kvfree);
 
 /**
+ * kvfree_atomic() - Free memory.
+ * @addr: Pointer to allocated memory.
+ *
+ * Same as kvfree(), but uses vfree_atomic() for vmalloc
+ * backed memory. Must not be called from NMI context.
+ */
+void kvfree_atomic(const void *addr)
+{
+	if (is_vmalloc_addr(addr))
+		vfree_atomic(addr);
+	else
+		kfree(addr);
+}
+EXPORT_SYMBOL(kvfree_atomic);
+
+/**
  * kvfree_sensitive - Free a data object containing sensitive information.
  * @addr: address of the data object to be freed.
  * @len: length of the data object.
@@ -7174,34 +7089,7 @@ void kvfree_sensitive(const void *addr, size_t len)
 }
 EXPORT_SYMBOL(kvfree_sensitive);
 
-/**
- * kvrealloc_node_align - reallocate memory; contents remain unchanged
- * @p: object to reallocate memory for
- * @size: the size to reallocate
- * @align: desired alignment
- * @flags: the flags for the page level allocator
- * @nid: NUMA node id
- *
- * If @p is %NULL, kvrealloc() behaves exactly like kvmalloc(). If @size is 0
- * and @p is not a %NULL pointer, the object pointed to is freed.
- *
- * Only alignments up to those guaranteed by kmalloc() will be honored. Please see
- * Documentation/core-api/memory-allocation.rst for more details.
- *
- * If __GFP_ZERO logic is requested, callers must ensure that, starting with the
- * initial memory allocation, every subsequent call to this API for the same
- * memory allocation is flagged with __GFP_ZERO. Otherwise, it is possible that
- * __GFP_ZERO is not fully honored by this API.
- *
- * In any case, the contents of the object pointed to are preserved up to the
- * lesser of the new and old sizes.
- *
- * This function must not be called concurrently with itself or kvfree() for the
- * same memory allocation.
- *
- * Return: pointer to the allocated memory or %NULL in case of error
- */
-void *kvrealloc_node_align_noprof(const void *p, size_t size, unsigned long align,
+void *kvrealloc_node_align_noprof(const void *p, DECL_TOKEN_PARAMS(size, token), unsigned long align,
 				  gfp_t flags, int nid)
 {
 	void *n;
@@ -7209,17 +7097,17 @@ void *kvrealloc_node_align_noprof(const void *p, size_t size, unsigned long alig
 	if (is_vmalloc_addr(p))
 		return vrealloc_node_align_noprof(p, size, align, flags, nid);
 
-	n = krealloc_node_align_noprof(p, size, align, kmalloc_gfp_adjust(flags, size), nid);
+	n = krealloc_node_align_noprof(p, PASS_TOKEN_PARAMS(size, token), align, kmalloc_gfp_adjust(flags, size), nid);
 	if (!n) {
 		/* We failed to krealloc(), fall back to kvmalloc(). */
-		n = kvmalloc_node_align_noprof(size, align, flags, nid);
+		n = __kvmalloc_node_noprof(PASS_KMALLOC_PARAMS(size, NULL, token), align, flags, nid);
 		if (!n)
 			return NULL;
 
 		if (p) {
 			/* We already know that `p` is not a vmalloc address. */
 			kasan_disable_current();
-			memcpy(n, kasan_reset_tag(p), ksize(p));
+			memcpy(n, kasan_reset_tag(p), min(size, ksize(p)));
 			kasan_enable_current();
 
 			kfree(p);
@@ -7256,24 +7144,26 @@ int build_detached_freelist(struct kmem_cache *s, size_t size,
 {
 	int lookahead = 3;
 	void *object;
-	struct folio *folio;
+	struct page *page;
+	struct slab *slab;
 	size_t same;
 
 	object = p[--size];
-	folio = virt_to_folio(object);
+	page = virt_to_page(object);
+	slab = page_slab(page);
 	if (!s) {
 		/* Handle kalloc'ed objects */
-		if (unlikely(!folio_test_slab(folio))) {
-			free_large_kmalloc(folio, object);
+		if (!slab) {
+			free_large_kmalloc(page, object);
 			df->slab = NULL;
 			return size;
 		}
 		/* Derive kmem_cache from object */
-		df->slab = folio_slab(folio);
-		df->s = df->slab->slab_cache;
+		df->slab = slab;
+		df->s = slab->slab_cache;
 	} else {
-		df->slab = folio_slab(folio);
-		df->s = cache_from_obj(s, object); /* Support for memcg */
+		df->slab = slab;
+		df->s = s;
 	}
 
 	/* Start new detached freelist */
@@ -7328,7 +7218,7 @@ static void __kmem_cache_free_bulk(struct kmem_cache *s, size_t size, void **p)
 		if (kfence_free(df.freelist))
 			continue;
 
-		do_slab_free(df.s, df.slab, df.freelist, df.tail, df.cnt,
+		__slab_free(df.s, df.slab, df.freelist, df.tail, df.cnt,
 			     _RET_IP_);
 	} while (likely(size));
 }
@@ -7343,7 +7233,7 @@ void kmem_cache_free_bulk(struct kmem_cache *s, size_t size, void **p)
 	 * freeing to sheaves is so incompatible with the detached freelist so
 	 * once we go that way, we have to do everything differently
 	 */
-	if (s && s->cpu_sheaves) {
+	if (s && cache_has_sheaves(s)) {
 		free_to_pcs_bulk(s, size, p);
 		return;
 	}
@@ -7361,145 +7251,288 @@ void kmem_cache_free_bulk(struct kmem_cache *s, size_t size, void **p)
 }
 EXPORT_SYMBOL(kmem_cache_free_bulk);
 
-#ifndef CONFIG_SLUB_TINY
-static inline
-int __kmem_cache_alloc_bulk(struct kmem_cache *s, gfp_t flags, size_t size,
-			    void **p)
+static unsigned int
+__refill_objects_node(struct kmem_cache *s, void **p, gfp_t gfp, unsigned int min,
+		      unsigned int max, struct kmem_cache_node *n,
+		      bool allow_spin)
 {
-	struct kmem_cache_cpu *c;
-	unsigned long irqflags;
-	int i;
+	struct partial_bulk_context pc;
+	struct slab *slab, *slab2;
+	unsigned int refilled = 0;
+	unsigned long flags;
+	void *object;
 
-	/*
-	 * Drain objects in the per cpu slab, while disabling local
-	 * IRQs, which protects against PREEMPT and interrupts
-	 * handlers invoking normal fastpath.
-	 */
-	c = slub_get_cpu_ptr(s->cpu_slab);
-	local_lock_irqsave(&s->cpu_slab->lock, irqflags);
+	pc.flags = gfp;
+	pc.min_objects = min;
+	pc.max_objects = max;
 
-	for (i = 0; i < size; i++) {
-		void *object = kfence_alloc(s, s->object_size, flags);
+	if (!get_partial_node_bulk(s, n, &pc, allow_spin))
+		return 0;
 
-		if (unlikely(object)) {
-			p[i] = object;
-			continue;
+	list_for_each_entry_safe(slab, slab2, &pc.slabs, slab_list) {
+
+		unsigned int count;
+
+		list_del(&slab->slab_list);
+
+		object = get_freelist_nofreeze(s, slab, &count);
+
+		while (count && refilled < max) {
+			p[refilled] = object;
+			object = get_freepointer(s, object);
+			maybe_wipe_obj_freeptr(s, p[refilled]);
+
+			refilled++;
+			count--;
 		}
 
-		object = c->freelist;
-		if (unlikely(!object)) {
-			/*
-			 * We may have removed an object from c->freelist using
-			 * the fastpath in the previous iteration; in that case,
-			 * c->tid has not been bumped yet.
-			 * Since ___slab_alloc() may reenable interrupts while
-			 * allocating memory, we should bump c->tid now.
-			 */
-			c->tid = next_tid(c->tid);
+		/*
+		 * Freelist had more objects than we can accommodate, we need to
+		 * free them back. First we try to be optimistic and assume the
+		 * slab is still full since we just detached its freelist.
+		 * Otherwise we must find the tail object.
+		 */
+		if (unlikely(count)) {
+			void *head = object;
+			void *tail;
 
-			local_unlock_irqrestore(&s->cpu_slab->lock, irqflags);
+			if (__slab_try_return_freelist(s, slab, head, count)) {
+				list_add(&slab->slab_list, &pc.slabs);
+				break;
+			}
 
-			/*
-			 * Invoking slow path likely have side-effect
-			 * of re-populating per CPU c->freelist
-			 */
-			p[i] = ___slab_alloc(s, flags, NUMA_NO_NODE,
-					    _RET_IP_, c, s->object_size);
+			do {
+				tail = object;
+				object = get_freepointer(s, object);
+			} while (object);
+			__slab_free(s, slab, head, tail, count, _RET_IP_);
+		}
+
+		if (refilled >= max)
+			break;
+	}
+
+	if (!list_empty(&pc.slabs)) {
+		spin_lock_irqsave(&n->list_lock, flags);
+
+		list_for_each_entry(slab, &pc.slabs, slab_list)
+			set_node_partial_state(n, slab);
+
+		list_splice_tail(&pc.slabs, &n->partial);
+
+		spin_unlock_irqrestore(&n->list_lock, flags);
+	}
+
+	return refilled;
+}
+
+#ifdef CONFIG_NUMA
+static unsigned int
+__refill_objects_any(struct kmem_cache *s, void **p, gfp_t gfp, unsigned int min,
+		     unsigned int max)
+{
+	struct zonelist *zonelist;
+	struct zoneref *z;
+	struct zone *zone;
+	enum zone_type highest_zoneidx = gfp_zone(gfp);
+	unsigned int cpuset_mems_cookie;
+	unsigned int refilled = 0;
+
+	/* see get_from_any_partial() for the defrag ratio description */
+	if (!s->remote_node_defrag_ratio ||
+			get_cycles() % 1024 > s->remote_node_defrag_ratio)
+		return 0;
+
+	do {
+		cpuset_mems_cookie = read_mems_allowed_begin();
+		zonelist = node_zonelist(mempolicy_slab_node(), gfp);
+		for_each_zone_zonelist(zone, z, zonelist, highest_zoneidx) {
+			struct kmem_cache_node *n;
+			unsigned int r;
+
+			n = get_node(s, zone_to_nid(zone));
+
+			if (!n || !cpuset_zone_allowed(zone, gfp) ||
+					n->nr_partial <= s->min_partial)
+				continue;
+
+			r = __refill_objects_node(s, p, gfp, min, max, n,
+						  /* allow_spin = */ false);
+			refilled += r;
+
+			if (r >= min) {
+				/*
+				 * Don't check read_mems_allowed_retry() here -
+				 * if mems_allowed was updated in parallel, that
+				 * was a harmless race between allocation and
+				 * the cpuset update
+				 */
+				return refilled;
+			}
+			p += r;
+			min -= r;
+			max -= r;
+		}
+	} while (read_mems_allowed_retry(cpuset_mems_cookie));
+
+	return refilled;
+}
+#else
+static inline unsigned int
+__refill_objects_any(struct kmem_cache *s, void **p, gfp_t gfp, unsigned int min,
+		     unsigned int max)
+{
+	return 0;
+}
+#endif
+
+static unsigned int
+refill_objects(struct kmem_cache *s, void **p, gfp_t gfp, unsigned int min,
+	       unsigned int max)
+{
+	int local_node = numa_mem_id();
+	unsigned int refilled;
+	struct slab *slab;
+
+	refilled = __refill_objects_node(s, p, gfp, min, max,
+					 get_node(s, local_node),
+					 /* allow_spin = */ true);
+	if (refilled >= min)
+		return refilled;
+
+	refilled += __refill_objects_any(s, p + refilled, gfp, min - refilled,
+					 max - refilled);
+	if (refilled >= min)
+		return refilled;
+
+new_slab:
+
+	slab = new_slab(s, gfp, SLAB_ALLOC_DEFAULT, local_node);
+	if (!slab)
+		goto out;
+
+	stat(s, ALLOC_SLAB);
+
+	refilled += alloc_from_new_slab(s, slab, p + refilled, max - refilled,
+					/* allow_spin = */ true);
+
+	if (refilled < min)
+		goto new_slab;
+
+out:
+	return refilled;
+}
+
+static bool __kmem_cache_alloc_bulk(struct kmem_cache *s, gfp_t flags,
+		size_t size, void **p)
+{
+	int i;
+
+	if (IS_ENABLED(CONFIG_SLUB_TINY) || kmem_cache_debug(s)) {
+		const struct slab_alloc_context ac = {
+			.caller_addr = _RET_IP_,
+			.orig_size = s->object_size,
+			.alloc_flags = SLAB_ALLOC_DEFAULT,
+		};
+		for (i = 0; i < size; i++) {
+
+			p[i] = ___slab_alloc(s, flags, NUMA_NO_NODE, &ac);
 			if (unlikely(!p[i]))
 				goto error;
 
-			c = this_cpu_ptr(s->cpu_slab);
 			maybe_wipe_obj_freeptr(s, p[i]);
-
-			local_lock_irqsave(&s->cpu_slab->lock, irqflags);
-
-			continue; /* goto for-loop */
 		}
-		c->freelist = get_freepointer(s, object);
-		p[i] = object;
-		maybe_wipe_obj_freeptr(s, p[i]);
-		stat(s, ALLOC_FASTPATH);
-	}
-	c->tid = next_tid(c->tid);
-	local_unlock_irqrestore(&s->cpu_slab->lock, irqflags);
-	slub_put_cpu_ptr(s->cpu_slab);
-
-	return i;
-
-error:
-	slub_put_cpu_ptr(s->cpu_slab);
-	__kmem_cache_free_bulk(s, i, p);
-	return 0;
-
-}
-#else /* CONFIG_SLUB_TINY */
-static int __kmem_cache_alloc_bulk(struct kmem_cache *s, gfp_t flags,
-				   size_t size, void **p)
-{
-	int i;
-
-	for (i = 0; i < size; i++) {
-		void *object = kfence_alloc(s, s->object_size, flags);
-
-		if (unlikely(object)) {
-			p[i] = object;
-			continue;
-		}
-
-		p[i] = __slab_alloc_node(s, flags, NUMA_NO_NODE,
-					 _RET_IP_, s->object_size);
-		if (unlikely(!p[i]))
+	} else {
+		i = refill_objects(s, p, flags, size, size);
+		if (i < size)
 			goto error;
-
-		maybe_wipe_obj_freeptr(s, p[i]);
+		stat_add(s, ALLOC_SLOWPATH, i);
 	}
 
-	return i;
+	return true;
 
 error:
 	__kmem_cache_free_bulk(s, i, p);
-	return 0;
+	return false;
 }
-#endif /* CONFIG_SLUB_TINY */
 
-/* Note that interrupts must be enabled when calling this function. */
-int kmem_cache_alloc_bulk_noprof(struct kmem_cache *s, gfp_t flags, size_t size,
-				 void **p)
+/**
+ * kmem_cache_alloc_bulk - Allocate multiple objects
+ * @s:		The cache to allocate from
+ * @flags:	GFP_* flags. See kmalloc().
+ * @size:	Number of objects to allocate
+ * @p:		Array of allocated objects
+ *
+ * Allocate @size objects from @s and places them into @p.  @size must be larger
+ * than 0.
+ *
+ * Interrupts must be enabled when calling this function.
+ *
+ * Unlike alloc_pages_bulk(), this function does not check for already allocated
+ * objects in @p, and thus the caller does not need to zero it.
+ *
+ * Return: %true if the allocation succeeded, or %false if it failed.
+ */
+bool kmem_cache_alloc_bulk_noprof(struct kmem_cache *s, gfp_t flags,
+		size_t size, void **p)
 {
 	unsigned int i = 0;
+	void *kfence_obj;
+	const struct slab_alloc_context ac = {
+		.orig_size = s->object_size,
+		.alloc_flags = SLAB_ALLOC_DEFAULT,
+	};
 
 	if (!size)
-		return 0;
+		return false;
 
 	s = slab_pre_alloc_hook(s, flags);
 	if (unlikely(!s))
-		return 0;
+		return false;
 
-	if (s->cpu_sheaves)
-		i = alloc_from_pcs_bulk(s, size, p);
+	/*
+	 * to make things simpler, only assume at most once kfence allocated
+	 * object per bulk allocation and choose its index randomly
+	 */
+	kfence_obj = kfence_alloc(s, s->object_size, flags);
 
+	if (unlikely(kfence_obj)) {
+		if (unlikely(size == 1)) {
+			p[0] = kfence_obj;
+			goto out;
+		}
+		size--;
+	}
+
+	i = alloc_from_pcs_bulk(s, size, p);
 	if (i < size) {
 		/*
 		 * If we ran out of memory, don't bother with freeing back to
 		 * the percpu sheaves, we have bigger problems.
 		 */
-		if (unlikely(__kmem_cache_alloc_bulk(s, flags, size - i, p + i) == 0)) {
+		if (unlikely(!__kmem_cache_alloc_bulk(s, flags, size - i,
+				p + i))) {
 			if (i > 0)
 				__kmem_cache_free_bulk(s, i, p);
-			return 0;
+			if (kfence_obj)
+				__kfence_free(kfence_obj);
+			return false;
 		}
 	}
 
-	/*
-	 * memcg and kmem_cache debug support and memory initialization.
-	 * Done outside of the IRQ disabled fastpath loop.
-	 */
-	if (unlikely(!slab_post_alloc_hook(s, NULL, flags, size, p,
-		    slab_want_init_on_alloc(flags, s), s->object_size))) {
-		return 0;
+	if (unlikely(kfence_obj)) {
+		int idx = get_random_u32_below(size + 1);
+
+		if (idx != size)
+			p[size] = p[idx];
+		p[idx] = kfence_obj;
+
+		size++;
 	}
 
-	return size;
+out:
+	/* memcg and kmem_cache debug support and memory initialization */
+	return likely(slab_post_alloc_hook(s, flags, size, p, &ac));
 }
 EXPORT_SYMBOL(kmem_cache_alloc_bulk_noprof);
 
@@ -7636,7 +7669,7 @@ static inline int calculate_order(unsigned int size)
 }
 
 static void
-init_kmem_cache_node(struct kmem_cache_node *n, struct node_barn *barn)
+init_kmem_cache_node(struct kmem_cache_node *n)
 {
 	n->nr_partial = 0;
 	spin_lock_init(&n->list_lock);
@@ -7646,41 +7679,27 @@ init_kmem_cache_node(struct kmem_cache_node *n, struct node_barn *barn)
 	atomic_long_set(&n->total_objects, 0);
 	INIT_LIST_HEAD(&n->full);
 #endif
-	n->barn = barn;
-	if (barn)
-		barn_init(barn);
 }
 
-#ifndef CONFIG_SLUB_TINY
-static inline int alloc_kmem_cache_cpus(struct kmem_cache *s)
+#ifdef CONFIG_SLUB_STATS
+static inline int alloc_kmem_cache_stats(struct kmem_cache *s)
 {
 	BUILD_BUG_ON(PERCPU_DYNAMIC_EARLY_SIZE <
 			NR_KMALLOC_TYPES * KMALLOC_SHIFT_HIGH *
-			sizeof(struct kmem_cache_cpu));
+			sizeof(struct kmem_cache_stats));
 
-	/*
-	 * Must align to double word boundary for the double cmpxchg
-	 * instructions to work; see __pcpu_double_call_return_bool().
-	 */
-	s->cpu_slab = __alloc_percpu(sizeof(struct kmem_cache_cpu),
-				     2 * sizeof(void *));
+	s->cpu_stats = alloc_percpu(struct kmem_cache_stats);
 
-	if (!s->cpu_slab)
+	if (!s->cpu_stats)
 		return 0;
 
-	init_kmem_cache_cpus(s);
-
 	return 1;
 }
-#else
-static inline int alloc_kmem_cache_cpus(struct kmem_cache *s)
-{
-	return 1;
-}
-#endif /* CONFIG_SLUB_TINY */
+#endif
 
 static int init_percpu_sheaves(struct kmem_cache *s)
 {
+	static struct slab_sheaf bootstrap_sheaf = {};
 	int cpu;
 
 	for_each_possible_cpu(cpu) {
@@ -7690,7 +7709,28 @@ static int init_percpu_sheaves(struct kmem_cache *s)
 
 		local_trylock_init(&pcs->lock);
 
-		pcs->main = alloc_empty_sheaf(s, GFP_KERNEL);
+		/*
+		 * Bootstrap sheaf has zero size so fast-path allocation fails.
+		 * It has also size == s->sheaf_capacity, so fast-path free
+		 * fails. In the slow paths we recognize the situation by
+		 * checking s->sheaf_capacity. This allows fast paths to assume
+		 * s->cpu_sheaves and pcs->main always exists and are valid.
+		 * It's also safe to share the single static bootstrap_sheaf
+		 * with zero-sized objects array as it's never modified.
+		 *
+		 * Bootstrap_sheaf also has NULL pointer to kmem_cache so we
+		 * recognize it and not attempt to free it when destroying the
+		 * cache.
+		 *
+		 * We keep bootstrap_sheaf for kmem_cache and kmem_cache_node,
+		 * caches with debug enabled, and all caches with SLUB_TINY.
+		 * For kmalloc caches it's used temporarily during the initial
+		 * bootstrap.
+		 */
+		if (!s->sheaf_capacity)
+			pcs->main = &bootstrap_sheaf;
+		else
+			pcs->main = alloc_empty_sheaf(s, GFP_KERNEL, SLAB_ALLOC_DEFAULT);
 
 		if (!pcs->main)
 			return -ENOMEM;
@@ -7714,10 +7754,11 @@ static void early_kmem_cache_node_alloc(int node)
 {
 	struct slab *slab;
 	struct kmem_cache_node *n;
+	struct slab_obj_iter iter;
 
 	BUG_ON(kmem_cache_node->size < sizeof(struct kmem_cache_node));
 
-	slab = new_slab(kmem_cache_node, GFP_NOWAIT, node);
+	slab = new_slab(kmem_cache_node, GFP_NOWAIT, SLAB_ALLOC_DEFAULT, node);
 
 	BUG_ON(!slab);
 	if (slab_nid(slab) != node) {
@@ -7725,23 +7766,27 @@ static void early_kmem_cache_node_alloc(int node)
 		pr_err("SLUB: Allocating a useless per node structure in order to be able to continue\n");
 	}
 
-	n = slab->freelist;
+	init_slab_obj_iter(kmem_cache_node, slab, &iter, true);
+
+	n = next_slab_obj(kmem_cache_node, &iter);
 	BUG_ON(!n);
+
+	slab->inuse = 1;
+	build_slab_freelist(kmem_cache_node, slab, &iter);
+
 #ifdef CONFIG_SLUB_DEBUG
 	init_object(kmem_cache_node, n, SLUB_RED_ACTIVE);
 #endif
 	n = kasan_slab_alloc(kmem_cache_node, n, GFP_KERNEL, false);
-	slab->freelist = get_freepointer(kmem_cache_node, n);
-	slab->inuse = 1;
-	kmem_cache_node->node[node] = n;
-	init_kmem_cache_node(n, NULL);
+	kmem_cache_node->per_node[node].node = n;
+	init_kmem_cache_node(n);
 	inc_slabs_node(kmem_cache_node, node, slab->objects);
 
 	/*
 	 * No locks need to be taken here as it has just been
 	 * initialized and there is no concurrent access.
 	 */
-	__add_partial(n, slab, DEACTIVATE_TO_HEAD);
+	__add_partial(n, slab, ADD_TO_HEAD);
 }
 
 static void free_kmem_cache_nodes(struct kmem_cache *s)
@@ -7749,15 +7794,20 @@ static void free_kmem_cache_nodes(struct kmem_cache *s)
 	int node;
 	struct kmem_cache_node *n;
 
-	for_each_kmem_cache_node(s, node, n) {
-		if (n->barn) {
-			WARN_ON(n->barn->nr_full);
-			WARN_ON(n->barn->nr_empty);
-			kfree(n->barn);
-			n->barn = NULL;
-		}
+	for_each_node(node) {
+		struct node_barn *barn = get_barn_node(s, node);
 
-		s->node[node] = NULL;
+		if (!barn)
+			continue;
+
+		WARN_ON(barn->nr_full);
+		WARN_ON(barn->nr_empty);
+		kfree(barn);
+		s->per_node[node].barn = NULL;
+	}
+
+	for_each_kmem_cache_node(s, node, n) {
+		s->per_node[node].node = NULL;
 		kmem_cache_free(kmem_cache_node, n);
 	}
 }
@@ -7765,14 +7815,9 @@ static void free_kmem_cache_nodes(struct kmem_cache *s)
 void __kmem_cache_release(struct kmem_cache *s)
 {
 	cache_random_seq_destroy(s);
-	if (s->cpu_sheaves)
-		pcs_destroy(s);
-#ifndef CONFIG_SLUB_TINY
-#ifdef CONFIG_PREEMPT_RT
-	if (s->cpu_slab)
-		lockdep_unregister_key(&s->lock_key);
-#endif
-	free_percpu(s->cpu_slab);
+	pcs_destroy(s);
+#ifdef CONFIG_SLUB_STATS
+	free_percpu(s->cpu_stats);
 #endif
 	free_kmem_cache_nodes(s);
 }
@@ -7783,65 +7828,84 @@ static int init_kmem_cache_nodes(struct kmem_cache *s)
 
 	for_each_node_mask(node, slab_nodes) {
 		struct kmem_cache_node *n;
-		struct node_barn *barn = NULL;
 
 		if (slab_state == DOWN) {
 			early_kmem_cache_node_alloc(node);
 			continue;
 		}
 
-		if (s->cpu_sheaves) {
-			barn = kmalloc_node(sizeof(*barn), GFP_KERNEL, node);
-
-			if (!barn)
-				return 0;
-		}
-
 		n = kmem_cache_alloc_node(kmem_cache_node,
 						GFP_KERNEL, node);
-		if (!n) {
-			kfree(barn);
+		if (!n)
 			return 0;
-		}
 
-		init_kmem_cache_node(n, barn);
-
-		s->node[node] = n;
+		init_kmem_cache_node(n);
+		s->per_node[node].node = n;
 	}
+
+	if (slab_state == DOWN || !cache_has_sheaves(s))
+		return 1;
+
+	for_each_node_mask(node, slab_barn_nodes) {
+		struct node_barn *barn;
+
+		barn = kmalloc_node(sizeof(*barn), GFP_KERNEL, node);
+
+		if (!barn)
+			return 0;
+
+		barn_init(barn);
+		s->per_node[node].barn = barn;
+	}
+
 	return 1;
 }
 
-static void set_cpu_partial(struct kmem_cache *s)
+static unsigned int calculate_sheaf_capacity(struct kmem_cache *s,
+					     struct kmem_cache_args *args)
+
 {
-#ifdef CONFIG_SLUB_CPU_PARTIAL
-	unsigned int nr_objects;
+	unsigned int capacity;
+	size_t size;
+
+
+	if (IS_ENABLED(CONFIG_SLUB_TINY) || s->flags & SLAB_DEBUG_FLAGS)
+		return 0;
 
 	/*
-	 * cpu_partial determined the maximum number of objects kept in the
-	 * per cpu partial lists of a processor.
-	 *
-	 * Per cpu partial lists mainly contain slabs that just have one
-	 * object freed. If they are used for allocation then they can be
-	 * filled up again with minimal effort. The slab will never hit the
-	 * per node partial lists and therefore no locking will be required.
-	 *
-	 * For backwards compatibility reasons, this is determined as number
-	 * of objects, even though we now limit maximum number of pages, see
-	 * slub_set_cpu_partial()
+	 * Bootstrap caches can't have sheaves for now (SLAB_NO_SHEAVES).
+	 * SLAB_NOLEAKTRACE caches (e.g., kmemleak's object_cache) must not
+	 * have sheaves to avoid recursion when sheaf allocation triggers
+	 * kmemleak tracking.
 	 */
-	if (!kmem_cache_has_cpu_partial(s))
-		nr_objects = 0;
-	else if (s->size >= PAGE_SIZE)
-		nr_objects = 6;
-	else if (s->size >= 1024)
-		nr_objects = 24;
-	else if (s->size >= 256)
-		nr_objects = 52;
-	else
-		nr_objects = 120;
+	if (s->flags & (SLAB_NO_SHEAVES | SLAB_NOLEAKTRACE))
+		return 0;
 
-	slub_set_cpu_partial(s, nr_objects);
-#endif
+	/*
+	 * For now we use roughly similar formula (divided by two as there are
+	 * two percpu sheaves) as what was used for percpu partial slabs, which
+	 * should result in similar lock contention (barn or list_lock)
+	 */
+	if (s->size >= PAGE_SIZE)
+		capacity = 4;
+	else if (s->size >= 1024)
+		capacity = 12;
+	else if (s->size >= 256)
+		capacity = 26;
+	else
+		capacity = 60;
+
+	/* Increment capacity to make sheaf exactly a kmalloc size bucket */
+	size = struct_size_t(struct slab_sheaf, objects, capacity);
+	size = kmalloc_size_roundup(size);
+	capacity = (size - struct_size_t(struct slab_sheaf, objects, 0)) / sizeof(void *);
+
+	/*
+	 * Respect an explicit request for capacity that's typically motivated by
+	 * expected maximum size of kmem_cache_prefill_sheaf() to not end up
+	 * using low-performance oversize sheaves
+	 */
+	return max(capacity, args->sheaf_capacity);
 }
 
 /*
@@ -7852,6 +7916,7 @@ static int calculate_sizes(struct kmem_cache_args *args, struct kmem_cache *s)
 {
 	slab_flags_t flags = s->flags;
 	unsigned int size = s->object_size;
+	unsigned int aligned_size;
 	unsigned int order;
 
 	/*
@@ -7875,9 +7940,9 @@ static int calculate_sizes(struct kmem_cache_args *args, struct kmem_cache *s)
 
 
 	/*
-	 * If we are Redzoning then check if there is some space between the
-	 * end of the object and the free pointer. If not then add an
-	 * additional word to have some bytes to store Redzone information.
+	 * If we are Redzoning and there is no space between the end of the
+	 * object and the following fields, add one word so the right Redzone
+	 * is non-empty.
 	 */
 	if ((flags & SLAB_RED_ZONE) && size == s->object_size)
 		size += sizeof(void *);
@@ -7890,7 +7955,8 @@ static int calculate_sizes(struct kmem_cache_args *args, struct kmem_cache *s)
 	s->inuse = size;
 
 	if (((flags & SLAB_TYPESAFE_BY_RCU) && !args->use_freeptr_offset) ||
-	    (flags & SLAB_POISON) || s->ctor ||
+	    (flags & SLAB_POISON) ||
+	    (s->ctor && !args->use_freeptr_offset) ||
 	    ((flags & SLAB_RED_ZONE) &&
 	     (s->object_size < sizeof(void *) || slub_debug_orig_size(s)))) {
 		/*
@@ -7898,11 +7964,11 @@ static int calculate_sizes(struct kmem_cache_args *args, struct kmem_cache *s)
 		 * permitted to overwrite the first word of the object on
 		 * kmem_cache_free.
 		 *
-		 * This is the case if we do RCU, have a constructor or
-		 * destructor, are poisoning the objects, or are
-		 * redzoning an object smaller than sizeof(void *) or are
-		 * redzoning an object with slub_debug_orig_size() enabled,
-		 * in which case the right redzone may be extended.
+		 * This is the case if we do RCU, have a constructor, are
+		 * poisoning the objects, or are redzoning an object smaller
+		 * than sizeof(void *) or are redzoning an object with
+		 * slub_debug_orig_size() enabled, in which case the right
+		 * redzone may be extended.
 		 *
 		 * The assumption that s->offset >= s->inuse means free
 		 * pointer is outside of the object is used in the
@@ -7911,7 +7977,8 @@ static int calculate_sizes(struct kmem_cache_args *args, struct kmem_cache *s)
 		 */
 		s->offset = size;
 		size += sizeof(void *);
-	} else if ((flags & SLAB_TYPESAFE_BY_RCU) && args->use_freeptr_offset) {
+	} else if (((flags & SLAB_TYPESAFE_BY_RCU) || s->ctor) &&
+			args->use_freeptr_offset) {
 		s->offset = args->freeptr_offset;
 	} else {
 		/*
@@ -7932,7 +7999,7 @@ static int calculate_sizes(struct kmem_cache_args *args, struct kmem_cache *s)
 
 		/* Save the original kmalloc request size */
 		if (flags & SLAB_KMALLOC)
-			size += sizeof(unsigned int);
+			size += sizeof(unsigned long);
 	}
 #endif
 
@@ -7959,7 +8026,14 @@ static int calculate_sizes(struct kmem_cache_args *args, struct kmem_cache *s)
 	 * offset 0. In order to align the objects we have to simply size
 	 * each object to conform to the alignment.
 	 */
-	size = ALIGN(size, s->align);
+	aligned_size = ALIGN(size, s->align);
+#if defined(CONFIG_SLAB_OBJ_EXT) && defined(CONFIG_64BIT)
+	if (slab_args_unmergeable(args, s->flags) &&
+			(aligned_size - size >= cache_obj_ext_size(s)))
+		s->flags |= SLAB_OBJ_EXT_IN_OBJ;
+#endif
+	size = aligned_size;
+
 	s->size = size;
 	s->reciprocal_size = reciprocal_value(size);
 	order = calculate_order(size);
@@ -7977,6 +8051,13 @@ static int calculate_sizes(struct kmem_cache_args *args, struct kmem_cache *s)
 
 	if (s->flags & SLAB_RECLAIM_ACCOUNT)
 		s->allocflags |= __GFP_RECLAIMABLE;
+
+	/*
+	 * For kmalloc caches we enable sheaves later by
+	 * bootstrap_kmalloc_sheaves() to avoid recursion.
+	 */
+	if (!is_kmalloc_cache(s))
+		s->sheaf_capacity = calculate_sheaf_capacity(s, args);
 
 	/*
 	 * Determine the number of objects per slab
@@ -8062,13 +8143,18 @@ int __kmem_cache_shutdown(struct kmem_cache *s)
 	flush_all_cpus_locked(s);
 
 	/* we might have rcu sheaves in flight */
-	if (s->cpu_sheaves)
+	if (cache_has_sheaves(s))
 		rcu_barrier();
+
+	for_each_node(node) {
+		struct node_barn *barn = get_barn_node(s, node);
+
+		if (barn)
+			barn_shrink(s, barn);
+	}
 
 	/* Attempt to free all objects */
 	for_each_kmem_cache_node(s, node, n) {
-		if (n->barn)
-			barn_shrink(s, n->barn);
 		free_partial(s, n);
 		if (n->nr_partial || node_nr_slabs(n))
 			return 1;
@@ -8139,46 +8225,53 @@ void __kmem_obj_info(struct kmem_obj_info *kpp, void *object, struct slab *slab)
  *		Kmalloc subsystem
  *******************************************************************/
 
-static int __init setup_slub_min_order(char *str)
+static int __init setup_slub_min_order(const char *str, const struct kernel_param *kp)
 {
-	get_option(&str, (int *)&slub_min_order);
+	int ret;
+
+	ret = kstrtouint(str, 0, &slub_min_order);
+	if (ret)
+		return ret;
 
 	if (slub_min_order > slub_max_order)
 		slub_max_order = slub_min_order;
 
-	return 1;
+	return 0;
 }
 
-__setup("slab_min_order=", setup_slub_min_order);
-__setup_param("slub_min_order=", slub_min_order, setup_slub_min_order, 0);
+static const struct kernel_param_ops param_ops_slab_min_order __initconst = {
+	.set = setup_slub_min_order,
+};
+__core_param_cb(slab_min_order, &param_ops_slab_min_order, &slub_min_order, 0);
+__core_param_cb(slub_min_order, &param_ops_slab_min_order, &slub_min_order, 0);
 
-
-static int __init setup_slub_max_order(char *str)
+static int __init setup_slub_max_order(const char *str, const struct kernel_param *kp)
 {
-	get_option(&str, (int *)&slub_max_order);
+	int ret;
+
+	ret = kstrtouint(str, 0, &slub_max_order);
+	if (ret)
+		return ret;
+
 	slub_max_order = min_t(unsigned int, slub_max_order, MAX_PAGE_ORDER);
 
 	if (slub_min_order > slub_max_order)
 		slub_min_order = slub_max_order;
 
-	return 1;
+	return 0;
 }
 
-__setup("slab_max_order=", setup_slub_max_order);
-__setup_param("slub_max_order=", slub_max_order, setup_slub_max_order, 0);
+static const struct kernel_param_ops param_ops_slab_max_order __initconst = {
+	.set = setup_slub_max_order,
+};
+__core_param_cb(slab_max_order, &param_ops_slab_max_order, &slub_max_order, 0);
+__core_param_cb(slub_max_order, &param_ops_slab_max_order, &slub_max_order, 0);
 
-static int __init setup_slub_min_objects(char *str)
-{
-	get_option(&str, (int *)&slub_min_objects);
-
-	return 1;
-}
-
-__setup("slab_min_objects=", setup_slub_min_objects);
-__setup_param("slub_min_objects=", slub_min_objects, setup_slub_min_objects, 0);
+core_param(slab_min_objects, slub_min_objects, uint, 0);
+core_param(slub_min_objects, slub_min_objects, uint, 0);
 
 #ifdef CONFIG_NUMA
-static int __init setup_slab_strict_numa(char *str)
+static int __init setup_slab_strict_numa(const char *str, const struct kernel_param *kp)
 {
 	if (nr_node_ids > 1) {
 		static_branch_enable(&strict_numa);
@@ -8187,10 +8280,14 @@ static int __init setup_slab_strict_numa(char *str)
 		pr_warn("slab_strict_numa parameter set on non NUMA system.\n");
 	}
 
-	return 1;
+	return 0;
 }
 
-__setup("slab_strict_numa", setup_slab_strict_numa);
+static const struct kernel_param_ops param_ops_slab_strict_numa __initconst = {
+	.flags = KERNEL_PARAM_OPS_FL_NOARG,
+	.set = setup_slab_strict_numa,
+};
+__core_param_cb(slab_strict_numa, &param_ops_slab_strict_numa, NULL, 0);
 #endif
 
 
@@ -8267,13 +8364,17 @@ static int __kmem_cache_do_shrink(struct kmem_cache *s)
 	unsigned long flags;
 	int ret = 0;
 
+	for_each_node(node) {
+		struct node_barn *barn = get_barn_node(s, node);
+
+		if (barn)
+			barn_shrink(s, barn);
+	}
+
 	for_each_kmem_cache_node(s, node, n) {
 		INIT_LIST_HEAD(&discard);
 		for (i = 0; i < SHRINK_PROMOTE_MAX; i++)
 			INIT_LIST_HEAD(promote + i);
-
-		if (n->barn)
-			barn_shrink(s, n->barn);
 
 		spin_lock_irqsave(&n->list_lock, flags);
 
@@ -8294,8 +8395,7 @@ static int __kmem_cache_do_shrink(struct kmem_cache *s)
 
 			if (free == slab->objects) {
 				list_move(&slab->slab_list, &discard);
-				slab_clear_node_partial(slab);
-				n->nr_partial--;
+				clear_node_partial_state(n, slab);
 				dec_slabs_node(s, node, slab->objects);
 			} else if (free <= SHRINK_PROMOTE_MAX)
 				list_move(&slab->slab_list, promote + free - 1);
@@ -8363,7 +8463,8 @@ static int slab_mem_going_online_callback(int nid)
 		if (get_node(s, nid))
 			continue;
 
-		if (s->cpu_sheaves) {
+		if (cache_has_sheaves(s) && !get_barn_node(s, nid)) {
+
 			barn = kmalloc_node(sizeof(*barn), GFP_KERNEL, nid);
 
 			if (!barn) {
@@ -8384,15 +8485,20 @@ static int slab_mem_going_online_callback(int nid)
 			goto out;
 		}
 
-		init_kmem_cache_node(n, barn);
+		init_kmem_cache_node(n);
+		s->per_node[nid].node = n;
 
-		s->node[nid] = n;
+		if (barn) {
+			barn_init(barn);
+			s->per_node[nid].barn = barn;
+		}
 	}
 	/*
 	 * Any cache created after this point will also have kmem_cache_node
-	 * initialized for the new node.
+	 * and barn initialized for the new node.
 	 */
 	node_set(nid, slab_nodes);
+	node_set(nid, slab_barn_nodes);
 out:
 	mutex_unlock(&slab_mutex);
 	return ret;
@@ -8438,12 +8544,6 @@ static struct kmem_cache * __init bootstrap(struct kmem_cache *static_cache)
 
 	memcpy(s, static_cache, kmem_cache->object_size);
 
-	/*
-	 * This runs very early, and only the boot processor is supposed to be
-	 * up.  Even if it weren't true, IRQs are not up so we couldn't fire
-	 * IPIs around.
-	 */
-	__flush_cpu_slab(s, smp_processor_id());
 	for_each_kmem_cache_node(s, node, n) {
 		struct slab *p;
 
@@ -8459,11 +8559,87 @@ static struct kmem_cache * __init bootstrap(struct kmem_cache *static_cache)
 	return s;
 }
 
+/*
+ * Finish the sheaves initialization done normally by init_percpu_sheaves() and
+ * init_kmem_cache_nodes(). For normal kmalloc caches we have to bootstrap it
+ * since sheaves and barns are allocated by kmalloc.
+ */
+static void __init bootstrap_cache_sheaves(struct kmem_cache *s)
+{
+	struct kmem_cache_args empty_args = {};
+	unsigned int capacity;
+	bool failed = false;
+	int node, cpu;
+
+	VM_WARN_ON_ONCE(cache_has_sheaves(s));
+
+	capacity = calculate_sheaf_capacity(s, &empty_args);
+
+	/* capacity can be 0 due to debugging or SLUB_TINY */
+	if (!capacity)
+		return;
+
+	for_each_node_mask(node, slab_barn_nodes) {
+		struct node_barn *barn;
+
+		barn = kmalloc_node(sizeof(*barn), GFP_KERNEL, node);
+
+		if (!barn) {
+			failed = true;
+			goto out;
+		}
+
+		barn_init(barn);
+		s->per_node[node].barn = barn;
+	}
+
+	for_each_possible_cpu(cpu) {
+		struct slub_percpu_sheaves *pcs;
+
+		pcs = per_cpu_ptr(s->cpu_sheaves, cpu);
+
+		pcs->main = __alloc_empty_sheaf(s, GFP_KERNEL,
+				SLAB_ALLOC_DEFAULT, capacity);
+
+		if (!pcs->main) {
+			failed = true;
+			break;
+		}
+	}
+
+out:
+	/*
+	 * It's still early in boot so treat this like same as a failure to
+	 * create the kmalloc cache in the first place
+	 */
+	if (failed)
+		panic("Out of memory when creating kmem_cache %s\n", s->name);
+
+	s->sheaf_capacity = capacity;
+}
+
+static void __init bootstrap_kmalloc_sheaves(void)
+{
+	enum kmalloc_cache_type type;
+
+	for (type = KMALLOC_NORMAL; type < NR_KMALLOC_TYPES; type++) {
+		for (int idx = 0; idx < KMALLOC_SHIFT_HIGH + 1; idx++) {
+			struct kmem_cache *s = kmalloc_caches[type][idx];
+
+			/* Do not bootstrap twice when caches are aliased */
+			if (s && !cache_has_sheaves(s))
+				bootstrap_cache_sheaves(s);
+		}
+	}
+}
+
 void __init kmem_cache_init(void)
 {
 	static __initdata struct kmem_cache boot_kmem_cache,
 		boot_kmem_cache_node;
 	int node;
+
+	slab_obj_ext_has_codetag_init();
 
 	if (debug_guardpage_minorder())
 		slub_max_order = 0;
@@ -8481,9 +8657,13 @@ void __init kmem_cache_init(void)
 	for_each_node_state(node, N_MEMORY)
 		node_set(node, slab_nodes);
 
+	for_each_online_node(node)
+		node_set(node, slab_barn_nodes);
+
 	create_boot_cache(kmem_cache_node, "kmem_cache_node",
 			sizeof(struct kmem_cache_node),
-			SLAB_HWCACHE_ALIGN | SLAB_NO_OBJ_EXT, 0, 0);
+			SLAB_HWCACHE_ALIGN | SLAB_NO_SHEAVES | SLAB_NO_OBJ_EXT,
+			0, 0);
 
 	hotplug_node_notifier(slab_memory_callback, SLAB_CALLBACK_PRI);
 
@@ -8491,9 +8671,10 @@ void __init kmem_cache_init(void)
 	slab_state = PARTIAL;
 
 	create_boot_cache(kmem_cache, "kmem_cache",
-			offsetof(struct kmem_cache, node) +
-				nr_node_ids * sizeof(struct kmem_cache_node *),
-			SLAB_HWCACHE_ALIGN | SLAB_NO_OBJ_EXT, 0, 0);
+			offsetof(struct kmem_cache, per_node) +
+				nr_node_ids * sizeof(struct kmem_cache_per_node_ptrs),
+			SLAB_HWCACHE_ALIGN | SLAB_NO_SHEAVES | SLAB_NO_OBJ_EXT,
+			0, 0);
 
 	kmem_cache = bootstrap(&boot_kmem_cache);
 	kmem_cache_node = bootstrap(&boot_kmem_cache_node);
@@ -8502,10 +8683,12 @@ void __init kmem_cache_init(void)
 	setup_kmalloc_cache_index_table();
 	create_kmalloc_caches();
 
+	bootstrap_kmalloc_sheaves();
+
 	/* Setup random freelists for each cache */
 	init_freelist_randomization();
 
-	cpuhp_setup_state_nocalls(CPUHP_SLUB_DEAD, "slub:dead", NULL,
+	cpuhp_setup_state_nocalls(CPUHP_SLUB_DEAD, "slub:dead", slub_cpu_setup,
 				  slub_cpu_dead);
 
 	pr_info("SLUB: HWalign=%d, Order=%u-%u, MinObjects=%u, CPUs=%u, Nodes=%u\n",
@@ -8516,35 +8699,12 @@ void __init kmem_cache_init(void)
 
 void __init kmem_cache_init_late(void)
 {
-#ifndef CONFIG_SLUB_TINY
-	flushwq = alloc_workqueue("slub_flushwq", WQ_MEM_RECLAIM, 0);
+	flushwq = alloc_workqueue("slub_flushwq", WQ_MEM_RECLAIM | WQ_PERCPU,
+				  0);
 	WARN_ON(!flushwq);
+#ifdef CONFIG_SLAB_FREELIST_RANDOM
+	prandom_init_once(&slab_rnd_state);
 #endif
-}
-
-struct kmem_cache *
-__kmem_cache_alias(const char *name, unsigned int size, unsigned int align,
-		   slab_flags_t flags, void (*ctor)(void *))
-{
-	struct kmem_cache *s;
-
-	s = find_mergeable(size, align, flags, name, ctor);
-	if (s) {
-		if (sysfs_slab_alias(s, name))
-			pr_err("SLUB: Unable to add cache alias %s to sysfs\n",
-			       name);
-
-		s->refcount++;
-
-		/*
-		 * Adjust the object sizes so that we clear
-		 * the complete object on kzalloc.
-		 */
-		s->object_size = max(s->object_size, size);
-		s->inuse = max(s->inuse, ALIGN(size, sizeof(void *)));
-	}
-
-	return s;
 }
 
 int do_kmem_cache_create(struct kmem_cache *s, const char *name,
@@ -8596,17 +8756,10 @@ int do_kmem_cache_create(struct kmem_cache *s, const char *name,
 	s->min_partial = min_t(unsigned long, MAX_PARTIAL, ilog2(s->size) / 2);
 	s->min_partial = max_t(unsigned long, MIN_PARTIAL, s->min_partial);
 
-	set_cpu_partial(s);
-
-	if (args->sheaf_capacity && !IS_ENABLED(CONFIG_SLUB_TINY)
-					&& !(s->flags & SLAB_DEBUG_FLAGS)) {
-		s->cpu_sheaves = alloc_percpu(struct slub_percpu_sheaves);
-		if (!s->cpu_sheaves) {
-			err = -ENOMEM;
-			goto out;
-		}
-		// TODO: increase capacity to grow slab_sheaf up to next kmalloc size?
-		s->sheaf_capacity = args->sheaf_capacity;
+	s->cpu_sheaves = alloc_percpu(struct slub_percpu_sheaves);
+	if (!s->cpu_sheaves) {
+		err = -ENOMEM;
+		goto out;
 	}
 
 #ifdef CONFIG_NUMA
@@ -8622,14 +8775,14 @@ int do_kmem_cache_create(struct kmem_cache *s, const char *name,
 	if (!init_kmem_cache_nodes(s))
 		goto out;
 
-	if (!alloc_kmem_cache_cpus(s))
+#ifdef CONFIG_SLUB_STATS
+	if (!alloc_kmem_cache_stats(s))
 		goto out;
+#endif
 
-	if (s->cpu_sheaves) {
-		err = init_percpu_sheaves(s);
-		if (err)
-			goto out;
-	}
+	err = init_percpu_sheaves(s);
+	if (err)
+		goto out;
 
 	err = 0;
 
@@ -8920,14 +9073,12 @@ static void process_slab(struct loc_track *t, struct kmem_cache *s,
 enum slab_stat_type {
 	SL_ALL,			/* All slabs */
 	SL_PARTIAL,		/* Only partially allocated slabs */
-	SL_CPU,			/* Only slabs used for cpu caches */
 	SL_OBJECTS,		/* Determine allocated objects not slabs */
 	SL_TOTAL		/* Determine object capacity not slabs */
 };
 
 #define SO_ALL		(1 << SL_ALL)
 #define SO_PARTIAL	(1 << SL_PARTIAL)
-#define SO_CPU		(1 << SL_CPU)
 #define SO_OBJECTS	(1 << SL_OBJECTS)
 #define SO_TOTAL	(1 << SL_TOTAL)
 
@@ -8943,47 +9094,6 @@ static ssize_t show_slab_objects(struct kmem_cache *s,
 	nodes = kcalloc(nr_node_ids, sizeof(unsigned long), GFP_KERNEL);
 	if (!nodes)
 		return -ENOMEM;
-
-	if (flags & SO_CPU) {
-		int cpu;
-
-		for_each_possible_cpu(cpu) {
-			struct kmem_cache_cpu *c = per_cpu_ptr(s->cpu_slab,
-							       cpu);
-			int node;
-			struct slab *slab;
-
-			slab = READ_ONCE(c->slab);
-			if (!slab)
-				continue;
-
-			node = slab_nid(slab);
-			if (flags & SO_TOTAL)
-				x = slab->objects;
-			else if (flags & SO_OBJECTS)
-				x = slab->inuse;
-			else
-				x = 1;
-
-			total += x;
-			nodes[node] += x;
-
-#ifdef CONFIG_SLUB_CPU_PARTIAL
-			slab = slub_percpu_partial_read_once(c);
-			if (slab) {
-				node = slab_nid(slab);
-				if (flags & SO_TOTAL)
-					WARN_ON_ONCE(1);
-				else if (flags & SO_OBJECTS)
-					WARN_ON_ONCE(1);
-				else
-					x = data_race(slab->slabs);
-				total += x;
-				nodes[node] += x;
-			}
-#endif
-		}
-	}
 
 	/*
 	 * It is impossible to take "mem_hotplug_lock" here with "kernfs_mutex"
@@ -9043,7 +9153,7 @@ static ssize_t show_slab_objects(struct kmem_cache *s,
 	return len;
 }
 
-#define to_slab_attr(n) container_of(n, struct slab_attribute, attr)
+#define to_slab_attr(n) container_of_const(n, struct slab_attribute, attr)
 #define to_slab(n) container_of(n, struct kmem_cache, kobj)
 
 struct slab_attribute {
@@ -9053,10 +9163,10 @@ struct slab_attribute {
 };
 
 #define SLAB_ATTR_RO(_name) \
-	static struct slab_attribute _name##_attr = __ATTR_RO_MODE(_name, 0400)
+	static const struct slab_attribute _name##_attr = __ATTR_RO_MODE(_name, 0400)
 
 #define SLAB_ATTR(_name) \
-	static struct slab_attribute _name##_attr = __ATTR_RW_MODE(_name, 0600)
+	static const struct slab_attribute _name##_attr = __ATTR_RW_MODE(_name, 0600)
 
 static ssize_t slab_size_show(struct kmem_cache *s, char *buf)
 {
@@ -9116,12 +9226,7 @@ SLAB_ATTR(min_partial);
 
 static ssize_t cpu_partial_show(struct kmem_cache *s, char *buf)
 {
-	unsigned int nr_partial = 0;
-#ifdef CONFIG_SLUB_CPU_PARTIAL
-	nr_partial = s->cpu_partial;
-#endif
-
-	return sysfs_emit(buf, "%u\n", nr_partial);
+	return sysfs_emit(buf, "0\n");
 }
 
 static ssize_t cpu_partial_store(struct kmem_cache *s, const char *buf,
@@ -9133,11 +9238,9 @@ static ssize_t cpu_partial_store(struct kmem_cache *s, const char *buf,
 	err = kstrtouint(buf, 10, &objects);
 	if (err)
 		return err;
-	if (objects && !kmem_cache_has_cpu_partial(s))
+	if (objects)
 		return -EINVAL;
 
-	slub_set_cpu_partial(s, objects);
-	flush_all(s);
 	return length;
 }
 SLAB_ATTR(cpu_partial);
@@ -9164,7 +9267,7 @@ SLAB_ATTR_RO(partial);
 
 static ssize_t cpu_slabs_show(struct kmem_cache *s, char *buf)
 {
-	return show_slab_objects(s, buf, SO_CPU);
+	return sysfs_emit(buf, "0\n");
 }
 SLAB_ATTR_RO(cpu_slabs);
 
@@ -9176,42 +9279,7 @@ SLAB_ATTR_RO(objects_partial);
 
 static ssize_t slabs_cpu_partial_show(struct kmem_cache *s, char *buf)
 {
-	int objects = 0;
-	int slabs = 0;
-	int cpu __maybe_unused;
-	int len = 0;
-
-#ifdef CONFIG_SLUB_CPU_PARTIAL
-	for_each_online_cpu(cpu) {
-		struct slab *slab;
-
-		slab = slub_percpu_partial(per_cpu_ptr(s->cpu_slab, cpu));
-
-		if (slab)
-			slabs += data_race(slab->slabs);
-	}
-#endif
-
-	/* Approximate half-full slabs, see slub_set_cpu_partial() */
-	objects = (slabs * oo_objects(s->oo)) / 2;
-	len += sysfs_emit_at(buf, len, "%d(%d)", objects, slabs);
-
-#ifdef CONFIG_SLUB_CPU_PARTIAL
-	for_each_online_cpu(cpu) {
-		struct slab *slab;
-
-		slab = slub_percpu_partial(per_cpu_ptr(s->cpu_slab, cpu));
-		if (slab) {
-			slabs = data_race(slab->slabs);
-			objects = (slabs * oo_objects(s->oo)) / 2;
-			len += sysfs_emit_at(buf, len, " C%d=%d(%d)",
-					     cpu, objects, slabs);
-		}
-	}
-#endif
-	len += sysfs_emit_at(buf, len, "\n");
-
-	return len;
+	return sysfs_emit(buf, "0(0)\n");
 }
 SLAB_ATTR_RO(slabs_cpu_partial);
 
@@ -9391,13 +9459,13 @@ static int show_stat(struct kmem_cache *s, char *buf, enum stat_item si)
 	unsigned long sum  = 0;
 	int cpu;
 	int len = 0;
-	int *data = kmalloc_array(nr_cpu_ids, sizeof(int), GFP_KERNEL);
+	int *data = kmalloc_objs(int, nr_cpu_ids);
 
 	if (!data)
 		return -ENOMEM;
 
 	for_each_online_cpu(cpu) {
-		unsigned x = per_cpu_ptr(s->cpu_slab, cpu)->stat[si];
+		unsigned int x = per_cpu_ptr(s->cpu_stats, cpu)->stat[si];
 
 		data[cpu] = x;
 		sum += x;
@@ -9423,7 +9491,7 @@ static void clear_stat(struct kmem_cache *s, enum stat_item si)
 	int cpu;
 
 	for_each_online_cpu(cpu)
-		per_cpu_ptr(s->cpu_slab, cpu)->stat[si] = 0;
+		per_cpu_ptr(s->cpu_stats, cpu)->stat[si] = 0;
 }
 
 #define STAT_ATTR(si, text) 					\
@@ -9441,36 +9509,19 @@ static ssize_t text##_store(struct kmem_cache *s,		\
 }								\
 SLAB_ATTR(text);						\
 
-STAT_ATTR(ALLOC_PCS, alloc_cpu_sheaf);
 STAT_ATTR(ALLOC_FASTPATH, alloc_fastpath);
 STAT_ATTR(ALLOC_SLOWPATH, alloc_slowpath);
-STAT_ATTR(FREE_PCS, free_cpu_sheaf);
 STAT_ATTR(FREE_RCU_SHEAF, free_rcu_sheaf);
 STAT_ATTR(FREE_RCU_SHEAF_FAIL, free_rcu_sheaf_fail);
 STAT_ATTR(FREE_FASTPATH, free_fastpath);
 STAT_ATTR(FREE_SLOWPATH, free_slowpath);
-STAT_ATTR(FREE_FROZEN, free_frozen);
 STAT_ATTR(FREE_ADD_PARTIAL, free_add_partial);
 STAT_ATTR(FREE_REMOVE_PARTIAL, free_remove_partial);
-STAT_ATTR(ALLOC_FROM_PARTIAL, alloc_from_partial);
 STAT_ATTR(ALLOC_SLAB, alloc_slab);
-STAT_ATTR(ALLOC_REFILL, alloc_refill);
 STAT_ATTR(ALLOC_NODE_MISMATCH, alloc_node_mismatch);
 STAT_ATTR(FREE_SLAB, free_slab);
-STAT_ATTR(CPUSLAB_FLUSH, cpuslab_flush);
-STAT_ATTR(DEACTIVATE_FULL, deactivate_full);
-STAT_ATTR(DEACTIVATE_EMPTY, deactivate_empty);
-STAT_ATTR(DEACTIVATE_TO_HEAD, deactivate_to_head);
-STAT_ATTR(DEACTIVATE_TO_TAIL, deactivate_to_tail);
-STAT_ATTR(DEACTIVATE_REMOTE_FREES, deactivate_remote_frees);
-STAT_ATTR(DEACTIVATE_BYPASS, deactivate_bypass);
 STAT_ATTR(ORDER_FALLBACK, order_fallback);
-STAT_ATTR(CMPXCHG_DOUBLE_CPU_FAIL, cmpxchg_double_cpu_fail);
 STAT_ATTR(CMPXCHG_DOUBLE_FAIL, cmpxchg_double_fail);
-STAT_ATTR(CPU_PARTIAL_ALLOC, cpu_partial_alloc);
-STAT_ATTR(CPU_PARTIAL_FREE, cpu_partial_free);
-STAT_ATTR(CPU_PARTIAL_NODE, cpu_partial_node);
-STAT_ATTR(CPU_PARTIAL_DRAIN, cpu_partial_drain);
 STAT_ATTR(SHEAF_FLUSH, sheaf_flush);
 STAT_ATTR(SHEAF_REFILL, sheaf_refill);
 STAT_ATTR(SHEAF_ALLOC, sheaf_alloc);
@@ -9509,7 +9560,7 @@ static ssize_t skip_kfence_store(struct kmem_cache *s,
 SLAB_ATTR(skip_kfence);
 #endif
 
-static struct attribute *slab_attrs[] = {
+static const struct attribute *const slab_attrs[] = {
 	&slab_size_attr.attr,
 	&object_size_attr.attr,
 	&objs_per_slab_attr.attr,
@@ -9546,36 +9597,19 @@ static struct attribute *slab_attrs[] = {
 	&remote_node_defrag_ratio_attr.attr,
 #endif
 #ifdef CONFIG_SLUB_STATS
-	&alloc_cpu_sheaf_attr.attr,
 	&alloc_fastpath_attr.attr,
 	&alloc_slowpath_attr.attr,
-	&free_cpu_sheaf_attr.attr,
 	&free_rcu_sheaf_attr.attr,
 	&free_rcu_sheaf_fail_attr.attr,
 	&free_fastpath_attr.attr,
 	&free_slowpath_attr.attr,
-	&free_frozen_attr.attr,
 	&free_add_partial_attr.attr,
 	&free_remove_partial_attr.attr,
-	&alloc_from_partial_attr.attr,
 	&alloc_slab_attr.attr,
-	&alloc_refill_attr.attr,
 	&alloc_node_mismatch_attr.attr,
 	&free_slab_attr.attr,
-	&cpuslab_flush_attr.attr,
-	&deactivate_full_attr.attr,
-	&deactivate_empty_attr.attr,
-	&deactivate_to_head_attr.attr,
-	&deactivate_to_tail_attr.attr,
-	&deactivate_remote_frees_attr.attr,
-	&deactivate_bypass_attr.attr,
 	&order_fallback_attr.attr,
 	&cmpxchg_double_fail_attr.attr,
-	&cmpxchg_double_cpu_fail_attr.attr,
-	&cpu_partial_alloc_attr.attr,
-	&cpu_partial_free_attr.attr,
-	&cpu_partial_node_attr.attr,
-	&cpu_partial_drain_attr.attr,
 	&sheaf_flush_attr.attr,
 	&sheaf_refill_attr.attr,
 	&sheaf_alloc_attr.attr,
@@ -9603,15 +9637,13 @@ static struct attribute *slab_attrs[] = {
 	NULL
 };
 
-static const struct attribute_group slab_attr_group = {
-	.attrs = slab_attrs,
-};
+ATTRIBUTE_GROUPS(slab);
 
 static ssize_t slab_attr_show(struct kobject *kobj,
 				struct attribute *attr,
 				char *buf)
 {
-	struct slab_attribute *attribute;
+	const struct slab_attribute *attribute;
 	struct kmem_cache *s;
 
 	attribute = to_slab_attr(attr);
@@ -9627,7 +9659,7 @@ static ssize_t slab_attr_store(struct kobject *kobj,
 				struct attribute *attr,
 				const char *buf, size_t len)
 {
-	struct slab_attribute *attribute;
+	const struct slab_attribute *attribute;
 	struct kmem_cache *s;
 
 	attribute = to_slab_attr(attr);
@@ -9652,6 +9684,7 @@ static const struct sysfs_ops slab_sysfs_ops = {
 static const struct kobj_type slab_ktype = {
 	.sysfs_ops = &slab_sysfs_ops,
 	.release = kmem_cache_release,
+	.default_groups = slab_groups,
 };
 
 static struct kset *slab_kset;
@@ -9736,12 +9769,13 @@ static int sysfs_slab_add(struct kmem_cache *s)
 
 	s->kobj.kset = kset;
 	err = kobject_init_and_add(&s->kobj, &slab_ktype, NULL, "%s", name);
+	/*
+	 * Intentionally skip kobject_put(). See commit 2420baa8e046
+	 * ("mm/slab: Allow cache creation to proceed even if sysfs
+	 * registration fails")
+	 */
 	if (err)
 		goto out;
-
-	err = sysfs_create_group(&s->kobj, &slab_attr_group);
-	if (err)
-		goto out_del_kobj;
 
 	if (!unmergeable) {
 		/* Setup first alias */
@@ -9751,9 +9785,6 @@ out:
 	if (!unmergeable)
 		kfree(name);
 	return err;
-out_del_kobj:
-	kobject_del(&s->kobj);
-	goto out;
 }
 
 void sysfs_slab_unlink(struct kmem_cache *s)
@@ -9779,7 +9810,7 @@ struct saved_alias {
 
 static struct saved_alias *alias_list;
 
-static int sysfs_slab_alias(struct kmem_cache *s, const char *name)
+int sysfs_slab_alias(struct kmem_cache *s, const char *name)
 {
 	struct saved_alias *al;
 
@@ -9796,7 +9827,7 @@ static int sysfs_slab_alias(struct kmem_cache *s, const char *name)
 		return sysfs_create_link(&slab_kset->kobj, &s->kobj, name);
 	}
 
-	al = kmalloc(sizeof(struct saved_alias), GFP_KERNEL);
+	al = kmalloc_obj(struct saved_alias);
 	if (!al)
 		return -ENOMEM;
 
@@ -9808,28 +9839,20 @@ static int sysfs_slab_alias(struct kmem_cache *s, const char *name)
 	return 0;
 }
 
-static int __init slab_sysfs_init(void)
+static int __init slab_kset_init(void)
 {
-	struct kmem_cache *s;
-	int err;
-
-	mutex_lock(&slab_mutex);
-
 	slab_kset = kset_create_and_add("slab", NULL, kernel_kobj);
 	if (!slab_kset) {
-		mutex_unlock(&slab_mutex);
 		pr_err("Cannot register slab subsystem.\n");
 		return -ENOMEM;
 	}
 
-	slab_state = FULL;
+	return 0;
+}
 
-	list_for_each_entry(s, &slab_caches, list) {
-		err = sysfs_slab_add(s);
-		if (err)
-			pr_err("SLUB: Unable to add boot slab %s to sysfs\n",
-			       s->name);
-	}
+static void __init slab_sysfs_process_aliases(void)
+{
+	int err;
 
 	while (alias_list) {
 		struct saved_alias *al = alias_list;
@@ -9841,12 +9864,41 @@ static int __init slab_sysfs_init(void)
 			       al->name);
 		kfree(al);
 	}
-
-	mutex_unlock(&slab_mutex);
-	return 0;
 }
-late_initcall(slab_sysfs_init);
 #endif /* SLAB_SUPPORTS_SYSFS */
+
+#if defined(SLAB_SUPPORTS_SYSFS) || \
+	(defined(CONFIG_SLUB_DEBUG) && defined(CONFIG_DEBUG_FS))
+static int __init slab_late_init(void)
+{
+	struct kmem_cache *s;
+	int err;
+
+	mutex_lock(&slab_mutex);
+
+	err = slab_kset_init();
+	if (err)
+		goto out;
+
+	slab_debugfs_root_init();
+	slab_state = FULL;
+
+	list_for_each_entry(s, &slab_caches, list) {
+		if (sysfs_slab_add(s))
+			pr_err("SLUB: Unable to add boot slab %s to sysfs\n",
+			       s->name);
+
+		if (s->flags & SLAB_STORE_USER)
+			debugfs_slab_add(s);
+	}
+
+	slab_sysfs_process_aliases();
+out:
+	mutex_unlock(&slab_mutex);
+	return err;
+}
+late_initcall(slab_late_init);
+#endif
 
 #if defined(CONFIG_SLUB_DEBUG) && defined(CONFIG_DEBUG_FS)
 static int slab_debugfs_show(struct seq_file *seq, void *v)
@@ -10038,23 +10090,16 @@ static void debugfs_slab_add(struct kmem_cache *s)
 
 void debugfs_slab_release(struct kmem_cache *s)
 {
+	if (unlikely(!slab_debugfs_root))
+		return;
+
 	debugfs_lookup_and_remove(s->name, slab_debugfs_root);
 }
 
-static int __init slab_debugfs_init(void)
+static void __init slab_debugfs_root_init(void)
 {
-	struct kmem_cache *s;
-
 	slab_debugfs_root = debugfs_create_dir("slab", NULL);
-
-	list_for_each_entry(s, &slab_caches, list)
-		if (s->flags & SLAB_STORE_USER)
-			debugfs_slab_add(s);
-
-	return 0;
-
 }
-__initcall(slab_debugfs_init);
 #endif
 /*
  * The /proc/slabinfo ABI

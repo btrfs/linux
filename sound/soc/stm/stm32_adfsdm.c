@@ -62,12 +62,11 @@ static void stm32_adfsdm_shutdown(struct snd_pcm_substream *substream,
 {
 	struct stm32_adfsdm_priv *priv = snd_soc_dai_get_drvdata(dai);
 
-	mutex_lock(&priv->lock);
+	guard(mutex)(&priv->lock);
 	if (priv->iio_active) {
 		iio_channel_stop_all_cb(priv->iio_cb);
 		priv->iio_active = false;
 	}
-	mutex_unlock(&priv->lock);
 }
 
 static int stm32_adfsdm_dai_prepare(struct snd_pcm_substream *substream,
@@ -76,7 +75,7 @@ static int stm32_adfsdm_dai_prepare(struct snd_pcm_substream *substream,
 	struct stm32_adfsdm_priv *priv = snd_soc_dai_get_drvdata(dai);
 	int ret;
 
-	mutex_lock(&priv->lock);
+	guard(mutex)(&priv->lock);
 	if (priv->iio_active) {
 		iio_channel_stop_all_cb(priv->iio_cb);
 		priv->iio_active = false;
@@ -88,7 +87,7 @@ static int stm32_adfsdm_dai_prepare(struct snd_pcm_substream *substream,
 	if (ret < 0) {
 		dev_err(dai->dev, "%s: Failed to set %d sampling rate\n",
 			__func__, substream->runtime->rate);
-		goto out;
+		return ret;
 	}
 
 	if (!priv->iio_active) {
@@ -99,9 +98,6 @@ static int stm32_adfsdm_dai_prepare(struct snd_pcm_substream *substream,
 			dev_err(dai->dev, "%s: IIO channel start failed (%d)\n",
 				__func__, ret);
 	}
-
-out:
-	mutex_unlock(&priv->lock);
 
 	return ret;
 }
@@ -180,7 +176,7 @@ static int stm32_afsdm_pcm_cb(const void *data, size_t size, void *private)
 		src_size >>= 1;
 	cur_size = src_size;
 
-	dev_dbg(rtd->dev, "%s: buff_add :%pK, pos = %d, size = %zu\n",
+	dev_dbg(rtd->dev, "%s: buff_add :%p, pos = %d, size = %zu\n",
 		__func__, &pcm_buff[priv->pos], priv->pos, src_size);
 
 	if ((priv->pos + src_size) > buff_size) {
@@ -315,7 +311,8 @@ static const struct snd_soc_component_driver stm32_adfsdm_soc_platform = {
 	.hw_params	= stm32_adfsdm_pcm_hw_params,
 	.trigger	= stm32_adfsdm_trigger,
 	.pointer	= stm32_adfsdm_pcm_pointer,
-	.pcm_construct	= stm32_adfsdm_pcm_new,
+	.pcm_new	= stm32_adfsdm_pcm_new,
+	.debugfs_prefix	= "pcm",
 };
 
 static const struct of_device_id stm32_adfsdm_of_match[] = {
@@ -327,7 +324,6 @@ MODULE_DEVICE_TABLE(of, stm32_adfsdm_of_match);
 static int stm32_adfsdm_probe(struct platform_device *pdev)
 {
 	struct stm32_adfsdm_priv *priv;
-	struct snd_soc_component *component;
 	int ret;
 
 	priv = devm_kzalloc(&pdev->dev, sizeof(*priv), GFP_KERNEL);
@@ -361,25 +357,11 @@ static int stm32_adfsdm_probe(struct platform_device *pdev)
 		return ret;
 	}
 
-	component = devm_kzalloc(&pdev->dev, sizeof(*component), GFP_KERNEL);
-	if (!component)
-		return -ENOMEM;
-
-	ret = snd_soc_component_initialize(component,
-					   &stm32_adfsdm_soc_platform,
-					   &pdev->dev);
+	ret = devm_snd_soc_register_component(&pdev->dev,
+					      &stm32_adfsdm_soc_platform,
+					      NULL, 0);
 	if (ret < 0)
 		return ret;
-#ifdef CONFIG_DEBUG_FS
-	component->debugfs_prefix = "pcm";
-#endif
-
-	ret = snd_soc_add_component(component, NULL, 0);
-	if (ret < 0) {
-		dev_err(&pdev->dev, "%s: Failed to register PCM platform\n",
-			__func__);
-		return ret;
-	}
 
 	pm_runtime_enable(&pdev->dev);
 
@@ -407,3 +389,4 @@ MODULE_DESCRIPTION("stm32 DFSDM DAI driver");
 MODULE_AUTHOR("Arnaud Pouliquen <arnaud.pouliquen@st.com>");
 MODULE_LICENSE("GPL v2");
 MODULE_ALIAS("platform:" STM32_ADFSDM_DRV_NAME);
+MODULE_IMPORT_NS("IIO_CONSUMER");

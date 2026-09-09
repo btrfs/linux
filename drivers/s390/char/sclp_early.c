@@ -5,8 +5,7 @@
  * Copyright IBM Corp. 2013
  */
 
-#define KMSG_COMPONENT "sclp_early"
-#define pr_fmt(fmt) KMSG_COMPONENT ": " fmt
+#define pr_fmt(fmt) "sclp_early: " fmt
 
 #include <linux/export.h>
 #include <linux/errno.h>
@@ -62,8 +61,10 @@ static void __init sclp_early_facilities_detect(void)
 		sclp.has_sipl = !!(sccb->cbl & 0x4000);
 		sclp.has_sipl_eckd = !!(sccb->cbl & 0x2000);
 	}
-	if (sccb->cpuoff > 139)
+	if (sccb->cpuoff > 139) {
 		sclp.has_diag324 = !!(sccb->byte_139 & 0x80);
+		sclp.has_astfleie2 = !!(sccb->byte_139 & 0x40);
+	}
 	sclp.rnmax = sccb->rnmax ? sccb->rnmax : sccb->rnmax2;
 	sclp.rzm = sccb->rnsize ? sccb->rnsize : sccb->rnsize2;
 	sclp.rzm <<= 20;

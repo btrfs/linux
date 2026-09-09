@@ -3,7 +3,7 @@
 
 #include <linux/kvm_host.h>
 #include "x86.h"
-#include "kvm_cache_regs.h"
+#include "regs.h"
 #include "kvm_emulate.h"
 #include "smm.h"
 #include "cpuid.h"
@@ -648,6 +648,10 @@ int emulator_leave_smm(struct x86_emulate_ctxt *ctxt)
 	else
 #endif
 		ret = rsm_load_state_32(ctxt, &smram.smram32);
+
+	if (ret == X86EMUL_CONTINUE &&
+	    kvm_x86_call(unhandleable_emulation_required)(vcpu))
+		ret = X86EMUL_UNHANDLEABLE;
 
 	/*
 	 * If RSM fails and triggers shutdown, architecturally the shutdown

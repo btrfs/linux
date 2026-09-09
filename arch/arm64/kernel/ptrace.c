@@ -560,6 +560,42 @@ static int gpr_get(struct task_struct *target,
 	return membuf_write(&to, uregs, sizeof(*uregs));
 }
 
+static void update_syscall_orig_x0_after_ptrace(struct task_struct *target)
+{
+	struct pt_regs *regs = task_pt_regs(target);
+	struct kernel_siginfo *info = target->last_siginfo;
+
+	/*
+	 * Skip the update for NO_SYSCALL (set either by the user or the
+	 * tracer), as regs[0] holds the return value (see the comment in
+	 * el0_svc_common()) and can be unwound using syscall_rollback().
+	 */
+	if (regs->syscallno == NO_SYSCALL)
+		return;
+
+	/* We should only be called when target is in a ptrace stop */
+	if (WARN_ON_ONCE(!info))
+		return;
+
+	/*
+	 * For compat tasks, orig_r0 is provided directly through GPR index
+	 * 17.
+	 */
+	if (is_compat_thread(task_thread_info(target)))
+		return;
+
+	/*
+	 * Don't update orig_x0 for a syscall-exit-stop, as x0 now contains the
+	 * return value of the system call.
+	 */
+	if ((info->si_code & ~0x80) == SIGTRAP &&
+	    target->ptrace_message == PTRACE_EVENTMSG_SYSCALL_EXIT) {
+		return;
+	}
+
+	regs->orig_x0 = regs->regs[0];
+}
+
 static int gpr_set(struct task_struct *target, const struct user_regset *regset,
 		   unsigned int pos, unsigned int count,
 		   const void *kbuf, const void __user *ubuf)
@@ -575,6 +611,14 @@ static int gpr_set(struct task_struct *target, const struct user_regset *regset,
 		return -EINVAL;
 
 	task_pt_regs(target)->user_regs = newregs;
+
+	/*
+	 * Keep orig_x0 authoritative so that seccomp (via
+	 * syscall_get_arguments()), audit and the restart path all see the same
+	 * first argument the syscall is dispatched with, even if it has been
+	 * updated by a tracer.
+	 */
+	update_syscall_orig_x0_after_ptrace(target);
 	return 0;
 }
 
@@ -753,6 +797,12 @@ static int system_call_set(struct task_struct *target,
 		return ret;
 
 	task_pt_regs(target)->syscallno = syscallno;
+
+	/*
+	 * Re-sync orig_x0 in case the syscall number has been changed
+	 * from NO_SYSCALL.
+	 */
+	update_syscall_orig_x0_after_ptrace(target);
 	return ret;
 }
 
@@ -801,7 +851,7 @@ static void sve_init_header_from_task(struct user_sve_header *header,
 	if (active)
 		header->size = SVE_PT_SIZE(vq, header->flags);
 	else
-		header->size = sizeof(header);
+		header->size = sizeof(*header);
 	header->max_size = SVE_PT_SIZE(sve_vq_from_vl(header->max_vl),
 				      SVE_PT_REGS_SVE);
 }
@@ -837,7 +887,7 @@ static int sve_get_common(struct task_struct *target,
 	 * from the other mode to userspace.
 	 */
 	if (header.size == sizeof(header))
-		return 0;
+		return to.left;
 
 	switch ((header.flags & SVE_PT_REGS_MASK)) {
 	case SVE_PT_REGS_FPSIMD:
@@ -912,13 +962,39 @@ static int sve_set_common(struct task_struct *target,
 		return -EINVAL;
 
 	/*
-	 * Apart from SVE_PT_REGS_MASK, all SVE_PT_* flags are consumed by
-	 * vec_set_vector_length(), which will also validate them for us:
+	 * On systems without SVE we accept FPSIMD format writes with
+	 * a VL of 0 to allow exiting streaming mode, otherwise a VL
+	 * is required.
 	 */
-	ret = vec_set_vector_length(target, type, header.vl,
-		((unsigned long)header.flags & ~SVE_PT_REGS_MASK) << 16);
-	if (ret)
-		return ret;
+	if (header.vl) {
+		/*
+		 * If the system does not support SVE we can't
+		 * configure a SVE VL.
+		 */
+		if (!system_supports_sve() && type == ARM64_VEC_SVE)
+			return -EINVAL;
+
+		/*
+		 * Apart from SVE_PT_REGS_MASK, all SVE_PT_* flags are
+		 * consumed by vec_set_vector_length(), which will
+		 * also validate them for us:
+		 */
+		ret = vec_set_vector_length(target, type, header.vl,
+					    ((unsigned long)header.flags & ~SVE_PT_REGS_MASK) << 16);
+		if (ret)
+			return ret;
+	} else {
+		/* If the system supports SVE we require a VL. */
+		if (system_supports_sve())
+			return -EINVAL;
+
+		/*
+		 * Only FPSIMD formatted data with no flags set is
+		 * supported.
+		 */
+		if (header.flags != SVE_PT_REGS_FPSIMD)
+			return -EINVAL;
+	}
 
 	/* Allocate SME storage if necessary, preserving any existing ZA/ZT state */
 	if (type == ARM64_VEC_SME) {
@@ -942,25 +1018,23 @@ static int sve_set_common(struct task_struct *target,
 	vq = sve_vq_from_vl(task_get_vl(target, type));
 
 	/* Enter/exit streaming mode */
-	if (system_supports_sme()) {
-		switch (type) {
-		case ARM64_VEC_SVE:
-			target->thread.svcr &= ~SVCR_SM_MASK;
-			set_tsk_thread_flag(target, TIF_SVE);
-			break;
-		case ARM64_VEC_SME:
-			target->thread.svcr |= SVCR_SM_MASK;
-			set_tsk_thread_flag(target, TIF_SME);
-			break;
-		default:
-			WARN_ON_ONCE(1);
-			return -EINVAL;
-		}
+	switch (type) {
+	case ARM64_VEC_SVE:
+		target->thread.svcr &= ~SVCR_SM_MASK;
+		set_tsk_thread_flag(target, TIF_SVE);
+		break;
+	case ARM64_VEC_SME:
+		target->thread.svcr |= SVCR_SM_MASK;
+		set_tsk_thread_flag(target, TIF_SME);
+		break;
+	default:
+		WARN_ON_ONCE(1);
+		return -EINVAL;
 	}
 
 	/* Always zero V regs, FPSR, and FPCR */
-	memset(&current->thread.uw.fpsimd_state, 0,
-	       sizeof(current->thread.uw.fpsimd_state));
+	memset(&target->thread.uw.fpsimd_state, 0,
+	       sizeof(target->thread.uw.fpsimd_state));
 
 	/* Registers: FPSIMD-only case */
 
@@ -1016,7 +1090,7 @@ static int sve_set(struct task_struct *target,
 		   unsigned int pos, unsigned int count,
 		   const void *kbuf, const void __user *ubuf)
 {
-	if (!system_supports_sve())
+	if (!system_supports_sve() && !system_supports_sme())
 		return -EINVAL;
 
 	return sve_set_common(target, regset, pos, count, kbuf, ubuf,
@@ -1459,6 +1533,9 @@ static int poe_get(struct task_struct *target,
 {
 	if (!system_supports_poe())
 		return -EINVAL;
+
+	if (target == current)
+		current->thread.por_el0 = read_sysreg_s(SYS_POR_EL0);
 
 	return membuf_write(&to, &target->thread.por_el0,
 			    sizeof(target->thread.por_el0));
@@ -2317,9 +2394,10 @@ enum ptrace_syscall_dir {
 	PTRACE_SYSCALL_EXIT,
 };
 
-static void report_syscall(struct pt_regs *regs, enum ptrace_syscall_dir dir)
+static __always_inline unsigned long ptrace_save_reg(struct pt_regs *regs,
+						     enum ptrace_syscall_dir dir,
+						     int *regno)
 {
-	int regno;
 	unsigned long saved_reg;
 
 	/*
@@ -2338,15 +2416,34 @@ static void report_syscall(struct pt_regs *regs, enum ptrace_syscall_dir dir)
 	 * - Syscall stops behave differently to seccomp and pseudo-step traps
 	 *   (the latter do not nobble any registers).
 	 */
-	regno = (is_compat_task() ? 12 : 7);
-	saved_reg = regs->regs[regno];
-	regs->regs[regno] = dir;
+	*regno = (is_compat_task() ? 12 : 7);
+	saved_reg = regs->regs[*regno];
+	regs->regs[*regno] = dir;
 
-	if (dir == PTRACE_SYSCALL_ENTER) {
-		if (ptrace_report_syscall_entry(regs))
-			forget_syscall(regs);
-		regs->regs[regno] = saved_reg;
-	} else if (!test_thread_flag(TIF_SINGLESTEP)) {
+	return saved_reg;
+}
+
+static int report_syscall_entry(struct pt_regs *regs)
+{
+	unsigned long saved_reg;
+	int regno, ret;
+
+	saved_reg = ptrace_save_reg(regs, PTRACE_SYSCALL_ENTER, &regno);
+	ret = !ptrace_report_syscall_permit_entry(regs);
+	if (ret)
+		forget_syscall(regs);
+	regs->regs[regno] = saved_reg;
+
+	return ret;
+}
+
+static void report_syscall_exit(struct pt_regs *regs)
+{
+	unsigned long saved_reg;
+	int regno;
+
+	saved_reg = ptrace_save_reg(regs, PTRACE_SYSCALL_EXIT, &regno);
+	if (!test_thread_flag(TIF_SINGLESTEP)) {
 		ptrace_report_syscall_exit(regs, 0);
 		regs->regs[regno] = saved_reg;
 	} else {
@@ -2364,15 +2461,16 @@ static void report_syscall(struct pt_regs *regs, enum ptrace_syscall_dir dir)
 int syscall_trace_enter(struct pt_regs *regs)
 {
 	unsigned long flags = read_thread_flags();
+	int ret;
 
 	if (flags & (_TIF_SYSCALL_EMU | _TIF_SYSCALL_TRACE)) {
-		report_syscall(regs, PTRACE_SYSCALL_ENTER);
-		if (flags & _TIF_SYSCALL_EMU)
+		ret = report_syscall_entry(regs);
+		if (ret || (flags & _TIF_SYSCALL_EMU))
 			return NO_SYSCALL;
 	}
 
 	/* Do the secure computing after ptrace; failures should be fast. */
-	if (secure_computing() == -1)
+	if (!seccomp_permit_syscall())
 		return NO_SYSCALL;
 
 	if (test_thread_flag(TIF_SYSCALL_TRACEPOINT))
@@ -2394,7 +2492,7 @@ void syscall_trace_exit(struct pt_regs *regs)
 		trace_sys_exit(regs, syscall_get_return_value(current, regs));
 
 	if (flags & (_TIF_SYSCALL_TRACE | _TIF_SINGLESTEP))
-		report_syscall(regs, PTRACE_SYSCALL_EXIT);
+		report_syscall_exit(regs);
 
 	rseq_syscall(regs);
 }

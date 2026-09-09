@@ -143,6 +143,7 @@ static void fbnic_mac_init_qm(struct fbnic_dev *fbd)
 #define FBNIC_DROP_EN_MASK	0x7d
 #define FBNIC_PAUSE_EN_MASK	0x14
 #define FBNIC_ECN_EN_MASK	0x10
+#define FBNIC_PS_EN_MASK	0x01
 
 struct fbnic_fifo_config {
 	unsigned int addr;
@@ -417,8 +418,28 @@ static void __fbnic_mac_stat_rd64(struct fbnic_dev *fbd, bool reset, u32 reg,
 	stat->reported = true;
 }
 
+static void fbnic_mac_stat_rd32(struct fbnic_dev *fbd, bool reset, u32 reg,
+				struct fbnic_stat_counter *stat)
+{
+	u32 new_reg_value;
+
+	new_reg_value = rd32(fbd, reg);
+	if (!reset)
+		stat->value += new_reg_value - stat->u.old_reg_value_32;
+	stat->u.old_reg_value_32 = new_reg_value;
+	stat->reported = true;
+}
+
 #define fbnic_mac_stat_rd64(fbd, reset, __stat, __CSR) \
 	__fbnic_mac_stat_rd64(fbd, reset, FBNIC_##__CSR##_L, &(__stat))
+
+bool fbnic_mac_check_tx_pause(struct fbnic_dev *fbd)
+{
+	u32 command_config;
+
+	command_config = rd32(fbd, FBNIC_MAC_COMMAND_CONFIG);
+	return !(command_config & FBNIC_MAC_COMMAND_CONFIG_TX_PAUSE_DIS);
+}
 
 static void fbnic_mac_tx_pause_config(struct fbnic_dev *fbd, bool tx_pause)
 {
@@ -434,14 +455,57 @@ static void fbnic_mac_tx_pause_config(struct fbnic_dev *fbd, bool tx_pause)
 	wr32(fbd, FBNIC_RXB_PAUSE_DROP_CTRL, rxb_pause_ctrl);
 }
 
-static int fbnic_pcs_get_link_event_asic(struct fbnic_dev *fbd)
+static void
+fbnic_mac_ps_protect_to_reset(struct fbnic_dev *fbd, u16 timeout_ms)
 {
-	u32 pcs_intr_mask = rd32(fbd, FBNIC_SIG_PCS_INTR_STS);
+	wr32(fbd, FBNIC_RXB_PAUSE_STORM_UNIT_WR, FBNIC_RXB_PS_CLK_DIV);
 
-	if (pcs_intr_mask & FBNIC_SIG_PCS_INTR_LINK_DOWN)
+	wr32(fbd, FBNIC_RXB_PAUSE_STORM(FBNIC_RXB_INTF_NET),
+	     FIELD_PREP(FBNIC_RXB_PAUSE_STORM_THLD_TIME,
+			FBNIC_MAC_RXB_PS_TO(timeout_ms)) |
+			FBNIC_RXB_PAUSE_STORM_FORCE_NORMAL);
+	wrfl(fbd);
+	wr32(fbd, FBNIC_RXB_PAUSE_STORM(FBNIC_RXB_INTF_NET),
+	     FIELD_PREP(FBNIC_RXB_PAUSE_STORM_THLD_TIME,
+			FBNIC_MAC_RXB_PS_TO(timeout_ms)));
+}
+
+static void
+fbnic_mac_ps_protect_config(struct fbnic_dev *fbd, bool ps_protect)
+{
+	u16 timeout;
+	u32 reg;
+
+	ps_protect = ps_protect && fbd->ps_timeout;
+	timeout = ps_protect ? fbd->ps_timeout : FBNIC_MAC_PS_TO_DEFAULT_MS;
+
+	fbnic_mac_ps_protect_to_reset(fbd, timeout);
+
+	reg = rd32(fbd, FBNIC_RXB_PAUSE_DROP_CTRL);
+	reg &= ~FBNIC_RXB_PAUSE_DROP_CTRL_PS_ENABLE;
+	reg |= FIELD_PREP(FBNIC_RXB_PAUSE_DROP_CTRL_PS_ENABLE, ps_protect);
+	wr32(fbd, FBNIC_RXB_PAUSE_DROP_CTRL, reg);
+
+	/* Clear any pending interrupt status first */
+	wr32(fbd, FBNIC_RXB_ERR_INTR_STS,
+	     FIELD_PREP(FBNIC_RXB_ERR_INTR_STS_PS, FBNIC_PS_EN_MASK));
+
+	/* Unmask the Network to Host PS interrupt if tx_pause is on */
+	reg = rd32(fbd, FBNIC_RXB_ERR_INTR_MASK);
+	reg |= FBNIC_RXB_ERR_INTR_STS_PS;
+	if (ps_protect)
+		reg &= ~FBNIC_RXB_ERR_INTR_STS_PS;
+	wr32(fbd, FBNIC_RXB_ERR_INTR_MASK, reg);
+}
+
+static int fbnic_mac_get_link_event(struct fbnic_dev *fbd)
+{
+	u32 intr_mask = rd32(fbd, FBNIC_SIG_PCS_INTR_STS);
+
+	if (intr_mask & FBNIC_SIG_PCS_INTR_LINK_DOWN)
 		return FBNIC_LINK_EVENT_DOWN;
 
-	return (pcs_intr_mask & FBNIC_SIG_PCS_INTR_LINK_UP) ?
+	return (intr_mask & FBNIC_SIG_PCS_INTR_LINK_UP) ?
 	       FBNIC_LINK_EVENT_UP : FBNIC_LINK_EVENT_NONE;
 }
 
@@ -466,9 +530,8 @@ static u32 __fbnic_mac_cmd_config_asic(struct fbnic_dev *fbd,
 	return command_config;
 }
 
-static bool fbnic_mac_get_pcs_link_status(struct fbnic_dev *fbd)
+static bool fbnic_mac_get_link_status(struct fbnic_dev *fbd, u8 aui, u8 fec)
 {
-	struct fbnic_net *fbn = netdev_priv(fbd->netdev);
 	u32 pcs_status, lane_mask = ~0;
 
 	pcs_status = rd32(fbd, FBNIC_SIG_PCS_OUT0);
@@ -476,7 +539,7 @@ static bool fbnic_mac_get_pcs_link_status(struct fbnic_dev *fbd)
 		return false;
 
 	/* Define the expected lane mask for the status bits we need to check */
-	switch (fbn->aui) {
+	switch (aui) {
 	case FBNIC_AUI_100GAUI2:
 		lane_mask = 0xf;
 		break;
@@ -484,7 +547,7 @@ static bool fbnic_mac_get_pcs_link_status(struct fbnic_dev *fbd)
 		lane_mask = 3;
 		break;
 	case FBNIC_AUI_LAUI2:
-		switch (fbn->fec) {
+		switch (fec) {
 		case FBNIC_FEC_OFF:
 			lane_mask = 0x63;
 			break;
@@ -502,7 +565,7 @@ static bool fbnic_mac_get_pcs_link_status(struct fbnic_dev *fbd)
 	}
 
 	/* Use an XOR to remove the bits we expect to see set */
-	switch (fbn->fec) {
+	switch (fec) {
 	case FBNIC_FEC_OFF:
 		lane_mask ^= FIELD_GET(FBNIC_SIG_PCS_OUT0_BLOCK_LOCK,
 				       pcs_status);
@@ -521,7 +584,46 @@ static bool fbnic_mac_get_pcs_link_status(struct fbnic_dev *fbd)
 	return !lane_mask;
 }
 
-static bool fbnic_pcs_get_link_asic(struct fbnic_dev *fbd)
+static bool fbnic_pmd_update_state(struct fbnic_dev *fbd, bool signal_detect)
+{
+	/* Delay link up for 4 seconds to allow for link training.
+	 * The state transitions for this are as follows:
+	 *
+	 * All states have the following two transitions in common:
+	 *	Loss of signal -> FBNIC_PMD_INITIALIZE
+	 *		The condition handled below (!signal)
+	 *	Reconfiguration -> FBNIC_PMD_INITIALIZE
+	 *		Occurs when mac_prepare starts a PHY reconfig
+	 * FBNIC_PMD_TRAINING:
+	 *	signal still detected && 4s have passed -> Report link up
+	 *	When link is brought up in link_up -> FBNIC_PMD_SEND_DATA
+	 * FBNIC_PMD_INITIALIZE:
+	 *	signal detected -> FBNIC_PMD_TRAINING
+	 */
+	if (!signal_detect) {
+		fbd->pmd_state = FBNIC_PMD_INITIALIZE;
+		return false;
+	}
+
+	switch (fbd->pmd_state) {
+	case FBNIC_PMD_TRAINING:
+		return time_before(fbd->end_of_pmd_training, jiffies);
+	case FBNIC_PMD_LINK_READY:
+	case FBNIC_PMD_SEND_DATA:
+		return true;
+	}
+
+	fbd->end_of_pmd_training = jiffies + 4 * HZ;
+
+	/* Ensure end_of_training is visible before the state change */
+	smp_wmb();
+
+	fbd->pmd_state = FBNIC_PMD_TRAINING;
+
+	return false;
+}
+
+static bool fbnic_mac_get_link(struct fbnic_dev *fbd, u8 aui, u8 fec)
 {
 	bool link;
 
@@ -538,7 +640,8 @@ static bool fbnic_pcs_get_link_asic(struct fbnic_dev *fbd)
 	wr32(fbd, FBNIC_SIG_PCS_INTR_STS,
 	     FBNIC_SIG_PCS_INTR_LINK_DOWN | FBNIC_SIG_PCS_INTR_LINK_UP);
 
-	link = fbnic_mac_get_pcs_link_status(fbd);
+	link = fbnic_mac_get_link_status(fbd, aui, fec);
+	link = fbnic_pmd_update_state(fbd, link);
 
 	/* Enable interrupt to only capture changes in link state */
 	wr32(fbd, FBNIC_SIG_PCS_INTR_MASK,
@@ -586,20 +689,15 @@ void fbnic_mac_get_fw_settings(struct fbnic_dev *fbd, u8 *aui, u8 *fec)
 	}
 }
 
-static int fbnic_pcs_enable_asic(struct fbnic_dev *fbd)
+static void fbnic_mac_prepare(struct fbnic_dev *fbd, u8 aui, u8 fec)
 {
 	/* Mask and clear the PCS interrupt, will be enabled by link handler */
 	wr32(fbd, FBNIC_SIG_PCS_INTR_MASK, ~0);
 	wr32(fbd, FBNIC_SIG_PCS_INTR_STS, ~0);
 
-	return 0;
-}
-
-static void fbnic_pcs_disable_asic(struct fbnic_dev *fbd)
-{
-	/* Mask and clear the PCS interrupt */
-	wr32(fbd, FBNIC_SIG_PCS_INTR_MASK, ~0);
-	wr32(fbd, FBNIC_SIG_PCS_INTR_STS, ~0);
+	/* If we don't have link tear it all down and start over */
+	if (!fbnic_mac_get_link_status(fbd, aui, fec))
+		fbd->pmd_state = FBNIC_PMD_INITIALIZE;
 }
 
 static void fbnic_mac_link_down_asic(struct fbnic_dev *fbd)
@@ -624,6 +722,7 @@ static void fbnic_mac_link_up_asic(struct fbnic_dev *fbd,
 	u32 cmd_cfg, mac_ctrl;
 
 	fbnic_mac_tx_pause_config(fbd, tx_pause);
+	fbnic_mac_ps_protect_config(fbd, tx_pause);
 
 	cmd_cfg = __fbnic_mac_cmd_config_asic(fbd, tx_pause, rx_pause);
 	mac_ctrl = rd32(fbd, FBNIC_SIG_MAC_IN0);
@@ -725,6 +824,9 @@ fbnic_mac_get_pause_stats(struct fbnic_dev *fbd, bool reset,
 			    MAC_STAT_TX_XOFF_STB);
 	fbnic_mac_stat_rd64(fbd, reset, pause_stats->rx_pause_frames,
 			    MAC_STAT_RX_XOFF_STB);
+	fbnic_mac_stat_rd32(fbd, reset,
+			    FBNIC_RXB_INTR_PS_COUNT(FBNIC_RXB_INTF_NET),
+			    &pause_stats->tx_pause_storm_events);
 }
 
 static void
@@ -801,7 +903,7 @@ static int fbnic_mac_get_sensor_asic(struct fbnic_dev *fbd, int id,
 				     long *val)
 {
 	struct fbnic_fw_completion *fw_cmpl;
-	int err = 0, retries = 5;
+	int err = 0;
 	s32 *sensor;
 
 	fw_cmpl = fbnic_fw_alloc_cmpl(FBNIC_TLV_MSG_ID_TSENE_READ_RESP);
@@ -828,24 +930,10 @@ static int fbnic_mac_get_sensor_asic(struct fbnic_dev *fbd, int id,
 		goto exit_free;
 	}
 
-	/* Allow 2 seconds for reply, resend and try up to 5 times */
-	while (!wait_for_completion_timeout(&fw_cmpl->done, 2 * HZ)) {
-		retries--;
-
-		if (retries == 0) {
-			dev_err(fbd->dev,
-				"Timed out waiting for TSENE read\n");
-			err = -ETIMEDOUT;
-			goto exit_cleanup;
-		}
-
-		err = fbnic_fw_xmit_tsene_read_msg(fbd, NULL);
-		if (err) {
-			dev_err(fbd->dev,
-				"Failed to transmit TSENE read msg, err %d\n",
-				err);
-			goto exit_cleanup;
-		}
+	if (!wait_for_completion_timeout(&fw_cmpl->done, 10 * HZ)) {
+		dev_err(fbd->dev, "Timed out waiting for TSENE read\n");
+		err = -ETIMEDOUT;
+		goto exit_cleanup;
 	}
 
 	/* Handle error returned by firmware */
@@ -867,10 +955,9 @@ exit_free:
 
 static const struct fbnic_mac fbnic_mac_asic = {
 	.init_regs = fbnic_mac_init_regs,
-	.pcs_enable = fbnic_pcs_enable_asic,
-	.pcs_disable = fbnic_pcs_disable_asic,
-	.pcs_get_link = fbnic_pcs_get_link_asic,
-	.pcs_get_link_event = fbnic_pcs_get_link_event_asic,
+	.get_link = fbnic_mac_get_link,
+	.get_link_event = fbnic_mac_get_link_event,
+	.prepare = fbnic_mac_prepare,
 	.get_fec_stats = fbnic_mac_get_fec_stats,
 	.get_pcs_stats = fbnic_mac_get_pcs_stats,
 	.get_eth_mac_stats = fbnic_mac_get_eth_mac_stats,
@@ -898,4 +985,47 @@ int fbnic_mac_init(struct fbnic_dev *fbd)
 	fbd->mac->init_regs(fbd);
 
 	return 0;
+}
+
+int fbnic_mac_ps_protect_to_config(struct fbnic_dev *fbd, u16 timeout_ms)
+{
+	u16 old_timeout_ms = fbd->ps_timeout;
+
+	if (timeout_ms == old_timeout_ms)
+		return 0;
+
+	if (timeout_ms == PFC_STORM_PREVENTION_AUTO)
+		timeout_ms = FBNIC_MAC_PS_TO_DEFAULT_MS;
+
+	if (timeout_ms > FBNIC_MAC_PS_TO_MAX_MS)
+		return -EINVAL;
+
+	fbd->ps_timeout = timeout_ms;
+
+	if (!fbnic_mac_check_tx_pause(fbd))
+		return 0;
+
+	if (timeout_ms == 0)
+		fbnic_mac_ps_protect_config(fbd, false);
+	else if (old_timeout_ms == 0)
+		fbnic_mac_ps_protect_config(fbd, true);
+	else
+		fbnic_mac_ps_protect_to_reset(fbd, fbd->ps_timeout);
+
+	return 0;
+}
+
+void fbnic_mac_ps_protect_handler(struct fbnic_dev *fbd)
+{
+	u32 rxb_err_sts = rd32(fbd, FBNIC_RXB_ERR_INTR_STS);
+
+	/* Check if pause storm interrupt for network was triggered */
+	if (rxb_err_sts & FIELD_PREP(FBNIC_RXB_ERR_INTR_STS_PS,
+				     FBNIC_PS_EN_MASK)) {
+		/* Write 1 to clear the interrupt status first */
+		wr32(fbd, FBNIC_RXB_ERR_INTR_STS,
+		     FIELD_PREP(FBNIC_RXB_ERR_INTR_STS_PS, FBNIC_PS_EN_MASK));
+
+		fbnic_mac_ps_protect_to_reset(fbd, fbd->ps_timeout);
+	}
 }

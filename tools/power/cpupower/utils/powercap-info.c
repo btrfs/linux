@@ -38,17 +38,15 @@ static int powercap_print_one_zone(struct powercap_zone *zone)
 	printf(" (%s)\n", mode ? "enabled" : "disabled");
 
 	if (zone->has_power_uw)
-		printf(_("%sPower can be monitored in micro Jules\n"),
+		printf(_("%sPower can be monitored in micro Watts\n"),
 		       pr_prefix);
 
 	if (zone->has_energy_uj)
-		printf(_("%sPower can be monitored in micro Watts\n"),
+		printf(_("%sPower can be monitored in micro Jules\n"),
 		       pr_prefix);
 
 	printf("\n");
 
-	if (ret != 0)
-		return ret;
 	return ret;
 }
 

@@ -19,8 +19,10 @@ nsim_do_psp(struct sk_buff *skb, struct netdevsim *ns,
 	    struct netdevsim *peer_ns, struct skb_ext **psp_ext)
 {
 	enum skb_drop_reason rc = 0;
+	struct psp_dev *peer_psd;
 	struct psp_assoc *pas;
 	struct net *net;
+	int psp_len;
 	void **ptr;
 
 	rcu_read_lock();
@@ -47,8 +49,13 @@ nsim_do_psp(struct sk_buff *skb, struct netdevsim *ns,
 		goto out_unlock;
 	}
 
+	psp_len = skb->len - skb_inner_transport_offset(skb);
+	atomic64_inc(&ns->psp.tx_packets);
+	atomic64_add(psp_len, &ns->psp.tx_bytes);
+
 	/* Now pretend we just received this frame */
-	if (peer_ns->psp.dev->config.versions & (1 << pas->version)) {
+	peer_psd = rcu_dereference(peer_ns->psp.dev);
+	if (peer_psd && peer_psd->config.versions & (1 << pas->version)) {
 		bool strip_icv = false;
 		u8 generation;
 
@@ -61,8 +68,7 @@ nsim_do_psp(struct sk_buff *skb, struct netdevsim *ns,
 
 		skb_ext_reset(skb);
 		skb->mac_len = ETH_HLEN;
-		if (psp_dev_rcv(skb, peer_ns->psp.dev->id, generation,
-				strip_icv)) {
+		if (psp_dev_rcv(skb, peer_psd->id, generation, strip_icv)) {
 			rc = SKB_DROP_REASON_PSP_OUTPUT;
 			goto out_unlock;
 		}
@@ -70,11 +76,15 @@ nsim_do_psp(struct sk_buff *skb, struct netdevsim *ns,
 		*psp_ext = skb->extensions;
 		refcount_inc(&(*psp_ext)->refcnt);
 		skb->decrypted = 1;
+
+		atomic64_inc(&peer_ns->psp.rx_packets);
+		atomic64_add(psp_len, &peer_ns->psp.rx_bytes);
 	} else {
 		struct ipv6hdr *ip6h __maybe_unused;
 		struct iphdr *iph;
 		struct udphdr *uh;
 		__wsum csum;
+		int udplen;
 
 		/* Do not decapsulate. Receive the skb with the udp and psp
 		 * headers still there as if this is a normal udp packet.
@@ -82,19 +92,20 @@ nsim_do_psp(struct sk_buff *skb, struct netdevsim *ns,
 		 * provide a valid checksum here, so the skb isn't dropped.
 		 */
 		uh = udp_hdr(skb);
+		udplen = udp_get_len(skb, uh, skb_transport_offset(skb));
 		csum = skb_checksum(skb, skb_transport_offset(skb),
-				    ntohs(uh->len), 0);
+				    udplen, 0);
 
 		switch (skb->protocol) {
 		case htons(ETH_P_IP):
 			iph = ip_hdr(skb);
-			uh->check = udp_v4_check(ntohs(uh->len), iph->saddr,
+			uh->check = udp_v4_check(udplen, iph->saddr,
 						 iph->daddr, csum);
 			break;
 #if IS_ENABLED(CONFIG_IPV6)
 		case htons(ETH_P_IPV6):
 			ip6h = ipv6_hdr(skb);
-			uh->check = udp_v6_check(ntohs(uh->len), &ip6h->saddr,
+			uh->check = udp_v6_check(udplen, &ip6h->saddr,
 						 &ip6h->daddr, csum);
 			break;
 #endif
@@ -122,14 +133,15 @@ nsim_rx_spi_alloc(struct psp_dev *psd, u32 version,
 		  struct netlink_ext_ack *extack)
 {
 	struct netdevsim *ns = psd->drv_priv;
-	unsigned int new;
 	int i;
 
-	new = ++ns->psp.spi & PSP_SPI_KEY_ID;
-	if (psd->generation & 1)
-		new |= PSP_SPI_KEY_PHASE;
+	/* Check if incrementing the spi would change the phase bit */
+	if ((ns->psp.spi & PSP_SPI_KEY_ID) == PSP_SPI_KEY_ID) {
+		NL_SET_ERR_MSG(extack, "SPI space exhausted");
+		return -ENOSPC;
+	}
 
-	assoc->spi = cpu_to_be32(new);
+	assoc->spi = cpu_to_be32(++ns->psp.spi);
 	assoc->key[0] = psd->generation;
 	for (i = 1; i < PSP_MAX_KEY; i++)
 		assoc->key[i] = ns->psp.spi + i;
@@ -152,6 +164,16 @@ static int nsim_assoc_add(struct psp_dev *psd, struct psp_assoc *pas,
 
 static int nsim_key_rotate(struct psp_dev *psd, struct netlink_ext_ack *extack)
 {
+	struct netdevsim *ns = psd->drv_priv;
+
+	/* Flip key phase and reset SPI to 0 within that space
+	 * (will be pre-incremented, as 0 is an invalid SPI).
+	 */
+	if (ns->psp.spi & PSP_SPI_KEY_PHASE)
+		ns->psp.spi = 0;
+	else
+		ns->psp.spi = PSP_SPI_KEY_PHASE;
+
 	return 0;
 }
 
@@ -164,12 +186,28 @@ static void nsim_assoc_del(struct psp_dev *psd, struct psp_assoc *pas)
 	ns->psp.assoc_cnt--;
 }
 
+static void nsim_get_stats(struct psp_dev *psd, struct psp_dev_stats *stats)
+{
+	struct netdevsim *ns = psd->drv_priv;
+
+	/* WARNING: do *not* blindly zero stats in real drivers!
+	 * All required stats must be reported by the device!
+	 */
+	memset(stats, 0, sizeof(struct psp_dev_stats));
+
+	stats->rx_bytes = atomic64_read(&ns->psp.rx_bytes);
+	stats->rx_packets = atomic64_read(&ns->psp.rx_packets);
+	stats->tx_bytes = atomic64_read(&ns->psp.tx_bytes);
+	stats->tx_packets = atomic64_read(&ns->psp.tx_packets);
+}
+
 static struct psp_dev_ops nsim_psp_ops = {
 	.set_config	= nsim_psp_set_config,
 	.rx_spi_alloc	= nsim_rx_spi_alloc,
 	.tx_key_add	= nsim_assoc_add,
 	.tx_key_del	= nsim_assoc_del,
 	.key_rotate	= nsim_key_rotate,
+	.get_stats	= nsim_get_stats,
 };
 
 static struct psp_dev_caps nsim_psp_caps = {
@@ -180,11 +218,26 @@ static struct psp_dev_caps nsim_psp_caps = {
 	.assoc_drv_spc = sizeof(void *),
 };
 
+static void __nsim_psp_uninit(struct netdevsim *ns, bool teardown)
+{
+	struct psp_dev *psd;
+
+	psd = rcu_dereference_protected(ns->psp.dev,
+					teardown ||
+					lockdep_is_held(&ns->psp.rereg_lock));
+	if (psd) {
+		rcu_assign_pointer(ns->psp.dev, NULL);
+		synchronize_rcu();
+		psp_dev_unregister(psd);
+	}
+	WARN_ON(ns->psp.assoc_cnt);
+}
+
 void nsim_psp_uninit(struct netdevsim *ns)
 {
-	if (!IS_ERR(ns->psp.dev))
-		psp_dev_unregister(ns->psp.dev);
-	WARN_ON(ns->psp.assoc_cnt);
+	debugfs_remove(ns->psp.rereg);
+	mutex_destroy(&ns->psp.rereg_lock);
+	__nsim_psp_uninit(ns, true);
 }
 
 static ssize_t
@@ -192,14 +245,23 @@ nsim_psp_rereg_write(struct file *file, const char __user *data, size_t count,
 		     loff_t *ppos)
 {
 	struct netdevsim *ns = file->private_data;
-	int err;
+	struct psp_dev *psd;
+	ssize_t ret;
 
-	nsim_psp_uninit(ns);
+	mutex_lock(&ns->psp.rereg_lock);
+	__nsim_psp_uninit(ns, false);
 
-	ns->psp.dev = psp_dev_create(ns->netdev, &nsim_psp_ops,
-				     &nsim_psp_caps, ns);
-	err = PTR_ERR_OR_ZERO(ns->psp.dev);
-	return err ?: count;
+	psd = psp_dev_create(ns->netdev, &nsim_psp_ops, &nsim_psp_caps, ns);
+	if (IS_ERR(psd)) {
+		ret = PTR_ERR(psd);
+		goto out;
+	}
+
+	rcu_assign_pointer(ns->psp.dev, psd);
+	ret = count;
+out:
+	mutex_unlock(&ns->psp.rereg_lock);
+	return ret;
 }
 
 static const struct file_operations nsim_psp_rereg_fops = {
@@ -212,14 +274,16 @@ static const struct file_operations nsim_psp_rereg_fops = {
 int nsim_psp_init(struct netdevsim *ns)
 {
 	struct dentry *ddir = ns->nsim_dev_port->ddir;
-	int err;
+	struct psp_dev *psd;
 
-	ns->psp.dev = psp_dev_create(ns->netdev, &nsim_psp_ops,
-				     &nsim_psp_caps, ns);
-	err = PTR_ERR_OR_ZERO(ns->psp.dev);
-	if (err)
-		return err;
+	psd = psp_dev_create(ns->netdev, &nsim_psp_ops, &nsim_psp_caps, ns);
+	if (IS_ERR(psd))
+		return PTR_ERR(psd);
 
-	debugfs_create_file("psp_rereg", 0200, ddir, ns, &nsim_psp_rereg_fops);
+	rcu_assign_pointer(ns->psp.dev, psd);
+
+	mutex_init(&ns->psp.rereg_lock);
+	ns->psp.rereg = debugfs_create_file("psp_rereg", 0200, ddir, ns,
+					    &nsim_psp_rereg_fops);
 	return 0;
 }

@@ -21,6 +21,10 @@
 #include "rvu_npc_hash.h"
 #include "mcs.h"
 
+#include "cn20k/reg.h"
+#include "cn20k/debugfs.h"
+#include "cn20k/npc.h"
+
 #define DEBUGFS_DIR_NAME "octeontx2"
 
 enum {
@@ -478,10 +482,11 @@ static int rvu_dbg_mcs_rx_secy_stats_display(struct seq_file *filp, void *unused
 		seq_printf(filp, "secy%d: Tagged ctrl pkts: %lld\n", secy_id,
 			   stats.pkt_tagged_ctl_cnt);
 		seq_printf(filp, "secy%d: Untaged pkts: %lld\n", secy_id, stats.pkt_untaged_cnt);
-		seq_printf(filp, "secy%d: Ctrl pkts: %lld\n", secy_id, stats.pkt_ctl_cnt);
 		if (mcs->hw->mcs_blks > 1)
 			seq_printf(filp, "secy%d: pkts notag: %lld\n", secy_id,
 				   stats.pkt_notag_cnt);
+		else
+			seq_printf(filp, "secy%d: Ctrl pkts: %lld\n", secy_id, stats.pkt_ctl_cnt);
 	}
 	mutex_unlock(&mcs->stats_lock);
 	return 0;
@@ -958,30 +963,21 @@ static bool rvu_dbg_is_valid_lf(struct rvu *rvu, int blkaddr, int lf,
 
 static void print_npa_qsize(struct seq_file *m, struct rvu_pfvf *pfvf)
 {
-	char *buf;
-
-	buf = kmalloc(PAGE_SIZE, GFP_KERNEL);
-	if (!buf)
-		return;
-
 	if (!pfvf->aura_ctx) {
 		seq_puts(m, "Aura context is not initialized\n");
 	} else {
-		bitmap_print_to_pagebuf(false, buf, pfvf->aura_bmap,
-					pfvf->aura_ctx->qsize);
 		seq_printf(m, "Aura count : %d\n", pfvf->aura_ctx->qsize);
-		seq_printf(m, "Aura context ena/dis bitmap : %s\n", buf);
+		seq_printf(m, "Aura context ena/dis bitmap : %*pb\n",
+			   pfvf->aura_ctx->qsize, pfvf->aura_bmap);
 	}
 
 	if (!pfvf->pool_ctx) {
 		seq_puts(m, "Pool context is not initialized\n");
 	} else {
-		bitmap_print_to_pagebuf(false, buf, pfvf->pool_bmap,
-					pfvf->pool_ctx->qsize);
 		seq_printf(m, "Pool count : %d\n", pfvf->pool_ctx->qsize);
-		seq_printf(m, "Pool context ena/dis bitmap : %s\n", buf);
+		seq_printf(m, "Pool context ena/dis bitmap : %*pb\n",
+			   pfvf->pool_ctx->qsize, pfvf->pool_bmap);
 	}
-	kfree(buf);
 }
 
 /* The 'qsize' entry dumps current Aura/Pool context Qsize
@@ -1101,6 +1097,11 @@ static void print_npa_aura_ctx(struct seq_file *m, struct npa_aq_enq_rsp *rsp)
 	struct npa_aura_s *aura = &rsp->aura;
 	struct rvu *rvu = m->private;
 
+	if (is_cn20k(rvu->pdev)) {
+		print_npa_cn20k_aura_ctx(m, (struct npa_cn20k_aq_enq_rsp *)rsp);
+		return;
+	}
+
 	seq_printf(m, "W0: Pool addr\t\t%llx\n", aura->pool_addr);
 
 	seq_printf(m, "W1: ena\t\t\t%d\nW1: pool caching\t%d\n",
@@ -1148,6 +1149,11 @@ static void print_npa_pool_ctx(struct seq_file *m, struct npa_aq_enq_rsp *rsp)
 {
 	struct npa_pool_s *pool = &rsp->pool;
 	struct rvu *rvu = m->private;
+
+	if (is_cn20k(rvu->pdev)) {
+		print_npa_cn20k_pool_ctx(m, (struct npa_cn20k_aq_enq_rsp *)rsp);
+		return;
+	}
 
 	seq_printf(m, "W0: Stack base\t\t%llx\n", pool->stack_base);
 
@@ -1651,6 +1657,9 @@ static void print_tm_tree(struct seq_file *m,
 	int blkaddr;
 	u64 cfg;
 
+	if (!sq_ctx->ena)
+		return;
+
 	blkaddr = nix_hw->blkaddr;
 	schq = sq_ctx->smq;
 
@@ -1688,6 +1697,12 @@ static int rvu_dbg_nix_tm_tree_display(struct seq_file *m, void *unused)
 		return -EINVAL;
 
 	pfvf = rvu_get_pfvf(rvu, pcifunc);
+
+	if (!pfvf->sq_ctx) {
+		seq_printf(m, "SQ context is not initialized for pcifunc 0x%x\n", pcifunc);
+		return -EINVAL;
+	}
+
 	max_id = pfvf->sq_ctx->qsize;
 
 	memset(&aq_req, 0, sizeof(struct nix_aq_enq_req));
@@ -2009,10 +2024,16 @@ static void print_nix_sq_ctx(struct seq_file *m, struct nix_aq_enq_rsp *rsp)
 	struct nix_hw *nix_hw = m->private;
 	struct rvu *rvu = nix_hw->rvu;
 
+	if (is_cn20k(rvu->pdev)) {
+		print_nix_cn20k_sq_ctx(m, (struct nix_cn20k_sq_ctx_s *)sq_ctx);
+		return;
+	}
+
 	if (!is_rvu_otx2(rvu)) {
 		print_nix_cn10k_sq_ctx(m, (struct nix_cn10k_sq_ctx_s *)sq_ctx);
 		return;
 	}
+
 	seq_printf(m, "W0: sqe_way_mask \t\t%d\nW0: cq \t\t\t\t%d\n",
 		   sq_ctx->sqe_way_mask, sq_ctx->cq);
 	seq_printf(m, "W0: sdp_mcast \t\t\t%d\nW0: substream \t\t\t0x%03x\n",
@@ -2103,7 +2124,9 @@ static void print_nix_cn10k_rq_ctx(struct seq_file *m,
 	seq_printf(m, "W1: ipsecd_drop_ena \t\t%d\nW1: chi_ena \t\t\t%d\n\n",
 		   rq_ctx->ipsecd_drop_ena, rq_ctx->chi_ena);
 
-	seq_printf(m, "W2: band_prof_id \t\t%d\n", rq_ctx->band_prof_id);
+	seq_printf(m, "W2: band_prof_id \t\t%d\n",
+		   (u16)rq_ctx->band_prof_id_h << 10 | rq_ctx->band_prof_id);
+
 	seq_printf(m, "W2: policer_ena \t\t%d\n", rq_ctx->policer_ena);
 	seq_printf(m, "W2: spb_sizem1 \t\t\t%d\n", rq_ctx->spb_sizem1);
 	seq_printf(m, "W2: wqe_skip \t\t\t%d\nW2: sqb_ena \t\t\t%d\n",
@@ -2225,6 +2248,11 @@ static void print_nix_cq_ctx(struct seq_file *m, struct nix_aq_enq_rsp *rsp)
 	struct nix_hw *nix_hw = m->private;
 	struct rvu *rvu = nix_hw->rvu;
 
+	if (is_cn20k(rvu->pdev)) {
+		print_nix_cn20k_cq_ctx(m, (struct nix_cn20k_aq_enq_rsp *)rsp);
+		return;
+	}
+
 	seq_printf(m, "W0: base \t\t\t%llx\n\n", cq_ctx->base);
 
 	seq_printf(m, "W1: wrptr \t\t\t%llx\n", (u64)cq_ctx->wrptr);
@@ -2254,6 +2282,7 @@ static void print_nix_cq_ctx(struct seq_file *m, struct nix_aq_enq_rsp *rsp)
 		   cq_ctx->cq_err_int_ena, cq_ctx->cq_err_int);
 	seq_printf(m, "W3: qsize \t\t\t%d\nW3:caching \t\t\t%d\n",
 		   cq_ctx->qsize, cq_ctx->caching);
+
 	seq_printf(m, "W3: substream \t\t\t0x%03x\nW3: ena \t\t\t%d\n",
 		   cq_ctx->substream, cq_ctx->ena);
 	if (!is_rvu_otx2(rvu)) {
@@ -2516,17 +2545,8 @@ RVU_DEBUG_SEQ_FOPS(nix_cq_ctx, nix_cq_ctx_display, nix_cq_ctx_write);
 static void print_nix_qctx_qsize(struct seq_file *filp, int qsize,
 				 unsigned long *bmap, char *qtype)
 {
-	char *buf;
-
-	buf = kmalloc(PAGE_SIZE, GFP_KERNEL);
-	if (!buf)
-		return;
-
-	bitmap_print_to_pagebuf(false, buf, bmap, qsize);
 	seq_printf(filp, "%s context count : %d\n", qtype, qsize);
-	seq_printf(filp, "%s context ena/dis bitmap : %s\n",
-		   qtype, buf);
-	kfree(buf);
+	seq_printf(filp, "%s context ena/dis bitmap : %*pb\n", qtype, qsize, bmap);
 }
 
 static void print_nix_qsize(struct seq_file *filp, struct rvu_pfvf *pfvf)
@@ -2615,7 +2635,10 @@ static void print_band_prof_ctx(struct seq_file *m,
 		(prof->rc_action == 1) ? "DROP" : "RED";
 	seq_printf(m, "W1: rc_action\t\t%s\n", str);
 	seq_printf(m, "W1: meter_algo\t\t%d\n", prof->meter_algo);
-	seq_printf(m, "W1: band_prof_id\t%d\n", prof->band_prof_id);
+
+	seq_printf(m, "W1: band_prof_id\t%d\n",
+		   (u16)prof->band_prof_id_h << 7 | prof->band_prof_id);
+
 	seq_printf(m, "W1: hl_en\t\t%d\n", prof->hl_en);
 
 	seq_printf(m, "W2: ts\t\t\t%lld\n", (u64)prof->ts);
@@ -2784,11 +2807,22 @@ static void rvu_dbg_npa_init(struct rvu *rvu)
 			    &rvu_dbg_npa_aura_ctx_fops);
 	debugfs_create_file("pool_ctx", 0600, rvu->rvu_dbg.npa, rvu,
 			    &rvu_dbg_npa_pool_ctx_fops);
+
+	if (is_cn20k(rvu->pdev)) /* NDC not appliable for cn20k */
+		return;
 	debugfs_create_file("ndc_cache", 0600, rvu->rvu_dbg.npa, rvu,
 			    &rvu_dbg_npa_ndc_cache_fops);
 	debugfs_create_file("ndc_hits_miss", 0600, rvu->rvu_dbg.npa, rvu,
 			    &rvu_dbg_npa_ndc_hits_miss_fops);
 }
+
+/* Per-lmac CGX debugfs files need both RVU and CGX handle; inode->i_private
+ * points here so seq_file ops avoid pci_get_device(PCI_DEVID_OCTEONTX2_RVU_AF).
+ */
+struct rvu_cgx_lmac_dbgfs_ctx {
+	struct rvu	*rvu;
+	void		*cgxd;
+};
 
 #define PRINT_CGX_CUML_NIXRX_STATUS(idx, name)				\
 	({								\
@@ -2812,18 +2846,14 @@ static void rvu_dbg_npa_init(struct rvu *rvu)
 
 static int cgx_print_stats(struct seq_file *s, int lmac_id)
 {
+	struct rvu_cgx_lmac_dbgfs_ctx *dctx = s->private;
 	struct cgx_link_user_info linfo;
+	struct rvu *rvu = dctx->rvu;
 	struct mac_ops *mac_ops;
-	void *cgxd = s->private;
+	void *cgxd = dctx->cgxd;
 	u64 ucast, mcast, bcast;
 	int stat = 0, err = 0;
 	u64 tx_stat, rx_stat;
-	struct rvu *rvu;
-
-	rvu = pci_get_drvdata(pci_get_device(PCI_VENDOR_ID_CAVIUM,
-					     PCI_DEVID_OCTEONTX2_RVU_AF, NULL));
-	if (!rvu)
-		return -ENODEV;
 
 	mac_ops = get_mac_ops(cgxd);
 	/* There can be no CGX devices at all */
@@ -2930,19 +2960,15 @@ RVU_DEBUG_SEQ_FOPS(cgx_stat, cgx_stat_display, NULL);
 
 static int cgx_print_dmac_flt(struct seq_file *s, int lmac_id)
 {
+	struct rvu_cgx_lmac_dbgfs_ctx *dctx = s->private;
+	struct rvu *rvu = dctx->rvu;
 	struct pci_dev *pdev = NULL;
-	void *cgxd = s->private;
+	void *cgxd = dctx->cgxd;
 	char *bcast, *mcast;
 	u16 index, domain;
 	u8 dmac[ETH_ALEN];
-	struct rvu *rvu;
 	u64 cfg, mac;
 	int pf;
-
-	rvu = pci_get_drvdata(pci_get_device(PCI_VENDOR_ID_CAVIUM,
-					     PCI_DEVID_OCTEONTX2_RVU_AF, NULL));
-	if (!rvu)
-		return -ENODEV;
 
 	pf = cgxlmac_to_pf(rvu, cgx_get_cgxid(cgxd), lmac_id);
 	domain = 2;
@@ -2990,16 +3016,12 @@ RVU_DEBUG_SEQ_FOPS(cgx_dmac_flt, cgx_dmac_flt_display, NULL);
 
 static int cgx_print_fwdata(struct seq_file *s, int lmac_id)
 {
+	struct rvu_cgx_lmac_dbgfs_ctx *dctx = s->private;
 	struct cgx_lmac_fwdata_s *fwdata;
-	void *cgxd = s->private;
+	struct rvu *rvu = dctx->rvu;
+	void *cgxd = dctx->cgxd;
 	struct phy_s *phy;
-	struct rvu *rvu;
 	int cgx_id, i;
-
-	rvu = pci_get_drvdata(pci_get_device(PCI_VENDOR_ID_CAVIUM,
-					     PCI_DEVID_OCTEONTX2_RVU_AF, NULL));
-	if (!rvu)
-		return -ENODEV;
 
 	if (!rvu->fwdata)
 		return -EAGAIN;
@@ -3081,6 +3103,7 @@ RVU_DEBUG_SEQ_FOPS(cgx_fwdata, cgx_fwdata_display, NULL);
 
 static void rvu_dbg_cgx_init(struct rvu *rvu)
 {
+	struct rvu_cgx_lmac_dbgfs_ctx *ctx;
 	struct mac_ops *mac_ops;
 	unsigned long lmac_bmap;
 	int i, lmac_id;
@@ -3107,6 +3130,13 @@ static void rvu_dbg_cgx_init(struct rvu *rvu)
 		rvu->rvu_dbg.cgx = debugfs_create_dir(dname,
 						      rvu->rvu_dbg.cgx_root);
 
+		ctx = devm_kzalloc(rvu->dev, sizeof(*ctx), GFP_KERNEL);
+		if (!ctx)
+			continue;
+
+		ctx->rvu = rvu;
+		ctx->cgxd = cgx;
+
 		for_each_set_bit(lmac_id, &lmac_bmap, rvu->hw->lmac_per_cgx) {
 			/* lmac debugfs dir */
 			sprintf(dname, "lmac%d", lmac_id);
@@ -3114,13 +3144,13 @@ static void rvu_dbg_cgx_init(struct rvu *rvu)
 				debugfs_create_dir(dname, rvu->rvu_dbg.cgx);
 
 			debugfs_create_file_aux_num("stats", 0600, rvu->rvu_dbg.lmac,
-					    cgx, lmac_id, &rvu_dbg_cgx_stat_fops);
+						    ctx, lmac_id, &rvu_dbg_cgx_stat_fops);
 			debugfs_create_file_aux_num("mac_filter", 0600,
-					    rvu->rvu_dbg.lmac, cgx, lmac_id,
+					    rvu->rvu_dbg.lmac, ctx, lmac_id,
 					    &rvu_dbg_cgx_dmac_flt_fops);
-			debugfs_create_file("fwdata", 0600,
-					    rvu->rvu_dbg.lmac, cgx,
-					    &rvu_dbg_cgx_fwdata_fops);
+			debugfs_create_file_aux_num("fwdata", 0600,
+						    rvu->rvu_dbg.lmac, ctx,
+						    lmac_id, &rvu_dbg_cgx_fwdata_fops);
 		}
 	}
 }
@@ -3161,7 +3191,9 @@ static void rvu_print_npc_mcam_info(struct seq_file *s,
 static int rvu_dbg_npc_mcam_info_display(struct seq_file *filp, void *unsued)
 {
 	struct rvu *rvu = filp->private;
+	int x4_free, x2_free, sb_free;
 	int pf, vf, numvfs, blkaddr;
+	struct npc_priv_t *npc_priv;
 	struct npc_mcam *mcam;
 	u16 pcifunc, counters;
 	u64 cfg;
@@ -3175,16 +3207,34 @@ static int rvu_dbg_npc_mcam_info_display(struct seq_file *filp, void *unsued)
 
 	seq_puts(filp, "\nNPC MCAM info:\n");
 	/* MCAM keywidth on receive and transmit sides */
-	cfg = rvu_read64(rvu, blkaddr, NPC_AF_INTFX_KEX_CFG(NIX_INTF_RX));
-	cfg = (cfg >> 32) & 0x07;
-	seq_printf(filp, "\t\t RX keywidth \t: %s\n", (cfg == NPC_MCAM_KEY_X1) ?
-		   "112bits" : ((cfg == NPC_MCAM_KEY_X2) ?
-		   "224bits" : "448bits"));
-	cfg = rvu_read64(rvu, blkaddr, NPC_AF_INTFX_KEX_CFG(NIX_INTF_TX));
-	cfg = (cfg >> 32) & 0x07;
-	seq_printf(filp, "\t\t TX keywidth \t: %s\n", (cfg == NPC_MCAM_KEY_X1) ?
-		   "112bits" : ((cfg == NPC_MCAM_KEY_X2) ?
-		   "224bits" : "448bits"));
+	if (is_cn20k(rvu->pdev)) {
+		npc_priv = npc_priv_get();
+		seq_printf(filp, "\t\t RX keywidth \t: %s\n",
+			   (npc_priv->kw == NPC_MCAM_KEY_X1) ?
+			   "256bits" : "512bits");
+
+		npc_cn20k_subbank_calc_free(rvu, &x2_free, &x4_free, &sb_free);
+		seq_printf(filp, "\t\t free x4 slots\t: %d\n", x4_free);
+
+		seq_printf(filp, "\t\t free x2 slots\t: %d\n", x2_free);
+
+		seq_printf(filp, "\t\t free subbanks\t: %d\n", sb_free);
+	} else {
+		cfg = rvu_read64(rvu, blkaddr,
+				 NPC_AF_INTFX_KEX_CFG(NIX_INTF_RX));
+		cfg = (cfg >> 32) & 0x07;
+		seq_printf(filp, "\t\t RX keywidth \t: %s\n",
+			   (cfg == NPC_MCAM_KEY_X1) ?
+			   "112bits" : ((cfg == NPC_MCAM_KEY_X2) ?
+					"224bits" : "448bits"));
+		cfg = rvu_read64(rvu, blkaddr,
+				 NPC_AF_INTFX_KEX_CFG(NIX_INTF_TX));
+		cfg = (cfg >> 32) & 0x07;
+		seq_printf(filp, "\t\t TX keywidth \t: %s\n",
+			   (cfg == NPC_MCAM_KEY_X1) ?
+			   "112bits" : ((cfg == NPC_MCAM_KEY_X2) ?
+					"224bits" : "448bits"));
+	}
 
 	mutex_lock(&mcam->lock);
 	/* MCAM entries */
@@ -3471,11 +3521,11 @@ static int rvu_dbg_npc_mcam_show_rules(struct seq_file *s, void *unused)
 	struct rvu_npc_mcam_rule *iter;
 	struct rvu *rvu = s->private;
 	struct npc_mcam *mcam;
-	int pf, vf = -1;
+	int pf, vf = -1, bank;
+	u16 target, index;
 	bool enabled;
+	u64 hits, off;
 	int blkaddr;
-	u16 target;
-	u64 hits;
 
 	blkaddr = rvu_get_blkaddr(rvu, BLKTYPE_NPC, 0);
 	if (blkaddr < 0)
@@ -3519,6 +3569,15 @@ static int rvu_dbg_npc_mcam_show_rules(struct seq_file *s, void *unused)
 
 		enabled = is_mcam_entry_enabled(rvu, mcam, blkaddr, iter->entry);
 		seq_printf(s, "\tenabled: %s\n", enabled ? "yes" : "no");
+		if (is_cn20k(rvu->pdev)) {
+			seq_printf(s, "\tpriority: %u\n", iter->hw_prio);
+			index = iter->entry & (mcam->banksize - 1);
+			bank = npc_get_bank(mcam, iter->entry);
+			off = NPC_AF_CN20K_MCAMEX_BANKX_STAT_EXT(index, bank);
+			hits = rvu_read64(rvu, blkaddr, off);
+			seq_printf(s, "\thits: %lld\n", hits);
+			continue;
+		}
 
 		if (!iter->has_cntr)
 			continue;
@@ -3663,9 +3722,9 @@ static int rvu_dbg_npc_exact_drop_cnt(struct seq_file *s, void *unused)
 	struct npc_exact_table *table;
 	struct rvu *rvu = s->private;
 	struct npc_key_field *field;
+	u64 cfg, cam1, off;
 	u16 chan, pcifunc;
 	int blkaddr, i;
-	u64 cfg, cam1;
 	char *str;
 
 	blkaddr = rvu_get_blkaddr(rvu, BLKTYPE_NPC, 0);
@@ -3686,11 +3745,17 @@ static int rvu_dbg_npc_exact_drop_cnt(struct seq_file *s, void *unused)
 		chan = field->kw_mask[0] & cam1;
 
 		str = (cfg & 1) ? "enabled" : "disabled";
+		if (is_cn20k(rvu->pdev)) {
+			off = NPC_AF_CN20K_MCAMEX_BANKX_STAT_EXT(i, 0);
+		seq_printf(s, "0x%x\t%d\t\t%llu\t0x%x\t%s\n", pcifunc,
+			   i, rvu_read64(rvu, blkaddr, off), chan, str);
+		} else {
+			off = NPC_AF_MATCH_STATX(table->counter_idx[i]);
+			seq_printf(s, "0x%x\t%d\t\t%llu\t0x%x\t%s\n", pcifunc,
+				   i, rvu_read64(rvu, blkaddr, off),
+				   chan, str);
+		}
 
-		seq_printf(s, "0x%x\t%d\t\t%llu\t0x%x\t%s\n", pcifunc, i,
-			   rvu_read64(rvu, blkaddr,
-				      NPC_AF_MATCH_STATX(table->counter_idx[i])),
-			   chan, str);
 	}
 
 	return 0;
@@ -3709,6 +3774,9 @@ static void rvu_dbg_npc_init(struct rvu *rvu)
 
 	debugfs_create_file("rx_miss_act_stats", 0444, rvu->rvu_dbg.npc, rvu,
 			    &rvu_dbg_npc_rx_miss_act_fops);
+
+	if (is_cn20k(rvu->pdev))
+		npc_cn20k_debugfs_init(rvu);
 
 	if (!rvu->hw->cap.npc_exact_match_enabled)
 		return;
@@ -3950,6 +4018,9 @@ static void rvu_dbg_cpt_init(struct rvu *rvu, int blkaddr)
 
 static const char *rvu_get_dbg_dir_name(struct rvu *rvu)
 {
+	if (is_cn20k(rvu->pdev))
+		return "cn20k";
+
 	if (!is_rvu_otx2(rvu))
 		return "cn10k";
 	else

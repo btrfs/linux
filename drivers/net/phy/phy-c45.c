@@ -7,6 +7,7 @@
 #include <linux/mdio.h>
 #include <linux/mii.h>
 #include <linux/phy.h>
+#include <linux/ethtool_netlink.h>
 
 #include "mdio-open-alliance.h"
 #include "phylib-internal.h"
@@ -147,12 +148,12 @@ int genphy_c45_pma_setup_forced(struct phy_device *phydev)
 		ctrl2 |= MDIO_PMA_CTRL2_1000BT;
 		break;
 	case SPEED_2500:
-		ctrl1 |= MDIO_CTRL1_SPEED2_5G;
+		ctrl1 |= MDIO_PMA_CTRL1_SPEED2_5G;
 		/* Assume 2.5Gbase-T */
 		ctrl2 |= MDIO_PMA_CTRL2_2_5GBT;
 		break;
 	case SPEED_5000:
-		ctrl1 |= MDIO_CTRL1_SPEED5G;
+		ctrl1 |= MDIO_PMA_CTRL1_SPEED5G;
 		/* Assume 5Gbase-T */
 		ctrl2 |= MDIO_PMA_CTRL2_5GBT;
 		break;
@@ -384,6 +385,119 @@ int genphy_c45_check_and_restart_aneg(struct phy_device *phydev, bool restart)
 EXPORT_SYMBOL_GPL(genphy_c45_check_and_restart_aneg);
 
 /**
+ * genphy_c45_pma_soft_reset - software reset the PHY via Clause 45 PMA/PMD control register
+ * @phydev: target phy_device struct
+ *
+ * Return: 0 on success, negative errno on failure.
+ */
+int genphy_c45_pma_soft_reset(struct phy_device *phydev)
+{
+	int ret, val;
+
+	ret = phy_set_bits_mmd(phydev, MDIO_MMD_PMAPMD, MDIO_CTRL1,
+			       MDIO_CTRL1_RESET);
+	if (ret < 0)
+		return ret;
+
+	return phy_read_mmd_poll_timeout(phydev, MDIO_MMD_PMAPMD,
+					 MDIO_CTRL1, val,
+					 !(val & MDIO_CTRL1_RESET),
+					 5000, 600000, true);
+}
+EXPORT_SYMBOL_GPL(genphy_c45_pma_soft_reset);
+
+/**
+ * genphy_c45_an_setup_master_slave - Configure Master/Slave setting for C45 PHYs
+ * @phydev: target phy_device struct
+ *
+ * Description: Configure the forced or preferred Master/Slave role
+ * 10GBASE-T control register (MMD 7, Register 0x0020) according to
+ * IEEE 802.3 standards.
+ *
+ * Return: negative errno code on failure, 0 if Master/Slave didn't change,
+ * or 1 if Master/Slave modes changed.
+ */
+static int genphy_c45_an_setup_master_slave(struct phy_device *phydev)
+{
+	u16 ctl = 0;
+
+	switch (phydev->master_slave_set) {
+	case MASTER_SLAVE_CFG_MASTER_PREFERRED:
+		ctl = MDIO_AN_10GBT_CTRL_MS_PORT_TYPE;
+		break;
+	case MASTER_SLAVE_CFG_SLAVE_PREFERRED:
+		break;
+	case MASTER_SLAVE_CFG_MASTER_FORCE:
+		ctl = MDIO_AN_10GBT_CTRL_MS_ENABLE | MDIO_AN_10GBT_CTRL_MS_VALUE;
+		break;
+	case MASTER_SLAVE_CFG_SLAVE_FORCE:
+		ctl = MDIO_AN_10GBT_CTRL_MS_ENABLE;
+		break;
+	case MASTER_SLAVE_CFG_UNKNOWN:
+	case MASTER_SLAVE_CFG_UNSUPPORTED:
+		return 0;
+	default:
+		phydev_warn(phydev, "Unsupported Master/Slave mode\n");
+		return -EOPNOTSUPP;
+	}
+
+	return phy_modify_mmd_changed(phydev, MDIO_MMD_AN, MDIO_AN_10GBT_CTRL,
+				      MDIO_AN_10GBT_CTRL_MS_ENABLE |
+				      MDIO_AN_10GBT_CTRL_MS_VALUE |
+				      MDIO_AN_10GBT_CTRL_MS_PORT_TYPE, ctl);
+}
+
+/**
+ * genphy_c45_read_master_slave - read master/slave status
+ * @phydev: target phy_device struct
+ *
+ * Description: Read the Master/Slave configuration and status
+ * from 10GBASE-T control/status registers (MMD 7, Reg 0x0020 and 0x0021).
+ *
+ * Return: 0 on success, or a negative error code on failure.
+ */
+static int genphy_c45_read_master_slave(struct phy_device *phydev)
+{
+	int val;
+
+	phydev->master_slave_get = MASTER_SLAVE_CFG_UNKNOWN;
+	phydev->master_slave_state = MASTER_SLAVE_STATE_UNKNOWN;
+
+	val = phy_read_mmd(phydev, MDIO_MMD_AN, MDIO_AN_10GBT_CTRL);
+	if (val < 0)
+		return val;
+
+	if (val & MDIO_AN_10GBT_CTRL_MS_ENABLE) {
+		if (val & MDIO_AN_10GBT_CTRL_MS_VALUE)
+			phydev->master_slave_get = MASTER_SLAVE_CFG_MASTER_FORCE;
+		else
+			phydev->master_slave_get = MASTER_SLAVE_CFG_SLAVE_FORCE;
+	} else {
+		if (val & MDIO_AN_10GBT_CTRL_MS_PORT_TYPE)
+			phydev->master_slave_get = MASTER_SLAVE_CFG_MASTER_PREFERRED;
+		else
+			phydev->master_slave_get = MASTER_SLAVE_CFG_SLAVE_PREFERRED;
+	}
+
+	val = phy_read_mmd(phydev, MDIO_MMD_AN, MDIO_AN_10GBT_STAT);
+	if (val < 0)
+		return val;
+
+	if (val & MDIO_AN_10GBT_STAT_MS_FAULT) {
+		phydev->master_slave_state = MASTER_SLAVE_STATE_ERR;
+	} else if (phydev->link) {
+		if (val & MDIO_AN_10GBT_STAT_MS_RES)
+			phydev->master_slave_state = MASTER_SLAVE_STATE_MASTER;
+		else
+			phydev->master_slave_state = MASTER_SLAVE_STATE_SLAVE;
+	} else {
+		phydev->master_slave_state = MASTER_SLAVE_STATE_UNKNOWN;
+	}
+
+	return 0;
+}
+
+/**
  * genphy_c45_aneg_done - return auto-negotiation complete status
  * @phydev: target phy_device struct
  *
@@ -485,8 +599,8 @@ static int genphy_c45_baset1_read_lpa(struct phy_device *phydev)
 		mii_t1_adv_l_mod_linkmode_t(phydev->lp_advertising, 0);
 		mii_t1_adv_m_mod_linkmode_t(phydev->lp_advertising, 0);
 
-		phydev->pause = 0;
-		phydev->asym_pause = 0;
+		phydev->pause = false;
+		phydev->asym_pause = false;
 
 		return 0;
 	}
@@ -498,8 +612,8 @@ static int genphy_c45_baset1_read_lpa(struct phy_device *phydev)
 		return val;
 
 	mii_t1_adv_l_mod_linkmode_t(phydev->lp_advertising, val);
-	phydev->pause = val & MDIO_AN_T1_ADV_L_PAUSE_CAP ? 1 : 0;
-	phydev->asym_pause = val & MDIO_AN_T1_ADV_L_PAUSE_ASYM ? 1 : 0;
+	phydev->pause = val & MDIO_AN_T1_ADV_L_PAUSE_CAP;
+	phydev->asym_pause = val & MDIO_AN_T1_ADV_L_PAUSE_ASYM;
 
 	val = phy_read_mmd(phydev, MDIO_MMD_AN, MDIO_AN_T1_LP_M);
 	if (val < 0)
@@ -536,8 +650,8 @@ int genphy_c45_read_lpa(struct phy_device *phydev)
 				   phydev->lp_advertising);
 		mii_10gbt_stat_mod_linkmode_lpa_t(phydev->lp_advertising, 0);
 		mii_adv_mod_linkmode_adv_t(phydev->lp_advertising, 0);
-		phydev->pause = 0;
-		phydev->asym_pause = 0;
+		phydev->pause = false;
+		phydev->asym_pause = false;
 
 		return 0;
 	}
@@ -551,8 +665,8 @@ int genphy_c45_read_lpa(struct phy_device *phydev)
 		return val;
 
 	mii_adv_mod_linkmode_adv_t(phydev->lp_advertising, val);
-	phydev->pause = val & LPA_PAUSE_CAP ? 1 : 0;
-	phydev->asym_pause = val & LPA_PAUSE_ASYM ? 1 : 0;
+	phydev->pause = val & LPA_PAUSE_CAP;
+	phydev->asym_pause = val & LPA_PAUSE_ASYM;
 
 	/* Read the link partner's 10G advertisement */
 	val = phy_read_mmd(phydev, MDIO_MMD_AN, MDIO_AN_10GBT_STAT);
@@ -617,10 +731,10 @@ int genphy_c45_read_pma(struct phy_device *phydev)
 	case MDIO_PMA_CTRL1_SPEED1000:
 		phydev->speed = SPEED_1000;
 		break;
-	case MDIO_CTRL1_SPEED2_5G:
+	case MDIO_PMA_CTRL1_SPEED2_5G:
 		phydev->speed = SPEED_2500;
 		break;
-	case MDIO_CTRL1_SPEED5G:
+	case MDIO_PMA_CTRL1_SPEED5G:
 		phydev->speed = SPEED_5000;
 		break;
 	case MDIO_CTRL1_SPEED10G:
@@ -939,6 +1053,14 @@ EXPORT_SYMBOL_GPL(genphy_c45_read_eee_abilities);
  */
 int genphy_c45_an_config_eee_aneg(struct phy_device *phydev)
 {
+	/* Writing MMD AN advertisements while autoneg is disabled has no
+	 * effect on link-partner negotiation, but on some PHYs (e.g. the
+	 * Broadcom BCM54213PE) the write itself disturbs the receive
+	 * datapath. Skip it.
+	 */
+	if (phydev->autoneg == AUTONEG_DISABLE)
+		return 0;
+
 	if (!phydev->eee_cfg.eee_enabled) {
 		__ETHTOOL_DECLARE_LINK_MODE_MASK(adv) = {};
 
@@ -1171,8 +1293,8 @@ int genphy_c45_read_status(struct phy_device *phydev)
 
 	phydev->speed = SPEED_UNKNOWN;
 	phydev->duplex = DUPLEX_UNKNOWN;
-	phydev->pause = 0;
-	phydev->asym_pause = 0;
+	phydev->pause = false;
+	phydev->asym_pause = false;
 
 	if (phydev->autoneg == AUTONEG_ENABLE) {
 		ret = genphy_c45_read_lpa(phydev);
@@ -1181,6 +1303,10 @@ int genphy_c45_read_status(struct phy_device *phydev)
 
 		if (genphy_c45_baset1_able(phydev)) {
 			ret = genphy_c45_baset1_read_status(phydev);
+			if (ret < 0)
+				return ret;
+		} else {
+			ret = genphy_c45_read_master_slave(phydev);
 			if (ret < 0)
 				return ret;
 		}
@@ -1215,6 +1341,14 @@ int genphy_c45_config_aneg(struct phy_device *phydev)
 		return ret;
 	if (ret > 0)
 		changed = true;
+
+	if (!genphy_c45_baset1_able(phydev)) {
+		ret = genphy_c45_an_setup_master_slave(phydev);
+		if (ret < 0)
+			return ret;
+		if (ret > 0)
+			changed = true;
+	}
 
 	return genphy_c45_check_and_restart_aneg(phydev, changed);
 }
@@ -1573,3 +1707,261 @@ int genphy_c45_ethtool_set_eee(struct phy_device *phydev,
 	return ret;
 }
 EXPORT_SYMBOL(genphy_c45_ethtool_set_eee);
+
+/**
+ * oatc14_cable_test_get_result_code - Convert hardware cable test status to
+ *                                     ethtool result code.
+ * @status: The hardware-reported cable test status
+ *
+ * This helper function maps the OATC14 HDD cable test status to the
+ * corresponding ethtool cable test result code. It provides a translation
+ * between the device-specific status values and the standardized ethtool
+ * result codes.
+ *
+ * Return:
+ * * ETHTOOL_A_CABLE_RESULT_CODE_OK          - Cable is OK
+ * * ETHTOOL_A_CABLE_RESULT_CODE_OPEN        - Open circuit detected
+ * * ETHTOOL_A_CABLE_RESULT_CODE_SAME_SHORT  - Short circuit detected
+ * * ETHTOOL_A_CABLE_RESULT_CODE_UNSPEC      - Status not detectable or invalid
+ */
+static int oatc14_cable_test_get_result_code(enum oatc14_hdd_status status)
+{
+	switch (status) {
+	case OATC14_HDD_STATUS_CABLE_OK:
+		return ETHTOOL_A_CABLE_RESULT_CODE_OK;
+	case OATC14_HDD_STATUS_OPEN:
+		return ETHTOOL_A_CABLE_RESULT_CODE_OPEN;
+	case OATC14_HDD_STATUS_SHORT:
+		return ETHTOOL_A_CABLE_RESULT_CODE_SAME_SHORT;
+	case OATC14_HDD_STATUS_NOT_DETECTABLE:
+	default:
+		return ETHTOOL_A_CABLE_RESULT_CODE_UNSPEC;
+	}
+}
+
+/**
+ * genphy_c45_oatc14_cable_test_get_status - Get status of OATC14 10Base-T1S
+ *                                           PHY cable test.
+ * @phydev:   pointer to the PHY device structure
+ * @finished: pointer to a boolean set true if the test is complete
+ *
+ * Retrieves the current status of the OATC14 10Base-T1S PHY cable test.
+ * This function reads the OATC14 HDD register to determine whether the test
+ * results are valid and whether the test has finished.
+ *
+ * If the test is complete, the function reports the cable test result via
+ * the ethtool cable test interface using ethnl_cable_test_result(), and then
+ * clears the test control bit in the PHY register to reset the test state.
+ *
+ * Return: 0 on success, or a negative error code on failure (e.g. register
+ *         read/write error).
+ */
+int genphy_c45_oatc14_cable_test_get_status(struct phy_device *phydev,
+					    bool *finished)
+{
+	int ret;
+	u8 sts;
+
+	*finished = false;
+
+	ret = phy_read_mmd(phydev, MDIO_MMD_VEND2, MDIO_OATC14_HDD);
+	if (ret < 0)
+		return ret;
+
+	if (!(ret & OATC14_HDD_VALID))
+		return 0;
+
+	*finished = true;
+
+	sts = FIELD_GET(OATC14_HDD_SHORT_OPEN_STATUS, ret);
+
+	ret = ethnl_cable_test_result(phydev, ETHTOOL_A_CABLE_PAIR_A,
+				      oatc14_cable_test_get_result_code(sts));
+	if (ret)
+		return ret;
+
+	return phy_clear_bits_mmd(phydev, MDIO_MMD_VEND2,
+				  MDIO_OATC14_HDD, OATC14_HDD_CONTROL);
+}
+EXPORT_SYMBOL(genphy_c45_oatc14_cable_test_get_status);
+
+/**
+ * genphy_c45_oatc14_cable_test_start - Start a cable test on an OATC14
+ *                                      10Base-T1S PHY.
+ * @phydev: Pointer to the PHY device structure
+ *
+ * This function initiates a cable diagnostic test on a Clause 45 OATC14
+ * 10Base-T1S capable PHY device. It first reads the PHY’s advanced diagnostic
+ * capability register to check if High Definition Diagnostics (HDD) mode is
+ * supported. If the PHY does not report HDD capability, cable testing is not
+ * supported and the function returns -EOPNOTSUPP.
+ *
+ * For PHYs that support HDD, the function sets the appropriate control bits in
+ * the OATC14_HDD register to enable and start the cable diagnostic test.
+ *
+ * Return:
+ * * 0 on success
+ * * -EOPNOTSUPP if the PHY does not support HDD capability
+ * * A negative error code on I/O or register access failures
+ */
+int genphy_c45_oatc14_cable_test_start(struct phy_device *phydev)
+{
+	int ret;
+
+	ret = phy_read_mmd(phydev, MDIO_MMD_VEND2, MDIO_OATC14_ADFCAP);
+	if (ret < 0)
+		return ret;
+
+	if (!(ret & OATC14_ADFCAP_HDD_CAPABILITY))
+		return -EOPNOTSUPP;
+
+	ret = phy_set_bits_mmd(phydev, MDIO_MMD_VEND2, MDIO_OATC14_HDD,
+			       OATC14_HDD_CONTROL);
+	if (ret)
+		return ret;
+
+	ret = phy_read_mmd(phydev, MDIO_MMD_VEND2, MDIO_OATC14_HDD);
+	if (ret < 0)
+		return ret;
+
+	return phy_set_bits_mmd(phydev, MDIO_MMD_VEND2, MDIO_OATC14_HDD,
+				OATC14_HDD_START_CONTROL);
+}
+EXPORT_SYMBOL(genphy_c45_oatc14_cable_test_start);
+
+/**
+ * oatc14_update_sqi_capability - Read and update OATC14 10Base-T1S PHY SQI/SQI+
+ *                                capability
+ * @phydev: Pointer to the PHY device structure
+ *
+ * This helper reads the OATC14 ADFCAP capability register to determine whether
+ * the PHY supports SQI or SQI+ reporting.
+ *
+ * SQI+ capability is detected first. The SQI+ field indicates the number of
+ * valid MSBs (3–8), corresponding to 8–256 SQI+ levels. When present, the
+ * function stores the number of SQI+ bits and computes the maximum SQI+ value
+ * as (2^bits - 1).
+ *
+ * If SQI+ is not supported, the function checks for basic SQI capability,
+ * which provides 0–7 SQI levels.
+ *
+ * On success, the capability information is stored in
+ * @phydev->oatc14_sqi_capability and marked as updated.
+ *
+ * Return:
+ * * 0        - capability successfully read and stored
+ * * -EOPNOTSUPP - SQI/SQI+ not supported by this PHY
+ * * Negative errno on read failure
+ */
+static int oatc14_update_sqi_capability(struct phy_device *phydev)
+{
+	u8 bits;
+	int ret;
+
+	ret = phy_read_mmd(phydev, MDIO_MMD_VEND2, MDIO_OATC14_ADFCAP);
+	if (ret < 0)
+		return ret;
+
+	/* Check for SQI+ capability
+	 * 0 - SQI+ is not supported
+	 * (3-8) bits for (8-256) SQI+ levels supported
+	 */
+	bits = FIELD_GET(OATC14_ADFCAP_SQIPLUS_CAPABILITY, ret);
+	if (bits) {
+		phydev->oatc14_sqi_capability.sqiplus_bits = bits;
+		/* Max sqi+ level supported: (2 ^ bits) - 1 */
+		phydev->oatc14_sqi_capability.sqi_max = BIT(bits) - 1;
+		goto update_done;
+	}
+
+	/* Check for SQI capability
+	 * 0 - SQI is not supported
+	 * 1 - SQI is supported (0-7 levels)
+	 */
+	if (ret & OATC14_ADFCAP_SQI_CAPABILITY) {
+		phydev->oatc14_sqi_capability.sqi_max = OATC14_SQI_MAX_LEVEL;
+		goto update_done;
+	}
+
+	return -EOPNOTSUPP;
+
+update_done:
+	phydev->oatc14_sqi_capability.updated = true;
+	return 0;
+}
+
+/**
+ * genphy_c45_oatc14_get_sqi_max - Get maximum supported SQI or SQI+ level of
+ *				   OATC14 10Base-T1S PHY
+ * @phydev: pointer to the PHY device structure
+ *
+ * This function returns the maximum supported Signal Quality Indicator (SQI) or
+ * SQI+ level. The SQI capability is updated on first invocation if it has not
+ * already been updated.
+ *
+ * Return:
+ * * Maximum SQI/SQI+ level supported
+ * * Negative errno on capability read failure
+ */
+int genphy_c45_oatc14_get_sqi_max(struct phy_device *phydev)
+{
+	int ret;
+
+	if (!phydev->oatc14_sqi_capability.updated) {
+		ret = oatc14_update_sqi_capability(phydev);
+		if (ret)
+			return ret;
+	}
+
+	return phydev->oatc14_sqi_capability.sqi_max;
+}
+EXPORT_SYMBOL(genphy_c45_oatc14_get_sqi_max);
+
+/**
+ * genphy_c45_oatc14_get_sqi - Get Signal Quality Indicator (SQI) from an OATC14
+ *			       10Base-T1S PHY
+ * @phydev: pointer to the PHY device structure
+ *
+ * This function reads the SQI+ or SQI value from an OATC14-compatible
+ * 10Base-T1S PHY. If SQI+ capability is supported, the function returns the
+ * extended SQI+ value; otherwise, it returns the basic SQI value. The SQI
+ * capability is updated on first invocation if it has not already been updated.
+ *
+ * Return:
+ * * SQI/SQI+ value on success
+ * * Negative errno on read failure
+ */
+int genphy_c45_oatc14_get_sqi(struct phy_device *phydev)
+{
+	u8 shift;
+	int ret;
+
+	if (!phydev->oatc14_sqi_capability.updated) {
+		ret = oatc14_update_sqi_capability(phydev);
+		if (ret)
+			return ret;
+	}
+
+	/* Calculate and return SQI+ value if supported */
+	if (phydev->oatc14_sqi_capability.sqiplus_bits) {
+		ret = phy_read_mmd(phydev, MDIO_MMD_VEND2,
+				   MDIO_OATC14_DCQ_SQIPLUS);
+		if (ret < 0)
+			return ret;
+
+		/* SQI+ uses N MSBs out of 8 bits, left-aligned with padding 1's
+		 * Calculate the right-shift needed to isolate the N bits.
+		 */
+		shift = 8 - phydev->oatc14_sqi_capability.sqiplus_bits;
+
+		return (ret & OATC14_DCQ_SQIPLUS_VALUE) >> shift;
+	}
+
+	/* Read and return SQI value if SQI+ capability is not supported */
+	ret = phy_read_mmd(phydev, MDIO_MMD_VEND2, MDIO_OATC14_DCQ_SQI);
+	if (ret < 0)
+		return ret;
+
+	return ret & OATC14_DCQ_SQI_VALUE;
+}
+EXPORT_SYMBOL(genphy_c45_oatc14_get_sqi);

@@ -19,6 +19,8 @@ struct codetag_type {
 	struct codetag_type_desc desc;
 	/* generates unique sequence number for module load */
 	unsigned long next_mod_seq;
+	/* bumped on every module load and unload */
+	unsigned long content_id;
 };
 
 struct codetag_range {
@@ -35,17 +37,33 @@ struct codetag_module {
 static DEFINE_MUTEX(codetag_lock);
 static LIST_HEAD(codetag_types);
 
-void codetag_lock_module_list(struct codetag_type *cttype, bool lock)
+void codetag_lock_module_list(struct codetag_type *cttype)
 {
-	if (lock)
-		down_read(&cttype->mod_lock);
-	else
-		up_read(&cttype->mod_lock);
+	down_read(&cttype->mod_lock);
 }
 
 bool codetag_trylock_module_list(struct codetag_type *cttype)
 {
 	return down_read_trylock(&cttype->mod_lock) != 0;
+}
+
+void codetag_unlock_module_list(struct codetag_type *cttype)
+{
+	up_read(&cttype->mod_lock);
+}
+
+unsigned long codetag_get_content_id(struct codetag_type *cttype)
+{
+	lockdep_assert_held(&cttype->mod_lock);
+
+	return cttype->content_id;
+}
+
+unsigned int codetag_get_count(struct codetag_type *cttype)
+{
+	lockdep_assert_held(&cttype->mod_lock);
+
+	return cttype->count;
 }
 
 struct codetag_iterator codetag_get_ct_iter(struct codetag_type *cttype)
@@ -193,7 +211,7 @@ static int codetag_module_init(struct codetag_type *cttype, struct module *mod)
 
 	BUG_ON(range.start > range.stop);
 
-	cmod = kmalloc(sizeof(*cmod), GFP_KERNEL);
+	cmod = kmalloc_obj(*cmod);
 	if (unlikely(!cmod))
 		return -ENOMEM;
 
@@ -202,6 +220,7 @@ static int codetag_module_init(struct codetag_type *cttype, struct module *mod)
 
 	down_write(&cttype->mod_lock);
 	cmod->mod_seq = ++cttype->next_mod_seq;
+	++cttype->content_id;
 	mod_id = idr_alloc(&cttype->mod_idr, cmod, 0, 0, GFP_KERNEL);
 	if (mod_id >= 0) {
 		if (cttype->desc.module_load) {
@@ -366,6 +385,7 @@ void codetag_unload_module(struct module *mod)
 			cttype->count -= range_size(cttype, &cmod->range);
 			idr_remove(&cttype->mod_idr, mod_id);
 			kfree(cmod);
+			++cttype->content_id;
 		}
 		up_write(&cttype->mod_lock);
 		if (found && cttype->desc.free_section_mem)
@@ -383,7 +403,7 @@ codetag_register_type(const struct codetag_type_desc *desc)
 
 	BUG_ON(desc->tag_size <= 0);
 
-	cttype = kzalloc(sizeof(*cttype), GFP_KERNEL);
+	cttype = kzalloc_obj(*cttype);
 	if (unlikely(!cttype))
 		return ERR_PTR(-ENOMEM);
 

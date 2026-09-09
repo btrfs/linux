@@ -9,6 +9,7 @@
 #include "tests/xe_kunit_helpers.h"
 #include "tests/xe_pci_test.h"
 
+#include "xe_pat.h"
 #include "xe_pci.h"
 #include "xe_pm.h"
 
@@ -197,8 +198,7 @@ static void xe_migrate_sanity_test(struct xe_migrate *m, struct kunit *test,
 
 	err = xe_bo_vmap(bo);
 	if (err) {
-		KUNIT_FAIL(test, "Failed to vmap our pagetables: %li\n",
-			   PTR_ERR(bo));
+		KUNIT_FAIL(test, "Failed to vmap our pagetables: %d\n", err);
 		return;
 	}
 
@@ -246,7 +246,7 @@ static void xe_migrate_sanity_test(struct xe_migrate *m, struct kunit *test,
 	/* First part of the test, are we updating our pagetable bo with a new entry? */
 	xe_map_wr(xe, &bo->vmap, XE_PAGE_SIZE * (NUM_KERNEL_PDE - 1), u64,
 		  0xdeaddeadbeefbeef);
-	expected = m->q->vm->pt_ops->pte_encode_bo(pt, 0, xe->pat.idx[XE_CACHE_WB], 0);
+	expected = m->q->vm->pt_ops->pte_encode_bo(pt, 0, xe_cache_pat_idx(xe, XE_CACHE_WB), 0);
 	if (m->q->vm->flags & XE_VM_FLAG_64K)
 		expected |= XE_PTE_PS64;
 	if (xe_bo_is_vram(pt))
@@ -344,8 +344,7 @@ static int migrate_test_run_device(struct xe_device *xe)
 	struct xe_tile *tile;
 	int id;
 
-	xe_pm_runtime_get(xe);
-
+	guard(xe_pm_runtime)(xe);
 	for_each_tile(tile, xe, id) {
 		struct xe_migrate *m = tile->migrate;
 		struct drm_exec *exec = XE_VALIDATION_OPT_OUT;
@@ -355,8 +354,6 @@ static int migrate_test_run_device(struct xe_device *xe)
 		xe_migrate_sanity_test(m, test, exec);
 		xe_vm_unlock(m->q->vm);
 	}
-
-	xe_pm_runtime_put(xe);
 
 	return 0;
 }
@@ -423,7 +420,7 @@ static struct dma_fence *blt_copy(struct xe_tile *tile,
 					      avail_pts, avail_pts);
 
 		/* Add copy commands size here */
-		batch_size += ((copy_only_ccs) ? 0 : EMIT_COPY_DW) +
+		batch_size += ((copy_only_ccs) ? 0 : emit_copy_cmd_len(xe)) +
 			((xe_device_has_flat_ccs(xe) && copy_only_ccs) ? EMIT_COPY_CCS_DW : 0);
 
 		bb = xe_bb_new(gt, batch_size, xe->info.has_usm);
@@ -759,12 +756,9 @@ static int validate_ccs_test_run_device(struct xe_device *xe)
 		return 0;
 	}
 
-	xe_pm_runtime_get(xe);
-
+	guard(xe_pm_runtime)(xe);
 	for_each_tile(tile, xe, id)
 		validate_ccs_test_run_tile(xe, tile, test);
-
-	xe_pm_runtime_put(xe);
 
 	return 0;
 }

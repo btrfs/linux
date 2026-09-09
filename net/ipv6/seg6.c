@@ -29,6 +29,9 @@ bool seg6_validate_srh(struct ipv6_sr_hdr *srh, int len, bool reduced)
 	int max_last_entry;
 	int trailing;
 
+	if (len < sizeof(*srh))
+		return false;
+
 	if (srh->type != IPV6_SRCRT_TYPE_4)
 		return false;
 
@@ -202,7 +205,7 @@ static int seg6_genl_sethmac(struct sk_buff *skb, struct genl_info *info)
 
 	secret = (char *)nla_data(info->attrs[SEG6_ATTR_SECRET]);
 
-	hinfo = kzalloc(sizeof(*hinfo), GFP_KERNEL);
+	hinfo = kzalloc_obj(*hinfo);
 	if (!hinfo) {
 		err = -ENOMEM;
 		goto out_unlock;
@@ -339,7 +342,7 @@ static int seg6_genl_dumphmac_start(struct netlink_callback *cb)
 	iter = (struct rhashtable_iter *)cb->args[0];
 
 	if (!iter) {
-		iter = kmalloc(sizeof(*iter), GFP_KERNEL);
+		iter = kmalloc_obj(*iter);
 		if (!iter)
 			return -ENOMEM;
 
@@ -421,13 +424,13 @@ static int __net_init seg6_net_init(struct net *net)
 {
 	struct seg6_pernet_data *sdata;
 
-	sdata = kzalloc(sizeof(*sdata), GFP_KERNEL);
+	sdata = kzalloc_obj(*sdata);
 	if (!sdata)
 		return -ENOMEM;
 
 	mutex_init(&sdata->lock);
 
-	sdata->tun_src = kzalloc(sizeof(*sdata->tun_src), GFP_KERNEL);
+	sdata->tun_src = kzalloc_obj(*sdata->tun_src);
 	if (!sdata->tun_src) {
 		kfree(sdata);
 		return -ENOMEM;

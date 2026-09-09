@@ -236,21 +236,21 @@ static void pn533_i2c_remove(struct i2c_client *client)
 	pn53x_common_clean(phy->priv);
 }
 
-static const struct of_device_id of_pn533_i2c_match[] __maybe_unused = {
-	{ .compatible = "nxp,pn532", },
+static const struct of_device_id of_pn533_i2c_match[] = {
+	{ .compatible = "nxp,pn532" },
 	/*
 	 * NOTE: The use of the compatibles with the trailing "...-i2c" is
 	 * deprecated and will be removed.
 	 */
-	{ .compatible = "nxp,pn533-i2c", },
-	{ .compatible = "nxp,pn532-i2c", },
-	{},
+	{ .compatible = "nxp,pn533-i2c" },
+	{ .compatible = "nxp,pn532-i2c" },
+	{ }
 };
 MODULE_DEVICE_TABLE(of, of_pn533_i2c_match);
 
 static const struct i2c_device_id pn533_i2c_id_table[] = {
-	{ PN533_I2C_DRIVER_NAME },
-	{}
+	{ .name = PN533_I2C_DRIVER_NAME },
+	{ }
 };
 MODULE_DEVICE_TABLE(i2c, pn533_i2c_id_table);
 

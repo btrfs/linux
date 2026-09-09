@@ -47,6 +47,9 @@
 #include <linux/rwsem.h>
 #include <linux/mutex.h>
 #include <asm/xen/hypervisor.h>
+#ifdef CONFIG_X86
+#include <asm/cpuid/api.h>
+#endif
 #include <xen/xenbus.h>
 #include <xen/xen.h>
 #include "xenbus.h"
@@ -324,7 +327,7 @@ static void *xs_talkv(struct xenbus_transaction t,
 	unsigned int i;
 	int err;
 
-	req = kmalloc(sizeof(*req), GFP_NOIO | __GFP_HIGH);
+	req = kmalloc_obj(*req, GFP_NOIO | __GFP_HIGH);
 	if (!req)
 		return ERR_PTR(-ENOMEM);
 
@@ -407,12 +410,18 @@ static char *join(const char *dir, const char *name)
 		buffer = kasprintf(GFP_NOIO | __GFP_HIGH, "%s", dir);
 	else
 		buffer = kasprintf(GFP_NOIO | __GFP_HIGH, "%s/%s", dir, name);
-	return (!buffer) ? ERR_PTR(-ENOMEM) : buffer;
+	return buffer ?: ERR_PTR(-ENOMEM);
 }
 
-static char **split(char *strings, unsigned int len, unsigned int *num)
+static char **split_strings(char *strings, unsigned int len, unsigned int *num)
 {
 	char *p, **ret;
+
+	if (len && strings[len - 1]) {
+		pr_err_once("malformed XS_DIRECTORY reply\n");
+		kfree(strings);
+		return ERR_PTR(-EIO);
+	}
 
 	/* Count the strings. */
 	*num = count_strings(strings, len);
@@ -448,7 +457,7 @@ char **xenbus_directory(struct xenbus_transaction t,
 	if (IS_ERR(strings))
 		return ERR_CAST(strings);
 
-	return split(strings, len, num);
+	return split_strings(strings, len, num);
 }
 EXPORT_SYMBOL_GPL(xenbus_directory);
 
@@ -546,18 +555,12 @@ int xenbus_transaction_start(struct xenbus_transaction *t)
 EXPORT_SYMBOL_GPL(xenbus_transaction_start);
 
 /* End a transaction.
- * If abandon is true, transaction is discarded instead of committed.
+ * If abort is true, transaction is discarded instead of committed.
  */
-int xenbus_transaction_end(struct xenbus_transaction t, int abort)
+int xenbus_transaction_end(struct xenbus_transaction t, bool abort)
 {
-	char abortstr[2];
-
-	if (abort)
-		strcpy(abortstr, "F");
-	else
-		strcpy(abortstr, "T");
-
-	return xs_error(xs_single(t, XS_TRANSACTION_END, abortstr, NULL));
+	return xs_error(xs_single(t, XS_TRANSACTION_END, abort ? "F" : "T",
+				  NULL));
 }
 EXPORT_SYMBOL_GPL(xenbus_transaction_end);
 
@@ -912,19 +915,27 @@ int xs_init(void)
 	int err;
 	struct task_struct *task;
 
-	register_reboot_notifier(&xs_reboot_nb);
+	err = register_reboot_notifier(&xs_reboot_nb);
+	if (err)
+		return err;
 
 	/* Initialize the shared memory rings to talk to xenstored */
 	err = xb_init_comms();
 	if (err)
-		return err;
+		goto err_unregister_reboot_notifier;
 
 	task = kthread_run(xenwatch_thread, NULL, "xenwatch");
-	if (IS_ERR(task))
-		return PTR_ERR(task);
+	if (IS_ERR(task)) {
+		err = PTR_ERR(task);
+		goto err_unregister_reboot_notifier;
+	}
 
 	/* shutdown watches for kexec boot */
 	xs_reset_watches();
 
 	return 0;
+
+err_unregister_reboot_notifier:
+	unregister_reboot_notifier(&xs_reboot_nb);
+	return err;
 }

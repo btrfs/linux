@@ -1,5 +1,5 @@
 
-# Copyright 2022 Advanced Micro Devices, Inc.
+# Copyright 2022-2026 Advanced Micro Devices, Inc.
 #
 # Permission is hereby granted, free of charge, to any person obtaining a
 # copy of this software and associated documentation files (the "Software"),
@@ -79,5 +79,30 @@ DPP_DCN401 = dcn401_dpp.o dcn401_dpp_cm.o dcn401_dpp_dscl.o
 AMD_DAL_DPP_DCN401 = $(addprefix $(AMDDALPATH)/dc/dpp/dcn401/,$(DPP_DCN401))
 
 AMD_DISPLAY_FILES += $(AMD_DAL_DPP_DCN401)
+
+###############################################################################
+# DCN42
+###############################################################################
+DPP_DCN42 = dcn42_dpp.o
+
+AMD_DAL_DPP_DCN42 = $(addprefix $(AMDDALPATH)/dc/dpp/dcn42/,$(DPP_DCN42))
+
+AMD_DISPLAY_FILES += $(AMD_DAL_DPP_DCN42)
+
+###############################################################################
+
+DPP_DCN50 = dcn50_dpp.o
+
+AMD_DAL_DPP_DCN50 = $(addprefix $(AMDDALPATH)/dc/dpp/dcn50/,$(DPP_DCN50))
+
+AMD_DISPLAY_FILES += $(AMD_DAL_DPP_DCN50)
+
+###############################################################################
+
+DPP_DCN60 = dcn60_dpp.o dcn60_dpp_dscl.o
+
+AMD_DAL_DPP_DCN60 = $(addprefix $(AMDDALPATH)/dc/dpp/dcn60/,$(DPP_DCN60))
+
+AMD_DISPLAY_FILES += $(AMD_DAL_DPP_DCN60)
 
 endif

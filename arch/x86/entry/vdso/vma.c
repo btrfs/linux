@@ -6,6 +6,7 @@
  */
 #include <linux/mm.h>
 #include <linux/err.h>
+#include <linux/futex.h>
 #include <linux/sched.h>
 #include <linux/sched/task_stack.h>
 #include <linux/slab.h>
@@ -65,17 +66,38 @@ static vm_fault_t vdso_fault(const struct vm_special_mapping *sm,
 static void vdso_fix_landing(const struct vdso_image *image,
 		struct vm_area_struct *new_vma)
 {
-	if (in_ia32_syscall() && image == &vdso_image_32) {
-		struct pt_regs *regs = current_pt_regs();
-		unsigned long vdso_land = image->sym_int80_landing_pad;
-		unsigned long old_land_addr = vdso_land +
-			(unsigned long)current->mm->context.vdso;
+	struct pt_regs *regs = current_pt_regs();
+	unsigned long ipoffset = regs->ip -
+		(unsigned long)current->mm->context.vdso;
 
-		/* Fixing userspace landing - look at do_fast_syscall_32 */
-		if (regs->ip == old_land_addr)
-			regs->ip = new_vma->vm_start + vdso_land;
-	}
+	if (ipoffset < image->size)
+		regs->ip = new_vma->vm_start + ipoffset;
 }
+
+#ifdef CONFIG_FUTEX_ROBUST_UNLOCK
+static void vdso_futex_robust_unlock_update_ips(void)
+{
+	const struct vdso_image *image = current->mm->context.vdso_image;
+	unsigned long vdso = (unsigned long) current->mm->context.vdso;
+	struct futex_mm_data *fd = &current->mm->futex;
+	unsigned int idx = 0;
+
+	futex_reset_cs_ranges(fd);
+
+#ifdef CONFIG_X86_64
+	futex_set_vdso_cs_range(fd, idx, vdso + image->sym___futex_list64_try_unlock_cs_start,
+				vdso + image->sym___futex_list64_try_unlock_cs_end, false);
+	idx++;
+#endif /* CONFIG_X86_64 */
+
+#if defined(CONFIG_X86_32) || defined(CONFIG_COMPAT)
+	futex_set_vdso_cs_range(fd, idx, vdso + image->sym___futex_list32_try_unlock_cs_start,
+				vdso + image->sym___futex_list32_try_unlock_cs_end, true);
+#endif /* CONFIG_X86_32 || CONFIG_COMPAT */
+}
+#else
+static inline void vdso_futex_robust_unlock_update_ips(void) { }
+#endif
 
 static int vdso_mremap(const struct vm_special_mapping *sm,
 		struct vm_area_struct *new_vma)
@@ -84,6 +106,7 @@ static int vdso_mremap(const struct vm_special_mapping *sm,
 
 	vdso_fix_landing(image, new_vma);
 	current->mm->context.vdso = (void __user *)new_vma->vm_start;
+	vdso_futex_robust_unlock_update_ips();
 
 	return 0;
 }
@@ -92,7 +115,6 @@ static vm_fault_t vvar_vclock_fault(const struct vm_special_mapping *sm,
 				    struct vm_area_struct *vma, struct vm_fault *vmf)
 {
 	switch (vmf->pgoff) {
-#ifdef CONFIG_PARAVIRT_CLOCK
 	case VDSO_PAGE_PVCLOCK_OFFSET:
 	{
 		struct pvclock_vsyscall_time_info *pvti =
@@ -104,8 +126,6 @@ static vm_fault_t vvar_vclock_fault(const struct vm_special_mapping *sm,
 					pgprot_decrypted(vma->vm_page_prot));
 		break;
 	}
-#endif /* CONFIG_PARAVIRT_CLOCK */
-#ifdef CONFIG_HYPERV_TIMER
 	case VDSO_PAGE_HVCLOCK_OFFSET:
 	{
 		unsigned long pfn = hv_get_tsc_pfn();
@@ -113,7 +133,6 @@ static vm_fault_t vvar_vclock_fault(const struct vm_special_mapping *sm,
 			return vmf_insert_pfn(vma, vmf->address, pfn);
 		break;
 	}
-#endif /* CONFIG_HYPERV_TIMER */
 	}
 
 	return VM_FAULT_SIGBUS;
@@ -186,12 +205,14 @@ static int map_vdso(const struct vdso_image *image, unsigned long addr)
 	if (IS_ERR(vma)) {
 		ret = PTR_ERR(vma);
 		do_munmap(mm, text_start, image->size, NULL);
-		do_munmap(mm, addr, image->size, NULL);
+		do_munmap(mm, addr, VDSO_NR_PAGES * PAGE_SIZE, NULL);
 		goto up_fail;
 	}
 
 	current->mm->context.vdso = (void __user *)text_start;
 	current->mm->context.vdso_image = image;
+
+	vdso_futex_robust_unlock_update_ips();
 
 up_fail:
 	mmap_write_unlock(mm);
@@ -230,7 +251,7 @@ static int load_vdso32(void)
 	if (vdso32_enabled != 1)  /* Other values all mean "disabled" */
 		return 0;
 
-	return map_vdso(&vdso_image_32, 0);
+	return map_vdso(&vdso32_image, 0);
 }
 
 int arch_setup_additional_pages(struct linux_binprm *bprm, int uses_interp)
@@ -239,7 +260,7 @@ int arch_setup_additional_pages(struct linux_binprm *bprm, int uses_interp)
 		if (!vdso64_enabled)
 			return 0;
 
-		return map_vdso(&vdso_image_64, 0);
+		return map_vdso(&vdso64_image, 0);
 	}
 
 	return load_vdso32();
@@ -252,7 +273,7 @@ int compat_arch_setup_additional_pages(struct linux_binprm *bprm,
 	if (IS_ENABLED(CONFIG_X86_X32_ABI) && x32) {
 		if (!vdso64_enabled)
 			return 0;
-		return map_vdso(&vdso_image_x32, 0);
+		return map_vdso(&vdsox32_image, 0);
 	}
 
 	if (IS_ENABLED(CONFIG_IA32_EMULATION))
@@ -267,7 +288,7 @@ bool arch_syscall_is_vdso_sigreturn(struct pt_regs *regs)
 	const struct vdso_image *image = current->mm->context.vdso_image;
 	unsigned long vdso = (unsigned long) current->mm->context.vdso;
 
-	if (in_ia32_syscall() && image == &vdso_image_32) {
+	if (in_ia32_syscall() && image == &vdso32_image) {
 		if (regs->ip == vdso + image->sym_vdso32_sigreturn_landing_pad ||
 		    regs->ip == vdso + image->sym_vdso32_rt_sigreturn_landing_pad)
 			return true;

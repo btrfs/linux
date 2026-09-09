@@ -70,7 +70,6 @@ void ODM_TXPowerTrackingCallback_ThermalMeter(struct adapter *Adapter)
 
 	struct txpwrtrack_cfg c;
 
-
 	/* 4 1. The following TWO tables decide the final index of OFDM/CCK swing table. */
 	u8 *deltaSwingTableIdx_TUP_A;
 	u8 *deltaSwingTableIdx_TDOWN_A;
@@ -220,22 +219,18 @@ void ODM_TXPowerTrackingCallback_ThermalMeter(struct adapter *Adapter)
 				pDM_Odm->RFCalibrateInfo.OFDM_index[p];
 
 			/* 4 7.1 Handle boundary conditions of index. */
-			if (pDM_Odm->RFCalibrateInfo.OFDM_index[p] > c.SwingTableSize_OFDM-1)
-				pDM_Odm->RFCalibrateInfo.OFDM_index[p] = c.SwingTableSize_OFDM-1;
+			if (pDM_Odm->RFCalibrateInfo.OFDM_index[p] > c.SwingTableSize_OFDM - 1)
+				pDM_Odm->RFCalibrateInfo.OFDM_index[p] = c.SwingTableSize_OFDM - 1;
 			else if (pDM_Odm->RFCalibrateInfo.OFDM_index[p] < OFDM_min_index)
 				pDM_Odm->RFCalibrateInfo.OFDM_index[p] = OFDM_min_index;
 		}
-		if (pDM_Odm->RFCalibrateInfo.CCK_index > c.SwingTableSize_CCK-1)
-			pDM_Odm->RFCalibrateInfo.CCK_index = c.SwingTableSize_CCK-1;
+		if (pDM_Odm->RFCalibrateInfo.CCK_index > c.SwingTableSize_CCK - 1)
+			pDM_Odm->RFCalibrateInfo.CCK_index = c.SwingTableSize_CCK - 1;
 		/* else if (pDM_Odm->RFCalibrateInfo.CCK_index < 0) */
 			/* pDM_Odm->RFCalibrateInfo.CCK_index = 0; */
 	} else {
 			for (p = RF_PATH_A; p < c.RfPathCount; p++)
 				pDM_Odm->RFCalibrateInfo.PowerIndexOffset[p] = 0;
-	}
-
-	/* Print Swing base & current */
-	for (p = RF_PATH_A; p < c.RfPathCount; p++) {
 	}
 
 	if (

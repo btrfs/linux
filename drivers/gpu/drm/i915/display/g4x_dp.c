@@ -10,8 +10,6 @@
 #include <drm/drm_print.h>
 
 #include "g4x_dp.h"
-#include "i915_reg.h"
-#include "i915_utils.h"
 #include "intel_audio.h"
 #include "intel_backlight.h"
 #include "intel_connector.h"
@@ -20,6 +18,7 @@
 #include "intel_display_power.h"
 #include "intel_display_regs.h"
 #include "intel_display_types.h"
+#include "intel_display_utils.h"
 #include "intel_dp.h"
 #include "intel_dp_aux.h"
 #include "intel_dp_link_training.h"
@@ -137,7 +136,7 @@ static void intel_dp_prepare(struct intel_encoder *encoder,
 			intel_dp->DP |= DP_SYNC_VS_HIGH;
 		intel_dp->DP |= DP_LINK_TRAIN_OFF_CPT;
 
-		if (drm_dp_enhanced_frame_cap(intel_dp->dpcd))
+		if (pipe_config->enhanced_framing)
 			intel_dp->DP |= DP_ENHANCED_FRAMING;
 
 		intel_dp->DP |= DP_PIPE_SEL_IVB(crtc->pipe);
@@ -274,7 +273,7 @@ static bool cpt_dp_port_selected(struct intel_display *display,
 }
 
 bool g4x_dp_port_enabled(struct intel_display *display,
-			 i915_reg_t dp_reg, enum port port,
+			 intel_reg_t dp_reg, enum port port,
 			 enum pipe *pipe)
 {
 	bool ret;
@@ -302,7 +301,7 @@ static bool intel_dp_get_hw_state(struct intel_encoder *encoder,
 {
 	struct intel_display *display = to_intel_display(encoder);
 	struct intel_dp *intel_dp = enc_to_intel_dp(encoder);
-	intel_wakeref_t wakeref;
+	struct ref_tracker *wakeref;
 	bool ret;
 
 	wakeref = intel_display_power_get_if_enabled(display,
@@ -684,12 +683,11 @@ static void intel_enable_dp(struct intel_atomic_state *state,
 	struct intel_display *display = to_intel_display(state);
 	struct intel_dp *intel_dp = enc_to_intel_dp(encoder);
 	u32 dp_reg = intel_de_read(display, intel_dp->output_reg);
-	intel_wakeref_t wakeref;
 
 	if (drm_WARN_ON(display->drm, dp_reg & DP_PORT_EN))
 		return;
 
-	with_intel_pps_lock(intel_dp, wakeref) {
+	with_intel_pps_lock(intel_dp) {
 		if (display->platform.valleyview || display->platform.cherryview)
 			vlv_pps_port_enable_unlocked(encoder, pipe_config);
 
@@ -1224,7 +1222,8 @@ static bool ilk_digital_port_connected(struct intel_encoder *encoder)
 	return intel_de_read(display, DEISR) & bit;
 }
 
-static int g4x_dp_compute_config(struct intel_encoder *encoder,
+static int g4x_dp_compute_config(struct intel_atomic_state *state,
+				 struct intel_encoder *encoder,
 				 struct intel_crtc_state *crtc_state,
 				 struct drm_connector_state *conn_state)
 {
@@ -1234,7 +1233,7 @@ static int g4x_dp_compute_config(struct intel_encoder *encoder,
 	if (HAS_PCH_SPLIT(display) && encoder->port != PORT_A)
 		crtc_state->has_pch_encoder = true;
 
-	ret = intel_dp_compute_config(encoder, crtc_state, conn_state);
+	ret = intel_dp_compute_config(state, encoder, crtc_state, conn_state);
 	if (ret)
 		return ret;
 
@@ -1254,10 +1253,13 @@ static void g4x_dp_suspend_complete(struct intel_encoder *encoder)
 
 static void intel_dp_encoder_destroy(struct drm_encoder *encoder)
 {
+	struct intel_digital_port *dig_port = enc_to_dig_port(to_intel_encoder(encoder));
+
 	intel_dp_encoder_flush_work(encoder);
 
 	drm_encoder_cleanup(encoder);
-	kfree(enc_to_dig_port(to_intel_encoder(encoder)));
+	intel_dp_link_cleanup(&dig_port->dp);
+	kfree(dig_port);
 }
 
 static void intel_dp_encoder_reset(struct drm_encoder *encoder)
@@ -1282,7 +1284,7 @@ static const struct drm_encoder_funcs intel_dp_enc_funcs = {
 };
 
 bool g4x_dp_init(struct intel_display *display,
-		 i915_reg_t output_reg, enum port port)
+		 intel_reg_t output_reg, enum port port)
 {
 	const struct intel_bios_encoder_data *devdata;
 	struct intel_digital_port *dig_port;
@@ -1351,6 +1353,9 @@ bool g4x_dp_init(struct intel_display *display,
 	}
 	intel_encoder->audio_enable = g4x_dp_audio_enable;
 	intel_encoder->audio_disable = g4x_dp_audio_disable;
+
+	if (intel_dp_link_init(&dig_port->dp) != 0)
+		goto err_dp_init;
 
 	if ((display->platform.ivybridge && port == PORT_A) ||
 	    (HAS_PCH_CPT(display) && port != PORT_A)) {
@@ -1421,6 +1426,8 @@ bool g4x_dp_init(struct intel_display *display,
 	return true;
 
 err_init_connector:
+	intel_dp_link_cleanup(&dig_port->dp);
+err_dp_init:
 	drm_encoder_cleanup(encoder);
 err_encoder_init:
 	kfree(intel_connector);

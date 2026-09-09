@@ -101,7 +101,7 @@ static __always_inline unsigned long __vmcs_readl(unsigned long field)
 
 			  : [output] "=r" (value)
 			  : [field] "r" (field)
-			  : "cc"
+			  : "cc", "memory"
 			  : do_fail, do_exception);
 
 	return value;
@@ -119,7 +119,6 @@ do_exception:
 #else /* !CONFIG_CC_HAS_ASM_GOTO_OUTPUT */
 
 	asm volatile("1: vmread %[field], %[output]\n\t"
-		     ".byte 0x3e\n\t" /* branch taken hint */
 		     "ja 3f\n\t"
 
 		     /*
@@ -146,7 +145,7 @@ do_exception:
 
 		     : ASM_CALL_CONSTRAINT, [output] "=&r" (value)
 		     : [field] "r" (field)
-		     : "cc");
+		     : "cc", "memory");
 	return value;
 
 #endif /* CONFIG_CC_HAS_ASM_GOTO_OUTPUT */
@@ -191,10 +190,9 @@ static __always_inline unsigned long vmcs_readl(unsigned long field)
 #define vmx_asm1(insn, op1, error_args...)				\
 do {									\
 	asm goto("1: " __stringify(insn) " %0\n\t"			\
-			  ".byte 0x2e\n\t" /* branch not taken hint */	\
 			  "jna %l[error]\n\t"				\
 			  _ASM_EXTABLE(1b, %l[fault])			\
-			  : : op1 : "cc" : error, fault);		\
+			  : : op1 : "cc", "memory" : error, fault);	\
 	return;								\
 error:									\
 	instrumentation_begin();					\
@@ -208,10 +206,9 @@ fault:									\
 #define vmx_asm2(insn, op1, op2, error_args...)				\
 do {									\
 	asm goto("1: "  __stringify(insn) " %1, %0\n\t"			\
-			  ".byte 0x2e\n\t" /* branch not taken hint */	\
 			  "jna %l[error]\n\t"				\
 			  _ASM_EXTABLE(1b, %l[fault])			\
-			  : : op1, op2 : "cc" : error, fault);		\
+			  : : op1, op2 : "cc", "memory" : error, fault);\
 	return;								\
 error:									\
 	instrumentation_begin();					\
@@ -224,7 +221,7 @@ fault:									\
 
 static __always_inline void __vmcs_writel(unsigned long field, unsigned long value)
 {
-	vmx_asm2(vmwrite, "r"(field), "rm"(value), field, value);
+	vmx_asm2(vmwrite, "r" (field), ASM_INPUT_RM (value), field, value);
 }
 
 static __always_inline void vmcs_write16(unsigned long field, u16 value)

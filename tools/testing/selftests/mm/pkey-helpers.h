@@ -16,7 +16,7 @@
 #include <linux/mman.h>
 #include <linux/types.h>
 
-#include "../kselftest.h"
+#include "kselftest.h"
 
 /* Define some kernel-like types */
 typedef __u8	u8;
@@ -68,16 +68,19 @@ static inline void sigsafe_printf(const char *format, ...)
 #define dprintf3(args...) dprintf_level(3, args)
 #define dprintf4(args...) dprintf_level(4, args)
 
-extern void abort_hooks(void);
+void tracing_on(void);
+void tracing_off(void);
+void abort_hooks(void);
 #define pkey_assert(condition) do {		\
 	if (!(condition)) {			\
-		dprintf0("assert() at %s::%d test_nr: %d iteration: %d\n", \
-				__FILE__, __LINE__,	\
-				test_nr, iteration_nr);	\
-		dprintf0("errno at assert: %d", errno);	\
-		abort_hooks();			\
-		exit(__LINE__);			\
-	}					\
+		dprintf0("# assert() at %s::%d test_nr: %d iteration: %d\n", \
+			 __FILE__, __LINE__,				\
+			 test_nr, iteration_nr);			\
+		dprintf0("# errno at assert: %d\n", errno);		\
+		abort_hooks();						\
+		ksft_exit_fail_msg("test %d (iteration %d)\n",		\
+				   test_nr, iteration_nr);		\
+	}								\
 } while (0)
 
 #define barrier() __asm__ __volatile__("": : :"memory")

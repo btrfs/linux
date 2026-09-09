@@ -12,8 +12,9 @@
 #include <linux/pm_runtime.h>
 
 #include <drm/drm_crtc_helper.h>
+#include <drm/drm_encoder.h>
 #include <drm/drm_modeset_helper_vtables.h>
-#include <drm/drm_simple_kms_helper.h>
+#include <drm/drm_print.h>
 
 #include "intel_bios.h"
 #include "power.h"
@@ -592,6 +593,10 @@ set_prop_error:
 	return -1;
 }
 
+static const struct drm_encoder_funcs psb_intel_lvds_funcs = {
+	.destroy = drm_encoder_cleanup,
+};
+
 static const struct drm_encoder_helper_funcs psb_intel_lvds_helper_funcs = {
 	.dpms = psb_intel_lvds_encoder_dpms,
 	.mode_fixup = psb_intel_lvds_mode_fixup,
@@ -638,20 +643,20 @@ void psb_intel_lvds_init(struct drm_device *dev,
 	int pipe;
 	int ret;
 
-	gma_encoder = kzalloc(sizeof(struct gma_encoder), GFP_KERNEL);
+	gma_encoder = kzalloc_obj(struct gma_encoder);
 	if (!gma_encoder) {
 		dev_err(dev->dev, "gma_encoder allocation error\n");
 		return;
 	}
 	encoder = &gma_encoder->base;
 
-	gma_connector = kzalloc(sizeof(struct gma_connector), GFP_KERNEL);
+	gma_connector = kzalloc_obj(struct gma_connector);
 	if (!gma_connector) {
 		dev_err(dev->dev, "gma_connector allocation error\n");
 		goto err_free_encoder;
 	}
 
-	lvds_priv = kzalloc(sizeof(struct psb_intel_lvds_priv), GFP_KERNEL);
+	lvds_priv = kzalloc_obj(struct psb_intel_lvds_priv);
 	if (!lvds_priv) {
 		dev_err(dev->dev, "LVDS private allocation error\n");
 		goto err_free_connector;
@@ -678,7 +683,8 @@ void psb_intel_lvds_init(struct drm_device *dev,
 	if (ret)
 		goto err_ddc_destroy;
 
-	ret = drm_simple_encoder_init(dev, encoder, DRM_MODE_ENCODER_LVDS);
+	ret = drm_encoder_init(dev, encoder, &psb_intel_lvds_funcs,
+			       DRM_MODE_ENCODER_LVDS, NULL);
 	if (ret)
 		goto err_connector_cleanup;
 

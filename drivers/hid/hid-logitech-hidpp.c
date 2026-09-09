@@ -76,6 +76,7 @@ MODULE_PARM_DESC(disable_tap_to_click,
 #define HIDPP_QUIRK_HI_RES_SCROLL_1P0		BIT(28)
 #define HIDPP_QUIRK_WIRELESS_STATUS		BIT(29)
 #define HIDPP_QUIRK_RESET_HI_RES_SCROLL		BIT(30)
+#define HIDPP_QUIRK_HIDPP_REPROG_CONTROLS_BTNS	BIT(31)
 
 /* These are just aliases for now */
 #define HIDPP_QUIRK_KBD_SCROLL_WHEEL HIDPP_QUIRK_HIDPP_WHEELS
@@ -164,7 +165,6 @@ struct hidpp_battery {
 /**
  * struct hidpp_scroll_counter - Utility class for processing high-resolution
  *                             scroll events.
- * @dev: the input device for which events should be reported.
  * @wheel_multiplier: the scalar multiplier to be applied to each wheel event
  * @remainder: counts the number of high-resolution units moved since the last
  *             low-resolution event (REL_WHEEL or REL_HWHEEL) was sent. Should
@@ -178,6 +178,8 @@ struct hidpp_scroll_counter {
 	int direction;
 	unsigned long long last_time;
 };
+
+struct hidpp_reprog_control_mapping;
 
 struct hidpp_device {
 	struct hid_device *hid_dev;
@@ -206,6 +208,11 @@ struct hidpp_device {
 	struct hidpp_scroll_counter vertical_wheel_counter;
 
 	u8 wireless_feature_index;
+	u8 reprog_controls_feature_index;
+	const struct hidpp_reprog_control_mapping *reprog_controls;
+
+	int hires_wheel_multiplier;
+	u8 hires_wheel_feature_index;
 
 	bool connected_once;
 };
@@ -306,21 +313,22 @@ static int __do_hidpp_send_message_sync(struct hidpp_device *hidpp,
 	if (ret) {
 		dbg_hid("__hidpp_send_report returned err: %d\n", ret);
 		memset(response, 0, sizeof(struct hidpp_report));
-		return ret;
+		goto out;
 	}
 
 	if (!wait_event_timeout(hidpp->wait, hidpp->answer_available,
 				5*HZ)) {
 		dbg_hid("%s:timeout waiting for response\n", __func__);
 		memset(response, 0, sizeof(struct hidpp_report));
-		return -ETIMEDOUT;
+		ret = -ETIMEDOUT;
+		goto out;
 	}
 
 	if (response->report_id == REPORT_ID_HIDPP_SHORT &&
 	    response->rap.sub_id == HIDPP_ERROR) {
 		ret = response->rap.params[1];
 		dbg_hid("%s:got hidpp error %02X\n", __func__, ret);
-		return ret;
+		goto out;
 	}
 
 	if ((response->report_id == REPORT_ID_HIDPP_LONG ||
@@ -328,10 +336,14 @@ static int __do_hidpp_send_message_sync(struct hidpp_device *hidpp,
 	    response->fap.feature_index == HIDPP20_ERROR) {
 		ret = response->fap.params[1];
 		dbg_hid("%s:got hidpp 2.0 error %02X\n", __func__, ret);
-		return ret;
+		goto out;
 	}
 
-	return 0;
+	ret = 0;
+
+out:
+	hidpp->send_receive_buf = NULL;
+	return ret;
 }
 
 /*
@@ -352,10 +364,15 @@ static int hidpp_send_message_sync(struct hidpp_device *hidpp,
 
 	do {
 		ret = __do_hidpp_send_message_sync(hidpp, message, response);
-		if (ret != HIDPP20_ERROR_BUSY)
+		if (response->report_id == REPORT_ID_HIDPP_SHORT &&
+		    ret != HIDPP_ERROR_BUSY)
+			break;
+		if ((response->report_id == REPORT_ID_HIDPP_LONG ||
+		     response->report_id == REPORT_ID_HIDPP_VERY_LONG) &&
+		    ret != HIDPP20_ERROR_BUSY)
 			break;
 
-		dbg_hid("%s:got busy hidpp 2.0 error %02X, retrying\n", __func__, ret);
+		dbg_hid("%s:got busy hidpp error %02X, retrying\n", __func__, ret);
 	} while (--max_retries);
 
 	mutex_unlock(&hidpp->send_mutex);
@@ -385,7 +402,7 @@ static int hidpp_send_fap_command_sync(struct hidpp_device *hidpp,
 		return -EINVAL;
 	}
 
-	message = kzalloc(sizeof(struct hidpp_report), GFP_KERNEL);
+	message = kzalloc_obj(struct hidpp_report);
 	if (!message)
 		return -ENOMEM;
 
@@ -438,7 +455,7 @@ static int hidpp_send_rap_command_sync(struct hidpp_device *hidpp_dev,
 	if (param_count > max_count)
 		return -EINVAL;
 
-	message = kzalloc(sizeof(struct hidpp_report), GFP_KERNEL);
+	message = kzalloc_obj(struct hidpp_report);
 	if (!message)
 		return -ENOMEM;
 	message->report_id = report_id;
@@ -971,7 +988,9 @@ static int hidpp_root_get_protocol_version(struct hidpp_device *hidpp)
 	}
 
 	/* the device might not be connected */
-	if (ret == HIDPP_ERROR_RESOURCE_ERROR)
+	if (ret == HIDPP_ERROR_CONNECT_FAIL ||
+	    ret == HIDPP_ERROR_RESOURCE_ERROR ||
+	    ret == HIDPP_ERROR_UNKNOWN_DEVICE)
 		return -EIO;
 
 	if (ret > 0) {
@@ -2496,12 +2515,15 @@ static void hidpp_ff_work_handler(struct work_struct *w)
 		}
 		break;
 	case HIDPP_FF_DESTROY_EFFECT:
-		if (wd->effect_id >= 0)
-			/* regular effect destroyed */
-			data->effect_ids[wd->params[0]-1] = -1;
-		else if (wd->effect_id >= HIDPP_FF_EFFECTID_AUTOCENTER)
-			/* autocenter spring destroyed */
-			data->slot_autocenter = 0;
+		slot = wd->params[0];
+		if (slot > 0 && slot <= data->num_effects) {
+			if (wd->effect_id >= 0)
+				/* regular effect destroyed */
+				data->effect_ids[slot-1] = -1;
+			else if (wd->effect_id >= HIDPP_FF_EFFECTID_AUTOCENTER)
+				/* autocenter spring destroyed */
+				data->slot_autocenter = 0;
+		}
 		break;
 	case HIDPP_FF_SET_GLOBAL_GAINS:
 		data->gain = (wd->params[0] << 8) + wd->params[1];
@@ -2521,7 +2543,7 @@ out:
 
 static int hidpp_ff_queue_work(struct hidpp_ff_private_data *data, int effect_id, u8 command, u8 *params, u8 size)
 {
-	struct hidpp_ff_work_data *wd = kzalloc(sizeof(*wd), GFP_KERNEL);
+	struct hidpp_ff_work_data *wd = kzalloc_obj(*wd);
 	int s;
 
 	if (!wd)
@@ -2845,18 +2867,19 @@ static int hidpp_ff_init(struct hidpp_device *hidpp,
 	 * ownership to FF core
 	 */
 	data = kmemdup(data, sizeof(*data), GFP_KERNEL);
-	if (!data)
-		return -ENOMEM;
-	data->effect_ids = kcalloc(num_slots, sizeof(int), GFP_KERNEL);
+	if (!data) {
+		error = -ENOMEM;
+		goto err_destroy_ff;
+	}
+	data->effect_ids = kzalloc_objs(int, num_slots);
 	if (!data->effect_ids) {
-		kfree(data);
-		return -ENOMEM;
+		error = -ENOMEM;
+		goto err_free_data;
 	}
 	data->wq = create_singlethread_workqueue("hidpp-ff-sendqueue");
 	if (!data->wq) {
-		kfree(data->effect_ids);
-		kfree(data);
-		return -ENOMEM;
+		error = -ENOMEM;
+		goto err_free_effect_ids;
 	}
 
 	data->hidpp = hidpp;
@@ -2886,6 +2909,14 @@ static int hidpp_ff_init(struct hidpp_device *hidpp,
 		 version);
 
 	return 0;
+
+err_free_effect_ids:
+	kfree(data->effect_ids);
+err_free_data:
+	kfree(data);
+err_destroy_ff:
+	input_ff_destroy(dev);
+	return error;
 }
 
 /* ************************************************************************** */
@@ -3585,6 +3616,211 @@ static int hidpp10_extra_mouse_buttons_raw_event(struct hidpp_device *hidpp,
 	return 1;
 }
 
+/* -------------------------------------------------------------------------- */
+/* HID++2.0 reprogrammable controls                                           */
+/* -------------------------------------------------------------------------- */
+
+#define HIDPP_PAGE_REPROG_CONTROLS_V4			0x1b04
+
+#define HIDPP_REPROG_CONTROLS_GET_COUNT			0x00
+#define HIDPP_REPROG_CONTROLS_GET_CID_INFO		0x10
+#define HIDPP_REPROG_CONTROLS_SET_CONTROL_REPORTING	0x30
+
+#define HIDPP_REPROG_CONTROLS_FLAG_MOUSE		BIT(0)
+#define HIDPP_REPROG_CONTROLS_FLAG_DIVERT		BIT(5)
+
+#define HIDPP_REPROG_CONTROLS_TEMPORARY_DIVERTED	BIT(0)
+#define HIDPP_REPROG_CONTROLS_CHANGE_TEMPORARY_DIVERT	BIT(1)
+
+#define HIDPP_REPROG_CONTROLS_EVENT_DIVERTED		0x00
+
+#define HIDPP_REPROG_CONTROL_BACK			0x0053
+#define HIDPP_REPROG_CONTROL_FORWARD			0x0056
+
+#define HIDPP_PRODUCT_SIGNATURE_M650			0xb02a
+
+struct hidpp_reprog_control_mapping {
+	u16 control;
+	u16 code;
+};
+
+static const struct hidpp_reprog_control_mapping m650_reprog_control_mappings[] = {
+	{ HIDPP_REPROG_CONTROL_BACK, BTN_BACK },
+	{ HIDPP_REPROG_CONTROL_FORWARD, BTN_FORWARD },
+	{ }
+};
+
+static const struct hidpp_reprog_control_mapping *
+hidpp20_reprog_controls_get_mappings(struct hidpp_device *hidpp)
+{
+	switch (hidpp->hid_dev->product) {
+	case HIDPP_PRODUCT_SIGNATURE_M650:
+		return m650_reprog_control_mappings;
+	}
+
+	return NULL;
+}
+
+static int hidpp20_reprog_controls_get_count(struct hidpp_device *hidpp)
+{
+	struct hidpp_report response;
+	u8 feature_index = hidpp->reprog_controls_feature_index;
+	u8 cmd = HIDPP_REPROG_CONTROLS_GET_COUNT;
+	int ret;
+
+	ret = hidpp_send_fap_command_sync(hidpp, feature_index, cmd, NULL, 0,
+					  &response);
+	if (ret > 0)
+		return -EPROTO;
+	if (ret)
+		return ret;
+
+	return response.fap.params[0];
+}
+
+static int hidpp20_reprog_controls_get_cid_info(struct hidpp_device *hidpp,
+						u8 index, u16 *control,
+						u8 *flags)
+{
+	struct hidpp_report response;
+	u8 feature_index = hidpp->reprog_controls_feature_index;
+	u8 cmd = HIDPP_REPROG_CONTROLS_GET_CID_INFO;
+	int ret;
+
+	ret = hidpp_send_fap_command_sync(hidpp, feature_index, cmd, &index,
+					  sizeof(index), &response);
+	if (ret > 0)
+		return -EPROTO;
+	if (ret)
+		return ret;
+
+	*control = get_unaligned_be16(&response.fap.params[0]);
+	*flags = response.fap.params[4];
+
+	return 0;
+}
+
+static bool hidpp20_reprog_controls_find_control(struct hidpp_device *hidpp,
+						 u16 control)
+{
+	int count, ret;
+	u16 cid;
+	u8 flags;
+	int i;
+
+	count = hidpp20_reprog_controls_get_count(hidpp);
+	if (count < 0)
+		return false;
+
+	for (i = 0; i < count; i++) {
+		ret = hidpp20_reprog_controls_get_cid_info(hidpp, i, &cid,
+							   &flags);
+		if (ret)
+			return false;
+
+		if (cid == control)
+			return (flags & HIDPP_REPROG_CONTROLS_FLAG_MOUSE) &&
+			       (flags & HIDPP_REPROG_CONTROLS_FLAG_DIVERT);
+	}
+
+	return false;
+}
+
+static int hidpp20_reprog_controls_set_control_reporting(struct hidpp_device *hidpp,
+							 u16 control, u8 flags)
+{
+	struct hidpp_report response;
+	u8 params[5];
+
+	put_unaligned_be16(control, &params[0]);
+	params[2] = flags;
+	put_unaligned_be16(control, &params[3]);
+
+	return hidpp_send_fap_command_sync(hidpp,
+					   hidpp->reprog_controls_feature_index,
+					   HIDPP_REPROG_CONTROLS_SET_CONTROL_REPORTING,
+					   params, sizeof(params), &response);
+}
+
+static void hidpp20_reprog_controls_connect(struct hidpp_device *hidpp)
+{
+	const struct hidpp_reprog_control_mapping *mapping;
+	u8 flags = HIDPP_REPROG_CONTROLS_TEMPORARY_DIVERTED |
+		   HIDPP_REPROG_CONTROLS_CHANGE_TEMPORARY_DIVERT;
+
+	if (!(hidpp->quirks & HIDPP_QUIRK_HIDPP_REPROG_CONTROLS_BTNS))
+		return;
+
+	if (!hidpp->reprog_controls)
+		return;
+
+	if (hidpp_root_get_feature(hidpp, HIDPP_PAGE_REPROG_CONTROLS_V4,
+				   &hidpp->reprog_controls_feature_index))
+		return;
+
+	for (mapping = hidpp->reprog_controls; mapping->control; mapping++) {
+		if (!hidpp20_reprog_controls_find_control(hidpp, mapping->control))
+			continue;
+
+		hidpp20_reprog_controls_set_control_reporting(hidpp,
+							      mapping->control,
+							      flags);
+	}
+}
+
+static int hidpp20_reprog_controls_raw_event(struct hidpp_device *hidpp,
+					     u8 *data, int size)
+{
+	const struct hidpp_reprog_control_mapping *mapping;
+	struct hidpp_report *report = (struct hidpp_report *)data;
+	u16 controls[4];
+	bool pressed;
+	unsigned int i, j;
+
+	if (!(hidpp->quirks & HIDPP_QUIRK_HIDPP_REPROG_CONTROLS_BTNS) ||
+	    !hidpp->input ||
+	    !hidpp->reprog_controls ||
+	    hidpp->reprog_controls_feature_index == 0xff)
+		return 0;
+
+	if (size < HIDPP_REPORT_LONG_LENGTH ||
+	    report->fap.feature_index != hidpp->reprog_controls_feature_index ||
+	    report->fap.funcindex_clientid != HIDPP_REPROG_CONTROLS_EVENT_DIVERTED)
+		return 0;
+
+	for (i = 0; i < ARRAY_SIZE(controls); i++)
+		controls[i] = get_unaligned_be16(&report->fap.params[i * 2]);
+
+	for (mapping = hidpp->reprog_controls; mapping->control; mapping++) {
+		pressed = false;
+
+		for (j = 0; j < ARRAY_SIZE(controls); j++) {
+			if (controls[j] == mapping->control) {
+				pressed = true;
+				break;
+			}
+		}
+
+		input_report_key(hidpp->input, mapping->code, pressed);
+	}
+
+	input_sync(hidpp->input);
+
+	return 1;
+}
+
+static void hidpp20_reprog_controls_populate_input(struct hidpp_device *hidpp,
+						   struct input_dev *input_dev)
+{
+	const struct hidpp_reprog_control_mapping *mapping;
+
+	if (!hidpp->reprog_controls)
+		return;
+
+	for (mapping = hidpp->reprog_controls; mapping->control; mapping++)
+		input_set_capability(input_dev, EV_KEY, mapping->code);
+}
+
 static void hidpp10_extra_mouse_buttons_populate_input(
 			struct hidpp_device *hidpp, struct input_dev *input_dev)
 {
@@ -3659,7 +3895,7 @@ static int hidpp10_consumer_keys_raw_event(struct hidpp_device *hidpp,
 	memcpy(&consumer_report[1], &data[3], 4);
 	/* We are called from atomic context */
 	hid_report_raw_event(hidpp->hid_dev, HID_INPUT_REPORT,
-			     consumer_report, 5, 1);
+			     consumer_report, sizeof(consumer_report), 5, 1);
 
 	return 1;
 }
@@ -3696,6 +3932,7 @@ static int hi_res_scroll_enable(struct hidpp_device *hidpp)
 		multiplier = 1;
 	}
 
+	hidpp->hires_wheel_multiplier = multiplier;
 	hidpp->vertical_wheel_counter.wheel_multiplier = multiplier;
 	hid_dbg(hidpp->hid_dev, "wheel multiplier = %d\n", multiplier);
 	return 0;
@@ -3706,6 +3943,7 @@ static int hidpp_initialize_hires_scroll(struct hidpp_device *hidpp)
 	int ret;
 	unsigned long capabilities;
 
+	hidpp->hires_wheel_feature_index = 0xff;
 	capabilities = hidpp->capabilities;
 
 	if (hidpp->protocol_major >= 2) {
@@ -3715,6 +3953,7 @@ static int hidpp_initialize_hires_scroll(struct hidpp_device *hidpp)
 					     &feature_index);
 		if (!ret) {
 			hidpp->capabilities |= HIDPP_CAPABILITY_HIDPP20_HI_RES_WHEEL;
+			hidpp->hires_wheel_feature_index = feature_index;
 			hid_dbg(hidpp->hid_dev, "Detected HID++ 2.0 hi-res scroll wheel\n");
 			return 0;
 		}
@@ -3734,6 +3973,31 @@ static int hidpp_initialize_hires_scroll(struct hidpp_device *hidpp)
 
 	if (hidpp->capabilities == capabilities)
 		hid_dbg(hidpp->hid_dev, "Did not detect HID++ hi-res scrolling hardware support\n");
+	return 0;
+}
+
+static int hidpp20_hires_wheel_raw_event(struct hidpp_device *hidpp,
+						u8 *data, int size)
+{
+	if (hidpp->hires_wheel_feature_index == 0xff)
+		return 0;
+
+	if (size < 5)
+		return 0;
+
+	if (data[0] != REPORT_ID_HIDPP_LONG ||
+	    data[2] != hidpp->hires_wheel_feature_index)
+		return 0;
+
+	if ((data[3] & 0xf0) == CMD_HIRES_WHEEL_SET_WHEEL_MODE) {
+		u8 mode = data[4];
+		bool hires = (mode & 0x02) != 0;
+		int new_multiplier = (hires && hidpp->hires_wheel_multiplier > 0)
+			? hidpp->hires_wheel_multiplier : 1;
+		hidpp->vertical_wheel_counter.wheel_multiplier = new_multiplier;
+		return 1;
+	}
+
 	return 0;
 }
 
@@ -3815,16 +4079,36 @@ static void hidpp_populate_input(struct hidpp_device *hidpp,
 
 	if (hidpp->quirks & HIDPP_QUIRK_HIDPP_EXTRA_MOUSE_BTNS)
 		hidpp10_extra_mouse_buttons_populate_input(hidpp, input);
+
+	if (hidpp->quirks & HIDPP_QUIRK_HIDPP_REPROG_CONTROLS_BTNS)
+		hidpp20_reprog_controls_populate_input(hidpp, input);
 }
 
-static int hidpp_input_configured(struct hid_device *hdev,
-				struct hid_input *hidinput)
+static int hidpp_input_configured(struct hid_device *hdev, struct hid_input *hidinput)
 {
 	struct hidpp_device *hidpp = hid_get_drvdata(hdev);
 	struct input_dev *input = hidinput->input;
+	int ret;
 
 	if (!hidpp)
 		return 0;
+
+	if (hidpp->quirks & HIDPP_QUIRK_CLASS_G920) {
+		struct hidpp_ff_private_data data;
+
+		if (!list_is_first(&hidinput->list, &hdev->inputs))
+			return 0;
+
+		ret = g920_get_config(hidpp, &data);
+		if (!ret)
+			ret = hidpp_ff_init(hidpp, &data);
+
+		if (ret) {
+			hid_warn(hidpp->hid_dev,
+				 "Unable to initialize force feedback support, errno %d\n",
+				 ret);
+		}
+	}
 
 	hidpp_populate_input(hidpp, input);
 
@@ -3834,8 +4118,7 @@ static int hidpp_input_configured(struct hid_device *hdev,
 static int hidpp_raw_hidpp_event(struct hidpp_device *hidpp, u8 *data,
 		int size)
 {
-	struct hidpp_report *question = hidpp->send_receive_buf;
-	struct hidpp_report *answer = hidpp->send_receive_buf;
+	struct hidpp_report *question, *answer;
 	struct hidpp_report *report = (struct hidpp_report *)data;
 	int ret;
 	int last_online;
@@ -3845,6 +4128,12 @@ static int hidpp_raw_hidpp_event(struct hidpp_device *hidpp, u8 *data,
 	 * previously sent command.
 	 */
 	if (unlikely(mutex_is_locked(&hidpp->send_mutex))) {
+		question = hidpp->send_receive_buf;
+		answer = hidpp->send_receive_buf;
+
+		if (!question)
+			return 0;
+
 		/*
 		 * Check for a correct hidpp20 answer or the corresponding
 		 * error
@@ -3922,8 +4211,18 @@ static int hidpp_raw_hidpp_event(struct hidpp_device *hidpp, u8 *data,
 			return ret;
 	}
 
+	ret = hidpp20_reprog_controls_raw_event(hidpp, data, size);
+	if (ret != 0)
+		return ret;
+
 	if (hidpp->quirks & HIDPP_QUIRK_HIDPP_CONSUMER_VENDOR_KEYS) {
 		ret = hidpp10_consumer_keys_raw_event(hidpp, data, size);
+		if (ret != 0)
+			return ret;
+	}
+
+	if (hidpp->capabilities & HIDPP_CAPABILITY_HIDPP20_HI_RES_WHEEL) {
+		ret = hidpp20_hires_wheel_raw_event(hidpp, data, size);
 		if (ret != 0)
 			return ret;
 	}
@@ -4106,8 +4405,50 @@ static int hidpp_initialize_battery(struct hidpp_device *hidpp)
 	return ret;
 }
 
+static bool hidpp_is_bolt_child(struct hid_device *hdev)
+{
+	struct device *parent = hdev->dev.parent;
+	struct hid_device *receiver_hdev;
+
+	if (!parent)
+		return false;
+
+	receiver_hdev = to_hid_device(parent);
+	return receiver_hdev->vendor == USB_VENDOR_ID_LOGITECH &&
+	       receiver_hdev->product == USB_DEVICE_ID_LOGITECH_BOLT_RECEIVER;
+}
+
+static int hidpp_bolt_init(struct hidpp_device *hidpp)
+{
+	struct hid_device *hdev = hidpp->hid_dev;
+	char *name;
+	int ret;
+
+	ret = hidpp_serial_init(hidpp);
+	if (ret)
+		return ret;
+
+	name = hidpp_get_device_name(hidpp);
+	if (!name)
+		return -EIO;
+
+	snprintf(hdev->name, sizeof(hdev->name), "%s", name);
+	dbg_hid("HID++ Bolt: Got name: %s\n", name);
+
+	kfree(name);
+	return 0;
+}
+
+static int hidpp_receiver_init(struct hidpp_device *hidpp)
+{
+	if (hidpp_is_bolt_child(hidpp->hid_dev))
+		return hidpp_bolt_init(hidpp);
+
+	return hidpp_unifying_init(hidpp);
+}
+
 /* Get name + serial for USB and Bluetooth HID++ devices */
-static void hidpp_non_unifying_init(struct hidpp_device *hidpp)
+static void hidpp_non_receiver_init(struct hidpp_device *hidpp)
 {
 	struct hid_device *hdev = hidpp->hid_dev;
 	char *name;
@@ -4209,6 +4550,8 @@ static void hidpp_connect_event(struct work_struct *work)
 			return;
 	}
 
+	hidpp20_reprog_controls_connect(hidpp);
+
 	if (hidpp->quirks & HIDPP_QUIRK_HIDPP_CONSUMER_VENDOR_KEYS) {
 		ret = hidpp10_consumer_keys_connect(hidpp);
 		if (ret)
@@ -4276,6 +4619,7 @@ static void hidpp_connect_event(struct work_struct *work)
 
 	ret = input_register_device(input);
 	if (ret) {
+		hidpp->input = NULL;
 		input_free_device(input);
 		return;
 	}
@@ -4308,7 +4652,7 @@ static int hidpp_get_report_length(struct hid_device *hdev, int id)
 
 	re = &(hdev->report_enum[HID_OUTPUT_REPORT]);
 	report = re->report_id_hash[id];
-	if (!report)
+	if (!report || !report->maxfield)
 		return 0;
 
 	return report->field[0]->report_count + 1;
@@ -4381,6 +4725,8 @@ static int hidpp_probe(struct hid_device *hdev, const struct hid_device_id *id)
 	hidpp->hid_dev = hdev;
 	hidpp->name = hdev->name;
 	hidpp->quirks = id->driver_data;
+	hidpp->reprog_controls_feature_index = 0xff;
+	hidpp->reprog_controls = hidpp20_reprog_controls_get_mappings(hidpp);
 	hid_set_drvdata(hdev, hidpp);
 
 	ret = hid_parse(hdev);
@@ -4454,9 +4800,9 @@ static int hidpp_probe(struct hid_device *hdev, const struct hid_device_id *id)
 
 	/* Get name + serial, store in hdev->name + hdev->uniq */
 	if (id->group == HID_GROUP_LOGITECH_DJ_DEVICE)
-		hidpp_unifying_init(hidpp);
+		hidpp_receiver_init(hidpp);
 	else
-		hidpp_non_unifying_init(hidpp);
+		hidpp_non_receiver_init(hidpp);
 
 	if (hidpp->quirks & HIDPP_QUIRK_DELAYED_INIT)
 		connect_mask &= ~HID_CONNECT_HIDINPUT;
@@ -4473,19 +4819,6 @@ static int hidpp_probe(struct hid_device *hdev, const struct hid_device_id *id)
 	hid_device_io_start(hdev);
 	schedule_work(&hidpp->work);
 	flush_work(&hidpp->work);
-
-	if (hidpp->quirks & HIDPP_QUIRK_CLASS_G920) {
-		struct hidpp_ff_private_data data;
-
-		ret = g920_get_config(hidpp, &data);
-		if (!ret)
-			ret = hidpp_ff_init(hidpp, &data);
-
-		if (ret)
-			hid_warn(hidpp->hid_dev,
-		     "Unable to initialize force feedback support, errno %d\n",
-				 ret);
-	}
 
 	/*
 	 * This relies on logi_dj_ll_close() being a no-op so that DJ connection
@@ -4589,6 +4922,8 @@ static const struct hid_device_id hidpp_devices[] = {
 	  HID_USB_DEVICE(USB_VENDOR_ID_LOGITECH, 0xC082) },
 	{ /* Logitech G502 Lightspeed Wireless Gaming Mouse over USB */
 	  HID_USB_DEVICE(USB_VENDOR_ID_LOGITECH, 0xC08D) },
+	{ /* Logitech G502 X Plus Wireless Gaming Mouse over USB */
+	  HID_USB_DEVICE(USB_VENDOR_ID_LOGITECH, 0xC095) },
 	{ /* Logitech G703 Gaming Mouse over USB */
 	  HID_USB_DEVICE(USB_VENDOR_ID_LOGITECH, 0xC087) },
 	{ /* Logitech G703 Hero Gaming Mouse over USB */
@@ -4601,8 +4936,6 @@ static const struct hid_device_id hidpp_devices[] = {
 	  HID_USB_DEVICE(USB_VENDOR_ID_LOGITECH, 0xC088) },
 	{ /* MX Vertical over USB */
 	  HID_USB_DEVICE(USB_VENDOR_ID_LOGITECH, 0xC08A) },
-	{ /* Logitech G703 Hero Gaming Mouse over USB */
-	  HID_USB_DEVICE(USB_VENDOR_ID_LOGITECH, 0xC090) },
 	{ /* Logitech G903 Hero Gaming Mouse over USB */
 	  HID_USB_DEVICE(USB_VENDOR_ID_LOGITECH, 0xC091) },
 	{ /* Logitech G915 TKL Keyboard over USB */
@@ -4649,15 +4982,61 @@ static const struct hid_device_id hidpp_devices[] = {
 	{ /* MX Vertical mouse over Bluetooth */
 	  HID_BLUETOOTH_DEVICE(USB_VENDOR_ID_LOGITECH, 0xb020) },
 	{ /* Signature M650 over Bluetooth */
-	  HID_BLUETOOTH_DEVICE(USB_VENDOR_ID_LOGITECH, 0xb02a) },
+	  HID_BLUETOOTH_DEVICE(USB_VENDOR_ID_LOGITECH,
+			       HIDPP_PRODUCT_SIGNATURE_M650),
+	  .driver_data = HIDPP_QUIRK_HIDPP_REPROG_CONTROLS_BTNS },
 	{ /* MX Master 3 mouse over Bluetooth */
 	  HID_BLUETOOTH_DEVICE(USB_VENDOR_ID_LOGITECH, 0xb023) },
 	{ /* MX Anywhere 3 mouse over Bluetooth */
 	  HID_BLUETOOTH_DEVICE(USB_VENDOR_ID_LOGITECH, 0xb025) },
 	{ /* MX Master 3S mouse over Bluetooth */
 	  HID_BLUETOOTH_DEVICE(USB_VENDOR_ID_LOGITECH, 0xb034) },
+	{ /* MX Anywhere 3S mouse over Bluetooth */
+	  HID_BLUETOOTH_DEVICE(USB_VENDOR_ID_LOGITECH, 0xb037) },
 	{ /* MX Anywhere 3SB mouse over Bluetooth */
 	  HID_BLUETOOTH_DEVICE(USB_VENDOR_ID_LOGITECH, 0xb038) },
+	{ /* Slim Solar+ K980 Keyboard over Bluetooth */
+	  HID_BLUETOOTH_DEVICE(USB_VENDOR_ID_LOGITECH, 0xb391) },
+	{ /* MX Master 4 mouse over Bluetooth */
+	  HID_BLUETOOTH_DEVICE(USB_VENDOR_ID_LOGITECH, 0xb042) },
+	{ /* Logitech Signature K650 over Bluetooth */
+	  HID_BLUETOOTH_DEVICE(USB_VENDOR_ID_LOGITECH, 0xb36f) },
+	{ /* Logitech Signature K650 B2B over Bluetooth */
+	  HID_BLUETOOTH_DEVICE(USB_VENDOR_ID_LOGITECH, 0xb370) },
+	{ /* Logitech Pebble Keys 2 K380S over Bluetooth */
+	  HID_BLUETOOTH_DEVICE(USB_VENDOR_ID_LOGITECH, 0xb377) },
+	{ /* Logitech Casa Pop-Up Desk over Bluetooth */
+	  HID_BLUETOOTH_DEVICE(USB_VENDOR_ID_LOGITECH, 0xb371) },
+	{ /* Logitech Casa Pop-Up Desk B2B over Bluetooth */
+	  HID_BLUETOOTH_DEVICE(USB_VENDOR_ID_LOGITECH, 0xb374) },
+	{ /* Logitech Wave Keys over Bluetooth */
+	  HID_BLUETOOTH_DEVICE(USB_VENDOR_ID_LOGITECH, 0xb383) },
+	{ /* Logitech Wave Keys B2B over Bluetooth */
+	  HID_BLUETOOTH_DEVICE(USB_VENDOR_ID_LOGITECH, 0xb384) },
+	{ /* Logitech Signature Slim K950 over Bluetooth */
+	  HID_BLUETOOTH_DEVICE(USB_VENDOR_ID_LOGITECH, 0xb386) },
+	{ /* Logitech Signature Slim K950 B2B over Bluetooth */
+	  HID_BLUETOOTH_DEVICE(USB_VENDOR_ID_LOGITECH, 0xb388) },
+	{ /* Logitech MX Keys S over Bluetooth */
+	  HID_BLUETOOTH_DEVICE(USB_VENDOR_ID_LOGITECH, 0xb378) },
+	{ /* Logitech MX Keys S B2B over Bluetooth */
+	  HID_BLUETOOTH_DEVICE(USB_VENDOR_ID_LOGITECH, 0xb380) },
+	{ /* Logitech Keys-To-Go 2 over Bluetooth */
+	  HID_BLUETOOTH_DEVICE(USB_VENDOR_ID_LOGITECH, 0xb38c) },
+	{ /* Logitech Pop Icon Keys over Bluetooth */
+	  HID_BLUETOOTH_DEVICE(USB_VENDOR_ID_LOGITECH, 0xb38f) },
+	{ /* Logitech MX Keys Mini over Bluetooth */
+	  HID_BLUETOOTH_DEVICE(USB_VENDOR_ID_LOGITECH, 0xb369) },
+	{ /* Logitech MX Keys Mini B2B over Bluetooth */
+	  HID_BLUETOOTH_DEVICE(USB_VENDOR_ID_LOGITECH, 0xb36e) },
+	{ /* Logitech Signature Slim Solar+ K980 B2B over Bluetooth */
+	  HID_BLUETOOTH_DEVICE(USB_VENDOR_ID_LOGITECH, 0xb394) },
+	{ /* Logitech Bluetooth Keyboard K250/K251 over Bluetooth */
+	  HID_BLUETOOTH_DEVICE(USB_VENDOR_ID_LOGITECH, 0xb397) },
+	{ /* Logitech Signature Comfort K880 over Bluetooth */
+	  HID_BLUETOOTH_DEVICE(USB_VENDOR_ID_LOGITECH, 0xb39c) },
+	{ /* Logitech Signature Comfort K880 B2B over Bluetooth */
+	  HID_BLUETOOTH_DEVICE(USB_VENDOR_ID_LOGITECH, 0xb39d) },
 	{}
 };
 

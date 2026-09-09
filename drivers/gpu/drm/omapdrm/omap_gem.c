@@ -5,12 +5,15 @@
  */
 
 #include <linux/dma-mapping.h>
+#include <linux/pagemap.h>
 #include <linux/seq_file.h>
 #include <linux/shmem_fs.h>
 #include <linux/spinlock.h>
 #include <linux/vmalloc.h>
 
+#include <drm/drm_dumb_buffers.h>
 #include <drm/drm_prime.h>
+#include <drm/drm_print.h>
 #include <drm/drm_vma_manager.h>
 
 #include "omap_drv.h"
@@ -252,7 +255,7 @@ static int omap_gem_attach_pages(struct drm_gem_object *obj)
 	 * DSS, GPU, etc. are not cache coherent:
 	 */
 	if (omap_obj->flags & (OMAP_BO_WC|OMAP_BO_UNCACHED)) {
-		addrs = kmalloc_array(npages, sizeof(*addrs), GFP_KERNEL);
+		addrs = kmalloc_objs(*addrs, npages);
 		if (!addrs) {
 			ret = -ENOMEM;
 			goto free_pages;
@@ -276,7 +279,7 @@ static int omap_gem_attach_pages(struct drm_gem_object *obj)
 			}
 		}
 	} else {
-		addrs = kcalloc(npages, sizeof(*addrs), GFP_KERNEL);
+		addrs = kzalloc_objs(*addrs, npages);
 		if (!addrs) {
 			ret = -ENOMEM;
 			goto free_pages;
@@ -357,7 +360,7 @@ static vm_fault_t omap_gem_fault_1d(struct drm_gem_object *obj,
 	pgoff_t pgoff;
 
 	/* We don't use vmf->pgoff since that has the fake offset: */
-	pgoff = (vmf->address - vma->vm_start) >> PAGE_SHIFT;
+	pgoff = linear_page_delta(vma, vmf->address);
 
 	if (omap_obj->pages) {
 		omap_gem_cpu_sync_page(obj, pgoff);
@@ -405,7 +408,7 @@ static vm_fault_t omap_gem_fault_2d(struct drm_gem_object *obj,
 	const int m = DIV_ROUND_UP(omap_obj->width << fmt, PAGE_SIZE);
 
 	/* We don't use vmf->pgoff since that has the fake offset: */
-	pgoff = (vmf->address - vma->vm_start) >> PAGE_SHIFT;
+	pgoff = linear_page_delta(vma, vmf->address);
 
 	/*
 	 * Actual address we start mapping at is rounded down to previous slot
@@ -535,9 +538,9 @@ static int omap_gem_object_mmap(struct drm_gem_object *obj, struct vm_area_struc
 	vm_flags_set(vma, VM_DONTEXPAND | VM_DONTDUMP | VM_IO | VM_MIXEDMAP);
 
 	if (omap_obj->flags & OMAP_BO_WC) {
-		vma->vm_page_prot = pgprot_writecombine(vm_get_page_prot(vma->vm_flags));
+		vma->vm_page_prot = pgprot_writecombine(vma_get_page_prot(vma));
 	} else if (omap_obj->flags & OMAP_BO_UNCACHED) {
-		vma->vm_page_prot = pgprot_noncached(vm_get_page_prot(vma->vm_flags));
+		vma->vm_page_prot = pgprot_noncached(vma_get_page_prot(vma));
 	} else {
 		/*
 		 * We do have some private objects, at least for scanout buffers
@@ -555,7 +558,7 @@ static int omap_gem_object_mmap(struct drm_gem_object *obj, struct vm_area_struc
 		vma->vm_pgoff -= drm_vma_node_start(&obj->vma_node);
 		vma_set_file(vma, obj->filp);
 
-		vma->vm_page_prot = vm_get_page_prot(vma->vm_flags);
+		vma->vm_page_prot = vma_get_page_prot(vma);
 	}
 
 	vma->vm_page_prot = pgprot_decrypted(vma->vm_page_prot);
@@ -580,15 +583,13 @@ static int omap_gem_object_mmap(struct drm_gem_object *obj, struct vm_area_struc
 int omap_gem_dumb_create(struct drm_file *file, struct drm_device *dev,
 		struct drm_mode_create_dumb *args)
 {
-	union omap_gem_size gsize;
+	union omap_gem_size gsize = { };
+	int ret;
 
-	args->pitch = DIV_ROUND_UP(args->width * args->bpp, 8);
-
-	args->size = PAGE_ALIGN(args->pitch * args->height);
-
-	gsize = (union omap_gem_size){
-		.bytes = args->size,
-	};
+	ret = drm_mode_size_dumb(dev, args, SZ_8, 0);
+	if (ret)
+		return ret;
+	gsize.bytes = args->size;
 
 	return omap_gem_new_handle(dev, file, gsize,
 			OMAP_BO_SCANOUT | OMAP_BO_WC, &args->handle);
@@ -989,7 +990,7 @@ struct sg_table *omap_gem_get_sg(struct drm_gem_object *obj,
 	if (sgt)
 		goto out;
 
-	sgt = kzalloc(sizeof(*sgt), GFP_KERNEL);
+	sgt = kzalloc_obj(*sgt);
 	if (!sgt) {
 		ret = -ENOMEM;
 		goto err_unpin;
@@ -1319,7 +1320,7 @@ struct drm_gem_object *omap_gem_new(struct drm_device *dev,
 	}
 
 	/* Allocate the initialize the OMAP GEM object. */
-	omap_obj = kzalloc(sizeof(*omap_obj), GFP_KERNEL);
+	omap_obj = kzalloc_obj(*omap_obj);
 	if (!omap_obj)
 		return NULL;
 
@@ -1410,7 +1411,7 @@ struct drm_gem_object *omap_gem_new_dmabuf(struct drm_device *dev, size_t size,
 		unsigned int ret;
 
 		npages = DIV_ROUND_UP(size, PAGE_SIZE);
-		pages = kcalloc(npages, sizeof(*pages), GFP_KERNEL);
+		pages = kzalloc_objs(*pages, npages);
 		if (!pages) {
 			omap_gem_free_object(obj);
 			return ERR_PTR(-ENOMEM);
@@ -1470,7 +1471,7 @@ void omap_gem_init(struct drm_device *dev)
 		return;
 	}
 
-	usergart = kcalloc(3, sizeof(*usergart), GFP_KERNEL);
+	usergart = kzalloc_objs(*usergart, 3);
 	if (!usergart)
 		return;
 

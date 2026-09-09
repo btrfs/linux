@@ -209,7 +209,7 @@ static struct in_ifaddr *inet_alloc_ifa(struct in_device *in_dev)
 {
 	struct in_ifaddr *ifa;
 
-	ifa = kzalloc(sizeof(*ifa), GFP_KERNEL_ACCOUNT);
+	ifa = kzalloc_obj(*ifa, GFP_KERNEL_ACCOUNT);
 	if (!ifa)
 		return NULL;
 
@@ -270,7 +270,7 @@ static struct in_device *inetdev_init(struct net_device *dev)
 
 	ASSERT_RTNL();
 
-	in_dev = kzalloc(sizeof(*in_dev), GFP_KERNEL);
+	in_dev = kzalloc_obj(*in_dev);
 	if (!in_dev)
 		goto out;
 	memcpy(&in_dev->cnf, dev_net(dev)->ipv4.devconf_dflt,
@@ -322,14 +322,14 @@ static void inetdev_destroy(struct in_device *in_dev)
 
 	in_dev->dead = 1;
 
+	RCU_INIT_POINTER(dev->ip_ptr, NULL);
+
 	ip_mc_destroy_dev(in_dev);
 
 	while ((ifa = rtnl_dereference(in_dev->ifa_list)) != NULL) {
 		inet_del_ifa(in_dev, &in_dev->ifa_list, 0);
 		inet_free_ifa(ifa);
 	}
-
-	RCU_INIT_POINTER(dev->ip_ptr, NULL);
 
 	devinet_sysctl_unregister(in_dev);
 	neigh_parms_release(&arp_tbl, in_dev->arp_parms);
@@ -2063,12 +2063,50 @@ static const struct nla_policy inet_af_policy[IFLA_INET_MAX+1] = {
 	[IFLA_INET_CONF]	= { .type = NLA_NESTED },
 };
 
+static const struct nla_policy inet_devconf_policy[IPV4_DEVCONF_MAX + 1] = {
+	[IPV4_DEVCONF_FORWARDING]	= NLA_POLICY_RANGE(NLA_U32, 0, 1),
+	[IPV4_DEVCONF_MC_FORWARDING]	= { .type = NLA_REJECT },
+	[IPV4_DEVCONF_PROXY_ARP]	= NLA_POLICY_RANGE(NLA_U32, 0, 1),
+	[IPV4_DEVCONF_ACCEPT_REDIRECTS]	= NLA_POLICY_RANGE(NLA_U32, 0, 1),
+	[IPV4_DEVCONF_SECURE_REDIRECTS]	= NLA_POLICY_RANGE(NLA_U32, 0, 1),
+	[IPV4_DEVCONF_SEND_REDIRECTS]	= NLA_POLICY_RANGE(NLA_U32, 0, 1),
+	[IPV4_DEVCONF_SHARED_MEDIA]	= NLA_POLICY_RANGE(NLA_U32, 0, 1),
+	[IPV4_DEVCONF_RP_FILTER]	= NLA_POLICY_RANGE(NLA_U32, 0, 2),
+	[IPV4_DEVCONF_ACCEPT_SOURCE_ROUTE] = NLA_POLICY_RANGE(NLA_U32, 0, 1),
+	[IPV4_DEVCONF_BOOTP_RELAY]	= NLA_POLICY_RANGE(NLA_U32, 0, 1),
+	[IPV4_DEVCONF_LOG_MARTIANS]	= NLA_POLICY_RANGE(NLA_U32, 0, 1),
+	[IPV4_DEVCONF_TAG]		= { .type = NLA_U32 },
+	[IPV4_DEVCONF_ARPFILTER]	= NLA_POLICY_RANGE(NLA_U32, 0, 1),
+	[IPV4_DEVCONF_MEDIUM_ID]	= NLA_POLICY_MIN(NLA_S32, -1),
+	[IPV4_DEVCONF_NOXFRM]		= NLA_POLICY_RANGE(NLA_U32, 0, 1),
+	[IPV4_DEVCONF_NOPOLICY]		= NLA_POLICY_RANGE(NLA_U32, 0, 1),
+	[IPV4_DEVCONF_FORCE_IGMP_VERSION] = NLA_POLICY_RANGE(NLA_U32, 0, 3),
+	[IPV4_DEVCONF_ARP_ANNOUNCE]	= NLA_POLICY_RANGE(NLA_U32, 0, 2),
+	[IPV4_DEVCONF_ARP_IGNORE]	= NLA_POLICY_RANGE(NLA_U32, 0, 8),
+	[IPV4_DEVCONF_PROMOTE_SECONDARIES] = NLA_POLICY_RANGE(NLA_U32, 0, 1),
+	[IPV4_DEVCONF_ARP_ACCEPT]	= NLA_POLICY_RANGE(NLA_U32, 0, 2),
+	[IPV4_DEVCONF_ARP_NOTIFY]	= NLA_POLICY_RANGE(NLA_U32, 0, 1),
+	[IPV4_DEVCONF_ACCEPT_LOCAL]	= NLA_POLICY_RANGE(NLA_U32, 0, 1),
+	[IPV4_DEVCONF_SRC_VMARK]	= NLA_POLICY_RANGE(NLA_U32, 0, 1),
+	[IPV4_DEVCONF_PROXY_ARP_PVLAN]	= NLA_POLICY_RANGE(NLA_U32, 0, 1),
+	[IPV4_DEVCONF_ROUTE_LOCALNET]	= NLA_POLICY_RANGE(NLA_U32, 0, 1),
+	[IPV4_DEVCONF_BC_FORWARDING]	= NLA_POLICY_RANGE(NLA_U32, 0, 1),
+	[IPV4_DEVCONF_IGMPV2_UNSOLICITED_REPORT_INTERVAL] = { .type = NLA_U32 },
+	[IPV4_DEVCONF_IGMPV3_UNSOLICITED_REPORT_INTERVAL] = { .type = NLA_U32 },
+	[IPV4_DEVCONF_IGNORE_ROUTES_WITH_LINKDOWN] =
+		NLA_POLICY_RANGE(NLA_U32, 0, 1),
+	[IPV4_DEVCONF_DROP_UNICAST_IN_L2_MULTICAST] =
+		NLA_POLICY_RANGE(NLA_U32, 0, 1),
+	[IPV4_DEVCONF_DROP_GRATUITOUS_ARP] = NLA_POLICY_RANGE(NLA_U32, 0, 1),
+	[IPV4_DEVCONF_ARP_EVICT_NOCARRIER] = NLA_POLICY_RANGE(NLA_U32, 0, 1),
+};
+
 static int inet_validate_link_af(const struct net_device *dev,
 				 const struct nlattr *nla,
 				 struct netlink_ext_ack *extack)
 {
-	struct nlattr *a, *tb[IFLA_INET_MAX+1];
-	int err, rem;
+	struct nlattr *tb[IFLA_INET_MAX + 1], *nested_tb[IPV4_DEVCONF_MAX + 1];
+	int err;
 
 	if (dev && !__in_dev_get_rtnl(dev))
 		return -EAFNOSUPPORT;
@@ -2079,18 +2117,69 @@ static int inet_validate_link_af(const struct net_device *dev,
 		return err;
 
 	if (tb[IFLA_INET_CONF]) {
-		nla_for_each_nested(a, tb[IFLA_INET_CONF], rem) {
-			int cfgid = nla_type(a);
+		err = nla_parse_nested(nested_tb, IPV4_DEVCONF_MAX,
+				       tb[IFLA_INET_CONF], inet_devconf_policy,
+				       extack);
 
-			if (nla_len(a) < 4)
-				return -EINVAL;
-
-			if (cfgid <= 0 || cfgid > IPV4_DEVCONF_MAX)
-				return -EINVAL;
-		}
+		if (err < 0)
+			return err;
 	}
 
 	return 0;
+}
+
+static bool devinet_conf_post_set(struct net *net, struct ipv4_devconf *cnf,
+				  int attr, int new, int old, int ifindex)
+{
+	if (new == old)
+		return false;
+
+	switch (attr) {
+	case IPV4_DEVCONF_ROUTE_LOCALNET:
+	case IPV4_DEVCONF_ACCEPT_LOCAL:
+		if (new == 0)
+			return true;
+		break;
+	case IPV4_DEVCONF_NOXFRM:
+	case IPV4_DEVCONF_NOPOLICY:
+	case IPV4_DEVCONF_PROMOTE_SECONDARIES:
+	case IPV4_DEVCONF_DROP_UNICAST_IN_L2_MULTICAST:
+	case IPV4_DEVCONF_BC_FORWARDING:
+		return true;
+	case IPV4_DEVCONF_RP_FILTER:
+		inet_netconf_notify_devconf(net, RTM_NEWNETCONF,
+					    NETCONFA_RP_FILTER,
+					    ifindex, cnf);
+		break;
+	case IPV4_DEVCONF_PROXY_ARP:
+		inet_netconf_notify_devconf(net, RTM_NEWNETCONF,
+					    NETCONFA_PROXY_NEIGH,
+					    ifindex, cnf);
+		break;
+	case IPV4_DEVCONF_IGNORE_ROUTES_WITH_LINKDOWN:
+		inet_netconf_notify_devconf(net, RTM_NEWNETCONF,
+					    NETCONFA_IGNORE_ROUTES_WITH_LINKDOWN,
+					    ifindex, cnf);
+		break;
+	case IPV4_DEVCONF_FORWARDING:
+		if (new == 1) {
+			/* it is safe to use container_of() because forwarding case
+			 * is only used by the netlink path
+			 */
+			struct in_device *idev = container_of(cnf, struct in_device, cnf);
+
+			netif_disable_lro(idev->dev);
+		}
+
+		inet_netconf_notify_devconf(net, RTM_NEWNETCONF,
+					    NETCONFA_FORWARDING,
+					    ifindex, cnf);
+		return true;
+	default:
+		break;
+	}
+
+	return false;
 }
 
 static int inet_set_link_af(struct net_device *dev, const struct nlattr *nla,
@@ -2098,6 +2187,8 @@ static int inet_set_link_af(struct net_device *dev, const struct nlattr *nla,
 {
 	struct in_device *in_dev = __in_dev_get_rtnl(dev);
 	struct nlattr *a, *tb[IFLA_INET_MAX+1];
+	struct net *net = dev_net(dev);
+	bool flush_cache = false;
 	int rem;
 
 	if (!in_dev)
@@ -2107,8 +2198,17 @@ static int inet_set_link_af(struct net_device *dev, const struct nlattr *nla,
 		return -EINVAL;
 
 	if (tb[IFLA_INET_CONF]) {
-		nla_for_each_nested(a, tb[IFLA_INET_CONF], rem)
-			ipv4_devconf_set(in_dev, nla_type(a), nla_get_u32(a));
+		nla_for_each_nested(a, tb[IFLA_INET_CONF], rem) {
+			int old_value = ipv4_devconf_get(in_dev, nla_type(a));
+			int new_value = nla_get_u32(a);
+
+			ipv4_devconf_set(in_dev, nla_type(a), new_value);
+			if (devinet_conf_post_set(net, &in_dev->cnf, nla_type(a), new_value,
+						  old_value, dev->ifindex))
+				flush_cache = true;
+		}
+		if (flush_cache)
+			rt_cache_flush(net);
 	}
 
 	return 0;
@@ -2474,44 +2574,31 @@ static int devinet_conf_proc(const struct ctl_table *ctl, int write,
 
 	if (write) {
 		struct ipv4_devconf *cnf = ctl->extra1;
-		struct net *net = ctl->extra2;
 		int i = (int *)ctl->data - cnf->data;
+		struct net *net = ctl->extra2;
 		int ifindex;
 
-		set_bit(i, cnf->state);
+		/* These attributes are bypassing the tracking state,
+		 * for the rest track the state and propagate the changes
+		 * to default config
+		 */
+		switch (i + 1) {
+		case IPV4_DEVCONF_NOXFRM:
+		case IPV4_DEVCONF_NOPOLICY:
+		case IPV4_DEVCONF_PROMOTE_SECONDARIES:
+		case IPV4_DEVCONF_DROP_UNICAST_IN_L2_MULTICAST:
+			break;
+		default:
+			set_bit(i, cnf->state);
+			if (cnf == net->ipv4.devconf_dflt)
+				devinet_copy_dflt_conf(net, i);
+			break;
+		}
 
-		if (cnf == net->ipv4.devconf_dflt)
-			devinet_copy_dflt_conf(net, i);
-		if (i == IPV4_DEVCONF_ACCEPT_LOCAL - 1 ||
-		    i == IPV4_DEVCONF_ROUTE_LOCALNET - 1)
-			if ((new_value == 0) && (old_value != 0))
-				rt_cache_flush(net);
-
-		if (i == IPV4_DEVCONF_BC_FORWARDING - 1 &&
-		    new_value != old_value)
+		ifindex = devinet_conf_ifindex(net, cnf);
+		if (devinet_conf_post_set(net, cnf, i + 1, new_value,
+					  old_value, ifindex))
 			rt_cache_flush(net);
-
-		if (i == IPV4_DEVCONF_RP_FILTER - 1 &&
-		    new_value != old_value) {
-			ifindex = devinet_conf_ifindex(net, cnf);
-			inet_netconf_notify_devconf(net, RTM_NEWNETCONF,
-						    NETCONFA_RP_FILTER,
-						    ifindex, cnf);
-		}
-		if (i == IPV4_DEVCONF_PROXY_ARP - 1 &&
-		    new_value != old_value) {
-			ifindex = devinet_conf_ifindex(net, cnf);
-			inet_netconf_notify_devconf(net, RTM_NEWNETCONF,
-						    NETCONFA_PROXY_NEIGH,
-						    ifindex, cnf);
-		}
-		if (i == IPV4_DEVCONF_IGNORE_ROUTES_WITH_LINKDOWN - 1 &&
-		    new_value != old_value) {
-			ifindex = devinet_conf_ifindex(net, cnf);
-			inet_netconf_notify_devconf(net, RTM_NEWNETCONF,
-						    NETCONFA_IGNORE_ROUTES_WITH_LINKDOWN,
-						    ifindex, cnf);
-		}
 	}
 
 	return ret;
@@ -2520,10 +2607,9 @@ static int devinet_conf_proc(const struct ctl_table *ctl, int write,
 static int devinet_sysctl_forward(const struct ctl_table *ctl, int write,
 				  void *buffer, size_t *lenp, loff_t *ppos)
 {
+	struct net *net = ctl->extra2;
 	int *valp = ctl->data;
 	int val = *valp;
-	loff_t pos = *ppos;
-	struct net *net = ctl->extra2;
 	int ret;
 
 	if (write && !ns_capable(net->user_ns, CAP_NET_ADMIN))
@@ -2536,7 +2622,6 @@ static int devinet_sysctl_forward(const struct ctl_table *ctl, int write,
 			if (!rtnl_net_trylock(net)) {
 				/* Restore the original values before restarting */
 				*valp = val;
-				*ppos = pos;
 				return restart_syscall();
 			}
 			if (valp == &IPV4_DEVCONF_ALL(net, FORWARDING)) {
@@ -2564,20 +2649,6 @@ static int devinet_sysctl_forward(const struct ctl_table *ctl, int write,
 	return ret;
 }
 
-static int ipv4_doint_and_flush(const struct ctl_table *ctl, int write,
-				void *buffer, size_t *lenp, loff_t *ppos)
-{
-	int *valp = ctl->data;
-	int val = *valp;
-	int ret = proc_dointvec(ctl, write, buffer, lenp, ppos);
-	struct net *net = ctl->extra2;
-
-	if (write && *valp != val)
-		rt_cache_flush(net);
-
-	return ret;
-}
-
 #define DEVINET_SYSCTL_ENTRY(attr, name, mval, proc) \
 	{ \
 		.procname	= name, \
@@ -2597,9 +2668,6 @@ static int ipv4_doint_and_flush(const struct ctl_table *ctl, int write,
 
 #define DEVINET_SYSCTL_COMPLEX_ENTRY(attr, name, proc) \
 	DEVINET_SYSCTL_ENTRY(attr, name, 0644, proc)
-
-#define DEVINET_SYSCTL_FLUSHING_ENTRY(attr, name) \
-	DEVINET_SYSCTL_COMPLEX_ENTRY(attr, name, ipv4_doint_and_flush)
 
 static struct devinet_sysctl_table {
 	struct ctl_table_header *sysctl_header;
@@ -2643,15 +2711,14 @@ static struct devinet_sysctl_table {
 					"ignore_routes_with_linkdown"),
 		DEVINET_SYSCTL_RW_ENTRY(DROP_GRATUITOUS_ARP,
 					"drop_gratuitous_arp"),
-
-		DEVINET_SYSCTL_FLUSHING_ENTRY(NOXFRM, "disable_xfrm"),
-		DEVINET_SYSCTL_FLUSHING_ENTRY(NOPOLICY, "disable_policy"),
-		DEVINET_SYSCTL_FLUSHING_ENTRY(PROMOTE_SECONDARIES,
-					      "promote_secondaries"),
-		DEVINET_SYSCTL_FLUSHING_ENTRY(ROUTE_LOCALNET,
-					      "route_localnet"),
-		DEVINET_SYSCTL_FLUSHING_ENTRY(DROP_UNICAST_IN_L2_MULTICAST,
-					      "drop_unicast_in_l2_multicast"),
+		DEVINET_SYSCTL_RW_ENTRY(NOXFRM, "disable_xfrm"),
+		DEVINET_SYSCTL_RW_ENTRY(NOPOLICY, "disable_policy"),
+		DEVINET_SYSCTL_RW_ENTRY(PROMOTE_SECONDARIES,
+					"promote_secondaries"),
+		DEVINET_SYSCTL_RW_ENTRY(ROUTE_LOCALNET,
+					"route_localnet"),
+		DEVINET_SYSCTL_RW_ENTRY(DROP_UNICAST_IN_L2_MULTICAST,
+					"drop_unicast_in_l2_multicast"),
 	},
 };
 
@@ -2729,7 +2796,7 @@ static void devinet_sysctl_unregister(struct in_device *idev)
 	neigh_sysctl_unregister(idev->arp_parms);
 }
 
-static struct ctl_table ctl_forward_entry[] = {
+static const struct ctl_table ctl_forward_entry[] = {
 	{
 		.procname	= "ip_forward",
 		.data		= &ipv4_devconf.data[
@@ -2754,9 +2821,8 @@ static __net_init int devinet_init_net(struct net *net)
 	int i;
 
 	err = -ENOMEM;
-	net->ipv4.inet_addr_lst = kmalloc_array(IN4_ADDR_HSIZE,
-						sizeof(struct hlist_head),
-						GFP_KERNEL);
+	net->ipv4.inet_addr_lst = kmalloc_objs(struct hlist_head,
+					       IN4_ADDR_HSIZE);
 	if (!net->ipv4.inet_addr_lst)
 		goto err_alloc_hash;
 

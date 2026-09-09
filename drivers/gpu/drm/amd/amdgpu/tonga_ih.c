@@ -159,6 +159,9 @@ static int tonga_ih_irq_init(struct amdgpu_device *adev)
 	/* enable interrupts */
 	tonga_ih_enable_interrupts(adev);
 
+	if (adev->irq.ih_soft.ring_size)
+		adev->irq.ih_soft.enabled = true;
+
 	return 0;
 }
 
@@ -195,6 +198,9 @@ static u32 tonga_ih_get_wptr(struct amdgpu_device *adev,
 	u32 wptr, tmp;
 
 	wptr = le32_to_cpu(*ih->wptr_cpu);
+
+	if (ih == &adev->irq.ih_soft)
+		goto out;
 
 	if (!REG_GET_FIELD(wptr, IH_RB_WPTR, RB_OVERFLOW))
 		goto out;
@@ -306,6 +312,10 @@ static int tonga_ih_sw_init(struct amdgpu_ip_block *ip_block)
 	if (r)
 		return r;
 
+	r = amdgpu_ih_ring_init(adev, &adev->irq.ih_soft, IH_SW_RING_SIZE, true);
+	if (r)
+		return r;
+
 	adev->irq.ih.use_doorbell = true;
 	adev->irq.ih.doorbell_index = adev->doorbell_index.ih;
 
@@ -380,43 +390,6 @@ static int tonga_ih_wait_for_idle(struct amdgpu_ip_block *ip_block)
 	return -ETIMEDOUT;
 }
 
-static bool tonga_ih_check_soft_reset(struct amdgpu_ip_block *ip_block)
-{
-	struct amdgpu_device *adev = ip_block->adev;
-	u32 srbm_soft_reset = 0;
-	u32 tmp = RREG32(mmSRBM_STATUS);
-
-	if (tmp & SRBM_STATUS__IH_BUSY_MASK)
-		srbm_soft_reset = REG_SET_FIELD(srbm_soft_reset, SRBM_SOFT_RESET,
-						SOFT_RESET_IH, 1);
-
-	if (srbm_soft_reset) {
-		adev->irq.srbm_soft_reset = srbm_soft_reset;
-		return true;
-	} else {
-		adev->irq.srbm_soft_reset = 0;
-		return false;
-	}
-}
-
-static int tonga_ih_pre_soft_reset(struct amdgpu_ip_block *ip_block)
-{
-	if (!ip_block->adev->irq.srbm_soft_reset)
-		return 0;
-
-	return tonga_ih_hw_fini(ip_block);
-}
-
-static int tonga_ih_post_soft_reset(struct amdgpu_ip_block *ip_block)
-{
-	struct amdgpu_device *adev = ip_block->adev;
-
-	if (!adev->irq.srbm_soft_reset)
-		return 0;
-
-	return tonga_ih_hw_init(ip_block);
-}
-
 static int tonga_ih_soft_reset(struct amdgpu_ip_block *ip_block)
 {
 	struct amdgpu_device *adev = ip_block->adev;
@@ -471,10 +444,7 @@ static const struct amd_ip_funcs tonga_ih_ip_funcs = {
 	.resume = tonga_ih_resume,
 	.is_idle = tonga_ih_is_idle,
 	.wait_for_idle = tonga_ih_wait_for_idle,
-	.check_soft_reset = tonga_ih_check_soft_reset,
-	.pre_soft_reset = tonga_ih_pre_soft_reset,
 	.soft_reset = tonga_ih_soft_reset,
-	.post_soft_reset = tonga_ih_post_soft_reset,
 	.set_clockgating_state = tonga_ih_set_clockgating_state,
 	.set_powergating_state = tonga_ih_set_powergating_state,
 };

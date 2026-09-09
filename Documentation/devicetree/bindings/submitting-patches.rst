@@ -15,8 +15,8 @@ I. For patch submitters
 
        "dt-bindings: <binding dir>: ..."
 
-     Few subsystems, like ASoC, media, regulators and SPI, expect reverse order
-     of the prefixes::
+     Few subsystems, like ASoC, media, regulators, SCSI, SPI and UFS, expect
+     reverse order of the prefixes, based on subsystem name::
 
        "<binding dir>: dt-bindings: ..."
 
@@ -41,6 +41,9 @@ I. For patch submitters
      See Documentation/devicetree/bindings/writing-schema.rst for more details
      about schema and tools setup.
 
+     The example DTS in new bindings should pass scripts/dtc/dt-check-style in
+     'strict' mode without warnings.
+
   3) DT binding files should be dual licensed. The preferred license tag is
      (GPL-2.0-only OR BSD-2-Clause).
 
@@ -64,9 +67,10 @@ I. For patch submitters
 
   7) DTS is treated in general as driver-independent hardware description, thus
      any DTS patches, regardless whether using existing or new bindings, should
-     be placed at the end of patchset to indicate no dependency of drivers on
-     the DTS.  DTS will be anyway applied through separate tree or branch, so
-     different order would indicate the series is non-bisectable.
+     be a separate posting or, when combined with driver patches, placed at the
+     end of the patchset to indicate no dependency of drivers on the DTS.  DTS
+     will be anyway applied through separate tree or branch, so different order
+     would indicate the series is non-bisectable.
 
      If a driver subsystem maintainer prefers to apply entire set, instead of
      their relevant portion of patchset, please split the DTS patches into

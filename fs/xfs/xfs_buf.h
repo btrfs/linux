@@ -14,6 +14,7 @@
 #include <linux/dax.h>
 #include <linux/uio.h>
 #include <linux/list_lru.h>
+#include <linux/lockref.h>
 
 extern struct kmem_cache *xfs_buf_cache;
 
@@ -32,9 +33,6 @@ struct xfs_buf;
 #define XBF_DONE	 (1u << 5) /* all pages in the buffer uptodate */
 #define XBF_STALE	 (1u << 6) /* buffer has been staled, do not find it */
 #define XBF_WRITE_FAIL	 (1u << 7) /* async writes have failed on this buffer */
-
-/* buffer type flags for write callbacks */
-#define _XBF_LOGRECOVERY (1u << 18)/* log recovery buffer */
 
 /* flags used only internally */
 #define _XBF_KMEM	 (1u << 21)/* backed by heap memory */
@@ -60,25 +58,12 @@ typedef unsigned int xfs_buf_flags_t;
 	{ XBF_DONE,		"DONE" }, \
 	{ XBF_STALE,		"STALE" }, \
 	{ XBF_WRITE_FAIL,	"WRITE_FAIL" }, \
-	{ _XBF_LOGRECOVERY,	"LOG_RECOVERY" }, \
 	{ _XBF_KMEM,		"KMEM" }, \
 	{ _XBF_DELWRI_Q,	"DELWRI_Q" }, \
 	/* The following interface flags should never be set */ \
 	{ XBF_LIVESCAN,		"LIVESCAN" }, \
 	{ XBF_INCORE,		"INCORE" }, \
 	{ XBF_TRYLOCK,		"TRYLOCK" }
-
-/*
- * Internal state flags.
- */
-#define XFS_BSTATE_DISPOSE	 (1 << 0)	/* buffer being discarded */
-
-struct xfs_buf_cache {
-	struct rhashtable	bc_hash;
-};
-
-int xfs_buf_cache_init(struct xfs_buf_cache *bch);
-void xfs_buf_cache_destroy(struct xfs_buf_cache *bch);
 
 /*
  * The xfs_buftarg contains 2 notions of "sector size" -
@@ -117,8 +102,7 @@ struct xfs_buftarg {
 	unsigned int		bt_awu_min;
 	unsigned int		bt_awu_max;
 
-	/* built-in cache, if we're not using the perag one */
-	struct xfs_buf_cache	bt_cache[];
+	struct rhashtable	bt_hash;
 };
 
 struct xfs_buf_map {
@@ -159,7 +143,7 @@ struct xfs_buf {
 
 	xfs_daddr_t		b_rhash_key;	/* buffer cache index */
 	int			b_length;	/* size of buffer in BBs */
-	unsigned int		b_hold;		/* reference count */
+	struct lockref		b_lockref;	/* refcount + lock */
 	atomic_t		b_lru_ref;	/* lru reclaim ref count */
 	xfs_buf_flags_t		b_flags;	/* status flags */
 	struct semaphore	b_sema;		/* semaphore for lockables */
@@ -169,8 +153,6 @@ struct xfs_buf {
 	 * bt_lru_lock and not by b_sema
 	 */
 	struct list_head	b_lru;		/* lru list */
-	spinlock_t		b_lock;		/* internal state lock */
-	unsigned int		b_state;	/* internal state flags */
 	wait_queue_head_t	b_waiters;	/* unpin waiters */
 	struct list_head	b_list;
 	struct xfs_perag	*b_pag;
@@ -304,7 +286,7 @@ extern void __xfs_buf_ioerror(struct xfs_buf *bp, int error,
 		xfs_failaddr_t failaddr);
 #define xfs_buf_ioerror(bp, err) __xfs_buf_ioerror((bp), (err), __this_address)
 extern void xfs_buf_ioerror_alert(struct xfs_buf *bp, xfs_failaddr_t fa);
-void xfs_buf_ioend_fail(struct xfs_buf *);
+void xfs_buf_fail(struct xfs_buf *bp);
 void __xfs_buf_mark_corrupt(struct xfs_buf *bp, xfs_failaddr_t fa);
 #define xfs_buf_mark_corrupt(bp) __xfs_buf_mark_corrupt((bp), __this_address)
 
@@ -319,7 +301,9 @@ static inline void xfs_buf_zero(struct xfs_buf *bp, size_t boff, size_t bsize)
 	memset(bp->b_addr + boff, 0, bsize);
 }
 
-extern void xfs_buf_stale(struct xfs_buf *bp);
+void xfs_buf_set_uptodate(struct xfs_buf *bp);
+void xfs_buf_stale(struct xfs_buf *bp);
+void xfs_buf_clear_stale(struct xfs_buf *bp);
 
 /* Delayed Write Buffer Routines */
 extern void xfs_buf_delwri_cancel(struct list_head *);
@@ -379,7 +363,6 @@ int xfs_configure_buftarg(struct xfs_buftarg *btp, unsigned int sectorsize,
 
 #define xfs_readonly_buftarg(buftarg)	bdev_read_only((buftarg)->bt_bdev)
 
-int xfs_buf_reverify(struct xfs_buf *bp, const struct xfs_buf_ops *ops);
 bool xfs_verify_magic(struct xfs_buf *bp, __be32 dmagic);
 bool xfs_verify_magic16(struct xfs_buf *bp, __be16 dmagic);
 

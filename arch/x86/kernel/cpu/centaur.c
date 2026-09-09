@@ -5,6 +5,7 @@
 
 #include <asm/cpu.h>
 #include <asm/cpufeature.h>
+#include <asm/cpuid/api.h>
 #include <asm/e820/api.h>
 #include <asm/mtrr.h>
 #include <asm/msr.h>
@@ -21,7 +22,7 @@
 
 static void init_c3(struct cpuinfo_x86 *c)
 {
-	u32  lo, hi;
+	u64 msr;
 
 	/* Test for Centaur Extended Feature Flags presence */
 	if (cpuid_eax(0xC0000000) >= 0xC0000001) {
@@ -29,17 +30,17 @@ static void init_c3(struct cpuinfo_x86 *c)
 
 		/* enable ACE unit, if present and disabled */
 		if ((tmp & (ACE_PRESENT | ACE_ENABLED)) == ACE_PRESENT) {
-			rdmsr(MSR_VIA_FCR, lo, hi);
-			lo |= ACE_FCR;		/* enable ACE unit */
-			wrmsr(MSR_VIA_FCR, lo, hi);
+			rdmsrq(MSR_VIA_FCR, msr);
+			/* enable ACE unit */
+			wrmsrq(MSR_VIA_FCR, msr | ACE_FCR);
 			pr_info("CPU: Enabled ACE h/w crypto\n");
 		}
 
 		/* enable RNG unit, if present and disabled */
 		if ((tmp & (RNG_PRESENT | RNG_ENABLED)) == RNG_PRESENT) {
-			rdmsr(MSR_VIA_RNG, lo, hi);
-			lo |= RNG_ENABLE;	/* enable RNG unit */
-			wrmsr(MSR_VIA_RNG, lo, hi);
+			rdmsrq(MSR_VIA_RNG, msr);
+			/* enable RNG unit */
+			wrmsrq(MSR_VIA_RNG, msr | RNG_ENABLE);
 			pr_info("CPU: Enabled h/w RNG\n");
 		}
 
@@ -51,9 +52,8 @@ static void init_c3(struct cpuinfo_x86 *c)
 #ifdef CONFIG_X86_32
 	/* Cyrix III family needs CX8 & PGE explicitly enabled. */
 	if (c->x86_model >= 6 && c->x86_model <= 13) {
-		rdmsr(MSR_VIA_FCR, lo, hi);
-		lo |= (1<<1 | 1<<7);
-		wrmsr(MSR_VIA_FCR, lo, hi);
+		rdmsrq(MSR_VIA_FCR, msr);
+		wrmsrq(MSR_VIA_FCR, msr | (1 << 1 | 1 << 7));
 		set_cpu_cap(c, X86_FEATURE_CX8);
 	}
 
@@ -102,9 +102,6 @@ static void early_init_centaur(struct cpuinfo_x86 *c)
 	    (c->x86 >= 7))
 		set_cpu_cap(c, X86_FEATURE_CONSTANT_TSC);
 
-#ifdef CONFIG_X86_64
-	set_cpu_cap(c, X86_FEATURE_SYSENTER32);
-#endif
 	if (c->x86_power & (1 << 8)) {
 		set_cpu_cap(c, X86_FEATURE_CONSTANT_TSC);
 		set_cpu_cap(c, X86_FEATURE_NONSTOP_TSC);
@@ -117,14 +114,9 @@ static void init_centaur(struct cpuinfo_x86 *c)
 	char *name;
 	u32  fcr_set = 0;
 	u32  fcr_clr = 0;
-	u32  lo, hi, newlo;
+	u32  newlo;
 	u32  aa, bb, cc, dd;
-
-	/*
-	 * Bit 31 in normal CPUID used for nonstandard 3DNow ID;
-	 * 3DNow is IDd by bit 31 in extended CPUID (1*32+31) anyway
-	 */
-	clear_cpu_cap(c, 0*32+31);
+	struct msr val;
 #endif
 	early_init_centaur(c);
 	init_intel_cacheinfo(c);
@@ -177,15 +169,16 @@ static void init_centaur(struct cpuinfo_x86 *c)
 			name = "??";
 		}
 
-		rdmsr(MSR_IDT_FCR1, lo, hi);
-		newlo = (lo|fcr_set) & (~fcr_clr);
+		rdmsrq(MSR_IDT_FCR1, val.q);
+		newlo = (val.l | fcr_set) & (~fcr_clr);
 
-		if (newlo != lo) {
+		if (newlo != val.l) {
 			pr_info("Centaur FCR was 0x%X now 0x%X\n",
-				lo, newlo);
-			wrmsr(MSR_IDT_FCR1, newlo, hi);
+				val.l, newlo);
+			val.l = newlo;
+			wrmsrq(MSR_IDT_FCR1, val.q);
 		} else {
-			pr_info("Centaur FCR is 0x%X\n", lo);
+			pr_info("Centaur FCR is 0x%X\n", val.l);
 		}
 		/* Emulate MTRRs using Centaur's MCR. */
 		set_cpu_cap(c, X86_FEATURE_CENTAUR_MCR);

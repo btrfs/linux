@@ -58,6 +58,9 @@ enum ucount_type {
 	UCOUNT_FANOTIFY_GROUPS,
 	UCOUNT_FANOTIFY_MARKS,
 #endif
+#if IS_ENABLED(CONFIG_BINFMT_MISC)
+	UCOUNT_BINFMT_MISC_INTERPRETERS,
+#endif
 	UCOUNT_COUNTS,
 };
 
@@ -166,12 +169,12 @@ static inline void set_userns_rlimit_max(struct user_namespace *ns,
 	ns->rlimit_max[type] = max <= LONG_MAX ? max : LONG_MAX;
 }
 
-#ifdef CONFIG_USER_NS
-
 static inline struct user_namespace *to_user_ns(struct ns_common *ns)
 {
 	return container_of(ns, struct user_namespace, ns);
 }
+
+#ifdef CONFIG_USER_NS
 
 static inline struct user_namespace *get_user_ns(struct user_namespace *ns)
 {

@@ -17,8 +17,11 @@ properties:
   compatible:
     items:
       - enum:
+          - qcom,hawi-tcsr
+          - qcom,maili-tcsr
           - qcom,msm8976-tcsr
           - qcom,msm8998-tcsr
+          - qcom,nord-tcsr
           - qcom,qcm2290-tcsr
           - qcom,qcs404-tcsr
           - qcom,qcs615-tcsr
@@ -33,6 +36,7 @@ properties:
           - qcom,sdx55-tcsr
           - qcom,sdx65-tcsr
           - qcom,sdx75-tcsr
+          - qcom,shikra-tcsr
           - qcom,sm4450-tcsr
           - qcom,sm6115-tcsr
           - qcom,sm8150-tcsr
@@ -42,12 +46,14 @@ properties:
           - qcom,tcsr-apq8064
           - qcom,tcsr-apq8084
           - qcom,tcsr-ipq5018
+          - qcom,tcsr-ipq5210
           - qcom,tcsr-ipq5332
           - qcom,tcsr-ipq5424
           - qcom,tcsr-ipq6018
           - qcom,tcsr-ipq8064
           - qcom,tcsr-ipq8074
           - qcom,tcsr-ipq9574
+          - qcom,tcsr-ipq9650
           - qcom,tcsr-mdm9615
           - qcom,tcsr-msm8226
           - qcom,tcsr-msm8660

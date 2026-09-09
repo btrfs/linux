@@ -56,7 +56,7 @@ static struct proto llcp_sock_proto = {
 	.obj_size = sizeof(struct nfc_llcp_sock),
 };
 
-static int llcp_sock_bind(struct socket *sock, struct sockaddr *addr, int alen)
+static int llcp_sock_bind(struct socket *sock, struct sockaddr_unsized *addr, int alen)
 {
 	struct sock *sk = sock->sk;
 	struct nfc_llcp_sock *llcp_sock = nfc_llcp_sock(sk);
@@ -146,7 +146,7 @@ error:
 	return ret;
 }
 
-static int llcp_raw_sock_bind(struct socket *sock, struct sockaddr *addr,
+static int llcp_raw_sock_bind(struct socket *sock, struct sockaddr_unsized *addr,
 			      int alen)
 {
 	struct sock *sk = sock->sk;
@@ -319,13 +319,21 @@ static int nfc_llcp_getsockopt(struct socket *sock, int level, int optname,
 	if (get_user(len, optlen))
 		return -EFAULT;
 
-	local = llcp_sock->local;
-	if (!local)
-		return -ENODEV;
+	if (len < 0)
+		return -EINVAL;
+
+	if (len < sizeof(u32))
+		return -EINVAL;
 
 	len = min_t(u32, len, sizeof(u32));
 
 	lock_sock(sk);
+
+	local = llcp_sock->local;
+	if (!local) {
+		release_sock(sk);
+		return -ENODEV;
+	}
 
 	switch (optname) {
 	case NFC_LLCP_RW:
@@ -633,6 +641,8 @@ static int llcp_sock_release(struct socket *sock)
 
 	if (sock->type == SOCK_RAW)
 		nfc_llcp_sock_unlink(&local->raw_sockets, sk);
+	else if (sk->sk_state == LLCP_CONNECTING)
+		nfc_llcp_sock_unlink(&local->connecting_sockets, sk);
 	else
 		nfc_llcp_sock_unlink(&local->sockets, sk);
 
@@ -648,7 +658,7 @@ out:
 	return err;
 }
 
-static int llcp_sock_connect(struct socket *sock, struct sockaddr *_addr,
+static int llcp_sock_connect(struct socket *sock, struct sockaddr_unsized *_addr,
 			     int len, int flags)
 {
 	struct sock *sk = sock->sk;

@@ -30,13 +30,12 @@
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/of.h>
-#include <linux/of_address.h>
-#include <linux/of_irq.h>
 #include <linux/platform_device.h>
 #include <linux/pm_runtime.h>
 #include <linux/scatterlist.h>
 #include <linux/slab.h>
 #include <linux/string.h>
+#include <linux/sysfs.h>
 #include <linux/workqueue.h>
 
 #define MD5_DIGEST_SIZE			16
@@ -146,7 +145,6 @@ struct omap_sham_reqctx {
 	u8			digest[SHA512_DIGEST_SIZE] OMAP_ALIGNED;
 	size_t			digcnt;
 	size_t			bufcnt;
-	size_t			buflen;
 
 	/* walk state */
 	struct scatterlist	*sg;
@@ -155,7 +153,7 @@ struct omap_sham_reqctx {
 	int			sg_len;
 	unsigned int		total;	/* total request */
 
-	u8			buffer[] OMAP_ALIGNED;
+	u8			buffer[BUFLEN] OMAP_ALIGNED;
 };
 
 struct omap_sham_hmac_ctx {
@@ -635,7 +633,7 @@ static int omap_sham_copy_sg_lists(struct omap_sham_reqctx *ctx,
 	if (ctx->bufcnt)
 		n++;
 
-	ctx->sg = kmalloc_array(n, sizeof(*sg), GFP_KERNEL);
+	ctx->sg = kmalloc_objs(*sg, n);
 	if (!ctx->sg)
 		return -ENOMEM;
 
@@ -890,7 +888,7 @@ static int omap_sham_prepare_request(struct crypto_engine *engine, void *areq)
 	if (hash_later < 0)
 		hash_later = 0;
 
-	if (hash_later && hash_later <= rctx->buflen) {
+	if (hash_later && hash_later <= sizeof(rctx->buffer)) {
 		scatterwalk_map_and_copy(rctx->buffer,
 					 req->src,
 					 req->nbytes - hash_later,
@@ -901,7 +899,7 @@ static int omap_sham_prepare_request(struct crypto_engine *engine, void *areq)
 		rctx->bufcnt = 0;
 	}
 
-	if (hash_later > rctx->buflen)
+	if (hash_later > sizeof(rctx->buffer))
 		set_bit(FLAGS_HUGE, &rctx->dd->flags);
 
 	rctx->total = min(nbytes, rctx->total);
@@ -986,7 +984,6 @@ static int omap_sham_init(struct ahash_request *req)
 	ctx->digcnt = 0;
 	ctx->total = 0;
 	ctx->offset = 0;
-	ctx->buflen = BUFLEN;
 
 	if (tctx->flags & BIT(FLAGS_HMAC)) {
 		if (!test_bit(FLAGS_AUTO_XOR, &dd->flags)) {
@@ -1199,7 +1196,7 @@ static int omap_sham_update(struct ahash_request *req)
 	if (!req->nbytes)
 		return 0;
 
-	if (ctx->bufcnt + req->nbytes <= ctx->buflen) {
+	if (ctx->bufcnt + req->nbytes <= sizeof(ctx->buffer)) {
 		scatterwalk_map_and_copy(ctx->buffer + ctx->bufcnt, req->src,
 					 0, req->nbytes, 0);
 		ctx->bufcnt += req->nbytes;
@@ -1332,7 +1329,7 @@ static int omap_sham_cra_init_alg(struct crypto_tfm *tfm, const char *alg_base)
 	}
 
 	crypto_ahash_set_reqsize(__crypto_ahash_cast(tfm),
-				 sizeof(struct omap_sham_reqctx) + BUFLEN);
+				 sizeof(struct omap_sham_reqctx));
 
 	if (alg_base) {
 		struct omap_sham_hmac_ctx *bctx = tctx->base;
@@ -1403,7 +1400,8 @@ static int omap_sham_export(struct ahash_request *req, void *out)
 {
 	struct omap_sham_reqctx *rctx = ahash_request_ctx(req);
 
-	memcpy(out, rctx, sizeof(*rctx) + rctx->bufcnt);
+	memcpy(out, rctx, offsetof(struct omap_sham_reqctx, buffer) +
+			  rctx->bufcnt);
 
 	return 0;
 }
@@ -1413,7 +1411,8 @@ static int omap_sham_import(struct ahash_request *req, const void *in)
 	struct omap_sham_reqctx *rctx = ahash_request_ctx(req);
 	const struct omap_sham_reqctx *ctx_in = in;
 
-	memcpy(rctx, in, sizeof(*rctx) + ctx_in->bufcnt);
+	memcpy(rctx, in, offsetof(struct omap_sham_reqctx, buffer) +
+			 ctx_in->bufcnt);
 
 	return 0;
 }
@@ -1895,85 +1894,14 @@ static const struct of_device_id omap_sham_of_match[] = {
 	{},
 };
 MODULE_DEVICE_TABLE(of, omap_sham_of_match);
-
-static int omap_sham_get_res_of(struct omap_sham_dev *dd,
-		struct device *dev, struct resource *res)
-{
-	struct device_node *node = dev->of_node;
-	int err = 0;
-
-	dd->pdata = of_device_get_match_data(dev);
-	if (!dd->pdata) {
-		dev_err(dev, "no compatible OF match\n");
-		err = -EINVAL;
-		goto err;
-	}
-
-	err = of_address_to_resource(node, 0, res);
-	if (err < 0) {
-		dev_err(dev, "can't translate OF node address\n");
-		err = -EINVAL;
-		goto err;
-	}
-
-	dd->irq = irq_of_parse_and_map(node, 0);
-	if (!dd->irq) {
-		dev_err(dev, "can't translate OF irq value\n");
-		err = -EINVAL;
-		goto err;
-	}
-
-err:
-	return err;
-}
-#else
-static const struct of_device_id omap_sham_of_match[] = {
-	{},
-};
-
-static int omap_sham_get_res_of(struct omap_sham_dev *dd,
-		struct device *dev, struct resource *res)
-{
-	return -EINVAL;
-}
 #endif
-
-static int omap_sham_get_res_pdev(struct omap_sham_dev *dd,
-		struct platform_device *pdev, struct resource *res)
-{
-	struct device *dev = &pdev->dev;
-	struct resource *r;
-	int err = 0;
-
-	/* Get the base address */
-	r = platform_get_resource(pdev, IORESOURCE_MEM, 0);
-	if (!r) {
-		dev_err(dev, "no MEM resource info\n");
-		err = -ENODEV;
-		goto err;
-	}
-	memcpy(res, r, sizeof(*res));
-
-	/* Get the IRQ */
-	dd->irq = platform_get_irq(pdev, 0);
-	if (dd->irq < 0) {
-		err = dd->irq;
-		goto err;
-	}
-
-	/* Only OMAP2/3 can be non-DT */
-	dd->pdata = &omap_sham_pdata_omap2;
-
-err:
-	return err;
-}
 
 static ssize_t fallback_show(struct device *dev, struct device_attribute *attr,
 			     char *buf)
 {
 	struct omap_sham_dev *dd = dev_get_drvdata(dev);
 
-	return sprintf(buf, "%d\n", dd->fallback_sz);
+	return sysfs_emit(buf, "%d\n", dd->fallback_sz);
 }
 
 static ssize_t fallback_store(struct device *dev, struct device_attribute *attr,
@@ -2003,7 +1931,7 @@ static ssize_t queue_len_show(struct device *dev, struct device_attribute *attr,
 {
 	struct omap_sham_dev *dd = dev_get_drvdata(dev);
 
-	return sprintf(buf, "%d\n", dd->queue.max_qlen);
+	return sysfs_emit(buf, "%d\n", dd->queue.max_qlen);
 }
 
 static ssize_t queue_len_store(struct device *dev,
@@ -2041,14 +1969,37 @@ static struct attribute *omap_sham_attrs[] = {
 };
 ATTRIBUTE_GROUPS(omap_sham);
 
+static void omap_sham_unregister_algs(const struct omap_sham_pdata *pdata)
+{
+	struct omap_sham_algs_info *alg_info;
+	int i;
+
+	for (i = pdata->algs_info_size - 1; i >= 0; i--) {
+		alg_info = &pdata->algs_info[i];
+
+		crypto_engine_unregister_ahashes(alg_info->algs_list,
+						 alg_info->registered);
+		alg_info->registered = 0;
+	}
+}
+
 static int omap_sham_probe(struct platform_device *pdev)
 {
 	struct omap_sham_dev *dd;
 	struct device *dev = &pdev->dev;
-	struct resource res;
+	void __iomem *io_base;
+	struct resource *res;
 	dma_cap_mask_t mask;
-	int err, i, j;
+	int err, i, j, irq;
 	u32 rev;
+
+	io_base = devm_platform_get_and_ioremap_resource(pdev, 0, &res);
+	if (IS_ERR(io_base))
+		return PTR_ERR(io_base);
+
+	irq = platform_get_irq(pdev, 0);
+	if (irq < 0)
+		return irq;
 
 	dd = devm_kzalloc(dev, sizeof(struct omap_sham_dev), GFP_KERNEL);
 	if (dd == NULL) {
@@ -2063,25 +2014,18 @@ static int omap_sham_probe(struct platform_device *pdev)
 	INIT_WORK(&dd->done_task, omap_sham_done_task);
 	crypto_init_queue(&dd->queue, OMAP_SHAM_QUEUE_LENGTH);
 
-	err = (dev->of_node) ? omap_sham_get_res_of(dd, dev, &res) :
-			       omap_sham_get_res_pdev(dd, pdev, &res);
-	if (err)
-		goto data_err;
+	dd->pdata = device_get_match_data(dev);
+	if (!dd->pdata)
+		dd->pdata = &omap_sham_pdata_omap2;
 
-	dd->io_base = devm_ioremap_resource(dev, &res);
-	if (IS_ERR(dd->io_base)) {
-		err = PTR_ERR(dd->io_base);
-		goto data_err;
-	}
-	dd->phys_base = res.start;
+	dd->irq = irq;
+	dd->io_base = io_base;
+	dd->phys_base = res->start;
 
 	err = devm_request_irq(dev, dd->irq, dd->pdata->intr_hdlr,
 			       IRQF_TRIGGER_NONE, dev_name(dev), dd);
-	if (err) {
-		dev_err(dev, "unable to request irq %d, err = %d\n",
-			dd->irq, err);
+	if (err)
 		goto data_err;
-	}
 
 	dma_cap_zero(mask);
 	dma_cap_set(DMA_SLAVE, mask);
@@ -2145,8 +2089,7 @@ static int omap_sham_probe(struct platform_device *pdev)
 			alg = &ealg->base;
 			alg->export = omap_sham_export;
 			alg->import = omap_sham_import;
-			alg->halg.statesize = sizeof(struct omap_sham_reqctx) +
-					      BUFLEN;
+			alg->halg.statesize = sizeof(struct omap_sham_reqctx);
 			err = crypto_engine_register_ahash(ealg);
 			if (err)
 				goto err_algs;
@@ -2158,10 +2101,7 @@ static int omap_sham_probe(struct platform_device *pdev)
 	return 0;
 
 err_algs:
-	for (i = dd->pdata->algs_info_size - 1; i >= 0; i--)
-		for (j = dd->pdata->algs_info[i].registered - 1; j >= 0; j--)
-			crypto_engine_unregister_ahash(
-					&dd->pdata->algs_info[i].algs_list[j]);
+	omap_sham_unregister_algs(dd->pdata);
 err_engine_start:
 	crypto_engine_exit(dd->engine);
 err_engine:
@@ -2182,19 +2122,13 @@ data_err:
 static void omap_sham_remove(struct platform_device *pdev)
 {
 	struct omap_sham_dev *dd;
-	int i, j;
 
 	dd = platform_get_drvdata(pdev);
 
 	spin_lock_bh(&sham.lock);
 	list_del(&dd->list);
 	spin_unlock_bh(&sham.lock);
-	for (i = dd->pdata->algs_info_size - 1; i >= 0; i--)
-		for (j = dd->pdata->algs_info[i].registered - 1; j >= 0; j--) {
-			crypto_engine_unregister_ahash(
-					&dd->pdata->algs_info[i].algs_list[j]);
-			dd->pdata->algs_info[i].registered--;
-		}
+	omap_sham_unregister_algs(dd->pdata);
 	cancel_work_sync(&dd->done_task);
 	pm_runtime_dont_use_autosuspend(&pdev->dev);
 	pm_runtime_disable(&pdev->dev);
@@ -2208,7 +2142,7 @@ static struct platform_driver omap_sham_driver = {
 	.remove = omap_sham_remove,
 	.driver	= {
 		.name	= "omap-sham",
-		.of_match_table	= omap_sham_of_match,
+		.of_match_table	= of_match_ptr(omap_sham_of_match),
 		.dev_groups = omap_sham_groups,
 	},
 };

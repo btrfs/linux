@@ -22,6 +22,7 @@ struct_mutex                    ra_mutex
 struct_fib_rules_ops*           rules_ops
 struct_fib_table                fib_main
 struct_fib_table                fib_default
+spinlock_t                      fib_table_hash_lock
 unsigned_int                    fib_rules_require_fldissect
 bool                            fib_has_custom_rules
 bool                            fib_has_custom_local_routes
@@ -52,6 +53,7 @@ u8                              sysctl_ip_fwd_update_priority                   
 u8                              sysctl_ip_nonlocal_bind
 u8                              sysctl_ip_autobind_reuse
 u8                              sysctl_ip_dynaddr
+u32                             sysctl_ip_local_port_step_width
 u8                              sysctl_ip_early_demux                                            read_mostly         ip(6)_rcv_finish_core
 u8                              sysctl_raw_l3mdev_accept
 u8                              sysctl_tcp_early_demux                                           read_mostly         ip(6)_rcv_finish_core
@@ -102,7 +104,9 @@ u8                              sysctl_tcp_app_win                              
 u8                              sysctl_tcp_frto                                                                      tcp_enter_loss
 u8                              sysctl_tcp_nometrics_save                                                            TCP_LAST_ACK/tcp_update_metrics
 u8                              sysctl_tcp_no_ssthresh_metrics_save                                                  TCP_LAST_ACK/tcp_(update/init)_metrics
-u8                              sysctl_tcp_moderate_rcvbuf                   read_mostly         read_mostly         tcp_tso_should_defer(tx);tcp_rcv_space_adjust(rx)
+u8                              sysctl_tcp_moderate_rcvbuf                                       read_mostly         tcp_rcvbuf_grow()
+u32                             sysctl_tcp_rcvbuf_low_rtt                                        read_mostly         tcp_rcvbuf_grow()
+u8                              sysctl_tcp_shrink_window                     read_mostly         read_mostly         __tcp_select_window()
 u8                              sysctl_tcp_tso_win_divisor                   read_mostly                             tcp_tso_should_defer(tcp_write_xmit)
 u8                              sysctl_tcp_workaround_signed_windows                                                 tcp_select_window
 int                             sysctl_tcp_limit_output_bytes                read_mostly                             tcp_small_queue_check(tcp_write_xmit)

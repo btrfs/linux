@@ -84,6 +84,12 @@ static const struct mxc_isi_bus_format_info mxc_isi_bus_formats[] = {
 				| BIT(MXC_ISI_PIPE_PAD_SOURCE),
 		.encoding	= MXC_ISI_ENC_RAW,
 	}, {
+		.mbus_code	= MEDIA_BUS_FMT_Y16_1X16,
+		.output		= MEDIA_BUS_FMT_Y16_1X16,
+		.pads		= BIT(MXC_ISI_PIPE_PAD_SINK)
+				| BIT(MXC_ISI_PIPE_PAD_SOURCE),
+		.encoding	= MXC_ISI_ENC_RAW,
+	}, {
 		.mbus_code	= MEDIA_BUS_FMT_SBGGR8_1X8,
 		.output		= MEDIA_BUS_FMT_SBGGR8_1X8,
 		.pads		= BIT(MXC_ISI_PIPE_PAD_SINK)
@@ -179,6 +185,30 @@ static const struct mxc_isi_bus_format_info mxc_isi_bus_formats[] = {
 		.pads		= BIT(MXC_ISI_PIPE_PAD_SINK)
 				| BIT(MXC_ISI_PIPE_PAD_SOURCE),
 		.encoding	= MXC_ISI_ENC_RAW,
+	}, {
+		.mbus_code	= MEDIA_BUS_FMT_SBGGR16_1X16,
+		.output		= MEDIA_BUS_FMT_SBGGR16_1X16,
+		.pads		= BIT(MXC_ISI_PIPE_PAD_SINK)
+				| BIT(MXC_ISI_PIPE_PAD_SOURCE),
+		.encoding	= MXC_ISI_ENC_RAW,
+	}, {
+		.mbus_code	= MEDIA_BUS_FMT_SGBRG16_1X16,
+		.output		= MEDIA_BUS_FMT_SGBRG16_1X16,
+		.pads		= BIT(MXC_ISI_PIPE_PAD_SINK)
+				| BIT(MXC_ISI_PIPE_PAD_SOURCE),
+		.encoding	= MXC_ISI_ENC_RAW,
+	}, {
+		.mbus_code	= MEDIA_BUS_FMT_SGRBG16_1X16,
+		.output		= MEDIA_BUS_FMT_SGRBG16_1X16,
+		.pads		= BIT(MXC_ISI_PIPE_PAD_SINK)
+				| BIT(MXC_ISI_PIPE_PAD_SOURCE),
+		.encoding	= MXC_ISI_ENC_RAW,
+	}, {
+		.mbus_code	= MEDIA_BUS_FMT_SRGGB16_1X16,
+		.output		= MEDIA_BUS_FMT_SRGGB16_1X16,
+		.pads		= BIT(MXC_ISI_PIPE_PAD_SINK)
+				| BIT(MXC_ISI_PIPE_PAD_SOURCE),
+		.encoding	= MXC_ISI_ENC_RAW,
 	},
 	/* JPEG */
 	{
@@ -232,6 +262,47 @@ static inline struct mxc_isi_pipe *to_isi_pipe(struct v4l2_subdev *sd)
 	return container_of(sd, struct mxc_isi_pipe, sd);
 }
 
+static int mxc_isi_get_vc(struct mxc_isi_pipe *pipe)
+{
+	struct mxc_isi_crossbar *xbar = &pipe->isi->crossbar;
+	struct device *dev = pipe->isi->dev;
+	struct v4l2_mbus_frame_desc fd = { };
+	unsigned int source_pad = xbar->num_sinks + pipe->id;
+	unsigned int num_vcs;
+	unsigned int i;
+	int ret;
+
+	ret = v4l2_subdev_call(&xbar->sd, pad, get_frame_desc,
+			       source_pad, &fd);
+	if (ret < 0) {
+		dev_err(dev, "Failed to get source frame desc from pad %u\n",
+			source_pad);
+		return ret;
+	}
+
+	/* Find stream 0 in the frame descriptor. */
+	for (i = 0; i < fd.num_entries; i++) {
+		if (fd.entry[i].stream == 0)
+			break;
+	}
+
+	if (i == fd.num_entries) {
+		dev_err(dev, "Failed to find stream from source frame desc\n");
+		return -EPIPE;
+	}
+
+	num_vcs = pipe->isi->pdata->num_vc ? : 1;
+
+	/* Check virtual channel range. */
+	if (fd.entry[i].bus.csi2.vc >= num_vcs) {
+		dev_err(dev, "Virtual channel %u exceeds maximum %u\n",
+			fd.entry[i].bus.csi2.vc, num_vcs - 1);
+		return -EPIPE;
+	}
+
+	return fd.entry[i].bus.csi2.vc;
+}
+
 int mxc_isi_pipe_enable(struct mxc_isi_pipe *pipe)
 {
 	struct mxc_isi_crossbar *xbar = &pipe->isi->crossbar;
@@ -246,6 +317,7 @@ int mxc_isi_pipe_enable(struct mxc_isi_pipe *pipe)
 	struct v4l2_rect crop;
 	u32 input;
 	int ret;
+	int vc;
 
 	/*
 	 * Find the connected input by inspecting the crossbar switch routing
@@ -280,8 +352,12 @@ int mxc_isi_pipe_enable(struct mxc_isi_pipe *pipe)
 
 	v4l2_subdev_unlock_state(state);
 
+	vc = mxc_isi_get_vc(pipe);
+	if (vc < 0)
+		return vc;
+
 	/* Configure the ISI channel. */
-	mxc_isi_channel_config(pipe, input, &in_size, &scale, &crop,
+	mxc_isi_channel_config(pipe, input, vc, &in_size, &scale, &crop,
 			       sink_info->encoding, src_info->encoding);
 
 	mxc_isi_channel_enable(pipe);
@@ -641,16 +717,19 @@ static int mxc_isi_pipe_set_selection(struct v4l2_subdev *sd,
 			/* Composing is supported on the sink only. */
 			return -EINVAL;
 
-		/* The sink crop is bound by the sink format downscaling only). */
+		/*
+		 * The ISI supports downscaling only, with a factor up to 16.
+		 * Clamp the compose rectangle size accordingly.
+		 */
 		format = mxc_isi_pipe_get_pad_format(pipe, state,
 						     MXC_ISI_PIPE_PAD_SINK);
 
 		sel->r.left = 0;
 		sel->r.top = 0;
-		sel->r.width = clamp(sel->r.width, MXC_ISI_MIN_WIDTH,
-				     format->width);
-		sel->r.height = clamp(sel->r.height, MXC_ISI_MIN_HEIGHT,
-				      format->height);
+		sel->r.width = mxc_isi_clamp_downscale_16(sel->r.width,
+							  format->width);
+		sel->r.height = mxc_isi_clamp_downscale_16(sel->r.height,
+							   format->height);
 
 		rect = mxc_isi_pipe_get_pad_compose(pipe, state,
 						    MXC_ISI_PIPE_PAD_SINK);
@@ -767,6 +846,7 @@ int mxc_isi_pipe_init(struct mxc_isi_dev *isi, unsigned int id)
 	pipe->acquired_res = 0;
 	pipe->chained_res = 0;
 	pipe->chained = false;
+	pipe->input = UINT_MAX;
 
 	sd = &pipe->sd;
 	v4l2_subdev_init(sd, &mxc_isi_pipe_subdev_ops);
@@ -796,18 +876,20 @@ int mxc_isi_pipe_init(struct mxc_isi_dev *isi, unsigned int id)
 	irq = platform_get_irq(to_platform_device(isi->dev), id);
 	if (irq < 0) {
 		ret = irq;
-		goto error;
+		goto error_subdev;
 	}
 
 	ret = devm_request_irq(isi->dev, irq, mxc_isi_pipe_irq_handler,
 			       0, dev_name(isi->dev), pipe);
 	if (ret < 0) {
 		dev_err(isi->dev, "failed to request IRQ (%d)\n", ret);
-		goto error;
+		goto error_subdev;
 	}
 
 	return 0;
 
+error_subdev:
+	v4l2_subdev_cleanup(sd);
 error:
 	media_entity_cleanup(&sd->entity);
 	mutex_destroy(&pipe->lock);
@@ -819,6 +901,7 @@ void mxc_isi_pipe_cleanup(struct mxc_isi_pipe *pipe)
 {
 	struct v4l2_subdev *sd = &pipe->sd;
 
+	v4l2_subdev_cleanup(sd);
 	media_entity_cleanup(&sd->entity);
 	mutex_destroy(&pipe->lock);
 }

@@ -525,7 +525,7 @@ Description:
 
 		Valid values:
 			      "Unknown", "NiMH", "Li-ion", "Li-poly", "LiFe",
-			      "NiCd", "LiMn"
+			      "NiCd", "LiMn", "PbAc", "NiZn", "RAM", "ZnAr"
 
 
 What:		/sys/class/power_supply/<supply_name>/voltage_avg,
@@ -675,7 +675,8 @@ Description:
 
 		Valid values:
 			      "Unknown", "SDP", "DCP", "CDP", "ACA", "C", "PD",
-			      "PD_DRP", "PD_PPS", "BrickID"
+			      "PD_DRP", "PD_PPS", "BrickID", "PD_SPR_AVS",
+			      "PD_PPS_SPR_AVS"
 
 **Device Specific Properties**
 

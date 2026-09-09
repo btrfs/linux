@@ -22,6 +22,45 @@
 #define DRV_NAME		"enic"
 #define DRV_DESCRIPTION		"Cisco VIC Ethernet NIC Driver"
 
+#define PCI_SUBDEV_ID_CISCO_VIC_1225	0x085
+#define PCI_SUBDEV_ID_CISCO_VIC_1225T	0x0CE
+#define PCI_SUBDEV_ID_CISCO_VIC_1227	0x12E
+#define PCI_SUBDEV_ID_CISCO_VIC_1227T	0x139
+#define PCI_SUBDEV_ID_CISCO_VIC_1240	0x084
+#define PCI_SUBDEV_ID_CISCO_VIC_1280	0x04F
+#define PCI_SUBDEV_ID_CISCO_VIC_1285	0x0CD
+
+#define PCI_SUBDEV_ID_CISCO_VIC_1340	0x12C
+#define PCI_SUBDEV_ID_CISCO_VIC_1380	0x137
+#define PCI_SUBDEV_ID_CISCO_VIC_1385	0x14D
+#define PCI_SUBDEV_ID_CISCO_VIC_1387	0x15D
+
+#define PCI_SUBDEV_ID_CISCO_VIC_1440	0x0215
+#define PCI_SUBDEV_ID_CISCO_VIC_1455	0x0217
+#define PCI_SUBDEV_ID_CISCO_VIC_1457	0x0218
+#define PCI_SUBDEV_ID_CISCO_VIC_1467	0x02AF
+#define PCI_SUBDEV_ID_CISCO_VIC_1477	0x2B0
+#define PCI_SUBDEV_ID_CISCO_VIC_1480	0x0216
+#define PCI_SUBDEV_ID_CISCO_VIC_1485	0x0219
+#define PCI_SUBDEV_ID_CISCO_VIC_1487	0x021A
+#define PCI_SUBDEV_ID_CISCO_VIC_1495	0x024A
+#define PCI_SUBDEV_ID_CISCO_VIC_1497	0x024B
+#define PCI_SUBDEV_ID_CISCO_VIC_14425	0x02CF
+#define PCI_SUBDEV_ID_CISCO_VIC_14825	0x02D0
+
+#define PCI_SUBDEV_ID_CISCO_VIC_15230	0x02DF
+#define PCI_SUBDEV_ID_CISCO_VIC_15231	0x02DB
+#define PCI_SUBDEV_ID_CISCO_VIC_15235	0x02E4
+#define PCI_SUBDEV_ID_CISCO_VIC_15237	0x02F3
+#define PCI_SUBDEV_ID_CISCO_VIC_15238	0x02E8
+#define PCI_SUBDEV_ID_CISCO_VIC_15411	0x02DC
+#define PCI_SUBDEV_ID_CISCO_VIC_15412	0x02E2
+#define PCI_SUBDEV_ID_CISCO_VIC_15420	0x02DE
+#define PCI_SUBDEV_ID_CISCO_VIC_15422	0x02E1
+#define PCI_SUBDEV_ID_CISCO_VIC_15425	0x02F2
+#define PCI_SUBDEV_ID_CISCO_VIC_15427	0x02E0
+#define PCI_SUBDEV_ID_CISCO_VIC_15428	0x02DD
+
 #define ENIC_BARS_MAX		6
 
 #define ENIC_WQ_MAX		256
@@ -186,6 +225,13 @@ struct enic_rq {
 	struct page_pool *pool;
 } ____cacheline_aligned;
 
+enum enic_vf_type {
+	ENIC_VF_TYPE_NONE,
+	ENIC_VF_TYPE_V1,
+	ENIC_VF_TYPE_USNIC,
+	ENIC_VF_TYPE_V2,
+};
+
 /* Per-instance private data structure */
 struct enic {
 	struct net_device *netdev;
@@ -210,9 +256,11 @@ struct enic {
 	struct enic_rx_coal rx_coalesce_setting;
 	u32 rx_coalesce_usecs;
 	u32 tx_coalesce_usecs;
-#ifdef CONFIG_PCI_IOV
 	u16 num_vfs;
-#endif
+	enum enic_vf_type vf_type;
+	bool vf_registered;
+	u32 pf_cap_version;
+	unsigned int enable_count;
 	spinlock_t enic_api_lock;
 	bool enic_api_busy;
 	struct enic_port_profile *pp;
@@ -241,6 +289,49 @@ struct enic {
 	u8 rss_key[ENIC_RSS_LEN];
 	struct vnic_gen_stats gen_stats;
 	enum ext_cq ext_cq;
+
+	/* Admin channel resources for SR-IOV MBOX */
+	bool has_admin_channel;
+	/* true only while the admin WQ/RQ/CQ are allocated and enabled; gates
+	 * enic_admin_channel_close() so it is a no-op after a failed (re)open
+	 * left the resources freed.
+	 */
+	bool admin_chan_up;
+	/* set on send timeout; cleared on channel re-open */
+	bool mbox_send_disabled;
+	struct vnic_wq admin_wq;
+	struct vnic_rq admin_rq;
+	struct vnic_cq admin_cq[2];
+	struct vnic_intr admin_intr;
+	struct delayed_work admin_poll_work;
+	unsigned int admin_intr_index;
+	struct work_struct link_notify_work;
+	struct work_struct admin_msg_work;
+	spinlock_t admin_msg_lock;	/* protects admin_msg_list */
+	struct list_head admin_msg_list;
+	unsigned int admin_msg_count;	/* current depth of admin_msg_list */
+	void (*admin_rq_handler)(struct enic *enic, void *buf,
+				 unsigned int len);
+
+	/* MBOX protocol state — mbox_lock serializes admin WQ sends */
+	struct mutex mbox_lock;
+	u64 mbox_msg_num;
+	/* MBOX request-reply state.  mbox_expected_reply is written and
+	 * cleared by the process-context request helpers (capability/register/
+	 * unregister) and only read by the admin_msg_work receive handlers, so
+	 * it is annotated with READ_ONCE()/WRITE_ONCE() rather than locked:
+	 * only one request is in flight at a time (requesters run under RTNL or
+	 * single-threaded probe/remove), so each request is serialized and its
+	 * reply completes mbox_comp before the next request is issued.
+	 */
+	struct completion mbox_comp;
+	u8 mbox_expected_reply;
+	bool mbox_initialized;
+
+	/* PF: per-VF MBOX state, allocated when SRIOV V2 is enabled */
+	struct enic_vf_state {
+		bool registered;
+	} *vf_state;
 };
 
 static inline struct net_device *vnic_get_netdev(struct vnic_dev *vdev)
@@ -258,6 +349,8 @@ static inline struct net_device *vnic_get_netdev(struct vnic_dev *vdev)
 	dev_warn(&(vdev)->pdev->dev, fmt, ##__VA_ARGS__)
 #define vdev_info(vdev, fmt, ...)					\
 	dev_info(&(vdev)->pdev->dev, fmt, ##__VA_ARGS__)
+#define vdev_dbg(vdev, fmt, ...)					\
+	dev_dbg(&(vdev)->pdev->dev, fmt, ##__VA_ARGS__)
 
 #define vdev_neterr(vdev, fmt, ...)					\
 	netdev_err(vnic_get_netdev(vdev), fmt, ##__VA_ARGS__)
@@ -360,6 +453,7 @@ void enic_reset_addr_lists(struct enic *enic);
 int enic_sriov_enabled(struct enic *enic);
 int enic_is_valid_vf(struct enic *enic, int vf);
 int enic_is_dynamic(struct enic *enic);
+int enic_is_sriov_vf_v2(struct enic *enic);
 void enic_set_ethtool_ops(struct net_device *netdev);
 int __enic_set_rsskey(struct enic *enic);
 void enic_ext_cq(struct enic *enic);

@@ -682,24 +682,19 @@ static int dln2_spi_probe(struct platform_device *pdev)
 	struct spi_controller *host;
 	struct dln2_spi *dln2;
 	struct dln2_platform_data *pdata = dev_get_platdata(&pdev->dev);
-	struct device *dev = &pdev->dev;
 	int ret;
 
-	host = spi_alloc_host(&pdev->dev, sizeof(*dln2));
+	host = devm_spi_alloc_host(&pdev->dev, sizeof(*dln2));
 	if (!host)
 		return -ENOMEM;
-
-	device_set_node(&host->dev, dev_fwnode(dev));
 
 	platform_set_drvdata(pdev, host);
 
 	dln2 = spi_controller_get_devdata(host);
 
 	dln2->buf = devm_kmalloc(&pdev->dev, DLN2_SPI_BUF_SIZE, GFP_KERNEL);
-	if (!dln2->buf) {
-		ret = -ENOMEM;
-		goto exit_free_host;
-	}
+	if (!dln2->buf)
+		return -ENOMEM;
 
 	dln2->host = host;
 	dln2->pdev = pdev;
@@ -712,13 +707,13 @@ static int dln2_spi_probe(struct platform_device *pdev)
 	ret = dln2_spi_enable(dln2, false);
 	if (ret < 0) {
 		dev_err(&pdev->dev, "Failed to disable SPI module\n");
-		goto exit_free_host;
+		return ret;
 	}
 
 	ret = dln2_spi_get_cs_num(dln2, &host->num_chipselect);
 	if (ret < 0) {
 		dev_err(&pdev->dev, "Failed to get number of CS pins\n");
-		goto exit_free_host;
+		return ret;
 	}
 
 	ret = dln2_spi_get_speed_range(dln2,
@@ -726,20 +721,20 @@ static int dln2_spi_probe(struct platform_device *pdev)
 				       &host->max_speed_hz);
 	if (ret < 0) {
 		dev_err(&pdev->dev, "Failed to read bus min/max freqs\n");
-		goto exit_free_host;
+		return ret;
 	}
 
 	ret = dln2_spi_get_supported_frame_sizes(dln2,
 						 &host->bits_per_word_mask);
 	if (ret < 0) {
 		dev_err(&pdev->dev, "Failed to read supported frame sizes\n");
-		goto exit_free_host;
+		return ret;
 	}
 
 	ret = dln2_spi_cs_enable_all(dln2, true);
 	if (ret < 0) {
 		dev_err(&pdev->dev, "Failed to enable CS pins\n");
-		goto exit_free_host;
+		return ret;
 	}
 
 	host->bus_num = -1;
@@ -752,7 +747,7 @@ static int dln2_spi_probe(struct platform_device *pdev)
 	ret = dln2_spi_enable(dln2, true);
 	if (ret < 0) {
 		dev_err(&pdev->dev, "Failed to enable SPI module\n");
-		goto exit_free_host;
+		return ret;
 	}
 
 	pm_runtime_set_autosuspend_delay(&pdev->dev,
@@ -761,7 +756,7 @@ static int dln2_spi_probe(struct platform_device *pdev)
 	pm_runtime_set_active(&pdev->dev);
 	pm_runtime_enable(&pdev->dev);
 
-	ret = devm_spi_register_controller(&pdev->dev, host);
+	ret = spi_register_controller(host);
 	if (ret < 0) {
 		dev_err(&pdev->dev, "Failed to register host\n");
 		goto exit_register;
@@ -775,8 +770,6 @@ exit_register:
 
 	if (dln2_spi_enable(dln2, false) < 0)
 		dev_err(&pdev->dev, "Failed to disable SPI module\n");
-exit_free_host:
-	spi_controller_put(host);
 
 	return ret;
 }
@@ -786,13 +779,14 @@ static void dln2_spi_remove(struct platform_device *pdev)
 	struct spi_controller *host = platform_get_drvdata(pdev);
 	struct dln2_spi *dln2 = spi_controller_get_devdata(host);
 
+	spi_unregister_controller(host);
+
 	pm_runtime_disable(&pdev->dev);
 
 	if (dln2_spi_enable(dln2, false) < 0)
 		dev_err(&pdev->dev, "Failed to disable SPI module\n");
 }
 
-#ifdef CONFIG_PM_SLEEP
 static int dln2_spi_suspend(struct device *dev)
 {
 	int ret;
@@ -839,9 +833,7 @@ static int dln2_spi_resume(struct device *dev)
 
 	return spi_controller_resume(host);
 }
-#endif /* CONFIG_PM_SLEEP */
 
-#ifdef CONFIG_PM
 static int dln2_spi_runtime_suspend(struct device *dev)
 {
 	struct spi_controller *host = dev_get_drvdata(dev);
@@ -857,18 +849,16 @@ static int dln2_spi_runtime_resume(struct device *dev)
 
 	return  dln2_spi_enable(dln2, true);
 }
-#endif /* CONFIG_PM */
 
 static const struct dev_pm_ops dln2_spi_pm = {
-	SET_SYSTEM_SLEEP_PM_OPS(dln2_spi_suspend, dln2_spi_resume)
-	SET_RUNTIME_PM_OPS(dln2_spi_runtime_suspend,
-			   dln2_spi_runtime_resume, NULL)
+	SYSTEM_SLEEP_PM_OPS(dln2_spi_suspend, dln2_spi_resume)
+	RUNTIME_PM_OPS(dln2_spi_runtime_suspend, dln2_spi_runtime_resume, NULL)
 };
 
 static struct platform_driver spi_dln2_driver = {
 	.driver = {
 		.name	= "dln2-spi",
-		.pm	= &dln2_spi_pm,
+		.pm	= pm_ptr(&dln2_spi_pm),
 	},
 	.probe		= dln2_spi_probe,
 	.remove		= dln2_spi_remove,

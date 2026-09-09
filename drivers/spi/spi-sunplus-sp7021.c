@@ -290,8 +290,7 @@ static void sp7021_spi_setup_clk(struct spi_controller *ctlr, struct spi_transfe
 	div = max(2U, clk_rate / xfer->speed_hz);
 
 	clk_sel = (div / 2) - 1;
-	pspim->xfer_conf &= ~SP7021_CLK_MASK;
-	pspim->xfer_conf |= FIELD_PREP(SP7021_CLK_MASK, clk_sel);
+	FIELD_MODIFY(SP7021_CLK_MASK, &pspim->xfer_conf, clk_sel);
 	writel(pspim->xfer_conf, pspim->m_base + SP7021_SPI_CONFIG_REG);
 }
 
@@ -389,11 +388,6 @@ static int sp7021_spi_target_transfer_one(struct spi_controller *ctlr, struct sp
 	return ret;
 }
 
-static void sp7021_spi_disable_unprepare(void *data)
-{
-	clk_disable_unprepare(data);
-}
-
 static void sp7021_spi_reset_control_assert(void *data)
 {
 	reset_control_assert(data);
@@ -419,7 +413,6 @@ static int sp7021_spi_controller_probe(struct platform_device *pdev)
 		ctlr = devm_spi_alloc_host(dev, sizeof(*pspim));
 	if (!ctlr)
 		return -ENOMEM;
-	device_set_node(&ctlr->dev, dev_fwnode(dev));
 	ctlr->bus_num = pdev->id;
 	ctlr->mode_bits = SPI_CPOL | SPI_CPHA | SPI_CS_HIGH | SPI_LSB_FIRST;
 	ctlr->auto_runtime_pm = true;
@@ -461,21 +454,13 @@ static int sp7021_spi_controller_probe(struct platform_device *pdev)
 	if (pspim->s_irq < 0)
 		return pspim->s_irq;
 
-	pspim->spi_clk = devm_clk_get(dev, NULL);
+	pspim->spi_clk = devm_clk_get_enabled(dev, NULL);
 	if (IS_ERR(pspim->spi_clk))
 		return dev_err_probe(dev, PTR_ERR(pspim->spi_clk), "clk get fail\n");
 
 	pspim->rstc = devm_reset_control_get_exclusive(dev, NULL);
 	if (IS_ERR(pspim->rstc))
 		return dev_err_probe(dev, PTR_ERR(pspim->rstc), "rst get fail\n");
-
-	ret = clk_prepare_enable(pspim->spi_clk);
-	if (ret)
-		return dev_err_probe(dev, ret, "failed to enable clk\n");
-
-	ret = devm_add_action_or_reset(dev, sp7021_spi_disable_unprepare, pspim->spi_clk);
-	if (ret)
-		return ret;
 
 	ret = reset_control_deassert(pspim->rstc);
 	if (ret)
@@ -513,7 +498,7 @@ static void sp7021_spi_controller_remove(struct platform_device *pdev)
 	pm_runtime_set_suspended(&pdev->dev);
 }
 
-static int __maybe_unused sp7021_spi_controller_suspend(struct device *dev)
+static int sp7021_spi_controller_suspend(struct device *dev)
 {
 	struct spi_controller *ctlr = dev_get_drvdata(dev);
 	struct sp7021_spi_ctlr *pspim = spi_controller_get_devdata(ctlr);
@@ -521,7 +506,7 @@ static int __maybe_unused sp7021_spi_controller_suspend(struct device *dev)
 	return reset_control_assert(pspim->rstc);
 }
 
-static int __maybe_unused sp7021_spi_controller_resume(struct device *dev)
+static int sp7021_spi_controller_resume(struct device *dev)
 {
 	struct spi_controller *ctlr = dev_get_drvdata(dev);
 	struct sp7021_spi_ctlr *pspim = spi_controller_get_devdata(ctlr);
@@ -530,7 +515,6 @@ static int __maybe_unused sp7021_spi_controller_resume(struct device *dev)
 	return clk_prepare_enable(pspim->spi_clk);
 }
 
-#ifdef CONFIG_PM
 static int sp7021_spi_runtime_suspend(struct device *dev)
 {
 	struct spi_controller *ctlr = dev_get_drvdata(dev);
@@ -546,13 +530,12 @@ static int sp7021_spi_runtime_resume(struct device *dev)
 
 	return reset_control_deassert(pspim->rstc);
 }
-#endif
 
 static const struct dev_pm_ops sp7021_spi_pm_ops = {
-	SET_RUNTIME_PM_OPS(sp7021_spi_runtime_suspend,
-			   sp7021_spi_runtime_resume, NULL)
-	SET_SYSTEM_SLEEP_PM_OPS(sp7021_spi_controller_suspend,
-				sp7021_spi_controller_resume)
+	RUNTIME_PM_OPS(sp7021_spi_runtime_suspend,
+		       sp7021_spi_runtime_resume, NULL)
+	SYSTEM_SLEEP_PM_OPS(sp7021_spi_controller_suspend,
+			    sp7021_spi_controller_resume)
 };
 
 static const struct of_device_id sp7021_spi_controller_ids[] = {
@@ -567,7 +550,7 @@ static struct platform_driver sp7021_spi_controller_driver = {
 	.driver = {
 		.name = "sunplus,sp7021-spi-controller",
 		.of_match_table = sp7021_spi_controller_ids,
-		.pm     = &sp7021_spi_pm_ops,
+		.pm     = pm_ptr(&sp7021_spi_pm_ops),
 	},
 };
 module_platform_driver(sp7021_spi_controller_driver);

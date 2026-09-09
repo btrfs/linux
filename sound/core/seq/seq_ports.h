@@ -28,17 +28,17 @@
 
 struct snd_seq_subscribers {
 	struct snd_seq_port_subscribe info;	/* additional info */
-	struct list_head src_list;	/* link of sources */
-	struct list_head dest_list;	/* link of destinations */
+	struct hlist_node src_list;	/* link of sources */
+	struct hlist_node dest_list;	/* link of destinations */
 	atomic_t ref_count;
+	struct rcu_head rcu;		/* for deferred free */
 };
 
 struct snd_seq_port_subs_info {
-	struct list_head list_head;	/* list of subscribed ports */
+	struct hlist_head list_head;	/* list of subscribed ports */
 	unsigned int count;		/* count of subscribers */
 	unsigned int exclusive: 1;	/* exclusive mode */
 	struct rw_semaphore list_mutex;
-	rwlock_t list_lock;
 	int (*open)(void *private_data, struct snd_seq_port_subscribe *info);
 	int (*close)(void *private_data, struct snd_seq_port_subscribe *info);
 };
@@ -98,9 +98,13 @@ struct snd_seq_client_port *snd_seq_port_query_nearest(struct snd_seq_client *cl
 
 DEFINE_FREE(snd_seq_port, struct snd_seq_client_port *, if (!IS_ERR_OR_NULL(_T)) snd_seq_port_unlock(_T))
 
-/* create a port, port number or a negative error code is returned */
-int snd_seq_create_port(struct snd_seq_client *client, int port_index,
+/* create a port, 0 on success or a negative error code is returned */
+int snd_seq_create_port(struct snd_seq_client *client,
 			struct snd_seq_client_port **port_ret);
+
+/* insert the port; return the port address or a negative error code */
+int snd_seq_insert_port(struct snd_seq_client *client, int port,
+			struct snd_seq_client_port *new_port);
 
 /* delete a port */
 int snd_seq_delete_port(struct snd_seq_client *client, int port);

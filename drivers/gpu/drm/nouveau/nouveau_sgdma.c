@@ -72,14 +72,12 @@ nouveau_sgdma_create_ttm(struct ttm_buffer_object *bo, uint32_t page_flags)
 	struct nouveau_sgdma_be *nvbe;
 	enum ttm_caching caching;
 
-	if (nvbo->force_coherent)
-		caching = ttm_uncached;
-	else if (drm->agp.bridge)
+	if (nvbo->force_coherent || drm->agp.bridge)
 		caching = ttm_write_combined;
 	else
 		caching = ttm_cached;
 
-	nvbe = kzalloc(sizeof(*nvbe), GFP_KERNEL);
+	nvbe = kzalloc_obj(*nvbe);
 	if (!nvbe)
 		return NULL;
 

@@ -520,6 +520,9 @@ static int goodix_hid_set_raw_report(struct hid_device *hid,
 	memcpy(tmp_buf + tx_len, args, args_len);
 	tx_len += args_len;
 
+	if (tx_len + len > sizeof(tmp_buf))
+		return -EINVAL;
+
 	memcpy(tmp_buf + tx_len, buf, len);
 	tx_len += len;
 
@@ -719,11 +722,8 @@ static int goodix_spi_probe(struct spi_device *spi)
 	error = devm_request_threaded_irq(&ts->spi->dev, ts->spi->irq,
 					  NULL, goodix_hid_irq, IRQF_ONESHOT,
 					  "goodix_spi_hid", ts);
-	if (error) {
-		dev_err(ts->dev, "could not register interrupt, irq = %d, %d",
-			ts->spi->irq, error);
+	if (error)
 		goto err_destroy_hid;
-	}
 
 	return 0;
 

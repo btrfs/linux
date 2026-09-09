@@ -53,7 +53,7 @@ struct samsung_galaxybook {
 	void *i8042_filter_ptr;
 
 	struct work_struct block_recording_hotkey_work;
-	struct input_dev *camera_lens_cover_switch;
+	struct input_dev *input;
 
 	struct acpi_battery_hook battery_hook;
 
@@ -197,6 +197,9 @@ static const guid_t performance_mode_guid =
 #define GB_ACPI_NOTIFY_DEVICE_ON_TABLE          0x6c
 #define GB_ACPI_NOTIFY_DEVICE_OFF_TABLE         0x6d
 #define GB_ACPI_NOTIFY_HOTKEY_PERFORMANCE_MODE  0x70
+#define GB_ACPI_NOTIFY_HOTKEY_KBD_BACKLIGHT     0x7d
+#define GB_ACPI_NOTIFY_HOTKEY_MICMUTE           0x6e
+#define GB_ACPI_NOTIFY_HOTKEY_CAMERA            0x6f
 
 #define GB_KEY_KBD_BACKLIGHT_KEYDOWN    0x2c
 #define GB_KEY_KBD_BACKLIGHT_KEYUP      0xac
@@ -442,12 +445,13 @@ static int galaxybook_battery_ext_property_get(struct power_supply *psy,
 					       union power_supply_propval *val)
 {
 	struct samsung_galaxybook *galaxybook = ext_data;
+	u8 value;
 	int err;
 
 	if (psp != POWER_SUPPLY_PROP_CHARGE_CONTROL_END_THRESHOLD)
 		return -EINVAL;
 
-	err = charge_control_end_threshold_acpi_get(galaxybook, (u8 *)&val->intval);
+	err = charge_control_end_threshold_acpi_get(galaxybook, &value);
 	if (err)
 		return err;
 
@@ -455,8 +459,10 @@ static int galaxybook_battery_ext_property_get(struct power_supply *psy,
 	 * device stores "no end threshold" as 0 instead of 100;
 	 * if device has 0, report 100
 	 */
-	if (val->intval == 0)
-		val->intval = 100;
+	if (value == 0)
+		value = 100;
+
+	val->intval = value;
 
 	return 0;
 }
@@ -856,11 +862,27 @@ static int block_recording_acpi_set(struct samsung_galaxybook *galaxybook, const
 	if (err)
 		return err;
 
-	input_report_switch(galaxybook->camera_lens_cover_switch,
+	input_report_switch(galaxybook->input,
 			    SW_CAMERA_LENS_COVER, value ? 1 : 0);
-	input_sync(galaxybook->camera_lens_cover_switch);
+	input_sync(galaxybook->input);
 
 	return 0;
+}
+
+static int galaxybook_input_init(struct samsung_galaxybook *galaxybook)
+{
+	galaxybook->input = devm_input_allocate_device(&galaxybook->platform->dev);
+	if (!galaxybook->input)
+		return -ENOMEM;
+
+	galaxybook->input->name = "Samsung Galaxy Book Camera Lens Cover";
+	galaxybook->input->phys = DRIVER_NAME "/input0";
+	galaxybook->input->id.bustype = BUS_HOST;
+
+	input_set_capability(galaxybook->input, EV_KEY, KEY_MICMUTE);
+	input_set_capability(galaxybook->input, EV_SW, SW_CAMERA_LENS_COVER);
+
+	return input_register_device(galaxybook->input);
 }
 
 static int galaxybook_block_recording_init(struct samsung_galaxybook *galaxybook)
@@ -884,24 +906,8 @@ static int galaxybook_block_recording_init(struct samsung_galaxybook *galaxybook
 		return GB_NOT_SUPPORTED;
 	}
 
-	galaxybook->camera_lens_cover_switch =
-		devm_input_allocate_device(&galaxybook->platform->dev);
-	if (!galaxybook->camera_lens_cover_switch)
-		return -ENOMEM;
-
-	galaxybook->camera_lens_cover_switch->name = "Samsung Galaxy Book Camera Lens Cover";
-	galaxybook->camera_lens_cover_switch->phys = DRIVER_NAME "/input0";
-	galaxybook->camera_lens_cover_switch->id.bustype = BUS_HOST;
-
-	input_set_capability(galaxybook->camera_lens_cover_switch, EV_SW, SW_CAMERA_LENS_COVER);
-
-	err = input_register_device(galaxybook->camera_lens_cover_switch);
-	if (err)
-		return err;
-
-	input_report_switch(galaxybook->camera_lens_cover_switch,
-			    SW_CAMERA_LENS_COVER, value ? 1 : 0);
-	input_sync(galaxybook->camera_lens_cover_switch);
+	input_report_switch(galaxybook->input, SW_CAMERA_LENS_COVER, value ? 1 : 0);
+	input_sync(galaxybook->input);
 
 	return 0;
 }
@@ -1257,6 +1263,25 @@ static void galaxybook_acpi_notify(acpi_handle handle, u32 event, void *data)
 		if (galaxybook->has_performance_mode)
 			platform_profile_cycle();
 		break;
+	case GB_ACPI_NOTIFY_HOTKEY_KBD_BACKLIGHT:
+		if (galaxybook->has_kbd_backlight)
+			schedule_work(&galaxybook->kbd_backlight_hotkey_work);
+		break;
+	case GB_ACPI_NOTIFY_HOTKEY_MICMUTE:
+		input_report_key(galaxybook->input, KEY_MICMUTE, 1);
+		input_sync(galaxybook->input);
+		input_report_key(galaxybook->input, KEY_MICMUTE, 0);
+		input_sync(galaxybook->input);
+		break;
+	case GB_ACPI_NOTIFY_HOTKEY_CAMERA:
+		if (galaxybook->has_block_recording) {
+			schedule_work(&galaxybook->block_recording_hotkey_work);
+		} else {
+			input_report_switch(galaxybook->input, SW_CAMERA_LENS_COVER,
+					    !test_bit(SW_CAMERA_LENS_COVER, galaxybook->input->sw));
+			input_sync(galaxybook->input);
+		}
+		break;
 	default:
 		dev_warn(&galaxybook->platform->dev,
 			 "unknown ACPI notification event: 0x%x\n", event);
@@ -1389,6 +1414,11 @@ static int galaxybook_probe(struct platform_device *pdev)
 		return dev_err_probe(&galaxybook->platform->dev, err,
 				     "failed to initialize kbd_backlight\n");
 
+	err = galaxybook_input_init(galaxybook);
+	if (err)
+		return dev_err_probe(&galaxybook->platform->dev, err,
+				     "failed to initialize input device\n");
+
 	err = galaxybook_fw_attrs_init(galaxybook);
 	if (err)
 		return dev_err_probe(&galaxybook->platform->dev, err,
@@ -1408,6 +1438,7 @@ static const struct acpi_device_id galaxybook_device_ids[] = {
 	{ "SAM0428" },
 	{ "SAM0429" },
 	{ "SAM0430" },
+	{ "SAMB430" },
 	{}
 };
 MODULE_DEVICE_TABLE(acpi, galaxybook_device_ids);

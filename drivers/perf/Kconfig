@@ -188,7 +188,7 @@ config FUJITSU_UNCORE_PMU
 	 monitoring Uncore events.
 
 config QCOM_L2_PMU
-	bool "Qualcomm Technologies L2-cache PMU"
+	bool "Qualcomm L2-cache PMU"
 	depends on ARCH_QCOM && ARM64 && ACPI
 	select QCOM_KRYO_L2_ACCESSORS
 	  help
@@ -198,7 +198,7 @@ config QCOM_L2_PMU
 	  monitoring L2 cache events.
 
 config QCOM_L3_PMU
-	bool "Qualcomm Technologies L3-cache PMU"
+	bool "Qualcomm L3-cache PMU"
 	depends on ARCH_QCOM && ARM64 && ACPI
 	select QCOM_IRQ_COMBINER
 	help
@@ -310,5 +310,19 @@ config MARVELL_PEM_PMU
 	help
 	  Enable support for PCIe Interface performance monitoring
 	  on Marvell platform.
+
+config NVIDIA_TEGRA410_CMEM_LATENCY_PMU
+	tristate "NVIDIA Tegra410 CPU Memory Latency PMU"
+	depends on ARM64 && ACPI
+	help
+	  Enable perf support for CPU memory latency counters monitoring on
+	  NVIDIA Tegra410 SoC.
+
+config NVIDIA_TEGRA410_C2C_PMU
+	tristate "NVIDIA Tegra410 C2C PMU"
+	depends on ARM64 && ACPI
+	help
+	  Enable perf support for counters in NVIDIA C2C interface of NVIDIA
+	  Tegra410 SoC.
 
 endmenu

@@ -331,9 +331,13 @@ struct ext4_group_info *ext4_get_group_info(struct super_block *sb,
 
 	if (unlikely(group >= EXT4_SB(sb)->s_groups_count))
 		return NULL;
+	if (unlikely(!EXT4_SB(sb)->s_group_info))
+		return NULL;
 	indexv = group >> (EXT4_DESC_PER_BLOCK_BITS(sb));
 	indexh = group & ((EXT4_DESC_PER_BLOCK(sb)) - 1);
 	grp_info = sbi_array_rcu_deref(EXT4_SB(sb), s_group_info, indexv);
+	if (unlikely(!grp_info))
+		return NULL;
 	return grp_info[indexh];
 }
 
@@ -752,7 +756,7 @@ ext4_fsblk_t ext4_new_meta_blocks(handle_t *handle, struct inode *inode,
 		*count = ar.len;
 	/*
 	 * Account for the allocated meta blocks.  We will never
-	 * fail EDQUOT for metdata, but we do account for it.
+	 * fail EDQUOT for metadata, but we do account for it.
 	 */
 	if (!(*errp) && (flags & EXT4_MB_DELALLOC_RESERVED)) {
 		dquot_alloc_block_nofail(inode,

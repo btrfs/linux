@@ -15,7 +15,7 @@
 #include <linux/clk.h>
 #include <linux/etherdevice.h>
 #include <linux/ethtool.h>
-#include <linux/gpio.h>
+#include <linux/gpio/consumer.h>
 #include <linux/interrupt.h>
 #include <linux/irq.h>
 #include <linux/mii.h>
@@ -223,7 +223,7 @@ emac_alloc_dma_req(struct emac_board_info *db,
 {
 	struct emac_dma_req *req;
 
-	req = kzalloc(sizeof(struct emac_dma_req), GFP_ATOMIC);
+	req = kzalloc_obj(struct emac_dma_req, GFP_ATOMIC);
 	if (!req)
 		return NULL;
 
@@ -996,9 +996,9 @@ static int emac_probe(struct platform_device *pdev)
 	/* fill in parameters for net-dev structure */
 	ndev->base_addr = (unsigned long)db->membase;
 	ndev->irq = irq_of_parse_and_map(np, 0);
-	if (ndev->irq == -ENXIO) {
+	if (!ndev->irq) {
 		netdev_err(ndev, "No irq resource\n");
-		ret = ndev->irq;
+		ret = -ENXIO;
 		goto out_iounmap;
 	}
 

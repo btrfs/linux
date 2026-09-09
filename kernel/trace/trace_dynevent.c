@@ -116,6 +116,8 @@ int dyn_event_release(const char *raw_command, struct dyn_event_operations *type
 	return ret;
 }
 
+static int create_dyn_event(const char *raw_command);
+
 /*
  * Locked version of event creation. The event creation must be protected by
  * dyn_event_ops_mutex because of protecting trace_probe_log.
@@ -123,6 +125,9 @@ int dyn_event_release(const char *raw_command, struct dyn_event_operations *type
 int dyn_event_create(const char *raw_command, struct dyn_event_operations *type)
 {
 	int ret;
+
+	if (!type)
+		return create_dyn_event(raw_command);
 
 	mutex_lock(&dyn_event_ops_mutex);
 	ret = type->create(raw_command);
@@ -144,9 +149,16 @@ static int create_dyn_event(const char *raw_command)
 		if (!ret || ret != -ECANCELED)
 			break;
 	}
-	mutex_unlock(&dyn_event_ops_mutex);
-	if (ret == -ECANCELED)
+	if (ret == -ECANCELED) {
+		static const char *err_msg[] = {"No matching dynamic event type"};
+
+		/* Wrong dynamic event. Leave an error message. */
+		tracing_log_err(NULL, "dynevent", raw_command, err_msg,
+				0, 0);
 		ret = -EINVAL;
+	}
+
+	mutex_unlock(&dyn_event_ops_mutex);
 
 	return ret;
 }
