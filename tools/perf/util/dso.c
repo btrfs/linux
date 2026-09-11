@@ -32,6 +32,7 @@
 #include "string2.h"
 #include "vdso.h"
 #include "annotate-data.h"
+#include "libdw.h"
 
 static const char * const debuglink_paths[] = {
 	"%.0s%s",
@@ -111,7 +112,7 @@ bool dso__is_object_file(const struct dso *dso)
 
 int dso__read_binary_type_filename(const struct dso *dso,
 				   enum dso_binary_type type,
-				   char *root_dir, char *filename, size_t size)
+				   const char *root_dir, char *filename, size_t size)
 {
 	char build_id_hex[SBUILD_ID_SIZE];
 	int ret = 0;
@@ -342,10 +343,16 @@ int filename__decompress(const char *name, char *pathname,
 	 * To keep this transparent, we detect this and return the file
 	 * descriptor to the uncompressed file.
 	 */
-	if (!compressions[comp].is_compressed(name))
-		return open(name, O_RDONLY);
+	if (!compressions[comp].is_compressed(name)) {
+		fd = open(name, O_RDONLY | O_CLOEXEC);
+		if (fd < 0)
+			*err = errno;
+		if (pathname && len > 0)
+			pathname[0] = '\0';
+		return fd;
+	}
 
-	fd = mkstemp(tmpbuf);
+	fd = mkostemp(tmpbuf, O_CLOEXEC);
 	if (fd < 0) {
 		*err = errno;
 		return -1;
@@ -388,7 +395,9 @@ int dso__decompress_kmodule_path(struct dso *dso, const char *name,
 {
 	int fd = decompress_kmodule(dso, name, pathname, len);
 
-	close(fd);
+	/* decompress_kmodule() returns -1 on failure, don't close(-1) */
+	if (fd >= 0)
+		close(fd);
 	return fd >= 0 ? 0 : -1;
 }
 
@@ -539,16 +548,13 @@ static void close_first_dso(void);
 
 static int do_open(char *name) EXCLUSIVE_LOCKS_REQUIRED(_dso__data_open_lock)
 {
-	int fd;
-	char sbuf[STRERR_BUFSIZE];
-
 	do {
-		fd = open(name, O_RDONLY|O_CLOEXEC);
+		int fd = open(name, O_RDONLY|O_CLOEXEC);
+
 		if (fd >= 0)
 			return fd;
 
-		pr_debug("dso open failed: %s\n",
-			 str_error_r(errno, sbuf, sizeof(sbuf)));
+		pr_debug("dso open failed: %m\n");
 		if (!dso__data_open_cnt || errno != EMFILE)
 			break;
 
@@ -563,29 +569,33 @@ char *dso__filename_with_chroot(const struct dso *dso, const char *filename)
 	return filename_with_chroot(nsinfo__pid(dso__nsinfo_const(dso)), filename);
 }
 
-static int __open_dso(struct dso *dso, struct machine *machine)
-	EXCLUSIVE_LOCKS_REQUIRED(_dso__data_open_lock)
+static char *dso__get_filename(struct dso *dso, const char *root_dir,
+			       bool *decomp)
 {
-	int fd = -EINVAL;
-	char *root_dir = (char *)"";
 	char *name = malloc(PATH_MAX);
-	bool decomp = false;
 
-	if (!name)
-		return -ENOMEM;
+	*decomp = false;
 
-	mutex_lock(dso__lock(dso));
-	if (machine)
-		root_dir = machine->root_dir;
+	if (name == NULL)
+		return NULL;
 
 	if (dso__read_binary_type_filename(dso, dso__binary_type(dso),
 					    root_dir, name, PATH_MAX))
 		goto out;
 
 	if (!is_regular_file(name)) {
+		struct stat st;
 		char *new_name;
 
-		if (errno != ENOENT || dso__nsinfo(dso) == NULL)
+		/*
+		 * errno only reflects the failure reason when stat() itself
+		 * failed: a successful stat() on a non-regular file (e.g. a
+		 * directory) leaves a stale errno, which a previous failed
+		 * iteration of the try_to_open_dso() fallback loop may have
+		 * set to ENOENT.
+		 */
+		if (stat(name, &st) == 0 || errno != ENOENT ||
+		    dso__nsinfo(dso) == NULL)
 			goto out;
 
 		new_name = dso__filename_with_chroot(dso, name);
@@ -601,20 +611,57 @@ static int __open_dso(struct dso *dso, struct machine *machine)
 		size_t len = sizeof(newpath);
 
 		if (dso__decompress_kmodule_path(dso, name, newpath, len) < 0) {
-			fd = -(*dso__load_errno(dso));
+			/*
+			 * Use a standard errno value, not the negative custom
+			 * DSO_LOAD_ERRNO stored in dso__load_errno(dso):
+			 * __open_dso() computes fd = -errno, so a negative
+			 * errno produces a positive fd that looks valid.
+			 */
+			errno = EIO;
 			goto out;
 		}
 
-		decomp = true;
-		strcpy(name, newpath);
-	}
+		/* empty pathname means file wasn't actually compressed */
+		if (newpath[0] != '\0') {
+			char *tmp = strdup(newpath);
 
-	fd = do_open(name);
+			if (!tmp) {
+				unlink(newpath);
+				goto out;
+			}
+			free(name);
+			name = tmp;
+			*decomp = true;
+		}
+	}
+	return name;
+
+out:
+	free(name);
+	return NULL;
+}
+
+static int __open_dso(struct dso *dso, struct machine *machine)
+	EXCLUSIVE_LOCKS_REQUIRED(_dso__data_open_lock)
+{
+	int fd = -EINVAL;
+	char *name;
+	bool decomp = false;
+
+	mutex_lock(dso__lock(dso));
+
+	name = dso__get_filename(dso, machine ? machine->root_dir : "", &decomp);
+	if (name) {
+		fd = do_open(name);
+	} else {
+		if (errno == 0)
+			errno = ENOENT;
+		fd = -errno;
+	}
 
 	if (decomp)
 		unlink(name);
 
-out:
 	mutex_unlock(dso__lock(dso));
 	free(name);
 	return fd;
@@ -853,6 +900,12 @@ static ssize_t bpf_read(struct dso *dso, u64 offset, char *data)
 		return -1;
 	}
 
+	/* jited_prog_insns is only valid if bpil_offs_to_addr() converted it */
+	if (!(node->info_linear->arrays & (1UL << PERF_BPIL_JITED_INSNS))) {
+		dso__data(dso)->status = DSO_DATA_STATUS_ERROR;
+		return -1;
+	}
+
 	len = node->info_linear->info.jited_prog_len;
 	buf = (u8 *)(uintptr_t)node->info_linear->info.jited_prog_insns;
 
@@ -961,7 +1014,20 @@ static ssize_t dso_cache__memcpy(struct dso_cache *cache, u64 offset, u8 *data,
 				 u64 size, bool out)
 {
 	u64 cache_offset = offset - cache->offset;
-	u64 cache_size   = min(cache->size - cache_offset, size);
+	u64 cache_size;
+
+	/*
+	 * The RB tree matches using DSO__DATA_CACHE_SIZE, but a short
+	 * pread may leave cache->size smaller.  For a regular file a
+	 * short pread only happens at end-of-file, so an offset past
+	 * the valid data is EOF: return 0, matching what a direct
+	 * pread() at that offset would return, and cached_io() then
+	 * stops its read loop.
+	 */
+	if (cache_offset >= cache->size)
+		return 0;
+
+	cache_size = min(cache->size - cache_offset, size);
 
 	if (out)
 		memcpy(data, cache->data + cache_offset, cache_size);
@@ -985,7 +1051,7 @@ static ssize_t file_read(struct dso *dso, struct machine *machine,
 
 	if (dso__data(dso)->fd < 0) {
 		dso__data(dso)->status = DSO_DATA_STATUS_ERROR;
-		ret = -errno;
+		ret = dso__data(dso)->fd;
 		goto out;
 	}
 
@@ -1097,7 +1163,6 @@ static int file_size(struct dso *dso, struct machine *machine)
 {
 	int ret = 0;
 	struct stat st;
-	char sbuf[STRERR_BUFSIZE];
 
 	mutex_lock(dso__data_open_lock());
 
@@ -1108,15 +1173,14 @@ static int file_size(struct dso *dso, struct machine *machine)
 	try_to_open_dso(dso, machine);
 
 	if (dso__data(dso)->fd < 0) {
-		ret = -errno;
 		dso__data(dso)->status = DSO_DATA_STATUS_ERROR;
+		ret = dso__data(dso)->fd;
 		goto out;
 	}
 
 	if (fstat(dso__data(dso)->fd, &st) < 0) {
 		ret = -errno;
-		pr_err("dso cache fstat failed: %s\n",
-		       str_error_r(errno, sbuf, sizeof(sbuf)));
+		pr_err("dso cache fstat failed: %m\n");
 		dso__data(dso)->status = DSO_DATA_STATUS_ERROR;
 		goto out;
 	}
@@ -1194,7 +1258,97 @@ ssize_t dso__data_read_offset(struct dso *dso, struct machine *machine,
 	return data_read_write_offset(dso, machine, offset, data, size, true);
 }
 
-uint16_t dso__e_machine(struct dso *dso, struct machine *machine)
+static enum dso_swap_type dso_swap_type__from_elf_data(unsigned char eidata)
+{
+	static const unsigned int endian = 1;
+
+	switch (eidata) {
+	case ELFDATA2LSB:
+		/* We are big endian, DSO is little endian. */
+		return (*(unsigned char const *)&endian != 1) ? DSO_SWAP__YES : DSO_SWAP__NO;
+	case ELFDATA2MSB:
+		/* We are little endian, DSO is big endian. */
+		return (*(unsigned char const *)&endian != 0) ? DSO_SWAP__YES : DSO_SWAP__NO;
+	default:
+		return DSO_SWAP__UNSET;
+	}
+}
+
+/* Reads e_machine from fd, optionally caching data in dso. */
+uint16_t dso__read_e_machine_endian(struct dso *optional_dso, int fd, uint32_t *e_flags,
+				    bool *is_big_endian)
+{
+	uint16_t e_machine = EM_NONE;
+	unsigned char e_ident[EI_NIDENT];
+	enum dso_swap_type swap_type;
+	bool need_e_flags;
+
+	if (e_flags)
+		*e_flags = 0;
+
+	{
+		_Static_assert(offsetof(Elf32_Ehdr, e_ident) == 0, "Unexpected offset");
+		_Static_assert(offsetof(Elf64_Ehdr, e_ident) == 0, "Unexpected offset");
+	}
+	if (pread(fd, &e_ident, sizeof(e_ident), 0) != sizeof(e_ident))
+		return EM_NONE; // Read failed.
+
+	if (memcmp(e_ident, ELFMAG, SELFMAG) != 0)
+		return EM_NONE; // Not an ELF file.
+
+	if (e_ident[EI_CLASS] == ELFCLASSNONE || e_ident[EI_CLASS] >= ELFCLASSNUM)
+		return EM_NONE; // Bad ELF class (32 or 64-bit objects).
+
+	if (e_ident[EI_VERSION] != EV_CURRENT)
+		return EM_NONE; // Bad ELF version.
+
+	swap_type = dso_swap_type__from_elf_data(e_ident[EI_DATA]);
+	if (swap_type == DSO_SWAP__UNSET)
+		return EM_NONE; // Bad ELF data encoding.
+
+	if (is_big_endian)
+		*is_big_endian = (e_ident[EI_DATA] == ELFDATA2MSB);
+
+	/* Cache the need for swapping. */
+	if (optional_dso) {
+		assert(dso__needs_swap(optional_dso) == DSO_SWAP__UNSET ||
+		       dso__needs_swap(optional_dso) == swap_type);
+		dso__set_needs_swap(optional_dso, swap_type);
+	}
+
+	{
+		_Static_assert(offsetof(Elf32_Ehdr, e_machine) == 18, "Unexpected offset");
+		_Static_assert(offsetof(Elf64_Ehdr, e_machine) == 18, "Unexpected offset");
+	}
+	if (pread(fd, &e_machine, sizeof(e_machine), 18) != sizeof(e_machine))
+		return EM_NONE; // e_machine read failed.
+
+	e_machine = DSO_SWAP_TYPE__SWAP(swap_type, uint16_t, e_machine);
+	if (e_machine >= EM_NUM)
+		return EM_NONE; // Bad ELF machine number.
+
+#ifdef NDEBUG
+	/* In production code the e_flags are only needed on CSKY. */
+	need_e_flags = e_flags && e_machine == EM_CSKY;
+#else
+	/* Debug code will always read the e_flags. */
+	need_e_flags = e_flags != NULL;
+#endif
+	if (need_e_flags) {
+		off_t offset = e_ident[EI_CLASS] == ELFCLASS32
+			? offsetof(Elf32_Ehdr, e_flags)
+			: offsetof(Elf64_Ehdr, e_flags);
+
+		if (pread(fd, e_flags, sizeof(*e_flags), offset) != sizeof(*e_flags)) {
+			*e_flags = 0;
+			return EM_NONE; // e_flags read failed.
+		}
+	}
+	return e_machine;
+}
+
+uint16_t dso__e_machine_endian(struct dso *dso, struct machine *machine, uint32_t *e_flags,
+			       bool *is_big_endian)
 {
 	uint16_t e_machine = EM_NONE;
 	int fd;
@@ -1214,7 +1368,11 @@ uint16_t dso__e_machine(struct dso *dso, struct machine *machine)
 	case DSO_BINARY_TYPE__BPF_IMAGE:
 	case DSO_BINARY_TYPE__OOL:
 	case DSO_BINARY_TYPE__JAVA_JIT:
-		return EM_HOST;
+		if (is_big_endian) {
+			*is_big_endian = perf_arch_is_big_endian(
+				machine && machine->env ? perf_env__arch(machine->env) : NULL);
+		}
+		return perf_env__e_machine(machine ? machine->env : NULL, e_flags);
 	case DSO_BINARY_TYPE__DEBUGLINK:
 	case DSO_BINARY_TYPE__BUILD_ID_CACHE:
 	case DSO_BINARY_TYPE__BUILD_ID_CACHE_DEBUGINFO:
@@ -1228,6 +1386,8 @@ uint16_t dso__e_machine(struct dso *dso, struct machine *machine)
 		break;
 	case DSO_BINARY_TYPE__NOT_FOUND:
 	default:
+		if (e_flags)
+			*e_flags = 0;
 		return EM_NONE;
 	}
 
@@ -1239,19 +1399,11 @@ uint16_t dso__e_machine(struct dso *dso, struct machine *machine)
 	 */
 	try_to_open_dso(dso, machine);
 	fd = dso__data(dso)->fd;
-	if (fd >= 0) {
-		_Static_assert(offsetof(Elf32_Ehdr, e_machine) == 18, "Unexpected offset");
-		_Static_assert(offsetof(Elf64_Ehdr, e_machine) == 18, "Unexpected offset");
-		if (dso__needs_swap(dso) == DSO_SWAP__UNSET) {
-			unsigned char eidata;
+	if (fd >= 0)
+		e_machine = dso__read_e_machine_endian(dso, fd, e_flags, is_big_endian);
+	else if (e_flags)
+		*e_flags = 0;
 
-			if (pread(fd, &eidata, sizeof(eidata), EI_DATA) == sizeof(eidata))
-				dso__swap_init(dso, eidata);
-		}
-		if (dso__needs_swap(dso) != DSO_SWAP__UNSET &&
-		    pread(fd, &e_machine, sizeof(e_machine), 18) == sizeof(e_machine))
-			e_machine = DSO__SWAP(dso, uint16_t, e_machine);
-	}
 	mutex_unlock(dso__data_open_lock());
 	return e_machine;
 }
@@ -1605,6 +1757,7 @@ void dso__delete(struct dso *dso)
 	auxtrace_cache__free(RC_CHK_ACCESS(dso)->auxtrace_cache);
 	dso_cache__free(dso);
 	dso__free_a2l(dso);
+	dso__free_libdw(dso);
 	dso__free_symsrc_filename(dso);
 	nsinfo__zput(RC_CHK_ACCESS(dso)->nsinfo);
 	mutex_destroy(dso__lock(dso));
@@ -1635,28 +1788,13 @@ void dso__put(struct dso *dso)
 
 int dso__swap_init(struct dso *dso, unsigned char eidata)
 {
-	static unsigned int const endian = 1;
+	enum dso_swap_type type = dso_swap_type__from_elf_data(eidata);
 
-	dso__set_needs_swap(dso, DSO_SWAP__NO);
-
-	switch (eidata) {
-	case ELFDATA2LSB:
-		/* We are big endian, DSO is little endian. */
-		if (*(unsigned char const *)&endian != 1)
-			dso__set_needs_swap(dso, DSO_SWAP__YES);
-		break;
-
-	case ELFDATA2MSB:
-		/* We are little endian, DSO is big endian. */
-		if (*(unsigned char const *)&endian != 0)
-			dso__set_needs_swap(dso, DSO_SWAP__YES);
-		break;
-
-	default:
+	dso__set_needs_swap(dso, type);
+	if (type == DSO_SWAP__UNSET) {
 		pr_err("unrecognized DSO data encoding %d\n", eidata);
 		return -EINVAL;
 	}
-
 	return 0;
 }
 
@@ -1690,7 +1828,7 @@ void dso__read_running_kernel_build_id(struct dso *dso, struct machine *machine)
 
 	if (machine__is_default_guest(machine))
 		return;
-	sprintf(path, "%s/sys/kernel/notes", machine->root_dir);
+	snprintf(path, sizeof(path), "%s/sys/kernel/notes", machine->root_dir);
 	sysfs__read_build_id(path, &bid);
 	dso__set_build_id(dso, &bid);
 }
@@ -1771,10 +1909,8 @@ int dso__strerror_load(struct dso *dso, char *buf, size_t buflen)
 	BUG_ON(buflen == 0);
 
 	if (errnum >= 0) {
-		const char *err = str_error_r(errnum, buf, buflen);
-
-		if (err != buf)
-			scnprintf(buf, buflen, "%s", err);
+		errno = errnum;
+		scnprintf(buf, buflen, "%m");
 
 		return 0;
 	}
@@ -1830,7 +1966,7 @@ static const u8 *__dso__read_symbol(struct dso *dso, const char *symfs_filename,
 	int saved_errno;
 
 	nsinfo__mountns_enter(dso__nsinfo(dso), &nsc);
-	fd = open(symfs_filename, O_RDONLY);
+	fd = open(symfs_filename, O_RDONLY | O_CLOEXEC);
 	saved_errno = errno;
 	nsinfo__mountns_exit(&nsc);
 	if (fd < 0) {
@@ -1898,7 +2034,16 @@ const u8 *dso__read_symbol(struct dso *dso, const char *symfs_filename,
 			return NULL;
 		}
 		info_linear = info_node->info_linear;
-		assert(len <= info_linear->info.jited_prog_len);
+		if (!(info_linear->arrays & (1UL << PERF_BPIL_JITED_INSNS))) {
+			errno = SYMBOL_ANNOTATE_ERRNO__BPF_MISSING_BTF;
+			return NULL;
+		}
+		if (len > info_linear->info.jited_prog_len) {
+			pr_debug("BPF symbol length %zu exceeds jited_prog_len %u\n",
+				 len, info_linear->info.jited_prog_len);
+			errno = SYMBOL_ANNOTATE_ERRNO__BPF_MISSING_BTF;
+			return NULL;
+		}
 		*out_buf_len = len;
 		return (const u8 *)(uintptr_t)(info_linear->info.jited_prog_insns);
 #else
@@ -1909,4 +2054,24 @@ const u8 *dso__read_symbol(struct dso *dso, const char *symfs_filename,
 	}
 	return __dso__read_symbol(dso, symfs_filename, start, len,
 				  out_buf, out_buf_len, is_64bit);
+}
+
+struct debuginfo *dso__debuginfo(struct dso *dso)
+{
+	char *name;
+	bool decomp = false;
+	struct debuginfo *dinfo = NULL;
+
+	mutex_lock(dso__lock(dso));
+
+	name = dso__get_filename(dso, "", &decomp);
+	if (name)
+		dinfo = debuginfo__new(name);
+
+	if (decomp)
+		unlink(name);
+
+	mutex_unlock(dso__lock(dso));
+	free(name);
+	return dinfo;
 }

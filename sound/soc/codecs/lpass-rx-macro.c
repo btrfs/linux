@@ -6,6 +6,7 @@
 #include <linux/init.h>
 #include <linux/io.h>
 #include <linux/platform_device.h>
+#include <linux/pm_clock.h>
 #include <linux/pm_runtime.h>
 #include <linux/clk.h>
 #include <sound/soc.h>
@@ -1682,7 +1683,7 @@ static const struct regmap_config rx_regmap_config = {
 static int rx_macro_int_dem_inp_mux_put(struct snd_kcontrol *kcontrol,
 					struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_dapm_widget *widget = snd_soc_dapm_kcontrol_widget(kcontrol);
+	struct snd_soc_dapm_widget *widget = snd_soc_dapm_kcontrol_to_widget(kcontrol);
 	struct snd_soc_component *component = snd_soc_dapm_to_component(widget->dapm);
 	struct rx_macro *rx = snd_soc_component_get_drvdata(component);
 	struct soc_enum *e = (struct soc_enum *)kcontrol->private_value;
@@ -1905,52 +1906,48 @@ static int rx_macro_digital_mute(struct snd_soc_dai *dai, int mute, int stream)
 {
 	struct snd_soc_component *component = dai->component;
 	struct rx_macro *rx = snd_soc_component_get_drvdata(component);
-	uint16_t j, reg, mix_reg, dsm_reg;
-	u16 int_mux_cfg0, int_mux_cfg1;
+	u32 port, j, reg, mix_reg, int_mux_cfg0, int_mux_cfg1;
+	u32 mask, val;
 	u8 int_mux_cfg0_val, int_mux_cfg1_val;
 
-	switch (dai->id) {
-	case RX_MACRO_AIF1_PB:
-	case RX_MACRO_AIF2_PB:
-	case RX_MACRO_AIF3_PB:
-	case RX_MACRO_AIF4_PB:
-		for (j = 0; j < INTERP_MAX; j++) {
-			reg = CDC_RX_RXn_RX_PATH_CTL(rx, j);
-			mix_reg = CDC_RX_RXn_RX_PATH_MIX_CTL(rx, j);
-			dsm_reg = CDC_RX_RXn_RX_PATH_DSM_CTL(rx, j);
+	if (stream != SNDRV_PCM_STREAM_PLAYBACK)
+		return 0;
 
-			if (mute) {
-				snd_soc_component_update_bits(component, reg,
-							      CDC_RX_PATH_PGA_MUTE_MASK,
-							      CDC_RX_PATH_PGA_MUTE_ENABLE);
-				snd_soc_component_update_bits(component, mix_reg,
-							      CDC_RX_PATH_PGA_MUTE_MASK,
-							      CDC_RX_PATH_PGA_MUTE_ENABLE);
-			} else {
-				snd_soc_component_update_bits(component, reg,
-							      CDC_RX_PATH_PGA_MUTE_MASK, 0x0);
-				snd_soc_component_update_bits(component, mix_reg,
-							      CDC_RX_PATH_PGA_MUTE_MASK, 0x0);
+	for (j = 0; j < INTERP_MAX; j++) {
+		reg = CDC_RX_RXn_RX_PATH_CTL(rx, j);
+		mix_reg = CDC_RX_RXn_RX_PATH_MIX_CTL(rx, j);
+
+		mask = CDC_RX_PATH_PGA_MUTE_MASK;
+		val = 0;
+		if (mute)
+			val |= CDC_RX_PATH_PGA_MUTE_ENABLE;
+		if (rx->main_clk_users[j] > 0) {
+			mask |= CDC_RX_PATH_CLK_EN_MASK;
+			val |= CDC_RX_PATH_CLK_ENABLE;
+		}
+
+		int_mux_cfg0 = CDC_RX_INP_MUX_RX_INT0_CFG0 + j * 8;
+		int_mux_cfg1 = int_mux_cfg0 + 4;
+		int_mux_cfg0_val = snd_soc_component_read(component, int_mux_cfg0);
+		int_mux_cfg1_val = snd_soc_component_read(component, int_mux_cfg1);
+
+		for_each_set_bit(port, &rx->active_ch_mask[dai->id], RX_MACRO_PORTS_MAX) {
+			if (((int_mux_cfg0_val & 0x0f) == port + INTn_1_INP_SEL_RX0) ||
+			    ((int_mux_cfg0_val >> 4) == port + INTn_1_INP_SEL_RX0) ||
+			    ((int_mux_cfg1_val >> 4) == port + INTn_1_INP_SEL_RX0)) {
+				snd_soc_component_update_bits(component, reg, mask, val);
 			}
 
-			int_mux_cfg0 = CDC_RX_INP_MUX_RX_INT0_CFG0 + j * 8;
-			int_mux_cfg1 = int_mux_cfg0 + 4;
-			int_mux_cfg0_val = snd_soc_component_read(component, int_mux_cfg0);
-			int_mux_cfg1_val = snd_soc_component_read(component, int_mux_cfg1);
-
-			if (snd_soc_component_read(component, dsm_reg) & 0x01) {
-				if (int_mux_cfg0_val || (int_mux_cfg1_val & 0xF0))
-					snd_soc_component_update_bits(component, reg, 0x20, 0x20);
-				if (int_mux_cfg1_val & 0x0F) {
-					snd_soc_component_update_bits(component, reg, 0x20, 0x20);
-					snd_soc_component_update_bits(component, mix_reg, 0x20,
-								      0x20);
+			if ((int_mux_cfg1_val & 0x0f) == port + INTn_2_INP_SEL_RX0) {
+				snd_soc_component_update_bits(component, mix_reg, mask, val);
+				/* main clock needs to be enabled for mix to be useful: */
+				if (rx->main_clk_users[j] > 0) {
+					snd_soc_component_update_bits(component, reg,
+								      CDC_RX_PATH_CLK_EN_MASK,
+								      CDC_RX_PATH_CLK_ENABLE);
 				}
 			}
 		}
-		break;
-	default:
-		break;
 	}
 	return 0;
 }
@@ -2034,9 +2031,10 @@ static struct snd_soc_dai_driver rx_macro_dai[] = {
 	},
 };
 
-static void rx_macro_mclk_enable(struct rx_macro *rx, bool mclk_enable)
+static int rx_macro_mclk_enable(struct rx_macro *rx, bool mclk_enable)
 {
 	struct regmap *regmap = rx->regmap;
+	int ret;
 
 	if (mclk_enable) {
 		if (rx->rx_mclk_users == 0) {
@@ -2051,14 +2049,16 @@ static void rx_macro_mclk_enable(struct rx_macro *rx, bool mclk_enable)
 					   CDC_RX_FS_MCLK_CNT_EN_MASK,
 					   CDC_RX_FS_MCLK_CNT_ENABLE);
 			regcache_mark_dirty(regmap);
-			regcache_sync(regmap);
+			ret = regcache_sync(regmap);
+			if (ret)
+				return ret;
 		}
 		rx->rx_mclk_users++;
 	} else {
 		if (rx->rx_mclk_users <= 0) {
 			dev_err(rx->dev, "%s: clock already disabled\n", __func__);
 			rx->rx_mclk_users = 0;
-			return;
+			return 0;
 		}
 		rx->rx_mclk_users--;
 		if (rx->rx_mclk_users == 0) {
@@ -2072,6 +2072,8 @@ static void rx_macro_mclk_enable(struct rx_macro *rx, bool mclk_enable)
 					   CDC_RX_CLK_MCLK2_EN_MASK, 0x0);
 		}
 	}
+
+	return 0;
 }
 
 static int rx_macro_mclk_event(struct snd_soc_dapm_widget *w,
@@ -2083,11 +2085,9 @@ static int rx_macro_mclk_event(struct snd_soc_dapm_widget *w,
 
 	switch (event) {
 	case SND_SOC_DAPM_PRE_PMU:
-		rx_macro_mclk_enable(rx, true);
-		break;
+		return rx_macro_mclk_enable(rx, true);
 	case SND_SOC_DAPM_POST_PMD:
-		rx_macro_mclk_enable(rx, false);
-		break;
+		return rx_macro_mclk_enable(rx, false);
 	default:
 		dev_err(component->dev, "%s: invalid DAPM event %d\n", __func__, event);
 		ret = -EINVAL;
@@ -2434,8 +2434,7 @@ static void rx_macro_hd2_control(struct snd_soc_component *component,
 static int rx_macro_get_compander(struct snd_kcontrol *kcontrol,
 			       struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_component *component =
-				snd_soc_kcontrol_component(kcontrol);
+	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
 	int comp = ((struct soc_mixer_control *) kcontrol->private_value)->shift;
 	struct rx_macro *rx = snd_soc_component_get_drvdata(component);
 
@@ -2446,7 +2445,7 @@ static int rx_macro_get_compander(struct snd_kcontrol *kcontrol,
 static int rx_macro_set_compander(struct snd_kcontrol *kcontrol,
 			       struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_component *component = snd_soc_kcontrol_component(kcontrol);
+	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
 	int comp = ((struct soc_mixer_control *)  kcontrol->private_value)->shift;
 	int value = ucontrol->value.integer.value[0];
 	struct rx_macro *rx = snd_soc_component_get_drvdata(component);
@@ -2459,7 +2458,7 @@ static int rx_macro_set_compander(struct snd_kcontrol *kcontrol,
 static int rx_macro_mux_get(struct snd_kcontrol *kcontrol,
 			  struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_dapm_widget *widget = snd_soc_dapm_kcontrol_widget(kcontrol);
+	struct snd_soc_dapm_widget *widget = snd_soc_dapm_kcontrol_to_widget(kcontrol);
 	struct snd_soc_component *component = snd_soc_dapm_to_component(widget->dapm);
 	struct rx_macro *rx = snd_soc_component_get_drvdata(component);
 
@@ -2471,7 +2470,7 @@ static int rx_macro_mux_get(struct snd_kcontrol *kcontrol,
 static int rx_macro_mux_put(struct snd_kcontrol *kcontrol,
 			    struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_dapm_widget *widget = snd_soc_dapm_kcontrol_widget(kcontrol);
+	struct snd_soc_dapm_widget *widget = snd_soc_dapm_kcontrol_to_widget(kcontrol);
 	struct snd_soc_component *component = snd_soc_dapm_to_component(widget->dapm);
 	struct soc_enum *e = (struct soc_enum *)kcontrol->private_value;
 	struct snd_soc_dapm_update *update = NULL;
@@ -2548,7 +2547,7 @@ static const struct snd_kcontrol_new rx_macro_rx5_mux =
 static int rx_macro_get_ear_mode(struct snd_kcontrol *kcontrol,
 			       struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_component *component = snd_soc_kcontrol_component(kcontrol);
+	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
 	struct rx_macro *rx = snd_soc_component_get_drvdata(component);
 
 	ucontrol->value.integer.value[0] = rx->is_ear_mode_on;
@@ -2558,7 +2557,7 @@ static int rx_macro_get_ear_mode(struct snd_kcontrol *kcontrol,
 static int rx_macro_put_ear_mode(struct snd_kcontrol *kcontrol,
 			       struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_component *component = snd_soc_kcontrol_component(kcontrol);
+	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
 	struct rx_macro *rx = snd_soc_component_get_drvdata(component);
 
 	rx->is_ear_mode_on = (!ucontrol->value.integer.value[0] ? false : true);
@@ -2568,7 +2567,7 @@ static int rx_macro_put_ear_mode(struct snd_kcontrol *kcontrol,
 static int rx_macro_get_hph_hd2_mode(struct snd_kcontrol *kcontrol,
 			       struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_component *component = snd_soc_kcontrol_component(kcontrol);
+	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
 	struct rx_macro *rx = snd_soc_component_get_drvdata(component);
 
 	ucontrol->value.integer.value[0] = rx->hph_hd2_mode;
@@ -2578,7 +2577,7 @@ static int rx_macro_get_hph_hd2_mode(struct snd_kcontrol *kcontrol,
 static int rx_macro_put_hph_hd2_mode(struct snd_kcontrol *kcontrol,
 			       struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_component *component = snd_soc_kcontrol_component(kcontrol);
+	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
 	struct rx_macro *rx = snd_soc_component_get_drvdata(component);
 
 	rx->hph_hd2_mode = ucontrol->value.integer.value[0];
@@ -2588,7 +2587,7 @@ static int rx_macro_put_hph_hd2_mode(struct snd_kcontrol *kcontrol,
 static int rx_macro_get_hph_pwr_mode(struct snd_kcontrol *kcontrol,
 			       struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_component *component = snd_soc_kcontrol_component(kcontrol);
+	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
 	struct rx_macro *rx = snd_soc_component_get_drvdata(component);
 
 	ucontrol->value.enumerated.item[0] = rx->hph_pwr_mode;
@@ -2598,7 +2597,7 @@ static int rx_macro_get_hph_pwr_mode(struct snd_kcontrol *kcontrol,
 static int rx_macro_put_hph_pwr_mode(struct snd_kcontrol *kcontrol,
 			       struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_component *component = snd_soc_kcontrol_component(kcontrol);
+	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
 	struct rx_macro *rx = snd_soc_component_get_drvdata(component);
 
 	rx->hph_pwr_mode = ucontrol->value.enumerated.item[0];
@@ -2608,7 +2607,7 @@ static int rx_macro_put_hph_pwr_mode(struct snd_kcontrol *kcontrol,
 static int rx_macro_soft_clip_enable_get(struct snd_kcontrol *kcontrol,
 					  struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_component *component = snd_soc_kcontrol_component(kcontrol);
+	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
 	struct rx_macro *rx = snd_soc_component_get_drvdata(component);
 
 	ucontrol->value.integer.value[0] = rx->is_softclip_on;
@@ -2619,7 +2618,7 @@ static int rx_macro_soft_clip_enable_get(struct snd_kcontrol *kcontrol,
 static int rx_macro_soft_clip_enable_put(struct snd_kcontrol *kcontrol,
 					  struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_component *component = snd_soc_kcontrol_component(kcontrol);
+	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
 	struct rx_macro *rx = snd_soc_component_get_drvdata(component);
 
 	rx->is_softclip_on = ucontrol->value.integer.value[0];
@@ -2630,7 +2629,7 @@ static int rx_macro_soft_clip_enable_put(struct snd_kcontrol *kcontrol,
 static int rx_macro_aux_hpf_mode_get(struct snd_kcontrol *kcontrol,
 					  struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_component *component = snd_soc_kcontrol_component(kcontrol);
+	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
 	struct rx_macro *rx = snd_soc_component_get_drvdata(component);
 
 	ucontrol->value.integer.value[0] = rx->is_aux_hpf_on;
@@ -2641,7 +2640,7 @@ static int rx_macro_aux_hpf_mode_get(struct snd_kcontrol *kcontrol,
 static int rx_macro_aux_hpf_mode_put(struct snd_kcontrol *kcontrol,
 					  struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_component *component = snd_soc_kcontrol_component(kcontrol);
+	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
 	struct rx_macro *rx = snd_soc_component_get_drvdata(component);
 
 	rx->is_aux_hpf_on = ucontrol->value.integer.value[0];
@@ -2930,8 +2929,7 @@ static int rx_macro_put_iir_band_audio_mixer(
 					struct snd_kcontrol *kcontrol,
 					struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_component *component =
-			snd_soc_kcontrol_component(kcontrol);
+	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
 	struct wcd_iir_filter_ctl *ctl =
 			(struct wcd_iir_filter_ctl *)kcontrol->private_value;
 	struct soc_bytes_ext *params = &ctl->bytes_ext;
@@ -2959,8 +2957,7 @@ static int rx_macro_put_iir_band_audio_mixer(
 static int rx_macro_get_iir_band_audio_mixer(struct snd_kcontrol *kcontrol,
 				    struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_component *component =
-			snd_soc_kcontrol_component(kcontrol);
+	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
 	struct wcd_iir_filter_ctl *ctl =
 			(struct wcd_iir_filter_ctl *)kcontrol->private_value;
 	struct soc_bytes_ext *params = &ctl->bytes_ext;
@@ -3612,7 +3609,7 @@ static const struct snd_soc_dapm_route rx_audio_map[] = {
 
 static int rx_macro_component_probe(struct snd_soc_component *component)
 {
-	struct snd_soc_dapm_context *dapm = snd_soc_component_get_dapm(component);
+	struct snd_soc_dapm_context *dapm = snd_soc_component_to_dapm(component);
 	struct rx_macro *rx = snd_soc_component_get_drvdata(component);
 	const struct snd_soc_dapm_widget *widgets;
 	const struct snd_kcontrol_new *controls;
@@ -3678,13 +3675,15 @@ static int swclk_gate_enable(struct clk_hw *hw)
 	struct rx_macro *rx = to_rx_macro(hw);
 	int ret;
 
-	ret = clk_prepare_enable(rx->mclk);
+	ret = pm_runtime_resume_and_get(rx->dev);
+	if (ret < 0)
+		return ret;
+
+	ret = rx_macro_mclk_enable(rx, true);
 	if (ret) {
-		dev_err(rx->dev, "unable to prepare mclk\n");
+		clk_disable_unprepare(rx->mclk);
 		return ret;
 	}
-
-	rx_macro_mclk_enable(rx, true);
 
 	regmap_update_bits(rx->regmap, CDC_RX_CLK_RST_CTRL_SWR_CONTROL,
 			   CDC_RX_SWR_CLK_EN_MASK, 1);
@@ -3700,7 +3699,7 @@ static void swclk_gate_disable(struct clk_hw *hw)
 			   CDC_RX_SWR_CLK_EN_MASK, 0);
 
 	rx_macro_mclk_enable(rx, false);
-	clk_disable_unprepare(rx->mclk);
+	pm_runtime_put_autosuspend(rx->dev);
 }
 
 static int swclk_gate_is_enabled(struct clk_hw *hw)
@@ -3827,7 +3826,7 @@ static int rx_macro_probe(struct platform_device *pdev)
 		rx->rxn_reg_stride = 0x80;
 		rx->rxn_reg_stride2 = 0xc;
 		def_count = ARRAY_SIZE(rx_defaults) + ARRAY_SIZE(rx_pre_2_5_defaults);
-		reg_defaults = kmalloc_array(def_count, sizeof(struct reg_default), GFP_KERNEL);
+		reg_defaults = kmalloc_objs(struct reg_default, def_count);
 		if (!reg_defaults)
 			return -ENOMEM;
 		memcpy(&reg_defaults[0], rx_defaults, sizeof(rx_defaults));
@@ -3841,7 +3840,7 @@ static int rx_macro_probe(struct platform_device *pdev)
 		rx->rxn_reg_stride = 0xc0;
 		rx->rxn_reg_stride2 = 0x0;
 		def_count = ARRAY_SIZE(rx_defaults) + ARRAY_SIZE(rx_2_5_defaults);
-		reg_defaults = kmalloc_array(def_count, sizeof(struct reg_default), GFP_KERNEL);
+		reg_defaults = kmalloc_objs(struct reg_default, def_count);
 		if (!reg_defaults)
 			return -ENOMEM;
 		memcpy(&reg_defaults[0], rx_defaults, sizeof(rx_defaults));
@@ -3871,28 +3870,31 @@ static int rx_macro_probe(struct platform_device *pdev)
 	rx->dev = dev;
 
 	/* set MCLK and NPL rates */
-	clk_set_rate(rx->mclk, MCLK_FREQ);
-	clk_set_rate(rx->npl, MCLK_FREQ);
-
-	ret = clk_prepare_enable(rx->macro);
+	ret = clk_set_rate(rx->mclk, MCLK_FREQ);
 	if (ret)
 		return ret;
 
-	ret = clk_prepare_enable(rx->dcodec);
+	ret = clk_set_rate(rx->npl, MCLK_FREQ);
 	if (ret)
-		goto err_dcodec;
+		return ret;
 
-	ret = clk_prepare_enable(rx->mclk);
+	ret = devm_pm_clk_create(dev);
 	if (ret)
-		goto err_mclk;
+		return ret;
 
-	ret = clk_prepare_enable(rx->npl);
-	if (ret)
-		goto err_npl;
+	ret = of_pm_clk_add_clks(dev);
+	if (ret < 0)
+		return ret;
 
-	ret = clk_prepare_enable(rx->fsgen);
+	pm_runtime_set_autosuspend_delay(dev, 100);
+	pm_runtime_use_autosuspend(dev);
+	ret = devm_pm_runtime_enable(dev);
 	if (ret)
-		goto err_fsgen;
+		return ret;
+
+	ret = pm_runtime_resume_and_get(dev);
+	if (ret)
+		return ret;
 
 	/* reset swr block  */
 	regmap_update_bits(rx->regmap, CDC_RX_CLK_RST_CTRL_SWR_CONTROL,
@@ -3909,44 +3911,23 @@ static int rx_macro_probe(struct platform_device *pdev)
 					      rx_macro_dai,
 					      ARRAY_SIZE(rx_macro_dai));
 	if (ret)
-		goto err_clkout;
-
-
-	pm_runtime_set_autosuspend_delay(dev, 3000);
-	pm_runtime_use_autosuspend(dev);
-	pm_runtime_mark_last_busy(dev);
-	pm_runtime_set_active(dev);
-	pm_runtime_enable(dev);
+		goto err_rpm_put;
 
 	ret = rx_macro_register_mclk_output(rx);
 	if (ret)
-		goto err_clkout;
+		goto err_rpm_put;
+
+	ret = pm_runtime_put_autosuspend(dev);
+	if (ret < 0)
+		dev_warn(dev, "runtime PM put failed after probe: %d\n", ret);
 
 	return 0;
 
-err_clkout:
-	clk_disable_unprepare(rx->fsgen);
-err_fsgen:
-	clk_disable_unprepare(rx->npl);
-err_npl:
-	clk_disable_unprepare(rx->mclk);
-err_mclk:
-	clk_disable_unprepare(rx->dcodec);
-err_dcodec:
-	clk_disable_unprepare(rx->macro);
+err_rpm_put:
+	if (pm_runtime_put_sync_suspend(dev) < 0)
+		dev_warn(dev, "runtime PM sync suspend failed in probe unwind\n");
 
 	return ret;
-}
-
-static void rx_macro_remove(struct platform_device *pdev)
-{
-	struct rx_macro *rx = dev_get_drvdata(&pdev->dev);
-
-	clk_disable_unprepare(rx->mclk);
-	clk_disable_unprepare(rx->npl);
-	clk_disable_unprepare(rx->fsgen);
-	clk_disable_unprepare(rx->macro);
-	clk_disable_unprepare(rx->dcodec);
 }
 
 static const struct of_device_id rx_macro_dt_match[] = {
@@ -3954,6 +3935,9 @@ static const struct of_device_id rx_macro_dt_match[] = {
 		.compatible = "qcom,sc7280-lpass-rx-macro",
 		.data = (void *)LPASS_MACRO_FLAG_HAS_NPL_CLOCK,
 
+	}, {
+		.compatible = "qcom,sm6115-lpass-rx-macro",
+		.data = (void *)LPASS_MACRO_FLAG_HAS_NPL_CLOCK,
 	}, {
 		.compatible = "qcom,sm8250-lpass-rx-macro",
 		.data = (void *)LPASS_MACRO_FLAG_HAS_NPL_CLOCK,
@@ -3973,13 +3957,17 @@ MODULE_DEVICE_TABLE(of, rx_macro_dt_match);
 static int rx_macro_runtime_suspend(struct device *dev)
 {
 	struct rx_macro *rx = dev_get_drvdata(dev);
+	int ret;
 
 	regcache_cache_only(rx->regmap, true);
-	regcache_mark_dirty(rx->regmap);
 
-	clk_disable_unprepare(rx->fsgen);
-	clk_disable_unprepare(rx->npl);
-	clk_disable_unprepare(rx->mclk);
+	ret = pm_clk_suspend(dev);
+	if (ret) {
+		regcache_cache_only(rx->regmap, false);
+		return ret;
+	}
+
+	regcache_mark_dirty(rx->regmap);
 
 	return 0;
 }
@@ -3989,33 +3977,23 @@ static int rx_macro_runtime_resume(struct device *dev)
 	struct rx_macro *rx = dev_get_drvdata(dev);
 	int ret;
 
-	ret = clk_prepare_enable(rx->mclk);
+	ret = pm_clk_resume(dev);
 	if (ret) {
-		dev_err(dev, "unable to prepare mclk\n");
+		regcache_cache_only(rx->regmap, true);
+		regcache_mark_dirty(rx->regmap);
 		return ret;
 	}
 
-	ret = clk_prepare_enable(rx->npl);
-	if (ret) {
-		dev_err(dev, "unable to prepare mclkx2\n");
-		goto err_npl;
-	}
-
-	ret = clk_prepare_enable(rx->fsgen);
-	if (ret) {
-		dev_err(dev, "unable to prepare fsgen\n");
-		goto err_fsgen;
-	}
 	regcache_cache_only(rx->regmap, false);
-	regcache_sync(rx->regmap);
+	ret = regcache_sync(rx->regmap);
+	if (ret) {
+		regcache_cache_only(rx->regmap, true);
+		regcache_mark_dirty(rx->regmap);
+		pm_clk_suspend(dev);
+		return ret;
+	}
 
 	return 0;
-err_fsgen:
-	clk_disable_unprepare(rx->npl);
-err_npl:
-	clk_disable_unprepare(rx->mclk);
-
-	return ret;
 }
 
 static const struct dev_pm_ops rx_macro_pm_ops = {
@@ -4030,7 +4008,6 @@ static struct platform_driver rx_macro_driver = {
 		.pm = pm_ptr(&rx_macro_pm_ops),
 	},
 	.probe = rx_macro_probe,
-	.remove = rx_macro_remove,
 };
 
 module_platform_driver(rx_macro_driver);

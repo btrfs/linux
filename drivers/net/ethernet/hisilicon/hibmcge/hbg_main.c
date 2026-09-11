@@ -420,6 +420,9 @@ static int hbg_pci_init(struct pci_dev *pdev)
 		return -ENOMEM;
 
 	pci_set_master(pdev);
+	pcie_capability_clear_word(pdev, PCI_EXP_DEVCTL,
+				   PCI_EXP_DEVCTL_RELAX_EN);
+	pci_save_state(pdev);
 	return 0;
 }
 
@@ -472,8 +475,24 @@ static int hbg_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 	return 0;
 }
 
+static void hbg_shutdown(struct pci_dev *pdev)
+{
+	struct net_device *netdev = pci_get_drvdata(pdev);
+
+	rtnl_lock();
+	if (netif_running(netdev))
+		dev_close(netdev);
+	rtnl_unlock();
+
+	pci_disable_device(pdev);
+	pci_set_drvdata(pdev, NULL);
+
+	if (system_state == SYSTEM_POWER_OFF)
+		pci_set_power_state(pdev, PCI_D3hot);
+}
+
 static const struct pci_device_id hbg_pci_tbl[] = {
-	{PCI_VDEVICE(HUAWEI, 0x3730), 0},
+	{ PCI_VDEVICE(HUAWEI, 0x3730) },
 	{ }
 };
 MODULE_DEVICE_TABLE(pci, hbg_pci_tbl);
@@ -482,6 +501,7 @@ static struct pci_driver hbg_driver = {
 	.name		= "hibmcge",
 	.id_table	= hbg_pci_tbl,
 	.probe		= hbg_probe,
+	.shutdown	= hbg_shutdown,
 };
 
 static int __init hbg_module_init(void)

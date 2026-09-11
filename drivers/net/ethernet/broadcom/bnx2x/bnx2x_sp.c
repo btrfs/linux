@@ -26,6 +26,7 @@
 #include <linux/netdevice.h>
 #include <linux/etherdevice.h>
 #include <linux/crc32c.h>
+#include <linux/slab.h>
 #include "bnx2x.h"
 #include "bnx2x_cmn.h"
 #include "bnx2x_sp.h"
@@ -251,7 +252,7 @@ static inline struct bnx2x_exeq_elem *bnx2x_exe_queue_alloc_elem(
 	struct bnx2x *bp)
 {
 	DP(BNX2X_MSG_SP, "Allocating a new exe_queue element\n");
-	return kzalloc(sizeof(struct bnx2x_exeq_elem), GFP_ATOMIC);
+	return kzalloc_obj(struct bnx2x_exeq_elem, GFP_ATOMIC);
 }
 
 /************************ raw_obj functions ***********************************/
@@ -1736,7 +1737,7 @@ static inline int bnx2x_vlan_mac_get_registry_elem(
 	/* Allocate a new registry element if needed. */
 	if (!restore &&
 	    ((cmd == BNX2X_VLAN_MAC_ADD) || (cmd == BNX2X_VLAN_MAC_MOVE))) {
-		reg_elem = kzalloc(sizeof(*reg_elem), GFP_ATOMIC);
+		reg_elem = kzalloc_obj(*reg_elem, GFP_ATOMIC);
 		if (!reg_elem)
 			return -ENOMEM;
 
@@ -2664,7 +2665,7 @@ static void bnx2x_free_groups(struct list_head *mcast_group_list)
 				      struct bnx2x_mcast_elem_group,
 				      mcast_group_link);
 		list_del(&current_mcast_group->mcast_group_link);
-		free_page((unsigned long)current_mcast_group);
+		kfree(current_mcast_group);
 	}
 }
 
@@ -2688,7 +2689,7 @@ static int bnx2x_mcast_enqueue_cmd(struct bnx2x *bp,
 		return 0;
 
 	/* Add mcast is called under spin_lock, thus calling with GFP_ATOMIC */
-	new_cmd = kzalloc(sizeof(*new_cmd), GFP_ATOMIC);
+	new_cmd = kzalloc_obj(*new_cmd, GFP_ATOMIC);
 	if (!new_cmd)
 		return -ENOMEM;
 
@@ -2713,8 +2714,7 @@ static int bnx2x_mcast_enqueue_cmd(struct bnx2x *bp,
 				total_elems = BNX2X_MCAST_BINS_NUM;
 		}
 		while (total_elems > 0) {
-			elem_group = (struct bnx2x_mcast_elem_group *)
-				     __get_free_page(GFP_ATOMIC | __GFP_ZERO);
+			elem_group = kzalloc(PAGE_SIZE, GFP_ATOMIC);
 			if (!elem_group) {
 				bnx2x_free_groups(&new_cmd->group_head);
 				kfree(new_cmd);
@@ -3846,7 +3846,7 @@ static inline int bnx2x_mcast_refresh_registry_e1(struct bnx2x *bp,
 		if (!list_empty(&o->registry.exact_match.macs))
 			return 0;
 
-		elem = kcalloc(len, sizeof(*elem), GFP_ATOMIC);
+		elem = kzalloc_objs(*elem, len, GFP_ATOMIC);
 		if (!elem) {
 			BNX2X_ERR("Failed to allocate registry memory\n");
 			return -ENOMEM;

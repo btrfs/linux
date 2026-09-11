@@ -115,6 +115,9 @@ struct inode;		/* To make gcc happy */
 extern int parse_rock_ridge_inode(struct iso_directory_record *, struct inode *, int relocated);
 extern int get_rock_ridge_filename(struct iso_directory_record *, char *, struct inode *);
 extern int isofs_name_translate(struct iso_directory_record *, char *, struct inode *);
+bool isofs_dir_record_valid(struct iso_directory_record *de,
+			    unsigned long offset,
+			    unsigned long bufsize);
 
 int get_joliet_filename(struct iso_directory_record *, unsigned char *, struct inode *);
 int get_acorn_filename(struct iso_directory_record *, char *, struct inode *);
@@ -196,6 +199,9 @@ isofs_normalize_block_and_offset(struct iso_directory_record* de,
 			+ (unsigned long)isonum_711(de->ext_attr_length);
 	}
 }
+
+struct file_kattr;
+int isofs_fileattr_get(struct dentry *dentry, struct file_kattr *fa);
 
 extern const struct inode_operations isofs_dir_inode_operations;
 extern const struct file_operations isofs_dir_operations;

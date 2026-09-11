@@ -44,8 +44,10 @@ static unsigned int	rds_exthdr_size[__RDS_EXTHDR_MAX] = {
 [RDS_EXTHDR_VERSION]	= sizeof(struct rds_ext_header_version),
 [RDS_EXTHDR_RDMA]	= sizeof(struct rds_ext_header_rdma),
 [RDS_EXTHDR_RDMA_DEST]	= sizeof(struct rds_ext_header_rdma_dest),
+[RDS_EXTHDR_RDMA_BYTES] = sizeof(struct rds_ext_header_rdma_bytes),
 [RDS_EXTHDR_NPATHS]	= sizeof(__be16),
 [RDS_EXTHDR_GEN_NUM]	= sizeof(__be32),
+[RDS_EXTHDR_SPORT_IDX]	= 1,
 };
 
 void rds_message_addref(struct rds_message *rm)
@@ -129,24 +131,34 @@ static void rds_rm_zerocopy_callback(struct rds_sock *rs,
  */
 static void rds_message_purge(struct rds_message *rm)
 {
+	struct rds_znotifier *znotifier;
 	unsigned long i, flags;
-	bool zcopy = false;
+	bool zcopy;
 
 	if (unlikely(test_bit(RDS_MSG_PAGEVEC, &rm->m_flags)))
 		return;
 
 	spin_lock_irqsave(&rm->m_rs_lock, flags);
+	znotifier = rm->data.op_mmp_znotifier;
+	rm->data.op_mmp_znotifier = NULL;
+	zcopy = !!znotifier;
+
 	if (rm->m_rs) {
 		struct rds_sock *rs = rm->m_rs;
 
-		if (rm->data.op_mmp_znotifier) {
-			zcopy = true;
-			rds_rm_zerocopy_callback(rs, rm->data.op_mmp_znotifier);
+		if (znotifier) {
+			rds_rm_zerocopy_callback(rs, znotifier);
 			rds_wake_sk_sleep(rs);
-			rm->data.op_mmp_znotifier = NULL;
 		}
 		sock_put(rds_rs_to_sk(rs));
 		rm->m_rs = NULL;
+	} else if (znotifier) {
+		/*
+		 * Zerocopy can fail before the message is queued on the
+		 * socket, so there is no rs to carry the notification.
+		 */
+		mm_unaccount_pinned_pages(&znotifier->z_mmp);
+		kfree(rds_info_from_znotifier(znotifier));
 	}
 	spin_unlock_irqrestore(&rm->m_rs_lock, flags);
 
@@ -170,6 +182,19 @@ static void rds_message_purge(struct rds_message *rm)
 		kref_put(&rm->atomic.op_rdma_mr->r_kref, __rds_put_mr_final);
 }
 
+static void rds_message_unpin_worker(struct work_struct *work)
+{
+	struct rds_message *rm = container_of(work, struct rds_message,
+					      m_unpin_work);
+
+	if (rm->rdma.op_unpin_deferred)
+		rds_rdma_op_unpin_pages(&rm->rdma);
+	if (rm->atomic.op_unpin_deferred)
+		rds_atomic_op_unpin_page(&rm->atomic);
+
+	kfree(rm);
+}
+
 void rds_message_put(struct rds_message *rm)
 {
 	rdsdebug("put rm %p ref %d\n", rm, refcount_read(&rm->m_refcount));
@@ -177,7 +202,20 @@ void rds_message_put(struct rds_message *rm)
 	if (refcount_dec_and_test(&rm->m_refcount)) {
 		BUG_ON(!list_empty(&rm->m_sock_item));
 		BUG_ON(!list_empty(&rm->m_conn_item));
+
 		rds_message_purge(rm);
+
+		/* A final put in atomic context cannot dirty the ops'
+		 * user pages on unpin, so rds_rdma_free_op() and
+		 * rds_atomic_free_op() deferred it.  Finish the unpin,
+		 * and the free, from process context.
+		 */
+		if (rm->rdma.op_unpin_deferred ||
+		    rm->atomic.op_unpin_deferred) {
+			INIT_WORK(&rm->m_unpin_work, rds_message_unpin_worker);
+			queue_work(rds_wq, &rm->m_unpin_work);
+			return;
+		}
 
 		kfree(rm);
 	}
@@ -191,31 +229,69 @@ void rds_message_populate_header(struct rds_header *hdr, __be16 sport,
 	hdr->h_sport = sport;
 	hdr->h_dport = dport;
 	hdr->h_sequence = cpu_to_be64(seq);
-	hdr->h_exthdr[0] = RDS_EXTHDR_NONE;
+	/* see rds_find_next_ext_space for reason why we memset the
+	 * ext header
+	 */
+	memset(hdr->h_exthdr, RDS_EXTHDR_NONE, RDS_HEADER_EXT_SPACE);
 }
 EXPORT_SYMBOL_GPL(rds_message_populate_header);
 
-int rds_message_add_extension(struct rds_header *hdr, unsigned int type,
-			      const void *data, unsigned int len)
+/*
+ * Find the next place we can add an RDS header extension with
+ * specific length. Extension headers are pushed one after the
+ * other. In the following, the number after the colon is the number
+ * of bytes:
+ *
+ * [ type1:1 dta1:len1 [ type2:1 dta2:len2 ] ... ] RDS_EXTHDR_NONE
+ *
+ * If the extension headers fill the complete extension header space
+ * (16 bytes), the trailing RDS_EXTHDR_NONE is omitted.
+ */
+static int rds_find_next_ext_space(struct rds_header *hdr, unsigned int len,
+				   u8 **ext_start)
 {
-	unsigned int ext_len = sizeof(u8) + len;
+	unsigned int ext_len;
+	unsigned int type;
+	int ind = 0;
+
+	while ((ind + 1 + len) <= RDS_HEADER_EXT_SPACE) {
+		if (hdr->h_exthdr[ind] == RDS_EXTHDR_NONE) {
+			*ext_start = hdr->h_exthdr + ind;
+			return 0;
+		}
+
+		type = hdr->h_exthdr[ind];
+
+		ext_len = (type < __RDS_EXTHDR_MAX) ? rds_exthdr_size[type] : 0;
+		WARN_ONCE(!ext_len, "Unknown ext hdr type %d\n", type);
+		if (!ext_len)
+			return -EINVAL;
+
+		/* ind points to a valid ext hdr with known length */
+		ind += 1 + ext_len;
+	}
+
+	/* no room for extension */
+	return -ENOSPC;
+}
+
+/* The ext hdr space is prefilled with zero from the kzalloc() */
+int rds_message_add_extension(struct rds_header *hdr,
+			      unsigned int type, const void *data)
+{
 	unsigned char *dst;
+	unsigned int len;
 
-	/* For now, refuse to add more than one extension header */
-	if (hdr->h_exthdr[0] != RDS_EXTHDR_NONE)
+	len = (type < __RDS_EXTHDR_MAX) ? rds_exthdr_size[type] : 0;
+	if (!len)
 		return 0;
 
-	if (type >= __RDS_EXTHDR_MAX || len != rds_exthdr_size[type])
+	if (rds_find_next_ext_space(hdr, len, &dst))
 		return 0;
-
-	if (ext_len >= RDS_HEADER_EXT_SPACE)
-		return 0;
-	dst = hdr->h_exthdr;
 
 	*dst++ = type;
 	memcpy(dst, data, len);
 
-	dst[len] = RDS_EXTHDR_NONE;
 	return 1;
 }
 EXPORT_SYMBOL_GPL(rds_message_add_extension);
@@ -272,7 +348,7 @@ int rds_message_add_rdma_dest_extension(struct rds_header *hdr, u32 r_key, u32 o
 
 	ext_hdr.h_rdma_rkey = cpu_to_be32(r_key);
 	ext_hdr.h_rdma_offset = cpu_to_be32(offset);
-	return rds_message_add_extension(hdr, RDS_EXTHDR_RDMA_DEST, &ext_hdr, sizeof(ext_hdr));
+	return rds_message_add_extension(hdr, RDS_EXTHDR_RDMA_DEST, &ext_hdr);
 }
 EXPORT_SYMBOL_GPL(rds_message_add_rdma_dest_extension);
 
@@ -375,7 +451,7 @@ static int rds_message_zcopy_from_user(struct rds_message *rm, struct iov_iter *
 	 */
 	sg = rm->data.op_sg;
 
-	info = kzalloc(sizeof(*info), GFP_KERNEL);
+	info = kzalloc_obj(*info);
 	if (!info)
 		return -ENOMEM;
 	INIT_LIST_HEAD(&info->rs_zcookie_next);
@@ -398,6 +474,7 @@ static int rds_message_zcopy_from_user(struct rds_message *rm, struct iov_iter *
 
 			for (i = 0; i < rm->data.op_nents; i++)
 				put_page(sg_page(&rm->data.op_sg[i]));
+			rm->data.op_nents = 0;
 			mmp = &rm->data.op_mmp_znotifier->z_mmp;
 			mm_unaccount_pinned_pages(mmp);
 			ret = -EFAULT;

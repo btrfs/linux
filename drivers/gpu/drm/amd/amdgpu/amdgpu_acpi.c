@@ -116,7 +116,9 @@ struct amdgpu_atcs_functions {
 	bool pcie_perf_req;
 	bool pcie_dev_rdy;
 	bool pcie_bus_width;
+	bool get_uma_size;
 	bool power_shift_control;
+	bool set_uma_allocation_size;
 };
 
 struct amdgpu_atcs {
@@ -138,13 +140,15 @@ static struct amdgpu_acpi_priv {
  * @atif: atif structure
  * @function: the ATIF function to execute
  * @params: ATIF function params
+ * @min_size: minimum size of the expected output buffer in bytes
  *
  * Executes the requested ATIF function (all asics).
  * Returns a pointer to the acpi output buffer.
  */
 static union acpi_object *amdgpu_atif_call(struct amdgpu_atif *atif,
 					   int function,
-					   struct acpi_buffer *params)
+					   struct acpi_buffer *params,
+					   size_t min_size)
 {
 	acpi_status status;
 	union acpi_object *obj;
@@ -183,6 +187,28 @@ static union acpi_object *amdgpu_atif_call(struct amdgpu_atif *atif,
 	if (obj->type != ACPI_TYPE_BUFFER) {
 		DRM_DEBUG_DRIVER("bad object returned from ATIF: %d\n",
 				 obj->type);
+		kfree(obj);
+		return NULL;
+	}
+
+	if (obj->buffer.length < sizeof(u16)) {
+		DRM_DEBUG_DRIVER("ATIF buffer too small to hold size field: %u\n",
+				 obj->buffer.length);
+		kfree(obj);
+		return NULL;
+	}
+
+	if (obj->buffer.length < *(u16 *)obj->buffer.pointer) {
+		DRM_DEBUG_DRIVER("ATIF buffer length mismatch: reported %u, actual %u\n",
+				 *(u16 *)obj->buffer.pointer,
+				 obj->buffer.length);
+		kfree(obj);
+		return NULL;
+	}
+
+	if (*(u16 *)obj->buffer.pointer < min_size) {
+		DRM_DEBUG_DRIVER("ATIF buffer too small: expected %zu, got %u\n",
+				 min_size, *(u16 *)obj->buffer.pointer);
 		kfree(obj);
 		return NULL;
 	}
@@ -241,26 +267,22 @@ static void amdgpu_atif_parse_functions(struct amdgpu_atif_functions *f, u32 mas
  * (all asics).
  * returns 0 on success, error on failure.
  */
-static int amdgpu_atif_verify_interface(struct amdgpu_atif *atif)
+static noinline_for_stack
+int amdgpu_atif_verify_interface(struct amdgpu_atif *atif)
 {
 	union acpi_object *info;
 	struct atif_verify_interface output;
 	size_t size;
 	int err = 0;
 
-	info = amdgpu_atif_call(atif, ATIF_FUNCTION_VERIFY_INTERFACE, NULL);
+	info = amdgpu_atif_call(atif, ATIF_FUNCTION_VERIFY_INTERFACE, NULL,
+				sizeof(output));
 	if (!info)
 		return -EIO;
 
 	memset(&output, 0, sizeof(output));
 
-	size = *(u16 *) info->buffer.pointer;
-	if (size < 12) {
-		DRM_INFO("ATIF buffer is too small: %zu\n", size);
-		err = -EINVAL;
-		goto out;
-	}
-	size = min(sizeof(output), size);
+	size = min(sizeof(output), (size_t)*(u16 *)info->buffer.pointer);
 
 	memcpy(&output, info->buffer.pointer, size);
 
@@ -270,7 +292,6 @@ static int amdgpu_atif_verify_interface(struct amdgpu_atif *atif)
 	amdgpu_atif_parse_notification(&atif->notifications, output.notification_mask);
 	amdgpu_atif_parse_functions(&atif->functions, output.function_bits);
 
-out:
 	kfree(info);
 	return err;
 }
@@ -286,7 +307,8 @@ out:
  * where n is specified in the result if a notifier is used.
  * Returns 0 on success, error on failure.
  */
-static int amdgpu_atif_get_notification_params(struct amdgpu_atif *atif)
+static noinline_for_stack
+int amdgpu_atif_get_notification_params(struct amdgpu_atif *atif)
 {
 	union acpi_object *info;
 	struct amdgpu_atif_notification_cfg *n = &atif->notification_cfg;
@@ -295,20 +317,14 @@ static int amdgpu_atif_get_notification_params(struct amdgpu_atif *atif)
 	int err = 0;
 
 	info = amdgpu_atif_call(atif, ATIF_FUNCTION_GET_SYSTEM_PARAMETERS,
-				NULL);
+				NULL, offsetof(struct atif_system_params, command_code));
 	if (!info) {
 		err = -EIO;
 		goto out;
 	}
 
-	size = *(u16 *) info->buffer.pointer;
-	if (size < 10) {
-		err = -EINVAL;
-		goto out;
-	}
-
 	memset(&params, 0, sizeof(params));
-	size = min(sizeof(params), size);
+	size = min(sizeof(params), (size_t)*(u16 *)info->buffer.pointer);
 	memcpy(&params, info->buffer.pointer, size);
 
 	DRM_DEBUG_DRIVER("SYSTEM_PARAMS: mask = %#x, flags = %#x\n",
@@ -354,7 +370,8 @@ out:
  *
  * Returns 0 on success, error on failure.
  */
-static int amdgpu_atif_query_backlight_caps(struct amdgpu_atif *atif)
+static noinline_for_stack
+int amdgpu_atif_query_backlight_caps(struct amdgpu_atif *atif)
 {
 	union acpi_object *info;
 	struct atif_qbtc_output characteristics;
@@ -371,20 +388,14 @@ static int amdgpu_atif_query_backlight_caps(struct amdgpu_atif *atif)
 
 	info = amdgpu_atif_call(atif,
 		ATIF_FUNCTION_QUERY_BRIGHTNESS_TRANSFER_CHARACTERISTICS,
-		&params);
+		&params, offsetof(struct atif_qbtc_output, data_points));
 	if (!info) {
 		err = -EIO;
 		goto out;
 	}
 
-	size = *(u16 *) info->buffer.pointer;
-	if (size < 10) {
-		err = -EINVAL;
-		goto out;
-	}
-
 	memset(&characteristics, 0, sizeof(characteristics));
-	size = min(sizeof(characteristics), size);
+	size = min(sizeof(characteristics), (size_t)*(u16 *)info->buffer.pointer);
 	memcpy(&characteristics, info->buffer.pointer, size);
 
 	atif->backlight_caps.caps_valid = true;
@@ -422,24 +433,18 @@ static int amdgpu_atif_get_sbios_requests(struct amdgpu_atif *atif,
 	int count = 0;
 
 	info = amdgpu_atif_call(atif, ATIF_FUNCTION_GET_SYSTEM_BIOS_REQUESTS,
-				NULL);
+				NULL, sizeof(*req));
 	if (!info)
 		return -EIO;
 
-	size = *(u16 *)info->buffer.pointer;
-	if (size < 0xd) {
-		count = -EINVAL;
-		goto out;
-	}
 	memset(req, 0, sizeof(*req));
 
-	size = min(sizeof(*req), size);
+	size = min(sizeof(*req), (size_t)*(u16 *)info->buffer.pointer);
 	memcpy(req, info->buffer.pointer, size);
 	DRM_DEBUG_DRIVER("SBIOS pending requests: %#x\n", req->pending);
 
 	count = hweight32(req->pending);
 
-out:
 	kfree(info);
 	return count;
 }
@@ -507,7 +512,6 @@ static int amdgpu_atif_handler(struct amdgpu_device *adev,
 				pm_runtime_get_sync(adev_to_drm(adev)->dev);
 				/* Just fire off a uevent and let userspace tell us what to do */
 				drm_helper_hpd_irq_event(adev_to_drm(adev));
-				pm_runtime_mark_last_busy(adev_to_drm(adev)->dev);
 				pm_runtime_put_autosuspend(adev_to_drm(adev)->dev);
 			}
 		}
@@ -588,7 +592,9 @@ static void amdgpu_atcs_parse_functions(struct amdgpu_atcs_functions *f, u32 mas
 	f->pcie_perf_req = mask & ATCS_PCIE_PERFORMANCE_REQUEST_SUPPORTED;
 	f->pcie_dev_rdy = mask & ATCS_PCIE_DEVICE_READY_NOTIFICATION_SUPPORTED;
 	f->pcie_bus_width = mask & ATCS_SET_PCIE_BUS_WIDTH_SUPPORTED;
+	f->get_uma_size = mask & ACPI_ATCS_GET_UMA_SIZE_SUPPORTED;
 	f->power_shift_control = mask & ATCS_SET_POWER_SHIFT_CONTROL_SUPPORTED;
+	f->set_uma_allocation_size = mask & ACPI_ATCS_SET_UMA_ALLOCATION_SIZE_SUPPORTED;
 }
 
 /**
@@ -601,7 +607,8 @@ static void amdgpu_atcs_parse_functions(struct amdgpu_atcs_functions *f, u32 mas
  * (all asics).
  * returns 0 on success, error on failure.
  */
-static int amdgpu_atcs_verify_interface(struct amdgpu_atcs *atcs)
+static noinline_for_stack
+int amdgpu_atcs_verify_interface(struct amdgpu_atcs *atcs)
 {
 	union acpi_object *info;
 	struct atcs_verify_interface output;
@@ -663,6 +670,11 @@ bool amdgpu_acpi_is_pcie_performance_request_supported(struct amdgpu_device *ade
 bool amdgpu_acpi_is_power_shift_control_supported(void)
 {
 	return amdgpu_acpi_priv.atcs.functions.power_shift_control;
+}
+
+bool amdgpu_acpi_is_set_uma_allocation_size_supported(void)
+{
+	return amdgpu_acpi_priv.atcs.functions.set_uma_allocation_size;
 }
 
 /**
@@ -741,7 +753,8 @@ int amdgpu_acpi_pcie_performance_request(struct amdgpu_device *adev,
 
 		size = *(u16 *) info->buffer.pointer;
 		if (size < 3) {
-			DRM_INFO("ATCS buffer is too small: %zu\n", size);
+			drm_info(adev_to_drm(adev),
+				"ATCS buffer is too small: %zu\n", size);
 			kfree(info);
 			return -EINVAL;
 		}
@@ -800,7 +813,7 @@ int amdgpu_acpi_power_shift_control(struct amdgpu_device *adev,
 
 	info = amdgpu_atcs_call(atcs, ATCS_FUNCTION_POWER_SHIFT_CONTROL, &params);
 	if (!info) {
-		DRM_ERROR("ATCS PSC update failed\n");
+		drm_err(adev_to_drm(adev), "ATCS PSC call failed\n");
 		return -EIO;
 	}
 
@@ -884,7 +897,7 @@ static struct amdgpu_numa_info *amdgpu_acpi_get_numa_info(uint32_t pxm)
 	if (!numa_info) {
 		struct sysinfo info;
 
-		numa_info = kzalloc(sizeof(*numa_info), GFP_KERNEL);
+		numa_info = kzalloc_obj(*numa_info);
 		if (!numa_info)
 			return NULL;
 
@@ -904,6 +917,44 @@ static struct amdgpu_numa_info *amdgpu_acpi_get_numa_info(uint32_t pxm)
 	return numa_info;
 }
 #endif
+
+/**
+ * amdgpu_acpi_set_uma_allocation_size - Set Unified Memory Architecture allocation size via ACPI
+ * @adev: Pointer to the amdgpu_device structure
+ * @index: Index specifying the UMA allocation
+ * @type: Type of UMA allocation
+ *
+ * This function configures the UMA allocation size for the specified device
+ * using ACPI methods. The allocation is determined by the provided index and type.
+ * Returns 0 on success or a negative error code on failure.
+ */
+int amdgpu_acpi_set_uma_allocation_size(struct amdgpu_device *adev, u8 index, u8 type)
+{
+	struct atcs_set_uma_allocation_size_input atcs_input;
+	struct amdgpu_atcs *atcs = &amdgpu_acpi_priv.atcs;
+	struct acpi_buffer params;
+	union acpi_object *info;
+
+	if (!amdgpu_acpi_is_set_uma_allocation_size_supported())
+		return -EINVAL;
+
+	atcs_input.size = sizeof(struct atcs_set_uma_allocation_size_input);
+	atcs_input.uma_size_index = index;
+	atcs_input.uma_size_type = type;
+
+	params.length = sizeof(struct atcs_set_uma_allocation_size_input);
+	params.pointer = &atcs_input;
+
+	info = amdgpu_atcs_call(atcs, ATCS_FUNCTION_SET_UMA_ALLOCATION_SIZE, &params);
+	if (!info) {
+		drm_err(adev_to_drm(adev), "ATCS UMA allocation size update failed\n");
+		return -EIO;
+	}
+
+	kfree(info);
+
+	return 0;
+}
 
 /**
  * amdgpu_acpi_get_node_id - obtain the NUMA node id for corresponding amdgpu
@@ -965,7 +1016,7 @@ static int amdgpu_acpi_dev_init(struct amdgpu_acpi_dev_info **dev_info,
 	int ret = -ENOENT;
 
 	*dev_info = NULL;
-	tmp = kzalloc(sizeof(struct amdgpu_acpi_dev_info), GFP_KERNEL);
+	tmp = kzalloc_obj(struct amdgpu_acpi_dev_info);
 	if (!tmp)
 		return -ENOMEM;
 
@@ -1090,7 +1141,8 @@ out:
 	return ret;
 }
 
-static int amdgpu_acpi_enumerate_xcc(void)
+static noinline_for_stack
+int amdgpu_acpi_enumerate_xcc(void)
 {
 	struct amdgpu_acpi_dev_info *dev_info = NULL;
 	struct amdgpu_acpi_xcc_info *xcc_info;
@@ -1109,17 +1161,14 @@ static int amdgpu_acpi_enumerate_xcc(void)
 		 * one is not found, no need to check the rest.
 		 */
 		if (!acpi_dev) {
-			DRM_DEBUG_DRIVER("No matching acpi device found for %s",
+			DRM_DEBUG_DRIVER("No matching acpi device found for %s\n",
 					 hid);
 			break;
 		}
 
-		xcc_info = kzalloc(sizeof(struct amdgpu_acpi_xcc_info),
-				   GFP_KERNEL);
-		if (!xcc_info) {
-			DRM_ERROR("Failed to allocate memory for xcc info\n");
+		xcc_info = kzalloc_obj(struct amdgpu_acpi_xcc_info);
+		if (!xcc_info)
 			return -ENOMEM;
-		}
 
 		INIT_LIST_HEAD(&xcc_info->list);
 		xcc_info->handle = acpi_device_handle(acpi_dev);
@@ -1136,8 +1185,10 @@ static int amdgpu_acpi_enumerate_xcc(void)
 		if (!dev_info)
 			ret = amdgpu_acpi_dev_init(&dev_info, xcc_info, sbdf);
 
-		if (ret == -ENOMEM)
+		if (ret == -ENOMEM) {
+			kfree(xcc_info);
 			return ret;
+		}
 
 		if (!dev_info) {
 			kfree(xcc_info);

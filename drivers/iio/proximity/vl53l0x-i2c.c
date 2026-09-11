@@ -87,15 +87,14 @@ static irqreturn_t vl53l0x_trigger_handler(int irq, void *priv)
 	ret = i2c_smbus_read_i2c_block_data(data->client,
 					VL_REG_RESULT_RANGE_STATUS,
 					sizeof(buffer), buffer);
-	if (ret < 0)
-		return ret;
-	else if (ret != 12)
-		return -EREMOTEIO;
+	if (ret != 12)
+		goto done;
 
 	scan.chan = get_unaligned_be16(&buffer[10]);
 	iio_push_to_buffers_with_ts(indio_dev, &scan, sizeof(scan),
 				    iio_get_time_ns(indio_dev));
 
+done:
 	iio_trigger_notify_done(indio_dev->trig);
 	vl53l0x_clear_irq(data);
 
@@ -128,10 +127,8 @@ static int vl53l0x_configure_irq(struct i2c_client *client,
 	ret = devm_request_threaded_irq(&client->dev, client->irq,
 			NULL, vl53l0x_threaded_irq,
 			irq_flags | IRQF_ONESHOT, indio_dev->name, indio_dev);
-	if (ret) {
-		dev_err(&client->dev, "devm_request_irq error: %d\n", ret);
+	if (ret)
 		return ret;
-	}
 
 	ret = i2c_smbus_write_byte_data(data->client,
 			VL_REG_SYSTEM_INTERRUPT_CONFIG_GPIO,
@@ -393,7 +390,7 @@ static int vl53l0x_probe(struct i2c_client *client)
 }
 
 static const struct i2c_device_id vl53l0x_id[] = {
-	{ "vl53l0x" },
+	{ .name = "vl53l0x" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, vl53l0x_id);

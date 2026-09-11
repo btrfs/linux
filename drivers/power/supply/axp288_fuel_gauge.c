@@ -791,7 +791,7 @@ static int axp288_fuel_gauge_probe(struct platform_device *pdev)
 						fuel_gauge_thread_handler,
 						IRQF_ONESHOT, DEV_NAME, info);
 		if (ret)
-			return dev_err_probe(dev, ret, "requesting IRQ %d\n", info->irq[i]);
+			return ret;
 	}
 
 	return 0;
@@ -799,7 +799,7 @@ static int axp288_fuel_gauge_probe(struct platform_device *pdev)
 
 static const struct platform_device_id axp288_fg_id_table[] = {
 	{ .name = DEV_NAME },
-	{},
+	{ }
 };
 MODULE_DEVICE_TABLE(platform, axp288_fg_id_table);
 
@@ -817,3 +817,4 @@ MODULE_AUTHOR("Ramakrishna Pallala <ramakrishna.pallala@intel.com>");
 MODULE_AUTHOR("Todd Brandt <todd.e.brandt@linux.intel.com>");
 MODULE_DESCRIPTION("Xpower AXP288 Fuel Gauge Driver");
 MODULE_LICENSE("GPL");
+MODULE_IMPORT_NS("IIO_CONSUMER");

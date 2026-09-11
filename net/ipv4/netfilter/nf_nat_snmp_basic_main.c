@@ -127,7 +127,7 @@ static int snmp_translate(struct nf_conn *ct, int dir, struct sk_buff *skb)
 {
 	struct iphdr *iph = ip_hdr(skb);
 	struct udphdr *udph = (struct udphdr *)((__be32 *)iph + iph->ihl);
-	u16 datalen = ntohs(udph->len) - sizeof(struct udphdr);
+	u16 datalen = udp_get_len_short(udph) - sizeof(struct udphdr);
 	char *data = (unsigned char *)udph + sizeof(struct udphdr);
 	struct snmp_ctx ctx;
 	int ret;
@@ -181,7 +181,7 @@ static int help(struct sk_buff *skb, unsigned int protoff,
 	 * enough room for a UDP header.  Just verify the UDP length field so we
 	 * can mess around with the payload.
 	 */
-	if (ntohs(udph->len) != skb->len - (iph->ihl << 2)) {
+	if (udp_get_len_short(udph) != skb->len - (iph->ihl << 2)) {
 		nf_ct_helper_log(skb, ct, "dropping malformed packet\n");
 		return NF_DROP;
 	}
@@ -202,29 +202,34 @@ static const struct nf_conntrack_expect_policy snmp_exp_policy = {
 	.timeout	= 180,
 };
 
-static struct nf_conntrack_helper snmp_trap_helper __read_mostly = {
-	.me			= THIS_MODULE,
-	.help			= help,
-	.expect_policy		= &snmp_exp_policy,
-	.name			= "snmp_trap",
-	.tuple.src.l3num	= AF_INET,
-	.tuple.src.u.udp.port	= cpu_to_be16(SNMP_TRAP_PORT),
-	.tuple.dst.protonum	= IPPROTO_UDP,
-};
+static struct nf_conntrack_helper snmp_trap_helper __read_mostly;
+static struct nf_conntrack_helper *snmp_trap_helper_ptr __read_mostly;
 
 static int __init nf_nat_snmp_basic_init(void)
 {
+	int err;
+
 	BUG_ON(nf_nat_snmp_hook != NULL);
 	RCU_INIT_POINTER(nf_nat_snmp_hook, help);
 
-	return nf_conntrack_helper_register(&snmp_trap_helper);
+	nf_ct_helper_init(&snmp_trap_helper, AF_INET, IPPROTO_UDP,
+			  "snmp_trap",
+			  &snmp_exp_policy, 0, help, NULL, THIS_MODULE);
+
+	err = nf_conntrack_helper_register(&snmp_trap_helper, &snmp_trap_helper_ptr);
+	if (err < 0) {
+		RCU_INIT_POINTER(nf_nat_snmp_hook, NULL);
+		return err;
+	}
+
+	return 0;
 }
 
 static void __exit nf_nat_snmp_basic_fini(void)
 {
 	RCU_INIT_POINTER(nf_nat_snmp_hook, NULL);
 	synchronize_rcu();
-	nf_conntrack_helper_unregister(&snmp_trap_helper);
+	nf_conntrack_helper_unregister(snmp_trap_helper_ptr);
 }
 
 module_init(nf_nat_snmp_basic_init);

@@ -514,13 +514,9 @@ static long vhost_dev_alloc_iovecs(struct vhost_dev *dev)
 
 	for (i = 0; i < dev->nvqs; ++i) {
 		vq = dev->vqs[i];
-		vq->indirect = kmalloc_array(UIO_MAXIOV,
-					     sizeof(*vq->indirect),
-					     GFP_KERNEL);
-		vq->log = kmalloc_array(dev->iov_limit, sizeof(*vq->log),
-					GFP_KERNEL);
-		vq->heads = kmalloc_array(dev->iov_limit, sizeof(*vq->heads),
-					  GFP_KERNEL);
+		vq->indirect = kmalloc_objs(*vq->indirect, UIO_MAXIOV);
+		vq->log = kmalloc_objs(*vq->log, dev->iov_limit);
+		vq->heads = kmalloc_objs(*vq->heads, dev->iov_limit);
 		vq->nheads = kmalloc_array(dev->iov_limit, sizeof(*vq->nheads),
 					   GFP_KERNEL);
 		if (!vq->indirect || !vq->log || !vq->heads || !vq->nheads)
@@ -804,11 +800,13 @@ static int vhost_kthread_worker_create(struct vhost_worker *worker,
 
 	ret = vhost_attach_task_to_cgroups(worker);
 	if (ret)
-		goto stop_worker;
+		goto free_id;
 
 	worker->id = id;
 	return 0;
 
+free_id:
+	xa_erase(&dev->worker_xa, id);
 stop_worker:
 	vhost_kthread_do_stop(worker);
 	return ret;
@@ -834,7 +832,7 @@ static struct vhost_worker *vhost_worker_create(struct vhost_dev *dev)
 	const struct vhost_worker_ops *ops = dev->fork_owner ? &vhost_task_ops :
 							       &kthread_ops;
 
-	worker = kzalloc(sizeof(*worker), GFP_KERNEL_ACCOUNT);
+	worker = kzalloc_obj(*worker, GFP_KERNEL_ACCOUNT);
 	if (!worker)
 		return NULL;
 
@@ -1139,6 +1137,9 @@ EXPORT_SYMBOL_GPL(vhost_dev_set_owner);
 
 static struct vhost_iotlb *iotlb_alloc(void)
 {
+	if (max_iotlb_entries <= 0)
+		return NULL;
+
 	return vhost_iotlb_alloc(max_iotlb_entries,
 				 VHOST_IOTLB_FLAG_RETIRE);
 }
@@ -1442,13 +1443,13 @@ static inline void __user *__vhost_get_user(struct vhost_virtqueue *vq,
 ({ \
 	int ret; \
 	if (!vq->iotlb) { \
-		ret = __put_user(x, ptr); \
+		ret = put_user(x, ptr); \
 	} else { \
 		__typeof__(ptr) to = \
 			(__typeof__(ptr)) __vhost_get_user(vq, ptr,	\
 					  sizeof(*ptr), VHOST_ADDR_USED); \
 		if (to != NULL) \
-			ret = __put_user(x, to); \
+			ret = put_user(x, to); \
 		else \
 			ret = -EFAULT;	\
 	} \
@@ -1487,14 +1488,14 @@ static inline int vhost_put_used_idx(struct vhost_virtqueue *vq)
 ({ \
 	int ret; \
 	if (!vq->iotlb) { \
-		ret = __get_user(x, ptr); \
+		ret = get_user(x, ptr); \
 	} else { \
 		__typeof__(ptr) from = \
 			(__typeof__(ptr)) __vhost_get_user(vq, ptr, \
 							   sizeof(*ptr), \
 							   type); \
 		if (from != NULL) \
-			ret = __get_user(x, from); \
+			ret = get_user(x, from); \
 		else \
 			ret = -EFAULT; \
 	} \
@@ -1524,6 +1525,7 @@ static void vhost_dev_unlock_vqs(struct vhost_dev *d)
 static inline int vhost_get_avail_idx(struct vhost_virtqueue *vq)
 {
 	__virtio16 idx;
+	u16 avail_idx;
 	int r;
 
 	r = vhost_get_avail(vq, idx, &vq->avail->idx);
@@ -1534,16 +1536,18 @@ static inline int vhost_get_avail_idx(struct vhost_virtqueue *vq)
 	}
 
 	/* Check it isn't doing very strange thing with available indexes */
-	vq->avail_idx = vhost16_to_cpu(vq, idx);
-	if (unlikely((u16)(vq->avail_idx - vq->last_avail_idx) > vq->num)) {
+	avail_idx = vhost16_to_cpu(vq, idx);
+	if (unlikely((u16)(avail_idx - vq->last_avail_idx) > vq->num)) {
 		vq_err(vq, "Invalid available index change from %u to %u",
-		       vq->last_avail_idx, vq->avail_idx);
+		       vq->last_avail_idx, avail_idx);
 		return -EINVAL;
 	}
 
 	/* We're done if there is nothing new */
-	if (vq->avail_idx == vq->last_avail_idx)
+	if (avail_idx == vq->avail_idx)
 		return 0;
+
+	vq->avail_idx = avail_idx;
 
 	/*
 	 * We updated vq->avail_idx so we need a memory barrier between
@@ -1654,6 +1658,10 @@ static int vhost_process_iotlb_msg(struct vhost_dev *dev, u32 asid,
 	case VHOST_IOTLB_INVALIDATE:
 		if (!dev->iotlb) {
 			ret = -EFAULT;
+			break;
+		}
+		if (!msg->size) {
+			ret = -EINVAL;
 			break;
 		}
 		vhost_vq_meta_reset(dev);
@@ -1980,8 +1988,9 @@ static long vhost_set_memory(struct vhost_dev *d, struct vhost_memory __user *m)
 		return -EOPNOTSUPP;
 	if (mem.nregions > max_mem_regions)
 		return -E2BIG;
-	newmem = kvzalloc(struct_size(newmem, regions, mem.nregions),
-			GFP_KERNEL);
+	if (max_iotlb_entries <= 0)
+		return -EINVAL;
+	newmem = kvzalloc_flex(*newmem, regions, mem.nregions);
 	if (!newmem)
 		return -ENOMEM;
 
@@ -2125,6 +2134,14 @@ static long vhost_vring_set_num_addr(struct vhost_dev *d,
 	default:
 		BUG();
 	}
+
+	/*
+	 * The metadata cache holds the IOTLB mapping that backed the previous
+	 * desc/avail/used addresses and vring size, both of which are being
+	 * replaced here.  iotlb_access_ok() takes a cache hit as proof that the
+	 * region was validated, so the stale entries have to go.
+	 */
+	__vhost_vq_meta_reset(vq);
 
 	mutex_unlock(&vq->mutex);
 
@@ -2274,6 +2291,9 @@ int vhost_init_device_iotlb(struct vhost_dev *d)
 {
 	struct vhost_iotlb *niotlb, *oiotlb;
 	int i;
+
+	if (max_iotlb_entries <= 0)
+		return -EINVAL;
 
 	niotlb = iotlb_alloc();
 	if (!niotlb)
@@ -3270,7 +3290,7 @@ EXPORT_SYMBOL_GPL(vhost_disable_notify);
 struct vhost_msg_node *vhost_new_msg(struct vhost_virtqueue *vq, int type)
 {
 	/* Make sure all padding within the structure is initialized. */
-	struct vhost_msg_node *node = kzalloc(sizeof(*node), GFP_KERNEL);
+	struct vhost_msg_node *node = kzalloc_obj(*node);
 	if (!node)
 		return NULL;
 
@@ -3323,18 +3343,6 @@ void vhost_set_backend_features(struct vhost_dev *dev, u64 features)
 	mutex_unlock(&dev->mutex);
 }
 EXPORT_SYMBOL_GPL(vhost_set_backend_features);
-
-static int __init vhost_init(void)
-{
-	return 0;
-}
-
-static void __exit vhost_exit(void)
-{
-}
-
-module_init(vhost_init);
-module_exit(vhost_exit);
 
 MODULE_VERSION("0.0.1");
 MODULE_LICENSE("GPL v2");

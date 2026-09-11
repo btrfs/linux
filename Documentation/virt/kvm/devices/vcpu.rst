@@ -39,6 +39,10 @@ number for this vcpu. This interrupt could be a PPI or SPI, but the interrupt
 type must be same for each vcpu. As a PPI, the interrupt number is the same for
 all vcpus, while as an SPI it must be a separate number per vcpu.
 
+For GICv5-based guests, the architected PPI (23) must be used, and must be
+communicated as the full GICv5-style Interrupt ID, i.e., 0x20000017. This ioctl
+can be omitted altogether for a GICv5-based guest.
+
 1.2 ATTRIBUTE: KVM_ARM_VCPU_PMU_V3_INIT
 ---------------------------------------
 
@@ -49,14 +53,18 @@ Returns:
 	 =======  ======================================================
 	 -EEXIST  Interrupt number already used
 	 -ENODEV  PMUv3 not supported or GIC not initialized
-	 -ENXIO   PMUv3 not supported, missing VCPU feature or interrupt
-		  number not set
+	 -ENXIO   PMUv3 not supported, missing VCPU feature, missing
+                  hardware PMU, or interrupt number not set (non-GICv5
+                  guests, only)
 	 -EBUSY   PMUv3 already initialized
 	 =======  ======================================================
 
 Request the initialization of the PMUv3.  If using the PMUv3 with an in-kernel
 virtual GIC implementation, this must be done after initializing the in-kernel
 irqchip.
+
+When the KVM_ARM_VCPU_PMU_V3_STRICT vCPU feature is enabled this must be done
+after selecting a hardware PMU.
 
 1.3 ATTRIBUTE: KVM_ARM_VCPU_PMU_V3_FILTER
 -----------------------------------------
@@ -103,6 +111,9 @@ Restrictions: Event 0 (SW_INCR) is never filtered, as it doesn't count a
 hardware event. Filtering event 0x1E (CHAIN) has no effect either, as it
 isn't strictly speaking an event. Filtering the cycle counter is possible
 using event 0x11 (CPU_CYCLES).
+
+When the KVM_ARM_VCPU_PMU_V3_STRICT vCPU feature is enabled this must be done
+after selecting a hardware PMU.
 
 1.4 ATTRIBUTE: KVM_ARM_VCPU_PMU_V3_SET_PMU
 ------------------------------------------

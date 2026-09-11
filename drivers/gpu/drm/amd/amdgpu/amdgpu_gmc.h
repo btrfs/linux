@@ -32,9 +32,11 @@
 #include "amdgpu_xgmi.h"
 #include "amdgpu_ras.h"
 
-/* VA hole for 48bit addresses on Vega10 */
-#define AMDGPU_GMC_HOLE_START	0x0000800000000000ULL
-#define AMDGPU_GMC_HOLE_END	0xffff800000000000ULL
+/* VA hole for 48bit and 57bit addresses */
+#define AMDGPU_GMC_HOLE_START	(adev->vm_manager.max_level == 4 ?\
+				0x0100000000000000ULL : 0x0000800000000000ULL)
+#define AMDGPU_GMC_HOLE_END	(adev->vm_manager.max_level == 4 ?\
+				0xff00000000000000ULL : 0xffff800000000000ULL)
 
 /*
  * Hardware is programmed as if the hole doesn't exists with start and end
@@ -43,7 +45,8 @@
  * This mask is used to remove the upper 16bits of the VA and so come up with
  * the linear addr value.
  */
-#define AMDGPU_GMC_HOLE_MASK	0x0000ffffffffffffULL
+#define AMDGPU_GMC_HOLE_MASK	(adev->vm_manager.max_level == 4 ?\
+				0x01ffffffffffffffULL : 0x0000ffffffffffffULL)
 
 /*
  * Ring size as power of two for the log of recent faults.
@@ -85,6 +88,15 @@ enum amdgpu_memory_partition {
 #define AMDGPU_GMC_INIT_RESET_NPS  BIT(0)
 
 #define AMDGPU_MAX_MEM_RANGES 8
+
+#define AMDGPU_GMC9_FAULT_SOURCE_DATA_RETRY 0x80
+#define AMDGPU_GMC9_FAULT_SOURCE_DATA_READ  0x40
+#define AMDGPU_GMC9_FAULT_SOURCE_DATA_WRITE 0x20
+#define AMDGPU_GMC9_FAULT_SOURCE_DATA_EXE   0x10
+
+#define AMDGPU_GMC121_FAULT_SOURCE_DATA_READ  0x400000
+#define AMDGPU_GMC121_FAULT_SOURCE_DATA_WRITE 0x200000
+#define AMDGPU_GMC121_FAULT_SOURCE_DATA_EXE   0x100000
 
 /*
  * GMC page fault information
@@ -268,12 +280,12 @@ struct amdgpu_gmc {
 	u64			real_vram_size;
 	int			vram_mtrr;
 	u64                     mc_mask;
+	uint64_t		pte_addr_mask;
 	const struct firmware   *fw;	/* MC firmware */
 	uint32_t                fw_version;
 	struct amdgpu_irq_src	vm_fault;
 	uint32_t		vram_type;
 	uint8_t			vram_vendor;
-	uint32_t                srbm_soft_reset;
 	bool			prt_warning;
 	uint32_t		sdpif_register;
 	/* apertures */
@@ -348,10 +360,13 @@ struct amdgpu_gmc {
 	u64 MC_VM_MX_L1_TLB_CNTL;
 
 	u64 noretry_flags;
+	u64 init_pte_flags;
 
 	bool flush_tlb_needs_extra_type_0;
 	bool flush_tlb_needs_extra_type_2;
 	bool flush_pasid_uses_kiq;
+
+	bool override_pte;
 };
 
 #define amdgpu_gmc_emit_flush_gpu_tlb(r, vmid, addr) (r)->adev->gmc.gmc_funcs->emit_flush_gpu_tlb((r), (vmid), (addr))
@@ -389,13 +404,8 @@ static inline bool amdgpu_gmc_vram_full_visible(struct amdgpu_gmc *gmc)
  *
  * @addr: address to extend
  */
-static inline uint64_t amdgpu_gmc_sign_extend(uint64_t addr)
-{
-	if (addr >= AMDGPU_GMC_HOLE_START)
-		addr |= AMDGPU_GMC_HOLE_END;
-
-	return addr;
-}
+#define amdgpu_gmc_sign_extend(addr)	((addr) >= AMDGPU_GMC_HOLE_START ?\
+					((addr) | AMDGPU_GMC_HOLE_END) : (addr))
 
 bool amdgpu_gmc_is_pdb0_enabled(struct amdgpu_device *adev);
 int amdgpu_gmc_pdb0_alloc(struct amdgpu_device *adev);
@@ -421,9 +431,13 @@ bool amdgpu_gmc_filter_faults(struct amdgpu_device *adev,
 			      uint16_t pasid, uint64_t timestamp);
 void amdgpu_gmc_filter_faults_remove(struct amdgpu_device *adev, uint64_t addr,
 				     uint16_t pasid);
+int amdgpu_gmc_handle_retry_fault(struct amdgpu_device *adev,
+				  struct amdgpu_iv_entry *entry,
+				  u64 addr,
+				  u32 cam_index,
+				  u32 node_id,
+				  bool write_fault);
 int amdgpu_gmc_ras_sw_init(struct amdgpu_device *adev);
-int amdgpu_gmc_ras_late_init(struct amdgpu_device *adev);
-void amdgpu_gmc_ras_fini(struct amdgpu_device *adev);
 int amdgpu_gmc_allocate_vm_inv_eng(struct amdgpu_device *adev);
 void amdgpu_gmc_flush_gpu_tlb(struct amdgpu_device *adev, uint32_t vmid,
 			      uint32_t vmhub, uint32_t flush_type);
@@ -442,7 +456,7 @@ extern void
 amdgpu_gmc_set_vm_fault_masks(struct amdgpu_device *adev, int hub_type,
 			      bool enable);
 
-void amdgpu_gmc_get_vbios_allocations(struct amdgpu_device *adev);
+void amdgpu_gmc_init_vga_resv_regions(struct amdgpu_device *adev);
 
 void amdgpu_gmc_init_pdb0(struct amdgpu_device *adev);
 uint64_t amdgpu_gmc_vram_mc2pa(struct amdgpu_device *adev, uint64_t mc_addr);
@@ -468,4 +482,8 @@ amdgpu_gmc_query_memory_partition(struct amdgpu_device *adev);
 int amdgpu_gmc_init_mem_ranges(struct amdgpu_device *adev);
 void amdgpu_gmc_init_sw_mem_ranges(struct amdgpu_device *adev,
 				   struct amdgpu_mem_partition_info *mem_ranges);
+int amdgpu_gmc_get_vram_info(struct amdgpu_device *adev,
+		int *vram_width, int *vram_type, int *vram_vendor);
+
+void amdgpu_gmc_set_gart_size(struct amdgpu_device *adev, u64 default_size);
 #endif

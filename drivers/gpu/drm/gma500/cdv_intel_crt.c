@@ -29,8 +29,8 @@
 #include <linux/pm_runtime.h>
 
 #include <drm/drm_crtc_helper.h>
+#include <drm/drm_encoder.h>
 #include <drm/drm_modeset_helper_vtables.h>
-#include <drm/drm_simple_kms_helper.h>
 
 #include "cdv_device.h"
 #include "intel_bios.h"
@@ -217,6 +217,10 @@ static int cdv_intel_crt_set_property(struct drm_connector *connector,
  * Routines for controlling stuff on the analog port
  */
 
+static const struct drm_encoder_funcs cdv_intel_crt_funcs = {
+	.destroy = drm_encoder_cleanup,
+};
+
 static const struct drm_encoder_helper_funcs cdv_intel_crt_helper_funcs = {
 	.dpms = cdv_intel_crt_dpms,
 	.prepare = gma_encoder_prepare,
@@ -250,11 +254,11 @@ void cdv_intel_crt_init(struct drm_device *dev,
 	struct drm_encoder *encoder;
 	int ret;
 
-	gma_encoder = kzalloc(sizeof(struct gma_encoder), GFP_KERNEL);
+	gma_encoder = kzalloc_obj(struct gma_encoder);
 	if (!gma_encoder)
 		return;
 
-	gma_connector = kzalloc(sizeof(struct gma_connector), GFP_KERNEL);
+	gma_connector = kzalloc_obj(struct gma_connector);
 	if (!gma_connector)
 		goto err_free_encoder;
 
@@ -275,7 +279,8 @@ void cdv_intel_crt_init(struct drm_device *dev,
 		goto err_ddc_destroy;
 
 	encoder = &gma_encoder->base;
-	ret = drm_simple_encoder_init(dev, encoder, DRM_MODE_ENCODER_DAC);
+	ret = drm_encoder_init(dev, encoder, &cdv_intel_crt_funcs,
+			       DRM_MODE_ENCODER_DAC, NULL);
 	if (ret)
 		goto err_connector_cleanup;
 

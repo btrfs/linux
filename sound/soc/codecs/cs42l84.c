@@ -10,13 +10,13 @@
 
 #include <linux/bitfield.h>
 #include <linux/bits.h>
+#include <linux/cleanup.h>
 #include <linux/module.h>
 #include <linux/moduleparam.h>
 #include <linux/kernel.h>
 #include <linux/init.h>
 #include <linux/delay.h>
 #include <linux/i2c.h>
-#include <linux/gpio.h>
 #include <linux/regmap.h>
 #include <linux/slab.h>
 #include <linux/acpi.h>
@@ -84,7 +84,7 @@ static const struct regmap_config cs42l84_regmap = {
 static int cs42l84_put_dac_vol(struct snd_kcontrol *kctl,
 			struct snd_ctl_elem_value *val)
 {
-	struct snd_soc_component *component = snd_soc_kcontrol_component(kctl);
+	struct snd_soc_component *component = snd_kcontrol_chip(kctl);
 	struct soc_mixer_control *mc = (struct soc_mixer_control *) kctl->private_value;
 	int vola, volb;
 	int ret, ret2, updated = 0;
@@ -138,7 +138,7 @@ bail:
 static int cs42l84_get_dac_vol(struct snd_kcontrol *kctl,
 			struct snd_ctl_elem_value *val)
 {
-	struct snd_soc_component *component = snd_soc_kcontrol_component(kctl);
+	struct snd_soc_component *component = snd_kcontrol_chip(kctl);
 	struct soc_mixer_control *mc = (struct soc_mixer_control *) kctl->private_value;
 	int vola, volb;
 	int ret;
@@ -281,10 +281,9 @@ static int cs42l84_set_jack(struct snd_soc_component *component, struct snd_soc_
 	struct cs42l84_private *cs42l84 = snd_soc_component_get_drvdata(component);
 
 	/* Prevent race with interrupt handler */
-	mutex_lock(&cs42l84->irq_lock);
+	guard(mutex)(&cs42l84->irq_lock);
 	cs42l84->jack = jk;
 	snd_soc_jack_report(jk, cs42l84->hs_type, SND_JACK_HEADSET);
-	mutex_unlock(&cs42l84->irq_lock);
 
 	return 0;
 }
@@ -357,8 +356,11 @@ struct cs42l84_pll_params {
  * Common PLL Settings for given BCLK
  */
 static const struct cs42l84_pll_params pll_ratio_table[] = {
+	{  2822400, 1, 0, 0x40, 0x000000, 0x03, 0x10, 11289600},
 	{  3072000, 1, 0, 0x40, 0x000000, 0x03, 0x10, 12288000},
+	{  5644800, 1, 0, 0x40, 0x000000, 0x03, 0x10, 11289600},
 	{  6144000, 1, 1, 0x40, 0x000000, 0x03, 0x10, 12288000},
+	{ 11289600, 0, 0, 0, 0, 0, 0,                 11289600},
 	{ 12288000, 0, 0, 0, 0, 0, 0,                 12288000},
 	{ 24576000, 1, 3, 0x40, 0x000000, 0x03, 0x10, 12288000},
 };
@@ -408,11 +410,18 @@ static int cs42l84_pll_config(struct snd_soc_component *component)
 		CS42L84_ASP_FSYNC_CTL3_BCLK_PERIOD_HI,
 		FIELD_PREP(CS42L84_ASP_FSYNC_CTL3_BCLK_PERIOD_HI, fsync >> 7));
 
-	/* Save what the MCLK will be */
+	/*
+	 * MCLK values are binned into 12 or 24 MHz regions. If MCLK is exactly
+	 * 12 or 24 MHz, the high bit of CCM_CTL1_MCLK_F is set. If MCLK
+	 * is in the region of 24 MHz, the low bit is set. This seemingly
+	 * corresponds to CS42L42's documented INTERNAL_FS and MCLKDIV
+	 * behaviour respectively.
+	 */
 	switch (pll_ratio_table[i].mclk_int) {
 	case 12000000:
 		cs42l84->pll_mclk_f = CS42L84_CCM_CTL1_MCLK_F_12MHZ;
 		break;
+	case 11289600:
 	case 12288000:
 		cs42l84->pll_mclk_f = CS42L84_CCM_CTL1_MCLK_F_12_288KHZ;
 		break;
@@ -670,14 +679,18 @@ static struct snd_soc_dai_driver cs42l84_dai = {
 			.stream_name = "Playback",
 			.channels_min = 1,
 			.channels_max = 2,
-			.rates = SNDRV_PCM_RATE_48000 | SNDRV_PCM_RATE_96000,
+			.rates = SNDRV_PCM_RATE_44100 | SNDRV_PCM_RATE_48000 |
+				SNDRV_PCM_RATE_88200 | SNDRV_PCM_RATE_96000 |
+				SNDRV_PCM_RATE_176400 | SNDRV_PCM_RATE_192000,
 			.formats = CS42L84_FORMATS,
 		},
 		.capture = {
 			.stream_name = "Capture",
 			.channels_min = 1,
 			.channels_max = 1,
-			.rates = SNDRV_PCM_RATE_48000 | SNDRV_PCM_RATE_96000,
+			.rates = SNDRV_PCM_RATE_44100 | SNDRV_PCM_RATE_48000 |
+				SNDRV_PCM_RATE_88200 | SNDRV_PCM_RATE_96000 |
+				SNDRV_PCM_RATE_176400 | SNDRV_PCM_RATE_192000,
 			.formats = CS42L84_FORMATS,
 		},
 		.symmetric_rate = 1,
@@ -817,7 +830,7 @@ static irqreturn_t cs42l84_irq_thread(int irq, void *data)
 	u8 current_ring_state;
 	int i;
 
-	mutex_lock(&cs42l84->irq_lock);
+	guard(mutex)(&cs42l84->irq_lock);
 	/* Read sticky registers to clear interrupt */
 	for (i = 0; i < ARRAY_SIZE(stickies); i++) {
 		regmap_read(cs42l84->regmap, irq_params_table[i].status_addr,
@@ -888,8 +901,6 @@ static irqreturn_t cs42l84_irq_thread(int irq, void *data)
 				break;
 			}
 
-			mutex_unlock(&cs42l84->irq_lock);
-
 			return IRQ_HANDLED;
 		}
 
@@ -904,8 +915,6 @@ static irqreturn_t cs42l84_irq_thread(int irq, void *data)
 				cs42l84_detect_hs(cs42l84);
 		}
 	}
-
-	mutex_unlock(&cs42l84->irq_lock);
 
 	return IRQ_HANDLED;
 }
@@ -1087,8 +1096,8 @@ static const struct of_device_id cs42l84_of_match[] = {
 MODULE_DEVICE_TABLE(of, cs42l84_of_match);
 
 static const struct i2c_device_id cs42l84_id[] = {
-	{ "cs42l84" },
-	{}
+	{ .name = "cs42l84" },
+	{ }
 };
 MODULE_DEVICE_TABLE(i2c, cs42l84_id);
 

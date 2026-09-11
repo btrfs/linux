@@ -36,23 +36,6 @@
 #include <asm/pgalloc.h>
 #include <asm/tlb.h>
 
-unsigned long empty_zero_page[PAGE_SIZE / sizeof(unsigned long)] __page_aligned_bss;
-EXPORT_SYMBOL(empty_zero_page);
-
-void copy_user_highpage(struct page *to, struct page *from,
-	unsigned long vaddr, struct vm_area_struct *vma)
-{
-	void *vfrom, *vto;
-
-	vfrom = kmap_local_page(from);
-	vto = kmap_local_page(to);
-	copy_page(vto, vfrom);
-	kunmap_local(vfrom);
-	kunmap_local(vto);
-	/* Make sure this page is cleared on other CPU's too before using it */
-	smp_wmb();
-}
-
 int __ref page_is_ram(unsigned long pfn)
 {
 	unsigned long addr = PFN_PHYS(pfn);
@@ -60,22 +43,65 @@ int __ref page_is_ram(unsigned long pfn)
 	return memblock_is_memory(addr) && !memblock_is_reserved(addr);
 }
 
-void __init paging_init(void)
+void __init arch_zone_limits_init(unsigned long *max_zone_pfns)
 {
-	unsigned long max_zone_pfns[MAX_NR_ZONES];
-
 #ifdef CONFIG_ZONE_DMA32
 	max_zone_pfns[ZONE_DMA32] = MAX_DMA32_PFN;
 #endif
 	max_zone_pfns[ZONE_NORMAL] = max_low_pfn;
-
-	free_area_init(max_zone_pfns);
+#ifdef CONFIG_HIGHMEM
+	max_zone_pfns[ZONE_HIGHMEM] = max_pfn;
+#endif
 }
 
 void __ref free_initmem(void)
 {
 	free_initmem_default(POISON_FREE_INITMEM);
 }
+
+#ifdef CONFIG_HIGHMEM
+
+void __init fixrange_init(unsigned long start, unsigned long end, pgd_t *pgd_base)
+{
+	pgd_t *pgd;
+	pud_t *pud;
+	pmd_t *pmd;
+	pte_t *pte;
+	int i, j, k;
+	int ptrs_per_pgd;
+	unsigned long vaddr;
+
+	vaddr = start;
+	i = pgd_index(vaddr);
+	j = pud_index(vaddr);
+	k = pmd_index(vaddr);
+	pgd = pgd_base + i;
+	ptrs_per_pgd = min((1 << (BITS_PER_LONG - PGDIR_SHIFT)), PTRS_PER_PGD);
+
+	for ( ; (i < ptrs_per_pgd) && (vaddr < end); pgd++, i++) {
+		pud = (pud_t *)pgd;
+		for ( ; (j < PTRS_PER_PUD) && (vaddr < end); pud++, j++) {
+			pmd = (pmd_t *)pud;
+			for (; (k < PTRS_PER_PMD) && (vaddr < end); pmd++, k++) {
+				if (pmd_none(*pmd)) {
+					pte = (pte_t *) memblock_alloc_low(PAGE_SIZE, PAGE_SIZE);
+					if (!pte)
+						panic("%s: Failed to allocate %lu bytes align=%lx\n",
+						      __func__, PAGE_SIZE, PAGE_SIZE);
+
+					kernel_pte_init(pte);
+					set_pmd(pmd, __pmd((unsigned long)pte));
+					BUG_ON(pte != pte_offset_kernel(pmd, 0));
+				}
+				vaddr += PMD_SIZE;
+			}
+			k = 0;
+		}
+		j = 0;
+	}
+}
+
+#endif
 
 #ifdef CONFIG_MEMORY_HOTPLUG
 int arch_add_memory(int nid, u64 start, u64 size, struct mhp_params *params)
@@ -93,16 +119,13 @@ int arch_add_memory(int nid, u64 start, u64 size, struct mhp_params *params)
 	return ret;
 }
 
-void arch_remove_memory(u64 start, u64 size, struct vmem_altmap *altmap)
+void arch_remove_memory(u64 start, u64 size, struct vmem_altmap *altmap,
+			struct dev_pagemap *pgmap)
 {
 	unsigned long start_pfn = start >> PAGE_SHIFT;
 	unsigned long nr_pages = size >> PAGE_SHIFT;
-	struct page *page = pfn_to_page(start_pfn);
 
-	/* With altmap the first mapped page is offset from @start */
-	if (altmap)
-		page += vmem_altmap_offset(altmap);
-	__remove_pages(start_pfn, nr_pages, altmap);
+	__remove_pages(start_pfn, nr_pages, altmap, pgmap);
 }
 #endif
 
@@ -115,17 +138,6 @@ void __meminit vmemmap_set_pmd(pmd_t *pmd, void *p, int node,
 	entry = pfn_pmd(virt_to_pfn(p), PAGE_KERNEL);
 	pmd_val(entry) |= _PAGE_HUGE | _PAGE_HGLOBAL;
 	set_pmd_at(&init_mm, addr, pmd, entry);
-}
-
-int __meminit vmemmap_check_pmd(pmd_t *pmd, int node,
-				unsigned long addr, unsigned long next)
-{
-	int huge = pmd_val(pmdp_get(pmd)) & _PAGE_HUGE;
-
-	if (huge)
-		vmemmap_verify((pte_t *)pmd, node, addr, next);
-
-	return huge;
 }
 
 int __meminit vmemmap_populate(unsigned long start, unsigned long end,
@@ -224,16 +236,27 @@ EXPORT_SYMBOL(invalid_pmd_table);
 pte_t invalid_pte_table[PTRS_PER_PTE] __page_aligned_bss;
 EXPORT_SYMBOL(invalid_pte_table);
 
-#ifdef CONFIG_EXECMEM
+#if defined(CONFIG_EXECMEM) && defined(MODULES_VADDR)
+#define MODULES_TEXT_START (MODULES_VADDR)
+#define MODULES_TEXT_END   (MODULES_VADDR + SZ_256M)
+#define MODULES_DATA_START (MODULES_VADDR + SZ_256M)
+#define MODULES_DATA_END   (MODULES_END)
+
 static struct execmem_info execmem_info __ro_after_init;
 
 struct execmem_info __init *execmem_arch_setup(void)
 {
 	execmem_info = (struct execmem_info){
 		.ranges = {
-			[EXECMEM_DEFAULT] = {
-				.start	= MODULES_VADDR,
-				.end	= MODULES_END,
+			[EXECMEM_MODULE_TEXT] = {
+				.start	= MODULES_TEXT_START,
+				.end	= MODULES_TEXT_END,
+				.pgprot	= PAGE_KERNEL,
+				.alignment = 1,
+			},
+			[EXECMEM_MODULE_DATA] = {
+				.start	= MODULES_DATA_START,
+				.end	= MODULES_DATA_END,
 				.pgprot	= PAGE_KERNEL,
 				.alignment = 1,
 			},
@@ -242,4 +265,4 @@ struct execmem_info __init *execmem_arch_setup(void)
 
 	return &execmem_info;
 }
-#endif /* CONFIG_EXECMEM */
+#endif /* CONFIG_EXECMEM && MODULES_VADDR */

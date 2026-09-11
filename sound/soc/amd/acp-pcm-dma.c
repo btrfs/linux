@@ -691,12 +691,10 @@ static irqreturn_t dma_irq_handler(int irq, void *arg)
 {
 	u16 dscr_idx;
 	u32 intr_flag, ext_intr_status;
-	struct audio_drv_data *irq_data;
+	struct audio_drv_data *irq_data = arg;
 	void __iomem *acp_mmio;
-	struct device *dev = arg;
 	bool valid_irq = false;
 
-	irq_data = dev_get_drvdata(dev);
 	acp_mmio = irq_data->acp_mmio;
 
 	ext_intr_status = acp_reg_read(acp_mmio, mmACP_EXTERNAL_INTR_STAT);
@@ -775,7 +773,7 @@ static int acp_dma_open(struct snd_soc_component *component,
 	struct snd_pcm_runtime *runtime = substream->runtime;
 	struct audio_drv_data *intr_data = dev_get_drvdata(component->dev);
 	struct audio_substream_data *adata =
-		kzalloc(sizeof(struct audio_substream_data), GFP_KERNEL);
+		kzalloc_obj(struct audio_substream_data);
 	if (!adata)
 		return -ENOMEM;
 
@@ -1252,7 +1250,7 @@ static const struct snd_soc_component_driver acp_asoc_platform = {
 	.pointer	= acp_dma_pointer,
 	.delay		= acp_dma_delay,
 	.prepare	= acp_dma_prepare,
-	.pcm_construct	= acp_dma_new,
+	.pcm_new	= acp_dma_new,
 };
 
 static int acp_audio_probe(struct platform_device *pdev)
@@ -1291,10 +1289,10 @@ static int acp_audio_probe(struct platform_device *pdev)
 
 	irq = platform_get_irq(pdev, 0);
 	if (irq < 0)
-		return -ENODEV;
+		return irq;
 
 	status = devm_request_irq(&pdev->dev, irq, dma_irq_handler,
-				  0, "ACP_IRQ", &pdev->dev);
+				  0, "ACP_IRQ", audio_drv_data);
 	if (status) {
 		dev_err(&pdev->dev, "ACP IRQ request failed\n");
 		return status;

@@ -143,7 +143,7 @@ static struct rds_cong_map *rds_cong_from_addr(const struct in6_addr *addr)
 	unsigned long i;
 	unsigned long flags;
 
-	map = kzalloc(sizeof(struct rds_cong_map), GFP_KERNEL);
+	map = kzalloc_obj(struct rds_cong_map);
 	if (!map)
 		return NULL;
 
@@ -242,7 +242,7 @@ void rds_cong_queue_updates(struct rds_cong_map *map)
 			 *    therefore trigger warnings.
 			 * Defer the xmit to rds_send_worker() instead.
 			 */
-			queue_delayed_work(rds_wq, &cp->cp_send_w, 0);
+			queue_delayed_work(cp->cp_wq, &cp->cp_send_w, 0);
 		}
 		rcu_read_unlock();
 	}
@@ -256,9 +256,9 @@ void rds_cong_map_updated(struct rds_cong_map *map, uint64_t portmask)
 	  map, &map->m_addr);
 	rds_stats_inc(s_cong_update_received);
 	atomic_inc(&rds_cong_generation);
-	if (waitqueue_active(&map->m_waitq))
+	if (wq_has_sleeper(&map->m_waitq))
 		wake_up(&map->m_waitq);
-	if (waitqueue_active(&rds_poll_waitq))
+	if (wq_has_sleeper(&rds_poll_waitq))
 		wake_up_all(&rds_poll_waitq);
 
 	if (portmask && !list_empty(&rds_cong_monitor)) {

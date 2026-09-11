@@ -1779,7 +1779,9 @@ EXPORT_SYMBOL(wx_set_rx_mode);
 static void wx_set_rx_buffer_len(struct wx *wx)
 {
 	struct net_device *netdev = wx->netdev;
+	struct wx_ring *rx_ring;
 	u32 mhadd, max_frame;
+	int i;
 
 	max_frame = netdev->mtu + ETH_HLEN + ETH_FCS_LEN + VLAN_HLEN;
 	/* adjust max frame to be at least the size of a standard frame */
@@ -1789,6 +1791,19 @@ static void wx_set_rx_buffer_len(struct wx *wx)
 	mhadd = rd32(wx, WX_PSR_MAX_SZ);
 	if (max_frame != mhadd)
 		wr32(wx, WX_PSR_MAX_SZ, max_frame);
+
+	/*
+	 * Setup the HW Rx Head and Tail Descriptor Pointers and
+	 * the Base and Length of the Rx Descriptor Ring
+	 */
+	for (i = 0; i < wx->num_rx_queues; i++) {
+		rx_ring = wx->rx_ring[i];
+		rx_ring->rx_buf_len = WX_RXBUFFER_2K;
+#if (PAGE_SIZE < 8192)
+		if (test_bit(WX_FLAG_RSC_ENABLED, wx->flags))
+			rx_ring->rx_buf_len = WX_RXBUFFER_3K;
+#endif
+	}
 }
 
 /**
@@ -1865,9 +1880,25 @@ static void wx_configure_srrctl(struct wx *wx,
 	srrctl |= WX_RXBUFFER_256 << WX_PX_RR_CFG_BHDRSIZE_SHIFT;
 
 	/* configure the packet buffer length */
-	srrctl |= WX_RX_BUFSZ >> WX_PX_RR_CFG_BSIZEPKT_SHIFT;
+	srrctl |= rx_ring->rx_buf_len >> WX_PX_RR_CFG_BSIZEPKT_SHIFT;
 
 	wr32(wx, WX_PX_RR_CFG(reg_idx), srrctl);
+}
+
+static void wx_configure_rscctl(struct wx *wx,
+				struct wx_ring *ring)
+{
+	u8 reg_idx = ring->reg_idx;
+	u32 rscctrl;
+
+	if (!test_bit(WX_FLAG_RSC_ENABLED, wx->flags))
+		return;
+
+	rscctrl = rd32(wx, WX_PX_RR_CFG(reg_idx));
+	rscctrl |= WX_PX_RR_CFG_RSC;
+	rscctrl |= WX_PX_RR_CFG_MAX_RSCBUF_16;
+
+	wr32(wx, WX_PX_RR_CFG(reg_idx), rscctrl);
 }
 
 static void wx_configure_tx_ring(struct wx *wx,
@@ -1901,9 +1932,19 @@ static void wx_configure_tx_ring(struct wx *wx,
 	else
 		ring->atr_sample_rate = 0;
 
+	bitmap_zero(ring->state, WX_RING_STATE_NBITS);
 	/* reinitialize tx_buffer_info */
 	memset(ring->tx_buffer_info, 0,
 	       sizeof(struct wx_tx_buffer) * ring->count);
+
+	if (ring->headwb_mem) {
+		wr32(wx, WX_PX_TR_HEAD_ADDRL(reg_idx),
+		     ring->headwb_dma & DMA_BIT_MASK(32));
+		wr32(wx, WX_PX_TR_HEAD_ADDRH(reg_idx),
+		     upper_32_bits(ring->headwb_dma));
+
+		txdctl |= WX_PX_TR_CFG_HEAD_WB;
+	}
 
 	/* enable queue */
 	wr32(wx, WX_PX_TR_CFG(reg_idx), txdctl);
@@ -1935,6 +1976,10 @@ static void wx_configure_rx_ring(struct wx *wx,
 		rxdctl |= (ring->count / 128) << WX_PX_RR_CFG_RR_SIZE_SHIFT;
 
 	rxdctl |= 0x1 << WX_PX_RR_CFG_RR_THER_SHIFT;
+
+	if (test_bit(WX_FLAG_RX_MERGE_ENABLED, wx->flags))
+		rxdctl |= WX_PX_RR_CFG_DESC_MERGE;
+
 	wr32(wx, WX_PX_RR_CFG(reg_idx), rxdctl);
 
 	/* reset head and tail pointers */
@@ -1943,6 +1988,7 @@ static void wx_configure_rx_ring(struct wx *wx,
 	ring->tail = wx->hw_addr + WX_PX_RR_WP(reg_idx);
 
 	wx_configure_srrctl(wx, ring);
+	wx_configure_rscctl(wx, ring);
 
 	/* initialize rx_buffer_info */
 	memset(ring->rx_buffer_info, 0,
@@ -2181,7 +2227,9 @@ void wx_configure_rx(struct wx *wx)
 		/* RSC Setup */
 		psrctl = rd32(wx, WX_PSR_CTL);
 		psrctl |= WX_PSR_CTL_RSC_ACK; /* Disable RSC for ACK packets */
-		psrctl |= WX_PSR_CTL_RSC_DIS;
+		psrctl &= ~WX_PSR_CTL_RSC_DIS;
+		if (!test_bit(WX_FLAG_RSC_ENABLED, wx->flags))
+			psrctl |= WX_PSR_CTL_RSC_DIS;
 		wr32(wx, WX_PSR_CTL, psrctl);
 	}
 
@@ -2190,6 +2238,12 @@ void wx_configure_rx(struct wx *wx)
 	/* set_rx_buffer_len must be called before ring initialization */
 	wx_set_rx_buffer_len(wx);
 
+	if (test_bit(WX_FLAG_RX_MERGE_ENABLED, wx->flags)) {
+		wr32(wx, WX_RDM_DCACHE_CTL, WX_RDM_DCACHE_CTL_EN);
+		wr32m(wx, WX_RDM_RSC_CTL,
+		      WX_RDM_RSC_CTL_FREE_CTL | WX_RDM_RSC_CTL_FREE_CNT_DIS,
+		      WX_RDM_RSC_CTL_FREE_CTL);
+	}
 	/* Setup the HW Rx Head and Tail Descriptor Pointers and
 	 * the Base and Length of the Rx Descriptor Ring
 	 */
@@ -2427,8 +2481,11 @@ int wx_sw_init(struct wx *wx)
 	wx->oem_svid = pdev->subsystem_vendor;
 	wx->oem_ssid = pdev->subsystem_device;
 	wx->bus.device = PCI_SLOT(pdev->devfn);
-	wx->bus.func = FIELD_GET(WX_CFG_PORT_ST_LANID,
-				 rd32(wx, WX_CFG_PORT_ST));
+	if (pdev->is_virtfn)
+		wx->bus.func = PCI_FUNC(pdev->devfn);
+	else
+		wx->bus.func = FIELD_GET(WX_CFG_PORT_ST_LANID,
+					 rd32(wx, WX_CFG_PORT_ST));
 
 	if (wx->oem_svid == PCI_VENDOR_ID_WANGXUN ||
 	    pdev->is_virtfn) {
@@ -2452,17 +2509,19 @@ int wx_sw_init(struct wx *wx)
 	wx->rss_flags = WX_RSS_FIELD_IPV4 | WX_RSS_FIELD_IPV4_TCP |
 			WX_RSS_FIELD_IPV6 | WX_RSS_FIELD_IPV6_TCP;
 
-	wx->mac_table = kcalloc(wx->mac.num_rar_entries,
-				sizeof(struct wx_mac_addr),
-				GFP_KERNEL);
+	wx->mac_table = kzalloc_objs(struct wx_mac_addr,
+				     wx->mac.num_rar_entries);
 	if (!wx->mac_table) {
 		wx_err(wx, "mac_table allocation failed\n");
 		kfree(wx->rss_key);
 		return -ENOMEM;
 	}
 
+	spin_lock_init(&wx->hw_stats_lock);
+	mutex_init(&wx->reset_lock);
 	bitmap_zero(wx->state, WX_STATE_NBITS);
 	bitmap_zero(wx->flags, WX_PF_FLAGS_NBITS);
+	set_bit(WX_STATE_DOWN, wx->state);
 	wx->misc_irq_domain = false;
 
 	return 0;
@@ -2720,6 +2779,15 @@ int wx_fc_enable(struct wx *wx, bool tx_pause, bool rx_pause)
 		}
 	}
 
+	if (rx_pause && tx_pause)
+		wx->fc.mode = wx_fc_full;
+	else if (rx_pause)
+		wx->fc.mode = wx_fc_rx_pause;
+	else if (tx_pause)
+		wx->fc.mode = wx_fc_tx_pause;
+	else
+		wx->fc.mode = wx_fc_none;
+
 	/* Disable any previous flow control settings */
 	mflcn_reg = rd32(wx, WX_MAC_RX_FLOW_CTRL);
 	mflcn_reg &= ~WX_MAC_RX_FLOW_CTRL_RFE;
@@ -2738,7 +2806,9 @@ int wx_fc_enable(struct wx *wx, bool tx_pause, bool rx_pause)
 
 	/* Set up and enable Rx high/low water mark thresholds, enable XON. */
 	if (tx_pause && wx->fc.high_water) {
-		fcrtl = (wx->fc.low_water << 10) | WX_RDB_RFCL_XONE;
+		fcrtl = (wx->fc.low_water << 10);
+		if (wx->mac.type != wx_mac_sp)
+			fcrtl |= WX_RDB_RFCL_XONE;
 		wr32(wx, WX_RDB_RFCL, fcrtl);
 		fcrth = (wx->fc.high_water << 10) | WX_RDB_RFCH_XOFFE;
 	} else {
@@ -2779,6 +2849,31 @@ int wx_fc_enable(struct wx *wx, bool tx_pause, bool rx_pause)
 }
 EXPORT_SYMBOL(wx_fc_enable);
 
+static void wx_update_xoff_rx_lfc(struct wx *wx)
+{
+	struct wx_hw_stats *hwstats = &wx->stats;
+	u64 data;
+	int i;
+
+	if (wx->fc.mode != wx_fc_full &&
+	    wx->fc.mode != wx_fc_rx_pause)
+		return;
+
+	if (wx->mac.type >= wx_mac_aml)
+		data = rd32_wrap(wx, WX_MAC_LXOFFRXC_AML,
+				 &wx->last_stats.lxoffrxc);
+	else
+		data = rd64(wx, WX_MAC_LXOFFRXC);
+	hwstats->lxoffrxc += data;
+
+	/* refill credits (no tx hang) if we received xoff */
+	if (!data)
+		return;
+
+	for (i = 0; i < wx->num_tx_queues; i++)
+		clear_bit(WX_HANG_CHECK_ARMED, wx->tx_ring[i]->state);
+}
+
 /**
  * wx_update_stats - Update the board statistics counters.
  * @wx: board private structure
@@ -2791,6 +2886,12 @@ void wx_update_stats(struct wx *wx)
 	u64 hw_csum_rx_good = 0, hw_csum_rx_error = 0;
 	u64 restart_queue = 0, tx_busy = 0;
 	u32 i;
+
+	if (test_bit(WX_STATE_DOWN, wx->state) ||
+	    test_bit(WX_STATE_RESETTING, wx->state))
+		return;
+
+	spin_lock(&wx->hw_stats_lock);
 
 	/* gather some stats to the wx struct that are per queue */
 	for (i = 0; i < wx->num_rx_queues; i++) {
@@ -2806,6 +2907,18 @@ void wx_update_stats(struct wx *wx)
 	wx->hw_csum_rx_error = hw_csum_rx_error;
 	wx->hw_csum_rx_good = hw_csum_rx_good;
 
+	if (test_bit(WX_FLAG_RSC_ENABLED, wx->flags)) {
+		u64 rsc_count = 0;
+		u64 rsc_flush = 0;
+
+		for (i = 0; i < wx->num_rx_queues; i++) {
+			rsc_count += wx->rx_ring[i]->rx_stats.rsc_count;
+			rsc_flush += wx->rx_ring[i]->rx_stats.rsc_flush;
+		}
+		wx->rsc_count = rsc_count;
+		wx->rsc_flush = rsc_flush;
+	}
+
 	for (i = 0; i < wx->num_tx_queues; i++) {
 		struct wx_ring *tx_ring = wx->tx_ring[i];
 
@@ -2814,6 +2927,8 @@ void wx_update_stats(struct wx *wx)
 	}
 	wx->restart_queue = restart_queue;
 	wx->tx_busy = tx_busy;
+
+	wx_update_xoff_rx_lfc(wx);
 
 	hwstats->gprc += rd32(wx, WX_RDM_PKT_CNT);
 	hwstats->gptc += rd32(wx, WX_TDM_PKT_CNT);
@@ -2829,7 +2944,11 @@ void wx_update_stats(struct wx *wx)
 	hwstats->mptc += rd64(wx, WX_TX_MC_FRAMES_GOOD_L);
 	hwstats->roc += rd32(wx, WX_RX_OVERSIZE_FRAMES_GOOD);
 	hwstats->ruc += rd32(wx, WX_RX_UNDERSIZE_FRAMES_GOOD);
-	hwstats->lxonoffrxc += rd32(wx, WX_MAC_LXONOFFRXC);
+	if (wx->mac.type >= wx_mac_aml)
+		hwstats->lxonrxc += rd32_wrap(wx, WX_MAC_LXONRXC_AML,
+					      &wx->last_stats.lxonrxc);
+	else
+		hwstats->lxonrxc += rd32(wx, WX_MAC_LXONRXC);
 	hwstats->lxontxc += rd32(wx, WX_RDB_LXONTXC);
 	hwstats->lxofftxc += rd32(wx, WX_RDB_LXOFFTXC);
 	hwstats->o2bgptc += rd32(wx, WX_TDM_OS2BMC_CNT);
@@ -2843,11 +2962,12 @@ void wx_update_stats(struct wx *wx)
 		hwstats->fdirmiss += rd32(wx, WX_RDB_FDIR_MISS);
 	}
 
-	/* qmprc is not cleared on read, manual reset it */
-	hwstats->qmprc = 0;
 	for (i = wx->num_vfs * wx->num_rx_queues_per_pool;
 	     i < wx->mac.max_rx_queues; i++)
-		hwstats->qmprc += rd32(wx, WX_PX_MPRC(i));
+		hwstats->qmprc += rd32_wrap(wx, WX_PX_MPRC(i),
+					    &wx->last_stats.qmprc[i]);
+
+	spin_unlock(&wx->hw_stats_lock);
 }
 EXPORT_SYMBOL(wx_update_stats);
 
@@ -2862,8 +2982,11 @@ void wx_clear_hw_cntrs(struct wx *wx)
 {
 	u16 i = 0;
 
-	for (i = 0; i < wx->mac.max_rx_queues; i++)
+	for (i = wx->num_vfs * wx->num_rx_queues_per_pool;
+	     i < wx->mac.max_rx_queues; i++) {
 		wr32(wx, WX_PX_MPRC(i), 0);
+		wx->last_stats.qmprc[i] = 0;
+	}
 
 	rd32(wx, WX_RDM_PKT_CNT);
 	rd32(wx, WX_TDM_PKT_CNT);
@@ -2882,7 +3005,15 @@ void wx_clear_hw_cntrs(struct wx *wx)
 	rd64(wx, WX_RX_LEN_ERROR_FRAMES_L);
 	rd32(wx, WX_RDB_LXONTXC);
 	rd32(wx, WX_RDB_LXOFFTXC);
-	rd32(wx, WX_MAC_LXONOFFRXC);
+	if (wx->mac.type >= wx_mac_aml) {
+		wr32(wx, WX_MAC_LXONRXC_AML, 0);
+		wr32(wx, WX_MAC_LXOFFRXC_AML, 0);
+		wx->last_stats.lxonrxc = 0;
+		wx->last_stats.lxoffrxc = 0;
+	} else {
+		rd32(wx, WX_MAC_LXONRXC);
+		rd64(wx, WX_MAC_LXOFFRXC);
+	}
 }
 EXPORT_SYMBOL(wx_clear_hw_cntrs);
 

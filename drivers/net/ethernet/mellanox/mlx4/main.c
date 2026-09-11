@@ -174,7 +174,8 @@ MODULE_PARM_DESC(port_type_array, "Array of port types: HW_DEFAULT (0) is defaul
 static atomic_t pf_loading = ATOMIC_INIT(0);
 
 static int mlx4_devlink_ierr_reset_get(struct devlink *devlink, u32 id,
-				       struct devlink_param_gset_ctx *ctx)
+				       struct devlink_param_gset_ctx *ctx,
+				       struct netlink_ext_ack *extack)
 {
 	ctx->val.vbool = !!mlx4_internal_err_reset;
 	return 0;
@@ -189,7 +190,8 @@ static int mlx4_devlink_ierr_reset_set(struct devlink *devlink, u32 id,
 }
 
 static int mlx4_devlink_crdump_snapshot_get(struct devlink *devlink, u32 id,
-					    struct devlink_param_gset_ctx *ctx)
+					    struct devlink_param_gset_ctx *ctx,
+					    struct netlink_ext_ack *extack)
 {
 	struct mlx4_priv *priv = devlink_priv(devlink);
 	struct mlx4_dev *dev = &priv->dev;
@@ -211,10 +213,10 @@ static int mlx4_devlink_crdump_snapshot_set(struct devlink *devlink, u32 id,
 
 static int
 mlx4_devlink_max_macs_validate(struct devlink *devlink, u32 id,
-			       union devlink_param_value val,
+			       union devlink_param_value *val,
 			       struct netlink_ext_ack *extack)
 {
-	u32 value = val.vu32;
+	u32 value = val->vu32;
 
 	if (value < 1 || value > 128)
 		return -ERANGE;
@@ -264,27 +266,27 @@ static void mlx4_devlink_set_params_init_values(struct devlink *devlink)
 	value.vbool = !!mlx4_internal_err_reset;
 	devl_param_driverinit_value_set(devlink,
 					DEVLINK_PARAM_GENERIC_ID_INT_ERR_RESET,
-					value);
+					&value);
 
 	value.vu32 = 1UL << log_num_mac;
 	devl_param_driverinit_value_set(devlink,
 					DEVLINK_PARAM_GENERIC_ID_MAX_MACS,
-					value);
+					&value);
 
 	value.vbool = enable_64b_cqe_eqe;
 	devl_param_driverinit_value_set(devlink,
 					MLX4_DEVLINK_PARAM_ID_ENABLE_64B_CQE_EQE,
-					value);
+					&value);
 
 	value.vbool = enable_4k_uar;
 	devl_param_driverinit_value_set(devlink,
 					MLX4_DEVLINK_PARAM_ID_ENABLE_4K_UAR,
-					value);
+					&value);
 
 	value.vbool = false;
 	devl_param_driverinit_value_set(devlink,
 					DEVLINK_PARAM_GENERIC_ID_REGION_SNAPSHOT,
-					value);
+					&value);
 }
 
 static inline void mlx4_set_num_reserved_uars(struct mlx4_dev *dev,
@@ -865,8 +867,8 @@ static int mlx4_slave_special_qp_cap(struct mlx4_dev *dev)
 	struct mlx4_caps *caps = &dev->caps;
 	int i, err = 0;
 
-	func_cap = kzalloc(sizeof(*func_cap), GFP_KERNEL);
-	caps->spec_qps = kcalloc(caps->num_ports, sizeof(*caps->spec_qps), GFP_KERNEL);
+	func_cap = kzalloc_obj(*func_cap);
+	caps->spec_qps = kzalloc_objs(*caps->spec_qps, caps->num_ports);
 
 	if (!func_cap || !caps->spec_qps) {
 		mlx4_err(dev, "Failed to allocate memory for special qps cap\n");
@@ -909,9 +911,9 @@ static int mlx4_slave_cap(struct mlx4_dev *dev)
 	struct mlx4_func_cap	   *func_cap;
 	struct mlx4_init_hca_param *hca_param;
 
-	hca_param = kzalloc(sizeof(*hca_param), GFP_KERNEL);
-	func_cap = kzalloc(sizeof(*func_cap), GFP_KERNEL);
-	dev_cap = kzalloc(sizeof(*dev_cap), GFP_KERNEL);
+	hca_param = kzalloc_obj(*hca_param);
+	func_cap = kzalloc_obj(*func_cap);
+	dev_cap = kzalloc_obj(*dev_cap);
 	if (!hca_param || !func_cap || !dev_cap) {
 		mlx4_err(dev, "Failed to allocate memory for slave_cap\n");
 		err = -ENOMEM;
@@ -1546,7 +1548,7 @@ int mlx4_queue_bond_work(struct mlx4_dev *dev, int is_bonded, u8 v2p_p1,
 {
 	struct mlx4_bond *bond;
 
-	bond = kzalloc(sizeof(*bond), GFP_ATOMIC);
+	bond = kzalloc_obj(*bond, GFP_ATOMIC);
 	if (!bond)
 		return -ENOMEM;
 
@@ -2321,8 +2323,8 @@ static int mlx4_init_hca(struct mlx4_dev *dev)
 	int err;
 
 	if (!mlx4_is_slave(dev)) {
-		dev_cap = kzalloc(sizeof(*dev_cap), GFP_KERNEL);
-		init_hca = kzalloc(sizeof(*init_hca), GFP_KERNEL);
+		dev_cap = kzalloc_obj(*dev_cap);
+		init_hca = kzalloc_obj(*init_hca);
 
 		if (!dev_cap || !init_hca) {
 			err = -ENOMEM;
@@ -2963,7 +2965,7 @@ static void mlx4_enable_msi_x(struct mlx4_dev *dev)
 		if (msi_x > 1)
 			nreq = min_t(int, nreq, msi_x);
 
-		entries = kcalloc(nreq, sizeof(*entries), GFP_KERNEL);
+		entries = kzalloc_objs(*entries, nreq);
 		if (!entries)
 			goto no_msi;
 
@@ -3171,8 +3173,7 @@ static int mlx4_init_steering(struct mlx4_dev *dev)
 	int num_entries = dev->caps.num_ports;
 	int i, j;
 
-	priv->steer = kcalloc(num_entries, sizeof(struct mlx4_steer),
-			      GFP_KERNEL);
+	priv->steer = kzalloc_objs(struct mlx4_steer, num_entries);
 	if (!priv->steer)
 		return -ENOMEM;
 
@@ -3277,8 +3278,7 @@ static u64 mlx4_enable_sriov(struct mlx4_dev *dev, struct pci_dev *pdev,
 					MLX4_MAX_NUM_VF);
 
 	if (reset_flow) {
-		dev->dev_vfs = kcalloc(total_vfs, sizeof(*dev->dev_vfs),
-				       GFP_KERNEL);
+		dev->dev_vfs = kzalloc_objs(*dev->dev_vfs, total_vfs);
 		if (!dev->dev_vfs)
 			goto free_mem;
 		return dev_flags;
@@ -3293,7 +3293,7 @@ static u64 mlx4_enable_sriov(struct mlx4_dev *dev, struct pci_dev *pdev,
 		}
 	}
 
-	dev->dev_vfs = kcalloc(total_vfs, sizeof(*dev->dev_vfs), GFP_KERNEL);
+	dev->dev_vfs = kzalloc_objs(*dev->dev_vfs, total_vfs);
 	if (NULL == dev->dev_vfs) {
 		mlx4_err(dev, "Failed to allocate memory for VFs\n");
 		goto disable_sriov;
@@ -3492,7 +3492,7 @@ slave_start:
 	if (mlx4_is_master(dev)) {
 		/* when we hit the goto slave_start below, dev_cap already initialized */
 		if (!dev_cap) {
-			dev_cap = kzalloc(sizeof(*dev_cap), GFP_KERNEL);
+			dev_cap = kzalloc_obj(*dev_cap);
 
 			if (!dev_cap) {
 				err = -ENOMEM;
@@ -4032,7 +4032,7 @@ static int mlx4_init_one(struct pci_dev *pdev, const struct pci_device_id *id)
 	priv = devlink_priv(devlink);
 
 	dev       = &priv->dev;
-	dev->persist = kzalloc(sizeof(*dev->persist), GFP_KERNEL);
+	dev->persist = kzalloc_obj(*dev->persist);
 	if (!dev->persist) {
 		ret = -ENOMEM;
 		goto err_devlink_free;
@@ -4274,9 +4274,9 @@ int mlx4_restart_one(struct pci_dev *pdev)
 	return mlx4_restart_one_up(pdev, false, NULL);
 }
 
-#define MLX_SP(id) { PCI_VDEVICE(MELLANOX, id), MLX4_PCI_DEV_FORCE_SENSE_PORT }
-#define MLX_VF(id) { PCI_VDEVICE(MELLANOX, id), MLX4_PCI_DEV_IS_VF }
-#define MLX_GN(id) { PCI_VDEVICE(MELLANOX, id), 0 }
+#define MLX_SP(id) { PCI_VDEVICE(MELLANOX, id), .driver_data = MLX4_PCI_DEV_FORCE_SENSE_PORT }
+#define MLX_VF(id) { PCI_VDEVICE(MELLANOX, id), .driver_data = MLX4_PCI_DEV_IS_VF }
+#define MLX_GN(id) { PCI_VDEVICE(MELLANOX, id), .driver_data = 0 }
 
 static const struct pci_device_id mlx4_pci_table[] = {
 #ifdef CONFIG_MLX4_CORE_GEN2
@@ -4366,7 +4366,6 @@ static pci_ers_result_t mlx4_pci_slot_reset(struct pci_dev *pdev)
 
 	pci_set_master(pdev);
 	pci_restore_state(pdev);
-	pci_save_state(pdev);
 	return PCI_ERS_RESULT_RECOVERED;
 }
 

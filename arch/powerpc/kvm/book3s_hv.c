@@ -36,7 +36,6 @@
 #include <linux/gfp.h>
 #include <linux/vmalloc.h>
 #include <linux/highmem.h>
-#include <linux/hugetlb.h>
 #include <linux/kvm_irqfd.h>
 #include <linux/irqbypass.h>
 #include <linux/module.h>
@@ -389,7 +388,7 @@ static void kvmppc_set_pvr_hv(struct kvm_vcpu *vcpu, u32 pvr)
 }
 
 /* Dummy value used in computing PCR value below */
-#define PCR_ARCH_31    (PCR_ARCH_300 << 1)
+#define PCR_ARCH_32	(PCR_ARCH_31 << 1)
 
 static inline unsigned long map_pcr_to_cap(unsigned long pcr)
 {
@@ -418,7 +417,9 @@ static int kvmppc_set_arch_compat(struct kvm_vcpu *vcpu, u32 arch_compat)
 	struct kvmppc_vcore *vc = vcpu->arch.vcore;
 
 	/* We can (emulate) our own architecture version and anything older */
-	if (cpu_has_feature(CPU_FTR_P11_PVR) || cpu_has_feature(CPU_FTR_ARCH_31))
+	if (cpu_has_feature(CPU_FTR_ARCH_32))
+		host_pcr_bit = PCR_ARCH_32;
+	else if (cpu_has_feature(CPU_FTR_P11_PVR) || cpu_has_feature(CPU_FTR_ARCH_31))
 		host_pcr_bit = PCR_ARCH_31;
 	else if (cpu_has_feature(CPU_FTR_ARCH_300))
 		host_pcr_bit = PCR_ARCH_300;
@@ -447,8 +448,23 @@ static int kvmppc_set_arch_compat(struct kvm_vcpu *vcpu, u32 arch_compat)
 			guest_pcr_bit = PCR_ARCH_300;
 			break;
 		case PVR_ARCH_31:
-		case PVR_ARCH_31_P11:
 			guest_pcr_bit = PCR_ARCH_31;
+			break;
+		case PVR_ARCH_31_P11:
+			/*
+			 * Need to check this for ISA 3.1, as Power10 and
+			 * Power11 share the same PCR. For any subsequent ISA
+			 * versions, this will be taken care of by the guest vs
+			 * host PCR comparison below.
+			 */
+			if (!cpu_has_feature(CPU_FTR_P11_PVR)) {
+				arch_compat = PVR_ARCH_INVALID;
+				goto out;
+			}
+			guest_pcr_bit = PCR_ARCH_31;
+			break;
+		case PVR_ARCH_32:
+			guest_pcr_bit = PCR_ARCH_32;
 			break;
 		default:
 			return -EINVAL;
@@ -470,6 +486,7 @@ static int kvmppc_set_arch_compat(struct kvm_vcpu *vcpu, u32 arch_compat)
 			return -EINVAL;
 	}
 
+out:
 	spin_lock(&vc->lock);
 	vc->arch_compat = arch_compat;
 	kvmhv_nestedv2_mark_dirty(vcpu, KVMPPC_GSID_LOGICAL_PVR);
@@ -480,7 +497,7 @@ static int kvmppc_set_arch_compat(struct kvm_vcpu *vcpu, u32 arch_compat)
 	vc->pcr = (host_pcr_bit - guest_pcr_bit) | PCR_MASK;
 	spin_unlock(&vc->lock);
 
-	return 0;
+	return kvmppc_sanity_check(vcpu);
 }
 
 static void kvmppc_dump_regs(struct kvm_vcpu *vcpu)
@@ -2790,7 +2807,7 @@ static struct kvmppc_vcore *kvmppc_vcore_create(struct kvm *kvm, int id)
 {
 	struct kvmppc_vcore *vcore;
 
-	vcore = kzalloc(sizeof(struct kvmppc_vcore), GFP_KERNEL);
+	vcore = kzalloc_obj(struct kvmppc_vcore);
 
 	if (vcore == NULL)
 		return NULL;
@@ -2842,7 +2859,7 @@ static int debugfs_timings_open(struct inode *inode, struct file *file)
 	struct kvm_vcpu *vcpu = inode->i_private;
 	struct debugfs_timings_state *p;
 
-	p = kzalloc(sizeof(*p), GFP_KERNEL);
+	p = kzalloc_obj(*p);
 	if (!p)
 		return -ENOMEM;
 
@@ -3854,7 +3871,8 @@ static noinline void kvmppc_run_core(struct kvmppc_vcore *vc)
 	 */
 	local_irq_disable();
 	hard_irq_disable();
-	if (lazy_irq_pending() || need_resched() ||
+	xfer_to_guest_mode_prepare();
+	if (lazy_irq_pending() || xfer_to_guest_mode_work_pending() ||
 	    recheck_signals_and_mmu(&core_info)) {
 		local_irq_enable();
 		vc->vcore_state = VCORE_INACTIVE;
@@ -4825,10 +4843,16 @@ static int kvmppc_run_vcpu(struct kvm_vcpu *vcpu)
 		vc->runner = vcpu;
 		if (n_ceded == vc->n_runnable) {
 			kvmppc_vcore_blocked(vc);
-		} else if (need_resched()) {
+		} else if (__xfer_to_guest_mode_work_pending()) {
 			kvmppc_vcore_preempt(vc);
-			/* Let something else run */
-			cond_resched_lock(&vc->lock);
+			/*
+			 * Let something else run. The raw helper is used as
+			 * signal exits are accounted by this path already;
+			 * it may schedule(), so drop the vcore lock.
+			 */
+			spin_unlock(&vc->lock);
+			xfer_to_guest_mode_handle_work();
+			spin_lock(&vc->lock);
 			if (vc->vcore_state == VCORE_PREEMPT)
 				kvmppc_vcore_end_preempt(vc);
 		} else {
@@ -4896,12 +4920,16 @@ int kvmhv_run_single_vcpu(struct kvm_vcpu *vcpu, u64 time_limit,
 			run->exit_reason = KVM_EXIT_FAIL_ENTRY;
 			run->fail_entry.hardware_entry_failure_reason = 0;
 			vcpu->arch.ret = r;
-			return r;
+			goto done;
 		}
 	}
 
-	if (need_resched())
-		cond_resched();
+	r = kvm_xfer_to_guest_mode_handle_work(vcpu);
+	if (r) {
+		/* -EINTR: signal pending, exit to userspace (KVM_EXIT_INTR) */
+		vcpu->arch.ret = r;
+		goto done;
+	}
 
 	kvmppc_update_vpas(vcpu);
 
@@ -4915,9 +4943,13 @@ int kvmhv_run_single_vcpu(struct kvm_vcpu *vcpu, u64 time_limit,
 
 	vcpu->arch.state = KVMPPC_VCPU_RUNNABLE;
 
-	if (signal_pending(current))
-		goto sigpend;
-	if (need_resched() || !kvm->arch.mmu_ready)
+	xfer_to_guest_mode_prepare();
+
+	/*
+	 * IRQs are disabled here, so on pending work bail to the outer loop,
+	 * which handles it via kvm_xfer_to_guest_mode_handle_work() above.
+	 */
+	if (xfer_to_guest_mode_work_pending() || !kvm->arch.mmu_ready)
 		goto out;
 
 	vcpu->cpu = pcpu;
@@ -5069,10 +5101,6 @@ int kvmhv_run_single_vcpu(struct kvm_vcpu *vcpu, u64 time_limit,
 
 	return vcpu->arch.ret;
 
- sigpend:
-	vcpu->stat.signal_exits++;
-	run->exit_reason = KVM_EXIT_INTR;
-	vcpu->arch.ret = -EINTR;
  out:
 	vcpu->cpu = -1;
 	vcpu->arch.thread_cpu = -1;
@@ -5637,7 +5665,7 @@ void kvmppc_alloc_host_rm_ops(void)
 	if (kvmppc_host_rm_ops_hv != NULL)
 		return;
 
-	ops = kzalloc(sizeof(struct kvmppc_host_rm_ops), GFP_KERNEL);
+	ops = kzalloc_obj(struct kvmppc_host_rm_ops);
 	if (!ops)
 		return;
 
@@ -5960,7 +5988,7 @@ void kvmppc_free_pimap(struct kvm *kvm)
 
 static struct kvmppc_passthru_irqmap *kvmppc_alloc_pimap(void)
 {
-	return kzalloc(sizeof(struct kvmppc_passthru_irqmap), GFP_KERNEL);
+	return kzalloc_obj(struct kvmppc_passthru_irqmap);
 }
 
 static int kvmppc_set_passthru_irq(struct kvm *kvm, int host_irq, int guest_gsi)
@@ -6511,6 +6539,61 @@ static bool kvmppc_hash_v3_possible(void)
 	return true;
 }
 
+static int kvmppc_map_compat_capabilities(u32 cpu_version,
+					  unsigned long *capabilities)
+{
+	switch (cpu_version) {
+	case PVR_ARCH_31_P11:
+		*capabilities |= KVM_PPC_COMPAT_CAP_POWER11;
+		fallthrough;
+	case PVR_ARCH_31:
+		*capabilities |= KVM_PPC_COMPAT_CAP_POWER10;
+		fallthrough;
+	case PVR_ARCH_300:
+		*capabilities |= KVM_PPC_COMPAT_CAP_POWER9;
+		break;
+	default:
+		return -EINVAL;
+	}
+
+	return 0;
+}
+
+static int kvmppc_get_compat_caps(struct kvm_ppc_compat_caps *host_caps)
+{
+	struct device_node *np;
+	unsigned long capabilities = 0;
+	long rc = -EINVAL;
+	u32 cpu_version = 0;
+
+	if (kvmhv_on_pseries()) {
+		if (kvmhv_is_nestedv2()) {
+			WARN_ON_ONCE(!nested_capabilities);
+			capabilities = nested_capabilities;
+			rc = 0;
+		} else {
+			for_each_node_by_type(np, "cpu") {
+				if (!of_property_read_u32(np, "cpu-version",
+							  &cpu_version)) {
+					of_node_put(np);
+					break;
+				}
+			}
+			if (!cpu_version)
+				return -EINVAL;
+			rc = kvmppc_map_compat_capabilities(cpu_version,
+							    &capabilities);
+		}
+	}
+
+	if (rc < 0)
+		return rc;
+
+	host_caps->compat_capabilities = capabilities & KVM_PPC_COMPAT_BITMASK;
+
+	return rc;
+}
+
 static struct kvmppc_ops kvm_ops_hv = {
 	.get_sregs = kvm_arch_vcpu_ioctl_get_sregs_hv,
 	.set_sregs = kvm_arch_vcpu_ioctl_set_sregs_hv,
@@ -6553,6 +6636,7 @@ static struct kvmppc_ops kvm_ops_hv = {
 	.hash_v3_possible = kvmppc_hash_v3_possible,
 	.create_vcpu_debugfs = kvmppc_arch_create_vcpu_debugfs_hv,
 	.create_vm_debugfs = kvmppc_arch_create_vm_debugfs_hv,
+	.get_compat_caps = kvmppc_get_compat_caps,
 };
 
 static int kvm_init_subcore_bitmap(void)

@@ -139,7 +139,7 @@ static int virtio_i2c_xfer(struct i2c_adapter *adap, struct i2c_msg *msgs,
 	struct virtio_i2c_req *reqs;
 	int count;
 
-	reqs = kcalloc(num, sizeof(*reqs), GFP_KERNEL);
+	reqs = kzalloc_objs(*reqs, num);
 	if (!reqs)
 		return -ENOMEM;
 
@@ -221,6 +221,8 @@ static int virtio_i2c_probe(struct virtio_device *vdev)
 	 * ACPI.
 	 */
 	ACPI_COMPANION_SET(&vi->adap.dev, ACPI_COMPANION(vdev->dev.parent));
+
+	virtio_device_ready(vdev);
 
 	ret = i2c_add_adapter(&vi->adap);
 	if (ret)

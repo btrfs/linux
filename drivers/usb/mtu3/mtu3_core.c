@@ -290,7 +290,7 @@ static void mtu3_csr_init(struct mtu3 *mtu)
 
 	/* delay about 0.1us from detecting reset to send chirp-K */
 	mtu3_clrbits(mbase, U3D_LINK_RESET_INFO, WTCHRP_MSK);
-	/* enable automatical HWRW from L1 */
+	/* enable automatic HWRW from L1 */
 	mtu3_setbits(mbase, U3D_POWER_MANAGEMENT, LPM_HRWE);
 }
 
@@ -613,7 +613,7 @@ static int mtu3_mem_alloc(struct mtu3 *mtu)
 
 	/* one for ep0, another is reserved */
 	mtu->num_eps = min(in_ep_num, out_ep_num) + 1;
-	ep_array = kcalloc(mtu->num_eps * 2, sizeof(*ep_array), GFP_KERNEL);
+	ep_array = kzalloc_objs(*ep_array, mtu->num_eps * 2);
 	if (ep_array == NULL)
 		return -ENOMEM;
 
@@ -1037,8 +1037,13 @@ int ssusb_gadget_suspend(struct ssusb_mtk *ssusb, pm_message_t msg)
 	if (!mtu->gadget_driver)
 		return 0;
 
-	if (mtu->connected)
+	/* Prevent runtime suspend when active connection exists */
+	if (mtu->connected && PMSG_IS_AUTO(msg))
 		return -EBUSY;
+
+	/* Perform soft disconnect for system suspend */
+	if (mtu->softconnect && !PMSG_IS_AUTO(msg))
+		mtu3_dev_on_off(mtu, 0);
 
 	mtu3_dev_suspend(mtu);
 	synchronize_irq(mtu->irq);
@@ -1054,6 +1059,10 @@ int ssusb_gadget_resume(struct ssusb_mtk *ssusb, pm_message_t msg)
 		return 0;
 
 	mtu3_dev_resume(mtu);
+
+	/* Restore soft connect for system resume */
+	if (mtu->softconnect && !PMSG_IS_AUTO(msg))
+		mtu3_dev_on_off(mtu, 1);
 
 	return 0;
 }

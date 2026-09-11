@@ -108,7 +108,7 @@ void svc_seq_show(struct seq_file *seq, const struct svc_stat *statp)
 		for (j = 0; j < vers->vs_nproc; j++) {
 			count = 0;
 			for_each_possible_cpu(k)
-				count += per_cpu(vers->vs_count[j], k);
+				count += per_cpu(statp->vs_count[i][j], k);
 			seq_printf(seq, " %lu", count);
 		}
 		seq_putc(seq, '\n');
@@ -126,7 +126,7 @@ struct rpc_iostats *rpc_alloc_iostats(struct rpc_clnt *clnt)
 	struct rpc_iostats *stats;
 	int i;
 
-	stats = kcalloc(clnt->cl_maxproc, sizeof(*stats), GFP_KERNEL);
+	stats = kzalloc_objs(*stats, clnt->cl_maxproc);
 	if (stats) {
 		for (i = 0; i < clnt->cl_maxproc; i++)
 			spin_lock_init(&stats[i].om_lock);

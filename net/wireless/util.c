@@ -5,7 +5,7 @@
  * Copyright 2007-2009	Johannes Berg <johannes@sipsolutions.net>
  * Copyright 2013-2014  Intel Mobile Communications GmbH
  * Copyright 2017	Intel Deutschland GmbH
- * Copyright (C) 2018-2023, 2025 Intel Corporation
+ * Copyright (C) 2018-2023, 2025-2026 Intel Corporation
  */
 #include <linux/export.h>
 #include <linux/bitops.h>
@@ -90,7 +90,7 @@ u32 ieee80211_channel_to_freq_khz(int chan, enum nl80211_band band)
 		/* see 802.11ax D6.1 27.3.23.2 */
 		if (chan == 2)
 			return MHZ_TO_KHZ(5935);
-		if (chan <= 233)
+		if (chan <= 253)
 			return MHZ_TO_KHZ(5950 + chan * 5);
 		break;
 	case NL80211_BAND_60GHZ:
@@ -241,10 +241,8 @@ bool cfg80211_supported_cipher_suite(struct wiphy *wiphy, u32 cipher)
 	return false;
 }
 
-static bool
-cfg80211_igtk_cipher_supported(struct cfg80211_registered_device *rdev)
+static bool cfg80211_igtk_cipher_supported(struct wiphy *wiphy)
 {
-	struct wiphy *wiphy = &rdev->wiphy;
 	int i;
 
 	for (i = 0; i < wiphy->n_cipher_suites; i++) {
@@ -260,40 +258,94 @@ cfg80211_igtk_cipher_supported(struct cfg80211_registered_device *rdev)
 	return false;
 }
 
-bool cfg80211_valid_key_idx(struct cfg80211_registered_device *rdev,
-			    int key_idx, bool pairwise)
+bool cfg80211_valid_key_idx(struct wireless_dev *wdev,
+			    int key_idx, bool pairwise,
+			    const u8 *mac_addr)
 {
-	int max_key_idx;
-
-	if (pairwise)
-		max_key_idx = 3;
-	else if (wiphy_ext_feature_isset(&rdev->wiphy,
-					 NL80211_EXT_FEATURE_BEACON_PROTECTION) ||
-		 wiphy_ext_feature_isset(&rdev->wiphy,
-					 NL80211_EXT_FEATURE_BEACON_PROTECTION_CLIENT))
-		max_key_idx = 7;
-	else if (cfg80211_igtk_cipher_supported(rdev))
-		max_key_idx = 5;
-	else
-		max_key_idx = 3;
-
-	if (key_idx < 0 || key_idx > max_key_idx)
+	if (WARN_ON(!wdev))
 		return false;
 
-	return true;
+	if (key_idx < 0)
+		return false;
+
+	/*
+	 * Can't differentiate ciphers here so allow 0..3.
+	 * Pairwise keys must be for a station (MAC address given).
+	 */
+	if (pairwise) {
+		if (!mac_addr)
+			return false;
+
+		return key_idx < 4;
+	}
+
+	/*
+	 * For group keys, mac_addr==NULL means setting a group key
+	 * for TX, which is only supported on some interface types,
+	 * except for STATION/P2P_CLIENT, where it's setting the RX
+	 * key with the current AP (for legacy reasons.)
+	 *
+	 * Apart from that exception, a non-NULL mac_addr means RX
+	 * key being set.
+	 */
+
+	switch (wdev->iftype) {
+	case NL80211_IFTYPE_ADHOC:
+		if (!(wdev->wiphy->flags & WIPHY_FLAG_IBSS_RSN))
+			return false;
+		fallthrough;
+	case NL80211_IFTYPE_MESH_POINT:
+		/* no support for IGTK/BIGTK (yet?) */
+		return key_idx < 4;
+	case NL80211_IFTYPE_NAN_DATA:
+		/* these always need to support per-STA GTK */
+		return key_idx < 4;
+	case NL80211_IFTYPE_NAN:
+		/* no data */
+		if (key_idx < 4)
+			return false;
+		/* NAN reused this flag */
+		if (wiphy_ext_feature_isset(wdev->wiphy,
+					    NL80211_EXT_FEATURE_BEACON_PROTECTION))
+			return key_idx <= 7;
+		return key_idx <= 5;
+	case NL80211_IFTYPE_STATION:
+	case NL80211_IFTYPE_P2P_CLIENT:
+		/* see note about exception above */
+		if (mac_addr)
+			return false;
+		/* BIGTK support implies IGTK support */
+		if (wiphy_ext_feature_isset(wdev->wiphy,
+					    NL80211_EXT_FEATURE_BEACON_PROTECTION_CLIENT))
+			return key_idx <= 7;
+		fallthrough;
+	case NL80211_IFTYPE_AP:
+	case NL80211_IFTYPE_P2P_GO:
+		/* no RX with [B]IGTK */
+		if (mac_addr)
+			return false;
+		if (wiphy_ext_feature_isset(wdev->wiphy,
+					    NL80211_EXT_FEATURE_BEACON_PROTECTION))
+			return key_idx <= 7;
+		fallthrough;
+	case NL80211_IFTYPE_AP_VLAN:
+		/* no RX with GTK */
+		if (mac_addr)
+			return false;
+		if (cfg80211_igtk_cipher_supported(wdev->wiphy))
+			return key_idx <= 5;
+		return key_idx <= 3;
+	default:
+		return false;
+	}
 }
 
 int cfg80211_validate_key_settings(struct cfg80211_registered_device *rdev,
+				   struct wireless_dev *wdev,
 				   struct key_params *params, int key_idx,
 				   bool pairwise, const u8 *mac_addr)
 {
-	if (!cfg80211_valid_key_idx(rdev, key_idx, pairwise))
-		return -EINVAL;
-
-	if (!pairwise && mac_addr && !(rdev->wiphy.flags & WIPHY_FLAG_IBSS_RSN))
-		return -EINVAL;
-
-	if (pairwise && !mac_addr)
+	if (!cfg80211_valid_key_idx(wdev, key_idx, pairwise, mac_addr))
 		return -EINVAL;
 
 	switch (params->cipher) {
@@ -343,6 +395,15 @@ int cfg80211_validate_key_settings(struct cfg80211_registered_device *rdev,
 	default:
 		break;
 	}
+
+	/*
+	 * Per Wi-Fi Aware v4.0 section 7.1.2, NAN Data interfaces
+	 * shall only use CCMP-128 or GCMP-256.
+	 */
+	if (wdev->iftype == NL80211_IFTYPE_NAN_DATA &&
+	    params->cipher != WLAN_CIPHER_SUITE_CCMP &&
+	    params->cipher != WLAN_CIPHER_SUITE_GCMP_256)
+		return -EINVAL;
 
 	switch (params->cipher) {
 	case WLAN_CIPHER_SUITE_WEP40:
@@ -423,6 +484,21 @@ int cfg80211_validate_key_settings(struct cfg80211_registered_device *rdev,
 
 	if (!cfg80211_supported_cipher_suite(&rdev->wiphy, params->cipher))
 		return -EINVAL;
+
+	if (params->ltf_keyseed) {
+		if (!wiphy_ext_feature_isset(&rdev->wiphy,
+					     NL80211_EXT_FEATURE_SECURE_LTF) ||
+		    !wiphy_ext_feature_isset(&rdev->wiphy,
+					     NL80211_EXT_FEATURE_SET_KEY_LTF_SEED))
+			return -EOPNOTSUPP;
+
+		/*
+		 * LTF key seed is pairwise key material and must only be
+		 * used with a pairwise key
+		 */
+		if (!pairwise)
+			return -EINVAL;
+	}
 
 	return 0;
 }
@@ -625,8 +701,9 @@ int ieee80211_data_to_8023_exthdr(struct sk_buff *skb, struct ethhdr *ehdr,
 	case cpu_to_le16(0):
 		if (iftype != NL80211_IFTYPE_ADHOC &&
 		    iftype != NL80211_IFTYPE_STATION &&
-		    iftype != NL80211_IFTYPE_OCB)
-				return -1;
+		    iftype != NL80211_IFTYPE_OCB &&
+		    iftype != NL80211_IFTYPE_NAN_DATA)
+			return -1;
 		break;
 	}
 
@@ -1095,7 +1172,7 @@ void cfg80211_upload_connect_keys(struct wireless_dev *wdev)
 	for (i = 0; i < 4; i++) {
 		if (!wdev->connect_keys->params[i].cipher)
 			continue;
-		if (rdev_add_key(rdev, dev, -1, i, false, NULL,
+		if (rdev_add_key(rdev, wdev, -1, i, false, NULL,
 				 &wdev->connect_keys->params[i])) {
 			netdev_err(dev, "failed to set key %d\n", i);
 			continue;
@@ -1144,7 +1221,15 @@ void cfg80211_process_wdev_events(struct wireless_dev *wdev)
 					       ev->ij.channel);
 			break;
 		case EVENT_STOPPED:
-			cfg80211_leave(wiphy_to_rdev(wdev->wiphy), wdev);
+			/*
+			 * for NAN interfaces cfg80211_leave must be called but
+			 * locking here doesn't allow this.
+			 */
+			if (WARN_ON(wdev->iftype == NL80211_IFTYPE_NAN))
+				break;
+
+			cfg80211_leave_locked(wiphy_to_rdev(wdev->wiphy), wdev,
+					      ev->link_id);
 			break;
 		case EVENT_PORT_AUTHORIZED:
 			__cfg80211_port_authorized(wdev, ev->pa.peer_addr,
@@ -1183,9 +1268,17 @@ int cfg80211_change_iface(struct cfg80211_registered_device *rdev,
 	if (otype == NL80211_IFTYPE_AP_VLAN)
 		return -EOPNOTSUPP;
 
+	/*
+	 * for NAN interfaces cfg80211_leave must be called for leaving,
+	 * but locking here doesn't allow this.
+	 */
+	if (otype == NL80211_IFTYPE_NAN)
+		return -EOPNOTSUPP;
+
 	/* cannot change into P2P device or NAN */
 	if (ntype == NL80211_IFTYPE_P2P_DEVICE ||
-	    ntype == NL80211_IFTYPE_NAN)
+	    ntype == NL80211_IFTYPE_NAN ||
+	    ntype == NL80211_IFTYPE_PD)
 		return -EOPNOTSUPP;
 
 	if (!rdev->ops->change_virtual_intf ||
@@ -1203,28 +1296,7 @@ int cfg80211_change_iface(struct cfg80211_registered_device *rdev,
 		dev->ieee80211_ptr->use_4addr = false;
 		rdev_set_qos_map(rdev, dev, NULL);
 
-		switch (otype) {
-		case NL80211_IFTYPE_AP:
-		case NL80211_IFTYPE_P2P_GO:
-			cfg80211_stop_ap(rdev, dev, -1, true);
-			break;
-		case NL80211_IFTYPE_ADHOC:
-			cfg80211_leave_ibss(rdev, dev, false);
-			break;
-		case NL80211_IFTYPE_STATION:
-		case NL80211_IFTYPE_P2P_CLIENT:
-			cfg80211_disconnect(rdev, dev,
-					    WLAN_REASON_DEAUTH_LEAVING, true);
-			break;
-		case NL80211_IFTYPE_MESH_POINT:
-			/* mesh should be handled? */
-			break;
-		case NL80211_IFTYPE_OCB:
-			cfg80211_leave_ocb(rdev, dev);
-			break;
-		default:
-			break;
-		}
+		cfg80211_leave_locked(rdev, dev->ieee80211_ptr, -1);
 
 		cfg80211_process_rdev_events(rdev);
 		cfg80211_mlme_purge_registrations(dev->ieee80211_ptr);
@@ -1252,6 +1324,7 @@ int cfg80211_change_iface(struct cfg80211_registered_device *rdev,
 		case NL80211_IFTYPE_OCB:
 		case NL80211_IFTYPE_P2P_CLIENT:
 		case NL80211_IFTYPE_ADHOC:
+		case NL80211_IFTYPE_NAN_DATA:
 			dev->priv_flags |= IFF_DONT_BRIDGE;
 			break;
 		case NL80211_IFTYPE_P2P_GO:
@@ -1270,6 +1343,7 @@ int cfg80211_change_iface(struct cfg80211_registered_device *rdev,
 		case NL80211_IFTYPE_P2P_DEVICE:
 		case NL80211_IFTYPE_WDS:
 		case NL80211_IFTYPE_NAN:
+		case NL80211_IFTYPE_PD:
 			WARN_ON(1);
 			break;
 		}
@@ -1582,36 +1656,42 @@ static u32 cfg80211_calculate_bitrate_he(struct rate_info *rate)
 	tmp = result;
 	tmp *= SCALE;
 	do_div(tmp, mcs_divisors[rate->mcs]);
-	result = tmp;
 
 	/* and take NSS, DCM into account */
-	result = (result * rate->nss) / 8;
+	tmp *= rate->nss;
+	do_div(tmp, 8);
 	if (rate->he_dcm)
-		result /= 2;
+		do_div(tmp, 2);
+
+	result = tmp;
 
 	return result / 10000;
 }
 
-static u32 cfg80211_calculate_bitrate_eht(struct rate_info *rate)
+static u32 _cfg80211_calculate_bitrate_eht_uhr(struct rate_info *rate)
 {
 #define SCALE 6144
-	static const u32 mcs_divisors[16] = {
-		102399, /* 16.666666... */
-		 51201, /*  8.333333... */
-		 34134, /*  5.555555... */
-		 25599, /*  4.166666... */
-		 17067, /*  2.777777... */
-		 12801, /*  2.083333... */
-		 11377, /*  1.851725... */
-		 10239, /*  1.666666... */
-		  8532, /*  1.388888... */
-		  7680, /*  1.250000... */
-		  6828, /*  1.111111... */
-		  6144, /*  1.000000... */
-		  5690, /*  0.926106... */
-		  5120, /*  0.833333... */
-		409600, /* 66.666666... */
-		204800, /* 33.333333... */
+	static const u32 mcs_divisors[] = {
+		[ 0] = 102399, /* 16.666666... */
+		[ 1] =  51201, /*  8.333333... */
+		[ 2] =  34134, /*  5.555555... */
+		[ 3] =  25599, /*  4.166666... */
+		[ 4] =  17067, /*  2.777777... */
+		[ 5] =  12801, /*  2.083333... */
+		[ 6] =  11377, /*  1.851725... */
+		[ 7] =  10239, /*  1.666666... */
+		[ 8] =   8532, /*  1.388888... */
+		[ 9] =   7680, /*  1.250000... */
+		[10] =   6828, /*  1.111111... */
+		[11] =   6144, /*  1.000000... */
+		[12] =   5690, /*  0.926106... */
+		[13] =   5120, /*  0.833333... */
+		[14] = 409600, /* 66.666666... */
+		[15] = 204800, /* 33.333333... */
+		[17] =  38400, /*  6.250180... */
+		[19] =  19200, /*  3.125090... */
+		[20] =  15360, /*  2.500000... */
+		[23] =   9600, /*  1.562545... */
 	};
 	static const u32 rates_996[3] =  { 480388888, 453700000, 408333333 };
 	static const u32 rates_484[3] =  { 229411111, 216666666, 195000000 };
@@ -1622,8 +1702,6 @@ static u32 cfg80211_calculate_bitrate_eht(struct rate_info *rate)
 	u64 tmp;
 	u32 result;
 
-	if (WARN_ON_ONCE(rate->mcs > 15))
-		return 0;
 	if (WARN_ON_ONCE(rate->eht_gi > NL80211_RATE_INFO_EHT_GI_3_2))
 		return 0;
 	if (WARN_ON_ONCE(rate->eht_ru_alloc >
@@ -1704,7 +1782,7 @@ static u32 cfg80211_calculate_bitrate_eht(struct rate_info *rate)
 		 rate->eht_ru_alloc == NL80211_RATE_INFO_EHT_RU_ALLOC_26)
 		result = rates_26[rate->eht_gi];
 	else {
-		WARN(1, "invalid EHT MCS: bw:%d, ru:%d\n",
+		WARN(1, "invalid EHT or UHR MCS: bw:%d, ru:%d\n",
 		     rate->bw, rate->eht_ru_alloc);
 		return 0;
 	}
@@ -1718,9 +1796,62 @@ static u32 cfg80211_calculate_bitrate_eht(struct rate_info *rate)
 	tmp *= rate->nss;
 	do_div(tmp, 8);
 
+	/* and handle interference mitigation - 0.9x */
+	if (rate->flags & RATE_INFO_FLAGS_UHR_IM) {
+		if (WARN(rate->nss != 1 || rate->mcs == 15,
+			 "invalid NSS or MCS for UHR IM\n"))
+			return 0;
+		tmp *= 9000;
+		do_div(tmp, 10000);
+	}
+
 	result = tmp;
 
 	return result / 10000;
+}
+
+static u32 cfg80211_calculate_bitrate_eht(struct rate_info *rate)
+{
+	if (WARN_ONCE(rate->mcs > 15, "bad EHT MCS %d\n", rate->mcs))
+		return 0;
+
+	if (WARN_ONCE(rate->flags & (RATE_INFO_FLAGS_UHR_ELR_MCS |
+				     RATE_INFO_FLAGS_UHR_IM),
+		      "bad EHT MCS flags 0x%x\n", rate->flags))
+		return 0;
+
+	return _cfg80211_calculate_bitrate_eht_uhr(rate);
+}
+
+static u32 cfg80211_calculate_bitrate_uhr(struct rate_info *rate)
+{
+	if (rate->flags & RATE_INFO_FLAGS_UHR_ELR_MCS) {
+		WARN_ONCE(rate->eht_gi != NL80211_RATE_INFO_EHT_GI_1_6,
+			  "bad UHR ELR guard interval %d\n",
+			  rate->eht_gi);
+		WARN_ONCE(rate->mcs > 1, "bad UHR ELR MCS %d\n", rate->mcs);
+		WARN_ONCE(rate->nss != 1, "bad UHR ELR NSS %d\n", rate->nss);
+		WARN_ONCE(rate->bw != RATE_INFO_BW_20,
+			  "bad UHR ELR bandwidth %d\n",
+			  rate->bw);
+		WARN_ONCE(rate->flags & RATE_INFO_FLAGS_UHR_IM,
+			  "bad UHR MCS flags 0x%x\n", rate->flags);
+		if (rate->mcs == 0)
+			return 17;
+		return 33;
+	}
+
+	switch (rate->mcs) {
+	case 0 ... 15:
+	case 17:
+	case 19:
+	case 20:
+	case 23:
+		return _cfg80211_calculate_bitrate_eht_uhr(rate);
+	}
+
+	WARN_ONCE(1, "bad UHR MCS %d\n", rate->mcs);
+	return 0;
 }
 
 static u32 cfg80211_calculate_bitrate_s1g(struct rate_info *rate)
@@ -1847,6 +1978,8 @@ u32 cfg80211_calculate_bitrate(struct rate_info *rate)
 		return cfg80211_calculate_bitrate_he(rate);
 	if (rate->flags & RATE_INFO_FLAGS_EHT_MCS)
 		return cfg80211_calculate_bitrate_eht(rate);
+	if (rate->flags & RATE_INFO_FLAGS_UHR_MCS)
+		return cfg80211_calculate_bitrate_uhr(rate);
 	if (rate->flags & RATE_INFO_FLAGS_S1G_MCS)
 		return cfg80211_calculate_bitrate_s1g(rate);
 
@@ -2222,9 +2355,6 @@ bool ieee80211_chandef_to_operating_class(struct cfg80211_chan_def *chandef,
 	case NL80211_CHAN_WIDTH_80P80:
 		vht_opclass = 130;
 		break;
-	case NL80211_CHAN_WIDTH_10:
-	case NL80211_CHAN_WIDTH_5:
-		return false; /* unsupported for now */
 	default:
 		vht_opclass = 0;
 		break;
@@ -2630,7 +2760,7 @@ int cfg80211_get_station(struct net_device *dev, const u8 *mac_addr,
 
 	guard(wiphy)(&rdev->wiphy);
 
-	return rdev_get_station(rdev, dev, mac_addr, sinfo);
+	return rdev_get_station(rdev, wdev, mac_addr, sinfo);
 }
 EXPORT_SYMBOL(cfg80211_get_station);
 
@@ -2674,8 +2804,8 @@ bool cfg80211_does_bw_fit_range(const struct ieee80211_freq_range *freq_range,
 int cfg80211_link_sinfo_alloc_tid_stats(struct link_station_info *link_sinfo,
 					gfp_t gfp)
 {
-	link_sinfo->pertid = kcalloc(IEEE80211_NUM_TIDS + 1,
-				     sizeof(*link_sinfo->pertid), gfp);
+	link_sinfo->pertid = kzalloc_objs(*link_sinfo->pertid,
+					  IEEE80211_NUM_TIDS + 1, gfp);
 	if (!link_sinfo->pertid)
 		return -ENOMEM;
 
@@ -2685,9 +2815,8 @@ EXPORT_SYMBOL(cfg80211_link_sinfo_alloc_tid_stats);
 
 int cfg80211_sinfo_alloc_tid_stats(struct station_info *sinfo, gfp_t gfp)
 {
-	sinfo->pertid = kcalloc(IEEE80211_NUM_TIDS + 1,
-				sizeof(*(sinfo->pertid)),
-				gfp);
+	sinfo->pertid = kzalloc_objs(*(sinfo->pertid), IEEE80211_NUM_TIDS + 1,
+				     gfp);
 	if (!sinfo->pertid)
 		return -ENOMEM;
 
@@ -2942,9 +3071,8 @@ cfg80211_get_iftype_ext_capa(struct wiphy *wiphy, enum nl80211_iftype type)
 }
 EXPORT_SYMBOL(cfg80211_get_iftype_ext_capa);
 
-static bool
-ieee80211_radio_freq_range_valid(const struct wiphy_radio *radio,
-				 u32 freq, u32 width)
+bool ieee80211_radio_freq_range_valid(const struct wiphy_radio *radio,
+				      u32 freq, u32 width)
 {
 	const struct wiphy_radio_freq_range *r;
 	int i;
@@ -2958,6 +3086,7 @@ ieee80211_radio_freq_range_valid(const struct wiphy_radio *radio,
 
 	return false;
 }
+EXPORT_SYMBOL(ieee80211_radio_freq_range_valid);
 
 bool cfg80211_radio_chandef_valid(const struct wiphy_radio *radio,
 				  const struct cfg80211_chan_def *chandef)

@@ -776,7 +776,7 @@ static int snd_emu10k1_verify_controls(struct snd_emu10k1 *emu,
 		if (snd_emu10k1_look_for_ctl(emu, &id) == NULL)
 			return -ENOENT;
 	}
-	gctl = kmalloc(sizeof(*gctl), GFP_KERNEL);
+	gctl = kmalloc_obj(*gctl);
 	if (! gctl)
 		return -ENOMEM;
 	err = 0;
@@ -864,9 +864,9 @@ static int snd_emu10k1_add_controls(struct snd_emu10k1 *emu,
 	struct snd_ctl_elem_value *val;
 	int err = 0;
 
-	val = kmalloc(sizeof(*val), GFP_KERNEL);
-	gctl = kmalloc(sizeof(*gctl), GFP_KERNEL);
-	nctl = kmalloc(sizeof(*nctl), GFP_KERNEL);
+	val = kmalloc_obj(*val);
+	gctl = kmalloc_obj(*gctl);
+	nctl = kmalloc_obj(*nctl);
 	if (!val || !gctl || !nctl) {
 		err = -ENOMEM;
 		goto __error;
@@ -914,7 +914,7 @@ static int snd_emu10k1_add_controls(struct snd_emu10k1 *emu,
 		nctl->max = gctl->max;
 		nctl->translation = gctl->translation;
 		if (ctl == NULL) {
-			ctl = kmalloc(sizeof(*ctl), GFP_KERNEL);
+			ctl = kmalloc_obj(*ctl);
 			if (ctl == NULL) {
 				err = -ENOMEM;
 				kfree(knew.tlv.p);
@@ -980,7 +980,7 @@ static int snd_emu10k1_list_controls(struct snd_emu10k1 *emu,
 	struct snd_emu10k1_fx8010_ctl *ctl;
 	struct snd_ctl_elem_id *id;
 
-	gctl = kmalloc(sizeof(*gctl), GFP_KERNEL);
+	gctl = kmalloc_obj(*gctl);
 	if (! gctl)
 		return -ENOMEM;
 
@@ -990,7 +990,7 @@ static int snd_emu10k1_list_controls(struct snd_emu10k1 *emu,
 		    i < icode->gpr_list_control_count) {
 			memset(gctl, 0, sizeof(*gctl));
 			id = &ctl->kcontrol->id;
-			gctl->id.iface = (__force int)id->iface;
+			gctl->id.iface = id->iface;
 			strscpy(gctl->id.name, id->name, sizeof(gctl->id.name));
 			gctl->id.index = id->index;
 			gctl->id.device = id->device;
@@ -1156,7 +1156,7 @@ static void
 snd_emu10k1_init_mono_control2(struct snd_emu10k1_fx8010_control_gpr *ctl,
 			       const char *name, int gpr, int defval, int defval_hr)
 {
-	ctl->id.iface = (__force int)SNDRV_CTL_ELEM_IFACE_MIXER;
+	ctl->id.iface = SNDRV_CTL_ELEM_IFACE_MIXER;
 	strscpy(ctl->id.name, name);
 	ctl->vcount = ctl->count = 1;
 	if (high_res_gpr_volume) {
@@ -1180,7 +1180,7 @@ static void
 snd_emu10k1_init_stereo_control2(struct snd_emu10k1_fx8010_control_gpr *ctl,
 				 const char *name, int gpr, int defval, int defval_hr)
 {
-	ctl->id.iface = (__force int)SNDRV_CTL_ELEM_IFACE_MIXER;
+	ctl->id.iface = SNDRV_CTL_ELEM_IFACE_MIXER;
 	strscpy(ctl->id.name, name);
 	ctl->vcount = ctl->count = 2;
 	if (high_res_gpr_volume) {
@@ -1205,7 +1205,7 @@ static void
 snd_emu10k1_init_mono_onoff_control(struct snd_emu10k1_fx8010_control_gpr *ctl,
 				    const char *name, int gpr, int defval)
 {
-	ctl->id.iface = (__force int)SNDRV_CTL_ELEM_IFACE_MIXER;
+	ctl->id.iface = SNDRV_CTL_ELEM_IFACE_MIXER;
 	strscpy(ctl->id.name, name);
 	ctl->vcount = ctl->count = 1;
 	ctl->gpr[0] = gpr + 0; ctl->value[0] = defval;
@@ -1218,7 +1218,7 @@ static void
 snd_emu10k1_init_stereo_onoff_control(struct snd_emu10k1_fx8010_control_gpr *ctl,
 				      const char *name, int gpr, int defval)
 {
-	ctl->id.iface = (__force int)SNDRV_CTL_ELEM_IFACE_MIXER;
+	ctl->id.iface = SNDRV_CTL_ELEM_IFACE_MIXER;
 	strscpy(ctl->id.name, name);
 	ctl->vcount = ctl->count = 2;
 	ctl->gpr[0] = gpr + 0; ctl->value[0] = defval;
@@ -1282,16 +1282,14 @@ static int _snd_emu10k1_audigy_init_efx(struct snd_emu10k1 *emu)
 	u32 *gpr_map;
 
 	err = -ENOMEM;
-	icode = kzalloc(sizeof(*icode), GFP_KERNEL);
+	icode = kzalloc_obj(*icode);
 	if (!icode)
 		return err;
 
-	icode->gpr_map = kcalloc(512 + 256 + 256 + 2 * 1024,
-				 sizeof(u_int32_t), GFP_KERNEL);
+	icode->gpr_map = kzalloc_objs(u_int32_t, 512 + 256 + 256 + 2 * 1024);
 	if (!icode->gpr_map)
 		goto __err_gpr;
-	controls = kcalloc(SND_EMU10K1_GPR_CONTROLS,
-			   sizeof(*controls), GFP_KERNEL);
+	controls = kzalloc_objs(*controls, SND_EMU10K1_GPR_CONTROLS);
 	if (!controls)
 		goto __err_ctrls;
 
@@ -1544,7 +1542,7 @@ static int _snd_emu10k1_audigy_init_efx(struct snd_emu10k1 *emu)
 	 *  Process tone control
 	 */
 	ctl = &controls[nctl + 0];
-	ctl->id.iface = (__force int)SNDRV_CTL_ELEM_IFACE_MIXER;
+	ctl->id.iface = SNDRV_CTL_ELEM_IFACE_MIXER;
 	strscpy(ctl->id.name, "Tone Control - Bass");
 	ctl->vcount = 2;
 	ctl->count = 10;
@@ -1553,7 +1551,7 @@ static int _snd_emu10k1_audigy_init_efx(struct snd_emu10k1 *emu)
 	ctl->value[0] = ctl->value[1] = 20;
 	ctl->translation = EMU10K1_GPR_TRANSLATION_BASS;
 	ctl = &controls[nctl + 1];
-	ctl->id.iface = (__force int)SNDRV_CTL_ELEM_IFACE_MIXER;
+	ctl->id.iface = SNDRV_CTL_ELEM_IFACE_MIXER;
 	strscpy(ctl->id.name, "Tone Control - Treble");
 	ctl->vcount = 2;
 	ctl->count = 10;
@@ -1800,22 +1798,20 @@ static int _snd_emu10k1_init_efx(struct snd_emu10k1 *emu)
 	u32 *gpr_map;
 
 	err = -ENOMEM;
-	icode = kzalloc(sizeof(*icode), GFP_KERNEL);
+	icode = kzalloc_obj(*icode);
 	if (!icode)
 		return err;
 
-	icode->gpr_map = kcalloc(256 + 160 + 160 + 2 * 512,
-				 sizeof(u_int32_t), GFP_KERNEL);
+	icode->gpr_map = kzalloc_objs(u_int32_t, 256 + 160 + 160 + 2 * 512);
 	if (!icode->gpr_map)
 		goto __err_gpr;
 
-	controls = kcalloc(SND_EMU10K1_GPR_CONTROLS,
-			   sizeof(struct snd_emu10k1_fx8010_control_gpr),
-			   GFP_KERNEL);
+	controls = kzalloc_objs(struct snd_emu10k1_fx8010_control_gpr,
+				SND_EMU10K1_GPR_CONTROLS);
 	if (!controls)
 		goto __err_ctrls;
 
-	ipcm = kzalloc(sizeof(*ipcm), GFP_KERNEL);
+	ipcm = kzalloc_obj(*ipcm);
 	if (!ipcm)
 		goto __err_ipcm;
 
@@ -2141,7 +2137,7 @@ static int _snd_emu10k1_init_efx(struct snd_emu10k1 *emu)
 	 *  Process tone control
 	 */
 	ctl = &controls[i + 0];
-	ctl->id.iface = (__force int)SNDRV_CTL_ELEM_IFACE_MIXER;
+	ctl->id.iface = SNDRV_CTL_ELEM_IFACE_MIXER;
 	strscpy(ctl->id.name, "Tone Control - Bass");
 	ctl->vcount = 2;
 	ctl->count = 10;
@@ -2151,7 +2147,7 @@ static int _snd_emu10k1_init_efx(struct snd_emu10k1 *emu)
 	ctl->tlv = snd_emu10k1_bass_treble_db_scale;
 	ctl->translation = EMU10K1_GPR_TRANSLATION_BASS;
 	ctl = &controls[i + 1];
-	ctl->id.iface = (__force int)SNDRV_CTL_ELEM_IFACE_MIXER;
+	ctl->id.iface = SNDRV_CTL_ELEM_IFACE_MIXER;
 	strscpy(ctl->id.name, "Tone Control - Treble");
 	ctl->vcount = 2;
 	ctl->count = 10;
@@ -2474,7 +2470,7 @@ static int snd_emu10k1_fx8010_ioctl(struct snd_hwdep * hw, struct file *file, un
 		emu->support_tlv = 1;
 		return put_user(SNDRV_EMU10K1_VERSION, (int __user *)argp);
 	case SNDRV_EMU10K1_IOCTL_INFO:
-		info = kzalloc(sizeof(*info), GFP_KERNEL);
+		info = kzalloc_obj(*info, GFP_KERNEL);
 		if (!info)
 			return -ENOMEM;
 		snd_emu10k1_fx8010_info(emu, info);

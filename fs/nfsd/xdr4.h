@@ -38,7 +38,7 @@
 #define _LINUX_NFSD_XDR4_H
 
 #include "state.h"
-#include "nfsd.h"
+#include "vfs.h"
 
 #define NFSD4_MAX_TAGLEN	128
 #define XDR_LEN(n)                     (((n) + 3) & ~3)
@@ -245,6 +245,8 @@ struct nfsd4_create {
 	int		cr_umask;           /* request */
 	struct nfsd4_change_info  cr_cinfo; /* response */
 	struct nfs4_acl *cr_acl;
+	struct posix_acl *cr_dpacl;
+	struct posix_acl *cr_pacl;
 	struct xdr_netobj cr_label;
 };
 #define cr_datalen	u.link.datalen
@@ -397,6 +399,8 @@ struct nfsd4_open {
 	struct nfs4_ol_stateid *op_stp;	    /* used during processing */
 	struct nfs4_clnt_odstate *op_odstate; /* used during processing */
 	struct nfs4_acl *op_acl;
+	struct posix_acl *op_dpacl;
+	struct posix_acl *op_pacl;
 	struct xdr_netobj op_label;
 	struct svc_rqst *op_rqstp;
 };
@@ -428,6 +432,19 @@ struct nfsd4_read {
 	u32			rd_eof;             /* response */
 };
 
+/*
+ * Cache the case-folding properties of @dir so a batched encoder
+ * (e.g., READDIR) does not re-probe per child. @dir is the
+ * directory being read, held by the request, so it is stable
+ * against rename for the duration of the cache's lifetime.
+ */
+struct nfsd_case_attrs_cache {
+	struct dentry	*dir;
+	bool		valid;
+	bool		insensitive;
+	bool		preserving;
+};
+
 struct nfsd4_readdir {
 	u64		rd_cookie;          /* request */
 	nfs4_verifier	rd_verf;            /* request */
@@ -440,6 +457,7 @@ struct nfsd4_readdir {
 	struct readdir_cd	common;
 	struct xdr_stream	*xdr;
 	int			cookie_offset;
+	struct nfsd_case_attrs_cache rd_case_cache;
 };
 
 struct nfsd4_release_lockowner {
@@ -483,6 +501,8 @@ struct nfsd4_setattr {
 	struct iattr	sa_iattr;           /* request */
 	struct nfs4_acl *sa_acl;
 	struct xdr_netobj sa_label;
+	struct posix_acl *sa_dpacl;
+	struct posix_acl *sa_pacl;
 };
 
 struct nfsd4_setclientid {
@@ -732,31 +752,43 @@ struct nfsd4_copy {
 #define NFSD4_COPY_F_COMMITTED		(3)
 #define NFSD4_COPY_F_COMPLETED		(4)
 #define NFSD4_COPY_F_OFFLOAD_DONE	(5)
+#define NFSD4_COPY_F_CB_ERROR		(6)
 
 	/* response */
 	__be32			nfserr;
 	struct nfsd42_write_res	cp_res;
 	struct knfsd_fh		fh;
 
-	/* offload callback */
-	struct nfsd4_cb_offload	cp_cb_offload;
-
 	struct nfs4_client      *cp_clp;
 
 	struct nfsd_file        *nf_src;
 	struct nfsd_file        *nf_dst;
-
-	copy_stateid_t		cp_stateid;
-
-	struct list_head	copies;
-	struct task_struct	*copy_task;
-	refcount_t		refcount;
-	unsigned int		cp_ttl;
+	bool			attr_update;
 
 	struct nfsd4_ssc_umount_item *ss_nsui;
 	struct nfs_fh		c_fh;
 	nfs4_stateid		stateid;
 	struct nfsd_net		*cp_nn;
+};
+
+/*
+ * Durable state for an async (background) server-side COPY.
+ *
+ * struct nfsd4_copy is transient: it lives in the COMPOUND argument buffer
+ * and is reused once the op returns. An async COPY outlives the COMPOUND
+ * (worker kthread, reaper linkage, CB_OFFLOAD), so its params and result are
+ * snapshotted into the embedded cp_copy and it never points into the request
+ * buffer.
+ */
+struct nfsd4_async_copy {
+	struct nfs4_stid	cp_stid;	/* SC_TYPE_COPY, in cl_stateids */
+	struct nfsd4_copy	cp_copy;	/* operation params + result */
+
+	struct list_head	copies;		/* nfs4_client.async_copies */
+	struct task_struct	*copy_task;
+	refcount_t		refcount;
+	unsigned int		cp_ttl;
+	struct nfsd4_cb_offload	cp_cb_offload;
 };
 
 static inline void nfsd4_copy_set_sync(struct nfsd4_copy *copy, bool sync)
@@ -924,27 +956,6 @@ struct nfsd4_compoundres {
 	struct nfsd4_compound_state	cstate;
 };
 
-static inline bool nfsd4_is_solo_sequence(struct nfsd4_compoundres *resp)
-{
-	struct nfsd4_compoundargs *args = resp->rqstp->rq_argp;
-	return resp->opcnt == 1 && args->ops[0].opnum == OP_SEQUENCE;
-}
-
-/*
- * The session reply cache only needs to cache replies that the client
- * actually asked us to.  But it's almost free for us to cache compounds
- * consisting of only a SEQUENCE op, so we may as well cache those too.
- * Also, the protocol doesn't give us a convenient response in the case
- * of a replay of a solo SEQUENCE op that wasn't cached
- * (RETRY_UNCACHED_REP can only be returned in the second op of a
- * compound).
- */
-static inline bool nfsd4_cache_this(struct nfsd4_compoundres *resp)
-{
-	return (resp->cstate.slot->sl_flags & NFSD4_SLOT_CACHETHIS)
-		|| nfsd4_is_solo_sequence(resp);
-}
-
 static inline bool nfsd4_last_compound_op(struct svc_rqst *rqstp)
 {
 	struct nfsd4_compoundres *resp = rqstp->rq_resp;
@@ -969,6 +980,11 @@ __be32 nfsd4_encode_fattr_to_buf(__be32 **p, int words,
 		struct svc_fh *fhp, struct svc_export *exp,
 		struct dentry *dentry,
 		u32 *bmval, struct svc_rqst *, int ignore_crossmnt);
+u8 *nfsd4_encode_notify_event(struct xdr_stream *xdr, struct nfsd_notify_event *nne,
+			      struct nfs4_delegation *dd, struct nfsd_file *nf,
+			      u32 *notify_mask);
+u8 *nfsd4_encode_dir_attr_change(struct xdr_stream *xdr, struct nfs4_delegation *dp,
+				 struct nfsd_file *nf);
 extern __be32 nfsd4_setclientid(struct svc_rqst *rqstp,
 		struct nfsd4_compound_state *, union nfsd4_op_u *u);
 extern __be32 nfsd4_setclientid_confirm(struct svc_rqst *rqstp,

@@ -305,6 +305,7 @@ snic_add_host(struct Scsi_Host *shost, struct pci_dev *pdev)
 	if (!shost->work_q) {
 		SNIC_HOST_ERR(shost, "Failed to Create ScsiHost wq.\n");
 
+		scsi_remove_host(shost);
 		ret = -ENOMEM;
 	}
 
@@ -818,7 +819,7 @@ snic_global_data_init(void)
 	struct kmem_cache *cachep;
 	ssize_t len = 0;
 
-	snic_glob = kzalloc(sizeof(*snic_glob), GFP_KERNEL);
+	snic_glob = kzalloc_obj(*snic_glob);
 
 	if (!snic_glob) {
 		SNIC_ERR("Failed to allocate Global Context.\n");

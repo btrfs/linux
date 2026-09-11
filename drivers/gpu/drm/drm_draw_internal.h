@@ -7,7 +7,6 @@
 #ifndef __DRM_DRAW_INTERNAL_H__
 #define __DRM_DRAW_INTERNAL_H__
 
-#include <linux/font.h>
 #include <linux/types.h>
 
 struct iosys_map;
@@ -18,11 +17,7 @@ static inline bool drm_draw_is_pixel_fg(const u8 *sbuf8, unsigned int spitch, in
 	return (sbuf8[(y * spitch) + x / 8] & (0x80 >> (x % 8))) != 0;
 }
 
-static inline const u8 *drm_draw_get_char_bitmap(const struct font_desc *font,
-						 char c, size_t font_pitch)
-{
-	return font->data + (c * font->height) * font_pitch;
-}
+bool drm_draw_can_convert_from_xrgb8888(u32 format);
 
 u32 drm_draw_color_from_xrgb8888(u32 color, u32 format);
 

@@ -46,7 +46,6 @@ enum {
 		.io_reg = 0x4 + REG_SIZE * id,		\
 		.intr_cfg_reg = 0x8 + REG_SIZE * id,	\
 		.intr_status_reg = 0xc + REG_SIZE * id,	\
-		.intr_target_reg = 0x8 + REG_SIZE * id,	\
 		.tile = _tile,			\
 		.mux_bit = 2,			\
 		.pull_bit = 0,			\
@@ -73,7 +72,6 @@ enum {
 		.io_reg = 0,				\
 		.intr_cfg_reg = 0,			\
 		.intr_status_reg = 0,			\
-		.intr_target_reg = 0,			\
 		.tile = NORTH,				\
 		.mux_bit = -1,				\
 		.pull_bit = pull,			\
@@ -1435,6 +1433,7 @@ static const struct of_device_id sdm660_pinctrl_of_match[] = {
 	{ .compatible = "qcom,sdm630-pinctrl", },
 	{ },
 };
+MODULE_DEVICE_TABLE(of, sdm660_pinctrl_of_match);
 
 static struct platform_driver sdm660_pinctrl_driver = {
 	.driver = {
@@ -1458,4 +1457,3 @@ module_exit(sdm660_pinctrl_exit);
 
 MODULE_DESCRIPTION("QTI sdm660 pinctrl driver");
 MODULE_LICENSE("GPL v2");
-MODULE_DEVICE_TABLE(of, sdm660_pinctrl_of_match);

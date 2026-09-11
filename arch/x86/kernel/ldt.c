@@ -61,7 +61,7 @@ void load_mm_ldt(struct mm_struct *mm)
 	 */
 
 	if (unlikely(ldt)) {
-		if (static_cpu_has(X86_FEATURE_PTI)) {
+		if (cpu_feature_enabled(X86_FEATURE_PTI)) {
 			if (WARN_ON_ONCE((unsigned long)ldt->slot > 1)) {
 				/*
 				 * Whoops -- either the new LDT isn't mapped
@@ -154,7 +154,7 @@ static struct ldt_struct *alloc_ldt_struct(unsigned int num_entries)
 	if (num_entries > LDT_ENTRIES)
 		return NULL;
 
-	new_ldt = kmalloc(sizeof(struct ldt_struct), GFP_KERNEL_ACCOUNT);
+	new_ldt = kmalloc_obj(struct ldt_struct, GFP_KERNEL_ACCOUNT);
 	if (!new_ldt)
 		return NULL;
 

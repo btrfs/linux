@@ -37,6 +37,13 @@
 		#size-cells = <2>;
 		ranges;
 
+		linux,cma {
+			compatible = "shared-dma-pool";
+			reusable;
+			size = <0x00 0x8000000>;
+			linux,cma-default;
+		};
+
 		ramoops@9c700000 {
 			compatible = "ramoops";
 			reg = <0x00 0x9c700000 0x00 0x00100000>;
@@ -211,11 +218,16 @@
 &cpsw3g {
 	pinctrl-names = "default";
 	pinctrl-0 = <&main_rgmii1_pins_default>;
+	status = "okay";
 };
 
 &cpsw_port1 {
-	phy-mode = "rgmii-rxid";
+	phy-mode = "rgmii-id";
 	phy-handle = <&cpsw3g_phy1>;
+	bootph-all;
+};
+
+&cpsw_mac_syscon {
 	bootph-all;
 };
 
@@ -356,6 +368,10 @@
 		cdns,read-delay = <0>;
 		bootph-all;
 	};
+};
+
+&phy_gmii_sel {
+	bootph-all;
 };
 
 &sdhci0 {

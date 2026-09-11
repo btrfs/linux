@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
 /*
  * Copyright (C) 2017 Intel Deutschland GmbH
- * Copyright (C) 2018-2025 Intel Corporation
+ * Copyright (C) 2018-2026 Intel Corporation
  */
 #include "iwl-trans.h"
 #include "iwl-fh.h"
@@ -99,10 +99,15 @@ int iwl_pcie_init_fw_sec(struct iwl_trans *trans,
 	/* add 2 due to separators */
 	paging_cnt = iwl_pcie_get_num_sections(fw, lmac_cnt + umac_cnt + 2);
 
-	dram->fw = kcalloc(umac_cnt + lmac_cnt, sizeof(*dram->fw), GFP_KERNEL);
+	if (WARN_ON(lmac_cnt > ARRAY_SIZE(ctxt_dram->lmac_img) ||
+		    umac_cnt > ARRAY_SIZE(ctxt_dram->umac_img) ||
+		    paging_cnt > ARRAY_SIZE(ctxt_dram->virtual_img)))
+		return -EINVAL;
+
+	dram->fw = kzalloc_objs(*dram->fw, umac_cnt + lmac_cnt);
 	if (!dram->fw)
 		return -ENOMEM;
-	dram->paging = kcalloc(paging_cnt, sizeof(*dram->paging), GFP_KERNEL);
+	dram->paging = kzalloc_objs(*dram->paging, paging_cnt);
 	if (!dram->paging)
 		return -ENOMEM;
 

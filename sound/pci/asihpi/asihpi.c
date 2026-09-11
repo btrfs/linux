@@ -280,7 +280,7 @@ static void print_hwparams(struct snd_pcm_substream *substream,
 		snd_pcm_format_width(params_format(p)) / 8);
 }
 
-#define INVALID_FORMAT	(__force snd_pcm_format_t)(-1)
+#define INVALID_FORMAT	-1
 
 static const snd_pcm_format_t hpi_to_alsa_formats[] = {
 	INVALID_FORMAT,		/* INVALID */
@@ -975,7 +975,7 @@ static int snd_card_asihpi_playback_open(struct snd_pcm_substream *substream)
 	struct snd_pcm_hardware snd_card_asihpi_playback;
 	int err;
 
-	dpcm = kzalloc(sizeof(*dpcm), GFP_KERNEL);
+	dpcm = kzalloc_obj(*dpcm);
 	if (dpcm == NULL)
 		return -ENOMEM;
 
@@ -1145,7 +1145,7 @@ static int snd_card_asihpi_capture_open(struct snd_pcm_substream *substream)
 	struct snd_pcm_hardware snd_card_asihpi_capture;
 	int err;
 
-	dpcm = kzalloc(sizeof(*dpcm), GFP_KERNEL);
+	dpcm = kzalloc_obj(*dpcm);
 	if (dpcm == NULL)
 		return -ENOMEM;
 
@@ -1362,6 +1362,7 @@ static void asihpi_ctl_init(struct snd_kcontrol_new *snd_control,
 				struct hpi_control *hpi_ctl,
 				char *name)
 {
+	int len;
 	char *dir;
 	memset(snd_control, 0, sizeof(*snd_control));
 	snd_control->name = hpi_ctl->name;
@@ -1384,23 +1385,30 @@ static void asihpi_ctl_init(struct snd_kcontrol_new *snd_control,
 		dir = "Playback "; /* PCM Playback source, or  output node */
 
 	if (hpi_ctl->src_node_type && hpi_ctl->dst_node_type)
-		sprintf(hpi_ctl->name, "%s %d %s %d %s%s",
-			asihpi_src_names[hpi_ctl->src_node_type],
-			hpi_ctl->src_node_index,
-			asihpi_dst_names[hpi_ctl->dst_node_type],
-			hpi_ctl->dst_node_index,
-			dir, name);
+		len = snprintf(hpi_ctl->name, sizeof(hpi_ctl->name),
+			       "%s %d %s %d %s%s",
+			       asihpi_src_names[hpi_ctl->src_node_type],
+			       hpi_ctl->src_node_index,
+			       asihpi_dst_names[hpi_ctl->dst_node_type],
+			       hpi_ctl->dst_node_index,
+			       dir, name);
 	else if (hpi_ctl->dst_node_type) {
-		sprintf(hpi_ctl->name, "%s %d %s%s",
-		asihpi_dst_names[hpi_ctl->dst_node_type],
-		hpi_ctl->dst_node_index,
-		dir, name);
+		len = snprintf(hpi_ctl->name, sizeof(hpi_ctl->name),
+			       "%s %d %s%s",
+			       asihpi_dst_names[hpi_ctl->dst_node_type],
+			       hpi_ctl->dst_node_index,
+			       dir, name);
 	} else {
-		sprintf(hpi_ctl->name, "%s %d %s%s",
-		asihpi_src_names[hpi_ctl->src_node_type],
-		hpi_ctl->src_node_index,
-		dir, name);
+		len = snprintf(hpi_ctl->name, sizeof(hpi_ctl->name),
+			       "%s %d %s%s",
+			       asihpi_src_names[hpi_ctl->src_node_type],
+			       hpi_ctl->src_node_index,
+			       dir, name);
 	}
+
+	if (len >= sizeof(hpi_ctl->name))
+		pr_err("asihpi: truncated control name: %s\n",
+		       hpi_ctl->name);
 }
 
 /*------------------------------------------------------------
@@ -2925,13 +2933,16 @@ static void snd_asihpi_remove(struct pci_dev *pci_dev)
 }
 
 static const struct pci_device_id asihpi_pci_tbl[] = {
-	{HPI_PCI_VENDOR_ID_TI, HPI_PCI_DEV_ID_DSP6205,
-		HPI_PCI_VENDOR_ID_AUDIOSCIENCE, PCI_ANY_ID, 0, 0,
-		(kernel_ulong_t)HPI_6205},
-	{HPI_PCI_VENDOR_ID_TI, HPI_PCI_DEV_ID_PCI2040,
-		HPI_PCI_VENDOR_ID_AUDIOSCIENCE, PCI_ANY_ID, 0, 0,
-		(kernel_ulong_t)HPI_6000},
-	{0,}
+	{
+		PCI_DEVICE_SUB(HPI_PCI_VENDOR_ID_TI, HPI_PCI_DEV_ID_DSP6205,
+			       HPI_PCI_VENDOR_ID_AUDIOSCIENCE, PCI_ANY_ID),
+		.driver_data = (kernel_ulong_t)HPI_6205,
+	}, {
+		PCI_DEVICE_SUB(HPI_PCI_VENDOR_ID_TI, HPI_PCI_DEV_ID_PCI2040,
+			       HPI_PCI_VENDOR_ID_AUDIOSCIENCE, PCI_ANY_ID),
+		.driver_data = (kernel_ulong_t)HPI_6000,
+	},
+	{}
 };
 MODULE_DEVICE_TABLE(pci, asihpi_pci_tbl);
 

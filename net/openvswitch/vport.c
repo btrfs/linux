@@ -34,8 +34,7 @@ static struct hlist_head *dev_table;
  */
 int ovs_vport_init(void)
 {
-	dev_table = kcalloc(VPORT_HASH_BUCKETS, sizeof(struct hlist_head),
-			    GFP_KERNEL);
+	dev_table = kzalloc_objs(struct hlist_head, VPORT_HASH_BUCKETS);
 	if (!dev_table)
 		return -ENOMEM;
 
@@ -58,7 +57,7 @@ static struct hlist_head *hash_bucket(const struct net *net, const char *name)
 	return &dev_table[hash & (VPORT_HASH_BUCKETS - 1)];
 }
 
-int __ovs_vport_ops_register(struct vport_ops *ops)
+int ovs_vport_ops_register(struct vport_ops *ops)
 {
 	int err = -EEXIST;
 	struct vport_ops *o;
@@ -74,7 +73,6 @@ errout:
 	ovs_unlock();
 	return err;
 }
-EXPORT_SYMBOL_GPL(__ovs_vport_ops_register);
 
 void ovs_vport_ops_unregister(struct vport_ops *ops)
 {
@@ -82,7 +80,6 @@ void ovs_vport_ops_unregister(struct vport_ops *ops)
 	list_del(&ops->list);
 	ovs_unlock();
 }
-EXPORT_SYMBOL_GPL(ovs_vport_ops_unregister);
 
 /**
  *	ovs_vport_locate - find a port that has already been created
@@ -160,7 +157,6 @@ err_kfree_vport:
 	kfree(vport);
 	return ERR_PTR(err);
 }
-EXPORT_SYMBOL_GPL(ovs_vport_alloc);
 
 /**
  *	ovs_vport_free - uninitialize and free vport
@@ -181,7 +177,6 @@ void ovs_vport_free(struct vport *vport)
 	free_percpu(vport->upcall_stats);
 	kfree(vport);
 }
-EXPORT_SYMBOL_GPL(ovs_vport_free);
 
 static struct vport_ops *ovs_vport_lookup(const struct vport_parms *parms)
 {
@@ -211,14 +206,9 @@ struct vport *ovs_vport_add(const struct vport_parms *parms)
 	if (ops) {
 		struct hlist_head *bucket;
 
-		if (!try_module_get(ops->owner))
-			return ERR_PTR(-EAFNOSUPPORT);
-
 		vport = ops->create(parms);
-		if (IS_ERR(vport)) {
-			module_put(ops->owner);
+		if (IS_ERR(vport))
 			return vport;
-		}
 
 		bucket = hash_bucket(ovs_dp_get_net(vport->dp),
 				     ovs_vport_name(vport));
@@ -226,34 +216,7 @@ struct vport *ovs_vport_add(const struct vport_parms *parms)
 		return vport;
 	}
 
-	/* Unlock to attempt module load and return -EAGAIN if load
-	 * was successful as we need to restart the port addition
-	 * workflow.
-	 */
-	ovs_unlock();
-	request_module("vport-type-%d", parms->type);
-	ovs_lock();
-
-	if (!ovs_vport_lookup(parms))
-		return ERR_PTR(-EAFNOSUPPORT);
-	else
-		return ERR_PTR(-EAGAIN);
-}
-
-/**
- *	ovs_vport_set_options - modify existing vport device (for kernel callers)
- *
- * @vport: vport to modify.
- * @options: New configuration.
- *
- * Modifies an existing device with the specified configuration (which is
- * dependent on device type).  ovs_mutex must be held.
- */
-int ovs_vport_set_options(struct vport *vport, struct nlattr *options)
-{
-	if (!vport->ops->set_options)
-		return -EOPNOTSUPP;
-	return vport->ops->set_options(vport, options);
+	return ERR_PTR(-EAFNOSUPPORT);
 }
 
 /**
@@ -267,7 +230,6 @@ int ovs_vport_set_options(struct vport *vport, struct nlattr *options)
 void ovs_vport_del(struct vport *vport)
 {
 	hlist_del_rcu(&vport->hash_node);
-	module_put(vport->ops->owner);
 	vport->ops->destroy(vport);
 }
 
@@ -310,22 +272,23 @@ void ovs_vport_get_stats(struct vport *vport, struct ovs_vport_stats *stats)
  */
 int ovs_vport_get_upcall_stats(struct vport *vport, struct sk_buff *skb)
 {
+	u64 tx_success = 0, tx_fail = 0;
 	struct nlattr *nla;
 	int i;
 
-	__u64 tx_success = 0;
-	__u64 tx_fail = 0;
-
 	for_each_possible_cpu(i) {
 		const struct vport_upcall_stats_percpu *stats;
+		u64 n_success, n_fail;
 		unsigned int start;
 
 		stats = per_cpu_ptr(vport->upcall_stats, i);
 		do {
 			start = u64_stats_fetch_begin(&stats->syncp);
-			tx_success += u64_stats_read(&stats->n_success);
-			tx_fail += u64_stats_read(&stats->n_fail);
+			n_success = u64_stats_read(&stats->n_success);
+			n_fail = u64_stats_read(&stats->n_fail);
 		} while (u64_stats_fetch_retry(&stats->syncp, start));
+		tx_success += n_success;
+		tx_fail += n_fail;
 	}
 
 	nla = nla_nest_start_noflag(skb, OVS_VPORT_ATTR_UPCALL_STATS);
@@ -349,44 +312,6 @@ int ovs_vport_get_upcall_stats(struct vport *vport, struct sk_buff *skb)
 }
 
 /**
- *	ovs_vport_get_options - retrieve device options
- *
- * @vport: vport from which to retrieve the options.
- * @skb: sk_buff where options should be appended.
- *
- * Retrieves the configuration of the given device, appending an
- * %OVS_VPORT_ATTR_OPTIONS attribute that in turn contains nested
- * vport-specific attributes to @skb.
- *
- * Returns 0 if successful, -EMSGSIZE if @skb has insufficient room, or another
- * negative error code if a real error occurred.  If an error occurs, @skb is
- * left unmodified.
- *
- * Must be called with ovs_mutex or rcu_read_lock.
- */
-int ovs_vport_get_options(const struct vport *vport, struct sk_buff *skb)
-{
-	struct nlattr *nla;
-	int err;
-
-	if (!vport->ops->get_options)
-		return 0;
-
-	nla = nla_nest_start_noflag(skb, OVS_VPORT_ATTR_OPTIONS);
-	if (!nla)
-		return -EMSGSIZE;
-
-	err = vport->ops->get_options(vport, skb);
-	if (err) {
-		nla_nest_cancel(skb, nla);
-		return err;
-	}
-
-	nla_nest_end(skb, nla);
-	return 0;
-}
-
-/**
  *	ovs_vport_set_upcall_portids - set upcall portids of @vport.
  *
  * @vport: vport to modify.
@@ -404,6 +329,9 @@ int ovs_vport_set_upcall_portids(struct vport *vport, const struct nlattr *ids)
 	struct vport_portids *old, *vport_portids;
 
 	if (!nla_len(ids) || nla_len(ids) % sizeof(u32))
+		return -EINVAL;
+
+	if (nla_len(ids) / sizeof(u32) > nr_cpu_ids)
 		return -EINVAL;
 
 	old = ovsl_dereference(vport->upcall_portids);
@@ -499,7 +427,7 @@ int ovs_vport_receive(struct vport *vport, struct sk_buff *skb,
 
 	OVS_CB(skb)->input_vport = vport;
 	OVS_CB(skb)->mru = 0;
-	OVS_CB(skb)->cutlen = 0;
+	OVS_CB(skb)->cutlen = U32_MAX;
 	OVS_CB(skb)->probability = 0;
 	OVS_CB(skb)->upcall_pid = 0;
 	if (unlikely(dev_net(skb->dev) != ovs_dp_get_net(vport->dp))) {

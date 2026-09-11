@@ -600,13 +600,12 @@ static irqreturn_t sq_spi_tx_handler(int irq, void *priv)
 
 static int synquacer_spi_probe(struct platform_device *pdev)
 {
-	struct device_node *np = pdev->dev.of_node;
 	struct spi_controller *host;
 	struct synquacer_spi *sspi;
 	int ret;
 	int rx_irq, tx_irq;
 
-	host = spi_alloc_host(&pdev->dev, sizeof(*sspi));
+	host = devm_spi_alloc_host(&pdev->dev, sizeof(*sspi));
 	if (!host)
 		return -ENOMEM;
 
@@ -618,10 +617,8 @@ static int synquacer_spi_probe(struct platform_device *pdev)
 	init_completion(&sspi->transfer_done);
 
 	sspi->regs = devm_platform_ioremap_resource(pdev, 0);
-	if (IS_ERR(sspi->regs)) {
-		ret = PTR_ERR(sspi->regs);
-		goto put_spi;
-	}
+	if (IS_ERR(sspi->regs))
+		return PTR_ERR(sspi->regs);
 
 	sspi->clk_src_type = SYNQUACER_HSSPI_CLOCK_SRC_IHCLK; /* Default */
 	device_property_read_u32(&pdev->dev, "socionext,ihclk-rate",
@@ -638,21 +635,19 @@ static int synquacer_spi_probe(struct platform_device *pdev)
 			sspi->clk = devm_clk_get(sspi->dev, "iPCLK");
 		} else {
 			dev_err(&pdev->dev, "specified wrong clock source\n");
-			ret = -EINVAL;
-			goto put_spi;
+			return -EINVAL;
 		}
 
 		if (IS_ERR(sspi->clk)) {
-			ret = dev_err_probe(&pdev->dev, PTR_ERR(sspi->clk),
-					    "clock not found\n");
-			goto put_spi;
+			return dev_err_probe(&pdev->dev, PTR_ERR(sspi->clk),
+					     "clock not found\n");
 		}
 
 		ret = clk_prepare_enable(sspi->clk);
 		if (ret) {
 			dev_err(&pdev->dev, "failed to enable clock (%d)\n",
 				ret);
-			goto put_spi;
+			return ret;
 		}
 
 		host->max_speed_hz = clk_get_rate(sspi->clk);
@@ -699,8 +694,6 @@ static int synquacer_spi_probe(struct platform_device *pdev)
 		goto disable_clk;
 	}
 
-	host->dev.of_node = np;
-	host->dev.fwnode = pdev->dev.fwnode;
 	host->auto_runtime_pm = true;
 	host->bus_num = pdev->id;
 
@@ -719,7 +712,7 @@ static int synquacer_spi_probe(struct platform_device *pdev)
 	pm_runtime_set_active(sspi->dev);
 	pm_runtime_enable(sspi->dev);
 
-	ret = devm_spi_register_controller(sspi->dev, host);
+	ret = spi_register_controller(host);
 	if (ret)
 		goto disable_pm;
 
@@ -729,8 +722,6 @@ disable_pm:
 	pm_runtime_disable(sspi->dev);
 disable_clk:
 	clk_disable_unprepare(sspi->clk);
-put_spi:
-	spi_controller_put(host);
 
 	return ret;
 }
@@ -740,12 +731,14 @@ static void synquacer_spi_remove(struct platform_device *pdev)
 	struct spi_controller *host = platform_get_drvdata(pdev);
 	struct synquacer_spi *sspi = spi_controller_get_devdata(host);
 
+	spi_unregister_controller(host);
+
 	pm_runtime_disable(sspi->dev);
 
 	clk_disable_unprepare(sspi->clk);
 }
 
-static int __maybe_unused synquacer_spi_suspend(struct device *dev)
+static int synquacer_spi_suspend(struct device *dev)
 {
 	struct spi_controller *host = dev_get_drvdata(dev);
 	struct synquacer_spi *sspi = spi_controller_get_devdata(host);
@@ -761,7 +754,7 @@ static int __maybe_unused synquacer_spi_suspend(struct device *dev)
 	return ret;
 }
 
-static int __maybe_unused synquacer_spi_resume(struct device *dev)
+static int synquacer_spi_resume(struct device *dev)
 {
 	struct spi_controller *host = dev_get_drvdata(dev);
 	struct synquacer_spi *sspi = spi_controller_get_devdata(host);
@@ -793,8 +786,8 @@ static int __maybe_unused synquacer_spi_resume(struct device *dev)
 	return ret;
 }
 
-static SIMPLE_DEV_PM_OPS(synquacer_spi_pm_ops, synquacer_spi_suspend,
-			 synquacer_spi_resume);
+static DEFINE_SIMPLE_DEV_PM_OPS(synquacer_spi_pm_ops, synquacer_spi_suspend,
+				synquacer_spi_resume);
 
 static const struct of_device_id synquacer_spi_of_match[] = {
 	{.compatible = "socionext,synquacer-spi"},
@@ -813,7 +806,7 @@ MODULE_DEVICE_TABLE(acpi, synquacer_hsspi_acpi_ids);
 static struct platform_driver synquacer_spi_driver = {
 	.driver = {
 		.name = "synquacer-spi",
-		.pm = &synquacer_spi_pm_ops,
+		.pm = pm_sleep_ptr(&synquacer_spi_pm_ops),
 		.of_match_table = synquacer_spi_of_match,
 		.acpi_match_table = ACPI_PTR(synquacer_hsspi_acpi_ids),
 	},

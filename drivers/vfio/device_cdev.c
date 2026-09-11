@@ -11,6 +11,10 @@ static dev_t device_devt;
 
 void vfio_init_device_cdev(struct vfio_device *device)
 {
+	if (vfio_device_is_noiommu(device) &&
+	    !IS_ENABLED(CONFIG_IOMMUFD_NOIOMMU))
+		return;
+
 	device->device.devt = MKDEV(MAJOR(device_devt), device->index);
 	cdev_init(&device->cdev, &vfio_device_fops);
 	device->cdev.owner = THIS_MODULE;
@@ -30,6 +34,11 @@ int vfio_device_fops_cdev_open(struct inode *inode, struct file *filep)
 	/* Paired with the put in vfio_device_fops_release() */
 	if (!vfio_device_try_get_registration(device))
 		return -ENODEV;
+
+	if (vfio_device_is_noiommu(device) && !capable(CAP_SYS_RAWIO)) {
+		ret = -EPERM;
+		goto err_put_registration;
+	}
 
 	df = vfio_allocate_device_file(device);
 	if (IS_ERR(df)) {
@@ -99,7 +108,7 @@ long vfio_df_ioctl_bind_iommufd(struct vfio_device_file *df,
 		return ret;
 	if (user_size < minsz)
 		return -EINVAL;
-	ret = copy_struct_from_user(&bind, minsz, arg, user_size);
+	ret = copy_struct_from_user(&bind, sizeof(bind), arg, user_size);
 	if (ret)
 		return ret;
 
@@ -293,14 +302,8 @@ int vfio_df_ioctl_detach_pt(struct vfio_device_file *df,
 	return 0;
 }
 
-static char *vfio_device_devnode(const struct device *dev, umode_t *mode)
+int vfio_cdev_init(void)
 {
-	return kasprintf(GFP_KERNEL, "vfio/devices/%s", dev_name(dev));
-}
-
-int vfio_cdev_init(struct class *device_class)
-{
-	device_class->devnode = vfio_device_devnode;
 	return alloc_chrdev_region(&device_devt, 0,
 				   MINORMASK + 1, "vfio-dev");
 }

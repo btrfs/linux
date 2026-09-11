@@ -24,11 +24,13 @@
 #ifndef __AMDGPU_VRAM_MGR_H__
 #define __AMDGPU_VRAM_MGR_H__
 
-#include <drm/drm_buddy.h>
+#include <linux/gpu_buddy.h>
+
+struct dmem_cgroup_region;
 
 struct amdgpu_vram_mgr {
 	struct ttm_resource_manager manager;
-	struct drm_buddy mm;
+	struct gpu_buddy mm;
 	/* protects access to buffer objects */
 	struct mutex lock;
 	struct list_head reservations_pending;
@@ -36,6 +38,7 @@ struct amdgpu_vram_mgr {
 	atomic64_t vis_usage;
 	u64 default_page_size;
 	struct list_head allocated_vres_list;
+	struct dmem_cgroup_region *cg_region;
 };
 
 struct amdgpu_vres_task {
@@ -57,19 +60,19 @@ struct amdgpu_vram_mgr_resource {
 	struct amdgpu_vres_task task;
 };
 
-static inline u64 amdgpu_vram_mgr_block_start(struct drm_buddy_block *block)
+static inline u64 amdgpu_vram_mgr_block_start(struct gpu_buddy_block *block)
 {
-	return drm_buddy_block_offset(block);
+	return gpu_buddy_block_offset(block);
 }
 
-static inline u64 amdgpu_vram_mgr_block_size(struct drm_buddy_block *block)
+static inline u64 amdgpu_vram_mgr_block_size(struct gpu_buddy_block *block)
 {
-	return (u64)PAGE_SIZE << drm_buddy_block_order(block);
+	return (u64)PAGE_SIZE << gpu_buddy_block_order(block);
 }
 
-static inline bool amdgpu_vram_mgr_is_cleared(struct drm_buddy_block *block)
+static inline bool amdgpu_vram_mgr_is_cleared(struct gpu_buddy_block *block)
 {
-	return drm_buddy_block_is_clear(block);
+	return gpu_buddy_block_is_clear(block);
 }
 
 static inline struct amdgpu_vram_mgr_resource *
@@ -82,8 +85,8 @@ static inline void amdgpu_vram_mgr_set_cleared(struct ttm_resource *res)
 {
 	struct amdgpu_vram_mgr_resource *ares = to_amdgpu_vram_mgr_resource(res);
 
-	WARN_ON(ares->flags & DRM_BUDDY_CLEARED);
-	ares->flags |= DRM_BUDDY_CLEARED;
+	WARN_ON(ares->flags & GPU_BUDDY_CLEARED);
+	ares->flags |= GPU_BUDDY_CLEARED;
 }
 
 int amdgpu_vram_mgr_query_address_block_info(struct amdgpu_vram_mgr *mgr,

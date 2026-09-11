@@ -9,7 +9,11 @@
 #include <linux/irqdesc.h>
 #include <linux/kernel_stat.h>
 #include <linux/pm_runtime.h>
+#include <linux/rcuref.h>
 #include <linux/sched/clock.h>
+
+#include "debugfs.h"
+#include "proc.h"
 
 #ifdef CONFIG_SPARSE_IRQ
 # define MAX_SPARSE_IRQS	INT_MAX
@@ -21,6 +25,7 @@
 
 extern bool noirqdebug;
 extern int irq_poll_cpu;
+extern unsigned int total_nr_irqs;
 
 extern struct irqaction chained_action;
 
@@ -100,9 +105,23 @@ extern void unmask_irq(struct irq_desc *desc);
 extern void unmask_threaded_irq(struct irq_desc *desc);
 
 #ifdef CONFIG_SPARSE_IRQ
-static inline void irq_mark_irq(unsigned int irq) { }
+static __always_inline void irq_mark_irq(unsigned int irq) { }
+void irq_desc_free_rcu(struct irq_desc *desc);
+
+static __always_inline bool irq_desc_get_ref(struct irq_desc *desc)
+{
+	return rcuref_get(&desc->refcnt);
+}
+
+static __always_inline void irq_desc_put_ref(struct irq_desc *desc)
+{
+	if (rcuref_put(&desc->refcnt))
+		irq_desc_free_rcu(desc);
+}
 #else
 extern void irq_mark_irq(unsigned int irq);
+static __always_inline bool irq_desc_get_ref(struct irq_desc *desc) { return true; }
+static __always_inline void irq_desc_put_ref(struct irq_desc *desc) { }
 #endif
 
 irqreturn_t __handle_irq_event_percpu(struct irq_desc *desc);
@@ -122,6 +141,7 @@ extern void register_irq_proc(unsigned int irq, struct irq_desc *desc);
 extern void unregister_irq_proc(unsigned int irq, struct irq_desc *desc);
 extern void register_handler_proc(unsigned int irq, struct irqaction *action);
 extern void unregister_handler_proc(unsigned int irq, struct irqaction *action);
+void irq_proc_update_valid(struct irq_desc *desc);
 #else
 static inline void register_irq_proc(unsigned int irq, struct irq_desc *desc) { }
 static inline void unregister_irq_proc(unsigned int irq, struct irq_desc *desc) { }
@@ -129,19 +149,22 @@ static inline void register_handler_proc(unsigned int irq,
 					 struct irqaction *action) { }
 static inline void unregister_handler_proc(unsigned int irq,
 					   struct irqaction *action) { }
+static inline void irq_proc_update_valid(struct irq_desc *desc) { }
 #endif
+
+struct irq_desc *irq_find_desc_at_or_after(unsigned int offset);
 
 extern bool irq_can_set_affinity_usr(unsigned int irq);
 
 extern int irq_do_set_affinity(struct irq_data *data,
 			       const struct cpumask *dest, bool force);
+extern void irq_affinity_schedule_notify_work(struct irq_desc *desc);
 
 #ifdef CONFIG_SMP
 extern int irq_setup_affinity(struct irq_desc *desc);
 #else
 static inline int irq_setup_affinity(struct irq_desc *desc) { return 0; }
 #endif
-
 
 #define for_each_action_of_desc(desc, act)			\
 	for (act = desc->action; act; act = act->next)
@@ -171,7 +194,7 @@ void __irq_put_desc_unlock(struct irq_desc *desc, unsigned long flags, bool bus)
 
 __DEFINE_CLASS_IS_CONDITIONAL(irqdesc_lock, true);
 __DEFINE_UNLOCK_GUARD(irqdesc_lock, struct irq_desc,
-		      __irq_put_desc_unlock(_T->lock, _T->flags, _T->bus),
+		      if (_T->lock) __irq_put_desc_unlock(_T->lock, _T->flags, _T->bus),
 		      unsigned long flags; bool bus);
 
 static inline class_irqdesc_lock_t class_irqdesc_lock_constructor(unsigned int irq, bool bus,
@@ -288,116 +311,6 @@ static inline void
 irq_pm_remove_action(struct irq_desc *desc, struct irqaction *action) { }
 #endif
 
-#ifdef CONFIG_IRQ_TIMINGS
-
-#define IRQ_TIMINGS_SHIFT	5
-#define IRQ_TIMINGS_SIZE	(1 << IRQ_TIMINGS_SHIFT)
-#define IRQ_TIMINGS_MASK	(IRQ_TIMINGS_SIZE - 1)
-
-/**
- * struct irq_timings - irq timings storing structure
- * @values: a circular buffer of u64 encoded <timestamp,irq> values
- * @count: the number of elements in the array
- */
-struct irq_timings {
-	u64	values[IRQ_TIMINGS_SIZE];
-	int	count;
-};
-
-DECLARE_PER_CPU(struct irq_timings, irq_timings);
-
-extern void irq_timings_free(int irq);
-extern int irq_timings_alloc(int irq);
-
-static inline void irq_remove_timings(struct irq_desc *desc)
-{
-	desc->istate &= ~IRQS_TIMINGS;
-
-	irq_timings_free(irq_desc_get_irq(desc));
-}
-
-static inline void irq_setup_timings(struct irq_desc *desc, struct irqaction *act)
-{
-	int irq = irq_desc_get_irq(desc);
-	int ret;
-
-	/*
-	 * We don't need the measurement because the idle code already
-	 * knows the next expiry event.
-	 */
-	if (act->flags & __IRQF_TIMER)
-		return;
-
-	/*
-	 * In case the timing allocation fails, we just want to warn,
-	 * not fail, so letting the system boot anyway.
-	 */
-	ret = irq_timings_alloc(irq);
-	if (ret) {
-		pr_warn("Failed to allocate irq timing stats for irq%d (%d)",
-			irq, ret);
-		return;
-	}
-
-	desc->istate |= IRQS_TIMINGS;
-}
-
-extern void irq_timings_enable(void);
-extern void irq_timings_disable(void);
-
-DECLARE_STATIC_KEY_FALSE(irq_timing_enabled);
-
-/*
- * The interrupt number and the timestamp are encoded into a single
- * u64 variable to optimize the size.
- * 48 bit time stamp and 16 bit IRQ number is way sufficient.
- *  Who cares an IRQ after 78 hours of idle time?
- */
-static inline u64 irq_timing_encode(u64 timestamp, int irq)
-{
-	return (timestamp << 16) | irq;
-}
-
-static inline int irq_timing_decode(u64 value, u64 *timestamp)
-{
-	*timestamp = value >> 16;
-	return value & U16_MAX;
-}
-
-static __always_inline void irq_timings_push(u64 ts, int irq)
-{
-	struct irq_timings *timings = this_cpu_ptr(&irq_timings);
-
-	timings->values[timings->count & IRQ_TIMINGS_MASK] =
-		irq_timing_encode(ts, irq);
-
-	timings->count++;
-}
-
-/*
- * The function record_irq_time is only called in one place in the
- * interrupts handler. We want this function always inline so the code
- * inside is embedded in the function and the static key branching
- * code can act at the higher level. Without the explicit
- * __always_inline we can end up with a function call and a small
- * overhead in the hotpath for nothing.
- */
-static __always_inline void record_irq_time(struct irq_desc *desc)
-{
-	if (!static_branch_likely(&irq_timing_enabled))
-		return;
-
-	if (desc->istate & IRQS_TIMINGS)
-		irq_timings_push(local_clock(), irq_desc_get_irq(desc));
-}
-#else
-static inline void irq_remove_timings(struct irq_desc *desc) {}
-static inline void irq_setup_timings(struct irq_desc *desc,
-				     struct irqaction *act) {};
-static inline void record_irq_time(struct irq_desc *desc) {}
-#endif /* CONFIG_IRQ_TIMINGS */
-
-
 #ifdef CONFIG_GENERIC_IRQ_CHIP
 void irq_init_generic_chip(struct irq_chip_generic *gc, const char *name,
 			   int num_ct, unsigned int irq_base,
@@ -482,42 +395,3 @@ static inline struct irq_data *irqd_get_parent_data(struct irq_data *irqd)
 	return NULL;
 #endif
 }
-
-#ifdef CONFIG_GENERIC_IRQ_DEBUGFS
-#include <linux/debugfs.h>
-
-struct irq_bit_descr {
-	unsigned int	mask;
-	char		*name;
-};
-
-#define BIT_MASK_DESCR(m)	{ .mask = m, .name = #m }
-
-void irq_debug_show_bits(struct seq_file *m, int ind, unsigned int state,
-			 const struct irq_bit_descr *sd, int size);
-
-void irq_add_debugfs_entry(unsigned int irq, struct irq_desc *desc);
-static inline void irq_remove_debugfs_entry(struct irq_desc *desc)
-{
-	debugfs_remove(desc->debugfs_file);
-	kfree(desc->dev_name);
-}
-void irq_debugfs_copy_devname(int irq, struct device *dev);
-# ifdef CONFIG_IRQ_DOMAIN
-void irq_domain_debugfs_init(struct dentry *root);
-# else
-static inline void irq_domain_debugfs_init(struct dentry *root)
-{
-}
-# endif
-#else /* CONFIG_GENERIC_IRQ_DEBUGFS */
-static inline void irq_add_debugfs_entry(unsigned int irq, struct irq_desc *d)
-{
-}
-static inline void irq_remove_debugfs_entry(struct irq_desc *d)
-{
-}
-static inline void irq_debugfs_copy_devname(int irq, struct device *dev)
-{
-}
-#endif /* CONFIG_GENERIC_IRQ_DEBUGFS */
