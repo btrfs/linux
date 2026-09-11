@@ -677,9 +677,6 @@ static irqreturn_t as73211_trigger_handler(int irq __always_unused, void *p)
 				(char *)&scan.chan[0], 3 * sizeof(scan.chan[0]));
 		if (ret < 0)
 			goto done;
-
-		/* Avoid pushing uninitialized data */
-		scan.chan[3] = 0;
 	}
 
 	if (data_result) {
@@ -878,8 +875,8 @@ static const struct of_device_id as73211_of_match[] = {
 MODULE_DEVICE_TABLE(of, as73211_of_match);
 
 static const struct i2c_device_id as73211_id[] = {
-	{ "as73211", (kernel_ulong_t)&as73211_spec },
-	{ "as7331", (kernel_ulong_t)&as7331_spec },
+	{ .name = "as73211", .driver_data = (kernel_ulong_t)&as73211_spec },
+	{ .name = "as7331", .driver_data = (kernel_ulong_t)&as7331_spec },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, as73211_id);

@@ -110,8 +110,6 @@ struct channel_space {
 	unsigned long		*guaranteed;
 };
 
-DEFINE_CORESIGHT_DEVLIST(stm_devs, "stm");
-
 /**
  * struct stm_drvdata - specifics associated to an STM component
  * @base:		memory mapped base address for this component.
@@ -834,7 +832,7 @@ static int __stm_probe(struct device *dev, struct resource *res)
 	struct resource ch_res;
 	struct coresight_desc desc = { 0 };
 
-	desc.name = coresight_alloc_device_name(&stm_devs, dev);
+	desc.name = coresight_alloc_device_name("stm", dev);
 	if (!desc.name)
 		return -ENOMEM;
 
@@ -1052,7 +1050,7 @@ static struct platform_driver stm_platform_driver = {
 
 static int __init stm_init(void)
 {
-	return coresight_init_driver("stm", &stm_driver, &stm_platform_driver, THIS_MODULE);
+	return coresight_init_driver("stm", &stm_driver, &stm_platform_driver);
 }
 
 static void __exit stm_exit(void)

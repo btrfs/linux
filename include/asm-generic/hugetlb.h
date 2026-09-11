@@ -37,24 +37,24 @@ static inline pte_t huge_pte_modify(pte_t pte, pgprot_t newprot)
 	return pte_modify(pte, newprot);
 }
 
-#ifndef __HAVE_ARCH_HUGE_PTE_MKUFFD_WP
-static inline pte_t huge_pte_mkuffd_wp(pte_t pte)
+#ifndef __HAVE_ARCH_HUGE_PTE_MKUFFD
+static inline pte_t huge_pte_mkuffd(pte_t pte)
 {
-	return huge_pte_wrprotect(pte_mkuffd_wp(pte));
+	return huge_pte_wrprotect(pte_mkuffd(pte));
 }
 #endif
 
-#ifndef __HAVE_ARCH_HUGE_PTE_CLEAR_UFFD_WP
-static inline pte_t huge_pte_clear_uffd_wp(pte_t pte)
+#ifndef __HAVE_ARCH_HUGE_PTE_CLEAR_UFFD
+static inline pte_t huge_pte_clear_uffd(pte_t pte)
 {
-	return pte_clear_uffd_wp(pte);
+	return pte_clear_uffd(pte);
 }
 #endif
 
-#ifndef __HAVE_ARCH_HUGE_PTE_UFFD_WP
-static inline int huge_pte_uffd_wp(pte_t pte)
+#ifndef __HAVE_ARCH_HUGE_PTE_UFFD
+static inline int huge_pte_uffd(pte_t pte)
 {
-	return pte_uffd_wp(pte);
+	return pte_uffd(pte);
 }
 #endif
 
@@ -94,14 +94,6 @@ static inline pte_t huge_ptep_clear_flush(struct vm_area_struct *vma,
 static inline int huge_pte_none(pte_t pte)
 {
 	return pte_none(pte);
-}
-#endif
-
-/* Please refer to comments above pte_none_mostly() for the usage */
-#ifndef __HAVE_ARCH_HUGE_PTE_NONE_MOSTLY
-static inline int huge_pte_none_mostly(pte_t pte)
-{
-	return huge_pte_none(pte) || is_pte_marker(pte);
 }
 #endif
 

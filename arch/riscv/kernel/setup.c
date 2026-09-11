@@ -46,11 +46,7 @@
  * This is used before the kernel initializes the BSS so it can't be in the
  * BSS.
  */
-atomic_t hart_lottery __section(".sdata")
-#ifdef CONFIG_XIP_KERNEL
-= ATOMIC_INIT(0xC001BEEF)
-#endif
-;
+atomic_t hart_lottery __section(".sdata");
 unsigned long boot_cpu_hartid;
 EXPORT_SYMBOL_GPL(boot_cpu_hartid);
 
@@ -75,16 +71,13 @@ static struct resource *standard_resources;
 static int __init add_resource(struct resource *parent,
 				struct resource *res)
 {
-	int ret = 0;
+	int ret;
 
 	ret = insert_resource(parent, res);
-	if (ret < 0) {
-		pr_err("Failed to add a %s resource at %llx\n",
-			res->name, (unsigned long long) res->start);
-		return ret;
-	}
+	if (ret < 0)
+		pr_err("Failed to add resource %s %pR\n", res->name, res);
 
-	return 1;
+	return ret;
 }
 
 static int __init add_kernel_resources(void)
@@ -327,6 +320,8 @@ void __init setup_arch(char **cmdline_p)
 
 	efi_init();
 	paging_init();
+
+	acpi_table_upgrade();
 
 	/* Parse the ACPI tables for possible boot-time configuration */
 	acpi_boot_table_init();

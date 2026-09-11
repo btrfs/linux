@@ -1345,8 +1345,7 @@ bnad_mem_alloc(struct bnad *bnad,
 		return 0;
 	}
 
-	mem_info->mdl = kcalloc(mem_info->num, sizeof(struct bna_mem_descr),
-				GFP_KERNEL);
+	mem_info->mdl = kzalloc_objs(struct bna_mem_descr, mem_info->num);
 	if (mem_info->mdl == NULL)
 		return -ENOMEM;
 
@@ -1458,9 +1457,8 @@ bnad_txrx_irq_alloc(struct bnad *bnad, enum bnad_intr_source src,
 
 	if (cfg_flags & BNAD_CF_MSIX) {
 		intr_info->intr_type = BNA_INTR_T_MSIX;
-		intr_info->idl = kcalloc(intr_info->num,
-					sizeof(struct bna_intr_descr),
-					GFP_KERNEL);
+		intr_info->idl = kzalloc_objs(struct bna_intr_descr,
+					      intr_info->num);
 		if (!intr_info->idl)
 			return -ENOMEM;
 
@@ -1484,9 +1482,8 @@ bnad_txrx_irq_alloc(struct bnad *bnad, enum bnad_intr_source src,
 	} else {
 		intr_info->intr_type = BNA_INTR_T_INTX;
 		intr_info->num = 1;
-		intr_info->idl = kcalloc(intr_info->num,
-					sizeof(struct bna_intr_descr),
-					GFP_KERNEL);
+		intr_info->idl = kzalloc_objs(struct bna_intr_descr,
+					      intr_info->num);
 		if (!intr_info->idl)
 			return -ENOMEM;
 
@@ -2642,7 +2639,7 @@ bnad_enable_msix(struct bnad *bnad)
 		return;
 
 	bnad->msix_table =
-		kcalloc(bnad->msix_num, sizeof(struct msix_entry), GFP_KERNEL);
+		kzalloc_objs(struct msix_entry, bnad->msix_num);
 
 	if (!bnad->msix_table)
 		goto intx_mode;
@@ -3009,7 +3006,6 @@ bnad_start_xmit(struct sk_buff *skb, struct net_device *netdev)
 	txqent->hdr.wi.reserved = 0;
 	txqent->hdr.wi.num_vectors = vectors;
 
-	head_unmap->skb = skb;
 	head_unmap->nvecs = 0;
 
 	/* Program the vectors */
@@ -3021,6 +3017,7 @@ bnad_start_xmit(struct sk_buff *skb, struct net_device *netdev)
 		BNAD_UPDATE_CTR(bnad, tx_skb_map_failed);
 		return NETDEV_TX_OK;
 	}
+	head_unmap->skb = skb;
 	BNA_SET_DMA_ADDR(dma_addr, &txqent->vector[0].host_addr);
 	txqent->vector[0].length = htons(len);
 	dma_unmap_addr_set(&unmap->vectors[0], dma_addr, dma_addr);

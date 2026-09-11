@@ -23,7 +23,7 @@
 #define MAX_SMB2_HDR_SIZE 0x78 /* 4 len + 64 hdr + (2*24 wct) + 2 bct + 2 pad */
 
 #define SMB21_DEFAULT_IOSIZE	(1024 * 1024)
-#define SMB3_DEFAULT_TRANS_SIZE	(1024 * 1024)
+#define SMB3_DEFAULT_TRANS_SIZE	(4 * 1024 * 1024)
 #define SMB3_MIN_IOSIZE		(64 * 1024)
 #define SMB3_MAX_IOSIZE		(8 * 1024 * 1024)
 #define SMB3_MAX_MSGSIZE	(4 * 4096)
@@ -66,39 +66,81 @@ struct preauth_integrity_info {
 /* Apple Defined Contexts */
 #define SMB2_CREATE_AAPL		"AAPL"
 
-struct create_durable_req_v2 {
+/*
+ * AAPL SMB2 extension -- kAAPL_SERVER_QUERY create context.
+ *
+ * Command code and bitmap values are the existing
+ * SMB2_CRTCTX_AAPL_* constants in fs/smb/common/smb2pdu.h.
+ *
+ * Omitting the model string when reply_bitmap includes
+ * SMB2_CRTCTX_AAPL_MODEL_INFO causes smbfs.kext to enter a broken
+ * disconnect path requiring a reboot.
+ *
+ * Layout: ccontext(16) + Name[4] + Pad[4] + cmd(4) + reserved(4) +
+ *         reply_bitmap(8) + server_caps(8) + vol_caps(8)
+ * When MODEL_INFO requested, appended: pad2(4) + model_bytes(4) + UTF-16LE
+ */
+#define SMB2_CREATE_AAPL_LEN	4
+
+/*
+ * Server capability flags (server_caps field) -- SMB2_CRTCTX_AAPL_UNIX_BASED:
+ * prevents macOS Windows-compat mode (question-mark icons).
+ * SMB2_CRTCTX_AAPL_SUPPORTS_OSX_COPYFILE: enables server-side file copy via
+ * FSCTL_SRV_COPYCHUNK. SMB2_CRTCTX_AAPL_SUPPORTS_READ_DIR_ATTR: inline
+ * FinderInfo per FIND entry, set when client also advertises the bit;
+ * format: EaSize=max_access, ShortName[0..7]=rfork_size,
+ * ShortName[8..23]=FinderInfo(16B), Reserved2=unix_mode.
+ */
+#define AAPL_SERVER_CAPS_KSMBD	(SMB2_CRTCTX_AAPL_UNIX_BASED | \
+				 SMB2_CRTCTX_AAPL_SUPPORTS_OSX_COPYFILE | \
+				 SMB2_CRTCTX_AAPL_SUPPORTS_READ_DIR_ATTR)
+
+/*
+ * READDIR_ATTR_V2 (SMB2_CRTCTX_AAPL_SUPPORTS_READ_DIR_ATTR_V2, see
+ * fs/smb/common/smb2pdu.h) extends the same inline-FinderInfo mechanism
+ * above with a flags field, confirmed byte-identical to V1 otherwise
+ * against AAPL's actual public client behavior. When a client's own
+ * client_caps requests V2, the server advertises V2 instead of V1 in
+ * its own server_caps reply; V1 and V2 are mutually exclusive on the
+ * wire, not both set together. The wire format's ShortNameLength+Reserved
+ * (ignored in V1) become a single flags field in V2 --
+ * AAPL_READDIR_ATTR_V2_NO_XATTR is the only flag bit currently defined,
+ * signaling the item has no xattrs/streams so the client can skip a
+ * separate query.
+ */
+#define AAPL_READDIR_ATTR_V2_NO_XATTR	0x01
+
+/* Model string: up to 31 ASCII chars */
+#define AAPL_MODEL_MAX_CHARS	31
+#define AAPL_MODEL_UTF16_BYTES	(AAPL_MODEL_MAX_CHARS * 2)
+
+/*
+ * Max AAPL response: header(24) + base data(32) + pad2(4) + model_bytes(4)
+ * + model(62), 8-byte aligned: ALIGN(126, 8) = 128 bytes.
+ */
+#define AAPL_RSP_MAX_SIZE	128
+
+/* AAPL server query request (client->server) */
+struct aapl_server_query_req {
+	__le32 cmd;
+	__le32 reserved;
+	__le64 req_bitmap;
+	__le64 client_caps;
+} __packed;
+
+struct create_aapl_rsp {
 	struct create_context_hdr ccontext;
-	__u8   Name[8];
-	__le32 Timeout;
-	__le32 Flags;
-	__u8 Reserved[8];
-	__u8 CreateGuid[16];
+	__u8   Name[4];
+	__u8   Pad[4];
+	__le32 cmd;
+	__le32 reserved;
+	__le64 reply_bitmap;
+	__le64 server_caps;
+	__le64 vol_caps;
+	/* when MODEL_INFO requested: __le32 pad2; __le32 model_bytes; __le16 model[] */
 } __packed;
 
 #define DURABLE_HANDLE_MAX_TIMEOUT	300000
-
-struct create_durable_reconn_req {
-	struct create_context_hdr ccontext;
-	__u8   Name[8];
-	union {
-		__u8  Reserved[16];
-		struct {
-			__u64 PersistentFileId;
-			__u64 VolatileFileId;
-		} Fid;
-	} Data;
-} __packed;
-
-struct create_durable_reconn_v2_req {
-	struct create_context_hdr ccontext;
-	__u8   Name[8];
-	struct {
-		__u64 PersistentFileId;
-		__u64 VolatileFileId;
-	} Fid;
-	__u8 CreateGuid[16];
-	__le32 Flags;
-} __packed;
 
 struct create_alloc_size_req {
 	struct create_context_hdr ccontext;
@@ -115,17 +157,10 @@ struct create_durable_rsp {
 	} Data;
 } __packed;
 
-/* See MS-SMB2 2.2.13.2.11 */
-/* Flags */
-#define SMB2_DHANDLE_FLAG_PERSISTENT	0x00000002
-struct create_durable_v2_rsp {
-	struct create_context_hdr ccontext;
-	__u8   Name[8];
-	__le32 Timeout;
-	__le32 Flags;
-} __packed;
-
-/* equivalent of the contents of SMB3.1.1 POSIX open context response */
+/*
+ * See POSIX-SMB2 2.2.14.2.16
+ * Link: https://gitlab.com/samba-team/smb3-posix-spec/-/blob/master/smb3_posix_extensions.md
+ */
 struct create_posix_rsp {
 	struct create_context_hdr ccontext;
 	__u8    Name[16];
@@ -138,22 +173,6 @@ struct create_posix_rsp {
 
 #define SMB2_0_IOCTL_IS_FSCTL 0x00000001
 
-struct smb_sockaddr_in {
-	__be16 Port;
-	__be32 IPv4address;
-	__u8 Reserved[8];
-} __packed;
-
-struct smb_sockaddr_in6 {
-	__be16 Port;
-	__be32 FlowInfo;
-	__u8 IPv6address[16];
-	__be32 ScopeId;
-} __packed;
-
-#define INTERNETWORK	0x0002
-#define INTERNETWORKV6	0x0017
-
 struct sockaddr_storage_rsp {
 	__le16 Family;
 	union {
@@ -162,49 +181,11 @@ struct sockaddr_storage_rsp {
 	};
 } __packed;
 
-#define RSS_CAPABLE	0x00000001
-#define RDMA_CAPABLE	0x00000002
-
-struct network_interface_info_ioctl_rsp {
-	__le32 Next; /* next interface. zero if this is last one */
-	__le32 IfIndex;
-	__le32 Capability; /* RSS or RDMA Capable */
-	__le32 Reserved;
-	__le64 LinkSpeed;
-	char	SockAddr_Storage[128];
-} __packed;
-
 struct file_object_buf_type1_ioctl_rsp {
 	__u8 ObjectId[16];
 	__u8 BirthVolumeId[16];
 	__u8 BirthObjectId[16];
 	__u8 DomainId[16];
-} __packed;
-
-struct resume_key_ioctl_rsp {
-	__u64 ResumeKey[3];
-	__le32 ContextLength;
-	__u8 Context[4]; /* ignored, Windows sets to 4 bytes of zero */
-} __packed;
-
-struct srv_copychunk {
-	__le64 SourceOffset;
-	__le64 TargetOffset;
-	__le32 Length;
-	__le32 Reserved;
-} __packed;
-
-struct copychunk_ioctl_req {
-	__le64 ResumeKey[3];
-	__le32 ChunkCount;
-	__le32 Reserved;
-	struct srv_copychunk Chunks[] __counted_by_le(ChunkCount);
-} __packed;
-
-struct copychunk_ioctl_rsp {
-	__le32 ChunksWritten;
-	__le32 ChunkBytesWritten;
-	__le32 TotalBytesWritten;
 } __packed;
 
 struct file_sparse {
@@ -279,15 +260,6 @@ struct smb2_file_alignment_info {
 	__le32 AlignmentRequirement;
 } __packed;
 
-struct smb2_file_basic_info { /* data block encoding of response to level 18 */
-	__le64 CreationTime;	/* Beginning of FILE_BASIC_INFO equivalent */
-	__le64 LastAccessTime;
-	__le64 LastWriteTime;
-	__le64 ChangeTime;
-	__le32 Attributes;
-	__u32  Pad1;		/* End of FILE_BASIC_INFO_INFO equivalent */
-} __packed;
-
 struct smb2_file_alt_name_info {
 	__le32 FileNameLength;
 	char FileName[];
@@ -301,14 +273,10 @@ struct smb2_file_stream_info {
 	char   StreamName[];
 } __packed;
 
-struct smb2_file_ntwrk_info {
-	__le64 CreationTime;
-	__le64 LastAccessTime;
-	__le64 LastWriteTime;
-	__le64 ChangeTime;
-	__le64 AllocationSize;
-	__le64 EndOfFile;
-	__le32 Attributes;
+struct srv_snapshot_array {
+	__le32 NumberOfSnapShots;
+	__le32 NumberOfSnapShotsReturned;
+	__le32 SnapShotArraySize;
 	__le32 Reserved;
 } __packed;
 
@@ -325,10 +293,6 @@ struct smb2_file_ea_info {
 	__le32 EASize;
 } __packed;
 
-struct smb2_file_alloc_info {
-	__le64 AllocationSize;
-} __packed;
-
 struct smb2_file_disposition_info {
 	__u8 DeletePending;
 } __packed;
@@ -342,9 +306,6 @@ struct smb2_file_pos_info {
 struct smb2_file_mode_info {
 	__le32 Mode;
 } __packed;
-
-#define COMPRESSION_FORMAT_NONE 0x0000
-#define COMPRESSION_FORMAT_LZNT1 0x0002
 
 struct smb2_file_comp_info {
 	__le64 CompressedFileSize;
@@ -467,6 +428,7 @@ bool smb3_encryption_negotiated(struct ksmbd_conn *conn);
 
 /* smb2 misc functions */
 int ksmbd_smb2_check_message(struct ksmbd_work *work);
+void smb2_complete_request_open(struct ksmbd_work *work);
 
 /* smb2 command handlers */
 int smb2_handle_negotiate(struct ksmbd_work *work);
@@ -489,15 +451,6 @@ int smb2_lock(struct ksmbd_work *work);
 int smb2_ioctl(struct ksmbd_work *work);
 int smb2_oplock_break(struct ksmbd_work *work);
 int smb2_notify(struct ksmbd_work *ksmbd_work);
-
-/*
- * Get the body of the smb2 message excluding the 4 byte rfc1002 headers
- * from request/response buffer.
- */
-static inline void *smb2_get_msg(void *buf)
-{
-	return buf + 4;
-}
 
 #define POSIX_TYPE_FILE		0
 #define POSIX_TYPE_DIR		1

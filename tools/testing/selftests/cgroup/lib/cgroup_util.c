@@ -59,7 +59,8 @@ char *cg_name(const char *root, const char *name)
 	size_t len = strlen(root) + strlen(name) + 2;
 	char *ret = malloc(len);
 
-	snprintf(ret, len, "%s/%s", root, name);
+	if (ret)
+		snprintf(ret, len, "%s/%s", root, name);
 
 	return ret;
 }
@@ -69,7 +70,8 @@ char *cg_name_indexed(const char *root, const char *name, int index)
 	size_t len = strlen(root) + strlen(name) + 10;
 	char *ret = malloc(len);
 
-	snprintf(ret, len, "%s/%s_%d", root, name, index);
+	if (ret)
+		snprintf(ret, len, "%s/%s_%d", root, name, index);
 
 	return ret;
 }
@@ -79,7 +81,8 @@ char *cg_control(const char *cgroup, const char *control)
 	size_t len = strlen(cgroup) + strlen(control) + 2;
 	char *ret = malloc(len);
 
-	snprintf(ret, len, "%s/%s", cgroup, control);
+	if (ret)
+		snprintf(ret, len, "%s/%s", cgroup, control);
 
 	return ret;
 }
@@ -106,8 +109,9 @@ int cg_read_strcmp(const char *cgroup, const char *control,
 	/* Handle the case of comparing against empty string */
 	if (!expected)
 		return -1;
-	else
-		size = strlen(expected) + 1;
+
+	/* needs size > 1, otherwise cg_read() reads 0 bytes */
+	size = (expected[0] == '\0') ? 2 : strlen(expected) + 1;
 
 	buf = malloc(size);
 	if (!buf)
@@ -123,9 +127,24 @@ int cg_read_strcmp(const char *cgroup, const char *control,
 	return ret;
 }
 
+int cg_read_strcmp_wait(const char *cgroup, const char *control,
+			    const char *expected)
+{
+	int i, ret;
+
+	for (i = 0; i < 100; i++) {
+		ret = cg_read_strcmp(cgroup, control, expected);
+		if (!ret)
+			return ret;
+		usleep(10000);
+	}
+
+	return ret;
+}
+
 int cg_read_strstr(const char *cgroup, const char *control, const char *needle)
 {
-	char buf[PAGE_SIZE];
+	char buf[BUF_SIZE];
 
 	if (cg_read(cgroup, control, buf, sizeof(buf)))
 		return -1;
@@ -155,7 +174,7 @@ long cg_read_long_fd(int fd)
 
 long cg_read_key_long(const char *cgroup, const char *control, const char *key)
 {
-	char buf[PAGE_SIZE];
+	char buf[BUF_SIZE];
 	char *ptr;
 
 	if (cg_read(cgroup, control, buf, sizeof(buf)))
@@ -168,9 +187,30 @@ long cg_read_key_long(const char *cgroup, const char *control, const char *key)
 	return atol(ptr + strlen(key));
 }
 
+long cg_read_key_long_poll(const char *cgroup, const char *control,
+			   const char *key, long expected, int retries,
+			   useconds_t wait_interval_us)
+{
+	long val = -1;
+	int i;
+
+	for (i = 0; i < retries; i++) {
+		val = cg_read_key_long(cgroup, control, key);
+		if (val < 0)
+			return val;
+
+		if (val == expected)
+			break;
+
+		usleep(wait_interval_us);
+	}
+
+	return val;
+}
+
 long cg_read_lc(const char *cgroup, const char *control)
 {
-	char buf[PAGE_SIZE];
+	char buf[BUF_SIZE];
 	const char delim[] = "\n";
 	char *line;
 	long cnt = 0;
@@ -222,7 +262,7 @@ int cg_write_numeric(const char *cgroup, const char *control, long value)
 static int cg_find_root(char *root, size_t len, const char *controller,
 			bool *nsdelegate)
 {
-	char buf[10 * PAGE_SIZE];
+	char buf[10 * BUF_SIZE];
 	char *fs, *mount, *type, *options;
 	const char delim[] = "\n\t ";
 
@@ -277,7 +317,7 @@ int cg_create(const char *cgroup)
 
 int cg_wait_for_proc_count(const char *cgroup, int count)
 {
-	char buf[10 * PAGE_SIZE] = {0};
+	char buf[10 * BUF_SIZE] = {0};
 	int attempts;
 	char *ptr;
 
@@ -302,7 +342,7 @@ int cg_wait_for_proc_count(const char *cgroup, int count)
 
 int cg_killall(const char *cgroup)
 {
-	char buf[PAGE_SIZE];
+	char buf[BUF_SIZE];
 	char *ptr = buf;
 
 	/* If cgroup.kill exists use it. */
@@ -512,7 +552,7 @@ int cg_run_nowait(const char *cgroup,
 
 int proc_mount_contains(const char *option)
 {
-	char buf[4 * PAGE_SIZE];
+	char buf[4 * BUF_SIZE];
 	ssize_t read;
 
 	read = read_text("/proc/mounts", buf, sizeof(buf));
@@ -524,7 +564,7 @@ int proc_mount_contains(const char *option)
 
 int cgroup_feature(const char *feature)
 {
-	char buf[PAGE_SIZE];
+	char buf[BUF_SIZE];
 	ssize_t read;
 
 	read = read_text("/sys/kernel/cgroup/features", buf, sizeof(buf));
@@ -551,7 +591,7 @@ ssize_t proc_read_text(int pid, bool thread, const char *item, char *buf, size_t
 
 int proc_read_strstr(int pid, bool thread, const char *item, const char *needle)
 {
-	char buf[PAGE_SIZE];
+	char buf[BUF_SIZE];
 
 	if (proc_read_text(pid, thread, item, buf, sizeof(buf)) < 0)
 		return -1;

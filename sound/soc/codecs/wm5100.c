@@ -2101,7 +2101,7 @@ static void wm5100_micd_irq(struct wm5100_priv *wm5100)
 int wm5100_detect(struct snd_soc_component *component, struct snd_soc_jack *jack)
 {
 	struct wm5100_priv *wm5100 = snd_soc_component_get_drvdata(component);
-	struct snd_soc_dapm_context *dapm = snd_soc_component_get_dapm(component);
+	struct snd_soc_dapm_context *dapm = snd_soc_component_to_dapm(component);
 
 	if (jack) {
 		wm5100->jack = jack;
@@ -2329,7 +2329,7 @@ static void wm5100_free_gpio(struct i2c_client *i2c)
 
 static int wm5100_probe(struct snd_soc_component *component)
 {
-	struct snd_soc_dapm_context *dapm = snd_soc_component_get_dapm(component);
+	struct snd_soc_dapm_context *dapm = snd_soc_component_to_dapm(component);
 	struct i2c_client *i2c = to_i2c_client(component->dev);
 	struct wm5100_priv *wm5100 = snd_soc_component_get_drvdata(component);
 	int ret, i;
@@ -2659,7 +2659,15 @@ static int wm5100_runtime_resume(struct device *dev)
 	}
 
 	regcache_cache_only(wm5100->regmap, false);
-	regcache_sync(wm5100->regmap);
+	ret = regcache_sync(wm5100->regmap);
+	if (ret) {
+		regcache_cache_only(wm5100->regmap, true);
+		regcache_mark_dirty(wm5100->regmap);
+		gpiod_set_value_cansleep(wm5100->ldo_ena, 0);
+		regulator_bulk_disable(ARRAY_SIZE(wm5100->core_supplies),
+				       wm5100->core_supplies);
+		return ret;
+	}
 
 	return 0;
 }
@@ -2669,7 +2677,7 @@ static const struct dev_pm_ops wm5100_pm = {
 };
 
 static const struct i2c_device_id wm5100_i2c_id[] = {
-	{ "wm5100" },
+	{ .name = "wm5100" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, wm5100_i2c_id);

@@ -537,7 +537,7 @@ static int associate_dev(struct us_data *us, struct usb_interface *intf)
 	usb_set_intfdata(intf, us);
 
 	/* Allocate the control/setup and DMA-mapped buffers */
-	us->cr = kmalloc(sizeof(*us->cr), GFP_KERNEL);
+	us->cr = kmalloc_obj(*us->cr);
 	if (!us->cr)
 		return -ENOMEM;
 
@@ -570,7 +570,7 @@ void usb_stor_adjust_quirks(struct usb_device *udev, u64 *fflags)
 			US_FL_INITIAL_READ10 | US_FL_WRITE_CACHE |
 			US_FL_NO_ATA_1X | US_FL_NO_REPORT_OPCODES |
 			US_FL_MAX_SECTORS_240 | US_FL_NO_REPORT_LUNS |
-			US_FL_ALWAYS_SYNC);
+			US_FL_ALWAYS_SYNC | US_FL_NO_SAME);
 
 	p = quirks;
 	while (*p) {

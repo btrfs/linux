@@ -281,7 +281,10 @@ static const struct sof_topology_token acpdmic_tokens[] = {
 		offsetof(struct sof_ipc_dai_acpdmic_params, pdm_ch)},
 };
 
-/* ACPI2S */
+/*
+ * ACPI2S tokens fill struct sof_ipc_dai_acp_params; SOF_DAI_AMD_I2S (ACPTDM
+ * on ACP7.B/7.F) reuses this tuple group rather than defining a parallel set.
+ */
 static const struct sof_topology_token acpi2s_tokens[] = {
 	{SOF_TKN_AMD_ACPI2S_RATE, SND_SOC_TPLG_TUPLE_TYPE_WORD, get_token_u32,
 		offsetof(struct sof_ipc_dai_acp_params, fsync_rate)},
@@ -289,6 +292,8 @@ static const struct sof_topology_token acpi2s_tokens[] = {
 		offsetof(struct sof_ipc_dai_acp_params, tdm_slots)},
 	{SOF_TKN_AMD_ACPI2S_TDM_MODE, SND_SOC_TPLG_TUPLE_TYPE_WORD, get_token_u32,
 		offsetof(struct sof_ipc_dai_acp_params, tdm_mode)},
+	{SOF_TKN_AMD_ACPI2S_FORMAT, SND_SOC_TPLG_TUPLE_TYPE_WORD, get_token_u32,
+		offsetof(struct sof_ipc_dai_acp_params, format)},
 };
 
 /* MICFIL PDM */
@@ -519,12 +524,13 @@ static int sof_ipc3_widget_setup_comp_mixer(struct snd_sof_widget *swidget)
 static int sof_ipc3_widget_setup_comp_pipeline(struct snd_sof_widget *swidget)
 {
 	struct snd_soc_component *scomp = swidget->scomp;
+	struct snd_sof_dev *sdev = snd_soc_component_get_drvdata(scomp);
 	struct snd_sof_pipeline *spipe = swidget->spipe;
 	struct sof_ipc_pipe_new *pipeline;
 	struct snd_sof_widget *comp_swidget;
 	int ret;
 
-	pipeline = kzalloc(sizeof(*pipeline), GFP_KERNEL);
+	pipeline = kzalloc_obj(*pipeline);
 	if (!pipeline)
 		return -ENOMEM;
 
@@ -559,8 +565,15 @@ static int sof_ipc3_widget_setup_comp_pipeline(struct snd_sof_widget *swidget)
 	if (ret < 0)
 		goto err;
 
-	if (sof_debug_check_flag(SOF_DBG_DISABLE_MULTICORE))
+	if (sof_debug_check_flag(SOF_DBG_DISABLE_MULTICORE)) {
 		pipeline->core = SOF_DSP_PRIMARY_CORE;
+	} else if (pipeline->core > sdev->num_cores - 1) {
+		dev_info(scomp->dev,
+			 "out of range core id for %s, moving it %d -> %d\n",
+			 swidget->widget->name, pipeline->core,
+			 SOF_DSP_PRIMARY_CORE);
+		pipeline->core = SOF_DSP_PRIMARY_CORE;
+	}
 
 	if (sof_debug_check_flag(SOF_DBG_DYNAMIC_PIPELINES_OVERRIDE))
 		swidget->dynamic_pipeline_widget =
@@ -589,7 +602,7 @@ static int sof_ipc3_widget_setup_comp_buffer(struct snd_sof_widget *swidget)
 	struct sof_ipc_buffer *buffer;
 	int ret;
 
-	buffer = kzalloc(sizeof(*buffer), GFP_KERNEL);
+	buffer = kzalloc_obj(*buffer);
 	if (!buffer)
 		return -ENOMEM;
 
@@ -893,7 +906,7 @@ static int sof_process_load(struct snd_soc_component *scomp,
 
 	/* allocate struct for widget control data sizes and types */
 	if (widget->num_kcontrols) {
-		wdata = kcalloc(widget->num_kcontrols, sizeof(*wdata), GFP_KERNEL);
+		wdata = kzalloc_objs(*wdata, widget->num_kcontrols);
 		if (!wdata)
 			return -ENOMEM;
 
@@ -1355,6 +1368,35 @@ static int sof_link_acp_sdw_load(struct snd_soc_component *scomp, struct snd_sof
 	return 0;
 }
 
+static int sof_link_acp_i2s_load(struct snd_soc_component *scomp, struct snd_sof_dai_link *slink,
+				 struct sof_ipc_dai_config *config, struct snd_sof_dai *dai)
+{
+	struct snd_soc_tplg_hw_config *hw_config = slink->hw_configs;
+	struct sof_dai_private_data *private = dai->private;
+	u32 size = sizeof(*config);
+	int ret;
+
+	/* handle master/slave and inverted clocks */
+	sof_dai_set_format(hw_config, config);
+
+	/* init IPC */
+	memset(&config->acp_i2s, 0, sizeof(config->acp_i2s));
+	config->hdr.size = size;
+
+	ret = sof_update_ipc_object(scomp, &config->acp_i2s, SOF_ACPI2S_TOKENS, slink->tuples,
+				    slink->num_tuples, size, slink->num_hw_configs);
+	if (ret < 0)
+		return ret;
+
+	dai->number_configs = 1;
+	dai->current_config = 0;
+	private->dai_config = kmemdup(config, size, GFP_KERNEL);
+	if (!private->dai_config)
+		return -ENOMEM;
+
+	return 0;
+}
+
 static int sof_link_afe_load(struct snd_soc_component *scomp, struct snd_sof_dai_link *slink,
 			     struct sof_ipc_dai_config *config, struct snd_sof_dai *dai)
 {
@@ -1567,7 +1609,7 @@ static int sof_ipc3_widget_setup_comp_dai(struct snd_sof_widget *swidget)
 	struct snd_sof_dai_link *slink;
 	int ret;
 
-	private = kzalloc(sizeof(*private), GFP_KERNEL);
+	private = kzalloc_obj(*private);
 	if (!private)
 		return -ENOMEM;
 
@@ -1622,7 +1664,7 @@ static int sof_ipc3_widget_setup_comp_dai(struct snd_sof_widget *swidget)
 			continue;
 
 		/* Reserve memory for all hw configs, eventually freed by widget */
-		config = kcalloc(slink->num_hw_configs, sizeof(*config), GFP_KERNEL);
+		config = kzalloc_objs(*config, slink->num_hw_configs);
 		if (!config) {
 			ret = -ENOMEM;
 			goto free_comp;
@@ -1683,6 +1725,9 @@ static int sof_ipc3_widget_setup_comp_dai(struct snd_sof_widget *swidget)
 			break;
 		case SOF_DAI_AMD_SDW:
 			ret = sof_link_acp_sdw_load(scomp, slink, config, dai);
+			break;
+		case SOF_DAI_AMD_I2S:
+			ret = sof_link_acp_i2s_load(scomp, slink, config, dai);
 			break;
 		default:
 			break;
@@ -2427,9 +2472,9 @@ static int sof_ipc3_free_widgets_in_list(struct snd_sof_dev *sdev, bool include_
 		/* Do not free widgets for static pipelines with FW older than SOF2.2 */
 		if (!verify && !swidget->dynamic_pipeline_widget &&
 		    SOF_FW_VER(v->major, v->minor, v->micro) < SOF_FW_VER(2, 2, 0)) {
-			mutex_lock(&swidget->setup_mutex);
-			swidget->use_count = 0;
-			mutex_unlock(&swidget->setup_mutex);
+			scoped_guard(mutex, &swidget->setup_mutex)
+				swidget->use_count = 0;
+
 			if (swidget->spipe)
 				swidget->spipe->complete = 0;
 			continue;

@@ -440,7 +440,7 @@ static int bm1390_fifo_flush(struct iio_dev *idev, unsigned int samples)
 	 * the timestamps. If we are ran from IRQ, then the
 	 * IRQF_ONESHOT has us covered - but if we are ran by the
 	 * user-space read we need to disable the IRQ to be on a safe
-	 * side. We do this usng synchronous disable so that if the
+	 * side. We do this using synchronous disable so that if the
 	 * IRQ thread is being ran on other CPU we wait for it to be
 	 * finished.
 	 */
@@ -621,17 +621,15 @@ static const struct iio_buffer_setup_ops bm1390_buffer_ops = {
 	.predisable = bm1390_buffer_predisable,
 };
 
-static irqreturn_t bm1390_trigger_handler(int irq, void *p)
+static bool bm1390_handle_trigger(struct iio_dev *idev)
 {
-	struct iio_poll_func *pf = p;
-	struct iio_dev *idev = pf->indio_dev;
 	struct bm1390_data *data = iio_priv(idev);
 	int ret, status;
 
 	/* DRDY is acked by reading status reg */
 	ret = regmap_read(data->regmap, BM1390_REG_STATUS, &status);
 	if (ret || !status)
-		return IRQ_NONE;
+		return false;
 
 	dev_dbg(data->dev, "DRDY trig status 0x%x\n", status);
 
@@ -639,7 +637,7 @@ static irqreturn_t bm1390_trigger_handler(int irq, void *p)
 		ret = bm1390_pressure_read(data, &data->buf.pressure);
 		if (ret) {
 			dev_warn(data->dev, "sample read failed %d\n", ret);
-			return IRQ_NONE;
+			return false;
 		}
 	}
 
@@ -648,15 +646,26 @@ static irqreturn_t bm1390_trigger_handler(int irq, void *p)
 				       &data->buf.temp, sizeof(data->buf.temp));
 		if (ret) {
 			dev_warn(data->dev, "temp read failed %d\n", ret);
-			return IRQ_HANDLED;
+			return true;
 		}
 	}
 
 	iio_push_to_buffers_with_ts(idev, &data->buf, sizeof(data->buf),
 				    data->timestamp);
+
+	return true;
+}
+
+static irqreturn_t bm1390_trigger_handler(int irq, void *p)
+{
+	struct iio_poll_func *pf = p;
+	struct iio_dev *idev = pf->indio_dev;
+	bool result;
+
+	result = bm1390_handle_trigger(idev);
 	iio_trigger_notify_done(idev->trig);
 
-	return IRQ_HANDLED;
+	return IRQ_RETVAL(result);
 }
 
 /* Get timestamps and wake the thread if we need to read data */
@@ -796,7 +805,7 @@ static int bm1390_setup_trigger(struct bm1390_data *data, struct iio_dev *idev,
 					&bm1390_irq_thread_handler,
 					IRQF_ONESHOT, name, idev);
 	if (ret)
-		return dev_err_probe(data->dev, ret, "Could not request IRQ\n");
+		return ret;
 
 
 	ret = devm_iio_trigger_register(data->dev, itrig);
@@ -888,7 +897,7 @@ static const struct of_device_id bm1390_of_match[] = {
 MODULE_DEVICE_TABLE(of, bm1390_of_match);
 
 static const struct i2c_device_id bm1390_id[] = {
-	{ "bm1390glv-z", },
+	{ .name = "bm1390glv-z" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, bm1390_id);

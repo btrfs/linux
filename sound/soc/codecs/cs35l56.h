@@ -10,6 +10,7 @@
 #define CS35L56_H
 
 #include <linux/completion.h>
+#include <linux/container_of.h>
 #include <linux/regulator/consumer.h>
 #include <linux/pm_runtime.h>
 #include <linux/workqueue.h>
@@ -36,9 +37,8 @@ struct cs35l56_private {
 	struct snd_soc_component *component;
 	struct regulator_bulk_data supplies[CS35L56_NUM_BULK_SUPPLIES];
 	struct sdw_slave *sdw_peripheral;
+	struct regmap *sdw_bus_regmap;
 	const char *fallback_fw_suffix;
-	struct work_struct sdw_irq_work;
-	bool sdw_irq_no_unmask;
 	bool soft_resetting;
 	bool sdw_attached;
 	struct completion init_completion;
@@ -52,9 +52,19 @@ struct cs35l56_private {
 	bool sysclk_set;
 	u8 sdw_link_num;
 	u8 sdw_unique_id;
+
+	u8 ambient_ctl_value;
 };
 
+static inline struct cs35l56_private *cs35l56_private_from_base(struct cs35l56_base *cs35l56_base)
+{
+	return container_of(cs35l56_base, struct cs35l56_private, base);
+}
+
 extern const struct dev_pm_ops cs35l56_pm_ops_i2c_spi;
+
+void cs35l56_mask_soundwire_interrupts(struct cs35l56_private *cs35l56);
+void cs35l56_unmask_soundwire_interrupts(struct cs35l56_private *cs35l56);
 
 int cs35l56_system_suspend(struct device *dev);
 int cs35l56_system_suspend_late(struct device *dev);
@@ -62,10 +72,16 @@ int cs35l56_system_suspend_no_irq(struct device *dev);
 int cs35l56_system_resume_no_irq(struct device *dev);
 int cs35l56_system_resume_early(struct device *dev);
 int cs35l56_system_resume(struct device *dev);
-irqreturn_t cs35l56_irq(int irq, void *data);
 int cs35l56_irq_request(struct cs35l56_base *cs35l56_base, int irq);
-int cs35l56_common_probe(struct cs35l56_private *cs35l56);
+int cs35l56_common_probe(struct cs35l56_private *cs35l56, int irq);
 int cs35l56_init(struct cs35l56_private *cs35l56);
 void cs35l56_remove(struct cs35l56_private *cs35l56);
+
+#if IS_ENABLED(CONFIG_KUNIT)
+int cs35l56_set_fw_suffix(struct cs35l56_private *cs35l56);
+int cs35l56_set_fw_name(struct snd_soc_component *component);
+int cs35l56_process_xu_properties(struct cs35l56_private *cs35l56);
+int cs35l56_get_firmware_uid(struct cs35l56_private *cs35l56);
+#endif
 
 #endif /* ifndef CS35L56_H */

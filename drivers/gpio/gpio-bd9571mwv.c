@@ -69,7 +69,7 @@ static int bd9571mwv_gpio_get(struct gpio_chip *chip, unsigned int offset)
 	if (ret < 0)
 		return ret;
 
-	return val & BIT(offset);
+	return !!(val & BIT(offset));
 }
 
 static int bd9571mwv_gpio_set(struct gpio_chip *chip, unsigned int offset,
@@ -110,8 +110,8 @@ static int bd9571mwv_gpio_probe(struct platform_device *pdev)
 }
 
 static const struct platform_device_id bd9571mwv_gpio_id_table[] = {
-	{ "bd9571mwv-gpio", ROHM_CHIP_TYPE_BD9571 },
-	{ "bd9574mwf-gpio", ROHM_CHIP_TYPE_BD9574 },
+	{ .name = "bd9571mwv-gpio", .driver_data = ROHM_CHIP_TYPE_BD9571 },
+	{ .name = "bd9574mwf-gpio", .driver_data = ROHM_CHIP_TYPE_BD9574 },
 	{ /* sentinel */ }
 };
 MODULE_DEVICE_TABLE(platform, bd9571mwv_gpio_id_table);

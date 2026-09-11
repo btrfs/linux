@@ -5,13 +5,6 @@
 #include <sys/sysinfo.h>
 
 struct __qspinlock { int val; };
-typedef struct __qspinlock arena_spinlock_t;
-
-struct arena_qnode {
-	unsigned long next;
-	int count;
-	int locked;
-};
 
 #include "arena_spin_lock.skel.h"
 
@@ -108,7 +101,7 @@ end:
 	return;
 }
 
-void test_arena_spin_lock(void)
+void serial_test_arena_spin_lock(void)
 {
 	repeat = 1000;
 	if (test__start_subtest("arena_spin_lock_1"))

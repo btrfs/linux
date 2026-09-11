@@ -13,6 +13,7 @@
 #include <linux/delay.h>
 #include <linux/errno.h>
 #include <linux/sched.h>
+#include <linux/string_choices.h>
 #include <linux/i2c.h>
 #include <linux/i2c-algo-bit.h>
 
@@ -562,7 +563,7 @@ static int bit_xfer(struct i2c_adapter *i2c_adap,
 			ret = readbytes(i2c_adap, pmsg);
 			if (ret >= 1)
 				bit_dbg(2, &i2c_adap->dev, "read %d byte%s\n",
-					ret, ret == 1 ? "" : "s");
+					ret, str_plural(ret));
 			if (ret < pmsg->len) {
 				if (ret >= 0)
 					ret = -EIO;
@@ -573,7 +574,7 @@ static int bit_xfer(struct i2c_adapter *i2c_adap,
 			ret = sendbytes(i2c_adap, pmsg);
 			if (ret >= 1)
 				bit_dbg(2, &i2c_adap->dev, "wrote %d byte%s\n",
-					ret, ret == 1 ? "" : "s");
+					ret, str_plural(ret));
 			if (ret < pmsg->len) {
 				if (ret >= 0)
 					ret = -EIO;
@@ -638,7 +639,7 @@ static int __i2c_bit_add_bus(struct i2c_adapter *adap,
 	struct i2c_algo_bit_data *bit_adap = adap->algo_data;
 	int ret;
 
-	if (bit_test) {
+	if (bit_test && !bit_adap->skip_bit_test) {
 		ret = test_bus(adap);
 		if (bit_test >= 2 && ret < 0)
 			return -ENODEV;

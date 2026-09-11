@@ -48,60 +48,42 @@ static struct genwqe_dev *genwqe_devices[GENWQE_CARD_NO_MAX];
 
 /* PCI structure for identifying device by PCI vendor and device ID */
 static const struct pci_device_id genwqe_device_table[] = {
-	{ .vendor      = PCI_VENDOR_ID_IBM,
-	  .device      = PCI_DEVICE_GENWQE,
-	  .subvendor   = PCI_SUBVENDOR_ID_IBM,
-	  .subdevice   = PCI_SUBSYSTEM_ID_GENWQE5,
-	  .class       = (PCI_CLASSCODE_GENWQE5 << 8),
-	  .class_mask  = ~0,
-	  .driver_data = 0 },
-
-	/* Initial SR-IOV bring-up image */
-	{ .vendor      = PCI_VENDOR_ID_IBM,
-	  .device      = PCI_DEVICE_GENWQE,
-	  .subvendor   = PCI_SUBVENDOR_ID_IBM_SRIOV,
-	  .subdevice   = PCI_SUBSYSTEM_ID_GENWQE5_SRIOV,
-	  .class       = (PCI_CLASSCODE_GENWQE5_SRIOV << 8),
-	  .class_mask  = ~0,
-	  .driver_data = 0 },
-
-	{ .vendor      = PCI_VENDOR_ID_IBM,  /* VF Vendor ID */
-	  .device      = 0x0000,  /* VF Device ID */
-	  .subvendor   = PCI_SUBVENDOR_ID_IBM_SRIOV,
-	  .subdevice   = PCI_SUBSYSTEM_ID_GENWQE5_SRIOV,
-	  .class       = (PCI_CLASSCODE_GENWQE5_SRIOV << 8),
-	  .class_mask  = ~0,
-	  .driver_data = 0 },
-
-	/* Fixed up image */
-	{ .vendor      = PCI_VENDOR_ID_IBM,
-	  .device      = PCI_DEVICE_GENWQE,
-	  .subvendor   = PCI_SUBVENDOR_ID_IBM_SRIOV,
-	  .subdevice   = PCI_SUBSYSTEM_ID_GENWQE5,
-	  .class       = (PCI_CLASSCODE_GENWQE5_SRIOV << 8),
-	  .class_mask  = ~0,
-	  .driver_data = 0 },
-
-	{ .vendor      = PCI_VENDOR_ID_IBM,  /* VF Vendor ID */
-	  .device      = 0x0000,  /* VF Device ID */
-	  .subvendor   = PCI_SUBVENDOR_ID_IBM_SRIOV,
-	  .subdevice   = PCI_SUBSYSTEM_ID_GENWQE5,
-	  .class       = (PCI_CLASSCODE_GENWQE5_SRIOV << 8),
-	  .class_mask  = ~0,
-	  .driver_data = 0 },
-
-	/* Even one more ... */
-	{ .vendor      = PCI_VENDOR_ID_IBM,
-	  .device      = PCI_DEVICE_GENWQE,
-	  .subvendor   = PCI_SUBVENDOR_ID_IBM,
-	  .subdevice   = PCI_SUBSYSTEM_ID_GENWQE5_NEW,
-	  .class       = (PCI_CLASSCODE_GENWQE5 << 8),
-	  .class_mask  = ~0,
-	  .driver_data = 0 },
-
-	{ 0, }			/* 0 terminated list. */
+	{
+		PCI_DEVICE_SUB(PCI_VENDOR_ID_IBM, PCI_DEVICE_GENWQE,
+			       PCI_SUBVENDOR_ID_IBM, PCI_SUBSYSTEM_ID_GENWQE5),
+		.class       = PCI_CLASSCODE_GENWQE5 << 8,
+		.class_mask  = ~0,
+	}, {
+		/* Initial SR-IOV bring-up image */
+		PCI_DEVICE_SUB(PCI_VENDOR_ID_IBM, PCI_VENDOR_ID_IBM, PCI_DEVICE_GENWQE,
+			       PCI_SUBVENDOR_ID_IBM_SRIOV),
+		.class       = PCI_CLASSCODE_GENWQE5_SRIOV << 8,
+		.class_mask  = ~0,
+	}, {
+		PCI_DEVICE_SUB(PCI_VENDOR_ID_IBM, 0x0000,
+			       PCI_SUBVENDOR_ID_IBM_SRIOV, PCI_SUBSYSTEM_ID_GENWQE5_SRIOV),
+		.class       = PCI_CLASSCODE_GENWQE5_SRIOV << 8,
+		.class_mask  = ~0,
+	}, {
+		/* Fixed up image */
+		PCI_DEVICE_SUB(PCI_VENDOR_ID_IBM, PCI_DEVICE_GENWQE,
+			       PCI_SUBVENDOR_ID_IBM_SRIOV, PCI_SUBSYSTEM_ID_GENWQE5),
+		.class       = PCI_CLASSCODE_GENWQE5_SRIOV << 8,
+		.class_mask  = ~0,
+	}, {
+		PCI_DEVICE_SUB(PCI_VENDOR_ID_IBM, 0x0000,
+			       PCI_SUBVENDOR_ID_IBM_SRIOV, PCI_SUBSYSTEM_ID_GENWQE5),
+		.class       = PCI_CLASSCODE_GENWQE5_SRIOV << 8,
+		.class_mask  = ~0,
+	}, {
+		/* Even one more ... */
+		PCI_DEVICE_SUB(PCI_VENDOR_ID_IBM, PCI_DEVICE_GENWQE,
+			       PCI_SUBVENDOR_ID_IBM, PCI_SUBSYSTEM_ID_GENWQE5_NEW),
+		.class       = (PCI_CLASSCODE_GENWQE5 << 8),
+		.class_mask  = ~0,
+	},
+	{ }			/* 0 terminated list. */
 };
-
 MODULE_DEVICE_TABLE(pci, genwqe_device_table);
 
 /**
@@ -141,7 +123,7 @@ static struct genwqe_dev *genwqe_dev_alloc(void)
 	if (i >= GENWQE_CARD_NO_MAX)
 		return ERR_PTR(-ENODEV);
 
-	cd = kzalloc(sizeof(struct genwqe_dev), GFP_KERNEL);
+	cd = kzalloc_obj(struct genwqe_dev);
 	if (!cd)
 		return ERR_PTR(-ENOMEM);
 
@@ -403,8 +385,7 @@ static int genwqe_ffdc_buffs_alloc(struct genwqe_dev *cd)
 		/* currently support only the debug units mentioned here */
 		cd->ffdc[type].entries = e;
 		cd->ffdc[type].regs =
-			kmalloc_array(e, sizeof(struct genwqe_reg),
-				      GFP_KERNEL);
+			kmalloc_objs(struct genwqe_reg, e);
 		/*
 		 * regs == NULL is ok, the using code treats this as no regs,
 		 * Printing warning is ok in this case.

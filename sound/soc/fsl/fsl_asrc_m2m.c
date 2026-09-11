@@ -155,7 +155,7 @@ static int asrc_dmaconfig(struct fsl_asrc_pair *pair,
 	if (buf_len % max_period_size)
 		sg_len += 1;
 
-	sg = kmalloc_array(sg_len, sizeof(*sg), GFP_KERNEL);
+	sg = kmalloc_objs(*sg, sg_len);
 	if (!sg)
 		return -ENOMEM;
 
@@ -253,15 +253,21 @@ static int asrc_m2m_device_run(struct fsl_asrc_pair *pair, struct snd_compr_task
 	reinit_completion(&pair->complete[IN]);
 	reinit_completion(&pair->complete[OUT]);
 
+	if (asrc->start_before_dma)
+		asrc->m2m_start(pair);
+
 	/* Submit DMA request */
 	dmaengine_submit(pair->desc[IN]);
 	dma_async_issue_pending(pair->desc[IN]->chan);
 	if (out_dma_len > 0) {
+		if (asrc->start_before_dma && asrc->m2m_output_ready)
+			asrc->m2m_output_ready(pair);
 		dmaengine_submit(pair->desc[OUT]);
 		dma_async_issue_pending(pair->desc[OUT]->chan);
 	}
 
-	asrc->m2m_start(pair);
+	if (!asrc->start_before_dma)
+		asrc->m2m_start(pair);
 
 	if (!wait_for_completion_interruptible_timeout(&pair->complete[IN], 10 * HZ)) {
 		dev_err(dev, "out DMA task timeout\n");
@@ -361,13 +367,13 @@ static int fsl_asrc_m2m_comp_set_params(struct snd_compr_stream *stream,
 	if (ret)
 		return -EINVAL;
 
-	if (pcm_format_to_bits((__force snd_pcm_format_t)params->codec.format) & cap.fmt_in)
-		pair->sample_format[IN] = (__force snd_pcm_format_t)params->codec.format;
+	if (pcm_format_to_bits(params->codec.format) & cap.fmt_in)
+		pair->sample_format[IN] = params->codec.format;
 	else
 		return -EINVAL;
 
-	if (pcm_format_to_bits((__force snd_pcm_format_t)params->codec.pcm_format) & cap.fmt_out)
-		pair->sample_format[OUT] = (__force snd_pcm_format_t)params->codec.pcm_format;
+	if (pcm_format_to_bits(params->codec.pcm_format) & cap.fmt_out)
+		pair->sample_format[OUT] = params->codec.pcm_format;
 	else
 		return -EINVAL;
 
@@ -414,7 +420,7 @@ static struct sg_table *fsl_asrc_m2m_map_dma_buf(struct dma_buf_attachment *atta
 	struct snd_dma_buffer *dmab = attachment->dmabuf->priv;
 	struct sg_table *sgt;
 
-	sgt = kmalloc(sizeof(*sgt), GFP_KERNEL);
+	sgt = kmalloc_obj(*sgt);
 	if (!sgt)
 		return NULL;
 
@@ -594,7 +600,7 @@ static int fsl_asrc_m2m_fill_codec_caps(struct fsl_asrc *asrc,
 			       cap.rate_in,
 			       cap.rate_in_count * sizeof(__u32));
 			codec->descriptor[j].num_sample_rates = cap.rate_in_count;
-			codec->descriptor[j].formats = (__force __u32)k;
+			codec->descriptor[j].formats = k;
 			codec->descriptor[j].pcm_formats = cap.fmt_out;
 			codec->descriptor[j].src.out_sample_rate_min = cap.rate_out[0];
 			codec->descriptor[j].src.out_sample_rate_max =

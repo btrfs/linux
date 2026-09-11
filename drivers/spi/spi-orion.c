@@ -100,10 +100,8 @@ struct orion_spi {
 	struct orion_child_options	child[ORION_NUM_CHIPSELECTS];
 };
 
-#ifdef CONFIG_PM
 static int orion_spi_runtime_suspend(struct device *dev);
 static int orion_spi_runtime_resume(struct device *dev);
-#endif
 
 static inline void __iomem *spi_reg(struct orion_spi *orion_spi, u32 reg)
 {
@@ -648,14 +646,12 @@ static int orion_spi_probe(struct platform_device *pdev)
 	struct orion_spi *spi;
 	struct resource *r;
 	unsigned long tclk_hz;
-	int status = 0;
 	struct device_node *np;
+	int status;
 
-	host = spi_alloc_host(&pdev->dev, sizeof(*spi));
-	if (host == NULL) {
-		dev_dbg(&pdev->dev, "host allocation failed\n");
+	host = devm_spi_alloc_host(&pdev->dev, sizeof(*spi));
+	if (host == NULL)
 		return -ENOMEM;
-	}
 
 	if (pdev->id != -1)
 		host->bus_num = pdev->id;
@@ -689,19 +685,13 @@ static int orion_spi_probe(struct platform_device *pdev)
 	spi->devdata = devdata;
 
 	spi->clk = devm_clk_get_enabled(&pdev->dev, NULL);
-	if (IS_ERR(spi->clk)) {
-		status = PTR_ERR(spi->clk);
-		goto out;
-	}
+	if (IS_ERR(spi->clk))
+		return PTR_ERR(spi->clk);
 
 	/* The following clock is only used by some SoCs */
-	spi->axi_clk = devm_clk_get(&pdev->dev, "axi");
-	if (PTR_ERR(spi->axi_clk) == -EPROBE_DEFER) {
-		status = -EPROBE_DEFER;
-		goto out;
-	}
-	if (!IS_ERR(spi->axi_clk))
-		clk_prepare_enable(spi->axi_clk);
+	spi->axi_clk = devm_clk_get_optional_enabled(&pdev->dev, "axi");
+	if (IS_ERR(spi->axi_clk))
+		return PTR_ERR(spi->axi_clk);
 
 	tclk_hz = clk_get_rate(spi->clk);
 
@@ -724,10 +714,8 @@ static int orion_spi_probe(struct platform_device *pdev)
 	host->min_speed_hz = DIV_ROUND_UP(tclk_hz, devdata->max_divisor);
 
 	spi->base = devm_platform_get_and_ioremap_resource(pdev, 0, &r);
-	if (IS_ERR(spi->base)) {
-		status = PTR_ERR(spi->base);
-		goto out_rel_axi_clk;
-	}
+	if (IS_ERR(spi->base))
+		return PTR_ERR(spi->base);
 
 	for_each_available_child_of_node(pdev->dev.of_node, np) {
 		struct orion_direct_acc *dir_acc;
@@ -762,9 +750,8 @@ static int orion_spi_probe(struct platform_device *pdev)
 		dir_acc = &spi->child[cs].direct_access;
 		dir_acc->vaddr = devm_ioremap(&pdev->dev, r->start, PAGE_SIZE);
 		if (!dir_acc->vaddr) {
-			status = -ENOMEM;
 			of_node_put(np);
-			goto out_rel_axi_clk;
+			return -ENOMEM;
 		}
 		dir_acc->size = PAGE_SIZE;
 
@@ -774,25 +761,27 @@ static int orion_spi_probe(struct platform_device *pdev)
 	pm_runtime_set_active(&pdev->dev);
 	pm_runtime_use_autosuspend(&pdev->dev);
 	pm_runtime_set_autosuspend_delay(&pdev->dev, SPI_AUTOSUSPEND_TIMEOUT);
+	pm_runtime_get_noresume(&pdev->dev);
 	pm_runtime_enable(&pdev->dev);
 
 	status = orion_spi_reset(spi);
 	if (status < 0)
 		goto out_rel_pm;
 
-	host->dev.of_node = pdev->dev.of_node;
 	status = spi_register_controller(host);
 	if (status < 0)
 		goto out_rel_pm;
 
-	return status;
+	pm_runtime_put_autosuspend(&pdev->dev);
+
+	return 0;
 
 out_rel_pm:
 	pm_runtime_disable(&pdev->dev);
-out_rel_axi_clk:
-	clk_disable_unprepare(spi->axi_clk);
-out:
-	spi_controller_put(host);
+	pm_runtime_put_noidle(&pdev->dev);
+	pm_runtime_set_suspended(&pdev->dev);
+	pm_runtime_dont_use_autosuspend(&pdev->dev);
+
 	return status;
 }
 
@@ -800,18 +789,19 @@ out:
 static void orion_spi_remove(struct platform_device *pdev)
 {
 	struct spi_controller *host = platform_get_drvdata(pdev);
-	struct orion_spi *spi = spi_controller_get_devdata(host);
-
-	pm_runtime_get_sync(&pdev->dev);
-	clk_disable_unprepare(spi->axi_clk);
 
 	spi_unregister_controller(host);
+
+	pm_runtime_get_sync(&pdev->dev);
+
 	pm_runtime_disable(&pdev->dev);
+	pm_runtime_put_noidle(&pdev->dev);
+	pm_runtime_set_suspended(&pdev->dev);
+	pm_runtime_dont_use_autosuspend(&pdev->dev);
 }
 
 MODULE_ALIAS("platform:" DRIVER_NAME);
 
-#ifdef CONFIG_PM
 static int orion_spi_runtime_suspend(struct device *dev)
 {
 	struct spi_controller *host = dev_get_drvdata(dev);
@@ -827,22 +817,20 @@ static int orion_spi_runtime_resume(struct device *dev)
 	struct spi_controller *host = dev_get_drvdata(dev);
 	struct orion_spi *spi = spi_controller_get_devdata(host);
 
-	if (!IS_ERR(spi->axi_clk))
-		clk_prepare_enable(spi->axi_clk);
+	clk_prepare_enable(spi->axi_clk);
 	return clk_prepare_enable(spi->clk);
 }
-#endif
 
 static const struct dev_pm_ops orion_spi_pm_ops = {
-	SET_RUNTIME_PM_OPS(orion_spi_runtime_suspend,
-			   orion_spi_runtime_resume,
-			   NULL)
+	RUNTIME_PM_OPS(orion_spi_runtime_suspend,
+		       orion_spi_runtime_resume,
+		       NULL)
 };
 
 static struct platform_driver orion_spi_driver = {
 	.driver = {
 		.name	= DRIVER_NAME,
-		.pm	= &orion_spi_pm_ops,
+		.pm	= pm_ptr(&orion_spi_pm_ops),
 		.of_match_table = of_match_ptr(orion_spi_of_match_table),
 	},
 	.probe		= orion_spi_probe,

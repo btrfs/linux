@@ -6,8 +6,7 @@
  *
  *  Copyright IBM Corp. 2025
  */
-#define KMSG_COMPONENT "dibs"
-#define pr_fmt(fmt) KMSG_COMPONENT ": " fmt
+#define pr_fmt(fmt) "dibs: " fmt
 
 #include <linux/module.h>
 #include <linux/types.h>
@@ -20,7 +19,9 @@
 MODULE_DESCRIPTION("Direct Internal Buffer Sharing class");
 MODULE_LICENSE("GPL");
 
-static struct class *dibs_class;
+static const struct class dibs_class = {
+	.name		= "dibs",
+};
 
 /* use an array rather a list for fast mapping: */
 static struct dibs_client *clients[MAX_DIBS_CLIENTS];
@@ -127,6 +128,7 @@ static void dibs_dev_release(struct device *dev)
 
 	dibs = container_of(dev, struct dibs_dev, dev);
 
+	kfree(dibs->dmb_clientid_arr);
 	kfree(dibs);
 }
 
@@ -134,11 +136,12 @@ struct dibs_dev *dibs_dev_alloc(void)
 {
 	struct dibs_dev *dibs;
 
-	dibs = kzalloc(sizeof(*dibs), GFP_KERNEL);
+	dibs = kzalloc_obj(*dibs);
 	if (!dibs)
 		return dibs;
+	spin_lock_init(&dibs->lock);
 	dibs->dev.release = dibs_dev_release;
-	dibs->dev.class = dibs_class;
+	dibs->dev.class = &dibs_class;
 	device_initialize(&dibs->dev);
 
 	return dibs;
@@ -185,7 +188,6 @@ int dibs_dev_add(struct dibs_dev *dibs)
 	int i, ret;
 
 	max_dmbs = dibs->ops->max_dmbs();
-	spin_lock_init(&dibs->lock);
 	dibs->dmb_clientid_arr = kzalloc(max_dmbs, GFP_KERNEL);
 	if (!dibs->dmb_clientid_arr)
 		return -ENOMEM;
@@ -193,12 +195,13 @@ int dibs_dev_add(struct dibs_dev *dibs)
 
 	ret = device_add(&dibs->dev);
 	if (ret)
-		goto free_client_arr;
+		return ret;
 
 	ret = sysfs_create_group(&dibs->dev.kobj, &dibs_dev_attr_group);
 	if (ret) {
 		dev_err(&dibs->dev, "sysfs_create_group failed for dibs_dev\n");
-		goto err_device_del;
+		device_del(&dibs->dev);
+		return ret;
 	}
 	mutex_lock(&dibs_dev_list.mutex);
 	mutex_lock(&clients_lock);
@@ -213,13 +216,6 @@ int dibs_dev_add(struct dibs_dev *dibs)
 	mutex_unlock(&dibs_dev_list.mutex);
 
 	return 0;
-
-err_device_del:
-	device_del(&dibs->dev);
-free_client_arr:
-	kfree(dibs->dmb_clientid_arr);
-	return ret;
-
 }
 EXPORT_SYMBOL_GPL(dibs_dev_add);
 
@@ -246,7 +242,6 @@ void dibs_dev_del(struct dibs_dev *dibs)
 	mutex_unlock(&dibs_dev_list.mutex);
 
 	device_del(&dibs->dev);
-	kfree(dibs->dmb_clientid_arr);
 }
 EXPORT_SYMBOL_GPL(dibs_dev_del);
 
@@ -254,12 +249,9 @@ static int __init dibs_init(void)
 {
 	int rc;
 
-	memset(clients, 0, sizeof(clients));
-	max_client = 0;
-
-	dibs_class = class_create("dibs");
-	if (IS_ERR(dibs_class))
-		return PTR_ERR(dibs_class);
+	rc = class_register(&dibs_class);
+	if (rc)
+		return rc;
 
 	rc = dibs_loopback_init();
 	if (rc)
@@ -271,8 +263,8 @@ static int __init dibs_init(void)
 static void __exit dibs_exit(void)
 {
 	dibs_loopback_exit();
-	class_destroy(dibs_class);
+	class_unregister(&dibs_class);
 }
 
-module_init(dibs_init);
+subsys_initcall(dibs_init);
 module_exit(dibs_exit);

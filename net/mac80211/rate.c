@@ -4,7 +4,7 @@
  * Copyright 2005-2006, Devicescape Software, Inc.
  * Copyright (c) 2006 Jiri Benc <jbenc@suse.cz>
  * Copyright 2017	Intel Deutschland GmbH
- * Copyright (C) 2019, 2022-2025 Intel Corporation
+ * Copyright (C) 2019, 2022-2026 Intel Corporation
  */
 
 #include <linux/kernel.h>
@@ -37,8 +37,6 @@ void rate_control_rate_init(struct link_sta_info *link_sta)
 	void *priv_sta = sta->rate_ctrl_priv;
 	struct ieee80211_supported_band *sband;
 	struct ieee80211_chanctx_conf *chanctx_conf;
-
-	ieee80211_sta_init_nss(link_sta);
 
 	if (!ref)
 		return;
@@ -163,7 +161,7 @@ int ieee80211_rate_control_register(const struct rate_control_ops *ops)
 		}
 	}
 
-	alg = kzalloc(sizeof(*alg), GFP_KERNEL);
+	alg = kzalloc_obj(*alg);
 	if (alg == NULL) {
 		mutex_unlock(&rate_ctrl_mutex);
 		return -ENOMEM;
@@ -263,7 +261,7 @@ rate_control_alloc(const char *name, struct ieee80211_local *local)
 {
 	struct rate_control_ref *ref;
 
-	ref = kmalloc(sizeof(struct rate_control_ref), GFP_KERNEL);
+	ref = kmalloc_obj(struct rate_control_ref);
 	if (!ref)
 		return NULL;
 	ref->ops = ieee80211_rate_control_ops_get(name);
@@ -603,14 +601,8 @@ static void rate_idx_match_mask(s8 *rate_idx, u16 *rate_flags,
 			return;
 
 		/* if HT BSS, and we handle a data frame, also try HT rates */
-		switch (chan_width) {
-		case NL80211_CHAN_WIDTH_20_NOHT:
-		case NL80211_CHAN_WIDTH_5:
-		case NL80211_CHAN_WIDTH_10:
+		if (chan_width == NL80211_CHAN_WIDTH_20_NOHT)
 			return;
-		default:
-			break;
-		}
 
 		*rate_idx = 0;
 		/* keep protection flags */

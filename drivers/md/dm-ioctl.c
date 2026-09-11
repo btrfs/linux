@@ -54,17 +54,19 @@ struct hash_cell {
 };
 
 struct vers_iter {
-	size_t param_size;
 	struct dm_target_versions *vers, *old_vers;
 	char *end;
-	uint32_t flags;
 };
 
 
 static struct rb_root name_rb_tree = RB_ROOT;
 static struct rb_root uuid_rb_tree = RB_ROOT;
 
-static void dm_hash_remove_all(bool keep_open_devices, bool mark_deferred, bool only_deferred);
+#define DM_REMOVE_KEEP_OPEN_DEVICES	1
+#define DM_REMOVE_MARK_DEFERRED		2
+#define DM_REMOVE_ONLY_DEFERRED		4
+#define DM_REMOVE_INTERRUPTIBLE		8
+static int dm_hash_remove_all(unsigned flags);
 
 /*
  * Guards access to both hash tables.
@@ -78,7 +80,7 @@ static DEFINE_MUTEX(dm_hash_cells_mutex);
 
 static void dm_hash_exit(void)
 {
-	dm_hash_remove_all(false, false, false);
+	dm_hash_remove_all(0);
 }
 
 /*
@@ -218,7 +220,7 @@ static struct hash_cell *alloc_cell(const char *name, const char *uuid,
 {
 	struct hash_cell *hc;
 
-	hc = kmalloc(sizeof(*hc), GFP_KERNEL);
+	hc = kmalloc_obj(*hc);
 	if (!hc)
 		return NULL;
 
@@ -254,6 +256,80 @@ static void free_cell(struct hash_cell *hc)
 		kfree(hc);
 	}
 }
+
+#ifdef CONFIG_IMA
+
+/*
+ * Called while holding to _hash_lock, to guarantee the ordering of the
+ * following dm_ima_measure_on_* functions, which should be called
+ * right after dropping the _hash_lock
+ */
+static unsigned int dm_ima_init_context(struct hash_cell *hc,
+					struct dm_ima_context *context,
+				        bool need_idx)
+{
+	lockdep_assert_held(&_hash_lock);
+
+	if (unlikely(!context))
+		return need_idx ? hc->md->ima.update_idx++ : 0;
+
+	context->update_idx = hc->md->ima.update_idx++;
+	strcpy(context->dev_name, hc->name);
+	strcpy(context->dev_uuid, hc->uuid ? : "");
+
+	return context->update_idx;
+}
+
+/*
+ * Called by do_resume() to guarantee correct ordering, since do_resume()
+ * does not grab the _hash_lock when the table is not getting swapped or
+ * when actually swapping the active table
+ */
+static bool dm_ima_need_measure(struct mapped_device *md,
+				struct dm_table *table,
+				struct dm_ima_context *context)
+{
+	int srcu_idx;
+	struct hash_cell *hc;
+	bool need_measure = false;
+
+	if (unlikely(!context))
+		return false;
+
+	down_write(&_hash_lock);
+	/* Check if the device has been removed */
+	hc = dm_get_mdptr(md);
+	if (hc) {
+		/*
+		 * If we have a table, we need to make sure that it's the
+		 * active table. Otherwise we raced with another process
+		 * setting the active table and it will do the measurement
+		 */
+		if (!table || dm_get_live_table(md, &srcu_idx) == table) {
+			dm_ima_init_context(hc, context, false);
+			need_measure = true;
+		}
+		if (table)
+			dm_put_live_table(md, srcu_idx);
+	}
+	up_write(&_hash_lock);
+
+	return need_measure;
+}
+#else
+static inline unsigned int dm_ima_init_context(struct hash_cell *hc,
+					       struct dm_ima_context *context,
+					       bool neex_idx)
+{
+	return 0;
+}
+static inline bool dm_ima_need_measure(struct mapped_device *md,
+				       struct dm_table *table,
+				       struct dm_ima_context *context)
+{
+	return false;
+}
+#endif
 
 /*
  * The kdev_t and uuid of a device can never change once it is
@@ -333,31 +409,41 @@ static struct dm_table *__hash_remove(struct hash_cell *hc)
 	return table;
 }
 
-static void dm_hash_remove_all(bool keep_open_devices, bool mark_deferred, bool only_deferred)
+static int dm_hash_remove_all(unsigned flags)
 {
 	int dev_skipped;
 	struct rb_node *n;
 	struct hash_cell *hc;
 	struct mapped_device *md;
 	struct dm_table *t;
+	struct dm_ima_context *ima_context = NULL;
+	unsigned int ima_idx;
 
+	dm_ima_alloc_context(&ima_context, true);
 retry:
 	dev_skipped = 0;
 
 	down_write(&_hash_lock);
 
 	for (n = rb_first(&name_rb_tree); n; n = rb_next(n)) {
+		if (flags & DM_REMOVE_INTERRUPTIBLE && fatal_signal_pending(current)) {
+			up_write(&_hash_lock);
+			dm_ima_free_context(ima_context);
+			return -EINTR;
+		}
+
 		hc = container_of(n, struct hash_cell, name_node);
 		md = hc->md;
 		dm_get(md);
 
-		if (keep_open_devices &&
-		    dm_lock_for_deletion(md, mark_deferred, only_deferred)) {
+		if (flags & DM_REMOVE_KEEP_OPEN_DEVICES &&
+		    dm_lock_for_deletion(md, !!(flags & DM_REMOVE_MARK_DEFERRED), !!(flags & DM_REMOVE_ONLY_DEFERRED))) {
 			dm_put(md);
 			dev_skipped++;
 			continue;
 		}
 
+		ima_idx = dm_ima_init_context(hc, ima_context, true);
 		t = __hash_remove(hc);
 
 		up_write(&_hash_lock);
@@ -366,9 +452,9 @@ retry:
 			dm_sync_table(md);
 			dm_table_destroy(t);
 		}
-		dm_ima_measure_on_device_remove(md, true);
+		dm_ima_measure_on_device_remove(md, true, ima_context, ima_idx);
 		dm_put(md);
-		if (likely(keep_open_devices))
+		if (likely(flags & DM_REMOVE_KEEP_OPEN_DEVICES))
 			dm_destroy(md);
 		else
 			dm_destroy_immediate(md);
@@ -384,8 +470,11 @@ retry:
 
 	up_write(&_hash_lock);
 
-	if (dev_skipped)
+	if (dev_skipped && !(flags & DM_REMOVE_ONLY_DEFERRED))
 		DMWARN("remove_all left %d open device(s)", dev_skipped);
+
+	dm_ima_free_context(ima_context);
+	return 0;
 }
 
 /*
@@ -432,6 +521,7 @@ static struct mapped_device *dm_hash_rename(struct dm_ioctl *param,
 	struct mapped_device *md;
 	unsigned int change_uuid = (param->flags & DM_UUID_FLAG) ? 1 : 0;
 	int srcu_idx;
+	struct dm_ima_context *ima_context = NULL;
 
 	/*
 	 * duplicate new.
@@ -440,6 +530,7 @@ static struct mapped_device *dm_hash_rename(struct dm_ioctl *param,
 	if (!new_data)
 		return ERR_PTR(-ENOMEM);
 
+	dm_ima_alloc_context(&ima_context, true);
 	down_write(&_hash_lock);
 
 	/*
@@ -456,6 +547,7 @@ static struct mapped_device *dm_hash_rename(struct dm_ioctl *param,
 		      param->name, new);
 		dm_put(hc->md);
 		up_write(&_hash_lock);
+		dm_ima_free_context(ima_context);
 		kfree(new_data);
 		return ERR_PTR(-EBUSY);
 	}
@@ -468,6 +560,7 @@ static struct mapped_device *dm_hash_rename(struct dm_ioctl *param,
 		DMERR("Unable to rename non-existent device, %s to %s%s",
 		      param->name, change_uuid ? "uuid " : "", new);
 		up_write(&_hash_lock);
+		dm_ima_free_context(ima_context);
 		kfree(new_data);
 		return ERR_PTR(-ENXIO);
 	}
@@ -481,6 +574,7 @@ static struct mapped_device *dm_hash_rename(struct dm_ioctl *param,
 		      param->name, new, hc->uuid);
 		dm_put(hc->md);
 		up_write(&_hash_lock);
+		dm_ima_free_context(ima_context);
 		kfree(new_data);
 		return ERR_PTR(-EINVAL);
 	}
@@ -503,9 +597,11 @@ static struct mapped_device *dm_hash_rename(struct dm_ioctl *param,
 
 	md = hc->md;
 
-	dm_ima_measure_on_device_rename(md);
+	dm_ima_init_context(hc, ima_context, false);
 
 	up_write(&_hash_lock);
+	dm_ima_measure_on_device_rename(md, ima_context);
+	dm_ima_free_context(ima_context);
 	kfree(old_name);
 
 	return md;
@@ -513,7 +609,7 @@ static struct mapped_device *dm_hash_rename(struct dm_ioctl *param,
 
 void dm_deferred_remove(void)
 {
-	dm_hash_remove_all(true, false, true);
+	dm_hash_remove_all(DM_REMOVE_KEEP_OPEN_DEVICES | DM_REMOVE_ONLY_DEFERRED);
 }
 
 /*
@@ -529,9 +625,13 @@ typedef int (*ioctl_fn)(struct file *filp, struct dm_ioctl *param, size_t param_
 
 static int remove_all(struct file *filp, struct dm_ioctl *param, size_t param_size)
 {
-	dm_hash_remove_all(true, !!(param->flags & DM_DEFERRED_REMOVE), false);
+	int r;
+	int flags = DM_REMOVE_KEEP_OPEN_DEVICES | DM_REMOVE_INTERRUPTIBLE;
+	if (param->flags & DM_DEFERRED_REMOVE)
+		flags |= DM_REMOVE_MARK_DEFERRED;
+	r = dm_hash_remove_all(flags);
 	param->data_size = 0;
-	return 0;
+	return r;
 }
 
 /*
@@ -592,118 +692,108 @@ static int list_devices(struct file *filp, struct dm_ioctl *param, size_t param_
 {
 	struct rb_node *n;
 	struct hash_cell *hc;
-	size_t len, needed = 0;
-	struct gendisk *disk;
-	struct dm_name_list *orig_nl, *nl, *old_nl = NULL;
+	size_t len;
+	struct dm_name_list *nl, *old_nl = NULL;
+	void *result_start, *result_limit;
 	uint32_t *event_nr;
-
-	down_write(&_hash_lock);
-
-	/*
-	 * Loop through all the devices working out how much
-	 * space we need.
-	 */
-	for (n = rb_first(&name_rb_tree); n; n = rb_next(n)) {
-		hc = container_of(n, struct hash_cell, name_node);
-		if (!filter_device(hc, param->name, param->uuid))
-			continue;
-		needed += align_val(offsetof(struct dm_name_list, name) + strlen(hc->name) + 1);
-		needed += align_val(sizeof(uint32_t) * 2);
-		if (param->flags & DM_UUID_FLAG && hc->uuid)
-			needed += align_val(strlen(hc->uuid) + 1);
-	}
 
 	/*
 	 * Grab our output buffer.
 	 */
-	nl = orig_nl = get_result_buffer(param, param_size, &len);
-	if (len < needed || len < sizeof(nl->dev)) {
-		param->flags |= DM_BUFFER_FULL_FLAG;
-		goto out;
-	}
-	param->data_size = param->data_start + needed;
+	nl = result_start = get_result_buffer(param, param_size, &len);
+	result_limit = result_start + len;
 
-	nl->dev = 0;	/* Flags no data */
+	if (len >= sizeof(*nl))
+		nl->dev = 0;	/* Flags no data */
+
+	down_write(&_hash_lock);
 
 	/*
-	 * Now loop through filling out the names.
+	 * Loop through filling out the names.
 	 */
 	for (n = rb_first(&name_rb_tree); n; n = rb_next(n)) {
-		void *uuid_ptr;
+		void *next_nl;
 
 		hc = container_of(n, struct hash_cell, name_node);
 		if (!filter_device(hc, param->name, param->uuid))
 			continue;
-		if (old_nl)
-			old_nl->next = (uint32_t) ((void *) nl -
-						   (void *) old_nl);
-		disk = dm_disk(hc->md);
-		nl->dev = huge_encode_dev(disk_devt(disk));
-		nl->next = 0;
-		strcpy(nl->name, hc->name);
 
-		old_nl = nl;
-		event_nr = align_ptr(nl->name + strlen(hc->name) + 1);
+		len = strlen(hc->name);
+		event_nr = align_ptr(nl->name + len + 1);
+		next_nl = event_nr + 2;
+		if (next_nl > result_limit)
+			break;
+
+		((u64 *)event_nr)[-1] = 0;
+		memcpy(nl->name, hc->name, len);
+
+		nl->dev = huge_encode_dev(disk_devt(dm_disk(hc->md)));
+
 		event_nr[0] = dm_get_event_nr(hc->md);
 		event_nr[1] = 0;
-		uuid_ptr = align_ptr(event_nr + 2);
+
 		if (param->flags & DM_UUID_FLAG) {
 			if (hc->uuid) {
+				len = strlen(hc->uuid);
+				next_nl = align_ptr(next_nl + len + 1);
+				if (next_nl > result_limit)
+					break;
 				event_nr[1] |= DM_NAME_LIST_FLAG_HAS_UUID;
-				strcpy(uuid_ptr, hc->uuid);
-				uuid_ptr = align_ptr(uuid_ptr + strlen(hc->uuid) + 1);
+				((u64 *)next_nl)[-1] = 0;
+				memcpy(event_nr + 2, hc->uuid, len);
 			} else {
 				event_nr[1] |= DM_NAME_LIST_FLAG_DOESNT_HAVE_UUID;
 			}
 		}
-		nl = uuid_ptr;
+		nl->next = next_nl - (void *)nl;
+		old_nl = nl;
+		nl = next_nl;
 	}
-	/*
-	 * If mismatch happens, security may be compromised due to buffer
-	 * overflow, so it's better to crash.
-	 */
-	BUG_ON((char *)nl - (char *)orig_nl != needed);
 
- out:
+	if (old_nl)
+		old_nl->next = 0;
+
+	if (n)
+		param->flags |= DM_BUFFER_FULL_FLAG;
+	else
+		param->data_size = param->data_start + ((void *)nl - result_start);
+
 	up_write(&_hash_lock);
 	return 0;
-}
-
-static void list_version_get_needed(struct target_type *tt, void *needed_param)
-{
-	size_t *needed = needed_param;
-
-	*needed += sizeof(struct dm_target_versions);
-	*needed += strlen(tt->name) + 1;
-	*needed += ALIGN_MASK;
 }
 
 static void list_version_get_info(struct target_type *tt, void *param)
 {
 	struct vers_iter *info = param;
+	struct dm_target_versions *vers = info->vers;
+	size_t name_len = strlen(tt->name);
 
-	/* Check space - it might have changed since the first iteration */
-	if ((char *)info->vers + sizeof(tt->version) + strlen(tt->name) + 1 > info->end) {
-		info->flags = DM_BUFFER_FULL_FLAG;
+	if (!vers)
+		return;
+
+	info->old_vers = vers;
+	info->vers = align_ptr((void *)(info->vers + 1) + name_len + 1);
+
+	/* Check space */
+	if ((char *)info->vers > info->end) {
+		info->vers = NULL;
 		return;
 	}
 
-	if (info->old_vers)
-		info->old_vers->next = (uint32_t) ((void *)info->vers - (void *)info->old_vers);
+	/* Zero padding and terminate vers->name[] */
+	((u64 *)info->vers)[-1] = 0;
 
-	info->vers->version[0] = tt->version[0];
-	info->vers->version[1] = tt->version[1];
-	info->vers->version[2] = tt->version[2];
-	info->vers->next = 0;
-	strcpy(info->vers->name, tt->name);
+	vers->next = (char *)info->vers - (char *)vers;
 
-	info->old_vers = info->vers;
-	info->vers = align_ptr((void *)(info->vers + 1) + strlen(tt->name) + 1);
+	vers->version[0] = tt->version[0];
+	vers->version[1] = tt->version[1];
+	vers->version[2] = tt->version[2];
+	memcpy(vers->name, tt->name, name_len);
 }
 
 static int __list_versions(struct dm_ioctl *param, size_t param_size, const char *name)
 {
-	size_t len, needed = 0;
+	size_t len;
 	struct dm_target_versions *vers;
 	struct vers_iter iter_info;
 	struct target_type *tt = NULL;
@@ -715,40 +805,30 @@ static int __list_versions(struct dm_ioctl *param, size_t param_size, const char
 	}
 
 	/*
-	 * Loop through all the devices working out how much
-	 * space we need.
-	 */
-	if (!tt)
-		dm_target_iterate(list_version_get_needed, &needed);
-	else
-		list_version_get_needed(tt, &needed);
-
-	/*
 	 * Grab our output buffer.
 	 */
 	vers = get_result_buffer(param, param_size, &len);
-	if (len < needed) {
-		param->flags |= DM_BUFFER_FULL_FLAG;
-		goto out;
-	}
-	param->data_size = param->data_start + needed;
 
-	iter_info.param_size = param_size;
 	iter_info.old_vers = NULL;
 	iter_info.vers = vers;
-	iter_info.flags = 0;
-	iter_info.end = (char *)vers + needed;
+	iter_info.end = (char *)vers + len;
 
 	/*
-	 * Now loop through filling out the names & versions.
+	 * Loop through filling out the names & versions.
 	 */
 	if (!tt)
 		dm_target_iterate(list_version_get_info, &iter_info);
 	else
 		list_version_get_info(tt, &iter_info);
-	param->flags |= iter_info.flags;
 
- out:
+	if (iter_info.vers) {
+		if (iter_info.old_vers)
+			iter_info.old_vers->next = 0;
+		param->data_size = param->data_start + ((char *)iter_info.vers - (char *)vers);
+	} else {
+		param->flags |= DM_BUFFER_FULL_FLAG;
+	}
+
 	if (tt)
 		dm_put_target_type(tt);
 	return 0;
@@ -980,13 +1060,17 @@ static int dev_remove(struct file *filp, struct dm_ioctl *param, size_t param_si
 	struct mapped_device *md;
 	int r;
 	struct dm_table *t;
+	struct dm_ima_context *ima_context = NULL;
+	unsigned int ima_idx;
 
+	dm_ima_alloc_context(&ima_context, true);
 	down_write(&_hash_lock);
 	hc = __find_device_hash_cell(param);
 
 	if (!hc) {
 		DMDEBUG_LIMIT("device doesn't appear to be in the dev hash table.");
 		up_write(&_hash_lock);
+		dm_ima_free_context(ima_context);
 		return -ENXIO;
 	}
 
@@ -1000,14 +1084,17 @@ static int dev_remove(struct file *filp, struct dm_ioctl *param, size_t param_si
 		if (r == -EBUSY && param->flags & DM_DEFERRED_REMOVE) {
 			up_write(&_hash_lock);
 			dm_put(md);
+			dm_ima_free_context(ima_context);
 			return 0;
 		}
 		DMDEBUG_LIMIT("unable to remove open device %s", hc->name);
 		up_write(&_hash_lock);
 		dm_put(md);
+		dm_ima_free_context(ima_context);
 		return r;
 	}
 
+	ima_idx = dm_ima_init_context(hc, ima_context, true);
 	t = __hash_remove(hc);
 	up_write(&_hash_lock);
 
@@ -1018,7 +1105,8 @@ static int dev_remove(struct file *filp, struct dm_ioctl *param, size_t param_si
 
 	param->flags &= ~DM_DEFERRED_REMOVE;
 
-	dm_ima_measure_on_device_remove(md, false);
+	dm_ima_measure_on_device_remove(md, false, ima_context, ima_idx);
+	dm_ima_free_context(ima_context);
 
 	if (!dm_kobject_uevent(md, KOBJ_REMOVE, param->event_nr, false))
 		param->flags |= DM_UEVENT_GENERATED_FLAG;
@@ -1154,13 +1242,16 @@ static int do_resume(struct dm_ioctl *param)
 	struct mapped_device *md;
 	struct dm_table *new_map, *old_map = NULL;
 	bool need_resize_uevent = false;
+	struct dm_ima_context *ima_context = NULL;
 
+	dm_ima_alloc_context(&ima_context, true);
 	down_write(&_hash_lock);
 
 	hc = __find_device_hash_cell(param);
 	if (!hc) {
 		DMDEBUG_LIMIT("device doesn't appear to be in the dev hash table.");
 		up_write(&_hash_lock);
+		dm_ima_free_context(ima_context);
 		return -ENXIO;
 	}
 
@@ -1169,13 +1260,15 @@ static int do_resume(struct dm_ioctl *param)
 	new_map = hc->new_map;
 	hc->new_map = NULL;
 	param->flags &= ~DM_INACTIVE_PRESENT_FLAG;
-
+	if (new_map)
+		dm_ima_init_context(hc, ima_context, false);
 	up_write(&_hash_lock);
 
 	/* Do we need to load a new map ? */
 	if (new_map) {
 		sector_t old_size, new_size;
 
+		dm_ima_context_table_op(md, ima_context, DM_IMA_TABLE_SAVE);
 		/* Suspend if it isn't already suspended */
 		if (param->flags & DM_SKIP_LOCKFS_FLAG)
 			suspend_flags &= ~DM_SUSPEND_LOCKFS_FLAG;
@@ -1189,6 +1282,8 @@ static int do_resume(struct dm_ioctl *param)
 				if (hc && !hc->new_map) {
 					hc->new_map = new_map;
 					new_map = NULL;
+					dm_ima_init_context(hc, ima_context,
+							    false);
 				} else {
 					r = -ENXIO;
 				}
@@ -1196,7 +1291,9 @@ static int do_resume(struct dm_ioctl *param)
 				if (new_map) {
 					dm_sync_table(md);
 					dm_table_destroy(new_map);
-				}
+				} else
+					dm_ima_context_table_op(md, ima_context, DM_IMA_TABLE_RESTORE);
+				dm_ima_free_context(ima_context);
 				dm_put(md);
 				return r;
 			}
@@ -1207,9 +1304,12 @@ static int do_resume(struct dm_ioctl *param)
 		if (IS_ERR(old_map)) {
 			dm_sync_table(md);
 			dm_table_destroy(new_map);
+			dm_ima_free_context(ima_context);
 			dm_put(md);
 			return PTR_ERR(old_map);
 		}
+		if (dm_ima_need_measure(md, new_map, ima_context))
+			dm_ima_measure_on_device_resume(md, true, ima_context);
 		new_size = dm_get_size(md);
 		if (old_size && new_size && old_size != new_size)
 			need_resize_uevent = true;
@@ -1223,7 +1323,10 @@ static int do_resume(struct dm_ioctl *param)
 	if (dm_suspended_md(md)) {
 		r = dm_resume(md);
 		if (!r) {
-			dm_ima_measure_on_device_resume(md, new_map ? true : false);
+			if (!new_map && dm_ima_need_measure(md, NULL,
+							    ima_context))
+				dm_ima_measure_on_device_resume(md, false,
+								ima_context);
 
 			if (!dm_kobject_uevent(md, KOBJ_CHANGE, param->event_nr, need_resize_uevent))
 				param->flags |= DM_UEVENT_GENERATED_FLAG;
@@ -1240,6 +1343,7 @@ static int do_resume(struct dm_ioctl *param)
 	if (!r)
 		__dev_status(md, param);
 
+	dm_ima_free_context(ima_context);
 	dm_put(md);
 	return r;
 }
@@ -1318,10 +1422,6 @@ static void retrieve_status(struct dm_table *table,
 
 		outptr += sizeof(struct dm_target_spec);
 		remaining = len - (outptr - outbuf);
-		if (remaining <= 0) {
-			param->flags |= DM_BUFFER_FULL_FLAG;
-			break;
-		}
 
 		/* Get the status/table string from the target driver */
 		if (ti->type->status) {
@@ -1341,6 +1441,10 @@ static void retrieve_status(struct dm_table *table,
 		used = param->data_start + (outptr - outbuf);
 
 		outptr = align_ptr(outptr);
+		if (!outptr || outptr > outbuf + len) {
+			param->flags |= DM_BUFFER_FULL_FLAG;
+			break;
+		}
 		spec->next = outptr - outbuf;
 	}
 
@@ -1513,11 +1617,12 @@ static bool is_valid_type(enum dm_queue_mode cur, enum dm_queue_mode new)
 
 static int table_load(struct file *filp, struct dm_ioctl *param, size_t param_size)
 {
-	int r;
+	int r, srcu_idx;
 	struct hash_cell *hc;
 	struct dm_table *t, *old_map = NULL;
 	struct mapped_device *md;
 	struct target_type *immutable_target_type;
+	struct dm_ima_context *ima_context = NULL;
 
 	md = find_device(param);
 	if (!md)
@@ -1532,8 +1637,6 @@ static int table_load(struct file *filp, struct dm_ioctl *param, size_t param_si
 	r = populate_table(t, param, param_size);
 	if (r)
 		goto err_unlock_md_type;
-
-	dm_ima_measure_on_table_load(t, STATUSTYPE_IMA);
 
 	immutable_target_type = dm_get_immutable_target_type(md);
 	if (immutable_target_type &&
@@ -1561,12 +1664,14 @@ static int table_load(struct file *filp, struct dm_ioctl *param, size_t param_si
 
 	dm_unlock_md_type(md);
 
+	dm_ima_alloc_context(&ima_context, false);
 	/* stage inactive table */
 	down_write(&_hash_lock);
 	hc = dm_get_mdptr(md);
 	if (!hc) {
 		DMERR("device has been removed from the dev hash table.");
 		up_write(&_hash_lock);
+		dm_ima_free_context(ima_context);
 		r = -ENXIO;
 		goto err_destroy_table;
 	}
@@ -1574,7 +1679,14 @@ static int table_load(struct file *filp, struct dm_ioctl *param, size_t param_si
 	if (hc->new_map)
 		old_map = hc->new_map;
 	hc->new_map = t;
+	dm_ima_init_context(hc, ima_context, false);
+	/* Make sure new_map doesn't get freed before we measure it*/
+	dm_get_live_table(md, &srcu_idx);
 	up_write(&_hash_lock);
+
+	dm_ima_measure_on_table_load(t, ima_context);
+	dm_ima_free_context(ima_context);
+	dm_put_live_table(md, srcu_idx);
 
 	param->flags |= DM_INACTIVE_PRESENT_FLAG;
 	__dev_status(md, param);
@@ -1603,25 +1715,29 @@ static int table_clear(struct file *filp, struct dm_ioctl *param, size_t param_s
 	struct hash_cell *hc;
 	struct mapped_device *md;
 	struct dm_table *old_map = NULL;
-	bool has_new_map = false;
+	struct dm_ima_context *ima_context = NULL;
 
+	dm_ima_alloc_context(&ima_context, true);
 	down_write(&_hash_lock);
 
 	hc = __find_device_hash_cell(param);
 	if (!hc) {
 		DMDEBUG_LIMIT("device doesn't appear to be in the dev hash table.");
 		up_write(&_hash_lock);
+		dm_ima_free_context(ima_context);
 		return -ENXIO;
 	}
 
 	if (hc->new_map) {
 		old_map = hc->new_map;
 		hc->new_map = NULL;
-		has_new_map = true;
 	}
 
+	dm_ima_init_context(hc, ima_context, false);
 	md = hc->md;
 	up_write(&_hash_lock);
+	dm_ima_measure_on_table_clear(md, ima_context);
+	dm_ima_free_context(ima_context);
 
 	param->flags &= ~DM_INACTIVE_PRESENT_FLAG;
 	__dev_status(md, param);
@@ -1630,7 +1746,6 @@ static int table_clear(struct file *filp, struct dm_ioctl *param, size_t param_s
 		dm_sync_table(md);
 		dm_table_destroy(old_map);
 	}
-	dm_ima_measure_on_table_clear(md, has_new_map);
 	dm_put(md);
 
 	return 0;
@@ -1648,8 +1763,6 @@ static void retrieve_deps(struct dm_table *table,
 	struct dm_dev_internal *dd;
 	struct dm_target_deps *deps;
 
-	down_read(&table->devices_lock);
-
 	deps = get_result_buffer(param, param_size, &len);
 
 	/*
@@ -1664,7 +1777,7 @@ static void retrieve_deps(struct dm_table *table,
 	needed = struct_size(deps, dev, count);
 	if (len < needed) {
 		param->flags |= DM_BUFFER_FULL_FLAG;
-		goto out;
+		return;
 	}
 
 	/*
@@ -1676,9 +1789,6 @@ static void retrieve_deps(struct dm_table *table,
 		deps->dev[count++] = huge_encode_dev(dd->dm_dev->bdev->bd_dev);
 
 	param->data_size = param->data_start + needed;
-
-out:
-	up_read(&table->devices_lock);
 }
 
 static int table_deps(struct file *filp, struct dm_ioctl *param, size_t param_size)
@@ -1802,8 +1912,11 @@ static int target_message(struct file *filp, struct dm_ioctl *param, size_t para
 		goto out_argv;
 
 	table = dm_get_live_table(md, &srcu_idx);
-	if (!table)
+	if (!table) {
+		DMERR("The device has no table.");
+		r = -EINVAL;
 		goto out_table;
+	}
 
 	if (dm_deleting_md(md)) {
 		r = -ENXIO;
@@ -1859,33 +1972,32 @@ static int target_message(struct file *filp, struct dm_ioctl *param, size_t para
 static ioctl_fn lookup_ioctl(unsigned int cmd, int *ioctl_flags)
 {
 	static const struct {
-		int cmd;
 		int flags;
 		ioctl_fn fn;
 	} _ioctls[] = {
-		{DM_VERSION_CMD, 0, NULL}, /* version is dealt with elsewhere */
-		{DM_REMOVE_ALL_CMD, IOCTL_FLAGS_NO_PARAMS | IOCTL_FLAGS_ISSUE_GLOBAL_EVENT, remove_all},
-		{DM_LIST_DEVICES_CMD, 0, list_devices},
+		[DM_VERSION_CMD] = {0, NULL}, /* version is dealt with elsewhere */
+		[DM_REMOVE_ALL_CMD] = {IOCTL_FLAGS_NO_PARAMS | IOCTL_FLAGS_ISSUE_GLOBAL_EVENT, remove_all},
+		[DM_LIST_DEVICES_CMD] = {0, list_devices},
 
-		{DM_DEV_CREATE_CMD, IOCTL_FLAGS_NO_PARAMS | IOCTL_FLAGS_ISSUE_GLOBAL_EVENT, dev_create},
-		{DM_DEV_REMOVE_CMD, IOCTL_FLAGS_NO_PARAMS | IOCTL_FLAGS_ISSUE_GLOBAL_EVENT, dev_remove},
-		{DM_DEV_RENAME_CMD, IOCTL_FLAGS_ISSUE_GLOBAL_EVENT, dev_rename},
-		{DM_DEV_SUSPEND_CMD, IOCTL_FLAGS_NO_PARAMS, dev_suspend},
-		{DM_DEV_STATUS_CMD, IOCTL_FLAGS_NO_PARAMS, dev_status},
-		{DM_DEV_WAIT_CMD, 0, dev_wait},
+		[DM_DEV_CREATE_CMD] = {IOCTL_FLAGS_NO_PARAMS | IOCTL_FLAGS_ISSUE_GLOBAL_EVENT, dev_create},
+		[DM_DEV_REMOVE_CMD] = {IOCTL_FLAGS_NO_PARAMS | IOCTL_FLAGS_ISSUE_GLOBAL_EVENT, dev_remove},
+		[DM_DEV_RENAME_CMD] = {IOCTL_FLAGS_ISSUE_GLOBAL_EVENT, dev_rename},
+		[DM_DEV_SUSPEND_CMD] = {IOCTL_FLAGS_NO_PARAMS, dev_suspend},
+		[DM_DEV_STATUS_CMD] = {IOCTL_FLAGS_NO_PARAMS, dev_status},
+		[DM_DEV_WAIT_CMD] = {0, dev_wait},
 
-		{DM_TABLE_LOAD_CMD, 0, table_load},
-		{DM_TABLE_CLEAR_CMD, IOCTL_FLAGS_NO_PARAMS, table_clear},
-		{DM_TABLE_DEPS_CMD, 0, table_deps},
-		{DM_TABLE_STATUS_CMD, 0, table_status},
+		[DM_TABLE_LOAD_CMD] = {0, table_load},
+		[DM_TABLE_CLEAR_CMD] = {IOCTL_FLAGS_NO_PARAMS, table_clear},
+		[DM_TABLE_DEPS_CMD] = {0, table_deps},
+		[DM_TABLE_STATUS_CMD] = {0, table_status},
 
-		{DM_LIST_VERSIONS_CMD, 0, list_versions},
+		[DM_LIST_VERSIONS_CMD] = {0, list_versions},
 
-		{DM_TARGET_MSG_CMD, 0, target_message},
-		{DM_DEV_SET_GEOMETRY_CMD, 0, dev_set_geometry},
-		{DM_DEV_ARM_POLL_CMD, IOCTL_FLAGS_NO_PARAMS, dev_arm_poll},
-		{DM_GET_TARGET_VERSION_CMD, 0, get_target_version},
-		{DM_MPATH_PROBE_PATHS_CMD, 0, NULL}, /* block device ioctl */
+		[DM_TARGET_MSG_CMD] = {0, target_message},
+		[DM_DEV_SET_GEOMETRY_CMD] = {0, dev_set_geometry},
+		[DM_DEV_ARM_POLL_CMD] = {IOCTL_FLAGS_NO_PARAMS, dev_arm_poll},
+		[DM_GET_TARGET_VERSION_CMD] = {0, get_target_version},
+		[DM_MPATH_PROBE_PATHS_CMD] = {0, NULL}, /* block device ioctl */
 	};
 
 	if (unlikely(cmd >= ARRAY_SIZE(_ioctls)))
@@ -2134,14 +2246,11 @@ static long dm_compat_ctl_ioctl(struct file *file, uint command, ulong u)
 
 static int dm_open(struct inode *inode, struct file *filp)
 {
-	int r;
 	struct dm_file *priv;
 
-	r = nonseekable_open(inode, filp);
-	if (unlikely(r))
-		return r;
+	nonseekable_open(inode, filp);
 
-	priv = filp->private_data = kmalloc(sizeof(struct dm_file), GFP_KERNEL);
+	priv = filp->private_data = kmalloc_obj(struct dm_file);
 	if (!priv)
 		return -ENOMEM;
 
@@ -2334,7 +2443,7 @@ int __init dm_early_create(struct dm_ioctl *dmi,
 	/* resume device */
 	r = dm_resume(md);
 	if (r)
-		goto err_destroy_table;
+		goto err_hash_remove;
 
 	DMINFO("%s (%s) is ready", md->disk->disk_name, dmi->name);
 	dm_put(md);

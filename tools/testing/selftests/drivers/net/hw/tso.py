@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0
 
-"""Run the tools/testing/selftests/net/csum testsuite."""
+"""A simple test for TSO."""
 
 import fcntl
 import socket
@@ -36,8 +36,11 @@ def tcp_sock_get_retrans(sock):
 def run_one_stream(cfg, ipver, remote_v4, remote_v6, should_lso):
     cfg.require_cmd("socat", local=False, remote=True)
 
+    # Set recv window clamp to avoid overwhelming receiver on debug kernels
+    # the 200k clamp should still let use reach > 15Gbps on real HW
     port = rand_port()
-    listen_cmd = f"socat -{ipver} -t 2 -u TCP-LISTEN:{port},reuseport /dev/null,ignoreeof"
+    listen_opts = f"{port},reuseport,tcp-window-clamp=200000"
+    listen_cmd = f"socat -{ipver} -t 2 -u TCP-LISTEN:{listen_opts} /dev/null,ignoreeof"
 
     with bkg(listen_cmd, host=cfg.remote, exit_wait=True) as nc:
         wait_port_listen(port, host=cfg.remote)
@@ -68,7 +71,7 @@ def run_one_stream(cfg, ipver, remote_v4, remote_v6, should_lso):
 
         # Make sure we have order of magnitude more LSO packets than
         # retransmits, in case TCP retransmitted all the LSO packets.
-        ksft_lt(tcp_sock_get_retrans(sock), total_lso_wire / 4)
+        ksft_lt(tcp_sock_get_retrans(sock), total_lso_wire / 16)
         sock.close()
 
         if should_lso:
@@ -184,28 +187,24 @@ def query_nic_features(cfg) -> None:
         cfg.wanted_features.add(f["name"])
 
     cfg.hw_features = set()
-    hw_all_features_cmd = ""
     for f in features["hw"]["bits"]["bit"]:
         if f.get("value", False):
-            feature = f["name"]
-            cfg.hw_features.add(feature)
-            hw_all_features_cmd += f" {feature} on"
-    try:
-        ethtool(f"-K {cfg.ifname} {hw_all_features_cmd}")
-    except Exception as e:
-        ksft_pr(f"WARNING: failure enabling all hw features: {e}")
-        ksft_pr("partial gso feature detection may be impacted")
+            cfg.hw_features.add(f["name"])
 
     # Check which features are supported via GSO partial
     cfg.partial_features = set()
     if 'tx-gso-partial' in cfg.hw_features:
+        seg_features = {f for f in cfg.hw_features if "segmentation" in f}
+        ethtool(f"-K {cfg.ifname} " +
+                " ".join(f"{f} on" for f in seg_features))
+
         ethtool(f"-K {cfg.ifname} tx-gso-partial off")
 
         no_partial = set()
         features = cfg.ethnl.features_get({"header": {"dev-index": cfg.ifindex}})
         for f in features["active"]["bits"]["bit"]:
             no_partial.add(f["name"])
-        cfg.partial_features = cfg.hw_features - no_partial
+        cfg.partial_features = seg_features - no_partial
         ethtool(f"-K {cfg.ifname} tx-gso-partial on")
 
     restore_wanted_features(cfg)
@@ -236,6 +235,9 @@ def main() -> None:
             ("vxlan_csum", "", "tx-udp_tnl-csum-segmentation", ("vxlan", "id 100 dstport 4789 udpcsum", ("4", "6"))),
             ("gre",        "4", "tx-gre-segmentation",         ("gre",   "", ("4", "6"))),
             ("gre",        "6", "tx-gre-segmentation",         ("ip6gre","", ("4", "6"))),
+            ("ip",         "6", "tx-ipxip6-segmentation",      ("ip6tnl","mode any", ("4", "6"))),
+            ("ip",         "4", "tx-ipxip4-segmentation",      ("sit","", ("6", ))),
+            ("ip",         "4", "tx-ipxip4-segmentation",      ("ipip","", ("4", ))),
         )
 
         cases = []

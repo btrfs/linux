@@ -3,7 +3,7 @@
  * Copyright (c) 2020-2024 Oracle.  All Rights Reserved.
  * Author: Darrick J. Wong <djwong@kernel.org>
  */
-#include "xfs.h"
+#include "xfs_platform.h"
 #include "xfs_fs.h"
 #include "xfs_shared.h"
 #include "xfs_format.h"
@@ -103,18 +103,15 @@ xrep_setup_rtrmapbt(
 	struct xfs_scrub	*sc)
 {
 	struct xrep_rtrmap	*rr;
-	char			*descr;
 	int			error;
 
 	xchk_fsgates_enable(sc, XCHK_FSGATES_RMAP);
 
-	descr = xchk_xfile_rtgroup_descr(sc, "reverse mapping records");
-	error = xrep_setup_xfbtree(sc, descr);
-	kfree(descr);
+	error = xrep_setup_xfbtree(sc, "realtime reverse mapping records");
 	if (error)
 		return error;
 
-	rr = kzalloc(sizeof(struct xrep_rtrmap), XCHK_GFP_FLAGS);
+	rr = kzalloc_obj(struct xrep_rtrmap, XCHK_GFP_FLAGS);
 	if (!rr)
 		return -ENOMEM;
 
@@ -327,7 +324,7 @@ xrep_rtrmap_scan_dfork(
 	struct xfs_inode	*ip)
 {
 	struct xrep_rtrmap_ifork rf = {
-		.accum		= { .rm_owner = ip->i_ino, },
+		.accum		= { .rm_owner = I_INO(ip), },
 		.rr		= rr,
 	};
 	struct xfs_ifork	*ifp = xfs_ifork_ptr(ip, XFS_DATA_FORK);
@@ -395,7 +392,7 @@ xrep_rtrmap_walk_rmap(
 		return error;
 
 	/* Skip extents which are not owned by this inode and fork. */
-	if (rec->rm_owner != rr->sc->ip->i_ino)
+	if (rec->rm_owner != I_INO(rr->sc->ip))
 		return 0;
 
 	error = xrep_check_ino_btree_mapping(rr->sc, rec);

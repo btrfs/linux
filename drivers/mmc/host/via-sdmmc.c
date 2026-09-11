@@ -323,9 +323,8 @@ struct via_crdr_mmc_host {
 #define VIA_CMD_TIMEOUT_MS		1000
 
 static const struct pci_device_id via_ids[] = {
-	{PCI_VENDOR_ID_VIA, PCI_DEVICE_ID_VIA_9530,
-	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0,},
-	{0,}
+	{ PCI_VDEVICE(VIA, PCI_DEVICE_ID_VIA_9530) },
+	{ }
 };
 
 MODULE_DEVICE_TABLE(pci, via_ids);
@@ -1154,10 +1153,16 @@ static int via_sd_probe(struct pci_dev *pcidev,
 
 	ret = mmc_add_host(mmc);
 	if (ret)
-		goto unmap;
+		goto free_irq;
 
 	return 0;
 
+free_irq:
+	writeb(0x0, sdhost->pcictrl_mmiobase + VIA_CRDR_PCIINTCTRL);
+	free_irq(pcidev->irq, sdhost);
+	cancel_work_sync(&sdhost->carddet_work);
+	/* carddet_work may re-enable the interrupt via via_reset_pcictrl(). */
+	writeb(0x0, sdhost->pcictrl_mmiobase + VIA_CRDR_PCIINTCTRL);
 unmap:
 	iounmap(sdhost->mmiobase);
 release:
@@ -1199,6 +1204,10 @@ static void via_sd_remove(struct pci_dev *pcidev)
 	mmc_remove_host(sdhost->mmc);
 
 	free_irq(pcidev->irq, sdhost);
+
+	cancel_work_sync(&sdhost->carddet_work);
+	/* carddet_work may re-enable the interrupt via via_reset_pcictrl(). */
+	writeb(0x0, sdhost->pcictrl_mmiobase + VIA_CRDR_PCIINTCTRL);
 
 	timer_delete_sync(&sdhost->timer);
 

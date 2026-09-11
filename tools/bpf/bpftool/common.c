@@ -832,6 +832,8 @@ static int prog_fd_by_nametag(void *nametag, int **fds, bool tag)
 
 		fd = bpf_prog_get_fd_by_id(id);
 		if (fd < 0) {
+			if (errno == ENOENT)
+				continue;
 			p_err("can't get prog by id (%u): %s",
 			      id, strerror(errno));
 			goto err_close_fds;
@@ -996,6 +998,8 @@ static int map_fd_by_name(char *name, int **fds,
 		opts_ro.open_flags = BPF_F_RDONLY;
 		fd = bpf_map_get_fd_by_id_opts(id, &opts_ro);
 		if (fd < 0) {
+			if (errno == ENOENT)
+				continue;
 			p_err("can't get map by id (%u): %s",
 			      id, strerror(errno));
 			goto err_close_fds;
@@ -1191,6 +1195,7 @@ const char *bpf_attach_type_input_str(enum bpf_attach_type t)
 	case BPF_TRACE_FENTRY:			return "fentry";
 	case BPF_TRACE_FEXIT:			return "fexit";
 	case BPF_MODIFY_RETURN:			return "mod_ret";
+	case BPF_TRACE_FSESSION:		return "fsession";
 	case BPF_SK_REUSEPORT_SELECT:		return "sk_skb_reuseport_select";
 	case BPF_SK_REUSEPORT_SELECT_OR_MIGRATE:	return "sk_skb_reuseport_select_or_migrate";
 	default:	return libbpf_bpf_attach_type_str(t);

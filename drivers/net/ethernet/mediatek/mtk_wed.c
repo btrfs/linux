@@ -656,7 +656,7 @@ mtk_wed_tx_buffer_alloc(struct mtk_wed_device *dev)
 	}
 	n_pages = dev->tx_buf_ring.size / MTK_WED_BUF_PER_PAGE;
 
-	page_list = kcalloc(n_pages, sizeof(*page_list), GFP_KERNEL);
+	page_list = kzalloc_objs(*page_list, n_pages);
 	if (!page_list)
 		return -ENOMEM;
 
@@ -780,7 +780,7 @@ mtk_wed_hwrro_buffer_alloc(struct mtk_wed_device *dev)
 	if (!dev->wlan.hw_rro)
 		return 0;
 
-	page_list = kcalloc(n_pages, sizeof(*page_list), GFP_KERNEL);
+	page_list = kzalloc_objs(*page_list, n_pages);
 	if (!page_list)
 		return -ENOMEM;
 
@@ -2071,6 +2071,11 @@ mtk_wed_dma_enable(struct mtk_wed_device *dev)
 		wdma_set(dev, MTK_WDMA_GLO_CFG, MTK_WDMA_GLO_CFG_TX_DMA_EN);
 	}
 
+	if (mtk_wed_is_v2(dev->hw))
+		wdma_m32(dev, MTK_WDMA_GLO_CFG,
+			 MTK_WDMA_GLO_CFG_RESV_BUFF,
+			 FIELD_PREP(MTK_WDMA_GLO_CFG_RESV_BUFF, 0x80));
+
 	wed_set(dev, MTK_WED_GLO_CFG,
 		MTK_WED_GLO_CFG_TX_DMA_EN |
 		MTK_WED_GLO_CFG_RX_DMA_EN);
@@ -2718,7 +2723,7 @@ mtk_wed_setup_tc_block(struct mtk_wed_hw *hw, struct net_device *dev,
 			return 0;
 		}
 
-		priv = kzalloc(sizeof(*priv), GFP_KERNEL);
+		priv = kzalloc_obj(*priv);
 		if (!priv)
 			return -ENOMEM;
 
@@ -2822,7 +2827,7 @@ void mtk_wed_add_hw(struct device_node *np, struct mtk_eth *eth,
 	if (WARN_ON(hw_list[index]))
 		goto unlock;
 
-	hw = kzalloc(sizeof(*hw), GFP_KERNEL);
+	hw = kzalloc_obj(*hw);
 	if (!hw)
 		goto unlock;
 

@@ -26,7 +26,6 @@
 #include "demangle-rust-v0.h"
 #include "dso.h"
 #include "util.h" // lsdir()
-#include "debug.h"
 #include "event.h"
 #include "machine.h"
 #include "map.h"
@@ -49,9 +48,15 @@
 #include <symbol/kallsyms.h>
 #include <sys/utsname.h>
 
+static int map_fixup_cb(struct map *map, void *data __maybe_unused)
+{
+	map__fixup_start(map);
+	map__fixup_end(map);
+	return 0;
+}
+
 static int dso__load_kernel_sym(struct dso *dso, struct map *map);
 static int dso__load_guest_kernel_sym(struct dso *dso, struct map *map);
-static bool symbol__is_idle(const char *name);
 
 int vmlinux_path__nr_entries;
 char **vmlinux_path;
@@ -66,9 +71,11 @@ struct symbol_conf symbol_conf = {
 	.time_quantum		= 100 * NSEC_PER_MSEC, /* 100ms */
 	.show_hist_headers	= true,
 	.symfs			= "",
+	.symfs_layout_flat	= false,
 	.event_group		= true,
 	.inline_name		= true,
 	.res_sample		= 0,
+	.addr2line_timeout_ms	= 5 * 1000,
 };
 
 struct map_list_node {
@@ -104,21 +111,10 @@ static enum dso_binary_type binary_type_symtab[] = {
 
 #define DSO_BINARY_TYPE__SYMTAB_CNT ARRAY_SIZE(binary_type_symtab)
 
-static bool symbol_type__filter(char __symbol_type)
+static bool symbol_type__filter(char symbol_type)
 {
-	// Since 'U' == undefined and 'u' == unique global symbol, we can't use toupper there
-	// 'N' is for debugging symbols, 'n' is a non-data, non-code, non-debug read-only section.
-	// According to 'man nm'.
-	// 'N' first seen in:
-	// ffffffff9b35d130 N __pfx__RNCINvNtNtNtCsbDUBuN8AbD4_4core4iter8adapters3map12map_try_foldjNtCs6vVzKs5jPr6_12drm_panic_qr7VersionuINtNtNtBa_3ops12control_flow11ControlFlowB10_ENcB10_0NCINvNvNtNtNtB8_6traits8iterator8Iterator4find5checkB10_NCNvMB12_B10_13from_segments0E0E0B12_
-	// a seemingly Rust mangled name
-	// Ditto for '1':
-	// root@x1:~# grep ' 1 ' /proc/kallsyms
-	// ffffffffb098bc00 1 __pfx__RNCINvNtNtNtCsfwaGRd4cjqE_4core4iter8adapters3map12map_try_foldjNtCskFudTml27HW_12drm_panic_qr7VersionuINtNtNtBa_3ops12control_flow11ControlFlowB10_ENcB10_0NCINvNvNtNtNtB8_6traits8iterator8Iterator4find5checkB10_NCNvMB12_B10_13from_segments0E0E0B12_
-	// ffffffffb098bc10 1 _RNCINvNtNtNtCsfwaGRd4cjqE_4core4iter8adapters3map12map_try_foldjNtCskFudTml27HW_12drm_panic_qr7VersionuINtNtNtBa_3ops12control_flow11ControlFlowB10_ENcB10_0NCINvNvNtNtNtB8_6traits8iterator8Iterator4find5checkB10_NCNvMB12_B10_13from_segments0E0E0B12_
-	char symbol_type = toupper(__symbol_type);
-	return symbol_type == 'T' || symbol_type == 'W' || symbol_type == 'D' || symbol_type == 'B' ||
-	       __symbol_type == 'u' || __symbol_type == 'l' || __symbol_type == 'N' || __symbol_type == '1';
+	symbol_type = toupper(symbol_type);
+	return symbol_type == 'T' || symbol_type == 'W' || symbol_type == 'D' || symbol_type == 'B';
 }
 
 static int prefix_underscores_count(const char *str)
@@ -173,24 +169,24 @@ static int choose_best_symbol(struct symbol *syma, struct symbol *symb)
 	else if ((a == 0) && (b > 0))
 		return SYMBOL_B;
 
-	if (syma->type != symb->type) {
-		if (syma->type == STT_NOTYPE)
+	if (symbol__type(syma) != symbol__type(symb)) {
+		if (symbol__type(syma) == STT_NOTYPE)
 			return SYMBOL_B;
-		if (symb->type == STT_NOTYPE)
+		if (symbol__type(symb) == STT_NOTYPE)
 			return SYMBOL_A;
 	}
 
 	/* Prefer a non weak symbol over a weak one */
-	a = syma->binding == STB_WEAK;
-	b = symb->binding == STB_WEAK;
+	a = symbol__binding(syma) == STB_WEAK;
+	b = symbol__binding(symb) == STB_WEAK;
 	if (b && !a)
 		return SYMBOL_A;
 	if (a && !b)
 		return SYMBOL_B;
 
 	/* Prefer a global symbol over a non global one */
-	a = syma->binding == STB_GLOBAL;
-	b = symb->binding == STB_GLOBAL;
+	a = symbol__binding(syma) == STB_GLOBAL;
+	b = symbol__binding(symb) == STB_GLOBAL;
 	if (a && !b)
 		return SYMBOL_A;
 	if (b && !a)
@@ -237,14 +233,14 @@ again:
 			continue;
 
 		if (choose_best_symbol(curr, next) == SYMBOL_A) {
-			if (next->type == STT_GNU_IFUNC)
-				curr->ifunc_alias = true;
+			if (symbol__type(next) == STT_GNU_IFUNC)
+				symbol__set_ifunc_alias(curr, true);
 			rb_erase_cached(&next->rb_node, symbols);
 			symbol__delete(next);
 			goto again;
 		} else {
-			if (curr->type == STT_GNU_IFUNC)
-				next->ifunc_alias = true;
+			if (symbol__type(curr) == STT_GNU_IFUNC)
+				symbol__set_ifunc_alias(next, true);
 			nd = rb_next(&curr->rb_node);
 			rb_erase_cached(&curr->rb_node, symbols);
 			symbol__delete(curr);
@@ -332,8 +328,8 @@ struct symbol *symbol__new(u64 start, u64 len, u8 binding, u8 type, const char *
 
 	sym->start   = start;
 	sym->end     = len ? start + len : start;
-	sym->type    = type;
-	sym->binding = binding;
+	atomic_init(&sym->flags, (type << SYMBOL_FLAG_TYPE_SHIFT) |
+				 (binding << SYMBOL_FLAG_BINDING_SHIFT));
 	sym->namelen = namelen - 1;
 
 	pr_debug4("%s: %s %#" PRIx64 "-%#" PRIx64 "\n",
@@ -355,6 +351,49 @@ void symbol__delete(struct symbol *sym)
 	free(((void *)sym) - symbol_conf.priv_size);
 }
 
+void symbol__set_ignore(struct symbol *sym, bool ignore)
+{
+	if (ignore)
+		atomic_fetch_or(&sym->flags, SYMBOL_FLAG_IGNORE);
+	else
+		atomic_fetch_and(&sym->flags, ~SYMBOL_FLAG_IGNORE);
+}
+
+void symbol__set_annotate2(struct symbol *sym, bool annotate2)
+{
+	if (annotate2)
+		atomic_fetch_or(&sym->flags, SYMBOL_FLAG_ANNOTATE2);
+	else
+		atomic_fetch_and(&sym->flags, ~SYMBOL_FLAG_ANNOTATE2);
+}
+
+void symbol__set_inlined(struct symbol *sym, bool inlined)
+{
+	if (inlined)
+		atomic_fetch_or(&sym->flags, SYMBOL_FLAG_INLINED);
+	else
+		atomic_fetch_and(&sym->flags, ~SYMBOL_FLAG_INLINED);
+}
+
+void symbol__set_ifunc_alias(struct symbol *sym, bool ifunc_alias)
+{
+	if (ifunc_alias)
+		atomic_fetch_or(&sym->flags, SYMBOL_FLAG_IFUNC_ALIAS);
+	else
+		atomic_fetch_and(&sym->flags, ~SYMBOL_FLAG_IFUNC_ALIAS);
+}
+
+static void symbol__set_idle(struct symbol *sym, bool idle)
+{
+	uint16_t old_flags = atomic_load_explicit(&sym->flags, memory_order_relaxed);
+	uint16_t new_flags;
+	uint16_t idle_val = idle ? SYMBOL_IDLE__IDLE : SYMBOL_IDLE__NOT_IDLE;
+
+	do {
+		new_flags = old_flags & ~SYMBOL_FLAG_IDLE_MASK;
+		new_flags |= (idle_val << SYMBOL_FLAG_IDLE_SHIFT);
+	} while (!atomic_compare_exchange_weak(&sym->flags, &old_flags, new_flags));
+}
 void symbols__delete(struct rb_root_cached *symbols)
 {
 	struct symbol *pos;
@@ -368,25 +407,13 @@ void symbols__delete(struct rb_root_cached *symbols)
 	}
 }
 
-void __symbols__insert(struct rb_root_cached *symbols,
-		       struct symbol *sym, bool kernel)
+void __symbols__insert(struct rb_root_cached *symbols, struct symbol *sym)
 {
 	struct rb_node **p = &symbols->rb_root.rb_node;
 	struct rb_node *parent = NULL;
 	const u64 ip = sym->start;
 	struct symbol *s;
 	bool leftmost = true;
-
-	if (kernel) {
-		const char *name = sym->name;
-		/*
-		 * ppc64 uses function descriptors and appends a '.' to the
-		 * start of every instruction address. Remove it.
-		 */
-		if (name[0] == '.')
-			name++;
-		sym->idle = symbol__is_idle(name);
-	}
 
 	while (*p != NULL) {
 		parent = *p;
@@ -404,7 +431,7 @@ void __symbols__insert(struct rb_root_cached *symbols,
 
 void symbols__insert(struct rb_root_cached *symbols, struct symbol *sym)
 {
-	__symbols__insert(symbols, sym, false);
+	__symbols__insert(symbols, sym);
 }
 
 static struct symbol *symbols__find(struct rb_root_cached *symbols, u64 ip)
@@ -565,7 +592,7 @@ void dso__reset_find_symbol_cache(struct dso *dso)
 
 void dso__insert_symbol(struct dso *dso, struct symbol *sym)
 {
-	__symbols__insert(dso__symbols(dso), sym, dso__kernel(dso));
+	__symbols__insert(dso__symbols(dso), sym);
 
 	/* update the symbol cache if necessary */
 	if (dso__last_find_result_addr(dso) >= sym->start &&
@@ -727,47 +754,120 @@ out:
 	return err;
 }
 
+
 /*
  * These are symbols in the kernel image, so make sure that
  * sym is from a kernel DSO.
  */
-static bool symbol__is_idle(const char *name)
+static int sym_name_cmp(const void *a, const void *b)
 {
-	const char * const idle_symbols[] = {
+	const char *name = a;
+	const char *const *sym = b;
+
+	return strcmp(name, *sym);
+}
+
+static bool match_x86_idle_routine(const char *name, const char *base)
+{
+	if (strstarts(name, base)) {
+		size_t len = strlen(base);
+
+		if (name[len] == '\0' || name[len] == '.')
+			return true;
+	}
+	return false;
+}
+
+bool symbol__is_idle(struct symbol *sym, const struct dso *dso, struct perf_env *env)
+{
+	static const char * const idle_symbols[] = {
 		"acpi_idle_do_entry",
 		"acpi_processor_ffh_cstate_enter",
 		"arch_cpu_idle",
 		"cpu_idle",
 		"cpu_startup_entry",
-		"idle_cpu",
-		"intel_idle",
-		"intel_idle_ibrs",
 		"default_idle",
-		"native_safe_halt",
 		"enter_idle",
 		"exit_idle",
-		"mwait_idle",
-		"mwait_idle_with_hints",
-		"mwait_idle_with_hints.constprop.0",
+		"idle_cpu",
+		"native_safe_halt",
 		"poll_idle",
-		"ppc64_runlatch_off",
 		"pseries_dedicated_idle_sleep",
-		"psw_idle",
-		"psw_idle_exit",
-		NULL
 	};
-	int i;
-	static struct strlist *idle_symbols_list;
+	const char *name = sym->name;
+	uint16_t e_machine;
 
-	if (idle_symbols_list)
-		return strlist__has_entry(idle_symbols_list, name);
+	{
+		uint16_t flags = atomic_load_explicit(&sym->flags, memory_order_relaxed);
+		uint16_t idle_val = (flags & SYMBOL_FLAG_IDLE_MASK) >> SYMBOL_FLAG_IDLE_SHIFT;
 
-	idle_symbols_list = strlist__new(NULL, NULL);
+		if (idle_val != SYMBOL_IDLE__UNKNOWN)
+			return idle_val == SYMBOL_IDLE__IDLE;
+	}
 
-	for (i = 0; idle_symbols[i]; i++)
-		strlist__add(idle_symbols_list, idle_symbols[i]);
+	if (!dso || dso__kernel(dso) == DSO_SPACE__USER) {
+		symbol__set_idle(sym, /*idle=*/false);
+		return false;
+	}
 
-	return strlist__has_entry(idle_symbols_list, name);
+	/*
+	 * ppc64 uses function descriptors and appends a '.' to the
+	 * start of every instruction address. Remove it.
+	 */
+	if (name[0] == '.')
+		name++;
+
+	if (bsearch(name, idle_symbols, ARRAY_SIZE(idle_symbols),
+		    sizeof(idle_symbols[0]), sym_name_cmp)) {
+		symbol__set_idle(sym, /*idle=*/true);
+		return true;
+	}
+
+	e_machine = (env && env->arch) ? perf_env__e_machine(env, NULL) : EM_NONE;
+	if (e_machine == EM_NONE && dso)
+		e_machine = dso__e_machine((struct dso *)dso, NULL, NULL);
+	if (e_machine == EM_NONE && env)
+		e_machine = perf_env__e_machine(env, NULL);
+
+	if (e_machine == EM_386 || e_machine == EM_X86_64) {
+		if (match_x86_idle_routine(name, "intel_idle") ||
+		    match_x86_idle_routine(name, "intel_idle_irq") ||
+		    match_x86_idle_routine(name, "intel_idle_ibrs") ||
+		    match_x86_idle_routine(name, "mwait_idle") ||
+		    match_x86_idle_routine(name, "mwait_idle_with_hints")) {
+			symbol__set_idle(sym, /*idle=*/true);
+			return true;
+		}
+	}
+
+	if (e_machine == EM_PPC64 && !strcmp(name, "ppc64_runlatch_off")) {
+		symbol__set_idle(sym, /*idle=*/true);
+		return true;
+	}
+
+	if (e_machine == EM_S390 && strstarts(name, "psw_idle")) {
+		int major = 0, minor = 0;
+		const char *release = env ? perf_env__os_release(env) : NULL;
+
+		/*
+		 * If we can't determine the release (e.g. unpopulated guest traces),
+		 * default to idle.
+		 */
+		if (!release) {
+			symbol__set_idle(sym, /*idle=*/true);
+			return true;
+		}
+
+		/* Before v6.10, s390 used psw_idle. */
+		if (sscanf(release, "%d.%d", &major, &minor) == 2 &&
+		    (major < 6 || (major == 6 && minor < 10))) {
+			symbol__set_idle(sym, /*idle=*/true);
+			return true;
+		}
+	}
+
+	symbol__set_idle(sym, /*idle=*/false);
+	return false;
 }
 
 static int map__process_kallsym_symbol(void *arg, const char *name,
@@ -780,8 +880,8 @@ static int map__process_kallsym_symbol(void *arg, const char *name,
 	if (!symbol_type__filter(type))
 		return 0;
 
-	/* Ignore local symbols for ARM modules */
-	if (name[0] == '$')
+	/* Ignore mapping and livepatch symbols in kallsyms */
+	if (is_ignored_kernel_symbol(name) || is_livepatch_symbol(name))
 		return 0;
 
 	/*
@@ -796,7 +896,7 @@ static int map__process_kallsym_symbol(void *arg, const char *name,
 	 * We will pass the symbols to the filter later, in
 	 * map__split_kallsyms, when we have split the maps per module
 	 */
-	__symbols__insert(root, sym, !strchr(name, '['));
+	__symbols__insert(root, sym);
 
 	return 0;
 }
@@ -861,6 +961,23 @@ static int maps__split_kallsyms_for_kcore(struct maps *kmaps, struct dso *dso)
 	return count;
 }
 
+static uint16_t machine_or_dso_e_machine(struct machine *machine, struct dso *dso)
+{
+	uint16_t e_machine = EM_NONE;
+	/* DSO should be most accurate */
+	if (dso)
+		e_machine = dso__e_machine(dso, machine, /*e_flags=*/NULL);
+
+	if (e_machine != EM_NONE)
+		return e_machine;
+
+	/* Check the global environment next. */
+	if (machine && machine->env && machine->env->e_machine != EM_NONE)
+		return machine->env->e_machine;
+
+	return perf_env__e_machine(machine ? machine->env : NULL, /*e_flags=*/NULL);
+}
+
 /*
  * Split the symbols into maps, making sure there are no overlaps, i.e. the
  * kernel range is broken in several maps, named [kernel].N, as we don't have
@@ -876,14 +993,13 @@ static int maps__split_kallsyms(struct maps *kmaps, struct dso *dso, u64 delta,
 	struct rb_root_cached *root = dso__symbols(dso);
 	struct rb_node *next = rb_first_cached(root);
 	int kernel_range = 0;
-	bool x86_64;
+	uint16_t e_machine = EM_NONE;
 
 	if (!kmaps)
 		return -1;
 
 	machine = maps__machine(kmaps);
-
-	x86_64 = machine__is(machine, "x86_64");
+	e_machine = machine_or_dso_e_machine(machine, dso);
 
 	while (next) {
 		char *module;
@@ -935,7 +1051,7 @@ static int maps__split_kallsyms(struct maps *kmaps, struct dso *dso, u64 delta,
 			 */
 			pos->start = map__map_ip(curr_map, pos->start);
 			pos->end   = map__map_ip(curr_map, pos->end);
-		} else if (x86_64 && is_entry_trampoline(pos->name)) {
+		} else if (e_machine == EM_X86_64 && is_entry_trampoline(pos->name)) {
 			/*
 			 * These symbols are not needed anymore since the
 			 * trampoline maps refer to the text section and it's
@@ -955,7 +1071,8 @@ static int maps__split_kallsyms(struct maps *kmaps, struct dso *dso, u64 delta,
 				pos->end -= delta;
 			}
 
-			if (count == 0) {
+			if (map__start(initial_map) <= (pos->start + delta) &&
+			    (pos->start + delta) < map__end(initial_map)) {
 				map__zput(curr_map);
 				curr_map = map__get(initial_map);
 				goto add_symbol;
@@ -964,11 +1081,11 @@ static int maps__split_kallsyms(struct maps *kmaps, struct dso *dso, u64 delta,
 			if (dso__kernel(dso) == DSO_SPACE__KERNEL_GUEST)
 				snprintf(dso_name, sizeof(dso_name),
 					"[guest.kernel].%d",
-					kernel_range++);
+					kernel_range);
 			else
 				snprintf(dso_name, sizeof(dso_name),
 					"[kernel].%d",
-					kernel_range++);
+					kernel_range);
 
 			ndso = dso__new(dso_name);
 			map__zput(curr_map);
@@ -976,6 +1093,7 @@ static int maps__split_kallsyms(struct maps *kmaps, struct dso *dso, u64 delta,
 				return -1;
 
 			dso__set_kernel(ndso, dso__kernel(dso));
+			dso__set_loaded(ndso);
 
 			curr_map = map__new2(pos->start, ndso);
 			if (curr_map == NULL) {
@@ -989,6 +1107,7 @@ static int maps__split_kallsyms(struct maps *kmaps, struct dso *dso, u64 delta,
 				dso__put(ndso);
 				return -1;
 			}
+			dso__put(ndso);
 			++kernel_range;
 		} else if (delta) {
 			/* Kernel was relocated at boot time */
@@ -1435,7 +1554,7 @@ static int dso__load_kcore(struct dso *dso, struct map *map,
 		free(new_node);
 	}
 
-	if (machine__is(machine, "x86_64")) {
+	if (machine_or_dso_e_machine(machine, dso) == EM_X86_64) {
 		u64 addr;
 
 		/*
@@ -1723,7 +1842,7 @@ int dso__load(struct dso *dso, struct map *map)
 			ret = dso__load_guest_kernel_sym(dso, map);
 
 		machine = maps__machine(map__kmaps(map));
-		if (machine__is(machine, "x86_64"))
+		if (machine && machine_or_dso_e_machine(machine, dso) == EM_X86_64)
 			machine__map_x86_64_entry_trampolines(machine, dso);
 		goto out;
 	}
@@ -1747,14 +1866,13 @@ int dso__load(struct dso *dso, struct map *map)
 
 	/*
 	 * Read the build id if possible. This is required for
-	 * DSO_BINARY_TYPE__BUILDID_DEBUGINFO to work. Don't block in case path
-	 * isn't for a regular file.
+	 * DSO_BINARY_TYPE__BUILDID_DEBUGINFO to work.
 	 */
 	if (!dso__has_build_id(dso)) {
 		struct build_id bid = { .size = 0, };
 
 		__symbol__join_symfs(name, PATH_MAX, dso__long_name(dso));
-		if (filename__read_build_id(name, &bid, /*block=*/false) > 0)
+		if (filename__read_build_id(name, &bid) > 0)
 			dso__set_build_id(dso, &bid);
 	}
 
@@ -2005,6 +2123,7 @@ static char *dso__find_kallsyms(struct dso *dso, struct map *map)
 	char sbuild_id[SBUILD_ID_SIZE];
 	bool is_host = false;
 	char path[PATH_MAX];
+	struct maps *kmaps = map__kmaps(map);
 
 	if (!dso__has_build_id(dso)) {
 		/*
@@ -2041,8 +2160,13 @@ static char *dso__find_kallsyms(struct dso *dso, struct map *map)
 		return strdup(path);
 
 	/* Use current /proc/kallsyms if possible */
-	if (is_host) {
 proc_kallsyms:
+	if (kmaps) {
+		struct machine *machine = maps__machine(kmaps);
+
+		scnprintf(path, sizeof(path), "%s/proc/kallsyms", machine->root_dir);
+		return strdup(path);
+	} else if (is_host) {
 		return strdup("/proc/kallsyms");
 	}
 
@@ -2123,10 +2247,11 @@ do_kallsyms:
 	free(kallsyms_allocated_filename);
 
 	if (err > 0 && !dso__is_kcore(dso)) {
+		struct maps *kmaps = map__kmaps(map);
+
 		dso__set_binary_type(dso, DSO_BINARY_TYPE__KALLSYMS);
 		dso__set_long_name(dso, DSO__NAME_KALLSYMS, false);
-		map__fixup_start(map);
-		map__fixup_end(map);
+		maps__mutate_mapping(kmaps, map, map_fixup_cb, NULL);
 	}
 
 	return err;
@@ -2158,7 +2283,7 @@ static int dso__load_guest_kernel_sym(struct dso *dso, struct map *map)
 		if (!kallsyms_filename)
 			return -1;
 	} else {
-		sprintf(path, "%s/proc/kallsyms", machine->root_dir);
+		snprintf(path, sizeof(path), "%s/proc/kallsyms", machine->root_dir);
 		kallsyms_filename = path;
 	}
 
@@ -2166,10 +2291,11 @@ static int dso__load_guest_kernel_sym(struct dso *dso, struct map *map)
 	if (err > 0)
 		pr_debug("Using %s for symbols\n", kallsyms_filename);
 	if (err > 0 && !dso__is_kcore(dso)) {
+		struct maps *kmaps = map__kmaps(map);
+
 		dso__set_binary_type(dso, DSO_BINARY_TYPE__GUEST_KALLSYMS);
 		dso__set_long_name(dso, machine->mmap_name, false);
-		map__fixup_start(map);
-		map__fixup_end(map);
+		maps__mutate_mapping(kmaps, map, map_fixup_cb, NULL);
 	}
 
 	return err;
@@ -2211,7 +2337,7 @@ static int vmlinux_path__init(struct perf_env *env)
 {
 	struct utsname uts;
 	char bf[PATH_MAX];
-	char *kernel_version;
+	const char *kernel_version;
 	unsigned int i;
 
 	vmlinux_path = malloc(sizeof(char *) * (ARRAY_SIZE(vmlinux_paths) +
@@ -2228,7 +2354,7 @@ static int vmlinux_path__init(struct perf_env *env)
 		return 0;
 
 	if (env) {
-		kernel_version = env->os_release;
+		kernel_version = perf_env__os_release(env);
 	} else {
 		if (uname(&uts) < 0)
 			goto out_fail;
@@ -2326,8 +2452,7 @@ static bool symbol__read_kptr_restrict(void)
 {
 	bool value = false;
 	FILE *fp = fopen("/proc/sys/kernel/kptr_restrict", "r");
-	bool used_root;
-	bool cap_syslog = perf_cap__capable(CAP_SYSLOG, &used_root);
+	bool cap_syslog = perf_cap__capable(CAP_SYSLOG);
 
 	if (fp != NULL) {
 		char line[8];
@@ -2366,7 +2491,8 @@ static int setup_parallelism_bitmap(void)
 {
 	struct perf_cpu_map *map;
 	struct perf_cpu cpu;
-	int i, err = -1;
+	unsigned int i;
+	int err = -1;
 
 	if (symbol_conf.parallelism_list_str == NULL)
 		return 0;
@@ -2477,6 +2603,7 @@ void symbol__exit(void)
 {
 	if (!symbol_conf.initialized)
 		return;
+
 	strlist__delete(symbol_conf.bt_stop_list);
 	strlist__delete(symbol_conf.sym_list);
 	strlist__delete(symbol_conf.dso_list);
@@ -2494,16 +2621,42 @@ int symbol__config_symfs(const struct option *opt __maybe_unused,
 			 const char *dir, int unset __maybe_unused)
 {
 	char *bf = NULL;
+	const char *layout_str;
+	char *dir_copy;
 	int ret;
 
-	symbol_conf.symfs = strdup(dir);
-	if (symbol_conf.symfs == NULL)
-		return -ENOMEM;
+	layout_str = strrchr(dir, ',');
+	if (layout_str) {
+		size_t dir_len = layout_str - dir;
+
+		dir_copy = strndup(dir, dir_len);
+		if (dir_copy == NULL)
+			return -ENOMEM;
+
+		symbol_conf.symfs = dir_copy;
+
+		layout_str++;
+		if (!strcmp(layout_str, "flat"))
+			symbol_conf.symfs_layout_flat = true;
+		else if (!strcmp(layout_str, "hierarchy"))
+			symbol_conf.symfs_layout_flat = false;
+		else {
+			pr_err("Invalid layout: '%s', use 'hierarchy' or 'flat'\n",
+			       layout_str);
+			free(dir_copy);
+			return -EINVAL;
+		}
+	} else {
+		symbol_conf.symfs = strdup(dir);
+		if (symbol_conf.symfs == NULL)
+			return -ENOMEM;
+		symbol_conf.symfs_layout_flat = false;
+	}
 
 	/* skip the locally configured cache if a symfs is given, and
 	 * config buildid dir to symfs/.debug
 	 */
-	ret = asprintf(&bf, "%s/%s", dir, ".debug");
+	ret = asprintf(&bf, "%s/%s", symbol_conf.symfs, ".debug");
 	if (ret < 0)
 		return -ENOMEM;
 

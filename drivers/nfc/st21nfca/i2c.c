@@ -572,21 +572,21 @@ static void st21nfca_hci_i2c_remove(struct i2c_client *client)
 }
 
 static const struct i2c_device_id st21nfca_hci_i2c_id_table[] = {
-	{ ST21NFCA_HCI_DRIVER_NAME },
-	{}
+	{ .name = ST21NFCA_HCI_DRIVER_NAME },
+	{ }
 };
 MODULE_DEVICE_TABLE(i2c, st21nfca_hci_i2c_id_table);
 
-static const struct acpi_device_id st21nfca_hci_i2c_acpi_match[] __maybe_unused = {
-	{"SMO2100", 0},
-	{}
+static const struct acpi_device_id st21nfca_hci_i2c_acpi_match[] = {
+	{ .id = "SMO2100" },
+	{ }
 };
 MODULE_DEVICE_TABLE(acpi, st21nfca_hci_i2c_acpi_match);
 
-static const struct of_device_id of_st21nfca_i2c_match[] __maybe_unused = {
-	{ .compatible = "st,st21nfca-i2c", },
-	{ .compatible = "st,st21nfca_i2c", },
-	{}
+static const struct of_device_id of_st21nfca_i2c_match[] = {
+	{ .compatible = "st,st21nfca-i2c" },
+	{ .compatible = "st,st21nfca_i2c" },
+	{ }
 };
 MODULE_DEVICE_TABLE(of, of_st21nfca_i2c_match);
 

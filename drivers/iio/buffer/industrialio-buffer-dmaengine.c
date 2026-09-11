@@ -6,6 +6,7 @@
 
 #include <linux/slab.h>
 #include <linux/kernel.h>
+#include <linux/cleanup.h>
 #include <linux/dmaengine.h>
 #include <linux/dma-mapping.h>
 #include <linux/spinlock.h>
@@ -39,27 +40,41 @@ struct dmaengine_buffer {
 	size_t max_size;
 };
 
-static struct dmaengine_buffer *iio_buffer_to_dmaengine_buffer(
-		struct iio_buffer *buffer)
+static struct dmaengine_buffer *iio_buffer_to_dmaengine_buffer(struct iio_buffer *buffer)
 {
 	return container_of(buffer, struct dmaengine_buffer, queue.buffer);
 }
 
 static void iio_dmaengine_buffer_block_done(void *data,
-		const struct dmaengine_result *result)
+					    const struct dmaengine_result *result)
 {
 	struct iio_dma_buffer_block *block = data;
-	unsigned long flags;
 
-	spin_lock_irqsave(&block->queue->list_lock, flags);
-	list_del(&block->head);
-	spin_unlock_irqrestore(&block->queue->list_lock, flags);
+	scoped_guard(spinlock_irqsave, &block->queue->list_lock)
+		list_del(&block->head);
 	block->bytes_used -= result->residue;
 	iio_dma_buffer_block_done(block);
 }
 
+/*
+ * Cyclic transfers run until abort. Cap active cyclic blocks to one until there
+ * is a use case for more.
+ */
+static bool iio_dmaengine_buffer_has_active_cyclic(struct dmaengine_buffer *dmaengine_buffer)
+{
+	struct iio_dma_buffer_block *block;
+
+	guard(spinlock_irqsave)(&dmaengine_buffer->queue.list_lock);
+	list_for_each_entry(block, &dmaengine_buffer->active, head) {
+		if (block->cyclic)
+			return true;
+	}
+
+	return false;
+}
+
 static int iio_dmaengine_buffer_submit_block(struct iio_dma_buffer_queue *queue,
-	struct iio_dma_buffer_block *block)
+					     struct iio_dma_buffer_block *block)
 {
 	struct dmaengine_buffer *dmaengine_buffer =
 		iio_buffer_to_dmaengine_buffer(&queue->buffer);
@@ -81,13 +96,20 @@ static int iio_dmaengine_buffer_submit_block(struct iio_dma_buffer_queue *queue,
 	else
 		dma_dir = DMA_MEM_TO_DEV;
 
+	if (block->cyclic && iio_dmaengine_buffer_has_active_cyclic(dmaengine_buffer)) {
+		dev_err(queue->dev, "cyclic DMA transfer already active\n");
+		return -EBUSY;
+	}
+
 	if (block->sg_table) {
+		unsigned long flags;
+
 		sgl = block->sg_table->sgl;
 		nents = sg_nents_for_len(sgl, block->bytes_used);
 		if (nents < 0)
 			return nents;
 
-		vecs = kmalloc_array(nents, sizeof(*vecs), GFP_ATOMIC);
+		vecs = kmalloc_objs(*vecs, nents, GFP_ATOMIC);
 		if (!vecs)
 			return -ENOMEM;
 
@@ -101,9 +123,19 @@ static int iio_dmaengine_buffer_submit_block(struct iio_dma_buffer_queue *queue,
 			sgl = sg_next(sgl);
 		}
 
+		if (block->cyclic)
+			flags = DMA_PREP_REPEAT;
+		else
+			flags = DMA_PREP_INTERRUPT;
+
+		/*
+		 * A new transfer may need to end an already active cyclic transfer
+		 * before it can run, so always set the EOT flag.
+		 */
+		flags |= DMA_PREP_LOAD_EOT;
 		desc = dmaengine_prep_peripheral_dma_vec(dmaengine_buffer->chan,
 							 vecs, nents, dma_dir,
-							 DMA_PREP_INTERRUPT);
+							 flags);
 		kfree(vecs);
 	} else {
 		max_size = min(block->size, dmaengine_buffer->max_size);
@@ -124,16 +156,17 @@ static int iio_dmaengine_buffer_submit_block(struct iio_dma_buffer_queue *queue,
 	if (!desc)
 		return -ENOMEM;
 
-	desc->callback_result = iio_dmaengine_buffer_block_done;
-	desc->callback_param = block;
+	if (!block->cyclic) {
+		desc->callback_result = iio_dmaengine_buffer_block_done;
+		desc->callback_param = block;
+	}
 
 	cookie = dmaengine_submit(desc);
 	if (dma_submit_error(cookie))
 		return dma_submit_error(cookie);
 
-	spin_lock_irq(&dmaengine_buffer->queue.list_lock);
-	list_add_tail(&block->head, &dmaengine_buffer->active);
-	spin_unlock_irq(&dmaengine_buffer->queue.list_lock);
+	scoped_guard(spinlock_irq, &dmaengine_buffer->queue.list_lock)
+		list_add_tail(&block->head, &dmaengine_buffer->active);
 
 	dma_async_issue_pending(dmaengine_buffer->chan);
 
@@ -189,7 +222,7 @@ static const struct iio_dma_buffer_ops iio_dmaengine_default_ops = {
 };
 
 static ssize_t iio_dmaengine_buffer_get_length_align(struct device *dev,
-	struct device_attribute *attr, char *buf)
+						     struct device_attribute *attr, char *buf)
 {
 	struct iio_buffer *buffer = to_iio_dev_attr(attr)->buffer;
 	struct dmaengine_buffer *dmaengine_buffer =
@@ -227,7 +260,7 @@ static struct iio_buffer *iio_dmaengine_buffer_alloc(struct dma_chan *chan)
 	if (ret < 0)
 		return ERR_PTR(ret);
 
-	dmaengine_buffer = kzalloc(sizeof(*dmaengine_buffer), GFP_KERNEL);
+	dmaengine_buffer = kzalloc_obj(*dmaengine_buffer);
 	if (!dmaengine_buffer)
 		return ERR_PTR(-ENOMEM);
 
@@ -248,7 +281,7 @@ static struct iio_buffer *iio_dmaengine_buffer_alloc(struct dma_chan *chan)
 	dmaengine_buffer->max_size = dma_get_max_seg_size(chan->device->dev);
 
 	iio_dma_buffer_init(&dmaengine_buffer->queue, chan->device->dev,
-		&iio_dmaengine_default_ops);
+			    &iio_dmaengine_default_ops);
 
 	dmaengine_buffer->queue.buffer.attrs = iio_dmaengine_buffer_attrs;
 	dmaengine_buffer->queue.buffer.access = &iio_dmaengine_buffer_ops;

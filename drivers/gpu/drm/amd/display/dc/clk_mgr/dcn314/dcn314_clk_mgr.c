@@ -77,7 +77,6 @@ static const struct IP_BASE CLK_BASE = { { { { 0x00016C00, 0x02401800, 0, 0, 0, 
 #undef DC_LOGGER
 #define DC_LOGGER \
 	clk_mgr->base.base.ctx->logger
-
 #define regCLK1_CLK_PLL_REQ			0x0237
 #define regCLK1_CLK_PLL_REQ_BASE_IDX		0
 
@@ -88,70 +87,8 @@ static const struct IP_BASE CLK_BASE = { { { { 0x00016C00, 0x02401800, 0, 0, 0, 
 #define CLK1_CLK_PLL_REQ__PllSpineDiv_MASK	0x0000F000L
 #define CLK1_CLK_PLL_REQ__FbMult_frac_MASK	0xFFFF0000L
 
-#define regCLK1_CLK0_DFS_CNTL				0x0269
-#define regCLK1_CLK0_DFS_CNTL_BASE_IDX		0
-#define regCLK1_CLK1_DFS_CNTL				0x026c
-#define regCLK1_CLK1_DFS_CNTL_BASE_IDX		0
-#define regCLK1_CLK2_DFS_CNTL				0x026f
-#define regCLK1_CLK2_DFS_CNTL_BASE_IDX		0
-#define regCLK1_CLK3_DFS_CNTL				0x0272
-#define regCLK1_CLK3_DFS_CNTL_BASE_IDX		0
-#define regCLK1_CLK4_DFS_CNTL				0x0275
-#define regCLK1_CLK4_DFS_CNTL_BASE_IDX		0
-#define regCLK1_CLK5_DFS_CNTL				0x0278
-#define regCLK1_CLK5_DFS_CNTL_BASE_IDX		0
-
-#define regCLK1_CLK0_CURRENT_CNT			0x02fb
-#define regCLK1_CLK0_CURRENT_CNT_BASE_IDX	0
-#define regCLK1_CLK1_CURRENT_CNT			0x02fc
-#define regCLK1_CLK1_CURRENT_CNT_BASE_IDX	0
-#define regCLK1_CLK2_CURRENT_CNT			0x02fd
-#define regCLK1_CLK2_CURRENT_CNT_BASE_IDX	0
-#define regCLK1_CLK3_CURRENT_CNT			0x02fe
-#define regCLK1_CLK3_CURRENT_CNT_BASE_IDX	0
-#define regCLK1_CLK4_CURRENT_CNT			0x02ff
-#define regCLK1_CLK4_CURRENT_CNT_BASE_IDX	0
-#define regCLK1_CLK5_CURRENT_CNT			0x0300
-#define regCLK1_CLK5_CURRENT_CNT_BASE_IDX	0
-
-#define regCLK1_CLK0_BYPASS_CNTL			0x028a
-#define regCLK1_CLK0_BYPASS_CNTL_BASE_IDX	0
-#define regCLK1_CLK1_BYPASS_CNTL			0x0293
-#define regCLK1_CLK1_BYPASS_CNTL_BASE_IDX	0
 #define regCLK1_CLK2_BYPASS_CNTL			0x029c
 #define regCLK1_CLK2_BYPASS_CNTL_BASE_IDX	0
-#define regCLK1_CLK3_BYPASS_CNTL			0x02a5
-#define regCLK1_CLK3_BYPASS_CNTL_BASE_IDX	0
-#define regCLK1_CLK4_BYPASS_CNTL			0x02ae
-#define regCLK1_CLK4_BYPASS_CNTL_BASE_IDX	0
-#define regCLK1_CLK5_BYPASS_CNTL			0x02b7
-#define regCLK1_CLK5_BYPASS_CNTL_BASE_IDX	0
-
-#define regCLK1_CLK0_DS_CNTL				0x0283
-#define regCLK1_CLK0_DS_CNTL_BASE_IDX		0
-#define regCLK1_CLK1_DS_CNTL				0x028c
-#define regCLK1_CLK1_DS_CNTL_BASE_IDX		0
-#define regCLK1_CLK2_DS_CNTL				0x0295
-#define regCLK1_CLK2_DS_CNTL_BASE_IDX		0
-#define regCLK1_CLK3_DS_CNTL				0x029e
-#define regCLK1_CLK3_DS_CNTL_BASE_IDX		0
-#define regCLK1_CLK4_DS_CNTL				0x02a7
-#define regCLK1_CLK4_DS_CNTL_BASE_IDX		0
-#define regCLK1_CLK5_DS_CNTL				0x02b0
-#define regCLK1_CLK5_DS_CNTL_BASE_IDX		0
-
-#define regCLK1_CLK0_ALLOW_DS				0x0284
-#define regCLK1_CLK0_ALLOW_DS_BASE_IDX		0
-#define regCLK1_CLK1_ALLOW_DS				0x028d
-#define regCLK1_CLK1_ALLOW_DS_BASE_IDX		0
-#define regCLK1_CLK2_ALLOW_DS				0x0296
-#define regCLK1_CLK2_ALLOW_DS_BASE_IDX		0
-#define regCLK1_CLK3_ALLOW_DS				0x029f
-#define regCLK1_CLK3_ALLOW_DS_BASE_IDX		0
-#define regCLK1_CLK4_ALLOW_DS				0x02a8
-#define regCLK1_CLK4_ALLOW_DS_BASE_IDX		0
-#define regCLK1_CLK5_ALLOW_DS				0x02b1
-#define regCLK1_CLK5_ALLOW_DS_BASE_IDX		0
 
 #define CLK1_CLK2_BYPASS_CNTL__CLK2_BYPASS_SEL__SHIFT	0x0
 #define CLK1_CLK2_BYPASS_CNTL__CLK2_BYPASS_DIV__SHIFT	0x10
@@ -190,6 +127,9 @@ static int dcn314_get_active_display_cnt_wa(
 		if (dc_is_dp_signal(stream->signal) && !stream->dpms_off)
 			display_count++;
 
+		/* FRL can't be tracked by DIG enablement */
+		if (dc_is_hdmi_frl_signal(stream->signal))
+			display_count++;
 	}
 
 	for (i = 0; i < dc->link_count; i++) {
@@ -212,7 +152,7 @@ static void dcn314_disable_otg_wa(struct clk_mgr *clk_mgr_base, struct dc_state 
 				  bool safe_to_lower, bool disable)
 {
 	struct dc *dc = clk_mgr_base->ctx->dc;
-	int i;
+	uint8_t i;
 
 	for (i = 0; i < dc->res_pool->pipe_count; ++i) {
 		struct pipe_ctx *pipe = safe_to_lower
@@ -248,8 +188,6 @@ void dcn314_init_clocks(struct clk_mgr *clk_mgr)
 {
 	struct clk_mgr_internal *clk_mgr_int = TO_CLK_MGR_INTERNAL(clk_mgr);
 	uint32_t ref_dtbclk = clk_mgr->clks.ref_dtbclk_khz;
-	struct clk_mgr_dcn314 *clk_mgr_dcn314 = TO_CLK_MGR_DCN314(clk_mgr_int);
-	struct clk_log_info log_info = {0};
 
 	memset(&(clk_mgr->clks), 0, sizeof(struct dc_clocks));
 	// Assumption is that boot state always supports pstate
@@ -265,9 +203,6 @@ void dcn314_init_clocks(struct clk_mgr *clk_mgr)
 			dce_adjust_dp_ref_freq_for_ss(clk_mgr_int, clk_mgr->dprefclk_khz);
 	else
 		clk_mgr->dp_dto_source_clock_in_khz = clk_mgr->dprefclk_khz;
-
-	dcn314_dump_clk_registers(&clk_mgr->boot_snapshot, &clk_mgr_dcn314->base.base, &log_info);
-	clk_mgr->clks.dispclk_khz =  clk_mgr->boot_snapshot.dispclk * 1000;
 }
 
 void dcn314_update_clocks(struct clk_mgr *clk_mgr_base,
@@ -278,7 +213,7 @@ void dcn314_update_clocks(struct clk_mgr *clk_mgr_base,
 	struct clk_mgr_internal *clk_mgr = TO_CLK_MGR_INTERNAL(clk_mgr_base);
 	struct dc_clocks *new_clocks = &context->bw_ctx.bw.dcn.clk;
 	struct dc *dc = clk_mgr_base->ctx->dc;
-	int display_count;
+	int display_count = 0;
 	bool update_dppclk = false;
 	bool update_dispclk = false;
 	bool dpp_clock_lowered = false;
@@ -287,7 +222,6 @@ void dcn314_update_clocks(struct clk_mgr *clk_mgr_base,
 		return;
 
 	display_count = dcn314_get_active_display_cnt_wa(dc, context);
-
 	/*
 	 * if it is safe to lower, but we are already in the lower state, we don't have to do anything
 	 * also if safe to lower is false, we just go in the higher state
@@ -296,7 +230,6 @@ void dcn314_update_clocks(struct clk_mgr *clk_mgr_base,
 		if (new_clocks->zstate_support != DCN_ZSTATE_SUPPORT_DISALLOW &&
 				new_clocks->zstate_support != clk_mgr_base->clks.zstate_support) {
 			dcn314_smu_set_zstate_support(clk_mgr, new_clocks->zstate_support);
-			dm_helpers_enable_periodic_detection(clk_mgr_base->ctx, true);
 			clk_mgr_base->clks.zstate_support = new_clocks->zstate_support;
 		}
 
@@ -321,7 +254,6 @@ void dcn314_update_clocks(struct clk_mgr *clk_mgr_base,
 		if (new_clocks->zstate_support == DCN_ZSTATE_SUPPORT_DISALLOW &&
 				new_clocks->zstate_support != clk_mgr_base->clks.zstate_support) {
 			dcn314_smu_set_zstate_support(clk_mgr, DCN_ZSTATE_SUPPORT_DISALLOW);
-			dm_helpers_enable_periodic_detection(clk_mgr_base->ctx, false);
 			clk_mgr_base->clks.zstate_support = new_clocks->zstate_support;
 		}
 
@@ -363,8 +295,8 @@ void dcn314_update_clocks(struct clk_mgr *clk_mgr_base,
 	}
 
 	if (should_set_clock(safe_to_lower, new_clocks->dispclk_khz, clk_mgr_base->clks.dispclk_khz) &&
-	    (new_clocks->dispclk_khz > 0 || (safe_to_lower && display_count == 0))) {
-		int requested_dispclk_khz = new_clocks->dispclk_khz;
+		(new_clocks->dispclk_khz > 0 || (safe_to_lower && display_count == 0))) {
+		uint32_t requested_dispclk_khz = new_clocks->dispclk_khz;
 
 		dcn314_disable_otg_wa(clk_mgr_base, context, safe_to_lower, true);
 
@@ -374,7 +306,6 @@ void dcn314_update_clocks(struct clk_mgr *clk_mgr_base,
 
 		dcn314_smu_set_dispclk(clk_mgr, requested_dispclk_khz);
 		clk_mgr_base->clks.dispclk_khz = new_clocks->dispclk_khz;
-
 		dcn314_disable_otg_wa(clk_mgr_base, context, safe_to_lower, false);
 
 		update_dispclk = true;
@@ -462,65 +393,13 @@ bool dcn314_are_clock_states_equal(struct dc_clocks *a,
 	return true;
 }
 
-
-static void dcn314_dump_clk_registers_internal(struct dcn35_clk_internal *internal, struct clk_mgr *clk_mgr_base)
-{
-	struct clk_mgr_internal *clk_mgr = TO_CLK_MGR_INTERNAL(clk_mgr_base);
-
-	// read dtbclk
-	internal->CLK1_CLK4_CURRENT_CNT = REG_READ(CLK1_CLK4_CURRENT_CNT);
-	internal->CLK1_CLK4_BYPASS_CNTL = REG_READ(CLK1_CLK4_BYPASS_CNTL);
-
-	// read dcfclk
-	internal->CLK1_CLK3_CURRENT_CNT = REG_READ(CLK1_CLK3_CURRENT_CNT);
-	internal->CLK1_CLK3_BYPASS_CNTL = REG_READ(CLK1_CLK3_BYPASS_CNTL);
-
-	// read dcf deep sleep divider
-	internal->CLK1_CLK3_DS_CNTL = REG_READ(CLK1_CLK3_DS_CNTL);
-	internal->CLK1_CLK3_ALLOW_DS = REG_READ(CLK1_CLK3_ALLOW_DS);
-
-	// read dppclk
-	internal->CLK1_CLK1_CURRENT_CNT = REG_READ(CLK1_CLK1_CURRENT_CNT);
-	internal->CLK1_CLK1_BYPASS_CNTL = REG_READ(CLK1_CLK1_BYPASS_CNTL);
-
-	// read dprefclk
-	internal->CLK1_CLK2_CURRENT_CNT = REG_READ(CLK1_CLK2_CURRENT_CNT);
-	internal->CLK1_CLK2_BYPASS_CNTL = REG_READ(CLK1_CLK2_BYPASS_CNTL);
-
-	// read dispclk
-	internal->CLK1_CLK0_CURRENT_CNT = REG_READ(CLK1_CLK0_CURRENT_CNT);
-	internal->CLK1_CLK0_BYPASS_CNTL = REG_READ(CLK1_CLK0_BYPASS_CNTL);
-}
-
-void dcn314_dump_clk_registers(struct clk_state_registers_and_bypass *regs_and_bypass,
+static void dcn314_dump_clk_registers(struct clk_state_registers_and_bypass *regs_and_bypass,
 		struct clk_mgr *clk_mgr_base, struct clk_log_info *log_info)
 {
-
-	struct dcn35_clk_internal internal = {0};
-
-	dcn314_dump_clk_registers_internal(&internal, clk_mgr_base);
-
-	regs_and_bypass->dcfclk = internal.CLK1_CLK3_CURRENT_CNT / 10;
-	regs_and_bypass->dcf_deep_sleep_divider = internal.CLK1_CLK3_DS_CNTL / 10;
-	regs_and_bypass->dcf_deep_sleep_allow = internal.CLK1_CLK3_ALLOW_DS;
-	regs_and_bypass->dprefclk = internal.CLK1_CLK2_CURRENT_CNT / 10;
-	regs_and_bypass->dispclk = internal.CLK1_CLK0_CURRENT_CNT / 10;
-	regs_and_bypass->dppclk = internal.CLK1_CLK1_CURRENT_CNT / 10;
-	regs_and_bypass->dtbclk = internal.CLK1_CLK4_CURRENT_CNT / 10;
-
-	regs_and_bypass->dppclk_bypass = internal.CLK1_CLK1_BYPASS_CNTL & 0x0007;
-	if (regs_and_bypass->dppclk_bypass < 0 || regs_and_bypass->dppclk_bypass > 4)
-		regs_and_bypass->dppclk_bypass = 0;
-	regs_and_bypass->dcfclk_bypass = internal.CLK1_CLK3_BYPASS_CNTL & 0x0007;
-	if (regs_and_bypass->dcfclk_bypass < 0 || regs_and_bypass->dcfclk_bypass > 4)
-		regs_and_bypass->dcfclk_bypass = 0;
-	regs_and_bypass->dispclk_bypass = internal.CLK1_CLK0_BYPASS_CNTL & 0x0007;
-	if (regs_and_bypass->dispclk_bypass < 0 || regs_and_bypass->dispclk_bypass > 4)
-		regs_and_bypass->dispclk_bypass = 0;
-	regs_and_bypass->dprefclk_bypass = internal.CLK1_CLK2_BYPASS_CNTL & 0x0007;
-	if (regs_and_bypass->dprefclk_bypass < 0 || regs_and_bypass->dprefclk_bypass > 4)
-		regs_and_bypass->dprefclk_bypass = 0;
-
+	(void)regs_and_bypass;
+	(void)clk_mgr_base;
+	(void)log_info;
+	return;
 }
 
 static struct clk_bw_params dcn314_bw_params = {
@@ -617,7 +496,7 @@ static struct dcn314_ss_info_table ss_info_table = {
 
 static void dcn314_build_watermark_ranges(struct clk_bw_params *bw_params, struct dcn314_watermarks *table)
 {
-	int i, num_valid_sets;
+	uint8_t i, num_valid_sets;
 
 	num_valid_sets = 0;
 
@@ -626,8 +505,10 @@ static void dcn314_build_watermark_ranges(struct clk_bw_params *bw_params, struc
 		if (!bw_params->wm_table.entries[i].valid)
 			continue;
 
-		table->WatermarkRow[WM_DCFCLK][num_valid_sets].WmSetting = bw_params->wm_table.entries[i].wm_inst;
-		table->WatermarkRow[WM_DCFCLK][num_valid_sets].WmType = bw_params->wm_table.entries[i].wm_type;
+		table->WatermarkRow[WM_DCFCLK][num_valid_sets].WmSetting =
+			(uint8_t)bw_params->wm_table.entries[i].wm_inst;
+		table->WatermarkRow[WM_DCFCLK][num_valid_sets].WmType =
+			(uint8_t)bw_params->wm_table.entries[i].wm_type;
 		/* We will not select WM based on fclk, so leave it as unconstrained */
 		table->WatermarkRow[WM_DCFCLK][num_valid_sets].MinClock = 0;
 		table->WatermarkRow[WM_DCFCLK][num_valid_sets].MaxClock = 0xFFFF;
@@ -638,10 +519,10 @@ static void dcn314_build_watermark_ranges(struct clk_bw_params *bw_params, struc
 			else {
 				/* add 1 to make it non-overlapping with next lvl */
 				table->WatermarkRow[WM_DCFCLK][num_valid_sets].MinMclk =
-						bw_params->clk_table.entries[i - 1].dcfclk_mhz + 1;
+						(uint16_t)(bw_params->clk_table.entries[i - 1].dcfclk_mhz + 1);
 			}
 			table->WatermarkRow[WM_DCFCLK][num_valid_sets].MaxMclk =
-					bw_params->clk_table.entries[i].dcfclk_mhz;
+					(uint16_t)bw_params->clk_table.entries[i].dcfclk_mhz;
 
 		} else {
 			/* unconstrained for memory retraining */
@@ -736,7 +617,7 @@ static unsigned int convert_wck_ratio(uint8_t wck_ratio)
 static uint32_t find_max_clk_value(const uint32_t clocks[], uint32_t num_clocks)
 {
 	uint32_t max = 0;
-	int i;
+	uint32_t i;
 
 	for (i = 0; i < num_clocks; ++i) {
 		if (clocks[i] > max)
@@ -754,6 +635,7 @@ static void dcn314_clk_mgr_helper_populate_bw_params(struct clk_mgr_internal *cl
 	struct clk_limit_table_entry def_max = bw_params->clk_table.entries[bw_params->clk_table.num_entries - 1];
 	uint32_t max_pstate = 0,  max_fclk = 0,  min_pstate = 0, max_dispclk = 0, max_dppclk = 0;
 	int i;
+	unsigned int entry_idx;
 
 	/* Find highest valid fclk pstate */
 	for (i = 0; i < clock_table->NumDfPstatesEnabled; i++) {
@@ -843,26 +725,26 @@ static void dcn314_clk_mgr_helper_populate_bw_params(struct clk_mgr_internal *cl
 	 * Set any 0 clocks to max default setting. Not an issue for
 	 * power since we aren't doing switching in such case anyway
 	 */
-	for (i = 0; i < bw_params->clk_table.num_entries; i++) {
-		if (!bw_params->clk_table.entries[i].fclk_mhz) {
-			bw_params->clk_table.entries[i].fclk_mhz = def_max.fclk_mhz;
-			bw_params->clk_table.entries[i].memclk_mhz = def_max.memclk_mhz;
-			bw_params->clk_table.entries[i].voltage = def_max.voltage;
+	for (entry_idx = 0; entry_idx < bw_params->clk_table.num_entries; entry_idx++) {
+		if (!bw_params->clk_table.entries[entry_idx].fclk_mhz) {
+			bw_params->clk_table.entries[entry_idx].fclk_mhz = def_max.fclk_mhz;
+			bw_params->clk_table.entries[entry_idx].memclk_mhz = def_max.memclk_mhz;
+			bw_params->clk_table.entries[entry_idx].voltage = def_max.voltage;
 		}
-		if (!bw_params->clk_table.entries[i].dcfclk_mhz)
-			bw_params->clk_table.entries[i].dcfclk_mhz = def_max.dcfclk_mhz;
-		if (!bw_params->clk_table.entries[i].socclk_mhz)
-			bw_params->clk_table.entries[i].socclk_mhz = def_max.socclk_mhz;
-		if (!bw_params->clk_table.entries[i].dispclk_mhz)
-			bw_params->clk_table.entries[i].dispclk_mhz = def_max.dispclk_mhz;
-		if (!bw_params->clk_table.entries[i].dppclk_mhz)
-			bw_params->clk_table.entries[i].dppclk_mhz = def_max.dppclk_mhz;
-		if (!bw_params->clk_table.entries[i].phyclk_mhz)
-			bw_params->clk_table.entries[i].phyclk_mhz = def_max.phyclk_mhz;
-		if (!bw_params->clk_table.entries[i].phyclk_d18_mhz)
-			bw_params->clk_table.entries[i].phyclk_d18_mhz = def_max.phyclk_d18_mhz;
-		if (!bw_params->clk_table.entries[i].dtbclk_mhz)
-			bw_params->clk_table.entries[i].dtbclk_mhz = def_max.dtbclk_mhz;
+		if (!bw_params->clk_table.entries[entry_idx].dcfclk_mhz)
+			bw_params->clk_table.entries[entry_idx].dcfclk_mhz = def_max.dcfclk_mhz;
+		if (!bw_params->clk_table.entries[entry_idx].socclk_mhz)
+			bw_params->clk_table.entries[entry_idx].socclk_mhz = def_max.socclk_mhz;
+		if (!bw_params->clk_table.entries[entry_idx].dispclk_mhz)
+			bw_params->clk_table.entries[entry_idx].dispclk_mhz = def_max.dispclk_mhz;
+		if (!bw_params->clk_table.entries[entry_idx].dppclk_mhz)
+			bw_params->clk_table.entries[entry_idx].dppclk_mhz = def_max.dppclk_mhz;
+		if (!bw_params->clk_table.entries[entry_idx].phyclk_mhz)
+			bw_params->clk_table.entries[entry_idx].phyclk_mhz = def_max.phyclk_mhz;
+		if (!bw_params->clk_table.entries[entry_idx].phyclk_d18_mhz)
+			bw_params->clk_table.entries[entry_idx].phyclk_d18_mhz = def_max.phyclk_d18_mhz;
+		if (!bw_params->clk_table.entries[entry_idx].dtbclk_mhz)
+			bw_params->clk_table.entries[entry_idx].dtbclk_mhz = def_max.dtbclk_mhz;
 	}
 	ASSERT(bw_params->clk_table.entries[i-1].dcfclk_mhz);
 	bw_params->vram_type = bios_info->memory_type;
@@ -870,16 +752,16 @@ static void dcn314_clk_mgr_helper_populate_bw_params(struct clk_mgr_internal *cl
 	bw_params->dram_channel_width_bytes = bios_info->memory_type == 0x22 ? 8 : 4;
 	bw_params->num_channels = bios_info->ma_channel_number ? bios_info->ma_channel_number : 4;
 
-	for (i = 0; i < WM_SET_COUNT; i++) {
-		bw_params->wm_table.entries[i].wm_inst = i;
+	for (entry_idx = 0; entry_idx < (unsigned int)WM_SET_COUNT; entry_idx++) {
+		bw_params->wm_table.entries[entry_idx].wm_inst = entry_idx;
 
-		if (i >= bw_params->clk_table.num_entries) {
-			bw_params->wm_table.entries[i].valid = false;
+		if (entry_idx >= bw_params->clk_table.num_entries) {
+			bw_params->wm_table.entries[entry_idx].valid = false;
 			continue;
 		}
 
-		bw_params->wm_table.entries[i].wm_type = WM_TYPE_PSTATE_CHG;
-		bw_params->wm_table.entries[i].valid = true;
+		bw_params->wm_table.entries[entry_idx].wm_type = WM_TYPE_PSTATE_CHG;
+		bw_params->wm_table.entries[entry_idx].valid = true;
 	}
 }
 
@@ -967,7 +849,8 @@ void dcn314_clk_mgr_construct(
 	/* TODO: Check we get what we expect during bringup */
 	clk_mgr->base.base.dentist_vco_freq_khz = get_vco_frequency_from_reg(&clk_mgr->base);
 
-	if (ctx->dc_bios->integrated_info->memory_type == LpDdr5MemType)
+	if (ctx->dc_bios->integrated_info &&
+	    ctx->dc_bios->integrated_info->memory_type == LpDdr5MemType)
 		dcn314_bw_params.wm_table = lpddr5_wm_table;
 	else
 		dcn314_bw_params.wm_table = ddr5_wm_table;

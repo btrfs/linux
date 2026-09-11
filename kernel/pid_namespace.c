@@ -184,7 +184,7 @@ struct pid_namespace *copy_pid_ns(u64 flags,
 
 void put_pid_ns(struct pid_namespace *ns)
 {
-	if (ns && ns != &init_pid_ns && ns_ref_put(ns))
+	if (ns && ns_ref_put(ns))
 		schedule_work(&ns->work);
 }
 EXPORT_SYMBOL_GPL(put_pid_ns);
@@ -368,15 +368,6 @@ static struct ns_common *pidns_for_children_get(struct task_struct *task)
 		get_pid_ns(ns);
 	}
 	task_unlock(task);
-
-	if (ns) {
-		read_lock(&tasklist_lock);
-		if (!ns->child_reaper) {
-			put_pid_ns(ns);
-			ns = NULL;
-		}
-		read_unlock(&tasklist_lock);
-	}
 
 	return ns ? &ns->ns : NULL;
 }

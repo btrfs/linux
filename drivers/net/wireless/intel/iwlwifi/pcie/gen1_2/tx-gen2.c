@@ -773,6 +773,8 @@ int iwl_txq_gen2_tx(struct iwl_trans *trans, struct sk_buff *skb,
 
 	tfd = iwl_txq_gen2_build_tfd(trans, txq, dev_cmd, skb, out_meta);
 	if (!tfd) {
+		txq->entries[idx].skb = NULL;
+		txq->entries[idx].cmd = NULL;
 		spin_unlock(&txq->lock);
 		return -1;
 	}
@@ -928,7 +930,7 @@ iwl_txq_dyn_alloc_dma(struct iwl_trans *trans, int size, unsigned int timeout)
 	if (WARN_ON(size > bc_tbl_entries))
 		return ERR_PTR(-EINVAL);
 
-	txq = kzalloc(sizeof(*txq), GFP_KERNEL);
+	txq = kzalloc_obj(*txq);
 	if (!txq)
 		return ERR_PTR(-ENOMEM);
 
@@ -1152,7 +1154,7 @@ int iwl_txq_gen2_init(struct iwl_trans *trans, int txq_id, int queue_size)
 
 	/* alloc and init the tx queue */
 	if (!trans_pcie->txqs.txq[txq_id]) {
-		queue = kzalloc(sizeof(*queue), GFP_KERNEL);
+		queue = kzalloc_obj(*queue);
 		if (!queue) {
 			IWL_ERR(trans, "Not enough memory for tx queue\n");
 			return -ENOMEM;

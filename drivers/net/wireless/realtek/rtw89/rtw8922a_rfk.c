@@ -205,11 +205,11 @@ static void rtw8922a_chlk_ktbl_sel(struct rtw89_dev *rtwdev, u8 kpath, u8 idx)
 	}
 }
 
-static u8 rtw8922a_chlk_reload_sel_tbl(struct rtw89_dev *rtwdev,
-				       const struct rtw89_chan *chan, u8 path)
+static u8 rtw8922a_chlk_reload_sel_tbl_v0(struct rtw89_dev *rtwdev,
+					  const struct rtw89_chan *chan, u8 path)
 {
-	struct rtw89_rfk_mcc_info *rfk_mcc = &rtwdev->rfk_mcc;
 	struct rtw89_rfk_chan_desc desc[__RTW89_RFK_CHS_NR_V1] = {};
+	struct rtw89_rfk_mcc_info *rfk_mcc = &rtwdev->rfk_mcc;
 	u8 tbl_sel;
 
 	for (tbl_sel = 0; tbl_sel < ARRAY_SIZE(desc); tbl_sel++) {
@@ -229,34 +229,62 @@ static u8 rtw8922a_chlk_reload_sel_tbl(struct rtw89_dev *rtwdev,
 	rfk_mcc->data[path].ch[tbl_sel] = chan->channel;
 	rfk_mcc->data[path].band[tbl_sel] = chan->band_type;
 	rfk_mcc->data[path].bw[tbl_sel] = chan->band_width;
+	rfk_mcc->data[path].rf18[tbl_sel] = rtw89_chip_chan_to_rf18_val(rtwdev, chan);
 	rfk_mcc->data[path].table_idx = tbl_sel;
 
 	return tbl_sel;
 }
 
-static void rtw8922a_chlk_reload(struct rtw89_dev *rtwdev)
+static u8 rtw8922a_chlk_reload_sel_tbl_v1(struct rtw89_dev *rtwdev,
+					  const struct rtw89_chan *chan, u8 path)
 {
-	const struct rtw89_chan *chan0, *chan1;
-	u8 s0_tbl, s1_tbl;
+	struct rtw89_rfk_mcc_info_data *rfk_mcc = rtwdev->rfk_mcc.data;
+	struct rtw89_rfk_chan_desc desc[__RTW89_RFK_CHS_NR_V1] = {};
+	u8 tbl_sel;
 
-	switch (rtwdev->mlo_dbcc_mode) {
-	default:
-	case MLO_2_PLUS_0_1RF:
-		chan0 = rtw89_mgnt_chan_get(rtwdev, 0);
-		chan1 = chan0;
-		break;
-	case MLO_0_PLUS_2_1RF:
-		chan1 = rtw89_mgnt_chan_get(rtwdev, 1);
-		chan0 = chan1;
-		break;
-	case MLO_1_PLUS_1_1RF:
-		chan0 = rtw89_mgnt_chan_get(rtwdev, 0);
-		chan1 = rtw89_mgnt_chan_get(rtwdev, 1);
-		break;
+	for (tbl_sel = 0; tbl_sel < ARRAY_SIZE(desc); tbl_sel++) {
+		struct rtw89_rfk_chan_desc *p = &desc[tbl_sel];
+
+		p->ch = rfk_mcc->ch[tbl_sel];
+
+		p->has_band = true;
+		p->band = rfk_mcc->band[tbl_sel];
+
+		p->has_bw = true;
+		p->bw = rfk_mcc->bw[tbl_sel];
 	}
 
-	s0_tbl = rtw8922a_chlk_reload_sel_tbl(rtwdev, chan0, 0);
-	s1_tbl = rtw8922a_chlk_reload_sel_tbl(rtwdev, chan1, 1);
+	tbl_sel = rtw89_rfk_chan_lookup(rtwdev, desc, ARRAY_SIZE(desc), chan);
+
+	rfk_mcc->ch[tbl_sel] = chan->channel;
+	rfk_mcc->band[tbl_sel] = chan->band_type;
+	rfk_mcc->bw[tbl_sel] = chan->band_width;
+	rfk_mcc->rf18[tbl_sel] = rtw89_chip_chan_to_rf18_val(rtwdev, chan);
+
+	/* shared table array, but tbl_sel can be independent by path */
+	rfk_mcc[path].table_idx = tbl_sel;
+
+	return tbl_sel;
+}
+
+static u8 rtw8922a_chlk_reload_sel_tbl(struct rtw89_dev *rtwdev,
+				       const struct rtw89_chan *chan, u8 path)
+{
+	if (RTW89_CHK_FW_FEATURE(RFK_PRE_NOTIFY_MCC_V1, &rtwdev->fw))
+		return rtw8922a_chlk_reload_sel_tbl_v1(rtwdev, chan, path);
+	else
+		return rtw8922a_chlk_reload_sel_tbl_v0(rtwdev, chan, path);
+}
+
+static void rtw8922a_chlk_reload(struct rtw89_dev *rtwdev)
+{
+	struct rtw89_entity_conf conf;
+	u8 s0_tbl, s1_tbl;
+
+	rtw89_entity_get_conf(rtwdev, &conf);
+
+	s0_tbl = rtw8922a_chlk_reload_sel_tbl(rtwdev, conf.chans[0], 0);
+	s1_tbl = rtw8922a_chlk_reload_sel_tbl(rtwdev, conf.chans[1], 1);
 
 	rtw8922a_chlk_ktbl_sel(rtwdev, RF_A, s0_tbl);
 	rtw8922a_chlk_ktbl_sel(rtwdev, RF_B, s1_tbl);

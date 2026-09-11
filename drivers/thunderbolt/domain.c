@@ -77,12 +77,10 @@ static int tb_service_probe(struct device *dev)
 {
 	struct tb_service *svc = tb_to_service(dev);
 	struct tb_service_driver *driver;
-	const struct tb_service_id *id;
 
 	driver = container_of(dev->driver, struct tb_service_driver, driver);
-	id = __tb_service_match(dev, &driver->driver);
 
-	return driver->probe(svc, id);
+	return driver->probe(svc);
 }
 
 static void tb_service_remove(struct device *dev)
@@ -126,7 +124,7 @@ static ssize_t boot_acl_show(struct device *dev, struct device_attribute *attr,
 	ssize_t ret;
 	int i;
 
-	uuids = kcalloc(tb->nboot_acl, sizeof(uuid_t), GFP_KERNEL);
+	uuids = kzalloc_objs(uuid_t, tb->nboot_acl);
 	if (!uuids)
 		return -ENOMEM;
 
@@ -181,7 +179,7 @@ static ssize_t boot_acl_store(struct device *dev, struct device_attribute *attr,
 	if (!str)
 		return -ENOMEM;
 
-	acl = kcalloc(tb->nboot_acl, sizeof(uuid_t), GFP_KERNEL);
+	acl = kzalloc_objs(uuid_t, tb->nboot_acl);
 	if (!acl) {
 		ret = -ENOMEM;
 		goto err_free_str;
@@ -319,12 +317,15 @@ const struct bus_type tb_bus_type = {
 static void tb_domain_release(struct device *dev)
 {
 	struct tb *tb = container_of(dev, struct tb, dev);
+	struct tb_nhi *nhi = tb->nhi;
 
 	tb_ctl_free(tb->ctl);
 	destroy_workqueue(tb->wq);
 	ida_free(&tb_domain_ida, tb->index);
 	mutex_destroy(&tb->lock);
 	kfree(tb);
+
+	complete(&nhi->domain_released);
 }
 
 const struct device_type tb_domain_type = {
@@ -376,7 +377,7 @@ struct tb *tb_domain_alloc(struct tb_nhi *nhi, int timeout_msec, size_t privsize
 	struct tb *tb;
 
 	/*
-	 * Make sure the structure sizes map with that the hardware
+	 * Make sure the structure sizes map with what the hardware
 	 * expects because bit-fields are being used.
 	 */
 	BUILD_BUG_ON(sizeof(struct tb_regs_switch_header) != 5 * 4);
@@ -402,7 +403,7 @@ struct tb *tb_domain_alloc(struct tb_nhi *nhi, int timeout_msec, size_t privsize
 	if (!tb->ctl)
 		goto err_destroy_wq;
 
-	tb->dev.parent = &nhi->pdev->dev;
+	tb->dev.parent = nhi->dev;
 	tb->dev.bus = &tb_bus_type;
 	tb->dev.type = &tb_domain_type;
 	tb->dev.groups = domain_attr_groups;
@@ -787,6 +788,21 @@ int tb_domain_approve_xdomain_paths(struct tb *tb, struct tb_xdomain *xd,
 			transmit_ring, receive_path, receive_ring);
 }
 
+static void tb_domain_reset_interface(struct tb *tb)
+{
+	struct tb_nhi *nhi = tb->nhi;
+
+	if (!nhi->ops->reset_interface)
+		return;
+
+	guard(mutex)(&tb->lock);
+
+	/* The reset clears the ring state so stop the control channel */
+	tb_ctl_stop(tb->ctl);
+	nhi->ops->reset_interface(nhi);
+	tb_ctl_start(tb->ctl);
+}
+
 /**
  * tb_domain_disconnect_xdomain_paths() - Disable DMA paths for XDomain
  * @tb: Domain disabling the DMA paths
@@ -809,11 +825,20 @@ int tb_domain_disconnect_xdomain_paths(struct tb *tb, struct tb_xdomain *xd,
 				       int transmit_path, int transmit_ring,
 				       int receive_path, int receive_ring)
 {
+	int ret;
+
 	if (!tb->cm_ops->disconnect_xdomain_paths)
 		return -ENOTSUPP;
 
-	return tb->cm_ops->disconnect_xdomain_paths(tb, xd, transmit_path,
+	ret = tb->cm_ops->disconnect_xdomain_paths(tb, xd, transmit_path,
 			transmit_ring, receive_path, receive_ring);
+	if (ret)
+		return ret;
+
+	if (tb->nhi->quirks & QUIRK_RESET_DMA_ON_TEARDOWN)
+		tb_domain_reset_interface(tb);
+
+	return 0;
 }
 
 static int disconnect_xdomain(struct device *dev, void *data)
@@ -850,10 +875,41 @@ int tb_domain_disconnect_all_paths(struct tb *tb)
 	return bus_for_each_dev(&tb_bus_type, NULL, tb, disconnect_xdomain);
 }
 
+struct unregister_context {
+	const struct tb *tb;
+	int n;
+};
+
+static int unregister_unplugged_xdomain(struct device *dev, void *data)
+{
+	struct unregister_context *ctx = data;
+	struct tb_xdomain *xd;
+
+	xd = tb_to_xdomain(dev);
+	if (xd && xd->tb == ctx->tb && xd->is_unplugged) {
+		tb_xdomain_unregister(xd);
+		ctx->n++;
+	}
+	return 0;
+}
+
+int tb_domain_unregister_unplugged_xdomains(struct tb *tb)
+{
+	struct unregister_context ctx;
+
+	ctx.tb = tb_domain_get(tb);
+	ctx.n = 0;
+	bus_for_each_dev(&tb_bus_type, NULL, &ctx, unregister_unplugged_xdomain);
+	tb_domain_put(tb);
+
+	return ctx.n;
+}
+
 int tb_domain_init(void)
 {
 	int ret;
 
+	tb_configfs_init();
 	tb_debugfs_init();
 	tb_acpi_init();
 
@@ -883,4 +939,5 @@ void tb_domain_exit(void)
 	tb_xdomain_exit();
 	tb_acpi_exit();
 	tb_debugfs_exit();
+	tb_configfs_exit();
 }

@@ -5,8 +5,6 @@
 #include "vmx.h"
 #include "svm_util.h"
 
-#define L2_GUEST_STACK_SIZE 256
-
 /*
  * Arbitrary, never shoved into KVM/hardware, just need to avoid conflict with
  * the "real" exceptions used, #SS/#GP/#DF (12/13/8).
@@ -72,7 +70,7 @@ static void l2_ss_injected_tf_test(void)
 }
 
 static void svm_run_l2(struct svm_test_data *svm, void *l2_code, int vector,
-		       uint32_t error_code)
+		       u32 error_code)
 {
 	struct vmcb *vmcb = svm->vmcb;
 	struct vmcb_control_area *ctrl = &vmcb->control;
@@ -91,9 +89,8 @@ static void svm_run_l2(struct svm_test_data *svm, void *l2_code, int vector,
 static void l1_svm_code(struct svm_test_data *svm)
 {
 	struct vmcb_control_area *ctrl = &svm->vmcb->control;
-	unsigned long l2_guest_stack[L2_GUEST_STACK_SIZE];
 
-	generic_svm_setup(svm, NULL, &l2_guest_stack[L2_GUEST_STACK_SIZE]);
+	generic_svm_setup(svm, NULL);
 	svm->vmcb->save.idtr.limit = 0;
 	ctrl->intercept |= BIT_ULL(INTERCEPT_SHUTDOWN);
 
@@ -111,7 +108,7 @@ static void l1_svm_code(struct svm_test_data *svm)
 	GUEST_DONE();
 }
 
-static void vmx_run_l2(void *l2_code, int vector, uint32_t error_code)
+static void vmx_run_l2(void *l2_code, int vector, u32 error_code)
 {
 	GUEST_ASSERT(!vmwrite(GUEST_RIP, (u64)l2_code));
 
@@ -128,13 +125,11 @@ static void vmx_run_l2(void *l2_code, int vector, uint32_t error_code)
 
 static void l1_vmx_code(struct vmx_pages *vmx)
 {
-	unsigned long l2_guest_stack[L2_GUEST_STACK_SIZE];
-
 	GUEST_ASSERT_EQ(prepare_for_vmx_operation(vmx), true);
 
 	GUEST_ASSERT_EQ(load_vmcs(vmx), true);
 
-	prepare_vmcs(vmx, NULL, &l2_guest_stack[L2_GUEST_STACK_SIZE]);
+	prepare_vmcs(vmx, NULL);
 	GUEST_ASSERT_EQ(vmwrite(GUEST_IDTR_LIMIT, 0), 0);
 
 	/*
@@ -216,7 +211,7 @@ static void queue_ss_exception(struct kvm_vcpu *vcpu, bool inject)
  */
 int main(int argc, char *argv[])
 {
-	vm_vaddr_t nested_test_data_gva;
+	gva_t nested_test_data_gva;
 	struct kvm_vcpu_events events;
 	struct kvm_vcpu *vcpu;
 	struct kvm_vm *vm;

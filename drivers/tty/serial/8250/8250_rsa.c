@@ -19,35 +19,33 @@ static const struct uart_ops *core_port_base_ops;
 static int rsa8250_request_resource(struct uart_8250_port *up)
 {
 	struct uart_port *port = &up->port;
-	unsigned long start = UART_RSA_BASE << port->regshift;
-	unsigned int size = 8 << port->regshift;
+	unsigned long start;
+	unsigned int size;
 
-	switch (port->iotype) {
-	case UPIO_HUB6:
-	case UPIO_PORT:
-		start += port->iobase;
-		if (!request_region(start, size, "serial-rsa"))
-			return -EBUSY;
-		return 0;
-	default:
+	if (!uart_iotype_io(port->iotype))
 		return -EINVAL;
-	}
+
+	start = UART_RSA_BASE << port->regshift;
+	start += port->iobase;
+	size = 8 << port->regshift;
+
+	if (!request_region(start, size, "serial-rsa"))
+		return -EBUSY;
+	return 0;
 }
 
 static void rsa8250_release_resource(struct uart_8250_port *up)
 {
 	struct uart_port *port = &up->port;
-	unsigned long offset = UART_RSA_BASE << port->regshift;
-	unsigned int size = 8 << port->regshift;
+	unsigned long offset;
+	unsigned int size;
 
-	switch (port->iotype) {
-	case UPIO_HUB6:
-	case UPIO_PORT:
-		release_region(port->iobase + offset, size);
-		break;
-	default:
-		break;
-	}
+	if (!uart_iotype_io(port->iotype))
+		return;
+
+	offset = UART_RSA_BASE << port->regshift;
+	size = 8 << port->regshift;
+	release_region(port->iobase + offset, size);
 }
 
 static void univ8250_config_port(struct uart_port *port, int flags)
@@ -209,27 +207,3 @@ void rsa_reset(struct uart_8250_port *up)
 
 	serial_out(up, UART_RSA_FRR, 0);
 }
-
-#ifdef CONFIG_SERIAL_8250_DEPRECATED_OPTIONS
-#ifndef MODULE
-/*
- * Keep the old "8250" name working as well for the module options so we don't
- * break people. We need to keep the names identical and the convenient macros
- * will happily refuse to let us do that by failing the build with redefinition
- * errors of global variables.  So we stick them inside a dummy function to
- * avoid those conflicts.  The options still get parsed, and the redefined
- * MODULE_PARAM_PREFIX lets us keep the "8250." syntax alive.
- *
- * This is hacky. I'm sorry.
- */
-static void __used rsa8250_options(void)
-{
-#undef MODULE_PARAM_PREFIX
-#define MODULE_PARAM_PREFIX "8250_core."
-
-	__module_param_call(MODULE_PARAM_PREFIX, probe_rsa,
-		&param_array_ops, .arr = &__param_arr_probe_rsa,
-		0444, -1, 0);
-}
-#endif
-#endif

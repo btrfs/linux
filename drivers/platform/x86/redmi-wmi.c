@@ -20,17 +20,40 @@
 static const struct key_entry redmi_wmi_keymap[] = {
 	{KE_KEY, 0x00000201,	{KEY_SELECTIVE_SCREENSHOT}},
 	{KE_KEY, 0x00000301,	{KEY_ALL_APPLICATIONS}},
-	{KE_KEY, 0x00001b01,	{KEY_SETUP}},
+	{KE_KEY, 0x00001b01,	{KEY_CONFIG}},
+	{KE_KEY, 0x00011b01,	{KEY_CONFIG}},
+	{KE_KEY, 0x00010101,	{KEY_SWITCHVIDEOMODE}},
+	{KE_KEY, 0x00001a01,	{KEY_REFRESH_RATE_TOGGLE}},
 
 	/* AI button has code for each position */
 	{KE_KEY, 0x00011801,	{KEY_ASSISTANT}},
 	{KE_KEY, 0x00011901,	{KEY_ASSISTANT}},
 
-	/* Keyboard backlight */
-	{KE_IGNORE, 0x00000501, {}},
-	{KE_IGNORE, 0x00800501, {}},
-	{KE_IGNORE, 0x00050501, {}},
-	{KE_IGNORE, 0x000a0501, {}},
+	/* Keyboard backlight: Off / Auto / Low / High (new state in byte 2) */
+	{KE_KEY, 0x00000501,	{KEY_KBDILLUMTOGGLE}},
+	{KE_KEY, 0x00800501,	{KEY_KBDILLUMTOGGLE}},
+	{KE_KEY, 0x00050501,	{KEY_KBDILLUMTOGGLE}},
+	{KE_KEY, 0x000a0501,	{KEY_KBDILLUMTOGGLE}},
+
+	/* Xiaomi G Command Center */
+	{KE_KEY, 0x00010a01,	{KEY_VENDOR}},
+
+	/* OEM preset power mode: 1=Balanced 2=Silent 3=Turbo 4=Full speed */
+	{KE_KEY, 0x00011601,	{KEY_PERFORMANCE}},
+	{KE_KEY, 0x00021601,	{KEY_PERFORMANCE}},
+	{KE_KEY, 0x00031601,	{KEY_PERFORMANCE}},
+	{KE_KEY, 0x00041601,	{KEY_PERFORMANCE}},
+
+	/* Fn Lock state: 1=on 0=off */
+	{KE_KEY, 0x00000701,	{KEY_FN_ESC}},
+	{KE_KEY, 0x00010701,	{KEY_FN_ESC}},
+
+	/* Fn+`/1/2/3/4 */
+	{KE_KEY, 0x00011101, {KEY_F13}},
+	{KE_KEY, 0x00011201, {KEY_F14}},
+	{KE_KEY, 0x00011301, {KEY_F15}},
+	{KE_KEY, 0x00011401, {KEY_F16}},
+	{KE_KEY, 0x00011501, {KEY_F17}},
 
 	{KE_END}
 };
@@ -118,6 +141,7 @@ static struct wmi_driver redmi_wmi_driver = {
 		.probe_type = PROBE_PREFER_ASYNCHRONOUS,
 	},
 	.id_table = redmi_wmi_id_table,
+	.min_event_size = 32,
 	.probe = redmi_wmi_probe,
 	.notify = redmi_wmi_notify,
 	.no_singleton = true,
