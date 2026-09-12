@@ -9,15 +9,18 @@
  */
 
 #include <linux/compiler.h>
+#include <linux/in6.h>
 #include <asm/byteorder.h>
 
 /**
  * csum_fold - Fold and invert a 32bit checksum.
- * sum: 32bit unfolded sum
+ * @sum: 32bit unfolded sum
  *
  * Fold a 32bit running checksum to 16bit and invert it. This is usually
  * the last step before putting a checksum into a packet.
  * Make sure not to mix with 64bit checksums.
+ *
+ * Returns: new checksum value
  */
 static inline __sum16 csum_fold(__wsum sum)
 {
@@ -39,8 +42,10 @@ static inline __sum16 csum_fold(__wsum sum)
 
 /**
  * ip_fast_csum - Compute the IPv4 header checksum efficiently.
- * iph: ipv4 header
- * ihl: length of header / 4
+ * @iph: ipv4 header
+ * @ihl: length of header / 4
+ *
+ * Returns: header checksum
  */
 static inline __sum16 ip_fast_csum(const void *iph, unsigned int ihl)
 {
@@ -73,14 +78,14 @@ static inline __sum16 ip_fast_csum(const void *iph, unsigned int ihl)
 }
 
 /**
- * csum_tcpup_nofold - Compute an IPv4 pseudo header checksum.
+ * csum_tcpudp_nofold - Compute an IPv4 pseudo header checksum.
  * @saddr: source address
  * @daddr: destination address
  * @len: length of packet
  * @proto: ip protocol of packet
  * @sum: initial sum to be added in (32bit unfolded)
  *
- * Returns the pseudo header checksum the input data. Result is
+ * Returns: the pseudo header checksum the input data. Result is
  * 32bit unfolded.
  */
 static inline __wsum
@@ -99,14 +104,14 @@ csum_tcpudp_nofold(__be32 saddr, __be32 daddr, __u32 len,
 
 
 /**
- * csum_tcpup_magic - Compute an IPv4 pseudo header checksum.
+ * csum_tcpudp_magic - Compute an IPv4 pseudo header checksum.
  * @saddr: source address
  * @daddr: destination address
  * @len: length of packet
  * @proto: ip protocol of packet
  * @sum: initial sum to be added in (32bit unfolded)
  *
- * Returns the 16bit pseudo header checksum the input data already
+ * Returns: the 16bit pseudo header checksum the input data already
  * complemented and ready to be filled in.
  */
 static inline __sum16 csum_tcpudp_magic(__be32 saddr, __be32 daddr,
@@ -122,7 +127,7 @@ static inline __sum16 csum_tcpudp_magic(__be32 saddr, __be32 daddr,
  * @len: length of buffer.
  * @sum: initial sum to be added in (32bit unfolded)
  *
- * Returns the 32bit unfolded internet checksum of the buffer.
+ * Returns: the 32bit unfolded internet checksum of the buffer.
  * Before filling it in it needs to be csum_fold()'ed.
  * buff should be aligned to a 64bit boundary if possible.
  */
@@ -140,30 +145,10 @@ extern __wsum csum_partial_copy_nocheck(const void *src, void *dst, int len);
  * @buff: buffer address.
  * @len: length of buffer.
  *
- * Returns the 16bit folded/inverted checksum of the passed buffer.
+ * Returns: the 16bit folded/inverted checksum of the passed buffer.
  * Ready to fill in.
  */
 extern __sum16 ip_compute_csum(const void *buff, int len);
-
-/**
- * csum_ipv6_magic - Compute checksum of an IPv6 pseudo header.
- * @saddr: source address
- * @daddr: destination address
- * @len: length of packet
- * @proto: protocol of packet
- * @sum: initial sum (32bit unfolded) to be added in
- *
- * Computes an IPv6 pseudo header checksum. This sum is added the checksum
- * into UDP/TCP packets and contains some link layer information.
- * Returns the unfolded 32bit checksum.
- */
-
-struct in6_addr;
-
-#define _HAVE_ARCH_IPV6_CSUM 1
-extern __sum16
-csum_ipv6_magic(const struct in6_addr *saddr, const struct in6_addr *daddr,
-		__u32 len, __u8 proto, __wsum sum);
 
 static inline unsigned add32_with_carry(unsigned a, unsigned b)
 {
@@ -172,6 +157,47 @@ static inline unsigned add32_with_carry(unsigned a, unsigned b)
 	    : "=r" (a)
 	    : "0" (a), "rm" (b));
 	return a;
+}
+
+#define _HAVE_ARCH_IPV6_CSUM 1
+
+/**
+ * csum_ipv6_magic - Compute checksum of an IPv6 pseudo header.
+ * @_saddr: source address
+ * @_daddr: destination address
+ * @len: length of packet
+ * @proto: protocol of packet
+ * @sum: initial sum (32bit unfolded) to be added in
+ *
+ * Computes an IPv6 pseudo header checksum. This sum is added the checksum
+ * into UDP/TCP packets and contains some link layer information.
+ *
+ * Returns: the unfolded 32bit checksum.
+ */
+
+static inline __sum16 csum_ipv6_magic(
+	const struct in6_addr *_saddr, const struct in6_addr *_daddr,
+	__u32 len, __u8 proto, __wsum sum)
+{
+	const unsigned long *saddr = (const unsigned long *)_saddr;
+	const unsigned long *daddr = (const unsigned long *)_daddr;
+	__u64 sum64;
+
+	sum64 = (__force __u64)htonl(len) + (__force __u64)htons(proto) +
+		(__force __u64)sum;
+
+	asm("	addq %1,%[sum64]\n"
+	    "	adcq %2,%[sum64]\n"
+	    "	adcq %3,%[sum64]\n"
+	    "	adcq %4,%[sum64]\n"
+	    "	adcq $0,%[sum64]\n"
+
+	    : [sum64] "+r" (sum64)
+	    : "m" (saddr[0]), "m" (saddr[1]),
+	      "m" (daddr[0]), "m" (daddr[1]));
+
+	return csum_fold(
+	       (__force __wsum)add32_with_carry(sum64 & 0xffffffff, sum64>>32));
 }
 
 #define HAVE_ARCH_CSUM_ADD

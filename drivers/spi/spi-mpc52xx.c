@@ -392,6 +392,18 @@ static int mpc52xx_spi_probe(struct platform_device *op)
 	void __iomem *regs;
 	u8 ctrl1;
 	int rc, i = 0;
+	int irq0;
+	int irq1;
+
+	irq0 = platform_get_irq_optional(op, 0);
+	if (irq0 == -EPROBE_DEFER)
+		return irq0;
+	irq0 = max(irq0, 0);
+
+	irq1 = platform_get_irq_optional(op, 1);
+	if (irq1 == -EPROBE_DEFER)
+		return irq1;
+	irq1 = max(irq1, 0);
 
 	/* MMIO registers */
 	dev_dbg(&op->dev, "probing mpc5200 SPI device\n");
@@ -430,23 +442,20 @@ static int mpc52xx_spi_probe(struct platform_device *op)
 	host->transfer = mpc52xx_spi_transfer;
 	host->mode_bits = SPI_CPOL | SPI_CPHA | SPI_LSB_FIRST;
 	host->bits_per_word_mask = SPI_BPW_MASK(8);
-	host->dev.of_node = op->dev.of_node;
 
 	platform_set_drvdata(op, host);
 
 	ms = spi_controller_get_devdata(host);
 	ms->host = host;
 	ms->regs = regs;
-	ms->irq0 = irq_of_parse_and_map(op->dev.of_node, 0);
-	ms->irq1 = irq_of_parse_and_map(op->dev.of_node, 1);
+	ms->irq0 = irq0;
+	ms->irq1 = irq1;
 	ms->state = mpc52xx_spi_fsmstate_idle;
 	ms->ipb_freq = mpc5xxx_get_bus_frequency(&op->dev);
 	ms->gpio_cs_count = gpiod_count(&op->dev, NULL);
 	if (ms->gpio_cs_count > 0) {
 		host->num_chipselect = ms->gpio_cs_count;
-		ms->gpio_cs = kmalloc_array(ms->gpio_cs_count,
-					    sizeof(*ms->gpio_cs),
-					    GFP_KERNEL);
+		ms->gpio_cs = kmalloc_objs(*ms->gpio_cs, ms->gpio_cs_count);
 		if (!ms->gpio_cs) {
 			rc = -ENOMEM;
 			goto err_alloc_gpio;
@@ -475,13 +484,15 @@ static int mpc52xx_spi_probe(struct platform_device *op)
 	if (ms->irq0 && ms->irq1) {
 		rc = request_irq(ms->irq0, mpc52xx_spi_irq, 0,
 				  "mpc5200-spi-modf", ms);
-		rc |= request_irq(ms->irq1, mpc52xx_spi_irq, 0,
-				  "mpc5200-spi-spif", ms);
-		if (rc) {
-			free_irq(ms->irq0, ms);
-			free_irq(ms->irq1, ms);
-			ms->irq0 = ms->irq1 = 0;
+		if (rc == 0) {
+			rc = request_irq(ms->irq1, mpc52xx_spi_irq, 0,
+					 "mpc5200-spi-spif", ms);
+			if (rc)
+				free_irq(ms->irq0, ms);
 		}
+
+		if (rc)
+			ms->irq0 = ms->irq1 = 0;
 	} else {
 		/* operate in polled mode */
 		ms->irq0 = ms->irq1 = 0;
@@ -501,6 +512,11 @@ static int mpc52xx_spi_probe(struct platform_device *op)
 
  err_register:
 	dev_err(&ms->host->dev, "initialization failed\n");
+	if (ms->irq0) {
+		free_irq(ms->irq0, ms);
+		free_irq(ms->irq1, ms);
+	}
+	cancel_work_sync(&ms->work);
  err_gpio:
 	while (i-- > 0)
 		gpiod_put(ms->gpio_cs[i]);
@@ -516,19 +532,23 @@ static int mpc52xx_spi_probe(struct platform_device *op)
 
 static void mpc52xx_spi_remove(struct platform_device *op)
 {
-	struct spi_controller *host = spi_controller_get(platform_get_drvdata(op));
+	struct spi_controller *host = platform_get_drvdata(op);
 	struct mpc52xx_spi *ms = spi_controller_get_devdata(host);
 	int i;
 
+	spi_unregister_controller(host);
+
+	if (ms->irq0) {
+		free_irq(ms->irq0, ms);
+		free_irq(ms->irq1, ms);
+	}
+
 	cancel_work_sync(&ms->work);
-	free_irq(ms->irq0, ms);
-	free_irq(ms->irq1, ms);
 
 	for (i = 0; i < ms->gpio_cs_count; i++)
 		gpiod_put(ms->gpio_cs[i]);
 
 	kfree(ms->gpio_cs);
-	spi_unregister_controller(host);
 	iounmap(ms->regs);
 	spi_controller_put(host);
 }

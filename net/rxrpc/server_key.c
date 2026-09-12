@@ -10,7 +10,6 @@
 
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
-#include <crypto/skcipher.h>
 #include <linux/module.h>
 #include <linux/net.h>
 #include <linux/skbuff.h>
@@ -124,6 +123,9 @@ int rxrpc_server_keyring(struct rxrpc_sock *rx, sockptr_t optval, int optlen)
 	char *description;
 
 	_enter("");
+
+	if (rx->securities)
+		return -EINVAL;
 
 	if (optlen <= 0 || optlen > PAGE_SIZE - 1)
 		return -EINVAL;

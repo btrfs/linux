@@ -236,6 +236,17 @@ int mtl_enable_interrupts(struct snd_sof_dev *sdev, bool enable)
 }
 EXPORT_SYMBOL_NS(mtl_enable_interrupts, "SND_SOC_SOF_INTEL_MTL");
 
+static bool mtl_dsp_is_enabled(struct snd_sof_dev *sdev)
+{
+	int val;
+
+	val = snd_sof_dsp_read(sdev, HDA_DSP_BAR, MTL_HFDSSCS);
+	if (val & MTL_HFDSSCS_CPA_MASK)
+		return true;
+
+	return false;
+}
+
 /* pre fw run operations */
 static int mtl_dsp_pre_fw_run(struct snd_sof_dev *sdev)
 {
@@ -248,6 +259,18 @@ static int mtl_dsp_pre_fw_run(struct snd_sof_dev *sdev)
 	u32 dsppwrctl;
 	u32 dsppwrsts;
 	const struct sof_intel_dsp_desc *chip;
+
+	/* Power down the DSP if it is left enabled to ensure clean boot state */
+	if (mtl_dsp_is_enabled(sdev)) {
+		dev_dbg(sdev->dev, "powering down DSP first\n");
+
+		ret = mtl_power_down_dsp(sdev);
+		if (ret < 0) {
+			dev_warn(sdev->dev,
+				 "%s: failed to power down already-enabled DSP\n", __func__);
+			/* Continue anyway to attempt recovery */
+		}
+	}
 
 	chip = get_chip_info(sdev->pdata);
 	if (chip->hw_ip_version > SOF_INTEL_ACE_2_0) {
@@ -596,13 +619,10 @@ static irqreturn_t mtl_ipc_irq_thread(int irq, void *context)
 				data->primary = primary;
 				data->extension = extension;
 
-				spin_lock_irq(&sdev->ipc_lock);
-
+				guard(spinlock_irq)(&sdev->ipc_lock);
 				snd_sof_ipc_get_reply(sdev);
 				mtl_ipc_host_done(sdev);
 				snd_sof_ipc_reply(sdev, data->primary);
-
-				spin_unlock_irq(&sdev->ipc_lock);
 			} else {
 				dev_dbg_ratelimited(sdev->dev,
 						    "IPC reply before FW_READY: %#x|%#x\n",
@@ -737,7 +757,7 @@ int sof_mtl_set_ops(struct snd_sof_dev *sdev, struct snd_sof_dsp_ops *dsp_ops)
 	dsp_ops->core_get = mtl_dsp_core_get;
 	dsp_ops->core_put = mtl_dsp_core_put;
 
-	sdev->private = kzalloc(sizeof(struct sof_ipc4_fw_data), GFP_KERNEL);
+	sdev->private = kzalloc_obj(struct sof_ipc4_fw_data);
 	if (!sdev->private)
 		return -ENOMEM;
 
@@ -786,6 +806,7 @@ const struct sof_intel_dsp_desc mtl_chip_info = {
 	.power_down_dsp = mtl_power_down_dsp,
 	.disable_interrupts = mtl_dsp_disable_interrupts,
 	.hw_ip_version = SOF_INTEL_ACE_1_0,
+	.platform = "mtl",
 };
 
 const struct sof_intel_dsp_desc arl_s_chip_info = {
@@ -814,4 +835,5 @@ const struct sof_intel_dsp_desc arl_s_chip_info = {
 	.power_down_dsp = mtl_power_down_dsp,
 	.disable_interrupts = mtl_dsp_disable_interrupts,
 	.hw_ip_version = SOF_INTEL_ACE_1_0,
+	.platform = "arl",
 };

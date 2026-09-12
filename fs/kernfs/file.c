@@ -40,22 +40,15 @@ struct kernfs_open_node {
 static DEFINE_SPINLOCK(kernfs_notify_lock);
 static struct kernfs_node *kernfs_notify_list = KERNFS_NOTIFY_EOL;
 
+/* Compatibility wrappers - use the common hashed node lock */
 static inline struct mutex *kernfs_open_file_mutex_ptr(struct kernfs_node *kn)
 {
-	int idx = hash_ptr(kn, NR_KERNFS_LOCK_BITS);
-
-	return &kernfs_locks->open_file_mutex[idx];
+	return kernfs_node_lock_ptr(kn);
 }
 
 static inline struct mutex *kernfs_open_file_mutex_lock(struct kernfs_node *kn)
 {
-	struct mutex *lock;
-
-	lock = kernfs_open_file_mutex_ptr(kn);
-
-	mutex_lock(lock);
-
-	return lock;
+	return kernfs_node_lock(kn);
 }
 
 /**
@@ -540,7 +533,7 @@ static int kernfs_get_open_node(struct kernfs_node *kn,
 
 	if (!on) {
 		/* not there, initialize a new one */
-		on = kzalloc(sizeof(*on), GFP_KERNEL);
+		on = kzalloc_obj(*on);
 		if (!on) {
 			mutex_unlock(mutex);
 			return -ENOMEM;
@@ -638,7 +631,7 @@ static int kernfs_fop_open(struct inode *inode, struct file *file)
 
 	/* allocate a kernfs_open_file for the file */
 	error = -ENOMEM;
-	of = kzalloc(sizeof(struct kernfs_open_file), GFP_KERNEL);
+	of = kzalloc_obj(struct kernfs_open_file);
 	if (!of)
 		goto err_out;
 
@@ -1045,7 +1038,7 @@ struct kernfs_node *__kernfs_create_file(struct kernfs_node *parent,
 					 umode_t mode, kuid_t uid, kgid_t gid,
 					 loff_t size,
 					 const struct kernfs_ops *ops,
-					 void *priv, const void *ns,
+					 void *priv, const struct ns_common *ns,
 					 struct lock_class_key *key)
 {
 	struct kernfs_node *kn;

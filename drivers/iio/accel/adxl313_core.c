@@ -8,6 +8,7 @@
  */
 
 #include <linux/bitfield.h>
+#include <linux/cleanup.h>
 #include <linux/interrupt.h>
 #include <linux/module.h>
 #include <linux/overflow.h>
@@ -356,19 +357,15 @@ static int adxl313_read_axis(struct adxl313_data *data,
 {
 	int ret;
 
-	mutex_lock(&data->lock);
+	guard(mutex)(&data->lock);
 
 	ret = regmap_bulk_read(data->regmap,
 			       ADXL313_REG_DATA_AXIS(chan->address),
 			       &data->transf_buf, sizeof(data->transf_buf));
 	if (ret)
-		goto unlock_ret;
+		return ret;
 
-	ret = le16_to_cpu(data->transf_buf);
-
-unlock_ret:
-	mutex_unlock(&data->lock);
-	return ret;
+	return le16_to_cpu(data->transf_buf);
 }
 
 static int adxl313_read_freq_avail(struct iio_dev *indio_dev,
@@ -998,6 +995,8 @@ static int adxl313_buffer_predisable(struct iio_dev *indio_dev)
 
 	ret = regmap_write(data->regmap, ADXL313_REG_FIFO_CTL,
 			   FIELD_PREP(ADXL313_REG_FIFO_CTL_MODE_MSK, ADXL313_FIFO_BYPASS));
+	if (ret)
+		return ret;
 
 	ret = regmap_write(data->regmap, ADXL313_REG_INT_ENABLE, 0);
 	if (ret)
@@ -1241,7 +1240,9 @@ int adxl313_core_probe(struct device *dev,
 	data->regmap = regmap;
 	data->chip_info = chip_info;
 
-	mutex_init(&data->lock);
+	ret = devm_mutex_init(dev, &data->lock);
+	if (ret)
+		return ret;
 
 	indio_dev->name = chip_info->name;
 	indio_dev->info = &adxl313_info;
@@ -1251,10 +1252,8 @@ int adxl313_core_probe(struct device *dev,
 	indio_dev->available_scan_masks = adxl313_scan_masks;
 
 	ret = adxl313_setup(dev, data, setup);
-	if (ret) {
-		dev_err(dev, "ADXL313 setup failed\n");
-		return ret;
-	}
+	if (ret)
+		return dev_err_probe(dev, ret, "ADXL313 setup failed\n");
 
 	int_line = adxl313_get_int_type(dev, &irq);
 	if (int_line == ADXL313_INT_NONE) {

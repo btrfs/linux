@@ -6,21 +6,25 @@
 //
 //
 
+#include <linux/cleanup.h>
 #include <linux/bitops.h>
-#include <sound/core.h>
 #include <linux/delay.h>
+#include <linux/dmi.h>
+#include <linux/firmware.h>
 #include <linux/init.h>
-#include <sound/initval.h>
-#include <sound/jack.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/moduleparam.h>
-#include <sound/pcm.h>
 #include <linux/pm_runtime.h>
-#include <sound/pcm_params.h>
-#include <linux/soundwire/sdw_registers.h>
 #include <linux/slab.h>
+#include <linux/soundwire/sdw_registers.h>
+#include <sound/core.h>
+#include <sound/initval.h>
+#include <sound/jack.h>
+#include <sound/pcm.h>
+#include <sound/pcm_params.h>
 #include <sound/soc-dapm.h>
+#include <sound/sdw.h>
 #include <sound/tlv.h>
 
 #include "rt722-sdca.h"
@@ -292,7 +296,7 @@ io_error:
 
 static void rt722_sdca_jack_init(struct rt722_sdca_priv *rt722)
 {
-	mutex_lock(&rt722->calibrate_mutex);
+	guard(mutex)(&rt722->calibrate_mutex);
 	if (rt722->hs_jack) {
 		/* set SCP_SDCA_IntMask1[0]=1 */
 		sdw_write_no_pm(rt722->slave, SDW_SCP_SDCA_INTMASK1,
@@ -315,7 +319,6 @@ static void rt722_sdca_jack_init(struct rt722_sdca_priv *rt722)
 		rt722_sdca_index_update_bits(rt722, RT722_VENDOR_HDA_CTL,
 			RT722_GE_RELATED_CTL2, 0x4000, 0x4000);
 	}
-	mutex_unlock(&rt722->calibrate_mutex);
 }
 
 static int rt722_sdca_set_jack_detect(struct snd_soc_component *component,
@@ -343,6 +346,277 @@ static int rt722_sdca_set_jack_detect(struct snd_soc_component *component,
 
 	return 0;
 }
+
+static int rt722_cae_load(struct rt722_sdca_priv *rt722)
+{
+	struct device *dev = &rt722->slave->dev;
+	static const char func_tag[] = "FUNC";
+	static const char xu_tag[] = "XU";
+	const char *dmi_vendor, *dmi_product, *dmi_sku;
+	unsigned int cae_st_spk, cae_st_hp, cae_st_mic;
+	unsigned int func, value;
+	unsigned int combined_val;
+	unsigned int addr, size;
+	unsigned int fw_offset;
+	unsigned char mbq_high_val = 0;
+	unsigned char *param_data;
+	unsigned char *fw_data;
+	char tag[5];
+	char *space;
+	int v_len, p_len, s_len;
+	int ret = 0, i;
+	int retry = 50;
+
+	dmi_vendor = dmi_get_system_info(DMI_SYS_VENDOR);
+	dmi_product = dmi_get_system_info(DMI_PRODUCT_NAME);
+	dmi_sku = dmi_get_system_info(DMI_PRODUCT_SKU);
+
+	if (!dmi_vendor || !dmi_product || !dmi_sku) {
+		dev_warn(dev, "%s: Incomplete DMI info\n", __func__);
+		return -EINVAL;
+	}
+	space = strchr(dmi_vendor, ' ');
+	v_len = space ? space - dmi_vendor : strlen(dmi_vendor);
+
+	space = strchr(dmi_product, ' ');
+	p_len = space ? space - dmi_product : strlen(dmi_product);
+
+	space = strchr(dmi_sku, ' ');
+	s_len = space ? space - dmi_sku : strlen(dmi_sku);
+
+	char *cae_filename __free(kfree) =
+		kasprintf(GFP_KERNEL,
+				 "realtek/rt722/rt722_RAE_%.*s_%.*s_%.*s.dat",
+				 v_len, dmi_vendor,
+				 p_len, dmi_product,
+				 s_len, dmi_sku);
+	if (!cae_filename)
+		return -ENOMEM;
+	dev_dbg(dev, "%s: try to load CAE file %s\n", __func__, cae_filename);
+
+	regmap_write(rt722->regmap, RT722_SPK_CAE_PARAM1, 0x5f);
+	regmap_write(rt722->regmap, RT722_HP_CAE_PARAM39, 0x5f);
+	regmap_write(rt722->regmap, RT722_MIC_CAE_PARAM39, 0x5f);
+	usleep_range(50000, 60000);
+
+	const struct firmware *cae_fw __free(firmware) = NULL;
+	request_firmware(&cae_fw, cae_filename, dev);
+	if (!cae_fw) {
+		dev_err(dev, "%s: Failed to load CAE firmware\n", __func__);
+		return -ENOENT;
+	}
+
+	regmap_read(rt722->regmap, RT722_SPK_CAE_PARAM38, &cae_st_spk);
+	regmap_read(rt722->regmap, RT722_HP_CAE_PARAM68, &cae_st_hp);
+	regmap_read(rt722->regmap, RT722_MIC_CAE_PARAM99, &cae_st_mic);
+	cae_st_spk &= 0x80;
+	cae_st_hp &= 0x80;
+	cae_st_mic &= 0x80;
+
+	dev_dbg(dev, "%s(%d) spk_crc:%x, hp_crc:%x, mic_crc:%x\n",
+		__func__, __LINE__, cae_st_spk, cae_st_hp, cae_st_mic);
+
+	if (cae_st_spk)
+		rt722_sdca_index_update_bits(rt722, RT722_VENDOR_EQ_CAE,
+			RT722_EQ_CTRL_SPK, 0x0008, 0x0008);
+	else if (cae_st_hp)
+		rt722_sdca_index_update_bits(rt722, RT722_VENDOR_EQ_CAE,
+			RT722_EQ_CTRL_HP, 0x0008, 0x0008);
+	else if (cae_st_mic)
+		rt722_sdca_index_update_bits(rt722, RT722_VENDOR_EQ_CAE,
+			RT722_EQ_CTRL_DMIC, 0x0008, 0x0008);
+
+	rt722_sdca_index_update_bits(rt722, RT722_VENDOR_REG,
+			RT722_MISC_CTRL1, 0x8000, 0x8000);
+
+	regmap_update_bits(rt722->regmap, RT722_SPK_CAE_PARAM34, 0x1, 0x0);
+	regmap_update_bits(rt722->regmap, RT722_HP_CAE_PARAM64, 0x1, 0x0);
+	regmap_update_bits(rt722->regmap, RT722_MIC_CAE_PARAM95, 0x1, 0x0);
+
+	while (--retry) {
+		regmap_read(rt722->regmap, RT722_SPK_CAE_PARAM35, &cae_st_spk);
+		regmap_read(rt722->regmap, RT722_HP_CAE_PARAM65, &cae_st_hp);
+		regmap_read(rt722->regmap, RT722_MIC_CAE_PARAM96, &cae_st_mic);
+		dev_dbg(dev, "%s(%d) cae_st_spk:%x, cae_st_hp:%x, cae_st_mic:%x\n",
+			__func__, __LINE__, cae_st_spk, cae_st_hp, cae_st_mic);
+		if ((cae_st_spk & 0x40) && (cae_st_hp & 0x40) && (cae_st_mic & 0x40))
+			break;
+		usleep_range(1000, 1100);
+	}
+
+	if (!retry && !((cae_st_spk & 0x40) && (cae_st_hp & 0x40)
+		&& (cae_st_mic & 0x40))) {
+		dev_err(dev, "%s: CAE is not ready to be loaded.\n", __func__);
+		ret = -ETIMEDOUT;
+		goto out_release;
+	}
+
+	dev_dbg(dev, "%s, cae_fw size=0x%zx, start\n", __func__, cae_fw->size);
+
+	rt722_sdca_index_write(rt722, RT722_VENDOR_EQ_CAE,
+		RT722_EQ_CTRL_AMIC, 0x8000);
+	rt722_sdca_index_write(rt722, RT722_VENDOR_EQ_CAE,
+		RT722_EQ_CTRL_DMIC, 0x8004);
+	rt722_sdca_index_write(rt722, RT722_VENDOR_EQ_CAE,
+		RT722_EQ_CTRL_HP, 0x8074);
+	rt722_sdca_index_write(rt722, RT722_VENDOR_EQ_CAE,
+		RT722_EQ_CTRL_SPK, 0xa074);
+
+	regcache_cache_bypass(rt722->regmap, true);
+	for (fw_offset = 0; fw_offset < cae_fw->size;) {
+
+		if (fw_offset + 12 > cae_fw->size) {
+			dev_err(dev, "%s: Unexpected end of firmware\n", __func__);
+			ret = -EINVAL;
+			goto verify_abort;
+		}
+
+		fw_data = (unsigned char *)&cae_fw->data[fw_offset];
+		memcpy(tag, fw_data, 4);
+		tag[4] = '\0';
+
+		if (strcmp(tag, xu_tag) == 0) {
+			dev_dbg(dev, "%s: This is a XU tag", __func__);
+			memcpy(&addr, (fw_data + 4), 4);
+			memcpy(&size, (fw_data + 8), 4);
+
+			if (size == 0 || size > cae_fw->size - fw_offset - 12) {
+				dev_err(dev, "%s: Invalid payload size: %u\n", __func__, size);
+				ret = -EINVAL;
+				goto verify_abort;
+			}
+
+			param_data = (unsigned char *)(fw_data + 12);
+
+			dev_dbg(dev, "%s: addr=0x%x, size=0x%x\n", __func__, addr, size);
+
+			if ((addr <= 0x05302300 && addr >= 0x05300000) ||
+				(addr <= 0x020020b4 && addr >= 0x020000b1)) {
+				if (addr & BIT(13)) {
+					mbq_high_val = param_data[0];
+					dev_dbg(dev, "MBQ: High Byte 0x%02x\n", mbq_high_val);
+					fw_offset += (size + 12);
+
+					continue;
+				} else {
+					regcache_cache_bypass(rt722->regmap, false);
+					combined_val = (mbq_high_val << 8) | param_data[0];
+					if (addr == 0x20000b1 || addr == 0x20000b4)
+						combined_val |= (0x2 << 8);
+					ret = regmap_write(rt722->regmap, addr, combined_val);
+					if (ret) {
+						dev_err(dev,
+							"MBQ fail: addr=0x%x ret=%d\n", addr, ret);
+						regcache_cache_bypass(rt722->regmap, true);
+						goto verify_abort;
+					}
+
+					dev_dbg(dev, "MBQ-reg=0x%x, value=0x%x\n",
+						addr, combined_val);
+
+					fw_offset += (size + 12);
+					regcache_cache_bypass(rt722->regmap, true);
+					continue;
+				}
+			}
+
+			for (i = 0; i < size; i++) {
+				ret = regmap_write(rt722->regmap, addr + i, param_data[i]);
+				if (ret) {
+					dev_err(dev,
+						"CAE write fail: addr=0x%x ret=%d\n",
+						addr + i, ret);
+					goto verify_abort;
+				}
+			}
+			fw_offset += (size + 12);
+		} else if (strcmp(tag, func_tag) == 0) {
+			dev_dbg(dev, "%s: This is a FUNC tag", __func__);
+
+			memcpy(&func, (fw_data + 4), 4);
+			memcpy(&value, (fw_data + 8), 4);
+			dev_dbg(dev, "%s: func=0x%x, value=0x%x\n",
+				__func__, func, value);
+
+			if (func == 1)
+				msleep(value);
+
+			fw_offset += 12;
+		} else {
+			dev_err(dev, "%s: No XU/FUNC tag at fw_offset=0x%x\n",
+				__func__, fw_offset);
+			ret = -EINVAL;
+			goto verify_abort;
+		}
+	}
+
+	rt722_sdca_index_update_bits(rt722, RT722_VENDOR_REG,
+			RT722_MISC_CTRL1, 0x8000, 0x0000);
+	regcache_cache_bypass(rt722->regmap, false);
+	rt722->cae_update_done = 1;
+	dev_dbg(dev, "%s: CAE FW update done.\n", __func__);
+	return 0;
+
+verify_abort:
+	regcache_cache_bypass(rt722->regmap, false);
+	if (!ret)
+		ret = -EIO;
+out_release:
+	rt722_sdca_index_update_bits(rt722, RT722_VENDOR_REG,
+			RT722_MISC_CTRL1, 0x8000, 0x0000);
+	dev_err(dev, "%s: CAE FW update aborted (ret=%d).\n", __func__, ret);
+	return ret;
+}
+
+static int rt722_cae_update_put(struct snd_kcontrol *kcontrol,
+				 struct snd_ctl_elem_value *ucontrol)
+{
+	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
+	struct rt722_sdca_priv *rt722 = snd_soc_component_get_drvdata(component);
+	struct snd_soc_dapm_context *dapm = snd_soc_component_to_dapm(component);
+	int ret, changed = 0;
+
+	if (!rt722->hw_init)
+		return 0;
+
+	ret = pm_runtime_resume_and_get(component->dev);
+	if (ret < 0 && ret != -EACCES)
+		return ret;
+
+	if (ucontrol->value.integer.value[0]) {
+		if (snd_soc_dapm_get_bias_level(dapm) == SND_SOC_BIAS_OFF) {
+			ret = rt722_cae_load(rt722);
+			if (ret) {
+				dev_err(component->dev, "CAE load failed: %d\n", ret);
+				goto out;
+			} else
+				changed = 1;
+		}
+	} else {
+		if (rt722->cae_update_done) {
+			rt722->cae_update_done = 0;
+			changed = 1;
+		}
+	}
+
+out:
+	pm_runtime_mark_last_busy(component->dev);
+	pm_runtime_put_autosuspend(component->dev);
+
+	return ret < 0 ? ret : changed;
+}
+
+static int rt722_cae_update_get(struct snd_kcontrol *kcontrol,
+				 struct snd_ctl_elem_value *ucontrol)
+{
+	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
+	struct rt722_sdca_priv *rt722 = snd_soc_component_get_drvdata(component);
+
+	ucontrol->value.integer.value[0] = rt722->cae_update_done;
+
+	return 0;
+}
+
 
 /* For SDCA control DAC/ADC Gain */
 static int rt722_sdca_set_gain_put(struct snd_kcontrol *kcontrol,
@@ -511,6 +785,61 @@ static int rt722_sdca_fu1e_capture_put(struct snd_kcontrol *kcontrol,
 	}
 
 	err = rt722_sdca_set_fu1e_capture_ctl(rt722);
+	if (err < 0)
+		return err;
+
+	return changed;
+}
+
+static int rt722_sdca_set_fu06_playback_ctl(struct rt722_sdca_priv *rt722)
+{
+	int err;
+	unsigned int ch_l, ch_r;
+
+	ch_l = (rt722->fu06_dapm_mute || rt722->fu06_mixer_l_mute) ? 0x01 : 0x00;
+	ch_r = (rt722->fu06_dapm_mute || rt722->fu06_mixer_r_mute) ? 0x01 : 0x00;
+
+	err = regmap_write(rt722->regmap,
+			SDW_SDCA_CTL(FUNC_NUM_AMP, RT722_SDCA_ENT_USER_FU06,
+			RT722_SDCA_CTL_FU_MUTE, CH_L), ch_l);
+	if (err < 0)
+		return err;
+
+	err = regmap_write(rt722->regmap,
+			SDW_SDCA_CTL(FUNC_NUM_AMP, RT722_SDCA_ENT_USER_FU06,
+			RT722_SDCA_CTL_FU_MUTE, CH_R), ch_r);
+	if (err < 0)
+		return err;
+
+	return 0;
+}
+
+static int rt722_sdca_fu06_playback_get(struct snd_kcontrol *kcontrol,
+			struct snd_ctl_elem_value *ucontrol)
+{
+	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
+	struct rt722_sdca_priv *rt722 = snd_soc_component_get_drvdata(component);
+
+	ucontrol->value.integer.value[0] = !rt722->fu06_mixer_l_mute;
+	ucontrol->value.integer.value[1] = !rt722->fu06_mixer_r_mute;
+	return 0;
+}
+
+static int rt722_sdca_fu06_playback_put(struct snd_kcontrol *kcontrol,
+			struct snd_ctl_elem_value *ucontrol)
+{
+	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
+	struct rt722_sdca_priv *rt722 = snd_soc_component_get_drvdata(component);
+	int err, changed = 0;
+
+	if (rt722->fu06_mixer_l_mute != !ucontrol->value.integer.value[0] ||
+		rt722->fu06_mixer_r_mute != !ucontrol->value.integer.value[1])
+		changed = 1;
+
+	rt722->fu06_mixer_l_mute = !ucontrol->value.integer.value[0];
+	rt722->fu06_mixer_r_mute = !ucontrol->value.integer.value[1];
+
+	err = rt722_sdca_set_fu06_playback_ctl(rt722);
 	if (err < 0)
 		return err;
 
@@ -718,6 +1047,8 @@ static const struct snd_kcontrol_new rt722_sdca_controls[] = {
 			RT722_SDCA_CTL_FU_CH_GAIN, CH_R), 8, 3, 0,
 		rt722_sdca_set_gain_get, rt722_sdca_set_gain_put, boost_vol_tlv),
 	/* AMP playback settings */
+	SOC_DOUBLE_EXT("FU06 Playback Switch", SND_SOC_NOPM, 0, 1, 1, 0,
+		rt722_sdca_fu06_playback_get, rt722_sdca_fu06_playback_put),
 	SOC_DOUBLE_R_EXT_TLV("FU06 Playback Volume",
 		SDW_SDCA_CTL(FUNC_NUM_AMP, RT722_SDCA_ENT_USER_FU06,
 			RT722_SDCA_CTL_FU_VOLUME, CH_L),
@@ -738,6 +1069,9 @@ static const struct snd_kcontrol_new rt722_sdca_controls[] = {
 			RT722_SDCA_CTL_FU_CH_GAIN, CH_01),
 		rt722_sdca_dmic_set_gain_get, rt722_sdca_dmic_set_gain_put,
 			4, 3, boost_vol_tlv),
+	/* CAE firmware update */
+	SOC_SINGLE_EXT("CAE Update", SND_SOC_NOPM, 0, 1, 0,
+		rt722_cae_update_get, rt722_cae_update_put),
 };
 
 static const char * const adc22_mux_text[] = {
@@ -807,27 +1141,17 @@ static int rt722_sdca_fu21_event(struct snd_soc_dapm_widget *w,
 	struct snd_soc_component *component =
 		snd_soc_dapm_to_component(w->dapm);
 	struct rt722_sdca_priv *rt722 = snd_soc_component_get_drvdata(component);
-	unsigned char unmute = 0x0, mute = 0x1;
 
 	switch (event) {
 	case SND_SOC_DAPM_POST_PMU:
-		regmap_write(rt722->regmap,
-			SDW_SDCA_CTL(FUNC_NUM_AMP, RT722_SDCA_ENT_USER_FU06,
-				RT722_SDCA_CTL_FU_MUTE, CH_L), unmute);
-		regmap_write(rt722->regmap,
-			SDW_SDCA_CTL(FUNC_NUM_AMP, RT722_SDCA_ENT_USER_FU06,
-				RT722_SDCA_CTL_FU_MUTE, CH_R), unmute);
+		rt722->fu06_dapm_mute = false;
 		break;
 	case SND_SOC_DAPM_PRE_PMD:
-		regmap_write(rt722->regmap,
-			SDW_SDCA_CTL(FUNC_NUM_AMP, RT722_SDCA_ENT_USER_FU06,
-				RT722_SDCA_CTL_FU_MUTE, CH_L), mute);
-		regmap_write(rt722->regmap,
-			SDW_SDCA_CTL(FUNC_NUM_AMP, RT722_SDCA_ENT_USER_FU06,
-				RT722_SDCA_CTL_FU_MUTE, CH_R), mute);
+		rt722->fu06_dapm_mute = true;
 		break;
 	}
-	return 0;
+
+	return rt722_sdca_set_fu06_playback_ctl(rt722);
 }
 
 static int rt722_sdca_fu113_event(struct snd_soc_dapm_widget *w,
@@ -1119,11 +1443,10 @@ static int rt722_sdca_pcm_hw_params(struct snd_pcm_substream *substream,
 {
 	struct snd_soc_component *component = dai->component;
 	struct rt722_sdca_priv *rt722 = snd_soc_component_get_drvdata(component);
-	struct sdw_stream_config stream_config;
+	struct sdw_stream_config stream_config = {0};
 	struct sdw_port_config port_config;
-	enum sdw_data_direction direction;
 	struct sdw_stream_runtime *sdw_stream;
-	int retval, port, num_channels;
+	int retval, port;
 	unsigned int sampling_rate;
 
 	dev_dbg(dai->dev, "%s %s", __func__, dai->name);
@@ -1142,7 +1465,6 @@ static int rt722_sdca_pcm_hw_params(struct snd_pcm_substream *substream,
 	 * RT722_AIF3 with port = 6 for digital-mic capture
 	 */
 	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK) {
-		direction = SDW_DATA_DIR_RX;
 		if (dai->id == RT722_AIF1)
 			port = 1;
 		else if (dai->id == RT722_AIF2)
@@ -1150,7 +1472,6 @@ static int rt722_sdca_pcm_hw_params(struct snd_pcm_substream *substream,
 		else
 			return -EINVAL;
 	} else {
-		direction = SDW_DATA_DIR_TX;
 		if (dai->id == RT722_AIF1)
 			port = 2;
 		else if (dai->id == RT722_AIF3)
@@ -1158,13 +1479,9 @@ static int rt722_sdca_pcm_hw_params(struct snd_pcm_substream *substream,
 		else
 			return -EINVAL;
 	}
-	stream_config.frame_rate = params_rate(params);
-	stream_config.ch_count = params_channels(params);
-	stream_config.bps = snd_pcm_format_width(params_format(params));
-	stream_config.direction = direction;
 
-	num_channels = params_channels(params);
-	port_config.ch_mask = GENMASK(num_channels - 1, 0);
+	/* SoundWire specific configuration */
+	snd_sdw_params_to_config(substream, params, &stream_config, &port_config);
 	port_config.num = port;
 
 	retval = sdw_stream_add_slave(rt722->slave, &stream_config,
@@ -1324,9 +1641,12 @@ int rt722_sdca_init(struct device *dev, struct regmap *regmap, struct sdw_slave 
 	rt722->first_hw_init = false;
 	rt722->fu1e_dapm_mute = true;
 	rt722->fu0f_dapm_mute = true;
+	rt722->fu06_dapm_mute = true;
+	rt722->fu06_mixer_l_mute = rt722->fu06_mixer_r_mute = false;
 	rt722->fu0f_mixer_l_mute = rt722->fu0f_mixer_r_mute = true;
 	rt722->fu1e_mixer_mute[0] = rt722->fu1e_mixer_mute[1] =
 		rt722->fu1e_mixer_mute[2] = rt722->fu1e_mixer_mute[3] = true;
+	rt722->cae_update_done = 0;
 
 	return devm_snd_soc_register_component(dev,
 			&soc_sdca_dev_rt722, rt722_sdca_dai, ARRAY_SIZE(rt722_sdca_dai));
@@ -1522,6 +1842,17 @@ static void rt722_sdca_jack_preset(struct rt722_sdca_priv *rt722)
 	}
 }
 
+static void rt722_sdca_reset(struct rt722_sdca_priv *rt722)
+{
+	rt722_sdca_index_update_bits(rt722, RT722_VENDOR_REG,
+		RT722_LDO1_CTL, RT722_HIDDEN_REG_SW_RESET,
+		RT722_HIDDEN_REG_SW_RESET);
+	rt722_sdca_index_update_bits(rt722, RT722_VENDOR_HDA_CTL,
+		RT722_HDA_LEGACY_RESET_CTL, 0x1, 0x1);
+	if (rt722->hw_vid == RT722_VA)
+		rt722_sdca_index_write(rt722, RT722_VENDOR_REG, RT722_LDO1_CTL, 0xb091);
+}
+
 int rt722_sdca_io_init(struct device *dev, struct sdw_slave *slave)
 {
 	struct rt722_sdca_priv *rt722 = dev_get_drvdata(dev);
@@ -1559,9 +1890,15 @@ int rt722_sdca_io_init(struct device *dev, struct sdw_slave *slave)
 	rt722->hw_vid = (val & 0x0f00) >> 8;
 	dev_dbg(&slave->dev, "%s hw_vid=0x%x\n", __func__, rt722->hw_vid);
 
+	if (!rt722->first_hw_init)
+		rt722_sdca_reset(rt722);
+
 	rt722_sdca_dmic_preset(rt722);
 	rt722_sdca_amp_preset(rt722);
 	rt722_sdca_jack_preset(rt722);
+
+	if (rt722->hs_jack && (!rt722->first_hw_init))
+		rt722_sdca_jack_init(rt722);
 
 	if (rt722->first_hw_init) {
 		regcache_cache_bypass(rt722->regmap, false);

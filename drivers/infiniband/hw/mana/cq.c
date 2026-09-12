@@ -13,7 +13,7 @@ int mana_ib_create_cq(struct ib_cq *ibcq, const struct ib_cq_init_attr *attr,
 	struct mana_ib_create_cq_resp resp = {};
 	struct mana_ib_ucontext *mana_ucontext;
 	struct ib_device *ibdev = ibcq->device;
-	struct mana_ib_create_cq ucmd = {};
+	struct mana_ib_create_cq ucmd;
 	struct mana_ib_dev *mdev;
 	bool is_rnic_cq;
 	u32 doorbell;
@@ -24,18 +24,13 @@ int mana_ib_create_cq(struct ib_cq *ibcq, const struct ib_cq_init_attr *attr,
 
 	cq->comp_vector = attr->comp_vector % ibdev->num_comp_vectors;
 	cq->cq_handle = INVALID_MANA_HANDLE;
+	is_rnic_cq = mana_ib_is_rnic(mdev);
 
 	if (udata) {
-		if (udata->inlen < offsetof(struct mana_ib_create_cq, flags))
-			return -EINVAL;
-
-		err = ib_copy_from_udata(&ucmd, udata, min(sizeof(ucmd), udata->inlen));
-		if (err) {
-			ibdev_dbg(ibdev, "Failed to copy from udata for create cq, %d\n", err);
+		err = ib_copy_validate_udata_in_cm(udata, ucmd, buf_addr,
+						   MANA_IB_CREATE_RNIC_CQ);
+		if (err)
 			return err;
-		}
-
-		is_rnic_cq = !!(ucmd.flags & MANA_IB_CREATE_RNIC_CQ);
 
 		if ((!is_rnic_cq && attr->cqe > mdev->adapter_caps.max_qp_wr) ||
 		    attr->cqe > U32_MAX / COMP_ENTRY_SIZE) {
@@ -55,7 +50,10 @@ int mana_ib_create_cq(struct ib_cq *ibcq, const struct ib_cq_init_attr *attr,
 							  ibucontext);
 		doorbell = mana_ucontext->doorbell;
 	} else {
-		is_rnic_cq = true;
+		if (attr->cqe > U32_MAX / COMP_ENTRY_SIZE / 2 + 1) {
+			ibdev_dbg(ibdev, "CQE %d exceeding limit\n", attr->cqe);
+			return -EINVAL;
+		}
 		buf_size = MANA_PAGE_ALIGN(roundup_pow_of_two(attr->cqe * COMP_ENTRY_SIZE));
 		cq->cqe = buf_size / COMP_ENTRY_SIZE;
 		err = mana_ib_create_kernel_queue(mdev, buf_size, GDMA_CQ, &cq->queue);
@@ -82,11 +80,9 @@ int mana_ib_create_cq(struct ib_cq *ibcq, const struct ib_cq_init_attr *attr,
 
 	if (udata) {
 		resp.cqid = cq->queue.id;
-		err = ib_copy_to_udata(udata, &resp, min(sizeof(resp), udata->outlen));
-		if (err) {
-			ibdev_dbg(&mdev->ib_dev, "Failed to copy to udata, %d\n", err);
+		err = ib_respond_udata(udata, resp);
+		if (err)
 			goto err_remove_cq_cb;
-		}
 	}
 
 	spin_lock_init(&cq->cq_lock);
@@ -110,6 +106,11 @@ int mana_ib_destroy_cq(struct ib_cq *ibcq, struct ib_udata *udata)
 	struct mana_ib_cq *cq = container_of(ibcq, struct mana_ib_cq, ibcq);
 	struct ib_device *ibdev = ibcq->device;
 	struct mana_ib_dev *mdev;
+	int err;
+
+	err = ib_no_udata_io(udata);
+	if (err)
+		return err;
 
 	mdev = container_of(ibdev, struct mana_ib_dev, ib_dev);
 
@@ -140,12 +141,13 @@ int mana_ib_install_cq_cb(struct mana_ib_dev *mdev, struct mana_ib_cq *cq)
 
 	if (cq->queue.id >= gc->max_num_cqs)
 		return -EINVAL;
-	/* Create CQ table entry */
-	WARN_ON(gc->cq_table[cq->queue.id]);
+	/* Create CQ table entry, sharing a CQ between WQs is not supported */
+	if (gc->cq_table[cq->queue.id])
+		return -EINVAL;
 	if (cq->queue.kmem)
 		gdma_cq = cq->queue.kmem;
 	else
-		gdma_cq = kzalloc(sizeof(*gdma_cq), GFP_KERNEL);
+		gdma_cq = kzalloc_obj(*gdma_cq);
 	if (!gdma_cq)
 		return -ENOMEM;
 

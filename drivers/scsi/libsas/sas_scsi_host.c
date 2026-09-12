@@ -10,6 +10,7 @@
 #include <linux/firmware.h>
 #include <linux/export.h>
 #include <linux/ctype.h>
+#include <linux/hex.h>
 #include <linux/kernel.h>
 
 #include "sas_internal.h"
@@ -157,7 +158,8 @@ static struct sas_task *sas_create_task(struct scsi_cmnd *cmd,
 	return task;
 }
 
-int sas_queuecommand(struct Scsi_Host *host, struct scsi_cmnd *cmd)
+enum scsi_qc_status sas_queuecommand(struct Scsi_Host *host,
+				     struct scsi_cmnd *cmd)
 {
 	struct sas_internal *i = to_sas_internal(host->transportt);
 	struct domain_device *dev = cmd_to_domain_dev(cmd);
@@ -499,6 +501,21 @@ int sas_eh_target_reset_handler(struct scsi_cmnd *cmd)
 	return FAILED;
 }
 EXPORT_SYMBOL_GPL(sas_eh_target_reset_handler);
+
+/*
+ * Handle deferred QCs in case of a command timeout.
+ * See ata_scsi_eh_timed_out() for details.
+ */
+enum scsi_timeout_action sas_eh_timed_out(struct scsi_cmnd *cmd)
+{
+	struct domain_device *dev = cmd_to_domain_dev(cmd);
+
+	if (dev_is_sata(dev))
+		return ata_scsi_retry_deferred_qc(dev->sata_dev.ap, cmd);
+
+	return SCSI_EH_NOT_HANDLED;
+}
+EXPORT_SYMBOL_GPL(sas_eh_timed_out);
 
 /* Try to reset a device */
 static int try_to_reset_cmd_device(struct scsi_cmnd *cmd)

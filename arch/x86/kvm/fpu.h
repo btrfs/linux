@@ -3,7 +3,33 @@
 #ifndef __KVM_FPU_H_
 #define __KVM_FPU_H_
 
+#include <linux/kvm_host.h>
+
+#include <trace/events/kvm.h>
+
 #include <asm/fpu/api.h>
+
+/* Swap (qemu) user FPU context for the guest FPU context. */
+static inline void kvm_load_guest_fpu(struct kvm_vcpu *vcpu)
+{
+	if (KVM_BUG_ON(vcpu->arch.guest_fpu.fpstate->in_use, vcpu->kvm))
+		return;
+
+	/* Exclude PKRU, it's restored separately immediately after VM-Exit. */
+	fpu_swap_kvm_fpstate(&vcpu->arch.guest_fpu, true);
+	trace_kvm_fpu(1);
+}
+
+/* When vcpu_run ends, restore user space FPU context. */
+static inline void kvm_put_guest_fpu(struct kvm_vcpu *vcpu)
+{
+	if (KVM_BUG_ON(!vcpu->arch.guest_fpu.fpstate->in_use, vcpu->kvm))
+		return;
+
+	fpu_swap_kvm_fpstate(&vcpu->arch.guest_fpu, false);
+	++vcpu->stat.fpu_reload;
+	trace_kvm_fpu(0);
+}
 
 typedef u32		__attribute__((vector_size(16))) sse128_t;
 #define __sse128_u	union { sse128_t vec; u64 as_u64[2]; u32 as_u32[4]; }
@@ -14,6 +40,58 @@ typedef u32		__attribute__((vector_size(16))) sse128_t;
 #define sse128_l2(x)	({ __sse128_u t; t.vec = x; t.as_u32[2]; })
 #define sse128_l3(x)	({ __sse128_u t; t.vec = x; t.as_u32[3]; })
 #define sse128(lo, hi)	({ __sse128_u t; t.as_u64[0] = lo; t.as_u64[1] = hi; t.vec; })
+
+typedef u32		__attribute__((vector_size(32))) avx256_t;
+
+static inline void _kvm_read_avx_reg(int reg, avx256_t *data)
+{
+	switch (reg) {
+	case 0:  asm("vmovdqa %%ymm0,  %0" : "=m"(*data)); break;
+	case 1:  asm("vmovdqa %%ymm1,  %0" : "=m"(*data)); break;
+	case 2:  asm("vmovdqa %%ymm2,  %0" : "=m"(*data)); break;
+	case 3:  asm("vmovdqa %%ymm3,  %0" : "=m"(*data)); break;
+	case 4:  asm("vmovdqa %%ymm4,  %0" : "=m"(*data)); break;
+	case 5:  asm("vmovdqa %%ymm5,  %0" : "=m"(*data)); break;
+	case 6:  asm("vmovdqa %%ymm6,  %0" : "=m"(*data)); break;
+	case 7:  asm("vmovdqa %%ymm7,  %0" : "=m"(*data)); break;
+#ifdef CONFIG_X86_64
+	case 8:  asm("vmovdqa %%ymm8,  %0" : "=m"(*data)); break;
+	case 9:  asm("vmovdqa %%ymm9,  %0" : "=m"(*data)); break;
+	case 10: asm("vmovdqa %%ymm10, %0" : "=m"(*data)); break;
+	case 11: asm("vmovdqa %%ymm11, %0" : "=m"(*data)); break;
+	case 12: asm("vmovdqa %%ymm12, %0" : "=m"(*data)); break;
+	case 13: asm("vmovdqa %%ymm13, %0" : "=m"(*data)); break;
+	case 14: asm("vmovdqa %%ymm14, %0" : "=m"(*data)); break;
+	case 15: asm("vmovdqa %%ymm15, %0" : "=m"(*data)); break;
+#endif
+	default: BUG();
+	}
+}
+
+static inline void _kvm_write_avx_reg(int reg, const avx256_t *data)
+{
+	switch (reg) {
+	case 0:  asm("vmovdqa %0, %%ymm0"  : : "m"(*data)); break;
+	case 1:  asm("vmovdqa %0, %%ymm1"  : : "m"(*data)); break;
+	case 2:  asm("vmovdqa %0, %%ymm2"  : : "m"(*data)); break;
+	case 3:  asm("vmovdqa %0, %%ymm3"  : : "m"(*data)); break;
+	case 4:  asm("vmovdqa %0, %%ymm4"  : : "m"(*data)); break;
+	case 5:  asm("vmovdqa %0, %%ymm5"  : : "m"(*data)); break;
+	case 6:  asm("vmovdqa %0, %%ymm6"  : : "m"(*data)); break;
+	case 7:  asm("vmovdqa %0, %%ymm7"  : : "m"(*data)); break;
+#ifdef CONFIG_X86_64
+	case 8:  asm("vmovdqa %0, %%ymm8"  : : "m"(*data)); break;
+	case 9:  asm("vmovdqa %0, %%ymm9"  : : "m"(*data)); break;
+	case 10: asm("vmovdqa %0, %%ymm10" : : "m"(*data)); break;
+	case 11: asm("vmovdqa %0, %%ymm11" : : "m"(*data)); break;
+	case 12: asm("vmovdqa %0, %%ymm12" : : "m"(*data)); break;
+	case 13: asm("vmovdqa %0, %%ymm13" : : "m"(*data)); break;
+	case 14: asm("vmovdqa %0, %%ymm14" : : "m"(*data)); break;
+	case 15: asm("vmovdqa %0, %%ymm15" : : "m"(*data)); break;
+#endif
+	default: BUG();
+	}
+}
 
 static inline void _kvm_read_sse_reg(int reg, sse128_t *data)
 {
@@ -107,6 +185,20 @@ static inline void kvm_fpu_get(void)
 static inline void kvm_fpu_put(void)
 {
 	fpregs_unlock();
+}
+
+static inline void kvm_read_avx_reg(int reg, avx256_t *data)
+{
+	kvm_fpu_get();
+	_kvm_read_avx_reg(reg, data);
+	kvm_fpu_put();
+}
+
+static inline void kvm_write_avx_reg(int reg, const avx256_t  *data)
+{
+	kvm_fpu_get();
+	_kvm_write_avx_reg(reg, data);
+	kvm_fpu_put();
 }
 
 static inline void kvm_read_sse_reg(int reg, sse128_t *data)

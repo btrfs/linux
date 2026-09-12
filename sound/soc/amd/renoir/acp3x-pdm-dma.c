@@ -104,7 +104,7 @@ static void disable_pdm_interrupts(void __iomem *acp_base)
 	u32 ext_int_ctrl;
 
 	ext_int_ctrl = rn_readl(acp_base + ACP_EXTERNAL_INTR_CNTL);
-	ext_int_ctrl |= ~PDM_DMA_INTR_MASK;
+	ext_int_ctrl &= ~PDM_DMA_INTR_MASK;
 	rn_writel(ext_int_ctrl, acp_base + ACP_EXTERNAL_INTR_CNTL);
 }
 
@@ -211,7 +211,7 @@ static int acp_pdm_dma_open(struct snd_soc_component *component,
 
 	runtime = substream->runtime;
 	adata = dev_get_drvdata(component->dev);
-	pdm_data = kzalloc(sizeof(*pdm_data), GFP_KERNEL);
+	pdm_data = kzalloc_obj(*pdm_data);
 	if (!pdm_data)
 		return -EINVAL;
 
@@ -301,9 +301,11 @@ static int acp_pdm_dma_close(struct snd_soc_component *component,
 			     struct snd_pcm_substream *substream)
 {
 	struct pdm_dev_data *adata = dev_get_drvdata(component->dev);
+	struct pdm_stream_instance *rtd = substream->runtime->private_data;
 
 	disable_pdm_interrupts(adata->acp_base);
 	adata->capture_stream = NULL;
+	kfree(rtd);
 	return 0;
 }
 
@@ -374,7 +376,7 @@ static const struct snd_soc_component_driver acp_pdm_component = {
 	.close			= acp_pdm_dma_close,
 	.hw_params		= acp_pdm_dma_hw_params,
 	.pointer		= acp_pdm_dma_pointer,
-	.pcm_construct		= acp_pdm_dma_new,
+	.pcm_new		= acp_pdm_dma_new,
 	.legacy_dai_naming	= 1,
 };
 

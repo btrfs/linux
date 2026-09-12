@@ -17,7 +17,6 @@
 #include <linux/limits.h>
 #include <linux/math64.h>
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/property.h>
 #include <linux/regmap.h>
 #include <linux/units.h>
@@ -336,10 +335,8 @@ static int adxl355_setup(struct adxl355_data *data)
 		return ret;
 
 	do {
-		if (--retries == 0) {
-			dev_err(data->dev, "Shadow registers mismatch\n");
-			return -EIO;
-		}
+		if (--retries == 0)
+			return dev_err_probe(data->dev, -EIO, "Shadow registers mismatch\n");
 
 		/*
 		 * Perform a software reset to make sure the device is in a consistent
@@ -351,7 +348,7 @@ static int adxl355_setup(struct adxl355_data *data)
 			return ret;
 
 		/* Wait at least 5ms after software reset */
-		usleep_range(5000, 10000);
+		fsleep(5 * USEC_PER_MSEC);
 
 		/* Read shadow registers for comparison */
 		ret = regmap_bulk_read(data->regmap,
@@ -745,7 +742,7 @@ static const struct iio_chan_spec adxl355_channels[] = {
 				      BIT(IIO_CHAN_INFO_OFFSET),
 		.scan_index = 3,
 		.scan_type = {
-			.sign = 's',
+			.sign = 'u',
 			.realbits = 12,
 			.storagebits = 16,
 			.endianness = IIO_BE,
@@ -768,18 +765,14 @@ static int adxl355_probe_trigger(struct iio_dev *indio_dev, int irq)
 	data->dready_trig->ops = &adxl355_trigger_ops;
 	iio_trigger_set_drvdata(data->dready_trig, indio_dev);
 
-	ret = devm_request_irq(data->dev, irq,
-			       &iio_trigger_generic_data_rdy_poll,
-			       IRQF_ONESHOT, "adxl355_irq", data->dready_trig);
+	ret = devm_request_irq(data->dev, irq, &iio_trigger_generic_data_rdy_poll,
+			       IRQF_NO_THREAD, "adxl355_irq", data->dready_trig);
 	if (ret)
-		return dev_err_probe(data->dev, ret, "request irq %d failed\n",
-				     irq);
+		return ret;
 
 	ret = devm_iio_trigger_register(data->dev, data->dready_trig);
-	if (ret) {
-		dev_err(data->dev, "iio trigger register failed\n");
-		return ret;
-	}
+	if (ret)
+		return dev_err_probe(data->dev, ret, "iio trigger register failed\n");
 
 	indio_dev->trig = iio_trigger_get(data->dready_trig);
 
@@ -803,7 +796,9 @@ int adxl355_core_probe(struct device *dev, struct regmap *regmap,
 	data->dev = dev;
 	data->op_mode = ADXL355_STANDBY;
 	data->chip_info = chip_info;
-	mutex_init(&data->lock);
+	ret = devm_mutex_init(dev, &data->lock);
+	if (ret)
+		return ret;
 
 	indio_dev->name = chip_info->name;
 	indio_dev->info = &adxl355_info;
@@ -813,18 +808,14 @@ int adxl355_core_probe(struct device *dev, struct regmap *regmap,
 	indio_dev->available_scan_masks = adxl355_avail_scan_masks;
 
 	ret = adxl355_setup(data);
-	if (ret) {
-		dev_err(dev, "ADXL355 setup failed\n");
-		return ret;
-	}
+	if (ret)
+		return dev_err_probe(dev, ret, "ADXL355 setup failed\n");
 
 	ret = devm_iio_triggered_buffer_setup(dev, indio_dev,
 					      &iio_pollfunc_store_time,
 					      &adxl355_trigger_handler, NULL);
-	if (ret) {
-		dev_err(dev, "iio triggered buffer setup failed\n");
-		return ret;
-	}
+	if (ret)
+		return dev_err_probe(dev, ret, "iio triggered buffer setup failed\n");
 
 	irq = fwnode_irq_get_byname(dev_fwnode(dev), "DRDY");
 	if (irq > 0) {

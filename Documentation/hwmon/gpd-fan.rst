@@ -28,6 +28,7 @@ Currently the driver supports the following handhelds:
  - GPD Win Max 2 2025 (HX370)
  - GPD Win 4 (6800U)
  - GPD Win 4 (7840U)
+ - GPD Micro PC 2
 
 Module parameters
 -----------------
@@ -50,6 +51,8 @@ gpd_fan_board
        - GPD Win Mini (HX370)
        - GPD Pocket 4
        - GPD Duo
+   - mpc2
+       - GPD Micro PC 2
 
 Sysfs entries
 -------------
@@ -64,7 +67,7 @@ pwm1_enable
   at full speed. Write "1" to set to manual, write "2" to let the EC control
   decide fan speed. Read this attribute to see current status.
 
-  NB：In consideration of the safety of the device, when setting to manual mode,
+  NB: In consideration of the safety of the device, when setting to manual mode,
   the pwm speed will be set to the maximum value (255) by default. You can set
   a different value by writing pwm1 later.
 

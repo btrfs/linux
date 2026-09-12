@@ -47,7 +47,6 @@ static int vsp1_wpf_set_rotation(struct vsp1_rwpf *wpf, unsigned int rotation)
 	struct v4l2_mbus_framefmt *sink_format;
 	struct v4l2_mbus_framefmt *source_format;
 	bool rotate;
-	int ret = 0;
 
 	/*
 	 * Only consider the 0°/180° from/to 90°/270° modifications, the rest
@@ -58,19 +57,17 @@ static int vsp1_wpf_set_rotation(struct vsp1_rwpf *wpf, unsigned int rotation)
 		return 0;
 
 	/* Changing rotation isn't allowed when buffers are allocated. */
-	mutex_lock(&video->lock);
+	guard(mutex)(&video->lock);
 
-	if (vb2_is_busy(&video->queue)) {
-		ret = -EBUSY;
-		goto done;
-	}
+	if (vb2_is_busy(&video->queue))
+		return -EBUSY;
 
 	sink_format = v4l2_subdev_state_get_format(wpf->entity.state,
 						   RWPF_PAD_SINK);
 	source_format = v4l2_subdev_state_get_format(wpf->entity.state,
 						     RWPF_PAD_SOURCE);
 
-	mutex_lock(&wpf->entity.lock);
+	guard(mutex)(&wpf->entity.lock);
 
 	if (rotate) {
 		source_format->width = sink_format->height;
@@ -82,11 +79,7 @@ static int vsp1_wpf_set_rotation(struct vsp1_rwpf *wpf, unsigned int rotation)
 
 	wpf->flip.rotate = rotate;
 
-	mutex_unlock(&wpf->entity.lock);
-
-done:
-	mutex_unlock(&video->lock);
-	return ret;
+	return 0;
 }
 
 static int vsp1_wpf_s_ctrl(struct v4l2_ctrl *ctrl)
@@ -118,9 +111,9 @@ static int vsp1_wpf_s_ctrl(struct v4l2_ctrl *ctrl)
 	if (rotation == 180 || rotation == 270)
 		flip ^= BIT(WPF_CTRL_VFLIP) | BIT(WPF_CTRL_HFLIP);
 
-	spin_lock_irq(&wpf->flip.lock);
+	guard(spinlock_irq)(&wpf->flip.lock);
+
 	wpf->flip.pending = flip;
-	spin_unlock_irq(&wpf->flip.lock);
 
 	return 0;
 }
@@ -239,7 +232,6 @@ static void wpf_configure_stream(struct vsp1_entity *entity,
 	const struct v4l2_mbus_framefmt *source_format;
 	const struct v4l2_mbus_framefmt *sink_format;
 	unsigned int index = wpf->entity.index;
-	unsigned int i;
 	u32 outfmt = 0;
 	u32 srcrpf = 0;
 	int ret;
@@ -321,7 +313,7 @@ static void wpf_configure_stream(struct vsp1_entity *entity,
 	 * inputs as sub-layers and select the virtual RPF as the master
 	 * layer. For VSPX configure the enabled sources as masters.
 	 */
-	for (i = 0; i < vsp1->info->rpf_count; ++i) {
+	for (unsigned int i = 0; i < vsp1->info->rpf_count; ++i) {
 		struct vsp1_rwpf *input = pipe->inputs[i];
 
 		if (!input)
@@ -373,13 +365,12 @@ static void wpf_configure_frame(struct vsp1_entity *entity,
 	const unsigned int mask = BIT(WPF_CTRL_VFLIP)
 				| BIT(WPF_CTRL_HFLIP);
 	struct vsp1_rwpf *wpf = to_rwpf(&entity->subdev);
-	unsigned long flags;
 	u32 outfmt;
 
-	spin_lock_irqsave(&wpf->flip.lock, flags);
-	wpf->flip.active = (wpf->flip.active & ~mask)
-			 | (wpf->flip.pending & mask);
-	spin_unlock_irqrestore(&wpf->flip.lock, flags);
+	scoped_guard(spinlock_irqsave, &wpf->flip.lock) {
+		wpf->flip.active = (wpf->flip.active & ~mask)
+				 | (wpf->flip.pending & mask);
+	}
 
 	outfmt = (wpf->alpha << VI6_WPF_OUTFMT_PDV_SHIFT) | wpf->outfmt;
 
@@ -407,7 +398,6 @@ static void wpf_configure_partition(struct vsp1_entity *entity,
 	unsigned int left;
 	unsigned int offset;
 	unsigned int flip;
-	unsigned int i;
 
 	/*
 	 * Cropping. The partition algorithm can split the image into multiple
@@ -456,7 +446,7 @@ static void wpf_configure_partition(struct vsp1_entity *entity,
 	else
 		offset = left;
 
-	for (i = 0; i < format->num_planes; ++i) {
+	for (unsigned int i = 0; i < format->num_planes; ++i) {
 		unsigned int hsub = i > 0 ? fmtinfo->hsub : 1;
 		unsigned int vsub = i > 0 ? fmtinfo->vsub : 1;
 
@@ -498,7 +488,7 @@ static void wpf_configure_partition(struct vsp1_entity *entity,
 		 * Compute the output coordinate. The partition
 		 * horizontal (left) offset becomes a vertical offset.
 		 */
-		for (i = 0; i < format->num_planes; ++i) {
+		for (unsigned int i = 0; i < format->num_planes; ++i) {
 			unsigned int hsub = i > 0 ? fmtinfo->hsub : 1;
 
 			mem.addr[i] += hoffset / hsub
@@ -531,7 +521,7 @@ static unsigned int wpf_max_width(struct vsp1_entity *entity,
 {
 	struct vsp1_rwpf *wpf = to_rwpf(&entity->subdev);
 
-	return wpf->flip.rotate ? 256 : wpf->max_width;
+	return wpf->flip.rotate ? 256 : wpf->entity.max_width;
 }
 
 static void wpf_partition(struct vsp1_entity *entity,
@@ -567,12 +557,15 @@ struct vsp1_rwpf *vsp1_wpf_create(struct vsp1_device *vsp1, unsigned int index)
 	if (wpf == NULL)
 		return ERR_PTR(-ENOMEM);
 
+	wpf->entity.min_width = RWPF_MIN_WIDTH;
+	wpf->entity.min_height = RWPF_MIN_HEIGHT;
+
 	if (vsp1->info->gen == 2) {
-		wpf->max_width = WPF_GEN2_MAX_WIDTH;
-		wpf->max_height = WPF_GEN2_MAX_HEIGHT;
+		wpf->entity.max_width = WPF_GEN2_MAX_WIDTH;
+		wpf->entity.max_height = WPF_GEN2_MAX_HEIGHT;
 	} else {
-		wpf->max_width = WPF_GEN3_MAX_WIDTH;
-		wpf->max_height = WPF_GEN3_MAX_HEIGHT;
+		wpf->entity.max_width = WPF_GEN3_MAX_WIDTH;
+		wpf->entity.max_height = WPF_GEN3_MAX_HEIGHT;
 	}
 
 	wpf->entity.ops = &wpf_entity_ops;

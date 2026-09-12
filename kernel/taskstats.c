@@ -210,13 +210,39 @@ static int fill_stats_for_pid(pid_t pid, struct taskstats *stats)
 	return 0;
 }
 
+static void tgid_stats_add_task(struct taskstats *stats,
+				struct task_struct *tsk, u64 now_ns)
+{
+	u64 delta, utime, stime;
+
+	/*
+	 * Each accounting subsystem calls its functions here to
+	 * accumulate its per-task stats for tsk, into the per-tgid structure
+	 *
+	 *	per-task-foo(stats, tsk);
+	 */
+	delayacct_add_tsk(stats, tsk);
+
+	/* calculate task elapsed time in nsec */
+	delta = now_ns - tsk->start_time;
+	/* Convert to micro seconds */
+	do_div(delta, NSEC_PER_USEC);
+	stats->ac_etime += delta;
+
+	task_cputime(tsk, &utime, &stime);
+	stats->ac_utime += div_u64(utime, NSEC_PER_USEC);
+	stats->ac_stime += div_u64(stime, NSEC_PER_USEC);
+
+	stats->nvcsw += tsk->nvcsw;
+	stats->nivcsw += tsk->nivcsw;
+}
+
 static int fill_stats_for_tgid(pid_t tgid, struct taskstats *stats)
 {
 	struct task_struct *tsk, *first;
 	unsigned long flags;
 	int rc = -ESRCH;
-	u64 delta, utime, stime;
-	u64 start_time;
+	u64 now_ns;
 
 	/*
 	 * Add additional stats from live tasks except zombie thread group
@@ -233,30 +259,12 @@ static int fill_stats_for_tgid(pid_t tgid, struct taskstats *stats)
 	else
 		memset(stats, 0, sizeof(*stats));
 
-	start_time = ktime_get_ns();
+	now_ns = ktime_get_ns();
 	for_each_thread(first, tsk) {
 		if (tsk->exit_state)
 			continue;
-		/*
-		 * Accounting subsystem can call its functions here to
-		 * fill in relevant parts of struct taskstsats as follows
-		 *
-		 *	per-task-foo(stats, tsk);
-		 */
-		delayacct_add_tsk(stats, tsk);
 
-		/* calculate task elapsed time in nsec */
-		delta = start_time - tsk->start_time;
-		/* Convert to micro seconds */
-		do_div(delta, NSEC_PER_USEC);
-		stats->ac_etime += delta;
-
-		task_cputime(tsk, &utime, &stime);
-		stats->ac_utime += div_u64(utime, NSEC_PER_USEC);
-		stats->ac_stime += div_u64(stime, NSEC_PER_USEC);
-
-		stats->nvcsw += tsk->nvcsw;
-		stats->nivcsw += tsk->nivcsw;
+		tgid_stats_add_task(stats, tsk, now_ns);
 	}
 
 	unlock_task_sighand(first, &flags);
@@ -275,18 +283,14 @@ out:
 static void fill_tgid_exit(struct task_struct *tsk)
 {
 	unsigned long flags;
+	u64 now_ns;
 
 	spin_lock_irqsave(&tsk->sighand->siglock, flags);
 	if (!tsk->signal->stats)
 		goto ret;
 
-	/*
-	 * Each accounting subsystem calls its functions here to
-	 * accumalate its per-task stats for tsk, into the per-tgid structure
-	 *
-	 *	per-task-foo(tsk->signal->stats, tsk);
-	 */
-	delayacct_add_tsk(tsk->signal->stats, tsk);
+	now_ns = ktime_get_ns();
+	tgid_stats_add_task(tsk->signal->stats, tsk, now_ns);
 ret:
 	spin_unlock_irqrestore(&tsk->sighand->siglock, flags);
 	return;
@@ -357,17 +361,14 @@ static int parse(struct nlattr *na, struct cpumask *mask)
 	int len;
 	int ret;
 
-	if (na == NULL)
-		return 1;
 	len = nla_len(na);
 	if (len > TASKSTATS_CPUMASK_MAXLEN)
 		return -E2BIG;
 	if (len < 1)
 		return -EINVAL;
-	data = kmalloc(len, GFP_KERNEL);
+	data = nla_strdup(na, GFP_KERNEL);
 	if (!data)
 		return -ENOMEM;
-	nla_strscpy(data, na, len);
 	ret = cpulist_parse(data, mask);
 	kfree(data);
 	return ret;
@@ -419,7 +420,7 @@ static int cgroupstats_user_cmd(struct sk_buff *skb, struct genl_info *info)
 	fd = nla_get_u32(info->attrs[CGROUPSTATS_CMD_ATTR_FD]);
 	CLASS(fd, f)(fd);
 	if (fd_empty(f))
-		return 0;
+		return -EBADF;
 
 	size = nla_total_size(sizeof(struct cgroupstats));
 
@@ -447,36 +448,18 @@ static int cgroupstats_user_cmd(struct sk_buff *skb, struct genl_info *info)
 	return send_reply(rep_skb, info);
 }
 
-static int cmd_attr_register_cpumask(struct genl_info *info)
+static int cmd_attr_cpumask(struct genl_info *info, int attr,
+			    enum actions action)
 {
-	cpumask_var_t mask;
+	cpumask_var_t mask __free(free_cpumask_var) = CPUMASK_VAR_NULL;
 	int rc;
 
 	if (!alloc_cpumask_var(&mask, GFP_KERNEL))
 		return -ENOMEM;
-	rc = parse(info->attrs[TASKSTATS_CMD_ATTR_REGISTER_CPUMASK], mask);
+	rc = parse(info->attrs[attr], mask);
 	if (rc < 0)
-		goto out;
-	rc = add_del_listener(info->snd_portid, mask, REGISTER);
-out:
-	free_cpumask_var(mask);
-	return rc;
-}
-
-static int cmd_attr_deregister_cpumask(struct genl_info *info)
-{
-	cpumask_var_t mask;
-	int rc;
-
-	if (!alloc_cpumask_var(&mask, GFP_KERNEL))
-		return -ENOMEM;
-	rc = parse(info->attrs[TASKSTATS_CMD_ATTR_DEREGISTER_CPUMASK], mask);
-	if (rc < 0)
-		goto out;
-	rc = add_del_listener(info->snd_portid, mask, DEREGISTER);
-out:
-	free_cpumask_var(mask);
-	return rc;
+		return rc;
+	return add_del_listener(info->snd_portid, mask, action);
 }
 
 static size_t taskstats_packet_size(void)
@@ -551,9 +534,13 @@ err:
 static int taskstats_user_cmd(struct sk_buff *skb, struct genl_info *info)
 {
 	if (info->attrs[TASKSTATS_CMD_ATTR_REGISTER_CPUMASK])
-		return cmd_attr_register_cpumask(info);
+		return cmd_attr_cpumask(info,
+					TASKSTATS_CMD_ATTR_REGISTER_CPUMASK,
+					REGISTER);
 	else if (info->attrs[TASKSTATS_CMD_ATTR_DEREGISTER_CPUMASK])
-		return cmd_attr_deregister_cpumask(info);
+		return cmd_attr_cpumask(info,
+					TASKSTATS_CMD_ATTR_DEREGISTER_CPUMASK,
+					DEREGISTER);
 	else if (info->attrs[TASKSTATS_CMD_ATTR_PID])
 		return cmd_attr_pid(info);
 	else if (info->attrs[TASKSTATS_CMD_ATTR_TGID])
@@ -649,6 +636,7 @@ void taskstats_exit(struct task_struct *tsk, int group_dead)
 		goto err;
 
 	memcpy(stats, tsk->signal->stats, sizeof(*stats));
+	stats->version = TASKSTATS_VERSION;
 
 send:
 	send_cpu_listeners(rep_skb, listeners);

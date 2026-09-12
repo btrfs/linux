@@ -6,6 +6,7 @@
 #include <bpf/bpf_helpers.h>
 
 #include "../bpf_experimental.h"
+#include "bpf_misc.h"
 #include "task_kfunc_common.h"
 
 char _license[] SEC("license") = "GPL";
@@ -140,17 +141,17 @@ int BPF_PROG(test_task_acquire_leave_in_map, struct task_struct *task, u64 clone
 	return 0;
 }
 
-SEC("tp_btf/task_newtask")
-int BPF_PROG(test_task_xchg_release, struct task_struct *task, u64 clone_flags)
+SEC("syscall")
+int test_task_xchg_release(const void *ctx)
 {
-	struct task_struct *kptr, *acquired;
+	struct task_struct *task, *kptr, *acquired;
 	struct __tasks_kfunc_map_value *v, *local;
 	int refcnt, refcnt_after_drop;
 	long status;
 
-	if (!is_test_kfunc_task())
-		return 0;
+	(void)ctx;
 
+	task = bpf_get_current_task_btf();
 	status = tasks_kfunc_map_insert(task);
 	if (status) {
 		err = 1;
@@ -191,7 +192,7 @@ int BPF_PROG(test_task_xchg_release, struct task_struct *task, u64 clone_flags)
 		return 0;
 	}
 
-	/* Stash a copy into local kptr and check if it is released recursively */
+	/* Stash a copy into local kptr and check if it is released recursively. */
 	acquired = bpf_task_acquire(kptr);
 	if (!acquired) {
 		err = 7;
@@ -220,7 +221,6 @@ int BPF_PROG(test_task_xchg_release, struct task_struct *task, u64 clone_flags)
 	}
 
 	bpf_task_release(kptr);
-
 	return 0;
 }
 
@@ -364,6 +364,200 @@ int BPF_PROG(task_kfunc_acquire_trusted_walked, struct task_struct *task, u64 cl
 		err = 1;
 
 
+	return 0;
+}
+
+SEC("fentry/" SYS_PREFIX "sys_getpgid")
+int BPF_PROG(task_kfunc_acquire_after_spin_unlock_non_sleepable)
+{
+	struct task_kptr_lock_value *v;
+	struct task_struct *task, *acquired;
+	int key = 0;
+
+	v = bpf_map_lookup_elem(&task_kptr_lock_map, &key);
+	if (!v)
+		return 0;
+
+	bpf_spin_lock(&v->lock);
+	task = v->task;
+	bpf_spin_unlock(&v->lock);
+	if (!task)
+		return 0;
+
+	acquired = bpf_task_acquire(task);
+	if (acquired)
+		bpf_task_release(acquired);
+	return 0;
+}
+
+SEC("fentry.s/" SYS_PREFIX "sys_getpgid")
+int BPF_PROG(task_kfunc_acquire_after_spin_unlock_explicit_rcu)
+{
+	struct task_kptr_lock_value *v;
+	struct task_struct *task, *acquired;
+	int key = 0;
+
+	v = bpf_map_lookup_elem(&task_kptr_lock_map, &key);
+	if (!v)
+		return 0;
+
+	bpf_rcu_read_lock();
+	bpf_spin_lock(&v->lock);
+	task = v->task;
+	bpf_spin_unlock(&v->lock);
+	if (task) {
+		acquired = bpf_task_acquire(task);
+		if (acquired)
+			bpf_task_release(acquired);
+	}
+	bpf_rcu_read_unlock();
+	return 0;
+}
+
+SEC("fentry.s/" SYS_PREFIX "sys_getpgid")
+int BPF_PROG(task_kfunc_acquire_after_spin_unlock_preempt_disabled)
+{
+	struct task_kptr_lock_value *v;
+	struct task_struct *task, *acquired;
+	int key = 0;
+
+	v = bpf_map_lookup_elem(&task_kptr_lock_map, &key);
+	if (!v)
+		return 0;
+
+	bpf_preempt_disable();
+	bpf_spin_lock(&v->lock);
+	task = v->task;
+	bpf_spin_unlock(&v->lock);
+	if (task) {
+		acquired = bpf_task_acquire(task);
+		if (acquired)
+			bpf_task_release(acquired);
+	}
+	bpf_preempt_enable();
+	return 0;
+}
+
+SEC("fentry.s/" SYS_PREFIX "sys_getpgid")
+int BPF_PROG(task_kfunc_acquire_after_spin_unlock_irq_disabled)
+{
+	struct task_kptr_lock_value *v;
+	struct task_struct *task, *acquired;
+	unsigned long flags;
+	int key = 0;
+
+	v = bpf_map_lookup_elem(&task_kptr_lock_map, &key);
+	if (!v)
+		return 0;
+
+	bpf_local_irq_save(&flags);
+	bpf_spin_lock(&v->lock);
+	task = v->task;
+	bpf_spin_unlock(&v->lock);
+	if (task) {
+		acquired = bpf_task_acquire(task);
+		if (acquired)
+			bpf_task_release(acquired);
+	}
+	bpf_local_irq_restore(&flags);
+	return 0;
+}
+
+SEC("fentry.s/" SYS_PREFIX "sys_getpgid")
+int BPF_PROG(task_kfunc_acquire_after_rcu_unlock_preempt_disabled)
+{
+	struct task_kptr_lock_value *v;
+	struct task_struct *task, *acquired;
+	int key = 0;
+
+	v = bpf_map_lookup_elem(&task_kptr_lock_map, &key);
+	if (!v)
+		return 0;
+
+	bpf_preempt_disable();
+	bpf_rcu_read_lock();
+	task = v->task;
+	bpf_rcu_read_unlock();
+	if (task) {
+		acquired = bpf_task_acquire(task);
+		if (acquired)
+			bpf_task_release(acquired);
+	}
+	bpf_preempt_enable();
+	return 0;
+}
+
+SEC("fentry.s/" SYS_PREFIX "sys_getpgid")
+int BPF_PROG(task_kfunc_acquire_after_rcu_unlock_irq_disabled)
+{
+	struct task_kptr_lock_value *v;
+	struct task_struct *task, *acquired;
+	unsigned long flags;
+	int key = 0;
+
+	v = bpf_map_lookup_elem(&task_kptr_lock_map, &key);
+	if (!v)
+		return 0;
+
+	bpf_local_irq_save(&flags);
+	bpf_rcu_read_lock();
+	task = v->task;
+	bpf_rcu_read_unlock();
+	if (task) {
+		acquired = bpf_task_acquire(task);
+		if (acquired)
+			bpf_task_release(acquired);
+	}
+	bpf_local_irq_restore(&flags);
+	return 0;
+}
+
+SEC("fentry.s/" SYS_PREFIX "sys_getpgid")
+int BPF_PROG(task_kfunc_acquire_after_preempt_enable_explicit_rcu)
+{
+	struct task_kptr_lock_value *v;
+	struct task_struct *task, *acquired;
+	int key = 0;
+
+	v = bpf_map_lookup_elem(&task_kptr_lock_map, &key);
+	if (!v)
+		return 0;
+
+	bpf_preempt_disable();
+	task = v->task;
+	bpf_rcu_read_lock();
+	bpf_preempt_enable();
+	if (task) {
+		acquired = bpf_task_acquire(task);
+		if (acquired)
+			bpf_task_release(acquired);
+	}
+	bpf_rcu_read_unlock();
+	return 0;
+}
+
+SEC("fentry.s/" SYS_PREFIX "sys_getpgid")
+int BPF_PROG(task_kfunc_acquire_after_irq_restore_explicit_rcu)
+{
+	struct task_kptr_lock_value *v;
+	struct task_struct *task, *acquired;
+	unsigned long flags;
+	int key = 0;
+
+	v = bpf_map_lookup_elem(&task_kptr_lock_map, &key);
+	if (!v)
+		return 0;
+
+	bpf_local_irq_save(&flags);
+	task = v->task;
+	bpf_rcu_read_lock();
+	bpf_local_irq_restore(&flags);
+	if (task) {
+		acquired = bpf_task_acquire(task);
+		if (acquired)
+			bpf_task_release(acquired);
+	}
+	bpf_rcu_read_unlock();
 	return 0;
 }
 

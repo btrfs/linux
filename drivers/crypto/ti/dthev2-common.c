@@ -21,7 +21,6 @@
 #include <linux/io.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/platform_device.h>
 #include <linux/scatterlist.h>
 
@@ -46,6 +45,25 @@ struct dthe_data *dthe_get_dev(struct dthe_tfm_ctx *ctx)
 	spin_unlock_bh(&dthe_dev_list.lock);
 
 	return dev_data;
+}
+
+struct scatterlist *dthe_copy_sg(struct scatterlist *dst,
+				 struct scatterlist *src,
+				 int buflen)
+{
+	struct scatterlist *from_sg, *to_sg;
+	int sglen;
+
+	for (to_sg = dst, from_sg = src; buflen && from_sg; buflen -= sglen) {
+		sglen = from_sg->length;
+		if (sglen > buflen)
+			sglen = buflen;
+		sg_set_buf(to_sg, sg_virt(from_sg), sglen);
+		from_sg = sg_next(from_sg);
+		to_sg = sg_next(to_sg);
+	}
+
+	return to_sg;
 }
 
 static int dthe_dma_init(struct dthe_data *dev_data)

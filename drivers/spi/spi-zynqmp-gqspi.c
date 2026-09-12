@@ -935,7 +935,7 @@ static int zynqmp_qspi_read_op(struct zynqmp_qspi *xqspi, u8 rx_nbits,
  *
  * Return:	Always 0
  */
-static int __maybe_unused zynqmp_qspi_suspend(struct device *dev)
+static int zynqmp_qspi_suspend(struct device *dev)
 {
 	struct zynqmp_qspi *xqspi = dev_get_drvdata(dev);
 	struct spi_controller *ctlr = xqspi->ctlr;
@@ -959,7 +959,7 @@ static int __maybe_unused zynqmp_qspi_suspend(struct device *dev)
  *
  * Return:	0 on success; error value otherwise
  */
-static int __maybe_unused zynqmp_qspi_resume(struct device *dev)
+static int zynqmp_qspi_resume(struct device *dev)
 {
 	struct zynqmp_qspi *xqspi = dev_get_drvdata(dev);
 	struct spi_controller *ctlr = xqspi->ctlr;
@@ -979,7 +979,7 @@ static int __maybe_unused zynqmp_qspi_resume(struct device *dev)
  *
  * Return:	Always 0
  */
-static int __maybe_unused zynqmp_runtime_suspend(struct device *dev)
+static int zynqmp_runtime_suspend(struct device *dev)
 {
 	struct zynqmp_qspi *xqspi = dev_get_drvdata(dev);
 
@@ -997,7 +997,7 @@ static int __maybe_unused zynqmp_runtime_suspend(struct device *dev)
  *
  * Return:	0 on success and error value on error
  */
-static int __maybe_unused zynqmp_runtime_resume(struct device *dev)
+static int zynqmp_runtime_resume(struct device *dev)
 {
 	struct zynqmp_qspi *xqspi = dev_get_drvdata(dev);
 	int ret;
@@ -1186,9 +1186,8 @@ return_err:
 }
 
 static const struct dev_pm_ops zynqmp_qspi_dev_pm_ops = {
-	SET_RUNTIME_PM_OPS(zynqmp_runtime_suspend,
-			   zynqmp_runtime_resume, NULL)
-	SET_SYSTEM_SLEEP_PM_OPS(zynqmp_qspi_suspend, zynqmp_qspi_resume)
+	RUNTIME_PM_OPS(zynqmp_runtime_suspend, zynqmp_runtime_resume, NULL)
+	SYSTEM_SLEEP_PM_OPS(zynqmp_qspi_suspend, zynqmp_qspi_resume)
 };
 
 static const struct qspi_platform_data versal_qspi_def = {
@@ -1324,7 +1323,7 @@ static int zynqmp_qspi_probe(struct platform_device *pdev)
 	ctlr->dev.of_node = np;
 	ctlr->auto_runtime_pm = true;
 
-	ret = devm_spi_register_controller(&pdev->dev, ctlr);
+	ret = spi_register_controller(ctlr);
 	if (ret) {
 		dev_err(&pdev->dev, "spi_register_controller failed\n");
 		goto clk_dis_all;
@@ -1362,6 +1361,8 @@ static void zynqmp_qspi_remove(struct platform_device *pdev)
 
 	pm_runtime_get_sync(&pdev->dev);
 
+	spi_unregister_controller(xqspi->ctlr);
+
 	zynqmp_gqspi_write(xqspi, GQSPI_EN_OFST, 0x0);
 
 	pm_runtime_disable(&pdev->dev);
@@ -1380,7 +1381,7 @@ static struct platform_driver zynqmp_qspi_driver = {
 	.driver = {
 		.name = "zynqmp-qspi",
 		.of_match_table = zynqmp_qspi_of_match,
-		.pm = &zynqmp_qspi_dev_pm_ops,
+		.pm = pm_ptr(&zynqmp_qspi_dev_pm_ops),
 	},
 };
 

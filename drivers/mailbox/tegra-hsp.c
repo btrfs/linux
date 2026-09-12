@@ -16,8 +16,6 @@
 
 #include <dt-bindings/mailbox/tegra186-hsp.h>
 
-#include "mailbox.h"
-
 #define HSP_INT_IE(x)		(0x100 + ((x) * 4))
 #define HSP_INT_IV		0x300
 #define HSP_INT_IR		0x304
@@ -497,7 +495,7 @@ static int tegra_hsp_mailbox_flush(struct mbox_chan *chan,
 			mbox_chan_txdone(chan, 0);
 
 			/* Wait until channel is empty */
-			if (chan->active_req != NULL)
+			if (chan->active_req != MBOX_NO_MSG)
 				continue;
 
 			return 0;
@@ -516,7 +514,7 @@ static int tegra_hsp_mailbox_startup(struct mbox_chan *chan)
 	struct tegra_hsp *hsp = mb->channel.hsp;
 	unsigned long flags;
 
-	chan->txdone_method = TXDONE_BY_IRQ;
+	chan->txdone_method = MBOX_TXDONE_BY_IRQ;
 
 	/*
 	 * Shared mailboxes start out as consumers by default. FULL and EMPTY
@@ -710,11 +708,8 @@ static int tegra_hsp_request_shared_irq(struct tegra_hsp *hsp)
 
 		err = devm_request_irq(hsp->dev, irq, tegra_hsp_shared_irq, 0,
 				       dev_name(hsp->dev), hsp);
-		if (err < 0) {
-			dev_err(hsp->dev, "failed to request interrupt: %d\n",
-				err);
+		if (err < 0)
 			continue;
-		}
 
 		hsp->shared_irq = i;
 
@@ -858,12 +853,8 @@ static int tegra_hsp_probe(struct platform_device *pdev)
 		err = devm_request_irq(&pdev->dev, hsp->doorbell_irq,
 				       tegra_hsp_doorbell_irq, IRQF_NO_SUSPEND,
 				       dev_name(&pdev->dev), hsp);
-		if (err < 0) {
-			dev_err(&pdev->dev,
-			        "failed to request doorbell IRQ#%u: %d\n",
-				hsp->doorbell_irq, err);
+		if (err < 0)
 			return err;
-		}
 	}
 
 	if (hsp->shared_irqs) {

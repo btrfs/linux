@@ -39,6 +39,9 @@ struct bpf_testmod_ops {
 	int (*unsupported_ops)(void);
 	/* Used to test ref_acquired arguments. */
 	int (*test_refcounted)(int dummy, struct task_struct *task);
+	/* Used to test checking of __ref arguments when it not the first argument. */
+	int (*test_refcounted_multi)(int dummy, struct task_struct *task,
+				     struct task_struct *task2);
 	/* Used to test returning referenced kptr. */
 	struct task_struct *(*test_return_ref_kptr)(int dummy, struct task_struct *task,
 						    struct cgroup *cgrp);
@@ -100,9 +103,23 @@ struct bpf_testmod_ops2 {
 	int (*test_1)(void);
 };
 
+/* 16 bytes, so it takes two argument slots when passed by value */
+struct bpf_testmod_arena_pair {
+	u64 a;
+	u64 b;
+};
+
 struct bpf_testmod_ops3 {
 	int (*test_1)(void);
 	int (*test_2)(void);
+	/* Used to test arena pointer arguments. */
+	int (*test_arena)(u64 *ptr);
+	int (*test_arena_nullable)(u64 *ptr);
+	/* enough leading args to force @ptr onto the stack on x86 and arm64 */
+	int (*test_arena_stack)(u64 a, u64 b, u64 c, u64 d, u64 e, u64 f,
+				u64 g, u64 h, u64 *ptr);
+	/* a multi-slot leading arg, so @ptr is not at the slot its arg index suggests */
+	int (*test_arena_multislot)(struct bpf_testmod_arena_pair p, u64 *ptr);
 };
 
 struct st_ops_args {

@@ -428,18 +428,18 @@ static void k3_configure_chan_coherency(struct dma_chan *chan, u32 asel)
 		/* No special handling for the channel */
 		chan->dev->chan_dma_dev = false;
 
-		chan_dev->dma_coherent = false;
+		dev_clear_dma_coherent(chan_dev);
 		chan_dev->dma_parms = NULL;
 	} else if (asel == 14 || asel == 15) {
 		chan->dev->chan_dma_dev = true;
 
-		chan_dev->dma_coherent = true;
+		dev_set_dma_coherent(chan_dev);
 		dma_coerce_mask_and_coherent(chan_dev, DMA_BIT_MASK(48));
 		chan_dev->dma_parms = chan_dev->parent->dma_parms;
 	} else {
 		dev_warn(chan->device->dev, "Invalid ASEL value: %u\n", asel);
 
-		chan_dev->dma_coherent = false;
+		dev_clear_dma_coherent(chan_dev);
 		chan_dev->dma_parms = NULL;
 	}
 }
@@ -3241,7 +3241,7 @@ udma_prep_slave_sg_pkt(struct udma_chan *uc, struct scatterlist *sgl,
 	unsigned int i;
 	u64 asel;
 
-	d = kzalloc(struct_size(d, hwdesc, sglen), GFP_NOWAIT);
+	d = kzalloc_flex(*d, hwdesc, sglen, GFP_NOWAIT);
 	if (!d)
 		return NULL;
 
@@ -3408,7 +3408,7 @@ static int udma_set_metadata_len(struct dma_async_tx_descriptor *desc,
 	return 0;
 }
 
-static struct dma_descriptor_metadata_ops metadata_ops = {
+static const struct dma_descriptor_metadata_ops metadata_ops = {
 	.attach = udma_attach_metadata,
 	.get_ptr = udma_get_metadata_ptr,
 	.set_len = udma_set_metadata_len,
@@ -3588,7 +3588,7 @@ udma_prep_dma_cyclic_pkt(struct udma_chan *uc, dma_addr_t buf_addr,
 	if (period_len >= SZ_4M)
 		return NULL;
 
-	d = kzalloc(struct_size(d, hwdesc, periods), GFP_NOWAIT);
+	d = kzalloc_flex(*d, hwdesc, periods, GFP_NOWAIT);
 	if (!d)
 		return NULL;
 
@@ -4686,7 +4686,7 @@ static int udma_setup_resources(struct udma_dev *ud)
 		irq_res.sets += rm_res->sets;
 	}
 
-	irq_res.desc = kcalloc(irq_res.sets, sizeof(*irq_res.desc), GFP_KERNEL);
+	irq_res.desc = kzalloc_objs(*irq_res.desc, irq_res.sets);
 	if (!irq_res.desc)
 		return -ENOMEM;
 	rm_res = tisci_rm->rm_ranges[RM_RANGE_TCHAN];
@@ -4878,7 +4878,7 @@ static int bcdma_setup_resources(struct udma_dev *ud)
 		}
 	}
 
-	irq_res.desc = kcalloc(irq_res.sets, sizeof(*irq_res.desc), GFP_KERNEL);
+	irq_res.desc = kzalloc_objs(*irq_res.desc, irq_res.sets);
 	if (!irq_res.desc)
 		return -ENOMEM;
 	if (ud->bchan_cnt) {
@@ -5080,7 +5080,7 @@ static int pktdma_setup_resources(struct udma_dev *ud)
 		irq_res.sets += rm_res->sets;
 	}
 
-	irq_res.desc = kcalloc(irq_res.sets, sizeof(*irq_res.desc), GFP_KERNEL);
+	irq_res.desc = kzalloc_objs(*irq_res.desc, irq_res.sets);
 	if (!irq_res.desc)
 		return -ENOMEM;
 	rm_res = tisci_rm->rm_ranges[RM_RANGE_TFLOW];

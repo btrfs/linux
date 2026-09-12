@@ -88,19 +88,19 @@ static void amd_set_max_freq_ratio(void)
 
 	rc = cppc_get_perf_caps(0, &perf_caps);
 	if (rc) {
-		pr_warn("Could not retrieve perf counters (%d)\n", rc);
+		pr_debug("Could not retrieve perf counters (%d)\n", rc);
 		return;
 	}
 
 	rc = amd_get_boost_ratio_numerator(0, &numerator);
 	if (rc) {
-		pr_warn("Could not retrieve highest performance (%d)\n", rc);
+		pr_debug("Could not retrieve highest performance (%d)\n", rc);
 		return;
 	}
 	nominal_perf = perf_caps.nominal_perf;
 
 	if (!nominal_perf) {
-		pr_warn("Could not retrieve nominal performance\n");
+		pr_debug("Could not retrieve nominal performance\n");
 		return;
 	}
 
@@ -241,7 +241,6 @@ EXPORT_SYMBOL_GPL(amd_detect_prefcore);
  */
 int amd_get_boost_ratio_numerator(unsigned int cpu, u64 *numerator)
 {
-	enum x86_topology_cpu_type core_type = get_topology_cpu_type(&cpu_data(cpu));
 	bool prefcore;
 	int ret;
 	u32 tmp;
@@ -273,16 +272,18 @@ int amd_get_boost_ratio_numerator(unsigned int cpu, u64 *numerator)
 
 	/* detect if running on heterogeneous design */
 	if (cpu_feature_enabled(X86_FEATURE_AMD_HTR_CORES)) {
-		switch (core_type) {
+		switch (cpu_data(cpu).topo.cpu_type) {
 		case TOPO_CPU_TYPE_UNKNOWN:
+		case TOPO_CPU_TYPE_ANY:
 			pr_warn("Undefined core type found for cpu %d\n", cpu);
 			break;
 		case TOPO_CPU_TYPE_PERFORMANCE:
 			/* use the max scale for performance cores */
 			*numerator = CPPC_HIGHEST_PERF_PERFORMANCE;
 			return 0;
+		case TOPO_CPU_TYPE_LOW_POWER:
 		case TOPO_CPU_TYPE_EFFICIENCY:
-			/* use the highest perf value for efficiency cores */
+			/* use the highest perf value for efficiency and low-power cores */
 			ret = amd_get_highest_perf(cpu, &tmp);
 			if (ret)
 				return ret;

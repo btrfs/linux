@@ -4,7 +4,9 @@
  */
 
 #include <drm/drm_prime.h>
+#include <drm/drm_print.h>
 #include <linux/dma-mapping.h>
+#include <linux/pagemap.h>
 #include <linux/shmem_fs.h>
 #include <linux/spinlock.h>
 #include <linux/vmalloc.h>
@@ -131,7 +133,7 @@ static int etnaviv_gem_mmap_obj(struct etnaviv_gem_object *etnaviv_obj,
 
 	vm_flags_set(vma, VM_PFNMAP | VM_DONTEXPAND | VM_DONTDUMP);
 
-	vm_page_prot = vm_get_page_prot(vma->vm_flags);
+	vm_page_prot = vma_get_page_prot(vma);
 
 	if (etnaviv_obj->flags & ETNA_BO_WC) {
 		vma->vm_page_prot = pgprot_writecombine(vm_page_prot);
@@ -187,7 +189,7 @@ static vm_fault_t etnaviv_gem_fault(struct vm_fault *vmf)
 	}
 
 	/* We don't use vmf->pgoff since that has the fake offset: */
-	pgoff = (vmf->address - vma->vm_start) >> PAGE_SHIFT;
+	pgoff = linear_page_delta(vma, vmf->address);
 
 	pfn = page_to_pfn(pages[pgoff]);
 
@@ -287,7 +289,7 @@ struct etnaviv_vram_mapping *etnaviv_gem_mapping_get(
 	 */
 	mapping = etnaviv_gem_get_vram_mapping(etnaviv_obj, NULL);
 	if (!mapping) {
-		mapping = kzalloc(sizeof(*mapping), GFP_KERNEL);
+		mapping = kzalloc_obj(*mapping);
 		if (!mapping) {
 			ret = -ENOMEM;
 			goto out;
@@ -674,7 +676,7 @@ static int etnaviv_gem_userptr_get_pages(struct etnaviv_gem_object *etnaviv_obj)
 	if (userptr->mm != current->mm)
 		return -EPERM;
 
-	pvec = kvmalloc_array(npages, sizeof(struct page *), GFP_KERNEL);
+	pvec = kvmalloc_objs(struct page *, npages);
 	if (!pvec)
 		return -ENOMEM;
 

@@ -127,7 +127,7 @@ struct repair_completion {
 	 * The page completions used for playing the journal into the block map, and, during
 	 * read-only rebuild, for rebuilding the reference counts from the block map.
 	 */
-	struct vdo_page_completion page_completions[];
+	struct vdo_page_completion page_completions[] __counted_by(page_count);
 };
 
 /*
@@ -1417,8 +1417,7 @@ static int parse_journal_for_rebuild(struct repair_completion *repair)
 	 * packed_recovery_journal_entry from every valid journal block.
 	 */
 	count = ((repair->highest_tail - repair->block_map_head + 1) * entries_per_block);
-	result = vdo_allocate(count, struct numbered_block_mapping, __func__,
-			      &repair->entries);
+	result = vdo_allocate(count, __func__, &repair->entries);
 	if (result != VDO_SUCCESS)
 		return result;
 
@@ -1464,8 +1463,7 @@ static int extract_new_mappings(struct repair_completion *repair)
 	 * Allocate an array of numbered_block_mapping structs just large enough to transcribe
 	 * every packed_recovery_journal_entry from every valid journal block.
 	 */
-	result = vdo_allocate(repair->entry_count, struct numbered_block_mapping,
-			      __func__, &repair->entries);
+	result = vdo_allocate(repair->entry_count, __func__, &repair->entries);
 	if (result != VDO_SUCCESS)
 		return result;
 
@@ -1698,6 +1696,7 @@ void vdo_repair(struct vdo_completion *parent)
 	struct vdo *vdo = parent->vdo;
 	struct recovery_journal *journal = vdo->recovery_journal;
 	physical_block_number_t pbn = journal->origin;
+	block_count_t i;
 	block_count_t remaining = journal->size;
 	block_count_t vio_count = DIV_ROUND_UP(remaining, MAX_BLOCKS_PER_VIO);
 	page_count_t page_count = min_t(page_count_t,
@@ -1715,9 +1714,7 @@ void vdo_repair(struct vdo_completion *parent)
 		vdo_log_warning("Device was dirty, rebuilding reference counts");
 	}
 
-	result = vdo_allocate_extended(struct repair_completion, page_count,
-				       struct vdo_page_completion, __func__,
-				       &repair);
+	result = vdo_allocate_extended(page_count, page_completions, __func__, &repair);
 	if (result != VDO_SUCCESS) {
 		vdo_fail_completion(parent, result);
 		return;
@@ -1729,12 +1726,11 @@ void vdo_repair(struct vdo_completion *parent)
 	prepare_repair_completion(repair, finish_repair, VDO_ZONE_TYPE_ADMIN);
 	repair->page_count = page_count;
 
-	result = vdo_allocate(remaining * VDO_BLOCK_SIZE, char, __func__,
-			      &repair->journal_data);
+	result = vdo_allocate(remaining * VDO_BLOCK_SIZE, __func__, &repair->journal_data);
 	if (abort_on_error(result, repair))
 		return;
 
-	result = vdo_allocate(vio_count, struct vio, __func__, &repair->vios);
+	result = vdo_allocate(vio_count, __func__, &repair->vios);
 	if (abort_on_error(result, repair))
 		return;
 
@@ -1754,9 +1750,8 @@ void vdo_repair(struct vdo_completion *parent)
 		remaining -= blocks;
 	}
 
-	for (vio_count = 0; vio_count < repair->vio_count;
-	     vio_count++, pbn += MAX_BLOCKS_PER_VIO) {
-		vdo_submit_metadata_vio(&repair->vios[vio_count], pbn, read_journal_endio,
+	for (i = 0; i < vio_count; i++, pbn += MAX_BLOCKS_PER_VIO) {
+		vdo_submit_metadata_vio(&repair->vios[i], pbn, read_journal_endio,
 					handle_journal_load_error, REQ_OP_READ);
 	}
 }

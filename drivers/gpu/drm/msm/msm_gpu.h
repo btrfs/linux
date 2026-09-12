@@ -22,9 +22,10 @@
 
 struct msm_gem_submit;
 struct msm_gem_vm_log_entry;
-struct msm_gpu_perfcntr;
 struct msm_gpu_state;
 struct msm_context;
+struct msm_perfcntr_group;
+struct msm_perfcntr_stream;
 
 struct msm_gpu_config {
 	const char *ioname;
@@ -92,7 +93,14 @@ struct msm_gpu_funcs {
 	 * for cmdstream that is buffered in this FIFO upstream of the CP fw.
 	 */
 	bool (*progress)(struct msm_gpu *gpu, struct msm_ringbuffer *ring);
-	void (*sysprof_setup)(struct msm_gpu *gpu);
+	void (*sysprof_setup)(struct msm_gpu *gpu, bool force_on);
+
+	/* Configure perfcntr SELect regs: */
+	void (*perfcntr_configure)(struct msm_gpu *gpu, struct msm_ringbuffer *ring,
+				   const struct msm_perfcntr_stream *stream);
+
+	/* Flush perfcntrs before reading (optional): */
+	void (*perfcntr_flush)(struct msm_gpu *gpu);
 };
 
 /* Additional state for iommu faults: */
@@ -116,15 +124,12 @@ struct msm_gpu_fault_info {
  * struct msm_gpu_devfreq - devfreq related state
  */
 struct msm_gpu_devfreq {
-	/** devfreq: devfreq instance */
+	/** @devfreq: devfreq instance */
 	struct devfreq *devfreq;
-
-	/** lock: lock for "suspended", "busy_cycles", and "time" */
+	/** @lock: lock for "suspended", "busy_cycles", and "time" */
 	struct mutex lock;
-
 	/**
-	 * idle_freq:
-	 *
+	 * @idle_freq:
 	 * Shadow frequency used while the GPU is idle.  From the PoV of
 	 * the devfreq governor, we are continuing to sample busyness and
 	 * adjust frequency while the GPU is idle, but we use this shadow
@@ -132,43 +137,34 @@ struct msm_gpu_devfreq {
 	 * it is inactive.
 	 */
 	unsigned long idle_freq;
-
 	/**
-	 * boost_constraint:
-	 *
+	 * @boost_freq:
 	 * A PM QoS constraint to boost min freq for a period of time
 	 * until the boost expires.
 	 */
 	struct dev_pm_qos_request boost_freq;
-
 	/**
-	 * busy_cycles: Last busy counter value, for calculating elapsed busy
+	 * @busy_cycles: Last busy counter value, for calculating elapsed busy
 	 * cycles since last sampling period.
 	 */
 	u64 busy_cycles;
-
-	/** time: Time of last sampling period. */
+	/** @time: Time of last sampling period.  */
 	ktime_t time;
-
-	/** idle_time: Time of last transition to idle: */
+	/** @idle_time: Time of last transition to idle.  */
 	ktime_t idle_time;
-
 	/**
-	 * idle_work:
-	 *
+	 * @idle_work:
 	 * Used to delay clamping to idle freq on active->idle transition.
 	 */
 	struct msm_hrtimer_work idle_work;
-
 	/**
-	 * boost_work:
-	 *
+	 * @boost_work:
 	 * Used to reset the boost_constraint after the boost period has
 	 * elapsed
 	 */
 	struct msm_hrtimer_work boost_work;
 
-	/** suspended: tracks if we're suspended */
+	/** @suspended: tracks if we're suspended */
 	bool suspended;
 };
 
@@ -179,18 +175,6 @@ struct msm_gpu {
 	const struct msm_gpu_funcs *funcs;
 
 	struct adreno_smmu_priv adreno_smmu;
-
-	/* performance counters (hw & sw): */
-	spinlock_t perf_lock;
-	bool perfcntr_active;
-	struct {
-		bool active;
-		ktime_t time;
-	} last_sample;
-	uint32_t totaltime, activetime;    /* sw counters */
-	uint32_t last_cntrs[5];            /* hw counters */
-	const struct msm_gpu_perfcntr *perfcntrs;
-	uint32_t num_perfcntrs;
 
 	struct msm_ringbuffer *rb[MSM_GPU_MAX_RINGS];
 	int nr_rings;
@@ -287,6 +271,14 @@ struct msm_gpu {
 	bool allow_relocs;
 
 	struct thermal_cooling_device *cooling;
+
+	const struct msm_perfcntr_group *perfcntr_groups;
+	unsigned num_perfcntr_groups;
+
+	struct msm_perfcntr_state *perfcntrs;
+
+	/** @perfcntr_lock: protects perfcntr related state */
+	struct mutex perfcntr_lock;
 };
 
 static inline struct msm_gpu *dev_to_gpu(struct device *dev)
@@ -332,18 +324,62 @@ static inline bool msm_gpu_active(struct msm_gpu *gpu)
 	return false;
 }
 
-/* Perf-Counters:
- * The select_reg and select_val are just there for the benefit of the child
- * class that actually enables the perf counter..  but msm_gpu base class
- * will handle sampling/displaying the counters.
+/**
+ * struct msm_perfcntr_group_state - Tracking for the currently allocated counter state
  */
+struct msm_perfcntr_group_state {
+	/**
+	 * @allocated_counters:
+	 *
+	 * allocated counters for global counter collection.  The
+	 * corresponding counters are allocated from highest to
+	 * lowest, to minimize chance of conflict with old userspace
+	 * allocating from lowest to highest.
+	 */
+	unsigned allocated_counters;
 
-struct msm_gpu_perfcntr {
-	uint32_t select_reg;
-	uint32_t sample_reg;
-	uint32_t select_val;
-	const char *name;
+	/**
+	 * @countables:
+	 *
+	 * The corresponding SELect reg values for the allocated counters
+	 */
+	uint32_t countables[];
 };
+
+/**
+ * struct msm_perfcntr_state - overall global perfcntr state
+ */
+struct msm_perfcntr_state {
+	/** @stream: current global counter stream if active */
+	struct msm_perfcntr_stream *stream;
+
+	/** @sel_seqno: counter for sel_fence */
+	uint32_t sel_seqno;
+
+	/**
+	 * @groups: Global perfcntr stream group state.
+	 *
+	 * Conceptually this is part of msm_perfcntr_stream state, but is
+	 * statically pre-allocated when the gpu is initialized to simplify
+	 * error path cleanup in PERFCNTR_CONFIG ioctl.  (__free(kfree)
+	 * doesn't really help with variable length arrays of allocated
+	 * pointers.)
+	 */
+	struct msm_perfcntr_group_state *groups[];
+};
+
+static inline bool
+msm_gpu_sysprof_no_perfcntr_zap(struct msm_gpu *gpu)
+{
+	return (refcount_read(&gpu->sysprof_active) > 1) ||
+		(gpu->perfcntrs && READ_ONCE(gpu->perfcntrs->stream));
+}
+
+static inline bool
+msm_gpu_sysprof_no_ifpc(struct msm_gpu *gpu)
+{
+	return refcount_read(&gpu->sysprof_active) > 1;
+}
 
 /*
  * The number of priority levels provided by drm gpu scheduler.  The
@@ -356,59 +392,45 @@ struct msm_gpu_perfcntr {
  * struct msm_context - per-drm_file context
  */
 struct msm_context {
-	/** @queuelock: synchronizes access to submitqueues list */
-	rwlock_t queuelock;
-
+	/** @ctxlock: synchronizes access to submitqueues list, etc */
+	struct rw_semaphore ctxlock;
 	/** @submitqueues: list of &msm_gpu_submitqueue created by userspace */
 	struct list_head submitqueues;
-
 	/**
 	 * @queueid:
-	 *
 	 * Counter incremented each time a submitqueue is created, used to
 	 * assign &msm_gpu_submitqueue.id
 	 */
 	int queueid;
-
 	/**
 	 * @closed: The device file associated with this context has been closed.
-	 *
 	 * Once the device is closed, any submits that have not been written
 	 * to the ring buffer are no-op'd.
 	 */
 	bool closed;
-
 	/**
 	 * @userspace_managed_vm:
-	 *
 	 * Has userspace opted-in to userspace managed VM (ie. VM_BIND) via
 	 * MSM_PARAM_EN_VM_BIND?
 	 */
 	bool userspace_managed_vm;
-
 	/**
 	 * @vm:
-	 *
 	 * The per-process GPU address-space.  Do not access directly, use
 	 * msm_context_vm().
 	 */
 	struct drm_gpuvm *vm;
-
-	/** @kref: the reference count */
+	/** @ref: the reference count */
 	struct kref ref;
-
 	/**
 	 * @seqno:
-	 *
 	 * A unique per-process sequence number.  Used to detect context
 	 * switches, without relying on keeping a, potentially dangling,
 	 * pointer to the previous context.
 	 */
 	int seqno;
-
 	/**
 	 * @sysprof:
-	 *
 	 * The value of MSM_PARAM_SYSPROF set by userspace.  This is
 	 * intended to be used by system profiling tools like Mesa's
 	 * pps-producer (perfetto), and restricted to CAP_SYS_ADMIN.
@@ -423,40 +445,32 @@ struct msm_context {
 	 * file is closed.
 	 */
 	int sysprof;
-
 	/**
 	 * @comm: Overridden task comm, see MSM_PARAM_COMM
 	 *
 	 * Accessed under msm_gpu::lock
 	 */
 	char *comm;
-
 	/**
 	 * @cmdline: Overridden task cmdline, see MSM_PARAM_CMDLINE
 	 *
 	 * Accessed under msm_gpu::lock
 	 */
 	char *cmdline;
-
 	/**
-	 * @elapsed:
-	 *
+	 * @elapsed_ns:
 	 * The total (cumulative) elapsed time GPU was busy with rendering
 	 * from this context in ns.
 	 */
 	uint64_t elapsed_ns;
-
 	/**
 	 * @cycles:
-	 *
 	 * The total (cumulative) GPU cycles elapsed attributed to this
 	 * context.
 	 */
 	uint64_t cycles;
-
 	/**
 	 * @entities:
-	 *
 	 * Table of per-priority-level sched entities used by submitqueues
 	 * associated with this &drm_file.  Because some userspace apps
 	 * make assumptions about rendering from multiple gl contexts
@@ -466,20 +480,23 @@ struct msm_context {
 	 * level.
 	 */
 	struct drm_sched_entity *entities[NR_SCHED_PRIORITIES * MSM_GPU_MAX_RINGS];
-
 	/**
 	 * @ctx_mem:
-	 *
 	 * Total amount of memory of GEM buffers with handles attached for
 	 * this context.
 	 */
 	atomic64_t ctx_mem;
+
+	/**
+	 * @perfcntrs: Per-context reserved perfcntrs state
+	 */
+	struct msm_perfcntr_context_state *perfctx;
 };
 
 struct drm_gpuvm *msm_context_vm(struct drm_device *dev, struct msm_context *ctx);
 
 /**
- * msm_context_is_vm_bind() - has userspace opted in to VM_BIND?
+ * msm_context_is_vmbind() - has userspace opted in to VM_BIND?
  *
  * @ctx: the drm_file context
  *
@@ -487,6 +504,8 @@ struct drm_gpuvm *msm_context_vm(struct drm_device *dev, struct msm_context *ctx
  * do sparse binding including having multiple, potentially partial,
  * mappings in the VM.  Therefore certain legacy uabi (ie. GET_IOVA,
  * SET_IOVA) are rejected because they don't have a sensible meaning.
+ *
+ * Returns: %true if userspace is managing the VM, %false otherwise.
  */
 static inline bool
 msm_context_is_vmbind(struct msm_context *ctx)
@@ -518,6 +537,8 @@ msm_context_is_vmbind(struct msm_context *ctx)
  * This allows generations without preemption (nr_rings==1) to have some
  * amount of prioritization, and provides more priority levels for gens
  * that do have preemption.
+ *
+ * Returns: %0 on success, %-errno on error.
  */
 static inline int msm_gpu_convert_priority(struct msm_gpu *gpu, int prio,
 		unsigned *ring_nr, enum drm_sched_priority *sched_prio)
@@ -541,7 +562,7 @@ static inline int msm_gpu_convert_priority(struct msm_gpu *gpu, int prio,
 }
 
 /**
- * struct msm_gpu_submitqueues - Userspace created context.
+ * struct msm_gpu_submitqueue - Userspace created context.
  *
  * A submitqueue is associated with a gl context or vk queue (or equiv)
  * in userspace.
@@ -720,11 +741,6 @@ void msm_devfreq_active(struct msm_gpu *gpu);
 void msm_devfreq_idle(struct msm_gpu *gpu);
 
 int msm_gpu_hw_init(struct msm_gpu *gpu);
-
-void msm_gpu_perfcntr_start(struct msm_gpu *gpu);
-void msm_gpu_perfcntr_stop(struct msm_gpu *gpu);
-int msm_gpu_perfcntr_sample(struct msm_gpu *gpu, uint32_t *activetime,
-		uint32_t *totaltime, uint32_t ncntrs, uint32_t *cntrs);
 
 void msm_gpu_retire(struct msm_gpu *gpu);
 void msm_gpu_submit(struct msm_gpu *gpu, struct msm_gem_submit *submit);

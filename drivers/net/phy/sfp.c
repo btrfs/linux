@@ -14,6 +14,7 @@
 #include <linux/platform_device.h>
 #include <linux/rtnetlink.h>
 #include <linux/slab.h>
+#include <linux/unaligned.h>
 #include <linux/workqueue.h>
 
 #include "sfp.h"
@@ -206,6 +207,16 @@ static const enum gpiod_flags gpio_flags[] = {
 #define T_PROBE_RETRY_SLOW	msecs_to_jiffies(5000)
 #define R_PROBE_RETRY_SLOW	12
 
+/* Polling interval and consecutive-failure threshold for the I2C presence
+ * probe used on boards without a MOD_DEF0 GPIO (see sfp_i2c_get_state()).
+ * A single successful read asserts presence immediately; R_PROBE_ABSENT
+ * consecutive failures are required to declare a live module removed, to ride
+ * out a transient I2C error. Insertion is thus detected within
+ * T_PROBE_PRESENT and removal within T_PROBE_PRESENT * R_PROBE_ABSENT.
+ */
+#define T_PROBE_PRESENT		msecs_to_jiffies(500)
+#define R_PROBE_ABSENT		3
+
 /* SFP modules appear to always have their PHY configured for bus address
  * 0x56 (which with mdio-i2c, translates to a PHY address of 22).
  * RollBall SFPs access phy via SFP Enhanced Digital Diagnostic Interface
@@ -248,6 +259,13 @@ struct sfp {
 	int gpio_irq[GPIO_MAX];
 
 	bool need_poll;
+
+	/* I2C-probed presence, for boards without a MOD_DEF0 GPIO.
+	 * Access rules: st_mutex held (updated from the poll/state machine).
+	 */
+	bool i2c_present;
+	u8 i2c_present_nak;
+	unsigned long i2c_present_next;
 
 	/* Access rules:
 	 * state_hw_drive: st_mutex held
@@ -367,6 +385,12 @@ static void sfp_fixup_ignore_tx_fault(struct sfp *sfp)
 	sfp->state_ignore_mask |= SFP_F_TX_FAULT;
 }
 
+static void sfp_fixup_ignore_tx_fault_and_los(struct sfp *sfp)
+{
+	sfp_fixup_ignore_tx_fault(sfp);
+	sfp_fixup_ignore_los(sfp);
+}
+
 static void sfp_fixup_ignore_hw(struct sfp *sfp, unsigned int mask)
 {
 	sfp->state_hw_mask &= ~mask;
@@ -474,17 +498,33 @@ static void sfp_quirk_ubnt_uf_instant(const struct sfp_eeprom_id *id,
 {
 	/* Ubiquiti U-Fiber Instant module claims that support all transceiver
 	 * types including 10G Ethernet which is not truth. So clear all claimed
-	 * modes and set only one mode which module supports: 1000baseX_Full.
+	 * modes and set only one mode which module supports: 1000baseX_Full,
+	 * along with the Autoneg and pause bits.
 	 */
 	linkmode_zero(caps->link_modes);
 	linkmode_set_bit(ETHTOOL_LINK_MODE_1000baseX_Full_BIT,
 			 caps->link_modes);
+	linkmode_set_bit(ETHTOOL_LINK_MODE_Autoneg_BIT, caps->link_modes);
+	linkmode_set_bit(ETHTOOL_LINK_MODE_Pause_BIT, caps->link_modes);
+	linkmode_set_bit(ETHTOOL_LINK_MODE_Asym_Pause_BIT, caps->link_modes);
+
+	phy_interface_zero(caps->interfaces);
+	__set_bit(PHY_INTERFACE_MODE_1000BASEX, caps->interfaces);
 }
 
 #define SFP_QUIRK(_v, _p, _s, _f) \
 	{ .vendor = _v, .part = _p, .support = _s, .fixup = _f, }
 #define SFP_QUIRK_S(_v, _p, _s) SFP_QUIRK(_v, _p, _s, NULL)
 #define SFP_QUIRK_F(_v, _p, _f) SFP_QUIRK(_v, _p, NULL, _f)
+/* Like SFP_QUIRK_F, but matches the part as a prefix; the vendor name
+ * is still matched exactly. Use for modules whose EEPROM vendor PN
+ * field reads back with garbage past the legitimate characters instead
+ * of the SFF-8472-mandated space padding, so sfp_strlen can't trim the
+ * field down to the legitimate length.
+ */
+#define SFP_QUIRK_F_PREFIX(_v, _p, _f) \
+	{ .vendor = _v, .part = _p, .support = NULL, .fixup = _f, \
+	  .part_prefix_match = true }
 
 static const struct sfp_quirk sfp_quirks[] = {
 	// Alcatel Lucent G-010S-P can operate at 2500base-X, but incorrectly
@@ -496,6 +536,8 @@ static const struct sfp_quirk sfp_quirks[] = {
 	// NRZ in their EEPROM
 	SFP_QUIRK("ALCATELLUCENT", "3FE46541AA", sfp_quirk_2500basex,
 		  sfp_fixup_nokia),
+
+	SFP_QUIRK_F("BIDB", "X-ONU-SFPP", sfp_fixup_potron),
 
 	// FLYPRO SFP-10GT-CS-30M uses Rollball protocol to talk to the PHY.
 	SFP_QUIRK_F("FLYPRO", "SFP-10GT-CS-30M", sfp_fixup_rollball),
@@ -515,7 +557,16 @@ static const struct sfp_quirk sfp_quirks[] = {
 	SFP_QUIRK("FS", "GPON-ONU-34-20BI", sfp_quirk_2500basex,
 		  sfp_fixup_ignore_tx_fault),
 
+	// Fiberstore XGS-SFP-ONT-MACI is a MAC-mode XGS-PON ONT stick with
+	// ONT-class serial-passthrough TX_FAULT/LOS wiring and slow startup;
+	// mask both signals and extend T_START_UP via the potron fixup. The
+	// PN is the product name (XGS-SFP-ONT-MAC-I) truncated at the 16-byte
+	// field width, so the field is fully occupied and matches exactly.
+	SFP_QUIRK_F("FS", "XGS-SFP-ONT-MACI", sfp_fixup_potron),
+
 	SFP_QUIRK_F("HALNy", "HL-GSFP", sfp_fixup_halny_gsfp),
+
+	SFP_QUIRK_F("H-COM", "SPP425H-GAB4", sfp_fixup_potron),
 
 	// HG MXPD-483II-F 2.5G supports 2500Base-X, but incorrectly reports
 	// 2600MBd in their EERPOM
@@ -524,11 +575,31 @@ static const struct sfp_quirk sfp_quirks[] = {
 	// Huawei MA5671A can operate at 2500base-X, but report 1.2GBd NRZ in
 	// their EEPROM
 	SFP_QUIRK("HUAWEI", "MA5671A", sfp_quirk_2500basex,
+		  sfp_fixup_ignore_tx_fault_and_los),
+
+	// Hisense LXT-010S-H is a GPON ONT SFP (sold as LEOX LXT-010S-H) that
+	// can operate at 2500base-X, but reports 1000BASE-LX / 1300MBd in its
+	// EEPROM
+	SFP_QUIRK("Hisense-Leox", "LXT-010S-H", sfp_quirk_2500basex,
 		  sfp_fixup_ignore_tx_fault),
 
-	// Lantech 8330-262D-E can operate at 2500base-X, but incorrectly report
-	// 2500MBd NRZ in their EEPROM
+	// Hisense ZNID-GPON-2311NA can operate at 2500base-X, but reports
+	// 1000BASE-LX / 1300MBd in its EEPROM
+	SFP_QUIRK("Hisense", "ZNID-GPON-2311NA", sfp_quirk_2500basex,
+		  sfp_fixup_ignore_tx_fault),
+
+	// HSGQ HSGQ-XPON-Stick can operate at 2500base-X, but reports
+	// 1000BASE-LX / 1300MBd in its EEPROM
+	SFP_QUIRK("HSGQ", "HSGQ-XPON-Stick", sfp_quirk_2500basex,
+		  sfp_fixup_ignore_tx_fault),
+
+	// Lantech 8330-262D-E and 8330-265D can operate at 2500base-X, but
+	// incorrectly report 2500MBd NRZ in their EEPROM.
+	// Some 8330-265D modules have inverted LOS, while all of them report
+	// normal LOS in EEPROM. Therefore we need to ignore LOS entirely.
 	SFP_QUIRK_S("Lantech", "8330-262D-E", sfp_quirk_2500basex),
+	SFP_QUIRK("Lantech", "8330-265D", sfp_quirk_2500basex,
+		  sfp_fixup_ignore_los),
 
 	SFP_QUIRK_S("UBNT", "UF-INSTANT", sfp_quirk_ubnt_uf_instant),
 
@@ -539,6 +610,9 @@ static const struct sfp_quirk sfp_quirks[] = {
 
 	SFP_QUIRK_F("YV", "SFP+ONU-XGSPON", sfp_fixup_potron),
 
+	// HORACO HC-10GE-113C uses Rollball protocol to talk to the PHY.
+	SFP_QUIRK_F("OEM", "HC-10GE-113C", sfp_fixup_rollball),
+
 	// OEM SFP-GE-T is a 1000Base-T module with broken TX_FAULT indicator
 	SFP_QUIRK_F("OEM", "SFP-GE-T", sfp_fixup_ignore_tx_fault),
 
@@ -546,11 +620,23 @@ static const struct sfp_quirk sfp_quirks[] = {
 	SFP_QUIRK_S("OEM", "SFP-2.5G-T", sfp_quirk_oem_2_5g),
 	SFP_QUIRK_S("OEM", "SFP-2.5G-BX10-D", sfp_quirk_2500basex),
 	SFP_QUIRK_S("OEM", "SFP-2.5G-BX10-U", sfp_quirk_2500basex),
+	SFP_QUIRK_S("OEM", "SFP-2.5G-LH03-B", sfp_quirk_2500basex),
+	SFP_QUIRK_S("OEM", "SFP-2.5G-LH20-A", sfp_quirk_2500basex),
 	SFP_QUIRK_F("OEM", "RTSFP-10", sfp_fixup_rollball_cc),
 	SFP_QUIRK_F("OEM", "RTSFP-10G", sfp_fixup_rollball_cc),
+
+	// OEM XGSPONST2001 is an XGS-PON ONT stick with broken TX_FAULT and
+	// LOS indicators and slow startup, just like potron. On cold
+	// power-up the EEPROM vendor PN field reads back with non-printable
+	// garbage past the legitimate string instead of space padding, so
+	// match the part as a prefix.
+	SFP_QUIRK_F_PREFIX("OEM", "XGSPONST2001", sfp_fixup_potron),
+
 	SFP_QUIRK_F("Turris", "RTSFP-2.5G", sfp_fixup_rollball),
 	SFP_QUIRK_F("Turris", "RTSFP-10", sfp_fixup_rollball),
 	SFP_QUIRK_F("Turris", "RTSFP-10G", sfp_fixup_rollball),
+
+	SFP_QUIRK_S("ZOERAX", "SFP-2.5G-T", sfp_quirk_oem_2_5g),
 };
 
 static size_t sfp_strlen(const char *str, size_t maxlen)
@@ -567,13 +653,16 @@ static size_t sfp_strlen(const char *str, size_t maxlen)
 	return size;
 }
 
-static bool sfp_match(const char *qs, const char *str, size_t len)
+static bool sfp_match(const char *qs, const char *str, size_t len, bool prefix)
 {
+	size_t qs_len;
+
 	if (!qs)
 		return true;
-	if (strlen(qs) != len)
+	qs_len = strlen(qs);
+	if (prefix ? qs_len > len : qs_len != len)
 		return false;
-	return !strncmp(qs, str, len);
+	return !strncmp(qs, str, qs_len);
 }
 
 static const struct sfp_quirk *sfp_lookup_quirk(const struct sfp_eeprom_id *id)
@@ -586,8 +675,9 @@ static const struct sfp_quirk *sfp_lookup_quirk(const struct sfp_eeprom_id *id)
 	ps = sfp_strlen(id->base.vendor_pn, ARRAY_SIZE(id->base.vendor_pn));
 
 	for (i = 0, q = sfp_quirks; i < ARRAY_SIZE(sfp_quirks); i++, q++)
-		if (sfp_match(q->vendor, id->base.vendor_name, vs) &&
-		    sfp_match(q->part, id->base.vendor_pn, ps))
+		if (sfp_match(q->vendor, id->base.vendor_name, vs, false) &&
+		    sfp_match(q->part, id->base.vendor_pn, ps,
+			      q->part_prefix_match))
 			return q;
 
 	return NULL;
@@ -717,72 +807,163 @@ static int sfp_i2c_write(struct sfp *sfp, bool a2, u8 dev_addr, void *buf,
 	return ret == ARRAY_SIZE(msgs) ? len : 0;
 }
 
-static int sfp_smbus_byte_read(struct sfp *sfp, bool a2, u8 dev_addr,
-			       void *buf, size_t len)
+static int sfp_smbus_read(struct sfp *sfp, bool a2, u8 dev_addr, void *buf,
+			  size_t len)
 {
-	union i2c_smbus_data smbus_data;
+	union i2c_smbus_data smbus_data = {0};
 	u8 bus_addr = a2 ? 0x51 : 0x50;
+	size_t this_len, transferred;
+	u32 functionality;
 	u8 *data = buf;
 	int ret;
 
+	functionality = i2c_get_functionality(sfp->i2c);
+
 	while (len) {
-		ret = i2c_smbus_xfer(sfp->i2c, bus_addr, 0,
-				     I2C_SMBUS_READ, dev_addr,
-				     I2C_SMBUS_BYTE_DATA, &smbus_data);
-		if (ret < 0)
-			return ret;
+		this_len = min(len, sfp->i2c_block_size);
 
-		*data = smbus_data.byte;
+		if (functionality & I2C_FUNC_SMBUS_READ_I2C_BLOCK) {
+			smbus_data.block[0] = this_len;
+			ret = i2c_smbus_xfer(sfp->i2c, bus_addr, 0,
+					     I2C_SMBUS_READ, dev_addr,
+					     I2C_SMBUS_I2C_BLOCK_DATA, &smbus_data);
+			if (ret < 0)
+				return ret;
 
-		len--;
-		data++;
-		dev_addr++;
+			transferred = min_t(size_t, smbus_data.block[0], this_len);
+			if (!transferred)
+				return -EIO;
+
+			memcpy(data, &smbus_data.block[1], transferred);
+		} else if (this_len >= 2 &&
+			   (functionality & I2C_FUNC_SMBUS_READ_WORD_DATA)) {
+			ret = i2c_smbus_xfer(sfp->i2c, bus_addr, 0,
+					     I2C_SMBUS_READ, dev_addr,
+					     I2C_SMBUS_WORD_DATA, &smbus_data);
+			if (ret < 0)
+				return ret;
+
+			put_unaligned_le16(smbus_data.word, data);
+			transferred = 2;
+		} else {
+			ret = i2c_smbus_xfer(sfp->i2c, bus_addr, 0,
+					     I2C_SMBUS_READ, dev_addr,
+					     I2C_SMBUS_BYTE_DATA, &smbus_data);
+			if (ret < 0)
+				return ret;
+
+			*data = smbus_data.byte;
+			transferred = 1;
+		}
+
+		data += transferred;
+		len -= transferred;
+		dev_addr += transferred;
 	}
 
 	return data - (u8 *)buf;
 }
 
-static int sfp_smbus_byte_write(struct sfp *sfp, bool a2, u8 dev_addr,
-				void *buf, size_t len)
+static int sfp_smbus_write(struct sfp *sfp, bool a2, u8 dev_addr, void *buf,
+			   size_t len)
 {
 	union i2c_smbus_data smbus_data;
 	u8 bus_addr = a2 ? 0x51 : 0x50;
+	size_t this_len, transferred;
+	u32 functionality;
 	u8 *data = buf;
 	int ret;
 
-	while (len) {
-		smbus_data.byte = *data;
-		ret = i2c_smbus_xfer(sfp->i2c, bus_addr, 0,
-				     I2C_SMBUS_WRITE, dev_addr,
-				     I2C_SMBUS_BYTE_DATA, &smbus_data);
-		if (ret)
-			return ret;
+	functionality = i2c_get_functionality(sfp->i2c);
 
-		len--;
-		data++;
-		dev_addr++;
+	while (len) {
+		this_len = min(len, sfp->i2c_block_size);
+
+		if (functionality & I2C_FUNC_SMBUS_WRITE_I2C_BLOCK) {
+			smbus_data.block[0] = this_len;
+			memcpy(&smbus_data.block[1], data, this_len);
+
+			ret = i2c_smbus_xfer(sfp->i2c, bus_addr, 0,
+					     I2C_SMBUS_WRITE, dev_addr,
+					     I2C_SMBUS_I2C_BLOCK_DATA, &smbus_data);
+			if (ret < 0)
+				return ret;
+
+			transferred = this_len;
+		} else if (this_len >= 2 &&
+			   (functionality & I2C_FUNC_SMBUS_WRITE_WORD_DATA)) {
+			smbus_data.word = get_unaligned_le16(data);
+			ret = i2c_smbus_xfer(sfp->i2c, bus_addr, 0,
+					     I2C_SMBUS_WRITE, dev_addr,
+					     I2C_SMBUS_WORD_DATA, &smbus_data);
+			if (ret < 0)
+				return ret;
+
+			transferred = 2;
+		} else {
+			smbus_data.byte = *data;
+			ret = i2c_smbus_xfer(sfp->i2c, bus_addr, 0,
+					     I2C_SMBUS_WRITE, dev_addr,
+					     I2C_SMBUS_BYTE_DATA, &smbus_data);
+			if (ret < 0)
+				return ret;
+
+			transferred = 1;
+		}
+
+		data += transferred;
+		len -= transferred;
+		dev_addr += transferred;
 	}
 
-	return 0;
+	return data - (u8 *)buf;
 }
 
 static int sfp_i2c_configure(struct sfp *sfp, struct i2c_adapter *i2c)
 {
+	size_t max_block_size;
+
 	sfp->i2c = i2c;
 
 	if (i2c_check_functionality(i2c, I2C_FUNC_I2C)) {
 		sfp->read = sfp_i2c_read;
 		sfp->write = sfp_i2c_write;
-		sfp->i2c_max_block_size = SFP_EEPROM_BLOCK_SIZE;
-	} else if (i2c_check_functionality(i2c, I2C_FUNC_SMBUS_BYTE_DATA)) {
-		sfp->read = sfp_smbus_byte_read;
-		sfp->write = sfp_smbus_byte_write;
-		sfp->i2c_max_block_size = 1;
+		max_block_size = SFP_EEPROM_BLOCK_SIZE;
+	} else if (i2c_check_functionality(i2c, I2C_FUNC_SMBUS_BYTE_DATA) ||
+		   i2c_check_functionality(i2c, I2C_FUNC_SMBUS_I2C_BLOCK)) {
+		/* Either protocol alone covers any length: I2C-block carries
+		 * 1..32 bytes per xfer, byte iterates one byte at a time.
+		 */
+		sfp->read = sfp_smbus_read;
+		sfp->write = sfp_smbus_write;
+
+		if (i2c_check_functionality(i2c, I2C_FUNC_SMBUS_I2C_BLOCK))
+			max_block_size = SFP_EEPROM_BLOCK_SIZE;
+		else if (i2c_check_functionality(i2c, I2C_FUNC_SMBUS_WORD_DATA))
+			max_block_size = 2;
+		else
+			max_block_size = 1;
+	} else if (WARN_ONCE(i2c_check_functionality(i2c, I2C_FUNC_SMBUS_WORD_DATA),
+			     "SMBus word-only adapter; odd-length transfers will fail\n")) {
+		/* Word-only: even-length xfers work; odd-length xfers fall
+		 * to BYTE, which the adapter does not advertise and will
+		 * likely fail.
+		 */
+		sfp->read = sfp_smbus_read;
+		sfp->write = sfp_smbus_write;
+		max_block_size = 2;
 	} else {
 		sfp->i2c = NULL;
 		return -EINVAL;
 	}
 
+	if (i2c->quirks && i2c->quirks->max_read_len)
+		max_block_size = min(max_block_size, i2c->quirks->max_read_len);
+	if (i2c->quirks && i2c->quirks->max_write_len)
+		max_block_size = min(max_block_size, i2c->quirks->max_write_len);
+
+	sfp->i2c_max_block_size = max_block_size;
+	sfp->i2c_block_size = sfp->i2c_max_block_size;
 	return 0;
 }
 
@@ -812,6 +993,7 @@ static int sfp_i2c_mdiobus_create(struct sfp *sfp)
 static void sfp_i2c_mdiobus_destroy(struct sfp *sfp)
 {
 	mdiobus_unregister(sfp->i2c_mii);
+	mdiobus_free(sfp->i2c_mii);
 	sfp->i2c_mii = NULL;
 }
 
@@ -819,6 +1001,45 @@ static void sfp_i2c_mdiobus_destroy(struct sfp *sfp)
 static int sfp_read(struct sfp *sfp, bool a2, u8 addr, void *buf, size_t len)
 {
 	return sfp->read(sfp, a2, addr, buf, len);
+}
+
+/* Probe whether a module is physically present by attempting a single-byte
+ * I2C read of the EEPROM identifier (an empty cage NAKs). Used as the presence
+ * source on boards that do not wire MOD_DEF0 to a GPIO.
+ */
+static bool sfp_module_present_i2c(struct sfp *sfp)
+{
+	u8 id;
+
+	return sfp_read(sfp, false, SFP_PHYS_ID, &id, sizeof(id)) == sizeof(id);
+}
+
+/* get_state variant for boards without a MOD_DEF0 GPIO. Instead of assuming
+ * the module is always present, derive SFP_F_PRESENT from a throttled I2C
+ * probe so that hot-insertion and removal are detected. A single ACK asserts
+ * presence; R_PROBE_ABSENT consecutive failures clear it, to ride out a
+ * transient I2C error on a live module.
+ */
+static unsigned int sfp_i2c_get_state(struct sfp *sfp)
+{
+	unsigned int state = sfp_gpio_get_state(sfp);
+
+	if (time_after_eq(jiffies, sfp->i2c_present_next)) {
+		if (sfp_module_present_i2c(sfp)) {
+			sfp->i2c_present = true;
+			sfp->i2c_present_nak = 0;
+		} else if (sfp->i2c_present &&
+			   ++sfp->i2c_present_nak >= R_PROBE_ABSENT) {
+			sfp->i2c_present = false;
+			sfp->i2c_present_nak = 0;
+		}
+		sfp->i2c_present_next = jiffies + T_PROBE_PRESENT;
+	}
+
+	if (sfp->i2c_present)
+		state |= SFP_F_PRESENT;
+
+	return state;
 }
 
 static int sfp_write(struct sfp *sfp, bool a2, u8 addr, void *buf, size_t len)
@@ -1726,7 +1947,11 @@ static void sfp_hwmon_remove(struct sfp *sfp)
 	if (!IS_ERR_OR_NULL(sfp->hwmon_dev)) {
 		hwmon_device_unregister(sfp->hwmon_dev);
 		sfp->hwmon_dev = NULL;
+	}
+
+	if (!IS_ERR_OR_NULL(sfp->hwmon_name)) {
 		kfree(sfp->hwmon_name);
+		sfp->hwmon_name = NULL;
 	}
 }
 
@@ -3019,7 +3244,7 @@ static struct sfp *sfp_alloc(struct device *dev)
 {
 	struct sfp *sfp;
 
-	sfp = kzalloc(sizeof(*sfp), GFP_KERNEL);
+	sfp = kzalloc_obj(*sfp);
 	if (!sfp)
 		return ERR_PTR(-ENOMEM);
 
@@ -3119,9 +3344,30 @@ static int sfp_probe(struct platform_device *pdev)
 	sfp->get_state = sfp_gpio_get_state;
 	sfp->set_state = sfp_gpio_set_state;
 
-	/* Modules that have no detect signal are always present */
-	if (!(sfp->gpio[GPIO_MODDEF0]))
-		sfp->get_state = sff_gpio_get_state;
+	/* An SFP cage with no MOD_DEF0 GPIO has no hardware presence signal.
+	 * Assuming the module is always present traps an empty cage in
+	 * MOD_ERROR and never detects hot-insertion, so derive presence from a
+	 * throttled I2C probe and poll for changes instead. sfp_i2c_configure()
+	 * has already set i2c_max_block_size; seed i2c_block_size so the
+	 * presence read does not issue a zero-length transfer before the first
+	 * EEPROM read. Seed i2c_present_next to jiffies so the first probe
+	 * happens immediately (a zero value would be in the past relative to
+	 * the negative INITIAL_JIFFIES at boot and delay detection).
+	 *
+	 * A soldered-down module (sff,sff) has no presence signal and is
+	 * genuinely always present, so it keeps the always-present behaviour;
+	 * the I2C probe is gated on the cage type advertising SFP_F_PRESENT.
+	 */
+	if (!sfp->gpio[GPIO_MODDEF0]) {
+		if (sff->gpios & SFP_F_PRESENT) {
+			sfp->get_state = sfp_i2c_get_state;
+			sfp->i2c_block_size = sfp->i2c_max_block_size;
+			sfp->i2c_present_next = jiffies;
+			sfp->need_poll = true;
+		} else {
+			sfp->get_state = sff_gpio_get_state;
+		}
+	}
 
 	device_property_read_u32(&pdev->dev, "maximum-power-milliwatt",
 				 &sfp->max_power_mW);

@@ -117,7 +117,7 @@ enclosure_register(struct device *dev, const char *name, int components,
 		   struct enclosure_component_callbacks *cb)
 {
 	struct enclosure_device *edev =
-		kzalloc(struct_size(edev, component, components), GFP_KERNEL);
+		kzalloc_flex(*edev, component, components);
 	int err, i;
 
 	BUG_ON(!cb);
@@ -184,8 +184,8 @@ EXPORT_SYMBOL_GPL(enclosure_unregister);
 
 static void enclosure_link_name(struct enclosure_component *cdev, char *name)
 {
-	strcpy(name, "enclosure_device:");
-	strcat(name, dev_name(&cdev->cdev));
+	snprintf(name, ENCLOSURE_NAME_SIZE, "enclosure_device:%s",
+		 dev_name(&cdev->cdev));
 }
 
 static void enclosure_remove_links(struct enclosure_component *cdev)

@@ -218,7 +218,7 @@ void radeon_atom_backlight_init(struct radeon_encoder *radeon_encoder,
 		return;
 	}
 
-	pdata = kmalloc(sizeof(struct radeon_backlight_privdata), GFP_KERNEL);
+	pdata = kmalloc_obj(struct radeon_backlight_privdata);
 	if (!pdata) {
 		DRM_ERROR("Memory allocation failed\n");
 		goto error;
@@ -1707,7 +1707,7 @@ radeon_atom_encoder_dpms_dig(struct drm_encoder *encoder, int mode)
 		if (ENCODER_MODE_IS_DP(atombios_get_encoder_mode(encoder)) && connector) {
 			/* DP_SET_POWER_D0 is set in radeon_dp_link_train */
 			radeon_dp_link_train(encoder, connector);
-			if (ASIC_IS_DCE4(rdev))
+			if (ASIC_IS_DCE4(rdev) || dmi_match(DMI_PRODUCT_NAME, "iMac11,1"))
 				atombios_dig_encoder_setup(encoder, ATOM_ENCODER_CMD_DP_VIDEO_ON, 0);
 		}
 		if (radeon_encoder->devices & (ATOM_DEVICE_LCD_SUPPORT)) {
@@ -2123,17 +2123,20 @@ int radeon_atom_pick_dig_encoder(struct drm_encoder *encoder, int fe_idx)
 	}
 
 	/*
-	 * On DCE32 any encoder can drive any block so usually just use crtc id,
-	 * but Apple thinks different at least on iMac10,1 and iMac11,2, so there use linkb,
-	 * otherwise the internal eDP panel will stay dark.
+	 * Apple routes the internal eDP panel through Link B of the DIG encoder
+	 * instead of Link A on the iMac10,1, iMac11,1 and iMac11,2.
+	 * Use linkb to avoid a dark display.
 	 */
-	if (ASIC_IS_DCE32(rdev)) {
-		if (dmi_match(DMI_PRODUCT_NAME, "iMac10,1") ||
-		    dmi_match(DMI_PRODUCT_NAME, "iMac11,2"))
-			enc_idx = (dig->linkb) ? 1 : 0;
-		else
-			enc_idx = radeon_crtc->crtc_id;
+	if (dmi_match(DMI_PRODUCT_NAME, "iMac10,1") ||
+	    dmi_match(DMI_PRODUCT_NAME, "iMac11,1") ||
+	    dmi_match(DMI_PRODUCT_NAME, "iMac11,2")) {
+		enc_idx = (dig->linkb) ? 1 : 0;
+		goto assigned;
+	}
 
+	/* on DCE32 and encoder can driver any block so just crtc id */
+	if (ASIC_IS_DCE32(rdev)) {
+		enc_idx = radeon_crtc->crtc_id;
 		goto assigned;
 	}
 
@@ -2625,7 +2628,7 @@ radeon_atombios_set_dac_info(struct radeon_encoder *radeon_encoder)
 {
 	struct drm_device *dev = radeon_encoder->base.dev;
 	struct radeon_device *rdev = dev->dev_private;
-	struct radeon_encoder_atom_dac *dac = kzalloc(sizeof(struct radeon_encoder_atom_dac), GFP_KERNEL);
+	struct radeon_encoder_atom_dac *dac = kzalloc_obj(struct radeon_encoder_atom_dac);
 
 	if (!dac)
 		return NULL;
@@ -2638,7 +2641,7 @@ static struct radeon_encoder_atom_dig *
 radeon_atombios_set_dig_info(struct radeon_encoder *radeon_encoder)
 {
 	int encoder_enum = (radeon_encoder->encoder_enum & ENUM_ID_MASK) >> ENUM_ID_SHIFT;
-	struct radeon_encoder_atom_dig *dig = kzalloc(sizeof(struct radeon_encoder_atom_dig), GFP_KERNEL);
+	struct radeon_encoder_atom_dig *dig = kzalloc_obj(struct radeon_encoder_atom_dig);
 
 	if (!dig)
 		return NULL;
@@ -2676,7 +2679,7 @@ radeon_add_atom_encoder(struct drm_device *dev,
 	}
 
 	/* add a new one */
-	radeon_encoder = kzalloc(sizeof(struct radeon_encoder), GFP_KERNEL);
+	radeon_encoder = kzalloc_obj(struct radeon_encoder);
 	if (!radeon_encoder)
 		return;
 

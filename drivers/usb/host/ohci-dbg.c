@@ -492,7 +492,7 @@ static ssize_t fill_periodic_buffer(struct debug_buffer *buf)
 	char			*next;
 	unsigned		i;
 
-	seen = kmalloc_array(DBG_SCHED_LIMIT, sizeof(*seen), GFP_ATOMIC);
+	seen = kmalloc_objs(*seen, DBG_SCHED_LIMIT, GFP_ATOMIC);
 	if (!seen)
 		return 0;
 	seen_count = 0;
@@ -667,7 +667,7 @@ static struct debug_buffer *alloc_buffer(struct ohci_hcd *ohci,
 {
 	struct debug_buffer *buf;
 
-	buf = kzalloc(sizeof(struct debug_buffer), GFP_KERNEL);
+	buf = kzalloc_obj(struct debug_buffer);
 
 	if (buf) {
 		buf->ohci = ohci;
@@ -683,7 +683,7 @@ static int fill_buffer(struct debug_buffer *buf)
 	int ret;
 
 	if (!buf->page)
-		buf->page = (char *)get_zeroed_page(GFP_KERNEL);
+		buf->page = kzalloc(PAGE_SIZE, GFP_KERNEL);
 
 	if (!buf->page) {
 		ret = -ENOMEM;
@@ -729,11 +729,8 @@ static int debug_close(struct inode *inode, struct file *file)
 {
 	struct debug_buffer *buf = file->private_data;
 
-	if (buf) {
-		if (buf->page)
-			free_page((unsigned long)buf->page);
-		kfree(buf);
-	}
+	kfree(buf->page);
+	kfree(buf);
 
 	return 0;
 }

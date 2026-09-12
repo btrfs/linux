@@ -622,7 +622,7 @@ static int pm8001_prep_sas_ha_init(struct Scsi_Host *shost,
 
 	sha->sas_phy = arr_phy;
 	sha->sas_port = arr_port;
-	sha->lldd_ha = kzalloc(sizeof(struct pm8001_hba_info), GFP_KERNEL);
+	sha->lldd_ha = kzalloc_obj(struct pm8001_hba_info);
 	if (!sha->lldd_ha)
 		goto exit_free1;
 
@@ -1029,8 +1029,8 @@ static u32 pm8001_request_msix(struct pm8001_hba_info *pm8001_ha)
 			&(pm8001_ha->irq_vector[i]));
 		if (rc) {
 			for (j = 0; j < i; j++) {
-				free_irq(pci_irq_vector(pm8001_ha->pdev, i),
-					&(pm8001_ha->irq_vector[i]));
+				free_irq(pci_irq_vector(pm8001_ha->pdev, j),
+					 &pm8001_ha->irq_vector[j]);
 			}
 			pci_free_irq_vectors(pm8001_ha->pdev);
 			break;
@@ -1148,7 +1148,7 @@ static int pm8001_pci_probe(struct pci_dev *pdev,
 		goto err_out_regions;
 	}
 	chip = &pm8001_chips[ent->driver_data];
-	sha = kzalloc(sizeof(struct sas_ha_struct), GFP_KERNEL);
+	sha = kzalloc_obj(struct sas_ha_struct);
 	if (!sha) {
 		rc = -ENOMEM;
 		goto err_out_free_host;
@@ -1264,7 +1264,7 @@ static int pm8001_init_ccb_tag(struct pm8001_hba_info *pm8001_ha)
 	/* Memory region for ccb_info*/
 	pm8001_ha->ccb_count = ccb_count;
 	pm8001_ha->ccb_info =
-		kcalloc(ccb_count, sizeof(struct pm8001_ccb_info), GFP_KERNEL);
+		kzalloc_objs(struct pm8001_ccb_info, ccb_count);
 	if (!pm8001_ha->ccb_info) {
 		pm8001_dbg(pm8001_ha, FAIL,
 			   "Unable to allocate memory for ccb\n");
@@ -1534,7 +1534,7 @@ static int __init pm8001_init(void)
 	if (pm8001_use_tasklet && !pm8001_use_msix)
 		pm8001_use_tasklet = false;
 
-	pm8001_wq = alloc_workqueue("pm80xx", 0, 0);
+	pm8001_wq = alloc_workqueue("pm80xx", WQ_PERCPU, 0);
 	if (!pm8001_wq)
 		goto err;
 

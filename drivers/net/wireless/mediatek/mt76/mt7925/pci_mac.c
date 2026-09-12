@@ -1,8 +1,9 @@
-// SPDX-License-Identifier: ISC
+// SPDX-License-Identifier: BSD-3-Clause-Clear
 /* Copyright (C) 2023 MediaTek Inc. */
 
 #include "mt7925.h"
 #include "../dma.h"
+#include "mcu.h"
 #include "mac.h"
 
 int mt7925e_tx_prepare_skb(struct mt76_dev *mdev, void *txwi_ptr,
@@ -77,7 +78,7 @@ int mt7925e_mac_reset(struct mt792x_dev *dev)
 	mt76_connac_free_pending_tx_skbs(&dev->pm, NULL);
 
 	mt76_wr(dev, dev->irq_map->host_irq_enable, 0);
-	mt76_wr(dev, MT_PCIE_MAC_INT_ENABLE, 0x0);
+	mt76_wr(dev, dev->pcie_reg->imask, 0x0);
 
 	set_bit(MT76_RESET, &dev->mphy.state);
 	set_bit(MT76_MCU_RESET, &dev->mphy.state);
@@ -118,8 +119,9 @@ int mt7925e_mac_reset(struct mt792x_dev *dev)
 
 	mt76_wr(dev, dev->irq_map->host_irq_enable,
 		dev->irq_map->tx.all_complete_mask |
-		MT_INT_RX_DONE_ALL | MT_INT_MCU_CMD);
-	mt76_wr(dev, MT_PCIE_MAC_INT_ENABLE, 0xff);
+		dev->irq_map->rx.all_complete_mask |
+		MT_INT_MCU_CMD);
+	mt76_wr(dev, dev->pcie_reg->imask, 0xff);
 
 	err = mt792xe_mcu_fw_pmctrl(dev);
 	if (err)
@@ -140,6 +142,12 @@ int mt7925e_mac_reset(struct mt792x_dev *dev)
 	err = mt7925_mac_init(dev);
 	if (err)
 		goto out;
+
+	if (is_mt7927(&dev->mt76)) {
+		err = mt7925_mcu_set_dbdc(&dev->mphy, true);
+		if (err)
+			goto out;
+	}
 
 	err = __mt7925_start(&dev->phy);
 out:

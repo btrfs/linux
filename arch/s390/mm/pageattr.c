@@ -16,13 +16,6 @@
 #include <asm/asm.h>
 #include <asm/set_memory.h>
 
-static inline unsigned long sske_frame(unsigned long addr, unsigned char skey)
-{
-	asm volatile(".insn rrf,0xb22b0000,%[skey],%[addr],1,0"
-		     : [addr] "+a" (addr) : [skey] "d" (skey));
-	return addr;
-}
-
 void __storage_key_init_range(unsigned long start, unsigned long end)
 {
 	unsigned long boundary, size;
@@ -78,10 +71,8 @@ static void pgt_set(unsigned long *old, unsigned long new, unsigned long addr,
 		}
 		table = (unsigned long *)((unsigned long)old & mask);
 		crdte(*old, new, table, dtt, addr, get_lowcore()->kernel_asce.val);
-	} else if (cpu_has_idte()) {
-		cspg(old, *old, new);
 	} else {
-		csp((unsigned int *)old + 1, *old, new);
+		cspg(old, *old, new);
 	}
 }
 
@@ -94,7 +85,7 @@ static int walk_pte_level(pmd_t *pmdp, unsigned long addr, unsigned long end,
 		return 0;
 	ptep = pte_offset_kernel(pmdp, addr);
 	do {
-		new = *ptep;
+		new = ptep_get(ptep);
 		if (pte_none(new))
 			return -EINVAL;
 		if (flags & SET_MEMORY_RO)
@@ -114,7 +105,6 @@ static int walk_pte_level(pmd_t *pmdp, unsigned long addr, unsigned long end,
 		pgt_set((unsigned long *)ptep, pte_val(new), addr, CRDTE_DTT_PAGE);
 		ptep++;
 		addr += PAGE_SIZE;
-		cond_resched();
 	} while (addr < end);
 	return 0;
 }
@@ -123,15 +113,16 @@ static int split_pmd_page(pmd_t *pmdp, unsigned long addr)
 {
 	unsigned long pte_addr, prot;
 	pte_t *pt_dir, *ptep;
-	pmd_t new;
+	pmd_t new, pmd;
 	int i, ro, nx;
 
 	pt_dir = vmem_pte_alloc();
 	if (!pt_dir)
 		return -ENOMEM;
-	pte_addr = pmd_pfn(*pmdp) << PAGE_SHIFT;
-	ro = !!(pmd_val(*pmdp) & _SEGMENT_ENTRY_PROTECT);
-	nx = !!(pmd_val(*pmdp) & _SEGMENT_ENTRY_NOEXEC);
+	pmd = pmdp_get(pmdp);
+	pte_addr = pmd_pfn(pmd) << PAGE_SHIFT;
+	ro = !!(pmd_val(pmd) & _SEGMENT_ENTRY_PROTECT);
+	nx = !!(pmd_val(pmd) & _SEGMENT_ENTRY_NOEXEC);
 	prot = pgprot_val(ro ? PAGE_KERNEL_RO : PAGE_KERNEL);
 	if (!nx)
 		prot &= ~_PAGE_NOEXEC;
@@ -151,7 +142,7 @@ static int split_pmd_page(pmd_t *pmdp, unsigned long addr)
 static void modify_pmd_page(pmd_t *pmdp, unsigned long addr,
 			    unsigned long flags)
 {
-	pmd_t new = *pmdp;
+	pmd_t new = pmdp_get(pmdp);
 
 	if (flags & SET_MEMORY_RO)
 		new = pmd_wrprotect(new);
@@ -174,16 +165,17 @@ static int walk_pmd_level(pud_t *pudp, unsigned long addr, unsigned long end,
 			  unsigned long flags)
 {
 	unsigned long next;
+	pmd_t *pmdp, pmd;
 	int need_split;
-	pmd_t *pmdp;
 	int rc = 0;
 
 	pmdp = pmd_offset(pudp, addr);
 	do {
-		if (pmd_none(*pmdp))
+		pmd = pmdp_get(pmdp);
+		if (pmd_none(pmd))
 			return -EINVAL;
 		next = pmd_addr_end(addr, end);
-		if (pmd_leaf(*pmdp)) {
+		if (pmd_leaf(pmd)) {
 			need_split  = !!(flags & SET_MEMORY_4K);
 			need_split |= !!(addr & ~PMD_MASK);
 			need_split |= !!(addr + PMD_SIZE > next);
@@ -201,24 +193,24 @@ static int walk_pmd_level(pud_t *pudp, unsigned long addr, unsigned long end,
 		}
 		pmdp++;
 		addr = next;
-		cond_resched();
 	} while (addr < end);
 	return rc;
 }
 
-static int split_pud_page(pud_t *pudp, unsigned long addr)
+int split_pud_page(pud_t *pudp, unsigned long addr)
 {
 	unsigned long pmd_addr, prot;
 	pmd_t *pm_dir, *pmdp;
-	pud_t new;
+	pud_t new, pud;
 	int i, ro, nx;
 
 	pm_dir = vmem_crst_alloc(_SEGMENT_ENTRY_EMPTY);
 	if (!pm_dir)
 		return -ENOMEM;
-	pmd_addr = pud_pfn(*pudp) << PAGE_SHIFT;
-	ro = !!(pud_val(*pudp) & _REGION_ENTRY_PROTECT);
-	nx = !!(pud_val(*pudp) & _REGION_ENTRY_NOEXEC);
+	pud = pudp_get(pudp);
+	pmd_addr = pud_pfn(pud) << PAGE_SHIFT;
+	ro = !!(pud_val(pud) & _REGION_ENTRY_PROTECT);
+	nx = !!(pud_val(pud) & _REGION_ENTRY_NOEXEC);
 	prot = pgprot_val(ro ? SEGMENT_KERNEL_RO : SEGMENT_KERNEL);
 	if (!nx)
 		prot &= ~_SEGMENT_ENTRY_NOEXEC;
@@ -238,7 +230,7 @@ static int split_pud_page(pud_t *pudp, unsigned long addr)
 static void modify_pud_page(pud_t *pudp, unsigned long addr,
 			    unsigned long flags)
 {
-	pud_t new = *pudp;
+	pud_t new = pudp_get(pudp);
 
 	if (flags & SET_MEMORY_RO)
 		new = pud_wrprotect(new);
@@ -261,16 +253,17 @@ static int walk_pud_level(p4d_t *p4d, unsigned long addr, unsigned long end,
 			  unsigned long flags)
 {
 	unsigned long next;
+	pud_t *pudp, pud;
 	int need_split;
-	pud_t *pudp;
 	int rc = 0;
 
 	pudp = pud_offset(p4d, addr);
 	do {
-		if (pud_none(*pudp))
+		pud = pudp_get(pudp);
+		if (pud_none(pud))
 			return -EINVAL;
 		next = pud_addr_end(addr, end);
-		if (pud_leaf(*pudp)) {
+		if (pud_leaf(pud)) {
 			need_split  = !!(flags & SET_MEMORY_4K);
 			need_split |= !!(addr & ~PUD_MASK);
 			need_split |= !!(addr + PUD_SIZE > next);
@@ -286,7 +279,6 @@ static int walk_pud_level(p4d_t *p4d, unsigned long addr, unsigned long end,
 		}
 		pudp++;
 		addr = next;
-		cond_resched();
 	} while (addr < end && !rc);
 	return rc;
 }
@@ -300,13 +292,12 @@ static int walk_p4d_level(pgd_t *pgd, unsigned long addr, unsigned long end,
 
 	p4dp = p4d_offset(pgd, addr);
 	do {
-		if (p4d_none(*p4dp))
+		if (p4d_none(p4dp_get(p4dp)))
 			return -EINVAL;
 		next = p4d_addr_end(addr, end);
 		rc = walk_pud_level(p4dp, addr, next, flags);
 		p4dp++;
 		addr = next;
-		cond_resched();
 	} while (addr < end && !rc);
 	return rc;
 }
@@ -322,13 +313,12 @@ static int change_page_attr(unsigned long addr, unsigned long end,
 
 	pgdp = pgd_offset_k(addr);
 	do {
-		if (pgd_none(*pgdp))
+		if (pgd_none(pgdp_get(pgdp)))
 			break;
 		next = pgd_addr_end(addr, end);
 		rc = walk_p4d_level(pgdp, addr, next, flags);
 		if (rc)
 			break;
-		cond_resched();
 	} while (pgdp++, addr = next, addr < end && !rc);
 	return rc;
 }
@@ -460,7 +450,8 @@ void __kernel_map_pages(struct page *page, int numpages, int enable)
 		nr = min(numpages - i, nr);
 		if (enable) {
 			for (j = 0; j < nr; j++) {
-				pte = clear_pte_bit(*ptep, __pgprot(_PAGE_INVALID));
+				pte = ptep_get(ptep);
+				pte = clear_pte_bit(pte, __pgprot(_PAGE_INVALID));
 				set_pte(ptep, pte);
 				address += PAGE_SIZE;
 				ptep++;

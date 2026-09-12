@@ -8,11 +8,12 @@
 #ifndef _LINUX_ACPI_H
 #define _LINUX_ACPI_H
 
+#include <linux/cleanup.h>
 #include <linux/errno.h>
 #include <linux/ioport.h>	/* for struct resource */
 #include <linux/resource_ext.h>
 #include <linux/device.h>
-#include <linux/mod_devicetable.h>
+#include <linux/device-id/acpi.h>
 #include <linux/property.h>
 #include <linux/uuid.h>
 #include <linux/node.h>
@@ -65,7 +66,7 @@ static inline struct fwnode_handle *acpi_alloc_fwnode_static(void)
 {
 	struct fwnode_handle *fwnode;
 
-	fwnode = kzalloc(sizeof(struct fwnode_handle), GFP_KERNEL);
+	fwnode = kzalloc_obj(struct fwnode_handle);
 	if (!fwnode)
 		return NULL;
 
@@ -93,6 +94,12 @@ static inline void acpi_preset_companion(struct device *dev,
 	ACPI_COMPANION_SET(dev, acpi_find_child_device(parent, addr, false));
 }
 
+static inline void acpi_device_clear_deps(struct device *dev)
+{
+	if (has_acpi_companion(dev))
+		acpi_dev_clear_dependencies(ACPI_COMPANION(dev));
+}
+
 static inline const char *acpi_dev_name(struct acpi_device *adev)
 {
 	return dev_name(&adev->dev);
@@ -106,6 +113,7 @@ enum acpi_irq_model_id {
 	ACPI_IRQ_MODEL_IOSAPIC,
 	ACPI_IRQ_MODEL_PLATFORM,
 	ACPI_IRQ_MODEL_GIC,
+	ACPI_IRQ_MODEL_GIC_V5,
 	ACPI_IRQ_MODEL_LPIC,
 	ACPI_IRQ_MODEL_RINTC,
 	ACPI_IRQ_MODEL_COUNT
@@ -221,6 +229,17 @@ void acpi_reserve_initial_tables (void);
 void acpi_table_init_complete (void);
 int acpi_table_init (void);
 
+static inline struct acpi_table_header *acpi_get_table_pointer(char *signature, u32 instance)
+{
+	struct acpi_table_header *table;
+	int status = acpi_get_table(signature, instance, &table);
+
+	if (ACPI_FAILURE(status))
+		return ERR_PTR(-ENOENT);
+	return table;
+}
+DEFINE_FREE(acpi_put_table, struct acpi_table_header *, if (!IS_ERR_OR_NULL(_T)) acpi_put_table(_T))
+
 int acpi_table_parse(char *id, acpi_tbl_table_handler handler);
 int __init_or_acpilib acpi_table_parse_entries(char *id,
 		unsigned long table_size, int entry_id,
@@ -302,6 +321,19 @@ static inline int acpi_processor_evaluate_cst(acpi_handle handle, u32 cpu,
 }
 #endif
 
+#ifdef CONFIG_ACPI_PROCESSOR_IDLE
+int acpi_processor_extract_lpi_info(acpi_handle pr_handle,
+				    struct acpi_processor_power *pr_power,
+				    bool strict);
+#else
+static inline int acpi_processor_extract_lpi_info(acpi_handle pr_handle,
+				    struct acpi_processor_power *pr_power,
+				    bool strict)
+{
+	return -ENODEV;
+}
+#endif
+
 #ifdef CONFIG_ACPI_HOTPLUG_CPU
 /* Arch dependent functions for cpu hotplug support */
 int acpi_map_cpu(acpi_handle handle, phys_cpuid_t physid, u32 acpi_id,
@@ -310,6 +342,17 @@ int acpi_unmap_cpu(int cpu);
 #endif /* CONFIG_ACPI_HOTPLUG_CPU */
 
 acpi_handle acpi_get_processor_handle(int cpu);
+
+/**
+ * acpi_get_cpu_uid() - Get ACPI Processor UID of from MADT table
+ * @cpu: Logical CPU number (0-based)
+ * @uid: Pointer to store ACPI Processor UID
+ *
+ * Return: 0 on success (ACPI Processor ID stored in *uid);
+ *         -EINVAL if CPU number is invalid or out of range;
+ *         -ENODEV if ACPI Processor UID for the CPU is not found.
+ */
+int acpi_get_cpu_uid(unsigned int cpu, u32 *uid);
 
 #ifdef CONFIG_ACPI_HOTPLUG_IOAPIC
 int acpi_get_ioapic_id(acpi_handle handle, u32 gsi_base, u64 *phys_addr);
@@ -336,9 +379,10 @@ int acpi_gsi_to_irq (u32 gsi, unsigned int *irq);
 int acpi_isa_irq_to_gsi (unsigned isa_irq, u32 *gsi);
 
 typedef struct fwnode_handle *(*acpi_gsi_domain_disp_fn)(u32);
+typedef acpi_handle (*acpi_gsi_handle_disp_fn)(u32);
 
 void acpi_set_irq_model(enum acpi_irq_model_id model,
-			acpi_gsi_domain_disp_fn fn);
+			acpi_gsi_domain_disp_fn fn, acpi_gsi_handle_disp_fn gsi_dep_fn);
 acpi_gsi_domain_disp_fn acpi_get_gsi_dispatcher(void);
 void acpi_set_gsi_to_irq_fallback(u32 (*)(u32));
 
@@ -347,6 +391,8 @@ struct irq_domain *acpi_irq_create_hierarchy(unsigned int flags,
 					     struct fwnode_handle *fwnode,
 					     const struct irq_domain_ops *ops,
 					     void *host_data);
+
+u32 acpi_irq_add_auto_dep(acpi_handle handle);
 
 #ifdef CONFIG_X86_IO_APIC
 extern int acpi_get_override_irq(u32 gsi, int *trigger, int *polarity);
@@ -424,6 +470,7 @@ extern char *wmi_get_acpi_device_uid(const char *guid);
 #define ACPI_VIDEO_OUTPUT_SWITCHING_DMI_VIDEO		0x0800
 
 extern char acpi_video_backlight_string[];
+extern bool acpi_dev_is_video_device(struct acpi_device *adev);
 extern long acpi_is_video_device(acpi_handle handle);
 
 extern void acpi_osi_setup(char *str);
@@ -755,7 +802,6 @@ int acpi_reconfig_notifier_unregister(struct notifier_block *nb);
 int acpi_gtdt_init(struct acpi_table_header *table, int *platform_timer_count);
 int acpi_gtdt_map_ppi(int type);
 bool acpi_gtdt_c3stop(int type);
-int acpi_arch_timer_mem_init(struct arch_timer_mem *timer_mem, int *timer_count);
 #endif
 
 #ifndef ACPI_HAVE_ARCH_SET_ROOT_POINTER
@@ -775,9 +821,19 @@ int acpi_get_local_u64_address(acpi_handle handle, u64 *addr);
 int acpi_get_local_address(acpi_handle handle, u32 *addr);
 const char *acpi_get_subsystem_id(acpi_handle handle);
 
+struct device *acpi_bus_find_device_by_name(const char *name);
+
 #ifdef CONFIG_ACPI_MRRM
 int acpi_mrrm_max_mem_region(void);
 #endif
+
+#define ACPI_CMOS_RTC_IDS	\
+	{ "PNP0B00", },		\
+	{ "PNP0B01", },		\
+	{ "PNP0B02", },		\
+	{ "", }
+
+extern bool cmos_rtc_platform_device_present;
 
 #else	/* !CONFIG_ACPI */
 
@@ -875,6 +931,8 @@ static inline void acpi_preset_companion(struct device *dev,
 {
 }
 
+static inline void acpi_device_clear_deps(struct device *dev) {}
+
 static inline const char *acpi_dev_name(struct acpi_device *adev)
 {
 	return NULL;
@@ -926,6 +984,12 @@ static inline int acpi_table_parse(char *id,
 				int (*handler)(struct acpi_table_header *))
 {
 	return -ENODEV;
+}
+
+static inline int acpi_get_cpu_uid(unsigned int cpu, u32 *uid)
+{
+	*uid = cpu;
+	return 0;
 }
 
 static inline int acpi_nvs_register(__u64 start, __u64 size)
@@ -1069,6 +1133,11 @@ static inline const char *acpi_get_subsystem_id(acpi_handle handle)
 	return ERR_PTR(-ENODEV);
 }
 
+static inline struct device *acpi_bus_find_device_by_name(const char *name)
+{
+	return NULL;
+}
+
 static inline int acpi_register_wakeup_handler(int wake_irq,
 	bool (*wakeup)(void *context), void *context)
 {
@@ -1103,6 +1172,8 @@ static inline int acpi_mrrm_max_mem_region(void)
 {
 	return 1;
 }
+
+#define cmos_rtc_platform_device_present	false
 
 #endif	/* !CONFIG_ACPI */
 
@@ -1146,12 +1217,7 @@ struct acpi_s2idle_dev_ops {
 #if defined(CONFIG_SUSPEND) && defined(CONFIG_X86)
 int acpi_register_lps0_dev(struct acpi_s2idle_dev_ops *arg);
 void acpi_unregister_lps0_dev(struct acpi_s2idle_dev_ops *arg);
-int acpi_get_lps0_constraint(struct acpi_device *adev);
 #else /* CONFIG_SUSPEND && CONFIG_X86 */
-static inline int acpi_get_lps0_constraint(struct device *dev)
-{
-	return ACPI_STATE_UNKNOWN;
-}
 static inline int acpi_register_lps0_dev(struct acpi_s2idle_dev_ops *arg)
 {
 	return -ENODEV;
@@ -1349,9 +1415,6 @@ acpi_data_add_props(struct acpi_device_data *data, const guid_t *guid,
 int acpi_node_prop_get(const struct fwnode_handle *fwnode, const char *propname,
 		       void **valptr);
 
-struct fwnode_handle *acpi_get_next_subnode(const struct fwnode_handle *fwnode,
-					    struct fwnode_handle *child);
-
 struct acpi_probe_entry;
 typedef bool (*acpi_probe_entry_validate_subtbl)(struct acpi_subtable_header *,
 						 struct acpi_probe_entry *);
@@ -1451,13 +1514,6 @@ static inline int acpi_node_prop_get(const struct fwnode_handle *fwnode,
 }
 
 static inline struct fwnode_handle *
-acpi_get_next_subnode(const struct fwnode_handle *fwnode,
-		      struct fwnode_handle *child)
-{
-	return NULL;
-}
-
-static inline struct fwnode_handle *
 acpi_graph_get_next_endpoint(const struct fwnode_handle *fwnode,
 			     struct fwnode_handle *prev)
 {
@@ -1509,11 +1565,18 @@ static inline int acpi_parse_spcr(bool enable_earlycon, bool enable_console)
 
 #if IS_ENABLED(CONFIG_ACPI_GENERIC_GSI)
 int acpi_irq_get(acpi_handle handle, unsigned int index, struct resource *res);
+const struct cpumask *acpi_irq_get_affinity(acpi_handle handle,
+					    unsigned int index);
 #else
 static inline
 int acpi_irq_get(acpi_handle handle, unsigned int index, struct resource *res)
 {
 	return -EINVAL;
+}
+static inline const struct cpumask *acpi_irq_get_affinity(acpi_handle handle,
+							  unsigned int index)
+{
+	return NULL;
 }
 #endif
 
@@ -1541,6 +1604,9 @@ int find_acpi_cpu_topology(unsigned int cpu, int level);
 int find_acpi_cpu_topology_cluster(unsigned int cpu);
 int find_acpi_cpu_topology_package(unsigned int cpu);
 int find_acpi_cpu_topology_hetero_id(unsigned int cpu);
+void acpi_pptt_get_cpus_from_container(u32 acpi_cpu_id, cpumask_t *cpus);
+int find_acpi_cache_level_from_id(u32 cache_id);
+int acpi_pptt_get_cpumask_from_cache_id(u32 cache_id, cpumask_t *cpus);
 #else
 static inline int acpi_pptt_cpu_is_thread(unsigned int cpu)
 {
@@ -1561,6 +1627,17 @@ static inline int find_acpi_cpu_topology_package(unsigned int cpu)
 static inline int find_acpi_cpu_topology_hetero_id(unsigned int cpu)
 {
 	return -EINVAL;
+}
+static inline void acpi_pptt_get_cpus_from_container(u32 acpi_cpu_id,
+						     cpumask_t *cpus) { }
+static inline int find_acpi_cache_level_from_id(u32 cache_id)
+{
+	return -ENOENT;
+}
+static inline int acpi_pptt_get_cpumask_from_cache_id(u32 cache_id,
+						      cpumask_t *cpus)
+{
+	return -ENOENT;
 }
 #endif
 

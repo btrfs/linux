@@ -40,7 +40,7 @@
 #define CTL_GET_TMP		0x11	/*
 					 * send: byte 1 is channel, rest zero
 					 * rcv:  returns temp for channel in centi-degree celsius
-					 * in bytes 1 and 2
+					 * in bytes 1 and 2 as a two's complement value
 					 * returns 0x11 in byte 0 if no sensor is connected
 					 */
 #define CTL_GET_VOLT		0x12	/*
@@ -90,10 +90,10 @@ struct ccp_device {
 	u8 *cmd_buffer;
 	u8 *buffer;
 	int buffer_recv_size; /* number of received bytes in buffer */
-	int target[6];
+	int target[NUM_FANS];
 	DECLARE_BITMAP(temp_cnct, NUM_TEMP_SENSORS);
 	DECLARE_BITMAP(fan_cnct, NUM_FANS);
-	char fan_label[6][LABEL_LENGTH];
+	char fan_label[NUM_FANS][LABEL_LENGTH];
 	u8 firmware_ver[3];
 	u8 bootloader_ver[2];
 };
@@ -258,7 +258,7 @@ static int ccp_read(struct device *dev, enum hwmon_sensor_types type,
 			ret = get_data(ccp, CTL_GET_TMP, channel, true);
 			if (ret < 0)
 				return ret;
-			*val = ret * 10;
+			*val = (s16)ret * 10;
 			return 0;
 		default:
 			break;
@@ -566,21 +566,18 @@ static int bootloader_show(struct seq_file *seqf, void *unused)
 }
 DEFINE_SHOW_ATTRIBUTE(bootloader);
 
-static void ccp_debugfs_init(struct ccp_device *ccp)
+static void ccp_debugfs_init(struct ccp_device *ccp, bool fw_valid, bool bl_valid)
 {
 	char name[32];
-	int ret;
 
 	scnprintf(name, sizeof(name), "corsaircpro-%s", dev_name(&ccp->hdev->dev));
 	ccp->debugfs = debugfs_create_dir(name, NULL);
 
-	ret = get_fw_version(ccp);
-	if (!ret)
+	if (fw_valid)
 		debugfs_create_file("firmware_version", 0444,
 				    ccp->debugfs, ccp, &firmware_fops);
 
-	ret = get_bl_version(ccp);
-	if (!ret)
+	if (bl_valid)
 		debugfs_create_file("bootloader_version", 0444,
 				    ccp->debugfs, ccp, &bootloader_fops);
 }
@@ -588,6 +585,7 @@ static void ccp_debugfs_init(struct ccp_device *ccp)
 static int ccp_probe(struct hid_device *hdev, const struct hid_device_id *id)
 {
 	struct ccp_device *ccp;
+	bool fw_valid, bl_valid;
 	int ret;
 
 	ccp = devm_kzalloc(&hdev->dev, sizeof(*ccp), GFP_KERNEL);
@@ -632,19 +630,30 @@ static int ccp_probe(struct hid_device *hdev, const struct hid_device_id *id)
 	if (ret)
 		goto out_hw_close;
 
-	ccp_debugfs_init(ccp);
+	/*
+	 * Query the versions before registering the hwmon device: they send
+	 * USB commands without holding ccp->mutex, which is only safe while
+	 * nothing else can call send_usb_cmd().
+	 */
+	fw_valid = !get_fw_version(ccp);
+	bl_valid = !get_bl_version(ccp);
 
 	ccp->hwmon_dev = hwmon_device_register_with_info(&hdev->dev, "corsaircpro",
 							 ccp, &ccp_chip_info, NULL);
 	if (IS_ERR(ccp->hwmon_dev)) {
 		ret = PTR_ERR(ccp->hwmon_dev);
-		goto out_hw_close;
+		goto out_debugfs_remove;
 	}
+
+	ccp_debugfs_init(ccp, fw_valid, bl_valid);
 
 	return 0;
 
+out_debugfs_remove:
+	debugfs_remove_recursive(ccp->debugfs);
 out_hw_close:
 	hid_hw_close(hdev);
+	hid_device_io_stop(hdev);
 out_hw_stop:
 	hid_hw_stop(hdev);
 	return ret;

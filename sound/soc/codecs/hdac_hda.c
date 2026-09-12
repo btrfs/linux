@@ -405,8 +405,6 @@ static int hdac_hda_codec_probe(struct snd_soc_component *component)
 {
 	struct hdac_hda_priv *hda_pvt =
 			snd_soc_component_get_drvdata(component);
-	struct snd_soc_dapm_context *dapm =
-			snd_soc_component_get_dapm(component);
 	struct hdac_device *hdev = &hda_pvt->codec->core;
 	struct hda_codec *hcodec = hda_pvt->codec;
 	struct hda_codec_driver *driver = hda_codec_to_driver(hcodec);
@@ -439,7 +437,7 @@ static int hdac_hda_codec_probe(struct snd_soc_component *component)
 
 #ifdef CONFIG_SND_HDA_PATCH_LOADER
 	if (loadable_patch[hda_pvt->dev_index] && *loadable_patch[hda_pvt->dev_index]) {
-		const struct firmware *fw;
+		const struct firmware *fw __free(firmware) = NULL;
 
 		dev_info(&hdev->dev, "Applying patch firmware '%s'\n",
 			 loadable_patch[hda_pvt->dev_index]);
@@ -453,7 +451,6 @@ static int hdac_hda_codec_probe(struct snd_soc_component *component)
 				dev_err(&hdev->dev, "%s: failed to load hda patch %d\n", __func__, ret);
 				goto error_no_pm;
 			}
-			release_firmware(fw);
 		}
 	}
 #endif
@@ -470,7 +467,7 @@ static int hdac_hda_codec_probe(struct snd_soc_component *component)
 	 */
 	pm_runtime_get_noresume(&hdev->dev);
 
-	hcodec->bus->card = dapm->card->snd_card;
+	hcodec->bus->card = component->card->snd_card;
 
 	ret = snd_hda_codec_set_name(hcodec, hcodec->preset->name);
 	if (ret < 0) {
@@ -644,10 +641,8 @@ static int hdac_hda_dev_probe(struct hdac_device *hdev)
 						&hdac_hda_codec, hdac_hda_dais,
 						ARRAY_SIZE(hdac_hda_dais));
 
-	if (ret < 0) {
+	if (ret < 0)
 		dev_err(&hdev->dev, "%s: failed to register HDA codec %d\n", __func__, ret);
-		return ret;
-	}
 
 	snd_hdac_ext_bus_link_put(hdev->bus, hlink);
 

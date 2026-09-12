@@ -54,7 +54,7 @@
 #include <sys/syscall.h>
 #include <poll.h>
 
-#include "../kselftest_harness.h"
+#include "kselftest_harness.h"
 #include "../clone3/clone3_selftests.h"
 
 /* Attempt to de-conflict with the selftests tree. */
@@ -167,6 +167,12 @@ struct seccomp_data {
 #ifndef __NR_uretprobe
 # if defined(__x86_64__)
 #  define __NR_uretprobe 335
+# endif
+#endif
+
+#ifndef __NR_uprobe
+# if defined(__x86_64__)
+#  define __NR_uprobe 336
 # endif
 #endif
 
@@ -5172,7 +5178,8 @@ FIXTURE_SETUP(UPROBE)
 		ASSERT_GE(bit, 0);
 	}
 
-	offset = get_uprobe_offset(variant->uretprobe ? probed_uretprobe : probed_uprobe);
+	offset = get_uprobe_offset(variant->uretprobe ? (void *)probed_uretprobe
+						      : (void *)probed_uprobe);
 	ASSERT_GE(offset, 0);
 
 	if (variant->uretprobe)

@@ -9,7 +9,6 @@
 #include <linux/gpio/consumer.h>
 #include <linux/iopoll.h>
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/of_irq.h>
 #include <linux/pm_runtime.h>
 #include <linux/soundwire/sdw.h>
@@ -433,19 +432,16 @@ static const struct reg_sequence cs42l42_soft_reboot_seq[] = {
 static int cs42l42_sdw_handle_unattach(struct cs42l42_private *cs42l42)
 {
 	struct sdw_slave *peripheral = cs42l42->sdw_peripheral;
+	int ret;
 
 	if (!peripheral->unattach_request)
 		return 0;
 
 	/* Cannot access registers until master re-attaches. */
 	dev_dbg(&peripheral->dev, "Wait for initialization_complete\n");
-	if (!wait_for_completion_timeout(&peripheral->initialization_complete,
-					 msecs_to_jiffies(5000))) {
-		dev_err(&peripheral->dev, "initialization_complete timed out\n");
-		return -ETIMEDOUT;
-	}
-
-	peripheral->unattach_request = 0;
+	ret = sdw_slave_wait_for_init(peripheral, 5000);
+	if (ret)
+		return ret;
 
 	/*
 	 * After a bus reset there must be a reconfiguration reset to
@@ -485,10 +481,20 @@ static int cs42l42_sdw_runtime_resume(struct device *dev)
 	regcache_cache_only(cs42l42->regmap, false);
 
 	/* Sync LATCH_TO_VP first so the VP domain registers sync correctly */
-	regcache_sync_region(cs42l42->regmap, CS42L42_MIC_DET_CTL1, CS42L42_MIC_DET_CTL1);
-	regcache_sync(cs42l42->regmap);
+	ret = regcache_sync_region(cs42l42->regmap, CS42L42_MIC_DET_CTL1, CS42L42_MIC_DET_CTL1);
+	if (ret)
+		goto err_sync;
+
+	ret = regcache_sync(cs42l42->regmap);
+	if (ret)
+		goto err_sync;
 
 	return 0;
+
+err_sync:
+	regcache_cache_only(cs42l42->regmap, true);
+	regcache_mark_dirty(cs42l42->regmap);
+	return ret;
 }
 
 static int cs42l42_sdw_resume(struct device *dev)
@@ -585,14 +591,12 @@ static int cs42l42_sdw_probe(struct sdw_slave *peripheral, const struct sdw_devi
 	return 0;
 }
 
-static int cs42l42_sdw_remove(struct sdw_slave *peripheral)
+static void cs42l42_sdw_remove(struct sdw_slave *peripheral)
 {
 	struct cs42l42_private *cs42l42 = dev_get_drvdata(&peripheral->dev);
 
 	cs42l42_common_remove(cs42l42);
 	pm_runtime_disable(cs42l42->dev);
-
-	return 0;
 }
 
 static const struct dev_pm_ops cs42l42_sdw_pm = {

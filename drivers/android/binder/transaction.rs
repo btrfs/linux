@@ -2,26 +2,133 @@
 
 // Copyright (C) 2025 Google LLC.
 
-use core::sync::atomic::{AtomicBool, Ordering};
 use kernel::{
+    net::netlink::GENLMSG_DEFAULT_SIZE,
     prelude::*,
     seq_file::SeqFile,
     seq_print,
+    sync::atomic::{ordering::Relaxed, Atomic},
     sync::{Arc, SpinLock},
-    task::Kuid,
+    task::{Kuid, Pid},
     time::{Instant, Monotonic},
     types::ScopeGuard,
+    uapi,
 };
 
 use crate::{
     allocation::{Allocation, TranslatedFds},
     defs::*,
     error::{BinderError, BinderResult},
+    netlink::Report,
     node::{Node, NodeRef},
     process::{Process, ProcessInner},
     ptr_align,
     thread::{PushWorkRes, Thread},
     BinderReturnWriter, DArc, DLArc, DTRWrap, DeliverToRead,
+};
+
+kernel::impl_flags!(
+    /// Represents multiple transaction flags.
+    #[derive(Debug, Clone, Default, Copy, PartialEq, Eq, Zeroable)]
+    pub struct TransactionFlags(u32);
+
+    /// Represents a single transaction flag.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum TransactionFlag {
+        OneWay = TF_ONE_WAY,
+        AcceptFds = TF_ACCEPT_FDS,
+        ClearBuf = TF_CLEAR_BUF,
+        UpdateTxn = TF_UPDATE_TXN,
+    }
+);
+
+impl TransactionFlags {
+    /// Creates a `TransactionFlags` from a raw `u32` value.
+    pub(crate) fn from_bits(bits: u32) -> Self {
+        Self(bits)
+    }
+
+    /// Checks if the Oneway flag is set.
+    pub(crate) fn is_oneway(self) -> bool {
+        self.contains(TransactionFlag::OneWay)
+    }
+}
+
+#[derive(Zeroable)]
+pub(crate) struct TransactionInfo {
+    pub(crate) from_pid: Pid,
+    pub(crate) from_tid: Pid,
+    pub(crate) to_pid: Pid,
+    pub(crate) to_tid: Pid,
+    pub(crate) code: u32,
+    pub(crate) flags: TransactionFlags,
+    pub(crate) data_ptr: UserPtr,
+    pub(crate) data_size: usize,
+    pub(crate) offsets_ptr: UserPtr,
+    pub(crate) offsets_size: usize,
+    pub(crate) buffers_size: usize,
+    pub(crate) target_handle: u32,
+    pub(crate) errno: i32,
+    pub(crate) reply: u32,
+    pub(crate) oneway_spam_suspect: bool,
+    pub(crate) is_reply: bool,
+    pub(crate) debug_id: usize,
+}
+
+impl TransactionInfo {
+    #[inline]
+    pub(crate) fn is_oneway(&self) -> bool {
+        self.flags.is_oneway()
+    }
+
+    pub(crate) fn report_netlink(&self, reply: u32, ctx: &crate::Context) {
+        if let Err(err) = self.report_netlink_inner(reply, ctx) {
+            pr_warn!(
+                "{}:{} netlink report failed: {err:?}\n",
+                self.from_pid,
+                self.from_tid
+            );
+        }
+    }
+
+    fn report_netlink_inner(&self, reply: u32, ctx: &crate::Context) -> kernel::error::Result {
+        if !Report::has_listeners() {
+            return Ok(());
+        }
+        let mut report = Report::new(GENLMSG_DEFAULT_SIZE, 0, 0, GFP_KERNEL)?;
+
+        report.error(reply)?;
+        report.context(&ctx.name)?;
+        report.from_pid(self.from_pid as u32)?;
+        report.from_tid(self.from_tid as u32)?;
+        if self.to_pid != 0 {
+            report.to_pid(self.to_pid as u32)?;
+        }
+        if self.to_tid != 0 {
+            report.to_tid(self.to_tid as u32)?;
+        }
+
+        if self.is_reply {
+            report.is_reply()?;
+        }
+        report.flags(u32::from(self.flags))?;
+        report.code(self.code)?;
+        report.data_size(self.data_size as u32)?;
+
+        report.multicast(0, GFP_KERNEL)?;
+        Ok(())
+    }
+}
+
+use core::mem::offset_of;
+use kernel::bindings::rb_transaction_layout;
+pub(crate) const TRANSACTION_LAYOUT: rb_transaction_layout = rb_transaction_layout {
+    debug_id: offset_of!(Transaction, debug_id),
+    code: offset_of!(Transaction, code),
+    flags: offset_of!(Transaction, flags),
+    from_thread: offset_of!(Transaction, from),
+    to_proc: offset_of!(Transaction, to),
+    target_node: offset_of!(Transaction, target_node),
 };
 
 #[pin_data(PinnedDrop)]
@@ -33,15 +140,14 @@ pub(crate) struct Transaction {
     pub(crate) to: Arc<Process>,
     #[pin]
     allocation: SpinLock<Option<Allocation>>,
-    is_outstanding: AtomicBool,
+    is_outstanding: Atomic<bool>,
     code: u32,
-    pub(crate) flags: u32,
+    pub(crate) flags: TransactionFlags,
     data_size: usize,
     offsets_size: usize,
     data_address: usize,
     sender_euid: Kuid,
     txn_security_ctx_off: Option<usize>,
-    pub(crate) oneway_spam_detected: bool,
     start_time: Instant<Monotonic>,
 }
 
@@ -54,18 +160,16 @@ impl Transaction {
         node_ref: NodeRef,
         from_parent: Option<DArc<Transaction>>,
         from: &Arc<Thread>,
-        tr: &BinderTransactionDataSg,
+        info: &mut TransactionInfo,
     ) -> BinderResult<DLArc<Self>> {
-        let debug_id = super::next_debug_id();
-        let trd = &tr.transaction_data;
         let allow_fds = node_ref.node.flags & FLAT_BINDER_FLAG_ACCEPTS_FDS != 0;
         let txn_security_ctx = node_ref.node.flags & FLAT_BINDER_FLAG_TXN_SECURITY_CTX != 0;
         let mut txn_security_ctx_off = if txn_security_ctx { Some(0) } else { None };
         let to = node_ref.node.owner.clone();
         let mut alloc = match from.copy_transaction_data(
             to.clone(),
-            tr,
-            debug_id,
+            info,
+            info.debug_id,
             allow_fds,
             txn_security_ctx_off.as_mut(),
         ) {
@@ -77,15 +181,14 @@ impl Transaction {
                 return Err(err);
             }
         };
-        let oneway_spam_detected = alloc.oneway_spam_detected;
-        if trd.flags & TF_ONE_WAY != 0 {
+        if info.is_oneway() {
             if from_parent.is_some() {
                 pr_warn!("Oneway transaction should not be in a transaction stack.");
                 return Err(EINVAL.into());
             }
             alloc.set_info_oneway_node(node_ref.node.clone());
         }
-        if trd.flags & TF_CLEAR_BUF != 0 {
+        if info.flags.contains(TransactionFlag::ClearBuf) {
             alloc.set_info_clear_on_drop();
         }
         let target_node = node_ref.node.clone();
@@ -93,21 +196,20 @@ impl Transaction {
         let data_address = alloc.ptr;
 
         Ok(DTRWrap::arc_pin_init(pin_init!(Transaction {
-            debug_id,
+            debug_id: info.debug_id,
             target_node: Some(target_node),
             from_parent,
-            sender_euid: from.process.task.euid(),
+            sender_euid: Kuid::current_euid(),
             from: from.clone(),
             to,
-            code: trd.code,
-            flags: trd.flags,
-            data_size: trd.data_size as _,
-            offsets_size: trd.offsets_size as _,
+            code: info.code,
+            flags: info.flags,
+            data_size: info.data_size,
+            offsets_size: info.offsets_size,
             data_address,
             allocation <- kernel::new_spinlock!(Some(alloc.success()), "Transaction::new"),
-            is_outstanding: AtomicBool::new(false),
+            is_outstanding: Atomic::new(false),
             txn_security_ctx_off,
-            oneway_spam_detected,
             start_time: Instant::now(),
         }))?)
     }
@@ -115,39 +217,35 @@ impl Transaction {
     pub(crate) fn new_reply(
         from: &Arc<Thread>,
         to: Arc<Process>,
-        tr: &BinderTransactionDataSg,
+        info: &mut TransactionInfo,
         allow_fds: bool,
     ) -> BinderResult<DLArc<Self>> {
-        let debug_id = super::next_debug_id();
-        let trd = &tr.transaction_data;
-        let mut alloc = match from.copy_transaction_data(to.clone(), tr, debug_id, allow_fds, None)
-        {
-            Ok(alloc) => alloc,
-            Err(err) => {
-                pr_warn!("Failure in copy_transaction_data: {:?}", err);
-                return Err(err);
-            }
-        };
-        let oneway_spam_detected = alloc.oneway_spam_detected;
-        if trd.flags & TF_CLEAR_BUF != 0 {
+        let mut alloc =
+            match from.copy_transaction_data(to.clone(), info, info.debug_id, allow_fds, None) {
+                Ok(alloc) => alloc,
+                Err(err) => {
+                    pr_warn!("Failure in copy_transaction_data: {:?}", err);
+                    return Err(err);
+                }
+            };
+        if info.flags.contains(TransactionFlag::ClearBuf) {
             alloc.set_info_clear_on_drop();
         }
         Ok(DTRWrap::arc_pin_init(pin_init!(Transaction {
-            debug_id,
+            debug_id: info.debug_id,
             target_node: None,
             from_parent: None,
-            sender_euid: from.process.task.euid(),
+            sender_euid: Kuid::current_euid(),
             from: from.clone(),
             to,
-            code: trd.code,
-            flags: trd.flags,
-            data_size: trd.data_size as _,
-            offsets_size: trd.offsets_size as _,
+            code: info.code,
+            flags: info.flags,
+            data_size: info.data_size,
+            offsets_size: info.offsets_size,
             data_address: alloc.ptr,
             allocation <- kernel::new_spinlock!(Some(alloc.success()), "Transaction::new"),
-            is_outstanding: AtomicBool::new(false),
+            is_outstanding: Atomic::new(false),
             txn_security_ctx_off: None,
-            oneway_spam_detected,
             start_time: Instant::now(),
         }))?)
     }
@@ -163,7 +261,7 @@ impl Transaction {
             self.from.id,
             self.to.task.pid(),
             self.code,
-            self.flags,
+            u32::from(self.flags),
             self.start_time.elapsed().as_millis(),
         );
         if let Some(target_node) = &self.target_node {
@@ -215,8 +313,8 @@ impl Transaction {
 
     pub(crate) fn set_outstanding(&self, to_process: &mut ProcessInner) {
         // No race because this method is only called once.
-        if !self.is_outstanding.load(Ordering::Relaxed) {
-            self.is_outstanding.store(true, Ordering::Relaxed);
+        if !self.is_outstanding.load(Relaxed) {
+            self.is_outstanding.store(true, Relaxed);
             to_process.add_outstanding_txn();
         }
     }
@@ -227,8 +325,8 @@ impl Transaction {
         // destructor, which is guaranteed to not race with any other operations on the
         // transaction. It also cannot race with `set_outstanding`, since submission happens
         // before delivery.
-        if self.is_outstanding.load(Ordering::Relaxed) {
-            self.is_outstanding.store(false, Ordering::Relaxed);
+        if self.is_outstanding.load(Relaxed) {
+            self.is_outstanding.store(false, Relaxed);
             self.to.drop_outstanding_txn();
         }
     }
@@ -237,11 +335,12 @@ impl Transaction {
     /// stack, otherwise uses the destination process.
     ///
     /// Not used for replies.
-    pub(crate) fn submit(self: DLArc<Self>) -> BinderResult {
+    pub(crate) fn submit(self: DLArc<Self>, info: &mut TransactionInfo) -> BinderResult {
         // Defined before `process_inner` so that the destructor runs after releasing the lock.
-        let mut _t_outdated;
+        let _t_outdated;
+        let _oneway_node;
 
-        let oneway = self.flags & TF_ONE_WAY != 0;
+        let oneway = self.flags.is_oneway();
         let process = self.to.clone();
         let mut process_inner = process.inner.lock();
 
@@ -249,12 +348,21 @@ impl Transaction {
 
         if oneway {
             if let Some(target_node) = self.target_node.clone() {
+                crate::trace::trace_transaction(false, &self, None);
                 if process_inner.is_frozen.is_frozen() {
                     process_inner.async_recv = true;
-                    if self.flags & TF_UPDATE_TXN != 0 {
+                    if self.flags.contains(TransactionFlag::UpdateTxn) {
                         if let Some(t_outdated) =
                             target_node.take_outdated_transaction(&self, &mut process_inner)
                         {
+                            let mut alloc_guard = t_outdated.allocation.lock();
+                            if let Some(alloc) = (*alloc_guard).as_mut() {
+                                // Take the oneway node to prevent `Allocation::drop` from calling
+                                // `pending_oneway_finished()`, which would be incorrect as this
+                                // transaction is not being submitted.
+                                _oneway_node = alloc.take_oneway_node();
+                            }
+                            drop(alloc_guard);
                             // Save the transaction to be dropped after locks are released.
                             _t_outdated = t_outdated;
                         }
@@ -286,12 +394,19 @@ impl Transaction {
         }
 
         let res = if let Some(thread) = self.find_target_thread() {
+            info.to_tid = thread.id;
+            crate::trace::trace_transaction(false, &self, Some(&thread.task));
             match thread.push_work(self) {
                 PushWorkRes::Ok => Ok(()),
+                PushWorkRes::OkNotifyPoll => {
+                    process.notify_poll(true);
+                    Ok(())
+                }
                 PushWorkRes::FailedDead(me) => Err((BinderError::new_dead(), me)),
             }
         } else {
-            process_inner.push_work(self)
+            crate::trace::trace_transaction(false, &self, None);
+            process_inner.push_work(&process, self)
         };
         drop(process_inner);
 
@@ -311,7 +426,8 @@ impl Transaction {
             return false;
         }
 
-        if self.flags & old.flags & (TF_ONE_WAY | TF_UPDATE_TXN) != (TF_ONE_WAY | TF_UPDATE_TXN) {
+        let required = TransactionFlag::OneWay | TransactionFlag::UpdateTxn;
+        if !(self.flags.contains_all(required) && old.flags.contains_all(required)) {
             return false;
         }
 
@@ -348,9 +464,9 @@ impl DeliverToRead for Transaction {
         writer: &mut BinderReturnWriter<'_>,
     ) -> Result<bool> {
         let send_failed_reply = ScopeGuard::new(|| {
-            if self.target_node.is_some() && self.flags & TF_ONE_WAY == 0 {
+            if self.target_node.is_some() && !self.flags.is_oneway() {
                 let reply = Err(BR_FAILED_REPLY);
-                self.from.deliver_reply(reply, &self);
+                self.from.deliver_reply(reply, &self, None);
             }
             self.drop_outstanding_txn();
         });
@@ -360,6 +476,14 @@ impl DeliverToRead for Transaction {
         } else {
             // On failure to process the list, we send a reply back to the sender and ignore the
             // transaction on the recipient.
+            binder_debug!(
+                FailedTransaction,
+                "transaction {} to {} failed, fd fixups failed, size {}-{}",
+                self.debug_id,
+                self.to.task.pid(),
+                self.data_size,
+                self.offsets_size
+            );
             return Ok(true);
         };
 
@@ -367,20 +491,21 @@ impl DeliverToRead for Transaction {
         let tr = tr_sec.tr_data();
         if let Some(target_node) = &self.target_node {
             let (ptr, cookie) = target_node.get_id();
-            tr.target.ptr = ptr as _;
-            tr.cookie = cookie as _;
+            tr.target.ptr = ptr as uapi::binder_uintptr_t;
+            tr.cookie = cookie as uapi::binder_uintptr_t;
         };
         tr.code = self.code;
-        tr.flags = self.flags;
-        tr.data_size = self.data_size as _;
-        tr.data.ptr.buffer = self.data_address as _;
-        tr.offsets_size = self.offsets_size as _;
+        tr.flags = u32::from(self.flags);
+        tr.data_size = self.data_size as uapi::binder_size_t;
+        tr.data.ptr.buffer = self.data_address as uapi::binder_uintptr_t;
+        tr.offsets_size = self.offsets_size as uapi::binder_size_t;
         if tr.offsets_size > 0 {
-            tr.data.ptr.offsets = (self.data_address + ptr_align(self.data_size).unwrap()) as _;
+            tr.data.ptr.offsets =
+                (self.data_address + ptr_align(self.data_size).unwrap()) as uapi::binder_uintptr_t;
         }
         tr.sender_euid = self.sender_euid.into_uid_in_current_ns();
         tr.sender_pid = 0;
-        if self.target_node.is_some() && self.flags & TF_ONE_WAY == 0 {
+        if self.target_node.is_some() && !self.flags.is_oneway() {
             // Not a reply and not one-way.
             tr.sender_pid = self.from.process.pid_in_current_ns();
         }
@@ -416,6 +541,8 @@ impl DeliverToRead for Transaction {
 
         self.drop_outstanding_txn();
 
+        crate::trace::trace_transaction_received(&self);
+
         // When this is not a reply and not a oneway transaction, update `current_transaction`. If
         // it's a reply, `current_transaction` has already been updated appropriately.
         if self.target_node.is_some() && tr_sec.transaction_data.flags & TF_ONE_WAY == 0 {
@@ -430,16 +557,23 @@ impl DeliverToRead for Transaction {
         drop(allocation);
 
         // If this is not a reply or oneway transaction, then send a dead reply.
-        if self.target_node.is_some() && self.flags & TF_ONE_WAY == 0 {
+        if self.target_node.is_some() && !self.flags.is_oneway() {
             let reply = Err(BR_DEAD_REPLY);
-            self.from.deliver_reply(reply, &self);
+            self.from.deliver_reply(reply, &self, None);
+        } else {
+            binder_debug!(
+                pid = self.to.task.pid(),
+                DeadTransaction,
+                "undelivered transaction {}, process died",
+                self.debug_id
+            );
         }
 
         self.drop_outstanding_txn();
     }
 
     fn should_sync_wakeup(&self) -> bool {
-        self.flags & TF_ONE_WAY == 0
+        !self.flags.is_oneway()
     }
 
     fn debug_print(&self, m: &SeqFile, _prefix: &str, tprefix: &str) -> Result<()> {

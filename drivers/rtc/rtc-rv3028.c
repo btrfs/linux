@@ -816,7 +816,7 @@ static int rv3028_clkout_register_clk(struct rv3028_data *rv3028,
 {
 	int ret;
 	struct clk *clk;
-	struct clk_init_data init;
+	struct clk_init_data init = {};
 	struct device_node *node = client->dev.of_node;
 
 	ret = regmap_update_bits(rv3028->regmap, RV3028_STATUS,
@@ -1022,8 +1022,6 @@ static int rv3028_probe(struct i2c_client *client)
 	devm_rtc_nvmem_register(rv3028->rtc, &nvmem_cfg);
 	eeprom_cfg.priv = rv3028;
 	devm_rtc_nvmem_register(rv3028->rtc, &eeprom_cfg);
-
-	rv3028->rtc->max_user_freq = 1;
 
 #ifdef CONFIG_COMMON_CLK
 	rv3028_clkout_register_clk(rv3028, client);

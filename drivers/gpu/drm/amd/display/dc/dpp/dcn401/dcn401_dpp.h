@@ -1,4 +1,5 @@
-/* Copyright 2023 Advanced Micro Devices, Inc.
+/* SPDX-License-Identifier: MIT */
+/* Copyright 2023-2026 Advanced Micro Devices, Inc.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a
  * copy of this software and associated documentation files (the "Software"),
@@ -41,6 +42,7 @@
 	TF_SF(CM0_CM_BIAS_Y_G_CB_B, CM_BIAS_CB_B, mask_sh),\
 	TF_SF(CM0_CM_MEM_PWR_CTRL, GAMCOR_MEM_PWR_DIS, mask_sh),\
 	TF_SF(CM0_CM_MEM_PWR_CTRL, GAMCOR_MEM_PWR_FORCE, mask_sh),\
+	TF_SF(CM0_CM_MEM_PWR_CTRL, GAMCOR_MEM_PWR_DIS, mask_sh),\
 	TF_SF(CNVC_CFG0_PRE_DEGAM, PRE_DEGAM_MODE, mask_sh),\
 	TF_SF(CNVC_CFG0_PRE_DEGAM, PRE_DEGAM_SELECT, mask_sh),\
 	TF_SF(CM0_CM_GAMCOR_CONTROL, CM_GAMCOR_MODE, mask_sh),\
@@ -208,6 +210,7 @@
 	TF_SF(CM_CUR0_CURSOR0_CONTROL, CUR0_ROM_EN, mask_sh),\
 	TF_SF(DSCL0_OBUF_MEM_PWR_CTRL, OBUF_MEM_PWR_FORCE, mask_sh),\
 	TF_SF(DSCL0_DSCL_MEM_PWR_CTRL, LUT_MEM_PWR_FORCE, mask_sh),\
+	TF_SF(DSCL0_DSCL_MEM_PWR_CTRL, LUT_MEM_PWR_DIS, mask_sh),\
 	TF_SF(DSCL0_DSCL_MEM_PWR_STATUS, LUT_MEM_PWR_STATE, mask_sh),\
 	TF_SF(DSCL0_DSCL_SC_MODE, SCL_SC_MATRIX_MODE, mask_sh),\
 	TF_SF(DSCL0_DSCL_SC_MODE, SCL_SC_LTONL_EN, mask_sh),\
@@ -336,6 +339,9 @@
 	TF_SF(DSCL0_DSCL_SC_MATRIX_C2C3, SCL_SC_MATRIX_C2, mask_sh),\
 	TF_SF(DSCL0_DSCL_SC_MATRIX_C2C3, SCL_SC_MATRIX_C3, mask_sh),\
 	TF_SF(DSCL0_ISHARP_DELTA_CTRL, ISHARP_DELTA_LUT_HOST_SELECT, mask_sh),\
+	TF_SF(DSCL0_ISHARP_DELTA_LUT_MEM_PWR_CTRL, ISHARP_DELTA_LUT_MEM_PWR_DIS, mask_sh),\
+	TF_SF(DSCL0_ISHARP_DELTA_LUT_MEM_PWR_CTRL, ISHARP_DELTA_LUT_MEM_PWR_FORCE, mask_sh),\
+	TF_SF(DSCL0_ISHARP_DELTA_LUT_MEM_PWR_CTRL, ISHARP_DELTA_LUT_MEM_PWR_STATE, mask_sh),\
 	TF_SF(DSCL0_ISHARP_DELTA_DATA, ISHARP_DELTA_DATA, mask_sh),\
 	TF_SF(DSCL0_ISHARP_DELTA_INDEX, ISHARP_DELTA_INDEX, mask_sh),\
 	TF_SF(DSCL0_ISHARP_MODE, ISHARP_EN, mask_sh),\
@@ -558,6 +564,9 @@
 	type ISHARP_DELTA_LUT_SELECT;	\
 	type ISHARP_DELTA_LUT_SELECT_CURRENT;	\
 	type ISHARP_DELTA_LUT_HOST_SELECT;	\
+	type ISHARP_DELTA_LUT_MEM_PWR_DIS;	\
+	type ISHARP_DELTA_LUT_MEM_PWR_FORCE;\
+	type ISHARP_DELTA_LUT_MEM_PWR_STATE;\
 	type ISHARP_DELTA_DATA;	\
 	type ISHARP_DELTA_INDEX; \
 	type ISHARP_NLDELTA_SCLIP_EN_P;	\
@@ -629,6 +638,7 @@
 	uint32_t DSCL_SC_MATRIX_C0C1; \
 	uint32_t DSCL_SC_MATRIX_C2C3; \
 	uint32_t ISHARP_MODE; \
+	uint32_t ISHARP_DELTA_LUT_MEM_PWR_CTRL; \
 	uint32_t ISHARP_NOISEDET_THRESHOLD; \
 	uint32_t ISHARP_NOISE_GAIN_PWL; \
 	uint32_t ISHARP_LBA_PWL_SEG0; \
@@ -644,6 +654,8 @@
 
 struct dcn401_dpp_registers {
 	DPP_REG_VARIABLE_LIST_DCN401;
+	uint32_t ALPHA_2BIT_LUT01;
+	uint32_t ALPHA_2BIT_LUT23;
 };
 
 struct dcn401_dpp_shift {
@@ -736,5 +748,46 @@ void dpp401_set_cursor_matrix(
 	struct dpp *dpp_base,
 	enum dc_color_space color_space,
 	struct dc_csc_transform cursor_csc_color_matrix);
+
+enum dcn401_dscl_mode_sel dpp401_dscl_get_dscl_mode(
+	struct dpp *dpp_base,
+	const struct scaler_data *data,
+	bool dbg_always_scale);
+
+void dpp401_power_on_dscl(
+	struct dpp *dpp_base,
+	bool power_on);
+
+void dpp401_dscl_set_recout(
+	struct dcn401_dpp *dpp,
+	const struct rect *recout);
+
+enum lb_memory_config dpp401_dscl_find_lb_memory_config(
+	struct dcn401_dpp *dpp,
+	const struct scaler_data *scl_data);
+
+void dpp401_dscl_program_isharp(
+	struct dpp *dpp_base,
+	const struct scaler_data *scl_data,
+	bool program_isharp_1dlut,
+	bool *bs_coeffs_updated);
+
+void dpp401_dscl_set_isharp_filter(
+	struct dcn401_dpp *dpp,
+	const uint32_t *filter);
+
+void dpp401_dscl_set_scl_filter(
+	struct dcn401_dpp *dpp,
+	const struct scaler_data *scl_data,
+	bool chroma_coef_mode,
+	bool force_coeffs_update);
+
+void dpp401_dscl_disable_easf(
+	struct dpp *dpp_base,
+	const struct scaler_data *scl_data);
+
+void dpp401_dscl_program_easf(
+	struct dpp *dpp_base,
+	const struct scaler_data *scl_data);
 
 #endif /* __DCN401_DPP_H__ */

@@ -42,7 +42,7 @@ static struct sk_buff *dequeue_func(struct codel_vars *vars, void *ctx)
 	struct sk_buff *skb = __qdisc_dequeue_head(&sch->q);
 
 	if (skb) {
-		sch->qstats.backlog -= qdisc_pkt_len(skb);
+		qstats_backlog_sub(sch, qdisc_pkt_len(skb));
 		prefetch(&skb->end); /* we'll need skb_shinfo() */
 	}
 	return skb;
@@ -52,11 +52,11 @@ static void drop_func(struct sk_buff *skb, void *ctx)
 {
 	struct Qdisc *sch = ctx;
 
-	kfree_skb_reason(skb, SKB_DROP_REASON_QDISC_CONGESTED);
+	qdisc_dequeue_drop(sch, skb, QDISC_DROP_CONGESTED);
 	qdisc_qstats_drop(sch);
 }
 
-static struct sk_buff *codel_qdisc_dequeue(struct Qdisc *sch)
+static struct sk_buff *__codel_qdisc_dequeue(struct Qdisc *sch)
 {
 	struct codel_sched_data *q = qdisc_priv(sch);
 	struct sk_buff *skb;
@@ -65,13 +65,51 @@ static struct sk_buff *codel_qdisc_dequeue(struct Qdisc *sch)
 			    &q->stats, qdisc_pkt_len, codel_get_enqueue_time,
 			    drop_func, dequeue_func);
 
+	if (skb)
+		qdisc_bstats_update(sch, skb);
+	return skb;
+}
+
+static void codel_dequeue_drop(struct Qdisc *sch)
+{
+	struct codel_sched_data *q = qdisc_priv(sch);
+
 	if (q->stats.drop_count) {
-		qdisc_tree_reduce_backlog(sch, q->stats.drop_count, q->stats.drop_len);
+		qdisc_tree_reduce_backlog(sch, q->stats.drop_count,
+					  q->stats.drop_len);
 		q->stats.drop_count = 0;
 		q->stats.drop_len = 0;
 	}
-	if (skb)
-		qdisc_bstats_update(sch, skb);
+}
+
+static struct sk_buff *codel_qdisc_dequeue(struct Qdisc *sch)
+{
+	struct sk_buff *skb;
+
+	skb = __codel_qdisc_dequeue(sch);
+
+	codel_dequeue_drop(sch);
+
+	return skb;
+}
+
+static struct sk_buff *codel_peek(struct Qdisc *sch)
+{
+	struct sk_buff *skb = skb_peek(&sch->gso_skb);
+
+	if (!skb) {
+		skb = __codel_qdisc_dequeue(sch);
+
+		if (skb) {
+			__skb_queue_head(&sch->gso_skb, skb);
+			/* it's still part of the queue */
+			qdisc_qstats_backlog_inc(sch, skb);
+			sch->q.qlen++;
+		}
+
+		codel_dequeue_drop(sch);
+	}
+
 	return skb;
 }
 
@@ -85,9 +123,8 @@ static int codel_qdisc_enqueue(struct sk_buff *skb, struct Qdisc *sch,
 		return qdisc_enqueue_tail(skb, sch);
 	}
 	q = qdisc_priv(sch);
-	q->drop_overlimit++;
-	return qdisc_drop_reason(skb, sch, to_free,
-				 SKB_DROP_REASON_QDISC_OVERLIMIT);
+	WRITE_ONCE(q->drop_overlimit, q->drop_overlimit + 1);
+	return qdisc_drop_reason(skb, sch, to_free, QDISC_DROP_OVERLIMIT);
 }
 
 static const struct nla_policy codel_policy[TCA_CODEL_MAX + 1] = {
@@ -168,7 +205,7 @@ static int codel_init(struct Qdisc *sch, struct nlattr *opt,
 	codel_params_init(&q->params);
 	codel_vars_init(&q->vars);
 	codel_stats_init(&q->stats);
-	q->params.mtu = psched_mtu(qdisc_dev(sch));
+	q->params.mtu = clamp_t(u32, psched_mtu(qdisc_dev(sch)), 256, 1 << 20);
 
 	if (opt) {
 		int err = codel_change(sch, opt, extack);
@@ -181,6 +218,8 @@ static int codel_init(struct Qdisc *sch, struct nlattr *opt,
 		sch->flags |= TCQ_F_CAN_BYPASS;
 	else
 		sch->flags &= ~TCQ_F_CAN_BYPASS;
+
+	sch->flags |= TCQ_F_DEQUEUE_DROPS;
 
 	return 0;
 }
@@ -220,18 +259,18 @@ static int codel_dump_stats(struct Qdisc *sch, struct gnet_dump *d)
 {
 	const struct codel_sched_data *q = qdisc_priv(sch);
 	struct tc_codel_xstats st = {
-		.maxpacket	= q->stats.maxpacket,
-		.count		= q->vars.count,
-		.lastcount	= q->vars.lastcount,
-		.drop_overlimit = q->drop_overlimit,
-		.ldelay		= codel_time_to_us(q->vars.ldelay),
-		.dropping	= q->vars.dropping,
-		.ecn_mark	= q->stats.ecn_mark,
-		.ce_mark	= q->stats.ce_mark,
+		.maxpacket	= READ_ONCE(q->stats.maxpacket),
+		.count		= READ_ONCE(q->vars.count),
+		.lastcount	= READ_ONCE(q->vars.lastcount),
+		.drop_overlimit = READ_ONCE(q->drop_overlimit),
+		.ldelay		= codel_time_to_us(READ_ONCE(q->vars.ldelay)),
+		.dropping	= READ_ONCE(q->vars.dropping),
+		.ecn_mark	= READ_ONCE(q->stats.ecn_mark),
+		.ce_mark	= READ_ONCE(q->stats.ce_mark),
 	};
 
-	if (q->vars.dropping) {
-		codel_tdiff_t delta = q->vars.drop_next - codel_get_time();
+	if (st.dropping) {
+		codel_tdiff_t delta = READ_ONCE(q->vars.drop_next) - codel_get_time();
 
 		if (delta >= 0)
 			st.drop_next = codel_time_to_us(delta);
@@ -256,7 +295,7 @@ static struct Qdisc_ops codel_qdisc_ops __read_mostly = {
 
 	.enqueue	=	codel_qdisc_enqueue,
 	.dequeue	=	codel_qdisc_dequeue,
-	.peek		=	qdisc_peek_dequeued,
+	.peek		=	codel_peek,
 	.init		=	codel_init,
 	.reset		=	codel_reset,
 	.change 	=	codel_change,

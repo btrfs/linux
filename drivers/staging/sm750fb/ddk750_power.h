@@ -24,18 +24,8 @@ void sm750_set_current_gate(unsigned int gate);
 void sm750_enable_2d_engine(unsigned int enable);
 
 /*
- * This function enable/disable the DMA Engine
- */
-void sm750_enable_dma(unsigned int enable);
-
-/*
  * This function enable/disable the GPIO Engine
  */
 void sm750_enable_gpio(unsigned int enable);
-
-/*
- * This function enable/disable the I2C Engine
- */
-void sm750_enable_i2c(unsigned int enable);
 
 #endif

@@ -77,20 +77,27 @@ static inline char *offstr(struct section *sec, unsigned long offset)
 #define WARN_INSN(insn, format, ...)					\
 ({									\
 	struct instruction *_insn = (insn);				\
-	if (!_insn->sym || !_insn->sym->warned)				\
+	if (!insn_sym(_insn) || !insn_sym(_insn)->warned)	{	\
 		WARN_FUNC(_insn->sec, _insn->offset, format,		\
 			  ##__VA_ARGS__);				\
-	if (_insn->sym)							\
-		_insn->sym->warned = 1;					\
+		BT_INSN(_insn, "");					\
+	}								\
+	if (insn_sym(_insn))						\
+		insn_sym(_insn)->warned = 1;				\
 })
 
 #define BT_INSN(insn, format, ...)				\
 ({								\
 	if (opts.verbose || opts.backtrace) {			\
-		struct instruction *_insn = (insn);		\
-		char *_str = offstr(_insn->sec, _insn->offset); \
-		WARN("  %s: " format, _str, ##__VA_ARGS__);	\
-		free(_str);					\
+		struct instruction *__insn = (insn);		\
+		char *_str = offstr(__insn->sec, __insn->offset); \
+		const char *_istr = objtool_disas_insn(__insn);	\
+		int _len;					\
+		_len = snprintf(NULL, 0, "  %s: " format,  _str, ##__VA_ARGS__);	\
+		_len = (_len < 50) ? 50 - _len : 0;		\
+		WARN("  %s: " format "  %*s%s", _str, ##__VA_ARGS__, _len, "", _istr); \
+		free(_str);						\
+		__insn->trace = 1;				\
 	}							\
 })
 
@@ -100,6 +107,62 @@ static inline char *offstr(struct section *sec, unsigned long offset)
 #define ERROR_ELF(format, ...) __WARN_ELF(ERROR_STR, format, ##__VA_ARGS__)
 #define ERROR_GLIBC(format, ...) __WARN_GLIBC(ERROR_STR, format, ##__VA_ARGS__)
 #define ERROR_FUNC(sec, offset, format, ...) __WARN_FUNC(ERROR_STR, sec, offset, format, ##__VA_ARGS__)
-#define ERROR_INSN(insn, format, ...) WARN_FUNC(insn->sec, insn->offset, format, ##__VA_ARGS__)
+#define ERROR_INSN(insn, format, ...) ERROR_FUNC(insn->sec, insn->offset, format, ##__VA_ARGS__)
+
+extern bool debug, debug_correlate, debug_clone;
+extern int indent;
+
+static inline void unindent(int *unused) { indent--; }
+
+/*
+ * Clang prior to 17 is being silly and considers many __cleanup() variables
+ * as unused (because they are, their sole purpose is to go out of scope).
+ *
+ * https://github.com/llvm/llvm-project/commit/877210faa447f4cc7db87812f8ed80e398fedd61
+ */
+#undef __cleanup
+#define __cleanup(func) __maybe_unused __attribute__((__cleanup__(func)))
+
+#define __dbg(format, ...)						\
+	fprintf(stderr,							\
+		"DEBUG: %s%s" format "\n",				\
+		objname ?: "",						\
+		objname ? ": " : "",					\
+		##__VA_ARGS__)
+
+#define dbg_checksum_insn(func, insn, checksum)				\
+({									\
+	if (unlikely(func->debug_checksum)) {				\
+		char *insn_off = offstr(insn->sec, insn->offset);	\
+		__dbg("checksum: %s(): %s %016llx",			\
+		      func->name, insn_off, (unsigned long long)checksum);\
+		free(insn_off);						\
+	}								\
+})
+
+#define dbg_checksum_object(sym, offset, what, checksum)		\
+({									\
+	if (unlikely(sym->debug_checksum))				\
+		__dbg("checksum: %s+0x%lx: %s %016llx",			\
+		      sym->name, offset, what,				\
+		      (unsigned long long)checksum);			\
+})
+
+#define dbg_correlate(args...)						\
+({									\
+	if (unlikely(debug_correlate))					\
+		__dbg(args);						\
+})
+
+#define __dbg_clone(format, ...)					\
+({									\
+	if (unlikely(debug_clone))					\
+		__dbg("%*s" format, indent * 8, "", ##__VA_ARGS__);	\
+})
+
+#define dbg_clone(args...)						\
+	int __cleanup(unindent) __dummy_##__COUNTER__;			\
+	__dbg_clone(args);						\
+	indent++
 
 #endif /* _WARN_H */

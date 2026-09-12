@@ -52,6 +52,18 @@
 		status = "disabled";
 	};
 
+	imx8mm-cm4 {
+		compatible = "fsl,imx8mm-cm4";
+		clocks = <&clk IMX8MM_CLK_M4_DIV>;
+		mbox-names = "tx", "rx", "rxdb";
+		mboxes = <&mu 0 1
+			  &mu 1 1
+			  &mu 3 1>;
+		memory-region = <&vdev0buffer>, <&vdev0vring0>, <&vdev0vring1>,
+				<&rsc_table>;
+		syscon = <&src>;
+	};
+
 	/* Carrier Board Supplies */
 	reg_1p8v: regulator-1p8v {
 		compatible = "regulator-fixed";
@@ -164,6 +176,27 @@
 
 		/* Use the kernel configuration settings instead */
 		/delete-node/ linux,cma;
+
+		vdev0vring0: vdev0vring0@55000000 {
+			reg = <0 0x55000000 0 0x8000>;
+			no-map;
+		};
+
+		vdev0vring1: vdev0vring1@55008000 {
+			reg = <0 0x55008000 0 0x8000>;
+			no-map;
+		};
+
+		rsc_table: rsc-table@550ff000 {
+			reg = <0 0x550ff000 0 0x1000>;
+			no-map;
+		};
+
+		vdev0buffer: vdev0buffer@55400000 {
+			compatible = "shared-dma-pool";
+			reg = <0 0x55400000 0 0x100000>;
+			no-map;
+		};
 	};
 };
 
@@ -735,7 +768,7 @@
 /* Verdin UART_2 */
 &uart3 {
 	pinctrl-names = "default";
-	pinctrl-0 = <&pinctrl_uart3>;
+	pinctrl-0 = <&pinctrl_uart3>, <&pinctrl_uart3_cts>, <&pinctrl_uart3_rts>;
 	uart-has-rtscts;
 };
 
@@ -1144,12 +1177,20 @@
 			<MX8MM_IOMUXC_SAI3_TXFS_UART2_DCE_RX		0x146>;	/* SODIMM 129 */
 	};
 
+	pinctrl_uart3_cts: uart3ctsgrp {
+		fsl,pins =
+			<MX8MM_IOMUXC_ECSPI1_SS0_UART3_DCE_RTS_B	0x146>;	/* SODIMM 143 */
+	};
+
+	pinctrl_uart3_rts: uart3rtsgrp {
+		fsl,pins =
+			<MX8MM_IOMUXC_ECSPI1_MISO_UART3_DCE_CTS_B	0x146>;	/* SODIMM 141 */
+	};
+
 	pinctrl_uart3: uart3grp {
 		fsl,pins =
-			<MX8MM_IOMUXC_ECSPI1_MISO_UART3_DCE_CTS_B	0x146>,	/* SODIMM 141 */
 			<MX8MM_IOMUXC_ECSPI1_MOSI_UART3_DCE_TX		0x146>,	/* SODIMM 139 */
-			<MX8MM_IOMUXC_ECSPI1_SCLK_UART3_DCE_RX		0x146>,	/* SODIMM 137 */
-			<MX8MM_IOMUXC_ECSPI1_SS0_UART3_DCE_RTS_B	0x146>;	/* SODIMM 143 */
+			<MX8MM_IOMUXC_ECSPI1_SCLK_UART3_DCE_RX		0x146>;	/* SODIMM 137 */
 	};
 
 	pinctrl_uart4: uart4grp {

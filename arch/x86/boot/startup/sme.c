@@ -24,6 +24,7 @@
 #undef CONFIG_PARAVIRT
 #undef CONFIG_PARAVIRT_XXL
 #undef CONFIG_PARAVIRT_SPINLOCKS
+#undef CONFIG_ARCH_HAS_LAZY_MMU_MODE
 
 /*
  * This code runs before CPU feature bits are set. By default, the
@@ -42,6 +43,7 @@
 #include <asm/init.h>
 #include <asm/setup.h>
 #include <asm/sections.h>
+#include <asm/cpuid/api.h>
 #include <asm/coco.h>
 #include <asm/sev.h>
 

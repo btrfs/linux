@@ -61,14 +61,16 @@ struct netfs_inode {
 #if IS_ENABLED(CONFIG_FSCACHE)
 	struct fscache_cookie	*cache;
 #endif
-	struct mutex		wb_lock;	/* Writeback serialisation */
-	loff_t			remote_i_size;	/* Size of the remote file */
-	loff_t			zero_point;	/* Size after which we assume there's no data
+	struct list_head	wb_queue;	/* Queue of processes wanting to do writeback */
+	loff_t			_remote_i_size;	/* Size of the remote file */
+	loff_t			_zero_point;	/* Size after which we assume there's no data
 						 * on the server */
+	spinlock_t		lock;		/* Lock covering wb_queue */
 	atomic_t		io_count;	/* Number of outstanding reqs */
 	unsigned long		flags;
 #define NETFS_ICTX_ODIRECT	0		/* The file has DIO in progress */
 #define NETFS_ICTX_UNBUFFERED	1		/* I/O should not use the pagecache */
+#define NETFS_ICTX_WB_LOCK	2		/* Writeback serialisation lock */
 #define NETFS_ICTX_MODIFIED_ATTR 3		/* Indicate change in mtime/ctime */
 #define NETFS_ICTX_SINGLE_NO_UPLOAD 4		/* Monolithic payload, cache but no upload */
 };
@@ -140,7 +142,6 @@ struct netfs_io_stream {
 	void (*issue_write)(struct netfs_io_subrequest *subreq);
 	/* Collection tracking */
 	struct list_head	subrequests;	/* Contributory I/O operations */
-	struct netfs_io_subrequest *front;	/* Op being collected */
 	unsigned long long	collected_to;	/* Position we've collected results to */
 	size_t			transferred;	/* The amount transferred from this stream */
 	unsigned short		error;		/* Aggregate error for the stream */
@@ -190,7 +191,6 @@ struct netfs_io_subrequest {
 #define NETFS_SREQ_COPY_TO_CACHE	0	/* Set if should copy the data to the cache */
 #define NETFS_SREQ_CLEAR_TAIL		1	/* Set if the rest of the read should be cleared */
 #define NETFS_SREQ_MADE_PROGRESS	4	/* Set if we transferred at least some data */
-#define NETFS_SREQ_ONDEMAND		5	/* Set if it's from on-demand read mode */
 #define NETFS_SREQ_BOUNDARY		6	/* Set if ends on hard boundary (eg. ceph object) */
 #define NETFS_SREQ_HIT_EOF		7	/* Set if short due to EOF */
 #define NETFS_SREQ_IN_PROGRESS		8	/* Unlocked when the subrequest completes */
@@ -246,6 +246,7 @@ struct netfs_io_request {
 	unsigned long long	submitted;	/* Amount submitted for I/O so far */
 	unsigned long long	len;		/* Length of the request */
 	size_t			transferred;	/* Amount to be indicated as transferred */
+	size_t			progress_at;	/* Report read progress when hit this much read */
 	long			error;		/* 0 or error that occurred */
 	unsigned long long	i_size;		/* Size of the file */
 	unsigned long long	start;		/* Start position */
@@ -253,7 +254,8 @@ struct netfs_io_request {
 	unsigned long long	collected_to;	/* Point we've collected to */
 	unsigned long long	cleaned_to;	/* Position we've cleaned folios to */
 	unsigned long long	abandon_to;	/* Position to abandon folios to */
-	pgoff_t			no_unlock_folio; /* Don't unlock this folio after read */
+	const struct folio	*no_unlock_folio; /* Don't unlock this folio after read */
+	gfp_t			gfp;		/* GFP flags to use */
 	unsigned int		direct_bv_count; /* Number of elements in direct_bv[] */
 	unsigned int		debug_id;
 	unsigned int		rsize;		/* Maximum read size (0 for none) */
@@ -261,7 +263,6 @@ struct netfs_io_request {
 	atomic_t		subreq_counter;	/* Next subreq->debug_index */
 	unsigned int		nr_group_rel;	/* Number of refs to release on ->group */
 	spinlock_t		lock;		/* Lock for queuing subreqs */
-	unsigned char		front_folio_order; /* Order (size) of front folio */
 	enum netfs_io_origin	origin;		/* Origin of the request */
 	bool			direct_bv_unpin; /* T if direct_bv[] must be unpinned */
 	refcount_t		ref;
@@ -274,9 +275,10 @@ struct netfs_io_request {
 #define NETFS_RREQ_SHORT_TRANSFER	5	/* Set if we have a short transfer */
 #define NETFS_RREQ_OFFLOAD_COLLECTION	8	/* Offload collection to workqueue */
 #define NETFS_RREQ_NO_UNLOCK_FOLIO	9	/* Don't unlock no_unlock_folio on completion */
-#define NETFS_RREQ_FOLIO_COPY_TO_CACHE	10	/* Copy current folio to cache from read */
+#define NETFS_RREQ_CANCEL_CACHING	10	/* Set to cancel caching */
 #define NETFS_RREQ_UPLOAD_TO_SERVER	11	/* Need to write to the server */
 #define NETFS_RREQ_USE_IO_ITER		12	/* Use ->io_iter rather than ->i_pages */
+#define NETFS_RREQ_NEED_PUT_RA_REFS	17	/* Need to put the folio refs RA gave us */
 #define NETFS_RREQ_USE_PGPRIV2		31	/* [DEPRECATED] Use PG_private_2 to mark
 						 * write to cache on read */
 	const struct netfs_request_ops *netfs_ops;
@@ -372,14 +374,6 @@ struct netfs_cache_ops {
 			     loff_t *_start, size_t *_len, size_t upper_len,
 			     loff_t i_size, bool no_space_allocated_yet);
 
-	/* Prepare an on-demand read operation, shortening it to a cached/uncached
-	 * boundary as appropriate.
-	 */
-	enum netfs_io_source (*prepare_ondemand_read)(struct netfs_cache_resources *cres,
-						      loff_t start, size_t *_len,
-						      loff_t i_size,
-						      unsigned long *_flags, ino_t ino);
-
 	/* Query the occupancy of the cache in a region, returning where the
 	 * next chunk of data starts and how long it is.
 	 */
@@ -463,6 +457,10 @@ int netfs_alloc_folioq_buffer(struct address_space *mapping,
 			      size_t *_cur_size, ssize_t size, gfp_t gfp);
 void netfs_free_folioq_buffer(struct folio_queue *fq);
 
+/* Writeback exclusion API. */
+bool netfs_wb_begin(struct netfs_inode *ictx, bool nowait);
+void netfs_wb_end(struct netfs_inode *ictx);
+
 /**
  * netfs_inode - Get the netfs inode context from the inode
  * @inode: The inode to query
@@ -473,6 +471,254 @@ void netfs_free_folioq_buffer(struct folio_queue *fq);
 static inline struct netfs_inode *netfs_inode(struct inode *inode)
 {
 	return container_of(inode, struct netfs_inode, inode);
+}
+
+/**
+ * netfs_read_remote_i_size - Read remote_i_size safely
+ * @inode: The inode to access
+ *
+ * Read remote_i_size safely without the potential for tearing on 32-bit
+ * arches.
+ *
+ * NOTE: in a 32bit arch with a preemptable kernel and an UP compile the
+ * i_size_read/write must be atomic with respect to the local cpu (unlike with
+ * preempt disabled), but they don't need to be atomic with respect to other
+ * cpus like in true SMP (so they need either to either locally disable irq
+ * around the read or for example on x86 they can be still implemented as a
+ * cmpxchg8b without the need of the lock prefix).  For SMP compiles and 64bit
+ * archs it makes no difference if preempt is enabled or not.
+ */
+static inline unsigned long long netfs_read_remote_i_size(const struct inode *inode)
+{
+	const struct netfs_inode *ictx = container_of(inode, struct netfs_inode, inode);
+	unsigned long long remote_i_size;
+
+#if BITS_PER_LONG==32 && defined(CONFIG_SMP)
+	unsigned int seq;
+
+	do {
+		seq = read_seqcount_begin(&inode->i_size_seqcount);
+		remote_i_size = ictx->_remote_i_size;
+	} while (read_seqcount_retry(&inode->i_size_seqcount, seq));
+#elif BITS_PER_LONG==32 && defined(CONFIG_PREEMPTION)
+	preempt_disable();
+	remote_i_size = ictx->_remote_i_size;
+	preempt_enable();
+#else
+	/* Pairs with smp_store_release() in netfs_write_remote_i_size() */
+	remote_i_size = smp_load_acquire(&ictx->_remote_i_size);
+#endif
+	return remote_i_size;
+}
+
+/*
+ * netfs_write_remote_i_size - Set remote_i_size safely
+ * @inode: The inode to access
+ * @remote_i_size: The new value for the size of the file on the server
+ *
+ * Set remote_i_size safely without the potential for tearing on 32-bit arches.
+ *
+ * Context: The caller must hold inode->i_lock.
+ *
+ * NOTE: unlike netfs_read_remote_i_size(), netfs_write_remote_i_size() does
+ * need locking around it (normally i_rwsem), otherwise on 32bit/SMP an update
+ * of i_size_seqcount can be lost, resulting in subsequent i_size_read() calls
+ * spinning forever.
+ */
+static inline void netfs_write_remote_i_size(struct inode *inode,
+					     unsigned long long remote_i_size)
+{
+	struct netfs_inode *ictx = netfs_inode(inode);
+
+#if BITS_PER_LONG==32 && defined(CONFIG_SMP)
+	write_seqcount_begin(&inode->i_size_seqcount);
+	ictx->_remote_i_size = remote_i_size;
+	write_seqcount_end(&inode->i_size_seqcount);
+#elif BITS_PER_LONG==32 && defined(CONFIG_PREEMPTION)
+	preempt_disable();
+	ictx->_remote_i_size = remote_i_size;
+	preempt_enable();
+#else
+	/*
+	 * Pairs with smp_load_acquire() in netfs_read_remote_i_size() to
+	 * ensure changes related to inode size (such as page contents) are
+	 * visible before we see the changed inode size.
+	 */
+	smp_store_release(&ictx->_remote_i_size, remote_i_size);
+#endif
+}
+
+/**
+ * netfs_read_zero_point - Read zero_point safely
+ * @inode: The inode to access
+ *
+ * Read zero_point safely without the potential for tearing on 32-bit
+ * arches.
+ *
+ * NOTE: in a 32bit arch with a preemptable kernel and an UP compile the
+ * i_size_read/write must be atomic with respect to the local cpu (unlike with
+ * preempt disabled), but they don't need to be atomic with respect to other
+ * cpus like in true SMP (so they need either to either locally disable irq
+ * around the read or for example on x86 they can be still implemented as a
+ * cmpxchg8b without the need of the lock prefix).  For SMP compiles and 64bit
+ * archs it makes no difference if preempt is enabled or not.
+ */
+static inline unsigned long long netfs_read_zero_point(const struct inode *inode)
+{
+	struct netfs_inode *ictx = container_of(inode, struct netfs_inode, inode);
+	unsigned long long zero_point;
+
+#if BITS_PER_LONG==32 && defined(CONFIG_SMP)
+	unsigned int seq;
+
+	do {
+		seq = read_seqcount_begin(&inode->i_size_seqcount);
+		zero_point = ictx->_zero_point;
+	} while (read_seqcount_retry(&inode->i_size_seqcount, seq));
+#elif BITS_PER_LONG==32 && defined(CONFIG_PREEMPTION)
+	preempt_disable();
+	zero_point = ictx->_zero_point;
+	preempt_enable();
+#else
+	/* Pairs with smp_store_release() in netfs_write_zero_point() */
+	zero_point = smp_load_acquire(&ictx->_zero_point);
+#endif
+	return zero_point;
+}
+
+/*
+ * netfs_write_zero_point - Set zero_point safely
+ * @inode: The inode to access
+ * @zero_point: The new value for the point beyond which the server has no data
+ *
+ * Set zero_point safely without the potential for tearing on 32-bit arches.
+ *
+ * Context: The caller must hold inode->i_lock.
+ *
+ * NOTE: unlike netfs_read_zero_point(), netfs_write_zero_point() does need
+ * locking around it (normally i_rwsem), otherwise on 32bit/SMP an update of
+ * i_size_seqcount can be lost, resulting in subsequent read calls spinning
+ * forever.
+ */
+static inline void netfs_write_zero_point(struct inode *inode,
+					  unsigned long long zero_point)
+{
+	struct netfs_inode *ictx = netfs_inode(inode);
+
+#if BITS_PER_LONG==32 && defined(CONFIG_SMP)
+	write_seqcount_begin(&inode->i_size_seqcount);
+	ictx->_zero_point = zero_point;
+	write_seqcount_end(&inode->i_size_seqcount);
+#elif BITS_PER_LONG==32 && defined(CONFIG_PREEMPTION)
+	preempt_disable();
+	ictx->_zero_point = zero_point;
+	preempt_enable();
+#else
+	/*
+	 * Pairs with smp_load_acquire() in netfs_read_zero_point() to
+	 * ensure changes related to inode size (such as page contents) are
+	 * visible before we see the changed inode size.
+	 */
+	smp_store_release(&ictx->_zero_point, zero_point);
+#endif
+}
+
+/**
+ * netfs_read_sizes - Read remote_i_size and zero_point safely
+ * @inode: The inode to access
+ * @i_size: Where to return the local file size.
+ * @remote_i_size: Where to return the size of the file on the server
+ * @zero_point: Where to return the the point beyond which the server has no data
+ *
+ * Read remote_i_size and zero_point safely without the potential for tearing
+ * on 32-bit arches.
+ *
+ * NOTE: in a 32bit arch with a preemptable kernel and an UP compile the
+ * i_size_read/write must be atomic with respect to the local cpu (unlike with
+ * preempt disabled), but they don't need to be atomic with respect to other
+ * cpus like in true SMP (so they need either to either locally disable irq
+ * around the read or for example on x86 they can be still implemented as a
+ * cmpxchg8b without the need of the lock prefix).  For SMP compiles and 64bit
+ * archs it makes no difference if preempt is enabled or not.
+ */
+static inline void netfs_read_sizes(const struct inode *inode,
+				    unsigned long long *i_size,
+				    unsigned long long *remote_i_size,
+				    unsigned long long *zero_point)
+{
+	const struct netfs_inode *ictx = container_of(inode, struct netfs_inode, inode);
+#if BITS_PER_LONG==32 && defined(CONFIG_SMP)
+	unsigned int seq;
+
+	do {
+		seq = read_seqcount_begin(&inode->i_size_seqcount);
+		*i_size = inode->i_size;
+		*remote_i_size = ictx->_remote_i_size;
+		*zero_point = ictx->_zero_point;
+	} while (read_seqcount_retry(&inode->i_size_seqcount, seq));
+#elif BITS_PER_LONG==32 && defined(CONFIG_PREEMPTION)
+	preempt_disable();
+	*i_size = inode->i_size;
+	*remote_i_size = ictx->_remote_i_size;
+	*zero_point = ictx->_zero_point;
+	preempt_enable();
+#else
+	/* Pairs with smp_store_release() in i_size_write() */
+	*i_size = smp_load_acquire(&inode->i_size);
+	/* Pairs with smp_store_release() in netfs_write_remote_i_size() */
+	*remote_i_size = smp_load_acquire(&ictx->_remote_i_size);
+	/* Pairs with smp_store_release() in netfs_write_zero_point() */
+	*zero_point = smp_load_acquire(&ictx->_zero_point);
+#endif
+}
+
+/*
+ * netfs_write_sizes - Set i_size, remote_i_size and zero_point safely
+ * @inode: The inode to access
+ * @i_size: The new value for the local size of the file
+ * @remote_i_size: The new value for the size of the file on the server
+ * @zero_point: The new value for the point beyond which the server has no data
+ *
+ * Set both remote_i_size and zero_point safely without the potential for
+ * tearing on 32-bit arches.
+ *
+ * Context: The caller must hold inode->i_lock.
+ *
+ * NOTE: unlike netfs_read_zero_point(), netfs_write_zero_point() does need
+ * locking around it (normally i_rwsem), otherwise on 32bit/SMP an update of
+ * i_size_seqcount can be lost, resulting in subsequent read calls spinning
+ * forever.
+ */
+static inline void netfs_write_sizes(struct inode *inode,
+				     unsigned long long i_size,
+				     unsigned long long remote_i_size,
+				     unsigned long long zero_point)
+{
+	struct netfs_inode *ictx = netfs_inode(inode);
+
+#if BITS_PER_LONG==32 && defined(CONFIG_SMP)
+	write_seqcount_begin(&inode->i_size_seqcount);
+	inode->i_size = i_size;
+	ictx->_remote_i_size = remote_i_size;
+	ictx->_zero_point = zero_point;
+	write_seqcount_end(&inode->i_size_seqcount);
+#elif BITS_PER_LONG==32 && defined(CONFIG_PREEMPTION)
+	preempt_disable();
+	inode->i_size = i_size;
+	ictx->_remote_i_size = remote_i_size;
+	ictx->_zero_point = zero_point;
+	preempt_enable();
+#else
+	/*
+	 * Pairs with smp_load_acquire() in i_size_read(),
+	 * netfs_read_remote_i_size() and netfs_read_zero_point() to ensure
+	 * changes related to inode size (such as page contents) are visible
+	 * before we see the changed inode size.
+	 */
+	smp_store_release(&inode->i_size, i_size);
+	smp_store_release(&ictx->_remote_i_size, remote_i_size);
+	smp_store_release(&ictx->_zero_point, zero_point);
+#endif
 }
 
 /**
@@ -489,36 +735,64 @@ static inline void netfs_inode_init(struct netfs_inode *ctx,
 				    bool use_zero_point)
 {
 	ctx->ops = ops;
-	ctx->remote_i_size = i_size_read(&ctx->inode);
-	ctx->zero_point = LLONG_MAX;
+	ctx->_remote_i_size = i_size_read(&ctx->inode);
+	ctx->_zero_point = LLONG_MAX;
 	ctx->flags = 0;
 	atomic_set(&ctx->io_count, 0);
 #if IS_ENABLED(CONFIG_FSCACHE)
 	ctx->cache = NULL;
 #endif
-	mutex_init(&ctx->wb_lock);
+	INIT_LIST_HEAD(&ctx->wb_queue);
+	spin_lock_init(&ctx->lock);
 	/* ->releasepage() drives zero_point */
 	if (use_zero_point) {
-		ctx->zero_point = ctx->remote_i_size;
+		ctx->_zero_point = ctx->_remote_i_size;
 		mapping_set_release_always(ctx->inode.i_mapping);
 	}
 }
 
 /**
  * netfs_resize_file - Note that a file got resized
- * @ctx: The netfs inode being resized
+ * @ictx: The netfs inode being resized
  * @new_i_size: The new file size
  * @changed_on_server: The change was applied to the server
  *
  * Inform the netfs lib that a file got resized so that it can adjust its state.
  */
-static inline void netfs_resize_file(struct netfs_inode *ctx, loff_t new_i_size,
+static inline void netfs_resize_file(struct netfs_inode *ictx,
+				     unsigned long long new_i_size,
 				     bool changed_on_server)
 {
+#if BITS_PER_LONG==32 && defined(CONFIG_SMP)
+	struct inode *inode = &ictx->inode;
+
+	preempt_disable();
+	write_seqcount_begin(&inode->i_size_seqcount);
 	if (changed_on_server)
-		ctx->remote_i_size = new_i_size;
-	if (new_i_size < ctx->zero_point)
-		ctx->zero_point = new_i_size;
+		ictx->_remote_i_size = new_i_size;
+	if (new_i_size < ictx->_zero_point)
+		ictx->_zero_point = new_i_size;
+	write_seqcount_end(&inode->i_size_seqcount);
+	preempt_enable();
+#elif BITS_PER_LONG==32 && defined(CONFIG_PREEMPTION)
+	preempt_disable();
+	if (changed_on_server)
+		ictx->_remote_i_size = new_i_size;
+	if (new_i_size < ictx->_zero_point)
+		ictx->_zero_point = new_i_size;
+	preempt_enable();
+#else
+	/*
+	 * Pairs with smp_load_acquire() in netfs_read_remote_i_size and
+	 * netfs_read_zero_point() to ensure changes related to inode size
+	 * (such as page contents) are visible before we see the changed inode
+	 * size.
+	 */
+	if (changed_on_server)
+		smp_store_release(&ictx->_remote_i_size, new_i_size);
+	if (new_i_size < ictx->_zero_point)
+		smp_store_release(&ictx->_zero_point, new_i_size);
+#endif
 }
 
 /**
