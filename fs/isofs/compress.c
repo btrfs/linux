@@ -65,17 +65,19 @@ static loff_t zisofs_uncompress_block(struct inode *inode, loff_t block_start,
 	/* Empty block? */
 	if (block_size == 0) {
 		for ( i = 0 ; i < pcount ; i++ ) {
+			unsigned int off = i ? 0 : poffset;
+
 			if (!pages[i])
 				continue;
-			memzero_page(pages[i], 0, PAGE_SIZE);
+			memzero_page(pages[i], off, PAGE_SIZE - off);
 			SetPageUptodate(pages[i]);
 		}
-		return ((loff_t)pcount) << PAGE_SHIFT;
+		return (((loff_t)pcount) << PAGE_SHIFT) - poffset;
 	}
 
 	/* Because zlib is not thread-safe, do all the I/O at the top. */
 	blocknum = block_start >> bufshift;
-	bhs = kcalloc(needblocks + 1, sizeof(*bhs), GFP_KERNEL);
+	bhs = kzalloc_objs(*bhs, needblocks + 1);
 	if (!bhs) {
 		*errp = -ENOMEM;
 		return 0;
@@ -156,7 +158,7 @@ static loff_t zisofs_uncompress_block(struct inode *inode, loff_t block_start,
 				else {
 					printk(KERN_DEBUG
 					       "zisofs: zisofs_inflate returned"
-					       " %d, inode = %lu,"
+					       " %d, inode = %llu,"
 					       " page idx = %d, bh idx = %d,"
 					       " avail_in = %ld,"
 					       " avail_out = %ld\n",
@@ -291,6 +293,7 @@ static int zisofs_fill_pages(struct inode *inode, int full_page, int pcount,
 		memzero_page(*pages, poffset, PAGE_SIZE - poffset);
 		SetPageUptodate(*pages);
 	}
+	brelse(bh);
 	return 0;
 }
 
@@ -333,8 +336,8 @@ static int zisofs_read_folio(struct file *file, struct folio *folio)
 		full_page = 0;
 		pcount = 1;
 	}
-	pages = kcalloc(max_t(unsigned int, zisofs_pages_per_cblock, 1),
-					sizeof(*pages), GFP_KERNEL);
+	pages = kzalloc_objs(*pages,
+			     max_t(unsigned int, zisofs_pages_per_cblock, 1));
 	if (!pages) {
 		folio_unlock(folio);
 		return -ENOMEM;

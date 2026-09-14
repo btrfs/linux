@@ -220,15 +220,11 @@ static unsigned long imsic_mrif_atomic_rmw(struct imsic_mrif *mrif,
 {
 	unsigned long old_val = 0, tmp = 0;
 
-	__asm__ __volatile__ (
-		"0:	lr.w.aq   %1, %0\n"
-		"	and       %2, %1, %3\n"
-		"	or        %2, %2, %4\n"
-		"	sc.w.rl   %2, %2, %0\n"
-		"	bnez      %2, 0b"
-		: "+A" (*ptr), "+r" (old_val), "+r" (tmp)
-		: "r" (~wr_mask), "r" (new_val & wr_mask)
-		: "memory");
+	new_val &= wr_mask;
+	old_val = READ_ONCE(*ptr);
+	do {
+		tmp = (old_val & ~wr_mask) | new_val;
+	} while (!try_cmpxchg(ptr, &old_val, tmp));
 
 	return old_val;
 }
@@ -683,6 +679,9 @@ bool kvm_riscv_vcpu_aia_imsic_has_interrupt(struct kvm_vcpu *vcpu)
 	unsigned long flags;
 	bool ret = false;
 
+	if (!imsic)
+		return false;
+
 	/*
 	 * The IMSIC SW-file directly injects interrupt via hvip so
 	 * only check for interrupt when IMSIC VS-file is being used.
@@ -722,6 +721,9 @@ void kvm_riscv_vcpu_aia_imsic_put(struct kvm_vcpu *vcpu)
 	struct imsic *imsic = vcpu->arch.aia_context.imsic_state;
 	unsigned long flags;
 
+	if (!imsic)
+		return;
+
 	if (!kvm_vcpu_is_blocking(vcpu))
 		return;
 
@@ -737,6 +739,9 @@ void kvm_riscv_vcpu_aia_imsic_release(struct kvm_vcpu *vcpu)
 	struct imsic_mrif tmrif;
 	int old_vsfile_hgei, old_vsfile_cpu;
 	struct imsic *imsic = vcpu->arch.aia_context.imsic_state;
+
+	if (!imsic)
+		return;
 
 	/* Read and clear IMSIC VS-file details */
 	write_lock_irqsave(&imsic->vsfile_lock, flags);
@@ -797,6 +802,10 @@ int kvm_riscv_vcpu_aia_imsic_update(struct kvm_vcpu *vcpu)
 	if (kvm->arch.aia.mode == KVM_DEV_RISCV_AIA_MODE_EMUL)
 		return 1;
 
+	/* IMSIC vCPU state may not be initialized yet */
+	if (!imsic)
+		return 1;
+
 	/* Read old IMSIC VS-file details */
 	read_lock_irqsave(&imsic->vsfile_lock, flags);
 	old_vsfile_hgei = imsic->vsfile_hgei;
@@ -814,7 +823,7 @@ int kvm_riscv_vcpu_aia_imsic_update(struct kvm_vcpu *vcpu)
 		/* For HW acceleration mode, we can't continue */
 		if (kvm->arch.aia.mode == KVM_DEV_RISCV_AIA_MODE_HWACCEL) {
 			run->fail_entry.hardware_entry_failure_reason =
-								CSR_HSTATUS;
+								KVM_EXIT_FAIL_ENTRY_NO_VSFILE;
 			run->fail_entry.cpu = vcpu->cpu;
 			run->exit_reason = KVM_EXIT_FAIL_ENTRY;
 			return 0;
@@ -904,6 +913,10 @@ int kvm_riscv_vcpu_aia_imsic_rmw(struct kvm_vcpu *vcpu, unsigned long isel,
 	int r, rc = KVM_INSN_CONTINUE_NEXT_SEPC;
 	struct imsic *imsic = vcpu->arch.aia_context.imsic_state;
 
+	/* If IMSIC vCPU state not initialized then forward to user space */
+	if (!imsic)
+		return KVM_INSN_EXIT_TO_USER_SPACE;
+
 	if (isel == KVM_RISCV_AIA_IMSIC_TOPEI) {
 		/* Read pending and enabled interrupt with highest priority */
 		topei = imsic_mrif_topei(imsic->swfile, imsic->nr_eix,
@@ -952,8 +965,10 @@ int kvm_riscv_aia_imsic_rw_attr(struct kvm *kvm, unsigned long type,
 	if (!vcpu)
 		return -ENODEV;
 
-	isel = KVM_DEV_RISCV_AIA_IMSIC_GET_ISEL(type);
 	imsic = vcpu->arch.aia_context.imsic_state;
+	if (!imsic)
+		return -ENODEV;
+	isel = KVM_DEV_RISCV_AIA_IMSIC_GET_ISEL(type);
 
 	read_lock_irqsave(&imsic->vsfile_lock, flags);
 
@@ -993,8 +1008,11 @@ int kvm_riscv_aia_imsic_has_attr(struct kvm *kvm, unsigned long type)
 	if (!vcpu)
 		return -ENODEV;
 
-	isel = KVM_DEV_RISCV_AIA_IMSIC_GET_ISEL(type);
 	imsic = vcpu->arch.aia_context.imsic_state;
+	if (!imsic)
+		return -ENODEV;
+
+	isel = KVM_DEV_RISCV_AIA_IMSIC_GET_ISEL(type);
 	return imsic_mrif_isel_check(imsic->nr_eix, isel);
 }
 
@@ -1086,7 +1104,7 @@ int kvm_riscv_vcpu_aia_imsic_init(struct kvm_vcpu *vcpu)
 		return -EINVAL;
 
 	/* Allocate IMSIC context */
-	imsic = kzalloc(sizeof(*imsic), GFP_KERNEL);
+	imsic = kzalloc_obj(*imsic, GFP_KERNEL_ACCOUNT);
 	if (!imsic)
 		return -ENOMEM;
 	vcpu->arch.aia_context.imsic_state = imsic;
@@ -1099,7 +1117,7 @@ int kvm_riscv_vcpu_aia_imsic_init(struct kvm_vcpu *vcpu)
 	imsic->vsfile_hgei = imsic->vsfile_cpu = -1;
 
 	/* Setup IMSIC SW-file */
-	swfile_page = alloc_pages(GFP_KERNEL | __GFP_ZERO,
+	swfile_page = alloc_pages(GFP_KERNEL_ACCOUNT | __GFP_ZERO,
 				  get_order(sizeof(*imsic->swfile)));
 	if (!swfile_page) {
 		ret = -ENOMEM;

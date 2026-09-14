@@ -218,7 +218,7 @@ static ssize_t show_cpus_attr(struct device *dev,
 {
 	struct cpu_attr *ca = container_of(attr, struct cpu_attr, attr);
 
-	return cpumap_print_to_pagebuf(true, buf, ca->map);
+	return sysfs_emit(buf, "%*pbl\n", cpumask_pr_args(ca->map));
 }
 
 #define _CPU_ATTR(name, map) \
@@ -291,7 +291,7 @@ static ssize_t print_cpus_isolated(struct device *dev,
 		return -ENOMEM;
 
 	cpumask_andnot(isolated, cpu_possible_mask,
-		       housekeeping_cpumask(HK_TYPE_DOMAIN));
+		       housekeeping_cpumask(HK_TYPE_DOMAIN_BOOT));
 	len = sysfs_emit(buf, "%*pbl\n", cpumask_pr_args(isolated));
 
 	free_cpumask_var(isolated);
@@ -300,13 +300,30 @@ static ssize_t print_cpus_isolated(struct device *dev,
 }
 static DEVICE_ATTR(isolated, 0444, print_cpus_isolated, NULL);
 
-#ifdef CONFIG_NO_HZ_FULL
-static ssize_t print_cpus_nohz_full(struct device *dev,
-				    struct device_attribute *attr, char *buf)
+static ssize_t housekeeping_show(struct device *dev,
+			     struct device_attribute *attr, char *buf)
 {
-	return sysfs_emit(buf, "%*pbl\n", cpumask_pr_args(tick_nohz_full_mask));
+	const struct cpumask *hk_mask;
+
+	hk_mask = housekeeping_cpumask(HK_TYPE_KERNEL_NOISE);
+
+	if (housekeeping_enabled(HK_TYPE_KERNEL_NOISE))
+		return sysfs_emit(buf, "%*pbl\n", cpumask_pr_args(hk_mask));
+	return sysfs_emit(buf, "\n");
 }
-static DEVICE_ATTR(nohz_full, 0444, print_cpus_nohz_full, NULL);
+static DEVICE_ATTR_RO(housekeeping);
+
+#ifdef CONFIG_NO_HZ_FULL
+static ssize_t nohz_full_show(struct device *dev,
+				    struct device_attribute *attr,
+				    char *buf)
+{
+	if (cpumask_available(tick_nohz_full_mask))
+		return sysfs_emit(buf, "%*pbl\n",
+				  cpumask_pr_args(tick_nohz_full_mask));
+	return sysfs_emit(buf, "\n");
+}
+static DEVICE_ATTR_RO(nohz_full);
 #endif
 
 #ifdef CONFIG_CRASH_HOTPLUG
@@ -405,8 +422,8 @@ int register_cpu(struct cpu *cpu, int num)
 	cpu->dev.id = num;
 	cpu->dev.bus = &cpu_subsys;
 	cpu->dev.release = cpu_device_release;
-	cpu->dev.offline_disabled = !cpu->hotpluggable;
-	cpu->dev.offline = !cpu_online(num);
+	dev_assign_offline_disabled(&cpu->dev, !cpu->hotpluggable);
+	dev_assign_offline(&cpu->dev, !cpu_online(num));
 	cpu->dev.of_node = of_get_cpu_node(num, NULL);
 	cpu->dev.groups = common_cpu_attr_groups;
 	if (cpu->hotpluggable)
@@ -449,7 +466,7 @@ __cpu_device_create(struct device *parent, void *drvdata,
 	struct device *dev = NULL;
 	int retval = -ENOMEM;
 
-	dev = kzalloc(sizeof(*dev), GFP_KERNEL);
+	dev = kzalloc_obj(*dev);
 	if (!dev)
 		goto error;
 
@@ -505,6 +522,7 @@ static struct attribute *cpu_root_attrs[] = {
 	&dev_attr_offline.attr,
 	&dev_attr_enabled.attr,
 	&dev_attr_isolated.attr,
+	&dev_attr_housekeeping.attr,
 #ifdef CONFIG_NO_HZ_FULL
 	&dev_attr_nohz_full.attr,
 #endif

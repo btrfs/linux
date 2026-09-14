@@ -7,7 +7,6 @@
 #ifndef __HAL_COMMON_H__
 #define __HAL_COMMON_H__
 
-#include "HalVerDef.h"
 #include "hal_pg.h"
 #include "hal_phy.h"
 #include "hal_phy_reg.h"
@@ -92,8 +91,6 @@ enum rt_media_status {
 u8 rtw_hal_data_init(struct adapter *padapter);
 void rtw_hal_data_deinit(struct adapter *padapter);
 
-void dump_chip_info(struct hal_version	ChipVersion);
-
 u8 /* return the final channel plan decision */
 hal_com_config_channel_plan(
 struct adapter *padapter,
@@ -138,12 +135,8 @@ void SetHwReg(struct adapter *padapter, u8 variable, u8 *val);
 void GetHwReg(struct adapter *padapter, u8 variable, u8 *val);
 void rtw_hal_check_rxfifo_full(struct adapter *adapter);
 
-u8 SetHalDefVar(struct adapter *adapter, enum hal_def_variable variable,
-		void *value);
 u8 GetHalDefVar(struct adapter *adapter, enum hal_def_variable variable,
 		void *value);
-
-bool eqNByte(u8 *str1, u8 *str2, u32 num);
 
 bool GetU1ByteIntegerFromStringInDecimal(char *str, u8 *in);
 

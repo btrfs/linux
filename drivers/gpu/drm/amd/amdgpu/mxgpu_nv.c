@@ -96,7 +96,9 @@ static int xgpu_nv_poll_ack(struct amdgpu_device *adev)
 		timeout -= 5;
 	} while (timeout > 1);
 
-	dev_err(adev->dev, "Doesn't get TRN_MSG_ACK from pf in %d msec \n", NV_MAILBOX_POLL_ACK_TIMEDOUT);
+	dev_err(adev->dev,
+		"Doesn't get TRN_MSG_ACK from pf in %d msec\n",
+		NV_MAILBOX_POLL_ACK_TIMEDOUT);
 
 	return -ETIME;
 }
@@ -173,13 +175,17 @@ static void xgpu_nv_mailbox_trans_msg (struct amdgpu_device *adev,
 static int xgpu_nv_send_access_requests_with_param(struct amdgpu_device *adev,
 			enum idh_request req, u32 data1, u32 data2, u32 data3)
 {
-	int r, retry = 1;
+	struct amdgpu_virt *virt = &adev->virt;
+	int r = 0, retry = 1;
 	enum idh_event event = -1;
 
+	mutex_lock(&virt->access_req_mutex);
 send_request:
 
-	if (amdgpu_ras_is_rma(adev))
-		return -ENODEV;
+	if (amdgpu_ras_is_rma(adev)) {
+		r = -ENODEV;
+		goto out;
+	}
 
 	xgpu_nv_mailbox_trans_msg(adev, req, data1, data2, data3);
 
@@ -205,6 +211,12 @@ send_request:
 	case IDH_REQ_RAS_CHK_CRITI:
 		event = IDH_REQ_RAS_CHK_CRITI_READY;
 		break;
+	case IDH_REQ_RAS_REMOTE_CMD:
+		event = IDH_REQ_RAS_REMOTE_CMD_READY;
+		break;
+	case IDH_REQ_PTL_UPDATE:
+		event = IDH_PTL_UPDATE_READY;
+		break;
 	default:
 		break;
 	}
@@ -217,17 +229,25 @@ send_request:
 
 			if (req != IDH_REQ_GPU_INIT_DATA) {
 				dev_err(adev->dev, "Doesn't get msg:%d from pf, error=%d\n", event, r);
-				return r;
+				goto out;
 			} else /* host doesn't support REQ_GPU_INIT_DATA handshake */
 				adev->virt.req_init_data_ver = 0;
 		} else {
 			if (req == IDH_REQ_GPU_INIT_DATA) {
-				adev->virt.req_init_data_ver =
-					RREG32_NO_KIQ(mmMAILBOX_MSGBUF_RCV_DW1);
-
-				/* assume V1 in case host doesn't set version number */
-				if (adev->virt.req_init_data_ver < 1)
-					adev->virt.req_init_data_ver = 1;
+				switch (RREG32_NO_KIQ(mmMAILBOX_MSGBUF_RCV_DW1)) {
+				case GPU_CRIT_REGION_V2:
+					adev->virt.req_init_data_ver = GPU_CRIT_REGION_V2;
+					adev->virt.init_data_header.offset =
+						RREG32_NO_KIQ(mmMAILBOX_MSGBUF_RCV_DW2);
+					adev->virt.init_data_header.size_kb =
+						RREG32_NO_KIQ(mmMAILBOX_MSGBUF_RCV_DW3);
+					break;
+				default:
+					adev->virt.req_init_data_ver = GPU_CRIT_REGION_V1;
+					adev->virt.init_data_header.offset = -1;
+					adev->virt.init_data_header.size_kb = 0;
+					break;
+				}
 			}
 		}
 
@@ -236,9 +256,29 @@ send_request:
 			adev->virt.fw_reserve.checksum_key =
 				RREG32_NO_KIQ(mmMAILBOX_MSGBUF_RCV_DW2);
 		}
+
+		/* Retrieve PTL response from mailbox */
+		if (req == IDH_REQ_PTL_UPDATE) {
+			u32 dw1 = RREG32_NO_KIQ(mmMAILBOX_MSGBUF_RCV_DW1);
+			u32 dw2 = RREG32_NO_KIQ(mmMAILBOX_MSGBUF_RCV_DW2);
+			u32 status = AMD_SRIOV_PTL_UNPACK_STATUS(dw1);
+
+			if (status == AMD_SRIOV_RESP_UNSUPPORTED) {
+				r = -EOPNOTSUPP;
+			} else if (status == AMD_SRIOV_RESP_FAIL) {
+				r = -EIO;
+			} else {
+				adev->virt.ptl_state = AMD_SRIOV_PTL_UNPACK_STATE(dw1);
+				adev->virt.ptl_pref_format1 = AMD_SRIOV_PTL_UNPACK_FMT1(dw2);
+				adev->virt.ptl_pref_format2 = AMD_SRIOV_PTL_UNPACK_FMT2(dw2);
+			}
+		}
 	}
 
-	return 0;
+out:
+	mutex_unlock(&virt->access_req_mutex);
+
+	return r;
 }
 
 static int xgpu_nv_send_access_requests(struct amdgpu_device *adev,
@@ -285,7 +325,8 @@ static int xgpu_nv_release_full_gpu_access(struct amdgpu_device *adev,
 
 static int xgpu_nv_request_init_data(struct amdgpu_device *adev)
 {
-	return xgpu_nv_send_access_requests(adev, IDH_REQ_GPU_INIT_DATA);
+	return xgpu_nv_send_access_requests_with_param(adev, IDH_REQ_GPU_INIT_DATA,
+			0, GPU_CRIT_REGION_V2, 0);
 }
 
 static int xgpu_nv_mailbox_ack_irq(struct amdgpu_device *adev,
@@ -569,6 +610,20 @@ static int xgpu_nv_check_vf_critical_region(struct amdgpu_device *adev, u64 addr
 		adev, IDH_REQ_RAS_CHK_CRITI, addr_hi, addr_lo, 0);
 }
 
+static int xgpu_nv_req_remote_ras_cmd(struct amdgpu_device *adev,
+		u32 param1, u32 param2, u32 param3)
+{
+	return xgpu_nv_send_access_requests_with_param(
+		adev, IDH_REQ_RAS_REMOTE_CMD, param1, param2, param3);
+}
+
+static int xgpu_nv_req_ptl_update(struct amdgpu_device *adev,
+				  u32 req_code, u32 ptl_state, u32 fmt1, u32 fmt2)
+{
+	return xgpu_nv_send_access_requests_with_param(adev, IDH_REQ_PTL_UPDATE,
+			req_code, ptl_state, AMD_SRIOV_PTL_PACK_FORMATS(fmt1, fmt2));
+}
+
 const struct amdgpu_virt_ops xgpu_nv_virt_ops = {
 	.req_full_gpu	= xgpu_nv_request_full_gpu_access,
 	.rel_full_gpu	= xgpu_nv_release_full_gpu_access,
@@ -582,5 +637,7 @@ const struct amdgpu_virt_ops xgpu_nv_virt_ops = {
 	.req_ras_err_count = xgpu_nv_req_ras_err_count,
 	.req_ras_cper_dump = xgpu_nv_req_ras_cper_dump,
 	.req_bad_pages = xgpu_nv_req_ras_bad_pages,
-	.req_ras_chk_criti = xgpu_nv_check_vf_critical_region
+	.req_ras_chk_criti = xgpu_nv_check_vf_critical_region,
+	.req_remote_ras_cmd = xgpu_nv_req_remote_ras_cmd,
+	.req_ptl_update = xgpu_nv_req_ptl_update,
 };

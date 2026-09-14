@@ -623,7 +623,7 @@ static int uniphier_aio_vol_info(struct snd_kcontrol *kcontrol,
 static int uniphier_aio_vol_get(struct snd_kcontrol *kcontrol,
 				struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_component *comp = snd_soc_kcontrol_component(kcontrol);
+	struct snd_soc_component *comp = snd_kcontrol_chip(kcontrol);
 	struct uniphier_aio_chip *chip = snd_soc_component_get_drvdata(comp);
 	struct uniphier_aio_sub *sub;
 	int oport_hw = kcontrol->private_value;
@@ -640,7 +640,7 @@ static int uniphier_aio_vol_get(struct snd_kcontrol *kcontrol,
 static int uniphier_aio_vol_put(struct snd_kcontrol *kcontrol,
 				struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_component *comp = snd_soc_kcontrol_component(kcontrol);
+	struct snd_soc_component *comp = snd_kcontrol_chip(kcontrol);
 	struct uniphier_aio_chip *chip = snd_soc_component_get_drvdata(comp);
 	struct uniphier_aio_sub *sub;
 	int oport_hw = kcontrol->private_value;
@@ -795,16 +795,12 @@ int uniphier_aio_probe(struct platform_device *pdev)
 	ret = devm_snd_soc_register_component(dev, &uniphier_aio_component,
 					      chip->chip_spec->dais,
 					      chip->chip_spec->num_dais);
-	if (ret) {
-		dev_err(dev, "Register component failed.\n");
+	if (ret)
 		goto err_out_reset;
-	}
 
 	ret = uniphier_aiodma_soc_register_platform(pdev);
-	if (ret) {
-		dev_err(dev, "Register platform failed.\n");
+	if (ret)
 		goto err_out_reset;
-	}
 
 	return 0;
 

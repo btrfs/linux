@@ -141,6 +141,9 @@ static const struct attribute_group boot_attr_group = {
 	.name = "boot",
 };
 
+static BIN_ATTR(FBPT, 0400, sysfs_bin_attr_simple_read, NULL, 0);
+static BIN_ATTR(S3PT, 0400, sysfs_bin_attr_simple_read, NULL, 0);
+
 static struct kobject *fpdt_kobj;
 
 #if defined CONFIG_X86 && defined CONFIG_PHYS_ADDR_T_64BIT
@@ -165,7 +168,7 @@ static int fpdt_process_subtable(u64 address, u32 subtable_type)
 	struct fpdt_subtable_header *subtable_header;
 	struct fpdt_record_header *record_header;
 	char *signature = (subtable_type == SUBTABLE_FBPT ? "FBPT" : "S3PT");
-	u32 length, offset;
+	u32 length, offset, remaining;
 	int result;
 
 	if (!fpdt_address_valid(address)) {
@@ -179,10 +182,17 @@ static int fpdt_process_subtable(u64 address, u32 subtable_type)
 
 	if (strncmp((char *)&subtable_header->signature, signature, 4)) {
 		pr_info(FW_BUG "subtable signature and type mismatch!\n");
+		acpi_os_unmap_memory(subtable_header, sizeof(*subtable_header));
 		return -EINVAL;
 	}
 
 	length = subtable_header->length;
+	if (length < sizeof(*subtable_header)) {
+		pr_err(FW_BUG "Invalid FPDT subtable length %u.\n", length);
+		acpi_os_unmap_memory(subtable_header, sizeof(*subtable_header));
+		return -EINVAL;
+	}
+
 	acpi_os_unmap_memory(subtable_header, sizeof(*subtable_header));
 
 	subtable_header = acpi_os_map_memory(address, length);
@@ -191,17 +201,29 @@ static int fpdt_process_subtable(u64 address, u32 subtable_type)
 
 	offset = sizeof(*subtable_header);
 	while (offset < length) {
-		record_header = (void *)subtable_header + offset;
-		offset += record_header->length;
-
-		if (!record_header->length) {
-			pr_err(FW_BUG "Zero-length record found in FPTD.\n");
+		remaining = length - offset;
+		if (remaining < sizeof(*record_header)) {
+			pr_err(FW_BUG "Truncated FPDT record header.\n");
 			result = -EINVAL;
 			goto err;
 		}
 
+		record_header = (void *)subtable_header + offset;
+		if (record_header->length < sizeof(*record_header) ||
+		    record_header->length > remaining) {
+			pr_err(FW_BUG "Invalid FPDT record length %u.\n",
+			       record_header->length);
+			result = -EINVAL;
+			goto err;
+		}
+		offset += record_header->length;
+
 		switch (record_header->type) {
 		case RECORD_S3_RESUME:
+			if (record_header->length < sizeof(*record_resume)) {
+				result = -EINVAL;
+				goto err;
+			}
 			if (subtable_type != SUBTABLE_S3PT) {
 				pr_err(FW_BUG "Invalid record %d for subtable %s\n",
 				     record_header->type, signature);
@@ -218,6 +240,10 @@ static int fpdt_process_subtable(u64 address, u32 subtable_type)
 				goto err;
 			break;
 		case RECORD_S3_SUSPEND:
+			if (record_header->length < sizeof(*record_suspend)) {
+				result = -EINVAL;
+				goto err;
+			}
 			if (subtable_type != SUBTABLE_S3PT) {
 				pr_err(FW_BUG "Invalid %d for subtable %s\n",
 				     record_header->type, signature);
@@ -233,6 +259,10 @@ static int fpdt_process_subtable(u64 address, u32 subtable_type)
 				goto err;
 			break;
 		case RECORD_BOOT:
+			if (record_header->length < sizeof(*record_boot)) {
+				result = -EINVAL;
+				goto err;
+			}
 			if (subtable_type != SUBTABLE_FBPT) {
 				pr_err(FW_BUG "Invalid %d for subtable %s\n",
 				     record_header->type, signature);
@@ -254,9 +284,34 @@ static int fpdt_process_subtable(u64 address, u32 subtable_type)
 			break;
 		}
 	}
+
+	if (subtable_type == SUBTABLE_FBPT) {
+		bin_attr_FBPT.private = subtable_header;
+		bin_attr_FBPT.size = length;
+		result = sysfs_create_bin_file(fpdt_kobj, &bin_attr_FBPT);
+		if (result)
+			pr_warn("Failed to create FBPT sysfs attribute.\n");
+	} else if (subtable_type == SUBTABLE_S3PT) {
+		bin_attr_S3PT.private = subtable_header;
+		bin_attr_S3PT.size = length;
+		result = sysfs_create_bin_file(fpdt_kobj, &bin_attr_S3PT);
+		if (result)
+			pr_warn("Failed to create S3PT sysfs attribute.\n");
+	}
+
 	return 0;
 
 err:
+	if (bin_attr_FBPT.private) {
+		sysfs_remove_bin_file(fpdt_kobj, &bin_attr_FBPT);
+		bin_attr_FBPT.private = NULL;
+	}
+
+	if (bin_attr_S3PT.private) {
+		sysfs_remove_bin_file(fpdt_kobj, &bin_attr_S3PT);
+		bin_attr_S3PT.private = NULL;
+	}
+
 	if (record_boot)
 		sysfs_remove_group(fpdt_kobj, &boot_attr_group);
 
@@ -289,7 +344,21 @@ static int __init acpi_init_fpdt(void)
 	}
 
 	while (offset < header->length) {
+		if (header->length - offset < sizeof(*subtable)) {
+			pr_err(FW_BUG "Truncated FPDT subtable entry.\n");
+			result = -EINVAL;
+			goto err_subtable;
+		}
+
 		subtable = (void *)header + offset;
+		if (subtable->length < sizeof(*subtable) ||
+		    subtable->length > header->length - offset) {
+			pr_err(FW_BUG "Invalid FPDT subtable entry length %u.\n",
+			       subtable->length);
+			result = -EINVAL;
+			goto err_subtable;
+		}
+
 		switch (subtable->type) {
 		case SUBTABLE_FBPT:
 		case SUBTABLE_S3PT:
@@ -302,7 +371,7 @@ static int __init acpi_init_fpdt(void)
 			/* Other types are reserved in ACPI 6.4 spec. */
 			break;
 		}
-		offset += sizeof(*subtable);
+		offset += subtable->length;
 	}
 	return 0;
 err_subtable:

@@ -59,15 +59,14 @@ static struct se_device *iblock_alloc_device(struct se_hba *hba, const char *nam
 {
 	struct iblock_dev *ib_dev = NULL;
 
-	ib_dev = kzalloc(sizeof(struct iblock_dev), GFP_KERNEL);
+	ib_dev = kzalloc_obj(struct iblock_dev);
 	if (!ib_dev) {
 		pr_err("Unable to allocate struct iblock_dev\n");
 		return NULL;
 	}
 	ib_dev->ibd_exclusive = true;
 
-	ib_dev->ibd_plug = kcalloc(nr_cpu_ids, sizeof(*ib_dev->ibd_plug),
-				   GFP_KERNEL);
+	ib_dev->ibd_plug = kzalloc_objs(*ib_dev->ibd_plug, nr_cpu_ids);
 	if (!ib_dev->ibd_plug)
 		goto free_dev;
 
@@ -84,8 +83,8 @@ static bool iblock_configure_unmap(struct se_device *dev)
 {
 	struct iblock_dev *ib_dev = IBLOCK_DEV(dev);
 
-	return target_configure_unmap_from_queue(&dev->dev_attrib,
-						 ib_dev->ibd_bd);
+	return target_configure_unmap_from_bdev(&dev->dev_attrib,
+						ib_dev->ibd_bd);
 }
 
 static int iblock_configure_device(struct se_device *dev)
@@ -149,8 +148,10 @@ static int iblock_configure_device(struct se_device *dev)
 	else
 		dev->dev_attrib.max_write_same_len = 0xFFFF;
 
-	if (bdev_nonrot(bd))
+	if (!bdev_rot(bd))
 		dev->dev_attrib.is_nonrot = 1;
+
+	target_configure_write_atomic_from_bdev(&dev->dev_attrib, bd);
 
 	bi = bdev_get_integrity(bd);
 	if (!bi)
@@ -521,7 +522,7 @@ iblock_execute_write_same(struct se_cmd *cmd)
 			return 0;
 	}
 
-	ibr = kzalloc(sizeof(struct iblock_req), GFP_KERNEL);
+	ibr = kzalloc_obj(struct iblock_req);
 	if (!ibr)
 		goto fail;
 	cmd->priv = ibr;
@@ -773,12 +774,15 @@ iblock_execute_rw(struct se_cmd *cmd, struct scatterlist *sgl, u32 sgl_nents,
 			else if (!bdev_write_cache(ib_dev->ibd_bd))
 				opf |= REQ_FUA;
 		}
+
+		if (cmd->se_cmd_flags & SCF_ATOMIC)
+			opf |= REQ_ATOMIC;
 	} else {
 		opf = REQ_OP_READ;
 		miter_dir = SG_MITER_FROM_SG;
 	}
 
-	ibr = kzalloc(sizeof(struct iblock_req), GFP_KERNEL);
+	ibr = kzalloc_obj(struct iblock_req);
 	if (!ibr)
 		goto fail;
 	cmd->priv = ibr;
@@ -902,7 +906,7 @@ static sense_reason_t iblock_execute_pr_out(struct se_cmd *cmd, u8 sa, u64 key,
 		break;
 	case PRO_PREEMPT:
 	case PRO_PREEMPT_AND_ABORT:
-		if (!ops->pr_clear) {
+		if (!ops->pr_preempt) {
 			pr_err("block_device does not support pr_preempt.\n");
 			return TCM_UNSUPPORTED_SCSI_OPCODE;
 		}
@@ -912,8 +916,8 @@ static sense_reason_t iblock_execute_pr_out(struct se_cmd *cmd, u8 sa, u64 key,
 				      sa == PRO_PREEMPT_AND_ABORT);
 		break;
 	case PRO_RELEASE:
-		if (!ops->pr_clear) {
-			pr_err("block_device does not support pr_pclear.\n");
+		if (!ops->pr_release) {
+			pr_err("block_device does not support pr_release.\n");
 			return TCM_UNSUPPORTED_SCSI_OPCODE;
 		}
 

@@ -15,6 +15,7 @@ Device Mapper
     dm-flakey
     dm-ima
     dm-init
+    dm-inlinecrypt
     dm-integrity
     dm-io
     dm-log
@@ -40,10 +41,3 @@ Device Mapper
     verity
     writecache
     zero
-
-.. only::  subproject and html
-
-   Indices
-   =======
-
-   * :ref:`genindex`

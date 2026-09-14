@@ -23,7 +23,6 @@
 #include <linux/kernel.h>
 
 #include <asm/hwcap.h>
-#include <asm/neon.h>
 #include <asm/simd.h>
 
 asmlinkage void chacha_block_xor_neon(const struct chacha_state *state,
@@ -37,9 +36,9 @@ asmlinkage void hchacha_block_neon(const struct chacha_state *state,
 static __ro_after_init DEFINE_STATIC_KEY_FALSE(have_neon);
 
 static void chacha_doneon(struct chacha_state *state, u8 *dst, const u8 *src,
-			  int bytes, int nrounds)
+			  unsigned int bytes, int nrounds)
 {
-	while (bytes > 0) {
+	while (bytes) {
 		int l = min(bytes, CHACHA_BLOCK_SIZE * 5);
 
 		if (l <= CHACHA_BLOCK_SIZE) {
@@ -65,9 +64,8 @@ static void hchacha_block_arch(const struct chacha_state *state,
 	if (!static_branch_likely(&have_neon) || !crypto_simd_usable()) {
 		hchacha_block_generic(state, out, nrounds);
 	} else {
-		kernel_neon_begin();
-		hchacha_block_neon(state, out, nrounds);
-		kernel_neon_end();
+		scoped_ksimd()
+			hchacha_block_neon(state, out, nrounds);
 	}
 }
 
@@ -78,17 +76,8 @@ static void chacha_crypt_arch(struct chacha_state *state, u8 *dst,
 	    !crypto_simd_usable())
 		return chacha_crypt_generic(state, dst, src, bytes, nrounds);
 
-	do {
-		unsigned int todo = min_t(unsigned int, bytes, SZ_4K);
-
-		kernel_neon_begin();
-		chacha_doneon(state, dst, src, todo, nrounds);
-		kernel_neon_end();
-
-		bytes -= todo;
-		src += todo;
-		dst += todo;
-	} while (bytes);
+	scoped_ksimd()
+		chacha_doneon(state, dst, src, bytes, nrounds);
 }
 
 #define chacha_mod_init_arch chacha_mod_init_arch

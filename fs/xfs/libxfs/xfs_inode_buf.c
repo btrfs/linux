@@ -3,7 +3,7 @@
  * Copyright (c) 2000-2006 Silicon Graphics, Inc.
  * All Rights Reserved.
  */
-#include "xfs.h"
+#include "xfs_platform.h"
 #include "xfs_fs.h"
 #include "xfs_shared.h"
 #include "xfs_format.h"
@@ -29,12 +29,14 @@
  * has not had the inode cores stamped into it. Hence for readahead, the buffer
  * may be potentially invalid.
  *
- * If the readahead buffer is invalid, we need to mark it with an error and
- * clear the DONE status of the buffer so that a followup read will re-read it
- * from disk. We don't report the error otherwise to avoid warnings during log
- * recovery and we don't get unnecessary panics on debug kernels. We use EIO here
- * because all we want to do is say readahead failed; there is no-one to report
- * the error to, so this will distinguish it from a non-ra verifier failure.
+ * If the readahead buffer is invalid, we need to mark it with an error so that a
+ * followup read will re-read it from disk.
+ *
+ * We don't report the error otherwise to avoid warnings during log recovery and
+ * we don't get unnecessary panics on debug kernels.  Use EIO here because all
+ * we want to do is say readahead failed; there is no-one to report the error
+ * to, so this will distinguish it from a non-ra verifier failure.
+ *
  * Changes to this readahead error behaviour also need to be reflected in
  * xfs_dquot_buf_readahead_verify().
  */
@@ -64,7 +66,6 @@ xfs_inode_buf_verify(
 		if (unlikely(!di_ok ||
 				XFS_TEST_ERROR(mp, XFS_ERRTAG_ITOBP_INOTOBP))) {
 			if (readahead) {
-				bp->b_flags &= ~XBF_DONE;
 				xfs_buf_ioerror(bp, -EIO);
 				return;
 			}
@@ -123,24 +124,24 @@ const struct xfs_buf_ops xfs_inode_buf_ra_ops = {
 
 
 /*
- * This routine is called to map an inode to the buffer containing the on-disk
- * version of the inode.  It returns a pointer to the buffer containing the
- * on-disk inode in the bpp parameter.
+ * Read the inode cluster at @bno and return it in @bpp.
  */
 int
-xfs_imap_to_bp(
-	struct xfs_mount	*mp,
+xfs_read_icluster(
+	struct xfs_perag	*pag,
 	struct xfs_trans	*tp,
-	struct xfs_imap		*imap,
+	xfs_agblock_t		agbno,
 	struct xfs_buf		**bpp)
 {
+	struct xfs_mount	*mp = pag_mount(pag);
 	int			error;
 
-	error = xfs_trans_read_buf(mp, tp, mp->m_ddev_targp, imap->im_blkno,
-			imap->im_len, 0, bpp, &xfs_inode_buf_ops);
+	error = xfs_trans_read_buf(mp, tp, mp->m_ddev_targp,
+			xfs_agbno_to_daddr(pag, agbno),
+			XFS_FSB_TO_BB(mp, M_IGEO(mp)->blocks_per_cluster),
+			0, bpp, &xfs_inode_buf_ops);
 	if (xfs_metadata_is_sick(error))
-		xfs_agno_mark_sick(mp, xfs_daddr_to_agno(mp, imap->im_blkno),
-				XFS_SICK_AG_INODES);
+		xfs_agno_mark_sick(mp, pag_agno(pag), XFS_SICK_AG_INODES);
 	return error;
 }
 
@@ -185,7 +186,7 @@ xfs_inode_from_disk(
 
 	ASSERT(ip->i_cowfp == NULL);
 
-	fa = xfs_dinode_verify(ip->i_mount, ip->i_ino, from);
+	fa = xfs_dinode_verify(ip->i_mount, I_INO(ip), from);
 	if (fa) {
 		xfs_inode_verifier_error(ip, -EFSCORRUPTED, "dinode", from,
 				sizeof(*from), fa);
@@ -268,6 +269,10 @@ xfs_inode_from_disk(
 	}
 	if (xfs_is_reflink_inode(ip))
 		xfs_ifork_init_cow(ip);
+	if (xfs_is_metadir_inode(ip)) {
+		XFS_STATS_DEC(ip->i_mount, xs_inodes_active);
+		XFS_STATS_INC(ip->i_mount, xs_inodes_meta);
+	}
 	return 0;
 
 out_destroy_data_fork:
@@ -354,7 +359,7 @@ xfs_inode_to_disk(
 		to->di_flags2 = cpu_to_be64(ip->i_diflags2);
 		/* also covers the di_used_blocks union arm: */
 		to->di_cowextsize = cpu_to_be32(ip->i_cowextsize);
-		to->di_ino = cpu_to_be64(ip->i_ino);
+		to->di_ino = cpu_to_be64(I_INO(ip));
 		to->di_lsn = cpu_to_be64(lsn);
 		memset(to->di_pad2, 0, sizeof(to->di_pad2));
 		uuid_copy(&to->di_uuid, &ip->i_mount->m_sb.sb_meta_uuid);

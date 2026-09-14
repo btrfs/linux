@@ -62,7 +62,7 @@ static struct switch_ctx *alloc_switch_ctx(struct dm_target *ti, unsigned int nr
 {
 	struct switch_ctx *sctx;
 
-	sctx = kzalloc(struct_size(sctx, path_list, nr_paths), GFP_KERNEL);
+	sctx = kzalloc_flex(*sctx, path_list, nr_paths);
 	if (!sctx)
 		return NULL;
 
@@ -184,7 +184,7 @@ static void switch_region_table_write(struct switch_ctx *sctx, unsigned long reg
 	pte = sctx->region_table[region_index];
 	pte &= ~((((region_table_slot_t)1 << sctx->region_table_entry_bits) - 1) << bit);
 	pte |= (region_table_slot_t)value << bit;
-	sctx->region_table[region_index] = pte;
+	WRITE_ONCE(sctx->region_table[region_index], pte);
 }
 
 /*

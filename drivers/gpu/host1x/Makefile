@@ -9,6 +9,7 @@ host1x-y = \
 	job.o \
 	debug.o \
 	mipi.o \
+	tegra114-mipi.o \
 	fence.o \
 	hw/host1x01.o \
 	hw/host1x02.o \
@@ -16,7 +17,8 @@ host1x-y = \
 	hw/host1x05.o \
 	hw/host1x06.o \
 	hw/host1x07.o \
-	hw/host1x08.o
+	hw/host1x08.o \
+	hw/host1x10.o
 
 host1x-$(CONFIG_IOMMU_API) += \
 	context.o

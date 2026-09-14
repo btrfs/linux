@@ -17,6 +17,7 @@
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
 #include <linux/bitmap.h>
+#include <linux/cleanup.h>
 #include <linux/debugfs.h>
 #include <linux/device.h>
 #include <linux/export.h>
@@ -32,6 +33,7 @@
 #include <linux/of.h>
 #include <linux/platform_device.h>
 #include <linux/processor.h>
+#include <linux/rcupdate.h>
 #include <linux/refcount.h>
 #include <linux/slab.h>
 #include <linux/xarray.h>
@@ -133,7 +135,7 @@ struct scmi_protocol_instance {
  *	       usage.
  * @protocols_mtx: A mutex to protect protocols instances initialization.
  * @protocols_imp: List of protocols implemented, currently maximum of
- *		   scmi_revision_info.num_protocols elements allocated by the
+ *		   scmi_base_info.num_protocols elements allocated by the
  *		   base protocol
  * @active_protocols: IDR storing device_nodes for protocols actually defined
  *		      in the DT and confirmed as implemented by fw.
@@ -151,7 +153,7 @@ struct scmi_info {
 	int id;
 	struct device *dev;
 	const struct scmi_desc *desc;
-	struct scmi_revision_info version;
+	struct scmi_base_info version;
 	struct scmi_handle handle;
 	struct scmi_xfers_info tx_minfo;
 	struct scmi_xfers_info rx_minfo;
@@ -265,7 +267,7 @@ scmi_vendor_protocol_lookup(int protocol_id, char *vendor_id,
 }
 
 static const struct scmi_protocol *
-scmi_vendor_protocol_get(int protocol_id, struct scmi_revision_info *version)
+scmi_vendor_protocol_get(int protocol_id, struct scmi_base_info *version)
 {
 	const struct scmi_protocol *proto;
 
@@ -303,7 +305,7 @@ scmi_vendor_protocol_get(int protocol_id, struct scmi_revision_info *version)
 }
 
 static const struct scmi_protocol *
-scmi_protocol_get(int protocol_id, struct scmi_revision_info *version)
+scmi_protocol_get(int protocol_id, struct scmi_base_info *version)
 {
 	const struct scmi_protocol *proto = NULL;
 
@@ -1627,17 +1629,15 @@ static int version_get(const struct scmi_protocol_handle *ph, u32 *version)
  *
  * @ph: A reference to the protocol handle.
  * @priv: The private data to set.
- * @version: The detected protocol version for the core to register.
  *
  * Return: 0 on Success
  */
 static int scmi_set_protocol_priv(const struct scmi_protocol_handle *ph,
-				  void *priv, u32 version)
+				  void *priv)
 {
 	struct scmi_protocol_instance *pi = ph_to_pi(ph);
 
 	pi->priv = priv;
-	pi->version = version;
 
 	return 0;
 }
@@ -1657,7 +1657,6 @@ static void *scmi_get_protocol_priv(const struct scmi_protocol_handle *ph)
 }
 
 static const struct scmi_xfer_ops xfer_ops = {
-	.version_get = version_get,
 	.xfer_get_init = xfer_get_init,
 	.reset_rx_to_maxsz = reset_rx_to_maxsz,
 	.do_xfer = do_xfer,
@@ -1792,84 +1791,113 @@ static void *scmi_iterator_init(const struct scmi_protocol_handle *ph,
 				size_t tx_size, void *priv)
 {
 	int ret;
-	struct scmi_iterator *i;
 
-	i = devm_kzalloc(ph->dev, sizeof(*i), GFP_KERNEL);
+	struct scmi_iterator *i __free(kfree) = kzalloc_obj(*i);
 	if (!i)
 		return ERR_PTR(-ENOMEM);
+
+	if (!ops || !ph)
+		return ERR_PTR(-EINVAL);
 
 	i->ph = ph;
 	i->ops = ops;
 	i->priv = priv;
 
 	ret = ph->xops->xfer_get_init(ph, msg_id, tx_size, 0, &i->t);
-	if (ret) {
-		devm_kfree(ph->dev, i);
+	if (ret)
 		return ERR_PTR(ret);
-	}
 
 	i->state.max_resources = max_resources;
 	i->msg = i->t->tx.buf;
 	i->resp = i->t->rx.buf;
 
-	return i;
+	return no_free_ptr(i);
 }
 
-static int scmi_iterator_run(void *iter)
+static int __scmi_iterator_run(void *iter, unsigned int *start, unsigned int *end)
 {
-	int ret = -EINVAL;
+	int ret;
 	struct scmi_iterator_ops *iops;
 	const struct scmi_protocol_handle *ph;
 	struct scmi_iterator_state *st;
-	struct scmi_iterator *i = iter;
+	struct scmi_iterator *i;
+	unsigned int n;
 
-	if (!i || !i->ops || !i->ph)
-		return ret;
+	if (!iter)
+		return -EINVAL;
 
+	i = iter;
 	iops = i->ops;
 	ph = i->ph;
 	st = &i->state;
+
+	/* Reinitialize state for next run */
+	st->num_returned = 0;
+	st->num_remaining = 0;
+	st->desc_index = start ? *start : 0;
 
 	do {
 		iops->prepare_message(i->msg, st->desc_index, i->priv);
 		ret = ph->xops->do_xfer(ph, i->t);
 		if (ret)
-			break;
+			return ret;
 
 		st->rx_len = i->t->rx.len;
 		ret = iops->update_state(st, i->resp, i->priv);
 		if (ret)
-			break;
+			return ret;
 
 		if (st->num_returned > st->max_resources - st->desc_index) {
 			dev_err(ph->dev,
 				"No. of resources can't exceed %d\n",
 				st->max_resources);
-			ret = -EINVAL;
-			break;
+			return -EINVAL;
 		}
 
-		for (st->loop_idx = 0; st->loop_idx < st->num_returned;
-		     st->loop_idx++) {
+		if (end)
+			n = min(st->num_returned, *end - st->desc_index + 1);
+		else
+			n = st->num_returned;
+		for (st->loop_idx = 0; st->loop_idx < n; st->loop_idx++) {
 			ret = iops->process_response(ph, i->resp, st, i->priv);
 			if (ret)
-				goto out;
+				return ret;
 		}
 
-		st->desc_index += st->num_returned;
+		st->desc_index += n;
 		ph->xops->reset_rx_to_maxsz(ph, i->t);
 		/*
 		 * check for both returned and remaining to avoid infinite
 		 * loop due to buggy firmware
 		 */
-	} while (st->num_returned && st->num_remaining);
+	} while (st->num_returned && st->num_remaining &&
+		 (!end || (st->desc_index <= min(*end, st->max_resources - 1))));
 
-out:
-	/* Finalize and destroy iterator */
-	ph->xops->xfer_put(ph, i->t);
-	devm_kfree(ph->dev, i);
+	return 0;
+}
+
+static void scmi_iterator_bound_cleanup(void *iter)
+{
+	struct scmi_iterator *i = iter;
+
+	i->ph->xops->xfer_put(i->ph, i->t);
+	kfree(i);
+}
+
+static int scmi_iterator_run(void *iter)
+{
+	int ret;
+
+	ret = __scmi_iterator_run(iter, NULL, NULL);
+	scmi_iterator_bound_cleanup(iter);
 
 	return ret;
+}
+
+static int scmi_iterator_run_bound(void *iter, unsigned int *start,
+				   unsigned int *end)
+{
+	return __scmi_iterator_run(iter, start, end);
 }
 
 struct scmi_msg_get_fc_info {
@@ -2050,6 +2078,8 @@ static const struct scmi_proto_helpers_ops helpers_ops = {
 	.get_max_msg_size = scmi_common_get_max_msg_size,
 	.iter_response_init = scmi_iterator_init,
 	.iter_response_run = scmi_iterator_run,
+	.iter_response_run_bound = scmi_iterator_run_bound,
+	.iter_response_bound_cleanup = scmi_iterator_bound_cleanup,
 	.protocol_msg_check = scmi_protocol_msg_check,
 	.fastchannel_init = scmi_common_fastchannel_init,
 	.fastchannel_db_ring = scmi_common_fastchannel_db_ring,
@@ -2066,7 +2096,7 @@ static const struct scmi_proto_helpers_ops helpers_ops = {
  * Return: A reference to the version memory area associated to the SCMI
  *	   instance underlying this protocol handle.
  */
-struct scmi_revision_info *
+struct scmi_base_info *
 scmi_revision_area_get(const struct scmi_protocol_handle *ph)
 {
 	const struct scmi_protocol_instance *pi = ph_to_pi(ph);
@@ -2110,6 +2140,76 @@ static int scmi_protocol_version_negotiate(struct scmi_protocol_handle *ph)
 	xfer_put(ph, t);
 
 	return ret;
+}
+
+/**
+ * scmi_protocol_version_initialize  - Initialize protocol version
+ * @dev: A device reference.
+ * @pi: A reference to the protocol instance being initialized
+ *
+ * At first retrieve the newest protocol version supported by the platform for
+ * this specific protoocol.
+ *
+ * Negotiation is attempted only when the platform advertised a protocol
+ * version newer than the most recent version known to this agent, since
+ * backward compatibility is NOT assured in general between versions.
+ *
+ * Failing to negotiate a fallback version or to query supported version at
+ * all will result in an attempt to use the newest version known to this agent
+ * even though compatibility is NOT assured.
+ *
+ * Versions are defined as:
+ *
+ * pi->version: the version supported by the platform as returned by the query.
+ * pi->proto->supported_version: the newest version supported by this agent
+ *				 for this protocol.
+ * pi->negotiated_version: The version successfully negotiated with the platform.
+ * ph->version: The final version effectively chosen for this session.
+ */
+static void scmi_protocol_version_initialize(struct device *dev,
+					     struct scmi_protocol_instance *pi)
+{
+	struct scmi_protocol_handle *ph = &pi->ph;
+	int ret;
+
+	/*
+	 * Query and store platform supported protocol version: this is usually
+	 * the newest version the platfom can support.
+	 */
+	ret = version_get(ph, &pi->version);
+	if (ret) {
+		dev_warn(dev,
+			 "Failed to query supported version for protocol 0x%X.\n",
+			 pi->proto->id);
+		goto best_effort;
+	}
+
+	/* Need to negotiate at all ? */
+	if (pi->version <= pi->proto->supported_version) {
+		ph->version = pi->version;
+		return;
+	}
+
+	/* Attempt negotiation */
+	ret = scmi_protocol_version_negotiate(ph);
+	if (!ret) {
+		ph->version = pi->negotiated_version;
+		dev_info(dev,
+			 "Protocol 0x%X successfully negotiated version 0x%X\n",
+			 pi->proto->id, ph->version);
+		return;
+	}
+
+	dev_warn(dev,
+		 "Detected UNSUPPORTED higher version 0x%X for protocol 0x%X.\n",
+		 pi->version, pi->proto->id);
+
+best_effort:
+	/* Fallback to use newest version known to this agent */
+	ph->version = pi->proto->supported_version;
+	dev_warn(dev,
+		 "Trying version 0x%X. Backward compatibility is NOT assured.\n",
+		 ph->version);
 }
 
 /**
@@ -2157,6 +2257,13 @@ scmi_alloc_init_protocol_instance(struct scmi_info *info,
 	pi->ph.set_priv = scmi_set_protocol_priv;
 	pi->ph.get_priv = scmi_get_protocol_priv;
 	refcount_set(&pi->users, 1);
+
+	/*
+	 * Initialize effectively used protocol version performing any
+	 * possibly needed negotiations.
+	 */
+	scmi_protocol_version_initialize(handle->dev, pi);
+
 	/* proto->init is assured NON NULL by scmi_protocol_register */
 	ret = pi->proto->instance_init(&pi->ph);
 	if (ret)
@@ -2183,22 +2290,6 @@ scmi_alloc_init_protocol_instance(struct scmi_info *info,
 
 	devres_close_group(handle->dev, pi->gid);
 	dev_dbg(handle->dev, "Initialized protocol: 0x%X\n", pi->proto->id);
-
-	if (pi->version > proto->supported_version) {
-		ret = scmi_protocol_version_negotiate(&pi->ph);
-		if (!ret) {
-			dev_info(handle->dev,
-				 "Protocol 0x%X successfully negotiated version 0x%X\n",
-				 proto->id, pi->negotiated_version);
-		} else {
-			dev_warn(handle->dev,
-				 "Detected UNSUPPORTED higher version 0x%X for protocol 0x%X.\n",
-				 pi->version, pi->proto->id);
-			dev_warn(handle->dev,
-				 "Trying version 0x%X. Backward compatibility is NOT assured.\n",
-				 pi->proto->supported_version);
-		}
-	}
 
 	return pi;
 
@@ -2318,7 +2409,7 @@ scmi_is_protocol_implemented(const struct scmi_handle *handle, u8 prot_id)
 {
 	int i;
 	struct scmi_info *info = handle_to_scmi_info(handle);
-	struct scmi_revision_info *rev = handle->version;
+	struct scmi_base_info *rev = handle->version;
 
 	if (!info->protocols_imp)
 		return false;
@@ -2494,13 +2585,11 @@ static bool scmi_is_transport_atomic(const struct scmi_handle *handle,
  */
 static struct scmi_handle *scmi_handle_get(struct device *dev)
 {
-	struct list_head *p;
 	struct scmi_info *info;
 	struct scmi_handle *handle = NULL;
 
 	mutex_lock(&scmi_list_mutex);
-	list_for_each(p, &scmi_list) {
-		info = list_entry(p, struct scmi_info, node);
+	list_for_each_entry(info, &scmi_list, node) {
 		if (dev->parent == info->dev) {
 			info->users++;
 			handle = &info->handle;
@@ -2540,21 +2629,31 @@ static int scmi_handle_put(const struct scmi_handle *handle)
 	return 0;
 }
 
-static void scmi_device_link_add(struct device *consumer,
+static bool scmi_device_link_add(struct device *consumer,
 				 struct device *supplier)
 {
 	struct device_link *link;
 
 	link = device_link_add(consumer, supplier, DL_FLAG_AUTOREMOVE_CONSUMER);
 
-	WARN_ON(!link);
+	return !WARN_ON(!link);
+}
+
+static void scmi_clear_handle(struct scmi_device *scmi_dev)
+{
+	if (!scmi_dev->handle)
+		return;
+
+	scmi_handle_put(scmi_dev->handle);
+	scmi_dev->handle = NULL;
 }
 
 static void scmi_set_handle(struct scmi_device *scmi_dev)
 {
 	scmi_dev->handle = scmi_handle_get(&scmi_dev->dev);
-	if (scmi_dev->handle)
-		scmi_device_link_add(&scmi_dev->dev, scmi_dev->handle->dev);
+	if (scmi_dev->handle &&
+	    !scmi_device_link_add(&scmi_dev->dev, scmi_dev->handle->dev))
+		scmi_clear_handle(scmi_dev);
 }
 
 static int __scmi_xfer_info_init(struct scmi_info *sinfo,
@@ -2663,6 +2762,9 @@ static int scmi_chan_setup(struct scmi_info *info, struct device_node *of_node,
 	idx = tx ? 0 : 1;
 	idr = tx ? &info->tx_idr : &info->rx_idr;
 
+	if (idr_find(idr, prot_id))
+		return -EEXIST;
+
 	if (!info->desc->ops->chan_available(of_node, idx)) {
 		cinfo = idr_find(idr, SCMI_PROTOCOL_BASE);
 		if (unlikely(!cinfo)) /* Possible only if platform has no Rx */
@@ -2677,9 +2779,10 @@ static int scmi_chan_setup(struct scmi_info *info, struct device_node *of_node,
 	cinfo->is_p2a = !tx;
 	cinfo->rx_timeout_ms = info->desc->max_rx_timeout_ms;
 	cinfo->max_msg_size = info->desc->max_msg_size;
+	cinfo->no_completion_irq = info->desc->no_completion_irq;
 
 	/* Create a unique name for this transport device */
-	snprintf(name, 32, "__scmi_transport_device_%s_%02X",
+	snprintf(name, sizeof(name), SCMI_TRANSPORT_DEVNAME_PREFIX "_%s_%02X",
 		 idx ? "rx" : "tx", prot_id);
 	/* Create a uniquely named, dedicated transport device for this chan */
 	tdev = scmi_device_create(of_node, info->dev, prot_id, name);
@@ -2689,13 +2792,12 @@ static int scmi_chan_setup(struct scmi_info *info, struct device_node *of_node,
 		devm_kfree(info->dev, cinfo);
 		return -EINVAL;
 	}
-	of_node_get(of_node);
 
 	cinfo->id = prot_id;
 	cinfo->dev = &tdev->dev;
+	cinfo->handle = &info->handle;
 	ret = info->desc->ops->chan_setup(cinfo, info->dev, tx);
 	if (ret) {
-		of_node_put(of_node);
 		scmi_device_destroy(info->dev, prot_id, name);
 		devm_kfree(info->dev, cinfo);
 		return ret;
@@ -2718,14 +2820,13 @@ idr_alloc:
 			"unable to allocate SCMI idr slot err %d\n", ret);
 		/* Destroy channel and device only if created by this call. */
 		if (tdev) {
-			of_node_put(of_node);
+			info->desc->ops->chan_free(prot_id, cinfo, idr);
 			scmi_device_destroy(info->dev, prot_id, name);
 			devm_kfree(info->dev, cinfo);
 		}
 		return ret;
 	}
 
-	cinfo->handle = &info->handle;
 	return 0;
 }
 
@@ -2783,9 +2884,11 @@ static int scmi_channels_setup(struct scmi_info *info)
 		if (of_property_read_u32(child, "reg", &prot_id))
 			continue;
 
-		if (!FIELD_FIT(MSG_PROTOCOL_ID_MASK, prot_id))
+		if (!FIELD_FIT(MSG_PROTOCOL_ID_MASK, prot_id)) {
 			dev_err(info->dev,
 				"Out of range protocol %d\n", prot_id);
+			continue;
+		}
 
 		ret = scmi_txrx_setup(info, child, prot_id);
 		if (ret)
@@ -2795,7 +2898,7 @@ static int scmi_channels_setup(struct scmi_info *info)
 	return 0;
 }
 
-static int scmi_chan_destroy(int id, void *p, void *idr)
+static int scmi_chan_destroy(int id, void *p, void *data)
 {
 	struct scmi_chan_info *cinfo = p;
 
@@ -2803,12 +2906,9 @@ static int scmi_chan_destroy(int id, void *p, void *idr)
 		struct scmi_info *info = handle_to_scmi_info(cinfo->handle);
 		struct scmi_device *sdev = to_scmi_dev(cinfo->dev);
 
-		of_node_put(cinfo->dev->of_node);
-		scmi_device_destroy(info->dev, id, sdev->name);
+		scmi_device_destroy(info->dev, cinfo->id, sdev->name);
 		cinfo->dev = NULL;
 	}
-
-	idr_remove(idr, id);
 
 	return 0;
 }
@@ -2836,6 +2936,7 @@ static int scmi_bus_notifier(struct notifier_block *nb,
 {
 	struct scmi_info *info = bus_nb_to_scmi_info(nb);
 	struct scmi_device *sdev = to_scmi_dev(data);
+	const char *status;
 
 	/* Skip devices of different SCMI instances */
 	if (sdev->dev.parent != info->dev)
@@ -2845,18 +2946,22 @@ static int scmi_bus_notifier(struct notifier_block *nb,
 	case BUS_NOTIFY_BIND_DRIVER:
 		/* setup handle now as the transport is ready */
 		scmi_set_handle(sdev);
+		status = "about to be BOUND.";
+		break;
+	case BUS_NOTIFY_DRIVER_NOT_BOUND:
+		scmi_clear_handle(sdev);
+		status = "NOT BOUND.";
 		break;
 	case BUS_NOTIFY_UNBOUND_DRIVER:
-		scmi_handle_put(sdev->handle);
-		sdev->handle = NULL;
+		scmi_clear_handle(sdev);
+		status = "UNBOUND.";
 		break;
 	default:
 		return NOTIFY_DONE;
 	}
 
 	dev_dbg(info->dev, "Device %s (%s) is now %s\n", dev_name(&sdev->dev),
-		sdev->name, action == BUS_NOTIFY_BIND_DRIVER ?
-		"about to be BOUND." : "UNBOUND.");
+		sdev->name, status);
 
 	return NOTIFY_OK;
 }
@@ -2868,7 +2973,9 @@ static int scmi_device_request_notifier(struct notifier_block *nb,
 	struct scmi_device_id *id_table = data;
 	struct scmi_info *info = req_nb_to_scmi_info(nb);
 
+	rcu_read_lock();
 	np = idr_find(&info->active_protocols, id_table->protocol_id);
+	rcu_read_unlock();
 	if (!np)
 		return NOTIFY_DONE;
 
@@ -3092,6 +3199,9 @@ static const struct scmi_desc *scmi_transport_setup(struct device *dev)
 	if (ret && ret != -EINVAL)
 		dev_err(dev, "Malformed arm,max-msg DT property.\n");
 
+	trans->desc.no_completion_irq = of_property_read_bool(dev->of_node,
+							      "arm,no-completion-irq");
+
 	dev_info(dev,
 		 "SCMI max-rx-timeout: %dms / max-msg-size: %dbytes / max-msg: %d\n",
 		 trans->desc.max_rx_timeout_ms, trans->desc.max_msg_size,
@@ -3109,7 +3219,7 @@ static const struct scmi_desc *scmi_transport_setup(struct device *dev)
 
 static void scmi_enable_matching_quirks(struct scmi_info *info)
 {
-	struct scmi_revision_info *rev = &info->version;
+	struct scmi_base_info *rev = &info->version;
 
 	dev_dbg(info->dev, "Looking for quirks matching: %s/%s/0x%08X\n",
 		rev->vendor_id, rev->sub_vendor_id, rev->impl_ver);
@@ -3171,7 +3281,7 @@ static int scmi_probe(struct platform_device *pdev)
 	ret = scmi_channels_setup(info);
 	if (ret) {
 		err_str = "failed to setup channels\n";
-		goto clear_ida;
+		goto clear_txrx_setup;
 	}
 
 	ret = bus_register_notifier(&scmi_bus_type, &info->bus_nb);
@@ -3233,7 +3343,7 @@ static int scmi_probe(struct platform_device *pdev)
 			dev_err(dev, "%s", err_str);
 			return 0;
 		}
-		goto notification_exit;
+		goto raw_mode_cleanup;
 	}
 
 	mutex_lock(&scmi_list_mutex);
@@ -3248,8 +3358,10 @@ static int scmi_probe(struct platform_device *pdev)
 		if (of_property_read_u32(child, "reg", &prot_id))
 			continue;
 
-		if (!FIELD_FIT(MSG_PROTOCOL_ID_MASK, prot_id))
+		if (!FIELD_FIT(MSG_PROTOCOL_ID_MASK, prot_id)) {
 			dev_err(dev, "Out of range protocol %d\n", prot_id);
+			continue;
+		}
 
 		if (!scmi_is_protocol_implemented(handle, prot_id)) {
 			dev_err(dev, "SCMI protocol %d not implemented\n",
@@ -3275,18 +3387,18 @@ static int scmi_probe(struct platform_device *pdev)
 
 	return 0;
 
-notification_exit:
+raw_mode_cleanup:
 	if (IS_ENABLED(CONFIG_ARM_SCMI_RAW_MODE_SUPPORT))
 		scmi_raw_mode_cleanup(info->raw);
-	scmi_notification_exit(&info->handle);
 clear_dev_req_notifier:
 	blocking_notifier_chain_unregister(&scmi_requested_devices_nh,
 					   &info->dev_req_nb);
 clear_bus_notifier:
 	bus_unregister_notifier(&scmi_bus_type, &info->bus_nb);
 clear_txrx_setup:
+	scmi_notification_quiesce(&info->handle);
 	scmi_cleanup_txrx_channels(info);
-clear_ida:
+	scmi_notification_exit(&info->handle);
 	ida_free(&scmi_id, info->id);
 
 out_err:
@@ -3309,6 +3421,12 @@ static void scmi_remove(struct platform_device *pdev)
 	list_del(&info->node);
 	mutex_unlock(&scmi_list_mutex);
 
+	blocking_notifier_chain_unregister(&scmi_requested_devices_nh,
+					   &info->dev_req_nb);
+
+	/* Stop transport callbacks before tearing down notifications. */
+	scmi_notification_quiesce(&info->handle);
+	scmi_cleanup_txrx_channels(info);
 	scmi_notification_exit(&info->handle);
 
 	mutex_lock(&info->protocols_mtx);
@@ -3319,12 +3437,7 @@ static void scmi_remove(struct platform_device *pdev)
 		of_node_put(child);
 	idr_destroy(&info->active_protocols);
 
-	blocking_notifier_chain_unregister(&scmi_requested_devices_nh,
-					   &info->dev_req_nb);
 	bus_unregister_notifier(&scmi_bus_type, &info->bus_nb);
-
-	/* Safe to free channels since no more users */
-	scmi_cleanup_txrx_channels(info);
 
 	ida_free(&scmi_id, info->id);
 }

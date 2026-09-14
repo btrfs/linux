@@ -74,18 +74,26 @@ struct netns_ipv4 {
 
 	/* TXRX readonly hotpath cache lines */
 	__cacheline_group_begin(netns_ipv4_read_txrx);
-	u8 sysctl_tcp_moderate_rcvbuf;
+	u8		sysctl_tcp_shrink_window;
 	__cacheline_group_end(netns_ipv4_read_txrx);
 
 	/* RX readonly hotpath cache line */
 	__cacheline_group_begin(netns_ipv4_read_rx);
+	u8 sysctl_tcp_moderate_rcvbuf;
 	u8 sysctl_ip_early_demux;
 	u8 sysctl_tcp_early_demux;
 	u8 sysctl_tcp_l3mdev_accept;
 	/* 3 bytes hole, try to pack */
 	int sysctl_tcp_reordering;
 	int sysctl_tcp_rmem[3];
+	int sysctl_tcp_rcvbuf_low_rtt;
 	__cacheline_group_end(netns_ipv4_read_rx);
+
+	/* ICMP rate limiter hot cache line. */
+	__cacheline_group_begin_aligned(icmp);
+	atomic_t	icmp_global_credit;
+	u32		icmp_global_stamp;
+	__cacheline_group_end_aligned(icmp);
 
 	struct inet_timewait_death_row tcp_death_row;
 	struct udp_table *udp_table;
@@ -110,12 +118,12 @@ struct netns_ipv4 {
 	struct fib_rules_ops	*rules_ops;
 	struct fib_table __rcu	*fib_main;
 	struct fib_table __rcu	*fib_default;
+	spinlock_t		fib_table_hash_lock;
 	unsigned int		fib_rules_require_fldissect;
 	bool			fib_has_custom_rules;
 #endif
 	bool			fib_has_custom_local_routes;
 	bool			fib_offload_disabled;
-	u8			sysctl_tcp_shrink_window;
 #ifdef CONFIG_IP_ROUTE_CLASSID
 	atomic_t		fib_num_tclassid_users;
 #endif
@@ -135,12 +143,12 @@ struct netns_ipv4 {
 	u8 sysctl_icmp_echo_ignore_broadcasts;
 	u8 sysctl_icmp_ignore_bogus_error_responses;
 	u8 sysctl_icmp_errors_use_inbound_ifaddr;
+	u8 sysctl_icmp_errors_extension_mask;
 	int sysctl_icmp_ratelimit;
 	int sysctl_icmp_ratemask;
 	int sysctl_icmp_msgs_per_sec;
 	int sysctl_icmp_msgs_burst;
-	atomic_t icmp_global_credit;
-	u32 icmp_global_stamp;
+
 	u32 ip_rt_min_pmtu;
 	int ip_rt_mtu_expires;
 	int ip_rt_min_advmss;
@@ -159,6 +167,7 @@ struct netns_ipv4 {
 	u8 sysctl_ip_autobind_reuse;
 	/* Shall we try to damage output packets if routing dev changes? */
 	u8 sysctl_ip_dynaddr;
+	u32 sysctl_ip_local_port_step_width;
 #ifdef CONFIG_NET_L3_MASTER_DEV
 	u8 sysctl_raw_l3mdev_accept;
 #endif
@@ -220,6 +229,7 @@ struct netns_ipv4 {
 	int sysctl_tcp_pacing_ss_ratio;
 	int sysctl_tcp_pacing_ca_ratio;
 	unsigned int sysctl_tcp_child_ehash_entries;
+	int sysctl_tcp_comp_sack_rtt_percent;
 	unsigned long sysctl_tcp_comp_sack_delay_ns;
 	unsigned long sysctl_tcp_comp_sack_slack_ns;
 	int sysctl_max_syn_backlog;
@@ -266,11 +276,14 @@ struct netns_ipv4 {
 
 #ifdef CONFIG_IP_MROUTE
 #ifndef CONFIG_IP_MROUTE_MULTIPLE_TABLES
-	struct mr_table		*mrt;
+	struct mr_table __rcu	*mrt;
 #else
 	struct list_head	mr_tables;
 	struct fib_rules_ops	*mr_rules_ops;
 #endif
+	struct fib_notifier_ops	*ipmr_notifier_ops;
+	atomic_t		ipmr_seq;
+	struct mutex		mfc_mutex;
 #endif
 #ifdef CONFIG_IP_ROUTE_MULTIPATH
 	struct sysctl_fib_multipath_hash_seed sysctl_fib_multipath_hash_seed;
@@ -281,9 +294,6 @@ struct netns_ipv4 {
 
 	struct fib_notifier_ops	*notifier_ops;
 	unsigned int	fib_seq;	/* writes protected by rtnl_mutex */
-
-	struct fib_notifier_ops	*ipmr_notifier_ops;
-	unsigned int	ipmr_seq;	/* protected by rtnl_mutex */
 
 	atomic_t	rt_genid;
 	siphash_key_t	ip_id_key;

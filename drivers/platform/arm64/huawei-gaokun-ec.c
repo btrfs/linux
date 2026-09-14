@@ -680,7 +680,7 @@ static int gaokun_aux_init(struct device *parent, const char *name,
 	struct auxiliary_device *adev;
 	int ret;
 
-	adev = kzalloc(sizeof(*adev), GFP_KERNEL);
+	adev = kzalloc_obj(*adev);
 	if (!adev)
 		return -ENOMEM;
 
@@ -795,7 +795,7 @@ static int gaokun_ec_probe(struct i2c_client *client)
 }
 
 static const struct i2c_device_id gaokun_ec_id[] = {
-	{ "gaokun-ec", },
+	{ .name = "gaokun-ec" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, gaokun_ec_id);

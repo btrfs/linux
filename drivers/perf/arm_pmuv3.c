@@ -8,6 +8,7 @@
  * This code is based heavily on the ARMv7 perf event code.
  */
 
+#include <asm/cputype.h>
 #include <asm/irq_regs.h>
 #include <asm/perf_event.h>
 #include <asm/virt.h>
@@ -795,6 +796,7 @@ static void armv8pmu_disable_user_access(void)
 static void armv8pmu_enable_user_access(struct arm_pmu *cpu_pmu)
 {
 	int i;
+	u64 userenr = ARMV8_PMU_USERENR_ER | ARMV8_PMU_USERENR_UEN;
 	struct pmu_hw_events *cpuc = this_cpu_ptr(cpu_pmu->hw_events);
 
 	if (is_pmuv3p9(cpu_pmu->pmuver)) {
@@ -817,7 +819,10 @@ static void armv8pmu_enable_user_access(struct arm_pmu *cpu_pmu)
 		}
 	}
 
-	update_pmuserenr(ARMV8_PMU_USERENR_ER | ARMV8_PMU_USERENR_CR | ARMV8_PMU_USERENR_UEN);
+	if (!cpu_pmu->avoid_pmccntr)
+		userenr |= ARMV8_PMU_USERENR_CR;
+
+	update_pmuserenr(userenr);
 }
 
 static void armv8pmu_enable_event(struct perf_event *event)
@@ -981,6 +986,7 @@ static int armv8pmu_get_chain_idx(struct pmu_hw_events *cpuc,
 static bool armv8pmu_can_use_pmccntr(struct pmu_hw_events *cpuc,
 				     struct perf_event *event)
 {
+	struct arm_pmu *cpu_pmu = to_arm_pmu(event->pmu);
 	struct hw_perf_event *hwc = &event->hw;
 	unsigned long evtype = hwc->config_base & ARMV8_PMU_EVTYPE_EVENT;
 
@@ -999,6 +1005,9 @@ static bool armv8pmu_can_use_pmccntr(struct pmu_hw_events *cpuc,
 	 * So don't use it for branch events.
 	 */
 	if (has_branch_stack(event))
+		return false;
+
+	if (cpu_pmu->avoid_pmccntr)
 		return false;
 
 	return true;
@@ -1064,7 +1073,7 @@ static int armv8pmu_user_event_idx(struct perf_event *event)
 static void armv8pmu_sched_task(struct perf_event_pmu_context *pmu_ctx,
 				struct task_struct *task, bool sched_in)
 {
-	struct arm_pmu *armpmu = *this_cpu_ptr(&cpu_armpmu);
+	struct arm_pmu *armpmu = to_arm_pmu(pmu_ctx->pmu);
 	struct pmu_hw_events *hw_events = this_cpu_ptr(armpmu->hw_events);
 
 	if (!hw_events->branch_users)
@@ -1240,7 +1249,8 @@ static int __armv8_pmuv3_map_event(struct perf_event *event,
 		if (!(event->attach_state & PERF_ATTACH_TASK))
 			return -EINVAL;
 		if (armv8pmu_event_is_64bit(event) &&
-		    (hw_event_id != ARMV8_PMUV3_PERFCTR_CPU_CYCLES) &&
+		    (hw_event_id != ARMV8_PMUV3_PERFCTR_CPU_CYCLES ||
+		     armpmu->avoid_pmccntr) &&
 		    !armv8pmu_has_long_event(armpmu))
 			return -EOPNOTSUPP;
 
@@ -1288,6 +1298,45 @@ static int armv8_vulcan_map_event(struct perf_event *event)
 	return __armv8_pmuv3_map_event(event, NULL,
 				       &armv8_vulcan_perf_cache_map);
 }
+
+#ifdef CONFIG_ARM64
+/*
+ * List of CPUs that should avoid using PMCCNTR_EL0.
+ */
+static struct midr_range armv8pmu_avoid_pmccntr_cpus[] = {
+	/*
+	 * NVIDIA Olympus may expose different WFI/WFE behaviour between the
+	 * PMCCNTR_EL0 and the CPU_CYCLES event on programmable counters.
+	 * While the CPU is in WFI/WFE state, the PMCCNTR_EL0 may still increment
+	 * but the programmable counter may not. This is an implementation specific
+	 * behavior and not an erratum. Perf assumes those two paths are
+	 * interchangeable, so avoid using PMCCNTR_EL0 for CPU_CYCLES event.
+	 *
+	 * From ARM DDI0487 D14.4:
+	 *   It is IMPLEMENTATION SPECIFIC whether CPU_CYCLES and PMCCNTR count
+	 *   when the PE is in WFI or WFE state, even if the clocks are not stopped.
+	 *
+	 * From ARM DDI0487 D24.5.2:
+	 *   All counters are subject to any changes in clock frequency, including
+	 *   clock stopping caused by the WFI and WFE instructions.
+	 *   This means that it is CONSTRAINED UNPREDICTABLE whether or not
+	 *   PMCCNTR_EL0 continues to increment when clocks are stopped by WFI and
+	 *   WFE instructions.
+	 */
+	MIDR_ALL_VERSIONS(MIDR_NVIDIA_OLYMPUS),
+	{}
+};
+
+static bool armv8pmu_is_in_avoid_pmccntr_cpus(void)
+{
+	return is_midr_in_range_list(armv8pmu_avoid_pmccntr_cpus);
+}
+#else
+static bool armv8pmu_is_in_avoid_pmccntr_cpus(void)
+{
+	return false;
+}
+#endif
 
 struct armv8pmu_probe_info {
 	struct arm_pmu *pmu;
@@ -1338,6 +1387,13 @@ static void __armv8pmu_probe_pmu(void *info)
 	else
 		cpu_pmu->reg_pmmir = 0;
 
+	/*
+	 * On some CPUs, PMCCNTR_EL0 does not match the behavior of CPU_CYCLES
+	 * programmable counter, so avoid routing cycles through PMCCNTR_EL0 to
+	 * prevent inconsistency in the results.
+	 */
+	cpu_pmu->avoid_pmccntr |= armv8pmu_is_in_avoid_pmccntr_cpus();
+
 	brbe_probe(cpu_pmu);
 }
 
@@ -1351,7 +1407,7 @@ static int branch_records_alloc(struct arm_pmu *armpmu)
 		struct pmu_hw_events *events_cpu;
 
 		events_cpu = per_cpu_ptr(armpmu->hw_events, cpu);
-		events_cpu->branch_stack = kmalloc(size, GFP_KERNEL);
+		events_cpu->branch_stack = kzalloc(size, GFP_KERNEL);
 		if (!events_cpu->branch_stack)
 			return -ENOMEM;
 	}
@@ -1465,6 +1521,10 @@ static int name##_pmu_init(struct arm_pmu *cpu_pmu)			\
 
 PMUV3_INIT_SIMPLE(armv8_pmuv3)
 
+PMUV3_INIT_SIMPLE(armv8_c1_nano)
+PMUV3_INIT_SIMPLE(armv8_c1_premium)
+PMUV3_INIT_SIMPLE(armv8_c1_pro)
+PMUV3_INIT_SIMPLE(armv8_c1_ultra)
 PMUV3_INIT_SIMPLE(armv8_cortex_a34)
 PMUV3_INIT_SIMPLE(armv8_cortex_a55)
 PMUV3_INIT_SIMPLE(armv8_cortex_a65)
@@ -1472,11 +1532,14 @@ PMUV3_INIT_SIMPLE(armv8_cortex_a75)
 PMUV3_INIT_SIMPLE(armv8_cortex_a76)
 PMUV3_INIT_SIMPLE(armv8_cortex_a77)
 PMUV3_INIT_SIMPLE(armv8_cortex_a78)
+PMUV3_INIT_SIMPLE(armv9_cortex_a320)
 PMUV3_INIT_SIMPLE(armv9_cortex_a510)
 PMUV3_INIT_SIMPLE(armv9_cortex_a520)
+PMUV3_INIT_SIMPLE(armv9_cortex_a520ae)
 PMUV3_INIT_SIMPLE(armv9_cortex_a710)
 PMUV3_INIT_SIMPLE(armv9_cortex_a715)
 PMUV3_INIT_SIMPLE(armv9_cortex_a720)
+PMUV3_INIT_SIMPLE(armv9_cortex_a720ae)
 PMUV3_INIT_SIMPLE(armv9_cortex_a725)
 PMUV3_INIT_SIMPLE(armv8_cortex_x1)
 PMUV3_INIT_SIMPLE(armv9_cortex_x2)
@@ -1508,6 +1571,10 @@ PMUV3_INIT_MAP_EVENT(armv8_brcm_vulcan, armv8_vulcan_map_event)
 
 static const struct of_device_id armv8_pmu_of_device_ids[] = {
 	{.compatible = "arm,armv8-pmuv3",	.data = armv8_pmuv3_pmu_init},
+	{.compatible = "arm,c1-nano-pmu",	.data = armv8_c1_nano_pmu_init},
+	{.compatible = "arm,c1-premium-pmu",	.data = armv8_c1_premium_pmu_init},
+	{.compatible = "arm,c1-pro-pmu",	.data = armv8_c1_pro_pmu_init},
+	{.compatible = "arm,c1-ultra-pmu",	.data = armv8_c1_ultra_pmu_init},
 	{.compatible = "arm,cortex-a34-pmu",	.data = armv8_cortex_a34_pmu_init},
 	{.compatible = "arm,cortex-a35-pmu",	.data = armv8_cortex_a35_pmu_init},
 	{.compatible = "arm,cortex-a53-pmu",	.data = armv8_cortex_a53_pmu_init},
@@ -1520,11 +1587,14 @@ static const struct of_device_id armv8_pmu_of_device_ids[] = {
 	{.compatible = "arm,cortex-a76-pmu",	.data = armv8_cortex_a76_pmu_init},
 	{.compatible = "arm,cortex-a77-pmu",	.data = armv8_cortex_a77_pmu_init},
 	{.compatible = "arm,cortex-a78-pmu",	.data = armv8_cortex_a78_pmu_init},
+	{.compatible = "arm,cortex-a320-pmu",	.data = armv9_cortex_a320_pmu_init},
 	{.compatible = "arm,cortex-a510-pmu",	.data = armv9_cortex_a510_pmu_init},
 	{.compatible = "arm,cortex-a520-pmu",	.data = armv9_cortex_a520_pmu_init},
+	{.compatible = "arm,cortex-a520ae-pmu",	.data = armv9_cortex_a520ae_pmu_init},
 	{.compatible = "arm,cortex-a710-pmu",	.data = armv9_cortex_a710_pmu_init},
 	{.compatible = "arm,cortex-a715-pmu",	.data = armv9_cortex_a715_pmu_init},
 	{.compatible = "arm,cortex-a720-pmu",	.data = armv9_cortex_a720_pmu_init},
+	{.compatible = "arm,cortex-a720ae-pmu",	.data = armv9_cortex_a720ae_pmu_init},
 	{.compatible = "arm,cortex-a725-pmu",	.data = armv9_cortex_a725_pmu_init},
 	{.compatible = "arm,cortex-x1-pmu",	.data = armv8_cortex_x1_pmu_init},
 	{.compatible = "arm,cortex-x2-pmu",	.data = armv9_cortex_x2_pmu_init},

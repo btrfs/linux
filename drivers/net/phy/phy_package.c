@@ -52,6 +52,29 @@ void *phy_package_get_priv(struct phy_device *phydev)
 }
 EXPORT_SYMBOL_GPL(phy_package_get_priv);
 
+/**
+ * phy_package_lock - acquire the PHY package lock
+ * @phydev: PHY device that has joined the package
+ *
+ * Use this to serialize access to package-private data. Release the lock
+ * with phy_package_unlock().
+ */
+void phy_package_lock(struct phy_device *phydev)
+{
+	mutex_lock(&phydev->mdio.bus->shared_lock);
+}
+EXPORT_SYMBOL_GPL(phy_package_lock);
+
+/**
+ * phy_package_unlock - release the PHY package lock
+ * @phydev: PHY device that has joined the package
+ */
+void phy_package_unlock(struct phy_device *phydev)
+{
+	mutex_unlock(&phydev->mdio.bus->shared_lock);
+}
+EXPORT_SYMBOL_GPL(phy_package_unlock);
+
 static int phy_package_address(struct phy_device *phydev,
 			       unsigned int addr_offset)
 {
@@ -194,8 +217,8 @@ EXPORT_SYMBOL_GPL(phy_package_probe_once);
  * for offset calculation to access generic registers of a PHY package.
  * Usually, one of the PHY addresses of the different PHYs in the package
  * provides access to these global registers.
- * The address which is given here, will be used in the phy_package_read()
- * and phy_package_write() convenience functions as base and added to the
+ * The address which is given here, will be used in the __phy_package_read()
+ * and __phy_package_write() convenience functions as base and added to the
  * passed offset in those functions.
  *
  * This will set the shared pointer of the phydev to the shared storage.
@@ -219,7 +242,7 @@ int phy_package_join(struct phy_device *phydev, int base_addr, size_t priv_size)
 	shared = bus->shared[base_addr];
 	if (!shared) {
 		ret = -ENOMEM;
-		shared = kzalloc(sizeof(*shared), GFP_KERNEL);
+		shared = kzalloc_obj(*shared);
 		if (!shared)
 			goto err_unlock;
 		if (priv_size) {
