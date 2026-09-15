@@ -53,21 +53,36 @@ struct intel_tlv {
 } __packed;
 
 #define BTINTEL_HCI_OP_RESET	0xfc01
+#define BTINTEL_HCI_OP_DEBUG	0xfcd9
 
-#define BTINTEL_CNVI_BLAZARI		0x900
-#define BTINTEL_CNVI_BLAZARIW		0x901
-#define BTINTEL_CNVI_GAP		0x910
-#define BTINTEL_CNVI_BLAZARU		0x930
-#define BTINTEL_CNVI_SCP		0xA00
+#define BTINTEL_CNVI_BLAZARI		0x900	/* BlazarI - Lunar Lake */
+#define BTINTEL_CNVI_BLAZARIW		0x901	/* BlazarIW - Wildcat Lake */
+#define BTINTEL_CNVI_GAP		0x910	/* Gale Peak2 - Meteor Lake */
+#define BTINTEL_CNVI_BLAZARU		0x930	/* BlazarU - Meteor Lake */
+#define BTINTEL_CNVI_SCP		0xA00	/* Scorpius Peak - Panther Lake */
+#define BTINTEL_CNVI_SCP2		0xA10	/* Scorpius Peak2 - Nova Lake */
+#define BTINTEL_CNVI_SCP2F		0xA20	/* Scorpius Peak2F - Nova Lake */
 
 /* CNVR */
 #define BTINTEL_CNVR_FMP2		0x910
+#define BTINTEL_CNVR_WHP2		0xA10	/* Whale Peak2 - Panther Lake */
 
 #define BTINTEL_IMG_BOOTLOADER		0x01	/* Bootloader image */
 #define BTINTEL_IMG_IML			0x02	/* Intermediate image */
 #define BTINTEL_IMG_OP			0x03	/* Operational image */
 
 #define BTINTEL_FWID_MAXLEN 64
+
+/* CNVi Hardware variant */
+#define BTINTEL_HWID_GAP	0x1c	/* Gale Peak2 - Meteor Lake */
+#define BTINTEL_HWID_BZRI	0x1e	/* BlazarI - Lunar Lake */
+#define BTINTEL_HWID_BZRU	0x1d	/* BlazarU - Meteor Lake */
+#define BTINTEL_HWID_SCP	0x1f	/* Scorpius Peak - Panther Lake */
+#define BTINTEL_HWID_SCP2	0x20	/* Scorpius Peak2 - Nova Lake */
+#define BTINTEL_HWID_SCP2F	0x21	/* Scorpius Peak2-F - Nova Lake */
+#define BTINTEL_HWID_BZRIW	0x22	/* BlazarIW - Wildcat Lake */
+
+extern const guid_t btintel_guid_dsm;
 
 struct intel_version_tlv {
 	u32	cnvi_top;
@@ -190,6 +205,23 @@ struct btintel_sar_inc_pwr {
 	u8	le_lr;
 };
 
+/* Bluetooth SAR feature (BRDS), Revision 2 - per-chain sub-band power limits */
+struct btintel_sar_band_limits {
+	u8	subband_2g4;
+	u8	subband_5g2;
+	u8	subband_5g8_5g9;
+	u8	subband_6g1;
+	u8	subband_6g3;
+};
+
+struct btintel_sar_rev2 {
+	u8	revision;
+	u32	bt_sar_bios;    /* 1: BIOS-managed SAR enabled */
+	u32	inc_power_mode; /* 0: supported, 1: disabled */
+	struct btintel_sar_band_limits chain_a;
+	struct btintel_sar_band_limits chain_b;
+};
+
 #define INTEL_HW_PLATFORM(cnvx_bt)	((u8)(((cnvx_bt) & 0x0000ff00) >> 8))
 #define INTEL_HW_VARIANT(cnvx_bt)	((u8)(((cnvx_bt) & 0x003f0000) >> 16))
 #define INTEL_CNVX_TOP_TYPE(cnvx_top)	((cnvx_top) & 0x00000fff)
@@ -279,6 +311,7 @@ int btintel_bootloader_setup_tlv(struct hci_dev *hdev,
 int btintel_shutdown_combined(struct hci_dev *hdev);
 void btintel_hw_error(struct hci_dev *hdev, u8 code);
 void btintel_print_fseq_info(struct hci_dev *hdev);
+int btintel_acpi_reset_method(struct hci_dev *hdev);
 #else
 
 static inline int btintel_check_bdaddr(struct hci_dev *hdev)
@@ -411,5 +444,9 @@ static inline void btintel_hw_error(struct hci_dev *hdev, u8 code)
 
 static inline void btintel_print_fseq_info(struct hci_dev *hdev)
 {
+}
+static inline int btintel_acpi_reset_method(struct hci_dev *hdev)
+{
+	return -ENODEV;
 }
 #endif

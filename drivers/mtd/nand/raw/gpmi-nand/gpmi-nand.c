@@ -5,7 +5,9 @@
  * Copyright (C) 2010-2015 Freescale Semiconductor, Inc.
  * Copyright (C) 2008 Embedded Alley Solutions, Inc.
  */
+#include <linux/cleanup.h>
 #include <linux/clk.h>
+#include <linux/debugfs.h>
 #include <linux/delay.h>
 #include <linux/slab.h>
 #include <linux/sched/task_stack.h>
@@ -191,7 +193,6 @@ static int gpmi_init(struct gpmi_nand_data *this)
 	       r->gpmi_regs + HW_GPMI_CTRL1_SET);
 
 err_out:
-	pm_runtime_mark_last_busy(this->dev);
 	pm_runtime_put_autosuspend(this->dev);
 	return ret;
 }
@@ -732,6 +733,31 @@ static int common_nfc_set_geometry(struct gpmi_nand_data *this)
 	return err;
 }
 
+#ifdef CONFIG_DEBUG_FS
+static void bch_remove_debugfs(void *data)
+{
+	struct gpmi_nand_data *this = data;
+
+	debugfs_remove_recursive(this->dbg_root);
+	this->dbg_root = NULL;
+}
+
+static void bch_create_debugfs(struct gpmi_nand_data *this)
+{
+	struct bch_geometry *bch_geo = &this->bch_geometry;
+
+	this->dbg_root = debugfs_create_dir("gpmi-nand", NULL);
+	this->dbg_bch_geo.data = (void *)bch_geo;
+	this->dbg_bch_geo.size = sizeof(struct bch_geometry);
+	this->raw_mode = true;
+	debugfs_create_blob("bch_geometry", 0444, this->dbg_root, &this->dbg_bch_geo);
+	debugfs_create_bool("raw_mode", 0444, this->dbg_root, &this->raw_mode);
+	devm_add_action_or_reset(this->dev, bch_remove_debugfs, this);
+}
+#else
+static void bch_create_debugfs(struct gpmi_nand_data *this) {}
+#endif /* CONFIG_DEBUG_FS */
+
 /* Configures the geometry for BCH.  */
 static int bch_set_geometry(struct gpmi_nand_data *this)
 {
@@ -761,7 +787,6 @@ static int bch_set_geometry(struct gpmi_nand_data *this)
 
 	ret = 0;
 err_out:
-	pm_runtime_mark_last_busy(this->dev);
 	pm_runtime_put_autosuspend(this->dev);
 
 	return ret;
@@ -2283,6 +2308,9 @@ static int gpmi_init_last(struct gpmi_nand_data *this)
 	if (ret)
 		return ret;
 
+	/* save BCH geometry to debugfs if CONFIG_DEBUG_FS is enabled */
+	bch_create_debugfs(this);
+
 	/* Init the nand_ecc_ctrl{} */
 	ecc->read_page	= gpmi_ecc_read_page;
 	ecc->write_page	= gpmi_ecc_write_page;
@@ -2667,7 +2695,6 @@ unmap:
 	this->bch = false;
 
 out_pm:
-	pm_runtime_mark_last_busy(this->dev);
 	pm_runtime_put_autosuspend(this->dev);
 
 	return ret;
@@ -2691,7 +2718,15 @@ static int gpmi_nand_init(struct gpmi_nand_data *this)
 
 	/* init the nand_chip{}, we don't support a 16-bit NAND Flash bus. */
 	nand_set_controller_data(chip, this);
-	nand_set_flash_node(chip, this->pdev->dev.of_node);
+
+	struct device_node *np __free(device_node) =
+		of_get_next_child_with_prefix(this->pdev->dev.of_node, NULL, "nand");
+
+	if (np)
+		nand_set_flash_node(chip, np);
+	else
+		nand_set_flash_node(chip, this->pdev->dev.of_node);
+
 	chip->legacy.block_markbad = gpmi_block_markbad;
 	chip->badblock_pattern	= &gpmi_bbt_descr;
 	chip->options		|= NAND_NO_SUBPAGE_WRITE;

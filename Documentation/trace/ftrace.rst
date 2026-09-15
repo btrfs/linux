@@ -366,6 +366,14 @@ of ftrace. Here is a list of some of the key files:
 	for each function. The displayed address is the patch-site address
 	and can differ from /proc/kallsyms address.
 
+  syscall_user_buf_size:
+
+	Some system call trace events will record the data from a user
+	space address that one of the parameters point to. The amount of
+	data per event is limited. This file holds the max number of bytes
+	that will be recorded into the ring buffer to hold this data.
+	The max value is currently 165.
+
   dyn_ftrace_total_info:
 
 	This file is for debugging purposes. The number of functions that
@@ -562,6 +570,10 @@ of ftrace. Here is a list of some of the key files:
 		to correlate events across hypervisor/guest if
 		tb_offset is known.
 
+	s390-tod:
+		This uses the s390 TOD clock value. This clock is usually in
+		sync across virtual machines and STP-enabled machines.
+
 	mono:
 		This uses the fast monotonic clock (CLOCK_MONOTONIC)
 		which is monotonic and is subject to NTP rate adjustments.
@@ -673,6 +685,22 @@ of ftrace. Here is a list of some of the key files:
   set_event:
 
 	By echoing in the event into this file, will enable that event.
+
+	See events.rst for more information.
+
+  show_event_filters:
+
+	A list of events that have filters. This shows the
+	system/event pair along with the filter that is attached to
+	the event.
+
+	See events.rst for more information.
+
+  show_event_triggers:
+
+	A list of events that have triggers. This shows the
+	system/event pair along with the trigger that is attached to
+	the event.
 
 	See events.rst for more information.
 
@@ -1282,6 +1310,15 @@ Here are the available options:
         This will be useful if you want to find out which hashed
         value is corresponding to the real value in trace log.
 
+  bitmask-list
+        When enabled, bitmasks are displayed as a human-readable list of
+        ranges (e.g., 0,2-5,7) using the printk "%*pbl" format specifier.
+        When disabled (the default), bitmasks are displayed in the
+        traditional hexadecimal bitmap representation. The list format is
+        particularly useful for tracing CPU masks and other large bitmasks
+        where individual bit positions are more meaningful than their
+        hexadecimal encoding.
+
   record-cmd
 	When any event or tracer is enabled, a hook is enabled
 	in the sched_switch trace point to fill comm cache
@@ -1591,7 +1628,7 @@ function-trace, we get a much larger output::
    => blk_queue_bio
    => submit_bio_noacct
    => submit_bio
-   => submit_bh
+   => bh_submit
    => __ext3_get_inode_loc
    => ext3_iget
    => ext3_lookup
@@ -1876,7 +1913,7 @@ tracers.
    => blk_queue_bio
    => submit_bio_noacct
    => submit_bio
-   => submit_bh
+   => bh_submit
    => ext3_bread
    => ext3_dir_bread
    => htree_dirblock_to_tree
@@ -3275,6 +3312,11 @@ this special filter via::
 
 ftrace_enabled
 --------------
+
+.. note::
+   Disabling ftrace via this switch is deprecated. Writing 0 is refused
+   with -EOPNOTSUPP and logs a warning; writing 1 and reading the value
+   are unaffected.
 
 Note, the proc sysctl ftrace_enable is a big on/off switch for the
 function tracer. By default it is enabled (when function tracing is

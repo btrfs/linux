@@ -126,7 +126,7 @@ int mthca_array_set(struct mthca_array *array, int index, void *value)
 
 	/* Allocate with GFP_ATOMIC because we'll be called with locks held. */
 	if (!array->page_list[p].page)
-		array->page_list[p].page = (void **) get_zeroed_page(GFP_ATOMIC);
+		array->page_list[p].page = kzalloc(PAGE_SIZE, GFP_ATOMIC);
 
 	if (!array->page_list[p].page)
 		return -ENOMEM;
@@ -142,7 +142,7 @@ void mthca_array_clear(struct mthca_array *array, int index)
 	int p = (index * sizeof (void *)) >> PAGE_SHIFT;
 
 	if (--array->page_list[p].used == 0) {
-		free_page((unsigned long) array->page_list[p].page);
+		kfree(array->page_list[p].page);
 		array->page_list[p].page = NULL;
 	} else
 		array->page_list[p].page[index & MTHCA_ARRAY_MASK] = NULL;
@@ -157,8 +157,7 @@ int mthca_array_init(struct mthca_array *array, int nent)
 	int npage = (nent * sizeof (void *) + PAGE_SIZE - 1) / PAGE_SIZE;
 	int i;
 
-	array->page_list = kmalloc_array(npage, sizeof(*array->page_list),
-					 GFP_KERNEL);
+	array->page_list = kmalloc_objs(*array->page_list, npage);
 	if (!array->page_list)
 		return -ENOMEM;
 
@@ -175,7 +174,7 @@ void mthca_array_cleanup(struct mthca_array *array, int nent)
 	int i;
 
 	for (i = 0; i < (nent * sizeof (void *) + PAGE_SIZE - 1) / PAGE_SIZE; ++i)
-		free_page((unsigned long) array->page_list[i].page);
+		kfree(array->page_list[i].page);
 
 	kfree(array->page_list);
 }
@@ -231,9 +230,7 @@ int mthca_buf_alloc(struct mthca_dev *dev, int size, int max_direct,
 		if (!dma_list)
 			return -ENOMEM;
 
-		buf->page_list = kmalloc_array(npages,
-					       sizeof(*buf->page_list),
-					       GFP_KERNEL);
+		buf->page_list = kmalloc_objs(*buf->page_list, npages);
 		if (!buf->page_list)
 			goto err_out;
 

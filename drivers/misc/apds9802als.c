@@ -217,7 +217,7 @@ static int apds9802als_probe(struct i2c_client *client)
 	int res;
 	struct als_data *data;
 
-	data = kzalloc(sizeof(struct als_data), GFP_KERNEL);
+	data = kzalloc_obj(struct als_data);
 	if (data == NULL) {
 		dev_err(&client->dev, "Memory allocation failed\n");
 		return -ENOMEM;
@@ -285,7 +285,7 @@ static UNIVERSAL_DEV_PM_OPS(apds9802als_pm_ops, apds9802als_suspend,
 #endif	/* CONFIG_PM */
 
 static const struct i2c_device_id apds9802als_id[] = {
-	{ DRIVER_NAME },
+	{ .name = DRIVER_NAME },
 	{ }
 };
 

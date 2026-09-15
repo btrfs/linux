@@ -28,6 +28,7 @@
 #include "session.h"
 #include "perf_regs.h"
 #include "string2.h"
+#include "dwarf-regs.h"
 
 /* 4096 - 2 ('\n' + '\0') */
 #define MAX_CMDLEN 4094
@@ -196,6 +197,8 @@ struct strlist *probe_file__get_rawlist(int fd)
 		idx = strlen(p) - 1;
 		if (p[idx] == '\n')
 			p[idx] = '\0';
+		if (buf[0] == '#')
+			continue;
 		ret = strlist__add(sl, buf);
 		if (ret < 0) {
 			pr_debug("strlist__add failed (%d)\n", ret);
@@ -413,7 +416,7 @@ int probe_cache_entry__get_event(struct probe_cache_entry *entry,
 	if (ret > probe_conf.max_probes)
 		return -E2BIG;
 
-	*tevs = zalloc(ret * sizeof(*tev));
+	*tevs = calloc(ret, sizeof(*tev));
 	if (!*tevs)
 		return -ENOMEM;
 
@@ -784,7 +787,7 @@ static int synthesize_sdt_probe_arg(struct strbuf *buf, int i, const char *arg)
 		op = desc;
 	}
 
-	ret = arch_sdt_arg_parse_op(op, &new_op);
+	ret = perf_sdt_arg_parse_op(EM_HOST, op, &new_op);
 
 	if (ret < 0)
 		goto error;

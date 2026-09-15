@@ -15,6 +15,8 @@
 #include <stdio.h>
 #include <sched.h>
 
+#include <linux/compiler.h>
+
 #include "osnoise.h"
 
 #define DEFAULT_SAMPLE_PERIOD	1000000			/* 1s */
@@ -62,7 +64,7 @@ int osnoise_set_cpus(struct osnoise_context *context, char *cpus)
 	if (!context->curr_cpus)
 		return -1;
 
-	snprintf(buffer, 1024, "%s\n", cpus);
+	snprintf(buffer, ARRAY_SIZE(buffer), "%s\n", cpus);
 
 	debug_msg("setting cpus to %s from %s", cpus, context->orig_cpus);
 
@@ -419,6 +421,86 @@ void osnoise_put_timerlat_period_us(struct osnoise_context *context)
 		return;
 
 	context->orig_timerlat_period_us = OSNOISE_TIME_INIT_VAL;
+}
+
+/*
+ * osnoise_get_timerlat_align_us - read and save the original "timerlat_align_us"
+ */
+static long long
+osnoise_get_timerlat_align_us(struct osnoise_context *context)
+{
+	long long timerlat_align_us;
+
+	if (context->timerlat_align_us != OSNOISE_OPTION_INIT_VAL)
+		return context->timerlat_align_us;
+
+	if (context->orig_timerlat_align_us != OSNOISE_OPTION_INIT_VAL)
+		return context->orig_timerlat_align_us;
+
+	timerlat_align_us = osnoise_read_ll_config("osnoise/timerlat_align_us");
+	if (timerlat_align_us < 0)
+		goto out_err;
+
+	context->orig_timerlat_align_us = timerlat_align_us;
+	return timerlat_align_us;
+
+out_err:
+	return OSNOISE_OPTION_INIT_VAL;
+}
+
+/*
+ * osnoise_set_timerlat_align_us - set "timerlat_align_us"
+ */
+int osnoise_set_timerlat_align_us(struct osnoise_context *context, long long timerlat_align_us)
+{
+	long long curr_timerlat_align_us = osnoise_get_timerlat_align_us(context);
+	int retval;
+
+	if (curr_timerlat_align_us == OSNOISE_OPTION_INIT_VAL)
+		return -1;
+
+	retval = osnoise_write_ll_config("osnoise/timerlat_align_us", timerlat_align_us);
+	if (retval < 0)
+		return -1;
+
+	context->timerlat_align_us = timerlat_align_us;
+
+	return 0;
+}
+
+/*
+ * osnoise_restore_timerlat_align_us - restore "timerlat_align_us"
+ */
+void osnoise_restore_timerlat_align_us(struct osnoise_context *context)
+{
+	int retval;
+
+	if (context->orig_timerlat_align_us == OSNOISE_OPTION_INIT_VAL)
+		return;
+
+	if (context->orig_timerlat_align_us == context->timerlat_align_us)
+		goto out_done;
+
+	retval = osnoise_write_ll_config("osnoise/timerlat_align_us",
+				   context->orig_timerlat_align_us);
+	if (retval < 0)
+		err_msg("Could not restore original osnoise timerlat_align_us\n");
+
+out_done:
+	context->timerlat_align_us = OSNOISE_OPTION_INIT_VAL;
+}
+
+/*
+ * osnoise_put_timerlat_align_us - restore original values and cleanup data
+ */
+void osnoise_put_timerlat_align_us(struct osnoise_context *context)
+{
+	osnoise_restore_timerlat_align_us(context);
+
+	if (context->orig_timerlat_align_us == OSNOISE_OPTION_INIT_VAL)
+		return;
+
+	context->orig_timerlat_align_us = OSNOISE_OPTION_INIT_VAL;
 }
 
 /*
@@ -906,6 +988,67 @@ static void osnoise_put_workload(struct osnoise_context *context)
 	context->orig_opt_workload = OSNOISE_OPTION_INIT_VAL;
 }
 
+static int osnoise_get_timerlat_align(struct osnoise_context *context)
+{
+	if (context->opt_timerlat_align != OSNOISE_OPTION_INIT_VAL)
+		return context->opt_timerlat_align;
+
+	if (context->orig_opt_timerlat_align != OSNOISE_OPTION_INIT_VAL)
+		return context->orig_opt_timerlat_align;
+
+	context->orig_opt_timerlat_align = osnoise_options_get_option("TIMERLAT_ALIGN");
+
+	return context->orig_opt_timerlat_align;
+}
+
+int osnoise_set_timerlat_align(struct osnoise_context *context, bool onoff)
+{
+	int opt_timerlat_align = osnoise_get_timerlat_align(context);
+	int retval;
+
+	if (opt_timerlat_align == OSNOISE_OPTION_INIT_VAL)
+		return -1;
+
+	if (opt_timerlat_align == onoff)
+		return 0;
+
+	retval = osnoise_options_set_option("TIMERLAT_ALIGN", onoff);
+	if (retval < 0)
+		return -2;
+
+	context->opt_timerlat_align = onoff;
+
+	return 0;
+}
+
+static void osnoise_restore_timerlat_align(struct osnoise_context *context)
+{
+	int retval;
+
+	if (context->orig_opt_timerlat_align == OSNOISE_OPTION_INIT_VAL)
+		return;
+
+	if (context->orig_opt_timerlat_align == context->opt_timerlat_align)
+		goto out_done;
+
+	retval = osnoise_options_set_option("TIMERLAT_ALIGN", context->orig_opt_timerlat_align);
+	if (retval < 0)
+		err_msg("Could not restore original TIMERLAT_ALIGN option\n");
+
+out_done:
+	context->orig_opt_timerlat_align = OSNOISE_OPTION_INIT_VAL;
+}
+
+static void osnoise_put_timerlat_align(struct osnoise_context *context)
+{
+	osnoise_restore_timerlat_align(context);
+
+	if (context->orig_opt_timerlat_align == OSNOISE_OPTION_INIT_VAL)
+		return;
+
+	context->orig_opt_timerlat_align = OSNOISE_OPTION_INIT_VAL;
+}
+
 enum {
 	FLAG_CONTEXT_NEWLY_CREATED	= (1 << 0),
 	FLAG_CONTEXT_DELETED		= (1 << 1),
@@ -938,9 +1081,7 @@ struct osnoise_context *osnoise_context_alloc(void)
 {
 	struct osnoise_context *context;
 
-	context = calloc(1, sizeof(*context));
-	if (!context)
-		return NULL;
+	context = calloc_fatal(1, sizeof(*context));
 
 	context->orig_stop_us		= OSNOISE_OPTION_INIT_VAL;
 	context->stop_us		= OSNOISE_OPTION_INIT_VAL;
@@ -959,6 +1100,12 @@ struct osnoise_context *osnoise_context_alloc(void)
 
 	context->orig_opt_workload	= OSNOISE_OPTION_INIT_VAL;
 	context->opt_workload		= OSNOISE_OPTION_INIT_VAL;
+
+	context->orig_opt_timerlat_align	= OSNOISE_OPTION_INIT_VAL;
+	context->opt_timerlat_align		= OSNOISE_OPTION_INIT_VAL;
+
+	context->orig_timerlat_align_us	= OSNOISE_OPTION_INIT_VAL;
+	context->timerlat_align_us	= OSNOISE_OPTION_INIT_VAL;
 
 	osnoise_get_context(context);
 
@@ -988,6 +1135,8 @@ void osnoise_put_context(struct osnoise_context *context)
 	osnoise_put_tracing_thresh(context);
 	osnoise_put_irq_disable(context);
 	osnoise_put_workload(context);
+	osnoise_put_timerlat_align(context);
+	osnoise_put_timerlat_align_us(context);
 
 	free(context);
 }
@@ -1017,24 +1166,16 @@ void osnoise_destroy_tool(struct osnoise_tool *top)
 struct osnoise_tool *osnoise_init_tool(char *tool_name)
 {
 	struct osnoise_tool *top;
-	int retval;
 
-	top = calloc(1, sizeof(*top));
-	if (!top)
-		return NULL;
-
+	top = calloc_fatal(1, sizeof(*top));
 	top->context = osnoise_context_alloc();
-	if (!top->context)
-		goto out_err;
 
-	retval = trace_instance_init(&top->trace, tool_name);
-	if (retval)
-		goto out_err;
+	if (trace_instance_init(&top->trace, tool_name)) {
+		osnoise_destroy_tool(top);
+		return NULL;
+	}
 
 	return top;
-out_err:
-	osnoise_destroy_tool(top);
-	return NULL;
 }
 
 /*
@@ -1128,18 +1269,6 @@ osnoise_apply_config(struct osnoise_tool *tool, struct osnoise_params *params)
 		goto out_err;
 	}
 
-	retval = osnoise_set_stop_us(tool->context, params->common.stop_us);
-	if (retval) {
-		err_msg("Failed to set stop us\n");
-		goto out_err;
-	}
-
-	retval = osnoise_set_stop_total_us(tool->context, params->common.stop_total_us);
-	if (retval) {
-		err_msg("Failed to set stop total us\n");
-		goto out_err;
-	}
-
 	retval = osnoise_set_tracing_thresh(tool->context, params->threshold);
 	if (retval) {
 		err_msg("Failed to set tracing_thresh\n");
@@ -1184,13 +1313,16 @@ int osnoise_enable(struct osnoise_tool *tool)
 			debug_msg("Error cleaning up the buffer");
 			return retval;
 		}
-
 	}
+
+	retval = osn_set_stop(tool);
+	if (retval)
+		return retval;
 
 	return 0;
 }
 
-static void osnoise_usage(int err)
+__noreturn static void osnoise_usage(int err)
 {
 	int i;
 
@@ -1228,8 +1360,8 @@ int osnoise_main(int argc, char *argv[])
 	}
 
 	if ((strcmp(argv[1], "-h") == 0) || (strcmp(argv[1], "--help") == 0)) {
-		osnoise_usage(0);
-	} else if (strncmp(argv[1], "-", 1) == 0) {
+		osnoise_usage(129);
+	} else if (str_has_prefix(argv[1], "-")) {
 		/* the user skipped the tool, call the default one */
 		run_tool(&osnoise_top_ops, argc, argv);
 		exit(0);
@@ -1242,8 +1374,7 @@ int osnoise_main(int argc, char *argv[])
 	}
 
 usage:
-	osnoise_usage(1);
-	exit(1);
+	osnoise_usage(129);
 }
 
 int hwnoise_main(int argc, char *argv[])

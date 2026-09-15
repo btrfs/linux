@@ -56,6 +56,30 @@ int trusted_task_arg_nullable(void *ctx)
 	return res;
 }
 
+/*
+ * Check that the verifier does not use checkpoints created
+ * on path with r1 == 0 to prune path with r1 != 0.
+ */
+SEC("?tp_btf/task_newtask")
+__failure
+__flag(BPF_F_TEST_STATE_FREQ)
+__msg("R1 type=scalar expected=ptr_, trusted_ptr_, rcu_ptr_")
+__naked int null_btf_id_arg_global_subprog(void)
+{
+	asm volatile (
+		"call %[bpf_get_prandom_u32];"
+		"r1 = 42;"
+		"if r0 > 42 goto 1f;"
+		"r1 = 0;"
+	"1:"
+		"call subprog_trusted_task_nullable;"
+		"r0 = 0;"
+		"exit;"
+		:
+		: __imm(bpf_get_prandom_u32)
+		: __clobber_all);
+}
+
 __weak int subprog_trusted_task_nonnull(struct task_struct *task __arg_trusted)
 {
 	return task->pid + task->tgid;
@@ -72,7 +96,7 @@ int trusted_task_arg_nonnull_fail1(void *ctx)
 
 SEC("?tp_btf/task_newtask")
 __failure __log_level(2)
-__msg("R1 type=ptr_or_null_ expected=ptr_, trusted_ptr_, rcu_ptr_")
+__msg("R1 type=trusted_ptr_or_null_ expected=ptr_, trusted_ptr_, rcu_ptr_")
 __msg("Caller passes invalid args into func#1 ('subprog_trusted_task_nonnull')")
 int trusted_task_arg_nonnull_fail2(void *ctx)
 {
@@ -153,7 +177,7 @@ __weak int subprog_trusted_destroy(struct task_struct *task __arg_trusted)
 
 SEC("?tp_btf/task_newtask")
 __failure __log_level(2)
-__msg("release kernel function bpf_task_release expects refcounted PTR_TO_BTF_ID")
+__msg("release kfunc bpf_task_release expects referenced PTR_TO_BTF_ID passed to R1")
 int BPF_PROG(trusted_destroy_fail, struct task_struct *task, u64 clone_flags)
 {
 	return subprog_trusted_destroy(task);
@@ -285,6 +309,25 @@ __msg(": R1=rdonly_untrusted_mem(sz=0)")
 int trusted_to_untrusted_mem(void *ctx)
 {
 	return subprog_void_untrusted(bpf_get_current_task_btf());
+}
+
+__weak int subprog_write_mem_arg(int *p)
+{
+	if (!p)
+		return 0;
+
+	*p = 42;
+	return 0;
+}
+
+SEC("?tp_btf/task_newtask")
+__failure
+__msg("only read is supported")
+int trusted_btf_field_to_writable_mem(void *ctx)
+{
+	struct task_struct *task = bpf_get_current_task_btf();
+
+	return subprog_write_mem_arg(&task->prio);
 }
 
 SEC("tp_btf/sys_enter")

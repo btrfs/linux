@@ -63,18 +63,17 @@ enum drm_mode_status intel_dsi_mode_valid(struct drm_connector *connector,
 {
 	struct intel_display *display = to_intel_display(connector->dev);
 	struct intel_connector *intel_connector = to_intel_connector(connector);
-	const struct drm_display_mode *fixed_mode =
-		intel_panel_fixed_mode(intel_connector, mode);
 	int max_dotclk = display->cdclk.max_dotclk_freq;
 	enum drm_mode_status status;
+	int target_clock;
 
 	drm_dbg_kms(display->drm, "\n");
 
-	status = intel_panel_mode_valid(intel_connector, mode);
+	status = intel_panel_mode_valid(intel_connector, mode, &target_clock);
 	if (status != MODE_OK)
 		return status;
 
-	if (fixed_mode->clock > max_dotclk)
+	if (target_clock > max_dotclk)
 		return MODE_CLOCK_HIGH;
 
 	return intel_mode_valid_max_plane_size(display, mode, 1);
@@ -87,7 +86,7 @@ struct intel_dsi_host *intel_dsi_host_init(struct intel_dsi *intel_dsi,
 	struct intel_dsi_host *host;
 	struct mipi_dsi_device *device;
 
-	host = kzalloc(sizeof(*host), GFP_KERNEL);
+	host = kzalloc_obj(*host);
 	if (!host)
 		return NULL;
 
@@ -102,7 +101,7 @@ struct intel_dsi_host *intel_dsi_host_init(struct intel_dsi *intel_dsi,
 	 * devices by ourselves here too. Need to be careful though, because we
 	 * don't initialize any of the driver model devices here.
 	 */
-	device = kzalloc(sizeof(*device), GFP_KERNEL);
+	device = kzalloc_obj(*device);
 	if (!device) {
 		kfree(host);
 		return NULL;

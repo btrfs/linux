@@ -95,6 +95,8 @@ struct target_core_fabric_ops {
 				struct se_lun *);
 	void (*fabric_pre_unlink)(struct se_portal_group *,
 				struct se_lun *);
+	void (*fabric_post_unlink)(struct se_portal_group *se_tpg,
+				   struct se_lun *lun);
 	struct se_tpg_np *(*fabric_make_np)(struct se_portal_group *,
 				struct config_group *, const char *);
 	void (*fabric_drop_np)(struct se_tpg_np *);
@@ -119,14 +121,20 @@ struct target_core_fabric_ops {
 	 */
 	unsigned int write_pending_must_be_called:1;
 	/*
+	 * Set this if the driver does not require calling queue_data_in
+	 * queue_status and check_stop_free from a worker thread when
+	 * completing successful commands.
+	 */
+	unsigned int direct_compl_supp:1;
+	/*
 	 * Set this if the driver supports submitting commands to the backend
 	 * from target_submit/target_submit_cmd.
 	 */
 	unsigned int direct_submit_supp:1;
-	/*
-	 * Set this to a target_submit_type value.
-	 */
+	/* Set this to a target_submit_type value. */
 	u8 default_submit_type;
+	/* Set this to the target_compl_type value. */
+	u8 default_compl_type;
 };
 
 int target_register_template(const struct target_core_fabric_ops *fo);

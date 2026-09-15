@@ -719,12 +719,12 @@ static void *snd_dma_sg_fallback_alloc(struct snd_dma_buffer *dmab, size_t size)
 	unsigned int idx, npages;
 	void *p;
 
-	sgbuf = kzalloc(sizeof(*sgbuf), GFP_KERNEL);
+	sgbuf = kzalloc_obj(*sgbuf);
 	if (!sgbuf)
 		return NULL;
 	size = PAGE_ALIGN(size);
 	sgbuf->count = size >> PAGE_SHIFT;
-	sgbuf->pages = kvcalloc(sgbuf->count, sizeof(*sgbuf->pages), GFP_KERNEL);
+	sgbuf->pages = kvzalloc_objs(*sgbuf->pages, sgbuf->count);
 	sgbuf->npages = kvcalloc(sgbuf->count, sizeof(*sgbuf->npages), GFP_KERNEL);
 	if (!sgbuf->pages || !sgbuf->npages)
 		goto error;
@@ -851,7 +851,7 @@ static void snd_dma_noncoherent_free(struct snd_dma_buffer *dmab)
 static int snd_dma_noncoherent_mmap(struct snd_dma_buffer *dmab,
 				    struct vm_area_struct *area)
 {
-	area->vm_page_prot = vm_get_page_prot(area->vm_flags);
+	area->vm_page_prot = vma_get_page_prot(area);
 	return dma_mmap_pages(dmab->dev.dev, area,
 			      area->vm_end - area->vm_start,
 			      virt_to_page(dmab->area));
