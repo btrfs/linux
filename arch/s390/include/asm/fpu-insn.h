@@ -12,8 +12,10 @@
 #ifndef __ASSEMBLER__
 
 #include <linux/instrumented.h>
+#include <linux/kmsan.h>
 #include <asm/asm-extable.h>
 
+asm(".include \"asm/insn-common-asm.h\"\n");
 asm(".include \"asm/fpu-insn-asm.h\"\n");
 
 /*
@@ -393,6 +395,7 @@ static __always_inline void fpu_vstl(u8 v1, u32 index, const void *vxr)
 		     : [vxr] "=Q" (*(u8 *)vxr)
 		     : [index] "d" (index), [v1] "I" (v1)
 		     : "memory");
+	kmsan_unpoison_memory(vxr, size);
 }
 
 #else /* CONFIG_CC_HAS_ASM_AOR_FORMAT_FLAGS */
@@ -409,6 +412,7 @@ static __always_inline void fpu_vstl(u8 v1, u32 index, const void *vxr)
 		: [vxr] "=R" (*(u8 *)vxr)
 		: [index] "d" (index), [v1] "I" (v1)
 		: "memory", "1");
+	kmsan_unpoison_memory(vxr, size);
 }
 
 #endif /* CONFIG_CC_HAS_ASM_AOR_FORMAT_FLAGS */

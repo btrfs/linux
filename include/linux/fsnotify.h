@@ -257,6 +257,10 @@ static inline void fsnotify_move(struct inode *old_dir, struct inode *new_dir,
 	__u32 new_dir_mask = FS_MOVED_TO;
 	__u32 rename_mask = FS_RENAME;
 	const struct qstr *new_name = &moved->d_name;
+	struct fsnotify_rename_data rd = {
+		.moved = moved,
+		.target = target,
+	};
 
 	if (isdir) {
 		old_dir_mask |= FS_ISDIR;
@@ -265,12 +269,12 @@ static inline void fsnotify_move(struct inode *old_dir, struct inode *new_dir,
 	}
 
 	/* Event with information about both old and new parent+name */
-	fsnotify_name(rename_mask, moved, FSNOTIFY_EVENT_DENTRY,
+	fsnotify_name(rename_mask, &rd, FSNOTIFY_EVENT_RENAME,
 		      old_dir, old_name, 0);
 
 	fsnotify_name(old_dir_mask, source, FSNOTIFY_EVENT_INODE,
 		      old_dir, old_name, fs_cookie);
-	fsnotify_name(new_dir_mask, source, FSNOTIFY_EVENT_INODE,
+	fsnotify_name(new_dir_mask, &rd, FSNOTIFY_EVENT_RENAME,
 		      new_dir, new_name, fs_cookie);
 
 	if (target)
@@ -493,19 +497,6 @@ static inline void fsnotify_change(struct dentry *dentry, unsigned int ia_valid)
 
 	if (mask)
 		fsnotify_dentry(dentry, mask);
-}
-
-static inline int fsnotify_sb_error(struct super_block *sb, struct inode *inode,
-				    int error)
-{
-	struct fs_error_report report = {
-		.error = error,
-		.inode = inode,
-		.sb = sb,
-	};
-
-	return fsnotify(FS_ERROR, &report, FSNOTIFY_EVENT_ERROR,
-			NULL, NULL, NULL, 0);
 }
 
 static inline void fsnotify_mnt_attach(struct mnt_namespace *ns, struct vfsmount *mnt)

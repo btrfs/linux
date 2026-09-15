@@ -79,8 +79,9 @@ struct cpufreq_policy {
 					 * called, but you're in IRQ context */
 
 	struct freq_constraints	constraints;
-	struct freq_qos_request	*min_freq_req;
-	struct freq_qos_request	*max_freq_req;
+	struct freq_qos_request	min_freq_req;
+	struct freq_qos_request	max_freq_req;
+	struct freq_qos_request boost_freq_req;
 
 	struct cpufreq_frequency_table	*freq_table;
 	enum cpufreq_table_sorting freq_table_sorted;
@@ -145,6 +146,9 @@ struct cpufreq_policy {
 	/* Per policy boost supported flag. */
 	bool			boost_supported;
 
+	/* Pending policy->min/max update for the driver */
+	bool			update_limits;
+
 	 /* Cached frequency lookup from cpufreq_driver_resolve_freq. */
 	unsigned int cached_target_freq;
 	unsigned int cached_resolved_idx;
@@ -203,10 +207,15 @@ struct cpufreq_freqs {
 
 #ifdef CONFIG_CPU_FREQ
 struct cpufreq_policy *cpufreq_cpu_get_raw(unsigned int cpu);
+struct cpufreq_policy *cpufreq_cpu_policy(unsigned int cpu);
 struct cpufreq_policy *cpufreq_cpu_get(unsigned int cpu);
 void cpufreq_cpu_put(struct cpufreq_policy *policy);
 #else
 static inline struct cpufreq_policy *cpufreq_cpu_get_raw(unsigned int cpu)
+{
+	return NULL;
+}
+static inline struct cpufreq_policy *cpufreq_cpu_policy(unsigned int cpu)
 {
 	return NULL;
 }
@@ -227,7 +236,7 @@ static inline bool policy_is_inactive(struct cpufreq_policy *policy)
 
 static inline bool policy_is_shared(struct cpufreq_policy *policy)
 {
-	return cpumask_weight(policy->cpus) > 1;
+	return cpumask_nth(1, policy->cpus) < nr_cpumask_bits;
 }
 
 #ifdef CONFIG_CPU_FREQ
@@ -367,9 +376,10 @@ struct cpufreq_driver {
 	 * conditions) scale invariance can be disabled, which causes the
 	 * schedutil governor to fall back to the latter.
 	 */
-	void		(*adjust_perf)(unsigned int cpu,
+	void		(*adjust_perf)(struct cpufreq_policy *policy,
 				       unsigned long min_perf,
 				       unsigned long target_perf,
+				       unsigned long max_perf,
 				       unsigned long capacity);
 
 	/*
@@ -428,7 +438,7 @@ struct cpufreq_driver {
 /*
  * Set by drivers that need to update internal upper and lower boundaries along
  * with the target frequency and so the core and governors should also invoke
- * the diver if the target frequency does not change, but the policy min or max
+ * the driver if the target frequency does not change, but the policy min or max
  * may have changed.
  */
 #define CPUFREQ_NEED_UPDATE_LIMITS		BIT(0)
@@ -612,9 +622,10 @@ struct cpufreq_governor {
 /* Pass a target to the cpufreq driver */
 unsigned int cpufreq_driver_fast_switch(struct cpufreq_policy *policy,
 					unsigned int target_freq);
-void cpufreq_driver_adjust_perf(unsigned int cpu,
+void cpufreq_driver_adjust_perf(struct cpufreq_policy *policy,
 				unsigned long min_perf,
 				unsigned long target_perf,
+				unsigned long max_perf,
 				unsigned long capacity);
 bool cpufreq_driver_has_adjust_perf(void);
 int cpufreq_driver_target(struct cpufreq_policy *policy,

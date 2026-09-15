@@ -112,6 +112,7 @@ struct pcl711_board {
 	int n_aichan;
 	int n_aochan;
 	int maxirq;
+	unsigned int min_io_start;
 	const struct comedi_lrange *ai_range_type;
 };
 
@@ -132,12 +133,14 @@ static const struct pcl711_board boardtypes[] = {
 		.n_aichan	= 16,
 		.n_aochan	= 2,
 		.maxirq		= 15,
+		.min_io_start	= 0x200,
 		.ai_range_type	= &range_acl8112hg_ai,
 	}, {
 		.name		= "acl8112dg",
 		.n_aichan	= 16,
 		.n_aochan	= 2,
 		.maxirq		= 15,
+		.min_io_start	= 0x200,
 		.ai_range_type	= &range_acl8112dg_ai,
 	},
 };
@@ -181,7 +184,7 @@ static irqreturn_t pcl711_interrupt(int irq, void *d)
 {
 	struct comedi_device *dev = d;
 	struct comedi_subdevice *s = dev->read_subdev;
-	struct comedi_cmd *cmd = &s->async->cmd;
+	struct comedi_cmd *cmd;
 	unsigned short data;
 
 	if (!dev->attached) {
@@ -189,6 +192,7 @@ static irqreturn_t pcl711_interrupt(int irq, void *d)
 		return IRQ_HANDLED;
 	}
 
+	cmd = &s->async->cmd;
 	data = pcl711_ai_get_sample(dev, s);
 
 	outb(PCL711_INT_STAT_CLR, dev->iobase + PCL711_INT_STAT_REG);
@@ -418,7 +422,8 @@ static int pcl711_attach(struct comedi_device *dev, struct comedi_devconfig *it)
 	struct comedi_subdevice *s;
 	int ret;
 
-	ret = comedi_request_region(dev, it->options[0], 0x10);
+	ret = comedi_check_request_region(dev, it->options[0], 0x10,
+					  board->min_io_start, 0x3ff, 16);
 	if (ret)
 		return ret;
 

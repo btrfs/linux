@@ -145,7 +145,8 @@ static int ufs_intel_set_lanes(struct ufs_hba *hba, u32 lanes)
 
 	pwr_info.lane_rx = lanes;
 	pwr_info.lane_tx = lanes;
-	ret = ufshcd_config_pwr_mode(hba, &pwr_info);
+	ret = ufshcd_change_power_mode(hba, &pwr_info,
+				       UFSHCD_PMC_POLICY_DONT_FORCE);
 	if (ret)
 		dev_err(hba->dev, "%s: Setting %u lanes, err = %d\n",
 			__func__, lanes, ret);
@@ -154,17 +155,15 @@ static int ufs_intel_set_lanes(struct ufs_hba *hba, u32 lanes)
 
 static int ufs_intel_lkf_pwr_change_notify(struct ufs_hba *hba,
 				enum ufs_notify_change_status status,
-				const struct ufs_pa_layer_attr *dev_max_params,
 				struct ufs_pa_layer_attr *dev_req_params)
 {
 	int err = 0;
 
 	switch (status) {
 	case PRE_CHANGE:
-		if (ufshcd_is_hs_mode(dev_max_params) &&
+		if (ufshcd_is_hs_mode(dev_req_params) &&
 		    (hba->pwr_info.lane_rx != 2 || hba->pwr_info.lane_tx != 2))
 			ufs_intel_set_lanes(hba, 2);
-		memcpy(dev_req_params, dev_max_params, sizeof(*dev_req_params));
 		break;
 	case POST_CHANGE:
 		if (ufshcd_is_hs_mode(dev_req_params)) {
@@ -180,6 +179,25 @@ static int ufs_intel_lkf_pwr_change_notify(struct ufs_hba *hba,
 	}
 
 	return err;
+}
+
+static int ufs_intel_nvl_pwr_change_notify(struct ufs_hba *hba,
+					   enum ufs_notify_change_status stage,
+					   struct ufs_pa_layer_attr *dev_req_params)
+{
+	int adapt_val;
+
+	if (stage != PRE_CHANGE || hba->ufs_version < ufshci_version(4, 0))
+		return 0;
+
+	if (dev_req_params->pwr_tx == FAST_MODE || dev_req_params->pwr_tx == FASTAUTO_MODE)
+		adapt_val = PA_INITIAL_ADAPT;
+	else
+		adapt_val = PA_NO_ADAPT;
+
+	ufshcd_dme_configure_adapt(hba, dev_req_params->gear_tx, adapt_val);
+
+	return 0;
 }
 
 static int ufs_intel_lkf_apply_dev_quirks(struct ufs_hba *hba)
@@ -442,6 +460,43 @@ static int ufs_intel_mtl_init(struct ufs_hba *hba)
 	return ufs_intel_common_init(hba);
 }
 
+static int ufs_intel_mcq_config_resource(struct ufs_hba *hba)
+{
+	hba->mcq_base = hba->mmio_base + ufshcd_mcq_queue_cfg_addr(hba);
+
+	return 0;
+}
+
+/*
+ * This Intel UFS4.0 controller maps MCQ doorbell and interrupt-status
+ * registers into the same PCI BAR as the legacy HCI space, at this
+ * fixed offset/stride.
+ */
+#define UFS_INTEL_SQDAO0	0x2800
+#define UFS_INTEL_SQISAO0	0x2814
+#define UFS_INTEL_CQDAO0	0x281C
+#define UFS_INTEL_CQISAO0	0x2824
+#define UFS_INTEL_MCQ_STRIDE	0x30
+
+static int ufs_intel_op_runtime_config(struct ufs_hba *hba)
+{
+	struct ufshcd_mcq_opr_info_t *opr;
+	int i;
+
+	hba->mcq_opr[OPR_SQD].offset  = UFS_INTEL_SQDAO0;
+	hba->mcq_opr[OPR_SQIS].offset = UFS_INTEL_SQISAO0;
+	hba->mcq_opr[OPR_CQD].offset  = UFS_INTEL_CQDAO0;
+	hba->mcq_opr[OPR_CQIS].offset = UFS_INTEL_CQISAO0;
+
+	for (i = 0; i < OPR_MAX; i++) {
+		opr = &hba->mcq_opr[i];
+		opr->stride = UFS_INTEL_MCQ_STRIDE;
+		opr->base = hba->mmio_base + opr->offset;
+	}
+
+	return 0;
+}
+
 static int ufs_qemu_get_hba_mac(struct ufs_hba *hba)
 {
 	return MAX_SUPP_MAC;
@@ -528,6 +583,9 @@ static struct ufs_hba_variant_ops ufs_intel_mtl_hba_vops = {
 	.exit			= ufs_intel_common_exit,
 	.hce_enable_notify	= ufs_intel_hce_enable_notify,
 	.link_startup_notify	= ufs_intel_link_startup_notify,
+	.pwr_change_notify	= ufs_intel_nvl_pwr_change_notify,
+	.mcq_config_resource	= ufs_intel_mcq_config_resource,
+	.op_runtime_config	= ufs_intel_op_runtime_config,
 	.resume			= ufs_intel_resume,
 	.device_reset		= ufs_intel_device_reset,
 };
@@ -681,20 +739,21 @@ static const struct dev_pm_ops ufshcd_pci_pm_ops = {
 };
 
 static const struct pci_device_id ufshcd_pci_tbl[] = {
-	{ PCI_VENDOR_ID_REDHAT, 0x0013, PCI_ANY_ID, PCI_ANY_ID, 0, 0,
-		(kernel_ulong_t)&ufs_qemu_hba_vops },
-	{ PCI_VENDOR_ID_SAMSUNG, 0xC00C, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0 },
-	{ PCI_VDEVICE(INTEL, 0x9DFA), (kernel_ulong_t)&ufs_intel_cnl_hba_vops },
-	{ PCI_VDEVICE(INTEL, 0x4B41), (kernel_ulong_t)&ufs_intel_ehl_hba_vops },
-	{ PCI_VDEVICE(INTEL, 0x4B43), (kernel_ulong_t)&ufs_intel_ehl_hba_vops },
-	{ PCI_VDEVICE(INTEL, 0x98FA), (kernel_ulong_t)&ufs_intel_lkf_hba_vops },
-	{ PCI_VDEVICE(INTEL, 0x51FF), (kernel_ulong_t)&ufs_intel_adl_hba_vops },
-	{ PCI_VDEVICE(INTEL, 0x54FF), (kernel_ulong_t)&ufs_intel_adl_hba_vops },
-	{ PCI_VDEVICE(INTEL, 0x7E47), (kernel_ulong_t)&ufs_intel_mtl_hba_vops },
-	{ PCI_VDEVICE(INTEL, 0xA847), (kernel_ulong_t)&ufs_intel_mtl_hba_vops },
-	{ PCI_VDEVICE(INTEL, 0x7747), (kernel_ulong_t)&ufs_intel_mtl_hba_vops },
-	{ PCI_VDEVICE(INTEL, 0xE447), (kernel_ulong_t)&ufs_intel_mtl_hba_vops },
-	{ PCI_VDEVICE(INTEL, 0x4D47), (kernel_ulong_t)&ufs_intel_mtl_hba_vops },
+	{ PCI_VDEVICE(REDHAT, 0x0013), .driver_data = (kernel_ulong_t)&ufs_qemu_hba_vops },
+	{ PCI_VDEVICE(SAMSUNG, 0xC00C), .driver_data = 0 },
+	{ PCI_VDEVICE(INTEL, 0x9DFA), .driver_data = (kernel_ulong_t)&ufs_intel_cnl_hba_vops },
+	{ PCI_VDEVICE(INTEL, 0x4B41), .driver_data = (kernel_ulong_t)&ufs_intel_ehl_hba_vops },
+	{ PCI_VDEVICE(INTEL, 0x4B43), .driver_data = (kernel_ulong_t)&ufs_intel_ehl_hba_vops },
+	{ PCI_VDEVICE(INTEL, 0x98FA), .driver_data = (kernel_ulong_t)&ufs_intel_lkf_hba_vops },
+	{ PCI_VDEVICE(INTEL, 0x51FF), .driver_data = (kernel_ulong_t)&ufs_intel_adl_hba_vops },
+	{ PCI_VDEVICE(INTEL, 0x54FF), .driver_data = (kernel_ulong_t)&ufs_intel_adl_hba_vops },
+	{ PCI_VDEVICE(INTEL, 0x7E47), .driver_data = (kernel_ulong_t)&ufs_intel_mtl_hba_vops },
+	{ PCI_VDEVICE(INTEL, 0xA847), .driver_data = (kernel_ulong_t)&ufs_intel_mtl_hba_vops },
+	{ PCI_VDEVICE(INTEL, 0x7747), .driver_data = (kernel_ulong_t)&ufs_intel_mtl_hba_vops },
+	{ PCI_VDEVICE(INTEL, 0xE447), .driver_data = (kernel_ulong_t)&ufs_intel_mtl_hba_vops },
+	{ PCI_VDEVICE(INTEL, 0x4D47), .driver_data = (kernel_ulong_t)&ufs_intel_mtl_hba_vops },
+	{ PCI_VDEVICE(INTEL, 0xD335), .driver_data = (kernel_ulong_t)&ufs_intel_mtl_hba_vops },
+	{ PCI_VDEVICE(AMD, 0x1B29), .driver_data = 0 },
 	{ }	/* terminate list */
 };
 

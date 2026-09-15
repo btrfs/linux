@@ -94,6 +94,19 @@ static int vcn_v5_0_1_early_init(struct amdgpu_ip_block *ip_block)
 	struct amdgpu_device *adev = ip_block->adev;
 	int i, r;
 
+	switch (amdgpu_user_queue) {
+	case -1:
+	case 0:
+	default:
+		adev->vcn.disable_kq = false;
+		adev->vcn.disable_uq = true;
+		break;
+	case 2:
+		adev->vcn.disable_kq = true;
+		adev->vcn.disable_uq = true;
+		break;
+	}
+
 	for (i = 0; i < adev->vcn.num_vcn_inst; ++i)
 		/* re-use enc ring as unified ring */
 		adev->vcn.inst[i].num_enc_rings = 1;
@@ -188,6 +201,10 @@ static int vcn_v5_0_1_sw_init(struct amdgpu_ip_block *ip_block)
 
 		ring = &adev->vcn.inst[i].ring_enc[0];
 		ring->use_doorbell = true;
+		if (adev->vcn.disable_kq) {
+			ring->no_scheduler = true;
+			ring->no_user_submission = true;
+		}
 		if (!amdgpu_sriov_vf(adev))
 			ring->doorbell_index =
 				(adev->doorbell_index.vcn.vcn_ring0_1 << 1) +
@@ -1301,6 +1318,59 @@ static void vcn_v5_0_1_unified_ring_set_wptr(struct amdgpu_ring *ring)
 	}
 }
 
+static int vcn_v5_0_1_reset_jpeg_pre_helper(struct amdgpu_device *adev, int inst)
+{
+	struct amdgpu_ring *ring;
+	uint32_t wait_seq = 0;
+	int i;
+
+	for (i = 0; i < adev->jpeg.num_jpeg_rings; ++i) {
+		ring = &adev->jpeg.inst[inst].ring_dec[i];
+
+		drm_sched_wqueue_stop(&ring->sched);
+		wait_seq = atomic_read(&ring->fence_drv.last_seq);
+		if (wait_seq)
+			continue;
+
+		/* if Jobs are still pending after timeout,
+		 * We'll handle them in the bottom helper
+		 */
+		amdgpu_fence_wait_polling(ring, wait_seq, adev->video_timeout);
+       }
+
+	return 0;
+}
+
+static int vcn_v5_0_1_reset_jpeg_post_helper(struct amdgpu_device *adev, int inst)
+{
+	struct amdgpu_ring *ring;
+	int i, r = 0;
+
+	for (i = 0; i < adev->jpeg.num_jpeg_rings; ++i) {
+		ring = &adev->jpeg.inst[inst].ring_dec[i];
+		/* Force completion of any remaining jobs */
+		amdgpu_fence_driver_force_completion(ring, NULL);
+
+		if (ring->use_doorbell)
+			WREG32_SOC15_OFFSET(
+				VCN, GET_INST(VCN, inst),
+				regVCN_JPEG_DB_CTRL,
+				(ring->pipe ? (ring->pipe - 0x15) : 0),
+				ring->doorbell_index << VCN_JPEG_DB_CTRL__OFFSET__SHIFT |
+				VCN_JPEG_DB_CTRL__EN_MASK);
+
+		r = amdgpu_ring_test_helper(ring);
+		if (r)
+			return r;
+
+		drm_sched_wqueue_start(&ring->sched);
+
+		DRM_DEV_DEBUG(adev->dev, "JPEG ring %d (inst %d) restored and sched restarted\n",
+		      i, inst);
+	}
+	return 0;
+}
+
 static int vcn_v5_0_1_ring_reset(struct amdgpu_ring *ring,
 				 unsigned int vmid,
 				 struct amdgpu_fence *timedout_fence)
@@ -1309,6 +1379,18 @@ static int vcn_v5_0_1_ring_reset(struct amdgpu_ring *ring,
 	int vcn_inst;
 	struct amdgpu_device *adev = ring->adev;
 	struct amdgpu_vcn_inst *vinst = &adev->vcn.inst[ring->me];
+	bool pg_state = false;
+
+	/* take the vcn reset mutex here because resetting VCN will reset jpeg as well */
+	mutex_lock(&vinst->engine_reset_mutex);
+	vcn_v5_0_1_reset_jpeg_pre_helper(adev, ring->me);
+	mutex_lock(&adev->jpeg.jpeg_pg_lock);
+	/* Ensure JPEG is powered on during reset if currently gated */
+	if (adev->jpeg.cur_state == AMD_PG_STATE_GATE) {
+		amdgpu_device_ip_set_powergating_state(adev, AMD_IP_BLOCK_TYPE_JPEG,
+					       AMD_PG_STATE_UNGATE);
+		pg_state = true;
+	}
 
 	amdgpu_ring_reset_helper_begin(ring, timedout_fence);
 
@@ -1317,19 +1399,44 @@ static int vcn_v5_0_1_ring_reset(struct amdgpu_ring *ring,
 
 	if (r) {
 		DRM_DEV_ERROR(adev->dev, "VCN reset fail : %d\n", r);
-		return r;
+		/* Restore JPEG power gating state if it was originally gated */
+		if (pg_state)
+			amdgpu_device_ip_set_powergating_state(adev, AMD_IP_BLOCK_TYPE_JPEG,
+							       AMD_PG_STATE_GATE);
+		mutex_unlock(&adev->jpeg.jpeg_pg_lock);
+		goto unlock;
 	}
 
 	vcn_v5_0_1_hw_init_inst(adev, ring->me);
 	vcn_v5_0_1_start_dpg_mode(vinst, vinst->indirect_sram);
 
-	return amdgpu_ring_reset_helper_end(ring, timedout_fence);
+	r = amdgpu_ring_reset_helper_end(ring, timedout_fence);
+	if (r) {
+		if (pg_state)
+			amdgpu_device_ip_set_powergating_state(adev, AMD_IP_BLOCK_TYPE_JPEG,
+							       AMD_PG_STATE_GATE);
+		mutex_unlock(&adev->jpeg.jpeg_pg_lock);
+		goto unlock;
+	}
+
+	if (pg_state)
+		amdgpu_device_ip_set_powergating_state(adev, AMD_IP_BLOCK_TYPE_JPEG,
+						       AMD_PG_STATE_GATE);
+	mutex_unlock(&adev->jpeg.jpeg_pg_lock);
+
+	r = vcn_v5_0_1_reset_jpeg_post_helper(adev, ring->me);
+
+unlock:
+	mutex_unlock(&vinst->engine_reset_mutex);
+
+	return r;
 }
 
 static const struct amdgpu_ring_funcs vcn_v5_0_1_unified_ring_vm_funcs = {
 	.type = AMDGPU_RING_TYPE_VCN_ENC,
 	.align_mask = 0x3f,
 	.nop = VCN_ENC_CMD_NO_OP,
+	.no_user_fence = true,
 	.get_rptr = vcn_v5_0_1_unified_ring_get_rptr,
 	.get_wptr = vcn_v5_0_1_unified_ring_get_wptr,
 	.set_wptr = vcn_v5_0_1_unified_ring_set_wptr,
@@ -1567,10 +1674,7 @@ static const struct amd_ip_funcs vcn_v5_0_1_ip_funcs = {
 	.resume = vcn_v5_0_1_resume,
 	.is_idle = vcn_v5_0_1_is_idle,
 	.wait_for_idle = vcn_v5_0_1_wait_for_idle,
-	.check_soft_reset = NULL,
-	.pre_soft_reset = NULL,
 	.soft_reset = NULL,
-	.post_soft_reset = NULL,
 	.set_clockgating_state = vcn_v5_0_1_set_clockgating_state,
 	.set_powergating_state = vcn_set_powergating_state,
 	.dump_ip_state = amdgpu_vcn_dump_ip_state,
@@ -1623,71 +1727,6 @@ static const struct amdgpu_ras_block_hw_ops vcn_v5_0_1_ras_hw_ops = {
 	.query_poison_status = vcn_v5_0_1_query_poison_status,
 };
 
-static int vcn_v5_0_1_aca_bank_parser(struct aca_handle *handle, struct aca_bank *bank,
-				      enum aca_smu_type type, void *data)
-{
-	struct aca_bank_info info;
-	u64 misc0;
-	int ret;
-
-	ret = aca_bank_info_decode(bank, &info);
-	if (ret)
-		return ret;
-
-	misc0 = bank->regs[ACA_REG_IDX_MISC0];
-	switch (type) {
-	case ACA_SMU_TYPE_UE:
-		bank->aca_err_type = ACA_ERROR_TYPE_UE;
-		ret = aca_error_cache_log_bank_error(handle, &info, ACA_ERROR_TYPE_UE,
-						     1ULL);
-		break;
-	case ACA_SMU_TYPE_CE:
-		bank->aca_err_type = ACA_ERROR_TYPE_CE;
-		ret = aca_error_cache_log_bank_error(handle, &info, bank->aca_err_type,
-						     ACA_REG__MISC0__ERRCNT(misc0));
-		break;
-	default:
-		return -EINVAL;
-	}
-
-	return ret;
-}
-
-/* reference to smu driver if header file */
-static int vcn_v5_0_1_err_codes[] = {
-	14, 15, 47, /* VCN [D|V|S] */
-};
-
-static bool vcn_v5_0_1_aca_bank_is_valid(struct aca_handle *handle, struct aca_bank *bank,
-					 enum aca_smu_type type, void *data)
-{
-	u32 instlo;
-
-	instlo = ACA_REG__IPID__INSTANCEIDLO(bank->regs[ACA_REG_IDX_IPID]);
-	instlo &= GENMASK(31, 1);
-
-	if (instlo != mmSMNAID_AID0_MCA_SMU)
-		return false;
-
-	if (aca_bank_check_error_codes(handle->adev, bank,
-				       vcn_v5_0_1_err_codes,
-				       ARRAY_SIZE(vcn_v5_0_1_err_codes)))
-		return false;
-
-	return true;
-}
-
-static const struct aca_bank_ops vcn_v5_0_1_aca_bank_ops = {
-	.aca_bank_parser = vcn_v5_0_1_aca_bank_parser,
-	.aca_bank_is_valid = vcn_v5_0_1_aca_bank_is_valid,
-};
-
-static const struct aca_info vcn_v5_0_1_aca_info = {
-	.hwip = ACA_HWIP_TYPE_SMU,
-	.mask = ACA_ERROR_UE_MASK,
-	.bank_ops = &vcn_v5_0_1_aca_bank_ops,
-};
-
 static int vcn_v5_0_1_ras_late_init(struct amdgpu_device *adev, struct ras_common_if *ras_block)
 {
 	int r;
@@ -1695,11 +1734,6 @@ static int vcn_v5_0_1_ras_late_init(struct amdgpu_device *adev, struct ras_commo
 	r = amdgpu_ras_block_late_init(adev, ras_block);
 	if (r)
 		return r;
-
-	r = amdgpu_ras_bind_aca(adev, AMDGPU_RAS_BLOCK__VCN,
-				&vcn_v5_0_1_aca_info, NULL);
-	if (r)
-		goto late_fini;
 
 	if (amdgpu_ras_is_supported(adev, ras_block->block) &&
 		adev->vcn.inst->ras_poison_irq.funcs) {

@@ -34,7 +34,7 @@ enum {
 
 /* work structure for recovery */
 struct nilfs_recovery_block {
-	ino_t ino;		/*
+	u64 ino;		/*
 				 * Inode number of the file that this block
 				 * belongs to
 				 */
@@ -333,7 +333,7 @@ static int nilfs_scan_dsync_log(struct the_nilfs *nilfs, sector_t start_blocknr,
 	unsigned int offset;
 	u32 nfinfo, sumbytes;
 	sector_t blocknr;
-	ino_t ino;
+	u64 ino;
 	int err = -EIO;
 
 	nfinfo = le32_to_cpu(sum->ss_nfinfo);
@@ -370,7 +370,7 @@ static int nilfs_scan_dsync_log(struct the_nilfs *nilfs, sector_t start_blocknr,
 			if (unlikely(!binfo))
 				goto out;
 
-			rb = kmalloc(sizeof(*rb), GFP_NOFS);
+			rb = kmalloc_obj(*rb, GFP_NOFS);
 			if (unlikely(!rb)) {
 				err = -ENOMEM;
 				goto out;
@@ -414,7 +414,7 @@ struct nilfs_segment_entry {
 
 static int nilfs_segment_list_add(struct list_head *head, __u64 segnum)
 {
-	struct nilfs_segment_entry *ent = kmalloc(sizeof(*ent), GFP_NOFS);
+	struct nilfs_segment_entry *ent = kmalloc_obj(*ent, GFP_NOFS);
 
 	if (unlikely(!ent))
 		return -ENOMEM;

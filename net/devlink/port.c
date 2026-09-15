@@ -220,8 +220,9 @@ size_t devlink_nl_port_handle_size(struct devlink_port *devlink_port)
 {
 	struct devlink *devlink = devlink_port->devlink;
 
-	return nla_total_size(strlen(devlink->dev->bus->name) + 1) /* DEVLINK_ATTR_BUS_NAME */
-	     + nla_total_size(strlen(dev_name(devlink->dev)) + 1) /* DEVLINK_ATTR_DEV_NAME */
+	return nla_total_size(strlen(devlink_bus_name(devlink)) + 1) /* DEVLINK_ATTR_BUS_NAME */
+	     + nla_total_size(strlen(devlink_dev_name(devlink)) + 1) /* DEVLINK_ATTR_DEV_NAME */
+	     + nla_total_size(8) /* DEVLINK_ATTR_INDEX */
 	     + nla_total_size(4); /* DEVLINK_ATTR_PORT_INDEX */
 }
 
@@ -265,6 +266,8 @@ static int devlink_nl_port_attrs_put(struct sk_buff *msg,
 				attrs->pci_sf.pf) ||
 		    nla_put_u32(msg, DEVLINK_ATTR_PORT_PCI_SF_NUMBER,
 				attrs->pci_sf.sf))
+			return -EMSGSIZE;
+		if (nla_put_u8(msg, DEVLINK_ATTR_PORT_EXTERNAL, attrs->pci_sf.external))
 			return -EMSGSIZE;
 		break;
 	case DEVLINK_PORT_FLAVOUR_PHYSICAL:
@@ -593,7 +596,7 @@ void devlink_ports_notify_unregister(struct devlink *devlink)
 
 int devlink_nl_port_get_doit(struct sk_buff *skb, struct genl_info *info)
 {
-	struct devlink_port *devlink_port = info->user_ptr[1];
+	struct devlink_port *devlink_port = devlink_nl_ctx(info)->devlink_port;
 	struct sk_buff *msg;
 	int err;
 
@@ -829,7 +832,7 @@ static int devlink_port_function_set(struct devlink_port *port,
 
 int devlink_nl_port_set_doit(struct sk_buff *skb, struct genl_info *info)
 {
-	struct devlink_port *devlink_port = info->user_ptr[1];
+	struct devlink_port *devlink_port = devlink_nl_ctx(info)->devlink_port;
 	int err;
 
 	if (info->attrs[DEVLINK_ATTR_PORT_TYPE]) {
@@ -855,8 +858,8 @@ int devlink_nl_port_set_doit(struct sk_buff *skb, struct genl_info *info)
 
 int devlink_nl_port_split_doit(struct sk_buff *skb, struct genl_info *info)
 {
-	struct devlink_port *devlink_port = info->user_ptr[1];
-	struct devlink *devlink = info->user_ptr[0];
+	struct devlink_port *devlink_port = devlink_nl_ctx(info)->devlink_port;
+	struct devlink *devlink = devlink_nl_ctx(info)->devlink;
 	u32 count;
 
 	if (GENL_REQ_ATTR_CHECK(info, DEVLINK_ATTR_PORT_SPLIT_COUNT))
@@ -886,8 +889,8 @@ int devlink_nl_port_split_doit(struct sk_buff *skb, struct genl_info *info)
 
 int devlink_nl_port_unsplit_doit(struct sk_buff *skb, struct genl_info *info)
 {
-	struct devlink_port *devlink_port = info->user_ptr[1];
-	struct devlink *devlink = info->user_ptr[0];
+	struct devlink_port *devlink_port = devlink_nl_ctx(info)->devlink_port;
+	struct devlink *devlink = devlink_nl_ctx(info)->devlink;
 
 	if (!devlink_port->ops->port_unsplit)
 		return -EOPNOTSUPP;
@@ -898,7 +901,7 @@ int devlink_nl_port_new_doit(struct sk_buff *skb, struct genl_info *info)
 {
 	struct netlink_ext_ack *extack = info->extack;
 	struct devlink_port_new_attrs new_attrs = {};
-	struct devlink *devlink = info->user_ptr[0];
+	struct devlink *devlink = devlink_nl_ctx(info)->devlink;
 	struct devlink_port *devlink_port;
 	struct sk_buff *msg;
 	int err;
@@ -960,9 +963,9 @@ err_out_port_del:
 
 int devlink_nl_port_del_doit(struct sk_buff *skb, struct genl_info *info)
 {
-	struct devlink_port *devlink_port = info->user_ptr[1];
+	struct devlink_port *devlink_port = devlink_nl_ctx(info)->devlink_port;
 	struct netlink_ext_ack *extack = info->extack;
-	struct devlink *devlink = info->user_ptr[0];
+	struct devlink *devlink = devlink_nl_ctx(info)->devlink;
 
 	if (!devlink_port->ops->port_del)
 		return -EOPNOTSUPP;
@@ -975,7 +978,7 @@ static void devlink_port_type_warn(struct work_struct *work)
 	struct devlink_port *port = container_of(to_delayed_work(work),
 						 struct devlink_port,
 						 type_warn_dw);
-	dev_warn(port->devlink->dev, "Type was not set for devlink port.");
+	devl_warn(port->devlink, "Type was not set for devlink port.");
 }
 
 static bool devlink_port_type_should_warn(struct devlink_port *devlink_port)
@@ -1024,6 +1027,7 @@ void devlink_port_init(struct devlink *devlink,
 		return;
 	devlink_port->devlink = devlink;
 	INIT_LIST_HEAD(&devlink_port->region_list);
+	INIT_LIST_HEAD(&devlink_port->resource_list);
 	devlink_port->initialized = true;
 }
 EXPORT_SYMBOL_GPL(devlink_port_init);
@@ -1041,6 +1045,7 @@ EXPORT_SYMBOL_GPL(devlink_port_init);
 void devlink_port_fini(struct devlink_port *devlink_port)
 {
 	WARN_ON(!list_empty(&devlink_port->region_list));
+	WARN_ON(!list_empty(&devlink_port->resource_list));
 }
 EXPORT_SYMBOL_GPL(devlink_port_fini);
 
@@ -1241,9 +1246,9 @@ static void __devlink_port_type_set(struct devlink_port *devlink_port,
  */
 void devlink_port_type_eth_set(struct devlink_port *devlink_port)
 {
-	dev_warn(devlink_port->devlink->dev,
-		 "devlink port type for port %d set to Ethernet without a software interface reference, device type not supported by the kernel?\n",
-		 devlink_port->index);
+	devl_warn(devlink_port->devlink,
+		  "devlink port type for port %d set to Ethernet without a software interface reference, device type not supported by the kernel?\n",
+		  devlink_port->index);
 	__devlink_port_type_set(devlink_port, DEVLINK_PORT_TYPE_ETH, NULL);
 }
 EXPORT_SYMBOL_GPL(devlink_port_type_eth_set);
@@ -1272,9 +1277,9 @@ EXPORT_SYMBOL_GPL(devlink_port_type_ib_set);
 void devlink_port_type_clear(struct devlink_port *devlink_port)
 {
 	if (devlink_port->type == DEVLINK_PORT_TYPE_ETH)
-		dev_warn(devlink_port->devlink->dev,
-			 "devlink port type for port %d cleared without a software interface reference, device type not supported by the kernel?\n",
-			 devlink_port->index);
+		devl_warn(devlink_port->devlink,
+			  "devlink port type for port %d cleared without a software interface reference, device type not supported by the kernel?\n",
+			  devlink_port->index);
 	__devlink_port_type_set(devlink_port, DEVLINK_PORT_TYPE_NOTSET, NULL);
 }
 EXPORT_SYMBOL_GPL(devlink_port_type_clear);
@@ -1526,7 +1531,7 @@ static int __devlink_port_phys_port_name_get(struct devlink_port *devlink_port,
 		WARN_ON(1);
 		return -EINVAL;
 	case DEVLINK_PORT_FLAVOUR_PCI_PF:
-		if (attrs->pci_pf.external) {
+		if (attrs->pci_pf.external || attrs->pci_pf.controller) {
 			n = snprintf(name, len, "c%u", attrs->pci_pf.controller);
 			if (n >= len)
 				return -EINVAL;
@@ -1536,7 +1541,7 @@ static int __devlink_port_phys_port_name_get(struct devlink_port *devlink_port,
 		n = snprintf(name, len, "pf%u", attrs->pci_pf.pf);
 		break;
 	case DEVLINK_PORT_FLAVOUR_PCI_VF:
-		if (attrs->pci_vf.external) {
+		if (attrs->pci_vf.external || attrs->pci_vf.controller) {
 			n = snprintf(name, len, "c%u", attrs->pci_vf.controller);
 			if (n >= len)
 				return -EINVAL;
@@ -1547,7 +1552,7 @@ static int __devlink_port_phys_port_name_get(struct devlink_port *devlink_port,
 			     attrs->pci_vf.pf, attrs->pci_vf.vf);
 		break;
 	case DEVLINK_PORT_FLAVOUR_PCI_SF:
-		if (attrs->pci_sf.external) {
+		if (attrs->pci_sf.external || attrs->pci_sf.controller) {
 			n = snprintf(name, len, "c%u", attrs->pci_sf.controller);
 			if (n >= len)
 				return -EINVAL;

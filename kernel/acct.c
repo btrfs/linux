@@ -218,7 +218,6 @@ static int acct_on(const char __user *name)
 	/* Difference from BSD - they don't do O_APPEND */
 	const int open_flags = O_WRONLY|O_APPEND|O_LARGEFILE;
 	struct pid_namespace *ns = task_active_pid_ns(current);
-	struct filename *pathname __free(putname) = getname(name);
 	struct file *original_file __free(fput) = NULL;	// in that order
 	struct path internal __free(path_put) = {};	// in that order
 	struct file *file __free(fput_sync) = NULL;	// in that order
@@ -226,8 +225,7 @@ static int acct_on(const char __user *name)
 	struct vfsmount *mnt;
 	struct fs_pin *old;
 
-	if (IS_ERR(pathname))
-		return PTR_ERR(pathname);
+	CLASS(filename, pathname)(name);
 	original_file = file_open_name(pathname, open_flags, 0);
 	if (IS_ERR(original_file))
 		return PTR_ERR(original_file);
@@ -246,18 +244,18 @@ static int acct_on(const char __user *name)
 	if (!S_ISREG(file_inode(file)->i_mode))
 		return -EACCES;
 
-	/* Exclude kernel kernel internal filesystems. */
+	/* Exclude kernel internal filesystems. */
 	if (file_inode(file)->i_sb->s_flags & (SB_NOUSER | SB_KERNMOUNT))
 		return -EINVAL;
 
 	/* Exclude procfs and sysfs. */
-	if (file_inode(file)->i_sb->s_iflags & SB_I_USERNS_VISIBLE)
+	if (file_inode(file)->i_sb->s_type->fs_flags & FS_USERNS_MOUNT_RESTRICTED)
 		return -EINVAL;
 
 	if (!(file->f_mode & FMODE_CAN_WRITE))
 		return -EIO;
 
-	acct = kzalloc(sizeof(struct bsd_acct_struct), GFP_KERNEL);
+	acct = kzalloc_obj(struct bsd_acct_struct);
 	if (!acct)
 		return -ENOMEM;
 
@@ -520,26 +518,23 @@ static void fill_ac(struct bsd_acct_struct *acct)
 static void acct_write_process(struct bsd_acct_struct *acct)
 {
 	struct file *file = acct->file;
-	const struct cred *cred;
 	acct_t *ac = &acct->ac;
 
 	/* Perform file operations on behalf of whoever enabled accounting */
-	cred = override_creds(file->f_cred);
-
-	/*
-	 * First check to see if there is enough free_space to continue
-	 * the process accounting system. Then get freeze protection. If
-	 * the fs is frozen, just skip the write as we could deadlock
-	 * the system otherwise.
-	 */
-	if (check_free_space(acct) && file_start_write_trylock(file)) {
-		/* it's been opened O_APPEND, so position is irrelevant */
-		loff_t pos = 0;
-		__kernel_write(file, ac, sizeof(acct_t), &pos);
-		file_end_write(file);
+	scoped_with_creds(file->f_cred) {
+		/*
+		 * First check to see if there is enough free_space to continue
+		 * the process accounting system. Then get freeze protection. If
+		 * the fs is frozen, just skip the write as we could deadlock
+		 * the system otherwise.
+		 */
+		if (check_free_space(acct) && file_start_write_trylock(file)) {
+			/* it's been opened O_APPEND, so position is irrelevant */
+			loff_t pos = 0;
+			__kernel_write(file, ac, sizeof(acct_t), &pos);
+			file_end_write(file);
+		}
 	}
-
-	revert_creds(cred);
 }
 
 static void do_acct_process(struct bsd_acct_struct *acct)

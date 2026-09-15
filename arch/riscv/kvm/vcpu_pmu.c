@@ -7,15 +7,19 @@
  */
 
 #define pr_fmt(fmt)	"riscv-kvm-pmu: " fmt
+#include <linux/bitops.h>
 #include <linux/errno.h>
 #include <linux/err.h>
 #include <linux/kvm_host.h>
+#include <linux/nospec.h>
+#include <linux/overflow.h>
 #include <linux/perf/riscv_pmu.h>
+#include <linux/slab.h>
 #include <asm/csr.h>
+#include <asm/kvm_isa.h>
 #include <asm/kvm_vcpu_sbi.h>
 #include <asm/kvm_vcpu_pmu.h>
 #include <asm/sbi.h>
-#include <linux/bitops.h>
 
 #define kvm_pmu_num_counters(pmu) ((pmu)->num_hw_ctrs + (pmu)->num_fw_ctrs)
 #define get_event_type(x) (((x) & SBI_PMU_EVENT_IDX_TYPE_MASK) >> 16)
@@ -87,7 +91,8 @@ static void kvm_pmu_release_perf_event(struct kvm_pmc *pmc)
 
 static u64 kvm_pmu_get_perf_event_hw_config(u32 sbi_event_code)
 {
-	return hw_event_perf_map[sbi_event_code];
+	return hw_event_perf_map[array_index_nospec(sbi_event_code,
+						    SBI_PMU_HW_GENERAL_MAX)];
 }
 
 static u64 kvm_pmu_get_perf_event_cache_config(u32 sbi_event_code)
@@ -218,12 +223,20 @@ static int pmu_fw_ctr_read_hi(struct kvm_vcpu *vcpu, unsigned long cidx,
 		return -EINVAL;
 	}
 
+	cidx = array_index_nospec(cidx, RISCV_KVM_MAX_COUNTERS);
 	pmc = &kvpmu->pmc[cidx];
 
 	if (pmc->cinfo.type != SBI_PMU_CTR_TYPE_FW)
 		return -EINVAL;
 
+	if (pmc->event_idx == SBI_PMU_EVENT_IDX_INVALID)
+		return -EINVAL;
+
 	fevent_code = get_event_code(pmc->event_idx);
+	if (WARN_ONCE(fevent_code >= SBI_PMU_FW_MAX,
+	    "Invalid firmware event code: %d\n", fevent_code))
+		return -EINVAL;
+
 	pmc->counter_val = kvpmu->fw_event[fevent_code].value;
 
 	*out_val = pmc->counter_val >> 32;
@@ -244,10 +257,18 @@ static int pmu_ctr_read(struct kvm_vcpu *vcpu, unsigned long cidx,
 		return -EINVAL;
 	}
 
+	cidx = array_index_nospec(cidx, RISCV_KVM_MAX_COUNTERS);
 	pmc = &kvpmu->pmc[cidx];
 
 	if (pmc->cinfo.type == SBI_PMU_CTR_TYPE_FW) {
+		if (pmc->event_idx == SBI_PMU_EVENT_IDX_INVALID)
+			return -EINVAL;
+
 		fevent_code = get_event_code(pmc->event_idx);
+		if (WARN_ONCE(fevent_code >= SBI_PMU_FW_MAX,
+		    "Invalid firmware event code: %d\n", fevent_code))
+			return -EINVAL;
+
 		pmc->counter_val = kvpmu->fw_event[fevent_code].value;
 	} else if (pmc->perf_event) {
 		pmc->counter_val += perf_event_read_value(pmc->perf_event, &enabled, &running);
@@ -262,8 +283,10 @@ static int pmu_ctr_read(struct kvm_vcpu *vcpu, unsigned long cidx,
 static int kvm_pmu_validate_counter_mask(struct kvm_pmu *kvpmu, unsigned long ctr_base,
 					 unsigned long ctr_mask)
 {
-	/* Make sure the we have a valid counter mask requested from the caller */
-	if (!ctr_mask || (ctr_base + __fls(ctr_mask) >= kvm_pmu_num_counters(kvpmu)))
+	unsigned long num_ctrs = kvm_pmu_num_counters(kvpmu);
+
+	/* Make sure we have a valid counter mask requested from the caller */
+	if (!ctr_mask || ctr_base >= num_ctrs || (ctr_base + __fls(ctr_mask) >= num_ctrs))
 		return -EINVAL;
 
 	return 0;
@@ -423,20 +446,24 @@ int kvm_riscv_vcpu_pmu_snapshot_set_shmem(struct kvm_vcpu *vcpu, unsigned long s
 	saddr = saddr_low;
 
 	if (saddr_high != 0) {
-		if (IS_ENABLED(CONFIG_32BIT))
+		if (IS_ENABLED(CONFIG_32BIT)) {
 			saddr |= ((gpa_t)saddr_high << 32);
-		else
+		} else {
 			sbiret = SBI_ERR_INVALID_ADDRESS;
-		goto out;
+			goto out;
+		}
 	}
 
-	kvpmu->sdata = kzalloc(snapshot_area_size, GFP_ATOMIC);
-	if (!kvpmu->sdata)
-		return -ENOMEM;
+	kvpmu->sdata = kzalloc(snapshot_area_size, GFP_ATOMIC | __GFP_ACCOUNT);
+	if (!kvpmu->sdata) {
+		sbiret = SBI_ERR_FAILURE;
+		goto out;
+	}
 
 	/* No need to check writable slot explicitly as kvm_vcpu_write_guest does it internally */
 	if (kvm_vcpu_write_guest(vcpu, saddr, kvpmu->sdata, snapshot_area_size)) {
 		kfree(kvpmu->sdata);
+		kvpmu->sdata = NULL;
 		sbiret = SBI_ERR_INVALID_ADDRESS;
 		goto out;
 	}
@@ -454,13 +481,14 @@ int kvm_riscv_vcpu_pmu_event_info(struct kvm_vcpu *vcpu, unsigned long saddr_low
 				  unsigned long flags, struct kvm_vcpu_sbi_return *retdata)
 {
 	struct riscv_pmu_event_info *einfo = NULL;
-	int shmem_size = num_events * sizeof(*einfo);
+	size_t shmem_size;
 	gpa_t shmem;
 	u32 eidx, etype;
 	u64 econfig;
 	int ret;
 
-	if (flags != 0 || (saddr_low & (SZ_16 - 1) || num_events == 0)) {
+	if (flags != 0 || (saddr_low & (SZ_16 - 1)) || num_events == 0 ||
+	    check_mul_overflow(num_events, sizeof(*einfo), &shmem_size)) {
 		ret = SBI_ERR_INVALID_PARAM;
 		goto out;
 	}
@@ -475,9 +503,12 @@ int kvm_riscv_vcpu_pmu_event_info(struct kvm_vcpu *vcpu, unsigned long saddr_low
 		}
 	}
 
-	einfo = kzalloc(shmem_size, GFP_KERNEL);
-	if (!einfo)
-		return -ENOMEM;
+	einfo = kvzalloc_objs(*einfo, num_events,
+			      GFP_KERNEL_ACCOUNT | __GFP_NOWARN);
+	if (!einfo) {
+		ret = SBI_ERR_FAILURE;
+		goto out;
+	}
 
 	ret = kvm_vcpu_read_guest(vcpu, shmem, einfo, shmem_size);
 	if (ret) {
@@ -485,7 +516,7 @@ int kvm_riscv_vcpu_pmu_event_info(struct kvm_vcpu *vcpu, unsigned long saddr_low
 		goto free_mem;
 	}
 
-	for (int i = 0; i < num_events; i++) {
+	for (unsigned long i = 0; i < num_events; i++) {
 		eidx = einfo[i].event_idx;
 		etype = kvm_pmu_get_perf_event_type(eidx);
 		econfig = kvm_pmu_get_perf_event_config(eidx, einfo[i].event_data);
@@ -494,14 +525,11 @@ int kvm_riscv_vcpu_pmu_event_info(struct kvm_vcpu *vcpu, unsigned long saddr_low
 	}
 
 	ret = kvm_vcpu_write_guest(vcpu, shmem, einfo, shmem_size);
-	if (ret) {
+	if (ret)
 		ret = SBI_ERR_INVALID_ADDRESS;
-		goto free_mem;
-	}
 
-	ret = 0;
 free_mem:
-	kfree(einfo);
+	kvfree(einfo);
 out:
 	retdata->err_val = ret;
 
@@ -523,11 +551,12 @@ int kvm_riscv_vcpu_pmu_ctr_info(struct kvm_vcpu *vcpu, unsigned long cidx,
 {
 	struct kvm_pmu *kvpmu = vcpu_to_pmu(vcpu);
 
-	if (cidx > RISCV_KVM_MAX_COUNTERS || cidx == 1) {
+	if (cidx >= RISCV_KVM_MAX_COUNTERS || cidx == 1) {
 		retdata->err_val = SBI_ERR_INVALID_PARAM;
 		return 0;
 	}
 
+	cidx = array_index_nospec(cidx, RISCV_KVM_MAX_COUNTERS);
 	retdata->out_val = kvpmu->pmc[cidx].cinfo.value;
 
 	return 0;
@@ -561,8 +590,9 @@ int kvm_riscv_vcpu_pmu_ctr_start(struct kvm_vcpu *vcpu, unsigned long ctr_base,
 		}
 	}
 	/* Start the counters that have been configured and requested by the guest */
-	for_each_set_bit(i, &ctr_mask, RISCV_MAX_COUNTERS) {
-		pmc_index = i + ctr_base;
+	for_each_set_bit(i, &ctr_mask, BITS_PER_LONG) {
+		pmc_index = array_index_nospec(i + ctr_base,
+					       RISCV_KVM_MAX_COUNTERS);
 		if (!test_bit(pmc_index, kvpmu->pmc_in_use))
 			continue;
 		/* The guest started the counter again. Reset the overflow status */
@@ -632,8 +662,9 @@ int kvm_riscv_vcpu_pmu_ctr_stop(struct kvm_vcpu *vcpu, unsigned long ctr_base,
 	}
 
 	/* Stop the counters that have been configured and requested by the guest */
-	for_each_set_bit(i, &ctr_mask, RISCV_MAX_COUNTERS) {
-		pmc_index = i + ctr_base;
+	for_each_set_bit(i, &ctr_mask, BITS_PER_LONG) {
+		pmc_index = array_index_nospec(i + ctr_base,
+					       RISCV_KVM_MAX_COUNTERS);
 		if (!test_bit(pmc_index, kvpmu->pmc_in_use))
 			continue;
 		pmc = &kvpmu->pmc[pmc_index];
@@ -671,7 +702,7 @@ int kvm_riscv_vcpu_pmu_ctr_stop(struct kvm_vcpu *vcpu, unsigned long ctr_base,
 				pmc->counter_val += perf_event_read_value(pmc->perf_event,
 									  &enabled, &running);
 			/*
-			 * The counter and overflow indicies in the snapshot region are w.r.to
+			 * The counter and overflow indices in the snapshot region are w.r.to
 			 * cbase. Modify the set bit in the counter mask instead of the pmc_index
 			 * which indicates the absolute counter index.
 			 */
@@ -764,6 +795,7 @@ int kvm_riscv_vcpu_pmu_ctr_cfg_match(struct kvm_vcpu *vcpu, unsigned long ctr_ba
 		}
 	}
 
+	ctr_idx = array_index_nospec(ctr_idx, RISCV_KVM_MAX_COUNTERS);
 	pmc = &kvpmu->pmc[ctr_idx];
 	pmc->idx = ctr_idx;
 
@@ -822,7 +854,7 @@ void kvm_riscv_vcpu_pmu_init(struct kvm_vcpu *vcpu)
 	 * filtering is available in the host. Otherwise, guest will always count
 	 * events while the execution is in hypervisor mode.
 	 */
-	if (!riscv_isa_extension_available(NULL, SSCOFPMF))
+	if (kvm_riscv_isa_check_host(SSCOFPMF))
 		return;
 
 	ret = riscv_pmu_get_hpm_info(&hpm_width, &num_hw_ctrs);

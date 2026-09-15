@@ -90,6 +90,14 @@ nouveau_channel_del(struct nouveau_channel **pchan)
 {
 	struct nouveau_channel *chan = *pchan;
 	if (chan) {
+		/*
+		 * Drop the kill-event subscription first.  Its handler
+		 * dereferences chan->fence, which the fence context teardown
+		 * below frees, so leaving it armed across the teardown leaves
+		 * a window for a use-after-free.
+		 */
+		nvif_event_dtor(&chan->kill);
+
 		if (chan->fence)
 			nouveau_fence(chan->cli->drm)->context_del(chan);
 
@@ -100,7 +108,6 @@ nouveau_channel_del(struct nouveau_channel **pchan)
 		nvif_object_dtor(&chan->nvsw);
 		nvif_object_dtor(&chan->gart);
 		nvif_object_dtor(&chan->vram);
-		nvif_event_dtor(&chan->kill);
 		nvif_object_dtor(&chan->user);
 		nvif_mem_dtor(&chan->mem_userd);
 		nouveau_vma_del(&chan->sema.vma);
@@ -149,7 +156,7 @@ nouveau_channel_prep(struct nouveau_cli *cli,
 	u32 target;
 	int ret;
 
-	chan = *pchan = kzalloc(sizeof(*chan), GFP_KERNEL);
+	chan = *pchan = kzalloc_obj(*chan);
 	if (!chan)
 		return -ENOMEM;
 
@@ -545,7 +552,7 @@ nouveau_channels_init(struct nouveau_drm *drm)
 
 	drm->chan_nr = drm->chan_total = channels->data;
 	drm->runl_nr = fls64(runlists->data);
-	drm->runl = kcalloc(drm->runl_nr, sizeof(*drm->runl), GFP_KERNEL);
+	drm->runl = kzalloc_objs(*drm->runl, drm->runl_nr);
 	if (!drm->runl)
 		return -ENOMEM;
 
