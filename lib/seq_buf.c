@@ -298,6 +298,7 @@ int seq_buf_putmem_hex(struct seq_buf *s, const void *mem,
 	}
 	return 0;
 }
+EXPORT_SYMBOL_GPL(seq_buf_putmem_hex);
 
 /**
  * seq_buf_path - copy a path into the sequence buffer
@@ -320,7 +321,7 @@ int seq_buf_path(struct seq_buf *s, const struct path *path, const char *esc)
 	if (size) {
 		char *p = d_path(path, buf, size);
 		if (!IS_ERR(p)) {
-			char *end = mangle_path(buf, p, esc);
+			char *end = seq_mangle_path(buf, p, esc);
 			if (end)
 				res = end - buf;
 		}

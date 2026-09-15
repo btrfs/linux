@@ -11,7 +11,6 @@
 
 #include <linux/bpf.h>
 #include <linux/filter.h>
-#include <asm/cacheflush.h>
 
 /* verify runtime detection extension status */
 #define rv_ext_enabled(ext) \
@@ -82,6 +81,7 @@ struct rv_jit_context {
 	int ex_jmp_off;
 	unsigned long flags;
 	int stack_size;
+	int tcc_offset;
 	u64 arena_vm_start;
 	u64 user_vm_start;
 };
@@ -103,11 +103,6 @@ struct rv_jit_data {
 static inline void bpf_fill_ill_insns(void *area, unsigned int size)
 {
 	memset(area, 0, size);
-}
-
-static inline void bpf_flush_icache(void *start, void *end)
-{
-	flush_icache_range((unsigned long)start, (unsigned long)end);
 }
 
 /* Emit a 4-byte riscv instruction. */

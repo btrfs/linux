@@ -26,6 +26,7 @@
 #include <asm-generic/errno.h>
 #include "user_exit_info.bpf.h"
 #include "enum_defs.autogen.h"
+#include "bpf_arena_common.bpf.h"
 
 #define PF_IDLE				0x00000002	/* I am an IDLE thread */
 #define PF_IO_WORKER			0x00000010	/* Task is an IO worker */
@@ -47,6 +48,7 @@
 extern int LINUX_KERNEL_VERSION __kconfig;
 extern const char CONFIG_CC_VERSION_TEXT[64] __kconfig __weak;
 extern const char CONFIG_LOCALVERSION[64] __kconfig __weak;
+extern bool CONFIG_PREEMPT_RCU __kconfig __weak;
 
 /*
  * Earlier versions of clang/pahole lost upper 32bits in 64bit enums which can
@@ -60,21 +62,15 @@ static inline void ___vmlinux_h_sanity_check___(void)
 
 s32 scx_bpf_create_dsq(u64 dsq_id, s32 node) __ksym;
 s32 scx_bpf_select_cpu_dfl(struct task_struct *p, s32 prev_cpu, u64 wake_flags, bool *is_idle) __ksym;
-s32 scx_bpf_select_cpu_and(struct task_struct *p, s32 prev_cpu, u64 wake_flags,
-			   const struct cpumask *cpus_allowed, u64 flags) __ksym __weak;
-void scx_bpf_dsq_insert(struct task_struct *p, u64 dsq_id, u64 slice, u64 enq_flags) __ksym __weak;
-void scx_bpf_dsq_insert_vtime(struct task_struct *p, u64 dsq_id, u64 slice, u64 vtime, u64 enq_flags) __ksym __weak;
+s32 __scx_bpf_select_cpu_and(struct task_struct *p, const struct cpumask *cpus_allowed,
+			     struct scx_bpf_select_cpu_and_args *args) __ksym __weak;
+bool __scx_bpf_dsq_insert_vtime(struct task_struct *p, struct scx_bpf_dsq_insert_vtime_args *args) __ksym __weak;
 u32 scx_bpf_dispatch_nr_slots(void) __ksym;
 void scx_bpf_dispatch_cancel(void) __ksym;
-bool scx_bpf_dsq_move_to_local(u64 dsq_id) __ksym __weak;
-void scx_bpf_dsq_move_set_slice(struct bpf_iter_scx_dsq *it__iter, u64 slice) __ksym __weak;
-void scx_bpf_dsq_move_set_vtime(struct bpf_iter_scx_dsq *it__iter, u64 vtime) __ksym __weak;
-bool scx_bpf_dsq_move(struct bpf_iter_scx_dsq *it__iter, struct task_struct *p, u64 dsq_id, u64 enq_flags) __ksym __weak;
-bool scx_bpf_dsq_move_vtime(struct bpf_iter_scx_dsq *it__iter, struct task_struct *p, u64 dsq_id, u64 enq_flags) __ksym __weak;
-u32 scx_bpf_reenqueue_local(void) __ksym;
 void scx_bpf_kick_cpu(s32 cpu, u64 flags) __ksym;
 s32 scx_bpf_dsq_nr_queued(u64 dsq_id) __ksym;
 void scx_bpf_destroy_dsq(u64 dsq_id) __ksym;
+struct task_struct *scx_bpf_dsq_peek(u64 dsq_id) __ksym __weak;
 int bpf_iter_scx_dsq_new(struct bpf_iter_scx_dsq *it, u64 dsq_id, u64 flags) __ksym __weak;
 struct task_struct *bpf_iter_scx_dsq_next(struct bpf_iter_scx_dsq *it) __ksym __weak;
 void bpf_iter_scx_dsq_destroy(struct bpf_iter_scx_dsq *it) __ksym __weak;
@@ -102,12 +98,30 @@ s32 scx_bpf_pick_any_cpu_node(const cpumask_t *cpus_allowed, int node, u64 flags
 s32 scx_bpf_pick_any_cpu(const cpumask_t *cpus_allowed, u64 flags) __ksym;
 bool scx_bpf_task_running(const struct task_struct *p) __ksym;
 s32 scx_bpf_task_cpu(const struct task_struct *p) __ksym;
-struct rq *scx_bpf_cpu_rq(s32 cpu) __ksym;
+struct rq *scx_bpf_cpu_rq(s32 cpu) __ksym __weak;
 struct rq *scx_bpf_locked_rq(void) __ksym;
 struct task_struct *scx_bpf_cpu_curr(s32 cpu) __ksym __weak;
-struct cgroup *scx_bpf_task_cgroup(struct task_struct *p) __ksym __weak;
+struct task_struct *scx_bpf_tid_to_task(u64 tid) __ksym __weak;
 u64 scx_bpf_now(void) __ksym __weak;
 void scx_bpf_events(struct scx_event_stats *events, size_t events__sz) __ksym __weak;
+s32 scx_bpf_cpu_to_cid(s32 cpu) __ksym __weak;
+s32 scx_bpf_cid_to_cpu(s32 cid) __ksym __weak;
+void scx_bpf_cid_topo(s32 cid, struct scx_cid_topo *out) __ksym __weak;
+void scx_bpf_kick_cid(s32 cid, u64 flags) __ksym __weak;
+s32 scx_bpf_task_cid(const struct task_struct *p) __ksym __weak;
+s32 scx_bpf_this_cid(void) __ksym __weak;
+struct task_struct *scx_bpf_cid_curr(s32 cid) __ksym __weak;
+u32 scx_bpf_nr_cids(void) __ksym __weak;
+u32 scx_bpf_nr_online_cids(void) __ksym __weak;
+u32 scx_bpf_cidperf_cap(s32 cid) __ksym __weak;
+u32 scx_bpf_cidperf_cur(s32 cid) __ksym __weak;
+s32 scx_bpf_cidperf_set(s32 cid, u32 perf) __ksym __weak;
+
+/* sub-scheduler cap control, scx_bpf_sub_caps() cgroup_id 0 == self */
+s32 scx_bpf_sub_grant(u64 cgroup_id, u64 caps, const struct scx_cmask __arena *cmask__arena, struct scx_cmask __arena *denied_out__arena__nullable) __ksym __weak;
+void scx_bpf_sub_revoke(u64 cgroup_id, u64 caps, const struct scx_cmask __arena *cmask__arena) __ksym __weak;
+s32 scx_bpf_sub_caps(u64 cgroup_id, u64 caps, struct scx_cmask __arena *out__arena) __ksym __weak;
+s32 scx_bpf_sub_kill_bstr(u64 cgroup_id, char *fmt, unsigned long long *data, u32 data__sz) __ksym __weak;
 
 /*
  * Use the following as @it__iter when calling scx_bpf_dsq_move[_vtime]() from
@@ -152,6 +166,22 @@ void ___scx_bpf_bstr_format_checker(const char *fmt, ...) {}
 	scx_bpf_bstr_preamble(fmt, args)					\
 	scx_bpf_exit_bstr(code, ___fmt, ___param, sizeof(___param));		\
 	___scx_bpf_bstr_format_checker(fmt, ##args);				\
+})
+
+/*
+ * scx_bpf_sub_kill() wraps the scx_bpf_sub_kill_bstr() kfunc with variadic
+ * arguments instead of an array of u64. It kills the direct child sub-scheduler
+ * @cgid, passing the formatted reason to its user space, and evaluates to the
+ * kfunc's return value. On a kernel without sub-scheduler support the kfunc is
+ * absent and it returns -EOPNOTSUPP.
+ */
+#define scx_bpf_sub_kill(cgid, fmt, args...)					\
+({										\
+	scx_bpf_bstr_preamble(fmt, args)					\
+	___scx_bpf_bstr_format_checker(fmt, ##args);				\
+	bpf_ksym_exists(scx_bpf_sub_kill_bstr) ?				\
+		scx_bpf_sub_kill_bstr((cgid), ___fmt, ___param,			\
+				      sizeof(___param)) : -EOPNOTSUPP;		\
 })
 
 /*
@@ -298,6 +328,50 @@ BPF_PROG(name, ##args)
 })
 #endif /* ARRAY_ELEM_PTR */
 
+/**
+ * __sink - Hide @expr's value from the compiler and BPF verifier
+ * @expr: The expression whose value should be opacified
+ *
+ * No-op at runtime. The empty inline assembly with a read-write constraint
+ * ("+g") has two effects at compile/verify time:
+ *
+ * 1. Compiler: treats @expr as both read and written, preventing dead-code
+ *    elimination and keeping @expr (and any side effects that produced it)
+ *    alive.
+ *
+ * 2. BPF verifier: forgets the precise value/range of @expr ("makes it
+ *    imprecise"). The verifier normally tracks exact ranges for every register
+ *    and stack slot. While useful, precision means each distinct value creates a
+ *    separate verifier state. Inside loops this leads to state explosion - each
+ *    iteration carries different precise values so states never merge and the
+ *    verifier explores every iteration individually.
+ *
+ * Example - preventing loop state explosion::
+ *
+ *     u32 nr_intersects = 0, nr_covered = 0;
+ *     __sink(nr_intersects);
+ *     __sink(nr_covered);
+ *     bpf_for(i, 0, nr_nodes) {
+ *         if (intersects(cpumask, node_mask[i]))
+ *             nr_intersects++;
+ *         if (covers(cpumask, node_mask[i]))
+ *             nr_covered++;
+ *     }
+ *
+ * Without __sink(), the verifier tracks every possible (nr_intersects,
+ * nr_covered) pair across iterations, causing "BPF program is too large". With
+ * __sink(), the values become unknown scalars so all iterations collapse into
+ * one reusable state.
+ *
+ * Example - keeping a reference alive::
+ *
+ *     struct task_struct *t = bpf_task_acquire(task);
+ *     __sink(t);
+ *
+ * Follows the convention from BPF selftests (bpf_misc.h).
+ */
+#define __sink(expr) asm volatile ("" : "+g"(expr))
+
 /*
  * BPF declarations and helpers
  */
@@ -343,6 +417,7 @@ void bpf_task_release(struct task_struct *p) __ksym;
 
 /* cgroup */
 struct cgroup *bpf_cgroup_ancestor(struct cgroup *cgrp, int level) __ksym;
+struct cgroup *bpf_cgroup_acquire(struct cgroup *cgrp) __ksym;
 void bpf_cgroup_release(struct cgroup *cgrp) __ksym;
 struct cgroup *bpf_cgroup_from_id(u64 cgid) __ksym;
 
@@ -455,31 +530,102 @@ static __always_inline const struct cpumask *cast_mask(struct bpf_cpumask *mask)
 }
 
 /*
+ * True if the non-sleepable BPF trampoline prolog (__bpf_prog_enter) calls
+ * migrate_disable() for the current task. Recorded once by
+ * scx_lib_init_probe, an fentry program on bpf_scx_reg() that fires during
+ * the natural scheduler-attach call chain (auto-attached by scx_ops_attach!).
+ *
+ * Defaults to true (conservative). Over-reporting in is_migration_disabled()
+ * causes local-only dispatch, which is safe. Under-reporting can crash the
+ * scheduler, so we err high if the probe somehow fails to run.
+ */
+bool __scx_prolog_disables_migration __weak = true;
+
+/*
+ * scx_lib_init_probe - non-sleepable prolog probe.
+ *
+ * Attached to bpf_scx_reg(), the .reg callback in bpf_sched_ext_ops
+ * (kernel/sched/ext.c). The kernel's struct_ops machinery invokes
+ * bpf_scx_reg when userspace creates the scheduler link, before
+ * ops.init() fires. Its address is taken in the vtable, so the symbol
+ * is non-inlinable and has been stable since introduction.
+ *
+ * Entering via fentry runs us through __bpf_prog_enter -- the
+ * non-sleepable prolog that consumers of is_migration_disabled() live
+ * under.
+ *
+ * Loud warning: the prolog adds at most 1 to migration_disabled.
+ * Reading > 1 means something upstream in the
+ * bpf_struct_ops_link_create -> bpf_scx_reg path disabled migration
+ * before the prolog ran, invalidating the probe; audit and adjust.
+ */
+SEC("fentry/bpf_scx_reg") __weak
+int scx_lib_init_probe(void *ctx)
+{
+	if (bpf_core_field_exists(((struct task_struct *)0)->migration_disabled)) {
+		const struct task_struct *p = bpf_get_current_task_btf();
+		unsigned int md = p->migration_disabled;
+
+		if (md > 1)
+			bpf_printk("scx_lib_init_probe: unexpected migration_disabled=%u "
+				   "upstream of BPF prolog; probe result unreliable",
+				   md);
+
+		__scx_prolog_disables_migration = md > 0;
+	}
+	return 0;
+}
+
+/*
  * Return true if task @p cannot migrate to a different CPU, false
  * otherwise.
+ *
+ * IMPORTANT: designed for NON-SLEEPABLE BPF contexts only. Sleepable
+ * contexts (BPF_STRUCT_OPS_SLEEPABLE, SEC("syscall"),
+ * SEC("fentry.s/...")) enter via __bpf_prog_enter_sleepable() or
+ * __bpf_prog_enter_sleepable_recur(), both of which unconditionally
+ * call migrate_disable(); this helper can yield a false negative for
+ * p == current there, which can crash the scheduler.
  */
 static inline bool is_migration_disabled(const struct task_struct *p)
 {
 	/*
-	 * Testing p->migration_disabled in a BPF code is tricky because the
-	 * migration is _always_ disabled while running the BPF code.
-	 * The prolog (__bpf_prog_enter) and epilog (__bpf_prog_exit) for BPF
-	 * code execution disable and re-enable the migration of the current
-	 * task, respectively. So, the _current_ task of the sched_ext ops is
-	 * always migration-disabled. Moreover, p->migration_disabled could be
-	 * two or greater when a sched_ext ops BPF code (e.g., ops.tick) is
-	 * executed in the middle of the other BPF code execution.
+	 * Testing p->migration_disabled in BPF is tricky because the BPF prolog
+	 * (__bpf_prog_enter) may call migrate_disable() for the current task,
+	 * making migration_disabled == 1 even for tasks that are not truly
+	 * migration-disabled.
 	 *
-	 * Therefore, we should decide that the _current_ task is
-	 * migration-disabled only when its migration_disabled count is greater
-	 * than one. In other words, when  p->migration_disabled == 1, there is
-	 * an ambiguity, so we should check if @p is the current task or not.
+	 * Since commit 8e4f0b1ebcf2 ("bpf: use rcu_read_lock_dont_migrate() for
+	 * trampoline.c"), the BPF prolog calls migrate_disable() only when
+	 * CONFIG_PREEMPT_RCU is enabled. Two fast paths cover the common cases:
+	 *
+	 *   1) CONFIG_PREEMPT_RCU: prolog always calls migrate_disable(), so
+	 *      migration_disabled == 1 for the current task is ambiguous.
+	 *      Disambiguate by checking p == current.
+	 *
+	 *   2) v6.18+ without CONFIG_PREEMPT_RCU: prolog never calls
+	 *      migrate_disable(), so migration_disabled == 1 is unambiguously
+	 *      a real migrate_disable() call.
+	 *
+	 * A slow path handles pre-v6.18 kernels without CONFIG_PREEMPT_RCU,
+	 * where the prolog historically called migrate_disable() unconditionally
+	 * but a cherry-picked downstream kernel may not. The runtime-probed flag
+	 * __scx_prolog_disables_migration (set by scx_lib_init_probe) distinguishes
+	 * the two cases without relying on the kernel version alone.
 	 */
 	if (bpf_core_field_exists(p->migration_disabled)) {
-		if (p->migration_disabled == 1)
-			return bpf_get_current_task_btf() != p;
-		else
-			return p->migration_disabled;
+		if (p->migration_disabled == 1) {
+			/* Fast path: prolog always disables migration */
+			if (CONFIG_PREEMPT_RCU)
+				return bpf_get_current_task_btf() != p;
+			/* Fast path: prolog never disables migration */
+			if (LINUX_KERNEL_VERSION >= KERNEL_VERSION(6, 18, 0))
+				return true;
+			/* Slow path: pre-v6.18, !PREEMPT_RCU - use runtime flag */
+			return __scx_prolog_disables_migration ?
+			       bpf_get_current_task_btf() != p : true;
+		}
+		return p->migration_disabled;
 	}
 	return false;
 }
@@ -487,6 +633,10 @@ static inline bool is_migration_disabled(const struct task_struct *p)
 /* rcu */
 void bpf_rcu_read_lock(void) __ksym;
 void bpf_rcu_read_unlock(void) __ksym;
+
+/* resilient qspinlock */
+int bpf_res_spin_lock(struct bpf_res_spin_lock *lock) __ksym __weak;
+void bpf_res_spin_unlock(struct bpf_res_spin_lock *lock) __ksym __weak;
 
 /*
  * Time helpers, most of which are from jiffies.h.
@@ -749,6 +899,73 @@ static inline u64 __sqrt_u64(u64 x)
 }
 
 /*
+ * ctzll -- Counts trailing zeros in an unsigned long long. If the input value
+ * is zero, the return value is undefined.
+ */
+static inline int ctzll(u64 v)
+{
+#if (!defined(__BPF__) && defined(__SCX_TARGET_ARCH_x86)) || \
+	(defined(__BPF__) && defined(__clang_major__) && __clang_major__ >= 19)
+	/*
+	 * Use the ctz builtin when: (1) building for native x86, or
+	 * (2) building for BPF with clang >= 19 (BPF backend supports
+	 * the intrinsic from clang 19 onward; earlier versions hit
+	 * "unimplemented opcode" in the backend).
+	 */
+	return __builtin_ctzll(v);
+#else
+	/*
+	 * If neither the target architecture nor the toolchains support ctzll,
+	 * use software-based emulation. Let's use the De Bruijn sequence-based
+	 * approach to find LSB fastly. See the details of De Bruijn sequence:
+	 *
+	 * https://en.wikipedia.org/wiki/De_Bruijn_sequence
+	 * https://www.chessprogramming.org/BitScan#De_Bruijn_Multiplication
+	 */
+	const int lookup_table[64] = {
+		 0,  1, 48,  2, 57, 49, 28,  3, 61, 58, 50, 42, 38, 29, 17,  4,
+		62, 55, 59, 36, 53, 51, 43, 22, 45, 39, 33, 30, 24, 18, 12,  5,
+		63, 47, 56, 27, 60, 41, 37, 16, 54, 35, 52, 21, 44, 32, 23, 11,
+		46, 26, 40, 15, 34, 20, 31, 10, 25, 14, 19,  9, 13,  8,  7,  6,
+	};
+	const u64 DEBRUIJN_CONSTANT = 0x03f79d71b4cb0a89ULL;
+	unsigned int index;
+	u64 lowest_bit;
+	const int *lt;
+
+	if (v == 0)
+		return -1;
+
+	/*
+	 * Isolate the least significant bit (LSB).
+	 * For example, if v = 0b...10100, then v & -v = 0b...00100
+	 */
+	lowest_bit = v & -v;
+
+	/*
+	 * Each isolated bit produces a unique 6-bit value, guaranteed by the
+	 * De Bruijn property. Calculate a unique index into the lookup table
+	 * using the magic constant and a right shift.
+	 *
+	 * Multiplying by the 64-bit constant "spreads out" that 1-bit into a
+	 * unique pattern in the top 6 bits. This uniqueness property is
+	 * exactly what a De Bruijn sequence guarantees: Every possible 6-bit
+	 * pattern (in top bits) occurs exactly once for each LSB position. So,
+	 * the constant 0x03f79d71b4cb0a89ULL is carefully chosen to be a
+	 * De Bruijn sequence, ensuring no collisions in the table index.
+	 */
+	index = (lowest_bit * DEBRUIJN_CONSTANT) >> 58;
+
+	/*
+	 * Lookup in a precomputed table. No collision is guaranteed by the
+	 * De Bruijn property.
+	 */
+	lt = MEMBER_VPTR(lookup_table, [index]);
+	return (lt)? *lt : -1;
+#endif
+}
+
+/*
  * Return a value proportionally scaled to the task's weight.
  */
 static inline u64 scale_by_task_weight(const struct task_struct *p, u64 value)
@@ -765,7 +982,210 @@ static inline u64 scale_by_task_weight_inverse(const struct task_struct *p, u64 
 }
 
 
+/*
+ * Get a random u64 from the kernel's pseudo-random generator.
+ */
+static inline u64 get_prandom_u64()
+{
+	return ((u64)bpf_get_prandom_u32() << 32) | bpf_get_prandom_u32();
+}
+
+/*
+ * Define the shadow structure to avoid a compilation error when
+ * vmlinux.h does not enable necessary kernel configs. The ___local
+ * suffix is a CO-RE convention that tells the loader to match this
+ * against the base struct rq in the kernel. The attribute
+ * preserve_access_index tells the compiler to generate a CO-RE
+ * relocation for these fields.
+ */
+struct rq___local {
+	/*
+	 * A monotonically increasing clock per CPU. It is rq->clock minus
+	 * cumulative IRQ time and hypervisor steal time. Unlike rq->clock,
+	 * it does not advance during IRQ processing or hypervisor preemption.
+	 * It does advance during idle (the idle task counts as a running task
+	 * for this purpose).
+	 */
+	u64		clock_task;
+	/*
+	 * Invariant version of clock_task scaled by CPU capacity and
+	 * frequency. For example, clock_pelt advances 2x slower on a CPU
+	 * with half the capacity.
+	 *
+	 * At idle exit, rq->clock_pelt jumps forward to resync with
+	 * clock_task. The kernel's rq_clock_pelt() corrects for this jump
+	 * by subtracting lost_idle_time, yielding a clock that appears
+	 * continuous across idle transitions. scx_clock_pelt() mirrors
+	 * rq_clock_pelt() by performing the same subtraction.
+	 */
+	u64		clock_pelt;
+	/*
+	 * Accumulates the magnitude of each clock_pelt jump at idle exit.
+	 * Subtracting this from clock_pelt gives rq_clock_pelt(): a
+	 * continuous, capacity-invariant clock suitable for both task
+	 * execution time stamping and cross-idle measurements.
+	 */
+	unsigned long	lost_idle_time;
+	/*
+	 * Shadow of paravirt_steal_clock() (the hypervisor's cumulative
+	 * stolen time counter). Stays frozen while the hypervisor preempts
+	 * the vCPU; catches up the next time update_rq_clock_task() is
+	 * called. The delta is the stolen time not yet subtracted from
+	 * clock_task.
+	 *
+	 * Unlike irqtime->total (a plain kernel-side field), the live stolen
+	 * time counter lives in hypervisor-specific shared memory and has no
+	 * kernel-side equivalent readable from BPF in a hypervisor-agnostic
+	 * way. This field is therefore the only portable BPF-accessible
+	 * approximation of cumulative steal time.
+	 *
+	 * Available only when CONFIG_PARAVIRT_TIME_ACCOUNTING is on.
+	 */
+	u64		prev_steal_time_rq;
+} __attribute__((preserve_access_index));
+
+extern struct rq runqueues __ksym;
+
+/*
+ * Define the shadow structure to avoid a compilation error when
+ * vmlinux.h does not enable necessary kernel configs.
+ */
+struct irqtime___local {
+	/*
+	 * Cumulative IRQ time counter for this CPU, in nanoseconds. Advances
+	 * immediately at the exit of every hardirq and non-ksoftirqd softirq
+	 * via irqtime_account_irq(). ksoftirqd time is counted as normal
+	 * task time and is NOT included. NMI time is also NOT included.
+	 *
+	 * The companion field irqtime->sync (struct u64_stats_sync) protects
+	 * against 64-bit tearing on 32-bit architectures. On 64-bit kernels,
+	 * u64_stats_sync is an empty struct and all seqcount operations are
+	 * no-ops, so a plain BPF_CORE_READ of this field is safe.
+	 *
+	 * Available only when CONFIG_IRQ_TIME_ACCOUNTING is on.
+	 */
+	u64		total;
+} __attribute__((preserve_access_index));
+
+/*
+ * cpu_irqtime is a per-CPU variable defined only when
+ * CONFIG_IRQ_TIME_ACCOUNTING is on. Declare it as __weak so the BPF
+ * loader sets its address to 0 (rather than failing) when the symbol
+ * is absent from the running kernel.
+ */
+extern struct irqtime___local cpu_irqtime __ksym __weak;
+
+static inline struct rq___local *get_current_rq(u32 cpu)
+{
+	/*
+	 * This is a workaround to get an rq pointer now that
+	 * scx_bpf_cpu_rq() has been removed.
+	 *
+	 * WARNING: The caller must hold the rq lock for @cpu. This is
+	 * guaranteed when called from scheduling callbacks (ops.running,
+	 * ops.stopping, ops.enqueue, ops.dequeue, ops.dispatch, etc.).
+	 * There is no runtime check available in BPF for kernel spinlock
+	 * state — correctness is enforced by calling context only.
+	 */
+	return (void *)bpf_per_cpu_ptr(&runqueues, cpu);
+}
+
+static inline u64 scx_clock_task(u32 cpu)
+{
+	struct rq___local *rq = get_current_rq(cpu);
+
+	/*
+	 * Equivalent to the kernel's rq_clock_task(): wall-clock time minus
+	 * cumulative IRQ time (CONFIG_IRQ_TIME_ACCOUNTING) and hypervisor
+	 * steal time (CONFIG_PARAVIRT_TIME_ACCOUNTING). Without those configs,
+	 * it equals rq->clock.
+	 *
+	 * Conceptually this clock advances during idle (the idle task counts
+	 * as a running task), but rq->clock_task is only updated on scheduling
+	 * events. With NO_HZ_IDLE (the default), the periodic tick is stopped
+	 * on idle CPUs, so rq->clock_task is not refreshed while a CPU is
+	 * idle. Reading this clock for a remote idle CPU from a BPF timer
+	 * callback returns the value from when the CPU last went idle, making
+	 * the delta over an idle interval effectively zero.
+	 */
+	return rq ? rq->clock_task : 0;
+}
+
+static inline u64 scx_clock_pelt(u32 cpu)
+{
+	struct rq___local *rq = get_current_rq(cpu);
+
+	/*
+	 * Equivalent to the kernel's rq_clock_pelt(): subtracts
+	 * lost_idle_time from clock_pelt to absorb the jump that occurs
+	 * when clock_pelt resyncs with clock_task at idle exit. The intent
+	 * is a continuous, capacity- and frequency-invariant clock that is
+	 * frozen during idle, IRQ, and hypervisor steal.
+	 *
+	 * However, like scx_clock_task(), this clock has a stale-read issue
+	 * for remote idle CPUs with NO_HZ_IDLE (the default). clock_pelt
+	 * itself advances at wall-clock rate (hardware-clock based), but
+	 * lost_idle_time is only updated via update_rq_clock_pelt(), which
+	 * requires update_rq_clock() to be called. With NO_HZ_IDLE, the
+	 * periodic tick is stopped on idle CPUs, so lost_idle_time is not
+	 * refreshed during idle. Reading this clock for a remote idle CPU
+	 * from a BPF timer callback therefore returns a value that drifts
+	 * at wall-clock rate -- the same stale behaviour as scx_clock_task().
+	 *
+	 * Without NO_HZ_IDLE, periodic ticks keep lost_idle_time nearly in
+	 * sync (stale by at most one tick period, ~1 ms), so the result is
+	 * accurate.
+	 */
+	return rq ? (rq->clock_pelt - rq->lost_idle_time) : 0;
+}
+
+static inline u64 scx_clock_virt(u32 cpu)
+{
+	struct rq___local *rq;
+
+	/*
+	 * Check field existence before calling get_current_rq() so we avoid
+	 * the per_cpu lookup entirely on kernels built without
+	 * CONFIG_PARAVIRT_TIME_ACCOUNTING.
+	 */
+	if (!bpf_core_field_exists(((struct rq___local *)0)->prev_steal_time_rq))
+		return 0;
+
+	/* Lagging shadow of the kernel's paravirt_steal_clock(). */
+	rq = get_current_rq(cpu);
+	return rq ? BPF_CORE_READ(rq, prev_steal_time_rq) : 0;
+}
+
+static inline u64 scx_clock_irq(u32 cpu)
+{
+	struct irqtime___local *irqt;
+
+	/*
+	 * bpf_core_type_exists() resolves at load time: if struct irqtime is
+	 * absent from kernel BTF (CONFIG_IRQ_TIME_ACCOUNTING off), the loader
+	 * patches this into an unconditional return 0, making the
+	 * bpf_per_cpu_ptr() call below dead code that the verifier never sees.
+	 */
+	if (!bpf_core_type_exists(struct irqtime___local))
+		return 0;
+
+	/* Equivalent to the kernel's irq_time_read(). */
+	irqt = bpf_per_cpu_ptr(&cpu_irqtime, cpu);
+	return irqt ? BPF_CORE_READ(irqt, total) : 0;
+}
+
+/* Abbreviated forms of <linux/overflow.h>'s struct_size() family. */
+#define flex_array_size(p, member, count)	\
+	((count) * sizeof(*(p)->member))
+
+#define struct_size(p, member, count)		\
+	(offsetof(typeof(*(p)), member) + flex_array_size(p, member, count))
+
+#define struct_size_t(type, member, count)	\
+	struct_size((type *)NULL, member, count)
+
 #include "compat.bpf.h"
 #include "enums.bpf.h"
+#include "cid.bpf.h"
 
 #endif	/* __SCX_COMMON_BPF_H */

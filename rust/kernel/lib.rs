@@ -16,38 +16,20 @@
 // Please see https://github.com/Rust-for-Linux/linux/issues/2 for details on
 // the unstable features in use.
 //
-// Stable since Rust 1.79.0.
-#![feature(generic_nonzero)]
-#![feature(inline_const)]
-#![feature(pointer_is_aligned)]
+// Stable since Rust 1.87.0.
+#![feature(unsigned_is_multiple_of)]
 //
-// Stable since Rust 1.81.0.
-#![feature(lint_reasons)]
-//
-// Stable since Rust 1.82.0.
-#![feature(raw_ref_op)]
-//
-// Stable since Rust 1.83.0.
-#![feature(const_maybe_uninit_as_mut_ptr)]
-#![feature(const_mut_refs)]
-#![feature(const_option)]
-#![feature(const_ptr_write)]
-#![feature(const_refs_to_cell)]
+// Stable since Rust 1.89.0.
+#![feature(generic_arg_infer)]
 //
 // Expected to become stable.
 #![feature(arbitrary_self_types)]
+#![feature(derive_coerce_pointee)]
 //
 // To be determined.
 #![feature(used_with_arg)]
 //
-// `feature(derive_coerce_pointee)` is expected to become stable. Before Rust
-// 1.84.0, it did not exist, so enable the predecessor features.
-#![cfg_attr(CONFIG_RUSTC_HAS_COERCE_POINTEE, feature(derive_coerce_pointee))]
-#![cfg_attr(not(CONFIG_RUSTC_HAS_COERCE_POINTEE), feature(coerce_unsized))]
-#![cfg_attr(not(CONFIG_RUSTC_HAS_COERCE_POINTEE), feature(dispatch_from_dyn))]
-#![cfg_attr(not(CONFIG_RUSTC_HAS_COERCE_POINTEE), feature(unsize))]
-//
-// `feature(file_with_nul)` is expected to become stable. Before Rust 1.89.0, it did not exist, so
+// `feature(file_with_nul)` is stable since Rust 1.92.0. Before Rust 1.89.0, it did not exist, so
 // enable it conditionally.
 #![cfg_attr(CONFIG_RUSTC_HAS_FILE_WITH_NUL, feature(file_with_nul))]
 
@@ -65,12 +47,12 @@ pub mod acpi;
 pub mod alloc;
 #[cfg(CONFIG_AUXILIARY_BUS)]
 pub mod auxiliary;
+pub mod bitfield;
 pub mod bitmap;
 pub mod bits;
 #[cfg(CONFIG_BLOCK)]
 pub mod block;
 pub mod bug;
-#[doc(hidden)]
 pub mod build_assert;
 pub mod clk;
 #[cfg(CONFIG_CONFIGFS_FS)]
@@ -94,10 +76,21 @@ pub mod faux;
 pub mod firmware;
 pub mod fmt;
 pub mod fs;
+#[cfg(CONFIG_RUST_FWCTL_ABSTRACTIONS)]
+pub mod fwctl;
+#[cfg(CONFIG_GPU_BUDDY = "y")]
+pub mod gpu;
+#[cfg(CONFIG_I2C = "y")]
+pub mod i2c;
 pub mod id_pool;
+#[doc(hidden)]
+pub mod impl_flags;
 pub mod init;
+pub mod interop;
+pub mod interrupt;
 pub mod io;
 pub mod ioctl;
+pub mod iommu;
 pub mod iov;
 pub mod irq;
 pub mod jump_label;
@@ -107,8 +100,11 @@ pub mod list;
 pub mod maple_tree;
 pub mod miscdevice;
 pub mod mm;
+pub mod module;
+pub mod module_param;
 #[cfg(CONFIG_NET)]
 pub mod net;
+pub mod num;
 pub mod of;
 #[cfg(CONFIG_PM_OPP)]
 pub mod opp;
@@ -121,14 +117,20 @@ pub mod prelude;
 pub mod print;
 pub mod processor;
 pub mod ptr;
+#[cfg(CONFIG_RUST_PWM_ABSTRACTIONS)]
+pub mod pwm;
 pub mod rbtree;
 pub mod regulator;
 pub mod revocable;
+pub mod safety;
 pub mod scatterlist;
 pub mod security;
 pub mod seq_file;
+#[cfg(CONFIG_RUST_SERIAL_DEV_BUS_ABSTRACTIONS)]
+pub mod serdev;
 pub mod sizes;
-mod static_assert;
+#[cfg(CONFIG_SOC_BUS)]
+pub mod soc;
 #[doc(hidden)]
 pub mod std_vendor;
 pub mod str;
@@ -139,83 +141,37 @@ pub mod tracepoint;
 pub mod transmute;
 pub mod types;
 pub mod uaccess;
+#[cfg(CONFIG_USB = "y")]
+pub mod usb;
 pub mod workqueue;
 pub mod xarray;
 
 #[doc(hidden)]
 pub use bindings;
 pub use macros;
+pub use module::{
+    InPlaceModule,
+    Module,
+    ModuleMetadata,
+    ThisModule, //
+};
 pub use uapi;
 
 /// Prefix to appear before log messages printed from within the `kernel` crate.
 const __LOG_PREFIX: &[u8] = b"rust_kernel\0";
 
-/// The top level entrypoint to implementing a kernel module.
-///
-/// For any teardown or cleanup operations, your type may implement [`Drop`].
-pub trait Module: Sized + Sync + Send {
-    /// Called at module initialization time.
-    ///
-    /// Use this method to perform whatever setup or registration your module
-    /// should do.
-    ///
-    /// Equivalent to the `module_init` macro in the C API.
-    fn init(module: &'static ThisModule) -> error::Result<Self>;
-}
+/// Dummy module type for `#[vtable]` `impl` blocks within the `kernel` crate (e.g. KUnit tests).
+// The `allow` is needed since it may be unused (e.g. KUnit tests may be disabled).
+#[allow(dead_code)]
+struct LocalModule;
 
-/// A module that is pinned and initialised in-place.
-pub trait InPlaceModule: Sync + Send {
-    /// Creates an initialiser for the module.
-    ///
-    /// It is called when the module is loaded.
-    fn init(module: &'static ThisModule) -> impl pin_init::PinInit<Self, error::Error>;
-}
+impl ModuleMetadata for LocalModule {
+    const NAME: &'static str::CStr = c"rust_kernel";
 
-impl<T: Module> InPlaceModule for T {
-    fn init(module: &'static ThisModule) -> impl pin_init::PinInit<Self, error::Error> {
-        let initer = move |slot: *mut Self| {
-            let m = <Self as Module>::init(module)?;
-
-            // SAFETY: `slot` is valid for write per the contract with `pin_init_from_closure`.
-            unsafe { slot.write(m) };
-            Ok(())
-        };
-
-        // SAFETY: On success, `initer` always fully initialises an instance of `Self`.
-        unsafe { pin_init::pin_init_from_closure(initer) }
-    }
-}
-
-/// Metadata attached to a [`Module`] or [`InPlaceModule`].
-pub trait ModuleMetadata {
-    /// The name of the module as specified in the `module!` macro.
-    const NAME: &'static crate::str::CStr;
-}
-
-/// Equivalent to `THIS_MODULE` in the C API.
-///
-/// C header: [`include/linux/init.h`](srctree/include/linux/init.h)
-pub struct ThisModule(*mut bindings::module);
-
-// SAFETY: `THIS_MODULE` may be used from all threads within a module.
-unsafe impl Sync for ThisModule {}
-
-impl ThisModule {
-    /// Creates a [`ThisModule`] given the `THIS_MODULE` pointer.
-    ///
-    /// # Safety
-    ///
-    /// The pointer must be equal to the right `THIS_MODULE`.
-    pub const unsafe fn from_ptr(ptr: *mut bindings::module) -> ThisModule {
-        ThisModule(ptr)
-    }
-
-    /// Access the raw pointer for this module.
-    ///
-    /// It is up to the user to use it correctly.
-    pub const fn as_ptr(&self) -> *mut bindings::module {
-        self.0
-    }
+    const THIS_MODULE: ThisModule = {
+        // SAFETY: `try_module_get`/`module_put` handle null module pointers gracefully.
+        unsafe { ThisModule::from_ptr(core::ptr::null_mut()) }
+    };
 }
 
 #[cfg(not(testlib))]

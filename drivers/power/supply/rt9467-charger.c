@@ -17,7 +17,6 @@
 #include <linux/kstrtox.h>
 #include <linux/linear_range.h>
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/mutex.h>
 #include <linux/of.h>
 #include <linux/power_supply.h>
@@ -376,7 +375,7 @@ static int rt9467_set_value_from_ranges(struct rt9467_chg_data *data,
 	if (rsel == RT9467_RANGE_VMIVR) {
 		ret = linear_range_get_selector_high(range, value, &sel, &found);
 		if (ret)
-			value = range->max_sel;
+			sel = range->max_sel;
 	} else {
 		linear_range_get_selector_within(range, value, &sel);
 	}
@@ -588,6 +587,10 @@ static int rt9467_run_aicl(struct rt9467_chg_data *data)
 	aicl_vth = mivr_vth + RT9467_AICLVTH_GAP_uV;
 	ret = rt9467_set_value_from_ranges(data, F_AICL_VTH,
 					   RT9467_RANGE_AICL_VTH, aicl_vth);
+	if (ret) {
+		dev_err(data->dev, "Failed to set AICL VTH\n");
+		return ret;
+	}
 
 	/* Trigger AICL function */
 	ret = regmap_field_write(data->rm_field[F_AICL_MEAS], 1);
@@ -1027,8 +1030,7 @@ static int rt9467_request_interrupt(struct rt9467_chg_data *data)
 		ret = devm_request_threaded_irq(dev, virq, NULL, chg_irqs[i].handler,
 						IRQF_ONESHOT, chg_irqs[i].name, data);
 		if (ret)
-			return dev_err_probe(dev, ret, "Failed to request (%s) irq\n",
-					     chg_irqs[i].name);
+			return ret;
 	}
 
 	return 0;

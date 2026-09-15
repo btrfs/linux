@@ -208,11 +208,18 @@ static bool uac_clock_source_is_valid_quirk(struct snd_usb_audio *chip,
 	}
 
 	/*
-	 * MOTU MicroBook IIc
-	 * Sample rate changes takes more than 2 seconds for this device. Clock
-	 * validity request returns false during that period.
+	 * Quirk for older MOTU AVB / hybrid interfaces
+	 *
+	 * These devices take more than 2 seconds to switch sample rate or
+	 * clock source. During this period the clock validity request
+	 * returns false, causing ALSA to fail prematurely.
+	 *
+	 * Affected models (all use vendor 0x07fd):
+	 *   - MicroBook IIc          → 0x0004
+	 *   - 1248, 624, 8A, UltraLite AVB, 8M, 16A, ... → 0x0005
 	 */
-	if (chip->usb_id == USB_ID(0x07fd, 0x0004)) {
+	if (chip->usb_id == USB_ID(0x07fd, 0x0004) ||  /* MicroBook IIc */
+	    chip->usb_id == USB_ID(0x07fd, 0x0005)) {  /* 1248 / 624 / 8A / UltraLite AVB / ... */
 		count = 0;
 
 		while ((!ret) && (count < 50)) {
@@ -593,7 +600,7 @@ int snd_usb_set_sample_rate_v2v3(struct snd_usb_audio *chip,
 static int set_sample_rate_v2v3(struct snd_usb_audio *chip,
 				const struct audioformat *fmt, int rate)
 {
-	int cur_rate, prev_rate;
+	int cur_rate, prev_rate = 0;
 	int clock;
 
 	/* First, try to find a valid clock. This may trigger
@@ -618,9 +625,12 @@ static int set_sample_rate_v2v3(struct snd_usb_audio *chip,
 			return clock;
 	}
 
-	prev_rate = get_sample_rate_v2v3(chip, fmt->iface, fmt->altsetting, clock);
-	if (prev_rate == rate)
-		goto validation;
+	if (!(chip->quirk_flags & QUIRK_FLAG_ALWAYS_SET_RATE)) {
+		prev_rate = get_sample_rate_v2v3(chip, fmt->iface,
+						 fmt->altsetting, clock);
+		if (prev_rate == rate)
+			goto validation;
+	}
 
 	cur_rate = snd_usb_set_sample_rate_v2v3(chip, fmt, clock, rate);
 	if (cur_rate < 0) {

@@ -344,7 +344,6 @@ static const unsigned int hsic_data_pins[] = { 153 };
 		.io_reg = 0x1004 + 0x10 * id,		\
 		.intr_cfg_reg = 0x1008 + 0x10 * id,	\
 		.intr_status_reg = 0x100c + 0x10 * id,	\
-		.intr_target_reg = 0x1008 + 0x10 * id,	\
 		.mux_bit = 2,				\
 		.pull_bit = 0,				\
 		.drv_bit = 6,				\
@@ -370,7 +369,6 @@ static const unsigned int hsic_data_pins[] = { 153 };
 		.io_reg = 0,				\
 		.intr_cfg_reg = 0,			\
 		.intr_status_reg = 0,			\
-		.intr_target_reg = 0,			\
 		.mux_bit = -1,				\
 		.pull_bit = pull,			\
 		.drv_bit = drv,				\
@@ -401,7 +399,6 @@ static const unsigned int hsic_data_pins[] = { 153 };
 		.io_reg = 0,				\
 		.intr_cfg_reg = 0,			\
 		.intr_status_reg = 0,			\
-		.intr_target_reg = 0,			\
 		.mux_bit = 25,				\
 		.pull_bit = -1,				\
 		.drv_bit = -1,				\
@@ -1076,6 +1073,7 @@ static const struct of_device_id msm8x74_pinctrl_of_match[] = {
 	{ .compatible = "qcom,msm8974-pinctrl", },
 	{ },
 };
+MODULE_DEVICE_TABLE(of, msm8x74_pinctrl_of_match);
 
 static struct platform_driver msm8x74_pinctrl_driver = {
 	.driver = {
@@ -1100,5 +1098,4 @@ module_exit(msm8x74_pinctrl_exit);
 MODULE_AUTHOR("Bjorn Andersson <bjorn.andersson@sonymobile.com>");
 MODULE_DESCRIPTION("Qualcomm MSM8x74 pinctrl driver");
 MODULE_LICENSE("GPL v2");
-MODULE_DEVICE_TABLE(of, msm8x74_pinctrl_of_match);
 

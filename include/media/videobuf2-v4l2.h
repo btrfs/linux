@@ -72,6 +72,19 @@ struct vb2_v4l2_buffer {
  */
 struct vb2_buffer *vb2_find_buffer(struct vb2_queue *q, u64 timestamp);
 
+/**
+ * vb2_querybuf() - Query video buffer information
+ * @q:		pointer to &struct vb2_queue with videobuf2 queue.
+ * @b:		buffer structure passed from userspace to
+ *		&v4l2_ioctl_ops->vidioc_querybuf handler in driver
+ *
+ * Should be called from vidioc_querybuf ioctl handler in driver.
+ * This function will verify the passed v4l2_buffer structure and fill the
+ * relevant information for the userspace.
+ *
+ * The return values from this function are intended to be directly returned
+ * from vidioc_querybuf handler in driver.
+ */
 int vb2_querybuf(struct vb2_queue *q, struct v4l2_buffer *b);
 
 /**
@@ -366,24 +379,6 @@ unsigned long vb2_fop_get_unmapped_area(struct file *file, unsigned long addr,
  * will have stopped streaming as well.
  */
 void vb2_video_unregister_device(struct video_device *vdev);
-
-/**
- * vb2_ops_wait_prepare - helper function to lock a struct &vb2_queue
- *
- * @vq: pointer to &struct vb2_queue
- *
- * ..note:: only use if vq->lock is non-NULL.
- */
-void vb2_ops_wait_prepare(struct vb2_queue *vq);
-
-/**
- * vb2_ops_wait_finish - helper function to unlock a struct &vb2_queue
- *
- * @vq: pointer to &struct vb2_queue
- *
- * ..note:: only use if vq->lock is non-NULL.
- */
-void vb2_ops_wait_finish(struct vb2_queue *vq);
 
 struct media_request;
 int vb2_request_validate(struct media_request *req);

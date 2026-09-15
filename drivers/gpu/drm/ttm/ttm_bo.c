@@ -31,6 +31,9 @@
 
 #define pr_fmt(fmt) "[TTM] " fmt
 
+#include <drm/drm_print.h>
+#include <drm/drm_util.h>
+#include <drm/ttm/ttm_allocation.h>
 #include <drm/ttm/ttm_bo.h>
 #include <drm/ttm/ttm_placement.h>
 #include <drm/ttm/ttm_tt.h>
@@ -220,10 +223,8 @@ static void ttm_bo_flush_all_fences(struct ttm_buffer_object *bo)
 	struct dma_fence *fence;
 
 	dma_resv_iter_begin(&cursor, resv, DMA_RESV_USAGE_BOOKKEEP);
-	dma_resv_for_each_fence_unlocked(&cursor, fence) {
-		if (!fence->ops->signaled)
-			dma_fence_enable_sw_signaling(fence);
-	}
+	dma_resv_for_each_fence_unlocked(&cursor, fence)
+		dma_fence_enable_signaling(fence);
 	dma_resv_iter_end(&cursor);
 }
 
@@ -266,8 +267,8 @@ static void ttm_bo_release(struct kref *kref)
 					      30 * HZ);
 		}
 
-		if (bo->bdev->funcs->release_notify)
-			bo->bdev->funcs->release_notify(bo);
+		if (bdev->funcs->release_notify)
+			bdev->funcs->release_notify(bo);
 
 		drm_vma_offset_remove(bdev->vma_manager, &bo->base.vma_node);
 		ttm_mem_io_free(bdev, bo->resource);
@@ -281,7 +282,7 @@ static void ttm_bo_release(struct kref *kref)
 			ttm_bo_flush_all_fences(bo);
 			bo->deleted = true;
 
-			spin_lock(&bo->bdev->lru_lock);
+			spin_lock(&bdev->lru_lock);
 
 			/*
 			 * Make pinned bos immediately available to
@@ -297,7 +298,7 @@ static void ttm_bo_release(struct kref *kref)
 			}
 
 			kref_init(&bo->kref);
-			spin_unlock(&bo->bdev->lru_lock);
+			spin_unlock(&bdev->lru_lock);
 
 			INIT_WORK(&bo->delayed_delete, ttm_bo_delayed_delete);
 
@@ -318,18 +319,17 @@ static void ttm_bo_release(struct kref *kref)
 	bo->destroy(bo);
 }
 
-/**
- * ttm_bo_put
- *
- * @bo: The buffer object.
- *
- * Unreference a buffer object.
- */
+/* TODO: remove! */
 void ttm_bo_put(struct ttm_buffer_object *bo)
 {
 	kref_put(&bo->kref, ttm_bo_release);
 }
-EXPORT_SYMBOL(ttm_bo_put);
+
+void ttm_bo_fini(struct ttm_buffer_object *bo)
+{
+	ttm_bo_put(bo);
+}
+EXPORT_SYMBOL(ttm_bo_fini);
 
 static int ttm_bo_bounce_temp_buffer(struct ttm_buffer_object *bo,
 				     struct ttm_operation_ctx *ctx,
@@ -358,7 +358,6 @@ static int ttm_bo_bounce_temp_buffer(struct ttm_buffer_object *bo,
 static int ttm_bo_evict(struct ttm_buffer_object *bo,
 			struct ttm_operation_ctx *ctx)
 {
-	struct ttm_device *bdev = bo->bdev;
 	struct ttm_resource *evict_mem;
 	struct ttm_placement placement;
 	struct ttm_place hop;
@@ -369,7 +368,7 @@ static int ttm_bo_evict(struct ttm_buffer_object *bo,
 	dma_resv_assert_held(bo->base.resv);
 
 	placement.num_placement = 0;
-	bdev->funcs->evict_flags(bo, &placement);
+	bo->bdev->funcs->evict_flags(bo, &placement);
 
 	if (!placement.num_placement) {
 		ret = ttm_bo_wait_ctx(bo, ctx);
@@ -422,16 +421,16 @@ bool ttm_bo_eviction_valuable(struct ttm_buffer_object *bo,
 			      const struct ttm_place *place)
 {
 	struct ttm_resource *res = bo->resource;
-	struct ttm_device *bdev = bo->bdev;
 
 	dma_resv_assert_held(bo->base.resv);
-	if (bo->resource->mem_type == TTM_PL_SYSTEM)
+
+	if (res->mem_type == TTM_PL_SYSTEM)
 		return true;
 
 	/* Don't evict this BO if it's outside of the
 	 * requested placement range
 	 */
-	return ttm_resource_intersects(bdev, res, place, bo->base.size);
+	return ttm_resource_intersects(bo->bdev, res, place, bo->base.size);
 }
 EXPORT_SYMBOL(ttm_bo_eviction_valuable);
 
@@ -489,6 +488,118 @@ out_no_ref:
 	return ret;
 }
 
+struct ttm_bo_alloc_state {
+	/** @charge_pool: The memory pool the resource is charged to */
+	struct dmem_cgroup_pool_state *charge_pool;
+	/** @limit_pool: Which pool limit we should test against */
+	struct dmem_cgroup_pool_state *limit_pool;
+	/** @in_evict: Whether we are currently evicting buffers */
+	bool in_evict;
+	/** @may_try_low: If only unprotected BOs, i.e. BOs whose cgroup
+	 *  is exceeding its dmem low/min protection, should be considered for eviction
+	 */
+	bool may_try_low;
+};
+
+/**
+ * ttm_bo_alloc_at_place - Attempt allocating a BO's backing store in a place
+ *
+ * @bo: The buffer to allocate the backing store of
+ * @place: The place to attempt allocation in
+ * @ctx: ttm_operation_ctx associated with this allocation
+ * @force_space: If we should evict buffers to force space
+ * @res: On allocation success, the resulting struct ttm_resource.
+ * @alloc_state: Object holding allocation state such as charged cgroups.
+ *
+ * Returns:
+ * -EBUSY: No space available, but allocation should be retried with ttm_bo_evict_alloc.
+ * -ENOSPC: No space available, allocation should not be retried.
+ * -ERESTARTSYS: An interruptible sleep was interrupted by a signal.
+ *
+ */
+static int ttm_bo_alloc_at_place(struct ttm_buffer_object *bo,
+				 const struct ttm_place *place,
+				 bool force_space,
+				 struct ttm_resource **res,
+				 struct ttm_bo_alloc_state *alloc_state)
+{
+	bool may_evict;
+	int ret;
+
+	may_evict = !alloc_state->in_evict && force_space &&
+		    place->mem_type != TTM_PL_SYSTEM;
+	if (!alloc_state->charge_pool) {
+		ret = ttm_resource_try_charge(bo, place, &alloc_state->charge_pool,
+					      force_space ? &alloc_state->limit_pool
+							  : NULL);
+		if (ret) {
+			/*
+			 * -EAGAIN means the charge failed, which we treat
+			 * like an allocation failure. Therefore, return an
+			 * error code indicating the allocation failed -
+			 * either -EBUSY if the allocation should be
+			 * retried with eviction, or -ENOSPC if there should
+			 * be no second attempt.
+			 */
+			if (!alloc_state->in_evict)
+				alloc_state->may_try_low = may_evict;
+			if (ret == -EAGAIN)
+				ret = may_evict ? -EBUSY : -ENOSPC;
+			return ret;
+		}
+	}
+
+	/*
+	 * cgroup protection plays a special role in eviction.
+	 * Conceptually, protection of memory via the dmem cgroup controller
+	 * entitles the protected cgroup to use a certain amount of memory.
+	 * There are two types of protection - the 'low' limit is a
+	 * "best-effort" protection, whereas the 'min' limit provides a hard
+	 * guarantee that memory within the cgroup's allowance will not be
+	 * evicted under any circumstance.
+	 *
+	 * To faithfully model this concept in TTM, we also need to take cgroup
+	 * protection into account when allocating. When allocation in one
+	 * place fails, TTM will default to trying other places first before
+	 * evicting.
+	 * If the allocation is covered by dmem cgroup protection, however,
+	 * this prevents the allocation from using the memory it is "entitled"
+	 * to. To make sure unprotected allocations cannot push new protected
+	 * allocations out of places they are "entitled" to use, we should
+	 * evict buffers not covered by any cgroup protection, if this
+	 * allocation is covered by cgroup protection.
+	 *
+	 * Buffers covered by 'min' protection are a special case - the 'min'
+	 * limit is a stronger guarantee than 'low', and thus buffers protected
+	 * by 'low' but not 'min' should also be considered for eviction.
+	 * Buffers protected by 'min' will never be considered for eviction
+	 * anyway, so the regular eviction path should be triggered here.
+	 * Buffers protected by 'low' but not 'min' will take a special
+	 * eviction path that only evicts buffers covered by neither 'low' or
+	 * 'min' protections.
+	 */
+	if (!alloc_state->in_evict) {
+		may_evict |= dmem_cgroup_below_min(NULL, alloc_state->charge_pool);
+		alloc_state->may_try_low = may_evict;
+
+		may_evict |= dmem_cgroup_below_low(NULL, alloc_state->charge_pool);
+	}
+
+	ret = ttm_resource_alloc(bo, place, res, alloc_state->charge_pool);
+	if (ret) {
+		if (ret == -ENOSPC && may_evict)
+			ret = -EBUSY;
+		return ret;
+	}
+
+	/*
+	 * Ownership of charge_pool has been transferred to the TTM resource,
+	 * don't make the caller think we still hold a reference to it.
+	 */
+	alloc_state->charge_pool = NULL;
+	return 0;
+}
+
 /**
  * struct ttm_bo_evict_walk - Parameters for the evict walk.
  */
@@ -504,24 +615,70 @@ struct ttm_bo_evict_walk {
 	/** @evicted: Number of successful evictions. */
 	unsigned long evicted;
 
-	/** @limit_pool: Which pool limit we should test against */
-	struct dmem_cgroup_pool_state *limit_pool;
 	/** @try_low: Whether we should attempt to evict BO's with low watermark threshold */
 	bool try_low;
 	/** @hit_low: If we cannot evict a bo when @try_low is false (first pass) */
 	bool hit_low;
+
+	/** @alloc_state: State associated with the allocation attempt. */
+	struct ttm_bo_alloc_state *alloc_state;
 };
 
 static s64 ttm_bo_evict_cb(struct ttm_lru_walk *walk, struct ttm_buffer_object *bo)
 {
 	struct ttm_bo_evict_walk *evict_walk =
 		container_of(walk, typeof(*evict_walk), walk);
+	struct dmem_cgroup_pool_state *limit_pool, *ancestor = NULL;
+	s64 bo_size = bo->base.size;
+	bool evict_valuable;
 	s64 lret;
 
-	if (!dmem_cgroup_state_evict_valuable(evict_walk->limit_pool, bo->resource->css,
-					      evict_walk->try_low, &evict_walk->hit_low))
+	/*
+	 * If may_try_low is not set, then we're trying to evict unprotected
+	 * buffers in favor of a protected allocation for charge_pool. Explicitly skip
+	 * buffers belonging to the same cgroup here - that cgroup is definitely protected,
+	 * even though dmem_cgroup_state_evict_valuable would allow the eviction because a
+	 * cgroup is always allowed to evict from itself even if it is protected.
+	 */
+	if (!evict_walk->alloc_state->may_try_low &&
+			bo->resource->css == evict_walk->alloc_state->charge_pool)
 		return 0;
 
+	limit_pool = evict_walk->alloc_state->limit_pool;
+	/*
+	 * If there is no explicit limit pool, find the root of the shared subtree between
+	 * evictor and evictee. This is important so that recursive protection rules can
+	 * apply properly: Recursive protection distributes cgroup protection afforded
+	 * to a parent cgroup but not used explicitly by a child cgroup between all child
+	 * cgroups (see docs of effective_protection in mm/page_counter.c). However, when
+	 * direct siblings compete for memory, siblings that were explicitly protected
+	 * should get prioritized over siblings that weren't. This only happens correctly
+	 * when the root of the shared subtree is passed to
+	 * dmem_cgroup_state_evict_valuable. Otherwise, the effective-protection
+	 * calculation cannot distinguish direct siblings from unrelated subtrees and the
+	 * calculated protection ends up wrong.
+	 */
+	if (!limit_pool) {
+		ancestor = dmem_cgroup_get_common_ancestor(bo->resource->css,
+							   evict_walk->alloc_state->charge_pool);
+		limit_pool = ancestor;
+	}
+
+	evict_valuable = dmem_cgroup_state_evict_valuable(limit_pool, bo->resource->css,
+							  evict_walk->try_low,
+							  &evict_walk->hit_low);
+	if (ancestor)
+		dmem_cgroup_pool_state_put(ancestor);
+
+	if (!evict_valuable)
+		return 0;
+
+	/*
+	 * evict_walk->place is NULL in cgroup drain mode.  Drivers'
+	 * eviction_valuable() callbacks must handle a NULL place, treating it
+	 * as "any placement": the TTM base implementation already does so via
+	 * ttm_resource_intersects().
+	 */
 	if (bo->pin_count || !bo->bdev->funcs->eviction_valuable(bo, evict_walk->place))
 		return 0;
 
@@ -537,11 +694,17 @@ static s64 ttm_bo_evict_cb(struct ttm_lru_walk *walk, struct ttm_buffer_object *
 		goto out;
 
 	evict_walk->evicted++;
-	if (evict_walk->res)
-		lret = ttm_resource_alloc(evict_walk->evictor, evict_walk->place,
-					  evict_walk->res, NULL);
-	if (lret == 0)
-		return 1;
+	if (evict_walk->res) {
+		lret = ttm_bo_alloc_at_place(evict_walk->evictor,
+					     evict_walk->place, false,
+					     evict_walk->res,
+					     evict_walk->alloc_state);
+		if (lret == 0)
+			return 1;
+	} else {
+		/* Cgroup drain: return bytes freed for byte-denominated progress. */
+		return bo_size;
+	}
 out:
 	/* Errors that should terminate the walk. */
 	if (lret == -ENOSPC)
@@ -561,7 +724,7 @@ static int ttm_bo_evict_alloc(struct ttm_device *bdev,
 			      struct ttm_operation_ctx *ctx,
 			      struct ww_acquire_ctx *ticket,
 			      struct ttm_resource **res,
-			      struct dmem_cgroup_pool_state *limit_pool)
+			      struct ttm_bo_alloc_state *state)
 {
 	struct ttm_bo_evict_walk evict_walk = {
 		.walk = {
@@ -574,15 +737,21 @@ static int ttm_bo_evict_alloc(struct ttm_device *bdev,
 		.place = place,
 		.evictor = evictor,
 		.res = res,
-		.limit_pool = limit_pool,
+		.alloc_state = state,
 	};
 	s64 lret;
+
+	state->in_evict = true;
 
 	evict_walk.walk.arg.trylock_only = true;
 	lret = ttm_lru_walk_for_evict(&evict_walk.walk, bdev, man, 1);
 
-	/* One more attempt if we hit low limit? */
-	if (!lret && evict_walk.hit_low) {
+	/* If we failed to find enough BOs to evict, but we skipped over
+	 * some BOs because they were covered by dmem low protection, retry
+	 * evicting these protected BOs too, except if we're told not to
+	 * consider protected BOs at all.
+	 */
+	if (!lret && evict_walk.hit_low && state->may_try_low) {
 		evict_walk.try_low = true;
 		lret = ttm_lru_walk_for_evict(&evict_walk.walk, bdev, man, 1);
 	}
@@ -603,17 +772,99 @@ retry:
 	} while (!lret && evict_walk.evicted);
 
 	/* We hit the low limit? Try once more */
-	if (!lret && evict_walk.hit_low && !evict_walk.try_low) {
+	if (!lret && evict_walk.hit_low && !evict_walk.try_low &&
+			state->may_try_low) {
 		evict_walk.try_low = true;
 		goto retry;
 	}
 out:
+	state->in_evict = false;
 	if (lret < 0)
 		return lret;
 	if (lret == 0)
 		return -EBUSY;
 	return 0;
 }
+
+/**
+ * ttm_bo_evict_cgroup() - Evict buffer objects charged to a specific cgroup.
+ * @bdev: The TTM device.
+ * @man: The resource manager whose LRU to walk.
+ * @limit_pool: The cgroup pool state whose members should be evicted.
+ * @target_bytes: Number of bytes to free.
+ * @ctx: The TTM operation context.
+ *
+ * Walk the LRU of @man and evict buffer objects that are charged to the
+ * cgroup identified by @limit_pool, until at least @target_bytes have been
+ * freed.  Mirrors the two-pass (trylock -> sleeping-lock, low-watermark)
+ * strategy used by ttm_bo_evict_alloc().
+ *
+ * Return: >= @target_bytes on full success, 0..target_bytes-1 if partial,
+ *         negative error code on fatal error.
+ */
+s64 ttm_bo_evict_cgroup(struct ttm_device *bdev,
+			struct ttm_resource_manager *man,
+			struct dmem_cgroup_pool_state *limit_pool,
+			s64 target_bytes,
+			struct ttm_operation_ctx *ctx)
+{
+	struct ttm_bo_evict_walk evict_walk = {
+		.walk = {
+			.ops = &ttm_evict_walk_ops,
+			.arg = { .ctx = ctx },
+		},
+		.alloc_state = &(struct ttm_bo_alloc_state) {
+			.limit_pool = limit_pool,
+			.in_evict = true,
+		},
+		/* place, evictor, res left NULL: selects cgroup drain mode */
+	};
+	s64 lret, pass;
+
+	evict_walk.walk.arg.trylock_only = true;
+	lret = ttm_lru_walk_for_evict(&evict_walk.walk, bdev, man, target_bytes);
+	if (lret < 0 || lret >= target_bytes)
+		return lret;
+
+	/* Second pass: also evict BOs at the low watermark. */
+	if (evict_walk.hit_low) {
+		evict_walk.try_low = true;
+		pass = ttm_lru_walk_for_evict(&evict_walk.walk, bdev, man,
+					      target_bytes - lret);
+		if (pass < 0)
+			return pass;
+		lret += pass;
+		if (lret >= target_bytes)
+			return lret;
+	}
+
+	/* Full sleeping-lock pass for remaining target. */
+	evict_walk.try_low = evict_walk.hit_low = false;
+	evict_walk.walk.arg.trylock_only = false;
+
+retry:
+	evict_walk.walk.arg.sleeping_lock = true;
+	do {
+		evict_walk.evicted = 0;
+		pass = ttm_lru_walk_for_evict(&evict_walk.walk, bdev, man,
+					      target_bytes - lret);
+		if (pass < 0) {
+			lret = pass;
+			goto out;
+		}
+		lret += pass;
+	} while (lret < target_bytes && evict_walk.evicted);
+
+	/* One more attempt if we hit the low limit during sleeping-lock pass. */
+	if (lret < target_bytes && evict_walk.hit_low && !evict_walk.try_low) {
+		evict_walk.try_low = true;
+		goto retry;
+	}
+
+out:
+	return lret;
+}
+EXPORT_SYMBOL(ttm_bo_evict_cgroup);
 
 /**
  * ttm_bo_pin - Pin the buffer object.
@@ -658,34 +909,35 @@ void ttm_bo_unpin(struct ttm_buffer_object *bo)
 EXPORT_SYMBOL(ttm_bo_unpin);
 
 /*
- * Add the last move fence to the BO as kernel dependency and reserve a new
- * fence slot.
+ * Add the pipelined eviction fencesto the BO as kernel dependency and reserve new
+ * fence slots.
  */
-static int ttm_bo_add_move_fence(struct ttm_buffer_object *bo,
-				 struct ttm_resource_manager *man,
-				 bool no_wait_gpu)
+static int ttm_bo_add_pipelined_eviction_fences(struct ttm_buffer_object *bo,
+						struct ttm_resource_manager *man,
+						bool no_wait_gpu)
 {
 	struct dma_fence *fence;
-	int ret;
+	int i;
 
-	spin_lock(&man->move_lock);
-	fence = dma_fence_get(man->move);
-	spin_unlock(&man->move_lock);
+	spin_lock(&man->eviction_lock);
+	for (i = 0; i < TTM_NUM_MOVE_FENCES; i++) {
+		fence = man->eviction_fences[i];
+		if (!fence)
+			continue;
 
-	if (!fence)
-		return 0;
-
-	if (no_wait_gpu) {
-		ret = dma_fence_is_signaled(fence) ? 0 : -EBUSY;
-		dma_fence_put(fence);
-		return ret;
+		if (no_wait_gpu) {
+			if (!dma_fence_is_signaled(fence)) {
+				spin_unlock(&man->eviction_lock);
+				return -EBUSY;
+			}
+		} else {
+			dma_resv_add_fence(bo->base.resv, fence, DMA_RESV_USAGE_KERNEL);
+		}
 	}
+	spin_unlock(&man->eviction_lock);
 
-	dma_resv_add_fence(bo->base.resv, fence, DMA_RESV_USAGE_KERNEL);
-
-	ret = dma_resv_reserve_fences(bo->base.resv, 1);
-	dma_fence_put(fence);
-	return ret;
+	/* TODO: this call should be removed. */
+	return dma_resv_reserve_fences(bo->base.resv, 1);
 }
 
 /**
@@ -718,15 +970,14 @@ static int ttm_bo_alloc_resource(struct ttm_buffer_object *bo,
 	int i, ret;
 
 	ticket = dma_resv_locking_ctx(bo->base.resv);
-	ret = dma_resv_reserve_fences(bo->base.resv, 1);
+	ret = dma_resv_reserve_fences(bo->base.resv, TTM_NUM_MOVE_FENCES);
 	if (unlikely(ret))
 		return ret;
 
 	for (i = 0; i < placement->num_placement; ++i) {
 		const struct ttm_place *place = &placement->placement[i];
-		struct dmem_cgroup_pool_state *limit_pool = NULL;
+		struct ttm_bo_alloc_state alloc_state = {};
 		struct ttm_resource_manager *man;
-		bool may_evict;
 
 		man = ttm_manager_type(bdev, place->mem_type);
 		if (!man || !ttm_resource_manager_used(man))
@@ -736,28 +987,33 @@ static int ttm_bo_alloc_resource(struct ttm_buffer_object *bo,
 				    TTM_PL_FLAG_FALLBACK))
 			continue;
 
-		may_evict = (force_space && place->mem_type != TTM_PL_SYSTEM);
-		ret = ttm_resource_alloc(bo, place, res, force_space ? &limit_pool : NULL);
-		if (ret) {
-			if (ret != -ENOSPC && ret != -EAGAIN) {
-				dmem_cgroup_pool_state_put(limit_pool);
-				return ret;
-			}
-			if (!may_evict) {
-				dmem_cgroup_pool_state_put(limit_pool);
-				continue;
-			}
+		ret = ttm_bo_alloc_at_place(bo, place, force_space, res,
+					    &alloc_state);
 
+		if (ret == -ENOSPC) {
+			dmem_cgroup_uncharge(alloc_state.charge_pool, bo->base.size);
+			dmem_cgroup_pool_state_put(alloc_state.limit_pool);
+			continue;
+		} else if (ret == -EBUSY) {
 			ret = ttm_bo_evict_alloc(bdev, man, place, bo, ctx,
-						 ticket, res, limit_pool);
-			dmem_cgroup_pool_state_put(limit_pool);
-			if (ret == -EBUSY)
-				continue;
-			if (ret)
+						 ticket, res, &alloc_state);
+
+			dmem_cgroup_pool_state_put(alloc_state.limit_pool);
+
+			if (ret) {
+				dmem_cgroup_uncharge(alloc_state.charge_pool,
+						bo->base.size);
+				if (ret == -EBUSY)
+					continue;
 				return ret;
+			}
+		} else if (ret) {
+			dmem_cgroup_uncharge(alloc_state.charge_pool, bo->base.size);
+			dmem_cgroup_pool_state_put(alloc_state.limit_pool);
+			return ret;
 		}
 
-		ret = ttm_bo_add_move_fence(bo, man, ctx->no_wait_gpu);
+		ret = ttm_bo_add_pipelined_eviction_fences(bo, man, ctx->no_wait_gpu);
 		if (unlikely(ret)) {
 			ttm_resource_free(bo, res);
 			if (ret == -EBUSY)
@@ -878,7 +1134,8 @@ bounce:
 
 	/* For backward compatibility with userspace */
 	if (ret == -ENOSPC)
-		return -ENOMEM;
+		return bo->bdev->alloc_flags & TTM_ALLOCATION_PROPAGATE_ENOSPC ?
+		       ret : -ENOMEM;
 
 	/*
 	 * We might need to add a TTM.
@@ -1024,7 +1281,7 @@ int ttm_bo_init_validate(struct ttm_device *bdev, struct ttm_buffer_object *bo,
 			 struct sg_table *sg, struct dma_resv *resv,
 			 void (*destroy) (struct ttm_buffer_object *))
 {
-	struct ttm_operation_ctx ctx = { interruptible, false };
+	struct ttm_operation_ctx ctx = { .interruptible = interruptible };
 	int ret;
 
 	ret = ttm_bo_init_reserved(bdev, bo, type, placement, alignment, &ctx,
@@ -1105,10 +1362,12 @@ struct ttm_bo_swapout_walk {
 static s64
 ttm_bo_swapout_cb(struct ttm_lru_walk *walk, struct ttm_buffer_object *bo)
 {
-	struct ttm_place place = {.mem_type = bo->resource->mem_type};
+	struct ttm_place place = { .mem_type = bo->resource->mem_type };
 	struct ttm_bo_swapout_walk *swapout_walk =
 		container_of(walk, typeof(*swapout_walk), walk);
 	struct ttm_operation_ctx *ctx = walk->arg.ctx;
+	struct ttm_device *bdev = bo->bdev;
+	struct ttm_tt *tt = bo->ttm;
 	s64 ret;
 
 	/*
@@ -1117,20 +1376,19 @@ ttm_bo_swapout_cb(struct ttm_lru_walk *walk, struct ttm_buffer_object *bo)
 	 * The driver may use the fact that we're moving from SYSTEM
 	 * as an indication that we're about to swap out.
 	 */
-	if (bo->pin_count || !bo->bdev->funcs->eviction_valuable(bo, &place)) {
+	if (bo->pin_count || !bdev->funcs->eviction_valuable(bo, &place)) {
 		ret = -EBUSY;
 		goto out;
 	}
 
-	if (!bo->ttm || !ttm_tt_is_populated(bo->ttm) ||
-	    bo->ttm->page_flags & TTM_TT_FLAG_EXTERNAL ||
-	    bo->ttm->page_flags & TTM_TT_FLAG_SWAPPED) {
+	if (!tt || !ttm_tt_is_populated(tt) ||
+	    tt->page_flags & (TTM_TT_FLAG_EXTERNAL | TTM_TT_FLAG_SWAPPED)) {
 		ret = -EBUSY;
 		goto out;
 	}
 
 	if (bo->deleted) {
-		pgoff_t num_pages = bo->ttm->num_pages;
+		pgoff_t num_pages = tt->num_pages;
 
 		ret = ttm_bo_wait_ctx(bo, ctx);
 		if (ret)
@@ -1171,21 +1429,17 @@ ttm_bo_swapout_cb(struct ttm_lru_walk *walk, struct ttm_buffer_object *bo)
 		goto out;
 
 	ttm_bo_unmap_virtual(bo);
-	if (bo->bdev->funcs->swap_notify)
-		bo->bdev->funcs->swap_notify(bo);
+	if (bdev->funcs->swap_notify)
+		bdev->funcs->swap_notify(bo);
 
-	if (ttm_tt_is_populated(bo->ttm)) {
-		spin_lock(&bo->bdev->lru_lock);
-		ttm_resource_del_bulk_move(bo->resource, bo);
-		spin_unlock(&bo->bdev->lru_lock);
-
-		ret = ttm_tt_swapout(bo->bdev, bo->ttm, swapout_walk->gfp_flags);
-
-		spin_lock(&bo->bdev->lru_lock);
-		if (ret)
-			ttm_resource_add_bulk_move(bo->resource, bo);
-		ttm_resource_move_to_lru_tail(bo->resource);
-		spin_unlock(&bo->bdev->lru_lock);
+	if (ttm_tt_is_populated(tt)) {
+		ret = ttm_tt_swapout(bdev, tt, swapout_walk->gfp_flags);
+		if (!ret) {
+			spin_lock(&bdev->lru_lock);
+			ttm_resource_del_bulk_move_unevictable(bo->resource, bo);
+			ttm_resource_move_to_lru_tail(bo->resource);
+			spin_unlock(&bdev->lru_lock);
+		}
 	}
 
 out:
@@ -1207,9 +1461,9 @@ const struct ttm_lru_walk_ops ttm_swap_ops = {
  * @man: The resource manager whose resources / buffer objects are
  * goint to be swapped out.
  * @gfp_flags: The gfp flags used for shmem page allocations.
- * @target: The desired number of bytes to swap out.
+ * @target: The desired number of pages to swap out.
  *
- * Return: The number of bytes actually swapped out, or negative error code
+ * Return: The number of pages actually swapped out, or negative error code
  * on error.
  */
 s64 ttm_bo_swapout(struct ttm_device *bdev, struct ttm_operation_ctx *ctx,
@@ -1229,6 +1483,7 @@ s64 ttm_bo_swapout(struct ttm_device *bdev, struct ttm_operation_ctx *ctx,
 
 	return ttm_lru_walk_for_evict(&swapout_walk.walk, bdev, man, target);
 }
+EXPORT_SYMBOL_FOR_TESTS_ONLY(ttm_bo_swapout);
 
 void ttm_bo_tt_destroy(struct ttm_buffer_object *bo)
 {
@@ -1258,6 +1513,7 @@ void ttm_bo_tt_destroy(struct ttm_buffer_object *bo)
 int ttm_bo_populate(struct ttm_buffer_object *bo,
 		    struct ttm_operation_ctx *ctx)
 {
+	struct ttm_device *bdev = bo->bdev;
 	struct ttm_tt *tt = bo->ttm;
 	bool swapped;
 	int ret;
@@ -1268,16 +1524,16 @@ int ttm_bo_populate(struct ttm_buffer_object *bo,
 		return 0;
 
 	swapped = ttm_tt_is_swapped(tt);
-	ret = ttm_tt_populate(bo->bdev, tt, ctx);
+	ret = ttm_tt_populate(bdev, tt, ctx);
 	if (ret)
 		return ret;
 
 	if (swapped && !ttm_tt_is_swapped(tt) && !bo->pin_count &&
 	    bo->resource) {
-		spin_lock(&bo->bdev->lru_lock);
+		spin_lock(&bdev->lru_lock);
 		ttm_resource_add_bulk_move(bo->resource, bo);
 		ttm_resource_move_to_lru_tail(bo->resource);
-		spin_unlock(&bo->bdev->lru_lock);
+		spin_unlock(&bdev->lru_lock);
 	}
 
 	return 0;

@@ -349,7 +349,7 @@ struct mcp3564_chip_info {
  * struct mcp3564_state - working data for a ADC device
  * @chip_info:		chip specific data
  * @spi:		SPI device structure
- * @vref_mv:		voltage reference value in miliVolts
+ * @vref_mv:		voltage reference value in millivolts
  * @lock:		synchronize access to driver's state members
  * @dev_addr:		hardware device address
  * @oversampling:	the index inside oversampling list of the ADC
@@ -987,7 +987,7 @@ static int mcp3564_read_label(struct iio_dev *indio_dev,
 {
 	struct mcp3564_state *adc = iio_priv(indio_dev);
 
-	return sprintf(label, "%s\n", adc->labels[chan->scan_index]);
+	return sysfs_emit(label, "%s\n", adc->labels[chan->scan_index]);
 }
 
 static int mcp3564_parse_fw_children(struct iio_dev *indio_dev)
@@ -1451,18 +1451,18 @@ static const struct of_device_id mcp3564_dt_ids[] = {
 MODULE_DEVICE_TABLE(of, mcp3564_dt_ids);
 
 static const struct spi_device_id mcp3564_id[] = {
-	{ "mcp3461", (kernel_ulong_t)&mcp3564_chip_infos_tbl[mcp3461] },
-	{ "mcp3462", (kernel_ulong_t)&mcp3564_chip_infos_tbl[mcp3462] },
-	{ "mcp3464", (kernel_ulong_t)&mcp3564_chip_infos_tbl[mcp3464] },
-	{ "mcp3561", (kernel_ulong_t)&mcp3564_chip_infos_tbl[mcp3561] },
-	{ "mcp3562", (kernel_ulong_t)&mcp3564_chip_infos_tbl[mcp3562] },
-	{ "mcp3564", (kernel_ulong_t)&mcp3564_chip_infos_tbl[mcp3564] },
-	{ "mcp3461r", (kernel_ulong_t)&mcp3564_chip_infos_tbl[mcp3461r] },
-	{ "mcp3462r", (kernel_ulong_t)&mcp3564_chip_infos_tbl[mcp3462r] },
-	{ "mcp3464r", (kernel_ulong_t)&mcp3564_chip_infos_tbl[mcp3464r] },
-	{ "mcp3561r", (kernel_ulong_t)&mcp3564_chip_infos_tbl[mcp3561r] },
-	{ "mcp3562r", (kernel_ulong_t)&mcp3564_chip_infos_tbl[mcp3562r] },
-	{ "mcp3564r", (kernel_ulong_t)&mcp3564_chip_infos_tbl[mcp3564r] },
+	{ .name = "mcp3461", .driver_data = (kernel_ulong_t)&mcp3564_chip_infos_tbl[mcp3461] },
+	{ .name = "mcp3462", .driver_data = (kernel_ulong_t)&mcp3564_chip_infos_tbl[mcp3462] },
+	{ .name = "mcp3464", .driver_data = (kernel_ulong_t)&mcp3564_chip_infos_tbl[mcp3464] },
+	{ .name = "mcp3561", .driver_data = (kernel_ulong_t)&mcp3564_chip_infos_tbl[mcp3561] },
+	{ .name = "mcp3562", .driver_data = (kernel_ulong_t)&mcp3564_chip_infos_tbl[mcp3562] },
+	{ .name = "mcp3564", .driver_data = (kernel_ulong_t)&mcp3564_chip_infos_tbl[mcp3564] },
+	{ .name = "mcp3461r", .driver_data = (kernel_ulong_t)&mcp3564_chip_infos_tbl[mcp3461r] },
+	{ .name = "mcp3462r", .driver_data = (kernel_ulong_t)&mcp3564_chip_infos_tbl[mcp3462r] },
+	{ .name = "mcp3464r", .driver_data = (kernel_ulong_t)&mcp3564_chip_infos_tbl[mcp3464r] },
+	{ .name = "mcp3561r", .driver_data = (kernel_ulong_t)&mcp3564_chip_infos_tbl[mcp3561r] },
+	{ .name = "mcp3562r", .driver_data = (kernel_ulong_t)&mcp3564_chip_infos_tbl[mcp3562r] },
+	{ .name = "mcp3564r", .driver_data = (kernel_ulong_t)&mcp3564_chip_infos_tbl[mcp3564r] },
 	{ }
 };
 MODULE_DEVICE_TABLE(spi, mcp3564_id);

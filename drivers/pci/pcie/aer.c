@@ -30,6 +30,7 @@
 #include <linux/kfifo.h>
 #include <linux/ratelimit.h>
 #include <linux/slab.h>
+#include <linux/vmcore_info.h>
 #include <acpi/apei.h>
 #include <acpi/ghes.h>
 #include <ras/ras_event.h>
@@ -94,6 +95,20 @@ struct aer_info {
 	struct ratelimit_state correctable_ratelimit;
 	struct ratelimit_state nonfatal_ratelimit;
 };
+
+#define AER_ANFE			(PCI_ERR_UNC_UNX_COMP |		\
+					PCI_ERR_UNC_ATOMEG |		\
+					PCI_ERR_UNC_DMWR_BLK)
+
+#define AER_POSSIBLE_ANFE		(PCI_ERR_UNC_POISON_TLP |	\
+					PCI_ERR_UNC_POISON_BLK |	\
+					PCI_ERR_UNC_ECRC |		\
+					PCI_ERR_UNC_UNSUP |		\
+					PCI_ERR_UNC_COMP_TIME |		\
+					PCI_ERR_UNC_COMP_ABORT |	\
+					PCI_ERR_UNC_ACSV |		\
+					PCI_ERR_UNC_TLPPRE |		\
+					PCI_ERR_UNC_PCRC_CHECK)
 
 #define AER_LOG_TLP_MASKS		(PCI_ERR_UNC_POISON_TLP|	\
 					PCI_ERR_UNC_POISON_BLK |	\
@@ -237,9 +252,6 @@ void pcie_ecrc_get_policy(char *str)
 	ecrc_policy = i;
 }
 #endif	/* CONFIG_PCIE_ECRC */
-
-#define	PCI_EXP_AER_FLAGS	(PCI_EXP_DEVCTL_CERE | PCI_EXP_DEVCTL_NFERE | \
-				 PCI_EXP_DEVCTL_FERE | PCI_EXP_DEVCTL_URRE)
 
 int pcie_aer_is_native(struct pci_dev *dev)
 {
@@ -392,7 +404,7 @@ void pci_aer_init(struct pci_dev *dev)
 	if (!dev->aer_cap)
 		return;
 
-	dev->aer_info = kzalloc(sizeof(*dev->aer_info), GFP_KERNEL);
+	dev->aer_info = kzalloc_obj(*dev->aer_info);
 	if (!dev->aer_info) {
 		dev->aer_cap = 0;
 		return;
@@ -412,6 +424,15 @@ void pci_aer_init(struct pci_dev *dev)
 	n = pcie_cap_has_rtctl(dev) ? 5 : 4;
 	pci_add_ext_cap_save_buffer(dev, PCI_EXT_CAP_ID_ERR, sizeof(u32) * n);
 
+	/*
+	 * Advisory Non-Fatal Errors are masked by default (PCIe r7.0, sec
+	 * 7.8.4.6).
+	 */
+	if (pcie_aer_is_native(dev) && dev->devcap & PCI_EXP_DEVCAP_RBER)
+		pci_clear_and_set_config_dword(dev,
+					       dev->aer_cap + PCI_ERR_COR_MASK,
+					       PCI_ERR_COR_ADV_NFAT, 0);
+
 	pci_aer_clear_status(dev);
 
 	if (pci_aer_available())
@@ -430,23 +451,38 @@ void pci_aer_exit(struct pci_dev *dev)
 #define AER_AGENT_REQUESTER		1
 #define AER_AGENT_COMPLETER		2
 #define AER_AGENT_TRANSMITTER		3
+#define AER_AGENT_COMPONENT		4
+#define AER_AGENT_UNDEF			5
 
 #define AER_AGENT_REQUESTER_MASK(t)	((t == AER_CORRECTABLE) ?	\
-	0 : (PCI_ERR_UNC_COMP_TIME|PCI_ERR_UNC_UNSUP))
+	0 : PCI_ERR_UNC_COMP_TIME)
 #define AER_AGENT_COMPLETER_MASK(t)	((t == AER_CORRECTABLE) ?	\
 	0 : PCI_ERR_UNC_COMP_ABORT)
 #define AER_AGENT_TRANSMITTER_MASK(t)	((t == AER_CORRECTABLE) ?	\
-	(PCI_ERR_COR_REP_ROLL|PCI_ERR_COR_REP_TIMER) : 0)
+	(PCI_ERR_COR_REP_ROLL|PCI_ERR_COR_REP_TIMER) :			\
+	(PCI_ERR_UNC_POISON_BLK|PCI_ERR_UNC_ATOMEG|			\
+	 PCI_ERR_UNC_DMWR_BLK|PCI_ERR_UNC_XLAT_BLK|			\
+	 PCI_ERR_UNC_TLPPRE))
+#define AER_AGENT_COMPONENT_MASK(t)	((t == AER_CORRECTABLE) ?	\
+	(PCI_ERR_COR_INTERNAL|PCI_ERR_COR_LOG_OVER) :			\
+	(PCI_ERR_UNC_INTN|PCI_ERR_UNC_SURPDN))
+#define AER_AGENT_UNDEF_MASK(t)		((t == AER_CORRECTABLE) ?	\
+	PCI_ERR_COR_ADV_NFAT : 0)
+
 
 #define AER_GET_AGENT(t, e)						\
 	((e & AER_AGENT_COMPLETER_MASK(t)) ? AER_AGENT_COMPLETER :	\
 	(e & AER_AGENT_REQUESTER_MASK(t)) ? AER_AGENT_REQUESTER :	\
 	(e & AER_AGENT_TRANSMITTER_MASK(t)) ? AER_AGENT_TRANSMITTER :	\
+	(e & AER_AGENT_COMPONENT_MASK(t)) ? AER_AGENT_COMPONENT :	\
+	(e & AER_AGENT_UNDEF_MASK(t)) ? AER_AGENT_UNDEF :		\
 	AER_AGENT_RECEIVER)
 
 #define AER_PHYSICAL_LAYER_ERROR	0
 #define AER_DATA_LINK_LAYER_ERROR	1
 #define AER_TRANSACTION_LAYER_ERROR	2
+#define AER_GENERAL_ERROR		3
+#define AER_UNDEF_ERROR			4
 
 #define AER_PHYSICAL_LAYER_ERROR_MASK(t) ((t == AER_CORRECTABLE) ?	\
 	PCI_ERR_COR_RCVR : 0)
@@ -454,11 +490,17 @@ void pci_aer_exit(struct pci_dev *dev)
 	(PCI_ERR_COR_BAD_TLP|						\
 	PCI_ERR_COR_BAD_DLLP|						\
 	PCI_ERR_COR_REP_ROLL|						\
-	PCI_ERR_COR_REP_TIMER) : PCI_ERR_UNC_DLP)
+	PCI_ERR_COR_REP_TIMER) : (PCI_ERR_UNC_DLP|PCI_ERR_UNC_SURPDN))
+#define AER_GENERAL_ERROR_MASK(t)  ((t == AER_CORRECTABLE) ?		\
+	(PCI_ERR_COR_INTERNAL|PCI_ERR_COR_LOG_OVER) : PCI_ERR_UNC_INTN)
+#define AER_UNDEF_ERROR_MASK(t)  ((t == AER_CORRECTABLE) ?		\
+	PCI_ERR_COR_ADV_NFAT : 0)
 
 #define AER_GET_LAYER_ERROR(t, e)					\
 	((e & AER_PHYSICAL_LAYER_ERROR_MASK(t)) ? AER_PHYSICAL_LAYER_ERROR : \
 	(e & AER_DATA_LINK_LAYER_ERROR_MASK(t)) ? AER_DATA_LINK_LAYER_ERROR : \
+	(e & AER_GENERAL_ERROR_MASK(t)) ? AER_GENERAL_ERROR :		\
+	(e & AER_UNDEF_ERROR_MASK(t)) ? AER_UNDEF_ERROR :		\
 	AER_TRANSACTION_LAYER_ERROR)
 
 /*
@@ -473,7 +515,9 @@ static const char * const aer_error_severity_string[] = {
 static const char *aer_error_layer[] = {
 	"Physical Layer",
 	"Data Link Layer",
-	"Transaction Layer"
+	"Transaction Layer",
+	"General",
+	"",
 };
 
 static const char *aer_correctable_error_string[] = {
@@ -547,10 +591,12 @@ static const char *aer_uncorrectable_error_string[] = {
 };
 
 static const char *aer_agent_string[] = {
-	"Receiver ID",
-	"Requester ID",
-	"Completer ID",
-	"Transmitter ID"
+	"Receiver",
+	"Requester",
+	"Completer",
+	"Transmitter",
+	"Component",
+	"",
 };
 
 #define aer_stats_dev_attr(name, stats_array, strings_array,		\
@@ -765,6 +811,7 @@ static void pci_dev_aer_stats_incr(struct pci_dev *pdev,
 		break;
 	case AER_NONFATAL:
 		aer_info->dev_total_nonfatal_errs++;
+		hwerr_log_error_type(HWERR_RECOV_PCI);
 		counter = &aer_info->dev_nonfatal_errs[0];
 		max = AER_MAX_TYPEOF_UNCOR_ERRS;
 		break;
@@ -813,6 +860,46 @@ static int aer_ratelimit(struct pci_dev *dev, unsigned int severity)
 	}
 }
 
+static u32 aer_compute_anfe_status(u16 devsta, u32 uncor_status,
+				   u32 uncor_mask, u32 uncor_severity)
+{
+	u32 anfe_status;
+
+	/*
+	 * Uncorrectable Errors must be unmasked and have Non-Fatal severity
+	 * to qualify as Advisory Non-Fatal Errors (PCIe r7.0 sec 6.2.4.3).
+	 */
+	uncor_status &= ~uncor_mask & ~uncor_severity;
+
+	/* Some Non-Fatal Errors are always Advisory (PCIe r7.0 sec 6.2.7). */
+	anfe_status = uncor_status & AER_ANFE;
+
+	/*
+	 * Others may be Advisory at the discretion of the detecting agent.
+	 * That's impossible to discern if the agent signaled ERR_NONFATAL
+	 * in addition to ERR_COR.  Assume none are Advisory in that case
+	 * to ensure that the Uncorrectable Error code path is taken.
+	 */
+	if (!(devsta & PCI_EXP_DEVSTA_NFED))
+		anfe_status |= uncor_status & AER_POSSIBLE_ANFE;
+
+	return anfe_status;
+}
+
+static u32 aer_get_anfe_status(struct pci_dev *dev)
+{
+	u32 uncor_status, uncor_mask, uncor_severity;
+	u16 devsta, aer = dev->aer_cap;
+
+	pci_read_config_dword(dev, aer + PCI_ERR_UNCOR_STATUS, &uncor_status);
+	pci_read_config_dword(dev, aer + PCI_ERR_UNCOR_MASK, &uncor_mask);
+	pci_read_config_dword(dev, aer + PCI_ERR_UNCOR_SEVER, &uncor_severity);
+	pcie_capability_read_word(dev, PCI_EXP_DEVSTA, &devsta);
+
+	return aer_compute_anfe_status(devsta, uncor_status, uncor_mask,
+				       uncor_severity);
+}
+
 static bool tlp_header_logged(u32 status, u32 capctl)
 {
 	/* Errors for which a header is always logged (PCIe r7.0 sec 6.2.7) */
@@ -831,8 +918,8 @@ static void __aer_print_error(struct pci_dev *dev, struct aer_err_info *info)
 {
 	const char **strings;
 	unsigned long status = info->status & ~info->mask;
+	const char *errmsg, *agent, *layer;
 	const char *level = info->level;
-	const char *errmsg;
 	int i;
 
 	if (info->severity == AER_CORRECTABLE)
@@ -842,10 +929,18 @@ static void __aer_print_error(struct pci_dev *dev, struct aer_err_info *info)
 
 	for_each_set_bit(i, &status, 32) {
 		errmsg = strings[i];
-		if (!errmsg)
+		agent = aer_agent_string[AER_GET_AGENT(info->severity, BIT(i))];
+		layer = aer_error_layer[AER_GET_LAYER_ERROR(info->severity,
+								       BIT(i))];
+		if (!errmsg) {
 			errmsg = "Unknown Error Bit";
+			agent = "";
+			layer = "";
+		}
 
-		aer_printk(level, dev, "   [%2d] %-22s%s\n", i, errmsg,
+		aer_printk(level, dev, "  [%2d] %-17s | %-11s | %-17s%s\n",
+			   i, errmsg, agent, layer,
+			   info->severity != AER_CORRECTABLE &&
 				info->first_error == i ? " (First)" : "");
 	}
 }
@@ -855,57 +950,67 @@ static void aer_print_source(struct pci_dev *dev, struct aer_err_info *info,
 {
 	u16 source = info->id;
 
-	pci_info(dev, "%s%s error message received from %04x:%02x:%02x.%d%s\n",
+	pci_info(dev, "%s%s Error message%s from %04x:%02x:%02x.%d%s\n",
 		 info->multi_error_valid ? "Multiple " : "",
 		 aer_error_severity_string[info->severity],
+		 info->multi_error_valid ? "s received, first one" : " received",
 		 pci_domain_nr(dev->bus), PCI_BUS_NUM(source),
 		 PCI_SLOT(source), PCI_FUNC(source),
-		 found ? "" : " (no details found");
+		 found ? "" : " (no details found)");
 }
 
 void aer_print_error(struct aer_err_info *info, int i)
 {
 	struct pci_dev *dev;
-	int layer, agent, id;
 	const char *level = info->level;
+	const char *bus_type = aer_err_bus(info);
 
 	if (WARN_ON_ONCE(i >= AER_MAX_MULTI_ERR_DEVICES))
 		return;
 
 	dev = info->dev[i];
-	id = pci_dev_id(dev);
 
 	pci_dev_aer_stats_incr(dev, info);
 	trace_aer_event(pci_name(dev), (info->status & ~info->mask),
-			info->severity, info->tlp_header_valid, &info->tlp);
+			info->severity, info->tlp_header_valid &&
+			info->severity != AER_CORRECTABLE, &info->tlp,
+			bus_type);
 
+	/*
+	 * For Advisory Non-Fatal Errors, record statistics and tracing
+	 * even if ratelimited
+	 */
 	if (!info->ratelimit_print[i])
-		return;
+		goto anfe;
 
 	if (!info->status) {
-		pci_err(dev, "PCIe Bus Error: severity=%s, type=Inaccessible, (Unregistered Agent ID)\n",
-			aer_error_severity_string[info->severity]);
-		goto out;
+		pci_err(dev, "%s Bus Error: severity=%s (Inaccessible)\n",
+			bus_type, aer_error_severity_string[info->severity]);
+		return;
 	}
 
-	layer = AER_GET_LAYER_ERROR(info->severity, info->status);
-	agent = AER_GET_AGENT(info->severity, info->status);
-
-	aer_printk(level, dev, "PCIe Bus Error: severity=%s, type=%s, (%s)\n",
-		   aer_error_severity_string[info->severity],
-		   aer_error_layer[layer], aer_agent_string[agent]);
+	aer_printk(level, dev, "%s Bus Error: severity=%s\n",
+		   bus_type, aer_error_severity_string[info->severity]);
 
 	aer_printk(level, dev, "  device [%04x:%04x] error status/mask=%08x/%08x\n",
 		   dev->vendor, dev->device, info->status, info->mask);
 
 	__aer_print_error(dev, info);
 
-	if (info->tlp_header_valid)
+	if (info->tlp_header_valid && info->severity != AER_CORRECTABLE)
 		pcie_print_tlp_log(dev, &info->tlp, level, dev_fmt("  "));
 
-out:
-	if (info->id && info->error_dev_num > 1 && info->id == id)
-		pci_err(dev, "  Error of this Agent is reported first\n");
+anfe:
+	/* Recursive invocation for Advisory Non-Fatal Errors */
+	if (info->anfe_status && info->severity == AER_CORRECTABLE) {
+		info->severity = AER_NONFATAL;
+		info->status = info->anfe_status;
+		info->mask = 0;
+
+		aer_print_error(info, i);
+
+		info->severity = AER_CORRECTABLE;
+	}
 }
 
 #ifdef CONFIG_ACPI_APEI_PCIEAER
@@ -923,12 +1028,15 @@ int cper_severity_to_aer(int cper_severity)
 EXPORT_SYMBOL_GPL(cper_severity_to_aer);
 #endif
 
-void pci_print_aer(struct pci_dev *dev, int aer_severity,
-		   struct aer_capability_regs *aer)
+static void __pci_print_aer(struct pci_dev *dev, int aer_severity,
+			    struct aer_capability_regs *aer,
+			    bool ratelimit_print, const char *level)
 {
-	int layer, agent, tlp_header_valid = 0;
+	const char *bus_type, *sev;
+	int tlp_header_valid = 0;
 	u32 status, mask;
 	struct aer_err_info info = {
+		.level = level,
 		.severity = aer_severity,
 		.first_error = PCI_ERR_CAP_FEP(aer->cap_control),
 	};
@@ -936,32 +1044,36 @@ void pci_print_aer(struct pci_dev *dev, int aer_severity,
 	if (aer_severity == AER_CORRECTABLE) {
 		status = aer->cor_status;
 		mask = aer->cor_mask;
-		info.level = KERN_WARNING;
+		sev = "cor";
 	} else {
 		status = aer->uncor_status;
 		mask = aer->uncor_mask;
-		info.level = KERN_ERR;
-		tlp_header_valid = tlp_header_logged(status, aer->cap_control);
+		sev = "uncor";
+		tlp_header_valid = tlp_header_logged(status & ~mask,
+						     aer->cap_control);
 	}
 
 	info.status = status;
 	info.mask = mask;
+	info.is_cxl = pcie_is_cxl(dev);
+
+	bus_type = aer_err_bus(&info);
 
 	pci_dev_aer_stats_incr(dev, &info);
-	trace_aer_event(pci_name(dev), (status & ~mask),
-			aer_severity, tlp_header_valid, &aer->header_log);
+	trace_aer_event(pci_name(dev), (status & ~mask), aer_severity,
+			tlp_header_valid, &aer->header_log, bus_type);
 
-	if (!aer_ratelimit(dev, info.severity))
-		return;
+	/*
+	 * For Advisory Non-Fatal Errors, record statistics and tracing
+	 * even if ratelimited
+	 */
+	if (!ratelimit_print)
+		goto anfe;
 
-	layer = AER_GET_LAYER_ERROR(aer_severity, status);
-	agent = AER_GET_AGENT(aer_severity, status);
-
-	aer_printk(info.level, dev, "aer_status: 0x%08x, aer_mask: 0x%08x\n",
-		   status, mask);
+	aer_printk(info.level, dev,
+		   "aer_%s_status: 0x%08x, aer_%s_mask: 0x%08x\n",
+		   sev, status, sev, mask);
 	__aer_print_error(dev, &info);
-	aer_printk(info.level, dev, "aer_layer=%s, aer_agent=%s\n",
-		   aer_error_layer[layer], aer_agent_string[agent]);
 
 	if (aer_severity != AER_CORRECTABLE)
 		aer_printk(info.level, dev, "aer_uncor_severity: 0x%08x\n",
@@ -970,8 +1082,38 @@ void pci_print_aer(struct pci_dev *dev, int aer_severity,
 	if (tlp_header_valid)
 		pcie_print_tlp_log(dev, &aer->header_log, info.level,
 				   dev_fmt("  "));
+
+anfe:
+	/* Recursive invocation for Advisory Non-Fatal Errors */
+	if (aer_severity == AER_CORRECTABLE &&
+	    info.status & ~info.mask & PCI_ERR_COR_ADV_NFAT) {
+		u32 anfe_status = aer_compute_anfe_status(PCI_EXP_DEVSTA_CED,
+							  aer->uncor_status,
+							  aer->uncor_mask,
+							  aer->uncor_severity);
+		if (anfe_status) {
+			aer->uncor_status = anfe_status;
+			aer->uncor_mask = 0;
+			__pci_print_aer(dev, AER_NONFATAL, aer,
+					ratelimit_print, level);
+		}
+	}
 }
-EXPORT_SYMBOL_NS_GPL(pci_print_aer, "CXL");
+
+void pci_print_aer(struct pci_dev *dev, int aer_severity,
+		   struct aer_capability_regs *aer)
+{
+	/*
+	 * Precalculate ratelimit counter and log level so that Advisory
+	 * Non-Fatal Errors are treated like the accompanying Correctable Error
+	 */
+	bool ratelimit_print = aer_ratelimit(dev, aer_severity);
+	const char *level = aer_severity == AER_CORRECTABLE ? KERN_WARNING
+							    : KERN_ERR;
+
+	__pci_print_aer(dev, aer_severity, aer, ratelimit_print, level);
+}
+EXPORT_SYMBOL_GPL(pci_print_aer);
 
 /**
  * add_error_device - list device to be handled
@@ -1037,8 +1179,6 @@ static bool is_error_source(struct pci_dev *dev, struct aer_err_info *e_info)
 	 *      3) There are multiple errors and prior ID comparing fails;
 	 * We check AER status registers to find possible reporter.
 	 */
-	if (atomic_read(&dev->enable_cnt) == 0)
-		return false;
 
 	/* Check if AER is enabled */
 	pcie_capability_read_word(dev, PCI_EXP_DEVCTL, &reg16);
@@ -1118,8 +1258,6 @@ static bool find_source_device(struct pci_dev *parent,
 	return true;
 }
 
-#ifdef CONFIG_PCIEAER_CXL
-
 /**
  * pci_aer_unmask_internal_errors - unmask internal errors
  * @dev: pointer to the pci_dev data structure
@@ -1130,7 +1268,7 @@ static bool find_source_device(struct pci_dev *parent,
  * Note: AER must be enabled and supported by the device which must be
  * checked in advance, e.g. with pcie_aer_is_native().
  */
-static void pci_aer_unmask_internal_errors(struct pci_dev *dev)
+void pci_aer_unmask_internal_errors(struct pci_dev *dev)
 {
 	int aer = dev->aer_cap;
 	u32 mask;
@@ -1144,117 +1282,20 @@ static void pci_aer_unmask_internal_errors(struct pci_dev *dev)
 	pci_write_config_dword(dev, aer + PCI_ERR_COR_MASK, mask);
 }
 
-static bool is_cxl_mem_dev(struct pci_dev *dev)
-{
-	/*
-	 * The capability, status, and control fields in Device 0,
-	 * Function 0 DVSEC control the CXL functionality of the
-	 * entire device (CXL 3.0, 8.1.3).
-	 */
-	if (dev->devfn != PCI_DEVFN(0, 0))
-		return false;
+/*
+ * Internal errors are too device-specific to enable generally, however for CXL
+ * their behavior is standardized for conveying CXL protocol errors.
+ */
+EXPORT_SYMBOL_FOR_MODULES(pci_aer_unmask_internal_errors, "cxl_core");
 
-	/*
-	 * CXL Memory Devices must have the 502h class code set (CXL
-	 * 3.0, 8.1.12.1).
-	 */
-	if ((dev->class >> 8) != PCI_CLASS_MEMORY_CXL)
-		return false;
-
-	return true;
-}
-
-static bool cxl_error_is_native(struct pci_dev *dev)
-{
-	struct pci_host_bridge *host = pci_find_host_bridge(dev->bus);
-
-	return (pcie_ports_native || host->native_aer);
-}
-
-static bool is_internal_error(struct aer_err_info *info)
+#ifdef CONFIG_CXL_RAS
+bool is_aer_internal_error(struct aer_err_info *info)
 {
 	if (info->severity == AER_CORRECTABLE)
 		return info->status & PCI_ERR_COR_INTERNAL;
 
 	return info->status & PCI_ERR_UNC_INTN;
 }
-
-static int cxl_rch_handle_error_iter(struct pci_dev *dev, void *data)
-{
-	struct aer_err_info *info = (struct aer_err_info *)data;
-	const struct pci_error_handlers *err_handler;
-
-	if (!is_cxl_mem_dev(dev) || !cxl_error_is_native(dev))
-		return 0;
-
-	/* Protect dev->driver */
-	device_lock(&dev->dev);
-
-	err_handler = dev->driver ? dev->driver->err_handler : NULL;
-	if (!err_handler)
-		goto out;
-
-	if (info->severity == AER_CORRECTABLE) {
-		if (err_handler->cor_error_detected)
-			err_handler->cor_error_detected(dev);
-	} else if (err_handler->error_detected) {
-		if (info->severity == AER_NONFATAL)
-			err_handler->error_detected(dev, pci_channel_io_normal);
-		else if (info->severity == AER_FATAL)
-			err_handler->error_detected(dev, pci_channel_io_frozen);
-	}
-out:
-	device_unlock(&dev->dev);
-	return 0;
-}
-
-static void cxl_rch_handle_error(struct pci_dev *dev, struct aer_err_info *info)
-{
-	/*
-	 * Internal errors of an RCEC indicate an AER error in an
-	 * RCH's downstream port. Check and handle them in the CXL.mem
-	 * device driver.
-	 */
-	if (pci_pcie_type(dev) == PCI_EXP_TYPE_RC_EC &&
-	    is_internal_error(info))
-		pcie_walk_rcec(dev, cxl_rch_handle_error_iter, info);
-}
-
-static int handles_cxl_error_iter(struct pci_dev *dev, void *data)
-{
-	bool *handles_cxl = data;
-
-	if (!*handles_cxl)
-		*handles_cxl = is_cxl_mem_dev(dev) && cxl_error_is_native(dev);
-
-	/* Non-zero terminates iteration */
-	return *handles_cxl;
-}
-
-static bool handles_cxl_errors(struct pci_dev *rcec)
-{
-	bool handles_cxl = false;
-
-	if (pci_pcie_type(rcec) == PCI_EXP_TYPE_RC_EC &&
-	    pcie_aer_is_native(rcec))
-		pcie_walk_rcec(rcec, handles_cxl_error_iter, &handles_cxl);
-
-	return handles_cxl;
-}
-
-static void cxl_rch_enable_rcec(struct pci_dev *rcec)
-{
-	if (!handles_cxl_errors(rcec))
-		return;
-
-	pci_aer_unmask_internal_errors(rcec);
-	pci_info(rcec, "CXL: Internal errors unmasked");
-}
-
-#else
-static inline void cxl_rch_enable_rcec(struct pci_dev *dev) { }
-static inline void cxl_rch_handle_error(struct pci_dev *dev,
-					struct aer_err_info *info) { }
 #endif
 
 /**
@@ -1273,9 +1314,14 @@ static void pci_aer_handle_error(struct pci_dev *dev, struct aer_err_info *info)
 		 * Correctable error does not need software intervention.
 		 * No need to go through error recovery process.
 		 */
-		if (aer)
+		if (aer) {
 			pci_write_config_dword(dev, aer + PCI_ERR_COR_STATUS,
 					info->status);
+			if (info->anfe_status)
+				pci_write_config_dword(dev,
+					aer + PCI_ERR_UNCOR_STATUS,
+					info->anfe_status);
+		}
 		if (pcie_aer_is_native(dev)) {
 			struct pci_driver *pdrv = dev->driver;
 
@@ -1378,6 +1424,27 @@ void aer_recover_queue(int domain, unsigned int bus, unsigned int devfn,
 EXPORT_SYMBOL_GPL(aer_recover_queue);
 #endif
 
+static void aer_get_uncor_info(struct pci_dev *dev, struct aer_err_info *info,
+			       u32 status)
+{
+	u16 aer = dev->aer_cap;
+	u32 aercc;
+
+	/* Get First Error Pointer */
+	pci_read_config_dword(dev, aer + PCI_ERR_CAP, &aercc);
+	info->first_error = PCI_ERR_CAP_FEP(aercc);
+
+	/* Get TLP Prefix/Header Log */
+	if (tlp_header_logged(status, aercc)) {
+		info->tlp_header_valid = 1;
+		pcie_read_tlp_log(dev, aer + PCI_ERR_HEADER_LOG,
+				  aer + PCI_ERR_PREFIX_LOG,
+				  aer_tlp_log_len(dev, aercc),
+				  aercc & PCI_ERR_CAP_TLP_LOG_FLIT,
+				  &info->tlp);
+	}
+}
+
 /**
  * aer_get_device_error_info - read error status from dev and store it to info
  * @info: pointer to structure to store the error record
@@ -1391,7 +1458,6 @@ int aer_get_device_error_info(struct aer_err_info *info, int i)
 {
 	struct pci_dev *dev;
 	int type, aer;
-	u32 aercc;
 
 	if (i >= AER_MAX_MULTI_ERR_DEVICES)
 		return 0;
@@ -1402,7 +1468,9 @@ int aer_get_device_error_info(struct aer_err_info *info, int i)
 
 	/* Must reset in this function */
 	info->status = 0;
+	info->anfe_status = 0;
 	info->tlp_header_valid = 0;
+	info->is_cxl = pcie_is_cxl(dev);
 
 	/* The device might not support AER */
 	if (!aer)
@@ -1415,6 +1483,10 @@ int aer_get_device_error_info(struct aer_err_info *info, int i)
 			&info->mask);
 		if (!(info->status & ~info->mask))
 			return 0;
+		if (info->status & ~info->mask & PCI_ERR_COR_ADV_NFAT) {
+			info->anfe_status = aer_get_anfe_status(dev);
+			aer_get_uncor_info(dev, info, info->anfe_status);
+		}
 	} else if (type == PCI_EXP_TYPE_ROOT_PORT ||
 		   type == PCI_EXP_TYPE_RC_EC ||
 		   type == PCI_EXP_TYPE_DOWNSTREAM ||
@@ -1428,18 +1500,7 @@ int aer_get_device_error_info(struct aer_err_info *info, int i)
 		if (!(info->status & ~info->mask))
 			return 0;
 
-		/* Get First Error Pointer */
-		pci_read_config_dword(dev, aer + PCI_ERR_CAP, &aercc);
-		info->first_error = PCI_ERR_CAP_FEP(aercc);
-
-		if (tlp_header_logged(info->status, aercc)) {
-			info->tlp_header_valid = 1;
-			pcie_read_tlp_log(dev, aer + PCI_ERR_HEADER_LOG,
-					  aer + PCI_ERR_PREFIX_LOG,
-					  aer_tlp_log_len(dev, aercc),
-					  aercc & PCI_ERR_CAP_TLP_LOG_FLIT,
-					  &info->tlp);
-		}
+		aer_get_uncor_info(dev, info, info->status & ~info->mask);
 	}
 
 	return 1;
@@ -1606,6 +1667,20 @@ static void aer_disable_irq(struct pci_dev *pdev)
 	pci_write_config_dword(pdev, aer + PCI_ERR_ROOT_COMMAND, reg32);
 }
 
+static int clear_status_iter(struct pci_dev *dev, void *data)
+{
+	u16 devctl;
+
+	/* Skip if pci_enable_pcie_error_reporting() hasn't been called yet */
+	pcie_capability_read_word(dev, PCI_EXP_DEVCTL, &devctl);
+	if (!(devctl & PCI_EXP_AER_FLAGS))
+		return 0;
+
+	pci_aer_clear_status(dev);
+	pcie_clear_device_status(dev);
+	return 0;
+}
+
 /**
  * aer_enable_rootport - enable Root Port's interrupts when receiving messages
  * @rpc: pointer to a Root Port data structure
@@ -1627,9 +1702,19 @@ static void aer_enable_rootport(struct aer_rpc *rpc)
 	pcie_capability_clear_word(pdev, PCI_EXP_RTCTL,
 				   SYSTEM_ERROR_INTR_ON_MESG_MASK);
 
-	/* Clear error status */
+	/* Clear error status of this Root Port or RCEC */
 	pci_read_config_dword(pdev, aer + PCI_ERR_ROOT_STATUS, &reg32);
 	pci_write_config_dword(pdev, aer + PCI_ERR_ROOT_STATUS, reg32);
+
+	/* Clear error status of agents reporting to this Root Port or RCEC */
+	if (reg32 & AER_ERR_STATUS_MASK) {
+		if (pci_pcie_type(pdev) == PCI_EXP_TYPE_RC_EC)
+			pcie_walk_rcec(pdev, clear_status_iter, NULL);
+		else if (pdev->subordinate)
+			pci_walk_bus(pdev->subordinate, clear_status_iter,
+				     NULL);
+	}
+
 	pci_read_config_dword(pdev, aer + PCI_ERR_COR_STATUS, &reg32);
 	pci_write_config_dword(pdev, aer + PCI_ERR_COR_STATUS, reg32);
 	pci_read_config_dword(pdev, aer + PCI_ERR_UNCOR_STATUS, &reg32);

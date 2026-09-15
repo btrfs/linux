@@ -1,13 +1,39 @@
 // SPDX-License-Identifier: GPL-2.0
 
-use kernel::{device, devres::Devres, error::code::*, fmt, pci, prelude::*, sync::Arc};
+use core::ops::Range;
 
-use crate::driver::Bar0;
-use crate::falcon::{gsp::Gsp as GspFalcon, sec2::Sec2 as Sec2Falcon, Falcon};
-use crate::fb::SysmemFlush;
-use crate::gfw;
-use crate::gsp::Gsp;
-use crate::regs;
+use kernel::{
+    device,
+    dma::Device,
+    fmt,
+    io::Io,
+    num::Bounded,
+    pci,
+    prelude::*,
+    sizes::SizeConstants, //
+};
+
+use crate::{
+    bounded_enum,
+    driver::Bar0,
+    falcon::{
+        gsp::Gsp as GspFalcon,
+        sec2::Sec2 as Sec2Falcon,
+        Falcon, //
+    },
+    fb::SysmemFlush,
+    fsp::Fsp,
+    gsp::{
+        self,
+        commands::GetGspStaticInfoReply,
+        Gsp,
+        GspBootContext, //
+    },
+    regs,
+    vgpu::VgpuManager, //
+};
+
+mod hal;
 
 macro_rules! define_chipset {
     ({ $($variant:ident = $value:expr),* $(,)* }) =>
@@ -70,16 +96,27 @@ define_chipset!({
     GA104 = 0x174,
     GA106 = 0x176,
     GA107 = 0x177,
+    // Hopper
+    GH100 = 0x180,
     // Ada
     AD102 = 0x192,
     AD103 = 0x193,
     AD104 = 0x194,
     AD106 = 0x196,
     AD107 = 0x197,
+    // Blackwell GB10x
+    GB100 = 0x1a0,
+    GB102 = 0x1a2,
+    // Blackwell GB20x
+    GB202 = 0x1b2,
+    GB203 = 0x1b3,
+    GB205 = 0x1b5,
+    GB206 = 0x1b6,
+    GB207 = 0x1b7,
 });
 
 impl Chipset {
-    pub(crate) fn arch(&self) -> Architecture {
+    pub(crate) const fn arch(self) -> Architecture {
         match self {
             Self::TU102 | Self::TU104 | Self::TU106 | Self::TU117 | Self::TU116 => {
                 Architecture::Turing
@@ -87,10 +124,20 @@ impl Chipset {
             Self::GA100 | Self::GA102 | Self::GA103 | Self::GA104 | Self::GA106 | Self::GA107 => {
                 Architecture::Ampere
             }
+            Self::GH100 => Architecture::Hopper,
             Self::AD102 | Self::AD103 | Self::AD104 | Self::AD106 | Self::AD107 => {
                 Architecture::Ada
             }
+            Self::GB100 | Self::GB102 => Architecture::BlackwellGB10x,
+            Self::GB202 | Self::GB203 | Self::GB205 | Self::GB206 | Self::GB207 => {
+                Architecture::BlackwellGB20x
+            }
         }
+    }
+
+    /// Returns the address range of the PCI config mirror space.
+    pub(crate) fn pci_config_mirror_range(self) -> Range<u32> {
+        hal::gpu_hal(self).pci_config_mirror_range()
     }
 }
 
@@ -108,37 +155,30 @@ impl fmt::Display for Chipset {
     }
 }
 
-/// Enum representation of the GPU generation.
-#[derive(fmt::Debug)]
-pub(crate) enum Architecture {
-    Turing = 0x16,
-    Ampere = 0x17,
-    Ada = 0x19,
-}
-
-impl TryFrom<u8> for Architecture {
-    type Error = Error;
-
-    fn try_from(value: u8) -> Result<Self> {
-        match value {
-            0x16 => Ok(Self::Turing),
-            0x17 => Ok(Self::Ampere),
-            0x19 => Ok(Self::Ada),
-            _ => Err(ENODEV),
-        }
+bounded_enum! {
+    /// Enum representation of the GPU generation.
+    #[derive(fmt::Debug, Copy, Clone)]
+    pub(crate) enum Architecture with TryFrom<Bounded<u32, 6>> {
+        Turing = 0x16,
+        Ampere = 0x17,
+        Hopper = 0x18,
+        Ada = 0x19,
+        BlackwellGB10x = 0x1a,
+        BlackwellGB20x = 0x1b,
     }
 }
 
+#[derive(Clone, Copy)]
 pub(crate) struct Revision {
-    major: u8,
-    minor: u8,
+    major: Bounded<u8, 4>,
+    minor: Bounded<u8, 4>,
 }
 
-impl Revision {
-    fn from_boot0(boot0: regs::NV_PMC_BOOT_0) -> Self {
+impl From<regs::NV_PMC_BOOT_42> for Revision {
+    fn from(boot0: regs::NV_PMC_BOOT_42) -> Self {
         Self {
-            major: boot0.major_revision(),
-            minor: boot0.minor_revision(),
+            major: boot0.major_revision().cast(),
+            minor: boot0.minor_revision().cast(),
         }
     }
 }
@@ -149,93 +189,228 @@ impl fmt::Display for Revision {
     }
 }
 
-/// Structure holding the metadata of the GPU.
+/// Structure holding a basic description of the GPU: `Chipset` and `Revision`.
+#[derive(Clone, Copy)]
 pub(crate) struct Spec {
     chipset: Chipset,
-    /// The revision of the chipset.
     revision: Revision,
 }
 
 impl Spec {
-    fn new(bar: &Bar0) -> Result<Spec> {
-        let boot0 = regs::NV_PMC_BOOT_0::read(bar);
+    fn new(dev: &device::Device, bar: Bar0<'_>) -> Result<Spec> {
+        // Some brief notes about boot0 and boot42, in chronological order:
+        //
+        // NV04 through NV50:
+        //
+        //    Not supported by Nova. boot0 is necessary and sufficient to identify these GPUs.
+        //    boot42 may not even exist on some of these GPUs.
+        //
+        // Fermi through Volta:
+        //
+        //     Not supported by Nova. boot0 is still sufficient to identify these GPUs, but boot42
+        //     is also guaranteed to be both present and accurate.
+        //
+        // Turing and later:
+        //
+        //     Supported by Nova. Identified by first checking boot0 to ensure that the GPU is not
+        //     from an earlier (pre-Fermi) era, and then using boot42 to precisely identify the GPU.
+        //     Somewhere in the Rubin timeframe, boot0 will no longer have space to add new GPU IDs.
 
-        Ok(Self {
-            chipset: boot0.chipset()?,
-            revision: Revision::from_boot0(boot0),
+        let boot0 = bar.read(regs::NV_PMC_BOOT_0);
+
+        if boot0.is_older_than_fermi() {
+            return Err(ENODEV);
+        }
+
+        let boot42 = bar.read(regs::NV_PMC_BOOT_42);
+        Spec::try_from(boot42).inspect_err(|_| {
+            dev_err!(dev, "Unsupported chipset: {}\n", boot42);
         })
     }
+}
+
+impl TryFrom<regs::NV_PMC_BOOT_42> for Spec {
+    type Error = Error;
+
+    fn try_from(boot42: regs::NV_PMC_BOOT_42) -> Result<Self> {
+        Ok(Self {
+            chipset: boot42.chipset()?,
+            revision: boot42.into(),
+        })
+    }
+}
+
+impl fmt::Display for Spec {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_fmt(fmt!(
+            "Chipset: {}, Architecture: {:?}, Revision: {}",
+            self.chipset,
+            self.chipset.arch(),
+            self.revision
+        ))
+    }
+}
+
+/// Self-contained resources to operate and drop the GSP.
+#[pin_data(PinnedDrop)]
+struct GspResources<'gpu> {
+    /// Device owning the GPU.
+    device: &'gpu pci::Device<device::Bound>,
+    /// Details about the chipset.
+    spec: Spec,
+    /// MMIO mapping of PCI BAR 0.
+    bar: Bar0<'gpu>,
+    /// GSP falcon instance, used for GSP boot up and cleanup.
+    gsp_falcon: Falcon<'gpu, GspFalcon>,
+    /// SEC2 falcon instance, used for GSP boot up and cleanup.
+    sec2_falcon: Falcon<'gpu, Sec2Falcon>,
+    /// FSP instance, if on an arch that supports it.
+    // TODO: use different resource types for each boot method, and make the relevant Gsp methods
+    // generic against them.
+    fsp: Option<Fsp<'gpu>>,
+    /// vGPU state detected before GSP boot.
+    vgpu: VgpuManager,
+    /// GSP runtime data.
+    #[pin]
+    gsp: Gsp,
+    /// GSP unload firmware bundle, if any.
+    unload_bundle: Option<gsp::UnloadBundle>,
 }
 
 /// Structure holding the resources required to operate the GPU.
 #[pin_data]
-pub(crate) struct Gpu {
+pub(crate) struct Gpu<'gpu> {
     spec: Spec,
-    /// MMIO mapping of PCI BAR 0
-    bar: Arc<Devres<Bar0>>,
+    /// Static GPU information as provided by the GSP.
+    gsp_static_info: GetGspStaticInfoReply,
+    /// GSP and its resources.
+    #[pin]
+    gsp_resources: GspResources<'gpu>,
     /// System memory page required for flushing all pending GPU-side memory writes done through
     /// PCIE into system memory, via sysmembar (A GPU-initiated HW memory-barrier operation).
-    sysmem_flush: SysmemFlush,
-    /// GSP falcon instance, used for GSP boot up and cleanup.
-    gsp_falcon: Falcon<GspFalcon>,
-    /// SEC2 falcon instance, used for GSP boot up and cleanup.
-    sec2_falcon: Falcon<Sec2Falcon>,
-    /// GSP runtime data. Temporarily an empty placeholder.
-    #[pin]
-    gsp: Gsp,
+    ///
+    /// Must be kept declared *after* `gsp_resources`, as the latter's `PinnedDrop` implementation
+    /// requires the sysmem flush page to be in place.
+    sysmem_flush: SysmemFlush<'gpu>,
 }
 
-impl Gpu {
+#[pinned_drop]
+impl PinnedDrop for GspResources<'_> {
+    fn drop(self: Pin<&mut Self>) {
+        let this = self.project();
+        let device = *this.device;
+        let bar = *this.bar;
+        let bundle = this.unload_bundle.take();
+
+        let _ = this
+            .gsp
+            .as_ref()
+            .get_ref()
+            .unload(
+                GspBootContext {
+                    pdev: device,
+                    bar,
+                    chipset: this.spec.chipset,
+                    gsp_falcon: &*this.gsp_falcon,
+                    sec2_falcon: &*this.sec2_falcon,
+                    fsp: this.fsp.as_mut(),
+                    vgpu: &*this.vgpu,
+                },
+                bundle,
+            )
+            .inspect_err(|e| dev_err!(device, "failed to unload GSP: {:?}\n", e));
+    }
+}
+
+impl<'gpu> Gpu<'gpu> {
     pub(crate) fn new<'a>(
-        pdev: &'a pci::Device<device::Bound>,
-        devres_bar: Arc<Devres<Bar0>>,
-        bar: &'a Bar0,
-    ) -> impl PinInit<Self, Error> + 'a {
+        pdev: &'gpu pci::Device<device::Core<'a>>,
+        bar: Bar0<'gpu>,
+    ) -> impl PinInit<Self, Error> + use<'gpu, 'a> {
+        let dev = pdev.as_ref();
+
         try_pin_init!(Self {
-            spec: Spec::new(bar).inspect(|spec| {
-                dev_info!(
-                    pdev.as_ref(),
-                    "NVIDIA (Chipset: {}, Architecture: {:?}, Revision: {})\n",
-                    spec.chipset,
-                    spec.chipset.arch(),
-                    spec.revision
-                );
+            spec: Spec::new(dev, bar).inspect(|spec| {
+                dev_info!(dev,"NVIDIA ({})\n", spec);
             })?,
 
             // We must wait for GFW_BOOT completion before doing any significant setup on the GPU.
             _: {
-                gfw::wait_gfw_boot_completion(bar)
-                    .inspect_err(|_| dev_err!(pdev.as_ref(), "GFW boot did not complete"))?;
+                let hal = hal::gpu_hal(spec.chipset);
+                let dma_mask = hal.dma_mask();
+
+                // SAFETY: `Gpu` owns all DMA allocations for this device, and we are
+                // still constructing it, so no concurrent DMA allocations can exist.
+                unsafe { pdev.dma_set_mask_and_coherent(dma_mask)? };
+
+                hal.wait_gfw_boot_completion(bar)
+                    .inspect_err(|_| dev_err!(dev, "GFW boot did not complete\n"))?;
             },
 
-            sysmem_flush: SysmemFlush::register(pdev.as_ref(), bar, spec.chipset)?,
+            // Initialize this early because `gsp_resources` depends on it.
+            sysmem_flush: SysmemFlush::register(dev, bar, spec.chipset)?,
 
-            gsp_falcon: Falcon::new(
-                pdev.as_ref(),
-                spec.chipset,
+            gsp_resources <- try_pin_init!(GspResources {
+                device: pdev,
+
+                spec: *spec,
+
                 bar,
-                spec.chipset > Chipset::GA100,
-            )
-            .inspect(|falcon| falcon.clear_swgen0_intr(bar))?,
 
-            sec2_falcon: Falcon::new(pdev.as_ref(), spec.chipset, bar, true)?,
+                gsp_falcon: Falcon::new(
+                    dev,
+                    spec.chipset,
+                    bar
+                )
+                .inspect(|falcon| falcon.clear_swgen0_intr())?,
 
-            gsp <- Gsp::new(),
+                sec2_falcon: Falcon::new(dev, spec.chipset, bar)?,
 
-            _: { gsp.boot(pdev, bar, spec.chipset, gsp_falcon, sec2_falcon)? },
+                fsp: Fsp::try_new(dev, bar, spec.chipset)?,
 
-            bar: devres_bar,
+                vgpu: VgpuManager::new(pdev, spec.chipset, fsp.as_mut()),
+
+                gsp <- Gsp::new(pdev),
+
+                // This member must be initialized last, so the `UnloadBundle` can never be dropped
+                // from outside of the constructed `GspResources`, ensuring that the unload sequence
+                // is properly run in case of failure.
+                unload_bundle: gsp.boot(GspBootContext {
+                    pdev,
+                    bar,
+                    chipset: spec.chipset,
+                    gsp_falcon,
+                    sec2_falcon,
+                    fsp: fsp.as_mut(),
+                    vgpu,
+                })?,
+            }),
+
+            gsp_static_info: {
+                // Obtain and display basic GPU information.
+                let info = gsp_resources.gsp.get_static_info(bar)?;
+                match info.gpu_name() {
+                    Ok(name) => dev_info!(dev, "GPU name: {}\n", name),
+                    Err(e) => dev_warn!(dev, "GPU name unavailable: {:?}\n", e),
+                }
+
+                if !info.usable_fb_regions.is_empty() {
+                    dev_dbg!(dev, "Usable FB regions:\n");
+                    for region in &info.usable_fb_regions {
+                        dev_dbg!(dev, "  - {:#x?}\n", region);
+                    }
+
+                    dev_dbg!(
+                        dev,
+                        "Total usable VRAM: {} MiB\n",
+                        info.usable_fb_regions.iter().fold(0u64, |res, region| res
+                            .saturating_add(region.end - region.start))
+                            / u64::SZ_1M
+                    );
+                }
+
+                info
+            }
         })
-    }
-
-    /// Called when the corresponding [`Device`](device::Device) is unbound.
-    ///
-    /// Note: This method must only be called from `Driver::unbind`.
-    pub(crate) fn unbind(&self, dev: &device::Device<device::Core>) {
-        kernel::warn_on!(self
-            .bar
-            .access(dev)
-            .inspect(|bar| self.sysmem_flush.unregister(bar))
-            .is_err());
     }
 }

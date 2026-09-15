@@ -62,6 +62,22 @@
 #include <internal/lib.h>
 #include "util/sample.h"
 
+#define AUXTRACE_SYNTH_EVENT_ID_OFFSET	1000000000ULL
+
+/*
+ * Event IDs are allocated sequentially, so a big offset from any
+ * existing ID will reach a unused range.
+ */
+u64 auxtrace_synth_id_range_start(struct evsel *evsel)
+{
+	u64 id = evsel->core.id[0] + AUXTRACE_SYNTH_EVENT_ID_OFFSET;
+
+	if (!id)
+		id = 1;
+
+	return id;
+}
+
 /*
  * Make a group from 'leader' to 'last', requiring that the events were not
  * already grouped to a different leader.
@@ -175,7 +191,7 @@ void auxtrace_mmap_params__set_idx(struct auxtrace_mmap_params *mp,
 				   struct evlist *evlist,
 				   struct evsel *evsel, int idx)
 {
-	bool per_cpu = !perf_cpu_map__has_any_cpu(evlist->core.user_requested_cpus);
+	bool per_cpu = !perf_cpu_map__has_any_cpu(evlist__core(evlist)->user_requested_cpus);
 
 	mp->mmap_needed = evsel->needs_auxtrace_mmap;
 
@@ -185,11 +201,11 @@ void auxtrace_mmap_params__set_idx(struct auxtrace_mmap_params *mp,
 	mp->idx = idx;
 
 	if (per_cpu) {
-		mp->cpu = perf_cpu_map__cpu(evlist->core.all_cpus, idx);
-		mp->tid = perf_thread_map__pid(evlist->core.threads, 0);
+		mp->cpu = perf_cpu_map__cpu(evlist__core(evlist)->all_cpus, idx);
+		mp->tid = perf_thread_map__pid(evlist__core(evlist)->threads, 0);
 	} else {
 		mp->cpu.cpu = -1;
-		mp->tid = perf_thread_map__pid(evlist->core.threads, idx);
+		mp->tid = perf_thread_map__pid(evlist__core(evlist)->threads, idx);
 	}
 }
 
@@ -235,7 +251,11 @@ static int auxtrace_queues__grow(struct auxtrace_queues *queues,
 {
 	unsigned int nr_queues = queues->nr_queues;
 	struct auxtrace_queue *queue_array;
+	struct auxtrace_queue *old_array = queues->queue_array;
 	unsigned int i;
+
+	if (!new_nr_queues)
+		return -EINVAL;
 
 	if (!nr_queues)
 		nr_queues = AUXTRACE_INIT_NR_QUEUES;
@@ -251,16 +271,17 @@ static int auxtrace_queues__grow(struct auxtrace_queues *queues,
 		return -ENOMEM;
 
 	for (i = 0; i < queues->nr_queues; i++) {
-		list_splice_tail(&queues->queue_array[i].head,
+		list_splice_tail(&old_array[i].head,
 				 &queue_array[i].head);
-		queue_array[i].tid = queues->queue_array[i].tid;
-		queue_array[i].cpu = queues->queue_array[i].cpu;
-		queue_array[i].set = queues->queue_array[i].set;
-		queue_array[i].priv = queues->queue_array[i].priv;
+		queue_array[i].tid = old_array[i].tid;
+		queue_array[i].cpu = old_array[i].cpu;
+		queue_array[i].set = old_array[i].set;
+		queue_array[i].priv = old_array[i].priv;
 	}
 
 	queues->nr_queues = nr_queues;
 	queues->queue_array = queue_array;
+	free(old_array);
 
 	return 0;
 }
@@ -356,7 +377,8 @@ static bool filter_cpu(struct perf_session *session, struct perf_cpu cpu)
 {
 	unsigned long *cpu_bitmap = session->itrace_synth_opts->cpu_bitmap;
 
-	return cpu_bitmap && cpu.cpu != -1 && !test_bit(cpu.cpu, cpu_bitmap);
+	return cpu_bitmap && cpu.cpu >= 0 && cpu.cpu < MAX_NR_CPUS &&
+	       !test_bit(cpu.cpu, cpu_bitmap);
 }
 
 static int auxtrace_queues__add_buffer(struct auxtrace_queues *queues,
@@ -651,10 +673,10 @@ int auxtrace_parse_snapshot_options(struct auxtrace_record *itr,
 
 static int evlist__enable_event_idx(struct evlist *evlist, struct evsel *evsel, int idx)
 {
-	bool per_cpu_mmaps = !perf_cpu_map__has_any_cpu(evlist->core.user_requested_cpus);
+	bool per_cpu_mmaps = !perf_cpu_map__has_any_cpu(evlist__core(evlist)->user_requested_cpus);
 
 	if (per_cpu_mmaps) {
-		struct perf_cpu evlist_cpu = perf_cpu_map__cpu(evlist->core.all_cpus, idx);
+		struct perf_cpu evlist_cpu = perf_cpu_map__cpu(evlist__core(evlist)->all_cpus, idx);
 		int cpu_map_idx = perf_cpu_map__idx(evsel->core.cpus, evlist_cpu);
 
 		if (cpu_map_idx == -1)
@@ -880,6 +902,21 @@ regroup:
 	return 0;
 }
 
+/**
+ * auxtrace_record__init - Initialize an AUX area tracing record.
+ * @evlist: The list of events to check for AUX area tracing event.
+ * @err: Pointer to an integer to store return code.
+ *
+ * This function looks through the @evlist to determine which AUX area
+ * tracing hardware is being used and initializes the auxtrace_record
+ * structure.
+ *
+ * Return:
+ * a) A pointer to the struct auxtrace_record with @err = 0 on success.
+ * b) NULL with @err = 0 if no AUX area tracing event is found/supported
+ *    (not considered an error).
+ * c) NULL with non-zero @err on actual auxtrace_record__init failure.
+ */
 struct auxtrace_record *__weak
 auxtrace_record__init(struct evlist *evlist __maybe_unused, int *err)
 {
@@ -1363,7 +1400,8 @@ static void unleader_auxtrace(struct perf_session *session)
 	}
 }
 
-int perf_event__process_auxtrace_info(struct perf_session *session,
+int perf_event__process_auxtrace_info(const struct perf_tool *tool __maybe_unused,
+				      struct perf_session *session,
 				      union perf_event *event)
 {
 	enum auxtrace_type type = event->auxtrace_info.type;
@@ -1407,7 +1445,8 @@ int perf_event__process_auxtrace_info(struct perf_session *session,
 	return 0;
 }
 
-s64 perf_event__process_auxtrace(struct perf_session *session,
+s64 perf_event__process_auxtrace(const struct perf_tool *tool __maybe_unused,
+				 struct perf_session *session,
 				 union perf_event *event)
 {
 	s64 err;
@@ -1741,7 +1780,7 @@ static const char * const auxtrace_error_type_name[] = {
 	[PERF_AUXTRACE_ERROR_ITRACE] = "instruction trace",
 };
 
-static const char *auxtrace_error_name(int type)
+static const char *auxtrace_error_name(unsigned int type)
 {
 	const char *error_type_name = NULL;
 
@@ -1757,6 +1796,7 @@ size_t perf_event__fprintf_auxtrace_error(union perf_event *event, FILE *fp)
 	struct perf_record_auxtrace_error *e = &event->auxtrace_error;
 	unsigned long long nsecs = e->time;
 	const char *msg = e->msg;
+	int msg_max;
 	int ret;
 
 	ret = fprintf(fp, " %s error type %u",
@@ -1774,11 +1814,26 @@ size_t perf_event__fprintf_auxtrace_error(union perf_event *event, FILE *fp)
 	if (!e->fmt)
 		msg = (const char *)&e->time;
 
-	if (e->fmt >= 2 && e->machine_pid)
+	/* Bound msg to the bytes actually within the event, capped at the array size */
+	msg_max = (int)((void *)event + event->header.size - (void *)msg);
+	if (msg_max < 0)
+		msg_max = 0;
+	if (msg_max > (int)sizeof(e->msg))
+		msg_max = sizeof(e->msg);
+
+	/*
+	 * Unlike the swap path which downgrades fmt in place,
+	 * native-endian events are mmap'd read-only — check size
+	 * instead to avoid accessing machine_pid/vcpu OOB.
+	 */
+	if (e->fmt >= 2 &&
+	    event->header.size >= offsetof(typeof(event->auxtrace_error), vcpu) +
+				  sizeof(event->auxtrace_error.vcpu) &&
+	    e->machine_pid)
 		ret += fprintf(fp, " machine_pid %d vcpu %d", e->machine_pid, e->vcpu);
 
-	ret += fprintf(fp, " cpu %d pid %d tid %d ip %#"PRI_lx64" code %u: %s\n",
-		       e->cpu, e->pid, e->tid, e->ip, e->code, msg);
+	ret += fprintf(fp, " cpu %d pid %d tid %d ip %#"PRI_lx64" code %u: %.*s\n",
+		       e->cpu, e->pid, e->tid, e->ip, e->code, msg_max, msg);
 	return ret;
 }
 
@@ -1788,7 +1843,7 @@ void perf_session__auxtrace_error_inc(struct perf_session *session,
 	struct perf_record_auxtrace_error *e = &event->auxtrace_error;
 
 	if (e->type < PERF_AUXTRACE_ERROR_MAX)
-		session->evlist->stats.nr_auxtrace_errors[e->type] += 1;
+		evlist__stats(session->evlist)->nr_auxtrace_errors[e->type] += 1;
 }
 
 void events_stats__auxtrace_error_warn(const struct events_stats *stats)
@@ -1804,7 +1859,8 @@ void events_stats__auxtrace_error_warn(const struct events_stats *stats)
 	}
 }
 
-int perf_event__process_auxtrace_error(struct perf_session *session,
+int perf_event__process_auxtrace_error(const struct perf_tool *tool __maybe_unused,
+				       struct perf_session *session,
 				       union perf_event *event)
 {
 	if (auxtrace__dont_decode(session))
@@ -2644,7 +2700,7 @@ static bool dso_sym_match(struct symbol *sym, const char *name, int *cnt,
 {
 	/* Same name, and global or the n'th found or any */
 	return !arch__compare_symbol_names(name, sym->name) &&
-	       ((!idx && sym->binding == STB_GLOBAL) ||
+	       ((!idx && symbol__binding(sym) == STB_GLOBAL) ||
 		(idx > 0 && ++*cnt == idx) ||
 		idx < 0);
 }
@@ -2662,8 +2718,8 @@ static void print_duplicate_syms(struct dso *dso, const char *sym_name)
 		if (dso_sym_match(sym, sym_name, &cnt, -1)) {
 			pr_err("#%d\t0x%"PRIx64"\t%c\t%s\n",
 			       ++cnt, sym->start,
-			       sym->binding == STB_GLOBAL ? 'g' :
-			       sym->binding == STB_LOCAL  ? 'l' : 'w',
+			       symbol__binding(sym) == STB_GLOBAL ? 'g' :
+			       symbol__binding(sym) == STB_LOCAL  ? 'l' : 'w',
 			       sym->name);
 			near = true;
 		} else if (near) {

@@ -40,6 +40,8 @@
 #define FLAGS_NUMA		0x0080
 #define FLAGS_STRICT		0x0100
 #define FLAGS_MPOL		0x0200
+#define FLAGS_ROBUST_UNLOCK	0x0400
+#define FLAGS_ROBUST_LIST32	0x0800
 
 /* FUTEX_ to FLAGS_ */
 static inline unsigned int futex_to_flags(unsigned int op)
@@ -51,6 +53,12 @@ static inline unsigned int futex_to_flags(unsigned int op)
 
 	if (op & FUTEX_CLOCK_REALTIME)
 		flags |= FLAGS_CLOCKRT;
+
+	if (op & FUTEX_ROBUST_UNLOCK)
+		flags |= FLAGS_ROBUST_UNLOCK;
+
+	if (op & FUTEX_ROBUST_LIST32)
+		flags |= FLAGS_ROBUST_LIST32;
 
 	return flags;
 }
@@ -126,6 +134,15 @@ static inline bool should_fail_futex(bool fshared)
 }
 #endif
 
+static inline bool futex_key_is_private(union futex_key *key)
+{
+	/*
+	 * Relies on get_futex_key() to set either bit for shared
+	 * futexes -- see comment with union futex_key.
+	 */
+	return !(key->both.offset & (FUT_OFF_INODE | FUT_OFF_MMSHARED));
+}
+
 /*
  * Hash buckets are shared by all the futex_keys that hash to the same
  * location.  Each key may have multiple futex_q structures, one for each task
@@ -135,7 +152,6 @@ struct futex_hash_bucket {
 	atomic_t waiters;
 	spinlock_t lock;
 	struct plist_head chain;
-	struct futex_private_hash *priv;
 } ____cacheline_aligned_in_smp;
 
 /*
@@ -175,7 +191,7 @@ typedef void (futex_wake_fn)(struct wake_q_head *wake_q, struct futex_q *q);
  * @requeue_pi_key:	the requeue_pi target futex key
  * @bitset:		bitset for the optional bitmasked wakeup
  * @requeue_state:	State field for futex_requeue_pi()
- * @drop_hb_ref:	Waiter should drop the extra hash bucket reference if true
+ * @drop_fph:		Waiter should drop the extra private hash reference when set
  * @requeue_wait:	RCU wait for futex_requeue_pi() (RT only)
  *
  * We use this hashed waitqueue, instead of a normal wait_queue_entry_t, so
@@ -202,7 +218,7 @@ struct futex_q {
 	union futex_key *requeue_pi_key;
 	u32 bitset;
 	atomic_t requeue_state;
-	bool drop_hb_ref;
+	struct futex_private_hash *drop_fph;
 #ifdef CONFIG_PREEMPT_RT
 	struct rcuwait requeue_wait;
 #endif
@@ -217,33 +233,34 @@ enum futex_access {
 
 extern int get_futex_key(u32 __user *uaddr, unsigned int flags, union futex_key *key,
 			 enum futex_access rw);
-extern void futex_q_lockptr_lock(struct futex_q *q);
+extern void futex_q_lockptr_lock(struct futex_q *q) __acquires(q->lock_ptr);
 extern struct hrtimer_sleeper *
 futex_setup_timer(ktime_t *time, struct hrtimer_sleeper *timeout,
 		  int flags, u64 range_ns);
 
-extern struct futex_hash_bucket *futex_hash(union futex_key *key);
-#ifdef CONFIG_FUTEX_PRIVATE_HASH
-extern void futex_hash_get(struct futex_hash_bucket *hb);
-extern void futex_hash_put(struct futex_hash_bucket *hb);
+struct futex_bucket_ref {
+	struct futex_hash_bucket *hb;
+	struct futex_private_hash *fph;
+};
 
-extern struct futex_private_hash *futex_private_hash(void);
+#ifdef CONFIG_FUTEX_PRIVATE_HASH
+extern struct futex_private_hash *futex_private_hash(struct mm_struct *mm);
 extern void futex_private_hash_put(struct futex_private_hash *fph);
 
 #else /* !CONFIG_FUTEX_PRIVATE_HASH */
-static inline void futex_hash_get(struct futex_hash_bucket *hb) { }
-static inline void futex_hash_put(struct futex_hash_bucket *hb) { }
-static inline struct futex_private_hash *futex_private_hash(void) { return NULL; }
+static inline struct futex_private_hash *futex_private_hash(struct mm_struct *mm) { return NULL; }
 static inline void futex_private_hash_put(struct futex_private_hash *fph) { }
 #endif
 
-DEFINE_CLASS(hb, struct futex_hash_bucket *,
-	     if (_T) futex_hash_put(_T),
+extern struct futex_bucket_ref futex_hash(union futex_key *key);
+
+DEFINE_CLASS(hbr, struct futex_bucket_ref,
+	     if (_T.fph) futex_private_hash_put(_T.fph),
 	     futex_hash(key), union futex_key *key);
 
 DEFINE_CLASS(private_hash, struct futex_private_hash *,
 	     if (_T) futex_private_hash_put(_T),
-	     futex_private_hash(), void);
+	     futex_private_hash(mm), struct mm_struct *mm);
 
 /**
  * futex_match - Check whether two futex keys are equal
@@ -281,63 +298,11 @@ static inline int futex_cmpxchg_value_locked(u32 *curval, u32 __user *uaddr, u32
 	return ret;
 }
 
-/*
- * This does a plain atomic user space read, and the user pointer has
- * already been verified earlier by get_futex_key() to be both aligned
- * and actually in user space, just like futex_atomic_cmpxchg_inatomic().
- *
- * We still want to avoid any speculation, and while __get_user() is
- * the traditional model for this, it's actually slower than doing
- * this manually these days.
- *
- * We could just have a per-architecture special function for it,
- * the same way we do futex_atomic_cmpxchg_inatomic(), but rather
- * than force everybody to do that, write it out long-hand using
- * the low-level user-access infrastructure.
- *
- * This looks a bit overkill, but generally just results in a couple
- * of instructions.
- */
-static __always_inline int futex_get_value(u32 *dest, u32 __user *from)
-{
-	u32 val;
-
-	if (can_do_masked_user_access())
-		from = masked_user_access_begin(from);
-	else if (!user_read_access_begin(from, sizeof(*from)))
-		return -EFAULT;
-	unsafe_get_user(val, from, Efault);
-	user_read_access_end();
-	*dest = val;
-	return 0;
-Efault:
-	user_read_access_end();
-	return -EFAULT;
-}
-
-static __always_inline int futex_put_value(u32 val, u32 __user *to)
-{
-	if (can_do_masked_user_access())
-		to = masked_user_access_begin(to);
-	else if (!user_write_access_begin(to, sizeof(*to)))
-		return -EFAULT;
-	unsafe_put_user(val, to, Efault);
-	user_write_access_end();
-	return 0;
-Efault:
-	user_write_access_end();
-	return -EFAULT;
-}
-
+/* Read from user memory with pagefaults disabled */
 static inline int futex_get_value_locked(u32 *dest, u32 __user *from)
 {
-	int ret;
-
-	pagefault_disable();
-	ret = futex_get_value(dest, from);
-	pagefault_enable();
-
-	return ret;
+	guard(pagefault)();
+	return get_user_inline(*dest, from);
 }
 
 extern void __futex_unqueue(struct futex_q *q);
@@ -363,9 +328,11 @@ extern int futex_unqueue(struct futex_q *q);
 static inline void futex_queue(struct futex_q *q, struct futex_hash_bucket *hb,
 			       struct task_struct *task)
 	__releases(&hb->lock)
+	__releases(q->lock_ptr)
 {
 	__futex_queue(q, hb, task);
 	spin_unlock(&hb->lock);
+	__release(q->lock_ptr);
 }
 
 extern void futex_unqueue_pi(struct futex_q *q);
@@ -410,9 +377,12 @@ static inline int futex_hb_waiters_pending(struct futex_hash_bucket *hb)
 #endif
 }
 
-extern void futex_q_lock(struct futex_q *q, struct futex_hash_bucket *hb);
-extern void futex_q_unlock(struct futex_hash_bucket *hb);
+extern void futex_q_lock(struct futex_q *q, struct futex_hash_bucket *hb)
+	__acquires(&hb->lock)
+	__acquires(q->lock_ptr);
 
+extern void futex_q_unlock(struct futex_hash_bucket *hb)
+	__releases(&hb->lock);
 
 extern int futex_lock_pi_atomic(u32 __user *uaddr, struct futex_hash_bucket *hb,
 				union futex_key *key,
@@ -431,6 +401,9 @@ extern int fixup_pi_owner(u32 __user *uaddr, struct futex_q *q, int locked);
  */
 static inline void
 double_lock_hb(struct futex_hash_bucket *hb1, struct futex_hash_bucket *hb2)
+	__acquires(&hb1->lock)
+	__acquires(&hb2->lock)
+	__no_context_analysis
 {
 	if (hb1 > hb2)
 		swap(hb1, hb2);
@@ -442,6 +415,9 @@ double_lock_hb(struct futex_hash_bucket *hb1, struct futex_hash_bucket *hb2)
 
 static inline void
 double_unlock_hb(struct futex_hash_bucket *hb1, struct futex_hash_bucket *hb2)
+	__releases(&hb1->lock)
+	__releases(&hb2->lock)
+	__no_context_analysis
 {
 	spin_unlock(&hb1->lock);
 	if (hb1 != hb2)
@@ -490,13 +466,16 @@ extern int futex_unqueue_multiple(struct futex_vector *v, int count);
 extern int futex_wait_multiple(struct futex_vector *vs, unsigned int count,
 			       struct hrtimer_sleeper *to);
 
-extern int futex_wake(u32 __user *uaddr, unsigned int flags, int nr_wake, u32 bitset);
+extern int futex_wake(u32 __user *uaddr, unsigned int flags, void __user *pop,
+		      int nr_wake, u32 bitset);
 
 extern int futex_wake_op(u32 __user *uaddr1, unsigned int flags,
 			 u32 __user *uaddr2, int nr_wake, int nr_wake2, int op);
 
-extern int futex_unlock_pi(u32 __user *uaddr, unsigned int flags);
+extern int futex_unlock_pi(u32 __user *uaddr, unsigned int flags, void __user *pop);
 
 extern int futex_lock_pi(u32 __user *uaddr, unsigned int flags, ktime_t *time, int trylock);
+
+bool futex_robust_list_clear_pending(void __user *pop, unsigned int flags);
 
 #endif /* _FUTEX_H */
