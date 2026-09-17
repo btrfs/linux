@@ -13,16 +13,12 @@
 /* define   MAX_JOIN_TIMEOUT	2500 */
 #define   MAX_JOIN_TIMEOUT	6500
 
-/* 	Commented by Albert 20101105 */
-/* 	Increase the scanning timeout because of increasing the SURVEY_TO value. */
+/* Commented by Albert 20101105 */
+/* Increase the scanning timeout because of increasing the SURVEY_TO value. */
 
 #define		SCANNING_TIMEOUT	8000
 
-#ifdef PALTFORM_OS_WINCE
-#define	SCANQUEUE_LIFETIME 12000000 /*  unit:us */
-#else
 #define	SCANQUEUE_LIFETIME 20000 /*  20sec, unit:msec */
-#endif
 
 #define WIFI_NULL_STATE		0x00000000
 #define WIFI_ASOC_STATE		0x00000001		/*  Under Linked state... */
@@ -48,15 +44,15 @@
 
 
 enum {
- dot11AuthAlgrthm_Open = 0,
- dot11AuthAlgrthm_Shared,
- dot11AuthAlgrthm_8021X,
- dot11AuthAlgrthm_Auto,
- dot11AuthAlgrthm_WAPI,
- dot11AuthAlgrthm_MaxNum
+	dot11_auth_algrthm_open = 0,
+	dot11_auth_algrthm_shared,
+	dot11_auth_algrthm_8021x,
+	dot11_auth_algrthm_auto,
+	dot11_auth_algrthm_wapi,
+	dot11_auth_algrthm_maxnum
 };
 
-/*  Scan type including active and passive scan. */
+/* Scan type including active and passive scan. */
 enum rt_scan_type {
 	SCAN_PASSIVE,
 	SCAN_ACTIVE,
@@ -71,23 +67,22 @@ enum {
 };
 
 /*
-
-there are several "locks" in mlme_priv,
-since mlme_priv is a shared resource between many threads,
-like ISR/Call-Back functions, the OID handlers, and even timer functions.
-
-Each struct __queue has its own locks, already.
-Other items in mlme_priv are protected by mlme_priv.lock, while items in
-xmit_priv are protected by xmit_priv.lock.
-
-To avoid possible dead lock, any thread trying to modifiying mlme_priv
-SHALL not lock up more than one locks at a time!
-
-The only exception is that queue functions which take the __queue.lock
-may be called with the xmit_priv.lock held. In this case the order
-MUST always be first lock xmit_priv.lock and then call any queue functions
-which take __queue.lock.
-*/
+ * There are several "locks" in mlme_priv,
+ * since mlme_priv is a shared resource between many threads,
+ * like ISR/Call-Back functions, the OID handlers, and even timer functions.
+ *
+ * Each struct __queue has its own locks, already.
+ * Other items in mlme_priv are protected by mlme_priv.lock, while items in
+ * xmit_priv are protected by xmit_priv.lock.
+ *
+ * To avoid possible dead lock, any thread trying to modifying mlme_priv
+ * SHALL not lock up more than one locks at a time!
+ *
+ * The only exception is that queue functions which take the __queue.lock
+ * may be called with the xmit_priv.lock held. In this case the order
+ * MUST always be first lock xmit_priv.lock and then call any queue functions
+ * which take __queue.lock.
+ */
 
 struct sitesurvey_ctrl {
 	u64	last_tx_pkts;
@@ -97,25 +92,27 @@ struct sitesurvey_ctrl {
 };
 
 struct rt_link_detect_t {
-	u32 			NumTxOkInPeriod;
-	u32 			NumRxOkInPeriod;
-	u32 			NumRxUnicastOkInPeriod;
-	bool			bBusyTraffic;
-	bool			bTxBusyTraffic;
-	bool			bRxBusyTraffic;
-	bool			bHigherBusyTraffic; /*  For interrupt migration purpose. */
-	bool			bHigherBusyRxTraffic; /*  We may disable Tx interrupt according as Rx traffic. */
-	bool			bHigherBusyTxTraffic; /*  We may disable Tx interrupt according as Tx traffic. */
-	/* u8 TrafficBusyState; */
-	u8 TrafficTransitionCount;
-	u32 LowPowerTransitionCount;
+	u32			num_tx_ok_in_period;
+	u32			num_rx_ok_in_period;
+	u32			num_rx_unicast_ok_in_period;
+	bool			busy_traffic;
+	bool			tx_busy_traffic;
+	bool			rx_busy_traffic;
+	/* For interrupt migration purpose. */
+	bool			higher_busy_traffic;
+	/* We may disable Tx interrupt according as Rx traffic. */
+	bool			higher_busy_rx_traffic;
+	/* We may disable Tx interrupt according as Tx traffic. */
+	bool			higher_busy_tx_traffic;
+	u8			traffic_transition_count;
+	u32			low_power_transition_count;
 };
 
 /* used for mlme_priv.roam_flags */
 enum {
-	RTW_ROAM_ON_EXPIRED = BIT0,
-	RTW_ROAM_ON_RESUME = BIT1,
-	RTW_ROAM_ACTIVE = BIT2,
+	RTW_ROAM_ON_EXPIRED = BIT(0),
+	RTW_ROAM_ON_RESUME = BIT(1),
+	RTW_ROAM_ACTIVE = BIT(2),
 };
 
 struct mlme_priv {
@@ -175,7 +172,7 @@ struct mlme_priv {
 
 	struct ht_priv htpriv;
 
-	struct rt_link_detect_t	LinkDetectInfo;
+	struct rt_link_detect_t	link_detect_info;
 	struct timer_list	dynamic_chk_timer; /* dynamic/periodic check timer */
 
 	u8 acm_mask; /*  for wmm acm mask */
@@ -186,7 +183,8 @@ struct mlme_priv {
 	u32 wps_probe_req_ie_len;
 
 	/* Number of associated Non-ERP stations (i.e., stations using 802.11b
-	 * in 802.11g BSS) */
+	 * in 802.11g BSS)
+	 */
 	int num_sta_non_erp;
 
 	/* Number of associated stations that do not support Short Slot Time */
@@ -219,12 +217,12 @@ struct mlme_priv {
 	u8 *wps_beacon_ie;
 	/* u8 *wps_probe_req_ie; */
 	u8 *wps_probe_resp_ie;
-	u8 *wps_assoc_resp_ie; /*  for CONFIG_IOCTL_CFG80211, this IE could include p2p ie / wfd ie */
+	u8 *wps_assoc_resp_ie; /* this IE could include p2p ie / wfd ie */
 
 	u32 wps_beacon_ie_len;
 	/* u32 wps_probe_req_ie_len; */
 	u32 wps_probe_resp_ie_len;
-	u32 wps_assoc_resp_ie_len; /*  for CONFIG_IOCTL_CFG80211, this IE len could include p2p ie / wfd ie */
+	u32 wps_assoc_resp_ie_len; /* this IE len could include p2p ie / wfd ie */
 
 	u8 *p2p_beacon_ie;
 	u8 *p2p_probe_req_ie;
@@ -260,7 +258,6 @@ extern void rtw_surveydone_event_callback(struct adapter *adapter, u8 *pbuf);
 extern void rtw_joinbss_event_callback(struct adapter *adapter, u8 *pbuf);
 extern void rtw_stassoc_event_callback(struct adapter *adapter, u8 *pbuf);
 extern void rtw_stadel_event_callback(struct adapter *adapter, u8 *pbuf);
-extern void rtw_atimdone_event_callback(struct adapter *adapter, u8 *pbuf);
 extern void rtw_cpwm_event_callback(struct adapter *adapter, u8 *pbuf);
 extern void rtw_wmm_event_callback(struct adapter *padapter, u8 *pbuf);
 
@@ -281,7 +278,7 @@ extern signed int rtw_set_auth(struct adapter *adapter, struct security_priv *ps
 
 static inline u8 *get_bssid(struct mlme_priv *pmlmepriv)
 {	/* if sta_mode:pmlmepriv->cur_network.network.mac_address => bssid */
-	/*  if adhoc_mode:pmlmepriv->cur_network.network.mac_address => ibss mac address */
+	/* if adhoc_mode:pmlmepriv->cur_network.network.mac_address => ibss mac address */
 	return pmlmepriv->cur_network.network.mac_address;
 }
 
@@ -364,9 +361,9 @@ extern void _rtw_free_network_nolock(struct mlme_priv *pmlmepriv, struct wlan_ne
 
 extern struct wlan_network *_rtw_find_network(struct __queue *scanned_queue, u8 *addr);
 
-extern signed int rtw_if_up(struct adapter *padapter);
+bool rtw_if_up(struct adapter *padapter);
 
-signed int rtw_linked_check(struct adapter *padapter);
+bool rtw_linked_check(struct adapter *padapter);
 
 u8 *rtw_get_capability_from_ie(u8 *ie);
 u8 *rtw_get_beacon_interval_from_ie(u8 *ie);
@@ -381,7 +378,7 @@ void rtw_update_ht_cap(struct adapter *padapter, u8 *pie, uint ie_len, u8 channe
 void rtw_issue_addbareq_cmd(struct adapter *padapter, struct xmit_frame *pxmitframe);
 void rtw_append_exented_cap(struct adapter *padapter, u8 *out_ie, uint *pout_len);
 
-int rtw_is_same_ibss(struct adapter *adapter, struct wlan_network *pnetwork);
+bool rtw_is_same_ibss(struct adapter *adapter, struct wlan_network *pnetwork);
 int is_same_network(struct wlan_bssid_ex *src, struct wlan_bssid_ex *dst, u8 feature);
 
 #define rtw_roam_flags(adapter) ((adapter)->mlmepriv.roam_flags)

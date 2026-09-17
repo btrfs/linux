@@ -92,9 +92,7 @@ static unsigned long mc_group_start = 0x3 | BIT(GENL_ID_CTRL) |
 static unsigned long *mc_groups = &mc_group_start;
 static unsigned long mc_groups_longs = 1;
 
-/* We need the last attribute with non-zero ID therefore a 2-entry array */
 static struct nla_policy genl_policy_reject_all[] = {
-	{ .type = NLA_REJECT },
 	{ .type = NLA_REJECT },
 };
 
@@ -106,13 +104,10 @@ static void
 genl_op_fill_in_reject_policy(const struct genl_family *family,
 			      struct genl_ops *op)
 {
-	BUILD_BUG_ON(ARRAY_SIZE(genl_policy_reject_all) - 1 != 1);
-
 	if (op->policy || op->cmd < family->resv_start_op)
 		return;
 
 	op->policy = genl_policy_reject_all;
-	op->maxattr = 1;
 }
 
 static void
@@ -123,7 +118,6 @@ genl_op_fill_in_reject_policy_split(const struct genl_family *family,
 		return;
 
 	op->policy = genl_policy_reject_all;
-	op->maxattr = 1;
 }
 
 static const struct genl_family *genl_family_find_byid(unsigned int id)
@@ -250,6 +244,7 @@ genl_get_cmd_split(u32 cmd, u8 flag, const struct genl_family *family,
 		if (family->split_ops[i].cmd == cmd &&
 		    family->split_ops[i].flags & flag) {
 			*op = family->split_ops[i];
+			genl_op_fill_in_reject_policy_split(family, op);
 			return 0;
 		}
 
@@ -659,7 +654,7 @@ static int genl_sk_privs_alloc(struct genl_family *family)
 	if (!family->sock_priv_size)
 		return 0;
 
-	family->sock_privs = kzalloc(sizeof(*family->sock_privs), GFP_KERNEL);
+	family->sock_privs = kzalloc_obj(*family->sock_privs);
 	if (!family->sock_privs)
 		return -ENOMEM;
 	xa_init(family->sock_privs);
@@ -912,7 +907,7 @@ EXPORT_SYMBOL(genlmsg_put);
 
 static struct genl_dumpit_info *genl_dumpit_info_alloc(void)
 {
-	return kmalloc(sizeof(struct genl_dumpit_info), GFP_KERNEL);
+	return kmalloc_obj(struct genl_dumpit_info);
 }
 
 static void genl_dumpit_info_free(const struct genl_dumpit_info *info)
@@ -934,13 +929,17 @@ genl_family_rcv_msg_attrs_parse(const struct genl_family *family,
 	struct nlattr **attrbuf;
 	int err;
 
-	if (!ops->maxattr)
+	if (!ops->policy)
 		return NULL;
 
-	attrbuf = kmalloc_array(ops->maxattr + 1,
-				sizeof(struct nlattr *), GFP_KERNEL);
-	if (!attrbuf)
-		return ERR_PTR(-ENOMEM);
+	if (ops->maxattr) {
+		attrbuf = kmalloc_objs(struct nlattr *, ops->maxattr + 1);
+		if (!attrbuf)
+			return ERR_PTR(-ENOMEM);
+	} else {
+		/* Reject all policy, __nlmsg_parse() will just validate */
+		attrbuf = NULL;
+	}
 
 	err = __nlmsg_parse(nlh, hdrlen, attrbuf, ops->maxattr, ops->policy,
 			    validate, extack);
@@ -1514,6 +1513,7 @@ struct ctrl_dump_policy_ctx {
 	struct netlink_policy_dump_state *state;
 	const struct genl_family *rt;
 	struct genl_op_iter *op_iter;
+	struct module *owner;
 	u32 op;
 	u16 fam_id;
 	u8 dump_map:1,
@@ -1556,6 +1556,9 @@ static int ctrl_dumppolicy_start(struct netlink_callback *cb)
 		return -ENOENT;
 
 	ctx->rt = rt;
+	ctx->owner = rt->module;
+	if (!try_module_get(ctx->owner))
+		return -ENOENT;
 
 	if (tb[CTRL_ATTR_OP]) {
 		struct genl_split_ops doit, dump;
@@ -1566,7 +1569,7 @@ static int ctrl_dumppolicy_start(struct netlink_callback *cb)
 		err = genl_get_cmd_both(ctx->op, rt, &doit, &dump);
 		if (err) {
 			NL_SET_BAD_ATTR(cb->extack, tb[CTRL_ATTR_OP]);
-			return err;
+			goto err_put_owner;
 		}
 
 		if (doit.policy) {
@@ -1584,16 +1587,20 @@ static int ctrl_dumppolicy_start(struct netlink_callback *cb)
 				goto err_free_state;
 		}
 
-		if (!ctx->state)
-			return -ENODATA;
+		if (!ctx->state) {
+			err = -ENODATA;
+			goto err_put_owner;
+		}
 
 		ctx->dump_map = 1;
 		return 0;
 	}
 
-	ctx->op_iter = kmalloc(sizeof(*ctx->op_iter), GFP_KERNEL);
-	if (!ctx->op_iter)
-		return -ENOMEM;
+	ctx->op_iter = kmalloc_obj(*ctx->op_iter);
+	if (!ctx->op_iter) {
+		err = -ENOMEM;
+		goto err_put_owner;
+	}
 
 	genl_op_iter_init(rt, ctx->op_iter);
 	ctx->dump_map = genl_op_iter_next(ctx->op_iter);
@@ -1625,6 +1632,8 @@ err_free_state:
 	netlink_policy_dump_free(ctx->state);
 err_free_op_iter:
 	kfree(ctx->op_iter);
+err_put_owner:
+	module_put(ctx->owner);
 	return err;
 }
 
@@ -1761,6 +1770,7 @@ static int ctrl_dumppolicy_done(struct netlink_callback *cb)
 
 	kfree(ctx->op_iter);
 	netlink_policy_dump_free(ctx->state);
+	module_put(ctx->owner);
 	return 0;
 }
 
@@ -1973,8 +1983,10 @@ int genlmsg_multicast_allns(const struct genl_family *family,
 			    struct sk_buff *skb, u32 portid,
 			    unsigned int group)
 {
-	if (WARN_ON_ONCE(group >= family->n_mcgrps))
+	if (WARN_ON_ONCE(group >= family->n_mcgrps)) {
+		kfree_skb(skb);
 		return -EINVAL;
+	}
 
 	group = family->mcgrp_offset + group;
 	return genlmsg_mcast(skb, portid, group);
@@ -1987,8 +1999,10 @@ void genl_notify(const struct genl_family *family, struct sk_buff *skb,
 	struct net *net = genl_info_net(info);
 	struct sock *sk = net->genl_sock;
 
-	if (WARN_ON_ONCE(group >= family->n_mcgrps))
+	if (WARN_ON_ONCE(group >= family->n_mcgrps)) {
+		kfree_skb(skb);
 		return;
+	}
 
 	group = family->mcgrp_offset + group;
 	nlmsg_notify(sk, skb, info->snd_portid, group,

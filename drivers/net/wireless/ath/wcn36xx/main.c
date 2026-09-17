@@ -462,7 +462,7 @@ static u64 wcn36xx_prepare_multicast(struct ieee80211_hw *hw,
 	struct netdev_hw_addr *ha;
 
 	wcn36xx_dbg(WCN36XX_DBG_MAC, "mac prepare multicast list\n");
-	fp = kzalloc(sizeof(*fp), GFP_ATOMIC);
+	fp = kzalloc_obj(*fp, GFP_ATOMIC);
 	if (!fp) {
 		wcn36xx_err("Out of memory setting filters.\n");
 		return 0;
@@ -1568,7 +1568,8 @@ static int wcn36xx_probe(struct platform_device *pdev)
 
 	wcnss = dev_get_drvdata(pdev->dev.parent);
 
-	hw = ieee80211_alloc_hw(sizeof(struct wcn36xx), &wcn36xx_ops);
+	n_channels = wcn_band_2ghz.n_channels + wcn_band_5ghz.n_channels;
+	hw = ieee80211_alloc_hw(struct_size(wcn, chan_survey, n_channels), &wcn36xx_ops);
 	if (!hw) {
 		wcn36xx_err("failed to alloc hw\n");
 		ret = -ENOMEM;
@@ -1586,16 +1587,6 @@ static int wcn36xx_probe(struct platform_device *pdev)
 
 	wcn->hal_buf = devm_kmalloc(wcn->dev, WCN36XX_HAL_BUF_SIZE, GFP_KERNEL);
 	if (!wcn->hal_buf) {
-		ret = -ENOMEM;
-		goto out_wq;
-	}
-
-	n_channels = wcn_band_2ghz.n_channels + wcn_band_5ghz.n_channels;
-	wcn->chan_survey = devm_kcalloc(wcn->dev,
-					n_channels,
-					sizeof(struct wcn36xx_chan_survey),
-					GFP_KERNEL);
-	if (!wcn->chan_survey) {
 		ret = -ENOMEM;
 		goto out_wq;
 	}

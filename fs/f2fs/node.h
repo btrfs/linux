@@ -52,14 +52,6 @@ enum {
 	IS_PREALLOC,		/* nat entry is preallocated */
 };
 
-/* For node type in __get_node_folio() */
-enum node_type {
-	NODE_TYPE_REGULAR,
-	NODE_TYPE_INODE,
-	NODE_TYPE_XATTR,
-	NODE_TYPE_NON_INODE,
-};
-
 /*
  * For node information
  */
@@ -137,13 +129,17 @@ static inline void raw_nat_from_node_info(struct f2fs_nat_entry *raw_ne,
 
 static inline bool excess_dirty_nats(struct f2fs_sb_info *sbi)
 {
-	return NM_I(sbi)->nat_cnt[DIRTY_NAT] >= NM_I(sbi)->max_nid *
+	/* nat_cnt[] is heuristic accounting sampled locklessly here. */
+	return data_race(READ_ONCE(NM_I(sbi)->nat_cnt[DIRTY_NAT])) >=
+					NM_I(sbi)->max_nid *
 					NM_I(sbi)->dirty_nats_ratio / 100;
 }
 
 static inline bool excess_cached_nats(struct f2fs_sb_info *sbi)
 {
-	return NM_I(sbi)->nat_cnt[TOTAL_NAT] >= DEF_NAT_CACHE_THRESHOLD;
+	/* nat_cnt[] is heuristic accounting sampled locklessly here. */
+	return data_race(READ_ONCE(NM_I(sbi)->nat_cnt[TOTAL_NAT])) >=
+					DEF_NAT_CACHE_THRESHOLD;
 }
 
 enum mem_type {
@@ -408,27 +404,26 @@ static inline int is_node(const struct folio *folio, int type)
 #define is_fsync_dnode(folio)	is_node(folio, FSYNC_BIT_SHIFT)
 #define is_dent_dnode(folio)	is_node(folio, DENT_BIT_SHIFT)
 
-static inline void set_cold_node(const struct folio *folio, bool is_dir)
+static inline void __set_mark(const struct folio *folio, bool mark, int type)
 {
 	struct f2fs_node *rn = F2FS_NODE(folio);
 	unsigned int flag = le32_to_cpu(rn->footer.flag);
 
-	if (is_dir)
-		flag &= ~BIT(COLD_BIT_SHIFT);
-	else
-		flag |= BIT(COLD_BIT_SHIFT);
-	rn->footer.flag = cpu_to_le32(flag);
-}
-
-static inline void set_mark(struct folio *folio, int mark, int type)
-{
-	struct f2fs_node *rn = F2FS_NODE(folio);
-	unsigned int flag = le32_to_cpu(rn->footer.flag);
 	if (mark)
 		flag |= BIT(type);
 	else
 		flag &= ~BIT(type);
 	rn->footer.flag = cpu_to_le32(flag);
+}
+
+static inline void set_cold_node(const struct folio *folio, bool is_dir)
+{
+	__set_mark(folio, !is_dir, COLD_BIT_SHIFT);
+}
+
+static inline void set_mark(struct folio *folio, bool mark, int type)
+{
+	__set_mark(folio, mark, type);
 
 #ifdef CONFIG_F2FS_CHECK_FS
 	f2fs_inode_chksum_set(F2FS_F_SB(folio), folio);

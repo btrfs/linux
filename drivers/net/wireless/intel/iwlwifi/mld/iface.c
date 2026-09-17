@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
 /*
- * Copyright (C) 2024-2025 Intel Corporation
+ * Copyright (C) 2024-2026 Intel Corporation
  */
 #include <net/cfg80211.h>
 
 #include "iface.h"
+#include "nan.h"
 #include "hcmd.h"
 #include "key.h"
 #include "mlo.h"
@@ -55,7 +56,23 @@ void iwl_mld_cleanup_vif(void *data, u8 *mac, struct ieee80211_vif *vif)
 
 	ieee80211_iter_keys(mld->hw, vif, iwl_mld_cleanup_keys_iter, NULL);
 
-	wiphy_delayed_work_cancel(mld->wiphy, &mld_vif->mlo_scan_start_wk);
+	if (vif->type == NL80211_IFTYPE_NAN) {
+		mld_vif->nan.mac_added = false;
+		/* Clean up NAN links */
+		for (int i = 0; i < ARRAY_SIZE(mld_vif->nan.links); i++)
+			iwl_mld_cleanup_nan_link(&mld_vif->nan.links[i]);
+
+		if (mld_vif->nan.bcast_sta.sta_id != IWL_INVALID_STA)
+			iwl_mld_free_internal_sta(mld, &mld_vif->nan.bcast_sta);
+		if (mld_vif->nan.mgmt_sta.sta_id != IWL_INVALID_STA)
+			iwl_mld_free_internal_sta(mld, &mld_vif->nan.mgmt_sta);
+
+		mld_vif->nan.tx_igtk = NULL;
+	}
+
+	if (vif->type == NL80211_IFTYPE_NAN_DATA &&
+	    mld_vif->nan.mcast_data_sta.sta_id != IWL_INVALID_STA)
+		iwl_mld_free_internal_sta(mld, &mld_vif->nan.mcast_data_sta);
 
 	CLEANUP_STRUCT(mld_vif);
 }
@@ -63,20 +80,27 @@ void iwl_mld_cleanup_vif(void *data, u8 *mac, struct ieee80211_vif *vif)
 static int iwl_mld_send_mac_cmd(struct iwl_mld *mld,
 				struct iwl_mac_config_cmd *cmd)
 {
+	u16 cmd_id = WIDE_ID(MAC_CONF_GROUP, MAC_CONFIG_CMD);
+	int len = sizeof(*cmd);
 	int ret;
 
 	lockdep_assert_wiphy(mld->wiphy);
 
-	ret = iwl_mld_send_cmd_pdu(mld,
-				   WIDE_ID(MAC_CONF_GROUP, MAC_CONFIG_CMD),
-				   cmd);
+	if (iwl_fw_lookup_cmd_ver(mld->fw, cmd_id, 0) < 4) {
+		if (WARN_ON(cmd->mac_type == cpu_to_le32(FW_MAC_TYPE_NAN)))
+			return -EINVAL;
+
+		len = sizeof(struct iwl_mac_config_cmd_v3);
+	}
+
+	ret = iwl_mld_send_cmd_pdu(mld, cmd_id, cmd, len);
 	if (ret)
 		IWL_ERR(mld, "Failed to send MAC_CONFIG_CMD ret = %d\n", ret);
 
 	return ret;
 }
 
-int iwl_mld_mac80211_iftype_to_fw(const struct ieee80211_vif *vif)
+static int iwl_mld_mac80211_iftype_to_fw(const struct ieee80211_vif *vif)
 {
 	switch (vif->type) {
 	case NL80211_IFTYPE_STATION:
@@ -89,6 +113,8 @@ int iwl_mld_mac80211_iftype_to_fw(const struct ieee80211_vif *vif)
 		return FW_MAC_TYPE_P2P_DEVICE;
 	case NL80211_IFTYPE_ADHOC:
 		return FW_MAC_TYPE_IBSS;
+	case NL80211_IFTYPE_NAN:
+		return FW_MAC_TYPE_NAN;
 	default:
 		WARN_ON_ONCE(1);
 	}
@@ -113,14 +139,75 @@ static bool iwl_mld_is_nic_ack_enabled(struct iwl_mld *mld,
 			       IEEE80211_HE_MAC_CAP2_ACK_EN);
 }
 
-static void iwl_mld_set_he_support(struct iwl_mld *mld,
-				   struct ieee80211_vif *vif,
-				   struct iwl_mac_config_cmd *cmd)
+struct iwl_mld_mac_wifi_gen_sta_iter_data {
+	struct ieee80211_vif *vif;
+	struct iwl_mac_wifi_gen_support *support;
+};
+
+static void iwl_mld_mac_wifi_gen_sta_iter(void *_data,
+					  struct ieee80211_sta *sta)
 {
-	if (vif->type == NL80211_IFTYPE_AP)
-		cmd->wifi_gen.he_ap_support = 1;
-	else
-		cmd->wifi_gen.he_support = 1;
+	struct iwl_mld_sta *mld_sta = iwl_mld_sta_from_mac80211(sta);
+	struct iwl_mld_mac_wifi_gen_sta_iter_data *data = _data;
+	struct ieee80211_link_sta *link_sta;
+	unsigned int link_id;
+
+	if (mld_sta->vif != data->vif)
+		return;
+
+	for_each_sta_active_link(data->vif, sta, link_sta, link_id) {
+		if (link_sta->he_cap.has_he)
+			data->support->he_support = 1;
+		if (link_sta->eht_cap.has_eht)
+			data->support->eht_support = 1;
+	}
+}
+
+static void iwl_mld_set_wifi_gen(struct iwl_mld *mld,
+				 struct ieee80211_vif *vif,
+				 struct iwl_mac_wifi_gen_support *support)
+{
+	struct iwl_mld_mac_wifi_gen_sta_iter_data sta_iter_data = {
+		.vif = vif,
+		.support = support,
+	};
+	struct ieee80211_bss_conf *link_conf;
+	unsigned int link_id;
+
+	switch (vif->type) {
+	case NL80211_IFTYPE_MONITOR:
+		/* for sniffer, set to HW capabilities */
+		support->he_support = 1;
+		support->eht_support = mld->trans->cfg->eht_supported;
+		break;
+	case NL80211_IFTYPE_AP:
+		/* for AP set according to the link configs */
+		for_each_vif_active_link(vif, link_conf, link_id) {
+			support->he_ap_support |= link_conf->he_support;
+			support->eht_support |= link_conf->eht_support;
+		}
+		break;
+	default:
+		/*
+		 * If we have MLO enabled, then the firmware needs to enable
+		 * address translation for the station(s) we add. That depends
+		 * on having EHT enabled in firmware, which in turn depends on
+		 * mac80211 in the iteration below.
+		 * However, mac80211 doesn't enable capabilities on the AP STA
+		 * until it has parsed the association response successfully,
+		 * so set EHT (and HE as a pre-requisite for EHT) when the vif
+		 * is an MLD.
+		 */
+		if (ieee80211_vif_is_mld(vif)) {
+			support->he_support = 1;
+			support->eht_support = 1;
+		}
+
+		ieee80211_iterate_stations_mtx(mld->hw,
+					       iwl_mld_mac_wifi_gen_sta_iter,
+					       &sta_iter_data);
+		break;
+	}
 }
 
 /* fill the common part for all interface types */
@@ -130,8 +217,6 @@ static void iwl_mld_mac_cmd_fill_common(struct iwl_mld *mld,
 					u32 action)
 {
 	struct iwl_mld_vif *mld_vif = iwl_mld_vif_from_mac80211(vif);
-	struct ieee80211_bss_conf *link_conf;
-	unsigned int link_id;
 
 	lockdep_assert_wiphy(mld->wiphy);
 
@@ -149,29 +234,7 @@ static void iwl_mld_mac_cmd_fill_common(struct iwl_mld *mld,
 	cmd->nic_not_ack_enabled =
 		cpu_to_le32(!iwl_mld_is_nic_ack_enabled(mld, vif));
 
-	/* If we have MLO enabled, then the firmware needs to enable
-	 * address translation for the station(s) we add. That depends
-	 * on having EHT enabled in firmware, which in turn depends on
-	 * mac80211 in the code below.
-	 * However, mac80211 doesn't enable HE/EHT until it has parsed
-	 * the association response successfully, so just skip all that
-	 * and enable both when we have MLO.
-	 */
-	if (ieee80211_vif_is_mld(vif)) {
-		iwl_mld_set_he_support(mld, vif, cmd);
-		cmd->wifi_gen.eht_support = 1;
-		return;
-	}
-
-	for_each_vif_active_link(vif, link_conf, link_id) {
-		if (!link_conf->he_support)
-			continue;
-
-		iwl_mld_set_he_support(mld, vif, cmd);
-
-		/* EHT, if supported, was already set above */
-		break;
-	}
+	iwl_mld_set_wifi_gen(mld, vif, &cmd->wifi_gen);
 }
 
 static void iwl_mld_fill_mac_cmd_sta(struct iwl_mld *mld,
@@ -215,7 +278,7 @@ static void iwl_mld_fill_mac_cmd_sta(struct iwl_mld *mld,
 				     IEEE80211_EML_CAP_TRANSITION_TIMEOUT);
 
 		cmd->client.esr_transition_timeout =
-			min_t(u16, IEEE80211_EML_CAP_TRANSITION_TIMEOUT_128TU,
+			min_t(u16, IEEE80211_EML_CAP_TRANSITION_TIMEOUT_64TU,
 			      esr_transition_timeout);
 		cmd->client.medium_sync_delay =
 			cpu_to_le16(vif->cfg.eml_med_sync_delay);
@@ -320,6 +383,42 @@ static void iwl_mld_fill_mac_cmd_ibss(struct iwl_mld *mld,
 					 MAC_CFG_FILTER_ACCEPT_GRP);
 }
 
+static int iwl_mld_fill_mac_cmd_nan(struct iwl_mld *mld,
+				    struct ieee80211_vif *vif,
+				    struct ieee80211_vif *ndi_being_added,
+				    struct iwl_mac_config_cmd *cmd)
+{
+	struct ieee80211_vif *iter;
+	u32 idx = 0;
+
+	cmd->filter_flags = cpu_to_le32(MAC_CFG_FILTER_ACCEPT_CONTROL_AND_MGMT);
+
+	/*
+	 * A NAN_DATA vif might be in the process of being added - it won't
+	 * be found by the iteration below since it's not yet active/in-driver.
+	 * In hw restart, the iteration below will find the ndi_being_added.
+	 */
+	if (ndi_being_added && !mld->fw_status.in_hw_restart) {
+		memcpy(cmd->nan.ndi_addrs[idx].addr, ndi_being_added->addr, ETH_ALEN);
+		idx++;
+	}
+
+	for_each_active_interface(iter, mld->hw) {
+		if (iter->type != NL80211_IFTYPE_NAN_DATA)
+			continue;
+
+		if (WARN_ON_ONCE(idx >= ARRAY_SIZE(cmd->nan.ndi_addrs)))
+			return -EINVAL;
+
+		memcpy(cmd->nan.ndi_addrs[idx].addr, iter->addr, ETH_ALEN);
+		idx++;
+	}
+
+	cmd->nan.ndi_addrs_count = cpu_to_le32(idx);
+
+	return 0;
+}
+
 static int
 iwl_mld_rm_mac_from_fw(struct iwl_mld *mld, struct ieee80211_vif *vif)
 {
@@ -332,12 +431,23 @@ iwl_mld_rm_mac_from_fw(struct iwl_mld *mld, struct ieee80211_vif *vif)
 	return iwl_mld_send_mac_cmd(mld, &cmd);
 }
 
-int iwl_mld_mac_fw_action(struct iwl_mld *mld, struct ieee80211_vif *vif,
-			  u32 action)
+static int
+__iwl_mld_mac_fw_action(struct iwl_mld *mld, struct ieee80211_vif *vif,
+			u32 action, struct ieee80211_vif *ndi_being_added)
 {
 	struct iwl_mac_config_cmd cmd = {};
+	int ret;
 
 	lockdep_assert_wiphy(mld->wiphy);
+
+	/* NAN_DATA interface type is not known to FW */
+	if (WARN_ON(vif->type == NL80211_IFTYPE_NAN_DATA))
+		return -EINVAL;
+
+	/* ndi_being_added is only relevant for NAN and when adding a NAN_DATA interface */
+	if (WARN_ON(ndi_being_added &&
+		    (vif->type != NL80211_IFTYPE_NAN || action != FW_CTXT_ACTION_MODIFY)))
+		return -EINVAL;
 
 	if (action == FW_CTXT_ACTION_REMOVE)
 		return iwl_mld_rm_mac_from_fw(mld, vif);
@@ -365,12 +475,23 @@ int iwl_mld_mac_fw_action(struct iwl_mld *mld, struct ieee80211_vif *vif,
 	case NL80211_IFTYPE_ADHOC:
 		iwl_mld_fill_mac_cmd_ibss(mld, vif, &cmd);
 		break;
+	case NL80211_IFTYPE_NAN:
+		ret = iwl_mld_fill_mac_cmd_nan(mld, vif, ndi_being_added, &cmd);
+		if (ret)
+			return ret;
+		break;
 	default:
 		WARN(1, "not supported yet\n");
 		return -EOPNOTSUPP;
 	}
 
 	return iwl_mld_send_mac_cmd(mld, &cmd);
+}
+
+int iwl_mld_mac_fw_action(struct iwl_mld *mld, struct ieee80211_vif *vif,
+			  u32 action)
+{
+	return __iwl_mld_mac_fw_action(mld, vif, action, NULL);
 }
 
 static void iwl_mld_mlo_scan_start_wk(struct wiphy *wiphy,
@@ -384,23 +505,19 @@ static void iwl_mld_mlo_scan_start_wk(struct wiphy *wiphy,
 	iwl_mld_int_mlo_scan(mld, iwl_mld_vif_to_mac80211(mld_vif));
 }
 
-IWL_MLD_ALLOC_FN(vif, vif)
+IWL_MLD_ALLOC_FN_STATIC(vif, vif)
 
 /* Constructor function for struct iwl_mld_vif */
-static int
+static void
 iwl_mld_init_vif(struct iwl_mld *mld, struct ieee80211_vif *vif)
 {
 	struct iwl_mld_vif *mld_vif = iwl_mld_vif_from_mac80211(vif);
-	int ret;
 
 	lockdep_assert_wiphy(mld->wiphy);
 
 	mld_vif->mld = mld;
+	mld_vif->fw_id = IWL_MLD_INVALID_FW_ID;
 	mld_vif->roc_activity = ROC_NUM_ACTIVITIES;
-
-	ret = iwl_mld_allocate_vif_fw_id(mld, &mld_vif->fw_id, vif);
-	if (ret)
-		return ret;
 
 	if (!mld->fw_status.in_hw_restart) {
 		wiphy_work_init(&mld_vif->emlsr.unblock_tpt_wk,
@@ -414,9 +531,38 @@ iwl_mld_init_vif(struct iwl_mld *mld, struct ieee80211_vif *vif)
 		wiphy_delayed_work_init(&mld_vif->mlo_scan_start_wk,
 					iwl_mld_mlo_scan_start_wk);
 	}
-	iwl_mld_init_internal_sta(&mld_vif->aux_sta);
 
-	return 0;
+	if (vif->type == NL80211_IFTYPE_NAN) {
+		for (int i = 0; i < ARRAY_SIZE(mld_vif->nan.links); i++) {
+			memset(&mld_vif->nan.links[i], 0, sizeof(mld_vif->nan.links[i]));
+			mld_vif->nan.links[i].fw_id = FW_CTXT_ID_INVALID;
+		}
+
+		iwl_mld_init_internal_sta(&mld_vif->nan.bcast_sta);
+		iwl_mld_init_internal_sta(&mld_vif->nan.mgmt_sta);
+	} else if (vif->type == NL80211_IFTYPE_NAN_DATA) {
+		iwl_mld_init_internal_sta(&mld_vif->nan.mcast_data_sta);
+	}
+
+	iwl_mld_init_internal_sta(&mld_vif->aux_sta);
+}
+
+static int iwl_mld_update_nan_mac(struct iwl_mld *mld,
+				  struct ieee80211_vif *ndi_being_added)
+{
+	struct ieee80211_vif *vif = mld->nan_device_vif;
+	struct iwl_mld_vif *mld_vif;
+
+	if (WARN_ON_ONCE(!vif))
+		return -ENODEV;
+
+	mld_vif = iwl_mld_vif_from_mac80211(vif);
+
+	if (!iwl_mld_vif_fw_id_valid(mld_vif))
+		return 0;
+
+	return __iwl_mld_mac_fw_action(mld, vif, FW_CTXT_ACTION_MODIFY,
+				       ndi_being_added);
 }
 
 int iwl_mld_add_vif(struct iwl_mld *mld, struct ieee80211_vif *vif)
@@ -426,7 +572,17 @@ int iwl_mld_add_vif(struct iwl_mld *mld, struct ieee80211_vif *vif)
 
 	lockdep_assert_wiphy(mld->wiphy);
 
-	ret = iwl_mld_init_vif(mld, vif);
+	iwl_mld_init_vif(mld, vif);
+
+	/* NAN MACs are added to FW only when a schedule is set */
+	if (vif->type == NL80211_IFTYPE_NAN)
+		return 0;
+
+	/* NAN_DATA interface type is not known to FW, but we need to update NAN MAC */
+	if (vif->type == NL80211_IFTYPE_NAN_DATA)
+		return iwl_mld_update_nan_mac(mld, vif);
+
+	ret = iwl_mld_allocate_vif_fw_id(mld, &mld_vif->fw_id, vif);
 	if (ret)
 		return ret;
 
@@ -437,18 +593,51 @@ int iwl_mld_add_vif(struct iwl_mld *mld, struct ieee80211_vif *vif)
 	return ret;
 }
 
+int iwl_mld_add_nan_vif(struct iwl_mld *mld, struct ieee80211_vif *vif)
+{
+	struct iwl_mld_vif *mld_vif = iwl_mld_vif_from_mac80211(vif);
+	int ret;
+
+	lockdep_assert_wiphy(mld->wiphy);
+
+	if (WARN_ON(vif->type != NL80211_IFTYPE_NAN))
+		return -EINVAL;
+
+	ret = iwl_mld_allocate_vif_fw_id(mld, &mld_vif->fw_id, vif);
+	if (ret)
+		return ret;
+
+	ret = iwl_mld_mac_fw_action(mld, vif, FW_CTXT_ACTION_ADD);
+	if (ret) {
+		RCU_INIT_POINTER(mld->fw_id_to_vif[mld_vif->fw_id], NULL);
+		return ret;
+	}
+
+	mld_vif->nan.mac_added = true;
+
+	return 0;
+}
+
 void iwl_mld_rm_vif(struct iwl_mld *mld, struct ieee80211_vif *vif)
 {
 	struct iwl_mld_vif *mld_vif = iwl_mld_vif_from_mac80211(vif);
 
 	lockdep_assert_wiphy(mld->wiphy);
 
-	iwl_mld_mac_fw_action(mld, vif, FW_CTXT_ACTION_REMOVE);
+	if (vif->type == NL80211_IFTYPE_NAN_DATA) {
+		iwl_mld_update_nan_mac(mld, NULL);
+		return;
+	}
 
-	if (WARN_ON(mld_vif->fw_id >= ARRAY_SIZE(mld->fw_id_to_vif)))
+	if (!iwl_mld_vif_fw_id_valid(mld_vif))
 		return;
 
+	iwl_mld_mac_fw_action(mld, vif, FW_CTXT_ACTION_REMOVE);
+
 	RCU_INIT_POINTER(mld->fw_id_to_vif[mld_vif->fw_id], NULL);
+
+	if (vif->type == NL80211_IFTYPE_NAN)
+		mld_vif->nan.mac_added = false;
 
 	iwl_mld_cancel_notifications_of_object(mld, IWL_MLD_OBJECT_TYPE_VIF,
 					       mld_vif->fw_id);
@@ -528,7 +717,20 @@ void iwl_mld_handle_probe_resp_data_notif(struct iwl_mld *mld,
 
 	mld_link = &iwl_mld_vif_from_mac80211(vif)->deflink;
 
-	new_data = kzalloc(sizeof(*new_data), GFP_KERNEL);
+	/* len_low should be 2 + n*13 (where n is the number of descriptors.
+	 * 13 is the size of a NoA descriptor). We can have either one or two
+	 * descriptors.
+	 */
+	if (IWL_FW_CHECK(mld, notif->noa_active &&
+			 notif->noa_attr.len_low != 2 +
+			 sizeof(struct ieee80211_p2p_noa_desc) &&
+			 notif->noa_attr.len_low != 2 +
+			 sizeof(struct ieee80211_p2p_noa_desc) * 2,
+			 "Invalid noa_attr.len_low (%d)\n",
+			 notif->noa_attr.len_low))
+		return;
+
+	new_data = kzalloc_obj(*new_data);
 	if (!new_data)
 		return;
 
@@ -551,24 +753,6 @@ void iwl_mld_handle_probe_resp_data_notif(struct iwl_mld *mld,
 
 	if (old_data)
 		kfree_rcu(old_data, rcu_head);
-}
-
-void iwl_mld_handle_uapsd_misbehaving_ap_notif(struct iwl_mld *mld,
-					       struct iwl_rx_packet *pkt)
-{
-	struct iwl_uapsd_misbehaving_ap_notif *notif = (void *)pkt->data;
-	struct ieee80211_vif *vif;
-
-	if (IWL_FW_CHECK(mld, notif->mac_id >= ARRAY_SIZE(mld->fw_id_to_vif),
-			 "mac id is invalid: %d\n", notif->mac_id))
-		return;
-
-	vif = wiphy_dereference(mld->wiphy, mld->fw_id_to_vif[notif->mac_id]);
-
-	if (WARN_ON(!vif) || ieee80211_vif_is_mld(vif))
-		return;
-
-	IWL_WARN(mld, "uapsd misbehaving AP: %pM\n", vif->bss_conf.bssid);
 }
 
 void iwl_mld_handle_datapath_monitor_notif(struct iwl_mld *mld,
@@ -685,6 +869,6 @@ struct ieee80211_vif *iwl_mld_get_bss_vif(struct iwl_mld *mld)
 
 	fw_id = __ffs(fw_id_bitmap);
 
-	return wiphy_dereference(mld->wiphy,
-				 mld->fw_id_to_vif[fw_id]);
+	return rcu_dereference_wiphy(mld->wiphy,
+				     mld->fw_id_to_vif[fw_id]);
 }

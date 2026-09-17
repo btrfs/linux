@@ -14,7 +14,6 @@
 #include <linux/init.h>
 #include <linux/interrupt.h>
 #include <linux/irq_work.h>
-#include <linux/profile.h>
 #include <linux/seq_file.h>
 #include <linux/smp.h>
 #include <linux/threads.h>
@@ -88,7 +87,7 @@ void show_ipi_list(struct seq_file *p, int prec)
 	unsigned int cpu, i;
 
 	for (i = 0; i < NR_IPI; i++) {
-		seq_printf(p, "%*s%u:%s", prec - 1, "IPI", i, prec >= 4 ? " " : "");
+		seq_printf(p, "%*s%u:", prec - 1, "IPI", i);
 		for_each_online_cpu(cpu)
 			seq_put_decimal_ull_width(p, " ", per_cpu(irq_stat, cpu).ipi_irqs[i], 10);
 		seq_printf(p, " LoongArch  %d  %s\n", i + 1, ipi_types[i]);
@@ -365,9 +364,21 @@ void __init loongson_smp_setup(void)
 void __init loongson_prepare_cpus(unsigned int max_cpus)
 {
 	int i = 0;
+	int threads_per_core = 0;
 
 	parse_acpi_topology();
 	cpu_data[0].global_id = cpu_logical_map(0);
+
+	if (!pptt_enabled)
+		threads_per_core = 1;
+	else {
+		for_each_possible_cpu(i) {
+			if (cpu_to_node(i) != 0)
+				continue;
+			if (cpus_are_siblings(0, i))
+				threads_per_core++;
+		}
+	}
 
 	for (i = 0; i < loongson_sysconf.nr_cpus; i++) {
 		set_cpu_present(i, true);
@@ -375,6 +386,7 @@ void __init loongson_prepare_cpus(unsigned int max_cpus)
 	}
 
 	per_cpu(cpu_state, smp_processor_id()) = CPU_ONLINE;
+	cpu_smt_set_num_threads(threads_per_core, threads_per_core);
 }
 
 /*
@@ -387,8 +399,9 @@ void loongson_boot_secondary(int cpu, struct task_struct *idle)
 	pr_info("Booting CPU#%d...\n", cpu);
 
 	entry = __pa_symbol((unsigned long)&smpboot_entry);
-	cpuboot_data.stack = (unsigned long)__KSTK_TOS(idle);
-	cpuboot_data.thread_info = (unsigned long)task_thread_info(idle);
+	cpuboot_data.task = (unsigned long)idle;
+	cpuboot_data.stack = (unsigned long)task_pt_regs(idle);
+	cpuboot_data.offset = per_cpu_offset(cpu);
 
 	csr_mail_send(entry, cpu_logical_map(cpu), 0);
 
@@ -412,10 +425,10 @@ void loongson_init_secondary(void)
 	numa_add_cpu(cpu);
 #endif
 	per_cpu(cpu_state, cpu) = CPU_ONLINE;
-	cpu_data[cpu].package =
-		     cpu_logical_map(cpu) / loongson_sysconf.cores_per_package;
 	cpu_data[cpu].core = pptt_enabled ? cpu_data[cpu].core :
 		     cpu_logical_map(cpu) % loongson_sysconf.cores_per_package;
+	cpu_data[cpu].package = pptt_enabled ? cpu_data[cpu].package :
+		     cpu_logical_map(cpu) / loongson_sysconf.cores_per_package;
 	cpu_data[cpu].global_id = cpu_logical_map(cpu);
 }
 
@@ -535,19 +548,23 @@ int hibernate_resume_nonboot_cpu_disable(void)
  */
 #ifdef CONFIG_PM
 
-static int loongson_ipi_suspend(void)
+static int loongson_ipi_suspend(void *data)
 {
 	return 0;
 }
 
-static void loongson_ipi_resume(void)
+static void loongson_ipi_resume(void *data)
 {
 	iocsr_write32(0xffffffff, LOONGARCH_IOCSR_IPI_EN);
 }
 
-static struct syscore_ops loongson_ipi_syscore_ops = {
+static const struct syscore_ops loongson_ipi_syscore_ops = {
 	.resume         = loongson_ipi_resume,
 	.suspend        = loongson_ipi_suspend,
+};
+
+static struct syscore loongson_ipi_syscore = {
+	.ops = &loongson_ipi_syscore_ops,
 };
 
 /*
@@ -556,7 +573,7 @@ static struct syscore_ops loongson_ipi_syscore_ops = {
  */
 static int __init ipi_pm_init(void)
 {
-	register_syscore_ops(&loongson_ipi_syscore_ops);
+	register_syscore(&loongson_ipi_syscore);
 	return 0;
 }
 
@@ -646,6 +663,7 @@ asmlinkage void start_secondary(void)
 	set_my_cpu_offset(per_cpu_offset(cpu));
 
 	cpu_probe();
+	set_current(current);
 	constant_clockevent_init();
 	loongson_init_secondary();
 
@@ -688,6 +706,7 @@ static void stop_this_cpu(void *dummy)
 	set_cpu_online(smp_processor_id(), false);
 	calculate_cpu_foreign_map();
 	local_irq_disable();
+	rcutree_report_cpu_dead();
 	while (true);
 }
 
@@ -695,13 +714,6 @@ void smp_send_stop(void)
 {
 	smp_call_function(stop_this_cpu, NULL, 0);
 }
-
-#ifdef CONFIG_PROFILING
-int setup_profiling_timer(unsigned int multiplier)
-{
-	return 0;
-}
-#endif
 
 static void flush_tlb_all_ipi(void *info)
 {

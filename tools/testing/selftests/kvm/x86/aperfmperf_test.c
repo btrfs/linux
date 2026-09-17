@@ -35,9 +35,9 @@ static int open_dev_msr(int cpu)
 	return open_path_or_exit(path, O_RDONLY);
 }
 
-static uint64_t read_dev_msr(int msr_fd, uint32_t msr)
+static u64 read_dev_msr(int msr_fd, u32 msr)
 {
-	uint64_t data;
+	u64 data;
 	ssize_t rc;
 
 	rc = pread(msr_fd, &data, sizeof(data), msr);
@@ -54,8 +54,6 @@ static void guest_read_aperf_mperf(void)
 		GUEST_SYNC2(rdmsr(MSR_IA32_APERF), rdmsr(MSR_IA32_MPERF));
 }
 
-#define L2_GUEST_STACK_SIZE	64
-
 static void l2_guest_code(void)
 {
 	guest_read_aperf_mperf();
@@ -64,21 +62,18 @@ static void l2_guest_code(void)
 
 static void l1_svm_code(struct svm_test_data *svm)
 {
-	unsigned long l2_guest_stack[L2_GUEST_STACK_SIZE];
 	struct vmcb *vmcb = svm->vmcb;
 
-	generic_svm_setup(svm, l2_guest_code, &l2_guest_stack[L2_GUEST_STACK_SIZE]);
+	generic_svm_setup(svm, l2_guest_code);
 	run_guest(vmcb, svm->vmcb_gpa);
 }
 
 static void l1_vmx_code(struct vmx_pages *vmx)
 {
-	unsigned long l2_guest_stack[L2_GUEST_STACK_SIZE];
-
 	GUEST_ASSERT_EQ(prepare_for_vmx_operation(vmx), true);
 	GUEST_ASSERT_EQ(load_vmcs(vmx), true);
 
-	prepare_vmcs(vmx, NULL, &l2_guest_stack[L2_GUEST_STACK_SIZE]);
+	prepare_vmcs(vmx, NULL);
 
 	/*
 	 * Enable MSR bitmaps (the bitmap itself is allocated, zeroed, and set
@@ -107,8 +102,8 @@ static void guest_code(void *nested_test_data)
 
 static void guest_no_aperfmperf(void)
 {
-	uint64_t msr_val;
-	uint8_t vector;
+	u64 msr_val;
+	u8 vector;
 
 	vector = rdmsr_safe(MSR_IA32_APERF, &msr_val);
 	GUEST_ASSERT(vector == GP_VECTOR);
@@ -122,8 +117,8 @@ static void guest_no_aperfmperf(void)
 int main(int argc, char *argv[])
 {
 	const bool has_nested = kvm_cpu_has(X86_FEATURE_SVM) || kvm_cpu_has(X86_FEATURE_VMX);
-	uint64_t host_aperf_before, host_mperf_before;
-	vm_vaddr_t nested_test_data_gva;
+	u64 host_aperf_before, host_mperf_before;
+	gva_t nested_test_data_gva;
 	struct kvm_vcpu *vcpu;
 	struct kvm_vm *vm;
 	int msr_fd, cpu, i;
@@ -166,8 +161,8 @@ int main(int argc, char *argv[])
 	host_mperf_before = read_dev_msr(msr_fd, MSR_IA32_MPERF);
 
 	for (i = 0; i <= NUM_ITERATIONS * (1 + has_nested); i++) {
-		uint64_t host_aperf_after, host_mperf_after;
-		uint64_t guest_aperf, guest_mperf;
+		u64 host_aperf_after, host_mperf_after;
+		u64 guest_aperf, guest_mperf;
 		struct ucall uc;
 
 		vcpu_run(vcpu);

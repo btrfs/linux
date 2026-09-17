@@ -699,15 +699,18 @@ static void snd_usbmidi_transmit_byte(struct usbmidi_out_port *port,
 static void snd_usbmidi_standard_output(struct snd_usb_midi_out_endpoint *ep,
 					struct urb *urb)
 {
-	int p;
+	int port0 = ep->current_port;
+	int i;
 
-	/* FIXME: lower-numbered ports can starve higher-numbered ports */
-	for (p = 0; p < 0x10; ++p) {
-		struct usbmidi_out_port *port = &ep->ports[p];
+	for (i = 0; i < 0x10; ++i) {
+		int portnum = (port0 + i) & 15;
+		struct usbmidi_out_port *port = &ep->ports[portnum];
+
 		if (!port->active)
 			continue;
 		while (urb->transfer_buffer_length + 3 < ep->max_transfer) {
 			uint8_t b;
+
 			if (snd_rawmidi_transmit(port->substream, &b, 1) != 1) {
 				port->active = 0;
 				break;
@@ -715,6 +718,7 @@ static void snd_usbmidi_standard_output(struct snd_usb_midi_out_endpoint *ep,
 			snd_usbmidi_transmit_byte(port, b, urb);
 		}
 	}
+	ep->current_port = (port0 + 1) & 15;
 }
 
 static const struct usb_protocol_ops snd_usbmidi_standard_ops = {
@@ -793,6 +797,8 @@ static void snd_usbmidi_akai_output(struct snd_usb_midi_out_endpoint *ep,
 
 	msg = urb->transfer_buffer + urb->transfer_buffer_length;
 	buf_end = ep->max_transfer - MAX_AKAI_SYSEX_LEN - 1;
+	if (buf_end <= 0)
+		return;
 
 	/* only try adding more data when there's space for at least 1 SysEx */
 	while (urb->transfer_buffer_length < buf_end) {
@@ -868,6 +874,8 @@ static void snd_usbmidi_novation_output(struct snd_usb_midi_out_endpoint *ep,
 	int count;
 
 	if (!ep->ports[0].active)
+		return;
+	if (ep->max_transfer < 3)
 		return;
 	transfer_buffer = urb->transfer_buffer;
 	count = snd_rawmidi_transmit(ep->ports[0].substream,
@@ -963,6 +971,8 @@ static void snd_usbmidi_us122l_output(struct snd_usb_midi_out_endpoint *ep,
 	default:
 		count = 2;
 	}
+	if (ep->max_transfer < count)
+		return;
 	count = snd_rawmidi_transmit(ep->ports[0].substream,
 				     urb->transfer_buffer,
 				     count);
@@ -1328,7 +1338,7 @@ static int snd_usbmidi_in_endpoint_create(struct snd_usb_midi *umidi,
 	int err;
 
 	rep->in = NULL;
-	ep = kzalloc(sizeof(*ep), GFP_KERNEL);
+	ep = kzalloc_obj(*ep);
 	if (!ep)
 		return -ENOMEM;
 	ep->umidi = umidi;
@@ -1414,7 +1424,7 @@ static int snd_usbmidi_out_endpoint_create(struct snd_usb_midi *umidi,
 	int err;
 
 	rep->out = NULL;
-	ep = kzalloc(sizeof(*ep), GFP_KERNEL);
+	ep = kzalloc_obj(*ep);
 	if (!ep)
 		return -ENOMEM;
 	ep->umidi = umidi;
@@ -1947,15 +1957,17 @@ static struct usb_ms_endpoint_descriptor *find_usb_ms_endpoint_descriptor(
 	while (extralen > 3) {
 		struct usb_ms_endpoint_descriptor *ms_ep =
 				(struct usb_ms_endpoint_descriptor *)extra;
+		int length = ms_ep->bLength;
 
-		if (ms_ep->bLength > 3 &&
+		if (!length || length > extralen)
+			break;
+
+		if (length > 3 &&
 		    ms_ep->bDescriptorType == USB_DT_CS_ENDPOINT &&
 		    ms_ep->bDescriptorSubtype == UAC_MS_GENERAL)
 			return ms_ep;
-		if (!extra[0])
-			break;
-		extralen -= extra[0];
-		extra += extra[0];
+		extralen -= length;
+		extra += length;
 	}
 	return NULL;
 }
@@ -2506,7 +2518,7 @@ int __snd_usbmidi_create(struct snd_card *card,
 	int out_ports, in_ports;
 	int i, err;
 
-	umidi = kzalloc(sizeof(*umidi), GFP_KERNEL);
+	umidi = kzalloc_obj(*umidi);
 	if (!umidi)
 		return -ENOMEM;
 	umidi->dev = interface_to_usbdev(iface);

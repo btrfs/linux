@@ -194,7 +194,7 @@ static bool ex_handler_msr(const struct exception_table_entry *fixup,
 static bool ex_handler_clear_fs(const struct exception_table_entry *fixup,
 				struct pt_regs *regs)
 {
-	if (static_cpu_has(X86_BUG_NULL_SEG))
+	if (cpu_feature_enabled(X86_BUG_NULL_SEG))
 		asm volatile ("mov %0, %%fs" : : "rm" (__USER_DS));
 	asm volatile ("mov %0, %%fs" : : "rm" (0));
 	return ex_handler_default(fixup, regs);
@@ -322,7 +322,7 @@ int fixup_exception(struct pt_regs *regs, int trapnr, unsigned long error_code,
 
 	type = FIELD_GET(EX_DATA_TYPE_MASK, e->data);
 	reg  = FIELD_GET(EX_DATA_REG_MASK,  e->data);
-	imm  = FIELD_GET(EX_DATA_IMM_MASK,  e->data);
+	imm  = FIELD_GET_SIGNED(EX_DATA_IMM_MASK, e->data);
 
 	switch (type) {
 	case EX_TYPE_DEFAULT:
@@ -411,14 +411,11 @@ void __init early_fixup_exception(struct pt_regs *regs, int trapnr)
 		return;
 
 	if (trapnr == X86_TRAP_UD) {
-		if (report_bug(regs->ip, regs) == BUG_TRAP_TYPE_WARN) {
-			/* Skip the ud2. */
-			regs->ip += LEN_UD2;
+		if (handle_bug(regs))
 			return;
-		}
 
 		/*
-		 * If this was a BUG and report_bug returns or if this
+		 * If this was a BUG and handle_bug returns or if this
 		 * was just a normal #UD, we want to continue onward and
 		 * crash.
 		 */

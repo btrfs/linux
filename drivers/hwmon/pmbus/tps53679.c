@@ -103,10 +103,10 @@ static int tps53679_identify_chip(struct i2c_client *client,
 	}
 
 	ret = i2c_smbus_read_block_data(client, PMBUS_IC_DEVICE_ID, buf);
-	if (ret < 0)
-		return ret;
+	if (ret <= 0)
+		return ret < 0 ? ret : -EIO;
 
-	/* Adjust length if null terminator if present */
+	/* Adjust length if null terminator is present */
 	buf_len = (buf[ret - 1] != '\x00' ? ret : ret - 1);
 
 	id_len = strlen(id);
@@ -175,8 +175,8 @@ static int tps53676_identify(struct i2c_client *client,
 	ret = i2c_smbus_read_block_data(client, PMBUS_IC_DEVICE_ID, buf);
 	if (ret < 0)
 		return ret;
-	if (strncmp("TI\x53\x67\x60", buf, 5)) {
-		dev_err(&client->dev, "Unexpected device ID: %s\n", buf);
+	if (ret != 6 || memcmp(buf, "TI\x53\x67\x60\x00", 6)) {
+		dev_err(&client->dev, "Unexpected device ID: %*ph\n", ret, buf);
 		return -ENODEV;
 	}
 
@@ -253,10 +253,7 @@ static int tps53679_probe(struct i2c_client *client)
 	struct pmbus_driver_info *info;
 	enum chips chip_id;
 
-	if (dev->of_node)
-		chip_id = (uintptr_t)of_device_get_match_data(dev);
-	else
-		chip_id = i2c_match_id(tps53679_id, client)->driver_data;
+	chip_id = (uintptr_t)i2c_get_match_data(client);
 
 	info = devm_kmemdup(dev, &tps53679_info, sizeof(*info), GFP_KERNEL);
 	if (!info)
@@ -294,15 +291,15 @@ static int tps53679_probe(struct i2c_client *client)
 }
 
 static const struct i2c_device_id tps53679_id[] = {
-	{"bmr474", tps53676},
-	{"tps53647", tps53647},
-	{"tps53667", tps53667},
-	{"tps53676", tps53676},
-	{"tps53679", tps53679},
-	{"tps53681", tps53681},
-	{"tps53685", tps53685},
-	{"tps53688", tps53688},
-	{}
+	{ .name = "bmr474", .driver_data = tps53676 },
+	{ .name = "tps53647", .driver_data = tps53647 },
+	{ .name = "tps53667", .driver_data = tps53667 },
+	{ .name = "tps53676", .driver_data = tps53676 },
+	{ .name = "tps53679", .driver_data = tps53679 },
+	{ .name = "tps53681", .driver_data = tps53681 },
+	{ .name = "tps53685", .driver_data = tps53685 },
+	{ .name = "tps53688", .driver_data = tps53688 },
+	{ }
 };
 
 MODULE_DEVICE_TABLE(i2c, tps53679_id);

@@ -93,7 +93,7 @@ int torture_hrtimeout_ns(ktime_t baset_ns, u32 fuzzt_ns, const enum hrtimer_mode
 {
 	ktime_t hto = baset_ns;
 
-	if (trsp)
+	if (trsp && fuzzt_ns)
 		hto += torture_random(trsp) % fuzzt_ns;
 	set_current_state(TASK_IDLE);
 	return schedule_hrtimeout(&hto, mode);
@@ -494,7 +494,7 @@ void torture_shuffle_task_register(struct task_struct *tp)
 
 	if (WARN_ON_ONCE(tp == NULL))
 		return;
-	stp = kmalloc(sizeof(*stp), GFP_KERNEL);
+	stp = kmalloc_obj(*stp);
 	if (WARN_ON_ONCE(stp == NULL))
 		return;
 	stp->st_t = tp;
@@ -577,6 +577,8 @@ static int torture_shuffle(void *arg)
  */
 int torture_shuffle_init(long shuffint)
 {
+	int ret;
+
 	shuffle_interval = shuffint;
 
 	shuffle_idle_cpu = -1;
@@ -587,7 +589,10 @@ int torture_shuffle_init(long shuffint)
 	}
 
 	/* Create the shuffler thread */
-	return torture_create_kthread(torture_shuffle, NULL, shuffler_task);
+	ret = torture_create_kthread(torture_shuffle, NULL, shuffler_task);
+	if (ret)
+		free_cpumask_var(shuffle_tmp_mask);
+	return ret;
 }
 EXPORT_SYMBOL_GPL(torture_shuffle_init);
 
@@ -972,3 +977,19 @@ void _torture_stop_kthread(char *m, struct task_struct **tp)
 	*tp = NULL;
 }
 EXPORT_SYMBOL_GPL(_torture_stop_kthread);
+
+/*
+ * Set the specified task's niceness value, saturating at limits.
+ * Saturating noisily, but saturating.
+ */
+void torture_sched_set_normal(struct task_struct *t, int nice)
+{
+	int realnice = nice;
+
+	if (WARN_ON_ONCE(realnice > MAX_NICE))
+		realnice = MAX_NICE;
+	if (WARN_ON_ONCE(realnice < MIN_NICE))
+		realnice = MIN_NICE;
+	sched_set_normal(t, realnice);
+}
+EXPORT_SYMBOL_GPL(torture_sched_set_normal);

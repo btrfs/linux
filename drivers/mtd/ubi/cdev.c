@@ -727,7 +727,7 @@ static int rename_volumes(struct ubi_device *ubi,
 		int name_len = req->ents[i].name_len;
 		const char *name = req->ents[i].name;
 
-		re = kzalloc(sizeof(struct ubi_rename_entry), GFP_KERNEL);
+		re = kzalloc_obj(struct ubi_rename_entry);
 		if (!re) {
 			err = -ENOMEM;
 			goto out_free;
@@ -801,7 +801,7 @@ static int rename_volumes(struct ubi_device *ubi,
 			goto out_free;
 		}
 
-		re1 = kzalloc(sizeof(struct ubi_rename_entry), GFP_KERNEL);
+		re1 = kzalloc_obj(struct ubi_rename_entry);
 		if (!re1) {
 			err = -ENOMEM;
 			ubi_close_volume(desc);
@@ -1007,7 +1007,7 @@ static long ubi_cdev_ioctl(struct file *file, unsigned int cmd,
 		struct ubi_rnvol_req *req;
 
 		dbg_gen("re-name volumes");
-		req = kmalloc(sizeof(struct ubi_rnvol_req), GFP_KERNEL);
+		req = kmalloc_obj(struct ubi_rnvol_req);
 		if (!req) {
 			err = -ENOMEM;
 			break;
@@ -1112,7 +1112,7 @@ static long ctrl_cdev_ioctl(struct file *file, unsigned int cmd,
 		mutex_lock(&ubi_devices_mutex);
 		err = ubi_attach_mtd_dev(mtd, req.ubi_num, req.vid_hdr_offset,
 					 req.max_beb_per1024, !!req.disable_fm,
-					 !!req.need_resv_pool);
+					 !!req.need_resv_pool, req.wl_threshold);
 		mutex_unlock(&ubi_devices_mutex);
 		if (err < 0)
 			put_mtd_device(mtd);

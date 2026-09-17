@@ -33,7 +33,8 @@ static const struct snd_soc_dapm_route card_base_routes[] = {
 
 static int avs_rt5514_codec_init(struct snd_soc_pcm_runtime *runtime)
 {
-	int ret = snd_soc_dapm_ignore_suspend(&runtime->card->dapm, "DMIC");
+	struct snd_soc_dapm_context *dapm = snd_soc_card_to_dapm(runtime->card);
+	int ret = snd_soc_dapm_ignore_suspend(dapm, "DMIC");
 
 	if (ret)
 		dev_err(runtime->dev, "DMIC - Ignore suspend failed = %d\n", ret);
@@ -177,7 +178,7 @@ static const struct platform_device_id avs_rt5514_driver_ids[] = {
 	{
 		.name = "avs_rt5514",
 	},
-	{},
+	{ }
 };
 MODULE_DEVICE_TABLE(platform, avs_rt5514_driver_ids);
 

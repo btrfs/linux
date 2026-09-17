@@ -310,7 +310,7 @@ static void maximize_lane_settings(const struct link_training_settings *lt_setti
 	max_requested.FFE_PRESET = lane_settings[0].FFE_PRESET;
 
 	/* Determine what the maximum of the requested settings are*/
-	for (lane = 1; lane < lt_settings->link_settings.lane_count; lane++) {
+	for (lane = 1; lane < (uint32_t)lt_settings->link_settings.lane_count; lane++) {
 		if (lane_settings[lane].VOLTAGE_SWING > max_requested.VOLTAGE_SWING)
 			max_requested.VOLTAGE_SWING = lane_settings[lane].VOLTAGE_SWING;
 
@@ -554,6 +554,7 @@ enum link_training_result dp_check_link_loss_status(
 	struct dc_link *link,
 	const struct link_training_settings *link_training_setting)
 {
+	(void)link_training_setting;
 	enum link_training_result status = LINK_TRAINING_SUCCESS;
 	union lane_status lane_status;
 	union lane_align_status_updated dpcd_lane_status_updated;
@@ -567,7 +568,7 @@ enum link_training_result dp_check_link_loss_status(
 			sizeof(dpcd_buf));
 
 	/*parse lane status*/
-	for (lane = 0; lane < link->cur_link_settings.lane_count; lane++) {
+	for (lane = 0; lane < (uint32_t)link->cur_link_settings.lane_count; lane++) {
 		/*
 		 * check lanes status
 		 */
@@ -1387,6 +1388,7 @@ bool dp_set_hw_training_pattern(
 	enum dc_dp_training_pattern pattern,
 	uint32_t offset)
 {
+	(void)offset;
 	enum dp_test_pattern test_pattern = DP_TEST_PATTERN_UNSUPPORTED;
 
 	switch (pattern) {
@@ -1719,6 +1721,20 @@ bool perform_link_training_with_retries(
 			}
 		}
 
+		if (j == (attempts - 1)) {
+			DC_LOG_WARNING(
+				"%s: Link(%d) training attempt %u of %d failed @ rate(%d) x lane(%d) @ spread = %x : fail reason:(%d)\n",
+				__func__, link->link_index, (unsigned int)j + 1, attempts,
+				cur_link_settings.link_rate, cur_link_settings.lane_count,
+				cur_link_settings.link_spread, status);
+		} else {
+			DC_LOG_HW_LINK_TRAINING(
+				"%s: Link(%d) training attempt %u of %d failed @ rate(%d) x lane(%d) @ spread = %x : fail reason:(%d)\n",
+				__func__, link->link_index, (unsigned int)j + 1, attempts,
+				cur_link_settings.link_rate, cur_link_settings.lane_count,
+				cur_link_settings.link_spread, status);
+		}
+
 		fail_count++;
 		dp_trace_lt_fail_count_update(link, fail_count, false);
 		if (link->ep_type == DISPLAY_ENDPOINT_PHY) {
@@ -1736,20 +1752,6 @@ bool perform_link_training_with_retries(
 				do_fallback = true;
 			else
 				do_fallback = false;
-		}
-
-		if (j == (attempts - 1)) {
-			DC_LOG_WARNING(
-				"%s: Link(%d) training attempt %u of %d failed @ rate(%d) x lane(%d) @ spread = %x : fail reason:(%d)\n",
-				__func__, link->link_index, (unsigned int)j + 1, attempts,
-				cur_link_settings.link_rate, cur_link_settings.lane_count,
-				cur_link_settings.link_spread, status);
-		} else {
-			DC_LOG_HW_LINK_TRAINING(
-				"%s: Link(%d) training attempt %u of %d failed @ rate(%d) x lane(%d) @ spread = %x : fail reason:(%d)\n",
-				__func__, link->link_index, (unsigned int)j + 1, attempts,
-				cur_link_settings.link_rate, cur_link_settings.lane_count,
-				cur_link_settings.link_spread, status);
 		}
 
 		dp_disable_link_phy(link, &pipe_ctx->link_res, signal);

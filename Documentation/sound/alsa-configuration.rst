@@ -1097,7 +1097,7 @@ output (with ``--no-upload`` option) to kernel bugzilla or alsa-devel
 ML (see the section `Links and Addresses`_).
 
 ``power_save`` and ``power_save_controller`` options are for power-saving
-mode.  See powersave.rst for details.
+mode.  See Documentation/sound/designs/powersave.rst for details.
 
 Note 2: If you get click noises on output, try the module option
 ``position_fix=1`` or ``2``.  ``position_fix=1`` will use the SD_LPIB
@@ -1168,7 +1168,7 @@ line_outs_monitor
 enable_monitor
     Enable Analog Out on Channel 63/64 by default.
 
-See hdspm.rst for details.
+See Documentation/sound/cards/hdspm.rst for details.
 
 Module snd-ice1712
 ------------------
@@ -2316,6 +2316,9 @@ quirk_flags
     applies the ``mixer_playback_min_mute`` flag and clears the
     ``ignore_ctl_error`` flag for the device 1234:abcd, and applies the
     ``skip_sample_rate`` flag for all devices.
+    New quirk flags may replace old ones by reusing the latter's bits, so the
+    new usage is preferred. Despite that, depending on the order of probing is
+    fragile, so it'd better migrate to the new usage anyway.
 
         * bit 0: ``get_sample_rate``
           Skip reading sample rate for devices
@@ -2372,6 +2375,38 @@ quirk_flags
           audible volume
         * bit 25: ``mixer_capture_min_mute``
           Similar to bit 24 but for capture streams
+        * bit 26: ``skip_iface_setup``
+          Skip the probe-time interface setup (usb_set_interface,
+          init_pitch, init_sample_rate); redundant with
+          snd_usb_endpoint_prepare() at stream-open time
+        * bit 27: ``mixer_playback_linear_vol``
+          Set linear volume mapping for devices where the playback volume
+          control value is mapped to voltage (instead of dB) level linearly.
+          In short: ``x(raw) = (raw - raw_min) / (raw_max - raw_min)``;
+          ``V(x) = k * x``; ``dB(x) = 20 * log10(x)``. Overrides bit 24
+        * bit 28: ``mixer_capture_linear_vol``
+          Similar to bit 27 but for capture streams. Overrides bit 25
+        * bit 29: ``ifb_silence_on_empty``
+          In implicit feedback mode, when an entire capture URB returns with
+          all iso_frame_desc[i].status != 0 (bytes==0), do not silently return
+          from snd_usb_handle_sync_urb. Instead fall through and enqueue a
+          packet_info containing only size-0 packets, so the OUT ring keeps
+          moving (emits silence). Needed by Behringer Flow 8 (1397:050c).
+        * bit 30: ``mixer_get_cur_ok``
+          On some devices, whether their GET_CUR being sticky depends on whether
+          hotpluggable components are present. When the hotpluggable components
+          are missing on probe, their GET_CUR behavior is classified as broken.
+          Set the flag to prevent the heuristics from gating GET_CUR.
+        * bit 31: ``playback_urb_fixup``
+          Some devices show the stuttering at playback, and this quirk
+          works around it by enforcing the fixed max URBs (12) instead of
+          the dynamic calculation from the buffer size, and passing the
+          `URB_ISO_ASAP` URB flag.
+        * bit 32: ``always_set_rate``
+          Issue SET_CUR for the sample rate even when the clock already reports
+          the requested rate.  A device advertising a single rate is otherwise
+          never sent the request at all, and some require it before streaming
+          will start.
 
 This module supports multiple devices, autoprobe and hotplugging.
 

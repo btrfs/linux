@@ -13,7 +13,6 @@
 #include <linux/i2c.h>
 #include <linux/delay.h>
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/pm.h>
 #include <linux/bitops.h>
 
@@ -350,18 +349,16 @@ static int tmp006_probe(struct i2c_client *client)
 
 		data->drdy_trig->ops = &tmp006_trigger_ops;
 		iio_trigger_set_drvdata(data->drdy_trig, indio_dev);
-		ret = iio_trigger_register(data->drdy_trig);
+		ret = devm_iio_trigger_register(&client->dev, data->drdy_trig);
 		if (ret)
 			return ret;
 
 		indio_dev->trig = iio_trigger_get(data->drdy_trig);
 
-		ret = devm_request_threaded_irq(&client->dev, client->irq,
-						iio_trigger_generic_data_rdy_poll,
-						NULL,
-						IRQF_ONESHOT,
-						"tmp006_irq",
-						data->drdy_trig);
+		ret = devm_request_irq(&client->dev, client->irq,
+				       iio_trigger_generic_data_rdy_poll,
+				       IRQF_NO_THREAD, "tmp006_irq",
+				       data->drdy_trig);
 		if (ret < 0)
 			return ret;
 	}
@@ -393,7 +390,7 @@ static const struct of_device_id tmp006_of_match[] = {
 MODULE_DEVICE_TABLE(of, tmp006_of_match);
 
 static const struct i2c_device_id tmp006_id[] = {
-	{ "tmp006" },
+	{ .name = "tmp006" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, tmp006_id);

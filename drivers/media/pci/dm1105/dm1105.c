@@ -763,10 +763,13 @@ static int dm1105_ir_init(struct dm1105_dev *dm1105)
 static void dm1105_ir_exit(struct dm1105_dev *dm1105)
 {
 	rc_unregister_device(dm1105->ir.dev);
+	rc_free_device(dm1105->ir.dev);
 }
 
 static int dm1105_hw_init(struct dm1105_dev *dev)
 {
+	int ret;
+
 	dm1105_disable_irqs(dev);
 
 	dm_writeb(DM1105_HOST_CTR, 0);
@@ -777,7 +780,10 @@ static int dm1105_hw_init(struct dm1105_dev *dev)
 	dm_writew(DM1105_TSCTR, 0xc10a);
 
 	/* map DMA and set address */
-	dm1105_dma_map(dev);
+	ret = dm1105_dma_map(dev);
+	if (ret)
+		return -ENOMEM;
+
 	dm1105_set_dma_addr(dev);
 	/* big buffer */
 	dm_writel(DM1105_RLEN, 5 * DM1105_DMA_BYTES);
@@ -976,7 +982,7 @@ static int dm1105_probe(struct pci_dev *pdev,
 	if (dm1105_devcount >= ARRAY_SIZE(card))
 		return -ENODEV;
 
-	dev = kzalloc(sizeof(struct dm1105_dev), GFP_KERNEL);
+	dev = kzalloc_obj(struct dm1105_dev);
 	if (!dev)
 		return -ENOMEM;
 
@@ -1193,6 +1199,7 @@ static void dm1105_remove(struct pci_dev *pdev)
 
 	dm1105_hw_exit(dev);
 	free_irq(pdev->irq, dev);
+	destroy_workqueue(dev->wq);
 	pci_iounmap(pdev, dev->io_mem);
 	pci_release_regions(pdev);
 	pci_disable_device(pdev);
@@ -1202,15 +1209,9 @@ static void dm1105_remove(struct pci_dev *pdev)
 
 static const struct pci_device_id dm1105_id_table[] = {
 	{
-		.vendor = PCI_VENDOR_ID_TRIGEM,
-		.device = PCI_DEVICE_ID_DM1105,
-		.subvendor = PCI_ANY_ID,
-		.subdevice = PCI_ANY_ID,
+		PCI_VDEVICE(TRIGEM, PCI_DEVICE_ID_DM1105),
 	}, {
-		.vendor = PCI_VENDOR_ID_AXESS,
-		.device = PCI_DEVICE_ID_DM05,
-		.subvendor = PCI_ANY_ID,
-		.subdevice = PCI_ANY_ID,
+		PCI_VDEVICE(AXESS, PCI_DEVICE_ID_DM05),
 	}, {
 		/* empty */
 	},

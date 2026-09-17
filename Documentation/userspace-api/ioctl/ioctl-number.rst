@@ -15,7 +15,7 @@ macros defined in <linux/ioctl.h>:
     ====== ===========================
     _IO    none
     _IOW   write (read from userspace)
-    _IOR   read (write to userpace)
+    _IOR   read (write to userspace)
     _IOWR  write and read
     ====== ===========================
 
@@ -229,7 +229,6 @@ Code  Seq#    Include File                                             Comments
                                                                        <mailto:gregkh@linuxfoundation.org>
 'a'   all    linux/atm*.h, linux/sonet.h                               ATM on linux
                                                                        <http://lrcwww.epfl.ch/>
-'a'   00-0F  drivers/crypto/qat/qat_common/adf_cfg_common.h            conflict! qat driver
 'b'   00-FF                                                            conflict! bit3 vme host bridge
                                                                        <mailto:natalia@nikhefk.nikhef.nl>
 'b'   00-0F  linux/dma-buf.h                                           conflict!
@@ -271,7 +270,6 @@ Code  Seq#    Include File                                             Comments
 'm'   00-09  linux/mmtimer.h                                           conflict!
 'm'   all    linux/mtio.h                                              conflict!
 'm'   all    linux/soundcard.h                                         conflict!
-'m'   all    linux/synclink.h                                          conflict!
 'm'   00-19  drivers/message/fusion/mptctl.h                           conflict!
 'm'   00     drivers/scsi/megaraid/megaraid_ioctl.h                    conflict!
 'n'   00-7F  linux/ncp_fs.h and fs/ncpfs/ioctl.c
@@ -342,13 +340,14 @@ Code  Seq#    Include File                                             Comments
 0xA2  all    uapi/linux/acrn.h                                         ACRN hypervisor
 0xA3  80-8F                                                            Port ACL  in development:
                                                                        <mailto:tlewis@mindspring.com>
-0xA3  90-9F  linux/dtlk.h
 0xA4  00-1F  uapi/linux/tee.h                                          Generic TEE subsystem
 0xA4  00-1F  uapi/asm/sgx.h                                            <mailto:linux-sgx@vger.kernel.org>
 0xA5  01-05  linux/surface_aggregator/cdev.h                           Microsoft Surface Platform System Aggregator
                                                                        <mailto:luzmaximilian@gmail.com>
 0xA5  20-2F  linux/surface_aggregator/dtx.h                            Microsoft Surface DTX driver
                                                                        <mailto:luzmaximilian@gmail.com>
+0xA6  00-0F  uapi/linux/alloc_tag.h                                    Memory allocation profiling
+                                                                       <mailto:surenb@google.com>
 0xAA  00-3F  linux/uapi/linux/userfaultfd.h
 0xAB  00-1F  linux/nbd.h
 0xAC  00-1F  linux/raw.h
@@ -385,6 +384,8 @@ Code  Seq#    Include File                                             Comments
 0xB8  01-02  uapi/misc/mrvl_cn10k_dpi.h                                Marvell CN10K DPI driver
 0xB8  all    uapi/linux/mshv.h                                         Microsoft Hyper-V /dev/mshv driver
                                                                        <mailto:linux-hyperv@vger.kernel.org>
+0xBA  00-0F  uapi/linux/liveupdate.h                                   Pasha Tatashin
+                                                                       <mailto:pasha.tatashin@soleen.com>
 0xC0  00-0F  linux/usb/iowarrior.h
 0xCA  00-0F  uapi/misc/cxl.h                                           Dead since 6.15
 0xCA  10-2F  uapi/misc/ocxl.h
@@ -395,7 +396,6 @@ Code  Seq#    Include File                                             Comments
 0xCD  01     linux/reiserfs_fs.h                                       Dead since 6.13
 0xCE  01-02  uapi/linux/cxl_mem.h                                      Compute Express Link Memory Devices
 0xCF  02     fs/smb/client/cifs_ioctl.h
-0xDB  00-0F  drivers/char/mwave/mwavepub.h
 0xDD  00-3F                                                            ZFCP device driver see drivers/s390/scsi/
                                                                        <mailto:aherrman@de.ibm.com>
 0xE5  00-3F  linux/fuse.h

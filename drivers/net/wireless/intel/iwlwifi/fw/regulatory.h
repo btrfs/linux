@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause */
 /*
- * Copyright (C) 2023-2025 Intel Corporation
+ * Copyright (C) 2023-2026 Intel Corporation
  */
 
 #ifndef __fw_regulatory_h__
@@ -21,14 +21,16 @@
  */
 #define BIOS_SAR_MAX_CHAINS_PER_PROFILE 4
 #define BIOS_SAR_NUM_CHAINS             2
-#define BIOS_SAR_MAX_SUB_BANDS_NUM      11
+#define BIOS_SAR_MAX_SUB_BANDS_NUM      12
+#define BIOS_PPAG_MAX_SUB_BANDS_NUM     12
 
 #define BIOS_GEO_NUM_CHAINS		2
-#define BIOS_GEO_MAX_NUM_BANDS		3
+#define BIOS_GEO_MAX_NUM_BANDS		4
 #define BIOS_GEO_MAX_PROFILE_NUM	8
 #define BIOS_GEO_MIN_PROFILE_NUM	3
 
 #define IWL_SAR_ENABLE_MSK		BIT(0)
+#define IWL_REDUCE_POWER_FLAGS_POS	1
 
 /* PPAG gain value bounds in 1/8 dBm */
 #define IWL_PPAG_MIN_LB	-16
@@ -100,7 +102,7 @@ struct iwl_geo_profile {
 
 /* Same thing as with SAR, all revisions fit in revision 2 */
 struct iwl_ppag_chain {
-	s8 subbands[BIOS_SAR_MAX_SUB_BANDS_NUM];
+	s8 subbands[BIOS_PPAG_MAX_SUB_BANDS_NUM];
 };
 
 struct iwl_tas_data {
@@ -125,7 +127,9 @@ enum iwl_dsm_funcs {
 	DSM_FUNC_ENERGY_DETECTION_THRESHOLD = 10,
 	DSM_FUNC_RFI_CONFIG = 11,
 	DSM_FUNC_ENABLE_11BE = 12,
-	DSM_FUNC_NUM_FUNCS = 13,
+	DSM_FUNC_ENABLE_11BN = 13,
+	DSM_FUNC_ENABLE_UNII_9 = 14,
+	DSM_FUNC_NUM_FUNCS,
 };
 
 enum iwl_dsm_values_srd {
@@ -178,6 +182,9 @@ enum iwl_dsm_masks_reg {
 
 struct iwl_fw_runtime;
 
+/* Print the PPAG table as read from BIOS */
+void iwl_bios_print_ppag(struct iwl_fw_runtime *fwrt, int n_subbands);
+
 bool iwl_sar_geo_support(struct iwl_fw_runtime *fwrt);
 
 int iwl_sar_geo_fill_table(struct iwl_fw_runtime *fwrt,
@@ -187,10 +194,6 @@ int iwl_sar_geo_fill_table(struct iwl_fw_runtime *fwrt,
 int iwl_sar_fill_profile(struct iwl_fw_runtime *fwrt,
 			 __le16 *per_chain, u32 n_tables, u32 n_subbands,
 			 int prof_a, int prof_b);
-
-int iwl_fill_ppag_table(struct iwl_fw_runtime *fwrt,
-			union iwl_ppag_table_cmd *cmd,
-			int *cmd_size);
 
 bool iwl_is_ppag_approved(struct iwl_fw_runtime *fwrt);
 
@@ -217,11 +220,6 @@ int iwl_bios_get_pwr_limit(struct iwl_fw_runtime *fwrt,
 int iwl_bios_get_mcc(struct iwl_fw_runtime *fwrt, char *mcc);
 int iwl_bios_get_eckv(struct iwl_fw_runtime *fwrt, u32 *ext_clk);
 int iwl_bios_get_wbem(struct iwl_fw_runtime *fwrt, u32 *value);
-
-__le32 iwl_get_lari_config_bitmap(struct iwl_fw_runtime *fwrt);
-int iwl_fill_lari_config(struct iwl_fw_runtime *fwrt,
-			 struct iwl_lari_config_change_cmd *cmd,
-			 size_t *cmd_size);
 
 int iwl_bios_get_dsm(struct iwl_fw_runtime *fwrt, enum iwl_dsm_funcs func,
 		     u32 *value);

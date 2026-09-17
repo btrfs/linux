@@ -24,14 +24,20 @@ properties:
   compatible:
     items:
       - enum:
+          - qcom,eliza-dwc3
+          - qcom,glymur-dwc3
+          - qcom,glymur-dwc3-mp
           - qcom,ipq4019-dwc3
           - qcom,ipq5018-dwc3
+          - qcom,ipq5210-dwc3
           - qcom,ipq5332-dwc3
           - qcom,ipq5424-dwc3
           - qcom,ipq6018-dwc3
           - qcom,ipq8064-dwc3
           - qcom,ipq8074-dwc3
           - qcom,ipq9574-dwc3
+          - qcom,kaanapali-dwc3
+          - qcom,maili-dwc3
           - qcom,milos-dwc3
           - qcom,msm8953-dwc3
           - qcom,msm8994-dwc3
@@ -56,6 +62,7 @@ properties:
           - qcom,sdx55-dwc3
           - qcom,sdx65-dwc3
           - qcom,sdx75-dwc3
+          - qcom,shikra-dwc3
           - qcom,sm4250-dwc3
           - qcom,sm6115-dwc3
           - qcom,sm6125-dwc3
@@ -67,6 +74,7 @@ properties:
           - qcom,sm8450-dwc3
           - qcom,sm8550-dwc3
           - qcom,sm8650-dwc3
+          - qcom,sm8750-dwc3
           - qcom,x1e80100-dwc3
           - qcom,x1e80100-dwc3-mp
       - const: qcom,snps-dwc3
@@ -82,14 +90,14 @@ properties:
 
   clocks:
     description: |
-      Several clocks are used, depending on the variant. Typical ones are::
-       - cfg_noc:: System Config NOC clock.
-       - core:: Master/Core clock, has to be >= 125 MHz for SS operation and >=
+      Several clocks are used, depending on the variant. Typical ones are:
+       - cfg_noc: System Config NOC clock.
+       - core: Master/Core clock, has to be >= 125 MHz for SS operation and >=
                 60MHz for HS operation.
-       - iface:: System bus AXI clock.
-       - sleep:: Sleep clock, used for wakeup when USB3 core goes into low
+       - iface: System bus AXI clock.
+       - sleep: Sleep clock, used for wakeup when USB3 core goes into low
                  power mode (U3).
-       - mock_utmi:: Mock utmi clock needed for ITP/SOF generation in host
+       - mock_utmi: Mock utmi clock needed for ITP/SOF generation in host
                      mode. Its frequency should be 19.2MHz.
     minItems: 1
     maxItems: 9
@@ -149,8 +157,6 @@ properties:
 
   wakeup-source: true
 
-# Required child node:
-
 required:
   - compatible
   - reg
@@ -171,6 +177,7 @@ allOf:
     then:
       properties:
         clocks:
+          minItems: 3
           maxItems: 3
         clock-names:
           items:
@@ -199,7 +206,11 @@ allOf:
         compatible:
           contains:
             enum:
+              - qcom,ipq5210-dwc3
+              - qcom,ipq5424-dwc3
               - qcom,ipq9574-dwc3
+              - qcom,kaanapali-dwc3
+              - qcom,maili-dwc3
               - qcom,msm8953-dwc3
               - qcom,msm8996-dwc3
               - qcom,msm8998-dwc3
@@ -212,10 +223,13 @@ allOf:
               - qcom,sdx55-dwc3
               - qcom,sdx65-dwc3
               - qcom,sdx75-dwc3
+              - qcom,shikra-dwc3
               - qcom,sm6350-dwc3
+              - qcom,sm8750-dwc3
     then:
       properties:
         clocks:
+          minItems: 5
           maxItems: 5
         clock-names:
           items:
@@ -258,6 +272,7 @@ allOf:
     then:
       properties:
         clocks:
+          minItems: 4
           maxItems: 4
         clock-names:
           items:
@@ -277,6 +292,7 @@ allOf:
     then:
       properties:
         clocks:
+          minItems: 4
           maxItems: 4
         clock-names:
           items:
@@ -297,6 +313,7 @@ allOf:
     then:
       properties:
         clocks:
+          minItems: 9
           maxItems: 9
         clock-names:
           items:
@@ -340,14 +357,17 @@ allOf:
         compatible:
           contains:
             enum:
+              - qcom,eliza-dwc3
               - qcom,milos-dwc3
               - qcom,qcm2290-dwc3
               - qcom,qcs615-dwc3
               - qcom,sar2130p-dwc3
               - qcom,sc8180x-dwc3
               - qcom,sc8180x-dwc3-mp
+              - qcom,sm4250-dwc3
               - qcom,sm6115-dwc3
               - qcom,sm6125-dwc3
+              - qcom,sm6375-dwc3
               - qcom,sm8150-dwc3
               - qcom,sm8250-dwc3
               - qcom,sm8450-dwc3
@@ -357,6 +377,7 @@ allOf:
       properties:
         clocks:
           minItems: 6
+          maxItems: 6
         clock-names:
           items:
             - const: cfg_noc
@@ -392,7 +413,29 @@ allOf:
         compatible:
           contains:
             enum:
-              - qcom,ipq5018-dwc3
+              - qcom,glymur-dwc3
+              - qcom,glymur-dwc3-mp
+
+    then:
+      properties:
+        clocks:
+          minItems: 7
+          maxItems: 7
+        clock-names:
+          items:
+            - const: cfg_noc
+            - const: core
+            - const: iface
+            - const: sleep
+            - const: mock_utmi
+            - const: noc_aggr_north
+            - const: noc_aggr_south
+
+  - if:
+      properties:
+        compatible:
+          contains:
+            enum:
               - qcom,ipq6018-dwc3
               - qcom,ipq8074-dwc3
               - qcom,msm8953-dwc3
@@ -415,9 +458,11 @@ allOf:
         compatible:
           contains:
             enum:
+              - qcom,msm8994-dwc3
               - qcom,msm8996-dwc3
               - qcom,qcs404-dwc3
               - qcom,sdm660-dwc3
+              - qcom,sm4250-dwc3
               - qcom,sm6115-dwc3
               - qcom,sm6125-dwc3
     then:
@@ -439,10 +484,12 @@ allOf:
         compatible:
           contains:
             enum:
+              - qcom,ipq5018-dwc3
               - qcom,ipq5332-dwc3
     then:
       properties:
         interrupts:
+          minItems: 4
           maxItems: 4
         interrupt-names:
           items:
@@ -456,6 +503,28 @@ allOf:
         compatible:
           contains:
             enum:
+              - qcom,ipq5210-dwc3
+              - qcom,ipq5424-dwc3
+              - qcom,ipq9574-dwc3
+    then:
+      properties:
+        interrupts:
+          minItems: 5
+          maxItems: 5
+        interrupt-names:
+          items:
+            - const: dwc_usb3
+            - const: pwr_event
+            - const: qusb2_phy
+            - const: dp_hs_phy_irq
+            - const: dm_hs_phy_irq
+
+  - if:
+      properties:
+        compatible:
+          contains:
+            enum:
+              - qcom,glymur-dwc3
               - qcom,milos-dwc3
               - qcom,x1e80100-dwc3
     then:
@@ -470,16 +539,18 @@ allOf:
             - const: pwr_event
             - const: dp_hs_phy_irq
             - const: dm_hs_phy_irq
-            - const: ss_phy_irq
+            - enum: [hs_phy_irq, ss_phy_irq]
 
   - if:
       properties:
         compatible:
           contains:
             enum:
+              - qcom,eliza-dwc3
               - qcom,ipq4019-dwc3
               - qcom,ipq8064-dwc3
-              - qcom,msm8994-dwc3
+              - qcom,kaanapali-dwc3
+              - qcom,maili-dwc3
               - qcom,qcs615-dwc3
               - qcom,qcs8300-dwc3
               - qcom,qdu1000-dwc3
@@ -493,14 +564,16 @@ allOf:
               - qcom,sdx55-dwc3
               - qcom,sdx65-dwc3
               - qcom,sdx75-dwc3
-              - qcom,sm4250-dwc3
+              - qcom,shikra-dwc3
               - qcom,sm6350-dwc3
+              - qcom,sm6375-dwc3
               - qcom,sm8150-dwc3
               - qcom,sm8250-dwc3
               - qcom,sm8350-dwc3
               - qcom,sm8450-dwc3
               - qcom,sm8550-dwc3
               - qcom,sm8650-dwc3
+              - qcom,sm8750-dwc3
     then:
       properties:
         interrupts:
@@ -521,6 +594,7 @@ allOf:
         compatible:
           contains:
             enum:
+              - qcom,glymur-dwc3-mp
               - qcom,sc8180x-dwc3-mp
               - qcom,x1e80100-dwc3-mp
     then:
