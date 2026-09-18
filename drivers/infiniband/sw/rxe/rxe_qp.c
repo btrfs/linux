@@ -15,31 +15,79 @@
 #include "rxe_queue.h"
 #include "rxe_task.h"
 
+#ifdef CONFIG_DEBUG_LOCK_ALLOC
+/*
+ * lockdep can detect false positive circular dependencies
+ * when there are user-space socket API users or in kernel
+ * users switching between a tcp and rdma transport.
+ * Maybe also switching between siw and rxe may cause
+ * problems as per default sockets are only classified
+ * by family and not by ip protocol. And there might
+ * be different locks used between the application
+ * and the low level sockets.
+ *
+ * Problems were seen with ksmbd.ko and cifs.ko,
+ * switching transports, use git blame to find
+ * more details.
+ */
+static struct lock_class_key rxe_send_sk_key[2];
+static struct lock_class_key rxe_send_slock_key[2];
+#endif /* CONFIG_DEBUG_LOCK_ALLOC */
+
+static inline void rxe_reclassify_send_socket(struct socket *sock)
+{
+#ifdef CONFIG_DEBUG_LOCK_ALLOC
+	struct sock *sk = sock->sk;
+
+	if (WARN_ON_ONCE(!sock_allow_reclassification(sk)))
+		return;
+
+	switch (sk->sk_family) {
+	case AF_INET:
+		sock_lock_init_class_and_name(sk,
+					      "slock-AF_INET-RDMA-RXE-SEND",
+					      &rxe_send_slock_key[0],
+					      "sk_lock-AF_INET-RDMA-RXE-SEND",
+					      &rxe_send_sk_key[0]);
+		break;
+	case AF_INET6:
+		sock_lock_init_class_and_name(sk,
+					      "slock-AF_INET6-RDMA-RXE-SEND",
+					      &rxe_send_slock_key[1],
+					      "sk_lock-AF_INET6-RDMA-RXE-SEND",
+					      &rxe_send_sk_key[1]);
+		break;
+	default:
+		WARN_ON_ONCE(1);
+	}
+#endif /* CONFIG_DEBUG_LOCK_ALLOC */
+}
+
 static int rxe_qp_chk_cap(struct rxe_dev *rxe, struct ib_qp_cap *cap,
 			  int has_srq)
 {
 	if (cap->max_send_wr > rxe->attr.max_qp_wr) {
-		rxe_dbg_dev(rxe, "invalid send wr = %u > %d\n",
-			 cap->max_send_wr, rxe->attr.max_qp_wr);
+		rxe_dbg_dev(rxe, "invalid send wr = %u > %u\n",
+			    cap->max_send_wr, rxe->attr.max_qp_wr);
 		goto err1;
 	}
 
 	if (cap->max_send_sge > rxe->attr.max_send_sge) {
-		rxe_dbg_dev(rxe, "invalid send sge = %u > %d\n",
-			 cap->max_send_sge, rxe->attr.max_send_sge);
+		rxe_dbg_dev(rxe, "invalid send sge = %u > %u\n",
+			    cap->max_send_sge, rxe->attr.max_send_sge);
 		goto err1;
 	}
 
 	if (!has_srq) {
 		if (cap->max_recv_wr > rxe->attr.max_qp_wr) {
-			rxe_dbg_dev(rxe, "invalid recv wr = %u > %d\n",
-				 cap->max_recv_wr, rxe->attr.max_qp_wr);
+			rxe_dbg_dev(rxe, "invalid recv wr = %u > %u\n",
+				    cap->max_recv_wr, rxe->attr.max_qp_wr);
 			goto err1;
 		}
 
 		if (cap->max_recv_sge > rxe->attr.max_recv_sge) {
-			rxe_dbg_dev(rxe, "invalid recv sge = %u > %d\n",
-				 cap->max_recv_sge, rxe->attr.max_recv_sge);
+			rxe_dbg_dev(rxe, "invalid recv sge = %u > %u\n",
+				    cap->max_recv_sge, rxe->attr.max_recv_sge);
 			goto err1;
 		}
 	}
@@ -104,7 +152,7 @@ static int alloc_rd_atomic_resources(struct rxe_qp *qp, unsigned int n)
 {
 	qp->resp.res_head = 0;
 	qp->resp.res_tail = 0;
-	qp->resp.resources = kcalloc(n, sizeof(struct resp_res), GFP_KERNEL);
+	qp->resp.resources = kzalloc_objs(struct resp_res, n);
 
 	if (!qp->resp.resources)
 		return -ENOMEM;
@@ -124,6 +172,7 @@ static void free_rd_atomic_resources(struct rxe_qp *qp)
 		}
 		kfree(qp->resp.resources);
 		qp->resp.resources = NULL;
+		qp->resp.res = NULL;
 	}
 }
 
@@ -244,6 +293,7 @@ static int rxe_qp_init_req(struct rxe_dev *rxe, struct rxe_qp *qp,
 	err = sock_create_kern(&init_net, AF_INET, SOCK_DGRAM, 0, &qp->sk);
 	if (err < 0)
 		return err;
+	rxe_reclassify_send_socket(qp->sk);
 	qp->sk->sk->sk_user_data = qp;
 
 	/* pick a source UDP port number for this QP based on
@@ -488,9 +538,9 @@ int rxe_qp_chk_attr(struct rxe_dev *rxe, struct rxe_qp *qp,
 
 	if (mask & IB_QP_MAX_QP_RD_ATOMIC) {
 		if (attr->max_rd_atomic > rxe->attr.max_qp_rd_atom) {
-			rxe_dbg_qp(qp, "invalid max_rd_atomic %d > %d\n",
-				 attr->max_rd_atomic,
-				 rxe->attr.max_qp_rd_atom);
+			rxe_dbg_qp(qp, "invalid max_rd_atomic %u > %u\n",
+				   attr->max_rd_atomic,
+				   rxe->attr.max_qp_rd_atom);
 			goto err1;
 		}
 	}
@@ -658,13 +708,24 @@ int rxe_qp_from_attr(struct rxe_qp *qp, struct ib_qp_attr *attr, int mask,
 		int max_dest_rd_atomic = attr->max_dest_rd_atomic ?
 			roundup_pow_of_two(attr->max_dest_rd_atomic) : 0;
 
-		qp->attr.max_dest_rd_atomic = max_dest_rd_atomic;
-
+		/*
+		 * Not gated by IB_QP_STATE, so the responder task is live.
+		 * Quiesce recv_task like rxe_qp_reset() before swapping the
+		 * rd_atomic array, so rxe_receiver() cannot race the free/
+		 * realloc.
+		 */
+		rxe_disable_task(&qp->recv_task);
 		free_rd_atomic_resources(qp);
-
+		qp->attr.max_dest_rd_atomic = max_dest_rd_atomic;
 		err = alloc_rd_atomic_resources(qp, max_dest_rd_atomic);
+		/*
+		 * On ENOMEM leave recv_task quiesced: qp->resp.resources is
+		 * NULL and rxe_prepare_res()/find_resource() would deref it.
+		 * Re-enable only after a fresh array is installed.
+		 */
 		if (err)
 			return err;
+		rxe_enable_task(&qp->recv_task);
 	}
 
 	if (mask & IB_QP_EN_SQD_ASYNC_NOTIFY)

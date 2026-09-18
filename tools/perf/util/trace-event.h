@@ -94,7 +94,6 @@ struct scripting_ops {
 	int (*stop_script) (void);
 	void (*process_event) (union perf_event *event,
 			       struct perf_sample *sample,
-			       struct evsel *evsel,
 			       struct addr_location *al,
 			       struct addr_location *addr_al);
 	void (*process_switch)(union perf_event *event,
@@ -116,9 +115,6 @@ extern unsigned int scripting_max_stack;
 struct scripting_ops *script_spec__lookup(const char *spec);
 int script_spec__for_each(int (*cb)(struct scripting_ops *ops, const char *spec));
 
-void script_fetch_insn(struct perf_sample *sample, struct thread *thread,
-		       struct machine *machine, bool native_arch);
-
 void setup_perl_scripting(void);
 void setup_python_scripting(void);
 
@@ -127,7 +123,6 @@ struct scripting_context {
 	void *event_data;
 	union perf_event *event;
 	struct perf_sample *sample;
-	struct evsel *evsel;
 	struct addr_location *al;
 	struct addr_location *addr_al;
 	struct perf_session *session;
@@ -136,7 +131,6 @@ struct scripting_context {
 void scripting_context__update(struct scripting_context *scripting_context,
 			       union perf_event *event,
 			       struct perf_sample *sample,
-			       struct evsel *evsel,
 			       struct addr_location *al,
 			       struct addr_location *addr_al);
 

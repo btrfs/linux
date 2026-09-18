@@ -22,6 +22,10 @@
 #include <trace/events/block.h>
 
 #define MaxSector (~(sector_t)0)
+/*
+ * Number of guaranteed raid bios in case of extreme VM load:
+ */
+#define	NR_RAID_BIOS 256
 
 enum md_submodule_type {
 	MD_PERSONALITY = 0,
@@ -122,7 +126,6 @@ enum sync_action {
 struct serial_in_rdev {
 	struct rb_root_cached serial_rb;
 	spinlock_t serial_lock;
-	wait_queue_head_t serial_io_wait;
 };
 
 /*
@@ -308,7 +311,7 @@ static inline int is_badblock(struct md_rdev *rdev, sector_t s, sector_t sectors
 }
 
 static inline int rdev_has_badblock(struct md_rdev *rdev, sector_t s,
-				    int sectors)
+				    sector_t sectors)
 {
 	sector_t first_bad;
 	sector_t bad_sectors;
@@ -316,9 +319,9 @@ static inline int rdev_has_badblock(struct md_rdev *rdev, sector_t s,
 	return is_badblock(rdev, s, sectors, &first_bad, &bad_sectors);
 }
 
-extern bool rdev_set_badblocks(struct md_rdev *rdev, sector_t s, int sectors,
+extern bool rdev_set_badblocks(struct md_rdev *rdev, sector_t s, sector_t sectors,
 			       int is_new);
-extern void rdev_clear_badblocks(struct md_rdev *rdev, sector_t s, int sectors,
+extern void rdev_clear_badblocks(struct md_rdev *rdev, sector_t s, sector_t sectors,
 				 int is_new);
 struct md_cluster_info;
 struct md_cluster_operations;
@@ -340,6 +343,10 @@ struct md_cluster_operations;
  *		   array is ready yet.
  * @MD_BROKEN: This is used to stop writes and mark array as failed.
  * @MD_DELETED: This device is being deleted
+ * @MD_HAS_SUPERBLOCK: There is persistence sb in member disks.
+ * @MD_FAILLAST_DEV: Allow last rdev to be removed.
+ * @MD_SERIALIZE_POLICY: Enforce write IO is not reordered, just used by raid1.
+ * @MD_DM_SUSPENDING: This DM raid device is suspending.
  *
  * change UNSUPPORTED_MDDEV_FLAGS for each array type if new flag is added
  */
@@ -354,7 +361,12 @@ enum mddev_flags {
 	MD_HAS_MULTIPLE_PPLS,
 	MD_NOT_READY,
 	MD_BROKEN,
+	MD_DO_DELETE,
 	MD_DELETED,
+	MD_HAS_SUPERBLOCK,
+	MD_FAILLAST_DEV,
+	MD_SERIALIZE_POLICY,
+	MD_DM_SUSPENDING,
 };
 
 enum mddev_sb_flags {
@@ -370,7 +382,11 @@ struct serial_info {
 	struct rb_node node;
 	sector_t start;		/* start sector of rb node */
 	sector_t last;		/* end sector of rb node */
+	sector_t wnode_start; /* address of waiting nodes on the same list */
 	sector_t _subtree_last; /* highest sector in subtree of rb node */
+	struct list_head	list_node;
+	struct list_head	waiters;
+	struct completion	ready;
 };
 
 /*
@@ -432,6 +448,7 @@ struct mddev {
 	sector_t			array_sectors; /* exported array size */
 	int				external_size; /* size managed
 							* externally */
+	unsigned int			logical_block_size;
 	__u64				events;
 	/* If the last 'event' was simply a clean->dirty transition, and
 	 * we didn't write it to the spares, then it is safe and simple
@@ -493,12 +510,6 @@ struct mddev {
 	int				ok_start_degraded;
 
 	unsigned long			recovery;
-	/* If a RAID personality determines that recovery (of a particular
-	 * device) will fail due to a read error on the source device, it
-	 * takes a copy of this number and does not attempt recovery again
-	 * until this number changes.
-	 */
-	int				recovery_disabled;
 
 	int				in_sync;	/* know to not need resync */
 	/* 'open_mutex' avoids races between 'md_open' and 'do_md_stop', so
@@ -610,7 +621,6 @@ struct mddev {
 	struct md_cluster_info		*cluster_info;
 	struct md_cluster_operations *cluster_ops;
 	unsigned int			good_device_nr;	/* good device num within cluster raid */
-	unsigned int			noio_flag; /* for memalloc scope API */
 
 	/*
 	 * Temporarily store rdev that will be finally removed when
@@ -620,10 +630,6 @@ struct mddev {
 
 	/* The sequence number for sync thread */
 	atomic_t sync_seq;
-
-	bool	has_superblocks:1;
-	bool	fail_last_dev:1;
-	bool	serialize_policy:1;
 };
 
 enum recovery_flags {
@@ -644,8 +650,6 @@ enum recovery_flags {
 	MD_RECOVERY_FROZEN,
 	/* waiting for pers->start() to finish */
 	MD_RECOVERY_WAIT,
-	/* interrupted because io-error */
-	MD_RECOVERY_ERROR,
 
 	/* flags determines sync action, see details in enum sync_action */
 
@@ -735,8 +739,8 @@ static inline int mddev_trylock(struct mddev *mddev)
 	int ret;
 
 	ret = mutex_trylock(&mddev->reconfig_mutex);
-	if (!ret && test_bit(MD_DELETED, &mddev->flags)) {
-		ret = -ENODEV;
+	if (ret && test_bit(MD_DELETED, &mddev->flags)) {
+		ret = 0;
 		mutex_unlock(&mddev->reconfig_mutex);
 	}
 	return ret;
@@ -793,6 +797,10 @@ struct md_personality
 	/* convert io ranges from array to bitmap */
 	void (*bitmap_sector)(struct mddev *mddev, sector_t *offset,
 			      unsigned long *sectors);
+	void (*bitmap_sector_map)(struct mddev *mddev, sector_t *offset,
+				  unsigned long *sectors, bool previous);
+	sector_t (*bitmap_sync_size)(struct mddev *mddev, bool previous);
+	sector_t (*bitmap_array_sectors)(struct mddev *mddev, bool previous);
 };
 
 struct md_sysfs_entry {
@@ -882,6 +890,12 @@ struct md_io_clone {
 
 #define THREAD_WAKEUP  0
 
+#define md_wakeup_thread(thread) do {   \
+	rcu_read_lock();                    \
+	__md_wakeup_thread(thread);         \
+	rcu_read_unlock();                  \
+} while (0)
+
 static inline void safe_put_page(struct page *p)
 {
 	if (p) put_page(p);
@@ -895,7 +909,7 @@ extern struct md_thread *md_register_thread(
 	struct mddev *mddev,
 	const char *name);
 extern void md_unregister_thread(struct mddev *mddev, struct md_thread __rcu **threadp);
-extern void md_wakeup_thread(struct md_thread __rcu *thread);
+extern void __md_wakeup_thread(struct md_thread __rcu *thread);
 extern void md_check_recovery(struct mddev *mddev);
 extern void md_reap_sync_thread(struct mddev *mddev);
 extern enum sync_action md_sync_action(struct mddev *mddev);
@@ -904,13 +918,17 @@ extern const char *md_sync_action_name(enum sync_action action);
 extern void md_write_start(struct mddev *mddev, struct bio *bi);
 extern void md_write_inc(struct mddev *mddev, struct bio *bi);
 extern void md_write_end(struct mddev *mddev);
-extern void md_done_sync(struct mddev *mddev, int blocks, int ok);
+extern void md_done_sync(struct mddev *mddev, int blocks);
+extern void md_sync_error(struct mddev *mddev);
 extern void md_error(struct mddev *mddev, struct md_rdev *rdev);
 extern void md_finish_reshape(struct mddev *mddev);
 void md_submit_discard_bio(struct mddev *mddev, struct md_rdev *rdev,
 			struct bio *bio, sector_t start, sector_t size);
+struct bio *mddev_bio_split_at_reshape_offset(struct mddev *mddev,
+					      struct bio *bio,
+					      unsigned int *max_sectors,
+					      struct bio_set *bs);
 void md_account_bio(struct mddev *mddev, struct bio **bio);
-void md_free_cloned_bio(struct bio *bio);
 
 extern bool __must_check md_flush_request(struct mddev *mddev, struct bio *bio);
 void md_write_metadata(struct mddev *mddev, struct md_rdev *rdev,
@@ -925,6 +943,9 @@ extern void md_allow_write(struct mddev *mddev);
 extern void md_wait_for_blocked_rdev(struct md_rdev *rdev, struct mddev *mddev);
 extern void md_set_array_sectors(struct mddev *mddev, sector_t array_sectors);
 extern int md_check_no_bitmap(struct mddev *mddev);
+bool mddev_set_bitmap_ops_nosysfs(struct mddev *mddev);
+int md_bitmap_create_nosysfs(struct mddev *mddev);
+void md_bitmap_destroy_nosysfs(struct mddev *mddev);
 extern int md_integrity_register(struct mddev *mddev);
 extern int strict_strtoul_scaled(const char *cp, unsigned long *res, int scale);
 
@@ -1005,7 +1026,7 @@ static inline int mddev_suspend_and_lock(struct mddev *mddev)
 static inline void mddev_suspend_and_lock_nointr(struct mddev *mddev)
 {
 	mddev_suspend(mddev, false);
-	mutex_lock(&mddev->reconfig_mutex);
+	mddev_lock_nointr(mddev);
 }
 
 static inline void mddev_unlock_and_resume(struct mddev *mddev)
@@ -1029,6 +1050,11 @@ int mddev_stack_new_rdev(struct mddev *mddev, struct md_rdev *rdev);
 void mddev_update_io_opt(struct mddev *mddev, unsigned int nr_stripes);
 
 extern const struct block_device_operations md_fops;
+
+static inline bool md_cloned_bio(struct mddev *mddev, struct bio *bio)
+{
+	return bio->bi_pool == &mddev->io_clone_set;
+}
 
 /*
  * MD devices can be used undeneath by DM, in which case ->gendisk is NULL.

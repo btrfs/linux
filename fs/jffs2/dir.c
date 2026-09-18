@@ -15,6 +15,7 @@
 #include <linux/kernel.h>
 #include <linux/slab.h>
 #include <linux/fs.h>
+#include <linux/filelock.h>
 #include <linux/crc32.h>
 #include <linux/jffs2.h>
 #include "jffs2_fs_i.h"
@@ -25,7 +26,7 @@
 static int jffs2_readdir (struct file *, struct dir_context *);
 
 static int jffs2_create (struct mnt_idmap *, struct inode *,
-		         struct dentry *, umode_t, bool);
+		         struct dentry *, umode_t);
 static struct dentry *jffs2_lookup (struct inode *,struct dentry *,
 				    unsigned int);
 static int jffs2_link (struct dentry *,struct inode *,struct dentry *);
@@ -48,6 +49,7 @@ const struct file_operations jffs2_dir_operations =
 	.unlocked_ioctl=jffs2_ioctl,
 	.fsync =	jffs2_fsync,
 	.llseek =	generic_file_llseek,
+	.setlease =	generic_setlease,
 };
 
 
@@ -127,7 +129,7 @@ static int jffs2_readdir(struct file *file, struct dir_context *ctx)
 	struct jffs2_full_dirent *fd;
 	unsigned long curofs = 1;
 
-	jffs2_dbg(1, "jffs2_readdir() for dir_i #%lu\n", inode->i_ino);
+	jffs2_dbg(1, "jffs2_readdir() for dir_i #%llu\n", inode->i_ino);
 
 	if (!dir_emit_dots(file, ctx))
 		return 0;
@@ -161,7 +163,7 @@ static int jffs2_readdir(struct file *file, struct dir_context *ctx)
 
 
 static int jffs2_create(struct mnt_idmap *idmap, struct inode *dir_i,
-			struct dentry *dentry, umode_t mode, bool excl)
+			struct dentry *dentry, umode_t mode)
 {
 	struct jffs2_raw_inode *ri;
 	struct jffs2_inode_info *f, *dir_f;
@@ -209,7 +211,7 @@ static int jffs2_create(struct mnt_idmap *idmap, struct inode *dir_i,
 
 	jffs2_free_raw_inode(ri);
 
-	jffs2_dbg(1, "%s(): Created ino #%lu with mode %o, nlink %d(%d). nrpages %ld\n",
+	jffs2_dbg(1, "%s(): Created ino #%llu with mode %o, nlink %d(%d). nrpages %ld\n",
 		  __func__, inode->i_ino, inode->i_mode, inode->i_nlink,
 		  f->inocache->pino_nlink, inode->i_mapping->nrpages);
 
@@ -459,8 +461,6 @@ static struct dentry *jffs2_mkdir (struct mnt_idmap *idmap, struct inode *dir_i,
 	int namelen;
 	uint32_t alloclen;
 	int ret;
-
-	mode |= S_IFDIR;
 
 	ri = jffs2_alloc_raw_inode();
 	if (!ri)

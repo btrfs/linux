@@ -3,7 +3,7 @@
  * Copyright (c) 2000-2006 Silicon Graphics, Inc.
  * All Rights Reserved.
  */
-#include "xfs.h"
+#include "xfs_platform.h"
 #include "xfs_fs.h"
 #include "xfs_shared.h"
 #include "xfs_format.h"
@@ -190,8 +190,8 @@ xlog_bwrite(
  */
 STATIC void
 xlog_header_check_dump(
-	xfs_mount_t		*mp,
-	xlog_rec_header_t	*head)
+	struct xfs_mount		*mp,
+	struct xlog_rec_header		*head)
 {
 	xfs_debug(mp, "%s:  SB : uuid = %pU, fmt = %d",
 		__func__, &mp->m_sb.sb_uuid, XLOG_FMT);
@@ -207,8 +207,8 @@ xlog_header_check_dump(
  */
 STATIC int
 xlog_header_check_recover(
-	xfs_mount_t		*mp,
-	xlog_rec_header_t	*head)
+	struct xfs_mount	*mp,
+	struct xlog_rec_header	*head)
 {
 	ASSERT(head->h_magicno == cpu_to_be32(XLOG_HEADER_MAGIC_NUM));
 
@@ -238,8 +238,8 @@ xlog_header_check_recover(
  */
 STATIC int
 xlog_header_check_mount(
-	xfs_mount_t		*mp,
-	xlog_rec_header_t	*head)
+	struct xfs_mount	*mp,
+	struct xlog_rec_header	*head)
 {
 	ASSERT(head->h_magicno == cpu_to_be32(XLOG_HEADER_MAGIC_NUM));
 
@@ -400,7 +400,7 @@ xlog_find_verify_log_record(
 	xfs_daddr_t		i;
 	char			*buffer;
 	char			*offset = NULL;
-	xlog_rec_header_t	*head = NULL;
+	struct xlog_rec_header	*head = NULL;
 	int			error = 0;
 	int			smallmem = 0;
 	int			num_blks = *last_blk - start_blk;
@@ -437,7 +437,7 @@ xlog_find_verify_log_record(
 				goto out;
 		}
 
-		head = (xlog_rec_header_t *)offset;
+		head = (struct xlog_rec_header *)offset;
 
 		if (head->h_magicno == cpu_to_be32(XLOG_HEADER_MAGIC_NUM))
 			break;
@@ -1028,7 +1028,7 @@ xlog_verify_head(
 {
 	struct xlog_rec_header	*tmp_rhead;
 	char			*tmp_buffer;
-	xfs_daddr_t		first_bad;
+	xfs_daddr_t		first_bad = XFS_BUF_DADDR_NULL;
 	xfs_daddr_t		tmp_rhead_blk;
 	int			found;
 	int			error;
@@ -1057,7 +1057,8 @@ xlog_verify_head(
 	 */
 	error = xlog_do_recovery_pass(log, *head_blk, tmp_rhead_blk,
 				      XLOG_RECOVER_CRCPASS, &first_bad);
-	if ((error == -EFSBADCRC || error == -EFSCORRUPTED) && first_bad) {
+	if ((error == -EFSBADCRC || error == -EFSCORRUPTED) &&
+	    first_bad != XFS_BUF_DADDR_NULL) {
 		/*
 		 * We've hit a potential torn write. Reset the error and warn
 		 * about it.
@@ -1237,7 +1238,7 @@ xlog_find_tail(
 	xfs_daddr_t		*head_blk,
 	xfs_daddr_t		*tail_blk)
 {
-	xlog_rec_header_t	*rhead;
+	struct xlog_rec_header	*rhead;
 	char			*offset = NULL;
 	char			*buffer;
 	int			error;
@@ -1487,7 +1488,7 @@ xlog_add_record(
 	int			tail_cycle,
 	int			tail_block)
 {
-	xlog_rec_header_t	*recp = (xlog_rec_header_t *)buf;
+	struct xlog_rec_header	*recp = (struct xlog_rec_header *)buf;
 
 	memset(buf, 0, BBSIZE);
 	recp->h_magicno = cpu_to_be32(XLOG_HEADER_MAGIC_NUM);
@@ -1906,18 +1907,20 @@ xlog_recover_reorder_trans(
 	list_for_each_entry_safe(item, n, &sort_list, ri_list) {
 		enum xlog_recover_reorder	fate = XLOG_REORDER_ITEM_LIST;
 
+		/* a committed item with no regions has a NULL ri_buf[0] */
+		if (!item->ri_cnt || !item->ri_buf) {
+			xfs_warn(log->l_mp,
+				"%s: committed log item has no regions",
+				__func__);
+			error = -EFSCORRUPTED;
+			break;
+		}
+
 		item->ri_ops = xlog_find_item_ops(item);
 		if (!item->ri_ops) {
 			xfs_warn(log->l_mp,
 				"%s: unrecognized type of log operation (%d)",
 				__func__, ITEM_TYPE(item));
-			ASSERT(0);
-			/*
-			 * return the remaining items back to the transaction
-			 * item list so they can be freed in caller.
-			 */
-			if (!list_empty(&sort_list))
-				list_splice_init(&sort_list, &trans->r_itemq);
 			error = -EFSCORRUPTED;
 			break;
 		}
@@ -1945,7 +1948,15 @@ xlog_recover_reorder_trans(
 		}
 	}
 
-	ASSERT(list_empty(&sort_list));
+	/*
+	 * Return the remaining items back to the transaction item list so they
+	 * can be freed in caller.  This should only happen when we encounter
+	 * an error.
+	 */
+	if (!list_empty(&sort_list)) {
+		ASSERT(error);
+		list_splice_init(&sort_list, &trans->r_itemq);
+	}
 	if (!list_empty(&buffer_list))
 		list_splice(&buffer_list, &trans->r_itemq);
 	if (!list_empty(&item_list))
@@ -2092,8 +2103,7 @@ xlog_recover_add_item(
 {
 	struct xlog_recover_item *item;
 
-	item = kzalloc(sizeof(struct xlog_recover_item),
-			GFP_KERNEL | __GFP_NOFAIL);
+	item = kzalloc_obj(struct xlog_recover_item, GFP_KERNEL | __GFP_NOFAIL);
 	INIT_LIST_HEAD(&item->ri_list);
 	list_add_tail(&item->ri_list, head);
 }
@@ -2223,8 +2233,8 @@ xlog_recover_add_to_trans(
 		}
 
 		item->ri_total = in_f->ilf_size;
-		item->ri_buf = kcalloc(item->ri_total, sizeof(*item->ri_buf),
-				GFP_KERNEL | __GFP_NOFAIL);
+		item->ri_buf = kzalloc_objs(*item->ri_buf, item->ri_total,
+					    GFP_KERNEL | __GFP_NOFAIL);
 	}
 
 	if (item->ri_total <= item->ri_cnt) {
@@ -2367,7 +2377,7 @@ xlog_recover_ophdr_to_trans(
 	 * This is a new transaction so allocate a new recovery container to
 	 * hold the recovery ops that will follow.
 	 */
-	trans = kzalloc(sizeof(struct xlog_recover), GFP_KERNEL | __GFP_NOFAIL);
+	trans = kzalloc_obj(struct xlog_recover, GFP_KERNEL | __GFP_NOFAIL);
 	trans->r_log_tid = tid;
 	trans->r_lsn = be64_to_cpu(rhead->h_lsn);
 	INIT_LIST_HEAD(&trans->r_itemq);
@@ -2863,22 +2873,11 @@ xlog_unpack_data(
 	char			*dp,
 	struct xlog		*log)
 {
-	int			i, j, k;
+	int			i;
 
-	for (i = 0; i < BTOBB(be32_to_cpu(rhead->h_len)) &&
-		  i < (XLOG_HEADER_CYCLE_SIZE / BBSIZE); i++) {
-		*(__be32 *)dp = *(__be32 *)&rhead->h_cycle_data[i];
+	for (i = 0; i < BTOBB(be32_to_cpu(rhead->h_len)); i++) {
+		*(__be32 *)dp = *xlog_cycle_data(rhead, i);
 		dp += BBSIZE;
-	}
-
-	if (xfs_has_logv2(log->l_mp)) {
-		xlog_in_core_2_t *xhdr = (xlog_in_core_2_t *)rhead;
-		for ( ; i < BTOBB(be32_to_cpu(rhead->h_len)); i++) {
-			j = i / (XLOG_HEADER_CYCLE_SIZE / BBSIZE);
-			k = i % (XLOG_HEADER_CYCLE_SIZE / BBSIZE);
-			*(__be32 *)dp = xhdr[j].hic_xheader.xh_cycle_data[k];
-			dp += BBSIZE;
-		}
 	}
 }
 
@@ -2964,18 +2963,23 @@ xlog_valid_rec_header(
 	xfs_daddr_t		blkno,
 	int			bufsize)
 {
+	struct xfs_mount	*mp = log->l_mp;
+	u32			h_version = be32_to_cpu(rhead->h_version);
 	int			hlen;
 
-	if (XFS_IS_CORRUPT(log->l_mp,
+	if (XFS_IS_CORRUPT(mp,
 			   rhead->h_magicno != cpu_to_be32(XLOG_HEADER_MAGIC_NUM)))
 		return -EFSCORRUPTED;
-	if (XFS_IS_CORRUPT(log->l_mp,
-			   (!rhead->h_version ||
-			   (be32_to_cpu(rhead->h_version) &
-			    (~XLOG_VERSION_OKBITS))))) {
-		xfs_warn(log->l_mp, "%s: unrecognised log version (%d).",
-			__func__, be32_to_cpu(rhead->h_version));
-		return -EFSCORRUPTED;
+
+	/*
+	 * The log version must match the superblock
+	 */
+	if (xfs_has_logv2(mp)) {
+		if (XFS_IS_CORRUPT(mp, h_version != XLOG_VERSION_2))
+			return -EFSCORRUPTED;
+	} else {
+		if (XFS_IS_CORRUPT(mp, h_version != XLOG_VERSION_1))
+			return -EFSCORRUPTED;
 	}
 
 	/*
@@ -2983,12 +2987,12 @@ xlog_valid_rec_header(
 	 * and h_len must not be greater than LR buffer size.
 	 */
 	hlen = be32_to_cpu(rhead->h_len);
-	if (XFS_IS_CORRUPT(log->l_mp, hlen <= 0 || hlen > bufsize))
+	if (XFS_IS_CORRUPT(mp, hlen <= 0 || hlen > bufsize))
 		return -EFSCORRUPTED;
 
-	if (XFS_IS_CORRUPT(log->l_mp,
-			   blkno > log->l_logBBsize || blkno > INT_MAX))
+	if (XFS_IS_CORRUPT(mp, blkno > log->l_logBBsize || blkno > INT_MAX))
 		return -EFSCORRUPTED;
+
 	return 0;
 }
 
@@ -3008,7 +3012,7 @@ xlog_do_recovery_pass(
 	int			pass,
 	xfs_daddr_t		*first_bad)	/* out: first bad log rec */
 {
-	xlog_rec_header_t	*rhead;
+	struct xlog_rec_header	*rhead;
 	xfs_daddr_t		blk_no, rblk_no;
 	xfs_daddr_t		rhead_blk;
 	char			*offset;
@@ -3045,7 +3049,7 @@ xlog_do_recovery_pass(
 		if (error)
 			goto bread_err1;
 
-		rhead = (xlog_rec_header_t *)offset;
+		rhead = (struct xlog_rec_header *)offset;
 
 		/*
 		 * xfsprogs has a bug where record length is based on lsunit but
@@ -3152,7 +3156,7 @@ xlog_do_recovery_pass(
 				if (error)
 					goto bread_err2;
 			}
-			rhead = (xlog_rec_header_t *)offset;
+			rhead = (struct xlog_rec_header *)offset;
 			error = xlog_valid_rec_header(log, rhead,
 					split_hblks ? blk_no : 0, h_size);
 			if (error)
@@ -3234,7 +3238,7 @@ xlog_do_recovery_pass(
 		if (error)
 			goto bread_err2;
 
-		rhead = (xlog_rec_header_t *)offset;
+		rhead = (struct xlog_rec_header *)offset;
 		error = xlog_valid_rec_header(log, rhead, blk_no, h_size);
 		if (error)
 			goto bread_err2;
@@ -3275,9 +3279,8 @@ xlog_do_recovery_pass(
 			 * checkpoints at this start LSN.
 			 *
 			 * Note: Shutting down the filesystem will result in the
-			 * delwri submission marking all the buffers stale,
-			 * completing them and cleaning up _XBF_LOGRECOVERY
-			 * state without doing any IO.
+			 * delwri submission marking all the buffers stale and
+			 * completing them without doing any IO.
 			 */
 			xlog_force_shutdown(log, SHUTDOWN_LOG_IO_ERROR);
 		}
@@ -3582,4 +3585,3 @@ xlog_recover_cancel(
 	if (xlog_recovery_needed(log))
 		xlog_recover_cancel_intents(log);
 }
-

@@ -12,7 +12,6 @@
 #include <linux/iopoll.h>
 #include <linux/kernel.h>
 #include <linux/kfifo.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
 #include <linux/pm_runtime.h>
@@ -2081,7 +2080,7 @@ static struct usb_request *usbf_ep_alloc_request(struct usb_ep *_ep,
 	if (!_ep)
 		return NULL;
 
-	req = kzalloc(sizeof(*req), gfp_flags);
+	req = kzalloc_obj(*req, gfp_flags);
 	if (!req)
 		return NULL;
 

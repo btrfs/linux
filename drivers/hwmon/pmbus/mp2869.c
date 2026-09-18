@@ -165,7 +165,7 @@ static int mp2869_read_byte_data(struct i2c_client *client, int page, int reg)
 {
 	const struct pmbus_driver_info *info = pmbus_get_driver_info(client);
 	struct mp2869_data *data = to_mp2869_data(info);
-	int ret;
+	int ret, mfr;
 
 	switch (reg) {
 	case PMBUS_VOUT_MODE:
@@ -188,11 +188,14 @@ static int mp2869_read_byte_data(struct i2c_client *client, int page, int reg)
 		if (ret < 0)
 			return ret;
 
+		mfr = pmbus_read_byte_data(client, page,
+					   PMBUS_STATUS_MFR_SPECIFIC);
+		if (mfr < 0)
+			return mfr;
+
 		ret = (ret & ~GENMASK(2, 2)) |
 			FIELD_PREP(GENMASK(2, 2),
-				   FIELD_GET(GENMASK(1, 1),
-					     pmbus_read_byte_data(client, page,
-								  PMBUS_STATUS_MFR_SPECIFIC)));
+				   FIELD_GET(GENMASK(1, 1), mfr));
 		break;
 	case PMBUS_STATUS_TEMPERATURE:
 		/*
@@ -207,15 +210,16 @@ static int mp2869_read_byte_data(struct i2c_client *client, int page, int reg)
 		if (ret < 0)
 			return ret;
 
+		mfr = pmbus_read_byte_data(client, page,
+					   PMBUS_STATUS_MFR_SPECIFIC);
+		if (mfr < 0)
+			return mfr;
+
 		ret = (ret & ~GENMASK(7, 6)) |
 			FIELD_PREP(GENMASK(6, 6),
-				   FIELD_GET(GENMASK(1, 1),
-					     pmbus_read_byte_data(client, page,
-								  PMBUS_STATUS_MFR_SPECIFIC))) |
+				   FIELD_GET(GENMASK(1, 1), mfr)) |
 			 FIELD_PREP(GENMASK(7, 7),
-				    FIELD_GET(GENMASK(1, 1),
-					      pmbus_read_byte_data(client, page,
-								   PMBUS_STATUS_MFR_SPECIFIC)));
+				    FIELD_GET(GENMASK(1, 1), mfr));
 		break;
 	default:
 		ret = -ENODATA;
@@ -230,7 +234,7 @@ static int mp2869_read_word_data(struct i2c_client *client, int page, int phase,
 {
 	const struct pmbus_driver_info *info = pmbus_get_driver_info(client);
 	struct mp2869_data *data = to_mp2869_data(info);
-	int ret;
+	int ret, mfr;
 
 	switch (reg) {
 	case PMBUS_STATUS_WORD:
@@ -246,11 +250,14 @@ static int mp2869_read_word_data(struct i2c_client *client, int page, int phase,
 		if (ret < 0)
 			return ret;
 
+		mfr = pmbus_read_byte_data(client, page,
+					   PMBUS_STATUS_MFR_SPECIFIC);
+		if (mfr < 0)
+			return mfr;
+
 		ret = (ret & ~GENMASK(2, 2)) |
 			 FIELD_PREP(GENMASK(2, 2),
-				    FIELD_GET(GENMASK(1, 1),
-					      pmbus_read_byte_data(client, page,
-								   PMBUS_STATUS_MFR_SPECIFIC)));
+				    FIELD_GET(GENMASK(1, 1), mfr));
 		break;
 	case PMBUS_READ_VIN:
 		/*
@@ -625,20 +632,20 @@ static int mp2869_probe(struct i2c_client *client)
 }
 
 static const struct i2c_device_id mp2869_id[] = {
-	{"mp2869", 0},
-	{"mp29608", 1},
-	{"mp29612", 2},
-	{"mp29816", 3},
-	{}
+	{ .name = "mp2869" },
+	{ .name = "mp29608" },
+	{ .name = "mp29612" },
+	{ .name = "mp29816" },
+	{ }
 };
 MODULE_DEVICE_TABLE(i2c, mp2869_id);
 
-static const struct of_device_id __maybe_unused mp2869_of_match[] = {
-	{.compatible = "mps,mp2869", .data = (void *)0},
-	{.compatible = "mps,mp29608", .data = (void *)1},
-	{.compatible = "mps,mp29612", .data = (void *)2},
-	{.compatible = "mps,mp29816", .data = (void *)3},
-	{}
+static const struct of_device_id mp2869_of_match[] = {
+	{ .compatible = "mps,mp2869" },
+	{ .compatible = "mps,mp29608" },
+	{ .compatible = "mps,mp29612" },
+	{ .compatible = "mps,mp29816" },
+	{ }
 };
 MODULE_DEVICE_TABLE(of, mp2869_of_match);
 

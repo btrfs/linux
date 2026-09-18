@@ -80,7 +80,7 @@ nv50_wndw_ctxdma_new(struct nv50_wndw *wndw, struct drm_framebuffer *fb)
 			return ctxdma;
 	}
 
-	if (!(ctxdma = kzalloc(sizeof(*ctxdma), GFP_KERNEL)))
+	if (!(ctxdma = kzalloc_obj(*ctxdma)))
 		return ERR_PTR(-ENOMEM);
 	list_add(&ctxdma->head, &wndw->ctxdma.list);
 
@@ -441,7 +441,7 @@ nv50_wndw_atomic_check_lut(struct nv50_wndw *wndw,
 
 static int
 nv50_wndw_atomic_check(struct drm_plane *plane,
-		       struct drm_atomic_state *state)
+		       struct drm_atomic_commit *state)
 {
 	struct drm_plane_state *new_plane_state = drm_atomic_get_new_plane_state(state,
 										 plane);
@@ -583,7 +583,7 @@ nv50_wndw_prepare_fb(struct drm_plane *plane, struct drm_plane_state *state)
 	asyw->image.offset[0] = nvbo->offset;
 
 	if (wndw->func->prepare) {
-		asyh = nv50_head_atom_get(asyw->state.state, asyw->state.crtc);
+		asyh = nv50_head_atom_get_new(asyw->state.state, asyw->state.crtc);
 		if (IS_ERR(asyh))
 			return PTR_ERR(asyh);
 
@@ -730,7 +730,7 @@ nv50_wndw_atomic_duplicate_state(struct drm_plane *plane)
 {
 	struct nv50_wndw_atom *armw = nv50_wndw_atom(plane->state);
 	struct nv50_wndw_atom *asyw;
-	if (!(asyw = kmalloc(sizeof(*asyw), GFP_KERNEL)))
+	if (!(asyw = kmalloc_obj(*asyw)))
 		return NULL;
 	__drm_atomic_helper_plane_duplicate_state(plane, &asyw->state);
 	asyw->sema = armw->sema;
@@ -757,7 +757,7 @@ nv50_wndw_reset(struct drm_plane *plane)
 {
 	struct nv50_wndw_atom *asyw;
 
-	if (WARN_ON(!(asyw = kzalloc(sizeof(*asyw), GFP_KERNEL))))
+	if (WARN_ON(!(asyw = kzalloc_obj(*asyw))))
 		return;
 
 	if (plane->state)
@@ -848,6 +848,28 @@ static const u64 nv50_cursor_format_modifiers[] = {
 	DRM_FORMAT_MOD_INVALID,
 };
 
+/*
+ * Setup defaults for the atomic wndw state
+ */
+void
+nv50_wndw_default_state(struct nv50_wndw *wndw)
+{
+	struct nv50_wndw_atom *armw = nv50_wndw_atom(wndw->plane.state);
+	const unsigned int blend_modes = wndw->func->blend_modes;
+
+	drm_modeset_lock_assert_held(&wndw->plane.mutex);
+
+	/* Ensure the plane's atomic state didn't default to a pixel_blend_mode we don't support */
+	if (blend_modes && (!(BIT(armw->state.pixel_blend_mode) & blend_modes))) {
+		if (blend_modes & BIT(DRM_MODE_BLEND_COVERAGE))
+			armw->state.pixel_blend_mode = DRM_MODE_BLEND_COVERAGE;
+		else if (blend_modes & BIT(DRM_MODE_BLEND_PREMULTI))
+			armw->state.pixel_blend_mode = DRM_MODE_BLEND_PREMULTI;
+		else if (blend_modes & BIT(DRM_MODE_BLEND_PIXEL_NONE))
+			armw->state.pixel_blend_mode = DRM_MODE_BLEND_PIXEL_NONE;
+	}
+}
+
 int
 nv50_wndw_new_(const struct nv50_wndw_func *func, struct drm_device *dev,
 	       enum drm_plane_type type, const char *name, int index,
@@ -863,7 +885,7 @@ nv50_wndw_new_(const struct nv50_wndw_func *func, struct drm_device *dev,
 	int nformat;
 	int ret;
 
-	if (!(wndw = *pwndw = kzalloc(sizeof(*wndw), GFP_KERNEL)))
+	if (!(wndw = *pwndw = kzalloc_obj(*wndw)))
 		return -ENOMEM;
 	wndw->func = func;
 	wndw->id = index;
@@ -908,16 +930,20 @@ nv50_wndw_new_(const struct nv50_wndw_func *func, struct drm_device *dev,
 		ret = drm_plane_create_alpha_property(&wndw->plane);
 		if (ret)
 			return ret;
-
-		ret = drm_plane_create_blend_mode_property(&wndw->plane,
-				BIT(DRM_MODE_BLEND_PIXEL_NONE) |
-				BIT(DRM_MODE_BLEND_PREMULTI) |
-				BIT(DRM_MODE_BLEND_COVERAGE));
-		if (ret)
-			return ret;
 	} else {
 		ret = drm_plane_create_zpos_immutable_property(&wndw->plane,
 				nv50_wndw_zpos_default(&wndw->plane));
+		if (ret)
+			return ret;
+	}
+
+	/*
+	 * DRM requires that we have a blend mode property for any type of plane that exposes color
+	 * formats with an alpha channel. So do this, even if we don't actually have control for the
+	 * blend property hooked up with blend_set.
+	 */
+	if (func->blend_modes) {
+		ret = drm_plane_create_blend_mode_property(&wndw->plane, func->blend_modes);
 		if (ret)
 			return ret;
 	}

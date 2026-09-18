@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
 /*
  * Copyright (C) 2017 Intel Deutschland GmbH
- * Copyright (C) 2018-2025 Intel Corporation
+ * Copyright (C) 2018-2026 Intel Corporation
  */
 #include "iwl-trans.h"
 #include "iwl-prph.h"
@@ -95,7 +95,9 @@ static void iwl_pcie_gen2_apm_stop(struct iwl_trans *trans, bool op_mode_leave)
 			      CSR_GP_CNTRL_REG_FLAG_INIT_DONE);
 }
 
-void iwl_trans_pcie_fw_reset_handshake(struct iwl_trans *trans)
+static void
+_iwl_trans_pcie_fw_reset_handshake(struct iwl_trans *trans,
+				   bool dump_on_timeout)
 {
 	struct iwl_trans_pcie *trans_pcie = IWL_TRANS_GET_PCIE_TRANS(trans);
 	int ret;
@@ -133,7 +135,7 @@ void iwl_trans_pcie_fw_reset_handshake(struct iwl_trans *trans)
 			"timeout waiting for FW reset ACK (inta_hw=0x%x, reset_done %d)\n",
 			inta_hw, reset_done);
 
-		if (!reset_done) {
+		if (!reset_done && dump_on_timeout) {
 			struct iwl_fw_error_dump_mode mode = {
 				.type = IWL_ERR_TYPE_RESET_HS_TIMEOUT,
 				.context = IWL_ERR_CONTEXT_FROM_OPMODE,
@@ -145,6 +147,11 @@ void iwl_trans_pcie_fw_reset_handshake(struct iwl_trans *trans)
 	}
 
 	trans_pcie->fw_reset_state = FW_RESET_IDLE;
+}
+
+void iwl_trans_pcie_fw_reset_handshake(struct iwl_trans *trans)
+{
+	_iwl_trans_pcie_fw_reset_handshake(trans, false);
 }
 
 static void _iwl_trans_pcie_gen2_stop_device(struct iwl_trans *trans)
@@ -163,7 +170,7 @@ static void _iwl_trans_pcie_gen2_stop_device(struct iwl_trans *trans)
 		 * should assume that the firmware is already dead.
 		 */
 		trans->state = IWL_TRANS_NO_FW;
-		iwl_trans_pcie_fw_reset_handshake(trans);
+		_iwl_trans_pcie_fw_reset_handshake(trans, true);
 	}
 
 	trans_pcie->is_down = true;
@@ -320,6 +327,13 @@ static void iwl_pcie_get_rf_name(struct iwl_trans *trans)
 		else
 			pos = scnprintf(buf, buflen, "WH");
 		break;
+	case CSR_HW_RFID_TYPE(CSR_HW_RF_ID_TYPE_PE):
+		if (SILICON_Z_STEP ==
+		    CSR_HW_RFID_STEP(trans->info.hw_rf_id))
+			pos = scnprintf(buf, buflen, "PETC");
+		else
+			pos = scnprintf(buf, buflen, "PE");
+		break;
 	default:
 		return;
 	}
@@ -362,6 +376,7 @@ static void iwl_pcie_get_rf_name(struct iwl_trans *trans)
 void iwl_trans_pcie_gen2_fw_alive(struct iwl_trans *trans)
 {
 	struct iwl_trans_pcie *trans_pcie = IWL_TRANS_GET_PCIE_TRANS(trans);
+	u32 step_reg;
 
 	iwl_pcie_reset_ict(trans);
 
@@ -390,10 +405,13 @@ void iwl_trans_pcie_gen2_fw_alive(struct iwl_trans *trans)
 	iwl_pcie_get_rf_name(trans);
 	mutex_unlock(&trans_pcie->mutex);
 
-	if (trans->mac_cfg->device_family >= IWL_DEVICE_FAMILY_BZ)
-		trans->step_urm = !!(iwl_read_umac_prph(trans,
-							CNVI_PMU_STEP_FLOW) &
-					CNVI_PMU_STEP_FLOW_FORCE_URM);
+	if (trans->mac_cfg->device_family < IWL_DEVICE_FAMILY_BZ)
+		return;
+
+	step_reg = trans->mac_cfg->device_family >= IWL_DEVICE_FAMILY_SC ?
+		   CNVI_PMU_STEP_FLOW_SC : CNVI_PMU_STEP_FLOW_BZ;
+	trans->step_urm = !!(iwl_read_prph(trans, step_reg) &
+			     CNVI_PMU_STEP_FLOW_FORCE_URM);
 }
 
 static bool iwl_pcie_set_ltr(struct iwl_trans *trans)

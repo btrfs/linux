@@ -581,7 +581,7 @@ static struct inode *hostfs_iget(struct super_block *sb, char *name)
 	if (!inode)
 		return ERR_PTR(-ENOMEM);
 
-	if (inode->i_state & I_NEW) {
+	if (inode_state_read_once(inode) & I_NEW) {
 		unlock_new_inode(inode);
 	} else {
 		spin_lock(&inode->i_lock);
@@ -593,7 +593,7 @@ static struct inode *hostfs_iget(struct super_block *sb, char *name)
 }
 
 static int hostfs_create(struct mnt_idmap *idmap, struct inode *dir,
-			 struct dentry *dentry, umode_t mode, bool excl)
+			 struct dentry *dentry, umode_t mode)
 {
 	struct inode *inode;
 	char *name;
@@ -1047,7 +1047,7 @@ static int hostfs_init_fs_context(struct fs_context *fc)
 {
 	struct hostfs_fs_info *fsi;
 
-	fsi = kzalloc(sizeof(*fsi), GFP_KERNEL);
+	fsi = kzalloc_obj(*fsi);
 	if (!fsi)
 		return -ENOMEM;
 

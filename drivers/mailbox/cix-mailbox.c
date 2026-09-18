@@ -12,8 +12,6 @@
 #include <linux/module.h>
 #include <linux/platform_device.h>
 
-#include "mailbox.h"
-
 /*
  * The maximum transmission size is 32 words or 128 bytes.
  */
@@ -346,7 +344,7 @@ static void cix_mbox_isr_fifo(struct mbox_chan *chan)
 		/* FIFO overflow is generated */
 		if (int_status & CIX_FIFO_OFLOW_INT) {
 			status = cix_mbox_read(priv, CIX_FIFO_STAS);
-			dev_err(priv->dev, "fifo overlow: int_stats %d\n", status);
+			dev_err(priv->dev, "fifo overflow: int_stats %d\n", status);
 			cix_mbox_write(priv, CIX_FIFO_OFLOW_INT, CIX_INT_CLEAR);
 		}
 	}
@@ -405,7 +403,7 @@ static int cix_mbox_startup(struct mbox_chan *chan)
 	int index = cp->index, ret;
 	u32 val;
 
-	ret = request_irq(priv->irq, cix_mbox_isr, 0,
+	ret = request_irq(priv->irq, cix_mbox_isr, IRQF_NO_SUSPEND,
 			  dev_name(priv->dev), chan);
 	if (ret) {
 		dev_err(priv->dev, "Unable to acquire IRQ %d\n", priv->irq);
@@ -415,7 +413,7 @@ static int cix_mbox_startup(struct mbox_chan *chan)
 	switch (cp->type) {
 	case CIX_MBOX_TYPE_DB:
 		/* Overwrite txdone_method for DB channel */
-		chan->txdone_method = TXDONE_BY_ACK;
+		chan->txdone_method = MBOX_TXDONE_BY_ACK;
 		fallthrough;
 	case CIX_MBOX_TYPE_REG:
 		if (priv->dir == CIX_MBOX_TX) {
@@ -589,19 +587,15 @@ static int cix_mbox_probe(struct platform_device *pdev)
 	if (priv->irq < 0)
 		return priv->irq;
 
-	if (device_property_read_string(dev, "cix,mbox-dir", &dir_str)) {
-		dev_err(priv->dev, "cix,mbox_dir property not found\n");
-		return -EINVAL;
-	}
+	if (device_property_read_string(dev, "cix,mbox-dir", &dir_str))
+		return dev_err_probe(dev, -EINVAL, "cix,mbox-dir property not found\n");
 
 	if (!strcmp(dir_str, "tx"))
 		priv->dir = 0;
 	else if (!strcmp(dir_str, "rx"))
 		priv->dir = 1;
-	else {
-		dev_err(priv->dev, "cix,mbox_dir=%s is not expected\n", dir_str);
-		return -EINVAL;
-	}
+	else
+		return dev_err_probe(dev, -EINVAL, "cix,mbox-dir=%s is not expected\n", dir_str);
 
 	cix_mbox_init(priv);
 
@@ -615,9 +609,9 @@ static int cix_mbox_probe(struct platform_device *pdev)
 	platform_set_drvdata(pdev, priv);
 	ret = devm_mbox_controller_register(dev, &priv->mbox);
 	if (ret)
-		dev_err(dev, "Failed to register mailbox %d\n", ret);
+		return dev_err_probe(dev, ret, "Failed to register mailbox\n");
 
-	return ret;
+	return 0;
 }
 
 static const struct of_device_id cix_mbox_dt_ids[] = {

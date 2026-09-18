@@ -43,12 +43,9 @@
 #include <linux/gpio/consumer.h>
 #include <linux/gpio/driver.h>
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/platform_device.h>
 #include <linux/property.h>
 #include <linux/delay.h>
-
-#include "gpiolib.h"
 
 struct gpio_latch_priv {
 	struct gpio_chip gc;
