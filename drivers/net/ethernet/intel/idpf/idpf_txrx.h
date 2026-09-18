@@ -5,6 +5,7 @@
 #define _IDPF_TXRX_H_
 
 #include <linux/dim.h>
+#include <linux/net/intel/virtchnl2_lan_desc.h>
 
 #include <net/libeth/cache.h>
 #include <net/libeth/types.h>
@@ -13,7 +14,6 @@
 #include <net/xdp.h>
 
 #include "idpf_lan_txrx.h"
-#include "virtchnl2_lan_desc.h"
 
 #define IDPF_LARGE_MAX_Q			256
 #define IDPF_MAX_Q				16
@@ -21,7 +21,7 @@
 /* Mailbox Queue */
 #define IDPF_MAX_MBXQ				1
 
-#define IDPF_MIN_TXQ_DESC			64
+#define IDPF_MIN_TXQ_DESC			128
 #define IDPF_MIN_RXQ_DESC			64
 #define IDPF_MIN_TXQ_COMPLQ_DESC		256
 #define IDPF_MAX_QIDS				256
@@ -101,6 +101,7 @@ do {								\
 		idx = 0;					\
 } while (0)
 
+#define IDPF_RX_MAX_BUF_SZ			(16384 - 128)
 #define IDPF_RX_BUF_STRIDE			32
 #define IDPF_RX_BUF_POST_STRIDE			16
 #define IDPF_LOW_WATERMARK			64
@@ -235,7 +236,7 @@ enum idpf_tx_ctx_desc_eipt_offload {
 				 (sizeof(u16) * IDPF_RX_MAX_PTYPE_PROTO_IDS))
 #define IDPF_RX_PTYPE_HDR_SZ	sizeof(struct virtchnl2_get_ptype_info)
 #define IDPF_RX_MAX_PTYPES_PER_BUF	\
-	DIV_ROUND_DOWN_ULL((IDPF_CTLQ_MAX_BUF_LEN - IDPF_RX_PTYPE_HDR_SZ), \
+	DIV_ROUND_DOWN_ULL(LIBIE_CTLQ_MAX_BUF_LEN - IDPF_RX_PTYPE_HDR_SZ, \
 			   IDPF_RX_MAX_PTYPE_SZ)
 
 #define IDPF_GET_PTYPE_SIZE(p) struct_size((p), proto_id, (p)->proto_id_count)
@@ -282,6 +283,7 @@ struct idpf_ptype_state {
  * @__IDPF_Q_FLOW_SCH_EN: Enable flow scheduling
  * @__IDPF_Q_SW_MARKER: Used to indicate TX queue marker completions
  * @__IDPF_Q_CRC_EN: enable CRC offload in singleq mode
+ * @__IDPF_Q_RSC_EN: enable Receive Side Coalescing on Rx (splitq)
  * @__IDPF_Q_HSPLIT_EN: enable header split on Rx (splitq)
  * @__IDPF_Q_PTP: indicates whether the Rx timestamping is enabled for the
  *		  queue
@@ -296,6 +298,7 @@ enum idpf_queue_flags_t {
 	__IDPF_Q_FLOW_SCH_EN,
 	__IDPF_Q_SW_MARKER,
 	__IDPF_Q_CRC_EN,
+	__IDPF_Q_RSC_EN,
 	__IDPF_Q_HSPLIT_EN,
 	__IDPF_Q_PTP,
 	__IDPF_Q_NOIRQ,
@@ -924,6 +927,7 @@ struct idpf_bufq_set {
  * @singleq.rxqs: Array of RX queue pointers
  * @splitq: Struct with split queue related members
  * @splitq.num_rxq_sets: Number of RX queue sets
+ * @splitq.num_rxq_sets: Number of Buffer queue sets
  * @splitq.rxq_sets: Array of RX queue sets
  * @splitq.bufq_sets: Buffer queue set pointer
  *
@@ -941,6 +945,7 @@ struct idpf_rxq_group {
 		} singleq;
 		struct {
 			u16 num_rxq_sets;
+			u16 num_bufq_sets;
 			struct idpf_rxq_set *rxq_sets[IDPF_LARGE_MAX_Q];
 			struct idpf_bufq_set *bufq_sets;
 		} splitq;
@@ -1071,24 +1076,35 @@ static inline u32 idpf_tx_splitq_get_free_bufs(struct idpf_sw_queue *refillq)
 
 int idpf_vport_singleq_napi_poll(struct napi_struct *napi, int budget);
 void idpf_vport_init_num_qs(struct idpf_vport *vport,
-			    struct virtchnl2_create_vport *vport_msg);
-void idpf_vport_calc_num_q_desc(struct idpf_vport *vport);
+			    struct virtchnl2_create_vport *vport_msg,
+			    struct idpf_q_vec_rsrc *rsrc);
+void idpf_vport_calc_num_q_desc(struct idpf_vport *vport,
+				struct idpf_q_vec_rsrc *rsrc);
 int idpf_vport_calc_total_qs(struct idpf_adapter *adapter, u16 vport_index,
 			     struct virtchnl2_create_vport *vport_msg,
 			     struct idpf_vport_max_q *max_q);
-void idpf_vport_calc_num_q_groups(struct idpf_vport *vport);
-int idpf_vport_queues_alloc(struct idpf_vport *vport);
-void idpf_vport_queues_rel(struct idpf_vport *vport);
-void idpf_vport_intr_rel(struct idpf_vport *vport);
-int idpf_vport_intr_alloc(struct idpf_vport *vport);
+void idpf_vport_calc_num_q_groups(struct idpf_q_vec_rsrc *rsrc);
+int idpf_vport_queues_alloc(struct idpf_vport *vport,
+			    struct idpf_q_vec_rsrc *rsrc);
+void idpf_vport_queues_rel(struct idpf_vport *vport,
+			   struct idpf_q_vec_rsrc *rsrc);
+void idpf_vport_intr_rel(struct idpf_q_vec_rsrc *rsrc);
+int idpf_vport_intr_alloc(struct idpf_vport *vport,
+			  struct idpf_q_vec_rsrc *rsrc);
 void idpf_vport_intr_update_itr_ena_irq(struct idpf_q_vector *q_vector);
-void idpf_vport_intr_deinit(struct idpf_vport *vport);
-int idpf_vport_intr_init(struct idpf_vport *vport);
-void idpf_vport_intr_ena(struct idpf_vport *vport);
-int idpf_config_rss(struct idpf_vport *vport);
-int idpf_init_rss(struct idpf_vport *vport);
-void idpf_deinit_rss(struct idpf_vport *vport);
-int idpf_rx_bufs_init_all(struct idpf_vport *vport);
+void idpf_vport_intr_deinit(struct idpf_vport *vport,
+			    struct idpf_q_vec_rsrc *rsrc);
+int idpf_vport_intr_init(struct idpf_vport *vport,
+			 struct idpf_q_vec_rsrc *rsrc);
+void idpf_vport_intr_ena(struct idpf_vport *vport,
+			 struct idpf_q_vec_rsrc *rsrc);
+void idpf_fill_dflt_rss_lut(struct idpf_vport *vport,
+			    struct idpf_rss_data *rss_data);
+int idpf_config_rss(struct idpf_vport *vport, struct idpf_rss_data *rss_data);
+int idpf_init_rss_lut(struct idpf_vport *vport, struct idpf_rss_data *rss_data);
+void idpf_deinit_rss_lut(struct idpf_rss_data *rss_data);
+int idpf_rx_bufs_init_all(struct idpf_vport *vport,
+			  struct idpf_q_vec_rsrc *rsrc);
 
 struct idpf_q_vector *idpf_find_rxq_vec(const struct idpf_vport *vport,
 					u32 q_num);

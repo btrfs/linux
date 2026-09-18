@@ -246,32 +246,32 @@ static unsigned extract_freq(struct cpufreq_policy *policy, u32 val)
 
 static u32 cpu_freq_read_intel(struct acpi_pct_register *not_used)
 {
-	u32 val, dummy __always_unused;
+	u64 val;
 
-	rdmsr(MSR_IA32_PERF_CTL, val, dummy);
-	return val;
+	rdmsrq(MSR_IA32_PERF_CTL, val);
+	return (u32)val;
 }
 
 static void cpu_freq_write_intel(struct acpi_pct_register *not_used, u32 val)
 {
-	u32 lo, hi;
+	u64 msrval;
 
-	rdmsr(MSR_IA32_PERF_CTL, lo, hi);
-	lo = (lo & ~INTEL_MSR_RANGE) | (val & INTEL_MSR_RANGE);
-	wrmsr(MSR_IA32_PERF_CTL, lo, hi);
+	rdmsrq(MSR_IA32_PERF_CTL, msrval);
+	msrval = (msrval & ~(u64)INTEL_MSR_RANGE) | (val & INTEL_MSR_RANGE);
+	wrmsrq(MSR_IA32_PERF_CTL, msrval);
 }
 
 static u32 cpu_freq_read_amd(struct acpi_pct_register *not_used)
 {
-	u32 val, dummy __always_unused;
+	u64 val;
 
-	rdmsr(MSR_AMD_PERF_CTL, val, dummy);
-	return val;
+	rdmsrq(MSR_AMD_PERF_CTL, val);
+	return (u32)val;
 }
 
 static void cpu_freq_write_amd(struct acpi_pct_register *not_used, u32 val)
 {
-	wrmsr(MSR_AMD_PERF_CTL, val, 0);
+	wrmsrq(MSR_AMD_PERF_CTL, val);
 }
 
 static u32 cpu_freq_read_io(struct acpi_pct_register *reg)
@@ -395,7 +395,7 @@ static unsigned int check_freqs(struct cpufreq_policy *policy,
 		cur_freq = extract_freq(policy, get_cur_val(mask, data));
 		if (cur_freq == freq)
 			return 1;
-		udelay(10);
+		usleep_range(10, 15);
 	}
 	return 0;
 }
@@ -675,6 +675,29 @@ static inline u64 get_max_boost_ratio(unsigned int cpu, u64 *nominal_freq)
 }
 #endif
 
+static void acpi_cpufreq_resolve_max_freq(struct cpufreq_policy *policy,
+					  unsigned int pss_max_freq)
+{
+#ifdef CONFIG_ACPI_CPPC_LIB
+	u64 max_speed = cppc_get_dmi_max_khz();
+	/*
+	 * Use DMI "Max Speed" if it looks plausible: must be
+	 * above _PSS P0 frequency and within 2x of it.
+	 */
+	if (max_speed > pss_max_freq && max_speed < pss_max_freq * 2) {
+		policy->cpuinfo.max_freq = max_speed;
+		return;
+	}
+#endif
+	/*
+	 * If the maximum "boost" frequency is unknown, ask the arch
+	 * scale-invariance code to use the "nominal" performance for
+	 * CPU utilization scaling so as to prevent the schedutil
+	 * governor from selecting inadequate CPU frequencies.
+	 */
+	arch_set_max_freq_ratio(true);
+}
+
 static int acpi_cpufreq_cpu_init(struct cpufreq_policy *policy)
 {
 	struct cpufreq_frequency_table *freq_table;
@@ -700,7 +723,7 @@ static int acpi_cpufreq_cpu_init(struct cpufreq_policy *policy)
 		return blacklisted;
 #endif
 
-	data = kzalloc(sizeof(*data), GFP_KERNEL);
+	data = kzalloc_obj(*data);
 	if (!data)
 		return -ENOMEM;
 
@@ -798,8 +821,7 @@ static int acpi_cpufreq_cpu_init(struct cpufreq_policy *policy)
 		goto err_unreg;
 	}
 
-	freq_table = kcalloc(perf->state_count + 1, sizeof(*freq_table),
-			     GFP_KERNEL);
+	freq_table = kzalloc_objs(*freq_table, perf->state_count + 1);
 	if (!freq_table) {
 		result = -ENOMEM;
 		goto err_unreg;
@@ -850,13 +872,7 @@ static int acpi_cpufreq_cpu_init(struct cpufreq_policy *policy)
 
 		policy->cpuinfo.max_freq = freq * max_boost_ratio >> SCHED_CAPACITY_SHIFT;
 	} else {
-		/*
-		 * If the maximum "boost" frequency is unknown, ask the arch
-		 * scale-invariance code to use the "nominal" performance for
-		 * CPU utilization scaling so as to prevent the schedutil
-		 * governor from selecting inadequate CPU frequencies.
-		 */
-		arch_set_max_freq_ratio(true);
+		acpi_cpufreq_resolve_max_freq(policy, freq_table[0].frequency);
 	}
 
 	policy->freq_table = freq_table;

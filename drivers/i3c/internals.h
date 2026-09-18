@@ -11,13 +11,17 @@
 #include <linux/i3c/master.h>
 #include <linux/io.h>
 
+int __must_check i3c_bus_rpm_get(struct i3c_bus *bus);
+void i3c_bus_rpm_put(struct i3c_bus *bus);
+bool i3c_bus_rpm_ibi_allowed(struct i3c_bus *bus);
+
 void i3c_bus_normaluse_lock(struct i3c_bus *bus);
 void i3c_bus_normaluse_unlock(struct i3c_bus *bus);
 
 int i3c_dev_setdasa_locked(struct i3c_dev_desc *dev);
-int i3c_dev_do_priv_xfers_locked(struct i3c_dev_desc *dev,
-				 struct i3c_priv_xfer *xfers,
-				 int nxfers);
+int i3c_dev_do_xfers_locked(struct i3c_dev_desc *dev,
+			    struct i3c_xfer *xfers,
+			    int nxfers, enum i3c_xfer_mode mode);
 int i3c_dev_disable_ibi_locked(struct i3c_dev_desc *dev);
 int i3c_dev_enable_ibi_locked(struct i3c_dev_desc *dev);
 int i3c_dev_request_ibi_locked(struct i3c_dev_desc *dev,
@@ -66,6 +70,11 @@ static inline void i3c_readl_fifo(const void __iomem *addr, void *buf,
 		readsl(addr, &tmp, 1);
 		memcpy(buf + (nbytes & ~3), &tmp, nbytes & 3);
 	}
+}
+
+static inline struct i3c_master_controller *i3c_bus_to_i3c_master(struct i3c_bus *i3cbus)
+{
+	return container_of(i3cbus, struct i3c_master_controller, bus);
 }
 
 #endif /* I3C_INTERNAL_H */

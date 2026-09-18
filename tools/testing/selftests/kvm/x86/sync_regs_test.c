@@ -20,7 +20,7 @@
 #include "kvm_util.h"
 #include "processor.h"
 
-#define UCALL_PIO_PORT ((uint16_t)0x1000)
+#define UCALL_PIO_PORT ((u16)0x1000)
 
 struct ucall uc_none = {
 	.cmd = UCALL_NONE,
@@ -181,7 +181,7 @@ static void race_sync_regs(struct kvm_vcpu *vcpu, void *racer)
 		    !!(run->s.regs.sregs.cr4 & X86_CR4_PAE),
 		    !!(run->s.regs.sregs.efer & EFER_LME));
 
-	TEST_ASSERT_EQ(pthread_create(&thread, NULL, racer, (void *)run), 0);
+	kvm_pthread_create(&thread, NULL, racer, (void *)run);
 
 	for (t = time(NULL) + TIMEOUT; time(NULL) < t;) {
 		/*
@@ -199,8 +199,7 @@ static void race_sync_regs(struct kvm_vcpu *vcpu, void *racer)
 		}
 	}
 
-	TEST_ASSERT_EQ(pthread_cancel(thread), 0);
-	TEST_ASSERT_EQ(pthread_join(thread, NULL), 0);
+	kvm_pthread_cancel_join(thread);
 
 	kvm_x86_state_cleanup(state);
 }
@@ -255,7 +254,6 @@ KVM_ONE_VCPU_TEST(sync_regs_test, req_and_verify_all_valid, guest_code)
 	struct kvm_regs regs;
 
 	/* Request and verify all valid register sets. */
-	/* TODO: BUILD TIME CHECK: TEST_ASSERT(KVM_SYNC_X86_NUM_FIELDS != 3); */
 	run->kvm_valid_regs = TEST_SYNC_FIELDS;
 	vcpu_run(vcpu);
 	TEST_ASSERT_KVM_EXIT_REASON(vcpu, KVM_EXIT_IO);

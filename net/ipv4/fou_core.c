@@ -22,7 +22,7 @@
 #include "fou_nl.h"
 
 struct fou {
-	struct socket *sock;
+	struct sock *sk;
 	u8 protocol;
 	u8 flags;
 	__be16 port;
@@ -215,6 +215,9 @@ static int gue_udp_recv(struct sock *sk, struct sk_buff *skb)
 		return gue_control_message(skb, guehdr);
 
 	proto_ctype = guehdr->proto_ctype;
+	if (unlikely(!proto_ctype))
+		goto drop;
+
 	__skb_pull(skb, sizeof(struct udphdr) + hdrlen);
 	skb_reset_transport_header(skb);
 
@@ -505,8 +508,8 @@ out:
 
 static bool fou_cfg_cmp(struct fou *fou, struct fou_cfg *cfg)
 {
-	struct sock *sk = fou->sock->sk;
 	struct udp_port_cfg *udp_cfg = &cfg->udp_config;
+	struct sock *sk = fou->sk;
 
 	if (fou->family != udp_cfg->family ||
 	    fou->port != udp_cfg->local_udp_port ||
@@ -555,11 +558,8 @@ static int fou_add_to_port_list(struct net *net, struct fou *fou,
 
 static void fou_release(struct fou *fou)
 {
-	struct socket *sock = fou->sock;
-
 	list_del(&fou->list);
-	udp_tunnel_sock_release(sock);
-
+	udp_tunnel_sock_release(fou->sk);
 	kfree_rcu(fou, rcu);
 }
 
@@ -578,7 +578,7 @@ static int fou_create(struct net *net, struct fou_cfg *cfg,
 		goto error;
 
 	/* Allocate FOU port structure */
-	fou = kzalloc(sizeof(*fou), GFP_KERNEL);
+	fou = kzalloc_obj(*fou);
 	if (!fou) {
 		err = -ENOMEM;
 		goto error;
@@ -590,7 +590,7 @@ static int fou_create(struct net *net, struct fou_cfg *cfg,
 	fou->family = cfg->udp_config.family;
 	fou->flags = cfg->flags;
 	fou->type = cfg->type;
-	fou->sock = sock;
+	fou->sk = sk;
 
 	memset(&tunnel_cfg, 0, sizeof(tunnel_cfg));
 	tunnel_cfg.encap_type = 1;
@@ -615,7 +615,7 @@ static int fou_create(struct net *net, struct fou_cfg *cfg,
 		goto error;
 	}
 
-	setup_udp_tunnel_sock(net, sock, &tunnel_cfg);
+	setup_udp_tunnel_sock(net, sk, &tunnel_cfg);
 
 	sk->sk_allocation = GFP_ATOMIC;
 
@@ -629,9 +629,9 @@ static int fou_create(struct net *net, struct fou_cfg *cfg,
 	return 0;
 
 error:
-	kfree(fou);
 	if (sock)
-		udp_tunnel_sock_release(sock);
+		udp_tunnel_sock_release(sock->sk);
+	kfree_rcu(fou, rcu);
 
 	return err;
 }
@@ -776,9 +776,9 @@ int fou_nl_del_doit(struct sk_buff *skb, struct genl_info *info)
 
 static int fou_fill_info(struct fou *fou, struct sk_buff *msg)
 {
-	struct sock *sk = fou->sock->sk;
+	struct sock *sk = fou->sk;
 
-	if (nla_put_u8(msg, FOU_ATTR_AF, fou->sock->sk->sk_family) ||
+	if (nla_put_u8(msg, FOU_ATTR_AF, sk->sk_family) ||
 	    nla_put_be16(msg, FOU_ATTR_PORT, fou->port) ||
 	    nla_put_be16(msg, FOU_ATTR_PEER_PORT, sk->sk_dport) ||
 	    nla_put_u8(msg, FOU_ATTR_IPPROTO, fou->protocol) ||
@@ -790,7 +790,7 @@ static int fou_fill_info(struct fou *fou, struct sk_buff *msg)
 		if (nla_put_flag(msg, FOU_ATTR_REMCSUM_NOPARTIAL))
 			return -1;
 
-	if (fou->sock->sk->sk_family == AF_INET) {
+	if (sk->sk_family == AF_INET) {
 		if (nla_put_in_addr(msg, FOU_ATTR_LOCAL_V4, sk->sk_rcv_saddr))
 			return -1;
 
@@ -1040,7 +1040,7 @@ static void fou_build_udp(struct sk_buff *skb, struct ip_tunnel_encap *e,
 
 	uh->dest = e->dport;
 	uh->source = sport;
-	uh->len = htons(skb->len);
+	udp_set_len(uh, skb->len);
 	udp_set_csum(!(e->flags & TUNNEL_ENCAP_FLAG_CSUM), skb,
 		     fl4->saddr, fl4->daddr, skb->len);
 
@@ -1147,8 +1147,7 @@ static int gue_err(struct sk_buff *skb, u32 info)
 	 * recursion. Besides, this kind of encapsulation can't even be
 	 * configured currently. Discard this.
 	 */
-	if (guehdr->proto_ctype == IPPROTO_UDP ||
-	    guehdr->proto_ctype == IPPROTO_UDPLITE)
+	if (guehdr->proto_ctype == IPPROTO_UDP)
 		return -EOPNOTSUPP;
 
 	skb_set_transport_header(skb, -(int)sizeof(struct icmphdr));

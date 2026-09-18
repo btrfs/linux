@@ -21,9 +21,10 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 
-#include "../kselftest_harness.h"
+#include "kselftest_harness.h"
 
 #define TLS_PAYLOAD_MAX_LEN 16384
+#define TLS_HDR_LEN 5
 #define SOL_TLS 282
 
 static int fips_enabled;
@@ -835,6 +836,43 @@ TEST_F(tls, send_and_splice)
 	EXPECT_EQ(memcmp(mem_send, mem_recv, send_len), 0);
 }
 
+TEST_F(tls, splice_onto_full_record)
+{
+	char mem_send[4608];
+	char mem_recv[4608];
+	int frag_len = 100;
+	int nfrags, i, off;
+	int p[2];
+
+	memrnd(mem_send, sizeof(mem_send));
+	ASSERT_GE(pipe(p), 0);
+
+	for (nfrags = 16; nfrags <= 44; nfrags++) {
+		for (i = 0, off = 0; i < nfrags; i++, off += frag_len) {
+			EXPECT_EQ(write(p[1], mem_send + off, frag_len), frag_len);
+			EXPECT_EQ(splice(p[0], NULL, self->fd, NULL, frag_len,
+					 SPLICE_F_MORE), frag_len);
+		}
+
+		EXPECT_EQ(send(self->fd, mem_send + off, 1, MSG_MORE), 1);
+		off++;
+
+		EXPECT_EQ(write(p[1], mem_send + off, frag_len), frag_len);
+		EXPECT_EQ(splice(p[0], NULL, self->fd, NULL, frag_len,
+				 SPLICE_F_MORE), frag_len);
+		off += frag_len;
+
+		EXPECT_EQ(send(self->fd, mem_send + off, 1, 0), 1);
+		off++;
+
+		EXPECT_EQ(recv(self->cfd, mem_recv, off, MSG_WAITALL), off);
+		EXPECT_EQ(memcmp(mem_send, mem_recv, off), 0);
+	}
+
+	close(p[0]);
+	close(p[1]);
+}
+
 TEST_F(tls, splice_to_pipe)
 {
 	int send_len = TLS_PAYLOAD_MAX_LEN;
@@ -946,6 +984,49 @@ TEST_F(tls, peek_and_splice)
 	EXPECT_EQ(memcmp(mem_send, mem_recv, send_len), 0);
 }
 
+TEST_F(tls, splice_to_pipe_small)
+{
+	int send_len = TLS_PAYLOAD_MAX_LEN;
+	char mem_send[TLS_PAYLOAD_MAX_LEN];
+	char mem_recv[TLS_PAYLOAD_MAX_LEN];
+	size_t total = 0;
+	int p[2];
+
+	memrnd(mem_send, sizeof(mem_send));
+
+	ASSERT_GE(pipe(p), 0);
+
+	/* Shrink pipe to 1 page (typically 4096 bytes) to force multiple
+	 * splice iterations for a 16384-byte TLS record.
+	 */
+	EXPECT_GE(fcntl(p[1], F_SETPIPE_SZ, 4096), 4096);
+
+	EXPECT_EQ(send(self->fd, mem_send, send_len, 0), send_len);
+
+	while (total < (size_t)send_len) {
+		ssize_t spliced, drained;
+
+		spliced = splice(self->cfd, NULL, p[1], NULL,
+				 send_len - total, 0);
+		EXPECT_GT(spliced, 0);
+		if (spliced <= 0)
+			break;
+
+		drained = read(p[0], mem_recv + total, spliced);
+		EXPECT_EQ(drained, spliced);
+		if (drained <= 0)
+			break;
+
+		total += drained;
+	}
+
+	EXPECT_EQ(total, (size_t)send_len);
+	EXPECT_EQ(memcmp(mem_send, mem_recv, send_len), 0);
+
+	close(p[0]);
+	close(p[1]);
+}
+
 #define MAX_FRAGS 48
 TEST_F(tls, splice_short)
 {
@@ -954,6 +1035,8 @@ TEST_F(tls, splice_short)
 	char sendbuf[0x100];
 	char sendchar = 'S';
 	int pipefds[2];
+	int pipe_sz;
+	int ret;
 	int i;
 
 	sendchar_iov.iov_base = &sendchar;
@@ -962,7 +1045,11 @@ TEST_F(tls, splice_short)
 	memset(sendbuf, 's', sizeof(sendbuf));
 
 	ASSERT_GE(pipe2(pipefds, O_NONBLOCK), 0);
-	ASSERT_GE(fcntl(pipefds[0], F_SETPIPE_SZ, (MAX_FRAGS + 1) * 0x1000), 0);
+	pipe_sz = (MAX_FRAGS + 1) * getpagesize();
+	ret = fcntl(pipefds[0], F_SETPIPE_SZ, pipe_sz);
+	if (ret < 0 && errno == EPERM)
+		SKIP(return, "insufficient pipe capacity");
+	ASSERT_GE(ret, pipe_sz);
 
 	for (i = 0; i < MAX_FRAGS; i++)
 		ASSERT_GE(vmsplice(pipefds[1], &sendchar_iov, 1, 0), 0);
@@ -1506,7 +1593,7 @@ test_mutliproc(struct __test_metadata *_metadata, struct _test_data_tls *self,
 			res = recv(self->cfd, rb,
 				   left > sizeof(rb) ? sizeof(rb) : left, 0);
 
-			EXPECT_GE(res, 0);
+			ASSERT_GE(res, 0);
 			left -= res;
 		}
 	} else {
@@ -1523,7 +1610,7 @@ test_mutliproc(struct __test_metadata *_metadata, struct _test_data_tls *self,
 				res = send(self->fd, buf,
 					   left > file_sz ? file_sz : left, 0);
 
-			EXPECT_GE(res, 0);
+			ASSERT_GE(res, 0);
 			left -= res;
 		}
 	}
@@ -1753,6 +1840,63 @@ TEST_F(tls, recv_efault)
 }
 
 #define TLS_RECORD_TYPE_HANDSHAKE      0x16
+
+TEST_F(tls_basic, recvmsg_nopad_retry_iov)
+{
+	char payload[32];
+	char first_iov[sizeof(payload)];
+	char later_iov[sizeof(payload) * 2];
+	char expected_later_iov[sizeof(later_iov)];
+	char cbuf[CMSG_SPACE(sizeof(char))];
+	struct tls_crypto_info_keys tls13;
+	struct iovec iov[] = {
+		{ .iov_base = first_iov, .iov_len = sizeof(first_iov) },
+		{ .iov_base = later_iov, .iov_len = sizeof(later_iov) },
+	};
+	struct msghdr msg = {
+		.msg_iov = iov,
+		.msg_iovlen = ARRAY_SIZE(iov),
+		.msg_control = cbuf,
+		.msg_controllen = sizeof(cbuf),
+	};
+	int one = 1;
+	int ret;
+	int i;
+
+	if (self->notls)
+		SKIP(return, "no TLS support");
+
+	tls_crypto_info_init(TLS_1_3_VERSION, TLS_CIPHER_AES_GCM_128,
+			     &tls13, 0);
+
+	ret = setsockopt(self->fd, SOL_TLS, TLS_TX, &tls13, tls13.len);
+	ASSERT_EQ(ret, 0);
+
+	ret = setsockopt(self->cfd, SOL_TLS, TLS_RX, &tls13, tls13.len);
+	ASSERT_EQ(ret, 0);
+
+	ret = setsockopt(self->cfd, SOL_TLS, TLS_RX_EXPECT_NO_PAD,
+			 &one, sizeof(one));
+	ASSERT_EQ(ret, 0);
+
+	for (i = 0; i < sizeof(payload); i++)
+		payload[i] = 0x40 + i;
+	memset(first_iov, 0xa5, sizeof(first_iov));
+	memset(later_iov, 0x5a, sizeof(later_iov));
+	memset(expected_later_iov, 0x5a, sizeof(expected_later_iov));
+
+	/* A control record forces optimistic TLS 1.3 RX to retry. */
+	ret = tls_send_cmsg(self->fd, TLS_RECORD_TYPE_HANDSHAKE,
+			    payload, sizeof(payload), 0);
+	ASSERT_EQ(ret, sizeof(payload));
+
+	ret = recvmsg(self->cfd, &msg, 0);
+	ASSERT_EQ(ret, sizeof(payload));
+	EXPECT_EQ(memcmp(first_iov, payload, sizeof(payload)), 0);
+	EXPECT_EQ(memcmp(later_iov, expected_later_iov,
+			 sizeof(later_iov)), 0);
+}
+
 /* key_update, length 1, update_not_requested */
 static const char key_update_msg[] = "\x18\x00\x00\x01\x00";
 static void tls_send_keyupdate(struct __test_metadata *_metadata, int fd)
@@ -2589,26 +2733,81 @@ TEST_F(tls_err, bad_rec)
 	EXPECT_EQ(errno, EAGAIN);
 }
 
+/* cfd carries a byte stream, so one recv() can return part of a
+ * record. Take the fragment length from the record header and wait
+ * for the remainder.
+ */
+static void tls_send_bad_auth(struct __test_metadata *_metadata,
+			      int fd, int cfd, int fd2)
+{
+	char buf[128];
+	int len;
+
+	memrnd(buf, sizeof(buf) / 2);
+	ASSERT_EQ(send(fd, buf, sizeof(buf) / 2, 0), sizeof(buf) / 2);
+
+	ASSERT_EQ(recv(cfd, buf, TLS_HDR_LEN, MSG_WAITALL), TLS_HDR_LEN);
+
+	len = ((unsigned char)buf[3] << 8) | (unsigned char)buf[4];
+	ASSERT_GT(len, 0);
+	ASSERT_LE(len, (int)sizeof(buf) - TLS_HDR_LEN);
+
+	ASSERT_EQ(recv(cfd, buf + TLS_HDR_LEN, len, MSG_WAITALL), len);
+
+	buf[TLS_HDR_LEN + len - 1]++;
+
+	ASSERT_EQ(send(fd2, buf, TLS_HDR_LEN + len, 0), TLS_HDR_LEN + len);
+}
+
 TEST_F(tls_err, bad_auth)
 {
 	char buf[128];
-	int n;
 
 	if (self->notls)
 		SKIP(return, "no TLS support");
 
-	memrnd(buf, sizeof(buf) / 2);
-	EXPECT_EQ(send(self->fd, buf, sizeof(buf) / 2, 0), sizeof(buf) / 2);
-	n = recv(self->cfd, buf, sizeof(buf), 0);
-	EXPECT_GT(n, sizeof(buf) / 2);
+	tls_send_bad_auth(_metadata, self->fd, self->cfd, self->fd2);
 
-	buf[n - 1]++;
-
-	EXPECT_EQ(send(self->fd2, buf, n, 0), n);
 	EXPECT_EQ(recv(self->cfd2, buf, sizeof(buf), 0), -1);
 	EXPECT_EQ(errno, EBADMSG);
 	EXPECT_EQ(recv(self->cfd2, buf, sizeof(buf), 0), -1);
 	EXPECT_EQ(errno, EBADMSG);
+}
+
+/* A record that did not authenticate breaks the connection for every
+ * reader, splice included.
+ *
+ * The two decrypt paths reach that result differently. A synchronous
+ * decrypt leaves the record parsed, so the splice re-runs the decrypt
+ * and fails on the record itself; the ctx->async_wait.err check in
+ * tls_sw_splice_read() is not what stops it. Only an asynchronous
+ * decrypt, which needs a TLS 1.2 socket and an AEAD advertising
+ * CRYPTO_ALG_ASYNC, consumes the record before the failure is
+ * recorded, leaving that check the sole reason the splice fails.
+ */
+TEST_F(tls_err, bad_auth_splice)
+{
+	char buf[128];
+	ssize_t ret;
+	int p[2];
+
+	if (self->notls)
+		SKIP(return, "no TLS support");
+
+	tls_send_bad_auth(_metadata, self->fd, self->cfd, self->fd2);
+
+	EXPECT_EQ(recv(self->cfd2, buf, sizeof(buf), 0), -1);
+	EXPECT_EQ(errno, EBADMSG);
+
+	ASSERT_GE(pipe(p), 0);
+
+	ret = splice(self->cfd2, NULL, p[1], NULL, sizeof(buf),
+		     SPLICE_F_NONBLOCK);
+	EXPECT_EQ(ret, -1);
+	EXPECT_EQ(errno, EBADMSG);
+
+	close(p[0]);
+	close(p[1]);
 }
 
 TEST_F(tls_err, bad_in_large_read)
@@ -2786,10 +2985,10 @@ TEST_F(tls_err, epoll_partial_rec)
 TEST_F(tls_err, poll_partial_rec_async)
 {
 	struct pollfd pfd = { };
+	char token = '\0';
 	ssize_t rec_len;
 	char rec[256];
 	char buf[128];
-	char token;
 	int p[2];
 	int ret;
 
@@ -2854,6 +3053,146 @@ TEST_F(tls_err, oob_pressure)
 	EXPECT_EQ(send(self->fd2, buf, sizeof(buf), 0), sizeof(buf));
 	for (i = 0; i < 64; i++)
 		EXPECT_EQ(send(self->fd2, buf, 5, MSG_OOB), 5);
+}
+
+/*
+ * Parse a stream of TLS records and ensure that each record respects
+ * the specified @max_payload_len.
+ */
+static size_t parse_tls_records(struct __test_metadata *_metadata,
+				const __u8 *rx_buf, int rx_len, int overhead,
+				__u16 max_payload_len)
+{
+	const __u8 *rec = rx_buf;
+	size_t total_plaintext_rx = 0;
+
+	while (rec < rx_buf + rx_len) {
+		__u16 record_payload_len;
+		__u16 plaintext_len;
+
+		/* Sanity check that it's a TLS header for application data */
+		ASSERT_EQ(rec[0], 23);
+		ASSERT_EQ(rec[1], 0x3);
+		ASSERT_EQ(rec[2], 0x3);
+
+		memcpy(&record_payload_len, rec + 3, 2);
+		record_payload_len = ntohs(record_payload_len);
+		ASSERT_GE(record_payload_len, overhead);
+
+		plaintext_len = record_payload_len - overhead;
+		total_plaintext_rx += plaintext_len;
+
+		/* Plaintext must not exceed the specified limit */
+		ASSERT_LE(plaintext_len, max_payload_len);
+		rec += TLS_HDR_LEN + record_payload_len;
+	}
+
+	return total_plaintext_rx;
+}
+
+TEST(tls_12_tx_max_payload_len)
+{
+	struct tls_crypto_info_keys tls12;
+	int cfd, ret, fd, overhead;
+	size_t total_plaintext_rx = 0;
+	__u8 tx[1024], rx[2000];
+	__u16 limit = 128;
+	__u16 opt = 0;
+	unsigned int optlen = sizeof(opt);
+	bool notls;
+
+	tls_crypto_info_init(TLS_1_2_VERSION, TLS_CIPHER_AES_CCM_128,
+			     &tls12, 0);
+
+	ulp_sock_pair(_metadata, &fd, &cfd, &notls);
+
+	if (notls)
+		exit(KSFT_SKIP);
+
+	/* Don't install keys on fd, we'll parse raw records */
+	ret = setsockopt(cfd, SOL_TLS, TLS_TX, &tls12, tls12.len);
+	ASSERT_EQ(ret, 0);
+
+	ret = setsockopt(cfd, SOL_TLS, TLS_TX_MAX_PAYLOAD_LEN, &limit,
+			 sizeof(limit));
+	ASSERT_EQ(ret, 0);
+
+	ret = getsockopt(cfd, SOL_TLS, TLS_TX_MAX_PAYLOAD_LEN, &opt, &optlen);
+	EXPECT_EQ(ret, 0);
+	EXPECT_EQ(limit, opt);
+	EXPECT_EQ(optlen, sizeof(limit));
+
+	memset(tx, 0, sizeof(tx));
+	ASSERT_EQ(send(cfd, tx, sizeof(tx), 0), sizeof(tx));
+	close(cfd);
+
+	ret = recv(fd, rx, sizeof(rx), 0);
+
+	/*
+	 * 16B tag + 8B IV -- record header (5B) is not counted but we'll
+	 * need it to walk the record stream
+	 */
+	overhead = 16 + 8;
+	total_plaintext_rx = parse_tls_records(_metadata, rx, ret, overhead,
+					       limit);
+
+	ASSERT_EQ(total_plaintext_rx, sizeof(tx));
+	close(fd);
+}
+
+TEST(tls_12_tx_max_payload_len_open_rec)
+{
+	struct tls_crypto_info_keys tls12;
+	int cfd, ret, fd, overhead;
+	size_t total_plaintext_rx = 0;
+	__u8 tx[1024], rx[2000];
+	__u16 tx_partial = 256;
+	__u16 og_limit = 512, limit = 128;
+	bool notls;
+
+	tls_crypto_info_init(TLS_1_2_VERSION, TLS_CIPHER_AES_CCM_128,
+			     &tls12, 0);
+
+	ulp_sock_pair(_metadata, &fd, &cfd, &notls);
+
+	if (notls)
+		exit(KSFT_SKIP);
+
+	/* Don't install keys on fd, we'll parse raw records */
+	ret = setsockopt(cfd, SOL_TLS, TLS_TX, &tls12, tls12.len);
+	ASSERT_EQ(ret, 0);
+
+	ret = setsockopt(cfd, SOL_TLS, TLS_TX_MAX_PAYLOAD_LEN, &og_limit,
+			 sizeof(og_limit));
+	ASSERT_EQ(ret, 0);
+
+	memset(tx, 0, sizeof(tx));
+	ASSERT_EQ(send(cfd, tx, tx_partial, MSG_MORE), tx_partial);
+
+	/*
+	 * Changing the payload limit with a pending open record should
+	 * not be allowed.
+	 */
+	ret = setsockopt(cfd, SOL_TLS, TLS_TX_MAX_PAYLOAD_LEN, &limit,
+			 sizeof(limit));
+	ASSERT_EQ(ret, -1);
+	ASSERT_EQ(errno, EBUSY);
+
+	ASSERT_EQ(send(cfd, tx + tx_partial, sizeof(tx) - tx_partial, MSG_EOR),
+		  sizeof(tx) - tx_partial);
+	close(cfd);
+
+	ret = recv(fd, rx, sizeof(rx), 0);
+
+	/*
+	 * 16B tag + 8B IV -- record header (5B) is not counted but we'll
+	 * need it to walk the record stream
+	 */
+	overhead = 16 + 8;
+	total_plaintext_rx = parse_tls_records(_metadata, rx, ret, overhead,
+					       og_limit);
+	ASSERT_EQ(total_plaintext_rx, sizeof(tx));
+	close(fd);
 }
 
 TEST(non_established) {
@@ -3119,17 +3458,25 @@ TEST(data_steal) {
 	ASSERT_EQ(setsockopt(cfd, IPPROTO_TCP, TCP_ULP, "tls", sizeof("tls")), 0);
 
 	/* Spawn a child and get it into the read wait path of the underlying
-	 * TCP socket.
+	 * TCP socket (before kernel .recvmsg is replaced with the TLS one).
 	 */
 	pid = fork();
 	ASSERT_GE(pid, 0);
 	if (!pid) {
-		EXPECT_EQ(recv(cfd, buf, sizeof(buf) / 2, MSG_WAITALL),
-			  sizeof(buf) / 2);
+		EXPECT_EQ(recv(cfd, buf, sizeof(buf) / 2 + 1, MSG_WAITALL),
+			  sizeof(buf) / 2 + 1);
 		exit(!__test_passed(_metadata));
 	}
 
-	usleep(10000);
+	/* Send a sync byte and poll until it's consumed to ensure
+	 * the child is in recv() before we proceed to install TLS.
+	 */
+	ASSERT_EQ(send(fd, buf, 1, 0), 1);
+	do {
+		usleep(500);
+	} while (recv(cfd, buf, 1, MSG_PEEK | MSG_DONTWAIT) == 1);
+	EXPECT_EQ(errno, EAGAIN);
+
 	ASSERT_EQ(setsockopt(fd, SOL_TLS, TLS_TX, &tls, tls.len), 0);
 	ASSERT_EQ(setsockopt(cfd, SOL_TLS, TLS_RX, &tls, tls.len), 0);
 

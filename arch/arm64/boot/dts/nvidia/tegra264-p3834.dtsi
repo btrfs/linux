@@ -9,6 +9,10 @@
 	};
 
 	bus@0 {
+		dma-controller@8400000 {
+			status = "okay";
+		};
+
 		serial@c4e0000 {
 			status = "okay";
 		};
@@ -23,7 +27,15 @@
 			status = "okay";
 		};
 
+		cmdqv@5200000 {
+			status = "okay";
+		};
+
 		iommu@6000000 {
+			status = "okay";
+		};
+
+		cmdqv@6200000 {
 			status = "okay";
 		};
 	};

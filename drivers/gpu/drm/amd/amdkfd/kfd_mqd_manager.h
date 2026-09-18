@@ -68,7 +68,7 @@
  */
 extern int pipe_priority_map[];
 struct mqd_manager {
-	struct kfd_mem_obj*	(*allocate_mqd)(struct kfd_node *kfd,
+	struct kfd_mem_obj*	(*allocate_mqd)(struct mqd_manager *mm,
 		struct queue_properties *q);
 
 	void	(*init_mqd)(struct mqd_manager *mm, void **mqd,
@@ -102,7 +102,8 @@ struct mqd_manager {
 				  u32 *ctl_stack_used_size,
 				  u32 *save_area_used_size);
 
-	void	(*get_checkpoint_info)(struct mqd_manager *mm, void *mqd, uint32_t *ctl_stack_size);
+	int	(*get_checkpoint_info)(struct mqd_manager *mm, void *mqd,
+				       uint32_t *ctl_stack_size);
 
 	void	(*checkpoint_mqd)(struct mqd_manager *mm,
 				  void *mqd,
@@ -116,6 +117,14 @@ struct mqd_manager {
 				const void *ctl_stack_src,
 				const u32 ctl_stack_size);
 
+	/* Patch the MQD's cached self GPU address after the MQD BO has moved
+	 * (e.g. repinned to a new VRAM location on hibernation resume). The MQD
+	 * contents are otherwise preserved.
+	 */
+	void	(*update_mqd_gpu_addr)(struct mqd_manager *mm, void *mqd,
+				       struct kfd_mem_obj *mqd_mem_obj,
+				       struct queue_properties *p);
+
 #if defined(CONFIG_DEBUG_FS)
 	int	(*debugfs_show_mqd)(struct seq_file *m, void *data);
 #endif
@@ -126,6 +135,7 @@ struct mqd_manager {
 	struct mutex	mqd_mutex;
 	struct kfd_node	*dev;
 	uint32_t mqd_size;
+	uint32_t ctl_stack_size;
 };
 
 struct mqd_user_context_save_area_header {
@@ -153,10 +163,10 @@ struct mqd_user_context_save_area_header {
 	uint32_t wave_state_size;
 };
 
-struct kfd_mem_obj *allocate_hiq_mqd(struct kfd_node *dev,
+struct kfd_mem_obj *allocate_hiq_mqd(struct mqd_manager *mm,
 				struct queue_properties *q);
 
-struct kfd_mem_obj *allocate_sdma_mqd(struct kfd_node *dev,
+struct kfd_mem_obj *allocate_sdma_mqd(struct mqd_manager *mm,
 					struct queue_properties *q);
 void free_mqd_hiq_sdma(struct mqd_manager *mm, void *mqd,
 				struct kfd_mem_obj *mqd_mem_obj);
@@ -200,4 +210,6 @@ uint64_t kfd_mqd_stride(struct mqd_manager *mm,
 			struct queue_properties *q);
 bool kfd_check_hiq_mqd_doorbell_id(struct kfd_node *node, uint32_t doorbell_id,
 				   uint32_t inst);
+bool mqd_on_vram(struct amdgpu_device *adev);
+
 #endif /* KFD_MQD_MANAGER_H_ */
