@@ -23,7 +23,7 @@
 #include <unistd.h>
 #include <numa.h>
 
-#include "../kselftest.h"
+#include "kselftest.h"
 
 static const int PORT = 8888;
 
@@ -102,6 +102,26 @@ static void attach_bpf(int fd)
 		error(1, errno, "failed to set SO_ATTACH_REUSEPORT_EBPF");
 
 	close(bpf_fd);
+}
+
+/*
+ * Return true if it is a cpuless node. Return false if it isn't or any
+ * error (very unlikely) happens during the libnuma calls.
+ */
+static bool is_cpuless_node(int node_id)
+{
+	struct bitmask *cpumask;
+	bool ret = false;
+
+	cpumask = numa_allocate_cpumask();
+	if (!cpumask)
+		return ret;
+
+	if (!numa_node_to_cpus(node_id, cpumask) && !numa_bitmask_weight(cpumask))
+		ret = true;
+
+	numa_bitmask_free(cpumask);
+	return ret;
 }
 
 static void send_from_node(int node_id, int family, int proto)
@@ -213,6 +233,8 @@ static void test(int *rcv_fd, int len, int family, int proto)
 	for (node = 0; node < len; ++node) {
 		if (!numa_bitmask_isbitset(numa_nodes_ptr, node))
 			continue;
+		if (is_cpuless_node(node))
+			continue;
 		send_from_node(node, family, proto);
 		receive_on_node(rcv_fd, len, epfd, node, proto);
 	}
@@ -220,6 +242,8 @@ static void test(int *rcv_fd, int len, int family, int proto)
 	/* Reverse iterate */
 	for (node = len - 1; node >= 0; --node) {
 		if (!numa_bitmask_isbitset(numa_nodes_ptr, node))
+			continue;
+		if (is_cpuless_node(node))
 			continue;
 		send_from_node(node, family, proto);
 		receive_on_node(rcv_fd, len, epfd, node, proto);
@@ -230,9 +254,19 @@ static void test(int *rcv_fd, int len, int family, int proto)
 		close(rcv_fd[node]);
 }
 
+static void setup_netns(void)
+{
+	if (unshare(CLONE_NEWNET))
+		error(1, errno, "failed to unshare netns");
+	if (system("ip link set lo up"))
+		error(1, 0, "failed to bring up lo interface in netns");
+}
+
 int main(void)
 {
 	int *rcv_fd, nodes;
+
+	setup_netns();
 
 	if (numa_available() < 0)
 		ksft_exit_skip("no numa api support\n");

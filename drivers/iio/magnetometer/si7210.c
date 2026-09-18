@@ -16,7 +16,6 @@
 #include <linux/i2c.h>
 #include <linux/iio/iio.h>
 #include <linux/math64.h>
-#include <linux/mod_devicetable.h>
 #include <linux/mutex.h>
 #include <linux/regmap.h>
 #include <linux/regulator/consumer.h>
@@ -128,8 +127,8 @@ static const struct regmap_config si7210_regmap_conf = {
 struct si7210_data {
 	struct regmap *regmap;
 	struct i2c_client *client;
-	struct regulator *vdd;
 	struct mutex fetch_lock; /* lock for a single measurement fetch */
+	unsigned int vdd_uV;
 	s8 temp_offset;
 	s8 temp_gain;
 	s8 scale_20_a[A_REGS_COUNT];
@@ -221,12 +220,8 @@ static int si7210_read_raw(struct iio_dev *indio_dev,
 		temp *= (1 + (data->temp_gain / 2048));
 		temp += (int)(MICRO / 16) * data->temp_offset;
 
-		ret = regulator_get_voltage(data->vdd);
-		if (ret < 0)
-			return ret;
-
 		/* temp -= 0.222 * VDD */
-		temp -= 222 * div_s64(ret, MILLI);
+		temp -= 222 * (data->vdd_uV / MILLI);
 
 		*val = div_s64(temp, MILLI);
 
@@ -396,14 +391,11 @@ static int si7210_probe(struct i2c_client *client)
 		return dev_err_probe(&client->dev, PTR_ERR(data->regmap),
 				     "failed to register regmap\n");
 
-	data->vdd = devm_regulator_get(&client->dev, "vdd");
-	if (IS_ERR(data->vdd))
-		return dev_err_probe(&client->dev, PTR_ERR(data->vdd),
-				     "failed to get VDD regulator\n");
-
-	ret = regulator_enable(data->vdd);
-	if (ret)
-		return ret;
+	ret = devm_regulator_get_enable_read_voltage(&client->dev, "vdd");
+	if (ret < 0)
+		return dev_err_probe(&client->dev, ret,
+				     "Failed to get vdd regulator\n");
+	data->vdd_uV = ret;
 
 	indio_dev->name = dev_name(&client->dev);
 	indio_dev->modes = INDIO_DIRECT_MODE;
@@ -420,7 +412,7 @@ static int si7210_probe(struct i2c_client *client)
 }
 
 static const struct i2c_device_id si7210_id[] = {
-	{ "si7210" },
+	{ .name = "si7210" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, si7210_id);

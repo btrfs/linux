@@ -124,10 +124,10 @@ audio_subsys: bus@59000000 {
 		compatible = "fsl,imx8qm-asrc";
 		reg = <0x59000000 0x10000>;
 		interrupts = <GIC_SPI 372 IRQ_TYPE_LEVEL_HIGH>;
-		clocks = <&asrc0_lpcg IMX_LPCG_CLK_0>,
-			 <&asrc0_lpcg IMX_LPCG_CLK_0>,
-			 <&aud_pll_div0_lpcg IMX_LPCG_CLK_4>,
-			 <&aud_pll_div1_lpcg IMX_LPCG_CLK_4>,
+		clocks = <&asrc0_lpcg IMX_LPCG_CLK_4>,
+			 <&asrc0_lpcg IMX_LPCG_CLK_4>,
+			 <&aud_pll_div0_lpcg IMX_LPCG_CLK_0>,
+			 <&aud_pll_div1_lpcg IMX_LPCG_CLK_0>,
 			 <&acm IMX_ADMA_ACM_AUD_CLK0_SEL>,
 			 <&acm IMX_ADMA_ACM_AUD_CLK1_SEL>,
 			 <&clk_dummy>,
@@ -296,7 +296,8 @@ audio_subsys: bus@59000000 {
 			     <GIC_SPI 0   IRQ_TYPE_LEVEL_HIGH>, /* 20 unused */
 			     <GIC_SPI 391 IRQ_TYPE_LEVEL_HIGH>, /* 21 */
 			     <GIC_SPI 0   IRQ_TYPE_LEVEL_HIGH>, /* 22 unused */
-			     <GIC_SPI 393 IRQ_TYPE_LEVEL_HIGH>; /* 23 unused */
+			     <GIC_SPI 393 IRQ_TYPE_LEVEL_HIGH>, /* 23 unused */
+			     <GIC_SPI 369 IRQ_TYPE_LEVEL_HIGH>;
 		power-domains = <&pd IMX_SC_R_DMA_0_CH0>,
 				<&pd IMX_SC_R_DMA_0_CH1>,
 				<&pd IMX_SC_R_DMA_0_CH2>,
@@ -558,7 +559,8 @@ audio_subsys: bus@59000000 {
 			     <GIC_SPI 0   IRQ_TYPE_LEVEL_HIGH>, /* 7 unused */
 			     <GIC_SPI 330 IRQ_TYPE_LEVEL_HIGH>, /* sai4 */
 			     <GIC_SPI 330 IRQ_TYPE_LEVEL_HIGH>,
-			     <GIC_SPI 332 IRQ_TYPE_LEVEL_HIGH>; /* sai5 */
+			     <GIC_SPI 332 IRQ_TYPE_LEVEL_HIGH>, /* sai5 */
+			     <GIC_SPI 371 IRQ_TYPE_LEVEL_HIGH>;
 		power-domains = <&pd IMX_SC_R_DMA_1_CH0>,
 				<&pd IMX_SC_R_DMA_1_CH1>,
 				<&pd IMX_SC_R_DMA_1_CH2>,

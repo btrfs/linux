@@ -127,9 +127,9 @@ struct snd_als300_substream_data {
 };
 
 static const struct pci_device_id snd_als300_ids[] = {
-	{ 0x4005, 0x0300, PCI_ANY_ID, PCI_ANY_ID, 0, 0, DEVICE_ALS300 },
-	{ 0x4005, 0x0308, PCI_ANY_ID, PCI_ANY_ID, 0, 0, DEVICE_ALS300_PLUS },
-	{ 0, }
+	{ PCI_DEVICE(0x4005, 0x0300), .driver_data = DEVICE_ALS300 },
+	{ PCI_DEVICE(0x4005, 0x0308), .driver_data = DEVICE_ALS300_PLUS },
+	{ }
 };
 
 MODULE_DEVICE_TABLE(pci, snd_als300_ids);
@@ -342,8 +342,7 @@ static int snd_als300_playback_open(struct snd_pcm_substream *substream)
 {
 	struct snd_als300 *chip = snd_pcm_substream_chip(substream);
 	struct snd_pcm_runtime *runtime = substream->runtime;
-	struct snd_als300_substream_data *data = kzalloc(sizeof(*data),
-								GFP_KERNEL);
+	struct snd_als300_substream_data *data = kzalloc_obj(*data);
 
 	if (!data)
 		return -ENOMEM;
@@ -370,8 +369,7 @@ static int snd_als300_capture_open(struct snd_pcm_substream *substream)
 {
 	struct snd_als300 *chip = snd_pcm_substream_chip(substream);
 	struct snd_pcm_runtime *runtime = substream->runtime;
-	struct snd_als300_substream_data *data = kzalloc(sizeof(*data),
-								GFP_KERNEL);
+	struct snd_als300_substream_data *data = kzalloc_obj(*data);
 
 	if (!data)
 		return -ENOMEM;

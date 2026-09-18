@@ -10,28 +10,32 @@
 #include <linux/cleanup.h>
 #include <linux/device.h>
 #include <linux/dev_printk.h>
+#include <linux/hid.h>
 #include <linux/module.h>
 #include <linux/property.h>
 #include <linux/soundwire/sdw.h>
+#include <linux/string.h>
 #include <linux/types.h>
 #include <sound/sdca.h>
 #include <sound/sdca_function.h>
 #include <sound/sdca_hid.h>
+#include <sound/sdca_interrupts.h>
+#include <sound/sdca_ump.h>
 
 static int sdwhid_parse(struct hid_device *hid)
 {
-	struct sdca_entity *entity = hid->driver_data;
+	struct sdca_function_data *function = hid->driver_data;
 	unsigned int rsize;
 	int ret;
 
-	rsize = le16_to_cpu(entity->hide.hid_desc.rpt_desc.wDescriptorLength);
+	rsize = le16_to_cpu(function->hid.desc.rpt_desc.wDescriptorLength);
 
 	if (!rsize || rsize > HID_MAX_DESCRIPTOR_SIZE) {
 		dev_err(&hid->dev, "invalid size of report descriptor (%u)\n", rsize);
 		return -EINVAL;
 	}
 
-	ret = hid_parse_report(hid, entity->hide.hid_report_desc, rsize);
+	ret = hid_parse_report(hid, function->hid.report_desc, rsize);
 
 	if (!ret)
 		return 0;
@@ -82,14 +86,18 @@ static const struct hid_ll_driver sdw_hid_driver = {
 	.raw_request = sdwhid_raw_request,
 };
 
-int sdca_add_hid_device(struct device *dev, struct sdca_entity *entity)
+/**
+ * sdca_add_hid_device - create a new SDCA HID device
+ * @interrupt: Pointer to the SDCA interrupt information structure.
+ *
+ * Return: Zero on success, and a negative error code on failure.
+ */
+int sdca_add_hid_device(struct sdca_interrupt *interrupt)
 {
-	struct sdw_bus *bus;
+	struct device *dev = interrupt->dev;
+	struct sdca_function_data *function = interrupt->function;
 	struct hid_device *hid;
-	struct sdw_slave *slave = dev_to_sdw_dev(dev);
 	int ret;
-
-	bus = slave->bus;
 
 	hid = hid_allocate_device();
 	if (IS_ERR(hid))
@@ -99,16 +107,13 @@ int sdca_add_hid_device(struct device *dev, struct sdca_entity *entity)
 
 	hid->dev.parent = dev;
 	hid->bus = BUS_SDW;
-	hid->version = le16_to_cpu(entity->hide.hid_desc.bcdHID);
+	hid->version = le16_to_cpu(function->hid.desc.bcdHID);
 
-	snprintf(hid->name, sizeof(hid->name),
-		 "HID sdw:%01x:%01x:%04x:%04x:%02x",
-		 bus->controller_id, bus->link_id, slave->id.mfg_id,
-		 slave->id.part_id, slave->id.class_id);
+	strscpy(hid->phys, dev_name(dev));
+	snprintf(hid->name, sizeof(hid->name), "SDCA %s:%02x",
+		 function->desc->name, function->desc->adr);
 
-	snprintf(hid->phys, sizeof(hid->phys), "%s", dev->bus->name);
-
-	hid->driver_data = entity;
+	hid->driver_data = function;
 
 	ret = hid_add_device(hid);
 	if (ret && ret != -ENODEV) {
@@ -117,11 +122,63 @@ int sdca_add_hid_device(struct device *dev, struct sdca_entity *entity)
 		return ret;
 	}
 
-	entity->hide.hid = hid;
+	interrupt->priv = hid;
 
 	return 0;
 }
 EXPORT_SYMBOL_NS(sdca_add_hid_device, "SND_SOC_SDCA");
 
-MODULE_LICENSE("Dual BSD/GPL");
-MODULE_DESCRIPTION("SDCA HID library");
+/**
+ * sdca_destroy_hid_device - destroy the HID device
+ * @interrupt: Pointer to the SDCA interrupt information structure.
+ */
+void sdca_destroy_hid_device(struct sdca_interrupt *interrupt)
+{
+	struct hid_device *hid = interrupt->priv;
+
+	hid_destroy_device(hid);
+}
+EXPORT_SYMBOL_NS(sdca_destroy_hid_device, "SND_SOC_SDCA");
+
+/**
+ * sdca_hid_process_report - read a HID event from the device and report
+ * @interrupt: Pointer to the SDCA interrupt information structure.
+ *
+ * Return: Zero on success, and a negative error code on failure.
+ */
+int sdca_hid_process_report(struct sdca_interrupt *interrupt)
+{
+	struct device *dev = interrupt->dev;
+	struct hid_device *hid = interrupt->priv;
+	void *val __free(kfree) = NULL;
+	int len, ret;
+
+	ret = sdca_ump_get_owner_host(dev, interrupt->function_regmap,
+				      interrupt->function, interrupt->entity,
+				      interrupt->control);
+	if (ret)
+		return ret;
+
+	len = sdca_ump_read_message(dev, interrupt->device_regmap,
+				    interrupt->function_regmap,
+				    interrupt->function, interrupt->entity,
+				    SDCA_CTL_HIDE_HIDTX_MESSAGEOFFSET,
+				    SDCA_CTL_HIDE_HIDTX_MESSAGELENGTH, &val);
+	if (len < 0)
+		return len;
+
+	ret = sdca_ump_set_owner_device(dev, interrupt->function_regmap,
+					interrupt->function, interrupt->entity,
+					interrupt->control);
+	if (ret)
+		return ret;
+
+	ret = hid_input_report(hid, HID_INPUT_REPORT, val, len, true);
+	if (ret < 0) {
+		dev_err(dev, "failed to report hid event: %d\n", ret);
+		return ret;
+	}
+
+	return 0;
+}
+EXPORT_SYMBOL_NS(sdca_hid_process_report, "SND_SOC_SDCA");

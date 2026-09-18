@@ -51,18 +51,25 @@ struct osnoise_context {
 	/* -1 as init value because 0 is off */
 	int			orig_opt_workload;
 	int			opt_workload;
+
+	/* -1 as init value because 0 is off */
+	int			orig_opt_timerlat_align;
+	int			opt_timerlat_align;
+
+	/* 0 as init value */
+	unsigned long long	orig_timerlat_align_us;
+	unsigned long long	timerlat_align_us;
 };
 
-extern struct trace_instance *trace_inst;
-extern int stop_tracing;
+extern volatile int stop_tracing;
 
 struct hist_params {
-	char			no_irq;
-	char			no_thread;
-	char			no_header;
-	char			no_summary;
-	char			no_index;
-	char			with_zeros;
+	bool			no_irq;
+	bool			no_thread;
+	bool			no_header;
+	bool			no_summary;
+	bool			no_index;
+	bool			with_zeros;
 	int			bucket_size;
 	int			entries;
 };
@@ -95,17 +102,23 @@ struct common_params {
 	/* Other parameters */
 	struct hist_params	hist;
 	int			output_divisor;
-	int			pretty_output;
-	int			quiet;
-	int			user_workload;
-	int			kernel_workload;
-	int			user_data;
-	int			aa_only;
+	bool			pretty_output;
+	bool			quiet;
+	bool			user_workload;
+	bool			kernel_workload;
+	bool			user_data;
+	bool			aa_only;
 
 	struct actions		threshold_actions;
 	struct actions		end_actions;
 	struct timerlat_u_params user;
 };
+
+extern int nr_cpus;
+
+#define for_each_monitored_cpu(cpu, common) \
+	for (cpu = 0; cpu < nr_cpus; cpu++) \
+		if (!(common)->cpus || CPU_ISSET(cpu, &(common)->monitored_cpus))
 
 struct tool_ops;
 
@@ -139,6 +152,24 @@ struct tool_ops {
 	void (*free)(struct osnoise_tool *tool);
 };
 
+/**
+ * should_continue_tracing - check if tracing should continue after threshold
+ * @params: pointer to the common parameters structure
+ *
+ * Returns true if the continue action was configured (--on-threshold continue),
+ * indicating that tracing should be restarted after handling the threshold event.
+ *
+ * Return: 1 if tracing should continue, 0 otherwise.
+ */
+static inline int
+should_continue_tracing(const struct common_params *params)
+{
+	return params->threshold_actions.continue_flag;
+}
+
+int
+common_threshold_handler(const struct osnoise_tool *tool);
+
 int osnoise_set_cpus(struct osnoise_context *context, char *cpus);
 void osnoise_restore_cpus(struct osnoise_context *context);
 
@@ -148,7 +179,14 @@ void osnoise_destroy_tool(struct osnoise_tool *top);
 struct osnoise_tool *osnoise_init_tool(char *tool_name);
 struct osnoise_tool *osnoise_init_trace_tool(const char *tracer);
 bool osnoise_trace_is_off(struct osnoise_tool *tool, struct osnoise_tool *record);
+int osnoise_set_stop_us(struct osnoise_context *context, long long stop_us);
+int osnoise_set_stop_total_us(struct osnoise_context *context,
+			      long long stop_total_us);
 
 int common_apply_config(struct osnoise_tool *tool, struct common_params *params);
 int top_main_loop(struct osnoise_tool *tool);
 int hist_main_loop(struct osnoise_tool *tool);
+int osn_set_stop(struct osnoise_tool *tool);
+
+void common_usage(const char *tool, const char *mode,
+		  const char *desc, const char * const *start_msgs, const char * const *opt_msgs);

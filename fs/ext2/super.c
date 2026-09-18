@@ -34,7 +34,6 @@
 #include <linux/log2.h>
 #include <linux/quotaops.h>
 #include <linux/uaccess.h>
-#include <linux/dax.h>
 #include <linux/iversion.h>
 #include "ext2.h"
 #include "xattr.h"
@@ -198,7 +197,6 @@ static void ext2_put_super (struct super_block * sb)
 	brelse (sbi->s_sbh);
 	sb->s_fs_info = NULL;
 	kfree(sbi->s_blockgroup_lock);
-	fs_put_dax(sbi->s_daxdev, NULL);
 	kfree(sbi);
 }
 
@@ -215,6 +213,7 @@ static struct inode *ext2_alloc_inode(struct super_block *sb)
 #ifdef CONFIG_QUOTA
 	memset(&ei->i_dquot, 0, sizeof(ei->i_dquot));
 #endif
+	mmb_init(&ei->i_metadata_bhs, &ei->vfs_inode.i_data);
 
 	return &ei->vfs_inode;
 }
@@ -328,11 +327,7 @@ static int ext2_show_options(struct seq_file *seq, struct dentry *root)
 	if (test_opt(sb, GRPQUOTA))
 		seq_puts(seq, ",grpquota");
 
-	if (test_opt(sb, XIP))
-		seq_puts(seq, ",xip");
 
-	if (test_opt(sb, DAX))
-		seq_puts(seq, ",dax");
 
 	if (!test_opt(sb, RESERVATION))
 		seq_puts(seq, ",noreservation");
@@ -367,6 +362,7 @@ static const struct super_operations ext2_sops = {
 	.alloc_inode	= ext2_alloc_inode,
 	.free_inode	= ext2_free_in_core_inode,
 	.write_inode	= ext2_write_inode,
+	.sync_inode_metadata = ext2_sync_inode_metadata,
 	.evict_inode	= ext2_evict_inode,
 	.put_super	= ext2_put_super,
 	.sync_fs	= ext2_sync_fs,
@@ -595,18 +591,10 @@ static int ext2_parse_param(struct fs_context *fc, struct fs_parameter *param)
 		break;
 #endif
 	case Opt_xip:
-		ext2_msg_fc(fc, KERN_INFO, "use dax instead of xip");
-		ctx_set_mount_opt(ctx, EXT2_MOUNT_XIP);
-		fallthrough;
+		ext2_msg_fc(fc, KERN_WARNING, "DAX support has been removed. xip option ignored.");
+		break;
 	case Opt_dax:
-#ifdef CONFIG_FS_DAX
-		ext2_msg_fc(fc, KERN_WARNING,
-		    "DAX enabled. Warning: DAX support in ext2 driver is deprecated"
-		    " and will be removed at the end of 2025. Please use ext4 driver instead.");
-		ctx_set_mount_opt(ctx, EXT2_MOUNT_DAX);
-#else
-		ext2_msg_fc(fc, KERN_INFO, "dax option not supported");
-#endif
+		ext2_msg_fc(fc, KERN_WARNING, "DAX support has been removed. dax option ignored.");
 		break;
 
 #if defined(CONFIG_QUOTA)
@@ -893,20 +881,18 @@ static int ext2_fill_super(struct super_block *sb, struct fs_context *fc)
 	__le32 features;
 	int err;
 
-	sbi = kzalloc(sizeof(*sbi), GFP_KERNEL);
+	sbi = kzalloc_obj(*sbi);
 	if (!sbi)
 		return -ENOMEM;
 
 	sbi->s_blockgroup_lock =
-		kzalloc(sizeof(struct blockgroup_lock), GFP_KERNEL);
+		kzalloc_obj(struct blockgroup_lock);
 	if (!sbi->s_blockgroup_lock) {
 		kfree(sbi);
 		return -ENOMEM;
 	}
 	sb->s_fs_info = sbi;
 	sbi->s_sb_block = sb_block;
-	sbi->s_daxdev = fs_dax_get_by_bdev(sb->s_bdev, &sbi->s_dax_part_off,
-					   NULL, NULL);
 
 	spin_lock_init(&sbi->s_lock);
 	ret = -EINVAL;
@@ -990,17 +976,6 @@ static int ext2_fill_super(struct super_block *sb, struct fs_context *fc)
 		goto failed_mount;
 	}
 	blocksize = BLOCK_SIZE << le32_to_cpu(sbi->s_es->s_log_block_size);
-
-	if (test_opt(sb, DAX)) {
-		if (!sbi->s_daxdev) {
-			ext2_msg(sb, KERN_ERR,
-				"DAX unsupported by block device. Turning off DAX.");
-			clear_opt(sbi->s_mount_opt, DAX);
-		} else if (blocksize != PAGE_SIZE) {
-			ext2_msg(sb, KERN_ERR, "unsupported blocksize for DAX\n");
-			clear_opt(sbi->s_mount_opt, DAX);
-		}
-	}
 
 	/* If the blocksize doesn't match, re-read the thing.. */
 	if (sb->s_blocksize != blocksize) {
@@ -1122,9 +1097,7 @@ static int ext2_fill_super(struct super_block *sb, struct fs_context *fc)
 	}
 	db_count = (sbi->s_groups_count + EXT2_DESC_PER_BLOCK(sb) - 1) /
 		   EXT2_DESC_PER_BLOCK(sb);
-	sbi->s_group_desc = kvmalloc_array(db_count,
-					   sizeof(struct buffer_head *),
-					   GFP_KERNEL);
+	sbi->s_group_desc = kvmalloc_objs(struct buffer_head *, db_count);
 	if (sbi->s_group_desc == NULL) {
 		ret = -ENOMEM;
 		ext2_msg(sb, KERN_ERR, "error: not enough memory");
@@ -1153,7 +1126,7 @@ static int ext2_fill_super(struct super_block *sb, struct fs_context *fc)
 		goto failed_mount2;
 	}
 	sbi->s_gdb_count = db_count;
-	get_random_bytes(&sbi->s_next_generation, sizeof(u32));
+	sbi->s_next_generation = get_random_u32();
 	spin_lock_init(&sbi->s_next_gen_lock);
 
 	/* per filesystem reservation list head & lock */
@@ -1253,7 +1226,6 @@ failed_mount_group_desc:
 failed_mount:
 	brelse(bh);
 failed_sbi:
-	fs_put_dax(sbi->s_daxdev, NULL);
 	sb->s_fs_info = NULL;
 	kfree(sbi->s_blockgroup_lock);
 	kfree(sbi);
@@ -1380,11 +1352,6 @@ static int ext2_reconfigure(struct fs_context *fc)
 
 	spin_lock(&sbi->s_lock);
 	es = sbi->s_es;
-	if ((sbi->s_mount_opt ^ new_opts.s_mount_opt) & EXT2_MOUNT_DAX) {
-		ext2_msg(sb, KERN_WARNING, "warning: refusing change of "
-			 "dax flag with busy inodes while remounting");
-		new_opts.s_mount_opt ^= EXT2_MOUNT_DAX;
-	}
 	if ((bool)(flags & SB_RDONLY) == sb_rdonly(sb))
 		goto out_set;
 	if (flags & SB_RDONLY) {
@@ -1670,7 +1637,7 @@ static int ext2_init_fs_context(struct fs_context *fc)
 {
 	struct ext2_fs_context *ctx;
 
-	ctx = kzalloc(sizeof(*ctx), GFP_KERNEL);
+	ctx = kzalloc_obj(*ctx);
 	if (!ctx)
 		return -ENOMEM;
 

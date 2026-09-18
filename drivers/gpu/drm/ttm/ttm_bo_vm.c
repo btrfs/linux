@@ -32,6 +32,7 @@
 #define pr_fmt(fmt) "[TTM] " fmt
 
 #include <linux/export.h>
+#include <linux/pagemap.h>
 
 #include <drm/ttm/ttm_bo.h>
 #include <drm/ttm/ttm_placement.h>
@@ -186,7 +187,6 @@ vm_fault_t ttm_bo_vm_fault_reserved(struct vm_fault *vmf,
 {
 	struct vm_area_struct *vma = vmf->vma;
 	struct ttm_buffer_object *bo = vma->vm_private_data;
-	struct ttm_device *bdev = bo->bdev;
 	unsigned long page_offset;
 	unsigned long page_last;
 	unsigned long pfn;
@@ -205,13 +205,13 @@ vm_fault_t ttm_bo_vm_fault_reserved(struct vm_fault *vmf,
 	if (unlikely(ret != 0))
 		return ret;
 
-	err = ttm_mem_io_reserve(bdev, bo->resource);
+	err = ttm_mem_io_reserve(bo->bdev, bo->resource);
 	if (unlikely(err != 0))
 		return VM_FAULT_SIGBUS;
 
-	page_offset = ((address - vma->vm_start) >> PAGE_SHIFT) +
-		vma->vm_pgoff - drm_vma_node_start(&bo->base.vma_node);
-	page_last = vma_pages(vma) + vma->vm_pgoff -
+	page_offset = linear_page_index(vma, address) -
+		drm_vma_node_start(&bo->base.vma_node);
+	page_last = vma_end_pgoff(vma) -
 		drm_vma_node_start(&bo->base.vma_node);
 
 	if (unlikely(page_offset >= PFN_UP(bo->base.size)))
@@ -293,7 +293,6 @@ vm_fault_t ttm_bo_vm_dummy_page(struct vm_fault *vmf, pgprot_t prot)
 {
 	struct vm_area_struct *vma = vmf->vma;
 	struct ttm_buffer_object *bo = vma->vm_private_data;
-	struct drm_device *ddev = bo->base.dev;
 	vm_fault_t ret = VM_FAULT_NOPAGE;
 	unsigned long address;
 	unsigned long pfn;
@@ -305,7 +304,8 @@ vm_fault_t ttm_bo_vm_dummy_page(struct vm_fault *vmf, pgprot_t prot)
 		return VM_FAULT_OOM;
 
 	/* Set the page to be freed using drmm release action */
-	if (drmm_add_action_or_reset(ddev, ttm_bo_release_dummy_page, page))
+	if (drmm_add_action_or_reset(bo->base.dev, ttm_bo_release_dummy_page,
+				     page))
 		return VM_FAULT_OOM;
 
 	pfn = page_to_pfn(page);
@@ -322,10 +322,9 @@ EXPORT_SYMBOL(ttm_bo_vm_dummy_page);
 vm_fault_t ttm_bo_vm_fault(struct vm_fault *vmf)
 {
 	struct vm_area_struct *vma = vmf->vma;
-	pgprot_t prot;
 	struct ttm_buffer_object *bo = vma->vm_private_data;
-	struct drm_device *ddev = bo->base.dev;
 	vm_fault_t ret;
+	pgprot_t prot;
 	int idx;
 
 	ret = ttm_bo_vm_reserve(bo, vmf);
@@ -333,7 +332,7 @@ vm_fault_t ttm_bo_vm_fault(struct vm_fault *vmf)
 		return ret;
 
 	prot = vma->vm_page_prot;
-	if (drm_dev_enter(ddev, &idx)) {
+	if (drm_dev_enter(bo->base.dev, &idx)) {
 		ret = ttm_bo_vm_fault_reserved(vmf, prot, TTM_BO_VM_NUM_PREFAULT);
 		drm_dev_exit(idx);
 	} else {
@@ -434,6 +433,11 @@ int ttm_bo_access(struct ttm_buffer_object *bo, unsigned long offset,
 	if (ret)
 		return ret;
 
+	if (!bo->resource) {
+		ret = -ENODATA;
+		goto unlock;
+	}
+
 	switch (bo->resource->mem_type) {
 	case TTM_PL_SYSTEM:
 		fallthrough;
@@ -448,6 +452,7 @@ int ttm_bo_access(struct ttm_buffer_object *bo, unsigned long offset,
 			ret = -EIO;
 	}
 
+unlock:
 	ttm_bo_unreserve(bo);
 
 	return ret;
@@ -484,7 +489,7 @@ static const struct vm_operations_struct ttm_bo_vm_ops = {
 int ttm_bo_mmap_obj(struct vm_area_struct *vma, struct ttm_buffer_object *bo)
 {
 	/* Enforce no COW since would have really strange behavior with it. */
-	if (is_cow_mapping(vma->vm_flags))
+	if (vma_is_cow_mapping(vma))
 		return -EINVAL;
 
 	drm_gem_object_get(&bo->base);

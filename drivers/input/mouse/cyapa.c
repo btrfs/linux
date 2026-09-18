@@ -403,7 +403,6 @@ static int cyapa_open(struct input_dev *input)
 	}
 
 	pm_runtime_get_sync(dev);
-	pm_runtime_mark_last_busy(dev);
 	pm_runtime_put_sync_autosuspend(dev);
 out:
 	mutex_unlock(&cyapa->state_sync_lock);
@@ -666,7 +665,6 @@ out:
 		pm_runtime_enable(dev);
 
 		pm_runtime_get_sync(dev);
-		pm_runtime_mark_last_busy(dev);
 		pm_runtime_put_sync_autosuspend(dev);
 	}
 
@@ -710,7 +708,6 @@ static irqreturn_t cyapa_irq(int irq, void *dev_id)
 			 * process.
 			 */
 			pm_runtime_get_sync(dev);
-			pm_runtime_mark_last_busy(dev);
 			pm_runtime_put_sync_autosuspend(dev);
 		}
 
@@ -1459,7 +1456,7 @@ static const struct dev_pm_ops cyapa_pm_ops = {
 };
 
 static const struct i2c_device_id cyapa_id_table[] = {
-	{ "cyapa" },
+	{ .name = "cyapa" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, cyapa_id_table);
