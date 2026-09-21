@@ -184,12 +184,6 @@ static const struct iio_info ad7766_info = {
 	.read_raw = &ad7766_read_raw,
 };
 
-static irqreturn_t ad7766_irq(int irq, void *private)
-{
-	iio_trigger_poll(private);
-	return IRQ_HANDLED;
-}
-
 static int ad7766_set_trigger_state(struct iio_trigger *trig, bool enable)
 {
 	struct ad7766 *ad7766 = iio_trigger_get_drvdata(trig);
@@ -260,8 +254,8 @@ static int ad7766_probe(struct spi_device *spi)
 		 * Some platforms might not allow the option to power it down so
 		 * don't enable the interrupt to avoid extra load on the system
 		 */
-		ret = devm_request_irq(&spi->dev, spi->irq, ad7766_irq,
-				       IRQF_TRIGGER_FALLING | IRQF_NO_AUTOEN,
+		ret = devm_request_irq(&spi->dev, spi->irq, iio_trigger_generic_data_rdy_poll,
+				       IRQF_TRIGGER_FALLING | IRQF_NO_AUTOEN | IRQF_NO_THREAD,
 				       dev_name(&spi->dev),
 				       ad7766->trig);
 		if (ret < 0)
@@ -291,12 +285,12 @@ static int ad7766_probe(struct spi_device *spi)
 }
 
 static const struct spi_device_id ad7766_id[] = {
-	{ "ad7766", ID_AD7766 },
-	{ "ad7766-1", ID_AD7766_1 },
-	{ "ad7766-2", ID_AD7766_2 },
-	{ "ad7767", ID_AD7766 },
-	{ "ad7767-1", ID_AD7766_1 },
-	{ "ad7767-2", ID_AD7766_2 },
+	{ .name = "ad7766", .driver_data = ID_AD7766 },
+	{ .name = "ad7766-1", .driver_data = ID_AD7766_1 },
+	{ .name = "ad7766-2", .driver_data = ID_AD7766_2 },
+	{ .name = "ad7767", .driver_data = ID_AD7766 },
+	{ .name = "ad7767-1", .driver_data = ID_AD7766_1 },
+	{ .name = "ad7767-2", .driver_data = ID_AD7766_2 },
 	{ }
 };
 MODULE_DEVICE_TABLE(spi, ad7766_id);

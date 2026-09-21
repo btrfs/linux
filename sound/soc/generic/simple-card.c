@@ -13,9 +13,9 @@
 #include <linux/of_platform.h>
 #include <linux/platform_device.h>
 #include <linux/string.h>
-#include <sound/simple_card.h>
-#include <sound/soc-dai.h>
+#include <sound/simple_card_utils.h>
 #include <sound/soc.h>
+#include <sound/soc-dai.h>
 
 #define DPCM_SELECTABLE 1
 
@@ -48,7 +48,8 @@ static int simple_parse_platform(struct simple_util_priv *priv,
 
 	/*
 	 * Get node via "sound-dai = <&phandle port>"
-	 * it will be used as xxx_of_node on soc_bind_dai_link()
+	 * It will be used as the of_node for component matching during
+	 * snd_soc_add_pcm_runtime().
 	 */
 	ret = of_parse_phandle_with_args(node, DAI, CELL, 0, &args);
 	if (ret)
@@ -68,7 +69,9 @@ static int simple_parse_dai(struct simple_util_priv *priv,
 {
 	struct device *dev = simple_priv_to_dev(priv);
 	struct of_phandle_args args;
+	struct snd_soc_dai_link_component resolved_dlc = {};
 	struct snd_soc_dai *dai;
+	const char *fallback_dai_name;
 	int ret;
 
 	if (!node)
@@ -76,7 +79,8 @@ static int simple_parse_dai(struct simple_util_priv *priv,
 
 	/*
 	 * Get node via "sound-dai = <&phandle port>"
-	 * it will be used as xxx_of_node on soc_bind_dai_link()
+	 * It will be used as the of_node for component matching during
+	 * snd_soc_add_pcm_runtime().
 	 */
 	ret = of_parse_phandle_with_args(node, DAI, CELL, 0, &args);
 	if (ret)
@@ -92,34 +96,28 @@ static int simple_parse_dai(struct simple_util_priv *priv,
 		dlc->dai_args = snd_soc_copy_dai_args(dev, &args);
 		if (!dlc->dai_args)
 			goto end;
+	} else {
+		ret = snd_soc_get_dlc(&args, &resolved_dlc);
+		if (ret < 0)
+			goto end;
 
-		goto parse_dai_end;
+		/* Keep fallback dai_name valid across component rebind */
+		fallback_dai_name = resolved_dlc.dai_name;
+		if (fallback_dai_name) {
+			fallback_dai_name = devm_kstrdup_const(dev, fallback_dai_name,
+							       GFP_KERNEL);
+			ret = -ENOMEM;
+			if (!fallback_dai_name) {
+				of_node_put(resolved_dlc.of_node);
+				goto end;
+			}
+		}
+
+		dlc->of_node = resolved_dlc.of_node;
+		dlc->dai_name = fallback_dai_name;
+		dlc->dai_args = resolved_dlc.dai_args;
 	}
 
-	/*
-	 * FIXME
-	 *
-	 * Here, dlc->dai_name is pointer to CPU/Codec DAI name.
-	 * If user unbinded CPU or Codec driver, but not for Sound Card,
-	 * dlc->dai_name is keeping unbinded CPU or Codec
-	 * driver's pointer.
-	 *
-	 * If user re-bind CPU or Codec driver again, ALSA SoC will try
-	 * to rebind Card via snd_soc_try_rebind_card(), but because of
-	 * above reason, it might can't bind Sound Card.
-	 * Because Sound Card is pointing to released dai_name pointer.
-	 *
-	 * To avoid this rebind Card issue,
-	 * 1) It needs to alloc memory to keep dai_name eventhough
-	 *    CPU or Codec driver was unbinded, or
-	 * 2) user need to rebind Sound Card everytime
-	 *    if he unbinded CPU or Codec.
-	 */
-	ret = snd_soc_get_dlc(&args, dlc);
-	if (ret < 0)
-		goto end;
-
-parse_dai_end:
 	if (is_single_link)
 		*is_single_link = !args.args_count;
 	ret = 0;
@@ -519,44 +517,6 @@ end:
 	return simple_ret(priv, ret);
 }
 
-static int simple_parse_of(struct simple_util_priv *priv, struct link_info *li)
-{
-	struct snd_soc_card *card = simple_priv_to_card(priv);
-	int ret;
-
-	ret = simple_util_parse_widgets(card, PREFIX);
-	if (ret < 0)
-		goto end;
-
-	ret = simple_util_parse_routing(card, PREFIX);
-	if (ret < 0)
-		goto end;
-
-	ret = simple_util_parse_pin_switches(card, PREFIX);
-	if (ret < 0)
-		goto end;
-
-	/* Single/Muti DAI link(s) & New style of DT node */
-	memset(li, 0, sizeof(*li));
-	ret = simple_for_each_link(priv, li,
-				   simple_dai_link_of,
-				   simple_dai_link_of_dpcm);
-	if (ret < 0)
-		goto end;
-
-	ret = simple_util_parse_card_name(priv, PREFIX);
-	if (ret < 0)
-		goto end;
-
-	ret = simple_populate_aux(priv);
-	if (ret < 0)
-		goto end;
-
-	ret = snd_soc_of_parse_aux_devs(card, PREFIX "aux-devs");
-end:
-	return simple_ret(priv, ret);
-}
-
 static int simple_count_noml(struct simple_util_priv *priv,
 			     struct device_node *np,
 			     struct device_node *codec,
@@ -701,32 +661,22 @@ static int simple_soc_probe(struct snd_soc_card *card)
 	if (ret < 0)
 		goto end;
 
-	ret = simple_util_init_aux_jacks(priv, PREFIX);
+	ret = simple_util_init_aux_jacks(card, PREFIX);
 end:
 	return simple_ret(priv, ret);
 }
 
-static int simple_probe(struct platform_device *pdev)
+static int simple_parse_of(struct simple_util_priv *priv)
 {
-	struct simple_util_priv *priv;
-	struct device *dev = &pdev->dev;
-	struct device_node *np = dev->of_node;
-	struct snd_soc_card *card;
-	int ret;
+	struct snd_soc_card *card = simple_priv_to_card(priv);
+	struct device *dev = card->dev;
+	int ret = -EINVAL;
 
-	/* Allocate the private data and the DAI link array */
-	priv = devm_kzalloc(dev, sizeof(*priv), GFP_KERNEL);
-	if (!priv)
-		return -ENOMEM;
-
-	card = simple_priv_to_card(priv);
-	card->owner		= THIS_MODULE;
-	card->dev		= dev;
-	card->probe		= simple_soc_probe;
-	card->driver_name       = "simple-card";
+	if (!dev)
+		return simple_ret(priv, ret);
 
 	ret = -ENOMEM;
-	struct link_info *li __free(kfree) = kzalloc(sizeof(*li), GFP_KERNEL);
+	struct link_info *li __free(kfree) = kzalloc_obj(*li);
 	if (!li)
 		goto end;
 
@@ -742,73 +692,71 @@ static int simple_probe(struct platform_device *pdev)
 	if (ret < 0)
 		goto end;
 
-	if (np && of_device_is_available(np)) {
+	ret = simple_util_parse_widgets(priv, PREFIX);
+	if (ret < 0)
+		goto end;
 
-		ret = simple_parse_of(priv, li);
-		if (ret < 0) {
-			dev_err_probe(dev, ret, "parse error\n");
-			goto err;
-		}
+	ret = simple_util_parse_routing(priv, PREFIX);
+	if (ret < 0)
+		goto end;
 
-	} else {
-		struct simple_util_info *cinfo;
-		struct snd_soc_dai_link_component *cpus;
-		struct snd_soc_dai_link_component *codecs;
-		struct snd_soc_dai_link_component *platform;
-		struct snd_soc_dai_link *dai_link = priv->dai_link;
-		struct simple_dai_props *dai_props = priv->dai_props;
+	ret = simple_util_parse_pin_switches(priv, PREFIX);
+	if (ret < 0)
+		goto end;
 
-		ret = -EINVAL;
+	ret = simple_util_parse_aux_devs(priv, PREFIX);
+	if (ret < 0)
+		goto err;
 
-		cinfo = dev->platform_data;
-		if (!cinfo) {
-			dev_err(dev, "no info for asoc-simple-card\n");
-			goto err;
-		}
+	/* Single/Muti DAI link(s) & New style of DT node */
+	memset(li, 0, sizeof(*li));
+	ret = simple_for_each_link(priv, li,
+				   simple_dai_link_of,
+				   simple_dai_link_of_dpcm);
+	if (ret < 0)
+		goto err;
 
-		if (!cinfo->name ||
-		    !cinfo->codec_dai.name ||
-		    !cinfo->codec ||
-		    !cinfo->platform ||
-		    !cinfo->cpu_dai.name) {
-			dev_err(dev, "insufficient simple_util_info settings\n");
-			goto err;
-		}
+	/* Card name should be set after simple_for_each_link() */
+	ret = simple_util_parse_card_name(priv, PREFIX);
+	if (ret < 0)
+		goto err;
 
-		cpus			= dai_link->cpus;
-		cpus->dai_name		= cinfo->cpu_dai.name;
-
-		codecs			= dai_link->codecs;
-		codecs->name		= cinfo->codec;
-		codecs->dai_name	= cinfo->codec_dai.name;
-
-		platform		= dai_link->platforms;
-		platform->name		= cinfo->platform;
-
-		card->name		= (cinfo->card) ? cinfo->card : cinfo->name;
-		dai_link->name		= cinfo->name;
-		dai_link->stream_name	= cinfo->name;
-		dai_link->dai_fmt	= cinfo->daifmt;
-		dai_link->init		= simple_util_dai_init;
-		memcpy(dai_props->cpu_dai, &cinfo->cpu_dai,
-					sizeof(*dai_props->cpu_dai));
-		memcpy(dai_props->codec_dai, &cinfo->codec_dai,
-					sizeof(*dai_props->codec_dai));
-	}
+	ret = simple_populate_aux(priv);
+	if (ret < 0)
+		goto err;
 
 	snd_soc_card_set_drvdata(card, priv);
 
 	simple_util_debug_info(priv);
 
 	ret = devm_snd_soc_register_card(dev, card);
-	if (ret < 0)
-		goto err;
-
-	return 0;
 err:
-	simple_util_clean_reference(card);
+	if (ret < 0) {
+		simple_util_clean_reference(priv);
+		return dev_err_probe(dev, ret, "parse error\n");
+	}
 end:
-	return dev_err_probe(dev, ret, "parse error\n");
+	return simple_ret(priv, ret);
+}
+
+static int simple_probe(struct platform_device *pdev)
+{
+	struct simple_util_priv *priv;
+	struct device *dev = &pdev->dev;
+	struct snd_soc_card *card;
+
+	/* Allocate the private data and the DAI link array */
+	priv = devm_kzalloc(dev, sizeof(*priv), GFP_KERNEL);
+	if (!priv)
+		return -ENOMEM;
+
+	card = simple_priv_to_card(priv);
+	card->owner		= THIS_MODULE;
+	card->dev		= dev;
+	card->probe		= simple_soc_probe;
+	card->driver_name       = "simple-card";
+
+	return simple_parse_of(priv);
 }
 
 static const struct of_device_id simple_of_match[] = {

@@ -358,7 +358,7 @@ static void rtw89_wow_get_key_info_iter(struct ieee80211_hw *hw,
 		key_info->gtk_keyidx = key->keyidx;
 		break;
 	default:
-		rtw89_debug(rtwdev, RTW89_DBG_WOW, "unsupport cipher %x\n",
+		rtw89_debug(rtwdev, RTW89_DBG_WOW, "unsupported cipher %x\n",
 			    key->cipher);
 		goto err;
 	}
@@ -443,7 +443,7 @@ static void rtw89_wow_set_key_info_iter(struct ieee80211_hw *hw,
 	case WLAN_CIPHER_SUITE_WEP104:
 		break;
 	default:
-		rtw89_debug(rtwdev, RTW89_DBG_WOW, "unsupport cipher %x\n",
+		rtw89_debug(rtwdev, RTW89_DBG_WOW, "unsupported cipher %x\n",
 			    key->cipher);
 		goto err;
 	}
@@ -809,6 +809,10 @@ static void rtw89_wow_show_wakeup_reason(struct rtw89_dev *rtwdev)
 
 	reason = rtw89_read8(rtwdev, wow_reason_reg);
 	switch (reason) {
+	case RTW89_WOW_RSN_RX_DISASSOC:
+		wakeup.disconnect = true;
+		rtw89_debug(rtwdev, RTW89_DBG_WOW, "WOW: Rx disassoc\n");
+		break;
 	case RTW89_WOW_RSN_RX_DEAUTH:
 		wakeup.disconnect = true;
 		rtw89_debug(rtwdev, RTW89_DBG_WOW, "WOW: Rx deauth\n");
@@ -1070,7 +1074,7 @@ static void rtw89_wow_pattern_clear_cam(struct rtw89_dev *rtwdev)
 	for (i = 0; i < rtw_wow->pattern_cnt; i++) {
 		rtw_pattern = &rtw_wow->patterns[i];
 		rtw_pattern->valid = false;
-		rtw89_fw_wow_cam_update(rtwdev, rtw_pattern);
+		rtw89_chip_h2c_wow_cam_update(rtwdev, rtw_pattern);
 	}
 }
 
@@ -1081,7 +1085,7 @@ static void rtw89_wow_pattern_write(struct rtw89_dev *rtwdev)
 	int i;
 
 	for (i = 0; i < rtw_wow->pattern_cnt; i++)
-		rtw89_fw_wow_cam_update(rtwdev, rtw_pattern + i);
+		rtw89_chip_h2c_wow_cam_update(rtwdev, rtw_pattern + i);
 }
 
 static void rtw89_wow_pattern_clear(struct rtw89_dev *rtwdev)
@@ -1221,7 +1225,8 @@ static int rtw89_wow_cfg_wake(struct rtw89_dev *rtwdev, bool wow)
 		}
 	}
 
-	ret = rtw89_fw_h2c_cam(rtwdev, rtwvif_link, rtwsta_link, NULL);
+	ret = rtw89_fw_h2c_cam(rtwdev, rtwvif_link, rtwsta_link, NULL,
+			       RTW89_ROLE_INFO_CHANGE);
 	if (ret) {
 		rtw89_warn(rtwdev, "failed to send h2c cam\n");
 		return ret;
@@ -1248,7 +1253,7 @@ static int rtw89_wow_check_fw_status(struct rtw89_dev *rtwdev, bool wow_enable)
 				       mac->wow_ctrl.addr, mac->wow_ctrl.mask);
 	if (ret)
 		rtw89_err(rtwdev, "failed to check wow status %s\n",
-			  wow_enable ? "enabled" : "disabled");
+			  str_enabled_disabled(wow_enable));
 	return ret;
 }
 
@@ -1262,15 +1267,15 @@ static int rtw89_wow_swap_fw(struct rtw89_dev *rtwdev, bool wow)
 	enum rtw89_core_chip_id chip_id = rtwdev->chip->chip_id;
 	const struct rtw89_chip_info *chip = rtwdev->chip;
 	bool include_bb = !!chip->bbmcu_nr;
-	bool disable_intr_for_dlfw = false;
+	bool disable_intr_for_dlfw = true;
 	struct ieee80211_sta *wow_sta;
 	struct rtw89_sta_link *rtwsta_link = NULL;
 	struct rtw89_sta *rtwsta;
 	bool is_conn = true;
 	int ret;
 
-	if (chip_id == RTL8852C || chip_id == RTL8922A)
-		disable_intr_for_dlfw = true;
+	if (chip->chip_gen == RTW89_CHIP_AX && chip_id != RTL8852C)
+		disable_intr_for_dlfw = false;
 
 	wow_sta = ieee80211_find_sta(wow_vif, wow_vif->cfg.ap_addr);
 	if (wow_sta) {
@@ -1294,7 +1299,8 @@ static int rtw89_wow_swap_fw(struct rtw89_dev *rtwdev, bool wow)
 	if (disable_intr_for_dlfw)
 		rtw89_hci_enable_intr(rtwdev);
 
-	rtw89_phy_init_rf_reg(rtwdev, true);
+	if (chip->chip_gen == RTW89_CHIP_AX)
+		rtw89_phy_init_rf_reg(rtwdev, true);
 
 	ret = rtw89_fw_h2c_role_maintain(rtwdev, rtwvif_link, rtwsta_link,
 					 RTW89_ROLE_FW_RESTORE);
@@ -1318,7 +1324,8 @@ static int rtw89_wow_swap_fw(struct rtw89_dev *rtwdev, bool wow)
 		return ret;
 	}
 
-	ret = rtw89_fw_h2c_cam(rtwdev, rtwvif_link, rtwsta_link, NULL);
+	ret = rtw89_fw_h2c_cam(rtwdev, rtwvif_link, rtwsta_link, NULL,
+			       RTW89_ROLE_FW_RESTORE);
 	if (ret) {
 		rtw89_warn(rtwdev, "failed to send h2c cam\n");
 		return ret;
@@ -1450,9 +1457,20 @@ static int rtw89_wow_disable_trx_post(struct rtw89_dev *rtwdev)
 static void rtw89_fw_release_pno_pkt_list(struct rtw89_dev *rtwdev,
 					  struct rtw89_vif_link *rtwvif_link)
 {
+	struct rtw89_hw_scan_info *scan_info = &rtwdev->scan_info;
 	struct rtw89_wow_param *rtw_wow = &rtwdev->wow;
 	struct list_head *pkt_list = &rtw_wow->pno_pkt_list;
 	struct rtw89_pktofld_info *info, *tmp;
+	u8 idx, wildcard_pkt_id;
+
+	for (idx = NL80211_BAND_2GHZ; idx < NUM_NL80211_BANDS; idx++) {
+		if (!(rtwdev->chip->support_bands & BIT(idx)))
+			continue;
+
+		wildcard_pkt_id = scan_info->wildcard_pkt_id[idx];
+		if (wildcard_pkt_id != RTW89_SCANOFLD_PKT_NONE)
+			rtw89_fw_h2c_del_pkt_offload(rtwdev, wildcard_pkt_id);
+	}
 
 	list_for_each_entry_safe(info, tmp, pkt_list, list) {
 		rtw89_fw_h2c_del_pkt_offload(rtwdev, info->id);
@@ -1473,6 +1491,11 @@ static int rtw89_pno_scan_update_probe_req(struct rtw89_dev *rtwdev,
 	struct sk_buff *skb;
 	int ret;
 
+	ret = rtw89_hw_scan_append_wildcard_probe_req(rtwdev, rtwvif_link,
+						      rtwvif_link->mac_addr, true);
+	if (ret)
+		return ret;
+
 	for (i = 0; i < num; i++) {
 		skb = ieee80211_probereq_get(rtwdev->hw, rtwvif_link->mac_addr,
 					     nd_config->match_sets[i].ssid.ssid,
@@ -1484,7 +1507,7 @@ static int rtw89_pno_scan_update_probe_req(struct rtw89_dev *rtwdev,
 		skb_put_data(skb, basic_rate_ie, sizeof(basic_rate_ie));
 		skb_put_data(skb, nd_config->ie, nd_config->ie_len);
 
-		info = kzalloc(sizeof(*info), GFP_KERNEL);
+		info = kzalloc_obj(*info);
 		if (!info) {
 			kfree_skb(skb);
 			rtw89_fw_release_pno_pkt_list(rtwdev, rtwvif_link);
@@ -1516,6 +1539,10 @@ static int rtw89_pno_scan_offload(struct rtw89_dev *rtwdev, bool enable)
 	int ret;
 
 	if (enable) {
+		rtw89_hw_scan_calc_req_ssid(rtwdev, rtwvif_link, true);
+		memset(rtwdev->scan_info.wildcard_pkt_id, RTW89_SCANOFLD_PKT_NONE,
+		       sizeof(rtwdev->scan_info.wildcard_pkt_id));
+
 		ret = rtw89_pno_scan_update_probe_req(rtwdev, rtwvif_link);
 		if (ret) {
 			rtw89_err(rtwdev, "Update probe request failed\n");
@@ -1734,6 +1761,8 @@ static int rtw89_wow_disable(struct rtw89_dev *rtwdev)
 	}
 
 	rtw89_wow_leave_ps(rtwdev, false);
+
+	rtw89_core_tid_rx_stats_reset(rtwdev);
 
 	ret = rtw89_wow_fw_stop(rtwdev);
 	if (ret) {

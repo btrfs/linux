@@ -8,6 +8,7 @@
  */
 
 #include <linux/list.h>
+#include <linux/cred.h>
 #include <linux/slab.h>
 #include <linux/string.h>
 #include <keys/user-type.h>
@@ -40,12 +41,27 @@ cifs_spnego_key_destroy(struct key *key)
 	kfree(key->payload.data[0]);
 }
 
+static int
+cifs_spnego_key_vet_description(const char *description)
+{
+	/*
+	 * cifs.spnego descriptions are authority-bearing inputs to cifs.upcall.
+	 * They are only valid when produced by CIFS while using the private
+	 * spnego_cred installed below.  Do not let userspace create this type
+	 * of key through request_key(2)/add_key(2), since the helper treats
+	 * pid/uid/creduid/upcall_target as kernel-originating fields.
+	 */
+	if (current_cred() != spnego_cred)
+		return -EPERM;
+	return 0;
+}
 
 /*
  * keytype for CIFS spnego keys
  */
 struct key_type cifs_spnego_key_type = {
 	.name		= "cifs.spnego",
+	.vet_description = cifs_spnego_key_vet_description,
 	.instantiate	= cifs_spnego_key_instantiate,
 	.destroy	= cifs_spnego_key_destroy,
 	.describe	= user_describe,
@@ -90,7 +106,6 @@ cifs_get_spnego_key(struct cifs_ses *sesInfo,
 	size_t desc_len;
 	struct key *spnego_key;
 	const char *hostname = server->hostname;
-	const struct cred *saved_cred;
 
 	/* length of fields (with semicolons): ver=0xyz ip4=ipaddress
 	   host=hostname sec=mechanism uid=0xFF user=username */
@@ -158,9 +173,9 @@ cifs_get_spnego_key(struct cifs_ses *sesInfo,
 		dp += sprintf(dp, ";upcall_target=app");
 
 	cifs_dbg(FYI, "key description = %s\n", description);
-	saved_cred = override_creds(spnego_cred);
-	spnego_key = request_key(&cifs_spnego_key_type, description, "");
-	revert_creds(saved_cred);
+	scoped_with_creds(spnego_cred)
+		spnego_key = request_key(&cifs_spnego_key_type, description, "");
+	trace_smb3_kerberos_auth(server, sesInfo, PTR_ERR_OR_ZERO(spnego_key));
 
 #ifdef CONFIG_CIFS_DEBUG2
 	if (cifsFYI && !IS_ERR(spnego_key)) {

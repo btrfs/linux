@@ -501,7 +501,7 @@ static void rtw89_set_sar_from_acpi(struct rtw89_dev *rtwdev)
 	struct rtw89_sar_cfg_acpi *cfg;
 	int ret;
 
-	cfg = kzalloc(sizeof(*cfg), GFP_KERNEL);
+	cfg = kzalloc_obj(*cfg);
 	if (!cfg)
 		return;
 
@@ -693,6 +693,7 @@ static bool rtw89_tas_rolling_average(struct rtw89_dev *rtwdev)
 
 static void rtw89_tas_init(struct rtw89_dev *rtwdev)
 {
+	bool skip_acpi_dsm = rtwdev->hci.type == RTW89_HCI_TYPE_USB;
 	const struct rtw89_chip_info *chip = rtwdev->chip;
 	struct rtw89_tas_info *tas = &rtwdev->tas;
 	const struct rtw89_acpi_policy_tas *ptr;
@@ -700,6 +701,9 @@ static void rtw89_tas_init(struct rtw89_dev *rtwdev)
 	int ret;
 
 	if (!chip->support_tas)
+		return;
+
+	if (skip_acpi_dsm)
 		return;
 
 	ret = rtw89_acpi_evaluate_dsm(rtwdev, RTW89_ACPI_DSM_FUNC_TAS_EN, &res);

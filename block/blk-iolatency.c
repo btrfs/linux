@@ -523,7 +523,7 @@ static void iolatency_check_latencies(struct iolatency_grp *iolat, u64 now)
 
 	latency_stat_init(iolat, &stat);
 	preempt_disable();
-	for_each_online_cpu(cpu) {
+	for_each_possible_cpu(cpu) {
 		struct latency_stat *s;
 		s = per_cpu_ptr(iolat->stats, cpu);
 		latency_stat_sum(iolat, &stat, s);
@@ -760,7 +760,7 @@ static int blk_iolatency_init(struct gendisk *disk)
 	struct blk_iolatency *blkiolat;
 	int ret;
 
-	blkiolat = kzalloc(sizeof(*blkiolat), GFP_KERNEL);
+	blkiolat = kzalloc_obj(*blkiolat);
 	if (!blkiolat)
 		return -ENOMEM;
 
@@ -840,7 +840,7 @@ static ssize_t iolatency_set_limit(struct kernfs_open_file *of, char *buf,
 
 	ret = blkg_conf_open_bdev(&ctx);
 	if (ret)
-		goto out;
+		return ret;
 
 	/*
 	 * blk_iolatency_init() may fail after rq_qos_add() succeeds which can
@@ -850,11 +850,11 @@ static ssize_t iolatency_set_limit(struct kernfs_open_file *of, char *buf,
 	if (!iolat_rq_qos(ctx.bdev->bd_queue))
 		ret = blk_iolatency_init(ctx.bdev->bd_disk);
 	if (ret)
-		goto out;
+		goto close_bdev;
 
 	ret = blkg_conf_prep(blkcg, &blkcg_policy_iolatency, &ctx);
 	if (ret)
-		goto out;
+		goto close_bdev;
 
 	iolat = blkg_to_lat(ctx.blkg);
 	p = ctx.body;
@@ -865,7 +865,7 @@ static ssize_t iolatency_set_limit(struct kernfs_open_file *of, char *buf,
 		char val[21];	/* 18446744073709551616 */
 
 		if (sscanf(tok, "%15[^=]=%20s", key, val) != 2)
-			goto out;
+			goto unprep;
 
 		if (!strcmp(key, "target")) {
 			u64 v;
@@ -875,9 +875,9 @@ static ssize_t iolatency_set_limit(struct kernfs_open_file *of, char *buf,
 			else if (sscanf(val, "%llu", &v) == 1)
 				lat_val = v * NSEC_PER_USEC;
 			else
-				goto out;
+				goto unprep;
 		} else {
-			goto out;
+			goto unprep;
 		}
 	}
 
@@ -889,8 +889,11 @@ static ssize_t iolatency_set_limit(struct kernfs_open_file *of, char *buf,
 	if (oldval != iolat->min_lat_nsec)
 		iolatency_clear_scaling(blkg);
 	ret = 0;
-out:
-	blkg_conf_exit(&ctx);
+
+unprep:
+	blkg_conf_unprep(&ctx);
+close_bdev:
+	blkg_conf_close_bdev(&ctx);
 	return ret ?: nbytes;
 }
 
@@ -922,7 +925,7 @@ static void iolatency_ssd_stat(struct iolatency_grp *iolat, struct seq_file *s)
 
 	latency_stat_init(iolat, &stat);
 	preempt_disable();
-	for_each_online_cpu(cpu) {
+	for_each_possible_cpu(cpu) {
 		struct latency_stat *s;
 		s = per_cpu_ptr(iolat->stats, cpu);
 		latency_stat_sum(iolat, &stat, s);
@@ -988,10 +991,7 @@ static void iolatency_pd_init(struct blkg_policy_data *pd)
 	u64 now = blk_time_get_ns();
 	int cpu;
 
-	if (blk_queue_nonrot(blkg->q))
-		iolat->ssd = true;
-	else
-		iolat->ssd = false;
+	iolat->ssd = !blk_queue_rot(blkg->q);
 
 	for_each_possible_cpu(cpu) {
 		struct latency_stat *stat;
@@ -1031,11 +1031,28 @@ static void iolatency_pd_offline(struct blkg_policy_data *pd)
 	iolatency_clear_scaling(blkg);
 }
 
-static void iolatency_pd_free(struct blkg_policy_data *pd)
+static void iolat_release(struct rcu_head *rcu)
 {
+	struct blkg_policy_data *pd =
+		container_of(rcu, struct blkg_policy_data, rcu_head);
 	struct iolatency_grp *iolat = pd_to_lat(pd);
+
 	free_percpu(iolat->stats);
 	kfree(iolat);
+}
+
+static void iolatency_pd_free(struct blkg_policy_data *pd)
+{
+	struct blkcg_gq *blkg = pd_to_blkg(pd);
+
+	/*
+	 * Groups throttled as collateral have min_lat_nsec == 0, so
+	 * iolatency_pd_offline() leaves their delay set.  Drop it here, where
+	 * no in-flight bio can re-arm it via check_scale_change().
+	 */
+	if (blkg)
+		blkcg_clear_delay(blkg);
+	call_rcu(&pd->rcu_head, iolat_release);
 }
 
 static struct cftype iolatency_files[] = {

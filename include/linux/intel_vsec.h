@@ -28,9 +28,16 @@
 #define INTEL_DVSEC_TABLE_BAR(x)	((x) & GENMASK(2, 0))
 #define INTEL_DVSEC_TABLE_OFFSET(x)	((x) & GENMASK(31, 3))
 #define TABLE_OFFSET_SHIFT		3
+#define PMT_DISC_DWORDS		4
 
+struct device;
 struct pci_dev;
 struct resource;
+
+enum intel_vsec_disc_source {
+	INTEL_VSEC_DISC_PCI,	/* PCI, default */
+	INTEL_VSEC_DISC_ACPI,	/* ACPI */
+};
 
 enum intel_vsec_id {
 	VSEC_ID_TELEMETRY	= 2,
@@ -80,16 +87,16 @@ enum intel_vsec_quirks {
 
 /**
  * struct pmt_callbacks - Callback infrastructure for PMT devices
- * ->read_telem() when specified, called by client driver to access PMT data (instead
- * of direct copy).
- * @pdev:  PCI device reference for the callback's use
- * @guid:  ID of data to acccss
- * @data:  buffer for the data to be copied
- * @off:   offset into the requested buffer
- * @count: size of buffer
+ * @read_telem: when specified, called by client driver to access PMT
+ * data (instead of direct copy).
+ * * dev:   device reference for the callback's use
+ * * guid:  ID of data to acccss
+ * * data:  buffer for the data to be copied
+ * * off:   offset into the requested buffer
+ * * count: size of buffer
  */
 struct pmt_callbacks {
-	int (*read_telem)(struct pci_dev *pdev, u32 guid, u64 *data, loff_t off, u32 count);
+	int (*read_telem)(struct device *dev, u32 guid, u64 *data, loff_t off, u32 count);
 };
 
 struct vsec_feature_dependency {
@@ -102,6 +109,10 @@ struct vsec_feature_dependency {
  * @parent:    parent device in the auxbus chain
  * @headers:   list of headers to define the PMT client devices to create
  * @deps:      array of feature dependencies
+ * @acpi_disc: ACPI discovery tables, each entry is two QWORDs
+ *             in little-endian format as defined by the PMT ACPI spec.
+ *             Valid only when @provider == INTEL_VSEC_DISC_ACPI.
+ * @src:       source of discovery table data
  * @priv_data: private data, usable by parent devices, currently a callback
  * @caps:      bitmask of PMT capabilities for the given headers
  * @quirks:    bitmask of VSEC device quirks
@@ -112,6 +123,8 @@ struct intel_vsec_platform_info {
 	struct device *parent;
 	struct intel_vsec_header **headers;
 	const struct vsec_feature_dependency *deps;
+	u32 (*acpi_disc)[PMT_DISC_DWORDS];
+	enum intel_vsec_disc_source src;
 	void *priv_data;
 	unsigned long caps;
 	unsigned long quirks;
@@ -120,22 +133,29 @@ struct intel_vsec_platform_info {
 };
 
 /**
- * struct intel_sec_device - Auxbus specific device information
+ * struct intel_vsec_device - Auxbus specific device information
  * @auxdev:        auxbus device struct for auxbus access
- * @pcidev:        pci device associated with the device
- * @resource:      any resources shared by the parent
+ * @dev:           struct device associated with the device
+ * @acpi_disc:     ACPI discovery tables, each entry is two QWORDs
+ *                 in little-endian format as defined by the PMT ACPI spec.
+ *                 Valid only when @src == INTEL_VSEC_DISC_ACPI.
+ * @src:           source of discovery table data
  * @ida:           id reference
  * @num_resources: number of resources
  * @id:            xarray id
  * @priv_data:     any private data needed
+ * @priv_data_size: size of private data area
  * @quirks:        specified quirks
  * @base_addr:     base address of entries (if specified)
  * @cap_id:        the enumerated id of the vsec feature
+ * @resource:      PCI discovery resources (BAR windows), one per discovery
+ *                 instance. Valid only when @src == INTEL_VSEC_DISC_PCI
  */
 struct intel_vsec_device {
 	struct auxiliary_device auxdev;
-	struct pci_dev *pcidev;
-	struct resource *resource;
+	struct device *dev;
+	u32 (*acpi_disc)[PMT_DISC_DWORDS];
+	enum intel_vsec_disc_source src;
 	struct ida *ida;
 	int num_resources;
 	int id; /* xa */
@@ -144,6 +164,7 @@ struct intel_vsec_device {
 	unsigned long quirks;
 	u64 base_addr;
 	unsigned long cap_id;
+	struct resource resource[] __counted_by(num_resources);
 };
 
 /**
@@ -183,7 +204,7 @@ struct pmt_feature_group {
 	struct telemetry_region	regions[];
 };
 
-int intel_vsec_add_aux(struct pci_dev *pdev, struct device *parent,
+int intel_vsec_add_aux(struct device *parent,
 		       struct intel_vsec_device *intel_vsec_dev,
 		       const char *name);
 
@@ -198,14 +219,14 @@ static inline struct intel_vsec_device *auxdev_to_ivdev(struct auxiliary_device 
 }
 
 #if IS_ENABLED(CONFIG_INTEL_VSEC)
-int intel_vsec_register(struct pci_dev *pdev,
-			 struct intel_vsec_platform_info *info);
+int intel_vsec_register(struct device *dev,
+			const struct intel_vsec_platform_info *info);
 int intel_vsec_set_mapping(struct oobmsm_plat_info *plat_info,
 			   struct intel_vsec_device *vsec_dev);
 struct oobmsm_plat_info *intel_vsec_get_mapping(struct pci_dev *pdev);
 #else
-static inline int intel_vsec_register(struct pci_dev *pdev,
-				       struct intel_vsec_platform_info *info)
+static inline int intel_vsec_register(struct device *dev,
+				      const struct intel_vsec_platform_info *info)
 {
 	return -ENODEV;
 }

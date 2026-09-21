@@ -10,8 +10,7 @@
  *    Bugreports to: <Linux390@de.ibm.com>
  */
 
-#define KMSG_COMPONENT "s390dbf"
-#define pr_fmt(fmt) KMSG_COMPONENT ": " fmt
+#define pr_fmt(fmt) "s390dbf: " fmt
 
 #include <linux/stddef.h>
 #include <linux/kernel.h>
@@ -27,6 +26,8 @@
 #include <linux/math.h>
 #include <linux/minmax.h>
 #include <linux/debugfs.h>
+#include <linux/glob.h>
+#include <linux/stringify.h>
 
 #include <asm/debug.h>
 
@@ -155,6 +156,7 @@ static unsigned int __used debug_feature_version = __DEBUG_FEATURE_VERSION;
 static debug_info_t *debug_area_first;
 static debug_info_t *debug_area_last;
 static DEFINE_MUTEX(debug_mutex);
+extern debug_info_t *__s390dbf_info[], *__s390dbf_info_end[];
 
 static int initialized;
 static int debug_critical;
@@ -169,7 +171,93 @@ static const struct file_operations debug_file_ops = {
 
 static struct dentry *debug_debugfs_root_entry;
 
+/* List of debug area parameters to override */
+#define PARAM_UNSET	-2
+#define PARAM_NUM	16
+static struct debug_param_t {
+	char name[DEBUG_MAX_NAME_LEN + 1];
+	int level;
+	int pages;
+} debug_param[PARAM_NUM];
+static int debug_param_num;
+
 /* functions */
+static void debug_get_param(const char *name, int *level, int *pages, bool quiet)
+{
+	struct debug_param_t *p;
+	int i;
+
+	for (i = 0; i < debug_param_num; i++) {
+		p = &debug_param[i];
+		if (!glob_match(p->name, name))
+			continue;
+		if (level && p->level != PARAM_UNSET) {
+			if (!quiet)
+				pr_info("%s: override level to %d\n", name, p->level);
+			*level = p->level;
+		}
+		if (pages && p->pages != PARAM_UNSET) {
+			if (!quiet)
+				pr_info("%s: override pages to %d\n", name, p->pages);
+			*pages = p->pages;
+		}
+	}
+}
+
+#define LVL_LEN		10
+#define LVL_FMT		"%" __stringify(LVL_LEN) "[^:]"
+#define NAME_FMT	"%" __stringify(DEBUG_MAX_NAME_LEN) "[^:]"
+
+static bool __init s390dbf_parse_one(const char *arg, struct debug_param_t *param)
+{
+	struct debug_param_t p = { { 0 }, PARAM_UNSET, PARAM_UNSET };
+	char level[LVL_LEN + 1] = { 0 };
+
+	/* arg: <name|pattern>:[<level>|-]:[<pages>] */
+	if (sscanf(arg, NAME_FMT ":" LVL_FMT ":%d", p.name, level, &p.pages) > 1) {
+		if (strcmp(level, "-") == 0)
+			p.level = DEBUG_OFF_LEVEL;
+		else if (kstrtoint(level, 0, &p.level) != 0)
+			return false;
+	} else if (sscanf(arg, NAME_FMT "::%d", p.name, &p.pages) != 2) {
+		return false;
+	}
+
+	if (p.level != PARAM_UNSET && p.level != DEBUG_OFF_LEVEL &&
+	    (p.level < 0 || p.level > DEBUG_MAX_LEVEL))
+		return false;
+	if (p.pages != PARAM_UNSET && p.pages < 0)
+		return false;
+	*param = p;
+
+	return true;
+}
+
+static int __init s390dbf_parse(char *arg)
+{
+	debug_info_t **id;
+	int i, rc = 0;
+
+	while (arg && debug_param_num < PARAM_NUM) {
+		if (s390dbf_parse_one(arg, &debug_param[debug_param_num]))
+			debug_param_num++;
+		else
+			rc = -EINVAL;
+		arg = strchr(arg, ',');
+		if (arg)
+			arg++;
+	}
+
+	/*
+	 * Apply level to static debug areas, delay buffer size changes until
+	 * regular memory allocations are possible.
+	 */
+	for (i = 0, id = __s390dbf_info; &id[i] < __s390dbf_info_end; i++)
+		debug_get_param(id[i]->name, &id[i]->level, NULL, false);
+
+	return rc;
+}
+early_param("s390dbf", s390dbf_parse);
 
 /*
  * debug_areas_alloc
@@ -182,14 +270,13 @@ static debug_entry_t ***debug_areas_alloc(int pages_per_area, int nr_areas)
 	debug_entry_t ***areas;
 	int i, j;
 
-	areas = kmalloc_array(nr_areas, sizeof(debug_entry_t **), GFP_KERNEL);
+	areas = kmalloc_objs(debug_entry_t **, nr_areas);
 	if (!areas)
 		goto fail_malloc_areas;
 	for (i = 0; i < nr_areas; i++) {
 		/* GFP_NOWARN to avoid user triggerable WARN, we handle fails */
-		areas[i] = kmalloc_array(pages_per_area,
-					 sizeof(debug_entry_t *),
-					 GFP_KERNEL | __GFP_NOWARN);
+		areas[i] = kmalloc_objs(debug_entry_t *, pages_per_area,
+					GFP_KERNEL | __GFP_NOWARN);
 		if (!areas[i])
 			goto fail_malloc_areas2;
 		for (j = 0; j < pages_per_area; j++) {
@@ -226,13 +313,13 @@ static debug_info_t *debug_info_alloc(const char *name, int pages_per_area,
 	debug_info_t *rc;
 
 	/* alloc everything */
-	rc = kmalloc(sizeof(debug_info_t), GFP_KERNEL);
+	rc = kmalloc_obj(debug_info_t);
 	if (!rc)
 		goto fail_malloc_rc;
-	rc->active_entries = kcalloc(nr_areas, sizeof(int), GFP_KERNEL);
+	rc->active_entries = kzalloc_objs(int, nr_areas);
 	if (!rc->active_entries)
 		goto fail_malloc_active_entries;
-	rc->active_pages = kcalloc(nr_areas, sizeof(int), GFP_KERNEL);
+	rc->active_pages = kzalloc_objs(int, nr_areas);
 	if (!rc->active_pages)
 		goto fail_malloc_active_pages;
 	if ((mode == ALL_AREAS) && (pages_per_area != 0)) {
@@ -244,7 +331,7 @@ static debug_info_t *debug_info_alloc(const char *name, int pages_per_area,
 	}
 
 	/* initialize members */
-	spin_lock_init(&rc->lock);
+	raw_spin_lock_init(&rc->lock);
 	rc->pages_per_area = pages_per_area;
 	rc->nr_areas	   = nr_areas;
 	rc->active_area    = 0;
@@ -307,10 +394,11 @@ static void debug_info_free(debug_info_t *db_info)
 static debug_info_t *debug_info_create(const char *name, int pages_per_area,
 				       int nr_areas, int buf_size, umode_t mode)
 {
+	int level = DEBUG_DEFAULT_LEVEL;
 	debug_info_t *rc;
 
-	rc = debug_info_alloc(name, pages_per_area, nr_areas, buf_size,
-			      DEBUG_DEFAULT_LEVEL, ALL_AREAS);
+	debug_get_param(name, &level, &pages_per_area, false);
+	rc = debug_info_alloc(name, pages_per_area, nr_areas, buf_size, level, ALL_AREAS);
 	if (!rc)
 		goto out;
 
@@ -334,7 +422,7 @@ static debug_info_t *debug_info_copy(debug_info_t *in, int mode)
 	do {
 		rc = debug_info_alloc(in->name, in->pages_per_area,
 			in->nr_areas, in->buf_size, in->level, mode);
-		spin_lock_irqsave(&in->lock, flags);
+		raw_spin_lock_irqsave(&in->lock, flags);
 		if (!rc)
 			goto out;
 		/* has something changed in the meantime ? */
@@ -342,7 +430,7 @@ static debug_info_t *debug_info_copy(debug_info_t *in, int mode)
 		    (rc->nr_areas == in->nr_areas)) {
 			break;
 		}
-		spin_unlock_irqrestore(&in->lock, flags);
+		raw_spin_unlock_irqrestore(&in->lock, flags);
 		debug_info_free(rc);
 	} while (1);
 
@@ -357,7 +445,7 @@ static debug_info_t *debug_info_copy(debug_info_t *in, int mode)
 	}
 	rc->active_area = in->active_area;
 out:
-	spin_unlock_irqrestore(&in->lock, flags);
+	raw_spin_unlock_irqrestore(&in->lock, flags);
 	return rc;
 }
 
@@ -632,7 +720,7 @@ static file_private_info_t *debug_file_private_alloc(debug_info_t *debug_info,
 
 	if (!debug_info_snapshot)
 		return NULL;
-	p_info = kmalloc(sizeof(file_private_info_t), GFP_KERNEL);
+	p_info = kmalloc_obj(file_private_info_t);
 	if (!p_info) {
 		debug_info_free(debug_info_snapshot);
 		return NULL;
@@ -874,26 +962,27 @@ void debug_register_static(debug_info_t *id, int pages_per_area, int nr_areas)
 		return;
 	}
 
+	debug_get_param(id->name, &id->level, &pages_per_area, false);
 	copy = debug_info_alloc("", pages_per_area, nr_areas, id->buf_size,
 				id->level, ALL_AREAS);
 	if (!copy) {
 		pr_err("Registering debug feature %s failed\n", id->name);
 
 		/* Clear pointers to prevent tracing into released initdata. */
-		spin_lock_irqsave(&id->lock, flags);
+		raw_spin_lock_irqsave(&id->lock, flags);
 		id->areas = NULL;
 		id->active_pages = NULL;
 		id->active_entries = NULL;
-		spin_unlock_irqrestore(&id->lock, flags);
+		raw_spin_unlock_irqrestore(&id->lock, flags);
 
 		return;
 	}
 
 	/* Replace static trace area with dynamic copy. */
-	spin_lock_irqsave(&id->lock, flags);
+	raw_spin_lock_irqsave(&id->lock, flags);
 	debug_events_append(copy, id);
 	debug_areas_swap(id, copy);
-	spin_unlock_irqrestore(&id->lock, flags);
+	raw_spin_unlock_irqrestore(&id->lock, flags);
 
 	/* Clear pointers to initdata and discard copy. */
 	copy->areas = NULL;
@@ -906,8 +995,8 @@ void debug_register_static(debug_info_t *id, int pages_per_area, int nr_areas)
 	mutex_unlock(&debug_mutex);
 }
 
-/* Remove debugfs entries and remove from internal list. */
-static void _debug_unregister(debug_info_t *id)
+/* Remove debugfs entries. */
+static void _debug_unregister_debugfs(debug_info_t *id)
 {
 	int i;
 
@@ -917,6 +1006,11 @@ static void _debug_unregister(debug_info_t *id)
 		debugfs_remove(id->debugfs_entries[i]);
 	}
 	debugfs_remove(id->debugfs_root_entry);
+}
+
+/* Remove from internal list. */
+static void _debug_unregister(debug_info_t *id)
+{
 	if (id == debug_area_first)
 		debug_area_first = id->next;
 	if (id == debug_area_last)
@@ -942,6 +1036,7 @@ void debug_unregister(debug_info_t *id)
 	mutex_lock(&debug_mutex);
 	_debug_unregister(id);
 	mutex_unlock(&debug_mutex);
+	_debug_unregister_debugfs(id);
 
 	debug_info_put(id);
 }
@@ -967,14 +1062,31 @@ static int debug_set_size(debug_info_t *id, int nr_areas, int pages_per_area)
 		return -ENOMEM;
 	}
 
-	spin_lock_irqsave(&id->lock, flags);
+	raw_spin_lock_irqsave(&id->lock, flags);
 	debug_events_append(new_id, id);
 	debug_areas_swap(new_id, id);
+	raw_spin_unlock_irqrestore(&id->lock, flags);
 	debug_info_free(new_id);
-	spin_unlock_irqrestore(&id->lock, flags);
 	pr_info("%s: set new size (%i pages)\n", id->name, pages_per_area);
 
 	return 0;
+}
+
+static void _debug_set_level(debug_info_t *id, int new_level)
+{
+	unsigned long flags;
+
+	if (new_level == DEBUG_OFF_LEVEL) {
+		pr_info("%s: switched off\n", id->name);
+	} else if ((new_level > DEBUG_MAX_LEVEL) || (new_level < 0)) {
+		pr_info("%s: level %i is out of range (%i - %i)\n",
+			id->name, new_level, 0, DEBUG_MAX_LEVEL);
+		return;
+	}
+
+	raw_spin_lock_irqsave(&id->lock, flags);
+	id->level = new_level;
+	raw_spin_unlock_irqrestore(&id->lock, flags);
 }
 
 /**
@@ -988,22 +1100,16 @@ static int debug_set_size(debug_info_t *id, int nr_areas, int pages_per_area)
  */
 void debug_set_level(debug_info_t *id, int new_level)
 {
-	unsigned long flags;
-
 	if (!id)
 		return;
 
-	if (new_level == DEBUG_OFF_LEVEL) {
-		pr_info("%s: switched off\n", id->name);
-	} else if ((new_level > DEBUG_MAX_LEVEL) || (new_level < 0)) {
-		pr_info("%s: level %i is out of range (%i - %i)\n",
-			id->name, new_level, 0, DEBUG_MAX_LEVEL);
-		return;
-	}
+	/*
+	 * Level specified via kernel parameter takes precedence. The override
+	 * was already announced during registration, so stay quiet here.
+	 */
+	debug_get_param(id->name, &new_level, NULL, true);
 
-	spin_lock_irqsave(&id->lock, flags);
-	id->level = new_level;
-	spin_unlock_irqrestore(&id->lock, flags);
+	_debug_set_level(id, new_level);
 }
 EXPORT_SYMBOL(debug_set_level);
 
@@ -1139,8 +1245,6 @@ static const struct ctl_table s390dbf_table[] = {
 	},
 };
 
-static struct ctl_table_header *s390dbf_sysctl_header;
-
 /**
  * debug_stop_all() - stops the debug feature if stopping is allowed.
  *
@@ -1179,17 +1283,19 @@ void debug_set_critical(void)
 debug_entry_t *debug_event_common(debug_info_t *id, int level, const void *buf,
 				  int len)
 {
-	debug_entry_t *active;
+	debug_entry_t *active = NULL;
 	unsigned long flags;
 
 	if (!debug_active || !id->areas)
 		return NULL;
 	if (debug_critical) {
-		if (!spin_trylock_irqsave(&id->lock, flags))
+		if (!raw_spin_trylock_irqsave(&id->lock, flags))
 			return NULL;
 	} else {
-		spin_lock_irqsave(&id->lock, flags);
+		raw_spin_lock_irqsave(&id->lock, flags);
 	}
+	if (!id->areas)
+		goto out;
 	do {
 		active = get_active_entry(id);
 		memcpy(DEBUG_DATA(active), buf, min(len, id->buf_size));
@@ -1199,8 +1305,8 @@ debug_entry_t *debug_event_common(debug_info_t *id, int level, const void *buf,
 		len -= id->buf_size;
 		buf += id->buf_size;
 	} while (len > 0);
-
-	spin_unlock_irqrestore(&id->lock, flags);
+out:
+	raw_spin_unlock_irqrestore(&id->lock, flags);
 	return active;
 }
 EXPORT_SYMBOL(debug_event_common);
@@ -1212,17 +1318,19 @@ EXPORT_SYMBOL(debug_event_common);
 debug_entry_t *debug_exception_common(debug_info_t *id, int level,
 				      const void *buf, int len)
 {
-	debug_entry_t *active;
+	debug_entry_t *active = NULL;
 	unsigned long flags;
 
 	if (!debug_active || !id->areas)
 		return NULL;
 	if (debug_critical) {
-		if (!spin_trylock_irqsave(&id->lock, flags))
+		if (!raw_spin_trylock_irqsave(&id->lock, flags))
 			return NULL;
 	} else {
-		spin_lock_irqsave(&id->lock, flags);
+		raw_spin_lock_irqsave(&id->lock, flags);
 	}
+	if (!id->areas)
+		goto out;
 	do {
 		active = get_active_entry(id);
 		memcpy(DEBUG_DATA(active), buf, min(len, id->buf_size));
@@ -1232,8 +1340,8 @@ debug_entry_t *debug_exception_common(debug_info_t *id, int level,
 		len -= id->buf_size;
 		buf += id->buf_size;
 	} while (len > 0);
-
-	spin_unlock_irqrestore(&id->lock, flags);
+out:
+	raw_spin_unlock_irqrestore(&id->lock, flags);
 	return active;
 }
 EXPORT_SYMBOL(debug_exception_common);
@@ -1258,7 +1366,7 @@ static inline int debug_count_numargs(char *string)
 debug_entry_t *__debug_sprintf_event(debug_info_t *id, int level, char *string, ...)
 {
 	debug_sprintf_entry_t *curr_event;
-	debug_entry_t *active;
+	debug_entry_t *active = NULL;
 	unsigned long flags;
 	int numargs, idx;
 	va_list ap;
@@ -1268,11 +1376,13 @@ debug_entry_t *__debug_sprintf_event(debug_info_t *id, int level, char *string, 
 	numargs = debug_count_numargs(string);
 
 	if (debug_critical) {
-		if (!spin_trylock_irqsave(&id->lock, flags))
+		if (!raw_spin_trylock_irqsave(&id->lock, flags))
 			return NULL;
 	} else {
-		spin_lock_irqsave(&id->lock, flags);
+		raw_spin_lock_irqsave(&id->lock, flags);
 	}
+	if (!id->areas)
+		goto out;
 	active = get_active_entry(id);
 	curr_event = (debug_sprintf_entry_t *) DEBUG_DATA(active);
 	va_start(ap, string);
@@ -1281,7 +1391,8 @@ debug_entry_t *__debug_sprintf_event(debug_info_t *id, int level, char *string, 
 		curr_event->args[idx] = va_arg(ap, long);
 	va_end(ap);
 	debug_finish_entry(id, active, level, 0);
-	spin_unlock_irqrestore(&id->lock, flags);
+out:
+	raw_spin_unlock_irqrestore(&id->lock, flags);
 
 	return active;
 }
@@ -1293,7 +1404,7 @@ EXPORT_SYMBOL(__debug_sprintf_event);
 debug_entry_t *__debug_sprintf_exception(debug_info_t *id, int level, char *string, ...)
 {
 	debug_sprintf_entry_t *curr_event;
-	debug_entry_t *active;
+	debug_entry_t *active = NULL;
 	unsigned long flags;
 	int numargs, idx;
 	va_list ap;
@@ -1304,11 +1415,13 @@ debug_entry_t *__debug_sprintf_exception(debug_info_t *id, int level, char *stri
 	numargs = debug_count_numargs(string);
 
 	if (debug_critical) {
-		if (!spin_trylock_irqsave(&id->lock, flags))
+		if (!raw_spin_trylock_irqsave(&id->lock, flags))
 			return NULL;
 	} else {
-		spin_lock_irqsave(&id->lock, flags);
+		raw_spin_lock_irqsave(&id->lock, flags);
 	}
+	if (!id->areas)
+		goto out;
 	active = get_active_entry(id);
 	curr_event = (debug_sprintf_entry_t *)DEBUG_DATA(active);
 	va_start(ap, string);
@@ -1317,7 +1430,8 @@ debug_entry_t *__debug_sprintf_exception(debug_info_t *id, int level, char *stri
 		curr_event->args[idx] = va_arg(ap, long);
 	va_end(ap);
 	debug_finish_entry(id, active, level, 1);
-	spin_unlock_irqrestore(&id->lock, flags);
+out:
+	raw_spin_unlock_irqrestore(&id->lock, flags);
 
 	return active;
 }
@@ -1351,7 +1465,7 @@ int debug_register_view(debug_info_t *id, struct debug_view *view)
 		mode &= ~(S_IWUSR | S_IWGRP | S_IWOTH);
 	pde = debugfs_create_file(view->name, mode, id->debugfs_root_entry,
 				  id, &debug_file_ops);
-	spin_lock_irqsave(&id->lock, flags);
+	raw_spin_lock_irqsave(&id->lock, flags);
 	for (i = 0; i < DEBUG_MAX_VIEWS; i++) {
 		if (!id->views[i])
 			break;
@@ -1362,7 +1476,7 @@ int debug_register_view(debug_info_t *id, struct debug_view *view)
 		id->views[i] = view;
 		id->debugfs_entries[i] = pde;
 	}
-	spin_unlock_irqrestore(&id->lock, flags);
+	raw_spin_unlock_irqrestore(&id->lock, flags);
 	if (rc) {
 		pr_err("Registering view %s/%s would exceed the maximum "
 		       "number of views %i\n", id->name, view->name, i);
@@ -1392,7 +1506,7 @@ int debug_unregister_view(debug_info_t *id, struct debug_view *view)
 
 	if (!id)
 		goto out;
-	spin_lock_irqsave(&id->lock, flags);
+	raw_spin_lock_irqsave(&id->lock, flags);
 	for (i = 0; i < DEBUG_MAX_VIEWS; i++) {
 		if (id->views[i] == view)
 			break;
@@ -1404,7 +1518,7 @@ int debug_unregister_view(debug_info_t *id, struct debug_view *view)
 		id->views[i] = NULL;
 		id->debugfs_entries[i] = NULL;
 	}
-	spin_unlock_irqrestore(&id->lock, flags);
+	raw_spin_unlock_irqrestore(&id->lock, flags);
 	debugfs_remove(dentry);
 out:
 	return rc;
@@ -1415,6 +1529,9 @@ static inline char *debug_get_user_string(const char __user *user_buf,
 					  size_t user_len)
 {
 	char *buffer;
+
+	if (!user_len)
+		return ERR_PTR(-EINVAL);
 
 	buffer = memdup_user_nul(user_buf, user_len);
 	if (IS_ERR(buffer))
@@ -1528,7 +1645,7 @@ static int debug_input_level_fn(debug_info_t *id, struct debug_view *view,
 		goto out;
 	}
 	if (str[0] == '-') {
-		debug_set_level(id, DEBUG_OFF_LEVEL);
+		_debug_set_level(id, DEBUG_OFF_LEVEL);
 		rc = user_len;
 		goto free_str;
 	} else {
@@ -1538,7 +1655,7 @@ static int debug_input_level_fn(debug_info_t *id, struct debug_view *view,
 		pr_warn("%s is not a valid level for a debug feature\n", str);
 		rc = -EINVAL;
 	} else {
-		debug_set_level(id, new_level);
+		_debug_set_level(id, new_level);
 		rc = user_len;
 	}
 free_str:
@@ -1556,9 +1673,11 @@ static void debug_flush(debug_info_t *id, int area)
 	unsigned long flags;
 	int i, j;
 
-	if (!id || !id->areas)
+	if (!id)
 		return;
-	spin_lock_irqsave(&id->lock, flags);
+	raw_spin_lock_irqsave(&id->lock, flags);
+	if (!id->areas)
+		goto out;
 	if (area == DEBUG_FLUSH_ALL) {
 		id->active_area = 0;
 		memset(id->active_entries, 0, id->nr_areas * sizeof(int));
@@ -1573,7 +1692,8 @@ static void debug_flush(debug_info_t *id, int area)
 		for (i = 0; i < id->pages_per_area; i++)
 			memset(id->areas[area][i], 0, PAGE_SIZE);
 	}
-	spin_unlock_irqrestore(&id->lock, flags);
+out:
+	raw_spin_unlock_irqrestore(&id->lock, flags);
 }
 
 /*
@@ -1585,6 +1705,11 @@ static int debug_input_flush_fn(debug_info_t *id, struct debug_view *view,
 {
 	char input_buf[1];
 	int rc = user_len;
+
+	if (!user_len) {
+		rc = -EINVAL;
+		goto out;
+	}
 
 	if (user_len > 0x10000)
 		user_len = 0x10000;
@@ -1722,7 +1847,7 @@ EXPORT_SYMBOL(debug_sprintf_format_fn);
  */
 static int __init debug_init(void)
 {
-	s390dbf_sysctl_header = register_sysctl("s390dbf", s390dbf_table);
+	register_sysctl("s390dbf", s390dbf_table);
 	mutex_lock(&debug_mutex);
 	debug_debugfs_root_entry = debugfs_create_dir(DEBUG_DIR_ROOT, NULL);
 	initialized = 1;

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
 /*
- * Copyright (C) 2024-2025 Intel Corporation
+ * Copyright (C) 2024-2026 Intel Corporation
  */
 
 #include <net/mac80211.h>
@@ -23,6 +23,7 @@
 #include "roc.h"
 #include "mlo.h"
 #include "stats.h"
+#include "iwl-nvm-parse.h"
 #include "ftm-initiator.h"
 #include "low_latency.h"
 #include "fw/api/scan.h"
@@ -49,7 +50,7 @@
 	{							\
 		.max = 1,					\
 		.types = BIT(NL80211_IFTYPE_P2P_DEVICE),	\
-	}
+	},
 
 static const struct ieee80211_iface_limit iwl_mld_limits[] = {
 	IWL_MLD_LIMITS(0)
@@ -57,6 +58,21 @@ static const struct ieee80211_iface_limit iwl_mld_limits[] = {
 
 static const struct ieee80211_iface_limit iwl_mld_limits_ap[] = {
 	IWL_MLD_LIMITS(BIT(NL80211_IFTYPE_AP))
+};
+
+static const struct ieee80211_iface_limit iwl_mld_limits_nan[] = {
+	{
+		.max = 1,
+		.types = BIT(NL80211_IFTYPE_STATION),
+	},
+	{
+		.max = 1,
+		.types = BIT(NL80211_IFTYPE_NAN),
+	},
+	{
+		.max = 2,
+		.types = BIT(NL80211_IFTYPE_NAN_DATA),
+	},
 };
 
 static const struct ieee80211_iface_combination
@@ -73,38 +89,32 @@ iwl_mld_iface_combinations[] = {
 		.limits = iwl_mld_limits_ap,
 		.n_limits = ARRAY_SIZE(iwl_mld_limits_ap),
 	},
+	/* NAN combination follow, this excludes P2P and AP */
+	{
+		.num_different_channels = 3,
+		.max_interfaces = 4,
+		.limits = iwl_mld_limits_nan,
+		.n_limits = ARRAY_SIZE(iwl_mld_limits_nan),
+	},
 };
 
-static const u8 if_types_ext_capa_sta[] = {
-	 [0] = WLAN_EXT_CAPA1_EXT_CHANNEL_SWITCHING,
-	 [2] = WLAN_EXT_CAPA3_MULTI_BSSID_SUPPORT,
-	 [7] = WLAN_EXT_CAPA8_OPMODE_NOTIF |
-	       WLAN_EXT_CAPA8_MAX_MSDU_IN_AMSDU_LSB,
-	 [8] = WLAN_EXT_CAPA9_MAX_MSDU_IN_AMSDU_MSB,
-	 [9] = WLAN_EXT_CAPA10_TWT_REQUESTER_SUPPORT,
+static const u8 ext_capa_base[IWL_MLD_STA_EXT_CAPA_SIZE] = {
+	[0] = WLAN_EXT_CAPA1_EXT_CHANNEL_SWITCHING,
+	[2] = WLAN_EXT_CAPA3_MULTI_BSSID_SUPPORT,
+	[7] = WLAN_EXT_CAPA8_OPMODE_NOTIF |
+	      WLAN_EXT_CAPA8_MAX_MSDU_IN_AMSDU_LSB,
+	[8] = WLAN_EXT_CAPA9_MAX_MSDU_IN_AMSDU_MSB,
 };
 
 #define IWL_MLD_EMLSR_CAPA	(IEEE80211_EML_CAP_EMLSR_SUPP | \
-				 IEEE80211_EML_CAP_EMLSR_PADDING_DELAY_32US << \
-					__bf_shf(IEEE80211_EML_CAP_EMLSR_PADDING_DELAY) | \
+				 IEEE80211_EML_CAP_EML_PADDING_DELAY_32US << \
+					__bf_shf(IEEE80211_EML_CAP_EML_PADDING_DELAY) | \
 				 IEEE80211_EML_CAP_EMLSR_TRANSITION_DELAY_64US << \
-					__bf_shf(IEEE80211_EML_CAP_EMLSR_TRANSITION_DELAY))
+					__bf_shf(IEEE80211_EML_CAP_EML_TRANSITION_DELAY))
 #define IWL_MLD_CAPA_OPS (FIELD_PREP_CONST( \
 			IEEE80211_MLD_CAP_OP_TID_TO_LINK_MAP_NEG_SUPP, \
 			IEEE80211_MLD_CAP_OP_TID_TO_LINK_MAP_NEG_SUPP_SAME) | \
 			IEEE80211_MLD_CAP_OP_LINK_RECONF_SUPPORT)
-
-static const struct wiphy_iftype_ext_capab iftypes_ext_capa[] = {
-	{
-		.iftype = NL80211_IFTYPE_STATION,
-		.extended_capabilities = if_types_ext_capa_sta,
-		.extended_capabilities_mask = if_types_ext_capa_sta,
-		.extended_capabilities_len = sizeof(if_types_ext_capa_sta),
-		/* relevant only if EHT is supported */
-		.eml_capabilities = IWL_MLD_EMLSR_CAPA,
-		.mld_capa_and_ops = IWL_MLD_CAPA_OPS,
-	},
-};
 
 static void iwl_mld_hw_set_addresses(struct iwl_mld *mld)
 {
@@ -255,6 +265,45 @@ static void iwl_mac_hw_set_flags(struct iwl_mld *mld)
 	ieee80211_hw_set(hw, TDLS_WIDER_BW);
 }
 
+static void iwl_mld_hw_set_nan(struct iwl_mld *mld)
+{
+	struct ieee80211_hw *hw = mld->hw;
+
+	hw->wiphy->interface_modes |= BIT(NL80211_IFTYPE_NAN);
+	hw->wiphy->interface_modes |= BIT(NL80211_IFTYPE_NAN_DATA);
+
+	hw->wiphy->nan_supported_bands = BIT(NL80211_BAND_2GHZ);
+	if (mld->nvm_data->bands[NL80211_BAND_5GHZ].n_channels)
+		hw->wiphy->nan_supported_bands |=
+			BIT(NL80211_BAND_5GHZ);
+
+	hw->wiphy->nan_capa.flags = WIPHY_NAN_FLAGS_CONFIGURABLE_SYNC |
+				    WIPHY_NAN_FLAGS_USERSPACE_DE;
+
+	hw->wiphy->nan_capa.op_mode = NAN_OP_MODE_PHY_MODE_VHT |
+				      NAN_OP_MODE_PHY_MODE_HE |
+				      NAN_OP_MODE_160MHZ;
+
+	hw->wiphy->nan_capa.n_antennas =
+		(hweight32(hw->wiphy->available_antennas_tx) &
+		 NAN_DEV_CAPA_NUM_TX_ANT_MASK) |
+		((hweight32(hw->wiphy->available_antennas_rx) <<
+		  NAN_DEV_CAPA_NUM_RX_ANT_POS) &
+		 NAN_DEV_CAPA_NUM_RX_ANT_MASK);
+
+	/* Maximal channel switch time - use FW TLV value if available */
+	if (mld->fw->ucode_capa.nan_max_chan_switch_time)
+		hw->wiphy->nan_capa.max_channel_switch_time =
+			mld->fw->ucode_capa.nan_max_chan_switch_time;
+	else
+		hw->wiphy->nan_capa.max_channel_switch_time =
+			4 * USEC_PER_MSEC;
+
+	hw->wiphy->nan_capa.phy.ht = mld->nvm_data->nan_phy_capa.ht;
+	hw->wiphy->nan_capa.phy.vht = mld->nvm_data->nan_phy_capa.vht;
+	hw->wiphy->nan_capa.phy.he = mld->nvm_data->nan_phy_capa.he;
+}
+
 static void iwl_mac_hw_set_wiphy(struct iwl_mld *mld)
 {
 	struct ieee80211_hw *hw = mld->hw;
@@ -318,7 +367,16 @@ static void iwl_mac_hw_set_wiphy(struct iwl_mld *mld)
 	wiphy->hw_timestamp_max_peers = 1;
 
 	wiphy->iface_combinations = iwl_mld_iface_combinations;
-	wiphy->n_iface_combinations = ARRAY_SIZE(iwl_mld_iface_combinations);
+
+	if (iwl_mld_nan_supported(mld)) {
+		wiphy->n_iface_combinations =
+			ARRAY_SIZE(iwl_mld_iface_combinations);
+		iwl_mld_hw_set_nan(mld);
+	} else {
+		/* Do not include NAN combination */
+		wiphy->n_iface_combinations =
+			ARRAY_SIZE(iwl_mld_iface_combinations) - 1;
+	}
 
 	wiphy_ext_feature_set(wiphy, NL80211_EXT_FEATURE_VHT_IBSS);
 	wiphy_ext_feature_set(wiphy, NL80211_EXT_FEATURE_DFS_CONCURRENT);
@@ -330,26 +388,46 @@ static void iwl_mac_hw_set_wiphy(struct iwl_mld *mld)
 	wiphy_ext_feature_set(wiphy, NL80211_EXT_FEATURE_FILS_MAX_CHANNEL_TIME);
 	wiphy_ext_feature_set(wiphy, NL80211_EXT_FEATURE_OCE_PROBE_REQ_HIGH_TX_RATE);
 	wiphy_ext_feature_set(wiphy, NL80211_EXT_FEATURE_MU_MIMO_AIR_SNIFFER);
+	wiphy_ext_feature_set(wiphy,
+			      NL80211_EXT_FEATURE_MULTICAST_REGISTRATIONS);
 	wiphy_ext_feature_set(wiphy, NL80211_EXT_FEATURE_SPP_AMSDU_SUPPORT);
 
 	if (fw_has_capa(ucode_capa, IWL_UCODE_TLV_CAPA_PROTECTED_TWT))
 		wiphy_ext_feature_set(wiphy, NL80211_EXT_FEATURE_PROTECTED_TWT);
 
-	wiphy->iftype_ext_capab = NULL;
-	wiphy->num_iftype_ext_capab = 0;
-
-	if (!iwlwifi_mod_params.disable_11ax) {
-		wiphy->iftype_ext_capab = iftypes_ext_capa;
-		wiphy->num_iftype_ext_capab = ARRAY_SIZE(iftypes_ext_capa);
-
-		ieee80211_hw_set(hw, SUPPORTS_MULTI_BSSID);
-		ieee80211_hw_set(hw, SUPPORTS_ONLY_HE_MULTI_BSSID);
-	}
-
 	if (iwlmld_mod_params.power_scheme != IWL_POWER_SCHEME_CAM)
 		wiphy->flags |= WIPHY_FLAG_PS_ON_BY_DEFAULT;
 	else
 		wiphy->flags &= ~WIPHY_FLAG_PS_ON_BY_DEFAULT;
+
+	/* We are done for non-HE */
+	if (iwlwifi_mod_params.disable_11ax)
+		return;
+
+	ieee80211_hw_set(hw, SUPPORTS_MULTI_BSSID);
+	ieee80211_hw_set(hw, SUPPORTS_ONLY_HE_MULTI_BSSID);
+
+	wiphy->iftype_ext_capab = mld->ext_capab;
+	wiphy->num_iftype_ext_capab = ARRAY_SIZE(mld->ext_capab);
+
+	BUILD_BUG_ON(sizeof(mld->sta_ext_capab) < sizeof(ext_capa_base));
+
+	memcpy(mld->sta_ext_capab, ext_capa_base, sizeof(ext_capa_base));
+
+	mld->ext_capab[0].iftype = NL80211_IFTYPE_STATION;
+	mld->ext_capab[0].extended_capabilities = mld->sta_ext_capab;
+	mld->ext_capab[0].extended_capabilities_mask = mld->sta_ext_capab;
+	mld->ext_capab[0].extended_capabilities_len = sizeof(mld->sta_ext_capab);
+
+	if (!mld->nvm_data->sku_cap_11be_enable ||
+	    iwlwifi_mod_params.disable_11be)
+		return;
+
+	mld->ext_capab[0].eml_capabilities = IWL_MLD_EMLSR_CAPA;
+	mld->ext_capab[0].mld_capa_and_ops = IWL_MLD_CAPA_OPS;
+	mld->ext_capab[0].ext_mld_capa_and_ops =
+		IEEE80211_UHR_ML_EXT_MLD_CAPA_ML_PM;
+
 }
 
 static void iwl_mac_hw_set_misc(struct iwl_mld *mld)
@@ -384,24 +462,6 @@ static void iwl_mac_hw_set_misc(struct iwl_mld *mld)
 
 static int iwl_mld_hw_verify_preconditions(struct iwl_mld *mld)
 {
-	int ratecheck;
-
-	/* check for rates version 3 */
-	ratecheck =
-		(iwl_fw_lookup_cmd_ver(mld->fw, TX_CMD, 0) >= 11) +
-		(iwl_fw_lookup_notif_ver(mld->fw, DATA_PATH_GROUP,
-					 TLC_MNG_UPDATE_NOTIF, 0) >= 4) +
-		(iwl_fw_lookup_notif_ver(mld->fw, LEGACY_GROUP,
-					 REPLY_RX_MPDU_CMD, 0) >= 6) +
-		(iwl_fw_lookup_notif_ver(mld->fw, DATA_PATH_GROUP,
-					 RX_NO_DATA_NOTIF, 0) >= 4) +
-		(iwl_fw_lookup_notif_ver(mld->fw, LONG_GROUP, TX_CMD, 0) >= 9);
-
-	if (ratecheck != 0 && ratecheck != 5) {
-		IWL_ERR(mld, "Firmware has inconsistent rates\n");
-		return -EINVAL;
-	}
-
 	/* 11ax is expected to be enabled for all supported devices */
 	if (WARN_ON(!mld->nvm_data->sku_cap_11ax_enable))
 		return -EINVAL;
@@ -483,8 +543,7 @@ iwl_mld_mac80211_tx(struct ieee80211_hw *hw,
 	iwl_mld_tx_skb(mld, skb, NULL);
 }
 
-static void
-iwl_mld_restart_cleanup(struct iwl_mld *mld)
+void iwl_mld_restart_cleanup(struct iwl_mld *mld)
 {
 	iwl_cleanup_mld(mld);
 
@@ -610,14 +669,37 @@ int iwl_mld_mac80211_add_interface(struct ieee80211_hw *hw,
 	if (ret)
 		return ret;
 
+	if (vif->type == NL80211_IFTYPE_NAN_DATA) {
+		if (WARN_ON(!mld->nan_device_vif)) {
+			ret = -EINVAL;
+			goto err;
+		}
+
+		if (iwl_mld_nan_use_nan_stations(mld)) {
+			struct iwl_mld_vif *mld_vif =
+				iwl_mld_vif_from_mac80211(vif);
+			struct iwl_mld_int_sta *sta =
+				&mld_vif->nan.mcast_data_sta;
+
+			ret = iwl_mld_add_nan_mcast_data_sta(mld,
+							     vif->addr,
+							     sta);
+			if (ret)
+				goto err;
+		}
+
+		return 0;
+	}
+
 	/*
 	 * Add the default link, but not if this is an MLD vif as that implies
 	 * the HW is restarting and it will be configured by change_vif_links.
 	 */
-	if (!ieee80211_vif_is_mld(vif))
+	if (vif->type != NL80211_IFTYPE_NAN && !ieee80211_vif_is_mld(vif)) {
 		ret = iwl_mld_add_link(mld, &vif->bss_conf);
-	if (ret)
-		goto err;
+		if (ret)
+			goto err;
+	}
 
 	if (vif->type == NL80211_IFTYPE_STATION) {
 		vif->driver_flags |= IEEE80211_VIF_REMOVE_AP_AFTER_DISASSOC;
@@ -644,6 +726,9 @@ int iwl_mld_mac80211_add_interface(struct ieee80211_hw *hw,
 
 	if (vif->type == NL80211_IFTYPE_P2P_DEVICE)
 		mld->p2p_device_vif = vif;
+
+	if (vif->type == NL80211_IFTYPE_NAN)
+		mld->nan_device_vif = vif;
 
 	return 0;
 
@@ -672,7 +757,17 @@ void iwl_mld_mac80211_remove_interface(struct ieee80211_hw *hw,
 	if (vif->type == NL80211_IFTYPE_P2P_DEVICE)
 		mld->p2p_device_vif = NULL;
 
-	iwl_mld_remove_link(mld, &vif->bss_conf);
+	if (vif->type == NL80211_IFTYPE_NAN) {
+		mld->nan_device_vif = NULL;
+	} else if (vif->type != NL80211_IFTYPE_NAN_DATA) {
+		iwl_mld_remove_link(mld, &vif->bss_conf);
+	} else if (iwl_mld_nan_use_nan_stations(mld)) {
+		struct iwl_mld_vif *mld_vif = iwl_mld_vif_from_mac80211(vif);
+		struct iwl_mld_int_sta *sta = &mld_vif->nan.mcast_data_sta;
+
+		if (sta->sta_id != IWL_INVALID_STA)
+			iwl_mld_remove_nan_mcast_data_sta(mld, sta);
+	}
 
 #ifdef CONFIG_IWLWIFI_DEBUGFS
 	debugfs_remove(iwl_mld_vif_from_mac80211(vif)->dbgfs_slink);
@@ -680,6 +775,32 @@ void iwl_mld_mac80211_remove_interface(struct ieee80211_hw *hw,
 #endif
 
 	iwl_mld_rm_vif(mld, vif);
+
+	mld->monitor.phy.valid = false;
+}
+
+static
+int iwl_mld_mac80211_change_interface(struct ieee80211_hw *hw,
+				      struct ieee80211_vif *vif,
+				      enum nl80211_iftype new_type, bool p2p)
+{
+	enum nl80211_iftype old_type = vif->type;
+	bool old_p2p = vif->p2p;
+	int ret;
+
+	iwl_mld_mac80211_remove_interface(hw, vif);
+
+	/* set the new type for adding it cleanly */
+	vif->type = new_type;
+	vif->p2p = p2p;
+
+	ret = iwl_mld_mac80211_add_interface(hw, vif);
+
+	/* restore for mac80211, it will change it again */
+	vif->type = old_type;
+	vif->p2p = old_p2p;
+
+	return ret;
 }
 
 struct iwl_mld_mc_iter_data {
@@ -892,6 +1013,30 @@ void iwl_mld_remove_chanctx(struct ieee80211_hw *hw,
 	mld->used_phy_ids &= ~BIT(phy->fw_id);
 }
 
+static void
+iwl_mld_update_link_npca_puncturing(struct ieee80211_hw *hw,
+				    struct ieee80211_chanctx_conf *ctx)
+{
+	struct iwl_mld *mld = IWL_MAC80211_GET_MLD(hw);
+	struct ieee80211_vif *vif;
+
+	for_each_active_interface(vif, hw) {
+		struct ieee80211_bss_conf *link;
+		int link_id;
+
+		for_each_vif_active_link(vif, link, link_id) {
+			if (rcu_access_pointer(link->chanctx_conf) != ctx)
+				continue;
+
+			if (!link->npca.enabled)
+				continue;
+
+			iwl_mld_change_link_in_fw(mld, link,
+						  LINK_CONTEXT_MODIFY_UHR_PARAMS);
+		}
+	}
+}
+
 static
 void iwl_mld_change_chanctx(struct ieee80211_hw *hw,
 			    struct ieee80211_chanctx_conf *ctx, u32 changed)
@@ -907,9 +1052,19 @@ void iwl_mld_change_chanctx(struct ieee80211_hw *hw,
 			  IEEE80211_CHANCTX_CHANGE_CHANNEL)))
 		return;
 
+	/* NPCA puncturing is in link API for FW */
+	if (changed & IEEE80211_CHANCTX_CHANGE_NPCA_PUNCT) {
+		iwl_mld_update_link_npca_puncturing(hw, ctx);
+		changed &= ~IEEE80211_CHANCTX_CHANGE_NPCA_PUNCT;
+	}
+
 	/* Check if a FW update is required */
 
-	if (changed & IEEE80211_CHANCTX_CHANGE_AP)
+	if (!changed)
+		return;
+
+	if (changed & IEEE80211_CHANCTX_CHANGE_AP ||
+	    changed & IEEE80211_CHANCTX_CHANGE_NPCA)
 		goto update;
 
 	if (chandef->chan == phy->chandef.chan &&
@@ -980,7 +1135,9 @@ int iwl_mld_assign_vif_chanctx(struct ieee80211_hw *hw,
 {
 	struct iwl_mld *mld = IWL_MAC80211_GET_MLD(hw);
 	struct iwl_mld_link *mld_link = iwl_mld_link_from_mac80211(link);
-	unsigned int n_active = iwl_mld_count_active_links(mld, vif);
+	struct iwl_mld_link *temp_mld_link;
+	struct iwl_mld_vif *mld_vif = iwl_mld_vif_from_mac80211(vif);
+	u16 final_active_links = 0;
 	int ret;
 
 	lockdep_assert_wiphy(mld->wiphy);
@@ -988,10 +1145,7 @@ int iwl_mld_assign_vif_chanctx(struct ieee80211_hw *hw,
 	if (WARN_ON(!mld_link))
 		return -EINVAL;
 
-	/* if the assigned one was not counted yet, count it now */
 	if (!rcu_access_pointer(mld_link->chan_ctx)) {
-		n_active++;
-
 		/* Track addition of non-BSS link */
 		if (ieee80211_vif_type_p2p(vif) != NL80211_IFTYPE_STATION) {
 			ret = iwl_mld_emlsr_check_non_bss_block(mld, 1);
@@ -1012,17 +1166,25 @@ int iwl_mld_assign_vif_chanctx(struct ieee80211_hw *hw,
 
 	rcu_assign_pointer(mld_link->chan_ctx, ctx);
 
-	if (n_active > 1) {
-		struct iwl_mld_vif *mld_vif = iwl_mld_vif_from_mac80211(vif);
+	/* We cannot rely on vif->active_links at this stage as it contains
+	 * both the removed links and the newly added links.
+	 * Therefore, we create our own bitmap of the final active links,
+	 * which does not include the removed links.
+	 */
+	for_each_mld_vif_valid_link(mld_vif, temp_mld_link) {
+		if (rcu_access_pointer(temp_mld_link->chan_ctx))
+			final_active_links |= BIT(link_id);
+	}
 
+	if (hweight16(final_active_links) > 1) {
 		/* Indicate to mac80211 that EML is enabled */
 		vif->driver_flags |= IEEE80211_VIF_EML_ACTIVE;
 		mld_vif->emlsr.last_entry_ts = jiffies;
 
-		if (vif->active_links & BIT(mld_vif->emlsr.selected_links))
+		if (final_active_links == mld_vif->emlsr.selected_links)
 			mld_vif->emlsr.primary = mld_vif->emlsr.selected_primary;
 		else
-			mld_vif->emlsr.primary = __ffs(vif->active_links);
+			mld_vif->emlsr.primary = __ffs(final_active_links);
 
 		iwl_dbg_tlv_time_point(&mld->fwrt, IWL_FW_INI_TIME_ESR_LINK_UP,
 				       NULL);
@@ -1045,6 +1207,15 @@ int iwl_mld_assign_vif_chanctx(struct ieee80211_hw *hw,
 
 	/* Now activate the link */
 	if (iwl_mld_can_activate_link(mld, vif, link)) {
+		iwl_mld_tlc_update_phy(mld, vif, link);
+
+		/* FW requires AP_TX_POWER_CONSTRAINTS_CMD before link
+		 * activation for AP and after link activation for STA,
+		 * for an unknown reason.
+		 */
+		if (vif->type == NL80211_IFTYPE_AP)
+			iwl_mld_send_ap_tx_power_constraint_cmd(mld, vif, link);
+
 		ret = iwl_mld_activate_link(mld, link);
 		if (ret)
 			goto err;
@@ -1106,12 +1277,16 @@ void iwl_mld_unassign_vif_chanctx(struct ieee80211_hw *hw,
 
 	RCU_INIT_POINTER(mld_link->chan_ctx, NULL);
 
+	iwl_mld_tlc_update_phy(mld, vif, link);
+
 	/* in the non-MLO case, remove/re-add the link to clean up FW state.
-	 * In MLO, it'll be done in drv_change_vif_link
+	 * In MLO, it'll be done in drv_change_vif_link.
+	 * Do not do so during restart or in case the device is dead.
 	 */
 	if (!ieee80211_vif_is_mld(vif) && !mld_vif->ap_sta &&
 	    !WARN_ON_ONCE(vif->cfg.assoc) &&
-	    vif->type != NL80211_IFTYPE_AP && !mld->fw_status.in_hw_restart) {
+	    vif->type != NL80211_IFTYPE_AP && !mld->fw_status.in_hw_restart &&
+	    !iwl_trans_is_dead(mld->trans)) {
 		iwl_mld_remove_link(mld, link);
 		iwl_mld_add_link(mld, link);
 	}
@@ -1122,33 +1297,6 @@ int iwl_mld_mac80211_set_rts_threshold(struct ieee80211_hw *hw, int radio_idx,
 				       u32 value)
 {
 	return 0;
-}
-
-static void
-iwl_mld_link_info_changed_ap_ibss(struct iwl_mld *mld,
-				  struct ieee80211_vif *vif,
-				  struct ieee80211_bss_conf *link,
-				  u64 changes)
-{
-	u32 link_changes = 0;
-
-	if (changes & BSS_CHANGED_ERP_SLOT)
-		link_changes |= LINK_CONTEXT_MODIFY_RATES_INFO;
-
-	if (changes & (BSS_CHANGED_ERP_CTS_PROT | BSS_CHANGED_HT))
-		link_changes |= LINK_CONTEXT_MODIFY_PROTECT_FLAGS;
-
-	if (changes & (BSS_CHANGED_QOS | BSS_CHANGED_BANDWIDTH))
-		link_changes |= LINK_CONTEXT_MODIFY_QOS_PARAMS;
-
-	if (changes & BSS_CHANGED_HE_BSS_COLOR)
-		link_changes |= LINK_CONTEXT_MODIFY_HE_PARAMS;
-
-	if (link_changes)
-		iwl_mld_change_link_in_fw(mld, link, link_changes);
-
-	if (changes & BSS_CHANGED_BEACON)
-		iwl_mld_update_beacon_template(mld, vif, link);
 }
 
 static
@@ -1181,6 +1329,9 @@ u32 iwl_mld_link_changed_mapping(struct iwl_mld *mld,
 		IWL_DEBUG_MAC80211(mld, "Associated in HE mode\n");
 		link_changes |= LINK_CONTEXT_MODIFY_HE_PARAMS;
 	}
+
+	if (changes & BSS_CHANGED_NPCA)
+		link_changes |= LINK_CONTEXT_MODIFY_UHR_PARAMS;
 
 	return link_changes;
 }
@@ -1260,6 +1411,10 @@ iwl_mld_mac80211_link_info_changed(struct ieee80211_hw *hw,
 		if (changes & BSS_CHANGED_MU_GROUPS)
 			iwl_mld_update_mu_groups(mld, link_conf);
 		break;
+	case NL80211_IFTYPE_NAN:
+	case NL80211_IFTYPE_NAN_DATA:
+		/* NAN has no links */
+		break;
 	default:
 		/* shouldn't happen */
 		WARN_ON_ONCE(1);
@@ -1275,28 +1430,6 @@ iwl_mld_mac80211_link_info_changed(struct ieee80211_hw *hw,
 		iwl_mld_set_tx_power(mld, link_conf, link_conf->txpower);
 }
 
-static void
-iwl_mld_smps_workaround(struct iwl_mld *mld, struct ieee80211_vif *vif, bool enable)
-{
-	struct iwl_mld_vif *mld_vif = iwl_mld_vif_from_mac80211(vif);
-	bool workaround_required =
-		iwl_fw_lookup_cmd_ver(mld->fw, MAC_PM_POWER_TABLE, 0) < 2;
-
-	if (!workaround_required)
-		return;
-
-	/* Send the device-level power commands since the
-	 * firmware checks the POWER_TABLE_CMD's POWER_SAVE_EN bit to
-	 * determine SMPS mode.
-	 */
-	if (mld_vif->ps_disabled == !enable)
-		return;
-
-	mld_vif->ps_disabled = !enable;
-
-	iwl_mld_update_device_power(mld, false);
-}
-
 static
 void iwl_mld_mac80211_vif_cfg_changed(struct ieee80211_hw *hw,
 				      struct ieee80211_vif *vif,
@@ -1306,6 +1439,11 @@ void iwl_mld_mac80211_vif_cfg_changed(struct ieee80211_hw *hw,
 	int ret;
 
 	lockdep_assert_wiphy(mld->wiphy);
+
+	if (vif->type == NL80211_IFTYPE_NAN) {
+		iwl_mld_nan_vif_cfg_changed(mld, vif, changes);
+		return;
+	}
 
 	if (vif->type != NL80211_IFTYPE_STATION)
 		return;
@@ -1329,10 +1467,8 @@ void iwl_mld_mac80211_vif_cfg_changed(struct ieee80211_hw *hw,
 		}
 	}
 
-	if (changes & BSS_CHANGED_PS) {
-		iwl_mld_smps_workaround(mld, vif, vif->cfg.ps);
+	if (changes & BSS_CHANGED_PS)
 		iwl_mld_update_mac_power(mld, vif, false);
-	}
 
 	/* TODO: task=MLO BSS_CHANGED_MLD_VALID_LINKS/CHANGED_MLD_TTLM */
 }
@@ -1502,6 +1638,9 @@ iwl_mld_mac80211_conf_tx(struct ieee80211_hw *hw,
 
 	lockdep_assert_wiphy(mld->wiphy);
 
+	if (vif->type == NL80211_IFTYPE_NAN || vif->type == NL80211_IFTYPE_NAN_DATA)
+		return 0;
+
 	link = iwl_mld_link_dereference_check(mld_vif, link_id);
 	if (!link)
 		return -EINVAL;
@@ -1570,7 +1709,7 @@ static void iwl_mld_check_he_obss_narrow_bw_ru_iter(struct wiphy *wiphy,
 	elem = cfg80211_find_elem(WLAN_EID_EXT_CAPABILITY, ies->data,
 				  ies->len);
 
-	if (!elem || elem->datalen < 10 ||
+	if (!elem || elem->datalen < 11 ||
 	    !(elem->data[10] &
 	      WLAN_EXT_CAPA10_OBSS_NARROW_BW_RU_TOLERANCE_SUPPORT)) {
 		*tolerated = false;
@@ -1645,13 +1784,22 @@ static int iwl_mld_move_sta_state_up(struct iwl_mld *mld,
 				return -EBUSY;
 		}
 
-		ret = iwl_mld_add_sta(mld, sta, vif, STATION_TYPE_PEER);
+		ret = iwl_mld_add_sta(mld, sta, vif);
 		if (ret)
 			return ret;
 
-		/* just added first TDLS STA, so disable PM */
-		if (sta->tdls && tdls_count == 0)
+		/* just added first TDLS STA, so disable PM and block EMLSR */
+		if (sta->tdls && tdls_count == 0) {
 			iwl_mld_update_mac_power(mld, vif, false);
+
+			/* TDLS requires single-link operation with
+			 * direct peer communication.
+			 * Block and exit EMLSR when TDLS is established.
+			 */
+			iwl_mld_block_emlsr(mld, vif,
+					    IWL_MLD_EMLSR_BLOCKED_TDLS,
+					    iwl_mld_get_primary_link(vif));
+		}
 
 		if (vif->type == NL80211_IFTYPE_STATION && !sta->tdls)
 			mld_vif->ap_sta = sta;
@@ -1679,6 +1827,16 @@ static int iwl_mld_move_sta_state_up(struct iwl_mld *mld,
 
 		if (vif->type == NL80211_IFTYPE_STATION)
 			iwl_mld_link_set_2mhz_block(mld, vif, sta);
+
+		if (sta->tdls) {
+			/*
+			 * update MAC since wifi generation flags may change,
+			 * we also update MAC on association to the AP via the
+			 * vif assoc change
+			 */
+			iwl_mld_mac_fw_action(mld, vif, FW_CTXT_ACTION_MODIFY);
+		}
+
 		/* Now the link_sta's capabilities are set, update the FW */
 		iwl_mld_config_tlc(mld, vif, sta);
 
@@ -1696,11 +1854,14 @@ static int iwl_mld_move_sta_state_up(struct iwl_mld *mld,
 		   new_state == IEEE80211_STA_AUTHORIZED) {
 		ret = 0;
 
-		if (!sta->tdls) {
+		if (vif->type == NL80211_IFTYPE_STATION && !sta->tdls) {
 			mld_vif->authorized = true;
 
 			/* Ensure any block due to a non-BSS link is synced */
 			iwl_mld_emlsr_check_non_bss_block(mld, 0);
+
+			/* Ensure NAN block is synced */
+			iwl_mld_emlsr_check_nan_block(mld, vif);
 
 			/* Block EMLSR until a certain throughput it reached */
 			if (!mld->fw_status.in_hw_restart &&
@@ -1714,7 +1875,6 @@ static int iwl_mld_move_sta_state_up(struct iwl_mld *mld,
 						    FW_CTXT_ACTION_MODIFY);
 			if (ret)
 				return ret;
-			iwl_mld_smps_workaround(mld, vif, vif->cfg.ps);
 		}
 
 		/* MFP is set by default before the station is authorized.
@@ -1755,9 +1915,10 @@ static int iwl_mld_move_sta_state_down(struct iwl_mld *mld,
 			wiphy_work_cancel(mld->wiphy, &mld_vif->emlsr.unblock_tpt_wk);
 			wiphy_delayed_work_cancel(mld->wiphy,
 						  &mld_vif->emlsr.check_tpt_wk);
+			wiphy_delayed_work_cancel(mld->wiphy,
+						  &mld_vif->mlo_scan_start_wk);
 
 			iwl_mld_reset_cca_40mhz_workaround(mld, vif);
-			iwl_mld_smps_workaround(mld, vif, true);
 		}
 
 		/* once we move into assoc state, need to update the FW to
@@ -1783,8 +1944,23 @@ static int iwl_mld_move_sta_state_down(struct iwl_mld *mld,
 		iwl_mld_remove_sta(mld, sta);
 
 		if (sta->tdls && iwl_mld_tdls_sta_count(mld) == 0) {
-			/* just removed last TDLS STA, so enable PM */
+			/* just removed last TDLS STA, so enable PM
+			 * and unblock EMLSR
+			 */
 			iwl_mld_update_mac_power(mld, vif, false);
+
+			/* Unblock EMLSR when TDLS connection is torn down */
+			iwl_mld_unblock_emlsr(mld, vif,
+					      IWL_MLD_EMLSR_BLOCKED_TDLS);
+		}
+
+		if (sta->tdls) {
+			/*
+			 * update MAC since wifi generation flags may change,
+			 * we also update MAC on disassociation to the AP via
+			 * the vif assoc change
+			 */
+			iwl_mld_mac_fw_action(mld, vif, FW_CTXT_ACTION_MODIFY);
 		}
 	} else {
 		return -EINVAL;
@@ -2005,8 +2181,7 @@ static int iwl_mld_alloc_ptk_pn(struct iwl_mld *mld,
 		return -EINVAL;
 
 	WARN_ON(rcu_access_pointer(mld_sta->ptk_pn[keyidx]));
-	*ptk_pn = kzalloc(struct_size(*ptk_pn, q, num_rx_queues),
-			  GFP_KERNEL);
+	*ptk_pn = kzalloc_flex(**ptk_pn, q, num_rx_queues);
 	if (!*ptk_pn)
 		return -ENOMEM;
 
@@ -2088,7 +2263,6 @@ static int iwl_mld_set_key_add(struct iwl_mld *mld,
 
 	ret = iwl_mld_add_key(mld, vif, sta, key);
 	if (ret) {
-		IWL_WARN(mld, "set key failed (%d)\n", ret);
 		if (ptk_pn) {
 			RCU_INIT_POINTER(mld_sta->ptk_pn[keyidx], NULL);
 			kfree(ptk_pn);
@@ -2130,7 +2304,9 @@ static void iwl_mld_set_key_remove(struct iwl_mld *mld,
 	}
 
 	/* if this key was stored to be added later to the FW - free it here */
-	if (!(key->flags & IEEE80211_KEY_FLAG_PAIRWISE))
+	if (!(key->flags & IEEE80211_KEY_FLAG_PAIRWISE) &&
+	    (vif->type == NL80211_IFTYPE_AP ||
+	     vif->type == NL80211_IFTYPE_ADHOC))
 		iwl_mld_free_ap_early_key(mld, key, mld_vif);
 
 	/* We already removed it */
@@ -2148,8 +2324,19 @@ static int iwl_mld_mac80211_set_key(struct ieee80211_hw *hw,
 				    struct ieee80211_sta *sta,
 				    struct ieee80211_key_conf *key)
 {
+	struct iwl_mld_vif *mld_vif = iwl_mld_vif_from_mac80211(vif);
 	struct iwl_mld *mld = IWL_MAC80211_GET_MLD(hw);
 	int ret;
+
+	/*
+	 * FW always needs the AP STA for client mode.
+	 * Note that during removal this could already
+	 * be NULL (mac80211 removes keys after STAs)
+	 * but then we'll already have removed the key
+	 * and set hw_key_idx = STA_KEY_IDX_INVALID.
+	 */
+	if (!sta && vif->type == NL80211_IFTYPE_STATION)
+		sta = mld_vif->ap_sta;
 
 	switch (cmd) {
 	case SET_KEY:
@@ -2411,15 +2598,108 @@ iwl_mld_mac80211_mgd_protect_tdls_discover(struct ieee80211_hw *hw,
 			ret);
 }
 
+static int iwl_mld_count_free_link_ids(struct iwl_mld *mld)
+{
+	int free_count = 0;
+
+	for (int i = 0; i < mld->fw->ucode_capa.num_links; i++) {
+		if (!rcu_access_pointer(mld->fw_id_to_bss_conf[i]))
+			free_count++;
+	}
+
+	return free_count;
+}
+
+static bool
+iwl_mld_chanctx_used_by_other_vif(struct ieee80211_hw *hw,
+				  struct ieee80211_vif *vif,
+				  struct ieee80211_chanctx_conf *chanctx_conf)
+{
+	struct ieee80211_bss_conf *iter_link;
+	struct ieee80211_vif *iter_vif;
+	int link_id;
+
+	for_each_active_interface(iter_vif, hw) {
+		if (vif == iter_vif)
+			continue;
+
+		/* NAN doesn't have active links, so we don't count NAN users */
+		for_each_vif_active_link(iter_vif, iter_link, link_id) {
+			if (rcu_access_pointer(iter_link->chanctx_conf) ==
+			    chanctx_conf)
+				return true;
+		}
+	}
+
+	return false;
+}
+
 static bool iwl_mld_can_activate_links(struct ieee80211_hw *hw,
 				       struct ieee80211_vif *vif,
 				       u16 desired_links)
 {
 	struct iwl_mld *mld = IWL_MAC80211_GET_MLD(hw);
 	int n_links = hweight16(desired_links);
+	int n_add = hweight16(desired_links & ~vif->active_links);
+	unsigned long to_deactivate = vif->active_links & ~desired_links;
+	int free_link_ids;
+	int i;
 
 	/* Check if HW supports the wanted number of links */
-	return n_links <= iwl_mld_max_active_links(mld, vif);
+	if (n_links > iwl_mld_max_active_links(mld, vif))
+		return false;
+
+	/*
+	 * During link switch, mac80211 first adds the new links, then removes
+	 * the old ones. This means we temporarily need extra link objects
+	 * during the transition. Check if we have enough free link IDs.
+	 */
+
+	free_link_ids = iwl_mld_count_free_link_ids(mld);
+
+	if (free_link_ids >= n_add)
+		return true;
+
+	if (!mld->nan_device_vif)
+		return false;
+
+	/*
+	 * Not enough free link IDs. First try to evacuate NAN from the
+	 * channel context of a link that is going to be deactivated.
+	 */
+	for_each_set_bit(i, &to_deactivate, IEEE80211_MLD_MAX_NUM_LINKS) {
+		struct ieee80211_bss_conf *link_conf;
+		struct ieee80211_chanctx_conf *chanctx_conf;
+
+		link_conf = link_conf_dereference_protected(vif, i);
+		if (!link_conf)
+			continue;
+
+		chanctx_conf = wiphy_dereference(mld->wiphy, link_conf->chanctx_conf);
+		if (!chanctx_conf)
+			continue;
+
+		if (iwl_mld_chanctx_used_by_other_vif(hw, vif, chanctx_conf))
+			continue;
+
+		if (ieee80211_nan_try_evacuate(hw, chanctx_conf)) {
+			free_link_ids = iwl_mld_count_free_link_ids(mld);
+			/*
+			 * Evacuation of one channel should do the job. If not,
+			 * something bad is happening. Don't try to evacuate more
+			 */
+			return free_link_ids >= n_add;
+		}
+	}
+
+	/* Couldn't find/evacuate any channel going to go unused, try any */
+	if (ieee80211_nan_try_evacuate(hw, NULL)) {
+		free_link_ids = iwl_mld_count_free_link_ids(mld);
+		if (free_link_ids >= n_add)
+			return true;
+	}
+
+	return false;
 }
 
 static int
@@ -2574,6 +2854,15 @@ static int iwl_mld_start_pmsr(struct ieee80211_hw *hw,
 	return iwl_mld_ftm_start(mld, vif, request);
 }
 
+static void iwl_mld_abort_pmsr(struct ieee80211_hw *hw,
+			       struct ieee80211_vif *vif,
+			       struct cfg80211_pmsr_request *request)
+{
+	struct iwl_mld *mld = IWL_MAC80211_GET_MLD(hw);
+
+	iwl_mld_ftm_abort(mld, request);
+}
+
 static enum ieee80211_neg_ttlm_res
 iwl_mld_can_neg_ttlm(struct ieee80211_hw *hw, struct ieee80211_vif *vif,
 		     struct ieee80211_neg_ttlm *neg_ttlm)
@@ -2591,12 +2880,46 @@ iwl_mld_can_neg_ttlm(struct ieee80211_hw *hw, struct ieee80211_vif *vif,
 	return NEG_TTLM_RES_ACCEPT;
 }
 
+static int iwl_mld_get_antenna(struct ieee80211_hw *hw, int radio_idx,
+			       u32 *tx_ant, u32 *rx_ant)
+{
+	struct iwl_mld *mld = IWL_MAC80211_GET_MLD(hw);
+
+	*tx_ant = iwl_mld_get_valid_tx_ant(mld);
+	*rx_ant = iwl_mld_get_valid_rx_ant(mld);
+
+	return 0;
+}
+
+static int iwl_mld_set_antenna(struct ieee80211_hw *hw, int radio_idx,
+			       u32 tx_ant, u32 rx_ant)
+{
+	struct iwl_mld *mld = IWL_MAC80211_GET_MLD(hw);
+
+	if (WARN_ON(!mld->nvm_data))
+		return -EBUSY;
+
+	/* mac80211 ensures the device is not started,
+	 * so the firmware cannot be running
+	 */
+
+	mld->set_tx_ant = tx_ant;
+	mld->set_rx_ant = rx_ant;
+
+	iwl_reinit_cab(mld->trans, mld->nvm_data, tx_ant, rx_ant, mld->fw);
+
+	return 0;
+}
+
 const struct ieee80211_ops iwl_mld_hw_ops = {
 	.tx = iwl_mld_mac80211_tx,
 	.start = iwl_mld_mac80211_start,
 	.stop = iwl_mld_mac80211_stop,
 	.config = iwl_mld_mac80211_config,
+	.get_antenna = iwl_mld_get_antenna,
+	.set_antenna = iwl_mld_set_antenna,
 	.add_interface = iwl_mld_mac80211_add_interface,
+	.change_interface = iwl_mld_mac80211_change_interface,
 	.remove_interface = iwl_mld_mac80211_remove_interface,
 	.conf_tx = iwl_mld_mac80211_conf_tx,
 	.prepare_multicast = iwl_mld_mac80211_prepare_multicast,
@@ -2661,5 +2984,10 @@ const struct ieee80211_ops iwl_mld_hw_ops = {
 	.prep_add_interface = iwl_mld_prep_add_interface,
 	.set_hw_timestamp = iwl_mld_set_hw_timestamp,
 	.start_pmsr = iwl_mld_start_pmsr,
+	.abort_pmsr = iwl_mld_abort_pmsr,
 	.can_neg_ttlm = iwl_mld_can_neg_ttlm,
+	.start_nan = iwl_mld_start_nan,
+	.stop_nan = iwl_mld_stop_nan,
+	.nan_change_conf = iwl_mld_nan_change_config,
+	.nan_peer_sched_changed = iwl_mld_mac802111_nan_peer_sched_changed,
 };

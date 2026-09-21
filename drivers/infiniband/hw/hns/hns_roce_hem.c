@@ -262,7 +262,7 @@ static struct hns_roce_hem *hns_roce_alloc_hem(struct hns_roce_dev *hr_dev,
 		return NULL;
 	}
 
-	hem = kmalloc(sizeof(*hem), GFP_KERNEL);
+	hem = kmalloc_obj(*hem);
 	if (!hem)
 		return NULL;
 
@@ -314,14 +314,14 @@ static int calc_hem_config(struct hns_roce_dev *hr_dev,
 	bt_num = hns_roce_get_bt_num(table->type, mhop->hop_num);
 	switch (bt_num) {
 	case 3:
-		index->l1 = l0_idx * chunk_ba_num + l1_idx;
+		index->l1 = (u64)l0_idx * chunk_ba_num + l1_idx;
 		index->l0 = l0_idx;
-		index->buf = l0_idx * chunk_ba_num * chunk_ba_num +
-			     l1_idx * chunk_ba_num + l2_idx;
+		index->buf = (u64)l0_idx * chunk_ba_num * chunk_ba_num +
+					 (u64)l1_idx * chunk_ba_num + l2_idx;
 		break;
 	case 2:
 		index->l0 = l0_idx;
-		index->buf = l0_idx * chunk_ba_num + l1_idx;
+		index->buf = (u64)l0_idx * chunk_ba_num + l1_idx;
 		break;
 	case 1:
 		index->buf = l0_idx;
@@ -737,7 +737,7 @@ int hns_roce_init_hem_table(struct hns_roce_dev *hr_dev,
 		obj_per_chunk = table->table_chunk_size / obj_size;
 		num_hem = DIV_ROUND_UP(nobj, obj_per_chunk);
 
-		table->hem = kcalloc(num_hem, sizeof(*table->hem), GFP_KERNEL);
+		table->hem = kzalloc_objs(*table->hem, num_hem);
 		if (!table->hem)
 			return -ENOMEM;
 	} else {
@@ -763,8 +763,7 @@ int hns_roce_init_hem_table(struct hns_roce_dev *hr_dev,
 		if (type >= HEM_TYPE_MTT)
 			num_bt_l0 = bt_chunk_num;
 
-		table->hem = kcalloc(num_hem, sizeof(*table->hem),
-					 GFP_KERNEL);
+		table->hem = kzalloc_objs(*table->hem, num_hem);
 		if (!table->hem)
 			goto err_kcalloc_hem_buf;
 
@@ -772,15 +771,12 @@ int hns_roce_init_hem_table(struct hns_roce_dev *hr_dev,
 			unsigned long num_bt_l1;
 
 			num_bt_l1 = DIV_ROUND_UP(num_hem, bt_chunk_num);
-			table->bt_l1 = kcalloc(num_bt_l1,
-					       sizeof(*table->bt_l1),
-					       GFP_KERNEL);
+			table->bt_l1 = kzalloc_objs(*table->bt_l1, num_bt_l1);
 			if (!table->bt_l1)
 				goto err_kcalloc_bt_l1;
 
-			table->bt_l1_dma_addr = kcalloc(num_bt_l1,
-						 sizeof(*table->bt_l1_dma_addr),
-						 GFP_KERNEL);
+			table->bt_l1_dma_addr = kzalloc_objs(*table->bt_l1_dma_addr,
+							     num_bt_l1);
 
 			if (!table->bt_l1_dma_addr)
 				goto err_kcalloc_l1_dma;
@@ -788,14 +784,12 @@ int hns_roce_init_hem_table(struct hns_roce_dev *hr_dev,
 
 		if (check_whether_bt_num_2(type, hop_num) ||
 			check_whether_bt_num_3(type, hop_num)) {
-			table->bt_l0 = kcalloc(num_bt_l0, sizeof(*table->bt_l0),
-					       GFP_KERNEL);
+			table->bt_l0 = kzalloc_objs(*table->bt_l0, num_bt_l0);
 			if (!table->bt_l0)
 				goto err_kcalloc_bt_l0;
 
-			table->bt_l0_dma_addr = kcalloc(num_bt_l0,
-						 sizeof(*table->bt_l0_dma_addr),
-						 GFP_KERNEL);
+			table->bt_l0_dma_addr = kzalloc_objs(*table->bt_l0_dma_addr,
+							     num_bt_l0);
 			if (!table->bt_l0_dma_addr)
 				goto err_kcalloc_l0_dma;
 		}
@@ -842,7 +836,7 @@ static void hns_roce_cleanup_mhop_hem_table(struct hns_roce_dev *hr_dev,
 					mhop.bt_chunk_size;
 
 	for (i = 0; i < table->num_hem; ++i) {
-		obj = i * buf_chunk_size / table->obj_size;
+		obj = (u64)i * buf_chunk_size / table->obj_size;
 		if (table->hem[i])
 			hns_roce_table_mhop_put(hr_dev, table, obj, 0);
 	}
@@ -939,7 +933,7 @@ hem_list_alloc_item(struct hns_roce_dev *hr_dev, int start, int end, int count,
 {
 	struct hns_roce_hem_item *hem;
 
-	hem = kzalloc(sizeof(*hem), GFP_KERNEL);
+	hem = kzalloc_obj(*hem);
 	if (!hem)
 		return NULL;
 
@@ -1275,8 +1269,6 @@ setup_root_hem(struct hns_roce_dev *hr_dev, struct hns_roce_hem_list *hem_list,
 
 	root_hem = list_first_entry(&head->root,
 				    struct hns_roce_hem_item, list);
-	if (!root_hem)
-		return -ENOMEM;
 
 	total = 0;
 	for (i = 0; i < region_cnt && total <= max_ba_num; i++) {

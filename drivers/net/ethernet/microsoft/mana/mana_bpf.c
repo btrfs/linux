@@ -68,7 +68,7 @@ int mana_xdp_xmit(struct net_device *ndev, int n, struct xdp_frame **frames,
 		count++;
 	}
 
-	tx_stats = &apc->tx_qp[q_idx].txq.stats;
+	tx_stats = &apc->tx_qp[q_idx]->txq.stats;
 
 	u64_stats_update_begin(&tx_stats->syncp);
 	tx_stats->xdp_xmit += count;
@@ -208,6 +208,7 @@ static int mana_xdp_set(struct net_device *ndev, struct bpf_prog *prog,
 		if (err) {
 			NL_SET_ERR_MSG_MOD(extack,
 					   "XDP: Insufficient memory for tx/rx re-config");
+			apc->bpf_prog = old_prog;
 			return err;
 		}
 
@@ -237,7 +238,8 @@ static int mana_xdp_set(struct net_device *ndev, struct bpf_prog *prog,
 		bpf_prog_put(old_prog);
 
 	if (prog)
-		ndev->max_mtu = MANA_XDP_MTU_MAX;
+		ndev->max_mtu = min_t(unsigned int, MANA_XDP_MTU_MAX,
+				      gc->adapter_mtu - ETH_HLEN);
 	else
 		ndev->max_mtu = gc->adapter_mtu - ETH_HLEN;
 

@@ -12,12 +12,14 @@
  * Updates for PPC64 by Peter Bergner & David Engebretsen, IBM Corp.
  */
 #include <linux/types.h>
+#include <linux/sizes.h>
 #include <asm/firmware.h>
 
 struct device_node;
 struct property;
 
-#define MIN_RMA			768		/* Minimum RMA (in MB) for CAS negotiation */
+/* Minimum RMA in bytes for CAS negotiation */
+#define MIN_RMA			(768ULL * SZ_1M)
 
 #define OF_DT_BEGIN_NODE	0x1		/* Start of node, full name */
 #define OF_DT_END_NODE		0x2		/* End node */
@@ -115,7 +117,8 @@ extern unsigned int boot_cpu_node_count;
 #define OV1_PPC_2_07		0x01	/* set if we support PowerPC 2.07 */
 
 #define OV1_PPC_3_00		0x80	/* set if we support PowerPC 3.00 */
-#define OV1_PPC_3_1			0x40	/* set if we support PowerPC 3.1 */
+#define OV1_PPC_3_1		0x40	/* set if we support PowerPC 3.1 */
+#define OV1_PPC_3_2		0x20	/* set if we support PowerPC 3.2 */
 
 /* Option vector 2: Open Firmware options supported */
 #define OV2_REAL_MODE		0x20	/* set if we want OF in real mode */

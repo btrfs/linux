@@ -440,8 +440,8 @@ static int tda18250_pll_calc(struct dvb_frontend *fe, u8 *rdiv,
 		goto err;
 
 	exp = (uval & 0x70) >> 4;
-	if (exp > 5)
-		exp = 0;
+	if (exp == 0 || exp > 5)
+		exp = 1;
 	lopd = 1 << (exp - 1);
 	scale = uval & 0x0f;
 	fvco = lopd * scale * ((c->frequency / 1000) + dev->if_frequency);
@@ -769,7 +769,7 @@ static int tda18250_probe(struct i2c_client *client)
 		.volatile_table = &tda18250_volatile_table,
 	};
 
-	dev = kzalloc(sizeof(*dev), GFP_KERNEL);
+	dev = kzalloc_obj(*dev);
 	if (!dev) {
 		ret = -ENOMEM;
 		goto err;
@@ -868,8 +868,8 @@ static void tda18250_remove(struct i2c_client *client)
 }
 
 static const struct i2c_device_id tda18250_id_table[] = {
-	{ "tda18250" },
-	{}
+	{ .name = "tda18250" },
+	{ }
 };
 MODULE_DEVICE_TABLE(i2c, tda18250_id_table);
 

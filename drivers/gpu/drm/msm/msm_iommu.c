@@ -7,6 +7,15 @@
 #include <linux/adreno-smmu-priv.h>
 #include <linux/io-pgtable.h>
 #include <linux/kmemleak.h>
+
+#if defined(CONFIG_ARM_DMA_USE_IOMMU)
+#include <asm/dma-iommu.h>
+#else
+#define arm_iommu_detach_device(...)	({ })
+#define arm_iommu_release_mapping(...)	({ })
+#define to_dma_iommu_mapping(dev)	NULL
+#endif
+
 #include "msm_drv.h"
 #include "msm_gpu_trace.h"
 #include "msm_mmu.h"
@@ -330,17 +339,20 @@ static int
 msm_iommu_pagetable_prealloc_allocate(struct msm_mmu *mmu, struct msm_mmu_prealloc *p)
 {
 	struct kmem_cache *pt_cache = get_pt_cache(mmu);
-	int ret;
 
-	p->pages = kvmalloc_array(p->count, sizeof(p->pages), GFP_KERNEL);
+	if (!p->count) {
+		p->pages = NULL;
+		return 0;
+	}
+
+	p->pages = kvmalloc_objs(*p->pages, p->count);
 	if (!p->pages)
 		return -ENOMEM;
 
-	ret = kmem_cache_alloc_bulk(pt_cache, GFP_KERNEL, p->count, p->pages);
-	if (ret != p->count) {
-		kfree(p->pages);
+	if (!kmem_cache_alloc_bulk(pt_cache, GFP_KERNEL, p->count, p->pages)) {
+		kvfree(p->pages);
 		p->pages = NULL;
-		p->count = ret;
+		p->count = 0;
 		return -ENOMEM;
 	}
 
@@ -364,7 +376,7 @@ msm_iommu_pagetable_prealloc_cleanup(struct msm_mmu *mmu, struct msm_mmu_preallo
 }
 
 /**
- * alloc_pt() - Custom page table allocator
+ * msm_iommu_pagetable_alloc_pt() - Custom page table allocator
  * @cookie: Cookie passed at page table allocation time.
  * @size: Size of the page table. This size should be fixed,
  * and determined at creation time based on the granule size.
@@ -416,7 +428,7 @@ msm_iommu_pagetable_alloc_pt(void *cookie, size_t size, gfp_t gfp)
 
 
 /**
- * free_pt() - Custom page table free function
+ * msm_iommu_pagetable_free_pt() - Custom page table free function
  * @cookie: Cookie passed at page table allocation time.
  * @data: Page table to free.
  * @size: Size of the page table. This size should be fixed,
@@ -521,7 +533,7 @@ struct msm_mmu *msm_iommu_pagetable_create(struct msm_mmu *parent, bool kernel_m
 	if (WARN_ONCE(!ttbr1_cfg, "No per-process page tables"))
 		return ERR_PTR(-ENODEV);
 
-	pagetable = kzalloc(sizeof(*pagetable), GFP_KERNEL);
+	pagetable = kzalloc_obj(*pagetable);
 	if (!pagetable)
 		return ERR_PTR(-ENOMEM);
 
@@ -677,7 +689,7 @@ static int msm_iommu_map(struct msm_mmu *mmu, uint64_t iova,
 			 int prot)
 {
 	struct msm_iommu *iommu = to_msm_iommu(mmu);
-	size_t ret;
+	ssize_t ret;
 
 	WARN_ON(off != 0);
 
@@ -686,7 +698,8 @@ static int msm_iommu_map(struct msm_mmu *mmu, uint64_t iova,
 		iova |= GENMASK_ULL(63, 49);
 
 	ret = iommu_map_sgtable(iommu->domain, iova, sgt, prot);
-	WARN_ON(!ret);
+	if (ret < 0)
+		return ret;
 
 	return (ret == len) ? 0 : -EINVAL;
 }
@@ -734,7 +747,7 @@ struct msm_mmu *msm_iommu_new(struct device *dev, unsigned long quirks)
 
 	iommu_set_pgtable_quirks(domain, quirks);
 
-	iommu = kzalloc(sizeof(*iommu), GFP_KERNEL);
+	iommu = kzalloc_obj(*iommu);
 	if (!iommu) {
 		iommu_domain_free(domain);
 		return ERR_PTR(-ENOMEM);
@@ -744,6 +757,19 @@ struct msm_mmu *msm_iommu_new(struct device *dev, unsigned long quirks)
 	msm_mmu_init(&iommu->base, dev, &funcs, MSM_MMU_IOMMU);
 
 	mutex_init(&iommu->init_lock);
+
+	/*
+	 * ARM32 attaches a DMA mapping domain to every IOMMU-backed device,
+	 * which would make attaching our own domain fail with -EBUSY.
+	 */
+	if (IS_ENABLED(CONFIG_ARM_DMA_USE_IOMMU)) {
+		struct dma_iommu_mapping *mapping = to_dma_iommu_mapping(dev);
+
+		if (mapping) {
+			arm_iommu_detach_device(dev);
+			arm_iommu_release_mapping(mapping);
+		}
+	}
 
 	ret = iommu_attach_device(iommu->domain, dev);
 	if (ret) {

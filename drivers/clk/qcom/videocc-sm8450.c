@@ -4,7 +4,6 @@
  */
 
 #include <linux/clk-provider.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
 #include <linux/regmap.h>
@@ -413,7 +412,7 @@ static struct clk_alpha_pll *video_cc_sm8450_plls[] = {
 	&video_cc_pll1,
 };
 
-static u32 video_cc_sm8450_critical_cbcrs[] = {
+static const u32 video_cc_sm8450_critical_cbcrs[] = {
 	0x80e4, /* VIDEO_CC_AHB_CLK */
 	0x8114, /* VIDEO_CC_XO_CLK */
 	0x8130, /* VIDEO_CC_SLEEP_CLK */
@@ -427,7 +426,7 @@ static const struct regmap_config video_cc_sm8450_regmap_config = {
 	.fast_io = true,
 };
 
-static struct qcom_cc_driver_data video_cc_sm8450_driver_data = {
+static const struct qcom_cc_driver_data video_cc_sm8450_driver_data = {
 	.alpha_plls = video_cc_sm8450_plls,
 	.num_alpha_plls = ARRAY_SIZE(video_cc_sm8450_plls),
 	.clk_cbcrs = video_cc_sm8450_critical_cbcrs,
