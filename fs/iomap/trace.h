@@ -118,13 +118,16 @@ DEFINE_RANGE_EVENT(iomap_zero_iter);
 	{ IOMAP_F_ATOMIC_BIO,	"ATOMIC_BIO" }, \
 	{ IOMAP_F_PRIVATE,	"PRIVATE" }, \
 	{ IOMAP_F_SIZE_CHANGED,	"SIZE_CHANGED" }, \
-	{ IOMAP_F_STALE,	"STALE" }
+	{ IOMAP_F_STALE,	"STALE" }, \
+	{ IOMAP_F_FSVERITY,	"FSVERITY" }, \
+	{ IOMAP_F_ZERO_TAIL,	"ZERO TAIL" }
 
 
 #define IOMAP_DIO_STRINGS \
-	{IOMAP_DIO_FORCE_WAIT,	"DIO_FORCE_WAIT" }, \
-	{IOMAP_DIO_OVERWRITE_ONLY, "DIO_OVERWRITE_ONLY" }, \
-	{IOMAP_DIO_PARTIAL,	"DIO_PARTIAL" }
+	{IOMAP_DIO_FORCE_WAIT,		"DIO_FORCE_WAIT" }, \
+	{IOMAP_DIO_OVERWRITE_ONLY,	"DIO_OVERWRITE_ONLY" }, \
+	{IOMAP_DIO_PARTIAL,		"DIO_PARTIAL" }, \
+	{IOMAP_DIO_FSBLOCK_ALIGNED,	"DIO_FSBLOCK_ALIGNED" }
 
 DECLARE_EVENT_CLASS(iomap_class,
 	TP_PROTO(struct inode *inode, struct iomap *iomap),
@@ -256,7 +259,7 @@ TRACE_EVENT(iomap_dio_rw_begin,
 	TP_ARGS(iocb, iter, dio_flags, done_before),
 	TP_STRUCT__entry(
 		__field(dev_t,	dev)
-		__field(ino_t,	ino)
+		__field(u64,	ino)
 		__field(loff_t, isize)
 		__field(loff_t, pos)
 		__field(size_t,	count)
@@ -276,7 +279,7 @@ TRACE_EVENT(iomap_dio_rw_begin,
 		__entry->dio_flags = dio_flags;
 		__entry->aio = !is_sync_kiocb(iocb);
 	),
-	TP_printk("dev %d:%d ino 0x%lx size 0x%llx offset 0x%llx length 0x%zx done_before 0x%zx flags %s dio_flags %s aio %d",
+	TP_printk("dev %d:%d ino 0x%llx size 0x%llx offset 0x%llx length 0x%zx done_before 0x%zx flags %s dio_flags %s aio %d",
 		  MAJOR(__entry->dev), MINOR(__entry->dev),
 		  __entry->ino,
 		  __entry->isize,
@@ -293,7 +296,7 @@ TRACE_EVENT(iomap_dio_complete,
 	TP_ARGS(iocb, error, ret),
 	TP_STRUCT__entry(
 		__field(dev_t,	dev)
-		__field(ino_t,	ino)
+		__field(u64,	ino)
 		__field(loff_t, isize)
 		__field(loff_t, pos)
 		__field(int,	ki_flags)
@@ -311,7 +314,7 @@ TRACE_EVENT(iomap_dio_complete,
 		__entry->error = error;
 		__entry->ret = ret;
 	),
-	TP_printk("dev %d:%d ino 0x%lx size 0x%llx offset 0x%llx flags %s aio %d error %d ret %zd",
+	TP_printk("dev %d:%d ino 0x%llx size 0x%llx offset 0x%llx flags %s aio %d error %d ret %zd",
 		  MAJOR(__entry->dev), MINOR(__entry->dev),
 		  __entry->ino,
 		  __entry->isize,

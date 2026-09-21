@@ -5,6 +5,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
+#include <sys/mman.h>
+#include <alloca.h>
 #include <bpf/bpf.h>
 #include <bpf/libbpf.h>
 #include "disasm.h"
@@ -212,6 +214,7 @@ int parse_test_list_file(const char *path,
 			break;
 	}
 
+	free(buf);
 	fclose(f);
 	return err;
 }
@@ -367,7 +370,7 @@ int delete_module(const char *name, int flags)
 	return syscall(__NR_delete_module, name, flags);
 }
 
-int unload_module(const char *name, bool verbose)
+int try_unload_module(const char *name, int retries, bool verbose)
 {
 	int ret, cnt = 0;
 
@@ -378,7 +381,7 @@ int unload_module(const char *name, bool verbose)
 		ret = delete_module(name, 0);
 		if (!ret || errno != EAGAIN)
 			break;
-		if (++cnt > 10000) {
+		if (++cnt > retries) {
 			fprintf(stdout, "Unload of %s timed out\n", name);
 			break;
 		}
@@ -397,6 +400,11 @@ int unload_module(const char *name, bool verbose)
 	if (verbose)
 		fprintf(stdout, "Successfully unloaded %s.ko.\n", name);
 	return 0;
+}
+
+int unload_module(const char *name, bool verbose)
+{
+	return try_unload_module(name, 10000, verbose);
 }
 
 static int __load_module(const char *path, const char *param_values, bool verbose)
@@ -509,4 +517,20 @@ bool is_jit_enabled(void)
 	}
 
 	return enabled;
+}
+
+int stack_mprotect(void)
+{
+	void *buf;
+	long sz;
+	int ret;
+
+	sz = sysconf(_SC_PAGESIZE);
+	if (sz < 0)
+		return sz;
+
+	buf = alloca(sz * 3);
+	ret = mprotect((void *)(((unsigned long)(buf + sz)) & ~(sz - 1)), sz,
+		       PROT_READ | PROT_WRITE | PROT_EXEC);
+	return ret;
 }

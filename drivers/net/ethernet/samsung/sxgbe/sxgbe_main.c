@@ -489,15 +489,13 @@ static int init_rx_ring(struct net_device *dev, u8 queue_no,
 		return -ENOMEM;
 
 	/* allocate memory for RX skbuff array */
-	rx_ring->rx_skbuff_dma = kmalloc_array(rx_rsize,
-					       sizeof(dma_addr_t), GFP_KERNEL);
+	rx_ring->rx_skbuff_dma = kmalloc_objs(dma_addr_t, rx_rsize);
 	if (!rx_ring->rx_skbuff_dma) {
 		ret = -ENOMEM;
 		goto err_free_dma_rx;
 	}
 
-	rx_ring->rx_skbuff = kmalloc_array(rx_rsize,
-					   sizeof(struct sk_buff *), GFP_KERNEL);
+	rx_ring->rx_skbuff = kmalloc_objs(struct sk_buff *, rx_rsize);
 	if (!rx_ring->rx_skbuff) {
 		ret = -ENOMEM;
 		goto err_free_skbuff_dma;
@@ -599,14 +597,13 @@ static int init_dma_desc_rings(struct net_device *netd)
 
 	return 0;
 
-txalloc_err:
-	while (queue_num--)
-		free_tx_ring(priv->device, priv->txq[queue_num], tx_rsize);
-	return ret;
-
 rxalloc_err:
 	while (queue_num--)
 		free_rx_ring(priv->device, priv->rxq[queue_num], rx_rsize);
+	queue_num = SXGBE_TX_QUEUES;
+txalloc_err:
+	while (queue_num--)
+		free_tx_ring(priv->device, priv->txq[queue_num], tx_rsize);
 	return ret;
 }
 
@@ -1081,7 +1078,9 @@ static int sxgbe_open(struct net_device *dev)
 	priv->dma_buf_sz = SXGBE_ALIGN(DMA_BUFFER_SIZE);
 	priv->tx_tc = TC_DEFAULT;
 	priv->rx_tc = TC_DEFAULT;
-	init_dma_desc_rings(dev);
+	ret = init_dma_desc_rings(dev);
+	if (ret)
+		goto init_phy_error;
 
 	/* DMA initialization and SW reset */
 	ret = sxgbe_init_dma_engine(priv);
@@ -1190,6 +1189,7 @@ static int sxgbe_open(struct net_device *dev)
 
 init_error:
 	free_dma_desc_resources(priv);
+init_phy_error:
 	if (dev->phydev)
 		phy_disconnect(dev->phydev);
 phy_error:
@@ -2007,7 +2007,7 @@ static int sxgbe_hw_init(struct sxgbe_priv_data * const priv)
 {
 	u32 ctrl_ids;
 
-	priv->hw = kmalloc(sizeof(*priv->hw), GFP_KERNEL);
+	priv->hw = kmalloc_obj(*priv->hw);
 	if(!priv->hw)
 		return -ENOMEM;
 

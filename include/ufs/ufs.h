@@ -21,9 +21,15 @@
  * in this header file of the size of struct utp_upiu_header.
  */
 static_assert(sizeof(struct utp_upiu_header) == 12);
+static_assert(sizeof(struct utp_upiu_query) == 20);
 
 #define GENERAL_UPIU_REQUEST_SIZE (sizeof(struct utp_upiu_req))
 #define QUERY_DESC_MAX_SIZE       255
+/*
+ * Max aggregated read data segment: the devman response area
+ * (ALIGNED_DEVMAN_RSP_SIZE) minus the fixed UPIU header it follows.
+ */
+#define QUERY_AGGREGATED_MAX_SIZE (4096 - GENERAL_UPIU_REQUEST_SIZE)
 #define QUERY_DESC_MIN_SIZE       2
 #define QUERY_DESC_HDR_SIZE       2
 #define QUERY_OSF_SIZE            (GENERAL_UPIU_REQUEST_SIZE - \
@@ -190,6 +196,8 @@ enum attr_idn {
 	QUERY_ATTR_IDN_WB_BUF_RESIZE_HINT	= 0x3C,
 	QUERY_ATTR_IDN_WB_BUF_RESIZE_EN		= 0x3D,
 	QUERY_ATTR_IDN_WB_BUF_RESIZE_STATUS	= 0x3E,
+	QUERY_ATTR_IDN_TX_EQ_GN_SETTINGS        = 0x47,
+	QUERY_ATTR_IDN_TX_EQ_GN_SETTINGS_EXT    = 0x48,
 };
 
 /* Descriptor idn for Query requests */
@@ -461,6 +469,7 @@ enum query_opcode {
 	UPIU_QUERY_OPCODE_SET_FLAG	= 0x6,
 	UPIU_QUERY_OPCODE_CLEAR_FLAG	= 0x7,
 	UPIU_QUERY_OPCODE_TOGGLE_FLAG	= 0x8,
+	UPIU_QUERY_OPCODE_AGGREGATED_READ = 0x9,
 };
 
 /* bRefClkFreq attribute values */
@@ -561,7 +570,7 @@ enum ufs_dev_pwr_mode {
 #define UFS_WB_BUF_REMAIN_PERCENT(val) ((val) / 10)
 
 /**
- * struct utp_cmd_rsp - Response UPIU structure
+ * struct utp_cmd_rsp - RESPONSE UPIU structure
  * @residual_transfer_count: Residual transfer count DW-3
  * @reserved: Reserved double words DW-4 to DW-7
  * @sense_data_len: Sense data length DW-8 U16
@@ -573,6 +582,8 @@ struct utp_cmd_rsp {
 	__be16 sense_data_len;
 	u8 sense_data[UFS_SENSE_SIZE];
 };
+
+static_assert(sizeof(struct utp_cmd_rsp) == 40);
 
 /**
  * struct utp_upiu_rsp - general upiu response structure
@@ -651,6 +662,11 @@ struct ufs_dev_info {
 	u8 rtt_cap; /* bDeviceRTTCap */
 
 	bool hid_sup;
+
+	/* Unique device ID string (manufacturer+model+serial+version+date) */
+	char *device_id;
+	u8 rpmb_io_size;
+	u8 rpmb_region_size[4];
 };
 
 #endif /* End of Header */

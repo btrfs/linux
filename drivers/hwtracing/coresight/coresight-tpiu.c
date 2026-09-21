@@ -49,8 +49,6 @@
 #define FFCR_FON_MAN		BIT(6)
 #define FFCR_STOP_FI		BIT(12)
 
-DEFINE_CORESIGHT_DEVLIST(tpiu_devs, "tpiu");
-
 /*
  * @base:	memory mapped base address for this component.
  * @atclk:	optional clock for the core parts of the TPIU.
@@ -75,7 +73,7 @@ static void tpiu_enable_hw(struct csdev_access *csa)
 }
 
 static int tpiu_enable(struct coresight_device *csdev, enum cs_mode mode,
-		       void *__unused)
+		       struct coresight_path *path)
 {
 	struct tpiu_drvdata *drvdata = dev_get_drvdata(csdev->dev.parent);
 
@@ -134,7 +132,7 @@ static int __tpiu_probe(struct device *dev, struct resource *res)
 	struct coresight_desc desc = { 0 };
 	int ret;
 
-	desc.name = coresight_alloc_device_name(&tpiu_devs, dev);
+	desc.name = coresight_alloc_device_name("tpiu", dev);
 	if (!desc.name)
 		return -ENOMEM;
 
@@ -312,7 +310,7 @@ static struct platform_driver tpiu_platform_driver = {
 
 static int __init tpiu_init(void)
 {
-	return coresight_init_driver("tpiu", &tpiu_driver, &tpiu_platform_driver, THIS_MODULE);
+	return coresight_init_driver("tpiu", &tpiu_driver, &tpiu_platform_driver);
 }
 
 static void __exit tpiu_exit(void)

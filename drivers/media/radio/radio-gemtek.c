@@ -179,7 +179,7 @@ static unsigned long gemtek_convfreq(unsigned long freq)
 
 static struct radio_isa_card *gemtek_alloc(void)
 {
-	struct gemtek *gt = kzalloc(sizeof(*gt), GFP_KERNEL);
+	struct gemtek *gt = kzalloc_obj(*gt);
 
 	if (gt)
 		gt->muted = true;
@@ -284,8 +284,8 @@ static const int gemtek_ioports[] = { 0x20c, 0x30c, 0x24c, 0x34c, 0x248, 0x28c }
 #ifdef CONFIG_PNP
 static const struct pnp_device_id gemtek_pnp_devices[] = {
 	/* AOpen FX-3D/Pro Radio */
-	{.id = "ADS7183", .driver_data = 0},
-	{.id = ""}
+	{ .id = "ADS7183" },
+	{ }
 };
 
 MODULE_DEVICE_TABLE(pnp, gemtek_pnp_devices);

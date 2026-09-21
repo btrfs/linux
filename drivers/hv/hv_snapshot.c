@@ -184,7 +184,7 @@ static void vss_send_op(void)
 		return;
 	}
 
-	vss_msg = kzalloc(sizeof(*vss_msg), GFP_KERNEL);
+	vss_msg = kzalloc_obj(*vss_msg);
 	if (!vss_msg)
 		return;
 
@@ -372,11 +372,6 @@ static void vss_on_reset(void)
 int
 hv_vss_init(struct hv_util_service *srv)
 {
-	if (vmbus_proto_version < VERSION_WIN8_1) {
-		pr_warn("Integration service 'Backup (volume snapshot)'"
-			" not supported on this host version.\n");
-		return -ENOTSUPP;
-	}
 	recv_buffer = srv->recv_buffer;
 	vss_transaction.recv_channel = srv->channel;
 	vss_transaction.recv_channel->max_pkt_size = VSS_MAX_PKT_SIZE;
@@ -424,7 +419,7 @@ int hv_vss_pre_suspend(void)
 	 * write() will fail with EINVAL (see vss_on_msg()), and the daemon
 	 * will reset the device by closing and re-opening it.
 	 */
-	vss_msg = kzalloc(sizeof(*vss_msg), GFP_KERNEL);
+	vss_msg = kzalloc_obj(*vss_msg);
 	if (!vss_msg)
 		return -ENOMEM;
 

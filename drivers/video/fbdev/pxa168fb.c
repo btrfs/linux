@@ -653,10 +653,9 @@ static int pxa168fb_probe(struct platform_device *pdev)
 	/*
 	 * Map LCD controller registers.
 	 */
-	fbi->reg_base = devm_ioremap(&pdev->dev, res->start,
-					     resource_size(res));
-	if (fbi->reg_base == NULL) {
-		ret = -ENOMEM;
+	fbi->reg_base = devm_ioremap_resource(&pdev->dev, res);
+	if (IS_ERR(fbi->reg_base)) {
+		ret = PTR_ERR(fbi->reg_base);
 		goto failed_free_info;
 	}
 
@@ -726,7 +725,6 @@ static int pxa168fb_probe(struct platform_device *pdev)
 	ret = devm_request_irq(&pdev->dev, irq, pxa168fb_handle_irq,
 			       IRQF_SHARED, info->fix.id, fbi);
 	if (ret < 0) {
-		dev_err(&pdev->dev, "unable to request IRQ\n");
 		ret = -ENXIO;
 		goto failed_free_cmap;
 	}

@@ -55,6 +55,8 @@
 #define HPRE_RAS_FE_ENB			0x301418
 #define HPRE_OOO_SHUTDOWN_SEL		0x301a3c
 #define HPRE_HAC_RAS_FE_ENABLE		0
+#define HPRE_RAS_MASK_ALL		GENMASK(31, 0)
+#define HPRE_RAS_CLEAR_ALL		GENMASK(31, 0)
 
 #define HPRE_CORE_ENB		(HPRE_CLSTR_BASE + HPRE_CORE_EN_OFFSET)
 #define HPRE_CORE_INI_CFG	(HPRE_CLSTR_BASE + HPRE_CORE_INI_CFG_OFFSET)
@@ -120,6 +122,8 @@
 #define HPRE_DFX_COMMON1_LEN		0x41
 #define HPRE_DFX_COMMON2_LEN		0xE
 #define HPRE_DFX_CORE_LEN		0x43
+
+#define HPRE_MAX_CHANNEL_NUM		2
 
 static const char hpre_name[] = "hisi_hpre";
 static struct dentry *hpre_debugfs_root;
@@ -370,6 +374,11 @@ static struct dfx_diff_registers hpre_diff_regs[] = {
 	},
 };
 
+static const char *hpre_channel_name[HPRE_MAX_CHANNEL_NUM] = {
+	"RSA",
+	"ECC",
+};
+
 static const struct hisi_qm_err_ini hpre_err_ini;
 
 bool hpre_check_alg_support(struct hisi_qm *qm, u32 alg)
@@ -465,7 +474,7 @@ struct hisi_qp *hpre_create_qp(u8 type)
 	 * type: 0 - RSA/DH. algorithm supported in V2,
 	 *       1 - ECC algorithm in V3.
 	 */
-	ret = hisi_qm_alloc_qps_node(&hpre_devices, 1, type, node, &qp);
+	ret = hisi_qm_alloc_qps_node(&hpre_devices, 1, &type, node, &qp);
 	if (!ret)
 		return qp;
 
@@ -813,11 +822,8 @@ static void hpre_master_ooo_ctrl(struct hisi_qm *qm, bool enable)
 
 static void hpre_hw_error_disable(struct hisi_qm *qm)
 {
-	struct hisi_qm_err_mask *dev_err = &qm->err_info.dev_err;
-	u32 err_mask = dev_err->ce | dev_err->nfe | dev_err->fe;
-
 	/* disable hpre hw error interrupts */
-	writel(err_mask, qm->io_base + HPRE_INT_MASK);
+	writel(HPRE_RAS_MASK_ALL, qm->io_base + HPRE_INT_MASK);
 	/* disable HPRE block master OOO when nfe occurs on Kunpeng930 */
 	hpre_master_ooo_ctrl(qm, false);
 }
@@ -828,7 +834,7 @@ static void hpre_hw_error_enable(struct hisi_qm *qm)
 	u32 err_mask = dev_err->ce | dev_err->nfe | dev_err->fe;
 
 	/* clear HPRE hw error source if having */
-	writel(err_mask, qm->io_base + HPRE_HAC_SOURCE_INT);
+	writel(HPRE_RAS_CLEAR_ALL, qm->io_base + HPRE_HAC_SOURCE_INT);
 
 	/* configure error type */
 	writel(dev_err->ce, qm->io_base + HPRE_RAS_CE_ENB);
@@ -1234,6 +1240,16 @@ static int hpre_pre_store_cap_reg(struct hisi_qm *qm)
 	return 0;
 }
 
+static void hpre_set_channels(struct hisi_qm *qm)
+{
+	struct qm_channel *channel_data = &qm->channel_data;
+	int i;
+
+	channel_data->channel_num = HPRE_MAX_CHANNEL_NUM;
+	for (i = 0; i < HPRE_MAX_CHANNEL_NUM; i++)
+		channel_data->channel_name[i] = hpre_channel_name[i];
+}
+
 static int hpre_qm_init(struct hisi_qm *qm, struct pci_dev *pdev)
 {
 	u64 alg_msk;
@@ -1267,6 +1283,7 @@ static int hpre_qm_init(struct hisi_qm *qm, struct pci_dev *pdev)
 		return ret;
 	}
 
+	hpre_set_channels(qm);
 	/* Fetch and save the value of capability registers */
 	ret = hpre_pre_store_cap_reg(qm);
 	if (ret) {
@@ -1613,12 +1630,10 @@ static int hpre_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 		goto err_qm_del_list;
 	}
 
-	if (qm->uacce) {
-		ret = uacce_register(qm->uacce);
-		if (ret) {
-			pci_err(pdev, "failed to register uacce (%d)!\n", ret);
-			goto err_with_alg_register;
-		}
+	ret = hisi_qm_register_uacce(qm);
+	if (ret) {
+		pci_err(pdev, "failed to register uacce (%d)!\n", ret);
+		goto err_with_alg_register;
 	}
 
 	if (qm->fun_type == QM_HW_PF && vfs_num) {

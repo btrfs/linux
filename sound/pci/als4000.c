@@ -102,8 +102,8 @@ struct snd_card_als4000 {
 };
 
 static const struct pci_device_id snd_als4000_ids[] = {
-	{ 0x4005, 0x4000, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0, },   /* ALS4000 */
-	{ 0, }
+	{ PCI_DEVICE(0x4005, 0x4000) },   /* ALS4000 */
+	{ }
 };
 
 MODULE_DEVICE_TABLE(pci, snd_als4000_ids);
@@ -421,30 +421,26 @@ static int snd_als4000_capture_trigger(struct snd_pcm_substream *substream, int 
 {
 	struct snd_sb *chip = snd_pcm_substream_chip(substream);
 	int result = 0;
-	
-	/* FIXME race condition in here!!!
-	   chip->mode non-atomic update gets consistently protected
-	   by reg_lock always, _except_ for this place!!
-	   Probably need to take reg_lock as outer (or inner??) lock, too.
-	   (or serialize both lock operations? probably not, though... - racy?)
-	*/
-	guard(spinlock)(&chip->mixer_lock);
-	switch (cmd) {
-	case SNDRV_PCM_TRIGGER_START:
-	case SNDRV_PCM_TRIGGER_RESUME:
-		chip->mode |= SB_RATE_LOCK_CAPTURE;
-		snd_als4_cr_write(chip, ALS4K_CR1E_FIFO2_CONTROL,
-							 capture_cmd(chip));
-		break;
-	case SNDRV_PCM_TRIGGER_STOP:
-	case SNDRV_PCM_TRIGGER_SUSPEND:
-		chip->mode &= ~SB_RATE_LOCK_CAPTURE;
-		snd_als4_cr_write(chip, ALS4K_CR1E_FIFO2_CONTROL,
-							 capture_cmd(chip));
-		break;
-	default:
-		result = -EINVAL;
-		break;
+
+	guard(spinlock)(&chip->reg_lock);
+	scoped_guard(spinlock, &chip->mixer_lock) {
+		switch (cmd) {
+		case SNDRV_PCM_TRIGGER_START:
+		case SNDRV_PCM_TRIGGER_RESUME:
+			chip->mode |= SB_RATE_LOCK_CAPTURE;
+			snd_als4_cr_write(chip, ALS4K_CR1E_FIFO2_CONTROL,
+					  capture_cmd(chip));
+			break;
+		case SNDRV_PCM_TRIGGER_STOP:
+		case SNDRV_PCM_TRIGGER_SUSPEND:
+			chip->mode &= ~SB_RATE_LOCK_CAPTURE;
+			snd_als4_cr_write(chip, ALS4K_CR1E_FIFO2_CONTROL,
+					  capture_cmd(chip));
+			break;
+		default:
+			result = -EINVAL;
+			break;
+		}
 	}
 	return result;
 }

@@ -106,9 +106,9 @@ static int inv_magn_init(struct inv_mpu6050_state *st)
 		return ret;
 
 	/*
-	 * Sensor sentivity
+	 * Sensor sensitivity
 	 * 1 uT = 0.01 G and value is in micron (1e6)
-	 * sensitvity = x uT * 0.01 * 1e6
+	 * sensitivity = x uT * 0.01 * 1e6
 	 */
 	switch (st->chip_type) {
 	case INV_MPU9150:
@@ -125,7 +125,7 @@ static int inv_magn_init(struct inv_mpu6050_state *st)
 	}
 
 	/*
-	 * Sensitivity adjustement and scale to Gauss
+	 * Sensitivity adjustment and scale to Gauss
 	 *
 	 * Hadj = H * (((ASA - 128) * 0.5 / 128) + 1)
 	 * Factor simplification:

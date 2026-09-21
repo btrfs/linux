@@ -271,7 +271,8 @@ static struct connection *__find_con(int nodeid, int r)
 {
 	struct connection *con;
 
-	hlist_for_each_entry_rcu(con, &connection_hash[r], list) {
+	hlist_for_each_entry_srcu(con, &connection_hash[r], list,
+			srcu_read_lock_held(&connections_srcu)) {
 		if (con->nodeid == nodeid)
 			return con;
 	}
@@ -305,7 +306,7 @@ static struct connection *nodeid2con(int nodeid, gfp_t alloc)
 	if (con || !alloc)
 		return con;
 
-	con = kzalloc(sizeof(*con), alloc);
+	con = kzalloc_obj(*con, alloc);
 	if (!con)
 		return NULL;
 
@@ -426,7 +427,8 @@ static int addr_to_nodeid(struct sockaddr_storage *addr, int *nodeid,
 
 	idx = srcu_read_lock(&connections_srcu);
 	for (i = 0; i < CONN_HASH_SIZE; i++) {
-		hlist_for_each_entry_rcu(con, &connection_hash[i], list) {
+		hlist_for_each_entry_srcu(con, &connection_hash[i], list,
+				srcu_read_lock_held(&connections_srcu)) {
 			WARN_ON_ONCE(!con->addr_count);
 
 			spin_lock(&con->addrs_lock);
@@ -838,7 +840,7 @@ static struct processqueue_entry *new_processqueue_entry(int nodeid,
 {
 	struct processqueue_entry *pentry;
 
-	pentry = kmalloc(sizeof(*pentry), GFP_NOFS);
+	pentry = kmalloc_obj(*pentry, GFP_NOFS);
 	if (!pentry)
 		return NULL;
 
@@ -1052,7 +1054,7 @@ static int accept_from_sock(void)
 		struct connection *othercon = newcon->othercon;
 
 		if (!othercon) {
-			othercon = kzalloc(sizeof(*othercon), GFP_NOFS);
+			othercon = kzalloc_obj(*othercon, GFP_NOFS);
 			if (!othercon) {
 				log_print("failed to allocate incoming socket");
 				up_write(&newcon->sock_lock);
@@ -1126,7 +1128,7 @@ static void writequeue_entry_complete(struct writequeue_entry *e, int completed)
 static int sctp_bind_addrs(struct socket *sock, __be16 port)
 {
 	struct sockaddr_storage localaddr;
-	struct sockaddr *addr = (struct sockaddr *)&localaddr;
+	struct sockaddr_unsized *addr = (struct sockaddr_unsized *)&localaddr;
 	int i, addr_len, result = 0;
 
 	for (i = 0; i < dlm_local_count; i++) {
@@ -1599,7 +1601,7 @@ static int dlm_connect(struct connection *con)
 
 	log_print_ratelimited("connecting to %d", con->nodeid);
 	make_sockaddr(&addr, dlm_config.ci_tcp_port, &addr_len);
-	result = kernel_connect(sock, (struct sockaddr *)&addr, addr_len, 0);
+	result = kernel_connect(sock, (struct sockaddr_unsized *)&addr, addr_len, 0);
 	switch (result) {
 	case -EINPROGRESS:
 		/* not an error */
@@ -1729,7 +1731,8 @@ void dlm_lowcomms_shutdown(void)
 
 	idx = srcu_read_lock(&connections_srcu);
 	for (i = 0; i < CONN_HASH_SIZE; i++) {
-		hlist_for_each_entry_rcu(con, &connection_hash[i], list) {
+		hlist_for_each_entry_srcu(con, &connection_hash[i], list,
+				srcu_read_lock_held(&connections_srcu)) {
 			shutdown_connection(con, true);
 			stop_connection_io(con);
 			flush_workqueue(process_workqueue);
@@ -1813,7 +1816,7 @@ static int dlm_tcp_bind(struct socket *sock)
 	memcpy(&src_addr, &dlm_local_addr[0], sizeof(src_addr));
 	make_sockaddr(&src_addr, 0, &addr_len);
 
-	result = kernel_bind(sock, (struct sockaddr *)&src_addr,
+	result = kernel_bind(sock, (struct sockaddr_unsized *)&src_addr,
 			     addr_len);
 	if (result < 0) {
 		/* This *may* not indicate a critical error */
@@ -1852,7 +1855,7 @@ static int dlm_tcp_listen_bind(struct socket *sock)
 
 	/* Bind to our port */
 	make_sockaddr(&dlm_local_addr[0], dlm_config.ci_tcp_port, &addr_len);
-	return kernel_bind(sock, (struct sockaddr *)&dlm_local_addr[0],
+	return kernel_bind(sock, (struct sockaddr_unsized *)&dlm_local_addr[0],
 			   addr_len);
 }
 
@@ -1968,7 +1971,8 @@ void dlm_lowcomms_exit(void)
 
 	idx = srcu_read_lock(&connections_srcu);
 	for (i = 0; i < CONN_HASH_SIZE; i++) {
-		hlist_for_each_entry_rcu(con, &connection_hash[i], list) {
+		hlist_for_each_entry_srcu(con, &connection_hash[i], list,
+				srcu_read_lock_held(&connections_srcu)) {
 			spin_lock(&connections_lock);
 			hlist_del_rcu(&con->list);
 			spin_unlock(&connections_lock);

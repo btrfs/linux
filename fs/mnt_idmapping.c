@@ -289,7 +289,7 @@ struct mnt_idmap *alloc_mnt_idmap(struct user_namespace *mnt_userns)
 	struct mnt_idmap *idmap;
 	int ret;
 
-	idmap = kzalloc(sizeof(struct mnt_idmap), GFP_KERNEL_ACCOUNT);
+	idmap = kzalloc_obj(struct mnt_idmap, GFP_KERNEL_ACCOUNT);
 	if (!idmap)
 		return ERR_PTR(-ENOMEM);
 
@@ -375,6 +375,8 @@ int statmount_mnt_idmap(struct mnt_idmap *idmap, struct seq_file *seq, bool uid_
 			continue;
 
 		seq_printf(seq, "%u %u %u", extent->first, lower, extent->count);
+		if (seq_has_overflowed(seq))
+			return -EAGAIN;
 
 		seq->count++; /* mappings are separated by \0 */
 		if (seq_has_overflowed(seq))

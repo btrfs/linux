@@ -3,10 +3,12 @@
 
 #include <linux/delay.h>
 #include <linux/mutex.h>
+#include <linux/pm_runtime.h>
 #include <linux/spinlock_types.h>
 #include <linux/workqueue.h>
 
-#include <drm/drm_encoder.h>
+#include <drm/drm_device.h>
+#include <drm/drm_exec.h>
 #include <drm/drm_gem.h>
 #include <drm/drm_gem_shmem_helper.h>
 #include <drm/gpu_scheduler.h>
@@ -38,6 +40,8 @@ static inline char *v3d_queue_to_string(enum v3d_queue queue)
 }
 
 struct v3d_stats {
+	struct kref refcount;
+
 	u64 start_ns;
 	u64 enabled_ns;
 	u64 jobs_completed;
@@ -46,8 +50,15 @@ struct v3d_stats {
 	 * This seqcount is used to protect the access to the GPU stats
 	 * variables. It must be used as, while we are reading the stats,
 	 * IRQs can happen and the stats can be updated.
+	 *
+	 * However, we use the raw seqcount helpers to interact with this lock
+	 * to avoid false positives from lockdep, which is unable to detect that
+	 * our readers are never from irq or softirq context, and that, for CPU
+	 * job queues, even the write side never is.
 	 */
 	seqcount_t lock;
+
+	atomic_t reset_counter;
 };
 
 struct v3d_queue_state {
@@ -57,29 +68,26 @@ struct v3d_queue_state {
 	u64 emit_seqno;
 
 	/* Stores the GPU stats for this queue in the global context. */
-	struct v3d_stats stats;
+	struct v3d_stats *stats;
 
 	/* Currently active job for this queue */
 	struct v3d_job *active_job;
 	spinlock_t queue_lock;
-	/* Protect dma fence for signalling job completion */
-	spinlock_t fence_lock;
 };
 
-/* Performance monitor object. The perform lifetime is controlled by userspace
- * using perfmon related ioctls. A perfmon can be attached to a submit_cl
- * request, and when this is the case, HW perf counters will be activated just
- * before the submit_cl is submitted to the GPU and disabled when the job is
- * done. This way, only events related to a specific job will be counted.
+/* Performance monitor object
+ *
+ * The performance monitor (perfmon) lifetime is controlled by userspace using
+ * perfmon related ioctls. A perfmon can be attached to a CL or CSD submission
+ * request, and when it is, HW performance counters will be activated just
+ * before the job is submitted to the GPU and disabled when the job is done.
+ * This way, only events related to a specific submission will be counted.
  */
 struct v3d_perfmon {
 	/* Tracks the number of users of the perfmon, when this counter reaches
 	 * zero the perfmon is destroyed.
 	 */
 	refcount_t refcnt;
-
-	/* Protects perfmon stop, as it can be invoked from multiple places. */
-	struct mutex lock;
 
 	/* Number of counters activated in this perfmon instance
 	 * (should be less than DRM_V3D_MAX_PERF_COUNTERS).
@@ -158,17 +166,36 @@ struct v3d_dev {
 	struct drm_mm mm;
 	spinlock_t mm_lock;
 
-	/*
-	 * tmpfs instance used for shmem backed objects
-	 */
-	struct vfsmount *gemfs;
-
 	struct work_struct overflow_mem_work;
 
 	struct v3d_queue_state queue[V3D_MAX_QUEUES];
 
-	/* Used to track the active perfmon if any. */
-	struct v3d_perfmon *active_perfmon;
+	/*
+	 * Tracks the performance monitor state and consistency.
+	 *
+	 * When a non-global perfmon is attached to a job, the scheduler must
+	 * not run any other job on the HW concurrently (otherwise, the
+	 * counters would be polluted by unrelated work).
+	 */
+	struct {
+		/* Protects @active. */
+		spinlock_t lock;
+
+		/* Perfmon currently programmed in HW (or NULL if none). */
+		struct v3d_perfmon *active;
+
+		/* Finished fence of the most recently submitted job that
+		 * opened a serialization window (i.e. a job with a non-global
+		 * perfmon attached).
+		 */
+		struct dma_fence *fence;
+
+		/* Finished fence of the most recently submitted job on each HW
+		 * queue. Used so that a new perfmon-carrying job can depend on
+		 * every job currently in-flight across all queues.
+		 */
+		struct dma_fence *last_hw_fence[V3D_MAX_QUEUES];
+	} perfmon_state;
 
 	/* Protects bo_stats */
 	struct mutex bo_lock;
@@ -178,6 +205,12 @@ struct v3d_dev {
 	 * reset at once.
 	 */
 	struct mutex reset_lock;
+
+	/* Ordered workqueue shared by every queue's scheduler timeout work.
+	 * V3D reset is global to all queues, so the timeout handlers must not
+	 * run concurrently.
+	 */
+	struct workqueue_struct *reset_wq;
 
 	/* Lock taken when creating and pushing the GPU scheduler
 	 * jobs, to keep the sched-fence seqnos in order.
@@ -201,10 +234,8 @@ struct v3d_dev {
 	 */
 	struct v3d_perfmon *global_perfmon;
 
-	/* Global reset counter. The counter must be incremented when
-	 * a GPU reset happens. It must be protected by @reset_lock.
-	 */
-	unsigned int reset_counter;
+	/* Global reset counter incremented on each GPU reset. */
+	atomic_t reset_counter;
 };
 
 static inline struct v3d_dev *
@@ -225,21 +256,12 @@ v3d_has_csd(struct v3d_dev *v3d)
 struct v3d_file_priv {
 	struct v3d_dev *v3d;
 
-	struct {
-		struct idr idr;
-		struct mutex lock;
-	} perfmon;
+	struct xarray perfmons;
 
 	struct drm_sched_entity sched_entity[V3D_MAX_QUEUES];
 
 	/* Stores the GPU stats for a specific queue for this fd. */
-	struct v3d_stats stats[V3D_MAX_QUEUES];
-
-	/* Per-fd reset counter, must be incremented when a job submitted
-	 * by this fd causes a GPU reset. It must be protected by
-	 * &struct v3d_dev->reset_lock.
-	 */
-	unsigned int reset_counter;
+	struct v3d_stats *stats[V3D_MAX_QUEUES];
 };
 
 struct v3d_bo {
@@ -296,12 +318,36 @@ to_v3d_fence(struct dma_fence *fence)
 #define V3D_CORE_READ(core, offset) readl(v3d->core_regs[core] + offset)
 #define V3D_CORE_WRITE(core, offset, val) writel(val, v3d->core_regs[core] + offset)
 
+#define V3D_MAX_JOBS_PER_SUBMISSION 3
+
+/* Per-ioctl submission context */
+struct v3d_submit {
+	struct v3d_dev *v3d;
+
+	struct drm_file *file_priv;
+
+	/* DRM exec context for this submission. */
+	struct drm_exec exec;
+
+	/* Ordered array of jobs forming the submission chain. Jobs are
+	 * appended via v3d_submit_add_job(), then chained and pushed to
+	 * the scheduler by v3d_submit_jobs().
+	 */
+	struct v3d_job *jobs[V3D_MAX_JOBS_PER_SUBMISSION];
+
+	/* Number of jobs currently in @jobs. */
+	u32 job_count;
+};
+
 struct v3d_job {
 	struct drm_sched_job base;
 
 	struct kref refcount;
 
 	struct v3d_dev *v3d;
+
+	/* The queue that the job was submitted on. */
+	enum v3d_queue queue;
 
 	/* This is the array of BOs that were looked up at the start
 	 * of submission.
@@ -327,8 +373,19 @@ struct v3d_job {
 	 */
 	struct v3d_file_priv *file_priv;
 
+	/* Pointers to this job's per-fd and global queue stats. */
+	struct v3d_stats *client_stats;
+	struct v3d_stats *global_stats;
+
 	/* Callback for the freeing of the job on refcount going to 0. */
 	void (*free)(struct kref *ref);
+
+	bool has_pm_ref;
+
+	/* Whether the job needs implicit dependencies, i.e. must wait for
+	 * other contexts still writing its BOs.
+	 */
+	bool has_implicit_dep;
 };
 
 struct v3d_bin_job {
@@ -403,8 +460,10 @@ struct v3d_indirect_csd_info {
 	/* Indirect CSD */
 	struct v3d_csd_job *job;
 
-	/* Clean cache job associated to the Indirect CSD job */
-	struct v3d_job *clean_job;
+	/* Indirect CSD args, stashed by the extension parser and later used
+	 * to create the CSD job from them.
+	 */
+	struct drm_v3d_submit_csd args;
 
 	/* Offset within the BO where the workgroup counts are stored */
 	u32 offset;
@@ -419,9 +478,6 @@ struct v3d_indirect_csd_info {
 
 	/* Indirect BO */
 	struct drm_gem_object *indirect;
-
-	/* Context of the Indirect CSD job */
-	struct ww_acquire_ctx acquire_ctx;
 };
 
 struct v3d_timestamp_query_info {
@@ -569,17 +625,16 @@ extern const struct dma_fence_ops v3d_fence_ops;
 struct dma_fence *v3d_fence_create(struct v3d_dev *v3d, enum v3d_queue q);
 
 /* v3d_gem.c */
+extern bool super_pages;
+void v3d_init_hw_state(struct v3d_dev *v3d);
 int v3d_gem_init(struct drm_device *dev);
 void v3d_gem_destroy(struct drm_device *dev);
+void v3d_idle_axi(struct v3d_dev *v3d, int core);
+void v3d_idle_gca(struct v3d_dev *v3d);
 void v3d_reset_sms(struct v3d_dev *v3d);
 void v3d_reset(struct v3d_dev *v3d);
 void v3d_invalidate_caches(struct v3d_dev *v3d);
 void v3d_clean_caches(struct v3d_dev *v3d);
-
-/* v3d_gemfs.c */
-extern bool super_pages;
-void v3d_gemfs_init(struct v3d_dev *v3d);
-void v3d_gemfs_fini(struct v3d_dev *v3d);
 
 /* v3d_submit.c */
 void v3d_job_cleanup(struct v3d_job *job);
@@ -605,14 +660,41 @@ int v3d_mmu_set_page_table(struct v3d_dev *v3d);
 void v3d_mmu_insert_ptes(struct v3d_bo *bo);
 void v3d_mmu_remove_ptes(struct v3d_bo *bo);
 
+/* v3d_power.c */
+int v3d_power_suspend(struct device *dev);
+int v3d_power_resume(struct device *dev);
+
+static __always_inline int v3d_pm_runtime_get(struct v3d_dev *v3d)
+{
+	return pm_runtime_resume_and_get(v3d->drm.dev);
+}
+
+static __always_inline int v3d_pm_runtime_put(struct v3d_dev *v3d)
+{
+	return pm_runtime_put_autosuspend(v3d->drm.dev);
+}
+
 /* v3d_sched.c */
 void v3d_timestamp_query_info_free(struct v3d_timestamp_query_info *query_info,
 				   unsigned int count);
 void v3d_performance_query_info_free(struct v3d_performance_query_info *query_info,
 				     unsigned int count);
-void v3d_job_update_stats(struct v3d_job *job, enum v3d_queue q);
+struct v3d_stats *v3d_stats_alloc(void);
+void v3d_stats_release(struct kref *refcount);
+void v3d_job_update_stats(struct v3d_job *job);
 int v3d_sched_init(struct v3d_dev *v3d);
 void v3d_sched_fini(struct v3d_dev *v3d);
+
+static inline struct v3d_stats *v3d_stats_get(struct v3d_stats *stats)
+{
+	kref_get(&stats->refcount);
+	return stats;
+}
+
+static inline void v3d_stats_put(struct v3d_stats *stats)
+{
+	kref_put(&stats->refcount, v3d_stats_release);
+}
 
 /* v3d_perfmon.c */
 void v3d_perfmon_init(struct v3d_dev *v3d);
@@ -621,6 +703,10 @@ void v3d_perfmon_put(struct v3d_perfmon *perfmon);
 void v3d_perfmon_start(struct v3d_dev *v3d, struct v3d_perfmon *perfmon);
 void v3d_perfmon_stop(struct v3d_dev *v3d, struct v3d_perfmon *perfmon,
 		      bool capture);
+void v3d_perfmon_stop_locked(struct v3d_dev *v3d, struct v3d_perfmon *perfmon,
+			     bool capture);
+void v3d_perfmon_suspend(struct v3d_dev *v3d);
+void v3d_perfmon_resume(struct v3d_dev *v3d);
 struct v3d_perfmon *v3d_perfmon_find(struct v3d_file_priv *v3d_priv, int id);
 void v3d_perfmon_open_file(struct v3d_file_priv *v3d_priv);
 void v3d_perfmon_close_file(struct v3d_file_priv *v3d_priv);

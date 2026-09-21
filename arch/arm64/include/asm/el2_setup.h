@@ -7,7 +7,7 @@
 #ifndef __ARM_KVM_INIT_H__
 #define __ARM_KVM_INIT_H__
 
-#ifndef __ASSEMBLY__
+#ifndef __ASSEMBLER__
 #error Assembly-only header
 #endif
 
@@ -24,7 +24,7 @@
 	 * ID_AA64MMFR4_EL1.E2H0 < 0. On such CPUs HCR_EL2.E2H is RES1, but it
 	 * can reset into an UNKNOWN state and might not read as 1 until it has
 	 * been initialized explicitly.
-	 * Initalize HCR_EL2.E2H so that later code can rely upon HCR_EL2.E2H
+	 * Initialize HCR_EL2.E2H so that later code can rely upon HCR_EL2.E2H
 	 * indicating whether the CPU is running in E2H mode.
 	 */
 	mrs_s	x1, SYS_ID_AA64MMFR4_EL1
@@ -50,7 +50,6 @@
 	 * effectively VHE-only or not.
 	 */
 	msr_hcr_el2 x0		// Setup HCR_EL2 as nVHE
-	isb
 	mov	x1, #1		// Write something to FAR_EL1
 	msr	far_el1, x1
 	isb
@@ -64,7 +63,6 @@
 .LnE2H0_\@:
 	orr	x0, x0, #HCR_E2H
 	msr_hcr_el2 x0
-	isb
 .LnVHE_\@:
 .endm
 
@@ -83,8 +81,18 @@
         /* Enable GCS if supported */
 	mrs_s	x1, SYS_ID_AA64PFR1_EL1
 	ubfx	x1, x1, #ID_AA64PFR1_EL1_GCS_SHIFT, #4
-	cbz	x1, .Lset_hcrx_\@
+	cbz	x1, .Lskip_gcs_hcrx_\@
 	orr	x0, x0, #HCRX_EL2_GCSEn
+
+.Lskip_gcs_hcrx_\@:
+	/* Enable LS64, LS64_V if supported */
+	mrs_s	x1, SYS_ID_AA64ISAR1_EL1
+	ubfx	x1, x1, #ID_AA64ISAR1_EL1_LS64_SHIFT, #4
+	cbz	x1, .Lset_hcrx_\@
+	orr	x0, x0, #HCRX_EL2_EnALS
+	cmp	x1, #ID_AA64ISAR1_EL1_LS64_LS64_V
+	b.lt	.Lset_hcrx_\@
+	orr	x0, x0, #HCRX_EL2_EnASR
 
 .Lset_hcrx_\@:
 	msr_s	SYS_HCRX_EL2, x0
@@ -225,7 +233,6 @@
 		     ICH_HFGRTR_EL2_ICC_ICSR_EL1		| \
 		     ICH_HFGRTR_EL2_ICC_PCR_EL1			| \
 		     ICH_HFGRTR_EL2_ICC_HPPIR_EL1		| \
-		     ICH_HFGRTR_EL2_ICC_HAPR_EL1		| \
 		     ICH_HFGRTR_EL2_ICC_CR0_EL1			| \
 		     ICH_HFGRTR_EL2_ICC_IDRn_EL1		| \
 		     ICH_HFGRTR_EL2_ICC_APR_EL1)
@@ -239,6 +246,8 @@
 		     ICH_HFGWTR_EL2_ICC_CR0_EL1			| \
 		     ICH_HFGWTR_EL2_ICC_APR_EL1)
 	msr_s	SYS_ICH_HFGWTR_EL2, x0		// Disable reg write traps
+	mov	x0, #(ICH_VCTLR_EL2_En)
+	msr_s	SYS_ICH_VCTLR_EL2, x0		// Enable vHPPI selection
 .Lskip_gicv5_\@:
 .endm
 
@@ -501,10 +510,13 @@
 #endif
 
 .macro finalise_el2_state
-	check_override id_aa64pfr0, ID_AA64PFR0_EL1_MPAM_SHIFT, .Linit_mpam_\@, .Lskip_mpam_\@, x1, x2
+	check_override id_aa64pfr0, ID_AA64PFR0_EL1_MPAM_SHIFT, .Linit_mpam_\@, .Lmpam_minor_\@, x1, x2
+.Lmpam_minor_\@:
+	check_override id_aa64pfr1, ID_AA64PFR1_EL1_MPAM_frac_SHIFT, .Linit_mpam_\@, .Lskip_mpam_\@, x1, x2
 
 .Linit_mpam_\@:
-	msr_s	SYS_MPAM2_EL2, xzr		// use the default partition
+	mov	x0, #MPAM2_EL2_EnMPAMSM_MASK
+	msr_s	SYS_MPAM2_EL2, x0		// use the default partition,
 						// and disable lower traps
 	mrs_s	x0, SYS_MPAMIDR_EL1
 	tbz	x0, #MPAMIDR_EL1_HAS_HCR_SHIFT, .Lskip_mpam_\@  // skip if no MPAMHCR reg

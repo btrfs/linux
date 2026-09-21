@@ -248,6 +248,7 @@ CLOCK
   devm_clk_put()
   devm_clk_bulk_get()
   devm_clk_bulk_get_all()
+  devm_clk_bulk_get_enable()
   devm_clk_bulk_get_optional()
   devm_get_clk_from_child()
   devm_clk_hw_register()
@@ -383,7 +384,6 @@ NET
 
 PER-CPU MEM
   devm_alloc_percpu()
-  devm_free_percpu()
 
 PCI
   devm_pci_alloc_host_bridge()  : managed PCI host bridge allocation
@@ -409,7 +409,6 @@ PINCTRL
   devm_pinctrl_get_select()
   devm_pinctrl_register()
   devm_pinctrl_register_and_init()
-  devm_pinctrl_unregister()
 
 POWER
   devm_reboot_mode_register()
@@ -466,3 +465,7 @@ SPI
 
 WATCHDOG
   devm_watchdog_register_device()
+
+WORKQUEUE
+  devm_alloc_workqueue()
+  devm_alloc_ordered_workqueue()

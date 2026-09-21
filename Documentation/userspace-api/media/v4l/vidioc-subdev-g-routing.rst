@@ -67,7 +67,7 @@ subdevice routing table. This may be smaller or larger than the value of
 drivers may adjust the requested routing table.
 
 The kernel can return a ``num_routes`` value larger than ``len_routes`` from
-both ioctls. This indicates thare are more routes in the routing table than fits
+both ioctls. This indicates there are more routes in the routing table than fits
 the ``routes`` array. In this case, the ``routes`` array is filled by the kernel
 with the first ``len_routes`` entries of the subdevice routing table. This is
 not considered to be an error, and the ioctl call succeeds. If the applications
@@ -157,7 +157,14 @@ appropriately. The generic error codes are described at the
 EINVAL
    The sink or source pad identifiers reference a non-existing pad or reference
    pads of different types (ie. the sink_pad identifiers refers to a source
-   pad), or the ``which`` field has an unsupported value.
+   pad), the ``which`` field has an unsupported value, or, for
+   ``VIDIOC_SUBDEV_S_ROUTING``, the num_routes field set by the application is
+   larger than the len_routes field value.
+
+ENXIO
+   The application requested routes cannot be created or the state of
+   the specified routes cannot be modified. Only returned for
+   ``VIDIOC_SUBDEV_S_ROUTING``.
 
 E2BIG
    The application provided ``num_routes`` for ``VIDIOC_SUBDEV_S_ROUTING`` is

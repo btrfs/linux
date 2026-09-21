@@ -3,6 +3,7 @@
 
 #include "rx.h"
 #include "en/xdp.h"
+#include <linux/bitmap.h>
 #include <net/xdp_sock_drv.h>
 #include <linux/filter.h>
 
@@ -23,6 +24,7 @@ int mlx5e_xsk_alloc_rx_mpwqe(struct mlx5e_rq *rq, u16 ix)
 	struct mlx5_wq_cyc *wq = &icosq->wq;
 	struct mlx5e_umr_wqe *umr_wqe;
 	struct xdp_buff **xsk_buffs;
+	bool sync_locked;
 	int batch, i;
 	u32 offset; /* 17-bit value with MTT. */
 	u16 pi;
@@ -47,6 +49,7 @@ int mlx5e_xsk_alloc_rx_mpwqe(struct mlx5e_rq *rq, u16 ix)
 			goto err_reuse_batch;
 	}
 
+	sync_locked = mlx5e_icosq_sync_lock(icosq);
 	pi = mlx5e_icosq_get_next_pi(icosq, rq->mpwqe.umr_wqebbs);
 	umr_wqe = mlx5_wq_cyc_get_wqe(wq, pi);
 	memcpy(umr_wqe, &rq->mpwqe.umr_wqe, sizeof(struct mlx5e_umr_wqe));
@@ -143,6 +146,7 @@ int mlx5e_xsk_alloc_rx_mpwqe(struct mlx5e_rq *rq, u16 ix)
 	};
 
 	icosq->pc += rq->mpwqe.umr_wqebbs;
+	mlx5e_icosq_sync_unlock(icosq, sync_locked);
 
 	icosq->doorbell_cseg = &umr_wqe->hdr.ctrl;
 
@@ -153,6 +157,7 @@ err_reuse_batch:
 		xsk_buff_free(xsk_buffs[batch]);
 
 err:
+	bitmap_fill(wi->skip_release_bitmap, rq->mpwqe.pages_per_wqe);
 	rq->stats->buff_alloc_err++;
 	return -ENOMEM;
 }

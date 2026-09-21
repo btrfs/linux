@@ -11,9 +11,11 @@
 #include <linux/purgatory.h>
 #include <linux/pgtable.h>
 #include <linux/ftrace_regs.h>
+#include <linux/kernel_stat.h>
 #include <asm/kvm_host_types.h>
 #include <asm/stacktrace.h>
 #include <asm/ptrace.h>
+#include <asm/idle.h>
 
 int main(void)
 {
@@ -21,6 +23,9 @@ int main(void)
 	OFFSET(__TASK_stack, task_struct, stack);
 	OFFSET(__TASK_thread, task_struct, thread);
 	OFFSET(__TASK_pid, task_struct, pid);
+#ifdef CONFIG_STACKPROTECTOR
+	OFFSET(__TASK_stack_canary, task_struct, stack_canary);
+#endif
 	BLANK();
 	/* thread struct offsets */
 	OFFSET(__THREAD_ksp, thread_struct, ksp);
@@ -60,10 +65,11 @@ int main(void)
 	OFFSET(__SF_EMPTY, stack_frame, empty[0]);
 	OFFSET(__SF_SIE_CONTROL, stack_frame, sie_control_block);
 	OFFSET(__SF_SIE_SAVEAREA, stack_frame, sie_savearea);
-	OFFSET(__SF_SIE_REASON, stack_frame, sie_reason);
+	OFFSET(__SF_SIE_RETURN, stack_frame, sie_return);
 	OFFSET(__SF_SIE_FLAGS, stack_frame, sie_flags);
 	OFFSET(__SF_SIE_CONTROL_PHYS, stack_frame, sie_control_block_phys);
 	OFFSET(__SF_SIE_GUEST_ASCE, stack_frame, sie_guest_asce);
+	OFFSET(__SF_SIE_IRQ, stack_frame, sie_irq);
 	DEFINE(STACK_FRAME_OVERHEAD, sizeof(struct stack_frame));
 	BLANK();
 	OFFSET(__SFUSER_BACKCHAIN, stack_frame_user, back_chain);
@@ -124,6 +130,7 @@ int main(void)
 	OFFSET(__LC_LAST_UPDATE_CLOCK, lowcore, last_update_clock);
 	OFFSET(__LC_INT_CLOCK, lowcore, int_clock);
 	OFFSET(__LC_CURRENT, lowcore, current_task);
+	OFFSET(__LC_PERCPU_OFFSET, lowcore, percpu_offset);
 	OFFSET(__LC_KERNEL_STACK, lowcore, kernel_stack);
 	OFFSET(__LC_ASYNC_STACK, lowcore, async_stack);
 	OFFSET(__LC_NODAT_STACK, lowcore, nodat_stack);
@@ -139,6 +146,7 @@ int main(void)
 	OFFSET(__LC_CURRENT_PID, lowcore, current_pid);
 	OFFSET(__LC_LAST_BREAK, lowcore, last_break);
 	/* software defined ABI-relevant lowcore locations 0xe00 - 0xe20 */
+	OFFSET(__LC_STACK_CANARY, lowcore, stack_canary);
 	OFFSET(__LC_DUMP_REIPL, lowcore, ipib);
 	OFFSET(__LC_VMCORE_INFO, lowcore, vmcore_info);
 	OFFSET(__LC_OS_INFO, lowcore, os_info);
@@ -175,6 +183,10 @@ int main(void)
 	DEFINE(OLDMEM_SIZE, PARMAREA + offsetof(struct parmarea, oldmem_size));
 	DEFINE(COMMAND_LINE, PARMAREA + offsetof(struct parmarea, command_line));
 	DEFINE(MAX_COMMAND_LINE_SIZE, PARMAREA + offsetof(struct parmarea, max_command_line_size));
+	OFFSET(__IDLE_CLOCK_EXIT, s390_idle_data, clock_idle_exit);
+#ifdef CONFIG_NO_HZ_COMMON
+	OFFSET(__KCPUSTAT_SEQUENCE, kernel_cpustat, idle_sleeptime_seq);
+#endif
 	OFFSET(__FTRACE_REGS_PT_REGS, __arch_ftrace_regs, regs);
 	DEFINE(__FTRACE_REGS_SIZE, sizeof(struct __arch_ftrace_regs));
 

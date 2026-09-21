@@ -9,7 +9,6 @@
 #include <linux/component.h>
 #include <linux/device.h>
 #include <linux/jiffies.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
 #include <linux/regmap.h>
@@ -56,9 +55,9 @@
 
 #define FGINCTRL		0x5c
 #define FGINCTRLPANIC		0x60
-#define  FGDM_MASK		GENMASK(2, 0)
-#define  ENPRIMALPHA		BIT(3)
 #define  ENSECALPHA		BIT(4)
+#define  ENPRIMALPHA		BIT(3)
+#define  FGDM_MASK		GENMASK(2, 0)
 
 #define FGCCR			0x64
 #define  CCGREEN(x)		FIELD_PREP(GENMASK(19, 10), (x))
