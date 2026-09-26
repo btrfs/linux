@@ -81,13 +81,12 @@ static int add_hist_entries(struct hists *hists, struct machine *machine)
 {
 	struct addr_location al;
 	struct evsel *evsel = hists_to_evsel(hists);
-	struct perf_sample sample = { .period = 1000, };
+	struct perf_sample sample = { .evsel = evsel, .period = 1000, };
 	size_t i;
 
 	addr_location__init(&al);
 	for (i = 0; i < ARRAY_SIZE(fake_samples); i++) {
 		struct hist_entry_iter iter = {
-			.evsel = evsel,
 			.sample	= &sample,
 			.hide_unresolved = false,
 		};
@@ -705,7 +704,7 @@ out:
 static int test__hists_cumulate(struct test_suite *test __maybe_unused, int subtest __maybe_unused)
 {
 	int err = TEST_FAIL;
-	struct machines machines;
+	struct machines machines = { 0 };
 	struct machine *machine;
 	struct evsel *evsel;
 	struct evlist *evlist = evlist__new();
@@ -724,7 +723,8 @@ static int test__hists_cumulate(struct test_suite *test __maybe_unused, int subt
 		goto out;
 	err = TEST_FAIL;
 
-	machines__init(&machines);
+	if (machines__init(&machines))
+		goto out;
 
 	/* setup threads/dso/map/symbols also */
 	machine = setup_fake_machine(&machines);
@@ -744,7 +744,7 @@ static int test__hists_cumulate(struct test_suite *test __maybe_unused, int subt
 
 out:
 	/* tear down everything */
-	evlist__delete(evlist);
+	evlist__put(evlist);
 	machines__exit(&machines);
 	put_fake_samples();
 

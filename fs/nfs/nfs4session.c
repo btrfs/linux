@@ -106,7 +106,7 @@ static struct nfs4_slot *nfs4_new_slot(struct nfs4_slot_table  *tbl,
 {
 	struct nfs4_slot *slot;
 
-	slot = kzalloc(sizeof(*slot), gfp_mask);
+	slot = kzalloc_obj(*slot, gfp_mask);
 	if (slot) {
 		slot->table = tbl;
 		slot->slot_nr = slotid;
@@ -408,8 +408,6 @@ void nfs41_wake_slot_table(struct nfs4_slot_table *tbl)
 	}
 }
 
-#if defined(CONFIG_NFS_V4_1)
-
 static void nfs41_set_max_slotid_locked(struct nfs4_slot_table *tbl,
 		u32 target_highest_slotid)
 {
@@ -560,7 +558,7 @@ struct nfs4_session *nfs4_alloc_session(struct nfs_client *clp)
 {
 	struct nfs4_session *session;
 
-	session = kzalloc(sizeof(struct nfs4_session), GFP_NOFS);
+	session = kzalloc_obj(struct nfs4_session, GFP_NOFS);
 	if (!session)
 		return NULL;
 
@@ -628,30 +626,35 @@ int nfs4_init_session(struct nfs_client *clp)
 	return nfs41_check_session_ready(clp);
 }
 
-int nfs4_init_ds_session(struct nfs_client *clp, unsigned long lease_time)
+int nfs4_init_ds_session(struct nfs_client *clp, unsigned long lease_time,
+			 bool tightly_coupled)
 {
 	struct nfs4_session *session = clp->cl_session;
 	int ret;
 
 	spin_lock(&clp->cl_lock);
-	if (test_and_clear_bit(NFS4_SESSION_INITING, &session->session_state)) {
-		/*
-		 * Do not set NFS_CS_CHECK_LEASE_TIME instead set the
-		 * DS lease to be equal to the MDS lease.
-		 */
+	/*
+	 * Do not set NFS_CS_CHECK_LEASE_TIME instead set the
+	 * DS lease to be equal to the MDS lease.
+	 *
+	 * A v4.0 DS has no session, so seed the lease every time.
+	 */
+	if (!session ||
+	    test_and_clear_bit(NFS4_SESSION_INITING, &session->session_state)) {
 		clp->cl_lease_time = lease_time;
 		clp->cl_last_renewal = jiffies;
 	}
 	spin_unlock(&clp->cl_lock);
 
+	if (!session)
+		return 0;
+
 	ret = nfs41_check_session_ready(clp);
 	if (ret)
 		return ret;
 	/* Test for the DS role */
-	if (!is_ds_client(clp))
+	if (tightly_coupled && !is_ds_client(clp))
 		return -ENODEV;
 	return 0;
 }
 EXPORT_SYMBOL_GPL(nfs4_init_ds_session);
-
-#endif	/* defined(CONFIG_NFS_V4_1) */

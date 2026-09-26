@@ -1,21 +1,25 @@
 // SPDX-License-Identifier: GPL-2.0
+#include "stat.h"
+
 #include <errno.h>
-#include <linux/err.h>
 #include <inttypes.h>
 #include <math.h>
 #include <string.h>
+
+#include <linux/err.h>
+#include <linux/zalloc.h>
+
 #include "counts.h"
 #include "cpumap.h"
 #include "debug.h"
-#include "header.h"
-#include "stat.h"
-#include "session.h"
-#include "target.h"
 #include "evlist.h"
 #include "evsel.h"
+#include "hashmap.h"
+#include "header.h"
+#include "pmu.h"
+#include "session.h"
+#include "target.h"
 #include "thread_map.h"
-#include "util/hashmap.h"
-#include <linux/zalloc.h>
 
 void update_stats(struct stats *stats, u64 val)
 {
@@ -246,9 +250,11 @@ void evlist__reset_prev_raw_counts(struct evlist *evlist)
 
 static void evsel__copy_prev_raw_counts(struct evsel *evsel)
 {
-	int idx, nthreads = perf_thread_map__nr(evsel->core.threads);
+	int nthreads = perf_thread_map__nr(evsel->core.threads);
 
 	for (int thread = 0; thread < nthreads; thread++) {
+		unsigned int idx;
+
 		perf_cpu_map__for_each_idx(idx, evsel__cpus(evsel)) {
 			*perf_counts(evsel->counts, idx, thread) =
 				*perf_counts(evsel->prev_raw_counts, idx, thread);
@@ -541,8 +547,8 @@ static void evsel__merge_aliases(struct evsel *evsel)
 	struct evlist *evlist = evsel->evlist;
 	struct evsel *alias;
 
-	alias = list_prepare_entry(evsel, &(evlist->core.entries), core.node);
-	list_for_each_entry_continue(alias, &evlist->core.entries, core.node) {
+	alias = list_prepare_entry(evsel, &(evlist__core(evlist)->entries), core.node);
+	list_for_each_entry_continue(alias, &evlist__core(evlist)->entries, core.node) {
 		if (alias->first_wildcard_match == evsel) {
 			/* Merge the same events on different PMUs. */
 			evsel__merge_aggr_counters(evsel, alias);
@@ -580,7 +586,7 @@ static void evsel__update_percore_stats(struct evsel *evsel, struct aggr_cpu_id 
 	struct perf_counts_values counts = { 0, };
 	struct aggr_cpu_id id;
 	struct perf_cpu cpu;
-	int idx;
+	unsigned int idx;
 
 	/* collect per-core counts */
 	perf_cpu_map__for_each_cpu(cpu, idx, evsel->core.cpus) {
@@ -617,7 +623,7 @@ static void evsel__process_percore(struct evsel *evsel)
 	struct perf_stat_evsel *ps = evsel->stats;
 	struct aggr_cpu_id core_id;
 	struct perf_cpu cpu;
-	int idx;
+	unsigned int idx;
 
 	if (!evsel->percore)
 		return;
@@ -645,7 +651,8 @@ void perf_stat_process_percore(struct perf_stat_config *config, struct evlist *e
 		evsel__process_percore(evsel);
 }
 
-int perf_event__process_stat_event(struct perf_session *session,
+int perf_event__process_stat_event(const struct perf_tool *tool __maybe_unused,
+				   struct perf_session *session,
 				   union perf_event *event)
 {
 	struct perf_counts_values count, *ptr;

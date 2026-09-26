@@ -5,6 +5,7 @@
  * Copyright 2009-2014 Analog Devices Inc.
  */
 
+#include <linux/cleanup.h>
 #include <linux/crc32.h>
 #include <linux/firmware.h>
 #include <linux/kernel.h>
@@ -35,7 +36,7 @@ struct sigmadsp_control {
 	struct snd_kcontrol *kcontrol;
 	bool is_readback;
 	bool cached;
-	uint8_t cache[];
+	u8 cache[] __counted_by(num_bytes);
 };
 
 struct sigmadsp_data {
@@ -135,7 +136,7 @@ static int sigmadsp_ctrl_put(struct snd_kcontrol *kcontrol,
 	uint8_t *data;
 	int ret = 0;
 
-	mutex_lock(&sigmadsp->lock);
+	guard(mutex)(&sigmadsp->lock);
 
 	data = ucontrol->value.bytes.data;
 
@@ -148,8 +149,6 @@ static int sigmadsp_ctrl_put(struct snd_kcontrol *kcontrol,
 			ctrl->cached = true;
 	}
 
-	mutex_unlock(&sigmadsp->lock);
-
 	return ret;
 }
 
@@ -160,7 +159,7 @@ static int sigmadsp_ctrl_get(struct snd_kcontrol *kcontrol,
 	struct sigmadsp *sigmadsp = snd_kcontrol_chip(kcontrol);
 	int ret = 0;
 
-	mutex_lock(&sigmadsp->lock);
+	guard(mutex)(&sigmadsp->lock);
 
 	if (!ctrl->cached) {
 		ret = sigmadsp_read(sigmadsp, ctrl->addr, ctrl->cache,
@@ -173,8 +172,6 @@ static int sigmadsp_ctrl_get(struct snd_kcontrol *kcontrol,
 		memcpy(ucontrol->value.bytes.data, ctrl->cache,
 			ctrl->num_bytes);
 	}
-
-	mutex_unlock(&sigmadsp->lock);
 
 	return ret;
 }
@@ -223,7 +220,7 @@ static int sigma_fw_load_control(struct sigmadsp *sigmadsp,
 		return -EINVAL;
 
 	num_bytes = le16_to_cpu(ctrl_chunk->num_bytes);
-	ctrl = kzalloc(sizeof(*ctrl) + num_bytes, GFP_KERNEL);
+	ctrl = kzalloc_flex(*ctrl, cache, num_bytes);
 	if (!ctrl)
 		return -ENOMEM;
 
@@ -270,7 +267,7 @@ static int sigma_fw_load_data(struct sigmadsp *sigmadsp,
 
 	length -= sizeof(*data_chunk);
 
-	data = kzalloc(struct_size(data, data, length), GFP_KERNEL);
+	data = kzalloc_flex(*data, data, length);
 	if (!data)
 		return -ENOMEM;
 
@@ -413,8 +410,7 @@ static int process_sigma_action(struct sigmadsp *sigmadsp,
 		if (len < 3)
 			return -EINVAL;
 
-		data = kzalloc(struct_size(data, data, size_sub(len, 2)),
-			       GFP_KERNEL);
+		data = kzalloc_flex(*data, data, size_sub(len, 2));
 		if (!data)
 			return -ENOMEM;
 
@@ -488,7 +484,7 @@ static void devm_sigmadsp_release(struct device *dev, void *res)
 static int sigmadsp_firmware_load(struct sigmadsp *sigmadsp, const char *name)
 {
 	const struct sigma_firmware_header *ssfw_head;
-	const struct firmware *fw;
+	const struct firmware *fw __free(firmware) = NULL;
 	int ret;
 	u32 crc;
 
@@ -496,7 +492,7 @@ static int sigmadsp_firmware_load(struct sigmadsp *sigmadsp, const char *name)
 	ret = request_firmware(&fw, name, sigmadsp->dev);
 	if (ret) {
 		pr_debug("%s: request_firmware() failed with %i\n", __func__, ret);
-		goto done;
+		return ret;
 	}
 
 	/* then verify the header */
@@ -510,13 +506,13 @@ static int sigmadsp_firmware_load(struct sigmadsp *sigmadsp, const char *name)
 	 */
 	if (fw->size < sizeof(*ssfw_head) || fw->size >= 0x4000000) {
 		dev_err(sigmadsp->dev, "Failed to load firmware: Invalid size\n");
-		goto done;
+		return -EINVAL;
 	}
 
 	ssfw_head = (void *)fw->data;
 	if (memcmp(ssfw_head->magic, SIGMA_MAGIC, ARRAY_SIZE(ssfw_head->magic))) {
 		dev_err(sigmadsp->dev, "Failed to load firmware: Invalid magic\n");
-		goto done;
+		return -EINVAL;
 	}
 
 	crc = crc32(0, fw->data + sizeof(*ssfw_head),
@@ -525,7 +521,7 @@ static int sigmadsp_firmware_load(struct sigmadsp *sigmadsp, const char *name)
 	if (crc != le32_to_cpu(ssfw_head->crc)) {
 		dev_err(sigmadsp->dev, "Failed to load firmware: Wrong crc checksum: expected %x got %x\n",
 			le32_to_cpu(ssfw_head->crc), crc);
-		goto done;
+		return -EINVAL;
 	}
 
 	switch (ssfw_head->version) {
@@ -545,9 +541,6 @@ static int sigmadsp_firmware_load(struct sigmadsp *sigmadsp, const char *name)
 
 	if (ret)
 		sigmadsp_firmware_release(sigmadsp);
-
-done:
-	release_firmware(fw);
 
 	return ret;
 }
@@ -678,10 +671,10 @@ static void sigmadsp_activate_ctrl(struct sigmadsp *sigmadsp,
 		return;
 	changed = snd_ctl_activate_id(card, &ctrl->kcontrol->id, active);
 	if (active && changed > 0) {
-		mutex_lock(&sigmadsp->lock);
-		if (ctrl->cached)
-			sigmadsp_ctrl_write(sigmadsp, ctrl, ctrl->cache);
-		mutex_unlock(&sigmadsp->lock);
+		scoped_guard(mutex, &sigmadsp->lock) {
+			if (ctrl->cached)
+				sigmadsp_ctrl_write(sigmadsp, ctrl, ctrl->cache);
+		}
 	}
 }
 

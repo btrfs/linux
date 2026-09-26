@@ -15,12 +15,17 @@
  * will be subsequently registered.
  */
 
+#include <linux/array_size.h>
+#include <linux/dev_printk.h>
+#include <linux/err.h>
 #include <linux/i2c.h>
-#include <linux/kernel.h>
 #include <linux/mfd/core.h>
 #include <linux/module.h>
 #include <linux/of_platform.h>
+#include <linux/platform_device.h>
+#include <linux/property.h>
 #include <linux/regmap.h>
+#include <linux/stddef.h>
 
 #include "simple-mfd-i2c.h"
 
@@ -99,6 +104,7 @@ static const struct regmap_config spacemit_p1_regmap_config = {
 };
 
 static const struct mfd_cell spacemit_p1_cells[] = {
+	{ .name = "spacemit-p1-reboot", },
 	{ .name = "spacemit-p1-regulator", },
 	{ .name = "spacemit-p1-rtc", },
 };
@@ -110,15 +116,16 @@ static const struct simple_mfd_data spacemit_p1 = {
 };
 
 static const struct of_device_id simple_mfd_i2c_of_match[] = {
+	{ .compatible = "delta,tn48m-cpld" },
 	{ .compatible = "fsl,ls1028aqds-fpga" },
 	{ .compatible = "fsl,lx2160aqds-fpga" },
 	{ .compatible = "fsl,lx2160ardb-fpga" },
 	{ .compatible = "kontron,sl28cpld" },
-	{ .compatible = "maxim,max5970", .data = &maxim_max5970},
-	{ .compatible = "maxim,max5978", .data = &maxim_max5970},
-	{ .compatible = "maxim,max77705-battery", .data = &maxim_mon_max77705},
-	{ .compatible = "silergy,sy7636a", .data = &silergy_sy7636a},
-	{ .compatible = "spacemit,p1", .data = &spacemit_p1, },
+	{ .compatible = "maxim,max5970", .data = &maxim_max5970 },
+	{ .compatible = "maxim,max5978", .data = &maxim_max5970 },
+	{ .compatible = "maxim,max77705-battery", .data = &maxim_mon_max77705 },
+	{ .compatible = "silergy,sy7636a", .data = &silergy_sy7636a },
+	{ .compatible = "spacemit,p1", .data = &spacemit_p1 },
 	{}
 };
 MODULE_DEVICE_TABLE(of, simple_mfd_i2c_of_match);

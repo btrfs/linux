@@ -6,6 +6,7 @@
 #include <asm/intel-family.h>
 #include <asm/apic.h>
 #include <asm/processor.h>
+#include <asm/cpuid/api.h>
 #include <asm/smp.h>
 
 #include "cpu.h"
@@ -15,6 +16,9 @@ EXPORT_SYMBOL_GPL(x86_topo_system);
 
 unsigned int __amd_nodes_per_pkg __ro_after_init;
 EXPORT_SYMBOL_GPL(__amd_nodes_per_pkg);
+
+/* CPUs which are the primary SMT threads */
+struct cpumask __cpu_primary_thread_mask __read_mostly;
 
 void topology_set_dom(struct topo_scan *tscan, enum x86_topology_domains dom,
 		      unsigned int shift, unsigned int ncpus)
@@ -38,8 +42,9 @@ enum x86_topology_cpu_type get_topology_cpu_type(struct cpuinfo_x86 *c)
 	}
 	if (c->x86_vendor == X86_VENDOR_AMD) {
 		switch (c->topo.amd_type) {
-		case 0:	return TOPO_CPU_TYPE_PERFORMANCE;
-		case 1:	return TOPO_CPU_TYPE_EFFICIENCY;
+		case AMD_CPU_TYPE_PERFORMANCE:	return TOPO_CPU_TYPE_PERFORMANCE;
+		case AMD_CPU_TYPE_EFFICIENCY:	return TOPO_CPU_TYPE_EFFICIENCY;
+		case AMD_CPU_TYPE_LOW_POWER:	return TOPO_CPU_TYPE_LOW_POWER;
 		}
 	}
 
@@ -53,12 +58,14 @@ const char *get_topology_cpu_type_name(struct cpuinfo_x86 *c)
 		return "performance";
 	case TOPO_CPU_TYPE_EFFICIENCY:
 		return "efficiency";
+	case TOPO_CPU_TYPE_LOW_POWER:
+		return "low_power";
 	default:
 		return "unknown";
 	}
 }
 
-static unsigned int __maybe_unused parse_num_cores_legacy(struct cpuinfo_x86 *c)
+static unsigned int parse_num_cores_legacy(struct cpuinfo_x86 *c)
 {
 	struct {
 		u32	cache_type	:  5,
@@ -154,8 +161,8 @@ static void parse_topology(struct topo_scan *tscan, bool early)
 
 	switch (c->x86_vendor) {
 	case X86_VENDOR_AMD:
-		if (IS_ENABLED(CONFIG_CPU_SUP_AMD))
-			cpu_parse_topology_amd(tscan);
+	case X86_VENDOR_HYGON:
+		cpu_parse_topology_amd(tscan);
 		break;
 	case X86_VENDOR_CENTAUR:
 	case X86_VENDOR_ZHAOXIN:
@@ -164,12 +171,12 @@ static void parse_topology(struct topo_scan *tscan, bool early)
 	case X86_VENDOR_INTEL:
 		if (!IS_ENABLED(CONFIG_CPU_SUP_INTEL) || !cpu_parse_topology_ext(tscan))
 			parse_legacy(tscan);
-		if (c->cpuid_level >= 0x1a)
-			c->topo.cpu_type = cpuid_eax(0x1a);
-		break;
-	case X86_VENDOR_HYGON:
-		if (IS_ENABLED(CONFIG_CPU_SUP_HYGON))
-			cpu_parse_topology_amd(tscan);
+
+		if (c->cpuid_level >= 0x1a) {
+			c->topo.hw_cpu_type = cpuid_eax(0x1a);
+			c->topo.cpu_type    = get_topology_cpu_type(c);
+		}
+
 		break;
 	}
 }

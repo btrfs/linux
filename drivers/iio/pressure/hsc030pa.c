@@ -13,7 +13,6 @@
 #include <linux/cleanup.h>
 #include <linux/init.h>
 #include <linux/math64.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/printk.h>
 #include <linux/property.h>
@@ -273,7 +272,7 @@ static const struct hsc_range_config hsc_range_config[HSC_VARIANTS_MAX] = {
  * @data: structure containing instantiated sensor data
  * Return: true only if both status bits are zero
  *
- * the two MSB from the first transfered byte contain a status code
+ * The two MSB from the first transferred byte contain a status code
  *   00 - normal operation, valid data
  *   01 - device in factory programming mode
  *   10 - stale data

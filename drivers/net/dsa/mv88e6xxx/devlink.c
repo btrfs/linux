@@ -91,6 +91,7 @@ void mv88e6xxx_teardown_devlink_params(struct dsa_switch *ds)
 }
 
 enum mv88e6xxx_devlink_resource_id {
+	MV88E6XXX_RESOURCE_ID_NONE,  /* DEVLINK_RESOURCE_ID_PARENT_TOP */
 	MV88E6XXX_RESOURCE_ID_ATU,
 	MV88E6XXX_RESOURCE_ID_ATU_BIN_0,
 	MV88E6XXX_RESOURCE_ID_ATU_BIN_1,
@@ -200,7 +201,7 @@ int mv88e6xxx_setup_devlink_resources(struct dsa_switch *ds)
 	err = dsa_devlink_resource_register(ds, "ATU_bin_0",
 					    mv88e6xxx_num_macs(chip) / 4,
 					    MV88E6XXX_RESOURCE_ID_ATU_BIN_0,
-					    MV88E6XXX_RESOURCE_ID_ATU,
+					    DEVLINK_RESOURCE_ID_PARENT_TOP,
 					    &size_params);
 	if (err)
 		goto out;
@@ -208,7 +209,7 @@ int mv88e6xxx_setup_devlink_resources(struct dsa_switch *ds)
 	err = dsa_devlink_resource_register(ds, "ATU_bin_1",
 					    mv88e6xxx_num_macs(chip) / 4,
 					    MV88E6XXX_RESOURCE_ID_ATU_BIN_1,
-					    MV88E6XXX_RESOURCE_ID_ATU,
+					    DEVLINK_RESOURCE_ID_PARENT_TOP,
 					    &size_params);
 	if (err)
 		goto out;
@@ -216,7 +217,7 @@ int mv88e6xxx_setup_devlink_resources(struct dsa_switch *ds)
 	err = dsa_devlink_resource_register(ds, "ATU_bin_2",
 					    mv88e6xxx_num_macs(chip) / 4,
 					    MV88E6XXX_RESOURCE_ID_ATU_BIN_2,
-					    MV88E6XXX_RESOURCE_ID_ATU,
+					    DEVLINK_RESOURCE_ID_PARENT_TOP,
 					    &size_params);
 	if (err)
 		goto out;
@@ -224,7 +225,7 @@ int mv88e6xxx_setup_devlink_resources(struct dsa_switch *ds)
 	err = dsa_devlink_resource_register(ds, "ATU_bin_3",
 					    mv88e6xxx_num_macs(chip) / 4,
 					    MV88E6XXX_RESOURCE_ID_ATU_BIN_3,
-					    MV88E6XXX_RESOURCE_ID_ATU,
+					    DEVLINK_RESOURCE_ID_PARENT_TOP,
 					    &size_params);
 	if (err)
 		goto out;
@@ -378,9 +379,8 @@ static int mv88e6xxx_region_atu_snapshot(struct devlink *dl,
 	struct mv88e6xxx_chip *chip = ds->priv;
 	int fid = -1, err = 0, count = 0;
 
-	table = kcalloc(mv88e6xxx_num_databases(chip),
-			sizeof(struct mv88e6xxx_devlink_atu_entry),
-			GFP_KERNEL);
+	table = kzalloc_objs(struct mv88e6xxx_devlink_atu_entry,
+			     mv88e6xxx_num_databases(chip));
 	if (!table)
 		return -ENOMEM;
 
@@ -440,9 +440,8 @@ static int mv88e6xxx_region_vtu_snapshot(struct devlink *dl,
 	struct mv88e6xxx_vtu_entry vlan;
 	int err;
 
-	table = kcalloc(mv88e6xxx_max_vid(chip) + 1,
-			sizeof(struct mv88e6xxx_devlink_vtu_entry),
-			GFP_KERNEL);
+	table = kzalloc_objs(struct mv88e6xxx_devlink_vtu_entry,
+			     mv88e6xxx_max_vid(chip) + 1);
 	if (!table)
 		return -ENOMEM;
 
@@ -523,9 +522,8 @@ static int mv88e6xxx_region_stu_snapshot(struct devlink *dl,
 	struct mv88e6xxx_stu_entry stu;
 	int err;
 
-	table = kcalloc(mv88e6xxx_max_sid(chip) + 1,
-			sizeof(struct mv88e6xxx_devlink_stu_entry),
-			GFP_KERNEL);
+	table = kzalloc_objs(struct mv88e6xxx_devlink_stu_entry,
+			     mv88e6xxx_max_sid(chip) + 1);
 	if (!table)
 		return -ENOMEM;
 

@@ -13,7 +13,7 @@ static int nvme_set_max_append(struct nvme_ctrl *ctrl)
 	struct nvme_id_ctrl_zns *id;
 	int status;
 
-	id = kzalloc(sizeof(*id), GFP_KERNEL);
+	id = kzalloc_obj(*id);
 	if (!id)
 		return -ENOMEM;
 
@@ -48,12 +48,12 @@ int nvme_query_zone_info(struct nvme_ns *ns, unsigned lbaf,
 			NVME_CMD_EFFECTS_CSUPP)) {
 		if (test_and_clear_bit(NVME_NS_FORCE_RO, &ns->flags))
 			dev_warn(ns->ctrl->device,
-				 "Zone Append supported for zoned namespace:%d. Remove read-only mode\n",
+				 "Zone Append supported for zoned namespace:%u. Remove read-only mode\n",
 				 ns->head->ns_id);
 	} else {
 		set_bit(NVME_NS_FORCE_RO, &ns->flags);
 		dev_warn(ns->ctrl->device,
-			 "Zone Append not supported for zoned namespace:%d. Forcing to read-only mode\n",
+			 "Zone Append not supported for zoned namespace:%u. Forcing to read-only mode\n",
 			 ns->head->ns_id);
 	}
 
@@ -64,7 +64,7 @@ int nvme_query_zone_info(struct nvme_ns *ns, unsigned lbaf,
 			return status;
 	}
 
-	id = kzalloc(sizeof(*id), GFP_KERNEL);
+	id = kzalloc_obj(*id);
 	if (!id)
 		return -ENOMEM;
 
@@ -148,14 +148,15 @@ static void *nvme_zns_alloc_report_buffer(struct nvme_ns *ns,
 
 static int nvme_zone_parse_entry(struct nvme_ns *ns,
 				 struct nvme_zone_descriptor *entry,
-				 unsigned int idx, report_zones_cb cb,
-				 void *data)
+				 unsigned int idx,
+				 struct blk_report_zones_args *args)
 {
 	struct nvme_ns_head *head = ns->head;
 	struct blk_zone zone = { };
 
 	if ((entry->zt & 0xf) != NVME_ZONE_TYPE_SEQWRITE_REQ) {
-		dev_err(ns->ctrl->device, "invalid zone type %#x\n", entry->zt);
+		dev_err(ns->ctrl->device, "invalid zone type %#x at zone %u\n",
+			entry->zt, idx);
 		return -EINVAL;
 	}
 
@@ -169,16 +170,16 @@ static int nvme_zone_parse_entry(struct nvme_ns *ns,
 	else
 		zone.wp = nvme_lba_to_sect(head, le64_to_cpu(entry->wp));
 
-	return cb(&zone, idx, data);
+	return disk_report_zone(ns->disk, &zone, idx, args);
 }
 
 int nvme_ns_report_zones(struct nvme_ns *ns, sector_t sector,
-		unsigned int nr_zones, report_zones_cb cb, void *data)
+		unsigned int nr_zones, struct blk_report_zones_args *args)
 {
 	struct nvme_zone_report *report;
 	struct nvme_command c = { };
 	int ret, zone_idx = 0;
-	unsigned int nz, i;
+	unsigned int max_in_buf, nz, i;
 	size_t buflen;
 
 	if (ns->head->ids.csi != NVME_CSI_ZNS)
@@ -187,6 +188,9 @@ int nvme_ns_report_zones(struct nvme_ns *ns, sector_t sector,
 	report = nvme_zns_alloc_report_buffer(ns, nr_zones, &buflen);
 	if (!report)
 		return -ENOMEM;
+
+	max_in_buf = (buflen - sizeof(struct nvme_zone_report)) /
+		sizeof(struct nvme_zone_descriptor);
 
 	c.zmr.opcode = nvme_cmd_zone_mgmt_recv;
 	c.zmr.nsid = cpu_to_le32(ns->head->ns_id);
@@ -207,13 +211,14 @@ int nvme_ns_report_zones(struct nvme_ns *ns, sector_t sector,
 			goto out_free;
 		}
 
-		nz = min((unsigned int)le64_to_cpu(report->nr_zones), nr_zones);
+		nz = min3((unsigned int)le64_to_cpu(report->nr_zones),
+			  nr_zones - zone_idx, max_in_buf);
 		if (!nz)
 			break;
 
 		for (i = 0; i < nz && zone_idx < nr_zones; i++) {
 			ret = nvme_zone_parse_entry(ns, &report->entries[i],
-						    zone_idx, cb, data);
+						    zone_idx, args);
 			if (ret)
 				goto out_free;
 			zone_idx++;
