@@ -15,6 +15,7 @@
 #ifdef HAVE_LIBBPF_SUPPORT
 #include <bpf/bpf.h>
 #include <bpf/btf.h>
+#include <bpf/libbpf.h>
 #endif
 #include <fcntl.h>
 #include <stdio.h>
@@ -91,7 +92,7 @@ static int slurp_symtab(bfd *abfd, struct a2l_data *a2l)
 	long storage;
 	long symcount;
 	asymbol **syms;
-	bfd_boolean dynamic = FALSE;
+	bool dynamic = false;
 
 	if ((bfd_get_file_flags(abfd) & HAS_SYMS) == 0)
 		return bfd_error(bfd_get_filename(abfd));
@@ -99,7 +100,7 @@ static int slurp_symtab(bfd *abfd, struct a2l_data *a2l)
 	storage = bfd_get_symtab_upper_bound(abfd);
 	if (storage == 0L) {
 		storage = bfd_get_dynamic_symtab_upper_bound(abfd);
-		dynamic = TRUE;
+		dynamic = true;
 	}
 	if (storage < 0L)
 		return bfd_error(bfd_get_filename(abfd));
@@ -233,7 +234,7 @@ int libbfd__addr2line(const char *dso_name, u64 addr,
 	}
 
 	if (a2l == NULL) {
-		if (!symbol_conf.disable_add2line_warn)
+		if (!symbol_conf.addr2line_disable_warn)
 			pr_warning("addr2line_init failed for %s\n", dso_name);
 		return 0;
 	}
@@ -418,13 +419,20 @@ out_close:
 	return err;
 }
 
-int libbfd__read_build_id(const char *filename, struct build_id *bid, bool block)
+int libbfd__read_build_id(const char *filename, struct build_id *bid)
 {
 	size_t size = sizeof(bid->data);
 	int err = -1, fd;
 	bfd *abfd;
 
-	fd = open(filename, block ? O_RDONLY : (O_RDONLY | O_NONBLOCK));
+	if (!filename)
+		return -EFAULT;
+
+	errno = 0;
+	if (!is_regular_file(filename))
+		return errno == 0 ? -EWOULDBLOCK : -errno;
+
+	fd = open(filename, O_RDONLY);
 	if (fd < 0)
 		return -1;
 
@@ -494,7 +502,7 @@ int symbol__disassemble_bpf_libbfd(struct symbol *sym __maybe_unused,
 	struct bpf_prog_info_node *info_node;
 	int len = sym->end - sym->start;
 	disassembler_ftype disassemble;
-	struct map *map = args->ms.map;
+	struct map *map = args->ms->map;
 	struct perf_bpil *info_linear;
 	struct disassemble_info info;
 	struct dso *dso = map__dso(map);
@@ -503,7 +511,7 @@ int symbol__disassemble_bpf_libbfd(struct symbol *sym __maybe_unused,
 	char tpath[PATH_MAX];
 	size_t buf_size;
 	int nr_skip = 0;
-	char *buf;
+	char *buf = NULL;
 	bfd *bfdf;
 	int ret;
 	FILE *s;
@@ -545,6 +553,11 @@ int symbol__disassemble_bpf_libbfd(struct symbol *sym __maybe_unused,
 	info_linear = info_node->info_linear;
 	sub_id = dso__bpf_prog(dso)->sub_id;
 
+	/* jited_prog_insns is only valid if bpil_offs_to_addr() converted it */
+	if (!(info_linear->arrays & (1UL << PERF_BPIL_JITED_INSNS))) {
+		ret = SYMBOL_ANNOTATE_ERRNO__BPF_MISSING_BTF;
+		goto out;
+	}
 	info.buffer = (void *)(uintptr_t)(info_linear->info.jited_prog_insns);
 	info.buffer_length = info_linear->info.jited_prog_len;
 
@@ -574,6 +587,12 @@ int symbol__disassemble_bpf_libbfd(struct symbol *sym __maybe_unused,
 	if (disassemble == NULL)
 		abort();
 
+	/* jited_ksyms is only valid if bpil_offs_to_addr() converted it */
+	if (!(info_linear->arrays & (1UL << PERF_BPIL_JITED_KSYMS))) {
+		ret = SYMBOL_ANNOTATE_ERRNO__BPF_MISSING_BTF;
+		goto out;
+	}
+
 	fflush(s);
 	do {
 		const struct bpf_line_info *linfo = NULL;
@@ -602,10 +621,10 @@ int symbol__disassemble_bpf_libbfd(struct symbol *sym __maybe_unused,
 
 		if (!annotate_opts.hide_src_code && srcline) {
 			args->offset = -1;
-			args->line = strdup(srcline);
+			args->line = (char *)srcline;
 			args->line_nr = 0;
 			args->fileloc = NULL;
-			args->ms.sym  = sym;
+			args->ms->sym = sym;
 			dl = disasm_line__new(args);
 			if (dl) {
 				annotation_line__add(&dl->al,
@@ -617,7 +636,7 @@ int symbol__disassemble_bpf_libbfd(struct symbol *sym __maybe_unused,
 		args->line = buf + prev_buf_size;
 		args->line_nr = 0;
 		args->fileloc = NULL;
-		args->ms.sym  = sym;
+		args->ms->sym = sym;
 		dl = disasm_line__new(args);
 		if (dl)
 			annotation_line__add(&dl->al, &notes->src->source);
@@ -627,9 +646,12 @@ int symbol__disassemble_bpf_libbfd(struct symbol *sym __maybe_unused,
 
 	ret = 0;
 out:
-	free(prog_linfo);
+	bpf_prog_linfo__free(prog_linfo);
 	btf__free(btf);
-	fclose(s);
+	if (s) {
+		fclose(s);
+		free(buf);
+	}
 	bfd_close(bfdf);
 	return ret;
 #else

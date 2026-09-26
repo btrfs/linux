@@ -175,10 +175,6 @@
 #define LMK04832_REG_RB_HOLDOVER	0x188
 #define LMK04832_REG_SPI_LOCK		0x555
 
-enum lmk04832_device_types {
-	LMK04832,
-};
-
 /**
  * struct lmk04832_device_info - Holds static device information that is
  *                               specific to the chip revision
@@ -197,14 +193,12 @@ struct lmk04832_device_info {
 	unsigned int vco1_range[2];
 };
 
-static const struct lmk04832_device_info lmk04832_device_info[] = {
-	[LMK04832] = {
-		.pid = 0x63d1, /* WARNING PROD_ID is inverted in the datasheet */
-		.maskrev = 0x70,
-		.num_channels = 14,
-		.vco0_range = { 2440, 2580 },
-		.vco1_range = { 2945, 3255 },
-	},
+static const struct lmk04832_device_info lmk04832_device_info = {
+	.pid = 0x63d1, /* WARNING PROD_ID is inverted in the datasheet */
+	.maskrev = 0x70,
+	.num_channels = 14,
+	.vco0_range = { 2440, 2580 },
+	.vco1_range = { 2945, 3255 },
 };
 
 enum lmk04832_rdbk_type {
@@ -422,11 +416,10 @@ static unsigned long lmk04832_vco_recalc_rate(struct clk_hw *hw,
  */
 static int lmk04832_check_vco_ranges(struct lmk04832 *lmk, unsigned long rate)
 {
-	struct spi_device *spi = to_spi_device(lmk->dev);
 	const struct lmk04832_device_info *info;
 	unsigned long mhz = rate / 1000000;
 
-	info = &lmk04832_device_info[spi_get_device_id(spi)->driver_data];
+	info = &lmk04832_device_info;
 
 	if (mhz >= info->vco0_range[0] && mhz <= info->vco0_range[1])
 		return LMK04832_VAL_VCO_MUX_VCO0;
@@ -822,13 +815,6 @@ static int lmk04832_sclk_sync_sequence(struct lmk04832 *lmk)
 	if (ret)
 		return ret;
 
-	ret = regmap_update_bits(lmk->regmap, LMK04832_REG_SYNC,
-				 LMK04832_BIT_SYNC_MODE,
-				 FIELD_PREP(LMK04832_BIT_SYNC_MODE,
-					    lmk->sync_mode));
-	if (ret)
-		return ret;
-
 	/*
 	 * 9. (optional) if SCLKx_y_DIS_MODE was used to mute SYSREF outputs
 	 *    during the SYNC event, restore SCLKx_y_DIS_MODE=0 for active state,
@@ -843,7 +829,10 @@ static int lmk04832_sclk_sync_sequence(struct lmk04832 *lmk)
 	 *     SYNC pulse to delay the output by some number of VCO counts).
 	 */
 
-	return ret;
+	return regmap_update_bits(lmk->regmap, LMK04832_REG_SYNC,
+				  LMK04832_BIT_SYNC_MODE,
+				  FIELD_PREP(LMK04832_BIT_SYNC_MODE,
+					     lmk->sync_mode));
 }
 
 static int lmk04832_sclk_is_enabled(struct clk_hw *hw)
@@ -1400,13 +1389,12 @@ static int lmk04832_probe(struct spi_device *spi)
 {
 	const struct lmk04832_device_info *info;
 	int rdbk_pin = RDBK_CLKIN_SEL1;
-	struct device_node *child;
 	struct lmk04832 *lmk;
 	u8 tmp[3];
 	int ret;
 	int i;
 
-	info = &lmk04832_device_info[spi_get_device_id(spi)->driver_data];
+	info = &lmk04832_device_info;
 
 	lmk = devm_kzalloc(&spi->dev, sizeof(struct lmk04832), GFP_KERNEL);
 	if (!lmk)
@@ -1462,14 +1450,13 @@ static int lmk04832_probe(struct spi_device *spi)
 	device_property_read_u32(lmk->dev, "ti,sysref-pulse-count",
 				 &lmk->sysref_pulse_cnt);
 
-	for_each_child_of_node(lmk->dev->of_node, child) {
+	for_each_child_of_node_scoped(lmk->dev->of_node, child) {
 		int reg;
 
 		ret = of_property_read_u32(child, "reg", &reg);
 		if (ret) {
 			dev_err(lmk->dev, "missing reg property in child: %s\n",
 				child->full_name);
-			of_node_put(child);
 			return ret;
 		}
 
@@ -1555,8 +1542,8 @@ static int lmk04832_probe(struct spi_device *spi)
 }
 
 static const struct spi_device_id lmk04832_id[] = {
-	{ "lmk04832", LMK04832 },
-	{}
+	{ .name = "lmk04832" },
+	{ }
 };
 MODULE_DEVICE_TABLE(spi, lmk04832_id);
 

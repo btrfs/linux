@@ -16,7 +16,6 @@
 #include <linux/device.h>
 #include <linux/io.h>
 #include <linux/init.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
 #include <linux/property.h>
@@ -285,7 +284,7 @@ static int ni16550_probe(struct platform_device *pdev)
 	bool rs232_property;
 	int ret;
 
-	uart = kzalloc(sizeof(*uart), GFP_KERNEL);
+	uart = kzalloc_obj(*uart);
 	if (!uart)
 		return -ENOMEM;
 

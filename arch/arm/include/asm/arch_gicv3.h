@@ -7,7 +7,7 @@
 #ifndef __ASM_ARCH_GICV3_H
 #define __ASM_ARCH_GICV3_H
 
-#ifndef __ASSEMBLY__
+#ifndef __ASSEMBLER__
 
 #include <linux/io.h>
 #include <linux/io-64-nonatomic-lo-hi.h>
@@ -246,16 +246,12 @@ static inline void gic_pmr_mask_irqs(void)
 	WARN_ON_ONCE(true);
 }
 
-static inline void gic_arch_enable_irqs(void)
-{
-	/* Should not get called. */
-	WARN_ON_ONCE(true);
-}
+static inline void gic_unmask_pnmis(void) {}
 
 static inline bool gic_has_relaxed_pmr_sync(void)
 {
 	return false;
 }
 
-#endif /* !__ASSEMBLY__ */
+#endif /* !__ASSEMBLER__ */
 #endif /* !__ASM_ARCH_GICV3_H */

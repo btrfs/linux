@@ -108,7 +108,7 @@ static int rk_jack_event(struct notifier_block *nb, unsigned long event,
 			 void *data)
 {
 	struct snd_soc_jack *jack = (struct snd_soc_jack *)data;
-	struct snd_soc_dapm_context *dapm = &jack->card->dapm;
+	struct snd_soc_dapm_context *dapm = snd_soc_card_to_dapm(jack->card);
 
 	if (event & SND_JACK_MICROPHONE) {
 		snd_soc_dapm_force_enable_pin(dapm, "MICBIAS");
@@ -428,11 +428,8 @@ static int snd_rk_mc_probe(struct platform_device *pdev)
 
 	/* Parse card name. */
 	ret = snd_soc_of_parse_card_name(card, "rockchip,model");
-	if (ret) {
-		dev_err(&pdev->dev,
-			"Soc parse card name failed %d\n", ret);
+	if (ret)
 		return ret;
-	}
 
 	/* register the soc card */
 	ret = devm_snd_soc_register_card(&pdev->dev, card);

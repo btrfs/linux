@@ -53,35 +53,35 @@ int mismatch_map(struct pt_regs *args)
 	work = bpf_map_lookup_elem(&arrmap, &key);
 	if (!work)
 		return 0;
-	bpf_task_work_schedule_resume_impl(task, &work->tw, &hmap, process_work, NULL);
+	bpf_task_work_schedule_resume(task, &work->tw, &hmap, process_work);
 	return 0;
 }
 
 SEC("perf_event")
-__failure __msg("arg#1 doesn't point to a map value")
+__failure __msg("R2 doesn't point to a map value")
 int no_map_task_work(struct pt_regs *args)
 {
 	struct task_struct *task;
 	struct bpf_task_work tw;
 
 	task = bpf_get_current_task_btf();
-	bpf_task_work_schedule_resume_impl(task, &tw, &hmap, process_work, NULL);
+	bpf_task_work_schedule_resume(task, &tw, &hmap, process_work);
 	return 0;
 }
 
 SEC("perf_event")
-__failure __msg("Possibly NULL pointer passed to trusted arg1")
+__failure __msg("Possibly NULL pointer passed to trusted R2")
 int task_work_null(struct pt_regs *args)
 {
 	struct task_struct *task;
 
 	task = bpf_get_current_task_btf();
-	bpf_task_work_schedule_resume_impl(task, NULL, &hmap, process_work, NULL);
+	bpf_task_work_schedule_resume(task, NULL, &hmap, process_work);
 	return 0;
 }
 
 SEC("perf_event")
-__failure __msg("Possibly NULL pointer passed to trusted arg2")
+__failure __msg("Possibly NULL pointer passed to trusted R3")
 int map_null(struct pt_regs *args)
 {
 	struct elem *work;
@@ -91,6 +91,6 @@ int map_null(struct pt_regs *args)
 	work = bpf_map_lookup_elem(&arrmap, &key);
 	if (!work)
 		return 0;
-	bpf_task_work_schedule_resume_impl(task, &work->tw, NULL, process_work, NULL);
+	bpf_task_work_schedule_resume(task, &work->tw, NULL, process_work);
 	return 0;
 }

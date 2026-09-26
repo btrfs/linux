@@ -7,7 +7,6 @@
  * Authors: Tim Howe <Tim.Howe@cirrus.com>
  */
 
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/moduleparam.h>
 #include <linux/kernel.h>
@@ -341,7 +340,13 @@ static int cs4349_runtime_resume(struct device *dev)
 	gpiod_set_value_cansleep(cs4349->reset_gpio, 1);
 
 	regcache_cache_only(cs4349->regmap, false);
-	regcache_sync(cs4349->regmap);
+	ret = regcache_sync(cs4349->regmap);
+	if (ret) {
+		regcache_cache_only(cs4349->regmap, true);
+		regcache_mark_dirty(cs4349->regmap);
+		gpiod_set_value_cansleep(cs4349->reset_gpio, 0);
+		return ret;
+	}
 
 	return 0;
 }
@@ -358,8 +363,8 @@ static const struct of_device_id cs4349_of_match[] = {
 MODULE_DEVICE_TABLE(of, cs4349_of_match);
 
 static const struct i2c_device_id cs4349_i2c_id[] = {
-	{"cs4349"},
-	{}
+	{ .name = "cs4349" },
+	{ }
 };
 
 MODULE_DEVICE_TABLE(i2c, cs4349_i2c_id);

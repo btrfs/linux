@@ -187,7 +187,9 @@
 /* Rn - imm12; set condition flags */
 #define A64_CMP_I(sf, Rn, imm12) A64_SUBS_I(sf, A64_ZR, Rn, imm12)
 /* Rd = Rn */
-#define A64_MOV(sf, Rd, Rn) A64_ADD_I(sf, Rd, Rn, 0)
+#define A64_MOV(sf, Rd, Rn) \
+	(((Rd) == A64_SP || (Rn) == A64_SP) ? A64_ADD_I(sf, Rd, Rn, 0) : \
+	 aarch64_insn_gen_move_reg(Rd, Rn, A64_VARIANT(sf)))
 
 /* Bitfield move */
 #define A64_BITFIELD(sf, Rd, Rn, immr, imms, type) \
@@ -240,6 +242,17 @@
 #define A64_NEG(sf, Rd, Rm) A64_SUB(sf, Rd, A64_ZR, Rm)
 /* Rn - Rm; set condition flags */
 #define A64_CMP(sf, Rn, Rm) A64_SUBS(sf, A64_ZR, Rn, Rm)
+
+/* Add/subtract (extended register) */
+#define A64_ADDSUB_EREG(sf, Rd, Rn, Rm, ext, shift, type) \
+	aarch64_insn_gen_add_sub_extended_reg(Rd, Rn, Rm, \
+		AARCH64_INSN_EXTEND_##ext, shift, A64_VARIANT(sf), \
+		AARCH64_INSN_ADSB_##type)
+/* Rd = Rn + (EXT(Rm) << shift) */
+#define A64_ADD_EXT(sf, Rd, Rn, Rm, ext, shift) \
+	A64_ADDSUB_EREG(sf, Rd, Rn, Rm, ext, shift, ADD)
+/* Rd = Rn + (u32)Rm */
+#define A64_ADD_UXTW(Rd, Rn, Rm) A64_ADD_EXT(1, Rd, Rn, Rm, UXTW, 0)
 
 /* Data-processing (1 source) */
 #define A64_DATA1(sf, Rd, Rn, type) aarch64_insn_gen_data1(Rd, Rn, \

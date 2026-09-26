@@ -19,8 +19,11 @@
 #include <errno.h>
 #include <unistd.h>
 #include <fcntl.h>
-#include <sys/mman.h>
 #include "kselftest.h"
+
+#include <linux/mman.h>
+#include <linux/types.h>
+#include <linux/stringify.h>
 
 #define msecs_to_usecs(msec)    ((msec) * 1000ULL)
 
@@ -99,38 +102,41 @@ do {										\
 
 size_t parse_size(const char *size);
 
-int64_t timespec_to_ns(struct timespec ts);
-struct timespec timespec_add_ns(struct timespec ts, int64_t ns);
+s64 timespec_to_ns(struct timespec ts);
+struct timespec timespec_add_ns(struct timespec ts, s64 ns);
 struct timespec timespec_add(struct timespec ts1, struct timespec ts2);
 struct timespec timespec_sub(struct timespec ts1, struct timespec ts2);
 struct timespec timespec_elapsed(struct timespec start);
 struct timespec timespec_div(struct timespec ts, int divisor);
 
-struct guest_random_state {
-	uint32_t seed;
+struct kvm_random_state {
+	u32 seed;
 };
 
-extern uint32_t guest_random_seed;
-extern struct guest_random_state guest_rng;
+extern u32 kvm_random_seed;
+extern struct kvm_random_state kvm_rng;
 
-struct guest_random_state new_guest_random_state(uint32_t seed);
-uint32_t guest_random_u32(struct guest_random_state *state);
+struct kvm_random_state new_kvm_random_state(u32 seed);
+u32 kvm_random_u32(struct kvm_random_state *state);
 
-static inline bool __guest_random_bool(struct guest_random_state *state,
-				       uint8_t percent)
+static inline bool __kvm_random_bool(struct kvm_random_state *state,
+				       u8 percent)
 {
-	return (guest_random_u32(state) % 100) < percent;
+	return (kvm_random_u32(state) % 100) < percent;
 }
 
-static inline bool guest_random_bool(struct guest_random_state *state)
+static inline bool kvm_random_bool(struct kvm_random_state *state)
 {
-	return __guest_random_bool(state, 50);
+	return __kvm_random_bool(state, 50);
 }
 
-static inline uint64_t guest_random_u64(struct guest_random_state *state)
+static inline u64 kvm_random_u64(struct kvm_random_state *state)
 {
-	return ((uint64_t)guest_random_u32(state) << 32) | guest_random_u32(state);
+	return ((u64)kvm_random_u32(state) << 32) | kvm_random_u32(state);
 }
+
+u32 kvm_random_u32_in_range(struct kvm_random_state *state, u32 min, u32 max);
+u64 kvm_random_u64_in_range(struct kvm_random_state *state, u64 min, u64 max);
 
 enum vm_mem_backing_src_type {
 	VM_MEM_SRC_ANONYMOUS,
@@ -158,7 +164,7 @@ enum vm_mem_backing_src_type {
 
 struct vm_mem_backing_src_alias {
 	const char *name;
-	uint32_t flag;
+	u32 flag;
 };
 
 #define MIN_RUN_DELAY_NS	200000UL
@@ -166,9 +172,9 @@ struct vm_mem_backing_src_alias {
 bool thp_configured(void);
 size_t get_trans_hugepagesz(void);
 size_t get_def_hugetlb_pagesz(void);
-const struct vm_mem_backing_src_alias *vm_mem_backing_src_alias(uint32_t i);
-size_t get_backing_src_pagesz(uint32_t i);
-bool is_backing_src_hugetlb(uint32_t i);
+const struct vm_mem_backing_src_alias *vm_mem_backing_src_alias(u32 i);
+size_t get_backing_src_pagesz(u32 i);
+bool is_backing_src_hugetlb(u32 i);
 void backing_src_help(const char *flag);
 enum vm_mem_backing_src_type parse_backing_src_type(const char *type_name);
 long get_run_delay(void);
@@ -189,18 +195,18 @@ static inline bool backing_src_can_be_huge(enum vm_mem_backing_src_type t)
 }
 
 /* Aligns x up to the next multiple of size. Size must be a power of 2. */
-static inline uint64_t align_up(uint64_t x, uint64_t size)
+static inline u64 align_up(u64 x, u64 size)
 {
-	uint64_t mask = size - 1;
+	u64 mask = size - 1;
 
 	TEST_ASSERT(size != 0 && !(size & (size - 1)),
 		    "size not a power of 2: %lu", size);
 	return ((x + mask) & ~mask);
 }
 
-static inline uint64_t align_down(uint64_t x, uint64_t size)
+static inline u64 align_down(u64 x, u64 size)
 {
-	uint64_t x_aligned_up = align_up(x, size);
+	u64 x_aligned_up = align_up(x, size);
 
 	if (x == x_aligned_up)
 		return x;
@@ -215,7 +221,7 @@ static inline void *align_ptr_up(void *x, size_t size)
 
 int atoi_paranoid(const char *num_str);
 
-static inline uint32_t atoi_positive(const char *name, const char *num_str)
+static inline u32 atoi_positive(const char *name, const char *num_str)
 {
 	int num = atoi_paranoid(num_str);
 
@@ -223,7 +229,7 @@ static inline uint32_t atoi_positive(const char *name, const char *num_str)
 	return num;
 }
 
-static inline uint32_t atoi_non_negative(const char *name, const char *num_str)
+static inline u32 atoi_non_negative(const char *name, const char *num_str)
 {
 	int num = atoi_paranoid(num_str);
 
