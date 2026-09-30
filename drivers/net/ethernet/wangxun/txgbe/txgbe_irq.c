@@ -23,7 +23,7 @@ void txgbe_irq_enable(struct wx *wx, bool queues)
 {
 	u32 misc_ien = TXGBE_PX_MISC_IEN_MASK;
 
-	if (wx->mac.type == wx_mac_aml) {
+	if (wx->mac.type != wx_mac_sp) {
 		misc_ien |= TXGBE_PX_MISC_GPIO;
 		txgbe_gpio_init_aml(wx);
 	}
@@ -141,7 +141,7 @@ static irqreturn_t txgbe_misc_irq_handle(int irq, void *data)
 		/* shared interrupt alert!
 		 * the interrupt that we masked before the ICR read.
 		 */
-		if (netif_running(wx->netdev))
+		if (!test_bit(WX_STATE_DOWN, wx->state))
 			txgbe_irq_enable(wx, true);
 		return IRQ_NONE;        /* Not our interrupt */
 	}
@@ -164,6 +164,7 @@ static irqreturn_t txgbe_misc_irq_thread_fn(int irq, void *data)
 	struct wx *wx = txgbe->wx;
 	unsigned int nhandled = 0;
 	unsigned int sub_irq;
+	u64 misc_mask;
 	u32 eicr;
 
 	eicr = txgbe->eicr;
@@ -183,7 +184,9 @@ static irqreturn_t txgbe_misc_irq_thread_fn(int irq, void *data)
 		nhandled++;
 	}
 
-	wx_intr_enable(wx, TXGBE_INTR_MISC(wx));
+	misc_mask = wx->pdev->msix_enabled ? TXGBE_INTR_MISC(wx) : BIT(0);
+	if (!test_bit(WX_STATE_DOWN, wx->state))
+		wx_intr_enable(wx, misc_mask);
 	return (nhandled > 0 ? IRQ_HANDLED : IRQ_NONE);
 }
 
@@ -201,10 +204,7 @@ static void txgbe_del_irq_domain(struct txgbe *txgbe)
 
 void txgbe_free_misc_irq(struct txgbe *txgbe)
 {
-	if (txgbe->wx->mac.type == wx_mac_aml40)
-		return;
-
-	if (txgbe->wx->mac.type == wx_mac_aml)
+	if (txgbe->wx->mac.type != wx_mac_sp)
 		free_irq(txgbe->gpio_irq, txgbe);
 
 	free_irq(txgbe->link_irq, txgbe);
@@ -218,9 +218,6 @@ int txgbe_setup_misc_irq(struct txgbe *txgbe)
 	unsigned long flags = IRQF_ONESHOT;
 	struct wx *wx = txgbe->wx;
 	int hwirq, err;
-
-	if (wx->mac.type == wx_mac_aml40)
-		goto skip_sp_irq;
 
 	txgbe->misc.nirqs = TXGBE_IRQ_MAX;
 	txgbe->misc.domain = irq_domain_create_simple(NULL, txgbe->misc.nirqs, 0,

@@ -3,7 +3,7 @@
  * Copyright (c) 2020-2024 Oracle.  All Rights Reserved.
  * Author: Darrick J. Wong <djwong@kernel.org>
  */
-#include "xfs.h"
+#include "xfs_platform.h"
 #include "xfs_fs.h"
 #include "xfs_shared.h"
 #include "xfs_format.h"
@@ -91,7 +91,7 @@ xrep_rtsummary_prep_buf(
 		struct xfs_rtbuf_blkinfo	*hdr = bp->b_addr;
 
 		hdr->rt_magic = cpu_to_be32(XFS_RTSUMMARY_MAGIC);
-		hdr->rt_owner = cpu_to_be64(sc->ip->i_ino);
+		hdr->rt_owner = cpu_to_be64(I_INO(sc->ip));
 		hdr->rt_blkno = cpu_to_be64(xfs_buf_daddr(bp));
 		hdr->rt_lsn = 0;
 		uuid_copy(&hdr->rt_uuid, &sc->mp->m_sb.sb_meta_uuid);
@@ -164,9 +164,10 @@ xrep_rtsummary(
 	/*
 	 * Now exchange the contents.  Nothing in repair uses the temporary
 	 * buffer, so we can reuse it for the tempfile exchrange information.
+	 * Use XFS_MAX_FILEOFF here so that we correct the rtsummary file size.
 	 */
 	error = xrep_tempexch_trans_reserve(sc, XFS_DATA_FORK, 0,
-			rts->rsumblocks, &rts->tempexch);
+			XFS_MAX_FILEOFF, &rts->tempexch);
 	if (error)
 		return error;
 

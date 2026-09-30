@@ -227,8 +227,8 @@ void dpp2_cm_set_gamut_remap(
 		for (i = 0; i < 12; i++)
 			arr_matrix[i] = adjust->temperature_matrix[i];
 
-		convert_float_matrix(
-			arr_reg_val, arr_matrix, 12);
+		convert_float_matrix(arr_reg_val, arr_matrix,
+			CM_GAMUT_REMAP_COEF_FORMAT_S2_13, 12);
 
 		program_gamut_remap(dpp, arr_reg_val, DCN2_GAMUT_REMAP_COEF_A);
 	}
@@ -285,8 +285,8 @@ void dpp2_cm_get_gamut_remap(struct dpp *dpp_base,
 	}
 
 	adjust->gamut_adjust_type = GRAPHICS_GAMUT_ADJUST_TYPE_SW;
-	convert_hw_matrix(adjust->temperature_matrix,
-			  arr_reg_val, ARRAY_SIZE(arr_reg_val));
+	convert_hw_matrix(adjust->temperature_matrix, arr_reg_val,
+			CM_GAMUT_REMAP_COEF_FORMAT_S2_13, ARRAY_SIZE(arr_reg_val));
 }
 
 void dpp2_program_input_csc(
@@ -1016,6 +1016,7 @@ static void dpp20_set_3dlut_mode(
 		bool is_color_channel_12bits,
 		bool is_lut_size17x17x17)
 {
+	(void)is_color_channel_12bits;
 	uint32_t lut_mode;
 	struct dcn20_dpp *dpp = TO_DCN20_DPP(dpp_base);
 

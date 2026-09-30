@@ -15,7 +15,17 @@ config SND_SOC_AMD_ACP_COMMON
 
 config SND_SOC_ACPI_AMD_MATCH
 	tristate
-	select SND_SOC_ACPI if ACPI
+        select SND_SOC_ACPI if ACPI
+
+config SND_SOC_ACPI_AMD_SDCA_QUIRKS
+	bool "AMD ACPI SDCA quirks"
+	depends on SND_SOC_ACPI_AMD_MATCH
+	depends on SND_SOC_SDCA
+	depends on SND_SOC_ACPI_AMD_MATCH = m || SND_SOC_SDCA = y
+	default y
+	help
+	  Enable SDCA quirk support for AMD ACPI match tables.
+	  This is compiled into the snd-soc-acpi-amd-match module.
 
 if SND_SOC_AMD_ACP_COMMON
 
@@ -104,7 +114,6 @@ config SND_AMD_ASOC_ACP70
 config SND_SOC_AMD_MACH_COMMON
 	tristate
 	depends on X86 && PCI && I2C
-	select CLK_FIXED_FCH
 	select SND_SOC_RT5682_I2C
 	select SND_SOC_DMIC
 	select SND_SOC_RT1019

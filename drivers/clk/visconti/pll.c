@@ -21,9 +21,9 @@ struct visconti_pll {
 	void __iomem	*pll_base;
 	spinlock_t	*lock;
 	unsigned long flags;
-	const struct visconti_pll_rate_table *rate_table;
 	size_t rate_count;
 	struct visconti_pll_provider *ctx;
+	struct visconti_pll_rate_table rate_table[] __counted_by(rate_count);
 };
 
 #define PLL_CONF_REG		0x0000
@@ -249,15 +249,11 @@ static struct clk_hw *visconti_register_pll(struct visconti_pll_provider *ctx,
 					    const struct visconti_pll_rate_table *rate_table,
 					    spinlock_t *lock)
 {
-	struct clk_init_data init;
+	struct clk_init_data init = {};
 	struct visconti_pll *pll;
 	struct clk_hw *pll_hw_clk;
 	size_t len;
 	int ret;
-
-	pll = kzalloc(sizeof(*pll), GFP_KERNEL);
-	if (!pll)
-		return ERR_PTR(-ENOMEM);
 
 	init.name = name;
 	init.flags = CLK_IGNORE_UNUSED;
@@ -266,11 +262,13 @@ static struct clk_hw *visconti_register_pll(struct visconti_pll_provider *ctx,
 
 	for (len = 0; rate_table[len].rate != 0; )
 		len++;
+
+	pll = kzalloc_flex(*pll, rate_table, len);
+	if (!pll)
+		return ERR_PTR(-ENOMEM);
+
 	pll->rate_count = len;
-	pll->rate_table = kmemdup_array(rate_table,
-					pll->rate_count, sizeof(*pll->rate_table),
-					GFP_KERNEL);
-	WARN(!pll->rate_table, "%s: could not allocate rate table for %s\n", __func__, name);
+	memcpy(pll->rate_table, rate_table, len * sizeof(*pll->rate_table));
 
 	init.ops = &visconti_pll_ops;
 	pll->hw.init = &init;
@@ -282,7 +280,6 @@ static struct clk_hw *visconti_register_pll(struct visconti_pll_provider *ctx,
 	ret = clk_hw_register(NULL, &pll->hw);
 	if (ret) {
 		pr_err("failed to register pll clock %s : %d\n", name, ret);
-		kfree(pll->rate_table);
 		kfree(pll);
 		pll_hw_clk = ERR_PTR(ret);
 	}
@@ -330,7 +327,7 @@ struct visconti_pll_provider * __init visconti_init_pll(struct device_node *np,
 	struct visconti_pll_provider *ctx;
 	int i;
 
-	ctx = kzalloc(struct_size(ctx, clk_data.hws, nr_plls), GFP_KERNEL);
+	ctx = kzalloc_flex(*ctx, clk_data.hws, nr_plls);
 	if (!ctx)
 		return ERR_PTR(-ENOMEM);
 

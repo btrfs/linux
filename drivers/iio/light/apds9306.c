@@ -168,7 +168,6 @@ struct apds9306_regfields {
  *         respectively.
  * @regmap: Regmap structure pointer
  * @rf: Regmap register fields structure
- * @nlux_per_count: Nano lux per ADC count for a particular model
  * @read_data_available: Flag set by IRQ handler for ADC data available
  */
 struct apds9306_data {
@@ -180,7 +179,6 @@ struct apds9306_data {
 	struct regmap *regmap;
 	struct apds9306_regfields rf;
 
-	int nlux_per_count;
 	int read_data_available;
 };
 
@@ -350,7 +348,7 @@ static const struct regmap_config apds9306_regmap = {
 	.volatile_table = &apds9306_volatile_table,
 	.precious_table = &apds9306_precious_table,
 	.max_register = APDS9306_ALS_THRES_VAR_REG,
-	.cache_type = REGCACHE_RBTREE,
+	.cache_type = REGCACHE_MAPLE,
 };
 
 static const struct reg_field apds9306_rf_sw_reset =
@@ -471,9 +469,9 @@ static int apds9306_read_data(struct apds9306_data *data, int *val, int reg)
 	int status = 0;
 	u8 buff[3];
 
-	ret = pm_runtime_resume_and_get(data->dev);
-	if (ret)
-		return ret;
+	PM_RUNTIME_ACQUIRE_AUTOSUSPEND(data->dev, pm);
+	if (PM_RUNTIME_ACQUIRE_ERR(&pm))
+		return PM_RUNTIME_ACQUIRE_ERR(&pm);
 
 	ret = regmap_field_read(rf->intg_time, &intg_time_idx);
 	if (ret)
@@ -536,8 +534,6 @@ static int apds9306_read_data(struct apds9306_data *data, int *val, int reg)
 	}
 
 	*val = get_unaligned_le24(&buff);
-
-	pm_runtime_put_autosuspend(data->dev);
 
 	return 0;
 }
@@ -1176,7 +1172,7 @@ static int apds9306_init_iio_gts(struct apds9306_data *data)
 
 static void apds9306_powerdown(void *ptr)
 {
-	struct apds9306_data *data = (struct apds9306_data *)ptr;
+	struct apds9306_data *data = ptr;
 	struct apds9306_regfields *rf = &data->rf;
 	int ret;
 
@@ -1288,8 +1284,7 @@ static int apds9306_probe(struct i2c_client *client)
 						apds9306_irq_handler, IRQF_ONESHOT,
 						"apds9306_event", indio_dev);
 		if (ret)
-			return dev_err_probe(dev, ret,
-					     "failed to assign interrupt.\n");
+			return ret;
 	} else {
 		indio_dev->info = &apds9306_info_no_events;
 		indio_dev->channels = apds9306_channels_without_events;

@@ -8,8 +8,8 @@
 #include <asm/cmpxchg.h>
 #include <asm/march.h>
 
-/* We use the MSB mostly because its available */
-#define PREEMPT_NEED_RESCHED	0x80000000
+/* Use MSB for PREEMPT_NEED_RESCHED mostly because it is available. */
+#define PREEMPT_NEED_RESCHED	0x8000000000000000UL
 
 /*
  * We use the PREEMPT_NEED_RESCHED bit as an inverted NEED_RESCHED such
@@ -23,12 +23,25 @@
  */
 static __always_inline int preempt_count(void)
 {
-	return READ_ONCE(get_lowcore()->preempt_count) & ~PREEMPT_NEED_RESCHED;
+	unsigned long lc_preempt;
+	int count;
+
+	lc_preempt = offsetof(struct lowcore, preempt.count);
+	/* READ_ONCE(get_lowcore()->preempt.count) (without PREEMPT_NEED_RESCHED) */
+	asm_inline(
+		ALTERNATIVE("ly		%[count],%[offzero](%%r0)\n",
+			    "ly		%[count],%[offalt](%%r0)\n",
+			    ALT_FEATURE(MFEATURE_LOWCORE))
+		: [count] "=d" (count)
+		: [offzero] "i" (lc_preempt),
+		  [offalt] "i" (lc_preempt + LOWCORE_ALT_ADDRESS),
+		  "m" (((struct lowcore *)0)->preempt.count));
+	return count;
 }
 
-static __always_inline void preempt_count_set(int pc)
+static __always_inline void preempt_count_set(unsigned long pc)
 {
-	int old, new;
+	unsigned long old, new;
 
 	old = READ_ONCE(get_lowcore()->preempt_count);
 	do {
@@ -47,12 +60,12 @@ static __always_inline void preempt_count_set(int pc)
 
 static __always_inline void set_preempt_need_resched(void)
 {
-	__atomic_and(~PREEMPT_NEED_RESCHED, &get_lowcore()->preempt_count);
+	__atomic64_and(~PREEMPT_NEED_RESCHED, (long *)&get_lowcore()->preempt_count);
 }
 
 static __always_inline void clear_preempt_need_resched(void)
 {
-	__atomic_or(PREEMPT_NEED_RESCHED, &get_lowcore()->preempt_count);
+	__atomic64_or(PREEMPT_NEED_RESCHED, (long *)&get_lowcore()->preempt_count);
 }
 
 static __always_inline bool test_preempt_need_resched(void)
@@ -68,11 +81,21 @@ static __always_inline void __preempt_count_add(int val)
 	 */
 	if (!IS_ENABLED(CONFIG_PROFILE_ALL_BRANCHES)) {
 		if (__builtin_constant_p(val) && (val >= -128) && (val <= 127)) {
-			__atomic_add_const(val, &get_lowcore()->preempt_count);
+			unsigned long lc_preempt;
+
+			lc_preempt = offsetof(struct lowcore, preempt_count);
+			asm_inline(
+				ALTERNATIVE("agsi	%[offzero](%%r0),%[val]\n",
+					    "agsi	%[offalt](%%r0),%[val]\n",
+					    ALT_FEATURE(MFEATURE_LOWCORE))
+				: "+m" (((struct lowcore *)0)->preempt_count)
+				: [offzero] "i" (lc_preempt), [val] "i" (val),
+				  [offalt] "i" (lc_preempt + LOWCORE_ALT_ADDRESS)
+				: "cc");
 			return;
 		}
 	}
-	__atomic_add(val, &get_lowcore()->preempt_count);
+	__atomic64_add(val, (long *)&get_lowcore()->preempt_count);
 }
 
 static __always_inline void __preempt_count_sub(int val)
@@ -87,7 +110,22 @@ static __always_inline void __preempt_count_sub(int val)
  */
 static __always_inline bool __preempt_count_dec_and_test(void)
 {
-	return __atomic_add_const_and_test(-1, &get_lowcore()->preempt_count);
+#ifdef __HAVE_ASM_FLAG_OUTPUTS__
+	unsigned long lc_preempt;
+	int cc;
+
+	lc_preempt = offsetof(struct lowcore, preempt_count);
+	asm_inline(
+		ALTERNATIVE("algsi	%[offzero](%%r0),%[val]\n",
+			    "algsi	%[offalt](%%r0),%[val]\n",
+			    ALT_FEATURE(MFEATURE_LOWCORE))
+		: "=@cc" (cc), "+m" (((struct lowcore *)0)->preempt_count)
+		: [offzero] "i" (lc_preempt), [val] "i" (-1),
+		[offalt] "i" (lc_preempt + LOWCORE_ALT_ADDRESS));
+	return (cc == 0) || (cc == 2);
+#else
+	return __atomic64_add_const_and_test(-1, (long *)&get_lowcore()->preempt_count);
+#endif
 }
 
 /*
@@ -96,6 +134,16 @@ static __always_inline bool __preempt_count_dec_and_test(void)
 static __always_inline bool should_resched(int preempt_offset)
 {
 	return unlikely(READ_ONCE(get_lowcore()->preempt_count) == preempt_offset);
+}
+
+static __always_inline int __preempt_count_add_return(int val)
+{
+	return val + __atomic64_add(val, (long *)&get_lowcore()->preempt_count);
+}
+
+static __always_inline int __preempt_count_sub_return(int val)
+{
+	return __preempt_count_add_return(-val);
 }
 
 #define init_task_preempt_count(p)	do { } while (0)

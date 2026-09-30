@@ -1,5 +1,5 @@
 /*
- * Copyright 2012-2023 Advanced Micro Devices, Inc.
+ * Copyright 2012-2026 Advanced Micro Devices, Inc.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a
  * copy of this software and associated documentation files (the "Software"),
@@ -29,6 +29,7 @@
 #include "dc_types.h"
 #include "dc_state.h"
 #include "dc_plane.h"
+#include "dc_probe.h"
 #include "grph_object_defs.h"
 #include "logger_types.h"
 #include "hdcp_msg_types.h"
@@ -42,9 +43,11 @@
 #include "inc/hw/dmcu.h"
 #include "dml/display_mode_lib.h"
 
-#include "dml2/dml2_wrapper.h"
+#include "dml2_0/dml2_wrapper.h"
 
 #include "dmub/inc/dmub_cmd.h"
+
+#include "dml/dml1_frl_cap_chk.h"
 
 #include "sspl/dc_spl_types.h"
 
@@ -54,8 +57,16 @@ struct abm_save_restore;
 struct aux_payload;
 struct set_config_cmd_payload;
 struct dmub_notification;
+struct dcn_hubbub_reg_state;
+struct dcn_hubp_reg_state;
+struct dcn_dpp_reg_state;
+struct dcn_mpc_reg_state;
+struct dcn_opp_reg_state;
+struct dcn_dsc_reg_state;
+struct dcn_optc_reg_state;
+struct dcn_dccg_reg_state;
 
-#define DC_VER "3.2.351"
+#define DC_VER "3.2.392"
 
 /**
  * MAX_SURFACES - representative of the upper bound of surfaces that can be piped to a single CRTC
@@ -73,6 +84,57 @@ struct dmub_notification;
 #define MAX_HOST_ROUTERS_NUM 3
 #define MAX_DPIA_PER_HOST_ROUTER 3
 #define MAX_DPIA_NUM  (MAX_HOST_ROUTERS_NUM * MAX_DPIA_PER_HOST_ROUTER)
+
+#define NUM_FAST_FLIPS_TO_STEADY_STATE 20
+
+struct frl_cap_chk_intermediates_fixed31_32 {
+	int      c_frl_sb;
+	struct fixed31_32   overhead_sb;
+	struct fixed31_32   overhead_rs;
+	struct fixed31_32   overhead_map;
+	struct fixed31_32   overhead_min;
+	struct fixed31_32   overhead_max;
+	struct fixed31_32   f_pixel_clock_max;
+	struct fixed31_32   t_line;
+	struct fixed31_32   r_bit_min;
+	struct fixed31_32   r_frl_char_min;
+	struct fixed31_32   c_frl_line;
+	struct fixed31_32   ap;
+	struct fixed31_32   r_ap;
+	struct fixed31_32   avg_audio_packets_line;
+	struct fixed31_32   margin;
+	int      audio_packets_line;
+	int      blank_audio_min;
+};
+
+struct frl_cap_chk_params_fixed31_32 {
+	int      lanes;
+	struct fixed31_32   f_pixel_clock_nominal;   /* Pixel Clock rate (Hz)  */
+	struct fixed31_32   r_bit_nominal;           /* FRL bitrate (bps) */
+	int      audio_packet_type;
+	struct fixed31_32   f_audio;                 /* Audio rate (Hz) */
+	int      h_active;                /* Active pixels per line */
+	int      h_blank;                 /* Blanking pixels per line */
+	int      bpc;                     /* Bits per component */
+	int      vic;                     /* Video Identification Code */
+
+	enum hdmi_frl_pixel_encoding    pixel_encoding;
+
+	bool     compressed;              /* set to true if DSC is enabled */
+	bool     bypass_hc_target_calc;   /* debug only */
+	bool     allow_all_bpp;           /* dsc_all_bpp */
+
+	/* DSC parameters */
+	int      slices;
+	int      slice_width;
+	struct fixed31_32   bpp_target;
+	int      layout;
+	int      acat;    /* not supported */
+
+	/* outputs */
+	struct frl_dml_borrow_params borrow_params;
+	int      average_tribyte_rate;
+};
 
 /* Display Core Interfaces */
 struct dc_versions {
@@ -112,6 +174,13 @@ struct dc_plane_cap {
 		uint32_t fp16 : 1;
 		uint32_t p010 : 1;
 		uint32_t ayuv : 1;
+		uint32_t yuy2 : 1; // Packed 422 8bpc
+		uint32_t y210 : 1; // Packed 422 10bpc
+		uint32_t y212 : 1; // Packed 422 12bpc
+		uint32_t p208 : 1; // Planar 422 8bpc
+		uint32_t p210 : 1; // Planar 422 10bpc
+		uint32_t p212 : 1; // Planar 422 12bpc
+		/* Not all caps will be used/supported */
 	} pixel_format_support;
 	// max upscaling factor x1000
 	// upscaling factors are always >= 1
@@ -178,6 +247,7 @@ struct rom_curve_caps {
  * @ogam_ram: programmable out/blend gamma LUT
  * @ocsc: output color space conversion
  * @dgam_rom_for_yuv: pre-defined degamma LUT for YUV planes
+ * @upsp_pre_scaler: Ability to upsample 420/422 before scaling
  * @dgam_rom_caps: pre-definied curve caps for degamma 1D LUT
  * @ogam_rom_caps: pre-definied curve caps for regamma 1D LUT
  *
@@ -194,6 +264,7 @@ struct dpp_color_caps {
 	uint16_t ogam_ram : 1;
 	uint16_t ocsc : 1;
 	uint16_t dgam_rom_for_yuv : 1;
+	uint16_t upsp_pre_scaler : 1;
 	struct rom_curve_caps dgam_rom_caps;
 	struct rom_curve_caps ogam_rom_caps;
 };
@@ -253,6 +324,7 @@ struct mpc_color_caps {
 	struct lut3d_caps mcm_3d_lut_caps;
 	struct lut3d_caps rmcm_3d_lut_caps;
 	bool preblend;
+	struct fixed31_32 max_gamut_remap_coeff;
 };
 
 /**
@@ -278,6 +350,18 @@ struct dc_scl_caps {
 	bool sharpener_support;
 };
 
+struct dc_check_config {
+	/**
+	 * max video plane width that can be safely assumed to be always
+	 * supported by single DPP pipe.
+	 */
+	unsigned int max_optimizable_video_width;
+	bool enable_legacy_fast_update;
+
+	bool deferred_transition_state;
+	unsigned int transition_countdown_to_steady_state;
+};
+
 struct dc_caps {
 	uint32_t max_streams;
 	uint32_t max_links;
@@ -293,11 +377,6 @@ struct dc_caps {
 	unsigned int max_cursor_size;
 	unsigned int max_buffered_cursor_size;
 	unsigned int max_video_width;
-	/*
-	 * max video plane width that can be safely assumed to be always
-	 * supported by single DPP pipe.
-	 */
-	unsigned int max_optimizable_video_width;
 	unsigned int min_horizontal_blanking_period;
 	int linear_pitch_alignment;
 	bool dcc_const_color;
@@ -315,6 +394,7 @@ struct dc_caps {
 	bool ips_v2_support;
 	uint32_t num_of_internal_disp;
 	enum dp_protocol_version max_dp_protocol_version;
+	bool hdmi_hpo;
 	unsigned int mall_size_per_mem_channel;
 	unsigned int mall_size_total;
 	unsigned int cursor_cache_size;
@@ -449,10 +529,23 @@ struct dc_static_screen_params {
  * underscan we don't expect to see this call at all.
  */
 
-enum surface_update_type {
+enum dc_update_type {
 	UPDATE_TYPE_FAST, /* super fast, safe to execute in isr */
 	UPDATE_TYPE_MED,  /* ISR safe, most of programming needed, no bw/clk change*/
 	UPDATE_TYPE_FULL, /* may need to shuffle resources */
+};
+
+enum dc_lock_descriptor {
+	LOCK_DESCRIPTOR_NONE = 0x0,
+	LOCK_DESCRIPTOR_STREAM = 0x1,
+	LOCK_DESCRIPTOR_LINK = 0x2,
+	LOCK_DESCRIPTOR_GLOBAL = 0x4,
+	LOCK_DESCRIPTOR_PROBE = 0x8,
+};
+
+struct dc_update_descriptor {
+	enum dc_update_type update_type;
+	enum dc_lock_descriptor lock_descriptor;
 };
 
 /* Forward declaration*/
@@ -476,7 +569,6 @@ union allow_lttpr_non_transparent_mode {
 	} bits;
 	unsigned char raw;
 };
-
 /* Structure to hold configuration flags set by dm at dc creation. */
 struct dc_config {
 	bool gpu_vm_support;
@@ -492,7 +584,7 @@ struct dc_config {
 	union allow_lttpr_non_transparent_mode allow_lttpr_non_transparent_mode;
 	bool multi_mon_pp_mclk_switch;
 	bool disable_dmcu;
-	bool enable_4to1MPC;
+	bool allow_4to1MPC;
 	bool enable_windowed_mpo_odm;
 	bool forceHBR2CP2520; // Used for switching between test patterns TPS4 and CP2520
 	uint32_t allow_edp_hotplug_detection;
@@ -509,10 +601,12 @@ struct dc_config {
 	int smart_mux_version;
 	bool ignore_dpref_ss;
 	bool enable_mipi_converter_optimization;
+	bool enable_frl;
+	bool force_hdmi21_frl_enc_enable;
 	bool use_default_clock_table;
 	bool force_bios_enable_lttpr;
 	uint8_t force_bios_fixed_vs;
-	int sdpif_request_limit_words_per_umc;
+	unsigned int sdpif_request_limit_words_per_umc;
 	bool dc_mode_clk_limit_support;
 	bool EnableMinDispClkODM;
 	bool enable_auto_dpm_test_logs;
@@ -530,8 +624,13 @@ struct dc_config {
 	bool set_pipe_unlock_order;
 	bool enable_dpia_pre_training;
 	bool unify_link_enc_assignment;
+	bool enable_cursor_offload;
+	bool dp_connector_no_native_i2c;
+	unsigned int link_index_with_no_ddc;
+	bool frame_update_cmd_version2;
 	struct spl_sharpness_range dcn_sharpness_range;
 	struct spl_sharpness_range dcn_override_sharpness_range;
+	bool no_native422_support;
 };
 
 enum visual_confirm {
@@ -546,11 +645,13 @@ enum visual_confirm {
 	VISUAL_CONFIRM_SMARTMUX_DGPU = 10,
 	VISUAL_CONFIRM_REPLAY = 12,
 	VISUAL_CONFIRM_SUBVP = 14,
+	VISUAL_CONFIRM_ABM = 15,
 	VISUAL_CONFIRM_MCLK_SWITCH = 16,
 	VISUAL_CONFIRM_FAMS2 = 19,
 	VISUAL_CONFIRM_HW_CURSOR = 20,
 	VISUAL_CONFIRM_VABC = 21,
 	VISUAL_CONFIRM_DCC = 22,
+	VISUAL_CONFIRM_BOOSTED_REFRESH_RATE = 23,
 	VISUAL_CONFIRM_EXPLICIT = 0x80000000,
 };
 
@@ -669,6 +770,15 @@ struct dc_clocks {
 	 * Elements below are not compared for the purposes of
 	 * optimization required
 	 */
+
+	/*
+	 * @cstate_allow
+	 *
+	 * DCN's DF C-state vote as last successfully acknowledged by PMFW.
+	 * false = DCN does NOT permit DF C-state;
+	 * true = DCN permits DF C-state;
+	 */
+	bool cstate_allow;
 	bool prev_p_state_change_support;
 	bool fclk_prev_p_state_change_support;
 	int num_ways;
@@ -685,6 +795,7 @@ struct dc_clocks {
 	 */
 	bool fw_based_mclk_switching;
 	bool fw_based_mclk_switching_shut_down;
+	bool alt_ch_pstate_switch;
 	int prev_num_ways;
 	enum dtm_pstate dtm_level;
 	int max_supported_dppclk_khz;
@@ -695,6 +806,18 @@ struct dc_clocks {
 	int idle_fclk_khz;
 	int subvp_prefetch_dramclk_khz;
 	int subvp_prefetch_fclk_khz;
+	/* deprecated: use _KBps variants — will be removed after DML update */
+	unsigned int utm_urgent_bandwidth_lb_Kbps;
+	unsigned int utm_nominal_bandwidth_lb_Kbps;
+	unsigned int utm_urgent_bandwidth_lb_KBps;
+	unsigned int utm_nominal_bandwidth_lb_KBps;
+	unsigned int utm_latency_ub_index;
+	unsigned int utm_lsdma_bandwidth_lb_KBps;
+	unsigned int utm_nominal_max_latency_ub_ns;
+	unsigned int utm_nominal_avg_latency_ub_ns;
+	/* deprecated: use _KBps variant — will be removed after DML update */
+	unsigned int required_avg_active_bandwidth_Kbps;
+	unsigned int required_avg_active_bandwidth_KBps;
 
 	/* Stutter efficiency is technically not clock values
 	 * but stored here so the values are part of the update_clocks call similar to num_ways
@@ -703,6 +826,8 @@ struct dc_clocks {
 	struct {
 		uint8_t base_efficiency; //LP1
 		uint8_t low_power_efficiency; //LP2
+		uint8_t z8_stutter_efficiency;
+		int z8_stutter_period;
 	} stutter_efficiency;
 };
 
@@ -849,8 +974,7 @@ union dpia_debug_options {
 		uint32_t enable_force_tbt3_work_around:1; /* bit 4 */
 		uint32_t disable_usb4_pm_support:1; /* bit 5 */
 		uint32_t enable_usb4_bw_zero_alloc_patch:1; /* bit 6 */
-		uint32_t enable_bw_allocation_mode:1; /* bit 7 */
-		uint32_t reserved:24;
+		uint32_t reserved:25;
 	} bits;
 	uint32_t raw;
 };
@@ -875,6 +999,7 @@ struct dc_debug_data {
 	uint32_t ltFailCount;
 	uint32_t i2cErrorCount;
 	uint32_t auxErrorCount;
+	struct pipe_topology_history topology_history;
 };
 
 struct dc_phy_addr_space_config {
@@ -910,20 +1035,29 @@ struct dc_virtual_addr_space_config {
 };
 
 struct dc_bounding_box_overrides {
-	int sr_exit_time_ns;
-	int sr_enter_plus_exit_time_ns;
-	int sr_exit_z8_time_ns;
-	int sr_enter_plus_exit_z8_time_ns;
-	int urgent_latency_ns;
-	int percent_of_ideal_drambw;
-	int dram_clock_change_latency_ns;
-	int dummy_clock_change_latency_ns;
-	int fclk_clock_change_latency_ns;
+	unsigned int sr_exit_time_ns;
+	unsigned int sr_enter_plus_exit_time_ns;
+	unsigned int sr_exit_z8_time_ns;
+	unsigned int sr_enter_plus_exit_z8_time_ns;
+	unsigned int urgent_latency_ns;
+	unsigned int percent_of_ideal_drambw;
+	unsigned int dram_clock_change_latency_ns;
+	unsigned int dummy_clock_change_latency_ns;
+	unsigned int fclk_clock_change_latency_ns;
 	/* This forces a hard min on the DCFCLK we use
 	 * for DML.  Unlike the debug option for forcing
 	 * DCFCLK, this override affects watermark calculations
 	 */
-	int min_dcfclk_mhz;
+	unsigned int min_dcfclk_mhz;
+};
+
+struct dc_qos_info {
+	uint32_t qos_bandwidth_lb_in_mbps;
+	uint32_t calculated_avg_bw_in_mbps;
+	uint32_t qos_max_latency_ub_in_ns;
+	uint32_t qos_avg_latency_ub_in_ns;
+	uint32_t dcn_bandwidth_ub_in_mbps;
+	uint32_t qos_max_bw_budget_in_mbps;
 };
 
 struct dc_state;
@@ -940,10 +1074,9 @@ struct link_service;
  * causing an issue or not.
  */
 struct dc_debug_options {
-	bool native422_support;
 	bool disable_dsc;
 	enum visual_confirm visual_confirm;
-	int visual_confirm_rect_height;
+	unsigned int visual_confirm_rect_height;
 
 	bool sanity_checks;
 	bool max_disp_clk;
@@ -979,23 +1112,23 @@ struct dc_debug_options {
 	bool disable_io_clk_power_gate;
 	bool disable_mem_power_gate;
 	bool disable_dio_power_gate;
-	int dsc_min_slice_height_override;
-	int dsc_bpp_increment_div;
+	unsigned int dsc_min_slice_height_override;
+	unsigned int dsc_bpp_increment_div;
 	bool disable_pplib_wm_range;
 	enum wm_report_mode pplib_wm_report_mode;
 	unsigned int min_disp_clk_khz;
 	unsigned int min_dpp_clk_khz;
 	unsigned int min_dram_clk_khz;
-	int sr_exit_time_dpm0_ns;
-	int sr_enter_plus_exit_time_dpm0_ns;
-	int sr_exit_time_ns;
-	int sr_enter_plus_exit_time_ns;
-	int sr_exit_z8_time_ns;
-	int sr_enter_plus_exit_z8_time_ns;
-	int urgent_latency_ns;
+	unsigned int sr_exit_time_dpm0_ns;
+	unsigned int sr_enter_plus_exit_time_dpm0_ns;
+	unsigned int sr_exit_time_ns;
+	unsigned int sr_enter_plus_exit_time_ns;
+	unsigned int sr_exit_z8_time_ns;
+	unsigned int sr_enter_plus_exit_z8_time_ns;
+	unsigned int urgent_latency_ns;
 	uint32_t underflow_assert_delay_us;
-	int percent_of_ideal_drambw;
-	int dram_clock_change_latency_ns;
+	unsigned int percent_of_ideal_drambw;
+	unsigned int dram_clock_change_latency_ns;
 	bool optimized_watermark;
 	int always_scale;
 	bool disable_pplib_clock_request;
@@ -1015,17 +1148,17 @@ struct dc_debug_options {
 	bool hdmi20_disable;
 	bool skip_detection_link_training;
 	uint32_t edid_read_retry_times;
-	unsigned int force_odm_combine; //bit vector based on otg inst
-	unsigned int seamless_boot_odm_combine;
-	unsigned int force_odm_combine_4to1; //bit vector based on otg inst
-	int minimum_z8_residency_time;
-	int minimum_z10_residency_time;
+
+	uint8_t force_odm_combine; //bit vector based on otg inst
+	uint8_t seamless_boot_odm_combine;
+	uint8_t force_odm_combine_4to1; //bit vector based on otg inst
+
+	unsigned int minimum_z8_residency_time;
+	unsigned int minimum_z10_residency_time;
 	bool disable_z9_mpc;
 	unsigned int force_fclk_khz;
 	bool enable_tri_buf;
 	bool ips_disallow_entry;
-	bool dmub_offload_enabled;
-	bool dmcub_emulation;
 	bool disable_idle_power_optimizations;
 	unsigned int mall_size_override;
 	unsigned int mall_additional_timer_percent;
@@ -1047,6 +1180,18 @@ struct dc_debug_options {
 	bool validate_dml_output;
 	bool enable_dmcub_surface_flip;
 	bool usbc_combo_phy_reset_wa;
+	bool force_fva;
+	int max_frl_rate;
+	unsigned int  force_frl_rate;
+	bool ignore_ffe;
+	unsigned int  select_ffe;
+	unsigned int  limit_ffe;
+	bool force_frl_always;
+	bool force_frl_dsc;
+	bool force_frl_max;
+	bool apply_vsdb_rcc_wa;
+	bool enable_hdmi_idcc;
+
 	bool enable_dram_clock_change_one_display_vactive;
 	/* TODO - remove once tested */
 	bool legacy_dp2_lt;
@@ -1068,7 +1213,7 @@ struct dc_debug_options {
 	uint8_t fec_enable_delay_in100us;
 	bool enable_driver_sequence_debug;
 	enum det_size crb_alloc_policy;
-	int crb_alloc_policy_min_disp_count;
+	unsigned int crb_alloc_policy_min_disp_count;
 	bool disable_z10;
 	bool enable_z9_disable_interface;
 	bool psr_skip_crtc_disable;
@@ -1120,7 +1265,6 @@ struct dc_debug_options {
 	uint32_t fpo_vactive_min_active_margin_us;
 	uint32_t fpo_vactive_max_blank_us;
 	bool enable_hpo_pg_support;
-	bool enable_legacy_fast_update;
 	bool disable_dc_mode_overwrite;
 	bool replay_skip_crtc_disabled;
 	bool ignore_pg;/*do nothing, let pmfw control it*/
@@ -1152,7 +1296,6 @@ struct dc_debug_options {
 	bool enable_ips_visual_confirm;
 	unsigned int sharpen_policy;
 	unsigned int scale_to_sharpness_policy;
-	bool skip_full_updated_if_possible;
 	unsigned int enable_oled_edp_power_up_opt;
 	bool enable_hblank_borrow;
 	bool force_subvp_df_throttle;
@@ -1164,6 +1307,20 @@ struct dc_debug_options {
 	unsigned int auxless_alpm_lfps_t1t2_us;
 	short auxless_alpm_lfps_t1t2_offset_us;
 	bool disable_stutter_for_wm_program;
+	bool enable_block_sequence_programming;
+	uint32_t custom_psp_footer_size;
+	bool disable_deferred_minimal_transitions;
+	unsigned int num_fast_flips_to_steady_state_override;
+	bool enable_dmu_recovery;
+	unsigned int force_vmin_threshold;
+	bool enable_otg_frame_sync_pwa;
+	unsigned int min_deep_sleep_dcfclk_khz;
+	unsigned int force_odm2to1_for_edp_pixclk_mhz;
+	bool enable_replay_esd_recovery;
+	uint8_t iommu_mismatch_temp_wka;
+	bool disable_dynamic_expansion_for_test_pattern;
+	uint32_t dml21_custom_derate_num_dpms;
+	uint32_t dml21_custom_derate_at_dpm[DML2_MAX_NUM_DPM_LVL];
 };
 
 
@@ -1206,7 +1363,6 @@ struct dc_init_data {
 	enum dce_environment dce_environment;
 
 	struct dmub_offload_funcs *dmub_if;
-	struct dc_reg_helper_state *dmub_offload;
 
 	struct dc_config flags;
 	uint64_t log_mask;
@@ -1236,7 +1392,7 @@ void dc_hardware_init(struct dc *dc);
 int dc_get_vmid_use_vector(struct dc *dc);
 void dc_setup_vm_context(struct dc *dc, struct dc_virtual_addr_space_config *va_config, int vmid);
 /* Returns the number of vmids supported */
-int dc_setup_system_context(struct dc *dc, struct dc_phy_addr_space_config *pa_config);
+unsigned int dc_setup_system_context(struct dc *dc, struct dc_phy_addr_space_config *pa_config);
 void dc_init_callbacks(struct dc *dc,
 		const struct dc_callback_init *init_params);
 void dc_deinit_callbacks(struct dc *dc);
@@ -1303,6 +1459,7 @@ struct dc_transfer_func {
 	enum dc_transfer_func_predefined tf;
 	/* FP16 1.0 reference level in nits, default is 80 nits, only for PQ*/
 	uint32_t sdr_ref_white_level;
+	struct fixed31_32 hdr_multiplier;
 	union {
 		struct pwl_params pwl;
 		struct dc_transfer_func_distributed_points tf_pts;
@@ -1353,15 +1510,50 @@ struct lut_mem_mapping {
 struct dc_rmcm_3dlut {
 	bool isInUse;
 	const struct dc_stream_state *stream;
-	uint8_t protection_bits;
 };
 
 struct dc_3dlut {
 	struct kref refcount;
 	struct tetrahedral_params lut_3d;
-	struct fixed31_32 hdr_multiplier;
 	union dc_3dlut_state state;
 };
+
+/* 3DLUT DMA (Fast Load) params */
+struct dc_3dlut_dma {
+	struct dc_plane_address addr;
+	enum dc_cm_lut_swizzle swizzle;
+	enum dc_cm_lut_pixel_format format;
+	uint16_t bias; /* FP1.5.10 */
+	uint16_t scale; /* FP1.5.10 */
+	enum dc_cm_lut_size size;
+};
+
+/* color manager */
+union dc_plane_cm_flags {
+	unsigned int all;
+	struct {
+		unsigned int shaper_enable    : 1;
+		unsigned int lut3d_enable     : 1;
+		unsigned int blend_enable     : 1;
+		/* whether legacy (lut3d_func) or DMA is valid */
+		unsigned int lut3d_dma_enable : 1;
+		/* RMCM lut to be used instead of MCM */
+		unsigned int rmcm_enable	 : 1;
+		unsigned int reserved: 27;
+	} bits;
+};
+
+struct dc_plane_cm {
+	struct kref refcount;
+	struct dc_transfer_func shaper_func;
+	union {
+		struct dc_3dlut lut3d_func;
+		struct dc_3dlut_dma lut3d_dma;
+	};
+	struct dc_transfer_func blend_func;
+	union dc_plane_cm_flags flags;
+};
+
 /*
  * This structure is filled in by dc_surface_get_status and contains
  * the last requested address and the currently active address so the called
@@ -1372,46 +1564,119 @@ struct dc_plane_status {
 	struct dc_plane_address current_address;
 	bool is_flip_pending;
 	bool is_right_eye;
+	struct cm_hist cm_hist;
 };
 
-union surface_update_flags {
-
-	struct {
-		uint32_t addr_update:1;
-		/* Medium updates */
-		uint32_t dcc_change:1;
-		uint32_t color_space_change:1;
-		uint32_t horizontal_mirror_change:1;
-		uint32_t per_pixel_alpha_change:1;
-		uint32_t global_alpha_change:1;
-		uint32_t hdr_mult:1;
-		uint32_t rotation_change:1;
-		uint32_t swizzle_change:1;
-		uint32_t scaling_change:1;
-		uint32_t position_change:1;
-		uint32_t in_transfer_func_change:1;
-		uint32_t input_csc_change:1;
-		uint32_t coeff_reduction_change:1;
-		uint32_t pixel_format_change:1;
-		uint32_t plane_size_change:1;
-		uint32_t gamut_remap_change:1;
-
-		/* Full updates */
-		uint32_t new_plane:1;
-		uint32_t bpp_change:1;
-		uint32_t gamma_change:1;
-		uint32_t bandwidth_change:1;
-		uint32_t clock_change:1;
-		uint32_t stereo_format_change:1;
-		uint32_t lut_3d:1;
-		uint32_t tmz_changed:1;
-		uint32_t mcm_transfer_function_enable_change:1; /* disable or enable MCM transfer func */
-		uint32_t full_update:1;
-		uint32_t sdr_white_level_nits:1;
-	} bits;
-
-	uint32_t raw;
+struct pipe_update_bits {
+	uint32_t addr_update:1;
+	uint32_t dcc_change:1;
+	uint32_t color_space_change:1;
+	uint32_t horizontal_mirror_change:1;
+	uint32_t per_pixel_alpha_change:1;
+	uint32_t global_alpha_change:1;
+	uint32_t hdr_mult:1;
+	uint32_t rotation_change:1;
+	uint32_t swizzle_change:1;
+	uint32_t scaling_change:1;
+	uint32_t position_change:1;
+	uint32_t in_transfer_func_change:1;
+	uint32_t input_csc_change:1;
+	uint32_t coeff_reduction_change:1;
+	uint32_t pixel_format_change:1;
+	uint32_t plane_size_change:1;
+	uint32_t gamut_remap_change:1;
+	uint32_t cursor_csc_color_matrix_change:1;
+	uint32_t new_plane:1;
+	uint32_t bpp_change:1;
+	uint32_t gamma_change:1;
+	uint32_t bandwidth_change:1;
+	uint32_t clock_change:1;
+	uint32_t stereo_format_change:1;
+	uint32_t lut_3d:1;
+	uint32_t tmz_changed:1;
+	uint32_t full_update:1;
+	uint32_t sdr_white_level_nits:1;
+	uint32_t cm_hist_change:1;
+	/* NOTE: When adding a new field, also update:
+	 *   - dc_pipe_update_bits_set_full()
+	 *   - dc_pipe_update_bits_is_any_set()
+	 */
 };
+
+static inline void dc_pipe_update_bits_clear(struct pipe_update_bits *flags)
+{
+	/* memset ensures padding bits are zeroed */
+	memset(flags, 0, sizeof(*flags));
+}
+
+static inline void dc_pipe_update_bits_set_full(struct pipe_update_bits *flags)
+{
+	dc_pipe_update_bits_clear(flags);
+	flags->addr_update = 1;
+	flags->dcc_change = 1;
+	flags->color_space_change = 1;
+	flags->horizontal_mirror_change = 1;
+	flags->per_pixel_alpha_change = 1;
+	flags->global_alpha_change = 1;
+	flags->hdr_mult = 1;
+	flags->rotation_change = 1;
+	flags->swizzle_change = 1;
+	flags->scaling_change = 1;
+	flags->position_change = 1;
+	flags->in_transfer_func_change = 1;
+	flags->input_csc_change = 1;
+	flags->coeff_reduction_change = 1;
+	flags->pixel_format_change = 1;
+	flags->plane_size_change = 1;
+	flags->gamut_remap_change = 1;
+	flags->cursor_csc_color_matrix_change = 1;
+	flags->new_plane = 1;
+	flags->bpp_change = 1;
+	flags->gamma_change = 1;
+	flags->bandwidth_change = 1;
+	flags->clock_change = 1;
+	flags->stereo_format_change = 1;
+	flags->lut_3d = 1;
+	flags->tmz_changed = 1;
+	flags->full_update = 1;
+	flags->sdr_white_level_nits = 1;
+	flags->cm_hist_change = 1;
+}
+
+static inline bool dc_pipe_update_bits_is_any_set(const struct pipe_update_bits *flags)
+{
+	return flags->addr_update ||
+		flags->dcc_change ||
+		flags->color_space_change ||
+		flags->horizontal_mirror_change ||
+		flags->per_pixel_alpha_change ||
+		flags->global_alpha_change ||
+		flags->hdr_mult ||
+		flags->rotation_change ||
+		flags->swizzle_change ||
+		flags->scaling_change ||
+		flags->position_change ||
+		flags->in_transfer_func_change ||
+		flags->input_csc_change ||
+		flags->coeff_reduction_change ||
+		flags->pixel_format_change ||
+		flags->plane_size_change ||
+		flags->gamut_remap_change ||
+		flags->cursor_csc_color_matrix_change ||
+		flags->new_plane ||
+		flags->bpp_change ||
+		flags->gamma_change ||
+		flags->bandwidth_change ||
+		flags->clock_change ||
+		flags->stereo_format_change ||
+		flags->lut_3d ||
+		flags->tmz_changed ||
+		flags->full_update ||
+		flags->sdr_white_level_nits ||
+		flags->cm_hist_change;
+}
+
+bool dc_check_address_only_update(struct pipe_update_bits update_bits);
 
 #define DC_REMOVE_PLANE_POINTERS 1
 
@@ -1437,14 +1702,20 @@ struct dc_plane_state {
 	struct fixed31_32 hdr_mult;
 	struct colorspace_transform gamut_remap_matrix;
 
-	// TODO: No longer used, remove
-	struct dc_hdr_static_metadata hdr_static_ctx;
-
 	enum dc_color_space color_space;
 
+#ifndef TRIM_CM2
+	bool lut_bank_a;
+	struct dc_hdr_static_metadata hdr_static_ctx;
 	struct dc_3dlut lut3d_func;
 	struct dc_transfer_func in_shaper_func;
 	struct dc_transfer_func blend_tf;
+	enum dc_cm2_shaper_3dlut_setting mcm_shaper_3dlut_setting;
+	bool mcm_lut1d_enable;
+	struct dc_cm2_func_luts mcm_luts;
+	enum mpcc_movable_cm_location mcm_location;
+#endif /* TRIM_CM2 */
+	struct dc_plane_cm cm;
 
 	struct dc_transfer_func *gamcor_tf;
 	enum surface_pixel_format format;
@@ -1459,9 +1730,9 @@ struct dc_plane_state {
 	bool visible;
 	bool flip_immediate;
 	bool horizontal_mirror;
-	int layer_index;
+	unsigned int layer_index;
 
-	union surface_update_flags update_flags;
+	struct pipe_update_bits update_bits;
 	bool flip_int_enabled;
 	bool skip_manual_trigger;
 
@@ -1481,17 +1752,13 @@ struct dc_plane_state {
 
 	bool is_statically_allocated;
 	enum chroma_cositing cositing;
-	enum dc_cm2_shaper_3dlut_setting mcm_shaper_3dlut_setting;
-	bool mcm_lut1d_enable;
-	struct dc_cm2_func_luts mcm_luts;
-	bool lut_bank_a;
-	enum mpcc_movable_cm_location mcm_location;
 	struct dc_csc_transform cursor_csc_color_matrix;
 	bool adaptive_sharpness_en;
 	int adaptive_sharpness_policy;
-	int sharpness_level;
-	enum linear_light_scaling linear_light_scaling;
+	unsigned int sharpness_level;
+	enum dc_scaling_linearity scaling_linearity;
 	unsigned int sdr_white_level_nits;
+	struct cm_hist_control cm_hist_control;
 	struct spl_sharpness_range sharpness_range;
 	enum sharpness_range_source sharpness_source;
 };
@@ -1511,8 +1778,9 @@ struct dc_plane_info {
 	bool global_alpha;
 	int  global_alpha_value;
 	bool input_csc_enabled;
-	int layer_index;
+	unsigned int layer_index;
 	enum chroma_cositing cositing;
+	enum dc_scaling_linearity scaling_linearity;
 };
 
 #include "dc_stream.h"
@@ -1575,6 +1843,7 @@ struct dc_scratch_space {
 	bool edp_sink_present;
 
 	struct dp_trace dp_trace;
+	volatile bool is_link_locked;
 
 	/* caps is the same as reported_link_cap. link_traing use
 	 * reported_link_cap. Will clean up.  TODO
@@ -1589,9 +1858,21 @@ struct dc_scratch_space {
 	 * management of the override pointers.
 	 */
 	struct dc_link_training_overrides preferred_training_settings;
+	struct dc_hdmi_frl_link_training_overrides preferred_hdmi_frl_settings;
 	struct dp_audio_test_data audio_test_data;
 
-	uint8_t ddc_hw_inst;
+	/* On ASICs with dp_connector_no_native_i2c cap set and no_ddc_pin cap
+	 * set by IFWI, link aux_hw_inst is used in aux layer functions instead
+	 * of ddc_pin to know which aux instance is associated with link.
+	 */
+	bool no_ddc_pin;
+	/** When set, forces all native I2C communication on this DP connector
+	 *  to use the I2C-over-AUX protocol instead of native I2C signaling.
+	 */
+	bool force_to_use_aux;
+	enum gpio_ddc_line aux_hw_inst;
+
+	enum gpio_ddc_line ddc_hw_inst;
 
 	uint8_t hpd_src;
 
@@ -1634,7 +1915,17 @@ struct dc_scratch_space {
 
 	struct panel_cntl *panel_cntl;
 	struct link_encoder *link_enc;
+	struct hpo_frl_link_encoder *hpo_frl_link_enc;
+	struct dc_hdmi_frl_link_settings frl_reported_link_cap;
+	struct dc_hdmi_frl_link_settings frl_verified_link_cap;
+	struct dc_hdmi_frl_link_settings frl_link_settings;
+	struct dc_hdmi_frl_flags frl_flags;
+	union hdmi_idcc_cable_id hdmi_cable_id;
 	struct graphics_object_id link_id;
+
+	/* External encoder eg. NUTMEG or TRAVIS used on CIK APUs. */
+	struct graphics_object_id ext_enc_id;
+
 	/* Endpoint type distinguishes display endpoints which do not have entries
 	 * in the BIOS connector table from those that do. Helps when tracking link
 	 * encoder to display endpoint assignments.
@@ -1666,6 +1957,8 @@ struct dc_scratch_space {
 		bool dp_skip_DID2;
 		bool dp_skip_reset_segment;
 		bool dp_skip_fs_144hz;
+		/* Some DP bridges don't work with RBR and must use HBR. */
+		bool dp_skip_rbr;
 		bool dp_mot_reset_segment;
 		/* Some USB4 docks do not handle turning off MST DSC once it has been enabled. */
 		bool dpia_mst_dsc_always_on;
@@ -1683,18 +1976,19 @@ struct dc_scratch_space {
 	struct dc_link_status link_status;
 	struct dprx_states dprx_states;
 
-	struct gpio *hpd_gpio;
 	enum dc_link_fec_state fec_state;
 	bool is_dds;
 	bool is_display_mux_present;
 	bool link_powered_externally;	// Used to bypass hardware sequencing delays when panel is powered down forcibly
 
 	struct dc_panel_config panel_config;
+	enum dc_panel_type panel_type;
 	struct phy_state phy_state;
 	uint32_t phy_transition_bitmask;
 	// BW ALLOCATON USB4 ONLY
 	struct dc_dpia_bw_alloc dpia_bw_alloc_config;
 	bool skip_implict_edp_power_control;
+	bool forced_psr_active;
 	enum backlight_control_type backlight_control_type;
 };
 
@@ -1702,6 +1996,7 @@ struct dc {
 	struct dc_debug_options debug;
 	struct dc_versions versions;
 	struct dc_caps caps;
+	struct dc_check_config check_config;
 	struct dc_cap_funcs cap_funcs;
 	struct dc_config config;
 	struct dc_bounding_box_overrides bb_overrides;
@@ -1716,6 +2011,12 @@ struct dc {
 
 	struct dc_state *current_state;
 	struct resource_pool *res_pool;
+
+	/**
+	 * @update_scratch_pool: Per-commit scratch buffers for dc_update_state.
+	 */
+	struct dc_update_scratch_space *update_scratch_pool[MAX_STREAMS + 1];
+	bool update_scratch_in_use[MAX_STREAMS + 1];
 
 	struct clk_mgr *clk_mgr;
 
@@ -1795,6 +2096,21 @@ struct dc_fast_update {
 	struct dc_transfer_func *out_transfer_func;
 	struct dc_csc_transform *output_csc_transform;
 	const struct dc_csc_transform *cursor_csc_color_matrix;
+	struct cm_hist_control *cm_hist_control;
+	/* stream-level fast updates */
+	const struct colorspace_transform *gamut_remap;
+	const struct dc_cursor_attributes *cursor_attributes;
+	const struct dc_cursor_position *cursor_position;
+	const struct periodic_interrupt_config *periodic_interrupt;
+	const enum dc_dither_option *dither_option;
+	struct dc_info_packet *vrr_infopacket;
+	struct dc_info_packet *vsc_infopacket;
+	struct dc_info_packet *vsp_infopacket;
+	struct dc_info_packet *hfvsif_infopacket;
+	struct dc_info_packet *vtem_infopacket;
+	struct dc_info_packet *adaptive_sync_infopacket;
+	struct dc_info_packet *avi_infopacket;
+	struct dc_info_packet *hdr_static_metadata;
 };
 
 struct dc_surface_update {
@@ -1813,37 +2129,186 @@ struct dc_surface_update {
 
 	const struct dc_csc_transform *input_csc_color_matrix;
 	const struct fixed31_32 *coeff_reduction_factor;
-	const struct dc_transfer_func *func_shaper;
-	const struct dc_3dlut *lut3d_func;
-	const struct dc_transfer_func *blend_tf;
 	const struct colorspace_transform *gamut_remap_matrix;
-	/*
-	 * Color Transformations for pre-blend MCM (Shaper, 3DLUT, 1DLUT)
-	 *
-	 * change cm2_params.component_settings: Full update
-	 * change cm2_params.cm2_luts: Fast update
-	 */
-	const struct dc_cm2_parameters *cm2_params;
+	const struct dc_plane_cm *cm;
 	const struct dc_csc_transform *cursor_csc_color_matrix;
 	unsigned int sdr_white_level_nits;
 	struct dc_bias_and_scale bias_and_scale;
+	struct cm_hist_control *cm_hist_control;
 };
 
+struct dc_state_update {
+	struct dc_stream_state   *stream;
+	struct dc_stream_update  *stream_update;
+	struct dc_surface_update *surface_updates;
+	int                       surface_count;
+	const struct dc_probe_updates *probe_updates;
+};
+
+/**
+ * dc_check_state_update() - Classify an update without committing it.
+ * @check_config: DC check configuration
+ * @updates:      root update object to classify
+ *
+ * Return: descriptor indicating update type and required lock scope.
+ */
+struct dc_update_descriptor dc_check_state_update(
+		const struct dc_check_config *check_config,
+		const struct dc_state_update *updates);
+
+/**
+ * dc_update_state - Commit an absolute dc_state_update.
+ * @dc:      DC structure
+ * @updates: root update object carrying stream, plane, and probe updates
+ *
+ * Return: true on success, false on failure.
+ */
+bool dc_update_state(struct dc *dc, const struct dc_state_update *updates);
+
+struct dc_update_scratch_space;
+
+/**
+ * dc_update_state_init - Acquire and initialise a commit scratch buffer.
+ * @dc:      DC structure
+ * @updates: update descriptor; validated before the slot is acquired
+ *
+ * Return: a scratch slot on success, NULL if validation fails or the pool
+ * is exhausted. The slot must be released via dc_update_state_cleanup() on
+ * success, or automatically by dc_update_state_prepare() on failure.
+ */
+struct dc_update_scratch_space *dc_update_state_init(
+		struct dc *dc,
+		const struct dc_state_update *updates
+);
+
+/**
+ * dc_update_state_prepare - Prepare the commit under the global lock.
+ * @scratch: commit scratch from dc_update_state_init()
+ *
+ * On failure the scratch slot is released and false is returned; the caller
+ * must not call execute or cleanup.
+ */
+bool dc_update_state_prepare(struct dc_update_scratch_space *scratch);
+
+/**
+ * dc_update_state_execute - Program hardware; called without the global lock.
+ * @scratch: commit scratch from dc_update_state_init()
+ */
+void dc_update_state_execute(const struct dc_update_scratch_space *scratch);
+
+/**
+ * dc_update_state_cleanup - Finalise the commit and release the scratch slot.
+ * @scratch: commit scratch from dc_update_state_init()
+ *
+ * Must be called with the global lock held. Returns true if the caller must
+ * loop back to prepare (SEAMLESS continuation).
+ */
+bool dc_update_state_cleanup(struct dc_update_scratch_space *scratch);
+
+/**
+ * struct dc_probe_latencies - min/max/avg memory latency in ns.
+ * @max_latency_ns: maximum latency in nanoseconds
+ * @avg_latency_ns: average latency in nanoseconds
+ * @min_latency_ns: minimum latency in nanoseconds
+ */
+struct dc_probe_latencies {
+	uint32_t max_latency_ns;
+	uint32_t avg_latency_ns;
+	uint32_t min_latency_ns;
+};
+
+/**
+ * struct dc_probe_status - results for a probe.
+ * @valid: true if a measurement was latched.
+ * @type: type of the probe that produced this result.
+ * @u.bandwidth_mbps:         peak BW in Mbps (DC_PROBE_PEAK_MEM_BW).
+ * @u.latency:                min/max/avg memory latency in ns (DC_PROBE_MEM_LATENCY),
+ *                            stored as struct dc_probe_latencies.
+ * @u.urgent_assertion_count: number of urgent assertion events (DC_PROBE_URGENT_ASSERTION_COUNT).
+ * @u.prefetch_data_size:     total prefetch data in bytes (DC_PROBE_PREFETCH_DATA_SIZE).
+ */
+struct dc_probe_status {
+	bool                       valid;
+	enum dc_probe_type         type;
+	union {
+		uint32_t bandwidth_mbps;
+		struct dc_probe_latencies latency;
+		uint32_t urgent_assertion_count;
+		uint32_t prefetch_data_size;
+	} u;
+};
+
+/**
+ * enum dc_get_status_type - Bitmask selecting which status classes to populate.
+ * @DC_GET_STATUS_STREAM: populate stream_status fields in dc_state_status
+ * @DC_GET_STATUS_PROBE:  populate probe_status fields in dc_state_status
+ */
+enum dc_get_status_type {
+	DC_GET_STATUS_STREAM = (1u << 0),
+	DC_GET_STATUS_PROBE  = (1u << 1),
+};
+
+/**
+ * struct dc_get_status_options - Input selector for dc_state_get_status.
+ * @state:  source state to read status from
+ * @types:  OR of dc_get_status_type values selecting classes to populate
+ * @stream: optional stream filter for DC_GET_STATUS_STREAM. NULL means
+ *          populate status for all streams in the state
+ * @probe:  optional probe filter for DC_GET_STATUS_PROBE. NULL means
+ *          populate status for all probes in the state
+ */
+struct dc_get_status_options {
+	struct dc_state              *state;
+	uint32_t                      types;
+	const struct dc_stream_state *stream;
+	const struct dc_probe_state  *probe;
+};
+
+/**
+ * struct dc_state_status - Output-only status object from dc_state_get_status.
+ * @stream_count: number of valid entries in stream_status (DC_GET_STATUS_STREAM)
+ * @stream_status: pointers to live per-stream status entries
+ * @probe_count: number of valid entries in probe_status (DC_GET_STATUS_PROBE)
+ * @probe_status: pointers to live per-probe status entries
+ */
+struct dc_state_status {
+	int                     stream_count;
+	struct dc_stream_status *stream_status[MAX_STREAMS];
+	int                     probe_count;
+	struct dc_probe_status *probe_status[MAX_PROBES];
+};
+
+/**
+ * dc_state_get_status - Unified status readback for dc_state.
+ * @status:  output object populated according to options->types
+ * @options: selects the source state, status classes to fill, and filters
+ *
+ * Return: DC_OK on success, DC_ERROR_UNEXPECTED if state is NULL.
+ */
+enum dc_status dc_state_get_status(struct dc_state_status *status,
+		const struct dc_get_status_options *options);
+
 struct dc_underflow_debug_data {
-	uint32_t otg_inst;
-	uint32_t otg_underflow;
-	uint32_t h_position;
-	uint32_t v_position;
-	uint32_t otg_frame_count;
-	struct dc_underflow_per_hubp_debug_data {
-		uint32_t hubp_underflow;
-		uint32_t hubp_in_blank;
-		uint32_t hubp_readline;
-		uint32_t det_config_error;
-	} hubps[MAX_PIPES];
-	uint32_t curr_det_sizes[MAX_PIPES];
-	uint32_t target_det_sizes[MAX_PIPES];
-	uint32_t compbuf_config_error;
+	struct dcn_hubbub_reg_state *hubbub_reg_state;
+	struct dcn_hubp_reg_state *hubp_reg_state[MAX_PIPES];
+	struct dcn_dpp_reg_state *dpp_reg_state[MAX_PIPES];
+	struct dcn_mpc_reg_state *mpc_reg_state[MAX_PIPES];
+	struct dcn_opp_reg_state *opp_reg_state[MAX_PIPES];
+	struct dcn_dsc_reg_state *dsc_reg_state[MAX_PIPES];
+	struct dcn_optc_reg_state *optc_reg_state[MAX_PIPES];
+	struct dcn_dccg_reg_state *dccg_reg_state[MAX_PIPES];
+};
+
+struct power_features {
+	bool ips;
+	bool rcg;
+	bool replay;
+	bool dds;
+	bool sprs;
+	bool psr;
+	bool fams;
+	bool mpo;
+	bool uclk_p_state;
 };
 
 /*
@@ -1861,13 +2326,26 @@ struct dc_3dlut *dc_create_3dlut_func(void);
 void dc_3dlut_func_release(struct dc_3dlut *lut);
 void dc_3dlut_func_retain(struct dc_3dlut *lut);
 
+struct dc_plane_cm *dc_plane_cm_create(void);
+void dc_plane_cm_release(struct dc_plane_cm *cm);
+void dc_plane_cm_retain(struct dc_plane_cm *cm);
+
 void dc_post_update_surfaces_to_stream(
 		struct dc *dc);
 
-/**
- * struct dc_validation_set - Struct to store surface/stream associations for validation
+/*
+ * dc_get_default_tiling_info() - Retrieve an ASIC-appropriate default tiling
+ * description for (typically) linear surfaces.
+ *
+ * This is used by OS/DM paths that need a valid, fully-initialized tiling
+ * description without hardcoding gfx-version specifics in the caller.
  */
-struct dc_validation_set {
+void dc_get_default_tiling_info(const struct dc *dc, struct dc_tiling_info *tiling_info);
+
+/**
+ * struct dc_validation_stream - Per-stream surface/stream association for validation
+ */
+struct dc_validation_stream {
 	/**
 	 * @stream: Stream state properties
 	 */
@@ -1884,6 +2362,31 @@ struct dc_validation_set {
 	uint8_t plane_count;
 };
 
+/**
+ * struct dc_validation_set - Root validation input grouping all streams for a commit
+ */
+struct dc_validation_set {
+	/**
+	 * @streams: Per-stream entries (stream + its planes)
+	 */
+	struct dc_validation_stream streams[MAX_STREAMS];
+
+	/**
+	 * @stream_count: Number of active entries in @streams
+	 */
+	uint8_t stream_count;
+
+	/**
+	 * @probes: Global probe descriptors to validate alongside the streams
+	 */
+	struct dc_probe_state probes[MAX_PROBES];
+
+	/**
+	 * @probe_count: Number of active entries in @probes
+	 */
+	uint8_t probe_count;
+};
+
 bool dc_validate_boot_timing(const struct dc *dc,
 				const struct dc_sink *sink,
 				struct dc_crtc_timing *crtc_timing);
@@ -1891,8 +2394,7 @@ bool dc_validate_boot_timing(const struct dc *dc,
 enum dc_status dc_validate_plane(struct dc *dc, const struct dc_plane_state *plane_state);
 
 enum dc_status dc_validate_with_context(struct dc *dc,
-					const struct dc_validation_set set[],
-					int set_count,
+					const struct dc_validation_set *set,
 					struct dc_state *context,
 					enum dc_validate_mode validate_mode);
 
@@ -1936,6 +2438,17 @@ struct dc_plane_state *dc_get_surface_for_mpcc(struct dc *dc,
 
 
 uint32_t dc_get_opp_for_plane(struct dc *dc, struct dc_plane_state *plane);
+bool dc_set_fva_vrr_adjust(struct dc *dc,
+	struct dc_stream_state *stream,
+	struct fva_adj *fva_adj,
+	struct dc_crtc_timing_adjust *vrr_adj);
+
+int dc_get_hw_max_fva_factor(struct dc *dc,
+		struct dc_stream_state *stream,
+		unsigned int max_pixel_clock);
+
+void dc_set_vstartup_start(struct dc *dc,
+		struct dc_stream_state *stream);
 
 void dc_set_disable_128b_132b_stream_overhead(bool disable);
 
@@ -1962,7 +2475,7 @@ bool dc_get_edp_link_panel_inst(const struct dc *dc,
 /* Return an array of link pointers to edp links. */
 void dc_get_edp_links(const struct dc *dc,
 		struct dc_link **edp_links,
-		int *edp_num);
+		unsigned int *edp_num);
 
 void dc_set_edp_power(const struct dc *dc, struct dc_link *edp_link,
 				 bool powerOn);
@@ -2004,7 +2517,7 @@ struct dc_sink_init_data;
 struct dc_sink *dc_link_add_remote_sink(
 		struct dc_link *dc_link,
 		const uint8_t *edid,
-		int len,
+		unsigned int len,
 		struct dc_sink_init_data *init_data);
 
 /* Remove remote sink from a link with dc_connection_mst_branch connection type.
@@ -2147,6 +2660,12 @@ enum dc_status dc_link_dp_read_hpd_rx_irq_data(
 	struct dc_link *link,
 	union hpd_irq_data *irq_data);
 
+bool dc_link_frl_poll_status_flag(struct dc_link *link);
+bool dc_link_frl_margin_check_uncompressed_video(
+		const struct dc_link *link,
+		struct frl_cap_chk_params_fixed31_32 *params,
+		struct frl_cap_chk_intermediates_fixed31_32 *inter);
+
 /* The function clears recorded DP RX states in the link. DM should call this
  * function when it is resuming from S3 power state to previously connected links.
  *
@@ -2170,6 +2689,12 @@ bool dc_link_reset_cur_dp_mst_topology(struct dc_link *link);
 uint32_t dc_link_bandwidth_kbps(
 	const struct dc_link *link,
 	const struct dc_link_settings *link_setting);
+
+/* The function returns effective HDMI FRL bandwidth given link rate.
+ * return - total effective link bandwidth in kbps.
+ */
+uint32_t dc_link_frl_bandwidth_kbps(const struct dc_link *link,
+		enum hdmi_frl_link_rate link_rate);
 
 struct dp_audio_bandwidth_params {
 	const struct dc_crtc_timing *crtc_timing;
@@ -2221,6 +2746,8 @@ void dc_get_cur_link_res_map(const struct dc *dc, uint32_t *map);
  *
  */
 void dc_restore_link_res_map(const struct dc *dc, uint32_t *map);
+
+void dc_link_wait_for_unlocked(struct dc_link *link);
 
 /* TODO: this is not meant to be exposed to DM. Should switch to stream update
  * interface i.e stream_update->dsc_config
@@ -2275,6 +2802,16 @@ const struct dc_link_settings *dc_link_get_link_cap(const struct dc_link *link);
  */
 enum dc_link_encoding_format dc_link_get_highest_encoding_format(const struct dc_link *link);
 
+/* get max frl link settings the link can enable with all things considered.
+ * (i.e TX/RX capabilities and link verification result.
+ *
+ * @link - a link with FRL RX connection
+ * return - max frl link settings the link can enable.
+ *
+ */
+struct dc_hdmi_frl_link_settings *dc_link_get_frl_link_cap(
+		struct dc_link *link);
+
 /* Check if a RX (ex. DP sink, MST hub, passive or active dongle) is connected
  * to a link with dp connector signal type.
  * @link - a link with dp connector signal type
@@ -2322,6 +2859,16 @@ bool dc_link_dp_set_test_pattern(
  */
 void dc_link_set_preferred_link_settings(struct dc *dc,
 		struct dc_link_settings *link_setting,
+		struct dc_link *link);
+
+/* Force FRL link settings to always use a specific value until reboot to a
+ * specific link. If link has already been enabled, the interface will also
+ * switch to desired link settings immediately. This is a debug interface to
+ * generic FRL issue trouble shooting.
+ */
+void dc_link_set_preferred_frl_link_settings(struct dc *dc,
+		struct dc_hdmi_frl_link_settings *link_setting,
+		struct dc_hdmi_frl_link_training_overrides *lt_overrides,
 		struct dc_link *link);
 
 /* Force DP link to customize a specific link training behavior by overriding to
@@ -2423,6 +2970,56 @@ bool dc_link_set_replay_allow_active(struct dc_link *dc_link, const bool *enable
 		bool wait, bool force_static, const unsigned int *power_opts);
 
 bool dc_link_get_replay_state(const struct dc_link *dc_link, uint64_t *state);
+
+/*
+ * Enable or disable Panel Replay on the specified link:
+ *
+ * @link: pointer to the dc_link struct instance
+ * @enable: enable or disable Panel Replay
+ *
+ * return: true if successful, false otherwise
+ */
+bool dc_link_set_pr_enable(struct dc_link *link, bool enable);
+
+/*
+ * Update Panel Replay state parameters:
+ *
+ * @link: pointer to the dc_link struct instance
+ * @update_state_data: pointer to state update data structure
+ *
+ * return: true if successful, false otherwise
+ */
+bool dc_link_update_pr_state(struct dc_link *link,
+		struct dmub_cmd_pr_update_state_data *update_state_data);
+
+/*
+ * Send general command to Panel Replay firmware:
+ *
+ * @link: pointer to the dc_link struct instance
+ * @general_cmd_data: pointer to general command data structure
+ *
+ * return: true if successful, false otherwise
+ */
+bool dc_link_set_pr_general_cmd(struct dc_link *link,
+		struct dmub_cmd_pr_general_cmd_data *general_cmd_data);
+
+/*
+ * Measure Panel Replay residency for the given link.
+ * mode: PR_RESIDENCY_MODE_PHY, PR_RESIDENCY_MODE_ALPM, or
+ *       PR_RESIDENCY_MODE_ENABLEMENT_PERIOD
+ */
+void dc_link_edp_replay_residency(const struct dc_link *link,
+		unsigned int *residency, bool is_start, enum pr_residency_mode mode);
+
+/*
+ * Get Panel Replay state:
+ *
+ * @link: pointer to the dc_link struct instance
+ * @state: pointer to store the Panel Replay state
+ *
+ * return: true if successful, false otherwise
+ */
+bool dc_link_get_pr_state(const struct dc_link *link, uint64_t *state);
 
 /* On eDP links this function call will stall until T12 has elapsed.
  * If the panel is not in power off state, this function will return
@@ -2565,6 +3162,7 @@ struct dc_sink {
 	struct stereo_3d_features features_3d[TIMING_3D_FORMAT_MAX];
 	bool converter_disable_audio;
 
+	struct mccs_caps mccs_caps;
 	struct scdc_caps scdc_caps;
 	struct dc_sink_dsc_caps dsc_caps;
 	struct dc_sink_fec_caps fec_caps;
@@ -2611,6 +3209,7 @@ enum dc_irq_source dc_interrupt_to_irq_source(
 		uint32_t ext_id);
 bool dc_interrupt_set(struct dc *dc, enum dc_irq_source src, bool enable);
 void dc_interrupt_ack(struct dc *dc, enum dc_irq_source src);
+bool dc_get_flip_pending_on_otg(struct dc *dc, int otg_inst);
 enum dc_irq_source dc_get_hpd_irq_source_at_index(
 		struct dc *dc, uint32_t link_index);
 
@@ -2624,6 +3223,8 @@ void dc_set_power_state(
 void dc_resume(struct dc *dc);
 
 void dc_power_down_on_boot(struct dc *dc);
+
+void dc_disable_dangling_timing_generators(struct dc *dc);
 
 /*
  * HDCP Interfaces
@@ -2688,6 +3289,13 @@ bool dc_process_dmub_aux_transfer_async(struct dc *dc,
 				uint32_t link_index,
 				struct aux_payload *payload);
 
+/*
+ * smart power OLED Interfaces
+ */
+bool dc_smart_power_oled_enable(const struct dc_link *link, bool enable, uint16_t peak_nits,
+	uint8_t debug_control, uint16_t fixed_CLL, uint32_t triggerline);
+bool dc_smart_power_oled_get_max_cll(const struct dc_link *link, unsigned int *pCurrent_MaxCLL);
+
 /* Get dc link index from dpia port index */
 uint8_t get_link_index_from_dpia_port_index(const struct dc *dc,
 				uint8_t dpia_port_index);
@@ -2721,6 +3329,8 @@ unsigned int dc_get_det_buffer_size_from_state(const struct dc_state *context);
 
 bool dc_get_host_router_index(const struct dc_link *link, unsigned int *host_router_index);
 
+void dc_log_preos_dmcub_info(const struct dc *dc);
+
 /* DSC Interfaces */
 #include "dc_dsc.h"
 
@@ -2736,7 +3346,7 @@ bool dc_is_timing_changed(struct dc_stream_state *cur_stream,
 		       struct dc_stream_state *new_stream);
 
 bool dc_is_cursor_limit_pending(struct dc *dc);
-bool dc_can_clear_cursor_limit(struct dc *dc);
+bool dc_can_clear_cursor_limit(const struct dc *dc);
 
 /**
  * dc_get_underflow_debug_data_for_otg() - Retrieve underflow debug data.
@@ -2749,6 +3359,540 @@ bool dc_can_clear_cursor_limit(struct dc *dc);
  * including OTG underflow status, current read positions, frame count, and per-HUBP debug data.
  * The results are stored in the provided out_data structure for further analysis or logging.
  */
-void dc_get_underflow_debug_data_for_otg(struct dc *dc, int primary_otg_inst, struct dc_underflow_debug_data *out_data);
+void dc_get_underflow_debug_data_for_otg(struct dc *dc, unsigned int primary_otg_inst, struct dc_underflow_debug_data *out_data);
+
+void dc_get_power_feature_status(struct dc *dc, unsigned int primary_otg_inst, struct power_features *out_data);
+
+/*
+ * Software state variables used to program register fields across the display pipeline
+ */
+struct dc_register_software_state {
+	/* HUBP register programming variables for each pipe */
+	struct {
+		bool valid_plane_state;
+		bool valid_stream;
+		bool min_dc_gfx_version9;
+		uint32_t vtg_sel;                        /* DCHUBP_CNTL->HUBP_VTG_SEL from pipe_ctx->stream_res.tg->inst */
+		uint32_t hubp_clock_enable;              /* HUBP_CLK_CNTL->HUBP_CLOCK_ENABLE from power management */
+		uint32_t surface_pixel_format;           /* DCSURF_SURFACE_CONFIG->SURFACE_PIXEL_FORMAT from plane_state->format */
+		uint32_t rotation_angle;                 /* DCSURF_SURFACE_CONFIG->ROTATION_ANGLE from plane_state->rotation */
+		uint32_t h_mirror_en;                    /* DCSURF_SURFACE_CONFIG->H_MIRROR_EN from plane_state->horizontal_mirror */
+		uint32_t surface_dcc_en;                 /* DCSURF_SURFACE_CONTROL->PRIMARY_SURFACE_DCC_EN from dcc->enable */
+		uint32_t surface_size_width;             /* HUBP_SIZE->SURFACE_SIZE_WIDTH from plane_size.surface_size.width */
+		uint32_t surface_size_height;            /* HUBP_SIZE->SURFACE_SIZE_HEIGHT from plane_size.surface_size.height */
+		uint32_t pri_viewport_width;             /* DCSURF_PRI_VIEWPORT_DIMENSION->PRI_VIEWPORT_WIDTH from scaler_data.viewport.width */
+		uint32_t pri_viewport_height;            /* DCSURF_PRI_VIEWPORT_DIMENSION->PRI_VIEWPORT_HEIGHT from scaler_data.viewport.height */
+		uint32_t pri_viewport_x_start;           /* DCSURF_PRI_VIEWPORT_START->PRI_VIEWPORT_X_START from scaler_data.viewport.x */
+		uint32_t pri_viewport_y_start;           /* DCSURF_PRI_VIEWPORT_START->PRI_VIEWPORT_Y_START from scaler_data.viewport.y */
+		uint32_t cursor_enable;                  /* CURSOR_CONTROL->CURSOR_ENABLE from cursor_attributes.enable */
+		uint32_t cursor_width;                   /* CURSOR_SETTINGS->CURSOR_WIDTH from cursor_position.width */
+		uint32_t cursor_height;                  /* CURSOR_SETTINGS->CURSOR_HEIGHT from cursor_position.height */
+
+		/* Additional DCC configuration */
+		uint32_t surface_dcc_ind_64b_blk;        /* DCSURF_SURFACE_CONTROL->PRIMARY_SURFACE_DCC_IND_64B_BLK from dcc.independent_64b_blks */
+		uint32_t surface_dcc_ind_128b_blk;       /* DCSURF_SURFACE_CONTROL->PRIMARY_SURFACE_DCC_IND_128B_BLK from dcc.independent_128b_blks */
+
+		/* Surface pitch configuration */
+		uint32_t surface_pitch;                  /* DCSURF_SURFACE_PITCH->PITCH from plane_size.surface_pitch */
+		uint32_t meta_pitch;                     /* DCSURF_SURFACE_PITCH->META_PITCH from dcc.meta_pitch */
+		uint32_t chroma_pitch;                   /* DCSURF_SURFACE_PITCH_C->PITCH_C from plane_size.chroma_pitch */
+		uint32_t meta_pitch_c;                   /* DCSURF_SURFACE_PITCH_C->META_PITCH_C from dcc.meta_pitch_c */
+
+		/* Surface addresses */
+		uint32_t primary_surface_address_low;    /* DCSURF_PRIMARY_SURFACE_ADDRESS->PRIMARY_SURFACE_ADDRESS from address.grph.addr.low_part */
+		uint32_t primary_surface_address_high;   /* DCSURF_PRIMARY_SURFACE_ADDRESS_HIGH->PRIMARY_SURFACE_ADDRESS_HIGH from address.grph.addr.high_part */
+		uint32_t primary_meta_surface_address_low;  /* DCSURF_PRIMARY_META_SURFACE_ADDRESS->PRIMARY_META_SURFACE_ADDRESS from address.grph.meta_addr.low_part */
+		uint32_t primary_meta_surface_address_high; /* DCSURF_PRIMARY_META_SURFACE_ADDRESS_HIGH->PRIMARY_META_SURFACE_ADDRESS_HIGH from address.grph.meta_addr.high_part */
+
+		/* TMZ configuration */
+		uint32_t primary_surface_tmz;            /* DCSURF_SURFACE_CONTROL->PRIMARY_SURFACE_TMZ from address.tmz_surface */
+		uint32_t primary_meta_surface_tmz;       /* DCSURF_SURFACE_CONTROL->PRIMARY_META_SURFACE_TMZ from address.tmz_surface */
+
+		/* Tiling configuration */
+		uint32_t sw_mode;                        /* DCSURF_TILING_CONFIG->SW_MODE from tiling_info.gfx9.swizzle */
+		uint32_t num_pipes;                      /* DCSURF_ADDR_CONFIG->NUM_PIPES from tiling_info.gfx9.num_pipes */
+		uint32_t num_banks;                      /* DCSURF_ADDR_CONFIG->NUM_BANKS from tiling_info.gfx9.num_banks */
+		uint32_t pipe_interleave;                /* DCSURF_ADDR_CONFIG->PIPE_INTERLEAVE from tiling_info.gfx9.pipe_interleave */
+		uint32_t num_shader_engines;             /* DCSURF_ADDR_CONFIG->NUM_SE from tiling_info.gfx9.num_shader_engines */
+		uint32_t num_rb_per_se;                  /* DCSURF_ADDR_CONFIG->NUM_RB_PER_SE from tiling_info.gfx9.num_rb_per_se */
+		uint32_t num_pkrs;                       /* DCSURF_ADDR_CONFIG->NUM_PKRS from tiling_info.gfx9.num_pkrs */
+
+		/* DML Request Size Configuration - Luma */
+		uint32_t rq_chunk_size;                  /* DCHUBP_REQ_SIZE_CONFIG->CHUNK_SIZE from rq_regs.rq_regs_l.chunk_size */
+		uint32_t rq_min_chunk_size;              /* DCHUBP_REQ_SIZE_CONFIG->MIN_CHUNK_SIZE from rq_regs.rq_regs_l.min_chunk_size */
+		uint32_t rq_meta_chunk_size;             /* DCHUBP_REQ_SIZE_CONFIG->META_CHUNK_SIZE from rq_regs.rq_regs_l.meta_chunk_size */
+		uint32_t rq_min_meta_chunk_size;         /* DCHUBP_REQ_SIZE_CONFIG->MIN_META_CHUNK_SIZE from rq_regs.rq_regs_l.min_meta_chunk_size */
+		uint32_t rq_dpte_group_size;             /* DCHUBP_REQ_SIZE_CONFIG->DPTE_GROUP_SIZE from rq_regs.rq_regs_l.dpte_group_size */
+		uint32_t rq_mpte_group_size;             /* DCHUBP_REQ_SIZE_CONFIG->MPTE_GROUP_SIZE from rq_regs.rq_regs_l.mpte_group_size */
+		uint32_t rq_swath_height_l;              /* DCHUBP_REQ_SIZE_CONFIG->SWATH_HEIGHT_L from rq_regs.rq_regs_l.swath_height */
+		uint32_t rq_pte_row_height_l;            /* DCHUBP_REQ_SIZE_CONFIG->PTE_ROW_HEIGHT_L from rq_regs.rq_regs_l.pte_row_height */
+
+		/* DML Request Size Configuration - Chroma */
+		uint32_t rq_chunk_size_c;                /* DCHUBP_REQ_SIZE_CONFIG_C->CHUNK_SIZE_C from rq_regs.rq_regs_c.chunk_size */
+		uint32_t rq_min_chunk_size_c;            /* DCHUBP_REQ_SIZE_CONFIG_C->MIN_CHUNK_SIZE_C from rq_regs.rq_regs_c.min_chunk_size */
+		uint32_t rq_meta_chunk_size_c;           /* DCHUBP_REQ_SIZE_CONFIG_C->META_CHUNK_SIZE_C from rq_regs.rq_regs_c.meta_chunk_size */
+		uint32_t rq_min_meta_chunk_size_c;       /* DCHUBP_REQ_SIZE_CONFIG_C->MIN_META_CHUNK_SIZE_C from rq_regs.rq_regs_c.min_meta_chunk_size */
+		uint32_t rq_dpte_group_size_c;           /* DCHUBP_REQ_SIZE_CONFIG_C->DPTE_GROUP_SIZE_C from rq_regs.rq_regs_c.dpte_group_size */
+		uint32_t rq_mpte_group_size_c;           /* DCHUBP_REQ_SIZE_CONFIG_C->MPTE_GROUP_SIZE_C from rq_regs.rq_regs_c.mpte_group_size */
+		uint32_t rq_swath_height_c;              /* DCHUBP_REQ_SIZE_CONFIG_C->SWATH_HEIGHT_C from rq_regs.rq_regs_c.swath_height */
+		uint32_t rq_pte_row_height_c;            /* DCHUBP_REQ_SIZE_CONFIG_C->PTE_ROW_HEIGHT_C from rq_regs.rq_regs_c.pte_row_height */
+
+		/* DML Expansion Modes */
+		uint32_t drq_expansion_mode;             /* DCN_EXPANSION_MODE->DRQ_EXPANSION_MODE from rq_regs.drq_expansion_mode */
+		uint32_t prq_expansion_mode;             /* DCN_EXPANSION_MODE->PRQ_EXPANSION_MODE from rq_regs.prq_expansion_mode */
+		uint32_t mrq_expansion_mode;             /* DCN_EXPANSION_MODE->MRQ_EXPANSION_MODE from rq_regs.mrq_expansion_mode */
+		uint32_t crq_expansion_mode;             /* DCN_EXPANSION_MODE->CRQ_EXPANSION_MODE from rq_regs.crq_expansion_mode */
+
+		/* DML DLG parameters - nominal */
+		uint32_t dst_y_per_vm_vblank;            /* NOM_PARAMETERS_0->DST_Y_PER_VM_VBLANK from dlg_regs.dst_y_per_vm_vblank */
+		uint32_t dst_y_per_row_vblank;           /* NOM_PARAMETERS_0->DST_Y_PER_ROW_VBLANK from dlg_regs.dst_y_per_row_vblank */
+		uint32_t dst_y_per_vm_flip;              /* NOM_PARAMETERS_1->DST_Y_PER_VM_FLIP from dlg_regs.dst_y_per_vm_flip */
+		uint32_t dst_y_per_row_flip;             /* NOM_PARAMETERS_1->DST_Y_PER_ROW_FLIP from dlg_regs.dst_y_per_row_flip */
+
+		/* DML prefetch settings */
+		uint32_t dst_y_prefetch;                 /* PREFETCH_SETTINS->DST_Y_PREFETCH from dlg_regs.dst_y_prefetch */
+		uint32_t vratio_prefetch;                /* PREFETCH_SETTINS->VRATIO_PREFETCH from dlg_regs.vratio_prefetch */
+		uint32_t vratio_prefetch_c;              /* PREFETCH_SETTINS_C->VRATIO_PREFETCH_C from dlg_regs.vratio_prefetch_c */
+
+		/* TTU parameters */
+		uint32_t qos_level_low_wm;               /* TTU_CNTL1->QoSLevelLowWaterMark from ttu_regs.qos_level_low_wm */
+		uint32_t qos_level_high_wm;              /* TTU_CNTL1->QoSLevelHighWaterMark from ttu_regs.qos_level_high_wm */
+		uint32_t qos_level_flip;                 /* TTU_CNTL2->QoS_LEVEL_FLIP_L from ttu_regs.qos_level_flip */
+		uint32_t min_ttu_vblank;                 /* DCN_GLOBAL_TTU_CNTL->MIN_TTU_VBLANK from ttu_regs.min_ttu_vblank */
+	} hubp[MAX_PIPES];
+
+	/* HUBBUB register programming variables */
+	struct {
+		/* Individual DET buffer control per pipe - software state that programs DET registers */
+		uint32_t det0_size;                      /* DCHUBBUB_DET0_CTRL->DET0_SIZE from hubbub->funcs->program_det_size(hubbub, 0, det_buffer_size_kb) */
+		uint32_t det1_size;                      /* DCHUBBUB_DET1_CTRL->DET1_SIZE from hubbub->funcs->program_det_size(hubbub, 1, det_buffer_size_kb) */
+		uint32_t det2_size;                      /* DCHUBBUB_DET2_CTRL->DET2_SIZE from hubbub->funcs->program_det_size(hubbub, 2, det_buffer_size_kb) */
+		uint32_t det3_size;                      /* DCHUBBUB_DET3_CTRL->DET3_SIZE from hubbub->funcs->program_det_size(hubbub, 3, det_buffer_size_kb) */
+
+		/* Compression buffer control - software state that programs COMPBUF registers */
+		uint32_t compbuf_size;                   /* DCHUBBUB_COMPBUF_CTRL->COMPBUF_SIZE from hubbub->funcs->program_compbuf_size(hubbub, compbuf_size_kb, safe_to_increase) */
+		uint32_t compbuf_reserved_space_64b;     /* COMPBUF_RESERVED_SPACE->COMPBUF_RESERVED_SPACE_64B from hubbub2->pixel_chunk_size / 32 */
+		uint32_t compbuf_reserved_space_zs;      /* COMPBUF_RESERVED_SPACE->COMPBUF_RESERVED_SPACE_ZS from hubbub2->pixel_chunk_size / 128 */
+	} hubbub;
+
+	/* DPP register programming variables for each pipe (simplified for available fields) */
+	struct {
+		uint32_t dpp_clock_enable;               /* DPP_CONTROL->DPP_CLOCK_ENABLE from dppclk_enable */
+
+		/* Recout (Rectangle of Interest) configuration */
+		uint32_t recout_start_x;                 /* RECOUT_START->RECOUT_START_X from pipe_ctx->plane_res.scl_data.recout.x */
+		uint32_t recout_start_y;                 /* RECOUT_START->RECOUT_START_Y from pipe_ctx->plane_res.scl_data.recout.y */
+		uint32_t recout_width;                   /* RECOUT_SIZE->RECOUT_WIDTH from pipe_ctx->plane_res.scl_data.recout.width */
+		uint32_t recout_height;                  /* RECOUT_SIZE->RECOUT_HEIGHT from pipe_ctx->plane_res.scl_data.recout.height */
+
+		/* MPC (Multiple Pipe/Plane Combiner) size configuration */
+		uint32_t mpc_width;                      /* MPC_SIZE->MPC_WIDTH from pipe_ctx->plane_res.scl_data.h_active */
+		uint32_t mpc_height;                     /* MPC_SIZE->MPC_HEIGHT from pipe_ctx->plane_res.scl_data.v_active */
+
+		/* DSCL mode configuration */
+		uint32_t dscl_mode;                      /* SCL_MODE->DSCL_MODE from pipe_ctx->plane_res.scl_data.dscl_prog_data.dscl_mode */
+
+		/* Scaler ratios (simplified to integer parts) */
+		uint32_t horz_ratio_int;                 /* SCL_HORZ_FILTER_SCALE_RATIO->SCL_H_SCALE_RATIO integer part from ratios.horz */
+		uint32_t vert_ratio_int;                 /* SCL_VERT_FILTER_SCALE_RATIO->SCL_V_SCALE_RATIO integer part from ratios.vert */
+
+		/* Basic scaler taps */
+		uint32_t h_taps;                         /* SCL_TAP_CONTROL->SCL_H_NUM_TAPS from taps.h_taps */
+		uint32_t v_taps;                         /* SCL_TAP_CONTROL->SCL_V_NUM_TAPS from taps.v_taps */
+	} dpp[MAX_PIPES];
+
+	/* DCCG register programming variables */
+	struct {
+		/* Core Display Clock Control */
+		uint32_t dispclk_khz;                    /* DENTIST_DISPCLK_CNTL->DENTIST_DISPCLK_WDIVIDER from clk_mgr.dispclk_khz */
+		uint32_t dc_mem_global_pwr_req_dis;      /* DC_MEM_GLOBAL_PWR_REQ_CNTL->DC_MEM_GLOBAL_PWR_REQ_DIS from memory power management settings */
+
+		/* DPP Clock Control - 4 fields per pipe */
+		uint32_t dppclk_khz[MAX_PIPES];          /* DPPCLK_CTRL->DPPCLK_R_GATE_DISABLE from dpp_clocks[pipe] */
+		uint32_t dppclk_enable[MAX_PIPES];       /* DPPCLK_CTRL->DPPCLK0_EN,DPPCLK1_EN,DPPCLK2_EN,DPPCLK3_EN from dccg31_update_dpp_dto() */
+		uint32_t dppclk_dto_enable[MAX_PIPES];   /* DPPCLK_DTO_CTRL->DPPCLK_DTO_ENABLE from dccg->dpp_clock_gated[dpp_inst] state */
+		uint32_t dppclk_dto_phase[MAX_PIPES];    /* DPPCLK0_DTO_PARAM->DPPCLK0_DTO_PHASE from phase calculation req_dppclk/ref_dppclk */
+		uint32_t dppclk_dto_modulo[MAX_PIPES];   /* DPPCLK0_DTO_PARAM->DPPCLK0_DTO_MODULO from modulo = 0xff */
+
+		/* DSC Clock Control - 4 fields per DSC resource */
+		uint32_t dscclk_khz[MAX_PIPES]; /* DSCCLK_DTO_CTRL->DSCCLK_DTO_ENABLE from dsc_clocks */
+		uint32_t dscclk_dto_enable[MAX_PIPES]; /* DSCCLK_DTO_CTRL->DSCCLK0_DTO_ENABLE,DSCCLK1_DTO_ENABLE,DSCCLK2_DTO_ENABLE,DSCCLK3_DTO_ENABLE */
+		uint32_t dscclk_dto_phase[MAX_PIPES];  /* DSCCLK0_DTO_PARAM->DSCCLK0_DTO_PHASE from dccg31_enable_dscclk() */
+		uint32_t dscclk_dto_modulo[MAX_PIPES]; /* DSCCLK0_DTO_PARAM->DSCCLK0_DTO_MODULO from dccg31_enable_dscclk() */
+
+		/* Pixel Clock Control - per pipe */
+		uint32_t pixclk_khz[MAX_PIPES];          /* PIXCLK_RESYNC_CNTL->PIXCLK_RESYNC_ENABLE from stream.timing.pix_clk_100hz */
+		uint32_t otg_pixel_rate_div[MAX_PIPES];  /* OTG_PIXEL_RATE_DIV->OTG_PIXEL_RATE_DIV from OTG pixel rate divider control */
+		uint32_t dtbclk_dto_enable[MAX_PIPES];   /* OTG0_PIXEL_RATE_CNTL->DTBCLK_DTO_ENABLE from dccg31_set_dtbclk_dto() */
+		uint32_t pipe_dto_src_sel[MAX_PIPES];    /* OTG0_PIXEL_RATE_CNTL->PIPE_DTO_SRC_SEL from dccg31_set_dtbclk_dto() source selection */
+		uint32_t dtbclk_dto_div[MAX_PIPES];      /* OTG0_PIXEL_RATE_CNTL->DTBCLK_DTO_DIV from dtbdto_div calculation */
+		uint32_t otg_add_pixel[MAX_PIPES];       /* OTG0_PIXEL_RATE_CNTL->OTG_ADD_PIXEL from dccg31_otg_add_pixel() */
+		uint32_t otg_drop_pixel[MAX_PIPES];      /* OTG0_PIXEL_RATE_CNTL->OTG_DROP_PIXEL from dccg31_otg_drop_pixel() */
+
+		/* DTBCLK DTO Control - 4 DTOs */
+		uint32_t dtbclk_dto_modulo[4];           /* DTBCLK_DTO0_MODULO->DTBCLK_DTO0_MODULO from dccg31_set_dtbclk_dto() modulo calculation */
+		uint32_t dtbclk_dto_phase[4];            /* DTBCLK_DTO0_PHASE->DTBCLK_DTO0_PHASE from phase calculation pixclk_khz/ref_dtbclk_khz */
+		uint32_t dtbclk_dto_dbuf_en;             /* DTBCLK_DTO_DBUF_EN->DTBCLK DTO data buffer enable */
+
+		/* DP Stream Clock Control - 4 pipes */
+		uint32_t dpstreamclk_enable[MAX_PIPES];          /* DPSTREAMCLK_CNTL->DPSTREAMCLK_PIPE0_EN,DPSTREAMCLK_PIPE1_EN,DPSTREAMCLK_PIPE2_EN,DPSTREAMCLK_PIPE3_EN */
+		uint32_t dp_dto_modulo[4];               /* DP_DTO0_MODULO->DP_DTO0_MODULO from DP stream DTO programming */
+		uint32_t dp_dto_phase[4];                /* DP_DTO0_PHASE->DP_DTO0_PHASE from DP stream DTO programming */
+		uint32_t dp_dto_dbuf_en;                 /* DP_DTO_DBUF_EN->DP DTO data buffer enable */
+
+		/* PHY Symbol Clock Control - 5 PHYs (A,B,C,D,E) */
+		uint32_t phy_symclk_force_en[5];         /* PHYASYMCLK_CLOCK_CNTL->PHYASYMCLK_FORCE_EN from dccg31_set_physymclk() force_enable */
+		uint32_t phy_symclk_force_src_sel[5];    /* PHYASYMCLK_CLOCK_CNTL->PHYASYMCLK_FORCE_SRC_SEL from dccg31_set_physymclk() clk_src */
+		uint32_t phy_symclk_gate_disable[5];     /* DCCG_GATE_DISABLE_CNTL2->PHYASYMCLK_GATE_DISABLE from debug.root_clock_optimization.bits.physymclk */
+
+		/* SYMCLK32 SE Control - 4 instances */
+		uint32_t symclk32_se_src_sel[4];         /* SYMCLK32_SE_CNTL->SYMCLK32_SE0_SRC_SEL from dccg31_enable_symclk32_se() with get_phy_mux_symclk() mapping */
+		uint32_t symclk32_se_enable[4];          /* SYMCLK32_SE_CNTL->SYMCLK32_SE0_EN from dccg31_enable_symclk32_se() enable */
+		uint32_t symclk32_se_gate_disable[4];    /* DCCG_GATE_DISABLE_CNTL3->SYMCLK32_SE0_GATE_DISABLE from debug.root_clock_optimization.bits.symclk32_se */
+
+		/* SYMCLK32 LE Control - 2 instances */
+		uint32_t symclk32_le_src_sel[2];         /* SYMCLK32_LE_CNTL->SYMCLK32_LE0_SRC_SEL from dccg31_enable_symclk32_le() phyd32clk source */
+		uint32_t symclk32_le_enable[2];          /* SYMCLK32_LE_CNTL->SYMCLK32_LE0_EN from dccg31_enable_symclk32_le() enable */
+		uint32_t symclk32_le_gate_disable[2];    /* DCCG_GATE_DISABLE_CNTL3->SYMCLK32_LE0_GATE_DISABLE from debug.root_clock_optimization.bits.symclk32_le */
+
+		/* HDMI Clock Control */
+		uint32_t hdmicharclk_enable;             /* HDMICHARCLK0_CLOCK_CNTL->HDMICHARCLK0_EN from dccg31_enable_hdmicharclk() */
+		uint32_t hdmicharclk_src_sel;            /* HDMICHARCLK0_CLOCK_CNTL->HDMICHARCLK0_SRC_SEL from dccg31_enable_hdmicharclk() phypll_inst source */
+		uint32_t hdmistreamclk_src_sel;          /* HDMISTREAMCLK_CNTL->HDMISTREAMCLK0_SRC_SEL from dccg31_set_hdmistreamclk() src selection */
+		uint32_t hdmistreamclk_dto_force_dis;    /* HDMISTREAMCLK_CNTL->HDMISTREAMCLK0_DTO_FORCE_DIS from dccg31_set_hdmistreamclk() DTO force bypass */
+		uint32_t hdmistreamclk_dto_phase;        /* HDMISTREAMCLK0_DTO_PARAM->HDMISTREAMCLK0_DTO_PHASE from dccg31_disable_hdmistreamclk() */
+		uint32_t hdmistreamclk_dto_modulo;       /* HDMISTREAMCLK0_DTO_PARAM->HDMISTREAMCLK0_DTO_MODULO from dccg31_disable_hdmistreamclk() */
+
+		/* DPIA Clock Control */
+		uint32_t dpiaclk_540m_dto_modulo;        /* DPIACLK_540M_DTO_MODULO->DPIA 540MHz DTO modulo */
+		uint32_t dpiaclk_540m_dto_phase;         /* DPIACLK_540M_DTO_PHASE->DPIA 540MHz DTO phase */
+		uint32_t dpiaclk_810m_dto_modulo;        /* DPIACLK_810M_DTO_MODULO->DPIA 810MHz DTO modulo */
+		uint32_t dpiaclk_810m_dto_phase;         /* DPIACLK_810M_DTO_PHASE->DPIA 810MHz DTO phase */
+		uint32_t dpiaclk_dto_cntl;               /* DPIACLK_DTO_CNTL->DPIA clock DTO control */
+		uint32_t dpiasymclk_cntl;                /* DPIASYMCLK_CNTL->DPIA symbol clock control */
+
+		/* Clock Gating Control */
+		uint32_t dccg_gate_disable_cntl;         /* DCCG_GATE_DISABLE_CNTL->Clock gate disable control from dccg31_init() */
+		uint32_t dpstreamclk_gate_disable;       /* DCCG_GATE_DISABLE_CNTL3->DPSTREAMCLK_GATE_DISABLE from debug.root_clock_optimization.bits.dpstream */
+		uint32_t dpstreamclk_root_gate_disable;  /* DCCG_GATE_DISABLE_CNTL3->DPSTREAMCLK_ROOT_GATE_DISABLE from debug.root_clock_optimization.bits.dpstream */
+
+		/* VSync Control */
+		uint32_t vsync_cnt_ctrl;                 /* DCCG_VSYNC_CNT_CTRL->VSync counter control */
+		uint32_t vsync_cnt_int_ctrl;             /* DCCG_VSYNC_CNT_INT_CTRL->VSync counter interrupt control */
+		uint32_t vsync_otg_latch_value[6];       /* DCCG_VSYNC_OTG0_LATCH_VALUE->OTG0 VSync latch value (for OTG0-5) */
+
+		/* Time Base Control */
+		uint32_t microsecond_time_base_div;      /* MICROSECOND_TIME_BASE_DIV->Microsecond time base divider */
+		uint32_t millisecond_time_base_div;      /* MILLISECOND_TIME_BASE_DIV->Millisecond time base divider */
+	} dccg;
+
+	/* DSC essential configuration for underflow analysis */
+	struct {
+		/* DSC active state - critical for bandwidth analysis */
+		uint32_t dsc_clock_enable;               /* DSC enabled - affects bandwidth requirements */
+
+		/* DSC configuration affecting bandwidth and timing */
+		uint32_t dsc_num_slices_h;              /* Horizontal slice count - affects throughput */
+		uint32_t dsc_num_slices_v;              /* Vertical slice count - affects throughput */
+		uint32_t dsc_bits_per_pixel;            /* Compression ratio - affects bandwidth */
+
+		/* OPP integration - affects pipeline flow */
+		uint32_t dscrm_dsc_forward_enable;      /* DSC forwarding to OPP enabled */
+		uint32_t dscrm_dsc_opp_pipe_source;    /* Which OPP receives DSC output */
+	} dsc[MAX_PIPES];
+
+	/* MPC register programming variables */
+	struct {
+		/* MPCC blending tree and mode control */
+		uint32_t mpcc_mode[MAX_PIPES];           /* MPCC_CONTROL->MPCC_MODE from blend_cfg.blend_mode */
+		uint32_t mpcc_alpha_blend_mode[MAX_PIPES]; /* MPCC_CONTROL->MPCC_ALPHA_BLND_MODE from blend_cfg.alpha_mode */
+		uint32_t mpcc_alpha_multiplied_mode[MAX_PIPES]; /* MPCC_CONTROL->MPCC_ALPHA_MULTIPLIED_MODE from blend_cfg.pre_multiplied_alpha */
+		uint32_t mpcc_blnd_active_overlap_only[MAX_PIPES]; /* MPCC_CONTROL->MPCC_BLND_ACTIVE_OVERLAP_ONLY from blend_cfg.overlap_only */
+		uint32_t mpcc_global_alpha[MAX_PIPES];   /* MPCC_CONTROL->MPCC_GLOBAL_ALPHA from blend_cfg.global_alpha */
+		uint32_t mpcc_global_gain[MAX_PIPES];    /* MPCC_CONTROL->MPCC_GLOBAL_GAIN from blend_cfg.global_gain */
+		uint32_t mpcc_bg_bpc[MAX_PIPES];         /* MPCC_CONTROL->MPCC_BG_BPC from background color depth */
+		uint32_t mpcc_bot_gain_mode[MAX_PIPES];  /* MPCC_CONTROL->MPCC_BOT_GAIN_MODE from bottom layer gain control */
+
+		/* MPCC blending tree connections */
+		uint32_t mpcc_bot_sel[MAX_PIPES];        /* MPCC_BOT_SEL->MPCC_BOT_SEL from mpcc_state->bot_sel */
+		uint32_t mpcc_top_sel[MAX_PIPES];        /* MPCC_TOP_SEL->MPCC_TOP_SEL from mpcc_state->dpp_id */
+
+		/* MPCC output gamma control */
+		uint32_t mpcc_ogam_mode[MAX_PIPES];      /* MPCC_OGAM_CONTROL->MPCC_OGAM_MODE from output gamma mode */
+		uint32_t mpcc_ogam_select[MAX_PIPES];    /* MPCC_OGAM_CONTROL->MPCC_OGAM_SELECT from gamma LUT bank selection */
+		uint32_t mpcc_ogam_pwl_disable[MAX_PIPES]; /* MPCC_OGAM_CONTROL->MPCC_OGAM_PWL_DISABLE from PWL control */
+
+		/* MPCC pipe assignment and status */
+		uint32_t mpcc_opp_id[MAX_PIPES];         /* MPCC_OPP_ID->MPCC_OPP_ID from mpcc_state->opp_id */
+		uint32_t mpcc_idle[MAX_PIPES];           /* MPCC_STATUS->MPCC_IDLE from mpcc idle status */
+		uint32_t mpcc_busy[MAX_PIPES];           /* MPCC_STATUS->MPCC_BUSY from mpcc busy status */
+
+		/* MPC output processing */
+		uint32_t mpc_out_csc_mode;               /* MPC_OUT_CSC_COEF->MPC_OUT_CSC_MODE from output_csc */
+		uint32_t mpc_out_gamma_mode;             /* MPC_OUT_GAMMA_LUT->MPC_OUT_GAMMA_MODE from output_gamma */
+	} mpc;
+
+	/* OPP register programming variables for each pipe */
+	struct {
+		/* Display Pattern Generator (DPG) Control - 19 fields from DPG_CONTROL register */
+		uint32_t dpg_enable;                     /* DPG_CONTROL->DPG_EN from test_pattern parameter (enable/disable) */
+
+		/* Format Control (FMT) - 18 fields from FMT_CONTROL register */
+		uint32_t fmt_pixel_encoding;             /* FMT_CONTROL->FMT_PIXEL_ENCODING from clamping->pixel_encoding */
+		uint32_t fmt_subsampling_mode;           /* FMT_CONTROL->FMT_SUBSAMPLING_MODE from force_chroma_subsampling_1tap */
+		uint32_t fmt_cbcr_bit_reduction_bypass;  /* FMT_CONTROL->FMT_CBCR_BIT_REDUCTION_BYPASS from pixel_encoding bypass control */
+		uint32_t fmt_stereosync_override;        /* FMT_CONTROL->FMT_STEREOSYNC_OVERRIDE from stereo timing override */
+		uint32_t fmt_spatial_dither_frame_counter_max; /* FMT_CONTROL->FMT_SPATIAL_DITHER_FRAME_COUNTER_MAX from fmt_bit_depth->flags */
+		uint32_t fmt_spatial_dither_frame_counter_bit_swap; /* FMT_CONTROL->FMT_SPATIAL_DITHER_FRAME_COUNTER_BIT_SWAP from dither control */
+		uint32_t fmt_truncate_enable;            /* FMT_CONTROL->FMT_TRUNCATE_EN from fmt_bit_depth->flags.TRUNCATE_ENABLED */
+		uint32_t fmt_truncate_depth;             /* FMT_CONTROL->FMT_TRUNCATE_DEPTH from fmt_bit_depth->flags.TRUNCATE_DEPTH */
+		uint32_t fmt_truncate_mode;              /* FMT_CONTROL->FMT_TRUNCATE_MODE from fmt_bit_depth->flags.TRUNCATE_MODE */
+		uint32_t fmt_spatial_dither_enable;      /* FMT_CONTROL->FMT_SPATIAL_DITHER_EN from fmt_bit_depth->flags.SPATIAL_DITHER_ENABLED */
+		uint32_t fmt_spatial_dither_mode;        /* FMT_CONTROL->FMT_SPATIAL_DITHER_MODE from fmt_bit_depth->flags.SPATIAL_DITHER_MODE */
+		uint32_t fmt_spatial_dither_depth;       /* FMT_CONTROL->FMT_SPATIAL_DITHER_DEPTH from fmt_bit_depth->flags.SPATIAL_DITHER_DEPTH */
+		uint32_t fmt_temporal_dither_enable;     /* FMT_CONTROL->FMT_TEMPORAL_DITHER_EN from fmt_bit_depth->flags.TEMPORAL_DITHER_ENABLED */
+		uint32_t fmt_clamp_data_enable;          /* FMT_CONTROL->FMT_CLAMP_DATA_EN from clamping->clamping_range enable */
+		uint32_t fmt_clamp_color_format;         /* FMT_CONTROL->FMT_CLAMP_COLOR_FORMAT from clamping->color_format */
+		uint32_t fmt_dynamic_exp_enable;         /* FMT_CONTROL->FMT_DYNAMIC_EXP_EN from color_sp/color_dpth/signal */
+		uint32_t fmt_dynamic_exp_mode;           /* FMT_CONTROL->FMT_DYNAMIC_EXP_MODE from color space mode mapping */
+		uint32_t fmt_bit_depth_control;          /* Legacy field - kept for compatibility */
+
+		/* OPP Pipe Control - 1 field from OPP_PIPE_CONTROL register */
+		uint32_t opp_pipe_clock_enable;          /* OPP_PIPE_CONTROL->OPP_PIPE_CLOCK_EN from enable parameter (bool) */
+
+		/* OPP CRC Control - 3 fields from OPP_PIPE_CRC_CONTROL register */
+		uint32_t opp_crc_enable;                 /* OPP_PIPE_CRC_CONTROL->CRC_EN from CRC enable control */
+		uint32_t opp_crc_select_source;          /* OPP_PIPE_CRC_CONTROL->CRC_SELECT_SOURCE from CRC source selection */
+		uint32_t opp_crc_stereo_cont;            /* OPP_PIPE_CRC_CONTROL->CRC_STEREO_CONT from stereo continuous CRC */
+
+		/* Output Buffer (OPPBUF) Control - 6 fields from OPPBUF_CONTROL register */
+		uint32_t oppbuf_active_width;            /* OPPBUF_CONTROL->OPPBUF_ACTIVE_WIDTH from oppbuf_params->active_width */
+		uint32_t oppbuf_pixel_repetition;        /* OPPBUF_CONTROL->OPPBUF_PIXEL_REPETITION from oppbuf_params->pixel_repetition */
+		uint32_t oppbuf_display_segmentation;    /* OPPBUF_CONTROL->OPPBUF_DISPLAY_SEGMENTATION from oppbuf_params->mso_segmentation */
+		uint32_t oppbuf_overlap_pixel_num;       /* OPPBUF_CONTROL->OPPBUF_OVERLAP_PIXEL_NUM from oppbuf_params->mso_overlap_pixel_num */
+		uint32_t oppbuf_3d_vact_space1_size;     /* OPPBUF_CONTROL->OPPBUF_3D_VACT_SPACE1_SIZE from 3D timing space1_size */
+		uint32_t oppbuf_3d_vact_space2_size;     /* OPPBUF_CONTROL->OPPBUF_3D_VACT_SPACE2_SIZE from 3D timing space2_size */
+
+		/* DSC Forward Config - 3 fields from DSCRM_DSC_FORWARD_CONFIG register */
+		uint32_t dscrm_dsc_forward_enable;       /* DSCRM_DSC_FORWARD_CONFIG->DSCRM_DSC_FORWARD_EN from DSC forward enable control */
+		uint32_t dscrm_dsc_opp_pipe_source;      /* DSCRM_DSC_FORWARD_CONFIG->DSCRM_DSC_OPP_PIPE_SOURCE from opp_pipe parameter */
+		uint32_t dscrm_dsc_forward_enable_status; /* DSCRM_DSC_FORWARD_CONFIG->DSCRM_DSC_FORWARD_EN_STATUS from DSC forward status (read-only) */
+	} opp[MAX_PIPES];
+
+	/* OPTC register programming variables for each pipe */
+	struct {
+		uint32_t otg_master_inst;
+
+		/* OTG_CONTROL register - 5 fields for OTG control */
+		uint32_t otg_master_enable;              /* OTG_CONTROL->OTG_MASTER_EN from timing enable/disable control */
+		uint32_t otg_disable_point_cntl;         /* OTG_CONTROL->OTG_DISABLE_POINT_CNTL from disable timing control */
+		uint32_t otg_start_point_cntl;           /* OTG_CONTROL->OTG_START_POINT_CNTL from start timing control */
+		uint32_t otg_field_number_cntl;          /* OTG_CONTROL->OTG_FIELD_NUMBER_CNTL from interlace field control */
+		uint32_t otg_out_mux;                    /* OTG_CONTROL->OTG_OUT_MUX from output mux selection */
+
+		/* OTG Horizontal Timing - 7 fields */
+		uint32_t otg_h_total;                    /* OTG_H_TOTAL->OTG_H_TOTAL from dc_crtc_timing->h_total */
+		uint32_t otg_h_blank_start;              /* OTG_H_BLANK_START_END->OTG_H_BLANK_START from dc_crtc_timing->h_front_porch */
+		uint32_t otg_h_blank_end;                /* OTG_H_BLANK_START_END->OTG_H_BLANK_END from dc_crtc_timing->h_addressable_video_pixel_width */
+		uint32_t otg_h_sync_start;               /* OTG_H_SYNC_A->OTG_H_SYNC_A_START from dc_crtc_timing->h_sync_width */
+		uint32_t otg_h_sync_end;                 /* OTG_H_SYNC_A->OTG_H_SYNC_A_END from calculated sync end position */
+		uint32_t otg_h_sync_polarity;            /* OTG_H_SYNC_A_CNTL->OTG_H_SYNC_A_POL from dc_crtc_timing->flags.HSYNC_POSITIVE_POLARITY */
+		uint32_t otg_h_timing_div_mode;          /* OTG_H_TIMING_CNTL->OTG_H_TIMING_DIV_MODE from horizontal timing division mode */
+
+		/* OTG Vertical Timing - 7 fields */
+		uint32_t otg_v_total;                    /* OTG_V_TOTAL->OTG_V_TOTAL from dc_crtc_timing->v_total */
+		uint32_t otg_v_blank_start;              /* OTG_V_BLANK_START_END->OTG_V_BLANK_START from dc_crtc_timing->v_front_porch */
+		uint32_t otg_v_blank_end;                /* OTG_V_BLANK_START_END->OTG_V_BLANK_END from dc_crtc_timing->v_addressable_video_line_width */
+		uint32_t otg_v_sync_start;               /* OTG_V_SYNC_A->OTG_V_SYNC_A_START from dc_crtc_timing->v_sync_width */
+		uint32_t otg_v_sync_end;                 /* OTG_V_SYNC_A->OTG_V_SYNC_A_END from calculated sync end position */
+		uint32_t otg_v_sync_polarity;            /* OTG_V_SYNC_A_CNTL->OTG_V_SYNC_A_POL from dc_crtc_timing->flags.VSYNC_POSITIVE_POLARITY */
+		uint32_t otg_v_sync_mode;                /* OTG_V_SYNC_A_CNTL->OTG_V_SYNC_MODE from sync mode selection */
+
+		/* OTG DRR (Dynamic Refresh Rate) Control - 8 fields */
+		uint32_t otg_v_total_max;                /* OTG_V_TOTAL_MAX->OTG_V_TOTAL_MAX from drr_params->vertical_total_max */
+		uint32_t otg_v_total_min;                /* OTG_V_TOTAL_MIN->OTG_V_TOTAL_MIN from drr_params->vertical_total_min */
+		uint32_t otg_v_total_mid;                /* OTG_V_TOTAL_MID->OTG_V_TOTAL_MID from drr_params->vertical_total_mid */
+		uint32_t otg_v_total_max_sel;            /* OTG_V_TOTAL_CONTROL->OTG_V_TOTAL_MAX_SEL from DRR max selection enable */
+		uint32_t otg_v_total_min_sel;            /* OTG_V_TOTAL_CONTROL->OTG_V_TOTAL_MIN_SEL from DRR min selection enable */
+		uint32_t otg_vtotal_mid_replacing_max_en; /* OTG_V_TOTAL_CONTROL->OTG_VTOTAL_MID_REPLACING_MAX_EN from DRR mid-frame enable */
+		uint32_t otg_vtotal_mid_frame_num;       /* OTG_V_TOTAL_CONTROL->OTG_VTOTAL_MID_FRAME_NUM from drr_params->vertical_total_mid_frame_num */
+		uint32_t otg_set_v_total_min_mask;       /* OTG_V_TOTAL_CONTROL->OTG_SET_V_TOTAL_MIN_MASK from DRR trigger mask */
+		uint32_t otg_force_lock_on_event;        /* OTG_V_TOTAL_CONTROL->OTG_FORCE_LOCK_ON_EVENT from DRR force lock control */
+
+		/* OPTC Data Source and ODM - 6 fields */
+		uint32_t optc_seg0_src_sel;              /* OPTC_DATA_SOURCE_SELECT->OPTC_SEG0_SRC_SEL from opp_id[0] ODM segment 0 source */
+		uint32_t optc_seg1_src_sel;              /* OPTC_DATA_SOURCE_SELECT->OPTC_SEG1_SRC_SEL from opp_id[1] ODM segment 1 source */
+		uint32_t optc_seg2_src_sel;              /* OPTC_DATA_SOURCE_SELECT->OPTC_SEG2_SRC_SEL from opp_id[2] ODM segment 2 source */
+		uint32_t optc_seg3_src_sel;              /* OPTC_DATA_SOURCE_SELECT->OPTC_SEG3_SRC_SEL from opp_id[3] ODM segment 3 source */
+		uint32_t optc_num_of_input_segment;      /* OPTC_DATA_SOURCE_SELECT->OPTC_NUM_OF_INPUT_SEGMENT from opp_cnt-1 number of input segments */
+		uint32_t optc_mem_sel;                   /* OPTC_MEMORY_CONFIG->OPTC_MEM_SEL from memory_mask ODM memory selection */
+
+		/* OPTC Data Format and DSC - 4 fields */
+		uint32_t optc_data_format;               /* OPTC_DATA_FORMAT_CONTROL->OPTC_DATA_FORMAT from data format selection */
+		uint32_t optc_dsc_mode;                  /* OPTC_DATA_FORMAT_CONTROL->OPTC_DSC_MODE from dsc_mode parameter */
+		uint32_t optc_dsc_bytes_per_pixel;       /* OPTC_BYTES_PER_PIXEL->OPTC_DSC_BYTES_PER_PIXEL from dsc_bytes_per_pixel parameter */
+		uint32_t optc_segment_width;             /* OPTC_WIDTH_CONTROL->OPTC_SEGMENT_WIDTH from segment_width parameter */
+		uint32_t optc_dsc_slice_width;           /* OPTC_WIDTH_CONTROL->OPTC_DSC_SLICE_WIDTH from dsc_slice_width parameter */
+
+		/* OPTC Clock and Underflow Control - 4 fields */
+		uint32_t optc_input_pix_clk_en;          /* OPTC_INPUT_CLOCK_CONTROL->OPTC_INPUT_PIX_CLK_EN from pixel clock enable */
+		uint32_t optc_underflow_occurred_status; /* OPTC_INPUT_GLOBAL_CONTROL->OPTC_UNDERFLOW_OCCURRED_STATUS from underflow status (read-only) */
+		uint32_t optc_underflow_clear;           /* OPTC_INPUT_GLOBAL_CONTROL->OPTC_UNDERFLOW_CLEAR from underflow clear control */
+		uint32_t otg_clock_enable;               /* OTG_CLOCK_CONTROL->OTG_CLOCK_EN from OTG clock enable */
+		uint32_t otg_clock_gate_dis;             /* OTG_CLOCK_CONTROL->OTG_CLOCK_GATE_DIS from clock gate disable */
+
+		/* OTG Stereo and 3D Control - 6 fields */
+		uint32_t otg_stereo_enable;              /* OTG_STEREO_CONTROL->OTG_STEREO_EN from stereo enable control */
+		uint32_t otg_stereo_sync_output_line_num; /* OTG_STEREO_CONTROL->OTG_STEREO_SYNC_OUTPUT_LINE_NUM from timing->stereo_3d_format line num */
+		uint32_t otg_stereo_sync_output_polarity; /* OTG_STEREO_CONTROL->OTG_STEREO_SYNC_OUTPUT_POLARITY from stereo polarity control */
+		uint32_t otg_3d_structure_en;            /* OTG_3D_STRUCTURE_CONTROL->OTG_3D_STRUCTURE_EN from 3D structure enable */
+		uint32_t otg_3d_structure_v_update_mode; /* OTG_3D_STRUCTURE_CONTROL->OTG_3D_STRUCTURE_V_UPDATE_MODE from 3D vertical update mode */
+		uint32_t otg_3d_structure_stereo_sel_ovr; /* OTG_3D_STRUCTURE_CONTROL->OTG_3D_STRUCTURE_STEREO_SEL_OVR from 3D stereo selection override */
+		uint32_t otg_interlace_enable;           /* OTG_INTERLACE_CONTROL->OTG_INTERLACE_ENABLE from dc_crtc_timing->flags.INTERLACE */
+
+		/* OTG GSL (Global Sync Lock) Control - 5 fields */
+		uint32_t otg_gsl0_en;                    /* OTG_GSL_CONTROL->OTG_GSL0_EN from GSL group 0 enable */
+		uint32_t otg_gsl1_en;                    /* OTG_GSL_CONTROL->OTG_GSL1_EN from GSL group 1 enable */
+		uint32_t otg_gsl2_en;                    /* OTG_GSL_CONTROL->OTG_GSL2_EN from GSL group 2 enable */
+		uint32_t otg_gsl_master_en;              /* OTG_GSL_CONTROL->OTG_GSL_MASTER_EN from GSL master enable */
+		uint32_t otg_gsl_master_mode;            /* OTG_GSL_CONTROL->OTG_GSL_MASTER_MODE from gsl_params->gsl_master mode */
+
+		/* OTG DRR Advanced Control - 4 fields */
+		uint32_t otg_v_total_last_used_by_drr;   /* OTG_DRR_CONTROL->OTG_V_TOTAL_LAST_USED_BY_DRR from last used DRR V_TOTAL (read-only) */
+		uint32_t otg_drr_trigger_window_start_x; /* OTG_DRR_TRIGGER_WINDOW->OTG_DRR_TRIGGER_WINDOW_START_X from window_start parameter */
+		uint32_t otg_drr_trigger_window_end_x;   /* OTG_DRR_TRIGGER_WINDOW->OTG_DRR_TRIGGER_WINDOW_END_X from window_end parameter */
+		uint32_t otg_drr_v_total_change_limit;   /* OTG_DRR_V_TOTAL_CHANGE->OTG_DRR_V_TOTAL_CHANGE_LIMIT from limit parameter */
+
+		/* OTG DSC Position Control - 2 fields */
+		uint32_t otg_dsc_start_position_x;       /* OTG_DSC_START_POSITION->OTG_DSC_START_POSITION_X from DSC start X position */
+		uint32_t otg_dsc_start_position_line_num; /* OTG_DSC_START_POSITION->OTG_DSC_START_POSITION_LINE_NUM from DSC start line number */
+
+		/* OTG Double Buffer Control - 2 fields */
+		uint32_t otg_drr_timing_dbuf_update_mode; /* OTG_DOUBLE_BUFFER_CONTROL->OTG_DRR_TIMING_DBUF_UPDATE_MODE from DRR double buffer mode */
+		uint32_t otg_blank_data_double_buffer_en; /* OTG_DOUBLE_BUFFER_CONTROL->OTG_BLANK_DATA_DOUBLE_BUFFER_EN from blank data double buffer enable */
+
+		/* OTG Vertical Interrupts - 6 fields */
+		uint32_t otg_vertical_interrupt0_int_enable; /* OTG_VERTICAL_INTERRUPT0_CONTROL->OTG_VERTICAL_INTERRUPT0_INT_ENABLE from interrupt 0 enable */
+		uint32_t otg_vertical_interrupt0_line_start; /* OTG_VERTICAL_INTERRUPT0_POSITION->OTG_VERTICAL_INTERRUPT0_LINE_START from start_line parameter */
+		uint32_t otg_vertical_interrupt1_int_enable; /* OTG_VERTICAL_INTERRUPT1_CONTROL->OTG_VERTICAL_INTERRUPT1_INT_ENABLE from interrupt 1 enable */
+		uint32_t otg_vertical_interrupt1_line_start; /* OTG_VERTICAL_INTERRUPT1_POSITION->OTG_VERTICAL_INTERRUPT1_LINE_START from start_line parameter */
+		uint32_t otg_vertical_interrupt2_int_enable; /* OTG_VERTICAL_INTERRUPT2_CONTROL->OTG_VERTICAL_INTERRUPT2_INT_ENABLE from interrupt 2 enable */
+		uint32_t otg_vertical_interrupt2_line_start; /* OTG_VERTICAL_INTERRUPT2_POSITION->OTG_VERTICAL_INTERRUPT2_LINE_START from start_line parameter */
+
+		/* OTG Global Sync Parameters - 6 fields */
+		uint32_t otg_vready_offset;              /* OTG_VREADY_PARAM->OTG_VREADY_OFFSET from vready_offset parameter */
+		uint32_t otg_vstartup_start;             /* OTG_VSTARTUP_PARAM->OTG_VSTARTUP_START from vstartup_start parameter */
+		uint32_t otg_vupdate_offset;             /* OTG_VUPDATE_PARAM->OTG_VUPDATE_OFFSET from vupdate_offset parameter */
+		uint32_t otg_vupdate_width;              /* OTG_VUPDATE_PARAM->OTG_VUPDATE_WIDTH from vupdate_width parameter */
+		uint32_t master_update_lock_vupdate_keepout_start_offset; /* OTG_VUPDATE_KEEPOUT->MASTER_UPDATE_LOCK_VUPDATE_KEEPOUT_START_OFFSET from pstate_keepout start */
+		uint32_t master_update_lock_vupdate_keepout_end_offset;   /* OTG_VUPDATE_KEEPOUT->MASTER_UPDATE_LOCK_VUPDATE_KEEPOUT_END_OFFSET from pstate_keepout end */
+
+		/* OTG Manual Trigger Control - 11 fields */
+		uint32_t otg_triga_source_select;        /* OTG_TRIGA_CNTL->OTG_TRIGA_SOURCE_SELECT from trigger A source selection */
+		uint32_t otg_triga_source_pipe_select;   /* OTG_TRIGA_CNTL->OTG_TRIGA_SOURCE_PIPE_SELECT from trigger A pipe selection */
+		uint32_t otg_triga_rising_edge_detect_cntl; /* OTG_TRIGA_CNTL->OTG_TRIGA_RISING_EDGE_DETECT_CNTL from trigger A rising edge detect */
+		uint32_t otg_triga_falling_edge_detect_cntl; /* OTG_TRIGA_CNTL->OTG_TRIGA_FALLING_EDGE_DETECT_CNTL from trigger A falling edge detect */
+		uint32_t otg_triga_polarity_select;      /* OTG_TRIGA_CNTL->OTG_TRIGA_POLARITY_SELECT from trigger A polarity selection */
+		uint32_t otg_triga_frequency_select;     /* OTG_TRIGA_CNTL->OTG_TRIGA_FREQUENCY_SELECT from trigger A frequency selection */
+		uint32_t otg_triga_delay;                /* OTG_TRIGA_CNTL->OTG_TRIGA_DELAY from trigger A delay */
+		uint32_t otg_triga_clear;                /* OTG_TRIGA_CNTL->OTG_TRIGA_CLEAR from trigger A clear */
+		uint32_t otg_triga_manual_trig;          /* OTG_TRIGA_MANUAL_TRIG->OTG_TRIGA_MANUAL_TRIG from manual trigger A */
+		uint32_t otg_trigb_source_select;        /* OTG_TRIGB_CNTL->OTG_TRIGB_SOURCE_SELECT from trigger B source selection */
+		uint32_t otg_trigb_polarity_select;      /* OTG_TRIGB_CNTL->OTG_TRIGB_POLARITY_SELECT from trigger B polarity selection */
+		uint32_t otg_trigb_manual_trig;          /* OTG_TRIGB_MANUAL_TRIG->OTG_TRIGB_MANUAL_TRIG from manual trigger B */
+
+		/* OTG Static Screen and Update Control - 6 fields */
+		uint32_t otg_static_screen_event_mask;   /* OTG_STATIC_SCREEN_CONTROL->OTG_STATIC_SCREEN_EVENT_MASK from event_triggers parameter */
+		uint32_t otg_static_screen_frame_count;  /* OTG_STATIC_SCREEN_CONTROL->OTG_STATIC_SCREEN_FRAME_COUNT from num_frames parameter */
+		uint32_t master_update_lock;             /* OTG_MASTER_UPDATE_LOCK->MASTER_UPDATE_LOCK from update lock control */
+		uint32_t master_update_mode;             /* OTG_MASTER_UPDATE_MODE->MASTER_UPDATE_MODE from update mode selection */
+		uint32_t otg_force_count_now_mode;       /* OTG_FORCE_COUNT_NOW_CNTL->OTG_FORCE_COUNT_NOW_MODE from force count mode */
+		uint32_t otg_force_count_now_clear;      /* OTG_FORCE_COUNT_NOW_CNTL->OTG_FORCE_COUNT_NOW_CLEAR from force count clear */
+
+		/* VTG Control - 3 fields */
+		uint32_t vtg0_enable;                    /* CONTROL->VTG0_ENABLE from VTG enable control */
+		uint32_t vtg0_fp2;                       /* CONTROL->VTG0_FP2 from VTG front porch 2 */
+		uint32_t vtg0_vcount_init;               /* CONTROL->VTG0_VCOUNT_INIT from VTG vertical count init */
+
+		/* OTG Status (Read-Only) - 12 fields */
+		uint32_t otg_v_blank;                    /* OTG_STATUS->OTG_V_BLANK from vertical blank status (read-only) */
+		uint32_t otg_v_active_disp;              /* OTG_STATUS->OTG_V_ACTIVE_DISP from vertical active display (read-only) */
+		uint32_t otg_frame_count;                /* OTG_STATUS_FRAME_COUNT->OTG_FRAME_COUNT from frame count (read-only) */
+		uint32_t otg_horz_count;                 /* OTG_STATUS_POSITION->OTG_HORZ_COUNT from horizontal position (read-only) */
+		uint32_t otg_vert_count;                 /* OTG_STATUS_POSITION->OTG_VERT_COUNT from vertical position (read-only) */
+		uint32_t otg_horz_count_hv;              /* OTG_STATUS_HV_COUNT->OTG_HORZ_COUNT from horizontal count (read-only) */
+		uint32_t otg_vert_count_nom;             /* OTG_STATUS_HV_COUNT->OTG_VERT_COUNT_NOM from vertical count nominal (read-only) */
+		uint32_t otg_flip_pending;               /* OTG_PIPE_UPDATE_STATUS->OTG_FLIP_PENDING from flip pending status (read-only) */
+		uint32_t otg_dc_reg_update_pending;      /* OTG_PIPE_UPDATE_STATUS->OTG_DC_REG_UPDATE_PENDING from DC register update pending (read-only) */
+		uint32_t otg_cursor_update_pending;      /* OTG_PIPE_UPDATE_STATUS->OTG_CURSOR_UPDATE_PENDING from cursor update pending (read-only) */
+		uint32_t otg_vupdate_keepout_status;     /* OTG_PIPE_UPDATE_STATUS->OTG_VUPDATE_KEEPOUT_STATUS from VUPDATE keepout status (read-only) */
+	} optc[MAX_PIPES];
+
+	/* Metadata */
+	uint32_t active_pipe_count;
+	uint32_t active_stream_count;
+	bool state_valid;
+};
+
+/**
+ * dc_capture_register_software_state() - Capture software state for register programming
+ * @dc: DC context containing current display configuration
+ * @state: Pointer to dc_register_software_state structure to populate
+ *
+ * Extracts all software state variables that are used to program hardware register
+ * fields across the display driver pipeline. This provides a complete snapshot
+ * of the software configuration that drives hardware register programming.
+ *
+ * The function traverses the DC context and extracts values from:
+ * - Stream configurations (timing, format, DSC settings)
+ * - Plane states (surface format, rotation, scaling, cursor)
+ * - Pipe contexts (resource allocation, blending, viewport)
+ * - Clock manager (display clocks, DPP clocks, pixel clocks)
+ * - Resource context (DET buffer allocation, ODM configuration)
+ *
+ * This is essential for underflow debugging as it captures the exact software
+ * state that determines how registers are programmed, allowing analysis of
+ * whether underflow is caused by incorrect register programming or timing issues.
+ *
+ * Return: true if state was successfully captured, false on error
+ */
+bool dc_capture_register_software_state(struct dc *dc, struct dc_register_software_state *state);
+
+/**
+ * dc_get_qos_info() - Retrieve Quality of Service (QoS) information from display core
+ * @dc: DC context containing current display configuration
+ * @info: Pointer to dc_qos_info structure to populate with QoS metrics
+ *
+ * This function retrieves QoS metrics from the display core that can be used by
+ * benchmark tools to analyze display system performance. The function may take
+ * several milliseconds to execute due to hardware measurement requirements.
+ *
+ * QoS information includes:
+ * - Bandwidth bounds (lower limits in Mbps)
+ * - Latency bounds (upper limits in nanoseconds)
+ * - Hardware-measured bandwidth metrics (peak/average in Mbps)
+ * - Hardware-measured latency metrics (maximum/average in nanoseconds)
+ *
+ * The function will populate the provided dc_qos_info structure with current
+ * QoS measurements. If hardware measurement functions are not available for
+ * the current DCN version, the function returns false with zero'd info structure.
+ *
+ * Return: true if QoS information was successfully retrieved, false if measurement
+ *         functions are unavailable or hardware measurements cannot be performed
+ */
+bool dc_get_qos_info(struct dc *dc, struct dc_qos_info *info);
+
+/**
+ * dc_override_memory_bandwidth_request - Override the DCN nominal memory
+ *     bandwidth request sent to PMFW, independent of the current display mode.
+ *     For debug use only.
+ * @dc: DC instance
+ * @bw_mbps: requested bandwidth in MB/s; 0 clears the override
+ *
+ * Return: capped bandwidth value actually applied (MB/s)
+ */
+unsigned int dc_override_memory_bandwidth_request(
+		struct dc *dc,
+		unsigned int bw_mbps);
 
 #endif /* DC_INTERFACE_H_ */

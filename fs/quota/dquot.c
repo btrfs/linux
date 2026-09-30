@@ -153,7 +153,7 @@ void __quota_error(struct super_block *sb, const char *func,
 }
 EXPORT_SYMBOL(__quota_error);
 
-#if defined(CONFIG_QUOTA_DEBUG) || defined(CONFIG_PRINT_QUOTA_WARNING)
+#ifdef CONFIG_QUOTA_DEBUG
 static char *quotatypes[] = INITQFNAMES;
 #endif
 static struct quota_format_type *quota_formats;	/* List of registered formats */
@@ -362,6 +362,31 @@ static inline int dquot_active(struct dquot *dquot)
 {
 	return test_bit(DQ_ACTIVE_B, &dquot->dq_flags);
 }
+
+static struct dquot *__dqgrab(struct dquot *dquot)
+{
+	lockdep_assert_held(&dq_list_lock);
+	if (!atomic_read(&dquot->dq_count))
+		remove_free_dquot(dquot);
+	atomic_inc(&dquot->dq_count);
+	return dquot;
+}
+
+/*
+ * Get reference to dquot when we got pointer to it by some other means. The
+ * dquot has to be active and the caller has to make sure it cannot get
+ * deactivated under our hands.
+ */
+struct dquot *dqgrab(struct dquot *dquot)
+{
+	spin_lock(&dq_list_lock);
+	WARN_ON_ONCE(!dquot_active(dquot));
+	dquot = __dqgrab(dquot);
+	spin_unlock(&dq_list_lock);
+
+	return dquot;
+}
+EXPORT_SYMBOL_GPL(dqgrab);
 
 static inline int dquot_dirty(struct dquot *dquot)
 {
@@ -641,15 +666,14 @@ int dquot_scan_active(struct super_block *sb,
 			continue;
 		if (dquot->dq_sb != sb)
 			continue;
-		/* Now we have active dquot so we can just increase use count */
-		atomic_inc(&dquot->dq_count);
+		__dqgrab(dquot);
 		spin_unlock(&dq_list_lock);
 		dqput(old_dquot);
 		old_dquot = dquot;
 		/*
 		 * ->release_dquot() can be racing with us. Our reference
-		 * protects us from new calls to it so just wait for any
-		 * outstanding call and recheck the DQ_ACTIVE_B after that.
+		 * protects us from dquot_release() proceeding so just wait for
+		 * any outstanding call and recheck the DQ_ACTIVE_B after that.
 		 */
 		wait_on_dquot(dquot);
 		if (dquot_active(dquot)) {
@@ -717,7 +741,7 @@ int dquot_writeback_dquots(struct super_block *sb, int type)
 			/* Now we have active dquot from which someone is
  			 * holding reference so we can safely just increase
 			 * use count */
-			dqgrab(dquot);
+			__dqgrab(dquot);
 			spin_unlock(&dq_list_lock);
 			err = dquot_write_dquot(dquot);
 			if (err && !ret)
@@ -963,9 +987,7 @@ we_slept:
 		spin_unlock(&dq_list_lock);
 		dqstats_inc(DQST_LOOKUPS);
 	} else {
-		if (!atomic_read(&dquot->dq_count))
-			remove_free_dquot(dquot);
-		atomic_inc(&dquot->dq_count);
+		__dqgrab(dquot);
 		spin_unlock(&dq_list_lock);
 		dqstats_inc(DQST_CACHE_HITS);
 		dqstats_inc(DQST_LOOKUPS);
@@ -1033,7 +1055,7 @@ static int add_dquot_ref(struct super_block *sb, int type)
 	spin_lock(&sb->s_inode_list_lock);
 	list_for_each_entry(inode, &sb->s_inodes, i_sb_list) {
 		spin_lock(&inode->i_lock);
-		if ((inode->i_state & (I_FREEING|I_WILL_FREE|I_NEW)) ||
+		if ((inode_state_read(inode) & (I_FREEING | I_WILL_FREE | I_NEW)) ||
 		    !atomic_read(&inode->i_writecount) ||
 		    !dqinit_needed(inode, type)) {
 			spin_unlock(&inode->i_lock);
@@ -1186,72 +1208,6 @@ static int warning_issued(struct dquot *dquot, const int warntype)
 	return test_and_set_bit(flag, &dquot->dq_flags);
 }
 
-#ifdef CONFIG_PRINT_QUOTA_WARNING
-static int flag_print_warnings = 1;
-
-static int need_print_warning(struct dquot_warn *warn)
-{
-	if (!flag_print_warnings)
-		return 0;
-
-	switch (warn->w_dq_id.type) {
-		case USRQUOTA:
-			return uid_eq(current_fsuid(), warn->w_dq_id.uid);
-		case GRPQUOTA:
-			return in_group_p(warn->w_dq_id.gid);
-		case PRJQUOTA:
-			return 1;
-	}
-	return 0;
-}
-
-/* Print warning to user which exceeded quota */
-static void print_warning(struct dquot_warn *warn)
-{
-	char *msg = NULL;
-	struct tty_struct *tty;
-	int warntype = warn->w_type;
-
-	if (warntype == QUOTA_NL_IHARDBELOW ||
-	    warntype == QUOTA_NL_ISOFTBELOW ||
-	    warntype == QUOTA_NL_BHARDBELOW ||
-	    warntype == QUOTA_NL_BSOFTBELOW || !need_print_warning(warn))
-		return;
-
-	tty = get_current_tty();
-	if (!tty)
-		return;
-	tty_write_message(tty, warn->w_sb->s_id);
-	if (warntype == QUOTA_NL_ISOFTWARN || warntype == QUOTA_NL_BSOFTWARN)
-		tty_write_message(tty, ": warning, ");
-	else
-		tty_write_message(tty, ": write failed, ");
-	tty_write_message(tty, quotatypes[warn->w_dq_id.type]);
-	switch (warntype) {
-		case QUOTA_NL_IHARDWARN:
-			msg = " file limit reached.\r\n";
-			break;
-		case QUOTA_NL_ISOFTLONGWARN:
-			msg = " file quota exceeded too long.\r\n";
-			break;
-		case QUOTA_NL_ISOFTWARN:
-			msg = " file quota exceeded.\r\n";
-			break;
-		case QUOTA_NL_BHARDWARN:
-			msg = " block limit reached.\r\n";
-			break;
-		case QUOTA_NL_BSOFTLONGWARN:
-			msg = " block quota exceeded too long.\r\n";
-			break;
-		case QUOTA_NL_BSOFTWARN:
-			msg = " block quota exceeded.\r\n";
-			break;
-	}
-	tty_write_message(tty, msg);
-	tty_kref_put(tty);
-}
-#endif
-
 static void prepare_warning(struct dquot_warn *warn, struct dquot *dquot,
 			    int warntype)
 {
@@ -1274,9 +1230,7 @@ static void flush_warnings(struct dquot_warn *warn)
 	for (i = 0; i < MAXQUOTAS; i++) {
 		if (warn[i].w_type == QUOTA_NL_NOWARN)
 			continue;
-#ifdef CONFIG_PRINT_QUOTA_WARNING
-		print_warning(&warn[i]);
-#endif
+
 		quota_send_warning(warn[i].w_dq_id,
 				   warn[i].w_sb->s_dev, warn[i].w_type);
 	}
@@ -1286,7 +1240,7 @@ static int ignore_hardlimit(struct dquot *dquot)
 {
 	struct mem_dqinfo *info = &sb_dqopt(dquot->dq_sb)->info[dquot->dq_id.type];
 
-	return capable(CAP_SYS_RESOURCE) &&
+	return capable_noaudit(CAP_SYS_RESOURCE) &&
 	       (info->dqi_format->qf_fmt_id != QFMT_VFS_OLD ||
 		!(info->dqi_flags & DQF_ROOT_SQUASH));
 }
@@ -2986,21 +2940,12 @@ static const struct ctl_table fs_dqstats_table[] = {
 		.mode		= 0444,
 		.proc_handler	= do_proc_dqstats,
 	},
-#ifdef CONFIG_PRINT_QUOTA_WARNING
-	{
-		.procname	= "warnings",
-		.data		= &flag_print_warnings,
-		.maxlen		= sizeof(int),
-		.mode		= 0644,
-		.proc_handler	= proc_dointvec,
-	},
-#endif
 };
 
 static int __init dquot_init(void)
 {
 	int i, ret;
-	unsigned long nr_hash, order;
+	unsigned long nr_hash;
 	struct shrinker *dqcache_shrinker;
 
 	printk(KERN_NOTICE "VFS: Disk quotas %s\n", __DQUOT_VERSION__);
@@ -3013,8 +2958,7 @@ static int __init dquot_init(void)
 				SLAB_PANIC),
 			NULL);
 
-	order = 0;
-	dquot_hash = (struct hlist_head *)__get_free_pages(GFP_KERNEL, order);
+	dquot_hash = kmalloc(PAGE_SIZE, GFP_KERNEL);
 	if (!dquot_hash)
 		panic("Cannot create dquot hash table");
 
@@ -3024,7 +2968,7 @@ static int __init dquot_init(void)
 		panic("Cannot create dquot stat counters");
 
 	/* Find power-of-two hlist_heads which can fit into allocation */
-	nr_hash = (1UL << order) * PAGE_SIZE / sizeof(struct hlist_head);
+	nr_hash = PAGE_SIZE / sizeof(struct hlist_head);
 	dq_hash_bits = ilog2(nr_hash);
 
 	nr_hash = 1UL << dq_hash_bits;
@@ -3032,8 +2976,8 @@ static int __init dquot_init(void)
 	for (i = 0; i < nr_hash; i++)
 		INIT_HLIST_HEAD(dquot_hash + i);
 
-	pr_info("VFS: Dquot-cache hash table entries: %ld (order %ld,"
-		" %ld bytes)\n", nr_hash, order, (PAGE_SIZE << order));
+	pr_info("VFS: Dquot-cache hash table entries: %ld (%ld bytes)\n",
+		nr_hash, PAGE_SIZE);
 
 	dqcache_shrinker = shrinker_alloc(0, "dquota-cache");
 	if (!dqcache_shrinker)

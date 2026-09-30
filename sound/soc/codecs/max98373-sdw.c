@@ -4,7 +4,6 @@
 #include <linux/acpi.h>
 #include <linux/delay.h>
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/pm_runtime.h>
 #include <linux/regmap.h>
 #include <linux/slab.h>
@@ -266,27 +265,24 @@ static int max98373_resume(struct device *dev)
 {
 	struct sdw_slave *slave = dev_to_sdw_dev(dev);
 	struct max98373_priv *max98373 = dev_get_drvdata(dev);
-	unsigned long time;
+	int ret;
 
 	if (!max98373->first_hw_init)
 		return 0;
 
-	if (!slave->unattach_request)
-		goto regmap_sync;
-
-	time = wait_for_completion_timeout(&slave->initialization_complete,
-					   msecs_to_jiffies(MAX98373_PROBE_TIMEOUT));
-	if (!time) {
-		dev_err(dev, "Initialization not complete, timed out\n");
+	ret = sdw_slave_wait_for_init(slave, MAX98373_PROBE_TIMEOUT);
+	if (ret) {
 		sdw_show_ping_status(slave->bus, true);
-
-		return -ETIMEDOUT;
+		return ret;
 	}
 
-regmap_sync:
-	slave->unattach_request = 0;
 	regcache_cache_only(max98373->regmap, false);
-	regcache_sync(max98373->regmap);
+	ret = regcache_sync(max98373->regmap);
+	if (ret) {
+		regcache_cache_only(max98373->regmap, true);
+		regcache_mark_dirty(max98373->regmap);
+		return ret;
+	}
 
 	return 0;
 }
@@ -839,11 +835,9 @@ static int max98373_sdw_probe(struct sdw_slave *slave,
 	return max98373_init(slave, regmap);
 }
 
-static int max98373_sdw_remove(struct sdw_slave *slave)
+static void max98373_sdw_remove(struct sdw_slave *slave)
 {
 	pm_runtime_disable(&slave->dev);
-
-	return 0;
 }
 
 #if defined(CONFIG_OF)

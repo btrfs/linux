@@ -21,6 +21,7 @@ enum mlx5e_rx_res_features {
 	MLX5E_RX_RES_FEATURE_INNER_FT = BIT(0),
 	MLX5E_RX_RES_FEATURE_PTP = BIT(1),
 	MLX5E_RX_RES_FEATURE_MULTI_VHCA = BIT(2),
+	MLX5E_RX_RES_FEATURE_SELF_LB_BLOCK = BIT(3),
 };
 
 /* Setup */
@@ -47,7 +48,6 @@ void mlx5e_rx_res_xsk_update(struct mlx5e_rx_res *res, struct mlx5e_channels *ch
 			     unsigned int ix, bool xsk);
 
 /* Configuration API */
-void mlx5e_rx_res_rss_set_indir_uniform(struct mlx5e_rx_res *res, unsigned int nch);
 void mlx5e_rx_res_rss_get_rxfh(struct mlx5e_rx_res *res, u32 rss_idx,
 			       u32 *indir, u8 *key, u8 *hfunc,
 			       bool *symmetric);
@@ -67,7 +67,8 @@ int mlx5e_rx_res_rss_destroy(struct mlx5e_rx_res *res, u32 rss_idx);
 int mlx5e_rx_res_rss_cnt(struct mlx5e_rx_res *res);
 int mlx5e_rx_res_rss_index(struct mlx5e_rx_res *res, struct mlx5e_rss *rss);
 struct mlx5e_rss *mlx5e_rx_res_rss_get(struct mlx5e_rx_res *res, u32 rss_idx);
-void mlx5e_rx_res_rss_update_num_channels(struct mlx5e_rx_res *res, u32 nch);
+void mlx5e_rx_res_rss_update_num_channels(struct mlx5e_rx_res *res, u32 nch,
+					  struct net_device *netdev);
 
 /* Workaround for hairpin */
 struct mlx5e_rss_params_hash mlx5e_rx_res_get_current_hash(struct mlx5e_rx_res *res);

@@ -50,6 +50,7 @@
 static void optc314_set_odm_combine(struct timing_generator *optc, int *opp_id, int opp_cnt,
 		int segment_width, int last_segment_width)
 {
+	(void)last_segment_width;
 	struct optc *optc1 = DCN10TG_FROM_TG(optc);
 	uint32_t memory_mask = 0;
 	int h_active = segment_width * opp_cnt;
@@ -114,15 +115,10 @@ static bool optc314_enable_crtc(struct timing_generator *optc)
 	REG_UPDATE(CONTROL,
 			VTG0_ENABLE, 1);
 
-	REG_SEQ_START();
-
 	/* Enable CRTC */
 	REG_UPDATE_2(OTG_CONTROL,
 			OTG_DISABLE_POINT_CNTL, 2,
 			OTG_MASTER_EN, 1);
-
-	REG_SEQ_SUBMIT();
-	REG_SEQ_WAIT_DONE();
 
 	return true;
 }
@@ -256,6 +252,7 @@ static const struct timing_generator_funcs dcn314_tg_funcs = {
 		.set_h_timing_div_manual_mode = optc314_set_h_timing_div_manual_mode,
 		.is_two_pixels_per_container = optc1_is_two_pixels_per_container,
 		.read_otg_state = optc31_read_otg_state,
+		.optc_read_reg_state = optc31_read_reg_state,
 };
 
 void dcn314_timing_generator_init(struct optc *optc1)

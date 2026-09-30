@@ -177,7 +177,7 @@ new_device_store(const struct bus_type *bus, const char *buf, size_t count)
 		}
 		break;
 	default:
-		pr_err("Format for adding new device is \"id port_count num_queues\" (uint uint unit).\n");
+		pr_err("Format for adding new device is \"id port_count num_queues\" (uint uint uint).\n");
 		return -EINVAL;
 	}
 
@@ -332,6 +332,11 @@ static ssize_t link_device_store(const struct bus_type *bus, const char *buf, si
 	rcu_assign_pointer(nsim_a->peer, nsim_b);
 	rcu_assign_pointer(nsim_b->peer, nsim_a);
 
+	if (netif_running(dev_a) && netif_running(dev_b)) {
+		netif_carrier_on(dev_a);
+		netif_carrier_on(dev_b);
+	}
+
 out_err:
 	put_net(ns_b);
 	put_net(ns_a);
@@ -380,6 +385,9 @@ static ssize_t unlink_device_store(const struct bus_type *bus, const char *buf, 
 	peer = rtnl_dereference(nsim->peer);
 	if (!peer)
 		goto out_put_netns;
+
+	netif_carrier_off(dev);
+	netif_carrier_off(peer->netdev);
 
 	err = 0;
 	RCU_INIT_POINTER(nsim->peer, NULL);
@@ -435,15 +443,13 @@ static const struct bus_type nsim_bus = {
 	.num_vf		= nsim_num_vf,
 };
 
-#define NSIM_BUS_DEV_MAX_VFS 4
-
 static struct nsim_bus_dev *
 nsim_bus_dev_new(unsigned int id, unsigned int port_count, unsigned int num_queues)
 {
 	struct nsim_bus_dev *nsim_bus_dev;
 	int err;
 
-	nsim_bus_dev = kzalloc(sizeof(*nsim_bus_dev), GFP_KERNEL);
+	nsim_bus_dev = kzalloc_obj(*nsim_bus_dev);
 	if (!nsim_bus_dev)
 		return ERR_PTR(-ENOMEM);
 
@@ -456,7 +462,6 @@ nsim_bus_dev_new(unsigned int id, unsigned int port_count, unsigned int num_queu
 	nsim_bus_dev->port_count = port_count;
 	nsim_bus_dev->num_queues = num_queues;
 	nsim_bus_dev->initial_net = current->nsproxy->net_ns;
-	nsim_bus_dev->max_vfs = NSIM_BUS_DEV_MAX_VFS;
 	/* Disallow using nsim_bus_dev */
 	smp_store_release(&nsim_bus_dev->init, false);
 

@@ -3,8 +3,14 @@
  * Copyright (c) 2022-2024 Qualcomm Innovation Center, Inc. All rights reserved.
  */
 
+#include <linux/bits.h>
+#include <linux/iopoll.h>
+#include <linux/reset.h>
+
 #include "iris_instance.h"
 #include "iris_vpu_common.h"
+
+#include "iris_vpu_register_defines.h"
 
 static u64 iris_vpu2_calc_freq(struct iris_inst *inst, size_t data_size)
 {
@@ -12,7 +18,7 @@ static u64 iris_vpu2_calc_freq(struct iris_inst *inst, size_t data_size)
 	struct v4l2_format *inp_f = inst->fmt_src;
 	u32 mbs_per_second, mbpf, height, width;
 	unsigned long vpp_freq, vsp_freq;
-	u32 fps = DEFAULT_FPS;
+	u32 fps = inst->frame_rate;
 
 	width = max(inp_f->fmt.pix_mp.width, inst->crop.width);
 	height = max(inp_f->fmt.pix_mp.height, inst->crop.height);
@@ -38,4 +44,5 @@ const struct vpu_ops iris_vpu2_ops = {
 	.power_off_controller = iris_vpu_power_off_controller,
 	.power_on_controller = iris_vpu_power_on_controller,
 	.calc_freq = iris_vpu2_calc_freq,
+	.set_hwmode = iris_vpu_set_hwmode,
 };

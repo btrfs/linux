@@ -40,7 +40,7 @@ static struct afs_volume *afs_insert_volume_into_cell(struct afs_cell *cell,
 				goto found;
 			}
 
-			set_bit(AFS_VOLUME_RM_TREE, &volume->flags);
+			set_bit(AFS_VOLUME_RM_TREE, &p->flags);
 			rb_replace_node_rcu(&p->cell_node, &volume->cell_node, &cell->volumes);
 		}
 	}
@@ -81,7 +81,7 @@ static struct afs_volume *afs_alloc_volume(struct afs_fs_context *params,
 	struct afs_volume *volume;
 	int ret = -ENOMEM, i;
 
-	volume = kzalloc(sizeof(struct afs_volume), GFP_KERNEL);
+	volume = kzalloc_obj(struct afs_volume);
 	if (!volume)
 		goto error_0;
 

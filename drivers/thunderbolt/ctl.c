@@ -56,22 +56,22 @@ struct tb_ctl {
 
 
 #define tb_ctl_WARN(ctl, format, arg...) \
-	dev_WARN(&(ctl)->nhi->pdev->dev, format, ## arg)
+	dev_WARN((ctl)->nhi->dev, format, ## arg)
 
 #define tb_ctl_err(ctl, format, arg...) \
-	dev_err(&(ctl)->nhi->pdev->dev, format, ## arg)
+	dev_err((ctl)->nhi->dev, format, ## arg)
 
 #define tb_ctl_warn(ctl, format, arg...) \
-	dev_warn(&(ctl)->nhi->pdev->dev, format, ## arg)
+	dev_warn((ctl)->nhi->dev, format, ## arg)
 
 #define tb_ctl_info(ctl, format, arg...) \
-	dev_info(&(ctl)->nhi->pdev->dev, format, ## arg)
+	dev_info((ctl)->nhi->dev, format, ## arg)
 
 #define tb_ctl_dbg(ctl, format, arg...) \
-	dev_dbg(&(ctl)->nhi->pdev->dev, format, ## arg)
+	dev_dbg((ctl)->nhi->dev, format, ## arg)
 
 #define tb_ctl_dbg_once(ctl, format, arg...) \
-	dev_dbg_once(&(ctl)->nhi->pdev->dev, format, ## arg)
+	dev_dbg_once((ctl)->nhi->dev, format, ## arg)
 
 static DECLARE_WAIT_QUEUE_HEAD(tb_cfg_request_cancel_queue);
 /* Serializes access to request kref_get/put */
@@ -89,7 +89,7 @@ struct tb_cfg_request *tb_cfg_request_alloc(void)
 {
 	struct tb_cfg_request *req;
 
-	req = kzalloc(sizeof(*req), GFP_KERNEL);
+	req = kzalloc_obj(*req);
 	if (!req)
 		return NULL;
 
@@ -333,7 +333,7 @@ static void tb_ctl_pkg_free(struct ctl_pkg *pkg)
 
 static struct ctl_pkg *tb_ctl_pkg_alloc(struct tb_ctl *ctl)
 {
-	struct ctl_pkg *pkg = kzalloc(sizeof(*pkg), GFP_KERNEL);
+	struct ctl_pkg *pkg = kzalloc_obj(*pkg);
 	if (!pkg)
 		return NULL;
 	pkg->ctl = ctl;
@@ -412,7 +412,7 @@ static void tb_ctl_rx_submit(struct ctl_pkg *pkg)
 					     * We ignore failures during stop.
 					     * All rx packets are referenced
 					     * from ctl->rx_packets, so we do
-					     * not loose them.
+					     * not lose them.
 					     */
 }
 
@@ -654,7 +654,7 @@ struct tb_ctl *tb_ctl_alloc(struct tb_nhi *nhi, int index, int timeout_msec,
 			    event_cb cb, void *cb_data)
 {
 	int i;
-	struct tb_ctl *ctl = kzalloc(sizeof(*ctl), GFP_KERNEL);
+	struct tb_ctl *ctl = kzalloc_obj(*ctl);
 	if (!ctl)
 		return NULL;
 
@@ -666,8 +666,8 @@ struct tb_ctl *tb_ctl_alloc(struct tb_nhi *nhi, int index, int timeout_msec,
 
 	mutex_init(&ctl->request_queue_lock);
 	INIT_LIST_HEAD(&ctl->request_queue);
-	ctl->frame_pool = dma_pool_create("thunderbolt_ctl", &nhi->pdev->dev,
-					 TB_FRAME_SIZE, 4, 0);
+	ctl->frame_pool = dma_pool_create("thunderbolt_ctl", nhi->dev,
+					  TB_FRAME_SIZE, 4, 0);
 	if (!ctl->frame_pool)
 		goto err;
 

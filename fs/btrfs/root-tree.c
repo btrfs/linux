@@ -27,20 +27,20 @@ static void btrfs_read_root_item(struct extent_buffer *eb, int slot,
 				struct btrfs_root_item *item)
 {
 	u32 len;
-	int need_reset = 0;
+	bool need_reset = false;
 
 	len = btrfs_item_size(eb, slot);
 	read_extent_buffer(eb, item, btrfs_item_ptr_offset(eb, slot),
 			   min_t(u32, len, sizeof(*item)));
 	if (len < sizeof(*item))
-		need_reset = 1;
+		need_reset = true;
 	if (!need_reset && btrfs_root_generation(item)
 		!= btrfs_root_generation_v2(item)) {
 		if (btrfs_root_generation_v2(item) != 0) {
 			btrfs_warn(eb->fs_info,
 					"mismatching generation and generation_v2 found in root item. This root was probably mounted with an older kernel. Resetting all new fields.");
 		}
-		need_reset = 1;
+		need_reset = true;
 	}
 	if (need_reset) {
 		/* Clear all members from generation_v2 onwards. */
@@ -147,8 +147,8 @@ int btrfs_update_root(struct btrfs_trans_handle *trans, struct btrfs_root
 
 	if (unlikely(ret > 0)) {
 		btrfs_crit(fs_info,
-			"unable to find root key (%llu %u %llu) in tree %llu",
-			key->objectid, key->type, key->offset, btrfs_root_id(root));
+			   "unable to find root key " BTRFS_KEY_FMT " in tree %llu",
+			   BTRFS_KEY_FMT_VALUE(key), btrfs_root_id(root));
 		ret = -EUCLEAN;
 		btrfs_abort_transaction(trans, ret);
 		return ret;
@@ -217,8 +217,6 @@ int btrfs_find_orphan_roots(struct btrfs_fs_info *fs_info)
 	BTRFS_PATH_AUTO_FREE(path);
 	struct btrfs_key key;
 	struct btrfs_root *root;
-	int err = 0;
-	int ret;
 
 	path = btrfs_alloc_path();
 	if (!path)
@@ -230,20 +228,19 @@ int btrfs_find_orphan_roots(struct btrfs_fs_info *fs_info)
 
 	while (1) {
 		u64 root_objectid;
+		int ret;
 
 		ret = btrfs_search_slot(NULL, tree_root, &key, path, 0, 0);
-		if (ret < 0) {
-			err = ret;
-			break;
-		}
+		if (ret < 0)
+			return ret;
 
 		leaf = path->nodes[0];
 		if (path->slots[0] >= btrfs_header_nritems(leaf)) {
 			ret = btrfs_next_leaf(tree_root, path);
 			if (ret < 0)
-				err = ret;
-			if (ret != 0)
-				break;
+				return ret;
+			else if (ret > 0)
+				return 0;
 			leaf = path->nodes[0];
 		}
 
@@ -252,34 +249,32 @@ int btrfs_find_orphan_roots(struct btrfs_fs_info *fs_info)
 
 		if (key.objectid != BTRFS_ORPHAN_OBJECTID ||
 		    key.type != BTRFS_ORPHAN_ITEM_KEY)
-			break;
+			return 0;
 
 		root_objectid = key.offset;
 		key.offset++;
 
 		root = btrfs_get_fs_root(fs_info, root_objectid, false);
-		err = PTR_ERR_OR_ZERO(root);
-		if (err && err != -ENOENT) {
-			break;
-		} else if (err == -ENOENT) {
+		ret = PTR_ERR_OR_ZERO(root);
+		if (ret && ret != -ENOENT) {
+			return ret;
+		} else if (ret == -ENOENT) {
 			struct btrfs_trans_handle *trans;
-
-			btrfs_release_path(path);
 
 			trans = btrfs_join_transaction(tree_root);
 			if (IS_ERR(trans)) {
-				err = PTR_ERR(trans);
-				btrfs_handle_fs_error(fs_info, err,
-					    "Failed to start trans to delete orphan item");
-				break;
+				ret = PTR_ERR(trans);
+				btrfs_err(fs_info,
+			  "failed to join transaction to delete orphan item: %pe",
+					  ERR_PTR(ret));
+				return ret;
 			}
-			err = btrfs_del_orphan_item(trans, tree_root,
-						    root_objectid);
+			ret = btrfs_del_orphan_item(trans, tree_root, root_objectid);
 			btrfs_end_transaction(trans);
-			if (err) {
-				btrfs_handle_fs_error(fs_info, err,
-					    "Failed to delete root orphan item");
-				break;
+			if (ret) {
+				btrfs_err(fs_info,
+				  "failed to delete root orphan item: %pe", ERR_PTR(ret));
+				return ret;
 			}
 			continue;
 		}
@@ -307,7 +302,7 @@ int btrfs_find_orphan_roots(struct btrfs_fs_info *fs_info)
 		btrfs_put_root(root);
 	}
 
-	return err;
+	return 0;
 }
 
 /* drop the root item for 'key' from the tree root */

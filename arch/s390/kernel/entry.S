@@ -23,6 +23,7 @@
 #include <asm/unistd.h>
 #include <asm/page.h>
 #include <asm/sigp.h>
+#include <asm/bug.h>
 #include <asm/irq.h>
 #include <asm/fpu-insn.h>
 #include <asm/setup.h>
@@ -30,6 +31,7 @@
 #include <asm/nospec-insn.h>
 #include <asm/lowcore.h>
 #include <asm/machine.h>
+#include "entry.h"
 
 _LPP_OFFSET	= __LC_LPP
 
@@ -162,12 +164,26 @@ SYM_FUNC_START(__switch_to_asm)
 	stg	%r3,__LC_CURRENT(%r13)		# store task struct of next
 	stg	%r15,__LC_KERNEL_STACK(%r13)	# store end of kernel stack
 	lg	%r15,__THREAD_ksp(%r1,%r3)	# load kernel stack of next
-	aghi	%r3,__TASK_pid
-	mvc	__LC_CURRENT_PID(4,%r13),0(%r3)	# store pid of next
+	lay	%r4,__TASK_pid(%r3)
+	mvc	__LC_CURRENT_PID(4,%r13),0(%r4) # store pid of next
 	ALTERNATIVE "nop", "lpp _LPP_OFFSET(%r13)", ALT_FACILITY(40)
+#ifdef CONFIG_STACKPROTECTOR
+	lg	%r3,__TASK_stack_canary(%r3)
+	stg	%r3,__LC_STACK_CANARY(%r13)
+#endif
 	lmg	%r6,%r15,__SF_GPRS(%r15)	# load gprs of next task
 	BR_EX	%r14
 SYM_FUNC_END(__switch_to_asm)
+
+#if defined(CONFIG_BUG) && defined(CONFIG_CC_HAS_ASM_IMMEDIATE_STRINGS)
+
+SYM_FUNC_START(__WARN_trap)
+	mc	MONCODE_BUG_ARG(%r0),0
+	BR_EX	%r14
+SYM_FUNC_END(__WARN_trap)
+EXPORT_SYMBOL(__WARN_trap)
+
+#endif /* CONFIG_BUG && CONFIG_CC_HAS_ASM_IMMEDIATE_STRINGS */
 
 #if IS_ENABLED(CONFIG_KVM)
 /*
@@ -185,10 +201,11 @@ SYM_FUNC_START(__sie64a)
 	stg	%r3,__SF_SIE_CONTROL(%r15)	# ...and virtual addresses
 	stg	%r4,__SF_SIE_SAVEAREA(%r15)	# save guest register save area
 	stg	%r5,__SF_SIE_GUEST_ASCE(%r15)	# save guest asce
-	xc	__SF_SIE_REASON(8,%r15),__SF_SIE_REASON(%r15) # reason code = 0
+	xc	__SF_SIE_RETURN(8,%r15),__SF_SIE_RETURN(%r15) # return code = 0
 	mvc	__SF_SIE_FLAGS(8,%r15),__TI_flags(%r14) # copy thread flags
 	lmg	%r0,%r13,0(%r4)			# load guest gprs 0-13
 	mvi	__TI_sie(%r14),1
+	stosm	__SF_SIE_IRQ(%r15),0x03		# enable interrupts
 	lctlg	%c1,%c1,__SF_SIE_GUEST_ASCE(%r15) # load primary asce
 	lg	%r14,__SF_SIE_CONTROL(%r15)	# get control block pointer
 	oi	__SIE_PROG0C+3(%r14),1		# we are going into SIE now
@@ -212,6 +229,7 @@ SYM_FUNC_START(__sie64a)
 	lg	%r14,__LC_CURRENT(%r14)
 	mvi	__TI_sie(%r14),0
 SYM_INNER_LABEL(sie_exit, SYM_L_GLOBAL)
+	stnsm	__SF_SIE_IRQ(%r15),0xfc		# disable interrupts
 	lg	%r14,__SF_SIE_SAVEAREA(%r15)	# load guest register save area
 	stmg	%r0,%r13,0(%r14)		# save guest gprs 0-13
 	xgr	%r0,%r0				# clear guest registers to
@@ -220,7 +238,7 @@ SYM_INNER_LABEL(sie_exit, SYM_L_GLOBAL)
 	xgr	%r4,%r4
 	xgr	%r5,%r5
 	lmg	%r6,%r14,__SF_GPRS(%r15)	# restore kernel registers
-	lg	%r2,__SF_SIE_REASON(%r15)	# return exit reason code
+	lg	%r2,__SF_SIE_RETURN(%r15)	# return sie return code
 	BR_EX	%r14
 SYM_FUNC_END(__sie64a)
 EXPORT_SYMBOL(__sie64a)
@@ -254,6 +272,7 @@ SYM_CODE_START(system_call)
 	xgr	%r9,%r9
 	xgr	%r10,%r10
 	xgr	%r11,%r11
+	xgr	%r12,%r12
 	la	%r2,STACK_FRAME_OVERHEAD(%r15)	# pointer to pt_regs
 	mvc	__PT_R8(64,%r2),__LC_SAVE_AREA(%r13)
 	MBEAR	%r2,%r13
@@ -303,7 +322,7 @@ SYM_CODE_START(pgm_check_handler)
 	jz	1f
 	BPENTER	__SF_SIE_FLAGS(%r15),_TIF_ISOLATE_BP_GUEST
 	SIEEXIT __SF_SIE_CONTROL(%r15),%r13
-	lghi	%r10,_PIF_GUEST_FAULT
+	lghi	%r10,PGM_FLAG_GUEST_FAULT
 #endif
 1:	tmhh	%r8,0x4000		# PER bit set in old PSW ?
 	jnz	2f			# -> enabled, can't be a double fault
@@ -314,7 +333,7 @@ SYM_CODE_START(pgm_check_handler)
 	CHECK_VMAP_STACK __LC_SAVE_AREA,%r13,4f
 3:	lg	%r15,__LC_KERNEL_STACK(%r13)
 4:	la	%r11,STACK_FRAME_OVERHEAD(%r15)
-	stg	%r10,__PT_FLAGS(%r11)
+	xc	__PT_FLAGS(8,%r11),__PT_FLAGS(%r11)
 	xc	__SF_BACKCHAIN(8,%r15),__SF_BACKCHAIN(%r15)
 	stmg	%r0,%r7,__PT_R0(%r11)
 	mvc	__PT_R8(64,%r11),__LC_SAVE_AREA(%r13)
@@ -323,13 +342,13 @@ SYM_CODE_START(pgm_check_handler)
 	# clear user controlled registers to prevent speculative use
 	xgr	%r0,%r0
 	xgr	%r1,%r1
-	xgr	%r3,%r3
 	xgr	%r4,%r4
 	xgr	%r5,%r5
 	xgr	%r6,%r6
 	xgr	%r7,%r7
 	xgr	%r12,%r12
 	lgr	%r2,%r11
+	lgr	%r3,%r10
 	brasl	%r14,__do_pgm_check
 	tmhh	%r8,0x0001		# returning to user space?
 	jno	.Lpgm_exit_kernel
@@ -349,7 +368,7 @@ SYM_CODE_START(pgm_check_handler)
 	mvc	__LC_RETURN_PSW(8,%r13),__LC_SVC_NEW_PSW(%r13)
 	larl	%r14,.Lsysc_per
 	stg	%r14,__LC_RETURN_PSW+8(%r13)
-	lghi	%r14,1
+	lghi	%r14,SYSCALL_FLAG_PER_TRAP
 	LBEAR	__LC_PGM_LAST_BREAK(%r13)
 	LPSWEY	__LC_RETURN_PSW,__LC_RETURN_LPSWE # branch to .Lsysc_per
 SYM_CODE_END(pgm_check_handler)
@@ -361,8 +380,19 @@ SYM_CODE_END(pgm_check_handler)
 SYM_CODE_START(\name)
 	STMG_LC	%r8,%r15,__LC_SAVE_AREA
 	GET_LC	%r13
-	stckf	__LC_INT_CLOCK(%r13)
+#ifdef CONFIG_NO_HZ_COMMON
+	larl	%r12,kernel_cpustat
+	ag	%r12,__LC_PERCPU_OFFSET(%r13)
+	asi	__KCPUSTAT_SEQUENCE(%r12),1
+#endif
+	stcke	__LC_INT_CLOCK(%r13)
 	stpt	__LC_SYS_ENTER_TIMER(%r13)
+	larl	%r10,s390_idle
+	ag	%r10,__LC_PERCPU_OFFSET(%r13)
+	mvc	__IDLE_CLOCK_EXIT(16,%r10),__LC_INT_CLOCK(%r13)
+#ifdef CONFIG_NO_HZ_COMMON
+	asi	__KCPUSTAT_SEQUENCE(%r12),1
+#endif
 	STBEAR	__LC_LAST_BREAK(%r13)
 	BPOFF
 	lmg	%r8,%r9,\lc_old_psw(%r13)
@@ -389,7 +419,7 @@ SYM_CODE_START(\name)
 	xgr	%r5,%r5
 	xgr	%r6,%r6
 	xgr	%r7,%r7
-	xgr	%r10,%r10
+	xgr	%r12,%r12
 	xc	__PT_FLAGS(8,%r11),__PT_FLAGS(%r11)
 	mvc	__PT_R8(64,%r11),__LC_SAVE_AREA(%r13)
 	MBEAR	%r11,%r13
@@ -479,6 +509,7 @@ SYM_CODE_START(mcck_int_handler)
 	xgr	%r6,%r6
 	xgr	%r7,%r7
 	xgr	%r10,%r10
+	xgr	%r12,%r12
 	stmg	%r8,%r9,__PT_PSW(%r11)
 	xc	__PT_FLAGS(8,%r11),__PT_FLAGS(%r11)
 	xc	__SF_BACKCHAIN(8,%r15),__SF_BACKCHAIN(%r15)
@@ -606,20 +637,3 @@ SYM_DATA_START_LOCAL(daton_psw)
 	.quad	PSW_KERNEL_BITS
 	.quad	.Ldaton
 SYM_DATA_END(daton_psw)
-
-	.section .rodata, "a"
-	.balign	8
-#define SYSCALL(esame,emu)	.quad __s390x_ ## esame
-SYM_DATA_START(sys_call_table)
-#include <asm/syscall_table.h>
-SYM_DATA_END(sys_call_table)
-#undef SYSCALL
-
-#ifdef CONFIG_COMPAT
-
-#define SYSCALL(esame,emu)	.quad __s390_ ## emu
-SYM_DATA_START(sys_call_table_emu)
-#include <asm/syscall_table.h>
-SYM_DATA_END(sys_call_table_emu)
-#undef SYSCALL
-#endif

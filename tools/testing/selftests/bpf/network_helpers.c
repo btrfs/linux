@@ -97,7 +97,7 @@ int settimeo(int fd, int timeout_ms)
 int start_server_addr(int type, const struct sockaddr_storage *addr, socklen_t addrlen,
 		      const struct network_helper_opts *opts)
 {
-	int fd;
+	int on = 1, fd;
 
 	if (!opts)
 		opts = &default_opts;
@@ -111,6 +111,12 @@ int start_server_addr(int type, const struct sockaddr_storage *addr, socklen_t a
 	if (settimeo(fd, opts->timeout_ms))
 		goto error_close;
 
+	if ((type & SOCK_TYPE_MASK) == SOCK_STREAM &&
+	    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on))) {
+		log_err("Failed to enable SO_REUSEADDR");
+		goto error_close;
+	}
+
 	if (opts->post_socket_cb &&
 	    opts->post_socket_cb(fd, opts->cb_opts)) {
 		log_err("Failed to call post_socket_cb");
@@ -122,7 +128,7 @@ int start_server_addr(int type, const struct sockaddr_storage *addr, socklen_t a
 		goto error_close;
 	}
 
-	if (type == SOCK_STREAM) {
+	if ((type & SOCK_TYPE_MASK) == SOCK_STREAM) {
 		if (listen(fd, opts->backlog ? MAX(opts->backlog, 0) : 1) < 0) {
 			log_err("Failed to listed on socket");
 			goto error_close;
@@ -418,7 +424,8 @@ int make_sockaddr(int family, const char *addr_str, __u16 port,
 			*len = sizeof(*sin6);
 		return 0;
 	} else if (family == AF_UNIX) {
-		/* Note that we always use abstract unix sockets to avoid having
+		/*
+		 * Note that we always use abstract unix sockets to avoid having
 		 * to clean up leftover files.
 		 */
 		struct sockaddr_un *sun = (void *)addr;
@@ -426,7 +433,7 @@ int make_sockaddr(int family, const char *addr_str, __u16 port,
 		memset(addr, 0, sizeof(*sun));
 		sun->sun_family = family;
 		sun->sun_path[0] = 0;
-		strcpy(sun->sun_path + 1, addr_str);
+		strscpy(sun->sun_path + 1, addr_str, sizeof(sun->sun_path) - 1);
 		if (len)
 			*len = offsetof(struct sockaddr_un, sun_path) + 1 + strlen(addr_str);
 		return 0;
@@ -575,8 +582,7 @@ int open_tuntap(const char *dev_name, bool need_mac)
 		return -1;
 
 	ifr.ifr_flags = IFF_NO_PI | (need_mac ? IFF_TAP : IFF_TUN);
-	strncpy(ifr.ifr_name, dev_name, IFNAMSIZ - 1);
-	ifr.ifr_name[IFNAMSIZ - 1] = '\0';
+	strscpy(ifr.ifr_name, dev_name);
 
 	err = ioctl(fd, TUNSETIFF, &ifr);
 	if (!ASSERT_OK(err, "ioctl(TUNSETIFF)")) {
@@ -766,6 +772,50 @@ int send_recv_data(int lfd, int fd, uint32_t total_bytes)
 	return err;
 }
 
+int tc_prog_attach(const char *dev, int ingress_fd, int egress_fd)
+{
+	int ifindex, ret;
+
+	if (!ASSERT_TRUE(ingress_fd >= 0 || egress_fd >= 0,
+			 "at least one program fd is valid"))
+		return -1;
+
+	ifindex = if_nametoindex(dev);
+	if (!ASSERT_NEQ(ifindex, 0, "get ifindex"))
+		return -1;
+
+	DECLARE_LIBBPF_OPTS(bpf_tc_hook, hook, .ifindex = ifindex,
+			    .attach_point = BPF_TC_INGRESS | BPF_TC_EGRESS);
+	DECLARE_LIBBPF_OPTS(bpf_tc_opts, opts1, .handle = 1,
+			    .priority = 1, .prog_fd = ingress_fd);
+	DECLARE_LIBBPF_OPTS(bpf_tc_opts, opts2, .handle = 1,
+			    .priority = 1, .prog_fd = egress_fd);
+
+	ret = bpf_tc_hook_create(&hook);
+	if (!ASSERT_OK(ret, "create tc hook"))
+		return ret;
+
+	if (ingress_fd >= 0) {
+		hook.attach_point = BPF_TC_INGRESS;
+		ret = bpf_tc_attach(&hook, &opts1);
+		if (!ASSERT_OK(ret, "bpf_tc_attach")) {
+			bpf_tc_hook_destroy(&hook);
+			return ret;
+		}
+	}
+
+	if (egress_fd >= 0) {
+		hook.attach_point = BPF_TC_EGRESS;
+		ret = bpf_tc_attach(&hook, &opts2);
+		if (!ASSERT_OK(ret, "bpf_tc_attach")) {
+			bpf_tc_hook_destroy(&hook);
+			return ret;
+		}
+	}
+
+	return 0;
+}
+
 #ifdef TRAFFIC_MONITOR
 struct tmonitor_ctx {
 	pcap_t *pcap;
@@ -816,7 +866,8 @@ static bool is_ethernet(const u_char *packet)
 	memcpy(&arphdr_type, packet + 8, 2);
 	arphdr_type = ntohs(arphdr_type);
 
-	/* Except the following cases, the protocol type contains the
+	/*
+	 * Except the following cases, the protocol type contains the
 	 * Ethernet protocol type for the packet.
 	 *
 	 * https://www.tcpdump.org/linktypes/LINKTYPE_LINUX_SLL2.html
@@ -984,19 +1035,22 @@ static void *traffic_monitor_thread(void *arg)
 		if (!packet)
 			continue;
 
-		/* According to the man page of pcap_dump(), first argument
+		/*
+		 * According to the man page of pcap_dump(), first argument
 		 * is the pcap_dumper_t pointer even it's argument type is
 		 * u_char *.
 		 */
 		pcap_dump((u_char *)dumper, &header, packet);
 
-		/* Not sure what other types of packets look like. Here, we
+		/*
+		 * Not sure what other types of packets look like. Here, we
 		 * parse only Ethernet and compatible packets.
 		 */
 		if (!is_ethernet(packet))
 			continue;
 
-		/* Skip SLL2 header
+		/*
+		 * Skip SLL2 header
 		 * https://www.tcpdump.org/linktypes/LINKTYPE_LINUX_SLL2.html
 		 *
 		 * Although the document doesn't mention that, the payload
@@ -1030,7 +1084,8 @@ static void *traffic_monitor_thread(void *arg)
 	return NULL;
 }
 
-/* Prepare the pcap handle to capture packets.
+/*
+ * Prepare the pcap handle to capture packets.
  *
  * This pcap is non-blocking and immediate mode is enabled to receive
  * captured packets as soon as possible.  The snaplen is set to 1024 bytes
@@ -1101,7 +1156,8 @@ static void encode_test_name(char *buf, size_t len, const char *test_name, const
 
 #define PCAP_DIR "/tmp/tmon_pcap"
 
-/* Start to monitor the network traffic in the given network namespace.
+/*
+ * Start to monitor the network traffic in the given network namespace.
  *
  * netns: the name of the network namespace to monitor. If NULL, the
  *        current network namespace is monitored.
@@ -1206,7 +1262,8 @@ static void traffic_monitor_release(struct tmonitor_ctx *ctx)
 	free(ctx);
 }
 
-/* Stop the network traffic monitor.
+/*
+ * Stop the network traffic monitor.
  *
  * ctx: the context returned by traffic_monitor_start()
  */

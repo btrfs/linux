@@ -11,7 +11,6 @@
 #include <linux/aperture.h>
 #include <linux/component.h>
 #include <linux/dma-mapping.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
 #include <linux/pm_runtime.h>
@@ -25,6 +24,7 @@
 #include <drm/drm_gem_dma_helper.h>
 #include <drm/drm_gem_framebuffer_helper.h>
 #include <drm/drm_module.h>
+#include <drm/drm_print.h>
 #include <drm/drm_probe_helper.h>
 #include <drm/drm_vblank.h>
 #include <drm/drm_managed.h>
@@ -125,7 +125,7 @@ static __maybe_unused int drv_suspend(struct device *dev)
 {
 	struct drm_device *ddev = dev_get_drvdata(dev);
 	struct ltdc_device *ldev = ddev->dev_private;
-	struct drm_atomic_state *state;
+	struct drm_atomic_commit *state;
 
 	WARN_ON(ldev->suspend_state);
 

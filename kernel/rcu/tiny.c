@@ -70,12 +70,10 @@ void rcu_qs(void)
  */
 void rcu_sched_clock_irq(int user)
 {
-	if (user) {
+	if (user)
 		rcu_qs();
-	} else if (rcu_ctrlblk.donetail != rcu_ctrlblk.curtail) {
-		set_tsk_need_resched(current);
-		set_preempt_need_resched();
-	}
+	else if (rcu_ctrlblk.donetail != rcu_ctrlblk.curtail)
+		set_need_resched_current();
 }
 
 /*
@@ -189,9 +187,9 @@ EXPORT_SYMBOL_GPL(call_rcu);
  * Store a grace-period-counter "cookie".  For more information,
  * see the Tree RCU header comment.
  */
-void get_completed_synchronize_rcu_full(struct rcu_gp_oldstate *rgosp)
+void get_completed_synchronize_rcu_full(struct rcu_gp_seq *gsp)
 {
-	rgosp->rgos_norm = RCU_GET_STATE_COMPLETED;
+	gsp->norm = RCU_GET_STATE_COMPLETED;
 }
 EXPORT_SYMBOL_GPL(get_completed_synchronize_rcu_full);
 

@@ -451,4 +451,15 @@ LIBBPF_1.7.0 {
 	global:
 		bpf_map__set_exclusive_program;
 		bpf_map__exclusive_program;
+		bpf_prog_assoc_struct_ops;
+		bpf_program__assoc_struct_ops;
+		btf__permute;
 } LIBBPF_1.6.0;
+
+LIBBPF_1.8.0 {
+	global:
+		bpf_program__attach_tracing_multi;
+		bpf_program__clone;
+		btf__find_by_name_kind_own;
+		btf__new_empty_opts;
+} LIBBPF_1.7.0;
