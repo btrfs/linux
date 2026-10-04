@@ -22,6 +22,8 @@ int gro_cells_receive(struct gro_cells *gcells, struct sk_buff *skb)
 	if (unlikely(!(dev->flags & IFF_UP)))
 		goto drop;
 
+	skb_unset_transport_header(skb);
+
 	if (!gcells->cells || skb_cloned(skb) || netif_elide_gro(dev)) {
 		res = netif_rx(skb);
 		goto unlock;
@@ -132,7 +134,7 @@ void gro_cells_destroy(struct gro_cells *gcells)
 	 * because we might be called from cleanup_net(), and we
 	 * definitely do not want to block this critical task.
 	 */
-	defer = kmalloc(sizeof(*defer), GFP_KERNEL | __GFP_NOWARN);
+	defer = kmalloc_obj(*defer, GFP_KERNEL | __GFP_NOWARN);
 	if (likely(defer)) {
 		defer->ptr = gcells->cells;
 		call_rcu(&defer->rcu, percpu_free_defer_callback);

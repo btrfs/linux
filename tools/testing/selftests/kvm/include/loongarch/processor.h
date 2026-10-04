@@ -70,6 +70,16 @@
 #define PS_64K				0x00000010
 #define PS_DEFAULT_SIZE			PS_16K
 
+#define LOONGARCH_CPUCFG2		0x2
+#define  CPUCFG2_FP			BIT(0)
+#define  CPUCFG2_FPSP			BIT(1)
+#define  CPUCFG2_FPDP			BIT(2)
+#define  CPUCFG2_FPVERS			GENMASK(5, 3)
+#define  CPUCFG2_LSX			BIT(6)
+#define  CPUCFG2_LASX			BIT(7)
+#define  CPUCFG2_LLFTP			BIT(14)
+#define  CPUCFG2_LLFTPREV		GENMASK(17, 15)
+
 /* LoongArch Basic CSR registers */
 #define LOONGARCH_CSR_CRMD		0x0 /* Current mode info */
 #define  CSR_CRMD_PG_SHIFT		4
@@ -82,8 +92,26 @@
 #define  PLV_MASK			0x3
 #define LOONGARCH_CSR_PRMD		0x1
 #define LOONGARCH_CSR_EUEN		0x2
+#define  CSR_EUEN_LBTEN_SHIFT		3
+#define  CSR_EUEN_LBTEN			BIT_ULL(CSR_EUEN_LBTEN_SHIFT)
+#define  CSR_EUEN_LASXEN_SHIFT		2
+#define  CSR_EUEN_LASXEN		BIT_ULL(CSR_EUEN_LASXEN_SHIFT)
+#define  CSR_EUEN_LSXEN_SHIFT		1
+#define  CSR_EUEN_LSXEN			BIT_ULL(CSR_EUEN_LSXEN_SHIFT)
+#define  CSR_EUEN_FPEN_SHIFT		0
+#define  CSR_EUEN_FPEN			BIT_ULL(CSR_EUEN_FPEN_SHIFT)
 #define LOONGARCH_CSR_ECFG		0x4
+#define  ECFGB_PMU			10
+#define  ECFGF_PMU			(BIT_ULL(ECFGB_PMU))
+#define  ECFGB_TIMER			11
+#define  ECFGF_TIMER			(BIT_ULL(ECFGB_TIMER))
 #define LOONGARCH_CSR_ESTAT		0x5  /* Exception status */
+#define  CSR_ESTAT_EXC_SHIFT		16
+#define  CSR_ESTAT_EXC_WIDTH		6
+#define  CSR_ESTAT_EXC			(0x3f << CSR_ESTAT_EXC_SHIFT)
+#define    EXCCODE_INT			0    /* Interrupt */
+#define	     INT_PMI			10   /* PMU interrupt */
+#define      INT_TI			11   /* Timer interrupt*/
 #define LOONGARCH_CSR_ERA		0x6  /* ERA */
 #define LOONGARCH_CSR_BADV		0x7  /* Bad virtual address */
 #define LOONGARCH_CSR_EENTRY		0xc
@@ -106,12 +134,53 @@
 #define LOONGARCH_CSR_KS1		0x31
 #define LOONGARCH_CSR_TMID		0x40
 #define LOONGARCH_CSR_TCFG		0x41
+#define  CSR_TCFG_VAL			(BIT_ULL(48) - BIT_ULL(2))
+#define  CSR_TCFG_PERIOD_SHIFT		1
+#define  CSR_TCFG_PERIOD		(0x1UL << CSR_TCFG_PERIOD_SHIFT)
+#define  CSR_TCFG_EN			(0x1UL)
+#define LOONGARCH_CSR_TVAL		0x42
+#define LOONGARCH_CSR_TINTCLR		0x44 /* Timer interrupt clear */
+#define  CSR_TINTCLR_TI_SHIFT		0
+#define  CSR_TINTCLR_TI			(1 << CSR_TINTCLR_TI_SHIFT)
 /* TLB refill exception entry */
 #define LOONGARCH_CSR_TLBRENTRY		0x88
 #define LOONGARCH_CSR_TLBRSAVE		0x8b
 #define LOONGARCH_CSR_TLBREHI		0x8e
 #define  CSR_TLBREHI_PS_SHIFT		0
 #define  CSR_TLBREHI_PS			(0x3fUL << CSR_TLBREHI_PS_SHIFT)
+
+#define read_cpucfg(reg)			\
+({						\
+	register unsigned long __v;		\
+	__asm__ __volatile__(			\
+		"cpucfg %0, %1\n\t"		\
+		: "=r" (__v)			\
+		: "r" (reg)			\
+		: "memory");			\
+	 __v;					\
+})
+
+#define csr_read(csr)				\
+({						\
+	register unsigned long __v;		\
+	__asm__ __volatile__(			\
+		"csrrd %[val], %[reg]\n\t"	\
+		: [val] "=r" (__v)		\
+		: [reg] "i" (csr)		\
+		: "memory");			\
+	__v;					\
+})
+
+#define csr_write(v, csr)			\
+({						\
+	register unsigned long __v = v;		\
+	__asm__ __volatile__ (			\
+		"csrwr %[val], %[reg]\n\t"	\
+		: [val] "+r" (__v)		\
+		: [reg] "i" (csr)		\
+		: "memory");			\
+	__v;					\
+})
 
 #define EXREGS_GPRS			(32)
 
@@ -124,18 +193,61 @@ struct ex_regs {
 	unsigned long pc;
 	unsigned long estat;
 	unsigned long badv;
+	unsigned long prmd;
 };
 
 #define PC_OFFSET_EXREGS		offsetof(struct ex_regs, pc)
 #define ESTAT_OFFSET_EXREGS		offsetof(struct ex_regs, estat)
 #define BADV_OFFSET_EXREGS		offsetof(struct ex_regs, badv)
+#define PRMD_OFFSET_EXREGS		offsetof(struct ex_regs, prmd)
 #define EXREGS_SIZE			sizeof(struct ex_regs)
 
+#define VECTOR_NUM			64
+
+typedef void(*handler_fn)(struct ex_regs *);
+
+struct handlers {
+	handler_fn exception_handlers[VECTOR_NUM];
+};
+
+void loongarch_vcpu_setup(struct kvm_vcpu *vcpu);
+void vm_init_descriptor_tables(struct kvm_vm *vm);
+void vm_install_exception_handler(struct kvm_vm *vm, int vector, handler_fn handler);
+
+static inline void cpu_relax(void)
+{
+	asm volatile("nop" ::: "memory");
+}
+
+static inline void local_irq_enable(void)
+{
+	unsigned int flags = CSR_CRMD_IE;
+	register unsigned int mask asm("$t0") = CSR_CRMD_IE;
+
+	__asm__ __volatile__(
+		"csrxchg %[val], %[mask], %[reg]\n\t"
+		: [val] "+r" (flags)
+		: [mask] "r" (mask), [reg] "i" (LOONGARCH_CSR_CRMD)
+		: "memory");
+}
+
+static inline void local_irq_disable(void)
+{
+	unsigned int flags = 0;
+	register unsigned int mask asm("$t0") = CSR_CRMD_IE;
+
+	__asm__ __volatile__(
+		"csrxchg %[val], %[mask], %[reg]\n\t"
+		: [val] "+r" (flags)
+		: [mask] "r" (mask), [reg] "i" (LOONGARCH_CSR_CRMD)
+		: "memory");
+}
 #else
 #define PC_OFFSET_EXREGS		((EXREGS_GPRS + 0) * 8)
 #define ESTAT_OFFSET_EXREGS		((EXREGS_GPRS + 1) * 8)
 #define BADV_OFFSET_EXREGS		((EXREGS_GPRS + 2) * 8)
-#define EXREGS_SIZE			((EXREGS_GPRS + 3) * 8)
+#define PRMD_OFFSET_EXREGS		((EXREGS_GPRS + 3) * 8)
+#define EXREGS_SIZE			((EXREGS_GPRS + 4) * 8)
 #endif
 
 #endif /* SELFTEST_KVM_PROCESSOR_H */

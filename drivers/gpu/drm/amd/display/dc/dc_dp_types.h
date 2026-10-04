@@ -947,8 +947,8 @@ union dp_tun_cap_support {
 /* DPCD[0xE000E] DP_IN_ADAPTER_INFO register. */
 union dpia_info {
 	struct {
-		uint8_t dpia_num :5;
-		uint8_t rsvd :3;
+		uint8_t dpia_num :6;
+		uint8_t rsvd :2;
 	} bits;
 	uint8_t raw;
 };
@@ -1146,6 +1146,7 @@ struct edp_psr_info {
 	union edp_psr_dpcd_caps psr_dpcd_caps;
 	uint8_t psr2_su_y_granularity_cap;
 	uint8_t force_psrsu_cap;
+	uint8_t psr_active_vtotal_control_cap;
 };
 
 struct replay_info {
@@ -1155,6 +1156,35 @@ struct replay_info {
 
 struct dprx_states {
 	bool cable_id_written;
+};
+
+union dpcd_panel_replay_capability_supported {
+	struct {
+		unsigned char PANEL_REPLAY_SUPPORT          :1;
+		unsigned char SELECTIVE_UPDATE_SUPPORT      :1;
+		unsigned char EARLY_TRANSPORT_SUPPORT       :1;
+		unsigned char RESERVED				        :5;
+	} bits;
+	unsigned char raw;
+};
+
+union dpcd_panel_replay_capability {
+	struct {
+		unsigned char RESERVED								:2;
+		unsigned char DSC_DECODE_NOT_SUPPORTED				:1;
+		unsigned char ASYNC_VIDEO_TIMING_NOT_SUPPORTED		:1;
+		unsigned char DSC_CRC_OF_MULTI_SU_SUPPORTED			:1;
+		unsigned char PR_SU_GRANULARITY_NEEDED				:1;
+		unsigned char SU_Y_GRANULARITY_EXT_CAP_SUPPORTED	:1;
+		unsigned char LINK_OFF_SUPPORTED_IN_PR_ACTIVE		:1;
+	} bits;
+	unsigned char raw;
+};
+
+struct dpcd_panel_replay_selective_update_info {
+	uint16_t pr_su_x_granularity;
+	uint8_t pr_su_y_granularity;
+	uint16_t pr_su_y_granularity_extended_caps;
 };
 
 enum dpcd_downstream_port_max_bpc {
@@ -1188,7 +1218,7 @@ struct dc_lttpr_caps {
 	union dp_main_link_channel_coding_lttpr_cap main_link_channel_coding;
 	union dp_128b_132b_supported_lttpr_link_rates supported_128b_132b_rates;
 	union dp_alpm_lttpr_cap alpm;
-	uint8_t aux_rd_interval[MAX_REPEATER_CNT - 1];
+	uint8_t aux_rd_interval[MAX_REPEATER_CNT];
 	uint8_t lttpr_ieee_oui[3]; // Always read from closest LTTPR to host
 	uint8_t lttpr_device_id[6]; // Always read from closest LTTPR to host
 };
@@ -1280,11 +1310,15 @@ struct dpcd_caps {
 	struct edp_psr_info psr_info;
 
 	struct replay_info pr_info;
+	union dpcd_panel_replay_capability_supported vesa_replay_caps_supported;
+	union dpcd_panel_replay_capability vesa_replay_caps;
+	struct dpcd_panel_replay_selective_update_info vesa_replay_su_info;
 	uint16_t edp_oled_emission_rate;
 	union dp_receive_port0_cap receive_port0_cap;
 	/* Indicates the number of SST links supported by MSO (Multi-Stream Output) */
 	uint8_t mso_cap_sst_links_supported;
 	uint8_t dp_edp_general_cap_2;
+	uint16_t drr_granularity;
 };
 
 union dpcd_sink_ext_caps {
@@ -1330,7 +1364,10 @@ union replay_enable_and_configuration {
 		unsigned char FREESYNC_PANEL_REPLAY_MODE              :1;
 		unsigned char TIMING_DESYNC_ERROR_VERIFICATION        :1;
 		unsigned char STATE_TRANSITION_ERROR_DETECTION        :1;
-		unsigned char RESERVED                                :5;
+		unsigned char FSFT_ENABLED                            :1;
+		unsigned char FRAME_SKIPPING_ERROR_DETECTION          :1;
+		unsigned char FRAME_SKIPPING_ENABLE                   :1;
+		unsigned char RESERVED                                :2;
 	} bits;
 	unsigned char raw;
 };
@@ -1341,7 +1378,32 @@ union dpcd_replay_configuration {
 		unsigned char DESYNC_ERROR_STATUS              : 1;
 		unsigned char SINK_DEVICE_REPLAY_STATUS        : 3;
 		unsigned char SINK_FRAME_LOCKED                : 2;
-		unsigned char RESERVED                         : 1;
+		unsigned char FRAME_SKIPPING_ERROR_STATUS      : 1;
+	} bits;
+	unsigned char raw;
+};
+
+union panel_replay_enable_and_configuration_1 {
+	struct {
+		unsigned char PANEL_REPLAY_ENABLE                     :1;
+		unsigned char PANEL_REPLAY_CRC_ENABLE                 :1;
+		unsigned char IRQ_HPD_ASSDP_MISSING                   :1;
+		unsigned char IRQ_HPD_VSCSDP_UNCORRECTABLE_ERROR      :1;
+		unsigned char IRQ_HPD_RFB_ERROR                       :1;
+		unsigned char IRQ_HPD_ACTIVE_FRAME_CRC_ERROR          :1;
+		unsigned char PANEL_REPLAY_SELECTIVE_UPDATE_ENABLE    :1;
+		unsigned char PANEL_REPLAY_EARLY_TRANSPORT_ENABLE     :1;
+	} bits;
+	unsigned char raw;
+};
+
+union panel_replay_enable_and_configuration_2 {
+	struct {
+		unsigned char SINK_REFRESH_RATE_UNLOCK_GRANTED        :1;
+		unsigned char RESERVED                                :1;
+		unsigned char SU_Y_GRANULARITY_EXT_VALUE_ENABLED      :1;
+		unsigned char SU_Y_GRANULARITY_EXT_VALUE              :4;
+		unsigned char SU_REGION_SCAN_LINE_CAPTURE_INDICATION  :1;
 	} bits;
 	unsigned char raw;
 };
@@ -1361,6 +1423,17 @@ union dpcd_sink_active_vtotal_control_mode {
 	struct {
 		unsigned char ENABLE                    : 1;
 		unsigned char RESERVED                  : 7;
+	} bits;
+	unsigned char raw;
+};
+
+union pr_error_status {
+	struct {
+		unsigned char LINK_CRC_ERROR        :1;
+		unsigned char RFB_STORAGE_ERROR     :1;
+		unsigned char VSC_SDP_ERROR         :1;
+		unsigned char ASSDP_MISSING_ERROR   :1;
+		unsigned char RESERVED              :4;
 	} bits;
 	unsigned char raw;
 };

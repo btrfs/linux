@@ -5,7 +5,6 @@
 #include <linux/delay.h>
 #include <linux/i2c.h>
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/of.h>
 #include <linux/pm.h>
 #include <linux/regmap.h>
@@ -489,10 +488,17 @@ static int max98373_suspend(struct device *dev)
 static int max98373_resume(struct device *dev)
 {
 	struct max98373_priv *max98373 = dev_get_drvdata(dev);
+	int ret;
 
 	regcache_cache_only(max98373->regmap, false);
 	max98373_reset(max98373, dev);
-	regcache_sync(max98373->regmap);
+	ret = regcache_sync(max98373->regmap);
+	if (ret) {
+		regcache_cache_only(max98373->regmap, true);
+		regcache_mark_dirty(max98373->regmap);
+		return ret;
+	}
+
 	return 0;
 }
 
@@ -576,8 +582,8 @@ static int max98373_i2c_probe(struct i2c_client *i2c)
 }
 
 static const struct i2c_device_id max98373_i2c_id[] = {
-	{ "max98373"},
-	{ },
+	{ .name = "max98373" },
+	{ }
 };
 
 MODULE_DEVICE_TABLE(i2c, max98373_i2c_id);

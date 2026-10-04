@@ -121,8 +121,19 @@ struct btrfs_qgroup_swapped_blocks;
  * To minimize the chance of collision with new persisted status flags, these
  * count backwards from the MSB.
  */
-#define BTRFS_QGROUP_RUNTIME_FLAG_CANCEL_RESCAN		(1ULL << 63)
-#define BTRFS_QGROUP_RUNTIME_FLAG_NO_ACCOUNTING		(1ULL << 62)
+#define BTRFS_QGROUP_RUNTIME_BIT_CANCEL_RESCAN		(BITS_PER_LONG - 1)
+#define BTRFS_QGROUP_RUNTIME_BIT_NO_ACCOUNTING		(BITS_PER_LONG - 2)
+
+/*
+ * No new rescan allowed when set.
+ *
+ * During huge subtree dropping, qgroup will be marked inconsistent, and skip
+ * all future accounting to avoid long stall.  But, an immediate rescan will
+ * re-enable qgroup and still stall the system.
+ *
+ * This bit is to avoid such rescan during the duration of a subvolume dropping.
+ */
+#define BTRFS_QGROUP_RUNTIME_BIT_REJECT_RESCAN		(BITS_PER_LONG - 3)
 
 #define BTRFS_QGROUP_DROP_SUBTREE_THRES_DEFAULT		(3)
 
@@ -365,6 +376,7 @@ int btrfs_qgroup_trace_leaf_items(struct btrfs_trans_handle *trans,
 int btrfs_qgroup_trace_subtree(struct btrfs_trans_handle *trans,
 			       struct extent_buffer *root_eb,
 			       u64 root_gen, int root_level);
+void btrfs_qgroup_check_tree_drop(struct btrfs_fs_info *fs_info, u64 rootid, u8 level);
 int btrfs_qgroup_account_extent(struct btrfs_trans_handle *trans, u64 bytenr,
 				u64 num_bytes, struct ulist *old_roots,
 				struct ulist *new_roots);
@@ -392,46 +404,10 @@ int btrfs_qgroup_release_data(struct btrfs_inode *inode, u64 start, u64 len, u64
 int btrfs_qgroup_free_data(struct btrfs_inode *inode,
 			   struct extent_changeset *reserved, u64 start,
 			   u64 len, u64 *freed);
-int btrfs_qgroup_reserve_meta(struct btrfs_root *root, int num_bytes,
-			      enum btrfs_qgroup_rsv_type type, bool enforce);
-int __btrfs_qgroup_reserve_meta(struct btrfs_root *root, int num_bytes,
-				enum btrfs_qgroup_rsv_type type, bool enforce,
-				bool noflush);
-/* Reserve metadata space for pertrans and prealloc type */
-static inline int btrfs_qgroup_reserve_meta_pertrans(struct btrfs_root *root,
-				int num_bytes, bool enforce)
-{
-	return __btrfs_qgroup_reserve_meta(root, num_bytes,
-					   BTRFS_QGROUP_RSV_META_PERTRANS,
-					   enforce, false);
-}
-static inline int btrfs_qgroup_reserve_meta_prealloc(struct btrfs_root *root,
-						     int num_bytes, bool enforce,
-						     bool noflush)
-{
-	return __btrfs_qgroup_reserve_meta(root, num_bytes,
-					   BTRFS_QGROUP_RSV_META_PREALLOC,
-					   enforce, noflush);
-}
-
-void __btrfs_qgroup_free_meta(struct btrfs_root *root, int num_bytes,
-			     enum btrfs_qgroup_rsv_type type);
-
-/* Free per-transaction meta reservation for error handling */
-static inline void btrfs_qgroup_free_meta_pertrans(struct btrfs_root *root,
-						   int num_bytes)
-{
-	__btrfs_qgroup_free_meta(root, num_bytes,
-			BTRFS_QGROUP_RSV_META_PERTRANS);
-}
-
+int btrfs_qgroup_reserve_meta_prealloc(struct btrfs_root *root, int num_bytes,
+				       bool enforce, bool noflush);
 /* Pre-allocated meta reservation can be freed at need */
-static inline void btrfs_qgroup_free_meta_prealloc(struct btrfs_root *root,
-						   int num_bytes)
-{
-	__btrfs_qgroup_free_meta(root, num_bytes,
-			BTRFS_QGROUP_RSV_META_PREALLOC);
-}
+void btrfs_qgroup_free_meta_prealloc(struct btrfs_root *root, int num_bytes);
 
 void btrfs_qgroup_free_meta_all_pertrans(struct btrfs_root *root);
 void btrfs_qgroup_convert_reserved_meta(struct btrfs_root *root, int num_bytes);

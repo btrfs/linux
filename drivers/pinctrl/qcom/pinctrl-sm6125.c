@@ -40,7 +40,6 @@ enum {
 		.io_reg = 0x4 + 0x1000 * id,		\
 		.intr_cfg_reg = 0x8 + 0x1000 * id,	\
 		.intr_status_reg = 0xc + 0x1000 * id,	\
-		.intr_target_reg = 0x8 + 0x1000 * id,	\
 		.tile = _tile,			\
 		.mux_bit = 2,			\
 		.pull_bit = 0,			\
@@ -67,7 +66,6 @@ enum {
 		.io_reg = 0,				\
 		.intr_cfg_reg = 0,			\
 		.intr_status_reg = 0,			\
-		.intr_target_reg = 0,			\
 		.tile = _tile,				\
 		.mux_bit = -1,				\
 		.pull_bit = pull,			\
@@ -93,7 +91,6 @@ enum {
 		.io_reg = offset + 0x4,			\
 		.intr_cfg_reg = 0,			\
 		.intr_status_reg = 0,			\
-		.intr_target_reg = 0,			\
 		.tile = WEST,				\
 		.mux_bit = -1,				\
 		.pull_bit = 3,				\
@@ -1259,6 +1256,7 @@ static const struct of_device_id sm6125_tlmm_of_match[] = {
 	{ .compatible = "qcom,sm6125-tlmm", },
 	{ },
 };
+MODULE_DEVICE_TABLE(of, sm6125_tlmm_of_match);
 
 static struct platform_driver sm6125_tlmm_driver = {
 	.driver = {
@@ -1282,4 +1280,3 @@ module_exit(sm6125_tlmm_exit);
 
 MODULE_DESCRIPTION("QTI sm6125 TLMM driver");
 MODULE_LICENSE("GPL v2");
-MODULE_DEVICE_TABLE(of, sm6125_tlmm_of_match);

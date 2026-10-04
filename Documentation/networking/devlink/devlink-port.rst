@@ -38,7 +38,7 @@ Devlink port flavours are described below.
      - This indicates an eswitch port representing a port of PCI
        subfunction (SF).
    * - ``DEVLINK_PORT_FLAVOUR_VIRTUAL``
-     - This indicates a virtual port for the PCI virtual function.
+     - Any virtual port facing the user.
 
 Devlink port can have a different type based on the link layer described below.
 
@@ -107,6 +107,15 @@ doesn't have the eswitch. Local controller (identified by controller number = 0)
 has the eswitch. The Devlink instance on the local controller has eswitch
 devlink ports for both the controllers.
 
+A non-zero controller number may also be used for ports that are not external.
+For example, a SmartNIC may have additional local PCI physical functions
+that are managed by the eswitch but are not on an external host. These
+ports use a non-zero controller number to distinguish them from the eswitch
+manager's own functions, while the external flag remains unset.
+
+The ``phys_port_name`` includes the controller prefix (``c<controller_num>``)
+whenever the controller number is non-zero, regardless of the external flag.
+
 Function configuration
 ======================
 
@@ -133,6 +142,9 @@ Users may also set the IPsec crypto capability of the function using
 
 Users may also set the IPsec packet capability of the function using
 `devlink port function set ipsec_packet` command.
+
+The ``migratable`` attribute may be set only on ports with
+``DEVLINK_PORT_FLAVOUR_PCI_VF``.
 
 Users may also set the maximum IO event queues of the function
 using `devlink port function set max_io_eqs` command.
@@ -417,6 +429,8 @@ API allows to configure following rate object's parameters:
   Parent node name. Parent node rate limits are considered as additional limits
   to all node children limits. ``tx_max`` is an upper limit for children.
   ``tx_share`` is a total bandwidth distributed among children.
+  If the device supports cross-function scheduling, the parent can be from a
+  different function of the same underlying device.
 
 ``tc_bw``
   Allow users to set the bandwidth allocation per traffic class on rate

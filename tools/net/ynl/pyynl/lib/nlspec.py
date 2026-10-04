@@ -1,13 +1,23 @@
 # SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
+#
+# pylint: disable=missing-function-docstring, too-many-instance-attributes, too-many-branches
+
+"""
+The nlspec is a python library for parsing and using YNL netlink
+specifications.
+"""
 
 import collections
 import importlib
 import os
-import yaml
+import yaml as pyyaml
+
+from .specdir import find_spec, SYS_SCHEMA_DIR
 
 
-# To be loaded dynamically as needed
-jsonschema = None
+class SpecException(Exception):
+    """Netlink spec exception.
+    """
 
 
 class SpecElement:
@@ -93,8 +103,7 @@ class SpecEnumEntry(SpecElement):
     def user_value(self, as_flags=None):
         if self.enum_set['type'] == 'flags' or as_flags:
             return 1 << self.value
-        else:
-            return self.value
+        return self.value
 
 
 class SpecEnumSet(SpecElement):
@@ -117,8 +126,8 @@ class SpecEnumSet(SpecElement):
 
         prev_entry = None
         value_start = self.yaml.get('value-start', 0)
-        self.entries = dict()
-        self.entries_by_val = dict()
+        self.entries = {}
+        self.entries_by_val = {}
         for entry in self.yaml['entries']:
             e = self.new_entry(entry, prev_entry, value_start)
             self.entries[e.name] = e
@@ -182,7 +191,7 @@ class SpecAttr(SpecElement):
         self.sub_message = yaml.get('sub-message')
         self.selector = yaml.get('selector')
 
-        self.is_auto_scalar = self.type == "sint" or self.type == "uint"
+        self.is_auto_scalar = self.type in ("sint", "uint")
 
 
 class SpecAttrSet(SpecElement):
@@ -288,7 +297,7 @@ class SpecStruct(SpecElement):
         yield from self.members
 
     def items(self):
-        return self.members.items()
+        return self.members
 
 
 class SpecSubMessage(SpecElement):
@@ -306,11 +315,11 @@ class SpecSubMessage(SpecElement):
 
         self.formats = collections.OrderedDict()
         for elem in self.yaml['formats']:
-            format = self.new_format(family, elem)
-            self.formats[format.value] = format
+            msg_format = self.new_format(family, elem)
+            self.formats[msg_format.value] = msg_format
 
-    def new_format(self, family, format):
-        return SpecSubMessageFormat(family, format)
+    def new_format(self, family, msg_format):
+        return SpecSubMessageFormat(family, msg_format)
 
 
 class SpecSubMessageFormat(SpecElement):
@@ -378,7 +387,7 @@ class SpecOperation(SpecElement):
         elif self.is_resv:
             attr_set_name = ''
         else:
-            raise Exception(f"Can't resolve attribute set for op '{self.name}'")
+            raise SpecException(f"Can't resolve attribute set for op '{self.name}'")
         if attr_set_name:
             self.attr_set = self.family.attr_sets[attr_set_name]
 
@@ -428,17 +437,43 @@ class SpecFamily(SpecElement):
         mcast_groups  dict of all multicast groups (index by name)
         kernel_family   dict of kernel family attributes
     """
-    def __init__(self, spec_path, schema_path=None, exclude_ops=None):
-        with open(spec_path, "r") as stream:
+
+    # To be loaded dynamically as needed
+    jsonschema = None
+
+    try:
+        _yaml_loader = pyyaml.CSafeLoader
+    except AttributeError:
+        _yaml_loader = pyyaml.SafeLoader
+
+    def __init__(self, spec_path=None, schema_path=None, exclude_ops=None,
+                 family=None):
+        # schema_path selects how the spec is validated:
+        #   None  -- no preference: validate against the default schema,
+        #            but trust (skip) installed specs selected by family=
+        #   True  -- always validate against the default schema
+        #   path  -- validate against this schema
+        #   ''    -- do not validate
+        if (spec_path is None) == (family is None):
+            raise ValueError("Specify exactly one of spec path or family name")
+        if family is not None:
+            spec_path = find_spec(family)
+            # Installed specs are assumed correct, so skip schema validation
+            # to save cycles unless the caller asked to validate.
+            if schema_path is None and spec_path.startswith(SYS_SCHEMA_DIR):
+                schema_path = ''
+
+        with open(spec_path, "r", encoding='utf-8') as stream:
             prefix = '# SPDX-License-Identifier: '
             first = stream.readline().strip()
             if not first.startswith(prefix):
-                raise Exception('SPDX license tag required in the spec')
+                raise SpecException('SPDX license tag required in the spec')
             self.license = first[len(prefix):]
 
             stream.seek(0)
-            spec = yaml.safe_load(stream)
+            spec = pyyaml.load(stream, Loader=self._yaml_loader)
 
+        self.fixed_header = None
         self._resolution_list = []
 
         super().__init__(self, spec)
@@ -448,18 +483,16 @@ class SpecFamily(SpecElement):
         self.proto = self.yaml.get('protocol', 'genetlink')
         self.msg_id_model = self.yaml['operations'].get('enum-model', 'unified')
 
-        if schema_path is None:
+        if schema_path is None or schema_path is True:
             schema_path = os.path.dirname(os.path.dirname(spec_path)) + f'/{self.proto}.yaml'
         if schema_path:
-            global jsonschema
+            with open(schema_path, "r", encoding='utf-8') as stream:
+                schema = pyyaml.load(stream, Loader=self._yaml_loader)
 
-            with open(schema_path, "r") as stream:
-                schema = yaml.safe_load(stream)
+            if SpecFamily.jsonschema is None:
+                SpecFamily.jsonschema = importlib.import_module("jsonschema")
 
-            if jsonschema is None:
-                jsonschema = importlib.import_module("jsonschema")
-
-            jsonschema.validate(self.yaml, schema)
+            SpecFamily.jsonschema.validate(self.yaml, schema)
 
         self.attr_sets = collections.OrderedDict()
         self.sub_msgs = collections.OrderedDict()
@@ -548,7 +581,7 @@ class SpecFamily(SpecElement):
                 req_val_next = req_val + 1
                 rsp_val_next = rsp_val + rsp_inc
             else:
-                raise Exception("Can't parse directional ops")
+                raise SpecException("Can't parse directional ops")
 
             if req_val == req_val_next:
                 req_val = None
@@ -560,20 +593,19 @@ class SpecFamily(SpecElement):
                 skip |= bool(exclude.match(elem['name']))
             if not skip:
                 op = self.new_operation(elem, req_val, rsp_val)
+                self.msgs[op.name] = op
 
             req_val = req_val_next
             rsp_val = rsp_val_next
 
-            self.msgs[op.name] = op
-
     def find_operation(self, name):
-      """
-      For a given operation name, find and return operation spec.
-      """
-      for op in self.yaml['operations']['list']:
-        if name == op['name']:
-          return op
-      return None
+        """
+        For a given operation name, find and return operation spec.
+        """
+        for op in self.yaml['operations']['list']:
+            if name == op['name']:
+                return op
+        return None
 
     def resolve(self):
         self.resolve_up(super())

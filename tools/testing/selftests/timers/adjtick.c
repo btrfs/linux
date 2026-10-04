@@ -22,9 +22,9 @@
 #include <sys/time.h>
 #include <sys/timex.h>
 #include <time.h>
-#include <include/vdso/time64.h>
 
-#include "../kselftest.h"
+#include "clock-helpers.h"
+#include "kselftest.h"
 
 #define MILLION			1000000
 

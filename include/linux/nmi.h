@@ -21,6 +21,7 @@ void lockup_detector_soft_poweroff(void);
 extern int watchdog_user_enabled;
 extern int watchdog_thresh;
 extern unsigned long watchdog_enabled;
+extern int watchdog_hardlockup_miss_thresh;
 
 extern struct cpumask watchdog_cpumask;
 extern unsigned long *watchdog_cpumask_bits;
@@ -76,13 +77,14 @@ static inline void reset_hung_task_detector(void) { }
  * detectors are 'suspended' while 'watchdog_thresh' is equal zero.
  */
 #define WATCHDOG_HARDLOCKUP_ENABLED_BIT  0
-#define WATCHDOG_SOFTOCKUP_ENABLED_BIT   1
+#define WATCHDOG_SOFTLOCKUP_ENABLED_BIT  1
 #define WATCHDOG_HARDLOCKUP_ENABLED     (1 << WATCHDOG_HARDLOCKUP_ENABLED_BIT)
-#define WATCHDOG_SOFTOCKUP_ENABLED      (1 << WATCHDOG_SOFTOCKUP_ENABLED_BIT)
+#define WATCHDOG_SOFTLOCKUP_ENABLED     (1 << WATCHDOG_SOFTLOCKUP_ENABLED_BIT)
 
 #if defined(CONFIG_HARDLOCKUP_DETECTOR)
 extern void hardlockup_detector_disable(void);
 extern unsigned int hardlockup_panic;
+extern unsigned long hardlockup_si_mask;
 #else
 static inline void hardlockup_detector_disable(void) {}
 #endif
@@ -155,27 +157,29 @@ static inline void touch_nmi_watchdog(void)
  * to allow calling code to fall back to some other mechanism:
  */
 #ifdef arch_trigger_cpumask_backtrace
+void cpumask_backtrace(const cpumask_t *mask, int exclude_cpu);
+
 static inline bool trigger_all_cpu_backtrace(void)
 {
-	arch_trigger_cpumask_backtrace(cpu_online_mask, -1);
+	cpumask_backtrace(cpu_online_mask, -1);
 	return true;
 }
 
 static inline bool trigger_allbutcpu_cpu_backtrace(int exclude_cpu)
 {
-	arch_trigger_cpumask_backtrace(cpu_online_mask, exclude_cpu);
+	cpumask_backtrace(cpu_online_mask, exclude_cpu);
 	return true;
 }
 
 static inline bool trigger_cpumask_backtrace(struct cpumask *mask)
 {
-	arch_trigger_cpumask_backtrace(mask, -1);
+	cpumask_backtrace(mask, -1);
 	return true;
 }
 
 static inline bool trigger_single_cpu_backtrace(int cpu)
 {
-	arch_trigger_cpumask_backtrace(cpumask_of(cpu), -1);
+	cpumask_backtrace(cpumask_of(cpu), -1);
 	return true;
 }
 

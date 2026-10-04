@@ -1618,11 +1618,7 @@ static int qlcnic_83xx_check_hw_status(struct qlcnic_adapter *p_dev)
 	if (err)
 		return err;
 
-	err = qlcnic_83xx_check_heartbeat(p_dev);
-	if (err)
-		return err;
-
-	return err;
+	return qlcnic_83xx_check_heartbeat(p_dev);
 }
 
 static int qlcnic_83xx_poll_reg(struct qlcnic_adapter *p_dev, u32 addr,
@@ -2388,7 +2384,7 @@ static int qlcnic_83xx_get_fw_info(struct qlcnic_adapter *adapter)
 	struct qlc_83xx_fw_info *fw_info;
 	int err = 0;
 
-	ahw->fw_info = kzalloc(sizeof(*fw_info), GFP_KERNEL);
+	ahw->fw_info = kzalloc_obj(*fw_info);
 	if (!ahw->fw_info) {
 		err = -ENOMEM;
 	} else {

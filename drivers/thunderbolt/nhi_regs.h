@@ -101,7 +101,8 @@ struct ring_desc {
 
 #define REG_RING_INTERRUPT_MASK_CLEAR_BASE	0x38208
 
-#define REG_INT_THROTTLING_RATE	0x38c00
+#define REG_INT_THROTTLING_RATE			0x38c00
+#define REG_INT_THROTTLING_RATE_INTERVAL_MASK	GENMASK(15, 0)
 
 /* Interrupt Vector Allocation */
 #define REG_INT_VEC_ALLOC_BASE	0x38c40
@@ -113,6 +114,10 @@ struct ring_desc {
 #define REG_CAPS			0x39640
 #define REG_CAPS_VERSION_MASK		GENMASK(23, 16)
 #define REG_CAPS_VERSION_2		0x40
+
+/* Host Interface Reset - resets TX/RX rings and E2E flow control counters */
+#define REG_HOST_INTERFACE_RESET	0x39858
+#define REG_HOST_INTERFACE_RESET_RST	BIT(0)
 
 #define REG_DMA_MISC			0x39864
 #define REG_DMA_MISC_INT_AUTO_CLEAR     BIT(2)
