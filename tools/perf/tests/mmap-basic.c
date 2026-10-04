@@ -1,25 +1,29 @@
 // SPDX-License-Identifier: GPL-2.0
 #include <errno.h>
-#include <fcntl.h>
 #include <inttypes.h>
 #include <stdlib.h>
+
+#include <fcntl.h>
+#include <linux/err.h>
+#include <linux/kernel.h>
+#include <linux/string.h>
+
 #include <perf/cpumap.h>
+#include <perf/evlist.h>
+#include <perf/mmap.h>
 
 #include "cpumap.h"
 #include "debug.h"
 #include "event.h"
 #include "evlist.h"
 #include "evsel.h"
-#include "thread_map.h"
+#include "pmu.h"
+#include "pmus.h"
 #include "tests.h"
+#include "thread_map.h"
 #include "util/affinity.h"
 #include "util/mmap.h"
 #include "util/sample.h"
-#include <linux/err.h>
-#include <linux/kernel.h>
-#include <linux/string.h>
-#include <perf/evlist.h>
-#include <perf/mmap.h>
 
 /*
  * This test will generate random numbers of calls to some getpid syscalls,
@@ -77,7 +81,7 @@ static int test__basic_mmap(struct test_suite *test __maybe_unused, int subtest 
 		goto out_free_cpus;
 	}
 
-	perf_evlist__set_maps(&evlist->core, cpus, threads);
+	perf_evlist__set_maps(evlist__core(evlist), cpus, threads);
 
 	for (i = 0; i < nsyscalls; ++i) {
 		char name[64];
@@ -90,7 +94,7 @@ static int test__basic_mmap(struct test_suite *test __maybe_unused, int subtest 
 				/* Permissions failure, flag the failure as a skip. */
 				err = TEST_SKIP;
 			}
-			goto out_delete_evlist;
+			goto out_put_evlist;
 		}
 
 		evsels[i]->core.attr.wakeup_events = 1;
@@ -102,17 +106,17 @@ static int test__basic_mmap(struct test_suite *test __maybe_unused, int subtest 
 			pr_debug("failed to open counter: %s, "
 				 "tweak /proc/sys/kernel/perf_event_paranoid?\n",
 				 str_error_r(errno, sbuf, sizeof(sbuf)));
-			goto out_delete_evlist;
+			goto out_put_evlist;
 		}
 
 		nr_events[i] = 0;
 		expected_nr_events[i] = 1 + rand() % 127;
 	}
 
-	if (evlist__mmap(evlist, 128) < 0) {
+	if (evlist__do_mmap(evlist, 128) < 0) {
 		pr_debug("failed to mmap events: %d (%s)\n", errno,
 			 str_error_r(errno, sbuf, sizeof(sbuf)));
-		goto out_delete_evlist;
+		goto out_put_evlist;
 	}
 
 	for (i = 0; i < nsyscalls; ++i)
@@ -120,7 +124,7 @@ static int test__basic_mmap(struct test_suite *test __maybe_unused, int subtest 
 			syscalls[i]();
 		}
 
-	md = &evlist->mmap[0];
+	md = &evlist__mmap(evlist)[0];
 	if (perf_mmap__read_init(&md->core) < 0)
 		goto out_init;
 
@@ -130,7 +134,7 @@ static int test__basic_mmap(struct test_suite *test __maybe_unused, int subtest 
 		if (event->header.type != PERF_RECORD_SAMPLE) {
 			pr_debug("unexpected %s event\n",
 				 perf_event__name(event->header.type));
-			goto out_delete_evlist;
+			goto out_put_evlist;
 		}
 
 		perf_sample__init(&sample, /*all=*/false);
@@ -138,16 +142,18 @@ static int test__basic_mmap(struct test_suite *test __maybe_unused, int subtest 
 		if (err) {
 			pr_err("Can't parse sample, err = %d\n", err);
 			perf_sample__exit(&sample);
-			goto out_delete_evlist;
+			goto out_put_evlist;
 		}
 
 		err = -1;
-		evsel = evlist__id2evsel(evlist, sample.id);
+		evsel = sample.evsel;
+		if (!evsel)
+			evsel = evlist__id2evsel(evlist, sample.id);
 		perf_sample__exit(&sample);
 		if (evsel == NULL) {
 			pr_debug("event with id %" PRIu64
 				 " doesn't map to an evsel\n", sample.id);
-			goto out_delete_evlist;
+			goto out_put_evlist;
 		}
 		nr_events[evsel->core.idx]++;
 		perf_mmap__consume(&md->core);
@@ -162,12 +168,12 @@ out_init:
 				 expected_nr_events[evsel->core.idx],
 				 evsel__name(evsel), nr_events[evsel->core.idx]);
 			err = -1;
-			goto out_delete_evlist;
+			goto out_put_evlist;
 		}
 	}
 
-out_delete_evlist:
-	evlist__delete(evlist);
+out_put_evlist:
+	evlist__put(evlist);
 out_free_cpus:
 	perf_cpu_map__put(cpus);
 out_free_threads:
@@ -322,7 +328,7 @@ static int test_stat_user_read(u64 event, enum user_read_state enabled)
 		}
 
 		perf_evsel__read(evsel, 0, 0, &counts);
-		if (counts.val == 0) {
+		if (rdpmc_supported && counts.val == 0) {
 			pr_err("User space counter reading for PMU %s [Failed read]\n", pmu->name);
 			ret = TEST_FAIL;
 			goto cleanup;

@@ -343,7 +343,7 @@ static int tsl2550_probe(struct i2c_client *client)
 		goto exit;
 	}
 
-	data = kzalloc(sizeof(struct tsl2550_data), GFP_KERNEL);
+	data = kzalloc_obj(struct tsl2550_data);
 	if (!data) {
 		err = -ENOMEM;
 		goto exit;
@@ -420,7 +420,7 @@ static SIMPLE_DEV_PM_OPS(tsl2550_pm_ops, tsl2550_suspend, tsl2550_resume);
 #endif /* CONFIG_PM_SLEEP */
 
 static const struct i2c_device_id tsl2550_id[] = {
-	{ "tsl2550" },
+	{ .name = "tsl2550" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, tsl2550_id);

@@ -28,8 +28,7 @@
  *	      Benjamin Block
  */
 
-#define KMSG_COMPONENT "zfcp"
-#define pr_fmt(fmt) KMSG_COMPONENT ": " fmt
+#define pr_fmt(fmt) "zfcp: " fmt
 
 #include <linux/seq_file.h>
 #include <linux/slab.h>
@@ -254,6 +253,7 @@ static int zfcp_allocate_low_mem_buffers(struct zfcp_adapter *adapter)
 static void zfcp_free_low_mem_buffers(struct zfcp_adapter *adapter)
 {
 	mempool_destroy(adapter->pool.erp_req);
+	mempool_destroy(adapter->pool.gid_pn_req);
 	mempool_destroy(adapter->pool.scsi_req);
 	mempool_destroy(adapter->pool.scsi_abort);
 	mempool_destroy(adapter->pool.qtcb_pool);
@@ -345,7 +345,7 @@ struct zfcp_adapter *zfcp_adapter_enqueue(struct ccw_device *ccw_device)
 	if (!get_device(&ccw_device->dev))
 		return ERR_PTR(-ENODEV);
 
-	adapter = kzalloc(sizeof(struct zfcp_adapter), GFP_KERNEL);
+	adapter = kzalloc_obj(struct zfcp_adapter);
 	if (!adapter) {
 		put_device(&ccw_device->dev);
 		return ERR_PTR(-ENOMEM);
@@ -519,7 +519,7 @@ struct zfcp_port *zfcp_port_enqueue(struct zfcp_adapter *adapter, u64 wwpn,
 		goto err_put;
 	}
 
-	port = kzalloc(sizeof(struct zfcp_port), GFP_KERNEL);
+	port = kzalloc_obj(struct zfcp_port);
 	if (!port)
 		goto err_put;
 

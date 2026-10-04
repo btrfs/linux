@@ -8,28 +8,40 @@
 use crate::{
     alloc::Flags,
     bindings,
-    device::{Bound, Device},
-    error::{to_result, Error, Result},
-    ffi::c_void,
+    device::{
+        Bound,
+        Device, //
+    },
+    error::to_result,
     prelude::*,
-    revocable::{Revocable, RevocableGuard},
-    sync::{aref::ARef, rcu, Completion},
-    types::{ForeignOwnable, Opaque, ScopeGuard},
+    revocable::{
+        Revocable,
+        RevocableGuard, //
+    },
+    sync::{
+        aref::ARef,
+        rcu,
+        Arc,
+        Completion, //
+    },
+    types::{
+        CovariantForLt,
+        ForLt,
+        ForeignOwnable,
+        Opaque, //
+    },
 };
 
-use pin_init::Wrapper;
-
-/// [`Devres`] inner data accessed from [`Devres::callback`].
+/// Inner type that embeds a `struct devres_node` and the `Revocable<T>`.
+#[repr(C)]
 #[pin_data]
-struct Inner<T: Send> {
+struct Inner<T> {
+    #[pin]
+    node: Opaque<bindings::devres_node>,
     #[pin]
     data: Revocable<T>,
-    /// Tracks whether [`Devres::callback`] has been completed.
     #[pin]
-    devm: Completion,
-    /// Tracks whether revoking [`Self::data`] has been completed.
-    #[pin]
-    revoke: Completion,
+    revocation: Completion,
 }
 
 /// This abstraction is meant to be used by subsystems to containerize [`Device`] bound resources to
@@ -46,17 +58,39 @@ struct Inner<T: Send> {
 /// After the [`Devres`] has been unbound it is not possible to access the encapsulated resource
 /// anymore.
 ///
+/// When a [`Devres`] is dropped, it is guaranteed that `T` has been fully dropped by the time
+/// [`Devres::drop`] returns, even if a concurrent revocation through the release callback is in
+/// progress.
+///
 /// [`Devres`] users should make sure to simply free the corresponding backing resource in `T`'s
 /// [`Drop`] implementation.
 ///
 /// # Examples
 ///
 /// ```no_run
-/// # use kernel::{bindings, device::{Bound, Device}, devres::Devres, io::{Io, IoRaw}};
-/// # use core::ops::Deref;
+/// # #![cfg(CONFIG_HAS_IOMEM)]
+/// use kernel::{
+///     bindings,
+///     device::{
+///         Bound,
+///         Device,
+///     },
+///     devres::Devres,
+///     io::{
+///         Io,
+///         IoBase,
+///         Mmio,
+///         MmioRaw,
+///         MmioBackend,
+///         PhysAddr,
+///         Region, //
+///     },
+///     prelude::*,
+/// };
+/// use core::ops::Deref;
 ///
 /// // See also [`pci::Bar`] for a real example.
-/// struct IoMem<const SIZE: usize>(IoRaw<SIZE>);
+/// struct IoMem<const SIZE: usize>(MmioRaw<Region<SIZE>>);
 ///
 /// impl<const SIZE: usize> IoMem<SIZE> {
 ///     /// # Safety
@@ -66,12 +100,12 @@ struct Inner<T: Send> {
 ///     unsafe fn new(paddr: usize) -> Result<Self>{
 ///         // SAFETY: By the safety requirements of this function [`paddr`, `paddr` + `SIZE`) is
 ///         // valid for `ioremap`.
-///         let addr = unsafe { bindings::ioremap(paddr as bindings::phys_addr_t, SIZE) };
+///         let addr = unsafe { bindings::ioremap(paddr as PhysAddr, SIZE) };
 ///         if addr.is_null() {
 ///             return Err(ENOMEM);
 ///         }
 ///
-///         Ok(IoMem(IoRaw::new(addr as usize, SIZE)?))
+///         Ok(IoMem(MmioRaw::new_region(addr as usize, SIZE)?))
 ///     }
 /// }
 ///
@@ -82,133 +116,184 @@ struct Inner<T: Send> {
 ///     }
 /// }
 ///
-/// impl<const SIZE: usize> Deref for IoMem<SIZE> {
-///    type Target = Io<SIZE>;
+/// impl<'a, const SIZE: usize> IoBase<'a> for &'a IoMem<SIZE> {
+///    type Backend = MmioBackend;
+///    type Target = Region<SIZE>;
 ///
-///    fn deref(&self) -> &Self::Target {
+///    fn as_view(self) -> Mmio<'a, Region<SIZE>> {
 ///         // SAFETY: The memory range stored in `self` has been properly mapped in `Self::new`.
-///         unsafe { Io::from_raw(&self.0) }
+///         unsafe { Mmio::from_raw(self.0) }
 ///    }
 /// }
 /// # fn no_run(dev: &Device<Bound>) -> Result<(), Error> {
 /// // SAFETY: Invalid usage for example purposes.
 /// let iomem = unsafe { IoMem::<{ core::mem::size_of::<u32>() }>::new(0xBAAAAAAD)? };
-/// let devres = KBox::pin_init(Devres::new(dev, iomem), GFP_KERNEL)?;
+/// let devres = Devres::new(dev, iomem)?;
 ///
 /// let res = devres.try_access().ok_or(ENXIO)?;
 /// res.write8(0x42, 0x0);
 /// # Ok(())
 /// # }
 /// ```
-///
-/// # Invariants
-///
-/// `Self::inner` is guaranteed to be initialized and is always accessed read-only.
-#[pin_data(PinnedDrop)]
-pub struct Devres<T: Send> {
+pub struct Devres<T: Send + 'static> {
     dev: ARef<Device>,
-    /// Pointer to [`Self::devres_callback`].
-    ///
-    /// Has to be stored, since Rust does not guarantee to always return the same address for a
-    /// function. However, the C API uses the address as a key.
-    callback: unsafe extern "C" fn(*mut c_void),
-    /// Contains all the fields shared with [`Self::callback`].
-    // TODO: Replace with `UnsafePinned`, once available.
-    //
-    // Subsequently, the `drop_in_place()` in `Devres::drop` and `Devres::new` as well as the
-    // explicit `Send` and `Sync' impls can be removed.
-    #[pin]
-    inner: Opaque<Inner<T>>,
-    _add_action: (),
+    inner: Arc<Inner<T>>,
 }
 
-impl<T: Send> Devres<T> {
+// Calling the FFI functions from the `base` module directly from the `Devres<T>` impl may result in
+// them being called directly from driver modules. This happens since the Rust compiler will use
+// monomorphisation, so it might happen that functions are instantiated within the calling driver
+// module. For now, work around this with `#[inline(never)]` helpers.
+//
+// TODO: Remove once a more generic solution has been implemented. For instance, we may be able to
+// leverage `bindgen` to take care of this depending on whether a symbol is (already) exported.
+mod base {
+    use kernel::{
+        bindings,
+        prelude::*, //
+    };
+
+    #[inline(never)]
+    #[allow(clippy::missing_safety_doc)]
+    pub(super) unsafe fn devres_node_init(
+        node: *mut bindings::devres_node,
+        release: bindings::dr_node_release_t,
+        free: bindings::dr_node_free_t,
+    ) {
+        // SAFETY: Safety requirements are the same as `bindings::devres_node_init`.
+        unsafe { bindings::devres_node_init(node, release, free) }
+    }
+
+    #[inline(never)]
+    #[allow(clippy::missing_safety_doc)]
+    pub(super) unsafe fn devres_set_node_dbginfo(
+        node: *mut bindings::devres_node,
+        name: *const c_char,
+        size: usize,
+    ) {
+        // SAFETY: Safety requirements are the same as `bindings::devres_set_node_dbginfo`.
+        unsafe { bindings::devres_set_node_dbginfo(node, name, size) }
+    }
+
+    #[inline(never)]
+    #[allow(clippy::missing_safety_doc)]
+    pub(super) unsafe fn devres_node_add(
+        dev: *mut bindings::device,
+        node: *mut bindings::devres_node,
+    ) {
+        // SAFETY: Safety requirements are the same as `bindings::devres_node_add`.
+        unsafe { bindings::devres_node_add(dev, node) }
+    }
+
+    #[must_use]
+    #[inline(never)]
+    #[allow(clippy::missing_safety_doc)]
+    pub(super) unsafe fn devres_node_remove(
+        dev: *mut bindings::device,
+        node: *mut bindings::devres_node,
+    ) -> bool {
+        // SAFETY: Safety requirements are the same as `bindings::devres_node_remove`.
+        unsafe { bindings::devres_node_remove(dev, node) }
+    }
+}
+
+impl<T: Send + 'static> Devres<T> {
     /// Creates a new [`Devres`] instance of the given `data`.
     ///
     /// The `data` encapsulated within the returned `Devres` instance' `data` will be
     /// (revoked)[`Revocable`] once the device is detached.
-    pub fn new<'a, E>(
-        dev: &'a Device<Bound>,
-        data: impl PinInit<T, E> + 'a,
-    ) -> impl PinInit<Self, Error> + 'a
+    pub fn new<E>(dev: &Device<Bound>, data: impl PinInit<T, E>) -> Result<Self>
     where
-        T: 'a,
         Error: From<E>,
     {
-        try_pin_init!(&this in Self {
+        let inner = Arc::pin_init::<Error>(
+            try_pin_init!(Inner {
+                node <- Opaque::ffi_init(|node: *mut bindings::devres_node| {
+                    // SAFETY: `node` is a valid pointer to an uninitialized `struct devres_node`.
+                    unsafe {
+                        base::devres_node_init(
+                            node,
+                            Some(Self::devres_node_release),
+                            Some(Self::devres_node_free_node),
+                        )
+                    };
+
+                    // SAFETY: `node` is a valid pointer to an uninitialized `struct devres_node`.
+                    unsafe {
+                        base::devres_set_node_dbginfo(
+                            node,
+                            // TODO: Use `core::any::type_name::<T>()` once it is a `const fn`,
+                            // such that we can convert the `&str` to a `&CStr` at compile-time.
+                            c"Devres<T>".as_char_ptr(),
+                            core::mem::size_of::<Revocable<T>>(),
+                        )
+                    };
+                }),
+                data <- Revocable::new(data),
+                revocation <- Completion::new(),
+            }),
+            GFP_KERNEL,
+        )?;
+
+        // SAFETY:
+        // - `dev` is a valid pointer to a bound `struct device`.
+        // - `node` is a valid pointer to a `struct devres_node`.
+        // - `devres_node_add()` is guaranteed not to call `devres_node_release()` for the entire
+        //    lifetime of `dev`.
+        unsafe { base::devres_node_add(dev.as_raw(), inner.node.get()) };
+
+        // Take additional reference count for `devres_node_add()`.
+        core::mem::forget(inner.clone());
+
+        Ok(Self {
             dev: dev.into(),
-            callback: Self::devres_callback,
-            // INVARIANT: `inner` is properly initialized.
-            inner <- Opaque::pin_init(try_pin_init!(Inner {
-                    devm <- Completion::new(),
-                    revoke <- Completion::new(),
-                    data <- Revocable::new(data),
-            })),
-            // TODO: Replace with "initializer code blocks" [1] once available.
-            //
-            // [1] https://github.com/Rust-for-Linux/pin-init/pull/69
-            _add_action: {
-                // SAFETY: `this` is a valid pointer to uninitialized memory.
-                let inner = unsafe { &raw mut (*this.as_ptr()).inner };
-
-                // SAFETY:
-                // - `dev.as_raw()` is a pointer to a valid bound device.
-                // - `inner` is guaranteed to be a valid for the duration of the lifetime of `Self`.
-                // - `devm_add_action()` is guaranteed not to call `callback` until `this` has been
-                //    properly initialized, because we require `dev` (i.e. the *bound* device) to
-                //    live at least as long as the returned `impl PinInit<Self, Error>`.
-                to_result(unsafe {
-                    bindings::devm_add_action(dev.as_raw(), Some(*callback), inner.cast())
-                }).inspect_err(|_| {
-                    let inner = Opaque::cast_into(inner);
-
-                    // SAFETY: `inner` is a valid pointer to an `Inner<T>` and valid for both reads
-                    // and writes.
-                    unsafe { core::ptr::drop_in_place(inner) };
-                })?;
-            },
+            inner,
         })
     }
 
-    fn inner(&self) -> &Inner<T> {
-        // SAFETY: By the type invairants of `Self`, `inner` is properly initialized and always
-        // accessed read-only.
-        unsafe { &*self.inner.get() }
-    }
-
     fn data(&self) -> &Revocable<T> {
-        &self.inner().data
+        &self.inner.data
     }
 
     #[allow(clippy::missing_safety_doc)]
-    unsafe extern "C" fn devres_callback(ptr: *mut kernel::ffi::c_void) {
-        // SAFETY: In `Self::new` we've passed a valid pointer to `Inner` to `devm_add_action()`,
-        // hence `ptr` must be a valid pointer to `Inner`.
-        let inner = unsafe { &*ptr.cast::<Inner<T>>() };
+    unsafe extern "C" fn devres_node_release(
+        _dev: *mut bindings::device,
+        node: *mut bindings::devres_node,
+    ) {
+        let node = Opaque::cast_from(node);
 
-        // Ensure that `inner` can't be used anymore after we signal completion of this callback.
-        let inner = ScopeGuard::new_with_data(inner, |inner| inner.devm.complete_all());
+        // SAFETY: `node` is in the same allocation as its container.
+        let inner = unsafe { kernel::container_of!(node, Inner<T>, node) };
 
-        if !inner.data.revoke() {
-            // If `revoke()` returns false, it means that `Devres::drop` already started revoking
-            // `data` for us. Hence we have to wait until `Devres::drop` signals that it
-            // completed revoking `data`.
-            inner.revoke.wait_for_completion();
+        // SAFETY: `inner` is a valid `Inner<T>` pointer.
+        let inner = unsafe { &*inner };
+
+        if inner.data.revoke() {
+            inner.revocation.complete_all();
+        } else {
+            // Devres::drop() is concurrently revoking; wait for it to finish `drop_in_place()`
+            // before returning to `devres_release_all()`, ensuring `T` is fully torn down before
+            // the device finishes unbinding.
+            inner.revocation.wait_for_completion();
         }
     }
 
-    fn remove_action(&self) -> bool {
+    #[allow(clippy::missing_safety_doc)]
+    unsafe extern "C" fn devres_node_free_node(node: *mut bindings::devres_node) {
+        let node = Opaque::cast_from(node);
+
+        // SAFETY: `node` is in the same allocation as its container.
+        let inner = unsafe { kernel::container_of!(node, Inner<T>, node) };
+
+        // SAFETY: `inner` points to the entire `Inner<T>` allocation.
+        drop(unsafe { Arc::from_raw(inner) });
+    }
+
+    fn remove_node(&self) -> bool {
         // SAFETY:
-        // - `self.dev` is a valid `Device`,
-        // - the `action` and `data` pointers are the exact same ones as given to
-        //   `devm_add_action()` previously,
-        (unsafe {
-            bindings::devm_remove_action_nowarn(
-                self.dev.as_raw(),
-                Some(self.callback),
-                core::ptr::from_ref(self.inner()).cast_mut().cast(),
-            )
-        } == 0)
+        // - `self.device().as_raw()` is a valid pointer to a bound `struct device`.
+        // - `self.inner.node.get()` is a valid pointer to a `struct devres_node`.
+        unsafe { base::devres_node_remove(self.device().as_raw(), self.inner.node.get()) }
     }
 
     /// Return a reference of the [`Device`] this [`Devres`] instance has been created with.
@@ -229,10 +314,15 @@ impl<T: Send> Devres<T> {
     /// # Examples
     ///
     /// ```no_run
-    /// # #![cfg(CONFIG_PCI)]
-    /// # use kernel::{device::Core, devres::Devres, pci};
+    /// #![cfg(CONFIG_PCI)]
+    /// use kernel::{
+    ///     device::Core,
+    ///     devres::Devres,
+    ///     io::Io,
+    ///     pci, //
+    /// };
     ///
-    /// fn from_core(dev: &pci::Device<Core>, devres: Devres<pci::Bar<0x4>>) -> Result {
+    /// fn from_core(dev: &pci::Device<Core<'_>>, devres: Devres<pci::Bar<'_, 0x4>>) -> Result {
     ///     let bar = devres.access(dev.as_ref())?;
     ///
     ///     let _ = bar.read32(0x0);
@@ -277,31 +367,125 @@ unsafe impl<T: Send> Send for Devres<T> {}
 // SAFETY: `Devres` can be shared with any task, if `T: Sync`.
 unsafe impl<T: Send + Sync> Sync for Devres<T> {}
 
-#[pinned_drop]
-impl<T: Send> PinnedDrop for Devres<T> {
-    fn drop(self: Pin<&mut Self>) {
+impl<T: Send + 'static> Drop for Devres<T> {
+    fn drop(&mut self) {
         // SAFETY: When `drop` runs, it is guaranteed that nobody is accessing the revocable data
         // anymore, hence it is safe not to wait for the grace period to finish.
         if unsafe { self.data().revoke_nosync() } {
-            // We revoked `self.data` before the devres action did, hence try to remove it.
-            if !self.remove_action() {
-                // We could not remove the devres action, which means that it now runs concurrently,
-                // hence signal that `self.data` has been revoked by us successfully.
-                self.inner().revoke.complete_all();
+            self.inner.revocation.complete_all();
 
-                // Wait for `Self::devres_callback` to be done using this object.
-                self.inner().devm.wait_for_completion();
+            // We revoked `self.data` before devres did, hence try to remove it.
+            if self.remove_node() {
+                // SAFETY: In `Self::new` we have taken an additional reference count of `self.data`
+                // for `devres_node_add()`. Since `remove_node()` was successful, we have to drop
+                // this additional reference count.
+                drop(unsafe { Arc::from_raw(Arc::as_ptr(&self.inner)) });
             }
         } else {
-            // `Self::devres_callback` revokes `self.data` for us, hence wait for it to be done
-            // using this object.
-            self.inner().devm.wait_for_completion();
+            // The release callback is concurrently revoking; wait for it to finish
+            // `drop_in_place()` of the wrapped object before returning.
+            self.inner.revocation.wait_for_completion();
         }
+    }
+}
 
-        // INVARIANT: At this point it is guaranteed that `inner` can't be accessed any more.
-        //
-        // SAFETY: `inner` is valid for dropping.
-        unsafe { core::ptr::drop_in_place(self.inner.get()) };
+/// Guard returned by [`DevresLt::try_access`].
+///
+/// Dereferences to `F::Of<'a>`, shortening the lifetime of the stored data to the guard's borrow
+/// lifetime.
+pub struct DevresGuard<'a, F: CovariantForLt>(RevocableGuard<'a, F::Of<'static>>);
+
+impl<'a, F: CovariantForLt> core::ops::Deref for DevresGuard<'a, F> {
+    type Target = F::Of<'a>;
+
+    #[inline]
+    fn deref(&self) -> &Self::Target {
+        F::cast_ref(&*self.0)
+    }
+}
+
+/// Device-managed resource with [`ForLt`](trait@ForLt)-aware access.
+///
+/// `DevresLt` wraps [`Devres`] and shortens the stored `'static` lifetime to the caller's borrow
+/// lifetime in all access methods.
+///
+/// Types that implement [`trait@CovariantForLt`] get direct-reference accessors ([`Self::access`],
+/// [`Self::try_access`]). Plain [`ForLt`](trait@ForLt) types use closure-based accessors
+/// ([`Self::access_with`], [`Self::try_access_with`]).
+pub struct DevresLt<F: ForLt>(Devres<F::Of<'static>>)
+where
+    for<'a> F::Of<'a>: Send;
+
+impl<F: ForLt> DevresLt<F>
+where
+    for<'a> F::Of<'a>: Send,
+{
+    /// Creates a new [`DevresLt`] instance of the given `data`.
+    ///
+    /// # Safety
+    ///
+    /// The data must remain valid for the device's full bound scope. [`DevresLt`] allows
+    /// access until the device is unbound, which may outlast `'a`.
+    pub unsafe fn new<'a, E>(
+        dev: &'a Device<Bound>,
+        data: impl PinInit<F::Of<'a>, E>,
+    ) -> Result<Self>
+    where
+        Error: From<E>,
+    {
+        // SAFETY: The caller guarantees the data is valid for the device's full bound scope.
+        // Lifetimes do not affect layout, so F::Of<'a> and F::Of<'static> have identical
+        // representation; casting the slot pointer is sound.
+        let data = unsafe { pin_init::cast_pin_init(data) };
+
+        Ok(Self(Devres::new(dev, data)?))
+    }
+
+    /// Return a reference of the [`Device`] this [`DevresLt`] instance has been created with.
+    #[inline]
+    pub fn device(&self) -> &Device {
+        self.0.device()
+    }
+
+    /// Obtain `&F::Of<'_>`, bypassing the [`Revocable`], through a closure.
+    ///
+    /// This method works like [`DevresLt::access`](DevresLt::access) but accepts any
+    /// [`trait@ForLt`] type, not just [`trait@CovariantForLt`].
+    #[inline]
+    pub fn access_with<R, G>(&self, dev: &Device<Bound>, f: G) -> Result<R>
+    where
+        G: for<'a> FnOnce(&F::Of<'a>) -> R,
+    {
+        self.0.access(dev).map(f)
+    }
+
+    /// [`DevresLt`] accessor for [`Revocable::try_access_with`].
+    #[inline]
+    pub fn try_access_with<R, G>(&self, f: G) -> Option<R>
+    where
+        G: for<'a> FnOnce(&F::Of<'a>) -> R,
+    {
+        self.0.data().try_access_with(f)
+    }
+}
+
+impl<F: CovariantForLt> DevresLt<F>
+where
+    for<'a> F::Of<'a>: Send,
+{
+    /// Obtain `&'a F::Of<'a>`, bypassing the [`Revocable`].
+    ///
+    /// This method works like [`Devres::access`], but shortens the returned reference's lifetime
+    /// from `'static` to `'a` via [`CovariantForLt::cast_ref`].
+    #[inline]
+    pub fn access<'a>(&'a self, dev: &'a Device<Bound>) -> Result<&'a F::Of<'a>> {
+        self.0.access(dev).map(F::cast_ref)
+    }
+
+    /// [`DevresLt`] accessor for [`Revocable::try_access`].
+    #[inline]
+    pub fn try_access(&self) -> Option<DevresGuard<'_, F>> {
+        self.0.data().try_access().map(DevresGuard)
     }
 }
 
@@ -333,7 +517,13 @@ where
 /// # Examples
 ///
 /// ```no_run
-/// use kernel::{device::{Bound, Device}, devres};
+/// use kernel::{
+///     device::{
+///         Bound,
+///         Device, //
+///     },
+///     devres, //
+/// };
 ///
 /// /// Registration of e.g. a class device, IRQ, etc.
 /// struct Registration;

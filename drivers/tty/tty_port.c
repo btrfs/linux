@@ -100,6 +100,23 @@ void tty_port_init(struct tty_port *port)
 EXPORT_SYMBOL(tty_port_init);
 
 /**
+ * tty_port_link_wq - link tty_port and flip workqueue
+ * @port: tty_port of the device
+ * @flip_wq: workqueue to queue flip buffer work on
+ *
+ * Whenever %TTY_DRIVER_NO_WORKQUEUE is used, every tty_port can be linked to
+ * a workqueue manually by this function.
+ * tty_port will use system_dfl_wq when buf.flip_wq is NULL.
+ *
+ * Note that tty_port API will NOT destroy the workqueue.
+ */
+void tty_port_link_wq(struct tty_port *port, struct workqueue_struct *flip_wq)
+{
+	port->buf.flip_wq = flip_wq;
+}
+EXPORT_SYMBOL_GPL(tty_port_link_wq);
+
+/**
  * tty_port_link_device - link tty and tty_port
  * @port: tty_port of the device
  * @driver: tty_driver for this device
@@ -157,6 +174,7 @@ struct device *tty_port_register_device_attr(struct tty_port *port,
 		const struct attribute_group **attr_grp)
 {
 	tty_port_link_device(port, driver, index);
+	tty_port_link_driver_wq(port, driver);
 	return tty_register_device_attr(driver, index, device, drvdata,
 			attr_grp);
 }
@@ -183,6 +201,7 @@ struct device *tty_port_register_device_attr_serdev(struct tty_port *port,
 	struct device *dev;
 
 	tty_port_link_device(port, driver, index);
+	tty_port_link_driver_wq(port, driver);
 
 	dev = serdev_tty_port_register(port, host, parent, driver, index);
 	if (PTR_ERR(dev) != -ENODEV) {
@@ -210,6 +229,7 @@ void tty_port_unregister_device(struct tty_port *port,
 {
 	int ret;
 
+	WRITE_ONCE(port->buf.flip_wq, NULL);
 	ret = serdev_tty_port_unregister(port);
 	if (ret == 0)
 		return;
@@ -257,6 +277,7 @@ void tty_port_destroy(struct tty_port *port)
 {
 	tty_buffer_cancel_work(port);
 	tty_buffer_free_all(port);
+	WRITE_ONCE(port->buf.flip_wq, NULL);
 }
 EXPORT_SYMBOL(tty_port_destroy);
 
@@ -319,19 +340,9 @@ void tty_port_tty_set(struct tty_port *port, struct tty_struct *tty)
 }
 EXPORT_SYMBOL(tty_port_tty_set);
 
-/**
- * tty_port_shutdown - internal helper to shutdown the device
- * @port: tty port to be shut down
- * @tty: the associated tty
- *
- * It is used by tty_port_hangup() and tty_port_close(). Its task is to
- * shutdown the device if it was initialized (note consoles remain
- * functioning). It lowers DTR/RTS (if @tty has HUPCL set) and invokes
- * @port->ops->shutdown().
- */
-static void tty_port_shutdown(struct tty_port *port, struct tty_struct *tty)
+static void tty_port_shutdown_locked(struct tty_port *port, struct tty_struct *tty)
 {
-	guard(mutex)(&port->mutex);
+	lockdep_assert_held(&port->mutex);
 
 	if (port->console)
 		return;
@@ -352,6 +363,23 @@ static void tty_port_shutdown(struct tty_port *port, struct tty_struct *tty)
 }
 
 /**
+ * tty_port_shutdown - internal helper to shutdown the device
+ * @port: tty port to be shut down
+ * @tty: the associated tty
+ *
+ * It is used by tty_port_hangup() and tty_port_close(). Its task is to
+ * shutdown the device if it was initialized (note consoles remain
+ * functioning). It lowers DTR/RTS (if @tty has HUPCL set) and invokes
+ * @port->ops->shutdown().
+ */
+static void tty_port_shutdown(struct tty_port *port, struct tty_struct *tty)
+{
+	guard(mutex)(&port->mutex);
+
+	tty_port_shutdown_locked(port, tty);
+}
+
+/**
  * tty_port_hangup		-	hangup helper
  * @port: tty port
  *
@@ -364,36 +392,58 @@ void tty_port_hangup(struct tty_port *port)
 {
 	struct tty_struct *tty;
 
-	scoped_guard(spinlock_irqsave, &port->lock) {
-		port->count = 0;
-		tty = port->tty;
-		if (tty)
-			set_bit(TTY_IO_ERROR, &tty->flags);
-		port->tty = NULL;
-	}
+	scoped_guard(mutex, &port->mutex) {
+		scoped_guard(spinlock_irqsave, &port->lock) {
+			port->count = 0;
+			tty = port->tty;
+			if (tty)
+				set_bit(TTY_IO_ERROR, &tty->flags);
+			port->tty = NULL;
+		}
 
-	tty_port_set_active(port, false);
-	tty_port_shutdown(port, tty);
+		tty_port_set_active(port, false);
+		tty_port_shutdown_locked(port, tty);
+	}
 	tty_kref_put(tty);
 	wake_up_interruptible(&port->open_wait);
 	wake_up_interruptible(&port->delta_msr_wait);
 }
 EXPORT_SYMBOL(tty_port_hangup);
 
-void __tty_port_tty_hangup(struct tty_port *port, bool check_clocal, bool async)
+/**
+ * tty_port_tty_hangup - helper to hang up a tty asynchronously
+ * @port: tty port
+ * @check_clocal: hang only ttys with %CLOCAL unset?
+ */
+void tty_port_tty_hangup(struct tty_port *port, bool check_clocal)
 {
 	scoped_guard(tty_port_tty, port) {
 		struct tty_struct *tty = scoped_tty();
 
-		if (!check_clocal || !C_CLOCAL(tty)) {
-			if (async)
-				tty_hangup(tty);
-			else
-				tty_vhangup(tty);
-		}
+		if (!check_clocal || !C_CLOCAL(tty))
+			tty_hangup(tty);
 	}
 }
-EXPORT_SYMBOL_GPL(__tty_port_tty_hangup);
+EXPORT_SYMBOL_GPL(tty_port_tty_hangup);
+
+/**
+ * tty_port_tty_vhangup - helper to hang up a tty synchronously
+ * @port: tty port
+ */
+void tty_port_tty_vhangup(struct tty_port *port)
+{
+	struct tty_struct *tty;
+
+	mutex_lock(&port->mutex);
+	tty = tty_port_tty_get(port);
+	mutex_unlock(&port->mutex);
+
+	if (tty) {
+		tty_vhangup(tty);
+		tty_kref_put(tty);
+	}
+}
+EXPORT_SYMBOL_GPL(tty_port_tty_vhangup);
 
 /**
  * tty_port_tty_wakeup - helper to wake up a tty
@@ -703,6 +753,7 @@ int tty_port_install(struct tty_port *port, struct tty_driver *driver,
 		struct tty_struct *tty)
 {
 	tty->port = port;
+	tty_port_link_driver_wq(port, driver);
 	return tty_standard_install(driver, tty);
 }
 EXPORT_SYMBOL_GPL(tty_port_install);
@@ -745,8 +796,10 @@ int tty_port_open(struct tty_port *port, struct tty_struct *tty,
 		clear_bit(TTY_IO_ERROR, &tty->flags);
 		if (port->ops->activate) {
 			int retval = port->ops->activate(port, tty);
-			if (retval)
+			if (retval) {
+				set_bit(TTY_IO_ERROR, &tty->flags);
 				return retval;
+			}
 		}
 		tty_port_set_initialized(port, true);
 	}

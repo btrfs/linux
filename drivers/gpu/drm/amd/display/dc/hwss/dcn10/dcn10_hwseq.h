@@ -73,8 +73,7 @@ void dcn10_program_output_csc(struct dc *dc,
 		enum dc_color_space colorspace,
 		uint16_t *matrix,
 		int opp_id);
-bool dcn10_set_output_transfer_func(struct dc *dc, struct pipe_ctx *pipe_ctx,
-				const struct dc_stream_state *stream);
+bool dcn10_set_output_transfer_func(struct set_output_transfer_func_params *params);
 bool dcn10_set_input_transfer_func(struct dc *dc, struct pipe_ctx *pipe_ctx,
 			const struct dc_plane_state *plane_state);
 void dcn10_update_plane_addr(const struct dc *dc, struct pipe_ctx *pipe_ctx);
@@ -108,7 +107,7 @@ void dcn10_program_pipe(
 		struct dc *dc,
 		struct pipe_ctx *pipe_ctx,
 		struct dc_state *context);
-void dcn10_program_gamut_remap(struct pipe_ctx *pipe_ctx);
+void dcn10_program_gamut_remap(struct program_gamut_remap_params *params);
 void dcn10_init_hw(struct dc *dc);
 void dcn10_init_pipes(struct dc *dc, struct dc_state *context);
 void dcn10_power_down_on_boot(struct dc *dc);
@@ -217,5 +216,7 @@ void dcn10_update_visual_confirm_color(
 void dcn10_reset_surface_dcc_and_tiling(struct pipe_ctx *pipe_ctx,
 					struct dc_plane_state *plane_state,
 					bool clear_tiling);
+void dcn10_config_stereo_parameters(
+		struct dc_stream_state *stream, struct crtc_stereo_flags *flags);
 
 #endif /* __DC_HWSS_DCN10_H__ */

@@ -50,7 +50,7 @@ devlink_port_region_get_by_name(struct devlink_port *port,
 	struct devlink_region *region;
 
 	list_for_each_entry(region, &port->region_list, list)
-		if (!strcmp(region->ops->name, region_name))
+		if (!strcmp(region->port_ops->name, region_name))
 			return region;
 
 	return NULL;
@@ -428,7 +428,7 @@ __devlink_region_snapshot_create(struct devlink_region *region,
 	if (devlink_region_snapshot_get_by_id(region, snapshot_id))
 		return -EEXIST;
 
-	snapshot = kzalloc(sizeof(*snapshot), GFP_KERNEL);
+	snapshot = kzalloc_obj(*snapshot);
 	if (!snapshot)
 		return -ENOMEM;
 
@@ -469,7 +469,7 @@ static void devlink_region_snapshot_del(struct devlink_region *region,
 
 int devlink_nl_region_get_doit(struct sk_buff *skb, struct genl_info *info)
 {
-	struct devlink *devlink = info->user_ptr[0];
+	struct devlink *devlink = devlink_nl_ctx(info)->devlink;
 	struct devlink_port *port = NULL;
 	struct devlink_region *region;
 	const char *region_name;
@@ -588,7 +588,7 @@ int devlink_nl_region_get_dumpit(struct sk_buff *skb,
 
 int devlink_nl_region_del_doit(struct sk_buff *skb, struct genl_info *info)
 {
-	struct devlink *devlink = info->user_ptr[0];
+	struct devlink *devlink = devlink_nl_ctx(info)->devlink;
 	struct devlink_snapshot *snapshot;
 	struct devlink_port *port = NULL;
 	struct devlink_region *region;
@@ -633,7 +633,7 @@ int devlink_nl_region_del_doit(struct sk_buff *skb, struct genl_info *info)
 
 int devlink_nl_region_new_doit(struct sk_buff *skb, struct genl_info *info)
 {
-	struct devlink *devlink = info->user_ptr[0];
+	struct devlink *devlink = devlink_nl_ctx(info)->devlink;
 	struct devlink_snapshot *snapshot;
 	struct devlink_port *port = NULL;
 	struct nlattr *snapshot_id_attr;
@@ -1055,7 +1055,7 @@ struct devlink_region *devl_region_create(struct devlink *devlink,
 	if (devlink_region_get_by_name(devlink, ops->name))
 		return ERR_PTR(-EEXIST);
 
-	region = kzalloc(sizeof(*region), GFP_KERNEL);
+	region = kzalloc_obj(*region);
 	if (!region)
 		return ERR_PTR(-ENOMEM);
 
@@ -1128,7 +1128,7 @@ devlink_port_region_create(struct devlink_port *port,
 		goto unlock;
 	}
 
-	region = kzalloc(sizeof(*region), GFP_KERNEL);
+	region = kzalloc_obj(*region);
 	if (!region) {
 		err = -ENOMEM;
 		goto unlock;

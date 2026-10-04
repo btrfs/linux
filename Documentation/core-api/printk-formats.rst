@@ -322,6 +322,7 @@ MAC/FDDI addresses
 	%pMF	00-01-02-03-04-05
 	%pm	000102030405
 	%pmR	050403020100
+	%p[mM][FR][U]
 
 For printing 6-byte MAC/FDDI addresses in hex notation. The ``M`` and ``m``
 specifiers result in a printed address with (M) or without (m) byte
@@ -334,6 +335,8 @@ separator.
 For Bluetooth addresses the ``R`` specifier shall be used after the ``M``
 specifier to use reversed byte order suitable for visual interpretation
 of Bluetooth addresses which are in the little endian order.
+
+When ``U`` is passed, the result is printed in the upper case.
 
 Passed by reference.
 
@@ -547,11 +550,13 @@ Time and date
 	%pt[RT]s		YYYY-mm-dd HH:MM:SS
 	%pt[RT]d		YYYY-mm-dd
 	%pt[RT]t		HH:MM:SS
-	%pt[RT][dt][r][s]
+	%ptSp			<seconds>.<nanoseconds>
+	%pt[RST][dt][r][s]
 
 For printing date and time as represented by::
 
-	R  struct rtc_time structure
+	R  content of struct rtc_time
+	S  content of struct timespec64
 	T  time64_t type
 
 in human readable format.
@@ -562,6 +567,11 @@ Use %pt[RT]r (raw) to suppress this behaviour.
 The %pt[RT]s (space) will override ISO 8601 separator by using ' ' (space)
 instead of 'T' (Capital T) between date and time. It won't have any effect
 when date or time is omitted.
+
+The %ptSp is equivalent to %lld.%09ld for the content of the struct timespec64.
+When the other specifiers are given, it becomes the respective equivalent of
+%ptT[dt][r][s].%09ld. In other words, the seconds are being printed in
+the human readable format followed by a dot and nanoseconds.
 
 Passed by reference.
 

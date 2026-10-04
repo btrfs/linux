@@ -32,7 +32,7 @@ static struct devlink_fmsg *devlink_fmsg_alloc(void)
 {
 	struct devlink_fmsg *fmsg;
 
-	fmsg = kzalloc(sizeof(*fmsg), GFP_KERNEL);
+	fmsg = kzalloc_obj(*fmsg);
 	if (!fmsg)
 		return NULL;
 
@@ -119,7 +119,7 @@ __devlink_health_reporter_create(struct devlink *devlink,
 	if (WARN_ON(ops->default_burst_period && !ops->default_graceful_period))
 		return ERR_PTR(-EINVAL);
 
-	reporter = kzalloc(sizeof(*reporter), GFP_KERNEL);
+	reporter = kzalloc_obj(*reporter);
 	if (!reporter)
 		return ERR_PTR(-ENOMEM);
 
@@ -358,7 +358,7 @@ devlink_health_reporter_get_from_info(struct devlink *devlink,
 int devlink_nl_health_reporter_get_doit(struct sk_buff *skb,
 					struct genl_info *info)
 {
-	struct devlink *devlink = info->user_ptr[0];
+	struct devlink *devlink = devlink_nl_ctx(info)->devlink;
 	struct devlink_health_reporter *reporter;
 	struct sk_buff *msg;
 	int err;
@@ -456,7 +456,7 @@ int devlink_nl_health_reporter_get_dumpit(struct sk_buff *skb,
 int devlink_nl_health_reporter_set_doit(struct sk_buff *skb,
 					struct genl_info *info)
 {
-	struct devlink *devlink = info->user_ptr[0];
+	struct devlink *devlink = devlink_nl_ctx(info)->devlink;
 	struct devlink_health_reporter *reporter;
 
 	reporter = devlink_health_reporter_get_from_info(devlink, info);
@@ -715,7 +715,7 @@ EXPORT_SYMBOL_GPL(devlink_health_reporter_state_update);
 int devlink_nl_health_reporter_recover_doit(struct sk_buff *skb,
 					    struct genl_info *info)
 {
-	struct devlink *devlink = info->user_ptr[0];
+	struct devlink *devlink = devlink_nl_ctx(info)->devlink;
 	struct devlink_health_reporter *reporter;
 
 	reporter = devlink_health_reporter_get_from_info(devlink, info);
@@ -738,7 +738,7 @@ static void devlink_fmsg_nest_common(struct devlink_fmsg *fmsg, int attrtype)
 	if (fmsg->err)
 		return;
 
-	item = kzalloc(sizeof(*item), GFP_KERNEL);
+	item = kzalloc_obj(*item);
 	if (!item) {
 		fmsg->err = -ENOMEM;
 		return;
@@ -1157,7 +1157,7 @@ nla_put_failure:
 int devlink_nl_health_reporter_diagnose_doit(struct sk_buff *skb,
 					     struct genl_info *info)
 {
-	struct devlink *devlink = info->user_ptr[0];
+	struct devlink *devlink = devlink_nl_ctx(info)->devlink;
 	struct devlink_health_reporter *reporter;
 	struct devlink_fmsg *fmsg;
 	int err;
@@ -1252,7 +1252,7 @@ unlock:
 int devlink_nl_health_reporter_dump_clear_doit(struct sk_buff *skb,
 					       struct genl_info *info)
 {
-	struct devlink *devlink = info->user_ptr[0];
+	struct devlink *devlink = devlink_nl_ctx(info)->devlink;
 	struct devlink_health_reporter *reporter;
 
 	reporter = devlink_health_reporter_get_from_info(devlink, info);
@@ -1269,7 +1269,7 @@ int devlink_nl_health_reporter_dump_clear_doit(struct sk_buff *skb,
 int devlink_nl_health_reporter_test_doit(struct sk_buff *skb,
 					 struct genl_info *info)
 {
-	struct devlink *devlink = info->user_ptr[0];
+	struct devlink *devlink = devlink_nl_ctx(info)->devlink;
 	struct devlink_health_reporter *reporter;
 
 	reporter = devlink_health_reporter_get_from_info(devlink, info);
@@ -1327,7 +1327,7 @@ void devlink_fmsg_dump_skb(struct devlink_fmsg *fmsg, const struct sk_buff *skb)
 	if (sk) {
 		devlink_fmsg_pair_nest_start(fmsg, "sk");
 		devlink_fmsg_obj_nest_start(fmsg);
-		devlink_fmsg_put(fmsg, "family", sk->sk_type);
+		devlink_fmsg_put(fmsg, "family", sk->sk_family);
 		devlink_fmsg_put(fmsg, "type", sk->sk_type);
 		devlink_fmsg_put(fmsg, "proto", sk->sk_protocol);
 		devlink_fmsg_obj_nest_end(fmsg);

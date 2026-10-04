@@ -7,6 +7,8 @@
 #include <linux/numa.h>
 #include <linux/numa_memblks.h>
 
+#include <asm/numa.h>
+
 int numa_distance_cnt;
 static u8 *numa_distance;
 
@@ -14,20 +16,6 @@ nodemask_t numa_nodes_parsed __initdata;
 
 static struct numa_meminfo numa_meminfo __initdata_or_meminfo;
 static struct numa_meminfo numa_reserved_meminfo __initdata_or_meminfo;
-
-/*
- * Set nodes, which have memory in @mi, in *@nodemask.
- */
-static void __init numa_nodemask_from_meminfo(nodemask_t *nodemask,
-					      const struct numa_meminfo *mi)
-{
-	int i;
-
-	for (i = 0; i < ARRAY_SIZE(mi->blk); i++)
-		if (mi->blk[i].start != mi->blk[i].end &&
-		    mi->blk[i].nid != NUMA_NO_NODE)
-			node_set(mi->blk[i].nid, *nodemask);
-}
 
 /**
  * numa_reset_distance - Reset NUMA distance table
@@ -54,7 +42,6 @@ static int __init numa_alloc_distance(void)
 
 	/* size the new table and allocate it */
 	nodes_parsed = numa_nodes_parsed;
-	numa_nodemask_from_meminfo(&nodes_parsed, &numa_meminfo);
 
 	for_each_node_mask(i, nodes_parsed)
 		cnt = i;
@@ -133,13 +120,20 @@ EXPORT_SYMBOL(__node_distance);
 static int __init numa_add_memblk_to(int nid, u64 start, u64 end,
 				     struct numa_meminfo *mi)
 {
+	/* whine about and ignore invalid nid */
+	if (nid < 0 || nid >= MAX_NUMNODES) {
+		pr_warn("Warning: invalid memblk node id %d [mem %#010Lx-%#010Lx]\n",
+			nid, start, end - 1);
+		return -EINVAL;
+	}
+
 	/* ignore zero length blks */
 	if (start == end)
 		return 0;
 
-	/* whine about and ignore invalid blks */
-	if (start > end || nid < 0 || nid >= MAX_NUMNODES) {
-		pr_warn("Warning: invalid memblk node %d [mem %#010Lx-%#010Lx]\n",
+	/* whine about and ignore invalid ranges */
+	if (start > end) {
+		pr_warn("Warning: invalid memblk range for node %d [mem %#010Lx-%#010Lx]\n",
 			nid, start, end - 1);
 		return 0;
 	}
@@ -191,13 +185,20 @@ static void __init numa_move_tail_memblk(struct numa_meminfo *dst, int idx,
  * @end: End address of the new memblk
  *
  * Add a new memblk to the default numa_meminfo.
+ * On success @nid is also set in numa_nodes_parsed.
  *
  * RETURNS:
  * 0 on success, -errno on failure.
  */
 int __init numa_add_memblk(int nid, u64 start, u64 end)
 {
-	return numa_add_memblk_to(nid, start, end, &numa_meminfo);
+	int ret;
+
+	ret = numa_add_memblk_to(nid, start, end, &numa_meminfo);
+	if (!ret)
+		node_set(nid, numa_nodes_parsed);
+
+	return ret;
 }
 
 /**
@@ -254,8 +255,7 @@ int __init numa_cleanup_meminfo(struct numa_meminfo *mi)
 
 		/* preserve info for non-RAM areas above 'max_pfn': */
 		if (bi->end > high) {
-			numa_add_memblk_to(bi->nid, high, bi->end,
-					   &numa_reserved_meminfo);
+			numa_add_reserved_memblk(bi->nid, high, bi->end);
 			bi->end = high;
 		}
 
@@ -399,7 +399,6 @@ static int __init numa_register_meminfo(struct numa_meminfo *mi)
 
 	/* Account for nodes with cpus and no memory */
 	node_possible_map = numa_nodes_parsed;
-	numa_nodemask_from_meminfo(&node_possible_map, mi);
 	if (WARN_ON(nodes_empty(node_possible_map)))
 		return -EINVAL;
 
@@ -465,7 +464,7 @@ int __init numa_memblks_init(int (*init_func)(void),
 	 * We reset memblock back to the top-down direction
 	 * here because if we configured ACPI_NUMA, we have
 	 * parsed SRAT in init_func(). It is ok to have the
-	 * reset here even if we did't configure ACPI_NUMA
+	 * reset here even if we didn't configure ACPI_NUMA
 	 * or acpi numa init fails and fallbacks to dummy
 	 * numa init.
 	 */
@@ -568,15 +567,16 @@ static int meminfo_to_nid(struct numa_meminfo *mi, u64 start)
 int phys_to_target_node(u64 start)
 {
 	int nid = meminfo_to_nid(&numa_meminfo, start);
+	int reserved_nid = meminfo_to_nid(&numa_reserved_meminfo, start);
 
 	/*
-	 * Prefer online nodes, but if reserved memory might be
-	 * hot-added continue the search with reserved ranges.
+	 * Prefer online nodes unless the address is also described
+	 * by reserved ranges, in which case use the reserved nid.
 	 */
-	if (nid != NUMA_NO_NODE)
+	if (nid != NUMA_NO_NODE && reserved_nid == NUMA_NO_NODE)
 		return nid;
 
-	return meminfo_to_nid(&numa_reserved_meminfo, start);
+	return reserved_nid;
 }
 EXPORT_SYMBOL_GPL(phys_to_target_node);
 

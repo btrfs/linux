@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause */
 /*
- * Copyright (C) 2012-2014, 2018-2022, 2024-2025 Intel Corporation
+ * Copyright (C) 2012-2014, 2018-2022, 2024-2026 Intel Corporation
  * Copyright (C) 2017 Intel Deutschland GmbH
  */
 #ifndef __iwl_fw_api_rs_h__
@@ -73,6 +73,7 @@ enum iwl_tlc_mng_cfg_chains {
  * @IWL_TLC_MNG_MODE_VHT: enable VHT
  * @IWL_TLC_MNG_MODE_HE: enable HE
  * @IWL_TLC_MNG_MODE_EHT: enable EHT
+ * @IWL_TLC_MNG_MODE_UHR: enable UHR
  */
 enum iwl_tlc_mng_cfg_mode {
 	IWL_TLC_MNG_MODE_CCK = 0,
@@ -82,6 +83,7 @@ enum iwl_tlc_mng_cfg_mode {
 	IWL_TLC_MNG_MODE_VHT,
 	IWL_TLC_MNG_MODE_HE,
 	IWL_TLC_MNG_MODE_EHT,
+	IWL_TLC_MNG_MODE_UHR,
 };
 
 /**
@@ -206,8 +208,9 @@ struct iwl_tlc_config_cmd_v4 {
 
 /**
  * struct iwl_tlc_config_cmd - TLC configuration
- * @sta_id: station id
- * @reserved1: reserved
+ * @sta_mask: station mask (in NAN we can have multiple logical stations of
+ *	the same peer (with the same TLC configuration)).
+ * @phy_id: the phy id to used for this TLC configuration
  * @max_ch_width: max supported channel width from &enum iwl_tlc_mng_cfg_cw
  * @mode: &enum iwl_tlc_mng_cfg_mode
  * @chains: bitmask of &enum iwl_tlc_mng_cfg_chains
@@ -222,8 +225,8 @@ struct iwl_tlc_config_cmd_v4 {
  *	       set zero for no limit.
  */
 struct iwl_tlc_config_cmd {
-	u8 sta_id;
-	u8 reserved1[3];
+	__le32 sta_mask;
+	__le32 phy_id;
 	u8 max_ch_width;
 	u8 mode;
 	u8 chains;
@@ -233,7 +236,7 @@ struct iwl_tlc_config_cmd {
 	__le32 ht_rates[IWL_TLC_NSS_MAX][IWL_TLC_MCS_PER_BW_NUM_V4];
 	__le16 max_mpdu_len;
 	__le16 max_tx_op;
-} __packed; /* TLC_MNG_CONFIG_CMD_API_S_VER_5 */
+} __packed; /* TLC_MNG_CONFIG_CMD_API_S_VER_6 */
 
 /**
  * enum iwl_tlc_update_flags - updated fields
@@ -706,10 +709,11 @@ enum {
 #define RATE_MCS_HE_SU_4_LTF		3
 #define RATE_MCS_HE_SU_4_LTF_08_GI	4
 
-/* Bit 24-23: HE type. (0) SU, (1) SU_EXT, (2) MU, (3) trigger based */
+/* Bit 24-23: HE type. (0) SU, (1) HE SU_EXT/UHR ELR, (2) MU, (3) trigger based */
 #define RATE_MCS_HE_TYPE_POS		23
 #define RATE_MCS_HE_TYPE_SU		(0 << RATE_MCS_HE_TYPE_POS)
 #define RATE_MCS_HE_TYPE_EXT_SU		(1 << RATE_MCS_HE_TYPE_POS)
+#define RATE_MCS_HE_TYPE_UHR_ELR	(1 << RATE_MCS_HE_TYPE_POS)
 #define RATE_MCS_HE_TYPE_MU		(2 << RATE_MCS_HE_TYPE_POS)
 #define RATE_MCS_HE_TYPE_TRIG		(3 << RATE_MCS_HE_TYPE_POS)
 #define RATE_MCS_HE_TYPE_MSK		(3 << RATE_MCS_HE_TYPE_POS)
@@ -854,7 +858,6 @@ struct iwl_lq_cmd {
 	__le32 ss_params;
 }; /* LINK_QUALITY_CMD_API_S_VER_1 */
 
-u8 iwl_fw_rate_idx_to_plcp(int idx);
 const struct iwl_rate_mcs_info *iwl_rate_mcs(int idx);
 const char *iwl_rs_pretty_ant(u8 ant);
 const char *iwl_rs_pretty_bw(int bw);
