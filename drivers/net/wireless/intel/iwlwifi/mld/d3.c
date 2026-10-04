@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
 /*
- * Copyright (C) 2024-2025 Intel Corporation
+ * Copyright (C) 2024-2026 Intel Corporation
  */
 #include "mld.h"
 
@@ -43,6 +43,12 @@ struct iwl_mld_resume_key_iter_data {
 	struct iwl_mld_wowlan_status *wowlan_status;
 };
 
+struct iwl_mld_rsc_resume_iter_data {
+	struct iwl_mld *mld;
+	const struct iwl_wowlan_all_rsc_tsc_v5 *notif;
+	int queue;
+};
+
 struct iwl_mld_suspend_key_iter_data {
 	struct iwl_wowlan_rsc_tsc_params_cmd *rsc;
 	bool have_rsc;
@@ -52,6 +58,30 @@ struct iwl_mld_suspend_key_iter_data {
 	__le32 igtk_cipher;
 	__le32 bigtk_cipher;
 };
+
+struct iwl_mld_wake_pkt_iter_data {
+	bool multicast;
+	u32 ivlen;
+	u32 icvlen;
+};
+
+static void
+iwl_mld_wake_pkt_key_iter(struct ieee80211_hw *hw, struct ieee80211_vif *vif,
+			  struct ieee80211_sta *sta,
+			  struct ieee80211_key_conf *key, void *_data)
+{
+	struct iwl_mld_wake_pkt_iter_data *data = _data;
+	bool is_group_key = !sta;
+
+	/* ignore anything that is not a PTK / GTK */
+	if (key->keyidx > 3)
+		return;
+	if (is_group_key != data->multicast)
+		return;
+
+	data->ivlen = key->iv_len;
+	data->icvlen = key->icv_len;
+}
 
 struct iwl_mld_mcast_key_data {
 	u8 key[WOWLAN_KEY_MAX_SIZE];
@@ -282,7 +312,8 @@ static void
 iwl_mld_convert_gtk_resume_data(struct iwl_mld *mld,
 				struct iwl_mld_wowlan_status *wowlan_status,
 				const struct iwl_wowlan_gtk_status *gtk_data,
-				const struct iwl_wowlan_all_rsc_tsc_v5 *sc)
+				const struct iwl_wowlan_all_rsc_tsc_v5 *sc,
+				int rsc_notif_ver)
 {
 	int status_idx = 0;
 
@@ -305,14 +336,18 @@ iwl_mld_convert_gtk_resume_data(struct iwl_mld *mld,
 		wowlan_status->gtk[status_idx].id =
 			wowlan_status->gtk[status_idx].flags &
 			IWL_WOWLAN_GTK_IDX_MASK;
-		/* The rsc for both gtk keys are stored in gtk[0]->sc->mcast_rsc
-		 * The gtk ids can be any two numbers between 0 and 3,
-		 * the id_map maps between the key id and the index in sc->mcast
-		 */
-		rsc_idx =
-			sc->mcast_key_id_map[wowlan_status->gtk[status_idx].id];
-		iwl_mld_convert_gtk_resume_seq(&wowlan_status->gtk[status_idx],
-					       sc, rsc_idx);
+		/* If RSC_NOTIF is not supported */
+		if (rsc_notif_ver == IWL_FW_CMD_VER_UNKNOWN) {
+			/* The rsc for both gtk keys are stored in
+			 * gtk[0]->sc->mcast_rsc. The gtk ids can be any two
+			 * numbers between 0 and 3, the id_map maps between the
+			 * key id and the index in sc->mcast
+			 */
+			rsc_idx =
+				sc->mcast_key_id_map[wowlan_status->gtk[status_idx].id];
+			iwl_mld_convert_gtk_resume_seq(&wowlan_status->gtk[status_idx],
+						       sc, rsc_idx);
+		}
 
 		if (key_status == IWL_WOWLAN_STATUS_NEW_KEY) {
 			memcpy(wowlan_status->gtk[status_idx].key,
@@ -562,18 +597,42 @@ iwl_mld_convert_wowlan_notif_v5(const struct iwl_wowlan_info_notif_v5 *notif_v5,
 	}
 }
 
-static bool iwl_mld_validate_wowlan_notif_size(struct iwl_mld *mld,
-					       u32 len,
-					       u32 expected_len,
-					       u8 num_mlo_keys,
+static bool iwl_mld_validate_wowlan_notif_size(struct iwl_mld *mld, u32 len,
+					       const void *notif_data,
 					       int version)
 {
 	u32 len_with_mlo_keys;
+	u32 expected_len;
+	u8 num_mlo_keys;
 
-	if (IWL_FW_CHECK(mld, len < expected_len,
-			 "Invalid wowlan_info_notif v%d (expected=%u got=%u)\n",
-			 version, expected_len, len))
+	/* Extract num_mlo_keys from the void pointer based on version */
+	if (version == 5) {
+		const struct iwl_wowlan_info_notif_v5 *notif_v5 = notif_data;
+
+		expected_len = sizeof(*notif_v5);
+
+		if (IWL_FW_CHECK(mld, len < expected_len,
+				 "Invalid wowlan_info_notif v5 (expected=%u got=%u)\n",
+				 expected_len, len))
+			return false;
+
+		num_mlo_keys = notif_v5->num_mlo_link_keys;
+	} else if (version == 6) {
+		const struct iwl_wowlan_info_notif *notif = notif_data;
+
+		expected_len = sizeof(*notif);
+
+		if (IWL_FW_CHECK(mld, len < expected_len,
+				 "Invalid wowlan_info_notif v6 (expected=%u got=%u)\n",
+				 expected_len, len))
+			return false;
+
+		num_mlo_keys = notif->num_mlo_link_keys;
+	} else {
+		IWL_WARN(mld, "Unsupported wowlan_info_notif version %d\n",
+			 version);
 		return false;
+	}
 
 	len_with_mlo_keys = expected_len +
 		(num_mlo_keys * sizeof(struct iwl_wowlan_mlo_gtk));
@@ -598,36 +657,34 @@ iwl_mld_handle_wowlan_info_notif(struct iwl_mld *mld,
 						      PROT_OFFLOAD_GROUP,
 						      WOWLAN_INFO_NOTIFICATION,
 						      IWL_FW_CMD_VER_UNKNOWN);
+	int rsc_notif_ver = iwl_fw_lookup_notif_ver(mld->fw,
+						    DATA_PATH_GROUP,
+						    RSC_NOTIF,
+						    IWL_FW_CMD_VER_UNKNOWN);
 
 	if (wowlan_info_ver == 5) {
 		/* v5 format - validate before conversion */
-		const struct iwl_wowlan_info_notif_v5 *notif_v5 = (void *)pkt->data;
+		const struct iwl_wowlan_info_notif_v5 *_notif =
+			(void *)pkt->data;
 
-		if (!iwl_mld_validate_wowlan_notif_size(mld, len,
-							sizeof(*notif_v5),
-							notif_v5->num_mlo_link_keys,
-							5))
+		if (!iwl_mld_validate_wowlan_notif_size(mld, len, _notif, 5))
 			return true;
 
-		converted_notif = kzalloc(struct_size(converted_notif,
-						      mlo_gtks,
-						      notif_v5->num_mlo_link_keys),
-					  GFP_ATOMIC);
+		converted_notif = kzalloc_flex(*converted_notif, mlo_gtks,
+					       _notif->num_mlo_link_keys,
+					       GFP_ATOMIC);
 		if (!converted_notif) {
 			IWL_ERR(mld,
 				"Failed to allocate memory for converted wowlan_info_notif\n");
 			return true;
 		}
 
-		iwl_mld_convert_wowlan_notif_v5(notif_v5,
-						converted_notif);
+		iwl_mld_convert_wowlan_notif_v5(_notif, converted_notif);
 		notif = converted_notif;
 	} else if (wowlan_info_ver == 6) {
 		notif = (void *)pkt->data;
-		if (!iwl_mld_validate_wowlan_notif_size(mld, len,
-							sizeof(*notif),
-							notif->num_mlo_link_keys,
-							6))
+
+		if (!iwl_mld_validate_wowlan_notif_size(mld, len, notif, 6))
 			return true;
 	} else {
 		/* smaller versions are not supported */
@@ -643,8 +700,10 @@ iwl_mld_handle_wowlan_info_notif(struct iwl_mld *mld,
 		return true;
 
 	iwl_mld_convert_gtk_resume_data(mld, wowlan_status, notif->gtk,
-					&notif->gtk[0].sc);
-	iwl_mld_convert_ptk_resume_seq(mld, wowlan_status, &notif->gtk[0].sc);
+					&notif->gtk[0].sc, rsc_notif_ver);
+	if (rsc_notif_ver == IWL_FW_CMD_VER_UNKNOWN)
+		iwl_mld_convert_ptk_resume_seq(mld, wowlan_status,
+					       &notif->gtk[0].sc);
 	/* only one igtk is passed by FW */
 	iwl_mld_convert_igtk_resume_data(wowlan_status, &notif->igtk[0]);
 	iwl_mld_convert_bigtk_resume_data(wowlan_status, notif->bigtk);
@@ -670,7 +729,7 @@ iwl_mld_handle_wake_pkt_notif(struct iwl_mld *mld,
 {
 	const struct iwl_wowlan_wake_pkt_notif *notif = (void *)pkt->data;
 	u32 actual_size, len = iwl_rx_packet_payload_len(pkt);
-	u32 expected_size = le32_to_cpu(notif->wake_packet_length);
+	u32 expected_size;
 
 	if (IWL_FW_CHECK(mld, len < sizeof(*notif),
 			 "Invalid WoWLAN wake packet notification (expected size=%zu got=%u)\n",
@@ -683,6 +742,7 @@ iwl_mld_handle_wake_pkt_notif(struct iwl_mld *mld,
 			 wowlan_status->wakeup_reasons))
 		return true;
 
+	expected_size = le32_to_cpu(notif->wake_packet_length);
 	actual_size = len - offsetof(struct iwl_wowlan_wake_pkt_notif,
 				     wake_packet);
 
@@ -707,11 +767,17 @@ iwl_mld_set_wake_packet(struct iwl_mld *mld,
 			struct cfg80211_wowlan_wakeup *wakeup,
 			struct sk_buff **_pkt)
 {
-	int pkt_bufsize = wowlan_status->wake_packet_bufsize;
-	int expected_pktlen = wowlan_status->wake_packet_length;
+	u32 pkt_bufsize = wowlan_status->wake_packet_bufsize;
+	u32 expected_pktlen = wowlan_status->wake_packet_length;
 	const u8 *pktdata = wowlan_status->wake_packet;
 	const struct ieee80211_hdr *hdr = (const void *)pktdata;
-	int truncated = expected_pktlen - pkt_bufsize;
+	u32 truncated;
+
+	if (IWL_FW_CHECK(mld, pkt_bufsize < sizeof(*hdr),
+			 "pkt_bufsize is too short: %u\n", pkt_bufsize))
+		return;
+
+	truncated = expected_pktlen - pkt_bufsize;
 
 	if (ieee80211_is_data(hdr->frame_control)) {
 		int hdrlen = ieee80211_hdrlen(hdr->frame_control);
@@ -722,9 +788,18 @@ iwl_mld_set_wake_packet(struct iwl_mld *mld,
 		if (!pkt)
 			return;
 
-		skb_put_data(pkt, pktdata, hdrlen);
-		pktdata += hdrlen;
-		pkt_bufsize -= hdrlen;
+		if (ieee80211_has_protected(hdr->frame_control)) {
+			struct iwl_mld_wake_pkt_iter_data iter_data = {
+				.multicast =
+					is_multicast_ether_addr(hdr->addr1),
+			};
+
+			ieee80211_iter_keys(mld->hw, vif,
+					    iwl_mld_wake_pkt_key_iter,
+					    &iter_data);
+			ivlen = iter_data.ivlen;
+			icvlen += iter_data.icvlen;
+		}
 
 		/* if truncated, FCS/ICV is (partially) gone */
 		if (truncated >= icvlen) {
@@ -735,6 +810,13 @@ iwl_mld_set_wake_packet(struct iwl_mld *mld,
 			truncated = 0;
 		}
 
+		if (IWL_FW_CHECK(mld, pkt_bufsize <= hdrlen + ivlen + icvlen,
+				 "pkt_bufsize is too small %u\n", pkt_bufsize))
+			return;
+
+		skb_put_data(pkt, pktdata, hdrlen);
+		pktdata += hdrlen;
+		pkt_bufsize -= hdrlen;
 		pkt_bufsize -= ivlen + icvlen;
 		pktdata += ivlen;
 
@@ -756,6 +838,11 @@ iwl_mld_set_wake_packet(struct iwl_mld *mld,
 			fcslen -= truncated;
 			truncated = 0;
 		}
+
+		if (IWL_FW_CHECK(mld, pkt_bufsize <= fcslen,
+				 "pkt_bufsize is too small %u\n", pkt_bufsize))
+			return;
+
 		pkt_bufsize -= fcslen;
 		wakeup->packet = wowlan_status->wake_packet;
 		wakeup->packet_present_len = pkt_bufsize;
@@ -903,8 +990,14 @@ iwl_mld_resume_keys_iter(struct ieee80211_hw *hw,
 	struct iwl_mld_resume_key_iter_data *data = _data;
 	struct iwl_mld_wowlan_status *wowlan_status = data->wowlan_status;
 	u8 status_idx;
+	int rsc_notif_ver = iwl_fw_lookup_notif_ver(data->mld->fw,
+						    DATA_PATH_GROUP,
+						    RSC_NOTIF,
+						    IWL_FW_CMD_VER_UNKNOWN);
 
-	if (key->keyidx >= 0 && key->keyidx <= 3) {
+	/* If RSC_NOTIF is not supported */
+	if (rsc_notif_ver == IWL_FW_CMD_VER_UNKNOWN &&
+	    key->keyidx >= 0 && key->keyidx <= 3) {
 		/* PTK */
 		if (sta) {
 			iwl_mld_update_ptk_rx_seq(data->mld, wowlan_status,
@@ -934,6 +1027,105 @@ iwl_mld_resume_keys_iter(struct ieee80211_hw *hw,
 }
 
 static void
+iwl_mld_rsc_update_key_iter(struct ieee80211_hw *hw,
+			    struct ieee80211_vif *vif,
+			    struct ieee80211_sta *sta,
+			    struct ieee80211_key_conf *key,
+			    void *_data)
+{
+	struct iwl_mld_rsc_resume_iter_data *data = _data;
+	struct ieee80211_key_seq seq;
+
+	if (key->keyidx > 3)
+		return;
+
+	if (sta) {
+		/* PTK */
+		BUILD_BUG_ON(ARRAY_SIZE(data->notif->ucast_rsc) !=
+			     IWL_MAX_TID_COUNT);
+
+		if (key->cipher == WLAN_CIPHER_SUITE_TKIP) {
+			/* TKIP: just update key sequences */
+			for (int tid = 0; tid < IWL_MAX_TID_COUNT; tid++) {
+				iwl_mld_le64_to_tkip_seq(data->notif->ucast_rsc[tid],
+							 &seq);
+				ieee80211_set_key_rx_seq(key, tid, &seq);
+			}
+		} else {
+			struct iwl_mld_sta *mld_sta = iwl_mld_sta_from_mac80211(sta);
+			struct iwl_mld_ptk_pn *mld_ptk_pn =
+				rcu_dereference_wiphy(data->mld->wiphy,
+						      mld_sta->ptk_pn[key->keyidx]);
+
+			if (WARN_ON(!mld_ptk_pn))
+				return;
+
+			if (WARN_ON(data->queue >=
+				    data->mld->trans->info.num_rxqs))
+				return;
+
+			for (int tid = 0; tid < IWL_MAX_TID_COUNT; tid++) {
+				iwl_mld_le64_to_aes_seq(data->notif->ucast_rsc[tid],
+							&seq);
+				ieee80211_set_key_rx_seq(key, tid, &seq);
+				memcpy(mld_ptk_pn->q[data->queue].pn[tid],
+				       seq.ccmp.pn,
+				       IEEE80211_CCMP_PN_LEN);
+			}
+		}
+
+		IWL_DEBUG_WOWLAN(data->mld,
+				 "Updated PTK RSC for key %d on queue %d\n",
+				 key->keyidx, data->queue);
+	} else {
+		/* GTK */
+		int rsc_idx = data->notif->mcast_key_id_map[key->keyidx];
+
+		if (rsc_idx == IWL_MCAST_KEY_MAP_INVALID)
+			return;
+
+		if (IWL_FW_CHECK(data->mld,
+				 rsc_idx >= ARRAY_SIZE(data->notif->mcast_rsc),
+				 "Invalid mcast key mapping: %d for key %d\n",
+				 rsc_idx, key->keyidx))
+			return;
+
+		for (int tid = 0; tid < IWL_MAX_TID_COUNT; tid++) {
+			__le64 rsc =
+				data->notif->mcast_rsc[rsc_idx][tid];
+
+			if (key->cipher == WLAN_CIPHER_SUITE_TKIP)
+				iwl_mld_le64_to_tkip_seq(rsc, &seq);
+			else
+				iwl_mld_le64_to_aes_seq(rsc, &seq);
+			ieee80211_set_key_rx_seq(key, tid, &seq);
+		}
+
+		IWL_DEBUG_WOWLAN(data->mld,
+				 "Updated GTK %d RSC (rsc_idx %d) on queue %d\n",
+				 key->keyidx, rsc_idx, data->queue);
+	}
+}
+
+void
+iwl_mld_process_rsc_notification(struct iwl_mld *mld,
+				 struct ieee80211_vif *vif,
+				 const struct iwl_wowlan_all_rsc_tsc_v5 *notif,
+				 int queue)
+{
+	struct iwl_mld_rsc_resume_iter_data iter_data = {
+		.mld = mld,
+		.notif = notif,
+		.queue = queue,
+	};
+
+	/* Iterate through all active keys and update RSC */
+	ieee80211_iter_keys_rcu(mld->hw, vif,
+				iwl_mld_rsc_update_key_iter,
+				&iter_data);
+}
+
+static void
 iwl_mld_add_mcast_rekey(struct ieee80211_vif *vif,
 			struct iwl_mld *mld,
 			struct iwl_mld_mcast_key_data *key_data,
@@ -952,19 +1144,25 @@ iwl_mld_add_mcast_rekey(struct ieee80211_vif *vif,
 
 	iwl_mld_update_mcast_rx_seq(key_config, key_data);
 
-	/* The FW holds only one igtk so we keep track of the valid one */
+	/* The FW holds only one IGTK so we keep track of the valid one */
 	if (key_config->keyidx == 4 || key_config->keyidx == 5) {
-		struct iwl_mld_link *mld_link =
-			iwl_mld_link_from_mac80211(link_conf);
+		struct iwl_mld_link_sta *mld_ap_link_sta;
+
+		mld_ap_link_sta = iwl_mld_get_ap_link_sta(vif,
+							  link_conf->link_id);
+		if (WARN_ON(!mld_ap_link_sta))
+			return;
 
 		/* If we had more than one rekey, mac80211 will tell us to
 		 * remove the old and add the new so we will update the IGTK in
 		 * drv_set_key
 		 */
-		if (mld_link->igtk && mld_link->igtk != key_config) {
+		if (mld_ap_link_sta->rx_igtk &&
+		    mld_ap_link_sta->rx_igtk != key_config) {
 			/* mark the old IGTK as not in FW */
-			mld_link->igtk->hw_key_idx = STA_KEY_IDX_INVALID;
-			mld_link->igtk = key_config;
+			mld_ap_link_sta->rx_igtk->hw_key_idx =
+				STA_KEY_IDX_INVALID;
+			mld_ap_link_sta->rx_igtk = key_config;
 		}
 	}
 
@@ -996,8 +1194,6 @@ static void iwl_mld_mlo_rekey(struct iwl_mld *mld,
 			      struct iwl_mld_wowlan_status *wowlan_status,
 			      struct ieee80211_vif *vif)
 {
-	struct iwl_mld_old_mlo_keys *old_keys __free(kfree) = NULL;
-
 	IWL_DEBUG_WOWLAN(mld, "Num of MLO Keys: %d\n", wowlan_status->num_mlo_keys);
 
 	if (!wowlan_status->num_mlo_keys)
@@ -1175,8 +1371,7 @@ iwl_mld_set_netdetect_info(struct iwl_mld *mld,
 		for (int k = 0; k < SCAN_OFFLOAD_MATCHING_CHANNELS_LEN; k++)
 			n_channels +=
 				hweight8(matches[i].matching_channels[k]);
-		match = kzalloc(struct_size(match, channels, n_channels),
-				GFP_KERNEL);
+		match = kzalloc_flex(*match, channels, n_channels);
 		if (!match)
 			return;
 
@@ -1253,8 +1448,7 @@ iwl_mld_process_netdetect_res(struct iwl_mld *mld,
 		goto out;
 	}
 	n_matches = hweight_long(matched_profiles);
-	netdetect_info = kzalloc(struct_size(netdetect_info, matches,
-					     n_matches), GFP_KERNEL);
+	netdetect_info = kzalloc_flex(*netdetect_info, matches, n_matches);
 	if (netdetect_info)
 		iwl_mld_set_netdetect_info(mld, netdetect_cfg, netdetect_info,
 					   resume_data->netdetect_res,
@@ -1326,8 +1520,16 @@ static bool iwl_mld_handle_d3_notif(struct iwl_notif_wait_data *notif_wait,
 	}
 	case WIDE_ID(PROT_OFFLOAD_GROUP, D3_END_NOTIFICATION): {
 		struct iwl_d3_end_notif *notif = (void *)pkt->data;
+		u32 len = iwl_rx_packet_payload_len(pkt);
 
-		resume_data->d3_end_flags = le32_to_cpu(notif->flags);
+		if (IWL_FW_CHECK(mld, len < sizeof(*notif),
+				 "Invalid D3_END notification (expected=%zu got=%u)\n",
+				 sizeof(*notif), len)) {
+			resume_data->notif_handling_err = true;
+		} else {
+			resume_data->d3_end_flags = le32_to_cpu(notif->flags);
+		}
+
 		resume_data->notifs_received |= IWL_D3_NOTIF_D3_END_NOTIF;
 		break;
 	}
@@ -1658,7 +1860,7 @@ iwl_mld_suspend_send_security_cmds(struct iwl_mld *mld,
 	struct iwl_mld_suspend_key_iter_data data = {};
 	int ret;
 
-	data.rsc = kzalloc(sizeof(*data.rsc), GFP_KERNEL);
+	data.rsc = kzalloc_obj(*data.rsc);
 	if (!data.rsc)
 		return -ENOMEM;
 
@@ -1794,6 +1996,10 @@ iwl_mld_send_proto_offload(struct iwl_mld *mld,
 	u32 enabled = 0;
 
 	cmd = kzalloc(hcmd.len[0], GFP_KERNEL);
+	if (!cmd) {
+		IWL_DEBUG_WOWLAN(mld, "Failed to allocate proto offload cmd\n");
+		return -ENOMEM;
+	}
 
 #if IS_ENABLED(CONFIG_IPV6)
 	struct iwl_mld_vif *mld_vif = iwl_mld_vif_from_mac80211(vif);
@@ -1931,16 +2137,19 @@ int iwl_mld_wowlan_suspend(struct iwl_mld *mld, struct cfg80211_wowlan *wowlan)
 	if (WARN_ON(!wowlan))
 		return 1;
 
-	IWL_DEBUG_WOWLAN(mld, "Starting the wowlan suspend flow\n");
-
 	bss_vif = iwl_mld_get_bss_vif(mld);
-	if (WARN_ON(!bss_vif))
+	if (!bss_vif)
 		return 1;
+
+	IWL_DEBUG_WOWLAN(mld, "Starting the wowlan suspend flow\n");
 
 	if (!bss_vif->cfg.assoc) {
 		int ret;
-		/* If we're not associated, this must be netdetect */
-		if (WARN_ON(!wowlan->nd_config))
+		/*
+		 * If not associated we can only do netdetect, if
+		 * that's not enabled then just suspend normally.
+		 */
+		if (!wowlan->nd_config)
 			return 1;
 
 		ret = iwl_mld_netdetect_config(mld, bss_vif, wowlan);
@@ -2000,8 +2209,7 @@ int iwl_mld_wowlan_resume(struct iwl_mld *mld)
 
 	iwl_fw_dbg_read_d3_debug_data(&mld->fwrt);
 
-	resume_data.wowlan_status = kzalloc(sizeof(*resume_data.wowlan_status),
-					    GFP_KERNEL);
+	resume_data.wowlan_status = kzalloc_obj(*resume_data.wowlan_status);
 	if (!resume_data.wowlan_status)
 		return -ENOMEM;
 
@@ -2011,6 +2219,9 @@ int iwl_mld_wowlan_resume(struct iwl_mld *mld)
 	ret = iwl_mld_wait_d3_notif(mld, &resume_data, true);
 	if (ret) {
 		IWL_ERR(mld, "Couldn't get the d3 notifs %d\n", ret);
+
+		if (bss_vif->cfg.assoc)
+			ieee80211_resume_disconnect(bss_vif);
 		goto err;
 	}
 

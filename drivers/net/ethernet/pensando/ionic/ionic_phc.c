@@ -3,6 +3,7 @@
 
 #include <linux/netdevice.h>
 #include <linux/etherdevice.h>
+#include <uapi/rdma/ib_user_verbs.h>
 
 #include "ionic.h"
 #include "ionic_bus.h"
@@ -65,18 +66,20 @@ static u64 ionic_hwstamp_rx_filt(int config_rx_filter)
 }
 
 static int ionic_lif_hwstamp_set_ts_config(struct ionic_lif *lif,
-					   struct hwtstamp_config *new_ts)
+					   struct kernel_hwtstamp_config *new_ts,
+					   struct netlink_ext_ack *extack)
 {
+	struct kernel_hwtstamp_config *config;
+	struct kernel_hwtstamp_config ts = {};
 	struct ionic *ionic = lif->ionic;
-	struct hwtstamp_config *config;
-	struct hwtstamp_config ts;
 	int tx_mode = 0;
 	u64 rx_filt = 0;
 	int err, err2;
 	bool rx_all;
 	__le64 mask;
 
-	if (!lif->phc || !lif->phc->ptp)
+	if (!lif->phc || !lif->phc->ptp ||
+	    !(lif->hw_features & IONIC_ETH_HW_TIMESTAMP))
 		return -EOPNOTSUPP;
 
 	mutex_lock(&lif->phc->config_lock);
@@ -99,12 +102,16 @@ static int ionic_lif_hwstamp_set_ts_config(struct ionic_lif *lif,
 
 	tx_mode = ionic_hwstamp_tx_mode(config->tx_type);
 	if (tx_mode < 0) {
+		NL_SET_ERR_MSG_MOD(extack,
+				   "TX time stamping mode isn't supported");
 		err = tx_mode;
 		goto err_queues;
 	}
 
 	mask = cpu_to_le64(BIT_ULL(tx_mode));
 	if ((ionic->ident.lif.eth.hwstamp_tx_modes & mask) != mask) {
+		NL_SET_ERR_MSG_MOD(extack,
+				   "TX time stamping mode isn't supported");
 		err = -ERANGE;
 		goto err_queues;
 	}
@@ -124,32 +131,47 @@ static int ionic_lif_hwstamp_set_ts_config(struct ionic_lif *lif,
 
 	if (tx_mode) {
 		err = ionic_lif_create_hwstamp_txq(lif);
-		if (err)
+		if (err) {
+			NL_SET_ERR_MSG_MOD(extack,
+					   "Error creating TX timestamp queue");
 			goto err_queues;
+		}
 	}
 
 	if (rx_filt) {
 		err = ionic_lif_create_hwstamp_rxq(lif);
-		if (err)
+		if (err) {
+			NL_SET_ERR_MSG_MOD(extack,
+					   "Error creating RX timestamp queue");
 			goto err_queues;
+		}
 	}
 
 	if (tx_mode != lif->phc->ts_config_tx_mode) {
 		err = ionic_lif_set_hwstamp_txmode(lif, tx_mode);
-		if (err)
+		if (err) {
+			NL_SET_ERR_MSG_MOD(extack,
+					   "Error enabling TX timestamp mode");
 			goto err_txmode;
+		}
 	}
 
 	if (rx_filt != lif->phc->ts_config_rx_filt) {
 		err = ionic_lif_set_hwstamp_rxfilt(lif, rx_filt);
-		if (err)
+		if (err) {
+			NL_SET_ERR_MSG_MOD(extack,
+					   "Error enabling RX timestamp mode");
 			goto err_rxfilt;
+		}
 	}
 
 	if (rx_all != (lif->phc->ts_config.rx_filter == HWTSTAMP_FILTER_ALL)) {
 		err = ionic_lif_config_hwstamp_rxq_all(lif, rx_all);
-		if (err)
+		if (err) {
+			NL_SET_ERR_MSG_MOD(extack,
+					   "Error enabling RX timestamp mode");
 			goto err_rxall;
+		}
 	}
 
 	memcpy(&lif->phc->ts_config, config, sizeof(*config));
@@ -183,27 +205,24 @@ err_queues:
 	return err;
 }
 
-int ionic_lif_hwstamp_set(struct ionic_lif *lif, struct ifreq *ifr)
+int ionic_hwstamp_set(struct net_device *netdev,
+		      struct kernel_hwtstamp_config *config,
+		      struct netlink_ext_ack *extack)
 {
-	struct hwtstamp_config config;
+	struct ionic_lif *lif = netdev_priv(netdev);
 	int err;
 
-	if (!lif->phc || !lif->phc->ptp)
+	if (!lif->phc || !lif->phc->ptp ||
+	    !(lif->hw_features & IONIC_ETH_HW_TIMESTAMP))
 		return -EOPNOTSUPP;
 
-	if (copy_from_user(&config, ifr->ifr_data, sizeof(config)))
-		return -EFAULT;
-
 	mutex_lock(&lif->queue_lock);
-	err = ionic_lif_hwstamp_set_ts_config(lif, &config);
+	err = ionic_lif_hwstamp_set_ts_config(lif, config, extack);
 	mutex_unlock(&lif->queue_lock);
 	if (err) {
 		netdev_info(lif->netdev, "hwstamp set failed: %d\n", err);
 		return err;
 	}
-
-	if (copy_to_user(ifr->ifr_data, &config, sizeof(config)))
-		return -EFAULT;
 
 	return 0;
 }
@@ -212,11 +231,12 @@ void ionic_lif_hwstamp_replay(struct ionic_lif *lif)
 {
 	int err;
 
-	if (!lif->phc || !lif->phc->ptp)
+	if (!lif->phc || !lif->phc->ptp ||
+	    !(lif->hw_features & IONIC_ETH_HW_TIMESTAMP))
 		return;
 
 	mutex_lock(&lif->queue_lock);
-	err = ionic_lif_hwstamp_set_ts_config(lif, NULL);
+	err = ionic_lif_hwstamp_set_ts_config(lif, NULL, NULL);
 	mutex_unlock(&lif->queue_lock);
 	if (err)
 		netdev_info(lif->netdev, "hwstamp replay failed: %d\n", err);
@@ -226,7 +246,8 @@ void ionic_lif_hwstamp_recreate_queues(struct ionic_lif *lif)
 {
 	int err;
 
-	if (!lif->phc || !lif->phc->ptp)
+	if (!lif->phc || !lif->phc->ptp ||
+	    !(lif->hw_features & IONIC_ETH_HW_TIMESTAMP))
 		return;
 
 	mutex_lock(&lif->phc->config_lock);
@@ -246,19 +267,19 @@ void ionic_lif_hwstamp_recreate_queues(struct ionic_lif *lif)
 	mutex_unlock(&lif->phc->config_lock);
 }
 
-int ionic_lif_hwstamp_get(struct ionic_lif *lif, struct ifreq *ifr)
+int ionic_hwstamp_get(struct net_device *netdev,
+		      struct kernel_hwtstamp_config *config)
 {
-	struct hwtstamp_config config;
+	struct ionic_lif *lif = netdev_priv(netdev);
 
-	if (!lif->phc || !lif->phc->ptp)
+	if (!lif->phc || !lif->phc->ptp ||
+	    !(lif->hw_features & IONIC_ETH_HW_TIMESTAMP))
 		return -EOPNOTSUPP;
 
 	mutex_lock(&lif->phc->config_lock);
-	memcpy(&config, &lif->phc->ts_config, sizeof(config));
+	memcpy(config, &lif->phc->ts_config, sizeof(*config));
 	mutex_unlock(&lif->phc->config_lock);
 
-	if (copy_to_user(ifr->ifr_data, &config, sizeof(config)))
-		return -EFAULT;
 	return 0;
 }
 
@@ -314,6 +335,26 @@ static int ionic_setphc_cmd(struct ionic_phc *phc, struct ionic_admin_ctx *ctx)
 	return ionic_adminq_post(phc->lif, ctx);
 }
 
+static void ionic_phc_state_page_update(struct ionic_phc *phc)
+{
+	struct ib_uverbs_clock_info *state = phc->state_page;
+	u32 sign;
+
+	/* read current sign */
+	sign = smp_load_acquire(&state->sign) & ~1;
+
+	/* make sign odd for updating */
+	smp_store_mb(state->sign, sign | 1);
+
+	state->cycles = phc->tc.cycle_last;
+	state->nsec = phc->tc.nsec;
+	state->frac = phc->tc.frac;
+	state->mult = phc->cc.mult;
+
+	/* make sign the next even number for update completed */
+	smp_store_release(&state->sign, sign + 2);
+}
+
 static int ionic_phc_adjfine(struct ptp_clock_info *info, long scaled_ppm)
 {
 	struct ionic_phc *phc = container_of(info, struct ionic_phc, ptp_info);
@@ -341,6 +382,8 @@ static int ionic_phc_adjfine(struct ptp_clock_info *info, long scaled_ppm)
 	timecounter_read(&phc->tc);
 	phc->cc.mult = adj;
 
+	ionic_phc_state_page_update(phc);
+
 	/* Setphc commands are posted in-order, sequenced by phc->lock.  We
 	 * need to drop the lock before waiting for the command to complete.
 	 */
@@ -365,6 +408,8 @@ static int ionic_phc_adjtime(struct ptp_clock_info *info, s64 delta)
 	spin_lock_irqsave(&phc->lock, irqflags);
 
 	timecounter_adjtime(&phc->tc, delta);
+
+	ionic_phc_state_page_update(phc);
 
 	/* Setphc commands are posted in-order, sequenced by phc->lock.  We
 	 * need to drop the lock before waiting for the command to complete.
@@ -394,6 +439,8 @@ static int ionic_phc_settime64(struct ptp_clock_info *info,
 	spin_lock_irqsave(&phc->lock, irqflags);
 
 	timecounter_init(&phc->tc, &phc->cc, ns);
+
+	ionic_phc_state_page_update(phc);
 
 	/* Setphc commands are posted in-order, sequenced by phc->lock.  We
 	 * need to drop the lock before waiting for the command to complete.
@@ -452,6 +499,8 @@ static long ionic_phc_aux_work(struct ptp_clock_info *info)
 	/* update point-in-time basis to now */
 	timecounter_read(&phc->tc);
 
+	ionic_phc_state_page_update(phc);
+
 	/* Setphc commands are posted in-order, sequenced by phc->lock.  We
 	 * need to drop the lock before waiting for the command to complete.
 	 */
@@ -491,7 +540,8 @@ static const struct ptp_clock_info ionic_ptp_info = {
 
 void ionic_lif_register_phc(struct ionic_lif *lif)
 {
-	if (!lif->phc || !(lif->hw_features & IONIC_ETH_HW_TIMESTAMP))
+	if (!lif->phc ||
+	    !(lif->hw_features & (IONIC_ETH_HW_TIMESTAMP | IONIC_ETH_HW_RDMA_TIMESTAMP)))
 		return;
 
 	lif->phc->ptp = ptp_clock_register(&lif->phc->ptp_info, lif->ionic->dev);
@@ -530,12 +580,18 @@ void ionic_lif_alloc_phc(struct ionic_lif *lif)
 		return;
 
 	features = le64_to_cpu(ionic->ident.lif.eth.config.features);
-	if (!(features & IONIC_ETH_HW_TIMESTAMP))
+	if (!(features & (IONIC_ETH_HW_TIMESTAMP | IONIC_ETH_HW_RDMA_TIMESTAMP)))
 		return;
 
 	phc = devm_kzalloc(ionic->dev, sizeof(*phc), GFP_KERNEL);
 	if (!phc)
 		return;
+
+	phc->state_page = (void *)get_zeroed_page(GFP_KERNEL);
+	if (!phc->state_page) {
+		devm_kfree(ionic->dev, phc);
+		return;
+	}
 
 	phc->lif = lif;
 
@@ -548,6 +604,7 @@ void ionic_lif_alloc_phc(struct ionic_lif *lif)
 		dev_err(lif->ionic->dev,
 			"Invalid device PHC mask multiplier %u, disabling HW timestamp support\n",
 			phc->cc.mult);
+		free_page((unsigned long)phc->state_page);
 		devm_kfree(lif->ionic->dev, phc);
 		lif->phc = NULL;
 		return;
@@ -631,6 +688,12 @@ void ionic_lif_alloc_phc(struct ionic_lif *lif)
 	 */
 	phc->ptp_info.max_adj = NORMAL_PPB;
 
+	phc->state_page->mask = phc->cc.mask;
+	phc->state_page->shift = phc->cc.shift;
+	phc->state_page->overflow_period = delay;
+
+	ionic_phc_state_page_update(phc);
+
 	lif->phc = phc;
 }
 
@@ -641,6 +704,7 @@ void ionic_lif_free_phc(struct ionic_lif *lif)
 
 	mutex_destroy(&lif->phc->config_lock);
 
+	free_page((unsigned long)lif->phc->state_page);
 	devm_kfree(lif->ionic->dev, lif->phc);
 	lif->phc = NULL;
 }

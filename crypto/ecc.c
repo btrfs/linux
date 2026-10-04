@@ -90,33 +90,24 @@ void ecc_digits_from_bytes(const u8 *in, unsigned int nbytes,
 }
 EXPORT_SYMBOL(ecc_digits_from_bytes);
 
-static u64 *ecc_alloc_digits_space(unsigned int ndigits)
-{
-	size_t len = ndigits * sizeof(u64);
-
-	if (!len)
-		return NULL;
-
-	return kmalloc(len, GFP_KERNEL);
-}
-
-static void ecc_free_digits_space(u64 *space)
-{
-	kfree_sensitive(space);
-}
-
 struct ecc_point *ecc_alloc_point(unsigned int ndigits)
 {
-	struct ecc_point *p = kmalloc(sizeof(*p), GFP_KERNEL);
+	struct ecc_point *p;
+	size_t ndigits_sz;
 
+	if (!ndigits)
+		return NULL;
+
+	p = kmalloc_obj(*p);
 	if (!p)
 		return NULL;
 
-	p->x = ecc_alloc_digits_space(ndigits);
+	ndigits_sz = ndigits * sizeof(u64);
+	p->x = kmalloc(ndigits_sz, GFP_KERNEL);
 	if (!p->x)
 		goto err_alloc_x;
 
-	p->y = ecc_alloc_digits_space(ndigits);
+	p->y = kmalloc(ndigits_sz, GFP_KERNEL);
 	if (!p->y)
 		goto err_alloc_y;
 
@@ -125,7 +116,7 @@ struct ecc_point *ecc_alloc_point(unsigned int ndigits)
 	return p;
 
 err_alloc_y:
-	ecc_free_digits_space(p->x);
+	kfree(p->x);
 err_alloc_x:
 	kfree(p);
 	return NULL;
@@ -288,6 +279,48 @@ static void vli_rshift1(u64 *vli, unsigned int ndigits)
 	}
 }
 
+#ifdef __has_builtin
+#if __has_builtin(__builtin_addcll)
+#define USE_BUILTIN_ADDC
+#endif
+#endif
+
+/* Computes result = left + right + carry_in and updates carry_out */
+static inline void add_carry(u64 left, u64 right, u64 *result, u64 carry_in,
+			     u64 *carry_out)
+{
+#ifdef USE_BUILTIN_ADDC
+	*result = __builtin_addcll(left, right, carry_in, carry_out);
+#else
+	u64 sum1, sum2;
+	u64 c1 = __builtin_uaddll_overflow(left, right, &sum1);
+	u64 c2 = __builtin_uaddll_overflow(sum1, carry_in, &sum2);
+	*result = sum2;
+	*carry_out = c1 | c2;
+#endif
+}
+
+#ifdef __has_builtin
+#if __has_builtin(__builtin_subcll)
+#define USE_BUILTIN_SUBC
+#endif
+#endif
+
+/* Computes result = left - right - borrow_in and updates borrow_out */
+static inline void sub_borrow(u64 left, u64 right, u64 *result, u64 borrow_in,
+			      u64 *borrow_out)
+{
+#ifdef USE_BUILTIN_SUBC
+	*result = __builtin_subcll(left, right, borrow_in, borrow_out);
+#else
+	u64 diff1, diff2;
+	u64 b1 = __builtin_usubll_overflow(left, right, &diff1);
+	u64 b2 = __builtin_usubll_overflow(diff1, borrow_in, &diff2);
+	*result = diff2;
+	*borrow_out = b1 | b2;
+#endif
+}
+
 /* Computes result = left + right, returning carry. Can modify in place. */
 static u64 vli_add(u64 *result, const u64 *left, const u64 *right,
 		   unsigned int ndigits)
@@ -295,15 +328,8 @@ static u64 vli_add(u64 *result, const u64 *left, const u64 *right,
 	u64 carry = 0;
 	int i;
 
-	for (i = 0; i < ndigits; i++) {
-		u64 sum;
-
-		sum = left[i] + right[i] + carry;
-		if (sum != left[i])
-			carry = (sum < left[i]);
-
-		result[i] = sum;
-	}
+	for (i = 0; i < ndigits; i++)
+		add_carry(left[i], right[i], &result[i], carry, &carry);
 
 	return carry;
 }
@@ -312,40 +338,29 @@ static u64 vli_add(u64 *result, const u64 *left, const u64 *right,
 static u64 vli_uadd(u64 *result, const u64 *left, u64 right,
 		    unsigned int ndigits)
 {
-	u64 carry = right;
+	u64 carry;
 	int i;
 
-	for (i = 0; i < ndigits; i++) {
-		u64 sum;
+	if (ndigits == 0)
+		return right;
 
-		sum = left[i] + carry;
-		if (sum != left[i])
-			carry = (sum < left[i]);
-		else
-			carry = !!carry;
+	carry = __builtin_uaddll_overflow(left[0], right, &result[0]);
 
-		result[i] = sum;
-	}
+	for (i = 1; i < ndigits; i++)
+		carry = __builtin_uaddll_overflow(left[i], carry, &result[i]);
 
 	return carry;
 }
 
 /* Computes result = left - right, returning borrow. Can modify in place. */
 u64 vli_sub(u64 *result, const u64 *left, const u64 *right,
-		   unsigned int ndigits)
+	    unsigned int ndigits)
 {
 	u64 borrow = 0;
 	int i;
 
-	for (i = 0; i < ndigits; i++) {
-		u64 diff;
-
-		diff = left[i] - right[i] - borrow;
-		if (diff != left[i])
-			borrow = (diff > left[i]);
-
-		result[i] = diff;
-	}
+	for (i = 0; i < ndigits; i++)
+		sub_borrow(left[i], right[i], &result[i], borrow, &borrow);
 
 	return borrow;
 }
@@ -353,20 +368,18 @@ EXPORT_SYMBOL(vli_sub);
 
 /* Computes result = left - right, returning borrow. Can modify in place. */
 static u64 vli_usub(u64 *result, const u64 *left, u64 right,
-	     unsigned int ndigits)
+		    unsigned int ndigits)
 {
-	u64 borrow = right;
+	u64 borrow;
 	int i;
 
-	for (i = 0; i < ndigits; i++) {
-		u64 diff;
+	if (ndigits == 0)
+		return right;
 
-		diff = left[i] - borrow;
-		if (diff != left[i])
-			borrow = (diff > left[i]);
+	borrow = __builtin_usubll_overflow(left[0], right, &result[0]);
 
-		result[i] = diff;
-	}
+	for (i = 1; i < ndigits; i++)
+		borrow = __builtin_usubll_overflow(left[i], borrow, &result[i]);
 
 	return borrow;
 }
@@ -402,14 +415,26 @@ static uint128_t mul_64_64(u64 left, u64 right)
 	return result;
 }
 
-static uint128_t add_128_128(uint128_t a, uint128_t b)
+/* Calculate addition with overflow checking. Returns true on wrap-around,
+ * false otherwise.
+ */
+static bool check_add_128_128_overflow(uint128_t *result, uint128_t a,
+				       uint128_t b)
 {
-	uint128_t result;
+	bool carry;
 
-	result.m_low = a.m_low + b.m_low;
-	result.m_high = a.m_high + b.m_high + (result.m_low < a.m_low);
+	result->m_low = a.m_low + b.m_low;
+	carry = (result->m_low < a.m_low);
 
-	return result;
+	result->m_high = a.m_high + b.m_high + carry;
+
+	/* Using constant-time bitwise arithmetic to prevent timing
+	 * side-channels.
+	 */
+	carry = (result->m_high < a.m_high) |
+		((result->m_high == a.m_high) & carry);
+
+	return carry;
 }
 
 static void vli_mult(u64 *result, const u64 *left, const u64 *right,
@@ -434,9 +459,7 @@ static void vli_mult(u64 *result, const u64 *left, const u64 *right,
 			uint128_t product;
 
 			product = mul_64_64(left[i], right[k - i]);
-
-			r01 = add_128_128(r01, product);
-			r2 += (r01.m_high < product.m_high);
+			r2 += check_add_128_128_overflow(&r01, r01, product);
 		}
 
 		result[k] = r01.m_low;
@@ -459,7 +482,7 @@ static void vli_umult(u64 *result, const u64 *left, u32 right,
 		uint128_t product;
 
 		product = mul_64_64(left[k], right);
-		r01 = add_128_128(r01, product);
+		check_add_128_128_overflow(&r01, r01, product);
 		/* no carry */
 		result[k] = r01.m_low;
 		r01.m_low = r01.m_high;
@@ -496,8 +519,7 @@ static void vli_square(u64 *result, const u64 *left, unsigned int ndigits)
 				product.m_low <<= 1;
 			}
 
-			r01 = add_128_128(r01, product);
-			r2 += (r01.m_high < product.m_high);
+			r2 += check_add_128_128_overflow(&r01, r01, product);
 		}
 
 		result[k] = r01.m_low;
@@ -1542,16 +1564,11 @@ int ecc_gen_privkey(unsigned int curve_id, unsigned int ndigits,
 	 * The maximum security strength identified by NIST SP800-57pt1r4 for
 	 * ECC is 256 (N >= 512).
 	 *
-	 * This condition is met by the default RNG because it selects a favored
-	 * DRBG with a security strength of 256.
+	 * This condition is met by stdrng because it selects a favored DRBG
+	 * with a security strength of 256.
 	 */
-	if (crypto_get_default_rng())
-		return -EFAULT;
-
 	/* Step 3: obtain N returned_bits from the DRBG. */
-	err = crypto_rng_get_bytes(crypto_default_rng,
-				   (u8 *)private_key, nbytes);
-	crypto_put_default_rng();
+	err = crypto_stdrng_get_bytes(private_key, nbytes);
 	if (err)
 		return err;
 

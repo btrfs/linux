@@ -33,10 +33,10 @@ static unsigned int max_ccb = 16;
 static char ilo_hwdev[MAX_ILO_DEV];
 static const struct pci_device_id ilo_blacklist[] = {
 	/* auxiliary iLO */
-	{PCI_DEVICE_SUB(PCI_VENDOR_ID_HP, 0x3307, PCI_VENDOR_ID_HP, 0x1979)},
+	{ PCI_DEVICE_SUB(PCI_VENDOR_ID_HP, 0x3307, PCI_VENDOR_ID_HP, 0x1979) },
 	/* CL */
-	{PCI_DEVICE_SUB(PCI_VENDOR_ID_HP, 0x3307, PCI_VENDOR_ID_HP_3PAR, 0x0289)},
-	{}
+	{ PCI_DEVICE_SUB(PCI_VENDOR_ID_HP, 0x3307, PCI_VENDOR_ID_HP_3PAR, 0x0289) },
+	{ }
 };
 
 static inline int get_entry_id(int entry)
@@ -160,11 +160,16 @@ static int ilo_pkt_dequeue(struct ilo_hwinfo *hw, struct ccb *ccb,
 
 	ret = fifo_dequeue(hw, fifobar, &entry);
 	if (ret) {
+		int pkt_len;
+
 		pkt_id = get_entry_id(entry);
+		pkt_len = get_entry_len(entry);
+		if (pkt_id >= NR_QENTRY || pkt_len > desc_mem_sz(1))
+			return 0;
 		if (id)
 			*id = pkt_id;
 		if (len)
-			*len = get_entry_len(entry);
+			*len = pkt_len;
 		if (pkt)
 			*pkt = (void *)(desc + desc_mem_sz(pkt_id));
 	}
@@ -570,7 +575,7 @@ static int ilo_open(struct inode *ip, struct file *fp)
 	hw = container_of(ip->i_cdev, struct ilo_hwinfo, cdev);
 
 	/* new ccb allocation */
-	data = kzalloc(sizeof(*data), GFP_KERNEL);
+	data = kzalloc_obj(*data);
 	if (!data)
 		return -ENOMEM;
 
@@ -798,7 +803,7 @@ static int ilo_probe(struct pci_dev *pdev,
 
 	/* track global allocations for this device */
 	error = -ENOMEM;
-	ilo_hw = kzalloc(sizeof(*ilo_hw), GFP_KERNEL);
+	ilo_hw = kzalloc_obj(*ilo_hw);
 	if (!ilo_hw)
 		goto out;
 

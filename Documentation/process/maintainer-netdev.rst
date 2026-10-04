@@ -203,12 +203,32 @@ For RFC postings specifically, if nobody responded in a week - reviewers
 either missed the posting or have no strong opinions. If the code is ready,
 repost as a PATCH.
 
+There are 2 services actively providing LLM-generated review on posted patches:
+
+- https://sashiko.dev/
+- https://netdev-ai.bots.linux.dev/sashiko/
+
+both use the Sashiko infrastructure on top of different models. Reviews are
+available after 24h. Patch authors are expected to proactively look into the
+AI-generated reviews and handle such feedback as any other kind of review:
+either debate it or address it. In both cases a reply on the mailing list is
+expected.
+
+Authors are strongly encouraged to run LLM reviews on the posted patches in
+advance of the actual post. Large series triggering a significant amount of
+AI-generated feedback will likely get little attention from maintainers and
+reviewers.
+
 Emails saying just "ping" or "bump" are considered rude. If you can't figure
 out the status of the patch from patchwork or where the discussion has
 landed - describe your best guess and ask if it's correct. For example::
 
   I don't understand what the next steps are. Person X seems to be unhappy
   with A, should I do B and repost the patches?
+
+Don't reach out to maintainers or reviewers via private email and/or other
+communications channels: all the discussion must remain public, and
+requesting special attention is unfair towards the community, at best.
 
 .. _Changes requested:
 
@@ -363,6 +383,18 @@ just do it. As a result, a sequence of smaller series gets merged quicker and
 with better review coverage. Re-posting large series also increases the mailing
 list traffic.
 
+Limit patches outstanding on mailing list
+-----------------------------------------
+
+Avoid having more than 15 patches, across all series, outstanding for
+review on the mailing list for a single tree. In other words, a maximum of
+15 patches under review on net, and a maximum of 15 patches under review on
+net-next.
+
+This limit is intended to focus developer effort on testing patches before
+upstream review. Aiding the quality of upstream submissions, and easing the
+load on reviewers.
+
 .. _rcs:
 
 Local variable ordering ("reverse xmas tree", "RCS")
@@ -467,8 +499,14 @@ netdevsim
 
 ``netdevsim`` is a test driver which can be used to exercise driver
 configuration APIs without requiring capable hardware.
-Mock-ups and tests based on ``netdevsim`` are strongly encouraged when
-adding new APIs, but ``netdevsim`` in itself is **not** considered
+Mock-ups and tests based on ``netdevsim`` are encouraged when
+adding new APIs with complex logic in the stack. The tests should
+be written so that they can run both against ``netdevsim`` and a real
+device (see ``tools/testing/selftests/drivers/net/README.rst``).
+``netdevsim``-only tests should focus on testing corner cases
+and failure paths in the core which are hard to exercise with a real driver.
+
+``netdevsim`` in itself is **not** considered
 a use case/user. You must also implement the new APIs in a real driver.
 
 We give no guarantees that ``netdevsim`` won't change in the future
@@ -510,7 +548,7 @@ The exact rules a driver must follow to acquire the ``Supported`` status:
    status will be withdrawn.
 
 5. Test failures due to bugs either in the driver or the test itself,
-   or lack of support for the feature the test is targgeting are
+   or lack of support for the feature the test is targeting are
    *not* a basis for losing the ``Supported`` status.
 
 netdev CI will maintain an official page of supported devices, listing their
@@ -533,10 +571,12 @@ helpful tips please see :ref:`development_advancedtopics_reviews`.
 
 It's safe to assume that netdev maintainers know the community and the level
 of expertise of the reviewers. The reviewers should not be concerned about
-their comments impeding or derailing the patch flow.
+their comments impeding or derailing the patch flow. A Reviewed-by tag
+is understood to mean "I have reviewed this code to the best of my ability"
+rather than "I can attest this code is correct".
 
-Less experienced reviewers are highly encouraged to do more in-depth
-review of submissions and not focus exclusively on trivial or subjective
+Reviewers are highly encouraged to do more in-depth review of submissions
+and not focus exclusively on process issues, trivial or subjective
 matters like code formatting, tags etc.
 
 Testimonials / feedback

@@ -22,9 +22,13 @@ enum x86_intercept_stage;
 struct x86_exception {
 	u8 vector;
 	bool error_code_valid;
-	u16 error_code;
+	u64 error_code;
 	bool nested_page_fault;
-	u64 address; /* cr2 or nested page fault gpa */
+	union {
+		u64 address; /* cr2 or nested page fault gpa */
+		unsigned long dr6;
+		u64 payload;
+	};
 	u8 async_page_fault;
 	unsigned long exit_qualification;
 };
@@ -211,6 +215,7 @@ struct x86_emulate_ops {
 	ulong (*get_cr)(struct x86_emulate_ctxt *ctxt, int cr);
 	int (*set_cr)(struct x86_emulate_ctxt *ctxt, int cr, ulong val);
 	int (*cpl)(struct x86_emulate_ctxt *ctxt);
+	ulong (*get_effective_dr7)(struct x86_emulate_ctxt *ctxt);
 	ulong (*get_dr)(struct x86_emulate_ctxt *ctxt, int dr);
 	int (*set_dr)(struct x86_emulate_ctxt *ctxt, int dr, ulong value);
 	int (*set_msr_with_filter)(struct x86_emulate_ctxt *ctxt, u32 msr_index, u64 data);
@@ -225,6 +230,7 @@ struct x86_emulate_ops {
 			 struct x86_instruction_info *info,
 			 enum x86_intercept_stage stage);
 
+	bool (*is_cpuid_allowed)(struct x86_emulate_ctxt *ctxt);
 	bool (*get_cpuid)(struct x86_emulate_ctxt *ctxt, u32 *eax, u32 *ebx,
 			  u32 *ecx, u32 *edx, bool exact_only);
 	bool (*guest_has_movbe)(struct x86_emulate_ctxt *ctxt);
@@ -237,6 +243,7 @@ struct x86_emulate_ops {
 	bool (*is_smm)(struct x86_emulate_ctxt *ctxt);
 	int (*leave_smm)(struct x86_emulate_ctxt *ctxt);
 	void (*triple_fault)(struct x86_emulate_ctxt *ctxt);
+	int (*get_xcr)(struct x86_emulate_ctxt *ctxt, u32 index, u64 *xcr);
 	int (*set_xcr)(struct x86_emulate_ctxt *ctxt, u32 index, u64 xcr);
 
 	gva_t (*get_untagged_addr)(struct x86_emulate_ctxt *ctxt, gva_t addr,
@@ -244,11 +251,13 @@ struct x86_emulate_ops {
 
 	bool (*is_canonical_addr)(struct x86_emulate_ctxt *ctxt, gva_t addr,
 				  unsigned int flags);
+
+	bool (*page_address_valid)(struct x86_emulate_ctxt *ctxt, gpa_t gpa);
 };
 
 /* Type, address-of, and value of an instruction's operand. */
 struct operand {
-	enum { OP_REG, OP_MEM, OP_MEM_STR, OP_IMM, OP_XMM, OP_MM, OP_NONE } type;
+	enum { OP_REG, OP_MEM, OP_MEM_STR, OP_IMM, OP_XMM, OP_YMM, OP_MM, OP_NONE } type;
 	unsigned int bytes;
 	unsigned int count;
 	union {
@@ -267,11 +276,12 @@ struct operand {
 	union {
 		unsigned long val;
 		u64 val64;
-		char valptr[sizeof(sse128_t)];
+		char valptr[sizeof(avx256_t)];
 		sse128_t vec_val;
+		avx256_t vec_val2;
 		u64 mm_val;
 		void *data;
-	};
+	} __aligned(32);
 };
 
 #define X86_MAX_INSTRUCTION_LENGTH	15
@@ -317,6 +327,14 @@ typedef void (*fastop_t)(struct fastop *);
 #define NR_EMULATOR_GPRS	8
 #endif
 
+/*
+ * Distinguish between no prefix, REX, or in the future REX2.
+ */
+enum rex_type {
+	REX_NONE,
+	REX_PREFIX,
+};
+
 struct x86_emulate_ctxt {
 	void *vcpu;
 	const struct x86_emulate_ops *ops;
@@ -348,6 +366,7 @@ struct x86_emulate_ctxt {
 	u8 opcode_len;
 	u8 b;
 	u8 intercept;
+	bool op_prefix;
 	u8 op_bytes;
 	u8 ad_bytes;
 	union {
@@ -357,7 +376,8 @@ struct x86_emulate_ctxt {
 	int (*check_perm)(struct x86_emulate_ctxt *ctxt);
 
 	bool rip_relative;
-	u8 rex_prefix;
+	enum rex_type rex_prefix;
+	u8 rex_bits;
 	u8 lock_prefix;
 	u8 rep_prefix;
 	/* bitmaps of registers in _regs[] that can be read */
@@ -505,13 +525,6 @@ enum x86_intercept {
 
 	nr_x86_intercepts
 };
-
-/* Host execution mode. */
-#if defined(CONFIG_X86_32)
-#define X86EMUL_MODE_HOST X86EMUL_MODE_PROT32
-#elif defined(CONFIG_X86_64)
-#define X86EMUL_MODE_HOST X86EMUL_MODE_PROT64
-#endif
 
 int x86_decode_insn(struct x86_emulate_ctxt *ctxt, void *insn, int insn_len, int emulation_type);
 bool x86_page_table_writing_insn(struct x86_emulate_ctxt *ctxt);

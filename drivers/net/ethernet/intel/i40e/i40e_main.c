@@ -63,34 +63,43 @@ static bool i40e_is_total_port_shutdown_enabled(struct i40e_pf *pf);
  *   Class, Class Mask, private data (not used) }
  */
 static const struct pci_device_id i40e_pci_tbl[] = {
-	{PCI_VDEVICE(INTEL, I40E_DEV_ID_SFP_XL710), 0},
-	{PCI_VDEVICE(INTEL, I40E_DEV_ID_QEMU), 0},
-	{PCI_VDEVICE(INTEL, I40E_DEV_ID_KX_B), 0},
-	{PCI_VDEVICE(INTEL, I40E_DEV_ID_KX_C), 0},
-	{PCI_VDEVICE(INTEL, I40E_DEV_ID_QSFP_A), 0},
-	{PCI_VDEVICE(INTEL, I40E_DEV_ID_QSFP_B), 0},
-	{PCI_VDEVICE(INTEL, I40E_DEV_ID_QSFP_C), 0},
-	{PCI_VDEVICE(INTEL, I40E_DEV_ID_1G_BASE_T_BC), 0},
-	{PCI_VDEVICE(INTEL, I40E_DEV_ID_10G_BASE_T), 0},
-	{PCI_VDEVICE(INTEL, I40E_DEV_ID_10G_BASE_T4), 0},
-	{PCI_VDEVICE(INTEL, I40E_DEV_ID_10G_BASE_T_BC), 0},
-	{PCI_VDEVICE(INTEL, I40E_DEV_ID_10G_SFP), 0},
-	{PCI_VDEVICE(INTEL, I40E_DEV_ID_10G_B), 0},
-	{PCI_VDEVICE(INTEL, I40E_DEV_ID_KX_X722), 0},
-	{PCI_VDEVICE(INTEL, I40E_DEV_ID_QSFP_X722), 0},
-	{PCI_VDEVICE(INTEL, I40E_DEV_ID_SFP_X722), 0},
-	{PCI_VDEVICE(INTEL, I40E_DEV_ID_1G_BASE_T_X722), 0},
-	{PCI_VDEVICE(INTEL, I40E_DEV_ID_10G_BASE_T_X722), 0},
-	{PCI_VDEVICE(INTEL, I40E_DEV_ID_SFP_I_X722), 0},
-	{PCI_VDEVICE(INTEL, I40E_DEV_ID_SFP_X722_A), 0},
-	{PCI_VDEVICE(INTEL, I40E_DEV_ID_20G_KR2), 0},
-	{PCI_VDEVICE(INTEL, I40E_DEV_ID_20G_KR2_A), 0},
-	{PCI_VDEVICE(INTEL, I40E_DEV_ID_X710_N3000), 0},
-	{PCI_VDEVICE(INTEL, I40E_DEV_ID_XXV710_N3000), 0},
-	{PCI_VDEVICE(INTEL, I40E_DEV_ID_25G_B), 0},
-	{PCI_VDEVICE(INTEL, I40E_DEV_ID_25G_SFP28), 0},
+	{ PCI_VDEVICE(INTEL, I40E_DEV_ID_SFP_XL710) },
+	{ PCI_VDEVICE(INTEL, I40E_DEV_ID_QEMU) },
+	{ PCI_VDEVICE(INTEL, I40E_DEV_ID_KX_B) },
+	{ PCI_VDEVICE(INTEL, I40E_DEV_ID_KX_C) },
+	{ PCI_VDEVICE(INTEL, I40E_DEV_ID_QSFP_A) },
+	{ PCI_VDEVICE(INTEL, I40E_DEV_ID_QSFP_B) },
+	{ PCI_VDEVICE(INTEL, I40E_DEV_ID_QSFP_C) },
+	{ PCI_VDEVICE(INTEL, I40E_DEV_ID_1G_BASE_T_BC) },
+	{ PCI_VDEVICE(INTEL, I40E_DEV_ID_10G_BASE_T) },
+	{ PCI_VDEVICE(INTEL, I40E_DEV_ID_10G_BASE_T4) },
+	{ PCI_VDEVICE(INTEL, I40E_DEV_ID_10G_BASE_T_BC) },
+	{ PCI_VDEVICE(INTEL, I40E_DEV_ID_10G_SFP) },
+	/*
+	 * This ID conflicts with ipw2200, but the devices can be differentiated
+	 * because i40e devices use PCI_CLASS_NETWORK_ETHERNET and ipw2200
+	 * devices use PCI_CLASS_NETWORK_OTHER.
+	 */
+	{
+		PCI_DEVICE(PCI_VENDOR_ID_INTEL, I40E_DEV_ID_10G_B),
+		.class = PCI_CLASS_NETWORK_ETHERNET << 8,
+		.class_mask = 0xffff00,
+	},
+	{ PCI_VDEVICE(INTEL, I40E_DEV_ID_KX_X722) },
+	{ PCI_VDEVICE(INTEL, I40E_DEV_ID_QSFP_X722) },
+	{ PCI_VDEVICE(INTEL, I40E_DEV_ID_SFP_X722) },
+	{ PCI_VDEVICE(INTEL, I40E_DEV_ID_1G_BASE_T_X722) },
+	{ PCI_VDEVICE(INTEL, I40E_DEV_ID_10G_BASE_T_X722) },
+	{ PCI_VDEVICE(INTEL, I40E_DEV_ID_SFP_I_X722) },
+	{ PCI_VDEVICE(INTEL, I40E_DEV_ID_SFP_X722_A) },
+	{ PCI_VDEVICE(INTEL, I40E_DEV_ID_20G_KR2) },
+	{ PCI_VDEVICE(INTEL, I40E_DEV_ID_20G_KR2_A) },
+	{ PCI_VDEVICE(INTEL, I40E_DEV_ID_X710_N3000) },
+	{ PCI_VDEVICE(INTEL, I40E_DEV_ID_XXV710_N3000) },
+	{ PCI_VDEVICE(INTEL, I40E_DEV_ID_25G_B) },
+	{ PCI_VDEVICE(INTEL, I40E_DEV_ID_25G_SFP28) },
 	/* required last entry */
-	{0, }
+	{ }
 };
 MODULE_DEVICE_TABLE(pci, i40e_pci_tbl);
 
@@ -1456,7 +1465,7 @@ static int i40e_correct_mac_vlan_filters(struct i40e_vsi *vsi,
 				return -ENOMEM;
 
 			/* Create a temporary i40e_new_mac_filter */
-			new = kzalloc(sizeof(*new), GFP_ATOMIC);
+			new = kzalloc_obj(*new, GFP_ATOMIC);
 			if (!new)
 				return -ENOMEM;
 
@@ -1568,7 +1577,7 @@ static int i40e_correct_vf_mac_vlan_filters(struct i40e_vsi *vsi,
 			if (!add_head)
 				return -ENOMEM;
 			/* Create a temporary i40e_new_mac_filter */
-			new_mac = kzalloc(sizeof(*new_mac), GFP_ATOMIC);
+			new_mac = kzalloc_obj(*new_mac, GFP_ATOMIC);
 			if (!new_mac)
 				return -ENOMEM;
 			new_mac->f = add_head;
@@ -1645,7 +1654,7 @@ struct i40e_mac_filter *i40e_add_filter(struct i40e_vsi *vsi,
 
 	f = i40e_find_filter(vsi, macaddr, vlan);
 	if (!f) {
-		f = kzalloc(sizeof(*f), GFP_ATOMIC);
+		f = kzalloc_obj(*f, GFP_ATOMIC);
 		if (!f)
 			return NULL;
 
@@ -2234,6 +2243,7 @@ static void i40e_set_rx_mode(struct net_device *netdev)
 		vsi->flags |= I40E_VSI_FLAG_FILTER_CHANGED;
 		set_bit(__I40E_MACVLAN_SYNC_PENDING, vsi->back->state);
 	}
+	i40e_service_event_schedule(vsi->back);
 }
 
 /**
@@ -2599,7 +2609,7 @@ int i40e_sync_vsi_filters(struct i40e_vsi *vsi)
 			}
 			if (f->state == I40E_FILTER_NEW) {
 				/* Create a temporary i40e_new_mac_filter */
-				new = kzalloc(sizeof(*new), GFP_ATOMIC);
+				new = kzalloc_obj(*new, GFP_ATOMIC);
 				if (!new)
 					goto err_no_memory_locked;
 
@@ -3562,6 +3572,7 @@ static int i40e_configure_rx_ring(struct i40e_ring *ring)
 	u16 pf_q = vsi->base_queue + ring->queue_index;
 	struct i40e_hw *hw = &vsi->back->hw;
 	struct i40e_hmc_obj_rxq rx_ctx;
+	u32 xdp_frame_sz;
 	int err = 0;
 	bool ok;
 
@@ -3571,49 +3582,47 @@ static int i40e_configure_rx_ring(struct i40e_ring *ring)
 	memset(&rx_ctx, 0, sizeof(rx_ctx));
 
 	ring->rx_buf_len = vsi->rx_buf_len;
+	xdp_frame_sz = i40e_rx_pg_size(ring) / 2;
 
 	/* XDP RX-queue info only needed for RX rings exposed to XDP */
 	if (ring->vsi->type != I40E_VSI_MAIN)
 		goto skip;
 
-	if (!xdp_rxq_info_is_reg(&ring->xdp_rxq)) {
-		err = __xdp_rxq_info_reg(&ring->xdp_rxq, ring->netdev,
-					 ring->queue_index,
-					 ring->q_vector->napi.napi_id,
-					 ring->rx_buf_len);
-		if (err)
-			return err;
-	}
-
 	ring->xsk_pool = i40e_xsk_pool(ring);
 	if (ring->xsk_pool) {
-		xdp_rxq_info_unreg(&ring->xdp_rxq);
+		xdp_frame_sz = xsk_pool_get_rx_frag_step(ring->xsk_pool);
 		ring->rx_buf_len = xsk_pool_get_rx_frame_size(ring->xsk_pool);
 		err = __xdp_rxq_info_reg(&ring->xdp_rxq, ring->netdev,
 					 ring->queue_index,
 					 ring->q_vector->napi.napi_id,
-					 ring->rx_buf_len);
+					 xdp_frame_sz);
 		if (err)
 			return err;
 		err = xdp_rxq_info_reg_mem_model(&ring->xdp_rxq,
 						 MEM_TYPE_XSK_BUFF_POOL,
 						 NULL);
 		if (err)
-			return err;
+			goto unreg_xdp;
 		dev_info(&vsi->back->pdev->dev,
 			 "Registered XDP mem model MEM_TYPE_XSK_BUFF_POOL on Rx ring %d\n",
 			 ring->queue_index);
 
 	} else {
+		err = __xdp_rxq_info_reg(&ring->xdp_rxq, ring->netdev,
+					 ring->queue_index,
+					 ring->q_vector->napi.napi_id,
+					 xdp_frame_sz);
+		if (err)
+			return err;
 		err = xdp_rxq_info_reg_mem_model(&ring->xdp_rxq,
 						 MEM_TYPE_PAGE_SHARED,
 						 NULL);
 		if (err)
-			return err;
+			goto unreg_xdp;
 	}
 
 skip:
-	xdp_init_buff(&ring->xdp, i40e_rx_pg_size(ring) / 2, &ring->xdp_rxq);
+	xdp_init_buff(&ring->xdp, xdp_frame_sz, &ring->xdp_rxq);
 
 	rx_ctx.dbuff = DIV_ROUND_UP(ring->rx_buf_len,
 				    BIT_ULL(I40E_RXQ_CTX_DBUFF_SHIFT));
@@ -3647,7 +3656,8 @@ skip:
 		dev_info(&vsi->back->pdev->dev,
 			 "Failed to clear LAN Rx queue context on Rx ring %d (pf_q %d), error: %d\n",
 			 ring->queue_index, pf_q, err);
-		return -ENOMEM;
+		err = -ENOMEM;
+		goto unreg_xdp;
 	}
 
 	/* set the context in the HMC */
@@ -3656,7 +3666,8 @@ skip:
 		dev_info(&vsi->back->pdev->dev,
 			 "Failed to set LAN Rx queue context on Rx ring %d (pf_q %d), error: %d\n",
 			 ring->queue_index, pf_q, err);
-		return -ENOMEM;
+		err = -ENOMEM;
+		goto unreg_xdp;
 	}
 
 	/* configure Rx buffer alignment */
@@ -3664,7 +3675,8 @@ skip:
 		if (I40E_2K_TOO_SMALL_WITH_PADDING) {
 			dev_info(&vsi->back->pdev->dev,
 				 "2k Rx buffer is too small to fit standard MTU and skb_shared_info\n");
-			return -EOPNOTSUPP;
+			err = -EOPNOTSUPP;
+			goto unreg_xdp;
 		}
 		clear_ring_build_skb_enabled(ring);
 	} else {
@@ -3694,6 +3706,11 @@ skip:
 	}
 
 	return 0;
+unreg_xdp:
+	if (ring->vsi->type == I40E_VSI_MAIN)
+		xdp_rxq_info_unreg(&ring->xdp_rxq);
+
+	return err;
 }
 
 /**
@@ -4847,16 +4864,10 @@ static void i40e_control_rx_q(struct i40e_pf *pf, int pf_q, bool enable)
  **/
 int i40e_control_wait_rx_q(struct i40e_pf *pf, int pf_q, bool enable)
 {
-	int ret = 0;
-
 	i40e_control_rx_q(pf, pf_q, enable);
 
 	/* wait for the change to finish */
-	ret = i40e_pf_rxq_wait(pf, pf_q, enable);
-	if (ret)
-		return ret;
-
-	return ret;
+	return i40e_pf_rxq_wait(pf, pf_q, enable);
 }
 
 /**
@@ -6679,7 +6690,7 @@ static int i40e_configure_queue_channels(struct i40e_vsi *vsi)
 	vsi->tc_seid_map[0] = vsi->seid;
 	for (i = 1; i < I40E_MAX_TRAFFIC_CLASS; i++) {
 		if (vsi->tc_config.enabled_tc & BIT(i)) {
-			ch = kzalloc(sizeof(*ch), GFP_KERNEL);
+			ch = kzalloc_obj(*ch);
 			if (!ch) {
 				ret = -ENOMEM;
 				goto err_free;
@@ -7955,7 +7966,7 @@ static int i40e_setup_macvlans(struct i40e_vsi *vsi, u16 macvlan_cnt, u16 qcnt,
 	/* Create channels for macvlans */
 	INIT_LIST_HEAD(&vsi->macvlan_list);
 	for (i = 0; i < macvlan_cnt; i++) {
-		ch = kzalloc(sizeof(*ch), GFP_KERNEL);
+		ch = kzalloc_obj(*ch);
 		if (!ch) {
 			ret = -ENOMEM;
 			goto err_free;
@@ -8067,7 +8078,7 @@ static void *i40e_fwd_add(struct net_device *netdev, struct net_device *vdev)
 		return ERR_PTR(-EBUSY);
 
 	/* create the fwd struct */
-	fwd = kzalloc(sizeof(*fwd), GFP_KERNEL);
+	fwd = kzalloc_obj(*fwd);
 	if (!fwd)
 		return ERR_PTR(-ENOMEM);
 
@@ -8828,7 +8839,7 @@ static int i40e_configure_clsflower(struct i40e_vsi *vsi,
 		clear_bit(I40E_FLAG_FD_SB_TO_CLOUD_FILTER, vsi->back->flags);
 	}
 
-	filter = kzalloc(sizeof(*filter), GFP_KERNEL);
+	filter = kzalloc_obj(*filter);
 	if (!filter)
 		return -ENOMEM;
 
@@ -9029,7 +9040,6 @@ int i40e_open(struct net_device *netdev)
 						       TCP_FLAG_FIN |
 						       TCP_FLAG_CWR) >> 16);
 	wr32(&pf->hw, I40E_GLLAN_TSOMSK_L, be32_to_cpu(TCP_FLAG_CWR) >> 16);
-	udp_tunnel_get_rx_info(netdev);
 
 	return 0;
 }
@@ -11534,7 +11544,7 @@ static int i40e_vsi_mem_alloc(struct i40e_pf *pf, enum i40e_vsi_type type)
 	}
 	pf->next_vsi = ++i;
 
-	vsi = kzalloc(sizeof(*vsi), GFP_KERNEL);
+	vsi = kzalloc_obj(*vsi);
 	if (!vsi) {
 		ret = -ENOMEM;
 		goto unlock_pf;
@@ -11705,7 +11715,7 @@ static int i40e_alloc_rings(struct i40e_vsi *vsi)
 	/* Set basic values in the rings to be used later during open() */
 	for (i = 0; i < vsi->alloc_queue_pairs; i++) {
 		/* allocate space for both Tx and Rx in one shot */
-		ring = kcalloc(qpv, sizeof(struct i40e_ring), GFP_KERNEL);
+		ring = kzalloc_objs(struct i40e_ring, qpv);
 		if (!ring)
 			goto err_out;
 
@@ -11908,8 +11918,7 @@ static int i40e_init_msix(struct i40e_pf *pf)
 	     "Calculation of remaining vectors underflowed. This is an accounting bug when determining total MSI-X vectors.\n");
 
 	v_budget += pf->num_lan_msix;
-	pf->msix_entries = kcalloc(v_budget, sizeof(struct msix_entry),
-				   GFP_KERNEL);
+	pf->msix_entries = kzalloc_objs(struct msix_entry, v_budget);
 	if (!pf->msix_entries)
 		return -ENOMEM;
 
@@ -12022,7 +12031,7 @@ static int i40e_vsi_alloc_q_vector(struct i40e_vsi *vsi, int v_idx)
 	struct i40e_q_vector *q_vector;
 
 	/* allocate q_vector */
-	q_vector = kzalloc(sizeof(struct i40e_q_vector), GFP_KERNEL);
+	q_vector = kzalloc_obj(struct i40e_q_vector);
 	if (!q_vector)
 		return -ENOMEM;
 
@@ -13771,7 +13780,6 @@ static int i40e_config_netdev(struct i40e_vsi *vsi)
 	netdev->neigh_priv_len = sizeof(u32) * 4;
 
 	netdev->priv_flags |= IFF_UNICAST_FLT;
-	netdev->priv_flags |= IFF_SUPP_NOFCS;
 	/* Setup netdev TC information */
 	i40e_vsi_config_netdev_tc(vsi, vsi->tc_config.enabled_tc);
 
@@ -14575,7 +14583,7 @@ static int i40e_veb_mem_alloc(struct i40e_pf *pf)
 		goto err_alloc_veb;  /* out of VEB slots! */
 	}
 
-	veb = kzalloc(sizeof(*veb), GFP_KERNEL);
+	veb = kzalloc_obj(*veb);
 	if (!veb) {
 		ret = -ENOMEM;
 		goto err_alloc_veb;
@@ -15435,8 +15443,7 @@ static int i40e_init_recovery_mode(struct i40e_pf *pf, struct i40e_hw *hw)
 		pf->num_alloc_vsi = pf->hw.func_caps.num_vsis;
 
 	/* Set up the vsi struct and our local tracking of the MAIN PF vsi. */
-	pf->vsi = kcalloc(pf->num_alloc_vsi, sizeof(struct i40e_vsi *),
-			  GFP_KERNEL);
+	pf->vsi = kzalloc_objs(struct i40e_vsi *, pf->num_alloc_vsi);
 	if (!pf->vsi) {
 		err = -ENOMEM;
 		goto err_switch_setup;
@@ -15859,8 +15866,7 @@ static int i40e_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 	}
 
 	/* Set up the *vsi struct and our local tracking of the MAIN PF vsi. */
-	pf->vsi = kcalloc(pf->num_alloc_vsi, sizeof(struct i40e_vsi *),
-			  GFP_KERNEL);
+	pf->vsi = kzalloc_objs(struct i40e_vsi *, pf->num_alloc_vsi);
 	if (!pf->vsi) {
 		err = -ENOMEM;
 		goto err_switch_setup;
@@ -16099,9 +16105,11 @@ static int i40e_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 	/* Unwind what we've done if something failed in the setup */
 err_vsis:
 	set_bit(__I40E_DOWN, pf->state);
+	i40e_ptp_stop(pf);
 	i40e_clear_interrupt_scheme(pf);
 	kfree(pf->vsi);
 err_switch_setup:
+	i40e_ptp_free_pins(pf);
 	i40e_reset_interrupt_capability(pf);
 	timer_shutdown_sync(&pf->service_timer);
 err_mac_addr:
@@ -16455,7 +16463,6 @@ static pci_ers_result_t i40e_pci_error_slot_reset(struct pci_dev *pdev)
 	} else {
 		pci_set_master(pdev);
 		pci_restore_state(pdev);
-		pci_save_state(pdev);
 		pci_wake_from_d3(pdev, false);
 
 		reg = rd32(&pf->hw, I40E_GLGEN_RTRIG);

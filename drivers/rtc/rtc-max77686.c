@@ -686,6 +686,11 @@ static int max77686_rtc_init_reg(struct max77686_rtc_info *info)
 	return ret;
 }
 
+static void max77686_rtc_release_dev(void *client)
+{
+	i2c_unregister_device(client);
+}
+
 static int max77686_init_rtc_regmap(struct max77686_rtc_info *info)
 {
 	struct device *parent = info->dev->parent;
@@ -713,11 +718,16 @@ static int max77686_init_rtc_regmap(struct max77686_rtc_info *info)
 		goto add_rtc_irq;
 	}
 
-	client = devm_i2c_new_dummy_device(info->dev, parent_i2c->adapter,
-					   info->drv_data->rtc_i2c_addr);
+	client = i2c_new_ancillary_device(parent_i2c, "rtc",
+					  info->drv_data->rtc_i2c_addr);
 	if (IS_ERR(client))
 		return dev_err_probe(info->dev, PTR_ERR(client),
 				     "Failed to allocate I2C device for RTC\n");
+
+	ret = devm_add_action_or_reset(info->dev, max77686_rtc_release_dev,
+				       client);
+	if (ret)
+		return ret;
 
 	info->rtc_regmap = devm_regmap_init_i2c(client,
 						info->drv_data->regmap_config);
@@ -856,11 +866,11 @@ static SIMPLE_DEV_PM_OPS(max77686_rtc_pm_ops,
 			 max77686_rtc_suspend, max77686_rtc_resume);
 
 static const struct platform_device_id rtc_id[] = {
-	{ "max77686-rtc", .driver_data = (kernel_ulong_t)&max77686_drv_data, },
-	{ "max77802-rtc", .driver_data = (kernel_ulong_t)&max77802_drv_data, },
-	{ "max77620-rtc", .driver_data = (kernel_ulong_t)&max77620_drv_data, },
-	{ "max77714-rtc", .driver_data = (kernel_ulong_t)&max77714_drv_data, },
-	{},
+	{ .name = "max77686-rtc", .driver_data = (kernel_ulong_t)&max77686_drv_data },
+	{ .name = "max77802-rtc", .driver_data = (kernel_ulong_t)&max77802_drv_data },
+	{ .name = "max77620-rtc", .driver_data = (kernel_ulong_t)&max77620_drv_data },
+	{ .name = "max77714-rtc", .driver_data = (kernel_ulong_t)&max77714_drv_data },
+	{ }
 };
 MODULE_DEVICE_TABLE(platform, rtc_id);
 

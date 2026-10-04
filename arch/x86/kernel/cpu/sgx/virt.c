@@ -5,9 +5,11 @@
  * Copyright(c) 2021 Intel Corporation.
  */
 
+#include <linux/kvm_types.h>
 #include <linux/miscdevice.h>
 #include <linux/mm.h>
 #include <linux/mman.h>
+#include <linux/pagemap.h>
 #include <linux/sched/mm.h>
 #include <linux/sched/signal.h>
 #include <linux/slab.h>
@@ -40,7 +42,7 @@ static int __sgx_vepc_fault(struct sgx_vepc *vepc,
 	WARN_ON(!mutex_is_locked(&vepc->lock));
 
 	/* Calculate index of EPC page in virtual EPC's page_array */
-	index = vma->vm_pgoff + PFN_DOWN(addr - vma->vm_start);
+	index = linear_page_index(vma, addr);
 
 	epc_page = xa_load(&vepc->page_array, index);
 	if (epc_page)
@@ -255,20 +257,38 @@ static int sgx_vepc_release(struct inode *inode, struct file *file)
 	xa_destroy(&vepc->page_array);
 	kfree(vepc);
 
+	sgx_dec_usage_count();
 	return 0;
 }
 
-static int sgx_vepc_open(struct inode *inode, struct file *file)
+static int __sgx_vepc_open(struct inode *inode, struct file *file)
 {
 	struct sgx_vepc *vepc;
 
-	vepc = kzalloc(sizeof(struct sgx_vepc), GFP_KERNEL);
+	vepc = kzalloc_obj(struct sgx_vepc);
 	if (!vepc)
 		return -ENOMEM;
 	mutex_init(&vepc->lock);
 	xa_init(&vepc->page_array);
 
 	file->private_data = vepc;
+
+	return 0;
+}
+
+static int sgx_vepc_open(struct inode *inode, struct file *file)
+{
+	int ret;
+
+	ret = sgx_inc_usage_count();
+	if (ret)
+		return ret;
+
+	ret =  __sgx_vepc_open(inode, file);
+	if (ret) {
+		sgx_dec_usage_count();
+		return ret;
+	}
 
 	return 0;
 }
@@ -363,7 +383,7 @@ int sgx_virt_ecreate(struct sgx_pageinfo *pageinfo, void __user *secs,
 	WARN_ON_ONCE(ret);
 	return 0;
 }
-EXPORT_SYMBOL_GPL(sgx_virt_ecreate);
+EXPORT_SYMBOL_FOR_KVM(sgx_virt_ecreate);
 
 static int __sgx_virt_einit(void __user *sigstruct, void __user *token,
 			    void __user *secs)
@@ -432,4 +452,4 @@ int sgx_virt_einit(void __user *sigstruct, void __user *token,
 
 	return ret;
 }
-EXPORT_SYMBOL_GPL(sgx_virt_einit);
+EXPORT_SYMBOL_FOR_KVM(sgx_virt_einit);

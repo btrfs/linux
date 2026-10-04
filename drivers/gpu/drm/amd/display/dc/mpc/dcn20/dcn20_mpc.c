@@ -43,8 +43,6 @@
 #define FN(reg_name, field_name) \
 	mpc20->mpc_shift->field_name, mpc20->mpc_mask->field_name
 
-#define NUM_ELEMENTS(a) (sizeof(a) / sizeof((a)[0]))
-
 void mpc2_update_blending(
 	struct mpc *mpc,
 	struct mpcc_blnd_cfg *blnd_cfg,
@@ -382,7 +380,6 @@ static void mpc20_program_ogam_pwl(
 	struct dcn20_mpc *mpc20 = TO_DCN20_MPC(mpc);
 
 	PERF_TRACE();
-	REG_SEQ_START();
 
 	for (i = 0 ; i < num; i++) {
 		REG_SET(MPCC_OGAM_LUT_DATA[mpcc_id], 0, MPCC_OGAM_LUT_DATA, rgb[i].red_reg);
@@ -397,9 +394,6 @@ static void mpc20_program_ogam_pwl(
 				MPCC_OGAM_LUT_DATA, rgb[i].delta_blue_reg);
 	}
 
-	REG_SEQ_SUBMIT();
-	PERF_TRACE();
-	REG_SEQ_WAIT_DONE();
 	PERF_TRACE();
 }
 

@@ -205,7 +205,7 @@ int iwlagn_send_beacon_cmd(struct iwl_priv *priv)
 
 	/* Allocate beacon command */
 	if (!priv->beacon_cmd)
-		priv->beacon_cmd = kzalloc(sizeof(*tx_beacon_cmd), GFP_KERNEL);
+		priv->beacon_cmd = kzalloc_obj(*tx_beacon_cmd);
 	tx_beacon_cmd = priv->beacon_cmd;
 	if (!tx_beacon_cmd)
 		return -ENOMEM;
@@ -1511,10 +1511,10 @@ out_destroy_workqueue:
 	priv->workqueue = NULL;
 out_uninit_drv:
 	iwl_uninit_drv(priv);
-out_free_eeprom_blob:
-	kfree(priv->eeprom_blob);
 out_free_eeprom:
 	kfree(priv->nvm_data);
+out_free_eeprom_blob:
+	kfree(priv->eeprom_blob);
 out_leave_trans:
 	iwl_trans_op_mode_leave(priv->trans);
 out_free_hw:

@@ -299,11 +299,11 @@ static ssize_t npcm_fiu_direct_read(struct spi_mem_dirmap_desc *desc,
 		for (i = 0 ; i < len ; i++)
 			*(buf_rx + i) = ioread8(src + i);
 	} else {
-		if (desc->info.op_tmpl.addr.buswidth != fiu->drd_op.addr.buswidth ||
-		    desc->info.op_tmpl.dummy.nbytes != fiu->drd_op.dummy.nbytes ||
-		    desc->info.op_tmpl.cmd.opcode != fiu->drd_op.cmd.opcode ||
-		    desc->info.op_tmpl.addr.nbytes != fiu->drd_op.addr.nbytes)
-			npcm_fiu_set_drd(fiu, &desc->info.op_tmpl);
+		if (desc->info.op_tmpl->addr.buswidth != fiu->drd_op.addr.buswidth ||
+		    desc->info.op_tmpl->dummy.nbytes != fiu->drd_op.dummy.nbytes ||
+		    desc->info.op_tmpl->cmd.opcode != fiu->drd_op.cmd.opcode ||
+		    desc->info.op_tmpl->addr.nbytes != fiu->drd_op.addr.nbytes)
+			npcm_fiu_set_drd(fiu, desc->info.op_tmpl);
 
 		memcpy_fromio(buf_rx, src, len);
 	}
@@ -393,7 +393,7 @@ static int npcm_fiu_uma_write(struct spi_mem *mem,
 {
 	struct npcm_fiu_spi *fiu =
 		spi_controller_get_devdata(mem->spi->controller);
-	u32 uma_cfg = BIT(10);
+	u32 uma_cfg = cmd ? BIT(10) : 0;
 	u32 data_reg[4] = {0};
 	u32 val;
 	u32 i;
@@ -403,8 +403,11 @@ static int npcm_fiu_uma_write(struct spi_mem *mem,
 			   (spi_get_chipselect(mem->spi, 0) <<
 			    NPCM_FIU_UMA_CTS_DEV_NUM_SHIFT));
 
-	regmap_update_bits(fiu->regmap, NPCM_FIU_UMA_CMD,
-			   NPCM_FIU_UMA_CMD_CMD, cmd);
+	if (cmd)
+		regmap_update_bits(fiu->regmap, NPCM_FIU_UMA_CMD,
+				   NPCM_FIU_UMA_CMD_CMD, cmd);
+	else
+		uma_cfg |= ilog2(op->data.buswidth) << NPCM_FIU_UMA_CFG_WDBPCK_SHIFT;
 
 	if (data_size) {
 		memcpy(data_reg, data, data_size);
@@ -464,8 +467,7 @@ static int npcm_fiu_manualwrite(struct spi_mem *mem,
 
 	/* Starting the data writing loop in multiples of 8 */
 	for (idx = 0; idx < num_data_chunks; ++idx) {
-		ret = npcm_fiu_uma_write(mem, op, data[0], false,
-					 &data[1], CHUNK_SIZE - 1);
+		ret = npcm_fiu_uma_write(mem, op, 0, false, &data[0], CHUNK_SIZE);
 		if (ret)
 			return ret;
 
@@ -474,8 +476,7 @@ static int npcm_fiu_manualwrite(struct spi_mem *mem,
 
 	/* Handling chunk remains */
 	if (remain_data > 0) {
-		ret = npcm_fiu_uma_write(mem, op, data[0], false,
-					 &data[1], remain_data - 1);
+		ret = npcm_fiu_uma_write(mem, op, 0, false, &data[0], remain_data);
 		if (ret)
 			return ret;
 	}
@@ -609,7 +610,7 @@ static int npcm_fiu_dirmap_create(struct spi_mem_dirmap_desc *desc)
 	}
 
 	if (!fiu->spix_mode &&
-	    desc->info.op_tmpl.data.dir == SPI_MEM_DATA_OUT) {
+	    desc->info.op_tmpl->data.dir == SPI_MEM_DATA_OUT) {
 		desc->nodirmap = true;
 		return 0;
 	}
@@ -644,9 +645,9 @@ static int npcm_fiu_dirmap_create(struct spi_mem_dirmap_desc *desc)
 				   NPCM_FIU_CFG_FIU_FIX);
 	}
 
-	if (desc->info.op_tmpl.data.dir == SPI_MEM_DATA_IN) {
+	if (desc->info.op_tmpl->data.dir == SPI_MEM_DATA_IN) {
 		if (!fiu->spix_mode)
-			npcm_fiu_set_drd(fiu, &desc->info.op_tmpl);
+			npcm_fiu_set_drd(fiu, desc->info.op_tmpl);
 		else
 			npcm_fiux_set_direct_rd(fiu);
 
@@ -715,7 +716,6 @@ static int npcm_fiu_probe(struct platform_device *pdev)
 
 	fiu->info = &fiu_data_match->npcm_fiu_data_info[id];
 
-	platform_set_drvdata(pdev, fiu);
 	fiu->dev = dev;
 
 	regbase = devm_platform_ioremap_resource_byname(pdev, "control");
@@ -738,21 +738,14 @@ static int npcm_fiu_probe(struct platform_device *pdev)
 	fiu->spix_mode = of_property_read_bool(dev->of_node,
 					       "nuvoton,spix-mode");
 
-	platform_set_drvdata(pdev, fiu);
-
 	ctrl->mode_bits = SPI_RX_DUAL | SPI_RX_QUAD
 		| SPI_TX_DUAL | SPI_TX_QUAD;
 	ctrl->setup = npcm_fiu_setup;
 	ctrl->bus_num = -1;
 	ctrl->mem_ops = &npcm_fiu_mem_ops;
 	ctrl->num_chipselect = fiu->info->max_cs;
-	ctrl->dev.of_node = dev->of_node;
 
 	return devm_spi_register_controller(dev, ctrl);
-}
-
-static void npcm_fiu_remove(struct platform_device *pdev)
-{
 }
 
 MODULE_DEVICE_TABLE(of, npcm_fiu_dt_ids);
@@ -764,7 +757,6 @@ static struct platform_driver npcm_fiu_driver = {
 		.of_match_table = npcm_fiu_dt_ids,
 	},
 	.probe = npcm_fiu_probe,
-	.remove = npcm_fiu_remove,
 };
 module_platform_driver(npcm_fiu_driver);
 

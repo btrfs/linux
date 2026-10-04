@@ -4,6 +4,7 @@
  * Copyright (c) 2015-2016 HGST, a Western Digital Company.
  */
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
+#include <linux/hex.h>
 #include <linux/module.h>
 #include <linux/random.h>
 #include <linux/rculist.h>
@@ -26,6 +27,8 @@ static DEFINE_IDA(cntlid_ida);
 
 struct workqueue_struct *nvmet_wq;
 EXPORT_SYMBOL_GPL(nvmet_wq);
+struct workqueue_struct *nvmet_aen_wq;
+EXPORT_SYMBOL_GPL(nvmet_aen_wq);
 
 /*
  * This read/write semaphore is used to synchronize access to configuration
@@ -40,7 +43,7 @@ EXPORT_SYMBOL_GPL(nvmet_wq);
  *  - the nvmet_transports array
  *
  * When updating any of those lists/structures write lock should be obtained,
- * while when reading (popolating discovery log page or checking host-subsystem
+ * while when reading (populating discovery log page or checking host-subsystem
  * link) read lock is obtained to allow concurrent reads.
  */
 DECLARE_RWSEM(nvmet_config_sem);
@@ -193,7 +196,7 @@ void nvmet_add_async_event(struct nvmet_ctrl *ctrl, u8 event_type,
 {
 	struct nvmet_async_event *aen;
 
-	aen = kmalloc(sizeof(*aen), GFP_KERNEL);
+	aen = kmalloc_obj(*aen);
 	if (!aen)
 		return;
 
@@ -205,7 +208,7 @@ void nvmet_add_async_event(struct nvmet_ctrl *ctrl, u8 event_type,
 	list_add_tail(&aen->entry, &ctrl->async_events);
 	mutex_unlock(&ctrl->lock);
 
-	queue_work(nvmet_wq, &ctrl->async_event_work);
+	queue_work(nvmet_aen_wq, &ctrl->async_event_work);
 }
 
 static void nvmet_add_to_changed_ns_log(struct nvmet_ctrl *ctrl, __le32 nsid)
@@ -366,6 +369,14 @@ int nvmet_enable_port(struct nvmet_port *port)
 		port->max_queue_size = clamp_t(int, port->max_queue_size,
 					       NVMET_MIN_QUEUE_SIZE,
 					       NVMET_MAX_QUEUE_SIZE);
+
+	/*
+	 * If the transport didn't set the mdts properly, then clamp it to the
+	 * target limits. Also set default values in case the transport didn't
+	 * set it at all.
+	 */
+	if (port->mdts < 0 || port->mdts > NVMET_MAX_MDTS)
+		port->mdts = 0;
 
 	port->enabled = true;
 	port->tr_ops = ops;
@@ -547,7 +558,7 @@ static void nvmet_p2pmem_ns_add_p2p(struct nvmet_ctrl *ctrl,
 	if (ret < 0)
 		pci_dev_put(p2p_dev);
 
-	pr_info("using p2pmem on %s for nsid %d\n", pci_name(p2p_dev),
+	pr_info("using p2pmem on %s for nsid %u\n", pci_name(p2p_dev),
 		ns->nsid);
 }
 
@@ -580,6 +591,11 @@ int nvmet_ns_enable(struct nvmet_ns *ns)
 	if (ns->enabled)
 		goto out_unlock;
 
+	if (!ns->device_path) {
+		ret = -EINVAL;
+		goto out_unlock;
+	}
+
 	ret = nvmet_bdev_ns_enable(ns);
 	if (ret == -ENOTBLK)
 		ret = nvmet_file_ns_enable(ns);
@@ -599,12 +615,14 @@ int nvmet_ns_enable(struct nvmet_ns *ns)
 			goto out_dev_put;
 	}
 
-	if (percpu_ref_init(&ns->ref, nvmet_destroy_namespace, 0, GFP_KERNEL))
+	ret = percpu_ref_init(&ns->ref, nvmet_destroy_namespace, 0, GFP_KERNEL);
+	if (ret)
 		goto out_pr_exit;
 
 	nvmet_ns_changed(subsys, ns->nsid);
 	ns->enabled = true;
 	xa_set_mark(&subsys->namespaces, ns->nsid, NVMET_NS_ENABLED);
+	nvmet_debugfs_ns_setup(ns);
 	ret = 0;
 out_unlock:
 	mutex_unlock(&subsys->lock);
@@ -631,6 +649,7 @@ void nvmet_ns_disable(struct nvmet_ns *ns)
 
 	ns->enabled = false;
 	xa_clear_mark(&subsys->namespaces, ns->nsid, NVMET_NS_ENABLED);
+	nvmet_debugfs_ns_free(ns);
 
 	list_for_each_entry(ctrl, &subsys->ctrls, subsys_entry)
 		pci_dev_put(radix_tree_delete(&ctrl->p2p_ns_map, ns->nsid));
@@ -692,7 +711,7 @@ struct nvmet_ns *nvmet_ns_alloc(struct nvmet_subsys *subsys, u32 nsid)
 	if (subsys->nr_namespaces == NVMET_MAX_NAMESPACES)
 		goto out_unlock;
 
-	ns = kzalloc(sizeof(*ns), GFP_KERNEL);
+	ns = kzalloc_obj(*ns);
 	if (!ns)
 		goto out_unlock;
 
@@ -864,7 +883,7 @@ u16 nvmet_check_cqid(struct nvmet_ctrl *ctrl, u16 cqid, bool create)
 	if (!ctrl->cqs)
 		return NVME_SC_INTERNAL | NVME_STATUS_DNR;
 
-	if (cqid > ctrl->subsys->max_qid)
+	if (cqid > ctrl->max_qid)
 		return NVME_SC_QID_INVALID | NVME_STATUS_DNR;
 
 	if ((create && ctrl->cqs[cqid]) || (!create && !ctrl->cqs[cqid]))
@@ -912,7 +931,7 @@ u16 nvmet_check_sqid(struct nvmet_ctrl *ctrl, u16 sqid,
 	if (!ctrl->sqs)
 		return NVME_SC_INTERNAL | NVME_STATUS_DNR;
 
-	if (sqid > ctrl->subsys->max_qid)
+	if (sqid > ctrl->max_qid)
 		return NVME_SC_QID_INVALID | NVME_STATUS_DNR;
 
 	if ((create && ctrl->sqs[sqid]) ||
@@ -933,7 +952,7 @@ u16 nvmet_sq_create(struct nvmet_ctrl *ctrl, struct nvmet_sq *sq,
 
 	status = nvmet_check_sqid(ctrl, sqid, true);
 	if (status != NVME_SC_SUCCESS)
-		return status;
+		goto ctrl_put;
 
 	ret = nvmet_sq_init(sq, cq);
 	if (ret) {
@@ -966,7 +985,7 @@ void nvmet_sq_destroy(struct nvmet_sq *sq)
 	wait_for_completion(&sq->confirm_done);
 	wait_for_completion(&sq->free_done);
 	percpu_ref_exit(&sq->ref);
-	nvmet_auth_sq_free(sq);
+	nvmet_auth_sq_destroy(sq);
 	nvmet_cq_put(sq->cq);
 
 	/*
@@ -1608,7 +1627,7 @@ struct nvmet_ctrl *nvmet_alloc_ctrl(struct nvmet_alloc_ctrl_args *args)
 	up_read(&nvmet_config_sem);
 
 	args->status = NVME_SC_INTERNAL;
-	ctrl = kzalloc(sizeof(*ctrl), GFP_KERNEL);
+	ctrl = kzalloc_obj(*ctrl);
 	if (!ctrl)
 		goto out_put_subsystem;
 	mutex_init(&ctrl->lock);
@@ -1628,7 +1647,6 @@ struct nvmet_ctrl *nvmet_alloc_ctrl(struct nvmet_alloc_ctrl_args *args)
 	INIT_WORK(&ctrl->fatal_err_work, nvmet_fatal_error_handler);
 	INIT_DELAYED_WORK(&ctrl->ka_work, nvmet_keep_alive_timer);
 
-	memcpy(ctrl->subsysnqn, args->subsysnqn, NVMF_NQN_SIZE);
 	memcpy(ctrl->hostnqn, args->hostnqn, NVMF_NQN_SIZE);
 
 	kref_init(&ctrl->ref);
@@ -1641,26 +1659,6 @@ struct nvmet_ctrl *nvmet_alloc_ctrl(struct nvmet_alloc_ctrl_args *args)
 			sizeof(__le32), GFP_KERNEL);
 	if (!ctrl->changed_ns_list)
 		goto out_free_ctrl;
-
-	ctrl->sqs = kcalloc(subsys->max_qid + 1,
-			sizeof(struct nvmet_sq *),
-			GFP_KERNEL);
-	if (!ctrl->sqs)
-		goto out_free_changed_ns_list;
-
-	ctrl->cqs = kcalloc(subsys->max_qid + 1, sizeof(struct nvmet_cq *),
-			   GFP_KERNEL);
-	if (!ctrl->cqs)
-		goto out_free_sqs;
-
-	ret = ida_alloc_range(&cntlid_ida,
-			     subsys->cntlid_min, subsys->cntlid_max,
-			     GFP_KERNEL);
-	if (ret < 0) {
-		args->status = NVME_SC_CONNECT_CTRL_BUSY | NVME_STATUS_DNR;
-		goto out_free_cqs;
-	}
-	ctrl->cntlid = ret;
 
 	/*
 	 * Discovery controllers may use some arbitrary high value
@@ -1675,9 +1673,28 @@ struct nvmet_ctrl *nvmet_alloc_ctrl(struct nvmet_alloc_ctrl_args *args)
 	ctrl->err_counter = 0;
 	spin_lock_init(&ctrl->error_lock);
 
-	nvmet_start_keep_alive_timer(ctrl);
-
+	down_read(&nvmet_config_sem);
 	mutex_lock(&subsys->lock);
+
+	ctrl->max_qid = subsys->max_qid;
+
+	ctrl->sqs = kzalloc_objs(struct nvmet_sq *, ctrl->max_qid + 1);
+	if (!ctrl->sqs)
+		goto out_free_changed_ns_list;
+
+	ctrl->cqs = kzalloc_objs(struct nvmet_cq *, ctrl->max_qid + 1);
+	if (!ctrl->cqs)
+		goto out_free_sqs;
+
+	ret = ida_alloc_range(&cntlid_ida,
+			     subsys->cntlid_min, subsys->cntlid_max,
+			     GFP_KERNEL);
+	if (ret < 0) {
+		args->status = NVME_SC_CONNECT_CTRL_BUSY | NVME_STATUS_DNR;
+		goto out_free_cqs;
+	}
+	ctrl->cntlid = ret;
+
 	ret = nvmet_ctrl_init_pr(ctrl);
 	if (ret)
 		goto init_pr_fail;
@@ -1685,11 +1702,14 @@ struct nvmet_ctrl *nvmet_alloc_ctrl(struct nvmet_alloc_ctrl_args *args)
 	nvmet_setup_p2p_ns_map(ctrl, args->p2p_client);
 	nvmet_debugfs_ctrl_setup(ctrl);
 	mutex_unlock(&subsys->lock);
+	up_read(&nvmet_config_sem);
+
+	nvmet_start_keep_alive_timer(ctrl);
 
 	if (args->hostid)
 		uuid_copy(&ctrl->hostid, args->hostid);
 
-	dhchap_status = nvmet_setup_auth(ctrl, args->sq);
+	dhchap_status = nvmet_setup_auth(ctrl, args->sq, false);
 	if (dhchap_status) {
 		pr_err("Failed to setup authentication, dhchap status %u\n",
 		       dhchap_status);
@@ -1714,14 +1734,14 @@ struct nvmet_ctrl *nvmet_alloc_ctrl(struct nvmet_alloc_ctrl_args *args)
 	return ctrl;
 
 init_pr_fail:
-	mutex_unlock(&subsys->lock);
-	nvmet_stop_keep_alive_timer(ctrl);
 	ida_free(&cntlid_ida, ctrl->cntlid);
 out_free_cqs:
 	kfree(ctrl->cqs);
 out_free_sqs:
 	kfree(ctrl->sqs);
 out_free_changed_ns_list:
+	mutex_unlock(&subsys->lock);
+	up_read(&nvmet_config_sem);
 	kfree(ctrl->changed_ns_list);
 out_free_ctrl:
 	kfree(ctrl);
@@ -1744,7 +1764,7 @@ static void nvmet_ctrl_free(struct kref *ref)
 
 	nvmet_stop_keep_alive_timer(ctrl);
 
-	flush_work(&ctrl->async_event_work);
+	cancel_work_sync(&ctrl->async_event_work);
 	cancel_work_sync(&ctrl->fatal_err_work);
 
 	nvmet_destroy_auth(ctrl);
@@ -1829,7 +1849,7 @@ struct nvmet_subsys *nvmet_subsys_alloc(const char *subsysnqn,
 	char serial[NVMET_SN_MAX_SIZE / 2];
 	int ret;
 
-	subsys = kzalloc(sizeof(*subsys), GFP_KERNEL);
+	subsys = kzalloc_obj(*subsys);
 	if (!subsys)
 		return ERR_PTR(-ENOMEM);
 
@@ -1903,6 +1923,8 @@ static void nvmet_subsys_free(struct kref *ref)
 	struct nvmet_subsys *subsys =
 		container_of(ref, struct nvmet_subsys, ref);
 
+	WARN_ON_ONCE(!list_empty(&subsys->ctrls));
+	WARN_ON_ONCE(!list_empty(&subsys->hosts));
 	WARN_ON_ONCE(!xa_empty(&subsys->namespaces));
 
 	nvmet_debugfs_subsys_free(subsys);
@@ -1943,12 +1965,13 @@ static int __init nvmet_init(void)
 	if (!nvmet_bvec_cache)
 		return -ENOMEM;
 
-	zbd_wq = alloc_workqueue("nvmet-zbd-wq", WQ_MEM_RECLAIM, 0);
+	zbd_wq = alloc_workqueue("nvmet-zbd-wq", WQ_MEM_RECLAIM | WQ_PERCPU,
+				 0);
 	if (!zbd_wq)
 		goto out_destroy_bvec_cache;
 
 	buffered_io_wq = alloc_workqueue("nvmet-buffered-io-wq",
-			WQ_MEM_RECLAIM, 0);
+			WQ_MEM_RECLAIM | WQ_PERCPU, 0);
 	if (!buffered_io_wq)
 		goto out_free_zbd_work_queue;
 
@@ -1957,9 +1980,14 @@ static int __init nvmet_init(void)
 	if (!nvmet_wq)
 		goto out_free_buffered_work_queue;
 
+	nvmet_aen_wq = alloc_workqueue("nvmet-aen-wq",
+			WQ_MEM_RECLAIM | WQ_UNBOUND, 0);
+	if (!nvmet_aen_wq)
+		goto out_free_nvmet_work_queue;
+
 	error = nvmet_init_debugfs();
 	if (error)
-		goto out_free_nvmet_work_queue;
+		goto out_free_nvmet_aen_work_queue;
 
 	error = nvmet_init_discovery();
 	if (error)
@@ -1975,6 +2003,8 @@ out_exit_discovery:
 	nvmet_exit_discovery();
 out_exit_debugfs:
 	nvmet_exit_debugfs();
+out_free_nvmet_aen_work_queue:
+	destroy_workqueue(nvmet_aen_wq);
 out_free_nvmet_work_queue:
 	destroy_workqueue(nvmet_wq);
 out_free_buffered_work_queue:
@@ -1992,6 +2022,7 @@ static void __exit nvmet_exit(void)
 	nvmet_exit_discovery();
 	nvmet_exit_debugfs();
 	ida_destroy(&cntlid_ida);
+	destroy_workqueue(nvmet_aen_wq);
 	destroy_workqueue(nvmet_wq);
 	destroy_workqueue(buffered_io_wq);
 	destroy_workqueue(zbd_wq);

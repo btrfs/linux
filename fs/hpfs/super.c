@@ -9,6 +9,7 @@
 
 #include "hpfs_fn.h"
 #include <linux/module.h>
+#include <linux/fs_struct.h>
 #include <linux/fs_context.h>
 #include <linux/fs_parser.h>
 #include <linux/init.h>
@@ -512,7 +513,7 @@ static int hpfs_fill_super(struct super_block *s, struct fs_context *fc)
 	struct hpfs_dirent *de = NULL;
 	struct quad_buffer_head qbh;
 
-	sbi = kzalloc(sizeof(*sbi), GFP_KERNEL);
+	sbi = kzalloc_obj(*sbi);
 	if (!sbi) {
 		return -ENOMEM;
 	}
@@ -522,7 +523,8 @@ static int hpfs_fill_super(struct super_block *s, struct fs_context *fc)
 	hpfs_lock(s);
 
 	/*sbi->sb_mounting = 1;*/
-	sb_set_blocksize(s, 512);
+	if (!sb_set_blocksize(s, 512))
+		goto bail0;
 	sbi->sb_fs_size = -1;
 	if (!(bootblock = hpfs_map_sector(s, 0, &bh0, 0))) goto bail1;
 	if (!(superblock = hpfs_map_sector(s, 16, &bh1, 1))) goto bail2;
@@ -714,7 +716,7 @@ static int hpfs_init_fs_context(struct fs_context *fc)
 {
 	struct hpfs_fc_context *ctx;
 
-	ctx = kzalloc(sizeof(struct hpfs_fc_context), GFP_KERNEL);
+	ctx = kzalloc_obj(struct hpfs_fc_context);
 	if (!ctx)
 		return -ENOMEM;
 

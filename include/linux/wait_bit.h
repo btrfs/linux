@@ -32,6 +32,7 @@ int out_of_line_wait_on_bit_timeout(unsigned long *word, int, wait_bit_action_f 
 int out_of_line_wait_on_bit_lock(unsigned long *word, int, wait_bit_action_f *action, unsigned int mode);
 struct wait_queue_head *bit_waitqueue(unsigned long *word, int bit);
 extern void __init wait_bit_init(void);
+extern struct wait_bit_key *__var_wake_key(struct wait_queue_entry *wq_entry, void *arg);
 
 int wake_bit_function(struct wait_queue_entry *wq_entry, unsigned mode, int sync, void *key);
 
@@ -406,7 +407,7 @@ do {									\
 			  schedule())
 
 /**
- * wait_var_event_killable - wait for a variable to be updated and notified
+ * wait_var_event_interruptible - wait for a variable to be updated and notified
  * @var: the address of variable being waited on
  * @condition: the condition to wait for
  *
@@ -492,7 +493,7 @@ do {									\
  * wait_var_event_mutex - wait for a variable to be updated under a mutex
  * @var: the address of the variable being waited on
  * @condition: condition to wait for
- * @mutex: the mutex which protects updates to the variable
+ * @lock: the mutex which protects updates to the variable
  *
  * Wait for a condition which can only be reliably tested while holding
  * a mutex.  The variables assessed in the condition will normal be
