@@ -214,17 +214,12 @@ static int apple_sart_probe(struct platform_device *pdev)
 	return 0;
 }
 
-static void apple_sart_put_device(void *dev)
-{
-	put_device(dev);
-}
-
 struct apple_sart *devm_apple_sart_get(struct device *dev)
 {
 	struct device_node *sart_node;
 	struct platform_device *sart_pdev;
+	struct device_link *link;
 	struct apple_sart *sart;
-	int ret;
 
 	sart_node = of_parse_phandle(dev->of_node, "apple,sart", 0);
 	if (!sart_node)
@@ -242,13 +237,14 @@ struct apple_sart *devm_apple_sart_get(struct device *dev)
 		return ERR_PTR(-EPROBE_DEFER);
 	}
 
-	ret = devm_add_action_or_reset(dev, apple_sart_put_device,
-				       &sart_pdev->dev);
-	if (ret)
-		return ERR_PTR(ret);
+	link = device_link_add(dev, &sart_pdev->dev,
+			       DL_FLAG_PM_RUNTIME | DL_FLAG_AUTOREMOVE_SUPPLIER);
+	if (!link) {
+		put_device(&sart_pdev->dev);
+		return ERR_PTR(-ENODEV);
+	}
 
-	device_link_add(dev, &sart_pdev->dev,
-			DL_FLAG_PM_RUNTIME | DL_FLAG_AUTOREMOVE_SUPPLIER);
+	put_device(&sart_pdev->dev);
 
 	return sart;
 }

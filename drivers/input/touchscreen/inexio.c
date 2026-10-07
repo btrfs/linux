@@ -81,7 +81,9 @@ static irqreturn_t inexio_interrupt(struct serio *serio,
 	if (INEXIO_RESPONSE_BEGIN_BYTE&pinexio->data[0])
 		inexio_process_data(pinexio);
 	else
-		printk(KERN_DEBUG "inexio.c: unknown/unsynchronized data from device, byte %x\n",pinexio->data[0]);
+		dev_dbg(&serio->dev,
+			"unknown/unsynchronized data from device, byte %x\n",
+			pinexio->data[0]);
 
 	return IRQ_HANDLED;
 }
@@ -114,7 +116,7 @@ static int inexio_connect(struct serio *serio, struct serio_driver *drv)
 	struct input_dev *input_dev;
 	int err;
 
-	pinexio = kzalloc(sizeof(*pinexio), GFP_KERNEL);
+	pinexio = kzalloc_obj(*pinexio);
 	input_dev = input_allocate_device();
 	if (!pinexio || !input_dev) {
 		err = -ENOMEM;
@@ -123,7 +125,7 @@ static int inexio_connect(struct serio *serio, struct serio_driver *drv)
 
 	pinexio->serio = serio;
 	pinexio->dev = input_dev;
-	snprintf(pinexio->phys, sizeof(pinexio->phys), "%s/input0", serio->phys);
+	scnprintf(pinexio->phys, sizeof(pinexio->phys), "%s/input0", serio->phys);
 
 	input_dev->name = "iNexio Serial TouchScreen";
 	input_dev->phys = pinexio->phys;

@@ -486,6 +486,7 @@ void native_tss_update_io_bitmap(void)
 		if (WARN_ON_ONCE(!iobm)) {
 			clear_thread_flag(TIF_IO_BITMAP);
 			native_tss_invalidate_io_bitmap();
+			return;
 		}
 
 		/*
@@ -578,7 +579,7 @@ static __always_inline void amd_set_core_ssb_state(unsigned long tifn)
 	struct ssb_state *st = this_cpu_ptr(&ssb_state);
 	u64 msr = x86_amd_ls_cfg_base;
 
-	if (!static_cpu_has(X86_FEATURE_ZEN)) {
+	if (!cpu_feature_enabled(X86_FEATURE_ZEN)) {
 		msr |= ssbd_tif_to_amd_ls_cfg(tifn);
 		wrmsrq(MSR_AMD64_LS_CFG, msr);
 		return;
@@ -645,14 +646,14 @@ static __always_inline void __speculation_ctrl_update(unsigned long tifp,
 	lockdep_assert_irqs_disabled();
 
 	/* Handle change of TIF_SSBD depending on the mitigation method. */
-	if (static_cpu_has(X86_FEATURE_VIRT_SSBD)) {
+	if (cpu_feature_enabled(X86_FEATURE_VIRT_SSBD)) {
 		if (tif_diff & _TIF_SSBD)
 			amd_set_ssb_virt_state(tifn);
-	} else if (static_cpu_has(X86_FEATURE_LS_CFG_SSBD)) {
+	} else if (cpu_feature_enabled(X86_FEATURE_LS_CFG_SSBD)) {
 		if (tif_diff & _TIF_SSBD)
 			amd_set_core_ssb_state(tifn);
-	} else if (static_cpu_has(X86_FEATURE_SPEC_CTRL_SSBD) ||
-		   static_cpu_has(X86_FEATURE_AMD_SSBD)) {
+	} else if (cpu_feature_enabled(X86_FEATURE_SPEC_CTRL_SSBD) ||
+		   cpu_feature_enabled(X86_FEATURE_AMD_SSBD)) {
 		updmsr |= !!(tif_diff & _TIF_SSBD);
 		msr |= ssbd_tif_to_spec_ctrl(tifn);
 	}
@@ -969,7 +970,7 @@ void amd_e400_c1e_apic_setup(void)
 
 void __init arch_post_acpi_subsys_init(void)
 {
-	u32 lo, hi;
+	u64 val;
 
 	if (!boot_cpu_has_bug(X86_BUG_AMD_E400))
 		return;
@@ -979,8 +980,8 @@ void __init arch_post_acpi_subsys_init(void)
 	 * the machine is affected K8_INTP_C1E_ACTIVE_MASK bits are set in
 	 * MSR_K8_INT_PENDING_MSG.
 	 */
-	rdmsr(MSR_K8_INT_PENDING_MSG, lo, hi);
-	if (!(lo & K8_INTP_C1E_ACTIVE_MASK))
+	rdmsrq(MSR_K8_INT_PENDING_MSG, val);
+	if (!(val & K8_INTP_C1E_ACTIVE_MASK))
 		return;
 
 	boot_cpu_set_bug(X86_BUG_AMD_APIC_C1E);

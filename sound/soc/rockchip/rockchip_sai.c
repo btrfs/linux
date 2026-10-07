@@ -11,6 +11,7 @@
 #include <linux/delay.h>
 #include <linux/of_device.h>
 #include <linux/clk.h>
+#include <linux/platform_device.h>
 #include <linux/pm_runtime.h>
 #include <linux/regmap.h>
 #include <linux/reset.h>
@@ -628,6 +629,10 @@ static int rockchip_sai_hw_params(struct snd_pcm_substream *substream,
 
 	regmap_update_bits(sai->regmap, reg, SAI_XCR_VDW_MASK | SAI_XCR_CSR_MASK, val);
 
+	if (!sai->is_tdm)
+		regmap_update_bits(sai->regmap, reg, SAI_XCR_SBW_MASK,
+				   SAI_XCR_SBW(params_physical_width(params)));
+
 	regmap_read(sai->regmap, reg, &val);
 
 	slot_width = SAI_XCR_SBW_V(val);
@@ -1227,7 +1232,7 @@ static int rockchip_sai_wait_time_info(struct snd_kcontrol *kcontrol,
 static int rockchip_sai_rd_wait_time_get(struct snd_kcontrol *kcontrol,
 					 struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_component *component = snd_soc_kcontrol_component(kcontrol);
+	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
 	struct rk_sai_dev *sai = snd_soc_component_get_drvdata(component);
 
 	ucontrol->value.integer.value[0] = sai->wait_time[SNDRV_PCM_STREAM_CAPTURE];
@@ -1238,7 +1243,7 @@ static int rockchip_sai_rd_wait_time_get(struct snd_kcontrol *kcontrol,
 static int rockchip_sai_rd_wait_time_put(struct snd_kcontrol *kcontrol,
 					 struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_component *component = snd_soc_kcontrol_component(kcontrol);
+	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
 	struct rk_sai_dev *sai = snd_soc_component_get_drvdata(component);
 
 	if (ucontrol->value.integer.value[0] > WAIT_TIME_MS_MAX)
@@ -1252,7 +1257,7 @@ static int rockchip_sai_rd_wait_time_put(struct snd_kcontrol *kcontrol,
 static int rockchip_sai_wr_wait_time_get(struct snd_kcontrol *kcontrol,
 					 struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_component *component = snd_soc_kcontrol_component(kcontrol);
+	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
 	struct rk_sai_dev *sai = snd_soc_component_get_drvdata(component);
 
 	ucontrol->value.integer.value[0] = sai->wait_time[SNDRV_PCM_STREAM_PLAYBACK];
@@ -1263,7 +1268,7 @@ static int rockchip_sai_wr_wait_time_get(struct snd_kcontrol *kcontrol,
 static int rockchip_sai_wr_wait_time_put(struct snd_kcontrol *kcontrol,
 					 struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_component *component = snd_soc_kcontrol_component(kcontrol);
+	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
 	struct rk_sai_dev *sai = snd_soc_component_get_drvdata(component);
 
 	if (ucontrol->value.integer.value[0] > WAIT_TIME_MS_MAX)
@@ -1423,12 +1428,13 @@ static int rockchip_sai_probe(struct platform_device *pdev)
 				     "Failed to initialize regmap\n");
 
 	irq = platform_get_irq_optional(pdev, 0);
+	if (irq == -EPROBE_DEFER)
+		return irq;
 	if (irq > 0) {
 		ret = devm_request_irq(&pdev->dev, irq, rockchip_sai_isr,
 				       IRQF_SHARED, node->name, sai);
 		if (ret)
-			return dev_err_probe(&pdev->dev, ret,
-					     "Failed to request irq %d\n", irq);
+			return ret;
 	} else {
 		dev_dbg(&pdev->dev, "Asked for an IRQ but got %d\n", irq);
 	}
@@ -1451,7 +1457,7 @@ static int rockchip_sai_probe(struct platform_device *pdev)
 
 	ret = rockchip_sai_parse_paths(sai, node);
 	if (ret)
-		return dev_err_probe(&pdev->dev, ret, "Failed to parse paths\n");
+		return ret;
 
 	/*
 	 * From here on, all register accesses need to be wrapped in
@@ -1466,18 +1472,14 @@ static int rockchip_sai_probe(struct platform_device *pdev)
 		return dev_err_probe(&pdev->dev, ret, "Failed to resume device\n");
 
 	ret = devm_snd_dmaengine_pcm_register(&pdev->dev, NULL, 0);
-	if (ret) {
-		dev_err(&pdev->dev, "Failed to register PCM: %d\n", ret);
+	if (ret)
 		goto err_runtime_suspend;
-	}
 
 	ret = devm_snd_soc_register_component(&pdev->dev,
 					      &rockchip_sai_component,
 					      dai, 1);
-	if (ret) {
-		dev_err(&pdev->dev, "Failed to register component: %d\n", ret);
+	if (ret)
 		goto err_runtime_suspend;
-	}
 
 	pm_runtime_use_autosuspend(&pdev->dev);
 	pm_runtime_put(&pdev->dev);
@@ -1487,8 +1489,9 @@ static int rockchip_sai_probe(struct platform_device *pdev)
 	return 0;
 
 err_runtime_suspend:
-	/* If we're !CONFIG_PM, we get -ENOSYS and disable manually */
-	if (pm_runtime_put(&pdev->dev))
+	if (IS_ENABLED(CONFIG_PM))
+		pm_runtime_put(&pdev->dev);
+	else
 		rockchip_sai_runtime_suspend(&pdev->dev);
 
 	return ret;

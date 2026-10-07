@@ -398,7 +398,6 @@ struct cdns_i3c_data {
 };
 
 struct cdns_i3c_master {
-	struct work_struct hj_work;
 	struct i3c_master_controller base;
 	u32 free_rr_slots;
 	unsigned int maxdevs;
@@ -498,7 +497,7 @@ cdns_i3c_master_alloc_xfer(struct cdns_i3c_master *master, unsigned int ncmds)
 {
 	struct cdns_i3c_xfer *xfer;
 
-	xfer = kzalloc(struct_size(xfer, cmds, ncmds), GFP_KERNEL);
+	xfer = kzalloc_flex(*xfer, cmds, ncmds);
 	if (!xfer)
 		return NULL;
 
@@ -574,6 +573,7 @@ static void cdns_i3c_master_end_xfer_locked(struct cdns_i3c_master *master,
 		cmd = &xfer->cmds[CMDR_CMDID(cmdr)];
 		rx_len = min_t(u32, CMDR_XFER_BYTES(cmdr), cmd->rx_len);
 		cdns_i3c_master_rd_from_rx_fifo(master, cmd->rx_buf, rx_len);
+		cmd->rx_len = rx_len;
 		cmd->error = CMDR_ERROR(cmdr);
 	}
 
@@ -715,14 +715,16 @@ static int cdns_i3c_master_send_ccc_cmd(struct i3c_master_controller *m,
 
 	ret = xfer->ret;
 	cmd->err = cdns_i3c_cmd_get_err(&xfer->cmds[0]);
+	if (!ret && cmd->rnw)
+		cmd->dests[0].payload.actual_len = ccmd->rx_len;
 	cdns_i3c_master_free_xfer(xfer);
 
 	return ret;
 }
 
-static int cdns_i3c_master_priv_xfers(struct i3c_dev_desc *dev,
-				      struct i3c_priv_xfer *xfers,
-				      int nxfers)
+static int cdns_i3c_master_i3c_xfers(struct i3c_dev_desc *dev,
+				     struct i3c_xfer *xfers,
+				     int nxfers, enum i3c_xfer_mode mode)
 {
 	struct i3c_master_controller *m = i3c_dev_get_master(dev);
 	struct cdns_i3c_master *master = to_cdns_i3c_master(m);
@@ -940,7 +942,7 @@ static int cdns_i3c_master_attach_i3c_dev(struct i3c_dev_desc *dev)
 	struct cdns_i3c_i2c_dev_data *data;
 	int slot;
 
-	data = kzalloc(sizeof(*data), GFP_KERNEL);
+	data = kzalloc_obj(*data);
 	if (!data)
 		return -ENOMEM;
 
@@ -991,7 +993,7 @@ static int cdns_i3c_master_attach_i2c_dev(struct i2c_dev_desc *dev)
 	if (slot < 0)
 		return slot;
 
-	data = kzalloc(sizeof(*data), GFP_KERNEL);
+	data = kzalloc_obj(*data);
 	if (!data)
 		return -ENOMEM;
 
@@ -1143,7 +1145,7 @@ static int cdns_i3c_master_do_daa(struct i3c_master_controller *m)
 	}
 
 	ret = i3c_master_entdaa_locked(&master->base);
-	if (ret && ret != I3C_ERROR_M2)
+	if (ret)
 		return ret;
 
 	newdevs = readl(master->regs + DEVS_CTRL) & DEVS_CTRL_DEVS_ACTIVE_MASK;
@@ -1357,7 +1359,7 @@ static void cnds_i3c_master_demux_ibis(struct cdns_i3c_master *master)
 
 		case IBIR_TYPE_HJ:
 			WARN_ON(IBIR_XFER_BYTES(ibir) || (ibir & IBIR_ERROR));
-			queue_work(master->base.wq, &master->hj_work);
+			i3c_master_queue_hotjoin(&master->base);
 			break;
 
 		case IBIR_TYPE_MR:
@@ -1519,7 +1521,7 @@ static const struct i3c_master_controller_ops cdns_i3c_master_ops = {
 	.detach_i2c_dev = cdns_i3c_master_detach_i2c_dev,
 	.supports_ccc_cmd = cdns_i3c_master_supports_ccc_cmd,
 	.send_ccc_cmd = cdns_i3c_master_send_ccc_cmd,
-	.priv_xfers = cdns_i3c_master_priv_xfers,
+	.i3c_xfers = cdns_i3c_master_i3c_xfers,
 	.i2c_xfers = cdns_i3c_master_i2c_xfers,
 	.enable_ibi = cdns_i3c_master_enable_ibi,
 	.disable_ibi = cdns_i3c_master_disable_ibi,
@@ -1527,15 +1529,6 @@ static const struct i3c_master_controller_ops cdns_i3c_master_ops = {
 	.free_ibi = cdns_i3c_master_free_ibi,
 	.recycle_ibi_slot = cdns_i3c_master_recycle_ibi_slot,
 };
-
-static void cdns_i3c_master_hj(struct work_struct *work)
-{
-	struct cdns_i3c_master *master = container_of(work,
-						      struct cdns_i3c_master,
-						      hj_work);
-
-	i3c_master_do_daa(&master->base);
-}
 
 static struct cdns_i3c_data cdns_i3c_devdata = {
 	.thd_delay_ns = 10,
@@ -1584,7 +1577,6 @@ static int cdns_i3c_master_probe(struct platform_device *pdev)
 	spin_lock_init(&master->xferqueue.lock);
 	INIT_LIST_HEAD(&master->xferqueue.list);
 
-	INIT_WORK(&master->hj_work, cdns_i3c_master_hj);
 	writel(0xffffffff, master->regs + MST_IDR);
 	writel(0xffffffff, master->regs + SLV_IDR);
 	ret = devm_request_irq(&pdev->dev, irq, cdns_i3c_master_interrupt, 0,
@@ -1627,7 +1619,6 @@ static void cdns_i3c_master_remove(struct platform_device *pdev)
 {
 	struct cdns_i3c_master *master = platform_get_drvdata(pdev);
 
-	cancel_work_sync(&master->hj_work);
 	i3c_master_unregister(&master->base);
 }
 

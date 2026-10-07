@@ -1,5 +1,4 @@
-
-# Copyright 2022 Advanced Micro Devices, Inc.
+# Copyright 2022-2026 Advanced Micro Devices, Inc.
 #
 # Permission is hereby granted, free of charge, to any person obtaining a
 # copy of this software and associated documentation files (the "Software"),
@@ -199,4 +198,37 @@ HWSS_DCN401 = dcn401_hwseq.o dcn401_init.o
 AMD_DAL_HWSS_DCN401 = $(addprefix $(AMDDALPATH)/dc/hwss/dcn401/,$(HWSS_DCN401))
 
 AMD_DISPLAY_FILES += $(AMD_DAL_HWSS_DCN401)
+
+###############################################################################
+
+HWSS_DCN50 = dcn50_hwseq.o
+
+AMD_DAL_HWSS_DCN50 = $(addprefix $(AMDDALPATH)/dc/hwss/dcn50/,$(HWSS_DCN50))
+
+AMD_DISPLAY_FILES += $(AMD_DAL_HWSS_DCN50)
+
+###############################################################################
+
+HWSS_DCN42 = dcn42_hwseq.o dcn42_init.o
+
+AMD_DAL_HWSS_DCN42 = $(addprefix $(AMDDALPATH)/dc/hwss/dcn42/,$(HWSS_DCN42))
+
+AMD_DISPLAY_FILES += $(AMD_DAL_HWSS_DCN42)
+
+###############################################################################
+
+HWSS_DCN42B = dcn42b_hwseq.o dcn42b_init.o
+
+AMD_DAL_HWSS_DCN42B = $(addprefix $(AMDDALPATH)/dc/hwss/dcn42b/,$(HWSS_DCN42B))
+
+AMD_DISPLAY_FILES += $(AMD_DAL_HWSS_DCN42B)
+
+###############################################################################
+
+HWSS_DCN60 = dcn60_hwseq.o dcn60_init.o
+
+AMD_DAL_HWSS_DCN60 = $(addprefix $(AMDDALPATH)/dc/hwss/dcn60/,$(HWSS_DCN60))
+
+AMD_DISPLAY_FILES += $(AMD_DAL_HWSS_DCN60)
+
 endif

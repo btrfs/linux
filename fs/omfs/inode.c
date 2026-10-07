@@ -14,6 +14,7 @@
 #include <linux/writeback.h>
 #include <linux/seq_file.h>
 #include <linux/crc-itu-t.h>
+#include <linux/fs_struct.h>
 #include <linux/fs_context.h>
 #include <linux/fs_parser.h>
 #include "omfs.h"
@@ -212,7 +213,7 @@ struct inode *omfs_iget(struct super_block *sb, ino_t ino)
 	inode = iget_locked(sb, ino);
 	if (!inode)
 		return ERR_PTR(-ENOMEM);
-	if (!(inode->i_state & I_NEW))
+	if (!(inode_state_read_once(inode) & I_NEW))
 		return inode;
 
 	bh = omfs_bread(inode->i_sb, ino);
@@ -463,7 +464,7 @@ static int omfs_fill_super(struct super_block *sb, struct fs_context *fc)
 	int ret = -EINVAL;
 	int silent = fc->sb_flags & SB_SILENT;
 
-	sbi = kzalloc(sizeof(struct omfs_sb_info), GFP_KERNEL);
+	sbi = kzalloc_obj(struct omfs_sb_info);
 	if (!sbi)
 		return -ENOMEM;
 
@@ -477,7 +478,8 @@ static int omfs_fill_super(struct super_block *sb, struct fs_context *fc)
 	sb->s_time_min = 0;
 	sb->s_time_max = U64_MAX / MSEC_PER_SEC;
 
-	sb_set_blocksize(sb, 0x200);
+	if (!sb_set_blocksize(sb, 0x200))
+		goto end;
 
 	bh = sb_bread(sb, 0);
 	if (!bh)
@@ -512,6 +514,12 @@ static int omfs_fill_super(struct super_block *sb, struct fs_context *fc)
 		goto out_brelse_bh;
 	}
 
+	if (sbi->s_sys_blocksize < OMFS_DIR_START) {
+		printk(KERN_ERR "omfs: sysblock size (%d) is too small\n",
+			sbi->s_sys_blocksize);
+		goto out_brelse_bh;
+	}
+
 	if (sbi->s_blocksize < sbi->s_sys_blocksize ||
 	    sbi->s_blocksize > OMFS_MAX_BLOCK_SIZE) {
 		printk(KERN_ERR "omfs: block size (%d) is out of range\n",
@@ -523,7 +531,8 @@ static int omfs_fill_super(struct super_block *sb, struct fs_context *fc)
 	 * Use sys_blocksize as the fs block since it is smaller than a
 	 * page while the fs blocksize can be larger.
 	 */
-	sb_set_blocksize(sb, sbi->s_sys_blocksize);
+	if (!sb_set_blocksize(sb, sbi->s_sys_blocksize))
+		goto out_brelse_bh;
 
 	/*
 	 * ...and the difference goes into a shift.  sys_blocksize is always
@@ -611,7 +620,7 @@ static int omfs_init_fs_context(struct fs_context *fc)
 {
 	struct omfs_mount_options *opts;
 
-	opts = kzalloc(sizeof(*opts), GFP_KERNEL);
+	opts = kzalloc_obj(*opts);
 	if (!opts)
 		return -ENOMEM;
 

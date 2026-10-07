@@ -241,7 +241,12 @@ char *btrfs_ref_to_path(struct btrfs_root *fs_root, struct btrfs_path *path,
 struct btrfs_data_container *init_data_container(u32 total_bytes);
 struct inode_fs_paths *init_ipath(s32 total_bytes, struct btrfs_root *fs_root,
 					struct btrfs_path *path);
-void free_ipath(struct inode_fs_paths *ipath);
+
+DEFINE_FREE(inode_fs_paths, struct inode_fs_paths *,
+	if (_T) {
+		kvfree(_T->fspath);
+		kfree(_T);
+	})
 
 int btrfs_find_one_extref(struct btrfs_root *root, u64 inode_objectid,
 			  u64 start_off, struct btrfs_path *path,
@@ -273,14 +278,11 @@ struct prelim_ref {
 struct btrfs_backref_iter {
 	u64 bytenr;
 	struct btrfs_path *path;
-	struct btrfs_fs_info *fs_info;
 	struct btrfs_key cur_key;
 	u32 item_ptr;
 	u32 cur_ptr;
 	u32 end_ptr;
 };
-
-struct btrfs_backref_iter *btrfs_backref_iter_alloc(struct btrfs_fs_info *fs_info);
 
 /*
  * For metadata with EXTENT_ITEM key (non-skinny) case, the first inline data
@@ -297,9 +299,11 @@ static inline bool btrfs_backref_has_tree_block_info(
 	return false;
 }
 
-int btrfs_backref_iter_start(struct btrfs_backref_iter *iter, u64 bytenr);
+int btrfs_backref_iter_init(struct btrfs_backref_iter *iter);
 
-int btrfs_backref_iter_next(struct btrfs_backref_iter *iter);
+int btrfs_backref_iter_start(struct btrfs_fs_info *fs_info, struct btrfs_backref_iter *iter, u64 bytenr);
+
+int btrfs_backref_iter_next(struct btrfs_fs_info *fs_info, struct btrfs_backref_iter *iter);
 
 /*
  * Backref cache related structures

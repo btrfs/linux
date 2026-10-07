@@ -11,16 +11,28 @@
 use crate::{
     bindings,
     device::Device,
-    error::{to_result, Error, Result, VTABLE_DEFAULT_ERROR},
-    ffi::{c_int, c_long, c_uint, c_ulong},
-    fs::{File, Kiocb},
-    iov::{IovIterDest, IovIterSource},
+    error::{
+        to_result,
+        VTABLE_DEFAULT_ERROR, //
+    },
+    fs::{
+        File,
+        Kiocb, //
+    },
+    iov::{
+        IovIterDest,
+        IovIterSource, //
+    },
     mm::virt::VmaNew,
+    module::this_module,
     prelude::*,
     seq_file::SeqFile,
-    types::{ForeignOwnable, Opaque},
+    types::{
+        ForeignOwnable,
+        Opaque, //
+    }, //
 };
-use core::{marker::PhantomData, mem::MaybeUninit, pin::Pin};
+use core::marker::PhantomData;
 
 /// Options for creating a misc device.
 #[derive(Copy, Clone)]
@@ -32,8 +44,7 @@ pub struct MiscDeviceOptions {
 impl MiscDeviceOptions {
     /// Create a raw `struct miscdev` ready for registration.
     pub const fn into_raw<T: MiscDevice>(self) -> bindings::miscdevice {
-        // SAFETY: All zeros is valid for this C type.
-        let mut result: bindings::miscdevice = unsafe { MaybeUninit::zeroed().assume_init() };
+        let mut result: bindings::miscdevice = pin_init::zeroed();
         result.minor = bindings::MISC_DYNAMIC_MINOR as ffi::c_int;
         result.name = crate::str::as_char_ptr_in_const_context(self.name);
         result.fops = MiscdeviceVTable::<T>::build();
@@ -279,7 +290,7 @@ impl<T: MiscDevice> MiscdeviceVTable<T> {
     /// # Safety
     ///
     /// `kiocb` must be correspond to a valid file that is associated with a
-    /// `MiscDeviceRegistration<T>`. `iter` must be a valid `struct iov_iter` for writing.
+    /// `MiscDeviceRegistration<T>`. `iter` must be a valid `struct iov_iter` for reading.
     unsafe extern "C" fn write_iter(
         kiocb: *mut bindings::kiocb,
         iter: *mut bindings::iov_iter,
@@ -411,7 +422,7 @@ impl<T: MiscDevice> MiscdeviceVTable<T> {
         compat_ioctl: if T::HAS_COMPAT_IOCTL {
             Some(Self::compat_ioctl)
         } else if T::HAS_IOCTL {
-            Some(bindings::compat_ptr_ioctl)
+            bindings::compat_ptr_ioctl
         } else {
             None
         },
@@ -420,8 +431,8 @@ impl<T: MiscDevice> MiscdeviceVTable<T> {
         } else {
             None
         },
-        // SAFETY: All zeros is a valid value for `bindings::file_operations`.
-        ..unsafe { MaybeUninit::zeroed().assume_init() }
+        owner: this_module::<T::OwnerModule>().as_ptr(),
+        ..pin_init::zeroed()
     };
 
     const fn build() -> &'static bindings::file_operations {

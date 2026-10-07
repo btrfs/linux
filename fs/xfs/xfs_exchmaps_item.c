@@ -3,7 +3,7 @@
  * Copyright (c) 2020-2024 Oracle.  All Rights Reserved.
  * Author: Darrick J. Wong <djwong@kernel.org>
  */
-#include "xfs.h"
+#include "xfs_platform.h"
 #include "xfs_fs.h"
 #include "xfs_format.h"
 #include "xfs_log_format.h"
@@ -83,16 +83,14 @@ xfs_xmi_item_size(
 STATIC void
 xfs_xmi_item_format(
 	struct xfs_log_item	*lip,
-	struct xfs_log_vec	*lv)
+	struct xlog_format_buf	*lfb)
 {
 	struct xfs_xmi_log_item	*xmi_lip = XMI_ITEM(lip);
-	struct xfs_log_iovec	*vecp = NULL;
 
 	xmi_lip->xmi_format.xmi_type = XFS_LI_XMI;
 	xmi_lip->xmi_format.xmi_size = 1;
 
-	xlog_copy_iovec(lv, &vecp, XLOG_REG_TYPE_XMI_FORMAT,
-			&xmi_lip->xmi_format,
+	xlog_format_copy(lfb, XLOG_REG_TYPE_XMI_FORMAT, &xmi_lip->xmi_format,
 			sizeof(struct xfs_xmi_log_format));
 }
 
@@ -166,15 +164,14 @@ xfs_xmd_item_size(
 STATIC void
 xfs_xmd_item_format(
 	struct xfs_log_item	*lip,
-	struct xfs_log_vec	*lv)
+	struct xlog_format_buf	*lfb)
 {
 	struct xfs_xmd_log_item	*xmd_lip = XMD_ITEM(lip);
-	struct xfs_log_iovec	*vecp = NULL;
 
 	xmd_lip->xmd_format.xmd_type = XFS_LI_XMD;
 	xmd_lip->xmd_format.xmd_size = 1;
 
-	xlog_copy_iovec(lv, &vecp, XLOG_REG_TYPE_XMD_FORMAT, &xmd_lip->xmd_format,
+	xlog_format_copy(lfb, XLOG_REG_TYPE_XMD_FORMAT, &xmd_lip->xmd_format,
 			sizeof(struct xfs_xmd_log_format));
 }
 
@@ -230,9 +227,9 @@ xfs_exchmaps_create_intent(
 	xmi_lip = xfs_xmi_init(tp->t_mountp);
 	xlf = &xmi_lip->xmi_format;
 
-	xlf->xmi_inode1 = xmi->xmi_ip1->i_ino;
+	xlf->xmi_inode1 = I_INO(xmi->xmi_ip1);
 	xlf->xmi_igen1 = VFS_I(xmi->xmi_ip1)->i_generation;
-	xlf->xmi_inode2 = xmi->xmi_ip2->i_ino;
+	xlf->xmi_inode2 = I_INO(xmi->xmi_ip2);
 	xlf->xmi_igen2 = VFS_I(xmi->xmi_ip2)->i_generation;
 	xlf->xmi_startoff1 = xmi->xmi_startoff1;
 	xlf->xmi_startoff2 = xmi->xmi_startoff2;
@@ -347,7 +344,17 @@ xfs_xmi_validate(
 	if (!xfs_verify_fileext(mp, xlf->xmi_startoff1, xlf->xmi_blockcount))
 		return false;
 
-	return xfs_verify_fileext(mp, xlf->xmi_startoff2, xlf->xmi_blockcount);
+	if (!xfs_verify_fileext(mp, xlf->xmi_startoff2, xlf->xmi_blockcount))
+		return false;
+
+	if (xlf->xmi_flags & XFS_EXCHMAPS_SET_SIZES) {
+		if ((int64_t)xlf->xmi_isize1 < 0)
+			return false;
+		if ((int64_t)xlf->xmi_isize2 < 0)
+			return false;
+	}
+
+	return true;
 }
 
 /*
@@ -406,6 +413,13 @@ xfs_xmi_item_recover_intent(
 	*ipp1 = ip1;
 	*ipp2 = ip2;
 	xmi = xfs_exchmaps_init_intent(req);
+
+	/* Restore intended file sizes from recovered logged item */
+	if (req->flags & XFS_EXCHMAPS_SET_SIZES) {
+		xmi->xmi_isize1 = xlf->xmi_isize1;
+		xmi->xmi_isize2 = xlf->xmi_isize2;
+	}
+
 	xfs_defer_add_item(dfp, &xmi->xmi_list);
 	return xmi;
 

@@ -604,7 +604,7 @@ static int nfc_genl_dump_devices(struct sk_buff *skb,
 
 	if (!iter) {
 		first_call = true;
-		iter = kmalloc(sizeof(struct class_dev_iter), GFP_KERNEL);
+		iter = kmalloc_obj(struct class_dev_iter);
 		if (!iter)
 			return -ENOMEM;
 		cb->args[0] = (long) iter;
@@ -1181,7 +1181,7 @@ static int nfc_genl_llc_sdreq(struct sk_buff *skb, struct genl_info *info)
 
 		if (rc != 0) {
 			rc = -EINVAL;
-			goto put_local;
+			goto free_list;
 		}
 
 		if (!sdp_attrs[NFC_SDP_ATTR_URI])
@@ -1200,7 +1200,7 @@ static int nfc_genl_llc_sdreq(struct sk_buff *skb, struct genl_info *info)
 		sdreq = nfc_llcp_build_sdreq_tlv(tid, uri, uri_len);
 		if (sdreq == NULL) {
 			rc = -ENOMEM;
-			goto put_local;
+			goto free_list;
 		}
 
 		tlvs_len += sdreq->tlv_len;
@@ -1214,6 +1214,9 @@ static int nfc_genl_llc_sdreq(struct sk_buff *skb, struct genl_info *info)
 	}
 
 	rc = nfc_llcp_send_snl_sdreq(local, &sdreq_list, tlvs_len);
+
+free_list:
+	nfc_llcp_free_sdp_tlv_list(&sdreq_list);
 
 put_local:
 	nfc_llcp_local_put(local);
@@ -1370,7 +1373,7 @@ static int nfc_genl_dump_ses(struct sk_buff *skb,
 
 	if (!iter) {
 		first_call = true;
-		iter = kmalloc(sizeof(struct class_dev_iter), GFP_KERNEL);
+		iter = kmalloc_obj(struct class_dev_iter);
 		if (!iter)
 			return -ENOMEM;
 		cb->args[0] = (long) iter;
@@ -1541,7 +1544,7 @@ static int nfc_genl_se_io(struct sk_buff *skb, struct genl_info *info)
 
 	apdu = nla_data(info->attrs[NFC_ATTR_SE_APDU]);
 
-	ctx = kzalloc(sizeof(struct se_io_ctx), GFP_KERNEL);
+	ctx = kzalloc_obj(struct se_io_ctx);
 	if (!ctx) {
 		rc = -ENOMEM;
 		goto put_dev;
@@ -1875,7 +1878,7 @@ static int nfc_genl_rcv_nl_event(struct notifier_block *this,
 
 	pr_debug("NETLINK_URELEASE event from id %d\n", n->portid);
 
-	w = kmalloc(sizeof(*w), GFP_ATOMIC);
+	w = kmalloc_obj(*w, GFP_ATOMIC);
 	if (w) {
 		INIT_WORK(&w->w, nfc_urelease_event_work);
 		w->portid = n->portid;

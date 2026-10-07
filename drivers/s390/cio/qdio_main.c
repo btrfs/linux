@@ -695,7 +695,7 @@ static void qdio_int_handler_pci(struct qdio_irq *irq_ptr)
 		return;
 
 	qdio_deliver_irq(irq_ptr);
-	irq_ptr->last_data_irq_time = get_lowcore()->int_clock;
+	irq_ptr->last_data_irq_time = get_lowcore()->int_clock.tod;
 }
 
 static void qdio_handle_activate_check(struct qdio_irq *irq_ptr,
@@ -965,7 +965,7 @@ int qdio_allocate(struct ccw_device *cdev, unsigned int no_input_qs,
 	if (!irq_ptr)
 		return -ENOMEM;
 
-	irq_ptr->ccw = kmalloc(sizeof(*irq_ptr->ccw), GFP_KERNEL | GFP_DMA);
+	irq_ptr->ccw = kmalloc_obj(*irq_ptr->ccw, GFP_KERNEL | GFP_DMA);
 	if (!irq_ptr->ccw)
 		goto err_ccw;
 

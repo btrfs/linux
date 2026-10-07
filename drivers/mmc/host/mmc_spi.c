@@ -952,6 +952,7 @@ crc_recover:
 			status = mmc_spi_command_send(host, mrq, &stop, 0);
 			crc_retry--;
 			mrq->data->error = 0;
+			mrq->data->bytes_xfered = 0;
 			goto crc_recover;
 		}
 
@@ -1236,7 +1237,7 @@ static int mmc_spi_probe(struct spi_device *spi)
 	}
 
 	/* Preallocate buffers */
-	host->data = kmalloc(sizeof(*host->data), GFP_KERNEL);
+	host->data = kmalloc_obj(*host->data);
 	if (!host->data)
 		goto fail_nobuf1;
 

@@ -56,7 +56,7 @@ struct the_nilfs *alloc_nilfs(struct super_block *sb)
 {
 	struct the_nilfs *nilfs;
 
-	nilfs = kzalloc(sizeof(*nilfs), GFP_KERNEL);
+	nilfs = kzalloc_obj(*nilfs);
 	if (!nilfs)
 		return NULL;
 
@@ -458,6 +458,12 @@ static int nilfs_store_disk_layout(struct the_nilfs *nilfs,
 		return -EINVAL;
 	} else if (nilfs->ns_inode_size < NILFS_MIN_INODE_SIZE) {
 		nilfs_err(nilfs->ns_sb, "too small inode size: %d bytes",
+			  nilfs->ns_inode_size);
+		return -EINVAL;
+	}
+	if (NILFS_SR_BYTES(nilfs->ns_inode_size) > nilfs->ns_blocksize) {
+		nilfs_err(nilfs->ns_sb,
+			  "too large inode size for super root: %d bytes",
 			  nilfs->ns_inode_size);
 		return -EINVAL;
 	}
@@ -877,7 +883,7 @@ nilfs_find_or_create_root(struct the_nilfs *nilfs, __u64 cno)
 	if (root)
 		return root;
 
-	new = kzalloc(sizeof(*root), GFP_KERNEL);
+	new = kzalloc_obj(*root);
 	if (!new)
 		return NULL;
 

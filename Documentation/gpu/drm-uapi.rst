@@ -16,6 +16,8 @@ management, and output management.
 Cover generic ioctls and sysfs layout here. We only need high-level
 info, since man pages should cover the rest.
 
+.. contents::
+
 libdrm Device Lookup
 ====================
 
@@ -117,6 +119,10 @@ Linux kernel's guarantee to keep existing userspace running for 10+ years this
 is already rather painful for the DRM subsystem, with multiple different uAPIs
 for the same thing co-existing. If we add a few more complete mistakes into the
 mix every year it would be entirely unmanageable.
+
+The DRM subsystem has however no concern with independent closed-source
+userspace implementations. To officialize that position, the DRM uAPI headers
+are covered by the MIT license.
 
 .. _drm_render_node:
 
@@ -438,14 +444,14 @@ following expectations.
     unknown         consumer policy
     =============== ========================================
 
-The only exception to this is ``WEDGED=none``, which signifies that the device
-was temporarily 'wedged' at some point but was recovered from driver context
-using device specific methods like reset. No explicit recovery is expected from
-the consumer in this case, but it can still take additional steps like gathering
-telemetry information (devcoredump, syslog). This is useful because the first
-hang is usually the most critical one which can result in consequential hangs or
-complete wedging.
+No Recovery
+-----------
 
+Here ``WEDGED=none`` signifies that no recovery is expected from the consumer
+but it can still try to gather telemetry information (devcoredump, syslog) for
+debug purpose in order to root cause the hang. This is useful because the first
+hang is usually the most critical one which can result in consequential hangs
+or complete wedging.
 
 Vendor Specific Recovery
 ------------------------
@@ -568,7 +574,7 @@ ENOSPC:
 EPERM/EACCES:
         Returned for an operation that is valid, but needs more privileges.
         E.g. root-only or much more common, DRM master-only operations return
-        this when called by unpriviledged clients. There's no clear
+        this when called by unprivileged clients. There's no clear
         difference between EACCES and EPERM.
 
 ENODEV:
