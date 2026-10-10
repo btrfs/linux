@@ -1,3 +1,3 @@
 # SPDX-License-Identifier: GPL-2.0
-
-obj-$(CONFIG_DRM_NOVA) += nova.o
+# nova-drm is built from drivers/gpu/Makefile.
+# nova.o (rust-analyzer marker - DO NOT REMOVE).

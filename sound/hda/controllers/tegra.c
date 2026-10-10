@@ -374,7 +374,8 @@ static int hda_tegra_first_init(struct azx *chip, struct platform_device *pdev)
 	 * in powers of 2, next available ratio is 16 which can be
 	 * used as a limiting factor here.
 	 */
-	if (of_device_is_compatible(np, "nvidia,tegra30-hda"))
+	if (of_device_is_compatible(np, "nvidia,tegra30-hda") ||
+	    of_device_is_compatible(np, "nvidia,tegra194-hda"))
 		chip->bus.core.sdo_limit = 16;
 
 	/* codec detection */
@@ -592,30 +593,26 @@ static void hda_tegra_probe_work(struct work_struct *work)
 	struct platform_device *pdev = to_platform_device(hda->dev);
 	int err;
 
-	pm_runtime_get_sync(hda->dev);
+	guard(pm_runtime_active)(hda->dev);
 	err = hda_tegra_first_init(chip, pdev);
 	if (err < 0)
-		goto out_free;
+		return;
 
 	/* create codec instances */
 	err = azx_probe_codecs(chip, 8);
 	if (err < 0)
-		goto out_free;
+		return;
 
 	err = azx_codec_configure(chip);
 	if (err < 0)
-		goto out_free;
+		return;
 
 	err = snd_card_register(chip->card);
 	if (err < 0)
-		goto out_free;
+		return;
 
 	chip->running = 1;
 	snd_hda_set_power_save(&chip->bus, power_save * 1000);
-
- out_free:
-	pm_runtime_put(hda->dev);
-	return; /* no error return from async probe */
 }
 
 static void hda_tegra_remove(struct platform_device *pdev)

@@ -175,8 +175,8 @@ static int vimc_capture_enum_framesizes(struct file *file, void *priv,
 	if (fsize->index)
 		return -EINVAL;
 
-	/* Only accept code in the pix map table */
-	vpix = vimc_pix_map_by_code(fsize->pixel_format);
+	/* Only accept pixel_format in the pix map table */
+	vpix = vimc_pix_map_by_pixelformat(fsize->pixel_format);
 	if (!vpix)
 		return -EINVAL;
 
@@ -397,7 +397,7 @@ static struct vimc_ent_device *vimc_capture_add(struct vimc_device *vimc,
 	int ret;
 
 	/* Allocate the vimc_capture_device struct */
-	vcapture = kzalloc(sizeof(*vcapture), GFP_KERNEL);
+	vcapture = kzalloc_obj(*vcapture);
 	if (!vcapture)
 		return ERR_PTR(-ENOMEM);
 

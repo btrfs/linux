@@ -11,7 +11,6 @@
 #include <linux/interrupt.h>
 #include <linux/io.h>
 #include <linux/kfifo.h>
-#include <linux/mailbox_client.h>
 #include <linux/mailbox_controller.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
@@ -190,7 +189,7 @@ static int cv1800_mbox_probe(struct platform_device *pdev)
 					cv1800_mbox_isr, IRQF_ONESHOT,
 					dev_name(&pdev->dev), mb);
 	if (err < 0)
-		return dev_err_probe(dev, err, "Failed to register irq\n");
+		return err;
 
 	for (idx = 0; idx < MAILBOX_MAX_CHAN; idx++) {
 		mb->priv[idx].idx = idx;

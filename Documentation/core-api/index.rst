@@ -25,6 +25,7 @@ it.
    symbol-namespaces
    asm-annotations
    real-time/index
+   housekeeping.rst
 
 Data structures and low-level utilities
 =======================================
@@ -80,6 +81,7 @@ Documentation/locking/index.rst for more related documentation.
    padata
    ../RCU/index
    wrappers/memory-barriers.rst
+   SMP
 
 Low-level hardware management
 =============================
@@ -138,11 +140,5 @@ Documents that don't fit elsewhere or which have yet to be categorized.
    :maxdepth: 1
 
    librs
+   liveupdate
    netlink
-
-.. only:: subproject and html
-
-   Indices
-   =======
-
-   * :ref:`genindex`

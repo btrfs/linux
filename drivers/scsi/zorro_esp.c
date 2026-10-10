@@ -706,7 +706,7 @@ static const struct zorro_device_id zorro_esp_zorro_tbl[] = {
 		.id = ZORRO_ID(PHASE5, 0x19, 0),
 		.driver_data = ZORRO_CYBERII,
 	},
-	{ 0 }
+	{ }
 };
 MODULE_DEVICE_TABLE(zorro, zorro_esp_zorro_tbl);
 
@@ -726,7 +726,7 @@ static int zorro_esp_probe(struct zorro_dev *z,
 
 	pr_info("%s found at address 0x%lx.\n", zdd->name, board);
 
-	zep = kzalloc(sizeof(*zep), GFP_KERNEL);
+	zep = kzalloc_obj(*zep);
 	if (!zep) {
 		pr_err("Can't allocate device private data!\n");
 		return -ENOMEM;

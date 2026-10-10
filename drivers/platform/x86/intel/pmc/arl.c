@@ -281,6 +281,7 @@ static const struct pmc_reg_map arl_socs_reg_map = {
 	.etr3_offset = ETR3_OFFSET,
 	.pson_residency_offset = TGL_PSON_RESIDENCY_OFFSET,
 	.pson_residency_counter_step = TGL_PSON_RES_COUNTER_STEP,
+	.lpm_req_guid = SOCS_LPM_REQ_GUID,
 };
 
 static const struct pmc_bit_map arl_pchs_ltr_show_map[] = {
@@ -648,31 +649,31 @@ static const struct pmc_reg_map arl_pchs_reg_map = {
 	.lpm_num_maps = ADL_LPM_NUM_MAPS,
 	.lpm_reg_index = ARL_LPM_REG_INDEX,
 	.etr3_offset = ETR3_OFFSET,
+	.lpm_req_guid = PCHS_LPM_REQ_GUID,
 };
 
 static struct pmc_info arl_pmc_info_list[] = {
 	{
-		.guid	= IOEP_LPM_REQ_GUID,
 		.devid	= PMC_DEVID_ARL_IOEP,
 		.map	= &mtl_ioep_reg_map,
 	},
 	{
-		.guid	= SOCS_LPM_REQ_GUID,
 		.devid	= PMC_DEVID_ARL_SOCS,
 		.map	= &arl_socs_reg_map,
 	},
 	{
-		.guid	= PCHS_LPM_REQ_GUID,
 		.devid	= PMC_DEVID_ARL_PCHS,
 		.map	= &arl_pchs_reg_map,
 	},
 	{
-		.guid	= SOCM_LPM_REQ_GUID,
 		.devid	= PMC_DEVID_ARL_SOCM,
 		.map	= &mtl_socm_reg_map,
 	},
 	{}
 };
+
+static const u8 arl_pmc_list[] = {PMC_IDX_MAIN, PMC_IDX_IOE, PMC_IDX_PCH};
+static const u8 arl_h_pmc_list[] = {PMC_IDX_MAIN, PMC_IDX_IOE};
 
 #define ARL_NPU_PCI_DEV			0xad1d
 #define ARL_GNA_PCI_DEV			0xae4c
@@ -720,9 +721,11 @@ static int arl_h_core_init(struct pmc_dev *pmcdev, struct pmc_dev_info *pmc_dev_
 	return generic_core_init(pmcdev, pmc_dev_info);
 }
 
+static u32 ARL_PMT_DMU_GUIDS[] = {ARL_PMT_DMU_GUID, 0x0};
 struct pmc_dev_info arl_pmc_dev = {
-	.pci_func = 0,
-	.dmu_guid = ARL_PMT_DMU_GUID,
+	.dmu_guids = ARL_PMT_DMU_GUIDS,
+	.num_pmcs = ARRAY_SIZE(arl_pmc_list),
+	.pmc_list = arl_pmc_list,
 	.regmap_list = arl_pmc_info_list,
 	.map = &arl_socs_reg_map,
 	.sub_req_show = &pmc_core_substate_req_regs_fops,
@@ -730,11 +733,15 @@ struct pmc_dev_info arl_pmc_dev = {
 	.resume = arl_resume,
 	.init = arl_core_init,
 	.sub_req = pmc_core_pmt_get_lpm_req,
+	.ssram_hidden = true,
+	.die_c6_offset = MTL_PMT_DMU_DIE_C6_OFFSET,
 };
 
+static u32 ARL_H_PMT_DMU_GUIDS[] = {ARL_PMT_DMU_GUID, ARL_H_PMT_DMU_GUID, 0x0};
 struct pmc_dev_info arl_h_pmc_dev = {
-	.pci_func = 2,
-	.dmu_guid = ARL_PMT_DMU_GUID,
+	.dmu_guids = ARL_H_PMT_DMU_GUIDS,
+	.num_pmcs = ARRAY_SIZE(arl_h_pmc_list),
+	.pmc_list = arl_h_pmc_list,
 	.regmap_list = arl_pmc_info_list,
 	.map = &mtl_socm_reg_map,
 	.sub_req_show = &pmc_core_substate_req_regs_fops,
@@ -742,4 +749,6 @@ struct pmc_dev_info arl_h_pmc_dev = {
 	.resume = arl_h_resume,
 	.init = arl_h_core_init,
 	.sub_req = pmc_core_pmt_get_lpm_req,
+	.ssram_hidden = true,
+	.die_c6_offset = MTL_PMT_DMU_DIE_C6_OFFSET,
 };

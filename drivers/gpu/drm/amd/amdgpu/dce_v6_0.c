@@ -138,10 +138,10 @@ static u32 dce_v6_0_audio_endpt_rreg(struct amdgpu_device *adev,
 	unsigned long flags;
 	u32 r;
 
-	spin_lock_irqsave(&adev->audio_endpt_idx_lock, flags);
+	spin_lock_irqsave(&adev->reg.audio_endpt.lock, flags);
 	WREG32(mmAZALIA_F0_CODEC_ENDPOINT_INDEX + block_offset, reg);
 	r = RREG32(mmAZALIA_F0_CODEC_ENDPOINT_DATA + block_offset);
-	spin_unlock_irqrestore(&adev->audio_endpt_idx_lock, flags);
+	spin_unlock_irqrestore(&adev->reg.audio_endpt.lock, flags);
 
 	return r;
 }
@@ -151,11 +151,11 @@ static void dce_v6_0_audio_endpt_wreg(struct amdgpu_device *adev,
 {
 	unsigned long flags;
 
-	spin_lock_irqsave(&adev->audio_endpt_idx_lock, flags);
+	spin_lock_irqsave(&adev->reg.audio_endpt.lock, flags);
 	WREG32(mmAZALIA_F0_CODEC_ENDPOINT_INDEX + block_offset,
 		reg | AZALIA_F0_CODEC_ENDPOINT_INDEX__AZALIA_ENDPOINT_REG_WRITE_EN_MASK);
 	WREG32(mmAZALIA_F0_CODEC_ENDPOINT_DATA + block_offset, v);
-	spin_unlock_irqrestore(&adev->audio_endpt_idx_lock, flags);
+	spin_unlock_irqrestore(&adev->reg.audio_endpt.lock, flags);
 }
 
 static u32 dce_v6_0_vblank_get_counter(struct amdgpu_device *adev, int crtc)
@@ -376,35 +376,6 @@ static void dce_v6_0_hpd_fini(struct amdgpu_device *adev)
 static u32 dce_v6_0_hpd_get_gpio_reg(struct amdgpu_device *adev)
 {
 	return mmDC_GPIO_HPD_A;
-}
-
-static bool dce_v6_0_is_display_hung(struct amdgpu_device *adev)
-{
-	u32 crtc_hung = 0;
-	u32 crtc_status[6];
-	u32 i, j, tmp;
-
-	for (i = 0; i < adev->mode_info.num_crtc; i++) {
-		if (RREG32(mmCRTC_CONTROL + crtc_offsets[i]) & CRTC_CONTROL__CRTC_MASTER_EN_MASK) {
-			crtc_status[i] = RREG32(mmCRTC_STATUS_HV_COUNT + crtc_offsets[i]);
-			crtc_hung |= (1 << i);
-		}
-	}
-
-	for (j = 0; j < 10; j++) {
-		for (i = 0; i < adev->mode_info.num_crtc; i++) {
-			if (crtc_hung & (1 << i)) {
-				tmp = RREG32(mmCRTC_STATUS_HV_COUNT + crtc_offsets[i]);
-				if (tmp != crtc_status[i])
-					crtc_hung &= ~(1 << i);
-			}
-		}
-		if (crtc_hung == 0)
-			return false;
-		udelay(100);
-	}
-
-	return true;
 }
 
 static void dce_v6_0_set_vga_render_state(struct amdgpu_device *adev,
@@ -1265,7 +1236,7 @@ static void dce_v6_0_audio_write_speaker_allocation(struct drm_encoder *encoder)
 		return;
 	}
 
-	sad_count = drm_edid_to_speaker_allocation(amdgpu_connector->edid, &sadb);
+	sad_count = drm_edid_to_speaker_allocation(drm_edid_raw(amdgpu_connector->edid), &sadb);
 	if (sad_count < 0) {
 		DRM_ERROR("Couldn't read Speaker Allocation Data Block: %d\n", sad_count);
 		sad_count = 0;
@@ -1346,7 +1317,7 @@ static void dce_v6_0_audio_write_sad_regs(struct drm_encoder *encoder)
 		return;
 	}
 
-	sad_count = drm_edid_to_sad(amdgpu_connector->edid, &sads);
+	sad_count = drm_edid_to_sad(drm_edid_raw(amdgpu_connector->edid), &sads);
 	if (sad_count < 0)
 		DRM_ERROR("Couldn't read SADs: %d\n", sad_count);
 	if (sad_count <= 0)
@@ -1818,7 +1789,7 @@ static int dce_v6_0_afmt_init(struct amdgpu_device *adev)
 
 	/* DCE6 has audio blocks tied to DIG encoders */
 	for (i = 0; i < adev->mode_info.num_dig; i++) {
-		adev->mode_info.afmt[i] = kzalloc(sizeof(struct amdgpu_afmt), GFP_KERNEL);
+		adev->mode_info.afmt[i] = kzalloc_obj(struct amdgpu_afmt);
 		if (adev->mode_info.afmt[i]) {
 			adev->mode_info.afmt[i]->offset = dig_offsets[i];
 			adev->mode_info.afmt[i]->id = i;
@@ -1876,7 +1847,7 @@ static void dce_v6_0_grph_enable(struct drm_crtc *crtc, bool enable)
 
 static int dce_v6_0_crtc_do_set_base(struct drm_crtc *crtc,
 				     struct drm_framebuffer *fb,
-				     int x, int y, int atomic)
+				     int x, int y)
 {
 	struct amdgpu_crtc *amdgpu_crtc = to_amdgpu_crtc(crtc);
 	struct drm_device *dev = crtc->dev;
@@ -1892,15 +1863,12 @@ static int dce_v6_0_crtc_do_set_base(struct drm_crtc *crtc,
 	bool bypass_lut = false;
 
 	/* no fb bound */
-	if (!atomic && !crtc->primary->fb) {
+	if (!crtc->primary->fb) {
 		DRM_DEBUG_KMS("No FB bound\n");
 		return 0;
 	}
 
-	if (atomic)
-		target_fb = fb;
-	else
-		target_fb = crtc->primary->fb;
+	target_fb = crtc->primary->fb;
 
 	/* If atomic, assume fb object is pinned & idle & fenced and
 	 * just update base pointers
@@ -1911,13 +1879,11 @@ static int dce_v6_0_crtc_do_set_base(struct drm_crtc *crtc,
 	if (unlikely(r != 0))
 		return r;
 
-	if (!atomic) {
-		abo->flags |= AMDGPU_GEM_CREATE_VRAM_CONTIGUOUS;
-		r = amdgpu_bo_pin(abo, AMDGPU_GEM_DOMAIN_VRAM);
-		if (unlikely(r != 0)) {
-			amdgpu_bo_unreserve(abo);
-			return -EINVAL;
-		}
+	abo->flags |= AMDGPU_GEM_CREATE_VRAM_CONTIGUOUS;
+	r = amdgpu_bo_pin(abo, AMDGPU_GEM_DOMAIN_VRAM);
+	if (unlikely(r != 0)) {
+		amdgpu_bo_unreserve(abo);
+		return -EINVAL;
 	}
 	fb_location = amdgpu_bo_gpu_offset(abo);
 
@@ -2083,7 +2049,7 @@ static int dce_v6_0_crtc_do_set_base(struct drm_crtc *crtc,
 	/* set pageflip to happen anywhere in vblank interval */
 	WREG32(mmMASTER_UPDATE_MODE + amdgpu_crtc->crtc_offset, 0);
 
-	if (!atomic && fb && fb != crtc->primary->fb) {
+	if (fb && fb != crtc->primary->fb) {
 		abo = gem_to_amdgpu_bo(fb->obj[0]);
 		r = amdgpu_bo_reserve(abo, true);
 		if (unlikely(r != 0))
@@ -2578,7 +2544,7 @@ static int dce_v6_0_crtc_mode_set(struct drm_crtc *crtc,
 
 	amdgpu_atombios_crtc_set_pll(crtc, adjusted_mode);
 	amdgpu_atombios_crtc_set_dtd_timing(crtc, adjusted_mode);
-	dce_v6_0_crtc_do_set_base(crtc, old_fb, x, y, 0);
+	dce_v6_0_crtc_do_set_base(crtc, old_fb, x, y);
 	amdgpu_atombios_crtc_overscan_setup(crtc, mode, adjusted_mode);
 	amdgpu_atombios_crtc_scaler_setup(crtc);
 	dce_v6_0_cursor_reset(crtc);
@@ -2626,14 +2592,7 @@ static bool dce_v6_0_crtc_mode_fixup(struct drm_crtc *crtc,
 static int dce_v6_0_crtc_set_base(struct drm_crtc *crtc, int x, int y,
 				  struct drm_framebuffer *old_fb)
 {
-	return dce_v6_0_crtc_do_set_base(crtc, old_fb, x, y, 0);
-}
-
-static int dce_v6_0_crtc_set_base_atomic(struct drm_crtc *crtc,
-					 struct drm_framebuffer *fb,
-					 int x, int y, enum mode_set_atomic state)
-{
-	return dce_v6_0_crtc_do_set_base(crtc, fb, x, y, 1);
+	return dce_v6_0_crtc_do_set_base(crtc, old_fb, x, y);
 }
 
 static const struct drm_crtc_helper_funcs dce_v6_0_crtc_helper_funcs = {
@@ -2641,7 +2600,6 @@ static const struct drm_crtc_helper_funcs dce_v6_0_crtc_helper_funcs = {
 	.mode_fixup = dce_v6_0_crtc_mode_fixup,
 	.mode_set = dce_v6_0_crtc_mode_set,
 	.mode_set_base = dce_v6_0_crtc_set_base,
-	.mode_set_base_atomic = dce_v6_0_crtc_set_base_atomic,
 	.prepare = dce_v6_0_crtc_prepare,
 	.commit = dce_v6_0_crtc_commit,
 	.disable = dce_v6_0_crtc_disable,
@@ -2710,8 +2668,8 @@ static int dce_v6_0_early_init(struct amdgpu_ip_block *ip_block)
 {
 	struct amdgpu_device *adev = ip_block->adev;
 
-	adev->audio_endpt_rreg = &dce_v6_0_audio_endpt_rreg;
-	adev->audio_endpt_wreg = &dce_v6_0_audio_endpt_wreg;
+	adev->reg.audio_endpt.rreg = &dce_v6_0_audio_endpt_rreg;
+	adev->reg.audio_endpt.wreg = &dce_v6_0_audio_endpt_wreg;
 
 	dce_v6_0_set_display_funcs(adev);
 
@@ -2912,33 +2870,6 @@ static int dce_v6_0_resume(struct amdgpu_ip_block *ip_block)
 static bool dce_v6_0_is_idle(struct amdgpu_ip_block *ip_block)
 {
 	return true;
-}
-
-static int dce_v6_0_soft_reset(struct amdgpu_ip_block *ip_block)
-{
-	u32 srbm_soft_reset = 0, tmp;
-	struct amdgpu_device *adev = ip_block->adev;
-
-	if (dce_v6_0_is_display_hung(adev))
-		srbm_soft_reset |= SRBM_SOFT_RESET__SOFT_RESET_DC_MASK;
-
-	if (srbm_soft_reset) {
-		tmp = RREG32(mmSRBM_SOFT_RESET);
-		tmp |= srbm_soft_reset;
-		dev_info(adev->dev, "SRBM_SOFT_RESET=0x%08X\n", tmp);
-		WREG32(mmSRBM_SOFT_RESET, tmp);
-		tmp = RREG32(mmSRBM_SOFT_RESET);
-
-		udelay(50);
-
-		tmp &= ~srbm_soft_reset;
-		WREG32(mmSRBM_SOFT_RESET, tmp);
-		tmp = RREG32(mmSRBM_SOFT_RESET);
-
-		/* Wait a little for things to settle down */
-		udelay(50);
-	}
-	return 0;
 }
 
 static void dce_v6_0_set_crtc_vblank_interrupt_state(struct amdgpu_device *adev,
@@ -3237,7 +3168,6 @@ static const struct amd_ip_funcs dce_v6_0_ip_funcs = {
 	.suspend = dce_v6_0_suspend,
 	.resume = dce_v6_0_resume,
 	.is_idle = dce_v6_0_is_idle,
-	.soft_reset = dce_v6_0_soft_reset,
 	.set_clockgating_state = dce_v6_0_set_clockgating_state,
 	.set_powergating_state = dce_v6_0_set_powergating_state,
 };
@@ -3426,7 +3356,7 @@ static void dce_v6_0_encoder_add(struct amdgpu_device *adev,
 	}
 
 	/* add a new one */
-	amdgpu_encoder = kzalloc(sizeof(struct amdgpu_encoder), GFP_KERNEL);
+	amdgpu_encoder = kzalloc_obj(struct amdgpu_encoder);
 	if (!amdgpu_encoder)
 		return;
 

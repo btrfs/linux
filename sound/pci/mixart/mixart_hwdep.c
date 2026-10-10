@@ -135,9 +135,9 @@ static int mixart_enum_connectors(struct mixart_mgr *mgr)
 	struct mixart_audio_info_req  *audio_info_req;
 	struct mixart_audio_info_resp *audio_info;
 
-	connector = kmalloc(sizeof(*connector), GFP_KERNEL);
-	audio_info_req = kmalloc(sizeof(*audio_info_req), GFP_KERNEL);
-	audio_info = kmalloc(sizeof(*audio_info), GFP_KERNEL);
+	connector = kmalloc_obj(*connector);
+	audio_info_req = kmalloc_obj(*audio_info_req);
+	audio_info = kmalloc_obj(*audio_info);
 	if (! connector || ! audio_info_req || ! audio_info) {
 		err = -ENOMEM;
 		goto __error;
@@ -560,12 +560,11 @@ int snd_mixart_setup_firmware(struct mixart_mgr *mgr)
 		"miXart8.xlx", "miXart8.elf", "miXart8AES.xlx"
 	};
 	char path[32];
-
-	const struct firmware *fw_entry;
 	int i, err;
 
 	for (i = 0; i < 3; i++) {
 		sprintf(path, "mixart/%s", fw_files[i]);
+		const struct firmware *fw_entry __free(firmware) = NULL;
 		if (request_firmware(&fw_entry, path, &mgr->pci->dev)) {
 			dev_err(&mgr->pci->dev,
 				"miXart: can't load firmware %s\n", path);
@@ -573,7 +572,6 @@ int snd_mixart_setup_firmware(struct mixart_mgr *mgr)
 		}
 		/* fake hwdep dsp record */
 		err = mixart_dsp_load(mgr, i, fw_entry);
-		release_firmware(fw_entry);
 		if (err < 0)
 			return err;
 		mgr->dsp_loaded |= 1 << i;

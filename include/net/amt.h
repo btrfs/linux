@@ -231,10 +231,6 @@ struct amt_relay_headers {
 	};
 } __packed;
 
-struct amt_skb_cb {
-	struct amt_tunnel_list *tunnel;
-};
-
 struct amt_tunnel_list {
 	struct list_head	list;
 	/* Protect All resources under an amt_tunne_list */
@@ -331,7 +327,7 @@ struct amt_dev {
 	enum amt_status		status;
 	/* Generated key */
 	siphash_key_t		key;
-	struct socket	  __rcu *sock;
+	struct sock	  __rcu *sk;
 	u32			max_groups;
 	u32			max_sources;
 	u32			hash_buckets;

@@ -502,7 +502,7 @@ static struct afs_super_info *afs_alloc_sbi(struct fs_context *fc)
 	struct afs_fs_context *ctx = fc->fs_private;
 	struct afs_super_info *as;
 
-	as = kzalloc(sizeof(struct afs_super_info), GFP_KERNEL);
+	as = kzalloc_obj(struct afs_super_info);
 	if (as) {
 		as->net_ns = get_net(fc->net_ns);
 		as->flock_mode = ctx->flock_mode;
@@ -587,7 +587,8 @@ static int afs_get_tree(struct fs_context *fc)
 	}
 
 	fc->root = dget(sb->s_root);
-	trace_afs_get_tree(as->cell, as->volume);
+	if (!ctx->dyn_root)
+		trace_afs_get_tree(as->cell, as->volume);
 	_leave(" = 0 [%p]", sb);
 	return 0;
 
@@ -623,7 +624,7 @@ static int afs_init_fs_context(struct fs_context *fc)
 	struct afs_fs_context *ctx;
 	struct afs_cell *cell;
 
-	ctx = kzalloc(sizeof(struct afs_fs_context), GFP_KERNEL);
+	ctx = kzalloc_obj(struct afs_fs_context);
 	if (!ctx)
 		return -ENOMEM;
 
@@ -659,7 +660,6 @@ static void afs_i_init_once(void *_vnode)
 	INIT_LIST_HEAD(&vnode->wb_keys);
 	INIT_LIST_HEAD(&vnode->pending_locks);
 	INIT_LIST_HEAD(&vnode->granted_locks);
-	INIT_DELAYED_WORK(&vnode->lock_work, afs_lock_work);
 	INIT_LIST_HEAD(&vnode->cb_mmap_link);
 	seqlock_init(&vnode->cb_lock);
 }
@@ -693,6 +693,7 @@ static struct inode *afs_alloc_inode(struct super_block *sb)
 
 	init_rwsem(&vnode->rmdir_lock);
 	INIT_WORK(&vnode->cb_work, afs_invalidate_mmap_work);
+	INIT_DELAYED_WORK(&vnode->lock_work, afs_lock_work);
 
 	_leave(" = %p", &vnode->netfs.inode);
 	return &vnode->netfs.inode;

@@ -258,8 +258,7 @@ static int aml_spisg_setup_transfer(struct spisg_device *spisg,
 	int ret;
 
 	memset(desc, 0, sizeof(*desc));
-	if (exdesc)
-		memset(exdesc, 0, sizeof(*exdesc));
+	memset(exdesc, 0, sizeof(*exdesc));
 	aml_spisg_set_speed(spisg, xfer->speed_hz);
 	xfer->effective_speed_hz = spisg->effective_speed_hz;
 
@@ -601,14 +600,11 @@ static int aml_spisg_prepare_message(struct spi_controller *ctlr,
 
 	spisg->bytes_per_word = spi->bits_per_word >> 3;
 
-	spisg->cfg_spi &= ~CFG_SLAVE_SELECT;
-	spisg->cfg_spi |= FIELD_PREP(CFG_SLAVE_SELECT, spi_get_chipselect(spi, 0));
-
-	spisg->cfg_bus &= ~(CFG_CPOL | CFG_CPHA | CFG_B_L_ENDIAN | CFG_HALF_DUPLEX);
-	spisg->cfg_bus |= FIELD_PREP(CFG_CPOL, !!(spi->mode & SPI_CPOL)) |
-			  FIELD_PREP(CFG_CPHA, !!(spi->mode & SPI_CPHA)) |
-			  FIELD_PREP(CFG_B_L_ENDIAN, !!(spi->mode & SPI_LSB_FIRST)) |
-			  FIELD_PREP(CFG_HALF_DUPLEX, !!(spi->mode & SPI_3WIRE));
+	FIELD_MODIFY(CFG_SLAVE_SELECT, &spisg->cfg_spi, spi_get_chipselect(spi, 0));
+	FIELD_MODIFY(CFG_CPOL, &spisg->cfg_bus, !!(spi->mode & SPI_CPOL));
+	FIELD_MODIFY(CFG_CPHA, &spisg->cfg_bus, !!(spi->mode & SPI_CPHA));
+	FIELD_MODIFY(CFG_B_L_ENDIAN, &spisg->cfg_bus, !!(spi->mode & SPI_LSB_FIRST));
+	FIELD_MODIFY(CFG_HALF_DUPLEX, &spisg->cfg_bus, !!(spi->mode & SPI_3WIRE));
 
 	return 0;
 }
@@ -640,20 +636,20 @@ static int aml_spisg_target_abort(struct spi_controller *ctlr)
 static int aml_spisg_clk_init(struct spisg_device *spisg, void __iomem *base)
 {
 	struct device *dev = &spisg->pdev->dev;
-	struct clk_init_data init;
+	struct clk_init_data init = {};
 	struct clk_divider *div;
 	struct clk_div_table *tbl;
 	char name[32];
 	int ret, i;
 
 	spisg->core = devm_clk_get_enabled(dev, "core");
-	if (IS_ERR_OR_NULL(spisg->core)) {
+	if (IS_ERR(spisg->core)) {
 		dev_err(dev, "core clock request failed\n");
 		return PTR_ERR(spisg->core);
 	}
 
 	spisg->pclk = devm_clk_get_enabled(dev, "pclk");
-	if (IS_ERR_OR_NULL(spisg->pclk)) {
+	if (IS_ERR(spisg->pclk)) {
 		dev_err(dev, "pclk clock request failed\n");
 		return PTR_ERR(spisg->pclk);
 	}
@@ -703,7 +699,7 @@ static int aml_spisg_clk_init(struct spisg_device *spisg, void __iomem *base)
 	}
 
 	spisg->sclk = devm_clk_hw_get_clk(dev, &div->hw, NULL);
-	if (IS_ERR_OR_NULL(spisg->sclk)) {
+	if (IS_ERR(spisg->sclk)) {
 		dev_err(dev, "get clock failed\n");
 		return PTR_ERR(spisg->sclk);
 	}
@@ -729,9 +725,9 @@ static int aml_spisg_probe(struct platform_device *pdev)
 	};
 
 	if (of_property_read_bool(dev->of_node, "spi-slave"))
-		ctlr = spi_alloc_target(dev, sizeof(*spisg));
+		ctlr = devm_spi_alloc_target(dev, sizeof(*spisg));
 	else
-		ctlr = spi_alloc_host(dev, sizeof(*spisg));
+		ctlr = devm_spi_alloc_host(dev, sizeof(*spisg));
 	if (!ctlr)
 		return -ENOMEM;
 
@@ -750,10 +746,8 @@ static int aml_spisg_probe(struct platform_device *pdev)
 		return dev_err_probe(dev, PTR_ERR(spisg->map), "regmap init failed\n");
 
 	irq = platform_get_irq(pdev, 0);
-	if (irq < 0) {
-		ret = irq;
-		goto out_controller;
-	}
+	if (irq < 0)
+		return irq;
 
 	ret = device_reset_optional(dev);
 	if (ret)
@@ -781,7 +775,6 @@ static int aml_spisg_probe(struct platform_device *pdev)
 	pm_runtime_resume_and_get(&spisg->pdev->dev);
 
 	ctlr->num_chipselect = 4;
-	ctlr->dev.of_node = pdev->dev.of_node;
 	ctlr->mode_bits = SPI_CPHA | SPI_CPOL | SPI_LSB_FIRST |
 			  SPI_3WIRE | SPI_TX_QUAD | SPI_RX_QUAD;
 	ctlr->max_speed_hz = 1000 * 1000 * 100;
@@ -797,19 +790,18 @@ static int aml_spisg_probe(struct platform_device *pdev)
 
 	dma_set_max_seg_size(&pdev->dev, SPISG_BLOCK_MAX);
 
+	init_completion(&spisg->completion);
 	ret = devm_request_irq(&pdev->dev, irq, aml_spisg_irq, 0, NULL, spisg);
 	if (ret) {
 		dev_err(&pdev->dev, "irq request failed\n");
 		goto out_clk;
 	}
 
-	ret = devm_spi_register_controller(dev, ctlr);
+	ret = spi_register_controller(ctlr);
 	if (ret) {
 		dev_err(&pdev->dev, "spi controller registration failed\n");
 		goto out_clk;
 	}
-
-	init_completion(&spisg->completion);
 
 	pm_runtime_put(&spisg->pdev->dev);
 
@@ -818,8 +810,6 @@ out_clk:
 	if (spisg->core)
 		clk_disable_unprepare(spisg->core);
 	clk_disable_unprepare(spisg->pclk);
-out_controller:
-	spi_controller_put(ctlr);
 
 	return ret;
 }
@@ -827,6 +817,8 @@ out_controller:
 static void aml_spisg_remove(struct platform_device *pdev)
 {
 	struct spisg_device *spisg = platform_get_drvdata(pdev);
+
+	spi_unregister_controller(spisg->controller);
 
 	if (!pm_runtime_suspended(&pdev->dev)) {
 		pinctrl_pm_select_sleep_state(&spisg->pdev->dev);

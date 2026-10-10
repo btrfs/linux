@@ -153,7 +153,7 @@ static int clk_cpu_on_set_rate(struct clk_hw *hwclk, unsigned long rate,
 static int clk_cpu_set_rate(struct clk_hw *hwclk, unsigned long rate,
 			    unsigned long parent_rate)
 {
-	if (__clk_is_enabled(hwclk->clk))
+	if (clk_hw_is_enabled(hwclk))
 		return clk_cpu_on_set_rate(hwclk, rate, parent_rate);
 	else
 		return clk_cpu_off_set_rate(hwclk, rate, parent_rate);
@@ -183,11 +183,11 @@ static void __init of_cpu_clk_setup(struct device_node *node)
 		pr_warn("%s: pmu-dfs base register not set, dynamic frequency scaling not available\n",
 			__func__);
 
-	cpuclk = kcalloc(ncpus, sizeof(*cpuclk), GFP_KERNEL);
+	cpuclk = kzalloc_objs(*cpuclk, ncpus);
 	if (WARN_ON(!cpuclk))
 		goto cpuclk_out;
 
-	clks = kcalloc(ncpus, sizeof(*clks), GFP_KERNEL);
+	clks = kzalloc_objs(*clks, ncpus);
 	if (WARN_ON(!clks))
 		goto clks_out;
 

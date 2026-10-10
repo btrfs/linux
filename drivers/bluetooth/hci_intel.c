@@ -126,7 +126,6 @@ static int intel_wait_booting(struct hci_uart *hu)
 	return err;
 }
 
-#ifdef CONFIG_PM
 static int intel_wait_lpm_transaction(struct hci_uart *hu)
 {
 	struct intel_data *intel = hu->priv;
@@ -237,7 +236,6 @@ static int intel_lpm_resume(struct hci_uart *hu)
 
 	return 0;
 }
-#endif /* CONFIG_PM */
 
 static int intel_lpm_host_wake(struct hci_uart *hu)
 {
@@ -280,7 +278,6 @@ static irqreturn_t intel_irq(int irq, void *dev_id)
 
 	/* Host/Controller are now LPM resumed, trigger a new delayed suspend */
 	pm_runtime_get(&idev->pdev->dev);
-	pm_runtime_mark_last_busy(&idev->pdev->dev);
 	pm_runtime_put_autosuspend(&idev->pdev->dev);
 
 	return IRQ_HANDLED;
@@ -348,6 +345,7 @@ static int intel_set_power(struct hci_uart *hu, bool powered)
 			devm_free_irq(&idev->pdev->dev, idev->irq, idev);
 			device_wakeup_disable(&idev->pdev->dev);
 
+			pm_runtime_dont_use_autosuspend(&idev->pdev->dev);
 			pm_runtime_disable(&idev->pdev->dev);
 		}
 	}
@@ -371,7 +369,6 @@ static void intel_busy_work(struct work_struct *work)
 	list_for_each_entry(idev, &intel_device_list, list) {
 		if (intel->hu->tty->dev->parent == idev->pdev->dev.parent) {
 			pm_runtime_get(&idev->pdev->dev);
-			pm_runtime_mark_last_busy(&idev->pdev->dev);
 			pm_runtime_put_autosuspend(&idev->pdev->dev);
 			break;
 		}
@@ -388,7 +385,7 @@ static int intel_open(struct hci_uart *hu)
 	if (!hci_uart_has_flow_control(hu))
 		return -EOPNOTSUPP;
 
-	intel = kzalloc(sizeof(*intel), GFP_KERNEL);
+	intel = kzalloc_obj(*intel);
 	if (!intel)
 		return -ENOMEM;
 
@@ -1003,7 +1000,6 @@ static int intel_enqueue(struct hci_uart *hu, struct sk_buff *skb)
 	list_for_each_entry(idev, &intel_device_list, list) {
 		if (hu->tty->dev->parent == idev->pdev->dev.parent) {
 			pm_runtime_get_sync(&idev->pdev->dev);
-			pm_runtime_mark_last_busy(&idev->pdev->dev);
 			pm_runtime_put_autosuspend(&idev->pdev->dev);
 			break;
 		}
@@ -1062,14 +1058,13 @@ static const struct hci_uart_proto intel_proto = {
 
 #ifdef CONFIG_ACPI
 static const struct acpi_device_id intel_acpi_match[] = {
-	{ "INT33E1", 0 },
-	{ "INT33E3", 0 },
+	{ .id = "INT33E1" },
+	{ .id = "INT33E3" },
 	{ }
 };
 MODULE_DEVICE_TABLE(acpi, intel_acpi_match);
 #endif
 
-#ifdef CONFIG_PM
 static int intel_suspend_device(struct device *dev)
 {
 	struct intel_device *idev = dev_get_drvdata(dev);
@@ -1093,10 +1088,8 @@ static int intel_resume_device(struct device *dev)
 
 	return 0;
 }
-#endif
 
-#ifdef CONFIG_PM_SLEEP
-static int intel_suspend(struct device *dev)
+static int __maybe_unused intel_suspend(struct device *dev)
 {
 	struct intel_device *idev = dev_get_drvdata(dev);
 
@@ -1106,7 +1099,7 @@ static int intel_suspend(struct device *dev)
 	return intel_suspend_device(dev);
 }
 
-static int intel_resume(struct device *dev)
+static int __maybe_unused intel_resume(struct device *dev)
 {
 	struct intel_device *idev = dev_get_drvdata(dev);
 
@@ -1115,7 +1108,6 @@ static int intel_resume(struct device *dev)
 
 	return intel_resume_device(dev);
 }
-#endif
 
 static const struct dev_pm_ops intel_pm_ops = {
 	SET_SYSTEM_SLEEP_PM_OPS(intel_suspend, intel_resume)

@@ -5,7 +5,7 @@
 #include <bpf/bpf_helpers.h>
 #include "bpf_misc.h"
 #include "bpf_experimental.h"
-#include "bpf_arena_common.h"
+#include <bpf_arena_common.h>
 
 struct arr_elem {
 	struct bpf_res_spin_lock lock;
@@ -42,6 +42,10 @@ int size;
 u64 fault_addr;
 void *arena_ptr;
 
+#define private(name) SEC(".bss." #name) __hidden __attribute__((aligned(8)))
+
+private(STREAM) struct bpf_spin_lock block;
+
 SEC("syscall")
 __success __retval(0)
 int stream_exhaust(void *ctx)
@@ -60,6 +64,8 @@ SEC("syscall")
 __arch_x86_64
 __arch_arm64
 __arch_s390x
+__arch_riscv64
+__arch_loongarch
 __success __retval(0)
 __stderr("ERROR: Timeout detected for may_goto instruction")
 __stderr("CPU: {{[0-9]+}} UID: 0 PID: {{[0-9]+}} Comm: {{.*}}")
@@ -180,6 +186,151 @@ int stream_arena_read_fault(void *ctx)
 	return 0;
 }
 
+SEC("syscall")
+__arch_x86_64
+__arch_arm64
+__success __retval(0)
+__stderr("ERROR: Arena READ access at unmapped address 0x{{.*}}")
+__stderr("CPU: {{[0-9]+}} UID: 0 PID: {{[0-9]+}} Comm: {{.*}}")
+__stderr("Call trace:\n"
+"{{([a-zA-Z_][a-zA-Z0-9_]*\\+0x[0-9a-fA-F]+/0x[0-9a-fA-F]+\n"
+"|[ \t]+[^\n]+\n)*}}")
+int stream_arena_load_acquire_fault(void *ctx)
+{
+	static const struct bpf_insn load_acquire_insn = {
+		.code	 = 0xc3,	/* BPF_STX | BPF_ATOMIC | BPF_W */
+		.dst_reg = 0,		/* BPF_REG_0 */
+		.src_reg = 1,		/* BPF_REG_1 */
+		.off	 = 0x7fff,
+		.imm	 = 0x100,	/* BPF_LOAD_ACQ */
+	};
+	struct bpf_arena *ptr = (void *)&arena;
+	u64 user_vm_start, val;
+
+	/*
+	 * Prevent GCC bounds warning: casting &arena to struct bpf_arena *
+	 * triggers bounds checking since the map definition is smaller than
+	 * struct bpf_arena. barrier_var() makes the pointer opaque to GCC,
+	 * preventing the bounds analysis.
+	 */
+	barrier_var(ptr);
+	user_vm_start = ptr->user_vm_start;
+	fault_addr = user_vm_start + 0x7fff;
+	bpf_addr_space_cast(user_vm_start, 0, 1);
+	asm volatile (
+		"r1 = %[user_vm_start];"
+		"r0 = 1;"
+		".8byte %[load_acquire_insn];" /* r0 = load_acquire((u32 *)(r1 + 0x7fff)) */
+		"%[val] = r0;"
+		: [val] "=r" (val)
+		: [user_vm_start] "r" (user_vm_start),
+		  __imm_insn(load_acquire_insn, load_acquire_insn)
+		: "r0", "r1"
+	);
+	return val;
+}
+
+SEC("syscall")
+__arch_x86_64
+__arch_arm64
+__success __retval(0)
+__stderr("ERROR: Arena WRITE access at unmapped address 0x{{.*}}")
+__stderr("CPU: {{[0-9]+}} UID: 0 PID: {{[0-9]+}} Comm: {{.*}}")
+__stderr("Call trace:\n"
+"{{([a-zA-Z_][a-zA-Z0-9_]*\\+0x[0-9a-fA-F]+/0x[0-9a-fA-F]+\n"
+"|[ \t]+[^\n]+\n)*}}")
+int stream_arena_xchg_fault(void *ctx)
+{
+	static const struct bpf_insn xchg_insn = {
+		.code	 = 0xc3,	/* BPF_STX | BPF_ATOMIC | BPF_W */
+		.dst_reg = 1,		/* BPF_REG_1 */
+		.src_reg = 2,		/* BPF_REG_2 */
+		.off	 = 0x7fff,
+		.imm	 = 0xe1,	/* BPF_XCHG */
+	};
+	struct bpf_arena *ptr = (void *)&arena;
+	u64 user_vm_start, val;
+
+	/*
+	 * Prevent GCC bounds warning: casting &arena to struct bpf_arena *
+	 * triggers bounds checking since the map definition is smaller than
+	 * struct bpf_arena. barrier_var() makes the pointer opaque to GCC,
+	 * preventing the bounds analysis.
+	 */
+	barrier_var(ptr);
+	user_vm_start = ptr->user_vm_start;
+	fault_addr = user_vm_start + 0x7fff;
+	bpf_addr_space_cast(user_vm_start, 0, 1);
+	/*
+	 * A read-modify-write carrying BPF_FETCH writes to memory, so the fault
+	 * has to be reported as a WRITE from the dst_reg address, but it also
+	 * reads the old value into src_reg, so the exception handler has to
+	 * clear src_reg. Poison it up front, the returned value must be 0.
+	 */
+	asm volatile (
+		"r1 = %[user_vm_start];"
+		"r2 = 1;"
+		".8byte %[xchg_insn];" /* r2 = xchg((u32 *)(r1 + 0x7fff), r2) */
+		"%[val] = r2;"
+		: [val] "=r" (val)
+		: [user_vm_start] "r" (user_vm_start),
+		  __imm_insn(xchg_insn, xchg_insn)
+		: "r1", "r2"
+	);
+	return val;
+}
+
+SEC("syscall")
+__arch_x86_64
+__arch_arm64
+__success __retval(0)
+__stderr("ERROR: Arena WRITE access at unmapped address 0x{{.*}}")
+__stderr("CPU: {{[0-9]+}} UID: 0 PID: {{[0-9]+}} Comm: {{.*}}")
+__stderr("Call trace:\n"
+"{{([a-zA-Z_][a-zA-Z0-9_]*\\+0x[0-9a-fA-F]+/0x[0-9a-fA-F]+\n"
+"|[ \t]+[^\n]+\n)*}}")
+int stream_arena_cmpxchg_fault(void *ctx)
+{
+	static const struct bpf_insn cmpxchg_insn = {
+		.code	 = 0xc3,	/* BPF_STX | BPF_ATOMIC | BPF_W */
+		.dst_reg = 1,		/* BPF_REG_1 */
+		.src_reg = 2,		/* BPF_REG_2 */
+		.off	 = 0x7fff,
+		.imm	 = 0xf1,	/* BPF_CMPXCHG */
+	};
+	struct bpf_arena *ptr = (void *)&arena;
+	u64 user_vm_start, val;
+
+	/*
+	 * Prevent GCC bounds warning: casting &arena to struct bpf_arena *
+	 * triggers bounds checking since the map definition is smaller than
+	 * struct bpf_arena. barrier_var() makes the pointer opaque to GCC,
+	 * preventing the bounds analysis.
+	 */
+	barrier_var(ptr);
+	user_vm_start = ptr->user_vm_start;
+	fault_addr = user_vm_start + 0x7fff;
+	bpf_addr_space_cast(user_vm_start, 0, 1);
+	/*
+	 * Same as the exchange above, except that a BPF_CMPXCHG reads the old
+	 * value into r0 rather than into src_reg, so r0 is the register the
+	 * exception handler has to clear. It doubles as the compare value, but
+	 * the comparison never happens since the access faults first.
+	 */
+	asm volatile (
+		"r1 = %[user_vm_start];"
+		"r0 = 1;"
+		"r2 = 2;"
+		".8byte %[cmpxchg_insn];" /* r0 = cmpxchg((u32 *)(r1 + 0x7fff), r0, r2) */
+		"%[val] = r0;"
+		: [val] "=r" (val)
+		: [user_vm_start] "r" (user_vm_start),
+		  __imm_insn(cmpxchg_insn, cmpxchg_insn)
+		: "r0", "r1", "r2"
+	);
+	return val;
+}
+
 static __noinline void subprog(void)
 {
 	int __arena *addr = (int __arena *)0xdeadbeef;
@@ -233,5 +384,54 @@ int stream_arena_callback_fault(void *ctx)
 	bpf_timer_start(arr_timer, 0, 0);
 	return 0;
 }
+
+SEC("syscall")
+__arch_x86_64
+__arch_arm64
+__success __retval(0)
+__stderr("CPU: {{[0-9]+}} UID: 0 PID: {{[0-9]+}} Comm: {{.*}}")
+__stderr("Call trace:\n"
+"{{([a-zA-Z_][a-zA-Z0-9_]*\\+0x[0-9a-fA-F]+/0x[0-9a-fA-F]+\n"
+"|[ \t]+[^\n]+\n)*}}")
+int stream_print_stack_kfunc(void *ctx)
+{
+	return bpf_stream_print_stack(BPF_STDERR);
+}
+
+SEC("syscall")
+__success __retval(-2)
+int stream_print_stack_invalid_id(void *ctx)
+{
+	/* Try to pass an invalid stream ID. */
+	return bpf_stream_print_stack((enum bpf_stream_id)0xbadcafe);
+}
+
+SEC("syscall")
+__arch_x86_64
+__arch_arm64
+__success __retval(0)
+__stdout(_STR)
+__stderr("CPU: {{[0-9]+}} UID: 0 PID: {{[0-9]+}} Comm: {{.*}}")
+__stderr("Call trace:\n"
+"{{([a-zA-Z_][a-zA-Z0-9_]*\\+0x[0-9a-fA-F]+/0x[0-9a-fA-F]+\n"
+"|[ \t]+[^\n]+\n)*}}")
+int stream_print_kfuncs_locked(void *ctx)
+{
+	int ret;
+
+	bpf_spin_lock(&block);
+
+	ret = bpf_stream_printk(BPF_STDOUT, _STR);
+	if (ret)
+		goto out;
+
+	ret = bpf_stream_print_stack(BPF_STDERR);
+
+out:
+	bpf_spin_unlock(&block);
+
+	return ret;
+}
+
 
 char _license[] SEC("license") = "GPL";

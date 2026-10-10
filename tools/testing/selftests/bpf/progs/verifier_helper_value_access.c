@@ -91,7 +91,7 @@ l0_%=:	exit;						\
 
 /* Call a function taking a pointer and a size which doesn't allow the size to
  * be zero (i.e. bpf_trace_printk() declares the second argument to be
- * ARG_CONST_SIZE, not ARG_CONST_SIZE_OR_ZERO). We attempt to pass zero for the
+ * ARG_MEM_SIZE, not ARG_MEM_SIZE_OR_ZERO). We attempt to pass zero for the
  * size and expect to fail.
  */
 SEC("tracepoint")
@@ -1100,7 +1100,7 @@ l0_%=:	exit;						\
 
 SEC("tracepoint")
 __description("map helper access to adjusted map (via const imm): out-of-bound 2")
-__failure __msg("invalid access to map value, value_size=16 off=-4 size=8")
+__failure __msg("R2 min value is negative")
 __naked void imm_out_of_bound_2(void)
 {
 	asm volatile ("					\
@@ -1176,7 +1176,7 @@ l0_%=:	exit;						\
 
 SEC("tracepoint")
 __description("map helper access to adjusted map (via const reg): out-of-bound 2")
-__failure __msg("invalid access to map value, value_size=16 off=-4 size=8")
+__failure __msg("R2 min value is negative")
 __naked void reg_out_of_bound_2(void)
 {
 	asm volatile ("					\

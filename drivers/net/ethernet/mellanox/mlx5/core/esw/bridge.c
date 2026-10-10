@@ -586,7 +586,7 @@ mlx5_esw_bridge_ingress_flow_with_esw_create(u16 vport_num, const unsigned char 
 	struct mlx5_flow_handle *handle;
 	u8 *smac_v, *smac_c;
 
-	rule_spec = kvzalloc(sizeof(*rule_spec), GFP_KERNEL);
+	rule_spec = kvzalloc_obj(*rule_spec);
 	if (!rule_spec)
 		return ERR_PTR(-ENOMEM);
 
@@ -700,7 +700,7 @@ mlx5_esw_bridge_ingress_filter_flow_create(u16 vport_num, const unsigned char *a
 	struct mlx5_flow_handle *handle;
 	u8 *smac_v, *smac_c;
 
-	rule_spec = kvzalloc(sizeof(*rule_spec), GFP_KERNEL);
+	rule_spec = kvzalloc_obj(*rule_spec);
 	if (!rule_spec)
 		return ERR_PTR(-ENOMEM);
 
@@ -753,7 +753,7 @@ mlx5_esw_bridge_egress_flow_create(u16 vport_num, u16 esw_owner_vhca_id, const u
 	struct mlx5_flow_handle *handle;
 	u8 *dmac_v, *dmac_c;
 
-	rule_spec = kvzalloc(sizeof(*rule_spec), GFP_KERNEL);
+	rule_spec = kvzalloc_obj(*rule_spec);
 	if (!rule_spec)
 		return ERR_PTR(-ENOMEM);
 
@@ -821,7 +821,7 @@ mlx5_esw_bridge_egress_miss_flow_create(struct mlx5_flow_table *egress_ft,
 	struct mlx5_flow_spec *rule_spec;
 	struct mlx5_flow_handle *handle;
 
-	rule_spec = kvzalloc(sizeof(*rule_spec), GFP_KERNEL);
+	rule_spec = kvzalloc_obj(*rule_spec);
 	if (!rule_spec)
 		return ERR_PTR(-ENOMEM);
 
@@ -844,7 +844,7 @@ static struct mlx5_esw_bridge *mlx5_esw_bridge_create(struct net_device *br_netd
 	struct mlx5_esw_bridge *bridge;
 	int err;
 
-	bridge = kvzalloc(sizeof(*bridge), GFP_KERNEL);
+	bridge = kvzalloc_obj(*bridge);
 	if (!bridge)
 		return ERR_PTR(-ENOMEM);
 
@@ -1179,7 +1179,7 @@ mlx5_esw_bridge_vlan_create(u16 vlan_proto, u16 vid, u16 flags, struct mlx5_esw_
 	struct mlx5_esw_bridge_vlan *vlan;
 	int err;
 
-	vlan = kvzalloc(sizeof(*vlan), GFP_KERNEL);
+	vlan = kvzalloc_obj(*vlan);
 	if (!vlan)
 		return ERR_PTR(-ENOMEM);
 
@@ -1365,7 +1365,7 @@ mlx5_esw_bridge_fdb_entry_init(struct net_device *dev, u16 vport_num, u16 esw_ow
 	if (entry)
 		mlx5_esw_bridge_fdb_entry_notify_and_cleanup(entry, bridge);
 
-	entry = kvzalloc(sizeof(*entry), GFP_KERNEL);
+	entry = kvzalloc_obj(*entry);
 	if (!entry)
 		return ERR_PTR(-ENOMEM);
 
@@ -1550,7 +1550,7 @@ static int mlx5_esw_bridge_vport_init(u16 vport_num, u16 esw_owner_vhca_id, u16 
 	struct mlx5_esw_bridge_port *port;
 	int err;
 
-	port = kvzalloc(sizeof(*port), GFP_KERNEL);
+	port = kvzalloc_obj(*port);
 	if (!port)
 		return -ENOMEM;
 
@@ -1649,10 +1649,8 @@ int mlx5_esw_bridge_vport_unlink(struct net_device *br_netdev, u16 vport_num,
 	int err;
 
 	port = mlx5_esw_bridge_port_lookup(vport_num, esw_owner_vhca_id, br_offloads);
-	if (!port) {
-		NL_SET_ERR_MSG_MOD(extack, "Port is not attached to any bridge");
-		return -EINVAL;
-	}
+	if (!port)
+		return 0;
 	if (port->bridge->ifindex != br_netdev->ifindex) {
 		NL_SET_ERR_MSG_MOD(extack, "Port is attached to another bridge");
 		return -EINVAL;
@@ -1682,8 +1680,17 @@ int mlx5_esw_bridge_vport_peer_unlink(struct net_device *br_netdev, u16 vport_nu
 				      struct mlx5_esw_bridge_offloads *br_offloads,
 				      struct netlink_ext_ack *extack)
 {
+	if (!MLX5_CAP_ESW(br_offloads->esw->dev, merged_eswitch))
+		return 0;
+
 	return mlx5_esw_bridge_vport_unlink(br_netdev, vport_num, esw_owner_vhca_id, br_offloads,
 					    extack);
+}
+
+bool mlx5_esw_bridge_port_exists(u16 vport_num, u16 esw_owner_vhca_id,
+				 struct mlx5_esw_bridge_offloads *br_offloads)
+{
+	return mlx5_esw_bridge_port_lookup(vport_num, esw_owner_vhca_id, br_offloads);
 }
 
 int mlx5_esw_bridge_port_vlan_add(u16 vport_num, u16 esw_owner_vhca_id, u16 vid, u16 flags,
@@ -1924,7 +1931,7 @@ struct mlx5_esw_bridge_offloads *mlx5_esw_bridge_init(struct mlx5_eswitch *esw)
 
 	ASSERT_RTNL();
 
-	br_offloads = kvzalloc(sizeof(*br_offloads), GFP_KERNEL);
+	br_offloads = kvzalloc_obj(*br_offloads);
 	if (!br_offloads)
 		return ERR_PTR(-ENOMEM);
 

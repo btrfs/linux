@@ -58,6 +58,12 @@ static u32 read_pin_sense(struct hda_codec *codec, hda_nid_t nid, int dev_id)
 				  AC_VERB_GET_PIN_SENSE, dev_id);
 	if (codec->inv_jack_detect)
 		val ^= AC_PINSENSE_PRESENCE;
+	if (codec->eld_jack_detect) {
+		if (val & AC_PINSENSE_ELDV)
+			val |= AC_PINSENSE_PRESENCE;
+		else
+			val &= ~AC_PINSENSE_PRESENCE;
+	}
 	return val;
 }
 
@@ -329,7 +335,7 @@ snd_hda_jack_detect_enable_callback_mst(struct hda_codec *codec, hda_nid_t nid,
 	callback = find_callback_from_list(jack, func);
 
 	if (func && !callback) {
-		callback = kzalloc(sizeof(*callback), GFP_KERNEL);
+		callback = kzalloc_obj(*callback);
 		if (!callback)
 			return ERR_PTR(-ENOMEM);
 		callback->func = func;
@@ -606,10 +612,10 @@ static int add_jack_kctl(struct hda_codec *codec, hda_nid_t nid,
 	if (base_name)
 		strscpy(name, base_name, sizeof(name));
 	else
-		snd_hda_get_pin_label(codec, nid, cfg, name, sizeof(name), NULL);
+		snd_hda_get_pin_label(codec, nid, cfg, name, sizeof(name));
 	if (phantom_jack)
 		/* Example final name: "Internal Mic Phantom Jack" */
-		strncat(name, " Phantom", sizeof(name) - strlen(name) - 1);
+		hda_append_suffix(name, " Phantom", sizeof(name));
 	err = snd_hda_jack_add_kctl(codec, nid, name, phantom_jack, 0, NULL);
 	if (err < 0)
 		return err;

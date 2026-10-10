@@ -2331,13 +2331,15 @@ static int __init _init(struct omap_hwmod *oh, void *data)
 	if (r < 0) {
 		WARN(1, "omap_hwmod: %s: doesn't have mpu register target base\n",
 		     oh->name);
-		return 0;
+		r = 0;
+		goto out_put_node;
 	}
 
 	r = _init_clocks(oh, np);
 	if (r < 0) {
 		WARN(1, "omap_hwmod: %s: couldn't init clocks\n", oh->name);
-		return -EINVAL;
+		r = -EINVAL;
+		goto out_put_node;
 	}
 
 	if (np) {
@@ -2345,13 +2347,19 @@ static int __init _init(struct omap_hwmod *oh, void *data)
 
 		parse_module_flags(oh, np);
 		child = of_get_next_child(np, NULL);
-		if (child)
+		if (child) {
 			parse_module_flags(oh, child);
+			of_node_put(child);
+		}
 	}
 
 	oh->_state = _HWMOD_STATE_INITIALIZED;
 
-	return 0;
+	r = 0;
+
+out_put_node:
+	of_node_put(bus);
+	return r;
 }
 
 /**
@@ -3392,7 +3400,7 @@ static int omap_hwmod_allocate_module(struct device *dev, struct omap_hwmod *oh,
 	void __iomem *regs = NULL;
 	unsigned long flags;
 
-	sysc = kzalloc(sizeof(*sysc), GFP_KERNEL);
+	sysc = kzalloc_obj(*sysc);
 	if (!sysc)
 		return -ENOMEM;
 
@@ -3422,7 +3430,7 @@ static int omap_hwmod_allocate_module(struct device *dev, struct omap_hwmod *oh,
 	}
 
 	if (list_empty(&oh->slave_ports)) {
-		oi = kzalloc(sizeof(*oi), GFP_KERNEL);
+		oi = kzalloc_obj(*oi);
 		if (!oi)
 			goto out_free_class;
 
@@ -3525,7 +3533,7 @@ int omap_hwmod_init_module(struct device *dev,
 
 	oh = _lookup(data->name);
 	if (!oh) {
-		oh = kzalloc(sizeof(*oh), GFP_KERNEL);
+		oh = kzalloc_obj(*oh);
 		if (!oh)
 			return -ENOMEM;
 
@@ -3536,7 +3544,7 @@ int omap_hwmod_init_module(struct device *dev,
 		/* Unused, can be handled by PRM driver handling resets */
 		oh->prcm.omap4.flags = HWMOD_OMAP4_NO_CONTEXT_LOSS_BIT;
 
-		oh->class = kzalloc(sizeof(*oh->class), GFP_KERNEL);
+		oh->class = kzalloc_obj(*oh->class);
 		if (!oh->class) {
 			kfree(oh);
 			return -ENOMEM;
@@ -3608,13 +3616,13 @@ int omap_hwmod_init_module(struct device *dev,
 #ifdef CONFIG_SERIAL_EARLYCON
 static void __init omap_hwmod_setup_earlycon_flags(void)
 {
-	struct device_node *np;
+	struct device_node *np, *chosen;
 	struct omap_hwmod *oh;
 	const char *uart;
 
-	np = of_find_node_by_path("/chosen");
-	if (np) {
-		uart = of_get_property(np, "stdout-path", NULL);
+	chosen = of_find_node_by_path("/chosen");
+	if (chosen) {
+		uart = of_get_property(chosen, "stdout-path", NULL);
 		if (uart) {
 			np = of_find_node_by_path(uart);
 			if (np) {
@@ -3629,8 +3637,10 @@ static void __init omap_hwmod_setup_earlycon_flags(void)
 				if (oh)
 					oh->flags |= DEBUG_OMAPUART_FLAGS;
 			}
+			of_node_put(np);
 		}
 	}
+	of_node_put(chosen);
 }
 #endif
 

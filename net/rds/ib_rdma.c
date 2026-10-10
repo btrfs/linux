@@ -43,7 +43,7 @@ struct workqueue_struct *rds_ib_mr_wq;
 
 static void rds_ib_odp_mr_worker(struct work_struct *work);
 
-static struct rds_ib_device *rds_ib_get_device(__be32 ipaddr)
+struct rds_ib_device *rds_ib_get_device(__be32 ipaddr)
 {
 	struct rds_ib_device *rds_ibdev;
 	struct rds_ib_ipaddr *i_ipaddr;
@@ -67,7 +67,7 @@ static int rds_ib_add_ipaddr(struct rds_ib_device *rds_ibdev, __be32 ipaddr)
 {
 	struct rds_ib_ipaddr *i_ipaddr;
 
-	i_ipaddr = kmalloc(sizeof *i_ipaddr, GFP_KERNEL);
+	i_ipaddr = kmalloc_obj(*i_ipaddr);
 	if (!i_ipaddr)
 		return -ENOMEM;
 
@@ -251,9 +251,7 @@ void __rds_ib_teardown_mr(struct rds_ib_mr *ibmr)
 
 			/* FIXME we need a way to tell a r/w MR
 			 * from a r/o MR */
-			WARN_ON(!page->mapping && irqs_disabled());
-			set_page_dirty(page);
-			put_page(page);
+			unpin_user_pages_dirty_lock(&page, 1, true);
 		}
 		kfree(ibmr->sg);
 
@@ -585,7 +583,7 @@ void *rds_ib_get_mr(struct scatterlist *sg, unsigned long nents,
 		if (key_ret)
 			*key_ret = ib_mr->rkey;
 
-		ibmr = kzalloc(sizeof(*ibmr), GFP_KERNEL);
+		ibmr = kzalloc_obj(*ibmr);
 		if (!ibmr) {
 			ib_dereg_mr(ib_mr);
 			ret = -ENOMEM;
@@ -604,8 +602,13 @@ void *rds_ib_get_mr(struct scatterlist *sg, unsigned long nents,
 		return ibmr;
 	}
 
-	if (conn)
+	if (conn) {
 		ic = conn->c_transport_data;
+		if (!ic || !ic->i_cm_id || !ic->i_cm_id->qp) {
+			ret = -ENODEV;
+			goto out;
+		}
+	}
 
 	if (!rds_ibdev->mr_8k_pool || !rds_ibdev->mr_1m_pool) {
 		ret = -ENODEV;
@@ -641,7 +644,7 @@ struct rds_ib_mr_pool *rds_ib_create_mr_pool(struct rds_ib_device *rds_ibdev,
 {
 	struct rds_ib_mr_pool *pool;
 
-	pool = kzalloc(sizeof(*pool), GFP_KERNEL);
+	pool = kzalloc_obj(*pool);
 	if (!pool)
 		return ERR_PTR(-ENOMEM);
 

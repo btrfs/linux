@@ -13,6 +13,7 @@
 #include <linux/export.h>
 #include <linux/io.h>
 #include <linux/mm.h>
+#include <linux/processor.h>
 
 #include <asm/spu.h>
 #include <asm/spu_priv1.h>
@@ -26,7 +27,7 @@
 
 /**
  * enum spe_type - Type of spe to create.
- * @spe_type_logical: Standard logical spe.
+ * @SPE_TYPE_LOGICAL: Standard logical spe.
  *
  * For use with lv1_construct_logical_spe().  The current HV does not support
  * any types other than those listed.
@@ -64,9 +65,9 @@ struct spe_shadow {
 
 /**
  * enum spe_ex_state - Logical spe execution state.
- * @spe_ex_state_unexecutable: Uninitialized.
- * @spe_ex_state_executable: Enabled, not ready.
- * @spe_ex_state_executed: Ready for use.
+ * @SPE_EX_STATE_UNEXECUTABLE: Uninitialized.
+ * @SPE_EX_STATE_EXECUTABLE: Enabled, not ready.
+ * @SPE_EX_STATE_EXECUTED: Ready for use.
  *
  * The execution state (status) of the logical spe as reported in
  * struct spe_shadow:spe_execution_status.
@@ -185,12 +186,12 @@ static void spu_unmap(struct spu *spu)
  *
  * The current HV requires the spu shadow regs to be mapped with the
  * PTE page protection bits set as read-only.
+ *
+ * Returns: %0 on success or -errno on error.
  */
 
 static int __init setup_areas(struct spu *spu)
 {
-	struct table {char* name; unsigned long addr; unsigned long size;};
-
 	spu_pdata(spu)->shadow = ioremap_prot(spu_pdata(spu)->shadow_addr,
 					      sizeof(struct spe_shadow),
 					      pgprot_noncached_wc(PAGE_KERNEL_RO));
@@ -336,8 +337,7 @@ static int __init ps3_create_spu(struct spu *spu, void *data)
 
 	pr_debug("%s:%d spu_%d\n", __func__, __LINE__, spu->number);
 
-	spu->pdata = kzalloc(sizeof(struct spu_pdata),
-		GFP_KERNEL);
+	spu->pdata = kzalloc_obj(struct spu_pdata);
 
 	if (!spu->pdata) {
 		result = -ENOMEM;
@@ -362,12 +362,9 @@ static int __init ps3_create_spu(struct spu *spu, void *data)
 	if (result)
 		goto fail_enable;
 
-	/* Make sure the spu is in SPE_EX_STATE_EXECUTED. */
-
-	/* need something better here!!! */
-	while (in_be64(&spu_pdata(spu)->shadow->spe_execution_status)
-		!= SPE_EX_STATE_EXECUTED)
-		(void)0;
+	while (in_be64(&spu_pdata(spu)->shadow->spe_execution_status) !=
+	       SPE_EX_STATE_EXECUTED)
+		cpu_relax();
 
 	return result;
 
