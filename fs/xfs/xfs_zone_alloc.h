@@ -42,6 +42,7 @@ void xfs_zoned_wake_all(struct xfs_mount *mp);
 bool xfs_zone_rgbno_is_valid(struct xfs_rtgroup *rtg, xfs_rgnumber_t rgbno);
 void xfs_mark_rtg_boundary(struct iomap_ioend *ioend);
 
+void xfs_zone_mark_free(struct xfs_rtgroup *rtg);
 uint64_t xfs_zoned_default_resblks(struct xfs_mount *mp,
 		enum xfs_free_counter ctr);
 void xfs_zoned_show_stats(struct seq_file *m, struct xfs_mount *mp);
@@ -51,6 +52,7 @@ int xfs_mount_zones(struct xfs_mount *mp);
 void xfs_unmount_zones(struct xfs_mount *mp);
 void xfs_zone_gc_start(struct xfs_mount *mp);
 void xfs_zone_gc_stop(struct xfs_mount *mp);
+void xfs_zone_gc_wakeup(struct xfs_mount *mp);
 #else
 static inline int xfs_mount_zones(struct xfs_mount *mp)
 {
@@ -63,6 +65,9 @@ static inline void xfs_zone_gc_start(struct xfs_mount *mp)
 {
 }
 static inline void xfs_zone_gc_stop(struct xfs_mount *mp)
+{
+}
+static inline void xfs_zone_gc_wakeup(struct xfs_mount *mp)
 {
 }
 #endif /* CONFIG_XFS_RT */

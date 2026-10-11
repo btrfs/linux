@@ -843,8 +843,7 @@ static int hdc3020_probe(struct i2c_client *client)
 						IRQF_ONESHOT, "hdc3020",
 						indio_dev);
 		if (ret)
-			return dev_err_probe(&client->dev, ret,
-					     "Failed to request IRQ\n");
+			return ret;
 	}
 
 	ret = devm_iio_device_register(&data->client->dev, indio_dev);
@@ -873,9 +872,9 @@ static int hdc3020_resume(struct device *dev)
 static DEFINE_SIMPLE_DEV_PM_OPS(hdc3020_pm_ops, hdc3020_suspend, hdc3020_resume);
 
 static const struct i2c_device_id hdc3020_id[] = {
-	{ "hdc3020" },
-	{ "hdc3021" },
-	{ "hdc3022" },
+	{ .name = "hdc3020" },
+	{ .name = "hdc3021" },
+	{ .name = "hdc3022" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, hdc3020_id);

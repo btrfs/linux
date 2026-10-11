@@ -360,7 +360,7 @@ static int ipoib_cm_nonsrq_init_rx(struct net_device *dev, struct ib_cm_id *cm_i
 	if (!rx->rx_ring)
 		return -ENOMEM;
 
-	t = kmalloc(sizeof(*t), GFP_KERNEL);
+	t = kmalloc_obj(*t);
 	if (!t) {
 		ret = -ENOMEM;
 		goto err_free_1;
@@ -449,7 +449,7 @@ static int ipoib_cm_req_handler(struct ib_cm_id *cm_id,
 	int ret;
 
 	ipoib_dbg(priv, "REQ arrived\n");
-	p = kzalloc(sizeof(*p), GFP_KERNEL);
+	p = kzalloc_obj(*p);
 	if (!p)
 		return -ENOMEM;
 	p->dev = dev;
@@ -1071,8 +1071,7 @@ static struct ib_qp *ipoib_cm_create_tx_qp(struct net_device *dev, struct ipoib_
 	struct ib_qp *tx_qp;
 
 	if (dev->features & NETIF_F_SG)
-		attr.cap.max_send_sge = min_t(u32, priv->ca->attrs.max_send_sge,
-					      MAX_SKB_FRAGS + 1);
+		attr.cap.max_send_sge = min(priv->ca->attrs.max_send_sge, MAX_SKB_FRAGS + 1);
 
 	tx_qp = ib_create_qp(priv->pd, &attr);
 	tx->max_send_sge = attr.cap.max_send_sge;
@@ -1304,7 +1303,7 @@ struct ipoib_cm_tx *ipoib_cm_create_tx(struct net_device *dev, struct ipoib_path
 	struct ipoib_dev_priv *priv = ipoib_priv(dev);
 	struct ipoib_cm_tx *tx;
 
-	tx = kzalloc(sizeof(*tx), GFP_ATOMIC);
+	tx = kzalloc_obj(*tx, GFP_ATOMIC);
 	if (!tx)
 		return NULL;
 
@@ -1582,7 +1581,8 @@ static void ipoib_cm_create_srq(struct net_device *dev, int max_sge)
 int ipoib_cm_dev_init(struct net_device *dev)
 {
 	struct ipoib_dev_priv *priv = ipoib_priv(dev);
-	int max_srq_sge, i;
+	u32 max_srq_sge;
+	int i;
 	u8 addr;
 
 	INIT_LIST_HEAD(&priv->cm.passive_ids);
@@ -1600,9 +1600,9 @@ int ipoib_cm_dev_init(struct net_device *dev)
 
 	skb_queue_head_init(&priv->cm.skb_queue);
 
-	ipoib_dbg(priv, "max_srq_sge=%d\n", priv->ca->attrs.max_srq_sge);
+	ipoib_dbg(priv, "max_srq_sge=%u\n", priv->ca->attrs.max_srq_sge);
 
-	max_srq_sge = min_t(int, IPOIB_CM_RX_SG, priv->ca->attrs.max_srq_sge);
+	max_srq_sge = min(priv->ca->attrs.max_srq_sge, IPOIB_CM_RX_SG);
 	ipoib_cm_create_srq(dev, max_srq_sge);
 	if (ipoib_cm_has_srq(dev)) {
 		priv->cm.max_cm_mtu = max_srq_sge * PAGE_SIZE - 0x10;

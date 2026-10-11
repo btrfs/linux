@@ -2,7 +2,7 @@
 #ifndef __LINUX_BITMAP_H
 #define __LINUX_BITMAP_H
 
-#ifndef __ASSEMBLY__
+#ifndef __ASSEMBLER__
 
 #include <linux/align.h>
 #include <linux/bitops.h>
@@ -45,6 +45,8 @@ struct device;
  *  bitmap_copy(dst, src, nbits)                *dst = *src
  *  bitmap_and(dst, src1, src2, nbits)          *dst = *src1 & *src2
  *  bitmap_or(dst, src1, src2, nbits)           *dst = *src1 | *src2
+ *  bitmap_weighted_or(dst, src1, src2, nbits)	*dst = *src1 | *src2. Returns Hamming Weight of dst
+ *  bitmap_weighted_xor(dst, src1, src2, nbits)	*dst = *src1 ^ *src2. Returns Hamming Weight of dst
  *  bitmap_xor(dst, src1, src2, nbits)          *dst = *src1 ^ *src2
  *  bitmap_andnot(dst, src1, src2, nbits)       *dst = *src1 & ~(*src2)
  *  bitmap_complement(dst, src, nbits)          *dst = ~(*src)
@@ -56,6 +58,7 @@ struct device;
  *  bitmap_weight(src, nbits)                   Hamming Weight: number set bits
  *  bitmap_weight_and(src1, src2, nbits)        Hamming Weight of and'ed bitmap
  *  bitmap_weight_andnot(src1, src2, nbits)     Hamming Weight of andnot'ed bitmap
+ *  bitmap_weight_from(src, start, end)         Hamming Weight starting from @start
  *  bitmap_set(dst, pos, nbits)                 Set specified bit area
  *  bitmap_clear(dst, pos, nbits)               Clear specified bit area
  *  bitmap_find_next_zero_area(buf, len, pos, n, mask)  Find bit free area
@@ -165,6 +168,10 @@ bool __bitmap_and(unsigned long *dst, const unsigned long *bitmap1,
 		 const unsigned long *bitmap2, unsigned int nbits);
 void __bitmap_or(unsigned long *dst, const unsigned long *bitmap1,
 		 const unsigned long *bitmap2, unsigned int nbits);
+unsigned int __bitmap_weighted_or(unsigned long *dst, const unsigned long *bitmap1,
+				  const unsigned long *bitmap2, unsigned int nbits);
+unsigned int __bitmap_weighted_xor(unsigned long *dst, const unsigned long *bitmap1,
+				  const unsigned long *bitmap2, unsigned int nbits);
 void __bitmap_xor(unsigned long *dst, const unsigned long *bitmap1,
 		  const unsigned long *bitmap2, unsigned int nbits);
 bool __bitmap_andnot(unsigned long *dst, const unsigned long *bitmap1,
@@ -202,6 +209,9 @@ unsigned long bitmap_find_next_zero_area_off(unsigned long *map,
  * The @align_mask should be one less than a power of 2; the effect is that
  * the bit offset of all zero areas this function finds is multiples of that
  * power of 2. A @align_mask of 0 means no alignment is required.
+ *
+ * Return: The bit offset of the found area or a value >= @size
+ * if no area is found.
  */
 static __always_inline
 unsigned long bitmap_find_next_zero_area(unsigned long *map,
@@ -338,6 +348,30 @@ void bitmap_or(unsigned long *dst, const unsigned long *src1,
 }
 
 static __always_inline
+unsigned int bitmap_weighted_or(unsigned long *dst, const unsigned long *src1,
+				const unsigned long *src2, unsigned int nbits)
+{
+	if (small_const_nbits(nbits)) {
+		*dst = *src1 | *src2;
+		return hweight_long(*dst & BITMAP_LAST_WORD_MASK(nbits));
+	} else {
+		return __bitmap_weighted_or(dst, src1, src2, nbits);
+	}
+}
+
+static __always_inline
+unsigned int bitmap_weighted_xor(unsigned long *dst, const unsigned long *src1,
+				const unsigned long *src2, unsigned int nbits)
+{
+	if (small_const_nbits(nbits)) {
+		*dst = *src1 ^ *src2;
+		return hweight_long(*dst & BITMAP_LAST_WORD_MASK(nbits));
+	} else {
+		return __bitmap_weighted_xor(dst, src1, src2, nbits);
+	}
+}
+
+static __always_inline
 void bitmap_xor(unsigned long *dst, const unsigned long *src1,
 		const unsigned long *src2, unsigned int nbits)
 {
@@ -462,6 +496,38 @@ unsigned long bitmap_weight_andnot(const unsigned long *src1,
 	if (small_const_nbits(nbits))
 		return hweight_long(*src1 & ~(*src2) & BITMAP_LAST_WORD_MASK(nbits));
 	return __bitmap_weight_andnot(src1, src2, nbits);
+}
+
+/**
+ * bitmap_weight_from - Hamming weight for a memory region
+ * @bitmap: The base address
+ * @start: The bitnumber to starts weighting
+ * @end: the bitmap size in bits
+ *
+ * Returns the number of set bits in the region. If @start >= @end,
+ * return >= end.
+ */
+static __always_inline
+unsigned long bitmap_weight_from(const unsigned long *bitmap,
+				   unsigned int start, unsigned int end)
+{
+	unsigned long w;
+
+	if (unlikely(start >= end))
+		return end;
+
+	if (small_const_nbits(end))
+		return hweight_long(*bitmap & GENMASK(end - 1, start));
+
+	bitmap += start / BITS_PER_LONG;
+	/* Opencode round_down() to not include math.h */
+	end -= start & ~(BITS_PER_LONG - 1);
+	start %= BITS_PER_LONG;
+	w = bitmap_weight(bitmap, end);
+	if (start)
+		w -= hweight_long(*bitmap & BITMAP_LAST_WORD_MASK(start));
+
+	return w;
 }
 
 static __always_inline
@@ -632,14 +698,6 @@ void bitmap_gather(unsigned long *dst, const unsigned long *src,
 
 	for_each_set_bit(bit, mask, nbits)
 		__assign_bit(n++, dst, test_bit(bit, src));
-}
-
-static __always_inline
-void bitmap_next_set_region(unsigned long *bitmap, unsigned int *rs,
-			    unsigned int *re, unsigned int end)
-{
-	*rs = find_next_bit(bitmap, end, *rs);
-	*re = find_next_zero_bit(bitmap, end, *rs + 1);
 }
 
 /**
@@ -831,6 +889,6 @@ void bitmap_write(unsigned long *map, unsigned long value,
 #define bitmap_set_value8(map, value, start)		\
 	bitmap_write(map, value, start, BITS_PER_BYTE)
 
-#endif /* __ASSEMBLY__ */
+#endif /* __ASSEMBLER__ */
 
 #endif /* __LINUX_BITMAP_H */

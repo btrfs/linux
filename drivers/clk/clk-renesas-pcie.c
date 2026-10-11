@@ -14,7 +14,6 @@
 
 #include <linux/clk-provider.h>
 #include <linux/i2c.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/regmap.h>
@@ -64,7 +63,7 @@ struct rs9_driver_data {
 	struct i2c_client	*client;
 	struct regmap		*regmap;
 	const struct rs9_chip_info *chip_info;
-	struct clk_hw		*clk_dif[4];
+	struct clk_hw		*clk_dif[8];
 	u8			pll_amplitude;
 	u8			pll_ssc;
 	u8			clk_dif_sr;
@@ -354,7 +353,7 @@ static int rs9_probe(struct i2c_client *client)
 	return ret;
 }
 
-static int __maybe_unused rs9_suspend(struct device *dev)
+static int rs9_suspend(struct device *dev)
 {
 	struct rs9_driver_data *rs9 = dev_get_drvdata(dev);
 
@@ -364,7 +363,7 @@ static int __maybe_unused rs9_suspend(struct device *dev)
 	return 0;
 }
 
-static int __maybe_unused rs9_resume(struct device *dev)
+static int rs9_resume(struct device *dev)
 {
 	struct rs9_driver_data *rs9 = dev_get_drvdata(dev);
 	int ret;
@@ -395,9 +394,9 @@ static const struct rs9_chip_info renesas_9fgv0841_info = {
 };
 
 static const struct i2c_device_id rs9_id[] = {
-	{ "9fgv0241", .driver_data = (kernel_ulong_t)&renesas_9fgv0241_info },
-	{ "9fgv0441", .driver_data = (kernel_ulong_t)&renesas_9fgv0441_info },
-	{ "9fgv0841", .driver_data = (kernel_ulong_t)&renesas_9fgv0841_info },
+	{ .name = "9fgv0241", .driver_data = (kernel_ulong_t)&renesas_9fgv0241_info },
+	{ .name = "9fgv0441", .driver_data = (kernel_ulong_t)&renesas_9fgv0441_info },
+	{ .name = "9fgv0841", .driver_data = (kernel_ulong_t)&renesas_9fgv0841_info },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, rs9_id);
@@ -410,12 +409,12 @@ static const struct of_device_id clk_rs9_of_match[] = {
 };
 MODULE_DEVICE_TABLE(of, clk_rs9_of_match);
 
-static SIMPLE_DEV_PM_OPS(rs9_pm_ops, rs9_suspend, rs9_resume);
+static DEFINE_SIMPLE_DEV_PM_OPS(rs9_pm_ops, rs9_suspend, rs9_resume);
 
 static struct i2c_driver rs9_driver = {
 	.driver = {
 		.name = "clk-renesas-pcie-9series",
-		.pm	= &rs9_pm_ops,
+		.pm	= pm_sleep_ptr(&rs9_pm_ops),
 		.of_match_table = clk_rs9_of_match,
 	},
 	.probe		= rs9_probe,

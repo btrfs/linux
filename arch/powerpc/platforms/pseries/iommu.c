@@ -812,18 +812,11 @@ static struct device_node *pci_dma_find(struct device_node *dn,
 
 	/* parse DMA window property. During normal system boot, only default
 	 * DMA window is passed in OF. But, for kdump, a dedicated adapter might
-	 * have both default and DDW in FDT. In this scenario, DDW takes precedence
-	 * over default window.
+	 * have both default and DDW in FDT. In this scenario, default window
+	 * takes precedence over DDW. For a dedicated adapter, default window will
+	 * potentially have more unused TCEs.
 	 */
-	if (ddw_win) {
-		struct dynamic_dma_window_prop *p;
-
-		p = (struct dynamic_dma_window_prop *)ddw_prop;
-		prop->liobn = p->liobn;
-		prop->dma_base = p->dma_base;
-		prop->tce_shift = p->tce_shift;
-		prop->window_shift = p->window_shift;
-	} else if (default_win) {
+	if (default_win) {
 		unsigned long offset, size, liobn;
 
 		of_parse_dma_window(rdn, default_prop, &liobn, &offset, &size);
@@ -832,6 +825,14 @@ static struct device_node *pci_dma_find(struct device_node *dn,
 		prop->dma_base = cpu_to_be64(offset);
 		prop->tce_shift = cpu_to_be32(IOMMU_PAGE_SHIFT_4K);
 		prop->window_shift = cpu_to_be32(order_base_2(size));
+	} else {
+		struct dynamic_dma_window_prop *p;
+
+		p = (struct dynamic_dma_window_prop *)ddw_prop;
+		prop->liobn = p->liobn;
+		prop->dma_base = p->dma_base;
+		prop->tce_shift = p->tce_shift;
+		prop->window_shift = p->window_shift;
 	}
 
 	return rdn;
@@ -1000,7 +1001,7 @@ static void copy_property(struct device_node *pdn, const char *from, const char 
 	if (!src)
 		return;
 
-	dst = kzalloc(sizeof(*dst), GFP_KERNEL);
+	dst = kzalloc_obj(*dst);
 	if (!dst)
 		return;
 
@@ -1089,7 +1090,7 @@ static struct dma_win *ddw_list_new_entry(struct device_node *pdn,
 {
 	struct dma_win *window;
 
-	window = kzalloc(sizeof(*window), GFP_KERNEL);
+	window = kzalloc_obj(*window);
 	if (!window)
 		return NULL;
 
@@ -1409,12 +1410,12 @@ static struct property *ddw_property_create(const char *propname, u32 liobn, u64
 	struct dynamic_dma_window_prop *ddwprop;
 	struct property *win64;
 
-	win64 = kzalloc(sizeof(*win64), GFP_KERNEL);
+	win64 = kzalloc_obj(*win64);
 	if (!win64)
 		return NULL;
 
 	win64->name = kstrdup(propname, GFP_KERNEL);
-	ddwprop = kzalloc(sizeof(*ddwprop), GFP_KERNEL);
+	ddwprop = kzalloc_obj(*ddwprop);
 	win64->value = ddwprop;
 	win64->length = sizeof(*ddwprop);
 	if (!win64->name || !win64->value) {
@@ -1760,7 +1761,7 @@ out_failed:
 	if (default_win_removed || limited_addr_enabled)
 		reset_dma_window(dev, pdn);
 
-	fpdn = kzalloc(sizeof(*fpdn), GFP_KERNEL);
+	fpdn = kzalloc_obj(*fpdn);
 	if (!fpdn)
 		goto out_unlock;
 	fpdn->pdn = pdn;
@@ -1769,10 +1770,8 @@ out_failed:
 out_unlock:
 	mutex_unlock(&dma_win_init_mutex);
 
-	/* If we have persistent memory and the window size is not big enough
-	 * to directly map both RAM and vPMEM, then we need to set DMA limit.
-	 */
-	if (pmem_present && direct_mapping && len != MAX_PHYSMEM_BITS)
+	/* For pre-mapped memory, set bus_dma_limit to the max RAM */
+	if (direct_mapping)
 		dev->dev.bus_dma_limit = dev->dev.archdata.dma_offset +
 						(1ULL << max_ram_len);
 
@@ -2237,7 +2236,7 @@ remove_window:
 	__remove_dma_window(pdn, ddw_avail, create.liobn);
 
 out_failed:
-	fpdn = kzalloc(sizeof(*fpdn), GFP_KERNEL);
+	fpdn = kzalloc_obj(*fpdn);
 	if (!fpdn)
 		goto out_unlock;
 	fpdn->pdn = pdn;
@@ -2324,7 +2323,7 @@ static long spapr_tce_unset_window(struct iommu_table_group *table_group, int nu
 	goto out_unlock;
 
 out_failed:
-	fpdn = kzalloc(sizeof(*fpdn), GFP_KERNEL);
+	fpdn = kzalloc_obj(*fpdn);
 	if (!fpdn)
 		goto out_unlock;
 	fpdn->pdn = pdn;

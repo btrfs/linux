@@ -10,6 +10,8 @@
 #include <linux/fs.h>
 #include <linux/module.h>
 #include <linux/kernel.h>
+#include <linux/printk.h>
+#include <linux/string.h>
 #include <linux/wmi.h>
 #include "bioscfg.h"
 #include "../../firmware_attributes_class.h"
@@ -83,7 +85,7 @@ int hp_get_string_from_buffer(u8 **buffer, u32 *buffer_size, char *dst, u32 dst_
 	 * bytes.
 	 */
 	conv_dst_size = size;
-	if (size > dst_size)
+	if (size >= dst_size)
 		conv_dst_size = dst_size - 1;
 
 	/*
@@ -586,7 +588,7 @@ static int hp_add_other_attributes(int attr_type)
 	int ret;
 	char *attr_name;
 
-	attr_name_kobj = kzalloc(sizeof(*attr_name_kobj), GFP_KERNEL);
+	attr_name_kobj = kzalloc_obj(*attr_name_kobj);
 	if (!attr_name_kobj)
 		return -ENOMEM;
 
@@ -659,10 +661,15 @@ static int hp_init_bios_package_attribute(enum hp_wmi_data_type attr_type,
 	int ret = 0;
 
 	/* Take action appropriate to each ACPI TYPE */
-	if (obj->package.count < min_elements) {
-		pr_err("ACPI-package does not have enough elements: %d < %d\n",
-		       obj->package.count, min_elements);
+	if (obj->package.count < COMMON_ELEM_CNT) {
+		pr_err("ACPI-package is missing common elements: %d < %d\n",
+		       obj->package.count, COMMON_ELEM_CNT);
 		goto pack_attr_exit;
+	}
+
+	if (obj->package.count < min_elements) {
+		pr_warn("ACPI-package has fewer elements than expected: %d < %d, parsing available elements\n",
+			obj->package.count, min_elements);
 	}
 
 	elements = obj->package.elements;
@@ -694,6 +701,11 @@ static int hp_init_bios_package_attribute(enum hp_wmi_data_type attr_type,
 		return ret;
 	}
 
+	if (!str_value || !str_value[0]) {
+		pr_debug("Ignoring attribute with empty name\n");
+		goto pack_attr_exit;
+	}
+
 	/* All duplicate attributes found are ignored */
 	duplicate = kset_find_obj(temp_kset, str_value);
 	if (duplicate) {
@@ -704,7 +716,7 @@ static int hp_init_bios_package_attribute(enum hp_wmi_data_type attr_type,
 	}
 
 	/* build attribute */
-	attr_name_kobj = kzalloc(sizeof(*attr_name_kobj), GFP_KERNEL);
+	attr_name_kobj = kzalloc_obj(*attr_name_kobj);
 	if (!attr_name_kobj) {
 		ret = -ENOMEM;
 		goto pack_attr_exit;
@@ -724,26 +736,31 @@ static int hp_init_bios_package_attribute(enum hp_wmi_data_type attr_type,
 	switch (attr_type) {
 	case HPWMI_STRING_TYPE:
 		ret = hp_populate_string_package_data(elements,
+						      obj->package.count,
 						      instance_id,
 						      attr_name_kobj);
 		break;
 	case HPWMI_INTEGER_TYPE:
 		ret = hp_populate_integer_package_data(elements,
+						       obj->package.count,
 						       instance_id,
 						       attr_name_kobj);
 		break;
 	case HPWMI_ENUMERATION_TYPE:
 		ret = hp_populate_enumeration_package_data(elements,
+							   obj->package.count,
 							   instance_id,
 							   attr_name_kobj);
 		break;
 	case HPWMI_ORDERED_LIST_TYPE:
 		ret = hp_populate_ordered_list_package_data(elements,
+							    obj->package.count,
 							    instance_id,
 							    attr_name_kobj);
 		break;
 	case HPWMI_PASSWORD_TYPE:
 		ret = hp_populate_password_package_data(elements,
+							obj->package.count,
 							instance_id,
 							attr_name_kobj);
 		break;
@@ -781,6 +798,12 @@ static int hp_init_bios_buffer_attribute(enum hp_wmi_data_type attr_type,
 	if (ret < 0)
 		goto buff_attr_exit;
 
+	if (strlen(str) == 0) {
+		pr_debug("Ignoring attribute with empty name\n");
+		ret = 0;
+		goto buff_attr_exit;
+	}
+
 	if (attr_type == HPWMI_PASSWORD_TYPE ||
 	    attr_type == HPWMI_SECURE_PLATFORM_TYPE)
 		temp_kset = bioscfg_drv.authentication_dir_kset;
@@ -797,7 +820,7 @@ static int hp_init_bios_buffer_attribute(enum hp_wmi_data_type attr_type,
 	}
 
 	/* build attribute */
-	attr_name_kobj = kzalloc(sizeof(*attr_name_kobj), GFP_KERNEL);
+	attr_name_kobj = kzalloc_obj(*attr_name_kobj);
 	if (!attr_name_kobj) {
 		ret = -ENOMEM;
 		goto buff_attr_exit;

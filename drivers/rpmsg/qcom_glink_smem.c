@@ -103,6 +103,13 @@ static void glink_smem_rx_peek(struct qcom_glink_pipe *np,
 	if (tail >= pipe->native.length)
 		tail -= pipe->native.length;
 
+	/*
+	 * Order the availability (head) read in glink_smem_rx_avail()
+	 * against the FIFO payload read below, so APPS never consumes
+	 * stale data the remote has not yet published.
+	 */
+	rmb();
+
 	len = min_t(size_t, count, pipe->native.length - tail);
 	if (len)
 		memcpy_fromio(data, pipe->fifo + tail, len);
@@ -230,7 +237,7 @@ struct qcom_glink_smem *qcom_glink_smem_register(struct device *parent,
 	size_t size;
 	int ret;
 
-	smem = kzalloc(sizeof(*smem), GFP_KERNEL);
+	smem = kzalloc_obj(*smem);
 	if (!smem)
 		return ERR_PTR(-ENOMEM);
 

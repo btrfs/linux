@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0
 /* Converted from tools/testing/selftests/bpf/verifier/direct_packet_access.c */
 
+#include <linux/if_ether.h>
 #include <linux/bpf.h>
 #include <bpf/bpf_helpers.h>
 #include "bpf_misc.h"
@@ -411,7 +412,7 @@ l0_%=:	r0 = 0;						\
 
 SEC("tc")
 __description("direct packet access: test17 (pruning, alignment)")
-__failure __msg("misaligned packet access off 2+0+15+-4 size 4")
+__failure __msg("misaligned packet access off 2+15+-4 size 4")
 __flag(BPF_F_STRICT_ALIGNMENT)
 __naked void packet_access_test17_pruning_alignment(void)
 {
@@ -568,7 +569,7 @@ l0_%=:	r0 = 0;						\
 
 SEC("tc")
 __description("direct packet access: test23 (x += pkt_ptr, 4)")
-__failure __msg("invalid access to packet, off=0 size=8, R5(id=3,off=0,r=0)")
+__failure __msg("invalid access to packet, off=31 size=8, R5(id=3,off=31,r=0)")
 __flag(BPF_F_ANY_ALIGNMENT)
 __naked void test23_x_pkt_ptr_4(void)
 {
@@ -797,6 +798,303 @@ l0_%=:	/* exit(0) */					\
 	: __imm(bpf_ktime_get_ns),
 	  __imm_const(__sk_buff_data, offsetof(struct __sk_buff, data)),
 	  __imm_const(__sk_buff_data_end, offsetof(struct __sk_buff, data_end))
+	: __clobber_all);
+}
+
+#define access_test_non_linear(name, type, desc, retval, linear_sz, off)			\
+	SEC(type)										\
+	__description("direct packet access: " #name " (non-linear, " type ", " desc ")")	\
+	__success __retval(retval)								\
+	__linear_size(linear_sz)								\
+	__naked void access_non_linear_##name(void)						\
+	{											\
+		asm volatile ("									\
+		r2 = *(u32*)(r1 + %[skb_data]);							\
+		r3 = *(u32*)(r1 + %[skb_data_end]);						\
+		r0 = r2;									\
+		r0 += %[offset];								\
+		if r0 > r3 goto l0_%=;								\
+		r0 = *(u8*)(r0 - 1);								\
+		r0 = 0;										\
+		exit;										\
+	l0_%=:	r0 = 1;										\
+		exit;										\
+	"	:										\
+		: __imm_const(skb_data, offsetof(struct __sk_buff, data)),			\
+		  __imm_const(skb_data_end, offsetof(struct __sk_buff, data_end)),		\
+		  __imm_const(offset, off)							\
+		: __clobber_all);								\
+	}
+
+access_test_non_linear(test31, "tc", "too short eth", 1, ETH_HLEN, 22);
+access_test_non_linear(test32, "tc", "too short 1", 1, 1, 22);
+access_test_non_linear(test33, "tc", "long enough", 0, 22, 22);
+access_test_non_linear(test34, "cgroup_skb/ingress", "too short eth", 1, ETH_HLEN, 8);
+access_test_non_linear(test35, "cgroup_skb/ingress", "too short 1", 1, 1, 8);
+access_test_non_linear(test36, "cgroup_skb/ingress", "long enough", 0, 22, 8);
+
+SEC("tc")
+__description("direct packet access: test37 (non-linear, linearized)")
+__success __retval(0)
+__linear_size(ETH_HLEN)
+__naked void access_non_linear_linearized(void)
+{
+	asm volatile ("				\
+	r6 = r1;				\
+	r2 = 22;				\
+	call %[bpf_skb_pull_data];		\
+	r2 = *(u32*)(r6 + %[skb_data]);		\
+	r3 = *(u32*)(r6 + %[skb_data_end]);	\
+	r0 = r2;				\
+	r0 += 22;				\
+	if r0 > r3 goto l0_%=;			\
+	r0 = *(u8*)(r0 - 1);			\
+	exit;					\
+l0_%=:	r0 = 1;					\
+	exit;					\
+"	:
+	: __imm(bpf_skb_pull_data),
+	  __imm_const(skb_data, offsetof(struct __sk_buff, data)),
+	  __imm_const(skb_data_end, offsetof(struct __sk_buff, data_end))
+	: __clobber_all);
+}
+
+SEC("tc")
+__description("direct packet access: pkt_range cleared after sub with known scalar")
+__failure __msg("invalid access to packet")
+__naked void pkt_range_clear_after_sub(void)
+{
+	asm volatile ("					\
+	r9 = *(u32*)(r1 + %[__sk_buff_data]);		\
+	r8 = *(u32*)(r1 + %[__sk_buff_data_end]);	\
+	r9 += 256;					\
+	if r9 >= r8 goto l0_%=;				\
+	r0 = 0;						\
+	exit;						\
+l0_%=:	/* r9 has AT_PKT_END (pkt + 256 >= pkt_end) */	\
+	r9 -= 256;					\
+	/*						\
+	 * AT_PKT_END must not survive the arithmetic.	\
+	 * is_pkt_ptr_branch_taken must validate both	\
+	 * branches when visiting the next condition.	\
+	 */						\
+	if r9 < r8 goto l1_%=;				\
+	r0 = 0;						\
+	exit;						\
+l1_%=:	r0 = *(u8*)(r9 + 0);				\
+	r0 = 0;						\
+	exit;						\
+"	:
+	: __imm_const(__sk_buff_data, offsetof(struct __sk_buff, data)),
+	  __imm_const(__sk_buff_data_end, offsetof(struct __sk_buff, data_end))
+	: __clobber_all);
+}
+
+SEC("tc")
+__description("direct packet access: pkt_range cleared after add with known scalar")
+__failure __msg("invalid access to packet")
+__naked void pkt_range_clear_after_add(void)
+{
+	asm volatile ("					\
+	r9 = *(u32*)(r1 + %[__sk_buff_data]);		\
+	r8 = *(u32*)(r1 + %[__sk_buff_data_end]);	\
+	r9 += 256;					\
+	if r9 >= r8 goto l0_%=;				\
+	r0 = 0;						\
+	exit;						\
+l0_%=:	/* r9 has AT_PKT_END (pkt + 256 >= pkt_end) */	\
+	r9 += -256;					\
+	/*						\
+	 * Same as sub, but goes through BPF_ADD path.	\
+	 * AT_PKT_END must not survive the arithmetic.	\
+	 */						\
+	if r9 < r8 goto l1_%=;				\
+	r0 = 0;						\
+	exit;						\
+l1_%=:	r0 = *(u8*)(r9 + 0);				\
+	r0 = 0;						\
+	exit;						\
+"	:
+	: __imm_const(__sk_buff_data, offsetof(struct __sk_buff, data)),
+	  __imm_const(__sk_buff_data_end, offsetof(struct __sk_buff, data_end))
+	: __clobber_all);
+}
+
+SEC("tc")
+__description("direct packet access: 8-aligned offset, check p + 8, load 8 bytes at p")
+__success __retval(0) __flag(BPF_F_ANY_ALIGNMENT)
+__naked void pkt_same_id_check_copy_load_base(void)
+{
+	asm volatile ("					\
+	r2 = *(u32*)(r1 + %[__sk_buff_data]);		\
+	r3 = *(u32*)(r1 + %[__sk_buff_data_end]);	\
+	r4 = *(u32*)(r1 + %[__sk_buff_mark]);		\
+	r4 &= 0x38;					\
+	if r4 > 50 goto l0_%=;				\
+	/* r4 is a multiple of 8, at most 48 */		\
+	r5 = r2;					\
+	r5 += r4;					\
+	r6 = r5;					\
+	r6 += 8;					\
+	if r6 > r3 goto l0_%=;				\
+	/* [r5, r5 + 8) is in the packet */		\
+	r0 = *(u64*)(r5 + 0);				\
+l0_%=:	r0 = 0;						\
+	exit;						\
+"	:
+	: __imm_const(__sk_buff_data, offsetof(struct __sk_buff, data)),
+	  __imm_const(__sk_buff_data_end, offsetof(struct __sk_buff, data_end)),
+	  __imm_const(__sk_buff_mark, offsetof(struct __sk_buff, mark))
+	: __clobber_all);
+}
+
+SEC("tc")
+__description("direct packet access: 8-aligned offset, check p, load past it via p + 8")
+__failure __msg("invalid access to packet, off=51 size=1")
+__naked void pkt_same_id_check_base_load_via_copy(void)
+{
+	asm volatile ("					\
+	r2 = *(u32*)(r1 + %[__sk_buff_data]);		\
+	r3 = *(u32*)(r1 + %[__sk_buff_data_end]);	\
+	r4 = *(u32*)(r1 + %[__sk_buff_mark]);		\
+	r4 &= 0x38;					\
+	if r4 > 50 goto l0_%=;				\
+	/* r4 is a multiple of 8, at most 48 */		\
+	r5 = r2;					\
+	r5 += r4;					\
+	r6 = r5;					\
+	r6 += 8;					\
+	if r5 > r3 goto l0_%=;				\
+	/* r6 - 7 is r5 + 1 */				\
+	r0 = *(u8*)(r6 - 7);				\
+l0_%=:	r0 = 0;						\
+	exit;						\
+"	:
+	: __imm_const(__sk_buff_data, offsetof(struct __sk_buff, data)),
+	  __imm_const(__sk_buff_data_end, offsetof(struct __sk_buff, data_end)),
+	  __imm_const(__sk_buff_mark, offsetof(struct __sk_buff, mark))
+	: __clobber_all);
+}
+
+SEC("tc")
+__description("direct packet access: 8-aligned offset, check p + 4, 4-byte load at p + 2")
+__failure __msg("invalid access to packet, off=52 size=4")
+__naked void pkt_same_id_check_base_4_load_via_copy(void)
+{
+	asm volatile ("					\
+	r2 = *(u32*)(r1 + %[__sk_buff_data]);		\
+	r3 = *(u32*)(r1 + %[__sk_buff_data_end]);	\
+	r4 = *(u32*)(r1 + %[__sk_buff_mark]);		\
+	r4 &= 0x38;					\
+	if r4 > 50 goto l0_%=;				\
+	/* r4 is a multiple of 8, at most 48 */		\
+	r5 = r2;					\
+	r5 += r4;					\
+	r6 = r5;					\
+	r6 += 8;					\
+	r7 = r5;					\
+	r7 += 4;					\
+	if r7 > r3 goto l0_%=;				\
+	/* [r5, r5 + 4) is in the packet, [r5 + 2, r5 + 6) may not be */ \
+	r0 = *(u32*)(r6 - 6);				\
+l0_%=:	r0 = 0;						\
+	exit;						\
+"	:
+	: __imm_const(__sk_buff_data, offsetof(struct __sk_buff, data)),
+	  __imm_const(__sk_buff_data_end, offsetof(struct __sk_buff, data_end)),
+	  __imm_const(__sk_buff_mark, offsetof(struct __sk_buff, mark))
+	: __clobber_all);
+}
+
+SEC("tc")
+__description("direct packet access: checked pointer minus non-negative unknown keeps range")
+__success __retval(0) __flag(BPF_F_ANY_ALIGNMENT)
+__naked void pkt_sub_unknown_keeps_range(void)
+{
+	asm volatile ("					\
+	r2 = *(u32*)(r1 + %[__sk_buff_data]);		\
+	r3 = *(u32*)(r1 + %[__sk_buff_data_end]);	\
+	r4 = *(u32*)(r1 + %[__sk_buff_mark]);		\
+	r4 &= 0x1f;					\
+	r4 += 8;					\
+	r5 = r2;					\
+	r5 += 40;					\
+	if r5 > r3 goto l0_%=;				\
+	/* r5 is 8 to 39 bytes below the checked pointer */	\
+	r5 -= r4;					\
+	r0 = *(u64*)(r5 + 0);				\
+l0_%=:	r0 = 0;						\
+	exit;						\
+"	:
+	: __imm_const(__sk_buff_data, offsetof(struct __sk_buff, data)),
+	  __imm_const(__sk_buff_data_end, offsetof(struct __sk_buff, data_end)),
+	  __imm_const(__sk_buff_mark, offsetof(struct __sk_buff, mark))
+	: __clobber_all);
+}
+
+SEC("tc")
+__description("direct packet access: no pruning of a path whose checks prove fewer bytes")
+__failure __msg("invalid access to packet, off=255 size=8")
+__flag(BPF_F_ANY_ALIGNMENT) __flag(BPF_F_TEST_STATE_FREQ)
+__naked void pkt_same_id_pruning(void)
+{
+	asm volatile ("					\
+	r2 = *(u32*)(r1 + %[__sk_buff_data]);		\
+	r3 = *(u32*)(r1 + %[__sk_buff_data_end]);	\
+	r4 = *(u32*)(r1 + %[__sk_buff_mark]);		\
+	r0 = *(u32*)(r1 + %[__sk_buff_priority]);	\
+	r4 &= 0xff;					\
+	r5 = r2;					\
+	r5 += r4;					\
+	if r0 != 0 goto l1_%=;				\
+	/* this path proves [r5, r5 + 8) */		\
+	r6 = r5;					\
+	r6 += 8;					\
+	if r6 > r3 goto l0_%=;				\
+	goto l2_%=;					\
+l1_%=:	/* this path proves [r5, r5 + 7) */		\
+	if r5 > r3 goto l0_%=;				\
+	r6 = r5;					\
+	r6 += 7;					\
+	if r6 > r3 goto l0_%=;				\
+l2_%=:	r0 = *(u64*)(r5 + 0);				\
+l0_%=:	r0 = 0;						\
+	exit;						\
+"	:
+	: __imm_const(__sk_buff_data, offsetof(struct __sk_buff, data)),
+	  __imm_const(__sk_buff_data_end, offsetof(struct __sk_buff, data_end)),
+	  __imm_const(__sk_buff_mark, offsetof(struct __sk_buff, mark)),
+	  __imm_const(__sk_buff_priority, offsetof(struct __sk_buff, priority))
+	: __clobber_all);
+}
+
+SEC("tc")
+__description("direct packet access: spilled copy of checked pointer, load past range")
+__failure __msg("invalid access to packet, off=262 size=1, R7(id={{[0-9]+}},off=262,r=262)")
+__naked void pkt_spilled_copy_gets_range(void)
+{
+	asm volatile ("					\
+	r2 = *(u32*)(r1 + %[__sk_buff_data]);		\
+	r3 = *(u32*)(r1 + %[__sk_buff_data_end]);	\
+	r4 = *(u32*)(r1 + %[__sk_buff_mark]);		\
+	r4 &= 0xff;					\
+	r5 = r2;					\
+	r5 += r4;					\
+	*(u64*)(r10 - 8) = r5;				\
+	/* proves only bytes before r5 */		\
+	if r5 > r3 goto l0_%=;				\
+	r6 = r5;					\
+	r6 += 7;					\
+	if r6 > r3 goto l0_%=;				\
+	/* [r5, r5 + 7) is in the packet */		\
+	r7 = *(u64*)(r10 - 8);				\
+	r0 = *(u8*)(r7 + 7);				\
+l0_%=:	r0 = 0;						\
+	exit;						\
+"	:
+	: __imm_const(__sk_buff_data, offsetof(struct __sk_buff, data)),
+	  __imm_const(__sk_buff_data_end, offsetof(struct __sk_buff, data_end)),
+	  __imm_const(__sk_buff_mark, offsetof(struct __sk_buff, mark))
 	: __clobber_all);
 }
 

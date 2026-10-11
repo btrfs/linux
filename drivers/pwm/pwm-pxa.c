@@ -15,7 +15,6 @@
  *   input clock (PWMCR_SD is set) and the output is driven to inactive.
  */
 
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/platform_device.h>
@@ -32,12 +31,12 @@
 #define HAS_SECONDARY_PWM	0x10
 
 static const struct platform_device_id pwm_id_table[] = {
-	/*   PWM    has_secondary_pwm? */
-	{ "pxa25x-pwm", 0 },
-	{ "pxa27x-pwm", HAS_SECONDARY_PWM },
-	{ "pxa168-pwm", 0 },
-	{ "pxa910-pwm", 0 },
-	{ },
+	/*             PWM            has_secondary_pwm? */
+	{ .name = "pxa25x-pwm", .driver_data = 0 },
+	{ .name = "pxa27x-pwm", .driver_data = HAS_SECONDARY_PWM },
+	{ .name = "pxa168-pwm", .driver_data = 0 },
+	{ .name = "pxa910-pwm", .driver_data = 0 },
+	{ }
 };
 MODULE_DEVICE_TABLE(platform, pwm_id_table);
 
@@ -137,7 +136,6 @@ static const struct pwm_ops pxa_pwm_ops = {
 	.apply = pxa_pwm_apply,
 };
 
-#ifdef CONFIG_OF
 /*
  * Device tree users must create one device instance for each PWM channel.
  * Hence we dispense with the HAS_SECONDARY_PWM and "tell" the original driver
@@ -145,27 +143,25 @@ static const struct pwm_ops pxa_pwm_ops = {
  * supported identically.
  */
 static const struct of_device_id pwm_of_match[] = {
-	{ .compatible = "marvell,pxa250-pwm", .data = &pwm_id_table[0]},
-	{ .compatible = "marvell,pxa270-pwm", .data = &pwm_id_table[0]},
-	{ .compatible = "marvell,pxa168-pwm", .data = &pwm_id_table[0]},
-	{ .compatible = "marvell,pxa910-pwm", .data = &pwm_id_table[0]},
+	{ .compatible = "marvell,pxa250-pwm", .data = &pwm_id_table[0] },
+	{ .compatible = "marvell,pxa270-pwm", .data = &pwm_id_table[0] },
+	{ .compatible = "marvell,pxa168-pwm", .data = &pwm_id_table[0] },
+	{ .compatible = "marvell,pxa910-pwm", .data = &pwm_id_table[0] },
 	{ }
 };
 MODULE_DEVICE_TABLE(of, pwm_of_match);
-#else
-#define pwm_of_match NULL
-#endif
 
 static int pwm_probe(struct platform_device *pdev)
 {
 	const struct platform_device_id *id = platform_get_device_id(pdev);
 	struct pwm_chip *chip;
 	struct pxa_pwm_chip *pc;
+	struct clk *bus_clk;
 	struct device *dev = &pdev->dev;
 	struct reset_control *rst;
 	int ret = 0;
 
-	if (IS_ENABLED(CONFIG_OF) && id == NULL)
+	if (id == NULL)
 		id = of_device_get_match_data(dev);
 
 	if (id == NULL)
@@ -177,7 +173,12 @@ static int pwm_probe(struct platform_device *pdev)
 		return PTR_ERR(chip);
 	pc = to_pxa_pwm_chip(chip);
 
-	pc->clk = devm_clk_get(dev, NULL);
+	bus_clk = devm_clk_get_optional_enabled(dev, "bus");
+	if (IS_ERR(bus_clk))
+		return dev_err_probe(dev, PTR_ERR(bus_clk), "Failed to get bus clock\n");
+
+	/* Get named func clk if bus clock is valid */
+	pc->clk = devm_clk_get(dev, bus_clk ? "func" : NULL);
 	if (IS_ERR(pc->clk))
 		return dev_err_probe(dev, PTR_ERR(pc->clk), "Failed to get clock\n");
 
@@ -186,9 +187,7 @@ static int pwm_probe(struct platform_device *pdev)
 		return PTR_ERR(rst);
 
 	chip->ops = &pxa_pwm_ops;
-
-	if (IS_ENABLED(CONFIG_OF))
-		chip->of_xlate = of_pwm_single_xlate;
+	chip->of_xlate = of_pwm_single_xlate;
 
 	pc->mmio_base = devm_platform_ioremap_resource(pdev, 0);
 	if (IS_ERR(pc->mmio_base))

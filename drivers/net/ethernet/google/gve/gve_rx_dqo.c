@@ -18,14 +18,26 @@
 #include <net/tcp.h>
 #include <net/xdp_sock_drv.h>
 
+static void gve_rx_starvation_timer(struct timer_list *t)
+{
+	struct gve_rx_ring *rx = timer_container_of(rx, t, starvation_timer);
+	struct gve_priv *priv = rx->gve;
+	struct gve_notify_block *block;
+
+	block = &priv->ntfy_blocks[rx->ntfy_id];
+	napi_schedule(&block->napi);
+}
+
 static void gve_rx_free_hdr_bufs(struct gve_priv *priv, struct gve_rx_ring *rx)
 {
 	struct device *hdev = &priv->pdev->dev;
-	int buf_count = rx->dqo.bufq.mask + 1;
 
 	if (rx->dqo.hdr_bufs.data) {
-		dma_free_coherent(hdev, priv->header_buf_size * buf_count,
-				  rx->dqo.hdr_bufs.data, rx->dqo.hdr_bufs.addr);
+		size_t size =
+			(size_t)priv->header_buf_size * rx->dqo.num_buf_states;
+
+		dma_free_coherent(hdev, size, rx->dqo.hdr_bufs.data,
+				  rx->dqo.hdr_bufs.addr);
 		rx->dqo.hdr_bufs.data = NULL;
 	}
 }
@@ -118,6 +130,7 @@ void gve_rx_stop_ring_dqo(struct gve_priv *priv, int idx)
 
 	if (rx->dqo.page_pool)
 		page_pool_disable_direct_recycling(rx->dqo.page_pool);
+	timer_shutdown_sync(&rx->starvation_timer);
 	gve_remove_napi(priv, ntfy_idx);
 	gve_rx_remove_from_block(priv, idx);
 	gve_rx_reset_ring_dqo(priv, idx);
@@ -206,8 +219,10 @@ static int gve_rx_alloc_hdr_bufs(struct gve_priv *priv, struct gve_rx_ring *rx,
 void gve_rx_start_ring_dqo(struct gve_priv *priv, int idx)
 {
 	int ntfy_idx = gve_rx_idx_to_ntfy(priv, idx);
+	struct gve_rx_ring *rx = &priv->rx[idx];
 
 	gve_rx_add_to_block(priv, idx);
+	timer_setup(&rx->starvation_timer, gve_rx_starvation_timer, 0);
 	gve_add_napi(priv, ntfy_idx, gve_napi_poll_dqo);
 }
 
@@ -218,7 +233,6 @@ int gve_rx_alloc_ring_dqo(struct gve_priv *priv,
 {
 	struct device *hdev = &priv->pdev->dev;
 	struct page_pool *pool;
-	int qpl_page_cnt;
 	size_t size;
 	u32 qpl_id;
 
@@ -240,8 +254,13 @@ int gve_rx_alloc_ring_dqo(struct gve_priv *priv,
 		rx->rx_headroom = 0;
 	}
 
+	/* struct gve_xdp_buff is overlaid on struct xdp_buff_xsk and utilizes
+	 * the 24 byte field cb to store gve specific data.
+	 */
+	XSK_CHECK_PRIV_TYPE(struct gve_xdp_buff);
+
 	rx->dqo.num_buf_states = cfg->raw_addressing ? buffer_queue_slots :
-		gve_get_rx_pages_per_qpl_dqo(cfg->ring_size);
+		cfg->pages_per_qpl;
 	rx->dqo.buf_states = kvcalloc_node(rx->dqo.num_buf_states,
 					   sizeof(rx->dqo.buf_states[0]),
 					   GFP_KERNEL, priv->numa_node);
@@ -250,7 +269,7 @@ int gve_rx_alloc_ring_dqo(struct gve_priv *priv,
 
 	/* Allocate header buffers for header-split */
 	if (cfg->enable_header_split)
-		if (gve_rx_alloc_hdr_bufs(priv, rx, buffer_queue_slots))
+		if (gve_rx_alloc_hdr_bufs(priv, rx, rx->dqo.num_buf_states))
 			goto err;
 
 	/* Allocate RX completion queue */
@@ -276,10 +295,9 @@ int gve_rx_alloc_ring_dqo(struct gve_priv *priv,
 		rx->dqo.page_pool = pool;
 	} else {
 		qpl_id = gve_get_rx_qpl_id(cfg->qcfg_tx, rx->q_num);
-		qpl_page_cnt = gve_get_rx_pages_per_qpl_dqo(cfg->ring_size);
 
 		rx->dqo.qpl = gve_alloc_queue_page_list(priv, qpl_id,
-							qpl_page_cnt);
+							cfg->pages_per_qpl);
 		if (!rx->dqo.qpl)
 			goto err;
 		rx->dqo.next_qpl_page_idx = 0;
@@ -315,8 +333,7 @@ int gve_rx_alloc_rings_dqo(struct gve_priv *priv,
 	int err;
 	int i;
 
-	rx = kvcalloc(cfg->qcfg_rx->max_queues, sizeof(struct gve_rx_ring),
-		      GFP_KERNEL);
+	rx = kvzalloc_objs(struct gve_rx_ring, cfg->qcfg_rx->max_queues);
 	if (!rx)
 		return -ENOMEM;
 
@@ -361,6 +378,7 @@ void gve_rx_post_buffers_dqo(struct gve_rx_ring *rx)
 	struct gve_rx_compl_queue_dqo *complq = &rx->dqo.complq;
 	struct gve_rx_buf_queue_dqo *bufq = &rx->dqo.bufq;
 	struct gve_priv *priv = rx->gve;
+	u32 num_bufs_avail_to_hw;
 	u32 num_avail_slots;
 	u32 num_full_slots;
 	u32 num_posted = 0;
@@ -379,10 +397,13 @@ void gve_rx_post_buffers_dqo(struct gve_rx_ring *rx)
 			break;
 		}
 
-		if (rx->dqo.hdr_bufs.data)
+		if (rx->dqo.hdr_bufs.data) {
+			u16 buf_id = le16_to_cpu(desc->buf_id);
+
 			desc->header_buf_addr =
 				cpu_to_le64(rx->dqo.hdr_bufs.addr +
-					    priv->header_buf_size * bufq->tail);
+					(size_t)priv->header_buf_size * buf_id);
+		}
 
 		bufq->tail = (bufq->tail + 1) & bufq->mask;
 		complq->num_free_slots--;
@@ -393,6 +414,26 @@ void gve_rx_post_buffers_dqo(struct gve_rx_ring *rx)
 	}
 
 	rx->fill_cnt += num_posted;
+
+	/* If the queue has fewer than GVE_RX_BUF_THRESH_DQO descriptors
+	 * visible to the hardware, the hardware is in danger of starving
+	 * and cannot trigger interrupts.
+	 *
+	 * We use a threshold of 32 because a single maximum-sized RSC
+	 * packet can consume up to 19 descriptors in the Rx path. Lower
+	 * thresholds (e.g., 8 or 16) would be unsafe as they could cause
+	 * the device to drop/stall on a maximum-sized RSC packet.
+	 *
+	 * Start the timer to periodically reschedule NAPI and recover.
+	 */
+	num_bufs_avail_to_hw =
+		((bufq->tail & ~(GVE_RX_BUF_THRESH_DQO - 1)) -
+		 bufq->head) & bufq->mask;
+
+	if (num_bufs_avail_to_hw < GVE_RX_BUF_THRESH_DQO) {
+		mod_timer(&rx->starvation_timer,
+			  jiffies + msecs_to_jiffies(GVE_RX_NAPI_RESCHED_MS));
+	}
 }
 
 static void gve_rx_skb_csum(struct sk_buff *skb,
@@ -456,20 +497,38 @@ static void gve_rx_skb_hash(struct sk_buff *skb,
  * Note that this means if the time delta between packet reception and the last
  * clock read is greater than ~2 seconds, this will provide invalid results.
  */
+static ktime_t gve_rx_get_hwtstamp(struct gve_priv *gve, u32 hwts)
+{
+	u64 last_read = READ_ONCE(gve->last_sync_nic_counter);
+	u32 low = (u32)last_read;
+	s32 diff = hwts - low;
+
+	return ns_to_ktime(last_read + diff);
+}
+
 static void gve_rx_skb_hwtstamp(struct gve_rx_ring *rx,
 				const struct gve_rx_compl_desc_dqo *desc)
 {
-	u64 last_read = READ_ONCE(rx->gve->last_sync_nic_counter);
 	struct sk_buff *skb = rx->ctx.skb_head;
-	u32 ts, low;
-	s32 diff;
 
-	if (desc->ts_sub_nsecs_low & GVE_DQO_RX_HWTSTAMP_VALID) {
-		ts = le32_to_cpu(desc->ts);
-		low = (u32)last_read;
-		diff = ts - low;
-		skb_hwtstamps(skb)->hwtstamp = ns_to_ktime(last_read + diff);
-	}
+	if (desc->ts_sub_nsecs_low & GVE_DQO_RX_HWTSTAMP_VALID)
+		skb_hwtstamps(skb)->hwtstamp =
+			gve_rx_get_hwtstamp(rx->gve, le32_to_cpu(desc->ts));
+}
+
+int gve_xdp_rx_timestamp(const struct xdp_md *_ctx, u64 *timestamp)
+{
+	const struct gve_xdp_buff *ctx = (void *)_ctx;
+
+	if (!gve_is_clock_enabled(ctx->gve))
+		return -ENODATA;
+
+	if (!(ctx->compl_desc->ts_sub_nsecs_low & GVE_DQO_RX_HWTSTAMP_VALID))
+		return -ENODATA;
+
+	*timestamp = gve_rx_get_hwtstamp(ctx->gve,
+					 le32_to_cpu(ctx->compl_desc->ts));
+	return 0;
 }
 
 static void gve_rx_free_skb(struct napi_struct *napi, struct gve_rx_ring *rx)
@@ -683,15 +742,22 @@ err:
 }
 
 static int gve_rx_xsk_dqo(struct napi_struct *napi, struct gve_rx_ring *rx,
-			  struct gve_rx_buf_state_dqo *buf_state, int buf_len,
+			  const struct gve_rx_compl_desc_dqo *compl_desc,
+			  struct gve_rx_buf_state_dqo *buf_state,
 			  struct bpf_prog *xprog)
 {
 	struct xdp_buff *xdp = buf_state->xsk_buff;
+	int buf_len = compl_desc->packet_len;
 	struct gve_priv *priv = rx->gve;
+	struct gve_xdp_buff *gve_xdp;
 	int xdp_act;
 
 	xdp->data_end = xdp->data + buf_len;
 	xsk_buff_dma_sync_for_cpu(xdp);
+
+	gve_xdp = (void *)xdp;
+	gve_xdp->gve = priv;
+	gve_xdp->compl_desc = compl_desc;
 
 	if (xprog) {
 		xdp_act = bpf_prog_run_xdp(xprog, xdp);
@@ -704,8 +770,7 @@ static int gve_rx_xsk_dqo(struct napi_struct *napi, struct gve_rx_ring *rx,
 	}
 
 	/* Copy the data to skb */
-	rx->ctx.skb_head = gve_rx_copy_data(priv->dev, napi,
-					    xdp->data, buf_len);
+	rx->ctx.skb_head = xdp_build_skb_from_zc(xdp);
 	if (unlikely(!rx->ctx.skb_head)) {
 		xsk_buff_free(xdp);
 		gve_free_buf_state(rx, buf_state);
@@ -713,8 +778,6 @@ static int gve_rx_xsk_dqo(struct napi_struct *napi, struct gve_rx_ring *rx,
 	}
 	rx->ctx.skb_tail = rx->ctx.skb_head;
 
-	/* Free XSK buffer and Buffer state */
-	xsk_buff_free(xdp);
 	gve_free_buf_state(rx, buf_state);
 
 	/* Update Stats */
@@ -782,7 +845,7 @@ static int gve_rx_dqo(struct napi_struct *napi, struct gve_rx_ring *rx,
 
 	xprog = READ_ONCE(priv->xdp_prog);
 	if (buf_state->xsk_buff)
-		return gve_rx_xsk_dqo(napi, rx, buf_state, buf_len, xprog);
+		return gve_rx_xsk_dqo(napi, rx, compl_desc, buf_state, xprog);
 
 	/* Page might have not been used for awhile and was likely last written
 	 * by a different thread.
@@ -799,10 +862,13 @@ static int gve_rx_dqo(struct napi_struct *napi, struct gve_rx_ring *rx,
 		int unsplit = 0;
 
 		if (hdr_len && !hbo) {
-			rx->ctx.skb_head = gve_rx_copy_data(priv->dev, napi,
-							    rx->dqo.hdr_bufs.data +
-							    desc_idx * priv->header_buf_size,
-							    hdr_len);
+			size_t offset =
+				(size_t)buffer_id * priv->header_buf_size;
+
+			rx->ctx.skb_head =
+				gve_rx_copy_data(priv->dev, napi,
+						 rx->dqo.hdr_bufs.data + offset,
+						 hdr_len);
 			if (unlikely(!rx->ctx.skb_head))
 				goto error;
 			rx->ctx.skb_tail = rx->ctx.skb_head;
@@ -817,6 +883,11 @@ static int gve_rx_dqo(struct napi_struct *napi, struct gve_rx_ring *rx,
 		rx->rx_hsplit_unsplit_pkt += unsplit;
 		rx->rx_hsplit_bytes += hdr_len;
 		u64_stats_update_end(&rx->statss);
+
+		if (!buf_len) {
+			gve_free_buffer(rx, buf_state);
+			return 0;
+		}
 	} else if (!rx->ctx.skb_head && rx->dqo.page_pool &&
 		   netmem_is_net_iov(buf_state->page_info.netmem)) {
 		/* when header split is disabled, the header went to the packet
@@ -840,30 +911,41 @@ static int gve_rx_dqo(struct napi_struct *napi, struct gve_rx_ring *rx,
 	}
 
 	if (xprog) {
-		struct xdp_buff xdp;
+		struct gve_xdp_buff gve_xdp;
 		void *old_data;
 		int xdp_act;
 
-		xdp_init_buff(&xdp, buf_state->page_info.buf_size,
+		xdp_init_buff(&gve_xdp.xdp, buf_state->page_info.buf_size,
 			      &rx->xdp_rxq);
-		xdp_prepare_buff(&xdp,
+		xdp_prepare_buff(&gve_xdp.xdp,
 				 buf_state->page_info.page_address +
 				 buf_state->page_info.page_offset,
 				 buf_state->page_info.pad,
-				 buf_len, false);
-		old_data = xdp.data;
-		xdp_act = bpf_prog_run_xdp(xprog, &xdp);
-		buf_state->page_info.pad += xdp.data - old_data;
-		buf_len = xdp.data_end - xdp.data;
+				 buf_len, true);
+		gve_xdp.gve = priv;
+		gve_xdp.compl_desc = compl_desc;
+
+		old_data = gve_xdp.xdp.data;
+		xdp_act = bpf_prog_run_xdp(xprog, &gve_xdp.xdp);
+		buf_state->page_info.pad += gve_xdp.xdp.data - old_data;
+		buf_len = gve_xdp.xdp.data_end - gve_xdp.xdp.data;
 		if (xdp_act != XDP_PASS) {
-			gve_xdp_done_dqo(priv, rx, &xdp, xprog, xdp_act,
+			gve_xdp_done_dqo(priv, rx, &gve_xdp.xdp, xprog, xdp_act,
 					 buf_state);
 			return 0;
 		}
 
+		rx->ctx.skb_head = xdp_build_skb_from_buff(&gve_xdp.xdp);
+		if (unlikely(!rx->ctx.skb_head))
+			goto error;
+		rx->ctx.skb_tail = rx->ctx.skb_head;
+
+		gve_reuse_buffer(rx, buf_state);
+
 		u64_stats_update_begin(&rx->statss);
 		rx->xdp_actions[XDP_PASS]++;
 		u64_stats_update_end(&rx->statss);
+		return 0;
 	}
 
 	if (eop && buf_len <= priv->rx_copybreak &&
@@ -912,10 +994,17 @@ static int gve_rx_complete_rsc(struct sk_buff *skb,
 			       struct gve_ptype ptype)
 {
 	struct skb_shared_info *shinfo = skb_shinfo(skb);
+	int rsc_segments, rsc_seg_len, hdr_len;
+	skb_frag_t *frag;
+	void *va;
 
-	/* Only TCP is supported right now. */
+	/* HW-GRO only coalesces TCP. */
 	if (ptype.l4_type != GVE_L4_TYPE_TCP)
 		return -EINVAL;
+
+	rsc_seg_len = le16_to_cpu(desc->rsc_seg_len);
+	if (!rsc_seg_len)
+		return 0;
 
 	switch (ptype.l3_type) {
 	case GVE_L3_TYPE_IPV4:
@@ -928,7 +1017,31 @@ static int gve_rx_complete_rsc(struct sk_buff *skb,
 		return -EINVAL;
 	}
 
-	shinfo->gso_size = le16_to_cpu(desc->rsc_seg_len);
+	if (skb_headlen(skb)) {
+		/* With header-split, payload is in the non-linear part */
+		rsc_segments = DIV_ROUND_UP(skb->data_len, rsc_seg_len);
+	} else {
+		/* HW-GRO packets are guaranteed to have complete TCP/IP
+		 * headers in frag[0] when header-split is not enabled.
+		 */
+		frag = &skb_shinfo(skb)->frags[0];
+		va = skb_frag_address(frag);
+		hdr_len =
+			eth_get_headlen(skb->dev, va, skb_frag_size(frag));
+		rsc_segments = DIV_ROUND_UP(skb->len - hdr_len, rsc_seg_len);
+		skb_copy_to_linear_data(skb, va, hdr_len);
+		skb_frag_size_sub(frag, hdr_len);
+		/* Verify we didn't empty the fragment completely as that could
+		 * otherwise lead to page leaks.
+		 */
+		DEBUG_NET_WARN_ON_ONCE(!skb_frag_size(frag));
+		skb_frag_off_add(frag, hdr_len);
+		skb->data_len -= hdr_len;
+		skb->tail += hdr_len;
+	}
+	shinfo->gso_size = rsc_seg_len;
+	shinfo->gso_segs = rsc_segments;
+
 	return 0;
 }
 
@@ -961,7 +1074,7 @@ static int gve_rx_complete_skb(struct gve_rx_ring *rx, struct napi_struct *napi,
 			return err;
 	}
 
-	if (skb_headlen(rx->ctx.skb_head) == 0)
+	if (rx->ctx.skb_head == napi->skb)
 		napi_gro_frags(napi);
 	else
 		napi_gro_receive(napi, rx->ctx.skb_head);

@@ -1085,7 +1085,7 @@ static void rp1_pctl_pin_dbg_show(struct pinctrl_dev *pctldev,
 
 	seq_printf(s, "function %s (%s) in %s; irq %d (%s)",
 		   rp1_func_names[fsel].name, rp1_func_names[func].name,
-		   value ? "hi" : "lo",
+		   str_hi_lo(value),
 		   irq, irq_type_names[pin->irq_type]);
 }
 
@@ -1158,7 +1158,7 @@ static int rp1_pctl_legacy_map_pull(struct rp1_pinctrl *pc,
 		return -EINVAL;
 	}
 
-	configs = kzalloc(sizeof(*configs), GFP_KERNEL);
+	configs = kzalloc_obj(*configs);
 	if (!configs)
 		return -ENOMEM;
 
@@ -1233,7 +1233,7 @@ static int rp1_pctl_dt_node_to_map(struct pinctrl_dev *pctldev,
 	if (num_configs || num_pulls)
 		maps_per_pin++;
 	reserved_maps = num_pins * maps_per_pin;
-	maps = kcalloc(reserved_maps, sizeof(*maps), GFP_KERNEL);
+	maps = kzalloc_objs(*maps, reserved_maps);
 	if (!maps)
 		return -ENOMEM;
 

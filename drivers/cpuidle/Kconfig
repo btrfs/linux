@@ -71,6 +71,11 @@ depends on RISCV
 source "drivers/cpuidle/Kconfig.riscv"
 endmenu
 
+menu "S390 CPU Idle Drivers"
+depends on S390
+source "drivers/cpuidle/Kconfig.s390"
+endmenu
+
 config HALTPOLL_CPUIDLE
 	tristate "Halt poll cpuidle driver"
 	depends on X86 && KVM_GUEST
@@ -81,7 +86,7 @@ config HALTPOLL_CPUIDLE
 	 before halting in the guest (more efficient than polling in the
 	 host via halt_poll_ns for some scenarios).
 
-endif
+endif # CPU_IDLE
 
 config ARCH_NEEDS_CPU_IDLE_COUPLED
 	def_bool n

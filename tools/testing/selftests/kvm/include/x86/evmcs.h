@@ -10,9 +10,9 @@
 #include "hyperv.h"
 #include "vmx.h"
 
-#define u16 uint16_t
-#define u32 uint32_t
-#define u64 uint64_t
+#define u16 u16
+#define u32 u32
+#define u64 u64
 
 #define EVMCS_VERSION 1
 
@@ -245,7 +245,7 @@ static inline void evmcs_enable(void)
 	enable_evmcs = true;
 }
 
-static inline int evmcs_vmptrld(uint64_t vmcs_pa, void *vmcs)
+static inline int evmcs_vmptrld(u64 vmcs_pa, void *vmcs)
 {
 	current_vp_assist->current_nested_vmcs = vmcs_pa;
 	current_vp_assist->enlighten_vmentry = 1;
@@ -265,7 +265,7 @@ static inline bool load_evmcs(struct hyperv_test_pages *hv)
 	return true;
 }
 
-static inline int evmcs_vmptrst(uint64_t *value)
+static inline int evmcs_vmptrst(u64 *value)
 {
 	*value = current_vp_assist->current_nested_vmcs &
 		~HV_X64_MSR_VP_ASSIST_PAGE_ENABLE;
@@ -273,7 +273,7 @@ static inline int evmcs_vmptrst(uint64_t *value)
 	return 0;
 }
 
-static inline int evmcs_vmread(uint64_t encoding, uint64_t *value)
+static inline int evmcs_vmread(u64 encoding, u64 *value)
 {
 	switch (encoding) {
 	case GUEST_RIP:
@@ -672,7 +672,7 @@ static inline int evmcs_vmread(uint64_t encoding, uint64_t *value)
 	return 0;
 }
 
-static inline int evmcs_vmwrite(uint64_t encoding, uint64_t value)
+static inline int evmcs_vmwrite(u64 encoding, u64 value)
 {
 	switch (encoding) {
 	case GUEST_RIP:
@@ -1207,30 +1207,23 @@ static inline int evmcs_vmlaunch(void)
 
 	current_evmcs->hv_clean_fields = 0;
 
-	__asm__ __volatile__("push %%rbp;"
-			     "push %%rcx;"
-			     "push %%rdx;"
-			     "push %%rsi;"
-			     "push %%rdi;"
-			     "push $0;"
+	__asm__ __volatile__("push $0;"
 			     "mov %%rsp, (%[host_rsp]);"
 			     "lea 1f(%%rip), %%rax;"
 			     "mov %%rax, (%[host_rip]);"
+			     VMX_SWITCH_GPRS_ASM
 			     "vmlaunch;"
 			     "incq (%%rsp);"
-			     "1: pop %%rax;"
-			     "pop %%rdi;"
-			     "pop %%rsi;"
-			     "pop %%rdx;"
-			     "pop %%rcx;"
-			     "pop %%rbp;"
+			     "1: ;"
+			     VMX_SWITCH_GPRS_ASM
+			     "pop %%rax;"
 			     : [ret]"=&a"(ret)
 			     : [host_rsp]"r"
-			       ((uint64_t)&current_evmcs->host_rsp),
+			       ((u64)&current_evmcs->host_rsp),
 			       [host_rip]"r"
-			       ((uint64_t)&current_evmcs->host_rip)
-			     : "memory", "cc", "rbx", "r8", "r9", "r10",
-			       "r11", "r12", "r13", "r14", "r15");
+			       ((u64)&current_evmcs->host_rip),
+			       GUEST_REGS_OFFSETS
+			     : "memory", "cc");
 	return ret;
 }
 
@@ -1246,30 +1239,23 @@ static inline int evmcs_vmresume(void)
 	/* HOST_RSP */
 	current_evmcs->hv_clean_fields &= ~HV_VMX_ENLIGHTENED_CLEAN_FIELD_HOST_POINTER;
 
-	__asm__ __volatile__("push %%rbp;"
-			     "push %%rcx;"
-			     "push %%rdx;"
-			     "push %%rsi;"
-			     "push %%rdi;"
-			     "push $0;"
+	__asm__ __volatile__("push $0;"
 			     "mov %%rsp, (%[host_rsp]);"
 			     "lea 1f(%%rip), %%rax;"
 			     "mov %%rax, (%[host_rip]);"
+			     VMX_SWITCH_GPRS_ASM
 			     "vmresume;"
 			     "incq (%%rsp);"
-			     "1: pop %%rax;"
-			     "pop %%rdi;"
-			     "pop %%rsi;"
-			     "pop %%rdx;"
-			     "pop %%rcx;"
-			     "pop %%rbp;"
+			     "1: ;"
+			     VMX_SWITCH_GPRS_ASM
+			     "pop %%rax;"
 			     : [ret]"=&a"(ret)
 			     : [host_rsp]"r"
-			       ((uint64_t)&current_evmcs->host_rsp),
+			       ((u64)&current_evmcs->host_rsp),
 			       [host_rip]"r"
-			       ((uint64_t)&current_evmcs->host_rip)
-			     : "memory", "cc", "rbx", "r8", "r9", "r10",
-			       "r11", "r12", "r13", "r14", "r15");
+			       ((u64)&current_evmcs->host_rip),
+			       GUEST_REGS_OFFSETS
+			     : "memory", "cc");
 	return ret;
 }
 

@@ -17,6 +17,8 @@ extern unsigned long loops_per_jiffy;
 
 #include <asm/delay.h>
 
+bool delay_read_timer(unsigned long *t);
+
 /*
  * Using udelay() for intervals greater than a few milliseconds can
  * risk overflow for high loops_per_jiffy (high bogomips) machines. The
@@ -68,7 +70,7 @@ void usleep_range_state(unsigned long min, unsigned long max,
  * @min:	Minimum time in microseconds to sleep
  * @max:	Maximum time in microseconds to sleep
  *
- * For basic information please refere to usleep_range_state().
+ * For basic information please refer to usleep_range_state().
  *
  * The task will be in the state TASK_UNINTERRUPTIBLE during the sleep.
  */
@@ -82,10 +84,10 @@ static inline void usleep_range(unsigned long min, unsigned long max)
  * @min:	Minimum time in microseconds to sleep
  * @max:	Maximum time in microseconds to sleep
  *
- * For basic information please refere to usleep_range_state().
+ * For basic information please refer to usleep_range_state().
  *
  * The sleeping task has the state TASK_IDLE during the sleep to prevent
- * contribution to the load avarage.
+ * contribution to the load average.
  */
 static inline void usleep_range_idle(unsigned long min, unsigned long max)
 {
@@ -96,7 +98,7 @@ static inline void usleep_range_idle(unsigned long min, unsigned long max)
  * ssleep - wrapper for seconds around msleep
  * @seconds:	Requested sleep duration in seconds
  *
- * Please refere to msleep() for detailed information.
+ * Please refer to msleep() for detailed information.
  */
 static inline void ssleep(unsigned int seconds)
 {
@@ -110,7 +112,7 @@ static const unsigned int max_slack_shift = 2;
  * fsleep - flexible sleep which autoselects the best mechanism
  * @usecs:	requested sleep duration in microseconds
  *
- * flseep() selects the best mechanism that will provide maximum 25% slack
+ * fsleep() selects the best mechanism that will provide maximum 25% slack
  * to the requested sleep duration. Therefore it uses:
  *
  * * udelay() loop for sleep durations <= 10 microseconds to avoid hrtimer

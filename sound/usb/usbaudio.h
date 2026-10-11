@@ -7,6 +7,8 @@
  *   Copyright (c) 2002 by Takashi Iwai <tiwai@suse.de>
  */
 
+#include <sound/core.h>
+
 /* handling of USB vendor/product ID pairs as 32-bit numbers */
 #define USB_ID(vendor, product) (((unsigned int)(vendor) << 16) | (product))
 #define USB_ID_VENDOR(id) ((id) >> 16)
@@ -41,9 +43,8 @@ struct snd_usb_audio {
 	unsigned int system_suspend;
 	atomic_t active;
 	atomic_t shutdown;
-	atomic_t usage_count;
-	wait_queue_head_t shutdown_wait;
-	unsigned int quirk_flags;
+	struct snd_refcount usage_count;
+	u64 quirk_flags;
 	unsigned int need_delayed_register:1; /* warn for delayed registration */
 	int num_interfaces;
 	int last_iface;
@@ -224,6 +225,39 @@ extern bool snd_usb_skip_validation;
  *  playback value represents muted state instead of minimum audible volume
  * QUIRK_FLAG_MIXER_CAPTURE_MIN_MUTE
  *  Similar to QUIRK_FLAG_MIXER_PLAYBACK_MIN_MUTE, but for capture streams
+ * QUIRK_FLAG_SKIP_IFACE_SETUP
+ *  Skip the probe-time interface setup (usb_set_interface,
+ *  init_pitch, init_sample_rate); redundant with
+ *  snd_usb_endpoint_prepare() at stream-open time
+ * QUIRK_FLAG_MIXER_PLAYBACK_LINEAR_VOL
+ *  Set linear volume mapping for devices where the playback volume control
+ *  value is mapped to voltage (instead of dB) level linearly. In short:
+ *  x(raw) = (raw - raw_min) / (raw_max - raw_min); V(x) = k * x;
+ *  dB(x) = 20 * log10(x). Overrides QUIRK_FLAG_MIXER_PLAYBACK_MIN_MUTE
+ * QUIRK_FLAG_MIXER_CAPTURE_LINEAR_VOL
+ *  Similar to QUIRK_FLAG_MIXER_PLAYBACK_LINEAR_VOL, but for capture streams.
+ *  Overrides QUIRK_FLAG_MIXER_CAPTURE_MIN_MUTE
+ * QUIRK_FLAG_IFB_SILENCE_ON_EMPTY
+ *  In implicit feedback mode, when an entire capture URB returns with
+ *  all iso_frame_desc[i].status != 0 (bytes==0), do not silently return
+ *  from snd_usb_handle_sync_urb. Instead fall through and enqueue a
+ *  packet_info containing only size-0 packets, so the OUT ring keeps
+ *  moving (emits silence). Needed by Behringer Flow 8 (1397:050c).
+ * QUIRK_FLAG_MIXER_GET_CUR_OK
+ *  On some devices, whether their GET_CUR being sticky depends on whether
+ *  hotpluggable components are present. When the hotpluggable components are
+ *  missing on probe, their GET_CUR behavior is classified as broken. Set the
+ *  flag to prevent the heuristics from gating GET_CUR.
+ * QUIRK_FLAG_PLAYBACK_URB_FIXUP
+ *  Set URB_ISO_ASAP flag for isochronous URBs and force nurbs to MAX_URBS.
+ *  This is needed for devices that exhibit boot-time audio stuttering due
+ *  to insufficient buffer depth combined with xHCI scheduling variability.
+ *  The larger buffer (MAX_URBS = 12, ~64ms) absorbs system scheduling
+ *  jitter during boot, while URB_ISO_ASAP ensures consistent xHCI scheduling.
+ * QUIRK_FLAG_ALWAYS_SET_RATE
+ *  Issue SET_CUR for the sample rate even when the clock already reports the
+ *  requested rate.  A device advertising a single rate is otherwise never sent
+ *  the request at all, and some require it before streaming will start.
  */
 
 enum {
@@ -253,10 +287,17 @@ enum {
 	QUIRK_TYPE_MIC_RES_384			= 23,
 	QUIRK_TYPE_MIXER_PLAYBACK_MIN_MUTE	= 24,
 	QUIRK_TYPE_MIXER_CAPTURE_MIN_MUTE	= 25,
-/* Please also edit snd_usb_audio_quirk_flag_names */
+	QUIRK_TYPE_SKIP_IFACE_SETUP		= 26,
+	QUIRK_TYPE_MIXER_PLAYBACK_LINEAR_VOL	= 27,
+	QUIRK_TYPE_MIXER_CAPTURE_LINEAR_VOL	= 28,
+	QUIRK_TYPE_IFB_SILENCE_ON_EMPTY		= 29,
+	QUIRK_TYPE_MIXER_GET_CUR_OK		= 30,
+	QUIRK_TYPE_PLAYBACK_URB_FIXUP		= 31,
+	QUIRK_TYPE_ALWAYS_SET_RATE		= 32,
+/* Please also edit snd_usb_audio_quirk_flag_names and alsa-configuration.rst */
 };
 
-#define QUIRK_FLAG(x)	BIT_U32(QUIRK_TYPE_ ## x)
+#define QUIRK_FLAG(x)	BIT_U64(QUIRK_TYPE_ ## x)
 
 #define QUIRK_FLAG_GET_SAMPLE_RATE		QUIRK_FLAG(GET_SAMPLE_RATE)
 #define QUIRK_FLAG_SHARE_MEDIA_DEVICE		QUIRK_FLAG(SHARE_MEDIA_DEVICE)
@@ -284,5 +325,12 @@ enum {
 #define QUIRK_FLAG_MIC_RES_384			QUIRK_FLAG(MIC_RES_384)
 #define QUIRK_FLAG_MIXER_PLAYBACK_MIN_MUTE	QUIRK_FLAG(MIXER_PLAYBACK_MIN_MUTE)
 #define QUIRK_FLAG_MIXER_CAPTURE_MIN_MUTE	QUIRK_FLAG(MIXER_CAPTURE_MIN_MUTE)
+#define QUIRK_FLAG_SKIP_IFACE_SETUP		QUIRK_FLAG(SKIP_IFACE_SETUP)
+#define QUIRK_FLAG_MIXER_PLAYBACK_LINEAR_VOL	QUIRK_FLAG(MIXER_PLAYBACK_LINEAR_VOL)
+#define QUIRK_FLAG_MIXER_CAPTURE_LINEAR_VOL	QUIRK_FLAG(MIXER_CAPTURE_LINEAR_VOL)
+#define QUIRK_FLAG_IFB_SILENCE_ON_EMPTY		QUIRK_FLAG(IFB_SILENCE_ON_EMPTY)
+#define QUIRK_FLAG_MIXER_GET_CUR_OK		QUIRK_FLAG(MIXER_GET_CUR_OK)
+#define QUIRK_FLAG_PLAYBACK_URB_FIXUP		QUIRK_FLAG(PLAYBACK_URB_FIXUP)
+#define QUIRK_FLAG_ALWAYS_SET_RATE		QUIRK_FLAG(ALWAYS_SET_RATE)
 
 #endif /* __USBAUDIO_H */

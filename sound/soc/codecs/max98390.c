@@ -534,8 +534,7 @@ static SOC_ENUM_SINGLE_DECL(max98390_current_limit,
 static int max98390_ref_rdc_put(struct snd_kcontrol *kcontrol,
 		struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_component *component =
-		snd_soc_kcontrol_component(kcontrol);
+	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
 	struct max98390_priv *max98390 =
 		snd_soc_component_get_drvdata(component);
 
@@ -554,8 +553,7 @@ static int max98390_ref_rdc_put(struct snd_kcontrol *kcontrol,
 static int max98390_ref_rdc_get(struct snd_kcontrol *kcontrol,
 		struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_component *component =
-		snd_soc_kcontrol_component(kcontrol);
+	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
 	struct max98390_priv *max98390 =
 		snd_soc_component_get_drvdata(component);
 
@@ -567,8 +565,7 @@ static int max98390_ref_rdc_get(struct snd_kcontrol *kcontrol,
 static int max98390_ambient_temp_put(struct snd_kcontrol *kcontrol,
 		struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_component *component =
-		snd_soc_kcontrol_component(kcontrol);
+	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
 	struct max98390_priv *max98390 =
 		snd_soc_component_get_drvdata(component);
 
@@ -585,8 +582,7 @@ static int max98390_ambient_temp_put(struct snd_kcontrol *kcontrol,
 static int max98390_ambient_temp_get(struct snd_kcontrol *kcontrol,
 		struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_component *component =
-		snd_soc_kcontrol_component(kcontrol);
+	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
 	struct max98390_priv *max98390 =
 		snd_soc_component_get_drvdata(component);
 
@@ -598,8 +594,7 @@ static int max98390_ambient_temp_get(struct snd_kcontrol *kcontrol,
 static int max98390_adaptive_rdc_put(struct snd_kcontrol *kcontrol,
 		struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_component *component =
-		snd_soc_kcontrol_component(kcontrol);
+	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
 
 	dev_warn(component->dev, "Put adaptive rdc not supported\n");
 
@@ -610,8 +605,7 @@ static int max98390_adaptive_rdc_get(struct snd_kcontrol *kcontrol,
 		struct snd_ctl_elem_value *ucontrol)
 {
 	int rdc, rdc0;
-	struct snd_soc_component *component =
-		snd_soc_kcontrol_component(kcontrol);
+	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
 	struct max98390_priv *max98390 =
 		snd_soc_component_get_drvdata(component);
 
@@ -632,9 +626,9 @@ static int max98390_dsm_calib_get(struct snd_kcontrol *kcontrol,
 static int max98390_dsm_calib_put(struct snd_kcontrol *kcontrol,
 		struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_component *component = snd_soc_kcontrol_component(kcontrol);
+	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
 	struct max98390_priv *max98390 = snd_soc_component_get_drvdata(component);
-	struct snd_soc_dapm_context *dapm = snd_soc_component_get_dapm(component);
+	struct snd_soc_dapm_context *dapm = snd_soc_component_to_dapm(component);
 	unsigned int rdc, rdc_cal_result, rdc_integer, rdc_factor, temp, val;
 
 	snd_soc_dapm_mutex_lock(dapm);
@@ -794,7 +788,6 @@ static int max98390_dsm_init(struct snd_soc_component *component)
 	const char *vendor, *product;
 	struct max98390_priv *max98390 =
 		snd_soc_component_get_drvdata(component);
-	const struct firmware *fw;
 	char *dsm_param;
 
 	vendor = dmi_get_system_info(DMI_SYS_VENDOR);
@@ -811,6 +804,8 @@ static int max98390_dsm_init(struct snd_soc_component *component)
 		snprintf(filename, sizeof(filename), "%s",
 			max98390->dsm_param_name);
 	}
+
+	const struct firmware *fw __free(firmware) = NULL;
 	ret = request_firmware(&fw, filename, component->dev);
 	if (ret) {
 		ret = request_firmware(&fw, "dsm_param.bin", component->dev);
@@ -818,7 +813,7 @@ static int max98390_dsm_init(struct snd_soc_component *component)
 			ret = request_firmware(&fw, "dsmparam.bin",
 				component->dev);
 			if (ret)
-				goto err;
+				return ret;
 		}
 	}
 
@@ -828,8 +823,7 @@ static int max98390_dsm_init(struct snd_soc_component *component)
 	if (fw->size < MAX98390_DSM_PARAM_MIN_SIZE) {
 		dev_err(component->dev,
 			"param fw is invalid.\n");
-		ret = -EINVAL;
-		goto err_alloc;
+		return -EINVAL;
 	}
 	dsm_param = (char *)fw->data;
 	param_start_addr = (dsm_param[0] & 0xff) | (dsm_param[1] & 0xff) << 8;
@@ -839,8 +833,7 @@ static int max98390_dsm_init(struct snd_soc_component *component)
 		fw->size < param_size + MAX98390_DSM_PAYLOAD_OFFSET) {
 		dev_err(component->dev,
 			"param fw is invalid.\n");
-		ret = -EINVAL;
-		goto err_alloc;
+		return -EINVAL;
 	}
 	regmap_write(max98390->regmap, MAX98390_R203A_AMP_EN, 0x80);
 	dsm_param += MAX98390_DSM_PAYLOAD_OFFSET;
@@ -848,10 +841,7 @@ static int max98390_dsm_init(struct snd_soc_component *component)
 		dsm_param, param_size);
 	regmap_write(max98390->regmap, MAX98390_R23E1_DSP_GLOBAL_EN, 0x01);
 
-err_alloc:
-	release_firmware(fw);
-err:
-	return ret;
+	return 0;
 }
 
 static void max98390_init_regs(struct snd_soc_component *component)
@@ -958,11 +948,17 @@ static int max98390_suspend(struct device *dev)
 static int max98390_resume(struct device *dev)
 {
 	struct max98390_priv *max98390 = dev_get_drvdata(dev);
+	int ret;
 
 	dev_dbg(dev, "%s:Enter\n", __func__);
 
 	regcache_cache_only(max98390->regmap, false);
-	regcache_sync(max98390->regmap);
+	ret = regcache_sync(max98390->regmap);
+	if (ret) {
+		regcache_cache_only(max98390->regmap, true);
+		regcache_mark_dirty(max98390->regmap);
+		return ret;
+	}
 
 	return 0;
 }
@@ -1021,10 +1017,8 @@ static int max98390_i2c_probe(struct i2c_client *i2c)
 	struct i2c_adapter *adapter = i2c->adapter;
 	struct gpio_desc *reset_gpio;
 
-	ret = i2c_check_functionality(adapter,
-		I2C_FUNC_SMBUS_BYTE
-		| I2C_FUNC_SMBUS_BYTE_DATA);
-	if (!ret) {
+	if (!i2c_check_functionality(adapter, I2C_FUNC_SMBUS_BYTE |
+					      I2C_FUNC_SMBUS_BYTE_DATA)) {
 		dev_err(&i2c->dev, "I2C check functionality failed\n");
 		return -ENXIO;
 	}
@@ -1073,6 +1067,9 @@ static int max98390_i2c_probe(struct i2c_client *i2c)
 
 	reset_gpio = devm_gpiod_get_optional(&i2c->dev,
 					     "reset", GPIOD_OUT_HIGH);
+	if (IS_ERR(reset_gpio))
+		return dev_err_probe(&i2c->dev, PTR_ERR(reset_gpio),
+				     "Failed to get reset gpio\n");
 
 	/* Power on device */
 	if (reset_gpio) {
@@ -1101,8 +1098,8 @@ static int max98390_i2c_probe(struct i2c_client *i2c)
 }
 
 static const struct i2c_device_id max98390_i2c_id[] = {
-	{ "max98390"},
-	{},
+	{ .name = "max98390" },
+	{ }
 };
 
 MODULE_DEVICE_TABLE(i2c, max98390_i2c_id);

@@ -123,8 +123,7 @@ At mount time, the two directories given as mount options "lowerdir" and
   mount -t overlay overlay -olowerdir=/lower,upperdir=/upper,\
   workdir=/work /merged
 
-The "workdir" needs to be an empty directory on the same filesystem
-as upperdir.
+The "workdir" needs to be a directory on the same filesystem as upperdir.
 
 Then whenever a lookup is requested in such a merged directory, the
 lookup is performed in each actual directory and the combined result
@@ -345,6 +344,22 @@ and::
 
 The resulting access permissions should be the same.  The difference is in
 the time of copy (on-demand vs. up-front).
+
+
+Idmapped mounts
+---------------
+
+The overlay mount itself can be turned into an idmapped mount by applying an
+idmapping to it with mount_setattr(2) and MOUNT_ATTR_IDMAP, just like for
+other filesystems that support idmapped mounts.
+
+The mount idmapping only changes how ownership and permissions of the overlay
+inodes are presented to and interpreted for the caller.  It does not change
+how overlayfs accesses the underlying layers: those are still accessed with
+the stashed mounter's credentials through their own mounts, which may
+themselves be idmapped.  The overlay mount idmapping and any layer idmapping
+compose, an underlying id is first mapped according to the relevant layer
+idmapping and then according to the overlay mount idmapping.
 
 
 Multiple lower layers
@@ -753,9 +768,9 @@ Note: the mount options index=off,nfs_export=on are conflicting for a
 read-write mount and will result in an error.
 
 Note: the mount option uuid=off can be used to replace UUID of the underlying
-filesystem in file handles with null, and effectively disable UUID checks. This
+filesystem in file handles with null, in order to relax the UUID checks. This
 can be useful in case the underlying disk is copied and the UUID of this copy
-is changed. This is only applicable if all lower/upper/work directories are on
+is changed. This is only applicable if all lower directories are on
 the same filesystem, otherwise it will fallback to normal behaviour.
 
 
@@ -769,7 +784,7 @@ controlled by the "uuid" mount option, which supports these values:
     UUID of overlayfs is null. fsid is taken from upper most filesystem.
 - "off":
     UUID of overlayfs is null. fsid is taken from upper most filesystem.
-    UUID of underlying layers is ignored.
+    UUID of underlying layers is ignored and null used instead.
 - "on":
     UUID of overlayfs is generated and used to report a unique fsid.
     UUID is stored in xattr "trusted.overlay.uuid", making overlayfs fsid
@@ -781,6 +796,56 @@ controlled by the "uuid" mount option, which supports these values:
     meets the prerequisites.
     Downgrade to "uuid=null" for existing overlay filesystems that were never
     mounted with "uuid=on".
+
+
+Durability and copy up
+----------------------
+
+The fsync(2) system call ensures that the data and metadata of a file
+are safely written to the backing storage, which is expected to
+guarantee the existence of the information post system crash.
+
+Without an fsync(2) call, there is no guarantee that the observed
+data after a system crash will be either the old or the new data, but
+in practice, the observed data after crash is often the old or new data
+or a mix of both.
+
+When an overlayfs file is modified for the first time, copy up will
+create a copy of the lower file and its parent directories in the upper
+layer.  Since the Linux filesystem API does not enforce any particular
+ordering on storing changes without explicit fsync(2) calls, in case
+of a system crash, the upper file could end up with no data at all
+(i.e. zeros), which would be an unusual outcome.  To avoid this
+experience, overlayfs calls fsync(2) on the upper file before completing
+data copy up with rename(2) or link(2) to make the copy up "atomic".
+
+By default, overlayfs does not explicitly call fsync(2) on copied up
+directories or on metadata-only copy up, so it provides no guarantee to
+persist the user's modification unless the user calls fsync(2).
+The fsync during copy up only guarantees that if a copy up is observed
+after a crash, the observed data is not zeroes or intermediate values
+from the copy up staging area.
+
+On traditional local filesystems with a single journal (e.g. ext4, xfs),
+fsync on a file also persists the parent directory changes, because they
+are usually modified in the same transaction, so metadata durability during
+data copy up effectively comes for free.  Overlayfs further limits risk by
+disallowing network filesystems as upper layer.
+
+Overlayfs can be tuned to prefer performance or durability when storing
+to the underlying upper layer.  This is controlled by the "fsync" mount
+option, which supports these values:
+
+- "auto": (default)
+    Call fsync(2) on upper file before completion of data copy up.
+    No explicit fsync(2) on directory or metadata-only copy up.
+- "strict":
+    Call fsync(2) on upper file and directories before completion of any
+    copy up.
+- "volatile": [*]
+    Prefer performance over durability (see `Volatile mount`_)
+
+[*] The mount option "volatile" is an alias to "fsync=volatile".
 
 
 Volatile mount

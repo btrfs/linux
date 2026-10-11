@@ -94,7 +94,7 @@ static int dpp401_dscl_get_pixel_depth_val(enum lb_pixel_depth depth)
 	}
 }
 
-static bool dpp401_dscl_is_video_format(enum pixel_format format)
+static bool dpp401_dscl_is_video_format(enum dc_pixel_format format)
 {
 	if (format >= PIXEL_FORMAT_VIDEO_BEGIN
 			&& format <= PIXEL_FORMAT_VIDEO_END)
@@ -103,7 +103,7 @@ static bool dpp401_dscl_is_video_format(enum pixel_format format)
 		return false;
 }
 
-static bool dpp401_dscl_is_420_format(enum pixel_format format)
+static bool dpp401_dscl_is_420_format(enum dc_pixel_format format)
 {
 	if (format == PIXEL_FORMAT_420BPP8 ||
 			format == PIXEL_FORMAT_420BPP10)
@@ -112,7 +112,7 @@ static bool dpp401_dscl_is_420_format(enum pixel_format format)
 		return false;
 }
 
-static enum dcn401_dscl_mode_sel dpp401_dscl_get_dscl_mode(
+enum dcn401_dscl_mode_sel dpp401_dscl_get_dscl_mode(
 		struct dpp *dpp_base,
 		const struct scaler_data *data,
 		bool dbg_always_scale)
@@ -146,7 +146,7 @@ static enum dcn401_dscl_mode_sel dpp401_dscl_get_dscl_mode(
 	return DCN401_DSCL_MODE_SCALING_420_YCBCR_ENABLE;
 }
 
-static void dpp401_power_on_dscl(
+void dpp401_power_on_dscl(
 	struct dpp *dpp_base,
 	bool power_on)
 {
@@ -155,7 +155,13 @@ static void dpp401_power_on_dscl(
 	if (dpp->tf_regs->DSCL_MEM_PWR_CTRL) {
 		if (power_on) {
 			REG_UPDATE(DSCL_MEM_PWR_CTRL, LUT_MEM_PWR_FORCE, 0);
-			REG_WAIT(DSCL_MEM_PWR_STATUS, LUT_MEM_PWR_STATE, 0, 1, 5);
+			if (dpp->base.ctx->dc->caps.ips_v2_support) {
+				/*hw default changes to LS*/
+				REG_UPDATE(DSCL_MEM_PWR_CTRL, LUT_MEM_PWR_DIS, 1);
+				REG_WAIT(DSCL_MEM_PWR_STATUS, LUT_MEM_PWR_STATE, 0, 1, 100);
+			} else
+				REG_WAIT(DSCL_MEM_PWR_STATUS, LUT_MEM_PWR_STATE, 0, 1, 5);
+			dpp->base.deferred_reg_writes.bits.disable_dscl = false;
 		} else {
 			if (dpp->base.ctx->dc->debug.enable_mem_low_power.bits.dscl) {
 				dpp->base.ctx->dc->optimized_required = true;
@@ -248,7 +254,7 @@ static void dpp401_dscl_set_scaler_filter(
 	for (phase = 0; phase < (NUM_PHASES / 2 + 1); phase++) {
 		for (pair = 0; pair < tap_pairs; pair++) {
 			even_coef = filter[phase * taps + 2 * pair];
-			if ((pair * 2 + 1) < taps)
+			if ((uint32_t)(pair * 2 + 1) < taps)
 				odd_coef = filter[phase * taps + 2 * pair + 1];
 			else
 				odd_coef = 0;
@@ -267,7 +273,7 @@ static void dpp401_dscl_set_scaler_filter(
 
 }
 
-static void dpp401_dscl_set_scl_filter(
+void dpp401_dscl_set_scl_filter(
 		struct dcn401_dpp *dpp,
 		const struct scaler_data *scl_data,
 		bool chroma_coef_mode,
@@ -462,7 +468,7 @@ static bool dpp401_dscl_is_lb_conf_valid(int ceil_vratio, int num_partitions, in
 }
 
 /*find first match configuration which meets the min required lb size*/
-static enum lb_memory_config dpp401_dscl_find_lb_memory_config(struct dcn401_dpp *dpp,
+enum lb_memory_config dpp401_dscl_find_lb_memory_config(struct dcn401_dpp *dpp,
 		const struct scaler_data *scl_data)
 {
 	int num_part_y, num_part_c;
@@ -631,8 +637,8 @@ static void dpp401_dscl_set_manual_ratio_init(
  *
  * Note: This function only have effect if AutoCal is disabled.
  */
-static void dpp401_dscl_set_recout(struct dcn401_dpp *dpp,
-				 const struct rect *recout)
+void dpp401_dscl_set_recout(struct dcn401_dpp *dpp,
+	const struct rect *recout)
 {
 	REG_SET_2(RECOUT_START, 0,
 		  /* First pixel of RECOUT in the active OTG area */
@@ -875,7 +881,7 @@ static void dpp401_dscl_program_easf_h(struct dpp *dpp_base, const struct scaler
  * This is the primary function to program EASF
  *
  */
-static void dpp401_dscl_program_easf(struct dpp *dpp_base, const struct scaler_data *scl_data)
+void dpp401_dscl_program_easf(struct dpp *dpp_base, const struct scaler_data *scl_data)
 {
 	struct dcn401_dpp *dpp = TO_DCN401_DPP(dpp_base);
 
@@ -904,7 +910,7 @@ static void dpp401_dscl_program_easf(struct dpp *dpp_base, const struct scaler_d
  * When we have 1:1 scaling, we need to disable EASF
  *
  */
-static void dpp401_dscl_disable_easf(struct dpp *dpp_base, const struct scaler_data *scl_data)
+void dpp401_dscl_disable_easf(struct dpp *dpp_base, const struct scaler_data *scl_data)
 {
 	struct dcn401_dpp *dpp = TO_DCN401_DPP(dpp_base);
 
@@ -917,7 +923,7 @@ static void dpp401_dscl_disable_easf(struct dpp *dpp_base, const struct scaler_d
 			SCL_EASF_H_EN, scl_data->dscl_prog_data.easf_h_en);
 	PERF_TRACE();
 }
-static void dpp401_dscl_set_isharp_filter(
+void dpp401_dscl_set_isharp_filter(
 	struct dcn401_dpp *dpp, const uint32_t *filter)
 {
 	int level;
@@ -947,15 +953,23 @@ static void dpp401_dscl_set_isharp_filter(
  * This is the primary function to program isharp
  *
  */
-static void dpp401_dscl_program_isharp(struct dpp *dpp_base,
-		const struct scaler_data *scl_data,
-		bool program_isharp_1dlut,
-		bool *bs_coeffs_updated)
+void dpp401_dscl_program_isharp(struct dpp *dpp_base,
+	const struct scaler_data *scl_data,
+	bool program_isharp_1dlut,
+	bool *bs_coeffs_updated)
 {
 	struct dcn401_dpp *dpp = TO_DCN401_DPP(dpp_base);
 	*bs_coeffs_updated = false;
 
 	PERF_TRACE();
+	/*power on isharp_delta_mem first*/
+	REG_UPDATE_2(ISHARP_DELTA_LUT_MEM_PWR_CTRL,
+		     ISHARP_DELTA_LUT_MEM_PWR_FORCE, 0,
+		     ISHARP_DELTA_LUT_MEM_PWR_DIS, 1);
+
+	REG_WAIT(ISHARP_DELTA_LUT_MEM_PWR_CTRL,
+		ISHARP_DELTA_LUT_MEM_PWR_STATE, 0, 1, 100);
+
 	/* ISHARP_MODE */
 	REG_SET_6(ISHARP_MODE, 0,
 		ISHARP_EN, scl_data->dscl_prog_data.isharp_en,
@@ -966,62 +980,57 @@ static void dpp401_dscl_program_isharp(struct dpp *dpp_base,
 		ISHARP_FMT_NORM, scl_data->dscl_prog_data.isharp_fmt.norm);
 
 	/* Skip remaining register programming if ISHARP is disabled */
-	if (!scl_data->dscl_prog_data.isharp_en) {
-		PERF_TRACE();
-		return;
-	}
+	if (scl_data->dscl_prog_data.isharp_en) {
+		/* ISHARP_NOISEDET_THRESHOLD */
+		REG_SET_2(ISHARP_NOISEDET_THRESHOLD, 0,
+			ISHARP_NOISEDET_UTHRE, scl_data->dscl_prog_data.isharp_noise_det.uthreshold,
+			ISHARP_NOISEDET_DTHRE, scl_data->dscl_prog_data.isharp_noise_det.dthreshold);
 
-	/* ISHARP_NOISEDET_THRESHOLD */
-	REG_SET_2(ISHARP_NOISEDET_THRESHOLD, 0,
-		ISHARP_NOISEDET_UTHRE, scl_data->dscl_prog_data.isharp_noise_det.uthreshold,
-		ISHARP_NOISEDET_DTHRE, scl_data->dscl_prog_data.isharp_noise_det.dthreshold);
+		/* ISHARP_NOISE_GAIN_PWL */
+		REG_SET_3(ISHARP_NOISE_GAIN_PWL, 0,
+			ISHARP_NOISEDET_PWL_START_IN, scl_data->dscl_prog_data.isharp_noise_det.pwl_start_in,
+			ISHARP_NOISEDET_PWL_END_IN, scl_data->dscl_prog_data.isharp_noise_det.pwl_end_in,
+			ISHARP_NOISEDET_PWL_SLOPE, scl_data->dscl_prog_data.isharp_noise_det.pwl_slope);
 
-	/* ISHARP_NOISE_GAIN_PWL */
-	REG_SET_3(ISHARP_NOISE_GAIN_PWL, 0,
-		ISHARP_NOISEDET_PWL_START_IN, scl_data->dscl_prog_data.isharp_noise_det.pwl_start_in,
-		ISHARP_NOISEDET_PWL_END_IN, scl_data->dscl_prog_data.isharp_noise_det.pwl_end_in,
-		ISHARP_NOISEDET_PWL_SLOPE, scl_data->dscl_prog_data.isharp_noise_det.pwl_slope);
+		/* ISHARP_LBA: IN_SEG, BASE_SEG, SLOPE_SEG */
+		REG_SET_3(ISHARP_LBA_PWL_SEG0, 0,
+			ISHARP_LBA_PWL_IN_SEG0, scl_data->dscl_prog_data.isharp_lba.in_seg[0],
+			ISHARP_LBA_PWL_BASE_SEG0, scl_data->dscl_prog_data.isharp_lba.base_seg[0],
+			ISHARP_LBA_PWL_SLOPE_SEG0, scl_data->dscl_prog_data.isharp_lba.slope_seg[0]);
+		REG_SET_3(ISHARP_LBA_PWL_SEG1, 0,
+			ISHARP_LBA_PWL_IN_SEG1, scl_data->dscl_prog_data.isharp_lba.in_seg[1],
+			ISHARP_LBA_PWL_BASE_SEG1, scl_data->dscl_prog_data.isharp_lba.base_seg[1],
+			ISHARP_LBA_PWL_SLOPE_SEG1, scl_data->dscl_prog_data.isharp_lba.slope_seg[1]);
+		REG_SET_3(ISHARP_LBA_PWL_SEG2, 0,
+			ISHARP_LBA_PWL_IN_SEG2, scl_data->dscl_prog_data.isharp_lba.in_seg[2],
+			ISHARP_LBA_PWL_BASE_SEG2, scl_data->dscl_prog_data.isharp_lba.base_seg[2],
+			ISHARP_LBA_PWL_SLOPE_SEG2, scl_data->dscl_prog_data.isharp_lba.slope_seg[2]);
+		REG_SET_3(ISHARP_LBA_PWL_SEG3, 0,
+			ISHARP_LBA_PWL_IN_SEG3, scl_data->dscl_prog_data.isharp_lba.in_seg[3],
+			ISHARP_LBA_PWL_BASE_SEG3, scl_data->dscl_prog_data.isharp_lba.base_seg[3],
+			ISHARP_LBA_PWL_SLOPE_SEG3, scl_data->dscl_prog_data.isharp_lba.slope_seg[3]);
+		REG_SET_3(ISHARP_LBA_PWL_SEG4, 0,
+			ISHARP_LBA_PWL_IN_SEG4, scl_data->dscl_prog_data.isharp_lba.in_seg[4],
+			ISHARP_LBA_PWL_BASE_SEG4, scl_data->dscl_prog_data.isharp_lba.base_seg[4],
+			ISHARP_LBA_PWL_SLOPE_SEG4, scl_data->dscl_prog_data.isharp_lba.slope_seg[4]);
+		REG_SET_2(ISHARP_LBA_PWL_SEG5, 0,
+			ISHARP_LBA_PWL_IN_SEG5, scl_data->dscl_prog_data.isharp_lba.in_seg[5],
+			ISHARP_LBA_PWL_BASE_SEG5, scl_data->dscl_prog_data.isharp_lba.base_seg[5]);
 
-	/* ISHARP_LBA: IN_SEG, BASE_SEG, SLOPE_SEG */
-	REG_SET_3(ISHARP_LBA_PWL_SEG0, 0,
-		ISHARP_LBA_PWL_IN_SEG0, scl_data->dscl_prog_data.isharp_lba.in_seg[0],
-		ISHARP_LBA_PWL_BASE_SEG0, scl_data->dscl_prog_data.isharp_lba.base_seg[0],
-		ISHARP_LBA_PWL_SLOPE_SEG0, scl_data->dscl_prog_data.isharp_lba.slope_seg[0]);
-	REG_SET_3(ISHARP_LBA_PWL_SEG1, 0,
-		ISHARP_LBA_PWL_IN_SEG1, scl_data->dscl_prog_data.isharp_lba.in_seg[1],
-		ISHARP_LBA_PWL_BASE_SEG1, scl_data->dscl_prog_data.isharp_lba.base_seg[1],
-		ISHARP_LBA_PWL_SLOPE_SEG1, scl_data->dscl_prog_data.isharp_lba.slope_seg[1]);
-	REG_SET_3(ISHARP_LBA_PWL_SEG2, 0,
-		ISHARP_LBA_PWL_IN_SEG2, scl_data->dscl_prog_data.isharp_lba.in_seg[2],
-		ISHARP_LBA_PWL_BASE_SEG2, scl_data->dscl_prog_data.isharp_lba.base_seg[2],
-		ISHARP_LBA_PWL_SLOPE_SEG2, scl_data->dscl_prog_data.isharp_lba.slope_seg[2]);
-	REG_SET_3(ISHARP_LBA_PWL_SEG3, 0,
-		ISHARP_LBA_PWL_IN_SEG3, scl_data->dscl_prog_data.isharp_lba.in_seg[3],
-		ISHARP_LBA_PWL_BASE_SEG3, scl_data->dscl_prog_data.isharp_lba.base_seg[3],
-		ISHARP_LBA_PWL_SLOPE_SEG3, scl_data->dscl_prog_data.isharp_lba.slope_seg[3]);
-	REG_SET_3(ISHARP_LBA_PWL_SEG4, 0,
-		ISHARP_LBA_PWL_IN_SEG4, scl_data->dscl_prog_data.isharp_lba.in_seg[4],
-		ISHARP_LBA_PWL_BASE_SEG4, scl_data->dscl_prog_data.isharp_lba.base_seg[4],
-		ISHARP_LBA_PWL_SLOPE_SEG4, scl_data->dscl_prog_data.isharp_lba.slope_seg[4]);
-	REG_SET_2(ISHARP_LBA_PWL_SEG5, 0,
-		ISHARP_LBA_PWL_IN_SEG5, scl_data->dscl_prog_data.isharp_lba.in_seg[5],
-		ISHARP_LBA_PWL_BASE_SEG5, scl_data->dscl_prog_data.isharp_lba.base_seg[5]);
+		/* ISHARP_DELTA_LUT */
+		if (!program_isharp_1dlut)
+			dpp401_dscl_set_isharp_filter(dpp, scl_data->dscl_prog_data.isharp_delta);
 
-	/* ISHARP_DELTA_LUT */
-	if (!program_isharp_1dlut)
-		dpp401_dscl_set_isharp_filter(dpp, scl_data->dscl_prog_data.isharp_delta);
-
-	/* ISHARP_NLDELTA_SOFT_CLIP */
-	REG_SET_6(ISHARP_NLDELTA_SOFT_CLIP, 0,
-		ISHARP_NLDELTA_SCLIP_EN_P, scl_data->dscl_prog_data.isharp_nldelta_sclip.enable_p,
-		ISHARP_NLDELTA_SCLIP_PIVOT_P, scl_data->dscl_prog_data.isharp_nldelta_sclip.pivot_p,
-		ISHARP_NLDELTA_SCLIP_SLOPE_P, scl_data->dscl_prog_data.isharp_nldelta_sclip.slope_p,
-		ISHARP_NLDELTA_SCLIP_EN_N, scl_data->dscl_prog_data.isharp_nldelta_sclip.enable_n,
-		ISHARP_NLDELTA_SCLIP_PIVOT_N, scl_data->dscl_prog_data.isharp_nldelta_sclip.pivot_n,
-		ISHARP_NLDELTA_SCLIP_SLOPE_N, scl_data->dscl_prog_data.isharp_nldelta_sclip.slope_n);
+		/* ISHARP_NLDELTA_SOFT_CLIP */
+		REG_SET_6(ISHARP_NLDELTA_SOFT_CLIP, 0,
+			ISHARP_NLDELTA_SCLIP_EN_P, scl_data->dscl_prog_data.isharp_nldelta_sclip.enable_p,
+			ISHARP_NLDELTA_SCLIP_PIVOT_P, scl_data->dscl_prog_data.isharp_nldelta_sclip.pivot_p,
+			ISHARP_NLDELTA_SCLIP_SLOPE_P, scl_data->dscl_prog_data.isharp_nldelta_sclip.slope_p,
+			ISHARP_NLDELTA_SCLIP_EN_N, scl_data->dscl_prog_data.isharp_nldelta_sclip.enable_n,
+			ISHARP_NLDELTA_SCLIP_PIVOT_N, scl_data->dscl_prog_data.isharp_nldelta_sclip.pivot_n,
+			ISHARP_NLDELTA_SCLIP_SLOPE_N, scl_data->dscl_prog_data.isharp_nldelta_sclip.slope_n);
 
 	/* Blur and Scale Coefficients - SCL_COEF_RAM_TAP_SELECT */
-	if (scl_data->dscl_prog_data.isharp_en) {
 		if (scl_data->dscl_prog_data.filter_blur_scale_v) {
 			dpp401_dscl_set_scaler_filter(
 				dpp, scl_data->taps.v_taps,
@@ -1037,6 +1046,12 @@ static void dpp401_dscl_program_isharp(struct dpp *dpp_base,
 			*bs_coeffs_updated = true;
 		}
 	}
+
+	/*power on isharp_delta_mem first*/
+	REG_UPDATE_SEQ_2(ISHARP_DELTA_LUT_MEM_PWR_CTRL,
+			 ISHARP_DELTA_LUT_MEM_PWR_FORCE, 0,
+			 ISHARP_DELTA_LUT_MEM_PWR_DIS, 0);
+
 	PERF_TRACE();
 } // dpp401_dscl_program_isharp
 /**

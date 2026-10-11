@@ -5,10 +5,11 @@
 
 #include "xe_step.h"
 
+#include <drm/drm_print.h>
 #include <kunit/visibility.h>
 #include <linux/bitfield.h>
 
-#include "xe_device.h"
+#include "xe_device_types.h"
 #include "xe_platform_types.h"
 
 /*
@@ -108,21 +109,50 @@ static const int pvc_basedie_subids[] = {
 __diag_pop();
 
 /**
+ * xe_step_platform_get - Determine platform-level stepping from PCI revid
+ * @platform: The Xe platform
+ * @revid: The PCI revid
+ * @step: Pointer to the step struct to update
+ *
+ * Convert the PCI revid into a platform-level stepping value and store that
+ * in @step->platform.
+ */
+void xe_step_platform_get(enum xe_platform platform, u8 revid, struct xe_step_info *step)
+{
+	/*
+	 * Not all platforms map PCI revid directly into our symbolic stepping
+	 * enumeration. Some platforms will have a single PCI revid used for a
+	 * range platform level steppings and some might even require specific
+	 * mappings. So prefer to err on the side of caution and include only
+	 * the platforms from which we need the stepping info for workaround
+	 * checks.
+	 */
+
+	if (platform == XE_NOVALAKE_P)
+		step->platform = STEP_A0 + revid;
+}
+
+/**
  * xe_step_pre_gmdid_get - Determine IP steppings from PCI revid
  * @xe: Xe device
+ * @step: Pointer to the step struct to update
  *
- * Convert the PCI revid into proper IP steppings.  This should only be
- * used on platforms that do not have GMD_ID support.
+ * Convert the PCI revid into proper IP steppings and update @step->basedie,
+ * @step->graphics and @step->media accordingly.
+ *
+ * This should only be used on platforms that do not have GMD_ID support.
  */
-struct xe_step_info xe_step_pre_gmdid_get(struct xe_device *xe)
+void xe_step_pre_gmdid_get(struct xe_device *xe, struct xe_step_info *step)
 {
 	const struct xe_step_info *revids = NULL;
-	struct xe_step_info step = {};
 	u16 revid = xe->info.revid;
 	int size = 0;
 	const int *basedie_info = NULL;
 	int basedie_size = 0;
 	int baseid = 0;
+	u8 graphics = STEP_NONE;
+	u8 media = STEP_NONE;
+	u8 basedie = STEP_NONE;
 
 	if (xe->info.platform == XE_PVC) {
 		baseid = FIELD_GET(GENMASK(5, 3), xe->info.revid);
@@ -165,10 +195,12 @@ struct xe_step_info xe_step_pre_gmdid_get(struct xe_device *xe)
 
 	/* Not using the stepping scheme for the platform yet. */
 	if (!revids)
-		return step;
+		goto done;
 
 	if (revid < size && revids[revid].graphics != STEP_NONE) {
-		step = revids[revid];
+		graphics = revids[revid].graphics;
+		media = revids[revid].media;
+		basedie = revids[revid].basedie;
 	} else {
 		drm_warn(&xe->drm, "Unknown revid 0x%02x\n", revid);
 
@@ -186,25 +218,30 @@ struct xe_step_info xe_step_pre_gmdid_get(struct xe_device *xe)
 		if (revid < size) {
 			drm_dbg(&xe->drm, "Using steppings for revid 0x%02x\n",
 				revid);
-			step = revids[revid];
+			graphics = revids[revid].graphics;
+			media = revids[revid].media;
+			basedie = revids[revid].basedie;
 		} else {
 			drm_dbg(&xe->drm, "Using future steppings\n");
-			step.graphics = STEP_FUTURE;
+			graphics = STEP_FUTURE;
 		}
 	}
 
-	drm_WARN_ON(&xe->drm, step.graphics == STEP_NONE);
+	drm_WARN_ON(&xe->drm, graphics == STEP_NONE);
 
 	if (basedie_info && basedie_size) {
 		if (baseid < basedie_size && basedie_info[baseid] != STEP_NONE) {
-			step.basedie = basedie_info[baseid];
+			basedie = basedie_info[baseid];
 		} else {
 			drm_warn(&xe->drm, "Unknown baseid 0x%02x\n", baseid);
-			step.basedie = STEP_FUTURE;
+			basedie = STEP_FUTURE;
 		}
 	}
 
-	return step;
+done:
+	step->graphics = graphics;
+	step->media = media;
+	step->basedie = basedie;
 }
 
 /**
@@ -212,42 +249,44 @@ struct xe_step_info xe_step_pre_gmdid_get(struct xe_device *xe)
  * @xe: Xe device
  * @graphics_gmdid_revid: value of graphics GMD_ID register's revid field
  * @media_gmdid_revid: value of media GMD_ID register's revid field
+ * @step: Poninter to the step struct to update.
  *
- * Convert the revid fields of the GMD_ID registers into proper IP steppings.
+ * Convert the revid fields of the GMD_ID registers into proper IP steppings
+ * and update @step->graphics and @step->media accordingly.
  *
  * GMD_ID revid values are currently expected to have consistent meanings on
  * all platforms:  major steppings (A0, B0, etc.) are 4 apart, with minor
  * steppings (A1, A2, etc.) taking the values in between.
  */
-struct xe_step_info xe_step_gmdid_get(struct xe_device *xe,
-				      u32 graphics_gmdid_revid,
-				      u32 media_gmdid_revid)
+void xe_step_gmdid_get(struct xe_device *xe,
+		       u32 graphics_gmdid_revid,
+		       u32 media_gmdid_revid,
+		       struct xe_step_info *step)
 {
-	struct xe_step_info step = {
-		.graphics = STEP_A0 + graphics_gmdid_revid,
-		.media = STEP_A0 + media_gmdid_revid,
-	};
+	u8 graphics = STEP_A0 + graphics_gmdid_revid;
+	u8 media = STEP_A0 + media_gmdid_revid;
 
-	if (step.graphics >= STEP_FUTURE) {
-		step.graphics = STEP_FUTURE;
+	if (graphics >= STEP_FUTURE) {
+		graphics = STEP_FUTURE;
 		drm_dbg(&xe->drm, "Graphics GMD_ID revid value %d treated as future stepping\n",
 			graphics_gmdid_revid);
 	}
 
-	if (step.media >= STEP_FUTURE) {
-		step.media = STEP_FUTURE;
+	if (media >= STEP_FUTURE) {
+		media = STEP_FUTURE;
 		drm_dbg(&xe->drm, "Media GMD_ID revid value %d treated as future stepping\n",
 			media_gmdid_revid);
 	}
 
-	return step;
+	step->graphics = graphics;
+	step->media = media;
 }
 
 #define STEP_NAME_CASE(name)	\
 	case STEP_##name:	\
 		return #name;
 
-const char *xe_step_name(enum xe_step step)
+const char *xe_step_name(enum intel_step step)
 {
 	switch (step) {
 	STEP_NAME_LIST(STEP_NAME_CASE);
