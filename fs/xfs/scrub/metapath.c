@@ -3,7 +3,7 @@
  * Copyright (c) 2023-2024 Oracle.  All Rights Reserved.
  * Author: Darrick J. Wong <djwong@kernel.org>
  */
-#include "xfs.h"
+#include "xfs_platform.h"
 #include "xfs_fs.h"
 #include "xfs_shared.h"
 #include "xfs_format.h"
@@ -23,6 +23,7 @@
 #include "xfs_rtgroup.h"
 #include "xfs_rtrmap_btree.h"
 #include "xfs_rtrefcount_btree.h"
+#include "xfs_ag.h"
 #include "scrub/scrub.h"
 #include "scrub/common.h"
 #include "scrub/trace.h"
@@ -102,7 +103,7 @@ xchk_setup_metapath_scan(
 		return error;
 	}
 
-	mpath = kzalloc(sizeof(struct xchk_metapath), XCHK_GFP_FLAGS);
+	mpath = kzalloc_obj(struct xchk_metapath, XCHK_GFP_FLAGS);
 	if (!mpath) {
 		kfree_const(path);
 		return -ENOMEM;
@@ -314,7 +315,7 @@ xchk_metapath(
 
 	/* Parent required to do anything else. */
 	if (mpath->dp == NULL) {
-		xchk_ino_set_corrupt(sc, sc->ip->i_ino);
+		xchk_ip_set_corrupt(sc, sc->ip);
 		return 0;
 	}
 
@@ -329,15 +330,15 @@ xchk_metapath(
 	trace_xchk_metapath_lookup(sc, mpath->path, mpath->dp, ino);
 	if (error == -ENOENT) {
 		/* No directory entry at all */
-		xchk_ino_set_corrupt(sc, sc->ip->i_ino);
+		xchk_ip_set_corrupt(sc, sc->ip);
 		error = 0;
 		goto out_ilock;
 	}
 	if (!xchk_fblock_xref_process_error(sc, XFS_DATA_FORK, 0, &error))
 		goto out_ilock;
-	if (ino != sc->ip->i_ino) {
+	if (ino != I_INO(sc->ip)) {
 		/* Pointing to wrong inode */
-		xchk_ino_set_corrupt(sc, sc->ip->i_ino);
+		xchk_ip_set_corrupt(sc, sc->ip);
 	}
 
 out_ilock:
@@ -348,12 +349,78 @@ out_cancel:
 }
 
 #ifdef CONFIG_XFS_ONLINE_REPAIR
+/*
+ * Given a directory @dp, an existing inode @ip, and a @name, link @ip into @dp
+ * under the given @name.
+ */
+static int
+xrep_metadir_add_child(
+	struct xchk_metapath	*mpath,
+	xfs_ino_t		old_dotdot)
+{
+	struct xfs_trans	*tp = mpath->sc->tp;
+	struct xfs_dir_update	*du = &mpath->du;
+	struct xfs_inode	*dp = du->dp;
+	const struct xfs_name	*name = du->name;
+	struct xfs_inode	*ip = du->ip;
+	struct xfs_mount	*mp = tp->t_mountp;
+	const unsigned int	resblks = mpath->link_resblks;
+	int			error;
+
+	/*
+	 * The metadata file shouldn't be on the unlinked list, but we'll fix
+	 * it if that is the case.
+	 */
+	if (VFS_I(ip)->i_nlink == 0) {
+		struct xfs_perag	*pag;
+
+		pag = xfs_perag_get(mp, XFS_INO_TO_AGNO(mp, I_INO(ip)));
+		error = xfs_iunlink_remove(tp, pag, ip);
+		xfs_perag_put(pag);
+		if (error)
+			return error;
+	}
+
+	error = xfs_dir_createname(tp, dp, name, I_INO(ip), resblks);
+	if (error)
+		return error;
+
+	xfs_trans_log_inode(tp, dp, XFS_ILOG_CORE);
+
+	xfs_bumplink(tp, ip);
+
+	/* update dotdot entry in child */
+	if (S_ISDIR(VFS_I(ip)->i_mode)) {
+		xfs_bumplink(tp, dp);
+
+		/* Replace the dotdot entry in the child */
+		if (old_dotdot != I_INO(dp)) {
+			error = xfs_dir_replace(tp, ip, &xfs_name_dotdot,
+					I_INO(dp), resblks);
+			if (error)
+				return error;
+		}
+	}
+
+	/* Update the child's parent pointer */
+	if (du->ppargs) {
+		error = xfs_parent_addname(tp, du->ppargs, dp, name, ip);
+		if (error)
+			return error;
+	}
+
+	xfs_dir_update_hook(dp, ip, 1, name);
+	return 0;
+}
+
 /* Create the dirent represented by the final component of the path. */
 STATIC int
 xrep_metapath_link(
 	struct xchk_metapath	*mpath)
 {
 	struct xfs_scrub	*sc = mpath->sc;
+	xfs_ino_t		old_dotdot = NULLFSINO;
+	int			error;
 
 	mpath->du.dp = mpath->dp;
 	mpath->du.name = &mpath->xname;
@@ -364,9 +431,23 @@ xrep_metapath_link(
 	else
 		mpath->du.ppargs = NULL;
 
-	trace_xrep_metapath_link(sc, mpath->path, mpath->dp, sc->ip->i_ino);
+	trace_xrep_metapath_link(sc, mpath->path, mpath->dp, I_INO(sc->ip));
 
-	return xfs_dir_add_child(sc->tp, mpath->link_resblks, &mpath->du);
+	if (S_ISDIR(VFS_I(sc->ip)->i_mode)) {
+		error = xchk_dir_lookup(sc, sc->ip, &xfs_name_dotdot,
+				&old_dotdot);
+		if (error && error != -ENOENT)
+			return error;
+
+		/*
+		 * subdir didn't give us a dotdot entry, so we just give up
+		 * and let the repair get marked as failed.
+		 */
+		if (old_dotdot == NULLFSINO)
+			return 0;
+	}
+
+	return xrep_metadir_add_child(mpath, old_dotdot);
 }
 
 /* Remove the dirent at the final component of the path. */
@@ -397,7 +478,7 @@ xrep_metapath_unlink(
 
 	/* Figure out if we're removing a parent pointer too. */
 	if (xfs_has_parent(mp)) {
-		xfs_inode_to_parent_rec(&rec, ip);
+		xfs_inode_to_parent_rec(&rec, mpath->dp);
 		error = xfs_parent_lookup(sc->tp, ip, &mpath->xname, &rec,
 				&mpath->pptr_args);
 		switch (error) {
@@ -462,7 +543,7 @@ xrep_metapath_try_link(
 	if (error)
 		goto out_cancel;
 
-	if (ino == sc->ip->i_ino) {
+	if (ino == I_INO(sc->ip)) {
 		/* The dirent already points to @sc->ip; we're done. */
 		error = 0;
 		goto out_cancel;
@@ -530,7 +611,7 @@ xrep_metapath_try_unlink(
 	xfs_ino_t		ino;
 	int			error;
 
-	ASSERT(*alleged_child != sc->ip->i_ino);
+	ASSERT(*alleged_child != I_INO(sc->ip));
 
 	trace_xrep_metapath_try_unlink(sc, mpath->path, mpath->dp,
 			*alleged_child);
@@ -556,6 +637,8 @@ xrep_metapath_try_unlink(
 	error = xchk_metapath_ilock_parent_and_child(mpath, ip);
 	if (error) {
 		xchk_trans_cancel(sc);
+		if (ip)
+			xchk_irele(sc, ip);
 		return error;
 	}
 	xfs_trans_ijoin(sc->tp, mpath->dp, 0);
@@ -575,7 +658,7 @@ xrep_metapath_try_unlink(
 	if (error)
 		goto out_cancel;
 
-	if (ino == sc->ip->i_ino) {
+	if (ino == I_INO(sc->ip)) {
 		/* The dirent already points to @sc->ip; we're done. */
 		error = -EEXIST;
 		goto out_cancel;

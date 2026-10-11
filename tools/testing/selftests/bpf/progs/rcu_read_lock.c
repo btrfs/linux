@@ -7,6 +7,16 @@
 #include "bpf_tracing_net.h"
 #include "bpf_misc.h"
 
+/* clang considers 'sum += 1' as usage but 'sum++' as non-usage.  GCC
+ * is more consistent and considers both 'sum += 1' and 'sum++' as
+ * non-usage.  This triggers warnings in the functions below.
+ *
+ * Starting with GCC 16 -Wunused-but-set-variable=2 can be used to
+ * mimic clang's behavior.  */
+#if !defined(__clang__) && __GNUC__ > 15
+#pragma GCC diagnostic ignored "-Wunused-but-set-variable"
+#endif
+
 char _license[] SEC("license") = "GPL";
 
 struct {
@@ -278,6 +288,46 @@ out:
 	return 0;
 }
 
+SEC("?fentry.s/" SYS_PREFIX "sys_nanosleep")
+int nested_rcu_region_unbalanced_1(void *ctx)
+{
+	struct task_struct *task, *real_parent;
+
+	/* nested rcu read lock regions */
+	task = bpf_get_current_task_btf();
+	bpf_rcu_read_lock();
+	bpf_rcu_read_lock();
+	real_parent = task->real_parent;
+	if (!real_parent)
+		goto out;
+	(void)bpf_task_storage_get(&map_a, real_parent, 0, 0);
+out:
+	bpf_rcu_read_unlock();
+	bpf_rcu_read_unlock();
+	bpf_rcu_read_unlock();
+	return 0;
+}
+
+SEC("?fentry.s/" SYS_PREFIX "sys_nanosleep")
+int nested_rcu_region_unbalanced_2(void *ctx)
+{
+	struct task_struct *task, *real_parent;
+
+	/* nested rcu read lock regions */
+	task = bpf_get_current_task_btf();
+	bpf_rcu_read_lock();
+	bpf_rcu_read_lock();
+	bpf_rcu_read_lock();
+	real_parent = task->real_parent;
+	if (!real_parent)
+		goto out;
+	(void)bpf_task_storage_get(&map_a, real_parent, 0, 0);
+out:
+	bpf_rcu_read_unlock();
+	bpf_rcu_read_unlock();
+	return 0;
+}
+
 SEC("?fentry.s/" SYS_PREFIX "sys_getpgid")
 int task_trusted_non_rcuptr(void *ctx)
 {
@@ -497,5 +547,81 @@ int rcu_read_lock_sleepable_global_subprog_indirect(void *ctx)
 	bpf_rcu_read_lock();
 	ret += global_subprog_calling_sleepable_global(ret);
 	bpf_rcu_read_unlock();
+	return 0;
+}
+
+struct rcu_node_data {
+	long key;
+	struct bpf_rb_node node;
+};
+
+struct rcu_node_stash {
+	struct rcu_node_data __kptr *node;
+};
+
+/*
+ * Necessary so that LLVM emits BTF for rcu_node_data rather than just a
+ * fwd reference to it, same as in progs/local_kptr_stash.c.
+ */
+struct rcu_node_data *just_here_because_btf_bug;
+
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__uint(max_entries, 1);
+	__type(key, int);
+	__type(value, struct rcu_node_stash);
+} node_stash SEC(".maps");
+
+long non_own_ref_key;
+
+SEC("?fentry.s/" SYS_PREFIX "sys_getpgid")
+int non_own_ref_untrusted_ld(void *ctx)
+{
+	struct rcu_node_stash *stash;
+	struct rcu_node_data *node;
+	int key = 0;
+
+	stash = bpf_map_lookup_elem(&node_stash, &key);
+	if (!stash)
+		return 0;
+	bpf_rcu_read_lock();
+	node = stash->node;
+	if (!node) {
+		bpf_rcu_read_unlock();
+		return 0;
+	}
+	bpf_rcu_read_unlock();
+	/*
+	 * The unlock leaves node as PTR_TO_BTF_ID | MEM_ALLOC | PTR_UNTRUSTED,
+	 * and the load below has to get the BPF_PROBE_MEM rewrite for it,
+	 * otherwise a bad address panics the kernel.
+	 */
+	non_own_ref_key = node->key;
+	return 0;
+}
+
+long rcu_untrusted_wq_flags;
+
+SEC("?tp_btf/tcp_probe")
+int BPF_PROG(rcu_untrusted_union_ld, struct sock *sk)
+{
+	struct socket_wq *wq;
+
+	/*
+	 * sk_wq sits in a two member union, so btf_struct_walk() marks the
+	 * pointer PTR_UNTRUSTED, and the __rcu tag on the member adds MEM_RCU
+	 * on top of it. struct sock is not on the __safe_rcu_or_null allow
+	 * list, hence the two stay combined and the load below has to get the
+	 * BPF_PROBE_MEM rewrite for PTR_TO_BTF_ID | PTR_UNTRUSTED | MEM_RCU,
+	 * otherwise a bad address panics the kernel.
+	 *
+	 * The __rcu tag only reaches BTF on a clang built kernel, that is, one
+	 * with CONFIG_PAHOLE_HAS_BTF_TAG. On a gcc built kernel the walk yields
+	 * a plain untrusted pointer, which is rewritten either way.
+	 */
+	wq = sk->sk_wq;
+	if (!wq)
+		return 0;
+	rcu_untrusted_wq_flags = wq->flags;
 	return 0;
 }

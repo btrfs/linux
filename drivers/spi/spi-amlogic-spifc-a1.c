@@ -206,10 +206,9 @@ static int amlogic_spifc_a1_read(struct amlogic_spifc_a1 *spifc, void *buf,
 	u32 val = readl(spifc->base + SPIFC_A1_USER_CTRL3_REG);
 	int ret;
 
-	val &= ~(SPIFC_A1_USER_DIN_MODE | SPIFC_A1_USER_DIN_BYTES);
 	val |= SPIFC_A1_USER_DIN_ENABLE;
-	val |= FIELD_PREP(SPIFC_A1_USER_DIN_MODE, mode);
-	val |= FIELD_PREP(SPIFC_A1_USER_DIN_BYTES, size);
+	FIELD_MODIFY(SPIFC_A1_USER_DIN_MODE, &val, mode);
+	FIELD_MODIFY(SPIFC_A1_USER_DIN_BYTES, &val, size);
 	writel(val, spifc->base + SPIFC_A1_USER_CTRL3_REG);
 
 	ret = amlogic_spifc_a1_request(spifc, true);
@@ -358,7 +357,6 @@ static int amlogic_spifc_a1_probe(struct platform_device *pdev)
 		return ret;
 
 	ctrl->num_chipselect = 1;
-	ctrl->dev.of_node = pdev->dev.of_node;
 	ctrl->bits_per_word_mask = SPI_BPW_MASK(8);
 	ctrl->auto_runtime_pm = true;
 	ctrl->mem_ops = &amlogic_spifc_a1_mem_ops;
@@ -376,7 +374,6 @@ static int amlogic_spifc_a1_probe(struct platform_device *pdev)
 	return 0;
 }
 
-#ifdef CONFIG_PM_SLEEP
 static int amlogic_spifc_a1_suspend(struct device *dev)
 {
 	struct amlogic_spifc_a1 *spifc = dev_get_drvdata(dev);
@@ -411,9 +408,7 @@ static int amlogic_spifc_a1_resume(struct device *dev)
 
 	return ret;
 }
-#endif /* CONFIG_PM_SLEEP */
 
-#ifdef CONFIG_PM
 static int amlogic_spifc_a1_runtime_suspend(struct device *dev)
 {
 	struct amlogic_spifc_a1 *spifc = dev_get_drvdata(dev);
@@ -434,14 +429,12 @@ static int amlogic_spifc_a1_runtime_resume(struct device *dev)
 
 	return ret;
 }
-#endif /* CONFIG_PM */
 
 static const struct dev_pm_ops amlogic_spifc_a1_pm_ops = {
-	SET_SYSTEM_SLEEP_PM_OPS(amlogic_spifc_a1_suspend,
-				amlogic_spifc_a1_resume)
-	SET_RUNTIME_PM_OPS(amlogic_spifc_a1_runtime_suspend,
-			   amlogic_spifc_a1_runtime_resume,
-			   NULL)
+	SYSTEM_SLEEP_PM_OPS(amlogic_spifc_a1_suspend, amlogic_spifc_a1_resume)
+	RUNTIME_PM_OPS(amlogic_spifc_a1_runtime_suspend,
+		       amlogic_spifc_a1_runtime_resume,
+		       NULL)
 };
 
 #ifdef CONFIG_OF
@@ -457,7 +450,7 @@ static struct platform_driver amlogic_spifc_a1_driver = {
 	.driver	= {
 		.name		= "amlogic-spifc-a1",
 		.of_match_table	= of_match_ptr(amlogic_spifc_a1_dt_match),
-		.pm		= &amlogic_spifc_a1_pm_ops,
+		.pm		= pm_ptr(&amlogic_spifc_a1_pm_ops),
 	},
 };
 module_platform_driver(amlogic_spifc_a1_driver);

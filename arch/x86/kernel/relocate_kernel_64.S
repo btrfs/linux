@@ -95,9 +95,12 @@ SYM_CODE_START_NOALIGN(relocate_kernel)
 	/* Leave CR4 in %r13 to enable the right paging mode later. */
 	movq	%cr4, %r13
 
-	/* Disable global pages immediately to ensure this mapping is RWX */
+	/*
+	 * Disable global pages immediately to ensure this mapping is RWX.
+	 * Disable LASS before jumping to the identity mapped page.
+	 */
 	movq	%r13, %r12
-	andq	$~(X86_CR4_PGE), %r12
+	andq	$~(X86_CR4_PGE | X86_CR4_LASS), %r12
 	movq	%r12, %cr4
 
 	/* Save %rsp and CRs. */
@@ -133,6 +136,14 @@ SYM_CODE_START_LOCAL_NOALIGN(identity_mapped)
 	 * %r13 original CR4 when relocate_kernel() was invoked
 	 */
 
+	/*
+	 * Set return address to 0 if not preserving context. The purgatory
+	 * shipped in kexec-tools will unconditionally look for the return
+	 * address on the stack and set a kexec_jump_back_entry= command
+	 * line option if it's non-zero. There's no other way that it can
+	 * tell a preserve-context (kjump) kexec from a normal one.
+	 */
+	pushq	$0
 	/* store the start address on the stack */
 	pushq   %rdx
 

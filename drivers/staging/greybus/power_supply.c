@@ -336,7 +336,7 @@ static int is_psy_prop_writeable(struct gb_power_supply *gbpsy,
 
 static int is_prop_valint(enum power_supply_property psp)
 {
-	return ((psp < POWER_SUPPLY_PROP_MODEL_NAME) ? 1 : 0);
+	return (psp < POWER_SUPPLY_PROP_MODEL_NAME) ? 1 : 0;
 }
 
 static void next_interval(struct gb_power_supply *gbpsy)
@@ -423,7 +423,7 @@ static void check_changed(struct gb_power_supply *gbpsy,
 static int total_props(struct gb_power_supply *gbpsy)
 {
 	/* this return the intval plus the strval properties */
-	return (gbpsy->properties_count + gbpsy->properties_count_str);
+	return gbpsy->properties_count + gbpsy->properties_count_str;
 }
 
 static void prop_append(struct gb_power_supply *gbpsy,
@@ -545,15 +545,14 @@ static int gb_power_supply_prop_descriptors_get(struct gb_power_supply *gbpsy)
 		}
 	}
 
-	gbpsy->props = kcalloc(gbpsy->properties_count, sizeof(*gbpsy->props),
-			       GFP_KERNEL);
+	gbpsy->props = kzalloc_objs(*gbpsy->props, gbpsy->properties_count);
 	if (!gbpsy->props) {
 		ret = -ENOMEM;
 		goto out_put_operation;
 	}
 
-	gbpsy->props_raw = kcalloc(gbpsy->properties_count,
-				   sizeof(*gbpsy->props_raw), GFP_KERNEL);
+	gbpsy->props_raw = kzalloc_objs(*gbpsy->props_raw,
+					gbpsy->properties_count);
 	if (!gbpsy->props_raw) {
 		ret = -ENOMEM;
 		goto out_put_operation;
@@ -942,9 +941,8 @@ static int gb_power_supplies_setup(struct gb_power_supplies *supplies)
 	if (ret < 0)
 		goto out;
 
-	supplies->supply = kcalloc(supplies->supplies_count,
-				   sizeof(struct gb_power_supply),
-				   GFP_KERNEL);
+	supplies->supply = kzalloc_objs(struct gb_power_supply,
+					supplies->supplies_count);
 
 	if (!supplies->supply) {
 		ret = -ENOMEM;
@@ -1064,7 +1062,7 @@ static int gb_power_supply_probe(struct gb_bundle *bundle,
 	if (cport_desc->protocol_id != GREYBUS_PROTOCOL_POWER_SUPPLY)
 		return -ENODEV;
 
-	supplies = kzalloc(sizeof(*supplies), GFP_KERNEL);
+	supplies = kzalloc_obj(*supplies);
 	if (!supplies)
 		return -ENOMEM;
 

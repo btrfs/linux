@@ -17,6 +17,7 @@
 #include <drm/drm_drv.h>
 #include <drm/drm_managed.h>
 #include <drm/drm_mm.h>
+#include <drm/drm_print.h>
 #include <linux/clk.h>
 #include <linux/firmware.h>
 #include <linux/math.h>
@@ -1003,7 +1004,7 @@ pvr_fw_init(struct pvr_device *pvr_dev)
 		goto err_fw_stop;
 	}
 
-	fw_dev->booted = true;
+	WRITE_ONCE(fw_dev->initialised, true);
 
 	return 0;
 
@@ -1043,7 +1044,7 @@ pvr_fw_fini(struct pvr_device *pvr_dev)
 {
 	struct pvr_fw_device *fw_dev = &pvr_dev->fw_dev;
 
-	fw_dev->booted = false;
+	WRITE_ONCE(fw_dev->initialised, false);
 
 	pvr_fw_destroy_structures(pvr_dev);
 	pvr_fw_object_unmap_and_destroy(pvr_dev->kccb.rtn_obj);
@@ -1271,7 +1272,7 @@ pvr_fw_object_create_and_map_common(struct pvr_device *pvr_dev, size_t size,
 	/* %DRM_PVR_BO_PM_FW_PROTECT is implicit for FW objects. */
 	flags |= DRM_PVR_BO_PM_FW_PROTECT;
 
-	fw_obj = kzalloc(sizeof(*fw_obj), GFP_KERNEL);
+	fw_obj = kzalloc_obj(*fw_obj);
 	if (!fw_obj)
 		return ERR_PTR(-ENOMEM);
 

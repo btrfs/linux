@@ -873,7 +873,7 @@ static void build_srb(struct scsi_cmnd *cmd, struct DeviceCtlBlk *dcb,
  *        and is expected to be held on return.
  *
  */
-static int dc395x_queue_command_lck(struct scsi_cmnd *cmd)
+static enum scsi_qc_status dc395x_queue_command_lck(struct scsi_cmnd *cmd)
 {
 	void (*done)(struct scsi_cmnd *) = scsi_done;
 	struct DeviceCtlBlk *dcb;
@@ -2182,7 +2182,6 @@ static void msgin_set_sync(struct AdapterCtlBlk *acb, struct ScsiReqBlk *srb)
 {
 	struct DeviceCtlBlk *dcb = srb->dcb;
 	u8 bval;
-	int fact;
 
 	if (srb->msgin_buf[4] > 15)
 		srb->msgin_buf[4] = 15;
@@ -2204,11 +2203,6 @@ static void msgin_set_sync(struct AdapterCtlBlk *acb, struct ScsiReqBlk *srb)
 	dcb->sync_period &= 0xf0;
 	dcb->sync_period |= ALT_SYNC | bval;
 	dcb->min_nego_period = srb->msgin_buf[3];
-
-	if (dcb->sync_period & WIDE_SYNC)
-		fact = 500;
-	else
-		fact = 250;
 
 	if (!(srb->state & SRB_DO_SYNC_NEGO)) {
 		/* Reply with corrected SDTR Message */
@@ -2990,7 +2984,7 @@ static struct DeviceCtlBlk *device_alloc(struct AdapterCtlBlk *acb,
 	u8 period_index = eeprom->target[target].period & 0x07;
 	struct DeviceCtlBlk *dcb;
 
-	dcb = kmalloc(sizeof(struct DeviceCtlBlk), GFP_ATOMIC);
+	dcb = kmalloc_obj(struct DeviceCtlBlk, GFP_ATOMIC);
 	if (!dcb)
 		return NULL;
 	dcb->acb = NULL;

@@ -11,29 +11,75 @@
 #include <linux/mm.h>
 #include <linux/hugetlb.h>
 #include <linux/swap.h>
-#include <linux/swapops.h>
+#include <linux/leafops.h>
 #include <linux/pagewalk.h>
 #include <linux/ksm.h>
 #include <asm/gmap_helpers.h>
-#include <asm/pgtable.h>
 
 /**
- * ptep_zap_swap_entry() - discard a swap entry.
+ * try_get_locked_pte() - like get_locked_pte(), but atomic and with trylock
  * @mm: the mm
- * @entry: the swap entry that needs to be zapped
+ * @vmaddr: the userspace virtual address whose pte is to be found
+ * @ptl: will be set to the pointer to the lock used to lock the pte in case
+ *       of success.
  *
- * Discards the given swap entry. If the swap entry was an actual swap
- * entry (and not a migration entry, for example), the actual swapped
- * page is also discarded from swap.
+ * This function returns the pointer to the pte corresponding to @addr in @mm,
+ * similarly to get_locked_pte(). Unlike get_locked_pte(), no attempt is made
+ * to allocate missing page tables. If a missing or large entry is found, the
+ * function will return NULL. If the ptl lock is contended, %-EAGAIN is
+ * returned.
+ *
+ * In case of success, *@ptl will point to the locked pte lock for the returned
+ * pte, like get_locked_pte() does.
+ *
+ * Context: mmap_lock or vma lock for read or for write needs to be held.
+ * Return:
+ * * %NULL if the pte cannot be reached.
+ * * %-EAGAIN if the pte can be reached, but cannot be locked.
+ * * the pointer to the pte corresponding to @addr in @mm, if it can be reached
+ *   and locked.
  */
-static void ptep_zap_swap_entry(struct mm_struct *mm, swp_entry_t entry)
+pte_t *try_get_locked_pte(struct mm_struct *mm, unsigned long vmaddr, spinlock_t **ptl)
+__context_unsafe(/* Returns nonnull if lock taken or not taken */)
 {
-	if (!non_swap_entry(entry))
-		dec_mm_counter(mm, MM_SWAPENTS);
-	else if (is_migration_entry(entry))
-		dec_mm_counter(mm, mm_counter(pfn_swap_entry_folio(entry)));
-	free_swap_and_cache(entry);
+	pmd_t *pmdp, pmd, pmdval;
+	pud_t *pudp, pud;
+	p4d_t *p4dp, p4d;
+	pgd_t *pgdp, pgd;
+	pte_t *ptep;
+
+	pgdp = pgd_offset(mm, vmaddr);
+	pgd = pgdp_get(pgdp);
+	if (pgd_none(pgd) || !pgd_present(pgd))
+		return NULL;
+	p4dp = p4d_offset_lockless(pgdp, pgd, vmaddr);
+	p4d = p4dp_get(p4dp);
+	if (p4d_none(p4d) || !p4d_present(p4d))
+		return NULL;
+	pudp = pud_offset_lockless(p4dp, p4d, vmaddr);
+	pud = pudp_get(pudp);
+	if (pud_none(pud) || pud_leaf(pud) || !pud_present(pud))
+		return NULL;
+	pmdp = pmd_offset_lockless(pudp, pud, vmaddr);
+	pmd = pmdp_get_lockless(pmdp);
+	if (pmd_none(pmd) || pmd_leaf(pmd) || !pmd_present(pmd))
+		return NULL;
+	ptep = pte_offset_map_rw_nolock(mm, pmdp, vmaddr, &pmdval, ptl);
+	if (!ptep)
+		return NULL;
+
+	if (spin_trylock(*ptl)) {
+		if (unlikely(!pmd_same(pmdval, pmdp_get_lockless(pmdp)))) {
+			pte_unmap_unlock(ptep, *ptl);
+			return ERR_PTR(-EAGAIN);
+		}
+		return ptep;
+	}
+
+	pte_unmap(ptep);
+	return ERR_PTR(-EAGAIN);
 }
+EXPORT_SYMBOL_GPL(try_get_locked_pte);
 
 /**
  * gmap_helper_zap_one_page() - discard a page if it was swapped.
@@ -45,10 +91,11 @@ static void ptep_zap_swap_entry(struct mm_struct *mm, swp_entry_t entry)
  * Context: needs to be called while holding the mmap lock.
  */
 void gmap_helper_zap_one_page(struct mm_struct *mm, unsigned long vmaddr)
+__context_unsafe(/* pte_unmap_unlock() not instrumented */)
 {
 	struct vm_area_struct *vma;
-	spinlock_t *ptl;
-	pgste_t pgste;
+	spinlock_t *ptl;	/* Lock for the host (userspace) page table */
+	softleaf_t sl;
 	pte_t *ptep;
 
 	mmap_assert_locked(mm);
@@ -59,18 +106,14 @@ void gmap_helper_zap_one_page(struct mm_struct *mm, unsigned long vmaddr)
 		return;
 
 	/* Get pointer to the page table entry */
-	ptep = get_locked_pte(mm, vmaddr, &ptl);
-	if (unlikely(!ptep))
+	ptep = try_get_locked_pte(mm, vmaddr, &ptl);
+	if (IS_ERR_OR_NULL(ptep))
 		return;
-	if (pte_swap(*ptep)) {
-		preempt_disable();
-		pgste = pgste_get_lock(ptep);
-
-		ptep_zap_swap_entry(mm, pte_to_swp_entry(*ptep));
+	sl = softleaf_from_pte(*ptep);
+	if (pte_swap(*ptep) && softleaf_is_swap(sl)) {
+		dec_mm_counter(mm, MM_SWAPENTS);
+		swap_put_entries_direct(sl, 1);
 		pte_clear(mm, vmaddr, ptep);
-
-		pgste_set_unlock(ptep, pgste);
-		preempt_enable();
 	}
 	pte_unmap_unlock(ptep, ptl);
 }
@@ -97,11 +140,55 @@ void gmap_helper_discard(struct mm_struct *mm, unsigned long vmaddr, unsigned lo
 		if (!vma)
 			return;
 		if (!is_vm_hugetlb_page(vma))
-			zap_page_range_single(vma, vmaddr, min(end, vma->vm_end) - vmaddr, NULL);
+			zap_vma_range(vma, vmaddr, min(end, vma->vm_end) - vmaddr);
 		vmaddr = vma->vm_end;
 	}
 }
 EXPORT_SYMBOL_GPL(gmap_helper_discard);
+
+/**
+ * gmap_helper_try_set_pte_unused() - mark a pte entry as unused
+ * @mm: the mm
+ * @vmaddr: the userspace address whose pte is to be marked
+ *
+ * Mark the pte corresponding the given address as unused. This will cause
+ * core mm code to just drop this page instead of swapping it.
+ *
+ * This function needs to be called with interrupts disabled (for example
+ * while holding a spinlock), or while holding the mmap lock. Normally this
+ * function is called as a result of an unmap operation, and thus KVM common
+ * code will already hold kvm->mmu_lock in write mode.
+ *
+ * Context: Needs to be called while holding the mmap lock or with interrupts
+ *          disabled.
+ */
+void gmap_helper_try_set_pte_unused(struct mm_struct *mm, unsigned long vmaddr)
+__context_unsafe(/* pte_unmap_unlock() not instrumented */)
+{
+	spinlock_t *ptl;	/* Lock for the host (userspace) page table */
+	pte_t *ptep;
+
+	/*
+	 * Several paths exists that takes the ptl lock and then call the
+	 * mmu_notifier, which takes the mmu_lock. The unmap path, instead,
+	 * takes the mmu_lock in write mode first, and then potentially
+	 * calls this function, which takes the ptl lock. This can lead to a
+	 * deadlock.
+	 * The unused page mechanism is only an optimization, if the
+	 * _PAGE_UNUSED bit is not set, the unused page is swapped as normal
+	 * instead of being discarded.
+	 * If the lock is contended the bit is not set and the deadlock is
+	 * avoided.
+	 */
+	ptep = try_get_locked_pte(mm, vmaddr, &ptl);
+	if (IS_ERR_OR_NULL(ptep))
+		return;
+
+	if (pte_present(*ptep))
+		__atomic64_or(_PAGE_UNUSED, (long *)ptep);
+	pte_unmap_unlock(ptep, ptl);
+}
+EXPORT_SYMBOL_GPL(gmap_helper_try_set_pte_unused);
 
 static int find_zeropage_pte_entry(pte_t *pte, unsigned long addr,
 				   unsigned long end, struct mm_walk *walk)
@@ -116,7 +203,7 @@ static int find_zeropage_pte_entry(pte_t *pte, unsigned long addr,
 		 * currently only works in COW mappings, which is also where
 		 * mm_forbids_zeropage() is checked.
 		 */
-		if (!is_cow_mapping(walk->vma->vm_flags))
+		if (!vma_is_cow_mapping(walk->vma))
 			return -EFAULT;
 
 		*found_addr = addr;
@@ -188,7 +275,6 @@ retry:
 		 * truncation. In that case, the shared zeropage would be gone
 		 * and we can simply retry and make progress.
 		 */
-		cond_resched();
 		goto retry;
 	}
 

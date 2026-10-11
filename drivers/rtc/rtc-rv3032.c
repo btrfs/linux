@@ -376,7 +376,7 @@ static int rv3032_read_offset(struct device *dev, long *offset)
 	if (ret < 0)
 		return ret;
 
-	steps = sign_extend32(FIELD_GET(RV3032_OFFSET_MSK, value), 5);
+	steps = FIELD_GET_SIGNED(RV3032_OFFSET_MSK, value);
 
 	*offset = DIV_ROUND_CLOSEST(steps * OFFSET_STEP_PPT, 1000);
 
@@ -752,7 +752,7 @@ static int rv3032_clkout_register_clk(struct rv3032_data *rv3032,
 {
 	int ret;
 	struct clk *clk;
-	struct clk_init_data init;
+	struct clk_init_data init = {};
 	struct device_node *node = client->dev.of_node;
 
 	ret = regmap_update_bits(rv3032->regmap, RV3032_TLSB, RV3032_TLSB_CLKF, 0);
@@ -967,8 +967,6 @@ static int rv3032_probe(struct i2c_client *client)
 	devm_rtc_nvmem_register(rv3032->rtc, &nvmem_cfg);
 	eeprom_cfg.priv = rv3032;
 	devm_rtc_nvmem_register(rv3032->rtc, &eeprom_cfg);
-
-	rv3032->rtc->max_user_freq = 1;
 
 #ifdef CONFIG_COMMON_CLK
 	rv3032_clkout_register_clk(rv3032, client);

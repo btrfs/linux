@@ -399,8 +399,6 @@ acpi_parse_memory_affinity(union acpi_subtable_headers *header,
 		goto out_err_bad_srat;
 	}
 
-	node_set(node, numa_nodes_parsed);
-
 	pr_info("SRAT: Node %u PXM %u [mem %#010Lx-%#010Lx]%s%s\n",
 		node, pxm,
 		(unsigned long long) start, (unsigned long long) end - 1,
@@ -654,8 +652,11 @@ int __init acpi_numa_init(void)
 	}
 	last_real_pxm = fake_pxm;
 	fake_pxm++;
-	acpi_table_parse_cedt(ACPI_CEDT_TYPE_CFMWS, acpi_parse_cfmws,
-			      &fake_pxm);
+
+	/* No need to expand numa nodes if CXL is disabled */
+	if (IS_ENABLED(CONFIG_CXL_ACPI))
+		acpi_table_parse_cedt(ACPI_CEDT_TYPE_CFMWS, acpi_parse_cfmws,
+				      &fake_pxm);
 
 	if (cnt < 0)
 		return cnt;

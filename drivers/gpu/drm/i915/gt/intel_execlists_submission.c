@@ -110,6 +110,8 @@
 #include <linux/interrupt.h>
 #include <linux/string_helpers.h>
 
+#include <drm/drm_print.h>
+
 #include "gen8_engine_cs.h"
 #include "i915_drv.h"
 #include "i915_list_util.h"
@@ -2252,7 +2254,7 @@ static struct execlists_capture *capture_regs(struct intel_engine_cs *engine)
 	const gfp_t gfp = GFP_ATOMIC | __GFP_NOWARN;
 	struct execlists_capture *cap;
 
-	cap = kmalloc(sizeof(*cap), gfp);
+	cap = kmalloc_obj(*cap, gfp);
 	if (!cap)
 		return NULL;
 
@@ -2932,12 +2934,12 @@ static void enable_execlists(struct intel_engine_cs *engine)
 	intel_engine_set_hwsp_writemask(engine, ~0u); /* HWSTAM */
 
 	if (GRAPHICS_VER(engine->i915) >= 11)
-		mode = _MASKED_BIT_ENABLE(GEN11_GFX_DISABLE_LEGACY_MODE);
+		mode = REG_MASKED_FIELD_ENABLE(GEN11_GFX_DISABLE_LEGACY_MODE);
 	else
-		mode = _MASKED_BIT_ENABLE(GFX_RUN_LIST_ENABLE);
+		mode = REG_MASKED_FIELD_ENABLE(GFX_RUN_LIST_ENABLE);
 	ENGINE_WRITE_FW(engine, RING_MODE_GEN7, mode);
 
-	ENGINE_WRITE_FW(engine, RING_MI_MODE, _MASKED_BIT_DISABLE(STOP_RING));
+	ENGINE_WRITE_FW(engine, RING_MI_MODE, REG_MASKED_FIELD_DISABLE(STOP_RING));
 
 	ENGINE_WRITE_FW(engine,
 			RING_HWS_PGA,
@@ -3930,11 +3932,11 @@ execlists_create_virtual(struct intel_engine_cs **siblings, unsigned int count,
 	struct drm_i915_private *i915 = siblings[0]->i915;
 	struct virtual_engine *ve;
 	unsigned int n;
-	int err;
+	int err = -ENOMEM;
 
-	ve = kzalloc(struct_size(ve, siblings, count), GFP_KERNEL);
+	ve = kzalloc_flex(*ve, siblings, count);
 	if (!ve)
-		return ERR_PTR(-ENOMEM);
+		goto err;
 
 	ve->base.i915 = i915;
 	ve->base.gt = siblings[0]->gt;
@@ -3966,10 +3968,8 @@ execlists_create_virtual(struct intel_engine_cs **siblings, unsigned int count,
 	intel_engine_init_execlists(&ve->base);
 
 	ve->base.sched_engine = i915_sched_engine_create(ENGINE_VIRTUAL);
-	if (!ve->base.sched_engine) {
-		err = -ENOMEM;
-		goto err_put;
-	}
+	if (!ve->base.sched_engine)
+		goto err_noput;
 	ve->base.sched_engine->private_data = &ve->base;
 
 	ve->base.cops = &virtual_context_ops;
@@ -3985,10 +3985,8 @@ execlists_create_virtual(struct intel_engine_cs **siblings, unsigned int count,
 	intel_context_init(&ve->context, &ve->base);
 
 	ve->base.breadcrumbs = intel_breadcrumbs_create(NULL);
-	if (!ve->base.breadcrumbs) {
-		err = -ENOMEM;
+	if (!ve->base.breadcrumbs)
 		goto err_put;
-	}
 
 	for (n = 0; n < count; n++) {
 		struct intel_engine_cs *sibling = siblings[n];
@@ -4063,8 +4061,13 @@ execlists_create_virtual(struct intel_engine_cs **siblings, unsigned int count,
 	virtual_engine_initial_hint(ve);
 	return &ve->context;
 
+err_noput:
+	kfree(ve);
+	goto err;
+
 err_put:
 	intel_context_put(&ve->context);
+err:
 	return ERR_PTR(err);
 }
 
