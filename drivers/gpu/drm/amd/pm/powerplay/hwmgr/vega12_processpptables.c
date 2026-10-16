@@ -64,6 +64,13 @@ static int check_powerplay_tables(
 		struct pp_hwmgr *hwmgr,
 		const ATOM_Vega12_POWERPLAYTABLE *powerplay_table)
 {
+	size_t smc_pptable_size =
+		offsetofend(ATOM_Vega12_POWERPLAYTABLE, smcPPTable);
+	size_t table_size = hwmgr->soft_pp_table_size;
+
+	PP_ASSERT_WITH_CODE((table_size >= smc_pptable_size),
+			    "Invalid PowerPlay Table!", return -1);
+
 	PP_ASSERT_WITH_CODE((powerplay_table->sHeader.format_revision >=
 		ATOM_VEGA12_TABLE_REVISION_VEGA12),
 		"Unsupported PPTable format!", return -1);
@@ -263,7 +270,7 @@ static int vega12_pp_tables_initialize(struct pp_hwmgr *hwmgr)
 	int result = 0;
 	const ATOM_Vega12_POWERPLAYTABLE *powerplay_table;
 
-	hwmgr->pptable = kzalloc(sizeof(struct phm_ppt_v3_information), GFP_KERNEL);
+	hwmgr->pptable = kzalloc_obj(struct phm_ppt_v3_information);
 	PP_ASSERT_WITH_CODE((hwmgr->pptable != NULL),
 		"Failed to allocate hwmgr->pptable!", return -ENOMEM);
 

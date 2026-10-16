@@ -79,7 +79,7 @@ The above is defined by including the header::
 
 Same as ftrace, the registered callbacks will start being called some time
 after the register_fprobe() is called and before it returns. See
-:file:`Documentation/trace/ftrace.rst`.
+Documentation/trace/ftrace.rst.
 
 Also, the unregister_fprobe() will guarantee that both enter and exit
 handlers are no longer being called by functions after unregister_fprobe()
@@ -118,7 +118,7 @@ will be cancelled.
 @fregs
         This is the `ftrace_regs` data structure at the entry and exit. This
         includes the function parameters, or the return values. So user can
-        access thos values via appropriate `ftrace_regs_*` APIs.
+        access those values via appropriate `ftrace_regs_*` APIs.
 
 @entry_data
         This is a local storage to share the data between entry and exit handlers.

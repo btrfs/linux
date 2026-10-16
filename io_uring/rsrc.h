@@ -2,8 +2,10 @@
 #ifndef IOU_RSRC_H
 #define IOU_RSRC_H
 
+#include <linux/bvec.h>
 #include <linux/io_uring_types.h>
 #include <linux/lockdep.h>
+#include <linux/uio.h>
 
 #define IO_VEC_CACHE_SOFT_CAP		256
 
@@ -24,21 +26,19 @@ struct io_rsrc_node {
 };
 
 enum {
-	IO_IMU_DEST	= 1 << ITER_DEST,
-	IO_IMU_SOURCE	= 1 << ITER_SOURCE,
+	IO_REGBUF_F_KBUF		= 1,
 };
 
 struct io_mapped_ubuf {
 	u64		ubuf;
-	unsigned int	len;
+	size_t		len;
 	unsigned int	nr_bvecs;
 	unsigned int    folio_shift;
 	refcount_t	refs;
-	unsigned long	acct_pages;
+	u8		flags;
+	u8		dir;
 	void		(*release)(void *);
 	void		*priv;
-	bool		is_kbuf;
-	u8		dir;
 	struct bio_vec	bvec[] __counted_by(nr_bvecs);
 };
 
@@ -90,7 +90,7 @@ bool io_check_coalesce_buffer(struct page **page_array, int nr_pages,
 			      struct io_imu_folio_data *data);
 
 static inline struct io_rsrc_node *io_rsrc_node_lookup(struct io_rsrc_data *data,
-						       int index)
+						       unsigned int index)
 {
 	if (index < data->nr)
 		return data->nodes[array_index_nospec(index, data->nr)];
@@ -105,10 +105,15 @@ static inline void io_put_rsrc_node(struct io_ring_ctx *ctx, struct io_rsrc_node
 }
 
 static inline bool io_reset_rsrc_node(struct io_ring_ctx *ctx,
-				      struct io_rsrc_data *data, int index)
+				      struct io_rsrc_data *data,
+				      unsigned int index)
 {
-	struct io_rsrc_node *node = data->nodes[index];
+	struct io_rsrc_node *node;
 
+	if (index >= data->nr)
+		return false;
+	index = array_index_nospec(index, data->nr);
+	node = data->nodes[index];
 	if (!node)
 		return false;
 	io_put_rsrc_node(ctx, node);
@@ -120,8 +125,10 @@ int io_files_update(struct io_kiocb *req, unsigned int issue_flags);
 int io_files_update_prep(struct io_kiocb *req, const struct io_uring_sqe *sqe);
 
 int __io_account_mem(struct user_struct *user, unsigned long nr_pages);
-int io_account_mem(struct io_ring_ctx *ctx, unsigned long nr_pages);
-void io_unaccount_mem(struct io_ring_ctx *ctx, unsigned long nr_pages);
+int io_account_mem(struct user_struct *user, struct mm_struct *mm_account,
+		   unsigned long nr_pages);
+void io_unaccount_mem(struct user_struct *user, struct mm_struct *mm_account,
+		      unsigned long nr_pages);
 
 static inline void __io_unaccount_mem(struct user_struct *user,
 				      unsigned long nr_pages)

@@ -137,7 +137,7 @@ static ssize_t _iommu_cpumask_show(struct device *dev,
 				   struct device_attribute *attr,
 				   char *buf)
 {
-	return cpumap_print_to_pagebuf(true, buf, &iommu_cpumask);
+	return sysfs_emit(buf, "%*pbl\n", cpumask_pr_args(&iommu_cpumask));
 }
 static DEVICE_ATTR(cpumask, S_IRUGO, _iommu_cpumask_show, NULL);
 
@@ -387,7 +387,7 @@ static __init int _init_events_attrs(void)
 	while (amd_iommu_v2_event_descs[i].attr.attr.name)
 		i++;
 
-	attrs = kcalloc(i + 1, sizeof(*attrs), GFP_KERNEL);
+	attrs = kzalloc_objs(*attrs, i + 1);
 	if (!attrs)
 		return -ENOMEM;
 
@@ -422,7 +422,7 @@ static __init int init_one_iommu(unsigned int idx)
 	struct perf_amd_iommu *perf_iommu;
 	int ret;
 
-	perf_iommu = kzalloc(sizeof(struct perf_amd_iommu), GFP_KERNEL);
+	perf_iommu = kzalloc_obj(struct perf_amd_iommu);
 	if (!perf_iommu)
 		return -ENOMEM;
 

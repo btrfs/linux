@@ -88,6 +88,7 @@ struct mod_hdcp_transition_input_hdcp2 {
 	uint8_t lc_init_write;
 	uint8_t l_prime_available_poll;
 	uint8_t l_prime_read;
+	uint8_t l_prime_combo_read;
 	uint8_t l_prime_validation;
 	uint8_t eks_prepare;
 	uint8_t eks_write;
@@ -405,6 +406,12 @@ static inline uint8_t is_hdmi_dvi_sl_hdcp(struct mod_hdcp *hdcp)
 	return (hdcp->connection.link.mode == MOD_HDCP_MODE_DEFAULT);
 }
 
+static inline uint8_t is_frl_hdcp(struct mod_hdcp *hdcp)
+{
+	return (hdcp->connection.link.mode == MOD_HDCP_MODE_DEFAULT &&
+			hdcp->connection.link.hdmi.frl_enabled);
+}
+
 /* hdcp state helpers */
 static inline uint8_t current_state(struct mod_hdcp *hdcp)
 {
@@ -500,6 +507,7 @@ static inline void callback_in_ms(uint16_t time, struct mod_hdcp_output *output)
 static inline void set_watchdog_in_ms(struct mod_hdcp *hdcp, uint16_t time,
 		struct mod_hdcp_output *output)
 {
+	(void)hdcp;
 	output->watchdog_timer_needed = 1;
 	output->watchdog_timer_delay = time;
 }
@@ -508,7 +516,7 @@ static inline void set_auth_complete(struct mod_hdcp *hdcp,
 		struct mod_hdcp_output *output)
 {
 	output->auth_complete = 1;
-	mod_hdcp_log_ddc_trace(hdcp);
+	HDCP_AUTH_COMPLETE_TRACE(hdcp);
 }
 
 /* connection topology helpers */

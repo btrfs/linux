@@ -10,6 +10,7 @@
 #include "errno.h"
 
 #define PAGE_SIZE_64K 65536
+#define TEST_SKB_LINEAR_SIZE (sizeof(struct ethhdr) + sizeof(struct iphdr))
 
 char _license[] SEC("license") = "GPL";
 
@@ -207,6 +208,25 @@ int test_dynptr_skb_data(struct __sk_buff *skb)
 		err = 2;
 		return 1;
 	}
+
+	return 1;
+}
+
+SEC("?tc")
+int test_dynptr_skb_slice_non_linear(struct __sk_buff *skb)
+{
+	struct bpf_dynptr ptr;
+	void *data;
+
+	if (bpf_dynptr_from_skb(skb, 0, &ptr)) {
+		err = 1;
+		return 1;
+	}
+
+	/* Ensure we cannot read past the end of the buffer. */
+	data = bpf_dynptr_slice(&ptr, TEST_SKB_LINEAR_SIZE + 1, NULL, 1);
+	if (data)
+		err = 2;
 
 	return 1;
 }
@@ -914,8 +934,8 @@ void *user_ptr;
 char expected_str[384];
 __u32 test_len[7] = {0/* placeholder */, 0, 1, 2, 255, 256, 257};
 
-typedef int (*bpf_read_dynptr_fn_t)(struct bpf_dynptr *dptr, u32 off,
-				    u32 size, const void *unsafe_ptr);
+typedef int (*bpf_read_dynptr_fn_t)(const struct bpf_dynptr *dptr, u64 off,
+				    u64 size, const void *unsafe_ptr);
 
 /* Returns the offset just before the end of the maximum sized xdp fragment.
  * Any write larger than 32 bytes will be split between 2 fragments.
@@ -1106,16 +1126,16 @@ int test_copy_from_user_str_dynptr(void *ctx)
 	return 0;
 }
 
-static int bpf_copy_data_from_user_task(struct bpf_dynptr *dptr, u32 off,
-					u32 size, const void *unsafe_ptr)
+static int bpf_copy_data_from_user_task(const struct bpf_dynptr *dptr, u64 off,
+					u64 size, const void *unsafe_ptr)
 {
 	struct task_struct *task = bpf_get_current_task_btf();
 
 	return bpf_copy_from_user_task_dynptr(dptr, off, size, unsafe_ptr, task);
 }
 
-static int bpf_copy_data_from_user_task_str(struct bpf_dynptr *dptr, u32 off,
-					    u32 size, const void *unsafe_ptr)
+static int bpf_copy_data_from_user_task_str(const struct bpf_dynptr *dptr, u64 off,
+					    u64 size, const void *unsafe_ptr)
 {
 	struct task_struct *task = bpf_get_current_task_btf();
 

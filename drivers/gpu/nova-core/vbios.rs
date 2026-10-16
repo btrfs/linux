@@ -2,44 +2,68 @@
 
 //! VBIOS extraction and parsing.
 
-use crate::driver::Bar0;
-use crate::firmware::fwsec::Bcrt30Rsa3kSignature;
-use crate::firmware::FalconUCodeDescV3;
-use core::convert::TryFrom;
-use kernel::device;
-use kernel::error::Result;
-use kernel::prelude::*;
-use kernel::ptr::{Alignable, Alignment};
-use kernel::types::ARef;
+use kernel::{
+    device,
+    io::Io,
+    prelude::*,
+    ptr::{
+        Alignable,
+        Alignment, //
+    },
+    register,
+    sizes::SZ_4K,
+    sync::aref::ARef,
+};
 
-/// The offset of the VBIOS ROM in the BAR0 space.
-const ROM_OFFSET: usize = 0x300000;
-/// The maximum length of the VBIOS ROM to scan into.
-const BIOS_MAX_SCAN_LEN: usize = 0x100000;
-/// The size to read ahead when parsing initial BIOS image headers.
-const BIOS_READ_AHEAD_SIZE: usize = 1024;
-/// The bit in the last image indicator byte for the PCI Data Structure that
-/// indicates the last image. Bit 0-6 are reserved, bit 7 is last image bit.
-const LAST_IMAGE_BIT_MASK: u8 = 0x80;
+use crate::{
+    driver::Bar0,
+    firmware::{
+        fwsec::Bcrt30Rsa3kSignature,
+        FalconUCodeDesc,
+        FalconUCodeDescV2,
+        FalconUCodeDescV3, //
+    },
+    num::FromSafeCast,
+};
 
-// PMU lookup table entry types. Used to locate PMU table entries
-// in the Fwsec image, corresponding to falcon ucodes.
-#[expect(dead_code)]
-const FALCON_UCODE_ENTRY_APPID_FIRMWARE_SEC_LIC: u8 = 0x05;
-#[expect(dead_code)]
-const FALCON_UCODE_ENTRY_APPID_FWSEC_DBG: u8 = 0x45;
-const FALCON_UCODE_ENTRY_APPID_FWSEC_PROD: u8 = 0x85;
+/// BIOS Image Type from PCI Data Structure code_type field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+enum BiosImageType {
+    /// PC-AT compatible BIOS image (x86 legacy)
+    PciAt = 0x00,
+    /// EFI (Extensible Firmware Interface) BIOS image
+    Efi = 0x03,
+    /// NBSI (Notebook System Information) BIOS image
+    Nbsi = 0x70,
+    /// FwSec (Firmware Security) BIOS image
+    FwSec = 0xE0,
+}
+
+impl TryFrom<u8> for BiosImageType {
+    type Error = Error;
+
+    fn try_from(code: u8) -> Result<Self> {
+        match code {
+            0x00 => Ok(Self::PciAt),
+            0x03 => Ok(Self::Efi),
+            0x70 => Ok(Self::Nbsi),
+            0xE0 => Ok(Self::FwSec),
+            _ => Err(EINVAL),
+        }
+    }
+}
 
 /// Vbios Reader for constructing the VBIOS data.
 struct VbiosIterator<'a> {
     dev: &'a device::Device,
-    bar0: &'a Bar0,
+    bar0: Bar0<'a>,
     /// VBIOS data vector: As BIOS images are scanned, they are added to this vector for reference
     /// or copying into other data structures. It is the entire scanned contents of the VBIOS which
     /// progressively extends. It is used so that we do not re-read any contents that are already
     /// read as we use the cumulative length read so far, and re-read any gaps as we extend the
     /// length.
-    data: KVec<u8>,
+    data: KVVec<u8>,
     /// Current offset of the [`Iterator`].
     current_offset: usize,
     /// Indicate whether the last image has been found.
@@ -47,20 +71,111 @@ struct VbiosIterator<'a> {
 }
 
 impl<'a> VbiosIterator<'a> {
-    fn new(dev: &'a device::Device, bar0: &'a Bar0) -> Result<Self> {
+    /// The offset of the VBIOS ROM in the BAR0 space.
+    const ROM_OFFSET: usize = 0x300000;
+    /// The maximum length of the VBIOS ROM to scan into.
+    const BIOS_MAX_SCAN_LEN: usize = 0x100000;
+    /// The size to read ahead when parsing initial BIOS image headers.
+    const BIOS_READ_AHEAD_SIZE: usize = 1024;
+
+    /// Return the byte offset where the PCI Expansion ROM images begin in the GPU's ROM.
+    ///
+    /// The GPU's ROM may begin with an Init-from-ROM (IFR) header that precedes the PCI Expansion
+    /// ROM images (VBIOS). When present, the PROM shadow method must parse this header to determine
+    /// the offset where the PCI ROM images actually begin, and adjust all subsequent reads
+    /// accordingly.
+    ///
+    /// On most GPUs this is not needed because the IFR microcode has already applied the ROM offset
+    /// so that PROM reads transparently skip the header. On GA100, for some reason, the IFR offset
+    /// is not applied to PROM reads. Therefore, the search for the PCI expansion must skip the IFR
+    /// header, if found.
+    fn rom_offset(dev: &device::Device, bar0: Bar0<'_>) -> Result<usize> {
+        // IFR Header in VBIOS.
+        register! {
+            NV_PBUS_IFR_FMT_FIXED0(u32) @ 0x300000 {
+                31:0    signature;
+            }
+        }
+
+        register! {
+            NV_PBUS_IFR_FMT_FIXED1(u32) @ 0x300004 {
+                30:16   fixed_data_size;
+                15:8    version => u8;
+            }
+        }
+
+        register! {
+            NV_PBUS_IFR_FMT_FIXED2(u32) @ 0x300008 {
+                19:0 total_data_size;
+            }
+        }
+
+        /// IFR signature.
+        const NV_PBUS_IFR_FMT_FIXED0_SIGNATURE_VALUE: u32 = u32::from_le_bytes(*b"NVGI");
+        /// ROM directory signature.
+        const NV_ROM_DIRECTORY_IDENTIFIER: u32 = u32::from_le_bytes(*b"RFRD");
+        /// Offset of the NV_PMGR_ROM_ADDR_OFFSET register in IFR Extended section.
+        const IFR_SW_EXT_ROM_ADDR_OFFSET: usize = 4;
+        /// Size of Redundant Firmware Flash Status section.
+        const RFW_FLASH_STATUS_SIZE: usize = SZ_4K;
+        /// Offset in the ROM Directory of the PCI Option ROM offset.
+        const PCI_OPTION_ROM_OFFSET: usize = 8;
+
+        let signature = bar0.read(NV_PBUS_IFR_FMT_FIXED0).signature();
+
+        if signature == NV_PBUS_IFR_FMT_FIXED0_SIGNATURE_VALUE {
+            let fixed1 = bar0.read(NV_PBUS_IFR_FMT_FIXED1);
+
+            match fixed1.version() {
+                1 | 2 => {
+                    let fixed_data_size = usize::from(fixed1.fixed_data_size());
+                    let pmgr_rom_addr_offset = fixed_data_size + IFR_SW_EXT_ROM_ADDR_OFFSET;
+                    bar0.try_read32(Self::ROM_OFFSET + pmgr_rom_addr_offset)
+                        .map(usize::from_safe_cast)
+                }
+                3 => {
+                    let fixed2 = bar0.read(NV_PBUS_IFR_FMT_FIXED2);
+                    let total_data_size = usize::from(fixed2.total_data_size());
+                    let flash_status_offset =
+                        usize::from_safe_cast(bar0.try_read32(Self::ROM_OFFSET + total_data_size)?);
+                    let dir_offset = flash_status_offset + RFW_FLASH_STATUS_SIZE;
+                    let dir_sig = bar0.try_read32(Self::ROM_OFFSET + dir_offset)?;
+                    if dir_sig != NV_ROM_DIRECTORY_IDENTIFIER {
+                        dev_err!(dev, "could not find IFR ROM directory\n");
+                        return Err(EINVAL);
+                    }
+                    bar0.try_read32(Self::ROM_OFFSET + dir_offset + PCI_OPTION_ROM_OFFSET)
+                        .map(usize::from_safe_cast)
+                }
+                _ => {
+                    dev_err!(dev, "unsupported IFR header version {}\n", fixed1.version());
+                    Err(EINVAL)
+                }
+            }
+        } else {
+            Ok(0)
+        }
+    }
+
+    fn new(dev: &'a device::Device, bar0: Bar0<'a>) -> Result<Self> {
         Ok(Self {
             dev,
             bar0,
-            data: KVec::new(),
-            current_offset: 0,
+            data: KVVec::new(),
+            current_offset: Self::rom_offset(dev, bar0)?,
             last_found: false,
         })
     }
 
     /// Read bytes from the ROM at the current end of the data vector.
     fn read_more(&mut self, len: usize) -> Result {
-        let current_len = self.data.len();
-        let start = ROM_OFFSET + current_len;
+        let start = self.data.len();
+        let end = start + len;
+
+        if end > Self::BIOS_MAX_SCAN_LEN {
+            dev_err!(self.dev, "Error: exceeded BIOS scan limit.\n");
+            return Err(EINVAL);
+        }
 
         // Ensure length is a multiple of 4 for 32-bit reads
         if len % core::mem::size_of::<u32>() != 0 {
@@ -74,9 +189,9 @@ impl<'a> VbiosIterator<'a> {
 
         self.data.reserve(len, GFP_KERNEL)?;
         // Read ROM data bytes and push directly to `data`.
-        for addr in (start..start + len).step_by(core::mem::size_of::<u32>()) {
+        for addr in (start..end).step_by(core::mem::size_of::<u32>()) {
             // Read 32-bit word from the VBIOS ROM
-            let word = self.bar0.try_read32(addr)?;
+            let word = self.bar0.try_read32(Self::ROM_OFFSET + addr)?;
 
             // Convert the `u32` to a 4 byte array and push each byte.
             word.to_ne_bytes()
@@ -89,17 +204,9 @@ impl<'a> VbiosIterator<'a> {
 
     /// Read bytes at a specific offset, filling any gap.
     fn read_more_at_offset(&mut self, offset: usize, len: usize) -> Result {
-        if offset > BIOS_MAX_SCAN_LEN {
-            dev_err!(self.dev, "Error: exceeded BIOS scan limit.\n");
-            return Err(EINVAL);
-        }
+        let end = offset.checked_add(len).ok_or(EINVAL)?;
 
-        // If `offset` is beyond current data size, fill the gap first.
-        let current_len = self.data.len();
-        let gap_bytes = offset.saturating_sub(current_len);
-
-        // Now read the requested bytes at the offset.
-        self.read_more(gap_bytes + len)
+        self.read_more(end.saturating_sub(self.data.len()))
     }
 
     /// Read a BIOS image at a specific offset and create a [`BiosImage`] from it.
@@ -112,8 +219,8 @@ impl<'a> VbiosIterator<'a> {
         len: usize,
         context: &str,
     ) -> Result<BiosImage> {
-        let data_len = self.data.len();
-        if offset + len > data_len {
+        let end = offset.checked_add(len).ok_or(EINVAL)?;
+        if end > self.data.len() {
             self.read_more_at_offset(offset, len).inspect_err(|e| {
                 dev_err!(
                     self.dev,
@@ -124,7 +231,7 @@ impl<'a> VbiosIterator<'a> {
             })?;
         }
 
-        BiosImage::new(self.dev, &self.data[offset..offset + len]).inspect_err(|err| {
+        BiosImage::new(self.dev, &self.data[offset..end]).inspect_err(|err| {
             dev_err!(
                 self.dev,
                 "Failed to {} at offset {:#x}: {:?}\n",
@@ -146,7 +253,7 @@ impl<'a> Iterator for VbiosIterator<'a> {
             return None;
         }
 
-        if self.current_offset > BIOS_MAX_SCAN_LEN {
+        if self.current_offset >= Self::BIOS_MAX_SCAN_LEN {
             dev_err!(self.dev, "Error: exceeded BIOS scan limit, stopping scan\n");
             return None;
         }
@@ -154,7 +261,7 @@ impl<'a> Iterator for VbiosIterator<'a> {
         // Parse image headers first to get image size.
         let image_size = match self.read_bios_image_at_offset(
             self.current_offset,
-            BIOS_READ_AHEAD_SIZE,
+            Self::BIOS_READ_AHEAD_SIZE,
             "parse initial BIOS image headers",
         ) {
             Ok(image) => image.image_size_bytes(),
@@ -189,60 +296,58 @@ impl Vbios {
     /// Probe for VBIOS extraction.
     ///
     /// Once the VBIOS object is built, `bar0` is not read for [`Vbios`] purposes anymore.
-    pub(crate) fn new(dev: &device::Device, bar0: &Bar0) -> Result<Vbios> {
+    pub(crate) fn new(dev: &device::Device, bar0: Bar0<'_>) -> Result<Vbios> {
         // Images to extract from iteration
         let mut pci_at_image: Option<PciAtBiosImage> = None;
-        let mut first_fwsec_image: Option<FwSecBiosBuilder> = None;
-        let mut second_fwsec_image: Option<FwSecBiosBuilder> = None;
+        let mut fwsec_section: Option<KVVec<u8>> = None;
 
         // Parse all VBIOS images in the ROM
         for image_result in VbiosIterator::new(dev, bar0)? {
-            let full_image = image_result?;
+            let image = image_result?;
 
             dev_dbg!(
                 dev,
-                "Found BIOS image: size: {:#x}, type: {}, last: {}\n",
-                full_image.image_size_bytes(),
-                full_image.image_type_str(),
-                full_image.is_last()
+                "Found BIOS image: size: {:#x}, type: {:?}, last: {}\n",
+                image.image_size_bytes(),
+                image.image_type(),
+                image.is_last()
             );
 
-            // Get references to images we will need after the loop, in order to
-            // setup the falcon data offset.
-            match full_image {
-                BiosImage::PciAt(image) => {
-                    pci_at_image = Some(image);
-                }
-                BiosImage::FwSec(image) => {
-                    if first_fwsec_image.is_none() {
-                        first_fwsec_image = Some(image);
-                    } else {
-                        second_fwsec_image = Some(image);
+            // Once we have found the first FWSEC image, grab all data after that as the FWSEC
+            // section. This is indexed as one logical block to build the final FWSEC image.
+            if let Some(data) = fwsec_section.as_mut() {
+                data.extend_from_slice(&image.data, GFP_KERNEL)?;
+                continue;
+            }
+
+            // Convert to a specific image type
+            match BiosImageType::try_from(image.pcir.code_type) {
+                Ok(BiosImageType::PciAt) => {
+                    // Silently ignore any extra PCI-AT images.
+                    if pci_at_image.is_none() {
+                        pci_at_image = Some(PciAtBiosImage::try_from(image)?);
                     }
                 }
-                // For now we don't need to handle these
-                BiosImage::Efi(_image) => {}
-                BiosImage::Nbsi(_image) => {}
+                Ok(BiosImageType::FwSec) => fwsec_section = Some(image.data),
+                _ => {
+                    // Ignore other image types or unknown types
+                }
             }
         }
 
         // Using all the images, setup the falcon data pointer in Fwsec.
-        if let (Some(mut second), Some(first), Some(pci_at)) =
-            (second_fwsec_image, first_fwsec_image, pci_at_image)
-        {
-            second
-                .setup_falcon_data(&pci_at, &first)
-                .inspect_err(|e| dev_err!(dev, "Falcon data setup failed: {:?}\n", e))?;
-            Ok(Vbios {
-                fwsec_image: second.build()?,
-            })
-        } else {
+        let (Some(pci_at), Some(fwsec_section)) = (pci_at_image, fwsec_section) else {
             dev_err!(
                 dev,
                 "Missing required images for falcon data setup, skipping\n"
             );
-            Err(EINVAL)
-        }
+            return Err(EINVAL);
+        };
+
+        let fwsec_image = FwSecBiosImage::new(dev, pci_at, fwsec_section)
+            .inspect_err(|e| dev_err!(dev, "Falcon data setup failed: {:?}\n", e))?;
+
+        Ok(Vbios { fwsec_image })
     }
 
     pub(crate) fn fwsec_image(&self) -> &FwSecBiosImage {
@@ -251,7 +356,7 @@ impl Vbios {
 }
 
 /// PCI Data Structure as defined in PCI Firmware Specification
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, FromBytes)]
 #[repr(C)]
 struct PcirStruct {
     /// PCI Data Structure signature ("PCIR" or "NPDS")
@@ -281,54 +386,38 @@ struct PcirStruct {
 }
 
 impl PcirStruct {
-    fn new(dev: &device::Device, data: &[u8]) -> Result<Self> {
-        if data.len() < core::mem::size_of::<PcirStruct>() {
-            dev_err!(dev, "Not enough data for PcirStruct\n");
-            return Err(EINVAL);
-        }
+    /// The bit in `last_image` that indicates the last image.
+    const LAST_IMAGE_BIT_MASK: u8 = 0x80;
 
-        let mut signature = [0u8; 4];
-        signature.copy_from_slice(&data[0..4]);
+    fn new(dev: &device::Device, data: &[u8]) -> Result<Self> {
+        let (pcir, _) = PcirStruct::read_from_prefix(data).map_err(|_| EINVAL)?;
 
         // Signature should be "PCIR" (0x52494350) or "NPDS" (0x5344504e).
-        if &signature != b"PCIR" && &signature != b"NPDS" {
-            dev_err!(dev, "Invalid signature for PcirStruct: {:?}\n", signature);
+        if &pcir.signature != b"PCIR" && &pcir.signature != b"NPDS" {
+            dev_err!(
+                dev,
+                "Invalid signature for PcirStruct: {:?}\n",
+                pcir.signature
+            );
             return Err(EINVAL);
         }
 
-        let mut class_code = [0u8; 3];
-        class_code.copy_from_slice(&data[13..16]);
-
-        let image_len = u16::from_le_bytes([data[16], data[17]]);
-        if image_len == 0 {
+        if pcir.image_len == 0 {
             dev_err!(dev, "Invalid image length: 0\n");
             return Err(EINVAL);
         }
 
-        Ok(PcirStruct {
-            signature,
-            vendor_id: u16::from_le_bytes([data[4], data[5]]),
-            device_id: u16::from_le_bytes([data[6], data[7]]),
-            device_list_ptr: u16::from_le_bytes([data[8], data[9]]),
-            pci_data_struct_len: u16::from_le_bytes([data[10], data[11]]),
-            pci_data_struct_rev: data[12],
-            class_code,
-            image_len,
-            vendor_rom_rev: u16::from_le_bytes([data[18], data[19]]),
-            code_type: data[20],
-            last_image: data[21],
-            max_runtime_image_len: u16::from_le_bytes([data[22], data[23]]),
-        })
+        Ok(pcir)
     }
 
     /// Check if this is the last image in the ROM.
     fn is_last(&self) -> bool {
-        self.last_image & LAST_IMAGE_BIT_MASK != 0
+        self.last_image & Self::LAST_IMAGE_BIT_MASK != 0
     }
 
     /// Calculate image size in bytes from 512-byte blocks.
     fn image_size_bytes(&self) -> usize {
-        self.image_len as usize * 512
+        usize::from(self.image_len) * 512
     }
 }
 
@@ -337,7 +426,7 @@ impl PcirStruct {
 /// This is the head of the BIT table, that is used to locate the Falcon data. The BIT table (with
 /// its header) is in the [`PciAtBiosImage`] and the falcon data it is pointing to is in the
 /// [`FwSecBiosImage`].
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, FromBytes)]
 #[repr(C)]
 struct BitHeader {
     /// 0h: BIT Header Identifier (BMP=0x7FFF/BIT=0xB8FF)
@@ -358,34 +447,20 @@ struct BitHeader {
 
 impl BitHeader {
     fn new(data: &[u8]) -> Result<Self> {
-        if data.len() < core::mem::size_of::<Self>() {
-            return Err(EINVAL);
-        }
-
-        let mut signature = [0u8; 4];
-        signature.copy_from_slice(&data[2..6]);
+        let (header, _) = BitHeader::read_from_prefix(data).map_err(|_| EINVAL)?;
 
         // Check header ID and signature
-        let id = u16::from_le_bytes([data[0], data[1]]);
-        if id != 0xB8FF || &signature != b"BIT\0" {
+        if header.id != 0xB8FF || &header.signature != b"BIT\0" {
             return Err(EINVAL);
         }
 
-        Ok(BitHeader {
-            id,
-            signature,
-            bcd_version: u16::from_le_bytes([data[6], data[7]]),
-            header_size: data[8],
-            token_size: data[9],
-            token_entries: data[10],
-            checksum: data[11],
-        })
+        Ok(header)
     }
 }
 
 /// BIT Token Entry: Records in the BIT table followed by the BIT header.
-#[derive(Debug, Clone, Copy)]
-#[expect(dead_code)]
+#[derive(Debug, Clone, Copy, FromBytes)]
+#[repr(C)]
 struct BitToken {
     /// 00h: Token identifier
     id: u8,
@@ -397,39 +472,35 @@ struct BitToken {
     data_offset: u16,
 }
 
-// Define the token ID for the Falcon data
-const BIT_TOKEN_ID_FALCON_DATA: u8 = 0x70;
-
 impl BitToken {
+    /// BIT token ID for Falcon data.
+    const ID_FALCON_DATA: u8 = 0x70;
+
     /// Find a BIT token entry by BIT ID in a PciAtBiosImage
     fn from_id(image: &PciAtBiosImage, token_id: u8) -> Result<Self> {
         let header = &image.bit_header;
+        let entry_size = usize::from(header.token_size);
 
         // Offset to the first token entry
-        let tokens_start = image.bit_offset + header.header_size as usize;
+        let tokens_start = image.bit_offset + usize::from(header.header_size);
 
-        for i in 0..header.token_entries as usize {
-            let entry_offset = tokens_start + (i * header.token_size as usize);
+        for i in 0..usize::from(header.token_entries) {
+            let entry_offset = i
+                .checked_mul(entry_size)
+                .and_then(|offset| tokens_start.checked_add(offset))
+                .ok_or(EINVAL)?;
+            let entry = image
+                .base
+                .data
+                .get(entry_offset..)
+                .and_then(|data| data.get(..entry_size))
+                .ok_or(EINVAL)?;
 
-            // Make sure we don't go out of bounds
-            if entry_offset + header.token_size as usize > image.base.data.len() {
-                return Err(EINVAL);
-            }
+            let (token, _) = BitToken::read_from_prefix(entry).map_err(|_| EINVAL)?;
 
             // Check if this token has the requested ID
-            if image.base.data[entry_offset] == token_id {
-                return Ok(BitToken {
-                    id: image.base.data[entry_offset],
-                    data_version: image.base.data[entry_offset + 1],
-                    data_size: u16::from_le_bytes([
-                        image.base.data[entry_offset + 2],
-                        image.base.data[entry_offset + 3],
-                    ]),
-                    data_offset: u16::from_le_bytes([
-                        image.base.data[entry_offset + 4],
-                        image.base.data[entry_offset + 5],
-                    ]),
-                });
+            if token.id == token_id {
+                return Ok(token);
             }
         }
 
@@ -440,72 +511,35 @@ impl BitToken {
 
 /// PCI ROM Expansion Header as defined in PCI Firmware Specification.
 ///
-/// This is header is at the beginning of every image in the set of images in the ROM. It contains
-/// a pointer to the PCI Data Structure which describes the image. For "NBSI" images (NoteBook
-/// System Information), the ROM header deviates from the standard and contains an offset to the
-/// NBSI image however we do not yet parse that in this module and keep it for future reference.
-#[derive(Debug, Clone, Copy)]
-#[expect(dead_code)]
+/// This header is at the beginning of every image in the set of images in the ROM. It contains a
+/// pointer to the PCI Data Structure which describes the image.
+#[derive(Debug, Clone, Copy, FromBytes)]
+#[repr(C)]
 struct PciRomHeader {
     /// 00h: Signature (0xAA55)
     signature: u16,
-    /// 02h: Reserved bytes for processor architecture unique data (20 bytes)
-    reserved: [u8; 20],
-    /// 16h: NBSI Data Offset (NBSI-specific, offset from header to NBSI image)
-    nbsi_data_offset: Option<u16>,
+    /// 02h: Reserved bytes for processor architecture unique data (22 bytes)
+    reserved: [u8; 22],
     /// 18h: Pointer to PCI Data Structure (offset from start of ROM image)
     pci_data_struct_offset: u16,
-    /// 1Ah: Size of block (this is NBSI-specific)
-    size_of_block: Option<u32>,
 }
 
 impl PciRomHeader {
     fn new(dev: &device::Device, data: &[u8]) -> Result<Self> {
-        if data.len() < 26 {
-            // Need at least 26 bytes to read pciDataStrucPtr and sizeOfBlock.
-            return Err(EINVAL);
-        }
-
-        let signature = u16::from_le_bytes([data[0], data[1]]);
+        let (rom_header, _) = PciRomHeader::read_from_prefix(data)
+            .map_err(|_| EINVAL)
+            .inspect_err(|_| dev_err!(dev, "Not enough data for ROM header\n"))?;
 
         // Check for valid ROM signatures.
-        match signature {
-            0xAA55 | 0xBB77 | 0x4E56 => {}
+        match rom_header.signature {
+            0xAA55 | 0x4E56 => {}
             _ => {
-                dev_err!(dev, "ROM signature unknown {:#x}\n", signature);
+                dev_err!(dev, "ROM signature unknown {:#x}\n", rom_header.signature);
                 return Err(EINVAL);
             }
         }
 
-        // Read the pointer to the PCI Data Structure at offset 0x18.
-        let pci_data_struct_ptr = u16::from_le_bytes([data[24], data[25]]);
-
-        // Try to read optional fields if enough data.
-        let mut size_of_block = None;
-        let mut nbsi_data_offset = None;
-
-        if data.len() >= 30 {
-            // Read size_of_block at offset 0x1A.
-            size_of_block = Some(
-                u32::from(data[29]) << 24
-                    | u32::from(data[28]) << 16
-                    | u32::from(data[27]) << 8
-                    | u32::from(data[26]),
-            );
-        }
-
-        // For NBSI images, try to read the nbsiDataOffset at offset 0x16.
-        if data.len() >= 24 {
-            nbsi_data_offset = Some(u16::from_le_bytes([data[22], data[23]]));
-        }
-
-        Ok(PciRomHeader {
-            signature,
-            reserved: [0u8; 20],
-            pci_data_struct_offset: pci_data_struct_ptr,
-            size_of_block,
-            nbsi_data_offset,
-        })
+        Ok(rom_header)
     }
 }
 
@@ -515,7 +549,7 @@ impl PciRomHeader {
 /// PCI Data Structure. It contains some fields that are redundant with the PCI Data Structure, but
 /// are needed for traversing the BIOS images. It is expected to be present in all BIOS images
 /// except for NBSI images.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, FromBytes)]
 #[repr(C)]
 struct NpdeStruct {
     /// 00h: Signature ("NPDE")
@@ -531,44 +565,38 @@ struct NpdeStruct {
 }
 
 impl NpdeStruct {
-    fn new(dev: &device::Device, data: &[u8]) -> Option<Self> {
-        if data.len() < core::mem::size_of::<Self>() {
-            dev_dbg!(dev, "Not enough data for NpdeStruct\n");
-            return None;
-        }
+    /// The bit in `last_image` that indicates the last image.
+    const LAST_IMAGE_BIT_MASK: u8 = 0x80;
 
-        let mut signature = [0u8; 4];
-        signature.copy_from_slice(&data[0..4]);
+    fn new(dev: &device::Device, data: &[u8]) -> Option<Self> {
+        let (npde, _) = NpdeStruct::read_from_prefix(data).ok()?;
 
         // Signature should be "NPDE" (0x4544504E).
-        if &signature != b"NPDE" {
-            dev_dbg!(dev, "Invalid signature for NpdeStruct: {:?}\n", signature);
+        if &npde.signature != b"NPDE" {
+            dev_dbg!(
+                dev,
+                "Invalid signature for NpdeStruct: {:?}\n",
+                npde.signature
+            );
             return None;
         }
 
-        let subimage_len = u16::from_le_bytes([data[8], data[9]]);
-        if subimage_len == 0 {
+        if npde.subimage_len == 0 {
             dev_dbg!(dev, "Invalid subimage length: 0\n");
             return None;
         }
 
-        Some(NpdeStruct {
-            signature,
-            npci_data_ext_rev: u16::from_le_bytes([data[4], data[5]]),
-            npci_data_ext_len: u16::from_le_bytes([data[6], data[7]]),
-            subimage_len,
-            last_image: data[10],
-        })
+        Some(npde)
     }
 
     /// Check if this is the last image in the ROM.
     fn is_last(&self) -> bool {
-        self.last_image & LAST_IMAGE_BIT_MASK != 0
+        self.last_image & Self::LAST_IMAGE_BIT_MASK != 0
     }
 
     /// Calculate image size in bytes from 512-byte blocks.
     fn image_size_bytes(&self) -> usize {
-        self.subimage_len as usize * 512
+        usize::from(self.subimage_len) * 512
     }
 
     /// Try to find NPDE in the data, the NPDE is right after the PCIR.
@@ -580,8 +608,8 @@ impl NpdeStruct {
     ) -> Option<Self> {
         // Calculate the offset where NPDE might be located
         // NPDE should be right after the PCIR structure, aligned to 16 bytes
-        let pcir_offset = rom_header.pci_data_struct_offset as usize;
-        let npde_start = (pcir_offset + pcir.pci_data_struct_len as usize + 0x0F) & !0x0F;
+        let pcir_offset = usize::from(rom_header.pci_data_struct_offset);
+        let npde_start = (pcir_offset + usize::from(pcir.pci_data_struct_len) + 0x0F) & !0x0F;
 
         // Check if we have enough data
         if npde_start + core::mem::size_of::<Self>() > data.len() {
@@ -594,188 +622,79 @@ impl NpdeStruct {
     }
 }
 
-// Use a macro to implement BiosImage enum and methods. This avoids having to
-// repeat each enum type when implementing functions like base() in BiosImage.
-macro_rules! bios_image {
-    (
-        $($variant:ident: $class:ident),* $(,)?
-    ) => {
-        // BiosImage enum with variants for each image type
-        enum BiosImage {
-            $($variant($class)),*
-        }
-
-        impl BiosImage {
-            /// Get a reference to the common BIOS image data regardless of type
-            fn base(&self) -> &BiosImageBase {
-                match self {
-                    $(Self::$variant(img) => &img.base),*
-                }
-            }
-
-            /// Returns a string representing the type of BIOS image
-            fn image_type_str(&self) -> &'static str {
-                match self {
-                    $(Self::$variant(_) => stringify!($variant)),*
-                }
-            }
-        }
-    }
-}
-
-impl BiosImage {
-    /// Check if this is the last image.
-    fn is_last(&self) -> bool {
-        let base = self.base();
-
-        // For NBSI images (type == 0x70), return true as they're
-        // considered the last image
-        if matches!(self, Self::Nbsi(_)) {
-            return true;
-        }
-
-        // For other image types, check the NPDE first if available
-        if let Some(ref npde) = base.npde {
-            return npde.is_last();
-        }
-
-        // Otherwise, fall back to checking the PCIR last_image flag
-        base.pcir.is_last()
-    }
-
-    /// Get the image size in bytes.
-    fn image_size_bytes(&self) -> usize {
-        let base = self.base();
-
-        // Prefer NPDE image size if available
-        if let Some(ref npde) = base.npde {
-            return npde.image_size_bytes();
-        }
-
-        // Otherwise, fall back to the PCIR image size
-        base.pcir.image_size_bytes()
-    }
-
-    /// Create a [`BiosImageBase`] from a byte slice and convert it to a [`BiosImage`] which
-    /// triggers the constructor of the specific BiosImage enum variant.
-    fn new(dev: &device::Device, data: &[u8]) -> Result<Self> {
-        let base = BiosImageBase::new(dev, data)?;
-        let image = base.into_image().inspect_err(|e| {
-            dev_err!(dev, "Failed to create BiosImage: {:?}\n", e);
-        })?;
-
-        Ok(image)
-    }
-}
-
-bios_image! {
-    PciAt: PciAtBiosImage,   // PCI-AT compatible BIOS image
-    Efi: EfiBiosImage,       // EFI (Extensible Firmware Interface)
-    Nbsi: NbsiBiosImage,     // NBSI (Nvidia Bios System Interface)
-    FwSec: FwSecBiosBuilder, // FWSEC (Firmware Security)
-}
-
 /// The PciAt BIOS image is typically the first BIOS image type found in the BIOS image chain.
 ///
 /// It contains the BIT header and the BIT tokens.
 struct PciAtBiosImage {
-    base: BiosImageBase,
+    base: BiosImage,
     bit_header: BitHeader,
     bit_offset: usize,
-}
-
-struct EfiBiosImage {
-    base: BiosImageBase,
-    // EFI-specific fields can be added here in the future.
-}
-
-struct NbsiBiosImage {
-    base: BiosImageBase,
-    // NBSI-specific fields can be added here in the future.
-}
-
-struct FwSecBiosBuilder {
-    base: BiosImageBase,
-    /// These are temporary fields that are used during the construction of the
-    /// [`FwSecBiosBuilder`].
-    ///
-    /// Once FwSecBiosBuilder is constructed, the `falcon_ucode_offset` will be copied into a new
-    /// [`FwSecBiosImage`].
-    ///
-    /// The offset of the Falcon data from the start of Fwsec image.
-    falcon_data_offset: Option<usize>,
-    /// The [`PmuLookupTable`] starts at the offset of the falcon data pointer.
-    pmu_lookup_table: Option<PmuLookupTable>,
-    /// The offset of the Falcon ucode.
-    falcon_ucode_offset: Option<usize>,
 }
 
 /// The [`FwSecBiosImage`] structure contains the PMU table and the Falcon Ucode.
 ///
 /// The PMU table contains voltage/frequency tables as well as a pointer to the Falcon Ucode.
 pub(crate) struct FwSecBiosImage {
-    base: BiosImageBase,
+    /// Used for logging.
+    dev: ARef<device::Device>,
+    /// FWSEC data.
+    data: KVVec<u8>,
     /// The offset of the Falcon ucode.
     falcon_ucode_offset: usize,
 }
 
-// Convert from BiosImageBase to BiosImage
-impl TryFrom<BiosImageBase> for BiosImage {
-    type Error = Error;
-
-    fn try_from(base: BiosImageBase) -> Result<Self> {
-        match base.pcir.code_type {
-            0x00 => Ok(BiosImage::PciAt(base.try_into()?)),
-            0x03 => Ok(BiosImage::Efi(EfiBiosImage { base })),
-            0x70 => Ok(BiosImage::Nbsi(NbsiBiosImage { base })),
-            0xE0 => Ok(BiosImage::FwSec(FwSecBiosBuilder {
-                base,
-                falcon_data_offset: None,
-                pmu_lookup_table: None,
-                falcon_ucode_offset: None,
-            })),
-            _ => Err(EINVAL),
-        }
-    }
-}
-
 /// BIOS Image structure containing various headers and reference fields to all BIOS images.
 ///
-/// Each BiosImage type has a BiosImageBase type along with other image-specific fields. Note that
-/// Rust favors composition of types over inheritance.
-#[expect(dead_code)]
-struct BiosImageBase {
-    /// Used for logging.
-    dev: ARef<device::Device>,
-    /// PCI ROM Expansion Header
-    rom_header: PciRomHeader,
+/// A BiosImage struct is embedded into all image types and implements common operations.
+struct BiosImage {
     /// PCI Data Structure
     pcir: PcirStruct,
     /// NVIDIA PCI Data Extension (optional)
     npde: Option<NpdeStruct>,
     /// Image data (includes ROM header and PCIR)
-    data: KVec<u8>,
+    data: KVVec<u8>,
 }
 
-impl BiosImageBase {
-    fn into_image(self) -> Result<BiosImage> {
-        BiosImage::try_from(self)
+impl BiosImage {
+    /// Get the image size in bytes.
+    fn image_size_bytes(&self) -> usize {
+        // Prefer NPDE image size if available
+        if let Some(ref npde) = self.npde {
+            npde.image_size_bytes()
+        } else {
+            // Otherwise, fall back to the PCIR image size
+            self.pcir.image_size_bytes()
+        }
     }
 
-    /// Creates a new BiosImageBase from raw byte data.
-    fn new(dev: &device::Device, data: &[u8]) -> Result<Self> {
-        // Ensure we have enough data for the ROM header.
-        if data.len() < 26 {
-            dev_err!(dev, "Not enough data for ROM header\n");
-            return Err(EINVAL);
+    /// Get the BIOS image type.
+    fn image_type(&self) -> Result<BiosImageType> {
+        BiosImageType::try_from(self.pcir.code_type)
+    }
+
+    /// Check if this is the last image.
+    fn is_last(&self) -> bool {
+        // For NBSI images, return true as they're considered the last image.
+        if self.image_type() == Ok(BiosImageType::Nbsi) {
+            return true;
         }
 
+        // For other image types, check the NPDE first if available
+        if let Some(ref npde) = self.npde {
+            return npde.is_last();
+        }
+
+        // Otherwise, fall back to checking the PCIR last_image flag
+        self.pcir.is_last()
+    }
+
+    /// Creates a new BiosImage from raw byte data.
+    fn new(dev: &device::Device, data: &[u8]) -> Result<Self> {
         // Parse the ROM header.
-        let rom_header = PciRomHeader::new(dev, &data[0..26])
-            .inspect_err(|e| dev_err!(dev, "Failed to create PciRomHeader: {:?}\n", e))?;
+        let rom_header = PciRomHeader::new(dev, data)?;
 
         // Get the PCI Data Structure using the pointer from the ROM header.
-        let pcir_offset = rom_header.pci_data_struct_offset as usize;
+        let pcir_offset = usize::from(rom_header.pci_data_struct_offset);
         let pcir_data = data
             .get(pcir_offset..pcir_offset + core::mem::size_of::<PcirStruct>())
             .ok_or(EINVAL)
@@ -799,12 +718,10 @@ impl BiosImageBase {
         let npde = NpdeStruct::find_in_data(dev, data, &rom_header, &pcir);
 
         // Create a copy of the data.
-        let mut data_copy = KVec::new();
+        let mut data_copy = KVVec::new();
         data_copy.extend_from_slice(data, GFP_KERNEL)?;
 
-        Ok(BiosImageBase {
-            dev: dev.into(),
-            rom_header,
+        Ok(BiosImage {
             pcir,
             npde,
             data: data_copy,
@@ -835,40 +752,36 @@ impl PciAtBiosImage {
         BitToken::from_id(self, token_id)
     }
 
-    /// Find the Falcon data pointer structure in the [`PciAtBiosImage`].
+    /// Find the Falcon data offset from the start of the FWSEC region.
     ///
-    /// This is just a 4 byte structure that contains a pointer to the Falcon data in the FWSEC
-    /// image.
-    fn falcon_data_ptr(&self) -> Result<u32> {
-        let token = self.get_bit_token(BIT_TOKEN_ID_FALCON_DATA)?;
+    /// The BIT table contains a 4-byte pointer to the Falcon data. Testing shows this pointer
+    /// treats the PCI-AT and FWSEC images as logically contiguous even when an EFI image sits in
+    /// between them, so subtract the PCI-AT image size here to convert it to a FWSEC-relative
+    /// offset.
+    fn falcon_data_offset(&self, dev: &device::Device) -> Result<usize> {
+        let token = self.get_bit_token(BitToken::ID_FALCON_DATA)?;
+        let offset = usize::from(token.data_offset);
 
-        // Make sure we don't go out of bounds
-        if token.data_offset as usize + 4 > self.base.data.len() {
-            return Err(EINVAL);
-        }
+        // Read the 4-byte falcon data pointer at the offset specified in the token.
+        let data = &self.base.data;
+        let (ptr, _) = data
+            .get(offset..)
+            .and_then(|p| u32::read_from_prefix(p).ok())
+            .ok_or(EINVAL)?;
 
-        // read the 4 bytes at the offset specified in the token
-        let offset = token.data_offset as usize;
-        let bytes: [u8; 4] = self.base.data[offset..offset + 4].try_into().map_err(|_| {
-            dev_err!(self.base.dev, "Failed to convert data slice to array");
-            EINVAL
-        })?;
-
-        let data_ptr = u32::from_le_bytes(bytes);
-
-        if (data_ptr as usize) < self.base.data.len() {
-            dev_err!(self.base.dev, "Falcon data pointer out of bounds\n");
-            return Err(EINVAL);
-        }
-
-        Ok(data_ptr)
+        usize::from_safe_cast(ptr)
+            .checked_sub(data.len())
+            .ok_or(EINVAL)
+            .inspect_err(|_| {
+                dev_err!(dev, "Falcon data pointer out of bounds\n");
+            })
     }
 }
 
-impl TryFrom<BiosImageBase> for PciAtBiosImage {
+impl TryFrom<BiosImage> for PciAtBiosImage {
     type Error = Error;
 
-    fn try_from(base: BiosImageBase) -> Result<Self> {
+    fn try_from(base: BiosImage) -> Result<Self> {
         let data_slice = &base.data;
         let (bit_header, bit_offset) = PciAtBiosImage::find_bit_header(data_slice)?;
 
@@ -883,6 +796,7 @@ impl TryFrom<BiosImageBase> for PciAtBiosImage {
 /// The [`PmuLookupTableEntry`] structure is a single entry in the [`PmuLookupTable`].
 ///
 /// See the [`PmuLookupTable`] description for more information.
+#[derive(FromBytes)]
 #[repr(C, packed)]
 struct PmuLookupTableEntry {
     application_id: u8,
@@ -891,17 +805,23 @@ struct PmuLookupTableEntry {
 }
 
 impl PmuLookupTableEntry {
-    fn new(data: &[u8]) -> Result<Self> {
-        if data.len() < core::mem::size_of::<Self>() {
-            return Err(EINVAL);
-        }
+    /// PMU lookup table application ID for firmware security license ucode.
+    #[expect(dead_code)]
+    const APPID_FIRMWARE_SEC_LIC: u8 = 0x05;
+    /// PMU lookup table application ID for debug FWSEC ucode.
+    #[expect(dead_code)]
+    const APPID_FWSEC_DBG: u8 = 0x45;
+    /// PMU lookup table application ID for production FWSEC ucode.
+    const APPID_FWSEC_PROD: u8 = 0x85;
+}
 
-        Ok(PmuLookupTableEntry {
-            application_id: data[0],
-            target_id: data[1],
-            data: u32::from_le_bytes(data[2..6].try_into().map_err(|_| EINVAL)?),
-        })
-    }
+#[repr(C)]
+#[derive(FromBytes)]
+struct PmuLookupTableHeader {
+    version: u8,
+    header_len: u8,
+    entry_len: u8,
+    entry_count: u8,
 }
 
 /// The [`PmuLookupTableEntry`] structure is used to find the [`PmuLookupTableEntry`] for a given
@@ -909,234 +829,135 @@ impl PmuLookupTableEntry {
 ///
 /// The table of entries is pointed to by the falcon data pointer in the BIT table, and is used to
 /// locate the Falcon Ucode.
-#[expect(dead_code)]
 struct PmuLookupTable {
-    version: u8,
-    header_len: u8,
-    entry_len: u8,
-    entry_count: u8,
-    table_data: KVec<u8>,
+    entries: KVVec<PmuLookupTableEntry>,
 }
 
 impl PmuLookupTable {
     fn new(dev: &device::Device, data: &[u8]) -> Result<Self> {
-        if data.len() < 4 {
-            return Err(EINVAL);
+        let (header, _) = PmuLookupTableHeader::read_from_prefix(data).map_err(|_| EINVAL)?;
+
+        let header_len = usize::from(header.header_len);
+        let entry_len = usize::from(header.entry_len);
+        let entry_count = usize::from(header.entry_count);
+
+        let data = data
+            .get(header_len..header_len + entry_count * entry_len)
+            .ok_or(EINVAL)
+            .inspect_err(|_| {
+                dev_err!(dev, "PmuLookupTable data length less than required\n");
+            })?;
+
+        let mut entries = KVVec::with_capacity(entry_count, GFP_KERNEL)?;
+        for i in 0..entry_count {
+            let (entry, _) = PmuLookupTableEntry::read_from_prefix(&data[i * entry_len..])
+                .map_err(|_| EINVAL)?;
+            entries.push(entry, GFP_KERNEL)?;
         }
 
-        let header_len = data[1] as usize;
-        let entry_len = data[2] as usize;
-        let entry_count = data[3] as usize;
-
-        let required_bytes = header_len + (entry_count * entry_len);
-
-        if data.len() < required_bytes {
-            dev_err!(dev, "PmuLookupTable data length less than required\n");
-            return Err(EINVAL);
-        }
-
-        // Create a copy of only the table data
-        let table_data = {
-            let mut ret = KVec::new();
-            ret.extend_from_slice(&data[header_len..required_bytes], GFP_KERNEL)?;
-            ret
-        };
-
-        // Debug logging of entries (dumps the table data to dmesg)
-        for i in (header_len..required_bytes).step_by(entry_len) {
-            dev_dbg!(dev, "PMU entry: {:02x?}\n", &data[i..][..entry_len]);
-        }
-
-        Ok(PmuLookupTable {
-            version: data[0],
-            header_len: header_len as u8,
-            entry_len: entry_len as u8,
-            entry_count: entry_count as u8,
-            table_data,
-        })
-    }
-
-    fn lookup_index(&self, idx: u8) -> Result<PmuLookupTableEntry> {
-        if idx >= self.entry_count {
-            return Err(EINVAL);
-        }
-
-        let index = (idx as usize) * self.entry_len as usize;
-        PmuLookupTableEntry::new(&self.table_data[index..])
+        Ok(PmuLookupTable { entries })
     }
 
     // find entry by type value
-    fn find_entry_by_type(&self, entry_type: u8) -> Result<PmuLookupTableEntry> {
-        for i in 0..self.entry_count {
-            let entry = self.lookup_index(i)?;
-            if entry.application_id == entry_type {
-                return Ok(entry);
-            }
-        }
-
-        Err(EINVAL)
-    }
-}
-
-impl FwSecBiosBuilder {
-    fn setup_falcon_data(
-        &mut self,
-        pci_at_image: &PciAtBiosImage,
-        first_fwsec: &FwSecBiosBuilder,
-    ) -> Result {
-        let mut offset = pci_at_image.falcon_data_ptr()? as usize;
-        let mut pmu_in_first_fwsec = false;
-
-        // The falcon data pointer assumes that the PciAt and FWSEC images
-        // are contiguous in memory. However, testing shows the EFI image sits in
-        // between them. So calculate the offset from the end of the PciAt image
-        // rather than the start of it. Compensate.
-        offset -= pci_at_image.base.data.len();
-
-        // The offset is now from the start of the first Fwsec image, however
-        // the offset points to a location in the second Fwsec image. Since
-        // the fwsec images are contiguous, subtract the length of the first Fwsec
-        // image from the offset to get the offset to the start of the second
-        // Fwsec image.
-        if offset < first_fwsec.base.data.len() {
-            pmu_in_first_fwsec = true;
-        } else {
-            offset -= first_fwsec.base.data.len();
-        }
-
-        self.falcon_data_offset = Some(offset);
-
-        if pmu_in_first_fwsec {
-            self.pmu_lookup_table = Some(PmuLookupTable::new(
-                &self.base.dev,
-                &first_fwsec.base.data[offset..],
-            )?);
-        } else {
-            self.pmu_lookup_table = Some(PmuLookupTable::new(
-                &self.base.dev,
-                &self.base.data[offset..],
-            )?);
-        }
-
-        match self
-            .pmu_lookup_table
-            .as_ref()
-            .ok_or(EINVAL)?
-            .find_entry_by_type(FALCON_UCODE_ENTRY_APPID_FWSEC_PROD)
-        {
-            Ok(entry) => {
-                let mut ucode_offset = entry.data as usize;
-                ucode_offset -= pci_at_image.base.data.len();
-                if ucode_offset < first_fwsec.base.data.len() {
-                    dev_err!(self.base.dev, "Falcon Ucode offset not in second Fwsec.\n");
-                    return Err(EINVAL);
-                }
-                ucode_offset -= first_fwsec.base.data.len();
-                self.falcon_ucode_offset = Some(ucode_offset);
-            }
-            Err(e) => {
-                dev_err!(
-                    self.base.dev,
-                    "PmuLookupTableEntry not found, error: {:?}\n",
-                    e
-                );
-                return Err(EINVAL);
-            }
-        }
-        Ok(())
-    }
-
-    /// Build the final FwSecBiosImage from this builder
-    fn build(self) -> Result<FwSecBiosImage> {
-        let ret = FwSecBiosImage {
-            base: self.base,
-            falcon_ucode_offset: self.falcon_ucode_offset.ok_or(EINVAL)?,
-        };
-
-        if cfg!(debug_assertions) {
-            // Print the desc header for debugging
-            let desc = ret.header()?;
-            dev_dbg!(ret.base.dev, "PmuLookupTableEntry desc: {:#?}\n", desc);
-        }
-
-        Ok(ret)
+    fn find_entry_by_type(&self, entry_type: u8) -> Result<&PmuLookupTableEntry> {
+        self.entries
+            .iter()
+            .find(|entry| entry.application_id == entry_type)
+            .ok_or(EINVAL)
     }
 }
 
 impl FwSecBiosImage {
-    /// Get the FwSec header ([`FalconUCodeDescV3`]).
-    pub(crate) fn header(&self) -> Result<&FalconUCodeDescV3> {
-        // Get the falcon ucode offset that was found in setup_falcon_data.
-        let falcon_ucode_offset = self.falcon_ucode_offset;
+    /// Build the final `FwSecBiosImage` from the PCI-AT and FWSEC BIOS images.
+    fn new(
+        dev: &device::Device,
+        pci_at_image: PciAtBiosImage,
+        data: KVVec<u8>,
+    ) -> Result<FwSecBiosImage> {
+        let offset = pci_at_image.falcon_data_offset(dev)?;
 
-        // Make sure the offset is within the data bounds.
-        if falcon_ucode_offset + core::mem::size_of::<FalconUCodeDescV3>() > self.base.data.len() {
-            dev_err!(
-                self.base.dev,
-                "fwsec-frts header not contained within BIOS bounds\n"
-            );
-            return Err(ERANGE);
-        }
+        let pmu_lookup_data = data.get(offset..).ok_or(EINVAL)?;
+        let pmu_lookup_table = PmuLookupTable::new(dev, pmu_lookup_data)?;
 
-        // Read the first 4 bytes to get the version.
-        let hdr_bytes: [u8; 4] = self.base.data[falcon_ucode_offset..falcon_ucode_offset + 4]
-            .try_into()
-            .map_err(|_| EINVAL)?;
-        let hdr = u32::from_le_bytes(hdr_bytes);
-        let ver = (hdr & 0xff00) >> 8;
+        let entry = pmu_lookup_table
+            .find_entry_by_type(PmuLookupTableEntry::APPID_FWSEC_PROD)
+            .inspect_err(|e| {
+                dev_err!(dev, "PmuLookupTableEntry not found, error: {:?}\n", e);
+            })?;
 
-        if ver != 3 {
-            dev_err!(self.base.dev, "invalid fwsec firmware version: {:?}\n", ver);
-            return Err(EINVAL);
-        }
+        let falcon_ucode_offset = usize::from_safe_cast(entry.data)
+            .checked_sub(pci_at_image.base.data.len())
+            .ok_or(EINVAL)
+            .inspect_err(|_| {
+                dev_err!(dev, "Falcon Ucode offset not in Fwsec.\n");
+            })?;
 
-        // Return a reference to the FalconUCodeDescV3 structure.
-        //
-        // SAFETY: We have checked that `falcon_ucode_offset + size_of::<FalconUCodeDescV3>` is
-        // within the bounds of `data`. Also, this data vector is from ROM, and the `data` field
-        // in `BiosImageBase` is immutable after construction.
-        Ok(unsafe {
-            &*(self
-                .base
-                .data
-                .as_ptr()
-                .add(falcon_ucode_offset)
-                .cast::<FalconUCodeDescV3>())
+        Ok(FwSecBiosImage {
+            dev: dev.into(),
+            data,
+            falcon_ucode_offset,
         })
     }
 
+    /// Get the FwSec header ([`FalconUCodeDesc`]).
+    pub(crate) fn header(&self) -> Result<FalconUCodeDesc> {
+        let data = self.data.get(self.falcon_ucode_offset..).ok_or(EINVAL)?;
+
+        // Read the version byte from the header.
+        let ver = data.get(1).copied().ok_or(EINVAL)?;
+        match ver {
+            2 => {
+                let (v2, _) = FalconUCodeDescV2::read_from_prefix(data).map_err(|_| EINVAL)?;
+                Ok(FalconUCodeDesc::V2(v2))
+            }
+            3 => {
+                let (v3, _) = FalconUCodeDescV3::read_from_prefix(data).map_err(|_| EINVAL)?;
+                Ok(FalconUCodeDesc::V3(v3))
+            }
+            _ => {
+                dev_err!(self.dev, "invalid fwsec firmware version: {:?}\n", ver);
+                Err(EINVAL)
+            }
+        }
+    }
+
     /// Get the ucode data as a byte slice
-    pub(crate) fn ucode(&self, desc: &FalconUCodeDescV3) -> Result<&[u8]> {
-        let falcon_ucode_offset = self.falcon_ucode_offset;
+    pub(crate) fn ucode(&self, desc: &FalconUCodeDesc) -> Result<&[u8]> {
+        let size = usize::from_safe_cast(
+            desc.imem_load_size()
+                .checked_add(desc.dmem_load_size())
+                .ok_or(ERANGE)?,
+        );
 
         // The ucode data follows the descriptor.
-        let ucode_data_offset = falcon_ucode_offset + desc.size();
-        let size = (desc.imem_load_size + desc.dmem_load_size) as usize;
-
-        // Get the data slice, checking bounds in a single operation.
-        self.base
-            .data
-            .get(ucode_data_offset..ucode_data_offset + size)
+        self.data
+            .get(self.falcon_ucode_offset..)
+            .and_then(|data| data.get(desc.size()..))
+            .and_then(|data| data.get(..size))
             .ok_or(ERANGE)
             .inspect_err(|_| {
                 dev_err!(
-                    self.base.dev,
+                    self.dev,
                     "fwsec ucode data not contained within BIOS bounds\n"
                 )
             })
     }
 
     /// Get the signatures as a byte slice
-    pub(crate) fn sigs(&self, desc: &FalconUCodeDescV3) -> Result<&[Bcrt30Rsa3kSignature]> {
+    pub(crate) fn sigs(&self, desc: &FalconUCodeDesc) -> Result<&[Bcrt30Rsa3kSignature]> {
+        let hdr_size = match desc {
+            FalconUCodeDesc::V2(_v2) => core::mem::size_of::<FalconUCodeDescV2>(),
+            FalconUCodeDesc::V3(_v3) => core::mem::size_of::<FalconUCodeDescV3>(),
+        };
         // The signatures data follows the descriptor.
-        let sigs_data_offset = self.falcon_ucode_offset + core::mem::size_of::<FalconUCodeDescV3>();
-        let sigs_size =
-            desc.signature_count as usize * core::mem::size_of::<Bcrt30Rsa3kSignature>();
+        let sigs_data_offset = self.falcon_ucode_offset + hdr_size;
+        let sigs_count = usize::from(desc.signature_count());
+        let sigs_size = sigs_count * core::mem::size_of::<Bcrt30Rsa3kSignature>();
 
         // Make sure the data is within bounds.
-        if sigs_data_offset + sigs_size > self.base.data.len() {
+        if sigs_data_offset + sigs_size > self.data.len() {
             dev_err!(
-                self.base.dev,
+                self.dev,
                 "fwsec signatures data not contained within BIOS bounds\n"
             );
             return Err(ERANGE);
@@ -1146,12 +967,11 @@ impl FwSecBiosImage {
         // sizeof::<Bcrt30Rsa3kSignature>()` is within the bounds of `data`.
         Ok(unsafe {
             core::slice::from_raw_parts(
-                self.base
-                    .data
+                self.data
                     .as_ptr()
                     .add(sigs_data_offset)
                     .cast::<Bcrt30Rsa3kSignature>(),
-                desc.signature_count as usize,
+                sigs_count,
             )
         })
     }

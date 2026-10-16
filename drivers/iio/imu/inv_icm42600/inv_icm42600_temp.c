@@ -3,11 +3,12 @@
  * Copyright (C) 2020 Invensense, Inc.
  */
 
-#include <linux/kernel.h>
 #include <linux/device.h>
+#include <linux/kernel.h>
 #include <linux/mutex.h>
 #include <linux/pm_runtime.h>
 #include <linux/regmap.h>
+
 #include <linux/iio/iio.h>
 
 #include "inv_icm42600.h"
@@ -59,10 +60,7 @@ int inv_icm42600_temp_read_raw(struct iio_dev *indio_dev,
 
 	switch (mask) {
 	case IIO_CHAN_INFO_RAW:
-		if (!iio_device_claim_direct(indio_dev))
-			return -EBUSY;
 		ret = inv_icm42600_temp_read(st, &temp);
-		iio_device_release_direct(indio_dev);
 		if (ret)
 			return ret;
 		*val = temp;

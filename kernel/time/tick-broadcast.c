@@ -3,7 +3,7 @@
  * This file contains functions which emulate a local clock-event
  * device via a broadcast event source.
  *
- * Copyright(C) 2005-2006, Thomas Gleixner <tglx@linutronix.de>
+ * Copyright(C) 2005-2006, Linutronix GmbH, Thomas Gleixner <tglx@kernel.org>
  * Copyright(C) 2005-2007, Red Hat, Inc., Ingo Molnar
  * Copyright(C) 2006-2007, Timesys Corp., Thomas Gleixner
  */
@@ -76,8 +76,10 @@ const struct clock_event_device *tick_get_wakeup_device(int cpu)
  */
 static void tick_broadcast_start_periodic(struct clock_event_device *bc)
 {
-	if (bc)
+	if (bc) {
+		bc->next_event_forced = 0;
 		tick_setup_periodic(bc, 1);
+	}
 }
 
 /*
@@ -106,6 +108,7 @@ static struct clock_event_device *tick_get_oneshot_wakeup_device(int cpu)
 
 static void tick_oneshot_wakeup_handler(struct clock_event_device *wd)
 {
+	wd->next_event_forced = 0;
 	/*
 	 * If we woke up early and the tick was reprogrammed in the
 	 * meantime then this may be spurious but harmless.
@@ -162,23 +165,31 @@ static bool tick_set_oneshot_wakeup_device(struct clock_event_device *newdev,
  */
 void tick_install_broadcast_device(struct clock_event_device *dev, int cpu)
 {
-	struct clock_event_device *cur = tick_broadcast_device.evtdev;
+	struct clock_event_device *cur;
 
-	if (tick_set_oneshot_wakeup_device(dev, cpu))
-		return;
+	scoped_guard(raw_spinlock_irqsave, &tick_broadcast_lock) {
 
-	if (!tick_check_broadcast_device(cur, dev))
-		return;
+		if (tick_set_oneshot_wakeup_device(dev, cpu))
+			return;
 
-	if (!try_module_get(dev->owner))
-		return;
+		cur = tick_broadcast_device.evtdev;
+		if (!tick_check_broadcast_device(cur, dev))
+			return;
 
-	clockevents_exchange_device(cur, dev);
+		if (!try_module_get(dev->owner))
+			return;
+
+		__clockevents_exchange_device(cur, dev);
+		if (cur)
+			cur->event_handler = clockevents_handle_noop;
+		WRITE_ONCE(tick_broadcast_device.evtdev, dev);
+		if (!cpumask_empty(tick_broadcast_mask))
+			tick_broadcast_start_periodic(dev);
+	}
+
+	/* Module release must be outside of the lock */
 	if (cur)
-		cur->event_handler = clockevents_handle_noop;
-	tick_broadcast_device.evtdev = dev;
-	if (!cpumask_empty(tick_broadcast_mask))
-		tick_broadcast_start_periodic(dev);
+		module_put(cur->owner);
 
 	if (!(dev->features & CLOCK_EVT_FEAT_ONESHOT))
 		return;
@@ -403,6 +414,7 @@ static void tick_handle_periodic_broadcast(struct clock_event_device *dev)
 	bool bc_local;
 
 	raw_spin_lock(&tick_broadcast_lock);
+	tick_broadcast_device.evtdev->next_event_forced = 0;
 
 	/* Handle spurious interrupts gracefully */
 	if (clockevent_state_shutdown(tick_broadcast_device.evtdev)) {
@@ -696,6 +708,7 @@ static void tick_handle_oneshot_broadcast(struct clock_event_device *dev)
 
 	raw_spin_lock(&tick_broadcast_lock);
 	dev->next_event = KTIME_MAX;
+	tick_broadcast_device.evtdev->next_event_forced = 0;
 	next_event = KTIME_MAX;
 	cpumask_clear(tmpmask);
 	now = ktime_get();
@@ -1063,6 +1076,7 @@ static void tick_broadcast_setup_oneshot(struct clock_event_device *bc,
 
 
 	bc->event_handler = tick_handle_oneshot_broadcast;
+	bc->next_event_forced = 0;
 	bc->next_event = KTIME_MAX;
 
 	/*
@@ -1175,6 +1189,7 @@ void hotplug_cpu__broadcast_tick_pull(int deadcpu)
 		}
 
 		/* This moves the broadcast assignment to this CPU: */
+		bc->next_event_forced = 0;
 		clockevents_program_event(bc, bc->next_event, 1);
 	}
 	raw_spin_unlock_irqrestore(&tick_broadcast_lock, flags);
@@ -1211,7 +1226,7 @@ int tick_broadcast_oneshot_active(void)
  */
 bool tick_broadcast_oneshot_available(void)
 {
-	struct clock_event_device *bc = tick_broadcast_device.evtdev;
+	struct clock_event_device *bc = READ_ONCE(tick_broadcast_device.evtdev);
 
 	return bc ? bc->features & CLOCK_EVT_FEAT_ONESHOT : false;
 }
@@ -1219,7 +1234,7 @@ bool tick_broadcast_oneshot_available(void)
 #else
 int __tick_broadcast_oneshot_control(enum tick_broadcast_state state)
 {
-	struct clock_event_device *bc = tick_broadcast_device.evtdev;
+	struct clock_event_device *bc = READ_ONCE(tick_broadcast_device.evtdev);
 
 	if (!bc || (bc->features & CLOCK_EVT_FEAT_HRTIMER))
 		return -EBUSY;

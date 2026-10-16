@@ -23,26 +23,37 @@ struct sdca_function_data;
 /**
  * struct sdca_interrupt - contains information about a single SDCA interrupt
  * @name: The name of the interrupt.
+ * @dev: Pointer to the Function device.
+ * @device_regmap: Pointer to the IRQ regmap.
+ * @function_regmap: Pointer to the SDCA Function regmap.
  * @component: Pointer to the ASoC component owns the interrupt.
  * @function: Pointer to the Function that the interrupt is associated with.
  * @entity: Pointer to the Entity that the interrupt is associated with.
  * @control: Pointer to the Control that the interrupt is associated with.
+ * @handler: Handler function to be called for the IRQ.
  * @priv: Pointer to private data for use by the handler.
- * @externally_requested: Internal flag used to check if a client driver has
- * already requested the interrupt, for custom handling, allowing the core to
- * skip handling this interrupt.
+ * @free_priv: Pointer to a function that can be used to free the priv data.
+ * @irq: IRQ number allocated to this interrupt, also used internally to track
+ * the IRQ being assigned.
+ * @early_request: Flag to indicate this IRQ was requested at bus probe time.
  */
 struct sdca_interrupt {
 	const char *name;
 
+	struct device *dev;
+	struct regmap *device_regmap;
+	struct regmap *function_regmap;
 	struct snd_soc_component *component;
 	struct sdca_function_data *function;
 	struct sdca_entity *entity;
 	struct sdca_control *control;
+	irq_handler_t handler;
 
 	void *priv;
+	void (*free_priv)(struct sdca_interrupt *interrupt);
 
-	bool externally_requested;
+	int irq;
+	bool early_request;
 };
 
 /**
@@ -64,15 +75,35 @@ struct sdca_interrupt_info {
 int sdca_irq_request(struct device *dev, struct sdca_interrupt_info *interrupt_info,
 		     int sdca_irq, const char *name, irq_handler_t handler,
 		     void *data);
-int sdca_irq_data_populate(struct snd_soc_component *component,
+void sdca_irq_free(struct device *dev, struct sdca_interrupt_info *interrupt_info,
+		   int sdca_irq, const char *name, void *data);
+int sdca_irq_data_populate(struct device *dev, struct regmap *function_regmap,
+			   struct snd_soc_component *component,
 			   struct sdca_function_data *function,
 			   struct sdca_entity *entity,
 			   struct sdca_control *control,
 			   struct sdca_interrupt *interrupt);
+int sdca_irq_populate_early(struct device *dev, struct regmap *function_regmap,
+			    struct sdca_function_data *function,
+			    struct sdca_interrupt_info *info);
 int sdca_irq_populate(struct sdca_function_data *function,
 		      struct snd_soc_component *component,
 		      struct sdca_interrupt_info *info);
-struct sdca_interrupt_info *sdca_irq_allocate(struct device *dev,
-					      struct regmap *regmap, int irq);
+void sdca_irq_cleanup(struct device *dev,
+		      struct sdca_function_data *function,
+		      struct sdca_interrupt_info *info);
+void sdca_irq_cleanup_late(struct device *dev,
+			   struct sdca_function_data *function,
+			   struct sdca_interrupt_info *info);
+
+struct sdca_interrupt_info *devm_sdca_irq_allocate(struct device *dev,
+						   struct regmap *regmap, int irq);
+
+void sdca_irq_enable_early(struct sdca_function_data *function,
+			   struct sdca_interrupt_info *info);
+void sdca_irq_enable(struct sdca_function_data *function,
+		     struct sdca_interrupt_info *info);
+void sdca_irq_disable(struct sdca_function_data *function,
+		      struct sdca_interrupt_info *info);
 
 #endif

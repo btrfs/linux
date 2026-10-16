@@ -3,7 +3,7 @@
  * Copyright (C) 2018-2023 Oracle.  All Rights Reserved.
  * Author: Darrick J. Wong <djwong@kernel.org>
  */
-#include "xfs.h"
+#include "xfs_platform.h"
 #include "xfs_fs.h"
 #include "xfs_shared.h"
 #include "xfs_format.h"
@@ -184,17 +184,13 @@ xrep_quota_item(
 	/*
 	 * We might need to fix holes in the bmap record for the storage
 	 * backing this dquot, so we need to lock the dquot and the quota file.
-	 * dqiterate gave us a locked dquot, so drop the dquot lock to get the
-	 * ILOCK_EXCL.
 	 */
-	xfs_dqunlock(dq);
 	xchk_ilock(sc, XFS_ILOCK_EXCL);
-	xfs_dqlock(dq);
-
+	mutex_lock(&dq->q_qlock);
 	error = xrep_quota_item_bmap(sc, dq, &dirty);
 	xchk_iunlock(sc, XFS_ILOCK_EXCL);
 	if (error)
-		return error;
+		goto out_unlock_dquot;
 
 	/* Check the limits. */
 	if (dq->q_blk.softlimit > dq->q_blk.hardlimit) {
@@ -246,7 +242,7 @@ xrep_quota_item(
 	xrep_quota_item_timer(sc, &dq->q_rtb, &dirty);
 
 	if (!dirty)
-		return 0;
+		goto out_unlock_dquot;
 
 	trace_xrep_dquot_item(sc->mp, dq->q_type, dq->q_id);
 
@@ -257,8 +253,10 @@ xrep_quota_item(
 		xfs_qm_adjust_dqtimers(dq);
 	}
 	xfs_trans_log_dquot(sc->tp, dq);
-	error = xfs_trans_roll(&sc->tp);
-	xfs_dqlock(dq);
+	return xfs_trans_roll(&sc->tp);
+
+out_unlock_dquot:
+	mutex_unlock(&dq->q_qlock);
 	return error;
 }
 
@@ -327,7 +325,7 @@ xrep_quota_block(
 		 * If there's nothing that would impede a dqiterate, we're
 		 * done.
 		 */
-		if ((ddq->d_type & XFS_DQTYPE_REC_MASK) != dqtype ||
+		if ((ddq->d_type & XFS_DQTYPE_REC_MASK) == dqtype &&
 		    id == be32_to_cpu(ddq->d_id)) {
 			xfs_trans_brelse(sc->tp, bp);
 			return 0;
@@ -365,11 +363,18 @@ xrep_quota_block(
 				ddq->d_rtbcount, &ddq->d_rtbtimer,
 				defq->rtb.time);
 
+		/*
+		 * This transaction operates on raw disk buffers, so we don't
+		 * have a dquot log item to assign the LSN for us.  Instead,
+		 * set it to zero so that log recovery will always replay any
+		 * logged dquot item atop this buffer.
+		 */
+		dqblk->dd_lsn = 0;
+
 		/* We only support v5 filesystems so always set these. */
 		uuid_copy(&dqblk->dd_uuid, &sc->mp->m_sb.sb_meta_uuid);
 		xfs_update_cksum((char *)dqblk, sizeof(struct xfs_dqblk),
 				 XFS_DQUOT_CRC_OFF);
-		dqblk->dd_lsn = 0;
 	}
 	switch (dqtype) {
 	case XFS_DQTYPE_USER:
@@ -457,8 +462,7 @@ xrep_quota_data_fork(
 
 	if (truncate) {
 		/* Erase everything after the block containing the max dquot */
-		error = xfs_bunmapi_range(&sc->tp, sc->ip, 0,
-				max_dqid_off * sc->mp->m_sb.sb_blocksize,
+		error = xfs_bunmapi_range(&sc->tp, sc->ip, 0, max_dqid_off + 1,
 				XFS_MAX_FILEOFF);
 		if (error)
 			goto out;
@@ -513,7 +517,7 @@ xrep_quota_problems(
 	xchk_dqiter_init(&cursor, sc, dqtype);
 	while ((error = xchk_dquot_iter(&cursor, &dq)) == 1) {
 		error = xrep_quota_item(&rqi, dq);
-		xfs_qm_dqput(dq);
+		xfs_qm_dqrele(dq);
 		if (error)
 			break;
 	}

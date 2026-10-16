@@ -6,7 +6,7 @@
  *
  * Code common to all SA11x0 machines.
  */
-#include <linux/gpio.h>
+#include <linux/gpio/consumer.h>
 #include <linux/gpio/machine.h>
 #include <linux/module.h>
 #include <linux/kernel.h>
@@ -321,7 +321,7 @@ int __init sa11x0_register_fixed_regulator(int n,
 {
 	struct regulator_init_data *id;
 
-	cfg->init_data = id = kzalloc(sizeof(*cfg->init_data), GFP_KERNEL);
+	cfg->init_data = id = kzalloc_obj(*cfg->init_data);
 	if (!cfg->init_data)
 		return -ENOMEM;
 

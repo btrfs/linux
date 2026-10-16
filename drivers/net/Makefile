@@ -21,7 +21,6 @@ obj-$(CONFIG_MACVTAP) += macvtap.o
 obj-$(CONFIG_MII) += mii.o
 obj-$(CONFIG_MDIO) += mdio.o
 obj-$(CONFIG_NET) += loopback.o
-obj-$(CONFIG_NETDEV_LEGACY_INIT) += Space.o
 obj-$(CONFIG_NETCONSOLE) += netconsole.o
 obj-$(CONFIG_NETKIT) += netkit.o
 obj-y += phy/
@@ -48,15 +47,12 @@ obj-$(CONFIG_MHI_NET) += mhi_net.o
 # Networking Drivers
 #
 obj-$(CONFIG_ARCNET) += arcnet/
-obj-$(CONFIG_CAIF) += caif/
 obj-$(CONFIG_CAN) += can/
 ifdef CONFIG_NET_DSA
 obj-y += dsa/
 endif
 obj-$(CONFIG_ETHERNET) += ethernet/
 obj-$(CONFIG_FDDI) += fddi/
-obj-$(CONFIG_HIPPI) += hippi/
-obj-$(CONFIG_HAMRADIO) += hamradio/
 obj-$(CONFIG_QCOM_IPA) += ipa/
 obj-$(CONFIG_PLIP) += plip/
 obj-$(CONFIG_PPP) += ppp/

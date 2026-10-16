@@ -2,10 +2,11 @@
 /*
  * VPA support
  */
-
+#include <errno.h>
 #include <linux/kernel.h>
 #include <linux/types.h>
 #include <linux/string.h>
+#include <linux/zalloc.h>
 
 #include "../../util/evlist.h"
 #include "../../util/debug.h"
@@ -69,6 +70,12 @@ struct auxtrace_record *auxtrace_record__init(struct evlist *evlist,
 	struct auxtrace_record *aux;
 	struct evsel *pos;
 	int found = 0;
+
+	/*
+	 * Set err value to zero here. Any fail later
+	 * will set appropriate return code to err.
+	 */
+	*err = 0;
 
 	evlist__for_each_entry(evlist, pos) {
 		if (strstarts(pos->name, "vpa_dtl")) {

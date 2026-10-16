@@ -176,7 +176,7 @@ struct ffs_data {
 	/* reference counter */
 	refcount_t			ref;
 	/* how many files are opened (EP0 and others) */
-	atomic_t			opened;
+	int				opened;
 
 	/* EP0 state */
 	enum ffs_state			state;
@@ -252,8 +252,14 @@ struct ffs_data {
 
 	unsigned short			strings_count;
 	unsigned short			interfaces_count;
+
+	/*
+	 * eps_count tracks the number of underlying hardware endpoints.
+	 * epfiles_count tracks the total number of VFS endpoint files.
+	 * When companion endpoints are active, epfiles_count > eps_count.
+	 */
 	unsigned short			eps_count;
-	unsigned short			_pad1;
+	unsigned short			epfiles_count;
 
 	/* filled by __ffs_data_got_strings() */
 	/* ids in stringtabs are set in functionfs_bind() */

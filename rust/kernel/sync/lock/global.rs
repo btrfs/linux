@@ -5,7 +5,7 @@
 //! Support for defining statics containing locks.
 
 use crate::{
-    str::CStr,
+    str::{CStr, CStrExt as _},
     sync::lock::{Backend, Guard, Lock},
     sync::{LockClassKey, LockedBy},
     types::Opaque,
@@ -77,6 +77,7 @@ impl<B: GlobalLockBackend> GlobalLock<B> {
     }
 
     /// Lock this global lock.
+    #[inline]
     pub fn lock(&'static self) -> GlobalGuard<B> {
         GlobalGuard {
             inner: self.inner.lock(),
@@ -84,6 +85,8 @@ impl<B: GlobalLockBackend> GlobalLock<B> {
     }
 
     /// Try to lock this global lock.
+    #[must_use = "if unused, the lock will be immediately unlocked"]
+    #[inline]
     pub fn try_lock(&'static self) -> Option<GlobalGuard<B>> {
         Some(GlobalGuard {
             inner: self.inner.try_lock()?,
@@ -94,6 +97,7 @@ impl<B: GlobalLockBackend> GlobalLock<B> {
 /// A guard for a [`GlobalLock`].
 ///
 /// See [`global_lock!`] for examples.
+#[must_use = "the lock unlocks immediately when the guard is unused"]
 pub struct GlobalGuard<B: GlobalLockBackend> {
     inner: Guard<'static, B::Item, B::Backend>,
 }
@@ -106,7 +110,10 @@ impl<B: GlobalLockBackend> core::ops::Deref for GlobalGuard<B> {
     }
 }
 
-impl<B: GlobalLockBackend> core::ops::DerefMut for GlobalGuard<B> {
+impl<B: GlobalLockBackend> core::ops::DerefMut for GlobalGuard<B>
+where
+    B::Item: Unpin,
+{
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.inner
     }
@@ -298,5 +305,8 @@ macro_rules! global_lock_inner {
     };
     (backend SpinLock) => {
         $crate::sync::lock::spinlock::SpinLockBackend
+    };
+    (backend SpinLockIrq) => {
+        $crate::sync::lock::spinlock::SpinLockIrqBackend
     };
 }

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0+
-/* Copyright (c) 2017 NXP. */
+/* Copyright 2017-2026 NXP. */
 
 #include <linux/bitfield.h>
 #include <linux/clk.h>
@@ -9,13 +9,21 @@
 #include <linux/of.h>
 #include <linux/phy/phy.h>
 #include <linux/platform_device.h>
+#include <linux/pm_domain.h>
+#include <linux/pm_runtime.h>
 #include <linux/regulator/consumer.h>
+#include <linux/regmap.h>
 #include <linux/usb/typec_mux.h>
 
 #define PHY_CTRL0			0x0
 #define PHY_CTRL0_REF_SSP_EN		BIT(2)
 #define PHY_CTRL0_FSEL_MASK		GENMASK(10, 5)
 #define PHY_CTRL0_FSEL_24M		0x2a
+#define PHY_CTRL0_FSEL_100M		0x27
+#define PHY_CTRL0_SSC_RANGE_MASK	GENMASK(23, 21)
+#define PHY_CTRL0_SSC_RANGE_4003PPM	0x2
+#define PHY_CTRL0_SSC_RANGE_4492PPM	0x1
+#define PHY_CTRL0_SSC_RANGE_4980PPM	0x0
 
 #define PHY_CTRL1			0x4
 #define PHY_CTRL1_RESET			BIT(0)
@@ -46,8 +54,11 @@
 #define PHY_CTRL5_PCS_TX_SWING_FULL_MASK	GENMASK(6, 0)
 
 #define PHY_CTRL6			0x18
+#define PHY_CTRL6_RXTERM_OVERRIDE_SEL	BIT(29)
 #define PHY_CTRL6_ALT_CLK_EN		BIT(1)
 #define PHY_CTRL6_ALT_CLK_SEL		BIT(0)
+
+#define PHY_CRCTL			0x30
 
 #define PHY_TUNE_DEFAULT		0xffffffff
 
@@ -108,9 +119,11 @@ struct tca_blk {
 struct imx8mq_usb_phy {
 	struct phy *phy;
 	struct clk *clk;
+	struct clk *alt_clk;
 	void __iomem *base;
 	struct regulator *vbus;
 	struct tca_blk *tca;
+	struct regmap *cr_regmap;
 	u32 pcs_tx_swing_full;
 	u32 pcs_tx_deemph_3p5db;
 	u32 tx_vref_tune;
@@ -120,28 +133,28 @@ struct imx8mq_usb_phy {
 	u32 comp_dis_tune;
 };
 
+struct imx8mq_usb_phy_drvdata {
+	const struct phy_ops *ops;
+	bool need_genpd_rpm_on;
+};
 
 static void tca_blk_orientation_set(struct tca_blk *tca,
 				enum typec_orientation orientation);
-
-#ifdef CONFIG_TYPEC
 
 static int tca_blk_typec_switch_set(struct typec_switch_dev *sw,
 				enum typec_orientation orientation)
 {
 	struct imx8mq_usb_phy *imx_phy = typec_switch_get_drvdata(sw);
 	struct tca_blk *tca = imx_phy->tca;
-	int ret;
 
 	if (tca->orientation == orientation)
 		return 0;
 
-	ret = clk_prepare_enable(imx_phy->clk);
-	if (ret)
-		return ret;
+	PM_RUNTIME_ACQUIRE_IF_ENABLED(&imx_phy->phy->dev, pm);
+	if (PM_RUNTIME_ACQUIRE_ERR(&pm))
+		return -ENXIO;
 
 	tca_blk_orientation_set(tca, orientation);
-	clk_disable_unprepare(imx_phy->clk);
 
 	return 0;
 }
@@ -168,22 +181,10 @@ static struct typec_switch_dev *tca_blk_get_typec_switch(struct platform_device 
 	return sw;
 }
 
-static void tca_blk_put_typec_switch(struct typec_switch_dev *sw)
+static void tca_blk_put_typec_switch(void *data)
 {
-	typec_switch_unregister(sw);
+	typec_switch_unregister(data);
 }
-
-#else
-
-static struct typec_switch_dev *tca_blk_get_typec_switch(struct platform_device *pdev,
-			struct imx8mq_usb_phy *imx_phy)
-{
-	return NULL;
-}
-
-static void tca_blk_put_typec_switch(struct typec_switch_dev *sw) {}
-
-#endif /* CONFIG_TYPEC */
 
 static void tca_blk_orientation_set(struct tca_blk *tca,
 				enum typec_orientation orientation)
@@ -255,6 +256,7 @@ static struct tca_blk *imx95_usb_phy_get_tca(struct platform_device *pdev,
 	struct device *dev = &pdev->dev;
 	struct resource *res;
 	struct tca_blk *tca;
+	int ret;
 
 	res = platform_get_resource(pdev, IORESOURCE_MEM, 1);
 	if (!res)
@@ -273,17 +275,11 @@ static struct tca_blk *imx95_usb_phy_get_tca(struct platform_device *pdev,
 	tca->orientation = TYPEC_ORIENTATION_NORMAL;
 	tca->sw = tca_blk_get_typec_switch(pdev, imx_phy);
 
+	ret = devm_add_action_or_reset(&pdev->dev, tca_blk_put_typec_switch, tca->sw);
+	if (ret)
+		return ERR_PTR(ret);
+
 	return tca;
-}
-
-static void imx95_usb_phy_put_tca(struct imx8mq_usb_phy *imx_phy)
-{
-	struct tca_blk *tca = imx_phy->tca;
-
-	if (!tca)
-		return;
-
-	tca_blk_put_typec_switch(tca->sw);
 }
 
 static u32 phy_tx_vref_tune_from_property(u32 percent)
@@ -502,6 +498,7 @@ static void imx8m_phy_tune(struct imx8mq_usb_phy *imx_phy)
 
 	if (imx_phy->pcs_tx_swing_full != PHY_TUNE_DEFAULT) {
 		value = readl(imx_phy->base + PHY_CTRL5);
+		value &= ~PHY_CTRL5_PCS_TX_SWING_FULL_MASK;
 		value |= FIELD_PREP(PHY_CTRL5_PCS_TX_SWING_FULL_MASK,
 				   imx_phy->pcs_tx_swing_full);
 		writel(value, imx_phy->base + PHY_CTRL5);
@@ -582,7 +579,8 @@ static int imx8mp_usb_phy_init(struct phy *phy)
 	/* USB3.0 PHY signal fsel for 24M ref */
 	value = readl(imx_phy->base + PHY_CTRL0);
 	value &= ~PHY_CTRL0_FSEL_MASK;
-	value |= FIELD_PREP(PHY_CTRL0_FSEL_MASK, PHY_CTRL0_FSEL_24M);
+	value |= FIELD_PREP(PHY_CTRL0_FSEL_MASK, imx_phy->alt_clk ?
+			    PHY_CTRL0_FSEL_100M : PHY_CTRL0_FSEL_24M);
 	writel(value, imx_phy->base + PHY_CTRL0);
 
 	/* Disable alt_clk_en and use internal MPLL clocks */
@@ -597,6 +595,9 @@ static int imx8mp_usb_phy_init(struct phy *phy)
 
 	value = readl(imx_phy->base + PHY_CTRL0);
 	value |= PHY_CTRL0_REF_SSP_EN;
+	value &= ~PHY_CTRL0_SSC_RANGE_MASK;
+	value |= FIELD_PREP(PHY_CTRL0_SSC_RANGE_MASK,
+			    PHY_CTRL0_SSC_RANGE_4003PPM);
 	writel(value, imx_phy->base + PHY_CTRL0);
 
 	value = readl(imx_phy->base + PHY_CTRL2);
@@ -620,20 +621,31 @@ static int imx8mp_usb_phy_init(struct phy *phy)
 static int imx8mq_phy_power_on(struct phy *phy)
 {
 	struct imx8mq_usb_phy *imx_phy = phy_get_drvdata(phy);
+	u32 value;
 	int ret;
 
 	ret = regulator_enable(imx_phy->vbus);
 	if (ret)
 		return ret;
 
-	return clk_prepare_enable(imx_phy->clk);
+	/* Disable rx term override */
+	value = readl(imx_phy->base + PHY_CTRL6);
+	value &= ~PHY_CTRL6_RXTERM_OVERRIDE_SEL;
+	writel(value, imx_phy->base + PHY_CTRL6);
+
+	return 0;
 }
 
 static int imx8mq_phy_power_off(struct phy *phy)
 {
 	struct imx8mq_usb_phy *imx_phy = phy_get_drvdata(phy);
+	u32 value;
 
-	clk_disable_unprepare(imx_phy->clk);
+	/* Override rx term to be 0 */
+	value = readl(imx_phy->base + PHY_CTRL6);
+	value |= PHY_CTRL6_RXTERM_OVERRIDE_SEL;
+	writel(value, imx_phy->base + PHY_CTRL6);
+
 	regulator_disable(imx_phy->vbus);
 
 	return 0;
@@ -653,70 +665,173 @@ static const struct phy_ops imx8mp_usb_phy_ops = {
 	.owner		= THIS_MODULE,
 };
 
+static const struct imx8mq_usb_phy_drvdata imx8mq_usb_phy_data = {
+	.ops = &imx8mq_usb_phy_ops,
+};
+
+static const struct imx8mq_usb_phy_drvdata imx8mp_usb_phy_data = {
+	.ops = &imx8mp_usb_phy_ops,
+	.need_genpd_rpm_on = true,
+};
+
+static const struct imx8mq_usb_phy_drvdata imx95_usb_phy_data = {
+	.ops = &imx8mp_usb_phy_ops,
+};
+
 static const struct of_device_id imx8mq_usb_phy_of_match[] = {
 	{.compatible = "fsl,imx8mq-usb-phy",
-	 .data = &imx8mq_usb_phy_ops,},
+	 .data = &imx8mq_usb_phy_data,},
 	{.compatible = "fsl,imx8mp-usb-phy",
-	 .data = &imx8mp_usb_phy_ops,},
+	 .data = &imx8mp_usb_phy_data,},
 	{.compatible = "fsl,imx95-usb-phy",
-	 .data = &imx8mp_usb_phy_ops,},
+	 .data = &imx95_usb_phy_data,},
 	{ }
 };
 MODULE_DEVICE_TABLE(of, imx8mq_usb_phy_of_match);
+
+static const struct regmap_config imx_cr_regmap_config = {
+	.name = "cr",
+	.reg_bits = 32,
+	.val_bits = 32,
+	.reg_stride = 4,
+	.max_register = 0x7,
+};
 
 static int imx8mq_usb_phy_probe(struct platform_device *pdev)
 {
 	struct phy_provider *phy_provider;
 	struct device *dev = &pdev->dev;
 	struct imx8mq_usb_phy *imx_phy;
-	const struct phy_ops *phy_ops;
+	const struct imx8mq_usb_phy_drvdata *phy_data;
+	int ret;
 
 	imx_phy = devm_kzalloc(dev, sizeof(*imx_phy), GFP_KERNEL);
 	if (!imx_phy)
 		return -ENOMEM;
 
-	imx_phy->clk = devm_clk_get(dev, "phy");
+	platform_set_drvdata(pdev, imx_phy);
+
+	imx_phy->clk = devm_clk_get_enabled(dev, "phy");
 	if (IS_ERR(imx_phy->clk)) {
 		dev_err(dev, "failed to get imx8mq usb phy clock\n");
 		return PTR_ERR(imx_phy->clk);
 	}
 
+	imx_phy->alt_clk = devm_clk_get_optional_enabled(dev, "alt");
+	if (IS_ERR(imx_phy->alt_clk))
+		return dev_err_probe(dev, PTR_ERR(imx_phy->alt_clk),
+				    "Failed to get alt clk\n");
+
 	imx_phy->base = devm_platform_ioremap_resource(pdev, 0);
 	if (IS_ERR(imx_phy->base))
 		return PTR_ERR(imx_phy->base);
 
-	phy_ops = of_device_get_match_data(dev);
-	if (!phy_ops)
-		return -EINVAL;
-
-	imx_phy->phy = devm_phy_create(dev, NULL, phy_ops);
-	if (IS_ERR(imx_phy->phy))
-		return PTR_ERR(imx_phy->phy);
+	imx_phy->cr_regmap = devm_regmap_init_mmio(dev, imx_phy->base + PHY_CRCTL,
+						   &imx_cr_regmap_config);
+	if (IS_ERR(imx_phy->cr_regmap)) {
+		dev_warn(dev, "Fail to init debug register regmap\n");
+		imx_phy->cr_regmap = NULL;
+	}
 
 	imx_phy->vbus = devm_regulator_get(dev, "vbus");
 	if (IS_ERR(imx_phy->vbus))
 		return dev_err_probe(dev, PTR_ERR(imx_phy->vbus), "failed to get vbus\n");
 
+	phy_data = of_device_get_match_data(dev);
+	if (!phy_data)
+		return -EINVAL;
+
+	if (phy_data->need_genpd_rpm_on) {
+		ret = dev_pm_genpd_rpm_always_on(dev, true);
+		if (ret && ret != -EOPNOTSUPP)
+			dev_warn(dev, "failed to set genpd rpm always on\n");
+	}
+
+	pm_runtime_set_active(dev);
+	pm_runtime_enable(dev);
+
+	imx_phy->phy = devm_phy_create(dev, NULL, phy_data->ops);
+	if (IS_ERR(imx_phy->phy)) {
+		ret = dev_err_probe(dev, PTR_ERR(imx_phy->phy),
+				    "failed to create PHY\n");
+		goto disable_rpm;
+	}
+
 	phy_set_drvdata(imx_phy->phy, imx_phy);
 
 	imx_phy->tca = imx95_usb_phy_get_tca(pdev, imx_phy);
-	if (IS_ERR(imx_phy->tca))
-		return dev_err_probe(dev, PTR_ERR(imx_phy->tca),
-					"failed to get tca\n");
+	if (IS_ERR(imx_phy->tca)) {
+		ret = dev_err_probe(dev, PTR_ERR(imx_phy->tca),
+				    "failed to get tca\n");
+		goto disable_rpm;
+	}
 
 	imx8m_get_phy_tuning_data(imx_phy);
+	device_set_wakeup_capable(dev, true);
 
 	phy_provider = devm_of_phy_provider_register(dev, of_phy_simple_xlate);
+	if (IS_ERR(phy_provider)) {
+		ret = dev_err_probe(dev, PTR_ERR(phy_provider),
+				    "failed to register phy provider\n");
+		goto disable_rpm;
+	}
 
-	return PTR_ERR_OR_ZERO(phy_provider);
+	return 0;
+
+disable_rpm:
+	pm_runtime_disable(dev);
+	return ret;
 }
 
 static void imx8mq_usb_phy_remove(struct platform_device *pdev)
 {
-	struct imx8mq_usb_phy *imx_phy = platform_get_drvdata(pdev);
+	struct device *dev = &pdev->dev;
+	int ret;
 
-	imx95_usb_phy_put_tca(imx_phy);
+	ret = pm_runtime_get_sync(dev);
+	if (ret < 0)
+		dev_warn(dev, "failed to resume on remove: %d\n", ret);
+
+	pm_runtime_disable(dev);
+	pm_runtime_put_noidle(dev);
 }
+
+static int imx8mq_usb_phy_runtime_suspend(struct device *dev)
+{
+	struct imx8mq_usb_phy *imx_phy = dev_get_drvdata(dev);
+
+	if (imx_phy->cr_regmap)
+		regcache_cache_only(imx_phy->cr_regmap, true);
+
+	clk_disable_unprepare(imx_phy->alt_clk);
+	clk_disable_unprepare(imx_phy->clk);
+
+	return 0;
+}
+
+static int imx8mq_usb_phy_runtime_resume(struct device *dev)
+{
+	struct imx8mq_usb_phy *imx_phy = dev_get_drvdata(dev);
+	int ret;
+
+	ret = clk_prepare_enable(imx_phy->clk);
+	if (ret)
+		return ret;
+
+	ret = clk_prepare_enable(imx_phy->alt_clk);
+	if (ret) {
+		clk_disable_unprepare(imx_phy->clk);
+		return ret;
+	}
+
+	if (imx_phy->cr_regmap)
+		regcache_cache_only(imx_phy->cr_regmap, false);
+
+	return 0;
+}
+
+static DEFINE_RUNTIME_DEV_PM_OPS(imx8mq_usb_phy_pm_ops, imx8mq_usb_phy_runtime_suspend,
+				 imx8mq_usb_phy_runtime_resume, NULL);
 
 static struct platform_driver imx8mq_usb_phy_driver = {
 	.probe	= imx8mq_usb_phy_probe,
@@ -724,6 +839,8 @@ static struct platform_driver imx8mq_usb_phy_driver = {
 	.driver = {
 		.name	= "imx8mq-usb-phy",
 		.of_match_table	= imx8mq_usb_phy_of_match,
+		.pm = pm_ptr(&imx8mq_usb_phy_pm_ops),
+		.suppress_bind_attrs = true,
 	}
 };
 module_platform_driver(imx8mq_usb_phy_driver);

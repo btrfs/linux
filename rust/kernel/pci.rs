@@ -5,39 +5,76 @@
 //! C header: [`include/linux/pci.h`](srctree/include/linux/pci.h)
 
 use crate::{
-    bindings, container_of, device,
-    device_id::{RawDeviceId, RawDeviceIdIndex},
-    devres::Devres,
+    bindings,
+    container_of,
+    device,
+    device_id::{
+        RawDeviceId,
+        RawDeviceIdIndex, //
+    },
     driver,
-    error::{from_result, to_result, Result},
-    io::{Io, IoRaw},
-    irq::{self, IrqRequest},
+    error::{
+        from_result,
+        to_result, //
+    },
+    prelude::*,
     str::CStr,
-    sync::aref::ARef,
     types::Opaque,
-    ThisModule,
+    ThisModule, //
 };
 use core::{
     marker::PhantomData,
-    ops::Deref,
-    ptr::{addr_of_mut, NonNull},
+    mem::offset_of,
+    num::NonZero,
+    ptr::{
+        addr_of_mut,
+        NonNull, //
+    },
 };
-use kernel::prelude::*;
 
 mod id;
+mod io;
+mod irq;
 
-pub use self::id::{Class, ClassMask, Vendor};
+pub use self::id::{
+    Class,
+    ClassMask,
+    Vendor, //
+};
+pub use self::io::{
+    Bar,
+    ConfigSpace,
+    ConfigSpaceSize,
+    DevresBar,
+    Extended,
+    Normal, //
+};
+pub use self::irq::{
+    IrqType,
+    IrqTypes,
+    IrqVector,
+    IrqVectorRegistration, //
+};
 
 /// An adapter for the registration of PCI drivers.
 pub struct Adapter<T: Driver>(T);
 
-// SAFETY: A call to `unregister` for a given instance of `RegType` is guaranteed to be valid if
-// a preceding call to `register` has been successful.
-unsafe impl<T: Driver + 'static> driver::RegistrationOps for Adapter<T> {
-    type RegType = bindings::pci_driver;
+// SAFETY:
+// - `bindings::pci_driver` is a C type declared as `repr(C)`.
+// - `T::Data` is the type of the driver's device private data.
+// - `struct pci_driver` embeds a `struct device_driver`.
+// - `DEVICE_DRIVER_OFFSET` is the correct byte offset to the embedded `struct device_driver`.
+unsafe impl<T: Driver> driver::DriverLayout for Adapter<T> {
+    type DriverType = bindings::pci_driver;
+    type DriverData<'bound> = T::Data<'bound>;
+    const DEVICE_DRIVER_OFFSET: usize = core::mem::offset_of!(Self::DriverType, driver);
+}
 
+// SAFETY: A call to `unregister` for a given instance of `DriverType` is guaranteed to be valid if
+// a preceding call to `register` has been successful.
+unsafe impl<T: Driver> driver::RegistrationOps for Adapter<T> {
     unsafe fn register(
-        pdrv: &Opaque<Self::RegType>,
+        pdrv: &Opaque<Self::DriverType>,
         name: &'static CStr,
         module: &'static ThisModule,
     ) -> Result {
@@ -49,19 +86,19 @@ unsafe impl<T: Driver + 'static> driver::RegistrationOps for Adapter<T> {
             (*pdrv.get()).id_table = T::ID_TABLE.as_ptr();
         }
 
-        // SAFETY: `pdrv` is guaranteed to be a valid `RegType`.
+        // SAFETY: `pdrv` is guaranteed to be a valid `DriverType`.
         to_result(unsafe {
-            bindings::__pci_register_driver(pdrv.get(), module.0, name.as_char_ptr())
+            bindings::__pci_register_driver(pdrv.get(), module.as_ptr(), name.as_char_ptr())
         })
     }
 
-    unsafe fn unregister(pdrv: &Opaque<Self::RegType>) {
-        // SAFETY: `pdrv` is guaranteed to be a valid `RegType`.
+    unsafe fn unregister(pdrv: &Opaque<Self::DriverType>) {
+        // SAFETY: `pdrv` is guaranteed to be a valid `DriverType`.
         unsafe { bindings::pci_unregister_driver(pdrv.get()) }
     }
 }
 
-impl<T: Driver + 'static> Adapter<T> {
+impl<T: Driver> Adapter<T> {
     extern "C" fn probe_callback(
         pdev: *mut bindings::pci_dev,
         id: *const bindings::pci_device_id,
@@ -70,17 +107,21 @@ impl<T: Driver + 'static> Adapter<T> {
         // `struct pci_dev`.
         //
         // INVARIANT: `pdev` is valid for the duration of `probe_callback()`.
-        let pdev = unsafe { &*pdev.cast::<Device<device::CoreInternal>>() };
+        let pdev = unsafe { &*pdev.cast::<Device<device::CoreInternal<'_>>>() };
 
         // SAFETY: `DeviceId` is a `#[repr(transparent)]` wrapper of `struct pci_device_id` and
         // does not add additional invariants, so it's safe to transmute.
         let id = unsafe { &*id.cast::<DeviceId>() };
-        let info = T::ID_TABLE.info(id.index());
+
+        // SAFETY: `id` comes from `T::ID_TABLE` which is of type `IdArray<_, T::IdInfo>` or
+        // `pci_device_id_any` which has 0 as driver_data. It can also come from dynamic IDs, which
+        // will ensure that `driver_data` exists in `T::ID_TABLE`.
+        let info = unsafe { id.info_unchecked_opt::<T::IdInfo>() };
 
         from_result(|| {
-            let data = T::probe(pdev, info)?;
+            let data = T::probe(pdev, info);
 
-            pdev.as_ref().set_drvdata(data);
+            pdev.as_ref().set_drvdata(data)?;
             Ok(0)
         })
     }
@@ -90,14 +131,14 @@ impl<T: Driver + 'static> Adapter<T> {
         // `struct pci_dev`.
         //
         // INVARIANT: `pdev` is valid for the duration of `remove_callback()`.
-        let pdev = unsafe { &*pdev.cast::<Device<device::CoreInternal>>() };
+        let pdev = unsafe { &*pdev.cast::<Device<device::CoreInternal<'_>>>() };
 
         // SAFETY: `remove_callback` is only ever called after a successful call to
         // `probe_callback`, hence it's guaranteed that `Device::set_drvdata()` has been called
-        // and stored a `Pin<KBox<T>>`.
-        let data = unsafe { pdev.as_ref().drvdata_obtain::<Pin<KBox<T>>>() };
+        // and stored a `Pin<KBox<T::Data<'_>>>`.
+        let data = unsafe { pdev.as_ref().drvdata_borrow::<T::Data<'_>>() };
 
-        T::unbind(pdev, data.as_ref());
+        T::unbind(pdev, data);
     }
 }
 
@@ -198,10 +239,6 @@ unsafe impl RawDeviceId for DeviceId {
 // SAFETY: `DRIVER_DATA_OFFSET` is the offset to the `driver_data` field.
 unsafe impl RawDeviceIdIndex for DeviceId {
     const DRIVER_DATA_OFFSET: usize = core::mem::offset_of!(bindings::pci_device_id, driver_data);
-
-    fn index(&self) -> usize {
-        self.0.driver_data
-    }
 }
 
 /// `IdTable` type for PCI.
@@ -210,14 +247,8 @@ pub type IdTable<T> = &'static dyn kernel::device_id::IdTable<DeviceId, T>;
 /// Create a PCI `IdTable` with its alias for modpost.
 #[macro_export]
 macro_rules! pci_device_table {
-    ($table_name:ident, $module_table_name:ident, $id_info_type: ty, $table_data: expr) => {
-        const $table_name: $crate::device_id::IdArray<
-            $crate::pci::DeviceId,
-            $id_info_type,
-            { $table_data.len() },
-        > = $crate::device_id::IdArray::new($table_data);
-
-        $crate::module_device_table!("pci", $module_table_name, $table_name);
+    ($($tt:tt)*) => {
+        $crate::module_device_table!("pci", $crate::pci::DeviceId, $($tt)*);
     };
 }
 
@@ -232,7 +263,6 @@ macro_rules! pci_device_table {
 ///
 /// kernel::pci_device_table!(
 ///     PCI_TABLE,
-///     MODULE_PCI_TABLE,
 ///     <MyDriver as pci::Driver>::IdInfo,
 ///     [
 ///         (
@@ -244,19 +274,20 @@ macro_rules! pci_device_table {
 ///
 /// impl pci::Driver for MyDriver {
 ///     type IdInfo = ();
+///     type Data<'bound> = Self;
 ///     const ID_TABLE: pci::IdTable<Self::IdInfo> = &PCI_TABLE;
 ///
-///     fn probe(
-///         _pdev: &pci::Device<Core>,
-///         _id_info: &Self::IdInfo,
-///     ) -> Result<Pin<KBox<Self>>> {
+///     fn probe<'bound>(
+///         _pdev: &'bound pci::Device<Core<'_>>,
+///         _id_info: Option<&'bound Self::IdInfo>,
+///     ) -> impl PinInit<Self::Data<'bound>, Error> + 'bound {
 ///         Err(ENODEV)
 ///     }
 /// }
 ///```
 /// Drivers must implement this trait in order to get a PCI driver registered. Please refer to the
 /// `Adapter` documentation for an example.
-pub trait Driver: Send {
+pub trait Driver {
     /// The type holding information about each device id supported by the driver.
     // TODO: Use `associated_type_defaults` once stabilized:
     //
@@ -265,6 +296,9 @@ pub trait Driver: Send {
     // ```
     type IdInfo: 'static;
 
+    /// The type of the driver's bus device private data.
+    type Data<'bound>: Send + 'bound;
+
     /// The table of device ids supported by the driver.
     const ID_TABLE: IdTable<Self::IdInfo>;
 
@@ -272,7 +306,10 @@ pub trait Driver: Send {
     ///
     /// Called when a new pci device is added or discovered. Implementers should
     /// attempt to initialize the device here.
-    fn probe(dev: &Device<device::Core>, id_info: &Self::IdInfo) -> Result<Pin<KBox<Self>>>;
+    fn probe<'bound>(
+        dev: &'bound Device<device::Core<'_>>,
+        id_info: Option<&'bound Self::IdInfo>,
+    ) -> impl PinInit<Self::Data<'bound>, Error> + 'bound;
 
     /// PCI driver unbind.
     ///
@@ -283,8 +320,8 @@ pub trait Driver: Send {
     /// `&Device<Core>` or `&Device<Bound>` reference. For instance, drivers may try to perform I/O
     /// operations to gracefully tear down the device.
     ///
-    /// Otherwise, release operations for driver resources should be performed in `Self::drop`.
-    fn unbind(dev: &Device<device::Core>, this: Pin<&Self>) {
+    /// Otherwise, release operations for driver resources should be performed in `Drop`.
+    fn unbind<'bound>(dev: &'bound Device<device::Core<'_>>, this: Pin<&Self::Data<'bound>>) {
         let _ = (dev, this);
     }
 }
@@ -305,112 +342,6 @@ pub struct Device<Ctx: device::DeviceContext = device::Normal>(
     PhantomData<Ctx>,
 );
 
-/// A PCI BAR to perform I/O-Operations on.
-///
-/// # Invariants
-///
-/// `Bar` always holds an `IoRaw` inststance that holds a valid pointer to the start of the I/O
-/// memory mapped PCI bar and its size.
-pub struct Bar<const SIZE: usize = 0> {
-    pdev: ARef<Device>,
-    io: IoRaw<SIZE>,
-    num: i32,
-}
-
-impl<const SIZE: usize> Bar<SIZE> {
-    fn new(pdev: &Device, num: u32, name: &CStr) -> Result<Self> {
-        let len = pdev.resource_len(num)?;
-        if len == 0 {
-            return Err(ENOMEM);
-        }
-
-        // Convert to `i32`, since that's what all the C bindings use.
-        let num = i32::try_from(num)?;
-
-        // SAFETY:
-        // `pdev` is valid by the invariants of `Device`.
-        // `num` is checked for validity by a previous call to `Device::resource_len`.
-        // `name` is always valid.
-        let ret = unsafe { bindings::pci_request_region(pdev.as_raw(), num, name.as_char_ptr()) };
-        if ret != 0 {
-            return Err(EBUSY);
-        }
-
-        // SAFETY:
-        // `pdev` is valid by the invariants of `Device`.
-        // `num` is checked for validity by a previous call to `Device::resource_len`.
-        // `name` is always valid.
-        let ioptr: usize = unsafe { bindings::pci_iomap(pdev.as_raw(), num, 0) } as usize;
-        if ioptr == 0 {
-            // SAFETY:
-            // `pdev` valid by the invariants of `Device`.
-            // `num` is checked for validity by a previous call to `Device::resource_len`.
-            unsafe { bindings::pci_release_region(pdev.as_raw(), num) };
-            return Err(ENOMEM);
-        }
-
-        let io = match IoRaw::new(ioptr, len as usize) {
-            Ok(io) => io,
-            Err(err) => {
-                // SAFETY:
-                // `pdev` is valid by the invariants of `Device`.
-                // `ioptr` is guaranteed to be the start of a valid I/O mapped memory region.
-                // `num` is checked for validity by a previous call to `Device::resource_len`.
-                unsafe { Self::do_release(pdev, ioptr, num) };
-                return Err(err);
-            }
-        };
-
-        Ok(Bar {
-            pdev: pdev.into(),
-            io,
-            num,
-        })
-    }
-
-    /// # Safety
-    ///
-    /// `ioptr` must be a valid pointer to the memory mapped PCI bar number `num`.
-    unsafe fn do_release(pdev: &Device, ioptr: usize, num: i32) {
-        // SAFETY:
-        // `pdev` is valid by the invariants of `Device`.
-        // `ioptr` is valid by the safety requirements.
-        // `num` is valid by the safety requirements.
-        unsafe {
-            bindings::pci_iounmap(pdev.as_raw(), ioptr as *mut c_void);
-            bindings::pci_release_region(pdev.as_raw(), num);
-        }
-    }
-
-    fn release(&self) {
-        // SAFETY: The safety requirements are guaranteed by the type invariant of `self.pdev`.
-        unsafe { Self::do_release(&self.pdev, self.io.addr(), self.num) };
-    }
-}
-
-impl Bar {
-    #[inline]
-    fn index_is_valid(index: u32) -> bool {
-        // A `struct pci_dev` owns an array of resources with at most `PCI_NUM_RESOURCES` entries.
-        index < bindings::PCI_NUM_RESOURCES
-    }
-}
-
-impl<const SIZE: usize> Drop for Bar<SIZE> {
-    fn drop(&mut self) {
-        self.release();
-    }
-}
-
-impl<const SIZE: usize> Deref for Bar<SIZE> {
-    type Target = Io<SIZE>;
-
-    fn deref(&self) -> &Self::Target {
-        // SAFETY: By the type invariant of `Self`, the MMIO range in `self.io` is properly mapped.
-        unsafe { Io::from_raw(&self.io) }
-    }
-}
-
 impl<Ctx: device::DeviceContext> Device<Ctx> {
     #[inline]
     fn as_raw(&self) -> *mut bindings::pci_dev {
@@ -425,11 +356,11 @@ impl Device {
     ///
     /// ```
     /// # use kernel::{device::Core, pci::{self, Vendor}, prelude::*};
-    /// fn log_device_info(pdev: &pci::Device<Core>) -> Result {
+    /// fn log_device_info(pdev: &pci::Device<Core<'_>>) -> Result {
     ///     // Get an instance of `Vendor`.
     ///     let vendor = pdev.vendor_id();
     ///     dev_info!(
-    ///         pdev.as_ref(),
+    ///         pdev,
     ///         "Device: Vendor={}, Device=0x{:x}\n",
     ///         vendor,
     ///         pdev.device_id()
@@ -484,7 +415,7 @@ impl Device {
         unsafe { (*self.as_raw()).subsystem_device }
     }
 
-    /// Returns the start of the given PCI bar resource.
+    /// Returns the start of the given PCI BAR resource.
     pub fn resource_start(&self, bar: u32) -> Result<bindings::resource_size_t> {
         if !Bar::index_is_valid(bar) {
             return Err(EINVAL);
@@ -496,7 +427,7 @@ impl Device {
         Ok(unsafe { bindings::pci_resource_start(self.as_raw(), bar.try_into()?) })
     }
 
-    /// Returns the size of the given PCI bar resource.
+    /// Returns the size of the given PCI BAR resource.
     pub fn resource_len(&self, bar: u32) -> Result<bindings::resource_size_t> {
         if !Bar::index_is_valid(bar) {
             return Err(EINVAL);
@@ -516,69 +447,19 @@ impl Device {
     }
 }
 
-impl Device<device::Bound> {
-    /// Mapps an entire PCI-BAR after performing a region-request on it. I/O operation bound checks
-    /// can be performed on compile time for offsets (plus the requested type size) < SIZE.
-    pub fn iomap_region_sized<'a, const SIZE: usize>(
-        &'a self,
-        bar: u32,
-        name: &'a CStr,
-    ) -> impl PinInit<Devres<Bar<SIZE>>, Error> + 'a {
-        Devres::new(self.as_ref(), Bar::<SIZE>::new(self, bar, name))
+impl<'a> Device<device::Core<'a>> {
+    /// Returns the total number of VFs, or [`None`] if SR-IOV is not available.
+    #[inline]
+    pub fn sriov_get_totalvfs(&self) -> Option<NonZero<u16>> {
+        // SAFETY: `self.as_raw()` is a valid pointer to a `struct pci_dev`.
+        let total_vfs = unsafe { bindings::pci_sriov_get_totalvfs(self.as_raw()) };
+
+        // CAST: The C function returns `unsigned int`, but the value originates
+        // from TotalVFs/driver_max_VFs (which are defined as `u16`), so this cast
+        // cannot truncate.
+        NonZero::new(total_vfs as u16)
     }
 
-    /// Mapps an entire PCI-BAR after performing a region-request on it.
-    pub fn iomap_region<'a>(
-        &'a self,
-        bar: u32,
-        name: &'a CStr,
-    ) -> impl PinInit<Devres<Bar>, Error> + 'a {
-        self.iomap_region_sized::<0>(bar, name)
-    }
-
-    /// Returns an [`IrqRequest`] for the IRQ vector at the given index, if any.
-    pub fn irq_vector(&self, index: u32) -> Result<IrqRequest<'_>> {
-        // SAFETY: `self.as_raw` returns a valid pointer to a `struct pci_dev`.
-        let irq = unsafe { crate::bindings::pci_irq_vector(self.as_raw(), index) };
-        if irq < 0 {
-            return Err(crate::error::Error::from_errno(irq));
-        }
-        // SAFETY: `irq` is guaranteed to be a valid IRQ number for `&self`.
-        Ok(unsafe { IrqRequest::new(self.as_ref(), irq as u32) })
-    }
-
-    /// Returns a [`kernel::irq::Registration`] for the IRQ vector at the given
-    /// index.
-    pub fn request_irq<'a, T: crate::irq::Handler + 'static>(
-        &'a self,
-        index: u32,
-        flags: irq::Flags,
-        name: &'static CStr,
-        handler: impl PinInit<T, Error> + 'a,
-    ) -> Result<impl PinInit<irq::Registration<T>, Error> + 'a> {
-        let request = self.irq_vector(index)?;
-
-        Ok(irq::Registration::<T>::new(request, flags, name, handler))
-    }
-
-    /// Returns a [`kernel::irq::ThreadedRegistration`] for the IRQ vector at
-    /// the given index.
-    pub fn request_threaded_irq<'a, T: crate::irq::ThreadedHandler + 'static>(
-        &'a self,
-        index: u32,
-        flags: irq::Flags,
-        name: &'static CStr,
-        handler: impl PinInit<T, Error> + 'a,
-    ) -> Result<impl PinInit<irq::ThreadedRegistration<T>, Error> + 'a> {
-        let request = self.irq_vector(index)?;
-
-        Ok(irq::ThreadedRegistration::<T>::new(
-            request, flags, name, handler,
-        ))
-    }
-}
-
-impl Device<device::Core> {
     /// Enable memory resources for this device.
     pub fn enable_device_mem(&self) -> Result {
         // SAFETY: `self.as_raw` is guaranteed to be a pointer to a valid `struct pci_dev`.
@@ -593,20 +474,28 @@ impl Device<device::Core> {
     }
 }
 
+// SAFETY: `pci::Device` is a transparent wrapper of `struct pci_dev`.
+// The offset is guaranteed to point to a valid device field inside `pci::Device`.
+unsafe impl<Ctx: device::DeviceContext> device::AsBusDevice<Ctx> for Device<Ctx> {
+    const OFFSET: usize = offset_of!(bindings::pci_dev, dev);
+}
+
 // SAFETY: `Device` is a transparent wrapper of a type that doesn't depend on `Device`'s generic
 // argument.
 kernel::impl_device_context_deref!(unsafe { Device });
 kernel::impl_device_context_into_aref!(Device);
 
-impl crate::dma::Device for Device<device::Core> {}
+impl<'a> crate::dma::Device<'a> for Device<device::Core<'a>> {}
 
 // SAFETY: Instances of `Device` are always reference-counted.
 unsafe impl crate::sync::aref::AlwaysRefCounted for Device {
+    #[inline]
     fn inc_ref(&self) {
         // SAFETY: The existence of a shared reference guarantees that the refcount is non-zero.
         unsafe { bindings::pci_dev_get(self.as_raw()) };
     }
 
+    #[inline]
     unsafe fn dec_ref(obj: NonNull<Self>) {
         // SAFETY: The safety requirements guarantee that the refcount is non-zero.
         unsafe { bindings::pci_dev_put(obj.cast().as_ptr()) }
@@ -650,3 +539,7 @@ unsafe impl Send for Device {}
 // SAFETY: `Device` can be shared among threads because all methods of `Device`
 // (i.e. `Device<Normal>) are thread safe.
 unsafe impl Sync for Device {}
+
+// SAFETY: Same as `Device<Normal>` -- the underlying `struct pci_dev` is the same;
+// `Bound` is a zero-sized type-state marker that does not affect thread safety.
+unsafe impl Sync for Device<device::Bound> {}

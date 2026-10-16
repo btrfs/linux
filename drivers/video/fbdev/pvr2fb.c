@@ -639,7 +639,7 @@ static irqreturn_t __maybe_unused pvr2fb_interrupt(int irq, void *dev_id)
 }
 
 #ifdef CONFIG_PVR2_DMA
-static ssize_t pvr2fb_write(struct fb_info *info, const char *buf,
+static ssize_t pvr2fb_write(struct fb_info *info, const char __user *buf,
 			    size_t count, loff_t *ppos)
 {
 	unsigned long dst, start, end, len;
@@ -652,7 +652,7 @@ static ssize_t pvr2fb_write(struct fb_info *info, const char *buf,
 
 	nr_pages = (count + PAGE_SIZE - 1) >> PAGE_SHIFT;
 
-	pages = kmalloc_array(nr_pages, sizeof(struct page *), GFP_KERNEL);
+	pages = kmalloc_objs(struct page *, nr_pages);
 	if (!pages)
 		return -ENOMEM;
 
@@ -993,9 +993,8 @@ static void pvr2fb_pci_remove(struct pci_dev *pdev)
 }
 
 static const struct pci_device_id pvr2fb_pci_tbl[] = {
-	{ PCI_VENDOR_ID_NEC, PCI_DEVICE_ID_NEC_NEON250,
-	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0 },
-	{ 0, },
+	{ PCI_VDEVICE(NEC, PCI_DEVICE_ID_NEC_NEON250) },
+	{ }
 };
 
 MODULE_DEVICE_TABLE(pci, pvr2fb_pci_tbl);
@@ -1078,7 +1077,7 @@ static struct pvr2_board {
 #ifdef CONFIG_PCI
 	{ pvr2fb_pci_init, pvr2fb_pci_exit, "PCI PVR2" },
 #endif
-	{ 0, },
+	{ },
 };
 
 static int __init pvr2fb_init(void)
