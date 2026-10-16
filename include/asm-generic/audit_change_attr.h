@@ -26,6 +26,9 @@ __NR_fremovexattr,
 __NR_fchownat,
 __NR_fchmodat,
 #endif
+#ifdef __NR_fchmodat2
+__NR_fchmodat2,
+#endif
 #ifdef __NR_chown32
 __NR_chown32,
 __NR_fchown32,
@@ -36,4 +39,7 @@ __NR_link,
 #endif
 #ifdef __NR_linkat
 __NR_linkat,
+#endif
+#ifdef __NR_file_setattr
+__NR_file_setattr,
 #endif

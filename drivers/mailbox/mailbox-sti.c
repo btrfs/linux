@@ -21,8 +21,6 @@
 #include <linux/property.h>
 #include <linux/slab.h>
 
-#include "mailbox.h"
-
 #define STI_MBOX_INST_MAX	4      /* RAM saving: Max supported instances */
 #define STI_MBOX_CHAN_MAX	20     /* RAM saving: Max supported channels  */
 
@@ -470,10 +468,8 @@ static int sti_mbox_probe(struct platform_device *pdev)
 					sti_mbox_irq_handler,
 					sti_mbox_thread_handler,
 					IRQF_ONESHOT, mdev->name, mdev);
-	if (ret) {
-		dev_err(&pdev->dev, "Can't claim IRQ %d\n", irq);
+	if (ret)
 		return -EINVAL;
-	}
 
 	dev_info(&pdev->dev, "%s: Registered Tx/Rx Mailbox\n", mdev->name);
 

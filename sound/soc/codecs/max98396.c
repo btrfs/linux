@@ -953,8 +953,7 @@ static const DECLARE_TLV_DB_RANGE(max98397_spk_tlv,
 static int max98396_mux_get(struct snd_kcontrol *kcontrol,
 			    struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_component *component =
-		snd_soc_dapm_kcontrol_component(kcontrol);
+	struct snd_soc_component *component = snd_soc_dapm_kcontrol_to_component(kcontrol);
 	struct max98396_priv *max98396 = snd_soc_component_get_drvdata(component);
 	int reg, val;
 
@@ -973,9 +972,8 @@ static int max98396_mux_get(struct snd_kcontrol *kcontrol,
 static int max98396_mux_put(struct snd_kcontrol *kcontrol,
 			    struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_component *component =
-		snd_soc_dapm_kcontrol_component(kcontrol);
-	struct snd_soc_dapm_context *dapm = snd_soc_dapm_kcontrol_dapm(kcontrol);
+	struct snd_soc_component *component = snd_soc_dapm_kcontrol_to_component(kcontrol);
+	struct snd_soc_dapm_context *dapm = snd_soc_dapm_kcontrol_to_dapm(kcontrol);
 	struct max98396_priv *max98396 = snd_soc_component_get_drvdata(component);
 	struct soc_enum *e = (struct soc_enum *)kcontrol->private_value;
 	unsigned int *item = ucontrol->value.enumerated.item;
@@ -1107,6 +1105,7 @@ static int max98396_adc_value_get(struct snd_kcontrol *kcontrol,
 				  struct snd_ctl_elem_value *ucontrol)
 {
 	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
+	struct snd_soc_dapm_context *dapm = snd_soc_component_to_dapm(component);
 	struct soc_mixer_control *mc =
 		(struct soc_mixer_control *)kcontrol->private_value;
 	struct max98396_priv *max98396 = snd_soc_component_get_drvdata(component);
@@ -1115,7 +1114,7 @@ static int max98396_adc_value_get(struct snd_kcontrol *kcontrol,
 	int reg = mc->reg;
 
 	/* ADC value is not available if the device is powered down */
-	if (snd_soc_component_get_bias_level(component) == SND_SOC_BIAS_OFF)
+	if (snd_soc_dapm_get_bias_level(dapm) == SND_SOC_BIAS_OFF)
 		goto exit;
 
 	if (max98396->device_id == CODEC_TYPE_MAX98397) {
@@ -1601,19 +1600,37 @@ static int max98396_resume(struct device *dev)
 	if (max98396->pvdd) {
 		ret = regulator_enable(max98396->pvdd);
 		if (ret < 0)
-			return ret;
+			goto err_core_supplies;
 	}
 
 	if (max98396->vbat) {
 		ret = regulator_enable(max98396->vbat);
 		if (ret < 0)
-			return ret;
+			goto err_pvdd;
 	}
 
 	regcache_cache_only(max98396->regmap, false);
 	max98396_reset(max98396, dev);
-	regcache_sync(max98396->regmap);
+	ret = regcache_sync(max98396->regmap);
+	if (ret < 0) {
+		regcache_cache_only(max98396->regmap, true);
+		regcache_mark_dirty(max98396->regmap);
+		goto err_vbat;
+	}
+
 	return 0;
+
+err_vbat:
+	if (max98396->vbat)
+		regulator_disable(max98396->vbat);
+err_pvdd:
+	if (max98396->pvdd)
+		regulator_disable(max98396->pvdd);
+err_core_supplies:
+	regulator_bulk_disable(MAX98396_NUM_CORE_SUPPLIES,
+			       max98396->core_supplies);
+
+	return ret;
 }
 
 static const struct dev_pm_ops max98396_pm = {
@@ -1872,9 +1889,9 @@ static int max98396_i2c_probe(struct i2c_client *i2c)
 }
 
 static const struct i2c_device_id max98396_i2c_id[] = {
-	{ "max98396", CODEC_TYPE_MAX98396},
-	{ "max98397", CODEC_TYPE_MAX98397},
-	{ },
+	{ .name = "max98396", .driver_data = CODEC_TYPE_MAX98396 },
+	{ .name = "max98397", .driver_data = CODEC_TYPE_MAX98397 },
+	{ }
 };
 
 MODULE_DEVICE_TABLE(i2c, max98396_i2c_id);

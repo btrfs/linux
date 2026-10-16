@@ -137,6 +137,13 @@ static char *tegra_bpmp_powergate_get_name(struct tegra_bpmp *bpmp,
 	if (err < 0 || msg.rx.ret < 0)
 		return NULL;
 
+	if (response.get_name.name[0] == '\0')
+		return NULL;
+
+	if (dev_to_node(bpmp->dev) != NUMA_NO_NODE)
+		return kasprintf(GFP_KERNEL, "%d-%s", dev_to_node(bpmp->dev),
+				 response.get_name.name);
+
 	return kstrdup(response.get_name.name, GFP_KERNEL);
 }
 
@@ -226,7 +233,7 @@ tegra_bpmp_probe_powergates(struct tegra_bpmp *bpmp,
 
 	dev_dbg(bpmp->dev, "maximum powergate ID: %u\n", max_id);
 
-	powergates = kcalloc(max_id + 1, sizeof(*powergates), GFP_KERNEL);
+	powergates = kzalloc_objs(*powergates, max_id + 1);
 	if (!powergates)
 		return -ENOMEM;
 
@@ -234,7 +241,7 @@ tegra_bpmp_probe_powergates(struct tegra_bpmp *bpmp,
 		struct tegra_powergate_info *info = &powergates[count];
 
 		info->name = tegra_bpmp_powergate_get_name(bpmp, id);
-		if (!info->name || info->name[0] == '\0') {
+		if (!info->name) {
 			num_holes++;
 			continue;
 		}
@@ -260,7 +267,7 @@ static int tegra_bpmp_add_powergates(struct tegra_bpmp *bpmp,
 	unsigned int i;
 	int err;
 
-	domains = kcalloc(count, sizeof(*domains), GFP_KERNEL);
+	domains = kzalloc_objs(*domains, count);
 	if (!domains)
 		return -ENOMEM;
 

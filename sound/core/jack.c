@@ -250,18 +250,15 @@ static const char * const jack_events_name[] = {
 /* the recommended buffer size is 256 */
 static int parse_mask_bits(unsigned int mask_bits, char *buf, size_t buf_size)
 {
+	int len = scnprintf(buf, buf_size, "0x%04x", mask_bits);
 	int i;
 
-	scnprintf(buf, buf_size, "0x%04x", mask_bits);
-
 	for (i = 0; i < ARRAY_SIZE(jack_events_name); i++)
-		if (mask_bits & (1 << i)) {
-			strlcat(buf, " ", buf_size);
-			strlcat(buf, jack_events_name[i], buf_size);
-		}
-	strlcat(buf, "\n", buf_size);
+		if (mask_bits & (1 << i))
+			len += scnprintf(buf + len, buf_size - len, " %s", jack_events_name[i]);
+	len += scnprintf(buf + len, buf_size - len, "\n");
 
-	return strlen(buf);
+	return len;
 }
 
 static ssize_t jack_kctl_mask_bits_read(struct file *file,
@@ -306,41 +303,41 @@ static ssize_t jack_type_read(struct file *file,
 }
 
 static const struct file_operations jack_type_fops = {
-	.open = simple_open,
-	.read = jack_type_read,
-	.llseek = default_llseek,
+	.open	=	simple_open,
+	.read	=	jack_type_read,
+	.llseek	=	default_llseek,
 };
 #endif
 
 static const struct file_operations sw_inject_enable_fops = {
-	.open = simple_open,
-	.read = sw_inject_enable_read,
-	.write = sw_inject_enable_write,
-	.llseek = default_llseek,
+	.open	=	simple_open,
+	.read	=	sw_inject_enable_read,
+	.write	=	sw_inject_enable_write,
+	.llseek	=	default_llseek,
 };
 
 static const struct file_operations jackin_inject_fops = {
-	.open = simple_open,
-	.write = jackin_inject_write,
-	.llseek = default_llseek,
+	.open	=	simple_open,
+	.write	=	jackin_inject_write,
+	.llseek	=	default_llseek,
 };
 
 static const struct file_operations jack_kctl_id_fops = {
-	.open = simple_open,
-	.read = jack_kctl_id_read,
-	.llseek = default_llseek,
+	.open	=	simple_open,
+	.read	=	jack_kctl_id_read,
+	.llseek	=	default_llseek,
 };
 
 static const struct file_operations jack_kctl_mask_bits_fops = {
-	.open = simple_open,
-	.read = jack_kctl_mask_bits_read,
-	.llseek = default_llseek,
+	.open	=	simple_open,
+	.read	=	jack_kctl_mask_bits_read,
+	.llseek	=	default_llseek,
 };
 
 static const struct file_operations jack_kctl_status_fops = {
-	.open = simple_open,
-	.read = jack_kctl_status_read,
-	.llseek = default_llseek,
+	.open	=	simple_open,
+	.read	=	jack_kctl_status_read,
+	.llseek	=	default_llseek,
 };
 
 static int snd_jack_debugfs_add_inject_node(struct snd_jack *jack,
@@ -440,7 +437,7 @@ static struct snd_jack_kctl * snd_jack_kctl_new(struct snd_card *card, const cha
 	if (err < 0)
 		return NULL;
 
-	jack_kctl = kzalloc(sizeof(*jack_kctl), GFP_KERNEL);
+	jack_kctl = kzalloc_obj(*jack_kctl);
 
 	if (!jack_kctl)
 		goto error;
@@ -516,7 +513,7 @@ int snd_jack_new(struct snd_card *card, const char *id, int type,
 			return -ENOMEM;
 	}
 
-	jack = kzalloc(sizeof(struct snd_jack), GFP_KERNEL);
+	jack = kzalloc_obj(struct snd_jack);
 	if (jack == NULL)
 		return -ENOMEM;
 

@@ -4,9 +4,11 @@
 //!
 //! C header: [`include/linux/refcount.h`](srctree/include/linux/refcount.h)
 
-use crate::build_assert;
-use crate::sync::atomic::Atomic;
-use crate::types::Opaque;
+use crate::{
+    build_assert::build_assert,
+    sync::atomic::Atomic,
+    types::Opaque, //
+};
 
 /// Atomic reference counter.
 ///
@@ -23,7 +25,8 @@ impl Refcount {
     /// Construct a new [`Refcount`] from an initial value.
     ///
     /// The initial value should be non-saturated.
-    #[inline]
+    // Always inline to optimize out error path of `build_assert`.
+    #[inline(always)]
     pub fn new(value: i32) -> Self {
         build_assert!(value >= 0, "initial value saturated");
         // SAFETY: There are no safety requirements for this FFI call.

@@ -44,6 +44,7 @@ properties:
       - items:
           - enum:
               - fsl,imx94-sai
+              - fsl,imx952-sai
           - const: fsl,imx95-sai
 
   reg:
@@ -132,6 +133,13 @@ properties:
         - description: dataline mask for 'rx'
         - description: dataline mask for 'tx'
 
+  fsl,sai-amix-mode:
+    $ref: /schemas/types.yaml#/definitions/string
+    description:
+      The audmix module is bypassed from hardware or not.
+    enum: [none, bypass, audmix]
+    default: none
+
   fsl,sai-mclk-direction-output:
     description: SAI will output the SAI MCLK clock.
     type: boolean
@@ -152,6 +160,13 @@ properties:
       default synchronous mode (sync Rx with Tx) will be used, which means both
       transmitter and receiver will send and receive data by following clocks
       of transmitter.
+    type: boolean
+
+  fsl,sai-bit-clock-swap:
+    description:
+      Enable Bit Clock Swap, which swaps the bit clock used by the transmitter
+      or receiver in asynchronous mode, i.e. makes transmitter use RX_BCLK and
+      TX_SYNC, and vice versa, makes receiver use TX_BCLK and RX_SYNC.
     type: boolean
 
   fsl,shared-interrupt:
@@ -178,6 +193,15 @@ allOf:
     then:
       properties:
         fsl,sai-synchronous-rx: false
+
+  - if:
+      required:
+        - fsl,sai-amix-mode
+    then:
+      properties:
+        compatible:
+          contains:
+            const: fsl,imx952-sai
 
 required:
   - compatible

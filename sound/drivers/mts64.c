@@ -75,7 +75,7 @@ static int snd_mts64_create(struct snd_card *card,
 
 	*rchip = NULL;
 
-	mts = kzalloc(sizeof(struct mts64), GFP_KERNEL);
+	mts = kzalloc_obj(struct mts64);
 	if (mts == NULL) 
 		return -ENOMEM;
 
@@ -899,6 +899,12 @@ static int snd_mts64_probe(struct platform_device *pdev)
 
 	p = platform_get_drvdata(pdev);
 	platform_set_drvdata(pdev, NULL);
+
+	if (dev < 0) {
+		dev_warn(&pdev->dev,
+			 "Invalid card index %d, using default 0\n", dev);
+		dev = 0;
+	}
 
 	if (dev >= SNDRV_CARDS)
 		return -ENODEV;

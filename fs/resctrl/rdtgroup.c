@@ -18,6 +18,7 @@
 #include <linux/fs_parser.h>
 #include <linux/sysfs.h>
 #include <linux/kernfs.h>
+#include <linux/once.h>
 #include <linux/resctrl.h>
 #include <linux/seq_buf.h>
 #include <linux/seq_file.h>
@@ -116,7 +117,7 @@ void rdt_staged_configs_clear(void)
 	lockdep_assert_held(&rdtgroup_mutex);
 
 	for_each_alloc_capable_rdt_resource(r) {
-		list_for_each_entry(dom, &r->ctrl_domains, hdr.list)
+		list_for_each_entry_rcu(dom, &r->ctrl_domains, hdr.list, lockdep_is_cpus_held())
 			memset(dom->staged_config, 0, sizeof(dom->staged_config));
 	}
 }
@@ -224,6 +225,11 @@ bool closid_allocated(unsigned int closid)
 	lockdep_assert_held(&rdtgroup_mutex);
 
 	return !test_bit(closid, closid_free_map);
+}
+
+bool closid_alloc_fixed(u32 closid)
+{
+	return __test_and_clear_bit(closid, closid_free_map);
 }
 
 /**
@@ -353,7 +359,6 @@ static int rdtgroup_cpus_show(struct kernfs_open_file *of,
 	if (rdtgrp) {
 		if (rdtgrp->mode == RDT_MODE_PSEUDO_LOCKED) {
 			if (!rdtgrp->plr->d) {
-				rdt_last_cmd_clear();
 				rdt_last_cmd_puts("Cache domain offline\n");
 				ret = -ENODEV;
 			} else {
@@ -505,38 +510,38 @@ static int cpus_ctrl_write(struct rdtgroup *rdtgrp, cpumask_var_t newmask,
 static ssize_t rdtgroup_cpus_write(struct kernfs_open_file *of,
 				   char *buf, size_t nbytes, loff_t off)
 {
-	cpumask_var_t tmpmask, newmask, tmpmask1;
+	cpumask_var_t tmpmask = CPUMASK_VAR_NULL, newmask = CPUMASK_VAR_NULL;
+	cpumask_var_t tmpmask1 = CPUMASK_VAR_NULL;
 	struct rdtgroup *rdtgrp;
 	int ret;
-
-	if (!buf)
-		return -EINVAL;
-
-	if (!zalloc_cpumask_var(&tmpmask, GFP_KERNEL))
-		return -ENOMEM;
-	if (!zalloc_cpumask_var(&newmask, GFP_KERNEL)) {
-		free_cpumask_var(tmpmask);
-		return -ENOMEM;
-	}
-	if (!zalloc_cpumask_var(&tmpmask1, GFP_KERNEL)) {
-		free_cpumask_var(tmpmask);
-		free_cpumask_var(newmask);
-		return -ENOMEM;
-	}
 
 	rdtgrp = rdtgroup_kn_lock_live(of->kn);
 	if (!rdtgrp) {
 		ret = -ENOENT;
-		goto unlock;
+		goto out_unlock;
 	}
 
-	rdt_last_cmd_clear();
+	if (!buf) {
+		rdt_last_cmd_printf("%s: Invalid input\n",
+				    is_cpu_list(of) ? "cpus_list" : "cpus");
+		ret = -EINVAL;
+		goto out_unlock;
+	}
+
+	if (!zalloc_cpumask_var(&tmpmask, GFP_KERNEL) ||
+	    !zalloc_cpumask_var(&newmask, GFP_KERNEL) ||
+	    !zalloc_cpumask_var(&tmpmask1, GFP_KERNEL)) {
+		rdt_last_cmd_printf("%s: Kernel allocation failure\n",
+				    is_cpu_list(of) ? "cpus_list" : "cpus");
+		ret = -ENOMEM;
+		goto out_free;
+	}
 
 	if (rdtgrp->mode == RDT_MODE_PSEUDO_LOCKED ||
 	    rdtgrp->mode == RDT_MODE_PSEUDO_LOCKSETUP) {
 		ret = -EINVAL;
 		rdt_last_cmd_puts("Pseudo-locking in progress\n");
-		goto unlock;
+		goto out_free;
 	}
 
 	if (is_cpu_list(of))
@@ -546,7 +551,7 @@ static ssize_t rdtgroup_cpus_write(struct kernfs_open_file *of,
 
 	if (ret) {
 		rdt_last_cmd_puts("Bad CPU list/mask\n");
-		goto unlock;
+		goto out_free;
 	}
 
 	/* check that user didn't specify any offline cpus */
@@ -554,7 +559,7 @@ static ssize_t rdtgroup_cpus_write(struct kernfs_open_file *of,
 	if (!cpumask_empty(tmpmask)) {
 		ret = -EINVAL;
 		rdt_last_cmd_puts("Can only assign online CPUs\n");
-		goto unlock;
+		goto out_free;
 	}
 
 	if (rdtgrp->type == RDTCTRL_GROUP)
@@ -564,11 +569,12 @@ static ssize_t rdtgroup_cpus_write(struct kernfs_open_file *of,
 	else
 		ret = -EINVAL;
 
-unlock:
-	rdtgroup_kn_unlock(of->kn);
+out_free:
 	free_cpumask_var(tmpmask);
 	free_cpumask_var(newmask);
 	free_cpumask_var(tmpmask1);
+out_unlock:
+	rdtgroup_kn_unlock(of->kn);
 
 	return ret ?: nbytes;
 }
@@ -579,14 +585,20 @@ unlock:
  *
  * On resource group creation via a mkdir, an extra kernfs_node reference is
  * taken to ensure that the rdtgroup structure remains accessible for the
- * rdtgroup_kn_unlock() calls where it is removed.
+ * rdtgroup_kn_unlock() calls where it is removed. The default group is
+ * statically allocated: it does not have an extra reference but will have
+ * RDT_DELETED set on unmount to support safe access to its associated files
+ * via rdtgroup_kn_lock_live/rdtgroup_kn_unlock().
  *
- * Drop the extra reference here, then free the rdtgroup structure.
+ * For all but the default group: drop the extra reference, then free the
+ * rdtgroup structure.
  *
  * Return: void
  */
 static void rdtgroup_remove(struct rdtgroup *rdtgrp)
 {
+	if (rdtgrp == &rdtgroup_default)
+		return;
 	kernfs_put(rdtgrp->kn);
 	kfree(rdtgrp);
 }
@@ -773,7 +785,6 @@ static ssize_t rdtgroup_tasks_write(struct kernfs_open_file *of,
 		rdtgroup_kn_unlock(of->kn);
 		return -ENOENT;
 	}
-	rdt_last_cmd_clear();
 
 	if (rdtgrp->mode == RDT_MODE_PSEUDO_LOCKED ||
 	    rdtgrp->mode == RDT_MODE_PSEUDO_LOCKSETUP) {
@@ -965,13 +976,17 @@ static int rdt_last_cmd_status_show(struct kernfs_open_file *of,
 {
 	int len;
 
-	mutex_lock(&rdtgroup_mutex);
+	if (!info_kn_lock(of->kn))
+		return -ENOENT;
 	len = seq_buf_used(&last_cmd_status);
-	if (len)
+	if (len) {
 		seq_printf(seq, "%.*s", len, last_cmd_status_buf);
-	else
+		if (seq_buf_has_overflowed(&last_cmd_status))
+			seq_puts(seq, "[truncated]\n");
+	} else {
 		seq_puts(seq, "ok\n");
-	mutex_unlock(&rdtgroup_mutex);
+	}
+	info_kn_unlock(of->kn);
 	return 0;
 }
 
@@ -990,7 +1005,11 @@ static int rdt_num_closids_show(struct kernfs_open_file *of,
 {
 	struct resctrl_schema *s = rdt_kn_parent_priv(of->kn);
 
+	if (!info_kn_lock(of->kn))
+		return -ENOENT;
 	seq_printf(seq, "%u\n", s->num_closid);
+	info_kn_unlock(of->kn);
+
 	return 0;
 }
 
@@ -998,9 +1017,14 @@ static int rdt_default_ctrl_show(struct kernfs_open_file *of,
 				 struct seq_file *seq, void *v)
 {
 	struct resctrl_schema *s = rdt_kn_parent_priv(of->kn);
-	struct rdt_resource *r = s->res;
+	struct rdt_resource *r;
 
+	if (!info_kn_lock(of->kn))
+		return -ENOENT;
+	r = s->res;
 	seq_printf(seq, "%x\n", resctrl_get_default_ctrl(r));
+	info_kn_unlock(of->kn);
+
 	return 0;
 }
 
@@ -1008,9 +1032,14 @@ static int rdt_min_cbm_bits_show(struct kernfs_open_file *of,
 				 struct seq_file *seq, void *v)
 {
 	struct resctrl_schema *s = rdt_kn_parent_priv(of->kn);
-	struct rdt_resource *r = s->res;
+	struct rdt_resource *r;
 
+	if (!info_kn_lock(of->kn))
+		return -ENOENT;
+	r = s->res;
 	seq_printf(seq, "%u\n", r->cache.min_cbm_bits);
+	info_kn_unlock(of->kn);
+
 	return 0;
 }
 
@@ -1018,9 +1047,14 @@ static int rdt_shareable_bits_show(struct kernfs_open_file *of,
 				   struct seq_file *seq, void *v)
 {
 	struct resctrl_schema *s = rdt_kn_parent_priv(of->kn);
-	struct rdt_resource *r = s->res;
+	struct rdt_resource *r;
 
+	if (!info_kn_lock(of->kn))
+		return -ENOENT;
+	r = s->res;
 	seq_printf(seq, "%x\n", r->cache.shareable_bits);
+	info_kn_unlock(of->kn);
+
 	return 0;
 }
 
@@ -1048,24 +1082,27 @@ static int rdt_bit_usage_show(struct kernfs_open_file *of,
 	 */
 	unsigned long sw_shareable = 0, hw_shareable = 0;
 	unsigned long exclusive = 0, pseudo_locked = 0;
-	struct rdt_resource *r = s->res;
 	struct rdt_ctrl_domain *dom;
 	int i, hwb, swb, excl, psl;
+	struct rdt_resource *r;
 	enum rdtgrp_mode mode;
 	bool sep = false;
 	u32 ctrl_val;
 
-	cpus_read_lock();
-	mutex_lock(&rdtgroup_mutex);
-	hw_shareable = r->cache.shareable_bits;
-	list_for_each_entry(dom, &r->ctrl_domains, hdr.list) {
+	if (!info_kn_lock(of->kn))
+		return -ENOENT;
+	r = s->res;
+	list_for_each_entry_rcu(dom, &r->ctrl_domains, hdr.list, lockdep_is_cpus_held()) {
 		if (sep)
 			seq_putc(seq, ';');
+		hw_shareable = r->cache.shareable_bits;
 		sw_shareable = 0;
 		exclusive = 0;
 		seq_printf(seq, "%d=", dom->hdr.id);
 		for (i = 0; i < closids_supported(); i++) {
-			if (!closid_allocated(i))
+			if (!closid_allocated(i) ||
+			    (resctrl_arch_get_io_alloc_enabled(r) &&
+			     i == resctrl_io_alloc_closid(r)))
 				continue;
 			ctrl_val = resctrl_arch_get_config(r, dom, i,
 							   s->conf_type);
@@ -1093,6 +1130,21 @@ static int rdt_bit_usage_show(struct kernfs_open_file *of,
 				break;
 			}
 		}
+
+		/*
+		 * When the "io_alloc" feature is enabled, a portion of the cache
+		 * is configured for shared use between hardware and software.
+		 * Also, when CDP is enabled the CBMs of CDP_CODE and CDP_DATA
+		 * resources are kept in sync. So, the CBMs for "io_alloc" can
+		 * be accessed through either resource.
+		 */
+		if (resctrl_arch_get_io_alloc_enabled(r)) {
+			ctrl_val = resctrl_arch_get_config(r, dom,
+							   resctrl_io_alloc_closid(r),
+							   s->conf_type);
+			hw_shareable |= ctrl_val;
+		}
+
 		for (i = r->cache.cbm_len - 1; i >= 0; i--) {
 			pseudo_locked = dom->plr ? dom->plr->cbm : 0;
 			hwb = test_bit(i, &hw_shareable);
@@ -1115,8 +1167,7 @@ static int rdt_bit_usage_show(struct kernfs_open_file *of,
 		sep = true;
 	}
 	seq_putc(seq, '\n');
-	mutex_unlock(&rdtgroup_mutex);
-	cpus_read_unlock();
+	info_kn_unlock(of->kn);
 	return 0;
 }
 
@@ -1124,9 +1175,14 @@ static int rdt_min_bw_show(struct kernfs_open_file *of,
 			   struct seq_file *seq, void *v)
 {
 	struct resctrl_schema *s = rdt_kn_parent_priv(of->kn);
-	struct rdt_resource *r = s->res;
+	struct rdt_resource *r;
 
+	if (!info_kn_lock(of->kn))
+		return -ENOENT;
+	r = s->res;
 	seq_printf(seq, "%u\n", r->membw.min_bw);
+	info_kn_unlock(of->kn);
+
 	return 0;
 }
 
@@ -1135,7 +1191,11 @@ static int rdt_num_rmids_show(struct kernfs_open_file *of,
 {
 	struct rdt_resource *r = rdt_kn_parent_priv(of->kn);
 
-	seq_printf(seq, "%d\n", r->mon.num_rmid);
+	if (!info_kn_lock(of->kn))
+		return -ENOENT;
+	seq_printf(seq, "%u\n", r->mon.num_rmid);
+
+	info_kn_unlock(of->kn);
 
 	return 0;
 }
@@ -1146,6 +1206,8 @@ static int rdt_mon_features_show(struct kernfs_open_file *of,
 	struct rdt_resource *r = rdt_kn_parent_priv(of->kn);
 	struct mon_evt *mevt;
 
+	if (!info_kn_lock(of->kn))
+		return -ENOENT;
 	for_each_mon_event(mevt) {
 		if (mevt->rid != r->rid || !mevt->enabled)
 			continue;
@@ -1155,6 +1217,8 @@ static int rdt_mon_features_show(struct kernfs_open_file *of,
 			seq_printf(seq, "%s_config\n", mevt->name);
 	}
 
+	info_kn_unlock(of->kn);
+
 	return 0;
 }
 
@@ -1162,9 +1226,14 @@ static int rdt_bw_gran_show(struct kernfs_open_file *of,
 			    struct seq_file *seq, void *v)
 {
 	struct resctrl_schema *s = rdt_kn_parent_priv(of->kn);
-	struct rdt_resource *r = s->res;
+	struct rdt_resource *r;
 
+	if (!info_kn_lock(of->kn))
+		return -ENOENT;
+	r = s->res;
 	seq_printf(seq, "%u\n", r->membw.bw_gran);
+	info_kn_unlock(of->kn);
+
 	return 0;
 }
 
@@ -1172,16 +1241,24 @@ static int rdt_delay_linear_show(struct kernfs_open_file *of,
 				 struct seq_file *seq, void *v)
 {
 	struct resctrl_schema *s = rdt_kn_parent_priv(of->kn);
-	struct rdt_resource *r = s->res;
+	struct rdt_resource *r;
 
+	if (!info_kn_lock(of->kn))
+		return -ENOENT;
+	r = s->res;
 	seq_printf(seq, "%u\n", r->membw.delay_linear);
+	info_kn_unlock(of->kn);
+
 	return 0;
 }
 
 static int max_threshold_occ_show(struct kernfs_open_file *of,
 				  struct seq_file *seq, void *v)
 {
+	if (!info_kn_lock(of->kn))
+		return -ENOENT;
 	seq_printf(seq, "%u\n", resctrl_rmid_realloc_threshold);
+	info_kn_unlock(of->kn);
 
 	return 0;
 }
@@ -1190,22 +1267,28 @@ static int rdt_thread_throttle_mode_show(struct kernfs_open_file *of,
 					 struct seq_file *seq, void *v)
 {
 	struct resctrl_schema *s = rdt_kn_parent_priv(of->kn);
-	struct rdt_resource *r = s->res;
+	struct rdt_resource *r;
 
+	if (!info_kn_lock(of->kn))
+		return -ENOENT;
+
+	r = s->res;
 	switch (r->membw.throttle_mode) {
 	case THREAD_THROTTLE_PER_THREAD:
 		seq_puts(seq, "per-thread\n");
-		return 0;
+		break;
 	case THREAD_THROTTLE_MAX:
 		seq_puts(seq, "max\n");
-		return 0;
+		break;
 	case THREAD_THROTTLE_UNDEFINED:
 		seq_puts(seq, "undefined\n");
-		return 0;
+		break;
+	default:
+		WARN_ON_ONCE(1);
+		break;
 	}
 
-	WARN_ON_ONCE(1);
-
+	info_kn_unlock(of->kn);
 	return 0;
 }
 
@@ -1215,16 +1298,30 @@ static ssize_t max_threshold_occ_write(struct kernfs_open_file *of,
 	unsigned int bytes;
 	int ret;
 
-	ret = kstrtouint(buf, 0, &bytes);
-	if (ret)
-		return ret;
+	if (!info_kn_lock(of->kn))
+		return -ENOENT;
 
-	if (bytes > resctrl_rmid_realloc_limit)
-		return -EINVAL;
+	rdt_last_cmd_clear();
+
+	ret = kstrtouint(buf, 0, &bytes);
+	if (ret) {
+		rdt_last_cmd_puts("max_threshold_occupancy: Invalid input\n");
+		goto out_unlock;
+	}
+
+	if (bytes > resctrl_rmid_realloc_limit) {
+		rdt_last_cmd_printf("max_threshold_occupancy: Exceeds limit (before adjustment) of %u bytes\n",
+				    resctrl_rmid_realloc_limit);
+		ret = -EINVAL;
+		goto out_unlock;
+	}
 
 	resctrl_rmid_realloc_threshold = resctrl_arch_round_mon_val(bytes);
 
-	return nbytes;
+out_unlock:
+	info_kn_unlock(of->kn);
+
+	return ret ?: nbytes;
 }
 
 /*
@@ -1247,7 +1344,7 @@ static int rdtgroup_mode_show(struct kernfs_open_file *of,
 	return 0;
 }
 
-static enum resctrl_conf_type resctrl_peer_type(enum resctrl_conf_type my_type)
+enum resctrl_conf_type resctrl_peer_type(enum resctrl_conf_type my_type)
 {
 	switch (my_type) {
 	case CDP_CODE:
@@ -1264,9 +1361,14 @@ static int rdt_has_sparse_bitmasks_show(struct kernfs_open_file *of,
 					struct seq_file *seq, void *v)
 {
 	struct resctrl_schema *s = rdt_kn_parent_priv(of->kn);
-	struct rdt_resource *r = s->res;
+	struct rdt_resource *r;
 
+	if (!info_kn_lock(of->kn))
+		return -ENOENT;
+	r = s->res;
 	seq_printf(seq, "%u\n", r->cache.arch_has_sparse_bitmasks);
+
+	info_kn_unlock(of->kn);
 
 	return 0;
 }
@@ -1392,7 +1494,7 @@ static bool rdtgroup_mode_test_exclusive(struct rdtgroup *rdtgrp)
 		if (r->rid == RDT_RESOURCE_MBA || r->rid == RDT_RESOURCE_SMBA)
 			continue;
 		has_cache = true;
-		list_for_each_entry(d, &r->ctrl_domains, hdr.list) {
+		list_for_each_entry_rcu(d, &r->ctrl_domains, hdr.list, lockdep_is_cpus_held()) {
 			ctrl = resctrl_arch_get_config(r, d, closid,
 						       s->conf_type);
 			if (rdtgroup_cbm_overlaps(s, d, ctrl, closid, false)) {
@@ -1420,18 +1522,20 @@ static ssize_t rdtgroup_mode_write(struct kernfs_open_file *of,
 	enum rdtgrp_mode mode;
 	int ret = 0;
 
-	/* Valid input requires a trailing newline */
-	if (nbytes == 0 || buf[nbytes - 1] != '\n')
-		return -EINVAL;
-	buf[nbytes - 1] = '\0';
-
 	rdtgrp = rdtgroup_kn_lock_live(of->kn);
 	if (!rdtgrp) {
 		rdtgroup_kn_unlock(of->kn);
 		return -ENOENT;
 	}
 
-	rdt_last_cmd_clear();
+	/* Valid input requires a trailing newline */
+	if (nbytes == 0 || buf[nbytes - 1] != '\n') {
+		rdt_last_cmd_puts("mode: Invalid input\n");
+		ret = -EINVAL;
+		goto out;
+	}
+
+	buf[nbytes - 1] = '\0';
 
 	mode = rdtgrp->mode;
 
@@ -1496,6 +1600,8 @@ out:
  *
  * @cbm is unsigned long, even if only 32 bits are used to make the
  * bitmap functions work correctly.
+ *
+ * Return: Size (in bytes) of cache portion represented by CBM, 0 on failure.
  */
 unsigned int rdtgroup_cbm_to_size(struct rdt_resource *r,
 				  struct rdt_ctrl_domain *d, unsigned long cbm)
@@ -1558,7 +1664,6 @@ static int rdtgroup_size_show(struct kernfs_open_file *of,
 
 	if (rdtgrp->mode == RDT_MODE_PSEUDO_LOCKED) {
 		if (!rdtgrp->plr->d) {
-			rdt_last_cmd_clear();
 			rdt_last_cmd_puts("Cache domain offline\n");
 			ret = -ENODEV;
 		} else {
@@ -1579,7 +1684,7 @@ static int rdtgroup_size_show(struct kernfs_open_file *of,
 		type = schema->conf_type;
 		sep = false;
 		seq_printf(s, "%*s:", max_name_width, schema->name);
-		list_for_each_entry(d, &r->ctrl_domains, hdr.list) {
+		list_for_each_entry_rcu(d, &r->ctrl_domains, hdr.list, lockdep_is_cpus_held()) {
 			if (sep)
 				seq_putc(s, ';');
 			if (rdtgrp->mode == RDT_MODE_PSEUDO_LOCKSETUP) {
@@ -1618,13 +1723,13 @@ static void mondata_config_read(struct resctrl_mon_config_info *mon_info)
 static int mbm_config_show(struct seq_file *s, struct rdt_resource *r, u32 evtid)
 {
 	struct resctrl_mon_config_info mon_info;
-	struct rdt_mon_domain *dom;
+	struct rdt_l3_mon_domain *dom;
 	bool sep = false;
 
-	cpus_read_lock();
-	mutex_lock(&rdtgroup_mutex);
+	lockdep_assert_cpus_held();
+	lockdep_assert_held(&rdtgroup_mutex);
 
-	list_for_each_entry(dom, &r->mon_domains, hdr.list) {
+	list_for_each_entry_rcu(dom, &r->mon_domains, hdr.list, lockdep_is_cpus_held()) {
 		if (sep)
 			seq_puts(s, ";");
 
@@ -1639,9 +1744,6 @@ static int mbm_config_show(struct seq_file *s, struct rdt_resource *r, u32 evtid
 	}
 	seq_puts(s, "\n");
 
-	mutex_unlock(&rdtgroup_mutex);
-	cpus_read_unlock();
-
 	return 0;
 }
 
@@ -1650,8 +1752,12 @@ static int mbm_total_bytes_config_show(struct kernfs_open_file *of,
 {
 	struct rdt_resource *r = rdt_kn_parent_priv(of->kn);
 
+	if (!info_kn_lock(of->kn))
+		return -ENOENT;
+
 	mbm_config_show(seq, r, QOS_L3_MBM_TOTAL_EVENT_ID);
 
+	info_kn_unlock(of->kn);
 	return 0;
 }
 
@@ -1660,13 +1766,17 @@ static int mbm_local_bytes_config_show(struct kernfs_open_file *of,
 {
 	struct rdt_resource *r = rdt_kn_parent_priv(of->kn);
 
+	if (!info_kn_lock(of->kn))
+		return -ENOENT;
+
 	mbm_config_show(seq, r, QOS_L3_MBM_LOCAL_EVENT_ID);
 
+	info_kn_unlock(of->kn);
 	return 0;
 }
 
 static void mbm_config_write_domain(struct rdt_resource *r,
-				    struct rdt_mon_domain *d, u32 evtid, u32 val)
+				    struct rdt_l3_mon_domain *d, u32 evtid, u32 val)
 {
 	struct resctrl_mon_config_info mon_info = {0};
 
@@ -1707,8 +1817,8 @@ static void mbm_config_write_domain(struct rdt_resource *r,
 static int mon_config_write(struct rdt_resource *r, char *tok, u32 evtid)
 {
 	char *dom_str = NULL, *id_str;
+	struct rdt_l3_mon_domain *d;
 	unsigned long dom_id, val;
-	struct rdt_mon_domain *d;
 
 	/* Walking r->domains, ensure it can't race with cpuhp */
 	lockdep_assert_cpus_held();
@@ -1738,7 +1848,7 @@ next:
 		return -EINVAL;
 	}
 
-	list_for_each_entry(d, &r->mon_domains, hdr.list) {
+	list_for_each_entry_rcu(d, &r->mon_domains, hdr.list, lockdep_is_cpus_held()) {
 		if (d->hdr.id == dom_id) {
 			mbm_config_write_domain(r, d, evtid, val);
 			goto next;
@@ -1755,21 +1865,24 @@ static ssize_t mbm_total_bytes_config_write(struct kernfs_open_file *of,
 	struct rdt_resource *r = rdt_kn_parent_priv(of->kn);
 	int ret;
 
-	/* Valid input requires a trailing newline */
-	if (nbytes == 0 || buf[nbytes - 1] != '\n')
-		return -EINVAL;
-
-	cpus_read_lock();
-	mutex_lock(&rdtgroup_mutex);
+	if (!info_kn_lock(of->kn))
+		return -ENOENT;
 
 	rdt_last_cmd_clear();
+
+	/* Valid input requires a trailing newline */
+	if (nbytes == 0 || buf[nbytes - 1] != '\n') {
+		rdt_last_cmd_puts("mbm_total_bytes_config: Invalid input\n");
+		ret = -EINVAL;
+		goto out_unlock;
+	}
 
 	buf[nbytes - 1] = '\0';
 
 	ret = mon_config_write(r, buf, QOS_L3_MBM_TOTAL_EVENT_ID);
 
-	mutex_unlock(&rdtgroup_mutex);
-	cpus_read_unlock();
+out_unlock:
+	info_kn_unlock(of->kn);
 
 	return ret ?: nbytes;
 }
@@ -1781,21 +1894,24 @@ static ssize_t mbm_local_bytes_config_write(struct kernfs_open_file *of,
 	struct rdt_resource *r = rdt_kn_parent_priv(of->kn);
 	int ret;
 
-	/* Valid input requires a trailing newline */
-	if (nbytes == 0 || buf[nbytes - 1] != '\n')
-		return -EINVAL;
-
-	cpus_read_lock();
-	mutex_lock(&rdtgroup_mutex);
+	if (!info_kn_lock(of->kn))
+		return -ENOENT;
 
 	rdt_last_cmd_clear();
+
+	/* Valid input requires a trailing newline */
+	if (nbytes == 0 || buf[nbytes - 1] != '\n') {
+		rdt_last_cmd_puts("mbm_local_bytes_config: Invalid input\n");
+		ret = -EINVAL;
+		goto out_unlock;
+	}
 
 	buf[nbytes - 1] = '\0';
 
 	ret = mon_config_write(r, buf, QOS_L3_MBM_LOCAL_EVENT_ID);
 
-	mutex_unlock(&rdtgroup_mutex);
-	cpus_read_unlock();
+out_unlock:
+	info_kn_unlock(of->kn);
 
 	return ret ?: nbytes;
 }
@@ -1836,6 +1952,18 @@ void resctrl_bmec_files_show(struct rdt_resource *r, struct kernfs_node *l3_mon_
 	/* Release the reference only if it was acquired */
 	if (mon_kn)
 		kernfs_put(mon_kn);
+}
+
+const char *rdtgroup_name_by_closid(u32 closid)
+{
+	struct rdtgroup *rdtgrp;
+
+	list_for_each_entry(rdtgrp, &rdt_all_groups, rdtgroup_list) {
+		if (rdtgrp->closid == closid)
+			return rdt_kn_name(rdtgrp->kn);
+	}
+
+	return NULL;
 }
 
 /* rdtgroup information files for one cache resource. */
@@ -1948,6 +2076,20 @@ static struct rftype res_common_files[] = {
 		.seq_show	= rdt_thread_throttle_mode_show,
 	},
 	{
+		.name		= "io_alloc",
+		.mode		= 0644,
+		.kf_ops		= &rdtgroup_kf_single_ops,
+		.seq_show	= resctrl_io_alloc_show,
+		.write          = resctrl_io_alloc_write,
+	},
+	{
+		.name		= "io_alloc_cbm",
+		.mode		= 0644,
+		.kf_ops		= &rdtgroup_kf_single_ops,
+		.seq_show	= resctrl_io_alloc_cbm_show,
+		.write		= resctrl_io_alloc_cbm_write,
+	},
+	{
 		.name		= "max_threshold_occupancy",
 		.mode		= 0644,
 		.kf_ops		= &rdtgroup_kf_single_ops,
@@ -1971,7 +2113,7 @@ static struct rftype res_common_files[] = {
 	},
 	{
 		.name		= "event_filter",
-		.mode		= 0644,
+		.mode		= 0444,
 		.kf_ops		= &rdtgroup_kf_single_ops,
 		.seq_show	= event_filter_show,
 		.write		= event_filter_write,
@@ -2138,6 +2280,23 @@ static void thread_throttle_mode_init(void)
 				 RFTYPE_CTRL_INFO | RFTYPE_RES_MB);
 }
 
+/*
+ * The resctrl file "io_alloc" is added using L3 resource. However, it results
+ * in this file being visible for *all* cache resources (eg. L2 cache),
+ * whether it supports "io_alloc" or not.
+ */
+static void io_alloc_init(void)
+{
+	struct rdt_resource *r = resctrl_arch_get_resource(RDT_RESOURCE_L3);
+
+	if (r->cache.io_alloc_capable) {
+		resctrl_file_fflags_init("io_alloc", RFTYPE_CTRL_INFO |
+					 RFTYPE_RES_CACHE);
+		resctrl_file_fflags_init("io_alloc_cbm",
+					 RFTYPE_CTRL_INFO | RFTYPE_RES_CACHE);
+	}
+}
+
 void resctrl_file_fflags_init(const char *config, unsigned long fflags)
 {
 	struct rftype *rft;
@@ -2145,6 +2304,15 @@ void resctrl_file_fflags_init(const char *config, unsigned long fflags)
 	rft = rdtgroup_get_rftype_by_name(config);
 	if (rft)
 		rft->fflags = fflags;
+}
+
+void resctrl_file_mode_init(const char *config, umode_t mode)
+{
+	struct rftype *rft;
+
+	rft = rdtgroup_get_rftype_by_name(config);
+	if (rft)
+		rft->mode = mode;
 }
 
 /**
@@ -2263,22 +2431,19 @@ static int resctrl_mkdir_event_configs(struct rdt_resource *r, struct kernfs_nod
 			continue;
 
 		kn_subdir2 = kernfs_create_dir(kn_subdir, mevt->name, kn_subdir->mode, mevt);
-		if (IS_ERR(kn_subdir2)) {
-			ret = PTR_ERR(kn_subdir2);
-			goto out;
-		}
+		if (IS_ERR(kn_subdir2))
+			return PTR_ERR(kn_subdir2);
 
 		ret = rdtgroup_kn_set_ugid(kn_subdir2);
 		if (ret)
-			goto out;
+			return ret;
 
 		ret = rdtgroup_add_files(kn_subdir2, RFTYPE_ASSIGN_CONFIG);
 		if (ret)
-			break;
+			return ret;
 	}
 
-out:
-	return ret;
+	return 0;
 }
 
 static int rdtgroup_mkdir_info_resdir(void *priv, char *name,
@@ -2330,6 +2495,8 @@ static unsigned long fflags_from_resource(struct rdt_resource *r)
 	case RDT_RESOURCE_MBA:
 	case RDT_RESOURCE_SMBA:
 		return RFTYPE_RES_MB;
+	case RDT_RESOURCE_PERF_PKG:
+		return RFTYPE_RES_PERF_PKG;
 	}
 
 	return WARN_ON_ONCE(1);
@@ -2440,10 +2607,13 @@ static void mba_sc_domain_destroy(struct rdt_resource *r,
 }
 
 /*
- * MBA software controller is supported only if
- * MBM is supported and MBA is in linear scale,
- * and the MBM monitor scope is the same as MBA
- * control scope.
+ * The MBA software controller is supported only if MBM is supported and MBA is
+ * in linear scale, and the MBM monitor scope is the same as MBA control scope.
+ *
+ * The software controller cannot be supported when the MBM counters are
+ * assignable.  There is no guarantee that MBM counters are assigned to the
+ * event backing the software controller in all monitoring domains of all
+ * monitoring groups.
  */
 static bool supports_mba_mbps(void)
 {
@@ -2452,7 +2622,8 @@ static bool supports_mba_mbps(void)
 
 	return (resctrl_is_mbm_enabled() &&
 		r->alloc_capable && is_mba_linear() &&
-		r->ctrl_scope == rmbm->mon_scope);
+		r->ctrl_scope == rmbm->mon_scope &&
+		!rmbm->mon.mbm_cntr_assignable);
 }
 
 /*
@@ -2474,7 +2645,7 @@ static int set_mba_sc(bool mba_sc)
 
 	rdtgroup_default.mba_mbps_event = mba_mbps_default_event;
 
-	list_for_each_entry(d, &r->ctrl_domains, hdr.list) {
+	list_for_each_entry_rcu(d, &r->ctrl_domains, hdr.list, lockdep_is_cpus_held()) {
 		for (i = 0; i < num_closid; i++)
 			d->mbps_val[i] = MBA_MAX_MBPS;
 	}
@@ -2520,15 +2691,24 @@ static void rdtgroup_kn_get(struct rdtgroup *rdtgrp, struct kernfs_node *kn)
 
 static void rdtgroup_kn_put(struct rdtgroup *rdtgrp, struct kernfs_node *kn)
 {
-	if (atomic_dec_and_test(&rdtgrp->waitcount) &&
-	    (rdtgrp->flags & RDT_DELETED)) {
+	bool needs_free;
+
+	if (!atomic_dec_and_mutex_lock(&rdtgrp->waitcount, &rdtgroup_mutex)) {
+		kernfs_unbreak_active_protection(kn);
+		return;
+	}
+
+	needs_free = rdtgrp->flags & RDT_DELETED;
+
+	mutex_unlock(&rdtgroup_mutex);
+
+	kernfs_unbreak_active_protection(kn);
+
+	if (needs_free) {
 		if (rdtgrp->mode == RDT_MODE_PSEUDO_LOCKSETUP ||
 		    rdtgrp->mode == RDT_MODE_PSEUDO_LOCKED)
 			rdtgroup_pseudo_lock_remove(rdtgrp);
-		kernfs_unbreak_active_protection(kn);
 		rdtgroup_remove(rdtgrp);
-	} else {
-		kernfs_unbreak_active_protection(kn);
 	}
 }
 
@@ -2543,10 +2723,20 @@ struct rdtgroup *rdtgroup_kn_lock_live(struct kernfs_node *kn)
 
 	cpus_read_lock();
 	mutex_lock(&rdtgroup_mutex);
+	rdt_last_cmd_clear();
 
 	/* Was this group deleted while we waited? */
-	if (rdtgrp->flags & RDT_DELETED)
+	if (rdtgrp->flags & RDT_DELETED) {
+		/*
+		 * It is safe to dereference kn to obtain the resource group's
+		 * name because one extra reference to kn is obtained
+		 * during resource group creation that will be released by
+		 * rdtgroup_remove() called by rdtgroup_kn_put().
+		 */
+		rdt_last_cmd_printf("Resource group %s deleted. No commands possible.\n",
+				    rdt_kn_name(rdtgrp->kn));
 		return NULL;
+	}
 
 	return rdtgrp;
 }
@@ -2562,6 +2752,58 @@ void rdtgroup_kn_unlock(struct kernfs_node *kn)
 	cpus_read_unlock();
 
 	rdtgroup_kn_put(rdtgrp, kn);
+}
+
+/*
+ * Accessing the kn after breaking active protection is safe since the open
+ * of resctrl file holds a kernfs base reference (different from active
+ * protection) on the kn ensuring that it remains accessible even if it was
+ * unlinked. Each kn in turn holds base reference to parent so the kn's
+ * genealogy remains in memory until all base references dropped.
+ */
+static bool is_active_resctrl_node(struct kernfs_node *kn)
+{
+	struct kernfs_node *p;
+	bool match = false;
+
+	guard(rcu)();
+	p = kn;
+	while (p) {
+		if (p == rdtgroup_default.kn) {
+			match = true;
+			break;
+		}
+		p = rcu_dereference(p->__parent);
+	}
+
+	return match;
+}
+
+bool info_kn_lock(struct kernfs_node *kn)
+{
+	kernfs_break_active_protection(kn);
+	cpus_read_lock();
+	mutex_lock(&rdtgroup_mutex);
+
+	/*
+	 * Check both if resctrl is torn down (!rdtgroup_default.kn) and
+	 * if the reader's kernfs_node originates from a dead mount.
+	 */
+	if (!rdtgroup_default.kn || !is_active_resctrl_node(kn)) {
+		mutex_unlock(&rdtgroup_mutex);
+		cpus_read_unlock();
+		kernfs_unbreak_active_protection(kn);
+		return false;
+	}
+
+	return true;
+}
+
+void info_kn_unlock(struct kernfs_node *kn)
+{
+	mutex_unlock(&rdtgroup_mutex);
+	cpus_read_unlock();
+	kernfs_unbreak_active_protection(kn);
 }
 
 static int mkdir_mondata_all(struct kernfs_node *parent_kn,
@@ -2618,7 +2860,7 @@ static int schemata_list_add(struct rdt_resource *r, enum resctrl_conf_type type
 	const char *suffix = "";
 	int ret, cl;
 
-	s = kzalloc(sizeof(*s), GFP_KERNEL);
+	s = kzalloc_obj(*s);
 	if (!s)
 		return -ENOMEM;
 
@@ -2712,199 +2954,6 @@ static void schemata_list_destroy(void)
 	}
 }
 
-static int rdt_get_tree(struct fs_context *fc)
-{
-	struct rdt_fs_context *ctx = rdt_fc2context(fc);
-	unsigned long flags = RFTYPE_CTRL_BASE;
-	struct rdt_mon_domain *dom;
-	struct rdt_resource *r;
-	int ret;
-
-	cpus_read_lock();
-	mutex_lock(&rdtgroup_mutex);
-	/*
-	 * resctrl file system can only be mounted once.
-	 */
-	if (resctrl_mounted) {
-		ret = -EBUSY;
-		goto out;
-	}
-
-	ret = rdtgroup_setup_root(ctx);
-	if (ret)
-		goto out;
-
-	ret = rdt_enable_ctx(ctx);
-	if (ret)
-		goto out_root;
-
-	ret = schemata_list_create();
-	if (ret)
-		goto out_schemata_free;
-
-	ret = closid_init();
-	if (ret)
-		goto out_schemata_free;
-
-	if (resctrl_arch_mon_capable())
-		flags |= RFTYPE_MON;
-
-	ret = rdtgroup_add_files(rdtgroup_default.kn, flags);
-	if (ret)
-		goto out_closid_exit;
-
-	kernfs_activate(rdtgroup_default.kn);
-
-	ret = rdtgroup_create_info_dir(rdtgroup_default.kn);
-	if (ret < 0)
-		goto out_closid_exit;
-
-	if (resctrl_arch_mon_capable()) {
-		ret = mongroup_create_dir(rdtgroup_default.kn,
-					  &rdtgroup_default, "mon_groups",
-					  &kn_mongrp);
-		if (ret < 0)
-			goto out_info;
-
-		rdtgroup_assign_cntrs(&rdtgroup_default);
-
-		ret = mkdir_mondata_all(rdtgroup_default.kn,
-					&rdtgroup_default, &kn_mondata);
-		if (ret < 0)
-			goto out_mongrp;
-		rdtgroup_default.mon.mon_data_kn = kn_mondata;
-	}
-
-	ret = rdt_pseudo_lock_init();
-	if (ret)
-		goto out_mondata;
-
-	ret = kernfs_get_tree(fc);
-	if (ret < 0)
-		goto out_psl;
-
-	if (resctrl_arch_alloc_capable())
-		resctrl_arch_enable_alloc();
-	if (resctrl_arch_mon_capable())
-		resctrl_arch_enable_mon();
-
-	if (resctrl_arch_alloc_capable() || resctrl_arch_mon_capable())
-		resctrl_mounted = true;
-
-	if (resctrl_is_mbm_enabled()) {
-		r = resctrl_arch_get_resource(RDT_RESOURCE_L3);
-		list_for_each_entry(dom, &r->mon_domains, hdr.list)
-			mbm_setup_overflow_handler(dom, MBM_OVERFLOW_INTERVAL,
-						   RESCTRL_PICK_ANY_CPU);
-	}
-
-	goto out;
-
-out_psl:
-	rdt_pseudo_lock_release();
-out_mondata:
-	if (resctrl_arch_mon_capable())
-		kernfs_remove(kn_mondata);
-out_mongrp:
-	if (resctrl_arch_mon_capable()) {
-		rdtgroup_unassign_cntrs(&rdtgroup_default);
-		kernfs_remove(kn_mongrp);
-	}
-out_info:
-	kernfs_remove(kn_info);
-out_closid_exit:
-	closid_exit();
-out_schemata_free:
-	schemata_list_destroy();
-	rdt_disable_ctx();
-out_root:
-	rdtgroup_destroy_root();
-out:
-	rdt_last_cmd_clear();
-	mutex_unlock(&rdtgroup_mutex);
-	cpus_read_unlock();
-	return ret;
-}
-
-enum rdt_param {
-	Opt_cdp,
-	Opt_cdpl2,
-	Opt_mba_mbps,
-	Opt_debug,
-	nr__rdt_params
-};
-
-static const struct fs_parameter_spec rdt_fs_parameters[] = {
-	fsparam_flag("cdp",		Opt_cdp),
-	fsparam_flag("cdpl2",		Opt_cdpl2),
-	fsparam_flag("mba_MBps",	Opt_mba_mbps),
-	fsparam_flag("debug",		Opt_debug),
-	{}
-};
-
-static int rdt_parse_param(struct fs_context *fc, struct fs_parameter *param)
-{
-	struct rdt_fs_context *ctx = rdt_fc2context(fc);
-	struct fs_parse_result result;
-	const char *msg;
-	int opt;
-
-	opt = fs_parse(fc, rdt_fs_parameters, param, &result);
-	if (opt < 0)
-		return opt;
-
-	switch (opt) {
-	case Opt_cdp:
-		ctx->enable_cdpl3 = true;
-		return 0;
-	case Opt_cdpl2:
-		ctx->enable_cdpl2 = true;
-		return 0;
-	case Opt_mba_mbps:
-		msg = "mba_MBps requires MBM and linear scale MBA at L3 scope";
-		if (!supports_mba_mbps())
-			return invalfc(fc, msg);
-		ctx->enable_mba_mbps = true;
-		return 0;
-	case Opt_debug:
-		ctx->enable_debug = true;
-		return 0;
-	}
-
-	return -EINVAL;
-}
-
-static void rdt_fs_context_free(struct fs_context *fc)
-{
-	struct rdt_fs_context *ctx = rdt_fc2context(fc);
-
-	kernfs_free_fs_context(fc);
-	kfree(ctx);
-}
-
-static const struct fs_context_operations rdt_fs_context_ops = {
-	.free		= rdt_fs_context_free,
-	.parse_param	= rdt_parse_param,
-	.get_tree	= rdt_get_tree,
-};
-
-static int rdt_init_fs_context(struct fs_context *fc)
-{
-	struct rdt_fs_context *ctx;
-
-	ctx = kzalloc(sizeof(*ctx), GFP_KERNEL);
-	if (!ctx)
-		return -ENOMEM;
-
-	ctx->kfc.magic = RDTGROUP_SUPER_MAGIC;
-	fc->fs_private = &ctx->kfc;
-	fc->ops = &rdt_fs_context_ops;
-	put_user_ns(fc->user_ns);
-	fc->user_ns = get_user_ns(&init_user_ns);
-	fc->global = true;
-	return 0;
-}
-
 /*
  * Move tasks from one to the other group. If @from is NULL, then all tasks
  * in the systems are moved unconditionally (used for teardown).
@@ -2983,10 +3032,6 @@ static void rmdir_all_sub(void)
 		if (rdtgrp == &rdtgroup_default)
 			continue;
 
-		if (rdtgrp->mode == RDT_MODE_PSEUDO_LOCKSETUP ||
-		    rdtgrp->mode == RDT_MODE_PSEUDO_LOCKED)
-			rdtgroup_pseudo_lock_remove(rdtgrp);
-
 		/*
 		 * Give any CPUs back to the default group. We cannot copy
 		 * cpu_online_mask because a CPU might have executed the
@@ -2997,7 +3042,13 @@ static void rmdir_all_sub(void)
 
 		rdtgroup_unassign_cntrs(rdtgrp);
 
-		free_rmid(rdtgrp->closid, rdtgrp->mon.rmid);
+		if (rdtgrp->mode == RDT_MODE_PSEUDO_LOCKSETUP ||
+		    rdtgrp->mode == RDT_MODE_PSEUDO_LOCKED) {
+			rdtgroup_pseudo_lock_remove(rdtgrp);
+		} else {
+			/* Pseudo-locked group's RMID is freed during setup. */
+			free_rmid(rdtgrp->closid, rdtgrp->mon.rmid);
+		}
 
 		kernfs_remove(rdtgrp->kn);
 		list_del(&rdtgrp->rdtgroup_list);
@@ -3026,7 +3077,10 @@ static void rmdir_all_sub(void)
  * @rid:    The resource id for the event file being created.
  * @domid:  The domain id for the event file being created.
  * @mevt:   The type of event file being created.
- * @do_sum: Whether SNC summing monitors are being created.
+ * @do_sum: Whether SNC summing monitors are being created. Only set
+ *	    when @rid == RDT_RESOURCE_L3.
+ *
+ * Return: Pointer to mon_data private data of the event, NULL on failure.
  */
 static struct mon_data *mon_get_kn_priv(enum resctrl_res_level rid, int domid,
 					struct mon_evt *mevt,
@@ -3038,18 +3092,18 @@ static struct mon_data *mon_get_kn_priv(enum resctrl_res_level rid, int domid,
 
 	list_for_each_entry(priv, &mon_data_kn_priv_list, list) {
 		if (priv->rid == rid && priv->domid == domid &&
-		    priv->sum == do_sum && priv->evtid == mevt->evtid)
+		    priv->sum == do_sum && priv->evt == mevt)
 			return priv;
 	}
 
-	priv = kzalloc(sizeof(*priv), GFP_KERNEL);
+	priv = kzalloc_obj(*priv);
 	if (!priv)
 		return NULL;
 
 	priv->rid = rid;
 	priv->domid = domid;
 	priv->sum = do_sum;
-	priv->evtid = mevt->evtid;
+	priv->evt = mevt;
 	list_add_tail(&priv->list, &mon_data_kn_priv_list);
 
 	return priv;
@@ -3085,12 +3139,13 @@ static void resctrl_fs_teardown(void)
 	mon_put_kn_priv();
 	rdt_pseudo_lock_release();
 	rdtgroup_default.mode = RDT_MODE_SHAREABLE;
+	rdtgroup_default.flags = RDT_DELETED;
 	closid_exit();
 	schemata_list_destroy();
 	rdtgroup_destroy_root();
 }
 
-static void rdt_kill_sb(struct super_block *sb)
+static void resctrl_unmount(void)
 {
 	struct rdt_resource *r;
 
@@ -3109,9 +3164,244 @@ static void rdt_kill_sb(struct super_block *sb)
 	if (resctrl_arch_mon_capable())
 		resctrl_arch_disable_mon();
 	resctrl_mounted = false;
-	kernfs_kill_sb(sb);
 	mutex_unlock(&rdtgroup_mutex);
 	cpus_read_unlock();
+}
+
+static int rdt_get_tree(struct fs_context *fc)
+{
+	struct rdt_fs_context *ctx = rdt_fc2context(fc);
+	unsigned long flags = RFTYPE_CTRL_BASE;
+	struct kernfs_node *rdt_root_kn;
+	struct rdt_l3_mon_domain *dom;
+	struct rdt_resource *r;
+	int ret;
+
+	DO_ONCE_SLEEPABLE(resctrl_arch_pre_mount);
+
+	cpus_read_lock();
+	mutex_lock(&rdtgroup_mutex);
+	/*
+	 * resctrl file system can only be mounted once.
+	 */
+	if (resctrl_mounted) {
+		ret = -EBUSY;
+		goto out;
+	}
+
+	/* Avoid races from pending operations from a previous mount */
+	if (atomic_read(&rdtgroup_default.waitcount) != 0) {
+		ret = -EBUSY;
+		goto out;
+	}
+
+	ret = setup_rmid_lru_list();
+	if (ret)
+		goto out;
+
+	ret = rdtgroup_setup_root(ctx);
+	if (ret)
+		goto out;
+
+	ret = rdt_enable_ctx(ctx);
+	if (ret)
+		goto out_root;
+
+	ret = schemata_list_create();
+	if (ret)
+		goto out_schemata_free;
+
+	ret = closid_init();
+	if (ret)
+		goto out_schemata_free;
+
+	if (resctrl_arch_mon_capable())
+		flags |= RFTYPE_MON;
+
+	ret = rdtgroup_add_files(rdtgroup_default.kn, flags);
+	if (ret)
+		goto out_closid_exit;
+
+	kernfs_activate(rdtgroup_default.kn);
+
+	ret = rdtgroup_create_info_dir(rdtgroup_default.kn);
+	if (ret < 0)
+		goto out_closid_exit;
+
+	if (resctrl_arch_mon_capable()) {
+		ret = mongroup_create_dir(rdtgroup_default.kn,
+					  &rdtgroup_default, "mon_groups",
+					  &kn_mongrp);
+		if (ret < 0)
+			goto out_info;
+
+		rdtgroup_assign_cntrs(&rdtgroup_default);
+
+		ret = mkdir_mondata_all(rdtgroup_default.kn,
+					&rdtgroup_default, &kn_mondata);
+		if (ret < 0)
+			goto out_mongrp;
+		rdtgroup_default.mon.mon_data_kn = kn_mondata;
+	}
+
+	ret = rdt_pseudo_lock_init();
+	if (ret)
+		goto out_mondata;
+
+	if (resctrl_arch_alloc_capable())
+		resctrl_arch_enable_alloc();
+	if (resctrl_arch_mon_capable())
+		resctrl_arch_enable_mon();
+
+	if (resctrl_arch_alloc_capable() || resctrl_arch_mon_capable())
+		resctrl_mounted = true;
+
+	if (resctrl_is_mbm_enabled()) {
+		r = resctrl_arch_get_resource(RDT_RESOURCE_L3);
+		list_for_each_entry_rcu(dom, &r->mon_domains, hdr.list, lockdep_is_cpus_held())
+			mbm_setup_overflow_handler(dom, MBM_OVERFLOW_INTERVAL,
+						   RESCTRL_PICK_ANY_CPU);
+	}
+
+	/*
+	 * Ensure root remains accessible after mutex is unlocked so that
+	 * kernfs_kill_sb() can run safely if called by kernfs_get_tree()'s
+	 * failure path after creating a superblock but before taking reference
+	 * on root kn (for example, if unable to get inode for root kn).
+	 */
+	kernfs_get(rdtgroup_default.kn);
+
+	/*
+	 * Make backup of the current root kn being created to be used in
+	 * kernfs_put(). The additional reference taken above will prevent the
+	 * kn from being freed before kernfs_kill_sb() can run but
+	 * rdtgroup_default.kn may be set to NULL via rdtgroup_destroy_root()
+	 * and its backing root (rdt_root) could be overwritten before
+	 * kernfs_put() can run.
+	 */
+	rdt_root_kn = rdtgroup_default.kn;
+
+	rdt_last_cmd_clear();
+	mutex_unlock(&rdtgroup_mutex);
+	cpus_read_unlock();
+
+	ret = kernfs_get_tree(fc);
+	/*
+	 * resctrl can only be mounted once, new superblock only expected
+	 * to be created once.
+	 */
+	if (!ctx->kfc.new_sb_created)
+		resctrl_unmount();
+	kernfs_put(rdt_root_kn);
+	return ret;
+
+out_mondata:
+	if (resctrl_arch_mon_capable())
+		kernfs_remove(kn_mondata);
+out_mongrp:
+	if (resctrl_arch_mon_capable()) {
+		mon_put_kn_priv();
+		rdtgroup_unassign_cntrs(&rdtgroup_default);
+		kernfs_remove(kn_mongrp);
+	}
+out_info:
+	kernfs_remove(kn_info);
+out_closid_exit:
+	closid_exit();
+out_schemata_free:
+	schemata_list_destroy();
+	rdt_disable_ctx();
+out_root:
+	rdtgroup_destroy_root();
+out:
+	mutex_unlock(&rdtgroup_mutex);
+	cpus_read_unlock();
+	return ret;
+}
+
+enum rdt_param {
+	Opt_cdp,
+	Opt_cdpl2,
+	Opt_mba_mbps,
+	Opt_debug,
+	nr__rdt_params
+};
+
+static const struct fs_parameter_spec rdt_fs_parameters[] = {
+	fsparam_flag("cdp",		Opt_cdp),
+	fsparam_flag("cdpl2",		Opt_cdpl2),
+	fsparam_flag("mba_MBps",	Opt_mba_mbps),
+	fsparam_flag("debug",		Opt_debug),
+	{}
+};
+
+static int rdt_parse_param(struct fs_context *fc, struct fs_parameter *param)
+{
+	struct rdt_fs_context *ctx = rdt_fc2context(fc);
+	struct fs_parse_result result;
+	const char *msg;
+	int opt;
+
+	opt = fs_parse(fc, rdt_fs_parameters, param, &result);
+	if (opt < 0)
+		return opt;
+
+	switch (opt) {
+	case Opt_cdp:
+		ctx->enable_cdpl3 = true;
+		return 0;
+	case Opt_cdpl2:
+		ctx->enable_cdpl2 = true;
+		return 0;
+	case Opt_mba_mbps:
+		msg = "mba_MBps requires MBM (mbm_event mode not supported) and linear scale MBA at L3 scope";
+		if (!supports_mba_mbps())
+			return invalfc(fc, msg);
+		ctx->enable_mba_mbps = true;
+		return 0;
+	case Opt_debug:
+		ctx->enable_debug = true;
+		return 0;
+	}
+
+	return -EINVAL;
+}
+
+static void rdt_fs_context_free(struct fs_context *fc)
+{
+	struct rdt_fs_context *ctx = rdt_fc2context(fc);
+
+	kernfs_free_fs_context(fc);
+	kfree(ctx);
+}
+
+static const struct fs_context_operations rdt_fs_context_ops = {
+	.free		= rdt_fs_context_free,
+	.parse_param	= rdt_parse_param,
+	.get_tree	= rdt_get_tree,
+};
+
+static int rdt_init_fs_context(struct fs_context *fc)
+{
+	struct rdt_fs_context *ctx;
+
+	ctx = kzalloc_obj(*ctx);
+	if (!ctx)
+		return -ENOMEM;
+
+	ctx->kfc.magic = RDTGROUP_SUPER_MAGIC;
+	fc->fs_private = &ctx->kfc;
+	fc->ops = &rdt_fs_context_ops;
+	put_user_ns(fc->user_ns);
+	fc->user_ns = get_user_ns(&init_user_ns);
+	fc->global = true;
+	return 0;
+}
+
+static void rdt_kill_sb(struct super_block *sb)
+{
+	resctrl_unmount();
+	kernfs_kill_sb(sb);
 }
 
 static struct file_system_type rdt_fs_type = {
@@ -3158,23 +3448,24 @@ static void mon_rmdir_one_subdir(struct kernfs_node *pkn, char *name, char *subn
 }
 
 /*
- * Remove all subdirectories of mon_data of ctrl_mon groups
- * and monitor groups for the given domain.
- * Remove files and directories containing "sum" of domain data
- * when last domain being summed is removed.
+ * Remove files and directories for one SNC node. If it is the last node
+ * sharing an L3 cache, then remove the upper level directory containing
+ * the "sum" files too.
  */
-static void rmdir_mondata_subdir_allrdtgrp(struct rdt_resource *r,
-					   struct rdt_mon_domain *d)
+static void rmdir_mondata_subdir_allrdtgrp_snc(struct rdt_resource *r,
+					       struct rdt_domain_hdr *hdr)
 {
 	struct rdtgroup *prgrp, *crgrp;
+	struct rdt_l3_mon_domain *d;
 	char subname[32];
-	bool snc_mode;
 	char name[32];
 
-	snc_mode = r->mon_scope == RESCTRL_L3_NODE;
-	sprintf(name, "mon_%s_%02d", r->name, snc_mode ? d->ci_id : d->hdr.id);
-	if (snc_mode)
-		sprintf(subname, "mon_sub_%s_%02d", r->name, d->hdr.id);
+	if (!domain_header_is_valid(hdr, RESCTRL_MON_DOMAIN, RDT_RESOURCE_L3))
+		return;
+
+	d = container_of(hdr, struct rdt_l3_mon_domain, hdr);
+	sprintf(name, "mon_%s_%02d", r->name, d->ci_id);
+	sprintf(subname, "mon_sub_%s_%02d", r->name, hdr->id);
 
 	list_for_each_entry(prgrp, &rdt_all_groups, rdtgroup_list) {
 		mon_rmdir_one_subdir(prgrp->mon.mon_data_kn, name, subname);
@@ -3184,47 +3475,89 @@ static void rmdir_mondata_subdir_allrdtgrp(struct rdt_resource *r,
 	}
 }
 
-static int mon_add_all_files(struct kernfs_node *kn, struct rdt_mon_domain *d,
-			     struct rdt_resource *r, struct rdtgroup *prgrp,
-			     bool do_sum)
+/*
+ * Remove all subdirectories of mon_data of ctrl_mon groups
+ * and monitor groups for the given domain.
+ */
+static void rmdir_mondata_subdir_allrdtgrp(struct rdt_resource *r,
+					   struct rdt_domain_hdr *hdr)
+{
+	struct rdtgroup *prgrp, *crgrp;
+	char name[32];
+
+	if (r->rid == RDT_RESOURCE_L3 && r->mon_scope == RESCTRL_L3_NODE) {
+		rmdir_mondata_subdir_allrdtgrp_snc(r, hdr);
+		return;
+	}
+
+	sprintf(name, "mon_%s_%02d", r->name, hdr->id);
+	list_for_each_entry(prgrp, &rdt_all_groups, rdtgroup_list) {
+		kernfs_remove_by_name(prgrp->mon.mon_data_kn, name);
+
+		list_for_each_entry(crgrp, &prgrp->mon.crdtgrp_list, mon.crdtgrp_list)
+			kernfs_remove_by_name(crgrp->mon.mon_data_kn, name);
+	}
+}
+
+/*
+ * Create a directory for a domain and populate it with monitor files. Create
+ * summing monitors when @hdr is NULL. No need to initialize summing monitors.
+ */
+static struct kernfs_node *_mkdir_mondata_subdir(struct kernfs_node *parent_kn, char *name,
+						 struct rdt_domain_hdr *hdr,
+						 struct rdt_resource *r,
+						 struct rdtgroup *prgrp, int domid)
 {
 	struct rmid_read rr = {0};
+	struct kernfs_node *kn;
 	struct mon_data *priv;
 	struct mon_evt *mevt;
-	int ret, domid;
+	int ret;
+
+	kn = kernfs_create_dir(parent_kn, name, parent_kn->mode, prgrp);
+	if (IS_ERR(kn))
+		return kn;
+
+	ret = rdtgroup_kn_set_ugid(kn);
+	if (ret)
+		goto out_destroy;
 
 	for_each_mon_event(mevt) {
 		if (mevt->rid != r->rid || !mevt->enabled)
 			continue;
-		domid = do_sum ? d->ci_id : d->hdr.id;
-		priv = mon_get_kn_priv(r->rid, domid, mevt, do_sum);
-		if (WARN_ON_ONCE(!priv))
-			return -EINVAL;
+		priv = mon_get_kn_priv(r->rid, domid, mevt, !hdr);
+		if (WARN_ON_ONCE(!priv)) {
+			ret = -EINVAL;
+			goto out_destroy;
+		}
 
 		ret = mon_addfile(kn, mevt->name, priv);
 		if (ret)
-			return ret;
+			goto out_destroy;
 
-		if (!do_sum && resctrl_is_mbm_event(mevt->evtid))
-			mon_event_read(&rr, r, d, prgrp, &d->hdr.cpu_mask, mevt->evtid, true);
+		if (hdr && resctrl_is_mbm_event(mevt->evtid))
+			mon_event_read(&rr, r, hdr, prgrp, &hdr->cpu_mask, mevt, true);
 	}
 
-	return 0;
+	return kn;
+out_destroy:
+	kernfs_remove(kn);
+	return ERR_PTR(ret);
 }
 
-static int mkdir_mondata_subdir(struct kernfs_node *parent_kn,
-				struct rdt_mon_domain *d,
-				struct rdt_resource *r, struct rdtgroup *prgrp)
+static int mkdir_mondata_subdir_snc(struct kernfs_node *parent_kn,
+				    struct rdt_domain_hdr *hdr,
+				    struct rdt_resource *r, struct rdtgroup *prgrp)
 {
-	struct kernfs_node *kn, *ckn;
+	struct kernfs_node *ckn, *kn;
+	struct rdt_l3_mon_domain *d;
 	char name[32];
-	bool snc_mode;
-	int ret = 0;
 
-	lockdep_assert_held(&rdtgroup_mutex);
+	if (!domain_header_is_valid(hdr, RESCTRL_MON_DOMAIN, RDT_RESOURCE_L3))
+		return -EINVAL;
 
-	snc_mode = r->mon_scope == RESCTRL_L3_NODE;
-	sprintf(name, "mon_%s_%02d", r->name, snc_mode ? d->ci_id : d->hdr.id);
+	d = container_of(hdr, struct rdt_l3_mon_domain, hdr);
+	sprintf(name, "mon_%s_%02d", r->name, d->ci_id);
 	kn = kernfs_find_and_get(parent_kn, name);
 	if (kn) {
 		/*
@@ -3233,41 +3566,41 @@ static int mkdir_mondata_subdir(struct kernfs_node *parent_kn,
 		 */
 		kernfs_put(kn);
 	} else {
-		kn = kernfs_create_dir(parent_kn, name, parent_kn->mode, prgrp);
+		kn = _mkdir_mondata_subdir(parent_kn, name, NULL, r, prgrp, d->ci_id);
 		if (IS_ERR(kn))
 			return PTR_ERR(kn);
-
-		ret = rdtgroup_kn_set_ugid(kn);
-		if (ret)
-			goto out_destroy;
-		ret = mon_add_all_files(kn, d, r, prgrp, snc_mode);
-		if (ret)
-			goto out_destroy;
 	}
 
-	if (snc_mode) {
-		sprintf(name, "mon_sub_%s_%02d", r->name, d->hdr.id);
-		ckn = kernfs_create_dir(kn, name, parent_kn->mode, prgrp);
-		if (IS_ERR(ckn)) {
-			ret = -EINVAL;
-			goto out_destroy;
-		}
-
-		ret = rdtgroup_kn_set_ugid(ckn);
-		if (ret)
-			goto out_destroy;
-
-		ret = mon_add_all_files(ckn, d, r, prgrp, false);
-		if (ret)
-			goto out_destroy;
+	sprintf(name, "mon_sub_%s_%02d", r->name, hdr->id);
+	ckn = _mkdir_mondata_subdir(kn, name, hdr, r, prgrp, hdr->id);
+	if (IS_ERR(ckn)) {
+		kernfs_remove(kn);
+		return PTR_ERR(ckn);
 	}
 
 	kernfs_activate(kn);
 	return 0;
+}
 
-out_destroy:
-	kernfs_remove(kn);
-	return ret;
+static int mkdir_mondata_subdir(struct kernfs_node *parent_kn,
+				struct rdt_domain_hdr *hdr,
+				struct rdt_resource *r, struct rdtgroup *prgrp)
+{
+	struct kernfs_node *kn;
+	char name[32];
+
+	lockdep_assert_held(&rdtgroup_mutex);
+
+	if (r->rid == RDT_RESOURCE_L3 && r->mon_scope == RESCTRL_L3_NODE)
+		return mkdir_mondata_subdir_snc(parent_kn, hdr, r, prgrp);
+
+	sprintf(name, "mon_%s_%02d", r->name, hdr->id);
+	kn = _mkdir_mondata_subdir(parent_kn, name, hdr, r, prgrp, hdr->id);
+	if (IS_ERR(kn))
+		return PTR_ERR(kn);
+
+	kernfs_activate(kn);
+	return 0;
 }
 
 /*
@@ -3275,7 +3608,7 @@ out_destroy:
  * and "monitor" groups with given domain id.
  */
 static void mkdir_mondata_subdir_allrdtgrp(struct rdt_resource *r,
-					   struct rdt_mon_domain *d)
+					   struct rdt_domain_hdr *hdr)
 {
 	struct kernfs_node *parent_kn;
 	struct rdtgroup *prgrp, *crgrp;
@@ -3283,12 +3616,12 @@ static void mkdir_mondata_subdir_allrdtgrp(struct rdt_resource *r,
 
 	list_for_each_entry(prgrp, &rdt_all_groups, rdtgroup_list) {
 		parent_kn = prgrp->mon.mon_data_kn;
-		mkdir_mondata_subdir(parent_kn, d, r, prgrp);
+		mkdir_mondata_subdir(parent_kn, hdr, r, prgrp);
 
 		head = &prgrp->mon.crdtgrp_list;
 		list_for_each_entry(crgrp, head, mon.crdtgrp_list) {
 			parent_kn = crgrp->mon.mon_data_kn;
-			mkdir_mondata_subdir(parent_kn, d, r, crgrp);
+			mkdir_mondata_subdir(parent_kn, hdr, r, crgrp);
 		}
 	}
 }
@@ -3297,14 +3630,14 @@ static int mkdir_mondata_subdir_alldom(struct kernfs_node *parent_kn,
 				       struct rdt_resource *r,
 				       struct rdtgroup *prgrp)
 {
-	struct rdt_mon_domain *dom;
+	struct rdt_domain_hdr *hdr;
 	int ret;
 
 	/* Walking r->domains, ensure it can't race with cpuhp */
 	lockdep_assert_cpus_held();
 
-	list_for_each_entry(dom, &r->mon_domains, hdr.list) {
-		ret = mkdir_mondata_subdir(parent_kn, dom, r, prgrp);
+	list_for_each_entry_rcu(hdr, &r->mon_domains, list, lockdep_is_cpus_held()) {
+		ret = mkdir_mondata_subdir(parent_kn, hdr, r, prgrp);
 		if (ret)
 			return ret;
 	}
@@ -3378,16 +3711,19 @@ out_destroy:
  * resource group is initialized. The user can follow this with a
  * modification to the CBM if the default does not satisfy the
  * requirements.
+ *
+ * Return: A CBM that is valid for resource @r.
  */
 static u32 cbm_ensure_valid(u32 _val, struct rdt_resource *r)
 {
 	unsigned int cbm_len = r->cache.cbm_len;
 	unsigned long first_bit, zero_bit;
-	unsigned long val = _val;
+	unsigned long val;
 
-	if (!val)
-		return 0;
+	if (!_val || r->cache.arch_has_sparse_bitmasks)
+		return _val;
 
+	val = _val;
 	first_bit = find_first_bit(&val, cbm_len);
 	zero_bit = find_next_zero_bit(&val, cbm_len, first_bit);
 
@@ -3480,12 +3816,12 @@ static int __init_one_rdt_domain(struct rdt_ctrl_domain *d, struct resctrl_schem
  * If there are no more shareable bits available on any domain then
  * the entire allocation will fail.
  */
-static int rdtgroup_init_cat(struct resctrl_schema *s, u32 closid)
+int rdtgroup_init_cat(struct resctrl_schema *s, u32 closid)
 {
 	struct rdt_ctrl_domain *d;
 	int ret;
 
-	list_for_each_entry(d, &s->res->ctrl_domains, hdr.list) {
+	list_for_each_entry_rcu(d, &s->res->ctrl_domains, hdr.list, lockdep_is_cpus_held()) {
 		ret = __init_one_rdt_domain(d, s, closid);
 		if (ret < 0)
 			return ret;
@@ -3500,7 +3836,7 @@ static void rdtgroup_init_mba(struct rdt_resource *r, u32 closid)
 	struct resctrl_staged_config *cfg;
 	struct rdt_ctrl_domain *d;
 
-	list_for_each_entry(d, &r->ctrl_domains, hdr.list) {
+	list_for_each_entry_rcu(d, &r->ctrl_domains, hdr.list, lockdep_is_cpus_held()) {
 		if (is_mba_sc(r)) {
 			d->mbps_val[closid] = MBA_MAX_MBPS;
 			continue;
@@ -3614,8 +3950,6 @@ static int mkdir_rdt_prepare(struct kernfs_node *parent_kn,
 		goto out_unlock;
 	}
 
-	rdt_last_cmd_clear();
-
 	/*
 	 * Check that the parent directory for a monitor group is a "mon_groups"
 	 * directory.
@@ -3634,7 +3968,7 @@ static int mkdir_rdt_prepare(struct kernfs_node *parent_kn,
 	}
 
 	/* allocate the rdtgroup. */
-	rdtgrp = kzalloc(sizeof(*rdtgrp), GFP_KERNEL);
+	rdtgrp = kzalloc_obj(*rdtgrp);
 	if (!rdtgrp) {
 		ret = -ENOSPC;
 		rdt_last_cmd_puts("Kernel out of memory\n");
@@ -4139,6 +4473,7 @@ static int rdtgroup_setup_root(struct rdt_fs_context *ctx)
 
 	ctx->kfc.root = rdt_root;
 	rdtgroup_default.kn = kernfs_root_to_node(rdt_root);
+	rdtgroup_default.flags = 0;
 
 	return 0;
 }
@@ -4165,7 +4500,7 @@ static void rdtgroup_setup_default(void)
 	mutex_unlock(&rdtgroup_mutex);
 }
 
-static void domain_destroy_mon_state(struct rdt_mon_domain *d)
+static void domain_destroy_l3_mon_state(struct rdt_l3_mon_domain *d)
 {
 	int idx;
 
@@ -4179,6 +4514,29 @@ static void domain_destroy_mon_state(struct rdt_mon_domain *d)
 
 void resctrl_offline_ctrl_domain(struct rdt_resource *r, struct rdt_ctrl_domain *d)
 {
+	/*
+	 * mbm_handle_overflow() may dereference this ctrl domain via
+	 * update_mba_bw()->get_sc_ctrl_domain_from_cpu(). The architecture has
+	 * unlinked the domain from the RCU list and waited a grace period, so
+	 * no new worker iteration can find it; drain any worker that already
+	 * holds a pointer to it before the architecture frees the domain.
+	 *
+	 * Software controller is enabled/disabled on mount/unmount with
+	 * cpus_read_lock() held. Running here with cpus_write_lock() so
+	 * there are no concurrent changes to software controller status.
+	 */
+	if (r->rid == RDT_RESOURCE_MBA && is_mba_sc(r)) {
+		struct rdt_resource *l3 = resctrl_arch_get_resource(RDT_RESOURCE_L3);
+		struct rdt_l3_mon_domain *mon_d;
+
+		list_for_each_entry_rcu(mon_d, &l3->mon_domains, hdr.list, lockdep_is_cpus_held()) {
+			if (mon_d->hdr.id == d->hdr.id) {
+				cancel_delayed_work_sync(&mon_d->mbm_over);
+				break;
+			}
+		}
+	}
+
 	mutex_lock(&rdtgroup_mutex);
 
 	if (supports_mba_mbps() && r->rid == RDT_RESOURCE_MBA)
@@ -4187,8 +4545,28 @@ void resctrl_offline_ctrl_domain(struct rdt_resource *r, struct rdt_ctrl_domain 
 	mutex_unlock(&rdtgroup_mutex);
 }
 
-void resctrl_offline_mon_domain(struct rdt_resource *r, struct rdt_mon_domain *d)
+void resctrl_offline_mon_domain(struct rdt_resource *r, struct rdt_domain_hdr *hdr)
 {
+	struct rdt_l3_mon_domain *d;
+
+	/*
+	 * Called by architecture under CPU hotplug lock as it prepares to remove
+	 * the domain which is guaranteed to be accessible here.
+	 * The domain has been unlinked from the RCU list and a grace period
+	 * has elapsed, so no new worker can be scheduled. Drain any worker that
+	 * is in flight or pending before letting architecture proceed to free
+	 * the domain that has the workers' struct delayed_work embedded.
+	 * Do so before taking rdtgroup_mutex since the workers also acquire it.
+	 */
+	if (r->rid == RDT_RESOURCE_L3 &&
+	    domain_header_is_valid(hdr, RESCTRL_MON_DOMAIN, RDT_RESOURCE_L3)) {
+		d = container_of(hdr, struct rdt_l3_mon_domain, hdr);
+		if (resctrl_is_mbm_enabled())
+			cancel_delayed_work_sync(&d->mbm_over);
+		if (resctrl_is_mon_event_enabled(QOS_L3_OCCUP_EVENT_ID))
+			cancel_delayed_work_sync(&d->cqm_limbo);
+	}
+
 	mutex_lock(&rdtgroup_mutex);
 
 	/*
@@ -4196,10 +4574,15 @@ void resctrl_offline_mon_domain(struct rdt_resource *r, struct rdt_mon_domain *d
 	 * per domain monitor data directories.
 	 */
 	if (resctrl_mounted && resctrl_arch_mon_capable())
-		rmdir_mondata_subdir_allrdtgrp(r, d);
+		rmdir_mondata_subdir_allrdtgrp(r, hdr);
 
-	if (resctrl_is_mbm_enabled())
-		cancel_delayed_work(&d->mbm_over);
+	if (r->rid != RDT_RESOURCE_L3)
+		goto out_unlock;
+
+	if (!domain_header_is_valid(hdr, RESCTRL_MON_DOMAIN, RDT_RESOURCE_L3))
+		goto out_unlock;
+
+	d = container_of(hdr, struct rdt_l3_mon_domain, hdr);
 	if (resctrl_is_mon_event_enabled(QOS_L3_OCCUP_EVENT_ID) && has_busy_rmid(d)) {
 		/*
 		 * When a package is going down, forcefully
@@ -4210,16 +4593,15 @@ void resctrl_offline_mon_domain(struct rdt_resource *r, struct rdt_mon_domain *d
 		 * package never comes back.
 		 */
 		__check_limbo(d, true);
-		cancel_delayed_work(&d->cqm_limbo);
 	}
 
-	domain_destroy_mon_state(d);
-
+	domain_destroy_l3_mon_state(d);
+out_unlock:
 	mutex_unlock(&rdtgroup_mutex);
 }
 
 /**
- * domain_setup_mon_state() -  Initialise domain monitoring structures.
+ * domain_setup_l3_mon_state() -  Initialise domain monitoring structures.
  * @r:	The resource for the newly online domain.
  * @d:	The newly online domain.
  *
@@ -4227,11 +4609,17 @@ void resctrl_offline_mon_domain(struct rdt_resource *r, struct rdt_mon_domain *d
  * Called when the first CPU of a domain comes online, regardless of whether
  * the filesystem is mounted.
  * During boot this may be called before global allocations have been made by
- * resctrl_mon_resource_init().
+ * resctrl_l3_mon_resource_init().
  *
- * Returns 0 for success, or -ENOMEM.
+ * Called during CPU online that may run as soon as CPU online callbacks
+ * are set up during resctrl initialization. The number of supported RMIDs
+ * may be reduced if additional mon_capable resources are enumerated
+ * at mount time. This means the rdt_l3_mon_domain::mbm_states[] and
+ * rdt_l3_mon_domain::rmid_busy_llc allocations may be larger than needed.
+ *
+ * Return: 0 for success, or -ENOMEM.
  */
-static int domain_setup_mon_state(struct rdt_resource *r, struct rdt_mon_domain *d)
+static int domain_setup_l3_mon_state(struct rdt_resource *r, struct rdt_l3_mon_domain *d)
 {
 	u32 idx_limit = resctrl_arch_system_num_rmid_idx();
 	size_t tsize = sizeof(*d->mbm_states[0]);
@@ -4287,13 +4675,21 @@ int resctrl_online_ctrl_domain(struct rdt_resource *r, struct rdt_ctrl_domain *d
 	return err;
 }
 
-int resctrl_online_mon_domain(struct rdt_resource *r, struct rdt_mon_domain *d)
+int resctrl_online_mon_domain(struct rdt_resource *r, struct rdt_domain_hdr *hdr)
 {
-	int err;
+	struct rdt_l3_mon_domain *d;
+	int err = -EINVAL;
 
 	mutex_lock(&rdtgroup_mutex);
 
-	err = domain_setup_mon_state(r, d);
+	if (r->rid != RDT_RESOURCE_L3)
+		goto mkdir;
+
+	if (!domain_header_is_valid(hdr, RESCTRL_MON_DOMAIN, RDT_RESOURCE_L3))
+		goto out_unlock;
+
+	d = container_of(hdr, struct rdt_l3_mon_domain, hdr);
+	err = domain_setup_l3_mon_state(r, d);
 	if (err)
 		goto out_unlock;
 
@@ -4306,6 +4702,8 @@ int resctrl_online_mon_domain(struct rdt_resource *r, struct rdt_mon_domain *d)
 	if (resctrl_is_mon_event_enabled(QOS_L3_OCCUP_EVENT_ID))
 		INIT_DELAYED_WORK(&d->cqm_limbo, cqm_handle_limbo);
 
+mkdir:
+	err = 0;
 	/*
 	 * If the filesystem is not mounted then only the default resource group
 	 * exists. Creation of its directories is deferred until mount time
@@ -4313,7 +4711,7 @@ int resctrl_online_mon_domain(struct rdt_resource *r, struct rdt_mon_domain *d)
 	 * If resctrl is mounted, add per domain monitor data directories.
 	 */
 	if (resctrl_mounted && resctrl_arch_mon_capable())
-		mkdir_mondata_subdir_allrdtgrp(r, d);
+		mkdir_mondata_subdir_allrdtgrp(r, hdr);
 
 out_unlock:
 	mutex_unlock(&rdtgroup_mutex);
@@ -4339,14 +4737,14 @@ static void clear_childcpus(struct rdtgroup *r, unsigned int cpu)
 	}
 }
 
-static struct rdt_mon_domain *get_mon_domain_from_cpu(int cpu,
-						      struct rdt_resource *r)
+static struct rdt_l3_mon_domain *get_mon_domain_from_cpu(int cpu,
+							 struct rdt_resource *r)
 {
-	struct rdt_mon_domain *d;
+	struct rdt_l3_mon_domain *d;
 
 	lockdep_assert_cpus_held();
 
-	list_for_each_entry(d, &r->mon_domains, hdr.list) {
+	list_for_each_entry_rcu(d, &r->mon_domains, hdr.list, lockdep_is_cpus_held()) {
 		/* Find the domain that contains this CPU */
 		if (cpumask_test_cpu(cpu, &d->hdr.cpu_mask))
 			return d;
@@ -4358,7 +4756,7 @@ static struct rdt_mon_domain *get_mon_domain_from_cpu(int cpu,
 void resctrl_offline_cpu(unsigned int cpu)
 {
 	struct rdt_resource *l3 = resctrl_arch_get_resource(RDT_RESOURCE_L3);
-	struct rdt_mon_domain *d;
+	struct rdt_l3_mon_domain *d;
 	struct rdtgroup *rdtgrp;
 
 	mutex_lock(&rdtgroup_mutex);
@@ -4375,12 +4773,16 @@ void resctrl_offline_cpu(unsigned int cpu)
 	d = get_mon_domain_from_cpu(cpu, l3);
 	if (d) {
 		if (resctrl_is_mbm_enabled() && cpu == d->mbm_work_cpu) {
-			cancel_delayed_work(&d->mbm_over);
+			mutex_unlock(&rdtgroup_mutex);
+			cancel_delayed_work_sync(&d->mbm_over);
+			mutex_lock(&rdtgroup_mutex);
 			mbm_setup_overflow_handler(d, 0, cpu);
 		}
 		if (resctrl_is_mon_event_enabled(QOS_L3_OCCUP_EVENT_ID) &&
 		    cpu == d->cqm_work_cpu && has_busy_rmid(d)) {
-			cancel_delayed_work(&d->cqm_limbo);
+			mutex_unlock(&rdtgroup_mutex);
+			cancel_delayed_work_sync(&d->cqm_limbo);
+			mutex_lock(&rdtgroup_mutex);
 			cqm_setup_limbo_handler(d, 0, cpu);
 		}
 	}
@@ -4408,13 +4810,15 @@ int resctrl_init(void)
 
 	thread_throttle_mode_init();
 
-	ret = resctrl_mon_resource_init();
+	io_alloc_init();
+
+	ret = resctrl_l3_mon_resource_init();
 	if (ret)
 		return ret;
 
 	ret = sysfs_create_mount_point(fs_kobj, "resctrl");
 	if (ret) {
-		resctrl_mon_resource_exit();
+		resctrl_l3_mon_resource_exit();
 		return ret;
 	}
 
@@ -4449,7 +4853,7 @@ int resctrl_init(void)
 
 cleanup_mountpoint:
 	sysfs_remove_mount_point(fs_kobj, "resctrl");
-	resctrl_mon_resource_exit();
+	resctrl_l3_mon_resource_exit();
 
 	return ret;
 }
@@ -4485,7 +4889,7 @@ static bool resctrl_online_domains_exist(void)
  * When called by the architecture code, all CPUs and resctrl domains must be
  * offline. This ensures the limbo and overflow handlers are not scheduled to
  * run, meaning the data structures they access can be freed by
- * resctrl_mon_resource_exit().
+ * resctrl_l3_mon_resource_exit().
  *
  * After resctrl_exit() returns, the architecture code should return an
  * error from all resctrl_arch_ functions that can do this.
@@ -4512,5 +4916,6 @@ void resctrl_exit(void)
 	 * it can be used to umount resctrl.
 	 */
 
-	resctrl_mon_resource_exit();
+	resctrl_l3_mon_resource_exit();
+	free_rmid_lru_list();
 }

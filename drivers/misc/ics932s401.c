@@ -95,7 +95,7 @@ static int ics932s401_detect(struct i2c_client *client,
 static void ics932s401_remove(struct i2c_client *client);
 
 static const struct i2c_device_id ics932s401_id[] = {
-	{ "ics932s401" },
+	{ .name = "ics932s401" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, ics932s401_id);
@@ -433,7 +433,7 @@ static int ics932s401_probe(struct i2c_client *client)
 	struct ics932s401_data *data;
 	int err;
 
-	data = kzalloc(sizeof(struct ics932s401_data), GFP_KERNEL);
+	data = kzalloc_obj(struct ics932s401_data);
 	if (!data) {
 		err = -ENOMEM;
 		goto exit;

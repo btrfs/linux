@@ -10,6 +10,7 @@
 
 #include <asm/apic.h>
 #include <asm/cpu.h>
+#include <asm/cpuid/api.h>
 #include <asm/smp.h>
 #include <asm/numa.h>
 #include <asm/cacheinfo.h>
@@ -124,11 +125,12 @@ static void bsp_init_hygon(struct cpuinfo_x86 *c)
 
 static void early_init_hygon(struct cpuinfo_x86 *c)
 {
-	u32 dummy;
+	u64 val;
 
 	set_cpu_cap(c, X86_FEATURE_K8);
 
-	rdmsr_safe(MSR_AMD64_PATCH_LEVEL, &c->microcode, &dummy);
+	rdmsrq_safe(MSR_AMD64_PATCH_LEVEL, &val);
+	c->microcode = (u32)val;
 
 	/*
 	 * c->x86_power is 8000_0007 edx. Bit 8 is TSC runs at constant rate
@@ -173,12 +175,6 @@ static void init_hygon(struct cpuinfo_x86 *c)
 	u64 vm_cr;
 
 	early_init_hygon(c);
-
-	/*
-	 * Bit 31 in normal CPUID used for nonstandard 3DNow ID;
-	 * 3DNow is IDd by bit 31 in extended CPUID (1*32+31) anyway
-	 */
-	clear_cpu_cap(c, 0*32+31);
 
 	set_cpu_cap(c, X86_FEATURE_REP_GOOD);
 

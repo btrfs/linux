@@ -28,6 +28,7 @@
 #include <linux/string.h> /* memset */
 #include <linux/capability.h>
 #include <linux/errno.h>
+#include <linux/filelock.h>
 #include <linux/pagemap.h>
 #include <linux/uio.h>
 
@@ -132,7 +133,7 @@ long udf_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 	int result;
 
 	if (file_permission(filp, MAY_READ) != 0) {
-		udf_debug("no permission to access inode %lu\n", inode->i_ino);
+		udf_debug("no permission to access inode %llu\n", inode->i_ino);
 		return -EPERM;
 	}
 
@@ -204,10 +205,11 @@ const struct file_operations udf_file_operations = {
 	.mmap			= udf_file_mmap,
 	.write_iter		= udf_file_write_iter,
 	.release		= udf_release_file,
-	.fsync			= generic_file_fsync,
+	.fsync			= simple_fsync,
 	.splice_read		= filemap_splice_read,
 	.splice_write		= iter_file_splice_write,
 	.llseek			= generic_file_llseek,
+	.setlease		= generic_setlease,
 };
 
 static int udf_setattr(struct mnt_idmap *idmap, struct dentry *dentry,
@@ -244,6 +246,8 @@ static int udf_setattr(struct mnt_idmap *idmap, struct dentry *dentry,
 
 	setattr_copy(&nop_mnt_idmap, inode, attr);
 	mark_inode_dirty(inode);
+	if (IS_SYNC(inode))
+		sync_inode_metadata(inode, 1);
 	return 0;
 }
 

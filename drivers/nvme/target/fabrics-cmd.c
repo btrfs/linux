@@ -280,7 +280,7 @@ static void nvmet_execute_admin_connect(struct nvmet_req *req)
 	if (!nvmet_check_transfer_len(req, sizeof(struct nvmf_connect_data)))
 		return;
 
-	d = kmalloc(sizeof(*d), GFP_KERNEL);
+	d = kmalloc_obj(*d);
 	if (!d) {
 		args.status = NVME_SC_INTERNAL;
 		goto complete;
@@ -344,7 +344,7 @@ static void nvmet_execute_io_connect(struct nvmet_req *req)
 	if (!nvmet_check_transfer_len(req, sizeof(struct nvmf_connect_data)))
 		return;
 
-	d = kmalloc(sizeof(*d), GFP_KERNEL);
+	d = kmalloc_obj(*d);
 	if (!d) {
 		status = NVME_SC_INTERNAL;
 		goto complete;
@@ -370,7 +370,7 @@ static void nvmet_execute_io_connect(struct nvmet_req *req)
 		goto out;
 	}
 
-	if (unlikely(qid > ctrl->subsys->max_qid)) {
+	if (unlikely(qid > ctrl->max_qid)) {
 		pr_warn("invalid queue id (%d)\n", qid);
 		status = NVME_SC_CONNECT_INVALID_PARAM | NVME_STATUS_DNR;
 		req->cqe->result.u32 = IPO_IATTR_CONNECT_SQE(qid);

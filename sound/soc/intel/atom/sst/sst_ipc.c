@@ -11,6 +11,7 @@
  *
  * ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
  */
+#include <linux/cleanup.h>
 #include <linux/pci.h>
 #include <linux/firmware.h>
 #include <linux/sched.h>
@@ -31,7 +32,7 @@ struct sst_block *sst_create_block(struct intel_sst_drv *ctx,
 	struct sst_block *msg;
 
 	dev_dbg(ctx->dev, "Enter\n");
-	msg = kzalloc(sizeof(*msg), GFP_KERNEL);
+	msg = kzalloc_obj(*msg);
 	if (!msg)
 		return NULL;
 	msg->condition = false;
@@ -180,9 +181,8 @@ void intel_sst_clear_intr_mrfld(struct intel_sst_drv *sst_drv_ctx)
 	union interrupt_reg_mrfld isr;
 	union interrupt_reg_mrfld imr;
 	union ipc_header_mrfld clear_ipc;
-	unsigned long irq_flags;
 
-	spin_lock_irqsave(&sst_drv_ctx->ipc_spin_lock, irq_flags);
+	guard(spinlock_irqsave)(&sst_drv_ctx->ipc_spin_lock);
 	imr.full = sst_shim_read64(sst_drv_ctx->shim, SST_IMRX);
 	isr.full = sst_shim_read64(sst_drv_ctx->shim, SST_ISRX);
 
@@ -200,7 +200,6 @@ void intel_sst_clear_intr_mrfld(struct intel_sst_drv *sst_drv_ctx)
 	/* un mask busy interrupt */
 	imr.part.busy_interrupt = 0;
 	sst_shim_write64(sst_drv_ctx->shim, SST_IMRX, imr.full);
-	spin_unlock_irqrestore(&sst_drv_ctx->ipc_spin_lock, irq_flags);
 }
 
 

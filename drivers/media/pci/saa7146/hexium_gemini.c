@@ -250,7 +250,7 @@ static int hexium_attach(struct saa7146_dev *dev, struct saa7146_pci_extension_d
 
 	DEB_EE("\n");
 
-	hexium = kzalloc(sizeof(*hexium), GFP_KERNEL);
+	hexium = kzalloc_obj(*hexium);
 	if (!hexium)
 		return -ENOMEM;
 
@@ -361,22 +361,14 @@ static struct saa7146_pci_extension_data hexium_gemini_dual_4bnc = {
 
 static const struct pci_device_id pci_tbl[] = {
 	{
-	 .vendor = PCI_VENDOR_ID_PHILIPS,
-	 .device = PCI_DEVICE_ID_PHILIPS_SAA7146,
-	 .subvendor = 0x17c8,
-	 .subdevice = 0x2401,
-	 .driver_data = (unsigned long) &hexium_gemini_4bnc,
-	 },
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7146, 0x17c8, 0x2401),
+		.driver_data = (unsigned long)&hexium_gemini_4bnc,
+	},
 	{
-	 .vendor = PCI_VENDOR_ID_PHILIPS,
-	 .device = PCI_DEVICE_ID_PHILIPS_SAA7146,
-	 .subvendor = 0x17c8,
-	 .subdevice = 0x2402,
-	 .driver_data = (unsigned long) &hexium_gemini_dual_4bnc,
-	 },
-	{
-	 .vendor = 0,
-	 }
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7146, 0x17c8, 0x2402),
+		.driver_data = (unsigned long)&hexium_gemini_dual_4bnc,
+	},
+	{ }
 };
 
 MODULE_DEVICE_TABLE(pci, pci_tbl);

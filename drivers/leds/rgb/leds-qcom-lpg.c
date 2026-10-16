@@ -2,7 +2,7 @@
 /*
  * Copyright (c) 2017-2022 Linaro Ltd
  * Copyright (c) 2010-2012, The Linux Foundation. All rights reserved.
- * Copyright (c) 2023-2024, Qualcomm Innovation Center, Inc. All rights reserved.
+ * Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
  */
 #include <linux/bits.h>
 #include <linux/bitfield.h>
@@ -80,57 +80,7 @@
 #define SDAM_PAUSE_HI_MULTIPLIER_OFFSET	0x8
 #define SDAM_PAUSE_LO_MULTIPLIER_OFFSET	0x9
 
-struct lpg_channel;
 struct lpg_data;
-
-/**
- * struct lpg - LPG device context
- * @dev:	pointer to LPG device
- * @map:	regmap for register access
- * @lock:	used to synchronize LED and pwm callback requests
- * @pwm:	PWM-chip object, if operating in PWM mode
- * @data:	reference to version specific data
- * @lut_base:	base address of the LUT block (optional)
- * @lut_size:	number of entries in the LUT block
- * @lut_bitmap:	allocation bitmap for LUT entries
- * @pbs_dev:	PBS device
- * @lpg_chan_sdam:	LPG SDAM peripheral device
- * @lut_sdam:	LUT SDAM peripheral device
- * @pbs_en_bitmap:	bitmap for tracking PBS triggers
- * @triled_base: base address of the TRILED block (optional)
- * @triled_src:	power-source for the TRILED
- * @triled_has_atc_ctl:	true if there is TRI_LED_ATC_CTL register
- * @triled_has_src_sel:	true if there is TRI_LED_SRC_SEL register
- * @channels:	list of PWM channels
- * @num_channels: number of @channels
- */
-struct lpg {
-	struct device *dev;
-	struct regmap *map;
-
-	struct mutex lock;
-
-	struct pwm_chip *pwm;
-
-	const struct lpg_data *data;
-
-	u32 lut_base;
-	u32 lut_size;
-	unsigned long *lut_bitmap;
-
-	struct pbs_dev *pbs_dev;
-	struct nvmem_device *lpg_chan_sdam;
-	struct nvmem_device *lut_sdam;
-	unsigned long pbs_en_bitmap;
-
-	u32 triled_base;
-	u32 triled_src;
-	bool triled_has_atc_ctl;
-	bool triled_has_src_sel;
-
-	struct lpg_channel *channels;
-	unsigned int num_channels;
-};
 
 /**
  * struct lpg_channel - per channel data
@@ -203,8 +153,8 @@ struct lpg_channel {
  * @lpg:		lpg context reference
  * @cdev:		LED class device
  * @mcdev:		Multicolor LED class device
- * @num_channels:	number of @channels
  * @channels:		list of channels associated with the LED
+ * @num_channels:	number of @channels
  */
 struct lpg_led {
 	struct lpg *lpg;
@@ -214,6 +164,55 @@ struct lpg_led {
 
 	unsigned int num_channels;
 	struct lpg_channel *channels[] __counted_by(num_channels);
+};
+
+/**
+ * struct lpg - LPG device context
+ * @dev:	pointer to LPG device
+ * @map:	regmap for register access
+ * @lock:	used to synchronize LED and pwm callback requests
+ * @pwm:	PWM-chip object, if operating in PWM mode
+ * @data:	reference to version specific data
+ * @lut_base:	base address of the LUT block (optional)
+ * @lut_size:	number of entries in the LUT block
+ * @lut_bitmap:	allocation bitmap for LUT entries
+ * @pbs_dev:	PBS device
+ * @lpg_chan_sdam:	LPG SDAM peripheral device
+ * @lut_sdam:	LUT SDAM peripheral device
+ * @pbs_en_bitmap:	bitmap for tracking PBS triggers
+ * @triled_base: base address of the TRILED block (optional)
+ * @triled_src:	power-source for the TRILED
+ * @triled_has_atc_ctl:	true if there is TRI_LED_ATC_CTL register
+ * @triled_has_src_sel:	true if there is TRI_LED_SRC_SEL register
+ * @num_channels: number of @channels
+ * @channels:	list of PWM channels
+ */
+struct lpg {
+	struct device *dev;
+	struct regmap *map;
+
+	struct mutex lock;
+
+	struct pwm_chip *pwm;
+
+	const struct lpg_data *data;
+
+	u32 lut_base;
+	u32 lut_size;
+	unsigned long *lut_bitmap;
+
+	struct pbs_dev *pbs_dev;
+	struct nvmem_device *lpg_chan_sdam;
+	struct nvmem_device *lut_sdam;
+	unsigned long pbs_en_bitmap;
+
+	u32 triled_base;
+	u32 triled_src;
+	bool triled_has_atc_ctl;
+	bool triled_has_src_sel;
+
+	unsigned int num_channels;
+	struct lpg_channel channels[] __counted_by(num_channels);
 };
 
 /**
@@ -369,7 +368,7 @@ static int lpg_lut_store(struct lpg *lpg, struct led_pattern *pattern,
 {
 	unsigned int idx;
 	u16 val;
-	int i;
+	int i, ret;
 
 	idx = bitmap_find_next_zero_area(lpg->lut_bitmap, lpg->lut_size,
 					 0, len, 0);
@@ -379,8 +378,10 @@ static int lpg_lut_store(struct lpg *lpg, struct led_pattern *pattern,
 	for (i = 0; i < len; i++) {
 		val = pattern[i].brightness;
 
-		regmap_bulk_write(lpg->map, lpg->lut_base + LPG_LUT_REG(idx + i),
-				  &val, sizeof(val));
+		ret = regmap_bulk_write(lpg->map, lpg->lut_base + LPG_LUT_REG(idx + i),
+					&val, sizeof(val));
+		if (ret)
+			return ret;
 	}
 
 	bitmap_set(lpg->lut_bitmap, idx, len);
@@ -994,7 +995,7 @@ static int lpg_pattern_set(struct lpg_led *led, struct led_pattern *led_pattern,
 	if (len % 2)
 		return -EINVAL;
 
-	pattern = kcalloc(len / 2, sizeof(*pattern), GFP_KERNEL);
+	pattern = kzalloc_objs(*pattern, len / 2);
 	if (!pattern)
 		return -ENOMEM;
 
@@ -1247,8 +1248,6 @@ static int lpg_pwm_apply(struct pwm_chip *chip, struct pwm_device *pwm,
 
 	lpg_apply(chan);
 
-	triled_set(lpg, chan->triled_mask, chan->enabled ? chan->triled_mask : 0);
-
 out_unlock:
 	mutex_unlock(&lpg->lock);
 
@@ -1273,7 +1272,12 @@ static int lpg_pwm_get_state(struct pwm_chip *chip, struct pwm_device *pwm,
 		return ret;
 
 	if (chan->subtype == LPG_SUBTYPE_HI_RES_PWM) {
-		refclk = lpg_clk_rates_hi_res[FIELD_GET(PWM_CLK_SELECT_HI_RES_MASK, val)];
+		unsigned int clk_idx = FIELD_GET(PWM_CLK_SELECT_HI_RES_MASK, val);
+
+		if (clk_idx >= ARRAY_SIZE(lpg_clk_rates_hi_res))
+			return -EINVAL;
+
+		refclk = lpg_clk_rates_hi_res[clk_idx];
 		resolution = lpg_pwm_resolution_hi_res[FIELD_GET(PWM_SIZE_HI_RES_MASK, val)];
 	} else {
 		refclk = lpg_clk_rates[FIELD_GET(PWM_CLK_SELECT_MASK, val)];
@@ -1382,7 +1386,7 @@ static int lpg_add_led(struct lpg *lpg, struct device_node *np)
 		return dev_err_probe(lpg->dev, ret,
 			      "failed to parse \"color\" of %pOF\n", np);
 
-	if (color == LED_COLOR_ID_RGB)
+	if (color == LED_COLOR_ID_RGB || color == LED_COLOR_ID_MULTI)
 		num_channels = of_get_available_child_count(np);
 	else
 		num_channels = 1;
@@ -1394,7 +1398,7 @@ static int lpg_add_led(struct lpg *lpg, struct device_node *np)
 	led->lpg = lpg;
 	led->num_channels = num_channels;
 
-	if (color == LED_COLOR_ID_RGB) {
+	if (color == LED_COLOR_ID_RGB || color == LED_COLOR_ID_MULTI) {
 		info = devm_kcalloc(lpg->dev, num_channels, sizeof(*info), GFP_KERNEL);
 		if (!info)
 			return -ENOMEM;
@@ -1454,7 +1458,7 @@ static int lpg_add_led(struct lpg *lpg, struct device_node *np)
 
 	init_data.fwnode = of_fwnode_handle(np);
 
-	if (color == LED_COLOR_ID_RGB)
+	if (color == LED_COLOR_ID_RGB || color == LED_COLOR_ID_MULTI)
 		ret = devm_led_classdev_multicolor_register_ext(lpg->dev, &led->mcdev, &init_data);
 	else
 		ret = devm_led_classdev_register_ext(lpg->dev, &led->cdev, &init_data);
@@ -1469,12 +1473,6 @@ static int lpg_init_channels(struct lpg *lpg)
 	const struct lpg_data *data = lpg->data;
 	struct lpg_channel *chan;
 	int i;
-
-	lpg->num_channels = data->num_channels;
-	lpg->channels = devm_kcalloc(lpg->dev, data->num_channels,
-				     sizeof(struct lpg_channel), GFP_KERNEL);
-	if (!lpg->channels)
-		return -ENOMEM;
 
 	for (i = 0; i < data->num_channels; i++) {
 		chan = &lpg->channels[i];
@@ -1598,18 +1596,21 @@ static int lpg_init_sdam(struct lpg *lpg)
 
 static int lpg_probe(struct platform_device *pdev)
 {
+	const struct lpg_data *data;
 	struct lpg *lpg;
 	int ret;
 	int i;
 
-	lpg = devm_kzalloc(&pdev->dev, sizeof(*lpg), GFP_KERNEL);
+	data = of_device_get_match_data(&pdev->dev);
+	if (!data)
+		return -EINVAL;
+
+	lpg = devm_kzalloc(&pdev->dev, struct_size(lpg, channels, data->num_channels), GFP_KERNEL);
 	if (!lpg)
 		return -ENOMEM;
 
-	lpg->data = of_device_get_match_data(&pdev->dev);
-	if (!lpg->data)
-		return -EINVAL;
-
+	lpg->num_channels = data->num_channels;
+	lpg->data = data;
 	lpg->dev = &pdev->dev;
 	mutex_init(&lpg->lock);
 

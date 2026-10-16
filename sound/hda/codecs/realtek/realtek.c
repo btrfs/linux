@@ -99,15 +99,6 @@ void alc_setup_gpio(struct hda_codec *codec, unsigned int mask)
 }
 EXPORT_SYMBOL_NS_GPL(alc_setup_gpio, "SND_HDA_CODEC_REALTEK");
 
-void alc_write_gpio_data(struct hda_codec *codec)
-{
-	struct alc_spec *spec = codec->spec;
-
-	snd_hda_codec_write(codec, 0x01, 0, AC_VERB_SET_GPIO_DATA,
-			    spec->gpio_data);
-}
-EXPORT_SYMBOL_NS_GPL(alc_write_gpio_data, "SND_HDA_CODEC_REALTEK");
-
 void alc_update_gpio_data(struct hda_codec *codec, unsigned int mask,
 			  bool on)
 {
@@ -119,26 +110,22 @@ void alc_update_gpio_data(struct hda_codec *codec, unsigned int mask,
 	else
 		spec->gpio_data &= ~mask;
 	if (oldval != spec->gpio_data)
-		alc_write_gpio_data(codec);
+		snd_hda_codec_write(codec, 0x01, 0, AC_VERB_SET_GPIO_DATA,
+				    spec->gpio_data);
 }
 EXPORT_SYMBOL_NS_GPL(alc_update_gpio_data, "SND_HDA_CODEC_REALTEK");
 
-void alc_write_gpio(struct hda_codec *codec)
+static void alc_write_gpio(struct hda_codec *codec)
 {
 	struct alc_spec *spec = codec->spec;
 
 	if (!spec->gpio_mask)
 		return;
 
-	snd_hda_codec_write(codec, codec->core.afg, 0,
-			    AC_VERB_SET_GPIO_MASK, spec->gpio_mask);
-	snd_hda_codec_write(codec, codec->core.afg, 0,
-			    AC_VERB_SET_GPIO_DIRECTION, spec->gpio_dir);
-	if (spec->gpio_write_delay)
-		msleep(1);
-	alc_write_gpio_data(codec);
+	snd_hda_codec_set_gpio(codec, spec->gpio_mask, spec->gpio_dir,
+			       spec->gpio_data,
+			       spec->gpio_write_delay ? 1 : 0);
 }
-EXPORT_SYMBOL_NS_GPL(alc_write_gpio, "SND_HDA_CODEC_REALTEK");
 
 void alc_fixup_gpio(struct hda_codec *codec, int action, unsigned int mask)
 {
@@ -215,12 +202,13 @@ void alc_update_knob_master(struct hda_codec *codec,
 {
 	unsigned int val;
 	struct snd_kcontrol *kctl;
-	struct snd_ctl_elem_value *uctl __free(kfree) = NULL;
 
 	kctl = snd_hda_find_mixer_ctl(codec, "Master Playback Volume");
 	if (!kctl)
 		return;
-	uctl = kzalloc(sizeof(*uctl), GFP_KERNEL);
+
+	struct snd_ctl_elem_value *uctl __free(kfree) =
+		kzalloc_obj(*uctl);
 	if (!uctl)
 		return;
 	val = snd_hda_codec_read(codec, jack->nid, 0,
@@ -410,9 +398,8 @@ void alc_headset_mic_no_shutup(struct hda_codec *codec)
 		return;
 
 	snd_array_for_each(&codec->init_pins, i, pin) {
-		/* use read here for syncing after issuing each verb */
 		if (pin->nid != mic_pin)
-			snd_hda_codec_read(codec, pin->nid, 0,
+			snd_hda_codec_write_sync(codec, pin->nid, 0,
 					AC_VERB_SET_PIN_WIDGET_CONTROL, 0);
 	}
 
@@ -1027,7 +1014,7 @@ EXPORT_SYMBOL_NS_GPL(alc_parse_auto_config, "SND_HDA_CODEC_REALTEK");
 /* common preparation job for alc_spec */
 int alc_alloc_spec(struct hda_codec *codec, hda_nid_t mixer_nid)
 {
-	struct alc_spec *spec = kzalloc(sizeof(*spec), GFP_KERNEL);
+	struct alc_spec *spec = kzalloc_obj(*spec);
 	int err;
 
 	if (!spec)
@@ -1305,6 +1292,7 @@ static void alc_headset_mode_unplugged(struct hda_codec *codec)
 	}
 
 	switch (codec->core.vendor_id) {
+	case 0x10ec0235:
 	case 0x10ec0255:
 		alc_process_coef_fw(codec, coef0255);
 		break;
@@ -1420,6 +1408,7 @@ static void alc_headset_mode_mic_in(struct hda_codec *codec, hda_nid_t hp_pin,
 	};
 
 	switch (codec->core.vendor_id) {
+	case 0x10ec0235:
 	case 0x10ec0255:
 		alc_write_coef_idx(codec, 0x45, 0xc489);
 		snd_hda_set_pin_ctl_cache(codec, hp_pin, 0);
@@ -1575,6 +1564,7 @@ static void alc_headset_mode_default(struct hda_codec *codec)
 		alc_process_coef_fw(codec, coef0225);
 		alc_hp_enable_unmute(codec, 75);
 		break;
+	case 0x10ec0235:
 	case 0x10ec0255:
 		alc_process_coef_fw(codec, coef0255);
 		break;
@@ -1676,6 +1666,7 @@ static void alc_headset_mode_ctia(struct hda_codec *codec)
 	};
 
 	switch (codec->core.vendor_id) {
+	case 0x10ec0235:
 	case 0x10ec0255:
 		alc_process_coef_fw(codec, coef0255);
 		break;
@@ -1793,6 +1784,7 @@ static void alc_headset_mode_omtp(struct hda_codec *codec)
 	};
 
 	switch (codec->core.vendor_id) {
+	case 0x10ec0235:
 	case 0x10ec0255:
 		alc_process_coef_fw(codec, coef0255);
 		break;
@@ -1894,6 +1886,7 @@ static void alc_determine_headset_type(struct hda_codec *codec)
 	}
 
 	switch (codec->core.vendor_id) {
+	case 0x10ec0235:
 	case 0x10ec0255:
 		alc_process_coef_fw(codec, coef0255);
 		msleep(300);
@@ -2163,8 +2156,7 @@ void alc_fixup_headset_mode_no_hp_mic(struct hda_codec *codec,
 	if (action == HDA_FIXUP_ACT_PRE_PROBE) {
 		struct alc_spec *spec = codec->spec;
 		spec->parse_flags |= HDA_PINCFG_HEADSET_MIC;
-	}
-	else
+	} else
 		alc_fixup_headset_mode(codec, fix, action);
 }
 EXPORT_SYMBOL_NS_GPL(alc_fixup_headset_mode_no_hp_mic, "SND_HDA_CODEC_REALTEK");

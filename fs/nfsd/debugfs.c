@@ -44,6 +44,7 @@ DEFINE_DEBUGFS_ATTRIBUTE(nfsd_dsr_fops, nfsd_dsr_get, nfsd_dsr_set, "%llu\n");
  * Contents:
  *   %0: NFS READ will use buffered IO
  *   %1: NFS READ will use dontcache (buffered IO w/ dropbehind)
+ *   %2: NFS READ will use direct IO
  *
  * This setting takes immediate effect for all NFS versions,
  * all exports, and in all NFSD net namespaces.
@@ -64,6 +65,7 @@ static int nfsd_io_cache_read_set(void *data, u64 val)
 		nfsd_io_cache_read = NFSD_IO_BUFFERED;
 		break;
 	case NFSD_IO_DONTCACHE:
+	case NFSD_IO_DIRECT:
 		/*
 		 * Must disable splice_read when enabling
 		 * NFSD_IO_DONTCACHE.
@@ -106,6 +108,7 @@ static int nfsd_io_cache_write_set(void *data, u64 val)
 	switch (val) {
 	case NFSD_IO_BUFFERED:
 	case NFSD_IO_DONTCACHE:
+	case NFSD_IO_DIRECT:
 		nfsd_io_cache_write = val;
 		break;
 	default:
@@ -137,4 +140,8 @@ void nfsd_debugfs_init(void)
 
 	debugfs_create_file("io_cache_write", 0644, nfsd_top_dir, NULL,
 			    &nfsd_io_cache_write_fops);
+#ifdef CONFIG_NFSD_V4
+	debugfs_create_bool("delegated_timestamps", 0644, nfsd_top_dir,
+			    &nfsd_delegts_enabled);
+#endif
 }

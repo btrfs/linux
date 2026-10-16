@@ -223,7 +223,7 @@ nouveau_svmm_join(struct nouveau_svmm *svmm, u64 inst)
 {
 	struct nouveau_ivmm *ivmm;
 	if (svmm) {
-		if (!(ivmm = kmalloc(sizeof(*ivmm), GFP_KERNEL)))
+		if (!(ivmm = kmalloc_obj(*ivmm)))
 			return -ENOMEM;
 		ivmm->svmm = svmm;
 		ivmm->inst = inst;
@@ -326,7 +326,7 @@ nouveau_svmm_init(struct drm_device *dev, void *data,
 		return -ENOSYS;
 
 	/* Allocate tracking for SVM-enabled VMM. */
-	if (!(svmm = kzalloc(sizeof(*svmm), GFP_KERNEL)))
+	if (!(svmm = kzalloc_obj(*svmm)))
 		return -ENOMEM;
 	svmm->vmm = &cli->svm;
 	svmm->unmanaged.start = args->unmanaged_addr;
@@ -475,7 +475,7 @@ nouveau_svm_fault_cache(struct nouveau_svm *svm,
 	nvif_mask(memory, offset + 0x1c, 0x80000000, 0x00000000);
 
 	if (!buffer->fault[buffer->fault_nr]) {
-		fault = kmalloc(sizeof(*fault), GFP_KERNEL);
+		fault = kmalloc_obj(*fault);
 		if (WARN_ON(!fault)) {
 			nouveau_svm_fault_cancel(svm, inst, hub, gpc, client);
 			return;
@@ -678,20 +678,22 @@ static int nouveau_range_fault(struct nouveau_svmm *svmm,
 	range.end = notifier->notifier.interval_tree.last + 1;
 
 	while (true) {
-		if (time_after(jiffies, timeout)) {
+		long remaining = timeout - jiffies;
+
+		/*
+		 * The HMM timeout only bounds retries while HMM is walking and
+		 * faulting the range. This fault is handled by a kernel worker,
+		 * so fatal signals from the faulting process cannot stop an
+		 * endless stream of invalidations here.
+		 */
+		if (time_after_eq(jiffies, timeout)) {
 			ret = -EBUSY;
 			goto out;
 		}
 
-		range.notifier_seq = mmu_interval_read_begin(range.notifier);
-		mmap_read_lock(mm);
-		ret = hmm_range_fault(&range);
-		mmap_read_unlock(mm);
-		if (ret) {
-			if (ret == -EBUSY)
-				continue;
+		ret = hmm_range_fault_unlocked_timeout(&range, remaining);
+		if (ret)
 			goto out;
-		}
 
 		mutex_lock(&svmm->mutex);
 		if (mmu_interval_read_retry(range.notifier,
@@ -900,7 +902,7 @@ nouveau_pfns_alloc(unsigned long npages)
 {
 	struct nouveau_pfnmap_args *args;
 
-	args = kzalloc(struct_size(args, p.phys, npages), GFP_KERNEL);
+	args = kzalloc_flex(*args, p.phys, npages);
 	if (!args)
 		return NULL;
 
@@ -921,12 +923,14 @@ nouveau_pfns_free(u64 *pfns)
 
 void
 nouveau_pfns_map(struct nouveau_svmm *svmm, struct mm_struct *mm,
-		 unsigned long addr, u64 *pfns, unsigned long npages)
+		 unsigned long addr, u64 *pfns, unsigned long npages,
+		 unsigned int page_shift)
 {
 	struct nouveau_pfnmap_args *args = nouveau_pfns_to_args(pfns);
 
 	args->p.addr = addr;
-	args->p.size = npages << PAGE_SHIFT;
+	args->p.size = npages << page_shift;
+	args->p.page = page_shift;
 
 	mutex_lock(&svmm->mutex);
 
@@ -1008,7 +1012,7 @@ nouveau_svm_fault_buffer_ctor(struct nouveau_svm *svm, s32 oclass, int id)
 	if (ret)
 		return ret;
 
-	buffer->fault = kvcalloc(buffer->entries, sizeof(*buffer->fault), GFP_KERNEL);
+	buffer->fault = kvzalloc_objs(*buffer->fault, buffer->entries);
 	if (!buffer->fault)
 		return -ENOMEM;
 
@@ -1060,7 +1064,7 @@ nouveau_svm_init(struct nouveau_drm *drm)
 	if (drm->client.device.info.family > NV_DEVICE_INFO_V0_PASCAL)
 		return;
 
-	drm->svm = svm = kzalloc(struct_size(drm->svm, buffer, 1), GFP_KERNEL);
+	drm->svm = svm = kzalloc_flex(*drm->svm, buffer, 1);
 	if (!drm->svm)
 		return;
 

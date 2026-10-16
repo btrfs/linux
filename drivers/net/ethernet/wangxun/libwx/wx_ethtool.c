@@ -9,6 +9,8 @@
 #include "wx_ethtool.h"
 #include "wx_hw.h"
 #include "wx_lib.h"
+#include "wx_vf_common.h"
+#include "wx_vf_lib.h"
 
 struct wx_stats {
 	char stat_string[ETH_GSTRING_LEN];
@@ -51,6 +53,11 @@ static const struct wx_stats wx_gstrings_fdir_stats[] = {
 	WX_STAT("fdir_miss", stats.fdirmiss),
 };
 
+static const struct wx_stats wx_gstrings_rsc_stats[] = {
+	WX_STAT("rsc_aggregated", rsc_count),
+	WX_STAT("rsc_flushed", rsc_flush),
+};
+
 /* drivers allocates num_tx_queues and num_rx_queues symmetrically so
  * we set the num_rx_queues to evaluate to num_tx_queues. This is
  * used because we do not have a good way to get the max number of
@@ -64,16 +71,21 @@ static const struct wx_stats wx_gstrings_fdir_stats[] = {
 		(sizeof(struct wx_queue_stats) / sizeof(u64)))
 #define WX_GLOBAL_STATS_LEN  ARRAY_SIZE(wx_gstrings_stats)
 #define WX_FDIR_STATS_LEN  ARRAY_SIZE(wx_gstrings_fdir_stats)
+#define WX_RSC_STATS_LEN  ARRAY_SIZE(wx_gstrings_rsc_stats)
 #define WX_STATS_LEN (WX_GLOBAL_STATS_LEN + WX_QUEUE_STATS_LEN)
 
 int wx_get_sset_count(struct net_device *netdev, int sset)
 {
 	struct wx *wx = netdev_priv(netdev);
+	int len = WX_STATS_LEN;
 
 	switch (sset) {
 	case ETH_SS_STATS:
-		return (test_bit(WX_FLAG_FDIR_CAPABLE, wx->flags)) ?
-			WX_STATS_LEN + WX_FDIR_STATS_LEN : WX_STATS_LEN;
+		if (test_bit(WX_FLAG_FDIR_CAPABLE, wx->flags))
+			len += WX_FDIR_STATS_LEN;
+		if (test_bit(WX_FLAG_RSC_CAPABLE, wx->flags))
+			len += WX_RSC_STATS_LEN;
+		return len;
 	default:
 		return -EOPNOTSUPP;
 	}
@@ -93,6 +105,10 @@ void wx_get_strings(struct net_device *netdev, u32 stringset, u8 *data)
 		if (test_bit(WX_FLAG_FDIR_CAPABLE, wx->flags)) {
 			for (i = 0; i < WX_FDIR_STATS_LEN; i++)
 				ethtool_puts(&p, wx_gstrings_fdir_stats[i].stat_string);
+		}
+		if (test_bit(WX_FLAG_RSC_CAPABLE, wx->flags)) {
+			for (i = 0; i < WX_RSC_STATS_LEN; i++)
+				ethtool_puts(&p, wx_gstrings_rsc_stats[i].stat_string);
 		}
 		for (i = 0; i < netdev->num_tx_queues; i++) {
 			ethtool_sprintf(&p, "tx_queue_%u_packets", i);
@@ -127,6 +143,13 @@ void wx_get_ethtool_stats(struct net_device *netdev,
 	if (test_bit(WX_FLAG_FDIR_CAPABLE, wx->flags)) {
 		for (k = 0; k < WX_FDIR_STATS_LEN; k++) {
 			p = (char *)wx + wx_gstrings_fdir_stats[k].stat_offset;
+			data[i++] = *(u64 *)p;
+		}
+	}
+
+	if (test_bit(WX_FLAG_RSC_CAPABLE, wx->flags)) {
+		for (k = 0; k < WX_RSC_STATS_LEN; k++) {
+			p = (char *)wx + wx_gstrings_rsc_stats[k].stat_offset;
 			data[i++] = *(u64 *)p;
 		}
 	}
@@ -190,7 +213,7 @@ void wx_get_pause_stats(struct net_device *netdev,
 
 	hwstats = &wx->stats;
 	stats->tx_pause_frames = hwstats->lxontxc + hwstats->lxofftxc;
-	stats->rx_pause_frames = hwstats->lxonoffrxc;
+	stats->rx_pause_frames = hwstats->lxonrxc + hwstats->lxoffrxc;
 }
 EXPORT_SYMBOL(wx_get_pause_stats);
 
@@ -219,9 +242,6 @@ int wx_nway_reset(struct net_device *netdev)
 {
 	struct wx *wx = netdev_priv(netdev);
 
-	if (wx->mac.type == wx_mac_aml40)
-		return -EOPNOTSUPP;
-
 	return phylink_ethtool_nway_reset(wx->phylink);
 }
 EXPORT_SYMBOL(wx_nway_reset);
@@ -240,20 +260,47 @@ int wx_set_link_ksettings(struct net_device *netdev,
 {
 	struct wx *wx = netdev_priv(netdev);
 
-	if (wx->mac.type == wx_mac_aml40)
-		return -EOPNOTSUPP;
-
 	return phylink_ethtool_ksettings_set(wx->phylink, cmd);
 }
 EXPORT_SYMBOL(wx_set_link_ksettings);
+
+void wx_get_wol(struct net_device *netdev,
+		struct ethtool_wolinfo *wol)
+{
+	struct wx *wx = netdev_priv(netdev);
+
+	if (!wx->wol_hw_supported)
+		return;
+	wol->supported = WAKE_MAGIC;
+	wol->wolopts = 0;
+	if (wx->wol & WX_PSR_WKUP_CTL_MAG)
+		wol->wolopts |= WAKE_MAGIC;
+}
+EXPORT_SYMBOL(wx_get_wol);
+
+int wx_set_wol(struct net_device *netdev,
+	       struct ethtool_wolinfo *wol)
+{
+	struct wx *wx = netdev_priv(netdev);
+	struct pci_dev *pdev = wx->pdev;
+
+	if (!wx->wol_hw_supported)
+		return -EOPNOTSUPP;
+
+	wx->wol = 0;
+	if (wol->wolopts & WAKE_MAGIC)
+		wx->wol = WX_PSR_WKUP_CTL_MAG;
+	wr32(wx, WX_PSR_WKUP_CTL, wx->wol);
+	device_set_wakeup_enable(&pdev->dev, !!(wx->wol));
+
+	return 0;
+}
+EXPORT_SYMBOL(wx_set_wol);
 
 void wx_get_pauseparam(struct net_device *netdev,
 		       struct ethtool_pauseparam *pause)
 {
 	struct wx *wx = netdev_priv(netdev);
-
-	if (wx->mac.type == wx_mac_aml40)
-		return;
 
 	phylink_ethtool_get_pauseparam(wx->phylink, pause);
 }
@@ -263,9 +310,6 @@ int wx_set_pauseparam(struct net_device *netdev,
 		      struct ethtool_pauseparam *pause)
 {
 	struct wx *wx = netdev_priv(netdev);
-
-	if (wx->mac.type == wx_mac_aml40)
-		return -EOPNOTSUPP;
 
 	return phylink_ethtool_set_pauseparam(wx->phylink, pause);
 }
@@ -321,6 +365,40 @@ int wx_get_coalesce(struct net_device *netdev,
 	return 0;
 }
 EXPORT_SYMBOL(wx_get_coalesce);
+
+static void wx_update_rsc(struct wx *wx)
+{
+	struct net_device *netdev = wx->netdev;
+	bool need_reset = false;
+
+	/* nothing to do if LRO or RSC are not enabled */
+	if (!test_bit(WX_FLAG_RSC_CAPABLE, wx->flags) ||
+	    !(netdev->features & NETIF_F_LRO))
+		return;
+
+	/* check the feature flag value and enable RSC if necessary */
+	if (wx->rx_itr_setting == 1 ||
+	    wx->rx_itr_setting > WX_MIN_RSC_ITR) {
+		if (!test_bit(WX_FLAG_RSC_ENABLED, wx->flags)) {
+			set_bit(WX_FLAG_RSC_ENABLED, wx->flags);
+			dev_info(&wx->pdev->dev,
+				 "rx-usecs value high enough to re-enable RSC\n");
+
+			need_reset = true;
+		}
+	/* if interrupt rate is too high then disable RSC */
+	} else if (test_bit(WX_FLAG_RSC_ENABLED, wx->flags)) {
+		clear_bit(WX_FLAG_RSC_ENABLED, wx->flags);
+		dev_info(&wx->pdev->dev,
+			 "rx-usecs set too low, disabling RSC\n");
+
+		need_reset = true;
+	}
+
+	/* reset the device to apply the new RSC setting */
+	if (need_reset && wx->do_reset)
+		wx->do_reset(netdev, true);
+}
 
 int wx_set_coalesce(struct net_device *netdev,
 		    struct ethtool_coalesce *ec,
@@ -411,8 +489,13 @@ int wx_set_coalesce(struct net_device *netdev,
 		else
 			/* rx only or mixed */
 			q_vector->itr = rx_itr_param;
-		wx_write_eitr(q_vector);
+		if (wx->pdev->is_virtfn)
+			wx_write_eitr_vf(q_vector);
+		else
+			wx_write_eitr(q_vector);
 	}
+
+	wx_update_rsc(wx);
 
 	return 0;
 }
@@ -477,7 +560,7 @@ int wx_set_channels(struct net_device *dev,
 
 	wx->ring_feature[RING_F_RSS].limit = count;
 
-	return 0;
+	return wx->setup_tc(dev, netdev_get_num_tc(dev));
 }
 EXPORT_SYMBOL(wx_set_channels);
 
@@ -697,6 +780,65 @@ static int wx_get_link_ksettings_vf(struct net_device *netdev,
 	return 0;
 }
 
+static int wx_set_ringparam_vf(struct net_device *netdev,
+			       struct ethtool_ringparam *ring,
+			       struct kernel_ethtool_ringparam *kernel_ring,
+			       struct netlink_ext_ack *extack)
+{
+	struct wx *wx = netdev_priv(netdev);
+	u32 new_rx_count, new_tx_count;
+	struct wx_ring *temp_ring;
+	int i, err = 0;
+
+	new_tx_count = clamp_t(u32, ring->tx_pending, WX_MIN_TXD, WX_MAX_TXD);
+	new_tx_count = ALIGN(new_tx_count, WX_REQ_TX_DESCRIPTOR_MULTIPLE);
+
+	new_rx_count = clamp_t(u32, ring->rx_pending, WX_MIN_RXD, WX_MAX_RXD);
+	new_rx_count = ALIGN(new_rx_count, WX_REQ_RX_DESCRIPTOR_MULTIPLE);
+
+	if (new_tx_count == wx->tx_ring_count &&
+	    new_rx_count == wx->rx_ring_count)
+		return 0;
+
+	mutex_lock(&wx->reset_lock);
+	set_bit(WX_STATE_RESETTING, wx->state);
+
+	if (!netif_running(wx->netdev)) {
+		for (i = 0; i < wx->num_tx_queues; i++)
+			wx->tx_ring[i]->count = new_tx_count;
+		for (i = 0; i < wx->num_rx_queues; i++)
+			wx->rx_ring[i]->count = new_rx_count;
+		wx->tx_ring_count = new_tx_count;
+		wx->rx_ring_count = new_rx_count;
+
+		goto clear_reset;
+	}
+
+	/* allocate temporary buffer to store rings in */
+	i = max_t(int, wx->num_tx_queues, wx->num_rx_queues);
+	temp_ring = kvmalloc_objs(struct wx_ring, i);
+	if (!temp_ring) {
+		err = -ENOMEM;
+		goto clear_reset;
+	}
+
+	wxvf_down(wx);
+	/* wx_set_ring() may partially apply changes before
+	 * returning an error. The error indicates that not all
+	 * requested ring parameters could be configured.
+	 */
+	err = wx_set_ring(wx, new_tx_count, new_rx_count, temp_ring);
+	if (err)
+		wx_err(wx, "failed to set ring parameters: %d", err);
+	wx_configure_vf(wx);
+	wxvf_up_complete(wx);
+	kvfree(temp_ring);
+clear_reset:
+	clear_bit(WX_STATE_RESETTING, wx->state);
+	mutex_unlock(&wx->reset_lock);
+	return err;
+}
+
 static const struct ethtool_ops wx_ethtool_ops_vf = {
 	.supported_coalesce_params = ETHTOOL_COALESCE_USECS |
 				     ETHTOOL_COALESCE_TX_MAX_FRAMES_IRQ |
@@ -704,8 +846,10 @@ static const struct ethtool_ops wx_ethtool_ops_vf = {
 	.get_drvinfo		= wx_get_drvinfo,
 	.get_link		= ethtool_op_get_link,
 	.get_ringparam		= wx_get_ringparam,
+	.set_ringparam		= wx_set_ringparam_vf,
 	.get_msglevel		= wx_get_msglevel,
 	.get_coalesce		= wx_get_coalesce,
+	.set_coalesce		= wx_set_coalesce,
 	.get_ts_info		= ethtool_op_get_ts_info,
 	.get_link_ksettings	= wx_get_link_ksettings_vf,
 };
