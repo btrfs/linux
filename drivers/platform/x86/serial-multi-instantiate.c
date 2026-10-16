@@ -22,6 +22,7 @@
 #define IRQ_RESOURCE_GPIO	1
 #define IRQ_RESOURCE_APIC	2
 #define IRQ_RESOURCE_AUTO   3
+#define IRQ_RESOURCE_OPT	BIT(2)
 
 enum smi_bus_type {
 	SMI_I2C,
@@ -63,6 +64,10 @@ static int smi_get_irq(struct platform_device *pdev, struct acpi_device *adev,
 		if (ret > 0) {
 			dev_dbg(&pdev->dev, "Using platform irq\n");
 			break;
+		}
+		if (inst->flags & IRQ_RESOURCE_OPT) {
+			dev_dbg(&pdev->dev, "No irq\n");
+			return 0;
 		}
 		break;
 	case IRQ_RESOURCE_GPIO:
@@ -302,6 +307,15 @@ static void smi_remove(struct platform_device *pdev)
 	smi_devs_unregister(smi);
 }
 
+static const struct smi_node aw88399_hda = {
+	.instances = {
+		{ "aw88399-hda", IRQ_RESOURCE_AUTO, 0 },
+		{ "aw88399-hda", IRQ_RESOURCE_AUTO, 0 },
+		{}
+	},
+	.bus_type = SMI_AUTO_DETECT,
+};
+
 static const struct smi_node bsg1160_data = {
 	.instances = {
 		{ "bmc150_accel", IRQ_RESOURCE_GPIO, 0 },
@@ -386,10 +400,10 @@ static const struct smi_node cs35l57_hda = {
 
 static const struct smi_node tas2781_hda = {
 	.instances = {
-		{ "tas2781-hda", IRQ_RESOURCE_AUTO, 0 },
-		{ "tas2781-hda", IRQ_RESOURCE_AUTO, 0 },
-		{ "tas2781-hda", IRQ_RESOURCE_AUTO, 0 },
-		{ "tas2781-hda", IRQ_RESOURCE_AUTO, 0 },
+		{ "tas2781-hda", IRQ_RESOURCE_AUTO | IRQ_RESOURCE_OPT, 0 },
+		{ "tas2781-hda", IRQ_RESOURCE_AUTO | IRQ_RESOURCE_OPT, 0 },
+		{ "tas2781-hda", IRQ_RESOURCE_AUTO | IRQ_RESOURCE_OPT, 0 },
+		{ "tas2781-hda", IRQ_RESOURCE_AUTO | IRQ_RESOURCE_OPT, 0 },
 		{}
 	},
 	.bus_type = SMI_AUTO_DETECT,
@@ -400,6 +414,7 @@ static const struct smi_node tas2781_hda = {
  * drivers/acpi/scan.c: acpi_device_enumeration_by_parent().
  */
 static const struct acpi_device_id smi_acpi_ids[] = {
+	{ "AWDZ8399", (unsigned long)&aw88399_hda },
 	{ "BSG1160", (unsigned long)&bsg1160_data },
 	{ "BSG2150", (unsigned long)&bsg2150_data },
 	{ "CSC3551", (unsigned long)&cs35l41_hda },

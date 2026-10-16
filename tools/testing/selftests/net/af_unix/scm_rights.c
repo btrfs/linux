@@ -10,7 +10,7 @@
 #include <sys/socket.h>
 #include <sys/un.h>
 
-#include "../../kselftest_harness.h"
+#include "kselftest_harness.h"
 
 FIXTURE(scm_rights)
 {
@@ -376,6 +376,23 @@ TEST_F(scm_rights, backtrack_from_scc)
 	send_fd(8, 6);
 
 	close_sockets(10);
+}
+
+TEST_F(scm_rights, mixed_lowpoint)
+{
+	create_sockets(6);
+
+	send_fd(0, 1);
+	send_fd(1, 2);
+	send_fd(2, 1);
+	send_fd(1, 0);
+
+	send_fd(3, 4);
+	send_fd(4, 5);
+	send_fd(5, 4);
+	send_fd(4, 3);
+
+	close_sockets(6);
 }
 
 TEST_HARNESS_MAIN

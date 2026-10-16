@@ -16,11 +16,13 @@ config ARCH_HAS_PREEMPT_LAZY
 
 choice
 	prompt "Preemption Model"
+	default PREEMPT_LAZY if ARCH_HAS_PREEMPT_LAZY
 	default PREEMPT_NONE
 
 config PREEMPT_NONE
 	bool "No Forced Preemption (Server)"
 	depends on !PREEMPT_RT
+	depends on ARCH_NO_PREEMPT
 	select PREEMPT_NONE_BUILD if !PREEMPT_DYNAMIC
 	help
 	  This is the traditional Linux preemption model, geared towards
@@ -35,6 +37,7 @@ config PREEMPT_NONE
 
 config PREEMPT_VOLUNTARY
 	bool "Voluntary Kernel Preemption (Desktop)"
+	depends on !ARCH_HAS_PREEMPT_LAZY
 	depends on !ARCH_NO_PREEMPT
 	depends on !PREEMPT_RT
 	select PREEMPT_VOLUNTARY_BUILD if !PREEMPT_DYNAMIC
@@ -119,6 +122,10 @@ config PREEMPT_RT_NEEDS_BH_LOCK
 config PREEMPT_COUNT
        bool
 
+config HAS_SEPARATE_PREEMPT_RESCHED_BITS
+	bool
+	depends on PREEMPT_COUNT && 64BIT
+
 config PREEMPTION
        bool
        select PREEMPT_COUNT
@@ -166,6 +173,7 @@ config SCHED_CORE
 config SCHED_CLASS_EXT
 	bool "Extensible Scheduling Class"
 	depends on BPF_SYSCALL && BPF_JIT && DEBUG_INFO_BTF
+	select GENERIC_ALLOCATOR
 	select STACKTRACE if STACKTRACE_SUPPORT
 	help
 	  This option enables a new scheduler class sched_ext (SCX), which

@@ -10,7 +10,6 @@
 #include <linux/i2c.h>
 #include <linux/init.h>
 #include <linux/kernel.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 
 #include "pmbus.h"
@@ -177,7 +176,6 @@ mp2975_vid2direct(int vrf, int val)
 static u16 mp2975_data2reg_linear11(s64 val)
 {
 	s16 exponent = 0, mantissa;
-	bool negative = false;
 
 	/* simple case */
 	if (val == 0)
@@ -196,10 +194,6 @@ static u16 mp2975_data2reg_linear11(s64 val)
 
 	/* Convert mantissa from milli-units to units */
 	mantissa = clamp_val(DIV_ROUND_CLOSEST_ULL(val, 1000), 0, 0x3ff);
-
-	/* restore sign */
-	if (negative)
-		mantissa = -mantissa;
 
 	/* Convert to 5 bit exponent, 11 bit mantissa */
 	return (mantissa & 0x7ff) | ((exponent << 11) & 0xf800);
@@ -313,6 +307,8 @@ static int mp2973_read_word_data(struct i2c_client *client, int page,
 	case PMBUS_STATUS_WORD:
 		/* MP2973 & MP2971 return PGOOD instead of PB_STATUS_POWER_GOOD_N. */
 		ret = pmbus_read_word_data(client, page, phase, reg);
+		if (ret < 0)
+			return ret;
 		ret ^= PB_STATUS_POWER_GOOD_N;
 		break;
 	case PMBUS_OT_FAULT_LIMIT:
@@ -1080,10 +1076,10 @@ static const struct of_device_id mp2975_of_match[] = {
 MODULE_DEVICE_TABLE(of, mp2975_of_match);
 
 static const struct i2c_device_id mp2975_id[] = {
-	{"mp2971", (kernel_ulong_t)&mp2975_ddinfo[mp2971]},
-	{"mp2973", (kernel_ulong_t)&mp2975_ddinfo[mp2973]},
-	{"mp2975", (kernel_ulong_t)&mp2975_ddinfo[mp2975]},
-	{}
+	{ .name = "mp2971", .driver_data = (kernel_ulong_t)&mp2975_ddinfo[mp2971] },
+	{ .name = "mp2973", .driver_data = (kernel_ulong_t)&mp2975_ddinfo[mp2973] },
+	{ .name = "mp2975", .driver_data = (kernel_ulong_t)&mp2975_ddinfo[mp2975] },
+	{ }
 };
 MODULE_DEVICE_TABLE(i2c, mp2975_id);
 

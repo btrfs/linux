@@ -303,7 +303,7 @@ static struct dm_zone *dmz_get(struct dmz_metadata *zmd, unsigned int zone_id)
 static struct dm_zone *dmz_insert(struct dmz_metadata *zmd,
 				  unsigned int zone_id, struct dmz_dev *dev)
 {
-	struct dm_zone *zone = kzalloc(sizeof(struct dm_zone), GFP_KERNEL);
+	struct dm_zone *zone = kzalloc_obj(struct dm_zone);
 
 	if (!zone)
 		return ERR_PTR(-ENOMEM);
@@ -419,7 +419,7 @@ static struct dmz_mblock *dmz_alloc_mblock(struct dmz_metadata *zmd,
 	}
 
 	/* Allocate a new block */
-	mblk = kmalloc(sizeof(struct dmz_mblock), GFP_NOIO);
+	mblk = kmalloc_obj(struct dmz_mblock, GFP_NOIO);
 	if (!mblk)
 		return NULL;
 
@@ -519,9 +519,7 @@ static void dmz_mblock_bio_end_io(struct bio *bio)
 	else
 		flag = DMZ_META_READING;
 
-	clear_bit_unlock(flag, &mblk->state);
-	smp_mb__after_atomic();
-	wake_up_bit(&mblk->state, flag);
+	clear_and_wake_up_bit(flag, &mblk->state);
 
 	bio_put(bio);
 }
@@ -1311,7 +1309,7 @@ static int dmz_load_sb(struct dmz_metadata *zmd)
 		int i;
 		struct dmz_sb *sb;
 
-		sb = kzalloc(sizeof(struct dmz_sb), GFP_KERNEL);
+		sb = kzalloc_obj(struct dmz_sb);
 		if (!sb)
 			return -ENOMEM;
 		for (i = 1; i < zmd->nr_devs; i++) {
@@ -1686,8 +1684,7 @@ static int dmz_load_mapping(struct dmz_metadata *zmd)
 	unsigned int bzone_id;
 
 	/* Metadata block array for the chunk mapping table */
-	zmd->map_mblk = kcalloc(zmd->nr_map_blocks,
-				sizeof(struct dmz_mblk *), GFP_KERNEL);
+	zmd->map_mblk = kzalloc_objs(struct dmz_mblock *, zmd->nr_map_blocks);
 	if (!zmd->map_mblk)
 		return -ENOMEM;
 
@@ -1911,9 +1908,7 @@ void dmz_unlock_zone_reclaim(struct dm_zone *zone)
 	WARN_ON(dmz_is_active(zone));
 	WARN_ON(!dmz_in_reclaim(zone));
 
-	clear_bit_unlock(DMZ_RECLAIM, &zone->flags);
-	smp_mb__after_atomic();
-	wake_up_bit(&zone->flags, DMZ_RECLAIM);
+	clear_and_wake_up_bit(DMZ_RECLAIM, &zone->flags);
 }
 
 /*
@@ -2868,11 +2863,11 @@ int dmz_ctr_metadata(struct dmz_dev *dev, int num_dev,
 	struct dm_zone *zone;
 	int ret;
 
-	zmd = kzalloc(sizeof(struct dmz_metadata), GFP_KERNEL);
+	zmd = kzalloc_obj(struct dmz_metadata);
 	if (!zmd)
 		return -ENOMEM;
 
-	strcpy(zmd->devname, devname);
+	strscpy(zmd->devname, devname);
 	zmd->dev = dev;
 	zmd->nr_devs = num_dev;
 	zmd->mblk_rbtree = RB_ROOT;

@@ -112,6 +112,12 @@ struct ps_led_info {
 #define DS_BUTTONS2_TOUCHPAD	BIT(1)
 #define DS_BUTTONS2_MIC_MUTE	BIT(2)
 
+/* DualSense Edge extra buttons in buttons[2], bits 4-7. */
+#define DS_EDGE_BUTTONS_FN1		BIT(4)
+#define DS_EDGE_BUTTONS_FN2		BIT(5)
+#define DS_EDGE_BUTTONS_LEFT_PADDLE	BIT(6)
+#define DS_EDGE_BUTTONS_RIGHT_PADDLE	BIT(7)
+
 /* Status fields of DualSense input report. */
 #define DS_STATUS0_BATTERY_CAPACITY		GENMASK(3, 0)
 #define DS_STATUS0_CHARGING			GENMASK(7, 4)
@@ -177,6 +183,9 @@ struct dualsense {
 	struct input_dev *sensors;
 	struct input_dev *touchpad;
 	struct input_dev *jack;
+
+	/* True if this is a DualSense Edge (product 0x0df2). */
+	bool is_edge;
 
 	/* Update version is used as a feature/capability version. */
 	u16 update_version;
@@ -753,11 +762,16 @@ ps_gamepad_create(struct hid_device *hdev,
 	if (IS_ERR(gamepad))
 		return ERR_CAST(gamepad);
 
+	/* Set initial resting state for joysticks to 128 (center) */
 	input_set_abs_params(gamepad, ABS_X, 0, 255, 0, 0);
+	gamepad->absinfo[ABS_X].value = 128;
 	input_set_abs_params(gamepad, ABS_Y, 0, 255, 0, 0);
+	gamepad->absinfo[ABS_Y].value = 128;
 	input_set_abs_params(gamepad, ABS_Z, 0, 255, 0, 0);
 	input_set_abs_params(gamepad, ABS_RX, 0, 255, 0, 0);
+	gamepad->absinfo[ABS_RX].value = 128;
 	input_set_abs_params(gamepad, ABS_RY, 0, 255, 0, 0);
+	gamepad->absinfo[ABS_RY].value = 128;
 	input_set_abs_params(gamepad, ABS_RZ, 0, 255, 0, 0);
 
 	input_set_abs_params(gamepad, ABS_HAT0X, -1, 1, 0, 0);
@@ -769,7 +783,9 @@ ps_gamepad_create(struct hid_device *hdev,
 #if IS_ENABLED(CONFIG_PLAYSTATION_FF)
 	if (play_effect) {
 		input_set_capability(gamepad, EV_FF, FF_RUMBLE);
-		input_ff_create_memless(gamepad, NULL, play_effect);
+		ret = input_ff_create_memless(gamepad, NULL, play_effect);
+		if (ret)
+			return ERR_PTR(ret);
 	}
 #endif
 
@@ -1479,6 +1495,18 @@ static int dualsense_parse_report(struct ps_device *ps_dev, struct hid_report *r
 	input_report_key(ds->gamepad, BTN_THUMBL, ds_report->buttons[1] & DS_BUTTONS1_L3);
 	input_report_key(ds->gamepad, BTN_THUMBR, ds_report->buttons[1] & DS_BUTTONS1_R3);
 	input_report_key(ds->gamepad, BTN_MODE,   ds_report->buttons[2] & DS_BUTTONS2_PS_HOME);
+
+	if (ds->is_edge) {
+		input_report_key(ds->gamepad, BTN_TRIGGER_HAPPY1,
+				 ds_report->buttons[2] & DS_EDGE_BUTTONS_FN1);
+		input_report_key(ds->gamepad, BTN_TRIGGER_HAPPY2,
+				 ds_report->buttons[2] & DS_EDGE_BUTTONS_FN2);
+		input_report_key(ds->gamepad, BTN_TRIGGER_HAPPY3,
+				 ds_report->buttons[2] & DS_EDGE_BUTTONS_LEFT_PADDLE);
+		input_report_key(ds->gamepad, BTN_TRIGGER_HAPPY4,
+				 ds_report->buttons[2] & DS_EDGE_BUTTONS_RIGHT_PADDLE);
+	}
+
 	input_sync(ds->gamepad);
 
 	/*
@@ -1651,7 +1679,7 @@ static int dualsense_reset_leds(struct dualsense *ds)
 	struct dualsense_output_report report;
 	struct dualsense_output_report_bt *buf;
 
-	buf = kzalloc(sizeof(*buf), GFP_KERNEL);
+	buf = kzalloc_obj(*buf);
 	if (!buf)
 		return -ENOMEM;
 
@@ -1778,6 +1806,7 @@ static struct ps_device *dualsense_create(struct hid_device *hdev)
 		ds->use_vibration_v2 = ds->update_version >= DS_FEATURE_VERSION(2, 21);
 	} else if (hdev->product == USB_DEVICE_ID_SONY_PS5_CONTROLLER_2) {
 		ds->use_vibration_v2 = true;
+		ds->is_edge = true;
 	}
 
 	ret = ps_devices_list_add(ps_dev);
@@ -1795,6 +1824,15 @@ static struct ps_device *dualsense_create(struct hid_device *hdev)
 		ret = PTR_ERR(ds->gamepad);
 		goto err;
 	}
+
+	/* Register DualSense Edge back paddle and Fn buttons. */
+	if (ds->is_edge) {
+		input_set_capability(ds->gamepad, EV_KEY, BTN_TRIGGER_HAPPY1);
+		input_set_capability(ds->gamepad, EV_KEY, BTN_TRIGGER_HAPPY2);
+		input_set_capability(ds->gamepad, EV_KEY, BTN_TRIGGER_HAPPY3);
+		input_set_capability(ds->gamepad, EV_KEY, BTN_TRIGGER_HAPPY4);
+	}
+
 	/* Use gamepad input device name as primary device name for e.g. LEDs */
 	ps_dev->input_dev_name = dev_name(&ds->gamepad->dev);
 
@@ -2370,8 +2408,15 @@ static int dualshock4_parse_report(struct ps_device *ps_dev, struct hid_report *
 		struct dualshock4_input_report_usb *usb =
 			(struct dualshock4_input_report_usb *)data;
 
+		if (usb->num_touch_reports > ARRAY_SIZE(usb->touch_reports)) {
+			hid_err(hdev, "DualShock4 USB input report has invalid num_touch_reports=%d\n",
+				usb->num_touch_reports);
+			return -EINVAL;
+		}
+
 		ds4_report = &usb->common;
-		num_touch_reports = usb->num_touch_reports;
+		num_touch_reports = min_t(u8, usb->num_touch_reports,
+					  ARRAY_SIZE(usb->touch_reports));
 		touch_reports = usb->touch_reports;
 	} else if (hdev->bus == BUS_BLUETOOTH && report->id == DS4_INPUT_REPORT_BT &&
 		   size == DS4_INPUT_REPORT_BT_SIZE) {
@@ -2384,8 +2429,15 @@ static int dualshock4_parse_report(struct ps_device *ps_dev, struct hid_report *
 			return -EILSEQ;
 		}
 
+		if (bt->num_touch_reports > ARRAY_SIZE(bt->touch_reports)) {
+			hid_err(hdev, "DualShock4 BT input report has invalid num_touch_reports=%d\n",
+				bt->num_touch_reports);
+			return -EINVAL;
+		}
+
 		ds4_report = &bt->common;
-		num_touch_reports = bt->num_touch_reports;
+		num_touch_reports = min_t(u8, bt->num_touch_reports,
+					  ARRAY_SIZE(bt->touch_reports));
 		touch_reports = bt->touch_reports;
 	} else if (hdev->bus == BUS_BLUETOOTH &&
 		   report->id == DS4_INPUT_REPORT_BT_MINIMAL &&

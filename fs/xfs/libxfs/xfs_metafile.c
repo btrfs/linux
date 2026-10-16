@@ -3,7 +3,7 @@
  * Copyright (c) 2018-2024 Oracle.  All Rights Reserved.
  * Author: Darrick J. Wong <djwong@kernel.org>
  */
-#include "xfs.h"
+#include "xfs_platform.h"
 #include "xfs_fs.h"
 #include "xfs_shared.h"
 #include "xfs_format.h"
@@ -61,6 +61,9 @@ xfs_metafile_set_iflag(
 	ip->i_diflags2 |= XFS_DIFLAG2_METADATA;
 	ip->i_metatype = metafile_type;
 	xfs_trans_log_inode(tp, ip, XFS_ILOG_CORE);
+
+	XFS_STATS_DEC(ip->i_mount, xs_inodes_active);
+	XFS_STATS_INC(ip->i_mount, xs_inodes_meta);
 }
 
 /* Clear the metadata directory inode flag. */
@@ -74,6 +77,8 @@ xfs_metafile_clear_iflag(
 
 	ip->i_diflags2 &= ~XFS_DIFLAG2_METADATA;
 	xfs_trans_log_inode(tp, ip, XFS_ILOG_CORE);
+	XFS_STATS_INC(ip->i_mount, xs_inodes_active);
+	XFS_STATS_DEC(ip->i_mount, xs_inodes_meta);
 }
 
 /*
@@ -292,14 +297,14 @@ xfs_metafile_resv_init(
 		goto out_unlock;
 
 	/*
-	 * Space taken by the per-AG metadata btrees are accounted on-disk as
-	 * used space.  We therefore only hide the space that is reserved but
-	 * not used by the trees.
+	 * Space taken by metadata btrees are accounted on-disk as used space.
+	 * We therefore only hide the space that is reserved but not used by
+	 * the trees.
 	 */
 	if (used > target)
 		target = used;
 	else if (target > dblocks_avail)
-		target = dblocks_avail;
+		target = max(dblocks_avail, used);
 	hidden_space = target - used;
 
 	error = xfs_dec_fdblocks(mp, hidden_space, true);

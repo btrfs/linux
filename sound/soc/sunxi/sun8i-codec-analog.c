@@ -390,7 +390,7 @@ static const struct snd_soc_dapm_route sun8i_codec_headphone_routes[] = {
 
 static int sun8i_codec_add_headphone(struct snd_soc_component *cmpnt)
 {
-	struct snd_soc_dapm_context *dapm = snd_soc_component_get_dapm(cmpnt);
+	struct snd_soc_dapm_context *dapm = snd_soc_component_to_dapm(cmpnt);
 	struct device *dev = cmpnt->dev;
 	int ret;
 
@@ -428,7 +428,7 @@ static const struct snd_soc_dapm_widget sun8i_codec_mbias_widgets[] = {
 
 static int sun8i_codec_add_mbias(struct snd_soc_component *cmpnt)
 {
-	struct snd_soc_dapm_context *dapm = snd_soc_component_get_dapm(cmpnt);
+	struct snd_soc_dapm_context *dapm = snd_soc_component_to_dapm(cmpnt);
 	struct device *dev = cmpnt->dev;
 	int ret;
 
@@ -449,7 +449,7 @@ static const struct snd_soc_dapm_widget sun8i_codec_hmic_widgets[] = {
 
 static int sun8i_codec_add_hmic(struct snd_soc_component *cmpnt)
 {
-	struct snd_soc_dapm_context *dapm = snd_soc_component_get_dapm(cmpnt);
+	struct snd_soc_dapm_context *dapm = snd_soc_component_to_dapm(cmpnt);
 	struct device *dev = cmpnt->dev;
 	int ret;
 
@@ -486,7 +486,7 @@ static const struct snd_soc_dapm_route sun8i_codec_linein_routes[] = {
 
 static int sun8i_codec_add_linein(struct snd_soc_component *cmpnt)
 {
-	struct snd_soc_dapm_context *dapm = snd_soc_component_get_dapm(cmpnt);
+	struct snd_soc_dapm_context *dapm = snd_soc_component_to_dapm(cmpnt);
 	struct device *dev = cmpnt->dev;
 	int ret;
 
@@ -567,7 +567,7 @@ static const struct snd_soc_dapm_route sun8i_codec_lineout_routes[] = {
 
 static int sun8i_codec_add_lineout(struct snd_soc_component *cmpnt)
 {
-	struct snd_soc_dapm_context *dapm = snd_soc_component_get_dapm(cmpnt);
+	struct snd_soc_dapm_context *dapm = snd_soc_component_to_dapm(cmpnt);
 	struct device *dev = cmpnt->dev;
 	int ret;
 
@@ -632,7 +632,7 @@ static const struct snd_soc_dapm_route sun8i_codec_mic2_routes[] = {
 
 static int sun8i_codec_add_mic2(struct snd_soc_component *cmpnt)
 {
-	struct snd_soc_dapm_context *dapm = snd_soc_component_get_dapm(cmpnt);
+	struct snd_soc_dapm_context *dapm = snd_soc_component_to_dapm(cmpnt);
 	struct device *dev = cmpnt->dev;
 	int ret;
 
@@ -688,7 +688,7 @@ static const struct sun8i_codec_analog_quirks sun8i_h3_quirks = {
 static int sun8i_codec_analog_add_mixer(struct snd_soc_component *cmpnt,
 					const struct sun8i_codec_analog_quirks *quirks)
 {
-	struct snd_soc_dapm_context *dapm = snd_soc_component_get_dapm(cmpnt);
+	struct snd_soc_dapm_context *dapm = snd_soc_component_to_dapm(cmpnt);
 	struct device *dev = cmpnt->dev;
 	int ret;
 
@@ -822,16 +822,13 @@ static int sun8i_codec_analog_probe(struct platform_device *pdev)
 	void __iomem *base;
 
 	base = devm_platform_ioremap_resource(pdev, 0);
-	if (IS_ERR(base)) {
-		dev_err(&pdev->dev, "Failed to map the registers\n");
+	if (IS_ERR(base))
 		return PTR_ERR(base);
-	}
 
 	regmap = sun8i_adda_pr_regmap_init(&pdev->dev, base);
-	if (IS_ERR(regmap)) {
-		dev_err(&pdev->dev, "Failed to create regmap\n");
-		return PTR_ERR(regmap);
-	}
+	if (IS_ERR(regmap))
+		return dev_err_probe(&pdev->dev, PTR_ERR(regmap),
+				     "Failed to create regmap\n");
 
 	return devm_snd_soc_register_component(&pdev->dev,
 					       &sun8i_codec_analog_cmpnt_drv,

@@ -11,13 +11,13 @@
 #include <sound/soc-dapm.h>
 #include <sound/jack.h>
 #include <linux/clk.h>
-#include <linux/gpio.h>
 #include <linux/module.h>
 #include <linux/regulator/machine.h>
 #include <linux/regulator/driver.h>
 #include <linux/i2c.h>
 #include <linux/input.h>
 #include <linux/acpi.h>
+#include <linux/pci.h>
 
 #include "acp.h"
 #include "../codecs/da7219.h"
@@ -47,8 +47,6 @@ static struct clk *da7219_dai_wclk;
 static struct clk *da7219_dai_bclk;
 static struct clk *rt5682_dai_wclk;
 static struct clk *rt5682_dai_bclk;
-
-void *acp_soc_is_rltk_max(struct device *dev);
 
 static int cz_da7219_init(struct snd_soc_pcm_runtime *rtd)
 {
@@ -704,7 +702,7 @@ static struct snd_soc_card cz_rt5682_card = {
 	.num_controls = ARRAY_SIZE(cz_mc_controls),
 };
 
-void *acp_soc_is_rltk_max(struct device *dev)
+static void *acp_soc_is_rltk_max(struct device *dev)
 {
 	const struct acpi_device_id *match;
 
@@ -745,6 +743,18 @@ static const struct regulator_desc acp_da7219_desc = {
 	.n_voltages = 1,
 };
 
+/*
+ * The ACP3.x+ (Raven/Picasso and later) audio coprocessor is a dedicated PCI
+ * function.  Carrizo/Stoney - the only platforms handled by this driver - reach
+ * the ACP through the GPU driver and have no such device.
+ */
+#define ACP3X_PCI_DEV_ID	0x15e2
+
+static const struct pci_device_id acp3x_pci_ids[] = {
+	{ PCI_DEVICE(PCI_VENDOR_ID_AMD, ACP3X_PCI_DEV_ID) },
+	{ 0, },
+};
+
 static int cz_probe(struct platform_device *pdev)
 {
 	int ret;
@@ -752,6 +762,16 @@ static int cz_probe(struct platform_device *pdev)
 	struct acp_platform_info *machine;
 	struct regulator_dev *rdev;
 	struct device *dev = &pdev->dev;
+
+	/*
+	 * AMDI5682 is also matched by acp3x-alc5682-max98357 (Raven/Picasso).
+	 * If the ACP3.x PCI function is present this is such a board; return
+	 * -ENODEV so that driver binds instead.
+	 */
+	if (pci_dev_present(acp3x_pci_ids)) {
+		dev_info(dev, "ACP3.x PCI device present, deferring to acp3x-alc5682-max98357\n");
+		return -ENODEV;
+	}
 
 	card = (struct snd_soc_card *)acp_soc_is_rltk_max(dev);
 	if (!card)

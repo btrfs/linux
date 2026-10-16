@@ -346,7 +346,6 @@ static int imx_aif_hw_params(struct snd_pcm_substream *substream,
 			      SND_SOC_DAIFMT_PDM;
 		} else {
 			slots = 2;
-			slot_width = params_physical_width(params);
 			fmt = (rtd->dai_link->dai_fmt & ~SND_SOC_DAIFMT_FORMAT_MASK) |
 			      SND_SOC_DAIFMT_I2S;
 		}
@@ -497,11 +496,15 @@ static void imx_aif_shutdown(struct snd_pcm_substream *substream)
 	struct snd_soc_dai *codec_dai;
 	int i;
 
-	for_each_rtd_cpu_dais(rtd, i, cpu_dai)
-		snd_soc_dai_set_sysclk(cpu_dai, 0, 0, SND_SOC_CLOCK_OUT);
+	for_each_rtd_cpu_dais(rtd, i, cpu_dai) {
+		if (!snd_soc_dai_active(cpu_dai))
+			snd_soc_dai_set_sysclk(cpu_dai, 0, 0, SND_SOC_CLOCK_OUT);
+	}
 
-	for_each_rtd_codec_dais(rtd, i, codec_dai)
-		snd_soc_dai_set_sysclk(codec_dai, 0, 0, SND_SOC_CLOCK_IN);
+	for_each_rtd_codec_dais(rtd, i, codec_dai) {
+		if (!snd_soc_dai_active(codec_dai))
+			snd_soc_dai_set_sysclk(codec_dai, 0, 0, SND_SOC_CLOCK_IN);
+	}
 }
 
 static const struct snd_soc_ops imx_aif_ops = {
@@ -528,7 +531,7 @@ static int be_hw_params_fixup(struct snd_soc_pcm_runtime *rtd,
 
 	mask = hw_param_mask(params, SNDRV_PCM_HW_PARAM_FORMAT);
 	snd_mask_none(mask);
-	snd_mask_set(mask, (__force unsigned int)data->asrc_format);
+	snd_mask_set(mask, data->asrc_format);
 
 	return 0;
 }
@@ -681,7 +684,7 @@ static int imx_card_parse_of(struct imx_card_data *data)
 			}
 
 			ret = of_property_read_u32(args.np, "fsl,asrc-format", &asrc_fmt);
-			data->asrc_format = (__force snd_pcm_format_t)asrc_fmt;
+			data->asrc_format = asrc_fmt;
 			if (ret) {
 				/* Fallback to old binding; translate to asrc_format */
 				ret = of_property_read_u32(args.np, "fsl,asrc-width", &width);
@@ -711,6 +714,8 @@ static int imx_card_parse_of(struct imx_card_data *data)
 			link->ops = &imx_aif_ops;
 		}
 
+		playback_only = false;
+		capture_only  = false;
 		graph_util_parse_link_direction(np, &playback_only, &capture_only);
 		link->playback_only = playback_only;
 		link->capture_only = capture_only;

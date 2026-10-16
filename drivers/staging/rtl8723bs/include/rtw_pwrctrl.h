@@ -86,8 +86,8 @@ enum rt_rf_power_state {
 
 /*  ASPM OSC Control bit, added by Roger, 2013.03.29. */
 #define	RT_PCI_ASPM_OSC_IGNORE		0	 /*  PCI ASPM ignore OSC control in default */
-#define	RT_PCI_ASPM_OSC_ENABLE		BIT0 /*  PCI ASPM controlled by OS according to ACPI Spec 5.0 */
-#define	RT_PCI_ASPM_OSC_DISABLE		BIT1 /*  PCI ASPM controlled by driver or BIOS, i.e., force enable ASPM */
+#define	RT_PCI_ASPM_OSC_ENABLE		BIT(0) /*  PCI ASPM controlled by OS according to ACPI Spec 5.0 */
+#define	RT_PCI_ASPM_OSC_DISABLE		BIT(1) /*  PCI ASPM controlled by driver or BIOS, i.e., force enable ASPM */
 
 enum {
 	PSBBREG_RF0 = 0,
@@ -169,7 +169,7 @@ struct pwrctrl_priv {
 	u8 power_mgnt;
 	u8 org_power_mgnt;
 	bool fw_current_in_ps_mode;
-	unsigned long	DelayLPSLastTimeStamp;
+	unsigned long	delay_lps_last_time_stamp;
 	s32		pnp_current_pwr_state;
 	u8 pnp_bstop_trx;
 
@@ -215,8 +215,8 @@ struct pwrctrl_priv {
 extern void rtw_init_pwrctrl_priv(struct adapter *adapter);
 extern void rtw_free_pwrctrl_priv(struct adapter *adapter);
 
-s32 rtw_register_task_alive(struct adapter *, u32 task);
-void rtw_unregister_task_alive(struct adapter *, u32 task);
+s32 rtw_register_task_alive(struct adapter *adapter, u32 task);
+void rtw_unregister_task_alive(struct adapter *adapter, u32 task);
 extern s32 rtw_register_tx_alive(struct adapter *padapter);
 extern void rtw_unregister_tx_alive(struct adapter *padapter);
 extern s32 rtw_register_cmd_alive(struct adapter *padapter);
@@ -233,7 +233,7 @@ int ips_leave(struct adapter *padapter);
 
 void rtw_ps_processor(struct adapter *padapter);
 
-s32 LPS_RF_ON_check(struct adapter *padapter, u32 delay_ms);
+int LPS_RF_ON_check(struct adapter *padapter, u32 delay_ms);
 void LPS_Enter(struct adapter *padapter, const char *msg);
 void LPS_Leave(struct adapter *padapter, const char *msg);
 void traffic_check_for_leave_lps(struct adapter *padapter, u8 tx, u32 tx_packets);

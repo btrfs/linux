@@ -17,7 +17,6 @@ Contents:
    diagnostic/index
    dsa/index
    devlink/index
-   caif/index
    ethtool-netlink
    ieee802154
    iso15765-2
@@ -41,11 +40,9 @@ Contents:
    tls-handshake
    nfc
    6lowpan
-   6pack
    arcnet-hardware
    arcnet
    atm
-   ax25
    bonding
    cdc_mbim
    dctcp
@@ -96,6 +93,7 @@ Contents:
    packet_mmap
    phonet
    phy-link-topology
+   phy-port
    pktgen
    plip
    ppp_generic
@@ -131,16 +129,6 @@ Contents:
    vxlan
    x25
    x25-iface
-   xfrm_device
-   xfrm_proc
-   xfrm_sync
-   xfrm_sysctl
+   xfrm/index
    xdp-rx-metadata
    xsk-tx-metadata
-
-.. only::  subproject and html
-
-   Indices
-   =======
-
-   * :ref:`genindex`

@@ -6,10 +6,14 @@
  */
 #include "test_util.h"
 
-#include <execinfo.h>
+
 #include <sys/syscall.h>
 
 #include "kselftest.h"
+#include "kvm_syscalls.h"
+
+#ifdef __GLIBC__
+#include <execinfo.h>
 
 /* Dumps the current stack trace to stderr. */
 static void __attribute__((noinline)) test_dump_stack(void);
@@ -57,11 +61,9 @@ static void test_dump_stack(void)
 	system(cmd);
 #pragma GCC diagnostic pop
 }
-
-static pid_t _gettid(void)
-{
-	return syscall(SYS_gettid);
-}
+#else
+static void test_dump_stack(void) {}
+#endif
 
 void __attribute__((noinline))
 test_assert(bool exp, const char *exp_str,
@@ -72,10 +74,10 @@ test_assert(bool exp, const char *exp_str,
 	if (!(exp)) {
 		va_start(ap, fmt);
 
-		fprintf(stderr, "==== Test Assertion Failure ====\n"
+		fprintf(stderr, "\n==== Test Assertion Failure ====\n"
 			"  %s:%u: %s\n"
 			"  pid=%d tid=%d errno=%d - %s\n",
-			file, line, exp_str, getpid(), _gettid(),
+			file, line, exp_str, getpid(), kvm_gettid(),
 			errno, strerror(errno));
 		test_dump_stack();
 		if (fmt) {

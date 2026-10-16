@@ -7,8 +7,8 @@
 #include <linux/err.h>
 #include <linux/interrupt.h>
 #include <linux/kernel.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
+#include <linux/of.h>
 #include <linux/platform_device.h>
 #include <linux/regmap.h>
 #include <linux/regulator/consumer.h>
@@ -683,6 +683,9 @@ static int qcom_pmic_typec_port_start(struct pmic_typec *tcpm,
 		enable_irq(pmic_typec_port->irq_data[i].irq);
 
 done:
+	if (ret)
+		disable_delayed_work_sync(&pmic_typec_port->cc_debounce_dwork);
+
 	return ret;
 }
 
@@ -693,6 +696,8 @@ static void qcom_pmic_typec_port_stop(struct pmic_typec *tcpm)
 
 	for (i = 0; i < pmic_typec_port->nr_irqs; i++)
 		disable_irq(pmic_typec_port->irq_data[i].irq);
+
+	disable_delayed_work_sync(&pmic_typec_port->cc_debounce_dwork);
 }
 
 int qcom_pmic_typec_port_probe(struct platform_device *pdev,
@@ -704,6 +709,7 @@ int qcom_pmic_typec_port_probe(struct platform_device *pdev,
 	struct device *dev = &pdev->dev;
 	struct pmic_typec_port_irq_data *irq_data;
 	struct pmic_typec_port *pmic_typec_port;
+	struct fwnode_handle *connector;
 	int i, ret, irq;
 
 	pmic_typec_port = devm_kzalloc(dev, sizeof(*pmic_typec_port), GFP_KERNEL);
@@ -720,7 +726,15 @@ int qcom_pmic_typec_port_probe(struct platform_device *pdev,
 
 	mutex_init(&pmic_typec_port->vbus_lock);
 
-	pmic_typec_port->vdd_vbus = devm_regulator_get(dev, "vdd-vbus");
+	connector = device_get_named_child_node(dev, "connector");
+	if (!connector)
+		return -EINVAL;
+
+	pmic_typec_port->vdd_vbus = devm_of_regulator_get_optional(dev,
+								   to_of_node(connector),
+								   "vbus");
+	if (pmic_typec_port->vdd_vbus == ERR_PTR(-ENODEV))
+		pmic_typec_port->vdd_vbus = devm_regulator_get(dev, "vdd-vbus");
 	if (IS_ERR(pmic_typec_port->vdd_vbus))
 		return PTR_ERR(pmic_typec_port->vdd_vbus);
 

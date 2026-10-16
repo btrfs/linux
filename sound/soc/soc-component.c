@@ -29,17 +29,42 @@ static inline int _soc_component_ret_reg_rw(struct snd_soc_component *component,
 			   func, component->name, reg);
 }
 
-static inline int soc_component_field_shift(struct snd_soc_component *component,
-					    unsigned int mask)
+struct snd_soc_component *snd_soc_component_alloc(struct device *dev)
 {
-	if (!mask) {
-		dev_err(component->dev,	"ASoC: error field mask is zero for %s\n",
-			component->name);
-		return 0;
-	}
+	struct snd_soc_component *component = devm_kzalloc(dev, sizeof(*component), GFP_KERNEL);
 
-	return (ffs(mask) - 1);
+	if (!component)
+		return NULL;
+
+	component->dev = dev;
+
+	return component;
 }
+EXPORT_SYMBOL_GPL(snd_soc_component_alloc);
+
+void snd_soc_component_set_name(struct snd_soc_component *component, const char *name)
+{
+	component->name = name;
+}
+EXPORT_SYMBOL_GPL(snd_soc_component_set_name);
+
+const char *snd_soc_component_name(struct snd_soc_component *component)
+{
+	return component->name;
+}
+EXPORT_SYMBOL_GPL(snd_soc_component_name);
+
+void snd_soc_component_set_priv(struct snd_soc_component *component, void *priv)
+{
+	component->priv = priv;
+}
+EXPORT_SYMBOL_GPL(snd_soc_component_set_priv);
+
+void *snd_soc_component_to_priv(struct snd_soc_component *component)
+{
+	return component->priv;
+}
+EXPORT_SYMBOL_GPL(snd_soc_component_to_priv);
 
 /*
  * We might want to check substream by using list.
@@ -141,88 +166,6 @@ int snd_soc_component_set_bias_level(struct snd_soc_component *component,
 
 	return soc_component_ret(component, ret);
 }
-
-int snd_soc_component_enable_pin(struct snd_soc_component *component,
-				 const char *pin)
-{
-	struct snd_soc_dapm_context *dapm =
-		snd_soc_component_get_dapm(component);
-	return snd_soc_dapm_enable_pin(dapm, pin);
-}
-EXPORT_SYMBOL_GPL(snd_soc_component_enable_pin);
-
-int snd_soc_component_enable_pin_unlocked(struct snd_soc_component *component,
-					  const char *pin)
-{
-	struct snd_soc_dapm_context *dapm =
-		snd_soc_component_get_dapm(component);
-	return snd_soc_dapm_enable_pin_unlocked(dapm, pin);
-}
-EXPORT_SYMBOL_GPL(snd_soc_component_enable_pin_unlocked);
-
-int snd_soc_component_disable_pin(struct snd_soc_component *component,
-				  const char *pin)
-{
-	struct snd_soc_dapm_context *dapm =
-		snd_soc_component_get_dapm(component);
-	return snd_soc_dapm_disable_pin(dapm, pin);
-}
-EXPORT_SYMBOL_GPL(snd_soc_component_disable_pin);
-
-int snd_soc_component_disable_pin_unlocked(struct snd_soc_component *component,
-					   const char *pin)
-{
-	struct snd_soc_dapm_context *dapm = 
-		snd_soc_component_get_dapm(component);
-	return snd_soc_dapm_disable_pin_unlocked(dapm, pin);
-}
-EXPORT_SYMBOL_GPL(snd_soc_component_disable_pin_unlocked);
-
-int snd_soc_component_nc_pin(struct snd_soc_component *component,
-			     const char *pin)
-{
-	struct snd_soc_dapm_context *dapm =
-		snd_soc_component_get_dapm(component);
-	return snd_soc_dapm_nc_pin(dapm, pin);
-}
-EXPORT_SYMBOL_GPL(snd_soc_component_nc_pin);
-
-int snd_soc_component_nc_pin_unlocked(struct snd_soc_component *component,
-				      const char *pin)
-{
-	struct snd_soc_dapm_context *dapm =
-		snd_soc_component_get_dapm(component);
-	return snd_soc_dapm_nc_pin_unlocked(dapm, pin);
-}
-EXPORT_SYMBOL_GPL(snd_soc_component_nc_pin_unlocked);
-
-int snd_soc_component_get_pin_status(struct snd_soc_component *component,
-				     const char *pin)
-{
-	struct snd_soc_dapm_context *dapm =
-		snd_soc_component_get_dapm(component);
-	return snd_soc_dapm_get_pin_status(dapm, pin);
-}
-EXPORT_SYMBOL_GPL(snd_soc_component_get_pin_status);
-
-int snd_soc_component_force_enable_pin(struct snd_soc_component *component,
-				       const char *pin)
-{
-	struct snd_soc_dapm_context *dapm =
-		snd_soc_component_get_dapm(component);
-	return snd_soc_dapm_force_enable_pin(dapm, pin);
-}
-EXPORT_SYMBOL_GPL(snd_soc_component_force_enable_pin);
-
-int snd_soc_component_force_enable_pin_unlocked(
-	struct snd_soc_component *component,
-	const char *pin)
-{
-	struct snd_soc_dapm_context *dapm =
-		snd_soc_component_get_dapm(component);
-	return snd_soc_dapm_force_enable_pin_unlocked(dapm, pin);
-}
-EXPORT_SYMBOL_GPL(snd_soc_component_force_enable_pin_unlocked);
 
 static void soc_get_kcontrol_name(struct snd_soc_component *component,
 				  char *buf, int size, const char * const ctl)
@@ -392,6 +335,16 @@ int snd_soc_component_probe(struct snd_soc_component *component)
 	return soc_component_ret(component, ret);
 }
 
+int snd_soc_component_fixup_controls(struct snd_soc_component *component)
+{
+	int ret = 0;
+
+	if (component->driver->fixup_controls)
+		ret = component->driver->fixup_controls(component);
+
+	return soc_component_ret(component, ret);
+}
+
 void snd_soc_component_remove(struct snd_soc_component *component)
 {
 	if (component->driver->remove)
@@ -424,14 +377,22 @@ int snd_soc_component_of_xlate_dai_name(struct snd_soc_component *component,
 	return -ENOTSUPP;
 }
 
-void snd_soc_component_setup_regmap(struct snd_soc_component *component)
+int snd_soc_component_regmap_val_bytes(struct snd_soc_component *component)
 {
-	int val_bytes = regmap_get_val_bytes(component->regmap);
+	int val_bytes;
 
 	/* Errors are legitimate for non-integer byte multiples */
-	if (val_bytes > 0)
-		component->val_bytes = val_bytes;
+
+	if (!component->regmap)
+		return 0;
+
+	val_bytes = regmap_get_val_bytes(component->regmap);
+	if (val_bytes < 0)
+		return 0;
+
+	return val_bytes;
 }
+EXPORT_SYMBOL_GPL(snd_soc_component_regmap_val_bytes);
 
 #ifdef CONFIG_REGMAP
 
@@ -450,7 +411,6 @@ void snd_soc_component_init_regmap(struct snd_soc_component *component,
 				   struct regmap *regmap)
 {
 	component->regmap = regmap;
-	snd_soc_component_setup_regmap(component);
 }
 EXPORT_SYMBOL_GPL(snd_soc_component_init_regmap);
 
@@ -885,6 +845,18 @@ int snd_soc_component_update_bits_async(struct snd_soc_component *component,
 }
 EXPORT_SYMBOL_GPL(snd_soc_component_update_bits_async);
 
+static inline int soc_component_field_shift(struct snd_soc_component *component,
+					    unsigned int mask)
+{
+	if (!mask) {
+		dev_err(component->dev,	"ASoC: error field mask is zero for %s\n",
+			component->name);
+		return 0;
+	}
+
+	return (ffs(mask) - 1);
+}
+
 /**
  * snd_soc_component_read_field() - Read register field value
  * @component: Component to read from
@@ -1119,8 +1091,8 @@ int snd_soc_pcm_component_new(struct snd_soc_pcm_runtime *rtd)
 	int i;
 
 	for_each_rtd_components(rtd, i, component) {
-		if (component->driver->pcm_construct) {
-			ret = component->driver->pcm_construct(component, rtd);
+		if (component->driver->pcm_new) {
+			ret = component->driver->pcm_new(component, rtd);
 			if (ret < 0)
 				return soc_component_ret(component, ret);
 		}
@@ -1138,8 +1110,8 @@ void snd_soc_pcm_component_free(struct snd_soc_pcm_runtime *rtd)
 		return;
 
 	for_each_rtd_components(rtd, i, component)
-		if (component->driver->pcm_destruct)
-			component->driver->pcm_destruct(component, rtd->pcm);
+		if (component->driver->pcm_free)
+			component->driver->pcm_free(component, rtd->pcm);
 }
 
 int snd_soc_pcm_component_prepare(struct snd_pcm_substream *substream)
