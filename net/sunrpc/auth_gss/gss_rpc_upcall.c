@@ -121,12 +121,6 @@ out:
 	return result;
 }
 
-void init_gssp_clnt(struct sunrpc_net *sn)
-{
-	mutex_init(&sn->gssp_lock);
-	sn->gssp_clnt = NULL;
-}
-
 int set_gssp_clnt(struct net *net)
 {
 	struct sunrpc_net *sn = net_generic(net, sunrpc_net_id);
@@ -214,7 +208,7 @@ static int gssp_alloc_receive_pages(struct gssx_arg_accept_sec_context *arg)
 	unsigned int i;
 
 	arg->npages = DIV_ROUND_UP(NGROUPS_MAX * 4, PAGE_SIZE);
-	arg->pages = kcalloc(arg->npages, sizeof(struct page *), GFP_KERNEL);
+	arg->pages = kzalloc_objs(struct page *, arg->npages);
 	if (!arg->pages)
 		return -ENOMEM;
 	for (i = 0; i < arg->npages; i++) {

@@ -20,7 +20,6 @@
 #include <linux/sched.h>
 #include <linux/delay.h>
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/property.h>
 #include <linux/units.h>
 
@@ -39,7 +38,7 @@
 #define AD7192_REG_CONF		2 /* Configuration Register  (RW, 24-bit) */
 #define AD7192_REG_DATA		3 /* Data Register	     (RO, 24/32-bit) */
 #define AD7192_REG_ID		4 /* ID Register	     (RO, 8-bit) */
-#define AD7192_REG_GPOCON	5 /* GPOCON Register	     (RO, 8-bit) */
+#define AD7192_REG_GPOCON	5 /* GPOCON Register	     (RW, 8-bit) */
 #define AD7192_REG_OFFSET	6 /* Offset Register	     (RW, 16-bit */
 				  /* (AD7792)/24-bit (AD7192)) */
 #define AD7192_REG_FULLSALE	7 /* Full-Scale Register */
@@ -576,7 +575,12 @@ static int ad7192_setup(struct iio_dev *indio_dev, struct device *dev)
 	ret = ad_sd_reset(&st->sd);
 	if (ret < 0)
 		return ret;
-	usleep_range(500, 1000); /* Wait for at least 500us */
+
+	/*
+	 * Per AD7192 datasheet (Rev. A, page 34, RESET section), allow
+	 * 500 us after a reset before accessing on-chip registers.
+	 */
+	fsleep(500);
 
 	/* write/read test for device presence */
 	ret = ad_sd_read_reg(&st->sd, AD7192_REG_ID, 1, &id);
@@ -1402,9 +1406,6 @@ static int ad7192_probe(struct spi_device *spi)
 	st->int_vref_mv = ret == -ENODEV ? avdd_mv : ret / MILLI;
 
 	st->chip_info = spi_get_device_match_data(spi);
-	if (!st->chip_info)
-		return -ENODEV;
-
 	indio_dev->name = st->chip_info->name;
 	indio_dev->modes = INDIO_DIRECT_MODE;
 	indio_dev->info = st->chip_info->info;
@@ -1447,11 +1448,11 @@ static const struct of_device_id ad7192_of_match[] = {
 MODULE_DEVICE_TABLE(of, ad7192_of_match);
 
 static const struct spi_device_id ad7192_ids[] = {
-	{ "ad7190", (kernel_ulong_t)&ad7192_chip_info_tbl[ID_AD7190] },
-	{ "ad7192", (kernel_ulong_t)&ad7192_chip_info_tbl[ID_AD7192] },
-	{ "ad7193", (kernel_ulong_t)&ad7192_chip_info_tbl[ID_AD7193] },
-	{ "ad7194", (kernel_ulong_t)&ad7192_chip_info_tbl[ID_AD7194] },
-	{ "ad7195", (kernel_ulong_t)&ad7192_chip_info_tbl[ID_AD7195] },
+	{ .name = "ad7190", .driver_data = (kernel_ulong_t)&ad7192_chip_info_tbl[ID_AD7190] },
+	{ .name = "ad7192", .driver_data = (kernel_ulong_t)&ad7192_chip_info_tbl[ID_AD7192] },
+	{ .name = "ad7193", .driver_data = (kernel_ulong_t)&ad7192_chip_info_tbl[ID_AD7193] },
+	{ .name = "ad7194", .driver_data = (kernel_ulong_t)&ad7192_chip_info_tbl[ID_AD7194] },
+	{ .name = "ad7195", .driver_data = (kernel_ulong_t)&ad7192_chip_info_tbl[ID_AD7195] },
 	{ }
 };
 MODULE_DEVICE_TABLE(spi, ad7192_ids);

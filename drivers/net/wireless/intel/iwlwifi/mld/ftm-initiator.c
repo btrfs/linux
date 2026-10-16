@@ -71,24 +71,34 @@ iwl_mld_ftm_set_target_chandef(struct iwl_mld *mld,
 
 	switch (peer->chandef.width) {
 	case NL80211_CHAN_WIDTH_20_NOHT:
-		target->format_bw = IWL_LOCATION_FRAME_FORMAT_LEGACY;
-		target->format_bw |= IWL_LOCATION_BW_20MHZ << LOCATION_BW_POS;
+		target->format_bw = u8_encode_bits(IWL_LOCATION_FRAME_FORMAT_LEGACY,
+						   IWL_LOCATION_FMT_BW_FORMAT);
+		target->format_bw |= u8_encode_bits(IWL_LOCATION_BW_20MHZ,
+						    IWL_LOCATION_FMT_BW_BANDWIDTH);
 		break;
 	case NL80211_CHAN_WIDTH_20:
-		target->format_bw = IWL_LOCATION_FRAME_FORMAT_HT;
-		target->format_bw |= IWL_LOCATION_BW_20MHZ << LOCATION_BW_POS;
+		target->format_bw = u8_encode_bits(IWL_LOCATION_FRAME_FORMAT_HT,
+						   IWL_LOCATION_FMT_BW_FORMAT);
+		target->format_bw |= u8_encode_bits(IWL_LOCATION_BW_20MHZ,
+						    IWL_LOCATION_FMT_BW_BANDWIDTH);
 		break;
 	case NL80211_CHAN_WIDTH_40:
-		target->format_bw = IWL_LOCATION_FRAME_FORMAT_HT;
-		target->format_bw |= IWL_LOCATION_BW_40MHZ << LOCATION_BW_POS;
+		target->format_bw = u8_encode_bits(IWL_LOCATION_FRAME_FORMAT_HT,
+						   IWL_LOCATION_FMT_BW_FORMAT);
+		target->format_bw |= u8_encode_bits(IWL_LOCATION_BW_40MHZ,
+						    IWL_LOCATION_FMT_BW_BANDWIDTH);
 		break;
 	case NL80211_CHAN_WIDTH_80:
-		target->format_bw = IWL_LOCATION_FRAME_FORMAT_VHT;
-		target->format_bw |= IWL_LOCATION_BW_80MHZ << LOCATION_BW_POS;
+		target->format_bw = u8_encode_bits(IWL_LOCATION_FRAME_FORMAT_VHT,
+						   IWL_LOCATION_FMT_BW_FORMAT);
+		target->format_bw |= u8_encode_bits(IWL_LOCATION_BW_80MHZ,
+						    IWL_LOCATION_FMT_BW_BANDWIDTH);
 		break;
 	case NL80211_CHAN_WIDTH_160:
-		target->format_bw = IWL_LOCATION_FRAME_FORMAT_HE;
-		target->format_bw |= IWL_LOCATION_BW_160MHZ << LOCATION_BW_POS;
+		target->format_bw = u8_encode_bits(IWL_LOCATION_FRAME_FORMAT_HE,
+						   IWL_LOCATION_FMT_BW_FORMAT);
+		target->format_bw |= u8_encode_bits(IWL_LOCATION_BW_160MHZ,
+						    IWL_LOCATION_FMT_BW_BANDWIDTH);
 		break;
 	default:
 		IWL_ERR(mld, "Unsupported BW in FTM request (%d)\n",
@@ -447,5 +457,26 @@ void iwl_mld_ftm_restart_cleanup(struct iwl_mld *mld)
 
 	cfg80211_pmsr_complete(mld->ftm_initiator.req_wdev,
 			       mld->ftm_initiator.req, GFP_KERNEL);
+	iwl_mld_ftm_reset(mld);
+}
+
+void iwl_mld_ftm_abort(struct iwl_mld *mld, struct cfg80211_pmsr_request *req)
+{
+	struct iwl_tof_range_abort_cmd cmd = {
+		.request_id = req->cookie,
+	};
+
+	lockdep_assert_wiphy(mld->wiphy);
+
+	if (req != mld->ftm_initiator.req)
+		return;
+
+	if (iwl_mld_send_cmd_pdu(mld, WIDE_ID(LOCATION_GROUP,
+					      TOF_RANGE_ABORT_CMD),
+				 &cmd))
+		IWL_ERR(mld, "failed to abort FTM process\n");
+
+	iwl_mld_cancel_notifications_of_object(mld, IWL_MLD_OBJECT_TYPE_FTM_REQ,
+					       mld->ftm_initiator.req->cookie);
 	iwl_mld_ftm_reset(mld);
 }

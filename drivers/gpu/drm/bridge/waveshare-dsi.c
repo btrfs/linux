@@ -12,6 +12,7 @@
 #include <linux/of_graph.h>
 #include <linux/regmap.h>
 
+#include <drm/drm_atomic_state_helper.h>
 #include <drm/drm_bridge.h>
 #include <drm/drm_mipi_dsi.h>
 #include <drm/drm_of.h>
@@ -66,7 +67,14 @@ static int ws_bridge_attach_dsi(struct ws_bridge *ws)
 	dsi->mode_flags = MIPI_DSI_MODE_VIDEO_HSE | MIPI_DSI_MODE_VIDEO |
 			  MIPI_DSI_CLOCK_NON_CONTINUOUS;
 	dsi->format = MIPI_DSI_FMT_RGB888;
-	dsi->lanes = 2;
+	ret = drm_of_get_data_lanes_count_ep(dev->of_node, 0, 0, 1, 4);
+	if (ret < 0) {
+		dev_warn(dev, "Invalid or missing DSI lane count %d, falling back to 2 lanes\n",
+			 ret);
+		dsi->lanes = 2;	/* Old DT backward compatibility */
+	} else {
+		dsi->lanes = ret;
+	}
 
 	ret = devm_mipi_dsi_attach(dev, dsi);
 	if (ret < 0)
@@ -80,17 +88,13 @@ static int ws_bridge_bridge_attach(struct drm_bridge *bridge,
 				   enum drm_bridge_attach_flags flags)
 {
 	struct ws_bridge *ws = bridge_to_ws_bridge(bridge);
-	int ret;
-
-	ret = ws_bridge_attach_dsi(ws);
-	if (ret)
-		return ret;
 
 	return drm_bridge_attach(encoder, ws->next_bridge,
 				 &ws->bridge, flags);
 }
 
-static void ws_bridge_bridge_enable(struct drm_bridge *bridge)
+static void ws_bridge_bridge_enable(struct drm_bridge *bridge,
+				    struct drm_atomic_commit *commit)
 {
 	struct ws_bridge *ws = bridge_to_ws_bridge(bridge);
 
@@ -98,7 +102,8 @@ static void ws_bridge_bridge_enable(struct drm_bridge *bridge)
 	backlight_enable(ws->backlight);
 }
 
-static void ws_bridge_bridge_disable(struct drm_bridge *bridge)
+static void ws_bridge_bridge_disable(struct drm_bridge *bridge,
+				     struct drm_atomic_commit *commit)
 {
 	struct ws_bridge *ws = bridge_to_ws_bridge(bridge);
 
@@ -107,8 +112,11 @@ static void ws_bridge_bridge_disable(struct drm_bridge *bridge)
 }
 
 static const struct drm_bridge_funcs ws_bridge_bridge_funcs = {
-	.enable = ws_bridge_bridge_enable,
-	.disable = ws_bridge_bridge_disable,
+	.atomic_create_state = drm_atomic_helper_bridge_create_state,
+	.atomic_destroy_state = drm_atomic_helper_bridge_destroy_state,
+	.atomic_duplicate_state = drm_atomic_helper_bridge_duplicate_state,
+	.atomic_enable = ws_bridge_bridge_enable,
+	.atomic_disable = ws_bridge_bridge_disable,
 	.attach = ws_bridge_bridge_attach,
 };
 
@@ -161,6 +169,7 @@ static int ws_bridge_probe(struct i2c_client *i2c)
 		return dev_err_probe(dev, ret, "Failed to find remote panel\n");
 
 	ws->next_bridge = devm_drm_panel_bridge_add(dev, panel);
+	drm_panel_put(panel);
 	if (IS_ERR(ws->next_bridge))
 		return PTR_ERR(ws->next_bridge);
 
@@ -175,15 +184,16 @@ static int ws_bridge_probe(struct i2c_client *i2c)
 	regmap_write(ws->reg_map, 0xc2, 0x01);
 	regmap_write(ws->reg_map, 0xac, 0x01);
 
-	ws->bridge.type = DRM_MODE_CONNECTOR_DPI;
+	ws->bridge.type = (uintptr_t)i2c_get_match_data(i2c);
 	ws->bridge.of_node = dev->of_node;
 	devm_drm_bridge_add(dev, &ws->bridge);
 
-	return 0;
+	return ws_bridge_attach_dsi(ws);
 }
 
 static const struct of_device_id ws_bridge_of_ids[] = {
-	{.compatible = "waveshare,dsi2dpi",},
+	{.compatible = "waveshare,dsi2dpi", .data = (void *)DRM_MODE_CONNECTOR_DPI, },
+	{.compatible = "waveshare,dsi2lvds", .data = (void *)DRM_MODE_CONNECTOR_LVDS, },
 	{ }
 };
 

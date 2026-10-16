@@ -184,20 +184,22 @@ static noinstr void enter_s2idle_proper(struct cpuidle_driver *drv,
  * cpuidle_enter_s2idle - Enter an idle state suitable for suspend-to-idle.
  * @drv: cpuidle driver for the given CPU.
  * @dev: cpuidle device for the given CPU.
+ * @latency_limit_ns: Idle state exit latency limit
  *
  * If there are states with the ->enter_s2idle callback, find the deepest of
  * them and enter it with frozen tick.
  */
-int cpuidle_enter_s2idle(struct cpuidle_driver *drv, struct cpuidle_device *dev)
+int cpuidle_enter_s2idle(struct cpuidle_driver *drv, struct cpuidle_device *dev,
+			 u64 latency_limit_ns)
 {
 	int index;
 
 	/*
-	 * Find the deepest state with ->enter_s2idle present, which guarantees
-	 * that interrupts won't be enabled when it exits and allows the tick to
-	 * be frozen safely.
+	 * Find the deepest state with ->enter_s2idle present that meets the
+	 * specified latency limit, which guarantees that interrupts won't be
+	 * enabled when it exits and allows the tick to be frozen safely.
 	 */
-	index = find_deepest_state(drv, dev, U64_MAX, 0, true);
+	index = find_deepest_state(drv, dev, latency_limit_ns, 0, true);
 	if (index > 0) {
 		enter_s2idle_proper(drv, dev, index);
 		local_irq_enable();
@@ -677,16 +679,16 @@ int cpuidle_register_device(struct cpuidle_device *dev)
 	if (!dev)
 		return -EINVAL;
 
-	mutex_lock(&cpuidle_lock);
+	guard(mutex)(&cpuidle_lock);
 
 	if (dev->registered)
-		goto out_unlock;
+		return ret;
 
 	__cpuidle_device_init(dev);
 
 	ret = __cpuidle_register_device(dev);
 	if (ret)
-		goto out_unlock;
+		return ret;
 
 	ret = cpuidle_add_sysfs(dev);
 	if (ret)
@@ -698,19 +700,34 @@ int cpuidle_register_device(struct cpuidle_device *dev)
 
 	cpuidle_install_idle_handler();
 
-out_unlock:
-	mutex_unlock(&cpuidle_lock);
-
 	return ret;
 
 out_sysfs:
 	cpuidle_remove_sysfs(dev);
 out_unregister:
 	__cpuidle_unregister_device(dev);
-	goto out_unlock;
+
+	return ret;
 }
 
 EXPORT_SYMBOL_GPL(cpuidle_register_device);
+
+void cpuidle_unregister_device_no_lock(struct cpuidle_device *dev)
+{
+	if (!dev || dev->registered == 0)
+		return;
+
+	lockdep_assert_held(&cpuidle_lock);
+
+	cpuidle_disable_device(dev);
+
+	cpuidle_remove_sysfs(dev);
+
+	__cpuidle_unregister_device(dev);
+
+	cpuidle_coupled_unregister_device(dev);
+}
+EXPORT_SYMBOL_GPL(cpuidle_unregister_device_no_lock);
 
 /**
  * cpuidle_unregister_device - unregisters a CPU's idle PM feature
@@ -722,18 +739,9 @@ void cpuidle_unregister_device(struct cpuidle_device *dev)
 		return;
 
 	cpuidle_pause_and_lock();
-
-	cpuidle_disable_device(dev);
-
-	cpuidle_remove_sysfs(dev);
-
-	__cpuidle_unregister_device(dev);
-
-	cpuidle_coupled_unregister_device(dev);
-
+	cpuidle_unregister_device_no_lock(dev);
 	cpuidle_resume_and_unlock();
 }
-
 EXPORT_SYMBOL_GPL(cpuidle_unregister_device);
 
 /**

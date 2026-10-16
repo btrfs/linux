@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
 /*
- * Copyright (C) 2024-2025 Intel Corporation
+ * Copyright (C) 2024-2026 Intel Corporation
  */
 
 #include <linux/ieee80211.h>
@@ -13,6 +13,7 @@
 #include "key.h"
 #include "agg.h"
 #include "tlc.h"
+#include "nan.h"
 #include "fw/api/sta.h"
 #include "fw/api/mac.h"
 #include "fw/api/rx.h"
@@ -43,13 +44,13 @@ int iwl_mld_fw_sta_id_from_link_sta(struct iwl_mld *mld,
 
 static void
 iwl_mld_fill_ampdu_size_and_dens(struct ieee80211_link_sta *link_sta,
-				 struct ieee80211_bss_conf *link,
+				 bool is_6ghz,
 				 __le32 *tx_ampdu_max_size,
 				 __le32 *tx_ampdu_spacing)
 {
 	u32 agg_size = 0, mpdu_dens = 0;
 
-	if (WARN_ON(!link_sta || !link))
+	if (WARN_ON(!link_sta))
 		return;
 
 	/* Note that we always use only legacy & highest supported PPDUs, so
@@ -63,7 +64,7 @@ iwl_mld_fill_ampdu_size_and_dens(struct ieee80211_link_sta *link_sta,
 		mpdu_dens = link_sta->ht_cap.ampdu_density;
 	}
 
-	if (link->chanreq.oper.chan->band == NL80211_BAND_6GHZ) {
+	if (is_6ghz) {
 		/* overwrite HT values on 6 GHz */
 		mpdu_dens =
 			le16_get_bits(link_sta->he_6ghz_capa.capa,
@@ -354,10 +355,9 @@ static void iwl_mld_fill_pkt_ext(struct iwl_mld *mld,
 
 	for (int i = 0; i < MAX_HE_SUPP_NSS; i++) {
 		for (int bw = 0;
-		     bw < ARRAY_SIZE(*pkt_ext->pkt_ext_qam_th[i]);
+		     bw < ARRAY_SIZE(pkt_ext->pkt_ext_qam_th[i]);
 		     bw++) {
-			u8 *qam_th =
-				&pkt_ext->pkt_ext_qam_th[i][bw][0];
+			u8 *qam_th = pkt_ext->pkt_ext_qam_th[i][bw];
 
 			IWL_DEBUG_HT(mld,
 				     "PPE table: nss[%d] bw[%d] PPET8 = %d, PPET16 = %d\n",
@@ -398,41 +398,109 @@ static u32 iwl_mld_get_htc_flags(struct ieee80211_link_sta *link_sta)
 	return htc_flags;
 }
 
+/* Note: modifies the command depending on FW command version */
 static int iwl_mld_send_sta_cmd(struct iwl_mld *mld,
-				const struct iwl_sta_cfg_cmd *cmd)
+				struct iwl_sta_cfg_cmd *cmd)
 {
-	int ret = iwl_mld_send_cmd_pdu(mld,
-				       WIDE_ID(MAC_CONF_GROUP, STA_CONFIG_CMD),
-				       cmd);
+	int cmd_id = WIDE_ID(MAC_CONF_GROUP, STA_CONFIG_CMD);
+	int cmd_ver = iwl_fw_lookup_cmd_ver(mld->fw, cmd_id, 0);
+	int len = sizeof(*cmd);
+	int ret;
+
+	if (cmd_ver < 2) {
+		IWL_ERR(mld, "Unsupported STA_CONFIG_CMD version %d\n",
+			cmd_ver);
+		return -EINVAL;
+	} else if (cmd_ver == 2) {
+		struct iwl_sta_cfg_cmd_v2 *cmd_v2 = (void *)cmd;
+
+		if (WARN_ON(cmd->station_type == cpu_to_le32(STATION_TYPE_NAN_PEER_NMI) ||
+			    cmd->station_type == cpu_to_le32(STATION_TYPE_NAN_PEER_NDI) ||
+			    hweight32(le32_to_cpu(cmd->link_mask)) != 1))
+			return -EINVAL;
+		/*
+		 * These fields are located in a different place in the struct of v2.
+		 * The assumption is that UHR won't be used with FW that has v2.
+		 */
+		if (WARN_ON(cmd->mic_prep_pad_delay || cmd->mic_compute_pad_delay))
+			return -EINVAL;
+
+		len = sizeof(struct iwl_sta_cfg_cmd_v2);
+		cmd_v2->link_id = cpu_to_le32(__ffs(le32_to_cpu(cmd->link_mask)));
+	} else if (cmd->station_type ==
+		   cpu_to_le32(STATION_TYPE_NAN_MCAST_DATA)) {
+		if (WARN_ON(!hweight32(le32_to_cpu(cmd->link_mask))))
+			return -EINVAL;
+	} else if (WARN_ON(cmd->station_type != cpu_to_le32(STATION_TYPE_NAN_PEER_NMI) &&
+			   cmd->station_type != cpu_to_le32(STATION_TYPE_NAN_PEER_NDI) &&
+			   cmd->station_type != cpu_to_le32(STATION_TYPE_NAN_BCAST) &&
+			   cmd->station_type != cpu_to_le32(STATION_TYPE_NAN_MGMT) &&
+			   hweight32(le32_to_cpu(cmd->link_mask)) != 1)) {
+		return -EINVAL;
+	}
+
+	ret = iwl_mld_send_cmd_pdu(mld, cmd_id, cmd, len);
 	if (ret)
 		IWL_ERR(mld, "STA_CONFIG_CMD send failed, ret=0x%x\n", ret);
 	return ret;
 }
 
-static int
-iwl_mld_add_modify_sta_cmd(struct iwl_mld *mld,
-			   struct ieee80211_link_sta *link_sta)
+static u32 iwl_mld_get_nan_link_mask(struct iwl_mld *mld)
+{
+	struct iwl_mld_vif *nan_dev =
+		iwl_mld_vif_from_mac80211(mld->nan_device_vif);
+	struct iwl_mld_nan_link *nan_link;
+	u32 link_mask = 0;
+
+	for_each_mld_nan_valid_link(nan_dev, nan_link)
+		link_mask |= BIT(nan_link->fw_id);
+
+	return link_mask;
+}
+
+int iwl_mld_add_modify_sta_cmd(struct iwl_mld *mld,
+			      struct ieee80211_link_sta *link_sta)
 {
 	struct ieee80211_sta *sta = link_sta->sta;
 	struct iwl_mld_sta *mld_sta = iwl_mld_sta_from_mac80211(sta);
-	struct ieee80211_bss_conf *link;
-	struct iwl_mld_link *mld_link;
 	struct iwl_sta_cfg_cmd cmd = {};
 	int fw_id = iwl_mld_fw_sta_id_from_link_sta(mld, link_sta);
+	bool is_6ghz, uora_exists;
+	u32 link_mask;
 
 	lockdep_assert_wiphy(mld->wiphy);
 
-	link = link_conf_dereference_protected(mld_sta->vif,
-					       link_sta->link_id);
-
-	mld_link = iwl_mld_link_from_mac80211(link);
-
-	if (WARN_ON(!link || !mld_link) || fw_id < 0)
+	if (WARN_ON(fw_id < 0))
 		return -EINVAL;
 
+	if (mld_sta->sta_type == STATION_TYPE_NAN_PEER_NMI ||
+	    mld_sta->sta_type == STATION_TYPE_NAN_PEER_NDI) {
+		if (WARN_ON(!mld->nan_device_vif))
+			return -EINVAL;
+
+		is_6ghz = false;
+		uora_exists = false;
+
+		link_mask = iwl_mld_get_nan_link_mask(mld);
+	} else {
+		struct ieee80211_bss_conf *link;
+		struct iwl_mld_link *mld_link;
+
+		link = link_conf_dereference_protected(mld_sta->vif,
+						       link_sta->link_id);
+		mld_link = iwl_mld_link_from_mac80211(link);
+
+		if (WARN_ON(!link || !mld_link))
+			return -EINVAL;
+
+		link_mask = BIT(mld_link->fw_id);
+		is_6ghz = link->chanreq.oper.chan->band == NL80211_BAND_6GHZ;
+		uora_exists = link->uora_exists;
+	}
+
 	cmd.sta_id = cpu_to_le32(fw_id);
+	cmd.link_mask = cpu_to_le32(link_mask);
 	cmd.station_type = cpu_to_le32(mld_sta->sta_type);
-	cmd.link_id = cpu_to_le32(mld_link->fw_id);
 
 	memcpy(&cmd.peer_mld_address, sta->addr, ETH_ALEN);
 	memcpy(&cmd.peer_link_address, link_sta->addr, ETH_ALEN);
@@ -469,7 +537,13 @@ iwl_mld_add_modify_sta_cmd(struct iwl_mld *mld,
 		break;
 	}
 
-	iwl_mld_fill_ampdu_size_and_dens(link_sta, link,
+	/* In NAN, there is no association request so no initial SMPS info */
+	if (mld_sta->vif->type == NL80211_IFTYPE_NAN_DATA) {
+		cmd.mimo = cpu_to_le32(1);
+		cmd.mimo_protection = cpu_to_le32(0);
+	}
+
+	iwl_mld_fill_ampdu_size_and_dens(link_sta, is_6ghz,
 					 &cmd.tx_ampdu_max_size,
 					 &cmd.tx_ampdu_spacing);
 
@@ -481,7 +555,7 @@ iwl_mld_add_modify_sta_cmd(struct iwl_mld *mld,
 
 	if (link_sta->he_cap.has_he) {
 		cmd.trig_rnd_alloc =
-			cpu_to_le32(link->uora_exists ? 1 : 0);
+			cpu_to_le32(uora_exists ? 1 : 0);
 
 		/* PPE Thresholds */
 		iwl_mld_fill_pkt_ext(mld, link_sta, &cmd.pkt_ext);
@@ -495,10 +569,29 @@ iwl_mld_add_modify_sta_cmd(struct iwl_mld *mld,
 			cmd.ack_enabled = cpu_to_le32(1);
 	}
 
+	if (mld_sta->sta_type == STATION_TYPE_NAN_PEER_NDI) {
+		struct ieee80211_sta *nmi_sta =
+			wiphy_dereference(mld->wiphy, sta->nmi);
+		int nmi_fw_id;
+
+		/* copy the local NDI address */
+		ether_addr_copy(cmd.ndi_local_addr, mld_sta->vif->addr);
+
+		if (WARN_ON(!nmi_sta))
+			return -EINVAL;
+
+		nmi_fw_id = iwl_mld_fw_sta_id_from_link_sta(mld,
+					&nmi_sta->deflink);
+		if (nmi_fw_id < 0)
+			return -EINVAL;
+
+		cmd.nmi_sta_id = (u8) nmi_fw_id;
+	}
+
 	return iwl_mld_send_sta_cmd(mld, &cmd);
 }
 
-IWL_MLD_ALLOC_FN(link_sta, link_sta)
+IWL_MLD_ALLOC_FN_STATIC(link_sta, link_sta)
 
 static int
 iwl_mld_add_link_sta(struct iwl_mld *mld, struct ieee80211_link_sta *link_sta)
@@ -539,7 +632,7 @@ iwl_mld_add_link_sta(struct iwl_mld *mld, struct ieee80211_link_sta *link_sta)
 	if (link_sta == &link_sta->sta->deflink) {
 		mld_link_sta = &mld_sta->deflink;
 	} else {
-		mld_link_sta = kzalloc(sizeof(*mld_link_sta), GFP_KERNEL);
+		mld_link_sta = kzalloc_obj(*mld_link_sta);
 		if (!mld_link_sta)
 			return -ENOMEM;
 	}
@@ -660,8 +753,7 @@ iwl_mld_alloc_dup_data(struct iwl_mld *mld, struct iwl_mld_sta *mld_sta)
 	if (mld->fw_status.in_hw_restart)
 		return 0;
 
-	dup_data = kcalloc(mld->trans->info.num_rxqs, sizeof(*dup_data),
-			   GFP_KERNEL);
+	dup_data = kzalloc_objs(*dup_data, mld->trans->info.num_rxqs);
 	if (!dup_data)
 		return -ENOMEM;
 
@@ -695,9 +787,8 @@ static void iwl_mld_alloc_mpdu_counters(struct iwl_mld *mld,
 	    sta->tdls || !ieee80211_vif_is_mld(vif))
 		return;
 
-	mld_sta->mpdu_counters = kcalloc(mld->trans->info.num_rxqs,
-					 sizeof(*mld_sta->mpdu_counters),
-					 GFP_KERNEL);
+	mld_sta->mpdu_counters = kzalloc_objs(*mld_sta->mpdu_counters,
+				              mld->trans->info.num_rxqs);
 	if (!mld_sta->mpdu_counters)
 		return;
 
@@ -727,12 +818,25 @@ iwl_mld_init_sta(struct iwl_mld *mld, struct ieee80211_sta *sta,
 }
 
 int iwl_mld_add_sta(struct iwl_mld *mld, struct ieee80211_sta *sta,
-		    struct ieee80211_vif *vif, enum iwl_fw_sta_type type)
+		    struct ieee80211_vif *vif)
 {
 	struct iwl_mld_sta *mld_sta = iwl_mld_sta_from_mac80211(sta);
 	struct ieee80211_link_sta *link_sta;
+	enum iwl_fw_sta_type type;
 	int link_id;
 	int ret;
+
+	switch (vif->type) {
+	case NL80211_IFTYPE_NAN:
+		type = STATION_TYPE_NAN_PEER_NMI;
+		break;
+	case NL80211_IFTYPE_NAN_DATA:
+		type = STATION_TYPE_NAN_PEER_NDI;
+		break;
+	default:
+		type = STATION_TYPE_PEER;
+		break;
+	}
 
 	ret = iwl_mld_init_sta(mld, sta, vif, type);
 	if (ret)
@@ -890,7 +994,7 @@ static void iwl_mld_count_mpdu(struct ieee80211_link_sta *link_sta, int queue,
 		       sizeof(queue_counter->per_link));
 		queue_counter->window_start_time = jiffies;
 
-		IWL_DEBUG_INFO(mld, "MPDU counters are cleared\n");
+		IWL_DEBUG_EHT(mld, "MPDU counters are cleared\n");
 	}
 
 	link_counter = &queue_counter->per_link[mld_link->fw_id];
@@ -910,7 +1014,7 @@ static void iwl_mld_count_mpdu(struct ieee80211_link_sta *link_sta, int queue,
 	if (!(mld_vif->emlsr.blocked_reasons & IWL_MLD_EMLSR_BLOCKED_TPT))
 		goto unlock;
 
-	for (int i = 0; i <= IWL_FW_MAX_LINK_ID; i++)
+	for (int i = 0; i < IWL_FW_MAX_LINKS; i++)
 		total_mpdus += tx ? queue_counter->per_link[i].tx :
 				    queue_counter->per_link[i].rx;
 
@@ -973,10 +1077,9 @@ static int iwl_mld_send_aux_sta_cmd(struct iwl_mld *mld,
 }
 
 static int
-iwl_mld_add_internal_sta_to_fw(struct iwl_mld *mld,
+iwl_mld_set_internal_sta_to_fw(struct iwl_mld *mld,
 			       const struct iwl_mld_int_sta *internal_sta,
-			       u8 fw_link_id,
-			       const u8 *addr)
+			       u32 link_mask, const u8 *addr)
 {
 	struct iwl_sta_cfg_cmd cmd = {};
 
@@ -984,20 +1087,30 @@ iwl_mld_add_internal_sta_to_fw(struct iwl_mld *mld,
 		return iwl_mld_send_aux_sta_cmd(mld, internal_sta);
 
 	cmd.sta_id = cpu_to_le32((u8)internal_sta->sta_id);
-	cmd.link_id = cpu_to_le32(fw_link_id);
+	cmd.link_mask = cpu_to_le32(link_mask);
 	cmd.station_type = cpu_to_le32(internal_sta->sta_type);
 
 	/* FW doesn't allow to add a IGTK/BIGTK if the sta isn't marked as MFP.
 	 * On the other hand, FW will never check this flag during RX since
 	 * an AP/GO doesn't receive protected broadcast management frames.
 	 * So, we can set it unconditionally.
+	 *
+	 * For NAN stations associated with a NAN Device, the MFP bit must be
+	 * set to 1, as otherwise the FW will assert when a key associated with
+	 * these stations would be added.
 	 */
-	if (internal_sta->sta_type == STATION_TYPE_BCAST_MGMT)
+	if (internal_sta->sta_type == STATION_TYPE_BCAST_MGMT ||
+	    internal_sta->sta_type == STATION_TYPE_NAN_BCAST ||
+	    internal_sta->sta_type == STATION_TYPE_NAN_MGMT)
 		cmd.mfp = cpu_to_le32(1);
 
 	if (addr) {
-		memcpy(cmd.peer_mld_address, addr, ETH_ALEN);
-		memcpy(cmd.peer_link_address, addr, ETH_ALEN);
+		if (internal_sta->sta_type == STATION_TYPE_NAN_MCAST_DATA) {
+			ether_addr_copy(cmd.ndi_local_addr, addr);
+		} else {
+			memcpy(cmd.peer_mld_address, addr, ETH_ALEN);
+			memcpy(cmd.peer_link_address, addr, ETH_ALEN);
+		}
 	}
 
 	return iwl_mld_send_sta_cmd(mld, &cmd);
@@ -1006,7 +1119,8 @@ iwl_mld_add_internal_sta_to_fw(struct iwl_mld *mld,
 static int iwl_mld_add_internal_sta(struct iwl_mld *mld,
 				    struct iwl_mld_int_sta *internal_sta,
 				    enum iwl_fw_sta_type sta_type,
-				    u8 fw_link_id, const u8 *addr, u8 tid)
+				    u32 link_mask, const u8 *addr,
+				    u8 tid, bool add_txq)
 {
 	int ret, queue_id;
 
@@ -1018,10 +1132,13 @@ static int iwl_mld_add_internal_sta(struct iwl_mld *mld,
 
 	internal_sta->sta_type = sta_type;
 
-	ret = iwl_mld_add_internal_sta_to_fw(mld, internal_sta, fw_link_id,
+	ret = iwl_mld_set_internal_sta_to_fw(mld, internal_sta, link_mask,
 					     addr);
 	if (ret)
 		goto err;
+
+	if (!add_txq)
+		return 0;
 
 	queue_id = iwl_mld_allocate_internal_txq(mld, internal_sta, tid);
 	if (queue_id < 0) {
@@ -1057,8 +1174,8 @@ int iwl_mld_add_bcast_sta(struct iwl_mld *mld,
 
 	return iwl_mld_add_internal_sta(mld, &mld_link->bcast_sta,
 					STATION_TYPE_BCAST_MGMT,
-					mld_link->fw_id, addr,
-					IWL_MGMT_TID);
+					BIT(mld_link->fw_id), addr,
+					IWL_MGMT_TID, true);
 }
 
 int iwl_mld_add_mcast_sta(struct iwl_mld *mld,
@@ -1077,14 +1194,16 @@ int iwl_mld_add_mcast_sta(struct iwl_mld *mld,
 
 	return iwl_mld_add_internal_sta(mld, &mld_link->mcast_sta,
 					STATION_TYPE_MCAST,
-					mld_link->fw_id, mcast_addr, 0);
+					BIT(mld_link->fw_id), mcast_addr,
+					0, true);
 }
 
 int iwl_mld_add_aux_sta(struct iwl_mld *mld,
 			struct iwl_mld_int_sta *internal_sta)
 {
 	return iwl_mld_add_internal_sta(mld, internal_sta, STATION_TYPE_AUX,
-					0, NULL, IWL_MAX_TID_COUNT);
+					0, NULL, IWL_MAX_TID_COUNT,
+					true);
 }
 
 int iwl_mld_add_mon_sta(struct iwl_mld *mld,
@@ -1101,23 +1220,25 @@ int iwl_mld_add_mon_sta(struct iwl_mld *mld,
 
 	return iwl_mld_add_internal_sta(mld, &mld_link->mon_sta,
 					STATION_TYPE_BCAST_MGMT,
-					mld_link->fw_id, NULL,
-					IWL_MAX_TID_COUNT);
+					BIT(mld_link->fw_id), NULL,
+					IWL_MAX_TID_COUNT,
+					true);
 }
 
 static void iwl_mld_remove_internal_sta(struct iwl_mld *mld,
 					struct iwl_mld_int_sta *internal_sta,
 					bool flush, u8 tid)
 {
-	if (WARN_ON_ONCE(internal_sta->sta_id == IWL_INVALID_STA ||
-			 internal_sta->queue_id == IWL_MLD_INVALID_QUEUE))
+	if (WARN_ON_ONCE(internal_sta->sta_id == IWL_INVALID_STA))
 		return;
 
-	if (flush)
+	if (flush && !WARN_ON_ONCE(internal_sta->queue_id ==
+				   IWL_MLD_INVALID_QUEUE))
 		iwl_mld_flush_link_sta_txqs(mld, internal_sta->sta_id);
 
-	iwl_mld_free_txq(mld, BIT(internal_sta->sta_id),
-			 tid, internal_sta->queue_id);
+	if (internal_sta->queue_id != IWL_MLD_INVALID_QUEUE)
+		iwl_mld_free_txq(mld, BIT(internal_sta->sta_id),
+				 tid, internal_sta->queue_id);
 
 	iwl_mld_rm_sta_from_fw(mld, internal_sta->sta_id);
 
@@ -1163,7 +1284,8 @@ void iwl_mld_remove_aux_sta(struct iwl_mld *mld,
 	struct iwl_mld_vif *mld_vif = iwl_mld_vif_from_mac80211(vif);
 
 	if (WARN_ON(vif->type != NL80211_IFTYPE_P2P_DEVICE &&
-		    vif->type != NL80211_IFTYPE_STATION))
+		    vif->type != NL80211_IFTYPE_STATION &&
+		    vif->type != NL80211_IFTYPE_NAN))
 		return;
 
 	iwl_mld_remove_internal_sta(mld, &mld_vif->aux_sta, false,
@@ -1316,4 +1438,83 @@ remove_added_link_stas:
 	}
 
 	return ret;
+}
+
+int iwl_mld_add_nan_bcast_sta(struct iwl_mld *mld,
+			      struct iwl_mld_int_sta *sta)
+{
+	const u8 bcast_addr[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+
+	return iwl_mld_add_internal_sta(mld, sta, STATION_TYPE_NAN_BCAST,
+					0, bcast_addr, 0, false);
+}
+
+int iwl_mld_add_nan_mgmt_sta(struct iwl_mld *mld,
+			     struct iwl_mld_int_sta *sta)
+{
+	return iwl_mld_add_internal_sta(mld, sta, STATION_TYPE_NAN_MGMT,
+					0, NULL, IWL_MAX_TID_COUNT, true);
+}
+
+int iwl_mld_add_nan_mcast_data_sta(struct iwl_mld *mld,
+				   const u8 *ndi_addr,
+				   struct iwl_mld_int_sta *sta)
+{
+	u32 link_mask = iwl_mld_get_nan_link_mask(mld);
+
+	/* In case that there are no NAN links, nothing to do */
+	if (!link_mask)
+		return 0;
+
+	return iwl_mld_add_internal_sta(mld, sta,
+					STATION_TYPE_NAN_MCAST_DATA,
+					link_mask, ndi_addr,
+					0, true);
+}
+
+int iwl_mld_update_nan_mcast_data_sta(struct iwl_mld *mld,
+				      const u8 *ndi_addr,
+				      struct iwl_mld_int_sta *sta)
+{
+	u32 link_mask;
+
+	if (WARN_ON(!mld->nan_device_vif))
+		return -EINVAL;
+
+	/* If the sta doesn't exist, add it */
+	if (sta->sta_id == IWL_INVALID_STA)
+		return iwl_mld_add_nan_mcast_data_sta(mld, ndi_addr, sta);
+
+	/* The station was already added */
+	if (WARN_ON(sta->sta_type != STATION_TYPE_NAN_MCAST_DATA))
+		return -EINVAL;
+
+	link_mask = iwl_mld_get_nan_link_mask(mld);
+	if (link_mask)
+		return iwl_mld_set_internal_sta_to_fw(mld,
+						      sta, link_mask,
+						      ndi_addr);
+
+	/* If no links are associated with NAN, remove the station */
+	iwl_mld_remove_nan_mcast_data_sta(mld, sta);
+
+	return 0;
+}
+
+void iwl_mld_remove_nan_bcast_sta(struct iwl_mld *mld,
+				  struct iwl_mld_int_sta *sta)
+{
+	iwl_mld_remove_internal_sta(mld, sta, false, 0);
+}
+
+void iwl_mld_remove_nan_mgmt_sta(struct iwl_mld *mld,
+				 struct iwl_mld_int_sta *sta)
+{
+	iwl_mld_remove_internal_sta(mld, sta, true, IWL_MAX_TID_COUNT);
+}
+
+void iwl_mld_remove_nan_mcast_data_sta(struct iwl_mld *mld,
+				       struct iwl_mld_int_sta *sta)
+{
+	iwl_mld_remove_internal_sta(mld, sta, true, 0);
 }

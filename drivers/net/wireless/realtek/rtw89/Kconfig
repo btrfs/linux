@@ -41,6 +41,9 @@ config RTW89_8852C
 config RTW89_8922A
 	tristate
 
+config RTW89_8922D
+	tristate
+
 config RTW89_8851BE
 	tristate "Realtek 8851BE PCI wireless network (Wi-Fi 6) adapter"
 	depends on PCI
@@ -73,6 +76,17 @@ config RTW89_8852AE
 	  Select this option will enable support for 8852AE chipset
 
 	  802.11ax PCIe wireless network (Wi-Fi 6) adapter
+
+config RTW89_8852AU
+	tristate "Realtek 8852AU USB wireless network (Wi-Fi 6) adapter"
+	depends on USB
+	select RTW89_CORE
+	select RTW89_USB
+	select RTW89_8852A
+	help
+	  Select this option will enable support for 8852AU chipset
+
+	  802.11ax USB wireless network (Wi-Fi 6) adapter
 
 config RTW89_8852BE
 	tristate "Realtek 8852BE PCI wireless network (Wi-Fi 6) adapter"
@@ -121,6 +135,17 @@ config RTW89_8852CE
 
 	  802.11ax PCIe wireless network (Wi-Fi 6E) adapter
 
+config RTW89_8852CU
+	tristate "Realtek 8852CU USB wireless network (Wi-Fi 6E) adapter"
+	depends on USB
+	select RTW89_CORE
+	select RTW89_USB
+	select RTW89_8852C
+	help
+	  Select this option will enable support for 8852CU chipset
+
+	  802.11ax USB wireless network (Wi-Fi 6E) adapter
+
 config RTW89_8922AE
 	tristate "Realtek 8922AE/8922AE-VS PCI wireless network (Wi-Fi 7) adapter"
 	depends on PCI
@@ -134,6 +159,30 @@ config RTW89_8922AE
 	  supporting 2x2 2GHz/5GHz/6GHz 4096-QAM 160MHz channels.
 
 	  The variant 8922AE-VS has the same features except 1024-QAM.
+
+config RTW89_8922AU
+	tristate "Realtek 8922AU USB wireless network (Wi-Fi 7) adapter"
+	depends on USB
+	select RTW89_CORE
+	select RTW89_USB
+	select RTW89_8922A
+	help
+	  Select this option will enable support for 8922AU chipset
+
+	  802.11be USB wireless network (Wi-Fi 7) adapter
+	  supporting 2x2 2GHz/5GHz/6GHz 4096-QAM 160MHz channels.
+
+config RTW89_8922DE
+	tristate "Realtek 8922DE/8922DE-VS PCI wireless network (Wi-Fi 7) adapter"
+	depends on PCI
+	select RTW89_CORE
+	select RTW89_PCI
+	select RTW89_8922D
+	help
+	  Select this option will enable support for 8922DE/8922DE-VS chipset
+
+	  802.11be PCIe wireless network (Wi-Fi 7) adapter
+	  supporting 2x2 2GHz/5GHz/6GHz 4096/1024-QAM 160MHz channels.
 
 config RTW89_DEBUG
 	bool
@@ -155,5 +204,19 @@ config RTW89_DEBUGFS
 	  Enable debugfs support
 
 	  If unsure, say Y to simplify debug problems
+
+config RTW89_LEDS
+	bool
+	depends on RTW89_CORE
+	depends on LEDS_CLASS=y || LEDS_CLASS=MAC80211
+	imply MAC80211_LEDS
+	default y
+
+config RTW89_LEDS_MC
+	bool
+	depends on RTW89_LEDS
+	depends on LEDS_CLASS_MULTICOLOR
+	imply LEDS_TRIGGER_TIMER
+	default y
 
 endif

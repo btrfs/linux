@@ -150,6 +150,8 @@ struct perf_pmu *perf_pmus__find(const char *name)
 	bool core_pmu;
 	unsigned int to_read_pmus = 0;
 
+	if (!strcmp(name, "default_core"))
+		return perf_pmus__find_core_pmu();
 	/*
 	 * Once PMU is loaded it stays in the list,
 	 * so we keep us from multiple reading/parsing
@@ -409,7 +411,7 @@ struct perf_pmu *perf_pmus__scan_matching_wildcard(struct perf_pmu *pmu, const c
 	if (!pmu) {
 		/*
 		 * Core PMUs, other sysfs PMUs and tool PMU can have any name or
-		 * aren't wother optimizing for.
+		 * aren't worth optimizing for.
 		 */
 		unsigned int to_read_pmus =  PERF_TOOL_PMU_TYPE_PE_CORE_MASK |
 			PERF_TOOL_PMU_TYPE_PE_OTHER_MASK |
@@ -482,6 +484,22 @@ static struct perf_pmu *perf_pmus__scan_skip_duplicates(struct perf_pmu *pmu)
 			continue;
 
 		return pmu;
+	}
+	return NULL;
+}
+
+struct perf_pmu *perf_pmus__scan_for_uncore_id(struct perf_pmu *pmu, const char *compat)
+{
+	if (!pmu) {
+		/* Only uncore PMUs can have identifiers. */
+		unsigned int to_read_pmus = PERF_TOOL_PMU_TYPE_PE_OTHER_MASK;
+
+		pmu_read_sysfs(to_read_pmus);
+		pmu = list_prepare_entry(pmu, &other_pmus, list);
+	}
+	list_for_each_entry_continue(pmu, &other_pmus, list) {
+		if (pmu->id && pmu_uncore_identifier_match(compat, pmu->id))
+			return pmu;
 	}
 	return NULL;
 }
@@ -621,7 +639,7 @@ void perf_pmus__print_pmu_events(const struct print_callbacks *print_cb, void *p
 	while ((pmu = scan_fn(pmu)) != NULL)
 		len += perf_pmu__num_events(pmu);
 
-	aliases = zalloc(sizeof(struct sevent) * len);
+	aliases = calloc(len, sizeof(struct sevent));
 	if (!aliases) {
 		pr_err("FATAL: not enough memory to print PMU events\n");
 		return;

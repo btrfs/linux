@@ -682,8 +682,8 @@ static unsigned long lvds_pixel_clk_recalc_rate(struct clk_hw *hw,
 	return (unsigned long)lvds->pixel_clock_rate;
 }
 
-static long lvds_pixel_clk_round_rate(struct clk_hw *hw, unsigned long rate,
-				      unsigned long *parent_rate)
+static int lvds_pixel_clk_determine_rate(struct clk_hw *hw,
+					 struct clk_rate_request *req)
 {
 	struct stm_lvds *lvds = container_of(hw, struct stm_lvds, lvds_ck_px);
 	unsigned int pll_in_khz, bdiv = 0, mdiv = 0, ndiv = 0;
@@ -703,7 +703,7 @@ static long lvds_pixel_clk_round_rate(struct clk_hw *hw, unsigned long rate,
 	mode = list_first_entry(&connector->modes,
 				struct drm_display_mode, head);
 
-	pll_in_khz = (unsigned int)(*parent_rate / 1000);
+	pll_in_khz = (unsigned int)(req->best_parent_rate / 1000);
 
 	if (lvds_is_dual_link(lvds->link_type))
 		multiplier = 2;
@@ -719,14 +719,16 @@ static long lvds_pixel_clk_round_rate(struct clk_hw *hw, unsigned long rate,
 	lvds->pixel_clock_rate = (unsigned long)pll_get_clkout_khz(pll_in_khz, bdiv, mdiv, ndiv)
 					 * 1000 * multiplier / 7;
 
-	return lvds->pixel_clock_rate;
+	req->rate = lvds->pixel_clock_rate;
+
+	return 0;
 }
 
 static const struct clk_ops lvds_pixel_clk_ops = {
 	.enable = lvds_pixel_clk_enable,
 	.disable = lvds_pixel_clk_disable,
 	.recalc_rate = lvds_pixel_clk_recalc_rate,
-	.round_rate = lvds_pixel_clk_round_rate,
+	.determine_rate = lvds_pixel_clk_determine_rate,
 };
 
 static const struct clk_init_data clk_data = {
@@ -885,7 +887,7 @@ static int lvds_connector_get_modes(struct drm_connector *connector)
 }
 
 static int lvds_connector_atomic_check(struct drm_connector *connector,
-				       struct drm_atomic_state *state)
+				       struct drm_atomic_commit *state)
 {
 	const struct drm_display_mode *panel_mode;
 	struct drm_connector_state *conn_state;
@@ -895,13 +897,13 @@ static int lvds_connector_atomic_check(struct drm_connector *connector,
 	if (!conn_state)
 		return -EINVAL;
 
+	if (!conn_state->crtc)
+		return 0;
+
 	if (list_empty(&connector->modes)) {
 		drm_dbg(connector->dev, "connector: empty modes list\n");
 		return -EINVAL;
 	}
-
-	if (!conn_state->crtc)
-		return -EINVAL;
 
 	panel_mode = list_first_entry(&connector->modes,
 				      struct drm_display_mode, head);
@@ -979,7 +981,7 @@ static int lvds_attach(struct drm_bridge *bridge, struct drm_encoder *encoder,
 }
 
 static void lvds_atomic_enable(struct drm_bridge *bridge,
-			       struct drm_atomic_state *state)
+			       struct drm_atomic_commit *state)
 {
 	struct stm_lvds *lvds = bridge_to_stm_lvds(bridge);
 	struct drm_connector_state *conn_state;
@@ -1015,7 +1017,7 @@ static void lvds_atomic_enable(struct drm_bridge *bridge,
 }
 
 static void lvds_atomic_disable(struct drm_bridge *bridge,
-				struct drm_atomic_state *state)
+				struct drm_atomic_commit *state)
 {
 	struct stm_lvds *lvds = bridge_to_stm_lvds(bridge);
 
@@ -1036,7 +1038,7 @@ static const struct drm_bridge_funcs lvds_bridge_funcs = {
 	.atomic_disable = lvds_atomic_disable,
 	.atomic_duplicate_state = drm_atomic_helper_bridge_duplicate_state,
 	.atomic_destroy_state = drm_atomic_helper_bridge_destroy_state,
-	.atomic_reset = drm_atomic_helper_bridge_reset,
+	.atomic_create_state = drm_atomic_helper_bridge_create_state,
 };
 
 static int lvds_probe(struct platform_device *pdev)
@@ -1066,20 +1068,20 @@ static int lvds_probe(struct platform_device *pdev)
 	if (IS_ERR(lvds->base)) {
 		ret = PTR_ERR(lvds->base);
 		dev_err(dev, "Unable to get regs %d\n", ret);
-		return ret;
+		goto err_put_panel;
 	}
 
 	lvds->pclk = devm_clk_get(dev, "pclk");
 	if (IS_ERR(lvds->pclk)) {
 		ret = PTR_ERR(lvds->pclk);
 		dev_err(dev, "Unable to get peripheral clock: %d\n", ret);
-		return ret;
+		goto err_put_panel;
 	}
 
 	ret = clk_prepare_enable(lvds->pclk);
 	if (ret) {
 		dev_err(dev, "%s: Failed to enable peripheral clk\n", __func__);
-		return ret;
+		goto err_put_panel;
 	}
 
 	rstc = devm_reset_control_get_exclusive(dev, NULL);
@@ -1179,6 +1181,9 @@ static int lvds_probe(struct platform_device *pdev)
 
 err_lvds_probe:
 	clk_disable_unprepare(lvds->pclk);
+err_put_panel:
+	if (lvds->panel)
+		drm_panel_put(lvds->panel);
 
 	return ret;
 }
@@ -1186,6 +1191,9 @@ err_lvds_probe:
 static void lvds_remove(struct platform_device *pdev)
 {
 	struct stm_lvds *lvds = platform_get_drvdata(pdev);
+
+	if (lvds->panel)
+		drm_panel_put(lvds->panel);
 
 	lvds_pixel_clk_unregister(lvds);
 

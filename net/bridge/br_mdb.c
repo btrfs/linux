@@ -1133,8 +1133,8 @@ static int br_mdb_config_src_list_init(struct nlattr *src_list,
 		return -EINVAL;
 	}
 
-	cfg->src_entries = kcalloc(cfg->num_src_entries,
-				   sizeof(struct br_mdb_src_entry), GFP_KERNEL);
+	cfg->src_entries = kzalloc_objs(struct br_mdb_src_entry,
+					cfg->num_src_entries);
 	if (!cfg->src_entries)
 		return -ENOMEM;
 
@@ -1523,6 +1523,8 @@ static void br_mdb_flush_pgs(struct net_bridge *br,
 		}
 
 		br_multicast_del_pg(mp, p, pp);
+		/* br_multicast_del_pg() can remove other groups from this list. */
+		pp = &mp->ports;
 	}
 }
 

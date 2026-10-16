@@ -371,7 +371,7 @@ static int udf_add_nondir(struct dentry *dentry, struct inode *inode)
 }
 
 static int udf_create(struct mnt_idmap *idmap, struct inode *dir,
-		      struct dentry *dentry, umode_t mode, bool excl)
+		      struct dentry *dentry, umode_t mode)
 {
 	struct inode *inode = udf_new_inode(dir, mode);
 
@@ -428,7 +428,7 @@ static struct dentry *udf_mkdir(struct mnt_idmap *idmap, struct inode *dir,
 	struct udf_inode_info *dinfo = UDF_I(dir);
 	struct udf_inode_info *iinfo;
 
-	inode = udf_new_inode(dir, S_IFDIR | mode);
+	inode = udf_new_inode(dir, mode);
 	if (IS_ERR(inode))
 		return ERR_CAST(inode);
 
@@ -550,7 +550,7 @@ static int udf_unlink(struct inode *dir, struct dentry *dentry)
 		goto end_unlink;
 
 	if (!inode->i_nlink) {
-		udf_debug("Deleting nonexistent file (%lu), %u\n",
+		udf_debug("Deleting nonexistent file (%llu), %u\n",
 			  inode->i_ino, inode->i_nlink);
 		set_nlink(inode, 1);
 	}
@@ -638,7 +638,7 @@ static int udf_symlink(struct mnt_idmap *idmap, struct inode *dir,
 		memset(epos.bh->b_data, 0x00, bsize);
 		set_buffer_uptodate(epos.bh);
 		unlock_buffer(epos.bh);
-		mark_buffer_dirty_inode(epos.bh, inode);
+		mmb_mark_buffer_dirty(epos.bh, &iinfo->i_metadata_bhs);
 		ea = epos.bh->b_data + udf_ext0_offset(inode);
 	} else
 		ea = iinfo->i_data + iinfo->i_lenEAttr;
@@ -809,7 +809,7 @@ static int udf_rename(struct mnt_idmap *idmap, struct inode *old_dir,
 					       &diriter);
 		if (retval == -ENOENT) {
 			udf_err(old_inode->i_sb,
-				"directory (ino %lu) has no '..' entry\n",
+				"directory (ino %llu) has no '..' entry\n",
 				old_inode->i_ino);
 			retval = -EFSCORRUPTED;
 		}
@@ -821,7 +821,7 @@ static int udf_rename(struct mnt_idmap *idmap, struct inode *old_dir,
 				old_dir->i_ino) {
 			retval = -EFSCORRUPTED;
 			udf_err(old_inode->i_sb,
-				"directory (ino %lu) has parent entry pointing to another inode (%lu != %u)\n",
+				"directory (ino %llu) has parent entry pointing to another inode (%llu != %u)\n",
 				old_inode->i_ino, old_dir->i_ino,
 				udf_get_lb_pblock(old_inode->i_sb, &tloc, 0));
 			goto out_oiter;
@@ -869,7 +869,7 @@ static int udf_rename(struct mnt_idmap *idmap, struct inode *old_dir,
 	retval = udf_fiiter_find_entry(old_dir, &old_dentry->d_name, &oiter);
 	if (retval) {
 		udf_err(old_dir->i_sb,
-			"failed to find renamed entry again in directory (ino %lu)\n",
+			"failed to find renamed entry again in directory (ino %llu)\n",
 			old_dir->i_ino);
 	} else {
 		udf_fiiter_delete_entry(&oiter);

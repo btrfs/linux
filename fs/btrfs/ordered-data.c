@@ -156,6 +156,20 @@ static struct btrfs_ordered_extent *alloc_ordered_extent(
 	const bool is_nocow = (flags &
 	       ((1U << BTRFS_ORDERED_NOCOW) | (1U << BTRFS_ORDERED_PREALLOC)));
 
+	/* Only one type flag can be set. */
+	ASSERT(has_single_bit_set(flags & BTRFS_ORDERED_EXCLUSIVE_FLAGS),
+	       "flags=0x%lx", flags);
+
+	/* DIRECT cannot be set with COMPRESSED nor ENCODED. */
+	if (test_bit(BTRFS_ORDERED_DIRECT, &flags)) {
+		ASSERT(!test_bit(BTRFS_ORDERED_COMPRESSED, &flags));
+		ASSERT(!test_bit(BTRFS_ORDERED_ENCODED, &flags));
+	}
+
+	/* ENCODED must be set with COMPRESSED. */
+	if (test_bit(BTRFS_ORDERED_ENCODED, &flags))
+		ASSERT(test_bit(BTRFS_ORDERED_COMPRESSED, &flags));
+
 	/*
 	 * For a NOCOW write we can free the qgroup reserve right now. For a COW
 	 * one we transfer the reserved space from the inode's iotree into the
@@ -197,7 +211,7 @@ static struct btrfs_ordered_extent *alloc_ordered_extent(
 	entry->flags = flags;
 	refcount_set(&entry->refs, 1);
 	init_waitqueue_head(&entry->wait);
-	INIT_LIST_HEAD(&entry->list);
+	INIT_LIST_HEAD(&entry->csum_list);
 	INIT_LIST_HEAD(&entry->log_list);
 	INIT_LIST_HEAD(&entry->root_extent_list);
 	INIT_LIST_HEAD(&entry->work_list);
@@ -237,14 +251,19 @@ static void insert_ordered_extent(struct btrfs_ordered_extent *entry)
 	/* One ref for the tree. */
 	refcount_inc(&entry->refs);
 
-	spin_lock_irq(&inode->ordered_tree_lock);
+	spin_lock(&inode->ordered_tree_lock);
 	node = tree_insert(&inode->ordered_tree, entry->file_offset,
 			   &entry->rb_node);
-	if (unlikely(node))
+	if (unlikely(node)) {
+		struct btrfs_ordered_extent *exist =
+			rb_entry(node, struct btrfs_ordered_extent, rb_node);
+
 		btrfs_panic(fs_info, -EEXIST,
-				"inconsistency in ordered tree at offset %llu",
-				entry->file_offset);
-	spin_unlock_irq(&inode->ordered_tree_lock);
+"overlapping ordered extents, existing oe file_offset %llu num_bytes %llu flags 0x%lx, new oe file_offset %llu num_bytes %llu flags 0x%lx",
+			    exist->file_offset, exist->num_bytes, exist->flags,
+			    entry->file_offset, entry->num_bytes, entry->flags);
+	}
+	spin_unlock(&inode->ordered_tree_lock);
 
 	spin_lock(&root->ordered_extent_lock);
 	list_add_tail(&entry->root_extent_list,
@@ -284,7 +303,7 @@ struct btrfs_ordered_extent *btrfs_alloc_ordered_extent(
 {
 	struct btrfs_ordered_extent *entry;
 
-	ASSERT((flags & ~BTRFS_ORDERED_TYPE_FLAGS) == 0);
+	ASSERT((flags & ~BTRFS_ORDERED_TYPE_FLAGS) == 0, "flags=0x%lx", flags);
 
 	/*
 	 * For regular writes, we just use the members in @file_extent.
@@ -328,15 +347,27 @@ void btrfs_add_ordered_sum(struct btrfs_ordered_extent *entry,
 {
 	struct btrfs_inode *inode = entry->inode;
 
-	spin_lock_irq(&inode->ordered_tree_lock);
-	list_add_tail(&sum->list, &entry->list);
-	spin_unlock_irq(&inode->ordered_tree_lock);
+	spin_lock(&inode->ordered_tree_lock);
+	list_add_tail(&sum->list, &entry->csum_list);
+	spin_unlock(&inode->ordered_tree_lock);
 }
 
 void btrfs_mark_ordered_extent_error(struct btrfs_ordered_extent *ordered)
 {
 	if (!test_and_set_bit(BTRFS_ORDERED_IOERR, &ordered->flags))
 		mapping_set_error(ordered->inode->vfs_inode.i_mapping, -EIO);
+}
+
+void btrfs_mark_ordered_extent_truncated(struct btrfs_ordered_extent *ordered,
+					 u64 truncate_len)
+{
+	struct btrfs_inode *inode = ordered->inode;
+
+	ASSERT(truncate_len <= ordered->num_bytes);
+	spin_lock(&inode->ordered_tree_lock);
+	set_bit(BTRFS_ORDERED_TRUNCATED, &ordered->flags);
+	ordered->truncated_len = min(ordered->truncated_len, truncate_len);
+	spin_unlock(&inode->ordered_tree_lock);
 }
 
 static void finish_ordered_fn(struct btrfs_work *work)
@@ -348,29 +379,12 @@ static void finish_ordered_fn(struct btrfs_work *work)
 }
 
 static bool can_finish_ordered_extent(struct btrfs_ordered_extent *ordered,
-				      struct folio *folio, u64 file_offset,
-				      u64 len, bool uptodate)
+				      u64 file_offset, u64 len, bool uptodate)
 {
 	struct btrfs_inode *inode = ordered->inode;
 	struct btrfs_fs_info *fs_info = inode->root->fs_info;
 
 	lockdep_assert_held(&inode->ordered_tree_lock);
-
-	if (folio) {
-		ASSERT(folio->mapping);
-		ASSERT(folio_pos(folio) <= file_offset);
-		ASSERT(file_offset + len <= folio_end(folio));
-
-		/*
-		 * Ordered flag indicates whether we still have
-		 * pending io unfinished for the ordered extent.
-		 *
-		 * If it's not set, we need to skip to next range.
-		 */
-		if (!btrfs_folio_test_ordered(fs_info, folio, file_offset, len))
-			return false;
-		btrfs_folio_clear_ordered(fs_info, folio, file_offset, len);
-	}
 
 	/* Now we're fine to update the accounting. */
 	if (WARN_ON_ONCE(len > ordered->bytes_left)) {
@@ -385,7 +399,7 @@ static bool can_finish_ordered_extent(struct btrfs_ordered_extent *ordered,
 	}
 
 	if (!uptodate)
-		set_bit(BTRFS_ORDERED_IOERR, &ordered->flags);
+		btrfs_mark_ordered_extent_error(ordered);
 
 	if (ordered->bytes_left)
 		return false;
@@ -413,19 +427,17 @@ static void btrfs_queue_ordered_fn(struct btrfs_ordered_extent *ordered)
 }
 
 void btrfs_finish_ordered_extent(struct btrfs_ordered_extent *ordered,
-				 struct folio *folio, u64 file_offset, u64 len,
-				 bool uptodate)
+				 u64 file_offset, u64 len, bool uptodate)
 {
 	struct btrfs_inode *inode = ordered->inode;
-	unsigned long flags;
 	bool ret;
 
 	trace_btrfs_finish_ordered_extent(inode, file_offset, len, uptodate);
 
-	spin_lock_irqsave(&inode->ordered_tree_lock, flags);
-	ret = can_finish_ordered_extent(ordered, folio, file_offset, len,
+	spin_lock(&inode->ordered_tree_lock);
+	ret = can_finish_ordered_extent(ordered, file_offset, len,
 					uptodate);
-	spin_unlock_irqrestore(&inode->ordered_tree_lock, flags);
+	spin_unlock(&inode->ordered_tree_lock);
 
 	/*
 	 * If this is a COW write it means we created new extent maps for the
@@ -476,23 +488,20 @@ void btrfs_finish_ordered_extent(struct btrfs_ordered_extent *ordered,
  * extent(s) covering it.
  */
 void btrfs_mark_ordered_io_finished(struct btrfs_inode *inode,
-				    struct folio *folio, u64 file_offset,
-				    u64 num_bytes, bool uptodate)
+				    u64 file_offset, u64 num_bytes, bool uptodate)
 {
 	struct rb_node *node;
 	struct btrfs_ordered_extent *entry = NULL;
-	unsigned long flags;
 	u64 cur = file_offset;
+	const u64 end = file_offset + num_bytes;
 
-	trace_btrfs_writepage_end_io_hook(inode, file_offset,
-					  file_offset + num_bytes - 1,
-					  uptodate);
+	trace_btrfs_writepage_end_io_hook(inode, file_offset, end - 1, uptodate);
 
-	spin_lock_irqsave(&inode->ordered_tree_lock, flags);
-	while (cur < file_offset + num_bytes) {
+	spin_lock(&inode->ordered_tree_lock);
+	while (cur < end) {
 		u64 entry_end;
-		u64 end;
-		u32 len;
+		u64 this_end;
+		u64 len;
 
 		node = ordered_tree_search(inode, cur);
 		/* No ordered extents at all */
@@ -535,19 +544,18 @@ void btrfs_mark_ordered_io_finished(struct btrfs_inode *inode,
 		 *	|
 		 *	cur
 		 */
-		end = min(entry->file_offset + entry->num_bytes,
-			  file_offset + num_bytes) - 1;
-		ASSERT(end + 1 - cur < U32_MAX);
-		len = end + 1 - cur;
+		this_end = min(entry_end, end);
+		len = this_end - cur;
+		ASSERT(len < U32_MAX);
 
-		if (can_finish_ordered_extent(entry, folio, cur, len, uptodate)) {
-			spin_unlock_irqrestore(&inode->ordered_tree_lock, flags);
+		if (can_finish_ordered_extent(entry, cur, len, uptodate)) {
+			spin_unlock(&inode->ordered_tree_lock);
 			btrfs_queue_ordered_fn(entry);
-			spin_lock_irqsave(&inode->ordered_tree_lock, flags);
+			spin_lock(&inode->ordered_tree_lock);
 		}
 		cur += len;
 	}
-	spin_unlock_irqrestore(&inode->ordered_tree_lock, flags);
+	spin_unlock(&inode->ordered_tree_lock);
 }
 
 /*
@@ -573,10 +581,9 @@ bool btrfs_dec_test_ordered_pending(struct btrfs_inode *inode,
 {
 	struct rb_node *node;
 	struct btrfs_ordered_extent *entry = NULL;
-	unsigned long flags;
 	bool finished = false;
 
-	spin_lock_irqsave(&inode->ordered_tree_lock, flags);
+	spin_lock(&inode->ordered_tree_lock);
 	if (cached && *cached) {
 		entry = *cached;
 		goto have_entry;
@@ -613,7 +620,7 @@ out:
 		refcount_inc(&entry->refs);
 		trace_btrfs_ordered_extent_dec_test_pending(inode, entry);
 	}
-	spin_unlock_irqrestore(&inode->ordered_tree_lock, flags);
+	spin_unlock(&inode->ordered_tree_lock);
 	return finished;
 }
 
@@ -633,7 +640,7 @@ void btrfs_put_ordered_extent(struct btrfs_ordered_extent *entry)
 		ASSERT(list_empty(&entry->log_list));
 		ASSERT(RB_EMPTY_NODE(&entry->rb_node));
 		btrfs_add_delayed_iput(entry->inode);
-		list_for_each_entry_safe(sum, tmp, &entry->list, list)
+		list_for_each_entry_safe(sum, tmp, &entry->csum_list, list)
 			kvfree(sum);
 		kmem_cache_free(btrfs_ordered_extent_cache, entry);
 	}
@@ -643,9 +650,9 @@ void btrfs_put_ordered_extent(struct btrfs_ordered_extent *entry)
  * remove an ordered extent from the tree.  No references are dropped
  * and waiters are woken up.
  */
-void btrfs_remove_ordered_extent(struct btrfs_inode *btrfs_inode,
-				 struct btrfs_ordered_extent *entry)
+void btrfs_remove_ordered_extent(struct btrfs_ordered_extent *entry)
 {
+	struct btrfs_inode *btrfs_inode = entry->inode;
 	struct btrfs_root *root = btrfs_inode->root;
 	struct btrfs_fs_info *fs_info = root->fs_info;
 	struct rb_node *node;
@@ -678,7 +685,7 @@ void btrfs_remove_ordered_extent(struct btrfs_inode *btrfs_inode,
 	percpu_counter_add_batch(&fs_info->ordered_bytes, -entry->num_bytes,
 				 fs_info->delalloc_batch);
 
-	spin_lock_irq(&btrfs_inode->ordered_tree_lock);
+	spin_lock(&btrfs_inode->ordered_tree_lock);
 	node = &entry->rb_node;
 	rb_erase(node, &btrfs_inode->ordered_tree);
 	RB_CLEAR_NODE(node);
@@ -686,7 +693,7 @@ void btrfs_remove_ordered_extent(struct btrfs_inode *btrfs_inode,
 		btrfs_inode->ordered_tree_last = NULL;
 	set_bit(BTRFS_ORDERED_COMPLETE, &entry->flags);
 	pending = test_and_clear_bit(BTRFS_ORDERED_PENDING, &entry->flags);
-	spin_unlock_irq(&btrfs_inode->ordered_tree_lock);
+	spin_unlock(&btrfs_inode->ordered_tree_lock);
 
 	/*
 	 * The current running transaction is waiting on us, we need to let it
@@ -971,9 +978,8 @@ struct btrfs_ordered_extent *btrfs_lookup_ordered_extent(struct btrfs_inode *ino
 {
 	struct rb_node *node;
 	struct btrfs_ordered_extent *entry = NULL;
-	unsigned long flags;
 
-	spin_lock_irqsave(&inode->ordered_tree_lock, flags);
+	spin_lock(&inode->ordered_tree_lock);
 	node = ordered_tree_search(inode, file_offset);
 	if (!node)
 		goto out;
@@ -986,7 +992,7 @@ struct btrfs_ordered_extent *btrfs_lookup_ordered_extent(struct btrfs_inode *ino
 		trace_btrfs_ordered_extent_lookup(inode, entry);
 	}
 out:
-	spin_unlock_irqrestore(&inode->ordered_tree_lock, flags);
+	spin_unlock(&inode->ordered_tree_lock);
 	return entry;
 }
 
@@ -999,7 +1005,7 @@ struct btrfs_ordered_extent *btrfs_lookup_ordered_range(
 	struct rb_node *node;
 	struct btrfs_ordered_extent *entry = NULL;
 
-	spin_lock_irq(&inode->ordered_tree_lock);
+	spin_lock(&inode->ordered_tree_lock);
 	node = ordered_tree_search(inode, file_offset);
 	if (!node) {
 		node = ordered_tree_search(inode, file_offset + len);
@@ -1026,7 +1032,7 @@ out:
 		refcount_inc(&entry->refs);
 		trace_btrfs_ordered_extent_lookup_range(inode, entry);
 	}
-	spin_unlock_irq(&inode->ordered_tree_lock);
+	spin_unlock(&inode->ordered_tree_lock);
 	return entry;
 }
 
@@ -1041,7 +1047,7 @@ void btrfs_get_ordered_extents_for_logging(struct btrfs_inode *inode,
 
 	btrfs_assert_inode_locked(inode);
 
-	spin_lock_irq(&inode->ordered_tree_lock);
+	spin_lock(&inode->ordered_tree_lock);
 	for (n = rb_first(&inode->ordered_tree); n; n = rb_next(n)) {
 		struct btrfs_ordered_extent *ordered;
 
@@ -1055,7 +1061,7 @@ void btrfs_get_ordered_extents_for_logging(struct btrfs_inode *inode,
 		refcount_inc(&ordered->refs);
 		trace_btrfs_ordered_extent_lookup_for_logging(inode, ordered);
 	}
-	spin_unlock_irq(&inode->ordered_tree_lock);
+	spin_unlock(&inode->ordered_tree_lock);
 }
 
 /*
@@ -1068,7 +1074,7 @@ btrfs_lookup_first_ordered_extent(struct btrfs_inode *inode, u64 file_offset)
 	struct rb_node *node;
 	struct btrfs_ordered_extent *entry = NULL;
 
-	spin_lock_irq(&inode->ordered_tree_lock);
+	spin_lock(&inode->ordered_tree_lock);
 	node = ordered_tree_search(inode, file_offset);
 	if (!node)
 		goto out;
@@ -1077,7 +1083,7 @@ btrfs_lookup_first_ordered_extent(struct btrfs_inode *inode, u64 file_offset)
 	refcount_inc(&entry->refs);
 	trace_btrfs_ordered_extent_lookup_first(inode, entry);
 out:
-	spin_unlock_irq(&inode->ordered_tree_lock);
+	spin_unlock(&inode->ordered_tree_lock);
 	return entry;
 }
 
@@ -1099,7 +1105,7 @@ struct btrfs_ordered_extent *btrfs_lookup_first_ordered_range(
 	struct rb_node *next;
 	struct btrfs_ordered_extent *entry = NULL;
 
-	spin_lock_irq(&inode->ordered_tree_lock);
+	spin_lock(&inode->ordered_tree_lock);
 	node = inode->ordered_tree.rb_node;
 	/*
 	 * Here we don't want to use tree_search() which will use tree->last
@@ -1154,7 +1160,7 @@ out:
 		trace_btrfs_ordered_extent_lookup_first_range(inode, entry);
 	}
 
-	spin_unlock_irq(&inode->ordered_tree_lock);
+	spin_unlock(&inode->ordered_tree_lock);
 	return entry;
 }
 
@@ -1245,7 +1251,7 @@ struct btrfs_ordered_extent *btrfs_split_ordered_extent(
 
 	trace_btrfs_ordered_extent_split(inode, ordered);
 
-	ASSERT(!(flags & (1U << BTRFS_ORDERED_COMPRESSED)));
+	ASSERT(!(flags & (1U << BTRFS_ORDERED_COMPRESSED)), "flags=0x%lx", flags);
 
 	/*
 	 * The entire bio must be covered by the ordered extent, but we can't
@@ -1267,7 +1273,7 @@ struct btrfs_ordered_extent *btrfs_split_ordered_extent(
 	}
 	/* We cannot split partially completed ordered extents. */
 	if (ordered->bytes_left) {
-		ASSERT(!(flags & ~BTRFS_ORDERED_TYPE_FLAGS));
+		ASSERT(!(flags & ~BTRFS_ORDERED_TYPE_FLAGS), "flags=0x%lx", flags);
 		if (WARN_ON_ONCE(ordered->bytes_left != ordered->disk_num_bytes))
 			return ERR_PTR(-EINVAL);
 	}
@@ -1286,9 +1292,7 @@ struct btrfs_ordered_extent *btrfs_split_ordered_extent(
 	/*
 	 * Take the root's ordered_extent_lock to avoid a race with
 	 * btrfs_wait_ordered_extents() when updating the disk_bytenr and
-	 * disk_num_bytes fields of the ordered extent below. And we disable
-	 * IRQs because the inode's ordered_tree_lock is used in IRQ context
-	 * elsewhere.
+	 * disk_num_bytes fields of the ordered extent below.
 	 *
 	 * There's no concern about a previous caller of
 	 * btrfs_wait_ordered_extents() getting the trimmed ordered extent
@@ -1316,7 +1320,8 @@ struct btrfs_ordered_extent *btrfs_split_ordered_extent(
 	ordered->ram_bytes -= len;
 
 	if (test_bit(BTRFS_ORDERED_IO_DONE, &ordered->flags)) {
-		ASSERT(ordered->bytes_left == 0);
+		ASSERT(ordered->bytes_left == 0, "ordered->bytes_left=%llu",
+		       ordered->bytes_left);
 		new->bytes_left = 0;
 	} else {
 		ordered->bytes_left -= len;
@@ -1331,10 +1336,10 @@ struct btrfs_ordered_extent *btrfs_split_ordered_extent(
 		}
 	}
 
-	list_for_each_entry_safe(sum, tmpsum, &ordered->list, list) {
+	list_for_each_entry_safe(sum, tmpsum, &ordered->csum_list, list) {
 		if (offset == len)
 			break;
-		list_move_tail(&sum->list, &new->list);
+		list_move_tail(&sum->list, &new->csum_list);
 		offset += sum->len;
 	}
 

@@ -101,7 +101,7 @@ static bool post_one_notification(struct watch_queue *wqueue,
 	struct pipe_inode_info *pipe = wqueue->pipe;
 	struct pipe_buffer *buf;
 	struct page *page;
-	unsigned int head, tail, note, offset, len;
+	unsigned int head, tail, note, offset, len, nr_notes;
 	bool done = false;
 
 	spin_lock_irq(&pipe->rd_wait.lock);
@@ -111,17 +111,19 @@ static bool post_one_notification(struct watch_queue *wqueue,
 	if (pipe_full(head, tail, pipe->ring_size))
 		goto lost;
 
-	note = find_first_bit(wqueue->notes_bitmap, wqueue->nr_notes);
-	if (note >= wqueue->nr_notes)
+	/* Pairs with the smp_store_release() in watch_queue_set_size(). */
+	nr_notes = smp_load_acquire(&wqueue->nr_notes);
+	note = find_first_bit(wqueue->notes_bitmap, nr_notes);
+	if (note >= nr_notes)
 		goto lost;
 
 	page = wqueue->notes[note / WATCH_QUEUE_NOTES_PER_PAGE];
 	offset = note % WATCH_QUEUE_NOTES_PER_PAGE * WATCH_QUEUE_NOTE_SIZE;
 	get_page(page);
 	len = n->info & WATCH_INFO_LENGTH;
-	p = kmap_atomic(page);
+	p = kmap_local_page(page);
 	memcpy(p + offset, n, len);
-	kunmap_atomic(p);
+	kunmap_local(p);
 
 	buf = pipe_buf(pipe, head);
 	buf->page = page;
@@ -278,7 +280,7 @@ long watch_queue_set_size(struct pipe_inode_info *pipe, unsigned int nr_notes)
 	pipe->nr_accounted = nr_pages;
 
 	ret = -ENOMEM;
-	pages = kcalloc(nr_pages, sizeof(struct page *), GFP_KERNEL);
+	pages = kzalloc_objs(struct page *, nr_pages);
 	if (!pages)
 		goto error;
 
@@ -297,7 +299,8 @@ long watch_queue_set_size(struct pipe_inode_info *pipe, unsigned int nr_notes)
 	wqueue->notes = pages;
 	wqueue->notes_bitmap = bitmap;
 	wqueue->nr_pages = nr_pages;
-	wqueue->nr_notes = nr_notes;
+	/* Pairs with the smp_load_acquire() in post_one_notification(). */
+	smp_store_release(&wqueue->nr_notes, nr_notes);
 	return 0;
 
 error_p:
@@ -358,7 +361,7 @@ long watch_queue_set_filter(struct pipe_inode_info *pipe,
 	 * user-specified filters.
 	 */
 	ret = -ENOMEM;
-	wfilter = kzalloc(struct_size(wfilter, filters, nr_filter), GFP_KERNEL);
+	wfilter = kzalloc_flex(*wfilter, filters, nr_filter);
 	if (!wfilter)
 		goto err_filter;
 	wfilter->nr_filters = nr_filter;
@@ -692,7 +695,7 @@ int watch_queue_init(struct pipe_inode_info *pipe)
 {
 	struct watch_queue *wqueue;
 
-	wqueue = kzalloc(sizeof(*wqueue), GFP_KERNEL);
+	wqueue = kzalloc_obj(*wqueue);
 	if (!wqueue)
 		return -ENOMEM;
 

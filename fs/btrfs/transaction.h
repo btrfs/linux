@@ -7,6 +7,7 @@
 #define BTRFS_TRANSACTION_H
 
 #include <linux/atomic.h>
+#include <linux/build_bug.h>
 #include <linux/refcount.h>
 #include <linux/list.h>
 #include <linux/time64.h>
@@ -14,10 +15,6 @@
 #include <linux/wait.h>
 #include "btrfs_inode.h"
 #include "delayed-ref.h"
-#include "extent-io-tree.h"
-#include "block-rsv.h"
-#include "messages.h"
-#include "misc.h"
 
 struct dentry;
 struct inode;
@@ -26,6 +23,7 @@ struct btrfs_fs_info;
 struct btrfs_root_item;
 struct btrfs_root;
 struct btrfs_path;
+struct extent_buffer;
 
 /*
  * Signal that a direct IO write is in progress, to avoid deadlock for sync
@@ -139,6 +137,18 @@ enum {
 
 #define TRANS_EXTWRITERS	(__TRANS_START | __TRANS_ATTACH)
 
+/*
+ * Number of extent buffers a transaction handle tracks for writeback
+ * inhibition. The CLOCK reference bits pack into a u32 so this must not exceed
+ * 32, and keeping it a power of two lets the compiler reduce the CLOCK hand
+ * modulo to a mask.
+ */
+#define BTRFS_INHIBITED_EBS_SLOTS				8
+
+static_assert(BTRFS_INHIBITED_EBS_SLOTS <= 32);
+static_assert(BTRFS_INHIBITED_EBS_SLOTS != 0 &&
+	      (BTRFS_INHIBITED_EBS_SLOTS & (BTRFS_INHIBITED_EBS_SLOTS - 1)) == 0);
+
 struct btrfs_trans_handle {
 	u64 transid;
 	u64 bytes_reserved;
@@ -166,6 +176,14 @@ struct btrfs_trans_handle {
 	struct btrfs_fs_info *fs_info;
 	struct list_head new_bgs;
 	struct btrfs_block_rsv delayed_rsv;
+
+	/* Extent buffers this handle has inhibited writeback on. */
+	struct extent_buffer *inhibited_ebs[BTRFS_INHIBITED_EBS_SLOTS];
+	/* CLOCK reference bit per slot. */
+	u32 inhibited_ebs_referenced;
+	u32 nr_inhibited_ebs;
+	/* CLOCK hand. */
+	u32 inhibited_ebs_hand;
 };
 
 /*
@@ -244,29 +262,47 @@ static inline bool btrfs_abort_should_print_stack(int error)
 }
 
 /*
- * Call btrfs_abort_transaction as early as possible when an error condition is
- * detected, that way the exact stack trace is reported for some errors.
+ * Compile-time and run-time verification of error passed to transaction abort.
+ * Direct constants will be caught at compile time, errors read from variables
+ * can be caught only at run-time and will warn under debugging config.
+ *
+ * How verification works:
+ * - accepted builtin constants are all -EIO and such
+ * - for compile-time check, invalid condition produces a negative-sized array
+ *   type, valid zero-sized
+ * - when a variable is passed as error the first check is a no-op
+ * - with enabled debugging, the second array type size is constructed from the
+ *   real variable value, valid condition produces array of size 1
+ * - sizeof(type) does not generate any code
+ */
+#define VERIFY_NEGATIVE_ERROR(error)						\
+do {										\
+	(void)sizeof(char[-!(__builtin_constant_p(error) ? (error) < 0 : 1)]);	\
+	if (IS_ENABLED(CONFIG_BTRFS_DEBUG)) {					\
+		if (sizeof(char[(error) < 0]) != 1)				\
+			DEBUG_WARN("error >= 0 passed to btrfs_abort_transaction()"); \
+	}									\
+} while(0)
+
+/*
+ * Call btrfs_abort_transaction() as early as possible when an error condition
+ * is detected, that way the exact stack trace is reported for some errors.
+ *
+ * Error number must be negative as it encodes wheather it's the first abort.
  */
 #define btrfs_abort_transaction(trans, error)		\
 do {								\
-	bool __first = false;					\
+	int __error = (error);					\
+								\
+	VERIFY_NEGATIVE_ERROR(error);				\
 	/* Report first abort since mount */			\
 	if (!test_and_set_bit(BTRFS_FS_STATE_TRANS_ABORTED,	\
 			&((trans)->fs_info->fs_state))) {	\
-		__first = true;					\
-		if (WARN(btrfs_abort_should_print_stack(error),	\
-			KERN_ERR				\
-			"BTRFS: Transaction aborted (error %d)\n",	\
-			(error))) {					\
-			/* Stack trace printed. */			\
-		} else {						\
-			btrfs_err((trans)->fs_info,			\
-				  "Transaction aborted (error %d)",	\
-				  (error));			\
-		}						\
+		WARN_ON(btrfs_abort_should_print_stack(__error)); \
+		__error = -__error;				\
 	}							\
 	__btrfs_abort_transaction((trans), __func__,		\
-				  __LINE__, (error), __first);	\
+				  __LINE__, __error);		\
 } while (0)
 
 int btrfs_end_transaction(struct btrfs_trans_handle *trans);
@@ -304,7 +340,7 @@ void btrfs_add_dropped_root(struct btrfs_trans_handle *trans,
 void btrfs_trans_release_chunk_metadata(struct btrfs_trans_handle *trans);
 void __cold __btrfs_abort_transaction(struct btrfs_trans_handle *trans,
 				      const char *function,
-				      unsigned int line, int error, bool first_hit);
+				      unsigned int line, int error);
 
 int __init btrfs_transaction_init(void);
 void __cold btrfs_transaction_exit(void);

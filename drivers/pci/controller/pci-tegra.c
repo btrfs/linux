@@ -340,6 +340,8 @@ struct tegra_pcie {
 	struct reset_control *afi_rst;
 	struct reset_control *pcie_xrst;
 
+	struct tegra_pmc *pmc;
+
 	bool legacy_phy;
 	struct phy *phy;
 
@@ -1165,7 +1167,7 @@ static void tegra_pcie_power_off(struct tegra_pcie *pcie)
 	clk_disable_unprepare(pcie->afi_clk);
 
 	if (!dev->pm_domain)
-		tegra_powergate_power_off(TEGRA_POWERGATE_PCIE);
+		tegra_pmc_powergate_power_off(pcie->pmc, TEGRA_POWERGATE_PCIE);
 
 	err = regulator_bulk_disable(pcie->num_supplies, pcie->supplies);
 	if (err < 0)
@@ -1183,7 +1185,7 @@ static int tegra_pcie_power_on(struct tegra_pcie *pcie)
 	reset_control_assert(pcie->pex_rst);
 
 	if (!dev->pm_domain)
-		tegra_powergate_power_off(TEGRA_POWERGATE_PCIE);
+		tegra_pmc_powergate_power_off(pcie->pmc, TEGRA_POWERGATE_PCIE);
 
 	/* enable regulators */
 	err = regulator_bulk_enable(pcie->num_supplies, pcie->supplies);
@@ -1191,12 +1193,14 @@ static int tegra_pcie_power_on(struct tegra_pcie *pcie)
 		dev_err(dev, "failed to enable regulators: %d\n", err);
 
 	if (!dev->pm_domain) {
-		err = tegra_powergate_power_on(TEGRA_POWERGATE_PCIE);
+		err = tegra_pmc_powergate_power_on(pcie->pmc,
+						   TEGRA_POWERGATE_PCIE);
 		if (err) {
 			dev_err(dev, "failed to power ungate: %d\n", err);
 			goto regulator_disable;
 		}
-		err = tegra_powergate_remove_clamping(TEGRA_POWERGATE_PCIE);
+		err = tegra_pmc_powergate_remove_clamping(pcie->pmc,
+							  TEGRA_POWERGATE_PCIE);
 		if (err) {
 			dev_err(dev, "failed to remove clamp: %d\n", err);
 			goto powergate;
@@ -1234,7 +1238,7 @@ disable_afi_clk:
 	clk_disable_unprepare(pcie->afi_clk);
 powergate:
 	if (!dev->pm_domain)
-		tegra_powergate_power_off(TEGRA_POWERGATE_PCIE);
+		tegra_pmc_powergate_power_off(pcie->pmc, TEGRA_POWERGATE_PCIE);
 regulator_disable:
 	regulator_bulk_disable(pcie->num_supplies, pcie->supplies);
 
@@ -1352,8 +1356,7 @@ static int tegra_pcie_port_get_phys(struct tegra_pcie_port *port)
 	for (i = 0; i < port->lanes; i++) {
 		phy = devm_of_phy_optional_get_index(dev, port->np, "pcie", i);
 		if (IS_ERR(phy)) {
-			dev_err(dev, "failed to get PHY#%u: %ld\n", i,
-				PTR_ERR(phy));
+			dev_err(dev, "failed to get PHY#%u: %pe\n", i, phy);
 			return PTR_ERR(phy);
 		}
 
@@ -1431,6 +1434,11 @@ static int tegra_pcie_get_resources(struct tegra_pcie *pcie)
 		dev_err(dev, "failed to get resets: %d\n", err);
 		return err;
 	}
+
+	pcie->pmc = devm_tegra_pmc_get(dev);
+	if (IS_ERR(pcie->pmc))
+		return dev_err_probe(dev, PTR_ERR(pcie->pmc),
+				     "failed to get PMC\n");
 
 	if (soc->program_uphy) {
 		err = tegra_pcie_phys_get(pcie);
@@ -2545,12 +2553,6 @@ static const struct seq_operations tegra_pcie_ports_sops = {
 
 DEFINE_SEQ_ATTRIBUTE(tegra_pcie_ports);
 
-static void tegra_pcie_debugfs_exit(struct tegra_pcie *pcie)
-{
-	debugfs_remove_recursive(pcie->debugfs);
-	pcie->debugfs = NULL;
-}
-
 static void tegra_pcie_debugfs_init(struct tegra_pcie *pcie)
 {
 	pcie->debugfs = debugfs_create_dir("pcie", NULL);
@@ -2622,29 +2624,6 @@ pm_runtime_put:
 put_resources:
 	tegra_pcie_put_resources(pcie);
 	return err;
-}
-
-static void tegra_pcie_remove(struct platform_device *pdev)
-{
-	struct tegra_pcie *pcie = platform_get_drvdata(pdev);
-	struct pci_host_bridge *host = pci_host_bridge_from_priv(pcie);
-	struct tegra_pcie_port *port, *tmp;
-
-	if (IS_ENABLED(CONFIG_DEBUG_FS))
-		tegra_pcie_debugfs_exit(pcie);
-
-	pci_stop_root_bus(host->bus);
-	pci_remove_root_bus(host->bus);
-	pm_runtime_put_sync(pcie->dev);
-	pm_runtime_disable(pcie->dev);
-
-	if (IS_ENABLED(CONFIG_PCI_MSI))
-		tegra_pcie_msi_teardown(pcie);
-
-	tegra_pcie_put_resources(pcie);
-
-	list_for_each_entry_safe(port, tmp, &pcie->ports, list)
-		tegra_pcie_port_free(port);
 }
 
 static int tegra_pcie_pm_suspend(struct device *dev)
@@ -2750,6 +2729,8 @@ static struct platform_driver tegra_pcie_driver = {
 		.pm = &tegra_pcie_pm_ops,
 	},
 	.probe = tegra_pcie_probe,
-	.remove = tegra_pcie_remove,
 };
-module_platform_driver(tegra_pcie_driver);
+builtin_platform_driver(tegra_pcie_driver);
+MODULE_AUTHOR("Thierry Reding <treding@nvidia.com>");
+MODULE_DESCRIPTION("NVIDIA PCI host controller driver");
+MODULE_LICENSE("GPL");

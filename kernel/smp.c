@@ -16,6 +16,7 @@
 #include <linux/init.h>
 #include <linux/interrupt.h>
 #include <linux/gfp.h>
+#include <linux/slab.h>
 #include <linux/smp.h>
 #include <linux/cpu.h>
 #include <linux/sched.h>
@@ -63,7 +64,14 @@ int smpcfd_prepare_cpu(unsigned int cpu)
 		free_cpumask_var(cfd->cpumask);
 		return -ENOMEM;
 	}
-	cfd->csd = alloc_percpu(call_single_data_t);
+
+	/*
+	 * Allocate the per-CPU CSD the first time a CPU comes up. It is
+	 * not freed when the CPU is offlined, so csd_lock_wait() can access
+	 * it even when the CPU was offlined after preemption was re-enabled.
+	 */
+	if (!cfd->csd)
+		cfd->csd = alloc_percpu(call_single_data_t);
 	if (!cfd->csd) {
 		free_cpumask_var(cfd->cpumask);
 		free_cpumask_var(cfd->cpumask_ipi);
@@ -79,7 +87,6 @@ int smpcfd_dead_cpu(unsigned int cpu)
 
 	free_cpumask_var(cfd->cpumask);
 	free_cpumask_var(cfd->cpumask_ipi);
-	free_percpu(cfd->csd);
 	return 0;
 }
 
@@ -137,9 +144,9 @@ csd_do_func(smp_call_func_t func, void *info, call_single_data_t *csd)
 	trace_csd_function_exit(func, csd);
 }
 
-#ifdef CONFIG_CSD_LOCK_WAIT_DEBUG
-
 static DEFINE_STATIC_KEY_MAYBE(CONFIG_CSD_LOCK_WAIT_DEBUG_DEFAULT, csdlock_debug_enabled);
+
+#ifdef CONFIG_CSD_LOCK_WAIT_DEBUG
 
 /*
  * Parse the csdlock_debug= kernel boot parameter.
@@ -182,16 +189,22 @@ static atomic_t csd_bug_count = ATOMIC_INIT(0);
 static void __csd_lock_record(call_single_data_t *csd)
 {
 	if (!csd) {
-		smp_mb(); /* NULL cur_csd after unlock. */
-		__this_cpu_write(cur_csd, NULL);
+		/*
+		 * Pairs with smp_load_acquire() of cur_csd in
+		 * csd_lock_wait_toolong(): orders any preceding CSD
+		 * callback/unlock before a remote reader observes NULL.
+		 */
+		smp_store_release(this_cpu_ptr(&cur_csd), NULL);
 		return;
 	}
 	__this_cpu_write(cur_csd_func, csd->func);
 	__this_cpu_write(cur_csd_info, csd->info);
-	smp_wmb(); /* func and info before csd. */
-	__this_cpu_write(cur_csd, csd);
-	smp_mb(); /* Update cur_csd before function call. */
-		  /* Or before unlock, as the case may be. */
+	/*
+	 * Pairs with smp_load_acquire() of cur_csd in
+	 * csd_lock_wait_toolong(): publishes cur_csd_func and
+	 * cur_csd_info before the non-NULL pointer becomes visible.
+	 */
+	smp_store_release(this_cpu_ptr(&cur_csd), csd);
 }
 
 static __always_inline void csd_lock_record(call_single_data_t *csd)
@@ -215,7 +228,7 @@ static atomic_t n_csd_lock_stuck;
 /**
  * csd_lock_is_stuck - Has a CSD-lock acquisition been stuck too long?
  *
- * Returns @true if a CSD-lock acquisition is stuck and has been stuck
+ * Returns: @true if a CSD-lock acquisition is stuck and has been stuck
  * long enough for a "non-responsive CSD lock" message to be printed.
  */
 bool csd_lock_is_stuck(void)
@@ -272,7 +285,13 @@ static bool csd_lock_wait_toolong(call_single_data_t *csd, u64 ts0, u64 *ts1, in
 		cpux = 0;
 	else
 		cpux = cpu;
-	cpu_cur_csd = smp_load_acquire(&per_cpu(cur_csd, cpux)); /* Before func and info. */
+	/*
+	 * Pairs with smp_store_release() of cur_csd in __csd_lock_record():
+	 * a non-NULL cur_csd here implies cur_csd_func and cur_csd_info
+	 * are the matching publication; a NULL value is ordered after any
+	 * preceding CSD callback/unlock on the remote CPU.
+	 */
+	cpu_cur_csd = smp_load_acquire(&per_cpu(cur_csd, cpux));
 	/* How long since this CSD lock was stuck. */
 	ts_delta = ts2 - ts0;
 	pr_alert("csd: %s non-responsive CSD lock (#%d) on CPU#%d, waiting %lld ns for CPU#%02d %pS(%ps).\n",
@@ -323,6 +342,8 @@ static void __csd_lock_wait(call_single_data_t *csd)
 	int bug_id = 0;
 	u64 ts0, ts1;
 
+	guard(preempt)();
+
 	ts1 = ts0 = ktime_get_mono_fast_ns();
 	for (;;) {
 		if (csd_lock_wait_toolong(csd, ts0, &ts1, &bug_id, &nmessages))
@@ -342,6 +363,10 @@ static __always_inline void csd_lock_wait(call_single_data_t *csd)
 	smp_cond_load_acquire(&csd->node.u_flags, !(VAL & CSD_FLAG_LOCK));
 }
 #else
+static __always_inline void __csd_lock_wait(call_single_data_t *csd)
+{
+}
+
 static void csd_lock_record(call_single_data_t *csd)
 {
 }
@@ -354,8 +379,23 @@ static __always_inline void csd_lock_wait(call_single_data_t *csd)
 
 static __always_inline void csd_lock(call_single_data_t *csd)
 {
-	csd_lock_wait(csd);
-	csd->node.u_flags |= CSD_FLAG_LOCK;
+	if (IS_ENABLED(CONFIG_CSD_LOCK_WAIT_DEBUG) &&
+	    static_branch_unlikely(&csdlock_debug_enabled)) {
+
+		for (;;) {
+			unsigned int flags;
+
+			__csd_lock_wait(csd);
+			flags = READ_ONCE(csd->node.u_flags);
+
+			if (!(flags & CSD_FLAG_LOCK) &&
+			    try_cmpxchg_acquire(&csd->node.u_flags, &flags, flags | CSD_FLAG_LOCK))
+				break;
+		}
+	} else {
+		csd_lock_wait(csd);
+		csd->node.u_flags |= CSD_FLAG_LOCK;
+	}
 
 	/*
 	 * prevent CPU from reordering the above assignment
@@ -377,6 +417,21 @@ static __always_inline void csd_unlock(call_single_data_t *csd)
 
 static DEFINE_PER_CPU_SHARED_ALIGNED(call_single_data_t, csd_data);
 
+#ifdef CONFIG_CSD_LOCK_WAIT_DEBUG
+static call_single_data_t *get_single_csd_data(int cpu)
+{
+	if (static_branch_unlikely(&csdlock_debug_enabled) &&
+	    (unsigned int)cpu < nr_cpu_ids)
+		return per_cpu_ptr(&csd_data, cpu);
+	return this_cpu_ptr(&csd_data);
+}
+#else
+static call_single_data_t *get_single_csd_data(int cpu)
+{
+	return this_cpu_ptr(&csd_data);
+}
+#endif
+
 void __smp_call_single_queue(int cpu, struct llist_node *node)
 {
 	/*
@@ -394,7 +449,7 @@ void __smp_call_single_queue(int cpu, struct llist_node *node)
 		func = CSD_TYPE(csd) == CSD_TYPE_TTWU ?
 			sched_ttwu_pending : csd->func;
 
-		trace_csd_queue_cpu(cpu, _RET_IP_, func, csd);
+		trace_call__csd_queue_cpu(cpu, _RET_IP_, func, csd);
 	}
 
 	/*
@@ -625,16 +680,9 @@ void flush_smp_call_function_queue(void)
 	local_irq_restore(flags);
 }
 
-/*
- * smp_call_function_single - Run a function on a specific CPU
- * @func: The function to run. This must be fast and non-blocking.
- * @info: An arbitrary pointer to pass to the function.
- * @wait: If true, wait until function has completed on other CPUs.
- *
- * Returns 0 on success, else a negative status code.
- */
-int smp_call_function_single(int cpu, smp_call_func_t func, void *info,
-			     int wait)
+static int __smp_call_function_single(int cpu, smp_call_func_t func,
+				      void *info, const struct cpumask *mask,
+				      bool wait)
 {
 	call_single_data_t *csd;
 	call_single_data_t csd_stack = {
@@ -650,6 +698,14 @@ int smp_call_function_single(int cpu, smp_call_func_t func, void *info,
 	 * IPI sending ensuring IPI are not missed by CPU going offline.
 	 */
 	this_cpu = get_cpu();
+
+	if (mask) {
+		/* Try for same CPU (cheapest) */
+		if (!cpumask_test_cpu(this_cpu, mask))
+			cpu = sched_numa_find_nth_cpu(mask, 0, cpu_to_node(this_cpu));
+		else
+			cpu = this_cpu;
+	}
 
 	/*
 	 * Can deadlock when called with interrupts disabled.
@@ -670,25 +726,44 @@ int smp_call_function_single(int cpu, smp_call_func_t func, void *info,
 
 	csd = &csd_stack;
 	if (!wait) {
-		csd = this_cpu_ptr(&csd_data);
+		csd = get_single_csd_data(cpu);
 		csd_lock(csd);
 	}
 
 	csd->func = func;
 	csd->info = info;
 #ifdef CONFIG_CSD_LOCK_WAIT_DEBUG
-	csd->node.src = smp_processor_id();
+	csd->node.src = this_cpu;
 	csd->node.dst = cpu;
 #endif
 
 	err = generic_exec_single(cpu, csd);
 
+	/*
+	 * @csd is stack-allocated when @wait is true. No concurrent access
+	 * except from the IPI completion path, so we can re-enable preemption
+	 * early to reduce latency.
+	 */
+	put_cpu();
+
 	if (wait)
 		csd_lock_wait(csd);
 
-	put_cpu();
-
 	return err;
+}
+
+/**
+ * smp_call_function_single - Run a function on a specific CPU
+ * @cpu:	Specific target CPU for this function.
+ * @func:	The function to run. This must be fast and non-blocking.
+ * @info:	An arbitrary pointer to pass to the function.
+ * @wait:	If true, wait until function has completed on other CPUs.
+ *
+ * Returns: %0 on success, else a negative status code.
+ */
+int smp_call_function_single(int cpu, smp_call_func_t func, void *info, bool wait)
+{
+	return __smp_call_function_single(cpu, func, info, NULL, wait);
 }
 EXPORT_SYMBOL(smp_call_function_single);
 
@@ -738,35 +813,69 @@ out:
 }
 EXPORT_SYMBOL_GPL(smp_call_function_single_async);
 
-/*
+/**
  * smp_call_function_any - Run a function on any of the given cpus
- * @mask: The mask of cpus it can run on.
- * @func: The function to run. This must be fast and non-blocking.
- * @info: An arbitrary pointer to pass to the function.
- * @wait: If true, wait until function has completed.
- *
- * Returns 0 on success, else a negative status code (if no cpus were online).
+ * @mask:	The mask of cpus it can run on.
+ * @func:	The function to run. This must be fast and non-blocking.
+ * @info:	An arbitrary pointer to pass to the function.
+ * @wait:	If true, wait until function has completed.
  *
  * Selection preference:
  *	1) current cpu if in @mask
  *	2) nearest cpu in @mask, based on NUMA topology
+ *
+ * Returns: %0 on success, else a negative status code (if no cpus were online).
  */
 int smp_call_function_any(const struct cpumask *mask,
 			  smp_call_func_t func, void *info, int wait)
 {
-	unsigned int cpu;
-	int ret;
-
-	/* Try for same CPU (cheapest) */
-	cpu = get_cpu();
-	if (!cpumask_test_cpu(cpu, mask))
-		cpu = sched_numa_find_nth_cpu(mask, 0, cpu_to_node(cpu));
-
-	ret = smp_call_function_single(cpu, func, info, wait);
-	put_cpu();
-	return ret;
+	return __smp_call_function_single(-1, func, info, mask, wait);
 }
 EXPORT_SYMBOL_GPL(smp_call_function_any);
+
+static DEFINE_STATIC_KEY_FALSE(ipi_mask_inlined);
+
+#ifdef CONFIG_PREEMPTION
+
+int smp_task_ipi_mask_alloc(struct task_struct *task)
+{
+	if (static_branch_unlikely(&ipi_mask_inlined))
+		return 0;
+
+	ACCESS_PRIVATE(task, ipi_mask).ipi_mask_ptr =
+		kmalloc(cpumask_size(), GFP_KERNEL);
+	if (!ACCESS_PRIVATE(task, ipi_mask).ipi_mask_ptr)
+		return -ENOMEM;
+
+	return 0;
+}
+
+void smp_task_ipi_mask_free(struct task_struct *task)
+{
+	if (static_branch_unlikely(&ipi_mask_inlined))
+		return;
+
+	kfree(ACCESS_PRIVATE(task, ipi_mask).ipi_mask_ptr);
+}
+
+static cpumask_t *smp_task_ipi_mask(struct task_struct *cur)
+{
+	/*
+	 * If cpumask_size() is smaller than or equal to the pointer
+	 * size, it stashes the cpumask in the pointer itself to
+	 * avoid extra memory allocations.
+	 */
+	if (static_branch_unlikely(&ipi_mask_inlined))
+		return (cpumask_t *)&ACCESS_PRIVATE(cur, ipi_mask).ipi_mask_val;
+
+	return ACCESS_PRIVATE(cur, ipi_mask).ipi_mask_ptr;
+}
+#else
+static cpumask_t *smp_task_ipi_mask(struct task_struct *cur)
+{
+	return NULL;
+}
+#endif
 
 /*
  * Flags to be used as scf_flags argument of smp_call_function_many_cond().
@@ -782,13 +891,20 @@ static void smp_call_function_many_cond(const struct cpumask *mask,
 					unsigned int scf_flags,
 					smp_cond_func_t cond_func)
 {
-	int cpu, last_cpu, this_cpu = smp_processor_id();
-	struct call_function_data *cfd;
+	struct cpumask *cpumask, *task_mask;
 	bool wait = scf_flags & SCF_WAIT;
-	int nr_cpus = 0;
+	struct call_function_data *cfd;
+	int cpu, last_cpu, this_cpu;
 	bool run_remote = false;
+	int nr_cpus = 0;
 
-	lockdep_assert_preemption_disabled();
+	this_cpu = get_cpu();
+	cfd = this_cpu_ptr(&cfd_data);
+	task_mask = smp_task_ipi_mask(current);
+	if (task_mask)
+		cpumask = task_mask;
+	else
+		cpumask = cfd->cpumask;
 
 	/*
 	 * Can deadlock when called with interrupts disabled.
@@ -810,16 +926,15 @@ static void smp_call_function_many_cond(const struct cpumask *mask,
 
 	/* Check if we need remote execution, i.e., any CPU excluding this one. */
 	if (cpumask_any_and_but(mask, cpu_online_mask, this_cpu) < nr_cpu_ids) {
-		cfd = this_cpu_ptr(&cfd_data);
-		cpumask_and(cfd->cpumask, mask, cpu_online_mask);
-		__cpumask_clear_cpu(this_cpu, cfd->cpumask);
+		cpumask_and(cpumask, mask, cpu_online_mask);
+		__cpumask_clear_cpu(this_cpu, cpumask);
 
 		cpumask_clear(cfd->cpumask_ipi);
-		for_each_cpu(cpu, cfd->cpumask) {
+		for_each_cpu(cpu, cpumask) {
 			call_single_data_t *csd = per_cpu_ptr(cfd->csd, cpu);
 
 			if (cond_func && !cond_func(cpu, info)) {
-				__cpumask_clear_cpu(cpu, cfd->cpumask);
+				__cpumask_clear_cpu(cpu, cpumask);
 				continue;
 			}
 
@@ -832,7 +947,7 @@ static void smp_call_function_many_cond(const struct cpumask *mask,
 			csd->func = func;
 			csd->info = info;
 #ifdef CONFIG_CSD_LOCK_WAIT_DEBUG
-			csd->node.src = smp_processor_id();
+			csd->node.src = this_cpu;
 			csd->node.dst = cpu;
 #endif
 			trace_csd_queue_cpu(cpu, _RET_IP_, func, csd);
@@ -869,8 +984,18 @@ static void smp_call_function_many_cond(const struct cpumask *mask,
 		local_irq_restore(flags);
 	}
 
+	/*
+	 * The IPI work has been queued and dispatched. On PREEMPT kernels,
+	 * tasks created through dup_task_struct() have task-local wait masks.
+	 * The boot init_task can fall back to cfd->cpumask when the mask is
+	 * not inlined, but other tasks still use task-local masks and cannot
+	 * overwrite it. On !PREEMPT kernels, preempt_enable() cannot schedule
+	 * another task, so the per-CPU mask remains protected.
+	 */
+	put_cpu();
+
 	if (run_remote && wait) {
-		for_each_cpu(cpu, cfd->cpumask) {
+		for_each_cpu(cpu, cpumask) {
 			call_single_data_t *csd;
 
 			csd = per_cpu_ptr(cfd->csd, cpu);
@@ -880,16 +1005,15 @@ static void smp_call_function_many_cond(const struct cpumask *mask,
 }
 
 /**
- * smp_call_function_many(): Run a function on a set of CPUs.
- * @mask: The set of cpus to run on (only runs on online subset).
- * @func: The function to run. This must be fast and non-blocking.
- * @info: An arbitrary pointer to pass to the function.
- * @wait: If true, wait (atomically) until function has completed
- *        on other CPUs.
+ * smp_call_function_many() - Run a function on a set of CPUs.
+ * @mask:	The set of cpus to run on (only runs on online subset).
+ * @func:	The function to run. This must be fast and non-blocking.
+ * @info:	An arbitrary pointer to pass to the function.
+ * @wait:	If true, wait (atomically) until function has completed
+ *		on other CPUs.
  *
  * You must not call this function with disabled interrupts or from a
- * hardware interrupt handler or from a bottom half handler. Preemption
- * must be disabled when calling this function.
+ * hardware interrupt handler or from a bottom half handler.
  *
  * @func is not called on the local CPU even if @mask contains it.  Consider
  * using on_each_cpu_cond_mask() instead if this is not desirable.
@@ -902,13 +1026,11 @@ void smp_call_function_many(const struct cpumask *mask,
 EXPORT_SYMBOL(smp_call_function_many);
 
 /**
- * smp_call_function(): Run a function on all other CPUs.
- * @func: The function to run. This must be fast and non-blocking.
- * @info: An arbitrary pointer to pass to the function.
- * @wait: If true, wait (atomically) until function has completed
- *        on other CPUs.
- *
- * Returns 0.
+ * smp_call_function() - Run a function on all other CPUs.
+ * @func:	The function to run. This must be fast and non-blocking.
+ * @info:	An arbitrary pointer to pass to the function.
+ * @wait:	If true, wait (atomically) until function has completed
+ *		on other CPUs.
  *
  * If @wait is true, then returns once @func has returned; otherwise
  * it returns just before the target cpu calls @func.
@@ -918,9 +1040,8 @@ EXPORT_SYMBOL(smp_call_function_many);
  */
 void smp_call_function(smp_call_func_t func, void *info, int wait)
 {
-	preempt_disable();
-	smp_call_function_many(cpu_online_mask, func, info, wait);
-	preempt_enable();
+	smp_call_function_many_cond(cpu_online_mask, func, info,
+				    wait ? SCF_WAIT : 0, NULL);
 }
 EXPORT_SYMBOL(smp_call_function);
 
@@ -986,6 +1107,9 @@ EXPORT_SYMBOL(nr_cpu_ids);
 void __init setup_nr_cpu_ids(void)
 {
 	set_nr_cpu_ids(find_last_bit(cpumask_bits(cpu_possible_mask), NR_CPUS) + 1);
+
+	if (IS_ENABLED(CONFIG_PREEMPTION) && cpumask_size() <= sizeof(unsigned long))
+		static_branch_enable(&ipi_mask_inlined);
 }
 
 /* Called by boot processor to activate the rest. */
@@ -1009,8 +1133,8 @@ void __init smp_init(void)
 	smp_cpus_done(setup_max_cpus);
 }
 
-/*
- * on_each_cpu_cond(): Call a function on each processor for which
+/**
+ * on_each_cpu_cond_mask() - Call a function on each processor for which
  * the supplied function cond_func returns true, optionally waiting
  * for all the required CPUs to finish. This may include the local
  * processor.
@@ -1022,11 +1146,14 @@ void __init smp_init(void)
  * @func:	The function to run on all applicable CPUs.
  *		This must be fast and non-blocking.
  * @info:	An arbitrary pointer to pass to both functions.
- * @wait:	If true, wait (atomically) until function has
- *		completed on other CPUs.
+ * @wait:	If true, wait until function has completed on other CPUs.
+ * @mask:	The set of cpus to run on (only runs on online subset).
  *
- * Preemption is disabled to protect against CPUs going offline but not online.
- * CPUs going online during the call will not be seen or sent an IPI.
+ * Target CPU selection and work queueing are done with preemption
+ * disabled. This protects against CPUs going offline, but not against
+ * CPUs coming online concurrently; newly online CPUs are not guaranteed
+ * to be seen or sent an IPI. If @wait is true, the final wait for remote
+ * completion happens after that preemption-disabled section.
  *
  * You must not call this function with disabled interrupts or
  * from a hardware interrupt handler or from a bottom half handler.
@@ -1039,9 +1166,7 @@ void on_each_cpu_cond_mask(smp_cond_func_t cond_func, smp_call_func_t func,
 	if (wait)
 		scf_flags |= SCF_WAIT;
 
-	preempt_disable();
 	smp_call_function_many_cond(mask, func, info, scf_flags, cond_func);
-	preempt_enable();
 }
 EXPORT_SYMBOL(on_each_cpu_cond_mask);
 
@@ -1088,6 +1213,28 @@ void wake_up_all_idle_cpus(void)
 EXPORT_SYMBOL_GPL(wake_up_all_idle_cpus);
 
 /**
+ * cpus_peek_for_pending_ipi - Check for pending IPI for CPUs
+ * @mask: The CPU mask for the CPUs to check.
+ *
+ * This function walks through the @mask to check if there are any pending IPIs
+ * scheduled, for any of the CPUs in the @mask. It does not guarantee
+ * correctness as it only provides a racy snapshot.
+ *
+ * Returns: true if there is a pending IPI scheduled and false otherwise.
+ */
+bool cpus_peek_for_pending_ipi(const struct cpumask *mask)
+{
+	unsigned int cpu;
+
+	for_each_cpu(cpu, mask) {
+		if (!llist_empty(per_cpu_ptr(&call_single_queue, cpu)))
+			return true;
+	}
+
+	return false;
+}
+
+/**
  * struct smp_call_on_cpu_struct - Call a function on a specific CPU
  * @work: &work_struct
  * @done: &completion to signal
@@ -1123,6 +1270,18 @@ static void smp_call_on_cpu_callback(struct work_struct *work)
 	complete(&sscs->done);
 }
 
+/**
+ * smp_call_on_cpu() - Call a function on a specific CPU and wait
+ *	for it to return.
+ * @cpu: The CPU to run on.
+ * @func: The function to run
+ * @par: An arbitrary pointer parameter for @func.
+ * @phys: If @true, force to run on physical @cpu. See
+ *	&struct smp_call_on_cpu_struct for more info.
+ *
+ * Returns: %-ENXIO if the @cpu is invalid; otherwise the return value
+ *	from @func.
+ */
 int smp_call_on_cpu(unsigned int cpu, int (*func)(void *), void *par, bool phys)
 {
 	struct smp_call_on_cpu_struct sscs = {
@@ -1137,7 +1296,7 @@ int smp_call_on_cpu(unsigned int cpu, int (*func)(void *), void *par, bool phys)
 	if (cpu >= nr_cpu_ids || !cpu_online(cpu))
 		return -ENXIO;
 
-	queue_work_on(cpu, system_wq, &sscs.work);
+	queue_work_on(cpu, system_percpu_wq, &sscs.work);
 	wait_for_completion(&sscs.done);
 	destroy_work_on_stack(&sscs.work);
 

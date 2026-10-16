@@ -16,6 +16,8 @@ struct q6apm_graph;
 #define MODULE_ID_PCM_CNV		0x07001003
 #define MODULE_ID_PCM_ENC		0x07001004
 #define MODULE_ID_PCM_DEC		0x07001005
+#define MODULE_ID_SH_MEM_PULL_MODE	0x07001006
+#define MODULE_ID_SH_MEM_PUSH_MODE	0x07001007
 #define MODULE_ID_PLACEHOLDER_ENCODER	0x07001008
 #define MODULE_ID_PLACEHOLDER_DECODER	0x07001009
 #define MODULE_ID_I2S_SINK		0x0700100A
@@ -31,7 +33,11 @@ struct q6apm_graph;
 #define MODULE_ID_MP3_DECODE		0x0700103B
 #define MODULE_ID_GAPLESS		0x0700104D
 #define MODULE_ID_DISPLAY_PORT_SINK	0x07001069
+#define MODULE_ID_SPEAKER_PROTECTION	0x070010E2
+#define MODULE_ID_SPEAKER_PROTECTION_VI	0x070010E3
 #define MODULE_ID_OPUS_DEC		0x07001174
+#define MODULE_ID_AUDIO_IF_SINK		0x0700117C
+#define MODULE_ID_AUDIO_IF_SOURCE	0x0700117D
 
 #define APM_CMD_GET_SPF_STATE		0x01001021
 #define APM_CMD_RSP_GET_SPF_STATE	0x02001007
@@ -58,10 +64,57 @@ struct q6apm_graph;
 #define APM_CMD_GET_CFG				0x01001007
 #define APM_CMD_SHARED_MEM_MAP_REGIONS		0x0100100C
 #define APM_CMD_SHARED_MEM_UNMAP_REGIONS	0x0100100D
+#define APM_CMD_REGISTER_MODULE_EVENTS		0x0100100E
+#define APM_EVENT_MODULE_TO_CLIENT              0x03001000
 #define APM_CMD_RSP_SHARED_MEM_MAP_REGIONS	0x02001001
+#define APM_MMAP_TOKEN_GID_MASK			GENMASK(15, 0)
+#define APM_MMAP_TOKEN_MAP_TYPE_POS_BUF		BIT(16)
+#define APM_MMAP_TOKEN_MAP_TYPE_SHIFT		16
 #define APM_CMD_RSP_GET_CFG			0x02001000
 #define APM_CMD_CLOSE_ALL			0x01001013
 #define APM_CMD_REGISTER_SHARED_CFG		0x0100100A
+#define EVENT_ID_SH_MEM_PULL_PUSH_MODE_WATERMARK	0x0800101C
+
+/**
+ * struct event_cfg_sh_mem_pull_push_mode_watermark_t - Watermark config
+ * @num_water_mark_levels: Number of watermark levels.
+ * @level: Watermark levels.
+ *
+ * If @num_water_mark_levels is zero, no watermark levels are specified
+ * and watermark events are not supported.
+ */
+struct event_cfg_sh_mem_pull_push_mode_watermark_t {
+	uint32_t num_water_mark_levels;
+	uint32_t level[];
+} __packed;
+
+/**
+ * struct apm_module_register_events - Register or unregister module events
+ * @module_instance_id: Module instance identifier.
+ * @event_id: Module event identifier.
+ * @is_register: 1 to register the event, 0 to unregister it.
+ * @error_code: Error code for out-of-band command mode.
+ * @event_config_payload_size: Event configuration payload size in bytes.
+ * @reserved: Reserved for alignment; must be zero.
+ */
+struct apm_module_register_events {
+	uint32_t module_instance_id;
+	uint32_t event_id;
+	uint32_t is_register;
+	uint32_t error_code;
+	uint32_t event_config_payload_size;
+	uint32_t reserved;
+} __packed;
+
+/**
+ * struct apm_module_event - Module event descriptor
+ * @event_id: Module event identifier.
+ * @event_payload_size: Event payload size in bytes.
+ */
+struct apm_module_event {
+	uint32_t event_id;
+	uint32_t event_payload_size;
+} __packed;
 
 #define APM_MEMORY_MAP_SHMEM8_4K_POOL		3
 
@@ -493,6 +546,74 @@ struct param_id_i2s_intf_cfg {
 #define PORT_ID_I2S_OUPUT		1
 #define I2S_STACK_SIZE			2048
 
+#define PARAM_ID_AUDIO_IF_INTF_CFG	0x08001B11
+
+/*
+ * struct param_id_audio_if_intf_cfg - Audio interface configuration
+ * @qaif_type: Audio interface type (e.g. QAIF, QAIF_VA)
+ * @intf_idx: Interface instance index
+ * @intf_mode: Interface operating mode (TDM/PCM/I2S)
+ * @ctrl_data_out_enable: Enable sharing of data-out signal with other masters
+ * @active_slot_mask: Bitmask indicating active slots
+ * @nslots_per_frame: Number of slots per audio frame
+ * @slot_width: Width of each slot in bits
+ * @active_lane_mask: Bitmask of active data lanes
+ * @frame_sync_rate: Frame sync rate in Hz
+ * @frame_sync_src: Frame sync source selection
+ * @frame_sync_mode: Frame sync mode configuration
+ * @invert_frame_sync_pulse: Invert frame sync polarity when set
+ * @frame_sync_data_delay: Data delay from frame sync in bit clocks
+ * @bit_clk_type: Bit clock type (internal / external)
+ * @inv_int_bit_clk: Invert internal bit clock when set
+ * @inv_ext_bit_clk: Invert external bit clock when set
+ *
+ * This structure defines configuration parameters for the Qualcomm
+ * Audio Interface (QAIF) block. It is used to program interface
+ * characteristics such as slot configuration, clocking and frame
+ * synchronization behaviour.
+ */
+struct param_id_audio_if_intf_cfg {
+	uint16_t qaif_type;
+	uint16_t intf_idx;
+	uint16_t intf_mode;
+	uint16_t ctrl_data_out_enable;
+	uint32_t active_slot_mask;
+	uint16_t nslots_per_frame;
+	uint16_t slot_width;
+	uint32_t active_lane_mask;
+	uint32_t frame_sync_rate;
+	uint16_t frame_sync_src;
+	uint16_t frame_sync_mode;
+	uint16_t invert_frame_sync_pulse;
+	uint16_t frame_sync_data_delay;
+	uint16_t bit_clk_type;
+	uint8_t inv_int_bit_clk;
+	uint8_t inv_ext_bit_clk;
+} __packed;
+
+#define PARAM_ID_HW_EP_FRAME_DURATION	0x08001B2F
+#define AUDIO_IF_FRAME_DURATION_US			1000
+#define AUDIO_IF_FRAME_DURATION_NORMALIZATION_ENABLE	1
+#define AUDIO_IF_FRAME_DURATION_MIN_US			1
+#define AUDIO_IF_FRAME_DURATION_MAX_US			100000
+
+/**
+ * struct param_id_hw_ep_frame_duration - Hardware endpoint frame duration
+ * @frame_duration_in_us: Frame duration in microseconds.
+ * @allow_frame_duration_normalization: Permit SPF to normalize frame duration.
+ * @min_normalized_frame_dur_us: Minimum normalized frame duration in microseconds.
+ * @max_normalized_frame_dur_us: Maximum normalized frame duration in microseconds.
+ *
+ * This structure configures the frame duration for the Audio IF hardware
+ * endpoint and, when enabled, the allowed normalization range.
+ */
+struct param_id_hw_ep_frame_duration {
+	uint32_t frame_duration_in_us;
+	uint32_t allow_frame_duration_normalization;
+	uint32_t min_normalized_frame_dur_us;
+	uint32_t max_normalized_frame_dur_us;
+} __packed;
+
 #define PARAM_ID_DISPLAY_PORT_INTF_CFG		0x08001154
 
 struct param_id_display_port_intf_cfg {
@@ -557,6 +678,43 @@ struct data_logging_config {
 	uint32_t log_code;
 	uint32_t log_tap_point_id;
 	uint32_t mode;
+} __packed;
+
+/* Speaker Protection */
+#define PARAM_ID_SP_OP_MODE			0x080011e9
+#define PARAM_ID_SP_OP_MODE_NORMAL		0
+#define PARAM_ID_SP_OP_MODE_CALIBRATION		1
+#define PARAM_ID_SP_OP_MODE_FACTORY_TEST	2
+#define PARAM_ID_SP_OP_MODE_VALIDATION		3
+
+struct param_id_sp_op_mode {
+	uint32_t operation_mode;
+} __packed;
+
+/* Speaker Protection VI */
+
+#define PARAM_ID_SP_VI_OP_MODE_CFG		0x080011f4
+#define PARAM_ID_SP_VI_OP_MODE_NORMAL		0
+#define PARAM_ID_SP_VI_OP_MODE_CALIBRATION	1
+#define PARAM_ID_SP_VI_OP_MODE_FACTORY_TEST	2
+#define PARAM_ID_SP_VI_OP_MODE_VALIDATION	3
+struct param_id_sp_vi_op_mode_cfg {
+	uint32_t num_channels;
+	uint32_t operation_mode;
+	uint32_t quick_calibration;
+	uint32_t r0_t0_selection[];
+} __packed;
+
+#define PARAM_ID_SP_VI_EX_MODE_CFG		0x080011ff
+struct param_id_sp_vi_ex_mode_cfg {
+	uint32_t factory_mode;
+} __packed;
+
+#define PARAM_ID_SP_VI_CHANNEL_MAP_CFG		0x08001203
+struct param_id_sp_vi_channel_map_cfg {
+	uint32_t num_channels;
+	/* [ Vsense of ch 1, Isense of ch 1, Vsense of ch 2, Isense of ch 2, ... ] */
+	uint32_t channel_mapping[];
 } __packed;
 
 #define PARAM_ID_SAL_OUTPUT_CFG			0x08001016
@@ -671,6 +829,46 @@ struct param_id_placeholder_real_module_id {
 	uint32_t real_module_id;
 } __packed;
 
+
+#define PARAM_ID_SH_MEM_PULL_PUSH_MODE_CFG	0x0800100A
+
+/**
+ * struct param_id_sh_mem_pull_push_mode_cfg - Shared memory push/pull config
+ * @shared_circ_buf_addr_lsw: Lower 32 bits of the circular buffer address.
+ * @shared_circ_buf_addr_msw: Upper 32 bits of the circular buffer address.
+ * @shared_circ_buf_size: Circular buffer size in bytes.
+ * @circ_buf_mem_map_handle: Circular buffer memory map handle.
+ * @shared_pos_buf_addr_lsw: Lower 32 bits of the position buffer address.
+ * @shared_pos_buf_addr_msw: Upper 32 bits of the position buffer address.
+ * @pos_buf_mem_map_handle: Position buffer memory map handle.
+ */
+struct param_id_sh_mem_pull_push_mode_cfg {
+	uint32_t shared_circ_buf_addr_lsw;
+	uint32_t shared_circ_buf_addr_msw;
+	uint32_t shared_circ_buf_size;
+	uint32_t circ_buf_mem_map_handle;
+	uint32_t shared_pos_buf_addr_lsw;
+	uint32_t shared_pos_buf_addr_msw;
+	uint32_t pos_buf_mem_map_handle;
+} __packed;
+
+/**
+ * struct sh_mem_pull_push_mode_position_buffer - Shared position buffer
+ * @frame_counter: Synchronization counter.
+ * @index: Current read/write index in bytes.
+ * @timestamp_us_lsw: Lower 32 bits of the timestamp in microseconds.
+ * @timestamp_us_msw: Upper 32 bits of the timestamp in microseconds.
+ *
+ * The frame counter should be read before and after the other fields to
+ * ensure the DSP did not update them while they were being read.
+ */
+struct sh_mem_pull_push_mode_position_buffer {
+	uint32_t frame_counter;
+	uint32_t index;
+	uint32_t timestamp_us_lsw;
+	uint32_t timestamp_us_msw;
+} __packed;
+
 /* Graph */
 struct audioreach_connection {
 	/* Connections */
@@ -683,8 +881,11 @@ struct audioreach_connection {
 
 struct audioreach_graph_info {
 	int id;
+	uint32_t mem_map_handle;
+	uint32_t pos_buf_mem_map_handle;
 	uint32_t num_sub_graphs;
 	struct list_head sg_list;
+	bool is_push_pull_mode;
 	/* DPCM connection from FE Graph to BE graph */
 	uint32_t src_mod_inst_id;
 	uint32_t src_mod_op_port_id;
@@ -746,6 +947,23 @@ struct audioreach_module {
 	uint32_t data_format;
 	uint32_t hw_interface_type;
 
+	/* Audio IF module (TDM/PCM/I2S) */
+	u32 slot_mask;
+	u32 active_lane_mask;
+	u32 frame_sync_rate;
+	u16 qaif_type;
+	u16 sync_src;
+	u16 ctrl_data_out_enable;
+	u16 nslots_per_frame;
+	u16 slot_width;
+	u16 intf_mode;
+	u16 sync_mode;
+	u16 ctrl_invert_sync_pulse;
+	u16 ctrl_sync_data_delay;
+	u16 bit_clk_type;
+	u8 inv_int_bit_clk;
+	u8 inv_ext_bit_clk;
+
 	/* PCM module specific */
 	uint32_t interleave_type;
 
@@ -776,6 +994,9 @@ struct audioreach_module_config {
 	u32	channel_allocation;
 	u32	sd_line_mask;
 	int	fmt;
+	u32	slot_mask;
+	u16	nslots_per_frame;
+	u16	slot_width;
 	struct snd_codec codec;
 	u8 channel_map[AR_PCM_MAX_NUM_CHANNEL];
 };
@@ -792,30 +1013,33 @@ void *audioreach_alloc_apm_pkt(int pkt_size, uint32_t opcode, uint32_t token,
 void *audioreach_alloc_pkt(int payload_size, uint32_t opcode,
 			   uint32_t token, uint32_t src_port,
 			   uint32_t dest_port);
-void *audioreach_alloc_graph_pkt(struct q6apm *apm, struct audioreach_graph_info
-				 *info);
+void *audioreach_alloc_graph_pkt(struct q6apm *apm,
+				 const struct audioreach_graph_info *info);
 /* Topology specific */
 int audioreach_tplg_init(struct snd_soc_component *component);
 
 /* Module specific */
 void audioreach_graph_free_buf(struct q6apm_graph *graph);
-int audioreach_map_memory_regions(struct q6apm_graph *graph,
-				  unsigned int dir, size_t period_sz,
-				  unsigned int periods,
-				  bool is_contiguous);
 int audioreach_send_cmd_sync(struct device *dev, gpr_device_t *gdev, struct gpr_ibasic_rsp_result_t *result,
 			     struct mutex *cmd_lock, gpr_port_t *port, wait_queue_head_t *cmd_wait,
-			     struct gpr_pkt *pkt, uint32_t rsp_opcode);
-int audioreach_graph_send_cmd_sync(struct q6apm_graph *graph, struct gpr_pkt *pkt,
+			     const struct gpr_pkt *pkt, uint32_t rsp_opcode);
+int audioreach_graph_send_cmd_sync(struct q6apm_graph *graph, const struct gpr_pkt *pkt,
 				   uint32_t rsp_opcode);
 int audioreach_set_media_format(struct q6apm_graph *graph,
-				struct audioreach_module *module,
-				struct audioreach_module_config *cfg);
+				const struct audioreach_module *module,
+				const struct audioreach_module_config *cfg);
 int audioreach_shared_memory_send_eos(struct q6apm_graph *graph);
 int audioreach_gain_set_vol_ctrl(struct q6apm *apm,
-				 struct audioreach_module *module, int vol);
-int audioreach_send_u32_param(struct q6apm_graph *graph, struct audioreach_module *module,
+				 const struct audioreach_module *module, int vol);
+int audioreach_send_u32_param(struct q6apm_graph *graph,
+			      const struct audioreach_module *module,
 			      uint32_t param_id, uint32_t param_val);
-int audioreach_compr_set_param(struct q6apm_graph *graph, struct audioreach_module_config *mcfg);
+int audioreach_compr_set_param(struct q6apm_graph *graph,
+			       const struct audioreach_module_config *mcfg);
+int audioreach_setup_push_pull(struct q6apm_graph *graph, phys_addr_t bphys,
+				phys_addr_t pphys, uint32_t mem_map_handle,
+				uint32_t pos_buf_mem_map_handle, uint32_t size);
+int audioreach_map_memory_position_buffer(struct q6apm_graph *graph, unsigned int dir);
 
+int audioreach_shmem_register_event(struct q6apm_graph *graph, int bytes, int num_levels);
 #endif /* __AUDIOREACH_H__ */

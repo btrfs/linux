@@ -15,6 +15,8 @@
  * directly but still need to forward parameters for it.
  */
 
+#include <linux/videodev2.h>
+
 #include <type_support.h>
 
 #include "ia_css_frac.h"
@@ -51,7 +53,7 @@
 #include "isp/kernels/output/output_1.0/ia_css_output_types.h"
 
 #define IA_CSS_DVS_STAT_GRID_INFO_SUPPORTED
-/** Should be removed after Driver adaptation will be done */
+/* Should be removed after Driver adaptation will be done */
 
 #define IA_CSS_VERSION_MAJOR    2
 #define IA_CSS_VERSION_MINOR    0
@@ -419,7 +421,7 @@ struct ia_css_dvs_6axis_config {
 	u32 *ycoords_uv;
 };
 
-/**
+/*
  * This specifies the coordinates (x,y)
  */
 struct ia_css_point {
@@ -427,22 +429,14 @@ struct ia_css_point {
 	s32 y; /** y coordinate */
 };
 
-/**
- * This specifies the region
- */
-struct ia_css_region {
-	struct ia_css_point origin; /** Starting point coordinates for the region */
-	struct ia_css_resolution resolution; /** Region resolution */
-};
-
-/**
+/*
  * Digital zoom:
  * This feature is currently available only for video, but will become
  * available for preview and capture as well.
  * Set the digital zoom factor, this is a logarithmic scale. The actual zoom
  * factor will be 64/x.
  * Setting dx or dy to 0 disables digital zoom for that direction.
- * New API change for Digital zoom:(added struct ia_css_region zoom_region)
+ *
  * zoom_region specifies the origin of the zoom region and width and
  * height of that region.
  * origin : This is the coordinate (x,y) within the effective input resolution
@@ -455,7 +449,7 @@ struct ia_css_region {
 struct ia_css_dz_config {
 	u32 dx; /** Horizontal zoom factor */
 	u32 dy; /** Vertical zoom factor */
-	struct ia_css_region zoom_region; /** region for zoom */
+	struct v4l2_rect zoom_region; /** region for zoom */
 };
 
 /* The still capture mode, this can be RAW (simply copy sensor input to DDR),

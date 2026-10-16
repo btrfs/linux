@@ -365,7 +365,7 @@ bool acpi_evaluate_reference(acpi_handle handle, acpi_string pathname,
 		goto err;
 
 	list->count = package->package.count;
-	list->handles = kcalloc(list->count, sizeof(*list->handles), GFP_KERNEL);
+	list->handles = kzalloc_objs(*list->handles, list->count);
 	if (!list->handles)
 		goto err_clear;
 
@@ -1046,6 +1046,23 @@ static int __init acpi_backlight(char *str)
 	return 1;
 }
 __setup("acpi_backlight=", acpi_backlight);
+
+/**
+ * acpi_dev_is_video_device - test if device matches against ACPI video device IDs
+ * @adev: ACPI device to test
+ *
+ * Return: true when matches, otherwise false.
+ */
+bool acpi_dev_is_video_device(struct acpi_device *adev)
+{
+	static const struct acpi_device_id video_device_ids[] = {
+		{ .id = ACPI_VIDEO_HID },
+		{ }
+	};
+
+	return adev && !acpi_match_device_ids(adev, video_device_ids);
+}
+EXPORT_SYMBOL(acpi_dev_is_video_device);
 
 /**
  * acpi_match_platform_list - Check if the system matches with a given list

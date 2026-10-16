@@ -33,8 +33,8 @@ int dmar_latency_enable(struct intel_iommu *iommu, enum latency_type type)
 
 	spin_lock_irqsave(&latency_lock, flags);
 	if (!iommu->perf_statistic) {
-		iommu->perf_statistic = kcalloc(DMAR_LATENCY_NUM, sizeof(*lstat),
-						GFP_ATOMIC);
+		iommu->perf_statistic = kzalloc_objs(*lstat, DMAR_LATENCY_NUM,
+						     GFP_ATOMIC);
 		if (!iommu->perf_statistic) {
 			ret = -ENOMEM;
 			goto unlock_out;
@@ -63,7 +63,7 @@ void dmar_latency_disable(struct intel_iommu *iommu, enum latency_type type)
 		return;
 
 	spin_lock_irqsave(&latency_lock, flags);
-	memset(&lstat[type], 0, sizeof(*lstat) * DMAR_LATENCY_NUM);
+	memset(&lstat[type], 0, sizeof(*lstat));
 	spin_unlock_irqrestore(&latency_lock, flags);
 }
 

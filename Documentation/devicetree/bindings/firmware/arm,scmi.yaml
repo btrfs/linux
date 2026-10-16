@@ -8,7 +8,7 @@ $schema: http://devicetree.org/meta-schemas/core.yaml#
 title: System Control and Management Interface (SCMI) Message Protocol
 
 maintainers:
-  - Sudeep Holla <sudeep.holla@arm.com>
+  - Sudeep Holla <sudeep.holla@kernel.org>
 
 description: |
   The SCMI is intended to allow agents such as OSPM to manage various functions
@@ -145,6 +145,13 @@ properties:
       number of concurrently outstanding messages that the server can handle on
       this platform. If set, the value should be non-zero.
     minimum: 1
+
+  arm,no-completion-irq:
+    type: boolean
+    description:
+      This optional property is intended for hardware that does not generate
+      completion interrupts and can be used to unconditionally enable forced
+      polling mode of operation.
 
   arm,smc-id:
     $ref: /schemas/types.yaml#/definitions/uint32
@@ -379,6 +386,9 @@ then:
     - shmem
 
 else:
+  properties:
+    arm,no-completion-irq: false
+
   if:
     properties:
       compatible:

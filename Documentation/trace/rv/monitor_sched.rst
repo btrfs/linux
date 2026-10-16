@@ -36,7 +36,7 @@ Specifications
 --------------
 
 The specifications included in sched are currently a work in progress, adapting the ones
-defined in by Daniel Bristot in [1].
+defined by Daniel Bristot in [1]_.
 
 Currently we included the following:
 
@@ -346,57 +346,26 @@ Monitor opid
 
 The operations with preemption and irq disabled (opid) monitor ensures
 operations like ``wakeup`` and ``need_resched`` occur with interrupts and
-preemption disabled or during interrupt context, in such case preemption may
-not be disabled explicitly.
+preemption disabled.
 ``need_resched`` can be set by some RCU internals functions, in which case it
-doesn't match a task wakeup and might occur with only interrupts disabled::
+doesn't match a task wakeup and might occur with only interrupts disabled.
+The interrupt and preemption status are validated by the hybrid automaton
+constraints when processing the events::
 
-                 |                     sched_need_resched
-                 |                     sched_waking
-                 |                     irq_entry
-                 |                   +--------------------+
-                 v                   v                    |
-               +------------------------------------------------------+
-  +----------- |                     disabled                         | <+
-  |            +------------------------------------------------------+  |
-  |              |                 ^                                     |
-  |              |          preempt_disable      sched_need_resched      |
-  |       preempt_enable           |           +--------------------+    |
-  |              v                 |           v                    |    |
-  |            +------------------------------------------------------+  |
-  |            |                   irq_disabled                       |  |
-  |            +------------------------------------------------------+  |
-  |                              |             |        ^                |
-  |     irq_entry            irq_entry         |        |                |
-  |     sched_need_resched       v             |   irq_disable           |
-  |     sched_waking +--------------+          |        |                |
-  |           +----- |              |     irq_enable    |                |
-  |           |      |    in_irq    |          |        |                |
-  |           +----> |              |          |        |                |
-  |                  +--------------+          |        |          irq_disable
-  |                     |                      |        |                |
-  | irq_enable          | irq_enable           |        |                |
-  |                     v                      v        |                |
-  |            #======================================================#  |
-  |            H                     enabled                          H  |
-  |            #======================================================#  |
-  |              |                   ^         ^ preempt_enable     |    |
-  |       preempt_disable     preempt_enable   +--------------------+    |
-  |              v                   |                                   |
-  |            +------------------+  |                                   |
-  +----------> | preempt_disabled | -+                                   |
-               +------------------+                                      |
-                 |                                                       |
-                 +-------------------------------------------------------+
-
-This monitor is designed to work on ``PREEMPT_RT`` kernels, the special case of
-events occurring in interrupt context is a shortcut to identify valid scenarios
-where the preemption tracepoints might not be visible, during interrupts
-preemption is always disabled. On non- ``PREEMPT_RT`` kernels, the interrupts
-might invoke a softirq to set ``need_resched`` and wake up a task. This is
-another special case that is currently not supported by the monitor.
+   |
+   |
+   v
+ #=========#   sched_need_resched;irq_off == 1
+ H         H   sched_waking;irq_off == 1 && preempt_off == 1
+ H   any   H ------------------------------------------------+
+ H         H                                                 |
+ H         H <-----------------------------------------------+
+ #=========#
 
 References
 ----------
 
-[1] - https://bristot.me/linux-task-model
+.. [1] Daniel Bristot de Oliveira et al.:
+       `A thread synchronization model for the PREEMPT_RT Linux kernel
+       <https://www.iris.sssup.it/bitstream/11382/533630/1/Elsevier-JSA-2020.pdf>`_,
+       J. Syst. Archit., 2020.

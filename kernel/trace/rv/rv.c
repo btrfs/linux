@@ -164,7 +164,6 @@ struct dentry *get_monitors_root(void)
  */
 LIST_HEAD(rv_monitors_list);
 
-static int task_monitor_count;
 static bool task_monitor_slots[CONFIG_RV_PER_TASK_MONITORS];
 
 int rv_get_task_monitor_slot(void)
@@ -173,22 +172,16 @@ int rv_get_task_monitor_slot(void)
 
 	lockdep_assert_held(&rv_interface_lock);
 
-	if (task_monitor_count == CONFIG_RV_PER_TASK_MONITORS)
-		return -EBUSY;
-
-	task_monitor_count++;
-
 	for (i = 0; i < CONFIG_RV_PER_TASK_MONITORS; i++) {
-		if (task_monitor_slots[i] == false) {
+		if (!task_monitor_slots[i]) {
 			task_monitor_slots[i] = true;
 			return i;
 		}
 	}
 
-	WARN_ONCE(1, "RV task_monitor_count and slots are out of sync\n");
-
-	return -EINVAL;
+	return -EBUSY;
 }
+EXPORT_SYMBOL_GPL(rv_get_task_monitor_slot);
 
 void rv_put_task_monitor_slot(int slot)
 {
@@ -199,12 +192,13 @@ void rv_put_task_monitor_slot(int slot)
 		return;
 	}
 
-	WARN_ONCE(!task_monitor_slots[slot], "RV releasing unused task_monitor_slots: %d\n",
-		  slot);
+	if (WARN_ONCE(!task_monitor_slots[slot],
+		      "RV releasing unused task monitor slot: %d\n", slot))
+		return;
 
-	task_monitor_count--;
 	task_monitor_slots[slot] = false;
 }
+EXPORT_SYMBOL_GPL(rv_put_task_monitor_slot);
 
 /*
  * Monitors with a parent are nested,
@@ -375,14 +369,12 @@ static ssize_t monitor_enable_write_data(struct file *filp, const char __user *u
 	if (retval)
 		return retval;
 
-	mutex_lock(&rv_interface_lock);
+	guard(mutex)(&rv_interface_lock);
 
 	if (val)
 		retval = rv_enable_monitor(mon);
 	else
 		retval = rv_disable_monitor(mon);
-
-	mutex_unlock(&rv_interface_lock);
 
 	return retval ? : count;
 }
@@ -422,35 +414,27 @@ static const struct file_operations interface_desc_fops = {
 static int create_monitor_dir(struct rv_monitor *mon, struct rv_monitor *parent)
 {
 	struct dentry *root = parent ? parent->root_d : get_monitors_root();
-	const char *name = mon->name;
+	struct dentry *dir __free(rv_remove) = rv_create_dir(mon->name, root);
 	struct dentry *tmp;
 	int retval;
 
-	mon->root_d = rv_create_dir(name, root);
-	if (!mon->root_d)
+	if (!dir)
 		return -ENOMEM;
 
-	tmp = rv_create_file("enable", RV_MODE_WRITE, mon->root_d, mon, &interface_enable_fops);
-	if (!tmp) {
-		retval = -ENOMEM;
-		goto out_remove_root;
-	}
+	tmp = rv_create_file("enable", RV_MODE_WRITE, dir, mon, &interface_enable_fops);
+	if (!tmp)
+		return -ENOMEM;
 
-	tmp = rv_create_file("desc", RV_MODE_READ, mon->root_d, mon, &interface_desc_fops);
-	if (!tmp) {
-		retval = -ENOMEM;
-		goto out_remove_root;
-	}
+	tmp = rv_create_file("desc", RV_MODE_READ, dir, mon, &interface_desc_fops);
+	if (!tmp)
+		return -ENOMEM;
 
-	retval = reactor_populate_monitor(mon);
+	retval = reactor_populate_monitor(mon, dir);
 	if (retval)
-		goto out_remove_root;
+		return retval;
 
+	mon->root_d = no_free_ptr(dir);
 	return 0;
-
-out_remove_root:
-	rv_remove(mon->root_d);
-	return retval;
 }
 
 /*
@@ -568,7 +552,7 @@ static void disable_all_monitors(void)
 	struct rv_monitor *mon;
 	int enabled = 0;
 
-	mutex_lock(&rv_interface_lock);
+	guard(mutex)(&rv_interface_lock);
 
 	list_for_each_entry(mon, &rv_monitors_list, list)
 		enabled += __rv_disable_monitor(mon, false);
@@ -581,8 +565,6 @@ static void disable_all_monitors(void)
 		 */
 		tracepoint_synchronize_unregister();
 	}
-
-	mutex_unlock(&rv_interface_lock);
 }
 
 static int enabled_monitors_open(struct inode *inode, struct file *file)
@@ -623,7 +605,7 @@ static ssize_t enabled_monitors_write(struct file *filp, const char __user *user
 	if (!len)
 		return count;
 
-	mutex_lock(&rv_interface_lock);
+	guard(mutex)(&rv_interface_lock);
 
 	retval = -EINVAL;
 
@@ -644,13 +626,11 @@ static ssize_t enabled_monitors_write(struct file *filp, const char __user *user
 		else
 			retval = rv_disable_monitor(mon);
 
-		if (!retval)
-			retval = count;
-
-		break;
+		if (retval)
+			return retval;
+		return count;
 	}
 
-	mutex_unlock(&rv_interface_lock);
 	return retval;
 }
 
@@ -737,7 +717,7 @@ static ssize_t monitoring_on_write_data(struct file *filp, const char __user *us
 	if (retval)
 		return retval;
 
-	mutex_lock(&rv_interface_lock);
+	guard(mutex)(&rv_interface_lock);
 
 	if (val)
 		turn_monitoring_on_with_reset();
@@ -749,8 +729,6 @@ static ssize_t monitoring_on_write_data(struct file *filp, const char __user *us
 	 * before returning to user-space.
 	 */
 	tracepoint_synchronize_unregister();
-
-	mutex_unlock(&rv_interface_lock);
 
 	return count;
 }
@@ -784,28 +762,26 @@ int rv_register_monitor(struct rv_monitor *monitor, struct rv_monitor *parent)
 		return -EINVAL;
 	}
 
-	mutex_lock(&rv_interface_lock);
+	guard(mutex)(&rv_interface_lock);
 
 	list_for_each_entry(r, &rv_monitors_list, list) {
 		if (strcmp(monitor->name, r->name) == 0) {
 			pr_info("Monitor %s is already registered\n", monitor->name);
-			retval = -EEXIST;
-			goto out_unlock;
+			return -EEXIST;
 		}
 	}
 
 	if (parent && rv_is_nested_monitor(parent)) {
 		pr_info("Parent monitor %s is already nested, cannot nest further\n",
 			parent->name);
-		retval = -EINVAL;
-		goto out_unlock;
+		return -EINVAL;
 	}
 
 	monitor->parent = parent;
 
 	retval = create_monitor_dir(monitor, parent);
 	if (retval)
-		goto out_unlock;
+		return retval;
 
 	/* keep children close to the parent for easier visualisation */
 	if (parent)
@@ -813,9 +789,7 @@ int rv_register_monitor(struct rv_monitor *monitor, struct rv_monitor *parent)
 	else
 		list_add_tail(&monitor->list, &rv_monitors_list);
 
-out_unlock:
-	mutex_unlock(&rv_interface_lock);
-	return retval;
+	return 0;
 }
 
 /**
@@ -826,13 +800,12 @@ out_unlock:
  */
 int rv_unregister_monitor(struct rv_monitor *monitor)
 {
-	mutex_lock(&rv_interface_lock);
+	guard(mutex)(&rv_interface_lock);
 
 	rv_disable_monitor(monitor);
 	list_del(&monitor->list);
 	destroy_monitor_dir(monitor);
 
-	mutex_unlock(&rv_interface_lock);
 	return 0;
 }
 
@@ -840,39 +813,102 @@ int __init rv_init_interface(void)
 {
 	struct dentry *tmp;
 	int retval;
+	struct dentry *root_dir __free(rv_remove) = rv_create_dir("rv", NULL);
 
-	rv_root.root_dir = rv_create_dir("rv", NULL);
-	if (!rv_root.root_dir)
-		goto out_err;
+	if (!root_dir)
+		return 1;
 
-	rv_root.monitors_dir = rv_create_dir("monitors", rv_root.root_dir);
+	rv_root.monitors_dir = rv_create_dir("monitors", root_dir);
 	if (!rv_root.monitors_dir)
-		goto out_err;
+		return 1;
 
-	tmp = rv_create_file("available_monitors", RV_MODE_READ, rv_root.root_dir, NULL,
+	tmp = rv_create_file("available_monitors", RV_MODE_READ, root_dir, NULL,
 			     &available_monitors_ops);
 	if (!tmp)
-		goto out_err;
+		return 1;
 
-	tmp = rv_create_file("enabled_monitors", RV_MODE_WRITE, rv_root.root_dir, NULL,
+	tmp = rv_create_file("enabled_monitors", RV_MODE_WRITE, root_dir, NULL,
 			     &enabled_monitors_ops);
 	if (!tmp)
-		goto out_err;
+		return 1;
 
-	tmp = rv_create_file("monitoring_on", RV_MODE_WRITE, rv_root.root_dir, NULL,
+	tmp = rv_create_file("monitoring_on", RV_MODE_WRITE, root_dir, NULL,
 			     &monitoring_on_fops);
 	if (!tmp)
-		goto out_err;
-	retval = init_rv_reactors(rv_root.root_dir);
+		return 1;
+	retval = init_rv_reactors(root_dir);
 	if (retval)
-		goto out_err;
+		return 1;
 
 	turn_monitoring_on();
 
-	return 0;
+	rv_root.root_dir = no_free_ptr(root_dir);
 
-out_err:
-	rv_remove(rv_root.root_dir);
-	printk(KERN_ERR "RV: Error while creating the RV interface\n");
-	return 1;
+	return 0;
 }
+
+#if IS_ENABLED(CONFIG_RV_MONITORS_KUNIT_TEST)
+#include <rv/kunit.h>
+#include <kunit/visibility.h>
+
+/*
+ * rv_set_testing - ensure mutual exclusion between KUnit tests and real monitors
+ *
+ * KUnit tests for RV monitors rely on stubs that are incompatible with
+ * the execution of real monitors. Ensure mutual exclusion by acquiring
+ * the rv_interface_lock for the duration of the suite.
+ *
+ * Returns 0 on success, -EBUSY if any real monitor is already enabled.
+ */
+int rv_set_testing(struct kunit_suite *suite)
+{
+	struct rv_monitor *mon;
+
+	mutex_lock(&rv_interface_lock);
+
+	list_for_each_entry(mon, &rv_monitors_list, list) {
+		if (mon->enabled) {
+			mutex_unlock(&rv_interface_lock);
+			return -EBUSY;
+		}
+	}
+
+	return 0;
+}
+EXPORT_SYMBOL_IF_KUNIT(rv_set_testing);
+
+/*
+ * rv_clear_testing - allow real monitors to run again after KUnit tests
+ */
+void rv_clear_testing(struct kunit_suite *suite)
+{
+	mutex_unlock(&rv_interface_lock);
+}
+EXPORT_SYMBOL_IF_KUNIT(rv_clear_testing);
+
+/*
+ * rv_get_mock_current() is called only if we are running from a KUnit test.
+ * This can occur from a legitimate RV test or any unrelated test running when
+ * a real RV monitor is active and triggering events.
+ * We assume the former case is the only one where mock_current is not NULL and
+ * can occur only sequentially (KUnit doesn't run tests in parallel).
+ * We cannot rely on the test's context because there is no way to safely
+ * understand from which test we are running and KUnit utilities require
+ * locking, which is unsafe from NMI or scheduling context.
+ * Note that it is not possible for a real RV monitor to run when the RV KUnit
+ * tests are running (see rv_set_testing()).
+ */
+static struct task_struct *mock_current;
+
+void rv_mock_current(struct task_struct *tsk)
+{
+	mock_current = tsk;
+}
+EXPORT_SYMBOL_IF_KUNIT(rv_mock_current);
+
+struct task_struct *rv_get_mock_current(void)
+{
+	return mock_current ?: current;
+}
+EXPORT_SYMBOL_GPL(rv_get_mock_current);
+#endif

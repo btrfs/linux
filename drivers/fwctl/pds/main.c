@@ -58,7 +58,7 @@ static void *pdsfc_info(struct fwctl_uctx *uctx, size_t *length)
 	struct pdsfc_uctx *pdsfc_uctx = container_of(uctx, struct pdsfc_uctx, uctx);
 	struct fwctl_info_pds *info;
 
-	info = kzalloc(sizeof(*info), GFP_KERNEL);
+	info = kzalloc_obj(*info);
 	if (!info)
 		return ERR_PTR(-ENOMEM);
 
@@ -361,6 +361,9 @@ static void *pdsfc_fw_rpc(struct fwctl_uctx *uctx, enum fwctl_rpc_scope scope,
 	void *in_payload = NULL;
 	void *out = NULL;
 	int err;
+
+	if (in_len < sizeof(*rpc))
+		return ERR_PTR(-EINVAL);
 
 	err = pdsfc_validate_rpc(pdsfc, rpc, scope);
 	if (err)

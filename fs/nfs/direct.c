@@ -145,26 +145,6 @@ static void nfs_direct_file_adjust_size_locked(struct inode *inode,
 	}
 }
 
-/**
- * nfs_swap_rw - NFS address space operation for swap I/O
- * @iocb: target I/O control block
- * @iter: I/O buffer
- *
- * Perform IO to the swap-file.  This is much like direct IO.
- */
-int nfs_swap_rw(struct kiocb *iocb, struct iov_iter *iter)
-{
-	ssize_t ret;
-
-	if (iov_iter_rw(iter) == READ)
-		ret = nfs_file_direct_read(iocb, iter, true);
-	else
-		ret = nfs_file_direct_write(iocb, iter, true);
-	if (ret < 0)
-		return ret;
-	return 0;
-}
-
 static void nfs_direct_release_pages(struct page **pages, unsigned int npages)
 {
 	unsigned int i;
@@ -466,14 +446,22 @@ ssize_t nfs_file_direct_read(struct kiocb *iocb, struct iov_iter *iter,
 		goto out_release;
 	}
 	dreq->l_ctx = l_ctx;
-	if (!is_sync_kiocb(iocb))
+	if (!is_sync_kiocb(iocb)) {
 		dreq->iocb = iocb;
+	} else if (iocb->ki_flags & IOCB_NOWAIT) {
+		result = -EAGAIN;
+		nfs_direct_req_release(dreq);
+		goto out_release;
+	}
 
 	if (user_backed_iter(iter))
 		dreq->flags = NFS_ODIRECT_SHOULD_DIRTY;
 
 	if (!swap) {
-		result = nfs_start_io_direct(inode);
+		if (iocb->ki_flags & IOCB_NOWAIT)
+			result = nfs_start_io_direct_nowait(inode);
+		else
+			result = nfs_start_io_direct(inode);
 		if (result) {
 			/* release the reference that would usually be
 			 * consumed by nfs_direct_read_schedule_iovec()
