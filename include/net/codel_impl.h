@@ -93,12 +93,17 @@ static void codel_Newton_step(struct codel_vars *vars)
  * CoDel control_law is t + interval/sqrt(count)
  * We maintain in rec_inv_sqrt the reciprocal value of sqrt(count) to avoid
  * both sqrt() and divide operation.
+ *
+ * Clamp the increment to at least 1 tick: a very small interval (or a
+ * large count) can truncate it to zero, stalling the dropping loop.
  */
 static codel_time_t codel_control_law(codel_time_t t,
 				      codel_time_t interval,
 				      u32 rec_inv_sqrt)
 {
-	return t + reciprocal_scale(interval, rec_inv_sqrt << REC_INV_SQRT_SHIFT);
+	return t + max_t(u32, 1,
+			 reciprocal_scale(interval,
+					  rec_inv_sqrt << REC_INV_SQRT_SHIFT));
 }
 
 static bool codel_should_drop(const struct sk_buff *skb,
@@ -120,10 +125,10 @@ static bool codel_should_drop(const struct sk_buff *skb,
 	}
 
 	skb_len = skb_len_func(skb);
-	vars->ldelay = now - skb_time_func(skb);
+	WRITE_ONCE(vars->ldelay, now - skb_time_func(skb));
 
 	if (unlikely(skb_len > stats->maxpacket))
-		stats->maxpacket = skb_len;
+		WRITE_ONCE(stats->maxpacket, skb_len);
 
 	if (codel_time_before(vars->ldelay, params->target) ||
 	    *backlog <= params->mtu) {
@@ -154,11 +159,13 @@ static struct sk_buff *codel_dequeue(void *ctx,
 				     codel_skb_dequeue_t dequeue_func)
 {
 	struct sk_buff *skb = dequeue_func(vars, ctx);
+	unsigned int drops = 0;
 	codel_time_t now;
 	bool drop;
 
 	if (!skb) {
-		vars->dropping = false;
+		vars->first_above_time = 0;
+		WRITE_ONCE(vars->dropping, false);
 		return skb;
 	}
 	now = codel_get_time();
@@ -167,7 +174,7 @@ static struct sk_buff *codel_dequeue(void *ctx,
 	if (vars->dropping) {
 		if (!drop) {
 			/* sojourn time below target - leave dropping state */
-			vars->dropping = false;
+			WRITE_ONCE(vars->dropping, false);
 		} else if (codel_time_after_eq(now, vars->drop_next)) {
 			/* It's time for the next drop. Drop the current
 			 * packet and dequeue the next. The dequeue might
@@ -179,16 +186,26 @@ static struct sk_buff *codel_dequeue(void *ctx,
 			 */
 			while (vars->dropping &&
 			       codel_time_after_eq(now, vars->drop_next)) {
-				vars->count++; /* dont care of possible wrap
-						* since there is no more divide
-						*/
+				if (++drops > CODEL_MAX_DROPS_PER_DEQUEUE) {
+					/* fell far behind the schedule */
+					WRITE_ONCE(vars->drop_next,
+						   codel_control_law(now,
+								     params->interval,
+								     vars->rec_inv_sqrt));
+					break;
+				}
+				/* dont care of possible wrap
+				 * since there is no more divide.
+				 */
+				WRITE_ONCE(vars->count, vars->count + 1);
 				codel_Newton_step(vars);
 				if (params->ecn && INET_ECN_set_ce(skb)) {
-					stats->ecn_mark++;
-					vars->drop_next =
+					WRITE_ONCE(stats->ecn_mark,
+						   stats->ecn_mark + 1);
+					WRITE_ONCE(vars->drop_next,
 						codel_control_law(vars->drop_next,
 								  params->interval,
-								  vars->rec_inv_sqrt);
+								  vars->rec_inv_sqrt));
 					goto end;
 				}
 				stats->drop_len += skb_len_func(skb);
@@ -201,13 +218,13 @@ static struct sk_buff *codel_dequeue(void *ctx,
 						       skb_time_func,
 						       backlog, now)) {
 					/* leave dropping state */
-					vars->dropping = false;
+					WRITE_ONCE(vars->dropping, false);
 				} else {
 					/* and schedule the next drop */
-					vars->drop_next =
+					WRITE_ONCE(vars->drop_next,
 						codel_control_law(vars->drop_next,
 								  params->interval,
-								  vars->rec_inv_sqrt);
+								  vars->rec_inv_sqrt));
 				}
 			}
 		}
@@ -215,7 +232,7 @@ static struct sk_buff *codel_dequeue(void *ctx,
 		u32 delta;
 
 		if (params->ecn && INET_ECN_set_ce(skb)) {
-			stats->ecn_mark++;
+			WRITE_ONCE(stats->ecn_mark, stats->ecn_mark + 1);
 		} else {
 			stats->drop_len += skb_len_func(skb);
 			drop_func(skb, ctx);
@@ -226,7 +243,7 @@ static struct sk_buff *codel_dequeue(void *ctx,
 						 stats, skb_len_func,
 						 skb_time_func, backlog, now);
 		}
-		vars->dropping = true;
+		WRITE_ONCE(vars->dropping, true);
 		/* if min went above target close to when we last went below it
 		 * assume that the drop rate that controlled the queue on the
 		 * last cycle is a good starting point to control it now.
@@ -235,19 +252,20 @@ static struct sk_buff *codel_dequeue(void *ctx,
 		if (delta > 1 &&
 		    codel_time_before(now - vars->drop_next,
 				      16 * params->interval)) {
-			vars->count = delta;
+			WRITE_ONCE(vars->count, delta);
 			/* we dont care if rec_inv_sqrt approximation
 			 * is not very precise :
 			 * Next Newton steps will correct it quadratically.
 			 */
 			codel_Newton_step(vars);
 		} else {
-			vars->count = 1;
+			WRITE_ONCE(vars->count, 1);
 			vars->rec_inv_sqrt = ~0U >> REC_INV_SQRT_SHIFT;
 		}
-		vars->lastcount = vars->count;
-		vars->drop_next = codel_control_law(now, params->interval,
-						    vars->rec_inv_sqrt);
+		WRITE_ONCE(vars->lastcount, vars->count);
+		WRITE_ONCE(vars->drop_next,
+			   codel_control_law(now, params->interval,
+					     vars->rec_inv_sqrt));
 	}
 end:
 	if (skb && codel_time_after(vars->ldelay, params->ce_threshold)) {
@@ -261,7 +279,7 @@ end:
 				   params->ce_threshold_selector));
 		}
 		if (set_ce && INET_ECN_set_ce(skb))
-			stats->ce_mark++;
+			WRITE_ONCE(stats->ce_mark, stats->ce_mark + 1);
 	}
 	return skb;
 }

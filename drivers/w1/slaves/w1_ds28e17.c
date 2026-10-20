@@ -389,6 +389,10 @@ static int w1_f19_i2c_master_transfer(struct i2c_adapter *adapter,
 			 * another simple read in that case.
 			 */
 			if (msgs[i+1].flags & I2C_M_RECV_LEN) {
+				if (msgs[i+1].buf[0] > I2C_SMBUS_BLOCK_MAX) {
+					i = -EPROTO;
+					goto error;
+				}
 				result = w1_f19_i2c_read(sl, msgs[i+1].addr,
 					&(msgs[i+1].buf[1]), msgs[i+1].buf[0]);
 				if (result < 0) {
@@ -415,6 +419,10 @@ static int w1_f19_i2c_master_transfer(struct i2c_adapter *adapter,
 			 * another simple read in that case.
 			 */
 			if (msgs[i].flags & I2C_M_RECV_LEN) {
+				if (msgs[i].buf[0] > I2C_SMBUS_BLOCK_MAX) {
+					i = -EPROTO;
+					goto error;
+				}
 				result = w1_f19_i2c_read(sl,
 					msgs[i].addr,
 					&(msgs[i].buf[1]),
@@ -719,8 +727,8 @@ static int w1_f19_add_slave(struct w1_slave *sl)
 	data->adapter.owner      = THIS_MODULE;
 	data->adapter.algo       = &w1_f19_i2c_algorithm;
 	data->adapter.algo_data  = sl;
-	strcpy(data->adapter.name, "w1-");
-	strcat(data->adapter.name, sl->name);
+	scnprintf(data->adapter.name, sizeof(data->adapter.name), "w1-%s",
+		  sl->name);
 	data->adapter.dev.parent = &sl->dev;
 	data->adapter.quirks     = &w1_f19_i2c_adapter_quirks;
 

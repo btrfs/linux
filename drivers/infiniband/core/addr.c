@@ -41,7 +41,6 @@
 #include <net/neighbour.h>
 #include <net/route.h>
 #include <net/netevent.h>
-#include <net/ipv6_stubs.h>
 #include <net/ip6_route.h>
 #include <rdma/ib_addr.h>
 #include <rdma/ib_cache.h>
@@ -80,37 +79,25 @@ static const struct nla_policy ib_nl_addr_policy[LS_NLA_TYPE_MAX] = {
 		.min = sizeof(struct rdma_nla_ls_gid)},
 };
 
-static inline bool ib_nl_is_good_ip_resp(const struct nlmsghdr *nlh)
+static void ib_nl_process_ip_rsep(const struct nlmsghdr *nlh)
 {
 	struct nlattr *tb[LS_NLA_TYPE_MAX] = {};
+	union ib_gid gid;
+	struct addr_req *req;
+	int found = 0;
 	int ret;
 
 	if (nlh->nlmsg_flags & RDMA_NL_LS_F_ERR)
-		return false;
+		return;
 
 	ret = nla_parse_deprecated(tb, LS_NLA_TYPE_MAX - 1, nlmsg_data(nlh),
 				   nlmsg_len(nlh), ib_nl_addr_policy, NULL);
 	if (ret)
-		return false;
+		return;
 
-	return true;
-}
-
-static void ib_nl_process_good_ip_rsep(const struct nlmsghdr *nlh)
-{
-	const struct nlattr *head, *curr;
-	union ib_gid gid;
-	struct addr_req *req;
-	int len, rem;
-	int found = 0;
-
-	head = (const struct nlattr *)nlmsg_data(nlh);
-	len = nlmsg_len(nlh);
-
-	nla_for_each_attr(curr, head, len, rem) {
-		if (curr->nla_type == LS_NLA_TYPE_DGID)
-			memcpy(&gid, nla_data(curr), nla_len(curr));
-	}
+	if (!tb[LS_NLA_TYPE_DGID])
+		return;
+	memcpy(&gid, nla_data(tb[LS_NLA_TYPE_DGID]), sizeof(gid));
 
 	spin_lock_bh(&lock);
 	list_for_each_entry(req, &req_list, list) {
@@ -137,8 +124,7 @@ int ib_nl_handle_ip_res_resp(struct sk_buff *skb,
 	    !(NETLINK_CB(skb).sk))
 		return -EPERM;
 
-	if (ib_nl_is_good_ip_resp(nlh))
-		ib_nl_process_good_ip_rsep(nlh);
+	ib_nl_process_ip_rsep(nlh);
 
 	return 0;
 }
@@ -163,7 +149,7 @@ static int ib_nl_ip_send_msg(struct rdma_dev_addr *dev_addr,
 		attrtype = RDMA_NLA_F_MANDATORY | LS_NLA_TYPE_IPV6;
 	}
 
-	len = nla_total_size(sizeof(size));
+	len = nla_total_size(size);
 	len += NLMSG_ALIGN(sizeof(*header));
 
 	skb = nlmsg_new(len, GFP_KERNEL);
@@ -334,11 +320,14 @@ static int dst_fetch_ha(const struct dst_entry *dst,
 	if (!n)
 		return -ENODATA;
 
+	read_lock_bh(&n->lock);
 	if (!(n->nud_state & NUD_VALID)) {
+		read_unlock_bh(&n->lock);
 		neigh_event_send(n, NULL);
 		ret = -ENODATA;
 	} else {
 		neigh_ha_snapshot(dev_addr->dst_dev_addr, n, dst->dev);
+		read_unlock_bh(&n->lock);
 	}
 
 	neigh_release(n);
@@ -424,7 +413,7 @@ static int addr6_resolve(struct sockaddr *src_sock,
 	fl6.saddr = src_in->sin6_addr;
 	fl6.flowi6_oif = addr->bound_dev_if;
 
-	dst = ipv6_stub->ipv6_dst_lookup_flow(addr->net, NULL, &fl6, NULL);
+	dst = ip6_dst_lookup_flow(addr->net, NULL, &fl6, NULL);
 	if (IS_ERR(dst))
 		return PTR_ERR(dst);
 
@@ -449,7 +438,7 @@ static int addr6_resolve(struct sockaddr *src_sock,
 static bool is_dst_local(const struct dst_entry *dst)
 {
 	if (dst->ops->family == AF_INET)
-		return !!(dst_rtable(dst)->rt_type & RTN_LOCAL);
+		return dst_rtable(dst)->rt_type == RTN_LOCAL;
 	else if (dst->ops->family == AF_INET6)
 		return !!(dst_rt6_info(dst)->rt6i_flags & RTF_LOCAL);
 	else
@@ -659,7 +648,7 @@ int rdma_resolve_ip(struct sockaddr *src_addr, const struct sockaddr *dst_addr,
 	struct addr_req *req;
 	int ret = 0;
 
-	req = kzalloc(sizeof *req, GFP_KERNEL);
+	req = kzalloc_obj(*req);
 	if (!req)
 		return -ENOMEM;
 
@@ -780,7 +769,7 @@ void rdma_addr_cancel(struct rdma_dev_addr *addr)
 
 	/*
 	 * sync canceling the work after removing it from the req_list
-	 * guarentees no work is running and none will be started.
+	 * guarantees no work is running and none will be started.
 	 */
 	cancel_delayed_work_sync(&found->work);
 	kfree(found);
@@ -861,7 +850,7 @@ static struct notifier_block nb = {
 
 int addr_init(void)
 {
-	addr_wq = alloc_ordered_workqueue("ib_addr", 0);
+	addr_wq = alloc_workqueue("ib_addr", WQ_UNBOUND, 0);
 	if (!addr_wq)
 		return -ENOMEM;
 

@@ -3,6 +3,7 @@
 
 #include <linux/ctype.h>
 #include <linux/firmware.h>
+#include <linux/string.h>
 #include <linux/string_choices.h>
 #include "otx2_cptpf_ucode.h"
 #include "otx2_cpt_common.h"
@@ -73,7 +74,7 @@ static int is_2nd_ucode_used(struct otx2_cpt_eng_grp_info *eng_grp)
 static void set_ucode_filename(struct otx2_cpt_ucode *ucode,
 			       const char *filename)
 {
-	strscpy(ucode->filename, filename, OTX2_CPT_NAME_LENGTH);
+	strscpy(ucode->filename, filename);
 }
 
 static char *get_eng_type_str(int eng_type)
@@ -129,7 +130,7 @@ static int get_ucode_type(struct device *dev,
 	int i, val = 0;
 	u8 nn;
 
-	strscpy(tmp_ver_str, ucode_hdr->ver_str, OTX2_CPT_UCODE_VER_STR_SZ);
+	strscpy(tmp_ver_str, ucode_hdr->ver_str);
 	for (i = 0; i < strlen(tmp_ver_str); i++)
 		tmp_ver_str[i] = tolower(tmp_ver_str[i]);
 
@@ -371,7 +372,7 @@ static int load_fw(struct device *dev, struct fw_info_t *fw_info,
 	int ucode_type, ucode_size;
 	int ret;
 
-	uc_info = kzalloc(sizeof(*uc_info), GFP_KERNEL);
+	uc_info = kzalloc_obj(*uc_info);
 	if (!uc_info)
 		return -ENOMEM;
 
@@ -458,13 +459,13 @@ static int cpt_ucode_load_fw(struct pci_dev *pdev, struct fw_info_t *fw_info,
 			     u16 rid)
 {
 	char filename[OTX2_CPT_NAME_LENGTH];
-	char eng_type[8] = {0};
+	char eng_type[8];
 	int ret, e, i;
 
 	INIT_LIST_HEAD(&fw_info->ucodes);
 
 	for (e = 1; e < OTX2_CPT_MAX_ENG_TYPES; e++) {
-		strcpy(eng_type, get_eng_type_str(e));
+		strscpy(eng_type, get_eng_type_str(e));
 		for (i = 0; i < strlen(eng_type); i++)
 			eng_type[i] = tolower(eng_type[i]);
 

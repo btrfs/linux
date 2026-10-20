@@ -20,6 +20,9 @@
 #define MCQ_MULTI_INTR_EN       BIT(2)
 #define MCQ_CMB_INTR_EN         BIT(3)
 #define MCQ_AH8                 BIT(4)
+#define MON_EN                  BIT(5)
+#define MRTT_EN                 BIT(25)
+#define RDN_PFM_IMPV_DIS        BIT(28)
 
 #define MCQ_INTR_EN_MSK         (MCQ_MULTI_INTR_EN | MCQ_CMB_INTR_EN)
 
@@ -28,6 +31,7 @@
  */
 #define REG_UFS_XOUFS_CTRL          0x140
 #define REG_UFS_REFCLK_CTRL         0x144
+#define REG_UFS_UFS_MMIO_OTSD_CTRL  0x14C
 #define REG_UFS_MMIO_OPT_CTRL_0     0x160
 #define REG_UFS_EXTREG              0x2100
 #define REG_UFS_MPHYCTRL            0x2200
@@ -199,8 +203,8 @@ struct ufs_mtk_host {
 /* MTK delay of autosuspend: 500 ms */
 #define MTK_RPM_AUTOSUSPEND_DELAY_MS 500
 
-/* MTK RTT support number */
-#define MTK_MAX_NUM_RTT 2
+/* MTK RTT support number for platforms before MT6995 B0 */
+#define MTK_MAX_NUM_RTT_LEGACY 2
 
 /* UFSHCI MTK ip version value */
 enum {
@@ -215,6 +219,10 @@ enum {
 	IP_VER_MT6991_A0 = 0x10460000,
 	IP_VER_MT6991_B0 = 0x10470000,
 	IP_VER_MT6993    = 0x10480000,
+
+	/* UFSHCI 5.0 */
+	IP_VER_MT6995_A0 = 0x10490000,
+	IP_VER_MT6995_B0 = 0x10500000,
 
 	IP_VER_NONE      = 0xFFFFFFFF
 };

@@ -114,10 +114,10 @@ enum x86_topology_domains {
 	TOPO_MAX_DOMAIN,
 };
 
-enum x86_topology_cpu_type {
-	TOPO_CPU_TYPE_PERFORMANCE,
-	TOPO_CPU_TYPE_EFFICIENCY,
-	TOPO_CPU_TYPE_UNKNOWN,
+enum amd_cpu_type {
+	AMD_CPU_TYPE_PERFORMANCE	= 0,
+	AMD_CPU_TYPE_EFFICIENCY		= 1,
+	AMD_CPU_TYPE_LOW_POWER		= 2,
 };
 
 struct x86_topology_system {
@@ -155,9 +155,11 @@ extern unsigned int __max_logical_packages;
 extern unsigned int __max_threads_per_core;
 extern unsigned int __num_threads_per_package;
 extern unsigned int __num_cores_per_package;
+extern unsigned int __num_nodes_per_package;
+
+struct cpuinfo_x86;
 
 const char *get_topology_cpu_type_name(struct cpuinfo_x86 *c);
-enum x86_topology_cpu_type get_topology_cpu_type(struct cpuinfo_x86 *c);
 
 static inline unsigned int topology_max_packages(void)
 {
@@ -177,6 +179,11 @@ static inline unsigned int topology_num_cores_per_package(void)
 static inline unsigned int topology_num_threads_per_package(void)
 {
 	return __num_threads_per_package;
+}
+
+static inline unsigned int topology_num_nodes_per_package(void)
+{
+	return __num_nodes_per_package;
 }
 
 #ifdef CONFIG_X86_LOCAL_APIC
@@ -218,6 +225,12 @@ static inline unsigned int topology_amd_nodes_per_pkg(void)
 	return __amd_nodes_per_pkg;
 }
 
+#else /* CONFIG_SMP */
+static inline int topology_phys_to_logical_pkg(unsigned int pkg) { return 0; }
+static inline int topology_max_smt_threads(void) { return 1; }
+static inline unsigned int topology_amd_nodes_per_pkg(void) { return 1; }
+#endif /* !CONFIG_SMP */
+
 extern struct cpumask __cpu_primary_thread_mask;
 #define cpu_primary_thread_mask ((const struct cpumask *)&__cpu_primary_thread_mask)
 
@@ -241,12 +254,6 @@ static inline bool topology_is_core_online(unsigned int cpu)
 }
 #define topology_is_core_online topology_is_core_online
 
-#else /* CONFIG_SMP */
-static inline int topology_phys_to_logical_pkg(unsigned int pkg) { return 0; }
-static inline int topology_max_smt_threads(void) { return 1; }
-static inline unsigned int topology_amd_nodes_per_pkg(void) { return 1; }
-#endif /* !CONFIG_SMP */
-
 static inline void arch_fix_phys_package_id(int num, u32 slot)
 {
 }
@@ -259,6 +266,7 @@ extern bool x86_topology_update;
 
 #ifdef CONFIG_SCHED_MC_PRIO
 #include <asm/percpu.h>
+#include <linux/cache.h>
 
 DECLARE_PER_CPU_READ_MOSTLY(int, sched_core_priority);
 extern bool __read_mostly sysctl_sched_itmt_enabled;
@@ -324,5 +332,7 @@ static inline void freq_invariance_set_perf_ratio(u64 ratio, bool turbo_disabled
 
 extern void arch_scale_freq_tick(void);
 #define arch_scale_freq_tick arch_scale_freq_tick
+
+extern int arch_sched_node_distance(int from, int to);
 
 #endif /* _ASM_X86_TOPOLOGY_H */

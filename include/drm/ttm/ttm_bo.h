@@ -167,24 +167,34 @@ struct ttm_bo_kmap_obj {
 /**
  * struct ttm_operation_ctx
  *
- * @interruptible: Sleep interruptible if sleeping.
- * @no_wait_gpu: Return immediately if the GPU is busy.
- * @gfp_retry_mayfail: Set the __GFP_RETRY_MAYFAIL when allocation pages.
- * @allow_res_evict: Allow eviction of reserved BOs. Can be used when multiple
- * BOs share the same reservation object.
- * faults. Should only be used by TTM internally.
- * @resv: Reservation object to allow reserved evictions with.
- * @bytes_moved: Statistics on how many bytes have been moved.
- *
  * Context for TTM operations like changing buffer placement or general memory
  * allocation.
  */
 struct ttm_operation_ctx {
+	/** @interruptible: Sleep interruptible if sleeping. */
 	bool interruptible;
+	/** @no_wait_gpu: Return immediately if the GPU is busy. */
 	bool no_wait_gpu;
+	/**
+	 * @gfp_retry_mayfail: Use __GFP_RETRY_MAYFAIL | __GFP_NOWARN
+	 * when allocation pages. This is to avoid invoking the OOM
+	 * killer when populating a buffer object, in order to
+	 * forward the error for it to be dealt with.
+	 */
 	bool gfp_retry_mayfail;
+	/**
+	 * @allow_res_evict: Allow eviction of reserved BOs. Can be used
+	 * when multiple BOs share the same reservation object @resv.
+	 */
 	bool allow_res_evict;
+	/**
+	 * @resv: Reservation object to be used together with
+	 * @allow_res_evict.
+	 */
 	struct dma_resv *resv;
+	/**
+	 * @bytes_moved: Statistics on how many bytes have been moved.
+	 */
 	uint64_t bytes_moved;
 };
 
@@ -216,6 +226,11 @@ struct ttm_lru_walk_arg {
 	struct ww_acquire_ctx *ticket;
 	/** @trylock_only: Only use trylock for locking. */
 	bool trylock_only;
+	/**
+	 * @sleeping_lock: Use sleeping locks even with %NULL @ticket.
+	 * @trylock_only has precedence over this field.
+	 */
+	bool sleeping_lock;
 };
 
 /**
@@ -391,7 +406,7 @@ int ttm_bo_wait_ctx(struct ttm_buffer_object *bo,
 int ttm_bo_validate(struct ttm_buffer_object *bo,
 		    struct ttm_placement *placement,
 		    struct ttm_operation_ctx *ctx);
-void ttm_bo_put(struct ttm_buffer_object *bo);
+void ttm_bo_fini(struct ttm_buffer_object *bo);
 void ttm_bo_set_bulk_move(struct ttm_buffer_object *bo,
 			  struct ttm_lru_bulk_move *bulk);
 bool ttm_bo_eviction_valuable(struct ttm_buffer_object *bo,
@@ -421,6 +436,11 @@ void ttm_bo_unpin(struct ttm_buffer_object *bo);
 int ttm_bo_evict_first(struct ttm_device *bdev,
 		       struct ttm_resource_manager *man,
 		       struct ttm_operation_ctx *ctx);
+s64 ttm_bo_evict_cgroup(struct ttm_device *bdev,
+			struct ttm_resource_manager *man,
+			struct dmem_cgroup_pool_state *limit_pool,
+			s64 target_bytes,
+			struct ttm_operation_ctx *ctx);
 int ttm_bo_access(struct ttm_buffer_object *bo, unsigned long offset,
 		  void *buf, int len, int write);
 vm_fault_t ttm_bo_vm_reserve(struct ttm_buffer_object *bo,

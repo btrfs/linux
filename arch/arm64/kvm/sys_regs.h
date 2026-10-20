@@ -49,6 +49,16 @@ struct sys_reg_params {
 				  .Op2 = ((esr) >> 17) & 0x7,			\
 				  .is_write = !((esr) & 1) })
 
+/*
+ * The Feature ID space is defined as the System register space in AArch64
+ * with op0==3, op1=={0, 1, 3}, CRn==0, CRm=={0-7}, op2=={0-7}.
+ */
+static inline bool in_feat_id_space(struct sys_reg_params *p)
+{
+	return (p->Op0 == 3 && !(p->Op1 & 0b100) && p->Op1 != 2 &&
+		p->CRn == 0 && !(p->CRm & 0b1000));
+}
+
 struct sys_reg_desc {
 	/* Sysreg string for debug */
 	const char *name;
@@ -210,6 +220,25 @@ find_reg(const struct sys_reg_params *params, const struct sys_reg_desc table[],
 	unsigned long pval = reg_to_encoding(params);
 
 	return __inline_bsearch((void *)pval, table, num, sizeof(table[0]), match_sys_reg);
+}
+
+static inline u64 kvm_calculate_mpidr(const struct kvm_vcpu *vcpu)
+{
+	u64 mpidr;
+
+	/*
+	 * Map the vcpu_id into the first three affinity level fields of
+	 * the MPIDR. We limit the number of VCPUs in level 0 due to a
+	 * limitation to 16 CPUs in that level in the ICC_SGIxR registers
+	 * of the GICv3 to be able to address each CPU directly when
+	 * sending IPIs.
+	 */
+	mpidr = (vcpu->vcpu_id & 0x0f) << MPIDR_LEVEL_SHIFT(0);
+	mpidr |= ((vcpu->vcpu_id >> 4) & 0xff) << MPIDR_LEVEL_SHIFT(1);
+	mpidr |= ((vcpu->vcpu_id >> 12) & 0xff) << MPIDR_LEVEL_SHIFT(2);
+	mpidr |= (1ULL << 31);
+
+	return mpidr;
 }
 
 const struct sys_reg_desc *get_reg_by_id(u64 id,

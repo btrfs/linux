@@ -367,7 +367,8 @@ static int snd_msnd_init_sma(struct snd_msnd *chip)
 static int upload_dsp_code(struct snd_card *card)
 {
 	struct snd_msnd *chip = card->private_data;
-	const struct firmware *init_fw = NULL, *perm_fw = NULL;
+	const struct firmware *init_fw __free(firmware) = NULL;
+	const struct firmware *perm_fw __free(firmware) = NULL;
 	int err;
 
 	outb(HPBLKSEL_0, chip->io + HP_BLKS);
@@ -375,28 +376,21 @@ static int upload_dsp_code(struct snd_card *card)
 	err = request_firmware(&init_fw, INITCODEFILE, card->dev);
 	if (err < 0) {
 		dev_err(card->dev, LOGNAME ": Error loading " INITCODEFILE);
-		goto cleanup1;
+		return err;
 	}
 	err = request_firmware(&perm_fw, PERMCODEFILE, card->dev);
 	if (err < 0) {
 		dev_err(card->dev, LOGNAME ": Error loading " PERMCODEFILE);
-		goto cleanup;
+		return err;
 	}
 
 	memcpy_toio(chip->mappedbase, perm_fw->data, perm_fw->size);
 	if (snd_msnd_upload_host(chip, init_fw->data, init_fw->size) < 0) {
 		dev_warn(card->dev, LOGNAME ": Error uploading to DSP\n");
-		err = -ENODEV;
-		goto cleanup;
+		return -ENODEV;
 	}
 	dev_info(card->dev, LOGNAME ": DSP firmware uploaded\n");
-	err = 0;
-
-cleanup:
-	release_firmware(perm_fw);
-cleanup1:
-	release_firmware(init_fw);
-	return err;
+	return 0;
 }
 
 #ifdef MSND_CLASSIC
@@ -512,6 +506,19 @@ static void snd_msnd_mpu401_close(struct snd_mpu401 *mpu)
 	snd_msnd_send_dsp_cmd(mpu->private_data, HDEX_MIDI_IN_STOP);
 	snd_msnd_disable_irq(mpu->private_data);
 }
+
+#ifdef CONFIG_PM
+static u8 snd_msnd_pm_recsrc(struct snd_msnd *chip)
+{
+	/* Convert recsrc to the Capture Source selector: 0=Analog, 1=MASS, 2=SPDIF. */
+	if (chip->recsrc & BIT(4))
+		return 1;
+	if ((chip->recsrc & BIT(17)) &&
+	    test_bit(F_HAVEDIGITAL, &chip->flags))
+		return 2;
+	return 0;
+}
+#endif
 
 static long mpu_io[SNDRV_CARDS] = SNDRV_DEFAULT_PORT;
 static int mpu_irq[SNDRV_CARDS] = SNDRV_DEFAULT_IRQ;
@@ -1001,10 +1008,73 @@ static int snd_msnd_isa_probe(struct device *pdev, unsigned int idx)
 	return 0;
 }
 
+#ifdef CONFIG_PM
+static int snd_msnd_card_suspend(struct snd_card *card)
+{
+	struct snd_msnd *chip = card->private_data;
+	struct snd_mpu401 *mpu;
+	int err;
+
+	mpu = chip->rmidi ? chip->rmidi->private_data : NULL;
+	chip->pm_recsrc = snd_msnd_pm_recsrc(chip);
+	chip->pm_mpu_input = mpu && test_bit(MPU401_MODE_BIT_INPUT, &mpu->mode);
+	if (chip->pm_mpu_input)
+		snd_msnd_send_dsp_cmd(chip, HDEX_MIDI_IN_STOP);
+
+	err = snd_msnd_force_irq(chip, false);
+	if (err < 0) {
+		if (chip->pm_mpu_input)
+			snd_msnd_send_dsp_cmd(chip, HDEX_MIDI_IN_START);
+		return err;
+	}
+
+	snd_power_change_state(card, SNDRV_CTL_POWER_D3hot);
+	return 0;
+}
+
+static int snd_msnd_card_resume(struct snd_card *card)
+{
+	struct snd_msnd *chip = card->private_data;
+	int err;
+
+	err = snd_msnd_initialize(card);
+	if (err < 0)
+		return err;
+
+	snd_msnd_calibrate_adc(chip, chip->play_sample_rate);
+	snd_msndmix_force_recsrc(chip, chip->pm_recsrc);
+
+	err = snd_msnd_force_irq(chip, true);
+	if (err < 0)
+		return err;
+
+	if (chip->pm_mpu_input)
+		snd_msnd_send_dsp_cmd(chip, HDEX_MIDI_IN_START);
+
+	chip->nresets = 0;
+	snd_power_change_state(card, SNDRV_CTL_POWER_D0);
+	return 0;
+}
+
+static int snd_msnd_isa_suspend(struct device *dev, unsigned int idx,
+				pm_message_t state)
+{
+	return snd_msnd_card_suspend(dev_get_drvdata(dev));
+}
+
+static int snd_msnd_isa_resume(struct device *dev, unsigned int idx)
+{
+	return snd_msnd_card_resume(dev_get_drvdata(dev));
+}
+#endif
+
 static struct isa_driver snd_msnd_driver = {
 	.match		= snd_msnd_isa_match,
 	.probe		= snd_msnd_isa_probe,
-	/* FIXME: suspend, resume */
+#ifdef CONFIG_PM
+	.suspend	= snd_msnd_isa_suspend,
+	.resume		= snd_msnd_isa_resume,
+#endif
 	.driver		= {
 		.name	= DEV_NAME
 	},
@@ -1111,8 +1181,20 @@ static int snd_msnd_pnp_detect(struct pnp_card_link *pcard,
 	return 0;
 }
 
-static int isa_registered;
-static int pnp_registered;
+#ifdef CONFIG_PM
+static int snd_msnd_pnp_suspend(struct pnp_card_link *pcard, pm_message_t state)
+{
+	return snd_msnd_card_suspend(pnp_get_card_drvdata(pcard));
+}
+
+static int snd_msnd_pnp_resume(struct pnp_card_link *pcard)
+{
+	return snd_msnd_card_resume(pnp_get_card_drvdata(pcard));
+}
+#endif
+
+static int isa_registered __ro_after_init;
+static int pnp_registered __ro_after_init;
 
 static const struct pnp_card_device_id msnd_pnpids[] = {
 	/* Pinnacle PnP */
@@ -1127,6 +1209,10 @@ static struct pnp_card_driver msnd_pnpc_driver = {
 	.name = "msnd_pinnacle",
 	.id_table = msnd_pnpids,
 	.probe = snd_msnd_pnp_detect,
+#ifdef CONFIG_PM
+	.suspend = snd_msnd_pnp_suspend,
+	.resume = snd_msnd_pnp_resume,
+#endif
 };
 #endif /* CONFIG_PNP */
 
@@ -1161,4 +1247,3 @@ static void __exit snd_msnd_exit(void)
 
 module_init(snd_msnd_init);
 module_exit(snd_msnd_exit);
-

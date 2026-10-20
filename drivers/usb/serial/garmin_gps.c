@@ -15,12 +15,9 @@
 #include <linux/slab.h>
 #include <linux/timer.h>
 #include <linux/tty.h>
-#include <linux/tty_driver.h>
 #include <linux/tty_flip.h>
 #include <linux/module.h>
 #include <linux/spinlock.h>
-#include <linux/uaccess.h>
-#include <linux/atomic.h>
 #include <linux/usb.h>
 #include <linux/usb/serial.h>
 
@@ -267,7 +264,7 @@ static int pkt_add(struct garmin_data *garmin_data_p,
 
 	/* process only packets containing data ... */
 	if (data_length) {
-		pkt = kmalloc(struct_size(pkt, data, data_length), GFP_ATOMIC);
+		pkt = kmalloc_flex(*pkt, data, data_length, GFP_ATOMIC);
 		if (!pkt)
 			return 0;
 
@@ -1373,7 +1370,7 @@ static int garmin_port_probe(struct usb_serial_port *port)
 	int status;
 	struct garmin_data *garmin_data_p;
 
-	garmin_data_p = kzalloc(sizeof(struct garmin_data), GFP_KERNEL);
+	garmin_data_p = kzalloc_obj(struct garmin_data);
 	if (!garmin_data_p)
 		return -ENOMEM;
 

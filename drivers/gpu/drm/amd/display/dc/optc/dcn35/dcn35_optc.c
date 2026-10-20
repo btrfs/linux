@@ -58,6 +58,7 @@
 static void optc35_set_odm_combine(struct timing_generator *optc, int *opp_id, int opp_cnt,
 		int segment_width, int last_segment_width)
 {
+	(void)last_segment_width;
 	struct optc *optc1 = DCN10TG_FROM_TG(optc);
 	uint32_t memory_mask = 0;
 	int h_active = segment_width * opp_cnt;
@@ -121,15 +122,10 @@ static bool optc35_enable_crtc(struct timing_generator *optc)
 	REG_UPDATE(CONTROL,
 			VTG0_ENABLE, 1);
 
-	REG_SEQ_START();
-
 	/* Enable CRTC */
 	REG_UPDATE_2(OTG_CONTROL,
 			OTG_DISABLE_POINT_CNTL, 2,
 			OTG_MASTER_EN, 1);
-
-	REG_SEQ_SUBMIT();
-	REG_SEQ_WAIT_DONE();
 
 	return true;
 }
@@ -180,7 +176,100 @@ static void optc35_phantom_crtc_post_enable(struct timing_generator *optc)
 	REG_WAIT(OTG_CLOCK_CONTROL, OTG_BUSY, 0, 1, 100000);
 }
 
-static bool optc35_configure_crc(struct timing_generator *optc,
+/**
+ * optc35_get_crc - Capture CRC result per component
+ *
+ * @optc: timing_generator instance.
+ * @idx: index of crc engine to get CRC from
+ * @r_cr: primary CRC signature for red data.
+ * @g_y: primary CRC signature for green data.
+ * @b_cb: primary CRC signature for blue data.
+ *
+ * This function reads the CRC signature from the OPTC registers. Notice that
+ * we have three registers to keep the CRC result per color component (RGB).
+ *
+ * For different DCN versions:
+ * - If CRC32 registers (OTG_CRC0_DATA_R32/G32/B32) are available, read from
+ *   32-bit CRC registers. DCN 3.6+ supports both CRC-32 and CRC-16 polynomials
+ *   selectable via OTG_CRC_POLY_SEL.
+ * - Otherwise, read from legacy 16-bit CRC registers (OTG_CRC0_DATA_RG/B)
+ *   which only support CRC-16 polynomial.
+ *
+ * Returns:
+ * If CRC is disabled, return false; otherwise, return true, and the CRC
+ * results in the parameters.
+ */
+static bool optc35_get_crc(struct timing_generator *optc, uint8_t idx,
+		   uint32_t *r_cr, uint32_t *g_y, uint32_t *b_cb)
+{
+	uint32_t field = 0;
+	struct optc *optc1 = DCN10TG_FROM_TG(optc);
+
+	if (idx == 1 && optc1->tg_mask->OTG_CRC1_EN != 0)
+		REG_GET(OTG_CRC_CNTL, OTG_CRC1_EN, &field);
+	else
+		REG_GET(OTG_CRC_CNTL, OTG_CRC_EN, &field);
+
+	/* Early return if CRC is not enabled for this CRTC */
+	if (!field)
+		return false;
+
+	if (optc1->tg_mask->CRC0_R_CR32 != 0 && optc1->tg_mask->CRC1_R_CR32 != 0 &&
+	    optc1->tg_mask->CRC0_G_Y32 != 0 && optc1->tg_mask->CRC1_G_Y32 != 0 &&
+	    optc1->tg_mask->CRC0_B_CB32 != 0 && optc1->tg_mask->CRC1_B_CB32 != 0) {
+		switch (idx) {
+		case 0:
+			/* OTG_CRC0_DATA_R32/G32/B32 has the CRC32 results */
+			REG_GET(OTG_CRC0_DATA_R32,
+				CRC0_R_CR32, r_cr);
+			REG_GET(OTG_CRC0_DATA_G32,
+				CRC0_G_Y32, g_y);
+			REG_GET(OTG_CRC0_DATA_B32,
+				CRC0_B_CB32, b_cb);
+			break;
+		case 1:
+			/* OTG_CRC1_DATA_R32/G32/B32 has the CRC32 results */
+			REG_GET(OTG_CRC1_DATA_R32,
+				CRC1_R_CR32, r_cr);
+			REG_GET(OTG_CRC1_DATA_G32,
+				CRC1_G_Y32, g_y);
+			REG_GET(OTG_CRC1_DATA_B32,
+				CRC1_B_CB32, b_cb);
+			break;
+		default:
+			return false;
+		}
+	} else {
+		switch (idx) {
+		case 0:
+			/* OTG_CRC0_DATA_RG has the CRC16 results for the red and green component */
+			REG_GET_2(OTG_CRC0_DATA_RG,
+				CRC0_R_CR, r_cr,
+				CRC0_G_Y, g_y);
+
+			/* OTG_CRC0_DATA_B has the CRC16 results for the blue component */
+			REG_GET(OTG_CRC0_DATA_B,
+				CRC0_B_CB, b_cb);
+			break;
+		case 1:
+			/* OTG_CRC1_DATA_RG has the CRC16 results for the red and green component */
+			REG_GET_2(OTG_CRC1_DATA_RG,
+				CRC1_R_CR, r_cr,
+				CRC1_G_Y, g_y);
+
+			/* OTG_CRC1_DATA_B has the CRC16 results for the blue component */
+			REG_GET(OTG_CRC1_DATA_B,
+				CRC1_B_CB, b_cb);
+			break;
+		default:
+			return false;
+			}
+	}
+
+	return true;
+}
+
+bool optc35_configure_crc(struct timing_generator *optc,
 				 const struct crc_params *params)
 {
 	struct optc *optc1 = DCN10TG_FROM_TG(optc);
@@ -189,8 +278,21 @@ static bool optc35_configure_crc(struct timing_generator *optc,
 	if (!optc1_is_tg_enabled(optc))
 		return false;
 
-	if (!params->enable || params->reset)
-		REG_WRITE(OTG_CRC_CNTL, 0);
+	if (!params->enable || params->reset) {
+		switch (params->crc_eng_inst) {
+		case 0:
+			REG_UPDATE(OTG_CRC_CNTL, OTG_CRC_EN, 0);
+			break;
+		case 1:
+			if (optc1->tg_mask->OTG_CRC1_EN != 0)
+				REG_UPDATE(OTG_CRC_CNTL, OTG_CRC1_EN, 0);
+			else
+				REG_UPDATE(OTG_CRC_CNTL, OTG_CRC_EN, 0);
+			break;
+		default:
+			return false;
+		}
+	}
 
 	if (!params->enable)
 		return true;
@@ -255,16 +357,20 @@ static bool optc35_configure_crc(struct timing_generator *optc,
 			REG_UPDATE_4(OTG_CRC_CNTL,
 					OTG_CRC_CONT_EN, params->continuous_mode ? 1 : 0,
 					OTG_CRC1_SELECT, params->selection,
-					OTG_CRC_EN, 1,
+					OTG_CRC1_EN, 1,
 					OTG_CRC_WINDOW_DB_EN, 1);
 		else
 			REG_UPDATE_3(OTG_CRC_CNTL,
 					OTG_CRC_CONT_EN, params->continuous_mode ? 1 : 0,
 					OTG_CRC1_SELECT, params->selection,
-					OTG_CRC_EN, 1);
+					OTG_CRC1_EN, 1);
 		break;
 	default:
 		return false;
+	}
+	if (optc1->tg_mask->OTG_CRC_POLY_SEL != 0) {
+		REG_UPDATE(OTG_CRC_CNTL,
+				OTG_CRC_POLY_SEL, params->crc_poly_mode);
 	}
 	return true;
 }
@@ -343,7 +449,7 @@ void optc35_set_drr(
 	REG_WRITE(OTG_V_COUNT_STOP_CONTROL2, 0);
 }
 
-static void optc35_set_long_vtotal(
+void optc35_set_long_vtotal(
 	struct timing_generator *optc,
 	const struct long_vtotal_params *params)
 {
@@ -430,7 +536,7 @@ static void optc35_set_long_vtotal(
 	}
 }
 
-static void optc35_wait_otg_disable(struct timing_generator *optc)
+void optc35_wait_otg_disable(struct timing_generator *optc)
 {
 	struct optc *optc1;
 	uint32_t is_master_en;
@@ -488,7 +594,7 @@ static const struct timing_generator_funcs dcn35_tg_funcs = {
 		.is_optc_underflow_occurred = optc1_is_optc_underflow_occurred,
 		.clear_optc_underflow = optc1_clear_optc_underflow,
 		.setup_global_swap_lock = NULL,
-		.get_crc = optc1_get_crc,
+		.get_crc = optc35_get_crc,
 		.configure_crc = optc35_configure_crc,
 		.set_dsc_config = optc3_set_dsc_config,
 		.get_dsc_status = optc2_get_dsc_status,
@@ -511,6 +617,7 @@ static const struct timing_generator_funcs dcn35_tg_funcs = {
 		.set_long_vtotal = optc35_set_long_vtotal,
 		.is_two_pixels_per_container = optc1_is_two_pixels_per_container,
 		.read_otg_state = optc31_read_otg_state,
+		.optc_read_reg_state = optc31_read_reg_state,
 };
 
 void dcn35_timing_generator_init(struct optc *optc1)
@@ -525,7 +632,6 @@ void dcn35_timing_generator_init(struct optc *optc1)
 	optc1->min_v_blank_interlace = 5;
 	optc1->min_h_sync_width = 4;
 	optc1->min_v_sync_width = 1;
-	optc1->max_frame_count = 0xFFFFFF;
 
 	dcn35_timing_generator_set_fgcg(
 		optc1, CTX->dc->debug.enable_fine_grain_clock_gating.bits.optc);

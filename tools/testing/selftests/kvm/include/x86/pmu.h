@@ -6,8 +6,8 @@
 #define SELFTEST_KVM_PMU_H
 
 #include <stdbool.h>
-#include <stdint.h>
 
+#include <linux/types.h>
 #include <linux/bits.h>
 
 #define KVM_PMU_EVENT_FILTER_MAX_EVENTS			300
@@ -37,6 +37,12 @@
 #define ARCH_PERFMON_EVENTSEL_ENABLE		BIT_ULL(22)
 #define ARCH_PERFMON_EVENTSEL_INV		BIT_ULL(23)
 #define ARCH_PERFMON_EVENTSEL_CMASK		GENMASK_ULL(31, 24)
+
+/*
+ * These are AMD-specific bits.
+ */
+#define AMD64_EVENTSEL_GUESTONLY		BIT_ULL(40)
+#define AMD64_EVENTSEL_HOSTONLY			BIT_ULL(41)
 
 /* RDPMC control flags, Intel only. */
 #define INTEL_RDPMC_METRICS			BIT_ULL(29)
@@ -104,14 +110,15 @@ enum amd_pmu_zen_events {
 	NR_AMD_ZEN_EVENTS,
 };
 
-extern const uint64_t intel_pmu_arch_events[];
-extern const uint64_t amd_pmu_zen_events[];
+extern const u64 intel_pmu_arch_events[];
+extern const u64 amd_pmu_zen_events[];
 
 enum pmu_errata {
 	INSTRUCTIONS_RETIRED_OVERCOUNT,
 	BRANCHES_RETIRED_OVERCOUNT,
 };
-extern uint64_t pmu_errata_mask;
+
+extern u64 pmu_errata_mask;
 
 void kvm_init_pmu_errata(void);
 

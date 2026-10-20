@@ -5,6 +5,7 @@
  * Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
  */
 #include <linux/auxiliary_bus.h>
+#include <linux/devm-helpers.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
 #include <linux/nvmem-consumer.h>
@@ -678,12 +679,7 @@ static int qcom_battmgr_set_charge_start_threshold(struct qcom_battmgr *battmgr,
 	u32 target_soc, delta_soc;
 	int ret;
 
-	if (start_soc < CHARGE_CTRL_START_THR_MIN ||
-	    start_soc > CHARGE_CTRL_START_THR_MAX) {
-		dev_err(battmgr->dev, "charge control start threshold exceed range: [%u - %u]\n",
-			CHARGE_CTRL_START_THR_MIN, CHARGE_CTRL_START_THR_MAX);
-		return -EINVAL;
-	}
+	start_soc = clamp(start_soc, CHARGE_CTRL_START_THR_MIN, CHARGE_CTRL_START_THR_MAX);
 
 	/*
 	 * If the new start threshold is larger than the old end threshold,
@@ -716,12 +712,7 @@ static int qcom_battmgr_set_charge_end_threshold(struct qcom_battmgr *battmgr, i
 	u32 delta_soc = CHARGE_CTRL_DELTA_SOC;
 	int ret;
 
-	if (end_soc < CHARGE_CTRL_END_THR_MIN ||
-	    end_soc > CHARGE_CTRL_END_THR_MAX) {
-		dev_err(battmgr->dev, "charge control end threshold exceed range: [%u - %u]\n",
-			CHARGE_CTRL_END_THR_MIN, CHARGE_CTRL_END_THR_MAX);
-		return -EINVAL;
-	}
+	end_soc = clamp(end_soc, CHARGE_CTRL_END_THR_MIN, CHARGE_CTRL_END_THR_MAX);
 
 	if (battmgr->info.charge_ctrl_start && end_soc > battmgr->info.charge_ctrl_start)
 		delta_soc = end_soc - battmgr->info.charge_ctrl_start;
@@ -1241,16 +1232,17 @@ static void qcom_battmgr_sc8280xp_strcpy(char *dest, const char *src)
 		memcpy(dest, src + 1, len);
 		dest[len] = '\0';
 	} else {
-		memcpy(dest, src, BATTMGR_STRING_LEN);
+		strscpy(dest, src, BATTMGR_STRING_LEN);
 	}
 }
 
 static unsigned int qcom_battmgr_sc8280xp_parse_technology(const char *chemistry)
 {
-	if ((!strncmp(chemistry, "LIO", BATTMGR_CHEMISTRY_LEN)) ||
-	    (!strncmp(chemistry, "OOI", BATTMGR_CHEMISTRY_LEN)))
+	if ((!strncmp(chemistry, "LIO", 3)) ||
+	    (!strncmp(chemistry, "OOI", 3)))
 		return POWER_SUPPLY_TECHNOLOGY_LION;
-	if (!strncmp(chemistry, "LIP", BATTMGR_CHEMISTRY_LEN))
+	if (!strncmp(chemistry, "LIP", 3) ||
+	    !strncmp(chemistry, "LiP", 3))
 		return POWER_SUPPLY_TECHNOLOGY_LIPO;
 
 	pr_err("Unknown battery technology '%s'\n", chemistry);
@@ -1620,6 +1612,8 @@ static void qcom_battmgr_pdr_notify(void *priv, int state)
 }
 
 static const struct of_device_id qcom_battmgr_of_variants[] = {
+	{ .compatible = "qcom,glymur-pmic-glink", .data = (void *)QCOM_BATTMGR_X1E80100 },
+	{ .compatible = "qcom,kaanapali-pmic-glink", .data = (void *)QCOM_BATTMGR_SM8550 },
 	{ .compatible = "qcom,sc8180x-pmic-glink", .data = (void *)QCOM_BATTMGR_SC8280XP },
 	{ .compatible = "qcom,sc8280xp-pmic-glink", .data = (void *)QCOM_BATTMGR_SC8280XP },
 	{ .compatible = "qcom,sm8550-pmic-glink", .data = (void *)QCOM_BATTMGR_SM8550 },
@@ -1655,7 +1649,6 @@ static int qcom_battmgr_probe(struct auxiliary_device *adev,
 	psy_cfg_supply.supplied_to = qcom_battmgr_battery;
 	psy_cfg_supply.num_supplicants = 1;
 
-	INIT_WORK(&battmgr->enable_work, qcom_battmgr_enable_worker);
 	mutex_init(&battmgr->lock);
 	init_completion(&battmgr->ack);
 
@@ -1717,6 +1710,11 @@ static int qcom_battmgr_probe(struct auxiliary_device *adev,
 			return dev_err_probe(dev, PTR_ERR(battmgr->wls_psy),
 					     "failed to register wireless charing power supply\n");
 	}
+
+	ret = devm_work_autocancel(dev, &battmgr->enable_work,
+				   qcom_battmgr_enable_worker);
+	if (ret)
+		return ret;
 
 	battmgr->client = devm_pmic_glink_client_alloc(dev, PMIC_GLINK_OWNER_BATTMGR,
 						       qcom_battmgr_callback,

@@ -88,7 +88,7 @@ struct xe_drm_client *xe_drm_client_alloc(void)
 {
 	struct xe_drm_client *client;
 
-	client = kzalloc(sizeof(*client), GFP_KERNEL);
+	client = kzalloc_obj(*client);
 	if (!client)
 		return NULL;
 
@@ -168,9 +168,19 @@ static void bo_meminfo(struct xe_bo *bo,
 		       struct drm_memory_stats stats[TTM_NUM_MEM_TYPES])
 {
 	u64 sz = xe_bo_size(bo);
-	u32 mem_type = bo->ttm.resource->mem_type;
+	u32 mem_type;
 
 	xe_bo_assert_held(bo);
+
+	/*
+	 * The resource can be NULL if the BO has been purged, plus maybe some
+	 * other cases. Either way there shouldn't be any memory to account for,
+	 * or a current resource to account this against, so skip for now.
+	 */
+	if (!bo->ttm.resource)
+		return;
+
+	mem_type = bo->ttm.resource->mem_type;
 
 	if (drm_gem_object_is_shared_for_memory_stats(&bo->ttm.base))
 		stats[mem_type].shared += sz;
@@ -183,7 +193,7 @@ static void bo_meminfo(struct xe_bo *bo,
 		if (!dma_resv_test_signaled(bo->ttm.base.resv,
 					    DMA_RESV_USAGE_BOOKKEEP))
 			stats[mem_type].active += sz;
-		else if (mem_type == XE_PL_SYSTEM)
+		else if (mem_type == XE_PL_SYSTEM || xe_bo_madv_is_dontneed(bo))
 			stats[mem_type].purgeable += sz;
 	}
 }
@@ -263,8 +273,7 @@ static void show_meminfo(struct drm_printer *p, struct drm_file *file)
 					       &stats[mem_type],
 					       DRM_GEM_OBJECT_ACTIVE |
 					       DRM_GEM_OBJECT_RESIDENT |
-					       (mem_type != XE_PL_SYSTEM ? 0 :
-					       DRM_GEM_OBJECT_PURGEABLE),
+					       DRM_GEM_OBJECT_PURGEABLE,
 					       xe_mem_type_to_name[mem_type]);
 		}
 	}
@@ -285,32 +294,31 @@ static struct xe_hw_engine *any_engine(struct xe_device *xe)
 	return NULL;
 }
 
-static bool force_wake_get_any_engine(struct xe_device *xe,
-				      struct xe_hw_engine **phwe,
-				      unsigned int *pfw_ref)
+/*
+ * Pick any engine and grab its forcewake.  On error phwe will be NULL and
+ * the returned forcewake reference will be invalid.  Callers should check
+ * phwe against NULL.
+ */
+static struct xe_force_wake_ref force_wake_get_any_engine(struct xe_device *xe,
+							  struct xe_hw_engine **phwe)
 {
 	enum xe_force_wake_domains domain;
-	unsigned int fw_ref;
+	struct xe_force_wake_ref fw_ref = {};
 	struct xe_hw_engine *hwe;
-	struct xe_force_wake *fw;
+
+	*phwe = NULL;
 
 	hwe = any_engine(xe);
 	if (!hwe)
-		return false;
+		return fw_ref;	/* will be invalid */
 
 	domain = xe_hw_engine_to_fw_domain(hwe);
-	fw = gt_to_fw(hwe->gt);
 
-	fw_ref = xe_force_wake_get(fw, domain);
-	if (!xe_force_wake_ref_has_domain(fw_ref, domain)) {
-		xe_force_wake_put(fw, fw_ref);
-		return false;
-	}
+	fw_ref = xe_force_wake_constructor(gt_to_fw(hwe->gt), domain);
+	if (xe_force_wake_ref_has_domain(fw_ref.domains, domain))
+		*phwe = hwe;	/* valid forcewake */
 
-	*phwe = hwe;
-	*pfw_ref = fw_ref;
-
-	return true;
+	return fw_ref;
 }
 
 static void show_run_ticks(struct drm_printer *p, struct drm_file *file)
@@ -322,7 +330,6 @@ static void show_run_ticks(struct drm_printer *p, struct drm_file *file)
 	struct xe_hw_engine *hwe;
 	struct xe_exec_queue *q;
 	u64 gpu_timestamp;
-	unsigned int fw_ref;
 
 	/*
 	 * RING_TIMESTAMP registers are inaccessible in VF mode.
@@ -339,29 +346,26 @@ static void show_run_ticks(struct drm_printer *p, struct drm_file *file)
 	wait_var_event(&xef->exec_queue.pending_removal,
 		       !atomic_read(&xef->exec_queue.pending_removal));
 
-	xe_pm_runtime_get(xe);
-	if (!force_wake_get_any_engine(xe, &hwe, &fw_ref)) {
-		xe_pm_runtime_put(xe);
-		return;
-	}
+	scoped_guard(xe_pm_runtime, xe) {
+		CLASS(xe_force_wake_release_only, fw_ref)(force_wake_get_any_engine(xe, &hwe));
+		if (!hwe)
+			return;
 
-	/* Accumulate all the exec queues from this client */
-	mutex_lock(&xef->exec_queue.lock);
-	xa_for_each(&xef->exec_queue.xa, i, q) {
-		xe_exec_queue_get(q);
+		/* Accumulate all the exec queues from this client */
+		mutex_lock(&xef->exec_queue.lock);
+		xa_for_each(&xef->exec_queue.xa, i, q) {
+			xe_exec_queue_get(q);
+			mutex_unlock(&xef->exec_queue.lock);
+
+			xe_exec_queue_update_run_ticks(q);
+
+			mutex_lock(&xef->exec_queue.lock);
+			xe_exec_queue_put(q);
+		}
 		mutex_unlock(&xef->exec_queue.lock);
 
-		xe_exec_queue_update_run_ticks(q);
-
-		mutex_lock(&xef->exec_queue.lock);
-		xe_exec_queue_put(q);
+		gpu_timestamp = xe_hw_engine_read_timestamp(hwe);
 	}
-	mutex_unlock(&xef->exec_queue.lock);
-
-	gpu_timestamp = xe_hw_engine_read_timestamp(hwe);
-
-	xe_force_wake_put(gt_to_fw(hwe->gt), fw_ref);
-	xe_pm_runtime_put(xe);
 
 	for (class = 0; class < XE_ENGINE_CLASS_MAX; class++) {
 		const char *class_name;

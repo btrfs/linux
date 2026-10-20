@@ -1217,13 +1217,11 @@ static int wcd9380_probe(struct sdw_slave *pdev,
 	return 0;
 }
 
-static int wcd9380_remove(struct sdw_slave *pdev)
+static void wcd9380_remove(struct sdw_slave *pdev)
 {
 	struct device *dev = &pdev->dev;
 
 	component_del(dev, &wcd_sdw_component_ops);
-
-	return 0;
 }
 
 static const struct sdw_device_id wcd9380_slave_id[] = {
@@ -1247,10 +1245,16 @@ static int wcd938x_sdw_runtime_suspend(struct device *dev)
 static int wcd938x_sdw_runtime_resume(struct device *dev)
 {
 	struct wcd938x_sdw_priv *wcd = dev_get_drvdata(dev);
+	int ret;
 
 	if (wcd->regmap) {
 		regcache_cache_only(wcd->regmap, false);
-		regcache_sync(wcd->regmap);
+		ret = regcache_sync(wcd->regmap);
+		if (ret) {
+			regcache_cache_only(wcd->regmap, true);
+			regcache_mark_dirty(wcd->regmap);
+			return ret;
+		}
 	}
 
 	pm_runtime_mark_last_busy(dev);

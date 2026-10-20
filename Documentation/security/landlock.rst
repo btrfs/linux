@@ -1,13 +1,14 @@
 .. SPDX-License-Identifier: GPL-2.0
 .. Copyright © 2017-2020 Mickaël Salaün <mic@digikod.net>
 .. Copyright © 2019-2020 ANSSI
+.. Copyright © 2026 Cloudflare, Inc.
 
 ==================================
 Landlock LSM: kernel documentation
 ==================================
 
 :Author: Mickaël Salaün
-:Date: March 2025
+:Date: August 2026
 
 Landlock's goal is to create scoped access-control (i.e. sandboxing).  To
 harden a whole system, this feature should be available to any process,
@@ -89,6 +90,46 @@ this is required to keep access controls consistent over the whole system, and
 this avoids unattended bypasses through file descriptor passing (i.e. confused
 deputy attack).
 
+.. _scoped-flags-interaction:
+
+Interaction between scoped flags and other access rights
+--------------------------------------------------------
+
+The ``scoped`` flags in &struct landlock_ruleset_attr restrict the
+use of *outgoing* IPC from the created Landlock domain, while they
+permit reaching out to IPC endpoints *within* the created Landlock
+domain.
+
+In the future, scoped flags *may* interact with other access rights,
+e.g. so that abstract UNIX sockets can be allow-listed by name, or so
+that signals can be allow-listed by signal number or target process.
+
+When introducing ``LANDLOCK_ACCESS_FS_RESOLVE_UNIX``, we defined it to
+implicitly have the same scoping semantics as a
+``LANDLOCK_SCOPE_PATHNAME_UNIX_SOCKET`` flag would have: connecting to
+UNIX sockets within the same domain (where
+``LANDLOCK_ACCESS_FS_RESOLVE_UNIX`` is used) is unconditionally
+allowed.
+
+The reasoning is:
+
+* Like other IPC mechanisms, connecting to named UNIX sockets in the
+  same domain should be expected and harmless.  (If needed, users can
+  further refine their Landlock policies with nested domains or by
+  restricting ``LANDLOCK_ACCESS_FS_MAKE_SOCK``.)
+* We reserve the option to still introduce
+  ``LANDLOCK_SCOPE_PATHNAME_UNIX_SOCKET`` in the future.  (This would
+  be useful if we wanted to have a Landlock rule to permit IPC access
+  to other Landlock domains.)
+* But we can postpone the point in time when users have to deal with
+  two interacting flags visible in the userspace API.  (In particular,
+  it is possible that it won't be needed in practice, in which case we
+  can avoid the second flag altogether.)
+* If we *do* introduce ``LANDLOCK_SCOPE_PATHNAME_UNIX_SOCKET`` in the
+  future, setting this scoped flag in a ruleset does *not reduce* the
+  restrictions, because access within the same scope is already
+  allowed based on ``LANDLOCK_ACCESS_FS_RESOLVE_UNIX``.
+
 Tests
 =====
 
@@ -110,6 +151,12 @@ Filesystem
 .. kernel-doc:: security/landlock/fs.h
     :identifiers:
 
+Process credential
+------------------
+
+.. kernel-doc:: security/landlock/cred.h
+    :identifiers:
+
 Ruleset and domain
 ------------------
 
@@ -128,11 +175,49 @@ makes the reasoning much easier and helps avoid pitfalls.
 .. kernel-doc:: security/landlock/ruleset.h
     :identifiers:
 
+.. kernel-doc:: security/landlock/domain.h
+    :identifiers:
+
+Denial logging
+==============
+
+Access denials are logged through two independent channels: audit
+records and tracepoints.  Both are managed by the common denial
+framework in ``log.c``, compiled under ``CONFIG_SECURITY_LANDLOCK_LOG``
+(automatically selected by ``CONFIG_AUDIT`` or ``CONFIG_TRACEPOINTS``).
+
+Audit records respect audit configuration, the domain's Landlock log
+flags, and ``LANDLOCK_LOG_DISABLED``.  Tracepoints fire unconditionally,
+independent of these settings.  The denial counter (``num_denials``) is
+always incremented regardless of logging configuration.
+
+Each denial tracepoint carries a ``logged`` field reporting the
+audit-logging verdict: whether the denial would be written to the audit
+log if audit were configured and active.  This verdict is the same
+whether or not the kernel is built with audit support, so a
+tracepoints-only build reports the selection audit would make.  A quiet
+rule (``LANDLOCK_ADD_RULE_QUIET`` with the access in the ``quiet_*``
+fields of ``struct landlock_ruleset_attr``) suppresses logging by
+setting ``logged=0`` the same way.
+
+See Documentation/admin-guide/LSM/landlock.rst for audit record format,
+tracepoint usage, and filtering examples.
+
+.. kernel-doc:: security/landlock/log.h
+    :identifiers:
+
+Trace events
+------------
+
+See Documentation/trace/events-landlock.rst for trace event usage and format
+details; the full event reference lives there and is not duplicated here.
+
 Additional documentation
 ========================
 
 * Documentation/userspace-api/landlock.rst
 * Documentation/admin-guide/LSM/landlock.rst
+* Documentation/trace/events-landlock.rst
 * https://landlock.io
 
 .. Links

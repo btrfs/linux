@@ -37,20 +37,14 @@ static inline pte_t huge_ptep_get_and_clear(struct mm_struct *mm,
 	return __huge_ptep_get_and_clear(mm, addr, ptep);
 }
 
-static inline void arch_clear_hugetlb_flags(struct folio *folio)
-{
-	clear_bit(PG_arch_1, &folio->flags.f);
-}
-#define arch_clear_hugetlb_flags arch_clear_hugetlb_flags
-
 #define __HAVE_ARCH_HUGE_PTE_CLEAR
 static inline void huge_pte_clear(struct mm_struct *mm, unsigned long addr,
 				  pte_t *ptep, unsigned long sz)
 {
-	if ((pte_val(*ptep) & _REGION_ENTRY_TYPE_MASK) == _REGION_ENTRY_TYPE_R3)
-		set_pte(ptep, __pte(_REGION3_ENTRY_EMPTY));
+	if ((pte_val(ptep_get(ptep)) & _REGION_ENTRY_TYPE_MASK) == _REGION_ENTRY_TYPE_R3)
+		set_pud((pud_t *)ptep, __pud(_REGION3_ENTRY_EMPTY));
 	else
-		set_pte(ptep, __pte(_SEGMENT_ENTRY_EMPTY));
+		set_pmd((pmd_t *)ptep, __pmd(_SEGMENT_ENTRY_EMPTY));
 }
 
 #define __HAVE_ARCH_HUGE_PTEP_CLEAR_FLUSH
@@ -83,20 +77,20 @@ static inline void huge_ptep_set_wrprotect(struct mm_struct *mm,
 	__set_huge_pte_at(mm, addr, ptep, pte_wrprotect(pte));
 }
 
-#define __HAVE_ARCH_HUGE_PTE_MKUFFD_WP
-static inline pte_t huge_pte_mkuffd_wp(pte_t pte)
+#define __HAVE_ARCH_HUGE_PTE_MKUFFD
+static inline pte_t huge_pte_mkuffd(pte_t pte)
 {
 	return pte;
 }
 
-#define __HAVE_ARCH_HUGE_PTE_CLEAR_UFFD_WP
-static inline pte_t huge_pte_clear_uffd_wp(pte_t pte)
+#define __HAVE_ARCH_HUGE_PTE_CLEAR_UFFD
+static inline pte_t huge_pte_clear_uffd(pte_t pte)
 {
 	return pte;
 }
 
-#define __HAVE_ARCH_HUGE_PTE_UFFD_WP
-static inline int huge_pte_uffd_wp(pte_t pte)
+#define __HAVE_ARCH_HUGE_PTE_UFFD
+static inline int huge_pte_uffd(pte_t pte)
 {
 	return 0;
 }

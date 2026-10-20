@@ -6,12 +6,12 @@
  */
 #include <linux/bits.h>
 #include <linux/freezer.h>
-#include <linux/gpio/consumer.h>
 #include <linux/i2c.h>
 #include <linux/interrupt.h>
 #include <linux/kernel.h>
 #include <linux/kthread.h>
 #include <linux/device.h>
+#include <linux/devm-helpers.h>
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/of_irq.h>
@@ -641,28 +641,25 @@ static int ucs1002_probe(struct i2c_client *client)
 	}
 
 	info->health = POWER_SUPPLY_HEALTH_GOOD;
-	INIT_DELAYED_WORK(&info->health_poll, ucs1002_health_poll);
+	ret = devm_delayed_work_autocancel(dev, &info->health_poll,
+					   ucs1002_health_poll);
+	if (ret)
+		return ret;
 
 	if (irq_a_det > 0) {
 		ret = devm_request_threaded_irq(dev, irq_a_det, NULL,
 						ucs1002_charger_irq,
 						IRQF_ONESHOT,
 						"ucs1002-a_det", info);
-		if (ret) {
-			dev_err(dev, "Failed to request A_DET threaded irq: %d\n",
-				ret);
+		if (ret)
 			return ret;
-		}
 	}
 
 	if (irq_alert > 0) {
 		ret = devm_request_irq(dev, irq_alert, ucs1002_alert_irq,
 				       0,"ucs1002-alert", info);
-		if (ret) {
-			dev_err(dev, "Failed to request ALERT threaded irq: %d\n",
-				ret);
+		if (ret)
 			return ret;
-		}
 	}
 
 	return 0;

@@ -23,7 +23,6 @@
 #include <asm/init.h>
 #include <asm/stacktrace.h>
 #include <asm/sev.h>
-#include <asm/sev-internal.h>
 #include <asm/insn-eval.h>
 #include <asm/fpu/xcr.h>
 #include <asm/processor.h>
@@ -34,6 +33,8 @@
 #include <asm/cpu.h>
 #include <asm/apic.h>
 #include <asm/cpuid/api.h>
+
+#include "internal.h"
 
 static enum es_result vc_slow_virt_to_phys(struct ghcb *ghcb, struct es_em_ctxt *ctxt,
 					   unsigned long vaddr, phys_addr_t *paddr)
@@ -352,7 +353,6 @@ fault:
 
 #define sev_printk(fmt, ...)		printk(fmt, ##__VA_ARGS__)
 #define error(v)
-#define has_cpuflag(f)			boot_cpu_has(f)
 
 #include "vc-shared.c"
 
@@ -404,7 +404,7 @@ static enum es_result __vc_handle_secure_tsc_msrs(struct es_em_ctxt *ctxt, bool 
 	return ES_OK;
 }
 
-enum es_result sev_es_ghcb_handle_msr(struct ghcb *ghcb, struct es_em_ctxt *ctxt, bool write)
+enum es_result __vc_handle_msr(struct ghcb *ghcb, struct es_em_ctxt *ctxt, bool write)
 {
 	struct pt_regs *regs = ctxt->regs;
 	enum es_result ret;
@@ -448,7 +448,7 @@ enum es_result sev_es_ghcb_handle_msr(struct ghcb *ghcb, struct es_em_ctxt *ctxt
 
 static enum es_result vc_handle_msr(struct ghcb *ghcb, struct es_em_ctxt *ctxt)
 {
-	return sev_es_ghcb_handle_msr(ghcb, ctxt, ctxt->insn.opcode.bytes[1] == 0x30);
+	return __vc_handle_msr(ghcb, ctxt, ctxt->insn.opcode.bytes[1] == 0x30);
 }
 
 static void __init vc_early_forward_exception(struct es_em_ctxt *ctxt)
@@ -954,7 +954,7 @@ static __always_inline bool vc_is_db(unsigned long error_code)
  * Runtime #VC exception handler when raised from kernel mode. Runs in NMI mode
  * and will panic when an error happens.
  */
-DEFINE_IDTENTRY_VC_KERNEL(exc_vmm_communication)
+noinstr void kernel_exc_vmm_communication(struct pt_regs *regs, unsigned long error_code)
 {
 	irqentry_state_t irq_state;
 
@@ -1006,7 +1006,7 @@ DEFINE_IDTENTRY_VC_KERNEL(exc_vmm_communication)
  * Runtime #VC exception handler when raised from user mode. Runs in IRQ mode
  * and will kill the current task with SIGBUS when an error happens.
  */
-DEFINE_IDTENTRY_VC_USER(exc_vmm_communication)
+noinstr void user_exc_vmm_communication(struct pt_regs *regs, unsigned long error_code)
 {
 	/*
 	 * Handle #DB before calling into !noinstr code to avoid recursive #DB.
@@ -1030,6 +1030,14 @@ DEFINE_IDTENTRY_VC_USER(exc_vmm_communication)
 
 	instrumentation_end();
 	irqentry_exit_to_user_mode(regs);
+}
+
+DEFINE_IDTENTRY_RAW_ERRORCODE(exc_vmm_communication)
+{
+	if (user_mode(regs))
+		return user_exc_vmm_communication(regs, error_code);
+	else
+		return kernel_exc_vmm_communication(regs, error_code);
 }
 
 bool __init handle_vc_boot_ghcb(struct pt_regs *regs)

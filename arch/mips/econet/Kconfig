@@ -13,10 +13,10 @@ choice
 		bool "EN751221 family"
 		select COMMON_CLK
 		select ECONET_EN751221_INTC
+		select HAVE_PCI
 		select IRQ_MIPS_CPU
-		select SMP
-		select SMP_UP
-		select SYS_SUPPORTS_SMP
+		select PCI_DRIVERS_GENERIC
+		select SYS_SUPPORTS_MULTITHREADING
 		help
 		  The EN751221 family includes EN7512, RN7513, EN7521, EN7526.
 		  They are based on single core MIPS 34Kc processors. To boot

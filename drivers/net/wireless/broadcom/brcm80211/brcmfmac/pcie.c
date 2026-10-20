@@ -1155,7 +1155,7 @@ brcmf_pcie_alloc_dma_and_ring(struct brcmf_pciedev_info *devinfo, u32 ring_id,
 	addr = tcm_ring_phys_addr + BRCMF_RING_LEN_ITEMS_OFFSET;
 	brcmf_pcie_write_tcm16(devinfo, addr, ring_itemsize_array[ring_id]);
 
-	ring = kzalloc(sizeof(*ring), GFP_KERNEL);
+	ring = kzalloc_obj(*ring);
 	if (!ring) {
 		dma_free_coherent(&devinfo->pdev->dev, size, dma_buf,
 				  dma_handle);
@@ -1347,7 +1347,7 @@ static int brcmf_pcie_init_ringbuffers(struct brcmf_pciedev_info *devinfo)
 	devinfo->shared.max_flowrings = max_flowrings;
 	devinfo->shared.max_submissionrings = max_submissionrings;
 	devinfo->shared.max_completionrings = max_completionrings;
-	rings = kcalloc(max_flowrings, sizeof(*ring), GFP_KERNEL);
+	rings = kzalloc_objs(*ring, max_flowrings);
 	if (!rings)
 		goto fail;
 
@@ -1383,16 +1383,20 @@ fail:
 static void
 brcmf_pcie_release_scratchbuffers(struct brcmf_pciedev_info *devinfo)
 {
-	if (devinfo->shared.scratch)
+	if (devinfo->shared.scratch) {
 		dma_free_coherent(&devinfo->pdev->dev,
 				  BRCMF_DMA_D2H_SCRATCH_BUF_LEN,
 				  devinfo->shared.scratch,
 				  devinfo->shared.scratch_dmahandle);
-	if (devinfo->shared.ringupd)
+		devinfo->shared.scratch = NULL;
+	}
+	if (devinfo->shared.ringupd) {
 		dma_free_coherent(&devinfo->pdev->dev,
 				  BRCMF_DMA_D2H_RINGUPD_BUF_LEN,
 				  devinfo->shared.ringupd,
 				  devinfo->shared.ringupd_dmahandle);
+		devinfo->shared.ringupd = NULL;
+	}
 }
 
 static int brcmf_pcie_init_scratchbuffers(struct brcmf_pciedev_info *devinfo)
@@ -2199,8 +2203,7 @@ static void brcmf_pcie_setup(struct device *dev, int ret,
 		bus->msgbuf->commonrings[i] =
 				&devinfo->shared.commonrings[i]->commonring;
 
-	flowrings = kcalloc(devinfo->shared.max_flowrings, sizeof(*flowrings),
-			    GFP_KERNEL);
+	flowrings = kzalloc_objs(*flowrings, devinfo->shared.max_flowrings);
 	if (!flowrings)
 		goto fail;
 
@@ -2457,7 +2460,7 @@ brcmf_pcie_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	brcmf_dbg(PCIE, "Enter %x:%x\n", pdev->vendor, pdev->device);
 
 	ret = -ENOMEM;
-	devinfo = kzalloc(sizeof(*devinfo), GFP_KERNEL);
+	devinfo = kzalloc_obj(*devinfo);
 	if (devinfo == NULL)
 		return ret;
 
@@ -2477,7 +2480,7 @@ brcmf_pcie_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	else
 		devinfo->reginfo = &brcmf_reginfo_default;
 
-	pcie_bus_dev = kzalloc(sizeof(*pcie_bus_dev), GFP_KERNEL);
+	pcie_bus_dev = kzalloc_obj(*pcie_bus_dev);
 	if (pcie_bus_dev == NULL) {
 		ret = -ENOMEM;
 		goto fail;
@@ -2495,12 +2498,13 @@ brcmf_pcie_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	if (ret < 0)
 		goto fail;
 
-	bus = kzalloc(sizeof(*bus), GFP_KERNEL);
+	bus = kzalloc_obj(*bus);
 	if (!bus) {
 		ret = -ENOMEM;
 		goto fail;
 	}
-	bus->msgbuf = kzalloc(sizeof(*bus->msgbuf), GFP_KERNEL);
+	mutex_init(&bus->bus_reset_lock);
+	bus->msgbuf = kzalloc_obj(*bus->msgbuf);
 	if (!bus->msgbuf) {
 		ret = -ENOMEM;
 		kfree(bus);
@@ -2594,6 +2598,11 @@ brcmf_pcie_remove(struct pci_dev *pdev)
 	devinfo->state = BRCMFMAC_PCIE_STATE_DOWN;
 	if (devinfo->ci)
 		brcmf_pcie_intr_disable(devinfo);
+
+	if (devinfo->irq_allocated)
+		synchronize_irq(pdev->irq);
+
+	brcmf_bus_cancel_reset_work(bus);
 
 	brcmf_detach(&pdev->dev);
 	brcmf_free(&pdev->dev);
@@ -2709,17 +2718,18 @@ static const struct dev_pm_ops brcmf_pciedrvr_pm = {
 
 #define BRCMF_PCIE_DEVICE(dev_id, fw_vend) \
 	{ \
-		BRCM_PCIE_VENDOR_ID_BROADCOM, (dev_id), \
-		PCI_ANY_ID, PCI_ANY_ID, \
-		PCI_CLASS_NETWORK_OTHER << 8, 0xffff00, \
-		BRCMF_DRVDATA_ ## fw_vend \
+		PCI_DEVICE(BRCM_PCIE_VENDOR_ID_BROADCOM, (dev_id)), \
+		.class = PCI_CLASS_NETWORK_OTHER << 8, \
+		.class_mask = 0xffff00, \
+		.driver_data = BRCMF_DRVDATA_ ## fw_vend, \
 	}
 #define BRCMF_PCIE_DEVICE_SUB(dev_id, subvend, subdev, fw_vend) \
 	{ \
-		BRCM_PCIE_VENDOR_ID_BROADCOM, (dev_id), \
-		(subvend), (subdev), \
-		PCI_CLASS_NETWORK_OTHER << 8, 0xffff00, \
-		BRCMF_DRVDATA_ ## fw_vend \
+		PCI_DEVICE_SUB(BRCM_PCIE_VENDOR_ID_BROADCOM, (dev_id), \
+			       (subvend), (subdev)), \
+		.class = PCI_CLASS_NETWORK_OTHER << 8, \
+		.class_mask = 0xffff00, \
+		.driver_data = BRCMF_DRVDATA_ ## fw_vend, \
 	}
 
 static const struct pci_device_id brcmf_pcie_devid_table[] = {

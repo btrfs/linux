@@ -2,6 +2,7 @@
 /* Copyright(c) 2024 Intel Corporation */
 
 #include <linux/slab.h>
+#include <linux/string.h>
 #include <linux/types.h>
 #include "adf_mstate_mgr.h"
 
@@ -37,7 +38,7 @@ struct adf_mstate_mgr *adf_mstate_mgr_new(u8 *buf, u32 size)
 {
 	struct adf_mstate_mgr *mgr;
 
-	mgr = kzalloc(sizeof(*mgr), GFP_KERNEL);
+	mgr = kzalloc_obj(*mgr);
 	if (!mgr)
 		return NULL;
 
@@ -158,7 +159,7 @@ static struct adf_mstate_sect_h *adf_mstate_sect_add_header(struct adf_mstate_mg
 		return NULL;
 	}
 
-	strscpy(sect->id, id, sizeof(sect->id));
+	strscpy(sect->id, id);
 	sect->size = 0;
 	sect->sub_sects = 0;
 	mgr->state += sizeof(*sect);

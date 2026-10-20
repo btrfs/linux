@@ -2,6 +2,7 @@
 /* Copyright (C) 2020 Marvell. */
 
 #include <linux/firmware.h>
+#include <linux/sysfs.h>
 #include "otx2_cpt_hw_types.h"
 #include "otx2_cpt_common.h"
 #include "otx2_cpt_devlink.h"
@@ -339,8 +340,7 @@ static int cptpf_flr_wq_init(struct otx2_cptpf_dev *cptpf, int num_vfs)
 	if (!cptpf->flr_wq)
 		return -ENOMEM;
 
-	cptpf->flr_work = kcalloc(num_vfs, sizeof(struct cptpf_flr_work),
-				  GFP_KERNEL);
+	cptpf->flr_work = kzalloc_objs(struct cptpf_flr_work, num_vfs);
 	if (!cptpf->flr_work)
 		goto destroy_wq;
 
@@ -430,11 +430,8 @@ static int cptpf_register_afpf_mbox_intr(struct otx2_cptpf_dev *cptpf)
 	/* Register AF-PF mailbox interrupt handler */
 	ret = devm_request_irq(dev, irq, otx2_cptpf_afpf_mbox_intr, 0,
 			       "CPTAFPF Mbox", cptpf);
-	if (ret) {
-		dev_err(dev,
-			"IRQ registration failed for PFAF mbox irq\n");
+	if (ret)
 		return ret;
-	}
 	/* Clear interrupt if any, to avoid spurious interrupts */
 	otx2_cpt_write64(cptpf->reg_base, BLKADDR_RVUM, 0, RVU_PF_INT, 0x1ULL);
 	/* Enable AF-PF interrupt */
@@ -507,7 +504,7 @@ static ssize_t sso_pf_func_ovrd_show(struct device *dev,
 {
 	struct otx2_cptpf_dev *cptpf = dev_get_drvdata(dev);
 
-	return sprintf(buf, "%d\n", cptpf->sso_pf_func_ovrd);
+	return sysfs_emit(buf, "%d\n", cptpf->sso_pf_func_ovrd);
 }
 
 static ssize_t sso_pf_func_ovrd_store(struct device *dev,
@@ -533,7 +530,7 @@ static ssize_t kvf_limits_show(struct device *dev,
 {
 	struct otx2_cptpf_dev *cptpf = dev_get_drvdata(dev);
 
-	return sprintf(buf, "%d\n", cptpf->kvf_limits);
+	return sysfs_emit(buf, "%d\n", cptpf->kvf_limits);
 }
 
 static ssize_t kvf_limits_store(struct device *dev,
@@ -867,6 +864,7 @@ static const struct pci_device_id otx2_cpt_id_table[] = {
 	{ PCI_DEVICE(PCI_VENDOR_ID_CAVIUM, CN10K_CPT_PCI_PF_DEVICE_ID) },
 	{ 0, }  /* end of table */
 };
+MODULE_DEVICE_TABLE(pci, otx2_cpt_id_table);
 
 static struct pci_driver otx2_cpt_pci_driver = {
 	.name = OTX2_CPT_DRV_NAME,
@@ -883,4 +881,3 @@ MODULE_IMPORT_NS("CRYPTO_DEV_OCTEONTX2_CPT");
 MODULE_AUTHOR("Marvell");
 MODULE_DESCRIPTION(OTX2_CPT_DRV_STRING);
 MODULE_LICENSE("GPL v2");
-MODULE_DEVICE_TABLE(pci, otx2_cpt_id_table);

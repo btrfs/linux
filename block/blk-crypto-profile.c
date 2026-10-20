@@ -43,6 +43,7 @@ struct blk_crypto_keyslot {
 };
 
 static inline void blk_crypto_hw_enter(struct blk_crypto_profile *profile)
+	__acquires(&profile->lock)
 {
 	/*
 	 * Calling into the driver requires profile->lock held and the device
@@ -55,6 +56,7 @@ static inline void blk_crypto_hw_enter(struct blk_crypto_profile *profile)
 }
 
 static inline void blk_crypto_hw_exit(struct blk_crypto_profile *profile)
+	__releases(&profile->lock)
 {
 	up_write(&profile->lock);
 	if (profile->dev)
@@ -93,8 +95,7 @@ int blk_crypto_profile_init(struct blk_crypto_profile *profile,
 
 	/* Initialize keyslot management data. */
 
-	profile->slots = kvcalloc(num_slots, sizeof(profile->slots[0]),
-				  GFP_KERNEL);
+	profile->slots = kvzalloc_objs(profile->slots[0], num_slots);
 	if (!profile->slots)
 		goto err_destroy;
 
@@ -121,8 +122,7 @@ int blk_crypto_profile_init(struct blk_crypto_profile *profile,
 
 	profile->log_slot_ht_size = ilog2(slot_hashtable_size);
 	profile->slot_hashtable =
-		kvmalloc_array(slot_hashtable_size,
-			       sizeof(profile->slot_hashtable[0]), GFP_KERNEL);
+		kvmalloc_objs(profile->slot_hashtable[0], slot_hashtable_size);
 	if (!profile->slot_hashtable)
 		goto err_destroy;
 	for (i = 0; i < slot_hashtable_size; i++)
@@ -333,28 +333,6 @@ void blk_crypto_put_keyslot(struct blk_crypto_keyslot *slot)
 		spin_unlock_irqrestore(&profile->idle_slots_lock, flags);
 		wake_up(&profile->idle_slots_wait_queue);
 	}
-}
-
-/**
- * __blk_crypto_cfg_supported() - Check whether the given crypto profile
- *				  supports the given crypto configuration.
- * @profile: the crypto profile to check
- * @cfg: the crypto configuration to check for
- *
- * Return: %true if @profile supports the given @cfg.
- */
-bool __blk_crypto_cfg_supported(struct blk_crypto_profile *profile,
-				const struct blk_crypto_config *cfg)
-{
-	if (!profile)
-		return false;
-	if (!(profile->modes_supported[cfg->crypto_mode] & cfg->data_unit_size))
-		return false;
-	if (profile->max_dun_bytes_supported < cfg->dun_bytes)
-		return false;
-	if (!(profile->key_types_supported & cfg->key_type))
-		return false;
-	return true;
 }
 
 /*

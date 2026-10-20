@@ -197,7 +197,7 @@ static void update_rsi(struct cache_head *cnew, struct cache_head *citem)
 
 static struct cache_head *rsi_alloc(void)
 {
-	struct rsi *rsii = kmalloc(sizeof(*rsii), GFP_KERNEL);
+	struct rsi *rsii = kmalloc_obj(*rsii);
 	if (rsii)
 		return &rsii->h;
 	else
@@ -206,7 +206,7 @@ static struct cache_head *rsi_alloc(void)
 
 static int rsi_upcall(struct cache_detail *cd, struct cache_head *h)
 {
-	return sunrpc_cache_pipe_upcall_timeout(cd, h);
+	return sunrpc_cache_upcall_warn(cd, h);
 }
 
 static void rsi_request(struct cache_detail *cd,
@@ -449,7 +449,7 @@ update_rsc(struct cache_head *cnew, struct cache_head *ctmp)
 static struct cache_head *
 rsc_alloc(void)
 {
-	struct rsc *rsci = kmalloc(sizeof(*rsci), GFP_KERNEL);
+	struct rsc *rsci = kmalloc_obj(*rsci);
 	if (rsci)
 		return &rsci->h;
 	else
@@ -814,7 +814,7 @@ svcauth_gss_register_pseudoflavor(u32 pseudoflavor, char * name)
 	struct auth_domain	*test;
 	int			stat = -ENOMEM;
 
-	new = kmalloc(sizeof(*new), GFP_KERNEL);
+	new = kmalloc_obj(*new);
 	if (!new)
 		goto out;
 	kref_init(&new->h.ref);
@@ -949,6 +949,8 @@ svcauth_gss_unwrap_priv(struct svc_rqst *rqstp, u32 seq, struct gss_ctx *ctx)
 	}
 	if (len > xdr_stream_remaining(xdr))
 		goto unwrap_failed;
+	if (len <= GSS_KRB5_TOK_HDR_LEN)
+		goto unwrap_failed;
 	offset = xdr_stream_pos(xdr);
 
 	saved_len = buf->len;
@@ -1069,7 +1071,7 @@ static int gss_read_proxy_verf(struct svc_rqst *rqstp,
 		goto out_denied_free;
 
 	pages = DIV_ROUND_UP(inlen, PAGE_SIZE);
-	in_token->pages = kcalloc(pages + 1, sizeof(struct page *), GFP_KERNEL);
+	in_token->pages = kzalloc_objs(struct page *, pages + 1);
 	if (!in_token->pages)
 		goto out_denied_free;
 	in_token->page_base = 0;
@@ -1083,7 +1085,8 @@ static int gss_read_proxy_verf(struct svc_rqst *rqstp,
 	}
 
 	length = min_t(unsigned int, inlen, (char *)xdr->end - (char *)xdr->p);
-	memcpy(page_address(in_token->pages[0]), xdr->p, length);
+	if (length)
+		memcpy(page_address(in_token->pages[0]), xdr->p, length);
 	inlen -= length;
 
 	to_offs = length;
@@ -1465,7 +1468,6 @@ static int create_use_gss_proxy_proc_entry(struct net *net)
 			      &use_gss_proxy_proc_ops, net);
 	if (!*p)
 		return -ENOMEM;
-	init_gssp_clnt(sn);
 	return 0;
 }
 
@@ -1572,6 +1574,9 @@ svcauth_gss_decode_credbody(struct xdr_stream *xdr,
 	u32 body_len;
 	__be32 *p;
 
+	/* Early-return paths leave deterministic state, not stale residue. */
+	memset(gc, 0, sizeof(*gc));
+
 	p = xdr_inline_decode(xdr, XDR_UNIT);
 	if (!p)
 		return false;
@@ -1630,7 +1635,7 @@ svcauth_gss_accept(struct svc_rqst *rqstp)
 
 	rqstp->rq_auth_stat = rpc_autherr_failed;
 	if (!svcdata)
-		svcdata = kmalloc(sizeof(*svcdata), GFP_KERNEL);
+		svcdata = kmalloc_obj(*svcdata);
 	if (!svcdata)
 		goto auth_err;
 	rqstp->rq_auth_data = svcdata;
@@ -1940,6 +1945,8 @@ svcauth_gss_release(struct svc_rqst *rqstp)
 	int stat;
 
 	if (!gsd)
+		goto out;
+	if (rqstp->rq_auth_stat != rpc_auth_ok)
 		goto out;
 	gc = &gsd->clcred;
 	if (gc->gc_proc != RPC_GSS_PROC_DATA)

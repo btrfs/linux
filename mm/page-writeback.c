@@ -25,7 +25,6 @@
 #include <linux/init.h>
 #include <linux/backing-dev.h>
 #include <linux/task_io_accounting_ops.h>
-#include <linux/blkdev.h>
 #include <linux/mpage.h>
 #include <linux/rmap.h>
 #include <linux/percpu.h>
@@ -33,7 +32,7 @@
 #include <linux/sysctl.h>
 #include <linux/cpu.h>
 #include <linux/syscalls.h>
-#include <linux/pagevec.h>
+#include <linux/folio_batch.h>
 #include <linux/timer.h>
 #include <linux/sched/rt.h>
 #include <linux/sched/signal.h>
@@ -108,14 +107,6 @@ EXPORT_SYMBOL_GPL(dirty_writeback_interval);
  * The longest time for which data is allowed to remain dirty
  */
 unsigned int dirty_expire_interval = 30 * 100; /* centiseconds */
-
-/*
- * Flag that puts the machine in "laptop mode". Doubles as a timeout in jiffies:
- * a full sync is triggered after this time elapses without any disk activity.
- */
-int laptop_mode;
-
-EXPORT_SYMBOL(laptop_mode);
 
 /* End of sysctl-exported parameters */
 
@@ -591,16 +582,6 @@ static inline void __wb_writeout_add(struct bdi_writeback *wb, long nr)
 		wb_domain_writeout_add(cgdom, wb_memcg_completions(wb),
 				       wb->bdi->max_prop_frac, nr);
 }
-
-void wb_writeout_inc(struct bdi_writeback *wb)
-{
-	unsigned long flags;
-
-	local_irq_save(flags);
-	__wb_writeout_add(wb, 1);
-	local_irq_restore(flags);
-}
-EXPORT_SYMBOL_GPL(wb_writeout_inc);
 
 /*
  * On idle system, we can be called long after we scheduled because we use
@@ -1843,17 +1824,9 @@ static int balance_dirty_pages(struct bdi_writeback *wb,
 			balance_domain_limits(mdtc, strictlimit);
 		}
 
-		/*
-		 * In laptop mode, we wait until hitting the higher threshold
-		 * before starting background writeout, and then write out all
-		 * the way down to the lower threshold.  So slow writers cause
-		 * minimal disk activity.
-		 *
-		 * In normal mode, we start background writeout at the lower
-		 * background_thresh, to keep the amount of dirty memory low.
-		 */
-		if (!laptop_mode && nr_dirty > gdtc->bg_thresh &&
-		    !writeback_in_progress(wb))
+		if (!writeback_in_progress(wb) &&
+		    (nr_dirty > gdtc->bg_thresh ||
+		     (strictlimit && gdtc->wb_dirty > gdtc->wb_bg_thresh)))
 			wb_start_background_writeback(wb);
 
 		/*
@@ -1876,7 +1849,18 @@ free_running:
 			break;
 		}
 
-		/* Start writeback even when in laptop mode */
+		/*
+		 * Unconditionally start background writeback if it's not
+		 * already in progress. We need to do this because the global
+		 * dirty threshold check above (nr_dirty > gdtc->bg_thresh)
+		 * doesn't account for the memcg-based throttling case. memcg
+		 * uses its own dirty count and thresholds and can trigger
+		 * throttling even when global nr_dirty < gdtc->bg_thresh
+		 *
+		 * Writeback needs to be started else the writer stalls in the
+		 * throttle loop waiting for dirty pages to be written back
+		 * while no writeback is running.
+		 */
 		if (unlikely(!writeback_in_progress(wb)))
 			wb_start_background_writeback(wb);
 
@@ -2198,41 +2182,6 @@ static int dirty_writeback_centisecs_handler(const struct ctl_table *table, int 
 }
 #endif
 
-void laptop_mode_timer_fn(struct timer_list *t)
-{
-	struct backing_dev_info *backing_dev_info =
-		timer_container_of(backing_dev_info, t, laptop_mode_wb_timer);
-
-	wakeup_flusher_threads_bdi(backing_dev_info, WB_REASON_LAPTOP_TIMER);
-}
-
-/*
- * We've spun up the disk and we're in laptop mode: schedule writeback
- * of all dirty data a few seconds from now.  If the flush is already scheduled
- * then push it back - the user is still using the disk.
- */
-void laptop_io_completion(struct backing_dev_info *info)
-{
-	mod_timer(&info->laptop_mode_wb_timer, jiffies + laptop_mode);
-}
-
-/*
- * We're in laptop mode and we've just synced. The sync's writes will have
- * caused another writeback to be scheduled by laptop_io_completion.
- * Nothing needs to be written back anymore, so we unschedule the writeback.
- */
-void laptop_sync_completion(void)
-{
-	struct backing_dev_info *bdi;
-
-	rcu_read_lock();
-
-	list_for_each_entry_rcu(bdi, &bdi_list, bdi_list)
-		timer_delete(&bdi->laptop_mode_wb_timer);
-
-	rcu_read_unlock();
-}
-
 /*
  * If ratelimit_pages is too high then we can get into dirty-data overload
  * if a large number of processes all perform writes at the same time.
@@ -2262,6 +2211,19 @@ static int page_writeback_cpu_online(unsigned int cpu)
 }
 
 #ifdef CONFIG_SYSCTL
+
+static int laptop_mode;
+static int laptop_mode_handler(const struct ctl_table *table, int write,
+			       void *buffer, size_t *lenp, loff_t *ppos)
+{
+	int ret = proc_dointvec_jiffies(table, write, buffer, lenp, ppos);
+
+	if (!ret && write)
+		pr_warn("%s: vm.laptop_mode is deprecated. Ignoring setting.\n",
+			current->comm);
+
+	return ret;
+}
 
 /* this is needed for the proc_doulongvec_minmax of vm_dirty_bytes */
 static const unsigned long dirty_bytes_min = 2 * PAGE_SIZE;
@@ -2332,7 +2294,7 @@ static const struct ctl_table vm_page_writeback_sysctls[] = {
 		.data		= &laptop_mode,
 		.maxlen		= sizeof(laptop_mode),
 		.mode		= 0644,
-		.proc_handler	= proc_dointvec_jiffies,
+		.proc_handler	= laptop_mode_handler,
 	},
 };
 #endif
@@ -2434,12 +2396,6 @@ static bool folio_prepare_writeback(struct address_space *mapping,
 	return true;
 }
 
-static xa_mark_t wbc_to_tag(struct writeback_control *wbc)
-{
-	if (wbc->sync_mode == WB_SYNC_ALL || wbc->tagged_writepages)
-		return PAGECACHE_TAG_TOWRITE;
-	return PAGECACHE_TAG_DIRTY;
-}
 
 static pgoff_t wbc_end(struct writeback_control *wbc)
 {
@@ -2658,7 +2614,9 @@ static void folio_account_dirtied(struct folio *folio,
 		inode_attach_wb(inode, folio);
 		wb = inode_to_wb(inode);
 
-		__lruvec_stat_mod_folio(folio, NR_FILE_DIRTY, nr);
+		lruvec_stat_mod_folio(folio, NR_FILE_DIRTY, nr);
+		if (folio_test_dropbehind(folio))
+			wb_stat_mod(wb, WB_DONTCACHE_DIRTY, nr);
 		__zone_stat_mod_folio(folio, NR_ZONE_WRITE_PENDING, nr);
 		__node_stat_mod_folio(folio, NR_DIRTIED, nr);
 		wb_stat_mod(wb, WB_RECLAIMABLE, nr);
@@ -2680,6 +2638,8 @@ void folio_account_cleaned(struct folio *folio, struct bdi_writeback *wb)
 	long nr = folio_nr_pages(folio);
 
 	lruvec_stat_mod_folio(folio, NR_FILE_DIRTY, -nr);
+	if (folio_test_dropbehind(folio))
+		wb_stat_mod(wb, WB_DONTCACHE_DIRTY, -nr);
 	zone_stat_mod_folio(folio, NR_ZONE_WRITE_PENDING, -nr);
 	wb_stat_mod(wb, WB_RECLAIMABLE, -nr);
 	task_io_account_cancelled_write(nr * PAGE_SIZE);
@@ -2695,7 +2655,7 @@ void folio_account_cleaned(struct folio *folio, struct bdi_writeback *wb)
  * while this function is in progress, although it may have been truncated
  * before this function is called.  Most callers have the folio locked.
  * A few have the folio blocked from truncation through other means (e.g.
- * zap_vma_pages() has it mapped and is holding the page table lock).
+ * zap_vma() has it mapped and is holding the page table lock).
  * When called from mark_buffer_dirty(), the filesystem should hold a
  * reference to the buffer_head that is being marked dirty, which causes
  * try_to_free_buffers() to fail.
@@ -2801,6 +2761,11 @@ EXPORT_SYMBOL(folio_redirty_for_writepage);
  * the page table lock for a page table which contains at least one page
  * in this folio.  Truncation will block on the page table lock as it
  * unmaps pages before removing the folio from its mapping.
+ *
+ * .. DANGER::
+ *    Do not use this on a folio obtained from a function like
+ *    get_user_pages_fast() without holding appropriate locks; you might want to
+ *    use set_page_dirty_lock() or folio_mark_dirty_lock() instead.
  *
  * Return: True if the folio was newly dirtied, false if it was already dirty.
  */
@@ -2949,6 +2914,8 @@ bool folio_clear_dirty_for_io(struct folio *folio)
 		if (folio_test_clear_dirty(folio)) {
 			long nr = folio_nr_pages(folio);
 			lruvec_stat_mod_folio(folio, NR_FILE_DIRTY, -nr);
+			if (folio_test_dropbehind(folio))
+				wb_stat_mod(wb, WB_DONTCACHE_DIRTY, -nr);
 			zone_stat_mod_folio(folio, NR_ZONE_WRITE_PENDING, -nr);
 			wb_stat_mod(wb, WB_RECLAIMABLE, -nr);
 			ret = true;

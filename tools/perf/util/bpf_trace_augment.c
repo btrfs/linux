@@ -1,11 +1,11 @@
 #include <bpf/libbpf.h>
 #include <internal/xyarray.h>
 
-#include "util/debug.h"
-#include "util/evlist.h"
-#include "util/trace_augment.h"
-
 #include "bpf_skel/augmented_raw_syscalls.skel.h"
+#include "debug.h"
+#include "evlist.h"
+#include "parse-events.h"
+#include "trace_augment.h"
 
 static struct augmented_raw_syscalls_bpf *skel;
 static struct evsel *bpf_output;
@@ -60,7 +60,7 @@ int augmented_syscalls__create_bpf_output(struct evlist *evlist)
 void augmented_syscalls__setup_bpf_output(void)
 {
 	struct perf_cpu cpu;
-	int i;
+	unsigned int i;
 
 	if (bpf_output == NULL)
 		return;
