@@ -141,7 +141,6 @@ bool can_boost(struct insn *insn, void *addr)
 {
 	kprobe_opcode_t opcode;
 	insn_byte_t prefix;
-	int i;
 
 	if (search_exception_tables((unsigned long)addr))
 		return false;	/* Page fault may occur on this address. */
@@ -154,7 +153,7 @@ bool can_boost(struct insn *insn, void *addr)
 	if (insn->opcode.nbytes != 1)
 		return false;
 
-	for_each_insn_prefix(insn, i, prefix) {
+	for_each_insn_prefix(insn, prefix) {
 		insn_attr_t attr;
 
 		attr = inat_get_opcode_attribute(prefix);
@@ -511,10 +510,9 @@ NOKPROBE_SYMBOL(kprobe_emulate_ret);
 
 static void kprobe_emulate_call(struct kprobe *p, struct pt_regs *regs)
 {
-	unsigned long func = regs->ip - INT3_INSN_SIZE + p->ainsn.size;
+	unsigned long ip = regs->ip - INT3_INSN_SIZE + p->ainsn.size;
 
-	func += p->ainsn.rel32;
-	int3_emulate_call(regs, func);
+	int3_emulate_call(regs, ip, ip + p->ainsn.rel32);
 }
 NOKPROBE_SYMBOL(kprobe_emulate_call);
 
@@ -762,9 +760,6 @@ static int arch_copy_kprobe(struct kprobe *p)
 int arch_prepare_kprobe(struct kprobe *p)
 {
 	int ret;
-
-	if (alternatives_text_reserved(p->addr, p->addr))
-		return -EINVAL;
 
 	if (!can_probe((unsigned long)p->addr))
 		return -EILSEQ;

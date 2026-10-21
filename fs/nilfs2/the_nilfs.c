@@ -56,7 +56,7 @@ struct the_nilfs *alloc_nilfs(struct super_block *sb)
 {
 	struct the_nilfs *nilfs;
 
-	nilfs = kzalloc(sizeof(*nilfs), GFP_KERNEL);
+	nilfs = kzalloc_obj(*nilfs);
 	if (!nilfs)
 		return NULL;
 
@@ -458,6 +458,12 @@ static int nilfs_store_disk_layout(struct the_nilfs *nilfs,
 		return -EINVAL;
 	} else if (nilfs->ns_inode_size < NILFS_MIN_INODE_SIZE) {
 		nilfs_err(nilfs->ns_sb, "too small inode size: %d bytes",
+			  nilfs->ns_inode_size);
+		return -EINVAL;
+	}
+	if (NILFS_SR_BYTES(nilfs->ns_inode_size) > nilfs->ns_blocksize) {
+		nilfs_err(nilfs->ns_sb,
+			  "too large inode size for super root: %d bytes",
 			  nilfs->ns_inode_size);
 		return -EINVAL;
 	}
@@ -877,9 +883,29 @@ nilfs_find_or_create_root(struct the_nilfs *nilfs, __u64 cno)
 	if (root)
 		return root;
 
-	new = kzalloc(sizeof(*root), GFP_KERNEL);
+	new = kzalloc_obj(*root);
 	if (!new)
 		return NULL;
+
+	new->cno = cno;
+	new->ifile = NULL;
+	new->nilfs = nilfs;
+	refcount_set(&new->count, 1);
+	atomic64_set(&new->inodes_count, 0);
+	atomic64_set(&new->blocks_count, 0);
+
+	/*
+	 * Register the sysfs group before publishing the root in the
+	 * checkpoint tree.  nilfs_sysfs_create_snapshot_group() can sleep,
+	 * so it must run outside ns_cptree_lock; creating it first also
+	 * ensures a concurrent nilfs_lookup_root() can never observe a root
+	 * whose sysfs registration later fails and gets freed.
+	 */
+	err = nilfs_sysfs_create_snapshot_group(new);
+	if (err) {
+		kfree(new);
+		return NULL;
+	}
 
 	spin_lock(&nilfs->ns_cptree_lock);
 
@@ -897,28 +923,16 @@ nilfs_find_or_create_root(struct the_nilfs *nilfs, __u64 cno)
 		} else {
 			refcount_inc(&root->count);
 			spin_unlock(&nilfs->ns_cptree_lock);
+			nilfs_sysfs_delete_snapshot_group(new);
 			kfree(new);
 			return root;
 		}
 	}
 
-	new->cno = cno;
-	new->ifile = NULL;
-	new->nilfs = nilfs;
-	refcount_set(&new->count, 1);
-	atomic64_set(&new->inodes_count, 0);
-	atomic64_set(&new->blocks_count, 0);
-
 	rb_link_node(&new->rb_node, parent, p);
 	rb_insert_color(&new->rb_node, &nilfs->ns_cptree);
 
 	spin_unlock(&nilfs->ns_cptree_lock);
-
-	err = nilfs_sysfs_create_snapshot_group(new);
-	if (err) {
-		kfree(new);
-		new = NULL;
-	}
 
 	return new;
 }

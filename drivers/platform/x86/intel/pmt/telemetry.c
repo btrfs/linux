@@ -58,14 +58,9 @@ struct pmt_telem_priv {
 	struct intel_pmt_entry		entry[];
 };
 
-static bool pmt_telem_region_overlaps(struct intel_pmt_entry *entry,
-				      struct device *dev)
+static bool pmt_telem_region_overlaps(struct device *dev, u32 guid, u32 type)
 {
-	u32 guid = readl(entry->disc_table + TELEM_GUID_OFFSET);
-
 	if (intel_pmt_is_early_client_hw(dev)) {
-		u32 type = TELEM_TYPE(readl(entry->disc_table));
-
 		if ((type == TELEM_TYPE_PUNIT_FIXED) ||
 		    (guid == TELEM_CLIENT_FIXED_BLOCK_GUID))
 			return true;
@@ -77,18 +72,28 @@ static bool pmt_telem_region_overlaps(struct intel_pmt_entry *entry,
 static int pmt_telem_header_decode(struct intel_pmt_entry *entry,
 				   struct device *dev)
 {
-	void __iomem *disc_table = entry->disc_table;
 	struct intel_pmt_header *header = &entry->header;
+	u32 *disc_header = entry->disc_header;
 
-	if (pmt_telem_region_overlaps(entry, dev))
-		return 1;
-
-	header->access_type = TELEM_ACCESS(readl(disc_table));
-	header->guid = readl(disc_table + TELEM_GUID_OFFSET);
-	header->base_offset = readl(disc_table + TELEM_BASE_OFFSET);
+	header->access_type = TELEM_ACCESS(disc_header[0]);
+	header->guid = disc_header[1];
+	header->base_offset = disc_header[2];
 
 	/* Size is measured in DWORDS, but accessor returns bytes */
-	header->size = TELEM_SIZE(readl(disc_table));
+	header->size = TELEM_SIZE(disc_header[0]);
+	header->telem_type = TELEM_TYPE(disc_header[0]);
+
+	return 0;
+}
+
+static int pmt_telem_post_decode(struct intel_vsec_device *ivdev,
+				 struct intel_pmt_entry *entry)
+{
+	struct intel_pmt_header *header = &entry->header;
+	struct device *dev = &ivdev->auxdev.dev;
+
+	if (pmt_telem_region_overlaps(dev, header->guid, header->telem_type))
+		return 1;
 
 	/*
 	 * Some devices may expose non-functioning entries that are
@@ -107,12 +112,12 @@ static int pmt_telem_add_endpoint(struct intel_vsec_device *ivdev,
 	struct telem_endpoint *ep;
 
 	/* Endpoint lifetimes are managed by kref, not devres */
-	entry->ep = kzalloc(sizeof(*(entry->ep)), GFP_KERNEL);
+	entry->ep = kzalloc_obj(*(entry->ep));
 	if (!entry->ep)
 		return -ENOMEM;
 
 	ep = entry->ep;
-	ep->pcidev = ivdev->pcidev;
+	ep->dev = ivdev->dev;
 	ep->header.access_type = entry->header.access_type;
 	ep->header.guid = entry->header.guid;
 	ep->header.base_offset = entry->header.base_offset;
@@ -131,6 +136,7 @@ static struct intel_pmt_namespace pmt_telem_ns = {
 	.name = "telem",
 	.xa = &telem_array,
 	.pmt_header_decode = pmt_telem_header_decode,
+	.pmt_post_decode = pmt_telem_post_decode,
 	.pmt_add_endpoint = pmt_telem_add_endpoint,
 };
 
@@ -204,7 +210,7 @@ int pmt_telem_get_endpoint_info(int devid, struct telem_endpoint_info *info)
 		goto unlock;
 	}
 
-	info->pdev = entry->ep->pcidev;
+	info->dev = entry->ep->dev;
 	info->header = entry->ep->header;
 
 unlock:
@@ -218,9 +224,10 @@ static int pmt_copy_region(struct telemetry_region *region,
 			   struct intel_pmt_entry *entry)
 {
 
+	struct pci_dev *pdev = to_pci_dev(entry->ep->dev);
 	struct oobmsm_plat_info *plat_info;
 
-	plat_info = intel_vsec_get_mapping(entry->ep->pcidev);
+	plat_info = intel_vsec_get_mapping(pdev);
 	if (IS_ERR(plat_info))
 		return PTR_ERR(plat_info);
 
@@ -308,7 +315,7 @@ int pmt_telem_read(struct telem_endpoint *ep, u32 id, u64 *data, u32 count)
 	if (offset + NUM_BYTES_QWORD(count) > size)
 		return -EINVAL;
 
-	pmt_telem_read_mmio(ep->pcidev, ep->cb, ep->header.guid, data, ep->base, offset,
+	pmt_telem_read_mmio(ep->dev, ep->cb, ep->header.guid, data, ep->base, offset,
 			    NUM_BYTES_QWORD(count));
 
 	return ep->present ? 0 : -EPIPE;
@@ -335,7 +342,7 @@ int pmt_telem_read32(struct telem_endpoint *ep, u32 id, u32 *data, u32 count)
 EXPORT_SYMBOL_NS_GPL(pmt_telem_read32, "INTEL_PMT_TELEMETRY");
 
 struct telem_endpoint *
-pmt_telem_find_and_register_endpoint(struct pci_dev *pcidev, u32 guid, u16 pos)
+pmt_telem_find_and_register_endpoint(struct device *dev, u32 guid, u16 pos)
 {
 	int devid = 0;
 	int inst = 0;
@@ -348,7 +355,7 @@ pmt_telem_find_and_register_endpoint(struct pci_dev *pcidev, u32 guid, u16 pos)
 		if (err)
 			return ERR_PTR(err);
 
-		if (ep_info.header.guid == guid && ep_info.pdev == pcidev) {
+		if (ep_info.header.guid == guid && ep_info.dev == dev) {
 			if (inst == pos)
 				return pmt_telem_register_endpoint(devid);
 			++inst;

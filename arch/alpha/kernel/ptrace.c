@@ -16,14 +16,22 @@
 #include <linux/security.h>
 #include <linux/signal.h>
 #include <linux/audit.h>
+#include <linux/seccomp.h>
+#include <asm/syscall.h>
 
 #include <linux/uaccess.h>
 #include <asm/fpu.h>
 
 #include "proto.h"
+#include <linux/uio.h>
+#include <linux/regset.h>
 
 #define DEBUG	DBG_MEM
 #undef DEBUG
+
+#ifndef NT_FPREGSET
+#define NT_FPREGSET NT_PRFPREG
+#endif
 
 #ifdef DEBUG
 enum {
@@ -126,33 +134,212 @@ get_reg_addr(struct task_struct * task, unsigned long regno)
 /*
  * Get contents of register REGNO in task TASK.
  */
-static unsigned long
-get_reg(struct task_struct * task, unsigned long regno)
+
+static bool
+valid_regno(unsigned long regno)
 {
-	/* Special hack for fpcr -- combine hardware and software bits.  */
-	if (regno == 63) {
-		unsigned long fpcr = *get_reg_addr(task, regno);
-		unsigned long swcr
-		  = task_thread_info(task)->ieee_state & IEEE_SW_MASK;
-		swcr = swcr_update_status(swcr, fpcr);
-		return fpcr | swcr;
-	}
-	return *get_reg_addr(task, regno);
+	return regno <= 65;
 }
 
+static long
+get_reg(struct task_struct *task, unsigned long regno)
+{
+	unsigned long *addr;
+
+	if (!valid_regno(regno))
+		return -EIO;
+
+	/*
+	 * Special hack for fpcr -- combine hardware and software bits.
+	 */
+	if (regno == 63) {
+		unsigned long fpcr;
+		unsigned long swcr;
+
+		addr = get_reg_addr(task, regno);
+		if (!addr)
+			return -EIO;
+
+		fpcr = *addr;
+		swcr = task_thread_info(task)->ieee_state & IEEE_SW_MASK;
+		swcr = swcr_update_status(swcr, fpcr);
+
+		return fpcr | swcr;
+	}
+
+	addr = get_reg_addr(task, regno);
+	if (!addr)
+		return -EIO;
+
+	return *addr;
+}
+
+static void alpha_elf_fpregs_get(struct task_struct *target,
+			 elf_fpreg_t *fpregs)  /* points to ELF_NFPREG entries */
+{
+	memcpy(fpregs, task_thread_info(target)->fp, sizeof(elf_fpregset_t));
+}
+
+static void alpha_elf_fpregs_set(struct task_struct *target,
+			 const elf_fpreg_t *fpregs,
+			 size_t nwords)
+{
+	size_t n = min_t(size_t, nwords, ELF_NFPREG);
+
+	memcpy(task_thread_info(target)->fp, fpregs, n * sizeof(elf_fpreg_t));
+}
+
+static void alpha_elf_gregs_set(struct task_struct *child,
+			const elf_greg_t *src,
+			size_t nwords)
+{
+	struct pt_regs *pt = task_pt_regs(child);
+	struct thread_info *ti = task_thread_info(child);
+	struct switch_stack *sw = ((struct switch_stack *)pt) - 1;
+
+	/* GPRs r0..r8 live in pt_regs */
+	if (nwords > 0)
+		pt->r0 = src[0];
+	if (nwords > 1)
+		pt->r1 = src[1];
+	if (nwords > 2)
+		pt->r2 = src[2];
+	if (nwords > 3)
+		pt->r3 = src[3];
+	if (nwords > 4)
+		pt->r4 = src[4];
+	if (nwords > 5)
+		pt->r5 = src[5];
+	if (nwords > 6)
+		pt->r6 = src[6];
+	if (nwords > 7)
+		pt->r7 = src[7];
+	if (nwords > 8)
+		pt->r8 = src[8];
+
+	/* r9..r15 live in switch_stack */
+	if (nwords > 9)
+		sw->r9 = src[9];
+	if (nwords > 10)
+		sw->r10 = src[10];
+	if (nwords > 11)
+		sw->r11 = src[11];
+	if (nwords > 12)
+		sw->r12 = src[12];
+	if (nwords > 13)
+		sw->r13 = src[13];
+	if (nwords > 14)
+		sw->r14 = src[14];
+	if (nwords > 15)
+		sw->r15 = src[15];
+
+	/* r16..r28 live in pt_regs */
+	if (nwords > 16)
+		pt->r16 = src[16];
+	if (nwords > 17)
+		pt->r17 = src[17];
+	if (nwords > 18)
+		pt->r18 = src[18];
+	if (nwords > 19)
+		pt->r19 = src[19];
+	if (nwords > 20)
+		pt->r20 = src[20];
+	if (nwords > 21)
+		pt->r21 = src[21];
+	if (nwords > 22)
+		pt->r22 = src[22];
+	if (nwords > 23)
+		pt->r23 = src[23];
+	if (nwords > 24)
+		pt->r24 = src[24];
+	if (nwords > 25)
+		pt->r25 = src[25];
+	if (nwords > 26)
+		pt->r26 = src[26];
+	if (nwords > 27)
+		pt->r27 = src[27];
+	if (nwords > 28)
+		pt->r28 = src[28];
+
+	/* gp, usp, pc, unique */
+	if (nwords > 29)
+		pt->gp = src[29];
+
+	if (nwords > 30) {
+		ti->pcb.usp = src[30];
+		/*
+		 * If someone ever does this to current (rare), keep the
+		 * hardware usp consistent.
+		 */
+		if (child == current)
+			wrusp(src[30]);
+	}
+
+	if (nwords > 31)
+		pt->pc = src[31];
+
+	if (nwords > 32)
+		ti->pcb.unique = src[32];
+
 /*
- * Write contents of register REGNO in task TASK.
+ * PTRACE_SETREGSET can be used at a syscall-entry stop to skip the
+ * syscall by setting the syscall number to -1.  The seccomp/ptrace
+ * selftests use this to synthesize errno returns.
+ *
+ * Alpha uses r19/a3 as the error flag, so a skipped syscall with a
+ * small positive r0 and a clear r19 must be normalized to an error
+ * return.
  */
+	if (pt->r1 == (unsigned long)-1 &&
+	    pt->r19 == 0 &&
+	    pt->r0 > 0 &&
+	    pt->r0 < MAX_ERRNO)
+		pt->r19 = 1;
+}
+
 static int
 put_reg(struct task_struct *task, unsigned long regno, unsigned long data)
 {
+	struct pt_regs *regs = task_pt_regs(task);
+	unsigned long *addr;
+	unsigned long old_r0 = regs->r0;
+
+	if (regno == 31)
+		return 0;
+	if (!valid_regno(regno))
+		return -EIO;
+
 	if (regno == 63) {
 		task_thread_info(task)->ieee_state
 		  = ((task_thread_info(task)->ieee_state & ~IEEE_SW_MASK)
 		     | (data & IEEE_SW_MASK));
 		data = (data & FPCR_DYN_MASK) | ieee_swcr_to_fpcr(data);
 	}
-	*get_reg_addr(task, regno) = data;
+
+	addr = get_reg_addr(task, regno);
+	if (!addr)
+		return -EIO;
+
+	*addr = data;
+
+	/*
+	 * Alpha historically exposes r0/v0 as the syscall number at a
+	 * syscall-entry stop.  The generic-entry conversion keeps the
+	 * mutable syscall number in regs->r1.
+	 */
+
+	if (regno == 0 && regs->r1 == old_r0 &&
+		(data == (unsigned long)-1 ||
+		(regs->r19 == 0 && data < NR_syscalls))) {
+		regs->r1 = data;
+
+	/*
+	 * Keep the skip path looking like a clean entry-side syscall
+	 * rewrite.  Do not touch r19 for ordinary syscall substitution.
+	 */
+		if (data == (unsigned long)-1)
+			regs->r19 = 0;
+	}
 	return 0;
 }
 
@@ -253,6 +440,18 @@ ptrace_cancel_bpt(struct task_struct * child)
 	return (nsaved != 0);
 }
 
+/*
+ * PALcode keeps the user stack pointer in the PCB, not the trap frame.
+ * A user-mode pt_regs sits at the top of its task's stack, so the
+ * thread_info is at the base.
+ */
+unsigned long user_stack_pointer(struct pt_regs *regs)
+{
+	struct thread_info *ti = (void *)((unsigned long)regs & -THREAD_SIZE);
+
+	return ti == current_thread_info() ? rdusp() : ti->pcb.usp;
+}
+
 void user_enable_single_step(struct task_struct *child)
 {
 	/* Mark single stepping.  */
@@ -283,25 +482,24 @@ long arch_ptrace(struct task_struct *child, long request,
 
 	switch (request) {
 	/* When I and D space are separate, these will need to be fixed.  */
-	case PTRACE_PEEKTEXT: /* read word at location addr. */
+	case PTRACE_PEEKTEXT:
 	case PTRACE_PEEKDATA:
 		copied = ptrace_access_vm(child, addr, &tmp, sizeof(tmp),
 				FOLL_FORCE);
 		ret = -EIO;
 		if (copied != sizeof(tmp))
 			break;
-		
 		force_successful_syscall_return();
 		ret = tmp;
 		break;
 
-	/* Read register number ADDR. */
 	case PTRACE_PEEKUSR:
-		force_successful_syscall_return();
 		ret = get_reg(child, addr);
-		DBG(DBG_MEM, ("peek $%lu->%#lx\n", addr, ret));
-		break;
+		if (ret == -EIO)
+			break;
 
+		force_successful_syscall_return();
+		break;
 	/* When I and D space are separate, this will have to be fixed.  */
 	case PTRACE_POKETEXT: /* write the word at location addr. */
 	case PTRACE_POKEDATA:
@@ -319,21 +517,124 @@ long arch_ptrace(struct task_struct *child, long request,
 	return ret;
 }
 
-asmlinkage unsigned long syscall_trace_enter(void)
+/*
+ * Minimal regset support for Alpha.
+ *
+ * Alpha-specific notes:
+ *  - Do NOT use ELF_CORE_COPY_REGS(): it uses current_thread_info(),
+ *    which is wrong for non-current tasks.
+ *  - dump_elf_task() returns 1 unconditionally in this tree, while
+ *    regset_get should return 0 on success. So call dump_elf_thread()
+ *    directly and return membuf_write()'s result.
+ */
+static int alpha_regset_set(struct task_struct *target,
+			    const struct user_regset *regset,
+			    unsigned int pos, unsigned int count,
+			    const void *kbuf,
+			    const void __user *ubuf)
 {
-	unsigned long ret = 0;
-	struct pt_regs *regs = current_pt_regs();
-	if (test_thread_flag(TIF_SYSCALL_TRACE) &&
-	    ptrace_report_syscall_entry(current_pt_regs()))
-		ret = -1UL;
-	audit_syscall_entry(regs->r0, regs->r16, regs->r17, regs->r18, regs->r19);
-	return ret ?: current_pt_regs()->r0;
+	elf_gregset_t gregs;
+	unsigned int nwords;
+
+	if (pos + count > sizeof(gregs))
+		return -EIO;
+
+	/*
+	 * Preserve registers outside the written range.
+	 */
+	dump_elf_thread(gregs, task_pt_regs(target),
+			task_thread_info(target));
+
+	if (user_regset_copyin(&pos, &count, &kbuf, &ubuf,
+				gregs, 0, sizeof(gregs)))
+		return -EFAULT;
+
+	nwords = sizeof(gregs) / sizeof(elf_greg_t);
+	alpha_elf_gregs_set(target, gregs, nwords);
+
+	return 0;
 }
 
-asmlinkage void
-syscall_trace_leave(void)
+static int alpha_fpregset_set(struct task_struct *target,
+			      const struct user_regset *regset,
+			      unsigned int pos, unsigned int count,
+			      const void *kbuf,
+			      const void __user *ubuf)
 {
-	audit_syscall_exit(current_pt_regs());
-	if (test_thread_flag(TIF_SYSCALL_TRACE))
-		ptrace_report_syscall_exit(current_pt_regs(), 0);
+	elf_fpregset_t fpregs;
+	unsigned int nwords;
+
+	if (pos + count > sizeof(fpregs))
+		return -EIO;
+
+	alpha_elf_fpregs_get(target, fpregs);
+
+	if (user_regset_copyin(&pos, &count, &kbuf, &ubuf,
+				fpregs, 0, sizeof(fpregs)))
+		return -EFAULT;
+
+	nwords = sizeof(fpregs) / sizeof(elf_fpreg_t);
+	alpha_elf_fpregs_set(target, fpregs, nwords);
+
+	return 0;
+}
+
+static int alpha_regset_get(struct task_struct *target,
+			    const struct user_regset *regset,
+			    struct membuf to)
+{
+	struct pt_regs *pt = task_pt_regs(target);
+	struct thread_info *ti = task_thread_info(target);
+	elf_gregset_t gregs;
+
+	dump_elf_thread(gregs, pt, ti);
+	return membuf_write(&to, gregs, sizeof(gregs));
+}
+
+static int alpha_fpregset_get(struct task_struct *target,
+			      const struct user_regset *regset,
+			      struct membuf to)
+{
+	elf_fpregset_t fpregs;
+
+	alpha_elf_fpregs_get(target, fpregs);
+	return membuf_write(&to, fpregs, sizeof(fpregs));
+}
+
+enum alpha_regset {
+	REGSET_GPR,
+	REGSET_FPR,
+};
+
+static const struct user_regset alpha_user_regsets[] = {
+	[REGSET_GPR] = {
+		.core_note_type	= NT_PRSTATUS,
+		.n		= ELF_NGREG,
+		.size		= sizeof(elf_greg_t),
+		.align		= sizeof(elf_greg_t),
+		.regset_get	= alpha_regset_get,
+		.set		= alpha_regset_set,
+	},
+	[REGSET_FPR] = {
+		.core_note_type	= NT_PRFPREG,
+		.core_note_name	= "CORE",
+		.n		= ELF_NFPREG,
+		.size		= sizeof(elf_fpreg_t),
+		.align		= sizeof(elf_fpreg_t),
+		.regset_get	= alpha_fpregset_get,
+		.set		= alpha_fpregset_set,
+	},
+};
+
+static const struct user_regset_view user_alpha_view = {
+	.name		= "alpha",
+	.e_machine	= EM_ALPHA,
+	.ei_osabi	= ELF_OSABI,
+	.regsets	= alpha_user_regsets,
+	.n		= ARRAY_SIZE(alpha_user_regsets),
+};
+
+const struct user_regset_view *task_user_regset_view(struct task_struct *task)
+{
+	return &user_alpha_view;
 }

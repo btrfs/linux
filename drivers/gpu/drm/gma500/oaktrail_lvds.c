@@ -12,8 +12,9 @@
 #include <linux/pm_runtime.h>
 
 #include <drm/drm_edid.h>
+#include <drm/drm_encoder.h>
 #include <drm/drm_modeset_helper_vtables.h>
-#include <drm/drm_simple_kms_helper.h>
+#include <drm/drm_print.h>
 
 #include "intel_bios.h"
 #include "power.h"
@@ -201,6 +202,10 @@ static void oaktrail_lvds_commit(struct drm_encoder *encoder)
 	oaktrail_lvds_set_power(dev, gma_encoder, true);
 }
 
+static const struct drm_encoder_funcs oaktrail_lvds_funcs = {
+	.destroy = drm_encoder_cleanup,
+};
+
 static const struct drm_encoder_helper_funcs oaktrail_lvds_helper_funcs = {
 	.dpms = oaktrail_lvds_dpms,
 	.mode_fixup = psb_intel_lvds_mode_fixup,
@@ -222,7 +227,7 @@ static void oaktrail_lvds_get_configuration_mode(struct drm_device *dev,
 
 	/* Use the firmware provided data on Moorestown */
 	if (dev_priv->has_gct) {
-		mode = kzalloc(sizeof(*mode), GFP_KERNEL);
+		mode = kzalloc_obj(*mode);
 		if (!mode)
 			return;
 
@@ -292,7 +297,7 @@ void oaktrail_lvds_init(struct drm_device *dev,
 {
 	struct gma_encoder *gma_encoder;
 	struct gma_connector *gma_connector;
-	struct gma_i2c_chan *ddc_bus;
+	struct gma_i2c_chan *ddc_bus = NULL;
 	struct drm_connector *connector;
 	struct drm_encoder *encoder;
 	struct drm_psb_private *dev_priv = to_drm_psb_private(dev);
@@ -301,11 +306,11 @@ void oaktrail_lvds_init(struct drm_device *dev,
 	struct drm_display_mode *scan;	/* *modes, *bios_mode; */
 	int ret;
 
-	gma_encoder = kzalloc(sizeof(struct gma_encoder), GFP_KERNEL);
+	gma_encoder = kzalloc_obj(struct gma_encoder);
 	if (!gma_encoder)
 		return;
 
-	gma_connector = kzalloc(sizeof(struct gma_connector), GFP_KERNEL);
+	gma_connector = kzalloc_obj(struct gma_connector);
 	if (!gma_connector)
 		goto err_free_encoder;
 
@@ -318,7 +323,8 @@ void oaktrail_lvds_init(struct drm_device *dev,
 	if (ret)
 		goto err_free_connector;
 
-	ret = drm_simple_encoder_init(dev, encoder, DRM_MODE_ENCODER_LVDS);
+	ret = drm_encoder_init(dev, encoder, &oaktrail_lvds_funcs,
+			       DRM_MODE_ENCODER_LVDS, NULL);
 	if (ret)
 		goto err_connector_cleanup;
 
@@ -366,6 +372,8 @@ void oaktrail_lvds_init(struct drm_device *dev,
 	if (edid == NULL && dev_priv->lpc_gpio_base) {
 		ddc_bus = oaktrail_lvds_i2c_init(dev);
 		if (!IS_ERR(ddc_bus)) {
+			if (i2c_adap)
+				i2c_put_adapter(i2c_adap);
 			i2c_adap = &ddc_bus->base;
 			edid = drm_get_edid(connector, i2c_adap);
 		}
@@ -420,7 +428,10 @@ out:
 
 err_unlock:
 	mutex_unlock(&dev->mode_config.mutex);
-	gma_i2c_destroy(to_gma_i2c_chan(connector->ddc));
+	if (!IS_ERR_OR_NULL(ddc_bus))
+		gma_i2c_destroy(ddc_bus);
+	else if (i2c_adap)
+		i2c_put_adapter(i2c_adap);
 	drm_encoder_cleanup(encoder);
 err_connector_cleanup:
 	drm_connector_cleanup(connector);

@@ -173,9 +173,12 @@ static void thunder_mmc_remove(struct pci_dev *pdev)
 	u64 dma_cfg;
 	int i;
 
-	for (i = 0; i < CAVIUM_MAX_MMC; i++)
+	for (i = 0; i < CAVIUM_MAX_MMC; i++) {
 		if (host->slot[i])
 			cvm_mmc_of_slot_remove(host->slot[i]);
+		if (host->slot_pdev[i])
+			of_platform_device_destroy(&host->slot_pdev[i]->dev, NULL);
+	}
 
 	dma_cfg = readq(host->dma_base + MIO_EMM_DMA_CFG(host));
 	dma_cfg &= ~MIO_EMM_DMA_CFG_EN;
@@ -188,6 +191,7 @@ static const struct pci_device_id thunder_mmc_id_table[] = {
 	{ PCI_DEVICE(PCI_VENDOR_ID_CAVIUM, 0xa010) },
 	{ 0, }  /* end of table */
 };
+MODULE_DEVICE_TABLE(pci, thunder_mmc_id_table);
 
 static struct pci_driver thunder_mmc_driver = {
 	.name = KBUILD_MODNAME,
@@ -201,4 +205,3 @@ module_pci_driver(thunder_mmc_driver);
 MODULE_AUTHOR("Cavium Inc.");
 MODULE_DESCRIPTION("Cavium ThunderX eMMC Driver");
 MODULE_LICENSE("GPL");
-MODULE_DEVICE_TABLE(pci, thunder_mmc_id_table);

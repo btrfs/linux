@@ -33,7 +33,7 @@ static struct dentry *minix_lookup(struct inode * dir, struct dentry *dentry, un
 	return d_splice_alias(inode, dentry);
 }
 
-static int minix_mknod(struct mnt_idmap *idmap, struct inode *dir,
+static int minix_mknod(const struct mnt_idmap *idmap, struct inode *dir,
 		       struct dentry *dentry, umode_t mode, dev_t rdev)
 {
 	struct inode *inode;
@@ -50,7 +50,7 @@ static int minix_mknod(struct mnt_idmap *idmap, struct inode *dir,
 	return add_nondir(dentry, inode);
 }
 
-static int minix_tmpfile(struct mnt_idmap *idmap, struct inode *dir,
+static int minix_tmpfile(const struct mnt_idmap *idmap, struct inode *dir,
 			 struct file *file, umode_t mode)
 {
 	struct inode *inode = minix_new_inode(dir, mode);
@@ -63,13 +63,13 @@ static int minix_tmpfile(struct mnt_idmap *idmap, struct inode *dir,
 	return finish_open_simple(file, 0);
 }
 
-static int minix_create(struct mnt_idmap *idmap, struct inode *dir,
-			struct dentry *dentry, umode_t mode, bool excl)
+static int minix_create(const struct mnt_idmap *idmap, struct inode *dir,
+			struct dentry *dentry, umode_t mode)
 {
 	return minix_mknod(&nop_mnt_idmap, dir, dentry, mode, 0);
 }
 
-static int minix_symlink(struct mnt_idmap *idmap, struct inode *dir,
+static int minix_symlink(const struct mnt_idmap *idmap, struct inode *dir,
 			 struct dentry *dentry, const char *symname)
 {
 	int i = strlen(symname)+1;
@@ -104,13 +104,13 @@ static int minix_link(struct dentry * old_dentry, struct inode * dir,
 	return add_nondir(dentry, inode);
 }
 
-static struct dentry *minix_mkdir(struct mnt_idmap *idmap, struct inode *dir,
+static struct dentry *minix_mkdir(const struct mnt_idmap *idmap, struct inode *dir,
 				  struct dentry *dentry, umode_t mode)
 {
 	struct inode * inode;
 	int err;
 
-	inode = minix_new_inode(dir, S_IFDIR | mode);
+	inode = minix_new_inode(dir, mode);
 	if (IS_ERR(inode))
 		return ERR_CAST(inode);
 
@@ -145,6 +145,11 @@ static int minix_unlink(struct inode * dir, struct dentry *dentry)
 	struct minix_dir_entry * de;
 	int err;
 
+	if (inode->i_nlink == 0) {
+		minix_error_inode(inode, "inode has corrupted nlink");
+		return -EFSCORRUPTED;
+	}
+
 	de = minix_find_entry(dentry, &folio);
 	if (!de)
 		return -ENOENT;
@@ -161,19 +166,28 @@ static int minix_unlink(struct inode * dir, struct dentry *dentry)
 static int minix_rmdir(struct inode * dir, struct dentry *dentry)
 {
 	struct inode * inode = d_inode(dentry);
-	int err = -ENOTEMPTY;
+	int err = -EFSCORRUPTED;
 
-	if (minix_empty_dir(inode)) {
-		err = minix_unlink(dir, dentry);
-		if (!err) {
-			inode_dec_link_count(dir);
-			inode_dec_link_count(inode);
-		}
+	if (dir->i_nlink <= 2) {
+		minix_error_inode(dir, "inode has corrupted nlink");
+		goto out;
 	}
+
+	err = -ENOTEMPTY;
+	if (!minix_empty_dir(inode))
+		goto out;
+
+	err = minix_unlink(dir, dentry);
+	if (!err) {
+		inode_dec_link_count(dir);
+		inode_dec_link_count(inode);
+	}
+
+out:
 	return err;
 }
 
-static int minix_rename(struct mnt_idmap *idmap,
+static int minix_rename(const struct mnt_idmap *idmap,
 			struct inode *old_dir, struct dentry *old_dentry,
 			struct inode *new_dir, struct dentry *new_dentry,
 			unsigned int flags)
@@ -207,6 +221,17 @@ static int minix_rename(struct mnt_idmap *idmap,
 		err = -ENOTEMPTY;
 		if (dir_de && !minix_empty_dir(new_inode))
 			goto out_dir;
+
+		err = -EFSCORRUPTED;
+		if (new_inode->i_nlink == 0 || (dir_de && new_inode->i_nlink != 2)) {
+			minix_error_inode(new_inode, "inode has corrupted nlink");
+			goto out_dir;
+		}
+
+		if (dir_de && old_dir->i_nlink <= 2) {
+			minix_error_inode(old_dir, "inode has corrupted nlink");
+			goto out_dir;
+		}
 
 		err = -ENOENT;
 		new_de = minix_find_entry(new_dentry, &new_folio);

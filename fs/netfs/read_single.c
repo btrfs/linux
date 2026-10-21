@@ -36,12 +36,12 @@ void netfs_single_mark_inode_dirty(struct inode *inode)
 
 	mark_inode_dirty(inode);
 
-	if (caching && !(inode->i_state & I_PINNING_NETFS_WB)) {
+	if (caching && !(inode_state_read_once(inode) & I_PINNING_NETFS_WB)) {
 		bool need_use = false;
 
 		spin_lock(&inode->i_lock);
-		if (!(inode->i_state & I_PINNING_NETFS_WB)) {
-			inode->i_state |= I_PINNING_NETFS_WB;
+		if (!(inode_state_read(inode) & I_PINNING_NETFS_WB)) {
+			inode_state_set(inode, I_PINNING_NETFS_WB);
 			need_use = true;
 		}
 		spin_unlock(&inode->i_lock);
@@ -56,20 +56,6 @@ EXPORT_SYMBOL(netfs_single_mark_inode_dirty);
 static int netfs_single_begin_cache_read(struct netfs_io_request *rreq, struct netfs_inode *ctx)
 {
 	return fscache_begin_read_operation(&rreq->cache_resources, netfs_i_cookie(ctx));
-}
-
-static void netfs_single_cache_prepare_read(struct netfs_io_request *rreq,
-					    struct netfs_io_subrequest *subreq)
-{
-	struct netfs_cache_resources *cres = &rreq->cache_resources;
-
-	if (!cres->ops) {
-		subreq->source = NETFS_DOWNLOAD_FROM_SERVER;
-		return;
-	}
-	subreq->source = cres->ops->prepare_read(subreq, rreq->i_size);
-	trace_netfs_sreq(subreq, netfs_sreq_trace_prepare);
-
 }
 
 static void netfs_single_read_cache(struct netfs_io_request *rreq,
@@ -89,30 +75,36 @@ static void netfs_single_read_cache(struct netfs_io_request *rreq,
  */
 static int netfs_single_dispatch_read(struct netfs_io_request *rreq)
 {
-	struct netfs_io_stream *stream = &rreq->io_streams[0];
+	struct fscache_occupancy occ = {
+		.query_from	= 0,
+		.query_to	= rreq->len,
+		.cached_from[0]	= ULLONG_MAX,
+		.cached_to[0]	= ULLONG_MAX,
+		.cached_from[1]	= ULLONG_MAX,
+		.cached_to[1]	= ULLONG_MAX,
+	};
 	struct netfs_io_subrequest *subreq;
+	enum netfs_io_source source = NETFS_DOWNLOAD_FROM_SERVER;
 	int ret = 0;
 
-	subreq = netfs_alloc_subrequest(rreq);
+	/* Try to use the cache if the cache content matches the size of the
+	 * remote file.
+	 */
+	netfs_read_query_cache(rreq, &occ);
+	if (occ.cached_from[0] == 0 &&
+	    occ.cached_to[0] >= rreq->len)
+		source = NETFS_READ_FROM_CACHE;
+
+	subreq = netfs_alloc_subrequest(rreq, source);
 	if (!subreq)
 		return -ENOMEM;
 
-	subreq->source	= NETFS_SOURCE_UNKNOWN;
 	subreq->start	= 0;
 	subreq->len	= rreq->len;
 	subreq->io_iter	= rreq->buffer.iter;
 
-	__set_bit(NETFS_SREQ_IN_PROGRESS, &subreq->flags);
+	netfs_queue_read(rreq, subreq);
 
-	spin_lock(&rreq->lock);
-	list_add_tail(&subreq->rreq_link, &stream->subrequests);
-	trace_netfs_sreq(subreq, netfs_sreq_trace_added);
-	stream->front = subreq;
-	/* Store list pointers before active flag */
-	smp_store_release(&stream->active, true);
-	spin_unlock(&rreq->lock);
-
-	netfs_single_cache_prepare_read(rreq, subreq);
 	switch (subreq->source) {
 	case NETFS_DOWNLOAD_FROM_SERVER:
 		netfs_stat(&netfs_n_rh_download);
@@ -122,10 +114,18 @@ static int netfs_single_dispatch_read(struct netfs_io_request *rreq)
 				goto cancel;
 		}
 
+		netfs_all_subreqs_queued(rreq);
 		rreq->netfs_ops->issue_read(subreq);
 		rreq->submitted += subreq->len;
 		break;
 	case NETFS_READ_FROM_CACHE:
+		if (rreq->cache_resources.ops->prepare_read) {
+			ret = rreq->cache_resources.ops->prepare_read(subreq);
+			if (ret < 0)
+				goto cancel;
+		}
+
+		netfs_all_subreqs_queued(rreq);
 		trace_netfs_sreq(subreq, netfs_sreq_trace_submit);
 		netfs_single_read_cache(rreq, subreq);
 		rreq->submitted += subreq->len;
@@ -135,14 +135,14 @@ static int netfs_single_dispatch_read(struct netfs_io_request *rreq)
 		pr_warn("Unexpected single-read source %u\n", subreq->source);
 		WARN_ON_ONCE(true);
 		ret = -EIO;
-		break;
+		goto cancel;
 	}
 
-	smp_wmb(); /* Write lists before ALL_QUEUED. */
-	set_bit(NETFS_RREQ_ALL_QUEUED, &rreq->flags);
 	return ret;
 cancel:
-	netfs_put_subrequest(subreq, netfs_sreq_trace_put_cancel);
+	netfs_cancel_read(subreq, ret);
+	netfs_all_subreqs_queued(rreq);
+	netfs_wake_collector(rreq);
 	return ret;
 }
 
@@ -173,6 +173,8 @@ ssize_t netfs_read_single(struct inode *inode, struct file *file, struct iov_ite
 				   NETFS_READ_SINGLE);
 	if (IS_ERR(rreq))
 		return PTR_ERR(rreq);
+
+	rreq->progress_at = rreq->len;
 
 	ret = netfs_single_begin_cache_read(rreq, ictx);
 	if (ret == -ENOMEM || ret == -EINTR || ret == -ERESTARTSYS)

@@ -29,19 +29,19 @@
 /*
  * IO end handler for temporary buffer_heads handling writes to the journal.
  */
-static void journal_end_buffer_io_sync(struct buffer_head *bh, int uptodate)
+static void journal_end_buffer_io_sync(struct bio *bio)
 {
+	struct buffer_head *bh;
+	bool success = bio_endio_bh(bio, &bh);
 	struct buffer_head *orig_bh = bh->b_private;
 
 	BUFFER_TRACE(bh, "");
-	if (uptodate)
-		set_buffer_uptodate(bh);
+	if (success)
+		clear_buffer_write_io_error(bh);
 	else
-		clear_buffer_uptodate(bh);
+		mark_buffer_write_io_error(bh);
 	if (orig_bh) {
-		clear_bit_unlock(BH_Shadow, &orig_bh->b_state);
-		smp_mb__after_atomic();
-		wake_up_bit(&orig_bh->b_state, BH_Shadow);
+		clear_and_wake_up_bit(BH_Shadow, &orig_bh->b_state);
 	}
 	unlock_buffer(bh);
 }
@@ -147,13 +147,12 @@ static int journal_submit_commit_record(journal_t *journal,
 	lock_buffer(bh);
 	clear_buffer_dirty(bh);
 	set_buffer_uptodate(bh);
-	bh->b_end_io = journal_end_buffer_io_sync;
 
 	if (journal->j_flags & JBD2_BARRIER &&
 	    !jbd2_has_feature_async_commit(journal))
 		write_flags |= REQ_PREFLUSH | REQ_FUA;
 
-	submit_bh(write_flags, bh);
+	bh_submit(bh, write_flags, journal_end_buffer_io_sync);
 	*cbh = bh;
 	return 0;
 }
@@ -170,7 +169,7 @@ static int journal_wait_on_commit_record(journal_t *journal,
 	clear_buffer_dirty(bh);
 	wait_on_buffer(bh);
 
-	if (unlikely(!buffer_uptodate(bh)))
+	if (unlikely(buffer_write_io_error(bh)))
 		ret = -EIO;
 	put_bh(bh);            /* One for getblk() */
 
@@ -180,7 +179,13 @@ static int journal_wait_on_commit_record(journal_t *journal,
 /* Send all the data buffers related to an inode */
 int jbd2_submit_inode_data(journal_t *journal, struct jbd2_inode *jinode)
 {
-	if (!jinode || !(jinode->i_flags & JI_WRITE_DATA))
+	unsigned long flags;
+
+	if (!jinode)
+		return 0;
+
+	flags = READ_ONCE(jinode->i_flags);
+	if (!(flags & JI_WRITE_DATA))
 		return 0;
 
 	trace_jbd2_submit_inode_data(jinode->i_vfs_inode);
@@ -191,12 +196,30 @@ EXPORT_SYMBOL(jbd2_submit_inode_data);
 
 int jbd2_wait_inode_data(journal_t *journal, struct jbd2_inode *jinode)
 {
-	if (!jinode || !(jinode->i_flags & JI_WAIT_DATA) ||
-		!jinode->i_vfs_inode || !jinode->i_vfs_inode->i_mapping)
+	struct address_space *mapping;
+	struct inode *inode;
+	unsigned long flags;
+	loff_t start_byte, end_byte;
+
+	if (!jinode)
+		return 0;
+
+	flags = READ_ONCE(jinode->i_flags);
+	if (!(flags & JI_WAIT_DATA))
+		return 0;
+
+	inode = jinode->i_vfs_inode;
+	if (!inode)
+		return 0;
+
+	mapping = inode->i_mapping;
+	if (!mapping)
+		return 0;
+
+	if (!jbd2_jinode_get_dirty_range(jinode, &start_byte, &end_byte))
 		return 0;
 	return filemap_fdatawait_range_keep_errors(
-		jinode->i_vfs_inode->i_mapping, jinode->i_dirty_start,
-		jinode->i_dirty_end);
+		mapping, start_byte, end_byte);
 }
 EXPORT_SYMBOL(jbd2_wait_inode_data);
 
@@ -218,7 +241,8 @@ static int journal_submit_data_buffers(journal_t *journal,
 	list_for_each_entry(jinode, &commit_transaction->t_inode_list, i_list) {
 		if (!(jinode->i_flags & JI_WRITE_DATA))
 			continue;
-		jinode->i_flags |= JI_COMMIT_RUNNING;
+		WRITE_ONCE(jinode->i_flags,
+			   jinode->i_flags | JI_COMMIT_RUNNING);
 		spin_unlock(&journal->j_list_lock);
 		/* submit the inode data buffers. */
 		trace_jbd2_submit_inode_data(jinode->i_vfs_inode);
@@ -229,7 +253,8 @@ static int journal_submit_data_buffers(journal_t *journal,
 		}
 		spin_lock(&journal->j_list_lock);
 		J_ASSERT(jinode->i_transaction == commit_transaction);
-		jinode->i_flags &= ~JI_COMMIT_RUNNING;
+		WRITE_ONCE(jinode->i_flags,
+			   jinode->i_flags & ~JI_COMMIT_RUNNING);
 		smp_mb();
 		wake_up_bit(&jinode->i_flags, __JI_COMMIT_RUNNING);
 	}
@@ -240,10 +265,13 @@ static int journal_submit_data_buffers(journal_t *journal,
 int jbd2_journal_finish_inode_data_buffers(struct jbd2_inode *jinode)
 {
 	struct address_space *mapping = jinode->i_vfs_inode->i_mapping;
+	loff_t start_byte, end_byte;
+
+	if (!jbd2_jinode_get_dirty_range(jinode, &start_byte, &end_byte))
+		return 0;
 
 	return filemap_fdatawait_range_keep_errors(mapping,
-						   jinode->i_dirty_start,
-						   jinode->i_dirty_end);
+						   start_byte, end_byte);
 }
 
 /*
@@ -262,7 +290,7 @@ static int journal_finish_inode_data_buffers(journal_t *journal,
 	list_for_each_entry(jinode, &commit_transaction->t_inode_list, i_list) {
 		if (!(jinode->i_flags & JI_WAIT_DATA))
 			continue;
-		jinode->i_flags |= JI_COMMIT_RUNNING;
+		WRITE_ONCE(jinode->i_flags, jinode->i_flags | JI_COMMIT_RUNNING);
 		spin_unlock(&journal->j_list_lock);
 		/* wait for the inode data buffers writeout. */
 		if (journal->j_finish_inode_data_buffers) {
@@ -272,7 +300,7 @@ static int journal_finish_inode_data_buffers(journal_t *journal,
 		}
 		cond_resched();
 		spin_lock(&journal->j_list_lock);
-		jinode->i_flags &= ~JI_COMMIT_RUNNING;
+		WRITE_ONCE(jinode->i_flags, jinode->i_flags & ~JI_COMMIT_RUNNING);
 		smp_mb();
 		wake_up_bit(&jinode->i_flags, __JI_COMMIT_RUNNING);
 	}
@@ -288,8 +316,8 @@ static int journal_finish_inode_data_buffers(journal_t *journal,
 				&jinode->i_transaction->t_inode_list);
 		} else {
 			jinode->i_transaction = NULL;
-			jinode->i_dirty_start = 0;
-			jinode->i_dirty_end = 0;
+			WRITE_ONCE(jinode->i_dirty_start_page, 0);
+			WRITE_ONCE(jinode->i_dirty_end_page, 0);
 		}
 	}
 	spin_unlock(&journal->j_list_lock);
@@ -302,9 +330,9 @@ static __u32 jbd2_checksum_data(__u32 crc32_sum, struct buffer_head *bh)
 	char *addr;
 	__u32 checksum;
 
-	addr = kmap_local_folio(bh->b_folio, bh_offset(bh));
+	addr = kmap_local_bh(bh);
 	checksum = crc32_be(crc32_sum, addr, bh->b_size);
-	kunmap_local(addr);
+	kunmap_local_bh(bh, addr);
 
 	return checksum;
 }
@@ -329,10 +357,10 @@ static void jbd2_block_tag_csum_set(journal_t *j, journal_block_tag_t *tag,
 		return;
 
 	seq = cpu_to_be32(sequence);
-	addr = kmap_local_folio(bh->b_folio, bh_offset(bh));
+	addr = kmap_local_bh(bh);
 	csum32 = jbd2_chksum(j->j_csum_seed, (__u8 *)&seq, sizeof(seq));
 	csum32 = jbd2_chksum(csum32, addr, bh->b_size);
-	kunmap_local(addr);
+	kunmap_local_bh(bh, addr);
 
 	if (jbd2_has_feature_csum3(j))
 		tag3->t_checksum = cpu_to_be32(csum32);
@@ -484,10 +512,8 @@ void jbd2_journal_commit_transaction(journal_t *journal)
 		 * leave undo-committed data.
 		 */
 		if (jh->b_committed_data) {
-			struct buffer_head *bh = jh2bh(jh);
-
 			spin_lock(&jh->b_state_lock);
-			jbd2_free(jh->b_committed_data, bh->b_size);
+			kfree(jh->b_committed_data);
 			jh->b_committed_data = NULL;
 			spin_unlock(&jh->b_state_lock);
 		}
@@ -722,9 +748,9 @@ start_journal_io:
 				lock_buffer(bh);
 				clear_buffer_dirty(bh);
 				set_buffer_uptodate(bh);
-				bh->b_end_io = journal_end_buffer_io_sync;
-				submit_bh(REQ_OP_WRITE | JBD2_JOURNAL_REQ_FLAGS,
-					  bh);
+				bh_submit(bh,
+					REQ_OP_WRITE | JBD2_JOURNAL_REQ_FLAGS,
+					journal_end_buffer_io_sync);
 			}
 			cond_resched();
 
@@ -808,7 +834,7 @@ start_journal_io:
 		wait_on_buffer(bh);
 		cond_resched();
 
-		if (unlikely(!buffer_uptodate(bh)))
+		if (unlikely(buffer_write_io_error(bh)))
 			err = -EIO;
 		jbd2_unfile_log_bh(bh);
 		stats.run.rs_blocks_logged++;
@@ -851,7 +877,7 @@ start_journal_io:
 		wait_on_buffer(bh);
 		cond_resched();
 
-		if (unlikely(!buffer_uptodate(bh)))
+		if (unlikely(buffer_write_io_error(bh)))
 			err = -EIO;
 
 		BUFFER_TRACE(bh, "ph5: control buffer writeout done: unfile");
@@ -948,7 +974,7 @@ restart_loop:
 		 * its triggers if they exist, so we can clear that too.
 		 */
 		if (jh->b_committed_data) {
-			jbd2_free(jh->b_committed_data, bh->b_size);
+			kfree(jh->b_committed_data);
 			jh->b_committed_data = NULL;
 			if (jh->b_frozen_data) {
 				jh->b_committed_data = jh->b_frozen_data;
@@ -956,7 +982,7 @@ restart_loop:
 				jh->b_frozen_triggers = NULL;
 			}
 		} else if (jh->b_frozen_data) {
-			jbd2_free(jh->b_frozen_data, bh->b_size);
+			kfree(jh->b_frozen_data);
 			jh->b_frozen_data = NULL;
 			jh->b_frozen_triggers = NULL;
 		}

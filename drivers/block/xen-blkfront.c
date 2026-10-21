@@ -314,7 +314,7 @@ static int fill_grant_buffer(struct blkfront_ring_info *rinfo, int num)
 	int i = 0;
 
 	while (i < num) {
-		gnt_list_entry = kzalloc(sizeof(struct grant), GFP_NOIO);
+		gnt_list_entry = kzalloc_obj(struct grant, GFP_NOIO);
 		if (!gnt_list_entry)
 			goto out_of_memory;
 
@@ -1211,6 +1211,14 @@ static void blkif_free_ring(struct blkfront_ring_info *rinfo)
 	int i, j, segs;
 
 	/*
+	 * Interrupt teardown must be done ahead of freeing queue-related
+	 * data, otherwise the interrupt handler can race with the cleanup.
+	 */
+	if (rinfo->irq)
+		unbind_from_irqhandler(rinfo->irq, rinfo);
+	rinfo->evtchn = rinfo->irq = 0;
+
+	/*
 	 * Remove indirect pages, this only happens when using indirect
 	 * descriptors but not persistent grants
 	 */
@@ -1292,10 +1300,6 @@ free_shadow:
 	/* Free resources associated with old device channel. */
 	xenbus_teardown_ring((void **)&rinfo->ring.sring, info->nr_ring_pages,
 			     rinfo->ring_ref);
-
-	if (rinfo->irq)
-		unbind_from_irqhandler(rinfo->irq, rinfo);
-	rinfo->evtchn = rinfo->irq = 0;
 }
 
 static void blkif_free(struct blkfront_info *info, int suspend)
@@ -1980,7 +1984,7 @@ static int blkfront_probe(struct xenbus_device *dev,
 		}
 		kfree(type);
 	}
-	info = kzalloc(sizeof(*info), GFP_KERNEL);
+	info = kzalloc_obj(*info);
 	if (!info) {
 		xenbus_dev_fatal(dev, -ENOMEM, "allocating info structure");
 		return -ENOMEM;
@@ -2080,6 +2084,15 @@ static int blkfront_resume(struct xenbus_device *dev)
 				continue;
 
 			/*
+			 * For requests split across multiple slots, process the
+			 * underlying request only once: skip the linked, sg-less
+			 * secondary slot.
+			 */
+			if (shadow[j].associated_id != NO_ASSOCIATED_ID &&
+			    shadow[j].num_sg == 0)
+				continue;
+
+			/*
 			 * Get the bios in the request so we can re-queue them.
 			 */
 			if (req_op(shadow[j].request) == REQ_OP_FLUSH ||
@@ -2129,10 +2142,8 @@ static void blkfront_closing(struct blkfront_info *info)
 		return;
 
 	/* No more blkif_request(). */
-	if (info->rq && info->gd) {
-		blk_mq_stop_hw_queues(info->rq);
+	if (info->gd)
 		blk_mark_disk_dead(info->gd);
-	}
 
 	for_each_rinfo(info, rinfo, i) {
 		/* No more gnttab callback work. */
@@ -2207,17 +2218,13 @@ static int blkfront_setup_indirect(struct blkfront_ring_info *rinfo)
 
 	for (i = 0; i < BLK_RING_SIZE(info); i++) {
 		rinfo->shadow[i].grants_used =
-			kvcalloc(grants,
-				 sizeof(rinfo->shadow[i].grants_used[0]),
-				 GFP_KERNEL);
-		rinfo->shadow[i].sg = kvcalloc(psegs,
-					       sizeof(rinfo->shadow[i].sg[0]),
-					       GFP_KERNEL);
+			kvzalloc_objs(rinfo->shadow[i].grants_used[0], grants);
+		rinfo->shadow[i].sg = kvzalloc_objs(rinfo->shadow[i].sg[0],
+						    psegs);
 		if (info->max_indirect_segments)
 			rinfo->shadow[i].indirect_grants =
-				kvcalloc(INDIRECT_GREFS(grants),
-					 sizeof(rinfo->shadow[i].indirect_grants[0]),
-					 GFP_KERNEL);
+				kvzalloc_objs(rinfo->shadow[i].indirect_grants[0],
+					      INDIRECT_GREFS(grants));
 		if ((rinfo->shadow[i].grants_used == NULL) ||
 			(rinfo->shadow[i].sg == NULL) ||
 		     (info->max_indirect_segments &&

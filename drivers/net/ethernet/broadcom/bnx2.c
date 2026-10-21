@@ -115,29 +115,45 @@ static struct {
 	};
 
 static const struct pci_device_id bnx2_pci_tbl[] = {
-	{ PCI_VENDOR_ID_BROADCOM, PCI_DEVICE_ID_NX2_5706,
-	  PCI_VENDOR_ID_HP, 0x3101, 0, 0, NC370T },
-	{ PCI_VENDOR_ID_BROADCOM, PCI_DEVICE_ID_NX2_5706,
-	  PCI_VENDOR_ID_HP, 0x3106, 0, 0, NC370I },
-	{ PCI_VENDOR_ID_BROADCOM, PCI_DEVICE_ID_NX2_5706,
-	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, BCM5706 },
-	{ PCI_VENDOR_ID_BROADCOM, PCI_DEVICE_ID_NX2_5708,
-	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, BCM5708 },
-	{ PCI_VENDOR_ID_BROADCOM, PCI_DEVICE_ID_NX2_5706S,
-	  PCI_VENDOR_ID_HP, 0x3102, 0, 0, NC370F },
-	{ PCI_VENDOR_ID_BROADCOM, PCI_DEVICE_ID_NX2_5706S,
-	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, BCM5706S },
-	{ PCI_VENDOR_ID_BROADCOM, PCI_DEVICE_ID_NX2_5708S,
-	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, BCM5708S },
-	{ PCI_VENDOR_ID_BROADCOM, PCI_DEVICE_ID_NX2_5709,
-	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, BCM5709 },
-	{ PCI_VENDOR_ID_BROADCOM, PCI_DEVICE_ID_NX2_5709S,
-	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, BCM5709S },
-	{ PCI_VENDOR_ID_BROADCOM, 0x163b,
-	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, BCM5716 },
-	{ PCI_VENDOR_ID_BROADCOM, 0x163c,
-	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, BCM5716S },
-	{ 0, }
+	{
+		PCI_VDEVICE_SUB(BROADCOM, PCI_DEVICE_ID_NX2_5706,
+				PCI_VENDOR_ID_HP, 0x3101),
+		.driver_data = NC370T,
+	}, {
+		PCI_VDEVICE_SUB(BROADCOM, PCI_DEVICE_ID_NX2_5706,
+				PCI_VENDOR_ID_HP, 0x3106),
+		.driver_data = NC370I,
+	}, {
+		PCI_VDEVICE(BROADCOM, PCI_DEVICE_ID_NX2_5706),
+		.driver_data = BCM5706,
+	}, {
+		PCI_VDEVICE_SUB(BROADCOM, PCI_DEVICE_ID_NX2_5708,
+				PCI_ANY_ID, PCI_ANY_ID),
+		.driver_data = BCM5708,
+	}, {
+		PCI_VDEVICE_SUB(BROADCOM, PCI_DEVICE_ID_NX2_5706S,
+				PCI_VENDOR_ID_HP, 0x3102),
+		.driver_data = NC370F,
+	}, {
+		PCI_VDEVICE(BROADCOM, PCI_DEVICE_ID_NX2_5706S),
+		.driver_data = BCM5706S,
+	}, {
+		PCI_VDEVICE(BROADCOM, PCI_DEVICE_ID_NX2_5708S),
+		.driver_data = BCM5708S,
+	}, {
+		PCI_VDEVICE(BROADCOM, PCI_DEVICE_ID_NX2_5709),
+		.driver_data = BCM5709,
+	}, {
+		PCI_VDEVICE(BROADCOM, PCI_DEVICE_ID_NX2_5709S),
+		.driver_data = BCM5709S,
+	}, {
+		PCI_VDEVICE(BROADCOM, 0x163b),
+		.driver_data = BCM5716,
+	}, {
+		PCI_VDEVICE(BROADCOM, 0x163c),
+		.driver_data = BCM5716S,
+	},
+	{ }
 };
 
 static const struct flash_spec flash_table[] =
@@ -6444,7 +6460,6 @@ bnx2_reset_task(struct work_struct *work)
 	if (!(pcicmd & PCI_COMMAND_MEMORY)) {
 		/* in case PCI block has reset */
 		pci_restore_state(bp->pdev);
-		pci_save_state(bp->pdev);
 	}
 	rc = bnx2_init_nic(bp, 1);
 	if (rc) {
@@ -8085,7 +8100,7 @@ bnx2_init_board(struct pci_dev *pdev, struct net_device *dev)
 	bp->phy_flags = 0;
 
 	bp->temp_stats_blk =
-		kzalloc(sizeof(struct statistics_block), GFP_KERNEL);
+		kzalloc_obj(struct statistics_block);
 
 	if (!bp->temp_stats_blk) {
 		rc = -ENOMEM;
@@ -8718,7 +8733,6 @@ static pci_ers_result_t bnx2_io_slot_reset(struct pci_dev *pdev)
 	} else {
 		pci_set_master(pdev);
 		pci_restore_state(pdev);
-		pci_save_state(pdev);
 
 		if (netif_running(dev))
 			err = bnx2_init_nic(bp, 1);

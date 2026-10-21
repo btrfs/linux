@@ -8,6 +8,7 @@
 #include <asm/hypervisor.h>
 #include <asm/e820/api.h>
 #include <asm/x86_init.h>
+#include <asm/string.h>
 
 #include <asm/xen/interface.h>
 
@@ -24,11 +25,6 @@ struct boot_params __initdata pvh_bootparams;
 struct hvm_start_info __initdata pvh_start_info;
 
 const unsigned int __initconst pvh_start_info_sz = sizeof(pvh_start_info);
-
-static u64 __init pvh_get_root_pointer(void)
-{
-	return pvh_start_info.rsdp_paddr;
-}
 
 /*
  * Xen guests are able to obtain the memory map from the hypervisor via the
@@ -83,7 +79,9 @@ static void __init init_pvh_bootparams(bool xen_guest)
 		struct hvm_modlist_entry *modaddr =
 			__va(pvh_start_info.modlist_paddr);
 		pvh_bootparams.hdr.ramdisk_image = modaddr->paddr;
+		pvh_bootparams.ext_ramdisk_image = modaddr->paddr >> 32;
 		pvh_bootparams.hdr.ramdisk_size = modaddr->size;
+		pvh_bootparams.ext_ramdisk_size = modaddr->size >> 32;
 	}
 
 	/*
@@ -95,7 +93,7 @@ static void __init init_pvh_bootparams(bool xen_guest)
 	pvh_bootparams.hdr.version = (2 << 8) | 12;
 	pvh_bootparams.hdr.type_of_loader = ((xen_guest ? 0x9 : 0xb) << 4) | 0;
 
-	x86_init.acpi.get_root_pointer = pvh_get_root_pointer;
+	pvh_bootparams.acpi_rsdp_addr = pvh_start_info.rsdp_paddr;
 }
 
 /*
@@ -134,7 +132,7 @@ void __init xen_prepare_pvh(void)
 	 * This must not compile to "call memset" because memset() may be
 	 * instrumented.
 	 */
-	__builtin_memset(&pvh_bootparams, 0, sizeof(pvh_bootparams));
+	__inline_memset(&pvh_bootparams, 0, sizeof(pvh_bootparams));
 
 	hypervisor_specific_init(xen_guest);
 

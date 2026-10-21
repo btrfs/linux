@@ -3,7 +3,7 @@
  * Copyright (C) 2017-2023 Oracle.  All Rights Reserved.
  * Author: Darrick J. Wong <djwong@kernel.org>
  */
-#include "xfs.h"
+#include "xfs_platform.h"
 #include "xfs_fs.h"
 #include "xfs_shared.h"
 #include "xfs_format.h"
@@ -70,20 +70,19 @@ xchk_symlink(
 		return 0;
 	}
 
-	/* Inline symlink? */
 	if (ifp->if_format == XFS_DINODE_FMT_LOCAL) {
+		/* Inline symlink? */
 		if (len > xfs_inode_data_fork_size(ip) ||
 		    len > strnlen(ifp->if_data, xfs_inode_data_fork_size(ip)))
 			xchk_fblock_set_corrupt(sc, XFS_DATA_FORK, 0);
-		return 0;
+	} else {
+		/* Remote symlink; must read the contents. */
+		error = xfs_symlink_remote_read(sc->ip, sc->buf);
+		if (!xchk_fblock_process_error(sc, XFS_DATA_FORK, 0, &error))
+			return error;
+		if (strnlen(sc->buf, XFS_SYMLINK_MAXLEN) < len)
+			xchk_fblock_set_corrupt(sc, XFS_DATA_FORK, 0);
 	}
-
-	/* Remote symlink; must read the contents. */
-	error = xfs_symlink_remote_read(sc->ip, sc->buf);
-	if (!xchk_fblock_process_error(sc, XFS_DATA_FORK, 0, &error))
-		return error;
-	if (strnlen(sc->buf, XFS_SYMLINK_MAXLEN) < len)
-		xchk_fblock_set_corrupt(sc, XFS_DATA_FORK, 0);
 
 	/* If a remote symlink is clean, it is clearly not zapped. */
 	xchk_mark_healthy_if_clean(sc, XFS_SICK_INO_SYMLINK_ZAPPED);

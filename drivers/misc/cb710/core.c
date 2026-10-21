@@ -223,13 +223,11 @@ static int cb710_probe(struct pci_dev *pdev,
 	if (err)
 		return err;
 
-	err = pcim_iomap_regions(pdev, 0x0001, KBUILD_MODNAME);
-	if (err)
-		return err;
-
 	spin_lock_init(&chip->irq_lock);
 	chip->pdev = pdev;
-	chip->iobase = pcim_iomap_table(pdev)[0];
+	chip->iobase = pcim_iomap_region(pdev, 0, KBUILD_MODNAME);
+	if (IS_ERR(chip->iobase))
+		return PTR_ERR(chip->iobase);
 
 	pci_set_drvdata(pdev, chip);
 
@@ -294,9 +292,8 @@ static void cb710_remove_one(struct pci_dev *pdev)
 }
 
 static const struct pci_device_id cb710_pci_tbl[] = {
-	{ PCI_VENDOR_ID_ENE, PCI_DEVICE_ID_ENE_CB710_FLASH,
-		PCI_ANY_ID, PCI_ANY_ID, },
-	{ 0, }
+	{ PCI_DEVICE(PCI_VENDOR_ID_ENE, PCI_DEVICE_ID_ENE_CB710_FLASH) },
+	{ }
 };
 
 static SIMPLE_DEV_PM_OPS(cb710_pm_ops, cb710_suspend, cb710_resume);

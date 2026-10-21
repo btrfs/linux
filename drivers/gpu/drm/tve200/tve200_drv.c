@@ -84,6 +84,7 @@ static int tve200_modeset_init(struct drm_device *dev)
 	if (panel) {
 		bridge = drm_panel_bridge_add_typed(panel,
 						    DRM_MODE_CONNECTOR_Unknown);
+		drm_panel_put(panel);
 		if (IS_ERR(bridge)) {
 			ret = PTR_ERR(bridge);
 			goto out_bridge;
@@ -221,12 +222,16 @@ static int tve200_probe(struct platform_device *pdev)
 
 	ret = drm_dev_register(drm, 0);
 	if (ret < 0)
-		goto clk_disable;
+		goto mode_config_cleanup;
 
 	drm_client_setup_with_fourcc(drm, DRM_FORMAT_RGB565);
 
 	return 0;
 
+mode_config_cleanup:
+	if (priv->panel)
+		drm_panel_bridge_remove(priv->bridge);
+	drm_mode_config_cleanup(drm);
 clk_disable:
 	clk_disable_unprepare(priv->pclk);
 dev_unref:
@@ -259,6 +264,7 @@ static const struct of_device_id tve200_of_match[] = {
 	},
 	{},
 };
+MODULE_DEVICE_TABLE(of, tve200_of_match);
 
 static struct platform_driver tve200_driver = {
 	.driver = {

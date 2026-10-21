@@ -1344,6 +1344,26 @@ enum ec_feature_code {
 	 * The EC supports UCSI PPM.
 	 */
 	EC_FEATURE_UCSI_PPM = 54,
+	/*
+	 * The EC supports Strauss keyboard.
+	 */
+	EC_FEATURE_STRAUSS = 55,
+	/*
+	 * The EC supports PoE.
+	 */
+	EC_FEATURE_POE = 56,
+	/*
+	 * The EC supports a hybrid boost charger
+	 */
+	EC_FEATURE_CHARGER_HYBRID_POWER_BOOST = 57,
+	/*
+	 * Support signaling new console logs via host event
+	 */
+	EC_FEATURE_CONSOLE_LOG_EVENT = 58,
+	/*
+	 * The EC supports power monitoring
+	 */
+	EC_FEATURE_PWRMON = 59,
 };
 
 #define EC_FEATURE_MASK_0(event_code) BIT(event_code % 32)
@@ -2005,12 +2025,31 @@ struct lightbar_params_v2_colors {
 	struct rgb_s color[8];			/* 0-3 are Google colors */
 } __ec_todo_packed;
 
+struct lightbar_params_v3 {
+	/*
+	 *  Number of LEDs reported by the EC.
+	 *  May be less than the actual number of LEDs in the lightbar.
+	 */
+	uint8_t reported_led_num;
+} __ec_todo_packed;
+
 /* Lightbar program. */
 #define EC_LB_PROG_LEN 192
 struct lightbar_program {
 	uint8_t size;
 	uint8_t data[EC_LB_PROG_LEN];
 } __ec_todo_unpacked;
+
+/*
+ * Lightbar program for large sequences. Sequences are sent in pieces, with
+ * increasing offset. The sequences are still limited by the amount reserved in
+ * EC RAM.
+ */
+struct lightbar_program_ex {
+	uint8_t size;
+	uint16_t offset;
+	uint8_t data[];
+} __ec_todo_packed;
 
 struct ec_params_lightbar {
 	uint8_t cmd;		      /* Command (see enum lightbar_command) */
@@ -2058,6 +2097,7 @@ struct ec_params_lightbar {
 		struct lightbar_params_v2_colors set_v2par_colors;
 
 		struct lightbar_program set_program;
+		struct lightbar_program_ex set_program_ex;
 	};
 } __ec_todo_packed;
 
@@ -2085,6 +2125,8 @@ struct ec_response_lightbar {
 		struct lightbar_params_v2_brightness get_params_v2_bright;
 		struct lightbar_params_v2_thresholds get_params_v2_thlds;
 		struct lightbar_params_v2_colors get_params_v2_colors;
+
+		struct lightbar_params_v3 get_params_v3;
 
 		struct __ec_todo_unpacked {
 			uint32_t num;
@@ -2143,6 +2185,8 @@ enum lightbar_command {
 	LIGHTBAR_CMD_SET_PARAMS_V2_THRESHOLDS = 31,
 	LIGHTBAR_CMD_GET_PARAMS_V2_COLORS = 32,
 	LIGHTBAR_CMD_SET_PARAMS_V2_COLORS = 33,
+	LIGHTBAR_CMD_GET_PARAMS_V3 = 34,
+	LIGHTBAR_CMD_SET_PROGRAM_EX = 35,
 	LIGHTBAR_NUM_CMDS
 };
 
@@ -2598,13 +2642,19 @@ struct ec_params_motion_sense {
 
 		/*
 		 * Used for MOTIONSENSE_CMD_INFO, MOTIONSENSE_CMD_DATA
-		 * and MOTIONSENSE_CMD_PERFORM_CALIB.
 		 */
 		struct __ec_todo_unpacked {
 			uint8_t sensor_num;
-		} info, info_3, data, fifo_flush, perform_calib,
-				list_activities;
+		} info, info_3, data, fifo_flush, list_activities;
 
+		/*
+		 * Used for MOTIONSENSE_CMD_PERFORM_CALIB:
+		 * Allow entering/exiting the calibration mode.
+		 */
+		struct __ec_todo_unpacked {
+			uint8_t sensor_num;
+			uint8_t enable;
+		} perform_calib;
 		/*
 		 * Used for MOTIONSENSE_CMD_EC_RATE, MOTIONSENSE_CMD_SENSOR_ODR
 		 * and MOTIONSENSE_CMD_SENSOR_RANGE.
@@ -3486,6 +3536,9 @@ enum ec_mkbp_event {
 	/* Peripheral device charger event */
 	EC_MKBP_EVENT_PCHG = 12,
 
+	/* Power monitor telemetry event */
+	EC_MKBP_EVENT_PWRMON = 13,
+
 	/* Number of MKBP events */
 	EC_MKBP_EVENT_COUNT,
 };
@@ -3569,6 +3622,12 @@ union __ec_align_offset1 ec_response_get_next_data_v3 {
 	uint32_t cec_events;
 
 	uint8_t cec_message[16];
+
+	struct __ec_todo_packed {
+		int64_t value;
+		uint32_t samples;
+		uint8_t channel_id;
+	} pwrmon_data;
 };
 BUILD_ASSERT(sizeof(union ec_response_get_next_data_v3) == 18);
 
@@ -6558,6 +6617,49 @@ struct ec_params_charger_control {
 struct ec_params_usb_pd_mux_ack {
 	uint8_t port; /* USB-C port number */
 } __ec_align1;
+
+/**
+ * Power monitoring. Used to read power consumptions on rails
+ */
+#define EC_CMD_PWRMON 0x0608
+
+enum ec_pwrmon_cmd {
+	EC_PWRMON_GET_CHANNEL_COUNT = 0,
+	EC_PWRMON_DUMP_INFO = 1,
+	EC_PWRMON_SET_RATE = 2,
+	EC_PWRMON_GET_RATE = 3,
+	EC_PWRMON_START = 4,
+	EC_PWRMON_STOP = 5,
+	EC_PWRMON_LATCH = 6,
+};
+
+struct ec_params_pwrmon {
+	uint8_t cmd;
+	union {
+		uint16_t set_rate;
+		uint8_t channel_id;
+	} __ec_align2;
+
+	/*
+	 * The following commands have no args:
+	 *
+	 * start, stop, latch
+	 *
+	 */
+} __ec_align4;
+
+struct pwrmon_dump_info {
+	uint8_t channel_id;
+	char channel_name[32];
+} __ec_align4;
+
+struct ec_response_pwrmon {
+	union {
+		uint16_t sample_rate;
+		uint8_t channel_count;
+		struct pwrmon_dump_info dump_info;
+	} __ec_align4;
+} __ec_align4;
 
 /*****************************************************************************/
 /*

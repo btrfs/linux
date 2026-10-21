@@ -367,6 +367,7 @@ static void scsifront_do_response(struct vscsifrnt_info *info,
 	struct vscsifrnt_shadow *shadow;
 
 	if (ring_rsp->rqid >= VSCSIIF_MAX_REQS ||
+	    !info->shadow[ring_rsp->rqid] ||
 	    !info->shadow[ring_rsp->rqid]->inflight) {
 		scsifront_set_error(info, "illegal rqid returned by backend!");
 		return;
@@ -494,8 +495,8 @@ static int map_data_for_request(struct vscsifrnt_info *info,
 			return -E2BIG;
 		}
 		seg_grants = vscsiif_grants_sg(data_grants);
-		shadow->sg = kcalloc(data_grants,
-			sizeof(struct scsiif_request_segment), GFP_ATOMIC);
+		shadow->sg = kzalloc_objs(struct scsiif_request_segment,
+					  data_grants, GFP_ATOMIC);
 		if (!shadow->sg)
 			return -ENOMEM;
 	}
@@ -603,8 +604,8 @@ static void scsifront_return(struct vscsifrnt_info *info)
 	wake_up(&info->wq_pause);
 }
 
-static int scsifront_queuecommand(struct Scsi_Host *shost,
-				  struct scsi_cmnd *sc)
+static enum scsi_qc_status scsifront_queuecommand(struct Scsi_Host *shost,
+						  struct scsi_cmnd *sc)
 {
 	struct vscsifrnt_info *info = shost_priv(shost);
 	struct vscsifrnt_shadow *shadow = scsi_cmd_priv(sc);
@@ -669,7 +670,7 @@ static int scsifront_action_handler(struct scsi_cmnd *sc, uint8_t act)
 	if (info->host_active == STATE_ERROR)
 		return FAILED;
 
-	shadow = kzalloc(sizeof(*shadow), GFP_NOIO);
+	shadow = kzalloc_obj(*shadow, GFP_NOIO);
 	if (!shadow)
 		return FAILED;
 
@@ -1076,7 +1077,7 @@ static void scsifront_do_lun_hotplug(struct vscsifrnt_info *info, int op)
 
 		/*
 		 * Front device state path, used in sdev_configure called
-		 * on successfull scsi_add_device, and in sdev_destroy called
+		 * on successful scsi_add_device, and in sdev_destroy called
 		 * on remove of a device.
 		 */
 		snprintf(info->dev_state_path, sizeof(info->dev_state_path),
@@ -1175,7 +1176,7 @@ static void scsifront_backend_changed(struct xenbus_device *dev,
 			return;
 		}
 
-		if (xenbus_read_driver_state(dev->nodename) ==
+		if (xenbus_read_driver_state(dev, dev->nodename) ==
 		    XenbusStateInitialised)
 			scsifront_do_lun_hotplug(info, VSCSIFRONT_OP_ADD_LUN);
 

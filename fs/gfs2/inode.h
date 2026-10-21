@@ -86,6 +86,7 @@ err:
 	return -EIO;
 }
 
+void gfs2_setup_inode(struct inode *inode);
 struct inode *gfs2_inode_lookup(struct super_block *sb, unsigned type,
 			        u64 no_addr, u64 no_formal_ino,
 			        unsigned int blktype);
@@ -96,7 +97,7 @@ int gfs2_dinode_dealloc(struct gfs2_inode *ip);
 
 struct inode *gfs2_lookupi(struct inode *dir, const struct qstr *name,
 			   int is_root);
-int gfs2_permission(struct mnt_idmap *idmap,
+int gfs2_permission(const struct mnt_idmap *idmap,
 		    struct inode *inode, int mask);
 struct inode *gfs2_lookup_meta(struct inode *dip, const char *name);
 void gfs2_dinode_out(const struct gfs2_inode *ip, void *buf);
@@ -108,7 +109,7 @@ extern const struct file_operations gfs2_file_fops_nolock;
 extern const struct file_operations gfs2_dir_fops_nolock;
 
 int gfs2_fileattr_get(struct dentry *dentry, struct file_kattr *fa);
-int gfs2_fileattr_set(struct mnt_idmap *idmap,
+int gfs2_fileattr_set(const struct mnt_idmap *idmap,
 		      struct dentry *dentry, struct file_kattr *fa);
 void gfs2_set_inode_flags(struct inode *inode);
 

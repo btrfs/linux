@@ -124,22 +124,32 @@ static struct dentry *__kernfs_fh_to_dentry(struct super_block *sb,
 		return NULL;
 	}
 
-	kn = kernfs_find_and_get_node_by_id(info->root, id);
-	if (!kn)
-		return ERR_PTR(-ESTALE);
-
-	if (get_parent) {
-		struct kernfs_node *parent;
-
-		parent = kernfs_get_parent(kn);
-		kernfs_put(kn);
-		kn = parent;
+	/*
+	 * Hold kernfs_rwsem across the lookup as well as kernfs_get_inode().
+	 * __kernfs_remove() deactivates the subtree and clears i_nlink on its
+	 * inodes under the write lock, so under the read lock either
+	 * kernfs_find_and_get_node_by_id() refuses the node, or the inode is
+	 * in the inode hash before the ilookup() pass goes looking for it.
+	 */
+	scoped_guard(rwsem_read, &info->root->kernfs_rwsem) {
+		kn = kernfs_find_and_get_node_by_id(info->root, id);
 		if (!kn)
 			return ERR_PTR(-ESTALE);
+
+		if (get_parent) {
+			struct kernfs_node *parent;
+
+			parent = kernfs_get_parent(kn);
+			kernfs_put(kn);
+			kn = parent;
+			if (!kn)
+				return ERR_PTR(-ESTALE);
+		}
+
+		inode = kernfs_get_inode(sb, kn);
+		kernfs_put(kn);
 	}
 
-	inode = kernfs_get_inode(sb, kn);
-	kernfs_put(kn);
 	return d_obtain_alias(inode);
 }
 
@@ -298,6 +308,7 @@ static int kernfs_fill_super(struct super_block *sb, struct kernfs_fs_context *k
 	if (info->root->flags & KERNFS_ROOT_SUPPORT_EXPORTOP)
 		sb->s_export_op = &kernfs_export_ops;
 	sb->s_time_gran = 1;
+	sb->s_maxbytes  = MAX_LFS_FILESIZE;
 
 	/* sysfs dentries and inodes don't require IO to create */
 	sb->s_shrink->seeks = 0;
@@ -344,7 +355,7 @@ static int kernfs_set_super(struct super_block *sb, struct fs_context *fc)
  *
  * Return: the namespace tag associated with kernfs super_block @sb.
  */
-const void *kernfs_super_ns(struct super_block *sb)
+const struct ns_common *kernfs_super_ns(struct super_block *sb)
 {
 	struct kernfs_super_info *info = kernfs_info(sb);
 
@@ -369,7 +380,7 @@ int kernfs_get_tree(struct fs_context *fc)
 	struct kernfs_super_info *info;
 	int error;
 
-	info = kzalloc(sizeof(*info), GFP_KERNEL);
+	info = kzalloc_obj(*info);
 	if (!info)
 		return -ENOMEM;
 
@@ -433,8 +444,8 @@ void kernfs_kill_sb(struct super_block *sb)
 	up_write(&root->kernfs_supers_rwsem);
 
 	/*
-	 * Remove the superblock from fs_supers/s_instances
-	 * so we can't find it, before freeing kernfs_super_info.
+	 * Mark the superblock dead so sget_fc() can't find it,
+	 * before freeing kernfs_super_info.
 	 */
 	kill_anon_super(sb);
 	kfree(info);
@@ -445,12 +456,12 @@ static void __init kernfs_mutex_init(void)
 	int count;
 
 	for (count = 0; count < NR_KERNFS_LOCKS; count++)
-		mutex_init(&kernfs_locks->open_file_mutex[count]);
+		mutex_init(&kernfs_locks->node_mutex[count]);
 }
 
 static void __init kernfs_lock_init(void)
 {
-	kernfs_locks = kmalloc(sizeof(struct kernfs_global_locks), GFP_KERNEL);
+	kernfs_locks = kmalloc_obj(struct kernfs_global_locks);
 	WARN_ON(!kernfs_locks);
 
 	kernfs_mutex_init();

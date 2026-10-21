@@ -11,7 +11,6 @@
 #include <linux/interrupt.h>
 #include <linux/io.h>
 #include <linux/iopoll.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
 #include <linux/pm_runtime.h>
@@ -71,7 +70,7 @@ static void deinterlace_device_run(void *priv)
 	src = v4l2_m2m_next_src_buf(ctx->fh.m2m_ctx);
 	dst = v4l2_m2m_next_dst_buf(ctx->fh.m2m_ctx);
 
-	v4l2_m2m_buf_copy_metadata(src, dst, true);
+	v4l2_m2m_buf_copy_metadata(src, dst);
 
 	deinterlace_write(dev, DEINTERLACE_MOD_ENABLE,
 			  DEINTERLACE_MOD_ENABLE_EN);
@@ -709,7 +708,7 @@ static int deinterlace_open(struct file *file)
 	if (mutex_lock_interruptible(&dev->dev_mutex))
 		return -ERESTARTSYS;
 
-	ctx = kzalloc(sizeof(*ctx), GFP_KERNEL);
+	ctx = kzalloc_obj(*ctx);
 	if (!ctx) {
 		mutex_unlock(&dev->dev_mutex);
 		return -ENOMEM;

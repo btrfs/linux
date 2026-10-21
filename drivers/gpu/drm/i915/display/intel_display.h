@@ -27,13 +27,14 @@
 
 #include <drm/drm_util.h>
 
-#include "i915_reg_defs.h"
+#include "intel_display_reg_defs.h"
 #include "intel_display_limits.h"
 
-struct drm_atomic_state;
+struct drm_atomic_commit;
 struct drm_device;
 struct drm_display_mode;
 struct drm_encoder;
+struct drm_format_info;
 struct drm_modeset_acquire_ctx;
 struct intel_atomic_state;
 struct intel_crtc;
@@ -134,32 +135,6 @@ enum tc_port {
 	I915_MAX_TC_PORTS
 };
 
-enum aux_ch {
-	AUX_CH_NONE = -1,
-
-	AUX_CH_A,
-	AUX_CH_B,
-	AUX_CH_C,
-	AUX_CH_D,
-	AUX_CH_E, /* ICL+ */
-	AUX_CH_F,
-	AUX_CH_G,
-	AUX_CH_H,
-	AUX_CH_I,
-
-	/* tgl+ */
-	AUX_CH_USBC1 = AUX_CH_D,
-	AUX_CH_USBC2,
-	AUX_CH_USBC3,
-	AUX_CH_USBC4,
-	AUX_CH_USBC5,
-	AUX_CH_USBC6,
-
-	/* XE_LPD repositions D/E offsets and bitfields */
-	AUX_CH_D_XELPD = AUX_CH_USBC5,
-	AUX_CH_E_XELPD,
-};
-
 enum phy {
 	PHY_NONE = -1,
 
@@ -237,22 +212,23 @@ enum phy_fia {
 			    base.head)					\
 		for_each_if((intel_plane)->pipe == (intel_crtc)->pipe)
 
-#define for_each_intel_crtc(dev, intel_crtc)				\
-	list_for_each_entry(intel_crtc,					\
-			    &(dev)->mode_config.crtc_list,		\
-			    base.head)
+#define for_each_intel_crtc(display, crtc) \
+	list_for_each_entry((crtc), \
+			    &(display)->pipe_list, \
+			    pipe_head)
 
-#define for_each_intel_crtc_in_pipe_mask(dev, intel_crtc, pipe_mask)	\
-	list_for_each_entry(intel_crtc,					\
-			    &(dev)->mode_config.crtc_list,		\
-			    base.head)					\
-		for_each_if((pipe_mask) & BIT(intel_crtc->pipe))
+#define for_each_intel_crtc_reverse(display, crtc) \
+	list_for_each_entry_reverse((crtc), \
+				    &(display)->pipe_list, \
+				    pipe_head)
 
-#define for_each_intel_crtc_in_pipe_mask_reverse(dev, intel_crtc, pipe_mask)	\
-	list_for_each_entry_reverse((intel_crtc),				\
-				    &(dev)->mode_config.crtc_list,		\
-				    base.head)					\
-		for_each_if((pipe_mask) & BIT((intel_crtc)->pipe))
+#define for_each_intel_crtc_in_pipe_mask(display, crtc, pipe_mask) \
+	for_each_intel_crtc((display), (crtc)) \
+		for_each_if((pipe_mask) & BIT((crtc)->pipe))
+
+#define for_each_intel_crtc_in_pipe_mask_reverse(display, crtc, pipe_mask) \
+	for_each_intel_crtc_reverse((display), (crtc)) \
+		for_each_if((pipe_mask) & BIT((crtc)->pipe))
 
 #define for_each_intel_encoder(dev, intel_encoder)		\
 	list_for_each_entry(intel_encoder,			\
@@ -294,14 +270,6 @@ enum phy_fia {
 	     (__i)++) \
 		for_each_if(plane)
 
-#define for_each_old_intel_crtc_in_state(__state, crtc, old_crtc_state, __i) \
-	for ((__i) = 0; \
-	     (__i) < (__state)->base.dev->mode_config.num_crtc && \
-		     ((crtc) = to_intel_crtc((__state)->base.crtcs[__i].ptr), \
-		      (old_crtc_state) = to_intel_crtc_state((__state)->base.crtcs[__i].old_state), 1); \
-	     (__i)++) \
-		for_each_if(crtc)
-
 #define for_each_new_intel_plane_in_state(__state, plane, new_plane_state, __i) \
 	for ((__i) = 0; \
 	     (__i) < (__state)->base.dev->mode_config.num_total_plane && \
@@ -309,22 +277,6 @@ enum phy_fia {
 		      (new_plane_state) = to_intel_plane_state((__state)->base.planes[__i].new_state), 1); \
 	     (__i)++) \
 		for_each_if(plane)
-
-#define for_each_new_intel_crtc_in_state(__state, crtc, new_crtc_state, __i) \
-	for ((__i) = 0; \
-	     (__i) < (__state)->base.dev->mode_config.num_crtc && \
-		     ((crtc) = to_intel_crtc((__state)->base.crtcs[__i].ptr), \
-		      (new_crtc_state) = to_intel_crtc_state((__state)->base.crtcs[__i].new_state), 1); \
-	     (__i)++) \
-		for_each_if(crtc)
-
-#define for_each_new_intel_crtc_in_state_reverse(__state, crtc, new_crtc_state, __i) \
-	for ((__i) = (__state)->base.dev->mode_config.num_crtc - 1; \
-	     (__i) >= 0  && \
-	     ((crtc) = to_intel_crtc((__state)->base.crtcs[__i].ptr), \
-	      (new_crtc_state) = to_intel_crtc_state((__state)->base.crtcs[__i].new_state), 1); \
-	     (__i)--) \
-		for_each_if(crtc)
 
 #define for_each_oldnew_intel_plane_in_state(__state, plane, old_plane_state, new_plane_state, __i) \
 	for ((__i) = 0; \
@@ -335,23 +287,27 @@ enum phy_fia {
 	     (__i)++) \
 		for_each_if(plane)
 
-#define for_each_oldnew_intel_crtc_in_state(__state, crtc, old_crtc_state, new_crtc_state, __i) \
-	for ((__i) = 0; \
-	     (__i) < (__state)->base.dev->mode_config.num_crtc && \
-		     ((crtc) = to_intel_crtc((__state)->base.crtcs[__i].ptr), \
-		      (old_crtc_state) = to_intel_crtc_state((__state)->base.crtcs[__i].old_state), \
-		      (new_crtc_state) = to_intel_crtc_state((__state)->base.crtcs[__i].new_state), 1); \
-	     (__i)++) \
-		for_each_if(crtc)
+#define for_each_old_intel_crtc_in_state(__state, crtc, old_crtc_state) \
+	for_each_intel_crtc(to_intel_display(__state), (crtc)) \
+		for_each_if((old_crtc_state) = intel_atomic_get_old_crtc_state((__state), (crtc)))
 
-#define for_each_oldnew_intel_crtc_in_state_reverse(__state, crtc, old_crtc_state, new_crtc_state, __i) \
-	for ((__i) = (__state)->base.dev->mode_config.num_crtc - 1; \
-	     (__i) >= 0  && \
-	     ((crtc) = to_intel_crtc((__state)->base.crtcs[__i].ptr), \
-	      (old_crtc_state) = to_intel_crtc_state((__state)->base.crtcs[__i].old_state), \
-	      (new_crtc_state) = to_intel_crtc_state((__state)->base.crtcs[__i].new_state), 1); \
-	     (__i)--) \
-		for_each_if(crtc)
+#define for_each_new_intel_crtc_in_state(__state, crtc, new_crtc_state) \
+	for_each_intel_crtc(to_intel_display(__state), (crtc)) \
+		for_each_if((new_crtc_state) = intel_atomic_get_new_crtc_state((__state), (crtc)))
+
+#define for_each_new_intel_crtc_in_state_reverse(__state, crtc, new_crtc_state) \
+	for_each_intel_crtc_reverse(to_intel_display(__state), (crtc)) \
+		for_each_if((new_crtc_state) = intel_atomic_get_new_crtc_state((__state), (crtc)))
+
+#define for_each_oldnew_intel_crtc_in_state(__state, crtc, old_crtc_state, new_crtc_state) \
+	for_each_intel_crtc(to_intel_display(__state), (crtc)) \
+		for_each_if(((old_crtc_state) = intel_atomic_get_old_crtc_state((__state), (crtc)), \
+			     (new_crtc_state) = intel_atomic_get_new_crtc_state((__state), (crtc))))
+
+#define for_each_oldnew_intel_crtc_in_state_reverse(__state, crtc, old_crtc_state, new_crtc_state) \
+	for_each_intel_crtc_reverse(to_intel_display(__state), (crtc)) \
+		for_each_if(((old_crtc_state) = intel_atomic_get_old_crtc_state((__state), (crtc)), \
+			     (new_crtc_state) = intel_atomic_get_new_crtc_state((__state), (crtc))))
 
 #define intel_atomic_crtc_state_for_each_plane_state( \
 		  plane, plane_state, \
@@ -369,39 +325,44 @@ enum phy_fia {
 			     ((connector) = to_intel_connector((__state)->base.connectors[__i].ptr), \
 			     (new_connector_state) = to_intel_digital_connector_state((__state)->base.connectors[__i].new_state), 1))
 
-#define for_each_crtc_in_masks(display, crtc, first_pipes, second_pipes, i) \
-	for ((i) = 0; \
+#define __for_each_crtc_in_masks(display, crtc, first_pipes, second_pipes, i) \
+	for (int (i) = 0; \
 	     (i) < (I915_MAX_PIPES * 2) && ((crtc) = intel_crtc_for_pipe(display, (i) % I915_MAX_PIPES), 1); \
 	     (i)++) \
 		for_each_if((crtc) && ((first_pipes) | ((second_pipes) << I915_MAX_PIPES)) & BIT(i))
 
-#define for_each_crtc_in_masks_reverse(display, crtc, first_pipes, second_pipes, i) \
-	for ((i) = (I915_MAX_PIPES * 2 - 1); \
+#define __for_each_crtc_in_masks_reverse(display, crtc, first_pipes, second_pipes, i) \
+	for (int (i) = (I915_MAX_PIPES * 2 - 1); \
 	     (i) >= 0 && ((crtc) = intel_crtc_for_pipe(display, (i) % I915_MAX_PIPES), 1); \
 	     (i)--) \
 		for_each_if((crtc) && ((first_pipes) | ((second_pipes) << I915_MAX_PIPES)) & BIT(i))
 
-#define for_each_pipe_crtc_modeset_disable(display, crtc, crtc_state, i) \
-	for_each_crtc_in_masks(display, crtc, \
-			       _intel_modeset_primary_pipes(crtc_state), \
-			       _intel_modeset_secondary_pipes(crtc_state), \
-			       i)
+#define for_each_pipe_crtc_modeset_disable(display, crtc, crtc_state) \
+	__for_each_crtc_in_masks(display, crtc, \
+				 _intel_modeset_primary_pipes(crtc_state), \
+				 _intel_modeset_secondary_pipes(crtc_state), \
+				 __UNIQUE_ID(i))
 
-#define for_each_pipe_crtc_modeset_enable(display, crtc, crtc_state, i) \
-	for_each_crtc_in_masks_reverse(display, crtc, \
-				       _intel_modeset_primary_pipes(crtc_state), \
-				       _intel_modeset_secondary_pipes(crtc_state), \
-				       i)
+#define for_each_pipe_crtc_modeset_enable(display, crtc, crtc_state) \
+	__for_each_crtc_in_masks_reverse(display, crtc,			\
+					 _intel_modeset_primary_pipes(crtc_state), \
+					 _intel_modeset_secondary_pipes(crtc_state), \
+					 __UNIQUE_ID(i))
 
-int intel_atomic_check(struct drm_device *dev, struct drm_atomic_state *state);
+int intel_atomic_check(struct drm_device *dev, struct drm_atomic_commit *state);
+u8 intel_calc_enabled_pipes(struct intel_atomic_state *state,
+			    u8 enabled_pipes);
 u8 intel_calc_active_pipes(struct intel_atomic_state *state,
 			   u8 active_pipes);
 void intel_link_compute_m_n(u16 bpp, int nlanes,
 			    int pixel_clock, int link_clock,
 			    int bw_overhead,
 			    struct intel_link_m_n *m_n);
-u32 intel_plane_fb_max_stride(struct drm_device *drm,
-			      u32 pixel_format, u64 modifier);
+u32 intel_plane_fb_max_stride(struct intel_display *display,
+			      const struct drm_format_info *info,
+			      u64 modifier);
+u32 intel_dumb_fb_max_stride(struct drm_device *drm,
+			     u32 pixel_format, u64 modifier);
 enum drm_mode_status
 intel_mode_valid_max_plane_size(struct intel_display *display,
 				const struct drm_display_mode *mode,
@@ -435,12 +396,8 @@ void intel_enable_transcoder(const struct intel_crtc_state *new_crtc_state);
 void intel_disable_transcoder(const struct intel_crtc_state *old_crtc_state);
 void i830_enable_pipe(struct intel_display *display, enum pipe pipe);
 void i830_disable_pipe(struct intel_display *display, enum pipe pipe);
-int vlv_get_hpll_vco(struct drm_device *drm);
-int vlv_get_cck_clock(struct drm_device *drm,
-		      const char *name, u32 reg, int ref_freq);
-int vlv_get_cck_clock_hpll(struct drm_device *drm,
-			   const char *name, u32 reg);
 bool intel_has_pending_fb_unpin(struct intel_display *display);
+void intel_display_flush_cleanup_work(struct intel_display *display);
 void intel_encoder_destroy(struct drm_encoder *encoder);
 struct drm_display_mode *
 intel_encoder_current_mode(struct intel_encoder *encoder);
@@ -450,6 +407,7 @@ bool intel_phy_is_combo(struct intel_display *display, enum phy phy);
 bool intel_phy_is_tc(struct intel_display *display, enum phy phy);
 bool intel_phy_is_snps(struct intel_display *display, enum phy phy);
 enum tc_port intel_port_to_tc(struct intel_display *display, enum port port);
+enum tc_port intel_tc_phy_port_to_tc(struct intel_display *display, enum port port);
 
 enum phy intel_encoder_to_phy(struct intel_encoder *encoder);
 bool intel_encoder_is_combo(struct intel_encoder *encoder);
@@ -464,12 +422,16 @@ bool intel_fuzzy_clock_check(int clock1, int clock2);
 void intel_zero_m_n(struct intel_link_m_n *m_n);
 void intel_set_m_n(struct intel_display *display,
 		   const struct intel_link_m_n *m_n,
-		   i915_reg_t data_m_reg, i915_reg_t data_n_reg,
-		   i915_reg_t link_m_reg, i915_reg_t link_n_reg);
+		   intel_reg_t data_m_reg, intel_reg_t data_n_reg,
+		   intel_reg_t link_m_reg, intel_reg_t link_n_reg);
+void intel_set_transcoder_timings(const struct intel_crtc_state *crtc_state,
+				  enum transcoder transcoder);
+void intel_set_transcoder_timings_lrr(const struct intel_crtc_state *crtc_state,
+				      enum transcoder transcoder);
 void intel_get_m_n(struct intel_display *display,
 		   struct intel_link_m_n *m_n,
-		   i915_reg_t data_m_reg, i915_reg_t data_n_reg,
-		   i915_reg_t link_m_reg, i915_reg_t link_n_reg);
+		   intel_reg_t data_m_reg, intel_reg_t data_n_reg,
+		   intel_reg_t link_m_reg, intel_reg_t link_n_reg);
 bool intel_cpu_transcoder_has_m2_n2(struct intel_display *display,
 				    enum transcoder transcoder);
 void intel_cpu_transcoder_set_m1_n1(struct intel_crtc *crtc,
@@ -486,6 +448,7 @@ void intel_cpu_transcoder_get_m2_n2(struct intel_crtc *crtc,
 				    struct intel_link_m_n *m_n);
 int intel_dotclock_calculate(int link_freq, const struct intel_link_m_n *m_n);
 int intel_crtc_dotclock(const struct intel_crtc_state *pipe_config);
+int intel_max_uncompressed_dotclock(struct intel_display *display);
 enum intel_display_power_domain intel_port_to_power_domain(struct intel_digital_port *dig_port);
 enum intel_display_power_domain
 intel_aux_power_domain(struct intel_digital_port *dig_port);
@@ -515,6 +478,9 @@ int intel_modeset_pipes_in_mask_early(struct intel_atomic_state *state,
 				      const char *reason, u8 pipe_mask);
 int intel_modeset_all_pipes_late(struct intel_atomic_state *state,
 				 const char *reason);
+int intel_modeset_commit_pipes_for_atomic_state(struct intel_atomic_state *state,
+						u8 pipe_mask,
+						struct drm_modeset_acquire_ctx *ctx);
 int intel_modeset_commit_pipes(struct intel_display *display,
 			       u8 pipe_mask,
 			       struct drm_modeset_acquire_ctx *ctx);
@@ -528,10 +494,9 @@ void intel_init_display_hooks(struct intel_display *display);
 void intel_setup_outputs(struct intel_display *display);
 int intel_initial_commit(struct intel_display *display);
 void intel_panel_sanitize_ssc(struct intel_display *display);
-void intel_update_czclk(struct intel_display *display);
 enum drm_mode_status intel_mode_valid(struct drm_device *dev,
 				      const struct drm_display_mode *mode);
-int intel_atomic_commit(struct drm_device *dev, struct drm_atomic_state *_state,
+int intel_atomic_commit(struct drm_device *dev, struct drm_atomic_commit *_state,
 			bool nonblock);
 
 /* modesetting asserts */

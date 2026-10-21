@@ -4,6 +4,9 @@ test_begin() {
 	# Count tests to allow the test harness to double-check if all were
 	# included correctly.
 	ctr=0
+	# Set test directory to the directory of the script
+	scriptfile=$(realpath "$0")
+	testdir=$(dirname "$scriptfile")
 	[ -z "$RTLA" ] && RTLA="./rtla"
 	[ -n "$TEST_COUNT" ] && echo "1..$TEST_COUNT"
 }
@@ -51,6 +54,11 @@ check() {
 	then
 		# Reset osnoise options before running test.
 		[ "$NO_RESET_OSNOISE" == 1 ] || reset_osnoise
+
+		# Create a temporary directory to contain rtla output
+		tmpdir=$(mktemp -d)
+		pushd $tmpdir >/dev/null
+
 		# Run rtla; in case of failure, include its output as comment
 		# in the test results.
 		result=$(eval stdbuf -oL $TIMEOUT "$RTLA" $2 2>&1); exitcode=$?
@@ -82,35 +90,60 @@ check() {
 			echo "$result" | col -b | while read line; do echo "# $line"; done
 			printf "#\n# exit code %s\n" $exitcode
 		fi
+
+		# Remove temporary directory
+		popd >/dev/null
+		rm -r $tmpdir
 	fi
 }
 
 check_with_osnoise_options() {
-	# Do the same as "check", but with pre-set osnoise options.
-	# Note: rtla should reset the osnoise options, this is used to test
-	# if it indeed does so.
-	# Save original arguments
-	arg1=$1
-	arg2=$2
-	arg3=$3
+	# Do the same as "check", but with pre-set tracefs options.
+	# Resets osnoise first, then writes the given tracefs option=value
+	# pairs before running the check with NO_RESET_OSNOISE=1.
+	# Arguments: test_name command exit_code expected_output [path=value ...]
+	# Each path is relative to /sys/kernel/tracing/
+	local arg1=$1
+	local arg2=$2
+	local arg3=$3
+	local arg4=$4
+	local opt option value
 
-	# Apply osnoise options (if not dry run)
+	# Apply tracefs options (if not dry run)
 	if [ -n "$TEST_COUNT" ]
 	then
 		[ "$NO_RESET_OSNOISE" == 1 ] || reset_osnoise
-		shift
-		shift
-		while shift
+		shift 4
+		for opt in "$@"
 		do
-			[ "$1" == "" ] && continue
-			option=$(echo $1 | cut -d '=' -f 1)
-			value=$(echo $1 | cut -d '=' -f 2)
-			echo "option: $option, value: $value"
-			echo "$value" > "/sys/kernel/tracing/osnoise/$option" || return 1
+			[ -z "$opt" ] && continue
+			option="${opt%%=*}"
+			value="${opt#*=}"
+			# Try to apply the option, ignore errors: when pre-setting fails
+			# (e.g. kernel does not know the option), the test itself will likely
+			# also fail.
+			# Throwing an error here would cause the test to be incorrectly
+			# skipped.
+			echo "$value" > "/sys/kernel/tracing/$option"
 		done
 	fi
 
-	NO_RESET_OSNOISE=1 check "$arg1" "$arg2" "$arg3"
+	NO_RESET_OSNOISE=1 check "$arg1" "$arg2" "$arg3" "$arg4"
+}
+
+check_top_hist() {
+	# Test one command with both "top" and "hist" tools, replacing "TOOL" in
+	# command with either "top" or "hist" respectively, and prefixing the test
+	# names with "top " and "hist ".
+	check "top $1" "$(echo "$2" | sed 's/TOOL/top/g')" "${@:3}"
+	check "hist $1" "$(echo "$2" | sed 's/TOOL/hist/g')" "${@:3}"
+}
+
+check_top_q_hist() {
+	# Same as above, but pass "-q" to top so that strings printed in main
+	# loop are on their own line for top too, not only for hist.
+	check "top $1" "$(echo "$2" | sed 's/TOOL/top -q/g')" "${@:3}"
+	check "hist $1" "$(echo "$2" | sed 's/TOOL/hist/g')" "${@:3}"
 }
 
 set_timeout() {

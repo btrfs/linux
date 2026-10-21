@@ -863,7 +863,7 @@ static void sync_power_state_change(struct hda_codec *codec, hda_nid_t nid)
 {
 	if (nid) {
 		msleep(10);
-		snd_hda_codec_read(codec, nid, 0, AC_VERB_GET_POWER_STATE, 0);
+		snd_hda_codec_write_sync(codec, nid, 0, AC_VERB_GET_POWER_STATE, 0);
 	}
 }
 
@@ -1517,7 +1517,7 @@ static int count_multiio_pins(struct hda_codec *codec, hda_nid_t reference_pin)
 /*
  * multi-io helper
  *
- * When hardwired is set, try to fill ony hardwired pins, and returns
+ * When hardwired is set, try to fill only hardwired pins, and returns
  * zero if any pins are filled, non-zero if nothing found.
  * When hardwired is off, try to fill possible input pins, and returns
  * the badness value.
@@ -1984,15 +1984,15 @@ static int parse_output_paths(struct hda_codec *codec)
 {
 	struct hda_gen_spec *spec = codec->spec;
 	struct auto_pin_cfg *cfg = &spec->autocfg;
-	struct auto_pin_cfg *best_cfg __free(kfree) = NULL;
 	unsigned int val;
 	int best_badness = INT_MAX;
 	int badness;
 	bool fill_hardwired = true, fill_mio_first = true;
 	bool best_wired = true, best_mio = true;
 	bool hp_spk_swapped = false;
+	struct auto_pin_cfg *best_cfg __free(kfree) =
+		kmalloc_obj(*best_cfg);
 
-	best_cfg = kmalloc(sizeof(*best_cfg), GFP_KERNEL);
 	if (!best_cfg)
 		return -ENOMEM;
 	*best_cfg = *cfg;
@@ -2695,30 +2695,13 @@ static const struct snd_kcontrol_new out_jack_mode_enum = {
 	.put = out_jack_mode_put,
 };
 
-static bool find_kctl_name(struct hda_codec *codec, const char *name, int idx)
-{
-	struct hda_gen_spec *spec = codec->spec;
-	const struct snd_kcontrol_new *kctl;
-	int i;
-
-	snd_array_for_each(&spec->kctls, i, kctl) {
-		if (!strcmp(kctl->name, name) && kctl->index == idx)
-			return true;
-	}
-	return false;
-}
-
 static void get_jack_mode_name(struct hda_codec *codec, hda_nid_t pin,
 			       char *name, size_t name_len)
 {
 	struct hda_gen_spec *spec = codec->spec;
-	int idx = 0;
 
-	snd_hda_get_pin_label(codec, pin, &spec->autocfg, name, name_len, &idx);
-	strlcat(name, " Jack Mode", name_len);
-
-	for (; find_kctl_name(codec, name, idx); idx++)
-		;
+	snd_hda_get_pin_label(codec, pin, &spec->autocfg, name, name_len);
+	hda_append_suffix(name, " Jack Mode", name_len);
 }
 
 static int get_out_jack_num_items(struct hda_codec *codec, hda_nid_t pin)
@@ -4889,7 +4872,7 @@ static int check_auto_mic_availability(struct hda_codec *codec)
  * snd_hda_gen_path_power_filter - power_filter hook to make inactive widgets
  * into power down
  * @codec: the HDA codec
- * @nid: NID to evalute
+ * @nid: NID to evaluate
  * @power_state: target power state
  */
 unsigned int snd_hda_gen_path_power_filter(struct hda_codec *codec,
@@ -5695,7 +5678,7 @@ static void fill_pcm_stream_name(char *str, size_t len, const char *sfx,
 			break;
 		}
 	}
-	strlcat(str, sfx, len);
+	hda_append_suffix(str, sfx, len);
 }
 
 /* copy PCM stream info from @default_str, and override non-NULL entries
@@ -6095,7 +6078,7 @@ static int snd_hda_gen_probe(struct hda_codec *codec,
 	struct hda_gen_spec *spec;
 	int err;
 
-	spec = kzalloc(sizeof(*spec), GFP_KERNEL);
+	spec = kzalloc_obj(*spec);
 	if (!spec)
 		return -ENOMEM;
 	snd_hda_gen_spec_init(spec);

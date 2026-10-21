@@ -32,14 +32,14 @@ static inline void local_add(long i, local_t *l)
 {
 	asm volatile(_ASM_ADD "%1,%0"
 		     : "+m" (l->a.counter)
-		     : "ir" (i));
+		     : "er" (i));
 }
 
 static inline void local_sub(long i, local_t *l)
 {
 	asm volatile(_ASM_SUB "%1,%0"
 		     : "+m" (l->a.counter)
-		     : "ir" (i));
+		     : "er" (i));
 }
 
 /**
@@ -106,7 +106,7 @@ static inline bool local_add_negative(long i, local_t *l)
 static inline long local_add_return(long i, local_t *l)
 {
 	long __i = i;
-	asm volatile(_ASM_XADD "%0, %1;"
+	asm volatile(_ASM_XADD "%0, %1"
 		     : "+r" (i), "+m" (l->a.counter)
 		     : : "memory");
 	return i + __i;

@@ -151,9 +151,14 @@ static struct request_sock *cookie_tcp_check(struct net *net, struct sock *sk,
 	tcp_parse_options(net, skb, &tcp_opt, 0, NULL);
 
 	if (tcp_opt.saw_tstamp && tcp_opt.rcv_tsecr) {
-		tsoff = secure_tcpv6_ts_off(net,
-					    ipv6_hdr(skb)->daddr.s6_addr32,
-					    ipv6_hdr(skb)->saddr.s6_addr32);
+		union tcp_seq_and_ts_off st;
+
+		st = secure_tcpv6_seq_and_ts_off(net,
+						 ipv6_hdr(skb)->daddr.s6_addr32,
+						 ipv6_hdr(skb)->saddr.s6_addr32,
+						 tcp_hdr(skb)->dest,
+						 tcp_hdr(skb)->source);
+		tsoff = st.ts_off;
 		tcp_opt.rcv_tsecr -= tsoff;
 	}
 
@@ -239,6 +244,8 @@ struct sock *cookie_v6_check(struct sock *sk, struct sk_buff *skb)
 		fl6.fl6_sport = inet_sk(sk)->inet_sport;
 		fl6.flowi6_uid = sk_uid(sk);
 		security_req_classify_flow(req, flowi6_to_flowi_common(&fl6));
+
+		ip6_ecmp_set_mp_hash(net, &fl6, tcp_rsk(req)->txhash);
 
 		dst = ip6_dst_lookup_flow(net, sk, &fl6, final_p);
 		if (IS_ERR(dst)) {

@@ -20,6 +20,9 @@
 #include <asm/uv.h>
 #include <asm/abs_lowcore.h>
 #include <asm/physmem_info.h>
+#include <asm/stacktrace.h>
+#include <asm/asm-offsets.h>
+#include <asm/arch-stackprotector.h>
 #include "decompressor.h"
 #include "boot.h"
 #include "uv.h"
@@ -86,10 +89,10 @@ static void detect_diag9c(void)
 
 	cpu = stap();
 	asm_inline volatile(
-		"	diag	%[cpu],%%r0,0x9c\n"
-		"0:	lhi	%[rc],0\n"
+		"0:	diag	%[cpu],%%r0,0x9c\n"
+		"	lhi	%[rc],0\n"
 		"1:\n"
-		EX_TABLE(0b, 1b)
+		EX_TABLE_INSN(0b, 1b)
 		: [rc] "+d" (rc)
 		: [cpu] "d" (cpu)
 		: "cc", "memory");
@@ -147,10 +150,10 @@ static int cmma_test_essa(void)
 
 	/* Test ESSA_GET_STATE */
 	asm_inline volatile(
-		"	.insn	rrf,0xb9ab0000,%[tmp],%[tmp],%[cmd],0\n"
-		"0:	lhi	%[rc],0\n"
+		"0:	.insn	rrf,0xb9ab0000,%[tmp],%[tmp],%[cmd],0\n"
+		"	lhi	%[rc],0\n"
 		"1:\n"
-		EX_TABLE(0b, 1b)
+		EX_TABLE_INSN(0b, 1b)
 		: [rc] "+d" (rc), [tmp] "+d" (tmp)
 		: [cmd] "i" (ESSA_GET_STATE)
 		: "cc", "memory");
@@ -333,6 +336,7 @@ static unsigned long setup_kernel_memory_layout(unsigned long kernel_size)
 	BUILD_BUG_ON(!IS_ALIGNED(TEXT_OFFSET, THREAD_SIZE));
 	BUILD_BUG_ON(!IS_ALIGNED(__NO_KASLR_START_KERNEL, THREAD_SIZE));
 	BUILD_BUG_ON(__NO_KASLR_END_KERNEL > _REGION1_SIZE);
+	BUILD_BUG_ON(CONFIG_ILLEGAL_POINTER_VALUE < _REGION1_SIZE);
 	vsize = get_vmem_size(ident_map_size, vmemmap_size, vmalloc_size, _REGION3_SIZE);
 	boot_debug("vmem size estimated: 0x%016lx\n", vsize);
 	if (IS_ENABLED(CONFIG_KASAN) || __NO_KASLR_END_KERNEL > _REGION2_SIZE ||
@@ -436,7 +440,8 @@ static unsigned long setup_kernel_memory_layout(unsigned long kernel_size)
 	max_mappable = max(ident_map_size, MAX_DCSS_ADDR);
 	max_mappable = min(max_mappable, vmemmap_start);
 #ifdef CONFIG_RANDOMIZE_IDENTITY_BASE
-	__identity_base = round_down(vmemmap_start - max_mappable, rte_size);
+	if (kaslr_enabled())
+		__identity_base = round_down(vmemmap_start - max_mappable, rte_size);
 #endif
 	boot_debug("identity map:        0x%016lx-0x%016lx\n", __identity_base,
 		   __identity_base + ident_map_size);
@@ -477,6 +482,10 @@ static void kaslr_adjust_vmlinux_info(long offset)
 	vmlinux.invalid_pg_dir_off += offset;
 	vmlinux.alt_instructions += offset;
 	vmlinux.alt_instructions_end += offset;
+#ifdef CONFIG_STACKPROTECTOR
+	vmlinux.stack_prot_start += offset;
+	vmlinux.stack_prot_end += offset;
+#endif
 #ifdef CONFIG_KASAN
 	vmlinux.kasan_early_shadow_page_off += offset;
 	vmlinux.kasan_early_shadow_pte_off += offset;
@@ -622,6 +631,7 @@ void startup_kernel(void)
 	__apply_alternatives((struct alt_instr *)_vmlinux_info.alt_instructions,
 			     (struct alt_instr *)_vmlinux_info.alt_instructions_end,
 			     ALT_CTX_EARLY);
+	stack_protector_apply_early(text_lma);
 
 	/*
 	 * Save KASLR offset for early dumps, before vmcore_info is set.

@@ -155,12 +155,16 @@ static void show_last_breaking_event(struct pt_regs *regs)
 void show_registers(struct pt_regs *regs)
 {
 	struct psw_bits *psw = &psw_bits(regs->psw);
+	unsigned long pswaddr;
 	char *mode;
 
+	pswaddr = regs->psw.addr;
+	if (test_pt_regs_flag(regs, PIF_PSW_ADDR_ADJUSTED))
+		pswaddr = __forward_psw(regs->psw, regs->int_code >> 16);
 	mode = user_mode(regs) ? "User" : "Krnl";
-	printk("%s PSW : %px %px", mode, (void *)regs->psw.mask, (void *)regs->psw.addr);
+	printk("%s PSW : %px %px", mode, (void *)regs->psw.mask, (void *)pswaddr);
 	if (!user_mode(regs))
-		pr_cont(" (%pSR)", (void *)regs->psw.addr);
+		pr_cont(" (%pSR)", (void *)pswaddr);
 	pr_cont("\n");
 	printk("           R:%x T:%x IO:%x EX:%x Key:%x M:%x W:%x "
 	       "P:%x AS:%x CC:%x PM:%x", psw->per, psw->dat, psw->io, psw->ext,
@@ -199,8 +203,11 @@ void __noreturn die(struct pt_regs *regs, const char *str)
 	console_verbose();
 	spin_lock_irq(&die_lock);
 	bust_spinlocks(1);
-	printk("%s: %04x ilc:%d [#%d]", str, regs->int_code & 0xffff,
-	       regs->int_code >> 17, ++die_counter);
+	if (test_pt_regs_flag(regs, PIF_WARN_TRAP_SKIPPED))
+		printk("%s: [#%d]", str, ++die_counter);
+	else
+		printk("%s: %04x ilc:%d [#%d]", str, regs->int_code & 0xffff,
+		       regs->int_code >> 17, ++die_counter);
 	pr_cont("SMP ");
 	if (debug_pagealloc_enabled())
 		pr_cont("DEBUG_PAGEALLOC");

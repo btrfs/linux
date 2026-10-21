@@ -3,7 +3,7 @@
  * Copyright (c) 2018-2024 Oracle.  All Rights Reserved.
  * Author: Darrick J. Wong <djwong@kernel.org>
  */
-#include "xfs.h"
+#include "xfs_platform.h"
 #include "xfs_fs.h"
 #include "xfs_shared.h"
 #include "xfs_format.h"
@@ -95,7 +95,7 @@ xfs_metadir_lookup(
 		.hashval	= xfs_dir2_hashname(mp, xname),
 		.whichfork	= XFS_DATA_FORK,
 		.op_flags	= XFS_DA_OP_OKNOENT,
-		.owner		= dp->i_ino,
+		.owner		= I_INO(dp),
 	};
 	int			error;
 
@@ -163,7 +163,7 @@ xfs_metadir_teardown(
 	trace_xfs_metadir_teardown(upd, error);
 
 	if (upd->ppargs) {
-		xfs_parent_finish(upd->dp->i_mount, upd->ppargs);
+		xfs_parent_finish(upd->ppargs);
 		upd->ppargs = NULL;
 	}
 
@@ -182,7 +182,7 @@ xfs_metadir_teardown(
  * Begin the process of creating a metadata file by allocating transactions
  * and taking whatever resources we're going to need.
  */
-int
+static int
 xfs_metadir_start_create(
 	struct xfs_metadir_update	*upd)
 {
@@ -236,7 +236,7 @@ out_teardown:
  * a negative error code.  If an inode is passed back, the caller must finish
  * setting up the inode before releasing it.
  */
-int
+static int
 xfs_metadir_create(
 	struct xfs_metadir_update	*upd,
 	umode_t				mode)
@@ -317,7 +317,7 @@ xfs_metadir_create(
  * Begin the process of linking a metadata file by allocating transactions
  * and locking whatever resources we're going to need.
  */
-int
+static int
 xfs_metadir_start_link(
 	struct xfs_metadir_update	*upd)
 {
@@ -364,7 +364,7 @@ out_teardown:
  * The path (up to the final component) must already exist, but the final
  * component must not already exist.
  */
-int
+static int
 xfs_metadir_link(
 	struct xfs_metadir_update	*upd)
 {
@@ -409,7 +409,7 @@ xfs_metadir_link(
 #endif /* ! __KERNEL__ */
 
 /* Commit a metadir update and unlock/drop all resources. */
-int
+static int
 xfs_metadir_commit(
 	struct xfs_metadir_update	*upd)
 {
@@ -425,7 +425,7 @@ xfs_metadir_commit(
 }
 
 /* Cancel a metadir update and unlock/drop all resources. */
-void
+static void
 xfs_metadir_cancel(
 	struct xfs_metadir_update	*upd,
 	int				error)
@@ -436,6 +436,52 @@ xfs_metadir_cancel(
 	upd->tp = NULL;
 
 	xfs_metadir_teardown(upd, error);
+}
+
+int
+xfs_metadir_create_file(
+	struct xfs_metadir_update	*upd,
+	umode_t				mode,
+	xfs_metadir_createfn		create,
+	void				*priv,
+	struct xfs_inode		**ipp)
+{
+	int				error;
+
+	if (xfs_is_shutdown(upd->dp->i_mount))
+		return -EIO;
+
+	error = xfs_metadir_start_create(upd);
+	if (error)
+		return error;
+
+	error = xfs_metadir_create(upd, mode);
+	if (error)
+		goto out_cancel;
+
+	if (create) {
+		error = create(upd, priv);
+		if (error)
+			goto out_cancel;
+	}
+
+	error = xfs_metadir_commit(upd);
+	if (error)
+		goto out_irele;
+
+	xfs_finish_inode_setup(upd->ip);
+	*ipp = upd->ip;
+	return 0;
+
+out_cancel:
+	xfs_metadir_cancel(upd, error);
+out_irele:
+	/* Have to finish setting up the inode to ensure it's deleted. */
+	if (upd->ip) {
+		xfs_finish_inode_setup(upd->ip);
+		xfs_irele(upd->ip);
+	}
+	return error;
 }
 
 /* Create a metadata for the last component of the path. */
@@ -450,36 +496,30 @@ xfs_metadir_mkdir(
 		.path			= path,
 		.metafile_type		= XFS_METAFILE_DIR,
 	};
+
+	return xfs_metadir_create_file(&upd, S_IFDIR, NULL, NULL, ipp);
+}
+
+#ifndef __KERNEL__
+/* Link a metadata file into a metadata directory. */
+int
+xfs_metadir_link_file(
+	struct xfs_metadir_update	*upd)
+{
 	int				error;
 
-	if (xfs_is_shutdown(dp->i_mount))
-		return -EIO;
-
-	/* Allocate a transaction to create the last directory. */
-	error = xfs_metadir_start_create(&upd);
+	error = xfs_metadir_start_link(upd);
 	if (error)
 		return error;
 
-	/* Create the subdirectory and take our reference. */
-	error = xfs_metadir_create(&upd, S_IFDIR);
-	if (error)
-		goto out_cancel;
-
-	error = xfs_metadir_commit(&upd);
-	if (error)
-		goto out_irele;
-
-	xfs_finish_inode_setup(upd.ip);
-	*ipp = upd.ip;
-	return 0;
-
-out_cancel:
-	xfs_metadir_cancel(&upd, error);
-out_irele:
-	/* Have to finish setting up the inode to ensure it's deleted. */
-	if (upd.ip) {
-		xfs_finish_inode_setup(upd.ip);
-		xfs_irele(upd.ip);
+	error = xfs_metadir_link(upd);
+	if (error) {
+		xfs_metadir_cancel(upd, error);
+		return error;
 	}
-	return error;
+
+	xfs_trans_log_inode(upd->tp, upd->ip, XFS_ILOG_CORE);
+
+	return xfs_metadir_commit(upd);
 }
+#endif /* ! __KERNEL__ */

@@ -163,6 +163,7 @@ static int snd_acp6x_probe(struct pci_dev *pci,
 	switch (pci->revision) {
 	case 0x60:
 	case 0x6f:
+	case 0x62: /* RPL */
 		break;
 	default:
 		dev_dbg(&pci->dev, "acp6x pci device not found\n");
@@ -208,6 +209,17 @@ static int snd_acp6x_probe(struct pci_dev *pci,
 	case ACP_CONFIG_15:
 		dev_info(&pci->dev, "Audio Mode %d\n", val);
 		break;
+	case ACP_CONFIG_10:
+	case ACP_CONFIG_11:
+	case ACP_CONFIG_12:
+	case ACP_CONFIG_13:
+	case ACP_CONFIG_14:
+		/* PIN 10 to 14 is reserve for RPL */
+		if (pci->revision == 0x62) {
+			dev_info(&pci->dev, "RPL Audio Mode %d\n", val);
+			break;
+		}
+		fallthrough;
 	default:
 		adata->res = devm_kzalloc(&pci->dev,
 					  sizeof(struct resource),
@@ -289,7 +301,7 @@ static int snd_acp6x_suspend(struct device *dev)
 	return ret;
 }
 
-static int snd_acp6x_resume(struct device *dev)
+static int snd_acp6x_runtime_resume(struct device *dev)
 {
 	struct acp6x_dev_data *adata;
 	int ret;
@@ -301,8 +313,42 @@ static int snd_acp6x_resume(struct device *dev)
 	return ret;
 }
 
+static void acp6x_disable_msi_on_resume(struct pci_dev *pdev)
+{
+	u16 control;
+
+	if (!pdev->msi_cap)
+		return;
+
+	pci_read_config_word(pdev, pdev->msi_cap + PCI_MSI_FLAGS, &control);
+	if (control & PCI_MSI_FLAGS_ENABLE) {
+		dev_warn(&pdev->dev,
+			 "ACP: MSI unexpectedly enabled after resume (flags=0x%04x), disabling\n",
+			 control);
+		control &= ~PCI_MSI_FLAGS_ENABLE;
+		pci_write_config_word(pdev, pdev->msi_cap + PCI_MSI_FLAGS, control);
+	}
+}
+
+static int snd_acp6x_resume(struct device *dev)
+{
+	struct pci_dev *pdev = to_pci_dev(dev);
+
+	/*
+	 * BIOS/firmware may re-enable MSI in PCI config space during
+	 * system resume even though this driver only uses legacy INTx
+	 * interrupts. If MSI is left enabled with stale address/data
+	 * registers, the device will write interrupts to a bogus address
+	 * causing IOMMU IO_PAGE_FAULT and interrupt delivery failure.
+	 * Explicitly clear the MSI Enable bit before reinitializing
+	 * the ACP hardware.
+	 */
+	acp6x_disable_msi_on_resume(pdev);
+	return snd_acp6x_runtime_resume(dev);
+}
+
 static const struct dev_pm_ops acp6x_pm = {
-	RUNTIME_PM_OPS(snd_acp6x_suspend, snd_acp6x_resume, NULL)
+	RUNTIME_PM_OPS(snd_acp6x_suspend, snd_acp6x_runtime_resume, NULL)
 	SYSTEM_SLEEP_PM_OPS(snd_acp6x_suspend, snd_acp6x_resume)
 };
 

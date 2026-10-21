@@ -12,8 +12,7 @@
  *    Copyright (C) 1991, 1992, 1995  Linus Torvalds
  */
 
-#define KMSG_COMPONENT "time"
-#define pr_fmt(fmt) KMSG_COMPONENT ": " fmt
+#define pr_fmt(fmt) "time: " fmt
 
 #include <linux/kernel_stat.h>
 #include <linux/errno.h>
@@ -49,9 +48,9 @@
 #include <asm/vdso.h>
 #include <asm/irq.h>
 #include <asm/irq_regs.h>
-#include <asm/vtimer.h>
 #include <asm/stp.h>
 #include <asm/cio.h>
+#include <asm/vtime.h>
 #include "entry.h"
 
 union tod_clock __bootdata_preserved(tod_clock_base);
@@ -66,6 +65,7 @@ ATOMIC_NOTIFIER_HEAD(s390_epoch_delta_notifier);
 EXPORT_SYMBOL(s390_epoch_delta_notifier);
 
 unsigned char ptff_function_mask[16];
+EXPORT_SYMBOL(ptff_function_mask);
 
 static unsigned long lpar_offset;
 static unsigned long initial_leap_seconds;

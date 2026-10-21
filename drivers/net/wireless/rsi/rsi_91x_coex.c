@@ -50,8 +50,9 @@ static void rsi_coex_sched_tx_pkts(struct rsi_coex_ctrl_block *coex_cb)
 	} while (coex_q != RSI_COEX_Q_INVALID);
 }
 
-static void rsi_coex_scheduler_thread(struct rsi_common *common)
+static int rsi_coex_scheduler_thread(void *data)
 {
+	struct rsi_common *common = data;
 	struct rsi_coex_ctrl_block *coex_cb = common->coex_cb;
 	u32 timeout = EVENT_WAIT_FOREVER;
 
@@ -140,7 +141,7 @@ int rsi_coex_attach(struct rsi_common *common)
 	struct rsi_coex_ctrl_block *coex_cb;
 	int cnt;
 
-	coex_cb = kzalloc(sizeof(*coex_cb), GFP_KERNEL);
+	coex_cb = kzalloc_obj(*coex_cb);
 	if (!coex_cb)
 		return -ENOMEM;
 

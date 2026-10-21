@@ -3,7 +3,7 @@
  * Copyright (c) 2000-2006 Silicon Graphics, Inc.
  * All Rights Reserved.
  */
-#include "xfs.h"
+#include "xfs_platform.h"
 #include "xfs_fs.h"
 #include "xfs_shared.h"
 #include "xfs_format.h"
@@ -221,7 +221,7 @@ xfs_bmap_forkoff_reset(
 	if (whichfork == XFS_ATTR_FORK &&
 	    ip->i_df.if_format != XFS_DINODE_FMT_DEV &&
 	    ip->i_df.if_format != XFS_DINODE_FMT_BTREE) {
-		uint	dfl_forkoff = xfs_default_attroffset(ip) >> 3;
+		uint	dfl_forkoff = xfs_inode_default_forkoff(ip);
 
 		if (dfl_forkoff > ip->i_forkoff)
 			ip->i_forkoff = dfl_forkoff;
@@ -602,7 +602,7 @@ xfs_bmap_btree_to_extents(
 	if ((error = xfs_btree_check_block(cur, cblock, 0, cbp)))
 		return error;
 
-	xfs_rmap_ino_bmbt_owner(&oinfo, ip->i_ino, whichfork);
+	xfs_rmap_inode_bmbt_owner(&oinfo, ip, whichfork);
 	error = xfs_free_extent_later(cur->bc_tp, cbno, 1, &oinfo,
 			XFS_AG_RESV_NONE, 0);
 	if (error)
@@ -676,13 +676,12 @@ xfs_bmap_extents_to_btree(
 	memset(&args, 0, sizeof(args));
 	args.tp = tp;
 	args.mp = mp;
-	xfs_rmap_ino_bmbt_owner(&args.oinfo, ip->i_ino, whichfork);
+	xfs_rmap_inode_bmbt_owner(&args.oinfo, ip, whichfork);
 
 	args.minlen = args.maxlen = args.prod = 1;
 	args.wasdel = wasdel;
 	*logflagsp = 0;
-	error = xfs_alloc_vextent_start_ag(&args,
-				XFS_INO_TO_FSB(mp, ip->i_ino));
+	error = xfs_alloc_vextent_start_ag(&args, XFS_INODE_TO_FSB(ip));
 	if (error)
 		goto out_root_realloc;
 
@@ -820,7 +819,7 @@ xfs_bmap_local_to_extents(
 	args.mp = ip->i_mount;
 	args.total = total;
 	args.minlen = args.maxlen = args.prod = 1;
-	xfs_rmap_ino_owner(&args.oinfo, ip->i_ino, whichfork, 0);
+	xfs_rmap_inode_owner(&args.oinfo, ip, whichfork, 0);
 
 	/*
 	 * Allocate a block.  We know we need only one, since the
@@ -828,8 +827,7 @@ xfs_bmap_local_to_extents(
 	 */
 	args.total = total;
 	args.minlen = args.maxlen = args.prod = 1;
-	error = xfs_alloc_vextent_start_ag(&args,
-			XFS_INO_TO_FSB(args.mp, ip->i_ino));
+	error = xfs_alloc_vextent_start_ag(&args, XFS_INODE_TO_FSB(ip));
 	if (error)
 		goto done;
 
@@ -976,7 +974,7 @@ xfs_bmap_add_attrfork_local(
 		dargs.total = dargs.geo->fsbcount;
 		dargs.whichfork = XFS_DATA_FORK;
 		dargs.trans = tp;
-		dargs.owner = ip->i_ino;
+		dargs.owner = I_INO(ip);
 		return xfs_dir2_sf_to_block(&dargs);
 	}
 
@@ -999,7 +997,7 @@ xfs_bmap_set_attrforkoff(
 	struct xfs_inode	*ip,
 	int			size)
 {
-	int			default_size = xfs_default_attroffset(ip) >> 3;
+	int			default_size = xfs_inode_default_forkoff(ip);
 
 	switch (ip->i_df.if_format) {
 	case XFS_DINODE_FMT_DEV:
@@ -1028,8 +1026,7 @@ int						/* error code */
 xfs_bmap_add_attrfork(
 	struct xfs_trans	*tp,
 	struct xfs_inode	*ip,		/* incore inode pointer */
-	int			size,		/* space new attribute needs */
-	int			rsvd)		/* xact may use reserved blks */
+	int			size)		/* space new attribute needs */
 {
 	struct xfs_mount	*mp = tp->t_mountp;
 	int			logflags;	/* logging flags */
@@ -1110,7 +1107,7 @@ xfs_bmap_complain_bad_rec(
 
 	xfs_warn(mp,
  "Bmap BTree record corruption in inode 0x%llx %s fork detected at %pS!",
-				ip->i_ino, forkname, fa);
+				I_INO(ip), forkname, fa);
 	xfs_warn(mp,
 		"Offset 0x%llx, start block 0x%llx, block count 0x%llx state 0x%x",
 		irec->br_startoff, irec->br_startblock, irec->br_blockcount,
@@ -1143,7 +1140,7 @@ xfs_iread_bmbt_block(
 	num_recs = xfs_btree_get_numrecs(block);
 	if (unlikely(ir->loaded + num_recs > ifp->if_nextents)) {
 		xfs_warn(ip->i_mount, "corrupt dinode %llu, (btree extents).",
-				(unsigned long long)ip->i_ino);
+				(unsigned long long)I_INO(ip));
 		xfs_inode_verifier_error(ip, -EFSCORRUPTED, __func__, block,
 				sizeof(*block), __this_address);
 		xfs_bmap_mark_sick(ip, whichfork);
@@ -3152,6 +3149,8 @@ xfs_bmap_longest_free_extent(
 	xfs_extlen_t		*blen)
 {
 	xfs_extlen_t		longest;
+	unsigned int		min_free;
+	unsigned int		max_free;
 	int			error = 0;
 
 	if (!xfs_perag_initialised_agf(pag)) {
@@ -3161,8 +3160,9 @@ xfs_bmap_longest_free_extent(
 			return error;
 	}
 
-	longest = xfs_alloc_longest_free_extent(pag,
-				xfs_alloc_min_freelist(pag_mount(pag), pag),
+	/* bmap allocs always have minleft set, so account for max_free */
+	xfs_alloc_freelist(pag_mount(pag), pag, &min_free, &max_free);
+	longest = xfs_alloc_longest_free_extent(pag, min_free, max_free,
 				xfs_ag_resv_needed(pag, XFS_AG_RESV_NONE));
 	if (*blen < longest)
 		*blen = longest;
@@ -3590,7 +3590,7 @@ xfs_bmap_btalloc_best_length(
 	xfs_extlen_t		blen = 0;
 	int			error;
 
-	ap->blkno = XFS_INO_TO_FSB(args->mp, ap->ip->i_ino);
+	ap->blkno = XFS_INODE_TO_FSB(ap->ip);
 	if (!xfs_bmap_adjacent(ap))
 		ap->eof = false;
 
@@ -6090,7 +6090,7 @@ xfs_bmap_validate_extent_raw(
 	int			whichfork,
 	struct xfs_bmbt_irec	*irec)
 {
-	if (!xfs_verify_fileext(mp, irec->br_startoff, irec->br_blockcount))
+	if (!xfs_verify_fileext(irec->br_startoff, irec->br_blockcount))
 		return __this_address;
 
 	if (rtfile && whichfork == XFS_DATA_FORK) {

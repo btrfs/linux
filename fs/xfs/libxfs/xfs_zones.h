@@ -3,6 +3,7 @@
 #define _LIBXFS_ZONES_H
 
 struct xfs_rtgroup;
+struct blk_zone;
 
 /*
  * In order to guarantee forward progress for GC we need to reserve at least
@@ -30,13 +31,20 @@ struct xfs_rtgroup;
 #define XFS_MIN_OPEN_ZONES	(XFS_OPEN_GC_ZONES + 1U)
 
 /*
+ * Never open a zone for user data unless this many zones are free, so that GC
+ * can always open the target zone it needs to make forward progress.
+ */
+#define XFS_MIN_FREE_GC_ZONES	(XFS_GC_ZONES - XFS_OPEN_GC_ZONES)
+
+/*
  * For zoned devices that do not have a limit on the number of open zones, and
  * for regular devices using the zoned allocator, use the most common SMR disks
  * limit (128) as the default limit on the number of open zones.
  */
 #define XFS_DEFAULT_MAX_OPEN_ZONES	128
 
-bool xfs_zone_validate(struct blk_zone *zone, struct xfs_rtgroup *rtg,
-	xfs_rgblock_t *write_pointer);
+bool xfs_validate_blk_zone(struct xfs_mount *mp, struct blk_zone *zone,
+	unsigned int zone_no, uint32_t expected_size,
+	uint32_t expected_capacity, xfs_rgblock_t *write_pointer);
 
 #endif /* _LIBXFS_ZONES_H */

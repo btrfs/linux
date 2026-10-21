@@ -19,6 +19,8 @@
 #include <net/checksum.h>
 
 #include "nfsd.h"
+#include "netns.h"
+#include "stats.h"
 #include "cache.h"
 #include "trace.h"
 
@@ -200,13 +202,13 @@ int nfsd_reply_cache_init(struct nfsd_net *nn)
 	nn->nfsd_reply_cache_shrinker->seeks = 1;
 	nn->nfsd_reply_cache_shrinker->private_data = nn;
 
-	shrinker_register(nn->nfsd_reply_cache_shrinker);
-
 	for (i = 0; i < hashsize; i++) {
 		INIT_LIST_HEAD(&nn->drc_hashtbl[i].lru_head);
 		spin_lock_init(&nn->drc_hashtbl[i].cache_lock);
 	}
 	nn->drc_hashsize = hashsize;
+
+	shrinker_register(nn->nfsd_reply_cache_shrinker);
 
 	return 0;
 out_shrinker:
@@ -275,7 +277,7 @@ nfsd_prune_bucket_locked(struct nfsd_net *nn, struct nfsd_drc_bucket *b,
 		nfsd_cacherep_unlink_locked(nn, b, rp);
 		list_add(&rp->c_lru, dispose);
 
-		if (max && ++freed > max)
+		if (max && ++freed >= max)
 			break;
 	}
 }
@@ -467,10 +469,11 @@ int nfsd_cache_lookup(struct svc_rqst *rqstp, unsigned int start,
 		      unsigned int len, struct nfsd_cacherep **cacherep)
 {
 	struct nfsd_net		*nn = net_generic(SVC_NET(rqstp), nfsd_net_id);
+	struct nfsd_thread_local_info *ntli = rqstp->rq_private;
 	struct nfsd_cacherep	*rp, *found;
 	__wsum			csum;
 	struct nfsd_drc_bucket	*b;
-	int type = rqstp->rq_cachetype;
+	int type = ntli->ntli_cachetype;
 	LIST_HEAD(dispose);
 	int rtn = RC_DOIT;
 

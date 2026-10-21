@@ -53,7 +53,7 @@ void fill_mg_cmtime(struct kstat *stat, u32 request_mask, struct inode *inode)
 	}
 
 	stat->mtime = inode_get_mtime(inode);
-	stat->ctime.tv_sec = inode->i_ctime_sec;
+	stat->ctime.tv_sec = inode_get_ctime_sec(inode);
 	stat->ctime.tv_nsec = (u32)atomic_read(pcn);
 	if (!(stat->ctime.tv_nsec & I_CTIME_QUERIED))
 		stat->ctime.tv_nsec = ((u32)atomic_fetch_or(I_CTIME_QUERIED, pcn));
@@ -79,7 +79,7 @@ EXPORT_SYMBOL(fill_mg_cmtime);
  * uid and gid filds. On non-idmapped mounts or if permission checking is to be
  * performed on the raw inode simply pass @nop_mnt_idmap.
  */
-void generic_fillattr(struct mnt_idmap *idmap, u32 request_mask,
+void generic_fillattr(const struct mnt_idmap *idmap, u32 request_mask,
 		      struct inode *inode, struct kstat *stat)
 {
 	vfsuid_t vfsuid = i_uid_into_vfsuid(idmap, inode);
@@ -181,7 +181,7 @@ EXPORT_SYMBOL_GPL(generic_fill_statx_atomic_writes);
 int vfs_getattr_nosec(const struct path *path, struct kstat *stat,
 		      u32 request_mask, unsigned int query_flags)
 {
-	struct mnt_idmap *idmap;
+	const struct mnt_idmap *idmap;
 	struct inode *inode = d_backing_inode(path->dentry);
 
 	memset(stat, 0, sizeof(*stat));
@@ -203,8 +203,12 @@ int vfs_getattr_nosec(const struct path *path, struct kstat *stat,
 	if (IS_DAX(inode))
 		stat->attributes |= STATX_ATTR_DAX;
 
+	if (IS_VERITY(inode))
+		stat->attributes |= STATX_ATTR_VERITY;
+
 	stat->attributes_mask |= (STATX_ATTR_AUTOMOUNT |
-				  STATX_ATTR_DAX);
+				  STATX_ATTR_DAX |
+				  STATX_ATTR_VERITY);
 
 	idmap = mnt_idmap(path->mnt);
 	if (inode->i_op->getattr) {
@@ -365,17 +369,13 @@ retry:
 int vfs_fstatat(int dfd, const char __user *filename,
 			      struct kstat *stat, int flags)
 {
-	int ret;
-	int statx_flags = flags | AT_NO_AUTOMOUNT;
-	struct filename *name = getname_maybe_null(filename, flags);
+	CLASS(filename_maybe_null, name)(filename, flags);
 
 	if (!name && dfd >= 0)
 		return vfs_fstat(dfd, stat);
 
-	ret = vfs_statx(dfd, name, statx_flags, stat, STATX_BASIC_STATS);
-	putname(name);
-
-	return ret;
+	return vfs_statx(dfd, name, flags | AT_NO_AUTOMOUNT,
+			 stat, STATX_BASIC_STATS);
 }
 
 #ifdef __ARCH_WANT_OLD_STAT
@@ -564,20 +564,17 @@ static int do_readlinkat(int dfd, const char __user *pathname,
 			 char __user *buf, int bufsiz)
 {
 	struct path path;
-	struct filename *name;
 	int error;
-	unsigned int lookup_flags = LOOKUP_EMPTY;
+	unsigned int lookup_flags = 0;
 
 	if (bufsiz <= 0)
 		return -EINVAL;
 
+	CLASS(filename_flags, name)(pathname, LOOKUP_EMPTY);
 retry:
-	name = getname_flags(pathname, lookup_flags);
 	error = filename_lookup(dfd, name, lookup_flags, &path, NULL);
-	if (unlikely(error)) {
-		putname(name);
+	if (unlikely(error))
 		return error;
-	}
 
 	/*
 	 * AFS mountpoints allow readlink(2) but are not symlinks
@@ -593,7 +590,6 @@ retry:
 		error = (name->name[0] == '\0') ? -ENOENT : -EINVAL;
 	}
 	path_put(&path);
-	putname(name);
 	if (retry_estale(error, lookup_flags)) {
 		lookup_flags |= LOOKUP_REVAL;
 		goto retry;
@@ -814,16 +810,12 @@ SYSCALL_DEFINE5(statx,
 		unsigned int, mask,
 		struct statx __user *, buffer)
 {
-	int ret;
-	struct filename *name = getname_maybe_null(filename, flags);
+	CLASS(filename_maybe_null, name)(filename, flags);
 
 	if (!name && dfd >= 0)
 		return do_statx_fd(dfd, flags & ~AT_NO_AUTOMOUNT, mask, buffer);
 
-	ret = do_statx(dfd, name, flags, mask, buffer);
-	putname(name);
-
-	return ret;
+	return do_statx(dfd, name, flags, mask, buffer);
 }
 
 #if defined(CONFIG_COMPAT) && defined(__ARCH_WANT_COMPAT_STAT)

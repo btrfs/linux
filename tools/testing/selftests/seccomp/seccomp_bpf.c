@@ -54,7 +54,7 @@
 #include <sys/syscall.h>
 #include <poll.h>
 
-#include "../kselftest_harness.h"
+#include "kselftest_harness.h"
 #include "../clone3/clone3_selftests.h"
 
 /* Attempt to de-conflict with the selftests tree. */
@@ -136,6 +136,8 @@ struct seccomp_data {
 #  define __NR_seccomp 354
 # elif defined(__x86_64__)
 #  define __NR_seccomp 317
+# elif defined(__alpha__)
+#  define __NR_seccomp 514
 # elif defined(__arm__)
 #  define __NR_seccomp 383
 # elif defined(__aarch64__)
@@ -167,6 +169,12 @@ struct seccomp_data {
 #ifndef __NR_uretprobe
 # if defined(__x86_64__)
 #  define __NR_uretprobe 335
+# endif
+#endif
+
+#ifndef __NR_uprobe
+# if defined(__x86_64__)
+#  define __NR_uprobe 336
 # endif
 #endif
 
@@ -1748,6 +1756,30 @@ TEST_F(TRACE_poke, getpid_runs_normally)
 # define ARCH_REGS		struct user_regs_struct
 # define SYSCALL_NUM(_regs)	(_regs).orig_eax
 # define SYSCALL_RET(_regs)	(_regs).eax
+#elif defined(__alpha__)
+/* NT_PRSTATUS contains r0-r30, pc and unique, not struct pt_regs. */
+struct alpha_regs {
+	unsigned long regs[33];
+};
+
+# define ARCH_REGS		struct alpha_regs
+/* The kernel keeps the mutable syscall number in r1. */
+# define SYSCALL_NUM(_regs)	((_regs).regs[1])
+# define SYSCALL_RET(_regs)	((_regs).regs[0])
+/*
+ * Alpha returns positive errno in r0 with the r19/a3 error flag set.
+ * At a syscall-entry stop, r19 is still the fourth syscall argument.
+ * Callers must also set the syscall number to -1 to skip the syscall
+ * before replacing r19 with the error flag.
+ */
+# define SYSCALL_RET_SET(_regs, _val)				\
+	do {							\
+		struct alpha_regs *__regs = &(_regs);		\
+		long __ret = (_val);				\
+								\
+		__regs->regs[0] = __ret < 0 ? -__ret : __ret;	\
+		__regs->regs[19] = __ret < 0;			\
+	} while (0)
 #elif defined(__arm__)
 # define ARCH_REGS		struct pt_regs
 # define SYSCALL_NUM(_regs)	(_regs).ARM_r7
@@ -5172,7 +5204,8 @@ FIXTURE_SETUP(UPROBE)
 		ASSERT_GE(bit, 0);
 	}
 
-	offset = get_uprobe_offset(variant->uretprobe ? probed_uretprobe : probed_uprobe);
+	offset = get_uprobe_offset(variant->uretprobe ? (void *)probed_uretprobe
+						      : (void *)probed_uprobe);
 	ASSERT_GE(offset, 0);
 
 	if (variant->uretprobe)

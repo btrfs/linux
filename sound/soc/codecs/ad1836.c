@@ -193,9 +193,15 @@ static int ad1836_hw_params(struct snd_pcm_substream *substream,
 	return 0;
 }
 
+static const u64 ad1836_selectable_formats =
+	SND_SOC_POSSIBLE_DAIFMT_DSP_A	|
+	SND_SOC_POSSIBLE_DAIFMT_IB_IF;
+
 static const struct snd_soc_dai_ops ad1836_dai_ops = {
 	.hw_params = ad1836_hw_params,
 	.set_fmt = ad1836_set_dai_fmt,
+	.auto_selectable_formats = &ad1836_selectable_formats,
+	.num_auto_selectable_formats = 1,
 };
 
 #define AD183X_DAI(_name, num_dacs, num_adcs) \
@@ -250,7 +256,7 @@ static int ad1836_resume(struct snd_soc_component *component)
 static int ad1836_probe(struct snd_soc_component *component)
 {
 	struct ad1836_priv *ad1836 = snd_soc_component_get_drvdata(component);
-	struct snd_soc_dapm_context *dapm = snd_soc_component_get_dapm(component);
+	struct snd_soc_dapm_context *dapm = snd_soc_component_to_dapm(component);
 	int num_dacs, num_adcs;
 	int ret = 0;
 	int i;

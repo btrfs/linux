@@ -26,11 +26,15 @@ static struct hnae3_ae_algo ae_algovf;
 static struct workqueue_struct *hclgevf_wq;
 
 static const struct pci_device_id ae_algovf_pci_tbl[] = {
-	{PCI_VDEVICE(HUAWEI, HNAE3_DEV_ID_VF), 0},
-	{PCI_VDEVICE(HUAWEI, HNAE3_DEV_ID_RDMA_DCB_PFC_VF),
-	 HNAE3_DEV_SUPPORT_ROCE_DCB_BITS},
+	{
+		PCI_VDEVICE(HUAWEI, HNAE3_DEV_ID_VF),
+		.driver_data = 0,
+	}, {
+		PCI_VDEVICE(HUAWEI, HNAE3_DEV_ID_RDMA_DCB_PFC_VF),
+		.driver_data = HNAE3_DEV_SUPPORT_ROCE_DCB_BITS,
+	},
 	/* required last entry */
-	{0, }
+	{ }
 };
 
 MODULE_DEVICE_TABLE(pci, ae_algovf_pci_tbl);
@@ -368,12 +372,12 @@ static int hclgevf_knic_setup(struct hclgevf_dev *hdev)
 	new_tqps = kinfo->rss_size * num_tc;
 	kinfo->num_tqps = min(new_tqps, hdev->num_tqps);
 
-	kinfo->tqp = devm_kcalloc(&hdev->pdev->dev, kinfo->num_tqps,
+	kinfo->tqp = devm_kcalloc(&hdev->pdev->dev, hdev->num_tqps,
 				  sizeof(struct hnae3_queue *), GFP_KERNEL);
 	if (!kinfo->tqp)
 		return -ENOMEM;
 
-	for (i = 0; i < kinfo->num_tqps; i++) {
+	for (i = 0; i < hdev->num_tqps; i++) {
 		hdev->htqp[i].q.handle = &hdev->nic;
 		hdev->htqp[i].q.tqp_index = i;
 		kinfo->tqp[i] = &hdev->htqp[i].q;
@@ -977,7 +981,7 @@ static int hclgevf_update_mac_list(struct hnae3_handle *handle,
 		return -ENOENT;
 	}
 
-	mac_node = kzalloc(sizeof(*mac_node), GFP_ATOMIC);
+	mac_node = kzalloc_obj(*mac_node, GFP_ATOMIC);
 	if (!mac_node) {
 		spin_unlock_bh(&hdev->mac_table.mac_list_lock);
 		return -ENOMEM;
@@ -1156,7 +1160,7 @@ static void hclgevf_sync_mac_list(struct hclgevf_dev *hdev,
 			list_move_tail(&mac_node->node, &tmp_del_list);
 			break;
 		case HCLGEVF_MAC_TO_ADD:
-			new_node = kzalloc(sizeof(*new_node), GFP_ATOMIC);
+			new_node = kzalloc_obj(*new_node, GFP_ATOMIC);
 			if (!new_node)
 				goto stop_traverse;
 

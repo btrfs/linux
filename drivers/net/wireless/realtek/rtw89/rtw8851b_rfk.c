@@ -1626,7 +1626,7 @@ static void _iqk_get_ch_info(struct rtw89_dev *rtwdev, enum rtw89_phy_idx phy,
 	iqk_info->iqk_table_idx[path] = idx;
 
 	rtw89_debug(rtwdev, RTW89_DBG_RFK, "[IQK]S%d (PHY%d): / DBCC %s/ %s/ CH%d/ %s\n",
-		    path, phy, rtwdev->dbcc_en ? "on" : "off",
+		    path, phy, str_on_off(rtwdev->dbcc_en),
 		    iqk_info->iqk_band[path] == 0 ? "2G" :
 		    iqk_info->iqk_band[path] == 1 ? "5G" : "6G",
 		    iqk_info->iqk_ch[path],
@@ -1874,7 +1874,7 @@ static void _dpk_onoff(struct rtw89_dev *rtwdev, enum rtw89_rf_path path,
 			       0xf0000000, val);
 
 	rtw89_debug(rtwdev, RTW89_DBG_RFK, "[DPK] S%d[%d] DPK %s !!!\n", path,
-		    kidx, val == 0 ? "disable" : "enable");
+		    kidx, str_enable_disable(val));
 }
 
 static void _dpk_init(struct rtw89_dev *rtwdev, enum rtw89_rf_path path)
@@ -1901,8 +1901,8 @@ static void _dpk_information(struct rtw89_dev *rtwdev, enum rtw89_phy_idx phy,
 	rtw89_debug(rtwdev, RTW89_DBG_RFK,
 		    "[DPK] S%d[%d] (PHY%d): TSSI %s/ DBCC %s/ %s/ CH%d/ %s\n",
 		    path, dpk->cur_idx[path], phy,
-		    rtwdev->is_tssi_mode[path] ? "on" : "off",
-		    rtwdev->dbcc_en ? "on" : "off",
+		    str_on_off(rtwdev->is_tssi_mode[path]),
+		    str_on_off(rtwdev->dbcc_en),
 		    dpk->bp[path][kidx].band == 0 ? "2G" :
 		    dpk->bp[path][kidx].band == 1 ? "5G" : "6G",
 		    dpk->bp[path][kidx].ch,
@@ -2016,7 +2016,7 @@ static void _dpk_txpwr_bb_force(struct rtw89_dev *rtwdev,
 	rtw89_phy_write32_mask(rtwdev, R_TXPWRB_H + (path << 13), B_TXPWRB_RDY, force);
 
 	rtw89_debug(rtwdev, RTW89_DBG_RFK, "[DPK] S%d txpwr_bb_force %s\n",
-		    path, force ? "on" : "off");
+		    path, str_on_off(force));
 }
 
 static void _dpk_kip_pwr_clk_onoff(struct rtw89_dev *rtwdev, bool turn_on)
@@ -2823,6 +2823,7 @@ static void _tssi_set_tmeter_tbl(struct rtw89_dev *rtwdev, enum rtw89_phy_idx ph
 	}						\
 	__val;						\
 })
+	const struct rtw89_fw_txpwr_track_cfg *trk = rtwdev->fw.elm_info.txpwr_trk;
 	struct rtw89_tssi_info *tssi_info = &rtwdev->tssi;
 	u8 ch = chan->channel;
 	u8 subband = chan->subband_type;
@@ -2833,23 +2834,26 @@ static void _tssi_set_tmeter_tbl(struct rtw89_dev *rtwdev, enum rtw89_phy_idx ph
 	u32 tmp = 0;
 	u8 i, j;
 
+	if (!trk)
+		trk = &rtw89_8851b_trk_cfg;
+
 	switch (subband) {
 	default:
 	case RTW89_CH_2G:
-		thm_up_a = rtw89_8851b_trk_cfg.delta_swingidx_2ga_p;
-		thm_down_a = rtw89_8851b_trk_cfg.delta_swingidx_2ga_n;
+		thm_up_a = trk->delta[RTW89_FW_TXPWR_TRK_TYPE_2GA_P][0];
+		thm_down_a = trk->delta[RTW89_FW_TXPWR_TRK_TYPE_2GA_N][0];
 		break;
 	case RTW89_CH_5G_BAND_1:
-		thm_up_a = rtw89_8851b_trk_cfg.delta_swingidx_5ga_p[0];
-		thm_down_a = rtw89_8851b_trk_cfg.delta_swingidx_5ga_n[0];
+		thm_up_a = trk->delta[RTW89_FW_TXPWR_TRK_TYPE_5GA_P][0];
+		thm_down_a = trk->delta[RTW89_FW_TXPWR_TRK_TYPE_5GA_N][0];
 		break;
 	case RTW89_CH_5G_BAND_3:
-		thm_up_a = rtw89_8851b_trk_cfg.delta_swingidx_5ga_p[1];
-		thm_down_a = rtw89_8851b_trk_cfg.delta_swingidx_5ga_n[1];
+		thm_up_a = trk->delta[RTW89_FW_TXPWR_TRK_TYPE_5GA_P][1];
+		thm_down_a = trk->delta[RTW89_FW_TXPWR_TRK_TYPE_5GA_N][1];
 		break;
 	case RTW89_CH_5G_BAND_4:
-		thm_up_a = rtw89_8851b_trk_cfg.delta_swingidx_5ga_p[2];
-		thm_down_a = rtw89_8851b_trk_cfg.delta_swingidx_5ga_n[2];
+		thm_up_a = trk->delta[RTW89_FW_TXPWR_TRK_TYPE_5GA_P][2];
+		thm_down_a = trk->delta[RTW89_FW_TXPWR_TRK_TYPE_5GA_N][2];
 		break;
 	}
 
