@@ -8,6 +8,7 @@
 #ifndef __ASM_BARRIER_H
 #define __ASM_BARRIER_H
 
+#include <asm/alternative.h>
 #include <asm/march.h>
 
 /*
@@ -16,16 +17,11 @@
  * to devices.
  */
 
-#ifdef MARCH_HAS_Z196_FEATURES
-/* Fast-BCR without checkpoint synchronization */
-#define __ASM_BCR_SERIALIZE "bcr 14,0"
-#else
-#define __ASM_BCR_SERIALIZE "bcr 15,0"
-#endif
-
 static __always_inline void bcr_serialize(void)
 {
-	asm volatile(__ASM_BCR_SERIALIZE : : : "memory");
+	asm_inline volatile(
+		ALTERNATIVE("bcr 15,0", "bcr 14,0", ALT_FACILITY(45))
+		: : : "memory");
 }
 
 #define __mb()		bcr_serialize()
@@ -62,8 +58,8 @@ do {									\
  * @size: number of elements in array
  */
 #define array_index_mask_nospec array_index_mask_nospec
-static inline unsigned long array_index_mask_nospec(unsigned long index,
-						    unsigned long size)
+static __always_inline unsigned long array_index_mask_nospec(unsigned long index,
+							     unsigned long size)
 {
 	unsigned long mask;
 

@@ -1305,7 +1305,7 @@ static int ag71xx_rings_init(struct ag71xx *ag)
 	ring_size = BIT(tx->order) + BIT(rx->order);
 	tx_size = BIT(tx->order);
 
-	tx->buf = kcalloc(ring_size, sizeof(*tx->buf), GFP_KERNEL);
+	tx->buf = kzalloc_objs(*tx->buf, ring_size);
 	if (!tx->buf)
 		return -ENOMEM;
 
@@ -1856,6 +1856,9 @@ static int ag71xx_probe(struct platform_device *pdev)
 	ag71xx_int_disable(ag, AG71XX_INT_POLL);
 
 	ndev->irq = platform_get_irq(pdev, 0);
+	if (ndev->irq < 0)
+		return ndev->irq;
+
 	err = devm_request_irq(&pdev->dev, ndev->irq, ag71xx_interrupt,
 			       0x0, dev_name(&pdev->dev), ndev);
 	if (err) {

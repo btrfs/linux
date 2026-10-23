@@ -1,9 +1,13 @@
 // SPDX-License-Identifier: GPL-2.0
 
 use super::Vmalloc;
+
 use crate::page;
-use core::marker::PhantomData;
-use core::ptr::NonNull;
+
+use core::{
+    marker::PhantomData,
+    ptr::NonNull, //
+};
 
 /// An [`Iterator`] of [`page::BorrowedPage`] items owned by a [`Vmalloc`] allocation.
 ///
@@ -42,15 +46,9 @@ impl<'a> Iterator for VmallocPageIter<'a> {
             return None;
         }
 
-        // TODO: Use `NonNull::add()` instead, once the minimum supported compiler version is
-        // bumped to 1.80 or later.
-        //
         // SAFETY: `offset` is in the interval `[0, (self.page_count() - 1) * page::PAGE_SIZE]`,
         // hence the resulting pointer is guaranteed to be within the same allocation.
-        let ptr = unsafe { self.buf.as_ptr().add(offset) };
-
-        // SAFETY: `ptr` is guaranteed to be non-null given that it is derived from `self.buf`.
-        let ptr = unsafe { NonNull::new_unchecked(ptr) };
+        let ptr = unsafe { self.buf.add(offset) };
 
         // SAFETY:
         // - `ptr` is a valid pointer to a `Vmalloc` allocation.

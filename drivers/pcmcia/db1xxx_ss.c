@@ -23,7 +23,7 @@
  */
 
 #include <linux/delay.h>
-#include <linux/gpio.h>
+#include <linux/gpio/legacy.h>
 #include <linux/interrupt.h>
 #include <linux/pm.h>
 #include <linux/module.h>
@@ -427,7 +427,7 @@ static int db1x_pcmcia_socket_probe(struct platform_device *pdev)
 	struct resource *r;
 	int ret, bid;
 
-	sock = kzalloc(sizeof(struct db1x_pcmcia_sock), GFP_KERNEL);
+	sock = kzalloc_obj(struct db1x_pcmcia_sock);
 	if (!sock)
 		return -ENOMEM;
 

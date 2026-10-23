@@ -202,7 +202,7 @@ l0_%=:	/* exit */					\
 
 SEC("tc")
 __description("bounds check based on reg_off + var_off + insn_off. test1")
-__failure __msg("value_size=8 off=1073741825")
+__failure __msg("map_value pointer offset 1073741822 is not allowed")
 __naked void var_off_insn_off_test1(void)
 {
 	asm volatile ("					\
@@ -1066,7 +1066,6 @@ l0_%=:	r0 = 0;						\
 SEC("xdp")
 __description("bound check with JMP_JSLT for crossing 64-bit signed boundary")
 __success __retval(0)
-__flag(BPF_F_TEST_REG_INVARIANTS)
 __naked void crossing_64_bit_signed_boundary_2(void)
 {
 	asm volatile ("					\
@@ -1148,7 +1147,6 @@ l0_%=:	r0 = 0;						\
 SEC("xdp")
 __description("bound check with JMP32_JSLT for crossing 32-bit signed boundary")
 __success __retval(0)
-__flag(!BPF_F_TEST_REG_INVARIANTS) /* known invariants violation */
 __naked void crossing_32_bit_signed_boundary_2(void)
 {
 	asm volatile ("					\
@@ -1197,7 +1195,7 @@ l0_%=:	r1 = r6;					\
 	r3 += -8;					\
 	r5 = 0;						\
 	/* The 4th argument of bpf_skb_store_bytes is defined as \
-	 * ARG_CONST_SIZE, so 0 is not allowed. The 'r4 != 0' \
+	 * ARG_MEM_SIZE, so 0 is not allowed. The 'r4 != 0' \
 	 * is providing us this exclusion of zero from initial \
 	 * [0, 7] range.				\
 	 */						\
@@ -1241,7 +1239,8 @@ l0_%=:	r0 = 0;						\
 SEC("tc")
 __description("multiply mixed sign bounds. test 1")
 __success __log_level(2)
-__msg("r6 *= r7 {{.*}}; R6=scalar(smin=umin=0x1bc16d5cd4927ee1,smax=umax=0x1bc16d674ec80000,smax32=0x7ffffeff,umax32=0xfffffeff,var_off=(0x1bc16d4000000000; 0x3ffffffeff))")
+__msg("r6 *= r7 {{.*}}; R6=scalar(smin=umin=0x1bc16d5cd4927ee1,smax=umax=0x1bc16d674ec80000,smax32=0x7ffffeff,var_off=(0x1bc16d4000000000; 0x3ffffffeff))")
+/* cnum can't represent both [0, 0xffff_feff] and [0x8000_0000, 0x7fff_feff], so it picks one */
 __naked void mult_mixed0_sign(void)
 {
 	asm volatile (
@@ -1477,7 +1476,7 @@ __naked void sub64_full_overflow(void)
 SEC("socket")
 __description("64-bit subtraction, partial overflow, result in unbounded reg")
 __success __log_level(2)
-__msg("3: (1f) r3 -= r2 {{.*}} R3=scalar()")
+__msg("3: (1f) r3 -= r2 {{.*}} R3=scalar(id=1-1)")
 __retval(0)
 __naked void sub64_partial_overflow(void)
 {
@@ -1536,7 +1535,7 @@ __naked void sub32_partial_overflow(void)
 SEC("socket")
 __description("dead branch on jset, does not result in invariants violation error")
 __success __log_level(2)
-__retval(0) __flag(BPF_F_TEST_REG_INVARIANTS)
+__retval(0)
 __naked void jset_range_analysis(void)
 {
 	asm volatile ("			\
@@ -1572,7 +1571,7 @@ l0_%=:	r0 = 0;				\
  */
 SEC("socket")
 __description("bounds deduction cross sign boundary, negative overlap")
-__success __log_level(2) __flag(BPF_F_TEST_REG_INVARIANTS)
+__success __log_level(2)
 __msg("7: (1f) r0 -= r6 {{.*}} R0=scalar(smin=smin32=-655,smax=smax32=-146,umin=0xfffffffffffffd71,umax=0xffffffffffffff6e,umin32=0xfffffd71,umax32=0xffffff6e,var_off=(0xfffffffffffffc00; 0x3ff))")
 __retval(0)
 __naked void bounds_deduct_negative_overlap(void)
@@ -1616,7 +1615,7 @@ l0_%=:	r0 = 0;				\
  */
 SEC("socket")
 __description("bounds deduction cross sign boundary, positive overlap")
-__success __log_level(2) __flag(BPF_F_TEST_REG_INVARIANTS)
+__success __log_level(2)
 __msg("3: (2d) if r0 > r1 {{.*}} R0=scalar(smin=smin32=0,smax=umax=smax32=umax32=127,var_off=(0x0; 0x7f))")
 __retval(0)
 __naked void bounds_deduct_positive_overlap(void)
@@ -1649,8 +1648,9 @@ l0_%=:	r0 = 0;				\
  */
 SEC("socket")
 __description("bounds deduction cross sign boundary, two overlaps")
-__failure __flag(BPF_F_TEST_REG_INVARIANTS)
-__msg("3: (2d) if r0 > r1 {{.*}} R0=scalar(smin=smin32=-128,smax=smax32=127,umax=0xffffffffffffff80)")
+__failure
+__msg("3: (2d) if r0 > r1 {{.*}} R0=scalar(smin=smin32=-128,smax=smax32=127)")
+/* smin=-128 includes point 0xffffffffffffff80 */
 __msg("frame pointer is read only")
 __naked void bounds_deduct_two_overlaps(void)
 {
@@ -1706,6 +1706,632 @@ __naked void jeq_disagreeing_tnums(void *ctx)
 	exit;				\
 "	:
 	: __imm(bpf_get_prandom_u32)
+	: __clobber_all);
+}
+
+SEC("socket")
+__description("conditional jump on same register, branch taken")
+__not_msg("20: (b7) r0 = 1 {{.*}} R0=1")
+__success __log_level(2)
+__retval(0)
+__naked void condition_jump_on_same_register(void *ctx)
+{
+	asm volatile("			\
+	call %[bpf_get_prandom_u32];	\
+	w8 = 0x80000000;		\
+	r0 &= r8;			\
+	if r0 == r0 goto +1;		\
+	goto l1_%=;			\
+	if r0 >= r0 goto +1;		\
+	goto l1_%=;			\
+	if r0 s>= r0 goto +1;		\
+	goto l1_%=;			\
+	if r0 <= r0 goto +1;		\
+	goto l1_%=;			\
+	if r0 s<= r0 goto +1;		\
+	goto l1_%=;			\
+	if r0 != r0 goto l1_%=;		\
+	if r0 >  r0 goto l1_%=;		\
+	if r0 s> r0 goto l1_%=;		\
+	if r0 <  r0 goto l1_%=;		\
+	if r0 s< r0 goto l1_%=;		\
+l0_%=:	r0 = 0;				\
+	exit;				\
+l1_%=:	r0 = 1;				\
+	exit;				\
+"	:
+	: __imm(bpf_get_prandom_u32)
+	: __clobber_all);
+}
+
+SEC("socket")
+__description("jset on same register, constant value branch taken")
+__not_msg("7: (b7) r0 = 1 {{.*}} R0=1")
+__success __log_level(2)
+__retval(0)
+__naked void jset_on_same_register_1(void *ctx)
+{
+	asm volatile("			\
+	r0 = 0;				\
+	if r0 & r0 goto l1_%=;		\
+	r0 = 1;				\
+	if r0 & r0 goto +1;		\
+	goto l1_%=;			\
+l0_%=:	r0 = 0;				\
+	exit;				\
+l1_%=:	r0 = 1;				\
+	exit;				\
+"	:
+	: __imm(bpf_get_prandom_u32)
+	: __clobber_all);
+}
+
+SEC("socket")
+__description("jset on same register, scalar value branch taken")
+__not_msg("12: (b7) r0 = 1 {{.*}} R0=1")
+__success __log_level(2)
+__retval(0)
+__naked void jset_on_same_register_2(void *ctx)
+{
+	asm volatile("			\
+	/* range [1;2] */		\
+	call %[bpf_get_prandom_u32];	\
+	r0 &= 0x1;			\
+	r0 += 1;			\
+	if r0 & r0 goto +1;		\
+	goto l1_%=;			\
+	/* range [-2;-1] */		\
+	call %[bpf_get_prandom_u32];	\
+	r0 &= 0x1;			\
+	r0 -= 2;			\
+	if r0 & r0 goto +1;		\
+	goto l1_%=;			\
+l0_%=:	r0 = 0;				\
+	exit;				\
+l1_%=:	r0 = 1;				\
+	exit;				\
+"	:
+	: __imm(bpf_get_prandom_u32)
+	: __clobber_all);
+}
+
+SEC("socket")
+__description("jset on same register, scalar value unknown branch 1")
+__msg("3: (b7) r0 = 0 {{.*}} R0=0")
+__msg("5: (b7) r0 = 1 {{.*}} R0=1")
+__success __log_level(2)
+__naked void jset_on_same_register_3(void *ctx)
+{
+	asm volatile("			\
+	/* range [0;1] */		\
+	call %[bpf_get_prandom_u32];	\
+	r0 &= 0x1;			\
+	if r0 & r0 goto l1_%=;		\
+l0_%=:	r0 = 0;				\
+	exit;				\
+l1_%=:	r0 = 1;				\
+	exit;				\
+"	:
+	: __imm(bpf_get_prandom_u32)
+	: __clobber_all);
+}
+
+SEC("socket")
+__description("jset on same register, scalar value unknown branch 2")
+__msg("4: (b7) r0 = 0 {{.*}} R0=0")
+__msg("6: (b7) r0 = 1 {{.*}} R0=1")
+__success __log_level(2)
+__naked void jset_on_same_register_4(void *ctx)
+{
+	asm volatile("			\
+	/* range [-1;0] */		\
+	call %[bpf_get_prandom_u32];	\
+	r0 &= 0x1;			\
+	r0 -= 1;			\
+	if r0 & r0 goto l1_%=;		\
+l0_%=:	r0 = 0;				\
+	exit;				\
+l1_%=:	r0 = 1;				\
+	exit;				\
+"	:
+	: __imm(bpf_get_prandom_u32)
+	: __clobber_all);
+}
+
+SEC("socket")
+__description("jset on same register, scalar value unknown branch 3")
+__msg("4: (b7) r0 = 0 {{.*}} R0=0")
+__msg("6: (b7) r0 = 1 {{.*}} R0=1")
+__success __log_level(2)
+__naked void jset_on_same_register_5(void *ctx)
+{
+	asm volatile("			\
+	/* range [-1;1] */		\
+	call %[bpf_get_prandom_u32];	\
+	r0 &= 0x2;			\
+	r0 -= 1;			\
+	if r0 & r0 goto l1_%=;		\
+l0_%=:	r0 = 0;				\
+	exit;				\
+l1_%=:	r0 = 1;				\
+	exit;				\
+"	:
+	: __imm(bpf_get_prandom_u32)
+	: __clobber_all);
+}
+
+/* This test covers the bounds deduction when the u64 range and the tnum
+ * overlap only at umax. After instruction 3, the ranges look as follows:
+ *
+ * 0    umin=0xe01     umax=0xf00                              U64_MAX
+ * |    [xxxxxxxxxxxxxx]                                       |
+ * |----------------------------|------------------------------|
+ * |   x               x                                       | tnum values
+ *
+ * The verifier can therefore deduce that the R0=0xf0=240.
+ */
+SEC("socket")
+__description("bounds refinement with single-value tnum on umax")
+__msg("3: (15) if r0 == 0xe0 {{.*}} R0=240")
+__success __log_level(2)
+__naked void bounds_refinement_tnum_umax(void *ctx)
+{
+	asm volatile("			\
+	call %[bpf_get_prandom_u32];	\
+	r0 |= 0xe0;			\
+	r0 &= 0xf0;			\
+	if r0 == 0xe0 goto +2;		\
+	if r0 == 0xf0 goto +1;		\
+	r10 = 0;			\
+	exit;				\
+"	:
+	: __imm(bpf_get_prandom_u32)
+	: __clobber_all);
+}
+
+/* This test covers the bounds deduction when the u64 range and the tnum
+ * overlap only at umin. After instruction 3, the ranges look as follows:
+ *
+ * 0    umin=0xe1      umax=0xf0                               U64_MAX
+ * |    [xxxxxxxxxxxxxx]                                       |
+ * |----------------------------|------------------------------|
+ * |    x               x                                      | tnum values
+ *
+ * The verifier can therefore deduce that the R0=0xe1=225.
+ */
+SEC("socket")
+__description("bounds refinement with single-value tnum on umin")
+__msg("3: (15) if r0 == 0xf1 {{.*}} R0=225")
+__success __log_level(2)
+__naked void bounds_refinement_tnum_umin(void *ctx)
+{
+	asm volatile("			\
+	call %[bpf_get_prandom_u32];	\
+	r0 |= 0xe1;			\
+	r0 &= 0xf1;			\
+	if r0 == 0xf1 goto +2;		\
+	if r0 == 0xe1 goto +1;		\
+	r10 = 0;			\
+	exit;				\
+"	:
+	: __imm(bpf_get_prandom_u32)
+	: __clobber_all);
+}
+
+/* This test covers the bounds deduction when the only possible tnum value is
+ * in the middle of the u64 range. After instruction 3, the ranges look as
+ * follows:
+ *
+ * 0    umin=0x7cf   umax=0x7df                                U64_MAX
+ * |    [xxxxxxxxxxxx]                                         |
+ * |----------------------------|------------------------------|
+ * |     x            x            x            x            x | tnum values
+ *       |            +--- 0x7e0
+ *       +--- 0x7d0
+ *
+ * Since the lower four bits are zero, the tnum and the u64 range only overlap
+ * in R0=0x7d0=2000. Instruction 5 is therefore dead code.
+ */
+SEC("socket")
+__description("bounds refinement with single-value tnum in middle of range")
+__msg("3: (a5) if r0 < 0x7cf {{.*}} R0=2000")
+__success __log_level(2)
+__naked void bounds_refinement_tnum_middle(void *ctx)
+{
+	asm volatile("			\
+	call %[bpf_get_prandom_u32];	\
+	if r0 & 0x0f goto +4;		\
+	if r0 > 0x7df goto +3;		\
+	if r0 < 0x7cf goto +2;		\
+	if r0 == 0x7d0 goto +1;		\
+	r10 = 0;			\
+	exit;				\
+"	:
+	: __imm(bpf_get_prandom_u32)
+	: __clobber_all);
+}
+
+/* This test cover the negative case for the tnum/u64 overlap. Since
+ * they contain the same two values (i.e., {0, 1}), we can't deduce
+ * anything more.
+ */
+SEC("socket")
+__description("bounds refinement: several overlaps between tnum and u64")
+__msg("2: (25) if r0 > 0x1 {{.*}} R0=scalar(smin=smin32=0,smax=umax=smax32=umax32=1,var_off=(0x0; 0x1))")
+__failure __log_level(2)
+__naked void bounds_refinement_several_overlaps(void *ctx)
+{
+	asm volatile("			\
+	call %[bpf_get_prandom_u32];	\
+	if r0 < 0 goto +3;		\
+	if r0 > 1 goto +2;		\
+	if r0 == 1 goto +1;		\
+	r10 = 0;			\
+	exit;				\
+"	:
+	: __imm(bpf_get_prandom_u32)
+	: __clobber_all);
+}
+
+/* This test cover the negative case for the tnum/u64 overlap. Since
+ * they overlap in the two values contained by the u64 range (i.e.,
+ * {0xf, 0x10}), we can't deduce anything more.
+ */
+SEC("socket")
+__description("bounds refinement: multiple overlaps between tnum and u64")
+__msg("2: (25) if r0 > 0x10 {{.*}} R0=scalar(smin=umin=smin32=umin32=15,smax=umax=smax32=umax32=16,var_off=(0x0; 0x1f))")
+__failure __log_level(2)
+__naked void bounds_refinement_multiple_overlaps(void *ctx)
+{
+	asm volatile("			\
+	call %[bpf_get_prandom_u32];	\
+	if r0 < 0xf goto +3;		\
+	if r0 > 0x10 goto +2;		\
+	if r0 == 0x10 goto +1;		\
+	r10 = 0;			\
+	exit;				\
+"	:
+	: __imm(bpf_get_prandom_u32)
+	: __clobber_all);
+}
+
+SEC("socket")
+__success
+__naked void signed_unsigned_intersection32_case1(void *ctx)
+{
+	asm volatile("									\
+	call %[bpf_get_prandom_u32];							\
+	w0 &= 0xffffffff;								\
+	if w0 < 0x3 goto 1f;		/* on fall-through u32 range [3..U32_MAX]  */	\
+	if w0 s> 0x1 goto 1f;		/* on fall-through s32 range [S32_MIN..1]  */	\
+	if w0 s< 0x0 goto 1f;		/* range can be narrowed to  [S32_MIN..-1] */	\
+	r10 = 0;			/* thus predicting the jump. */			\
+1:	exit;										\
+"	:
+	: __imm(bpf_get_prandom_u32)
+	: __clobber_all);
+}
+
+SEC("socket")
+__success
+__naked void signed_unsigned_intersection32_case2(void *ctx)
+{
+	asm volatile("									\
+	call %[bpf_get_prandom_u32];							\
+	w0 &= 0xffffffff;								\
+	if w0 > 0x80000003 goto 1f;	/* on fall-through u32 range [0..S32_MIN+3] */	\
+	if w0 s< -3 goto 1f;		/* on fall-through s32 range [-3..S32_MAX] */	\
+	if w0 s> 5 goto 1f;		/* on fall-through s32 range [-3..5] */		\
+	if w0 <= 5 goto 1f;		/* range can be narrowed to  [0..5] */		\
+	r10 = 0;			/* thus predicting the jump */			\
+1:	exit;										\
+"	:
+	: __imm(bpf_get_prandom_u32)
+	: __clobber_all);
+}
+
+/*
+ * After instruction 3, the u64 and s64 ranges look as follows:
+ * 0  umin=2                             umax=0xff..ff00..03   U64_MAX
+ * |  [xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx]      |
+ * |----------------------------|------------------------------|
+ * |xx]                           [xxxxxxxxxxxxxxxxxxxxxxxxxxxx|
+ * 0  smax=2                      smin=0x800..02               -1
+ *
+ * The two ranges can't be refined because they overlap in two places. Once we
+ * add an upper-bound to u64 at instruction 4, the refinement can happen. This
+ * test validates that this refinement does happen and is not overwritten by
+ * the less-precise 32bits ranges.
+ */
+SEC("socket")
+__description("bounds refinement: 64bits ranges not overwritten by 32bits ranges")
+__msg("3: (65) if r0 s> 0x2 {{.*}} R0=scalar(smin=0x8000000000000002,smax=2,smin32=umin32=2,smax32=umax32=3,var_off{{.*}}))")
+/* Can't represent both [S64_MIN+2, 2] and [2, U64_MAX - U32_MAX + 2] at the same time, picks shorter interval */
+__msg("4: (25) if r0 > 0x13 {{.*}} R0=2")
+__success __log_level(2)
+__naked void refinement_32bounds_not_overwriting_64bounds(void *ctx)
+{
+	asm volatile("			\
+	call %[bpf_get_prandom_u32];	\
+	if w0 < 2 goto +5;		\
+	if w0 > 3 goto +4;		\
+	if r0 s> 2 goto +3;		\
+	if r0 > 19 goto +2;		\
+	if r0 == 2 goto +1;		\
+	r10 = 0;			\
+	exit;				\
+"	:
+	: __imm(bpf_get_prandom_u32)
+	: __clobber_all);
+}
+
+SEC("socket")
+__description("maybe_fork_scalars: OR with constant rejects OOB")
+__failure __msg("invalid access to map value")
+__naked void or_scalar_fork_rejects_oob(void)
+{
+	asm volatile ("					\
+	r1 = 0;						\
+	*(u64*)(r10 - 8) = r1;				\
+	r2 = r10;					\
+	r2 += -8;					\
+	r1 = %[map_hash_8b] ll;				\
+	call %[bpf_map_lookup_elem];			\
+	if r0 == 0 goto l0_%=;				\
+	r9 = r0;					\
+	r6 = *(u64*)(r9 + 0);				\
+	r6 s>>= 63;					\
+	r6 |= 8;					\
+	/* r6 is -1 (current) or 8 (pushed) */		\
+	if r6 s< 0 goto l0_%=;				\
+	/* pushed path: r6 = 8, OOB for value_size=8 */	\
+	r9 += r6;					\
+	r0 = *(u8*)(r9 + 0);				\
+l0_%=:	r0 = 0;						\
+	exit;						\
+"	:
+	: __imm(bpf_map_lookup_elem),
+	  __imm_addr(map_hash_8b)
+	: __clobber_all);
+}
+
+SEC("socket")
+__description("maybe_fork_scalars: AND with constant still works")
+__success __retval(0)
+__naked void and_scalar_fork_still_works(void)
+{
+	asm volatile ("					\
+	r1 = 0;						\
+	*(u64*)(r10 - 8) = r1;				\
+	r2 = r10;					\
+	r2 += -8;					\
+	r1 = %[map_hash_8b] ll;				\
+	call %[bpf_map_lookup_elem];			\
+	if r0 == 0 goto l0_%=;				\
+	r9 = r0;					\
+	r6 = *(u64*)(r9 + 0);				\
+	r6 s>>= 63;					\
+	r6 &= 4;					\
+	/*						\
+	 * r6 is 0 (pushed, 0&4==0) or 4 (current)	\
+	 * both within value_size=8			\
+	 */						\
+	if r6 s< 0 goto l0_%=;				\
+	r9 += r6;					\
+	r0 = *(u8*)(r9 + 0);				\
+l0_%=:	r0 = 0;						\
+	exit;						\
+"	:
+	: __imm(bpf_map_lookup_elem),
+	  __imm_addr(map_hash_8b)
+	: __clobber_all);
+}
+
+SEC("socket")
+__description("maybe_fork_scalars: OR with constant allows in-bounds")
+__success __retval(0)
+__naked void or_scalar_fork_allows_inbounds(void)
+{
+	asm volatile ("					\
+	r1 = 0;						\
+	*(u64*)(r10 - 8) = r1;				\
+	r2 = r10;					\
+	r2 += -8;					\
+	r1 = %[map_hash_8b] ll;				\
+	call %[bpf_map_lookup_elem];			\
+	if r0 == 0 goto l0_%=;				\
+	r9 = r0;					\
+	r6 = *(u64*)(r9 + 0);				\
+	r6 s>>= 63;					\
+	r6 |= 4;					\
+	/*						\
+	 * r6 is -1 (current) or 4 (pushed)		\
+	 * pushed path: r6 = 4, within value_size=8	\
+	 */						\
+	if r6 s< 0 goto l0_%=;				\
+	r9 += r6;					\
+	r0 = *(u8*)(r9 + 0);				\
+l0_%=:	r0 = 0;						\
+	exit;						\
+"	:
+	: __imm(bpf_map_lookup_elem),
+	  __imm_addr(map_hash_8b)
+	: __clobber_all);
+}
+
+/*
+ * Last jump can be detected as always taken because the intersection of R5 and
+ * R7 32bit tnums produces a constant that isn't within R7's s32 bounds.
+ */
+SEC("socket")
+__description("dead branch: tnums give impossible constant if equal")
+__success
+__naked void tnums_equal_impossible_constant(void *ctx)
+{
+	asm volatile("						\
+	call %[bpf_get_prandom_u32];				\
+	r5 = r0;						\
+	/* Set r5's var_off32 to (0; 0xfffffffc) */		\
+	r5 &= 0xfffffffffffffffc;				\
+	r7 = r0;						\
+	/* Set r7's var_off32 to (0x0; 0x1) */			\
+	r7 &= 0x1;						\
+	/* Now, s32=[-43; -42], var_off32=(0xffffffd4; 0x3) */	\
+	r7 += -43;						\
+	/* On fallthrough, var_off32=-44, not in s32 */		\
+	if w5 != w7 goto +1;					\
+	r10 = 0;						\
+	exit;							\
+"	:
+	: __imm(bpf_get_prandom_u32)
+	: __clobber_all);
+}
+
+/*
+ * 32-bit range starts before 64-bit range low bits in each 2^32 block.
+ *
+ * N*2^32                   (N+1)*2^32                (N+2)*2^32                (N+3)*2^32
+ * ||----|=====|--|----------||----|=====|-------------||--|-|=====|-------------||
+ *       |< b >|  |                |< b >|                 | |< b >|
+ *                |                |     |                 |
+ *                |<---------------+- a -+---------------->|
+ *                                 |     |
+ *                                 |< t >| refined r0 range
+ *
+ * a = u64 [0x1'00000008, 0x3'00000001]
+ * b = u32 [2, 5]
+ * t = u64 [0x2'00000002, 0x2'00000005]
+ */
+SEC("socket")
+__success
+__flag(BPF_F_TEST_REG_INVARIANTS)
+__naked void deduce64_from_32_before_block_start(void)
+{
+	asm volatile ("							\
+	call %[bpf_get_prandom_u32];					\
+	r1 = 0x100000008 ll;						\
+	if r0 < r1 goto 2f;						\
+	r1 = 0x300000001 ll;						\
+	if r0 > r1 goto 2f;	/* u64: [0x1'00000008, 0x3'00000001] */	\
+	if w0 < 2 goto 2f;						\
+	if w0 > 5 goto 2f;	/* u32: [2, 5] */			\
+	r2 = 0x200000002 ll;						\
+	r3 = 0x200000005 ll;						\
+	if r0 >= r2 goto 1f;	/* should be always true */		\
+	r10 = 0;		/* dead code */				\
+1:	if r0 <= r3 goto 2f;	/* should be always true */		\
+	r10 = 0;		/* dead code */				\
+2:	exit;								\
+	"
+	:: __imm(bpf_get_prandom_u32)
+	: __clobber_all);
+}
+
+/*
+ * 32-bit range crossing U32_MAX / 0 boundary.
+ *
+ * N*2^32                   (N+1)*2^32                (N+2)*2^32                (N+3)*2^32
+ * ||===|---------|------|===||===|----------------|===||===|---------|------|===||
+ *  |b >|         |      |< b||b >|                |< b||b >|         |      |< b|
+ *                |      |                                  |         |
+ *                |<-----+----------------- a --------------+-------->|
+ *                       |                                  |
+ *                       |<---------------- t ------------->| refined r0 range
+ *
+ * a = u64 [0x1'00000006, 0x2'FFFFFFEF]
+ * b = s32 [-16, 5] (u32 wrapping [0xFFFFFFF0, 0x00000005])
+ * t = u64 [0x1'FFFFFFF0, 0x2'00000005]
+ */
+SEC("socket")
+__success
+__flag(BPF_F_TEST_REG_INVARIANTS)
+__naked void deduce64_from_32_wrapping_32bit(void)
+{
+	asm volatile ("							\
+	call %[bpf_get_prandom_u32];					\
+	r1 = 0x100000006 ll;						\
+	if r0 < r1 goto 2f;						\
+	r1 = 0x2ffffffef ll;						\
+	if r0 > r1 goto 2f;	/* u64: [0x1'00000006, 0x2'FFFFFFEF] */	\
+	if w0 s< -16 goto 2f;						\
+	if w0 s> 5 goto 2f;	/* s32: [-16, 5] */			\
+	r1 = 0x1fffffff0 ll;						\
+	r2 = 0x200000005 ll;						\
+	if r0 >= r1 goto 1f;	/* should be always true */		\
+	r10 = 0;		/* dead code */				\
+1:	if r0 <= r2 goto 2f;	/* should be always true */		\
+	r10 = 0;		/* dead code */				\
+2:	exit;								\
+	"
+	:: __imm(bpf_get_prandom_u32)
+	: __clobber_all);
+}
+
+/*
+ * Unprivileged variable pointer arithmetic on a PTR_TO_MAP_VALUE whose
+ * offset collapses to a constant. The Spectre-v1 speculative path snapshots
+ * the pointer while its r32 has just been blanked but its offset not yet
+ * synced; the following register move used to trip reg_bounds_sanity_check()
+ * ("const subreg tnum out of sync with range bounds"). With
+ * BPF_F_TEST_REG_INVARIANTS that violation turns into a load failure, so the
+ * unprivileged program must still load.
+ */
+SEC("socket")
+__success __success_unpriv
+__flag(BPF_F_TEST_REG_INVARIANTS)
+__naked void spec_ptr_alu_const_offset(void)
+{
+	asm volatile ("							\
+	call %[bpf_ktime_get_ns];					\
+	*(u64*)(r10 - 16) = r0;						\
+	r1 = 0;								\
+	*(u64*)(r10 - 8) = r1;						\
+	r2 = r10;							\
+	r2 += -8;							\
+	r1 = %[map_hash_8b] ll;						\
+	call %[bpf_map_lookup_elem];					\
+	if r0 == 0 goto l0_%=;						\
+	r1 = *(u64*)(r10 - 16);						\
+	r2 = 0x40000000;						\
+	if r1 > r2 goto l0_%=;						\
+	if r1 s> 1 goto l0_%=;		/* r1 in [0, 1] */		\
+	r0 += r1;			/* ptr += bounded scalar */	\
+	r9 = r0;			/* used to trip the warning */	\
+	*(u8*)(r0 + 0) = r1;						\
+l0_%=:	r0 = 0;								\
+	exit;								\
+	"
+	:
+	: __imm(bpf_ktime_get_ns),
+	  __imm(bpf_map_lookup_elem),
+	  __imm_addr(map_hash_8b)
+	: __clobber_all);
+}
+
+/* Check that range_within() compares cnum ranges, not min/max projections. */
+SEC("socket")
+__failure __msg("div by zero")
+__flag(BPF_F_TEST_STATE_FREQ)
+__naked void range_within_cnum_cross_both_boundaries(void)
+{
+	asm volatile ("							\
+	call %[bpf_get_prandom_u32];					\
+	r1 = 0x80000020;						\
+	if r0 > r1 goto 1f;						\
+	r0 += 0x7FFFFFF0;			/* PATH 1 */		\
+	goto 2f;							\
+1:	call %[bpf_get_prandom_u32];		/* PATH 2 */		\
+	if r0 < 0x100 goto 3f;						\
+	if r0 > 0x200 goto 3f;						\
+2:	/* PATH 1: r0 ∈ [0x7FFFFFF0, U32_MAX] ∪ [0, 0x10] */		\
+	/* PATH 2: r0 ∈ [0x100, 0x200] */				\
+	if r0 != 0x100 goto 3f;	/* True only on PATH 2 */		\
+	r0 /= 0;							\
+3:	exit;								\
+	"
+	:: __imm(bpf_map_lookup_elem),
+	   __imm_addr(map_hash_8b),
+	   __imm(bpf_get_prandom_u32)
 	: __clobber_all);
 }
 

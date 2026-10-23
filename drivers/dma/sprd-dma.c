@@ -901,7 +901,7 @@ sprd_dma_prep_dma_memcpy(struct dma_chan *chan, dma_addr_t dest, dma_addr_t src,
 	enum sprd_dma_datawidth datawidth;
 	u32 step, temp;
 
-	sdesc = kzalloc(sizeof(*sdesc), GFP_NOWAIT);
+	sdesc = kzalloc_obj(*sdesc, GFP_NOWAIT);
 	if (!sdesc)
 		return NULL;
 
@@ -986,7 +986,7 @@ sprd_dma_prep_slave_sg(struct dma_chan *chan, struct scatterlist *sgl,
 		(flags >> SPRD_DMA_TRG_MODE_SHIFT) & SPRD_DMA_TRG_MODE_MASK;
 	schan->int_type = flags & SPRD_DMA_INT_TYPE_MASK;
 
-	sdesc = kzalloc(sizeof(*sdesc), GFP_NOWAIT);
+	sdesc = kzalloc_obj(*sdesc, GFP_NOWAIT);
 	if (!sdesc)
 		return NULL;
 
@@ -1212,7 +1212,7 @@ static int sprd_dma_probe(struct platform_device *pdev)
 
 	ret = pm_runtime_get_sync(&pdev->dev);
 	if (ret < 0)
-		goto err_rpm;
+		goto err_register;
 
 	ret = dma_async_device_register(&sdev->dma_dev);
 	if (ret < 0) {
@@ -1234,7 +1234,6 @@ err_of_register:
 err_register:
 	pm_runtime_put_noidle(&pdev->dev);
 	pm_runtime_disable(&pdev->dev);
-err_rpm:
 	sprd_dma_disable(sdev);
 	return ret;
 }
@@ -1311,4 +1310,3 @@ MODULE_LICENSE("GPL v2");
 MODULE_DESCRIPTION("DMA driver for Spreadtrum");
 MODULE_AUTHOR("Baolin Wang <baolin.wang@spreadtrum.com>");
 MODULE_AUTHOR("Eric Long <eric.long@spreadtrum.com>");
-MODULE_ALIAS("platform:sprd-dma");

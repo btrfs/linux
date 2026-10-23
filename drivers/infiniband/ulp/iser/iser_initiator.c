@@ -240,9 +240,8 @@ int iser_alloc_rx_descriptors(struct iser_conn *iser_conn,
 		goto alloc_login_buf_fail;
 
 	iser_conn->num_rx_descs = session->cmds_max;
-	iser_conn->rx_descs = kmalloc_array(iser_conn->num_rx_descs,
-					    sizeof(struct iser_rx_desc),
-					    GFP_KERNEL);
+	iser_conn->rx_descs = kmalloc_objs(struct iser_rx_desc,
+					   iser_conn->num_rx_descs);
 	if (!iser_conn->rx_descs)
 		goto rx_desc_alloc_fail;
 
@@ -599,11 +598,8 @@ static int iser_check_remote_inv(struct iser_conn *iser_conn, struct ib_wc *wc,
 		iser_dbg("conn %p: remote invalidation for rkey %#x\n",
 			 iser_conn, rkey);
 
-		if (unlikely(!iser_conn->snd_w_inv)) {
-			iser_err("conn %p: unexpected remote invalidation, terminating connection\n",
-				 iser_conn);
-			return -EPROTO;
-		}
+		if (unlikely(!iser_conn->snd_w_inv))
+			goto bad_inv;
 
 		task = iscsi_itt_to_ctask(iser_conn->iscsi_conn, hdr->itt);
 		if (likely(task)) {
@@ -612,12 +608,16 @@ static int iser_check_remote_inv(struct iser_conn *iser_conn, struct ib_wc *wc,
 
 			if (iser_task->dir[ISER_DIR_IN]) {
 				desc = iser_task->rdma_reg[ISER_DIR_IN].desc;
+				if (unlikely(!desc))
+					goto bad_inv;
 				if (unlikely(iser_inv_desc(desc, rkey)))
 					return -EINVAL;
 			}
 
 			if (iser_task->dir[ISER_DIR_OUT]) {
 				desc = iser_task->rdma_reg[ISER_DIR_OUT].desc;
+				if (unlikely(!desc))
+					goto bad_inv;
 				if (unlikely(iser_inv_desc(desc, rkey)))
 					return -EINVAL;
 			}
@@ -628,6 +628,11 @@ static int iser_check_remote_inv(struct iser_conn *iser_conn, struct ib_wc *wc,
 	}
 
 	return 0;
+
+bad_inv:
+	iser_err("conn %p: unexpected remote invalidation, terminating connection\n",
+		 iser_conn);
+	return -EPROTO;
 }
 
 

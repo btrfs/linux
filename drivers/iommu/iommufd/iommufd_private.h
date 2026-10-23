@@ -19,6 +19,7 @@ struct iommu_domain;
 struct iommu_group;
 struct iommu_option;
 struct iommufd_device;
+struct dma_buf_attachment;
 
 struct iommufd_sw_msi_map {
 	struct list_head sw_msi_item;
@@ -108,7 +109,7 @@ int iopt_map_user_pages(struct iommufd_ctx *ictx, struct io_pagetable *iopt,
 			unsigned long length, int iommu_prot,
 			unsigned int flags);
 int iopt_map_file_pages(struct iommufd_ctx *ictx, struct io_pagetable *iopt,
-			unsigned long *iova, struct file *file,
+			unsigned long *iova, int fd,
 			unsigned long start, unsigned long length,
 			int iommu_prot, unsigned int flags);
 int iopt_map_pages(struct io_pagetable *iopt, struct list_head *pages_list,
@@ -117,6 +118,16 @@ int iopt_map_pages(struct io_pagetable *iopt, struct list_head *pages_list,
 int iopt_unmap_iova(struct io_pagetable *iopt, unsigned long iova,
 		    unsigned long length, unsigned long *unmapped);
 int iopt_unmap_all(struct io_pagetable *iopt, unsigned long *unmapped);
+#ifdef CONFIG_IOMMUFD_NOIOMMU
+int iopt_get_phys(struct io_pagetable *iopt, unsigned long iova, u64 *paddr,
+		  u64 *length);
+#else
+static inline int iopt_get_phys(struct io_pagetable *iopt, unsigned long iova,
+				u64 *paddr, u64 *length)
+{
+	return -EOPNOTSUPP;
+}
+#endif
 
 int iopt_read_and_clear_dirty_data(struct io_pagetable *iopt,
 				   struct iommu_domain *domain,
@@ -181,6 +192,7 @@ static inline bool iommufd_lock_obj(struct iommufd_object *obj)
 	return true;
 }
 
+int iommufd_try_inc_users(struct iommufd_ctx *ictx, struct iommufd_object *obj);
 struct iommufd_object *iommufd_get_object(struct iommufd_ctx *ictx, u32 id,
 					  enum iommufd_object_type type);
 static inline void iommufd_put_object(struct iommufd_ctx *ictx,
@@ -345,6 +357,14 @@ int iommufd_ioas_map_file(struct iommufd_ucmd *ucmd);
 int iommufd_ioas_change_process(struct iommufd_ucmd *ucmd);
 int iommufd_ioas_copy(struct iommufd_ucmd *ucmd);
 int iommufd_ioas_unmap(struct iommufd_ucmd *ucmd);
+#ifdef CONFIG_IOMMUFD_NOIOMMU
+int iommufd_ioas_noiommu_get_pa(struct iommufd_ucmd *ucmd);
+#else
+static inline int iommufd_ioas_noiommu_get_pa(struct iommufd_ucmd *ucmd)
+{
+	return -EOPNOTSUPP;
+}
+#endif
 int iommufd_ioas_option(struct iommufd_ucmd *ucmd);
 int iommufd_option_rlimit_mode(struct iommu_option *cmd,
 			       struct iommufd_ctx *ictx);
@@ -463,6 +483,8 @@ static inline void iommufd_hw_pagetable_put(struct iommufd_ctx *ictx,
 	refcount_dec(&hwpt->obj.users);
 }
 
+extern const struct iommu_ops iommufd_noiommu_ops;
+
 struct iommufd_attach;
 
 struct iommufd_group {
@@ -500,9 +522,21 @@ iommufd_get_device(struct iommufd_ucmd *ucmd, u32 id)
 			    struct iommufd_device, obj);
 }
 
+static inline struct iommu_device *
+iommufd_device_get_iommu_dev(struct iommufd_device *idev)
+{
+	if (IS_ENABLED(CONFIG_IOMMUFD_NOIOMMU) && !idev->igroup->group)
+		return NULL;
+	if (WARN_ON_ONCE(!idev->dev->iommu))
+		return NULL;
+	return __iommu_get_iommu_dev(idev->dev);
+}
+
 void iommufd_device_pre_destroy(struct iommufd_object *obj);
 void iommufd_device_destroy(struct iommufd_object *obj);
 int iommufd_get_hw_info(struct iommufd_ucmd *ucmd);
+
+struct device *iommufd_global_device(void);
 
 struct iommufd_access {
 	struct iommufd_object obj;
@@ -599,7 +633,7 @@ struct iommufd_vevent {
 	struct iommufd_vevent_header header;
 	struct list_head node; /* for iommufd_eventq::deliver */
 	ssize_t data_len;
-	u64 event_data[] __counted_by(data_len);
+	u8 event_data[] __counted_by(data_len);
 };
 
 #define vevent_for_lost_events_header(vevent) \
@@ -695,14 +729,6 @@ void iommufd_vdevice_abort(struct iommufd_object *obj);
 int iommufd_hw_queue_alloc_ioctl(struct iommufd_ucmd *ucmd);
 void iommufd_hw_queue_destroy(struct iommufd_object *obj);
 
-static inline struct iommufd_vdevice *
-iommufd_get_vdevice(struct iommufd_ctx *ictx, u32 id)
-{
-	return container_of(iommufd_get_object(ictx, id,
-					       IOMMUFD_OBJ_VDEVICE),
-			    struct iommufd_vdevice, obj);
-}
-
 #ifdef CONFIG_IOMMUFD_TEST
 int iommufd_test(struct iommufd_ucmd *ucmd);
 void iommufd_selftest_destroy(struct iommufd_object *obj);
@@ -713,6 +739,8 @@ bool iommufd_should_fail(void);
 int __init iommufd_test_init(void);
 void iommufd_test_exit(void);
 bool iommufd_selftest_is_mock_dev(struct device *dev);
+int iommufd_test_dma_buf_iommufd_map(struct dma_buf_attachment *attachment,
+				     struct phys_vec *phys);
 #else
 static inline void iommufd_test_syz_conv_iova_id(struct iommufd_ucmd *ucmd,
 						 unsigned int ioas_id,
@@ -733,6 +761,12 @@ static inline void iommufd_test_exit(void)
 static inline bool iommufd_selftest_is_mock_dev(struct device *dev)
 {
 	return false;
+}
+static inline int
+iommufd_test_dma_buf_iommufd_map(struct dma_buf_attachment *attachment,
+				 struct phys_vec *phys)
+{
+	return -EOPNOTSUPP;
 }
 #endif
 #endif

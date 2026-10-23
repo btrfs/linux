@@ -7,7 +7,6 @@
  */
 
 #include <linux/i2c.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/regmap.h>
 #include <sound/soc.h>
@@ -28,16 +27,25 @@ static int adau1977_i2c_probe(struct i2c_client *client)
 }
 
 static const struct i2c_device_id adau1977_i2c_ids[] = {
-	{ "adau1977", ADAU1977 },
-	{ "adau1978", ADAU1978 },
-	{ "adau1979", ADAU1978 },
+	{ .name = "adau1977", .driver_data = ADAU1977 },
+	{ .name = "adau1978", .driver_data = ADAU1978 },
+	{ .name = "adau1979", .driver_data = ADAU1978 },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, adau1977_i2c_ids);
 
+static const struct of_device_id adau1977_i2c_of_match[] = {
+	{ .compatible = "adi,adau1977" },
+	{ .compatible = "adi,adau1978" },
+	{ .compatible = "adi,adau1979" },
+	{ },
+};
+MODULE_DEVICE_TABLE(of, adau1977_i2c_of_match);
+
 static struct i2c_driver adau1977_i2c_driver = {
 	.driver = {
 		.name = "adau1977",
+		.of_match_table = adau1977_i2c_of_match,
 	},
 	.probe = adau1977_i2c_probe,
 	.id_table = adau1977_i2c_ids,

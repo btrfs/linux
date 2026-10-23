@@ -8,17 +8,6 @@ config BINARY_PRINTF
 
 menu "Library routines"
 
-config RAID6_PQ
-	tristate
-
-config RAID6_PQ_BENCHMARK
-	bool "Automatically choose fastest RAID6 PQ functions"
-	depends on RAID6_PQ
-	default y
-	help
-	  Benchmark all available RAID6 PQ functions on init and choose the
-	  fastest one.
-
 config LINEAR_RANGES
 	tristate
 
@@ -54,13 +43,26 @@ config PACKING_KUNIT_TEST
 
 config BITREVERSE
 	tristate
+	select GENERIC_BITREVERSE if !HAVE_ARCH_BITREVERSE
 
 config HAVE_ARCH_BITREVERSE
 	bool
 	default n
+	depends on BITREVERSE
 	help
 	  This option enables the use of hardware bit-reversal instructions on
 	  architectures which support such operations.
+
+config GENERIC_BITREVERSE
+	tristate
+	depends on BITREVERSE
+	help
+	  Generic bit reversal implementation. Drivers should never enable
+	  it explicitly. Instead, enable BITREVERSE.
+
+	  Architectures may want to select it as a fall-back option for
+	  HAVE_ARCH_BITREVERSE, when the hardware-accelerated bit reverse
+	  instruction set is optional, like RISC-V ZBKB extension.
 
 config ARCH_HAS_STRNCPY_FROM_USER
 	bool
@@ -138,6 +140,7 @@ config TRACE_MMIO_ACCESS
 
 source "lib/crc/Kconfig"
 source "lib/crypto/Kconfig"
+source "lib/raid/Kconfig"
 
 config XXHASH
 	tristate
@@ -155,12 +158,6 @@ config AUDIT_COMPAT_GENERIC
 	bool
 	depends on AUDIT_GENERIC && AUDIT_ARCH_COMPAT_GENERIC && COMPAT
 	default y
-
-config RANDOM32_SELFTEST
-	bool "PRNG perform self test on init"
-	help
-	  This option enables the 32 bit PRNG library functions to perform a
-	  self test on initialization.
 
 #
 # compression support is select'ed if needed
@@ -430,19 +427,6 @@ config GLOB
 	  are compiling an out-of tree driver which tells you that it
 	  depends on this.
 
-config GLOB_SELFTEST
-	tristate "glob self-test on init"
-	depends on GLOB
-	help
-	  This option enables a simple self-test of the glob_match
-	  function on startup.	It is primarily useful for people
-	  working on the code to ensure they haven't introduced any
-	  regressions.
-
-	  It only adds a little bit of code and slows kernel boot (or
-	  module load) by a small amount, so you're welcome to play with
-	  it, but you probably don't need it.
-
 #
 # Netlink attribute parsing support is select'ed if needed
 #
@@ -542,6 +526,9 @@ config MEMREGION
 config ARCH_HAS_CPU_CACHE_INVALIDATE_MEMREGION
 	bool
 
+config GENERIC_CPU_CACHE_MAINTENANCE
+	bool
+
 config ARCH_HAS_MEMREMAP_COMPAT_ALIGN
 	bool
 
@@ -599,7 +586,7 @@ config OBJAGG
 config LWQ_TEST
 	bool "Boot-time test for lwq queuing"
 	help
-          Run boot-time test of light-weight queuing.
+	  Run boot-time test of light-weight queuing.
 
 endmenu
 
@@ -633,9 +620,6 @@ config PLDMFW
 	default n
 
 config ASN1_ENCODER
-       tristate
-
-config POLYNOMIAL
        tristate
 
 config FIRMWARE_TABLE

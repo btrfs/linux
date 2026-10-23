@@ -18,8 +18,6 @@
 #include <linux/delay.h>
 #include <linux/gfp.h>
 #include <linux/of_address.h>
-#include <linux/of_irq.h>
-#include <linux/of_platform.h>
 #include <linux/list.h>
 #include <linux/slab.h>
 
@@ -267,14 +265,8 @@ static irqreturn_t fsl_dma_isr(int irq, void *dev_id)
 /**
  * fsl_dma_new: initialize this PCM driver.
  *
- * This function is called when the codec driver calls snd_soc_new_pcms(),
- * once for each .dai_link in the machine driver's snd_soc_card
- * structure.
- *
- * snd_dma_alloc_pages() is just a front-end to dma_alloc_coherent(), which
- * (currently) always allocates the DMA buffer in lowmem, even if GFP_HIGHMEM
- * is specified. Therefore, any DMA buffers we allocate will always be in low
- * memory, but we support for 36-bit physical addresses anyway.
+ * This function is called by soc_new_pcm(), once for each DAI link
+ * in the machine driver's snd_soc_card structure.
  *
  * Regardless of where the memory is actually allocated, since the device can
  * technically DMA to any 36-bit address, we do need to set the DMA mask to 36.
@@ -830,8 +822,33 @@ static int fsl_soc_dma_probe(struct platform_device *pdev)
 	struct device_node *np = pdev->dev.of_node;
 	struct device_node *ssi_np;
 	struct resource res;
+	void __iomem *channel;
 	const uint32_t *iprop;
+	int irq;
 	int ret;
+
+	channel = devm_platform_ioremap_resource(pdev, 0);
+	if (IS_ERR(channel))
+		return PTR_ERR(channel);
+
+	irq = platform_get_irq(pdev, 0);
+	if (irq < 0)
+		return irq;
+
+	dma = devm_kzalloc(&pdev->dev, sizeof(*dma), GFP_KERNEL);
+	if (!dma)
+		return -ENOMEM;
+
+	dma->dai.name = DRV_NAME;
+	dma->dai.open = fsl_dma_open;
+	dma->dai.close = fsl_dma_close;
+	dma->dai.hw_params = fsl_dma_hw_params;
+	dma->dai.hw_free = fsl_dma_hw_free;
+	dma->dai.pointer = fsl_dma_pointer;
+	dma->dai.pcm_new = fsl_dma_new;
+
+	dma->channel = channel;
+	dma->irq = irq;
 
 	/* Find the SSI node that points to us. */
 	ssi_np = find_ssi_node(np);
@@ -848,55 +865,19 @@ static int fsl_soc_dma_probe(struct platform_device *pdev)
 		return ret;
 	}
 
-	dma = kzalloc(sizeof(*dma), GFP_KERNEL);
-	if (!dma) {
-		of_node_put(ssi_np);
-		return -ENOMEM;
-	}
-
-	dma->dai.name = DRV_NAME;
-	dma->dai.open = fsl_dma_open;
-	dma->dai.close = fsl_dma_close;
-	dma->dai.hw_params = fsl_dma_hw_params;
-	dma->dai.hw_free = fsl_dma_hw_free;
-	dma->dai.pointer = fsl_dma_pointer;
-	dma->dai.pcm_construct = fsl_dma_new;
-
 	/* Store the SSI-specific information that we need */
 	dma->ssi_stx_phys = res.start + REG_SSI_STX0;
 	dma->ssi_srx_phys = res.start + REG_SSI_SRX0;
 
 	iprop = of_get_property(ssi_np, "fsl,fifo-depth", NULL);
+	of_node_put(ssi_np);
 	if (iprop)
 		dma->ssi_fifo_depth = be32_to_cpup(iprop);
 	else
                 /* Older 8610 DTs didn't have the fifo-depth property */
 		dma->ssi_fifo_depth = 8;
 
-	of_node_put(ssi_np);
-
-	ret = devm_snd_soc_register_component(&pdev->dev, &dma->dai, NULL, 0);
-	if (ret) {
-		dev_err(&pdev->dev, "could not register platform\n");
-		kfree(dma);
-		return ret;
-	}
-
-	dma->channel = of_iomap(np, 0);
-	dma->irq = irq_of_parse_and_map(np, 0);
-
-	dev_set_drvdata(&pdev->dev, dma);
-
-	return 0;
-}
-
-static void fsl_soc_dma_remove(struct platform_device *pdev)
-{
-	struct dma_object *dma = dev_get_drvdata(&pdev->dev);
-
-	iounmap(dma->channel);
-	irq_dispose_mapping(dma->irq);
-	kfree(dma);
+	return devm_snd_soc_register_component(&pdev->dev, &dma->dai, NULL, 0);
 }
 
 static const struct of_device_id fsl_soc_dma_ids[] = {
@@ -911,7 +892,6 @@ static struct platform_driver fsl_soc_dma_driver = {
 		.of_match_table = fsl_soc_dma_ids,
 	},
 	.probe = fsl_soc_dma_probe,
-	.remove = fsl_soc_dma_remove,
 };
 
 module_platform_driver(fsl_soc_dma_driver);

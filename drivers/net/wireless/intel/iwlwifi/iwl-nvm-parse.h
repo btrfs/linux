@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause */
 /*
- * Copyright (C) 2005-2015, 2018-2025 Intel Corporation
+ * Copyright (C) 2005-2015, 2018-2026 Intel Corporation
  * Copyright (C) 2016-2017 Intel Deutschland GmbH
  */
 #ifndef __iwl_nvm_parse_h__
@@ -22,6 +22,19 @@ enum iwl_nvm_sbands_flags {
 };
 
 /**
+ * enum iwl_puncturing_status - EHT puncturing status from MCC capabilities
+ * @IWL_PUNCTURING_STATUS_UNKNOWN: puncturing status is not provided by FW
+ *	or is not initialized yet
+ * @IWL_PUNCTURING_STATUS_ENABLED: puncturing is enabled for the current MCC
+ * @IWL_PUNCTURING_STATUS_DISABLED: puncturing is disabled for the current MCC
+ */
+enum iwl_puncturing_status {
+	IWL_PUNCTURING_STATUS_UNKNOWN,
+	IWL_PUNCTURING_STATUS_ENABLED,
+	IWL_PUNCTURING_STATUS_DISABLED,
+};
+
+/**
  * struct iwl_reg_capa - struct for global regulatory capabilities, Used for
  * handling the different APIs of reg_capa_flags.
  *
@@ -35,6 +48,9 @@ enum iwl_nvm_sbands_flags {
  *	for this regulatory domain (valid only in 6 Ghz).
  * @disable_11ax: 11ax is forbidden for this regulatory domain.
  * @disable_11be: 11be is forbidden for this regulatory domain.
+ * @disable_11bn: UHR/11bn is not allowed for this regulatory domain
+ * @puncturing_status: EHT puncturing status for the current MCC.
+ *	See &enum iwl_puncturing_status.
  */
 struct iwl_reg_capa {
 	bool allow_40mhz;
@@ -43,6 +59,8 @@ struct iwl_reg_capa {
 	bool allow_320mhz;
 	bool disable_11ax;
 	bool disable_11be;
+	bool disable_11bn;
+	enum iwl_puncturing_status puncturing_status;
 };
 
 /**
@@ -115,11 +133,12 @@ iwl_parse_nvm_data(struct iwl_trans *trans, const struct iwl_rf_cfg *cfg,
  * iwl_parse_nvm_mcc_info - parse MCC (mobile country code) info coming from FW
  *
  * This function parses the regulatory channel data received as a
- * MCC_UPDATE_CMD command. It returns a newly allocation regulatory domain,
- * to be fed into the regulatory core. In case the geo_info is set handle
- * accordingly. An ERR_PTR is returned on error.
- * If not given to the regulatory core, the user is responsible for freeing
- * the regdomain returned here with kfree.
+ * MCC_UPDATE_CMD command.
+ *
+ * Return: a newly allocation regulatory domain, to be given to the regulatory
+ *	core. In case the geo_info is set handle accordingly. An ERR_PTR is
+ *	returned on error. If not given to the regulatory core, the user is
+ *	responsible for freeing the regdomain returned here with kfree().
  *
  * @trans: the transport
  * @num_of_ch: the number of channels
@@ -128,11 +147,13 @@ iwl_parse_nvm_data(struct iwl_trans *trans, const struct iwl_rf_cfg *cfg,
  * @geo_info: geo info value
  * @cap: capability
  * @resp_ver: FW response version
+ * @puncturing_status: FW puncturing status for current MCC, when available
  */
 struct ieee80211_regdomain *
 iwl_parse_nvm_mcc_info(struct iwl_trans *trans,
 		       int num_of_ch, __le32 *channels, u16 fw_mcc,
-		       u16 geo_info, u32 cap, u8 resp_ver);
+		       u16 geo_info, u32 cap, u8 resp_ver,
+		       enum iwl_puncturing_status *puncturing_status);
 
 /**
  * struct iwl_nvm_section - describes an NVM section in memory.
@@ -140,6 +161,8 @@ iwl_parse_nvm_mcc_info(struct iwl_trans *trans,
  * This struct holds an NVM section read from the NIC using NVM_ACCESS_CMD,
  * and saved for later use by the driver. Not all NVM sections are saved
  * this way, only the needed ones.
+ * @length: length of the section
+ * @data: section data
  */
 struct iwl_nvm_section {
 	u16 length;
@@ -148,6 +171,10 @@ struct iwl_nvm_section {
 
 /**
  * iwl_read_external_nvm - Reads external NVM from a file into nvm_sections
+ * @trans: the transport
+ * @nvm_file_name: the filename to request
+ * @nvm_sections: sections data to fill
+ * Return: 0 on success or an error code
  */
 int iwl_read_external_nvm(struct iwl_trans *trans,
 			  const char *nvm_file_name,

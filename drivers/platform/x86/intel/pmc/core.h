@@ -14,9 +14,14 @@
 
 #include <linux/acpi.h>
 #include <linux/bits.h>
+#include <linux/cleanup.h>
+#include <linux/intel_vsec.h>
 #include <linux/platform_device.h>
+#include <linux/uuid.h>
 
 struct telem_endpoint;
+
+DEFINE_FREE(pmc_acpi_free, void *, if (_T) ACPI_FREE(_T))
 
 #define SLP_S0_RES_COUNTER_MASK			GENMASK(31, 0)
 
@@ -46,7 +51,7 @@ struct telem_endpoint;
 #define SPT_PMC_SLP_S0_RES_COUNTER_STEP		0x68
 #define PMC_BASE_ADDR_MASK			~(SPT_PMC_MMIO_REG_LEN - 1)
 #define MTPMC_MASK				0xffff0000
-#define PPFEAR_MAX_NUM_ENTRIES			12
+#define PPFEAR_MAX_NUM_ENTRIES			13
 #define SPT_PPFEAR_NUM_ENTRIES			5
 #define SPT_PMC_READ_DISABLE_BIT		0x16
 #define SPT_PMC_MSG_FULL_STS_BIT		0x18
@@ -282,7 +287,8 @@ enum ppfear_regs {
 /* Die C6 from PUNIT telemetry */
 #define MTL_PMT_DMU_DIE_C6_OFFSET		15
 #define MTL_PMT_DMU_GUID			0x1A067102
-#define ARL_PMT_DMU_GUID			0x1A06A000
+#define ARL_PMT_DMU_GUID			0x1A06A102
+#define ARL_H_PMT_DMU_GUID			0x1A06A101
 
 #define LNL_PMC_MMIO_REG_LEN			0x2708
 #define LNL_PMC_LTR_OSSE			0x1B88
@@ -303,6 +309,31 @@ enum ppfear_regs {
 /* Wildcat Lake */
 #define WCL_PMC_LTR_RESERVED			0x1B64
 #define WCL_PCD_PMC_MMIO_REG_LEN		0x3178
+#define WCL_NUM_S0IX_BLOCKER			94
+#define WCL_BLK_REQ_OFFSET			50
+
+/* Nova Lake */
+#define NVL_PCDH_PPFEAR_NUM_ENTRIES		13
+#define NVL_PCDH_PMC_MMIO_REG_LEN		0x363c
+#define NVL_PCDS_PMC_MMIO_REG_LEN		0x3118
+#define NVL_PCHS_PMC_MMIO_REG_LEN		0x30d8
+#define NVL_LPM_PRI_OFFSET			0x17a4
+#define NVL_LPM_EN_OFFSET			0x17a0
+#define NVL_LPM_RESIDENCY_OFFSET		0x17a8
+#define NVL_LPM_LIVE_STATUS_OFFSET		0x1760
+#define NVL_LPM_NUM_MAPS			15
+#define NVL_PCDH_NUM_S0IX_BLOCKER		107
+#define NVL_PCDS_NUM_S0IX_BLOCKER		71
+#define NVL_PCHS_NUM_S0IX_BLOCKER		54
+#define NVL_PCDS_PMC_LTR_RESERVED		0x1bac
+#define NVL_PCDH_BLK_REQ_OFFSET			53
+#define NVL_PCDS_BLK_REQ_OFFSET			18
+#define NVL_PCHS_BLK_REQ_OFFSET			46
+#define NVL_PMT_PC_GUID				0x13000101
+#define NVL_PMT_DMU_GUID			0x1a000101
+#define NVL_LTR_BLK_OFFSET			64
+#define NVL_PKGC_BLK_OFFSET			4
+#define NVL_PMT_DMU_DIE_C6_OFFSET		25
 
 /* SSRAM PMC Device ID */
 /* LNL */
@@ -325,6 +356,11 @@ enum ppfear_regs {
 #define PMC_DEVID_MTL_SOCM	0x7e7f
 #define PMC_DEVID_MTL_IOEP	0x7ecf
 #define PMC_DEVID_MTL_IOEM	0x7ebf
+
+/* NVL */
+#define PMC_DEVID_NVL_PCDH	0xd37e
+#define PMC_DEVID_NVL_PCDS	0xd47e
+#define PMC_DEVID_NVL_PCHS	0x6e27
 
 extern const char *pmc_lpm_modes[];
 
@@ -355,6 +391,7 @@ struct pmc_bit_map {
  * @s0ix_blocker_offset PWRMBASE offset to S0ix blocker counter
  * @num_s0ix_blocker:	Number of S0ix blockers
  * @blocker_req_offset:	Telemetry offset to S0ix blocker low power mode substate requirement table
+ * @lpm_req_guid:	Telemetry GUID to read low power mode substate requirement table
  *
  * Each PCH has unique set of register offsets and bit indexes. This structure
  * captures them to have a common implementation.
@@ -396,6 +433,8 @@ struct pmc_reg_map {
 	const u8  *lpm_reg_index;
 	const u32 pson_residency_offset;
 	const u32 pson_residency_counter_step;
+	/* GUID for telemetry regions */
+	const u32 lpm_req_guid;
 };
 
 /**
@@ -405,7 +444,6 @@ struct pmc_reg_map {
  *			specific attributes
  */
 struct pmc_info {
-	u32 guid;
 	u16 devid;
 	const struct pmc_reg_map *map;
 };
@@ -418,6 +456,9 @@ struct pmc_info {
  *			specific attributes
  * @lpm_req_regs:	List of substate requirements
  * @ltr_ign:		Holds LTR ignore data while suspended
+ * @num_lpm_modes:	Count of enabled modes
+ * @lpm_en_modes:	Array of enabled modes from lowest to highest priority
+ * @devid:		Device ID of the SSRAM device
  *
  * pmc contains info about one power management controller device.
  */
@@ -427,6 +468,9 @@ struct pmc {
 	const struct pmc_reg_map *map;
 	u32 *lpm_req_regs;
 	u32 ltr_ign;
+	u8 num_lpm_modes;
+	u8 lpm_en_modes[LPM_MAX_NUM_MODES];
+	u16 devid;
 };
 
 /**
@@ -441,10 +485,13 @@ struct pmc {
  * @pkgc_res_cnt:	Array of PKGC residency counters
  * @num_of_pkgc:	Number of PKGC
  * @s0ix_counter:	S0ix residency (step adjusted)
- * @num_lpm_modes:	Count of enabled modes
- * @lpm_en_modes:	Array of enabled modes from lowest to highest priority
  * @suspend:		Function to perform platform specific suspend
  * @resume:		Function to perform platform specific resume
+ *
+ * @pkgc_ltr_blocker_counters: Array of PKGC LTR blocker counters
+ * @pkgc_ltr_blocker_offset: Offset to PKGC LTR blockers in telemetry region
+ * @pkgc_blocker_counters: Array of PKGC blocker counters
+ * @pkgc_blocker_offset: Offset to PKGC blocker in telemetry region
  *
  * pmc_dev contains info about power management controller device.
  */
@@ -457,18 +504,21 @@ struct pmc_dev {
 	struct mutex lock; /* generic mutex lock for PMC Core */
 
 	u64 s0ix_counter;
-	int num_lpm_modes;
-	int lpm_en_modes[LPM_MAX_NUM_MODES];
 	void (*suspend)(struct pmc_dev *pmcdev);
 	int (*resume)(struct pmc_dev *pmcdev);
 
 	u64 *pkgc_res_cnt;
 	u8 num_of_pkgc;
 
-	bool has_die_c6;
 	u32 die_c6_offset;
+	struct telem_endpoint *pc_ep;
 	struct telem_endpoint *punit_ep;
 	struct pmc_info *regmap_list;
+
+	const char **pkgc_ltr_blocker_counters;
+	u32 pkgc_ltr_blocker_offset;
+	const char **pkgc_blocker_counters;
+	u32 pkgc_blocker_offset;
 };
 
 enum pmc_index {
@@ -480,29 +530,45 @@ enum pmc_index {
 
 /**
  * struct pmc_dev_info - Structure to keep PMC device info
- * @pci_func:		Function number of the primary PMC
- * @dmu_guid:		Die Management Unit GUID
+ * @dmu_guids:		List of Die Management Unit GUID
+ * @pc_guid:		GUID for telemetry region to read PKGC blocker info
+ * @pkgc_ltr_blocker_offset: Offset to PKGC LTR blockers in telemetry region
+ * @pkgc_blocker_offset:Offset to PKGC blocker in telemetry region
+ * @num_pmcs:		Number of entries in @pmc_list
+ * @pmc_list:		Index list of available PMC
  * @regmap_list:	Pointer to a list of pmc_info structure that could be
  *			available for the platform. When set, this field implies
  *			SSRAM support.
  * @map:		Pointer to a pmc_reg_map struct that contains platform
  *			specific attributes of the primary PMC
  * @sub_req_show:	File operations to show substate requirements
+ * @pkgc_ltr_blocker_counters: Array of PKGC LTR blocker counters
+ * @pkgc_blocker_counters: Array of PKGC blocker counters
  * @suspend:		Function to perform platform specific suspend
  * @resume:		Function to perform platform specific resume
  * @init:		Function to perform platform specific init action
  * @sub_req:		Function to achieve low power mode substate requirements
+ * @ssram_hidden:	Some SSRAM devices are hidden on this platform
+ * @die_c6_offset:	Telemetry offset to read Die C6 residency
  */
 struct pmc_dev_info {
-	u8 pci_func;
-	u32 dmu_guid;
+	u32 *dmu_guids;
+	u32 pc_guid;
+	u32 pkgc_ltr_blocker_offset;
+	u32 pkgc_blocker_offset;
+	u8 num_pmcs;
+	const u8 *pmc_list;
 	struct pmc_info *regmap_list;
 	const struct pmc_reg_map *map;
 	const struct file_operations *sub_req_show;
+	const char **pkgc_ltr_blocker_counters;
+	const char **pkgc_blocker_counters;
 	void (*suspend)(struct pmc_dev *pmcdev);
 	int (*resume)(struct pmc_dev *pmcdev);
 	int (*init)(struct pmc_dev *pmcdev, struct pmc_dev_info *pmc_dev_info);
 	int (*sub_req)(struct pmc_dev *pmcdev, struct pmc *pmc, struct telem_endpoint *ep);
+	bool ssram_hidden;
+	u32 die_c6_offset;
 };
 
 extern const struct pmc_bit_map msr_map[];
@@ -525,14 +591,14 @@ extern const struct pmc_reg_map mtl_ioep_reg_map;
 extern const struct pmc_bit_map ptl_pcdp_clocksource_status_map[];
 extern const struct pmc_bit_map ptl_pcdp_vnn_req_status_3_map[];
 extern const struct pmc_bit_map ptl_pcdp_signal_status_map[];
+extern const struct pmc_bit_map ptl_pcdp_ltr_show_map[];
 
 void pmc_core_get_tgl_lpm_reqs(struct platform_device *pdev);
 int pmc_core_send_ltr_ignore(struct pmc_dev *pmcdev, u32 value, int ignore);
 
 int pmc_core_resume_common(struct pmc_dev *pmcdev);
 int get_primary_reg_base(struct pmc *pmc);
-void pmc_core_get_low_power_modes(struct pmc_dev *pmcdev);
-void pmc_core_punit_pmt_init(struct pmc_dev *pmcdev, u32 guid);
+void pmc_core_punit_pmt_init(struct pmc_dev *pmcdev, struct pmc_dev_info *pmc_dev_info);
 void pmc_core_set_device_d3(unsigned int device);
 
 int generic_core_init(struct pmc_dev *pmcdev, struct pmc_dev_info *pmc_dev_info);
@@ -549,6 +615,8 @@ extern struct pmc_dev_info arl_h_pmc_dev;
 extern struct pmc_dev_info lnl_pmc_dev;
 extern struct pmc_dev_info ptl_pmc_dev;
 extern struct pmc_dev_info wcl_pmc_dev;
+extern struct pmc_dev_info nvl_s_pmc_dev;
+extern struct pmc_dev_info nvl_h_pmc_dev;
 
 void cnl_suspend(struct pmc_dev *pmcdev);
 int cnl_resume(struct pmc_dev *pmcdev);
@@ -559,10 +627,12 @@ int pmc_core_pmt_get_blk_sub_req(struct pmc_dev *pmcdev, struct pmc *pmc,
 extern const struct file_operations pmc_core_substate_req_regs_fops;
 extern const struct file_operations pmc_core_substate_blk_req_fops;
 
-#define pmc_for_each_mode(mode, pmcdev)						\
+extern const guid_t intel_vsec_guid;
+
+#define pmc_for_each_mode(mode, pmc)						\
 	for (unsigned int __i = 0, __cond;					\
-	     __cond = __i < (pmcdev)->num_lpm_modes,				\
-	     __cond && ((mode) = (pmcdev)->lpm_en_modes[__i]),			\
+	     __cond = __i < (pmc)->num_lpm_modes,				\
+	     __cond && ((mode) = (pmc)->lpm_en_modes[__i]),			\
 	     __cond;								\
 	     __i++)
 
@@ -580,4 +650,13 @@ static const struct file_operations __name ## _fops = {			\
 	.release	= single_release,				\
 }
 
+struct intel_vsec_header;
+union acpi_object;
+
+/* Avoid checkpatch warning */
+typedef u32 (*acpi_disc_t)[PMT_DISC_DWORDS];
+
+acpi_disc_t pmc_parse_telem_dsd(union acpi_object *obj,
+				struct intel_vsec_header *header);
+union acpi_object *pmc_find_telem_guid(union acpi_object *dsd);
 #endif /* PMC_CORE_H */

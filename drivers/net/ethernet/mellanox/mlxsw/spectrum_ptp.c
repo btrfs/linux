@@ -277,7 +277,7 @@ mlxsw_sp1_ptp_clock_init(struct mlxsw_sp *mlxsw_sp, struct device *dev)
 	struct mlxsw_sp1_ptp_clock *clock;
 	int err;
 
-	clock = kzalloc(sizeof(*clock), GFP_KERNEL);
+	clock = kzalloc_obj(*clock);
 	if (!clock)
 		return ERR_PTR(-ENOMEM);
 
@@ -446,7 +446,7 @@ mlxsw_sp2_ptp_clock_init(struct mlxsw_sp *mlxsw_sp, struct device *dev)
 	struct mlxsw_sp_ptp_clock *clock;
 	int err;
 
-	clock = kzalloc(sizeof(*clock), GFP_KERNEL);
+	clock = kzalloc_obj(*clock);
 	if (!clock)
 		return ERR_PTR(-ENOMEM);
 
@@ -524,7 +524,7 @@ mlxsw_sp1_ptp_unmatched_save(struct mlxsw_sp *mlxsw_sp,
 	struct mlxsw_sp1_ptp_unmatched *unmatched;
 	int err;
 
-	unmatched = kzalloc(sizeof(*unmatched), GFP_ATOMIC);
+	unmatched = kzalloc_obj(*unmatched, GFP_ATOMIC);
 	if (!unmatched)
 		return -ENOMEM;
 
@@ -572,6 +572,38 @@ mlxsw_sp1_ptp_unmatched_remove(struct mlxsw_sp *mlxsw_sp,
 			       mlxsw_sp1_ptp_unmatched_ht_params);
 }
 
+/* mlxsw_sp1_ptp_packet_finish() is reached both from the NAPI poll context
+ * (mlxsw_sp1_ptp_got_packet(), mlxsw_sp1_ptp_got_piece() and
+ * mlxsw_sp1_packet_timestamp()) and from process context, by way of the GC
+ * workqueue (mlxsw_sp1_ptp_ht_gc_collect() ->
+ * mlxsw_sp1_ptp_unmatched_finish()).
+ *
+ * mlxsw_sp_rx_listener_no_mark_func() ends in napi_gro_receive(), using the
+ * NAPI pointer that was placed in the SKB control block when the trapped
+ * packet was received in the NAPI context. That pointer may only be used
+ * from its own poll context, which this call site cannot guarantee.
+ *
+ * netif_receive_skb(), unlike napi_gro_receive(), can be called from outside
+ * of the NAPI instance's poll context. RX stats accounting and the skb->dev
+ * assignment are still preserved; the only change is the delivery call.
+ */
+static void mlxsw_sp1_ptp_rx_finish(struct mlxsw_sp_port *mlxsw_sp_port,
+				    struct sk_buff *skb)
+{
+	struct mlxsw_sp_port_pcpu_stats *pcpu_stats;
+
+	skb->dev = mlxsw_sp_port->dev;
+
+	pcpu_stats = this_cpu_ptr(mlxsw_sp_port->pcpu_stats);
+	u64_stats_update_begin(&pcpu_stats->syncp);
+	pcpu_stats->rx_packets++;
+	pcpu_stats->rx_bytes += skb->len;
+	u64_stats_update_end(&pcpu_stats->syncp);
+
+	skb->protocol = eth_type_trans(skb, skb->dev);
+	netif_receive_skb(skb);
+}
+
 /* This function is called in the following scenarios:
  *
  * 1) When a packet is matched with its timestamp.
@@ -600,7 +632,7 @@ static void mlxsw_sp1_ptp_packet_finish(struct mlxsw_sp *mlxsw_sp,
 	if (ingress) {
 		if (hwtstamps)
 			*skb_hwtstamps(skb) = *hwtstamps;
-		mlxsw_sp_rx_listener_no_mark_func(skb, local_port, mlxsw_sp);
+		mlxsw_sp1_ptp_rx_finish(mlxsw_sp_port, skb);
 	} else {
 		/* skb_tstamp_tx() allows hwtstamps to be NULL. */
 		skb_tstamp_tx(skb, hwtstamps);
@@ -1032,7 +1064,7 @@ struct mlxsw_sp_ptp_state *mlxsw_sp1_ptp_init(struct mlxsw_sp *mlxsw_sp)
 	if (err)
 		return ERR_PTR(err);
 
-	ptp_state = kzalloc(sizeof(*ptp_state), GFP_KERNEL);
+	ptp_state = kzalloc_obj(*ptp_state);
 	if (!ptp_state)
 		return ERR_PTR(-ENOMEM);
 	ptp_state->common.mlxsw_sp = mlxsw_sp;
@@ -1358,7 +1390,7 @@ struct mlxsw_sp_ptp_state *mlxsw_sp2_ptp_init(struct mlxsw_sp *mlxsw_sp)
 	if (!MLXSW_CORE_RES_VALID(mlxsw_sp->core, FID))
 		return ERR_PTR(-EIO);
 
-	ptp_state = kzalloc(sizeof(*ptp_state), GFP_KERNEL);
+	ptp_state = kzalloc_obj(*ptp_state);
 	if (!ptp_state)
 		return ERR_PTR(-ENOMEM);
 

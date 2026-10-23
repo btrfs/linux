@@ -77,7 +77,7 @@ found:
 static void synthesize_clac(kprobe_opcode_t *addr)
 {
 	/*
-	 * Can't be static_cpu_has() due to how objtool treats this feature bit.
+	 * Can't be cpu_feature_enabled() due to how objtool treats this feature bit.
 	 * This isn't a fast path anyway.
 	 */
 	if (!boot_cpu_has(X86_FEATURE_SMAP))
@@ -103,7 +103,6 @@ static void synthesize_set_arg1(kprobe_opcode_t *addr, unsigned long val)
 
 asm (
 			".pushsection .rodata\n"
-			"optprobe_template_func:\n"
 			".global optprobe_template_entry\n"
 			"optprobe_template_entry:\n"
 #ifdef CONFIG_X86_64
@@ -160,9 +159,6 @@ asm (
 			"optprobe_template_end:\n"
 			".popsection\n");
 
-void optprobe_template_func(void);
-STACK_FRAME_NON_STANDARD(optprobe_template_func);
-
 #define TMPL_CLAC_IDX \
 	((long)optprobe_template_clac - (long)optprobe_template_entry)
 #define TMPL_MOVE_IDX \
@@ -217,7 +213,6 @@ static int copy_optimized_instructions(u8 *dest, u8 *src, u8 *real)
 	}
 	/* Check whether the address range is reserved */
 	if (ftrace_text_reserved(src, src + len - 1) ||
-	    alternatives_text_reserved(src, src + len - 1) ||
 	    jump_label_text_reserved(src, src + len - 1) ||
 	    static_call_text_reserved(src, src + len - 1))
 		return -EBUSY;

@@ -49,13 +49,26 @@ pub unsafe trait FromBytes {
         let slice_ptr = bytes.as_ptr().cast::<Self>();
         let size = size_of::<Self>();
 
-        #[allow(clippy::incompatible_msrv)]
         if bytes.len() == size && slice_ptr.is_aligned() {
             // SAFETY: Size and alignment were just checked.
             unsafe { Some(&*slice_ptr) }
         } else {
             None
         }
+    }
+
+    /// Converts the beginning of `bytes` to a reference to `Self`.
+    ///
+    /// This method is similar to [`Self::from_bytes`], with the difference that `bytes` does not
+    /// need to be the same size of `Self` - the appropriate portion is cut from the beginning of
+    /// `bytes`, and the remainder returned alongside `Self`.
+    fn from_bytes_prefix(bytes: &[u8]) -> Option<(&Self, &[u8])>
+    where
+        Self: Sized,
+    {
+        let (prefix, remainder) = bytes.split_at_checked(size_of::<Self>())?;
+
+        Self::from_bytes(prefix).map(|s| (s, remainder))
     }
 
     /// Converts a mutable slice of bytes to a reference to `Self`.
@@ -71,13 +84,26 @@ pub unsafe trait FromBytes {
         let slice_ptr = bytes.as_mut_ptr().cast::<Self>();
         let size = size_of::<Self>();
 
-        #[allow(clippy::incompatible_msrv)]
         if bytes.len() == size && slice_ptr.is_aligned() {
             // SAFETY: Size and alignment were just checked.
             unsafe { Some(&mut *slice_ptr) }
         } else {
             None
         }
+    }
+
+    /// Converts the beginning of `bytes` to a mutable reference to `Self`.
+    ///
+    /// This method is similar to [`Self::from_bytes_mut`], with the difference that `bytes` does
+    /// not need to be the same size of `Self` - the appropriate portion is cut from the beginning
+    /// of `bytes`, and the remainder returned alongside `Self`.
+    fn from_bytes_mut_prefix(bytes: &mut [u8]) -> Option<(&mut Self, &mut [u8])>
+    where
+        Self: AsBytes + Sized,
+    {
+        let (prefix, remainder) = bytes.split_at_mut_checked(size_of::<Self>())?;
+
+        Self::from_bytes_mut(prefix).map(|s| (s, remainder))
     }
 
     /// Creates an owned instance of `Self` by copying `bytes`.
@@ -97,6 +123,20 @@ pub unsafe trait FromBytes {
             None
         }
     }
+
+    /// Creates an owned instance of `Self` from the beginning of `bytes`.
+    ///
+    /// This method is similar to [`Self::from_bytes_copy`], with the difference that `bytes` does
+    /// not need to be the same size of `Self` - the appropriate portion is cut from the beginning
+    /// of `bytes`, and the remainder returned alongside `Self`.
+    fn from_bytes_copy_prefix(bytes: &[u8]) -> Option<(Self, &[u8])>
+    where
+        Self: Sized,
+    {
+        let (prefix, remainder) = bytes.split_at_checked(size_of::<Self>())?;
+
+        Self::from_bytes_copy(prefix).map(|s| (s, remainder))
+    }
 }
 
 macro_rules! impl_frombytes {
@@ -107,6 +147,10 @@ macro_rules! impl_frombytes {
 }
 
 impl_frombytes! {
+    // SAFETY: Inhabited ZSTs only have one possible bit pattern, and these two have no invariant.
+    (),
+    {<T>} core::marker::PhantomData<T>,
+
     // SAFETY: All bit patterns are acceptable values of the types below.
     u8, u16, u32, u64, usize,
     i8, i16, i32, i64, isize,
@@ -167,6 +211,10 @@ macro_rules! impl_asbytes {
 }
 
 impl_asbytes! {
+    // SAFETY: Inhabited ZSTs only have one possible bit pattern, and these two have no invariant.
+    (),
+    {<T>} core::marker::PhantomData<T>,
+
     // SAFETY: Instances of the following types have no uninitialized portions.
     u8, u16, u32, u64, usize,
     i8, i16, i32, i64, isize,

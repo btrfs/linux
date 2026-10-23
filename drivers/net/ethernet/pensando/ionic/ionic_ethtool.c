@@ -115,9 +115,32 @@ static void ionic_get_link_ext_stats(struct net_device *netdev,
 				     struct ethtool_link_ext_stats *stats)
 {
 	struct ionic_lif *lif = netdev_priv(netdev);
+	struct ionic *ionic = lif->ionic;
+	u64 link_down_count_total;
+	u16 link_down_count_fw;
 
-	if (lif->ionic->pdev->is_physfn)
-		stats->link_down_events = lif->link_down_count;
+	if (ionic->pdev->is_virtfn)
+		return;
+
+	if (!ionic->idev.port_info) {
+		netdev_err_once(netdev, "port_info not initialized\n");
+		return;
+	}
+
+	link_down_count_fw =
+	    le16_to_cpu(ionic->idev.port_info->status.link_down_count);
+	link_down_count_total = ionic->idev.link_down_count_total +
+				link_down_count_fw -
+				ionic->idev.link_down_count_last;
+
+	/* The firmware counter is only 16 bits and can wraparound */
+	if (link_down_count_fw < ionic->idev.link_down_count_last)
+		link_down_count_total += BIT(16);
+
+	ionic->idev.link_down_count_last = link_down_count_fw;
+	ionic->idev.link_down_count_total = link_down_count_total;
+
+	stats->link_down_events = link_down_count_total;
 }
 
 static int ionic_get_link_ksettings(struct net_device *netdev,
@@ -188,10 +211,9 @@ static int ionic_get_link_ksettings(struct net_device *netdev,
 	case IONIC_XCVR_PID_QSFP_100G_CWDM4:
 	case IONIC_XCVR_PID_QSFP_100G_PSM4:
 	case IONIC_XCVR_PID_QSFP_100G_LR4:
-		ethtool_link_ksettings_add_link_mode(ks, supported,
-						     100000baseLR4_ER4_Full);
-		break;
 	case IONIC_XCVR_PID_QSFP_100G_ER4:
+	case IONIC_XCVR_PID_QSFP_100G_FR4:
+	case IONIC_XCVR_PID_QSFP_100G_DR4:
 		ethtool_link_ksettings_add_link_mode(ks, supported,
 						     100000baseLR4_ER4_Full);
 		break;
@@ -212,6 +234,7 @@ static int ionic_get_link_ksettings(struct net_device *netdev,
 		break;
 	case IONIC_XCVR_PID_QSFP_200G_AOC:
 	case IONIC_XCVR_PID_QSFP_200G_SR4:
+	case IONIC_XCVR_PID_QSFP_200G_AEC:
 		ethtool_link_ksettings_add_link_mode(ks, supported,
 						     200000baseSR4_Full);
 		break;
@@ -232,6 +255,9 @@ static int ionic_get_link_ksettings(struct net_device *netdev,
 						     400000baseDR4_Full);
 		break;
 	case IONIC_XCVR_PID_QSFP_400G_SR4:
+	case IONIC_XCVR_PID_QSFP_400G_AOC:
+	case IONIC_XCVR_PID_QSFP_400G_AEC:
+	case IONIC_XCVR_PID_QSFP_400G_LPO:
 		ethtool_link_ksettings_add_link_mode(ks, supported,
 						     400000baseSR4_Full);
 		break;
@@ -263,9 +289,10 @@ static int ionic_get_link_ksettings(struct net_device *netdev,
 		/* This means there's no module plugged in */
 		break;
 	default:
-		dev_info(lif->ionic->dev, "unknown xcvr type pid=%d / 0x%x\n",
-			 idev->port_info->status.xcvr.pid,
-			 idev->port_info->status.xcvr.pid);
+		dev_dbg_ratelimited(lif->ionic->dev,
+				    "unknown xcvr type pid=%d / 0x%x\n",
+				    idev->port_info->status.xcvr.pid,
+				    idev->port_info->status.xcvr.pid);
 		break;
 	}
 
@@ -843,23 +870,11 @@ static int ionic_set_channels(struct net_device *netdev,
 	return err;
 }
 
-static int ionic_get_rxnfc(struct net_device *netdev,
-			   struct ethtool_rxnfc *info, u32 *rules)
+static u32 ionic_get_rx_ring_count(struct net_device *netdev)
 {
 	struct ionic_lif *lif = netdev_priv(netdev);
-	int err = 0;
 
-	switch (info->cmd) {
-	case ETHTOOL_GRXRINGS:
-		info->data = lif->nxqs;
-		break;
-	default:
-		netdev_dbg(netdev, "Command parameter %d is not supported\n",
-			   info->cmd);
-		err = -EOPNOTSUPP;
-	}
-
-	return err;
+	return lif->nxqs;
 }
 
 static u32 ionic_get_rxfh_indir_size(struct net_device *netdev)
@@ -1026,10 +1041,14 @@ static int ionic_get_ts_info(struct net_device *netdev,
 
 	info->phc_index = ptp_clock_index(lif->phc->ptp);
 
-	info->so_timestamping = SOF_TIMESTAMPING_TX_SOFTWARE |
-				SOF_TIMESTAMPING_TX_HARDWARE |
-				SOF_TIMESTAMPING_RX_HARDWARE |
-				SOF_TIMESTAMPING_RAW_HARDWARE;
+	info->so_timestamping = SOF_TIMESTAMPING_TX_SOFTWARE;
+
+	if (!(lif->hw_features & IONIC_ETH_HW_TIMESTAMP))
+		return 0;
+
+	info->so_timestamping |= SOF_TIMESTAMPING_TX_HARDWARE |
+				 SOF_TIMESTAMPING_RX_HARDWARE |
+				 SOF_TIMESTAMPING_RAW_HARDWARE;
 
 	/* tx modes */
 
@@ -1152,7 +1171,7 @@ static const struct ethtool_ops ionic_ethtool_ops = {
 	.get_strings		= ionic_get_strings,
 	.get_ethtool_stats	= ionic_get_stats,
 	.get_sset_count		= ionic_get_sset_count,
-	.get_rxnfc		= ionic_get_rxnfc,
+	.get_rx_ring_count	= ionic_get_rx_ring_count,
 	.get_rxfh_indir_size	= ionic_get_rxfh_indir_size,
 	.get_rxfh_key_size	= ionic_get_rxfh_key_size,
 	.get_rxfh		= ionic_get_rxfh,

@@ -403,20 +403,20 @@ static ssize_t mxic_spi_mem_dirmap_read(struct spi_mem_dirmap_desc *desc,
 	if (WARN_ON(offs + desc->info.offset + len > U32_MAX))
 		return -EINVAL;
 
-	writel(mxic_spi_prep_hc_cfg(desc->mem->spi, 0, desc->info.op_tmpl.data.swap16),
+	writel(mxic_spi_prep_hc_cfg(desc->mem->spi, 0, desc->info.op_tmpl->data.swap16),
 	       mxic->regs + HC_CFG);
 
-	writel(mxic_spi_mem_prep_op_cfg(&desc->info.op_tmpl, len),
+	writel(mxic_spi_mem_prep_op_cfg(desc->info.op_tmpl, len),
 	       mxic->regs + LRD_CFG);
 	writel(desc->info.offset + offs, mxic->regs + LRD_ADDR);
 	len = min_t(size_t, len, mxic->linear.size);
 	writel(len, mxic->regs + LRD_RANGE);
-	writel(LMODE_CMD0(desc->info.op_tmpl.cmd.opcode) |
+	writel(LMODE_CMD0(desc->info.op_tmpl->cmd.opcode) |
 	       LMODE_SLV_ACT(spi_get_chipselect(desc->mem->spi, 0)) |
 	       LMODE_EN,
 	       mxic->regs + LRD_CTRL);
 
-	if (mxic->ecc.use_pipelined_conf && desc->info.op_tmpl.data.ecc) {
+	if (mxic->ecc.use_pipelined_conf && desc->info.op_tmpl->data.ecc) {
 		ret = mxic_ecc_process_data_pipelined(mxic->ecc.pipelined_engine,
 						      NAND_PAGE_READ,
 						      mxic->linear.dma + offs);
@@ -448,20 +448,20 @@ static ssize_t mxic_spi_mem_dirmap_write(struct spi_mem_dirmap_desc *desc,
 	if (WARN_ON(offs + desc->info.offset + len > U32_MAX))
 		return -EINVAL;
 
-	writel(mxic_spi_prep_hc_cfg(desc->mem->spi, 0, desc->info.op_tmpl.data.swap16),
+	writel(mxic_spi_prep_hc_cfg(desc->mem->spi, 0, desc->info.op_tmpl->data.swap16),
 	       mxic->regs + HC_CFG);
 
-	writel(mxic_spi_mem_prep_op_cfg(&desc->info.op_tmpl, len),
+	writel(mxic_spi_mem_prep_op_cfg(desc->info.op_tmpl, len),
 	       mxic->regs + LWR_CFG);
 	writel(desc->info.offset + offs, mxic->regs + LWR_ADDR);
 	len = min_t(size_t, len, mxic->linear.size);
 	writel(len, mxic->regs + LWR_RANGE);
-	writel(LMODE_CMD0(desc->info.op_tmpl.cmd.opcode) |
+	writel(LMODE_CMD0(desc->info.op_tmpl->cmd.opcode) |
 	       LMODE_SLV_ACT(spi_get_chipselect(desc->mem->spi, 0)) |
 	       LMODE_EN,
 	       mxic->regs + LWR_CTRL);
 
-	if (mxic->ecc.use_pipelined_conf && desc->info.op_tmpl.data.ecc) {
+	if (mxic->ecc.use_pipelined_conf && desc->info.op_tmpl->data.ecc) {
 		ret = mxic_ecc_process_data_pipelined(mxic->ecc.pipelined_engine,
 						      NAND_PAGE_WRITE,
 						      mxic->linear.dma + offs);
@@ -509,7 +509,7 @@ static int mxic_spi_mem_dirmap_create(struct spi_mem_dirmap_desc *desc)
 	if (desc->info.offset + desc->info.length > U32_MAX)
 		return -EINVAL;
 
-	if (!mxic_spi_mem_supports_op(desc->mem, &desc->info.op_tmpl))
+	if (!mxic_spi_mem_supports_op(desc->mem, desc->info.op_tmpl))
 		return -EOPNOTSUPP;
 
 	return 0;
@@ -721,7 +721,7 @@ static int mxic_spi_mem_ecc_probe(struct platform_device *pdev,
 	return 0;
 }
 
-static int __maybe_unused mxic_spi_runtime_suspend(struct device *dev)
+static int mxic_spi_runtime_suspend(struct device *dev)
 {
 	struct spi_controller *host = dev_get_drvdata(dev);
 	struct mxic_spi *mxic = spi_controller_get_devdata(host);
@@ -732,7 +732,7 @@ static int __maybe_unused mxic_spi_runtime_suspend(struct device *dev)
 	return 0;
 }
 
-static int __maybe_unused mxic_spi_runtime_resume(struct device *dev)
+static int mxic_spi_runtime_resume(struct device *dev)
 {
 	struct spi_controller *host = dev_get_drvdata(dev);
 	struct mxic_spi *mxic = spi_controller_get_devdata(host);
@@ -748,8 +748,7 @@ static int __maybe_unused mxic_spi_runtime_resume(struct device *dev)
 }
 
 static const struct dev_pm_ops mxic_spi_dev_pm_ops = {
-	SET_RUNTIME_PM_OPS(mxic_spi_runtime_suspend,
-			   mxic_spi_runtime_resume, NULL)
+	RUNTIME_PM_OPS(mxic_spi_runtime_suspend, mxic_spi_runtime_resume, NULL)
 };
 
 static int mxic_spi_probe(struct platform_device *pdev)
@@ -768,7 +767,6 @@ static int mxic_spi_probe(struct platform_device *pdev)
 	mxic = spi_controller_get_devdata(host);
 	mxic->dev = &pdev->dev;
 
-	host->dev.of_node = pdev->dev.of_node;
 
 	mxic->ps_clk = devm_clk_get(&pdev->dev, "ps_clk");
 	if (IS_ERR(mxic->ps_clk))
@@ -833,9 +831,10 @@ static void mxic_spi_remove(struct platform_device *pdev)
 	struct spi_controller *host = platform_get_drvdata(pdev);
 	struct mxic_spi *mxic = spi_controller_get_devdata(host);
 
+	spi_unregister_controller(host);
+
 	pm_runtime_disable(&pdev->dev);
 	mxic_spi_mem_ecc_remove(mxic);
-	spi_unregister_controller(host);
 }
 
 static const struct of_device_id mxic_spi_of_ids[] = {
@@ -850,7 +849,7 @@ static struct platform_driver mxic_spi_driver = {
 	.driver = {
 		.name = "mxic-spi",
 		.of_match_table = mxic_spi_of_ids,
-		.pm = &mxic_spi_dev_pm_ops,
+		.pm = pm_ptr(&mxic_spi_dev_pm_ops),
 	},
 };
 module_platform_driver(mxic_spi_driver);

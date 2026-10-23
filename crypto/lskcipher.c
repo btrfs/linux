@@ -95,7 +95,6 @@ static int crypto_lskcipher_crypt_unaligned(
 
 	while (len >= bs) {
 		unsigned chunk = min((unsigned)PAGE_SIZE, len);
-		int err;
 
 		if (chunk > cs)
 			chunk &= ~(cs - 1);
@@ -264,12 +263,10 @@ static int __maybe_unused crypto_lskcipher_report(
 	struct sk_buff *skb, struct crypto_alg *alg)
 {
 	struct lskcipher_alg *skcipher = __crypto_lskcipher_alg(alg);
-	struct crypto_report_blkcipher rblkcipher;
-
-	memset(&rblkcipher, 0, sizeof(rblkcipher));
-
-	strscpy(rblkcipher.type, "lskcipher", sizeof(rblkcipher.type));
-	strscpy(rblkcipher.geniv, "<none>", sizeof(rblkcipher.geniv));
+	struct crypto_report_blkcipher rblkcipher = {
+		.type = "lskcipher",
+		.geniv = "<none>",
+	};
 
 	rblkcipher.blocksize = alg->cra_blocksize;
 	rblkcipher.min_keysize = skcipher->co.min_keysize;
@@ -384,17 +381,13 @@ int crypto_register_lskciphers(struct lskcipher_alg *algs, int count)
 
 	for (i = 0; i < count; i++) {
 		ret = crypto_register_lskcipher(&algs[i]);
-		if (ret)
-			goto err;
+		if (ret) {
+			crypto_unregister_lskciphers(algs, i);
+			return ret;
+		}
 	}
 
 	return 0;
-
-err:
-	for (--i; i >= 0; --i)
-		crypto_unregister_lskcipher(&algs[i]);
-
-	return ret;
 }
 EXPORT_SYMBOL_GPL(crypto_register_lskciphers);
 
@@ -534,8 +527,7 @@ struct lskcipher_instance *lskcipher_alloc_instance_simple(
 		int len;
 
 		err = -EINVAL;
-		len = strscpy(ecb_name, &cipher_alg->co.base.cra_name[4],
-			      sizeof(ecb_name));
+		len = strscpy(ecb_name, &cipher_alg->co.base.cra_name[4]);
 		if (len < 2)
 			goto err_free_inst;
 

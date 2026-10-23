@@ -3,21 +3,19 @@
 // Copyright (C) 2025 Google LLC.
 
 //! Binder -- the Android IPC mechanism.
+
+#![crate_name = "rust_binder"]
 #![recursion_limit = "256"]
-#![allow(
-    clippy::as_underscore,
-    clippy::ref_as_ptr,
-    clippy::ptr_as_ptr,
-    clippy::cast_lossless
-)]
 
 use kernel::{
     bindings::{self, seq_file},
     fs::File,
     list::{ListArc, ListArcSafe, ListLinksSelfPtr, TryNewListArc},
+    module::this_module,
     prelude::*,
     seq_file::SeqFile,
     seq_print,
+    sync::atomic::{ordering::Relaxed, Atomic},
     sync::poll::PollTable,
     sync::Arc,
     task::Pid,
@@ -28,16 +26,16 @@ use kernel::{
 
 use crate::{context::Context, page_range::Shrinker, process::Process, thread::Thread};
 
-use core::{
-    ptr::NonNull,
-    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
-};
+use core::ptr::NonNull;
 
 mod allocation;
 mod context;
 mod deferred_close;
 mod defs;
+#[macro_use]
+mod debug;
 mod error;
+mod netlink;
 mod node;
 mod page_range;
 mod process;
@@ -89,10 +87,18 @@ module! {
     license: "GPL",
 }
 
-fn next_debug_id() -> usize {
-    static NEXT_DEBUG_ID: AtomicUsize = AtomicUsize::new(0);
+use kernel::bindings::rust_binder_layout;
+#[no_mangle]
+static RUST_BINDER_LAYOUT: rust_binder_layout = rust_binder_layout {
+    t: transaction::TRANSACTION_LAYOUT,
+    p: process::PROCESS_LAYOUT,
+    n: node::NODE_LAYOUT,
+};
 
-    NEXT_DEBUG_ID.fetch_add(1, Ordering::Relaxed)
+fn next_debug_id() -> usize {
+    static NEXT_DEBUG_ID: Atomic<usize> = Atomic::new(0);
+
+    NEXT_DEBUG_ID.fetch_add(1, Relaxed)
 }
 
 /// Provides a single place to write Binder return values via the
@@ -110,6 +116,7 @@ impl<'a> BinderReturnWriter<'a> {
     /// Write a return code back to user space.
     /// Should be a `BR_` constant from [`defs`] e.g. [`defs::BR_TRANSACTION_COMPLETE`].
     fn write_code(&mut self, code: u32) -> Result {
+        crate::trace::trace_return(code);
         stats::GLOBAL_STATS.inc_br(code);
         self.thread.process.stats.inc_br(code);
         self.writer.write(&code)
@@ -215,7 +222,8 @@ impl<T: ListArcSafe> DTRWrap<T> {
 
 struct DeliverCode {
     code: u32,
-    skip: AtomicBool,
+    skip: Atomic<bool>,
+    pid: i32,
 }
 
 kernel::list::impl_list_arc_safe! {
@@ -223,10 +231,11 @@ kernel::list::impl_list_arc_safe! {
 }
 
 impl DeliverCode {
-    fn new(code: u32) -> Self {
+    fn new(code: u32, pid: i32) -> Self {
         Self {
             code,
-            skip: AtomicBool::new(false),
+            skip: Atomic::new(false),
+            pid,
         }
     }
 
@@ -235,7 +244,7 @@ impl DeliverCode {
     /// This is used instead of removing it from the work list, since `LinkedList::remove` is
     /// unsafe, whereas this method is not.
     fn skip(&self) {
-        self.skip.store(true, Ordering::Relaxed);
+        self.skip.store(true, Relaxed);
     }
 }
 
@@ -245,13 +254,21 @@ impl DeliverToRead for DeliverCode {
         _thread: &Thread,
         writer: &mut BinderReturnWriter<'_>,
     ) -> Result<bool> {
-        if !self.skip.load(Ordering::Relaxed) {
+        if !self.skip.load(Relaxed) {
             writer.write_code(self.code)?;
         }
         Ok(true)
     }
 
-    fn cancel(self: DArc<Self>) {}
+    fn cancel(self: DArc<Self>) {
+        if !self.skip.load(Relaxed) {
+            binder_debug!(
+                pid = self.pid,
+                DeadTransaction,
+                "undelivered TRANSACTION_COMPLETE"
+            );
+        }
+    }
 
     fn should_sync_wakeup(&self) -> bool {
         false
@@ -259,7 +276,7 @@ impl DeliverToRead for DeliverCode {
 
     fn debug_print(&self, m: &SeqFile, prefix: &str, _tprefix: &str) -> Result<()> {
         seq_print!(m, "{}", prefix);
-        if self.skip.load(Ordering::Relaxed) {
+        if self.skip.load(Relaxed) {
             seq_print!(m, "(skipped) ");
         }
         if self.code == defs::BR_TRANSACTION_COMPLETE {
@@ -279,47 +296,45 @@ fn ptr_align(value: usize) -> Option<usize> {
 // SAFETY: We call register in `init`.
 static BINDER_SHRINKER: Shrinker = unsafe { Shrinker::new() };
 
-struct BinderModule {}
+struct BinderModule {
+    _netlink: kernel::net::netlink::Registration,
+}
 
 impl kernel::Module for BinderModule {
     fn init(_module: &'static kernel::ThisModule) -> Result<Self> {
         // SAFETY: The module initializer never runs twice, so we only call this once.
         unsafe { crate::context::CONTEXTS.init() };
 
-        pr_warn!("Loaded Rust Binder.");
-
-        BINDER_SHRINKER.register(kernel::c_str!("android-binder"))?;
+        let netlink = crate::netlink::BINDER_NL_FAMILY.register()?;
+        BINDER_SHRINKER.register(c"android-binder")?;
 
         // SAFETY: The module is being loaded, so we can initialize binderfs.
         unsafe { kernel::error::to_result(binderfs::init_rust_binderfs())? };
 
-        Ok(Self {})
+        Ok(Self { _netlink: netlink })
     }
 }
 
 /// Makes the inner type Sync.
 #[repr(transparent)]
 pub struct AssertSync<T>(T);
-// SAFETY: Used only to insert `file_operations` into a global, which is safe.
+// SAFETY: Used only to insert C bindings types into globals, which is safe.
 unsafe impl<T> Sync for AssertSync<T> {}
 
 /// File operations that rust_binderfs.c can use.
 #[no_mangle]
 #[used]
 pub static rust_binder_fops: AssertSync<kernel::bindings::file_operations> = {
-    // SAFETY: All zeroes is safe for the `file_operations` type.
-    let zeroed_ops = unsafe { core::mem::MaybeUninit::zeroed().assume_init() };
-
     let ops = kernel::bindings::file_operations {
-        owner: THIS_MODULE.as_ptr(),
+        owner: this_module::<LocalModule>().as_ptr(),
         poll: Some(rust_binder_poll),
-        unlocked_ioctl: Some(rust_binder_unlocked_ioctl),
-        compat_ioctl: Some(rust_binder_compat_ioctl),
+        unlocked_ioctl: Some(rust_binder_ioctl),
+        compat_ioctl: bindings::compat_ptr_ioctl,
         mmap: Some(rust_binder_mmap),
         open: Some(rust_binder_open),
         release: Some(rust_binder_release),
         flush: Some(rust_binder_flush),
-        ..zeroed_ops
+        ..pin_init::zeroed()
     };
     AssertSync(ops)
 };
@@ -402,7 +417,7 @@ unsafe extern "C" fn rust_binder_release(
 
 /// # Safety
 /// Only called by binderfs.
-unsafe extern "C" fn rust_binder_compat_ioctl(
+unsafe extern "C" fn rust_binder_ioctl(
     file: *mut bindings::file,
     cmd: kernel::ffi::c_uint,
     arg: kernel::ffi::c_ulong,
@@ -410,23 +425,7 @@ unsafe extern "C" fn rust_binder_compat_ioctl(
     // SAFETY: We previously set `private_data` in `rust_binder_open`.
     let f = unsafe { Arc::<Process>::borrow((*file).private_data) };
     // SAFETY: The caller ensures that the file is valid.
-    match Process::compat_ioctl(f, unsafe { File::from_raw_file(file) }, cmd as _, arg as _) {
-        Ok(()) => 0,
-        Err(err) => err.to_errno() as isize,
-    }
-}
-
-/// # Safety
-/// Only called by binderfs.
-unsafe extern "C" fn rust_binder_unlocked_ioctl(
-    file: *mut bindings::file,
-    cmd: kernel::ffi::c_uint,
-    arg: kernel::ffi::c_ulong,
-) -> kernel::ffi::c_long {
-    // SAFETY: We previously set `private_data` in `rust_binder_open`.
-    let f = unsafe { Arc::<Process>::borrow((*file).private_data) };
-    // SAFETY: The caller ensures that the file is valid.
-    match Process::ioctl(f, unsafe { File::from_raw_file(file) }, cmd as _, arg as _) {
+    match Process::ioctl(f, unsafe { File::from_raw_file(file) }, cmd, arg) {
         Ok(()) => 0,
         Err(err) => err.to_errno() as isize,
     }
@@ -520,7 +519,7 @@ unsafe extern "C" fn rust_binder_proc_show(
     _: *mut kernel::ffi::c_void,
 ) -> kernel::ffi::c_int {
     // SAFETY: Accessing the private field of `seq_file` is okay.
-    let pid = (unsafe { (*ptr).private }) as usize as Pid;
+    let pid = unsafe { (*ptr).private }.addr() as Pid;
     // SAFETY: The caller ensures that the pointer is valid and exclusive for the duration in which
     // this method is called.
     let m = unsafe { SeqFile::from_raw(ptr) };

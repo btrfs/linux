@@ -851,7 +851,6 @@ static int mtk_nor_probe(struct platform_device *pdev)
 	}
 
 	ctlr->bits_per_word_mask = SPI_BPW_MASK(8);
-	ctlr->dev.of_node = pdev->dev.of_node;
 	ctlr->max_message_size = mtk_max_msg_size;
 	ctlr->mem_ops = &mtk_nor_mem_ops;
 	ctlr->mode_bits = SPI_RX_DUAL | SPI_RX_QUAD | SPI_TX_DUAL | SPI_TX_QUAD;
@@ -896,12 +895,17 @@ static int mtk_nor_probe(struct platform_device *pdev)
 	irq = platform_get_irq_optional(pdev, 0);
 
 	if (irq < 0) {
+		if (irq != -ENXIO) {
+			ret = irq;
+			goto err_disable_clk;
+		}
 		dev_warn(sp->dev, "IRQ not available.");
 	} else {
 		ret = devm_request_irq(sp->dev, irq, mtk_nor_irq_handler, 0,
 				       pdev->name, sp);
 		if (ret < 0) {
 			dev_warn(sp->dev, "failed to request IRQ.");
+			goto err_disable_clk;
 		} else {
 			init_completion(&sp->op_done);
 			sp->has_irq = true;
@@ -914,7 +918,7 @@ static int mtk_nor_probe(struct platform_device *pdev)
 	pm_runtime_enable(&pdev->dev);
 	pm_runtime_get_noresume(&pdev->dev);
 
-	ret = devm_spi_register_controller(&pdev->dev, ctlr);
+	ret = spi_register_controller(ctlr);
 	if (ret < 0)
 		goto err_probe;
 
@@ -929,6 +933,7 @@ err_probe:
 	pm_runtime_set_suspended(&pdev->dev);
 	pm_runtime_dont_use_autosuspend(&pdev->dev);
 
+err_disable_clk:
 	mtk_nor_disable_clk(sp);
 
 	return ret;
@@ -939,6 +944,8 @@ static void mtk_nor_remove(struct platform_device *pdev)
 	struct spi_controller *ctlr = dev_get_drvdata(&pdev->dev);
 	struct mtk_nor *sp = spi_controller_get_devdata(ctlr);
 
+	spi_unregister_controller(ctlr);
+
 	pm_runtime_disable(&pdev->dev);
 	pm_runtime_set_suspended(&pdev->dev);
 	pm_runtime_dont_use_autosuspend(&pdev->dev);
@@ -946,7 +953,7 @@ static void mtk_nor_remove(struct platform_device *pdev)
 	mtk_nor_disable_clk(sp);
 }
 
-static int __maybe_unused mtk_nor_runtime_suspend(struct device *dev)
+static int mtk_nor_runtime_suspend(struct device *dev)
 {
 	struct spi_controller *ctlr = dev_get_drvdata(dev);
 	struct mtk_nor *sp = spi_controller_get_devdata(ctlr);
@@ -956,7 +963,7 @@ static int __maybe_unused mtk_nor_runtime_suspend(struct device *dev)
 	return 0;
 }
 
-static int __maybe_unused mtk_nor_runtime_resume(struct device *dev)
+static int mtk_nor_runtime_resume(struct device *dev)
 {
 	struct spi_controller *ctlr = dev_get_drvdata(dev);
 	struct mtk_nor *sp = spi_controller_get_devdata(ctlr);
@@ -964,12 +971,12 @@ static int __maybe_unused mtk_nor_runtime_resume(struct device *dev)
 	return mtk_nor_enable_clk(sp);
 }
 
-static int __maybe_unused mtk_nor_suspend(struct device *dev)
+static int mtk_nor_suspend(struct device *dev)
 {
 	return pm_runtime_force_suspend(dev);
 }
 
-static int __maybe_unused mtk_nor_resume(struct device *dev)
+static int mtk_nor_resume(struct device *dev)
 {
 	struct spi_controller *ctlr = dev_get_drvdata(dev);
 	struct mtk_nor *sp = spi_controller_get_devdata(ctlr);
@@ -985,16 +992,15 @@ static int __maybe_unused mtk_nor_resume(struct device *dev)
 }
 
 static const struct dev_pm_ops mtk_nor_pm_ops = {
-	SET_RUNTIME_PM_OPS(mtk_nor_runtime_suspend,
-			   mtk_nor_runtime_resume, NULL)
-	SET_SYSTEM_SLEEP_PM_OPS(mtk_nor_suspend, mtk_nor_resume)
+	RUNTIME_PM_OPS(mtk_nor_runtime_suspend, mtk_nor_runtime_resume, NULL)
+	SYSTEM_SLEEP_PM_OPS(mtk_nor_suspend, mtk_nor_resume)
 };
 
 static struct platform_driver mtk_nor_driver = {
 	.driver = {
 		.name = DRIVER_NAME,
 		.of_match_table = mtk_nor_match,
-		.pm = &mtk_nor_pm_ops,
+		.pm = pm_ptr(&mtk_nor_pm_ops),
 	},
 	.probe = mtk_nor_probe,
 	.remove = mtk_nor_remove,

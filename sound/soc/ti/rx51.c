@@ -19,8 +19,6 @@
 #include <sound/soc.h>
 #include <linux/platform_data/asoc-ti-mcbsp.h>
 
-#include <asm/mach-types.h>
-
 #include "omap-mcbsp.h"
 
 enum {
@@ -42,7 +40,7 @@ static int rx51_jack_func;
 
 static void rx51_ext_control(struct snd_soc_dapm_context *dapm)
 {
-	struct snd_soc_card *card = dapm->card;
+	struct snd_soc_card *card = snd_soc_dapm_to_card(dapm);
 	struct rx51_audio_pdata *pdata = snd_soc_card_get_drvdata(card);
 	int hp = 0, hs = 0, tvout = 0;
 
@@ -89,10 +87,10 @@ static int rx51_startup(struct snd_pcm_substream *substream)
 {
 	struct snd_pcm_runtime *runtime = substream->runtime;
 	struct snd_soc_pcm_runtime *rtd = snd_soc_substream_to_rtd(substream);
-	struct snd_soc_card *card = rtd->card;
+	struct snd_soc_dapm_context *dapm = snd_soc_card_to_dapm(rtd->card);
 
 	snd_pcm_hw_constraint_single(runtime, SNDRV_PCM_HW_PARAM_CHANNELS, 2);
-	rx51_ext_control(&card->dapm);
+	rx51_ext_control(dapm);
 
 	return 0;
 }
@@ -125,12 +123,13 @@ static int rx51_set_spk(struct snd_kcontrol *kcontrol,
 			struct snd_ctl_elem_value *ucontrol)
 {
 	struct snd_soc_card *card = snd_kcontrol_chip(kcontrol);
+	struct snd_soc_dapm_context *dapm = snd_soc_card_to_dapm(card);
 
 	if (rx51_spk_func == ucontrol->value.enumerated.item[0])
 		return 0;
 
 	rx51_spk_func = ucontrol->value.enumerated.item[0];
-	rx51_ext_control(&card->dapm);
+	rx51_ext_control(dapm);
 
 	return 1;
 }
@@ -139,7 +138,7 @@ static int rx51_spk_event(struct snd_soc_dapm_widget *w,
 			  struct snd_kcontrol *k, int event)
 {
 	struct snd_soc_dapm_context *dapm = w->dapm;
-	struct snd_soc_card *card = dapm->card;
+	struct snd_soc_card *card = snd_soc_dapm_to_card(dapm);
 	struct rx51_audio_pdata *pdata = snd_soc_card_get_drvdata(card);
 
 	gpiod_set_raw_value_cansleep(pdata->speaker_amp_gpio,
@@ -160,12 +159,13 @@ static int rx51_set_input(struct snd_kcontrol *kcontrol,
 			  struct snd_ctl_elem_value *ucontrol)
 {
 	struct snd_soc_card *card = snd_kcontrol_chip(kcontrol);
+	struct snd_soc_dapm_context *dapm = snd_soc_card_to_dapm(card);
 
 	if (rx51_dmic_func == ucontrol->value.enumerated.item[0])
 		return 0;
 
 	rx51_dmic_func = ucontrol->value.enumerated.item[0];
-	rx51_ext_control(&card->dapm);
+	rx51_ext_control(dapm);
 
 	return 1;
 }
@@ -182,12 +182,13 @@ static int rx51_set_jack(struct snd_kcontrol *kcontrol,
 			 struct snd_ctl_elem_value *ucontrol)
 {
 	struct snd_soc_card *card = snd_kcontrol_chip(kcontrol);
+	struct snd_soc_dapm_context *dapm = snd_soc_card_to_dapm(card);
 
 	if (rx51_jack_func == ucontrol->value.enumerated.item[0])
 		return 0;
 
 	rx51_jack_func = ucontrol->value.enumerated.item[0];
-	rx51_ext_control(&card->dapm);
+	rx51_ext_control(dapm);
 
 	return 1;
 }
@@ -357,21 +358,22 @@ static struct snd_soc_card rx51_sound_card = {
 static int rx51_soc_probe(struct platform_device *pdev)
 {
 	struct rx51_audio_pdata *pdata;
-	struct device_node *np = pdev->dev.of_node;
+	struct device *dev = &pdev->dev;
+	struct device_node *np = dev->of_node;
 	struct snd_soc_card *card = &rx51_sound_card;
 	int err;
 
-	if (!machine_is_nokia_rx51() && !of_machine_is_compatible("nokia,omap3-n900"))
+	if (!of_machine_is_compatible("nokia,omap3-n900"))
 		return -ENODEV;
 
-	card->dev = &pdev->dev;
+	card->dev = dev;
 
 	if (np) {
 		struct device_node *dai_node;
 
 		dai_node = of_parse_phandle(np, "nokia,cpu-dai", 0);
 		if (!dai_node) {
-			dev_err(card->dev, "McBSP node is not provided\n");
+			dev_err(dev, "McBSP node is not provided\n");
 			return -EINVAL;
 		}
 		rx51_dai[0].cpus->dai_name = NULL;
@@ -381,7 +383,7 @@ static int rx51_soc_probe(struct platform_device *pdev)
 
 		dai_node = of_parse_phandle(np, "nokia,audio-codec", 0);
 		if (!dai_node) {
-			dev_err(card->dev, "Codec node is not provided\n");
+			dev_err(dev, "Codec node is not provided\n");
 			return -EINVAL;
 		}
 		rx51_dai[0].codecs->name = NULL;
@@ -389,7 +391,7 @@ static int rx51_soc_probe(struct platform_device *pdev)
 
 		dai_node = of_parse_phandle(np, "nokia,audio-codec", 1);
 		if (!dai_node) {
-			dev_err(card->dev, "Auxiliary Codec node is not provided\n");
+			dev_err(dev, "Auxiliary Codec node is not provided\n");
 			return -EINVAL;
 		}
 		rx51_aux_dev[0].dlc.name = NULL;
@@ -399,7 +401,7 @@ static int rx51_soc_probe(struct platform_device *pdev)
 
 		dai_node = of_parse_phandle(np, "nokia,headphone-amplifier", 0);
 		if (!dai_node) {
-			dev_err(card->dev, "Headphone amplifier node is not provided\n");
+			dev_err(dev, "Headphone amplifier node is not provided\n");
 			return -EINVAL;
 		}
 		rx51_aux_dev[1].dlc.name = NULL;
@@ -408,40 +410,36 @@ static int rx51_soc_probe(struct platform_device *pdev)
 		rx51_codec_conf[1].dlc.of_node = dai_node;
 	}
 
-	pdata = devm_kzalloc(card->dev, sizeof(*pdata), GFP_KERNEL);
+	pdata = devm_kzalloc(dev, sizeof(*pdata), GFP_KERNEL);
 	if (pdata == NULL)
 		return -ENOMEM;
 
 	snd_soc_card_set_drvdata(card, pdata);
 
-	pdata->tvout_selection_gpio = devm_gpiod_get(card->dev,
+	pdata->tvout_selection_gpio = devm_gpiod_get(dev,
 						     "tvout-selection",
 						     GPIOD_OUT_LOW);
-	if (IS_ERR(pdata->tvout_selection_gpio)) {
-		dev_err(card->dev, "could not get tvout selection gpio\n");
-		return PTR_ERR(pdata->tvout_selection_gpio);
-	}
+	if (IS_ERR(pdata->tvout_selection_gpio))
+		return dev_err_probe(dev, PTR_ERR(pdata->tvout_selection_gpio),
+				     "could not get tvout selection gpio\n");
 
-	pdata->eci_sw_gpio = devm_gpiod_get(card->dev, "eci-switch",
+	pdata->eci_sw_gpio = devm_gpiod_get(dev, "eci-switch",
 					    GPIOD_OUT_HIGH);
-	if (IS_ERR(pdata->eci_sw_gpio)) {
-		dev_err(card->dev, "could not get eci switch gpio\n");
-		return PTR_ERR(pdata->eci_sw_gpio);
-	}
+	if (IS_ERR(pdata->eci_sw_gpio))
+		return dev_err_probe(dev, PTR_ERR(pdata->eci_sw_gpio),
+				     "could not get eci switch gpio\n");
 
-	pdata->speaker_amp_gpio = devm_gpiod_get(card->dev,
+	pdata->speaker_amp_gpio = devm_gpiod_get(dev,
 						 "speaker-amplifier",
 						 GPIOD_OUT_LOW);
-	if (IS_ERR(pdata->speaker_amp_gpio)) {
-		dev_err(card->dev, "could not get speaker enable gpio\n");
-		return PTR_ERR(pdata->speaker_amp_gpio);
-	}
+	if (IS_ERR(pdata->speaker_amp_gpio))
+		return dev_err_probe(dev, PTR_ERR(pdata->speaker_amp_gpio),
+				     "could not get speaker enable gpio\n");
 
-	err = devm_snd_soc_register_card(card->dev, card);
-	if (err) {
-		dev_err(card->dev, "snd_soc_register_card failed (%d)\n", err);
-		return err;
-	}
+	err = devm_snd_soc_register_card(dev, card);
+	if (err)
+		return dev_err_probe(dev, err,
+				     "snd_soc_register_card() failed\n");
 
 	return 0;
 }

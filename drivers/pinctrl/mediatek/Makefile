@@ -8,7 +8,6 @@ obj-$(CONFIG_PINCTRL_MTK_MOORE)		+= pinctrl-moore.o
 obj-$(CONFIG_PINCTRL_MTK_PARIS)		+= pinctrl-paris.o
 
 # SoC Drivers
-obj-$(CONFIG_PINCTRL_AIROHA)		+= pinctrl-airoha.o
 obj-$(CONFIG_PINCTRL_MT7620)		+= pinctrl-mt7620.o
 obj-$(CONFIG_PINCTRL_MT7621)		+= pinctrl-mt7621.o
 obj-$(CONFIG_PINCTRL_MT76X8)		+= pinctrl-mt76x8.o
@@ -23,6 +22,8 @@ obj-$(CONFIG_PINCTRL_MT6765)		+= pinctrl-mt6765.o
 obj-$(CONFIG_PINCTRL_MT6779)		+= pinctrl-mt6779.o
 obj-$(CONFIG_PINCTRL_MT6795)		+= pinctrl-mt6795.o
 obj-$(CONFIG_PINCTRL_MT6797)		+= pinctrl-mt6797.o
+obj-$(CONFIG_PINCTRL_MT6858)		+= pinctrl-mt6858.o
+obj-$(CONFIG_PINCTRL_MT6878)		+= pinctrl-mt6878.o
 obj-$(CONFIG_PINCTRL_MT6893)		+= pinctrl-mt6893.o
 obj-$(CONFIG_PINCTRL_MT7622)		+= pinctrl-mt7622.o
 obj-$(CONFIG_PINCTRL_MT7623)		+= pinctrl-mt7623.o
