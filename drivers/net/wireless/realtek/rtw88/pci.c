@@ -2,6 +2,7 @@
 /* Copyright(c) 2018-2019  Realtek Corporation
  */
 
+#include <linux/dmi.h>
 #include <linux/module.h>
 #include <linux/pci.h>
 #include "main.h"
@@ -1041,20 +1042,21 @@ static int rtw_pci_get_hw_rx_ring_nr(struct rtw_dev *rtwdev,
 static u32 rtw_pci_rx_napi(struct rtw_dev *rtwdev, struct rtw_pci *rtwpci,
 			   u8 hw_queue, u32 limit)
 {
+	struct rtw_pci_rx_ring *ring = &rtwpci->rx_rings[RTW_RX_QUEUE_MPDU];
 	const struct rtw_chip_info *chip = rtwdev->chip;
 	struct napi_struct *napi = &rtwpci->napi;
-	struct rtw_pci_rx_ring *ring = &rtwpci->rx_rings[RTW_RX_QUEUE_MPDU];
-	struct rtw_rx_pkt_stat pkt_stat;
+	u32 pkt_desc_sz = chip->rx_pkt_desc_sz;
+	u32 buf_desc_sz = chip->rx_buf_desc_sz;
 	struct ieee80211_rx_status rx_status;
+	struct rtw_rx_pkt_stat pkt_stat;
 	struct sk_buff *skb, *new;
 	u32 cur_rp = ring->r.rp;
 	u32 count, rx_done = 0;
 	u32 pkt_offset;
-	u32 pkt_desc_sz = chip->rx_pkt_desc_sz;
-	u32 buf_desc_sz = chip->rx_buf_desc_sz;
+	dma_addr_t dma;
 	u32 new_len;
 	u8 *rx_desc;
-	dma_addr_t dma;
+	int ret;
 
 	count = rtw_pci_get_hw_rx_ring_nr(rtwdev, rtwpci);
 	count = min(count, limit);
@@ -1066,7 +1068,10 @@ static u32 rtw_pci_rx_napi(struct rtw_dev *rtwdev, struct rtw_pci *rtwpci,
 		dma_sync_single_for_cpu(rtwdev->dev, dma, RTK_PCI_RX_BUF_SIZE,
 					DMA_FROM_DEVICE);
 		rx_desc = skb->data;
-		rtw_rx_query_rx_desc(rtwdev, rx_desc, &pkt_stat, &rx_status);
+		ret = rtw_rx_query_rx_desc(rtwdev, rx_desc,
+					   &pkt_stat, &rx_status);
+		if (ret)
+			goto next_rp;
 
 		/* offset from rx_desc to payload */
 		pkt_offset = pkt_desc_sz + pkt_stat.drv_info_sz +
@@ -1076,6 +1081,11 @@ static u32 rtw_pci_rx_napi(struct rtw_dev *rtwdev, struct rtw_pci *rtwpci,
 		 * discard the frame if none available
 		 */
 		new_len = pkt_stat.pkt_len + pkt_offset;
+		if (unlikely(new_len > RTK_PCI_RX_BUF_SIZE)) {
+			rtw_dbg(rtwdev, RTW_DBG_RX,
+				"oversized RX packet: %u\n", new_len);
+			goto next_rp;
+		}
 		new = dev_alloc_skb(new_len);
 		if (WARN_ONCE(!new, "rx routine starvation\n"))
 			goto next_rp;
@@ -1710,9 +1720,9 @@ static void rtw_pci_napi_deinit(struct rtw_dev *rtwdev)
 static pci_ers_result_t rtw_pci_io_err_detected(struct pci_dev *pdev,
 						pci_channel_state_t state)
 {
-	struct net_device *netdev = pci_get_drvdata(pdev);
+	struct ieee80211_hw *hw = pci_get_drvdata(pdev);
 
-	netif_device_detach(netdev);
+	ieee80211_stop_queues(hw);
 
 	return PCI_ERS_RESULT_NEED_RESET;
 }
@@ -1729,12 +1739,12 @@ static pci_ers_result_t rtw_pci_io_slot_reset(struct pci_dev *pdev)
 
 static void rtw_pci_io_resume(struct pci_dev *pdev)
 {
-	struct net_device *netdev = pci_get_drvdata(pdev);
+	struct ieee80211_hw *hw = pci_get_drvdata(pdev);
 
 	/* ack any pending wake events, disable PME */
 	pci_enable_wake(pdev, PCI_D0, 0);
 
-	netif_device_attach(netdev);
+	ieee80211_wake_queues(hw);
 }
 
 const struct pci_error_handlers rtw_pci_err_handler = {
@@ -1743,6 +1753,44 @@ const struct pci_error_handlers rtw_pci_err_handler = {
 	.resume = rtw_pci_io_resume,
 };
 EXPORT_SYMBOL(rtw_pci_err_handler);
+
+static int rtw_pci_disable_caps(const struct dmi_system_id *dmi)
+{
+	uintptr_t dis_caps = (uintptr_t)dmi->driver_data;
+
+	if (dis_caps & BIT(QUIRK_DIS_CAP_PCI_ASPM))
+		rtw_pci_disable_aspm = true;
+
+	if (dis_caps & BIT(QUIRK_DIS_CAP_LPS_DEEP))
+		rtw_disable_lps_deep_mode = true;
+
+	return 1;
+}
+
+static const struct dmi_system_id rtw_pci_quirks[] = {
+	{
+		.callback = rtw_pci_disable_caps,
+		.ident = "HP Notebook - P3S95EA#ACB",
+		.matches = {
+			DMI_MATCH(DMI_SYS_VENDOR, "HP"),
+			DMI_MATCH(DMI_PRODUCT_NAME, "HP Notebook"),
+			DMI_MATCH(DMI_PRODUCT_SKU, "P3S95EA#ACB"),
+		},
+		.driver_data = (void *)(BIT(QUIRK_DIS_CAP_PCI_ASPM) |
+					BIT(QUIRK_DIS_CAP_LPS_DEEP)),
+	},
+	{
+		.callback = rtw_pci_disable_caps,
+		.ident = "ASUS TUF Gaming A15 FA506II",
+		.matches = {
+			DMI_MATCH(DMI_SYS_VENDOR, "ASUSTeK COMPUTER INC."),
+			DMI_MATCH(DMI_BOARD_NAME, "FA506II"),
+		},
+		.driver_data = (void *)(BIT(QUIRK_DIS_CAP_PCI_ASPM) |
+					BIT(QUIRK_DIS_CAP_LPS_DEEP)),
+	},
+	{}
+};
 
 int rtw_pci_probe(struct pci_dev *pdev,
 		  const struct pci_device_id *id)
@@ -1771,6 +1819,8 @@ int rtw_pci_probe(struct pci_dev *pdev,
 	rtwpci = (struct rtw_pci *)rtwdev->priv;
 	atomic_set(&rtwpci->link_usage, 1);
 
+	dmi_check_system(rtw_pci_quirks);
+
 	ret = rtw_core_init(rtwdev);
 	if (ret)
 		goto err_release_hw;
@@ -1794,7 +1844,7 @@ int rtw_pci_probe(struct pci_dev *pdev,
 	ret = rtw_pci_napi_init(rtwdev);
 	if (ret) {
 		rtw_err(rtwdev, "failed to setup NAPI\n");
-		goto err_pci_declaim;
+		goto err_destroy_rsrc;
 	}
 
 	ret = rtw_chip_info_setup(rtwdev);
@@ -1804,7 +1854,8 @@ int rtw_pci_probe(struct pci_dev *pdev,
 	}
 
 	/* Disable PCIe ASPM L1 while doing NAPI poll for 8821CE */
-	if (rtwdev->chip->id == RTW_CHIP_TYPE_8821C && bridge->vendor == PCI_VENDOR_ID_INTEL)
+	if (rtwdev->chip->id == RTW_CHIP_TYPE_8821C &&
+	    bridge && bridge->vendor == PCI_VENDOR_ID_INTEL)
 		rtwpci->rx_no_aspm = true;
 
 	rtw_pci_phy_cfg(rtwdev);
@@ -1825,6 +1876,8 @@ int rtw_pci_probe(struct pci_dev *pdev,
 
 err_destroy_pci:
 	rtw_pci_napi_deinit(rtwdev);
+
+err_destroy_rsrc:
 	rtw_pci_destroy(rtwdev, pdev);
 
 err_pci_declaim:

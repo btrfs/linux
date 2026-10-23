@@ -314,8 +314,8 @@ static int cio2_csi2_calc_timing(struct cio2_device *cio2, struct cio2_queue *q,
 
 	src_pad = media_entity_remote_source_pad_unique(&q->subdev.entity);
 	if (IS_ERR(src_pad)) {
-		dev_err(dev, "can't get source pad of %s (%ld)\n",
-			q->subdev.name, PTR_ERR(src_pad));
+		dev_err(dev, "can't get source pad of %s (%pe)\n",
+			q->subdev.name, src_pad);
 		return PTR_ERR(src_pad);
 	}
 
@@ -1961,7 +1961,7 @@ static const struct dev_pm_ops cio2_pm_ops = {
 };
 
 static const struct pci_device_id cio2_pci_id_table[] = {
-	{ PCI_DEVICE(PCI_VENDOR_ID_INTEL, CIO2_PCI_ID) },
+	{ PCI_VDEVICE(INTEL, CIO2_PCI_ID) },
 	{ }
 };
 

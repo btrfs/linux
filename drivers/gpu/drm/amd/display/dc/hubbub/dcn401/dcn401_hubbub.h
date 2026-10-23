@@ -133,7 +133,9 @@
 	HUBBUB_SF(DCHUBBUB_CTRL_STATUS, ROB_OVERFLOW_STATUS, mask_sh),\
 	HUBBUB_SF(DCHUBBUB_CTRL_STATUS, ROB_OVERFLOW_CLEAR, mask_sh),\
 	HUBBUB_SF(DCHUBBUB_CTRL_STATUS, DCHUBBUB_HW_DEBUG, mask_sh),\
-	HUBBUB_SF(DCHUBBUB_CTRL_STATUS, CSTATE_SWATH_CHK_GOOD_MODE, mask_sh)
+	HUBBUB_SF(DCHUBBUB_CTRL_STATUS, CSTATE_SWATH_CHK_GOOD_MODE, mask_sh),\
+	HUBBUB_SF(DCHUBBUB_ARB_MALL_CNTL, MALL_PREFETCH_COMPLETE, mask_sh),\
+	HUBBUB_SF(DCHUBBUB_ARB_MALL_CNTL, MALL_IN_USE, mask_sh)
 
 bool hubbub401_program_urgent_watermarks(
 		struct hubbub *hubbub,
@@ -194,6 +196,11 @@ bool hubbub401_get_dcc_compression_cap(
 		const struct dc_dcc_surface_param *input,
 		struct dc_surface_dcc_cap *output);
 
+bool dcn401_program_arbiter(
+	struct hubbub *hubbub,
+	struct dml2_display_arb_regs *arb_regs,
+	bool safe_to_lower);
+
 void hubbub401_construct(struct dcn20_hubbub *hubbub2,
 	struct dc_context *ctx,
 	const struct dcn_hubbub_registers *hubbub_regs,
@@ -202,5 +209,10 @@ void hubbub401_construct(struct dcn20_hubbub *hubbub2,
 	int det_size_kb,
 	int pixel_chunk_size_kb,
 	int config_return_buffer_size_kb);
+
+void dcn401_program_det_segments(struct hubbub *hubbub, int hubp_inst, unsigned det_buffer_size_seg);
+void dcn401_program_compbuf_segments(struct hubbub *hubbub, unsigned compbuf_size_seg, bool safe_to_increase);
+void dcn401_wait_for_det_update(struct hubbub *hubbub, int hubp_inst);
+void dcn401_init_crb(struct hubbub *hubbub);
 
 #endif

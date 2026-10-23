@@ -6,7 +6,7 @@
 #ifndef __INTEL_DDI_H__
 #define __INTEL_DDI_H__
 
-#include "i915_reg_defs.h"
+#include "intel_display_reg_defs.h"
 
 struct drm_connector_state;
 struct intel_atomic_state;
@@ -23,8 +23,8 @@ enum pipe;
 enum port;
 enum transcoder;
 
-i915_reg_t dp_tp_ctl_reg(struct intel_encoder *encoder,
-			 const struct intel_crtc_state *crtc_state);
+intel_reg_t dp_tp_ctl_reg(struct intel_encoder *encoder,
+			  const struct intel_crtc_state *crtc_state);
 
 void intel_ddi_clear_act_sent(struct intel_encoder *encoder,
 			      const struct intel_crtc_state *crtc_state);
@@ -81,6 +81,7 @@ void intel_ddi_sanitize_encoder_pll_mapping(struct intel_encoder *encoder);
 int intel_ddi_level(struct intel_encoder *encoder,
 		    const struct intel_crtc_state *crtc_state,
 		    int lane);
+int intel_ddi_link_symbol_clock(struct intel_encoder *encoder, int clock);
 void intel_ddi_update_active_dpll(struct intel_atomic_state *state,
 				  struct intel_encoder *encoder,
 				  struct intel_crtc *crtc);

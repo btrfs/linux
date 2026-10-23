@@ -219,45 +219,45 @@ static irqreturn_t elo_interrupt(struct serio *serio,
 
 static int elo_command_10(struct elo *elo, unsigned char *packet)
 {
-	int rc = -1;
+	int error;
 	int i;
 	unsigned char csum = 0xaa + ELO10_LEAD_BYTE;
 
-	mutex_lock(&elo->cmd_mutex);
+	guard(mutex)(&elo->cmd_mutex);
 
 	scoped_guard(serio_pause_rx, elo->serio) {
 		elo->expected_packet = toupper(packet[0]);
 		init_completion(&elo->cmd_done);
 	}
 
-	if (serio_write(elo->serio, ELO10_LEAD_BYTE))
-		goto out;
+	error = serio_write(elo->serio, ELO10_LEAD_BYTE);
+	if (error)
+		return error;
 
 	for (i = 0; i < ELO10_PACKET_LEN; i++) {
 		csum += packet[i];
-		if (serio_write(elo->serio, packet[i]))
-			goto out;
+		error = serio_write(elo->serio, packet[i]);
+		if (error)
+			return error;
 	}
 
-	if (serio_write(elo->serio, csum))
-		goto out;
+	error = serio_write(elo->serio, csum);
+	if (error)
+		return error;
 
 	wait_for_completion_timeout(&elo->cmd_done, HZ);
 
-	if (elo->expected_packet == ELO10_TOUCH_PACKET) {
-		/* We are back in reporting mode, the command was ACKed */
-		memcpy(packet, elo->response, ELO10_PACKET_LEN);
-		rc = 0;
-	}
+	if (elo->expected_packet != ELO10_TOUCH_PACKET)
+		return -EIO;
 
- out:
-	mutex_unlock(&elo->cmd_mutex);
-	return rc;
+	/* We are back in reporting mode, the command was ACKed */
+	memcpy(packet, elo->response, ELO10_PACKET_LEN);
+	return 0;
 }
 
 static int elo_setup_10(struct elo *elo)
 {
-	static const char *elo_types[] = { "Accu", "Dura", "Intelli", "Carroll" };
+	static const char * const elo_types[] = { "Accu", "Dura", "Intelli", "Carroll" };
 	struct input_dev *dev = elo->dev;
 	unsigned char packet[ELO10_PACKET_LEN] = { ELO10_ID_CMD };
 
@@ -273,7 +273,7 @@ static int elo_setup_10(struct elo *elo)
 
 	dev_info(&elo->serio->dev,
 		 "%sTouch touchscreen, fw: %02x.%02x, features: 0x%02x, controller: 0x%02x\n",
-		 elo_types[(packet[1] -'0') & 0x03],
+		 elo_types[(packet[1] - '0') & 0x03],
 		 packet[5], packet[4], packet[3], packet[7]);
 
 	return 0;
@@ -307,7 +307,7 @@ static int elo_connect(struct serio *serio, struct serio_driver *drv)
 	struct input_dev *input_dev;
 	int err;
 
-	elo = kzalloc(sizeof(*elo), GFP_KERNEL);
+	elo = kzalloc_obj(*elo);
 	input_dev = input_allocate_device();
 	if (!elo || !input_dev) {
 		err = -ENOMEM;
@@ -320,7 +320,7 @@ static int elo_connect(struct serio *serio, struct serio_driver *drv)
 	elo->expected_packet = ELO10_TOUCH_PACKET;
 	mutex_init(&elo->cmd_mutex);
 	init_completion(&elo->cmd_done);
-	snprintf(elo->phys, sizeof(elo->phys), "%s/input0", serio->phys);
+	scnprintf(elo->phys, sizeof(elo->phys), "%s/input0", serio->phys);
 
 	input_dev->name = "Elo Serial TouchScreen";
 	input_dev->phys = elo->phys;

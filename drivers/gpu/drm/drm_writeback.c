@@ -58,6 +58,12 @@
  *	framebuffer to be written by the writeback connector. This property is
  *	similar to the FB_ID property on planes, but will always read as zero
  *	and is not preserved across commits.
+ *	If the width and height of the framebuffer do not match those of the
+ *	attached CRTC, the driver must either fail or scale (not crop) the
+ *	content to exactly fit the framebuffer.
+ *	If the driver is unable to exactly fill the framebuffer for any reason,
+ *	such as hardware scaler constraints or an odd width for a sub-sampled
+ *	format, the writeback must fail instead of partially filling the buffer.
  *	Userspace must set this property to an output buffer every time it
  *	wishes the buffer to get filled.
  *
@@ -81,7 +87,7 @@
  *	From userspace, this property will always read as zero.
  */
 
-#define fence_to_wb_connector(x) container_of(x->lock, \
+#define fence_to_wb_connector(x) container_of(x->extern_lock, \
 					      struct drm_writeback_connector, \
 					      fence_lock)
 
@@ -422,8 +428,7 @@ int drm_writeback_set_fb(struct drm_connector_state *conn_state,
 	WARN_ON(conn_state->connector->connector_type != DRM_MODE_CONNECTOR_WRITEBACK);
 
 	if (!conn_state->writeback_job) {
-		conn_state->writeback_job =
-			kzalloc(sizeof(*conn_state->writeback_job), GFP_KERNEL);
+		conn_state->writeback_job = kzalloc_obj(*conn_state->writeback_job);
 		if (!conn_state->writeback_job)
 			return -ENOMEM;
 
@@ -581,7 +586,7 @@ drm_writeback_get_out_fence(struct drm_writeback_connector *wb_connector)
 		    DRM_MODE_CONNECTOR_WRITEBACK))
 		return NULL;
 
-	fence = kzalloc(sizeof(*fence), GFP_KERNEL);
+	fence = kzalloc_obj(*fence);
 	if (!fence)
 		return NULL;
 

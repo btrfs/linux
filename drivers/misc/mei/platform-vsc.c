@@ -350,7 +350,7 @@ static int mei_vsc_probe(struct platform_device *pdev)
 	mei_device_init(mei_dev, dev, false, &mei_vsc_hw_ops);
 
 	mei_dev->fw_f_fw_ver_supported = 0;
-	mei_dev->kind = "ivsc";
+	mei_dev->kind = MEI_DEV_KIND_IVSC;
 
 	hw = mei_dev_to_vsc_hw(mei_dev);
 	atomic_set(&hw->write_lock_cnt, 0);
@@ -435,7 +435,7 @@ static int mei_vsc_resume(struct device *dev)
 static DEFINE_SIMPLE_DEV_PM_OPS(mei_vsc_pm_ops, mei_vsc_suspend, mei_vsc_resume);
 
 static const struct platform_device_id mei_vsc_id_table[] = {
-	{ MEI_VSC_DRV_NAME },
+	{ .name = MEI_VSC_DRV_NAME },
 	{ /* sentinel */ }
 };
 MODULE_DEVICE_TABLE(platform, mei_vsc_id_table);

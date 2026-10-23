@@ -140,6 +140,7 @@ void ionic_lif_deferred_enqueue(struct ionic_lif *lif,
 
 static void ionic_link_status_check(struct ionic_lif *lif)
 {
+	struct ionic_dev *idev = &lif->ionic->idev;
 	struct net_device *netdev = lif->netdev;
 	u16 link_status;
 	bool link_up;
@@ -152,6 +153,8 @@ static void ionic_link_status_check(struct ionic_lif *lif)
 		clear_bit(IONIC_LIF_F_LINK_CHECK_REQUESTED, lif->state);
 		return;
 	}
+
+	ionic_reset_link_down_count(idev);
 
 	link_status = le16_to_cpu(lif->info->status.link_status);
 	link_up = link_status == IONIC_PORT_OPER_STATUS_UP;
@@ -179,7 +182,6 @@ static void ionic_link_status_check(struct ionic_lif *lif)
 		}
 	} else {
 		if (netif_carrier_ok(netdev)) {
-			lif->link_down_count++;
 			netdev_info(netdev, "Link down\n");
 			netif_carrier_off(netdev);
 		}
@@ -203,7 +205,7 @@ void ionic_link_status_check_request(struct ionic_lif *lif, bool can_sleep)
 		return;
 
 	if (!can_sleep) {
-		work = kzalloc(sizeof(*work), GFP_ATOMIC);
+		work = kzalloc_obj(*work, GFP_ATOMIC);
 		if (!work) {
 			clear_bit(IONIC_LIF_F_LINK_CHECK_REQUESTED, lif->state);
 			return;
@@ -918,8 +920,21 @@ static int ionic_lif_rxq_init(struct ionic_lif *lif, struct ionic_qcq *qcq)
 	};
 	int err;
 
-	q->partner = &lif->txqcqs[q->index]->q;
-	q->partner->partner = q;
+	q->partner = NULL;
+
+	/* Only normal RX queues have matching TX queue partners. */
+	if (q->index < lif->nxqs) {
+		if (!lif->txqcqs ||
+		    q->index >= lif->ionic->ntxqs_per_lif ||
+		    !lif->txqcqs[q->index]) {
+			dev_err(dev, "missing TX queue partner for RX queue %u\n",
+				q->index);
+			return -ENXIO;
+		}
+
+		q->partner = &lif->txqcqs[q->index]->q;
+		q->partner->partner = q;
+	}
 
 	if (!lif->xdp_prog ||
 	    (lif->xdp_prog->aux && lif->xdp_prog->aux->xdp_has_frags))
@@ -1427,7 +1442,7 @@ static void ionic_ndo_set_rx_mode(struct net_device *netdev)
 	/* Shove off the rest of the rxmode work to the work task
 	 * which will include syncing the filters to the firmware.
 	 */
-	work = kzalloc(sizeof(*work), GFP_ATOMIC);
+	work = kzalloc_obj(*work, GFP_ATOMIC);
 	if (!work) {
 		netdev_err(lif->netdev, "rxmode change dropped\n");
 		return;
@@ -1498,7 +1513,8 @@ static int ionic_set_nic_features(struct ionic_lif *lif,
 	ctx.cmd.lif_setattr.features = ionic_netdev_features_to_nic(features);
 
 	if (lif->phc)
-		ctx.cmd.lif_setattr.features |= cpu_to_le64(IONIC_ETH_HW_TIMESTAMP);
+		ctx.cmd.lif_setattr.features |= lif->ionic->ident.lif.eth.config.features &
+			cpu_to_le64(IONIC_ETH_HW_TIMESTAMP | IONIC_ETH_HW_RDMA_TIMESTAMP);
 
 	err = ionic_adminq_post_wait(lif, &ctx);
 	if (err)
@@ -1549,6 +1565,8 @@ static int ionic_set_nic_features(struct ionic_lif *lif,
 		dev_dbg(dev, "feature ETH_HW_TSO_UDP_CSUM\n");
 	if (lif->hw_features & IONIC_ETH_HW_TIMESTAMP)
 		dev_dbg(dev, "feature ETH_HW_TIMESTAMP\n");
+	if (lif->hw_features & IONIC_ETH_HW_RDMA_TIMESTAMP)
+		dev_dbg(dev, "feature ETH_HW_RDMA_TIMESTAMP\n");
 
 	return 0;
 }
@@ -1719,13 +1737,18 @@ static int ionic_set_mac_address(struct net_device *netdev, void *sa)
 	if (ether_addr_equal(netdev->dev_addr, mac))
 		return 0;
 
-	err = ionic_program_mac(lif, mac);
-	if (err < 0)
-		return err;
+	/* Only program macs for virtual functions to avoid losing the permanent
+	 * Mac across warm reset/reboot.
+	 */
+	if (lif->ionic->pdev->is_virtfn) {
+		err = ionic_program_mac(lif, mac);
+		if (err < 0)
+			return err;
 
-	if (err > 0)
-		netdev_dbg(netdev, "%s: SET and GET ATTR Mac are not equal-due to old FW running\n",
-			   __func__);
+		if (err > 0)
+			netdev_dbg(netdev, "%s: SET and GET ATTR Mac are not equal-due to old FW running\n",
+				   __func__);
+	}
 
 	err = eth_prepare_mac_addr_change(netdev, addr);
 	if (err)
@@ -2335,20 +2358,6 @@ static int ionic_stop(struct net_device *netdev)
 	return 0;
 }
 
-static int ionic_eth_ioctl(struct net_device *netdev, struct ifreq *ifr, int cmd)
-{
-	struct ionic_lif *lif = netdev_priv(netdev);
-
-	switch (cmd) {
-	case SIOCSHWTSTAMP:
-		return ionic_lif_hwstamp_set(lif, ifr);
-	case SIOCGHWTSTAMP:
-		return ionic_lif_hwstamp_get(lif, ifr);
-	default:
-		return -EOPNOTSUPP;
-	}
-}
-
 static int ionic_get_vf_config(struct net_device *netdev,
 			       int vf, struct ifla_vf_info *ivf)
 {
@@ -2708,7 +2717,7 @@ static int ionic_register_rxq_info(struct ionic_queue *q, unsigned int napi_id)
 	struct xdp_rxq_info *rxq_info;
 	int err;
 
-	rxq_info = kzalloc(sizeof(*rxq_info), GFP_KERNEL);
+	rxq_info = kzalloc_obj(*rxq_info);
 	if (!rxq_info)
 		return -ENOMEM;
 
@@ -2812,7 +2821,6 @@ static int ionic_xdp(struct net_device *netdev, struct netdev_bpf *bpf)
 static const struct net_device_ops ionic_netdev_ops = {
 	.ndo_open               = ionic_open,
 	.ndo_stop               = ionic_stop,
-	.ndo_eth_ioctl		= ionic_eth_ioctl,
 	.ndo_start_xmit		= ionic_start_xmit,
 	.ndo_bpf		= ionic_xdp,
 	.ndo_xdp_xmit		= ionic_xdp_xmit,
@@ -2833,6 +2841,8 @@ static const struct net_device_ops ionic_netdev_ops = {
 	.ndo_get_vf_config	= ionic_get_vf_config,
 	.ndo_set_vf_link_state	= ionic_set_vf_link_state,
 	.ndo_get_vf_stats       = ionic_get_vf_stats,
+	.ndo_hwtstamp_get	= ionic_hwstamp_get,
+	.ndo_hwtstamp_set	= ionic_hwstamp_set,
 };
 
 static int ionic_cmb_reconfig(struct ionic_lif *lif,
@@ -3190,7 +3200,7 @@ static int ionic_affinity_masks_alloc(struct ionic *ionic)
 	int nintrs = ionic->nintrs;
 	int i;
 
-	affinity_masks = kcalloc(nintrs, sizeof(cpumask_var_t), GFP_KERNEL);
+	affinity_masks = kzalloc_objs(cpumask_var_t, nintrs);
 	if (!affinity_masks)
 		return -ENOMEM;
 
@@ -3231,7 +3241,7 @@ int ionic_lif_alloc(struct ionic *ionic)
 	int tbl_sz;
 	int err;
 
-	lid = kzalloc(sizeof(*lid), GFP_KERNEL);
+	lid = kzalloc_obj(*lid);
 	if (!lid)
 		return -ENOMEM;
 

@@ -13,7 +13,6 @@
 #include <linux/gpio/consumer.h>
 #include <linux/i2c.h>
 #include <linux/kernel.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/pm_runtime.h>
@@ -107,7 +106,7 @@ static const struct soc_enum rt9123_i2sch_select_enum =
 
 static int rt9123_kcontrol_name_comp(struct snd_kcontrol *kcontrol, const char *s)
 {
-	struct snd_soc_component *comp = snd_soc_kcontrol_component(kcontrol);
+	struct snd_soc_component *comp = snd_kcontrol_chip(kcontrol);
 	const char *kctlname = kcontrol->id.name;
 
 	if (comp && comp->name_prefix)
@@ -118,7 +117,7 @@ static int rt9123_kcontrol_name_comp(struct snd_kcontrol *kcontrol, const char *
 
 static int rt9123_xhandler_get(struct snd_kcontrol *kcontrol, struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_component *comp = snd_soc_kcontrol_component(kcontrol);
+	struct snd_soc_component *comp = snd_kcontrol_chip(kcontrol);
 	struct device *dev = comp->dev;
 	int ret;
 
@@ -145,7 +144,7 @@ static int rt9123_xhandler_get(struct snd_kcontrol *kcontrol, struct snd_ctl_ele
 
 static int rt9123_xhandler_put(struct snd_kcontrol *kcontrol, struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_component *comp = snd_soc_kcontrol_component(kcontrol);
+	struct snd_soc_component *comp = snd_kcontrol_chip(kcontrol);
 	struct device *dev = comp->dev;
 	int ret;
 

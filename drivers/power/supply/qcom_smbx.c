@@ -134,6 +134,9 @@
 #define OCP_CHARGER_BIT					BIT(1)
 #define SDP_CHARGER_BIT					BIT(0)
 
+#define USBIN_CMD_IL					0x340
+#define USBIN_SUSPEND_BIT				BIT(0)
+
 #define TYPE_C_STATUS_1					0x30B
 #define UFP_TYPEC_MASK					GENMASK(7, 5)
 #define UFP_TYPEC_RDSTD_BIT				BIT(7)
@@ -693,6 +696,9 @@ static int smb_set_property(struct power_supply *psy,
 	struct smb_chip *chip = power_supply_get_drvdata(psy);
 
 	switch (psp) {
+	case POWER_SUPPLY_PROP_STATUS:
+		return regmap_update_bits(chip->regmap, chip->base + USBIN_CMD_IL,
+					  USBIN_SUSPEND_BIT, !val->intval);
 	case POWER_SUPPLY_PROP_CURRENT_MAX:
 		return smb_set_current_limit(chip, val->intval);
 	default:
@@ -705,6 +711,7 @@ static int smb_property_is_writable(struct power_supply *psy,
 				     enum power_supply_property psp)
 {
 	switch (psp) {
+	case POWER_SUPPLY_PROP_STATUS:
 	case POWER_SUPPLY_PROP_CURRENT_MAX:
 		return 1;
 	default:
@@ -915,8 +922,7 @@ static int smb_init_irq(struct smb_chip *chip, int *irq, const char *name,
 	rc = devm_request_threaded_irq(chip->dev, irqnum, NULL, handler,
 				       IRQF_ONESHOT, name, chip);
 	if (rc < 0)
-		return dev_err_probe(chip->dev, rc, "Couldn't request irq %s\n",
-				     name);
+		return rc;
 
 	if (irq)
 		*irq = irqnum;
@@ -1050,3 +1056,4 @@ module_platform_driver(qcom_spmi_smb);
 MODULE_AUTHOR("Casey Connolly <casey.connolly@linaro.org>");
 MODULE_DESCRIPTION("Qualcomm SMB2 Charger Driver");
 MODULE_LICENSE("GPL");
+MODULE_IMPORT_NS("IIO_CONSUMER");

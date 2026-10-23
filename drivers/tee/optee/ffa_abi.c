@@ -78,7 +78,7 @@ static int optee_shm_add_ffa_handle(struct optee *optee, struct tee_shm *shm,
 	struct shm_rhash *r;
 	int rc;
 
-	r = kmalloc(sizeof(*r), GFP_KERNEL);
+	r = kmalloc_obj(*r);
 	if (!r)
 		return -ENOMEM;
 	r->shm = shm;
@@ -198,7 +198,8 @@ static int to_msg_param_ffa_mem(struct optee_msg_param *mp,
 	if (shm) {
 		u64 shm_offs = p->u.memref.shm_offs;
 
-		mp->u.fmem.internal_offs = shm->offset;
+		mp->u.fmem.internal_offs = tee_shm_get_page_offset(shm) &
+					   (FFA_PAGE_SIZE - 1);
 
 		mp->u.fmem.offs_low = shm_offs;
 		mp->u.fmem.offs_high = shm_offs >> 32;
@@ -284,14 +285,26 @@ static int optee_ffa_shm_register(struct tee_context *ctx, struct tee_shm *shm,
 		.nattrs = 1,
 	};
 	struct sg_table sgt;
+	size_t ffa_offs;
 	int rc;
+
+	if (!num_pages)
+		return -EINVAL;
 
 	rc = optee_check_mem_type(start, num_pages);
 	if (rc)
 		return rc;
 
-	rc = sg_alloc_table_from_pages(&sgt, pages, num_pages, 0,
-				       num_pages * PAGE_SIZE, GFP_KERNEL);
+	/*
+	 * Start the FF-A descriptor at the 4 KiB page containing the shared
+	 * buffer, skipping unused leading 4 KiB pages when PAGE_SIZE is
+	 * larger. Same approach as optee_fill_pages_list() in the SMC ABI.
+	 * This leaves only the offset into that 4 KiB page for internal_offs.
+	 */
+	ffa_offs = round_down(tee_shm_get_page_offset(shm), FFA_PAGE_SIZE);
+	rc = sg_alloc_table_from_pages(&sgt, pages, num_pages, ffa_offs,
+				       num_pages * PAGE_SIZE - ffa_offs,
+				       GFP_KERNEL);
 	if (rc)
 		return rc;
 	args.sg = sgt.sgl;
@@ -404,7 +417,7 @@ static const struct tee_shm_pool_ops pool_ffa_ops = {
  */
 static struct tee_shm_pool *optee_ffa_shm_pool_alloc_pages(void)
 {
-	struct tee_shm_pool *pool = kzalloc(sizeof(*pool), GFP_KERNEL);
+	struct tee_shm_pool *pool = kzalloc_obj(*pool);
 
 	if (!pool)
 		return ERR_PTR(-ENOMEM);
@@ -458,7 +471,8 @@ static void handle_ffa_rpc_func_cmd_shm_alloc(struct tee_context *ctx,
 		.attr = OPTEE_MSG_ATTR_TYPE_FMEM_OUTPUT,
 		.u.fmem.size = tee_shm_get_size(shm),
 		.u.fmem.global_id = shm->sec_world_id,
-		.u.fmem.internal_offs = shm->offset,
+		.u.fmem.internal_offs = tee_shm_get_page_offset(shm) &
+					(FFA_PAGE_SIZE - 1),
 	};
 
 	arg->ret = TEEC_SUCCESS;
@@ -697,7 +711,10 @@ static int optee_ffa_lend_protmem(struct optee *optee, struct tee_shm *protmem,
 	unsigned int n;
 	int rc;
 
-	mem_attr = kcalloc(ma_count, sizeof(*mem_attr), GFP_KERNEL);
+	mem_attr = kzalloc_objs(*mem_attr, ma_count);
+	if (!mem_attr)
+		return -ENOMEM;
+
 	for (n = 0; n < ma_count; n++) {
 		mem_attr[n].receiver = mem_attrs[n] & U16_MAX;
 		mem_attr[n].attrs = mem_attrs[n] >> 16;
@@ -775,6 +792,39 @@ static int optee_ffa_reclaim_protmem(struct optee *optee,
  * with a matching configuration.
  */
 
+static bool optee_ffa_get_os_revision(struct ffa_device *ffa_dev,
+				      const struct ffa_ops *ops,
+				      struct optee_revision *revision)
+{
+	const struct ffa_msg_ops *msg_ops = ops->msg_ops;
+	struct ffa_send_direct_data data = {
+		.data0 = OPTEE_FFA_GET_OS_VERSION,
+	};
+	int rc;
+
+	msg_ops->mode_32bit_set(ffa_dev);
+
+	rc = msg_ops->sync_send_receive(ffa_dev, &data);
+	if (rc) {
+		pr_err("Unexpected error %d\n", rc);
+		return false;
+	}
+
+	if (revision) {
+		revision->os_major = data.data0;
+		revision->os_minor = data.data1;
+		revision->os_build_id = data.data2;
+	}
+
+	if (data.data2)
+		pr_info("revision %lu.%lu (%08lx)",
+			data.data0, data.data1, data.data2);
+	else
+		pr_info("revision %lu.%lu", data.data0, data.data1);
+
+	return true;
+}
+
 static bool optee_ffa_api_is_compatible(struct ffa_device *ffa_dev,
 					const struct ffa_ops *ops)
 {
@@ -797,20 +847,6 @@ static bool optee_ffa_api_is_compatible(struct ffa_device *ffa_dev,
 		       data.data0, data.data1);
 		return false;
 	}
-
-	data = (struct ffa_send_direct_data){
-		.data0 = OPTEE_FFA_GET_OS_VERSION,
-	};
-	rc = msg_ops->sync_send_receive(ffa_dev, &data);
-	if (rc) {
-		pr_err("Unexpected error %d\n", rc);
-		return false;
-	}
-	if (data.data2)
-		pr_info("revision %lu.%lu (%08lx)",
-			data.data0, data.data1, data.data2);
-	else
-		pr_info("revision %lu.%lu", data.data0, data.data1);
 
 	return true;
 }
@@ -900,6 +936,7 @@ static int optee_ffa_open(struct tee_context *ctx)
 
 static const struct tee_driver_ops optee_ffa_clnt_ops = {
 	.get_version = optee_ffa_get_version,
+	.get_tee_revision = optee_get_revision,
 	.open = optee_ffa_open,
 	.release = optee_release,
 	.open_session = optee_open_session,
@@ -918,6 +955,7 @@ static const struct tee_desc optee_ffa_clnt_desc = {
 
 static const struct tee_driver_ops optee_ffa_supp_ops = {
 	.get_version = optee_ffa_get_version,
+	.get_tee_revision = optee_get_revision,
 	.open = optee_ffa_open,
 	.release = optee_release_supp,
 	.supp_recv = optee_supp_recv,
@@ -1056,9 +1094,14 @@ static int optee_ffa_probe(struct ffa_device *ffa_dev)
 	if (sec_caps & OPTEE_FFA_SEC_CAP_ARG_OFFSET)
 		arg_cache_flags |= OPTEE_SHM_ARG_SHARED;
 
-	optee = kzalloc(sizeof(*optee), GFP_KERNEL);
+	optee = kzalloc_obj(*optee);
 	if (!optee)
 		return -ENOMEM;
+
+	if (!optee_ffa_get_os_revision(ffa_dev, ffa_ops, &optee->revision)) {
+		rc = -EINVAL;
+		goto err_free_optee;
+	}
 
 	pool = optee_ffa_shm_pool_alloc_pages();
 	if (IS_ERR(pool)) {
@@ -1094,14 +1137,6 @@ static int optee_ffa_probe(struct ffa_device *ffa_dev)
 
 	optee_set_dev_group(optee);
 
-	rc = tee_device_register(optee->teedev);
-	if (rc)
-		goto err_unreg_supp_teedev;
-
-	rc = tee_device_register(optee->supp_teedev);
-	if (rc)
-		goto err_unreg_supp_teedev;
-
 	rc = rhashtable_init(&optee->ffa.global_ids, &shm_rhash_params);
 	if (rc)
 		goto err_unreg_supp_teedev;
@@ -1129,6 +1164,14 @@ static int optee_ffa_probe(struct ffa_device *ffa_dev)
 
 	if (optee_ffa_protmem_pool_init(optee, sec_caps))
 		pr_info("Protected memory service not available\n");
+
+	rc = tee_device_register(optee->teedev);
+	if (rc)
+		goto err_unregister_devices;
+
+	rc = tee_device_register(optee->supp_teedev);
+	if (rc)
+		goto err_unregister_devices;
 
 	rc = optee_enumerate_devices(PTA_CMD_GET_DEVICES);
 	if (rc)

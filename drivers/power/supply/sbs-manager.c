@@ -199,7 +199,7 @@ static int sbsm_gpio_get_value(struct gpio_chip *gc, unsigned int off)
 	if (ret < 0)
 		return ret;
 
-	return ret & BIT(off);
+	return !!(ret & BIT(off));
 }
 
 /*
@@ -389,8 +389,8 @@ static int sbsm_probe(struct i2c_client *client)
 }
 
 static const struct i2c_device_id sbsm_ids[] = {
-	{ "sbs-manager" },
-	{ "ltc1760" },
+	{ .name = "sbs-manager" },
+	{ .name = "ltc1760" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, sbsm_ids);

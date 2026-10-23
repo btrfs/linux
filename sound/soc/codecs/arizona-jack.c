@@ -5,13 +5,13 @@
  *  Copyright (C) 2012-2014 Wolfson Microelectronics plc
  */
 
+#include <linux/cleanup.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/slab.h>
 #include <linux/interrupt.h>
 #include <linux/err.h>
 #include <linux/gpio/consumer.h>
-#include <linux/gpio.h>
 #include <linux/input.h>
 #include <linux/pm_runtime.h>
 #include <linux/property.h>
@@ -212,17 +212,16 @@ static void arizona_extcon_pulse_micbias(struct arizona_priv *info)
 	struct arizona *arizona = info->arizona;
 	const char *widget = arizona_extcon_get_micbias(info);
 	struct snd_soc_dapm_context *dapm = arizona->dapm;
-	struct snd_soc_component *component = snd_soc_dapm_to_component(dapm);
 	int ret;
 
-	ret = snd_soc_component_force_enable_pin(component, widget);
+	ret = snd_soc_dapm_force_enable_pin(dapm, widget);
 	if (ret)
 		dev_warn(arizona->dev, "Failed to enable %s: %d\n", widget, ret);
 
 	snd_soc_dapm_sync(dapm);
 
 	if (!arizona->pdata.micd_force_micbias) {
-		ret = snd_soc_component_disable_pin(component, widget);
+		ret = snd_soc_dapm_disable_pin(dapm, widget);
 		if (ret)
 			dev_warn(arizona->dev, "Failed to disable %s: %d\n", widget, ret);
 
@@ -287,7 +286,6 @@ static void arizona_stop_mic(struct arizona_priv *info)
 	struct arizona *arizona = info->arizona;
 	const char *widget = arizona_extcon_get_micbias(info);
 	struct snd_soc_dapm_context *dapm = arizona->dapm;
-	struct snd_soc_component *component = snd_soc_dapm_to_component(dapm);
 	bool change = false;
 	int ret;
 
@@ -297,7 +295,7 @@ static void arizona_stop_mic(struct arizona_priv *info)
 	if (ret < 0)
 		dev_err(arizona->dev, "Failed to disable micd: %d\n", ret);
 
-	ret = snd_soc_component_disable_pin(component, widget);
+	ret = snd_soc_dapm_disable_pin(dapm, widget);
 	if (ret)
 		dev_warn(arizona->dev, "Failed to disable %s: %d\n", widget, ret);
 
@@ -461,11 +459,6 @@ static int arizona_hpdet_do_id(struct arizona_priv *info, int *reading,
 			       bool *mic)
 {
 	struct arizona *arizona = info->arizona;
-#ifdef CONFIG_GPIOLIB_LEGACY
-	int id_gpio = arizona->pdata.hpdet_id_gpio;
-#else
-	int id_gpio = 0;
-#endif
 
 	if (!arizona->pdata.hpdet_acc_id)
 		return 0;
@@ -476,9 +469,8 @@ static int arizona_hpdet_do_id(struct arizona_priv *info, int *reading,
 	 */
 	info->hpdet_res[info->num_hpdet_res++] = *reading;
 
-#ifdef CONFIG_GPIOLIB_LEGACY
 	/* Only check the mic directly if we didn't already ID it */
-	if (id_gpio && info->num_hpdet_res == 1) {
+	if (info->hpdet_id_gpio && info->num_hpdet_res == 1) {
 		dev_dbg(arizona->dev, "Measuring mic\n");
 
 		regmap_update_bits(arizona->regmap,
@@ -488,13 +480,12 @@ static int arizona_hpdet_do_id(struct arizona_priv *info, int *reading,
 				   ARIZONA_ACCDET_MODE_HPR |
 				   info->micd_modes[0].src);
 
-		gpio_set_value_cansleep(id_gpio, 1);
+		gpiod_set_value_cansleep(info->hpdet_id_gpio, 1);
 
 		regmap_update_bits(arizona->regmap, ARIZONA_HEADPHONE_DETECT_1,
 				   ARIZONA_HP_POLL, ARIZONA_HP_POLL);
 		return -EAGAIN;
 	}
-#endif
 
 	/* OK, got both.  Now, compare... */
 	dev_dbg(arizona->dev, "HPDET measured %d %d\n",
@@ -516,7 +507,7 @@ static int arizona_hpdet_do_id(struct arizona_priv *info, int *reading,
 	/*
 	 * If we measure the mic as high impedance
 	 */
-	if (!id_gpio || info->hpdet_res[1] > 50) {
+	if (!info->hpdet_id_gpio || info->hpdet_res[1] > 50) {
 		dev_dbg(arizona->dev, "Detected mic\n");
 		*mic = true;
 		info->detecting = true;
@@ -535,9 +526,6 @@ static irqreturn_t arizona_hpdet_irq(int irq, void *data)
 {
 	struct arizona_priv *info = data;
 	struct arizona *arizona = info->arizona;
-#ifdef CONFIG_GPIOLIB_LEGACY
-	int id_gpio = arizona->pdata.hpdet_id_gpio;
-#endif
 	int ret, reading, state, report;
 	bool mic = false;
 
@@ -593,10 +581,8 @@ done:
 
 	arizona_extcon_hp_clamp(info, false);
 
-#ifdef CONFIG_GPIOLIB_LEGACY
-	if (id_gpio)
-		gpio_set_value_cansleep(id_gpio, 0);
-#endif
+	if (info->hpdet_id_gpio)
+		gpiod_set_value_cansleep(info->hpdet_id_gpio, 0);
 
 	/* If we have a mic then reenable MICDET */
 	if (state && (mic || info->mic))
@@ -722,15 +708,13 @@ static void arizona_micd_timeout_work(struct work_struct *work)
 						struct arizona_priv,
 						micd_timeout_work.work);
 
-	mutex_lock(&info->lock);
+	guard(mutex)(&info->lock);
 
 	dev_dbg(info->arizona->dev, "MICD timed out, reporting HP\n");
 
 	info->detecting = false;
 
 	arizona_identify_headphone(info);
-
-	mutex_unlock(&info->lock);
 }
 
 static int arizona_micd_adc_read(struct arizona_priv *info)
@@ -936,12 +920,11 @@ static void arizona_micd_detect(struct work_struct *work)
 
 	cancel_delayed_work_sync(&info->micd_timeout_work);
 
-	mutex_lock(&info->lock);
+	guard(mutex)(&info->lock);
 
 	/* If the cable was removed while measuring ignore the result */
 	if (!(info->jack->status & SND_JACK_MECHANICAL)) {
 		dev_dbg(arizona->dev, "Ignoring MICDET for removed cable\n");
-		mutex_unlock(&info->lock);
 		return;
 	}
 
@@ -951,7 +934,6 @@ static void arizona_micd_detect(struct work_struct *work)
 		arizona_button_reading(info);
 
 	pm_runtime_mark_last_busy(arizona->dev);
-	mutex_unlock(&info->lock);
 }
 
 static irqreturn_t arizona_micdet(int irq, void *data)
@@ -963,10 +945,10 @@ static irqreturn_t arizona_micdet(int irq, void *data)
 	cancel_delayed_work_sync(&info->micd_detect_work);
 	cancel_delayed_work_sync(&info->micd_timeout_work);
 
-	mutex_lock(&info->lock);
-	if (!info->detecting)
-		debounce = 0;
-	mutex_unlock(&info->lock);
+	scoped_guard(mutex, &info->lock) {
+		if (!info->detecting)
+			debounce = 0;
+	}
 
 	if (debounce)
 		queue_delayed_work(system_power_efficient_wq,
@@ -984,9 +966,8 @@ static void arizona_hpdet_work(struct work_struct *work)
 						struct arizona_priv,
 						hpdet_work.work);
 
-	mutex_lock(&info->lock);
+	guard(mutex)(&info->lock);
 	arizona_start_hpdet_acc_id(info);
-	mutex_unlock(&info->lock);
 }
 
 static int arizona_hpdet_wait(struct arizona_priv *info)
@@ -1033,9 +1014,9 @@ static irqreturn_t arizona_jackdet(int irq, void *data)
 	cancelled_hp = cancel_delayed_work_sync(&info->hpdet_work);
 	cancelled_mic = cancel_delayed_work_sync(&info->micd_timeout_work);
 
-	pm_runtime_get_sync(arizona->dev);
+	guard(pm_runtime_active_auto)(arizona->dev);
 
-	mutex_lock(&info->lock);
+	guard(mutex)(&info->lock);
 
 	if (info->micd_clamp) {
 		mask = ARIZONA_MICD_CLAMP_STS;
@@ -1051,8 +1032,6 @@ static irqreturn_t arizona_jackdet(int irq, void *data)
 	ret = regmap_read(arizona->regmap, ARIZONA_AOD_IRQ_RAW_STATUS, &val);
 	if (ret) {
 		dev_err(arizona->dev, "Failed to read jackdet status: %d\n", ret);
-		mutex_unlock(&info->lock);
-		pm_runtime_put_autosuspend(arizona->dev);
 		return IRQ_NONE;
 	}
 
@@ -1071,72 +1050,67 @@ static irqreturn_t arizona_jackdet(int irq, void *data)
 					   &info->micd_timeout_work,
 					   msecs_to_jiffies(micd_timeout));
 		}
+	} else {
+		info->last_jackdet = val;
 
-		goto out;
-	}
-	info->last_jackdet = val;
+		if (info->last_jackdet == present) {
+			dev_dbg(arizona->dev, "Detected jack\n");
+			snd_soc_jack_report(info->jack, SND_JACK_MECHANICAL, SND_JACK_MECHANICAL);
 
-	if (info->last_jackdet == present) {
-		dev_dbg(arizona->dev, "Detected jack\n");
-		snd_soc_jack_report(info->jack, SND_JACK_MECHANICAL, SND_JACK_MECHANICAL);
+			info->detecting = true;
+			info->mic = false;
+			info->jack_flips = 0;
 
-		info->detecting = true;
-		info->mic = false;
-		info->jack_flips = 0;
+			if (!arizona->pdata.hpdet_acc_id) {
+				arizona_start_mic(info);
+			} else {
+				queue_delayed_work(system_power_efficient_wq,
+						   &info->hpdet_work,
+						   msecs_to_jiffies(HPDET_DEBOUNCE));
+			}
 
-		if (!arizona->pdata.hpdet_acc_id) {
-			arizona_start_mic(info);
+			if (info->micd_clamp || !arizona->pdata.jd_invert)
+				regmap_update_bits(arizona->regmap,
+						   ARIZONA_JACK_DETECT_DEBOUNCE,
+						   ARIZONA_MICD_CLAMP_DB |
+						   ARIZONA_JD1_DB, 0);
 		} else {
-			queue_delayed_work(system_power_efficient_wq,
-					   &info->hpdet_work,
-					   msecs_to_jiffies(HPDET_DEBOUNCE));
-		}
+			dev_dbg(arizona->dev, "Detected jack removal\n");
 
-		if (info->micd_clamp || !arizona->pdata.jd_invert)
+			arizona_stop_mic(info);
+
+			info->num_hpdet_res = 0;
+			for (i = 0; i < ARRAY_SIZE(info->hpdet_res); i++)
+				info->hpdet_res[i] = 0;
+			info->mic = false;
+			info->hpdet_done = false;
+			info->hpdet_retried = false;
+
+			snd_soc_jack_report(info->jack, 0,
+					    ARIZONA_JACK_MASK | info->micd_button_mask);
+
+			/*
+			 * If the jack was removed during a headphone detection we
+			 * need to wait for the headphone detection to finish, as
+			 * it can not be aborted. We don't want to be able to start
+			 * a new headphone detection from a fresh insert until this
+			 * one is finished.
+			 */
+			arizona_hpdet_wait(info);
+
 			regmap_update_bits(arizona->regmap,
 					   ARIZONA_JACK_DETECT_DEBOUNCE,
-					   ARIZONA_MICD_CLAMP_DB |
-					   ARIZONA_JD1_DB, 0);
-	} else {
-		dev_dbg(arizona->dev, "Detected jack removal\n");
-
-		arizona_stop_mic(info);
-
-		info->num_hpdet_res = 0;
-		for (i = 0; i < ARRAY_SIZE(info->hpdet_res); i++)
-			info->hpdet_res[i] = 0;
-		info->mic = false;
-		info->hpdet_done = false;
-		info->hpdet_retried = false;
-
-		snd_soc_jack_report(info->jack, 0, ARIZONA_JACK_MASK | info->micd_button_mask);
-
-		/*
-		 * If the jack was removed during a headphone detection we
-		 * need to wait for the headphone detection to finish, as
-		 * it can not be aborted. We don't want to be able to start
-		 * a new headphone detection from a fresh insert until this
-		 * one is finished.
-		 */
-		arizona_hpdet_wait(info);
-
-		regmap_update_bits(arizona->regmap,
-				   ARIZONA_JACK_DETECT_DEBOUNCE,
-				   ARIZONA_MICD_CLAMP_DB | ARIZONA_JD1_DB,
-				   ARIZONA_MICD_CLAMP_DB | ARIZONA_JD1_DB);
+					   ARIZONA_MICD_CLAMP_DB | ARIZONA_JD1_DB,
+					   ARIZONA_MICD_CLAMP_DB | ARIZONA_JD1_DB);
+		}
 	}
 
-out:
 	/* Clear trig_sts to make sure DCVDD is not forced up */
 	regmap_write(arizona->regmap, ARIZONA_AOD_WKUP_AND_TRIG,
 		     ARIZONA_MICD_CLAMP_FALL_TRIG_STS |
 		     ARIZONA_MICD_CLAMP_RISE_TRIG_STS |
 		     ARIZONA_JD1_FALL_TRIG_STS |
 		     ARIZONA_JD1_RISE_TRIG_STS);
-
-	mutex_unlock(&info->lock);
-
-	pm_runtime_put_autosuspend(arizona->dev);
 
 	return IRQ_HANDLED;
 }
@@ -1327,58 +1301,33 @@ int arizona_jack_codec_dev_probe(struct arizona_priv *info, struct device *dev)
 		regmap_update_bits(arizona->regmap, ARIZONA_GP_SWITCH_1,
 				ARIZONA_SW1_MODE_MASK, arizona->pdata.gpsw);
 
-#ifdef CONFIG_GPIOLIB_LEGACY
-	if (pdata->micd_pol_gpio > 0) {
-		if (info->micd_modes[0].gpio)
-			mode = GPIOF_OUT_INIT_HIGH;
-		else
-			mode = GPIOF_OUT_INIT_LOW;
+	if (info->micd_modes[0].gpio)
+		mode = GPIOD_OUT_HIGH;
+	else
+		mode = GPIOD_OUT_LOW;
 
-		ret = devm_gpio_request_one(dev, pdata->micd_pol_gpio,
-					    mode, "MICD polarity");
-		if (ret != 0) {
-			dev_err(arizona->dev, "Failed to request GPIO%d: %d\n",
-				pdata->micd_pol_gpio, ret);
-			return ret;
-		}
-
-		info->micd_pol_gpio = gpio_to_desc(pdata->micd_pol_gpio);
-	} else
-#endif
-	{
-		if (info->micd_modes[0].gpio)
-			mode = GPIOD_OUT_HIGH;
-		else
-			mode = GPIOD_OUT_LOW;
-
-		/* We can't use devm here because we need to do the get
-		 * against the MFD device, as that is where the of_node
-		 * will reside, but if we devm against that the GPIO
-		 * will not be freed if the extcon driver is unloaded.
-		 */
-		info->micd_pol_gpio = gpiod_get_optional(arizona->dev,
-							 "wlf,micd-pol",
-							 mode);
-		if (IS_ERR(info->micd_pol_gpio)) {
-			ret = PTR_ERR(info->micd_pol_gpio);
-			dev_err_probe(arizona->dev, ret, "getting microphone polarity GPIO\n");
-			return ret;
-		}
+	/* We can't use devm here because we need to do the get
+	 * against the MFD device, as that is where the of_node
+	 * will reside, but if we devm against that the GPIO
+	 * will not be freed if the extcon driver is unloaded.
+	 */
+	info->micd_pol_gpio = gpiod_get_optional(arizona->dev,
+						 "wlf,micd-pol",
+						 mode);
+	if (IS_ERR(info->micd_pol_gpio)) {
+		ret = PTR_ERR(info->micd_pol_gpio);
+		dev_err_probe(arizona->dev, ret, "getting microphone polarity GPIO\n");
+		return ret;
 	}
 
-#ifdef CONFIG_GPIOLIB_LEGACY
-	if (arizona->pdata.hpdet_id_gpio > 0) {
-		ret = devm_gpio_request_one(dev, arizona->pdata.hpdet_id_gpio,
-					    GPIOF_OUT_INIT_LOW,
-					    "HPDET");
-		if (ret != 0) {
-			dev_err(arizona->dev, "Failed to request GPIO%d: %d\n",
-				arizona->pdata.hpdet_id_gpio, ret);
-			gpiod_put(info->micd_pol_gpio);
-			return ret;
-		}
+	info->hpdet_id_gpio = gpiod_get_optional(arizona->dev,
+						 "wlf,hpdet-id-gpio",
+						 mode);
+	if (IS_ERR(info->hpdet_id_gpio)) {
+		ret = PTR_ERR(info->hpdet_id_gpio);
+		dev_err_probe(arizona->dev, ret, "getting headphone detect ID GPIO\n");
+		return ret;
 	}
-#endif
 
 	return 0;
 }
@@ -1387,6 +1336,7 @@ EXPORT_SYMBOL_GPL(arizona_jack_codec_dev_probe);
 int arizona_jack_codec_dev_remove(struct arizona_priv *info)
 {
 	gpiod_put(info->micd_pol_gpio);
+	gpiod_put(info->hpdet_id_gpio);
 	return 0;
 }
 EXPORT_SYMBOL_GPL(arizona_jack_codec_dev_remove);

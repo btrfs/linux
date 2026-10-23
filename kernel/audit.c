@@ -32,6 +32,7 @@
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
 #include <linux/file.h>
+#include <linux/hex.h>
 #include <linux/init.h>
 #include <linux/types.h>
 #include <linux/atomic.h>
@@ -58,6 +59,10 @@
 #include <linux/freezer.h>
 #include <linux/pid_namespace.h>
 #include <net/netns/generic.h>
+#include <net/ip.h>
+#include <net/ipv6.h>
+#include <linux/sctp.h>
+#include <linux/overflow.h>
 
 #include "audit.h"
 
@@ -351,8 +356,8 @@ void audit_panic(const char *message)
 
 static inline int audit_rate_check(void)
 {
-	static unsigned long	last_check = 0;
-	static int		messages   = 0;
+	static unsigned long	last_check;
+	static int		messages;
 	static DEFINE_SPINLOCK(lock);
 	unsigned long		flags;
 	unsigned long		now;
@@ -387,7 +392,7 @@ static inline int audit_rate_check(void)
 */
 void audit_log_lost(const char *message)
 {
-	static unsigned long	last_msg = 0;
+	static unsigned long	last_msg;
 	static DEFINE_SPINLOCK(lock);
 	unsigned long		flags;
 	unsigned long		now;
@@ -541,7 +546,7 @@ static int auditd_set(struct pid *pid, u32 portid, struct net *net,
 	if (!pid || !net)
 		return -EINVAL;
 
-	ac_new = kzalloc(sizeof(*ac_new), GFP_KERNEL);
+	ac_new = kzalloc_obj(*ac_new);
 	if (!ac_new)
 		return -ENOMEM;
 	ac_new->pid = get_pid(pid);
@@ -946,7 +951,7 @@ main_queue:
 		 *       do the multicast send and rotate records from the
 		 *       main queue to the retry/hold queues */
 		wait_event_freezable(kauditd_wait,
-				     (skb_queue_len(&audit_queue) ? 1 : 0));
+				(skb_queue_len_lockless(&audit_queue) ? 1 : 0));
 	}
 
 	return 0;
@@ -1040,7 +1045,7 @@ static void audit_send_reply(struct sk_buff *request_skb, int seq, int type, int
 	struct task_struct *tsk;
 	struct audit_reply *reply;
 
-	reply = kzalloc(sizeof(*reply), GFP_KERNEL);
+	reply = kzalloc_obj(*reply);
 	if (!reply)
 		return;
 
@@ -1279,7 +1284,7 @@ static int audit_receive_msg(struct sk_buff *skb, struct nlmsghdr *nlh,
 		s.rate_limit		   = audit_rate_limit;
 		s.backlog_limit		   = audit_backlog_limit;
 		s.lost			   = atomic_read(&audit_lost);
-		s.backlog		   = skb_queue_len(&audit_queue);
+		s.backlog		   = skb_queue_len_lockless(&audit_queue);
 		s.feature_bitmap	   = AUDIT_FEATURE_BITMAP_ALL;
 		s.backlog_wait_time	   = audit_backlog_wait_time;
 		s.backlog_wait_time_actual = atomic_read(&audit_backlog_wait_time_actual);
@@ -1291,6 +1296,8 @@ static int audit_receive_msg(struct sk_buff *skb, struct nlmsghdr *nlh,
 		memset(&s, 0, sizeof(s));
 		/* guard against past and future API changes */
 		memcpy(&s, data, min_t(size_t, sizeof(s), data_len));
+		if (s.mask & ~AUDIT_STATUS_ALL)
+			return -EINVAL;
 		if (s.mask & AUDIT_STATUS_ENABLED) {
 			err = audit_set_enabled(s.enabled);
 			if (err < 0)
@@ -1462,6 +1469,8 @@ static int audit_receive_msg(struct sk_buff *skb, struct nlmsghdr *nlh,
 		err = audit_list_rules_send(skb, seq);
 		break;
 	case AUDIT_TRIM:
+		if (audit_enabled == AUDIT_LOCKED)
+			return -EPERM;
 		audit_trim_trees();
 		audit_log_common_recv_msg(audit_context(), &ab,
 					  AUDIT_CONFIG_CHANGE);
@@ -1474,6 +1483,8 @@ static int audit_receive_msg(struct sk_buff *skb, struct nlmsghdr *nlh,
 		size_t msglen = data_len;
 		char *old, *new;
 
+		if (audit_enabled == AUDIT_LOCKED)
+			return -EPERM;
 		err = -EINVAL;
 		if (msglen < 2 * sizeof(u32))
 			break;
@@ -1513,8 +1524,7 @@ static int audit_receive_msg(struct sk_buff *skb, struct nlmsghdr *nlh,
 			if (err < 0)
 				return err;
 		}
-		sig_data = kmalloc(struct_size(sig_data, ctx, lsmctx.len),
-				   GFP_KERNEL);
+		sig_data = kmalloc_flex(*sig_data, ctx, lsmctx.len);
 		if (!sig_data) {
 			if (lsmprop_is_set(&audit_sig_lsm))
 				security_release_secctx(&lsmctx);
@@ -1618,7 +1628,7 @@ static void audit_receive(struct sk_buff *skb)
 
 	/* can't block with the ctrl lock, so penalize the sender now */
 	if (audit_backlog_limit &&
-	    (skb_queue_len(&audit_queue) > audit_backlog_limit)) {
+	    (skb_queue_len_lockless(&audit_queue) > audit_backlog_limit)) {
 		DECLARE_WAITQUEUE(wait, current);
 
 		/* wake kauditd to try and flush the queue */
@@ -1924,7 +1934,7 @@ struct audit_buffer *audit_log_start(struct audit_context *ctx, gfp_t gfp_mask,
 		long stime = audit_backlog_wait_time;
 
 		while (audit_backlog_limit &&
-		       (skb_queue_len(&audit_queue) > audit_backlog_limit)) {
+			(skb_queue_len_lockless(&audit_queue) > audit_backlog_limit)) {
 			/* wake kauditd to try and flush the queue */
 			wake_up_interruptible(&kauditd_wait);
 
@@ -1944,7 +1954,7 @@ struct audit_buffer *audit_log_start(struct audit_context *ctx, gfp_t gfp_mask,
 			} else {
 				if (audit_rate_check() && printk_ratelimit())
 					pr_warn("audit_backlog=%d > audit_backlog_limit=%d\n",
-						skb_queue_len(&audit_queue),
+						skb_queue_len_lockless(&audit_queue),
 						audit_backlog_limit);
 				audit_log_lost("backlog limit exceeded");
 				return NULL;
@@ -2025,7 +2035,7 @@ void audit_log_vformat(struct audit_buffer *ab, const char *fmt, va_list args)
 		 * here and AUDIT_BUFSIZ is at least 1024, then we can
 		 * log everything that printk could have logged. */
 		avail = audit_expand(ab,
-			max_t(unsigned, AUDIT_BUFSIZ, 1+len-avail));
+			max_t(unsigned int, AUDIT_BUFSIZ, 1+len-avail));
 		if (!avail)
 			goto out_va_end;
 		len = vsnprintf(skb_tail_pointer(skb), avail, fmt, args2);
@@ -2071,7 +2081,8 @@ void audit_log_format(struct audit_buffer *ab, const char *fmt, ...)
 void audit_log_n_hex(struct audit_buffer *ab, const unsigned char *buf,
 		size_t len)
 {
-	int i, avail, new_len;
+	int avail;
+	size_t i, new_len;
 	unsigned char *ptr;
 	struct sk_buff *skb;
 
@@ -2081,7 +2092,12 @@ void audit_log_n_hex(struct audit_buffer *ab, const unsigned char *buf,
 	BUG_ON(!ab->skb);
 	skb = ab->skb;
 	avail = skb_tailroom(skb);
-	new_len = len<<1;
+
+	if (check_shl_overflow(len, 1, &new_len)) {
+		audit_log_format(ab, "?");
+		return;
+	}
+
 	if (new_len >= avail) {
 		/* Round the buffer request up to the next multiple */
 		new_len = AUDIT_BUFSIZ*(((new_len-avail)/AUDIT_BUFSIZ) + 1);
@@ -2104,7 +2120,8 @@ void audit_log_n_hex(struct audit_buffer *ab, const unsigned char *buf,
 void audit_log_n_string(struct audit_buffer *ab, const char *string,
 			size_t slen)
 {
-	int avail, new_len;
+	int avail;
+	size_t new_len;
 	unsigned char *ptr;
 	struct sk_buff *skb;
 
@@ -2114,7 +2131,13 @@ void audit_log_n_string(struct audit_buffer *ab, const char *string,
 	BUG_ON(!ab->skb);
 	skb = ab->skb;
 	avail = skb_tailroom(skb);
-	new_len = slen + 3;	/* enclosing quotes + null terminator */
+
+	/* enclosing quotes + null terminator */
+	if (check_add_overflow(slen, 3, &new_len)) {
+		audit_log_format(ab, "?");
+		return;
+	}
+
 	if (new_len > avail) {
 		avail = audit_expand(ab, new_len);
 		if (!avail)
@@ -2487,6 +2510,162 @@ void audit_log_path_denied(int type, const char *operation)
 	audit_log_format(ab, " res=0");
 	audit_log_end(ab);
 }
+
+int audit_log_nf_skb(struct audit_buffer *ab,
+		     const struct sk_buff *skb, u8 nfproto)
+{
+	/* find the IP protocol in the case of NFPROTO_BRIDGE */
+	if (nfproto == NFPROTO_BRIDGE) {
+		switch (eth_hdr(skb)->h_proto) {
+		case htons(ETH_P_IP):
+			nfproto = NFPROTO_IPV4;
+			break;
+		case htons(ETH_P_IPV6):
+			nfproto = NFPROTO_IPV6;
+			break;
+		default:
+			goto unknown_proto;
+		}
+	}
+
+	switch (nfproto) {
+	case NFPROTO_IPV4: {
+		struct iphdr iph;
+		const struct iphdr *ih;
+
+		ih = skb_header_pointer(skb, skb_network_offset(skb),
+					sizeof(iph), &iph);
+		if (!ih)
+			return -ENOMEM;
+
+		switch (ih->protocol) {
+		case IPPROTO_TCP: {
+			struct tcphdr _tcph;
+			const struct tcphdr *th;
+
+			th = skb_header_pointer(skb, skb_transport_offset(skb),
+						sizeof(_tcph), &_tcph);
+			if (!th)
+				return -ENOMEM;
+
+			audit_log_format(ab, " saddr=%pI4 daddr=%pI4 proto=%hhu sport=%hu dport=%hu",
+					 &ih->saddr, &ih->daddr, ih->protocol,
+					 ntohs(th->source), ntohs(th->dest));
+			break;
+		}
+		case IPPROTO_UDP:
+		case IPPROTO_UDPLITE: {
+			struct udphdr _udph;
+			const struct udphdr *uh;
+
+			uh = skb_header_pointer(skb, skb_transport_offset(skb),
+						sizeof(_udph), &_udph);
+			if (!uh)
+				return -ENOMEM;
+
+			audit_log_format(ab, " saddr=%pI4 daddr=%pI4 proto=%hhu sport=%hu dport=%hu",
+					 &ih->saddr, &ih->daddr, ih->protocol,
+					 ntohs(uh->source), ntohs(uh->dest));
+			break;
+		}
+		case IPPROTO_SCTP: {
+			struct sctphdr _sctph;
+			const struct sctphdr *sh;
+
+			sh = skb_header_pointer(skb, skb_transport_offset(skb),
+						sizeof(_sctph), &_sctph);
+			if (!sh)
+				return -ENOMEM;
+
+			audit_log_format(ab, " saddr=%pI4 daddr=%pI4 proto=%hhu sport=%hu dport=%hu",
+					 &ih->saddr, &ih->daddr, ih->protocol,
+					 ntohs(sh->source), ntohs(sh->dest));
+			break;
+		}
+		default:
+			audit_log_format(ab, " saddr=%pI4 daddr=%pI4 proto=%hhu",
+					 &ih->saddr, &ih->daddr, ih->protocol);
+		}
+
+		break;
+	}
+	case NFPROTO_IPV6: {
+		struct ipv6hdr iph;
+		const struct ipv6hdr *ih;
+		u8 nexthdr;
+		__be16 frag_off;
+
+		ih = skb_header_pointer(skb, skb_network_offset(skb),
+					sizeof(iph), &iph);
+		if (!ih)
+			return -ENOMEM;
+
+		nexthdr = ih->nexthdr;
+		ipv6_skip_exthdr(skb, skb_network_offset(skb) + sizeof(iph),
+				 &nexthdr, &frag_off);
+
+		switch (nexthdr) {
+		case IPPROTO_TCP: {
+			struct tcphdr _tcph;
+			const struct tcphdr *th;
+
+			th = skb_header_pointer(skb, skb_transport_offset(skb),
+						sizeof(_tcph), &_tcph);
+			if (!th)
+				return -ENOMEM;
+
+			audit_log_format(ab, " saddr=%pI6c daddr=%pI6c proto=%hhu sport=%hu dport=%hu",
+					 &ih->saddr, &ih->daddr, nexthdr,
+					 ntohs(th->source), ntohs(th->dest));
+			break;
+		}
+		case IPPROTO_UDP:
+		case IPPROTO_UDPLITE: {
+			struct udphdr _udph;
+			const struct udphdr *uh;
+
+			uh = skb_header_pointer(skb, skb_transport_offset(skb),
+						sizeof(_udph), &_udph);
+			if (!uh)
+				return -ENOMEM;
+
+			audit_log_format(ab, " saddr=%pI6c daddr=%pI6c proto=%hhu sport=%hu dport=%hu",
+					 &ih->saddr, &ih->daddr, nexthdr,
+					 ntohs(uh->source), ntohs(uh->dest));
+			break;
+		}
+		case IPPROTO_SCTP: {
+			struct sctphdr _sctph;
+			const struct sctphdr *sh;
+
+			sh = skb_header_pointer(skb, skb_transport_offset(skb),
+						sizeof(_sctph), &_sctph);
+			if (!sh)
+				return -ENOMEM;
+
+			audit_log_format(ab, " saddr=%pI6c daddr=%pI6c proto=%hhu sport=%hu dport=%hu",
+					 &ih->saddr, &ih->daddr, nexthdr,
+					 ntohs(sh->source), ntohs(sh->dest));
+			break;
+		}
+		default:
+			audit_log_format(ab, " saddr=%pI6c daddr=%pI6c proto=%hhu",
+					 &ih->saddr, &ih->daddr, nexthdr);
+		}
+
+		break;
+	}
+	default:
+		goto unknown_proto;
+	}
+
+	return 0;
+
+unknown_proto:
+	audit_log_format(ab, " saddr=? daddr=? proto=?");
+	return -EPFNOSUPPORT;
+}
+EXPORT_SYMBOL(audit_log_nf_skb);
 
 /* global counter which is incremented every time something logs in */
 static atomic_t session_id = ATOMIC_INIT(0);

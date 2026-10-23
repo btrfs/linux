@@ -326,7 +326,7 @@ static SOC_ENUM_SINGLE_DECL(da7210_hp_mode_sel,
 static int da7210_put_alc_sw(struct snd_kcontrol *kcontrol,
 			     struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_component *component = snd_soc_kcontrol_component(kcontrol);
+	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
 
 	if (ucontrol->value.integer.value[0]) {
 		/* Check if noise suppression is enabled */
@@ -349,7 +349,7 @@ static int da7210_put_alc_sw(struct snd_kcontrol *kcontrol,
 static int da7210_put_noise_sup_sw(struct snd_kcontrol *kcontrol,
 				   struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_component *component = snd_soc_kcontrol_component(kcontrol);
+	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
 	u8 val;
 
 	if (ucontrol->value.integer.value[0]) {
@@ -1238,7 +1238,7 @@ static int da7210_i2c_probe(struct i2c_client *i2c)
 }
 
 static const struct i2c_device_id da7210_i2c_id[] = {
-	{ "da7210" },
+	{ .name = "da7210" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, da7210_i2c_id);

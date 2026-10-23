@@ -44,7 +44,6 @@ enum {
 		.io_reg = REG_SIZE * id + 0x4,		\
 		.intr_cfg_reg = REG_SIZE * id + 0x8,	\
 		.intr_status_reg = REG_SIZE * id + 0xc,	\
-		.intr_target_reg = REG_SIZE * id + 0x8,	\
 		.tile = _tile,				\
 		.mux_bit = 2,				\
 		.pull_bit = 0,				\
@@ -73,7 +72,6 @@ enum {
 		.io_reg = 0,				\
 		.intr_cfg_reg = 0,			\
 		.intr_status_reg = 0,			\
-		.intr_target_reg = 0,			\
 		.tile = NORTH,				\
 		.mux_bit = -1,				\
 		.pull_bit = pull,			\
@@ -99,7 +97,6 @@ enum {
 		.io_reg = offset + 0x4,			\
 		.intr_cfg_reg = 0,			\
 		.intr_status_reg = 0,			\
-		.intr_target_reg = 0,			\
 		.tile = SOUTH,				\
 		.mux_bit = -1,				\
 		.pull_bit = 3,				\
@@ -1357,6 +1354,7 @@ static const struct of_device_id sm8250_pinctrl_of_match[] = {
 	{ .compatible = "qcom,sm8250-pinctrl", },
 	{ },
 };
+MODULE_DEVICE_TABLE(of, sm8250_pinctrl_of_match);
 
 static struct platform_driver sm8250_pinctrl_driver = {
 	.driver = {
@@ -1380,4 +1378,3 @@ module_exit(sm8250_pinctrl_exit);
 
 MODULE_DESCRIPTION("QTI sm8250 pinctrl driver");
 MODULE_LICENSE("GPL v2");
-MODULE_DEVICE_TABLE(of, sm8250_pinctrl_of_match);

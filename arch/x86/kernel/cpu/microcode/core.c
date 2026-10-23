@@ -34,6 +34,7 @@
 
 #include <asm/apic.h>
 #include <asm/cpu_device_id.h>
+#include <asm/cpuid/api.h>
 #include <asm/perf_event.h>
 #include <asm/processor.h>
 #include <asm/cmdline.h>
@@ -56,6 +57,8 @@ bool force_minrev = IS_ENABLED(CONFIG_MICROCODE_LATE_FORCE_MINREV);
 /* base microcode revision for debugging */
 u32 base_rev;
 u32 microcode_rev[NR_CPUS] = {};
+
+bool __ro_after_init x86_hypervisor_present;
 
 /*
  * Synchronization.
@@ -116,9 +119,10 @@ bool __init microcode_loader_disabled(void)
 	/*
 	 * Disable when:
 	 *
-	 * 1) The CPU does not support CPUID.
+	 * 1) The CPU does not support CPUID, detected below in
+	 *    load_ucode_bsp().
 	 *
-	 * 2) Bit 31 in CPUID[1]:ECX is clear
+	 * 2) Bit 31 in CPUID[1]:ECX is set
 	 *    The bit is reserved for hypervisor use. This is still not
 	 *    completely accurate as XEN PV guests don't see that CPUID bit
 	 *    set, but that's good enough as they don't land on the BSP
@@ -127,16 +131,14 @@ bool __init microcode_loader_disabled(void)
 	 * 3) Certain AMD patch levels are not allowed to be
 	 *    overwritten.
 	 */
-	if (!cpuid_feature() ||
-	    ((native_cpuid_ecx(1) & BIT(31)) &&
-	      !IS_ENABLED(CONFIG_MICROCODE_DBG)) ||
+	if ((x86_hypervisor_present && !IS_ENABLED(CONFIG_MICROCODE_DBG)) ||
 	    amd_check_current_patch_level())
 		dis_ucode_ldr = true;
 
 	return dis_ucode_ldr;
 }
 
-static void early_parse_cmdline(void)
+static void __init early_parse_cmdline(void)
 {
 	char cmd_buf[64] = {};
 	char *s, *p = cmd_buf;
@@ -170,6 +172,11 @@ void __init load_ucode_bsp(void)
 	bool intel = true;
 
 	early_parse_cmdline();
+
+	if (!cpuid_feature())
+		dis_ucode_ldr = true;
+	else
+		x86_hypervisor_present = native_cpuid_ecx(1) & BIT(31);
 
 	if (microcode_loader_disabled())
 		return;
@@ -589,6 +596,17 @@ static int load_late_stop_cpus(bool is_safe)
 		pr_err("You should switch to early loading, if possible.\n");
 	}
 
+	/*
+	 * Pre-load the microcode image into a staging device. This
+	 * process is preemptible and does not require stopping CPUs.
+	 * Successful staging simplifies the subsequent late-loading
+	 * process, reducing rendezvous time.
+	 *
+	 * Even if the transfer fails, the update will proceed as usual.
+	 */
+	if (microcode_ops->use_staging)
+		microcode_ops->stage_microcode();
+
 	atomic_set(&late_cpus_in, num_online_cpus());
 	atomic_set(&offline_in_nmi, 0);
 	loops_per_usec = loops_per_jiffy / (TICK_NSEC / 1000);
@@ -812,8 +830,17 @@ void microcode_bsp_resume(void)
 		reload_early_microcode(cpu);
 }
 
-static struct syscore_ops mc_syscore_ops = {
-	.resume	= microcode_bsp_resume,
+static void microcode_bsp_syscore_resume(void *data)
+{
+	microcode_bsp_resume();
+}
+
+static const struct syscore_ops mc_syscore_ops = {
+	.resume	= microcode_bsp_syscore_resume,
+};
+
+static struct syscore mc_syscore = {
+	.ops = &mc_syscore_ops,
 };
 
 static int mc_cpu_online(unsigned int cpu)
@@ -892,7 +919,7 @@ static int __init microcode_init(void)
 		}
 	}
 
-	register_syscore_ops(&mc_syscore_ops);
+	register_syscore(&mc_syscore);
 	cpuhp_setup_state(CPUHP_AP_ONLINE_DYN, "x86/microcode:online",
 			  mc_cpu_online, mc_cpu_down_prep);
 

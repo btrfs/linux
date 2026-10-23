@@ -38,6 +38,7 @@
 #define IMA_GID		0x2000
 #define IMA_EGID	0x4000
 #define IMA_FGROUP	0x8000
+#define IMA_FS_SUBTYPE	0x10000
 
 #define UNKNOWN		0
 #define MEASURE		0x0001	/* same as IMA_MEASURE */
@@ -45,11 +46,14 @@
 #define APPRAISE	0x0004	/* same as IMA_APPRAISE */
 #define DONT_APPRAISE	0x0008
 #define AUDIT		0x0040
+#define DONT_AUDIT	0x0080
 #define HASH		0x0100
 #define DONT_HASH	0x0200
 
 #define INVALID_PCR(a) (((a) < 0) || \
 	(a) >= (sizeof_field(struct ima_iint_cache, measured_pcrs) * 8))
+
+static size_t max_rule_len;
 
 int ima_policy_flag;
 static int temp_ima_appraise;
@@ -119,6 +123,7 @@ struct ima_rule_entry {
 		int type;	/* audit type */
 	} lsm[MAX_LSM_RULES];
 	char *fsname;
+	char *fs_subtype;
 	struct ima_rule_opt_list *keyrings; /* Measure keys added to these keyrings */
 	struct ima_rule_opt_list *label; /* Measure data grouped under this label */
 	struct ima_template_desc *template;
@@ -160,7 +165,10 @@ static struct ima_rule_entry dont_measure_rules[] __ro_after_init = {
 	{.action = DONT_MEASURE, .fsmagic = CGROUP2_SUPER_MAGIC,
 	 .flags = IMA_FSMAGIC},
 	{.action = DONT_MEASURE, .fsmagic = NSFS_MAGIC, .flags = IMA_FSMAGIC},
-	{.action = DONT_MEASURE, .fsmagic = EFIVARFS_MAGIC, .flags = IMA_FSMAGIC}
+	{.action = DONT_MEASURE, .fsmagic = EFIVARFS_MAGIC,
+	 .flags = IMA_FSMAGIC},
+	{.action = DONT_MEASURE, .fsmagic = CONFIGFS_MAGIC,
+	 .flags = IMA_FSMAGIC}
 };
 
 static struct ima_rule_entry original_measurement_rules[] __ro_after_init = {
@@ -206,6 +214,8 @@ static struct ima_rule_entry default_appraise_rules[] __ro_after_init = {
 	{.action = DONT_APPRAISE, .fsmagic = EFIVARFS_MAGIC, .flags = IMA_FSMAGIC},
 	{.action = DONT_APPRAISE, .fsmagic = CGROUP_SUPER_MAGIC, .flags = IMA_FSMAGIC},
 	{.action = DONT_APPRAISE, .fsmagic = CGROUP2_SUPER_MAGIC, .flags = IMA_FSMAGIC},
+	{.action = DONT_APPRAISE, .fsmagic = CONFIGFS_MAGIC,
+	 .flags = IMA_FSMAGIC},
 #ifdef CONFIG_IMA_WRITE_POLICY
 	{.action = APPRAISE, .func = POLICY_CHECK,
 	.flags = IMA_FUNC | IMA_DIGSIG_REQUIRED},
@@ -241,7 +251,8 @@ static struct ima_rule_entry build_appraise_rules[] __ro_after_init = {
 
 static struct ima_rule_entry secure_boot_rules[] __ro_after_init = {
 	{.action = APPRAISE, .func = MODULE_CHECK,
-	 .flags = IMA_FUNC | IMA_DIGSIG_REQUIRED},
+	 .flags = IMA_FUNC | IMA_DIGSIG_REQUIRED | IMA_MODSIG_ALLOWED |
+		  IMA_CHECK_BLACKLIST},
 	{.action = APPRAISE, .func = FIRMWARE_CHECK,
 	 .flags = IMA_FUNC | IMA_DIGSIG_REQUIRED},
 	{.action = APPRAISE, .func = KEXEC_KERNEL_CHECK,
@@ -338,7 +349,7 @@ static struct ima_rule_opt_list *ima_alloc_rule_opt_list(const substring_t *src)
 		return ERR_PTR(-EINVAL);
 	}
 
-	opt_list = kzalloc(struct_size(opt_list, items, count), GFP_KERNEL);
+	opt_list = kzalloc_flex(*opt_list, items, count);
 	if (!opt_list) {
 		kfree(src_copy);
 		return ERR_PTR(-ENOMEM);
@@ -397,6 +408,7 @@ static void ima_free_rule(struct ima_rule_entry *entry)
 	 * the defined_templates list and cannot be freed here
 	 */
 	kfree(entry->fsname);
+	kfree(entry->fs_subtype);
 	ima_free_rule_opt_list(entry->keyrings);
 	ima_lsm_free_rule(entry);
 	kfree(entry);
@@ -535,6 +547,8 @@ static bool ima_match_rule_data(struct ima_rule_entry *rule,
 
 		opt_list = rule->label;
 		break;
+	case POLICY_CHECK:
+		return true;
 	default:
 		return false;
 	}
@@ -581,6 +595,10 @@ static bool ima_match_rules(struct ima_rule_entry *rule,
 		return false;
 
 	switch (func) {
+	case POLICY_CHECK:
+		if (inode)
+			break;
+		fallthrough;
 	case KEY_CHECK:
 	case CRITICAL_DATA:
 		return ((rule->func == func) &&
@@ -601,6 +619,12 @@ static bool ima_match_rules(struct ima_rule_entry *rule,
 	if ((rule->flags & IMA_FSNAME)
 	    && strcmp(rule->fsname, inode->i_sb->s_type->name))
 		return false;
+	if (rule->flags & IMA_FS_SUBTYPE) {
+		if (!inode->i_sb->s_subtype)
+			return false;
+		if (strcmp(rule->fs_subtype, inode->i_sb->s_subtype))
+			return false;
+	}
 	if ((rule->flags & IMA_FSUUID) &&
 	    !uuid_equal(&rule->fsuuid, &inode->i_sb->s_uuid))
 		return false;
@@ -674,7 +698,7 @@ retry:
 				goto retry;
 			}
 		}
-		if (!rc) {
+		if (rc <= 0) {
 			result = false;
 			goto out;
 		}
@@ -910,8 +934,7 @@ static int __init ima_init_arch_policy(void)
 	for (rules = arch_rules; *rules != NULL; rules++)
 		arch_entries++;
 
-	arch_policy_entry = kcalloc(arch_entries + 1,
-				    sizeof(*arch_policy_entry), GFP_KERNEL);
+	arch_policy_entry = kzalloc_objs(*arch_policy_entry, arch_entries + 1);
 	if (!arch_policy_entry)
 		return 0;
 
@@ -944,6 +967,8 @@ static int __init ima_init_arch_policy(void)
 void __init ima_init_policy(void)
 {
 	int build_appraise_entries, arch_entries;
+
+	max_rule_len = 255;
 
 	/* if !ima_policy, we load NO default rules */
 	if (ima_policy)
@@ -1064,10 +1089,10 @@ void ima_update_policy(void)
 enum policy_opt {
 	Opt_measure, Opt_dont_measure,
 	Opt_appraise, Opt_dont_appraise,
-	Opt_audit, Opt_hash, Opt_dont_hash,
+	Opt_audit, Opt_dont_audit, Opt_hash, Opt_dont_hash,
 	Opt_obj_user, Opt_obj_role, Opt_obj_type,
 	Opt_subj_user, Opt_subj_role, Opt_subj_type,
-	Opt_func, Opt_mask, Opt_fsmagic, Opt_fsname, Opt_fsuuid,
+	Opt_func, Opt_mask, Opt_fsmagic, Opt_fsname, Opt_fs_subtype, Opt_fsuuid,
 	Opt_uid_eq, Opt_euid_eq, Opt_gid_eq, Opt_egid_eq,
 	Opt_fowner_eq, Opt_fgroup_eq,
 	Opt_uid_gt, Opt_euid_gt, Opt_gid_gt, Opt_egid_gt,
@@ -1086,6 +1111,7 @@ static const match_table_t policy_tokens = {
 	{Opt_appraise, "appraise"},
 	{Opt_dont_appraise, "dont_appraise"},
 	{Opt_audit, "audit"},
+	{Opt_dont_audit, "dont_audit"},
 	{Opt_hash, "hash"},
 	{Opt_dont_hash, "dont_hash"},
 	{Opt_obj_user, "obj_user=%s"},
@@ -1098,6 +1124,7 @@ static const match_table_t policy_tokens = {
 	{Opt_mask, "mask=%s"},
 	{Opt_fsmagic, "fsmagic=%s"},
 	{Opt_fsname, "fsname=%s"},
+	{Opt_fs_subtype, "fs_subtype=%s"},
 	{Opt_fsuuid, "fsuuid=%s"},
 	{Opt_uid_eq, "uid=%s"},
 	{Opt_euid_eq, "euid=%s"},
@@ -1282,10 +1309,12 @@ static bool ima_validate_rule(struct ima_rule_entry *entry)
 		if (entry->flags & ~(IMA_FUNC | IMA_MASK | IMA_FSMAGIC |
 				     IMA_UID | IMA_FOWNER | IMA_FSUUID |
 				     IMA_INMASK | IMA_EUID | IMA_PCR |
-				     IMA_FSNAME | IMA_GID | IMA_EGID |
+				     IMA_FSNAME | IMA_FS_SUBTYPE |
+				     IMA_GID | IMA_EGID |
 				     IMA_FGROUP | IMA_DIGSIG_REQUIRED |
 				     IMA_PERMIT_DIRECTIO | IMA_VALIDATE_ALGOS |
-				     IMA_CHECK_BLACKLIST | IMA_VERITY_REQUIRED))
+				     IMA_CHECK_BLACKLIST | IMA_VERITY_REQUIRED |
+				     IMA_SIGV3_REQUIRED))
 			return false;
 
 		break;
@@ -1295,10 +1324,12 @@ static bool ima_validate_rule(struct ima_rule_entry *entry)
 		if (entry->flags & ~(IMA_FUNC | IMA_MASK | IMA_FSMAGIC |
 				     IMA_UID | IMA_FOWNER | IMA_FSUUID |
 				     IMA_INMASK | IMA_EUID | IMA_PCR |
-				     IMA_FSNAME | IMA_GID | IMA_EGID |
+				     IMA_FSNAME | IMA_FS_SUBTYPE |
+				     IMA_GID | IMA_EGID |
 				     IMA_FGROUP | IMA_DIGSIG_REQUIRED |
 				     IMA_PERMIT_DIRECTIO | IMA_MODSIG_ALLOWED |
-				     IMA_CHECK_BLACKLIST | IMA_VALIDATE_ALGOS))
+				     IMA_CHECK_BLACKLIST | IMA_VALIDATE_ALGOS |
+				     IMA_SIGV3_REQUIRED))
 			return false;
 
 		break;
@@ -1308,7 +1339,8 @@ static bool ima_validate_rule(struct ima_rule_entry *entry)
 
 		if (entry->flags & ~(IMA_FUNC | IMA_FSMAGIC | IMA_UID |
 				     IMA_FOWNER | IMA_FSUUID | IMA_EUID |
-				     IMA_PCR | IMA_FSNAME | IMA_GID | IMA_EGID |
+				     IMA_PCR | IMA_FSNAME | IMA_FS_SUBTYPE |
+				     IMA_GID | IMA_EGID |
 				     IMA_FGROUP))
 			return false;
 
@@ -1478,6 +1510,14 @@ static int ima_parse_rule(char *rule, struct ima_rule_entry *entry)
 
 			entry->action = AUDIT;
 			break;
+		case Opt_dont_audit:
+			ima_log_string(ab, "action", "dont_audit");
+
+			if (entry->action != UNKNOWN)
+				result = -EINVAL;
+
+			entry->action = DONT_AUDIT;
+			break;
 		case Opt_hash:
 			ima_log_string(ab, "action", "hash");
 
@@ -1586,6 +1626,22 @@ static int ima_parse_rule(char *rule, struct ima_rule_entry *entry)
 			}
 			result = 0;
 			entry->flags |= IMA_FSNAME;
+			break;
+		case Opt_fs_subtype:
+			ima_log_string(ab, "fs_subtype", args[0].from);
+
+			if (entry->fs_subtype) {
+				result = -EINVAL;
+				break;
+			}
+
+			entry->fs_subtype = kstrdup(args[0].from, GFP_KERNEL);
+			if (!entry->fs_subtype) {
+				result = -ENOMEM;
+				break;
+			}
+			result = 0;
+			entry->flags |= IMA_FS_SUBTYPE;
 			break;
 		case Opt_keyrings:
 			ima_log_string(ab, "keyrings", args[0].from);
@@ -1794,9 +1850,7 @@ static int ima_parse_rule(char *rule, struct ima_rule_entry *entry)
 			break;
 		case Opt_digest_type:
 			ima_log_string(ab, "digest_type", args[0].from);
-			if (entry->flags & IMA_DIGSIG_REQUIRED)
-				result = -EINVAL;
-			else if ((strcmp(args[0].from, "verity")) == 0)
+			if ((strcmp(args[0].from, "verity")) == 0)
 				entry->flags |= IMA_VERITY_REQUIRED;
 			else
 				result = -EINVAL;
@@ -1810,14 +1864,13 @@ static int ima_parse_rule(char *rule, struct ima_rule_entry *entry)
 				else
 					entry->flags |= IMA_DIGSIG_REQUIRED | IMA_CHECK_BLACKLIST;
 			} else if (strcmp(args[0].from, "sigv3") == 0) {
-				/* Only fsverity supports sigv3 for now */
-				if (entry->flags & IMA_VERITY_REQUIRED)
-					entry->flags |= IMA_DIGSIG_REQUIRED | IMA_CHECK_BLACKLIST;
-				else
-					result = -EINVAL;
+				entry->flags |= IMA_SIGV3_REQUIRED |
+					IMA_DIGSIG_REQUIRED |
+					IMA_CHECK_BLACKLIST;
 			} else if (IS_ENABLED(CONFIG_IMA_APPRAISE_MODSIG) &&
 				 strcmp(args[0].from, "imasig|modsig") == 0) {
-				if (entry->flags & IMA_VERITY_REQUIRED)
+				if ((entry->flags & IMA_VERITY_REQUIRED) ||
+				    (entry->flags & IMA_SIGV3_REQUIRED))
 					result = -EINVAL;
 				else
 					entry->flags |= IMA_DIGSIG_REQUIRED |
@@ -1902,7 +1955,7 @@ static int ima_parse_rule(char *rule, struct ima_rule_entry *entry)
 
 	/* d-ngv2 template field recommended for unsigned fs-verity digests */
 	if (!result && entry->action == MEASURE &&
-	    entry->flags & IMA_VERITY_REQUIRED) {
+	    (entry->flags & IMA_VERITY_REQUIRED)) {
 		template_desc = entry->template ? entry->template :
 						  ima_template_desc_current();
 		check_template_field(template_desc, "d-ngv2",
@@ -1936,7 +1989,7 @@ ssize_t ima_parse_add_rule(char *rule)
 	if (*p == '#' || *p == '\0')
 		return len;
 
-	entry = kzalloc(sizeof(*entry), GFP_KERNEL);
+	entry = kzalloc_obj(*entry);
 	if (!entry) {
 		integrity_audit_msg(AUDIT_INTEGRITY_STATUS, NULL,
 				    NULL, op, "-ENOMEM", -ENOMEM, audit_info);
@@ -1955,6 +2008,9 @@ ssize_t ima_parse_add_rule(char *rule)
 	}
 
 	list_add_tail(&entry->list, &ima_temp_rules);
+
+	if (len > max_rule_len)
+		max_rule_len = len;
 
 	return len;
 }
@@ -1983,7 +2039,6 @@ const char *const func_tokens[] = {
 	__ima_hooks(__ima_hook_stringify)
 };
 
-#ifdef	CONFIG_IMA_READ_POLICY
 enum {
 	mask_exec = 0, mask_write, mask_read, mask_append
 };
@@ -2097,6 +2152,8 @@ int ima_policy_show(struct seq_file *m, void *v)
 		seq_puts(m, pt(Opt_dont_appraise));
 	if (entry->action & AUDIT)
 		seq_puts(m, pt(Opt_audit));
+	if (entry->action & DONT_AUDIT)
+		seq_puts(m, pt(Opt_dont_audit));
 	if (entry->action & HASH)
 		seq_puts(m, pt(Opt_hash));
 	if (entry->action & DONT_HASH)
@@ -2130,6 +2187,12 @@ int ima_policy_show(struct seq_file *m, void *v)
 	if (entry->flags & IMA_FSNAME) {
 		snprintf(tbuf, sizeof(tbuf), "%s", entry->fsname);
 		seq_printf(m, pt(Opt_fsname), tbuf);
+		seq_puts(m, " ");
+	}
+
+	if (entry->flags & IMA_FS_SUBTYPE) {
+		snprintf(tbuf, sizeof(tbuf), "%s", entry->fs_subtype);
+		seq_printf(m, pt(Opt_fs_subtype), tbuf);
 		seq_puts(m, " ");
 	}
 
@@ -2262,7 +2325,7 @@ int ima_policy_show(struct seq_file *m, void *v)
 	if (entry->template)
 		seq_printf(m, "template=%s ", entry->template->name);
 	if (entry->flags & IMA_DIGSIG_REQUIRED) {
-		if (entry->flags & IMA_VERITY_REQUIRED)
+		if (entry->flags & IMA_SIGV3_REQUIRED)
 			seq_puts(m, "appraise_type=sigv3 ");
 		else if (entry->flags & IMA_MODSIG_ALLOWED)
 			seq_puts(m, "appraise_type=imasig|modsig ");
@@ -2277,7 +2340,6 @@ int ima_policy_show(struct seq_file *m, void *v)
 	seq_puts(m, "\n");
 	return 0;
 }
-#endif	/* CONFIG_IMA_READ_POLICY */
 
 #if defined(CONFIG_IMA_APPRAISE) && defined(CONFIG_INTEGRITY_TRUSTED_KEYRING)
 /*
@@ -2334,3 +2396,83 @@ bool ima_appraise_signature(enum kernel_read_file_id id)
 	return found;
 }
 #endif /* CONFIG_IMA_APPRAISE && CONFIG_INTEGRITY_TRUSTED_KEYRING */
+
+/**
+ * ima_measure_loaded_policy - measure the active IMA policy ruleset
+ *
+ * Must be called with ima_write_mutex held, as it performs two
+ * separate RCU read passes over ima_rules and relies on the mutex
+ * to prevent concurrent policy updates between them.
+ */
+void ima_measure_loaded_policy(void)
+{
+	const char *event_name = "ima_policy_loaded";
+	const char *op = "measure_loaded_ima_policy";
+	size_t rule_len = max_rule_len + 2;
+	struct ima_rule_entry *rule_entry;
+	struct list_head *ima_rules_tmp;
+	struct seq_file file = { 0 };
+	int result = -ENOMEM;
+	size_t file_len = 0;
+	char *rule;
+
+	lockdep_assert_held(&ima_write_mutex);
+
+	rule = kmalloc(rule_len, GFP_KERNEL);
+	if (!rule) {
+		integrity_audit_msg(AUDIT_INTEGRITY_PCR, NULL, event_name,
+				    op, "ENOMEM", result, 0);
+		return;
+	}
+
+	/* calculate IMA policy rules memory size */
+	file.buf = rule;
+	file.read_pos = 0;
+	file.size = rule_len;
+	file.count = 0;
+
+	rcu_read_lock();
+	ima_rules_tmp = rcu_dereference(ima_rules);
+	list_for_each_entry_rcu(rule_entry, ima_rules_tmp, list) {
+		ima_policy_show(&file, rule_entry);
+
+		if (seq_has_overflowed(&file)) {
+			result = -E2BIG;
+			integrity_audit_msg(AUDIT_INTEGRITY_PCR, NULL,
+					    event_name, op, "rule_length",
+					    result, 0);
+			rcu_read_unlock();
+			goto free_rule;
+		}
+
+		file_len += file.count;
+		file.count = 0;
+	}
+	rcu_read_unlock();
+
+	/* copy IMA policy rules to a buffer for measuring */
+	file.buf = kmalloc(file_len, GFP_KERNEL);
+	if (!file.buf) {
+		integrity_audit_msg(AUDIT_INTEGRITY_PCR, NULL, event_name,
+				    op, "ENOMEM", result, 0);
+		goto free_rule;
+	}
+
+	file.read_pos = 0;
+	file.size = file_len;
+	file.count = 0;
+
+	rcu_read_lock();
+	ima_rules_tmp = rcu_dereference(ima_rules);
+	list_for_each_entry_rcu(rule_entry, ima_rules_tmp, list) {
+		ima_policy_show(&file, rule_entry);
+	}
+	rcu_read_unlock();
+
+	ima_measure_critical_data("ima_policy", event_name, file.buf,
+				  file.count, false, NULL, 0);
+
+	kfree(file.buf);
+free_rule:
+	kfree(rule);
+}

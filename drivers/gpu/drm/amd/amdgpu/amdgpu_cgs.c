@@ -76,10 +76,9 @@ static uint32_t amdgpu_cgs_read_ind_register(struct cgs_device *cgs_device,
 		DRM_ERROR("audio endpt register access not implemented.\n");
 		return 0;
 	default:
-		BUG();
+		WARN(1, "Invalid indirect register space");
+		return 0;
 	}
-	WARN(1, "Invalid indirect register space");
-	return 0;
 }
 
 static void amdgpu_cgs_write_ind_register(struct cgs_device *cgs_device,
@@ -104,9 +103,8 @@ static void amdgpu_cgs_write_ind_register(struct cgs_device *cgs_device,
 		DRM_ERROR("audio endpt register access not implemented.\n");
 		return;
 	default:
-		BUG();
+		WARN(1, "Invalid indirect register space");
 	}
-	WARN(1, "Invalid indirect register space");
 }
 
 static uint32_t fw_type_convert(struct cgs_device *cgs_device, uint32_t fw_type)
@@ -241,7 +239,7 @@ static int amdgpu_cgs_get_firmware_info(struct cgs_device *cgs_device,
 		info->fw_version = amdgpu_get_firmware_version(cgs_device, type);
 		info->feature_version = (uint16_t)le32_to_cpu(header->ucode_feature_version);
 	} else {
-		char fw_name[30] = {0};
+		const char *fw_name = NULL;
 		int err = 0;
 		uint32_t ucode_size;
 		uint32_t ucode_start_address;
@@ -257,17 +255,17 @@ static int amdgpu_cgs_get_firmware_info(struct cgs_device *cgs_device,
 					(adev->pdev->revision == 0x81) ||
 					(adev->pdev->device == 0x665f)) {
 					info->is_kicker = true;
-					strscpy(fw_name, "amdgpu/bonaire_k_smc.bin");
+					fw_name = "bonaire_k_smc.bin";
 				} else {
-					strscpy(fw_name, "amdgpu/bonaire_smc.bin");
+					fw_name = "bonaire_smc.bin";
 				}
 				break;
 			case CHIP_HAWAII:
 				if (adev->pdev->revision == 0x80) {
 					info->is_kicker = true;
-					strscpy(fw_name, "amdgpu/hawaii_k_smc.bin");
+					fw_name = "hawaii_k_smc.bin";
 				} else {
-					strscpy(fw_name, "amdgpu/hawaii_smc.bin");
+					fw_name = "hawaii_smc.bin";
 				}
 				break;
 			case CHIP_TOPAZ:
@@ -277,87 +275,86 @@ static int amdgpu_cgs_get_firmware_info(struct cgs_device *cgs_device,
 				    ((adev->pdev->device == 0x6900) && (adev->pdev->revision == 0xD1)) ||
 				    ((adev->pdev->device == 0x6900) && (adev->pdev->revision == 0xD3))) {
 					info->is_kicker = true;
-					strscpy(fw_name, "amdgpu/topaz_k_smc.bin");
+					fw_name = "topaz_k_smc.bin";
 				} else
-					strscpy(fw_name, "amdgpu/topaz_smc.bin");
+					fw_name = "topaz_smc.bin";
 				break;
 			case CHIP_TONGA:
 				if (((adev->pdev->device == 0x6939) && (adev->pdev->revision == 0xf1)) ||
 				    ((adev->pdev->device == 0x6938) && (adev->pdev->revision == 0xf1))) {
 					info->is_kicker = true;
-					strscpy(fw_name, "amdgpu/tonga_k_smc.bin");
+					fw_name = "tonga_k_smc.bin";
 				} else
-					strscpy(fw_name, "amdgpu/tonga_smc.bin");
+					fw_name = "tonga_smc.bin";
 				break;
 			case CHIP_FIJI:
-				strscpy(fw_name, "amdgpu/fiji_smc.bin");
+				fw_name = "fiji_smc.bin";
 				break;
 			case CHIP_POLARIS11:
 				if (type == CGS_UCODE_ID_SMU) {
 					if (ASICID_IS_P21(adev->pdev->device, adev->pdev->revision)) {
 						info->is_kicker = true;
-						strscpy(fw_name, "amdgpu/polaris11_k_smc.bin");
+						fw_name = "polaris11_k_smc.bin";
 					} else if (ASICID_IS_P31(adev->pdev->device, adev->pdev->revision)) {
 						info->is_kicker = true;
-						strscpy(fw_name, "amdgpu/polaris11_k2_smc.bin");
+						fw_name = "polaris11_k2_smc.bin";
 					} else {
-						strscpy(fw_name, "amdgpu/polaris11_smc.bin");
+						fw_name = "polaris11_smc.bin";
 					}
 				} else if (type == CGS_UCODE_ID_SMU_SK) {
-					strscpy(fw_name, "amdgpu/polaris11_smc_sk.bin");
+					fw_name = "polaris11_smc_sk.bin";
 				}
 				break;
 			case CHIP_POLARIS10:
 				if (type == CGS_UCODE_ID_SMU) {
 					if (ASICID_IS_P20(adev->pdev->device, adev->pdev->revision)) {
 						info->is_kicker = true;
-						strscpy(fw_name, "amdgpu/polaris10_k_smc.bin");
+						fw_name = "polaris10_k_smc.bin";
 					} else if (ASICID_IS_P30(adev->pdev->device, adev->pdev->revision)) {
 						info->is_kicker = true;
-						strscpy(fw_name, "amdgpu/polaris10_k2_smc.bin");
+						fw_name = "polaris10_k2_smc.bin";
 					} else {
-						strscpy(fw_name, "amdgpu/polaris10_smc.bin");
+						fw_name = "polaris10_smc.bin";
 					}
 				} else if (type == CGS_UCODE_ID_SMU_SK) {
-					strscpy(fw_name, "amdgpu/polaris10_smc_sk.bin");
+					fw_name = "polaris10_smc_sk.bin";
 				}
 				break;
 			case CHIP_POLARIS12:
 				if (ASICID_IS_P23(adev->pdev->device, adev->pdev->revision)) {
 					info->is_kicker = true;
-					strscpy(fw_name, "amdgpu/polaris12_k_smc.bin");
+					fw_name = "polaris12_k_smc.bin";
 				} else {
-					strscpy(fw_name, "amdgpu/polaris12_smc.bin");
+					fw_name = "polaris12_smc.bin";
 				}
 				break;
 			case CHIP_VEGAM:
-				strscpy(fw_name, "amdgpu/vegam_smc.bin");
+				fw_name = "vegam_smc.bin";
 				break;
 			case CHIP_VEGA10:
 				if ((adev->pdev->device == 0x687f) &&
 					((adev->pdev->revision == 0xc0) ||
 					(adev->pdev->revision == 0xc1) ||
 					(adev->pdev->revision == 0xc3)))
-					strscpy(fw_name, "amdgpu/vega10_acg_smc.bin");
+					fw_name = "vega10_acg_smc.bin";
 				else
-					strscpy(fw_name, "amdgpu/vega10_smc.bin");
+					fw_name = "vega10_smc.bin";
 				break;
 			case CHIP_VEGA12:
-				strscpy(fw_name, "amdgpu/vega12_smc.bin");
+				fw_name = "vega12_smc.bin";
 				break;
 			case CHIP_VEGA20:
-				strscpy(fw_name, "amdgpu/vega20_smc.bin");
+				fw_name = "vega20_smc.bin";
 				break;
 			default:
-				DRM_ERROR("SMC firmware not supported\n");
+				drm_err(adev_to_drm(adev), "SMC firmware not supported\n");
 				return -EINVAL;
 			}
 
 			err = amdgpu_ucode_request(adev, &adev->pm.fw,
 						   AMDGPU_UCODE_REQUIRED,
-						   "%s", fw_name);
+						   "amdgpu/%s", fw_name);
 			if (err) {
-				DRM_ERROR("Failed to load firmware \"%s\"", fw_name);
 				amdgpu_ucode_release(&adev->pm.fw);
 				return err;
 			}
@@ -398,11 +395,10 @@ static const struct cgs_ops amdgpu_cgs_ops = {
 
 struct cgs_device *amdgpu_cgs_create_device(struct amdgpu_device *adev)
 {
-	struct amdgpu_cgs_device *cgs_device =
-		kmalloc(sizeof(*cgs_device), GFP_KERNEL);
+	struct amdgpu_cgs_device *cgs_device = kmalloc_obj(*cgs_device);
 
 	if (!cgs_device) {
-		DRM_ERROR("Couldn't allocate CGS device structure\n");
+		drm_err(adev_to_drm(adev), "Couldn't allocate CGS device structure\n");
 		return NULL;
 	}
 

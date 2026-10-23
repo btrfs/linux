@@ -32,44 +32,43 @@
 #include <linux/i2c.h>
 #include <linux/iopoll.h>
 
+#include <drm/drm_print.h>
 #include <drm/display/drm_hdcp_helper.h>
 
-#include "i915_drv.h"
-#include "i915_irq.h"
-#include "i915_reg.h"
 #include "intel_de.h"
 #include "intel_display_regs.h"
 #include "intel_display_types.h"
 #include "intel_display_wa.h"
 #include "intel_gmbus.h"
 #include "intel_gmbus_regs.h"
+#include "intel_parent.h"
 
 struct intel_gmbus {
 	struct i2c_adapter adapter;
 #define GMBUS_FORCE_BIT_RETRY (1U << 31)
 	u32 force_bit;
 	u32 reg0;
-	i915_reg_t gpio_reg;
+	intel_reg_t gpio_reg;
 	struct i2c_algo_bit_data bit_algo;
 	struct intel_display *display;
 };
 
 enum gmbus_gpio {
-	GPIOA,
-	GPIOB,
-	GPIOC,
-	GPIOD,
-	GPIOE,
-	GPIOF,
-	GPIOG,
-	GPIOH,
-	__GPIOI_UNUSED,
-	GPIOJ,
-	GPIOK,
-	GPIOL,
-	GPIOM,
-	GPION,
-	GPIOO,
+	GPIO_0,
+	GPIO_1,
+	GPIO_2,
+	GPIO_3,
+	GPIO_4,
+	GPIO_5,
+	GPIO_6,
+	GPIO_7,
+	GPIO_8,
+	GPIO_9,
+	GPIO_10,
+	GPIO_11,
+	GPIO_12,
+	GPIO_13,
+	GPIO_14,
 };
 
 struct gmbus_pin {
@@ -79,77 +78,82 @@ struct gmbus_pin {
 
 /* Map gmbus pin pairs to names and registers. */
 static const struct gmbus_pin gmbus_pins[] = {
-	[GMBUS_PIN_SSC] = { "ssc", GPIOB },
-	[GMBUS_PIN_VGADDC] = { "vga", GPIOA },
-	[GMBUS_PIN_PANEL] = { "panel", GPIOC },
-	[GMBUS_PIN_DPC] = { "dpc", GPIOD },
-	[GMBUS_PIN_DPB] = { "dpb", GPIOE },
-	[GMBUS_PIN_DPD] = { "dpd", GPIOF },
+	[GMBUS_PIN_SSC] = { "ssc", GPIO_1 },
+	[GMBUS_PIN_VGADDC] = { "vga", GPIO_0 },
+	[GMBUS_PIN_PANEL] = { "panel", GPIO_2 },
+	[GMBUS_PIN_DPC] = { "dpc", GPIO_3 },
+	[GMBUS_PIN_DPB] = { "dpb", GPIO_4 },
+	[GMBUS_PIN_DPD] = { "dpd", GPIO_5 },
 };
 
-static const struct gmbus_pin gmbus_pins_bdw[] = {
-	[GMBUS_PIN_VGADDC] = { "vga", GPIOA },
-	[GMBUS_PIN_DPC] = { "dpc", GPIOD },
-	[GMBUS_PIN_DPB] = { "dpb", GPIOE },
-	[GMBUS_PIN_DPD] = { "dpd", GPIOF },
+static const struct gmbus_pin gmbus_pins_lpt_h[] = {
+	[GMBUS_PIN_VGADDC] = { "vga", GPIO_0 },
+	[GMBUS_PIN_DPC] = { "dpc", GPIO_3 },
+	[GMBUS_PIN_DPB] = { "dpb", GPIO_4 },
+	[GMBUS_PIN_DPD] = { "dpd", GPIO_5 },
 };
 
-static const struct gmbus_pin gmbus_pins_skl[] = {
-	[GMBUS_PIN_DPC] = { "dpc", GPIOD },
-	[GMBUS_PIN_DPB] = { "dpb", GPIOE },
-	[GMBUS_PIN_DPD] = { "dpd", GPIOF },
+static const struct gmbus_pin gmbus_pins_lpt_lp[] = {
+	[GMBUS_PIN_DPC] = { "dpc", GPIO_3 },
+	[GMBUS_PIN_DPB] = { "dpb", GPIO_4 },
+};
+
+static const struct gmbus_pin gmbus_pins_spt[] = {
+	[GMBUS_PIN_DPC] = { "dpc", GPIO_3 },
+	[GMBUS_PIN_DPB] = { "dpb", GPIO_4 },
+	[GMBUS_PIN_DPD] = { "dpd", GPIO_5 },
 };
 
 static const struct gmbus_pin gmbus_pins_bxt[] = {
-	[GMBUS_PIN_1_BXT] = { "dpb", GPIOB },
-	[GMBUS_PIN_2_BXT] = { "dpc", GPIOC },
-	[GMBUS_PIN_3_BXT] = { "misc", GPIOD },
+	[GMBUS_PIN_1] = { "dpb", GPIO_1 },
+	[GMBUS_PIN_2] = { "dpc", GPIO_2 },
+	[GMBUS_PIN_3] = { "misc", GPIO_3 },
 };
 
 static const struct gmbus_pin gmbus_pins_cnp[] = {
-	[GMBUS_PIN_1_BXT] = { "dpb", GPIOB },
-	[GMBUS_PIN_2_BXT] = { "dpc", GPIOC },
-	[GMBUS_PIN_3_BXT] = { "misc", GPIOD },
-	[GMBUS_PIN_4_CNP] = { "dpd", GPIOE },
+	[GMBUS_PIN_1] = { "dpb", GPIO_1 },
+	[GMBUS_PIN_2] = { "dpc", GPIO_2 },
+	[GMBUS_PIN_3] = { "misc", GPIO_3 },
+	[GMBUS_PIN_4] = { "dpd", GPIO_4 },
 };
 
 static const struct gmbus_pin gmbus_pins_icp[] = {
-	[GMBUS_PIN_1_BXT] = { "dpa", GPIOB },
-	[GMBUS_PIN_2_BXT] = { "dpb", GPIOC },
-	[GMBUS_PIN_3_BXT] = { "dpc", GPIOD },
-	[GMBUS_PIN_9_TC1_ICP] = { "tc1", GPIOJ },
-	[GMBUS_PIN_10_TC2_ICP] = { "tc2", GPIOK },
-	[GMBUS_PIN_11_TC3_ICP] = { "tc3", GPIOL },
-	[GMBUS_PIN_12_TC4_ICP] = { "tc4", GPIOM },
-	[GMBUS_PIN_13_TC5_TGP] = { "tc5", GPION },
-	[GMBUS_PIN_14_TC6_TGP] = { "tc6", GPIOO },
+	[GMBUS_PIN_1] = { "dpa", GPIO_1 },
+	[GMBUS_PIN_2] = { "dpb", GPIO_2 },
+	[GMBUS_PIN_3] = { "dpc", GPIO_3 },
+	[GMBUS_PIN_9_TC1] = { "tc1", GPIO_9 },
+	[GMBUS_PIN_10_TC2] = { "tc2", GPIO_10 },
+	[GMBUS_PIN_11_TC3] = { "tc3", GPIO_11 },
+	[GMBUS_PIN_12_TC4] = { "tc4", GPIO_12 },
+	[GMBUS_PIN_13_TC5] = { "tc5", GPIO_13 },
+	[GMBUS_PIN_14_TC6] = { "tc6", GPIO_14 },
 };
 
 static const struct gmbus_pin gmbus_pins_dg1[] = {
-	[GMBUS_PIN_1_BXT] = { "dpa", GPIOB },
-	[GMBUS_PIN_2_BXT] = { "dpb", GPIOC },
-	[GMBUS_PIN_3_BXT] = { "dpc", GPIOD },
-	[GMBUS_PIN_4_CNP] = { "dpd", GPIOE },
+	[GMBUS_PIN_1] = { "dpa", GPIO_1 },
+	[GMBUS_PIN_2] = { "dpb", GPIO_2 },
+	[GMBUS_PIN_3] = { "dpc", GPIO_3 },
+	[GMBUS_PIN_4] = { "dpd", GPIO_4 },
 };
 
 static const struct gmbus_pin gmbus_pins_dg2[] = {
-	[GMBUS_PIN_1_BXT] = { "dpa", GPIOB },
-	[GMBUS_PIN_2_BXT] = { "dpb", GPIOC },
-	[GMBUS_PIN_3_BXT] = { "dpc", GPIOD },
-	[GMBUS_PIN_4_CNP] = { "dpd", GPIOE },
-	[GMBUS_PIN_9_TC1_ICP] = { "tc1", GPIOJ },
+	[GMBUS_PIN_1] = { "dpa", GPIO_1 },
+	[GMBUS_PIN_2] = { "dpb", GPIO_2 },
+	[GMBUS_PIN_3] = { "dpc", GPIO_3 },
+	[GMBUS_PIN_4] = { "dpd", GPIO_4 },
+	[GMBUS_PIN_9_TC1] = { "tc1", GPIO_9 },
 };
 
 static const struct gmbus_pin gmbus_pins_mtp[] = {
-	[GMBUS_PIN_1_BXT] = { "dpa", GPIOB },
-	[GMBUS_PIN_2_BXT] = { "dpb", GPIOC },
-	[GMBUS_PIN_3_BXT] = { "dpc", GPIOD },
-	[GMBUS_PIN_4_CNP] = { "dpd", GPIOE },
-	[GMBUS_PIN_5_MTP] = { "dpe", GPIOF },
-	[GMBUS_PIN_9_TC1_ICP] = { "tc1", GPIOJ },
-	[GMBUS_PIN_10_TC2_ICP] = { "tc2", GPIOK },
-	[GMBUS_PIN_11_TC3_ICP] = { "tc3", GPIOL },
-	[GMBUS_PIN_12_TC4_ICP] = { "tc4", GPIOM },
+	[GMBUS_PIN_1] = { "dpa", GPIO_1 },
+	[GMBUS_PIN_2] = { "dpb", GPIO_2 },
+	[GMBUS_PIN_3] = { "dpc", GPIO_3 },
+	[GMBUS_PIN_4] = { "dpd", GPIO_4 },
+	[GMBUS_PIN_5] = { "dpe", GPIO_5 },
+	[GMBUS_PIN_9_TC1] = { "tc1", GPIO_9 },
+	[GMBUS_PIN_10_TC2] = { "tc2", GPIO_10 },
+	[GMBUS_PIN_11_TC3] = { "tc3", GPIO_11 },
+	[GMBUS_PIN_12_TC4] = { "tc4", GPIO_12 },
 };
 
 static const struct gmbus_pin *get_gmbus_pin(struct intel_display *display,
@@ -176,12 +180,15 @@ static const struct gmbus_pin *get_gmbus_pin(struct intel_display *display,
 	} else if (display->platform.geminilake || display->platform.broxton) {
 		pins = gmbus_pins_bxt;
 		size = ARRAY_SIZE(gmbus_pins_bxt);
-	} else if (DISPLAY_VER(display) == 9) {
-		pins = gmbus_pins_skl;
-		size = ARRAY_SIZE(gmbus_pins_skl);
-	} else if (display->platform.broadwell) {
-		pins = gmbus_pins_bdw;
-		size = ARRAY_SIZE(gmbus_pins_bdw);
+	} else if (HAS_PCH_SPT(display)) {
+		pins = gmbus_pins_spt;
+		size = ARRAY_SIZE(gmbus_pins_spt);
+	} else if (HAS_PCH_LPT_LP(display)) {
+		pins = gmbus_pins_lpt_lp;
+		size = ARRAY_SIZE(gmbus_pins_lpt_lp);
+	} else if (HAS_PCH_LPT(display)) {
+		pins = gmbus_pins_lpt_h;
+		size = ARRAY_SIZE(gmbus_pins_lpt_h);
 	} else {
 		pins = gmbus_pins;
 		size = ARRAY_SIZE(gmbus_pins);
@@ -251,7 +258,7 @@ static u32 get_reserved(struct intel_gmbus *bus)
 	preserve_bits |= GPIO_DATA_PULLUP_DISABLE | GPIO_CLOCK_PULLUP_DISABLE;
 
 	/* Wa_16025573575: the masks bits need to be preserved through out */
-	if (intel_display_wa(display, 16025573575))
+	if (intel_display_wa(display, INTEL_DISPLAY_WA_16025573575))
 		preserve_bits |= GPIO_CLOCK_DIR_MASK | GPIO_CLOCK_VAL_MASK |
 				 GPIO_DATA_DIR_MASK | GPIO_DATA_VAL_MASK;
 
@@ -343,7 +350,7 @@ intel_gpio_pre_xfer(struct i2c_adapter *adapter)
 	if (display->platform.pineview)
 		pnv_gmbus_clock_gating(display, false);
 
-	if (intel_display_wa(display, 16025573575))
+	if (intel_display_wa(display, INTEL_DISPLAY_WA_16025573575))
 		ptl_handle_mask_bits(bus, true);
 
 	set_data(bus, 1);
@@ -364,12 +371,12 @@ intel_gpio_post_xfer(struct i2c_adapter *adapter)
 	if (display->platform.pineview)
 		pnv_gmbus_clock_gating(display, true);
 
-	if (intel_display_wa(display, 16025573575))
+	if (intel_display_wa(display, INTEL_DISPLAY_WA_16025573575))
 		ptl_handle_mask_bits(bus, false);
 }
 
 static void
-intel_gpio_setup(struct intel_gmbus *bus, i915_reg_t gpio_reg)
+intel_gpio_setup(struct intel_gmbus *bus, intel_reg_t gpio_reg)
 {
 	struct i2c_algo_bit_data *algo;
 
@@ -390,12 +397,11 @@ intel_gpio_setup(struct intel_gmbus *bus, i915_reg_t gpio_reg)
 
 static bool has_gmbus_irq(struct intel_display *display)
 {
-	struct drm_i915_private *i915 = to_i915(display->drm);
 	/*
 	 * encoder->shutdown() may want to use GMBUS
 	 * after irqs have already been disabled.
 	 */
-	return HAS_GMBUS_IRQ(display) && intel_irqs_enabled(i915);
+	return HAS_GMBUS_IRQ(display) && intel_parent_irq_enabled(display);
 }
 
 static int gmbus_wait(struct intel_display *display, u32 status, u32 irq_en)
@@ -448,7 +454,7 @@ gmbus_wait_idle(struct intel_display *display)
 	add_wait_queue(&display->gmbus.wait_queue, &wait);
 	intel_de_write_fw(display, GMBUS4(display), irq_enable);
 
-	ret = intel_de_wait_fw(display, GMBUS2(display), GMBUS_ACTIVE, 0, 10, NULL);
+	ret = intel_de_wait_fw_ms(display, GMBUS2(display), GMBUS_ACTIVE, 0, 10, NULL);
 
 	intel_de_write_fw(display, GMBUS4(display), 0);
 	remove_wait_queue(&display->gmbus.wait_queue, &wait);
@@ -497,8 +503,10 @@ gmbus_xfer_read_chunk(struct intel_display *display,
 
 		val = intel_de_read_fw(display, GMBUS3(display));
 		do {
-			if (extra_byte_added && len == 1)
+			if (extra_byte_added && len == 1) {
+				len--;
 				break;
+			}
 
 			*buf++ = val & 0xff;
 			val >>= 8;
@@ -694,7 +702,7 @@ retry:
 			goto clear_err;
 	}
 
-	/* Generate a STOP condition on the bus. Note that gmbus can't generata
+	/* Generate a STOP condition on the bus. Note that gmbus can't generate
 	 * a STOP on the very first cycle. To simplify the code we
 	 * unconditionally generate the STOP condition with an additional gmbus
 	 * cycle. */
@@ -790,7 +798,7 @@ gmbus_xfer(struct i2c_adapter *adapter, struct i2c_msg *msgs, int num)
 {
 	struct intel_gmbus *bus = to_intel_gmbus(adapter);
 	struct intel_display *display = bus->display;
-	intel_wakeref_t wakeref;
+	struct ref_tracker *wakeref;
 	int ret;
 
 	wakeref = intel_display_power_get(display, POWER_DOMAIN_GMBUS);
@@ -830,7 +838,7 @@ int intel_gmbus_output_aksv(struct i2c_adapter *adapter)
 			.buf = buf,
 		}
 	};
-	intel_wakeref_t wakeref;
+	struct ref_tracker *wakeref;
 	int ret;
 
 	wakeref = intel_display_power_get(display, POWER_DOMAIN_GMBUS);
@@ -926,7 +934,7 @@ int intel_gmbus_setup(struct intel_display *display)
 		if (!gmbus_pin)
 			continue;
 
-		bus = kzalloc(sizeof(*bus), GFP_KERNEL);
+		bus = kzalloc_obj(*bus);
 		if (!bus) {
 			ret = -ENOMEM;
 			goto err;

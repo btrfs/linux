@@ -3,7 +3,7 @@
  * Copyright (c) 2000-2005 Silicon Graphics, Inc.
  * All Rights Reserved.
  */
-#include "xfs.h"
+#include "xfs_platform.h"
 #include "xfs_fs.h"
 #include "xfs_shared.h"
 #include "xfs_format.h"
@@ -263,24 +263,21 @@ xfs_buf_item_size(
 
 static inline void
 xfs_buf_item_copy_iovec(
-	struct xfs_log_vec	*lv,
-	struct xfs_log_iovec	**vecp,
+	struct xlog_format_buf	*lfb,
 	struct xfs_buf		*bp,
 	uint			offset,
 	int			first_bit,
 	uint			nbits)
 {
 	offset += first_bit * XFS_BLF_CHUNK;
-	xlog_copy_iovec(lv, vecp, XLOG_REG_TYPE_BCHUNK,
-			xfs_buf_offset(bp, offset),
+	xlog_format_copy(lfb, XLOG_REG_TYPE_BCHUNK, xfs_buf_offset(bp, offset),
 			nbits * XFS_BLF_CHUNK);
 }
 
 static void
 xfs_buf_item_format_segment(
 	struct xfs_buf_log_item	*bip,
-	struct xfs_log_vec	*lv,
-	struct xfs_log_iovec	**vecp,
+	struct xlog_format_buf	*lfb,
 	uint			offset,
 	struct xfs_buf_log_format *blfp)
 {
@@ -308,7 +305,7 @@ xfs_buf_item_format_segment(
 		return;
 	}
 
-	blfp = xlog_copy_iovec(lv, vecp, XLOG_REG_TYPE_BFORMAT, blfp, base_size);
+	blfp = xlog_format_copy(lfb, XLOG_REG_TYPE_BFORMAT, blfp, base_size);
 	blfp->blf_size = 1;
 
 	if (bip->bli_flags & XFS_BLI_STALE) {
@@ -331,8 +328,7 @@ xfs_buf_item_format_segment(
 		nbits = xfs_contig_bits(blfp->blf_data_map,
 					blfp->blf_map_size, first_bit);
 		ASSERT(nbits > 0);
-		xfs_buf_item_copy_iovec(lv, vecp, bp, offset,
-					first_bit, nbits);
+		xfs_buf_item_copy_iovec(lfb, bp, offset, first_bit, nbits);
 		blfp->blf_size++;
 
 		/*
@@ -357,11 +353,10 @@ xfs_buf_item_format_segment(
 STATIC void
 xfs_buf_item_format(
 	struct xfs_log_item	*lip,
-	struct xfs_log_vec	*lv)
+	struct xlog_format_buf	*lfb)
 {
 	struct xfs_buf_log_item	*bip = BUF_ITEM(lip);
 	struct xfs_buf		*bp = bip->bli_buf;
-	struct xfs_log_iovec	*vecp = NULL;
 	uint			offset = 0;
 	int			i;
 
@@ -398,7 +393,7 @@ xfs_buf_item_format(
 	}
 
 	for (i = 0; i < bip->bli_format_count; i++) {
-		xfs_buf_item_format_segment(bip, lv, &vecp, offset,
+		xfs_buf_item_format_segment(bip, lfb, offset,
 					    &bip->bli_formats[i]);
 		offset += BBTOB(bp->b_maps[i].bm_len);
 	}
@@ -554,8 +549,7 @@ xfs_buf_item_unpin(
 		 * wait for the lock and then run the IO failure completion.
 		 */
 		xfs_buf_lock(bp);
-		bp->b_flags |= XBF_ASYNC;
-		xfs_buf_ioend_fail(bp);
+		xfs_buf_fail(bp);
 		return;
 	}
 
@@ -896,6 +890,7 @@ xfs_buf_item_init(
 		map_size = DIV_ROUND_UP(chunks, NBWORD);
 
 		if (map_size > XFS_BLF_DATAMAP_SIZE) {
+			xfs_buf_item_free_format(bip);
 			kmem_cache_free(xfs_buf_item_cache, bip);
 			xfs_err(mp,
 	"buffer item dirty bitmap (%u uints) too small to reflect %u bytes!",
@@ -1071,6 +1066,8 @@ void
 xfs_buf_item_done(
 	struct xfs_buf		*bp)
 {
+	struct xfs_buf_log_item	*bip = bp->b_log_item;
+
 	/*
 	 * If we are forcibly shutting down, this may well be off the AIL
 	 * already. That's because we simulate the log-committed callbacks to
@@ -1083,8 +1080,8 @@ xfs_buf_item_done(
 	 * Note that log recovery writes might have buffer items that are not on
 	 * the AIL even when the file system is not shut down.
 	 */
-	xfs_trans_ail_delete(&bp->b_log_item->bli_item,
-			     (bp->b_flags & _XBF_LOGRECOVERY) ? 0 :
-			     SHUTDOWN_CORRUPT_INCORE);
-	xfs_buf_item_relse(bp->b_log_item);
+	xfs_trans_ail_delete(&bip->bli_item,
+			     xlog_in_recovery(bip->bli_item.li_log) ?
+			     0 : SHUTDOWN_CORRUPT_INCORE);
+	xfs_buf_item_relse(bip);
 }

@@ -2,6 +2,7 @@
 
 #include <linux/io_uring_types.h>
 #include <linux/pagemap.h>
+#include <linux/uio.h>
 
 struct io_meta_state {
 	u32			seed;
@@ -46,7 +47,7 @@ int io_read_fixed(struct io_kiocb *req, unsigned int issue_flags);
 int io_write_fixed(struct io_kiocb *req, unsigned int issue_flags);
 void io_readv_writev_cleanup(struct io_kiocb *req);
 void io_rw_fail(struct io_kiocb *req);
-void io_req_rw_complete(struct io_kiocb *req, io_tw_token_t tw);
+void io_req_rw_complete(struct io_tw_req tw_req, io_tw_token_t tw);
 int io_read_mshot_prep(struct io_kiocb *req, const struct io_uring_sqe *sqe);
 int io_read_mshot(struct io_kiocb *req, unsigned int issue_flags);
 void io_rw_cache_free(const void *entry);

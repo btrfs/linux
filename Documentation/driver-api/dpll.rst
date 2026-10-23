@@ -65,35 +65,50 @@ request, where user provides attributes that result in single pin match.
 Pin selection
 =============
 
-In general, selected pin (the one which signal is driving the dpll
-device) can be obtained from ``DPLL_A_PIN_STATE`` attribute, and only
-one pin shall be in ``DPLL_PIN_STATE_CONNECTED`` state for any dpll
-device.
+Pin state (``DPLL_A_PIN_STATE``) reflects the administrative intent set
+by the user. Pin operational state (``DPLL_A_PIN_OPERSTATE``) reflects
+what the hardware is actually doing with the pin.
 
 Pin selection can be done either manually or automatically, depending
 on hardware capabilities and active dpll device work mode
 (``DPLL_A_MODE`` attribute). The consequence is that there are
-differences for each mode in terms of available pin states, as well as
-for the states the user can request for a dpll device.
+differences for each mode in terms of available pin states the user can
+request for a dpll device.
 
-In manual mode (``DPLL_MODE_MANUAL``) the user can request or receive
-one of following pin states:
+In manual mode (``DPLL_MODE_MANUAL``) the user can request one of
+following pin states:
 
-- ``DPLL_PIN_STATE_CONNECTED`` - the pin is used to drive dpll device
-- ``DPLL_PIN_STATE_DISCONNECTED`` - the pin is not used to drive dpll
+- ``DPLL_PIN_STATE_CONNECTED`` - the pin is selected to drive dpll
   device
+- ``DPLL_PIN_STATE_DISCONNECTED`` - the pin is not selected to drive
+  dpll device
 
-In automatic mode (``DPLL_MODE_AUTOMATIC``) the user can request or
-receive one of following pin states:
+In automatic mode (``DPLL_MODE_AUTOMATIC``) the user can request one of
+following pin states:
 
 - ``DPLL_PIN_STATE_SELECTABLE`` - the pin shall be considered as valid
   input for automatic selection algorithm
 - ``DPLL_PIN_STATE_DISCONNECTED`` - the pin shall be not considered as
   a valid input for automatic selection algorithm
 
-In automatic mode (``DPLL_MODE_AUTOMATIC``) the user can only receive
-pin state ``DPLL_PIN_STATE_CONNECTED`` once automatic selection
-algorithm locks a dpll device with one of the inputs.
+Pins that have the ``DPLL_PIN_CAPABILITIES_STATE_CONNECTED_OVERRIDE``
+capability can additionally be set to ``DPLL_PIN_STATE_CONNECTED`` in
+automatic mode, overriding the active input selection. This is useful
+for automatic-only DPLL devices where mode cannot be switched to manual.
+When such a pin is disconnected, the device returns to automatic input
+selection.
+
+The actual hardware status of a pin is reported via the operational
+state (``DPLL_A_PIN_OPERSTATE``) attribute nested under the parent
+device:
+
+- ``DPLL_PIN_OPERSTATE_ACTIVE`` - pin is qualified and actively used
+  by the DPLL
+- ``DPLL_PIN_OPERSTATE_STANDBY`` - pin is qualified but not actively
+  used by the DPLL
+- ``DPLL_PIN_OPERSTATE_NO_SIGNAL`` - pin does not have a valid signal
+- ``DPLL_PIN_OPERSTATE_QUAL_FAILED`` - pin signal failed qualification
+  checks
 
 Shared pins
 ===========
@@ -101,8 +116,9 @@ Shared pins
 A single pin object can be attached to multiple dpll devices.
 Then there are two groups of configuration knobs:
 
-1) Set on a pin - the configuration affects all dpll devices pin is
-   registered to (i.e., ``DPLL_A_PIN_FREQUENCY``),
+1) Set on a pin - the configuration is a property of the pin itself and
+   applies to all dpll devices the pin is registered with
+   (i.e., ``DPLL_A_PIN_FREQUENCY``),
 2) Set on a pin-dpll tuple - the configuration affects only selected
    dpll device (i.e., ``DPLL_A_PIN_PRIO``, ``DPLL_A_PIN_STATE``,
    ``DPLL_A_PIN_DIRECTION``).
@@ -198,26 +214,28 @@ be requested with the same attribute with ``DPLL_CMD_DEVICE_SET`` command.
   ================================== ======================================
 
 Device may also provide ability to adjust a signal phase on a pin.
-If pin phase adjustment is supported, minimal and maximal values that pin
-handle shall be provide to the user on ``DPLL_CMD_PIN_GET`` respond
-with ``DPLL_A_PIN_PHASE_ADJUST_MIN`` and ``DPLL_A_PIN_PHASE_ADJUST_MAX``
+If pin phase adjustment is supported, minimal and maximal values and
+granularity that pin handle shall be provided to the user on
+``DPLL_CMD_PIN_GET`` respond with ``DPLL_A_PIN_PHASE_ADJUST_MIN``,
+``DPLL_A_PIN_PHASE_ADJUST_MAX`` and ``DPLL_A_PIN_PHASE_ADJUST_GRAN``
 attributes. Configured phase adjust value is provided with
 ``DPLL_A_PIN_PHASE_ADJUST`` attribute of a pin, and value change can be
 requested with the same attribute with ``DPLL_CMD_PIN_SET`` command.
 
-  =============================== ======================================
-  ``DPLL_A_PIN_ID``               configured pin id
-  ``DPLL_A_PIN_PHASE_ADJUST_MIN`` attr minimum value of phase adjustment
-  ``DPLL_A_PIN_PHASE_ADJUST_MAX`` attr maximum value of phase adjustment
-  ``DPLL_A_PIN_PHASE_ADJUST``     attr configured value of phase
-                                  adjustment on parent dpll device
-  ``DPLL_A_PIN_PARENT_DEVICE``    nested attribute for requesting
-                                  configuration on given parent dpll
-                                  device
-    ``DPLL_A_PIN_PARENT_ID``      parent dpll device id
-    ``DPLL_A_PIN_PHASE_OFFSET``   attr measured phase difference
-                                  between a pin and parent dpll device
-  =============================== ======================================
+  ================================ ==========================================
+  ``DPLL_A_PIN_ID``                configured pin id
+  ``DPLL_A_PIN_PHASE_ADJUST_GRAN`` attr granularity of phase adjustment value
+  ``DPLL_A_PIN_PHASE_ADJUST_MIN``  attr minimum value of phase adjustment
+  ``DPLL_A_PIN_PHASE_ADJUST_MAX``  attr maximum value of phase adjustment
+  ``DPLL_A_PIN_PHASE_ADJUST``      attr configured value of phase
+                                   adjustment on parent dpll device
+  ``DPLL_A_PIN_PARENT_DEVICE``     nested attribute for requesting
+                                   configuration on given parent dpll
+                                   device
+    ``DPLL_A_PIN_PARENT_ID``       parent dpll device id
+    ``DPLL_A_PIN_PHASE_OFFSET``    attr measured phase difference
+                                   between a pin and parent dpll device
+  ================================ ==========================================
 
 All phase related values are provided in pico seconds, which represents
 time difference between signals phase. The negative value means that
@@ -246,6 +264,44 @@ in the ``DPLL_A_PIN_PHASE_OFFSET`` attribute.
 
   =============================== ========================
   ``DPLL_A_PHASE_OFFSET_MONITOR`` attr state of a feature
+  =============================== ========================
+
+Fractional frequency offset
+===========================
+
+The fractional frequency offset (FFO) is reported through two attributes
+that carry the same measurement at different precisions:
+
+- ``DPLL_A_PIN_FRACTIONAL_FREQUENCY_OFFSET`` in PPM (parts per million)
+- ``DPLL_A_PIN_FRACTIONAL_FREQUENCY_OFFSET_PPT`` in PPT (parts per trillion)
+
+Both attributes appear at the top level of a pin and inside each
+``pin-parent-device`` nest. Two FFO types are defined:
+
+- ``DPLL_FFO_PORT_RXTX_RATE`` - RX vs TX symbol rate offset (top-level)
+- ``DPLL_FFO_PIN_DEVICE`` - pin vs parent DPLL offset (per-parent)
+
+The driver declares which types it supports via the ``supported_ffo``
+bitmask in ``struct dpll_pin_ops``. The core only calls the ``ffo_get``
+callback for types the driver has opted into. The requested type is
+passed to the driver in the ``struct dpll_ffo_param``.
+
+Frequency monitor
+=================
+
+Some DPLL devices may offer the capability to measure the actual
+frequency of all available input pins. The attribute and current feature state
+shall be included in the response message of the ``DPLL_CMD_DEVICE_GET``
+command for supported DPLL devices. In such cases, users can also control
+the feature using the ``DPLL_CMD_DEVICE_SET`` command by setting the
+``enum dpll_feature_state`` values for the attribute.
+Once enabled the measured input frequency for each input pin shall be
+returned in the ``DPLL_A_PIN_MEASURED_FREQUENCY`` attribute. The value
+is in millihertz (mHz), using ``DPLL_PIN_MEASURED_FREQUENCY_DIVIDER``
+as the divider.
+
+  =============================== ========================
+  ``DPLL_A_FREQUENCY_MONITOR``    attr state of a feature
   =============================== ========================
 
 Embedded SYNC
@@ -384,6 +440,8 @@ according to attribute purpose.
                                        frequencies
       ``DPLL_A_PIN_ANY_FREQUENCY_MIN`` attr minimum value of frequency
       ``DPLL_A_PIN_ANY_FREQUENCY_MAX`` attr maximum value of frequency
+    ``DPLL_A_PIN_PHASE_ADJUST_GRAN``   attr granularity of phase
+                                       adjustment value
     ``DPLL_A_PIN_PHASE_ADJUST_MIN``    attr minimum value of phase
                                        adjustment
     ``DPLL_A_PIN_PHASE_ADJUST_MAX``    attr maximum value of phase
@@ -407,6 +465,8 @@ according to attribute purpose.
       ``DPLL_A_PIN_STATE``             attr state of pin on the parent
                                        pin
     ``DPLL_A_PIN_CAPABILITIES``        attr bitmask of pin capabilities
+    ``DPLL_A_PIN_MEASURED_FREQUENCY``  attr measured frequency of
+                                       an input pin in mHz
   ==================================== ==================================
 
   ==================================== =================================
@@ -448,9 +508,9 @@ as well as parameter being configured (``DPLL_A_MODE``).
 ``DPLL_CMD_PIN_SET`` - to target a pin user must provide a
 ``DPLL_A_PIN_ID``, which is unique identifier of a pin in the system.
 Also configured pin parameters must be added.
-If ``DPLL_A_PIN_FREQUENCY`` is configured, this affects all the dpll
-devices that are connected with the pin, that is why frequency attribute
-shall not be enclosed in ``DPLL_A_PIN_PARENT_DEVICE``.
+If ``DPLL_A_PIN_FREQUENCY`` is configured, it is a property of the pin
+itself and applies to all dpll devices the pin is registered with, so the
+frequency attribute shall not be enclosed in ``DPLL_A_PIN_PARENT_DEVICE``.
 Other attributes: ``DPLL_A_PIN_PRIO``, ``DPLL_A_PIN_STATE`` or
 ``DPLL_A_PIN_DIRECTION`` must be enclosed in
 ``DPLL_A_PIN_PARENT_DEVICE`` as their configuration relates to only one

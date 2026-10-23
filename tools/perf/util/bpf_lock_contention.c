@@ -42,7 +42,7 @@ static void check_slab_cache_iter(struct lock_contention *con)
 
 	con->btf = btf__load_vmlinux_btf();
 	if (con->btf == NULL) {
-		pr_debug("BTF loading failed: %s\n", strerror(errno));
+		pr_debug("BTF loading failed: %m\n");
 		return;
 	}
 
@@ -117,6 +117,9 @@ static void init_numa_data(struct lock_contention *con)
 	long last = -1;
 	int ret;
 
+	if (!con->btf)
+		return;
+
 	/*
 	 * 'struct zone' is embedded in 'struct pglist_data' as an array.
 	 * As we may not have full information of the struct zone in the
@@ -183,6 +186,10 @@ int lock_contention_prepare(struct lock_contention *con)
 	int ncpus = 1, ntasks = 1, ntypes = 1, naddrs = 1, ncgrps = 1, nslabs = 1;
 	struct evlist *evlist = con->evlist;
 	struct target *target = con->target;
+	bool has_mmap_lock = false;
+
+	/* make sure it loads the kernel map before lookup */
+	map__load(machine__kernel_map(con->machine));
 
 	skel = lock_contention_bpf__open();
 	if (!skel) {
@@ -216,11 +223,11 @@ int lock_contention_prepare(struct lock_contention *con)
 
 	if (target__has_cpu(target)) {
 		skel->rodata->has_cpu = 1;
-		ncpus = perf_cpu_map__nr(evlist->core.user_requested_cpus);
+		ncpus = perf_cpu_map__nr(evlist__core(evlist)->user_requested_cpus);
 	}
 	if (target__has_task(target)) {
 		skel->rodata->has_task = 1;
-		ntasks = perf_thread_map__nr(evlist->core.threads);
+		ntasks = perf_thread_map__nr(evlist__core(evlist)->threads);
 	}
 	if (con->filters->nr_types) {
 		skel->rodata->has_type = 1;
@@ -238,6 +245,11 @@ int lock_contention_prepare(struct lock_contention *con)
 		unsigned long *addrs;
 
 		for (i = 0; i < con->filters->nr_syms; i++) {
+			if (!strcmp(con->filters->syms[i], "mmap_lock")) {
+				has_mmap_lock = true;
+				continue;
+			}
+
 			sym = machine__find_kernel_symbol_by_name(con->machine,
 								  con->filters->syms[i],
 								  &kmap);
@@ -257,7 +269,7 @@ int lock_contention_prepare(struct lock_contention *con)
 			addrs[con->filters->nr_addrs++] = map__unmap_ip(kmap, sym->start);
 			con->filters->addrs = addrs;
 		}
-		naddrs = con->filters->nr_addrs;
+		naddrs = con->filters->nr_addrs ?: has_mmap_lock;
 		skel->rodata->has_addr = 1;
 	}
 
@@ -292,6 +304,7 @@ int lock_contention_prepare(struct lock_contention *con)
 	skel->rodata->aggr_mode = con->aggr_mode;
 	skel->rodata->needs_callstack = con->save_callstack;
 	skel->rodata->lock_owner = con->owner;
+	skel->rodata->has_mmap_lock = has_mmap_lock;
 
 	if (con->aggr_mode == LOCK_AGGR_CGROUP || con->filters->nr_cgrps) {
 		if (cgroup_is_v2("perf_event"))
@@ -321,7 +334,7 @@ int lock_contention_prepare(struct lock_contention *con)
 		fd = bpf_map__fd(skel->maps.cpu_filter);
 
 		for (i = 0; i < ncpus; i++) {
-			cpu = perf_cpu_map__cpu(evlist->core.user_requested_cpus, i).cpu;
+			cpu = perf_cpu_map__cpu(evlist__core(evlist)->user_requested_cpus, i).cpu;
 			bpf_map_update_elem(fd, &cpu, &val, BPF_ANY);
 		}
 	}
@@ -333,13 +346,13 @@ int lock_contention_prepare(struct lock_contention *con)
 		fd = bpf_map__fd(skel->maps.task_filter);
 
 		for (i = 0; i < ntasks; i++) {
-			pid = perf_thread_map__pid(evlist->core.threads, i);
+			pid = perf_thread_map__pid(evlist__core(evlist)->threads, i);
 			bpf_map_update_elem(fd, &pid, &val, BPF_ANY);
 		}
 	}
 
-	if (target__none(target) && evlist->workload.pid > 0) {
-		u32 pid = evlist->workload.pid;
+	if (target__none(target) && evlist__workload_pid(evlist) > 0) {
+		u32 pid = evlist__workload_pid(evlist);
 		u8 val = 1;
 
 		fd = bpf_map__fd(skel->maps.task_filter);
@@ -457,8 +470,8 @@ static void update_lock_stat(int map_fd, int pid, u64 end_ts,
 		stat_key.lock_addr_or_cgroup = ts_data->lock;
 		break;
 	case LOCK_AGGR_CGROUP:
-		/* TODO */
-		return;
+		stat_key.lock_addr_or_cgroup = ts_data->cgroup_id;
+		break;
 	default:
 		return;
 	}
@@ -748,9 +761,6 @@ int lock_contention_read(struct lock_contention *con)
 
 		bpf_prog_test_run_opts(prog_fd, &opts);
 	}
-
-	/* make sure it loads the kernel map */
-	maps__load_first(machine->kmaps);
 
 	prev_key = NULL;
 	while (!bpf_map_get_next_key(fd, prev_key, &key)) {
