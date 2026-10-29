@@ -30,18 +30,30 @@
 	status = "okay";
 };
 
+&mdio1 {
+	clock-frequency = <6250000>;
+
+	status = "okay";
+
+	ethernet-phy@1c {
+		reg = <0x1c>;
+	};
+};
+
 &pcie0 {
 	pinctrl-0 = <&pcie0_default>;
 	pinctrl-names = "default";
-
-	perst-gpios = <&tlmm 15 GPIO_ACTIVE_LOW>;
-	wake-gpios = <&tlmm 16 GPIO_ACTIVE_LOW>;
 
 	status = "okay";
 };
 
 &pcie0_phy {
 	status = "okay";
+};
+
+&pcie0_port0 {
+	reset-gpios = <&tlmm 15 GPIO_ACTIVE_LOW>;
+	wake-gpios = <&tlmm 16 GPIO_ACTIVE_LOW>;
 };
 
 &sdhc_1 {

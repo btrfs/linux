@@ -65,7 +65,7 @@ nouveau_led_set_brightness(struct led_classdev *led, enum led_brightness value)
 	duty = value * div / LED_FULL;
 
 	/* for now, this is safe to directly poke those registers because:
-	 *  - A: nvidia never puts the logo led to any other PWM controler
+	 *  - A: nvidia never puts the logo led to any other PWM controller
 	 *       than PDISPLAY.SOR[1].PWM.
 	 *  - B: nouveau does not touch these registers anywhere else
 	 */
@@ -89,7 +89,7 @@ nouveau_led_init(struct drm_device *dev)
 	if (nvkm_gpio_find(gpio, 0, DCB_GPIO_LOGO_LED_PWM, 0xff, &logo_led))
 		return 0;
 
-	drm->led = kzalloc(sizeof(*drm->led), GFP_KERNEL);
+	drm->led = kzalloc_obj(*drm->led);
 	if (!drm->led)
 		return -ENOMEM;
 	drm->led->dev = dev;

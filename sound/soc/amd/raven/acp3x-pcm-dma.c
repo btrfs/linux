@@ -218,7 +218,7 @@ static int acp3x_dma_open(struct snd_soc_component *component,
 	prtd = snd_soc_substream_to_rtd(substream);
 	component = snd_soc_rtdcom_lookup(prtd, DRV_NAME);
 	adata = dev_get_drvdata(component->dev);
-	i2s_data = kzalloc(sizeof(*i2s_data), GFP_KERNEL);
+	i2s_data = kzalloc_obj(*i2s_data);
 	if (!i2s_data)
 		return -EINVAL;
 
@@ -237,7 +237,13 @@ static int acp3x_dma_open(struct snd_soc_component *component,
 
 	i2s_data->acp3x_base = adata->acp3x_base;
 	runtime->private_data = i2s_data;
-	return ret;
+
+	/*
+	 * ASoC only marks the component as opened when .open() returns 0.
+	 * Since snd_pcm_hw_constraint_integer() may return 1, explicitly
+	 * return 0 to ensure .close() is not skipped on rollback.
+	 */
+	return 0;
 }
 
 
@@ -363,7 +369,7 @@ static const struct snd_soc_component_driver acp3x_i2s_component = {
 	.close		= acp3x_dma_close,
 	.hw_params	= acp3x_dma_hw_params,
 	.pointer	= acp3x_dma_pointer,
-	.pcm_construct	= acp3x_dma_new,
+	.pcm_new	= acp3x_dma_new,
 };
 
 static int acp3x_audio_probe(struct platform_device *pdev)

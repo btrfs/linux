@@ -349,7 +349,7 @@ static int xpcs_plat_init_dev(struct dw_xpcs_plat *pxpcs)
 	 * up later. Make sure DD-core is aware of the OF-node being re-used.
 	 */
 	device_set_node(&mdiodev->dev, fwnode_handle_get(dev_fwnode(dev)));
-	mdiodev->dev.of_node_reused = true;
+	dev_set_of_node_reused(&mdiodev->dev);
 
 	/* Pass the data further so the DW XPCS driver core could use it */
 	mdiodev->dev.platform_data = (void *)device_get_match_data(dev);
@@ -364,9 +364,6 @@ static int xpcs_plat_init_dev(struct dw_xpcs_plat *pxpcs)
 
 err_clean_data:
 	mdiodev->dev.platform_data = NULL;
-
-	fwnode_handle_put(dev_fwnode(&mdiodev->dev));
-	device_set_node(&mdiodev->dev, NULL);
 
 	mdio_device_free(mdiodev);
 
@@ -441,7 +438,7 @@ static const struct of_device_id xpcs_of_ids[] = {
 	{ .compatible = "snps,dw-xpcs-gen4-6g", .data = &xpcs_pma_gen4_6g },
 	{ .compatible = "snps,dw-xpcs-gen5-10g", .data = &xpcs_pma_gen5_10g },
 	{ .compatible = "snps,dw-xpcs-gen5-12g", .data = &xpcs_pma_gen5_12g },
-	{ /* sentinel */ },
+	{ /* sentinel */ }
 };
 MODULE_DEVICE_TABLE(of, xpcs_of_ids);
 
@@ -456,5 +453,5 @@ static struct platform_driver xpcs_plat_driver = {
 module_platform_driver(xpcs_plat_driver);
 
 MODULE_DESCRIPTION("Synopsys DesignWare XPCS platform device driver");
-MODULE_AUTHOR("Signed-off-by: Serge Semin <fancer.lancer@gmail.com>");
+MODULE_AUTHOR("Serge Semin <fancer.lancer@gmail.com>");
 MODULE_LICENSE("GPL");

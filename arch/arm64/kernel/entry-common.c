@@ -21,9 +21,11 @@
 #include <asm/daifflags.h>
 #include <asm/esr.h>
 #include <asm/exception.h>
+#include <asm/fpsimd.h>
 #include <asm/irq_regs.h>
 #include <asm/kprobes.h>
 #include <asm/mmu.h>
+#include <asm/percpu.h>
 #include <asm/processor.h>
 #include <asm/sdei.h>
 #include <asm/stacktrace.h>
@@ -31,23 +33,51 @@
 #include <asm/system_misc.h>
 
 /*
+ * Where the context being returned to had an active percpu GPR critical
+ * section, ensure that the offset and address GPRs are updated to match the
+ * current CPU.
+ *
+ * For simplicity we always update the GPRs when a critical section is active
+ * and preemption was *possible*, regardless of whether preemption actually
+ * occurred. Where preemption did not occur, the updates are redundant but not
+ * harmful.
+ */
+static __always_inline void irqentry_exit_pcpu_adjust(struct pt_regs *regs)
+{
+	int reg_pcp, reg_off, reg_addr;
+	unsigned long pcp, off, addr;
+	u16 gprs = regs->pcpu_gprs;
+
+	/*
+	 * Zero means no active PCPU GPRs. As the PCPU GPRs must be distinct,
+	 * a PCPU critical section cannot possibly use {x0,x0,x0}.
+	 */
+	if (likely(!gprs))
+		return;
+
+	reg_pcp  = FIELD_GET(PCPU_GPR_PCP,  gprs);
+	reg_off  = FIELD_GET(PCPU_GPR_OFF,  gprs);
+	reg_addr = FIELD_GET(PCPU_GPR_ADDR, gprs);
+
+	pcp = pt_regs_read_reg(regs, reg_pcp);
+
+	off = __kern_my_cpu_offset();
+	pt_regs_write_reg(regs, reg_off, off);
+
+	addr = pcp + off;
+	pt_regs_write_reg(regs, reg_addr, addr);
+}
+
+/*
  * Handle IRQ/context state management when entering from kernel mode.
  * Before this function is called it is not safe to call regular kernel code,
  * instrumentable code, or any code which may trigger an exception.
- *
- * This is intended to match the logic in irqentry_enter(), handling the kernel
- * mode transitions only.
  */
-static __always_inline irqentry_state_t __enter_from_kernel_mode(struct pt_regs *regs)
-{
-	return irqentry_enter(regs);
-}
-
-static noinstr irqentry_state_t enter_from_kernel_mode(struct pt_regs *regs)
+static noinstr irqentry_state_t arm64_enter_from_kernel_mode(struct pt_regs *regs)
 {
 	irqentry_state_t state;
 
-	state = __enter_from_kernel_mode(regs);
+	state = irqentry_enter_from_kernel_mode(regs);
 	mte_check_tfsr_entry();
 	mte_disable_tco_entry(current);
 
@@ -58,21 +88,43 @@ static noinstr irqentry_state_t enter_from_kernel_mode(struct pt_regs *regs)
  * Handle IRQ/context state management when exiting to kernel mode.
  * After this function returns it is not safe to call regular kernel code,
  * instrumentable code, or any code which may trigger an exception.
- *
- * This is intended to match the logic in irqentry_exit(), handling the kernel
- * mode transitions only, and with preemption handled elsewhere.
  */
-static __always_inline void __exit_to_kernel_mode(struct pt_regs *regs,
-						  irqentry_state_t state)
+static void noinstr __arm64_exit_to_kernel_mode(struct pt_regs *regs,
+						irqentry_state_t state)
 {
-	irqentry_exit(regs, state);
+	local_daif_mask();
+	irqentry_exit_pcpu_adjust(regs);
+	mte_check_tfsr_exit();
+	irqentry_exit_to_kernel_mode_after_preempt(regs, state);
 }
 
-static void noinstr exit_to_kernel_mode(struct pt_regs *regs,
-					irqentry_state_t state)
+/*
+ * We are returning from the context which allows involuntary kernel preemption
+ */
+static void noinstr arm64_exit_to_kernel_mode_preempt(struct pt_regs *regs,
+						      irqentry_state_t state)
 {
-	mte_check_tfsr_exit();
-	__exit_to_kernel_mode(regs, state);
+	irqentry_exit_to_kernel_mode_preempt(regs, state);
+	__arm64_exit_to_kernel_mode(regs, state);
+}
+
+static void noinstr arm64_exit_to_kernel_mode(struct pt_regs *regs,
+					      irqentry_state_t state)
+{
+	if (!regs_irqs_disabled(regs)) {
+		local_irq_disable();
+		arm64_exit_to_kernel_mode_preempt(regs, state);
+		return;
+	}
+
+	__arm64_exit_to_kernel_mode(regs, state);
+}
+
+static __always_inline void arm64_syscall_enter_from_user_mode(struct pt_regs *regs)
+{
+	enter_from_user_mode(regs);
+	mte_disable_tco_entry(current);
+	sme_enter_from_user_mode();
 }
 
 /*
@@ -80,15 +132,22 @@ static void noinstr exit_to_kernel_mode(struct pt_regs *regs,
  * Before this function is called it is not safe to call regular kernel code,
  * instrumentable code, or any code which may trigger an exception.
  */
-static __always_inline void __enter_from_user_mode(struct pt_regs *regs)
-{
-	enter_from_user_mode(regs);
-	mte_disable_tco_entry(current);
-}
-
 static __always_inline void arm64_enter_from_user_mode(struct pt_regs *regs)
 {
-	__enter_from_user_mode(regs);
+	enter_from_user_mode(regs);
+	rseq_note_user_irq_entry();
+	mte_disable_tco_entry(current);
+	sme_enter_from_user_mode();
+}
+
+static __always_inline void arm64_syscall_exit_to_user_mode(struct pt_regs *regs)
+{
+	local_irq_disable();
+	syscall_exit_to_user_mode_prepare(regs);
+	local_daif_mask();
+	sme_exit_to_user_mode();
+	mte_check_tfsr_exit();
+	exit_to_user_mode();
 }
 
 /*
@@ -96,19 +155,19 @@ static __always_inline void arm64_enter_from_user_mode(struct pt_regs *regs)
  * After this function returns it is not safe to call regular kernel code,
  * instrumentable code, or any code which may trigger an exception.
  */
-
 static __always_inline void arm64_exit_to_user_mode(struct pt_regs *regs)
 {
 	local_irq_disable();
-	exit_to_user_mode_prepare(regs);
+	irqentry_exit_to_user_mode_prepare(regs);
 	local_daif_mask();
+	sme_exit_to_user_mode();
 	mte_check_tfsr_exit();
 	exit_to_user_mode();
 }
 
 asmlinkage void noinstr asm_exit_to_user_mode(struct pt_regs *regs)
 {
-	arm64_exit_to_user_mode(regs);
+	arm64_syscall_exit_to_user_mode(regs);
 }
 
 /*
@@ -253,12 +312,8 @@ static inline void fpsimd_syscall_enter(void)
 	if (!system_supports_sve())
 		return;
 
-	if (test_thread_flag(TIF_SVE)) {
-		unsigned int sve_vq_minus_one;
-
-		sve_vq_minus_one = sve_vq_from_vl(task_get_sve_vl(current)) - 1;
-		sve_flush_live(true, sve_vq_minus_one);
-	}
+	if (test_thread_flag(TIF_SVE))
+		sve_flush_live();
 
 	/*
 	 * Any live non-FPSIMD SVE state has been zeroed. Allow
@@ -320,11 +375,10 @@ static void noinstr el1_abort(struct pt_regs *regs, unsigned long esr)
 	unsigned long far = read_sysreg(far_el1);
 	irqentry_state_t state;
 
-	state = enter_from_kernel_mode(regs);
+	state = arm64_enter_from_kernel_mode(regs);
 	local_daif_inherit(regs);
 	do_mem_abort(far, esr, regs);
-	local_daif_mask();
-	exit_to_kernel_mode(regs, state);
+	arm64_exit_to_kernel_mode(regs, state);
 }
 
 static void noinstr el1_pc(struct pt_regs *regs, unsigned long esr)
@@ -332,55 +386,50 @@ static void noinstr el1_pc(struct pt_regs *regs, unsigned long esr)
 	unsigned long far = read_sysreg(far_el1);
 	irqentry_state_t state;
 
-	state = enter_from_kernel_mode(regs);
+	state = arm64_enter_from_kernel_mode(regs);
 	local_daif_inherit(regs);
 	do_sp_pc_abort(far, esr, regs);
-	local_daif_mask();
-	exit_to_kernel_mode(regs, state);
+	arm64_exit_to_kernel_mode(regs, state);
 }
 
 static void noinstr el1_undef(struct pt_regs *regs, unsigned long esr)
 {
 	irqentry_state_t state;
 
-	state = enter_from_kernel_mode(regs);
+	state = arm64_enter_from_kernel_mode(regs);
 	local_daif_inherit(regs);
 	do_el1_undef(regs, esr);
-	local_daif_mask();
-	exit_to_kernel_mode(regs, state);
+	arm64_exit_to_kernel_mode(regs, state);
 }
 
 static void noinstr el1_bti(struct pt_regs *regs, unsigned long esr)
 {
 	irqentry_state_t state;
 
-	state = enter_from_kernel_mode(regs);
+	state = arm64_enter_from_kernel_mode(regs);
 	local_daif_inherit(regs);
 	do_el1_bti(regs, esr);
-	local_daif_mask();
-	exit_to_kernel_mode(regs, state);
+	arm64_exit_to_kernel_mode(regs, state);
 }
 
 static void noinstr el1_gcs(struct pt_regs *regs, unsigned long esr)
 {
 	irqentry_state_t state;
 
-	state = enter_from_kernel_mode(regs);
+	state = arm64_enter_from_kernel_mode(regs);
 	local_daif_inherit(regs);
 	do_el1_gcs(regs, esr);
-	local_daif_mask();
-	exit_to_kernel_mode(regs, state);
+	arm64_exit_to_kernel_mode(regs, state);
 }
 
 static void noinstr el1_mops(struct pt_regs *regs, unsigned long esr)
 {
 	irqentry_state_t state;
 
-	state = enter_from_kernel_mode(regs);
+	state = arm64_enter_from_kernel_mode(regs);
 	local_daif_inherit(regs);
 	do_el1_mops(regs, esr);
-	local_daif_mask();
-	exit_to_kernel_mode(regs, state);
+	arm64_exit_to_kernel_mode(regs, state);
 }
 
 static void noinstr el1_breakpt(struct pt_regs *regs, unsigned long esr)
@@ -442,11 +491,10 @@ static void noinstr el1_fpac(struct pt_regs *regs, unsigned long esr)
 {
 	irqentry_state_t state;
 
-	state = enter_from_kernel_mode(regs);
+	state = arm64_enter_from_kernel_mode(regs);
 	local_daif_inherit(regs);
 	do_el1_fpac(regs, esr);
-	local_daif_mask();
-	exit_to_kernel_mode(regs, state);
+	arm64_exit_to_kernel_mode(regs, state);
 }
 
 asmlinkage void noinstr el1h_64_sync_handler(struct pt_regs *regs)
@@ -505,6 +553,7 @@ static __always_inline void __el1_pnmi(struct pt_regs *regs,
 
 	state = irqentry_nmi_enter(regs);
 	do_interrupt_handler(regs, handler);
+	local_daif_mask();
 	irqentry_nmi_exit(regs, state);
 }
 
@@ -513,13 +562,13 @@ static __always_inline void __el1_irq(struct pt_regs *regs,
 {
 	irqentry_state_t state;
 
-	state = enter_from_kernel_mode(regs);
+	state = arm64_enter_from_kernel_mode(regs);
 
 	irq_enter_rcu();
 	do_interrupt_handler(regs, handler);
 	irq_exit_rcu();
 
-	exit_to_kernel_mode(regs, state);
+	arm64_exit_to_kernel_mode_preempt(regs, state);
 }
 static void noinstr el1_interrupt(struct pt_regs *regs,
 				  void (*handler)(struct pt_regs *))
@@ -550,6 +599,7 @@ asmlinkage void noinstr el1h_64_error_handler(struct pt_regs *regs)
 	local_daif_restore(DAIF_ERRCTX);
 	state = irqentry_nmi_enter(regs);
 	do_serror(regs, esr);
+	local_daif_mask();
 	irqentry_nmi_exit(regs, state);
 }
 
@@ -739,12 +789,12 @@ static void noinstr el0_brk64(struct pt_regs *regs, unsigned long esr)
 
 static void noinstr el0_svc(struct pt_regs *regs)
 {
-	arm64_enter_from_user_mode(regs);
+	arm64_syscall_enter_from_user_mode(regs);
 	cortex_a76_erratum_1463225_svc_handler();
 	fpsimd_syscall_enter();
 	local_daif_restore(DAIF_PROCCTX);
 	do_el0_svc(regs);
-	arm64_exit_to_user_mode(regs);
+	arm64_syscall_exit_to_user_mode(regs);
 	fpsimd_syscall_exit();
 }
 
@@ -891,11 +941,11 @@ static void noinstr el0_cp15(struct pt_regs *regs, unsigned long esr)
 
 static void noinstr el0_svc_compat(struct pt_regs *regs)
 {
-	arm64_enter_from_user_mode(regs);
+	arm64_syscall_enter_from_user_mode(regs);
 	cortex_a76_erratum_1463225_svc_handler();
 	local_daif_restore(DAIF_PROCCTX);
 	do_el0_svc_compat(regs);
-	arm64_exit_to_user_mode(regs);
+	arm64_syscall_exit_to_user_mode(regs);
 }
 
 static void noinstr el0_bkpt32(struct pt_regs *regs, unsigned long esr)

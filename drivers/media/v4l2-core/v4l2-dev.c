@@ -146,7 +146,7 @@ static inline int devnode_find(struct video_device *vdev, int from, int to)
 
 struct video_device *video_device_alloc(void)
 {
-	return kzalloc(sizeof(struct video_device), GFP_KERNEL);
+	return kzalloc_obj(struct video_device);
 }
 EXPORT_SYMBOL(video_device_alloc);
 
@@ -1032,6 +1032,11 @@ int __video_register_device(struct video_device *vdev,
 	vdev->minor = i + minor_offset;
 	vdev->num = nr;
 
+	if (WARN_ON(vdev->minor >= VIDEO_NUM_DEVICES)) {
+		mutex_unlock(&videodev_lock);
+		return -EINVAL;
+	}
+
 	/* Should not happen since we thought this minor was free */
 	if (WARN_ON(video_devices[vdev->minor])) {
 		mutex_unlock(&videodev_lock);
@@ -1066,24 +1071,38 @@ int __video_register_device(struct video_device *vdev,
 	vdev->dev.class = &video_class;
 	vdev->dev.devt = MKDEV(VIDEO_MAJOR, vdev->minor);
 	vdev->dev.parent = vdev->dev_parent;
-	vdev->dev.release = v4l2_device_release;
 	dev_set_name(&vdev->dev, "%s%d", name_base, vdev->num);
-
-	/* Increase v4l2_device refcount */
-	v4l2_device_get(vdev->v4l2_dev);
-
 	mutex_lock(&videodev_lock);
 	ret = device_register(&vdev->dev);
 	if (ret < 0) {
+		/*
+		 * We should do a put_device() here, but the problem is that
+		 * the V4L2 API expects drivers to call video_device_release()
+		 * on error, and so both put_device() and video_device_release
+		 * would kfree vdev.
+		 *
+		 * The proper solution would be to split this function into
+		 * two parts: initialization and registration, and then rework
+		 * all drivers.
+		 *
+		 * Until then just skip the put_device and free everything.
+		 * This will result in a small memory leak, which is better
+		 * than a double-free.
+		 */
 		mutex_unlock(&videodev_lock);
 		pr_err("%s: device_register failed\n", __func__);
-		put_device(&vdev->dev);
-		return ret;
+		goto cleanup;
 	}
+	/* Register the release callback that will be called when the last
+	   reference to the device goes away. */
+	vdev->dev.release = v4l2_device_release;
 
 	if (nr != -1 && nr != vdev->num && warn_if_nr_in_use)
 		pr_warn("%s: requested %s%d, got %s\n", __func__,
 			name_base, nr, video_device_node_name(vdev));
+
+	/* Increase v4l2_device refcount */
+	v4l2_device_get(vdev->v4l2_dev);
 
 	/* Part 5: Register the entity. */
 	ret = video_register_media_controller(vdev);

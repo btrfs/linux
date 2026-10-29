@@ -127,14 +127,24 @@ int btrfs_set_prop(struct btrfs_trans_handle *trans, struct btrfs_inode *inode,
 		return ret;
 	}
 
+	ret = handler->validate(inode, value, value_len);
+	if (ret)
+		return ret;
 	ret = btrfs_setxattr(trans, &inode->vfs_inode, handler->xattr_name, value,
 			     value_len, flags);
 	if (ret)
 		return ret;
 	ret = handler->apply(inode, value, value_len);
-	if (ret) {
-		btrfs_setxattr(trans, &inode->vfs_inode, handler->xattr_name, NULL,
-			       0, flags);
+	/* We validated before, so it should not fail here. */
+	ASSERT(ret == 0);
+	if (unlikely(ret)) {
+		int ret2;
+
+		/* Try to delete xattr, if not possible abort transaction. */
+		ret2 = btrfs_setxattr(trans, &inode->vfs_inode, handler->xattr_name,
+				      NULL, 0, flags);
+		if (unlikely(ret2))
+			btrfs_abort_transaction(trans, ret2);
 		return ret;
 	}
 
@@ -430,8 +440,7 @@ int btrfs_inode_inherit_props(struct btrfs_trans_handle *trans,
 		 */
 		if (need_reserve) {
 			num_bytes = btrfs_calc_insert_metadata_size(fs_info, 1);
-			ret = btrfs_block_rsv_add(fs_info, trans->block_rsv,
-						  num_bytes,
+			ret = btrfs_block_rsv_add(trans->block_rsv, num_bytes,
 						  BTRFS_RESERVE_NO_FLUSH);
 			if (ret)
 				return ret;

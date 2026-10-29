@@ -575,7 +575,7 @@ static const struct rescale_tc_data offset_cases[] = {
 
 static void case_to_desc(const struct rescale_tc_data *t, char *desc)
 {
-	strcpy(desc, t->name);
+	strscpy(desc, t->name, KUNIT_PARAM_DESC_SIZE);
 }
 
 KUNIT_ARRAY_PARAM(iio_rescale_scale, scale_cases, case_to_desc);
@@ -587,7 +587,7 @@ KUNIT_ARRAY_PARAM(iio_rescale_offset, offset_cases, case_to_desc);
  * @str: The string to parse
  * @nano: The number as an integer
  *
- * Returns 0 on success, or a negative error code if the string cound not be
+ * Returns 0 on success, or a negative error code if the string could not be
  * parsed.
  */
 static int iio_str_to_nano(const char *str, s64 *nano)
@@ -617,7 +617,7 @@ static int iio_str_to_nano(const char *str, s64 *nano)
  * @real_str: The real value as a string
  * @exp_str: The expected value as a string
  *
- * Returns a negative error code if the strings cound not be parsed, or the
+ * Returns a negative error code if the strings could not be parsed, or the
  * relative error in parts-per-million.
  */
 static int iio_test_relative_error_ppm(const char *real_str, const char *exp_str)

@@ -61,7 +61,7 @@ int ftrace_allocate_ftrace_ops(struct trace_array *tr)
 	if (tr->flags & TRACE_ARRAY_FL_GLOBAL)
 		return 0;
 
-	ops = kzalloc(sizeof(*ops), GFP_KERNEL);
+	ops = kzalloc_obj(*ops);
 	if (!ops)
 		return -ENOMEM;
 
@@ -101,7 +101,7 @@ int ftrace_create_function_files(struct trace_array *tr,
 		return ret;
 	}
 
-	ftrace_create_filter_files(tr->ops, parent);
+	ftrace_create_filter_files(tr, parent);
 
 	return 0;
 }
@@ -121,6 +121,7 @@ static ftrace_func_t select_trace_function(u32 flags_val)
 	case TRACE_FUNC_OPT_ARGS:
 		return function_args_trace_call;
 	case TRACE_FUNC_OPT_STACK:
+	case TRACE_FUNC_OPT_STACK | TRACE_FUNC_OPT_ARGS:
 		return function_stack_trace_call;
 	case TRACE_FUNC_OPT_NO_REPEATS:
 		return function_no_repeats_trace_call;
@@ -154,11 +155,11 @@ static int function_trace_init(struct trace_array *tr)
 	if (!tr->ops)
 		return -ENOMEM;
 
-	func = select_trace_function(func_flags.val);
+	func = select_trace_function(tr->current_trace_flags->val);
 	if (!func)
 		return -EINVAL;
 
-	if (!handle_func_repeats(tr, func_flags.val))
+	if (!handle_func_repeats(tr, tr->current_trace_flags->val))
 		return -ENOMEM;
 
 	ftrace_init_array_ops(tr, func);
@@ -295,7 +296,9 @@ function_stack_trace_call(unsigned long ip, unsigned long parent_ip,
 
 	if (likely(disabled == 1)) {
 		trace_ctx = tracing_gen_ctx_flags(flags);
-		trace_function(tr, ip, parent_ip, trace_ctx, NULL);
+		if (!(tr->current_trace_flags->val & TRACE_FUNC_OPT_ARGS))
+			fregs = NULL;
+		trace_function(tr, ip, parent_ip, trace_ctx, fregs);
 #ifdef CONFIG_UNWINDER_FRAME_POINTER
 		if (ftrace_pids_enabled(op))
 			skip++;
@@ -458,15 +461,15 @@ func_set_flag(struct trace_array *tr, u32 old_flags, u32 bit, int set)
 	ftrace_func_t func;
 	u32 new_flags;
 
-	/* Do nothing if already set. */
-	if (!!set == !!(func_flags.val & bit))
-		return 0;
-
-	/* We can change this flag only when not running. */
+	/* We can change this flag only when current tracer is function. */
 	if (tr->current_trace != &function_trace)
 		return 0;
 
-	new_flags = (func_flags.val & ~bit) | (set ? bit : 0);
+	/* Do nothing if already set. */
+	if (!!set == !!(tr->current_trace_flags->val & bit))
+		return 0;
+
+	new_flags = (tr->current_trace_flags->val & ~bit) | (set ? bit : 0);
 	func = select_trace_function(new_flags);
 	if (!func)
 		return -EINVAL;
@@ -491,7 +494,7 @@ static struct tracer function_trace __tracer_data =
 	.init		= function_trace_init,
 	.reset		= function_trace_reset,
 	.start		= function_trace_start,
-	.flags		= &func_flags,
+	.default_flags	= &func_flags,
 	.set_flag	= func_set_flag,
 	.allow_instances = true,
 #ifdef CONFIG_FTRACE_SELFTEST

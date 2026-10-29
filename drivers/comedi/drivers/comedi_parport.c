@@ -211,6 +211,13 @@ static irqreturn_t parport_interrupt(int irq, void *d)
 	unsigned int ctrl;
 	unsigned short val = 0;
 
+	/*
+	 * Check device is fully attached.  Device interrupts should have
+	 * been disabled, but do this in case of bad hardware.
+	 */
+	if (!dev->attached)
+		return IRQ_NONE;
+
 	ctrl = inb(dev->iobase + PARPORT_CTRL_REG);
 	if (!(ctrl & PARPORT_CTRL_IRQ_ENA))
 		return IRQ_NONE;
@@ -225,13 +232,19 @@ static int parport_attach(struct comedi_device *dev,
 			  struct comedi_devconfig *it)
 {
 	struct comedi_subdevice *s;
+	unsigned int iobase = it->options[0];
 	int ret;
 
-	ret = comedi_request_region(dev, it->options[0], 0x03);
+	ret = comedi_check_request_region(dev, iobase, 0x03,
+					  0, UINT_MAX, 4);
 	if (ret)
 		return ret;
 
-	if (it->options[1]) {
+	outb(0, dev->iobase + PARPORT_DATA_REG);
+	outb(0, dev->iobase + PARPORT_CTRL_REG);
+
+	/* only ISA interrupts are valid on a parallel port */
+	if (it->options[1] >= 1 && it->options[1] <= 15) {
 		ret = request_irq(it->options[1], parport_interrupt, 0,
 				  dev->board_name, dev);
 		if (ret == 0)
@@ -285,9 +298,6 @@ static int parport_attach(struct comedi_device *dev,
 		s->do_cmd	= parport_intr_cmd;
 		s->cancel	= parport_intr_cancel;
 	}
-
-	outb(0, dev->iobase + PARPORT_DATA_REG);
-	outb(0, dev->iobase + PARPORT_CTRL_REG);
 
 	return 0;
 }

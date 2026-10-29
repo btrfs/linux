@@ -65,13 +65,6 @@ struct mm_struct;
 #define PGDIR_SIZE	(1UL << PGDIR_SHIFT)
 #define PGDIR_MASK	(~(PGDIR_SIZE-1))
 
-/*
- * ZERO_PAGE is a global shared page that is always zero: used
- * for zero-mapped memory areas etc..
- */
-extern unsigned long empty_zero_page[PAGE_SIZE / sizeof(unsigned long)];
-#define ZERO_PAGE(vaddr)	(virt_to_page(empty_zero_page))
-
 extern pgd_t swapper_pg_dir[PTRS_PER_PGD];
 extern pte_t invalid_pte_table[PAGE_SIZE/sizeof(pte_t)];
 
@@ -229,13 +222,6 @@ static inline unsigned long pmd_page_vaddr(pmd_t pmd)
 {
 	return pmd_val(pmd);
 }
-
-#define pte_ERROR(e) \
-	pr_err("%s:%d: bad pte %08lx.\n", \
-		__FILE__, __LINE__, pte_val(e))
-#define pgd_ERROR(e) \
-	pr_err("%s:%d: bad pgd %08lx.\n", \
-		__FILE__, __LINE__, pgd_val(e))
 
 /*
  * Encode/decode swap entries and swap PTEs. Swap PTEs are all PTEs that

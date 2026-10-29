@@ -144,7 +144,7 @@ static int max6875_probe(struct i2c_client *client)
 	if (client->addr & 1)
 		return -ENODEV;
 
-	data = kzalloc(sizeof(struct max6875_data), GFP_KERNEL);
+	data = kzalloc_obj(struct max6875_data);
 	if (!data)
 		return -ENOMEM;
 
@@ -183,7 +183,7 @@ static void max6875_remove(struct i2c_client *client)
 }
 
 static const struct i2c_device_id max6875_id[] = {
-	{ "max6875" },
+	{ .name = "max6875" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, max6875_id);

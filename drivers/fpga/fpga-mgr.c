@@ -486,7 +486,7 @@ static int fpga_mgr_buf_load(struct fpga_manager *mgr,
 	 */
 	nr_pages = DIV_ROUND_UP((unsigned long)buf + count, PAGE_SIZE) -
 		   (unsigned long)buf / PAGE_SIZE;
-	pages = kmalloc_array(nr_pages, sizeof(struct page *), GFP_KERNEL);
+	pages = kmalloc_objs(struct page *, nr_pages);
 	if (!pages)
 		return -ENOMEM;
 
@@ -744,7 +744,7 @@ EXPORT_SYMBOL_GPL(fpga_mgr_put);
  * @mgr:	fpga manager
  *
  * Given a pointer to FPGA Manager (from fpga_mgr_get() or
- * of_fpga_mgr_put()) attempt to get the mutex. The user should call
+ * of_fpga_mgr_get()) attempt to get the mutex. The user should call
  * fpga_mgr_lock() and verify that it returns 0 before attempting to
  * program the FPGA.  Likewise, the user should call fpga_mgr_unlock
  * when done programming the FPGA.
@@ -801,7 +801,7 @@ __fpga_mgr_register_full(struct device *parent, const struct fpga_manager_info *
 		return ERR_PTR(-EINVAL);
 	}
 
-	mgr = kzalloc(sizeof(*mgr), GFP_KERNEL);
+	mgr = kzalloc_obj(*mgr);
 	if (!mgr)
 		return ERR_PTR(-ENOMEM);
 

@@ -1642,7 +1642,7 @@ static int mpic_set_default_irq_routing(struct openpic *opp)
 	struct kvm_irq_routing_entry *routing;
 
 	/* Create a nop default map, so that dereferencing it still works */
-	routing = kzalloc((sizeof(*routing)), GFP_KERNEL);
+	routing = kzalloc_obj(*routing);
 	if (!routing)
 		return -ENOMEM;
 
@@ -1661,7 +1661,7 @@ static int mpic_create(struct kvm_device *dev, u32 type)
 	if (dev->kvm->arch.mpic)
 		return -EINVAL;
 
-	opp = kzalloc(sizeof(struct openpic), GFP_KERNEL);
+	opp = kzalloc_obj(struct openpic);
 	if (!opp)
 		return -ENOMEM;
 
@@ -1833,7 +1833,8 @@ int kvm_set_routing_entry(struct kvm *kvm,
 		e->set = mpic_set_irq;
 		e->irqchip.irqchip = ue->u.irqchip.irqchip;
 		e->irqchip.pin = ue->u.irqchip.pin;
-		if (e->irqchip.pin >= KVM_IRQCHIP_NUM_PINS)
+		if (e->irqchip.pin >= KVM_IRQCHIP_NUM_PINS ||
+		    e->irqchip.irqchip >= KVM_NR_IRQCHIPS)
 			goto out;
 		break;
 	case KVM_IRQ_ROUTING_MSI:

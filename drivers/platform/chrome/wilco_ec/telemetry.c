@@ -30,7 +30,6 @@
 #include <linux/cdev.h>
 #include <linux/device.h>
 #include <linux/fs.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/platform_data/wilco-ec.h>
 #include <linux/platform_device.h>
@@ -248,7 +247,7 @@ static int telem_open(struct inode *inode, struct file *filp)
 
 	get_device(&dev_data->dev);
 
-	sess_data = kzalloc(sizeof(*sess_data), GFP_KERNEL);
+	sess_data = kzalloc_obj(*sess_data);
 	if (!sess_data) {
 		atomic_set(&dev_data->available, 1);
 		return -ENOMEM;
@@ -370,7 +369,7 @@ static int telem_device_probe(struct platform_device *pdev)
 		return error;
 	}
 
-	dev_data = kzalloc(sizeof(*dev_data), GFP_KERNEL);
+	dev_data = kzalloc_obj(*dev_data);
 	if (!dev_data) {
 		ida_free(&telem_ida, minor);
 		return -ENOMEM;
@@ -410,8 +409,8 @@ static void telem_device_remove(struct platform_device *pdev)
 }
 
 static const struct platform_device_id telem_id[] = {
-	{ DRV_NAME, 0 },
-	{}
+	{ .name = DRV_NAME },
+	{ }
 };
 MODULE_DEVICE_TABLE(platform, telem_id);
 

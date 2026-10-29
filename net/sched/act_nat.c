@@ -81,7 +81,7 @@ static int tcf_nat_init(struct net *net, struct nlattr *nla, struct nlattr *est,
 	if (err < 0)
 		goto release_idr;
 
-	nparm = kzalloc(sizeof(*nparm), GFP_KERNEL);
+	nparm = kzalloc_obj(*nparm);
 	if (!nparm) {
 		err = -ENOMEM;
 		goto release_idr;
@@ -313,12 +313,18 @@ static void tcf_nat_cleanup(struct tc_action *a)
 		kfree_rcu(parms, rcu);
 }
 
+static size_t tcf_nat_get_fill_size(const struct tc_action *act)
+{
+	return nla_total_size(sizeof(struct tc_nat)); /* TCA_NAT_PARMS */
+}
+
 static struct tc_action_ops act_nat_ops = {
 	.kind		=	"nat",
 	.id		=	TCA_ID_NAT,
 	.owner		=	THIS_MODULE,
 	.act		=	tcf_nat_act,
 	.dump		=	tcf_nat_dump,
+	.get_fill_size	=	tcf_nat_get_fill_size,
 	.init		=	tcf_nat_init,
 	.cleanup	=	tcf_nat_cleanup,
 	.size		=	sizeof(struct tcf_nat),

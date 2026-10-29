@@ -667,7 +667,7 @@ static int si4713_tx_tune_measure(struct si4713_device *sdev, u16 frequency,
 /*
  * si4713_tx_tune_status- Returns the status of the tx_tune_freq, tx_tune_mea or
  *			tx_tune_power commands. This command return the current
- *			frequency, output voltage in dBuV, the antenna tunning
+ *			frequency, output voltage in dBuV, the antenna tuning
  *			capacitance value and the received noise level. The
  *			command also clears the stcint interrupt bit when the
  *			first bit of its arguments is high.
@@ -1639,7 +1639,7 @@ static void si4713_remove(struct i2c_client *client)
 
 /* si4713_i2c_driver - i2c driver interface */
 static const struct i2c_device_id si4713_id[] = {
-	{ "si4713" },
+	{ .name = "si4713" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, si4713_id);

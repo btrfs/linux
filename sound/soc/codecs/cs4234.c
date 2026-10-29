@@ -11,7 +11,6 @@
 #include <linux/gpio/consumer.h>
 #include <linux/i2c.h>
 #include <linux/jiffies.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <sound/pcm.h>
 #include <sound/pcm_params.h>
@@ -85,9 +84,9 @@ static SOC_ENUM_SINGLE_DECL(cs4234_max_delay, CS4234_VOLUME_MODE,
 static int cs4234_dac14_grp_delay_put(struct snd_kcontrol *kctrl,
 				      struct snd_ctl_elem_value *uctrl)
 {
-	struct snd_soc_component *component = snd_soc_kcontrol_component(kctrl);
+	struct snd_soc_component *component = snd_kcontrol_chip(kctrl);
 	struct cs4234 *cs4234 = snd_soc_component_get_drvdata(component);
-	struct snd_soc_dapm_context *dapm = snd_soc_component_get_dapm(component);
+	struct snd_soc_dapm_context *dapm = snd_soc_component_to_dapm(component);
 	unsigned int val = 0;
 	int ret = 0;
 
@@ -126,10 +125,11 @@ static int cs4234_set_bias_level(struct snd_soc_component *component,
 				 enum snd_soc_bias_level level)
 {
 	struct cs4234 *cs4234 = snd_soc_component_get_drvdata(component);
+	struct snd_soc_dapm_context *dapm = snd_soc_component_to_dapm(component);
 
 	switch (level) {
 	case SND_SOC_BIAS_PREPARE:
-		switch (snd_soc_component_get_bias_level(component)) {
+		switch (snd_soc_dapm_get_bias_level(dapm)) {
 		case SND_SOC_BIAS_STANDBY:
 			wait_for_completion(&cs4234->vq_ramp_complete);
 			break;
@@ -560,11 +560,20 @@ static int cs4234_dai_set_tdm_slot(struct snd_soc_dai *dai, unsigned int tx_mask
 	return 0;
 }
 
+static const u64 cs4234_selectable_formats =
+	SND_SOC_POSSIBLE_DAIFMT_I2S	|
+	SND_SOC_POSSIBLE_DAIFMT_LEFT_J	|
+	SND_SOC_POSSIBLE_DAIFMT_DSP_A	|
+	SND_SOC_POSSIBLE_DAIFMT_NB_NF	|
+	SND_SOC_POSSIBLE_DAIFMT_IB_NF;
+
 static const struct snd_soc_dai_ops cs4234_dai_ops = {
 	.set_fmt	= cs4234_dai_set_fmt,
 	.hw_params	= cs4234_dai_hw_params,
 	.startup	= cs4234_dai_startup,
 	.set_tdm_slot	= cs4234_dai_set_tdm_slot,
+	.auto_selectable_formats	= &cs4234_selectable_formats,
+	.num_auto_selectable_formats	= 1,
 };
 
 static struct snd_soc_dai_driver cs4234_dai[] = {

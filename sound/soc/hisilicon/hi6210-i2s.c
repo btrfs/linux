@@ -185,7 +185,7 @@ static void hi6210_i2s_txctrl(struct snd_soc_dai *cpu_dai, int on)
 	struct hi6210_i2s *i2s = dev_get_drvdata(cpu_dai->dev);
 	u32 val;
 
-	spin_lock(&i2s->lock);
+	guard(spinlock)(&i2s->lock);
 	if (on) {
 		/* enable S2 TX */
 		val = hi6210_read_reg(i2s, HII2S_I2S_CFG);
@@ -197,7 +197,6 @@ static void hi6210_i2s_txctrl(struct snd_soc_dai *cpu_dai, int on)
 		val &= ~HII2S_I2S_CFG__S2_IF_TX_EN;
 		hi6210_write_reg(i2s, HII2S_I2S_CFG, val);
 	}
-	spin_unlock(&i2s->lock);
 }
 
 static void hi6210_i2s_rxctrl(struct snd_soc_dai *cpu_dai, int on)
@@ -205,7 +204,7 @@ static void hi6210_i2s_rxctrl(struct snd_soc_dai *cpu_dai, int on)
 	struct hi6210_i2s *i2s = dev_get_drvdata(cpu_dai->dev);
 	u32 val;
 
-	spin_lock(&i2s->lock);
+	guard(spinlock)(&i2s->lock);
 	if (on) {
 		val = hi6210_read_reg(i2s, HII2S_I2S_CFG);
 		val |= HII2S_I2S_CFG__S2_IF_RX_EN;
@@ -215,7 +214,6 @@ static void hi6210_i2s_rxctrl(struct snd_soc_dai *cpu_dai, int on)
 		val &= ~HII2S_I2S_CFG__S2_IF_RX_EN;
 		hi6210_write_reg(i2s, HII2S_I2S_CFG, val);
 	}
-	spin_unlock(&i2s->lock);
 }
 
 static int hi6210_i2s_set_fmt(struct snd_soc_dai *cpu_dai, unsigned int fmt)
@@ -509,6 +507,11 @@ static int hi6210_i2s_dai_probe(struct snd_soc_dai *dai)
 }
 
 
+static const u64 hi6210_i2s_selectable_formats =
+	SND_SOC_POSSIBLE_DAIFMT_I2S	|
+	SND_SOC_POSSIBLE_DAIFMT_RIGHT_J	|
+	SND_SOC_POSSIBLE_DAIFMT_LEFT_J;
+
 static const struct snd_soc_dai_ops hi6210_i2s_dai_ops = {
 	.probe		= hi6210_i2s_dai_probe,
 	.trigger	= hi6210_i2s_trigger,
@@ -516,6 +519,8 @@ static const struct snd_soc_dai_ops hi6210_i2s_dai_ops = {
 	.set_fmt	= hi6210_i2s_set_fmt,
 	.startup	= hi6210_i2s_startup,
 	.shutdown	= hi6210_i2s_shutdown,
+	.auto_selectable_formats	= &hi6210_i2s_selectable_formats,
+	.num_auto_selectable_formats	= 1,
 };
 
 static const struct snd_soc_dai_driver hi6210_i2s_dai_init = {

@@ -50,6 +50,7 @@
 #include <linux/netdevice.h>
 #include <linux/skbuff.h>
 #include <linux/rtnetlink.h>
+#include <linux/hex.h>
 #include <linux/init.h>
 #include <linux/kernel.h>
 #include <linux/workqueue.h>
@@ -130,10 +131,7 @@ int slcan_enable_err_rst_on_open(struct net_device *ndev, bool on)
 	if (netif_running(ndev))
 		return -EBUSY;
 
-	if (on)
-		set_bit(CF_ERR_RST, &sl->cmd_flags);
-	else
-		clear_bit(CF_ERR_RST, &sl->cmd_flags);
+	assign_bit(CF_ERR_RST, &sl->cmd_flags, on);
 
 	return 0;
 }
@@ -774,7 +772,6 @@ static const struct net_device_ops slcan_netdev_ops = {
 	.ndo_open               = slcan_netdev_open,
 	.ndo_stop               = slcan_netdev_close,
 	.ndo_start_xmit         = slcan_netdev_xmit,
-	.ndo_change_mtu         = can_change_mtu,
 };
 
 /******************************************

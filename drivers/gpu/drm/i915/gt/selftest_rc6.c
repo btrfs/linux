@@ -92,8 +92,8 @@ int live_rc6_manual(void *arg)
 
 		if (!rc0_power) {
 			if (rc0_freq)
-				pr_debug("No power measured while in RC0! GPU Freq: %uMHz in RC0\n",
-					 rc0_freq);
+				pr_err("No power measured while in RC0! GPU Freq: %uMHz in RC0\n",
+				       rc0_freq);
 			else
 				pr_err("No power and freq measured while in RC0\n");
 			err = -EINVAL;
@@ -201,7 +201,7 @@ randomised_engines(struct intel_gt *gt,
 	if (!n)
 		return NULL;
 
-	engines = kmalloc_array(n, sizeof(*engines), GFP_KERNEL);
+	engines = kmalloc_objs(*engines, n);
 	if (!engines)
 		return NULL;
 

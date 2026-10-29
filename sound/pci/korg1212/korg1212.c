@@ -1980,7 +1980,7 @@ static int snd_korg1212_create(struct snd_card *card, struct pci_dev *pci)
 	__maybe_unused unsigned ioport_size;
 	__maybe_unused unsigned iomem2_size;
 	struct snd_korg1212 *korg1212 = card->private_data;
-	const struct firmware *dsp_code;
+	const struct firmware *dsp_code __free(firmware) = NULL;
 
 	err = pcim_enable_device(pci);
 	if (err < 0)
@@ -2147,18 +2147,14 @@ static int snd_korg1212_create(struct snd_card *card, struct pci_dev *pci)
 
 	korg1212->dma_dsp = snd_devm_alloc_pages(&pci->dev, SNDRV_DMA_TYPE_DEV,
 						 dsp_code->size);
-	if (!korg1212->dma_dsp) {
-		release_firmware(dsp_code);
+	if (!korg1212->dma_dsp)
 		return -ENOMEM;
-	}
 
         K1212_DEBUG_PRINTK("K1212_DEBUG: DSP Code area = 0x%p (0x%08x) %d bytes [%s]\n",
 		   korg1212->dma_dsp->area, korg1212->dma_dsp->addr, dsp_code->size,
 		   stateName[korg1212->cardState]);
 
 	memcpy(korg1212->dma_dsp->area, dsp_code->data, dsp_code->size);
-
-	release_firmware(dsp_code);
 
 	rc = snd_korg1212_Send1212Command(korg1212, K1212_DB_RebootCard, 0, 0, 0, 0);
 
@@ -2220,7 +2216,7 @@ snd_korg1212_probe(struct pci_dev *pci,
 {
 	static int dev;
 	struct snd_korg1212 *korg1212;
-	struct snd_card *card;
+	struct snd_card *card __free(snd_card_free) = NULL;
 	int err;
 
 	if (dev >= SNDRV_CARDS) {
@@ -2238,7 +2234,7 @@ snd_korg1212_probe(struct pci_dev *pci,
 
 	err = snd_korg1212_create(card, pci);
 	if (err < 0)
-		goto error;
+		return err;
 
 	strscpy(card->driver, "korg1212");
 	strscpy(card->shortname, "korg1212");
@@ -2249,14 +2245,11 @@ snd_korg1212_probe(struct pci_dev *pci,
 
 	err = snd_card_register(card);
 	if (err < 0)
-		goto error;
+		return err;
 	pci_set_drvdata(pci, card);
+	card = NULL; /* probe succeeded, don't release as error */
 	dev++;
 	return 0;
-
- error:
-	snd_card_free(card);
-	return err;
 }
 
 static struct pci_driver korg1212_driver = {

@@ -27,6 +27,7 @@
 #ifndef _OS_TYPES_H_
 #define _OS_TYPES_H_
 
+#include <linux/compiler_attributes.h>
 #include <linux/slab.h>
 #include <linux/kgdb.h>
 #include <linux/delay.h>
@@ -55,9 +56,17 @@
 
 #if defined(CONFIG_DRM_AMD_DC_FP)
 #include "amdgpu_dm/dc_fpu.h"
-#define DC_FP_START() dc_fpu_begin(__func__, __LINE__)
-#define DC_FP_END() dc_fpu_end(__func__, __LINE__)
 #endif /* CONFIG_DRM_AMD_DC_FP */
+
+
+/*
+ * On Linux this is provided by <linux/kconfig.h> and evaluates Kconfig
+ * options for both built-in (=y) and module (=m) cases. Windows has no
+ * Kconfig, so config options are never set here and this always yields 0.
+ */
+#ifndef IS_ENABLED
+#define IS_ENABLED(option) 0
+#endif
 
 /*
  *
@@ -70,6 +79,23 @@
 #define dc_breakpoint()		do {} while (0)
 #endif
 
+#ifdef __COVERITY__
+/*
+ * Static analysers see the WARN_ON() test as proof that the asserted condition
+ * can fail, then keep walking the failing path because nothing stops it. Model
+ * the assert as a path terminator so only genuinely reachable defects survive.
+ * __COVERITY__ is defined during analysis capture only, so the code emitted by
+ * a real build is unchanged.
+ */
+void __coverity_panic__(void);
+
+#define ASSERT_CRITICAL(expr) do {		\
+		if (!(expr))			\
+			__coverity_panic__();	\
+	} while (0)
+
+#define ASSERT(expr) ASSERT_CRITICAL(expr)
+#else
 #define ASSERT_CRITICAL(expr) do {		\
 		if (WARN_ON(!(expr)))		\
 			dc_breakpoint();	\
@@ -79,6 +105,7 @@
 		if (WARN_ON_ONCE(!(expr)))	\
 			dc_breakpoint();	\
 	} while (0)
+#endif
 
 #define BREAK_TO_DEBUGGER() \
 	do { \

@@ -365,7 +365,7 @@ bool acpi_evaluate_reference(acpi_handle handle, acpi_string pathname,
 		goto err;
 
 	list->count = package->package.count;
-	list->handles = kcalloc(list->count, sizeof(*list->handles), GFP_KERNEL);
+	list->handles = kzalloc_objs(*list->handles, list->count);
 	if (!list->handles)
 		goto err_clear;
 
@@ -1048,23 +1048,47 @@ static int __init acpi_backlight(char *str)
 __setup("acpi_backlight=", acpi_backlight);
 
 /**
+ * acpi_dev_is_video_device - test if device matches against ACPI video device IDs
+ * @adev: ACPI device to test
+ *
+ * Return: true when matches, otherwise false.
+ */
+bool acpi_dev_is_video_device(struct acpi_device *adev)
+{
+	static const struct acpi_device_id video_device_ids[] = {
+		{ .id = ACPI_VIDEO_HID },
+		{ }
+	};
+
+	return adev && !acpi_match_device_ids(adev, video_device_ids);
+}
+EXPORT_SYMBOL(acpi_dev_is_video_device);
+
+/**
  * acpi_match_platform_list - Check if the system matches with a given list
  * @plat: pointer to acpi_platform_list table terminated by a NULL entry
  *
  * Return the matched index if the system is found in the platform list.
- * Otherwise, return a negative error code.
+ * Return -ENODEV for no match, or another negative error code if a table
+ * header could not be read and no entry matched.
  */
 int acpi_match_platform_list(const struct acpi_platform_list *plat)
 {
 	struct acpi_table_header hdr;
+	acpi_status status;
+	int ret = -ENODEV;
 	int idx = 0;
 
 	if (acpi_disabled)
 		return -ENODEV;
 
 	for (; plat->oem_id[0]; plat++, idx++) {
-		if (ACPI_FAILURE(acpi_get_table_header(plat->table, 0, &hdr)))
+		status = acpi_get_table_header(plat->table, 0, &hdr);
+		if (ACPI_FAILURE(status)) {
+			if (status != AE_NOT_FOUND)
+				ret = status == AE_NO_MEMORY ? -ENOMEM : -EIO;
 			continue;
+		}
 
 		if (strncmp(plat->oem_id, hdr.oem_id, ACPI_OEM_ID_SIZE))
 			continue;
@@ -1079,6 +1103,6 @@ int acpi_match_platform_list(const struct acpi_platform_list *plat)
 			return idx;
 	}
 
-	return -ENODEV;
+	return ret;
 }
 EXPORT_SYMBOL(acpi_match_platform_list);

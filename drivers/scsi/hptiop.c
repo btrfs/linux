@@ -385,9 +385,9 @@ static int iop_send_sync_msg(struct hptiop_hba *hba, u32 msg, u32 millisec)
 	hba->ops->post_msg(hba, msg);
 
 	for (i = 0; i < millisec; i++) {
-		spin_lock_irq(hba->host->host_lock);
+		spin_lock_irq(&hba->host->host_lock);
 		hba->ops->iop_intr(hba);
-		spin_unlock_irq(hba->host->host_lock);
+		spin_unlock_irq(&hba->host->host_lock);
 		if (hba->msg_done)
 			break;
 		msleep(1);
@@ -836,9 +836,9 @@ static irqreturn_t hptiop_intr(int irq, void *dev_id)
 	int  handled;
 	unsigned long flags;
 
-	spin_lock_irqsave(hba->host->host_lock, flags);
+	spin_lock_irqsave(&hba->host->host_lock, flags);
 	handled = hba->ops->iop_intr(hba);
-	spin_unlock_irqrestore(hba->host->host_lock, flags);
+	spin_unlock_irqrestore(&hba->host->host_lock, flags);
 
 	return handled;
 }
@@ -993,7 +993,7 @@ static int hptiop_reset_comm_mvfrey(struct hptiop_hba *hba)
 	return 0;
 }
 
-static int hptiop_queuecommand_lck(struct scsi_cmnd *scp)
+static enum scsi_qc_status hptiop_queuecommand_lck(struct scsi_cmnd *scp)
 {
 	struct Scsi_Host *host = scp->device->host;
 	struct hptiop_hba *hba = (struct hptiop_hba *)host->hostdata;

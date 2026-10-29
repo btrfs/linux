@@ -5,6 +5,7 @@
  * Copyright (C) 2019 Jeff LaBundy <jeff@labundy.com>
  */
 
+#include <linux/cleanup.h>
 #include <linux/device.h>
 #include <linux/iio/events.h>
 #include <linux/iio/iio.h>
@@ -107,26 +108,20 @@ static int iqs621_als_notifier(struct notifier_block *notifier,
 	indio_dev = iqs621_als->indio_dev;
 	timestamp = iio_get_time_ns(indio_dev);
 
-	mutex_lock(&iqs621_als->lock);
+	guard(mutex)(&iqs621_als->lock);
 
 	if (event_flags & BIT(IQS62X_EVENT_SYS_RESET)) {
 		ret = iqs621_als_init(iqs621_als);
 		if (ret) {
 			dev_err(indio_dev->dev.parent,
 				"Failed to re-initialize device: %d\n", ret);
-			ret = NOTIFY_BAD;
-		} else {
-			ret = NOTIFY_OK;
+			return NOTIFY_BAD;
 		}
-
-		goto err_mutex;
+		return NOTIFY_OK;
 	}
 
-	if (!iqs621_als->light_en && !iqs621_als->range_en &&
-	    !iqs621_als->prox_en) {
-		ret = NOTIFY_DONE;
-		goto err_mutex;
-	}
+	if (!iqs621_als->light_en && !iqs621_als->range_en && !iqs621_als->prox_en)
+		return NOTIFY_DONE;
 
 	/* IQS621 only */
 	light_new = event_data->als_flags & IQS621_ALS_FLAGS_LIGHT;
@@ -181,25 +176,7 @@ static int iqs621_als_notifier(struct notifier_block *notifier,
 
 	iqs621_als->als_flags = event_data->als_flags;
 	iqs621_als->ir_flags = event_data->ir_flags;
-	ret = NOTIFY_OK;
-
-err_mutex:
-	mutex_unlock(&iqs621_als->lock);
-
-	return ret;
-}
-
-static void iqs621_als_notifier_unregister(void *context)
-{
-	struct iqs621_als_private *iqs621_als = context;
-	struct iio_dev *indio_dev = iqs621_als->indio_dev;
-	int ret;
-
-	ret = blocking_notifier_chain_unregister(&iqs621_als->iqs62x->nh,
-						 &iqs621_als->notifier);
-	if (ret)
-		dev_err(indio_dev->dev.parent,
-			"Failed to unregister notifier: %d\n", ret);
+	return NOTIFY_OK;
 }
 
 static int iqs621_als_read_raw(struct iio_dev *indio_dev,
@@ -241,30 +218,22 @@ static int iqs621_als_read_event_config(struct iio_dev *indio_dev,
 					enum iio_event_direction dir)
 {
 	struct iqs621_als_private *iqs621_als = iio_priv(indio_dev);
-	int ret;
 
-	mutex_lock(&iqs621_als->lock);
+	guard(mutex)(&iqs621_als->lock);
 
 	switch (chan->type) {
 	case IIO_LIGHT:
-		ret = iqs621_als->light_en;
-		break;
+		return iqs621_als->light_en;
 
 	case IIO_INTENSITY:
-		ret = iqs621_als->range_en;
-		break;
+		return iqs621_als->range_en;
 
 	case IIO_PROXIMITY:
-		ret = iqs621_als->prox_en;
-		break;
+		return iqs621_als->prox_en;
 
 	default:
-		ret = -EINVAL;
+		return -EINVAL;
 	}
-
-	mutex_unlock(&iqs621_als->lock);
-
-	return ret;
 }
 
 static int iqs621_als_write_event_config(struct iio_dev *indio_dev,
@@ -278,11 +247,11 @@ static int iqs621_als_write_event_config(struct iio_dev *indio_dev,
 	unsigned int val;
 	int ret;
 
-	mutex_lock(&iqs621_als->lock);
+	guard(mutex)(&iqs621_als->lock);
 
 	ret = regmap_read(iqs62x->regmap, iqs62x->dev_desc->als_flags, &val);
 	if (ret)
-		goto err_mutex;
+		return ret;
 	iqs621_als->als_flags = val;
 
 	switch (chan->type) {
@@ -291,40 +260,41 @@ static int iqs621_als_write_event_config(struct iio_dev *indio_dev,
 					 iqs62x->dev_desc->als_mask,
 					 iqs621_als->range_en || state ? 0 :
 									 0xFF);
-		if (!ret)
-			iqs621_als->light_en = state;
-		break;
+		if (ret)
+			return ret;
+		iqs621_als->light_en = state;
+
+		return 0;
 
 	case IIO_INTENSITY:
 		ret = regmap_update_bits(iqs62x->regmap, IQS620_GLBL_EVENT_MASK,
 					 iqs62x->dev_desc->als_mask,
 					 iqs621_als->light_en || state ? 0 :
 									 0xFF);
-		if (!ret)
-			iqs621_als->range_en = state;
-		break;
+		if (ret)
+			return ret;
+		iqs621_als->range_en = state;
+
+		return 0;
 
 	case IIO_PROXIMITY:
 		ret = regmap_read(iqs62x->regmap, IQS622_IR_FLAGS, &val);
 		if (ret)
-			goto err_mutex;
+			return ret;
 		iqs621_als->ir_flags = val;
 
 		ret = regmap_update_bits(iqs62x->regmap, IQS620_GLBL_EVENT_MASK,
 					 iqs62x->dev_desc->ir_mask,
 					 state ? 0 : 0xFF);
-		if (!ret)
-			iqs621_als->prox_en = state;
-		break;
+		if (ret)
+			return ret;
+		iqs621_als->prox_en = state;
+
+		return 0;
 
 	default:
-		ret = -EINVAL;
+		return -EINVAL;
 	}
-
-err_mutex:
-	mutex_unlock(&iqs621_als->lock);
-
-	return ret;
 }
 
 static int iqs621_als_read_event_value(struct iio_dev *indio_dev,
@@ -335,33 +305,28 @@ static int iqs621_als_read_event_value(struct iio_dev *indio_dev,
 				       int *val, int *val2)
 {
 	struct iqs621_als_private *iqs621_als = iio_priv(indio_dev);
-	int ret = IIO_VAL_INT;
 
-	mutex_lock(&iqs621_als->lock);
+	guard(mutex)(&iqs621_als->lock);
 
 	switch (dir) {
 	case IIO_EV_DIR_RISING:
 		*val = iqs621_als->thresh_light * 16;
-		break;
+		return IIO_VAL_INT;
 
 	case IIO_EV_DIR_FALLING:
 		*val = iqs621_als->thresh_dark * 4;
-		break;
+		return IIO_VAL_INT;
 
 	case IIO_EV_DIR_EITHER:
 		if (iqs621_als->ir_flags_mask == IQS622_IR_FLAGS_TOUCH)
 			*val = iqs621_als->thresh_prox * 4;
 		else
 			*val = iqs621_als->thresh_prox;
-		break;
+		return IIO_VAL_INT;
 
 	default:
-		ret = -EINVAL;
+		return -EINVAL;
 	}
-
-	mutex_unlock(&iqs621_als->lock);
-
-	return ret;
 }
 
 static int iqs621_als_write_event_value(struct iio_dev *indio_dev,
@@ -375,9 +340,9 @@ static int iqs621_als_write_event_value(struct iio_dev *indio_dev,
 	struct iqs62x_core *iqs62x = iqs621_als->iqs62x;
 	unsigned int thresh_reg, thresh_val;
 	u8 ir_flags_mask, *thresh_cache;
-	int ret = -EINVAL;
+	int ret;
 
-	mutex_lock(&iqs621_als->lock);
+	guard(mutex)(&iqs621_als->lock);
 
 	switch (dir) {
 	case IIO_EV_DIR_RISING:
@@ -426,30 +391,27 @@ static int iqs621_als_write_event_value(struct iio_dev *indio_dev,
 			break;
 
 		default:
-			goto err_mutex;
+			return -EINVAL;
 		}
 
 		thresh_cache = &iqs621_als->thresh_prox;
 		break;
 
 	default:
-		goto err_mutex;
+		return -EINVAL;
 	}
 
 	if (thresh_val > 0xFF)
-		goto err_mutex;
+		return -EINVAL;
 
 	ret = regmap_write(iqs62x->regmap, thresh_reg, thresh_val);
 	if (ret)
-		goto err_mutex;
+		return ret;
 
 	*thresh_cache = thresh_val;
 	iqs621_als->ir_flags_mask = ir_flags_mask;
 
-err_mutex:
-	mutex_unlock(&iqs621_als->lock);
-
-	return ret;
+	return 0;
 }
 
 static const struct iio_info iqs621_als_info = {
@@ -588,18 +550,13 @@ static int iqs621_als_probe(struct platform_device *pdev)
 	mutex_init(&iqs621_als->lock);
 
 	iqs621_als->notifier.notifier_call = iqs621_als_notifier;
-	ret = blocking_notifier_chain_register(&iqs621_als->iqs62x->nh,
-					       &iqs621_als->notifier);
+	ret = devm_blocking_notifier_chain_register(&pdev->dev,
+						    &iqs621_als->iqs62x->nh,
+						    &iqs621_als->notifier);
 	if (ret) {
 		dev_err(&pdev->dev, "Failed to register notifier: %d\n", ret);
 		return ret;
 	}
-
-	ret = devm_add_action_or_reset(&pdev->dev,
-				       iqs621_als_notifier_unregister,
-				       iqs621_als);
-	if (ret)
-		return ret;
 
 	return devm_iio_device_register(&pdev->dev, indio_dev);
 }

@@ -61,7 +61,7 @@ static int quickspi_hid_raw_request(struct hid_device *hid,
 
 	switch (reqtype) {
 	case HID_REQ_GET_REPORT:
-		ret = quickspi_get_report(qsdev, rtype, reportnum, buf);
+		ret = quickspi_get_report(qsdev, rtype, reportnum, buf, len);
 		break;
 	case HID_REQ_SET_REPORT:
 		ret = quickspi_set_report(qsdev, rtype, reportnum, buf, len);
@@ -71,7 +71,6 @@ static int quickspi_hid_raw_request(struct hid_device *hid,
 		break;
 	}
 
-	pm_runtime_mark_last_busy(qsdev->dev);
 	pm_runtime_put_autosuspend(qsdev->dev);
 
 	return ret;
@@ -119,6 +118,7 @@ int quickspi_hid_probe(struct quickspi_device *qsdev)
 	hid->product = le16_to_cpu(qsdev->dev_desc.product_id);
 	snprintf(hid->name, sizeof(hid->name), "%s %04X:%04X", "quickspi-hid",
 		 hid->vendor, hid->product);
+	strscpy(hid->phys, dev_name(qsdev->dev), sizeof(hid->phys));
 
 	ret = hid_add_device(hid);
 	if (ret) {
@@ -148,16 +148,18 @@ void quickspi_hid_remove(struct quickspi_device *qsdev)
  *
  * @qsdev: point to quickspi device
  * @data: point to input report data buffer
+ * @buf_size: the allocated size of the input report data buffer
  * @data_len: the length of input report data
  *
  * Return: 0 on success, non zero on error.
  */
 int quickspi_hid_send_report(struct quickspi_device *qsdev,
-			     void *data, size_t data_len)
+			     void *data, size_t buf_size, size_t data_len)
 {
 	int ret;
 
-	ret = hid_input_report(qsdev->hid_dev, HID_INPUT_REPORT, data, data_len, 1);
+	ret = hid_safe_input_report(qsdev->hid_dev, HID_INPUT_REPORT, data,
+				    buf_size, data_len, 1);
 	if (ret)
 		dev_err(qsdev->dev, "Failed to send HID input report, ret = %d.\n", ret);
 

@@ -18,8 +18,7 @@
 #undef DEBUGDATA
 #undef DEBUGCCW
 
-#define KMSG_COMPONENT "ctcm"
-#define pr_fmt(fmt) KMSG_COMPONENT ": " fmt
+#define pr_fmt(fmt) "ctcm: " fmt
 
 #include <linux/export.h>
 #include <linux/module.h>
@@ -827,7 +826,7 @@ static void mpc_action_go_ready(fsm_instance *fsm, int event, void *arg)
 
 	fsm_deltimer(&grp->timer);
 
-	if (grp->saved_xid2->xid2_flag2 == 0x40) {
+	if (priv->xid->xid2_flag2 == 0x40) {
 		priv->xid->xid2_flag2 = 0x00;
 		if (grp->estconnfunc) {
 			grp->estconnfunc(grp->port_num, 1,
@@ -1164,7 +1163,7 @@ static void ctcmpc_unpack_skb(struct channel *ch, struct sk_buff *pskb)
 			skb_pull(pskb, new_len); /* point to next PDU */
 		}
 	} else {
-		mpcginfo = kmalloc(sizeof(struct mpcg_info), GFP_ATOMIC);
+		mpcginfo = kmalloc_obj(struct mpcg_info, GFP_ATOMIC);
 		if (mpcginfo == NULL)
 					goto done;
 
@@ -1260,7 +1259,7 @@ struct mpc_group *ctcmpc_init_mpc_group(struct ctcm_priv *priv)
 	CTCM_DBF_TEXT_(MPC_SETUP, CTC_DBF_INFO,
 			"Enter %s(%p)", CTCM_FUNTAIL, priv);
 
-	grp = kzalloc(sizeof(struct mpc_group), GFP_KERNEL);
+	grp = kzalloc_obj(struct mpc_group);
 	if (grp == NULL)
 		return NULL;
 
@@ -1637,7 +1636,6 @@ done:
 			"The XID used in the MPC protocol is not valid, "
 			"rc = %d\n", rc);
 		priv->xid->xid2_flag2 = 0x40;
-		grp->saved_xid2->xid2_flag2 = 0x40;
 	}
 
 	return rc;
@@ -1648,6 +1646,7 @@ done:
  * CTCM_PROTO_MPC only
  */
 static void mpc_action_side_xid(fsm_instance *fsm, void *arg, int side)
+__context_unsafe(/* Conditional locking */)
 {
 	struct channel *ch = arg;
 	int rc = 0;
@@ -1775,9 +1774,6 @@ static void mpc_action_side_xid(fsm_instance *fsm, void *arg, int side)
 	CTCM_D3_DUMP((char *)ch->xid_id, 4);
 
 	if (!in_hardirq()) {
-			 /* Such conditional locking is a known problem for
-			  * sparse because its static undeterministic.
-			  * Warnings should be ignored here. */
 		spin_lock_irqsave(get_ccwdev_lock(ch->cdev), saveflags);
 		gotlock = 1;
 	}
@@ -1785,7 +1781,7 @@ static void mpc_action_side_xid(fsm_instance *fsm, void *arg, int side)
 	fsm_addtimer(&ch->timer, 5000 , CTC_EVENT_TIMER, ch);
 	rc = ccw_device_start(ch->cdev, &ch->ccw[8], 0, 0xff, 0);
 
-	if (gotlock)	/* see remark above about conditional locking */
+	if (gotlock)
 		spin_unlock_irqrestore(get_ccwdev_lock(ch->cdev), saveflags);
 
 	if (rc != 0) {

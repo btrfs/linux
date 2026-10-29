@@ -90,19 +90,19 @@ static void cpt_configure_group(struct cpt_device *cpt, u8 grp,
 
 static void cpt_disable_mbox_interrupts(struct cpt_device *cpt)
 {
-	/* Clear mbox(0) interupts for all vfs */
+	/* Clear mbox(0) interrupts for all vfs */
 	cpt_write_csr64(cpt->reg_base, CPTX_PF_MBOX_ENA_W1CX(0, 0), ~0ull);
 }
 
 static void cpt_disable_ecc_interrupts(struct cpt_device *cpt)
 {
-	/* Clear ecc(0) interupts for all vfs */
+	/* Clear ecc(0) interrupts for all vfs */
 	cpt_write_csr64(cpt->reg_base, CPTX_PF_ECC0_ENA_W1C(0), ~0ull);
 }
 
 static void cpt_disable_exec_interrupts(struct cpt_device *cpt)
 {
-	/* Clear exec interupts for all vfs */
+	/* Clear exec interrupts for all vfs */
 	cpt_write_csr64(cpt->reg_base, CPTX_PF_EXEC_ENA_W1C(0), ~0ull);
 }
 
@@ -115,7 +115,7 @@ static void cpt_disable_all_interrupts(struct cpt_device *cpt)
 
 static void cpt_enable_mbox_interrupts(struct cpt_device *cpt)
 {
-	/* Set mbox(0) interupts for all vfs */
+	/* Set mbox(0) interrupts for all vfs */
 	cpt_write_csr64(cpt->reg_base, CPTX_PF_MBOX_ENA_W1SX(0, 0), ~0ull);
 }
 
@@ -140,10 +140,10 @@ static int cpt_load_microcode(struct cpt_device *cpt, struct microcode *mcode)
 	 */
 	if (mcode->is_ae) {
 		core = CPT_MAX_SE_CORES; /* start couting from 10 */
-		total_cores = CPT_MAX_TOTAL_CORES; /* upto 15 */
+		total_cores = CPT_MAX_TOTAL_CORES; /* up to 15 */
 	} else {
 		core = 0; /* start couting from 0 */
-		total_cores = CPT_MAX_SE_CORES; /* upto 9 */
+		total_cores = CPT_MAX_SE_CORES; /* up to 9 */
 	}
 
 	/* Point to microcode for each core of the group */
@@ -651,6 +651,7 @@ static const struct pci_device_id cpt_id_table[] = {
 	{ PCI_DEVICE(PCI_VENDOR_ID_CAVIUM, CPT_81XX_PCI_PF_DEVICE_ID) },
 	{ 0, }  /* end of table */
 };
+MODULE_DEVICE_TABLE(pci, cpt_id_table);
 
 static struct pci_driver cpt_pci_driver = {
 	.name = DRV_NAME,
@@ -666,4 +667,3 @@ MODULE_AUTHOR("George Cherian <george.cherian@cavium.com>");
 MODULE_DESCRIPTION("Cavium Thunder CPT Physical Function Driver");
 MODULE_LICENSE("GPL v2");
 MODULE_VERSION(DRV_VERSION);
-MODULE_DEVICE_TABLE(pci, cpt_id_table);

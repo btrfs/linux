@@ -152,6 +152,17 @@ config REALTEK_OTTO_TIMER
 	  RT8391, RTL8392, RTL8393 and RTL8396 and chips of the RTL930x series
 	  such as RTL9301, RTL9302 or RTL9303.
 
+config RZN1_TIMER
+	bool "Renesas RZ/N1 Timer"
+	depends on HAS_IOMEM && COMMON_CLK
+	depends on ARCH_RZN1 || COMPILE_TEST
+	help
+	  Enables support for RZ/N1 SoC timers.
+	  A timers block in RZ/N1 SoCs is composed of 8 timers
+	    - 6 16-bit timers
+	    - 2 32-bit timers
+	  Two timers blocks are available in RZ/N1 SoCs.
+
 config SUN4I_TIMER
 	bool "Sun4i timer driver" if COMPILE_TEST
 	depends on HAS_IOMEM
@@ -254,6 +265,7 @@ config KEYSTONE_TIMER
 
 config INTEGRATOR_AP_TIMER
 	bool "Integrator-AP timer driver" if COMPILE_TEST
+	depends on OF
 	select CLKSRC_MMIO
 	help
 	  Enables support for the Integrator-AP timer.
@@ -595,7 +607,6 @@ config CLKSRC_VERSATILE
 config CLKSRC_MIPS_GIC
 	bool
 	depends on MIPS_GIC
-	select CLOCKSOURCE_WATCHDOG
 	select TIMER_OF
 
 config CLKSRC_PXA
@@ -781,5 +792,47 @@ config NXP_STM_TIMER
 	help
           Enables the support for NXP System Timer Module found in the
           s32g NXP platform series.
+
+config RTK_SYSTIMER
+	bool "Realtek SYSTIMER support"
+	depends on ARM || ARM64
+	depends on ARCH_REALTEK || COMPILE_TEST
+	select TIMER_OF
+	help
+	  This option enables the driver that registers the global 1 MHz hardware
+	  counter as a clock event device on Realtek SoCs. Make sure to enable
+	  this option only when building for a Realtek platform or for compilation
+	  testing.
+
+choice
+	prompt "NXP clocksource for scheduler clock"
+	depends on SOC_VF610 || ARCH_S32
+	# Default to Global Timer for Vybrid (32-bit)
+	default VF_USE_ARM_GLOBAL_TIMER if SOC_VF610
+	# Default to None for S32 (64-bit)
+	default VF_TIMER_NONE if ARCH_S32
+
+	config VF_USE_ARM_GLOBAL_TIMER
+		bool "Use NXP Vybrid Global Timer"
+		depends on ARCH_MULTI_V7 && SOC_VF610
+		select ARM_GLOBAL_TIMER
+		select CLKSRC_ARM_GLOBAL_TIMER_SCHED_CLOCK
+		help
+		  Use the NXP Vybrid Global Timer as clocksource.
+
+	config VF_USE_PIT_TIMER
+		bool "Use NXP PIT timer"
+		select NXP_PIT_TIMER
+		help
+		  Use NXP Periodic Interrupt Timer (PIT) as clocksource.
+
+	config VF_TIMER_NONE
+		bool "None (Use standard Arch Timer)"
+		depends on ARCH_S32
+		help
+		  Do not use any specific NXP timer driver. Use the standard
+		  ARM Architected Timer instead.
+
+endchoice
 
 endmenu

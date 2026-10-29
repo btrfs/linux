@@ -4,6 +4,7 @@
 
 struct trace_events {
 	struct trace_events *next;
+	struct trace_events *prev;
 	char *system;
 	char *event;
 	char *filter;
@@ -18,6 +19,7 @@ struct trace_instance {
 	struct tep_handle		*tep;
 	struct trace_seq		*seq;
 	unsigned long long		missed_events;
+	unsigned long long		invalid_events;
 	unsigned long long		processed_events;
 };
 
@@ -45,6 +47,6 @@ void trace_events_destroy(struct trace_instance *instance,
 int trace_events_enable(struct trace_instance *instance,
 			  struct trace_events *events);
 
-int trace_event_add_filter(struct trace_events *event, char *filter);
-int trace_event_add_trigger(struct trace_events *event, char *trigger);
+void trace_event_add_filter(struct trace_events *event, char *filter);
+void trace_event_add_trigger(struct trace_events *event, char *trigger);
 int trace_set_buffer_size(struct trace_instance *trace, int size);

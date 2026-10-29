@@ -93,16 +93,19 @@ static void file_audit_cb(struct audit_buffer *ab, void *va)
  * Returns: %0 or error on failure
  */
 int aa_audit_file(const struct cred *subj_cred,
-		  struct aa_profile *profile, struct aa_perms *perms,
+		  struct aa_profile *profile, const struct aa_perms *perms,
 		  const char *op, u32 request, const char *name,
 		  const char *target, struct aa_label *tlabel,
 		  kuid_t ouid, const char *info, int error)
 {
+	u32 quiet = perms->quiet;
+	u32 complain = perms->complain;
 	int type = AUDIT_APPARMOR_AUTO;
 	DEFINE_AUDIT_DATA(ad, LSM_AUDIT_DATA_TASK, AA_CLASS_FILE, op);
 
 	ad.subj_cred = subj_cred;
 	ad.request = request;
+	ad.tags = perms->tag;
 	ad.name = name;
 	ad.fs.target = target;
 	ad.peer = tlabel;
@@ -111,6 +114,8 @@ int aa_audit_file(const struct cred *subj_cred,
 	ad.error = error;
 	ad.common.u.tsk = NULL;
 
+	if (COMPLAIN_MODE(profile))
+		complain |= ~(perms->allow | perms->deny);
 	if (likely(!ad.error)) {
 		u32 mask = perms->audit;
 
@@ -131,11 +136,14 @@ int aa_audit_file(const struct cred *subj_cred,
 		if (ad.request & perms->kill)
 			type = AUDIT_APPARMOR_KILL;
 
+		if (AUDIT_MODE(profile) == AUDIT_QUIET_ALLOWED)
+			quiet |= complain | perms->allow;
+
 		/* quiet known rejects, assumes quiet and kill do not overlap */
-		if ((ad.request & perms->quiet) &&
+		if ((ad.request & quiet) &&
 		    AUDIT_MODE(profile) != AUDIT_NOQUIET &&
 		    AUDIT_MODE(profile) != AUDIT_ALL)
-			ad.request &= ~perms->quiet;
+			ad.request &= ~quiet;
 
 		if (!ad.request)
 			return ad.error;
@@ -153,6 +161,10 @@ static int path_name(const char *op, const struct cred *subj_cred,
 	struct aa_profile *profile;
 	const char *info = NULL;
 	int error;
+
+	/* don't reaudit files closed during inheritance */
+	if (unlikely(path->dentry == aa_null.dentry))
+		return -EACCES;
 
 	error = aa_path_name(path, flags, buffer, name, &info,
 			     labels_profile(label)->disconnected);
@@ -227,7 +239,7 @@ int __aa_path_perm(const char *op, const struct cred *subj_cred,
 	int e = 0;
 
 	if (profile_unconfined(profile) ||
-	    ((flags & PATH_SOCK_COND) && !RULE_MEDIATES_v9NET(rules)))
+	    ((flags & PATH_SOCK_COND) && !RULE_MEDIATES_UNIX(rules)))
 		return 0;
 	aa_str_perms(rules->file, rules->file->start[AA_CLASS_FILE],
 		     name, cond, perms);
@@ -245,7 +257,7 @@ static int profile_path_perm(const char *op, const struct cred *subj_cred,
 			     struct path_cond *cond, int flags,
 			     struct aa_perms *perms)
 {
-	const char *name;
+	const char *name = NULL;
 	int error;
 
 	if (profile_unconfined(profile))
@@ -323,7 +335,7 @@ static int profile_path_link(const struct cred *subj_cred,
 			     struct path_cond *cond)
 {
 	struct aa_ruleset *rules = profile->label.rules[0];
-	const char *lname, *tname = NULL;
+	const char *lname = NULL, *tname = NULL;
 	struct aa_perms lperms = {}, perms;
 	const char *info = NULL;
 	u32 request = AA_MAY_LINK;
@@ -567,8 +579,7 @@ static bool __file_is_delegated(struct aa_label *obj_label)
 	return unconfined(obj_label);
 }
 
-static bool __unix_needs_revalidation(struct file *file, struct aa_label *label,
-				      u32 request)
+static bool __is_unix_file(struct file *file)
 {
 	struct socket *sock = (struct socket *) file->private_data;
 
@@ -576,18 +587,29 @@ static bool __unix_needs_revalidation(struct file *file, struct aa_label *label,
 
 	if (!S_ISSOCK(file_inode(file)->i_mode))
 		return false;
-	if (request & NET_PEER_MASK)
+	/* sock and sock->sk can be NULL for sockets being set up or torn down */
+	if (!sock || !sock->sk)
 		return false;
-	if (sock->sk->sk_family == PF_UNIX) {
-		struct aa_sk_ctx *ctx = aa_sock(sock->sk);
-
-		if (rcu_access_pointer(ctx->peer) !=
-		    rcu_access_pointer(ctx->peer_lastupdate))
-			return true;
-		return !__aa_subj_label_is_cached(rcu_dereference(ctx->label),
-						  label);
-	}
+	if (sock->sk->sk_family == PF_UNIX)
+		return true;
 	return false;
+}
+
+static bool __unix_needs_revalidation(struct file *file, struct aa_label *label,
+				      u32 request)
+{
+	struct socket *sock = (struct socket *) file->private_data;
+
+	AA_BUG(!__is_unix_file(file));
+	lockdep_assert_in_rcu_read_lock();
+
+	struct aa_sk_ctx *skctx = aa_sock(sock->sk);
+
+	if (rcu_access_pointer(skctx->peer) !=
+	    rcu_access_pointer(skctx->peer_lastupdate))
+		return true;
+
+	return !__aa_subj_label_is_cached(rcu_dereference(skctx->label), label);
 }
 
 /**
@@ -613,6 +635,10 @@ int aa_file_perm(const char *op, const struct cred *subj_cred,
 	AA_BUG(!label);
 	AA_BUG(!file);
 
+	/* don't reaudit files closed during inheritance */
+	if (unlikely(file->f_path.dentry == aa_null.dentry))
+		return -EACCES;
+
 	fctx = file_ctx(file);
 
 	rcu_read_lock();
@@ -628,7 +654,7 @@ int aa_file_perm(const char *op, const struct cred *subj_cred,
 	 */
 	denied = request & ~fctx->allow;
 	if (unconfined(label) || __file_is_delegated(flabel) ||
-	    __unix_needs_revalidation(file, label, request) ||
+	    (!denied && __is_unix_file(file) && !__unix_needs_revalidation(file, label, request)) ||
 	    (!denied && __aa_subj_label_is_cached(label, flabel))) {
 		rcu_read_unlock();
 		goto done;

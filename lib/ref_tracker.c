@@ -74,8 +74,7 @@ ref_tracker_get_stats(struct ref_tracker_dir *dir, unsigned int limit)
 	struct ref_tracker_dir_stats *stats;
 	struct ref_tracker *tracker;
 
-	stats = kmalloc(struct_size(stats, stacks, limit),
-			GFP_NOWAIT);
+	stats = kmalloc_flex(*stats, stacks, limit, GFP_NOWAIT);
 	if (!stats)
 		return ERR_PTR(-ENOMEM);
 	stats->total = 0;
@@ -266,9 +265,9 @@ int ref_tracker_alloc(struct ref_tracker_dir *dir,
 		refcount_inc(&dir->no_tracker);
 		return 0;
 	}
-	if (gfp & __GFP_DIRECT_RECLAIM)
+	if ((gfp & __GFP_DIRECT_RECLAIM) && !(current->flags & PF_MEMALLOC))
 		gfp_mask |= __GFP_NOFAIL;
-	*trackerp = tracker = kzalloc(sizeof(*tracker), gfp_mask);
+	*trackerp = tracker = kzalloc_obj(*tracker, gfp_mask);
 	if (unlikely(!tracker)) {
 		pr_err_once("memory allocation failure, unreliable refcount tracker.\n");
 		refcount_inc(&dir->untracked);

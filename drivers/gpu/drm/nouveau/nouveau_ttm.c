@@ -23,6 +23,7 @@
  * USE OR OTHER DEALINGS IN THE SOFTWARE.
  */
 
+#include <linux/cgroup_dmem.h>
 #include <linux/limits.h>
 
 #include <drm/ttm/ttm_range_manager.h>
@@ -181,12 +182,19 @@ static int
 nouveau_ttm_init_vram(struct nouveau_drm *drm)
 {
 	if (drm->client.device.info.family >= NV_DEVICE_INFO_V0_TESLA) {
-		struct ttm_resource_manager *man = kzalloc(sizeof(*man), GFP_KERNEL);
+		struct ttm_resource_manager *man = kzalloc_obj(*man);
 
 		if (!man)
 			return -ENOMEM;
 
 		man->func = &nouveau_vram_manager;
+
+		man->cg = drmm_cgroup_register_region(drm->dev, "vram",
+						      &(struct dmem_cgroup_init){
+							      .size = drm->gem.vram_available
+						      });
+		if (IS_ERR(man->cg))
+			return PTR_ERR(man->cg);
 
 		ttm_resource_manager_init(man, &drm->ttm.bdev,
 					  drm->gem.vram_available >> PAGE_SHIFT);
@@ -229,7 +237,7 @@ nouveau_ttm_init_gtt(struct nouveau_drm *drm)
 		return ttm_range_man_init(&drm->ttm.bdev, TTM_PL_TT, true,
 					  size_pages);
 
-	man = kzalloc(sizeof(*man), GFP_KERNEL);
+	man = kzalloc_obj(*man);
 	if (!man)
 		return -ENOMEM;
 
@@ -302,8 +310,10 @@ nouveau_ttm_init(struct nouveau_drm *drm)
 	ret = ttm_device_init(&drm->ttm.bdev, &nouveau_bo_driver, drm->dev->dev,
 				  dev->anon_inode->i_mapping,
 				  dev->vma_offset_manager,
-				  drm_need_swiotlb(drm->client.mmu.dmabits),
-				  drm->client.mmu.dmabits <= 32);
+				  (drm_need_swiotlb(drm->client.mmu.dmabits) ?
+				   TTM_ALLOCATION_POOL_USE_DMA_ALLOC : 0) |
+				  (drm->client.mmu.dmabits <= 32 ?
+				   TTM_ALLOCATION_POOL_USE_DMA32 : 0));
 	if (ret) {
 		NV_ERROR(drm, "error initialising bo driver, %d\n", ret);
 		return ret;

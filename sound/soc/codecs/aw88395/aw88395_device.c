@@ -8,6 +8,7 @@
 // Author: Ben Yi <yijiangtao@awinic.com>
 //
 
+#include <linux/cleanup.h>
 #include <linux/crc32.h>
 #include <linux/i2c.h>
 #include <linux/minmax.h>
@@ -64,21 +65,21 @@ static int aw_dev_dsp_write_32bit(struct aw_device *aw_dev,
 	return 0;
 }
 
-static int aw_dev_dsp_write(struct aw_device *aw_dev,
+int aw_dev_dsp_write(struct aw_device *aw_dev,
 		unsigned short dsp_addr, unsigned int dsp_data, unsigned char data_type)
 {
 	u32 reg_value;
 	int ret;
 
-	mutex_lock(&aw_dev->dsp_lock);
+	guard(mutex)(&aw_dev->dsp_lock);
 	switch (data_type) {
-	case AW88395_DSP_16_DATA:
+	case AW_DSP_16_DATA:
 		ret = aw_dev_dsp_write_16bit(aw_dev, dsp_addr, dsp_data);
 		if (ret)
 			dev_err(aw_dev->dev, "write dsp_addr[0x%x] 16-bit dsp_data[0x%x] failed",
 					(u32)dsp_addr, dsp_data);
 		break;
-	case AW88395_DSP_32_DATA:
+	case AW_DSP_32_DATA:
 		ret = aw_dev_dsp_write_32bit(aw_dev, dsp_addr, dsp_data);
 		if (ret)
 			dev_err(aw_dev->dev, "write dsp_addr[0x%x] 32-bit dsp_data[0x%x] failed",
@@ -93,10 +94,10 @@ static int aw_dev_dsp_write(struct aw_device *aw_dev,
 	/* clear dsp chip select state*/
 	if (regmap_read(aw_dev->regmap, AW88395_ID_REG, &reg_value))
 		dev_err(aw_dev->dev, "%s fail to clear chip state. Err=%d\n", __func__, ret);
-	mutex_unlock(&aw_dev->dsp_lock);
 
 	return ret;
 }
+EXPORT_SYMBOL_GPL(aw_dev_dsp_write);
 
 static int aw_dev_dsp_read_16bit(struct aw_device *aw_dev,
 		unsigned short dsp_addr, unsigned int *dsp_data)
@@ -149,21 +150,21 @@ static int aw_dev_dsp_read_32bit(struct aw_device *aw_dev,
 	return 0;
 }
 
-static int aw_dev_dsp_read(struct aw_device *aw_dev,
+int aw_dev_dsp_read(struct aw_device *aw_dev,
 		unsigned short dsp_addr, unsigned int *dsp_data, unsigned char data_type)
 {
 	u32 reg_value;
 	int ret;
 
-	mutex_lock(&aw_dev->dsp_lock);
+	guard(mutex)(&aw_dev->dsp_lock);
 	switch (data_type) {
-	case AW88395_DSP_16_DATA:
+	case AW_DSP_16_DATA:
 		ret = aw_dev_dsp_read_16bit(aw_dev, dsp_addr, dsp_data);
 		if (ret)
 			dev_err(aw_dev->dev, "read dsp_addr[0x%x] 16-bit dsp_data[0x%x] failed",
 					(u32)dsp_addr, *dsp_data);
 		break;
-	case AW88395_DSP_32_DATA:
+	case AW_DSP_32_DATA:
 		ret = aw_dev_dsp_read_32bit(aw_dev, dsp_addr, dsp_data);
 		if (ret)
 			dev_err(aw_dev->dev, "read dsp_addr[0x%x] 32r-bit dsp_data[0x%x] failed",
@@ -178,11 +179,10 @@ static int aw_dev_dsp_read(struct aw_device *aw_dev,
 	/* clear dsp chip select state*/
 	if (regmap_read(aw_dev->regmap, AW88395_ID_REG, &reg_value))
 		dev_err(aw_dev->dev, "%s fail to clear chip state. Err=%d\n", __func__, ret);
-	mutex_unlock(&aw_dev->dsp_lock);
 
 	return ret;
 }
-
+EXPORT_SYMBOL_GPL(aw_dev_dsp_read);
 
 static int aw_dev_read_chipid(struct aw_device *aw_dev, u16 *chip_id)
 {
@@ -231,7 +231,7 @@ static int aw_dev_dsp_fw_check(struct aw_device *aw_dev)
 	dsp_fw_desc = &set_prof_desc->sec_desc[AW88395_DATA_TYPE_DSP_FW];
 
 	for (i = 0; i < AW88395_FW_CHECK_PART; i++) {
-		ret = aw_dev_dsp_read(aw_dev, addr, &dsp_val, AW88395_DSP_16_DATA);
+		ret = aw_dev_dsp_read(aw_dev, addr, &dsp_val, AW_DSP_16_DATA);
 		if (ret) {
 			dev_err(aw_dev->dev, "dsp read failed");
 			return ret;
@@ -351,11 +351,11 @@ static int aw_dev_modify_dsp_cfg(struct aw_device *aw_dev,
 		return -EINVAL;
 	}
 	switch (data_type) {
-	case AW88395_DSP_16_DATA:
+	case AW_DSP_16_DATA:
 		data1 = cpu_to_le16((u16)dsp_data);
 		memcpy(crc_dsp_cfg->data + addr_offset, (u8 *)&data1, 2);
 		break;
-	case AW88395_DSP_32_DATA:
+	case AW_DSP_32_DATA:
 		data2 = cpu_to_le32(dsp_data);
 		memcpy(crc_dsp_cfg->data + addr_offset, (u8 *)&data2, 4);
 		break;
@@ -377,14 +377,14 @@ static int aw_dev_dsp_set_cali_re(struct aw_device *aw_dev)
 
 	/* set cali re to device */
 	ret = aw_dev_dsp_write(aw_dev,
-			AW88395_DSP_REG_CFG_ADPZ_RE, cali_re, AW88395_DSP_32_DATA);
+			AW88395_DSP_REG_CFG_ADPZ_RE, cali_re, AW_DSP_32_DATA);
 	if (ret) {
 		dev_err(aw_dev->dev, "set cali re error");
 		return ret;
 	}
 
 	ret = aw_dev_modify_dsp_cfg(aw_dev, AW88395_DSP_REG_CFG_ADPZ_RE,
-				cali_re, AW88395_DSP_32_DATA);
+				cali_re, AW_DSP_32_DATA);
 	if (ret)
 		dev_err(aw_dev->dev, "modify dsp cfg failed");
 
@@ -428,7 +428,7 @@ static int aw_dev_dsp_set_crc32(struct aw_device *aw_dev)
 	crc_value = crc32c(0xFFFFFFFF, crc_dsp_cfg->data, crc_data_len) ^ 0xFFFFFFFF;
 
 	return aw_dev_dsp_write(aw_dev, AW88395_DSP_REG_CRC_ADDR, crc_value,
-						AW88395_DSP_32_DATA);
+						AW_DSP_32_DATA);
 }
 
 static void aw_dev_dsp_check_crc_enable(struct aw_device *aw_dev, bool flag)
@@ -663,7 +663,7 @@ static int aw_dev_set_vcalb(struct aw_device *aw_dev)
 	int vcalb, vcalk;
 	int ret;
 
-	ret = aw_dev_dsp_read(aw_dev, AW88395_DSP_REG_VCALB, &vcalb_adj, AW88395_DSP_16_DATA);
+	ret = aw_dev_dsp_read(aw_dev, AW88395_DSP_REG_VCALB, &vcalb_adj, AW_DSP_16_DATA);
 	if (ret) {
 		dev_err(aw_dev->dev, "read vcalb_adj failed");
 		return ret;
@@ -720,14 +720,14 @@ static int aw_dev_set_vcalb(struct aw_device *aw_dev)
 	dev_dbg(aw_dev->dev, "vcalb=%d, reg_val=0x%x, vcalb_adj =0x%x",
 				vcalb, reg_val, vcalb_adj);
 
-	ret = aw_dev_dsp_write(aw_dev, AW88395_DSP_REG_VCALB, reg_val, AW88395_DSP_16_DATA);
+	ret = aw_dev_dsp_write(aw_dev, AW88395_DSP_REG_VCALB, reg_val, AW_DSP_16_DATA);
 	if (ret) {
 		dev_err(aw_dev->dev, "write vcalb failed");
 		return ret;
 	}
 
 	ret = aw_dev_modify_dsp_cfg(aw_dev, AW88395_DSP_REG_VCALB,
-					(u32)reg_val, AW88395_DSP_16_DATA);
+					(u32)reg_val, AW_DSP_16_DATA);
 	if (ret)
 		dev_err(aw_dev->dev, "modify dsp cfg failed");
 
@@ -741,7 +741,7 @@ static int aw_dev_get_cali_f0_delay(struct aw_device *aw_dev)
 	int ret;
 
 	ret = aw_dev_dsp_read(aw_dev,
-			AW88395_DSP_CALI_F0_DELAY, &cali_delay, AW88395_DSP_16_DATA);
+			AW88395_DSP_CALI_F0_DELAY, &cali_delay, AW_DSP_16_DATA);
 	if (ret)
 		dev_err(aw_dev->dev, "read cali delay failed, ret=%d", ret);
 	else
@@ -991,7 +991,7 @@ static int aw_dev_get_dsp_status(struct aw_device *aw_dev)
 
 static int aw_dev_get_vmax(struct aw_device *aw_dev, unsigned int *vmax)
 {
-	return aw_dev_dsp_read(aw_dev, AW88395_DSP_REG_VMAX, vmax, AW88395_DSP_16_DATA);
+	return aw_dev_dsp_read(aw_dev, AW88395_DSP_REG_VMAX, vmax, AW_DSP_16_DATA);
 }
 
 static int aw_dev_update_reg_container(struct aw_device *aw_dev,
@@ -1089,7 +1089,7 @@ static int aw_dev_get_ra(struct aw_cali_desc *cali_desc)
 	int ret;
 
 	ret = aw_dev_dsp_read(aw_dev, AW88395_DSP_REG_CFG_ADPZ_RA,
-				&dsp_ra, AW88395_DSP_32_DATA);
+				&dsp_ra, AW_DSP_32_DATA);
 	if (ret) {
 		dev_err(aw_dev->dev, "read ra error");
 		return ret;
@@ -1109,42 +1109,36 @@ static int aw_dev_dsp_update_container(struct aw_device *aw_dev,
 #ifdef AW88395_DSP_I2C_WRITES
 	u32 tmp_len;
 
-	mutex_lock(&aw_dev->dsp_lock);
+	guard(mutex)(&aw_dev->dsp_lock);
 	ret = regmap_write(aw_dev->regmap, AW88395_DSPMADD_REG, base);
 	if (ret)
-		goto error_operation;
+		return ret;
 
 	for (i = 0; i < len; i += AW88395_MAX_RAM_WRITE_BYTE_SIZE) {
 		tmp_len = min(len - i, AW88395_MAX_RAM_WRITE_BYTE_SIZE);
 		ret = regmap_raw_write(aw_dev->regmap, AW88395_DSPMDAT_REG,
 					&data[i], tmp_len);
 		if (ret)
-			goto error_operation;
+			return ret;
 	}
-	mutex_unlock(&aw_dev->dsp_lock);
 #else
 	__be16 reg_val;
 
-	mutex_lock(&aw_dev->dsp_lock);
+	guard(mutex)(&aw_dev->dsp_lock);
 	/* i2c write */
 	ret = regmap_write(aw_dev->regmap, AW88395_DSPMADD_REG, base);
 	if (ret)
-		goto error_operation;
+		return ret;
 	for (i = 0; i < len; i += 2) {
 		reg_val = cpu_to_be16p((u16 *)(data + i));
 		ret = regmap_write(aw_dev->regmap, AW88395_DSPMDAT_REG,
 					(u16)reg_val);
 		if (ret)
-			goto error_operation;
+			return ret;
 	}
-	mutex_unlock(&aw_dev->dsp_lock);
 #endif
 
 	return 0;
-
-error_operation:
-	mutex_unlock(&aw_dev->dsp_lock);
-	return ret;
 }
 
 static int aw_dev_dsp_update_fw(struct aw_device *aw_dev,
@@ -1230,14 +1224,14 @@ static int aw_dev_check_sram(struct aw_device *aw_dev)
 {
 	unsigned int reg_val;
 
-	mutex_lock(&aw_dev->dsp_lock);
+	guard(mutex)(&aw_dev->dsp_lock);
 	/* check the odd bits of reg 0x40 */
 	regmap_write(aw_dev->regmap, AW88395_DSPMADD_REG, AW88395_DSP_ODD_NUM_BIT_TEST);
 	regmap_read(aw_dev->regmap, AW88395_DSPMADD_REG, &reg_val);
 	if (reg_val != AW88395_DSP_ODD_NUM_BIT_TEST) {
 		dev_err(aw_dev->dev, "check reg 0x40 odd bit failed, read[0x%x] != write[0x%x]",
 				reg_val, AW88395_DSP_ODD_NUM_BIT_TEST);
-		goto error;
+		return -EPERM;
 	}
 
 	/* check the even bits of reg 0x40 */
@@ -1246,7 +1240,7 @@ static int aw_dev_check_sram(struct aw_device *aw_dev)
 	if (reg_val != AW88395_DSP_EVEN_NUM_BIT_TEST) {
 		dev_err(aw_dev->dev, "check reg 0x40 even bit failed, read[0x%x] != write[0x%x]",
 				reg_val, AW88395_DSP_EVEN_NUM_BIT_TEST);
-		goto error;
+		return -EPERM;
 	}
 
 	/* check dsp_fw_base_addr */
@@ -1255,7 +1249,7 @@ static int aw_dev_check_sram(struct aw_device *aw_dev)
 	if (reg_val != AW88395_DSP_EVEN_NUM_BIT_TEST) {
 		dev_err(aw_dev->dev, "check dsp fw addr failed, read[0x%x] != write[0x%x]",
 						reg_val, AW88395_DSP_EVEN_NUM_BIT_TEST);
-		goto error;
+		return -EPERM;
 	}
 
 	/* check dsp_cfg_base_addr */
@@ -1264,15 +1258,10 @@ static int aw_dev_check_sram(struct aw_device *aw_dev)
 	if (reg_val != AW88395_DSP_ODD_NUM_BIT_TEST) {
 		dev_err(aw_dev->dev, "check dsp cfg failed, read[0x%x] != write[0x%x]",
 						reg_val, AW88395_DSP_ODD_NUM_BIT_TEST);
-		goto error;
+		return -EPERM;
 	}
-	mutex_unlock(&aw_dev->dsp_lock);
 
 	return 0;
-
-error:
-	mutex_unlock(&aw_dev->dsp_lock);
-	return -EPERM;
 }
 
 int aw88395_dev_fw_update(struct aw_device *aw_dev, bool up_dsp_fw_en, bool force_up_en)

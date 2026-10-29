@@ -23,6 +23,14 @@
 		stdout-path = &uart1;
 	};
 
+	epd_pmic_supply: regulator-epd-pmic-in {
+		compatible = "regulator-fixed";
+		regulator-name = "epd_pmic_supply";
+		gpio = <&gpio2 14 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+		startup-delay-us = <20000>;
+	};
+
 	gpio_keys: gpio-keys {
 		compatible = "gpio-keys";
 
@@ -119,8 +127,33 @@
 		vdd-supply = <&ldo5_reg>;
 	};
 
-	/* TODO: TPS65185 PMIC for E Ink at 0x68 */
+	tps65185: pmic@68 {
+		compatible = "ti,tps65185";
+		reg = <0x68>;
+		interrupt-parent = <&gpio2>;
+		interrupts = <9 IRQ_TYPE_LEVEL_LOW>;
+		vin-supply = <&epd_pmic_supply>;
+		pwr-good-gpios = <&gpio2 13 GPIO_ACTIVE_HIGH>;
+		vcom-ctrl-gpios = <&gpio2 3 GPIO_ACTIVE_HIGH>;
+		wakeup-gpios = <&gpio2 7 GPIO_ACTIVE_HIGH>;
+		enable-gpios = <&gpio2 8 GPIO_ACTIVE_HIGH>;
 
+		regulators {
+			vcom_reg: vcom {
+				regulator-name = "vcom";
+			};
+
+			vposneg_reg: vposneg {
+				regulator-name = "vposneg";
+				regulator-min-microvolt = <15000000>;
+				regulator-max-microvolt = <15000000>;
+			};
+
+			v3p3_reg: v3p3 {
+				regulator-name = "v3p3";
+			};
+		};
+	};
 };
 
 &i2c3 {
@@ -207,13 +240,13 @@
 			};
 
 			/* IR_3V3 */
-			ldo1_reg: LDO1  {
+			ldo1_reg: LDO1 {
 				regulator-name = "LDO1";
 				regulator-boot-on;
 			};
 
 			/* Core1_3V3 */
-			ldo2_reg: LDO2  {
+			ldo2_reg: LDO2 {
 				regulator-name = "LDO2";
 				regulator-always-on;
 				regulator-boot-on;
@@ -226,7 +259,7 @@
 			};
 
 			/* Core5_1V2 */
-			ldo3_reg: LDO3  {
+			ldo3_reg: LDO3 {
 				regulator-name = "LDO3";
 				regulator-always-on;
 				regulator-boot-on;
@@ -277,7 +310,7 @@
 				regulator-boot-on;
 			};
 
-			ldortc1_reg: LDORTC1  {
+			ldortc1_reg: LDORTC1 {
 				regulator-name = "LDORTC1";
 				regulator-boot-on;
 			};

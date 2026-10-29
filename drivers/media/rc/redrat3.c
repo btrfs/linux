@@ -358,8 +358,24 @@ static void redrat3_process_ir_data(struct redrat3_dev *rr3)
 
 	/* process each rr3 encoded byte into an int */
 	sig_size = be16_to_cpu(rr3->irdata.sig_size);
+
+	/*
+	 * Note we are not checking if we are reading beyond the end of the
+	 * packet which was sent, and reading stale data. If the device
+	 * sends a packet which is short then we get garbage IR, but no
+	 * out of bounds read.
+	 */
+	if (sig_size > RR3_MAX_SIG_SIZE) {
+		dev_err(dev, "length %u is incorrect\n", sig_size);
+		return;
+	}
+
 	for (i = 0; i < sig_size; i++) {
 		offset = rr3->irdata.sigdata[i];
+		if (offset >= RR3_DRIVER_MAXLENS) {
+			dev_err(dev, "offset %u is incorrect\n", offset);
+			return;
+		}
 		val = get_unaligned_be16(&rr3->irdata.lens[offset]);
 
 		/* we should always get pulse/space/pulse/space samples */
@@ -502,7 +518,7 @@ static int redrat3_set_timeout(struct rc_dev *rc_dev, unsigned int timeoutus)
 	__be32 *timeout;
 	int ret;
 
-	timeout = kmalloc(sizeof(*timeout), GFP_KERNEL);
+	timeout = kmalloc_obj(*timeout);
 	if (!timeout)
 		return -ENOMEM;
 
@@ -757,28 +773,21 @@ static int redrat3_transmit_ir(struct rc_dev *rcdev, unsigned *txbuf,
 	u8 curlencheck = 0;
 	unsigned i, sendbuf_len;
 
-	if (rr3->transmitting) {
-		dev_warn(dev, "%s: transmitter already in use\n", __func__);
-		return -EAGAIN;
-	}
-
 	if (count > RR3_MAX_SIG_SIZE - RR3_TX_TRAILER_LEN)
 		return -EINVAL;
 
-	/* rr3 will disable rc detector on transmit */
-	rr3->transmitting = true;
-
-	sample_lens = kcalloc(RR3_DRIVER_MAXLENS,
-			      sizeof(*sample_lens),
-			      GFP_KERNEL);
+	sample_lens = kzalloc_objs(*sample_lens, RR3_DRIVER_MAXLENS);
 	if (!sample_lens)
 		return -ENOMEM;
 
-	irdata = kzalloc(sizeof(*irdata), GFP_KERNEL);
+	irdata = kzalloc_obj(*irdata);
 	if (!irdata) {
 		ret = -ENOMEM;
 		goto out;
 	}
+
+	/* rr3 will disable rc detector on transmit */
+	rr3->transmitting = true;
 
 	for (i = 0; i < count; i++) {
 		cur_sample_len = redrat3_us_to_len(txbuf[i]);
@@ -977,6 +986,7 @@ static int redrat3_dev_probe(struct usb_interface *intf,
 	struct device *dev = &intf->dev;
 	struct usb_host_interface *uhi;
 	struct redrat3_dev *rr3;
+	struct rc_dev *rc;
 	struct usb_endpoint_descriptor *ep;
 	struct usb_endpoint_descriptor *ep_narrow = NULL;
 	struct usb_endpoint_descriptor *ep_wide = NULL;
@@ -1022,7 +1032,7 @@ static int redrat3_dev_probe(struct usb_interface *intf,
 	}
 
 	/* allocate memory for our device state and initialize it */
-	rr3 = kzalloc(sizeof(*rr3), GFP_KERNEL);
+	rr3 = kzalloc_obj(*rr3);
 	if (!rr3)
 		goto no_endpoints;
 
@@ -1121,9 +1131,12 @@ static int redrat3_dev_probe(struct usb_interface *intf,
 	return 0;
 
 led_free:
+	rc_unregister_device(rr3->rc);
 	led_classdev_unregister(&rr3->led);
 redrat_free:
+	rc = rr3->rc;
 	redrat3_delete(rr3, rr3->udev);
+	rc_free_device(rc);
 
 no_endpoints:
 	return retval;
@@ -1133,11 +1146,13 @@ static void redrat3_dev_disconnect(struct usb_interface *intf)
 {
 	struct usb_device *udev = interface_to_usbdev(intf);
 	struct redrat3_dev *rr3 = usb_get_intfdata(intf);
+	struct rc_dev *rc = rr3->rc;
 
 	usb_set_intfdata(intf, NULL);
-	rc_unregister_device(rr3->rc);
+	rc_unregister_device(rc);
 	led_classdev_unregister(&rr3->led);
 	redrat3_delete(rr3, udev);
+	rc_free_device(rc);
 }
 
 static int redrat3_dev_suspend(struct usb_interface *intf, pm_message_t message)
@@ -1148,6 +1163,7 @@ static int redrat3_dev_suspend(struct usb_interface *intf, pm_message_t message)
 	usb_kill_urb(rr3->narrow_urb);
 	usb_kill_urb(rr3->wide_urb);
 	usb_kill_urb(rr3->flash_urb);
+	usb_kill_urb(rr3->learn_urb);
 	return 0;
 }
 

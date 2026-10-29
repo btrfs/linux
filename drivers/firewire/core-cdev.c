@@ -47,14 +47,14 @@
 #define FW_CDEV_VERSION_AUTO_FLUSH_ISO_OVERFLOW	5
 #define FW_CDEV_VERSION_EVENT_ASYNC_TSTAMP	6
 
-static DEFINE_SPINLOCK(phy_receiver_list_lock);
+static DEFINE_MUTEX(phy_receiver_list_mutex);
 static LIST_HEAD(phy_receiver_list);
 
 struct client {
 	u32 version;
 	struct fw_device *device;
 
-	spinlock_t lock;
+	struct mutex mutex;
 	bool in_shutdown;
 	struct xarray resource_xa;
 	struct list_head event_list;
@@ -63,10 +63,10 @@ struct client {
 	u64 bus_reset_closure;
 
 	struct fw_iso_context *iso_context;
+	struct mutex iso_context_mutex;
 	u64 iso_closure;
 	struct fw_iso_buffer buffer;
 	unsigned long vm_start;
-	bool buffer_is_mapped;
 
 	struct list_head phy_receiver_link;
 	u64 phy_receiver_closure;
@@ -128,17 +128,36 @@ struct descriptor_resource {
 	u32 data[];
 };
 
-struct iso_resource {
+struct iso_resource_params {
+	u64 channels_mask;
+	s32 bandwidth;
+};
+
+enum {
+	ISO_RES_AUTO_ALLOC,
+	ISO_RES_AUTO_REALLOC,
+	ISO_RES_AUTO_DEALLOC,
+};
+
+struct iso_resource_auto {
 	struct client_resource resource;
 	struct client *client;
-	/* Schedule work and access todo only with client->lock held. */
 	struct delayed_work work;
-	enum {ISO_RES_ALLOC, ISO_RES_REALLOC, ISO_RES_DEALLOC,
-	      ISO_RES_ALLOC_ONCE, ISO_RES_DEALLOC_ONCE,} todo;
+	atomic_t todo; // one of ISO_RES_AUTO_XXX.
 	int generation;
-	u64 channels;
-	s32 bandwidth;
+	struct iso_resource_params params;
 	struct iso_resource_event *e_alloc, *e_dealloc;
+};
+
+struct iso_resource_once {
+	struct client *client;
+	struct work_struct work;
+	enum {
+		ISO_RES_ONCE_ALLOC,
+		ISO_RES_ONCE_DEALLOC,
+	} todo;
+	struct iso_resource_params params;
+	struct iso_resource_event *event;
 };
 
 static struct address_handler_resource *to_address_handler_resource(struct client_resource *resource)
@@ -156,16 +175,16 @@ static struct descriptor_resource *to_descriptor_resource(struct client_resource
 	return container_of(resource, struct descriptor_resource, resource);
 }
 
-static struct iso_resource *to_iso_resource(struct client_resource *resource)
+static struct iso_resource_auto *to_iso_resource_auto(struct client_resource *resource)
 {
-	return container_of(resource, struct iso_resource, resource);
+	return container_of(resource, struct iso_resource_auto, resource);
 }
 
-static void release_iso_resource(struct client *, struct client_resource *);
+static void release_iso_resource_auto(struct client *, struct client_resource *);
 
-static int is_iso_resource(const struct client_resource *resource)
+static int is_iso_resource_auto(const struct client_resource *resource)
 {
-	return resource->release == release_iso_resource;
+	return resource->release == release_iso_resource_auto;
 }
 
 static void release_transaction(struct client *client,
@@ -176,11 +195,9 @@ static int is_outbound_transaction_resource(const struct client_resource *resour
 	return resource->release == release_transaction;
 }
 
-static void schedule_iso_resource(struct iso_resource *r, unsigned long delay)
+static void schedule_iso_resource_auto(struct iso_resource_auto *r, unsigned long delay)
 {
-	client_get(r->client);
-	if (!queue_delayed_work(fw_workqueue, &r->work, delay))
-		client_put(r->client);
+	queue_delayed_work(fw_workqueue, &r->work, delay);
 }
 
 /*
@@ -291,14 +308,14 @@ static int fw_device_op_open(struct inode *inode, struct file *file)
 		return -ENODEV;
 	}
 
-	client = kzalloc(sizeof(*client), GFP_KERNEL);
+	client = kzalloc_obj(*client);
 	if (client == NULL) {
 		fw_device_put(device);
 		return -ENOMEM;
 	}
 
 	client->device = device;
-	spin_lock_init(&client->lock);
+	mutex_init(&client->mutex);
 	xa_init_flags(&client->resource_xa, XA_FLAGS_ALLOC1 | XA_FLAGS_LOCK_BH);
 	INIT_LIST_HEAD(&client->event_list);
 	init_waitqueue_head(&client->wait);
@@ -306,6 +323,7 @@ static int fw_device_op_open(struct inode *inode, struct file *file)
 	INIT_LIST_HEAD(&client->phy_receiver_link);
 	INIT_LIST_HEAD(&client->link);
 	kref_init(&client->kref);
+	mutex_init(&client->iso_context_mutex);
 
 	file->private_data = client;
 
@@ -320,50 +338,61 @@ static void queue_event(struct client *client, struct event *event,
 	event->v[1].data = data1;
 	event->v[1].size = size1;
 
-	scoped_guard(spinlock_irqsave, &client->lock) {
-		if (client->in_shutdown)
+	scoped_guard(mutex, &client->mutex) {
+		if (client->in_shutdown) {
 			kfree(event);
-		else
+		} else {
 			list_add_tail(&event->link, &client->event_list);
-	}
 
-	wake_up_interruptible(&client->wait);
+			wake_up_interruptible(&client->wait);
+		}
+	}
 }
 
-static int dequeue_event(struct client *client,
-			 char __user *buffer, size_t count)
+static ssize_t dequeue_event(struct client *client, char __user *buffer, size_t count)
 {
 	struct event *event;
-	size_t size, total;
-	int i, ret;
 
-	ret = wait_event_interruptible(client->wait,
-			!list_empty(&client->event_list) ||
-			fw_device_is_shutdown(client->device));
-	if (ret < 0)
-		return ret;
+	// After the following block, the event pointer above is guaranteed to have a correct value.
+	{
+		mutex_lock(&client->mutex);
 
-	if (list_empty(&client->event_list) &&
-		       fw_device_is_shutdown(client->device))
-		return -ENODEV;
+		// This could be replaced with wait_var_event_any_lock() if poll_wait() alternative
+		// would be introduced.
+		int ret = ___wait_event(client->wait,
+			!list_empty(&client->event_list) || fw_device_is_shutdown(client->device),
+			TASK_INTERRUPTIBLE, 0, 0,
+			mutex_unlock(&client->mutex);
+			schedule();
+			mutex_lock(&client->mutex)
+		);
+		if (ret < 0) {
+			mutex_unlock(&client->mutex);
+			return ret;
+		}
 
-	scoped_guard(spinlock_irq, &client->lock) {
+		if (fw_device_is_shutdown(client->device)) {
+			mutex_unlock(&client->mutex);
+			return -ENODEV;
+		}
+
 		event = list_first_entry(&client->event_list, struct event, link);
 		list_del(&event->link);
+
+		mutex_unlock(&client->mutex);
 	}
 
-	total = 0;
-	for (i = 0; i < ARRAY_SIZE(event->v) && total < count; i++) {
-		size = min(event->v[i].size, count - total);
-		if (copy_to_user(buffer + total, event->v[i].data, size)) {
+	ssize_t ret = 0;
+
+	for (int i = 0; i < ARRAY_SIZE(event->v) && ret < count; i++) {
+		size_t size = min(event->v[i].size, count - ret);
+		if (copy_to_user(buffer + ret, event->v[i].data, size)) {
 			ret = -EFAULT;
-			goto out;
+			break;
 		}
-		total += size;
+		ret += size;
 	}
-	ret = total;
 
- out:
 	kfree(event);
 
 	return ret;
@@ -379,19 +408,27 @@ static ssize_t fw_device_op_read(struct file *file, char __user *buffer,
 
 static void fill_bus_reset_event(struct fw_cdev_event_bus_reset *event,
 				 struct client *client)
+__must_hold(&client->device->client_list_mutex)
 {
-	struct fw_card *card = client->device->card;
+	lockdep_assert_held(&client->device->client_list_mutex);
 
-	guard(spinlock_irq)(&card->lock);
-
+	// This member is related to the above mutex. In detail, see 93b37905f70 ("firewire: cdev:
+	// prevent race between first get_info ioctl and bus reset event queuing").
 	event->closure	     = client->bus_reset_closure;
 	event->type          = FW_CDEV_EVENT_BUS_RESET;
+
 	event->generation    = client->device->generation;
+	smp_rmb();
 	event->node_id       = client->device->node_id;
-	event->local_node_id = card->local_node->node_id;
-	event->bm_node_id    = card->bm_node_id;
-	event->irm_node_id   = card->irm_node->node_id;
-	event->root_node_id  = card->root_node->node_id;
+
+	struct fw_card *card = client->device->card;
+
+	scoped_guard(spinlock_irq, &card->lock) {
+		event->local_node_id = card->local_node->node_id;
+		event->bm_node_id    = card->bm_node_id;
+		event->irm_node_id   = card->irm_node->node_id;
+		event->root_node_id  = card->root_node->node_id;
+	}
 }
 
 static void for_each_client(struct fw_device *device,
@@ -411,7 +448,7 @@ static void queue_bus_reset_event(struct client *client)
 	struct client_resource *resource;
 	unsigned long index;
 
-	e = kzalloc(sizeof(*e), GFP_KERNEL);
+	e = kzalloc_obj(*e);
 	if (e == NULL)
 		return;
 
@@ -420,11 +457,11 @@ static void queue_bus_reset_event(struct client *client)
 	queue_event(client, &e->event,
 		    &e->reset, sizeof(e->reset), NULL, 0);
 
-	guard(spinlock_irq)(&client->lock);
-
-	xa_for_each(&client->resource_xa, index, resource) {
-		if (is_iso_resource(resource))
-			schedule_iso_resource(to_iso_resource(resource), 0);
+	scoped_guard(mutex, &client->mutex) {
+		xa_for_each(&client->resource_xa, index, resource) {
+			if (is_iso_resource_auto(resource))
+				schedule_iso_resource_auto(to_iso_resource_auto(resource), 0);
+		}
 	}
 }
 
@@ -469,8 +506,6 @@ union ioctl_arg {
 static int ioctl_get_info(struct client *client, union ioctl_arg *arg)
 {
 	struct fw_cdev_get_info *a = &arg->get_info;
-	struct fw_cdev_event_bus_reset bus_reset;
-	unsigned long ret = 0;
 
 	client->version = a->version;
 	a->version = FW_CDEV_KERNEL_VERSION;
@@ -478,59 +513,62 @@ static int ioctl_get_info(struct client *client, union ioctl_arg *arg)
 
 	scoped_guard(rwsem_read, &fw_device_rwsem) {
 		if (a->rom != 0) {
-			size_t want = a->rom_length;
-			size_t have = client->device->config_rom_length * 4;
+			size_t length = min_t(size_t, a->rom_length,
+					      client->device->config_rom_length * 4);
 
-			ret = copy_to_user(u64_to_uptr(a->rom), client->device->config_rom,
-					   min(want, have));
-			if (ret != 0)
+			if (copy_to_user(u64_to_uptr(a->rom), client->device->config_rom, length))
 				return -EFAULT;
 		}
 		a->rom_length = client->device->config_rom_length * 4;
 	}
 
-	guard(mutex)(&client->device->client_list_mutex);
+	scoped_guard(mutex, &client->device->client_list_mutex) {
+		// Coordinate concurrent access to this member with bus reset event handling, see
+		// 93b37905f70 ("firewire: cdev: prevent race between first get_info ioctl and bus
+		// reset event queuing").
+		client->bus_reset_closure = a->bus_reset_closure;
 
-	client->bus_reset_closure = a->bus_reset_closure;
-	if (a->bus_reset != 0) {
-		fill_bus_reset_event(&bus_reset, client);
-		/* unaligned size of bus_reset is 36 bytes */
-		ret = copy_to_user(u64_to_uptr(a->bus_reset), &bus_reset, 36);
+		if (a->bus_reset != 0) {
+			struct fw_cdev_event_bus_reset bus_reset;
+
+			memset(&bus_reset, 0, sizeof(bus_reset));
+			fill_bus_reset_event(&bus_reset, client);
+
+			// This structure has 4 bytes of trailing padding under the System V ABI
+			// on most architectures (due to 8-byte alignment of the long long type),
+			// except for Intel386 (where long long type is aligned to 4 bytes). In
+			// either case, the effective length is 36 bytes.
+			if (copy_to_user(u64_to_uptr(a->bus_reset), &bus_reset, 36))
+				return -EFAULT;
+		}
+
+		if (list_empty(&client->link))
+			list_add_tail(&client->link, &client->device->client_list);
 	}
-	if (ret == 0 && list_empty(&client->link))
-		list_add_tail(&client->link, &client->device->client_list);
 
-	return ret ? -EFAULT : 0;
+	return 0;
 }
 
 static int add_client_resource(struct client *client, struct client_resource *resource,
-			       gfp_t gfp_mask)
+			       client_resource_release_fn_t release)
 {
-	int ret;
-
-	scoped_guard(spinlock_irqsave, &client->lock) {
+	scoped_guard(mutex, &client->mutex) {
 		u32 index;
+		int ret;
 
-		if (client->in_shutdown) {
-			ret = -ECANCELED;
-		} else {
-			if (gfpflags_allow_blocking(gfp_mask)) {
-				ret = xa_alloc(&client->resource_xa, &index, resource, xa_limit_32b,
-					       GFP_NOWAIT);
-			} else {
-				ret = xa_alloc_bh(&client->resource_xa, &index, resource,
-						  xa_limit_32b, GFP_NOWAIT);
-			}
-		}
-		if (ret >= 0) {
-			resource->handle = index;
-			client_get(client);
-			if (is_iso_resource(resource))
-				schedule_iso_resource(to_iso_resource(resource), 0);
-		}
+		if (client->in_shutdown)
+			return  -ECANCELED;
+
+		ret = xa_alloc(&client->resource_xa, &index, resource, xa_limit_32b, GFP_KERNEL);
+		if (ret < 0)
+			return ret;
+
+		resource->handle = index;
+		resource->release = release;
+		client_get(client);
 	}
 
-	return ret < 0 ? ret : 0;
+	return 0;
 }
 
 static int release_client_resource(struct client *client, u32 handle,
@@ -540,7 +578,7 @@ static int release_client_resource(struct client *client, u32 handle,
 	unsigned long index = handle;
 	struct client_resource *resource;
 
-	scoped_guard(spinlock_irq, &client->lock) {
+	scoped_guard(mutex, &client->mutex) {
 		if (client->in_shutdown)
 			return -EINVAL;
 
@@ -573,7 +611,7 @@ static void complete_transaction(struct fw_card *card, int rcode, u32 request_ts
 	struct client *client = e->client;
 	unsigned long index = e->r.resource.handle;
 
-	scoped_guard(spinlock_irqsave, &client->lock) {
+	scoped_guard(mutex, &client->mutex) {
 		xa_erase(&client->resource_xa, index);
 		if (client->in_shutdown)
 			wake_up(&client->tx_flush_wait);
@@ -645,8 +683,8 @@ static int init_request(struct client *client,
 	    request->length < 4)
 		return -EINVAL;
 
-	e = kmalloc(sizeof(*e) + request->length, GFP_KERNEL);
-	if (e == NULL)
+	e = kzalloc_flex(*e, rsp.with_tstamp.data, DIV_ROUND_UP(request->length, sizeof(u32)));
+	if (!e)
 		return -ENOMEM;
 	e->client = client;
 
@@ -671,8 +709,7 @@ static int init_request(struct client *client,
 		goto failed;
 	}
 
-	e->r.resource.release = release_transaction;
-	ret = add_client_resource(client, &e->r.resource, GFP_KERNEL);
+	ret = add_client_resource(client, &e->r.resource, release_transaction);
 	if (ret < 0)
 		goto failed;
 
@@ -744,8 +781,8 @@ static void handle_request(struct fw_card *card, struct fw_request *request,
 	if (is_fcp)
 		fw_request_get(request);
 
-	r = kmalloc(sizeof(*r), GFP_ATOMIC);
-	e = kmalloc(sizeof(*e), GFP_ATOMIC);
+	r = kmalloc_obj(*r);
+	e = kmalloc_obj(*e);
 	if (r == NULL || e == NULL)
 		goto failed;
 
@@ -755,8 +792,7 @@ static void handle_request(struct fw_card *card, struct fw_request *request,
 	r->data    = payload;
 	r->length  = length;
 
-	r->resource.release = release_request;
-	ret = add_client_resource(handler->client, &r->resource, GFP_ATOMIC);
+	ret = add_client_resource(handler->client, &r->resource, release_request);
 	if (ret < 0)
 		goto failed;
 
@@ -836,7 +872,7 @@ static int ioctl_allocate(struct client *client, union ioctl_arg *arg)
 	struct fw_address_region region;
 	int ret;
 
-	r = kmalloc(sizeof(*r), GFP_KERNEL);
+	r = kmalloc_obj(*r);
 	if (r == NULL)
 		return -ENOMEM;
 
@@ -859,8 +895,7 @@ static int ioctl_allocate(struct client *client, union ioctl_arg *arg)
 	}
 	a->offset = r->handler.offset;
 
-	r->resource.release = release_address_handler;
-	ret = add_client_resource(client, &r->resource, GFP_KERNEL);
+	ret = add_client_resource(client, &r->resource, release_address_handler);
 	if (ret < 0) {
 		release_address_handler(client, &r->resource);
 		return ret;
@@ -940,7 +975,7 @@ static int ioctl_add_descriptor(struct client *client, union ioctl_arg *arg)
 	if (a->length > 256)
 		return -EINVAL;
 
-	r = kmalloc(struct_size(r, data, a->length), GFP_KERNEL);
+	r = kmalloc_flex(*r, data, a->length);
 	if (r == NULL)
 		return -ENOMEM;
 
@@ -959,8 +994,7 @@ static int ioctl_add_descriptor(struct client *client, union ioctl_arg *arg)
 	if (ret < 0)
 		goto failed;
 
-	r->resource.release = release_descriptor;
-	ret = add_client_resource(client, &r->resource, GFP_KERNEL);
+	ret = add_client_resource(client, &r->resource, release_descriptor);
 	if (ret < 0) {
 		fw_core_remove_descriptor(&r->descriptor);
 		goto failed;
@@ -986,7 +1020,7 @@ static void iso_callback(struct fw_iso_context *context, u32 cycle,
 	struct client *client = data;
 	struct iso_interrupt_event *e;
 
-	e = kmalloc(sizeof(*e) + header_length, GFP_KERNEL);
+	e = kzalloc_flex(*e, interrupt.header, header_length);
 	if (e == NULL)
 		return;
 
@@ -1005,7 +1039,7 @@ static void iso_mc_callback(struct fw_iso_context *context,
 	struct client *client = data;
 	struct iso_interrupt_mc_event *e;
 
-	e = kmalloc(sizeof(*e), GFP_KERNEL);
+	e = kmalloc_obj(*e);
 	if (e == NULL)
 		return;
 
@@ -1025,25 +1059,10 @@ static enum dma_data_direction iso_dma_direction(struct fw_iso_context *context)
 			return DMA_FROM_DEVICE;
 }
 
-static struct fw_iso_context *fw_iso_mc_context_create(struct fw_card *card,
-						fw_iso_mc_callback_t callback,
-						void *callback_data)
-{
-	struct fw_iso_context *ctx;
-
-	ctx = fw_iso_context_create(card, FW_ISO_CONTEXT_RECEIVE_MULTICHANNEL,
-				    0, 0, 0, NULL, callback_data);
-	if (!IS_ERR(ctx))
-		ctx->callback.mc = callback;
-
-	return ctx;
-}
-
 static int ioctl_create_iso_context(struct client *client, union ioctl_arg *arg)
 {
 	struct fw_cdev_create_iso_context *a = &arg->create_iso_context;
 	struct fw_iso_context *context;
-	union fw_iso_callback cb;
 	int ret;
 
 	BUILD_BUG_ON(FW_CDEV_ISO_CONTEXT_TRANSMIT != FW_ISO_CONTEXT_TRANSMIT ||
@@ -1055,20 +1074,15 @@ static int ioctl_create_iso_context(struct client *client, union ioctl_arg *arg)
 	case FW_ISO_CONTEXT_TRANSMIT:
 		if (a->speed > SCODE_3200 || a->channel > 63)
 			return -EINVAL;
-
-		cb.sc = iso_callback;
 		break;
 
 	case FW_ISO_CONTEXT_RECEIVE:
 		if (a->header_size < 4 || (a->header_size & 3) ||
 		    a->channel > 63)
 			return -EINVAL;
-
-		cb.sc = iso_callback;
 		break;
 
 	case FW_ISO_CONTEXT_RECEIVE_MULTICHANNEL:
-		cb.mc = iso_mc_callback;
 		break;
 
 	default:
@@ -1076,38 +1090,36 @@ static int ioctl_create_iso_context(struct client *client, union ioctl_arg *arg)
 	}
 
 	if (a->type == FW_ISO_CONTEXT_RECEIVE_MULTICHANNEL)
-		context = fw_iso_mc_context_create(client->device->card, cb.mc,
-						   client);
+		context = fw_iso_mc_context_create(client->device->card, iso_mc_callback, client);
 	else
-		context = fw_iso_context_create(client->device->card, a->type,
-						a->channel, a->speed,
-						a->header_size, cb.sc, client);
+		context = fw_iso_context_create(client->device->card, a->type, a->channel, a->speed,
+						a->header_size, iso_callback, client);
 	if (IS_ERR(context))
 		return PTR_ERR(context);
 	if (client->version < FW_CDEV_VERSION_AUTO_FLUSH_ISO_OVERFLOW)
-		context->drop_overflow_headers = true;
+		context->flags |= FW_ISO_CONTEXT_FLAG_DROP_OVERFLOW_HEADERS;
 
 	// We only support one context at this time.
-	guard(spinlock_irq)(&client->lock);
-
-	if (client->iso_context != NULL) {
-		fw_iso_context_destroy(context);
-
-		return -EBUSY;
-	}
-	if (!client->buffer_is_mapped) {
-		ret = fw_iso_buffer_map_dma(&client->buffer,
-					    client->device->card,
-					    iso_dma_direction(context));
-		if (ret < 0) {
+	scoped_guard(mutex, &client->iso_context_mutex) {
+		if (client->iso_context != NULL) {
 			fw_iso_context_destroy(context);
 
-			return ret;
+			return -EBUSY;
 		}
-		client->buffer_is_mapped = true;
+		// The DMA mapping operation is available if the buffer is already allocated by
+		// mmap(2) system call. If not, it is delegated to the system call.
+		if (client->buffer.pages && !client->buffer.dma_addrs) {
+			ret = fw_iso_buffer_map_dma(&client->buffer, client->device->card,
+						    iso_dma_direction(context));
+			if (ret < 0) {
+				fw_iso_context_destroy(context);
+
+				return ret;
+			}
+		}
+		client->iso_closure = a->closure;
+		client->iso_context = context;
 	}
-	client->iso_closure = a->closure;
-	client->iso_context = context;
 
 	a->handle = 0;
 
@@ -1314,83 +1326,101 @@ static int ioctl_get_cycle_timer(struct client *client, union ioctl_arg *arg)
 	return 0;
 }
 
-static void iso_resource_work(struct work_struct *work)
+static int fill_iso_resource_params(struct iso_resource_params *params,
+				    struct fw_cdev_allocate_iso_resource *request)
+{
+	if ((request->channels == 0 && request->bandwidth == 0) ||
+	    request->bandwidth > BANDWIDTH_AVAILABLE_INITIAL)
+		return -EINVAL;
+
+	params->channels_mask = request->channels;
+	params->bandwidth = request->bandwidth;
+
+	return 0;
+}
+
+static void iso_resource_auto_work(struct work_struct *work)
 {
 	struct iso_resource_event *e;
-	struct iso_resource *r = from_work(r, work, work.work);
+	struct iso_resource_auto *r = from_work(r, work, work.work);
 	struct client *client = r->client;
 	unsigned long index = r->resource.handle;
-	int generation, channel, bandwidth, todo;
-	bool skip, free, success;
+	int channel, bandwidth;
+	bool free;
 
-	scoped_guard(spinlock_irq, &client->lock) {
-		generation = client->device->generation;
-		todo = r->todo;
+	u64 reset_jiffies = client->device->card->reset_jiffies;
+	int current_generation = client->device->generation;
+
+	int resource_generation = xchg(&r->generation, current_generation); // But no need to be atomic.
+	int todo = atomic_read(&r->todo);
+
+	switch (todo) {
+	case ISO_RES_AUTO_ALLOC:
 		// Allow 1000ms grace period for other reallocations.
-		if (todo == ISO_RES_ALLOC &&
-		    time_is_after_jiffies64(client->device->card->reset_jiffies + secs_to_jiffies(1))) {
-			schedule_iso_resource(r, msecs_to_jiffies(333));
-			skip = true;
-		} else {
-			// We could be called twice within the same generation.
-			skip = todo == ISO_RES_REALLOC &&
-			       r->generation == generation;
+		if (time_is_after_jiffies64(reset_jiffies + secs_to_jiffies(1))) {
+			schedule_iso_resource_auto(r, msecs_to_jiffies(333));
+			return;
 		}
-		free = todo == ISO_RES_DEALLOC ||
-		       todo == ISO_RES_ALLOC_ONCE ||
-		       todo == ISO_RES_DEALLOC_ONCE;
-		r->generation = generation;
+		break;
+	case ISO_RES_AUTO_REALLOC:
+		// We could be called twice within the same generation.
+		if (resource_generation == current_generation)
+			return;
+		break;
+	case ISO_RES_AUTO_DEALLOC:
+	default:
+		break;
 	}
 
-	if (skip)
-		goto out;
+	bandwidth = r->params.bandwidth;
 
-	bandwidth = r->bandwidth;
+	fw_iso_resource_manage(client->device->card, current_generation, r->params.channels_mask,
+			       &channel, &bandwidth, todo != ISO_RES_AUTO_DEALLOC);
 
-	fw_iso_resource_manage(client->device->card, generation,
-			r->channels, &channel, &bandwidth,
-			todo == ISO_RES_ALLOC ||
-			todo == ISO_RES_REALLOC ||
-			todo == ISO_RES_ALLOC_ONCE);
-	/*
-	 * Is this generation outdated already?  As long as this resource sticks
-	 * in the xarray, it will be scheduled again for a newer generation or at
-	 * shutdown.
-	 */
-	if (channel == -EAGAIN &&
-	    (todo == ISO_RES_ALLOC || todo == ISO_RES_REALLOC))
-		goto out;
-
-	success = channel >= 0 || bandwidth > 0;
-
-	scoped_guard(spinlock_irq, &client->lock) {
-		// Transit from allocation to reallocation, except if the client
-		// requested deallocation in the meantime.
-		if (r->todo == ISO_RES_ALLOC)
-			r->todo = ISO_RES_REALLOC;
-		// Allocation or reallocation failure?  Pull this resource out of the
-		// xarray and prepare for deletion, unless the client is shutting down.
-		if (r->todo == ISO_RES_REALLOC && !success &&
-		    !client->in_shutdown &&
-		    xa_erase(&client->resource_xa, index)) {
-			client_put(client);
-			free = true;
-		}
-	}
-
-	if (todo == ISO_RES_ALLOC && channel >= 0)
-		r->channels = 1ULL << channel;
-
-	if (todo == ISO_RES_REALLOC && success)
-		goto out;
-
-	if (todo == ISO_RES_ALLOC || todo == ISO_RES_ALLOC_ONCE) {
-		e = r->e_alloc;
-		r->e_alloc = NULL;
+	if (todo == ISO_RES_AUTO_DEALLOC) {
+		free = true;
+		e = xchg(&r->e_dealloc, NULL); // But no need to be atomic.
 	} else {
-		e = r->e_dealloc;
-		r->e_dealloc = NULL;
+		free = false;
+
+		// Is this generation outdated already?  As long as this resource sticks in the
+		// xarray, it will be scheduled again for a newer generation or at shutdown.
+		if (channel == -EAGAIN)
+			return;
+
+		bool success = channel >= 0 || bandwidth > 0;
+
+		if (!success) {
+			// Allocation or reallocation failure?  Pull this resource out of the
+			// xarray and prepare for deletion, unless the client is shutting down.
+			scoped_guard(mutex,  &client->mutex) {
+				if (!client->in_shutdown && xa_erase(&client->resource_xa, index)) {
+					// For the incrementation by add_client_resource().
+					client_put(client);
+					free = true;
+				}
+			}
+		}
+
+		if (todo == ISO_RES_AUTO_REALLOC) {
+			if (success)
+				return;
+
+			// Notify the userspace client of the failure through a deallocation event.
+			e = xchg(&r->e_dealloc, NULL); // But no need to be atomic.
+		} else {
+			// Transit from allocation to reallocation. Use compare-and-swap atomic
+			// operation because the todo member can be set with ISO_RES_AUTO_DEALLOC
+			// by release_iso_resource_auto() in parallel.
+			atomic_cmpxchg_relaxed(&r->todo, ISO_RES_AUTO_ALLOC, ISO_RES_AUTO_REALLOC);
+
+			if (channel >= 0)
+				r->params.channels_mask = BIT_ULL(channel);
+
+			e = xchg(&r->e_alloc, NULL); // But no need to be atomic.
+		}
 	}
+
 	e->iso_resource.handle    = r->resource.handle;
 	e->iso_resource.channel   = channel;
 	e->iso_resource.bandwidth = bandwidth;
@@ -1403,102 +1433,138 @@ static void iso_resource_work(struct work_struct *work)
 		kfree(r->e_alloc);
 		kfree(r->e_dealloc);
 		kfree(r);
+
+		// For the incrementation by ioctl_allocate_iso_resource().
+		client_put(client);
 	}
- out:
-	client_put(client);
 }
 
-static void release_iso_resource(struct client *client,
-				 struct client_resource *resource)
+static void release_iso_resource_auto(struct client *client, struct client_resource *resource)
 {
-	struct iso_resource *r = to_iso_resource(resource);
+	struct iso_resource_auto *r = to_iso_resource_auto(resource);
 
-	guard(spinlock_irq)(&client->lock);
-
-	r->todo = ISO_RES_DEALLOC;
-	schedule_iso_resource(r, 0);
+	atomic_set(&r->todo, ISO_RES_AUTO_DEALLOC);
+	schedule_iso_resource_auto(r, 0);
 }
 
-static int init_iso_resource(struct client *client,
-		struct fw_cdev_allocate_iso_resource *request, int todo)
+static int ioctl_allocate_iso_resource(struct client *client, union ioctl_arg *arg)
 {
-	struct iso_resource_event *e1, *e2;
-	struct iso_resource *r;
-	int ret;
+	struct fw_cdev_allocate_iso_resource *request = &arg->allocate_iso_resource;
+	struct iso_resource_event *e1 __free(kfree) = kmalloc_obj(*e1);
+	struct iso_resource_event *e2 __free(kfree) = kmalloc_obj(*e2);
+	struct iso_resource_auto *r  __free(kfree) = kmalloc_obj(*r);
+	int err;
 
-	if ((request->channels == 0 && request->bandwidth == 0) ||
-	    request->bandwidth > BANDWIDTH_AVAILABLE_INITIAL)
-		return -EINVAL;
+	if (!r || !e1 || !e2)
+		return -ENOMEM;
 
-	r  = kmalloc(sizeof(*r), GFP_KERNEL);
-	e1 = kmalloc(sizeof(*e1), GFP_KERNEL);
-	e2 = kmalloc(sizeof(*e2), GFP_KERNEL);
-	if (r == NULL || e1 == NULL || e2 == NULL) {
-		ret = -ENOMEM;
-		goto fail;
-	}
+	err = fill_iso_resource_params(&r->params, request);
+	if (err < 0)
+		return  err;
 
-	INIT_DELAYED_WORK(&r->work, iso_resource_work);
+	INIT_DELAYED_WORK(&r->work, iso_resource_auto_work);
 	r->client	= client;
-	r->todo		= todo;
-	r->generation	= -1;
-	r->channels	= request->channels;
-	r->bandwidth	= request->bandwidth;
+	atomic_set(&r->todo, ISO_RES_AUTO_ALLOC);
 	r->e_alloc	= e1;
 	r->e_dealloc	= e2;
 
 	e1->iso_resource.closure = request->closure;
-	e1->iso_resource.type    = FW_CDEV_EVENT_ISO_RESOURCE_ALLOCATED;
+	e1->iso_resource.type = FW_CDEV_EVENT_ISO_RESOURCE_ALLOCATED;
 	e2->iso_resource.closure = request->closure;
-	e2->iso_resource.type    = FW_CDEV_EVENT_ISO_RESOURCE_DEALLOCATED;
+	e2->iso_resource.type = FW_CDEV_EVENT_ISO_RESOURCE_DEALLOCATED;
 
-	if (todo == ISO_RES_ALLOC) {
-		r->resource.release = release_iso_resource;
-		ret = add_client_resource(client, &r->resource, GFP_KERNEL);
-		if (ret < 0)
-			goto fail;
-	} else {
-		r->resource.release = NULL;
-		r->resource.handle = -1;
-		schedule_iso_resource(r, 0);
-	}
+	err = add_client_resource(client, &r->resource, release_iso_resource_auto);
+	if (err < 0)
+		return err;
 	request->handle = r->resource.handle;
+	client_get(client);
+
+	retain_and_null_ptr(e1);
+	retain_and_null_ptr(e2);
+	schedule_iso_resource_auto(no_free_ptr(r), 0);
 
 	return 0;
- fail:
-	kfree(r);
-	kfree(e1);
-	kfree(e2);
-
-	return ret;
-}
-
-static int ioctl_allocate_iso_resource(struct client *client,
-				       union ioctl_arg *arg)
-{
-	return init_iso_resource(client,
-			&arg->allocate_iso_resource, ISO_RES_ALLOC);
 }
 
 static int ioctl_deallocate_iso_resource(struct client *client,
 					 union ioctl_arg *arg)
 {
 	return release_client_resource(client,
-			arg->deallocate.handle, release_iso_resource, NULL);
+			arg->deallocate.handle, release_iso_resource_auto, NULL);
+}
+
+#define UNAVAILABLE_HANDLE	-1
+
+static void iso_resource_once_work(struct work_struct *work)
+{
+	struct iso_resource_once *r = from_work(r, work, work);
+	struct client *client = r->client;
+	struct iso_resource_event *e = r->event;
+	int channel;
+
+	int generation = client->device->generation;
+	int bandwidth = r->params.bandwidth;
+
+	fw_iso_resource_manage(client->device->card, generation, r->params.channels_mask, &channel,
+			       &bandwidth, r->todo == ISO_RES_ONCE_ALLOC);
+
+	e->iso_resource.handle = UNAVAILABLE_HANDLE;
+	e->iso_resource.channel = channel;
+	e->iso_resource.bandwidth = bandwidth;
+
+	queue_event(client, &e->event, &e->iso_resource, sizeof(e->iso_resource), NULL, 0);
+
+	cancel_work(&r->work);
+	kfree(r);
+
+	client_put(client);
+}
+
+static int init_iso_resource_once(struct client *client,
+				  struct fw_cdev_allocate_iso_resource *request, int todo)
+{
+	struct iso_resource_event *e __free(kfree) = kmalloc_obj(*e);
+	struct iso_resource_once *r __free(kfree) = kmalloc_obj(*r);
+	int err;
+
+	if (!r || !e)
+		return -ENOMEM;
+
+	err = fill_iso_resource_params(&r->params, request);
+	if (err < 0)
+		return err;
+
+	INIT_WORK(&r->work, iso_resource_once_work);
+	r->client = client;
+	r->todo	= todo;
+
+	if (todo == ISO_RES_ONCE_ALLOC)
+		e->iso_resource.type = FW_CDEV_EVENT_ISO_RESOURCE_ALLOCATED;
+	else
+		e->iso_resource.type = FW_CDEV_EVENT_ISO_RESOURCE_DEALLOCATED;
+	e->iso_resource.closure = request->closure;
+	r->event = no_free_ptr(e);
+
+	// Keep the client until work item finishing.
+	client_get(r->client);
+
+	queue_work(fw_workqueue, &no_free_ptr(r)->work);
+
+	request->handle = UNAVAILABLE_HANDLE;
+
+	return 0;
 }
 
 static int ioctl_allocate_iso_resource_once(struct client *client,
 					    union ioctl_arg *arg)
 {
-	return init_iso_resource(client,
-			&arg->allocate_iso_resource, ISO_RES_ALLOC_ONCE);
+	return init_iso_resource_once(client, &arg->allocate_iso_resource, ISO_RES_ONCE_ALLOC);
 }
 
 static int ioctl_deallocate_iso_resource_once(struct client *client,
 					      union ioctl_arg *arg)
 {
-	return init_iso_resource(client,
-			&arg->allocate_iso_resource, ISO_RES_DEALLOC_ONCE);
+	return init_iso_resource_once(client, &arg->allocate_iso_resource, ISO_RES_ONCE_DEALLOC);
 }
 
 /*
@@ -1630,7 +1696,7 @@ static int ioctl_send_phy_packet(struct client *client, union ioctl_arg *arg)
 	if (!client->device->is_local)
 		return -ENOSYS;
 
-	e = kzalloc(sizeof(*e) + sizeof(a->data), GFP_KERNEL);
+	e = kzalloc_flex(*e, phy_packet.with_tstamp.data, ARRAY_SIZE(a->data));
 	if (e == NULL)
 		return -ENOMEM;
 
@@ -1665,7 +1731,7 @@ static int ioctl_send_phy_packet(struct client *client, union ioctl_arg *arg)
 	trace_async_phy_outbound_initiate((uintptr_t)&e->p, card->index, e->p.generation,
 					  e->p.header[1], e->p.header[2]);
 
-	card->driver->send_request(card, &e->p);
+	smp_load_acquire(&card->driver)->send_request(card, &e->p);
 
 	return 0;
 }
@@ -1678,9 +1744,7 @@ static int ioctl_receive_phy_packets(struct client *client, union ioctl_arg *arg
 	if (!client->device->is_local)
 		return -ENOSYS;
 
-	// NOTE: This can be without irq when we can guarantee that __fw_send_request() for local
-	// destination never runs in any type of IRQ context.
-	scoped_guard(spinlock_irq, &phy_receiver_list_lock)
+	scoped_guard(mutex, &phy_receiver_list_mutex)
 		list_move_tail(&client->phy_receiver_link, &phy_receiver_list);
 
 	client->phy_receiver_closure = a->closure;
@@ -1692,18 +1756,15 @@ void fw_cdev_handle_phy_packet(struct fw_card *card, struct fw_packet *p)
 {
 	struct client *client;
 
-	// NOTE: This can be without irqsave when we can guarantee that __fw_send_request() for local
-	// destination never runs in any type of IRQ context.
-	guard(spinlock_irqsave)(&phy_receiver_list_lock);
+	guard(mutex)(&phy_receiver_list_mutex);
 
 	list_for_each_entry(client, &phy_receiver_list, phy_receiver_link) {
-		struct inbound_phy_packet_event *e;
-
 		if (client->device->card != card)
 			continue;
 
-		e = kmalloc(sizeof(*e) + 8, GFP_ATOMIC);
-		if (e == NULL)
+		struct inbound_phy_packet_event *e =
+			kzalloc_flex(*e, phy_packet.with_tstamp.data, 2);
+		if (!e)
 			break;
 
 		if (client->version < FW_CDEV_VERSION_EVENT_ASYNC_TSTAMP) {
@@ -1826,13 +1887,14 @@ static int fw_device_op_mmap(struct file *file, struct vm_area_struct *vma)
 	if (ret < 0)
 		return ret;
 
-	scoped_guard(spinlock_irq, &client->lock) {
+	scoped_guard(mutex, &client->iso_context_mutex) {
+		// The direction of DMA can be determined if the isochronous context is already
+		// allocated. If not, the DMA mapping operation is postponed after the allocation.
 		if (client->iso_context) {
 			ret = fw_iso_buffer_map_dma(&client->buffer, client->device->card,
 						    iso_dma_direction(client->iso_context));
 			if (ret < 0)
 				goto fail;
-			client->buffer_is_mapped = true;
 		}
 	}
 
@@ -1852,11 +1914,11 @@ static bool has_outbound_transactions(struct client *client)
 	struct client_resource *resource;
 	unsigned long index;
 
-	guard(spinlock_irq)(&client->lock);
-
-	xa_for_each(&client->resource_xa, index, resource) {
-		if (is_outbound_transaction_resource(resource))
-			return true;
+	scoped_guard(mutex, &client->mutex) {
+		xa_for_each(&client->resource_xa, index, resource) {
+			if (is_outbound_transaction_resource(resource))
+				return true;
+		}
 	}
 
 	return false;
@@ -1869,9 +1931,7 @@ static int fw_device_op_release(struct inode *inode, struct file *file)
 	struct client_resource *resource;
 	unsigned long index;
 
-	// NOTE: This can be without irq when we can guarantee that __fw_send_request() for local
-	// destination never runs in any type of IRQ context.
-	scoped_guard(spinlock_irq, &phy_receiver_list_lock)
+	scoped_guard(mutex, &phy_receiver_list_mutex)
 		list_del(&client->phy_receiver_link);
 
 	scoped_guard(mutex, &client->device->client_list_mutex)
@@ -1879,12 +1939,13 @@ static int fw_device_op_release(struct inode *inode, struct file *file)
 
 	if (client->iso_context)
 		fw_iso_context_destroy(client->iso_context);
+	mutex_destroy(&client->iso_context_mutex);
 
 	if (client->buffer.pages)
 		fw_iso_buffer_destroy(&client->buffer, client->device->card);
 
 	// Freeze client->resource_xa and client->event_list.
-	scoped_guard(spinlock_irq, &client->lock)
+	scoped_guard(mutex, &client->mutex)
 		client->in_shutdown = true;
 
 	wait_event(client->tx_flush_wait, !has_outbound_transactions(client));

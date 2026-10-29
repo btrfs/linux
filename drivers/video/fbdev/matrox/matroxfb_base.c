@@ -374,10 +374,6 @@ static void matroxfb_remove(struct matrox_fb_info *minfo, int dummy)
 	unregister_framebuffer(&minfo->fbcon);
 	matroxfb_g450_shutdown(minfo);
 	arch_phys_wc_del(minfo->wc_cookie);
-	iounmap(minfo->mmio.vbase.vaddr);
-	iounmap(minfo->video.vbase.vaddr);
-	release_mem_region(minfo->video.base, minfo->video.len_maximum);
-	release_mem_region(minfo->mmio.base, 16384);
 	kfree(minfo);
 }
 
@@ -1642,8 +1638,8 @@ static int initMatrox2(struct matrox_fb_info *minfo, struct board *b)
 	int err;
 
 	static const struct pci_device_id intel_82437[] = {
-		{ PCI_DEVICE(PCI_VENDOR_ID_INTEL, PCI_DEVICE_ID_INTEL_82437) },
-		{ },
+		{ PCI_VDEVICE(INTEL, PCI_DEVICE_ID_INTEL_82437) },
+		{ }
 	};
 
 	DBG(__func__)
@@ -1712,11 +1708,13 @@ static int initMatrox2(struct matrox_fb_info *minfo, struct board *b)
 		goto fail;
 	}
 	memsize = b->base->maxvram;
-	if (!request_mem_region(ctrlptr_phys, 16384, "matroxfb MMIO")) {
+	if (!devm_request_mem_region(&minfo->pcidev->dev, ctrlptr_phys, 16384,
+				     "matroxfb MMIO")) {
 		goto fail;
 	}
-	if (!request_mem_region(video_base_phys, memsize, "matroxfb FB")) {
-		goto failCtrlMR;
+	if (!devm_request_mem_region(&minfo->pcidev->dev, video_base_phys,
+				     memsize, "matroxfb FB")) {
+		goto fail;
 	}
 	minfo->video.len_maximum = memsize;
 	/* convert mem (autodetect k, M) */
@@ -1727,19 +1725,19 @@ static int initMatrox2(struct matrox_fb_info *minfo, struct board *b)
 		memsize = mem;
 	err = -ENOMEM;
 
-	minfo->mmio.vbase.vaddr = ioremap(ctrlptr_phys, 16384);
+	minfo->mmio.vbase.vaddr = devm_ioremap(&minfo->pcidev->dev, ctrlptr_phys, 16384);
 	if (!minfo->mmio.vbase.vaddr) {
 		printk(KERN_ERR "matroxfb: cannot ioremap(%lX, 16384), matroxfb disabled\n", ctrlptr_phys);
-		goto failVideoMR;
+		goto fail;
 	}
 	minfo->mmio.base = ctrlptr_phys;
 	minfo->mmio.len = 16384;
 	minfo->video.base = video_base_phys;
-	minfo->video.vbase.vaddr = ioremap_wc(video_base_phys, memsize);
+	minfo->video.vbase.vaddr = devm_ioremap_wc(&minfo->pcidev->dev, video_base_phys, memsize);
 	if (!minfo->video.vbase.vaddr) {
 		printk(KERN_ERR "matroxfb: cannot ioremap(%lX, %d), matroxfb disabled\n",
 			video_base_phys, memsize);
-		goto failCtrlIO;
+		goto fail;
 	}
 	{
 		u_int32_t cmd;
@@ -1954,13 +1952,6 @@ static int initMatrox2(struct matrox_fb_info *minfo, struct board *b)
 	return 0;
 failVideoIO:;
 	matroxfb_g450_shutdown(minfo);
-	iounmap(minfo->video.vbase.vaddr);
-failCtrlIO:;
-	iounmap(minfo->mmio.vbase.vaddr);
-failVideoMR:;
-	release_mem_region(video_base_phys, minfo->video.len_maximum);
-failCtrlMR:;
-	release_mem_region(ctrlptr_phys, 16384);
 fail:;
 	return err;
 }
@@ -2069,11 +2060,10 @@ static int matroxfb_probe(struct pci_dev* pdev, const struct pci_device_id* dumm
 		return -ENODEV;
 	}
 	pci_read_config_dword(pdev, PCI_COMMAND, &cmd);
-	if (pci_enable_device(pdev)) {
+	if (pcim_enable_device(pdev))
 		return -1;
-	}
 
-	minfo = kzalloc(sizeof(*minfo), GFP_KERNEL);
+	minfo = kzalloc_obj(*minfo);
 	if (!minfo)
 		return -ENOMEM;
 
@@ -2135,35 +2125,23 @@ static void pci_remove_matrox(struct pci_dev* pdev) {
 
 static const struct pci_device_id matroxfb_devices[] = {
 #ifdef CONFIG_FB_MATROX_MILLENIUM
-	{PCI_VENDOR_ID_MATROX,	PCI_DEVICE_ID_MATROX_MIL,
-		PCI_ANY_ID,	PCI_ANY_ID,	0, 0, 0},
-	{PCI_VENDOR_ID_MATROX,	PCI_DEVICE_ID_MATROX_MIL_2,
-		PCI_ANY_ID,	PCI_ANY_ID,	0, 0, 0},
-	{PCI_VENDOR_ID_MATROX,	PCI_DEVICE_ID_MATROX_MIL_2_AGP,
-		PCI_ANY_ID,	PCI_ANY_ID,	0, 0, 0},
+	{ PCI_VDEVICE(MATROX, PCI_DEVICE_ID_MATROX_MIL) },
+	{ PCI_VDEVICE(MATROX, PCI_DEVICE_ID_MATROX_MIL_2) },
+	{ PCI_VDEVICE(MATROX, PCI_DEVICE_ID_MATROX_MIL_2_AGP) },
 #endif
 #ifdef CONFIG_FB_MATROX_MYSTIQUE
-	{PCI_VENDOR_ID_MATROX,	PCI_DEVICE_ID_MATROX_MYS,
-		PCI_ANY_ID,	PCI_ANY_ID,	0, 0, 0},
+	{ PCI_VDEVICE(MATROX, PCI_DEVICE_ID_MATROX_MYS) },
 #endif
 #ifdef CONFIG_FB_MATROX_G
-	{PCI_VENDOR_ID_MATROX,	PCI_DEVICE_ID_MATROX_G100_MM,
-		PCI_ANY_ID,	PCI_ANY_ID,	0, 0, 0},
-	{PCI_VENDOR_ID_MATROX,	PCI_DEVICE_ID_MATROX_G100_AGP,
-		PCI_ANY_ID,	PCI_ANY_ID,	0, 0, 0},
-	{PCI_VENDOR_ID_MATROX,	PCI_DEVICE_ID_MATROX_G200_PCI,
-		PCI_ANY_ID,	PCI_ANY_ID,	0, 0, 0},
-	{PCI_VENDOR_ID_MATROX,	0x0532,
-		PCI_ANY_ID,	PCI_ANY_ID,	0, 0, 0},
-	{PCI_VENDOR_ID_MATROX,	PCI_DEVICE_ID_MATROX_G200_AGP,
-		PCI_ANY_ID,	PCI_ANY_ID,	0, 0, 0},
-	{PCI_VENDOR_ID_MATROX,	PCI_DEVICE_ID_MATROX_G400,
-		PCI_ANY_ID,	PCI_ANY_ID,	0, 0, 0},
-	{PCI_VENDOR_ID_MATROX,	PCI_DEVICE_ID_MATROX_G550,
-		PCI_ANY_ID,	PCI_ANY_ID,	0, 0, 0},
+	{ PCI_VDEVICE(MATROX, PCI_DEVICE_ID_MATROX_G100_MM) },
+	{ PCI_VDEVICE(MATROX, PCI_DEVICE_ID_MATROX_G100_AGP) },
+	{ PCI_VDEVICE(MATROX, PCI_DEVICE_ID_MATROX_G200_PCI) },
+	{ PCI_VDEVICE(MATROX, 0x0532) },
+	{ PCI_VDEVICE(MATROX, PCI_DEVICE_ID_MATROX_G200_AGP) },
+	{ PCI_VDEVICE(MATROX, PCI_DEVICE_ID_MATROX_G400) },
+	{ PCI_VDEVICE(MATROX, PCI_DEVICE_ID_MATROX_G550) },
 #endif
-	{0,			0,
-		0,		0,		0, 0, 0}
+	{ }
 };
 
 MODULE_DEVICE_TABLE(pci, matroxfb_devices);

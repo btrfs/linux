@@ -284,6 +284,7 @@ static int adv7170_get_fmt(struct v4l2_subdev *sd,
 }
 
 static int adv7170_set_fmt(struct v4l2_subdev *sd,
+		const struct v4l2_subdev_client_info *ci,
 		struct v4l2_subdev_state *sd_state,
 		struct v4l2_subdev_format *format)
 {
@@ -377,8 +378,8 @@ static void adv7170_remove(struct i2c_client *client)
 /* ----------------------------------------------------------------------- */
 
 static const struct i2c_device_id adv7170_id[] = {
-	{ "adv7170" },
-	{ "adv7171" },
+	{ .name = "adv7170" },
+	{ .name = "adv7171" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, adv7170_id);

@@ -5,15 +5,15 @@
  * Copyright (C) 2015 Martin Willi
  */
 
-#include <crypto/algapi.h> // for crypto_xor_cpy
 #include <crypto/chacha.h>
+#include <crypto/utils.h>
 #include <linux/export.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
 
-static void __maybe_unused
-chacha_crypt_generic(struct chacha_state *state, u8 *dst, const u8 *src,
-		     unsigned int bytes, int nrounds)
+static void __maybe_unused chacha_crypt_generic(struct chacha_state *state,
+						u8 *dst, const u8 *src,
+						size_t bytes, int nrounds)
 {
 	/* aligned to potentially speed up crypto_xor() */
 	u8 stream[CHACHA_BLOCK_SIZE] __aligned(sizeof(long));
@@ -39,7 +39,7 @@ chacha_crypt_generic(struct chacha_state *state, u8 *dst, const u8 *src,
 #endif
 
 void chacha_crypt(struct chacha_state *state, u8 *dst, const u8 *src,
-		  unsigned int bytes, int nrounds)
+		  size_t bytes, int nrounds)
 {
 	chacha_crypt_arch(state, dst, src, bytes, nrounds);
 }

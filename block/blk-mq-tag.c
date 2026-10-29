@@ -13,9 +13,17 @@
 #include <linux/kmemleak.h>
 
 #include <linux/delay.h>
+#include <trace/events/block.h>
 #include "blk.h"
 #include "blk-mq.h"
 #include "blk-mq-sched.h"
+
+/*
+ * Protects tag iteration against the deferred freeing of tags->page_list and
+ * flush queues. The callbacks touch neither the tag set nor driver code, so
+ * one global instance is enough and freeing a tag set needn't wait for them.
+ */
+DEFINE_SRCU(blk_mq_tags_srcu);
 
 /*
  * Recalculate wakeup batch when tag is shared by hctx.
@@ -180,6 +188,11 @@ unsigned int blk_mq_get_tag(struct blk_mq_alloc_data *data)
 		tag = __blk_mq_get_tag(data, bt);
 		if (tag != BLK_MQ_NO_TAG)
 			break;
+
+		/* Log the starvation event before altering task state */
+		trace_block_rq_tag_wait(data->q, data->hctx,
+					data->rq_flags & RQF_SCHED_TAGS,
+					data->flags);
 
 		sbitmap_prepare_to_wait(bt, ws, &wait, TASK_UNINTERRUPTIBLE);
 
@@ -437,7 +450,7 @@ void blk_mq_tagset_busy_iter(struct blk_mq_tag_set *tagset,
 	unsigned int flags = tagset->flags;
 	int i, nr_tags, srcu_idx;
 
-	srcu_idx = srcu_read_lock(&tagset->tags_srcu);
+	srcu_idx = srcu_read_lock(&blk_mq_tags_srcu);
 
 	nr_tags = blk_mq_is_shared_tags(flags) ? 1 : tagset->nr_hw_queues;
 
@@ -446,7 +459,7 @@ void blk_mq_tagset_busy_iter(struct blk_mq_tag_set *tagset,
 			__blk_mq_all_tag_iter(tagset->tags[i], fn, priv,
 					      BT_TAG_ITER_STARTED);
 	}
-	srcu_read_unlock(&tagset->tags_srcu, srcu_idx);
+	srcu_read_unlock(&blk_mq_tags_srcu, srcu_idx);
 }
 EXPORT_SYMBOL(blk_mq_tagset_busy_iter);
 
@@ -499,14 +512,14 @@ void blk_mq_queue_tag_busy_iter(struct request_queue *q, busy_tag_iter_fn *fn,
 	int srcu_idx;
 
 	/*
-	 * __blk_mq_update_nr_hw_queues() updates nr_hw_queues and hctx_table
+	 * __blk_mq_update_nr_hw_queues() updates nr_hw_queues and queue_hw_ctx
 	 * while the queue is frozen. So we can use q_usage_counter to avoid
 	 * racing with it.
 	 */
 	if (!percpu_ref_tryget(&q->q_usage_counter))
 		return;
 
-	srcu_idx = srcu_read_lock(&q->tag_set->tags_srcu);
+	srcu_idx = srcu_read_lock(&blk_mq_tags_srcu);
 	if (blk_mq_is_shared_tags(q->tag_set->flags)) {
 		struct blk_mq_tags *tags = q->tag_set->shared_tags;
 		struct sbitmap_queue *bresv = &tags->breserved_tags;
@@ -536,7 +549,7 @@ void blk_mq_queue_tag_busy_iter(struct request_queue *q, busy_tag_iter_fn *fn,
 			bt_for_each(hctx, q, btags, fn, priv, false);
 		}
 	}
-	srcu_read_unlock(&q->tag_set->tags_srcu, srcu_idx);
+	srcu_read_unlock(&blk_mq_tags_srcu, srcu_idx);
 	blk_queue_exit(q);
 }
 
@@ -601,7 +614,7 @@ static void blk_mq_free_tags_callback(struct rcu_head *head)
 	kfree(tags);
 }
 
-void blk_mq_free_tags(struct blk_mq_tag_set *set, struct blk_mq_tags *tags)
+void blk_mq_free_tags(struct blk_mq_tags *tags)
 {
 	sbitmap_queue_free(&tags->bitmap_tags);
 	sbitmap_queue_free(&tags->breserved_tags);
@@ -612,7 +625,7 @@ void blk_mq_free_tags(struct blk_mq_tag_set *set, struct blk_mq_tags *tags)
 		return;
 	}
 
-	call_srcu(&set->tags_srcu, &tags->rcu_head, blk_mq_free_tags_callback);
+	call_srcu(&blk_mq_tags_srcu, &tags->rcu_head, blk_mq_free_tags_callback);
 }
 
 void blk_mq_tag_resize_shared_tags(struct blk_mq_tag_set *set, unsigned int size)

@@ -23,7 +23,7 @@
  * should be managed by the kernel and which by the UMD.
  *
  * The DRM_NOUVEAU_VM_BIND ioctl provides clients an interface to manage the
- * userspace-managable portion of the VA space. It provides operations to map
+ * userspace-manageable portion of the VA space. It provides operations to map
  * and unmap memory. Mappings may be flagged as sparse. Sparse mappings are not
  * backed by a GEM object and the kernel will ignore GEM handles provided
  * alongside a sparse mapping.
@@ -219,7 +219,7 @@ nouveau_exec_job_init(struct nouveau_exec_job **pjob,
 		}
 	}
 
-	job = *pjob = kzalloc(sizeof(*job), GFP_KERNEL);
+	job = *pjob = kzalloc_obj(*job);
 	if (!job)
 		return -ENOMEM;
 
@@ -331,10 +331,10 @@ nouveau_exec_ucopy(struct nouveau_exec_job_args *args,
 
 	return 0;
 
-err_free_pushs:
-	u_free(args->push.s);
 err_free_ins:
 	u_free(args->in_sync.s);
+err_free_pushs:
+	u_free(args->push.s);
 	return ret;
 }
 

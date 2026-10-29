@@ -122,6 +122,7 @@ static int ak881x_enum_mbus_code(struct v4l2_subdev *sd,
 }
 
 static int ak881x_get_selection(struct v4l2_subdev *sd,
+				const struct v4l2_subdev_client_info *ci,
 				struct v4l2_subdev_state *sd_state,
 				struct v4l2_subdev_selection *sel)
 {
@@ -216,7 +217,6 @@ static const struct v4l2_subdev_video_ops ak881x_subdev_video_ops = {
 static const struct v4l2_subdev_pad_ops ak881x_subdev_pad_ops = {
 	.enum_mbus_code = ak881x_enum_mbus_code,
 	.get_selection	= ak881x_get_selection,
-	.set_fmt	= ak881x_fill_fmt,
 	.get_fmt	= ak881x_fill_fmt,
 };
 
@@ -304,8 +304,8 @@ static void ak881x_remove(struct i2c_client *client)
 }
 
 static const struct i2c_device_id ak881x_id[] = {
-	{ "ak8813" },
-	{ "ak8814" },
+	{ .name = "ak8813" },
+	{ .name = "ak8814" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, ak881x_id);

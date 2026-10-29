@@ -111,12 +111,12 @@ static long sfs_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 	struct sfs_device *sfs_dev;
 	int ret = 0;
 
+	guard(mutex)(&sfs_ioctl_mutex);
+
 	if (!psp_master || !psp_master->sfs_data)
 		return -ENODEV;
 
 	sfs_dev = psp_master->sfs_data;
-
-	guard(mutex)(&sfs_ioctl_mutex);
 
 	switch (cmd) {
 	case SFSIOCFWVERS:
@@ -191,8 +191,11 @@ static void sfs_exit(struct kref *ref)
 
 void sfs_dev_destroy(struct psp_device *psp)
 {
-	struct sfs_device *sfs_dev = psp->sfs_data;
+	struct sfs_device *sfs_dev;
 
+	guard(mutex)(&sfs_ioctl_mutex);
+
+	sfs_dev = psp->sfs_data;
 	if (!sfs_dev)
 		return;
 
@@ -223,7 +226,7 @@ static int sfs_misc_init(struct sfs_device *sfs)
 	if (!misc_dev) {
 		struct miscdevice *misc;
 
-		misc_dev = kzalloc(sizeof(*misc_dev), GFP_KERNEL);
+		misc_dev = kzalloc_obj(*misc_dev);
 		if (!misc_dev)
 			return -ENOMEM;
 

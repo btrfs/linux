@@ -27,7 +27,8 @@ static struct iosys_map engine_activity_map(struct xe_guc *guc, struct xe_hw_eng
 {
 	struct xe_guc_engine_activity *engine_activity = &guc->engine_activity;
 	struct engine_activity_buffer *buffer;
-	u16 guc_class = xe_engine_class_to_guc_class(hwe->class);
+	u16 guc_class = xe_hwe_to_guc_class(hwe);
+	u16 guc_logical_instance = xe_hwe_guc_logical_instance(hwe);
 	size_t offset;
 
 	if (engine_activity->num_functions) {
@@ -39,7 +40,7 @@ static struct iosys_map engine_activity_map(struct xe_guc *guc, struct xe_hw_eng
 	}
 
 	offset += offsetof(struct guc_engine_activity_data,
-			  engine_activity[guc_class][hwe->logical_instance]);
+			  engine_activity[guc_class][guc_logical_instance]);
 
 	return IOSYS_MAP_INIT_OFFSET(&buffer->activity_bo->vmap, offset);
 }
@@ -96,7 +97,8 @@ static int allocate_engine_activity_buffers(struct xe_guc *guc,
 
 	metadata_bo = xe_bo_create_pin_map_novm(gt_to_xe(gt), tile, PAGE_ALIGN(metadata_size),
 						ttm_bo_type_kernel, XE_BO_FLAG_SYSTEM |
-						XE_BO_FLAG_GGTT | XE_BO_FLAG_GGTT_INVALIDATE,
+						XE_BO_FLAG_GGTT | XE_BO_FLAG_GGTT_INVALIDATE |
+						xe_guc_bo_wa_flags(gt),
 						false);
 
 	if (IS_ERR(metadata_bo))
@@ -104,7 +106,8 @@ static int allocate_engine_activity_buffers(struct xe_guc *guc,
 
 	bo = xe_bo_create_pin_map_novm(gt_to_xe(gt), tile, PAGE_ALIGN(size),
 				       ttm_bo_type_kernel, XE_BO_FLAG_VRAM_IF_DGFX(tile) |
-				       XE_BO_FLAG_GGTT | XE_BO_FLAG_GGTT_INVALIDATE, false);
+				       XE_BO_FLAG_GGTT | XE_BO_FLAG_GGTT_INVALIDATE |
+				       xe_guc_bo_wa_flags(gt), false);
 
 	if (IS_ERR(bo)) {
 		xe_bo_unpin_map_no_vm(metadata_bo);
@@ -150,9 +153,10 @@ static struct engine_activity *hw_engine_to_engine_activity(struct xe_hw_engine 
 {
 	struct xe_guc *guc = &hwe->gt->uc.guc;
 	struct engine_activity_group *eag = &guc->engine_activity.eag[index];
-	u16 guc_class = xe_engine_class_to_guc_class(hwe->class);
+	u16 guc_class = xe_hwe_to_guc_class(hwe);
+	u16 guc_logical_instance = xe_hwe_guc_logical_instance(hwe);
 
-	return &eag->engine[guc_class][hwe->logical_instance];
+	return &eag->engine[guc_class][guc_logical_instance];
 }
 
 static u64 cpu_ns_to_guc_tsc_tick(ktime_t ns, u32 freq)
@@ -473,7 +477,7 @@ void xe_guc_engine_activity_enable_stats(struct xe_guc *guc)
 
 	ret = enable_engine_activity_stats(guc);
 	if (ret)
-		xe_gt_err(guc_to_gt(guc), "failed to enable activity stats%d\n", ret);
+		xe_gt_err(guc_to_gt(guc), "failed to enable activity stats: %pe\n", ERR_PTR(ret));
 	else
 		engine_activity_set_cpu_ts(guc, 0);
 }

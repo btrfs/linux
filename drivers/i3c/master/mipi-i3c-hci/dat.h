@@ -12,12 +12,12 @@
 
 /* Global DAT flags */
 #define DAT_0_I2C_DEVICE		W0_BIT_(31)
+#define DAT_0_DEV_NACK_RETRY_CNT	W0_MASK(30, 29)
 #define DAT_0_SIR_REJECT		W0_BIT_(13)
 #define DAT_0_IBI_PAYLOAD		W0_BIT_(12)
 
 struct hci_dat_ops {
 	int (*init)(struct i3c_hci *hci);
-	void (*cleanup)(struct i3c_hci *hci);
 	int (*alloc_entry)(struct i3c_hci *hci);
 	void (*free_entry)(struct i3c_hci *hci, unsigned int dat_idx);
 	void (*set_dynamic_addr)(struct i3c_hci *hci, unsigned int dat_idx, u8 addr);
@@ -25,6 +25,8 @@ struct hci_dat_ops {
 	void (*set_flags)(struct i3c_hci *hci, unsigned int dat_idx, u32 w0, u32 w1);
 	void (*clear_flags)(struct i3c_hci *hci, unsigned int dat_idx, u32 w0, u32 w1);
 	int (*get_index)(struct i3c_hci *hci, u8 address);
+	void (*restore)(struct i3c_hci *hci);
+	void (*set_nack_retry)(struct i3c_hci *hci, unsigned int dat_idx, unsigned int cnt);
 };
 
 extern const struct hci_dat_ops mipi_i3c_hci_dat_v1;

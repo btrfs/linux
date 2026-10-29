@@ -48,7 +48,6 @@ static int max9860_dvddio_event(struct notifier_block *nb,
 }
 
 static const struct reg_default max9860_reg_defaults[] = {
-	{ MAX9860_PWRMAN,       0x00 },
 	{ MAX9860_INTEN,        0x00 },
 	{ MAX9860_SYSCLK,       0x00 },
 	{ MAX9860_AUDIOCLKHIGH, 0x00 },
@@ -62,6 +61,7 @@ static const struct reg_default max9860_reg_defaults[] = {
 	{ MAX9860_MICGAIN,      0x00 },
 	{ MAX9860_MICADC,       0x00 },
 	{ MAX9860_NOISEGATE,    0x00 },
+	{ MAX9860_PWRMAN,       0x00 },
 };
 
 static bool max9860_readable(struct device *dev, unsigned int reg)
@@ -459,9 +459,32 @@ static int max9860_set_fmt(struct snd_soc_dai *dai, unsigned int fmt)
 	}
 }
 
+static const u64 max9860_selectable_formats[] = {
+	/*
+	 * DSP_A/B has some limitations.
+	 * priority is I2S/LEFT_J > DSP_A/B
+	 * see
+	 *	max9860_hw_params()
+	 */
+	/* 1st priority */
+	SND_SOC_POSSIBLE_DAIFMT_I2S	|
+	SND_SOC_POSSIBLE_DAIFMT_LEFT_J	|
+	SND_SOC_POSSIBLE_DAIFMT_NB_NF	|
+	SND_SOC_POSSIBLE_DAIFMT_NB_IF	|
+	SND_SOC_POSSIBLE_DAIFMT_IB_NF	|
+	SND_SOC_POSSIBLE_DAIFMT_IB_IF,
+	/* 2nd priority */
+	SND_SOC_POSSIBLE_DAIFMT_DSP_A	|
+	SND_SOC_POSSIBLE_DAIFMT_DSP_B	|
+	SND_SOC_POSSIBLE_DAIFMT_NB_NF	|
+	SND_SOC_POSSIBLE_DAIFMT_IB_NF,
+};
+
 static const struct snd_soc_dai_ops max9860_dai_ops = {
 	.hw_params = max9860_hw_params,
 	.set_fmt = max9860_set_fmt,
+	.auto_selectable_formats = max9860_selectable_formats,
+	.num_auto_selectable_formats = ARRAY_SIZE(max9860_selectable_formats),
 };
 
 static struct snd_soc_dai_driver max9860_dai = {
@@ -709,7 +732,7 @@ static void max9860_remove(struct i2c_client *i2c)
 }
 
 static const struct i2c_device_id max9860_i2c_id[] = {
-	{ "max9860", },
+	{ .name = "max9860" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, max9860_i2c_id);

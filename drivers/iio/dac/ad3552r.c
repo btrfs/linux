@@ -167,8 +167,7 @@ static int ad3552r_read_raw(struct iio_dev *indio_dev,
 		mutex_unlock(&dac->lock);
 		if (err < 0)
 			return err;
-		*val = !((tmp_val & AD3552R_MASK_CH_DAC_POWERDOWN(ch)) >>
-			  __ffs(AD3552R_MASK_CH_DAC_POWERDOWN(ch)));
+		*val = !field_get(AD3552R_MASK_CH_DAC_POWERDOWN(ch), tmp_val);
 		return IIO_VAL_INT;
 	case IIO_CHAN_INFO_SCALE:
 		*val = dac->ch_data[ch].scale_int;
@@ -629,7 +628,9 @@ static int ad3552r_probe(struct spi_device *spi)
 	if (!dac->model_data)
 		return -EINVAL;
 
-	mutex_init(&dac->lock);
+	err = devm_mutex_init(&spi->dev, &dac->lock);
+	if (err)
+		return err;
 
 	err = ad3552r_init(dac);
 	if (err)
@@ -695,6 +696,6 @@ static struct spi_driver ad3552r_driver = {
 module_spi_driver(ad3552r_driver);
 
 MODULE_AUTHOR("Mihail Chindris <mihail.chindris@analog.com>");
-MODULE_DESCRIPTION("Analog Device AD3552R DAC");
+MODULE_DESCRIPTION("Analog Devices AD3552R DAC");
 MODULE_LICENSE("GPL v2");
 MODULE_IMPORT_NS("IIO_AD3552R");

@@ -41,7 +41,6 @@
 #define WX_VF_MAX_RX_QUEUES      4
 
 #define WX_VXITR(i)              (0x200 + (4 * (i))) /* i=[0,1] */
-#define WX_VXITR_MASK            GENMASK(8, 0)
 #define WX_VXITR_CNT_WDIS        BIT(31)
 #define WX_VXIVAR_MISC           0x260
 #define WX_VXIVAR(i)             (0x240 + (4 * (i))) /* i=[0,3] */
@@ -74,6 +73,7 @@
 #define WX_VXRXDCTL_BUFSZ(f)     FIELD_PREP(GENMASK(11, 8), f)
 #define WX_VXRXDCTL_HDRSZ_MASK   GENMASK(15, 12)
 #define WX_VXRXDCTL_HDRSZ(f)     FIELD_PREP(GENMASK(15, 12), f)
+#define WX_VXRXDCTL_DESC_MERGE   BIT(19)
 #define WX_VXRXDCTL_RSCMAX_MASK  GENMASK(24, 23)
 #define WX_VXRXDCTL_RSCMAX(f)    FIELD_PREP(GENMASK(24, 23), f)
 #define WX_VXRXDCTL_RSCEN        BIT(29)
@@ -91,6 +91,9 @@
 #define WX_VXTXDCTL_PTHRESH(f)   FIELD_PREP(GENMASK(11, 8), f)
 #define WX_VXTXDCTL_WTHRESH(f)   FIELD_PREP(GENMASK(22, 16), f)
 #define WX_VXTXDCTL_FLUSH        BIT(26)
+#define WX_VXTXDCTL_HEAD_WB      BIT(27)
+#define WX_VXTXD_HEAD_ADDRL(r)   (0x3028 + (0x40 * (r)))
+#define WX_VXTXD_HEAD_ADDRH(r)   (0x302C + (0x40 * (r)))
 
 #define WX_PFLINK_STATUS(g)      FIELD_GET(BIT(0), g)
 #define WX_PFLINK_SPEED(g)       FIELD_GET(GENMASK(31, 1), g)

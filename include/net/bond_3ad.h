@@ -60,12 +60,6 @@ typedef enum {
 	AD_MUX_COLLECTING_DISTRIBUTING	/* mux machine */
 } mux_states_t;
 
-/* tx machine states(43.4.15 in the 802.3ad standard) */
-typedef enum {
-	AD_TX_DUMMY,
-	AD_TRANSMIT		/* tx Machine */
-} tx_states_t;
-
 /* churn machine states(43.4.17 in the 802.3ad standard) */
 typedef enum {
 	 AD_CHURN_MONITOR, /* monitoring for churn */
@@ -231,7 +225,6 @@ typedef struct port {
 	u16 sm_periodic_timer_counter;	/* state machine periodic timer counter */
 	mux_states_t sm_mux_state;	/* state machine mux state */
 	u16 sm_mux_timer_counter;	/* state machine mux timer counter */
-	tx_states_t sm_tx_state;	/* state machine tx state */
 	u16 sm_tx_timer_counter;	/* state machine tx timer counter
 					 * (always on - enter to transmit
 					 *  state 3 time per second)
@@ -243,7 +236,7 @@ typedef struct port {
 	churn_state_t sm_churn_actor_state;
 	churn_state_t sm_churn_partner_state;
 	struct slave *slave;		/* pointer to the bond slave that this port belongs to */
-	struct aggregator *aggregator;	/* pointer to an aggregator that this port related to */
+	struct aggregator __rcu *aggregator;	/* pointer to an aggregator that this port related to */
 	struct port *next_port_in_aggregator;	/* Next port on the linked list of the parent aggregator */
 	u32 transaction_id;		/* continuous number for identification of Marker PDU's; */
 	struct lacpdu lacpdu;		/* the lacpdu that will be sent for this port */
@@ -302,8 +295,8 @@ void bond_3ad_state_machine_handler(struct work_struct *);
 void bond_3ad_initiate_agg_selection(struct bonding *bond, int timeout);
 void bond_3ad_adapter_speed_duplex_changed(struct slave *slave);
 void bond_3ad_handle_link_change(struct slave *slave, char link);
-int  bond_3ad_get_active_agg_info(struct bonding *bond, struct ad_info *ad_info);
-int  __bond_3ad_get_active_agg_info(struct bonding *bond,
+int  bond_3ad_get_active_agg_info(const struct bonding *bond, struct ad_info *ad_info);
+int  __bond_3ad_get_active_agg_info(const struct bonding *bond,
 				    struct ad_info *ad_info);
 int bond_3ad_lacpdu_recv(const struct sk_buff *skb, struct bonding *bond,
 			 struct slave *slave);

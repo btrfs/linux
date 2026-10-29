@@ -453,7 +453,7 @@ int siu_init_port(int port, struct siu_port **port_info, struct snd_card *card)
 	struct snd_kcontrol *kctrl;
 	int ret;
 
-	*port_info = kzalloc(sizeof(**port_info), GFP_KERNEL);
+	*port_info = kzalloc_obj(**port_info);
 	if (!*port_info)
 		return -ENOMEM;
 
@@ -688,12 +688,18 @@ epclkget:
 	return ret;
 }
 
+static const u64 siu_dai_selectable_formats =
+	SND_SOC_POSSIBLE_DAIFMT_I2S	|
+	SND_SOC_POSSIBLE_DAIFMT_LEFT_J;
+
 static const struct snd_soc_dai_ops siu_dai_ops = {
 	.startup	= siu_dai_startup,
 	.shutdown	= siu_dai_shutdown,
 	.prepare	= siu_dai_prepare,
 	.set_sysclk	= siu_dai_set_sysclk,
 	.set_fmt	= siu_dai_set_fmt,
+	.auto_selectable_formats	= &siu_dai_selectable_formats,
+	.num_auto_selectable_formats	= 1,
 };
 
 static struct snd_soc_dai_driver siu_i2s_dai = {
@@ -715,7 +721,6 @@ static struct snd_soc_dai_driver siu_i2s_dai = {
 
 static int siu_probe(struct platform_device *pdev)
 {
-	const struct firmware *fw_entry;
 	struct resource *res, *region;
 	struct siu_info *info;
 	int ret;
@@ -726,6 +731,7 @@ static int siu_probe(struct platform_device *pdev)
 	siu_i2s_data = info;
 	info->dev = &pdev->dev;
 
+	const struct firmware *fw_entry __free(firmware) = NULL;
 	ret = request_firmware(&fw_entry, "siu_spb.bin", &pdev->dev);
 	if (ret)
 		return ret;
@@ -735,8 +741,6 @@ static int siu_probe(struct platform_device *pdev)
 	 * snd_siu_sh7343_spbAselect() and snd_siu_sh7343_spbBselect()
 	 */
 	memcpy(&info->fw, fw_entry->data, fw_entry->size);
-
-	release_firmware(fw_entry);
 
 	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
 	if (!res)

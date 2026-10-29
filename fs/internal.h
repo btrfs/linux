@@ -44,7 +44,6 @@ extern void __init chrdev_init(void);
 /*
  * fs_context.c
  */
-extern const struct fs_context_operations legacy_fs_context_ops;
 extern int parse_monolithic_mount_data(struct fs_context *, void *);
 extern void vfs_clean_context(struct fs_context *fc);
 extern int finish_clean_context(struct fs_context *fc);
@@ -54,19 +53,25 @@ extern int finish_clean_context(struct fs_context *fc);
  */
 extern int filename_lookup(int dfd, struct filename *name, unsigned flags,
 			   struct path *path, const struct path *root);
-int do_rmdir(int dfd, struct filename *name);
-int do_unlinkat(int dfd, struct filename *name);
-int may_linkat(struct mnt_idmap *idmap, const struct path *link);
-int do_renameat2(int olddfd, struct filename *oldname, int newdfd,
+int filename_rmdir(int dfd, struct filename *name);
+int filename_unlinkat(int dfd, struct filename *name);
+int may_linkat(const struct mnt_idmap *idmap, const struct path *link);
+int filename_renameat2(int olddfd, struct filename *oldname, int newdfd,
 		 struct filename *newname, unsigned int flags);
-int do_mkdirat(int dfd, struct filename *name, umode_t mode);
-int do_symlinkat(struct filename *from, int newdfd, struct filename *to);
-int do_linkat(int olddfd, struct filename *old, int newdfd,
+int filename_mkdirat(int dfd, struct filename *name, umode_t mode);
+int filename_mknodat(int dfd, struct filename *name, umode_t mode, unsigned int dev);
+int filename_symlinkat(struct filename *from, int newdfd, struct filename *to);
+int filename_linkat(int olddfd, struct filename *old, int newdfd,
 			struct filename *new, int flags);
-int vfs_tmpfile(struct mnt_idmap *idmap,
+int vfs_tmpfile(const struct mnt_idmap *idmap,
 		const struct path *parentpath,
 		struct file *file, umode_t mode);
 struct dentry *d_hash_and_lookup(struct dentry *, struct qstr *);
+struct dentry *start_dirop(struct dentry *parent, struct qstr *name,
+			   unsigned int lookup_flags);
+int lookup_noperm_common(struct qstr *qname, struct dentry *base);
+
+void __init filename_init(void);
 
 /*
  * namespace.c
@@ -87,6 +92,7 @@ extern bool may_mount(void);
 int path_mount(const char *dev_name, const struct path *path,
 		const char *type_page, unsigned long flags, void *data_page);
 int path_umount(const struct path *path, int flags);
+int path_pivot_root(struct path *new, struct path *old);
 
 int show_path(struct seq_file *m, struct dentry *root);
 
@@ -100,7 +106,8 @@ extern void chroot_fs_refs(const struct path *, const struct path *);
  */
 struct file *alloc_empty_file(int flags, const struct cred *cred);
 struct file *alloc_empty_file_noaccount(int flags, const struct cred *cred);
-struct file *alloc_empty_backing_file(int flags, const struct cred *cred);
+struct file *alloc_empty_backing_file(int flags, const struct cred *cred,
+				      const struct file *user_file);
 void backing_file_set_user_path(struct file *f, const struct path *path);
 
 static inline void file_put_write_access(struct file *file)
@@ -130,8 +137,8 @@ extern int reconfigure_super(struct fs_context *);
 extern bool super_trylock_shared(struct super_block *sb);
 struct super_block *user_get_super(dev_t, bool excl);
 void put_super(struct super_block *sb);
+void __init super_dev_init(void);
 extern bool mount_capable(struct fs_context *);
-int sb_init_dio_done_wq(struct super_block *sb);
 
 /*
  * Prepare superblock for changing its read-only state (i.e., either remount
@@ -184,34 +191,36 @@ struct open_flags {
 	int intent;
 	int lookup_flags;
 };
-extern struct file *do_filp_open(int dfd, struct filename *pathname,
+extern struct file *do_file_open(int dfd, struct filename *pathname,
 		const struct open_flags *op);
 extern struct file *do_file_open_root(const struct path *,
 		const char *, const struct open_flags *);
 extern struct open_how build_open_how(int flags, umode_t mode);
 extern int build_open_flags(const struct open_how *how, struct open_flags *op);
 struct file *file_close_fd_locked(struct files_struct *files, unsigned fd);
+int filp_close_sync(struct file *filp, fl_owner_t id);
 
-int do_ftruncate(struct file *file, loff_t length, int small);
-int do_sys_ftruncate(unsigned int fd, loff_t length, int small);
+int do_ftruncate(struct file *file, loff_t length, unsigned int flags);
 int chmod_common(const struct path *path, umode_t mode);
 int do_fchownat(int dfd, const char __user *filename, uid_t user, gid_t group,
 		int flag);
 int chown_common(const struct path *path, uid_t user, gid_t group);
 extern int vfs_open(const struct path *, struct file *);
+int vfs_open_consume(struct path *, struct file *);
 
 /*
  * inode.c
  */
 extern long prune_icache_sb(struct super_block *sb, struct shrink_control *sc);
-int dentry_needs_remove_privs(struct mnt_idmap *, struct dentry *dentry);
-bool in_group_or_capable(struct mnt_idmap *idmap,
+int dentry_needs_remove_privs(const struct mnt_idmap *, struct dentry *dentry);
+bool in_group_or_capable(const struct mnt_idmap *idmap,
 			 const struct inode *inode, vfsgid_t vfsgid);
 
 /*
  * fs-writeback.c
  */
-extern long get_nr_dirty_inodes(void);
+long get_nr_dirty_inodes(void);
+bool sync_lazytime(struct inode *inode);
 
 /*
  * dcache.c
@@ -227,7 +236,6 @@ extern void shrink_dcache_for_umount(struct super_block *);
 extern struct dentry *__d_lookup(const struct dentry *, const struct qstr *);
 extern struct dentry *__d_lookup_rcu(const struct dentry *parent,
 				const struct qstr *name, unsigned *seq);
-extern void d_genocide(struct dentry *);
 
 /*
  * pipe.c
@@ -245,6 +253,7 @@ extern void mnt_pin_kill(struct mount *m);
  */
 extern const struct dentry_operations ns_dentry_operations;
 int open_namespace(struct ns_common *ns);
+struct file *open_namespace_file(struct ns_common *ns);
 
 /*
  * fs/stat.c:
@@ -292,21 +301,21 @@ int filename_setxattr(int dfd, struct filename *filename,
 int setxattr_copy(const char __user *name, struct kernel_xattr_ctx *ctx);
 int import_xattr_name(struct xattr_name *kname, const char __user *name);
 
-int may_write_xattr(struct mnt_idmap *idmap, struct inode *inode);
+int may_write_xattr(const struct mnt_idmap *idmap, struct inode *inode);
 
 #ifdef CONFIG_FS_POSIX_ACL
-int do_set_acl(struct mnt_idmap *idmap, struct dentry *dentry,
+int do_set_acl(const struct mnt_idmap *idmap, struct dentry *dentry,
 	       const char *acl_name, const void *kvalue, size_t size);
-ssize_t do_get_acl(struct mnt_idmap *idmap, struct dentry *dentry,
+ssize_t do_get_acl(const struct mnt_idmap *idmap, struct dentry *dentry,
 		   const char *acl_name, void *kvalue, size_t size);
 #else
-static inline int do_set_acl(struct mnt_idmap *idmap,
+static inline int do_set_acl(const struct mnt_idmap *idmap,
 			     struct dentry *dentry, const char *acl_name,
 			     const void *kvalue, size_t size)
 {
 	return -EOPNOTSUPP;
 }
-static inline ssize_t do_get_acl(struct mnt_idmap *idmap,
+static inline ssize_t do_get_acl(const struct mnt_idmap *idmap,
 				 struct dentry *dentry, const char *acl_name,
 				 void *kvalue, size_t size)
 {
@@ -320,8 +329,8 @@ ssize_t __kernel_write_iter(struct file *file, struct iov_iter *from, loff_t *po
  * fs/attr.c
  */
 struct mnt_idmap *alloc_mnt_idmap(struct user_namespace *mnt_userns);
-struct mnt_idmap *mnt_idmap_get(struct mnt_idmap *idmap);
-void mnt_idmap_put(struct mnt_idmap *idmap);
+const struct mnt_idmap *mnt_idmap_get(const struct mnt_idmap *idmap);
+void mnt_idmap_put(const struct mnt_idmap *idmap);
 struct stashed_operations {
 	struct dentry *(*stash_dentry)(struct dentry **stashed,
 				       struct dentry *dentry);
@@ -347,12 +356,16 @@ static inline bool path_mounted(const struct path *path)
 }
 void file_f_owner_release(struct file *file);
 bool file_seek_cur_needs_f_lock(struct file *file);
-int statmount_mnt_idmap(struct mnt_idmap *idmap, struct seq_file *seq, bool uid_map);
+int statmount_mnt_idmap(const struct mnt_idmap *idmap, struct seq_file *seq, bool uid_map);
 struct dentry *find_next_child(struct dentry *parent, struct dentry *prev);
-int anon_inode_getattr(struct mnt_idmap *idmap, const struct path *path,
+int anon_inode_getattr(const struct mnt_idmap *idmap, const struct path *path,
 		       struct kstat *stat, u32 request_mask,
 		       unsigned int query_flags);
-int anon_inode_setattr(struct mnt_idmap *idmap, struct dentry *dentry,
+int anon_inode_setattr(const struct mnt_idmap *idmap, struct dentry *dentry,
 		       struct iattr *attr);
 void pidfs_get_root(struct path *path);
 void nsfs_get_root(struct path *path);
+void failfs_get_root(struct path *path);
+void __init failfs_init(void);
+bool failfs_mnt(const struct vfsmount *mnt);
+int failfs_current_chdir(void);

@@ -79,7 +79,7 @@ void __weak arch_irq_work_raise(void)
 static __always_inline void irq_work_raise(struct irq_work *work)
 {
 	if (trace_ipi_send_cpu_enabled() && arch_irq_work_has_interrupt())
-		trace_ipi_send_cpu(smp_processor_id(), _RET_IP_, work->func);
+		trace_call__ipi_send_cpu(smp_processor_id(), _RET_IP_, work->func);
 
 	arch_irq_work_raise();
 }
@@ -252,10 +252,7 @@ static void irq_work_run_list(struct llist_head *list)
 		irq_work_single(work);
 }
 
-/*
- * hotplug calls this through:
- *  hotplug_cfd() -> flush_smp_call_function_queue()
- */
+/* CPU hotplug calls this through smpcfd_dying_cpu() */
 void irq_work_run(void)
 {
 	irq_work_run_list(this_cpu_ptr(&raised_list));
@@ -265,6 +262,17 @@ void irq_work_run(void)
 		wake_irq_workd();
 }
 EXPORT_SYMBOL_GPL(irq_work_run);
+
+void irq_work_run_cpu(unsigned int cpu)
+{
+	if (WARN_ON_ONCE(!cpumask_test_cpu(cpu, cpu_dying_mask)))
+		return;
+
+	if (!IS_ENABLED(CONFIG_PREEMPT_RT))
+		return;
+
+	irq_work_run_list(per_cpu_ptr(&lazy_list, cpu));
+}
 
 void irq_work_tick(void)
 {
@@ -292,6 +300,12 @@ void irq_work_sync(struct irq_work *work)
 	    !arch_irq_work_has_interrupt()) {
 		rcuwait_wait_event(&work->irqwait, !irq_work_is_busy(work),
 				   TASK_UNINTERRUPTIBLE);
+		/*
+		 * Ensure irq_work_single() does not access @work
+		 * after removing IRQ_WORK_BUSY. It is always
+		 * accessed within a RCU-read section.
+		 */
+		synchronize_rcu();
 		return;
 	}
 
@@ -302,6 +316,7 @@ EXPORT_SYMBOL_GPL(irq_work_sync);
 
 static void run_irq_workd(unsigned int cpu)
 {
+	guard(rcu)();
 	irq_work_run_list(this_cpu_ptr(&lazy_list));
 }
 

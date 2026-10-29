@@ -31,6 +31,7 @@
 #include <linux/pm_runtime.h>
 #include <linux/regmap.h>
 #include <linux/slab.h>
+#include <linux/units.h>
 
 #define DRIVER_NAME "nmk-i2c"
 
@@ -419,10 +420,10 @@ static void setup_i2c_controller(struct nmk_i2c_dev *priv)
 	 * modes are 250ns, 100ns, 10ns respectively.
 	 *
 	 * As the time for one cycle T in nanoseconds is
-	 * T = (1/f) * 1000000000 =>
-	 * slsu = cycles / (1000000000 / f) + 1
+	 * T = (1/f) * HZ_PER_GHZ =>
+	 * slsu = cycles / (HZ_PER_GHZ / f) + 1
 	 */
-	ns = DIV_ROUND_UP_ULL(1000000000ULL, i2c_clk);
+	ns = DIV_ROUND_UP(HZ_PER_GHZ, i2c_clk);
 	switch (priv->sm) {
 	case I2C_FREQ_MODE_FAST:
 	case I2C_FREQ_MODE_FAST_PLUS:
@@ -1049,9 +1050,9 @@ static int nmk_i2c_eyeq5_probe(struct nmk_i2c_dev *priv)
 	if (id >= ARRAY_SIZE(nmk_i2c_eyeq5_masks))
 		return -ENOENT;
 
-	if (priv->clk_freq <= 400000)
+	if (priv->clk_freq <= I2C_MAX_FAST_MODE_FREQ)
 		speed_mode = I2C_EYEQ5_SPEED_FAST;
-	else if (priv->clk_freq <= 1000000)
+	else if (priv->clk_freq <= I2C_MAX_FAST_MODE_PLUS_FREQ)
 		speed_mode = I2C_EYEQ5_SPEED_FAST_PLUS;
 	else
 		speed_mode = I2C_EYEQ5_SPEED_HIGH_SPEED;
@@ -1136,8 +1137,7 @@ static int nmk_i2c_probe(struct amba_device *adev, const struct amba_id *id)
 	ret = devm_request_irq(dev, priv->irq, i2c_irq_handler, 0,
 			       DRIVER_NAME, priv);
 	if (ret)
-		return dev_err_probe(dev, ret,
-				     "cannot claim the irq %d\n", priv->irq);
+		return ret;
 
 	priv->clk = devm_clk_get_enabled(dev, NULL);
 	if (IS_ERR(priv->clk))

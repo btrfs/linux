@@ -8,10 +8,13 @@
 
 enum mlx5_devlink_resource_id {
 	MLX5_DL_RES_MAX_LOCAL_SFS = 1,
-	MLX5_DL_RES_MAX_EXTERNAL_SFS,
 
 	__MLX5_ID_RES_MAX,
 	MLX5_ID_RES_MAX = __MLX5_ID_RES_MAX - 1,
+};
+
+enum mlx5_devlink_port_resource_id {
+	MLX5_DL_PORT_RES_MAX_SFS = 1,
 };
 
 enum mlx5_devlink_param_id {
@@ -26,7 +29,8 @@ enum mlx5_devlink_param_id {
 	MLX5_DEVLINK_PARAM_ID_PCIE_CONG_IN_HIGH,
 	MLX5_DEVLINK_PARAM_ID_PCIE_CONG_OUT_LOW,
 	MLX5_DEVLINK_PARAM_ID_PCIE_CONG_OUT_HIGH,
-	MLX5_DEVLINK_PARAM_ID_CQE_COMPRESSION_TYPE
+	MLX5_DEVLINK_PARAM_ID_CQE_COMPRESSION_TYPE,
+	MLX5_DEVLINK_PARAM_ID_SWP_L4_CSUM_MODE,
 };
 
 struct mlx5_trap_ctx {

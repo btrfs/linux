@@ -63,7 +63,13 @@ struct mlx5_eswitch_rep {
 void mlx5_eswitch_register_vport_reps(struct mlx5_eswitch *esw,
 				      const struct mlx5_eswitch_rep_ops *ops,
 				      u8 rep_type);
+void
+mlx5_eswitch_register_vport_reps_nested(struct mlx5_eswitch *esw,
+					const struct mlx5_eswitch_rep_ops *ops,
+					u8 rep_type);
 void mlx5_eswitch_unregister_vport_reps(struct mlx5_eswitch *esw, u8 rep_type);
+void mlx5_eswitch_unregister_vport_reps_nested(struct mlx5_eswitch *esw,
+					       u8 rep_type);
 void *mlx5_eswitch_get_proto_dev(struct mlx5_eswitch *esw,
 				 u16 vport_num,
 				 u8 rep_type);
@@ -216,8 +222,11 @@ static inline bool is_mdev_switchdev_mode(struct mlx5_core_dev *dev)
 /* The returned number is valid only when the dev is eswitch manager. */
 static inline u16 mlx5_eswitch_manager_vport(struct mlx5_core_dev *dev)
 {
+	if (MLX5_CAP_ESW(dev, esw_manager_vport_number_valid))
+		return MLX5_CAP_ESW(dev, esw_manager_vport_number);
+
 	return mlx5_core_is_ecpf_esw_manager(dev) ?
-		MLX5_VPORT_ECPF : MLX5_VPORT_PF;
+		MLX5_VPORT_ECPF : MLX5_VPORT_HOST_PF;
 }
 
 #endif

@@ -94,7 +94,7 @@
 #define VIRQ_XENOPROF   7  /* V. XenOprofile interrupt: new sample available */
 #define VIRQ_CON_RING   8  /* G. (DOM0) Bytes received on console            */
 #define VIRQ_PCPU_STATE 9  /* G. (DOM0) PCPU state changed                   */
-#define VIRQ_MEM_EVENT  10 /* G. (DOM0) A memory event has occured           */
+#define VIRQ_MEM_EVENT  10 /* G. (DOM0) A memory event has occurred           */
 #define VIRQ_XC_RESERVED 11 /* G. Reserved for XenClient                     */
 #define VIRQ_ENOMEM     12 /* G. (DOM0) Low on heap memory       */
 #define VIRQ_XENPMU     13  /* PMC interrupt                                 */
@@ -337,7 +337,7 @@
 #define MMUEXT_MARK_SUPER       19
 #define MMUEXT_UNMARK_SUPER     20
 
-#ifndef __ASSEMBLY__
+#ifndef __ASSEMBLER__
 struct mmuext_op {
 	unsigned int cmd;
 	union {
@@ -415,7 +415,7 @@ DEFINE_GUEST_HANDLE_STRUCT(mmuext_op);
 
 #define MAX_VMASST_TYPE 5
 
-#ifndef __ASSEMBLY__
+#ifndef __ASSEMBLER__
 
 typedef uint16_t domid_t;
 
@@ -760,11 +760,11 @@ struct tmem_op {
 
 DEFINE_GUEST_HANDLE(u64);
 
-#else /* __ASSEMBLY__ */
+#else /* __ASSEMBLER__ */
 
 /* In assembly code we cannot use C numeric constant suffixes. */
 #define mk_unsigned_long(x) x
 
-#endif /* !__ASSEMBLY__ */
+#endif /* !__ASSEMBLER__ */
 
 #endif /* __XEN_PUBLIC_XEN_H__ */

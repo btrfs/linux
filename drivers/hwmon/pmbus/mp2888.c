@@ -272,14 +272,14 @@ static int mp2888_write_word_data(struct i2c_client *client, int page, int reg, 
 		word = clamp_val(word, 0, GENMASK(7, 0));
 		break;
 	case PMBUS_IOUT_OC_WARN_LIMIT:
-		/* Fix limit according to total curent resolution. */
+		/* Fix limit according to total current resolution. */
 		word = data->total_curr_resolution ? DIV_ROUND_CLOSEST(word, 8) :
 		       DIV_ROUND_CLOSEST(word, 4);
 		/* Drop unused bits 15:10. */
 		word = clamp_val(word, 0, GENMASK(9, 0));
 		break;
 	case PMBUS_POUT_OP_WARN_LIMIT:
-		/* Fix limit according to total curent resolution. */
+		/* Fix limit according to total current resolution. */
 		word = data->total_curr_resolution ? DIV_ROUND_CLOSEST(word, 4) :
 		       DIV_ROUND_CLOSEST(word, 2);
 		/* Drop unused bits 15:10. */
@@ -378,8 +378,8 @@ static int mp2888_probe(struct i2c_client *client)
 }
 
 static const struct i2c_device_id mp2888_id[] = {
-	{"mp2888"},
-	{}
+	{ .name = "mp2888" },
+	{ }
 };
 
 MODULE_DEVICE_TABLE(i2c, mp2888_id);

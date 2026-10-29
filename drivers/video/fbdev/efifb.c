@@ -15,11 +15,11 @@
 #include <linux/fb.h>
 #include <linux/platform_device.h>
 #include <linux/printk.h>
-#include <linux/screen_info.h>
+#include <linux/sysfb.h>
 #include <video/vga.h>
 #include <asm/efi.h>
-#include <drm/drm_utils.h> /* For drm_get_panel_orientation_quirk */
 #include <drm/drm_connector.h>  /* For DRM_MODE_PANEL_ORIENTATION_* */
+#include <drm/drm_panel_quirks.h> /* For drm_get_panel_orientation_quirk */
 
 struct bmp_file_header {
 	u16 id;
@@ -97,7 +97,7 @@ static int efifb_setcolreg(unsigned regno, unsigned red, unsigned green,
 }
 
 /*
- * If fbcon deffered console takeover is configured, the intent is for the
+ * If fbcon deferred console takeover is configured, the intent is for the
  * framebuffer to show the boot graphics (e.g. vendor logo) until there is some
  * (error) message to display. But the boot graphics may have been destroyed by
  * e.g. option ROM output, detect this and restore the boot graphics.
@@ -345,6 +345,7 @@ ATTRIBUTE_GROUPS(efifb);
 
 static int efifb_probe(struct platform_device *dev)
 {
+	struct sysfb_display_info *dpy;
 	struct screen_info *si;
 	struct fb_info *info;
 	struct efifb_par *par;
@@ -360,10 +361,11 @@ static int efifb_probe(struct platform_device *dev)
 	 * driver. We get a copy of the attached screen_info, so that we can
 	 * modify its values without affecting later drivers.
 	 */
-	si = dev_get_platdata(&dev->dev);
-	if (!si)
+	dpy = dev_get_platdata(&dev->dev);
+	if (!dpy)
 		return -ENODEV;
-	si = devm_kmemdup(&dev->dev, si, sizeof(*si), GFP_KERNEL);
+
+	si = devm_kmemdup(&dev->dev, &dpy->screen, sizeof(*si), GFP_KERNEL);
 	if (!si)
 		return -ENOMEM;
 
@@ -375,6 +377,7 @@ static int efifb_probe(struct platform_device *dev)
 	if (fb_get_options("efifb", &option))
 		return -ENODEV;
 	efifb_setup(si, option);
+	kfree(option);
 
 	/* We don't get linelength from UGA Draw Protocol, only from
 	 * EFI Graphics Protocol.  So if it's not in DMI, and it's not
@@ -418,7 +421,7 @@ static int efifb_probe(struct platform_device *dev)
 	size_vmode = efifb_defined.yres * efifb_fix.line_length;
 
 	/*   size_total -- all video memory we have. Used for
-	 *                 entries, ressource allocation and bounds
+	 *                 entries, resource allocation and bounds
 	 *                 checking. */
 	size_total = si->lfb_size;
 	if (size_total < size_vmode)

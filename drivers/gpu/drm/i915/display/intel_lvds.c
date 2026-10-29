@@ -70,7 +70,7 @@ struct intel_lvds_encoder {
 	struct intel_encoder base;
 
 	bool is_dual_link;
-	i915_reg_t reg;
+	intel_reg_t reg;
 	u32 a3_power;
 
 	struct intel_lvds_pps init_pps;
@@ -85,7 +85,7 @@ static struct intel_lvds_encoder *to_lvds_encoder(struct intel_encoder *encoder)
 }
 
 bool intel_lvds_port_enabled(struct intel_display *display,
-			     i915_reg_t lvds_reg, enum pipe *pipe)
+			     intel_reg_t lvds_reg, enum pipe *pipe)
 {
 	u32 val;
 
@@ -105,7 +105,7 @@ static bool intel_lvds_get_hw_state(struct intel_encoder *encoder,
 {
 	struct intel_display *display = to_intel_display(encoder);
 	struct intel_lvds_encoder *lvds_encoder = to_lvds_encoder(encoder);
-	intel_wakeref_t wakeref;
+	struct ref_tracker *wakeref;
 	bool ret;
 
 	wakeref = intel_display_power_get_if_enabled(display, encoder->power_domain);
@@ -329,7 +329,7 @@ static void intel_enable_lvds(struct intel_atomic_state *state,
 	intel_de_rmw(display, PP_CONTROL(display, 0), 0, PANEL_POWER_ON);
 	intel_de_posting_read(display, lvds_encoder->reg);
 
-	if (intel_de_wait_for_set(display, PP_STATUS(display, 0), PP_ON, 5000))
+	if (intel_de_wait_for_set_ms(display, PP_STATUS(display, 0), PP_ON, 5000))
 		drm_err(display->drm,
 			"timed out waiting for panel to power on\n");
 
@@ -345,7 +345,7 @@ static void intel_disable_lvds(struct intel_atomic_state *state,
 	struct intel_lvds_encoder *lvds_encoder = to_lvds_encoder(encoder);
 
 	intel_de_rmw(display, PP_CONTROL(display, 0), PANEL_POWER_ON, 0);
-	if (intel_de_wait_for_clear(display, PP_STATUS(display, 0), PP_ON, 1000))
+	if (intel_de_wait_for_clear_ms(display, PP_STATUS(display, 0), PP_ON, 1000))
 		drm_err(display->drm,
 			"timed out waiting for panel to power off\n");
 
@@ -384,7 +384,7 @@ static void intel_lvds_shutdown(struct intel_encoder *encoder)
 {
 	struct intel_display *display = to_intel_display(encoder);
 
-	if (intel_de_wait_for_clear(display, PP_STATUS(display, 0), PP_CYCLE_DELAY_ACTIVE, 5000))
+	if (intel_de_wait_for_clear_ms(display, PP_STATUS(display, 0), PP_CYCLE_DELAY_ACTIVE, 5000))
 		drm_err(display->drm,
 			"timed out waiting for panel power cycle delay\n");
 }
@@ -395,26 +395,26 @@ intel_lvds_mode_valid(struct drm_connector *_connector,
 {
 	struct intel_display *display = to_intel_display(_connector->dev);
 	struct intel_connector *connector = to_intel_connector(_connector);
-	const struct drm_display_mode *fixed_mode =
-		intel_panel_fixed_mode(connector, mode);
 	int max_pixclk = display->cdclk.max_dotclk_freq;
 	enum drm_mode_status status;
+	int target_clock;
 
 	status = intel_cpu_transcoder_mode_valid(display, mode);
 	if (status != MODE_OK)
 		return status;
 
-	status = intel_panel_mode_valid(connector, mode);
+	status = intel_panel_mode_valid(connector, mode, &target_clock);
 	if (status != MODE_OK)
 		return status;
 
-	if (fixed_mode->clock > max_pixclk)
+	if (target_clock > max_pixclk)
 		return MODE_CLOCK_HIGH;
 
 	return MODE_OK;
 }
 
-static int intel_lvds_compute_config(struct intel_encoder *encoder,
+static int intel_lvds_compute_config(struct intel_atomic_state *state,
+				     struct intel_encoder *encoder,
 				     struct intel_crtc_state *crtc_state,
 				     struct drm_connector_state *conn_state)
 {
@@ -460,7 +460,7 @@ static int intel_lvds_compute_config(struct intel_encoder *encoder,
 	 * with the panel scaling set up to source from the H/VDisplay
 	 * of the original mode.
 	 */
-	ret = intel_panel_compute_config(connector, adjusted_mode);
+	ret = intel_panel_compute_config(state, crtc_state, connector);
 	if (ret)
 		return ret;
 
@@ -846,7 +846,7 @@ void intel_lvds_init(struct intel_display *display)
 	struct intel_connector *connector;
 	const struct drm_edid *drm_edid;
 	struct intel_encoder *encoder;
-	i915_reg_t lvds_reg;
+	intel_reg_t lvds_reg;
 	u32 lvds;
 	u8 ddc_pin;
 
@@ -886,7 +886,7 @@ void intel_lvds_init(struct intel_display *display)
 			    "LVDS is not present in VBT, but enabled anyway\n");
 	}
 
-	lvds_encoder = kzalloc(sizeof(*lvds_encoder), GFP_KERNEL);
+	lvds_encoder = kzalloc_obj(*lvds_encoder);
 	if (!lvds_encoder)
 		return;
 

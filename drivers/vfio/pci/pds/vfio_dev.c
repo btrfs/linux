@@ -20,10 +20,7 @@ struct device *pds_vfio_to_dev(struct pds_vfio_pci_device *pds_vfio)
 
 struct pds_vfio_pci_device *pds_vfio_pci_drvdata(struct pci_dev *pdev)
 {
-	struct vfio_pci_core_device *core_device = dev_get_drvdata(&pdev->dev);
-
-	return container_of(core_device, struct pds_vfio_pci_device,
-			    vfio_coredev);
+	return pci_get_drvdata(pdev);
 }
 
 void pds_vfio_reset(struct pds_vfio_pci_device *pds_vfio,
@@ -195,6 +192,7 @@ static const struct vfio_device_ops pds_vfio_ops = {
 	.open_device = pds_vfio_open_device,
 	.close_device = pds_vfio_close_device,
 	.ioctl = vfio_pci_core_ioctl,
+	.get_region_info_caps = vfio_pci_ioctl_get_region_info,
 	.device_feature = vfio_pci_core_ioctl_feature,
 	.read = vfio_pci_core_read,
 	.write = vfio_pci_core_write,

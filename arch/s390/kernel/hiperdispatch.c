@@ -3,8 +3,7 @@
  * Copyright IBM Corp. 2024
  */
 
-#define KMSG_COMPONENT "hd"
-#define pr_fmt(fmt) KMSG_COMPONENT ": " fmt
+#define pr_fmt(fmt) "hd: " fmt
 
 /*
  * Hiperdispatch:
@@ -65,7 +64,7 @@
 
 #define HD_DELAY_FACTOR			(4)
 #define HD_DELAY_INTERVAL		(HZ / 4)
-#define HD_STEAL_THRESHOLD		30
+#define HD_STEAL_THRESHOLD		10
 #define HD_STEAL_AVG_WEIGHT		16
 
 static cpumask_t hd_vl_coremask;	/* Mask containing all vertical low COREs */
@@ -208,16 +207,12 @@ static unsigned long hd_calculate_steal_percentage(void)
 {
 	unsigned long time_delta, steal_delta, steal, percentage;
 	static ktime_t prev;
-	int cpus, cpu;
+	int cpus;
 	ktime_t now;
 
-	cpus = 0;
-	steal = 0;
 	percentage = 0;
-	for_each_cpu(cpu, &hd_vmvl_cpumask) {
-		steal += kcpustat_cpu(cpu).cpustat[CPUTIME_STEAL];
-		cpus++;
-	}
+	steal = kcpustat_field_total(CPUTIME_STEAL, &hd_vmvl_cpumask);
+	cpus = cpumask_weight(&hd_vmvl_cpumask);
 	/*
 	 * If there is no vertical medium and low CPUs steal time
 	 * is 0 as vertical high CPUs shouldn't experience steal time.
@@ -266,7 +261,7 @@ static void hd_capacity_work_fn(struct work_struct *work)
 	}
 	trace_s390_hd_work_fn(steal_percentage, hd_entitled_cores, hd_high_capacity_cores);
 	mutex_unlock(&smp_cpu_state_mutex);
-	schedule_delayed_work(&hd_capacity_work, HD_DELAY_INTERVAL);
+	queue_delayed_work(system_dfl_wq, &hd_capacity_work, HD_DELAY_INTERVAL);
 }
 
 static int hiperdispatch_ctl_handler(const struct ctl_table *ctl, int write,

@@ -60,10 +60,9 @@
 #include <linux/ioport.h>		/* For io-port access */
 #include <linux/uaccess.h>		/* For copy_to_user/put_user/... */
 #include <linux/io.h>			/* For inb/outb/... */
+#include <linux/stringify.h>		/* For __stringify */
 #include <linux/platform_data/itco_wdt.h>
 #include <linux/mfd/intel_pmc_bxt.h>
-
-#include "iTCO_vendor.h"
 
 /* Address definitions for the TCO */
 /* TCO base address */
@@ -117,13 +116,13 @@ static int heartbeat = WATCHDOG_TIMEOUT;  /* in seconds */
 module_param(heartbeat, int, 0);
 MODULE_PARM_DESC(heartbeat, "Watchdog timeout in seconds. "
 	"5..76 (TCO v1) or 3..614 (TCO v2), default="
-				__MODULE_STRING(WATCHDOG_TIMEOUT) ")");
+				__stringify(WATCHDOG_TIMEOUT) ")");
 
 static bool nowayout = WATCHDOG_NOWAYOUT;
 module_param(nowayout, bool, 0);
 MODULE_PARM_DESC(nowayout,
 	"Watchdog cannot be stopped once started (default="
-				__MODULE_STRING(WATCHDOG_NOWAYOUT) ")");
+				__stringify(WATCHDOG_NOWAYOUT) ")");
 
 static int turn_SMI_watchdog_clear_off = 1;
 module_param(turn_SMI_watchdog_clear_off, int, 0);
@@ -283,8 +282,6 @@ static int iTCO_wdt_start(struct watchdog_device *wd_dev)
 	struct iTCO_wdt_private *p = watchdog_get_drvdata(wd_dev);
 	unsigned int val;
 
-	iTCO_vendor_pre_start(p->smi_res, wd_dev->timeout);
-
 	/* disable chipset's NO_REBOOT bit */
 	if (p->update_no_reboot_bit(p->no_reboot_priv, false)) {
 		dev_err(wd_dev->parent, "failed to reset NO_REBOOT flag, reboot disabled by hardware/BIOS\n");
@@ -313,8 +310,6 @@ static int iTCO_wdt_stop(struct watchdog_device *wd_dev)
 {
 	struct iTCO_wdt_private *p = watchdog_get_drvdata(wd_dev);
 	unsigned int val;
-
-	iTCO_vendor_pre_stop(p->smi_res);
 
 	/* Bit 11: TCO Timer Halt -> 1 = The TCO timer is disabled */
 	val = inw(TCO1_CNT(p));
@@ -488,8 +483,7 @@ static int iTCO_wdt_probe(struct platform_device *pdev)
 			       (u64)SMI_EN(p));
 			return -EBUSY;
 		}
-	} else if (iTCO_vendorsupport ||
-		   turn_SMI_watchdog_clear_off >= p->iTCO_version) {
+	} else if (turn_SMI_watchdog_clear_off >= p->iTCO_version) {
 		dev_err(dev, "SMI I/O resource is missing\n");
 		return -ENODEV;
 	}
@@ -508,8 +502,7 @@ static int iTCO_wdt_probe(struct platform_device *pdev)
 	}
 
 	/* Check chipset's NO_REBOOT bit */
-	if (p->update_no_reboot_bit(p->no_reboot_priv, false) &&
-	    iTCO_vendor_check_noreboot_on()) {
+	if (p->update_no_reboot_bit(p->no_reboot_priv, false)) {
 		dev_info(dev, "unable to reset NO_REBOOT flag, device disabled by hardware/BIOS\n");
 		return -ENODEV;	/* Cannot reset NO_REBOOT bit */
 	}

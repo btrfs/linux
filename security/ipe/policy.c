@@ -52,7 +52,7 @@ void ipe_free_policy(struct ipe_policy *p)
 	ipe_del_policyfs_node(p);
 	ipe_free_parsed_policy(p->parsed);
 	/*
-	 * p->text is allocated only when p->pkcs7 is not NULL
+	 * p->text is allocated only when p->pkcs7 is NULL
 	 * otherwise it points to the plaintext data inside the pkcs7
 	 */
 	if (!p->pkcs7)
@@ -162,7 +162,7 @@ struct ipe_policy *ipe_new_policy(const char *text, size_t textlen,
 	struct ipe_policy *new = NULL;
 	int rc = 0;
 
-	new = kzalloc(sizeof(*new), GFP_KERNEL);
+	new = kzalloc_obj(*new);
 	if (!new)
 		return ERR_PTR(-ENOMEM);
 

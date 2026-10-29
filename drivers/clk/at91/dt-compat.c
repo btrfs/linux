@@ -2,6 +2,7 @@
 #include <linux/clk-provider.h>
 #include <linux/clk/at91_pmc.h>
 #include <linux/of.h>
+#include <linux/of_address.h>
 #include <linux/mfd/syscon.h>
 #include <linux/regmap.h>
 #include <linux/slab.h>
@@ -217,7 +218,7 @@ CLK_OF_DECLARE(of_sama5d4_clk_h32mx_setup, "atmel,sama5d4-clk-h32mx",
 static void __init of_sama5d2_clk_i2s_mux_setup(struct device_node *np)
 {
 	struct regmap *regmap_sfr;
-	u8 bus_id;
+	u64 bus_id;
 	const char *parent_names[2];
 	struct device_node *i2s_mux_np;
 	struct clk_hw *hw;
@@ -228,7 +229,7 @@ static void __init of_sama5d2_clk_i2s_mux_setup(struct device_node *np)
 		return;
 
 	for_each_child_of_node(np, i2s_mux_np) {
-		if (of_property_read_u8(i2s_mux_np, "reg", &bus_id))
+		if (of_property_read_reg(i2s_mux_np, 0, &bus_id, NULL))
 			continue;
 
 		if (bus_id > I2S_BUS_NR)
@@ -369,7 +370,7 @@ of_at91_clk_master_get_characteristics(struct device_node *np)
 {
 	struct clk_master_characteristics *characteristics;
 
-	characteristics = kzalloc(sizeof(*characteristics), GFP_KERNEL);
+	characteristics = kzalloc_obj(*characteristics);
 	if (!characteristics)
 		return NULL;
 
@@ -568,11 +569,11 @@ of_at91_clk_pll_get_characteristics(struct device_node *np)
 		return NULL;
 	num_output /= num_cells;
 
-	characteristics = kzalloc(sizeof(*characteristics), GFP_KERNEL);
+	characteristics = kzalloc_obj(*characteristics);
 	if (!characteristics)
 		return NULL;
 
-	output = kcalloc(num_output, sizeof(*output), GFP_KERNEL);
+	output = kzalloc_objs(*output, num_output);
 	if (!output)
 		goto out_free_characteristics;
 

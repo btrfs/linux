@@ -21,6 +21,7 @@
 #include <linux/panic_notifier.h>
 #include <linux/ptrace.h>
 #include <linux/random.h>
+#include <linux/rhashtable.h>
 #include <linux/efi.h>
 #include <linux/kdebug.h>
 #include <linux/kmsg_dump.h>
@@ -78,6 +79,22 @@ static struct ctl_table_header *hv_ctl_table_hdr;
 u8 * __percpu *hv_synic_eventring_tail;
 EXPORT_SYMBOL_GPL(hv_synic_eventring_tail);
 
+struct hv_pci_busdata {
+	int pci_domain_nr;
+	u32 logical_dev_id_prefix;
+	struct rhash_head node;
+	struct rcu_head rcu;
+};
+
+static struct rhashtable hv_pci_bus_ht;
+static bool hv_pci_bus_ht_initialized;
+
+static const struct rhashtable_params hv_pci_bus_ht_params = {
+	.key_len	= sizeof_field(struct hv_pci_busdata, pci_domain_nr),
+	.key_offset	= offsetof(struct hv_pci_busdata, pci_domain_nr),
+	.head_offset	= offsetof(struct hv_pci_busdata, node),
+};
+
 /*
  * Hyper-V specific initialization and shutdown code that is
  * common across all architectures.  Called from architecture
@@ -86,6 +103,11 @@ EXPORT_SYMBOL_GPL(hv_synic_eventring_tail);
 
 void __init hv_common_free(void)
 {
+	if (hv_pci_bus_ht_initialized) {
+		rhashtable_destroy(&hv_pci_bus_ht);
+		hv_pci_bus_ht_initialized = false;
+	}
+
 	unregister_sysctl_table(hv_ctl_table_hdr);
 	hv_ctl_table_hdr = NULL;
 
@@ -195,13 +217,15 @@ static void hv_kmsg_dump(struct kmsg_dumper *dumper,
 
 	/*
 	 * Write dump contents to the page. No need to synchronize; panic should
-	 * be single-threaded.
+	 * be single-threaded. Ignore failures from kmsg_dump_get_buffer() since
+	 * panic notification should be done even if there is no message data.
+	 * Don't assume bytes_written is set in case of failure, so initialize it.
 	 */
 	kmsg_dump_rewind(&iter);
-	kmsg_dump_get_buffer(&iter, false, hv_panic_page, HV_HYP_PAGE_SIZE,
+	bytes_written = 0;
+	(void)kmsg_dump_get_buffer(&iter, false, hv_panic_page, HV_HYP_PAGE_SIZE,
 			     &bytes_written);
-	if (!bytes_written)
-		return;
+
 	/*
 	 * P3 to contain the physical address of the panic page & P4 to
 	 * contain the size of the panic data in that page. Rest of the
@@ -210,7 +234,7 @@ static void hv_kmsg_dump(struct kmsg_dumper *dumper,
 	hv_set_msr(HV_MSR_CRASH_P0, 0);
 	hv_set_msr(HV_MSR_CRASH_P1, 0);
 	hv_set_msr(HV_MSR_CRASH_P2, 0);
-	hv_set_msr(HV_MSR_CRASH_P3, virt_to_phys(hv_panic_page));
+	hv_set_msr(HV_MSR_CRASH_P3, bytes_written ? virt_to_phys(hv_panic_page) : 0);
 	hv_set_msr(HV_MSR_CRASH_P4, bytes_written);
 
 	/*
@@ -313,11 +337,12 @@ u8 __init get_vtl(void)
 int __init hv_common_init(void)
 {
 	int i;
+	int ret;
 	union hv_hypervisor_version_info version;
 
-	/* Get information about the Hyper-V host version */
+	/* Get information about the Microsoft Hypervisor version */
 	if (!hv_get_hypervisor_version(&version))
-		pr_info("Hyper-V: Host Build %d.%d.%d.%d-%d-%d\n",
+		pr_info("Hyper-V: Hypervisor Build %d.%d.%d.%d-%d-%d\n",
 			version.major_version, version.minor_version,
 			version.build_number, version.service_number,
 			version.service_pack, version.service_branch);
@@ -391,6 +416,13 @@ int __init hv_common_init(void)
 
 	for (i = 0; i < nr_cpu_ids; i++)
 		hv_vp_index[i] = VP_INVAL;
+
+	ret = rhashtable_init(&hv_pci_bus_ht, &hv_pci_bus_ht_params);
+	if (ret) {
+		hv_common_free();
+		return ret;
+	}
+	hv_pci_bus_ht_initialized = true;
 
 	return 0;
 }
@@ -487,7 +519,7 @@ int hv_common_cpu_init(unsigned int cpu)
 	 * online and then taken offline
 	 */
 	if (!*inputarg) {
-		mem = kmalloc(pgcount * HV_HYP_PAGE_SIZE, flags);
+		mem = kmalloc_array(pgcount, HV_HYP_PAGE_SIZE, flags);
 		if (!mem)
 			return -ENOMEM;
 
@@ -716,6 +748,27 @@ u64 __weak hv_tdx_hypercall(u64 control, u64 param1, u64 param2)
 }
 EXPORT_SYMBOL_GPL(hv_tdx_hypercall);
 
+void __weak hv_enable_coco_interrupt(unsigned int cpu, unsigned int vector, bool set)
+{
+}
+EXPORT_SYMBOL_GPL(hv_enable_coco_interrupt);
+
+void __weak hv_para_set_sint_proxy(bool enable)
+{
+}
+EXPORT_SYMBOL_GPL(hv_para_set_sint_proxy);
+
+u64 __weak hv_para_get_synic_register(unsigned int reg)
+{
+	return ~0ULL;
+}
+EXPORT_SYMBOL_GPL(hv_para_get_synic_register);
+
+void __weak hv_para_set_synic_register(unsigned int reg, u64 val)
+{
+}
+EXPORT_SYMBOL_GPL(hv_para_set_synic_register);
+
 void hv_identify_partition_type(void)
 {
 	/* Assume guest role */
@@ -764,12 +817,15 @@ static const struct hv_status_info hv_status_infos[] = {
 	_STATUS_INFO(HV_STATUS_INVALID_HYPERCALL_INPUT,		-EINVAL),
 	_STATUS_INFO(HV_STATUS_INVALID_ALIGNMENT,		-EIO),
 	_STATUS_INFO(HV_STATUS_INVALID_PARAMETER,		-EINVAL),
-	_STATUS_INFO(HV_STATUS_ACCESS_DENIED,			-EIO),
+	_STATUS_INFO(HV_STATUS_ACCESS_DENIED,			-EACCES),
 	_STATUS_INFO(HV_STATUS_INVALID_PARTITION_STATE,		-EIO),
-	_STATUS_INFO(HV_STATUS_OPERATION_DENIED,		-EIO),
-	_STATUS_INFO(HV_STATUS_UNKNOWN_PROPERTY,		-EIO),
-	_STATUS_INFO(HV_STATUS_PROPERTY_VALUE_OUT_OF_RANGE,	-EIO),
+	_STATUS_INFO(HV_STATUS_OPERATION_DENIED,		-EACCES),
+	_STATUS_INFO(HV_STATUS_UNKNOWN_PROPERTY,		-EINVAL),
+	_STATUS_INFO(HV_STATUS_PROPERTY_VALUE_OUT_OF_RANGE,	-EINVAL),
 	_STATUS_INFO(HV_STATUS_INSUFFICIENT_MEMORY,		-ENOMEM),
+	_STATUS_INFO(HV_STATUS_INSUFFICIENT_CONTIGUOUS_MEMORY,	-ENOMEM),
+	_STATUS_INFO(HV_STATUS_INSUFFICIENT_ROOT_MEMORY,	-ENOMEM),
+	_STATUS_INFO(HV_STATUS_INSUFFICIENT_CONTIGUOUS_ROOT_MEMORY,	-ENOMEM),
 	_STATUS_INFO(HV_STATUS_INVALID_PARTITION_ID,		-EINVAL),
 	_STATUS_INFO(HV_STATUS_INVALID_VP_INDEX,		-EINVAL),
 	_STATUS_INFO(HV_STATUS_NOT_FOUND,			-EIO),
@@ -779,11 +835,10 @@ static const struct hv_status_info hv_status_infos[] = {
 	_STATUS_INFO(HV_STATUS_NOT_ACKNOWLEDGED,		-EIO),
 	_STATUS_INFO(HV_STATUS_INVALID_VP_STATE,		-EIO),
 	_STATUS_INFO(HV_STATUS_NO_RESOURCES,			-EIO),
-	_STATUS_INFO(HV_STATUS_PROCESSOR_FEATURE_NOT_SUPPORTED,	-EIO),
+	_STATUS_INFO(HV_STATUS_PROCESSOR_FEATURE_NOT_SUPPORTED,	-EOPNOTSUPP),
 	_STATUS_INFO(HV_STATUS_INVALID_LP_INDEX,		-EINVAL),
 	_STATUS_INFO(HV_STATUS_INVALID_REGISTER_VALUE,		-EINVAL),
-	_STATUS_INFO(HV_STATUS_INVALID_LP_INDEX,		-EIO),
-	_STATUS_INFO(HV_STATUS_INVALID_REGISTER_VALUE,		-EIO),
+	_STATUS_INFO(HV_STATUS_DEVICE_ALREADY_IN_DOMAIN,	-EEXIST),
 	_STATUS_INFO(HV_STATUS_OPERATION_FAILED,		-EIO),
 	_STATUS_INFO(HV_STATUS_TIME_OUT,			-EIO),
 	_STATUS_INFO(HV_STATUS_CALL_PENDING,			-EIO),
@@ -837,3 +892,87 @@ const char *hv_result_to_string(u64 status)
 	return "Unknown";
 }
 EXPORT_SYMBOL_GPL(hv_result_to_string);
+
+/*
+ * Logical device ID registry for Hyper-V PCI buses. The pci-hyperv
+ * driver registers each bus's logical device ID prefix before scanning
+ * its devices. Consumers look up the prefix by PCI domain number when
+ * building logical device IDs for Hyper-V interfaces.
+ */
+int hv_pci_register_dev_id(int pci_domain_nr, u32 logical_dev_id_prefix)
+{
+	struct hv_pci_busdata *bus, *new;
+	int ret;
+
+	new = kzalloc_obj(*new, GFP_KERNEL);
+	if (!new)
+		return -ENOMEM;
+
+	new->pci_domain_nr = pci_domain_nr;
+	new->logical_dev_id_prefix = logical_dev_id_prefix;
+
+	bus = rhashtable_lookup_get_insert_fast(&hv_pci_bus_ht, &new->node,
+						hv_pci_bus_ht_params);
+	if (IS_ERR(bus)) {
+		ret = PTR_ERR(bus);
+		goto free_new;
+	}
+
+	if (WARN_ONCE(bus != NULL,
+		      "Hyper-V PCI domain %04x is already registered\n",
+		      pci_domain_nr)) {
+		ret = -EEXIST;
+		goto free_new;
+	}
+
+	return 0;
+
+free_new:
+	kfree(new);
+	return ret;
+}
+EXPORT_SYMBOL_FOR_MODULES(hv_pci_register_dev_id, "pci-hyperv");
+
+void hv_pci_unregister_dev_id(int pci_domain_nr)
+{
+	struct hv_pci_busdata *bus;
+	int ret = -ENOENT;
+
+	rcu_read_lock();
+	bus = rhashtable_lookup(&hv_pci_bus_ht, &pci_domain_nr,
+				hv_pci_bus_ht_params);
+	if (bus)
+		ret = rhashtable_remove_fast(&hv_pci_bus_ht, &bus->node,
+					     hv_pci_bus_ht_params);
+	rcu_read_unlock();
+
+	if (WARN_ONCE(ret,
+		      "Failed to unregister Hyper-V PCI domain %04x\n",
+		      pci_domain_nr))
+		return;
+
+	kfree_rcu(bus, rcu);
+}
+EXPORT_SYMBOL_FOR_MODULES(hv_pci_unregister_dev_id, "pci-hyperv");
+
+/*
+ * Look up the logical device ID prefix registered for @pci_domain_nr.
+ * Returns 0 on success with *prefix filled in; -ENODEV if no entry is
+ * registered for that PCI domain.
+ */
+int hv_pci_lookup_dev_id(int pci_domain_nr, u32 *prefix)
+{
+	struct hv_pci_busdata *bus;
+	int ret = -ENODEV;
+
+	rcu_read_lock();
+	bus = rhashtable_lookup(&hv_pci_bus_ht, &pci_domain_nr,
+				hv_pci_bus_ht_params);
+	if (bus) {
+		*prefix = bus->logical_dev_id_prefix;
+		ret = 0;
+	}
+	rcu_read_unlock();
+
+	return ret;
+}

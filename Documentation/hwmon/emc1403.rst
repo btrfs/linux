@@ -57,7 +57,7 @@ Supported chips:
 	- https://ww1.microchip.com/downloads/en/DeviceDoc/EMC1438%20DS%20Rev.%201.0%20(04-29-10).pdf
 
 Author:
-    Kalhan Trisal <kalhan.trisal@intel.com
+    Kalhan Trisal <kalhan.trisal@intel.com>
 
 
 Description
@@ -71,10 +71,10 @@ and EMC14x8 support eight sensors (one internal, seven external).
 
 The chips implement three limits for each sensor: low (tempX_min), high
 (tempX_max) and critical (tempX_crit.) The chips also implement an
-hysteresis mechanism which applies to all limits. The relative difference
-is stored in a single register on the chip, which means that the relative
-difference between the limit and its hysteresis is always the same for
-all three limits.
+hysteresis mechanism which applies to high and critical limits. The relative
+difference is stored in a single register on the chip, which means that the
+relative difference between the limit and its hysteresis is always the same
+for high and critical limits.
 
 This implementation detail implies the following:
 

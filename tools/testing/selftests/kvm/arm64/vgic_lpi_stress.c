@@ -23,7 +23,6 @@
 #define GIC_LPI_OFFSET	8192
 
 static size_t nr_iterations = 1000;
-static vm_paddr_t gpa_base;
 
 static struct kvm_vm *vm;
 static struct kvm_vcpu **vcpus;
@@ -35,14 +34,14 @@ static struct test_data {
 	u32		nr_devices;
 	u32		nr_event_ids;
 
-	vm_paddr_t	device_table;
-	vm_paddr_t	collection_table;
-	vm_paddr_t	cmdq_base;
+	gpa_t		device_table;
+	gpa_t		collection_table;
+	gpa_t		cmdq_base;
 	void		*cmdq_base_va;
-	vm_paddr_t	itt_tables;
+	gpa_t		itt_tables;
 
-	vm_paddr_t	lpi_prop_table;
-	vm_paddr_t	lpi_pend_tables;
+	gpa_t		lpi_prop_table;
+	gpa_t		lpi_pend_tables;
 } test_data =  {
 	.nr_cpus	= 1,
 	.nr_devices	= 1,
@@ -73,7 +72,7 @@ static void guest_setup_its_mappings(void)
 	/* Round-robin the LPIs to all of the vCPUs in the VM */
 	coll_id = 0;
 	for (device_id = 0; device_id < nr_devices; device_id++) {
-		vm_paddr_t itt_base = test_data.itt_tables + (device_id * SZ_64K);
+		gpa_t itt_base = test_data.itt_tables + (device_id * SZ_64K);
 
 		its_send_mapd_cmd(test_data.cmdq_base_va, device_id,
 				  itt_base, SZ_64K, true);
@@ -118,6 +117,10 @@ static void guest_setup_gic(void)
 
 	guest_setup_its_mappings();
 	guest_invalidate_all_rdists();
+
+	/* SYNC to ensure ITS setup is complete */
+	for (cpuid = 0; cpuid < test_data.nr_cpus; cpuid++)
+		its_send_sync_cmd(test_data.cmdq_base_va, cpuid);
 }
 
 static void guest_code(size_t nr_lpis)
@@ -139,6 +142,7 @@ static void guest_code(size_t nr_lpis)
 
 static void setup_memslot(void)
 {
+	gpa_t gpa_base;
 	size_t pages;
 	size_t sz;
 
@@ -160,8 +164,8 @@ static void setup_memslot(void)
 
 	pages = sz / vm->page_size;
 	gpa_base = ((vm_compute_max_gfn(vm) + 1) * vm->page_size) - sz;
-	vm_userspace_mem_region_add(vm, VM_MEM_SRC_ANONYMOUS, gpa_base,
-				    TEST_MEMSLOT_INDEX, pages, 0);
+	vm_override_mem_region(vm, MEM_REGION_TEST_EXTRA, VM_MEM_SRC_ANONYMOUS,
+			       gpa_base, TEST_MEMSLOT_INDEX, pages);
 }
 
 #define LPI_PROP_DEFAULT_PRIO	0xa0
@@ -184,31 +188,28 @@ static void setup_test_data(void)
 	size_t pages_per_64k = vm_calc_num_guest_pages(vm->mode, SZ_64K);
 	u32 nr_devices = test_data.nr_devices;
 	u32 nr_cpus = test_data.nr_cpus;
-	vm_paddr_t cmdq_base;
+	gpa_t cmdq_base;
 
 	test_data.device_table = vm_phy_pages_alloc(vm, pages_per_64k,
-						    gpa_base,
-						    TEST_MEMSLOT_INDEX);
+						    MEM_REGION_TEST_EXTRA);
 
 	test_data.collection_table = vm_phy_pages_alloc(vm, pages_per_64k,
-							gpa_base,
-							TEST_MEMSLOT_INDEX);
+							MEM_REGION_TEST_EXTRA);
 
-	cmdq_base = vm_phy_pages_alloc(vm, pages_per_64k, gpa_base,
-				       TEST_MEMSLOT_INDEX);
+	cmdq_base = vm_phy_pages_alloc(vm, pages_per_64k, MEM_REGION_TEST_EXTRA);
 	virt_map(vm, cmdq_base, cmdq_base, pages_per_64k);
 	test_data.cmdq_base = cmdq_base;
 	test_data.cmdq_base_va = (void *)cmdq_base;
 
 	test_data.itt_tables = vm_phy_pages_alloc(vm, pages_per_64k * nr_devices,
-						  gpa_base, TEST_MEMSLOT_INDEX);
+						  MEM_REGION_TEST_EXTRA);
 
 	test_data.lpi_prop_table = vm_phy_pages_alloc(vm, pages_per_64k,
-						      gpa_base, TEST_MEMSLOT_INDEX);
+						      MEM_REGION_TEST_EXTRA);
 	configure_lpis();
 
 	test_data.lpi_pend_tables = vm_phy_pages_alloc(vm, pages_per_64k * nr_cpus,
-						       gpa_base, TEST_MEMSLOT_INDEX);
+						       MEM_REGION_TEST_EXTRA);
 
 	sync_global_to_guest(vm, test_data);
 }
@@ -220,7 +221,7 @@ static void setup_gic(void)
 
 static void signal_lpi(u32 device_id, u32 event_id)
 {
-	vm_paddr_t db_addr = GITS_BASE_GPA + GITS_TRANSLATER;
+	gpa_t db_addr = GITS_BASE_GPA + GITS_TRANSLATER;
 
 	struct kvm_msi msi = {
 		.address_lo	= db_addr,
@@ -307,23 +308,23 @@ static void run_test(void)
 	pthread_barrier_init(&test_setup_barrier, NULL, nr_vcpus + nr_devices + 1);
 
 	for (i = 0; i < nr_vcpus; i++)
-		pthread_create(&vcpu_threads[i], NULL, vcpu_worker_thread, vcpus[i]);
+		kvm_pthread_create(&vcpu_threads[i], NULL, vcpu_worker_thread, vcpus[i]);
 
 	for (i = 0; i < nr_devices; i++)
-		pthread_create(&lpi_threads[i], NULL, lpi_worker_thread, (void *)i);
+		kvm_pthread_create(&lpi_threads[i], NULL, lpi_worker_thread, (void *)i);
 
 	pthread_barrier_wait(&test_setup_barrier);
 
 	clock_gettime(CLOCK_MONOTONIC, &start);
 
 	for (i = 0; i < nr_devices; i++)
-		pthread_join(lpi_threads[i], NULL);
+		kvm_pthread_join(lpi_threads[i], NULL);
 
 	delta = timespec_elapsed(start);
 	write_guest_global(vm, test_data.request_vcpus_stop, true);
 
 	for (i = 0; i < nr_vcpus; i++)
-		pthread_join(vcpu_threads[i], NULL);
+		kvm_pthread_join(vcpu_threads[i], NULL);
 
 	report_stats(delta);
 }

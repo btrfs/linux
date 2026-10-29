@@ -12,7 +12,7 @@
 #include "kvm_util.h"
 #include "processor.h"
 
-static bool is_kvm_controlled_msr(uint32_t msr)
+static bool is_kvm_controlled_msr(u32 msr)
 {
 	return msr == MSR_IA32_VMX_CR0_FIXED1 || msr == MSR_IA32_VMX_CR4_FIXED1;
 }
@@ -21,7 +21,7 @@ static bool is_kvm_controlled_msr(uint32_t msr)
  * For VMX MSRs with a "true" variant, KVM requires userspace to set the "true"
  * MSR, and doesn't allow setting the hidden version.
  */
-static bool is_hidden_vmx_msr(uint32_t msr)
+static bool is_hidden_vmx_msr(u32 msr)
 {
 	switch (msr) {
 	case MSR_IA32_VMX_PINBASED_CTLS:
@@ -34,15 +34,15 @@ static bool is_hidden_vmx_msr(uint32_t msr)
 	}
 }
 
-static bool is_quirked_msr(uint32_t msr)
+static bool is_quirked_msr(u32 msr)
 {
 	return msr != MSR_AMD64_DE_CFG;
 }
 
-static void test_feature_msr(uint32_t msr)
+static void test_feature_msr(u32 msr)
 {
-	const uint64_t supported_mask = kvm_get_feature_msr(msr);
-	uint64_t reset_value = is_quirked_msr(msr) ? supported_mask : 0;
+	const u64 supported_mask = kvm_get_feature_msr(msr);
+	u64 reset_value = is_quirked_msr(msr) ? supported_mask : 0;
 	struct kvm_vcpu *vcpu;
 	struct kvm_vm *vm;
 
@@ -59,7 +59,7 @@ static void test_feature_msr(uint32_t msr)
 	 * but initializes the vCPU's revision ID to an arbitrary value.
 	 */
 	if (msr == MSR_IA32_UCODE_REV)
-		reset_value = host_cpu_is_intel ? 0x100000000ULL : 0x01000065;
+		reset_value = host_cpu_is_intel_compatible ? 0x100000000ULL : 0x01000065;
 
 	/*
 	 * For quirked MSRs, KVM's ABI is to initialize the vCPU's value to the

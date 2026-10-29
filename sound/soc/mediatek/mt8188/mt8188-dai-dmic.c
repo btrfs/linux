@@ -143,10 +143,7 @@ static void mtk_dai_dmic_hw_gain_bypass(struct mtk_base_afe *afe,
 		return;
 	}
 
-	if (bypass)
-		regmap_set_bits(afe->regmap, reg->bypass, msk);
-	else
-		regmap_clear_bits(afe->regmap, reg->bypass, msk);
+	regmap_assign_bits(afe->regmap, reg->bypass, msk, bypass);
 }
 
 static void mtk_dai_dmic_hw_gain_on(struct mtk_base_afe *afe, unsigned int id,
@@ -157,10 +154,7 @@ static void mtk_dai_dmic_hw_gain_on(struct mtk_base_afe *afe, unsigned int id,
 	if (!reg)
 		return;
 
-	if (on)
-		regmap_set_bits(afe->regmap, reg->con0, DMIC_GAIN_CON0_GAIN_ON);
-	else
-		regmap_clear_bits(afe->regmap, reg->con0, DMIC_GAIN_CON0_GAIN_ON);
+	regmap_assign_bits(afe->regmap, reg->con0, DMIC_GAIN_CON0_GAIN_ON, on);
 }
 
 static const struct reg_sequence mtk_dai_dmic_iir_coeff_reg_defaults[] = {
@@ -570,7 +564,7 @@ static int mtk_dai_dmic_hw_gain_ctrl_put(struct snd_kcontrol *kcontrol,
 static int mtk_dai_dmic_hw_gain_ctrl_get(struct snd_kcontrol *kcontrol,
 					 struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_component *component = snd_soc_kcontrol_component(kcontrol);
+	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
 	struct mtk_base_afe *afe = snd_soc_component_get_drvdata(component);
 	struct mt8188_afe_private *afe_priv = afe->platform_priv;
 	struct mtk_dai_dmic_priv *dmic_priv = afe_priv->dai_priv[MT8188_AFE_IO_DMIC_IN];

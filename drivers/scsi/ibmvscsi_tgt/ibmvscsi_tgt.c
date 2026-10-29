@@ -2214,7 +2214,7 @@ static int ibmvscsis_make_nexus(struct ibmvscsis_tport *tport)
 		return 0;
 	}
 
-	nexus = kzalloc(sizeof(*nexus), GFP_KERNEL);
+	nexus = kzalloc_obj(*nexus);
 	if (!nexus) {
 		dev_err(&vscsi->dev, "Unable to allocate struct ibmvscsis_nexus\n");
 		return -ENOMEM;
@@ -3424,7 +3424,7 @@ static int ibmvscsis_probe(struct vio_dev *vdev,
 	int rc = 0;
 	long hrc = 0;
 
-	vscsi = kzalloc(sizeof(*vscsi), GFP_KERNEL);
+	vscsi = kzalloc_obj(*vscsi);
 	if (!vscsi) {
 		rc = -ENOMEM;
 		dev_err(&vdev->dev, "probe: allocation of adapter failed\n");
@@ -3533,7 +3533,8 @@ static int ibmvscsis_probe(struct vio_dev *vdev,
 	init_completion(&vscsi->wait_idle);
 	init_completion(&vscsi->unconfig);
 
-	vscsi->work_q = alloc_workqueue("ibmvscsis%s", WQ_MEM_RECLAIM, 1,
+	vscsi->work_q = alloc_workqueue("ibmvscsis%s",
+					WQ_MEM_RECLAIM | WQ_PERCPU, 1,
 					dev_name(&vdev->dev));
 	if (!vscsi->work_q) {
 		rc = -ENOMEM;
@@ -3756,9 +3757,8 @@ static int ibmvscsis_queue_data_in(struct se_cmd *se_cmd)
 		dev_err(&vscsi->dev, "srp_transfer_data failed: %d\n", rc);
 		se_cmd->scsi_sense_length = 18;
 		memset(se_cmd->sense_buffer, 0, se_cmd->scsi_sense_length);
-		/* Logical Unit Communication Time-out asc/ascq = 0x0801 */
-		scsi_build_sense_buffer(0, se_cmd->sense_buffer, MEDIUM_ERROR,
-					0x08, 0x01);
+		scsi_set_sense_buffer(0, se_cmd->sense_buffer, MEDIUM_ERROR,
+				      LU_COMMUNICATION_TIMEOUT);
 	}
 
 	srp_build_response(vscsi, cmd, &len);
@@ -3967,6 +3967,7 @@ static const struct target_core_fabric_ops ibmvscsis_ops = {
 
 	.tfc_wwn_attrs			= ibmvscsis_wwn_attrs,
 
+	.default_compl_type		= TARGET_QUEUE_COMPL,
 	.default_submit_type		= TARGET_DIRECT_SUBMIT,
 	.direct_submit_supp		= 1,
 };

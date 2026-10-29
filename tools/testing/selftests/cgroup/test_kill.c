@@ -7,9 +7,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/types.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
-#include "../kselftest.h"
+#include "kselftest.h"
 #include "../pidfd/pidfd.h"
 #include "cgroup_util.h"
 
@@ -86,7 +87,7 @@ cleanup:
 		wait_for_pid(pids[i]);
 
 	if (ret == KSFT_PASS &&
-	    cg_read_strcmp(cgroup, "cgroup.events", "populated 0\n"))
+	    cg_read_strcmp_wait(cgroup, "cgroup.events", "populated 0\n"))
 		ret = KSFT_FAIL;
 
 	if (cgroup)
@@ -190,7 +191,8 @@ cleanup:
 		wait_for_pid(pids[i]);
 
 	if (ret == KSFT_PASS &&
-	    cg_read_strcmp(cgroup[0], "cgroup.events", "populated 0\n"))
+	    cg_read_strcmp_wait(cgroup[0], "cgroup.events",
+				   "populated 0\n"))
 		ret = KSFT_FAIL;
 
 	for (i = 9; i >= 0 && cgroup[i]; i--) {
@@ -251,9 +253,62 @@ cleanup:
 		wait_for_pid(pid);
 
 	if (ret == KSFT_PASS &&
-	    cg_read_strcmp(cgroup, "cgroup.events", "populated 0\n"))
+	    cg_read_strcmp_wait(cgroup, "cgroup.events", "populated 0\n"))
 		ret = KSFT_FAIL;
 
+	if (cgroup)
+		cg_destroy(cgroup);
+	free(cgroup);
+	return ret;
+}
+
+/*
+ * Test that a cgroup that was killed in the past can still be the target
+ * of clone3(CLONE_INTO_CGROUP): writing cgroup.kill must only kill the
+ * tasks in the cgroup at the time of the write, not tasks cloned into
+ * it afterwards.
+ */
+static int test_cgkill_clone_into_killed(const char *root)
+{
+	pid_t pid;
+	int cgroup_fd = -EBADF;
+	int ret = KSFT_FAIL;
+	char *cgroup = NULL;
+
+	cgroup = cg_name(root, "cg_test_clone_into_killed");
+	if (!cgroup)
+		goto cleanup;
+
+	if (cg_create(cgroup))
+		goto cleanup;
+
+	/* Kill the cgroup while it is still empty. */
+	if (cg_write(cgroup, "cgroup.kill", "1"))
+		goto cleanup;
+
+	cgroup_fd = dirfd_open_opath(cgroup);
+	if (cgroup_fd < 0)
+		goto cleanup;
+
+	pid = clone_into_cgroup(cgroup_fd);
+	if (pid < 0) {
+		if (errno == ENOSYS)
+			ret = KSFT_SKIP;
+		goto cleanup;
+	}
+
+	if (pid == 0)
+		exit(EXIT_SUCCESS);
+
+	/* The child must not be SIGKILLed; it has to exit cleanly. */
+	if (clone_reap(pid, WEXITED) != EXIT_SUCCESS)
+		goto cleanup;
+
+	ret = KSFT_PASS;
+
+cleanup:
+	if (cgroup_fd >= 0)
+		close(cgroup_fd);
 	if (cgroup)
 		cg_destroy(cgroup);
 	free(cgroup);
@@ -268,16 +323,19 @@ struct cgkill_test {
 	T(test_cgkill_simple),
 	T(test_cgkill_tree),
 	T(test_cgkill_forkbomb),
+	T(test_cgkill_clone_into_killed),
 };
 #undef T
 
 int main(int argc, char *argv[])
 {
 	char root[PATH_MAX];
-	int i, ret = EXIT_SUCCESS;
+	int i;
 
+	ksft_print_header();
 	if (cg_find_unified_root(root, sizeof(root), NULL))
 		ksft_exit_skip("cgroup v2 isn't mounted\n");
+	ksft_set_plan(ARRAY_SIZE(tests));
 	for (i = 0; i < ARRAY_SIZE(tests); i++) {
 		switch (tests[i].fn(root)) {
 		case KSFT_PASS:
@@ -287,11 +345,10 @@ int main(int argc, char *argv[])
 			ksft_test_result_skip("%s\n", tests[i].name);
 			break;
 		default:
-			ret = EXIT_FAILURE;
 			ksft_test_result_fail("%s\n", tests[i].name);
 			break;
 		}
 	}
 
-	return ret;
+	ksft_finished();
 }

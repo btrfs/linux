@@ -2,6 +2,7 @@
 #include <linux/cpu.h>
 
 #include <asm/apic.h>
+#include <asm/cpuid/api.h>
 #include <asm/memtype.h>
 #include <asm/msr.h>
 #include <asm/processor.h>
@@ -79,7 +80,7 @@ static bool parse_8000_001e(struct topo_scan *tscan)
 	if (!boot_cpu_has(X86_FEATURE_TOPOEXT))
 		return false;
 
-	cpuid_leaf(0x8000001e, &leaf);
+	cpuid_read(0x8000001e, &leaf);
 
 	/*
 	 * If leaf 0xb/0x26 is available, then the APIC ID and the domain
@@ -176,8 +177,10 @@ static void topoext_fixup(struct topo_scan *tscan)
 
 static void parse_topology_amd(struct topo_scan *tscan)
 {
-	if (cpu_feature_enabled(X86_FEATURE_AMD_HTR_CORES))
-		tscan->c->topo.cpu_type = cpuid_ebx(0x80000026);
+	if (cpu_feature_enabled(X86_FEATURE_AMD_HTR_CORES)) {
+		tscan->c->topo.hw_cpu_type = cpuid_ebx(0x80000026);
+		tscan->c->topo.cpu_type    = get_topology_cpu_type(tscan->c);
+	}
 
 	/*
 	 * Try to get SMT, CORE, TILE, and DIE shifts from extended

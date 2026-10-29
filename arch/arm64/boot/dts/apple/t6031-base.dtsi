@@ -1,0 +1,326 @@
+// SPDX-License-Identifier: GPL-2.0+ OR MIT
+/*
+ * Nodes common for T6031, T6032 and T6034 family SoCs (M3 Max/Ultra)
+ *
+ * Other names: H15J, H15S, "Palma"
+ *
+ * Copyright The Asahi Linux Contributors
+ */
+
+/ {
+	#address-cells = <2>;
+	#size-cells = <2>;
+
+	clkref: clock-ref {
+		compatible = "fixed-clock";
+		#clock-cells = <0>;
+		clock-frequency = <24000000>;
+		clock-output-names = "clkref";
+	};
+
+	cpus {
+		#address-cells = <2>;
+		#size-cells = <0>;
+
+		cpu-map {
+			cluster0 {
+				core0 {
+					cpu = <&cpu_e00>;
+				};
+
+				core1 {
+					cpu = <&cpu_e01>;
+				};
+
+				core2 {
+					cpu = <&cpu_e02>;
+				};
+
+				core3 {
+					cpu = <&cpu_e03>;
+				};
+			};
+
+			cluster1 {
+				core0 {
+					cpu = <&cpu_p00>;
+				};
+
+				core1 {
+					cpu = <&cpu_p01>;
+				};
+
+				core2 {
+					cpu = <&cpu_p02>;
+				};
+
+				core3 {
+					cpu = <&cpu_p03>;
+				};
+
+				core4 {
+					cpu = <&cpu_p04>;
+				};
+
+				core5 {
+					cpu = <&cpu_p05>;
+				};
+			};
+
+			cluster2 {
+				core0 {
+					cpu = <&cpu_p10>;
+				};
+
+				core1 {
+					cpu = <&cpu_p11>;
+				};
+
+				core2 {
+					cpu = <&cpu_p12>;
+				};
+
+				core3 {
+					cpu = <&cpu_p13>;
+				};
+
+				core4 {
+					cpu = <&cpu_p14>;
+				};
+
+				core5 {
+					cpu = <&cpu_p15>;
+				};
+			};
+		};
+
+		cpu_e00: cpu@0 {
+			device_type = "cpu";
+			compatible = "apple,sawtooth";
+			reg = <0x0 0x0>;
+			cpu-release-addr = <0 0>; /* to be filled by loader */
+			enable-method = "spin-table";
+
+			d-cache-size = <0x10000>;
+			i-cache-size = <0x20000>;
+			next-level-cache = <&l2_cache_0>;
+		};
+
+		cpu_e01: cpu@1 {
+			device_type = "cpu";
+			compatible = "apple,sawtooth";
+			reg = <0x0 0x1>;
+			cpu-release-addr = <0 0>; /* to be filled by loader */
+			enable-method = "spin-table";
+
+			d-cache-size = <0x10000>;
+			i-cache-size = <0x20000>;
+			next-level-cache = <&l2_cache_0>;
+		};
+
+		cpu_e02: cpu@2 {
+			device_type = "cpu";
+			compatible = "apple,sawtooth";
+			reg = <0x0 0x2>;
+			cpu-release-addr = <0 0>; /* to be filled by loader */
+			enable-method = "spin-table";
+
+			d-cache-size = <0x10000>;
+			i-cache-size = <0x20000>;
+			next-level-cache = <&l2_cache_0>;
+		};
+
+		cpu_e03: cpu@3 {
+			device_type = "cpu";
+			compatible = "apple,sawtooth";
+			reg = <0x0 0x3>;
+			cpu-release-addr = <0 0>; /* to be filled by loader */
+			enable-method = "spin-table";
+
+			d-cache-size = <0x10000>;
+			i-cache-size = <0x20000>;
+			next-level-cache = <&l2_cache_0>;
+		};
+
+		cpu_p00: cpu@10100 {
+			device_type = "cpu";
+			compatible = "apple,everest";
+			reg = <0x0 0x10100>;
+			cpu-release-addr = <0 0>; /* To be filled by loader */
+			enable-method = "spin-table";
+
+			d-cache-size = <0x20000>;
+			i-cache-size = <0x30000>;
+			next-level-cache = <&l2_cache_1>;
+		};
+
+		cpu_p01: cpu@10101 {
+			device_type = "cpu";
+			compatible = "apple,everest";
+			reg = <0x0 0x10101>;
+			cpu-release-addr = <0 0>; /* To be filled by loader */
+			enable-method = "spin-table";
+
+			d-cache-size = <0x20000>;
+			i-cache-size = <0x30000>;
+			next-level-cache = <&l2_cache_1>;
+		};
+
+		cpu_p02: cpu@10102 {
+			device_type = "cpu";
+			compatible = "apple,everest";
+			reg = <0x0 0x10102>;
+			cpu-release-addr = <0 0>; /* To be filled by loader */
+			enable-method = "spin-table";
+
+			d-cache-size = <0x20000>;
+			i-cache-size = <0x30000>;
+			next-level-cache = <&l2_cache_1>;
+		};
+
+		cpu_p03: cpu@10103 {
+			device_type = "cpu";
+			compatible = "apple,everest";
+			reg = <0x0 0x10103>;
+			cpu-release-addr = <0 0>; /* To be filled by loader */
+			enable-method = "spin-table";
+
+			d-cache-size = <0x20000>;
+			i-cache-size = <0x30000>;
+			next-level-cache = <&l2_cache_1>;
+		};
+
+		cpu_p04: cpu@10104 {
+			device_type = "cpu";
+			compatible = "apple,everest";
+			reg = <0x0 0x10104>;
+			cpu-release-addr = <0 0>; /* To be filled by loader */
+			enable-method = "spin-table";
+
+			d-cache-size = <0x20000>;
+			i-cache-size = <0x30000>;
+			next-level-cache = <&l2_cache_1>;
+		};
+
+		cpu_p05: cpu@10105 {
+			device_type = "cpu";
+			compatible = "apple,everest";
+			reg = <0x0 0x10105>;
+			cpu-release-addr = <0 0>; /* To be filled by loader */
+			enable-method = "spin-table";
+
+			d-cache-size = <0x20000>;
+			i-cache-size = <0x30000>;
+			next-level-cache = <&l2_cache_1>;
+		};
+
+		cpu_p10: cpu@10200 {
+			device_type = "cpu";
+			compatible = "apple,everest";
+			reg = <0x0 0x10200>;
+			cpu-release-addr = <0 0>; /* To be filled by loader */
+			enable-method = "spin-table";
+
+			d-cache-size = <0x20000>;
+			i-cache-size = <0x30000>;
+			next-level-cache = <&l2_cache_2>;
+		};
+
+		cpu_p11: cpu@10201 {
+			device_type = "cpu";
+			compatible = "apple,everest";
+			reg = <0x0 0x10201>;
+			cpu-release-addr = <0 0>; /* To be filled by loader */
+			enable-method = "spin-table";
+
+			d-cache-size = <0x20000>;
+			i-cache-size = <0x30000>;
+			next-level-cache = <&l2_cache_2>;
+		};
+
+		cpu_p12: cpu@10202 {
+			device_type = "cpu";
+			compatible = "apple,everest";
+			reg = <0x0 0x10202>;
+			cpu-release-addr = <0 0>; /* To be filled by loader */
+			enable-method = "spin-table";
+
+			d-cache-size = <0x20000>;
+			i-cache-size = <0x30000>;
+			next-level-cache = <&l2_cache_2>;
+		};
+
+		cpu_p13: cpu@10203 {
+			device_type = "cpu";
+			compatible = "apple,everest";
+			reg = <0x0 0x10203>;
+			cpu-release-addr = <0 0>; /* To be filled by loader */
+			enable-method = "spin-table";
+
+			d-cache-size = <0x20000>;
+			i-cache-size = <0x30000>;
+			next-level-cache = <&l2_cache_2>;
+		};
+
+		cpu_p14: cpu@10204 {
+			device_type = "cpu";
+			compatible = "apple,everest";
+			reg = <0x0 0x10204>;
+			cpu-release-addr = <0 0>; /* To be filled by loader */
+			enable-method = "spin-table";
+
+			d-cache-size = <0x20000>;
+			i-cache-size = <0x30000>;
+			next-level-cache = <&l2_cache_2>;
+		};
+
+		cpu_p15: cpu@10205 {
+			device_type = "cpu";
+			compatible = "apple,everest";
+			reg = <0x0 0x10205>;
+			cpu-release-addr = <0 0>; /* To be filled by loader */
+			enable-method = "spin-table";
+
+			d-cache-size = <0x20000>;
+			i-cache-size = <0x30000>;
+			next-level-cache = <&l2_cache_2>;
+		};
+
+		l2_cache_0: l2-cache-0 {
+			compatible = "cache";
+			cache-level = <2>;
+			cache-size = <0x400000>;
+			cache-unified;
+		};
+
+		l2_cache_1: l2-cache-1 {
+			compatible = "cache";
+			cache-level = <2>;
+			cache-size = <0x1000000>;
+			cache-unified;
+		};
+
+		l2_cache_2: l2-cache-2 {
+			compatible = "cache";
+			cache-level = <2>;
+			cache-size = <0x1000000>;
+			cache-unified;
+		};
+	};
+
+	reserved-memory {
+		ranges;
+		#address-cells = <2>;
+		#size-cells = <2>;
+	};
+
+	timer {
+		compatible = "arm,armv8-timer";
+		interrupt-parent = <&aic>;
+		interrupts = <AIC_FIQ 0 AIC_TMR_GUEST_PHYS IRQ_TYPE_LEVEL_HIGH>,
+			     <AIC_FIQ 0 AIC_TMR_GUEST_VIRT IRQ_TYPE_LEVEL_HIGH>,
+			     <AIC_FIQ 0 AIC_TMR_HV_PHYS IRQ_TYPE_LEVEL_HIGH>,
+			     <AIC_FIQ 0 AIC_TMR_HV_VIRT IRQ_TYPE_LEVEL_HIGH>;
+		interrupt-names = "phys", "virt", "hyp-phys", "hyp-virt";
+	};
+};

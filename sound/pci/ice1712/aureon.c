@@ -1891,6 +1891,8 @@ static int aureon_add_controls(struct snd_ice1712 *ice)
 			for (i = 0; i < ARRAY_SIZE(cs8415_controls); i++) {
 				struct snd_kcontrol *kctl;
 				kctl = snd_ctl_new1(&cs8415_controls[i], ice);
+				if (!kctl)
+					return -ENOMEM;
 				if (i > 1)
 					kctl->id.device = ice->pcm->device;
 				err = snd_ctl_add(ice->card, kctl);
@@ -2076,7 +2078,7 @@ static int aureon_init(struct snd_ice1712 *ice)
 	struct aureon_spec *spec;
 	int i, err;
 
-	spec = kzalloc(sizeof(*spec), GFP_KERNEL);
+	spec = kzalloc_obj(*spec);
 	if (!spec)
 		return -ENOMEM;
 	ice->spec = spec;
@@ -2091,7 +2093,7 @@ static int aureon_init(struct snd_ice1712 *ice)
 	}
 
 	/* to remember the register values of CS8415 */
-	ice->akm = kzalloc(sizeof(struct snd_akm4xxx), GFP_KERNEL);
+	ice->akm = kzalloc_obj(struct snd_akm4xxx);
 	if (!ice->akm)
 		return -ENOMEM;
 	ice->akm_codecs = 1;

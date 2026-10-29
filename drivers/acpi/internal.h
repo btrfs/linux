@@ -27,7 +27,6 @@ static inline void acpi_pci_link_init(void) {}
 void acpi_processor_init(void);
 void acpi_platform_init(void);
 void acpi_pnp_init(void);
-void acpi_int340x_thermal_init(void);
 int acpi_sysfs_init(void);
 void acpi_gpe_apply_masked_gpes(void);
 void acpi_container_init(void);
@@ -158,6 +157,7 @@ void acpi_turn_off_unused_power_resources(void);
                               Device Power Management
    -------------------------------------------------------------------------- */
 int acpi_device_get_power(struct acpi_device *device, int *state);
+int acpi_bus_init_power(struct acpi_device *device);
 int acpi_wakeup_device_init(void);
 
 /* --------------------------------------------------------------------------

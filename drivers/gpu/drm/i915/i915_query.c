@@ -6,6 +6,8 @@
 
 #include <linux/nospec.h>
 
+#include <drm/drm_print.h>
+
 #include "i915_drv.h"
 #include "i915_perf.h"
 #include "i915_query.h"
@@ -401,8 +403,10 @@ static int query_perf_config_list(struct drm_i915_private *i915,
 		ids = krealloc(oa_config_ids,
 			       n_configs * sizeof(*oa_config_ids),
 			       GFP_KERNEL);
-		if (!ids)
+		if (!ids) {
+			kfree(oa_config_ids);
 			return -ENOMEM;
+		}
 
 		alloc = fetch_and_zero(&n_configs);
 

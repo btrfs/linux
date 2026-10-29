@@ -7,6 +7,7 @@
  * Written by Theodore Ts'o, 2010.
  */
 
+#include <linux/blk-crypto.h>
 #include <linux/fs.h>
 #include <linux/time.h>
 #include <linux/highuid.h>
@@ -15,13 +16,13 @@
 #include <linux/string.h>
 #include <linux/buffer_head.h>
 #include <linux/writeback.h>
-#include <linux/pagevec.h>
 #include <linux/mpage.h>
 #include <linux/namei.h>
 #include <linux/uio.h>
 #include <linux/bio.h>
 #include <linux/workqueue.h>
 #include <linux/kernel.h>
+#include <linux/iomap.h>
 #include <linux/slab.h>
 #include <linux/mm.h>
 #include <linux/sched/mm.h>
@@ -29,6 +30,8 @@
 #include "ext4_jbd2.h"
 #include "xattr.h"
 #include "acl.h"
+
+#include <trace/events/ext4.h>
 
 static struct kmem_cache *io_end_cachep;
 static struct kmem_cache *io_end_vec_cachep;
@@ -103,17 +106,11 @@ static void ext4_finish_bio(struct bio *bio)
 
 	bio_for_each_folio_all(fi, bio) {
 		struct folio *folio = fi.folio;
-		struct folio *io_folio = NULL;
 		struct buffer_head *bh, *head;
 		size_t bio_start = fi.offset;
 		size_t bio_end = bio_start + fi.length;
 		unsigned under_io = 0;
 		unsigned long flags;
-
-		if (fscrypt_is_bounce_folio(folio)) {
-			io_folio = folio;
-			folio = fscrypt_pagecache_folio(folio);
-		}
 
 		if (bio->bi_status) {
 			int err = blk_status_to_errno(bio->bi_status);
@@ -139,10 +136,8 @@ static void ext4_finish_bio(struct bio *bio)
 			}
 		} while ((bh = bh->b_this_page) != head);
 		spin_unlock_irqrestore(&head->b_uptodate_lock, flags);
-		if (!under_io) {
-			fscrypt_free_bounce_page(&io_folio->page);
+		if (!under_io)
 			folio_end_writeback(folio);
-		}
 	}
 }
 
@@ -168,7 +163,7 @@ static void ext4_release_io_end(ext4_io_end_t *io_end)
  * written. On IO failure, check if journal abort is needed. Note that
  * we are protected from truncate touching same part of extent tree by the
  * fact that truncate code waits for all DIO to finish (thus exclusion from
- * direct IO is achieved) and also waits for PageWriteback bits. Thus we
+ * direct IO is achieved) and also waits for writeback to complete. Thus we
  * cannot get to ext4_ext_truncate() before all IOs overlapping that range are
  * completed (happens from ext4_free_ioend()).
  */
@@ -179,7 +174,7 @@ static int ext4_end_io_end(ext4_io_end_t *io_end)
 	struct super_block *sb = inode->i_sb;
 	int ret = 0;
 
-	ext4_debug("ext4_end_io_nolock: io_end 0x%p from inode %lu,list->next 0x%p,"
+	ext4_debug("ext4_end_io_nolock: io_end 0x%p from inode %llu,list->next 0x%p,"
 		   "list->prev 0x%p\n",
 		   io_end, inode->i_ino, io_end->list.next, io_end->list.prev);
 
@@ -203,7 +198,7 @@ static int ext4_end_io_end(ext4_io_end_t *io_end)
 		ext4_msg(sb, KERN_EMERG,
 			 "failed to convert unwritten extents to written "
 			 "extents -- potential data loss!  "
-			 "(inode %lu, error %d)", inode->i_ino, ret);
+			 "(inode %llu, error %d)", inode->i_ino, ret);
 	}
 
 	ext4_clear_io_unwritten_flag(io_end);
@@ -220,7 +215,7 @@ static void dump_completed_IO(struct inode *inode, struct list_head *head)
 	if (list_empty(head))
 		return;
 
-	ext4_debug("Dump inode %lu completed io list\n", inode->i_ino);
+	ext4_debug("Dump inode %llu completed io list\n", inode->i_ino);
 	list_for_each_entry(io_end, head, list) {
 		cur = &io_end->list;
 		before = cur->prev;
@@ -228,7 +223,7 @@ static void dump_completed_IO(struct inode *inode, struct list_head *head)
 		after = cur->next;
 		io_end1 = container_of(after, ext4_io_end_t, list);
 
-		ext4_debug("io 0x%p from inode %lu,prev 0x%p,next 0x%p\n",
+		ext4_debug("io 0x%p from inode %llu,prev 0x%p,next 0x%p\n",
 			    io_end, inode->i_ino, io_end0, io_end1);
 	}
 #endif
@@ -365,7 +360,7 @@ static void ext4_end_bio(struct bio *bio)
 	if (bio->bi_status) {
 		struct inode *inode = io_end->inode;
 
-		ext4_warning(inode->i_sb, "I/O error %d writing to inode %lu "
+		ext4_warning(inode->i_sb, "I/O error %d writing to inode %llu "
 			     "starting block %llu)",
 			     bio->bi_status, inode->i_ino,
 			     (unsigned long long)
@@ -401,7 +396,7 @@ void ext4_io_submit(struct ext4_io_submit *io)
 	if (bio) {
 		if (io->io_wbc->sync_mode == WB_SYNC_ALL)
 			io->io_bio->bi_opf |= REQ_SYNC;
-		submit_bio(io->io_bio);
+		blk_crypto_submit_bio(io->io_bio);
 	}
 	io->io_bio = NULL;
 }
@@ -415,6 +410,8 @@ void ext4_io_submit_init(struct ext4_io_submit *io,
 }
 
 static void io_submit_init_bio(struct ext4_io_submit *io,
+			       struct inode *inode,
+			       struct folio *folio,
 			       struct buffer_head *bh)
 {
 	struct bio *bio;
@@ -424,44 +421,53 @@ static void io_submit_init_bio(struct ext4_io_submit *io,
 	 * __GFP_DIRECT_RECLAIM is set, see comments for bio_alloc_bioset().
 	 */
 	bio = bio_alloc(bh->b_bdev, BIO_MAX_VECS, REQ_OP_WRITE, GFP_NOIO);
-	fscrypt_set_bio_crypt_ctx_bh(bio, bh, GFP_NOIO);
+	fscrypt_set_bio_crypt_ctx(bio, inode, folio_pos(folio) + bh_offset(bh),
+				  GFP_NOIO);
 	bio->bi_iter.bi_sector = bh->b_blocknr * (bh->b_size >> 9);
 	bio->bi_end_io = ext4_end_bio;
 	bio->bi_private = ext4_get_io_end(io->io_end);
+	bio->bi_write_hint = inode->i_write_hint;
 	io->io_bio = bio;
 	io->io_next_block = bh->b_blocknr;
 	wbc_init_bio(io->io_wbc, bio);
 }
 
+static bool io_submit_need_new_bio(struct ext4_io_submit *io,
+				   struct inode *inode,
+				   struct folio *folio,
+				   struct buffer_head *bh)
+{
+	if (bh->b_blocknr != io->io_next_block)
+		return true;
+	if (!fscrypt_mergeable_bio(io->io_bio, inode,
+			folio_pos(folio) + bh_offset(bh)))
+		return true;
+	return false;
+}
+
 static void io_submit_add_bh(struct ext4_io_submit *io,
 			     struct inode *inode,
 			     struct folio *folio,
-			     struct folio *io_folio,
 			     struct buffer_head *bh)
 {
-	if (io->io_bio && (bh->b_blocknr != io->io_next_block ||
-			   !fscrypt_mergeable_bio_bh(io->io_bio, bh))) {
+	if (io->io_bio && io_submit_need_new_bio(io, inode, folio, bh)) {
 submit_and_retry:
 		ext4_io_submit(io);
 	}
-	if (io->io_bio == NULL) {
-		io_submit_init_bio(io, bh);
-		io->io_bio->bi_write_hint = inode->i_write_hint;
-	}
-	if (!bio_add_folio(io->io_bio, io_folio, bh->b_size, bh_offset(bh)))
+	if (io->io_bio == NULL)
+		io_submit_init_bio(io, inode, folio, bh);
+	if (!bio_add_folio(io->io_bio, folio, bh->b_size, bh_offset(bh)))
 		goto submit_and_retry;
 	wbc_account_cgroup_owner(io->io_wbc, folio, bh->b_size);
 	io->io_next_block++;
 }
 
-int ext4_bio_write_folio(struct ext4_io_submit *io, struct folio *folio,
+void ext4_bio_write_folio(struct ext4_io_submit *io, struct folio *folio,
 		size_t len)
 {
-	struct folio *io_folio = folio;
 	struct inode *inode = folio->mapping->host;
 	unsigned block_start;
 	struct buffer_head *bh, *head;
-	int ret = 0;
 	int nr_to_submit = 0;
 	struct writeback_control *wbc = io->io_wbc;
 	bool keep_towrite = false;
@@ -523,62 +529,17 @@ int ext4_bio_write_folio(struct ext4_io_submit *io, struct folio *folio,
 		nr_to_submit++;
 	} while ((bh = bh->b_this_page) != head);
 
-	/* Nothing to submit? Just unlock the folio... */
-	if (!nr_to_submit)
-		return 0;
+	if (!nr_to_submit) {
+		/*
+		 * We have nothing to submit. Just cycle the folio through
+		 * writeback state to properly update xarray tags.
+		 */
+		__folio_start_writeback(folio, keep_towrite);
+		folio_end_writeback(folio);
+		return;
+	}
 
 	bh = head = folio_buffers(folio);
-
-	/*
-	 * If any blocks are being written to an encrypted file, encrypt them
-	 * into a bounce page.  For simplicity, just encrypt until the last
-	 * block which might be needed.  This may cause some unneeded blocks
-	 * (e.g. holes) to be unnecessarily encrypted, but this is rare and
-	 * can't happen in the common case of blocksize == PAGE_SIZE.
-	 */
-	if (fscrypt_inode_uses_fs_layer_crypto(inode)) {
-		gfp_t gfp_flags = GFP_NOFS;
-		unsigned int enc_bytes = round_up(len, i_blocksize(inode));
-		struct page *bounce_page;
-
-		/*
-		 * Since bounce page allocation uses a mempool, we can only use
-		 * a waiting mask (i.e. request guaranteed allocation) on the
-		 * first page of the bio.  Otherwise it can deadlock.
-		 */
-		if (io->io_bio)
-			gfp_flags = GFP_NOWAIT;
-	retry_encrypt:
-		bounce_page = fscrypt_encrypt_pagecache_blocks(folio,
-					enc_bytes, 0, gfp_flags);
-		if (IS_ERR(bounce_page)) {
-			ret = PTR_ERR(bounce_page);
-			if (ret == -ENOMEM &&
-			    (io->io_bio || wbc->sync_mode == WB_SYNC_ALL)) {
-				gfp_t new_gfp_flags = GFP_NOFS;
-				if (io->io_bio)
-					ext4_io_submit(io);
-				else
-					new_gfp_flags |= __GFP_NOFAIL;
-				memalloc_retry_wait(gfp_flags);
-				gfp_flags = new_gfp_flags;
-				goto retry_encrypt;
-			}
-
-			printk_ratelimited(KERN_ERR "%s: ret = %d\n", __func__, ret);
-			folio_redirty_for_writepage(wbc, folio);
-			do {
-				if (buffer_async_write(bh)) {
-					clear_buffer_async_write(bh);
-					set_buffer_dirty(bh);
-				}
-				bh = bh->b_this_page;
-			} while (bh != head);
-
-			return ret;
-		}
-		io_folio = page_folio(bounce_page);
-	}
 
 	__folio_start_writeback(folio, keep_towrite);
 
@@ -586,8 +547,204 @@ int ext4_bio_write_folio(struct ext4_io_submit *io, struct folio *folio,
 	do {
 		if (!buffer_async_write(bh))
 			continue;
-		io_submit_add_bh(io, inode, folio, io_folio, bh);
+		io_submit_add_bh(io, inode, folio, bh);
 	} while ((bh = bh->b_this_page) != head);
+}
 
-	return 0;
+/*
+ * If the current writeback range starts beyond the zeroed EOF pending
+ * range that straddles i_disksize, wait for the zeroed data from
+ * ext4_block_zero_eof() to be written out first. Otherwise, extending
+ * i_disksize may expose stale data in the old EOF block.
+ */
+static void ext4_iomap_wb_disksize_pending_wait(struct inode *inode,
+						loff_t pos, size_t size)
+{
+	loff_t disksize = READ_ONCE(EXT4_I(inode)->i_disksize);
+	loff_t pstart, plen;
+
+	/*
+	 * Overwrite I/Os and I/Os covering the EOF block do not need to
+	 * wait: the former do not advance i_disksize past the pending
+	 * boundary, and the latter are the pending I/O itself (cleared in
+	 * the bio completion path).
+	 */
+	if (pos < round_up(disksize, i_blocksize(inode)))
+		return;
+
+	plen = ext4_iomap_get_disksize_pending_range(inode, &pstart);
+	if (!plen || pos < pstart + plen)
+		return;
+
+	trace_ext4_iomap_wb_disksize_pending_wait(inode, pos, size);
+	ext4_iomap_wait_disksize_pending(inode);
+}
+
+static int ext4_iomap_wb_update_disksize(handle_t *handle, struct inode *inode,
+					 loff_t end, bool is_disksize_grow)
+{
+	loff_t new_disksize, i_size;
+	struct ext4_inode_info *ei = EXT4_I(inode);
+	int ret;
+
+	/*
+	 * Races with truncate are avoided by checking i_size under
+	 * i_data_sem.
+	 */
+	down_write(&ei->i_data_sem);
+	i_size = i_size_read(inode);
+
+	/*
+	 * EXT4_STATE_DISKSIZE_GROW_PENDING is cleared when the pending
+	 * I/O completes. However, another thread may have re-set the bit
+	 * between that point and here, meaning i_disksize has already
+	 * been advanced and a new EOF zeroing has been initiated. In that
+	 * case, do not advance i_disksize to i_size; leave it to the
+	 * next pending grow ioend.
+	 */
+	if (is_disksize_grow &&
+	    ext4_test_inode_state(inode, EXT4_STATE_DISKSIZE_GROW_PENDING))
+		is_disksize_grow = false;
+
+	/*
+	 * Update i_disksize to i_size when EXT4_IOMAP_IOEND_DISKSIZE_GROW_IO
+	 * completes. This is safe because we never directly allocate written
+	 * blocks during buffered writes.
+	 *
+	 * This ensures that i_disksize is correctly advanced during
+	 * truncate-up or append fallocate on a block-unaligned file,
+	 * preventing it from remaining stale. The tradeoff is that zeroed
+	 * data may be exposed after crash recovery if dirty data in this
+	 * range is not yet on disk, but stale data will never be exposed.
+	 * This is because the extent is only converted to written state
+	 * after the data has been persisted.
+	 */
+	new_disksize = is_disksize_grow ? i_size : min(end, i_size);
+	if (new_disksize > ei->i_disksize) {
+		trace_ext4_iomap_wb_update_disksize(inode, end, i_size,
+				ei->i_disksize, new_disksize, is_disksize_grow);
+		WRITE_ONCE(ei->i_disksize, new_disksize);
+	}
+	up_write(&ei->i_data_sem);
+	ret = ext4_mark_inode_dirty(handle, inode);
+	if (ret)
+		EXT4_ERROR_INODE_ERR(inode, -ret, "Failed to mark inode dirty");
+
+	return ret;
+}
+
+static void ext4_iomap_finish_ioend(struct iomap_ioend *ioend)
+{
+	struct inode *inode = ioend->io_inode;
+	struct super_block *sb = inode->i_sb;
+	loff_t pos = ioend->io_offset;
+	size_t size = ioend->io_size;
+	loff_t end = pos + size;
+	unsigned long io_mode = (unsigned long)ioend->io_private;
+	bool is_disksize_grow = (io_mode == EXT4_IOMAP_IOEND_DISKSIZE_GROW_IO);
+	handle_t *handle;
+	int credits;
+	int ret, err;
+
+	ret = blk_status_to_errno(ioend->io_bio.bi_status);
+	if (is_disksize_grow)
+		trace_ext4_iomap_wb_disksize_pending_complete(ioend->io_inode,
+				ioend->io_offset, ioend->io_size, ret);
+	if (unlikely(ret)) {
+		if (test_opt(sb, DATA_ERR_ABORT) && !ext4_emergency_state(sb))
+			jbd2_journal_abort(EXT4_SB(sb)->s_journal, ret);
+		goto out;
+	}
+
+	if (!(ioend->io_flags & IOMAP_IOEND_UNWRITTEN) &&
+	    end <= READ_ONCE(EXT4_I(inode)->i_disksize) && !is_disksize_grow)
+		goto out;
+
+	/* Wait for disksize-pending zeroed data to be written out. */
+	ext4_iomap_wb_disksize_pending_wait(inode, pos, size);
+
+	/*
+	 * We may need to convert one extent, update the i_disksize and
+	 * dirty the inode.
+	 */
+	credits = ext4_chunk_trans_blocks(inode,
+			EXT4_MAX_BLOCKS(size, pos, inode->i_blkbits));
+	handle = ext4_journal_start(inode, EXT4_HT_EXT_CONVERT, credits);
+	if (IS_ERR(handle)) {
+		ret = PTR_ERR(handle);
+		goto out_err;
+	}
+
+	/* Update on-disk size after I/O is completed. */
+	if (end > READ_ONCE(EXT4_I(inode)->i_disksize) || is_disksize_grow) {
+		ret = ext4_iomap_wb_update_disksize(handle, inode, end,
+						    is_disksize_grow);
+		if (ret)
+			goto out_journal;
+	}
+
+	if (ioend->io_flags & IOMAP_IOEND_UNWRITTEN)
+		ret = ext4_convert_unwritten_extents(handle, inode, pos,
+						     size, NULL);
+
+out_journal:
+	err = ext4_journal_stop(handle);
+	if (!ret)
+		ret = err;
+out_err:
+	if (ret < 0 && !ext4_emergency_state(sb)) {
+		ext4_msg(sb, KERN_EMERG,
+			 "failed to convert unwritten extents to written extents or update inode size -- potential data loss! (inode %llu, error %d)",
+			 inode->i_ino, ret);
+	}
+out:
+	iomap_finish_ioends(ioend, ret);
+}
+
+/*
+ * Work on buffered iomap completed IO, to convert unwritten extents to
+ * mapped extents
+ */
+void ext4_iomap_end_io(struct work_struct *work)
+{
+	struct ext4_inode_info *ei = container_of(work, struct ext4_inode_info,
+						  i_rsv_conversion_work);
+	struct iomap_ioend *ioend;
+	struct list_head ioend_list;
+	unsigned long flags;
+
+	spin_lock_irqsave(&ei->i_completed_io_lock, flags);
+	list_replace_init(&ei->i_rsv_conversion_list, &ioend_list);
+	spin_unlock_irqrestore(&ei->i_completed_io_lock, flags);
+
+	iomap_sort_ioends(&ioend_list);
+	while (!list_empty(&ioend_list)) {
+		ioend = list_entry(ioend_list.next, struct iomap_ioend, io_list);
+		list_del_init(&ioend->io_list);
+		iomap_ioend_try_merge(ioend, &ioend_list);
+		ext4_iomap_finish_ioend(ioend);
+	}
+}
+
+void ext4_iomap_end_bio(struct bio *bio)
+{
+	struct iomap_ioend *ioend = iomap_ioend_from_bio(bio);
+	struct ext4_inode_info *ei = EXT4_I(ioend->io_inode);
+	unsigned long io_mode = (unsigned long)ioend->io_private;
+	unsigned long flags;
+
+	/*
+	 * This is a disksize-pending I/O: clear the disksize-pending
+	 * state set in ext4_block_zero_eof() and wake up all waiters
+	 * that will update the inode i_disksize.
+	 */
+	if (io_mode == EXT4_IOMAP_IOEND_DISKSIZE_GROW_IO)
+		ext4_iomap_clear_disksize_pending(ioend->io_inode);
+
+	spin_lock_irqsave(&ei->i_completed_io_lock, flags);
+	if (list_empty(&ei->i_rsv_conversion_list))
+		queue_work(EXT4_SB(ioend->io_inode->i_sb)->rsv_conversion_wq,
+			   &ei->i_rsv_conversion_work);
+	list_add_tail(&ioend->io_list, &ei->i_rsv_conversion_list);
+	spin_unlock_irqrestore(&ei->i_completed_io_lock, flags);
 }

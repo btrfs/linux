@@ -616,7 +616,7 @@ static int alx_set_mac_address(struct net_device *netdev, void *data)
 static int alx_alloc_tx_ring(struct alx_priv *alx, struct alx_tx_queue *txq,
 			     int offset)
 {
-	txq->bufs = kcalloc(txq->count, sizeof(struct alx_buffer), GFP_KERNEL);
+	txq->bufs = kzalloc_objs(struct alx_buffer, txq->count);
 	if (!txq->bufs)
 		return -ENOMEM;
 
@@ -630,7 +630,7 @@ static int alx_alloc_tx_ring(struct alx_priv *alx, struct alx_tx_queue *txq,
 static int alx_alloc_rx_ring(struct alx_priv *alx, struct alx_rx_queue *rxq,
 			     int offset)
 {
-	rxq->bufs = kcalloc(rxq->count, sizeof(struct alx_buffer), GFP_KERNEL);
+	rxq->bufs = kzalloc_objs(struct alx_buffer, rxq->count);
 	if (!rxq->bufs)
 		return -ENOMEM;
 
@@ -746,7 +746,7 @@ static int alx_alloc_napis(struct alx_priv *alx)
 
 	/* allocate alx_napi structures */
 	for (i = 0; i < alx->num_napi; i++) {
-		np = kzalloc(sizeof(struct alx_napi), GFP_KERNEL);
+		np = kzalloc_obj(struct alx_napi);
 		if (!np)
 			goto err_out;
 
@@ -758,7 +758,7 @@ static int alx_alloc_napis(struct alx_priv *alx)
 	/* allocate tx queues */
 	for (i = 0; i < alx->num_txq; i++) {
 		np = alx->qnapi[i];
-		txq = kzalloc(sizeof(*txq), GFP_KERNEL);
+		txq = kzalloc_obj(*txq);
 		if (!txq)
 			goto err_out;
 
@@ -775,7 +775,7 @@ static int alx_alloc_napis(struct alx_priv *alx)
 
 	/* allocate rx queues */
 	np = alx->qnapi[0];
-	rxq = kzalloc(sizeof(*rxq), GFP_KERNEL);
+	rxq = kzalloc_obj(*rxq);
 	if (!rxq)
 		goto err_out;
 
@@ -1727,15 +1727,12 @@ static int alx_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 	 * shared register for the high 32 bits, so only a single, aligned,
 	 * 4 GB physical address range can be used for descriptors.
 	 */
-	if (!dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(64))) {
-		dev_dbg(&pdev->dev, "DMA to 64-BIT addresses\n");
-	} else {
-		err = dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(32));
-		if (err) {
-			dev_err(&pdev->dev, "No usable DMA config, aborting\n");
-			goto out_pci_disable;
-		}
+	err = dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(64));
+	if (err) {
+		dev_err(&pdev->dev, "No usable DMA config, aborting\n");
+		goto out_pci_disable;
 	}
+	dev_dbg(&pdev->dev, "DMA to 64-BIT addresses\n");
 
 	err = pci_request_mem_regions(pdev, alx_drv_name);
 	if (err) {

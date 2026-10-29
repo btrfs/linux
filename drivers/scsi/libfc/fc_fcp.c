@@ -358,7 +358,7 @@ static void fc_fcp_can_queue_ramp_up(struct fc_lport *lport)
 	unsigned long flags;
 	int can_queue;
 
-	spin_lock_irqsave(lport->host->host_lock, flags);
+	spin_lock_irqsave(&lport->host->host_lock, flags);
 
 	if (si->last_can_queue_ramp_up_time &&
 	    (time_before(jiffies, si->last_can_queue_ramp_up_time +
@@ -381,7 +381,7 @@ static void fc_fcp_can_queue_ramp_up(struct fc_lport *lport)
 		     "can_queue to %d.\n", can_queue);
 
 unlock:
-	spin_unlock_irqrestore(lport->host->host_lock, flags);
+	spin_unlock_irqrestore(&lport->host->host_lock, flags);
 }
 
 /**
@@ -401,7 +401,7 @@ static bool fc_fcp_can_queue_ramp_down(struct fc_lport *lport)
 	int can_queue;
 	bool changed = false;
 
-	spin_lock_irqsave(lport->host->host_lock, flags);
+	spin_lock_irqsave(&lport->host->host_lock, flags);
 
 	if (si->last_can_queue_ramp_down_time &&
 	    (time_before(jiffies, si->last_can_queue_ramp_down_time +
@@ -418,7 +418,7 @@ static bool fc_fcp_can_queue_ramp_down(struct fc_lport *lport)
 	changed = true;
 
 unlock:
-	spin_unlock_irqrestore(lport->host->host_lock, flags);
+	spin_unlock_irqrestore(&lport->host->host_lock, flags);
 	return changed;
 }
 
@@ -1854,7 +1854,8 @@ static inline int fc_fcp_lport_queue_ready(struct fc_lport *lport)
  *
  * This is the i/o strategy routine, called by the SCSI layer.
  */
-int fc_queuecommand(struct Scsi_Host *shost, struct scsi_cmnd *sc_cmd)
+enum scsi_qc_status fc_queuecommand(struct Scsi_Host *shost,
+				    struct scsi_cmnd *sc_cmd)
 {
 	struct fc_lport *lport = shost_priv(shost);
 	struct fc_rport *rport = starget_to_rport(scsi_target(sc_cmd->device));
@@ -2297,7 +2298,7 @@ int fc_fcp_init(struct fc_lport *lport)
 	if (!lport->tt.fcp_abort_io)
 		lport->tt.fcp_abort_io = fc_fcp_abort_io;
 
-	si = kzalloc(sizeof(struct fc_fcp_internal), GFP_KERNEL);
+	si = kzalloc_obj(struct fc_fcp_internal);
 	if (!si)
 		return -ENOMEM;
 	lport->scsi_priv = si;

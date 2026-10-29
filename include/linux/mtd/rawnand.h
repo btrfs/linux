@@ -2,7 +2,7 @@
 /*
  *  Copyright © 2000-2010 David Woodhouse <dwmw2@infradead.org>
  *                        Steven J. Hill <sjhill@realitydiluted.com>
- *		          Thomas Gleixner <tglx@linutronix.de>
+ *		          Thomas Gleixner <tglx@kernel.org>
  *
  * Info:
  *	Contains standard defines and IDs for NAND flash devices
@@ -1592,7 +1592,7 @@ void nand_wait_ready(struct nand_chip *chip);
 
 /*
  * Free resources held by the NAND device, must be called on error after a
- * sucessful nand_scan().
+ * successful nand_scan().
  */
 void nand_cleanup(struct nand_chip *chip);
 

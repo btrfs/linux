@@ -113,7 +113,9 @@ struct ksmbd_startup_request {
 	__u32	max_connections;	/* Number of maximum simultaneous connections */
 	__s8	bind_interfaces_only;
 	__u32	max_ip_connections;	/* Number of maximum connection per ip address */
-	__s8	reserved[499];		/* Reserved room */
+	__s8	aapl_model[32];		/* AAPL model string for Finder icon, e.g. "Xserve" */
+	__u32	max_sessions_per_connection; /* Maximum sessions per connection */
+	__s8	reserved[463];		/* Reserved room */
 	__u32	ifc_list_sz;		/* interfaces list size */
 	__s8	____payload[];
 } __packed;
@@ -147,7 +149,9 @@ struct ksmbd_login_response {
 	__u16	status;
 	__u16	hash_sz;			/* hash size */
 	__s8	hash[KSMBD_REQ_MAX_HASH_SZ];	/* password hash */
-	__u32	reserved[16];			/* Reserved room */
+	__u32	session_expiry_lo;	/* Kerberos ticket expiry, SPNEGO only */
+	__u32	session_expiry_hi;
+	__u32	reserved[14];			/* Reserved room */
 };
 
 /*
@@ -377,6 +381,10 @@ enum KSMBD_TREE_CONN_STATUS {
 #define KSMBD_SHARE_FLAG_UPDATE				BIT(14)
 #define KSMBD_SHARE_FLAG_CROSSMNT			BIT(15)
 #define KSMBD_SHARE_FLAG_CONTINUOUS_AVAILABILITY	BIT(16)
+#define KSMBD_SHARE_FLAG_HIDE_UNREADABLE		BIT(17)
+#define KSMBD_SHARE_FLAG_TIME_MACHINE			BIT(18)
+/* Keep BIT(19) reserved for the existing ksmbd-tools WIDE_LINKS flag. */
+#define KSMBD_SHARE_FLAG_ENCRYPT_DATA			BIT(20)
 
 /*
  * Tree connect request flags.

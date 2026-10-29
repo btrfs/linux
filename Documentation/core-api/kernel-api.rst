@@ -96,6 +96,15 @@ Error Pointers
 .. kernel-doc:: include/linux/err.h
    :internal:
 
+Sequence Buffers
+----------------
+
+.. kernel-doc:: include/linux/seq_buf.h
+   :internal:
+
+.. kernel-doc:: lib/seq_buf.c
+   :no-identifiers: seq_buf_can_fit
+
 Sorting
 -------
 
@@ -307,6 +316,7 @@ Accounting Framework
 Block Devices
 =============
 
+.. kernel-doc:: include/linux/bvec.h
 .. kernel-doc:: include/linux/bio.h
 .. kernel-doc:: block/blk-core.c
    :export:

@@ -21,7 +21,7 @@
 #include "fsl_dcu_drm_plane.h"
 
 static void fsl_dcu_drm_crtc_atomic_flush(struct drm_crtc *crtc,
-					  struct drm_atomic_state *state)
+					  struct drm_atomic_commit *state)
 {
 	struct drm_device *dev = crtc->dev;
 	struct fsl_dcu_drm_device *fsl_dev = dev->dev_private;
@@ -43,7 +43,7 @@ static void fsl_dcu_drm_crtc_atomic_flush(struct drm_crtc *crtc,
 }
 
 static void fsl_dcu_drm_crtc_atomic_disable(struct drm_crtc *crtc,
-					struct drm_atomic_state *state)
+					struct drm_atomic_commit *state)
 {
 	struct drm_crtc_state *old_crtc_state = drm_atomic_get_old_crtc_state(state,
 									      crtc);
@@ -64,7 +64,7 @@ static void fsl_dcu_drm_crtc_atomic_disable(struct drm_crtc *crtc,
 }
 
 static void fsl_dcu_drm_crtc_atomic_enable(struct drm_crtc *crtc,
-					   struct drm_atomic_state *state)
+					   struct drm_atomic_commit *state)
 {
 	struct drm_device *dev = crtc->dev;
 	struct fsl_dcu_drm_device *fsl_dev = dev->dev_private;
@@ -161,7 +161,7 @@ static const struct drm_crtc_funcs fsl_dcu_drm_crtc_funcs = {
 	.atomic_destroy_state = drm_atomic_helper_crtc_destroy_state,
 	.destroy = drm_crtc_cleanup,
 	.page_flip = drm_atomic_helper_page_flip,
-	.reset = drm_atomic_helper_crtc_reset,
+	.atomic_create_state = drm_atomic_helper_crtc_create_state,
 	.set_config = drm_atomic_helper_set_config,
 	.enable_vblank = fsl_dcu_drm_crtc_enable_vblank,
 	.disable_vblank = fsl_dcu_drm_crtc_disable_vblank,

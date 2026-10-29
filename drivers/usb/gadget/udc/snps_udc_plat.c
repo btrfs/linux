@@ -159,10 +159,9 @@ static int udc_plat_probe(struct platform_device *pdev)
 	if (of_property_present(dev->of_node, "extcon")) {
 		udc->edev = extcon_get_edev_by_phandle(dev, 0);
 		if (IS_ERR(udc->edev)) {
-			if (PTR_ERR(udc->edev) == -EPROBE_DEFER)
-				return -EPROBE_DEFER;
-			dev_err(dev, "Invalid or missing extcon\n");
 			ret = PTR_ERR(udc->edev);
+			if (ret != -EPROBE_DEFER)
+				dev_err(dev, "Invalid or missing extcon\n");
 			goto exit_phy;
 		}
 
@@ -193,10 +192,8 @@ static int udc_plat_probe(struct platform_device *pdev)
 
 	ret = devm_request_irq(dev, udc->irq, udc_irq, IRQF_SHARED,
 			       "snps-udc", udc);
-	if (ret < 0) {
-		dev_err(dev, "Request irq %d failed for UDC\n", udc->irq);
+	if (ret < 0)
 		goto exit_dma;
-	}
 
 	platform_set_drvdata(pdev, udc);
 	udc->chiprev = UDC_BCM_REV;

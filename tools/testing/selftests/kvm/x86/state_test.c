@@ -19,27 +19,27 @@
 #include "vmx.h"
 #include "svm_util.h"
 
-#define L2_GUEST_STACK_SIZE 256
-
 void svm_l2_guest_code(void)
 {
 	GUEST_SYNC(4);
 	/* Exit to L1 */
 	vmcall();
+	clgi();
 	GUEST_SYNC(6);
+	stgi();
 	/* Done, exit to L1 and never come back.  */
 	vmcall();
 }
 
 static void svm_l1_guest_code(struct svm_test_data *svm)
 {
-	unsigned long l2_guest_stack[L2_GUEST_STACK_SIZE];
 	struct vmcb *vmcb = svm->vmcb;
 
 	GUEST_ASSERT(svm->vmcb_gpa);
 	/* Prepare for L2 execution. */
-	generic_svm_setup(svm, svm_l2_guest_code,
-			  &l2_guest_stack[L2_GUEST_STACK_SIZE]);
+	generic_svm_setup(svm, svm_l2_guest_code);
+
+	vmcb->control.int_ctl |= (V_GIF_ENABLE_MASK | V_GIF_MASK);
 
 	GUEST_SYNC(3);
 	run_guest(vmcb, svm->vmcb_gpa);
@@ -59,13 +59,13 @@ void vmx_l2_guest_code(void)
 	vmcall();
 
 	/* L1 has now set up a shadow VMCS for us.  */
-	GUEST_ASSERT(vmreadz(GUEST_RIP) == 0xc0ffee);
+	GUEST_ASSERT(vmread(GUEST_RIP) == 0xc0ffee);
 	GUEST_SYNC(10);
-	GUEST_ASSERT(vmreadz(GUEST_RIP) == 0xc0ffee);
-	GUEST_ASSERT(!vmwrite(GUEST_RIP, 0xc0fffee));
+	GUEST_ASSERT(vmread(GUEST_RIP) == 0xc0ffee);
+	vmwrite(GUEST_RIP, 0xc0fffee);
 	GUEST_SYNC(11);
-	GUEST_ASSERT(vmreadz(GUEST_RIP) == 0xc0fffee);
-	GUEST_ASSERT(!vmwrite(GUEST_RIP, 0xc0ffffee));
+	GUEST_ASSERT(vmread(GUEST_RIP) == 0xc0fffee);
+	vmwrite(GUEST_RIP, 0xc0ffffee);
 	GUEST_SYNC(12);
 
 	/* Done, exit to L1 and never come back.  */
@@ -74,65 +74,62 @@ void vmx_l2_guest_code(void)
 
 static void vmx_l1_guest_code(struct vmx_pages *vmx_pages)
 {
-	unsigned long l2_guest_stack[L2_GUEST_STACK_SIZE];
-
 	GUEST_ASSERT(vmx_pages->vmcs_gpa);
-	GUEST_ASSERT(prepare_for_vmx_operation(vmx_pages));
+	prepare_for_vmx_operation(vmx_pages);
 	GUEST_SYNC(3);
-	GUEST_ASSERT(load_vmcs(vmx_pages));
-	GUEST_ASSERT(vmptrstz() == vmx_pages->vmcs_gpa);
+	load_vmcs(vmx_pages);
+	GUEST_ASSERT(vmptrst() == vmx_pages->vmcs_gpa);
 
 	GUEST_SYNC(4);
-	GUEST_ASSERT(vmptrstz() == vmx_pages->vmcs_gpa);
+	GUEST_ASSERT(vmptrst() == vmx_pages->vmcs_gpa);
 
-	prepare_vmcs(vmx_pages, vmx_l2_guest_code,
-		     &l2_guest_stack[L2_GUEST_STACK_SIZE]);
+	prepare_vmcs(vmx_pages, vmx_l2_guest_code);
 
 	GUEST_SYNC(5);
-	GUEST_ASSERT(vmptrstz() == vmx_pages->vmcs_gpa);
-	GUEST_ASSERT(!vmlaunch());
-	GUEST_ASSERT(vmptrstz() == vmx_pages->vmcs_gpa);
-	GUEST_ASSERT(vmreadz(VM_EXIT_REASON) == EXIT_REASON_VMCALL);
+	GUEST_ASSERT(vmptrst() == vmx_pages->vmcs_gpa);
+	vmlaunch();
+	GUEST_ASSERT(vmptrst() == vmx_pages->vmcs_gpa);
+	GUEST_ASSERT(vmread(VM_EXIT_REASON) == EXIT_REASON_VMCALL);
 
 	/* Check that the launched state is preserved.  */
-	GUEST_ASSERT(vmlaunch());
+	GUEST_ASSERT(__vmlaunch());
 
-	GUEST_ASSERT(!vmresume());
-	GUEST_ASSERT(vmreadz(VM_EXIT_REASON) == EXIT_REASON_VMCALL);
+	vmresume();
+	GUEST_ASSERT(vmread(VM_EXIT_REASON) == EXIT_REASON_VMCALL);
 
 	GUEST_SYNC(7);
-	GUEST_ASSERT(vmreadz(VM_EXIT_REASON) == EXIT_REASON_VMCALL);
+	GUEST_ASSERT(vmread(VM_EXIT_REASON) == EXIT_REASON_VMCALL);
 
-	GUEST_ASSERT(!vmresume());
-	GUEST_ASSERT(vmreadz(VM_EXIT_REASON) == EXIT_REASON_VMCALL);
+	vmresume();
+	GUEST_ASSERT(vmread(VM_EXIT_REASON) == EXIT_REASON_VMCALL);
 
-	vmwrite(GUEST_RIP, vmreadz(GUEST_RIP) + 3);
+	vmwrite(GUEST_RIP, vmread(GUEST_RIP) + 3);
 
 	vmwrite(SECONDARY_VM_EXEC_CONTROL, SECONDARY_EXEC_SHADOW_VMCS);
 	vmwrite(VMCS_LINK_POINTER, vmx_pages->shadow_vmcs_gpa);
 
-	GUEST_ASSERT(!vmptrld(vmx_pages->shadow_vmcs_gpa));
-	GUEST_ASSERT(vmlaunch());
+	vmptrld(vmx_pages->shadow_vmcs_gpa);
+	GUEST_ASSERT(__vmlaunch());
 	GUEST_SYNC(8);
-	GUEST_ASSERT(vmlaunch());
-	GUEST_ASSERT(vmresume());
+	GUEST_ASSERT(__vmlaunch());
+	GUEST_ASSERT(__vmresume());
 
 	vmwrite(GUEST_RIP, 0xc0ffee);
 	GUEST_SYNC(9);
-	GUEST_ASSERT(vmreadz(GUEST_RIP) == 0xc0ffee);
+	GUEST_ASSERT(vmread(GUEST_RIP) == 0xc0ffee);
 
-	GUEST_ASSERT(!vmptrld(vmx_pages->vmcs_gpa));
-	GUEST_ASSERT(!vmresume());
-	GUEST_ASSERT(vmreadz(VM_EXIT_REASON) == EXIT_REASON_VMCALL);
+	vmptrld(vmx_pages->vmcs_gpa);
+	vmresume();
+	GUEST_ASSERT(vmread(VM_EXIT_REASON) == EXIT_REASON_VMCALL);
 
-	GUEST_ASSERT(!vmptrld(vmx_pages->shadow_vmcs_gpa));
-	GUEST_ASSERT(vmreadz(GUEST_RIP) == 0xc0ffffee);
-	GUEST_ASSERT(vmlaunch());
-	GUEST_ASSERT(vmresume());
+	vmptrld(vmx_pages->shadow_vmcs_gpa);
+	GUEST_ASSERT(vmread(GUEST_RIP) == 0xc0ffffee);
+	GUEST_ASSERT(__vmlaunch());
+	GUEST_ASSERT(__vmresume());
 	GUEST_SYNC(13);
-	GUEST_ASSERT(vmreadz(GUEST_RIP) == 0xc0ffffee);
-	GUEST_ASSERT(vmlaunch());
-	GUEST_ASSERT(vmresume());
+	GUEST_ASSERT(vmread(GUEST_RIP) == 0xc0ffffee);
+	GUEST_ASSERT(__vmlaunch());
+	GUEST_ASSERT(__vmresume());
 }
 
 static void __attribute__((__flatten__)) guest_code(void *arg)
@@ -140,8 +137,8 @@ static void __attribute__((__flatten__)) guest_code(void *arg)
 	GUEST_SYNC(1);
 
 	if (this_cpu_has(X86_FEATURE_XSAVE)) {
-		uint64_t supported_xcr0 = this_cpu_supported_xcr0();
-		uint8_t buffer[4096];
+		u64 supported_xcr0 = this_cpu_supported_xcr0();
+		u8 buffer[PAGE_SIZE];
 
 		memset(buffer, 0xcc, sizeof(buffer));
 
@@ -168,8 +165,8 @@ static void __attribute__((__flatten__)) guest_code(void *arg)
 		}
 
 		if (this_cpu_has(X86_FEATURE_MPX)) {
-			uint64_t bounds[2] = { 10, 0xffffffffull };
-			uint64_t output[2] = { };
+			u64 bounds[2] = { 10, 0xffffffffull };
+			u64 output[2] = { };
 
 			GUEST_ASSERT(supported_xcr0 & XFEATURE_MASK_BNDREGS);
 			GUEST_ASSERT(supported_xcr0 & XFEATURE_MASK_BNDCSR);
@@ -222,10 +219,39 @@ static void __attribute__((__flatten__)) guest_code(void *arg)
 	GUEST_DONE();
 }
 
+void svm_check_nested_state(int stage, struct kvm_x86_state *state)
+{
+	struct vmcb *vmcb = (struct vmcb *)state->nested.data.svm;
+
+	if (kvm_cpu_has(X86_FEATURE_VGIF)) {
+		if (stage == 4)
+			TEST_ASSERT_EQ(!!(vmcb->control.int_ctl & V_GIF_MASK), 1);
+		if (stage == 6)
+			TEST_ASSERT_EQ(!!(vmcb->control.int_ctl & V_GIF_MASK), 0);
+	}
+
+	if (kvm_cpu_has(X86_FEATURE_NRIPS)) {
+		/*
+		 * GUEST_SYNC() causes IO emulation in KVM, in which case the
+		 * RIP is advanced before exiting to userspace. Hence, the RIP
+		 * in the saved state should be the same as nRIP saved by the
+		 * CPU in the VMCB.
+		 */
+		if (stage == 6)
+			TEST_ASSERT_EQ(vmcb->control.next_rip, state->regs.rip);
+	}
+}
+
+void check_nested_state(int stage, struct kvm_x86_state *state)
+{
+	if (kvm_has_cap(KVM_CAP_NESTED_STATE) && kvm_cpu_has(X86_FEATURE_SVM))
+		svm_check_nested_state(stage, state);
+}
+
 int main(int argc, char *argv[])
 {
-	uint64_t *xstate_bv, saved_xstate_bv;
-	vm_vaddr_t nested_gva = 0;
+	u64 *xstate_bv, saved_xstate_bv;
+	gva_t nested_gva = 0;
 	struct kvm_cpuid2 empty_cpuid = {};
 	struct kvm_regs regs1, regs2;
 	struct kvm_vcpu *vcpu, *vcpuN;
@@ -270,13 +296,15 @@ int main(int argc, char *argv[])
 		/* UCALL_SYNC is handled here.  */
 		TEST_ASSERT(!strcmp((const char *)uc.args[0], "hello") &&
 			    uc.args[1] == stage, "Stage %d: Unexpected register values vmexit, got %lx",
-			    stage, (ulong)uc.args[1]);
+			    stage, (unsigned long)uc.args[1]);
 
 		state = vcpu_save_state(vcpu);
 		memset(&regs1, 0, sizeof(regs1));
 		vcpu_regs_get(vcpu, &regs1);
 
 		kvm_vm_release(vm);
+
+		check_nested_state(stage, state);
 
 		/* Restore state in a new VM.  */
 		vcpu = vm_recreate_with_one_vcpu(vm);
@@ -296,7 +324,7 @@ int main(int argc, char *argv[])
 		 * supported features, even if something goes awry in saving
 		 * the original snapshot.
 		 */
-		xstate_bv = (void *)&((uint8_t *)state->xsave->region)[512];
+		xstate_bv = (void *)&((u8 *)state->xsave->region)[512];
 		saved_xstate_bv = *xstate_bv;
 
 		vcpuN = __vm_vcpu_add(vm, vcpu->id + 1);
@@ -315,7 +343,7 @@ int main(int argc, char *argv[])
 		vcpu_regs_get(vcpu, &regs2);
 		TEST_ASSERT(!memcmp(&regs1, &regs2, sizeof(regs2)),
 			    "Unexpected register values after vcpu_load_state; rdi: %lx rsi: %lx",
-			    (ulong) regs2.rdi, (ulong) regs2.rsi);
+			    (unsigned long)regs2.rdi, (unsigned long)regs2.rsi);
 	}
 
 done:

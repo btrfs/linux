@@ -311,18 +311,16 @@ static int initialize_delta_zone(struct delta_zone *delta_zone, size_t size,
 {
 	int result;
 
-	result = vdo_allocate(size, u8, "delta list", &delta_zone->memory);
+	result = vdo_allocate(size, "delta list", &delta_zone->memory);
 	if (result != VDO_SUCCESS)
 		return result;
 
-	result = vdo_allocate(list_count + 2, u64, "delta list temp",
-			      &delta_zone->new_offsets);
+	result = vdo_allocate(list_count + 2, "delta list temp", &delta_zone->new_offsets);
 	if (result != VDO_SUCCESS)
 		return result;
 
 	/* Allocate the delta lists. */
-	result = vdo_allocate(list_count + 2, struct delta_list, "delta lists",
-			      &delta_zone->delta_lists);
+	result = vdo_allocate(list_count + 2, "delta lists", &delta_zone->delta_lists);
 	if (result != VDO_SUCCESS)
 		return result;
 
@@ -352,8 +350,7 @@ int uds_initialize_delta_index(struct delta_index *delta_index, unsigned int zon
 	unsigned int z;
 	size_t zone_memory;
 
-	result = vdo_allocate(zone_count, struct delta_zone, "Delta Index Zones",
-			      &delta_index->delta_zones);
+	result = vdo_allocate(zone_count, "Delta Index Zones", &delta_index->delta_zones);
 	if (result != VDO_SUCCESS)
 		return result;
 
@@ -803,7 +800,7 @@ static void compute_new_list_offsets(struct delta_zone *delta_zone, u32 growing_
 		(delta_zone->size * BITS_PER_BYTE - delta_lists[tail_guard_index].size);
 }
 
-static void rebalance_lists(struct delta_zone *delta_zone)
+static int rebalance_lists(struct delta_zone *delta_zone)
 {
 	struct delta_list *delta_lists;
 	u32 i;
@@ -814,9 +811,17 @@ static void rebalance_lists(struct delta_zone *delta_zone)
 	for (i = 0; i <= delta_zone->list_count + 1; i++)
 		used_space += get_delta_list_byte_size(&delta_lists[i]);
 
+	if (delta_zone->size < used_space) {
+		return vdo_log_warning_strerror(UDS_CORRUPT_DATA,
+						"delta zone lists overflow zone size %zu",
+						delta_zone->size);
+	}
+
 	compute_new_list_offsets(delta_zone, 0, 0, used_space);
 	for (i = 1; i <= delta_zone->list_count + 1; i++)
 		delta_lists[i].start = delta_zone->new_offsets[i];
+
+	return UDS_SUCCESS;
 }
 
 /* Start restoring a delta index from multiple input streams. */
@@ -944,8 +949,11 @@ int uds_start_restoring_delta_index(struct delta_index *delta_index,
 	}
 
 	/* Prepare each zone to start receiving the delta list data. */
-	for (z = 0; z < delta_index->zone_count; z++)
-		rebalance_lists(&delta_index->delta_zones[z]);
+	for (z = 0; z < delta_index->zone_count; z++) {
+		result = rebalance_lists(&delta_index->delta_zones[z]);
+		if (result != UDS_SUCCESS)
+			return result;
+	}
 
 	return UDS_SUCCESS;
 }
@@ -1047,7 +1055,7 @@ int uds_finish_restoring_delta_index(struct delta_index *delta_index,
 	unsigned int z;
 	u8 *data;
 
-	result = vdo_allocate(DELTA_LIST_MAX_BYTE_COUNT, u8, __func__, &data);
+	result = vdo_allocate(DELTA_LIST_MAX_BYTE_COUNT, __func__, &data);
 	if (result != VDO_SUCCESS)
 		return result;
 

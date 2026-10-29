@@ -566,6 +566,7 @@ static void vdic_try_fmt(struct vdic_priv *priv,
 }
 
 static int vdic_set_fmt(struct v4l2_subdev *sd,
+			const struct v4l2_subdev_client_info *ci,
 			struct v4l2_subdev_state *sd_state,
 			struct v4l2_subdev_format *sdformat)
 {
@@ -616,7 +617,7 @@ out:
 }
 
 static int vdic_link_setup(struct media_entity *entity,
-			    const struct media_pad *local,
+			   const struct media_pad *local,
 			    const struct media_pad *remote, u32 flags)
 {
 	struct v4l2_subdev *sd = media_entity_to_v4l2_subdev(entity);

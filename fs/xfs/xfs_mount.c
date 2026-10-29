@@ -3,7 +3,7 @@
  * Copyright (c) 2000-2005 Silicon Graphics, Inc.
  * All Rights Reserved.
  */
-#include "xfs.h"
+#include "xfs_platform.h"
 #include "xfs_fs.h"
 #include "xfs_shared.h"
 #include "xfs_format.h"
@@ -41,19 +41,39 @@
 #include "xfs_rtrefcount_btree.h"
 #include "scrub/stats.h"
 #include "xfs_zone_alloc.h"
+#include "xfs_healthmon.h"
 
 static DEFINE_MUTEX(xfs_uuid_table_mutex);
-static int xfs_uuid_table_size;
-static uuid_t *xfs_uuid_table;
+static DEFINE_XARRAY_ALLOC(xfs_uuid_table);
+
+static uuid_t *
+xfs_uuid_search(
+	uuid_t		*new_uuid)
+{
+	unsigned long	index = 0;
+	uuid_t		*uuid;
+
+	xa_for_each(&xfs_uuid_table, index, uuid) {
+		if (uuid_equal(uuid, new_uuid))
+			return uuid;
+	}
+	return NULL;
+}
+
+static void
+xfs_uuid_delete(
+	uuid_t		*uuid,
+	unsigned int	index)
+{
+	ASSERT(uuid_equal(xa_load(&xfs_uuid_table, index), uuid));
+	xa_erase(&xfs_uuid_table, index);
+}
 
 void
 xfs_uuid_table_free(void)
 {
-	if (xfs_uuid_table_size == 0)
-		return;
-	kfree(xfs_uuid_table);
-	xfs_uuid_table = NULL;
-	xfs_uuid_table_size = 0;
+	ASSERT(xa_empty(&xfs_uuid_table));
+	xa_destroy(&xfs_uuid_table);
 }
 
 /*
@@ -65,7 +85,7 @@ xfs_uuid_mount(
 	struct xfs_mount	*mp)
 {
 	uuid_t			*uuid = &mp->m_sb.sb_uuid;
-	int			hole, i;
+	int			ret;
 
 	/* Publish UUID in struct super_block */
 	super_set_uuid(mp->m_super, uuid->b, sizeof(*uuid));
@@ -79,30 +99,17 @@ xfs_uuid_mount(
 	}
 
 	mutex_lock(&xfs_uuid_table_mutex);
-	for (i = 0, hole = -1; i < xfs_uuid_table_size; i++) {
-		if (uuid_is_null(&xfs_uuid_table[i])) {
-			hole = i;
-			continue;
-		}
-		if (uuid_equal(uuid, &xfs_uuid_table[i]))
-			goto out_duplicate;
+	if (unlikely(xfs_uuid_search(uuid))) {
+		xfs_warn(mp, "Filesystem has duplicate UUID %pU - can't mount",
+				uuid);
+		mutex_unlock(&xfs_uuid_table_mutex);
+		return -EINVAL;
 	}
 
-	if (hole < 0) {
-		xfs_uuid_table = krealloc(xfs_uuid_table,
-			(xfs_uuid_table_size + 1) * sizeof(*xfs_uuid_table),
-			GFP_KERNEL | __GFP_NOFAIL);
-		hole = xfs_uuid_table_size++;
-	}
-	xfs_uuid_table[hole] = *uuid;
+	ret = xa_alloc(&xfs_uuid_table, &mp->m_uuid_table_index, uuid,
+				xa_limit_32b, GFP_KERNEL);
 	mutex_unlock(&xfs_uuid_table_mutex);
-
-	return 0;
-
- out_duplicate:
-	mutex_unlock(&xfs_uuid_table_mutex);
-	xfs_warn(mp, "Filesystem has duplicate UUID %pU - can't mount", uuid);
-	return -EINVAL;
+	return ret;
 }
 
 STATIC void
@@ -110,21 +117,12 @@ xfs_uuid_unmount(
 	struct xfs_mount	*mp)
 {
 	uuid_t			*uuid = &mp->m_sb.sb_uuid;
-	int			i;
 
 	if (xfs_has_nouuid(mp))
 		return;
 
 	mutex_lock(&xfs_uuid_table_mutex);
-	for (i = 0; i < xfs_uuid_table_size; i++) {
-		if (uuid_is_null(&xfs_uuid_table[i]))
-			continue;
-		if (!uuid_equal(uuid, &xfs_uuid_table[i]))
-			continue;
-		memset(&xfs_uuid_table[i], 0, sizeof(uuid_t));
-		break;
-	}
-	ASSERT(i < xfs_uuid_table_size);
+	xfs_uuid_delete(uuid, mp->m_uuid_table_index);
 	mutex_unlock(&xfs_uuid_table_mutex);
 }
 
@@ -448,6 +446,8 @@ int
 xfs_mount_reset_sbqflags(
 	struct xfs_mount	*mp)
 {
+	int			error;
+
 	mp->m_qflags = 0;
 
 	/* It is OK to look at sb_qflags in the mount path without m_sb_lock. */
@@ -460,7 +460,12 @@ xfs_mount_reset_sbqflags(
 	if (!xfs_fs_writable(mp, SB_FREEZE_WRITE))
 		return 0;
 
-	return xfs_sync_sb(mp, false);
+	error = xfs_sync_sb(mp, false);
+	if (error)
+		return error;
+
+	xfs_qm_update_secondary_sb(mp);
+	return 0;
 }
 
 static const char *const xfs_free_pool_name[] = {
@@ -607,8 +612,9 @@ xfs_unmount_check(
  * have been retrying in the background.  This will prevent never-ending
  * retries in AIL pushing from hanging the unmount.
  *
- * Finally, we can push the AIL to clean all the remaining dirty objects, then
- * reclaim the remaining inodes that are still in memory at this point in time.
+ * Stop inodegc and background reclaim before pushing the AIL so that they
+ * are not running while the AIL is being flushed. Then push the AIL to
+ * clean all the remaining dirty objects and reclaim the remaining inodes.
  */
 static void
 xfs_unmount_flush_inodes(
@@ -620,11 +626,12 @@ xfs_unmount_flush_inodes(
 
 	xfs_set_unmounting(mp);
 
-	xfs_ail_push_all_sync(mp->m_ail);
 	xfs_inodegc_stop(mp);
 	cancel_delayed_work_sync(&mp->m_reclaim_work);
+	xfs_ail_push_all_sync(mp->m_ail);
 	xfs_reclaim_inodes(mp);
 	xfs_health_unmount(mp);
+	xfs_healthmon_unmount(mp);
 }
 
 static void
@@ -674,15 +681,13 @@ static inline xfs_extlen_t xfs_calc_atomic_write_max(struct xfs_mount *mp)
 }
 
 /*
- * If the underlying device advertises atomic write support, limit the size of
- * atomic writes to the greatest power-of-two factor of the group size so
- * that every atomic write unit aligns with the start of every group.  This is
- * required so that the allocations for an atomic write will always be
- * aligned compatibly with the alignment requirements of the storage.
+ * The largest out of place write is the number of blocks that user files can
+ * allocate from any group.
  *
- * If the device doesn't advertise atomic writes, then there are no alignment
- * restrictions and the largest out-of-place write we can do ourselves is the
- * number of blocks that user files can allocate from any group.
+ * This is a software limit, so it deliberately does not take the alignment
+ * requirements of the storage into account. An atomic write that cannot be
+ * handed to the device as a single naturally aligned REQ_ATOMIC bio is
+ * completed through the COW fork instead, which has no such requirement.
  */
 static xfs_extlen_t
 xfs_calc_group_awu_max(
@@ -690,13 +695,28 @@ xfs_calc_group_awu_max(
 	enum xfs_group_type	type)
 {
 	struct xfs_groups	*g = &mp->m_groups[type];
-	struct xfs_buftarg	*btp = xfs_group_type_buftarg(mp, type);
 
 	if (g->blocks == 0)
 		return 0;
-	if (btp && btp->bt_awu_min > 0)
-		return max_pow_of_two_factor(g->blocks);
 	return rounddown_pow_of_two(g->blocks);
+}
+
+/*
+ * Compute the largest atomic write unit for which the allocator can guarantee
+ * naturally aligned extents in this group type.
+ *
+ * Hardware atomic writes have to be naturally aligned on disk.
+ */
+xfs_extlen_t
+xfs_calc_group_awu_align_max(
+	struct xfs_mount	*mp,
+	enum xfs_group_type	type)
+{
+	struct xfs_groups	*g = &mp->m_groups[type];
+
+	if (g->blocks == 0)
+		return 0;
+	return max_pow_of_two_factor(g->blocks);
 }
 
 /* Compute the maximum atomic write unit size for each section. */
@@ -1080,7 +1100,7 @@ xfs_mountfs(
 
 	if (XFS_IS_CORRUPT(mp, !S_ISDIR(VFS_I(rip)->i_mode))) {
 		xfs_warn(mp, "corrupted root inode %llu: not a directory",
-			(unsigned long long)rip->i_ino);
+			(unsigned long long)I_INO(rip));
 		xfs_iunlock(rip, XFS_ILOCK_EXCL);
 		error = -EFSCORRUPTED;
 		goto out_rele_rip;
@@ -1149,9 +1169,12 @@ xfs_mountfs(
 	 * blocks.
 	 */
 	error = xfs_fs_reserve_ag_blocks(mp);
-	if (error && error == -ENOSPC)
+	if (error) {
+		if (error != -ENOSPC)
+			goto out_rtunmount;
 		xfs_warn(mp,
-	"ENOSPC reserving per-AG metadata pool, log recovery may fail.");
+"ENOSPC reserving per-AG metadata pool, log recovery may fail.");
+	}
 	error = xfs_log_mount_finish(mp);
 	xfs_fs_unreserve_ag_blocks(mp);
 	if (error) {
@@ -1243,11 +1266,19 @@ xfs_mountfs(
 		xfs_irele(mp->m_metadirip);
 
 	/*
-	 * Inactivate all inodes that might still be in memory after a log
-	 * intent recovery failure so that reclaim can free them.  Metadata
-	 * inodes and the root directory shouldn't need inactivation, but the
-	 * mount failed for some reason, so pull down all the state and flee.
+	 * The mount has failed.  Mark the filesystem shut down so that any
+	 * inodes still queued for background inactivation are dropped
+	 * straight to reclaim instead of being inactivated: a failed mount
+	 * must not write to the (possibly corrupt, only partially set up)
+	 * persistent metadata, and parts of the mount it would need - e.g.
+	 * the quota subsystem (mp->m_quotainfo) - may never have been
+	 * initialised.
+	 *
+	 * Flush the queue so that those inodes are pulled down and reclaim
+	 * can free them; with the fs shut down xfs_inodegc_inactivate()
+	 * turns each one reclaimable without touching the on-disk structures.
 	 */
+	xfs_force_shutdown(mp, SHUTDOWN_META_IO_ERROR);
 	xfs_inodegc_flush(mp);
 
 	/*

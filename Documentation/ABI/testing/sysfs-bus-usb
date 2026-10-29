@@ -83,7 +83,8 @@ Description:
 		idVendor idProduct.	After successfully
 		removing an ID, the driver will no longer support the
 		device.  This is useful to ensure auto probing won't
-		match the driver to the device.  For example:
+		match the driver to the device.  For example::
+
 		# echo "046d c315" > /sys/bus/usb/drivers/foo/remove_id
 
 		Reading from this file will list the dynamically added
@@ -293,7 +294,7 @@ Description:
 
 		Supported values are 0 - 15.
 		More information on how besl values map to microseconds can be found in
-		USB 2.0 ECN Errata for Link Power Management, section 4.10)
+		USB 2.0 ECN Errata for Link Power Management, section 4.10
 
 What:		/sys/bus/usb/devices/.../rx_lanes
 Date:		March 2018

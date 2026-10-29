@@ -470,7 +470,11 @@ void enc3_stream_encoder_update_dp_info_packets(
 				&info_frame->spd,
 				true);
 	}
-	if (info_frame->hdrsmd.valid) {
+	/* While smart power oled is enabled DMUB is scanning the contents of each frame
+	 * and updating the HDR infopacket contents. Therefore we transition the infopacket
+	 * programming control to DMUB while Smart Power OLED is enabled.
+	 */
+	if (info_frame->hdrsmd.valid && !info_frame->firmware_controlled_hdr_info_packet) {
 		enc->vpg->funcs->update_generic_info_packet(
 				enc->vpg,
 				3,  /* packetIndex */
@@ -895,5 +899,7 @@ void dcn30_dio_stream_encoder_construct(
 	enc1->se_shift = se_shift;
 	enc1->se_mask = se_mask;
 	enc1->base.stream_enc_inst = vpg->inst;
+	enc1->base.inst = enc1->base.stream_enc_inst;
+
 }
 

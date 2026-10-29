@@ -139,6 +139,7 @@ enum mlx5_ib_var_alloc_attrs {
 	MLX5_IB_ATTR_VAR_OBJ_ALLOC_MMAP_OFFSET,
 	MLX5_IB_ATTR_VAR_OBJ_ALLOC_MMAP_LENGTH,
 	MLX5_IB_ATTR_VAR_OBJ_ALLOC_PAGE_ID,
+	MLX5_IB_ATTR_VAR_OBJ_ALLOC_FLAGS,
 };
 
 enum mlx5_ib_var_obj_destroy_attrs {
@@ -273,6 +274,15 @@ enum mlx5_ib_device_query_context_attrs {
 
 enum mlx5_ib_create_cq_attrs {
 	MLX5_IB_ATTR_CREATE_CQ_UAR_INDEX = UVERBS_ID_DRIVER_NS_WITH_UHW,
+	MLX5_IB_ATTR_CREATE_CQ_DBR_BUF_UMEM,
+};
+
+enum mlx5_ib_create_qp_attrs {
+	MLX5_IB_ATTR_CREATE_QP_DBR_BUF_UMEM = UVERBS_ID_DRIVER_NS_WITH_UHW,
+};
+
+enum mlx5_ib_create_srq_attrs {
+	MLX5_IB_ATTR_CREATE_SRQ_DBR_BUF_UMEM = UVERBS_ID_DRIVER_NS_WITH_UHW,
 };
 
 enum mlx5_ib_reg_dmabuf_mr_attrs {

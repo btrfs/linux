@@ -6,6 +6,7 @@
  * Copyright The Asahi Linux Contributors
  */
 
+&SOC_NODE {
 	nco: clock-controller@28e03c000 {
 		compatible = "apple,t6020-nco", "apple,t8103-nco";
 		reg = <0x2 0x8e03c000 0x0 0x14000>;
@@ -21,6 +22,13 @@
 			<0x2 0x8e10c000 0x0 0x1000>;
 		reg-names = "core", "event";
 		power-domains = <&ps_aic>;
+	};
+
+	pmgr_misc: power-management@28e20c000 {
+		compatible = "apple,t6020-pmgr-misc";
+		reg = <0x2 0x8e20c000 0 0x400>,
+			<0x2 0x8e20c400 0 0x400>;
+		reg-names = "fabric-ps", "dcs-ps";
 	};
 
 	nub_spmi0: spmi@29e114000 {
@@ -120,6 +128,16 @@
 				<&boot_error_count>, <&panic_count>;
 			nvmem-cell-names = "shutdown_flag", "boot_stage",
 				"boot_error_count", "panic_count";
+		};
+
+		smc_hwmon: hwmon {
+			compatible = "apple,smc-hwmon";
+		};
+
+		rtc {
+			compatible = "apple,smc-rtc";
+			nvmem-cells = <&rtc_offset>;
+			nvmem-cell-names = "rtc_offset";
 		};
 	};
 
@@ -573,3 +591,4 @@
 		power-domains = <&ps_apcie_gp_sys>;
 		status = "disabled";
 	};
+};

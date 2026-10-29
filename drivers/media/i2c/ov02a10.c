@@ -296,6 +296,7 @@ static void ov02a10_fill_fmt(const struct ov02a10_mode *mode,
 }
 
 static int ov02a10_set_fmt(struct v4l2_subdev *sd,
+			   const struct v4l2_subdev_client_info *ci,
 			   struct v4l2_subdev_state *sd_state,
 			   struct v4l2_subdev_format *fmt)
 {
@@ -523,7 +524,7 @@ static int ov02a10_init_state(struct v4l2_subdev *sd,
 		}
 	};
 
-	ov02a10_set_fmt(sd, sd_state, &fmt);
+	ov02a10_set_fmt(sd, NULL, sd_state, &fmt);
 
 	return 0;
 }
@@ -820,17 +821,15 @@ static int ov02a10_check_hwcfg(struct device *dev, struct ov02a10 *ov02a10)
 	if (!ep)
 		return -ENXIO;
 
+	/* Optional indication of MIPI clock voltage unit */
+	if (!fwnode_property_read_u32(ep, "ovti,mipi-clock-voltage",
+				      &clk_volt))
+		ov02a10->mipi_clock_voltage = clk_volt;
+
 	ret = v4l2_fwnode_endpoint_alloc_parse(ep, &bus_cfg);
 	fwnode_handle_put(ep);
 	if (ret)
 		return ret;
-
-	/* Optional indication of MIPI clock voltage unit */
-	ret = fwnode_property_read_u32(ep, "ovti,mipi-clock-voltage",
-				       &clk_volt);
-
-	if (!ret)
-		ov02a10->mipi_clock_voltage = clk_volt;
 
 	for (i = 0; i < ARRAY_SIZE(link_freq_menu_items); i++) {
 		for (j = 0; j < bus_cfg.nr_of_link_frequencies; j++) {
@@ -998,6 +997,6 @@ static struct i2c_driver ov02a10_i2c_driver = {
 };
 module_i2c_driver(ov02a10_i2c_driver);
 
-MODULE_AUTHOR("Dongchun Zhu <dongchun.zhu@mediatek.com>");
+MODULE_AUTHOR("Dongchun Zhu");
 MODULE_DESCRIPTION("OmniVision OV02A10 sensor driver");
 MODULE_LICENSE("GPL v2");

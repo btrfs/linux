@@ -6,49 +6,63 @@
 
 //! `pin-init` proc macros.
 
-#![cfg_attr(not(RUSTC_LINT_REASONS_IS_STABLE), feature(lint_reasons))]
-// Allow `.into()` to convert
-// - `proc_macro2::TokenStream` into `proc_macro::TokenStream` in the user-space version.
-// - `proc_macro::TokenStream` into `proc_macro::TokenStream` in the kernel version.
-//   Clippy warns on this conversion, but it's required by the user-space version.
-//
-// Remove once we have `proc_macro2` in the kernel.
-#![allow(clippy::useless_conversion)]
 // Documentation is done in the pin-init crate instead.
 #![allow(missing_docs)]
 
 use proc_macro::TokenStream;
 
-#[cfg(kernel)]
-#[path = "../../../macros/quote.rs"]
-#[macro_use]
-#[cfg_attr(not(kernel), rustfmt::skip)]
-mod quote;
-#[cfg(not(kernel))]
-#[macro_use]
-extern crate quote;
+use crate::diagnostics::DiagCtxt;
 
-mod helpers;
+mod diagnostics;
+mod init;
 mod pin_data;
 mod pinned_drop;
+mod util;
 mod zeroable;
 
 #[proc_macro_attribute]
-pub fn pin_data(inner: TokenStream, item: TokenStream) -> TokenStream {
-    pin_data::pin_data(inner.into(), item.into()).into()
+pub fn pin_data(args: TokenStream, input: TokenStream) -> TokenStream {
+    DiagCtxt::for_item(|dcx| pin_data::expand_with_cfg(syn::parse(args)?, syn::parse(input)?, dcx))
+        .into()
 }
 
 #[proc_macro_attribute]
 pub fn pinned_drop(args: TokenStream, input: TokenStream) -> TokenStream {
-    pinned_drop::pinned_drop(args.into(), input.into()).into()
+    DiagCtxt::for_item(|dcx| pinned_drop::pinned_drop(syn::parse(args)?, syn::parse(input)?, dcx))
+        .into()
 }
 
 #[proc_macro_derive(Zeroable)]
 pub fn derive_zeroable(input: TokenStream) -> TokenStream {
-    zeroable::derive(input.into()).into()
+    DiagCtxt::for_item(|dcx| zeroable::derive(syn::parse(input)?, dcx)).into()
 }
 
 #[proc_macro_derive(MaybeZeroable)]
 pub fn maybe_derive_zeroable(input: TokenStream) -> TokenStream {
-    zeroable::maybe_derive(input.into()).into()
+    DiagCtxt::for_item(|dcx| zeroable::maybe_derive(syn::parse(input)?, dcx)).into()
+}
+#[proc_macro]
+pub fn init(input: TokenStream) -> TokenStream {
+    DiagCtxt::for_expr(|dcx| {
+        init::expand_with_cfg(
+            syn::parse(input)?,
+            Some("::core::convert::Infallible"),
+            false,
+            dcx,
+        )
+    })
+    .into()
+}
+
+#[proc_macro]
+pub fn pin_init(input: TokenStream) -> TokenStream {
+    DiagCtxt::for_expr(|dcx| {
+        init::expand_with_cfg(
+            syn::parse(input)?,
+            Some("::core::convert::Infallible"),
+            true,
+            dcx,
+        )
+    })
+    .into()
 }

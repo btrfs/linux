@@ -1035,6 +1035,8 @@ static const struct dsa_switch_ops a5psw_switch_ops = {
 	.port_fdb_add = a5psw_port_fdb_add,
 	.port_fdb_del = a5psw_port_fdb_del,
 	.port_fdb_dump = a5psw_port_fdb_dump,
+	.port_hsr_join = dsa_port_simple_hsr_join,
+	.port_hsr_leave = dsa_port_simple_hsr_leave,
 };
 
 static int a5psw_mdio_wait_busy(struct a5psw *a5psw)
@@ -1297,7 +1299,7 @@ static void a5psw_shutdown(struct platform_device *pdev)
 
 static const struct of_device_id a5psw_of_mtable[] = {
 	{ .compatible = "renesas,rzn1-a5psw", },
-	{ /* sentinel */ },
+	{ /* sentinel */ }
 };
 MODULE_DEVICE_TABLE(of, a5psw_of_mtable);
 

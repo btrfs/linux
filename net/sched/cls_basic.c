@@ -77,7 +77,7 @@ static int basic_init(struct tcf_proto *tp)
 {
 	struct basic_head *head;
 
-	head = kzalloc(sizeof(*head), GFP_KERNEL);
+	head = kzalloc_obj(*head);
 	if (head == NULL)
 		return -ENOBUFS;
 	INIT_LIST_HEAD(&head->flist);
@@ -193,7 +193,7 @@ static int basic_change(struct net *net, struct sk_buff *in_skb,
 			return -EINVAL;
 	}
 
-	fnew = kzalloc(sizeof(*fnew), GFP_KERNEL);
+	fnew = kzalloc_obj(*fnew, GFP_KERNEL_ACCOUNT);
 	if (!fnew)
 		return -ENOBUFS;
 
@@ -212,9 +212,11 @@ static int basic_change(struct net *net, struct sk_buff *in_skb,
 	if (err)
 		goto errout;
 	fnew->handle = handle;
-	fnew->pf = alloc_percpu(struct tc_basic_pcnt);
+	fnew->pf = alloc_percpu_gfp(struct tc_basic_pcnt, GFP_KERNEL_ACCOUNT);
 	if (!fnew->pf) {
 		err = -ENOMEM;
+		if (!fold)
+			idr_remove(&head->handle_idr, fnew->handle);
 		goto errout;
 	}
 
@@ -303,7 +305,8 @@ static int basic_dump(struct net *net, struct tcf_proto *tp, void *fh,
 	    tcf_em_tree_dump(skb, &f->ematches, TCA_BASIC_EMATCHES) < 0)
 		goto nla_put_failure;
 
-	nla_nest_end(skb, nest);
+	if (nla_nest_end_safe(skb, nest) < 0)
+		goto nla_put_failure;
 
 	if (tcf_exts_dump_stats(skb, &f->exts) < 0)
 		goto nla_put_failure;
