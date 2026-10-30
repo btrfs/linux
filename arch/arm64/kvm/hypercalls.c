@@ -28,7 +28,7 @@ static void kvm_ptp_get_time(struct kvm_vcpu *vcpu, u64 *val)
 	 * system time and counter value must captured at the same
 	 * time to keep consistency and precision.
 	 */
-	ktime_get_snapshot(&systime_snapshot);
+	ktime_get_snapshot_id(CLOCK_REALTIME, &systime_snapshot);
 
 	/*
 	 * This is only valid if the current clocksource is the
@@ -61,8 +61,8 @@ static void kvm_ptp_get_time(struct kvm_vcpu *vcpu, u64 *val)
 	 * in the future (about 292 years from 1970, and at that stage
 	 * nobody will give a damn about it).
 	 */
-	val[0] = upper_32_bits(systime_snapshot.real);
-	val[1] = lower_32_bits(systime_snapshot.real);
+	val[0] = upper_32_bits(systime_snapshot.systime);
+	val[1] = lower_32_bits(systime_snapshot.systime);
 	val[2] = upper_32_bits(cycles);
 	val[3] = lower_32_bits(cycles);
 }
@@ -185,7 +185,8 @@ static int kvm_smccc_set_filter(struct kvm *kvm, struct kvm_smccc_filter __user 
 	start = filter.base;
 	end = start + filter.nr_functions - 1;
 
-	if (end < start || filter.action >= NR_SMCCC_FILTER_ACTIONS)
+	if (!filter.nr_functions || end < start ||
+	    filter.action >= NR_SMCCC_FILTER_ACTIONS)
 		return -EINVAL;
 
 	mutex_lock(&kvm->arch.config_lock);

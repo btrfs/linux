@@ -16,6 +16,7 @@
 #include <linux/list.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
+#include <linux/minmax.h>
 #include <linux/spinlock.h>
 #include <linux/workqueue.h>
 
@@ -85,8 +86,6 @@ static size_t config_rom_length = 1 + 4 + 1 + 1;
  * is just too slow for that.
  */
 #define DEFAULT_SPLIT_TIMEOUT	(2 * 8000)
-
-#define CANON_OUI		0x000085
 
 static void generate_config_rom(struct fw_card *card, __be32 *config_rom)
 {
@@ -169,15 +168,30 @@ int fw_core_add_descriptor(struct fw_descriptor *desc)
 {
 	size_t i;
 
-	/*
-	 * Check descriptor is valid; the length of all blocks in the
-	 * descriptor has to add up to exactly the length of the
-	 * block.
-	 */
-	i = 0;
-	while (i < desc->length)
-		i += (desc->data[i] >> 16) + 1;
+	/* Reject empty descriptors or those exceeding max Config ROM size (256 quadlets) */
+	if (!in_range(desc->length, 1, 256))
+		return -EINVAL;
 
+	i = 0;
+	/*
+	 * Validate internal block structures within the descriptor. Each sub-block
+	 * encodes its length in the top 16 bits of its header quadlet.
+	 */
+	while (i < desc->length) {
+		u16 block_len = desc->data[i] >> 16;
+
+		/*
+		 * Guard against corrupted descriptors where an individual block length
+		 * claims to extend past the allocated end of desc->data, avoiding
+		 * out-of-bounds reads.
+		 */
+		if (block_len >= desc->length - i)
+			return -EINVAL;
+
+		i += block_len + 1;
+	}
+
+	/* The sum of sub-block lengths must match total descriptor length */
 	if (i != desc->length)
 		return -EINVAL;
 
@@ -308,11 +322,9 @@ __must_hold(&card->lock)
 		cpu_to_be32(local_id),
 	};
 	bool grace = time_is_before_jiffies64(card->reset_jiffies + msecs_to_jiffies(125));
-	bool irm_is_1394_1995_only = false;
-	bool keep_this_irm = false;
 	struct fw_node *irm_node;
 	struct fw_device *irm_device;
-	int irm_node_id;
+	int irm_node_id, irm_device_quirks = 0;
 	int rcode;
 
 	lockdep_assert_held(&card->lock);
@@ -328,15 +340,12 @@ __must_hold(&card->lock)
 		return BM_CONTENTION_OUTCOME_IRM_HAS_LINK_OFF;
 	}
 
+	// NOTE: It is likely that the quirk detection for IRM device has not done yet.
 	irm_device = fw_node_get_device(irm_node);
-	if (irm_device && irm_device->config_rom) {
-		irm_is_1394_1995_only = (irm_device->config_rom[2] & 0x000000f0) == 0;
-
-		// Canon MV5i works unreliably if it is not root node.
-		keep_this_irm = irm_device->config_rom[3] >> 8 == CANON_OUI;
-	}
-
-	if (irm_is_1394_1995_only && !keep_this_irm) {
+	if (irm_device)
+		irm_device_quirks = READ_ONCE(irm_device->quirks);
+	if ((irm_device_quirks & FW_DEVICE_QUIRK_IRM_IS_1394_1995_ONLY) &&
+	    !(irm_device_quirks & FW_DEVICE_QUIRK_IRM_IGNORES_BUS_MANAGER)) {
 		fw_notice(card, "IRM is not 1394a compliant, making local node (%02x) root\n",
 			  local_id);
 		return BM_CONTENTION_OUTCOME_IRM_COMPLIES_1394_1995_ONLY;
@@ -373,7 +382,7 @@ __must_hold(&card->lock)
 			return BM_CONTENTION_OUTCOME_IRM_HOLDS_LOCAL_NODE_AS_BM;
 	}
 	default:
-		if (!keep_this_irm) {
+		if (!(irm_device_quirks & FW_DEVICE_QUIRK_IRM_IGNORES_BUS_MANAGER)) {
 			fw_notice(card, "BM lock failed (%s), making local node (%02x) root\n",
 				  fw_rcode_string(rcode), local_id);
 			return BM_CONTENTION_OUTCOME_IRM_COMPLIES_1394_1995_ONLY;
@@ -711,8 +720,8 @@ static int dummy_enable_phys_dma(struct fw_card *card,
 	return -ENODEV;
 }
 
-static struct fw_iso_context *dummy_allocate_iso_context(struct fw_card *card,
-				int type, int channel, size_t header_size)
+static struct fw_iso_context *dummy_allocate_iso_context(struct fw_card *card, int type,
+		int channel, size_t header_size, size_t header_storage_size)
 {
 	return ERR_PTR(-ENODEV);
 }
@@ -793,9 +802,13 @@ void fw_core_remove_card(struct fw_card *card)
 	/* Switch off most of the card driver interface. */
 	dummy_driver.free_iso_context	= card->driver->free_iso_context;
 	dummy_driver.stop_iso		= card->driver->stop_iso;
+	dummy_driver.disable		= card->driver->disable;
 	card->driver = &dummy_driver;
+
 	drain_workqueue(card->isoc_wq);
 	drain_workqueue(card->async_wq);
+	card->driver->disable(card);
+	fw_cancel_pending_transactions(card);
 
 	scoped_guard(spinlock_irqsave, &card->lock)
 		fw_destroy_nodes(card);

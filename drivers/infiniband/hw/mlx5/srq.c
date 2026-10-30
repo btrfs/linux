@@ -10,6 +10,9 @@
 #include "mlx5_ib.h"
 #include "srq.h"
 
+#define UVERBS_MODULE_NAME mlx5_ib
+#include <rdma/uverbs_named_ioctl.h>
+
 static void *get_wqe(struct mlx5_ib_srq *srq, int n)
 {
 	return mlx5_frag_buf_get_wqe(&srq->fbc, n);
@@ -45,26 +48,19 @@ static int create_srq_user(struct ib_pd *pd, struct mlx5_ib_srq *srq,
 			   struct ib_udata *udata, int buf_size)
 {
 	struct mlx5_ib_dev *dev = to_mdev(pd->device);
-	struct mlx5_ib_create_srq ucmd = {};
+	struct mlx5_ib_create_srq ucmd;
 	struct mlx5_ib_ucontext *ucontext = rdma_udata_to_drv_context(
 		udata, struct mlx5_ib_ucontext, ibucontext);
-	size_t ucmdlen;
+	struct uverbs_attr_bundle *attrs =
+		rdma_udata_to_uverbs_attr_bundle(udata);
 	int err;
 	u32 uidx = MLX5_IB_DEFAULT_UIDX;
 
-	ucmdlen = min(udata->inlen, sizeof(ucmd));
-
-	if (ib_copy_from_udata(&ucmd, udata, ucmdlen)) {
-		mlx5_ib_dbg(dev, "failed copy udata\n");
-		return -EFAULT;
-	}
+	err = ib_copy_validate_udata_in(udata, ucmd, flags);
+	if (err)
+		return err;
 
 	if (ucmd.reserved0 || ucmd.reserved1)
-		return -EINVAL;
-
-	if (udata->inlen > sizeof(ucmd) &&
-	    !ib_is_udata_cleared(udata, sizeof(ucmd),
-				 udata->inlen - sizeof(ucmd)))
 		return -EINVAL;
 
 	if (in->type != IB_SRQT_BASIC) {
@@ -75,7 +71,9 @@ static int create_srq_user(struct ib_pd *pd, struct mlx5_ib_srq *srq,
 
 	srq->wq_sig = !!(ucmd.flags & MLX5_SRQ_FLAG_SIGNATURE);
 
-	srq->umem = ib_umem_get(pd->device, ucmd.buf_addr, buf_size, 0);
+	srq->umem = ib_umem_get_attr_or_va(pd->device, attrs,
+					   UVERBS_ATTR_CREATE_SRQ_BUF_UMEM,
+					   ucmd.buf_addr, buf_size, 0);
 	if (IS_ERR(srq->umem)) {
 		mlx5_ib_dbg(dev, "failed umem get, size %d\n", buf_size);
 		err = PTR_ERR(srq->umem);
@@ -83,7 +81,9 @@ static int create_srq_user(struct ib_pd *pd, struct mlx5_ib_srq *srq,
 	}
 	in->umem = srq->umem;
 
-	err = mlx5_ib_db_map_user(ucontext, ucmd.db_addr, &srq->db);
+	err = mlx5_ib_db_map_user(ucontext, attrs,
+				  MLX5_IB_ATTR_CREATE_SRQ_DBR_BUF_UMEM,
+				  ucmd.db_addr, &srq->db);
 	if (err) {
 		mlx5_ib_dbg(dev, "map doorbell failed\n");
 		goto err_umem;
@@ -301,12 +301,9 @@ int mlx5_ib_create_srq(struct ib_srq *ib_srq,
 			.srqn = srq->msrq.srqn,
 		};
 
-		if (ib_copy_to_udata(udata, &resp, min(udata->outlen,
-				     sizeof(resp)))) {
-			mlx5_ib_dbg(dev, "copy to user failed\n");
-			err = -EFAULT;
+		err = ib_respond_udata(udata, resp);
+		if (err)
 			goto err_core;
-		}
 	}
 
 	init_attr->attr.max_wr = srq->msrq.max - 1;
@@ -358,7 +355,7 @@ int mlx5_ib_query_srq(struct ib_srq *ibsrq, struct ib_srq_attr *srq_attr)
 	int ret;
 	struct mlx5_srq_attr *out;
 
-	out = kzalloc(sizeof(*out), GFP_KERNEL);
+	out = kzalloc_obj(*out);
 	if (!out)
 		return -ENOMEM;
 
@@ -474,3 +471,15 @@ out:
 
 	return err;
 }
+
+ADD_UVERBS_ATTRIBUTES_SIMPLE(
+	mlx5_ib_srq_create,
+	UVERBS_OBJECT_SRQ,
+	UVERBS_METHOD_SRQ_CREATE,
+	UVERBS_ATTR_UMEM(MLX5_IB_ATTR_CREATE_SRQ_DBR_BUF_UMEM,
+			 UA_OPTIONAL));
+
+const struct uapi_definition mlx5_ib_create_srq_defs[] = {
+	UAPI_DEF_CHAIN_OBJ_TREE(UVERBS_OBJECT_SRQ, &mlx5_ib_srq_create),
+	{},
+};

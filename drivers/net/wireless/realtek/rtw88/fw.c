@@ -279,6 +279,9 @@ static void rtw_fw_adaptivity_result(struct rtw_dev *rtwdev, u8 *payload,
 	const struct rtw_hw_reg_offset *edcca_th = rtwdev->chip->edcca_th;
 	struct rtw_c2h_adaptivity *result = (struct rtw_c2h_adaptivity *)payload;
 
+	if (!edcca_th)
+		return;
+
 	rtw_dbg(rtwdev, RTW_DBG_ADAPTIVITY,
 		"Adaptivity: density %x igi %x l2h_th_init %x l2h %x h2l %x option %x\n",
 		result->density, result->igi, result->l2h_th_init, result->l2h,
@@ -1331,7 +1334,7 @@ static struct rtw_rsvd_page *rtw_alloc_rsvd_page(struct rtw_dev *rtwdev,
 {
 	struct rtw_rsvd_page *rsvd_pkt = NULL;
 
-	rsvd_pkt = kzalloc(sizeof(*rsvd_pkt), GFP_KERNEL);
+	rsvd_pkt = kzalloc_obj(*rsvd_pkt);
 
 	if (!rsvd_pkt)
 		return NULL;

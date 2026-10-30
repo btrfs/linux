@@ -18,8 +18,7 @@
 static int orangefs_create(struct mnt_idmap *idmap,
 			struct inode *dir,
 			struct dentry *dentry,
-			umode_t mode,
-			bool exclusive)
+			umode_t mode)
 {
 	struct orangefs_inode_s *parent = ORANGEFS_I(dir);
 	struct orangefs_kernel_op_s *new_op;
@@ -333,7 +332,7 @@ static struct dentry *orangefs_mkdir(struct mnt_idmap *idmap, struct inode *dir,
 
 	ref = new_op->downcall.resp.mkdir.refn;
 
-	inode = orangefs_new_inode(dir->i_sb, dir, S_IFDIR | mode, 0, &ref);
+	inode = orangefs_new_inode(dir->i_sb, dir, mode, 0, &ref);
 	if (IS_ERR(inode)) {
 		gossip_err("*** Failed to allocate orangefs dir inode\n");
 		ret = PTR_ERR(inode);
@@ -362,7 +361,7 @@ static struct dentry *orangefs_mkdir(struct mnt_idmap *idmap, struct inode *dir,
 	__orangefs_setattr(dir, &iattr);
 out:
 	op_release(new_op);
-	return ERR_PTR(ret);
+	return ret ? ERR_PTR(ret) : NULL;
 }
 
 static int orangefs_rename(struct mnt_idmap *idmap,

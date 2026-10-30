@@ -90,23 +90,24 @@ EXPORT_SYMBOL_GPL(raw_v6_match);
  *	0 - deliver
  *	1 - block
  */
-static int icmpv6_filter(const struct sock *sk, const struct sk_buff *skb)
+static int icmpv6_filter(const struct sock *sk, struct sk_buff *skb)
 {
-	struct icmp6hdr _hdr;
 	const struct icmp6hdr *hdr;
+	const __u32 *data;
+	unsigned int type;
 
 	/* We require only the four bytes of the ICMPv6 header, not any
 	 * additional bytes of message body in "struct icmp6hdr".
 	 */
-	hdr = skb_header_pointer(skb, skb_transport_offset(skb),
-				 ICMPV6_HDRLEN, &_hdr);
-	if (hdr) {
-		const __u32 *data = &raw6_sk(sk)->filter.data[0];
-		unsigned int type = hdr->icmp6_type;
+	if (!pskb_may_pull(skb, ICMPV6_HDRLEN))
+		return 1;
 
-		return (data[type >> 5] & (1U << (type & 31))) != 0;
-	}
-	return 1;
+	hdr = (struct icmp6hdr *)skb->data;
+	type = hdr->icmp6_type;
+
+	data = &raw6_sk(sk)->filter.data[0];
+
+	return (data[type >> 5] & (1U << (type & 31))) != 0;
 }
 
 #if IS_ENABLED(CONFIG_IPV6_MIP6)
@@ -141,15 +142,13 @@ EXPORT_SYMBOL(rawv6_mh_filter_unregister);
 static bool ipv6_raw_deliver(struct sk_buff *skb, int nexthdr)
 {
 	struct net *net = dev_net(skb->dev);
-	const struct in6_addr *saddr;
-	const struct in6_addr *daddr;
+	const struct ipv6hdr *ip6h;
 	struct hlist_head *hlist;
-	struct sock *sk;
 	bool delivered = false;
+	struct sock *sk;
 	__u8 hash;
 
-	saddr = &ipv6_hdr(skb)->saddr;
-	daddr = saddr + 1;
+	ip6h = ipv6_hdr(skb);
 
 	hash = raw_hashfunc(net, nexthdr);
 	hlist = &raw_v6_hashinfo.ht[hash];
@@ -157,7 +156,7 @@ static bool ipv6_raw_deliver(struct sk_buff *skb, int nexthdr)
 	sk_for_each_rcu(sk, hlist) {
 		int filtered;
 
-		if (!raw_v6_match(net, sk, nexthdr, daddr, saddr,
+		if (!raw_v6_match(net, sk, nexthdr, &ip6h->daddr, &ip6h->saddr,
 				  inet6_iif(skb), inet6_sdif(skb)))
 			continue;
 
@@ -171,6 +170,7 @@ static bool ipv6_raw_deliver(struct sk_buff *skb, int nexthdr)
 		switch (nexthdr) {
 		case IPPROTO_ICMPV6:
 			filtered = icmpv6_filter(sk, skb);
+			ip6h = ipv6_hdr(skb);
 			break;
 
 #if IS_ENABLED(CONFIG_IPV6_MIP6)
@@ -214,7 +214,8 @@ bool raw6_local_deliver(struct sk_buff *skb, int nexthdr)
 }
 
 /* This cleans up af_inet6 a bit. -DaveM */
-static int rawv6_bind(struct sock *sk, struct sockaddr *uaddr, int addr_len)
+static int rawv6_bind(struct sock *sk, struct sockaddr_unsized *uaddr,
+		      int addr_len)
 {
 	struct inet_sock *inet = inet_sk(sk);
 	struct ipv6_pinfo *np = inet6_sk(sk);
@@ -348,7 +349,7 @@ void raw6_icmp_error(struct sk_buff *skb, int nexthdr,
 		const struct ipv6hdr *ip6h = (const struct ipv6hdr *)skb->data;
 
 		if (!raw_v6_match(net, sk, nexthdr, &ip6h->saddr, &ip6h->daddr,
-				  inet6_iif(skb), inet6_iif(skb)))
+				  inet6_iif(skb), inet6_sdif(skb)))
 			continue;
 		rawv6_err(sk, skb, type, code, inner_offset, info);
 	}
@@ -368,7 +369,8 @@ static inline int rawv6_rcv_skb(struct sock *sk, struct sk_buff *skb)
 
 	/* Charge it to the socket. */
 	skb_dst_drop(skb);
-	if (sock_queue_rcv_skb_reason(sk, skb, &reason) < 0) {
+	reason = sock_queue_rcv_skb_reason(sk, skb);
+	if (reason) {
 		sk_skb_reason_drop(sk, skb, reason);
 		return NET_RX_DROP;
 	}
@@ -431,7 +433,7 @@ int rawv6_rcv(struct sock *sk, struct sk_buff *skb)
  */
 
 static int rawv6_recvmsg(struct sock *sk, struct msghdr *msg, size_t len,
-			 int flags, int *addr_len)
+			 int flags)
 {
 	struct ipv6_pinfo *np = inet6_sk(sk);
 	DECLARE_SOCKADDR(struct sockaddr_in6 *, sin6, msg->msg_name);
@@ -443,10 +445,10 @@ static int rawv6_recvmsg(struct sock *sk, struct msghdr *msg, size_t len,
 		return -EOPNOTSUPP;
 
 	if (flags & MSG_ERRQUEUE)
-		return ipv6_recv_error(sk, msg, len, addr_len);
+		return ipv6_recv_error(sk, msg, len);
 
 	if (np->rxopt.bits.rxpmtu && READ_ONCE(np->rxpmtu))
-		return ipv6_recv_rxpmtu(sk, msg, len, addr_len);
+		return ipv6_recv_rxpmtu(sk, msg, len);
 
 	skb = skb_recv_datagram(sk, flags, &err);
 	if (!skb)
@@ -480,7 +482,7 @@ static int rawv6_recvmsg(struct sock *sk, struct msghdr *msg, size_t len,
 		sin6->sin6_flowinfo = 0;
 		sin6->sin6_scope_id = ipv6_iface_scope_id(&sin6->sin6_addr,
 							  inet6_iif(skb));
-		*addr_len = sizeof(*sin6);
+		msg->msg_namelen = sizeof(*sin6);
 	}
 
 	sock_recv_cmsgs(msg, sk, skb);
@@ -528,7 +530,7 @@ static int rawv6_push_pending_frames(struct sock *sk, struct flowi6 *fl6,
 
 	offset = rp->offset;
 	total_len = inet_sk(sk)->cork.base.length;
-	opt = inet6_sk(sk)->cork.opt;
+	opt = inet_sk(sk)->cork.base6.opt;
 	total_len -= opt ? opt->opt_flen : 0;
 
 	if (offset >= total_len - 1) {
@@ -1049,14 +1051,12 @@ static int rawv6_setsockopt(struct sock *sk, int level, int optname,
 	return do_rawv6_setsockopt(sk, level, optname, optval, optlen);
 }
 
-static int do_rawv6_getsockopt(struct sock *sk, int level, int optname,
-			    char __user *optval, int __user *optlen)
+static int do_rawv6_getsockopt(struct sock *sk, int optname, sockopt_t *opt)
 {
 	struct raw6_sock *rp = raw6_sk(sk);
 	int val, len;
 
-	if (get_user(len, optlen))
-		return -EFAULT;
+	len = opt->optlen;
 
 	switch (optname) {
 	case IPV6_HDRINCL:
@@ -1078,11 +1078,10 @@ static int do_rawv6_getsockopt(struct sock *sk, int level, int optname,
 		return -ENOPROTOOPT;
 	}
 
-	len = min_t(unsigned int, sizeof(int), len);
+	len = umin(sizeof(int), len);
 
-	if (put_user(len, optlen))
-		return -EFAULT;
-	if (copy_to_user(optval, &val, len))
+	opt->optlen = len;
+	if (copy_to_iter(&val, len, &opt->iter_out) != len)
 		return -EFAULT;
 	return 0;
 }
@@ -1090,6 +1089,9 @@ static int do_rawv6_getsockopt(struct sock *sk, int level, int optname,
 static int rawv6_getsockopt(struct sock *sk, int level, int optname,
 			  char __user *optval, int __user *optlen)
 {
+	sockopt_t opt;
+	int err;
+
 	switch (level) {
 	case SOL_RAW:
 		break;
@@ -1107,7 +1109,18 @@ static int rawv6_getsockopt(struct sock *sk, int level, int optname,
 		return ipv6_getsockopt(sk, level, optname, optval, optlen);
 	}
 
-	return do_rawv6_getsockopt(sk, level, optname, optval, optlen);
+	err = sockopt_init_user(&opt, optval, optlen);
+	if (err)
+		return err;
+
+	err = do_rawv6_getsockopt(sk, optname, &opt);
+	if (err)
+		return err;
+
+	if (put_user(opt.optlen, optlen))
+		return -EFAULT;
+
+	return 0;
 }
 
 static int rawv6_ioctl(struct sock *sk, int cmd, int *karg)

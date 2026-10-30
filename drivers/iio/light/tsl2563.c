@@ -18,7 +18,6 @@
 #include <linux/interrupt.h>
 #include <linux/irq.h>
 #include <linux/math.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
 #include <linux/pm.h>
@@ -755,7 +754,7 @@ static int tsl2563_probe(struct i2c_client *client)
 					   "tsl2563_event",
 					   indio_dev);
 		if (err)
-			return dev_err_probe(dev, err, "irq request error\n");
+			return err;
 	}
 
 	err = tsl2563_configure(chip);
@@ -839,10 +838,10 @@ static DEFINE_SIMPLE_DEV_PM_OPS(tsl2563_pm_ops, tsl2563_suspend,
 				tsl2563_resume);
 
 static const struct i2c_device_id tsl2563_id[] = {
-	{ "tsl2560", 0 },
-	{ "tsl2561", 1 },
-	{ "tsl2562", 2 },
-	{ "tsl2563", 3 },
+	{ .name = "tsl2560" },
+	{ .name = "tsl2561" },
+	{ .name = "tsl2562" },
+	{ .name = "tsl2563" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, tsl2563_id);

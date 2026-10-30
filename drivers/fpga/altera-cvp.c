@@ -16,15 +16,13 @@
 #include <linux/module.h>
 #include <linux/pci.h>
 #include <linux/sizes.h>
+#include <linux/string.h>
 
 #define CVP_BAR		0	/* BAR used for data transfer in memory mode */
 #define CVP_DUMMY_WR	244	/* dummy writes to clear CvP state machine */
 #define TIMEOUT_US	2000	/* CVP STATUS timeout for USERMODE polling */
 
 /* Vendor Specific Extended Capability Registers */
-#define VSE_PCIE_EXT_CAP_ID		0x0
-#define VSE_PCIE_EXT_CAP_ID_VAL		0x000b	/* 16bit */
-
 #define VSE_CVP_STATUS			0x1c	/* 32bit */
 #define VSE_CVP_STATUS_CFG_RDY		BIT(18)	/* CVP_CONFIG_READY */
 #define VSE_CVP_STATUS_CFG_ERR		BIT(19)	/* CVP_CONFIG_ERROR */
@@ -264,7 +262,7 @@ static int altera_cvp_v2_wait_for_credit(struct fpga_manager *mgr,
 static int altera_cvp_send_block(struct altera_cvp_conf *conf,
 				 const u32 *data, size_t len)
 {
-	u32 mask, words = len / sizeof(u32);
+	u32 words = len / sizeof(u32);
 	int i, remainder;
 
 	for (i = 0; i < words; i++)
@@ -273,9 +271,10 @@ static int altera_cvp_send_block(struct altera_cvp_conf *conf,
 	/* write up to 3 trailing bytes, if any */
 	remainder = len % sizeof(u32);
 	if (remainder) {
-		mask = BIT(remainder * 8) - 1;
-		if (mask)
-			conf->write_data(conf, *data & mask);
+		u32 word = 0;
+
+		memcpy(&word, data, remainder);
+		conf->write_data(conf, word);
 	}
 
 	return 0;
@@ -577,25 +576,18 @@ static int altera_cvp_probe(struct pci_dev *pdev,
 {
 	struct altera_cvp_conf *conf;
 	struct fpga_manager *mgr;
-	int ret, offset;
-	u16 cmd, val;
+	u16 cmd, offset;
 	u32 regval;
-
-	/* Discover the Vendor Specific Offset for this device */
-	offset = pci_find_next_ext_capability(pdev, 0, PCI_EXT_CAP_ID_VNDR);
-	if (!offset) {
-		dev_err(&pdev->dev, "No Vendor Specific Offset.\n");
-		return -ENODEV;
-	}
+	int ret;
 
 	/*
 	 * First check if this is the expected FPGA device. PCI config
 	 * space access works without enabling the PCI device, memory
 	 * space access is enabled further down.
 	 */
-	pci_read_config_word(pdev, offset + VSE_PCIE_EXT_CAP_ID, &val);
-	if (val != VSE_PCIE_EXT_CAP_ID_VAL) {
-		dev_err(&pdev->dev, "Wrong EXT_CAP_ID value 0x%x\n", val);
+	offset = pci_find_vsec_capability(pdev, PCI_VENDOR_ID_ALTERA, 0x1172);
+	if (!offset) {
+		dev_err(&pdev->dev, "Wrong VSEC ID value\n");
 		return -ENODEV;
 	}
 

@@ -16,6 +16,7 @@
 / {
 	compatible = "apple,j493", "apple,t8112", "apple,arm-platform";
 	model = "Apple MacBook Pro (13-inch, M2, 2022)";
+	chassis-type = "laptop";
 
 	/*
 	 * All of those are used by the bootloader to pass calibration
@@ -108,6 +109,18 @@
 	};
 };
 
+/*
+ * Provide labels for the USB type C ports.
+ */
+
+&typec0 {
+	label = "USB-C Left-back";
+};
+
+&typec1 {
+	label = "USB-C Left-front";
+};
+
 &i2c4 {
 	status = "okay";
 };
@@ -133,3 +146,6 @@
 		touchscreen-inverted-y;
 	};
 };
+
+#include "hwmon-laptop.dtsi"
+#include "hwmon-fan.dtsi"

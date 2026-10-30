@@ -41,6 +41,7 @@ enum npc_kpu_la_ltype {
 	NPC_LT_LA_CPT_HDR,
 	NPC_LT_LA_CUSTOM_L2_24B_ETHER,
 	NPC_LT_LA_CUSTOM_PRE_L2_ETHER,
+	NPC_LT_LA_FP_ETHER,
 	NPC_LT_LA_CUSTOM0 = 0xE,
 	NPC_LT_LA_CUSTOM1 = 0xF,
 };
@@ -114,6 +115,7 @@ enum npc_kpu_le_ltype {
 	NPC_LT_LE_TU_MPLS_IN_GRE,
 	NPC_LT_LE_TU_NSH_IN_GRE,
 	NPC_LT_LE_TU_MPLS_IN_UDP,
+	NPC_LT_LE_ROCEV2,
 	NPC_LT_LE_CUSTOM0 = 0xE,
 	NPC_LT_LE_CUSTOM1 = 0xF,
 };
@@ -159,10 +161,12 @@ enum npc_kpu_lh_ltype {
  * Software assigns pkind for each incoming port such as CGX
  * Ethernet interfaces, LBK interfaces, etc.
  */
-#define NPC_UNRESERVED_PKIND_COUNT NPC_RX_CPT_HDR_PTP_PKIND
+#define NPC_UNRESERVED_PKIND_COUNT NPC_RX_SKIP_SIZE_PKIND
 
 enum npc_pkind_type {
 	NPC_RX_LBK_PKIND = 0ULL,
+	NPC_RX_SKIP_SIZE_PKIND = 46ULL,
+	NPC_RX_CPT_SKIP_SIZE_PKIND = 50ULL,
 	NPC_RX_CPT_HDR_PTP_PKIND = 54ULL,
 	NPC_RX_CUSTOM_PRE_L2_PKIND = 55ULL,
 	NPC_RX_VLAN_EXDSA_PKIND = 56ULL,
@@ -265,6 +269,19 @@ struct npc_kpu_profile_cam {
 	u16 dp2_mask;
 } __packed;
 
+struct npc_kpu_profile_cam2 {
+	u8 state;
+	u8 state_mask;
+	u16 dp0;
+	u16 dp0_mask;
+	u16 dp1;
+	u16 dp1_mask;
+	u16 dp2;
+	u16 dp2_mask;
+	u8 ptype;
+	u8 ptype_mask;
+} __packed;
+
 struct npc_kpu_profile_action {
 	u8 errlev;
 	u8 errcode;
@@ -290,6 +307,10 @@ struct npc_kpu_profile {
 	int action_entries;
 	struct npc_kpu_profile_cam *cam;
 	struct npc_kpu_profile_action *action;
+	int cam_entries2;
+	int action_entries2;
+	struct npc_kpu_profile_action *action2;
+	struct npc_kpu_profile_cam2 *cam2;
 };
 
 /* NPC KPU register formats */
@@ -429,6 +450,7 @@ struct nix_rx_action {
 
 /* NPC_AF_INTFX_KEX_CFG field masks */
 #define NPC_PARSE_NIBBLE		GENMASK_ULL(30, 0)
+#define NPC_TOTAL_NIBBLE		31
 
 /* NPC_PARSE_KEX_S nibble definitions for each field */
 #define NPC_PARSE_NIBBLE_CHAN		GENMASK_ULL(2, 0)
@@ -643,6 +665,7 @@ struct rvu_npc_mcam_rule {
 	u16 chan;
 	u16 chan_mask;
 	u8 lxmb;
+	u8 hw_prio;
 };
 
 #endif /* NPC_H */

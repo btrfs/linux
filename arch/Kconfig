@@ -114,6 +114,20 @@ config GENERIC_ENTRY
 	select GENERIC_IRQ_ENTRY
 	select GENERIC_SYSCALL
 
+config ARCH_SUPPORTS_SYSCALL_USER_DISPATCH
+	bool
+
+config SYSCALL_USER_DISPATCH
+	bool "Syscall User Dispatch"
+	depends on ARCH_SUPPORTS_SYSCALL_USER_DISPATCH
+	depends on GENERIC_ENTRY
+	default y
+	help
+	  Syscall User Dispatch lets a thread have its own system calls
+	  intercepted and redirected to a userspace signal handler based
+	  on a prctl() configured instruction pointer range.
+	  If unsure, say Y.
+
 config KPROBES
 	bool "Kprobes"
 	depends on HAVE_KPROBES
@@ -232,17 +246,14 @@ config HAVE_EFFICIENT_UNALIGNED_ACCESS
 config ARCH_USE_BUILTIN_BSWAP
 	bool
 	help
-	  Modern versions of GCC (since 4.4) have builtin functions
-	  for handling byte-swapping. Using these, instead of the old
-	  inline assembler that the architecture code provides in the
-	  __arch_bswapXX() macros, allows the compiler to see what's
-	  happening and offers more opportunity for optimisation. In
-	  particular, the compiler will be able to combine the byteswap
-	  with a nearby load or store and use load-and-swap or
-	  store-and-swap instructions if the architecture has them. It
-	  should almost *never* result in code which is worse than the
-	  hand-coded assembler in <asm/swab.h>.  But just in case it
-	  does, the use of the builtins is optional.
+	  GCC and Clang have builtin functions for handling byte-swapping.
+	  Using these allows the compiler to see what's happening and
+	  offers more opportunity for optimisation. In particular, the
+	  compiler will be able to combine the byteswap with a nearby load
+	  or store and use load-and-swap or store-and-swap instructions if
+	  the architecture has them. It should almost *never* result in code
+	  which is worse than the hand-coded assembler in <asm/swab.h>.
+	  But just in case it does, the use of the builtins is optional.
 
 	  Any architecture with load-and-swap or store-and-swap
 	  instructions should set this. And it shouldn't hurt to set it
@@ -366,6 +377,9 @@ config ARCH_HAS_DMA_CLEAR_UNCACHED
 config ARCH_HAS_CPU_FINALIZE_INIT
 	bool
 
+config ARCH_HAS_DELAY_TIMER
+	bool
+
 # The architecture has a per-task state that includes the mm's PASID
 config ARCH_HAS_CPU_PASID
 	bool
@@ -404,6 +418,10 @@ config ARCH_32BIT_OFF_T
 
 # Selected by 64 bit architectures which have a 32 bit f_tinode in struct ustat
 config ARCH_32BIT_USTAT_F_TINODE
+	bool
+
+# Selected by architectures with Total Store Order (TSO)
+config ARCH_MEMORY_ORDER_TSO
 	bool
 
 config HAVE_ASM_MODVERSIONS
@@ -636,7 +654,7 @@ config HAVE_ARCH_SECCOMP_FILTER
 	  - syscall_set_return_value()
 	  - SIGSYS siginfo_t support
 	  - secure_computing is called from a ptrace_event()-safe context
-	  - secure_computing return value is checked and a return value of -1
+	  - secure_computing return value is checked and if false it
 	    results in the system call being skipped immediately.
 	  - seccomp syscall wired up
 	  - if !HAVE_SPARSE_SYSCALL_NR, have SECCOMP_ARCH_NATIVE,
@@ -809,9 +827,6 @@ config HAS_LTO_CLANG
 	depends on $(success,$(AR) --help | head -n 1 | grep -qi llvm)
 	depends on ARCH_SUPPORTS_LTO_CLANG
 	depends on !FTRACE_MCOUNT_USE_RECORDMCOUNT
-	# https://github.com/ClangBuiltLinux/linux/issues/1721
-	depends on (!KASAN || KASAN_HW_TAGS || CLANG_VERSION >= 170000) || !DEBUG_INFO
-	depends on (!KCOV || CLANG_VERSION >= 170000) || !DEBUG_INFO
 	depends on !GCOV_KERNEL
 	help
 	  The compiler and Kconfig options support building with Clang's
@@ -864,15 +879,30 @@ config LTO_CLANG_THIN
 	    https://clang.llvm.org/docs/ThinLTO.html
 
 	  If unsure, say Y.
-endchoice
 
-config ARCH_SUPPORTS_AUTOFDO_CLANG
-	bool
+config LTO_CLANG_THIN_DIST
+	bool "Clang ThinLTO in distributed mode (EXPERIMENTAL)"
+	depends on HAS_LTO_CLANG && ARCH_SUPPORTS_LTO_CLANG_THIN
+	select LTO_CLANG
+	help
+	  This option enables Clang's ThinLTO in distributed build mode.
+	  In this mode, the linker performs the thin-link, generating
+	  ThinLTO index files. Subsequently, the build system explicitly
+	  invokes ThinLTO backend compilation using these index files
+	  and pre-linked IR objects. The resulting native object files
+	  are with the .thinlto-native.o suffix.
+
+	  This build mode offers improved visibility into the ThinLTO
+	  process through explicit subcommand exposure. It also makes
+	  final native object files directly available, benefiting
+	  tools like objtool and kpatch. Additionally, it provides
+	  crucial granular control over back-end options, enabling
+	  module-specific compiler options, and simplifies debugging.
+endchoice
 
 config AUTOFDO_CLANG
 	bool "Enable Clang's AutoFDO build (EXPERIMENTAL)"
-	depends on ARCH_SUPPORTS_AUTOFDO_CLANG
-	depends on CC_IS_CLANG && CLANG_VERSION >= 170000
+	depends on CC_IS_CLANG
 	help
 	  This option enables Clang’s AutoFDO build. When
 	  an AutoFDO profile is specified in variable
@@ -886,13 +916,10 @@ config AUTOFDO_CLANG
 
 	  If unsure, say N.
 
-config ARCH_SUPPORTS_PROPELLER_CLANG
-	bool
-
 config PROPELLER_CLANG
 	bool "Enable Clang's Propeller build"
-	depends on ARCH_SUPPORTS_PROPELLER_CLANG
 	depends on CC_IS_CLANG && CLANG_VERSION >= 190000
+	depends on $(cc-option,-fbasic-block-sections=list=/dev/null)
 	help
 	  This option enables Clang’s Propeller build. When the Propeller
 	  profiles is specified in variable CLANG_PROPELLER_PROFILE_PREFIX
@@ -971,10 +998,9 @@ config HAVE_CFI_ICALL_NORMALIZE_INTEGERS
 config HAVE_CFI_ICALL_NORMALIZE_INTEGERS_RUSTC
 	def_bool y
 	depends on HAVE_CFI_ICALL_NORMALIZE_INTEGERS
-	depends on RUSTC_VERSION >= 107900
 	depends on ARM64 || X86_64
 	# With GCOV/KASAN we need this fix: https://github.com/rust-lang/rust/pull/129373
-	depends on (RUSTC_LLVM_VERSION >= 190103 && RUSTC_VERSION >= 108200) || \
+	depends on RUSTC_LLVM_VERSION >= 190103 || \
 		(!GCOV_KERNEL && !KASAN_GENERIC && !KASAN_SW_TAGS)
 
 config CFI_PERMISSIVE
@@ -1059,6 +1085,9 @@ config HAVE_IRQ_TIME_ACCOUNTING
 	  Archs need to ensure they use a high enough resolution clock to
 	  support irq time accounting and then call enable_sched_clock_irqtime().
 
+config HAVE_PV_STEAL_CLOCK_GEN
+	bool
+
 config HAVE_MOVE_PUD
 	bool
 	help
@@ -1127,6 +1156,13 @@ config ARCH_WANTS_MODULES_DATA_IN_VMALLOC
 	help
 	  For architectures like powerpc/32 which have constraints on module
 	  allocation and need to allocate module data outside of module area.
+
+config ARCH_WANTS_MODULES_TEXT_SECTIONS
+	bool
+	help
+	  For architectures like 32-bit parisc which require that functions in
+	  modules have to keep code in own text sections (-ffunction-sections)
+	  and to avoid merging all text into one big text section,
 
 config ARCH_WANTS_EXECMEM_LATE
 	bool
@@ -1519,9 +1555,8 @@ config HAVE_ARCH_RANDOMIZE_KSTACK_OFFSET
 	def_bool n
 	help
 	  An arch should select this symbol if it can support kernel stack
-	  offset randomization with calls to add_random_kstack_offset()
-	  during syscall entry and choose_random_kstack_offset() during
-	  syscall exit. Careful removal of -fstack-protector-strong and
+	  offset randomization with a call to add_random_kstack_offset()
+	  during syscall entry. Careful removal of -fstack-protector-strong and
 	  -fstack-protector should also be applied to the entry code and
 	  closely examined, as the artificial stack bump looks like an array
 	  to the compiler, so it will attempt to add canary checks regardless
@@ -1664,7 +1699,6 @@ config HAVE_SPARSE_SYSCALL_NR
 	  related optimizations for a given architecture.
 
 config ARCH_HAS_VDSO_ARCH_DATA
-	depends on HAVE_GENERIC_VDSO
 	bool
 
 config ARCH_HAS_VDSO_TIME_DATA
@@ -1840,5 +1874,8 @@ config ARCH_WANTS_PRE_LINK_VMLINUX
 
 config ARCH_HAS_CPU_ATTACK_VECTORS
 	bool
+
+config HAVE_ARCH_GET_SECUREBOOT
+	def_bool EFI
 
 endmenu

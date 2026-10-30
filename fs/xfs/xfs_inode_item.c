@@ -3,7 +3,7 @@
  * Copyright (c) 2000-2002,2005 Silicon Graphics, Inc.
  * All Rights Reserved.
  */
-#include "xfs.h"
+#include "xfs_platform.h"
 #include "xfs_fs.h"
 #include "xfs_shared.h"
 #include "xfs_format.h"
@@ -18,6 +18,7 @@
 #include "xfs_buf_item.h"
 #include "xfs_log.h"
 #include "xfs_log_priv.h"
+#include "xfs_ag.h"
 #include "xfs_error.h"
 #include "xfs_rtbitmap.h"
 
@@ -34,7 +35,7 @@ static uint64_t
 xfs_inode_item_sort(
 	struct xfs_log_item	*lip)
 {
-	return INODE_ITEM(lip)->ili_inode->i_ino;
+	return I_INO(INODE_ITEM(lip)->ili_inode);
 }
 
 #ifdef DEBUG_EXPENSIVE
@@ -54,7 +55,7 @@ xfs_inode_item_precommit_check(
 
 	xfs_inode_to_disk(ip, dip, 0);
 	xfs_dinode_calc_crc(mp, dip);
-	fa = xfs_dinode_verify(mp, ip->i_ino, dip);
+	fa = xfs_dinode_verify(mp, I_INO(ip), dip);
 	if (fa) {
 		xfs_inode_verifier_error(ip, -EFSCORRUPTED, __func__, dip,
 				sizeof(*dip), fa);
@@ -104,6 +105,7 @@ xfs_inode_item_precommit(
 {
 	struct xfs_inode_log_item *iip = INODE_ITEM(lip);
 	struct xfs_inode	*ip = iip->ili_inode;
+	struct xfs_mount	*mp = ip->i_mount;
 	struct inode		*inode = VFS_I(ip);
 	unsigned int		flags = iip->ili_dirty_flags;
 
@@ -113,9 +115,9 @@ xfs_inode_item_precommit(
 	 * to log the timestamps, or will clear already cleared fields in the
 	 * worst case.
 	 */
-	if (inode->i_state & I_DIRTY_TIME) {
+	if (inode_state_read_once(inode) & I_DIRTY_TIME) {
 		spin_lock(&inode->i_lock);
-		inode->i_state &= ~I_DIRTY_TIME;
+		inode_state_clear(inode, I_DIRTY_TIME);
 		spin_unlock(&inode->i_lock);
 	}
 
@@ -124,8 +126,7 @@ xfs_inode_item_precommit(
 	 * to upgrade this inode to bigtime format, do so now.
 	 */
 	if ((flags & (XFS_ILOG_CORE | XFS_ILOG_TIMESTAMP)) &&
-	    xfs_has_bigtime(ip->i_mount) &&
-	    !xfs_inode_has_bigtime(ip)) {
+	    xfs_has_bigtime(mp) && !xfs_inode_has_bigtime(ip)) {
 		ip->i_diflags2 |= XFS_DIFLAG2_BIGTIME;
 		flags |= XFS_ILOG_CORE;
 	}
@@ -138,14 +139,14 @@ xfs_inode_item_precommit(
 	 */
 	if (ip->i_diflags & XFS_DIFLAG_RTINHERIT) {
 		if ((ip->i_diflags & XFS_DIFLAG_EXTSZINHERIT) &&
-		    xfs_extlen_to_rtxmod(ip->i_mount, ip->i_extsize) > 0) {
+		    xfs_extlen_to_rtxmod(mp, ip->i_extsize) > 0) {
 			ip->i_diflags &= ~(XFS_DIFLAG_EXTSIZE |
 					   XFS_DIFLAG_EXTSZINHERIT);
 			ip->i_extsize = 0;
 			flags |= XFS_ILOG_CORE;
 		}
 		if ((ip->i_diflags2 & XFS_DIFLAG2_COWEXTSIZE) &&
-		    xfs_extlen_to_rtxmod(ip->i_mount, ip->i_cowextsize) > 0) {
+		    xfs_extlen_to_rtxmod(mp, ip->i_cowextsize) > 0) {
 			ip->i_diflags2 &= ~XFS_DIFLAG2_COWEXTSIZE;
 			ip->i_cowextsize = 0;
 			flags |= XFS_ILOG_CORE;
@@ -154,6 +155,7 @@ xfs_inode_item_precommit(
 
 	spin_lock(&iip->ili_lock);
 	if (!iip->ili_item.li_buf) {
+		struct xfs_perag *pag;
 		struct xfs_buf	*bp;
 		int		error;
 
@@ -167,7 +169,9 @@ xfs_inode_item_precommit(
 		 * here.
 		 */
 		spin_unlock(&iip->ili_lock);
-		error = xfs_imap_to_bp(ip->i_mount, tp, &ip->i_imap, &bp);
+		pag = xfs_perag_get(mp, XFS_INODE_TO_AGNO(ip));
+		error = xfs_read_icluster(pag, tp, ip->i_imap.im_agbno, &bp);
+		xfs_perag_put(pag);
 		if (error)
 			return error;
 
@@ -336,8 +340,7 @@ STATIC void
 xfs_inode_item_format_data_fork(
 	struct xfs_inode_log_item *iip,
 	struct xfs_inode_log_format *ilf,
-	struct xfs_log_vec	*lv,
-	struct xfs_log_iovec	**vecp)
+	struct xlog_format_buf	*lfb)
 {
 	struct xfs_inode	*ip = iip->ili_inode;
 	size_t			data_bytes;
@@ -354,9 +357,9 @@ xfs_inode_item_format_data_fork(
 
 			ASSERT(xfs_iext_count(&ip->i_df) > 0);
 
-			p = xlog_prepare_iovec(lv, vecp, XLOG_REG_TYPE_IEXT);
+			p = xlog_format_start(lfb, XLOG_REG_TYPE_IEXT);
 			data_bytes = xfs_iextents_copy(ip, p, XFS_DATA_FORK);
-			xlog_finish_iovec(lv, *vecp, data_bytes);
+			xlog_format_commit(lfb, data_bytes);
 
 			ASSERT(data_bytes <= ip->i_df.if_bytes);
 
@@ -374,7 +377,7 @@ xfs_inode_item_format_data_fork(
 		if ((iip->ili_fields & XFS_ILOG_DBROOT) &&
 		    ip->i_df.if_broot_bytes > 0) {
 			ASSERT(ip->i_df.if_broot != NULL);
-			xlog_copy_iovec(lv, vecp, XLOG_REG_TYPE_IBROOT,
+			xlog_format_copy(lfb, XLOG_REG_TYPE_IBROOT,
 					ip->i_df.if_broot,
 					ip->i_df.if_broot_bytes);
 			ilf->ilf_dsize = ip->i_df.if_broot_bytes;
@@ -392,8 +395,9 @@ xfs_inode_item_format_data_fork(
 		    ip->i_df.if_bytes > 0) {
 			ASSERT(ip->i_df.if_data != NULL);
 			ASSERT(ip->i_disk_size > 0);
-			xlog_copy_iovec(lv, vecp, XLOG_REG_TYPE_ILOCAL,
-					ip->i_df.if_data, ip->i_df.if_bytes);
+			xlog_format_copy(lfb, XLOG_REG_TYPE_ILOCAL,
+					ip->i_df.if_data,
+					ip->i_df.if_bytes);
 			ilf->ilf_dsize = (unsigned)ip->i_df.if_bytes;
 			ilf->ilf_size++;
 		} else {
@@ -416,8 +420,7 @@ STATIC void
 xfs_inode_item_format_attr_fork(
 	struct xfs_inode_log_item *iip,
 	struct xfs_inode_log_format *ilf,
-	struct xfs_log_vec	*lv,
-	struct xfs_log_iovec	**vecp)
+	struct xlog_format_buf	*lfb)
 {
 	struct xfs_inode	*ip = iip->ili_inode;
 	size_t			data_bytes;
@@ -435,9 +438,9 @@ xfs_inode_item_format_attr_fork(
 			ASSERT(xfs_iext_count(&ip->i_af) ==
 				ip->i_af.if_nextents);
 
-			p = xlog_prepare_iovec(lv, vecp, XLOG_REG_TYPE_IATTR_EXT);
+			p = xlog_format_start(lfb, XLOG_REG_TYPE_IATTR_EXT);
 			data_bytes = xfs_iextents_copy(ip, p, XFS_ATTR_FORK);
-			xlog_finish_iovec(lv, *vecp, data_bytes);
+			xlog_format_commit(lfb, data_bytes);
 
 			ilf->ilf_asize = data_bytes;
 			ilf->ilf_size++;
@@ -453,7 +456,7 @@ xfs_inode_item_format_attr_fork(
 		    ip->i_af.if_broot_bytes > 0) {
 			ASSERT(ip->i_af.if_broot != NULL);
 
-			xlog_copy_iovec(lv, vecp, XLOG_REG_TYPE_IATTR_BROOT,
+			xlog_format_copy(lfb, XLOG_REG_TYPE_IATTR_BROOT,
 					ip->i_af.if_broot,
 					ip->i_af.if_broot_bytes);
 			ilf->ilf_asize = ip->i_af.if_broot_bytes;
@@ -469,8 +472,9 @@ xfs_inode_item_format_attr_fork(
 		if ((iip->ili_fields & XFS_ILOG_ADATA) &&
 		    ip->i_af.if_bytes > 0) {
 			ASSERT(ip->i_af.if_data != NULL);
-			xlog_copy_iovec(lv, vecp, XLOG_REG_TYPE_IATTR_LOCAL,
-					ip->i_af.if_data, ip->i_af.if_bytes);
+			xlog_format_copy(lfb, XLOG_REG_TYPE_IATTR_LOCAL,
+					ip->i_af.if_data,
+					ip->i_af.if_bytes);
 			ilf->ilf_asize = (unsigned)ip->i_af.if_bytes;
 			ilf->ilf_size++;
 		} else {
@@ -588,7 +592,7 @@ xfs_inode_to_log_dinode(
 		to->di_flags2 = ip->i_diflags2;
 		/* also covers the di_used_blocks union arm: */
 		to->di_cowextsize = ip->i_cowextsize;
-		to->di_ino = ip->i_ino;
+		to->di_ino = I_INO(ip);
 		to->di_lsn = lsn;
 		memset(to->di_pad2, 0, sizeof(to->di_pad2));
 		uuid_copy(&to->di_uuid, &ip->i_mount->m_sb.sb_meta_uuid);
@@ -619,14 +623,13 @@ xfs_inode_to_log_dinode(
 static void
 xfs_inode_item_format_core(
 	struct xfs_inode	*ip,
-	struct xfs_log_vec	*lv,
-	struct xfs_log_iovec	**vecp)
+	struct xlog_format_buf	*lfb)
 {
 	struct xfs_log_dinode	*dic;
 
-	dic = xlog_prepare_iovec(lv, vecp, XLOG_REG_TYPE_ICORE);
+	dic = xlog_format_start(lfb, XLOG_REG_TYPE_ICORE);
 	xfs_inode_to_log_dinode(ip, dic, ip->i_itemp->ili_item.li_lsn);
-	xlog_finish_iovec(lv, *vecp, xfs_log_dinode_size(ip->i_mount));
+	xlog_format_commit(lfb, xfs_log_dinode_size(ip->i_mount));
 }
 
 /*
@@ -644,18 +647,19 @@ xfs_inode_item_format_core(
 STATIC void
 xfs_inode_item_format(
 	struct xfs_log_item	*lip,
-	struct xfs_log_vec	*lv)
+	struct xlog_format_buf	*lfb)
 {
 	struct xfs_inode_log_item *iip = INODE_ITEM(lip);
 	struct xfs_inode	*ip = iip->ili_inode;
-	struct xfs_log_iovec	*vecp = NULL;
+	struct xfs_mount	*mp = ip->i_mount;
 	struct xfs_inode_log_format *ilf;
 
-	ilf = xlog_prepare_iovec(lv, &vecp, XLOG_REG_TYPE_IFORMAT);
+	ilf = xlog_format_start(lfb, XLOG_REG_TYPE_IFORMAT);
 	ilf->ilf_type = XFS_LI_INODE;
-	ilf->ilf_ino = ip->i_ino;
-	ilf->ilf_blkno = ip->i_imap.im_blkno;
-	ilf->ilf_len = ip->i_imap.im_len;
+	ilf->ilf_ino = I_INO(ip);
+	ilf->ilf_blkno = XFS_AGB_TO_DADDR(mp, XFS_INODE_TO_AGNO(ip),
+				ip->i_imap.im_agbno);
+	ilf->ilf_len = XFS_FSB_TO_BB(mp, M_IGEO(mp)->blocks_per_cluster);
 	ilf->ilf_boffset = ip->i_imap.im_boffset;
 	ilf->ilf_fields = XFS_ILOG_CORE;
 	ilf->ilf_size = 2; /* format + core */
@@ -668,13 +672,12 @@ xfs_inode_item_format(
 	ilf->ilf_asize = 0;
 	ilf->ilf_pad = 0;
 	memset(&ilf->ilf_u, 0, sizeof(ilf->ilf_u));
+	xlog_format_commit(lfb, sizeof(*ilf));
 
-	xlog_finish_iovec(lv, vecp, sizeof(*ilf));
-
-	xfs_inode_item_format_core(ip, lv, &vecp);
-	xfs_inode_item_format_data_fork(iip, ilf, lv, &vecp);
+	xfs_inode_item_format_core(ip, lfb);
+	xfs_inode_item_format_data_fork(iip, ilf, lfb);
 	if (xfs_inode_has_attr_fork(ip)) {
-		xfs_inode_item_format_attr_fork(iip, ilf, lv, &vecp);
+		xfs_inode_item_format_attr_fork(iip, ilf, lfb);
 	} else {
 		iip->ili_fields &=
 			~(XFS_ILOG_ADATA | XFS_ILOG_ABROOT | XFS_ILOG_AEXT);
@@ -749,6 +752,7 @@ xfs_inode_item_push(
 	struct xfs_inode_log_item *iip = INODE_ITEM(lip);
 	struct xfs_inode	*ip = iip->ili_inode;
 	struct xfs_buf		*bp = lip->li_buf;
+	struct xfs_ail		*ailp = lip->li_ailp;
 	uint			rval = XFS_ITEM_SUCCESS;
 	int			error;
 
@@ -774,7 +778,7 @@ xfs_inode_item_push(
 	if (!xfs_buf_trylock(bp))
 		return XFS_ITEM_LOCKED;
 
-	spin_unlock(&lip->li_ailp->ail_lock);
+	spin_unlock(&ailp->ail_lock);
 
 	/*
 	 * We need to hold a reference for flushing the cluster buffer as it may
@@ -798,7 +802,11 @@ xfs_inode_item_push(
 		rval = XFS_ITEM_LOCKED;
 	}
 
-	spin_lock(&lip->li_ailp->ail_lock);
+	/*
+	 * The buffer no longer protects the log item from reclaim, so
+	 * do not reference lip after this point.
+	 */
+	spin_lock(&ailp->ail_lock);
 	return rval;
 }
 

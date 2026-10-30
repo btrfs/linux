@@ -263,6 +263,10 @@
 	SF(OTG0_OTG_PIPE_UPDATE_STATUS, OTG_VUPDATE_KEEPOUT_STATUS, mask_sh),\
 	SF(OTG0_INTERRUPT_DEST, OTG0_IHC_OTG_VERTICAL_INTERRUPT2_DEST, mask_sh)
 
+#define OPTC_COMMON_MASK_SH_LIST_DCN31X(mask_sh)\
+	OPTC_COMMON_MASK_SH_LIST_DCN3_1(mask_sh),\
+	SF(OTG0_OTG_CRC_CNTL, OTG_CRC1_EN, mask_sh)
+
 void dcn31_timing_generator_init(struct optc *optc1);
 
 bool optc31_immediate_disable_crtc(struct timing_generator *optc);
@@ -273,5 +277,7 @@ void optc3_init_odm(struct timing_generator *optc);
 
 void optc31_read_otg_state(struct timing_generator *optc,
 		struct dcn_otg_state *s);
+
+void optc31_read_reg_state(struct timing_generator *optc, struct dcn_optc_reg_state *optc_reg_state);
 
 #endif /* __DC_OPTC_DCN31_H__ */

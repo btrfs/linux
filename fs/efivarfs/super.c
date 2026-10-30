@@ -44,7 +44,7 @@ static int efivarfs_ops_notifier(struct notifier_block *nb, unsigned long event,
 
 static struct inode *efivarfs_alloc_inode(struct super_block *sb)
 {
-	struct efivar_entry *entry = kzalloc(sizeof(*entry), GFP_KERNEL);
+	struct efivar_entry *entry = kzalloc_obj(*entry);
 
 	if (!entry)
 		return NULL;
@@ -89,12 +89,30 @@ static int efivarfs_statfs(struct dentry *dentry, struct kstatfs *buf)
 	/* Some UEFI firmware does not implement QueryVariableInfo() */
 	storage_space = remaining_space = 0;
 	if (efi_rt_services_supported(EFI_RT_SUPPORTED_QUERY_VARIABLE_INFO)) {
-		status = efivar_query_variable_info(attr, &storage_space,
-						    &remaining_space,
-						    &max_variable_size);
-		if (status != EFI_SUCCESS && status != EFI_UNSUPPORTED)
-			pr_warn_ratelimited("query_variable_info() failed: 0x%lx\n",
-					    status);
+		static DEFINE_RATELIMIT_STATE(_rs, 2 * HZ, 5);
+		static u64 storage, remaining;
+		static DEFINE_SPINLOCK(lock);
+
+		if (!__ratelimit(&_rs)) {
+			ratelimit_set_flags(&_rs, RATELIMIT_MSG_ON_RELEASE);
+
+			spin_lock(&lock);
+			storage_space = storage;
+			remaining_space = remaining;
+			spin_unlock(&lock);
+		} else {
+			status = efivar_query_variable_info(attr, &storage_space,
+							    &remaining_space,
+							    &max_variable_size);
+			if (status != EFI_SUCCESS && status != EFI_UNSUPPORTED)
+				pr_warn("query_variable_info() failed: 0x%lx\n",
+					status);
+
+			spin_lock(&lock);
+			storage = storage_space;
+			remaining = remaining_space;
+			spin_unlock(&lock);
+		}
 	}
 
 	/*
@@ -191,12 +209,9 @@ static const struct dentry_operations efivarfs_d_ops = {
 
 static struct dentry *efivarfs_alloc_dentry(struct dentry *parent, char *name)
 {
+	struct qstr q = QSTR(name);
 	struct dentry *d;
-	struct qstr q;
 	int err;
-
-	q.name = name;
-	q.len = strlen(name);
 
 	err = efivarfs_d_hash(parent, &q);
 	if (err)
@@ -278,7 +293,8 @@ static int efivarfs_create_dentry(struct super_block *sb, efi_char16_t *name16,
 	inode->i_private = entry;
 	i_size_write(inode, size + sizeof(__u32)); /* attributes + data */
 	inode_unlock(inode);
-	d_add(dentry, inode);
+	d_make_persistent(dentry, inode);
+	dput(dentry);
 
 	return 0;
 
@@ -504,7 +520,7 @@ static int efivarfs_init_fs_context(struct fs_context *fc)
 	if (!efivar_is_available())
 		return -EOPNOTSUPP;
 
-	sfi = kzalloc(sizeof(*sfi), GFP_KERNEL);
+	sfi = kzalloc_obj(*sfi);
 	if (!sfi)
 		return -ENOMEM;
 
@@ -522,7 +538,7 @@ static void efivarfs_kill_sb(struct super_block *sb)
 	struct efivarfs_fs_info *sfi = sb->s_fs_info;
 
 	blocking_notifier_chain_unregister(&efivar_ops_nh, &sfi->nb);
-	kill_litter_super(sb);
+	kill_anon_super(sb);
 
 	kfree(sfi);
 }

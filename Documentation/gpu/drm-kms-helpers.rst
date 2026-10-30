@@ -33,6 +33,8 @@ There are a few areas these helpers can grouped into:
   pipeline: Planes, handling rectangles for visibility checking and scissoring,
   flip queues and assorted bits.
 
+.. contents::
+
 Modeset Helper Reference for Common Vtables
 ===========================================
 
@@ -92,16 +94,16 @@ GEM Atomic Helper Reference
 .. kernel-doc:: drivers/gpu/drm/drm_gem_atomic_helper.c
    :export:
 
-Simple KMS Helper Reference
-===========================
+VBLANK Helper Reference
+-----------------------
 
-.. kernel-doc:: drivers/gpu/drm/drm_simple_kms_helper.c
+.. kernel-doc:: drivers/gpu/drm/drm_vblank_helper.c
    :doc: overview
 
-.. kernel-doc:: include/drm/drm_simple_kms_helper.h
+.. kernel-doc:: include/drm/drm_vblank_helper.h
    :internal:
 
-.. kernel-doc:: drivers/gpu/drm/drm_simple_kms_helper.c
+.. kernel-doc:: drivers/gpu/drm/drm_vblank_helper.c
    :export:
 
 fbdev Helper Functions Reference
@@ -168,6 +170,12 @@ Bridge Operations
 
 .. kernel-doc:: drivers/gpu/drm/drm_bridge.c
    :doc: bridge operations
+
+Bridge Chain Format Selection
+-----------------------------
+
+.. kernel-doc:: drivers/gpu/drm/drm_bridge.c
+   :doc: bridge chain format selection
 
 Bridge Connector Helper
 -----------------------

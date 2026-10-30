@@ -192,13 +192,19 @@ enum batadv_tvlv_type {
 };
 
 #pragma pack(2)
-/* the destination hardware field in the ARP frame is used to
- * transport the claim type and the group id
+/**
+ * struct batadv_bla_claim_dst - layout of the destination MAC of a BLA claim
+ *  frame
+ * @magic: fixed magic prefix (FF:43:05) identifying claim frames
+ * @type: claim frame type, see &enum batadv_bla_claimframe
+ * @group: group identifier of the announcing backbone gateway
+ *
+ * used in the destination hardware field of the ARP frame
  */
 struct batadv_bla_claim_dst {
-	__u8   magic[3];	/* FF:43:05 */
-	__u8   type;		/* bla_claimframe */
-	__be16 group;		/* group id */
+	__u8   magic[3];
+	__u8   type;
+	__be16 group;
 };
 
 /**
@@ -518,16 +524,16 @@ struct batadv_mcast_packet {
  * @packet_type: batman-adv packet type, part of the general header
  * @version: batman-adv protocol version, part of the general header
  * @ttl: time to live for this packet, part of the general header
+ * @first_ttvn: tt-version number of first included packet
  * @first_source: original source of first included packet
  * @first_orig_dest: original destination of first included packet
  * @first_crc: checksum of first included packet
- * @first_ttvn: tt-version number of first included packet
  * @second_ttl: ttl of second packet
+ * @second_ttvn: tt version number of second included packet
  * @second_dest: second receiver of this coded packet
  * @second_source: original source of second included packet
  * @second_orig_dest: original destination of second included packet
  * @second_crc: checksum of second included packet
- * @second_ttvn: tt version number of second included packet
  * @coded_len: length of network coded part of the payload
  */
 struct batadv_coded_packet {
@@ -554,8 +560,8 @@ struct batadv_coded_packet {
  * @version: batman-adv protocol version, part of the general header
  * @ttl: time to live for this packet, part of the general header
  * @reserved: reserved field (for packet alignment)
- * @src: address of the source
  * @dst: address of the destination
+ * @src: address of the source
  * @tvlv_len: length of tvlv data following the unicast tvlv header
  * @align: 2 bytes to align the header to a 4 byte boundary
  */

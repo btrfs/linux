@@ -281,7 +281,7 @@ DEFINE_STATIC_KEY_FALSE(timers_migration_enabled);
 
 static void timers_update_migration(void)
 {
-	if (sysctl_timer_migration && tick_nohz_active)
+	if (sysctl_timer_migration && tick_nohz_is_active())
 		static_branch_enable(&timers_migration_enabled);
 	else
 		static_branch_disable(&timers_migration_enabled);
@@ -1932,7 +1932,7 @@ static void timer_recalc_next_expiry(struct timer_base *base)
  */
 static u64 cmp_next_hrtimer_event(u64 basem, u64 expires)
 {
-	u64 nextevt = hrtimer_get_next_event();
+	u64 nextevt = ktime_to_ns(hrtimer_get_next_event());
 
 	/*
 	 * If high resolution timers are enabled
@@ -2319,6 +2319,7 @@ u64 timer_base_try_to_set_idle(unsigned long basej, u64 basem, bool *idle)
  */
 void timer_clear_idle(void)
 {
+	int this_cpu = smp_processor_id();
 	/*
 	 * We do this unlocked. The worst outcome is a remote pinned timer
 	 * enqueue sending a pointless IPI, but taking the lock would just
@@ -2327,9 +2328,9 @@ void timer_clear_idle(void)
 	 * path. Required for BASE_LOCAL only.
 	 */
 	__this_cpu_write(timer_bases[BASE_LOCAL].is_idle, false);
-	if (tick_nohz_full_cpu(smp_processor_id()))
+	if (tick_nohz_full_cpu(this_cpu))
 		__this_cpu_write(timer_bases[BASE_GLOBAL].is_idle, false);
-	trace_timer_base_idle(false, smp_processor_id());
+	trace_timer_base_idle(false, this_cpu);
 
 	/* Activate without holding the timer_base->lock */
 	tmigr_cpu_activate();
@@ -2473,7 +2474,7 @@ void update_process_times(int user_tick)
 	run_local_timers();
 	rcu_sched_clock_irq(user_tick);
 #ifdef CONFIG_IRQ_WORK
-	if (in_irq())
+	if (in_hardirq())
 		irq_work_tick();
 #endif
 	sched_tick();
@@ -2491,6 +2492,7 @@ static void migrate_timer_list(struct timer_base *new_base, struct hlist_head *h
 		timer = hlist_entry(head->first, struct timer_list, entry);
 		detach_timer(timer, false);
 		timer->flags = (timer->flags & ~TIMER_BASEMASK) | cpu;
+		debug_timer_activate(timer);
 		internal_add_timer(new_base, timer);
 	}
 }

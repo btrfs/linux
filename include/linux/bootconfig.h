@@ -36,9 +36,9 @@ bool __init cmdline_has_extra_options(void);
  * The checksum will be used with the BOOTCONFIG_MAGIC and the size for
  * embedding the bootconfig in the initrd image.
  */
-static inline __init uint32_t xbc_calc_checksum(void *data, uint32_t size)
+static inline __init uint32_t xbc_calc_checksum(const void *data, uint32_t size)
 {
-	unsigned char *p = data;
+	const unsigned char *p = data;
 	uint32_t ret = 0;
 
 	while (size--)
@@ -66,7 +66,7 @@ struct xbc_node {
 
 /* Node tree access raw APIs */
 struct xbc_node * __init xbc_root_node(void);
-int __init xbc_node_index(struct xbc_node *node);
+uint16_t __init xbc_node_index(struct xbc_node *node);
 struct xbc_node * __init xbc_node_get_parent(struct xbc_node *node);
 struct xbc_node * __init xbc_node_get_child(struct xbc_node *node);
 struct xbc_node * __init xbc_node_get_next(struct xbc_node *node);
@@ -265,6 +265,9 @@ static inline struct xbc_node * __init xbc_node_get_subkey(struct xbc_node *node
 int __init xbc_node_compose_key_after(struct xbc_node *root,
 			struct xbc_node *node, char *buf, size_t size);
 
+/* Render key/value pairs under @root as a flat cmdline string */
+int __init xbc_snprint_cmdline(char *buf, size_t size, struct xbc_node *root);
+
 /**
  * xbc_node_compose_key() - Compose full key string of the XBC node
  * @node: An XBC node.
@@ -303,6 +306,20 @@ static inline const char *xbc_get_embedded_bootconfig(size_t *size)
 {
 	return NULL;
 }
+#endif
+
+/* Bootconfig opt-in detection, shared by setup_arch() and setup_boot_config() */
+#ifdef CONFIG_BOOT_CONFIG
+bool __init bootconfig_cmdline_requested(const char *boot_cmdline, int *end_offset);
+#endif
+
+/* Build-time-rendered bootconfig cmdline prepended in setup_arch() */
+#ifdef CONFIG_CMDLINE_FROM_BOOTCONFIG
+void __init xbc_prepend_embedded_cmdline(char *dst, size_t size);
+bool __init xbc_embedded_cmdline_applied(void);
+#else
+static inline void xbc_prepend_embedded_cmdline(char *dst, size_t size) { }
+static inline bool xbc_embedded_cmdline_applied(void) { return false; }
 #endif
 
 #endif

@@ -53,13 +53,22 @@ static u16 nvmet_passthru_override_id_descs(struct nvmet_req *req)
 	for (pos = 0; pos < NVME_IDENTIFY_DATA_SIZE; pos += len) {
 		struct nvme_ns_id_desc *cur = data + pos;
 
+		if (pos + sizeof(*cur) > NVME_IDENTIFY_DATA_SIZE)
+			break;
+
 		if (cur->nidl == 0)
 			break;
+
 		if (cur->nidt == NVME_NIDT_CSI) {
+			if (pos + sizeof(*cur) + NVME_NIDT_CSI_LEN >
+						NVME_IDENTIFY_DATA_SIZE)
+				break;
+
 			memcpy(&csi, cur + 1, NVME_NIDT_CSI_LEN);
 			csi_seen = true;
 			break;
 		}
+
 		len = sizeof(struct nvme_ns_id_desc) + cur->nidl;
 	}
 
@@ -86,7 +95,7 @@ static u16 nvmet_passthru_override_id_ctrl(struct nvmet_req *req)
 	unsigned int max_hw_sectors;
 	int page_shift;
 
-	id = kzalloc(sizeof(*id), GFP_KERNEL);
+	id = kzalloc_obj(*id);
 	if (!id)
 		return NVME_SC_INTERNAL;
 
@@ -150,7 +159,7 @@ static u16 nvmet_passthru_override_id_ctrl(struct nvmet_req *req)
 	 * code path with duplicate ctrl subsysnqn. In order to prevent that we
 	 * mask the passthru-ctrl subsysnqn with the target ctrl subsysnqn.
 	 */
-	memcpy(id->subnqn, ctrl->subsysnqn, sizeof(id->subnqn));
+	strscpy(id->subnqn, ctrl->subsys->subsysnqn, sizeof(id->subnqn));
 
 	/* use fabric id-ctrl values */
 	id->ioccsz = cpu_to_le32((sizeof(struct nvme_command) +
@@ -178,7 +187,7 @@ static u16 nvmet_passthru_override_id_ns(struct nvmet_req *req)
 	struct nvme_id_ns *id;
 	int i;
 
-	id = kzalloc(sizeof(*id), GFP_KERNEL);
+	id = kzalloc_obj(*id);
 	if (!id)
 		return NVME_SC_INTERNAL;
 
@@ -247,7 +256,8 @@ static void nvmet_passthru_execute_cmd_work(struct work_struct *w)
 }
 
 static enum rq_end_io_ret nvmet_passthru_req_done(struct request *rq,
-						  blk_status_t blk_status)
+						  blk_status_t blk_status,
+						  const struct io_comp_batch *iob)
 {
 	struct nvmet_req *req = rq->end_io_data;
 

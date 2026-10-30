@@ -5,6 +5,7 @@
 // Author: Cezary Rojewski <cezary.rojewski@intel.com>
 //
 
+#include <linux/cleanup.h>
 #include <linux/pm_runtime.h>
 #include <sound/soc.h>
 #include <sound/pcm_params.h>
@@ -74,8 +75,8 @@ static struct catpt_stream_template *catpt_topology[] = {
 static struct catpt_stream_template *
 catpt_get_stream_template(struct snd_pcm_substream *substream)
 {
-	struct snd_soc_pcm_runtime *rtm = snd_soc_substream_to_rtd(substream);
-	struct snd_soc_dai *cpu_dai = snd_soc_rtd_to_cpu(rtm, 0);
+	struct snd_soc_pcm_runtime *rtd = snd_soc_substream_to_rtd(substream);
+	struct snd_soc_dai *cpu_dai = snd_soc_rtd_to_cpu(rtd, 0);
 	enum catpt_stream_type type;
 
 	type = cpu_dai->driver->id;
@@ -97,67 +98,72 @@ catpt_get_stream_template(struct snd_pcm_substream *substream)
 	return catpt_topology[type];
 }
 
-struct catpt_stream_runtime *
-catpt_stream_find(struct catpt_dev *cdev, u8 stream_hw_id)
+/* Caller responsible for holding ->stream_mutex. */
+struct catpt_stream_runtime *catpt_stream_find(struct catpt_dev *cdev, u8 stream_hw_id)
 {
-	struct catpt_stream_runtime *pos, *result = NULL;
+	struct catpt_stream_runtime *stream;
 
-	spin_lock(&cdev->list_lock);
-	list_for_each_entry(pos, &cdev->stream_list, node) {
-		if (pos->info.stream_hw_id == stream_hw_id) {
-			result = pos;
-			break;
-		}
+	list_for_each_entry(stream, &cdev->stream_list, node)
+		if (stream->info.stream_hw_id == stream_hw_id)
+			return stream;
+
+	return NULL;
+}
+
+/* Caller responsible for holding ->stream_mutex. */
+static u8 catpt_stream_hw_id(struct catpt_dev *cdev, enum catpt_pin_id pin_id)
+{
+	struct catpt_stream_runtime *stream;
+
+	switch (pin_id) {
+	default:
+		stream = catpt_stream_find(cdev, pin_id);
+		if (stream)
+			return stream->info.stream_hw_id;
+		break;
+	case CATPT_PIN_ID_MIXER:
+		if (!list_empty(&cdev->stream_list))
+			return cdev->mixer.mixer_hw_id;
+		break;
 	}
 
-	spin_unlock(&cdev->list_lock);
-	return result;
+	return CATPT_PIN_ID_INVALID;
 }
 
-static u32 catpt_stream_read_position(struct catpt_dev *cdev,
-				      struct catpt_stream_runtime *stream)
+/* Caller responsible for holding ->stream_mutex. */
+static u32 *catpt_stream_volume_regs(struct catpt_dev *cdev, enum catpt_pin_id pin_id)
 {
-	u32 pos;
+	struct catpt_stream_runtime *stream;
 
-	memcpy_fromio(&pos, cdev->lpe_ba + stream->info.read_pos_regaddr,
-		      sizeof(pos));
-	return pos;
+	switch (pin_id) {
+	case CATPT_PIN_ID_MIXER:
+		if (!list_empty(&cdev->stream_list))
+			return &cdev->mixer.volume_regaddr[0];
+		break;
+	default:
+		stream = catpt_stream_find(cdev, pin_id);
+		if (stream)
+			return &stream->info.volume_regaddr[0];
+		break;
+	}
+
+	return NULL;
 }
 
-static u32 catpt_stream_volume(struct catpt_dev *cdev,
-			       struct catpt_stream_runtime *stream, u32 channel)
+static void catpt_stream_read_position(struct catpt_dev *cdev,
+				       struct catpt_stream_runtime *stream, u32 *pos)
 {
-	u32 volume, offset;
-
-	if (channel >= CATPT_CHANNELS_MAX)
-		channel = 0;
-
-	offset = stream->info.volume_regaddr[channel];
-	memcpy_fromio(&volume, cdev->lpe_ba + offset, sizeof(volume));
-	return volume;
-}
-
-static u32 catpt_mixer_volume(struct catpt_dev *cdev,
-			      struct catpt_mixer_stream_info *info, u32 channel)
-{
-	u32 volume, offset;
-
-	if (channel >= CATPT_CHANNELS_MAX)
-		channel = 0;
-
-	offset = info->volume_regaddr[channel];
-	memcpy_fromio(&volume, cdev->lpe_ba + offset, sizeof(volume));
-	return volume;
+	memcpy_fromio(pos, cdev->lpe_ba + stream->info.read_pos_regaddr, sizeof(*pos));
 }
 
 static void catpt_arrange_page_table(struct snd_pcm_substream *substream,
 				     struct snd_dma_buffer *pgtbl)
 {
-	struct snd_pcm_runtime *rtm = substream->runtime;
+	struct snd_pcm_runtime *runtime = substream->runtime;
 	struct snd_dma_buffer *databuf = snd_pcm_get_dma_buf(substream);
 	int i, pages;
 
-	pages = snd_sgbuf_aligned_pages(rtm->dma_bytes);
+	pages = snd_sgbuf_aligned_pages(runtime->dma_bytes);
 
 	for (i = 0; i < pages; i++) {
 		u32 pfn, offset;
@@ -267,7 +273,7 @@ static int catpt_dai_startup(struct snd_pcm_substream *substream,
 
 	template = catpt_get_stream_template(substream);
 
-	stream = kzalloc(sizeof(*stream), GFP_KERNEL);
+	stream = kzalloc_obj(*stream);
 	if (!stream)
 		return -ENOMEM;
 
@@ -290,10 +296,6 @@ static int catpt_dai_startup(struct snd_pcm_substream *substream,
 	INIT_LIST_HEAD(&stream->node);
 	snd_soc_dai_set_dma_data(dai, substream, stream);
 
-	spin_lock(&cdev->list_lock);
-	list_add_tail(&stream->node, &cdev->stream_list);
-	spin_unlock(&cdev->list_lock);
-
 	return 0;
 
 err_request:
@@ -311,10 +313,6 @@ static void catpt_dai_shutdown(struct snd_pcm_substream *substream,
 
 	stream = snd_soc_dai_get_dma_data(dai, substream);
 
-	spin_lock(&cdev->list_lock);
-	list_del(&stream->node);
-	spin_unlock(&cdev->list_lock);
-
 	release_resource(stream->persistent);
 	kfree(stream->persistent);
 	catpt_dsp_update_srampge(cdev, &cdev->dram, cdev->spec->dram_mask);
@@ -326,55 +324,69 @@ static void catpt_dai_shutdown(struct snd_pcm_substream *substream,
 
 static int catpt_set_dspvol(struct catpt_dev *cdev, u8 stream_id, long *ctlvol);
 
-static int catpt_dai_apply_usettings(struct snd_soc_dai *dai,
-				     struct catpt_stream_runtime *stream)
-{
-	struct snd_soc_component *component = dai->component;
-	struct snd_kcontrol *pos;
-	struct catpt_dev *cdev = dev_get_drvdata(dai->dev);
-	const char *name;
-	int ret;
-	u32 id = stream->info.stream_hw_id;
+struct catpt_control_data {
+	enum catpt_pin_id pin_id;
+	long volumes[CATPT_CHANNELS_MAX];
+};
 
-	/* only selected streams have individual controls */
-	switch (id) {
+static int catpt_apply_volume(struct catpt_dev *cdev, struct snd_soc_card *card, const char *name)
+{
+	struct snd_kcontrol *kctl = snd_ctl_find_id_mixer(card->snd_card, name);
+	struct catpt_control_data *data;
+
+	if (!kctl)
+		return -ENOENT;
+	data = (struct catpt_control_data *)kctl->private_value;
+
+	return catpt_set_dspvol(cdev, data->pin_id, data->volumes);
+}
+
+static int catpt_apply_mute(struct catpt_dev *cdev, struct snd_soc_card *card)
+{
+	struct snd_kcontrol *kctl = snd_ctl_find_id_mixer(card->snd_card, "Loopback Mute");
+	bool mute;
+	int ret;
+
+	if (!kctl)
+		return -ENOENT;
+	mute = *(bool *)kctl->private_value;
+
+	ret = catpt_ipc_mute_loopback(cdev, CATPT_PIN_ID_REFERENCE, mute);
+	return CATPT_IPC_RET(ret);
+}
+
+static int catpt_apply_controls(struct catpt_dev *cdev, struct snd_soc_card *card,
+				struct catpt_stream_runtime *stream)
+{
+	int ret;
+
+	/* Update the master volume when the first stream is opened. */
+	if (list_empty(&cdev->stream_list)) {
+		ret = catpt_apply_volume(cdev, card, "Master Playback Volume");
+		if (ret)
+			return ret;
+	}
+
+	/* Only selected streams have individual controls. */
+	switch (stream->info.stream_hw_id) {
 	case CATPT_PIN_ID_OFFLOAD1:
-		name = "Media0 Playback Volume";
-		break;
+		return catpt_apply_volume(cdev, card, "Media0 Playback Volume");
 	case CATPT_PIN_ID_OFFLOAD2:
-		name = "Media1 Playback Volume";
-		break;
+		return catpt_apply_volume(cdev, card, "Media1 Playback Volume");
 	case CATPT_PIN_ID_CAPTURE1:
-		name = "Mic Capture Volume";
-		break;
+		return catpt_apply_volume(cdev, card, "Mic Capture Volume");
 	case CATPT_PIN_ID_REFERENCE:
-		name = "Loopback Mute";
-		break;
+		return catpt_apply_mute(cdev, card);
 	default:
 		return 0;
 	}
-
-	list_for_each_entry(pos, &component->card->snd_card->controls, list) {
-		if (pos->private_data == component &&
-		    !strncmp(name, pos->id.name, sizeof(pos->id.name)))
-			break;
-	}
-	if (list_entry_is_head(pos, &component->card->snd_card->controls, list))
-		return -ENOENT;
-
-	if (stream->template->type != CATPT_STRM_TYPE_LOOPBACK)
-		return catpt_set_dspvol(cdev, id, (long *)pos->private_value);
-	ret = catpt_ipc_mute_loopback(cdev, id, *(bool *)pos->private_value);
-	if (ret)
-		return CATPT_IPC_ERROR(ret);
-	return 0;
 }
 
 static int catpt_dai_hw_params(struct snd_pcm_substream *substream,
 			       struct snd_pcm_hw_params *params,
 			       struct snd_soc_dai *dai)
 {
-	struct snd_pcm_runtime *rtm = substream->runtime;
+	struct snd_pcm_runtime *runtime = substream->runtime;
 	struct snd_dma_buffer *dmab;
 	struct catpt_stream_runtime *stream;
 	struct catpt_audio_format afmt;
@@ -400,8 +412,8 @@ static int catpt_dai_hw_params(struct snd_pcm_substream *substream,
 
 	memset(&rinfo, 0, sizeof(rinfo));
 	rinfo.page_table_addr = stream->pgtbl.addr;
-	rinfo.num_pages = DIV_ROUND_UP(rtm->dma_bytes, PAGE_SIZE);
-	rinfo.size = rtm->dma_bytes;
+	rinfo.num_pages = DIV_ROUND_UP(runtime->dma_bytes, PAGE_SIZE);
+	rinfo.size = runtime->dma_bytes;
 	rinfo.offset = 0;
 	rinfo.ring_first_page_pfn = PFN_DOWN(snd_sgbuf_get_addr(dmab, 0));
 
@@ -414,12 +426,17 @@ static int catpt_dai_hw_params(struct snd_pcm_substream *substream,
 				     cdev->scratch,
 				     &stream->info);
 	if (ret)
-		return CATPT_IPC_ERROR(ret);
+		return CATPT_IPC_RET(ret);
 
-	ret = catpt_dai_apply_usettings(dai, stream);
-	if (ret)
+	guard(mutex)(&cdev->stream_mutex);
+
+	ret = catpt_apply_controls(cdev, dai->component->card, stream);
+	if (ret) {
+		catpt_ipc_free_stream(cdev, stream->info.stream_hw_id);
 		return ret;
+	}
 
+	list_add_tail(&stream->node, &cdev->stream_list);
 	stream->allocated = true;
 	return 0;
 }
@@ -433,6 +450,10 @@ static int catpt_dai_hw_free(struct snd_pcm_substream *substream,
 	stream = snd_soc_dai_get_dma_data(dai, substream);
 	if (!stream->allocated)
 		return 0;
+
+	mutex_lock(&cdev->stream_mutex);
+	list_del(&stream->node);
+	mutex_unlock(&cdev->stream_mutex);
 
 	catpt_ipc_reset_stream(cdev, stream->info.stream_hw_id);
 	catpt_ipc_free_stream(cdev, stream->info.stream_hw_id);
@@ -454,11 +475,11 @@ static int catpt_dai_prepare(struct snd_pcm_substream *substream,
 
 	ret = catpt_ipc_reset_stream(cdev, stream->info.stream_hw_id);
 	if (ret)
-		return CATPT_IPC_ERROR(ret);
+		return CATPT_IPC_RET(ret);
 
 	ret = catpt_ipc_pause_stream(cdev, stream->info.stream_hw_id);
 	if (ret)
-		return CATPT_IPC_ERROR(ret);
+		return CATPT_IPC_RET(ret);
 
 	stream->prepared = true;
 	return 0;
@@ -489,7 +510,7 @@ static int catpt_dai_trigger(struct snd_pcm_substream *substream, int cmd,
 		ret = catpt_ipc_set_write_pos(cdev, stream->info.stream_hw_id,
 					      pos, false, false);
 		if (ret)
-			return CATPT_IPC_ERROR(ret);
+			return CATPT_IPC_RET(ret);
 		fallthrough;
 	case SNDRV_PCM_TRIGGER_RESUME:
 	case SNDRV_PCM_TRIGGER_PAUSE_RELEASE:
@@ -497,7 +518,7 @@ static int catpt_dai_trigger(struct snd_pcm_substream *substream, int cmd,
 		catpt_dsp_update_lpclock(cdev);
 		ret = catpt_ipc_resume_stream(cdev, stream->info.stream_hw_id);
 		if (ret)
-			return CATPT_IPC_ERROR(ret);
+			return CATPT_IPC_RET(ret);
 		break;
 
 	case SNDRV_PCM_TRIGGER_STOP:
@@ -508,7 +529,7 @@ static int catpt_dai_trigger(struct snd_pcm_substream *substream, int cmd,
 		ret = catpt_ipc_pause_stream(cdev, stream->info.stream_hw_id);
 		catpt_dsp_update_lpclock(cdev);
 		if (ret)
-			return CATPT_IPC_ERROR(ret);
+			return CATPT_IPC_RET(ret);
 		break;
 
 	default:
@@ -523,11 +544,11 @@ void catpt_stream_update_position(struct catpt_dev *cdev,
 				  struct catpt_notify_position *pos)
 {
 	struct snd_pcm_substream *substream = stream->substream;
-	struct snd_pcm_runtime *r = substream->runtime;
+	struct snd_pcm_runtime *runtime = substream->runtime;
 	snd_pcm_uframes_t dsppos, newpos;
 	int ret;
 
-	dsppos = bytes_to_frames(r, pos->stream_position);
+	dsppos = bytes_to_frames(runtime, pos->stream_position);
 
 	if (!stream->prepared)
 		goto exit;
@@ -535,8 +556,8 @@ void catpt_stream_update_position(struct catpt_dev *cdev,
 	if (stream->template->type != CATPT_STRM_TYPE_RENDER)
 		goto exit;
 
-	if (dsppos >= r->buffer_size / 2)
-		newpos = r->buffer_size / 2;
+	if (dsppos >= runtime->buffer_size / 2)
+		newpos = runtime->buffer_size / 2;
 	else
 		newpos = 0;
 	/*
@@ -544,7 +565,7 @@ void catpt_stream_update_position(struct catpt_dev *cdev,
 	 * (buffer half consumed) update wp to allow stream progression.
 	 */
 	ret = catpt_ipc_set_write_pos(cdev, stream->info.stream_hw_id,
-				      frames_to_bytes(r, newpos),
+				      frames_to_bytes(runtime, newpos),
 				      false, false);
 	if (ret) {
 		dev_err(cdev->dev, "update position for stream %d failed: %d\n",
@@ -578,12 +599,12 @@ static const struct snd_pcm_hardware catpt_pcm_hardware = {
 	.buffer_bytes_max	= CATPT_BUFFER_MAX_SIZE,
 };
 
-static int catpt_component_pcm_construct(struct snd_soc_component *component,
-					 struct snd_soc_pcm_runtime *rtm)
+static int catpt_component_pcm_new(struct snd_soc_component *component,
+				   struct snd_soc_pcm_runtime *rtd)
 {
 	struct catpt_dev *cdev = dev_get_drvdata(component->dev);
 
-	snd_pcm_set_managed_buffer_all(rtm->pcm, SNDRV_DMA_TYPE_DEV_SG,
+	snd_pcm_set_managed_buffer_all(rtd->pcm, SNDRV_DMA_TYPE_DEV_SG,
 				       cdev->dev,
 				       catpt_pcm_hardware.buffer_bytes_max,
 				       catpt_pcm_hardware.buffer_bytes_max);
@@ -594,9 +615,9 @@ static int catpt_component_pcm_construct(struct snd_soc_component *component,
 static int catpt_component_open(struct snd_soc_component *component,
 				struct snd_pcm_substream *substream)
 {
-	struct snd_soc_pcm_runtime *rtm = snd_soc_substream_to_rtd(substream);
+	struct snd_soc_pcm_runtime *rtd = snd_soc_substream_to_rtd(substream);
 
-	if (!rtm->dai_link->no_pcm)
+	if (!rtd->dai_link->no_pcm)
 		snd_soc_set_runtime_hwparams(substream, &catpt_pcm_hardware);
 	return 0;
 }
@@ -605,17 +626,17 @@ static snd_pcm_uframes_t
 catpt_component_pointer(struct snd_soc_component *component,
 			struct snd_pcm_substream *substream)
 {
-	struct snd_soc_pcm_runtime *rtm = snd_soc_substream_to_rtd(substream);
-	struct snd_soc_dai *cpu_dai = snd_soc_rtd_to_cpu(rtm, 0);
+	struct snd_soc_pcm_runtime *rtd = snd_soc_substream_to_rtd(substream);
+	struct snd_soc_dai *cpu_dai = snd_soc_rtd_to_cpu(rtd, 0);
 	struct catpt_stream_runtime *stream;
 	struct catpt_dev *cdev = dev_get_drvdata(component->dev);
 	u32 pos;
 
-	if (rtm->dai_link->no_pcm)
+	if (rtd->dai_link->no_pcm)
 		return 0;
 
 	stream = snd_soc_dai_get_dma_data(cpu_dai, substream);
-	pos = catpt_stream_read_position(cdev, stream);
+	catpt_stream_read_position(cdev, stream, &pos);
 
 	return bytes_to_frames(substream->runtime, pos);
 }
@@ -629,10 +650,10 @@ static const struct snd_soc_dai_ops catpt_fe_dai_ops = {
 	.trigger = catpt_dai_trigger,
 };
 
-static int catpt_dai_pcm_new(struct snd_soc_pcm_runtime *rtm,
+static int catpt_dai_pcm_new(struct snd_soc_pcm_runtime *rtd,
 			     struct snd_soc_dai *dai)
 {
-	struct snd_soc_dai *codec_dai = snd_soc_rtd_to_codec(rtm, 0);
+	struct snd_soc_dai *codec_dai = snd_soc_rtd_to_codec(rtd, 0);
 	struct catpt_ssp_device_format devfmt;
 	struct catpt_dev *cdev = dev_get_drvdata(dai->dev);
 	int ret;
@@ -669,7 +690,7 @@ static int catpt_dai_pcm_new(struct snd_soc_pcm_runtime *rtm,
 		return 0;
 
 	ret = pm_runtime_resume_and_get(cdev->dev);
-	if (ret < 0 && ret != -EACCES)
+	if (ret)
 		return ret;
 
 	ret = catpt_ipc_set_device_format(cdev, &devfmt);
@@ -677,7 +698,7 @@ static int catpt_dai_pcm_new(struct snd_soc_pcm_runtime *rtm,
 	pm_runtime_put_autosuspend(cdev->dev);
 
 	if (ret)
-		return CATPT_IPC_ERROR(ret);
+		return CATPT_IPC_RET(ret);
 
 	/* store device format set for given SSP */
 	memcpy(&cdev->devfmt[devfmt.iface], &devfmt, sizeof(devfmt));
@@ -691,7 +712,7 @@ static const struct snd_soc_dai_ops catpt_dai_ops = {
 static struct snd_soc_dai_driver dai_drivers[] = {
 /* FE DAIs */
 {
-	.name  = "System Pin",
+	.name = "System Pin",
 	.id = CATPT_STRM_TYPE_SYSTEM,
 	.ops = &catpt_fe_dai_ops,
 	.playback = {
@@ -714,7 +735,7 @@ static struct snd_soc_dai_driver dai_drivers[] = {
 	},
 },
 {
-	.name  = "Offload0 Pin",
+	.name = "Offload0 Pin",
 	.id = CATPT_STRM_TYPE_RENDER,
 	.ops = &catpt_fe_dai_ops,
 	.playback = {
@@ -728,7 +749,7 @@ static struct snd_soc_dai_driver dai_drivers[] = {
 	},
 },
 {
-	.name  = "Offload1 Pin",
+	.name = "Offload1 Pin",
 	.id = CATPT_STRM_TYPE_RENDER,
 	.ops = &catpt_fe_dai_ops,
 	.playback = {
@@ -742,7 +763,7 @@ static struct snd_soc_dai_driver dai_drivers[] = {
 	},
 },
 {
-	.name  = "Loopback Pin",
+	.name = "Loopback Pin",
 	.id = CATPT_STRM_TYPE_LOOPBACK,
 	.ops = &catpt_fe_dai_ops,
 	.capture = {
@@ -756,7 +777,7 @@ static struct snd_soc_dai_driver dai_drivers[] = {
 	},
 },
 {
-	.name  = "Bluetooth Pin",
+	.name = "Bluetooth Pin",
 	.id = CATPT_STRM_TYPE_BLUETOOTH_RENDER,
 	.ops = &catpt_fe_dai_ops,
 	.playback = {
@@ -847,13 +868,10 @@ static int catpt_set_dspvol(struct catpt_dev *cdev, u8 stream_id, long *ctlvol)
 		}
 	}
 
-	if (ret)
-		return CATPT_IPC_ERROR(ret);
-	return 0;
+	return CATPT_IPC_RET(ret);
 }
 
-static int catpt_volume_info(struct snd_kcontrol *kcontrol,
-			     struct snd_ctl_elem_info *uinfo)
+static int catpt_volume_info(struct snd_kcontrol *kctl, struct snd_ctl_elem_info *uinfo)
 {
 	uinfo->type = SNDRV_CTL_ELEM_TYPE_INTEGER;
 	uinfo->count = CATPT_CHANNELS_MAX;
@@ -862,249 +880,116 @@ static int catpt_volume_info(struct snd_kcontrol *kcontrol,
 	return 0;
 }
 
-static int catpt_mixer_volume_get(struct snd_kcontrol *kcontrol,
-				  struct snd_ctl_elem_value *ucontrol)
+static int catpt_volume_get(struct snd_kcontrol *kctl, struct snd_ctl_elem_value *uctl)
 {
-	struct snd_soc_component *component =
-		snd_soc_kcontrol_component(kcontrol);
+	struct snd_soc_component *component = snd_kcontrol_chip(kctl);
 	struct catpt_dev *cdev = dev_get_drvdata(component->dev);
-	u32 dspvol;
-	int ret;
+	struct catpt_control_data *data;
+	u32 dspvol, *regs;
+	long *uvolumes;
 	int i;
 
-	ret = pm_runtime_resume_and_get(cdev->dev);
-	if (ret < 0 && ret != -EACCES)
-		return ret;
+	data = (struct catpt_control_data *)kctl->private_value;
+	uvolumes = &uctl->value.integer.value[0];
 
-	for (i = 0; i < CATPT_CHANNELS_MAX; i++) {
-		dspvol = catpt_mixer_volume(cdev, &cdev->mixer, i);
-		ucontrol->value.integer.value[i] = dspvol_to_ctlvol(dspvol);
+	guard(mutex)(&cdev->stream_mutex);
+
+	regs = catpt_stream_volume_regs(cdev, data->pin_id);
+	if (regs) {
+		for (i = 0; i < CATPT_CHANNELS_MAX; i++) {
+			dspvol = readl(cdev->lpe_ba + regs[i]);
+			data->volumes[i] = dspvol_to_ctlvol(dspvol);
+		}
 	}
 
-	pm_runtime_put_autosuspend(cdev->dev);
-
+	memcpy(uvolumes, data->volumes, sizeof(data->volumes));
 	return 0;
 }
 
-static int catpt_mixer_volume_put(struct snd_kcontrol *kcontrol,
-				  struct snd_ctl_elem_value *ucontrol)
+static int catpt_volume_put(struct snd_kcontrol *kctl, struct snd_ctl_elem_value *uctl)
 {
-	struct snd_soc_component *component =
-		snd_soc_kcontrol_component(kcontrol);
+	struct snd_soc_component *component = snd_kcontrol_chip(kctl);
 	struct catpt_dev *cdev = dev_get_drvdata(component->dev);
+	struct catpt_control_data *data;
+	u8 stream_hw_id;
+	long *uvolumes;
 	int ret;
 
-	ret = pm_runtime_resume_and_get(cdev->dev);
-	if (ret < 0 && ret != -EACCES)
-		return ret;
+	data = (struct catpt_control_data *)kctl->private_value;
+	uvolumes = &uctl->value.integer.value[0];
 
-	ret = catpt_set_dspvol(cdev, cdev->mixer.mixer_hw_id,
-			       ucontrol->value.integer.value);
-
-	pm_runtime_put_autosuspend(cdev->dev);
-
-	return ret;
-}
-
-static int catpt_stream_volume_get(struct snd_kcontrol *kcontrol,
-				   struct snd_ctl_elem_value *ucontrol,
-				   enum catpt_pin_id pin_id)
-{
-	struct snd_soc_component *component =
-		snd_soc_kcontrol_component(kcontrol);
-	struct catpt_stream_runtime *stream;
-	struct catpt_dev *cdev = dev_get_drvdata(component->dev);
-	long *ctlvol = (long *)kcontrol->private_value;
-	u32 dspvol;
-	int ret;
-	int i;
-
-	stream = catpt_stream_find(cdev, pin_id);
-	if (!stream) {
-		for (i = 0; i < CATPT_CHANNELS_MAX; i++)
-			ucontrol->value.integer.value[i] = ctlvol[i];
+	if (!memcmp(data->volumes, uvolumes, sizeof(data->volumes)))
 		return 0;
+
+	guard(mutex)(&cdev->stream_mutex);
+
+	stream_hw_id = catpt_stream_hw_id(cdev, data->pin_id);
+	if (stream_hw_id != CATPT_PIN_ID_INVALID) {
+		ret = catpt_set_dspvol(cdev, stream_hw_id, uvolumes);
+		if (ret)
+			return ret;
 	}
 
-	ret = pm_runtime_resume_and_get(cdev->dev);
-	if (ret < 0 && ret != -EACCES)
-		return ret;
+	memcpy(data->volumes, uvolumes, sizeof(data->volumes));
+	return 1;
+}
 
-	for (i = 0; i < CATPT_CHANNELS_MAX; i++) {
-		dspvol = catpt_stream_volume(cdev, stream, i);
-		ucontrol->value.integer.value[i] = dspvol_to_ctlvol(dspvol);
-	}
-
-	pm_runtime_put_autosuspend(cdev->dev);
-
+static int catpt_loopback_mute_get(struct snd_kcontrol *kctl, struct snd_ctl_elem_value *uctl)
+{
+	uctl->value.integer.value[0] = *(bool *)kctl->private_value;
 	return 0;
 }
 
-static int catpt_stream_volume_put(struct snd_kcontrol *kcontrol,
-				   struct snd_ctl_elem_value *ucontrol,
-				   enum catpt_pin_id pin_id)
+static int catpt_loopback_mute_put(struct snd_kcontrol *kctl, struct snd_ctl_elem_value *uctl)
 {
-	struct snd_soc_component *component =
-		snd_soc_kcontrol_component(kcontrol);
-	struct catpt_stream_runtime *stream;
+	struct snd_soc_component *component = snd_kcontrol_chip(kctl);
 	struct catpt_dev *cdev = dev_get_drvdata(component->dev);
-	long *ctlvol = (long *)kcontrol->private_value;
-	int ret, i;
-
-	stream = catpt_stream_find(cdev, pin_id);
-	if (!stream) {
-		for (i = 0; i < CATPT_CHANNELS_MAX; i++)
-			ctlvol[i] = ucontrol->value.integer.value[i];
-		return 0;
-	}
-
-	ret = pm_runtime_resume_and_get(cdev->dev);
-	if (ret < 0 && ret != -EACCES)
-		return ret;
-
-	ret = catpt_set_dspvol(cdev, stream->info.stream_hw_id,
-			       ucontrol->value.integer.value);
-
-	pm_runtime_put_autosuspend(cdev->dev);
-
-	if (ret)
-		return ret;
-
-	for (i = 0; i < CATPT_CHANNELS_MAX; i++)
-		ctlvol[i] = ucontrol->value.integer.value[i];
-	return 0;
-}
-
-static int catpt_offload1_volume_get(struct snd_kcontrol *kctl,
-				     struct snd_ctl_elem_value *uctl)
-{
-	return catpt_stream_volume_get(kctl, uctl, CATPT_PIN_ID_OFFLOAD1);
-}
-
-static int catpt_offload1_volume_put(struct snd_kcontrol *kctl,
-				     struct snd_ctl_elem_value *uctl)
-{
-	return catpt_stream_volume_put(kctl, uctl, CATPT_PIN_ID_OFFLOAD1);
-}
-
-static int catpt_offload2_volume_get(struct snd_kcontrol *kctl,
-				     struct snd_ctl_elem_value *uctl)
-{
-	return catpt_stream_volume_get(kctl, uctl, CATPT_PIN_ID_OFFLOAD2);
-}
-
-static int catpt_offload2_volume_put(struct snd_kcontrol *kctl,
-				     struct snd_ctl_elem_value *uctl)
-{
-	return catpt_stream_volume_put(kctl, uctl, CATPT_PIN_ID_OFFLOAD2);
-}
-
-static int catpt_capture_volume_get(struct snd_kcontrol *kctl,
-				    struct snd_ctl_elem_value *uctl)
-{
-	return catpt_stream_volume_get(kctl, uctl, CATPT_PIN_ID_CAPTURE1);
-}
-
-static int catpt_capture_volume_put(struct snd_kcontrol *kctl,
-				    struct snd_ctl_elem_value *uctl)
-{
-	return catpt_stream_volume_put(kctl, uctl, CATPT_PIN_ID_CAPTURE1);
-}
-
-static int catpt_loopback_switch_get(struct snd_kcontrol *kcontrol,
-				     struct snd_ctl_elem_value *ucontrol)
-{
-	ucontrol->value.integer.value[0] = *(bool *)kcontrol->private_value;
-	return 0;
-}
-
-static int catpt_loopback_switch_put(struct snd_kcontrol *kcontrol,
-				     struct snd_ctl_elem_value *ucontrol)
-{
-	struct snd_soc_component *component =
-		snd_soc_kcontrol_component(kcontrol);
-	struct catpt_stream_runtime *stream;
-	struct catpt_dev *cdev = dev_get_drvdata(component->dev);
-	bool mute;
+	bool *kmute, cmute;
+	u8 stream_hw_id;
 	int ret;
 
-	mute = (bool)ucontrol->value.integer.value[0];
-	stream = catpt_stream_find(cdev, CATPT_PIN_ID_REFERENCE);
-	if (!stream) {
-		*(bool *)kcontrol->private_value = mute;
+	kmute = (bool *)kctl->private_value;
+	cmute = (bool)uctl->value.integer.value[0];
+
+	if (*kmute == cmute)
 		return 0;
+
+	guard(mutex)(&cdev->stream_mutex);
+
+	stream_hw_id = catpt_stream_hw_id(cdev, CATPT_PIN_ID_REFERENCE);
+	if (stream_hw_id != CATPT_PIN_ID_INVALID) {
+		ret = catpt_ipc_mute_loopback(cdev, stream_hw_id, cmute);
+		if (ret)
+			return CATPT_IPC_RET(ret);
 	}
 
-	ret = pm_runtime_resume_and_get(cdev->dev);
-	if (ret < 0 && ret != -EACCES)
-		return ret;
-
-	ret = catpt_ipc_mute_loopback(cdev, stream->info.stream_hw_id, mute);
-
-	pm_runtime_put_autosuspend(cdev->dev);
-
-	if (ret)
-		return CATPT_IPC_ERROR(ret);
-
-	*(bool *)kcontrol->private_value = mute;
-	return 0;
+	*kmute = cmute;
+	return 1;
 }
 
-static int catpt_waves_switch_get(struct snd_kcontrol *kcontrol,
-				  struct snd_ctl_elem_value *ucontrol)
-{
-	return 0;
-}
-
-static int catpt_waves_switch_put(struct snd_kcontrol *kcontrol,
-				  struct snd_ctl_elem_value *ucontrol)
-{
-	return 0;
-}
-
-static int catpt_waves_param_get(struct snd_kcontrol *kcontrol,
-				 unsigned int __user *bytes,
-				 unsigned int size)
-{
-	return 0;
-}
-
-static int catpt_waves_param_put(struct snd_kcontrol *kcontrol,
-				 const unsigned int __user *bytes,
-				 unsigned int size)
-{
-	return 0;
-}
-
+static bool catpt_loopback_mute;
 static const SNDRV_CTL_TLVD_DECLARE_DB_SCALE(catpt_volume_tlv, -9000, 300, 1);
 
-#define CATPT_VOLUME_CTL(kname, sname) \
-{	.iface = SNDRV_CTL_ELEM_IFACE_MIXER, \
-	.name = (kname), \
-	.access = SNDRV_CTL_ELEM_ACCESS_TLV_READ | \
-		  SNDRV_CTL_ELEM_ACCESS_READWRITE, \
-	.info = catpt_volume_info, \
-	.get = catpt_##sname##_volume_get, \
-	.put = catpt_##sname##_volume_put, \
-	.tlv.p = catpt_volume_tlv, \
-	.private_value = (unsigned long) \
-		&(long[CATPT_CHANNELS_MAX]) {0} }
+#define CATPT_VOLUME_CTL(kname, pname) {		\
+	.iface	= SNDRV_CTL_ELEM_IFACE_MIXER,		\
+	.name	= kname,				\
+	.access = SNDRV_CTL_ELEM_ACCESS_READWRITE |	\
+		  SNDRV_CTL_ELEM_ACCESS_TLV_READ,	\
+	.info	= catpt_volume_info,			\
+	.get	= catpt_volume_get,			\
+	.put	= catpt_volume_put,			\
+	.tlv.p	= catpt_volume_tlv,			\
+	.private_value = (unsigned long)		\
+		&(struct catpt_control_data) { CATPT_PIN_ID_##pname } \
+}
 
 static const struct snd_kcontrol_new component_kcontrols[] = {
-/* Master volume (mixer stream) */
-CATPT_VOLUME_CTL("Master Playback Volume", mixer),
-/* Individual volume controls for offload and capture */
-CATPT_VOLUME_CTL("Media0 Playback Volume", offload1),
-CATPT_VOLUME_CTL("Media1 Playback Volume", offload2),
-CATPT_VOLUME_CTL("Mic Capture Volume", capture),
-SOC_SINGLE_BOOL_EXT("Loopback Mute", (unsigned long)&(bool[1]) {0},
-		    catpt_loopback_switch_get, catpt_loopback_switch_put),
-/* Enable or disable WAVES module */
-SOC_SINGLE_BOOL_EXT("Waves Switch", 0,
-		    catpt_waves_switch_get, catpt_waves_switch_put),
-/* WAVES module parameter control */
-SND_SOC_BYTES_TLV("Waves Set Param", 128,
-		  catpt_waves_param_get, catpt_waves_param_put),
+	CATPT_VOLUME_CTL("Master Playback Volume", MIXER),
+	CATPT_VOLUME_CTL("Media0 Playback Volume", OFFLOAD1),
+	CATPT_VOLUME_CTL("Media1 Playback Volume", OFFLOAD2),
+	CATPT_VOLUME_CTL("Mic Capture Volume", CAPTURE1),
+	SOC_SINGLE_BOOL_EXT("Loopback Mute", (unsigned long)&catpt_loopback_mute,
+			    catpt_loopback_mute_get, catpt_loopback_mute_put),
 };
 
 static const struct snd_soc_dapm_widget component_widgets[] = {
@@ -1133,7 +1018,7 @@ static const struct snd_soc_dapm_route component_routes[] = {
 static const struct snd_soc_component_driver catpt_comp_driver = {
 	.name = "catpt-platform",
 
-	.pcm_construct = catpt_component_pcm_construct,
+	.pcm_new = catpt_component_pcm_new,
 	.open = catpt_component_open,
 	.pointer = catpt_component_pointer,
 
@@ -1187,18 +1072,14 @@ int catpt_arm_stream_templates(struct catpt_dev *cdev)
 int catpt_register_plat_component(struct catpt_dev *cdev)
 {
 	struct snd_soc_component *component;
-	int ret;
 
-	component = devm_kzalloc(cdev->dev, sizeof(*component), GFP_KERNEL);
+	component = snd_soc_component_alloc(cdev->dev);
 	if (!component)
 		return -ENOMEM;
 
-	ret = snd_soc_component_initialize(component, &catpt_comp_driver,
-					   cdev->dev);
-	if (ret)
-		return ret;
+	snd_soc_component_set_name(component, catpt_comp_driver.name);
 
-	component->name = catpt_comp_driver.name;
-	return snd_soc_add_component(component, dai_drivers,
-				     ARRAY_SIZE(dai_drivers));
+	return snd_soc_register_component(component,
+					  &catpt_comp_driver,
+					  dai_drivers, ARRAY_SIZE(dai_drivers));
 }

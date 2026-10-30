@@ -56,8 +56,8 @@ static const struct reg_default sgtl5000_reg_defaults[] = {
 	{ SGTL5000_CHIP_PLL_CTRL,		0x5000 },
 	{ SGTL5000_CHIP_CLK_TOP_CTRL,		0x0000 },
 	{ SGTL5000_CHIP_ANA_STATUS,		0x0000 },
-	{ SGTL5000_CHIP_SHORT_CTRL,		0x0000 },
 	{ SGTL5000_CHIP_ANA_TEST2,		0x0000 },
+	{ SGTL5000_CHIP_SHORT_CTRL,		0x0000 },
 	{ SGTL5000_DAP_CTRL,			0x0000 },
 	{ SGTL5000_DAP_PEQ,			0x0000 },
 	{ SGTL5000_DAP_BASS_ENHANCE,		0x0040 },
@@ -540,7 +540,7 @@ static int dac_info_volsw(struct snd_kcontrol *kcontrol,
 static int dac_get_volsw(struct snd_kcontrol *kcontrol,
 			 struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_component *component = snd_soc_kcontrol_component(kcontrol);
+	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
 	int reg;
 	int l;
 	int r;
@@ -593,7 +593,7 @@ static int dac_get_volsw(struct snd_kcontrol *kcontrol,
 static int dac_put_volsw(struct snd_kcontrol *kcontrol,
 			 struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_component *component = snd_soc_kcontrol_component(kcontrol);
+	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
 	int reg;
 	int l;
 	int r;
@@ -631,7 +631,7 @@ static int dac_put_volsw(struct snd_kcontrol *kcontrol,
 static int avc_get_threshold(struct snd_kcontrol *kcontrol,
 			     struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_component *component = snd_soc_kcontrol_component(kcontrol);
+	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
 	int db, i;
 	u16 reg = snd_soc_component_read(component, SGTL5000_DAP_AVC_THRESHOLD);
 
@@ -664,7 +664,7 @@ static int avc_get_threshold(struct snd_kcontrol *kcontrol,
 static int avc_put_threshold(struct snd_kcontrol *kcontrol,
 			     struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_component *component = snd_soc_kcontrol_component(kcontrol);
+	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
 	int db;
 	u16 reg;
 
@@ -1809,8 +1809,8 @@ static void sgtl5000_i2c_shutdown(struct i2c_client *client)
 }
 
 static const struct i2c_device_id sgtl5000_id[] = {
-	{"sgtl5000"},
-	{},
+	{ .name = "sgtl5000" },
+	{ }
 };
 
 MODULE_DEVICE_TABLE(i2c, sgtl5000_id);

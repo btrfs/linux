@@ -5,25 +5,26 @@
  * Copyright 2010-2011 Analog Devices Inc.
  */
 
+#include <linux/bits.h>
 #include <linux/clk.h>
-#include <linux/interrupt.h>
-#include <linux/workqueue.h>
-#include <linux/device.h>
-#include <linux/kernel.h>
-#include <linux/slab.h>
-#include <linux/sysfs.h>
-#include <linux/list.h>
-#include <linux/spi/spi.h>
-#include <linux/regulator/consumer.h>
+#include <linux/dev_printk.h>
 #include <linux/err.h>
+#include <linux/kstrtox.h>
 #include <linux/module.h>
+#include <linux/mutex.h>
+#include <linux/regulator/consumer.h>
+#include <linux/spi/spi.h>
+#include <linux/string.h>
+#include <linux/sysfs.h>
+#include <linux/types.h>
+
+#include <asm/byteorder.h>
 #include <asm/div64.h>
 
 #include <linux/iio/iio.h>
 #include <linux/iio/sysfs.h>
-#include "dds.h"
 
-#include "ad9834.h"
+#include "dds.h"
 
 /* Registers */
 
@@ -165,7 +166,7 @@ static ssize_t ad9834_write(struct device *dev,
 		break;
 	case AD9834_OPBITEN:
 		if (st->control & AD9834_MODE) {
-			ret = -EINVAL;  /* AD9843 reserved mode */
+			ret = -EINVAL;  /* AD9834 reserved mode */
 			break;
 		}
 
@@ -240,7 +241,7 @@ static ssize_t ad9834_store_wavetype(struct device *dev,
 				st->control &= ~AD9834_OPBITEN;
 				st->control |= AD9834_MODE;
 			} else if (st->control & AD9834_OPBITEN) {
-				ret = -EINVAL;	/* AD9843 reserved mode */
+				ret = -EINVAL;	/* AD9834 reserved mode */
 			} else {
 				st->control |= AD9834_MODE;
 			}
@@ -282,16 +283,12 @@ ssize_t ad9834_show_out0_wavetype_available(struct device *dev,
 {
 	struct iio_dev *indio_dev = dev_to_iio_dev(dev);
 	struct ad9834_state *st = iio_priv(indio_dev);
-	char *str;
 
 	if (st->devid == ID_AD9833 || st->devid == ID_AD9837)
-		str = "sine triangle square";
-	else if (st->control & AD9834_OPBITEN)
-		str = "sine";
-	else
-		str = "sine triangle";
-
-	return sprintf(buf, "%s\n", str);
+		return sysfs_emit(buf, "sine triangle square\n");
+	if (st->control & AD9834_OPBITEN)
+		return sysfs_emit(buf, "sine\n");
+	return sysfs_emit(buf, "sine triangle\n");
 }
 
 static IIO_DEVICE_ATTR(out_altvoltage0_out0_wavetype_available, 0444,
@@ -304,14 +301,10 @@ ssize_t ad9834_show_out1_wavetype_available(struct device *dev,
 {
 	struct iio_dev *indio_dev = dev_to_iio_dev(dev);
 	struct ad9834_state *st = iio_priv(indio_dev);
-	char *str;
 
 	if (st->control & AD9834_MODE)
-		str = "";
-	else
-		str = "square";
-
-	return sprintf(buf, "%s\n", str);
+		return sysfs_emit(buf, "\n");
+	return sysfs_emit(buf, "square\n");
 }
 
 static IIO_DEVICE_ATTR(out_altvoltage0_out1_wavetype_available, 0444,
@@ -321,21 +314,21 @@ static IIO_DEVICE_ATTR(out_altvoltage0_out1_wavetype_available, 0444,
  * see dds.h for further information
  */
 
-static IIO_DEV_ATTR_FREQ(0, 0, 0200, NULL, ad9834_write, AD9834_REG_FREQ0);
-static IIO_DEV_ATTR_FREQ(0, 1, 0200, NULL, ad9834_write, AD9834_REG_FREQ1);
-static IIO_DEV_ATTR_FREQSYMBOL(0, 0200, NULL, ad9834_write, AD9834_FSEL);
+static IIO_DEV_ATTR_FREQ(0200, 0, 0, NULL, ad9834_write, AD9834_REG_FREQ0);
+static IIO_DEV_ATTR_FREQ(0200, 0, 1, NULL, ad9834_write, AD9834_REG_FREQ1);
+static IIO_DEV_ATTR_FREQSYMBOL(0200, 0, NULL, ad9834_write, AD9834_FSEL);
 static IIO_CONST_ATTR_FREQ_SCALE(0, "1"); /* 1Hz */
 
-static IIO_DEV_ATTR_PHASE(0, 0, 0200, NULL, ad9834_write, AD9834_REG_PHASE0);
-static IIO_DEV_ATTR_PHASE(0, 1, 0200, NULL, ad9834_write, AD9834_REG_PHASE1);
-static IIO_DEV_ATTR_PHASESYMBOL(0, 0200, NULL, ad9834_write, AD9834_PSEL);
+static IIO_DEV_ATTR_PHASE(0200, 0, 0, NULL, ad9834_write, AD9834_REG_PHASE0);
+static IIO_DEV_ATTR_PHASE(0200, 0, 1, NULL, ad9834_write, AD9834_REG_PHASE1);
+static IIO_DEV_ATTR_PHASESYMBOL(0200, 0, NULL, ad9834_write, AD9834_PSEL);
 static IIO_CONST_ATTR_PHASE_SCALE(0, "0.0015339808"); /* 2PI/2^12 rad*/
 
-static IIO_DEV_ATTR_PINCONTROL_EN(0, 0200, NULL, ad9834_write, AD9834_PIN_SW);
-static IIO_DEV_ATTR_OUT_ENABLE(0, 0200, NULL, ad9834_write, AD9834_RESET);
-static IIO_DEV_ATTR_OUTY_ENABLE(0, 1, 0200, NULL, ad9834_write, AD9834_OPBITEN);
-static IIO_DEV_ATTR_OUT_WAVETYPE(0, 0, ad9834_store_wavetype, 0);
-static IIO_DEV_ATTR_OUT_WAVETYPE(0, 1, ad9834_store_wavetype, 1);
+static IIO_DEV_ATTR_PINCONTROL_EN(0200, 0, NULL, ad9834_write, AD9834_PIN_SW);
+static IIO_DEV_ATTR_OUT_ENABLE(0200, 0, NULL, ad9834_write, AD9834_RESET);
+static IIO_DEV_ATTR_OUTY_ENABLE(0200, 0, 1, NULL, ad9834_write, AD9834_OPBITEN);
+static IIO_DEV_ATTR_OUT_WAVETYPE(0200, 0, 0, ad9834_store_wavetype, 0);
+static IIO_DEV_ATTR_OUT_WAVETYPE(0200, 0, 1, ad9834_store_wavetype, 1);
 
 static struct attribute *ad9834_attributes[] = {
 	&iio_dev_attr_out_altvoltage0_frequency0.dev_attr.attr,
@@ -398,17 +391,14 @@ static int ad9834_probe(struct spi_device *spi)
 		return dev_err_probe(&spi->dev, ret, "Failed to enable specified AVDD supply\n");
 
 	indio_dev = devm_iio_device_alloc(&spi->dev, sizeof(*st));
-	if (!indio_dev) {
-		ret = -ENOMEM;
-		return ret;
-	}
+	if (!indio_dev)
+		return -ENOMEM;
 	st = iio_priv(indio_dev);
 	mutex_init(&st->lock);
 	st->mclk = devm_clk_get_enabled(&spi->dev, NULL);
-	if (IS_ERR(st->mclk)) {
-		dev_err(&spi->dev, "Failed to enable master clock\n");
-		return PTR_ERR(st->mclk);
-	}
+	if (IS_ERR(st->mclk))
+		return dev_err_probe(&spi->dev, PTR_ERR(st->mclk),
+				     "Failed to enable master clock\n");
 
 	st->spi = spi;
 	st->devid = spi_get_device_id(spi)->driver_data;
@@ -450,10 +440,9 @@ static int ad9834_probe(struct spi_device *spi)
 
 	st->data = cpu_to_be16(AD9834_REG_CMD | st->control);
 	ret = spi_sync(st->spi, &st->msg);
-	if (ret) {
-		dev_err(&spi->dev, "device init failed\n");
-		return ret;
-	}
+	if (ret)
+		return dev_err_probe(&spi->dev, ret,
+				     "device init failed\n");
 
 	ret = ad9834_write_frequency(st, AD9834_REG_FREQ0, 1000000);
 	if (ret)
@@ -475,10 +464,10 @@ static int ad9834_probe(struct spi_device *spi)
 }
 
 static const struct spi_device_id ad9834_id[] = {
-	{"ad9833", ID_AD9833},
-	{"ad9834", ID_AD9834},
-	{"ad9837", ID_AD9837},
-	{"ad9838", ID_AD9838},
+	{ .name = "ad9833", .driver_data = ID_AD9833 },
+	{ .name = "ad9834", .driver_data = ID_AD9834 },
+	{ .name = "ad9837", .driver_data = ID_AD9837 },
+	{ .name = "ad9838", .driver_data = ID_AD9838 },
 	{ }
 };
 MODULE_DEVICE_TABLE(spi, ad9834_id);

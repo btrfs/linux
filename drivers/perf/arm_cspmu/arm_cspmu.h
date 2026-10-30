@@ -1,13 +1,14 @@
 /* SPDX-License-Identifier: GPL-2.0
  *
  * ARM CoreSight Architecture PMU driver.
- * Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  */
 
 #ifndef __ARM_CSPMU_H__
 #define __ARM_CSPMU_H__
 
+#include <linux/acpi.h>
 #include <linux/bitfield.h>
 #include <linux/cpumask.h>
 #include <linux/device.h>
@@ -34,21 +35,15 @@
 	PMU_EVENT_ATTR_ID(_name, arm_cspmu_sysfs_event_show, _config)
 
 
-/* Default event id mask */
-#define ARM_CSPMU_EVENT_MASK	GENMASK_ULL(63, 0)
-
-/* Default filter value mask */
-#define ARM_CSPMU_FILTER_MASK	GENMASK_ULL(63, 0)
-
 /* Default event format */
 #define ARM_CSPMU_FORMAT_EVENT_ATTR	\
-	ARM_CSPMU_FORMAT_ATTR(event, "config:0-32")
+	PMU_EVENT_ATTR_ID(event, arm_cspmu_default_format_show, 0)
 
 /* Default filter format */
 #define ARM_CSPMU_FORMAT_FILTER_ATTR	\
-	ARM_CSPMU_FORMAT_ATTR(filter, "config1:0-31")
+	PMU_EVENT_ATTR_ID(filter, arm_cspmu_default_format_show, 1)
 #define ARM_CSPMU_FORMAT_FILTER2_ATTR	\
-	ARM_CSPMU_FORMAT_ATTR(filter2, "config2:0-31")
+	PMU_EVENT_ATTR_ID(filter2, arm_cspmu_default_format_show, 2)
 
 /*
  * This is the default event number for cycle count, if supported, since the
@@ -77,6 +72,7 @@
 #define PMEVFILT2R			0x800
 #define PMEVFILTR			0xA00
 #define PMCNTENSET			0xC00
+#define PMCNTEN				0xC10
 #define PMCNTENCLR			0xC20
 #define PMINTENSET			0xC40
 #define PMINTENCLR			0xC60
@@ -86,6 +82,13 @@
 #define PMCFGR				0xE00
 #define PMCR				0xE04
 #define PMIIDR				0xE08
+#define PMCR_64				0xE10
+#define PMDEVARCH			0xFBC
+#define PMPIDR0				0xFE0
+#define PMPIDR1				0xFE4
+#define PMPIDR2				0xFE8
+#define PMPIDR3				0xFEC
+#define PMPIDR4				0xFD0
 
 /* PMCFGR register field */
 #define PMCFGR_NCG			GENMASK(31, 28)
@@ -115,12 +118,42 @@
 #define PMCR_E				BIT(0)
 
 /* PMIIDR register field */
-#define ARM_CSPMU_PMIIDR_IMPLEMENTER	GENMASK(11, 0)
-#define ARM_CSPMU_PMIIDR_PRODUCTID	GENMASK(31, 20)
+#define PMIIDR_IMPLEMENTER		GENMASK(11, 0)
+#define PMIIDR_IMPLEMENTER_DES_0	GENMASK(3, 0)
+#define PMIIDR_IMPLEMENTER_DES_1	GENMASK(6, 4)
+#define PMIIDR_IMPLEMENTER_DES_2	GENMASK(11, 8)
+#define PMIIDR_REVISION			GENMASK(15, 12)
+#define PMIIDR_VARIANT			GENMASK(19, 16)
+#define PMIIDR_PRODUCTID		GENMASK(31, 20)
+#define PMIIDR_PRODUCTID_PART_0		GENMASK(27, 20)
+#define PMIIDR_PRODUCTID_PART_1		GENMASK(31, 28)
+
+/* PMPIDR0 register field */
+#define PMPIDR0_PART_0			GENMASK(7, 0)
+
+/* PMPIDR1 register field */
+#define PMPIDR1_DES_0			GENMASK(7, 4)
+#define PMPIDR1_PART_1			GENMASK(3, 0)
+
+/* PMPIDR2 register field */
+#define PMPIDR2_REVISION		GENMASK(7, 4)
+#define PMPIDR2_DES_1			GENMASK(2, 0)
+
+/* PMPIDR3 register field */
+#define PMPIDR3_REVAND			GENMASK(7, 4)
+#define PMPIDR3_CMOD			GENMASK(3, 0)
+
+/* PMPIDR4 register field */
+#define PMPIDR4_SIZE			GENMASK(7, 4)
+#define PMPIDR4_DES_2			GENMASK(3, 0)
 
 /* JEDEC-assigned JEP106 identification code */
 #define ARM_CSPMU_IMPL_ID_NVIDIA	0x36B
 #define ARM_CSPMU_IMPL_ID_AMPERE	0xA16
+
+/* PMDEVARCH */
+#define ARM_CSPMU_PMDEVARCH_PRESENT	BIT(20)
+#define ARM_CSPMU_PMDEVARCH_ARCHPART	GENMASK(11, 0)
 
 struct arm_cspmu;
 
@@ -151,12 +184,14 @@ struct arm_cspmu_impl_ops {
 	/* Check if the event corresponds to cycle count event */
 	bool (*is_cycle_counter_event)(const struct perf_event *event);
 	/* Decode event type/id from configs */
-	u32 (*event_type)(const struct perf_event *event);
-	/* Set event filters */
+	u64 (*event_type)(const struct perf_event *event);
+	/* Set/reset event filters */
 	void (*set_cc_filter)(struct arm_cspmu *cspmu,
 			      const struct perf_event *event);
 	void (*set_ev_filter)(struct arm_cspmu *cspmu,
 			      const struct perf_event *event);
+	void (*reset_ev_filter)(struct arm_cspmu *cspmu,
+				const struct perf_event *event);
 	/* Implementation specific event validation */
 	int (*validate_event)(struct arm_cspmu *cspmu,
 			      struct perf_event *event);
@@ -200,6 +235,7 @@ struct arm_cspmu {
 	int irq;
 
 	bool has_atomic_dword;
+	bool has_ext64;
 	u32 pmcfgr;
 	u32 num_logical_ctrs;
 	u32 num_set_clr_reg;
@@ -216,10 +252,27 @@ ssize_t arm_cspmu_sysfs_event_show(struct device *dev,
 				   struct device_attribute *attr,
 				   char *buf);
 
+ssize_t arm_cspmu_default_format_show(struct device *dev,
+				      struct device_attribute *attr, char *buf);
+
 /* Register vendor backend. */
 int arm_cspmu_impl_register(const struct arm_cspmu_impl_match *impl_match);
 
 /* Unregister vendor backend. */
 void arm_cspmu_impl_unregister(const struct arm_cspmu_impl_match *impl_match);
+
+#if defined(CONFIG_ACPI) && defined(CONFIG_ARM64)
+/**
+ * Get ACPI device associated with the PMU.
+ * The caller is responsible for calling acpi_dev_put() on the returned device.
+ */
+struct acpi_device *arm_cspmu_acpi_dev_get(const struct arm_cspmu *cspmu);
+#else
+static inline struct acpi_device *
+arm_cspmu_acpi_dev_get(const struct arm_cspmu *cspmu)
+{
+	return NULL;
+}
+#endif
 
 #endif /* __ARM_CSPMU_H__ */

@@ -33,6 +33,7 @@
 #ifndef _HNS_ROCE_DEVICE_H
 #define _HNS_ROCE_DEVICE_H
 
+#include <linux/pci.h>
 #include <rdma/ib_verbs.h>
 #include <rdma/hns-abi.h>
 #include "hns_roce_debugfs.h"
@@ -102,6 +103,10 @@
 
 #define CQ_BANKID_SHIFT 2
 #define CQ_BANKID_MASK GENMASK(1, 0)
+#define VALID_CQ_BANK_MASK_DEFAULT 0xF
+#define VALID_CQ_BANK_MASK_LIMIT 0x9
+
+#define VALID_EXT_SGE_QP_BANK_MASK_LIMIT 0x42
 
 #define HNS_ROCE_MAX_CQ_COUNT 0xFFFF
 #define HNS_ROCE_MAX_CQ_PERIOD 0xFFFF
@@ -153,7 +158,9 @@ enum {
 	HNS_ROCE_CAP_FLAG_SDI_MODE		= BIT(14),
 	HNS_ROCE_CAP_FLAG_STASH			= BIT(17),
 	HNS_ROCE_CAP_FLAG_CQE_INLINE		= BIT(19),
+	HNS_ROCE_CAP_FLAG_BOND                  = BIT(21),
 	HNS_ROCE_CAP_FLAG_SRQ_RECORD_DB         = BIT(22),
+	HNS_ROCE_CAP_FLAG_LIMIT_BANK            = BIT(23),
 };
 
 #define HNS_ROCE_DB_TYPE_COUNT			2
@@ -177,6 +184,7 @@ enum hns_roce_instance_state {
 	HNS_ROCE_STATE_INIT,
 	HNS_ROCE_STATE_INITED,
 	HNS_ROCE_STATE_UNINIT,
+	HNS_ROCE_STATE_BOND_UNINIT,
 };
 
 enum {
@@ -497,6 +505,7 @@ struct hns_roce_cq_table {
 	struct hns_roce_bank bank[HNS_ROCE_CQ_BANK_NUM];
 	struct mutex			bank_mutex;
 	u32 ctx_num[HNS_ROCE_CQ_BANK_NUM];
+	u8 valid_cq_bank_mask;
 };
 
 struct hns_roce_srq_table {
@@ -715,6 +724,14 @@ struct hns_roce_eq {
 
 struct hns_roce_eq_table {
 	struct hns_roce_eq	*eq;
+};
+
+enum hns_roce_scc_algo {
+	HNS_ROCE_SCC_ALGO_DCQCN = 0,
+	HNS_ROCE_SCC_ALGO_LDCP,
+	HNS_ROCE_SCC_ALGO_HC3,
+	HNS_ROCE_SCC_ALGO_DIP,
+	HNS_ROCE_SCC_ALGO_TOTAL,
 };
 
 struct hns_roce_caps {
@@ -954,6 +971,18 @@ struct hns_roce_hw {
 			u8 *tc_mode, u8 *priority);
 	const struct ib_device_ops *hns_roce_dev_ops;
 	const struct ib_device_ops *hns_roce_dev_srq_ops;
+	int (*config_scc_param)(struct hns_roce_dev *hr_dev,
+				enum hns_roce_scc_algo algo);
+	int (*query_scc_param)(struct hns_roce_dev *hr_dev,
+			       enum hns_roce_scc_algo alog);
+};
+
+#define HNS_ROCE_SCC_PARAM_SIZE 4
+struct hns_roce_scc_param {
+	__le32 param[HNS_ROCE_SCC_PARAM_SIZE];
+	enum hns_roce_scc_algo algo_type;
+	struct hns_roce_dev *hr_dev;
+	struct mutex scc_mutex; /* protect @param */
 };
 
 struct hns_roce_dev {
@@ -1017,6 +1046,7 @@ struct hns_roce_dev {
 	u64 dwqe_page;
 	struct hns_roce_dev_debugfs dbgfs;
 	atomic64_t *dfx_cnt;
+	struct hns_roce_scc_param *scc_param;
 };
 
 enum hns_roce_trace_type {
@@ -1167,6 +1197,17 @@ static inline u8 get_tclass(const struct ib_global_route *grh)
 	       grh->traffic_class >> DSCP_SHIFT : grh->traffic_class;
 }
 
+static inline struct net_device *get_hr_netdev(struct hns_roce_dev *hr_dev,
+					       u8 port)
+{
+	return hr_dev->iboe.netdevs[port];
+}
+
+static inline u8 get_hr_bus_num(struct hns_roce_dev *hr_dev)
+{
+	return hr_dev->pci_dev->bus->number;
+}
+
 void hns_roce_init_uar_table(struct hns_roce_dev *dev);
 int hns_roce_uar_alloc(struct hns_roce_dev *dev, struct hns_roce_uar *uar);
 
@@ -1293,7 +1334,7 @@ void hns_roce_flush_cqe(struct hns_roce_dev *hr_dev, u32 qpn);
 void hns_roce_srq_event(struct hns_roce_dev *hr_dev, u32 srqn, int event_type);
 void hns_roce_handle_device_err(struct hns_roce_dev *hr_dev);
 int hns_roce_init(struct hns_roce_dev *hr_dev);
-void hns_roce_exit(struct hns_roce_dev *hr_dev);
+void hns_roce_exit(struct hns_roce_dev *hr_dev, bool bond_cleanup);
 int hns_roce_fill_res_cq_entry(struct sk_buff *msg, struct ib_cq *ib_cq);
 int hns_roce_fill_res_cq_entry_raw(struct sk_buff *msg, struct ib_cq *ib_cq);
 int hns_roce_fill_res_qp_entry(struct sk_buff *msg, struct ib_qp *ib_qp);

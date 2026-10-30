@@ -28,7 +28,6 @@
  * SUCH DAMAGES.
  */
 
-#include <crypto/skcipher.h>
 #include <linux/types.h>
 #include <linux/jiffies.h>
 #include <linux/sunrpc/gss_krb5.h>
@@ -74,6 +73,8 @@ static void _rotate_left(struct xdr_buf *buf, unsigned int shift)
 	int shifted = 0;
 	int this_shift;
 
+	if (!buf->len)
+		return;
 	shift %= buf->len;
 	while (shifted < shift) {
 		this_shift = min(shift - shifted, LOCAL_BUF_LEN);
@@ -86,6 +87,8 @@ static void rotate_left(u32 base, struct xdr_buf *buf, unsigned int shift)
 {
 	struct xdr_buf subbuf;
 
+	if (buf->len <= base)
+		return;
 	xdr_buf_subsegment(buf, &subbuf, base, buf->len - base);
 	_rotate_left(&subbuf, shift);
 }
@@ -112,9 +115,9 @@ gss_krb5_wrap_v2(struct krb5_ctx *kctx, int offset,
 	*ptr++ = (unsigned char) ((KG2_TOK_WRAP>>8) & 0xff);
 	*ptr++ = (unsigned char) (KG2_TOK_WRAP & 0xff);
 
-	if ((kctx->flags & KRB5_CTX_FLAG_INITIATOR) == 0)
+	if (!kctx->initiate)
 		flags |= KG2_TOKEN_FLAG_SENTBYACCEPTOR;
-	if ((kctx->flags & KRB5_CTX_FLAG_ACCEPTOR_SUBKEY) != 0)
+	if (kctx->flags & KRB5_CTX_FLAG_ACCEPTOR_SUBKEY)
 		flags |= KG2_TOKEN_FLAG_ACCEPTORSUBKEY;
 	/* We always do confidentiality in wrap tokens */
 	flags |= KG2_TOKEN_FLAG_SEALED;
@@ -130,7 +133,7 @@ gss_krb5_wrap_v2(struct krb5_ctx *kctx, int offset,
 	be64ptr = (__be64 *)be16ptr;
 	*be64ptr = cpu_to_be64(atomic64_fetch_inc(&kctx->seq_send64));
 
-	err = (*kctx->gk5e->encrypt)(kctx, offset, buf, pages);
+	err = gss_krb5_aead_encrypt(kctx, offset, buf, pages);
 	if (err)
 		return err;
 
@@ -154,6 +157,9 @@ gss_krb5_unwrap_v2(struct krb5_ctx *kctx, int offset, int len,
 
 
 	dprintk("RPC:       %s\n", __func__);
+
+	if (len - offset <= GSS_KRB5_TOK_HDR_LEN)
+		return GSS_S_DEFECTIVE_TOKEN;
 
 	ptr = buf->head[0].iov_base + offset;
 
@@ -184,10 +190,10 @@ gss_krb5_unwrap_v2(struct krb5_ctx *kctx, int offset, int len,
 	if (rrc != 0)
 		rotate_left(offset + 16, buf, rrc);
 
-	err = (*kctx->gk5e->decrypt)(kctx, offset, len, buf,
-				     &headskip, &tailskip);
+	err = gss_krb5_aead_decrypt(kctx, offset, len, buf,
+				    &headskip, &tailskip);
 	if (err)
-		return GSS_S_FAILURE;
+		return err;
 
 	/*
 	 * Retrieve the decrypted gss token header and verify
@@ -221,14 +227,16 @@ gss_krb5_unwrap_v2(struct krb5_ctx *kctx, int offset, int len,
 	 * head buffer space rather than that actually occupied.
 	 */
 	movelen = min_t(unsigned int, buf->head[0].iov_len, len);
+	if (movelen < offset + GSS_KRB5_TOK_HDR_LEN + headskip)
+		return GSS_S_DEFECTIVE_TOKEN;
 	movelen -= offset + GSS_KRB5_TOK_HDR_LEN + headskip;
-	BUG_ON(offset + GSS_KRB5_TOK_HDR_LEN + headskip + movelen >
-							buf->head[0].iov_len);
 	memmove(ptr, ptr + GSS_KRB5_TOK_HDR_LEN + headskip, movelen);
 	buf->head[0].iov_len -= GSS_KRB5_TOK_HDR_LEN + headskip;
 	buf->len = len - (GSS_KRB5_TOK_HDR_LEN + headskip);
 
 	/* Trim off the trailing "extra count" and checksum blob */
+	if (ec + GSS_KRB5_TOK_HDR_LEN + tailskip > buf->len - offset)
+		return GSS_S_DEFECTIVE_TOKEN;
 	xdr_buf_trim(buf, ec + GSS_KRB5_TOK_HDR_LEN + tailskip);
 
 	*align = XDR_QUADLEN(GSS_KRB5_TOK_HDR_LEN + headskip);

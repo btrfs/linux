@@ -17,9 +17,15 @@
 #include <linux/bug.h>
 #include <linux/ctype.h>
 #include <linux/errno.h>
-#include <linux/kernel.h>
+#include <linux/cache.h>
+#include <linux/compiler.h>
+#include <linux/init.h>
+#include <linux/moduleparam.h>
+#include <linux/printk.h>
+#include <linux/sprintf.h>
 #include <linux/memblock.h>
 #include <linux/string.h>
+#include <asm/setup.h>		/* COMMAND_LINE_SIZE */
 
 #ifdef CONFIG_BOOT_CONFIG_EMBED
 /* embedded_bootconfig_data is defined in bootconfig-data.S */
@@ -32,7 +38,129 @@ const char * __init xbc_get_embedded_bootconfig(size_t *size)
 	return (*size) ? embedded_bootconfig_data : NULL;
 }
 #endif
-#endif
+
+#ifdef CONFIG_CMDLINE_FROM_BOOTCONFIG
+/* embedded_kernel_cmdline is defined in embedded-cmdline.S */
+extern __visible const char embedded_kernel_cmdline[];
+extern __visible const char embedded_kernel_cmdline_end[];
+
+/* Set once the embedded cmdline has actually been prepended. */
+static bool xbc_cmdline_applied __initdata;
+
+/*
+ * str_prepend() - Prepend @src in front of the string in @dst, in place
+ * @dst: NUL-terminated destination buffer, currently @dst_len bytes long
+ * @dst_len: length of the current @dst string (excluding its NUL)
+ * @src: bytes to prepend (not NUL-terminated)
+ * @src_len: number of bytes from @src to prepend
+ *
+ * The caller must guarantee @dst has room for src_len + dst_len + 1 bytes.
+ * Moving dst_len + 1 bytes carries @dst's NUL terminator too, so an empty
+ * @dst needs no special case.
+ */
+static void __init str_prepend(char *dst, size_t dst_len,
+			       const char *src, size_t src_len)
+{
+	memmove(dst + src_len, dst, dst_len + 1);
+	memcpy(dst, src, src_len);
+}
+
+/**
+ * xbc_prepend_embedded_cmdline() - Prepend embedded bootconfig cmdline
+ * @dst: cmdline buffer to prepend into (must already contain a NUL byte)
+ * @size: total capacity of @dst in bytes
+ *
+ * Prepend the build-time-rendered "kernel" subtree of the embedded
+ * bootconfig to @dst. The rendered string already ends with a single
+ * space (the xbc_snprint_cmdline() invariant), which serves as the
+ * separator between the embedded keys and any existing content of @dst.
+ * On overflow, log an error and leave @dst untouched rather than
+ * silently truncating: booting without the embedded values is better
+ * than refusing to boot, and the error message tells the user why
+ * their embedded keys are missing.
+ *
+ * Intended to be called from setup_arch() before parse_early_param() so
+ * that early_param() handlers see the embedded values.
+ */
+void __init xbc_prepend_embedded_cmdline(char *dst, size_t size)
+{
+	size_t embed_len = embedded_kernel_cmdline_end - embedded_kernel_cmdline;
+	size_t dst_len;
+
+	if (!size || embed_len <= 1)	/* trailing NUL only */
+		return;
+	embed_len--;			/* exclude trailing NUL byte */
+
+	dst_len = strnlen(dst, size);
+	if (embed_len + dst_len + 1 > size) {
+		pr_err("embedded bootconfig cmdline (%zu bytes) does not fit in COMMAND_LINE_SIZE with %zu bytes already used; ignoring embedded values\n",
+		       embed_len, dst_len);
+		return;
+	}
+
+	str_prepend(dst, dst_len, embedded_kernel_cmdline, embed_len);
+	xbc_cmdline_applied = true;
+}
+
+/**
+ * xbc_embedded_cmdline_applied() - Did the embedded cmdline get prepended?
+ *
+ * Return true if xbc_prepend_embedded_cmdline() actually prepended the
+ * embedded "kernel" subtree. setup_boot_config() uses this to avoid
+ * rendering the same keys a second time.
+ */
+bool __init xbc_embedded_cmdline_applied(void)
+{
+	return xbc_cmdline_applied;
+}
+#endif	/* CONFIG_CMDLINE_FROM_BOOTCONFIG */
+
+/* parse_args() callback: flag when the "bootconfig" parameter is present. */
+static int __init bootconfig_optin(char *param, char *val,
+				   const char *unused, void *arg)
+{
+	if (!strcmp(param, "bootconfig"))
+		*(bool *)arg = true;
+	return 0;
+}
+
+/**
+ * bootconfig_cmdline_requested() - Was "bootconfig" passed on the cmdline?
+ * @boot_cmdline: kernel command line to inspect (not modified)
+ * @end_offset: if non-NULL, set to the offset of the init arguments that
+ *		follow a "--" separator, or 0 when there is none
+ *
+ * Parse a private copy of @boot_cmdline (parse_args() is destructive) and
+ * report whether "bootconfig" is present before the "--" separator.
+ * setup_arch() uses this to gate prepending the build-time embedded cmdline;
+ * setup_boot_config() uses it for the runtime opt-in and to locate the init
+ * arguments via @end_offset. Sharing one parser keeps the early and late
+ * paths agreeing on what counts as opt-in. CONFIG_BOOT_CONFIG_FORCE is not
+ * folded in here; callers apply it where they need it.
+ */
+bool __init bootconfig_cmdline_requested(const char *boot_cmdline, int *end_offset)
+{
+	static char tmp_cmdline[COMMAND_LINE_SIZE] __initdata;
+	bool found = false;
+	char *err;
+
+	if (end_offset)
+		*end_offset = 0;
+
+	strscpy(tmp_cmdline, boot_cmdline, COMMAND_LINE_SIZE);
+	err = parse_args("bootconfig", tmp_cmdline, NULL, 0, 0, 0,
+			 &found, bootconfig_optin);
+	if (IS_ERR(err))
+		return false;
+
+	/* parse_args() stops at "--" and returns the address of the rest. */
+	if (end_offset && err)
+		*end_offset = err - tmp_cmdline;
+
+	return found;
+}
+
+#endif	/* __KERNEL__ */
 
 /*
  * Extra Boot Config (XBC) is given as tree-structured ascii text of
@@ -64,14 +192,14 @@ static inline void __init xbc_free_mem(void *addr, size_t size, bool early)
 	if (early)
 		memblock_free(addr, size);
 	else if (addr)
-		memblock_free_late(__pa(addr), size);
+		memblock_free(addr, size);
 }
 
 #else /* !__KERNEL__ */
 
 static inline void *xbc_alloc_mem(size_t size)
 {
-	return malloc(size);
+	return calloc(1, size);
 }
 
 static inline void xbc_free_mem(void *addr, size_t size, bool early)
@@ -79,6 +207,7 @@ static inline void xbc_free_mem(void *addr, size_t size, bool early)
 	free(addr);
 }
 #endif
+
 /**
  * xbc_get_info() - Get the information of loaded boot config
  * @node_size: A pointer to store the number of nodes.
@@ -112,7 +241,7 @@ static int __init xbc_parse_error(const char *msg, const char *p)
  * xbc_root_node() - Get the root node of extended boot config
  *
  * Return the address of root node of extended boot config. If the
- * extended boot config is not initiized, return NULL.
+ * extended boot config is not initialized, return NULL.
  */
 struct xbc_node * __init xbc_root_node(void)
 {
@@ -128,9 +257,9 @@ struct xbc_node * __init xbc_root_node(void)
  *
  * Return the index number of @node in XBC node list.
  */
-int __init xbc_node_index(struct xbc_node *node)
+uint16_t __init xbc_node_index(struct xbc_node *node)
 {
-	return node - &xbc_nodes[0];
+	return (uint16_t)(node - &xbc_nodes[0]);
 }
 
 /**
@@ -180,7 +309,7 @@ struct xbc_node * __init xbc_node_get_next(struct xbc_node *node)
  */
 const char * __init xbc_node_get_data(struct xbc_node *node)
 {
-	int offset = node->data & ~XBC_VALUE;
+	size_t offset = node->data & ~XBC_VALUE;
 
 	if (WARN_ON(offset >= xbc_data_size))
 		return NULL;
@@ -192,7 +321,7 @@ static bool __init
 xbc_node_match_prefix(struct xbc_node *node, const char **prefix)
 {
 	const char *p = xbc_node_get_data(node);
-	int len = strlen(p);
+	size_t len = strlen(p);
 
 	if (strncmp(*prefix, p, len))
 		return false;
@@ -316,7 +445,7 @@ int __init xbc_node_compose_key_after(struct xbc_node *root,
 			       depth ? "." : "");
 		if (ret < 0)
 			return ret;
-		if (ret > size) {
+		if (ret >= size) {
 			size = 0;
 		} else {
 			size -= ret;
@@ -364,7 +493,7 @@ struct xbc_node * __init xbc_node_find_next_leaf(struct xbc_node *root,
 			node = xbc_node_get_parent(node);
 			if (node == root)
 				return NULL;
-			/* User passed a node which is not uder parent */
+			/* User passed a node which is not under parent */
 			if (WARN_ON(!node))
 				return NULL;
 		}
@@ -405,13 +534,89 @@ const char * __init xbc_node_find_next_key_value(struct xbc_node *root,
 		return "";	/* No value key */
 }
 
+static char xbc_namebuf[XBC_KEYLEN_MAX] __initdata;
+
+#define rest(dst, end) ((end) > (dst) ? (end) - (dst) : 0)
+
+/**
+ * xbc_snprint_cmdline() - Render bootconfig keys under @root as a cmdline string
+ * @buf: Destination buffer (may be NULL when @size is 0 to query the length)
+ * @size: Size of @buf in bytes
+ * @root: Subtree root whose key=value pairs should be rendered
+ *
+ * Walk all key/value pairs under @root and emit them as a space-separated
+ * cmdline string into @buf. Values containing whitespace are quoted with
+ * double quotes. Returns the number of bytes that would be written if @buf
+ * were large enough (matching snprintf semantics), or a negative errno on
+ * failure.
+ */
+int __init xbc_snprint_cmdline(char *buf, size_t size, struct xbc_node *root)
+{
+	struct xbc_node *knode, *vnode;
+	const char *val, *q;
+	size_t len = 0;
+	int ret;
+
+	/*
+	 * Track the running written length rather than advancing @buf, so we
+	 * never form "buf + size" or "buf += ret" while @buf is NULL (the
+	 * size-probe call passes buf=NULL, size=0). NULL pointer arithmetic
+	 * is undefined behavior and trips host UBSan / FORTIFY_SOURCE when
+	 * this renderer runs at kernel build time. snprintf(NULL, 0, ...)
+	 * itself is well defined and returns the would-be length.
+	 */
+	xbc_node_for_each_key_value(root, knode, val) {
+		/*
+		 * An empty or value-only @root (e.g. "kernel {}" or
+		 * "kernel = x", possibly alongside "kernel.foo = bar")
+		 * yields @root itself here. Skip it: composing a key for it
+		 * would fail with -EINVAL, yet any real descendant keys must
+		 * still be rendered. An entirely empty subtree then renders
+		 * nothing and returns 0 rather than an error.
+		 */
+		if (knode == root)
+			continue;
+
+		ret = xbc_node_compose_key_after(root, knode,
+					xbc_namebuf, XBC_KEYLEN_MAX);
+		if (ret < 0)
+			return ret;
+
+		vnode = xbc_node_get_child(knode);
+		if (!vnode) {
+			ret = snprintf(buf ? buf + len : NULL, rest(len, size),
+				       "%s ", xbc_namebuf);
+			if (ret < 0)
+				return ret;
+			len += ret;
+			continue;
+		}
+		xbc_array_for_each_value(vnode, val) {
+			/*
+			 * For prettier and more readable /proc/cmdline, only
+			 * quote the value when necessary, i.e. when it contains
+			 * whitespace.
+			 */
+			q = strpbrk(val, " \t\r\n") ? "\"" : "";
+			ret = snprintf(buf ? buf + len : NULL, rest(len, size),
+				       "%s=%s%s%s ", xbc_namebuf, q, val, q);
+			if (ret < 0)
+				return ret;
+			len += ret;
+		}
+	}
+
+	return len;
+}
+#undef rest
+
 /* XBC parse and tree build */
 
-static int __init xbc_init_node(struct xbc_node *node, char *data, uint32_t flag)
+static int __init xbc_init_node(struct xbc_node *node, char *data, uint16_t flag)
 {
-	unsigned long offset = data - xbc_data;
+	long offset = data - xbc_data;
 
-	if (WARN_ON(offset >= XBC_DATA_MAX))
+	if (WARN_ON(offset < 0 || offset >= XBC_DATA_MAX))
 		return -EINVAL;
 
 	node->data = (uint16_t)offset | flag;
@@ -421,16 +626,17 @@ static int __init xbc_init_node(struct xbc_node *node, char *data, uint32_t flag
 	return 0;
 }
 
-static struct xbc_node * __init xbc_add_node(char *data, uint32_t flag)
+static struct xbc_node * __init xbc_add_node(char *data, uint16_t flag)
 {
 	struct xbc_node *node;
 
 	if (xbc_node_num == XBC_NODE_MAX)
 		return NULL;
 
-	node = &xbc_nodes[xbc_node_num++];
+	node = &xbc_nodes[xbc_node_num];
 	if (xbc_init_node(node, data, flag) < 0)
 		return NULL;
+	xbc_node_num++;
 
 	return node;
 }
@@ -451,7 +657,7 @@ static inline __init struct xbc_node *xbc_last_child(struct xbc_node *node)
 	return node;
 }
 
-static struct xbc_node * __init __xbc_add_sibling(char *data, uint32_t flag, bool head)
+static struct xbc_node * __init __xbc_add_sibling(char *data, uint16_t flag, bool head)
 {
 	struct xbc_node *sib, *node = xbc_add_node(data, flag);
 
@@ -472,23 +678,24 @@ static struct xbc_node * __init __xbc_add_sibling(char *data, uint32_t flag, boo
 				sib->next = xbc_node_index(node);
 			}
 		}
-	} else
+	} else {
 		xbc_parse_error("Too many nodes", data);
+	}
 
 	return node;
 }
 
-static inline struct xbc_node * __init xbc_add_sibling(char *data, uint32_t flag)
+static inline struct xbc_node * __init xbc_add_sibling(char *data, uint16_t flag)
 {
 	return __xbc_add_sibling(data, flag, false);
 }
 
-static inline struct xbc_node * __init xbc_add_head_sibling(char *data, uint32_t flag)
+static inline struct xbc_node * __init xbc_add_head_sibling(char *data, uint16_t flag)
 {
 	return __xbc_add_sibling(data, flag, true);
 }
 
-static inline __init struct xbc_node *xbc_add_child(char *data, uint32_t flag)
+static inline __init struct xbc_node *xbc_add_child(char *data, uint16_t flag)
 {
 	struct xbc_node *node = xbc_add_sibling(data, flag);
 
@@ -532,9 +739,9 @@ static char *skip_spaces_until_newline(char *p)
 static int __init __xbc_open_brace(char *p)
 {
 	/* Push the last key as open brace */
-	open_brace[brace_index++] = xbc_node_index(last_parent);
 	if (brace_index >= XBC_DEPTH_MAX)
 		return xbc_parse_error("Exceed max depth of braces", p);
+	open_brace[brace_index++] = xbc_node_index(last_parent);
 
 	return 0;
 }
@@ -557,17 +764,13 @@ static int __init __xbc_close_brace(char *p)
 /*
  * Return delimiter or error, no node added. As same as lib/cmdline.c,
  * you can use " around spaces, but can't escape " for value.
+ * *@__v must point real value string. (not including spaces before value.)
  */
 static int __init __xbc_parse_value(char **__v, char **__n)
 {
 	char *p, *v = *__v;
 	int c, quotes = 0;
 
-	v = skip_spaces(v);
-	while (*v == '#') {
-		v = skip_comment(v);
-		v = skip_spaces(v);
-	}
 	if (*v == '"' || *v == '\'') {
 		quotes = *v;
 		v++;
@@ -617,6 +820,13 @@ static int __init xbc_parse_array(char **__v)
 		last_parent = xbc_node_get_child(last_parent);
 
 	do {
+		/* Search the next array value beyond comments and empty lines */
+		next = skip_spaces(*__v);
+		while (*next == '#') {
+			next = skip_comment(next);
+			next = skip_spaces(next);
+		}
+		*__v = next;
 		c = __xbc_parse_value(__v, &next);
 		if (c < 0)
 			return c;
@@ -652,9 +862,9 @@ static int __init __xbc_add_key(char *k)
 	if (unlikely(xbc_node_num == 0))
 		goto add_node;
 
-	if (!last_parent)	/* the first level */
+	if (!last_parent) {	/* the first level */
 		node = find_match_node(xbc_nodes, k);
-	else {
+	} else {
 		child = xbc_node_get_child(last_parent);
 		/* Since the value node is the first child, skip it. */
 		if (child && xbc_node_is_value(child))
@@ -662,9 +872,9 @@ static int __init __xbc_add_key(char *k)
 		node = find_match_node(child, k);
 	}
 
-	if (node)
+	if (node) {
 		last_parent = node;
-	else {
+	} else {
 add_node:
 		node = xbc_add_child(k, XBC_KEY);
 		if (!node)
@@ -701,9 +911,17 @@ static int __init xbc_parse_kv(char **k, char *v, int op)
 	if (ret)
 		return ret;
 
-	c = __xbc_parse_value(&v, &next);
-	if (c < 0)
-		return c;
+	v = skip_spaces_until_newline(v);
+	/* If there is a comment, this has an empty value. */
+	if (*v == '#') {
+		next = skip_comment(v);
+		*v = '\0';
+		c = '\n';
+	} else {
+		c = __xbc_parse_value(&v, &next);
+		if (c < 0)
+			return c;
+	}
 
 	child = xbc_node_get_child(last_parent);
 	if (child && xbc_node_is_value(child)) {
@@ -712,7 +930,8 @@ static int __init xbc_parse_kv(char **k, char *v, int op)
 		if (op == ':') {
 			unsigned short nidx = child->next;
 
-			xbc_init_node(child, v, XBC_VALUE);
+			if (xbc_init_node(child, v, XBC_VALUE) < 0)
+				return xbc_parse_error("Failed to override value", v);
 			child->next = nidx;	/* keep subkeys */
 			goto array;
 		}
@@ -786,12 +1005,13 @@ static int __init xbc_close_brace(char **k, char *n)
 
 static int __init xbc_verify_tree(void)
 {
-	int i, depth, len, wlen;
+	int i, depth;
+	size_t len, wlen;
 	struct xbc_node *n, *m;
 
 	/* Brace closing */
 	if (brace_index) {
-		n = &xbc_nodes[open_brace[brace_index]];
+		n = &xbc_nodes[open_brace[brace_index - 1]];
 		return xbc_parse_error("Brace is not closed",
 					xbc_node_get_data(n));
 	}
@@ -803,8 +1023,12 @@ static int __init xbc_verify_tree(void)
 	}
 
 	for (i = 0; i < xbc_node_num; i++) {
-		if (xbc_nodes[i].next > xbc_node_num) {
+		if (xbc_nodes[i].next >= xbc_node_num) {
 			return xbc_parse_error("No closing brace",
+				xbc_node_get_data(xbc_nodes + i));
+		}
+		if (xbc_nodes[i].child >= xbc_node_num) {
+			return xbc_parse_error("Broken child node",
 				xbc_node_get_data(xbc_nodes + i));
 		}
 	}
@@ -968,7 +1192,6 @@ int __init xbc_init(const char *data, size_t size, const char **emsg, int *epos)
 		_xbc_exit(true);
 		return -ENOMEM;
 	}
-	memset(xbc_nodes, 0, sizeof(struct xbc_node) * XBC_NODE_MAX);
 
 	ret = xbc_parse_tree();
 	if (!ret)
@@ -980,8 +1203,9 @@ int __init xbc_init(const char *data, size_t size, const char **emsg, int *epos)
 		if (emsg)
 			*emsg = xbc_err_msg;
 		_xbc_exit(true);
-	} else
+	} else {
 		ret = xbc_node_num;
+	}
 
 	return ret;
 }

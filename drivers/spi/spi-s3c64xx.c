@@ -961,7 +961,7 @@ static struct s3c64xx_spi_csinfo *s3c64xx_get_target_ctrldata(
 		return ERR_PTR(-EINVAL);
 	}
 
-	cs = kzalloc(sizeof(*cs), GFP_KERNEL);
+	cs = kzalloc_obj(*cs);
 	if (!cs)
 		return ERR_PTR(-ENOMEM);
 
@@ -1295,7 +1295,6 @@ static int s3c64xx_spi_probe(struct platform_device *pdev)
 	sdd->tx_dma.direction = DMA_MEM_TO_DEV;
 	sdd->rx_dma.direction = DMA_DEV_TO_MEM;
 
-	host->dev.of_node = pdev->dev.of_node;
 	host->bus_num = -1;
 	host->setup = s3c64xx_spi_setup;
 	host->cleanup = s3c64xx_spi_cleanup;
@@ -1370,7 +1369,7 @@ static int s3c64xx_spi_probe(struct platform_device *pdev)
 	       S3C64XX_SPI_INT_TX_OVERRUN_EN | S3C64XX_SPI_INT_TX_UNDERRUN_EN,
 	       sdd->regs + S3C64XX_SPI_INT_EN);
 
-	ret = devm_spi_register_controller(&pdev->dev, host);
+	ret = spi_register_controller(host);
 	if (ret != 0) {
 		dev_err(&pdev->dev, "cannot register SPI host: %d\n", ret);
 		goto err_pm_put;
@@ -1400,19 +1399,15 @@ static void s3c64xx_spi_remove(struct platform_device *pdev)
 
 	pm_runtime_get_sync(&pdev->dev);
 
-	writel(0, sdd->regs + S3C64XX_SPI_INT_EN);
+	spi_unregister_controller(host);
 
-	if (!is_polling(sdd)) {
-		dma_release_channel(sdd->rx_dma.ch);
-		dma_release_channel(sdd->tx_dma.ch);
-	}
+	writel(0, sdd->regs + S3C64XX_SPI_INT_EN);
 
 	pm_runtime_put_noidle(&pdev->dev);
 	pm_runtime_disable(&pdev->dev);
 	pm_runtime_set_suspended(&pdev->dev);
 }
 
-#ifdef CONFIG_PM_SLEEP
 static int s3c64xx_spi_suspend(struct device *dev)
 {
 	struct spi_controller *host = dev_get_drvdata(dev);
@@ -1448,9 +1443,7 @@ static int s3c64xx_spi_resume(struct device *dev)
 
 	return spi_controller_resume(host);
 }
-#endif /* CONFIG_PM_SLEEP */
 
-#ifdef CONFIG_PM
 static int s3c64xx_spi_runtime_suspend(struct device *dev)
 {
 	struct spi_controller *host = dev_get_drvdata(dev);
@@ -1498,12 +1491,11 @@ err_disable_ioclk:
 
 	return ret;
 }
-#endif /* CONFIG_PM */
 
 static const struct dev_pm_ops s3c64xx_spi_pm = {
-	SET_SYSTEM_SLEEP_PM_OPS(s3c64xx_spi_suspend, s3c64xx_spi_resume)
-	SET_RUNTIME_PM_OPS(s3c64xx_spi_runtime_suspend,
-			   s3c64xx_spi_runtime_resume, NULL)
+	SYSTEM_SLEEP_PM_OPS(s3c64xx_spi_suspend, s3c64xx_spi_resume)
+	RUNTIME_PM_OPS(s3c64xx_spi_runtime_suspend,
+		       s3c64xx_spi_runtime_resume, NULL)
 };
 
 static const struct s3c64xx_spi_port_config s3c6410_spi_port_config = {
@@ -1617,10 +1609,10 @@ static const struct s3c64xx_spi_port_config gs101_spi_port_config = {
 
 static const struct platform_device_id s3c64xx_spi_driver_ids[] = {
 	{
-		.name		= "s3c6410-spi",
-		.driver_data	= (kernel_ulong_t)&s3c6410_spi_port_config,
+		.name = "s3c6410-spi",
+		.driver_data = (kernel_ulong_t)&s3c6410_spi_port_config,
 	},
-	{ },
+	{ }
 };
 MODULE_DEVICE_TABLE(platform, s3c64xx_spi_driver_ids);
 
@@ -1659,7 +1651,7 @@ MODULE_DEVICE_TABLE(of, s3c64xx_spi_dt_match);
 static struct platform_driver s3c64xx_spi_driver = {
 	.driver = {
 		.name	= "s3c64xx-spi",
-		.pm = &s3c64xx_spi_pm,
+		.pm = pm_ptr(&s3c64xx_spi_pm),
 		.of_match_table = of_match_ptr(s3c64xx_spi_dt_match),
 	},
 	.probe = s3c64xx_spi_probe,

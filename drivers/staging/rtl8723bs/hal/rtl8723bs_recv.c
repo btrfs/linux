@@ -110,7 +110,6 @@ static void update_recvframe_phyinfo(union recv_frame *precvframe,
 	pkt_info.to_self = pkt_info.bssid_match &&
 		ether_addr_equal(rx_ra, my_hwaddr);
 
-
 	pkt_info.is_beacon = pkt_info.bssid_match &&
 		(GetFrameSubType(wlanhdr) == WIFI_BEACON);
 
@@ -135,7 +134,7 @@ static void update_recvframe_phyinfo(union recv_frame *precvframe,
 	precvframe->u.hdr.psta = NULL;
 	if (
 		pkt_info.bssid_match &&
-		(check_fwstate(&padapter->mlmepriv, WIFI_AP_STATE) == true)
+		(check_fwstate(&padapter->mlmepriv, WIFI_AP_STATE))
 	) {
 		if (psta) {
 			precvframe->u.hdr.psta = psta;
@@ -143,6 +142,7 @@ static void update_recvframe_phyinfo(union recv_frame *precvframe,
 		}
 	} else if (pkt_info.to_self || pkt_info.is_beacon) {
 		u32 adhoc_state = WIFI_ADHOC_STATE | WIFI_ADHOC_MASTER_STATE;
+
 		if (check_fwstate(&padapter->mlmepriv, adhoc_state))
 			if (psta)
 				precvframe->u.hdr.psta = psta;
@@ -159,11 +159,9 @@ static void rtl8723bs_c2h_packet_handler(struct adapter *padapter,
 	if (length == 0)
 		return;
 
-	tmp = rtw_zmalloc(length);
+	tmp = kmemdup(pbuf, length, GFP_ATOMIC);
 	if (!tmp)
 		return;
-
-	memcpy(tmp, pbuf, length);
 
 	res = rtw_c2h_packet_wk_cmd(padapter, tmp, length);
 
@@ -269,9 +267,9 @@ static void rtl8723bs_recv_tasklet(struct tasklet_struct *t)
 				rtw_free_recvframe(precvframe,
 						   &precvpriv->free_recv_queue);
 			} else {
-				/* 	Modified by Albert 20101213 */
-				/* 	For 8 bytes IP header alignment. */
-				if (pattrib->qos)	/* 	Qos data, wireless lan header length is 26 */
+				/*	Modified by Albert 20101213 */
+				/*	For 8 bytes IP header alignment. */
+				if (pattrib->qos)	/*	Qos data, wireless lan header length is 26 */
 					shift_sz = 6;
 				else
 					shift_sz = 0;
@@ -287,12 +285,12 @@ static void rtl8723bs_recv_tasklet(struct tasklet_struct *t)
 						alloc_sz = skb_len + 14;
 				} else {
 					alloc_sz = skb_len;
-					/* 	6 is for IP header 8 bytes alignment in QoS packet case. */
-					/* 	8 is for skb->data 4 bytes alignment. */
+					/*	6 is for IP header 8 bytes alignment in QoS packet case. */
+					/*	8 is for skb->data 4 bytes alignment. */
 					alloc_sz += 14;
 				}
 
-				pkt_copy = rtw_skb_alloc(alloc_sz);
+				pkt_copy = __dev_alloc_skb(alloc_sz, GFP_ATOMIC);
 				if (!pkt_copy) {
 					rtw_free_recvframe(precvframe, &precvpriv->free_recv_queue);
 					break;
@@ -382,7 +380,7 @@ s32 rtl8723bs_init_recv_priv(struct adapter *padapter)
 	spin_lock_init(&precvpriv->recv_buf_pending_queue.lock);
 
 	n = NR_RECVBUFF * sizeof(struct recv_buf) + 4;
-	precvpriv->pallocated_recv_buf = rtw_zmalloc(n);
+	precvpriv->pallocated_recv_buf = kzalloc(n, GFP_KERNEL);
 	if (!precvpriv->pallocated_recv_buf) {
 		res = _FAIL;
 		goto exit;
@@ -399,8 +397,7 @@ s32 rtl8723bs_init_recv_priv(struct adapter *padapter)
 			SIZE_PTR tmpaddr = 0;
 			SIZE_PTR alignment = 0;
 
-			precvbuf->pskb = rtw_skb_alloc(MAX_RECVBUF_SZ + RECVBUFF_ALIGN_SZ);
-
+			precvbuf->pskb = __dev_alloc_skb(MAX_RECVBUF_SZ + RECVBUFF_ALIGN_SZ, GFP_ATOMIC);
 			if (precvbuf->pskb) {
 				precvbuf->pskb->dev = padapter->pnetdev;
 

@@ -11,9 +11,7 @@
  */
 
 #include <linux/module.h>
-#include <linux/param.h>
 #include <linux/delay.h>
-#include <linux/workqueue.h>
 #include <linux/platform_device.h>
 #include <linux/power_supply.h>
 #include <linux/slab.h>
@@ -237,3 +235,4 @@ MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Lukas Märdian <lukas@goldelico.com>");
 MODULE_DESCRIPTION("twl4030_madc battery driver");
 MODULE_ALIAS("platform:twl4030_madc_battery");
+MODULE_IMPORT_NS("IIO_CONSUMER");

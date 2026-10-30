@@ -31,7 +31,7 @@
 #include "uncore-frequency-common.h"
 
 #define	UNCORE_MAJOR_VERSION		0
-#define	UNCORE_MINOR_VERSION		2
+#define	UNCORE_MINOR_VERSION		3
 #define UNCORE_ELC_SUPPORTED_VERSION	2
 #define UNCORE_HEADER_INDEX		0
 #define UNCORE_FABRIC_CLUSTER_OFFSET	8
@@ -385,7 +385,19 @@ static u8 io_die_index_next;
 /* Lock to protect io_die_start, io_die_index_next */
 static DEFINE_MUTEX(domain_lock);
 
-static void set_domain_id(int id,  int num_resources,
+static inline void set_instance_id(int id, struct tpmi_uncore_cluster_info *cluster_info)
+{
+	/*
+	 * On non-partitioned systems domain_id can be used for mapping both
+	 * CPUs to compute die IDs and physical die indexes to MMIO mapped
+	 * memory. However on partitioned systems domain_id loses the second
+	 * association. Therefore instance_id should be used for that instead,
+	 * while domain_id should still be used to match CPUs to compute dies.
+	 */
+	cluster_info->uncore_data.instance_id = id;
+}
+
+static void set_domain_id(int id, int num_resources,
 			  struct oobmsm_plat_info *plat_info,
 			  struct tpmi_uncore_cluster_info *cluster_info)
 {
@@ -537,6 +549,7 @@ static void set_cdie_id(int domain_id, struct tpmi_uncore_cluster_info *cluster_
 #define UNCORE_VERSION_MASK			GENMASK_ULL(7, 0)
 #define UNCORE_LOCAL_FABRIC_CLUSTER_ID_MASK	GENMASK_ULL(15, 8)
 #define UNCORE_CLUSTER_OFF_MASK			GENMASK_ULL(7, 0)
+#define UNCORE_AUTONOMOUS_UFS_DISABLED		BIT(32)
 #define UNCORE_MAX_CLUSTER_PER_DOMAIN		8
 
 static int uncore_probe(struct auxiliary_device *auxdev, const struct auxiliary_device_id *id)
@@ -598,6 +611,7 @@ static int uncore_probe(struct auxiliary_device *auxdev, const struct auxiliary_
 
 	for (i = 0; i < num_resources; ++i) {
 		struct tpmi_uncore_power_domain_info *pd_info;
+		bool auto_ufs_enabled;
 		struct resource *res;
 		u64 cluster_offset;
 		u8 cluster_mask;
@@ -647,6 +661,8 @@ static int uncore_probe(struct auxiliary_device *auxdev, const struct auxiliary_
 			continue;
 		}
 
+		auto_ufs_enabled = !(header & UNCORE_AUTONOMOUS_UFS_DISABLED);
+
 		/* Find out number of clusters in this resource */
 		pd_info->cluster_count = hweight8(cluster_mask);
 
@@ -686,10 +702,13 @@ static int uncore_probe(struct auxiliary_device *auxdev, const struct auxiliary_
 			set_cdie_id(i, cluster_info, plat_info);
 
 			set_domain_id(i, num_resources, plat_info, cluster_info);
+			set_instance_id(i, cluster_info);
 
 			cluster_info->uncore_root = tpmi_uncore;
 
-			if (TPMI_MINOR_VERSION(pd_info->ufs_header_ver) >= UNCORE_ELC_SUPPORTED_VERSION)
+			if ((TPMI_MINOR_VERSION(pd_info->ufs_header_ver) >=
+			     UNCORE_ELC_SUPPORTED_VERSION) &&
+			    auto_ufs_enabled)
 				cluster_info->elc_supported = true;
 
 			ret = uncore_freq_add_entry(&cluster_info->uncore_data, 0);

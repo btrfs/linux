@@ -1320,7 +1320,7 @@ static bool cmp_str_seq(const char *log, const char *exp)
 			printf("FAIL\nTestcase bug\n");
 			return false;
 		}
-		strncpy(needle, exp, len);
+		memcpy(needle, exp, len);
 		needle[len] = 0;
 		q = strstr(log, needle);
 		if (!q) {
@@ -1560,7 +1560,7 @@ static void do_test_single(struct bpf_test *test, bool unpriv,
 
 	opts.expected_attach_type = test->expected_attach_type;
 	if (expected_ret == VERBOSE_ACCEPT)
-		opts.log_level = 2;
+		opts.log_level = 2 | 4;
 	else if (verbose)
 		opts.log_level = verif_log_level | 4; /* force stats */
 	else

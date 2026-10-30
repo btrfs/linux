@@ -1,25 +1,29 @@
 // SPDX-License-Identifier: GPL-2.0
-#include <linux/init.h>
 #include <linux/async.h>
-#include <linux/export.h>
-#include <linux/fs.h>
-#include <linux/slab.h>
-#include <linux/types.h>
-#include <linux/fcntl.h>
 #include <linux/delay.h>
-#include <linux/string.h>
 #include <linux/dirent.h>
-#include <linux/syscalls.h>
-#include <linux/utime.h>
+#include <linux/export.h>
+#include <linux/fcntl.h>
 #include <linux/file.h>
+#include <linux/fs.h>
+#include <linux/fs_struct.h>
+#include <linux/hex.h>
+#include <linux/init.h>
+#include <linux/init_syscalls.h>
 #include <linux/kstrtox.h>
 #include <linux/memblock.h>
 #include <linux/mm.h>
 #include <linux/namei.h>
-#include <linux/init_syscalls.h>
-#include <linux/umh.h>
-#include <linux/security.h>
 #include <linux/overflow.h>
+#include <linux/security.h>
+#include <linux/slab.h>
+#include <linux/string.h>
+#include <linux/syscalls.h>
+#include <linux/types.h>
+#include <linux/umh.h>
+#include <linux/utime.h>
+
+#include <asm/byteorder.h>
 
 #include "do_mounts.h"
 #include "initramfs_internal.h"
@@ -102,7 +106,7 @@ static char __init *find_link(int major, int minor, int ino,
 			continue;
 		return (*p)->name;
 	}
-	q = kmalloc(sizeof(struct hash), GFP_KERNEL);
+	q = kmalloc_obj(struct hash);
 	if (!q)
 		panic_show_mem("can't allocate link hash entry");
 	q->major = major;
@@ -153,7 +157,7 @@ static void __init dir_add(const char *name, size_t nlen, time64_t mtime)
 {
 	struct dir_entry *de;
 
-	de = kmalloc(struct_size(de, name, nlen), GFP_KERNEL);
+	de = kmalloc_flex(*de, name, nlen);
 	if (!de)
 		panic_show_mem("can't allocate dir_entry buffer");
 	INIT_LIST_HEAD(&de->list);
@@ -190,29 +194,33 @@ static __initdata gid_t gid;
 static __initdata unsigned rdev;
 static __initdata u32 hdr_csum;
 
-static void __init parse_header(char *s)
+static int __init parse_header(char *s)
 {
-	unsigned long parsed[13];
-	int i;
+	__be32 header[13];
+	int ret;
 
-	for (i = 0, s += 6; i < 13; i++, s += 8)
-		parsed[i] = simple_strntoul(s, NULL, 16, 8);
+	ret = hex2bin((u8 *)header, s + 6, sizeof(header));
+	if (ret) {
+		error("damaged header");
+		return ret;
+	}
 
-	ino = parsed[0];
-	mode = parsed[1];
-	uid = parsed[2];
-	gid = parsed[3];
-	nlink = parsed[4];
-	mtime = parsed[5]; /* breaks in y2106 */
-	body_len = parsed[6];
-	major = parsed[7];
-	minor = parsed[8];
-	rdev = new_encode_dev(MKDEV(parsed[9], parsed[10]));
-	name_len = parsed[11];
-	hdr_csum = parsed[12];
+	ino = be32_to_cpu(header[0]);
+	mode = be32_to_cpu(header[1]);
+	uid = be32_to_cpu(header[2]);
+	gid = be32_to_cpu(header[3]);
+	nlink = be32_to_cpu(header[4]);
+	mtime = be32_to_cpu(header[5]); /* breaks in y2106 */
+	body_len = be32_to_cpu(header[6]);
+	major = be32_to_cpu(header[7]);
+	minor = be32_to_cpu(header[8]);
+	rdev = new_encode_dev(MKDEV(be32_to_cpu(header[9]), be32_to_cpu(header[10])));
+	name_len = be32_to_cpu(header[11]);
+	hdr_csum = be32_to_cpu(header[12]);
+	return 0;
 }
 
-/* FSM */
+/* Finite-state machine */
 
 static __initdata enum state {
 	Start,
@@ -289,7 +297,8 @@ static int __init do_header(void)
 			error("no cpio magic");
 		return 1;
 	}
-	parse_header(collected);
+	if (parse_header(collected))
+		return 1;
 	next_header = this_header + N_ALIGN(name_len) + body_len;
 	next_header = (next_header + 3) & ~3;
 	state = SkipIt;
@@ -517,7 +526,7 @@ char * __init unpack_to_rootfs(char *buf, unsigned long len)
 		char header[CPIO_HDRLEN];
 		char symlink[PATH_MAX + N_ALIGN(PATH_MAX) + 1];
 		char name[N_ALIGN(PATH_MAX)];
-	} *bufs = kmalloc(sizeof(*bufs), GFP_KERNEL);
+	} *bufs = kmalloc_obj(*bufs);
 
 	if (!bufs)
 		panic_show_mem("can't allocate buffers");
@@ -610,7 +619,7 @@ void __init reserve_initrd_mem(void)
 	phys_addr_t start;
 	unsigned long size;
 
-	/* Ignore the virtul address computed during device tree parsing */
+	/* Ignore the virtual address computed during device tree parsing */
 	initrd_start = initrd_end = 0;
 
 	if (!phys_initrd_size)
@@ -652,13 +661,6 @@ disable:
 
 void __weak __init free_initrd_mem(unsigned long start, unsigned long end)
 {
-#ifdef CONFIG_ARCH_KEEP_MEMBLOCK
-	unsigned long aligned_start = ALIGN_DOWN(start, PAGE_SIZE);
-	unsigned long aligned_end = ALIGN(end, PAGE_SIZE);
-
-	memblock_free((void *)aligned_start, aligned_end - aligned_start);
-#endif
-
 	free_reserved_area((void *)start, (void *)end, POISON_FREE_INITMEM,
 			"initrd");
 }
@@ -715,7 +717,7 @@ static void __init populate_initrd_image(char *err)
 }
 #endif /* CONFIG_BLK_DEV_RAM */
 
-static void __init do_populate_rootfs(void *unused, async_cookie_t cookie)
+static void __init unpack_initramfs(async_cookie_t cookie)
 {
 	/* Load the built in initramfs */
 	char *err = unpack_to_rootfs(__initramfs_start, __initramfs_size);
@@ -723,7 +725,7 @@ static void __init do_populate_rootfs(void *unused, async_cookie_t cookie)
 		panic_show_mem("%s", err); /* Failed to decompress INTERNAL initramfs */
 
 	if (!initrd_start || IS_ENABLED(CONFIG_INITRAMFS_FORCE))
-		goto done;
+		return;
 
 	if (IS_ENABLED(CONFIG_BLK_DEV_RAM))
 		printk(KERN_INFO "Trying to unpack rootfs image as initramfs...\n");
@@ -738,9 +740,14 @@ static void __init do_populate_rootfs(void *unused, async_cookie_t cookie)
 		printk(KERN_EMERG "Initramfs unpacking failed: %s\n", err);
 #endif
 	}
+}
 
-done:
-	security_initramfs_populated();
+static void __init do_populate_rootfs(void *unused, async_cookie_t cookie)
+{
+	scoped_with_init_fs() {
+		unpack_initramfs(cookie);
+		security_initramfs_populated();
+	}
 
 	/*
 	 * If the initrd region is overlapped with crashkernel reserved region,

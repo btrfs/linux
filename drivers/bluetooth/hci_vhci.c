@@ -337,7 +337,17 @@ static ssize_t force_devcd_write(struct file *file, const char __user *user_buf,
 	if (copy_from_user(&dump_data, user_buf, count))
 		return -EFAULT;
 
+	switch (dump_data.state) {
+	case HCI_DEVCOREDUMP_DONE:
+	case HCI_DEVCOREDUMP_ABORT:
+	case HCI_DEVCOREDUMP_TIMEOUT:
+		break;
+	default:
+		return -EINVAL;
+	}
+
 	data_size = count - offsetof(struct devcoredump_test_data, data);
+
 	skb = alloc_skb(data_size, GFP_ATOMIC);
 	if (!skb)
 		return -ENOMEM;
@@ -640,7 +650,7 @@ static int vhci_open(struct inode *inode, struct file *file)
 {
 	struct vhci_data *data;
 
-	data = kzalloc(sizeof(*data), GFP_KERNEL);
+	data = kzalloc_obj(*data);
 	if (!data)
 		return -ENOMEM;
 

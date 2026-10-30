@@ -83,6 +83,21 @@ int f2fs_update_extension_list(struct f2fs_sb_info *sbi, const char *name,
 	if (set) {
 		if (total_count == F2FS_MAX_EXTENSION)
 			return -EINVAL;
+
+		if (hot) {
+			start = 0;
+			count = cold_count;
+		} else {
+			start = cold_count;
+			count = total_count;
+		}
+		for (i = start; i < count; i++) {
+			if (!strcmp(name, extlist[i])) {
+				f2fs_warn(sbi, "extension '%s' already exists in %s list",
+					  name, hot ? "cold" : "hot");
+				return -EINVAL;
+			}
+		}
 	} else {
 		if (!hot && !cold_count)
 			return -EINVAL;
@@ -351,9 +366,10 @@ fail_drop:
 }
 
 static int f2fs_create(struct mnt_idmap *idmap, struct inode *dir,
-		       struct dentry *dentry, umode_t mode, bool excl)
+		       struct dentry *dentry, umode_t mode)
 {
 	struct f2fs_sb_info *sbi = F2FS_I_SB(dir);
+	struct f2fs_lock_context lc;
 	struct inode *inode;
 	nid_t ino = 0;
 	int err;
@@ -376,23 +392,26 @@ static int f2fs_create(struct mnt_idmap *idmap, struct inode *dir,
 	inode->i_mapping->a_ops = &f2fs_dblock_aops;
 	ino = inode->i_ino;
 
-	f2fs_lock_op(sbi);
+	f2fs_lock_op(sbi, &lc);
 	err = f2fs_add_link(dentry, inode);
 	if (err)
 		goto out;
-	f2fs_unlock_op(sbi);
+	f2fs_unlock_op(sbi, &lc);
 
 	f2fs_alloc_nid_done(sbi, ino);
 
 	d_instantiate_new(dentry, inode);
 
-	if (IS_DIRSYNC(dir))
-		f2fs_sync_fs(sbi->sb, 1);
+	if (IS_DIRSYNC(dir)) {
+		err = f2fs_sync_fs(sbi->sb, 1);
+		if (err)
+			return err;
+	}
 
 	f2fs_balance_fs(sbi, true);
 	return 0;
 out:
-	f2fs_handle_failed_inode(inode);
+	f2fs_handle_failed_inode(inode, &lc, true);
 	return err;
 }
 
@@ -401,12 +420,16 @@ static int f2fs_link(struct dentry *old_dentry, struct inode *dir,
 {
 	struct inode *inode = d_inode(old_dentry);
 	struct f2fs_sb_info *sbi = F2FS_I_SB(dir);
+	struct f2fs_lock_context lc;
 	int err;
 
 	if (unlikely(f2fs_cp_error(sbi)))
 		return -EIO;
 	if (!f2fs_is_checkpoint_ready(sbi))
 		return -ENOSPC;
+
+	if (IS_DEVICE_ALIASING(inode))
+		return -EPERM;
 
 	err = fscrypt_prepare_link(old_dentry, dir, dentry);
 	if (err)
@@ -427,21 +450,24 @@ static int f2fs_link(struct dentry *old_dentry, struct inode *dir,
 	ihold(inode);
 
 	set_inode_flag(inode, FI_INC_LINK);
-	f2fs_lock_op(sbi);
+	f2fs_lock_op(sbi, &lc);
 	err = f2fs_add_link(dentry, inode);
 	if (err)
 		goto out;
-	f2fs_unlock_op(sbi);
+	f2fs_unlock_op(sbi, &lc);
 
 	d_instantiate(dentry, inode);
 
-	if (IS_DIRSYNC(dir))
-		f2fs_sync_fs(sbi->sb, 1);
+	if (IS_DIRSYNC(dir)) {
+		err = f2fs_sync_fs(sbi->sb, 1);
+		if (err)
+			return err;
+	}
 	return 0;
 out:
 	clear_inode_flag(inode, FI_INC_LINK);
 	iput(inode);
-	f2fs_unlock_op(sbi);
+	f2fs_unlock_op(sbi, &lc);
 	return err;
 }
 
@@ -503,7 +529,7 @@ static struct dentry *f2fs_lookup(struct inode *dir, struct dentry *dentry,
 	}
 
 	if (inode->i_nlink == 0) {
-		f2fs_warn(F2FS_I_SB(inode), "%s: inode (ino=%lx) has zero i_nlink",
+		f2fs_warn(F2FS_I_SB(inode), "%s: inode (ino=%llx) has zero i_nlink",
 			  __func__, inode->i_ino);
 		err = -EFSCORRUPTED;
 		set_sbi_flag(F2FS_I_SB(inode), SBI_NEED_FSCK);
@@ -513,7 +539,7 @@ static struct dentry *f2fs_lookup(struct inode *dir, struct dentry *dentry,
 	if (IS_ENCRYPTED(dir) &&
 	    (S_ISDIR(inode->i_mode) || S_ISLNK(inode->i_mode)) &&
 	    !fscrypt_has_permitted_context(dir, inode)) {
-		f2fs_warn(F2FS_I_SB(inode), "Inconsistent encryption contexts: %lu/%lu",
+		f2fs_warn(F2FS_I_SB(inode), "Inconsistent encryption contexts: %llu/%llu",
 			  dir->i_ino, inode->i_ino);
 		err = -EPERM;
 		goto out_iput;
@@ -540,55 +566,70 @@ out:
 	return ERR_PTR(err);
 }
 
-static int f2fs_unlink(struct inode *dir, struct dentry *dentry)
+static int __do_unlink(struct inode *dir, struct inode *inode,
+			const struct qstr *name)
 {
 	struct f2fs_sb_info *sbi = F2FS_I_SB(dir);
-	struct inode *inode = d_inode(dentry);
 	struct f2fs_dir_entry *de;
+	struct f2fs_lock_context lc;
 	struct folio *folio;
 	int err;
 
-	trace_f2fs_unlink_enter(dir, dentry);
+	if (IS_DEVICE_ALIASING(inode))
+		return -EPERM;
 
-	if (unlikely(f2fs_cp_error(sbi))) {
-		err = -EIO;
-		goto fail;
-	}
+	if (unlikely(f2fs_cp_error(sbi)))
+		return -EIO;
 
 	err = f2fs_dquot_initialize(dir);
 	if (err)
-		goto fail;
+		return err;
 	err = f2fs_dquot_initialize(inode);
 	if (err)
-		goto fail;
+		return err;
 
-	de = f2fs_find_entry(dir, &dentry->d_name, &folio);
-	if (!de) {
-		if (IS_ERR(folio))
-			err = PTR_ERR(folio);
-		goto fail;
-	}
+	de = f2fs_find_entry(dir, name, &folio);
+	if (!de)
+		return IS_ERR(folio) ? PTR_ERR(folio) : 0;
 
 	if (unlikely(inode->i_nlink == 0)) {
-		f2fs_warn(F2FS_I_SB(inode), "%s: inode (ino=%lx) has zero i_nlink",
+		f2fs_warn(sbi, "%s: inode (ino=%llx) has zero i_nlink",
 			  __func__, inode->i_ino);
-		err = -EFSCORRUPTED;
-		set_sbi_flag(F2FS_I_SB(inode), SBI_NEED_FSCK);
-		f2fs_folio_put(folio, false);
-		goto fail;
+		goto corrupted;
+	} else if (S_ISDIR(inode->i_mode) && unlikely(inode->i_nlink == 1)) {
+		f2fs_warn(sbi, "%s: directory inode (ino=%llx) has a single i_nlink",
+			  __func__, inode->i_ino);
+		goto corrupted;
 	}
 
 	f2fs_balance_fs(sbi, true);
 
-	f2fs_lock_op(sbi);
+	f2fs_lock_op(sbi, &lc);
 	err = f2fs_acquire_orphan_inode(sbi);
 	if (err) {
-		f2fs_unlock_op(sbi);
-		f2fs_folio_put(folio, false);
-		goto fail;
+		f2fs_unlock_op(sbi, &lc);
+		goto err_out;
 	}
 	f2fs_delete_entry(de, folio, dir, inode);
-	f2fs_unlock_op(sbi);
+	f2fs_unlock_op(sbi, &lc);
+	return 0;
+
+corrupted:
+	err = -EFSCORRUPTED;
+	set_sbi_flag(sbi, SBI_NEED_FSCK);
+err_out:
+	f2fs_folio_put(folio, false);
+	return err;
+}
+
+static int f2fs_unlink(struct inode *dir, struct dentry *dentry)
+{
+	int err;
+
+	trace_f2fs_unlink_enter(dir, dentry);
+	err = __do_unlink(dir, d_inode(dentry), &dentry->d_name);
+	if (err)
+		goto out;
 
 	/* VFS negative dentries are incompatible with Encoding and
 	 * Case-insensitiveness. Eventually we'll want avoid
@@ -600,9 +641,9 @@ static int f2fs_unlink(struct inode *dir, struct dentry *dentry)
 		d_invalidate(dentry);
 
 	if (IS_DIRSYNC(dir))
-		f2fs_sync_fs(sbi->sb, 1);
-fail:
-	trace_f2fs_unlink_exit(inode, err);
+		err = f2fs_sync_fs(F2FS_I_SB(dir)->sb, 1);
+out:
+	trace_f2fs_unlink_exit(d_inode(dentry), err);
 	return err;
 }
 
@@ -625,9 +666,12 @@ static int f2fs_symlink(struct mnt_idmap *idmap, struct inode *dir,
 			struct dentry *dentry, const char *symname)
 {
 	struct f2fs_sb_info *sbi = F2FS_I_SB(dir);
+	struct f2fs_lock_context lc;
 	struct inode *inode;
 	size_t len = strlen(symname);
 	struct fscrypt_str disk_link;
+	bool orphan_free = true;
+	int ret = -EAGAIN;
 	int err;
 
 	if (unlikely(f2fs_cp_error(sbi)))
@@ -655,20 +699,22 @@ static int f2fs_symlink(struct mnt_idmap *idmap, struct inode *dir,
 	inode_nohighmem(inode);
 	inode->i_mapping->a_ops = &f2fs_dblock_aops;
 
-	f2fs_lock_op(sbi);
+	f2fs_lock_op(sbi, &lc);
 	err = f2fs_add_link(dentry, inode);
 	if (err)
-		goto out_f2fs_handle_failed_inode;
-	f2fs_unlock_op(sbi);
+		goto free_inode;
+	f2fs_unlock_op(sbi, &lc);
 	f2fs_alloc_nid_done(sbi, inode->i_ino);
 
+	/* Write the symlink path to the new inode. */
 	err = fscrypt_encrypt_symlink(inode, symname, len, &disk_link);
 	if (err)
-		goto err_out;
+		goto unlink_free_inode;
 
 	err = page_symlink(inode, disk_link.name, disk_link.len);
+	if (err)
+		goto unlink_free_inode;
 
-err_out:
 	d_instantiate_new(dentry, inode);
 
 	/*
@@ -680,31 +726,36 @@ err_out:
 	 * If the symlink path is stored into inline_data, there is no
 	 * performance regression.
 	 */
-	if (!err) {
-		filemap_write_and_wait_range(inode->i_mapping, 0,
-							disk_link.len - 1);
-
-		if (IS_DIRSYNC(dir))
-			f2fs_sync_fs(sbi->sb, 1);
-	} else {
-		f2fs_unlink(dir, dentry);
-	}
+	ret = filemap_write_and_wait_range(inode->i_mapping, 0,
+					   disk_link.len - 1);
+	if (!ret && IS_DIRSYNC(dir))
+		err = f2fs_sync_fs(sbi->sb, 1);
 
 	f2fs_balance_fs(sbi, true);
-	goto out_free_encrypted_link;
-
-out_f2fs_handle_failed_inode:
-	f2fs_handle_failed_inode(inode);
-out_free_encrypted_link:
+out:
 	if (disk_link.name != (unsigned char *)symname)
 		kfree(disk_link.name);
 	return err;
+
+unlink_free_inode:
+	ret = __do_unlink(dir, inode, &dentry->d_name);
+	if (ret) {
+		/* Give up and leave a broken symlink. */
+		d_instantiate_new(dentry, inode);
+		goto out;
+	}
+	orphan_free = false;
+	f2fs_lock_op(sbi, &lc);
+free_inode:
+	f2fs_handle_failed_inode(inode, &lc, orphan_free);
+	goto out;
 }
 
 static struct dentry *f2fs_mkdir(struct mnt_idmap *idmap, struct inode *dir,
 				 struct dentry *dentry, umode_t mode)
 {
 	struct f2fs_sb_info *sbi = F2FS_I_SB(dir);
+	struct f2fs_lock_context lc;
 	struct inode *inode;
 	int err;
 
@@ -715,7 +766,7 @@ static struct dentry *f2fs_mkdir(struct mnt_idmap *idmap, struct inode *dir,
 	if (err)
 		return ERR_PTR(err);
 
-	inode = f2fs_new_inode(idmap, dir, S_IFDIR | mode, NULL);
+	inode = f2fs_new_inode(idmap, dir, mode, NULL);
 	if (IS_ERR(inode))
 		return ERR_CAST(inode);
 
@@ -725,25 +776,28 @@ static struct dentry *f2fs_mkdir(struct mnt_idmap *idmap, struct inode *dir,
 	mapping_set_gfp_mask(inode->i_mapping, GFP_NOFS);
 
 	set_inode_flag(inode, FI_INC_LINK);
-	f2fs_lock_op(sbi);
+	f2fs_lock_op(sbi, &lc);
 	err = f2fs_add_link(dentry, inode);
 	if (err)
 		goto out_fail;
-	f2fs_unlock_op(sbi);
+	f2fs_unlock_op(sbi, &lc);
 
 	f2fs_alloc_nid_done(sbi, inode->i_ino);
 
 	d_instantiate_new(dentry, inode);
 
-	if (IS_DIRSYNC(dir))
-		f2fs_sync_fs(sbi->sb, 1);
+	if (IS_DIRSYNC(dir)) {
+		err = f2fs_sync_fs(sbi->sb, 1);
+		if (err)
+			return ERR_PTR(err);
+	}
 
 	f2fs_balance_fs(sbi, true);
 	return NULL;
 
 out_fail:
 	clear_inode_flag(inode, FI_INC_LINK);
-	f2fs_handle_failed_inode(inode);
+	f2fs_handle_failed_inode(inode, &lc, true);
 	return ERR_PTR(err);
 }
 
@@ -760,6 +814,7 @@ static int f2fs_mknod(struct mnt_idmap *idmap, struct inode *dir,
 		      struct dentry *dentry, umode_t mode, dev_t rdev)
 {
 	struct f2fs_sb_info *sbi = F2FS_I_SB(dir);
+	struct f2fs_lock_context lc;
 	struct inode *inode;
 	int err = 0;
 
@@ -779,23 +834,26 @@ static int f2fs_mknod(struct mnt_idmap *idmap, struct inode *dir,
 	init_special_inode(inode, inode->i_mode, rdev);
 	inode->i_op = &f2fs_special_inode_operations;
 
-	f2fs_lock_op(sbi);
+	f2fs_lock_op(sbi, &lc);
 	err = f2fs_add_link(dentry, inode);
 	if (err)
 		goto out;
-	f2fs_unlock_op(sbi);
+	f2fs_unlock_op(sbi, &lc);
 
 	f2fs_alloc_nid_done(sbi, inode->i_ino);
 
 	d_instantiate_new(dentry, inode);
 
-	if (IS_DIRSYNC(dir))
-		f2fs_sync_fs(sbi->sb, 1);
+	if (IS_DIRSYNC(dir)) {
+		err = f2fs_sync_fs(sbi->sb, 1);
+		if (err)
+			return err;
+	}
 
 	f2fs_balance_fs(sbi, true);
 	return 0;
 out:
-	f2fs_handle_failed_inode(inode);
+	f2fs_handle_failed_inode(inode, &lc, true);
 	return err;
 }
 
@@ -804,6 +862,7 @@ static int __f2fs_tmpfile(struct mnt_idmap *idmap, struct inode *dir,
 			  struct inode **new_inode, struct f2fs_filename *fname)
 {
 	struct f2fs_sb_info *sbi = F2FS_I_SB(dir);
+	struct f2fs_lock_context lc;
 	struct inode *inode;
 	int err;
 
@@ -824,7 +883,7 @@ static int __f2fs_tmpfile(struct mnt_idmap *idmap, struct inode *dir,
 		inode->i_mapping->a_ops = &f2fs_dblock_aops;
 	}
 
-	f2fs_lock_op(sbi);
+	f2fs_lock_op(sbi, &lc);
 	err = f2fs_acquire_orphan_inode(sbi);
 	if (err)
 		goto out;
@@ -844,7 +903,7 @@ static int __f2fs_tmpfile(struct mnt_idmap *idmap, struct inode *dir,
 		f2fs_i_links_write(inode, false);
 
 		spin_lock(&inode->i_lock);
-		inode->i_state |= I_LINKABLE;
+		inode_state_set(inode, I_LINKABLE);
 		spin_unlock(&inode->i_lock);
 	} else {
 		if (file)
@@ -853,7 +912,7 @@ static int __f2fs_tmpfile(struct mnt_idmap *idmap, struct inode *dir,
 			f2fs_i_links_write(inode, false);
 	}
 	/* link_count was changed by d_tmpfile as well. */
-	f2fs_unlock_op(sbi);
+	f2fs_unlock_op(sbi, &lc);
 	unlock_new_inode(inode);
 
 	if (new_inode)
@@ -865,7 +924,7 @@ static int __f2fs_tmpfile(struct mnt_idmap *idmap, struct inode *dir,
 release_out:
 	f2fs_release_orphan_inode(sbi);
 out:
-	f2fs_handle_failed_inode(inode);
+	f2fs_handle_failed_inode(inode, &lc, true);
 	return err;
 }
 
@@ -913,8 +972,12 @@ static int f2fs_rename(struct mnt_idmap *idmap, struct inode *old_dir,
 	struct f2fs_dir_entry *old_dir_entry = NULL;
 	struct f2fs_dir_entry *old_entry;
 	struct f2fs_dir_entry *new_entry;
+	struct f2fs_lock_context lc;
 	bool old_is_dir = S_ISDIR(old_inode->i_mode);
 	int err;
+
+	if (IS_DEVICE_ALIASING(old_inode))
+		return -EPERM;
 
 	if (unlikely(f2fs_cp_error(sbi)))
 		return -EIO;
@@ -949,6 +1012,7 @@ static int f2fs_rename(struct mnt_idmap *idmap, struct inode *old_dir,
 			return err;
 
 		err = f2fs_create_whiteout(idmap, old_dir, &whiteout, &fname);
+		f2fs_free_filename(&fname);
 		if (err)
 			return err;
 	}
@@ -985,6 +1049,10 @@ static int f2fs_rename(struct mnt_idmap *idmap, struct inode *old_dir,
 	}
 
 	if (new_inode) {
+		if (IS_DEVICE_ALIASING(new_inode)) {
+			err = -EPERM;
+			goto out_dir;
+		}
 
 		err = -ENOTEMPTY;
 		if (old_is_dir && !f2fs_empty_dir(new_inode))
@@ -1001,7 +1069,7 @@ static int f2fs_rename(struct mnt_idmap *idmap, struct inode *old_dir,
 
 		f2fs_balance_fs(sbi, true);
 
-		f2fs_lock_op(sbi);
+		f2fs_lock_op(sbi, &lc);
 
 		err = f2fs_acquire_orphan_inode(sbi);
 		if (err)
@@ -1024,11 +1092,11 @@ static int f2fs_rename(struct mnt_idmap *idmap, struct inode *old_dir,
 	} else {
 		f2fs_balance_fs(sbi, true);
 
-		f2fs_lock_op(sbi);
+		f2fs_lock_op(sbi, &lc);
 
 		err = f2fs_add_link(new_dentry, old_inode);
 		if (err) {
-			f2fs_unlock_op(sbi);
+			f2fs_unlock_op(sbi, &lc);
 			goto out_dir;
 		}
 
@@ -1045,7 +1113,7 @@ static int f2fs_rename(struct mnt_idmap *idmap, struct inode *old_dir,
 	f2fs_up_write(&F2FS_I(old_inode)->i_sem);
 
 	inode_set_ctime_current(old_inode);
-	f2fs_mark_inode_dirty_sync(old_inode, false);
+	f2fs_mark_inode_dirty_sync(old_inode, true);
 
 	f2fs_delete_entry(old_entry, old_folio, old_dir, NULL);
 	old_folio = NULL;
@@ -1053,11 +1121,13 @@ static int f2fs_rename(struct mnt_idmap *idmap, struct inode *old_dir,
 	if (whiteout) {
 		set_inode_flag(whiteout, FI_INC_LINK);
 		err = f2fs_add_link(old_dentry, whiteout);
-		if (err)
+		if (err) {
+			d_invalidate(old_dentry);
+			d_invalidate(new_dentry);
 			goto put_out_dir;
-
+		}
 		spin_lock(&whiteout->i_lock);
-		whiteout->i_state &= ~I_LINKABLE;
+		inode_state_clear(whiteout, I_LINKABLE);
 		spin_unlock(&whiteout->i_lock);
 
 		iput(whiteout);
@@ -1075,16 +1145,19 @@ static int f2fs_rename(struct mnt_idmap *idmap, struct inode *old_dir,
 							TRANS_DIR_INO);
 	}
 
-	f2fs_unlock_op(sbi);
+	f2fs_unlock_op(sbi, &lc);
 
-	if (IS_DIRSYNC(old_dir) || IS_DIRSYNC(new_dir))
-		f2fs_sync_fs(sbi->sb, 1);
+	if (IS_DIRSYNC(old_dir) || IS_DIRSYNC(new_dir)) {
+		err = f2fs_sync_fs(sbi->sb, 1);
+		if (err)
+			return err;
+	}
 
 	f2fs_update_time(sbi, REQ_TIME);
 	return 0;
 
 put_out_dir:
-	f2fs_unlock_op(sbi);
+	f2fs_unlock_op(sbi, &lc);
 	f2fs_folio_put(new_folio, false);
 out_dir:
 	if (old_dir_entry)
@@ -1106,8 +1179,12 @@ static int f2fs_cross_rename(struct inode *old_dir, struct dentry *old_dentry,
 	struct folio *old_folio, *new_folio;
 	struct f2fs_dir_entry *old_dir_entry = NULL, *new_dir_entry = NULL;
 	struct f2fs_dir_entry *old_entry, *new_entry;
+	struct f2fs_lock_context lc;
 	int old_nlink = 0, new_nlink = 0;
 	int err;
+
+	if (IS_DEVICE_ALIASING(old_inode) || IS_DEVICE_ALIASING(new_inode))
+		return -EPERM;
 
 	if (unlikely(f2fs_cp_error(sbi)))
 		return -EIO;
@@ -1185,7 +1262,7 @@ static int f2fs_cross_rename(struct inode *old_dir, struct dentry *old_dentry,
 
 	f2fs_balance_fs(sbi, true);
 
-	f2fs_lock_op(sbi);
+	f2fs_lock_op(sbi, &lc);
 
 	/* update ".." directory entry info of old dentry */
 	if (old_dir_entry)
@@ -1212,7 +1289,7 @@ static int f2fs_cross_rename(struct inode *old_dir, struct dentry *old_dentry,
 		f2fs_i_links_write(old_dir, old_nlink > 0);
 		f2fs_up_write(&F2FS_I(old_dir)->i_sem);
 	}
-	f2fs_mark_inode_dirty_sync(old_dir, false);
+	f2fs_mark_inode_dirty_sync(old_dir, true);
 
 	/* update directory entry info of new dir inode */
 	f2fs_set_link(new_dir, new_entry, new_folio, old_inode);
@@ -1231,27 +1308,30 @@ static int f2fs_cross_rename(struct inode *old_dir, struct dentry *old_dentry,
 		f2fs_i_links_write(new_dir, new_nlink > 0);
 		f2fs_up_write(&F2FS_I(new_dir)->i_sem);
 	}
-	f2fs_mark_inode_dirty_sync(new_dir, false);
+	f2fs_mark_inode_dirty_sync(new_dir, true);
 
 	if (F2FS_OPTION(sbi).fsync_mode == FSYNC_MODE_STRICT) {
 		f2fs_add_ino_entry(sbi, old_dir->i_ino, TRANS_DIR_INO);
 		f2fs_add_ino_entry(sbi, new_dir->i_ino, TRANS_DIR_INO);
 	}
 
-	f2fs_unlock_op(sbi);
+	f2fs_unlock_op(sbi, &lc);
 
-	if (IS_DIRSYNC(old_dir) || IS_DIRSYNC(new_dir))
-		f2fs_sync_fs(sbi->sb, 1);
+	if (IS_DIRSYNC(old_dir) || IS_DIRSYNC(new_dir)) {
+		err = f2fs_sync_fs(sbi->sb, 1);
+		if (err)
+			return err;
+	}
 
 	f2fs_update_time(sbi, REQ_TIME);
 	return 0;
 out_new_dir:
 	if (new_dir_entry) {
-		f2fs_folio_put(new_dir_folio, 0);
+		f2fs_folio_put(new_dir_folio, false);
 	}
 out_old_dir:
 	if (old_dir_entry) {
-		f2fs_folio_put(old_dir_folio, 0);
+		f2fs_folio_put(old_dir_folio, false);
 	}
 out_new:
 	f2fs_folio_put(new_folio, false);

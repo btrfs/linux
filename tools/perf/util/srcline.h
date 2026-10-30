@@ -47,6 +47,7 @@ struct inline_node *dso__parse_addr_inlines(struct dso *dso, u64 addr,
 					    struct symbol *sym);
 /* free resources associated to the inline node list */
 void inline_node__delete(struct inline_node *node);
+void inline_node__clear_frames(struct inline_node *node);
 
 /* insert the inline node list into the DSO, which will take ownership */
 void inlines__tree_insert(struct rb_root_cached *tree,
@@ -57,9 +58,12 @@ struct inline_node *inlines__tree_find(struct rb_root_cached *tree, u64 addr);
 void inlines__tree_delete(struct rb_root_cached *tree);
 
 int inline_list__append(struct symbol *symbol, char *srcline, struct inline_node *node);
+int inline_list__append_tail(struct symbol *symbol, char *srcline, struct inline_node *node);
 char *srcline_from_fileline(const char *file, unsigned int line);
 struct symbol *new_inline_sym(struct dso *dso,
 			      struct symbol *base_sym,
 			      const char *funcname);
+
+int addr2line_configure(const char *var, const char *value, void *cb);
 
 #endif /* PERF_SRCLINE_H */

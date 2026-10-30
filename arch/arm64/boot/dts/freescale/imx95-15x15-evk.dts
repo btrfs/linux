@@ -61,6 +61,7 @@
 
 	fan0: pwm-fan {
 		compatible = "pwm-fan";
+		fan-supply = <&reg_vcc_12v>;
 		#cooling-cells = <2>;
 		cooling-levels = <64 128 192 255>;
 		pwms = <&tpm6 0 4000000 PWM_POLARITY_INVERTED>;
@@ -106,17 +107,15 @@
 		gpio = <&pcal6524 0 GPIO_ACTIVE_LOW>;
 	};
 
-	reg_can2_stby: regulator-can2-stby {
-		compatible = "regulator-fixed";
-		regulator-max-microvolt = <3300000>;
-		regulator-min-microvolt = <3300000>;
-		regulator-name = "can2-stby";
-		gpio = <&pcal6524 14 GPIO_ACTIVE_LOW>;
+	flexcan2_phy: can-phy {
+		compatible = "nxp,tja1051";
+		#phy-cells = <0>;
+		max-bitrate = <5000000>;
+		silent-gpios = <&pcal6524 14 GPIO_ACTIVE_HIGH>;
 	};
 
 	reg_m2_pwr: regulator-m2-pwr {
 		compatible = "regulator-fixed";
-		regulator-always-on;
 		regulator-max-microvolt = <3300000>;
 		regulator-min-microvolt = <3300000>;
 		regulator-name = "M.2-power";
@@ -178,7 +177,7 @@
 
 		linux_cma: linux,cma {
 			compatible = "shared-dma-pool";
-			alloc-ranges = <0 0x80000000 0 0x7F000000>;
+			alloc-ranges = <0 0x80000000 0 0x7f000000>;
 			reusable;
 			size = <0 0x3c000000>;
 			linux,cma-default;
@@ -215,7 +214,7 @@
 			no-map;
 		};
 
-		vpu_boot: vpu_boot@a0000000 {
+		vpu_boot: vpu-boot@a0000000 {
 			reg = <0 0xa0000000 0 0x100000>;
 			no-map;
 		};
@@ -317,7 +316,7 @@
 &flexcan2 {
 	pinctrl-0 = <&pinctrl_flexcan2>;
 	pinctrl-names = "default";
-	xceiver-supply = <&reg_can2_stby>;
+	phys = <&flexcan2_phy>;
 	status = "okay";
 };
 
@@ -554,9 +553,10 @@
 &pcie0 {
 	pinctrl-0 = <&pinctrl_pcie0>;
 	pinctrl-names = "default";
+	/* This property is deprecated, use reset-gpios from the Root Port node. */
 	reset-gpio = <&gpio5 13 GPIO_ACTIVE_LOW>;
-	vpcie-supply = <&reg_m2_pwr>;
-	status = "okay";
+	supports-clkreq;
+	status = "disabled";
 };
 
 &pcie0_ep {
@@ -564,6 +564,12 @@
 	pinctrl-names = "default";
 	vpcie-supply = <&reg_m2_pwr>;
 	status = "disabled";
+};
+
+&pcie0_port0 {
+	reset-gpios = <&gpio5 13 GPIO_ACTIVE_LOW>;
+	vpcie3v3-supply = <&reg_m2_pwr>;
+	vpcie3v3aux-supply = <&reg_m2_pwr>;
 };
 
 &sai1 {
@@ -1136,7 +1142,7 @@
 	status = "okay";
 };
 
-&usdhc3 {
+m2_usdhc: &usdhc3 {
 	bus-width = <4>;
 	keep-power-in-suspend;
 	mmc-pwrseq = <&usdhc3_pwrseq>;

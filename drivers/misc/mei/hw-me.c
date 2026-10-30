@@ -4,13 +4,13 @@
  * Intel Management Engine Interface (Intel MEI) Linux driver
  */
 
-#include <linux/pci.h>
-
-#include <linux/kthread.h>
+#include <linux/bitfield.h>
+#include <linux/delay.h>
 #include <linux/interrupt.h>
+#include <linux/kthread.h>
+#include <linux/pci.h>
 #include <linux/pm_runtime.h>
 #include <linux/sizes.h>
-#include <linux/delay.h>
 
 #include "mei_dev.h"
 #include "hbm.h"
@@ -215,16 +215,22 @@ static int mei_me_fw_status(struct mei_device *dev,
 
 	fw_status->count = fw_src->count;
 	for (i = 0; i < fw_src->count && i < MEI_FW_STATUS_MAX; i++) {
-		ret = hw->read_fws(dev, fw_src->status[i],
+		ret = hw->read_fws(dev, fw_src->status[i], "PCI_CFG_HFS_X",
 				   &fw_status->status[i]);
-		trace_mei_pci_cfg_read(&dev->dev, "PCI_CFG_HFS_X",
-				       fw_src->status[i],
-				       fw_status->status[i]);
 		if (ret)
 			return ret;
 	}
 
 	return 0;
+}
+
+static bool mei_csc_pg_blocked(struct mei_device *dev)
+{
+	struct mei_me_hw *hw = to_me_hw(dev);
+	u32 reg = 0;
+
+	hw->read_fws(dev, PCI_CFG_HFS_2, "PCI_CFG_HFS_2", &reg);
+	return (reg & PCI_CFG_HFS_2_D3_BLOCK) == PCI_CFG_HFS_2_D3_BLOCK;
 }
 
 /**
@@ -250,8 +256,7 @@ static int mei_me_hw_config(struct mei_device *dev)
 	hw->hbuf_depth = (hcsr & H_CBD) >> 24;
 
 	reg = 0;
-	hw->read_fws(dev, PCI_CFG_HFS_1, &reg);
-	trace_mei_pci_cfg_read(&dev->dev, "PCI_CFG_HFS_1", PCI_CFG_HFS_1, reg);
+	hw->read_fws(dev, PCI_CFG_HFS_1, "PCI_CFG_HFS_1", &reg);
 	hw->d0i3_supported =
 		((reg & PCI_CFG_HFS_1_D0I3_MSK) == PCI_CFG_HFS_1_D0I3_MSK);
 
@@ -446,8 +451,7 @@ static void mei_gsc_pxp_check(struct mei_device *dev)
 	if (!kind_is_gsc(dev) && !kind_is_gscfi(dev))
 		return;
 
-	hw->read_fws(dev, PCI_CFG_HFS_5, &fwsts5);
-	trace_mei_pci_cfg_read(&dev->dev, "PCI_CFG_HFS_5", PCI_CFG_HFS_5, fwsts5);
+	hw->read_fws(dev, PCI_CFG_HFS_5, "PCI_CFG_HFS_5", &fwsts5);
 
 	if ((fwsts5 & GSC_CFG_HFS_5_BOOT_TYPE_MSK) == GSC_CFG_HFS_5_BOOT_TYPE_PXP) {
 		if (dev->gsc_reset_to_pxp == MEI_DEV_RESET_TO_PXP_DEFAULT)
@@ -1211,6 +1215,7 @@ static int mei_me_hw_reset(struct mei_device *dev, bool intr_enable)
 				return ret;
 		} else {
 			hw->pg_state = MEI_PG_OFF;
+			dev->pg_blocked = mei_csc_pg_blocked(dev);
 		}
 	}
 
@@ -1299,6 +1304,7 @@ irqreturn_t mei_me_irq_thread_handler(int irq, void *dev_id)
 {
 	struct mei_device *dev = (struct mei_device *) dev_id;
 	struct list_head cmpl_list;
+	bool pg_blocked;
 	s32 slots;
 	u32 hcsr;
 	int rets = 0;
@@ -1337,25 +1343,27 @@ irqreturn_t mei_me_irq_thread_handler(int irq, void *dev_id)
 	/*  check if we need to start the dev */
 	if (!mei_host_is_ready(dev)) {
 		if (mei_hw_is_ready(dev)) {
-			/* synchronized by dev mutex */
-			if (waitqueue_active(&dev->wait_hw_ready)) {
-				dev_dbg(&dev->dev, "we need to start the dev.\n");
-				dev->recvd_hw_ready = true;
-				wake_up(&dev->wait_hw_ready);
-			} else if (dev->dev_state != MEI_DEV_UNINITIALIZED &&
-				   dev->dev_state != MEI_DEV_POWERING_DOWN &&
-				   dev->dev_state != MEI_DEV_POWER_DOWN) {
+			if (dev->dev_state == MEI_DEV_ENABLED) {
 				dev_dbg(&dev->dev, "Force link reset.\n");
 				schedule_work(&dev->reset_work);
 			} else {
-				dev_dbg(&dev->dev, "Ignore this interrupt in state = %d\n",
-					dev->dev_state);
+				dev_dbg(&dev->dev, "we need to start the dev.\n");
+				dev->recvd_hw_ready = true;
+				wake_up(&dev->wait_hw_ready);
 			}
 		} else {
 			dev_dbg(&dev->dev, "Spurious Interrupt\n");
 		}
 		goto end;
 	}
+
+	pg_blocked = mei_csc_pg_blocked(dev);
+	if (pg_blocked && !dev->pg_blocked) /* PG block requested */
+		pm_request_resume(&dev->dev);
+	else if (!pg_blocked && dev->pg_blocked) /* PG block lifted */
+		pm_request_autosuspend(&dev->dev);
+	dev->pg_blocked = pg_blocked;
+
 	/* check slots available for reading */
 	slots = mei_count_full_read_slots(dev);
 	while (slots > 0) {
@@ -1510,10 +1518,11 @@ static bool mei_me_fw_type_nm(const struct pci_dev *pdev)
 {
 	u32 reg;
 	unsigned int devfn;
+	int ret;
 
 	devfn = PCI_DEVFN(PCI_SLOT(pdev->devfn), 0);
-	pci_bus_read_config_dword(pdev->bus, devfn, PCI_CFG_HFS_2, &reg);
-	trace_mei_pci_cfg_read(&pdev->dev, "PCI_CFG_HFS_2", PCI_CFG_HFS_2, reg);
+	ret = pci_bus_read_config_dword(pdev->bus, devfn, PCI_CFG_HFS_2, &reg);
+	trace_mei_pci_cfg_read(&pdev->dev, "PCI_CFG_HFS_2", PCI_CFG_HFS_2, reg, ret);
 	/* make sure that bit 9 (NM) is up and bit 10 (DM) is down */
 	return (reg & 0x600) == 0x200;
 }
@@ -1536,10 +1545,11 @@ static bool mei_me_fw_type_sps_4(const struct pci_dev *pdev)
 {
 	u32 reg;
 	unsigned int devfn;
+	int ret;
 
 	devfn = PCI_DEVFN(PCI_SLOT(pdev->devfn), 0);
-	pci_bus_read_config_dword(pdev->bus, devfn, PCI_CFG_HFS_1, &reg);
-	trace_mei_pci_cfg_read(&pdev->dev, "PCI_CFG_HFS_1", PCI_CFG_HFS_1, reg);
+	ret = pci_bus_read_config_dword(pdev->bus, devfn, PCI_CFG_HFS_1, &reg);
+	trace_mei_pci_cfg_read(&pdev->dev, "PCI_CFG_HFS_1", PCI_CFG_HFS_1, reg, ret);
 	return (reg & PCI_CFG_HFS_1_OPMODE_MSK) == PCI_CFG_HFS_1_OPMODE_SPS;
 }
 
@@ -1561,10 +1571,11 @@ static bool mei_me_fw_type_sps_ign(const struct pci_dev *pdev)
 	u32 reg;
 	u32 fw_type;
 	unsigned int devfn;
+	int ret;
 
 	devfn = PCI_DEVFN(PCI_SLOT(pdev->devfn), 0);
-	pci_bus_read_config_dword(pdev->bus, devfn, PCI_CFG_HFS_3, &reg);
-	trace_mei_pci_cfg_read(&pdev->dev, "PCI_CFG_HFS_3", PCI_CFG_HFS_3, reg);
+	ret = pci_bus_read_config_dword(pdev->bus, devfn, PCI_CFG_HFS_3, &reg);
+	trace_mei_pci_cfg_read(&pdev->dev, "PCI_CFG_HFS_3", PCI_CFG_HFS_3, reg, ret);
 	fw_type = (reg & PCI_CFG_HFS_3_FW_SKU_MSK);
 
 	dev_dbg(&pdev->dev, "fw type is %d\n", fw_type);
@@ -1573,17 +1584,57 @@ static bool mei_me_fw_type_sps_ign(const struct pci_dev *pdev)
 	       fw_type == PCI_CFG_HFS_3_FW_SKU_SPS;
 }
 
-#define MEI_CFG_KIND_ITOUCH                     \
-	.kind = "itouch"
-
-#define MEI_CFG_TYPE_GSC                        \
-	.kind = "gsc"
-
-#define MEI_CFG_TYPE_GSCFI                      \
-	.kind = "gscfi"
-
 #define MEI_CFG_FW_SPS_IGN                      \
 	.quirk_probe = mei_me_fw_type_sps_ign
+
+static enum mei_dev_kind mei_cfg_kind_mei(const struct device *parent)
+{
+	return MEI_DEV_KIND_MEI;
+}
+
+#define MEI_CFG_KIND_MEI                     \
+	.get_kind = mei_cfg_kind_mei
+
+static enum mei_dev_kind mei_cfg_kind_itouch(const struct device *parent)
+{
+	return MEI_DEV_KIND_ITOUCH;
+}
+
+#define MEI_CFG_KIND_ITOUCH                  \
+	.get_kind = mei_cfg_kind_itouch
+
+static enum mei_dev_kind mei_cfg_kind_gsc(const struct device *parent)
+{
+	return MEI_DEV_KIND_GSC;
+}
+
+#define MEI_CFG_KIND_GSC                     \
+	.get_kind = mei_cfg_kind_gsc
+
+static enum mei_dev_kind mei_cfg_kind_gscfi(const struct device *parent)
+{
+	return MEI_DEV_KIND_GSCFI;
+}
+
+#define MEI_CFG_KIND_GSCFI                   \
+	.get_kind = mei_cfg_kind_gscfi
+
+static enum mei_dev_kind mei_cfg_kind_ioe(const struct device *parent)
+{
+	const struct pci_dev *pdev = to_pci_dev(parent);
+	unsigned int devfn;
+	u32 reg;
+	int ret;
+
+	devfn = PCI_DEVFN(PCI_SLOT(pdev->devfn), 0);
+	ret = pci_bus_read_config_dword(pdev->bus, devfn, PCI_CFG_HFS_3, &reg);
+	trace_mei_pci_cfg_read(parent, "PCI_CFG_HFS_3", PCI_CFG_HFS_3, reg, ret);
+	return FIELD_GET(PCI_CFG_HFS_3_EXT_SKU_MSK, reg) == PCI_CFG_HFS_3_EXT_SKU_IOE ?
+		MEI_DEV_KIND_IOE : MEI_DEV_KIND_MEI;
+}
+
+#define MEI_CFG_KIND_IOE                     \
+	.get_kind = mei_cfg_kind_ioe
 
 #define MEI_CFG_FW_VER_SUPP                     \
 	.fw_ver_supported = 1
@@ -1619,27 +1670,32 @@ static bool mei_me_fw_type_sps_ign(const struct pci_dev *pdev)
 
 /* ICH Legacy devices */
 static const struct mei_cfg mei_me_ich_cfg = {
+	MEI_CFG_KIND_MEI,
 	MEI_CFG_ICH_HFS,
 };
 
 /* ICH devices */
 static const struct mei_cfg mei_me_ich10_cfg = {
+	MEI_CFG_KIND_MEI,
 	MEI_CFG_ICH10_HFS,
 };
 
 /* PCH6 devices */
 static const struct mei_cfg mei_me_pch6_cfg = {
+	MEI_CFG_KIND_MEI,
 	MEI_CFG_PCH_HFS,
 };
 
 /* PCH7 devices */
 static const struct mei_cfg mei_me_pch7_cfg = {
+	MEI_CFG_KIND_MEI,
 	MEI_CFG_PCH_HFS,
 	MEI_CFG_FW_VER_SUPP,
 };
 
 /* PCH Cougar Point and Patsburg with quirk for Node Manager exclusion */
 static const struct mei_cfg mei_me_pch_cpt_pbg_cfg = {
+	MEI_CFG_KIND_MEI,
 	MEI_CFG_PCH_HFS,
 	MEI_CFG_FW_VER_SUPP,
 	MEI_CFG_FW_NM,
@@ -1647,6 +1703,7 @@ static const struct mei_cfg mei_me_pch_cpt_pbg_cfg = {
 
 /* PCH8 Lynx Point and newer devices */
 static const struct mei_cfg mei_me_pch8_cfg = {
+	MEI_CFG_KIND_MEI,
 	MEI_CFG_PCH8_HFS,
 	MEI_CFG_FW_VER_SUPP,
 };
@@ -1660,6 +1717,7 @@ static const struct mei_cfg mei_me_pch8_itouch_cfg = {
 
 /* PCH8 Lynx Point with quirk for SPS Firmware exclusion */
 static const struct mei_cfg mei_me_pch8_sps_4_cfg = {
+	MEI_CFG_KIND_MEI,
 	MEI_CFG_PCH8_HFS,
 	MEI_CFG_FW_VER_SUPP,
 	MEI_CFG_FW_SPS_4,
@@ -1667,6 +1725,7 @@ static const struct mei_cfg mei_me_pch8_sps_4_cfg = {
 
 /* LBG with quirk for SPS (4.0) Firmware exclusion */
 static const struct mei_cfg mei_me_pch12_sps_4_cfg = {
+	MEI_CFG_KIND_MEI,
 	MEI_CFG_PCH8_HFS,
 	MEI_CFG_FW_VER_SUPP,
 	MEI_CFG_FW_SPS_4,
@@ -1674,6 +1733,7 @@ static const struct mei_cfg mei_me_pch12_sps_4_cfg = {
 
 /* Cannon Lake and newer devices */
 static const struct mei_cfg mei_me_pch12_cfg = {
+	MEI_CFG_KIND_MEI,
 	MEI_CFG_PCH8_HFS,
 	MEI_CFG_FW_VER_SUPP,
 	MEI_CFG_DMA_128,
@@ -1681,6 +1741,7 @@ static const struct mei_cfg mei_me_pch12_cfg = {
 
 /* Cannon Lake with quirk for SPS 5.0 and newer Firmware exclusion */
 static const struct mei_cfg mei_me_pch12_sps_cfg = {
+	MEI_CFG_KIND_MEI,
 	MEI_CFG_PCH8_HFS,
 	MEI_CFG_FW_VER_SUPP,
 	MEI_CFG_DMA_128,
@@ -1699,6 +1760,7 @@ static const struct mei_cfg mei_me_pch12_itouch_sps_cfg = {
 
 /* Tiger Lake and newer devices */
 static const struct mei_cfg mei_me_pch15_cfg = {
+	MEI_CFG_KIND_MEI,
 	MEI_CFG_PCH8_HFS,
 	MEI_CFG_FW_VER_SUPP,
 	MEI_CFG_DMA_128,
@@ -1707,6 +1769,7 @@ static const struct mei_cfg mei_me_pch15_cfg = {
 
 /* Tiger Lake with quirk for SPS 5.0 and newer Firmware exclusion */
 static const struct mei_cfg mei_me_pch15_sps_cfg = {
+	MEI_CFG_KIND_MEI,
 	MEI_CFG_PCH8_HFS,
 	MEI_CFG_FW_VER_SUPP,
 	MEI_CFG_DMA_128,
@@ -1716,16 +1779,32 @@ static const struct mei_cfg mei_me_pch15_sps_cfg = {
 
 /* Graphics System Controller */
 static const struct mei_cfg mei_me_gsc_cfg = {
-	MEI_CFG_TYPE_GSC,
+	MEI_CFG_KIND_GSC,
 	MEI_CFG_PCH8_HFS,
 	MEI_CFG_FW_VER_SUPP,
 };
 
 /* Graphics System Controller Firmware Interface */
 static const struct mei_cfg mei_me_gscfi_cfg = {
-	MEI_CFG_TYPE_GSCFI,
+	MEI_CFG_KIND_GSCFI,
 	MEI_CFG_PCH8_HFS,
 	MEI_CFG_FW_VER_SUPP,
+};
+
+/* Chassis System Controller Firmware Interface */
+static const struct mei_cfg mei_me_csc_cfg = {
+	MEI_CFG_KIND_GSCFI,
+	MEI_CFG_PCH8_HFS,
+	MEI_CFG_FW_VER_SUPP,
+};
+
+/* Nova Lake with possible IOE devices */
+static const struct mei_cfg mei_me_pch22_ioe_cfg = {
+	MEI_CFG_KIND_IOE,
+	MEI_CFG_PCH8_HFS,
+	MEI_CFG_FW_VER_SUPP,
+	MEI_CFG_DMA_128,
+	MEI_CFG_TRC,
 };
 
 /*
@@ -1750,6 +1829,8 @@ static const struct mei_cfg *const mei_cfg_list[] = {
 	[MEI_ME_PCH15_SPS_CFG] = &mei_me_pch15_sps_cfg,
 	[MEI_ME_GSC_CFG] = &mei_me_gsc_cfg,
 	[MEI_ME_GSCFI_CFG] = &mei_me_gscfi_cfg,
+	[MEI_ME_CSC_CFG] = &mei_me_csc_cfg,
+	[MEI_ME_PCH22_IOE_CFG] = &mei_me_pch22_ioe_cfg,
 };
 
 const struct mei_cfg *mei_me_get_cfg(kernel_ulong_t idx)
@@ -1793,7 +1874,7 @@ struct mei_device *mei_me_dev_init(struct device *parent,
 
 	dev->fw_f_fw_ver_supported = cfg->fw_ver_supported;
 
-	dev->kind = cfg->kind;
+	dev->kind = cfg->get_kind(parent);
 
 	return dev;
 }

@@ -140,7 +140,7 @@ static void bcm74110_rx_push_init_msg(struct bcm74110_mbox *mbox, u32 val)
 {
 	struct bcm74110_mbox_msg *msg;
 
-	msg = kzalloc(sizeof(*msg), GFP_ATOMIC);
+	msg = kzalloc_obj(*msg, GFP_ATOMIC);
 	if (!msg)
 		return;
 
@@ -601,7 +601,7 @@ static int bcm74110_mbox_probe(struct platform_device *pdev)
 	ret = devm_request_irq(dev, mbox->rx_irq, bcm74110_mbox_isr,
 			       IRQF_NO_SUSPEND, pdev->name, mbox);
 	if (ret)
-		return dev_err_probe(dev, ret, "Failed to request irq\n");
+		return ret;
 
 	mbox->controller.ops = &bcm74110_mbox_chan_ops;
 	mbox->controller.dev = dev;

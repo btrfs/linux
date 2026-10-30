@@ -114,9 +114,7 @@ int ocfs2_compute_replay_slots(struct ocfs2_super *osb)
 	if (osb->replay_map)
 		return 0;
 
-	replay_map = kzalloc(struct_size(replay_map, rm_replay_slots,
-					 osb->max_slots),
-			     GFP_KERNEL);
+	replay_map = kzalloc_flex(*replay_map, rm_replay_slots, osb->max_slots);
 	if (!replay_map) {
 		mlog_errno(-ENOMEM);
 		return -ENOMEM;
@@ -178,8 +176,7 @@ int ocfs2_recovery_init(struct ocfs2_super *osb)
 	osb->recovery_thread_task = NULL;
 	init_waitqueue_head(&osb->recovery_event);
 
-	rm = kzalloc(struct_size(rm, rm_entries, osb->max_slots),
-		     GFP_KERNEL);
+	rm = kzalloc_flex(*rm, rm_entries, osb->max_slots);
 	if (!rm) {
 		mlog_errno(-ENOMEM);
 		return -ENOMEM;
@@ -476,8 +473,12 @@ bail:
  */
 int ocfs2_assure_trans_credits(handle_t *handle, int nblocks)
 {
-	int old_nblks = jbd2_handle_buffer_credits(handle);
+	int old_nblks;
 
+	if (is_handle_aborted(handle))
+		return -EROFS;
+
+	old_nblks = jbd2_handle_buffer_credits(handle);
 	trace_ocfs2_assure_trans_credits(old_nblks);
 	if (old_nblks >= nblocks)
 		return 0;
@@ -878,7 +879,7 @@ int ocfs2_journal_alloc(struct ocfs2_super *osb)
 	int status = 0;
 	struct ocfs2_journal *journal;
 
-	journal = kzalloc(sizeof(struct ocfs2_journal), GFP_KERNEL);
+	journal = kzalloc_obj(struct ocfs2_journal);
 	if (!journal) {
 		mlog(ML_ERROR, "unable to alloc journal\n");
 		status = -ENOMEM;
@@ -903,14 +904,12 @@ bail:
 static int ocfs2_journal_submit_inode_data_buffers(struct jbd2_inode *jinode)
 {
 	struct address_space *mapping = jinode->i_vfs_inode->i_mapping;
-	struct writeback_control wbc = {
-		.sync_mode =  WB_SYNC_ALL,
-		.nr_to_write = mapping->nrpages * 2,
-		.range_start = jinode->i_dirty_start,
-		.range_end = jinode->i_dirty_end,
-	};
+	loff_t range_start, range_end;
 
-	return filemap_fdatawrite_wbc(mapping, &wbc);
+	if (!jbd2_jinode_get_dirty_range(jinode, &range_start, &range_end))
+		return 0;
+
+	return filemap_fdatawrite_range(mapping, range_start, range_end);
 }
 
 int ocfs2_journal_init(struct ocfs2_super *osb, int *dirty)
@@ -1027,11 +1026,8 @@ static int ocfs2_journal_toggle_dirty(struct ocfs2_super *osb,
 	struct ocfs2_dinode *fe;
 
 	fe = (struct ocfs2_dinode *)bh->b_data;
-
-	/* The journal bh on the osb always comes from ocfs2_journal_init()
-	 * and was validated there inside ocfs2_inode_lock_full().  It's a
-	 * code bug if we mess it up. */
-	BUG_ON(!OCFS2_IS_VALID_DINODE(fe));
+	if (WARN_ON(!OCFS2_IS_VALID_DINODE(fe)))
+		return -EIO;
 
 	flags = le32_to_cpu(fe->id1.journal1.ij_flags);
 	if (dirty)
@@ -1401,7 +1397,7 @@ static void ocfs2_queue_recovery_completion(struct ocfs2_journal *journal,
 {
 	struct ocfs2_la_recovery_item *item;
 
-	item = kmalloc(sizeof(struct ocfs2_la_recovery_item), GFP_NOFS);
+	item = kmalloc_obj(struct ocfs2_la_recovery_item, GFP_NOFS);
 	if (!item) {
 		/* Though we wish to avoid it, we are in fact safe in
 		 * skipping local alloc cleanup as fsck.ocfs2 is more
@@ -1487,7 +1483,7 @@ static int __ocfs2_recovery_thread(void *arg)
 	}
 
 	if (quota_enabled) {
-		rm_quota = kcalloc(osb->max_slots, sizeof(int), GFP_NOFS);
+		rm_quota = kzalloc_objs(int, osb->max_slots, GFP_NOFS);
 		if (!rm_quota) {
 			status = -ENOMEM;
 			goto bail;

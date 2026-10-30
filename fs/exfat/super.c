@@ -195,7 +195,6 @@ static struct inode *exfat_alloc_inode(struct super_block *sb)
 	if (!ei)
 		return NULL;
 
-	init_rwsem(&ei->truncate_lock);
 	return &ei->vfs_inode;
 }
 
@@ -369,7 +368,7 @@ static int exfat_read_root(struct inode *inode, struct exfat_chain *root_clu)
 	ei->hint_stat.clu = sbi->root_dir;
 	ei->hint_femp.eidx = EXFAT_HINT_NONE;
 
-	i_size_write(inode, EXFAT_CLU_TO_B(root_clu->size, sbi));
+	i_size_write(inode, exfat_cluster_to_bytes(sbi, root_clu->size));
 
 	num_subdirs = exfat_count_dir_entries(sb, root_clu);
 	if (num_subdirs < 0)
@@ -499,6 +498,7 @@ static int exfat_read_boot_sector(struct super_block *sb)
 	if (p_boot->num_fats == 2)
 		sbi->FAT2_start_sector += sbi->num_FAT_sectors;
 	sbi->data_start_sector = le32_to_cpu(p_boot->clu_offset);
+	sbi->data_start_bytes = sbi->data_start_sector << p_boot->sect_size_bits;
 	sbi->num_sectors = le64_to_cpu(p_boot->vol_length);
 	/* because the cluster index starts with 2 */
 	sbi->num_clusters = le32_to_cpu(p_boot->clu_count) +
@@ -531,9 +531,14 @@ static int exfat_read_boot_sector(struct super_block *sb)
 	if (sbi->vol_flags & MEDIA_FAILURE)
 		exfat_warn(sb, "Medium has reported failures. Some data may be lost.");
 
-	/* exFAT file size is limited by a disk volume size */
-	sb->s_maxbytes = (u64)(sbi->num_clusters - EXFAT_RESERVED_CLUSTERS) <<
-		sbi->cluster_size_bits;
+	/*
+	 * Set to the max possible volume size for this volume's cluster size so
+	 * that any integer overflow from bytes to cluster size conversion is
+	 * checked in inode_newsize_ok(). Clamped to MAX_LFS_FILESIZE for 32-bit
+	 * machines.
+	 */
+	sb->s_maxbytes = min(MAX_LFS_FILESIZE,
+			     exfat_cluster_to_bytes(sbi, (loff_t)EXFAT_MAX_NUM_CLUSTER));
 
 	/* check logical sector size */
 	if (exfat_calibrate_blocksize(sb, 1 << p_boot->sect_size_bits))
@@ -627,6 +632,17 @@ static int __exfat_fill_super(struct super_block *sb,
 	if (ret) {
 		exfat_err(sb, "failed to load alloc-bitmap");
 		goto free_bh;
+	}
+
+	if (!exfat_test_bitmap(sb, sbi->root_dir)) {
+		exfat_warn(sb, "failed to test first cluster bit of root dir(%u)",
+			   sbi->root_dir);
+		/*
+		 * The first cluster bit of the root directory should never
+		 * be unset except when storage is corrupted. This bit is
+		 * set to allow operations after mount.
+		 */
+		exfat_set_bitmap(sb, sbi->root_dir, false);
 	}
 
 	ret = exfat_count_used_clusters(sb, &sbi->used_clusters);
@@ -804,7 +820,7 @@ static int exfat_init_fs_context(struct fs_context *fc)
 {
 	struct exfat_sb_info *sbi;
 
-	sbi = kzalloc(sizeof(struct exfat_sb_info), GFP_KERNEL);
+	sbi = kzalloc_obj(struct exfat_sb_info);
 	if (!sbi)
 		return -ENOMEM;
 
@@ -813,10 +829,21 @@ static int exfat_init_fs_context(struct fs_context *fc)
 	ratelimit_state_init(&sbi->ratelimit, DEFAULT_RATELIMIT_INTERVAL,
 			DEFAULT_RATELIMIT_BURST);
 
-	sbi->options.fs_uid = current_uid();
-	sbi->options.fs_gid = current_gid();
-	sbi->options.fs_fmask = current->fs->umask;
-	sbi->options.fs_dmask = current->fs->umask;
+	if (fc->purpose == FS_CONTEXT_FOR_RECONFIGURE && fc->root) {
+		struct super_block *sb = fc->root->d_sb;
+		struct exfat_mount_options *cur_opts = &EXFAT_SB(sb)->options;
+
+		sbi->options.fs_uid = cur_opts->fs_uid;
+		sbi->options.fs_gid = cur_opts->fs_gid;
+		sbi->options.fs_fmask = cur_opts->fs_fmask;
+		sbi->options.fs_dmask = cur_opts->fs_dmask;
+	} else {
+		sbi->options.fs_uid = current_uid();
+		sbi->options.fs_gid = current_gid();
+		sbi->options.fs_fmask = current->fs->umask;
+		sbi->options.fs_dmask = current->fs->umask;
+	}
+
 	sbi->options.allow_utime = -1;
 	sbi->options.errors = EXFAT_ERRORS_RO;
 	exfat_set_iocharset(&sbi->options, exfat_default_iocharset);

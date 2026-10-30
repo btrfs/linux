@@ -42,21 +42,21 @@ static struct mfd_cell rtsx_pcr_cells[] = {
 };
 
 static const struct pci_device_id rtsx_pci_ids[] = {
-	{ PCI_DEVICE(0x10EC, 0x5209), PCI_CLASS_OTHERS << 16, 0xFF0000 },
-	{ PCI_DEVICE(0x10EC, 0x5229), PCI_CLASS_OTHERS << 16, 0xFF0000 },
-	{ PCI_DEVICE(0x10EC, 0x5289), PCI_CLASS_OTHERS << 16, 0xFF0000 },
-	{ PCI_DEVICE(0x10EC, 0x5227), PCI_CLASS_OTHERS << 16, 0xFF0000 },
-	{ PCI_DEVICE(0x10EC, 0x522A), PCI_CLASS_OTHERS << 16, 0xFF0000 },
-	{ PCI_DEVICE(0x10EC, 0x5249), PCI_CLASS_OTHERS << 16, 0xFF0000 },
-	{ PCI_DEVICE(0x10EC, 0x5287), PCI_CLASS_OTHERS << 16, 0xFF0000 },
-	{ PCI_DEVICE(0x10EC, 0x5286), PCI_CLASS_OTHERS << 16, 0xFF0000 },
-	{ PCI_DEVICE(0x10EC, 0x524A), PCI_CLASS_OTHERS << 16, 0xFF0000 },
-	{ PCI_DEVICE(0x10EC, 0x525A), PCI_CLASS_OTHERS << 16, 0xFF0000 },
-	{ PCI_DEVICE(0x10EC, 0x5260), PCI_CLASS_OTHERS << 16, 0xFF0000 },
-	{ PCI_DEVICE(0x10EC, 0x5261), PCI_CLASS_OTHERS << 16, 0xFF0000 },
-	{ PCI_DEVICE(0x10EC, 0x5228), PCI_CLASS_OTHERS << 16, 0xFF0000 },
-	{ PCI_DEVICE(0x10EC, 0x5264), PCI_CLASS_OTHERS << 16, 0xFF0000 },
-	{ 0, }
+	{ PCI_DEVICE(0x10EC, 0x5209), .class = PCI_CLASS_OTHERS << 16, .class_mask = 0xFF0000 },
+	{ PCI_DEVICE(0x10EC, 0x5229), .class = PCI_CLASS_OTHERS << 16, .class_mask = 0xFF0000 },
+	{ PCI_DEVICE(0x10EC, 0x5289), .class = PCI_CLASS_OTHERS << 16, .class_mask = 0xFF0000 },
+	{ PCI_DEVICE(0x10EC, 0x5227), .class = PCI_CLASS_OTHERS << 16, .class_mask = 0xFF0000 },
+	{ PCI_DEVICE(0x10EC, 0x522A), .class = PCI_CLASS_OTHERS << 16, .class_mask = 0xFF0000 },
+	{ PCI_DEVICE(0x10EC, 0x5249), .class = PCI_CLASS_OTHERS << 16, .class_mask = 0xFF0000 },
+	{ PCI_DEVICE(0x10EC, 0x5287), .class = PCI_CLASS_OTHERS << 16, .class_mask = 0xFF0000 },
+	{ PCI_DEVICE(0x10EC, 0x5286), .class = PCI_CLASS_OTHERS << 16, .class_mask = 0xFF0000 },
+	{ PCI_DEVICE(0x10EC, 0x524A), .class = PCI_CLASS_OTHERS << 16, .class_mask = 0xFF0000 },
+	{ PCI_DEVICE(0x10EC, 0x525A), .class = PCI_CLASS_OTHERS << 16, .class_mask = 0xFF0000 },
+	{ PCI_DEVICE(0x10EC, 0x5260), .class = PCI_CLASS_OTHERS << 16, .class_mask = 0xFF0000 },
+	{ PCI_DEVICE(0x10EC, 0x5261), .class = PCI_CLASS_OTHERS << 16, .class_mask = 0xFF0000 },
+	{ PCI_DEVICE(0x10EC, 0x5228), .class = PCI_CLASS_OTHERS << 16, .class_mask = 0xFF0000 },
+	{ PCI_DEVICE(0x10EC, 0x5264), .class = PCI_CLASS_OTHERS << 16, .class_mask = 0xFF0000 },
+	{ }
 };
 
 MODULE_DEVICE_TABLE(pci, rtsx_pci_ids);
@@ -1196,6 +1196,8 @@ static int rtsx_pci_init_hw(struct rtsx_pcr *pcr)
 		/* Gating real mcu clock */
 		err = rtsx_pci_write_register(pcr, RTS5261_FW_CFG1,
 			RTS5261_MCU_CLOCK_GATING, 0);
+		if (err < 0)
+			return err;
 		err = rtsx_pci_write_register(pcr, RTS5261_REG_FPDCTL,
 			SSC_POWER_DOWN, 0);
 	} else {
@@ -1385,8 +1387,7 @@ static int rtsx_pci_init_chip(struct rtsx_pcr *pcr)
 	pcr_dbg(pcr, "PID: 0x%04x, IC version: 0x%02x\n",
 			PCI_PID(pcr), pcr->ic_version);
 
-	pcr->slots = kcalloc(pcr->num_slots, sizeof(struct rtsx_slot),
-			GFP_KERNEL);
+	pcr->slots = kzalloc_objs(struct rtsx_slot, pcr->num_slots);
 	if (!pcr->slots)
 		return -ENOMEM;
 
@@ -1494,13 +1495,13 @@ static int rtsx_pci_probe(struct pci_dev *pcidev,
 	if (ret)
 		goto disable;
 
-	pcr = kzalloc(sizeof(*pcr), GFP_KERNEL);
+	pcr = kzalloc_obj(*pcr);
 	if (!pcr) {
 		ret = -ENOMEM;
 		goto release_pci;
 	}
 
-	handle = kzalloc(sizeof(*handle), GFP_KERNEL);
+	handle = kzalloc_obj(*handle);
 	if (!handle) {
 		ret = -ENOMEM;
 		goto free_pcr;

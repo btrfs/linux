@@ -96,7 +96,6 @@
 	min_t(unsigned int, IEEE_8021QAZ_MAX_TCS, (_cnt))
 
 /* Common property names */
-#define XGBE_MAC_ADDR_PROPERTY	"mac-address"
 #define XGBE_PHY_MODE_PROPERTY	"phy-mode"
 #define XGBE_DMA_IRQS_PROPERTY	"amd,per-channel-interrupt"
 #define XGBE_SPEEDSET_PROPERTY	"amd,speed-set"
@@ -136,19 +135,15 @@
  */
 #define XGBE_TSTAMP_SSINC	20
 #define XGBE_TSTAMP_SNSINC	0
-#define XGBE_PTP_ACT_CLK_FREQ	500000000
+#define XGBE_PTP_ACT_CLK_FREQ	(NSEC_PER_SEC / XGBE_TSTAMP_SSINC)
 
 #define XGBE_V2_TSTAMP_SSINC	0xA
 #define XGBE_V2_TSTAMP_SNSINC	0
-#define XGBE_V2_PTP_ACT_CLK_FREQ	1000000000
+#define XGBE_V2_PTP_ACT_CLK_FREQ	(NSEC_PER_SEC / XGBE_V2_TSTAMP_SSINC)
 
 /* Define maximum supported values */
 #define XGBE_MAX_PPS_OUT	4
 #define XGBE_MAX_AUX_SNAP	4
-
-/* Driver PMT macros */
-#define XGMAC_DRIVER_CONTEXT	1
-#define XGMAC_IOCTL_CONTEXT	2
 
 #define XGMAC_FIFO_MIN_ALLOC	2048
 #define XGMAC_FIFO_UNIT		256
@@ -262,10 +257,30 @@
 #define XGBE_RV_PCI_DEVICE_ID	0x15d0
 #define XGBE_YC_PCI_DEVICE_ID	0x14b5
 #define XGBE_RN_PCI_DEVICE_ID	0x1630
+#define XGBE_P100a_PCI_DEVICE_ID	0x1122
 
  /* Generic low and high masks */
 #define XGBE_GEN_HI_MASK	GENMASK(31, 16)
 #define XGBE_GEN_LO_MASK	GENMASK(15, 0)
+
+/* MAC hardware version numbers (SNPSVER field in MAC_VR register) */
+#define XGBE_MAC_VER_30		0x30	/* Baseline Rx adaptation support */
+#define XGBE_MAC_VER_33		0x33	/* P100a platform */
+
+/* MAC Speed Select (SS) values for MAC_TCR register
+ * These values are written to the SS field to configure link speed.
+ * Note: P100a uses XGMII mode (0x06) for 2.5G instead of GMII (0x02)
+ */
+/* Note: 100M and 2.5G GMII share the same value (0x02) but are
+ * differentiated by the mode/interface type at the PHY level
+ */
+
+#define XGBE_MAC_SS_10G		0x00	/* 10Gbps - XGMII mode */
+#define XGBE_MAC_SS_2_5G_GMII	0x02	/* 2.5Gbps - GMII mode (YC) */
+#define XGBE_MAC_SS_2_5G_XGMII	0x06	/* 2.5Gbps - XGMII mode (P100a) */
+#define XGBE_MAC_SS_1G		0x03	/* 1Gbps */
+#define XGBE_MAC_SS_100M	0x02	/* 100Mbps */
+#define XGBE_MAC_SS_10M		0x07	/* 10Mbps */
 
 struct xgbe_prv_data;
 
@@ -558,7 +573,10 @@ enum xgbe_mb_subcmd {
 	XGBE_MB_SUBCMD_10MBITS = 0,
 	XGBE_MB_SUBCMD_100MBITS,
 	XGBE_MB_SUBCMD_1G_SGMII,
-	XGBE_MB_SUBCMD_1G_KX
+	XGBE_MB_SUBCMD_1G_KX,
+
+	/* 2.5GbE Mode subcommands */
+	XGBE_MB_SUBCMD_2_5G_KX = 1
 };
 
 struct xgbe_phy {
@@ -659,6 +677,7 @@ struct xgbe_mmc_stats {
 	u64 rxfifooverflow;
 	u64 rxvlanframes_gb;
 	u64 rxwatchdogerror;
+	u64 rxalignmenterror;
 };
 
 struct xgbe_ext_stats {
@@ -1003,9 +1022,6 @@ struct xgbe_prv_data {
 	unsigned int pp3;
 	unsigned int pp4;
 
-	/* Overall device lock */
-	spinlock_t lock;
-
 	/* XPCS indirect addressing lock */
 	spinlock_t xpcs_lock;
 	unsigned int xpcs_window_def_reg;
@@ -1146,7 +1162,7 @@ struct xgbe_prv_data {
 	spinlock_t tstamp_lock;
 	struct ptp_clock_info ptp_clock_info;
 	struct ptp_clock *ptp_clock;
-	struct hwtstamp_config tstamp_config;
+	struct kernel_hwtstamp_config tstamp_config;
 	unsigned int tstamp_addend;
 	struct work_struct tx_tstamp_work;
 	struct sk_buff *tx_tstamp_skb;
@@ -1245,7 +1261,12 @@ struct xgbe_prv_data {
 	bool en_rx_adap;
 	int rx_adapt_retries;
 	bool rx_adapt_done;
+	/* Flag to track if data path (TX/RX) was stopped for RX adaptation.
+	 * This prevents packet corruption during the adaptation window.
+	 */
+	bool data_path_stopped;
 	bool mode_set;
+	bool sph;
 };
 
 /* Function prototypes*/
@@ -1287,8 +1308,8 @@ void xgbe_dump_rx_desc(struct xgbe_prv_data *, struct xgbe_ring *,
 		       unsigned int);
 void xgbe_print_pkt(struct net_device *, struct sk_buff *, bool);
 void xgbe_get_all_hw_features(struct xgbe_prv_data *);
-int xgbe_powerup(struct net_device *, unsigned int);
-int xgbe_powerdown(struct net_device *, unsigned int);
+int xgbe_powerup(struct net_device *netdev);
+int xgbe_powerdown(struct net_device *netdev);
 void xgbe_init_rx_coalesce(struct xgbe_prv_data *);
 void xgbe_init_tx_coalesce(struct xgbe_prv_data *);
 void xgbe_restart_dev(struct xgbe_prv_data *pdata);
@@ -1307,10 +1328,11 @@ void xgbe_update_tstamp_addend(struct xgbe_prv_data *pdata,
 void xgbe_set_tstamp_time(struct xgbe_prv_data *pdata, unsigned int sec,
 			  unsigned int nsec);
 void xgbe_tx_tstamp(struct work_struct *work);
-int xgbe_get_hwtstamp_settings(struct xgbe_prv_data *pdata,
-			       struct ifreq *ifreq);
-int xgbe_set_hwtstamp_settings(struct xgbe_prv_data *pdata,
-			       struct ifreq *ifreq);
+int xgbe_get_hwtstamp_settings(struct net_device *netdev,
+			       struct kernel_hwtstamp_config *config);
+int xgbe_set_hwtstamp_settings(struct net_device *netdev,
+			       struct kernel_hwtstamp_config *config,
+			       struct netlink_ext_ack *extack);
 void xgbe_prep_tx_tstamp(struct xgbe_prv_data *pdata,
 			 struct sk_buff *skb,
 			 struct xgbe_packet_data *packet);
@@ -1320,6 +1342,16 @@ void xgbe_update_tstamp_time(struct xgbe_prv_data *pdata, unsigned int sec,
 
 int xgbe_pps_config(struct xgbe_prv_data *pdata, struct xgbe_pps_config *cfg,
 		    int index, bool on);
+
+/* Selftest functions */
+void xgbe_selftest_run(struct net_device *dev,
+		       struct ethtool_test *etest, u64 *buf);
+void xgbe_selftest_get_strings(struct xgbe_prv_data *pdata, u8 *data);
+int xgbe_selftest_get_count(struct xgbe_prv_data *pdata);
+
+/* Loopback control */
+int xgbe_enable_mac_loopback(struct xgbe_prv_data *pdata);
+void xgbe_disable_mac_loopback(struct xgbe_prv_data *pdata);
 
 #ifdef CONFIG_DEBUG_FS
 void xgbe_debugfs_init(struct xgbe_prv_data *);

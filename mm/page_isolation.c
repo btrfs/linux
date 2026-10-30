@@ -11,9 +11,111 @@
 #include <linux/page_owner.h>
 #include <linux/migrate.h>
 #include "internal.h"
+#include "page_alloc.h"
 
 #define CREATE_TRACE_POINTS
 #include <trace/events/page_isolation.h>
+
+bool page_is_unmovable(struct zone *zone, struct page *page,
+		enum pb_isolate_mode mode, unsigned long *step)
+{
+	/*
+	 * Both, bootmem allocations and memory holes are marked
+	 * PG_reserved and are unmovable. We can even have unmovable
+	 * allocations inside ZONE_MOVABLE, for example when
+	 * specifying "movablecore".
+	 */
+	if (PageReserved(page))
+		return true;
+
+	/*
+	 * If the zone is movable and we have ruled out all reserved
+	 * pages then it should be reasonably safe to assume the rest
+	 * is movable.
+	 */
+	if (zone_idx(zone) == ZONE_MOVABLE)
+		return false;
+
+	/*
+	 * Hugepages are not in LRU lists, but they're movable.
+	 * THPs are on the LRU, but need to be counted as #small pages.
+	 * We need not scan over tail pages because we don't
+	 * handle each tail page individually in migration.
+	 */
+	if (PageCompound(page)) {
+		struct folio *folio = page_folio(page);
+		unsigned long nr_pages, pfn;
+		unsigned int order;
+
+		order = compound_order(&folio->page);
+		if (order > MAX_FOLIO_ORDER)
+			return true;
+
+		if (folio_test_hugetlb(folio)) {
+			struct hstate *h;
+
+			if (!IS_ENABLED(CONFIG_ARCH_ENABLE_HUGEPAGE_MIGRATION))
+				return true;
+
+			/*
+			 * The huge page may be freed so can not
+			 * use folio_hstate() directly.
+			 */
+			h = size_to_hstate(PAGE_SIZE << order);
+			if (!h || !hugepage_migration_supported(h))
+				return true;
+		} else if (!PageLRU(page)) {
+			return true;
+		}
+
+		nr_pages = 1UL << order;
+		pfn = page_to_pfn(page);
+		*step = (pfn | (nr_pages - 1)) + 1 - pfn;
+		return false;
+	}
+
+	/*
+	 * We can't use page_count without pin a page
+	 * because another CPU can free compound page.
+	 * This check already skips compound tails of THP
+	 * because their page->_refcount is zero at all time.
+	 */
+	if (!page_ref_count(page)) {
+		if (PageBuddy(page))
+			*step = (1 << buddy_order(page));
+		return false;
+	}
+
+	/*
+	 * The HWPoisoned page may be not in buddy system, and
+	 * page_count() is not 0.
+	 */
+	if ((mode == PB_ISOLATE_MODE_MEM_OFFLINE) && PageHWPoison(page))
+		return false;
+
+	/*
+	 * We treat all PageOffline() pages as movable when offlining
+	 * to give drivers a chance to decrement their reference count
+	 * in MEM_GOING_OFFLINE in order to indicate that these pages
+	 * can be offlined as there are no direct references anymore.
+	 * For actually unmovable PageOffline() where the driver does
+	 * not support this, we will fail later when trying to actually
+	 * move these pages that still have a reference count > 0.
+	 * (false negatives in this function only)
+	 */
+	if ((mode == PB_ISOLATE_MODE_MEM_OFFLINE) && PageOffline(page))
+		return false;
+
+	if (PageLRU(page) || page_has_movable_ops(page))
+		return false;
+
+	/*
+	 * If there are RECLAIMABLE pages, we need to check
+	 * it.  But now, memory offline itself doesn't call
+	 * shrink_node_slabs() and it still to be fixed.
+	 */
+	return true;
+}
 
 /*
  * This function checks whether the range [start_pfn, end_pfn) includes
@@ -35,7 +137,6 @@ static struct page *has_unmovable_pages(unsigned long start_pfn, unsigned long e
 {
 	struct page *page = pfn_to_page(start_pfn);
 	struct zone *zone = page_zone(page);
-	unsigned long pfn;
 
 	VM_BUG_ON(pageblock_start_pfn(start_pfn) !=
 		  pageblock_start_pfn(end_pfn - 1));
@@ -52,96 +153,14 @@ static struct page *has_unmovable_pages(unsigned long start_pfn, unsigned long e
 		return page;
 	}
 
-	for (pfn = start_pfn; pfn < end_pfn; pfn++) {
-		page = pfn_to_page(pfn);
+	while (start_pfn < end_pfn) {
+		unsigned long step = 1;
 
-		/*
-		 * Both, bootmem allocations and memory holes are marked
-		 * PG_reserved and are unmovable. We can even have unmovable
-		 * allocations inside ZONE_MOVABLE, for example when
-		 * specifying "movablecore".
-		 */
-		if (PageReserved(page))
+		page = pfn_to_page(start_pfn);
+		if (page_is_unmovable(zone, page, mode, &step))
 			return page;
 
-		/*
-		 * If the zone is movable and we have ruled out all reserved
-		 * pages then it should be reasonably safe to assume the rest
-		 * is movable.
-		 */
-		if (zone_idx(zone) == ZONE_MOVABLE)
-			continue;
-
-		/*
-		 * Hugepages are not in LRU lists, but they're movable.
-		 * THPs are on the LRU, but need to be counted as #small pages.
-		 * We need not scan over tail pages because we don't
-		 * handle each tail page individually in migration.
-		 */
-		if (PageHuge(page) || PageTransCompound(page)) {
-			struct folio *folio = page_folio(page);
-			unsigned int skip_pages;
-
-			if (PageHuge(page)) {
-				struct hstate *h;
-
-				/*
-				 * The huge page may be freed so can not
-				 * use folio_hstate() directly.
-				 */
-				h = size_to_hstate(folio_size(folio));
-				if (h && !hugepage_migration_supported(h))
-					return page;
-			} else if (!folio_test_lru(folio)) {
-				return page;
-			}
-
-			skip_pages = folio_nr_pages(folio) - folio_page_idx(folio, page);
-			pfn += skip_pages - 1;
-			continue;
-		}
-
-		/*
-		 * We can't use page_count without pin a page
-		 * because another CPU can free compound page.
-		 * This check already skips compound tails of THP
-		 * because their page->_refcount is zero at all time.
-		 */
-		if (!page_ref_count(page)) {
-			if (PageBuddy(page))
-				pfn += (1 << buddy_order(page)) - 1;
-			continue;
-		}
-
-		/*
-		 * The HWPoisoned page may be not in buddy system, and
-		 * page_count() is not 0.
-		 */
-		if ((mode == PB_ISOLATE_MODE_MEM_OFFLINE) && PageHWPoison(page))
-			continue;
-
-		/*
-		 * We treat all PageOffline() pages as movable when offlining
-		 * to give drivers a chance to decrement their reference count
-		 * in MEM_GOING_OFFLINE in order to indicate that these pages
-		 * can be offlined as there are no direct references anymore.
-		 * For actually unmovable PageOffline() where the driver does
-		 * not support this, we will fail later when trying to actually
-		 * move these pages that still have a reference count > 0.
-		 * (false negatives in this function only)
-		 */
-		if ((mode == PB_ISOLATE_MODE_MEM_OFFLINE) && PageOffline(page))
-			continue;
-
-		if (PageLRU(page) || page_has_movable_ops(page))
-			continue;
-
-		/*
-		 * If there are RECLAIMABLE pages, we need to check
-		 * it.  But now, memory offline itself doesn't call
-		 * shrink_node_slabs() and it still to be fixed.
-		 */
-		return page;
+		start_pfn += step;
 	}
 	return NULL;
 }
@@ -156,48 +175,40 @@ static int set_migratetype_isolate(struct page *page, enum pb_isolate_mode mode,
 {
 	struct zone *zone = page_zone(page);
 	struct page *unmovable;
-	unsigned long flags;
 	unsigned long check_unmovable_start, check_unmovable_end;
 
 	if (PageUnaccepted(page))
 		accept_page(page);
 
-	spin_lock_irqsave(&zone->lock, flags);
-
-	/*
-	 * We assume the caller intended to SET migrate type to isolate.
-	 * If it is already set, then someone else must have raced and
-	 * set it before us.
-	 */
-	if (is_migrate_isolate_page(page)) {
-		spin_unlock_irqrestore(&zone->lock, flags);
-		return -EBUSY;
-	}
-
-	/*
-	 * FIXME: Now, memory hotplug doesn't call shrink_slab() by itself.
-	 * We just check MOVABLE pages.
-	 *
-	 * Pass the intersection of [start_pfn, end_pfn) and the page's pageblock
-	 * to avoid redundant checks.
-	 */
-	check_unmovable_start = max(page_to_pfn(page), start_pfn);
-	check_unmovable_end = min(pageblock_end_pfn(page_to_pfn(page)),
-				  end_pfn);
-
-	unmovable = has_unmovable_pages(check_unmovable_start, check_unmovable_end,
-			mode);
-	if (!unmovable) {
-		if (!pageblock_isolate_and_move_free_pages(zone, page)) {
-			spin_unlock_irqrestore(&zone->lock, flags);
+	scoped_guard(spinlock_irqsave, &zone->lock) {
+		/*
+		 * We assume the caller intended to SET migrate type to
+		 * isolate. If it is already set, then someone else must have
+		 * raced and set it before us.
+		 */
+		if (is_migrate_isolate_page(page))
 			return -EBUSY;
-		}
-		zone->nr_isolate_pageblock++;
-		spin_unlock_irqrestore(&zone->lock, flags);
-		return 0;
-	}
 
-	spin_unlock_irqrestore(&zone->lock, flags);
+		/*
+		 * FIXME: Now, memory hotplug doesn't call shrink_slab() by
+		 * itself. We just check MOVABLE pages.
+		 *
+		 * Pass the intersection of [start_pfn, end_pfn) and the page's
+		 * pageblock to avoid redundant checks.
+		 */
+		check_unmovable_start = max(page_to_pfn(page), start_pfn);
+		check_unmovable_end = min(pageblock_end_pfn(page_to_pfn(page)),
+					  end_pfn);
+
+		unmovable = has_unmovable_pages(check_unmovable_start,
+				check_unmovable_end, mode);
+		if (!unmovable) {
+			if (!pageblock_isolate_and_move_free_pages(zone, page))
+				return -EBUSY;
+			zone->nr_isolate_pageblock++;
+			return 0;
+		}
+	}
 	if (mode == PB_ISOLATE_MODE_MEM_OFFLINE) {
 		/*
 		 * printk() with zone->lock held will likely trigger a
@@ -212,15 +223,14 @@ static int set_migratetype_isolate(struct page *page, enum pb_isolate_mode mode,
 static void unset_migratetype_isolate(struct page *page)
 {
 	struct zone *zone;
-	unsigned long flags;
 	bool isolated_page = false;
 	unsigned int order;
 	struct page *buddy;
 
 	zone = page_zone(page);
-	spin_lock_irqsave(&zone->lock, flags);
+	guard(spinlock_irqsave)(&zone->lock);
 	if (!is_migrate_isolate_page(page))
-		goto out;
+		return;
 
 	/*
 	 * Because freepage with more than pageblock_order on isolated
@@ -268,8 +278,6 @@ static void unset_migratetype_isolate(struct page *page)
 		__putback_isolated_page(page, order, get_pageblock_migratetype(page));
 	}
 	zone->nr_isolate_pageblock--;
-out:
-	spin_unlock_irqrestore(&zone->lock, flags);
 }
 
 static inline struct page *
@@ -301,7 +309,7 @@ __first_valid_page(unsigned long pfn, unsigned long nr_pages)
  * pageblock. When not all pageblocks within a page are isolated at the same
  * time, free page accounting can go wrong. For example, in the case of
  * MAX_PAGE_ORDER = pageblock_order + 1, a MAX_PAGE_ORDER page has two
- * pagelbocks.
+ * pageblocks.
  * [      MAX_PAGE_ORDER         ]
  * [  pageblock0  |  pageblock1  ]
  * When either pageblock is isolated, if it is a free page, the page is not

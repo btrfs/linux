@@ -6,7 +6,6 @@
 #include <linux/err.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/mutex.h>
 #include <linux/of.h>
 #include <linux/regulator/consumer.h>
@@ -302,6 +301,7 @@ static int ssd2825_dsi_host_attach(struct mipi_dsi_host *host, struct mipi_dsi_d
 
 	if (panel) {
 		bridge = drm_panel_bridge_add_typed(panel, DRM_MODE_CONNECTOR_DSI);
+		drm_panel_put(panel);
 		if (IS_ERR(bridge))
 			return PTR_ERR(bridge);
 	}
@@ -482,7 +482,7 @@ static int ssd2825_setup_pll(struct ssd2825_priv *priv,
 }
 
 static void ssd2825_bridge_atomic_pre_enable(struct drm_bridge *bridge,
-					     struct drm_atomic_state *state)
+					     struct drm_atomic_commit *state)
 {
 	struct ssd2825_priv *priv = bridge_to_ssd2825(bridge);
 	struct mipi_dsi_device *dsi_dev = priv->output.dev;
@@ -585,7 +585,7 @@ static void ssd2825_bridge_atomic_pre_enable(struct drm_bridge *bridge,
 }
 
 static void ssd2825_bridge_atomic_enable(struct drm_bridge *bridge,
-					 struct drm_atomic_state *state)
+					 struct drm_atomic_commit *state)
 {
 	struct ssd2825_priv *priv = bridge_to_ssd2825(bridge);
 	struct mipi_dsi_device *dsi_dev = priv->output.dev;
@@ -607,7 +607,7 @@ static void ssd2825_bridge_atomic_enable(struct drm_bridge *bridge,
 }
 
 static void ssd2825_bridge_atomic_disable(struct drm_bridge *bridge,
-					  struct drm_atomic_state *state)
+					  struct drm_atomic_commit *state)
 {
 	struct ssd2825_priv *priv = bridge_to_ssd2825(bridge);
 	int ret;
@@ -680,7 +680,7 @@ static const struct drm_bridge_funcs ssd2825_bridge_funcs = {
 	.atomic_enable = ssd2825_bridge_atomic_enable,
 	.atomic_disable = ssd2825_bridge_atomic_disable,
 
-	.atomic_reset = drm_atomic_helper_bridge_reset,
+	.atomic_create_state = drm_atomic_helper_bridge_create_state,
 	.atomic_duplicate_state = drm_atomic_helper_bridge_duplicate_state,
 	.atomic_destroy_state = drm_atomic_helper_bridge_destroy_state,
 };

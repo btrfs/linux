@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: BSD-3-Clause-Clear
 /*
  * Copyright (c) 2018-2019 The Linux Foundation. All rights reserved.
- * Copyright (c) 2021-2023 Qualcomm Innovation Center, Inc. All rights reserved.
  * Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
  */
 
@@ -615,7 +614,7 @@ ath11k_ce_alloc_ring(struct ath11k_base *ab, int nentries, int desc_sz)
 	struct ath11k_ce_ring *ce_ring;
 	dma_addr_t base_addr;
 
-	ce_ring = kzalloc(struct_size(ce_ring, skb, nentries), GFP_KERNEL);
+	ce_ring = kzalloc_flex(*ce_ring, skb, nentries);
 	if (ce_ring == NULL)
 		return ERR_PTR(-ENOMEM);
 

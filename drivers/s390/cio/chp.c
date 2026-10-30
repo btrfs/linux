@@ -78,6 +78,9 @@ u8 chp_get_sch_opm(struct subchannel *sch)
 	int opm;
 	int i;
 
+	if (!sch->schib.pmcw.dnv)
+		return 0;
+
 	opm = 0;
 	chp_id_init(&chpid);
 	for (i = 0; i < 8; i++) {
@@ -111,8 +114,9 @@ static int s390_vary_chpid(struct chp_id chpid, int on)
 	char dbf_text[15];
 	int status;
 
-	sprintf(dbf_text, on?"varyon%x.%02x":"varyoff%x.%02x", chpid.cssid,
-		chpid.id);
+	scnprintf(dbf_text, sizeof(dbf_text),
+		  on ? "varyon%x.%02x" : "varyoff%x.%02x",
+		  chpid.cssid, chpid.id);
 	CIO_TRACE_EVENT(2, dbf_text);
 
 	status = chp_get_status(chpid);
@@ -529,7 +533,7 @@ int chp_new(struct chp_id chpid)
 	if (chp_is_registered(chpid))
 		goto out;
 
-	chp = kzalloc(sizeof(struct channel_path), GFP_KERNEL);
+	chp = kzalloc_obj(struct channel_path);
 	if (!chp) {
 		ret = -ENOMEM;
 		goto out;
@@ -592,7 +596,7 @@ struct channel_path_desc_fmt0 *chp_get_chp_desc(struct chp_id chpid)
 	chp = chpid_to_chp(chpid);
 	if (!chp)
 		return NULL;
-	desc = kmalloc(sizeof(*desc), GFP_KERNEL);
+	desc = kmalloc_obj(*desc);
 	if (!desc)
 		return NULL;
 

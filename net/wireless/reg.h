@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: ISC */
 #ifndef __NET_WIRELESS_REG_H
 #define __NET_WIRELESS_REG_H
 
@@ -6,18 +7,6 @@
 /*
  * Copyright 2008-2011	Luis R. Rodriguez <mcgrof@qca.qualcomm.com>
  * Copyright (C) 2019, 2023 Intel Corporation
- *
- * Permission to use, copy, modify, and/or distribute this software for any
- * purpose with or without fee is hereby granted, provided that the above
- * copyright notice and this permission notice appear in all copies.
- *
- * THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
- * WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
- * MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
- * ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
- * WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
- * ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
- * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
 enum ieee80211_regd_source {
@@ -188,6 +177,22 @@ int reg_reload_regdb(void);
  * reg_check_channels - schedule regulatory enforcement
  */
 void reg_check_channels(void);
+
+/**
+ * reg_leave_invalid_chans_wk - check if channels are no longer usable and leave
+ * @wiphy: the wiphy to check
+ * @work: the work struct
+ */
+void reg_leave_invalid_chans_wk(struct wiphy *wiphy, struct wiphy_work *work);
+
+/**
+ * reg_leave_invalid_nan_wk - check channels and tear down NAN when unusable
+ * @work: the work struct
+ *
+ * Stopping a NAN interface needs the RTNL, so it cannot be done from
+ * reg_leave_invalid_chans_wk() which runs with the wiphy mutex held.
+ */
+void reg_leave_invalid_nan_wk(struct work_struct *work);
 
 extern const u8 shipped_regdb_certs[];
 extern unsigned int shipped_regdb_certs_len;

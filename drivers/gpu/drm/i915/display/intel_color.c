@@ -24,14 +24,16 @@
 
 #include <drm/drm_print.h>
 
-#include "i915_utils.h"
 #include "i9xx_plane_regs.h"
 #include "intel_color.h"
 #include "intel_color_regs.h"
 #include "intel_de.h"
 #include "intel_display_types.h"
+#include "intel_display_utils.h"
 #include "intel_dsb.h"
 #include "intel_vrr.h"
+#include "skl_universal_plane.h"
+#include "skl_universal_plane_regs.h"
 
 struct intel_color_funcs {
 	int (*color_check)(struct intel_atomic_state *state,
@@ -87,6 +89,14 @@ struct intel_color_funcs {
 	 * Read config other than LUTs and CSCs, before them. Optional.
 	 */
 	void (*get_config)(struct intel_crtc_state *crtc_state);
+
+	/* Plane CSC*/
+	void (*load_plane_csc_matrix)(struct intel_dsb *dsb,
+				      const struct intel_plane_state *plane_state);
+
+	/* Plane Pre/Post CSC */
+	void (*load_plane_luts)(struct intel_dsb *dsb,
+				const struct intel_plane_state *plane_state);
 };
 
 #define CTM_COEFF_SIGN	(1ULL << 63)
@@ -609,6 +619,8 @@ static u16 ctm_to_twos_complement(u64 coeff, int int_bits, int frac_bits)
 	if (CTM_COEFF_NEGATIVE(coeff))
 		c = -c;
 
+	int_bits = max(int_bits, 1);
+
 	c = clamp(c, -(s64)BIT(int_bits + frac_bits - 1),
 		  (s64)(BIT(int_bits + frac_bits - 1) - 1));
 
@@ -1090,18 +1102,37 @@ static void skl_get_config(struct intel_crtc_state *crtc_state)
 {
 	struct intel_display *display = to_intel_display(crtc_state);
 	struct intel_crtc *crtc = to_intel_crtc(crtc_state->uapi.crtc);
-	u32 tmp;
+	u32 color;
 
 	crtc_state->gamma_mode = hsw_read_gamma_mode(crtc);
 	crtc_state->csc_mode = ilk_read_csc_mode(crtc);
 
-	tmp = intel_de_read(display, SKL_BOTTOM_COLOR(crtc->pipe));
+	color = intel_de_read(display, SKL_BOTTOM_COLOR(crtc->pipe));
+	if (DISPLAY_VER(display) < 35) {
+		if (color & SKL_BOTTOM_COLOR_GAMMA_ENABLE)
+			crtc_state->gamma_enable = true;
 
-	if (tmp & SKL_BOTTOM_COLOR_GAMMA_ENABLE)
-		crtc_state->gamma_enable = true;
+		if (color & SKL_BOTTOM_COLOR_CSC_ENABLE)
+			crtc_state->csc_enable = true;
+	}
 
-	if (tmp & SKL_BOTTOM_COLOR_CSC_ENABLE)
-		crtc_state->csc_enable = true;
+	crtc_state->hw.background_color = color & GENMASK(29, 0);
+}
+
+u32 intel_color_background_color_drm_to_hw(u64 drm_background_color)
+{
+	return (DRM_ARGB64_GETR_BPC(drm_background_color, 10) << 20) |
+	       (DRM_ARGB64_GETG_BPC(drm_background_color, 10) << 10) |
+	       (DRM_ARGB64_GETB_BPC(drm_background_color, 10));
+}
+
+u64 intel_color_background_color_hw_to_drm(u32 hw_background_color)
+{
+	u16 r = (hw_background_color >> 20) & 0x3ff;
+	u16 g = (hw_background_color >> 10) & 0x3ff;
+	u16 b = hw_background_color & 0x3ff;
+
+	return DRM_ARGB64_PREP_BPC(0x3ff, r, g, b, 10);
 }
 
 static void skl_color_commit_arm(struct intel_dsb *dsb,
@@ -1110,16 +1141,11 @@ static void skl_color_commit_arm(struct intel_dsb *dsb,
 	struct intel_display *display = to_intel_display(crtc_state);
 	struct intel_crtc *crtc = to_intel_crtc(crtc_state->uapi.crtc);
 	enum pipe pipe = crtc->pipe;
-	u32 val = 0;
+	u32 val = crtc_state->hw.background_color;
 
 	if (crtc_state->has_psr)
 		ilk_load_csc_matrix(dsb, crtc_state);
 
-	/*
-	 * We don't (yet) allow userspace to control the pipe background color,
-	 * so force it to black, but apply pipe gamma and CSC appropriately
-	 * so that its handling will match how we program our planes.
-	 */
 	if (crtc_state->gamma_enable)
 		val |= SKL_BOTTOM_COLOR_GAMMA_ENABLE;
 	if (crtc_state->csc_enable)
@@ -1138,11 +1164,7 @@ static void icl_color_commit_arm(struct intel_dsb *dsb,
 	struct intel_crtc *crtc = to_intel_crtc(crtc_state->uapi.crtc);
 	enum pipe pipe = crtc->pipe;
 
-	/*
-	 * We don't (yet) allow userspace to control the pipe background color,
-	 * so force it to black.
-	 */
-	intel_de_write_dsb(display, dsb, SKL_BOTTOM_COLOR(pipe), 0);
+	intel_de_write_dsb(display, dsb, SKL_BOTTOM_COLOR(pipe), crtc_state->hw.background_color);
 
 	intel_de_write_dsb(display, dsb, GAMMA_MODE(crtc->pipe), crtc_state->gamma_mode);
 
@@ -1335,7 +1357,7 @@ static void i965_load_luts(const struct intel_crtc_state *crtc_state)
 }
 
 static void ilk_lut_write(const struct intel_crtc_state *crtc_state,
-			  i915_reg_t reg, u32 val)
+			  intel_reg_t reg, u32 val)
 {
 	struct intel_display *display = to_intel_display(crtc_state);
 
@@ -1346,7 +1368,7 @@ static void ilk_lut_write(const struct intel_crtc_state *crtc_state,
 }
 
 static void ilk_lut_write_indexed(const struct intel_crtc_state *crtc_state,
-				  i915_reg_t reg, u32 val)
+				  intel_reg_t reg, u32 val)
 {
 	struct intel_display *display = to_intel_display(crtc_state);
 
@@ -1920,7 +1942,7 @@ void intel_color_load_luts(const struct intel_crtc_state *crtc_state)
 	if (crtc_state->dsb_color)
 		return;
 
-	display->funcs.color->load_luts(crtc_state);
+	display->color.funcs->load_luts(crtc_state);
 }
 
 void intel_color_commit_noarm(struct intel_dsb *dsb,
@@ -1928,8 +1950,8 @@ void intel_color_commit_noarm(struct intel_dsb *dsb,
 {
 	struct intel_display *display = to_intel_display(crtc_state);
 
-	if (display->funcs.color->color_commit_noarm)
-		display->funcs.color->color_commit_noarm(dsb, crtc_state);
+	if (display->color.funcs->color_commit_noarm)
+		display->color.funcs->color_commit_noarm(dsb, crtc_state);
 }
 
 void intel_color_commit_arm(struct intel_dsb *dsb,
@@ -1937,15 +1959,15 @@ void intel_color_commit_arm(struct intel_dsb *dsb,
 {
 	struct intel_display *display = to_intel_display(crtc_state);
 
-	display->funcs.color->color_commit_arm(dsb, crtc_state);
+	display->color.funcs->color_commit_arm(dsb, crtc_state);
 }
 
 void intel_color_post_update(const struct intel_crtc_state *crtc_state)
 {
 	struct intel_display *display = to_intel_display(crtc_state);
 
-	if (display->funcs.color->color_post_update)
-		display->funcs.color->color_post_update(crtc_state);
+	if (display->color.funcs->color_post_update)
+		display->color.funcs->color_post_update(crtc_state);
 }
 
 void intel_color_modeset(const struct intel_crtc_state *crtc_state)
@@ -2009,11 +2031,11 @@ void intel_color_prepare_commit(struct intel_atomic_state *state,
 	if (!intel_color_uses_dsb(crtc_state))
 		return;
 
-	display->funcs.color->load_luts(crtc_state);
+	display->color.funcs->load_luts(crtc_state);
 
 	if (crtc_state->use_dsb && intel_color_uses_chained_dsb(crtc_state)) {
 		intel_vrr_send_push(crtc_state->dsb_color, crtc_state);
-		intel_dsb_wait_vblank_delay(state, crtc_state->dsb_color);
+		intel_dsb_wait_for_delayed_vblank(state, crtc_state->dsb_color);
 		intel_vrr_check_push_sent(crtc_state->dsb_color, crtc_state);
 		intel_dsb_interrupt(crtc_state->dsb_color);
 	}
@@ -2094,25 +2116,31 @@ int intel_color_check(struct intel_atomic_state *state,
 	 * May need to update pipe gamma enable bits
 	 * when C8 planes are getting enabled/disabled.
 	 */
-	if (!old_crtc_state->c8_planes != !new_crtc_state->c8_planes)
+	if (!old_crtc_state->c8_planes != !new_crtc_state->c8_planes ||
+	    old_crtc_state->hw.background_color != new_crtc_state->hw.background_color)
 		new_crtc_state->uapi.color_mgmt_changed = true;
+
+	if (DRM_ARGB64_GETA(new_crtc_state->uapi.background_color) != 0xffff) {
+		drm_dbg_kms(display->drm, "New background not completely opaque\n");
+		return -EINVAL;
+	}
 
 	if (!intel_crtc_needs_color_update(new_crtc_state))
 		return 0;
 
-	return display->funcs.color->color_check(state, crtc);
+	return display->color.funcs->color_check(state, crtc);
 }
 
 void intel_color_get_config(struct intel_crtc_state *crtc_state)
 {
 	struct intel_display *display = to_intel_display(crtc_state);
 
-	display->funcs.color->get_config(crtc_state);
+	display->color.funcs->get_config(crtc_state);
 
-	display->funcs.color->read_luts(crtc_state);
+	display->color.funcs->read_luts(crtc_state);
 
-	if (display->funcs.color->read_csc)
-		display->funcs.color->read_csc(crtc_state);
+	if (display->color.funcs->read_csc)
+		display->color.funcs->read_csc(crtc_state);
 }
 
 bool intel_color_lut_equal(const struct intel_crtc_state *crtc_state,
@@ -2129,7 +2157,7 @@ bool intel_color_lut_equal(const struct intel_crtc_state *crtc_state,
 	if (!is_pre_csc_lut && crtc_state->c8_planes)
 		return true;
 
-	return display->funcs.color->lut_equal(crtc_state, blob1, blob2,
+	return display->color.funcs->lut_equal(crtc_state, blob1, blob2,
 					       is_pre_csc_lut);
 }
 
@@ -3835,6 +3863,239 @@ static void icl_read_luts(struct intel_crtc_state *crtc_state)
 	}
 }
 
+static void
+xelpd_load_plane_csc_matrix(struct intel_dsb *dsb,
+			    const struct intel_plane_state *plane_state)
+{
+	struct intel_display *display = to_intel_display(plane_state);
+	const struct drm_plane_state *state = &plane_state->uapi;
+	enum pipe pipe = to_intel_plane(state->plane)->pipe;
+	enum plane_id plane = to_intel_plane(state->plane)->id;
+	const struct drm_property_blob *blob = plane_state->hw.ctm;
+	struct drm_color_ctm_3x4 *ctm;
+	const u64 *input;
+	u16 coeffs[9] = {};
+	int i, j;
+
+	if (!icl_is_hdr_plane(display, plane) || !blob)
+		return;
+
+	ctm = blob->data;
+	input = ctm->matrix;
+
+	/*
+	 * Convert fixed point S31.32 input to format supported by the
+	 * hardware.
+	 */
+	for (i = 0, j = 0; i < ARRAY_SIZE(coeffs); i++) {
+		u64 abs_coeff = ((1ULL << 63) - 1) & input[j];
+
+		/*
+		 * Clamp input value to min/max supported by
+		 * hardware.
+		 */
+		abs_coeff = clamp_val(abs_coeff, 0, CTM_COEFF_4_0 - 1);
+
+		/* sign bit */
+		if (CTM_COEFF_NEGATIVE(input[j]))
+			coeffs[i] |= 1 << 15;
+
+		if (abs_coeff < CTM_COEFF_0_125)
+			coeffs[i] |= (3 << 12) |
+				      ILK_CSC_COEFF_FP(abs_coeff, 12);
+		else if (abs_coeff < CTM_COEFF_0_25)
+			coeffs[i] |= (2 << 12) |
+				      ILK_CSC_COEFF_FP(abs_coeff, 11);
+		else if (abs_coeff < CTM_COEFF_0_5)
+			coeffs[i] |= (1 << 12) |
+				      ILK_CSC_COEFF_FP(abs_coeff, 10);
+		else if (abs_coeff < CTM_COEFF_1_0)
+			coeffs[i] |= ILK_CSC_COEFF_FP(abs_coeff, 9);
+		else if (abs_coeff < CTM_COEFF_2_0)
+			coeffs[i] |= (7 << 12) |
+				      ILK_CSC_COEFF_FP(abs_coeff, 8);
+		else
+			coeffs[i] |= (6 << 12) |
+				      ILK_CSC_COEFF_FP(abs_coeff, 7);
+
+		/* Skip postoffs */
+		if (!((j + 2) % 4))
+			j += 2;
+		else
+			j++;
+	}
+
+	intel_de_write_dsb(display, dsb, PLANE_CSC_COEFF(pipe, plane, 0),
+			   coeffs[0] << 16 | coeffs[1]);
+	intel_de_write_dsb(display, dsb, PLANE_CSC_COEFF(pipe, plane, 1),
+			   coeffs[2] << 16);
+
+	intel_de_write_dsb(display, dsb, PLANE_CSC_COEFF(pipe, plane, 2),
+			   coeffs[3] << 16 | coeffs[4]);
+	intel_de_write_dsb(display, dsb, PLANE_CSC_COEFF(pipe, plane, 3),
+			   coeffs[5] << 16);
+
+	intel_de_write_dsb(display, dsb, PLANE_CSC_COEFF(pipe, plane, 4),
+			   coeffs[6] << 16 | coeffs[7]);
+	intel_de_write_dsb(display, dsb, PLANE_CSC_COEFF(pipe, plane, 5),
+			   coeffs[8] << 16);
+
+	intel_de_write_dsb(display, dsb, PLANE_CSC_PREOFF(pipe, plane, 0), 0);
+	intel_de_write_dsb(display, dsb, PLANE_CSC_PREOFF(pipe, plane, 1), 0);
+	intel_de_write_dsb(display, dsb, PLANE_CSC_PREOFF(pipe, plane, 2), 0);
+
+	/*
+	 * Conversion from S31.32 to S0.12. BIT[12] is the signed bit
+	 */
+	intel_de_write_dsb(display, dsb,
+			   PLANE_CSC_POSTOFF(pipe, plane, 0),
+			   ctm_to_twos_complement(input[3], 0, 12));
+	intel_de_write_dsb(display, dsb,
+			   PLANE_CSC_POSTOFF(pipe, plane, 1),
+			   ctm_to_twos_complement(input[7], 0, 12));
+	intel_de_write_dsb(display, dsb,
+			   PLANE_CSC_POSTOFF(pipe, plane, 2),
+			   ctm_to_twos_complement(input[11], 0, 12));
+}
+
+static void
+xelpd_program_plane_pre_csc_lut(struct intel_dsb *dsb,
+				const struct intel_plane_state *plane_state)
+{
+	struct intel_display *display = to_intel_display(plane_state);
+	const struct drm_plane_state *state = &plane_state->uapi;
+	enum pipe pipe = to_intel_plane(state->plane)->pipe;
+	enum plane_id plane = to_intel_plane(state->plane)->id;
+	const struct drm_color_lut32 *pre_csc_lut = plane_state->hw.degamma_lut->data;
+	int i, lut_size = 128;
+	u32 lut_val;
+
+	if (!icl_is_hdr_plane(display, plane))
+		return;
+
+	intel_de_write_dsb(display, dsb,
+			   PLANE_PRE_CSC_GAMC_INDEX_ENH(pipe, plane, 0),
+			   PLANE_PAL_PREC_AUTO_INCREMENT);
+
+	for (i = 0; i < lut_size + 3; i++) {
+		if (pre_csc_lut) {
+			if (i < lut_size)
+				lut_val = drm_color_lut32_extract(pre_csc_lut[i].green, 24);
+			/* else duplicate last lut_val */
+		} else {
+			if (i < lut_size)
+				lut_val = (i * ((1 << 24) - 1)) / (lut_size - 1);
+			else
+				lut_val = 1 << 24;
+		}
+
+		intel_de_write_dsb(display, dsb,
+				   PLANE_PRE_CSC_GAMC_DATA_ENH(pipe, plane, 0),
+				   lut_val);
+	}
+
+	intel_de_write_dsb(display, dsb, PLANE_PRE_CSC_GAMC_INDEX_ENH(pipe, plane, 0), 0);
+}
+
+static void
+xelpd_program_plane_post_csc_lut(struct intel_dsb *dsb,
+				 const struct intel_plane_state *plane_state)
+{
+	struct intel_display *display = to_intel_display(plane_state);
+	const struct drm_plane_state *state = &plane_state->uapi;
+	enum pipe pipe = to_intel_plane(state->plane)->pipe;
+	enum plane_id plane = to_intel_plane(state->plane)->id;
+	const struct drm_color_lut32 *post_csc_lut = plane_state->hw.gamma_lut->data;
+	int i, lut_size = 32;
+	u32 lut_val;
+
+	if (!icl_is_hdr_plane(display, plane))
+		return;
+
+	intel_de_write_dsb(display, dsb, PLANE_POST_CSC_GAMC_INDEX_ENH(pipe, plane, 0),
+			   PLANE_PAL_PREC_AUTO_INCREMENT);
+	/* TODO: Add macro */
+	intel_de_write_dsb(display, dsb, PLANE_POST_CSC_GAMC_SEG0_INDEX_ENH(pipe, plane, 0),
+			   PLANE_PAL_PREC_AUTO_INCREMENT);
+
+	for (i = 0; i < lut_size + 3; i++) {
+		if (post_csc_lut) {
+			if (i < lut_size)
+				lut_val = drm_color_lut32_extract(post_csc_lut[i].green, 24);
+			/* else clamp to the last LUT value to prevent step discontinuity */
+		} else {
+			if (i < lut_size)
+				lut_val = (i * ((1 << 24) - 1)) / (lut_size - 1);
+			else
+				lut_val = 1 << 24;
+		}
+
+		intel_de_write_dsb(display, dsb,
+				   PLANE_POST_CSC_GAMC_DATA_ENH(pipe, plane, 0),
+				   lut_val);
+	}
+
+	intel_de_write_dsb(display, dsb, PLANE_POST_CSC_GAMC_INDEX_ENH(pipe, plane, 0), 0);
+	intel_de_write_dsb(display, dsb,
+			   PLANE_POST_CSC_GAMC_SEG0_INDEX_ENH(pipe, plane, 0), 0);
+}
+
+static void
+xelpd_plane_load_luts(struct intel_dsb *dsb, const struct intel_plane_state *plane_state)
+{
+	if (plane_state->hw.degamma_lut)
+		xelpd_program_plane_pre_csc_lut(dsb, plane_state);
+
+	if (plane_state->hw.gamma_lut)
+		xelpd_program_plane_post_csc_lut(dsb, plane_state);
+}
+
+static u32 glk_3dlut_10(const struct drm_color_lut32 *color)
+{
+	return REG_FIELD_PREP(LUT_3D_DATA_RED_MASK, drm_color_lut32_extract(color->red, 10)) |
+		REG_FIELD_PREP(LUT_3D_DATA_GREEN_MASK, drm_color_lut32_extract(color->green, 10)) |
+		REG_FIELD_PREP(LUT_3D_DATA_BLUE_MASK, drm_color_lut32_extract(color->blue, 10));
+}
+
+static void glk_load_lut_3d(struct intel_dsb *dsb,
+			    struct intel_crtc *crtc,
+			    const struct drm_property_blob *blob)
+{
+	struct intel_display *display = to_intel_display(crtc->base.dev);
+	const struct drm_color_lut32 *lut = blob->data;
+	int i, lut_size = drm_color_lut32_size(blob);
+	enum pipe pipe = crtc->pipe;
+
+	if (!dsb && intel_de_read(display, LUT_3D_CTL(pipe)) & LUT_3D_READY) {
+		drm_err(display->drm, "[CRTC:%d:%s] 3D LUT not ready, not loading LUTs\n",
+			crtc->base.base.id, crtc->base.name);
+		return;
+	}
+
+	intel_de_write_dsb(display, dsb, LUT_3D_INDEX(pipe), LUT_3D_AUTO_INCREMENT);
+	for (i = 0; i < lut_size; i++)
+		intel_de_write_dsb(display, dsb, LUT_3D_DATA(pipe), glk_3dlut_10(&lut[i]));
+	intel_de_write_dsb(display, dsb, LUT_3D_INDEX(pipe), 0);
+}
+
+static void glk_lut_3d_commit(struct intel_dsb *dsb, struct intel_crtc *crtc, bool enable)
+{
+	struct intel_display *display = to_intel_display(crtc);
+	enum pipe pipe = crtc->pipe;
+	u32 val = 0;
+
+	if (!dsb && intel_de_read(display, LUT_3D_CTL(pipe)) & LUT_3D_READY) {
+		drm_err(display->drm, "[CRTC:%d:%s] 3D LUT not ready, not committing change\n",
+			crtc->base.base.id, crtc->base.name);
+		return;
+	}
+
+	if (enable)
+		val = LUT_3D_ENABLE | LUT_3D_READY | LUT_3D_BIND_PLANE_1;
+
+	intel_de_write_dsb(display, dsb, LUT_3D_CTL(pipe), val);
+}
+
 static const struct intel_color_funcs chv_color_funcs = {
 	.color_check = chv_color_check,
 	.color_commit_arm = i9xx_color_commit_arm,
@@ -3882,6 +4143,8 @@ static const struct intel_color_funcs tgl_color_funcs = {
 	.lut_equal = icl_lut_equal,
 	.read_csc = icl_read_csc,
 	.get_config = skl_get_config,
+	.load_plane_csc_matrix = xelpd_load_plane_csc_matrix,
+	.load_plane_luts = xelpd_plane_load_luts,
 };
 
 static const struct intel_color_funcs icl_color_funcs = {
@@ -3962,6 +4225,67 @@ static const struct intel_color_funcs ilk_color_funcs = {
 	.get_config = ilk_get_config,
 };
 
+void intel_color_plane_commit_arm(struct intel_dsb *dsb,
+				  const struct intel_plane_state *plane_state)
+{
+	struct intel_display *display = to_intel_display(plane_state);
+	struct intel_crtc *crtc = to_intel_crtc(plane_state->uapi.crtc);
+
+	if (crtc && intel_color_crtc_has_3dlut(display, crtc->pipe))
+		glk_lut_3d_commit(dsb, crtc, !!plane_state->hw.lut_3d);
+}
+
+static void
+intel_color_load_plane_csc_matrix(struct intel_dsb *dsb,
+				  const struct intel_plane_state *plane_state)
+{
+	struct intel_display *display = to_intel_display(plane_state);
+
+	if (display->color.funcs->load_plane_csc_matrix)
+		display->color.funcs->load_plane_csc_matrix(dsb, plane_state);
+}
+
+static void
+intel_color_load_plane_luts(struct intel_dsb *dsb,
+			    const struct intel_plane_state *plane_state)
+{
+	struct intel_display *display = to_intel_display(plane_state);
+
+	if (display->color.funcs->load_plane_luts)
+		display->color.funcs->load_plane_luts(dsb, plane_state);
+}
+
+bool
+intel_color_crtc_has_3dlut(struct intel_display *display, enum pipe pipe)
+{
+	if (DISPLAY_VER(display) >= 12)
+		return pipe == PIPE_A || pipe == PIPE_B;
+	else
+		return false;
+}
+
+static void
+intel_color_load_3dlut(struct intel_dsb *dsb,
+		       const struct intel_plane_state *plane_state)
+{
+	struct intel_display *display = to_intel_display(plane_state);
+	struct intel_crtc *crtc = to_intel_crtc(plane_state->uapi.crtc);
+
+	if (crtc && intel_color_crtc_has_3dlut(display, crtc->pipe))
+		glk_load_lut_3d(dsb, crtc, plane_state->hw.lut_3d);
+}
+
+void intel_color_plane_program_pipeline(struct intel_dsb *dsb,
+					const struct intel_plane_state *plane_state)
+{
+	if (plane_state->hw.ctm)
+		intel_color_load_plane_csc_matrix(dsb, plane_state);
+	if (plane_state->hw.degamma_lut || plane_state->hw.gamma_lut)
+		intel_color_load_plane_luts(dsb, plane_state);
+	if (plane_state->hw.lut_3d)
+		intel_color_load_3dlut(dsb, plane_state);
+}
+
 void intel_color_crtc_init(struct intel_crtc *crtc)
 {
 	struct intel_display *display = to_intel_display(crtc);
@@ -4010,29 +4334,29 @@ void intel_color_init_hooks(struct intel_display *display)
 {
 	if (HAS_GMCH(display)) {
 		if (display->platform.cherryview)
-			display->funcs.color = &chv_color_funcs;
+			display->color.funcs = &chv_color_funcs;
 		else if (display->platform.valleyview)
-			display->funcs.color = &vlv_color_funcs;
+			display->color.funcs = &vlv_color_funcs;
 		else if (DISPLAY_VER(display) >= 4)
-			display->funcs.color = &i965_color_funcs;
+			display->color.funcs = &i965_color_funcs;
 		else
-			display->funcs.color = &i9xx_color_funcs;
+			display->color.funcs = &i9xx_color_funcs;
 	} else {
 		if (DISPLAY_VER(display) >= 12)
-			display->funcs.color = &tgl_color_funcs;
+			display->color.funcs = &tgl_color_funcs;
 		else if (DISPLAY_VER(display) == 11)
-			display->funcs.color = &icl_color_funcs;
+			display->color.funcs = &icl_color_funcs;
 		else if (DISPLAY_VER(display) == 10)
-			display->funcs.color = &glk_color_funcs;
+			display->color.funcs = &glk_color_funcs;
 		else if (DISPLAY_VER(display) == 9)
-			display->funcs.color = &skl_color_funcs;
+			display->color.funcs = &skl_color_funcs;
 		else if (DISPLAY_VER(display) == 8)
-			display->funcs.color = &bdw_color_funcs;
+			display->color.funcs = &bdw_color_funcs;
 		else if (display->platform.haswell)
-			display->funcs.color = &hsw_color_funcs;
+			display->color.funcs = &hsw_color_funcs;
 		else if (DISPLAY_VER(display) == 7)
-			display->funcs.color = &ivb_color_funcs;
+			display->color.funcs = &ivb_color_funcs;
 		else
-			display->funcs.color = &ilk_color_funcs;
+			display->color.funcs = &ilk_color_funcs;
 	}
 }

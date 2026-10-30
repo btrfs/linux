@@ -3,16 +3,14 @@
 
 #define dev_fmt(fmt) "tegra241_cmdqv: " fmt
 
-#include <linux/acpi.h>
 #include <linux/debugfs.h>
 #include <linux/dma-mapping.h>
 #include <linux/interrupt.h>
 #include <linux/iommu.h>
 #include <linux/iommufd.h>
 #include <linux/iopoll.h>
+#include <linux/platform_device.h>
 #include <uapi/linux/iommufd.h>
-
-#include <acpi/acpixf.h>
 
 #include "arm-smmu-v3.h"
 
@@ -58,6 +56,8 @@
 #define  VINTF_ENABLED			BIT(0)
 
 #define TEGRA241_VINTF_SID_MATCH(s)	(0x0040 + 0x4*(s))
+#define  VINTF_SID_MATCH_VIRT_SID	GENMASK(20, 1)
+#define  VINTF_SID_MATCH_ENABLE		BIT(0)
 #define TEGRA241_VINTF_SID_REPLACE(s)	(0x0080 + 0x4*(s))
 
 #define TEGRA241_VINTF_LVCMDQ_ERR_MAP_64(m) \
@@ -313,55 +313,86 @@ static void tegra241_vintf_user_handle_error(struct tegra241_vintf *vintf)
 
 static void tegra241_vintf0_handle_error(struct tegra241_vintf *vintf)
 {
+	struct tegra241_cmdqv *cmdqv = vintf->cmdqv;
 	int i;
 
 	for (i = 0; i < LVCMDQ_ERR_MAP_NUM_64; i++) {
 		u64 map = readq_relaxed(REG_VINTF(vintf, LVCMDQ_ERR_MAP_64(i)));
 
 		while (map) {
-			unsigned long lidx = __ffs64(map);
-			struct tegra241_vcmdq *vcmdq = vintf->lvcmdqs[lidx];
-			u32 gerror = readl_relaxed(REG_VCMDQ_PAGE0(vcmdq, GERROR));
+			unsigned long map_bit = __ffs64(map);
+			unsigned long lidx = 64 * i + map_bit;
+			struct tegra241_vcmdq *vcmdq;
+			u32 gerror;
 
-			__arm_smmu_cmdq_skip_err(&vintf->cmdqv->smmu, &vcmdq->cmdq);
+			map &= ~BIT_ULL(map_bit);
+
+			/* A bit beyond the count means a HW error; skip it */
+			if (WARN_ON_ONCE(lidx >= cmdqv->num_lvcmdqs_per_vintf))
+				continue;
+			/* Pairs with smp_store_release() publishing it */
+			vcmdq = smp_load_acquire(&vintf->lvcmdqs[lidx]);
+			if (!vcmdq)
+				continue;
+
+			gerror = readl_relaxed(REG_VCMDQ_PAGE0(vcmdq, GERROR));
+			__arm_smmu_cmdq_skip_err(&cmdqv->smmu, &vcmdq->cmdq);
 			writel(gerror, REG_VCMDQ_PAGE0(vcmdq, GERRORN));
-			map &= ~BIT_ULL(lidx);
 		}
 	}
 }
 
+/*
+ * The CMDQV error interrupt is edge-triggered, so a pending VINTF error fires
+ * this ISR once and does not re-assert. An unacked guest therefore cannot
+ * storm the host. The HW latches and forwards each new error event on its
+ * own, so an already-set ERR_MAP bit does not suppress the interrupt for a
+ * new error.
+ */
 static irqreturn_t tegra241_cmdqv_isr(int irq, void *devid)
 {
 	struct tegra241_cmdqv *cmdqv = (struct tegra241_cmdqv *)devid;
 	void __iomem *reg_vintf_map = REG_CMDQV(cmdqv, VINTF_ERR_MAP);
-	char err_str[256];
 	u64 vintf_map;
 
 	/* Use readl_relaxed() as register addresses are not 64-bit aligned */
 	vintf_map = (u64)readl_relaxed(reg_vintf_map + 0x4) << 32 |
 		    (u64)readl_relaxed(reg_vintf_map);
 
-	snprintf(err_str, sizeof(err_str),
-		 "vintf_map: %016llx, vcmdq_map %08x:%08x:%08x:%08x", vintf_map,
-		 readl_relaxed(REG_CMDQV(cmdqv, CMDQ_ERR_MAP(3))),
-		 readl_relaxed(REG_CMDQV(cmdqv, CMDQ_ERR_MAP(2))),
-		 readl_relaxed(REG_CMDQV(cmdqv, CMDQ_ERR_MAP(1))),
-		 readl_relaxed(REG_CMDQV(cmdqv, CMDQ_ERR_MAP(0))));
-
-	dev_warn(cmdqv->dev, "unexpected error reported. %s\n", err_str);
+	dev_warn_ratelimited(
+		cmdqv->dev,
+		"unexpected error reported. vintf_map: %016llx, vcmdq_map %08x:%08x:%08x:%08x\n",
+		vintf_map, readl_relaxed(REG_CMDQV(cmdqv, CMDQ_ERR_MAP(3))),
+		readl_relaxed(REG_CMDQV(cmdqv, CMDQ_ERR_MAP(2))),
+		readl_relaxed(REG_CMDQV(cmdqv, CMDQ_ERR_MAP(1))),
+		readl_relaxed(REG_CMDQV(cmdqv, CMDQ_ERR_MAP(0))));
 
 	/* Handle VINTF0 and its LVCMDQs */
 	if (vintf_map & BIT_ULL(0)) {
-		tegra241_vintf0_handle_error(cmdqv->vintfs[0]);
+		struct tegra241_vintf *vintf0;
+
 		vintf_map &= ~BIT_ULL(0);
+
+		/* NULL until tegra241_cmdqv_init_structures() publishes it */
+		vintf0 = smp_load_acquire(&cmdqv->vintfs[0]);
+		if (vintf0)
+			tegra241_vintf0_handle_error(vintf0);
 	}
 
 	/* Handle other user VINTFs and their LVCMDQs */
 	while (vintf_map) {
 		unsigned long idx = __ffs64(vintf_map);
+		struct tegra241_vintf *vintf;
 
-		tegra241_vintf_user_handle_error(cmdqv->vintfs[idx]);
 		vintf_map &= ~BIT_ULL(idx);
+
+		/* A bit beyond the count means a HW error; skip it */
+		if (WARN_ON_ONCE(idx >= cmdqv->num_vintfs))
+			continue;
+		/* The slot may be published or torn down (NULL'd) concurrently */
+		vintf = smp_load_acquire(&cmdqv->vintfs[idx]);
+		if (vintf)
+			tegra241_vintf_user_handle_error(vintf);
 	}
 
 	return IRQ_HANDLED;
@@ -369,9 +400,9 @@ static irqreturn_t tegra241_cmdqv_isr(int irq, void *devid)
 
 /* Command Queue Function */
 
-static bool tegra241_guest_vcmdq_supports_cmd(struct arm_smmu_cmdq_ent *ent)
+static bool tegra241_guest_vcmdq_supports_cmd(struct arm_smmu_cmd *cmd)
 {
-	switch (ent->opcode) {
+	switch (FIELD_GET(CMDQ_0_OP, cmd->data[0])) {
 	case CMDQ_OP_TLBI_NH_ASID:
 	case CMDQ_OP_TLBI_NH_VA:
 	case CMDQ_OP_ATC_INV:
@@ -383,7 +414,7 @@ static bool tegra241_guest_vcmdq_supports_cmd(struct arm_smmu_cmdq_ent *ent)
 
 static struct arm_smmu_cmdq *
 tegra241_cmdqv_get_cmdq(struct arm_smmu_device *smmu,
-			struct arm_smmu_cmdq_ent *ent)
+			struct arm_smmu_cmd *cmd)
 {
 	struct tegra241_cmdqv *cmdqv =
 		container_of(smmu, struct tegra241_cmdqv, smmu);
@@ -411,7 +442,7 @@ tegra241_cmdqv_get_cmdq(struct arm_smmu_device *smmu,
 		return NULL;
 
 	/* Unsupported CMD goes for smmu->cmdq pathway */
-	if (!arm_smmu_cmdq_supports_cmd(&vcmdq->cmdq, ent))
+	if (!arm_smmu_cmdq_supports_cmd(&vcmdq->cmdq, cmd))
 		return NULL;
 	return &vcmdq->cmdq;
 }
@@ -429,16 +460,16 @@ tegra241_cmdqv_get_cmdq(struct arm_smmu_device *smmu,
 static void tegra241_vcmdq_hw_flush_timeout(struct tegra241_vcmdq *vcmdq)
 {
 	struct arm_smmu_device *smmu = &vcmdq->cmdqv->smmu;
-	u64 cmd_sync[CMDQ_ENT_DWORDS] = {};
+	struct arm_smmu_cmd cmd_sync = {};
 
-	cmd_sync[0] = FIELD_PREP(CMDQ_0_OP, CMDQ_OP_CMD_SYNC) |
-		      FIELD_PREP(CMDQ_SYNC_0_CS, CMDQ_SYNC_0_CS_NONE);
+	cmd_sync.data[0] = FIELD_PREP(CMDQ_0_OP, CMDQ_OP_CMD_SYNC) |
+			   FIELD_PREP(CMDQ_SYNC_0_CS, CMDQ_SYNC_0_CS_NONE);
 
 	/*
 	 * It does not hurt to insert another CMD_SYNC, taking advantage of the
 	 * arm_smmu_cmdq_issue_cmdlist() that waits for the CMD_SYNC completion.
 	 */
-	arm_smmu_cmdq_issue_cmdlist(smmu, &smmu->cmdq, cmd_sync, 1, true);
+	arm_smmu_cmdq_issue_cmdlist(smmu, &smmu->cmdq, &cmd_sync, 1, true);
 }
 
 /* This function is for LVCMDQ, so @vcmdq must not be unmapped yet */
@@ -480,6 +511,10 @@ static int tegra241_vcmdq_hw_init(struct tegra241_vcmdq *vcmdq)
 
 	/* Reset VCMDQ */
 	tegra241_vcmdq_hw_deinit(vcmdq);
+
+	/* vintf->hyp_own is a HW state finalized in tegra241_vintf_hw_init() */
+	if (!vcmdq->vintf->hyp_own)
+		vcmdq->cmdq.supports_cmd = tegra241_guest_vcmdq_supports_cmd;
 
 	/* Configure and enable VCMDQ */
 	writeq_relaxed(vcmdq->cmdq.q.q_base, REG_VCMDQ_PAGE1(vcmdq, BASE));
@@ -641,9 +676,6 @@ static int tegra241_vcmdq_alloc_smmu_cmdq(struct tegra241_vcmdq *vcmdq)
 	q->q_base = q->base_dma & VCMDQ_ADDR;
 	q->q_base |= FIELD_PREP(VCMDQ_LOG2SIZE, q->llq.max_n_shift);
 
-	if (!vcmdq->vintf->hyp_own)
-		cmdq->supports_cmd = tegra241_guest_vcmdq_supports_cmd;
-
 	return arm_smmu_cmdq_init(smmu, cmdq);
 }
 
@@ -667,7 +699,6 @@ static int tegra241_vintf_init_lvcmdq(struct tegra241_vintf *vintf, u16 lidx,
 	vcmdq->page0 = cmdqv->base + TEGRA241_VINTFi_LVCMDQ_PAGE0(idx, lidx);
 	vcmdq->page1 = cmdqv->base + TEGRA241_VINTFi_LVCMDQ_PAGE1(idx, lidx);
 
-	vintf->lvcmdqs[lidx] = vcmdq;
 	return 0;
 }
 
@@ -683,7 +714,7 @@ static void tegra241_vintf_free_lvcmdq(struct tegra241_vintf *vintf, u16 lidx)
 	dev_dbg(vintf->cmdqv->dev,
 		"%sdeallocated\n", lvcmdq_error_header(vcmdq, header, 64));
 	/* Guest-owned VCMDQ is free-ed with hw_queue by iommufd core */
-	if (vcmdq->vintf->hyp_own)
+	if (!vcmdq->vintf->idx)
 		kfree(vcmdq);
 }
 
@@ -695,7 +726,7 @@ tegra241_vintf_alloc_lvcmdq(struct tegra241_vintf *vintf, u16 lidx)
 	char header[64];
 	int ret;
 
-	vcmdq = kzalloc(sizeof(*vcmdq), GFP_KERNEL);
+	vcmdq = kzalloc_obj(*vcmdq);
 	if (!vcmdq)
 		return ERR_PTR(-ENOMEM);
 
@@ -706,14 +737,15 @@ tegra241_vintf_alloc_lvcmdq(struct tegra241_vintf *vintf, u16 lidx)
 	/* Build an arm_smmu_cmdq for each LVCMDQ */
 	ret = tegra241_vcmdq_alloc_smmu_cmdq(vcmdq);
 	if (ret)
-		goto deinit_lvcmdq;
+		goto free_vcmdq;
+
+	/* Pairs with the smp_load_acquire() in the error ISR */
+	smp_store_release(&vintf->lvcmdqs[lidx], vcmdq);
 
 	dev_dbg(cmdqv->dev,
 		"%sallocated\n", lvcmdq_error_header(vcmdq, header, 64));
 	return vcmdq;
 
-deinit_lvcmdq:
-	tegra241_vintf_deinit_lvcmdq(vintf, lidx);
 free_vcmdq:
 	kfree(vcmdq);
 	return ERR_PTR(ret);
@@ -724,8 +756,18 @@ free_vcmdq:
 static void tegra241_cmdqv_deinit_vintf(struct tegra241_cmdqv *cmdqv, u16 idx)
 {
 	kfree(cmdqv->vintfs[idx]->lvcmdqs);
+	/*
+	 * Clear the slot and drain any in-flight ISR before returning idx to
+	 * the IDA, so a concurrent create that reuses idx cannot have its
+	 * freshly published VINTF erased here. A plain WRITE_ONCE() suffices
+	 * since clearing the slot publishes no data. This also covers the
+	 * init-failure unwind, which reaches deinit_vintf() without the
+	 * destroy callback.
+	 */
+	WRITE_ONCE(cmdqv->vintfs[idx], NULL);
+	if (cmdqv->irq > 0)
+		synchronize_irq(cmdqv->irq);
 	ida_free(&cmdqv->vintf_ids, idx);
-	cmdqv->vintfs[idx] = NULL;
 }
 
 static int tegra241_cmdqv_init_vintf(struct tegra241_cmdqv *cmdqv, u16 max_idx,
@@ -744,14 +786,15 @@ static int tegra241_cmdqv_init_vintf(struct tegra241_cmdqv *cmdqv, u16 max_idx,
 	vintf->cmdqv = cmdqv;
 	vintf->base = cmdqv->base + TEGRA241_VINTF(idx);
 
-	vintf->lvcmdqs = kcalloc(cmdqv->num_lvcmdqs_per_vintf,
-				 sizeof(*vintf->lvcmdqs), GFP_KERNEL);
+	vintf->lvcmdqs = kzalloc_objs(*vintf->lvcmdqs,
+				      cmdqv->num_lvcmdqs_per_vintf);
 	if (!vintf->lvcmdqs) {
 		ida_free(&cmdqv->vintf_ids, idx);
 		return -ENOMEM;
 	}
 
-	cmdqv->vintfs[idx] = vintf;
+	/* Pairs with the smp_load_acquire() in tegra241_cmdqv_isr() */
+	smp_store_release(&cmdqv->vintfs[idx], vintf);
 	return ret;
 }
 
@@ -762,8 +805,6 @@ static void tegra241_cmdqv_remove_vintf(struct tegra241_cmdqv *cmdqv, u16 idx)
 	struct tegra241_vintf *vintf = cmdqv->vintfs[idx];
 	u16 lidx;
 
-	tegra241_vintf_hw_deinit(vintf);
-
 	/* Remove LVCMDQ resources */
 	for (lidx = 0; lidx < vintf->cmdqv->num_lvcmdqs_per_vintf; lidx++)
 		if (vintf->lvcmdqs[lidx])
@@ -771,7 +812,7 @@ static void tegra241_cmdqv_remove_vintf(struct tegra241_cmdqv *cmdqv, u16 idx)
 
 	dev_dbg(cmdqv->dev, "VINTF%u: deallocated\n", vintf->idx);
 	tegra241_cmdqv_deinit_vintf(cmdqv, idx);
-	if (!vintf->hyp_own) {
+	if (vintf->idx) {
 		mutex_destroy(&vintf->lvcmdq_mutex);
 		ida_destroy(&vintf->sids);
 		/* Guest-owned VINTF is free-ed with viommu by iommufd core */
@@ -780,11 +821,30 @@ static void tegra241_cmdqv_remove_vintf(struct tegra241_cmdqv *cmdqv, u16 idx)
 	}
 }
 
+static void tegra241_cmdqv_hw_disable(struct arm_smmu_device *smmu)
+{
+	struct tegra241_cmdqv *cmdqv =
+		container_of(smmu, struct tegra241_cmdqv, smmu);
+	u16 idx;
+
+	for (idx = 0; idx < cmdqv->num_vintfs; idx++)
+		if (cmdqv->vintfs[idx])
+			tegra241_vintf_hw_deinit(cmdqv->vintfs[idx]);
+}
+
 static void tegra241_cmdqv_remove(struct arm_smmu_device *smmu)
 {
 	struct tegra241_cmdqv *cmdqv =
 		container_of(smmu, struct tegra241_cmdqv, smmu);
 	u16 idx;
+
+	/*
+	 * Free the IRQ before tearing down the VINTFs. free_irq() waits for any
+	 * in-flight tegra241_cmdqv_isr() to finish and blocks new ones, so the
+	 * ISR cannot dereference a VINTF that is freed by the loop below.
+	 */
+	if (cmdqv->irq > 0)
+		free_irq(cmdqv->irq, cmdqv);
 
 	/* Remove VINTF resources */
 	for (idx = 0; idx < cmdqv->num_vintfs; idx++) {
@@ -798,8 +858,6 @@ static void tegra241_cmdqv_remove(struct arm_smmu_device *smmu)
 	/* Remove cmdqv resources */
 	ida_destroy(&cmdqv->vintf_ids);
 
-	if (cmdqv->irq > 0)
-		free_irq(cmdqv->irq, cmdqv);
 	iounmap(cmdqv->base);
 	kfree(cmdqv->vintfs);
 	put_device(cmdqv->dev); /* smmu->impl_dev */
@@ -820,7 +878,7 @@ static void *tegra241_cmdqv_hw_info(struct arm_smmu_device *smmu, u32 *length,
 	if (*type != IOMMU_HW_INFO_TYPE_TEGRA241_CMDQV)
 		return ERR_PTR(-EOPNOTSUPP);
 
-	info = kzalloc(sizeof(*info), GFP_KERNEL);
+	info = kzalloc_obj(*info);
 	if (!info)
 		return ERR_PTR(-ENOMEM);
 
@@ -845,6 +903,7 @@ static struct arm_smmu_impl_ops tegra241_cmdqv_impl_ops = {
 	/* For in-kernel use */
 	.get_secondary_cmdq = tegra241_cmdqv_get_cmdq,
 	.device_reset = tegra241_cmdqv_hw_reset,
+	.device_disable = tegra241_cmdqv_hw_disable,
 	.device_remove = tegra241_cmdqv_remove,
 	/* For user-space use */
 	.hw_info = tegra241_cmdqv_hw_info,
@@ -854,69 +913,6 @@ static struct arm_smmu_impl_ops tegra241_cmdqv_impl_ops = {
 
 /* Probe Functions */
 
-static int tegra241_cmdqv_acpi_is_memory(struct acpi_resource *res, void *data)
-{
-	struct resource_win win;
-
-	return !acpi_dev_resource_address_space(res, &win);
-}
-
-static int tegra241_cmdqv_acpi_get_irqs(struct acpi_resource *ares, void *data)
-{
-	struct resource r;
-	int *irq = data;
-
-	if (*irq <= 0 && acpi_dev_resource_interrupt(ares, 0, &r))
-		*irq = r.start;
-	return 1; /* No need to add resource to the list */
-}
-
-static struct resource *
-tegra241_cmdqv_find_acpi_resource(struct device *dev, int *irq)
-{
-	struct acpi_device *adev = to_acpi_device(dev);
-	struct list_head resource_list;
-	struct resource_entry *rentry;
-	struct resource *res = NULL;
-	int ret;
-
-	INIT_LIST_HEAD(&resource_list);
-	ret = acpi_dev_get_resources(adev, &resource_list,
-				     tegra241_cmdqv_acpi_is_memory, NULL);
-	if (ret < 0) {
-		dev_err(dev, "failed to get memory resource: %d\n", ret);
-		return NULL;
-	}
-
-	rentry = list_first_entry_or_null(&resource_list,
-					  struct resource_entry, node);
-	if (!rentry) {
-		dev_err(dev, "failed to get memory resource entry\n");
-		goto free_list;
-	}
-
-	/* Caller must free the res */
-	res = kzalloc(sizeof(*res), GFP_KERNEL);
-	if (!res)
-		goto free_list;
-
-	*res = *rentry->res;
-
-	acpi_dev_free_resource_list(&resource_list);
-
-	INIT_LIST_HEAD(&resource_list);
-
-	if (irq)
-		ret = acpi_dev_get_resources(adev, &resource_list,
-					     tegra241_cmdqv_acpi_get_irqs, irq);
-	if (ret < 0 || !irq || *irq <= 0)
-		dev_warn(dev, "no interrupt. errors will not be reported\n");
-
-free_list:
-	acpi_dev_free_resource_list(&resource_list);
-	return res;
-}
-
 static int tegra241_cmdqv_init_structures(struct arm_smmu_device *smmu)
 {
 	struct tegra241_cmdqv *cmdqv =
@@ -925,7 +921,7 @@ static int tegra241_cmdqv_init_structures(struct arm_smmu_device *smmu)
 	int lidx;
 	int ret;
 
-	vintf = kzalloc(sizeof(*vintf), GFP_KERNEL);
+	vintf = kzalloc_obj(*vintf);
 	if (!vintf)
 		return -ENOMEM;
 
@@ -933,6 +929,12 @@ static int tegra241_cmdqv_init_structures(struct arm_smmu_device *smmu)
 	ret = tegra241_cmdqv_init_vintf(cmdqv, 0, vintf);
 	if (ret) {
 		dev_err(cmdqv->dev, "failed to init vintf0: %d\n", ret);
+		/*
+		 * tegra241_cmdqv_init_vintf() failed to publish the vintf0 to
+		 * cmdqv->vintfs[], so the probe unwind path that goes through
+		 * cmdqv->vintfs[] would miss it. Free it here.
+		 */
+		kfree(vintf);
 		return ret;
 	}
 
@@ -954,16 +956,22 @@ static int tegra241_cmdqv_init_structures(struct arm_smmu_device *smmu)
 static struct dentry *cmdqv_debugfs_dir;
 #endif
 
-static struct arm_smmu_device *
-__tegra241_cmdqv_probe(struct arm_smmu_device *smmu, struct resource *res,
-		       int irq)
+/*
+ * Probe the CMDQV and reallocate @smmu into the larger cmdqv->smmu.
+ *
+ * devm_krealloc() may relocate and free the original @smmu, so update *smmu to
+ * the new pointer once it succeeds. The error paths after it do the same, so a
+ * caller falling back keeps a live @smmu instead of the freed original.
+ */
+static int __tegra241_cmdqv_probe(struct arm_smmu_device **smmu,
+				  struct resource *res, int irq)
 {
 	static const struct arm_smmu_impl_ops init_ops = {
 		.init_structures = tegra241_cmdqv_init_structures,
 		.device_remove = tegra241_cmdqv_remove,
 	};
-	struct tegra241_cmdqv *cmdqv = NULL;
-	struct arm_smmu_device *new_smmu;
+	struct device *dev = (*smmu)->dev;
+	struct tegra241_cmdqv *cmdqv;
 	void __iomem *base;
 	u32 regval;
 	int ret;
@@ -972,37 +980,29 @@ __tegra241_cmdqv_probe(struct arm_smmu_device *smmu, struct resource *res,
 
 	base = ioremap(res->start, resource_size(res));
 	if (!base) {
-		dev_err(smmu->dev, "failed to ioremap\n");
-		return NULL;
+		dev_err(dev, "failed to ioremap\n");
+		return -ENOMEM;
 	}
 
 	regval = readl(base + TEGRA241_CMDQV_CONFIG);
 	if (disable_cmdqv) {
-		dev_info(smmu->dev, "Detected disable_cmdqv=true\n");
+		dev_info(dev, "Detected disable_cmdqv=true\n");
 		writel(regval & ~CMDQV_EN, base + TEGRA241_CMDQV_CONFIG);
+		ret = -ENODEV;
 		goto iounmap;
 	}
 
-	cmdqv = devm_krealloc(smmu->dev, smmu, sizeof(*cmdqv), GFP_KERNEL);
-	if (!cmdqv)
+	cmdqv = devm_krealloc(dev, *smmu, sizeof(*cmdqv), GFP_KERNEL);
+	if (!cmdqv) {
+		ret = -ENOMEM;
 		goto iounmap;
-	new_smmu = &cmdqv->smmu;
+	}
+	*smmu = &cmdqv->smmu;
 
 	cmdqv->irq = irq;
 	cmdqv->base = base;
-	cmdqv->dev = smmu->impl_dev;
+	cmdqv->dev = (*smmu)->impl_dev;
 	cmdqv->base_phys = res->start;
-
-	if (cmdqv->irq > 0) {
-		ret = request_threaded_irq(irq, NULL, tegra241_cmdqv_isr,
-					   IRQF_ONESHOT, "tegra241-cmdqv",
-					   cmdqv);
-		if (ret) {
-			dev_err(cmdqv->dev, "failed to request irq (%d): %d\n",
-				cmdqv->irq, ret);
-			goto iounmap;
-		}
-	}
 
 	regval = readl_relaxed(REG_CMDQV(cmdqv, PARAM));
 	cmdqv->num_vintfs = 1 << FIELD_GET(CMDQV_NUM_VINTF_LOG2, regval);
@@ -1012,11 +1012,28 @@ __tegra241_cmdqv_probe(struct arm_smmu_device *smmu, struct resource *res,
 		1 << FIELD_GET(CMDQV_NUM_SID_PER_VM_LOG2, regval);
 
 	cmdqv->vintfs =
-		kcalloc(cmdqv->num_vintfs, sizeof(*cmdqv->vintfs), GFP_KERNEL);
-	if (!cmdqv->vintfs)
-		goto free_irq;
+		kzalloc_objs(*cmdqv->vintfs, cmdqv->num_vintfs);
+	if (!cmdqv->vintfs) {
+		ret = -ENOMEM;
+		goto iounmap;
+	}
 
 	ida_init(&cmdqv->vintf_ids);
+
+	/*
+	 * Request the IRQ only after cmdqv->vintfs is allocated and zeroed, so
+	 * the ISR would not walk an uninitialized array.
+	 */
+	if (cmdqv->irq > 0) {
+		ret = request_threaded_irq(irq, NULL, tegra241_cmdqv_isr,
+					   IRQF_ONESHOT, "tegra241-cmdqv",
+					   cmdqv);
+		if (ret) {
+			dev_err(cmdqv->dev, "failed to request irq (%d): %d\n",
+				cmdqv->irq, ret);
+			goto free_vintfs;
+		}
+	}
 
 #ifdef CONFIG_IOMMU_DEBUGFS
 	if (!cmdqv_debugfs_dir) {
@@ -1028,40 +1045,44 @@ __tegra241_cmdqv_probe(struct arm_smmu_device *smmu, struct resource *res,
 #endif
 
 	/* Provide init-level ops only, until tegra241_cmdqv_init_structures */
-	new_smmu->impl_ops = &init_ops;
+	cmdqv->smmu.impl_ops = &init_ops;
 
-	return new_smmu;
+	return 0;
 
-free_irq:
-	if (cmdqv->irq > 0)
-		free_irq(cmdqv->irq, cmdqv);
+free_vintfs:
+	ida_destroy(&cmdqv->vintf_ids);
+	kfree(cmdqv->vintfs);
 iounmap:
 	iounmap(base);
-	return NULL;
+	return ret;
 }
 
 struct arm_smmu_device *tegra241_cmdqv_probe(struct arm_smmu_device *smmu)
 {
-	struct arm_smmu_device *new_smmu;
-	struct resource *res = NULL;
-	int irq;
+	struct platform_device *pdev = to_platform_device(smmu->impl_dev);
+	struct resource *res;
+	int irq, ret;
 
-	if (!smmu->dev->of_node)
-		res = tegra241_cmdqv_find_acpi_resource(smmu->impl_dev, &irq);
-	if (!res)
+	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
+	if (!res) {
+		dev_err(&pdev->dev, "no memory resource found for CMDQV\n");
 		goto out_fallback;
+	}
 
-	new_smmu = __tegra241_cmdqv_probe(smmu, res, irq);
-	kfree(res);
+	irq = platform_get_irq_optional(pdev, 0);
+	if (irq <= 0)
+		dev_warn(&pdev->dev,
+			 "no interrupt. errors will not be reported\n");
 
-	if (new_smmu)
-		return new_smmu;
+	ret = __tegra241_cmdqv_probe(&smmu, res, irq);
+	if (!ret)
+		return smmu;
 
 out_fallback:
 	dev_info(smmu->impl_dev, "Falling back to standard SMMU CMDQ\n");
 	smmu->options &= ~ARM_SMMU_OPT_TEGRA241_CMDQV;
 	put_device(smmu->impl_dev);
-	return ERR_PTR(-ENODEV);
+	return smmu;
 }
 
 /* User space VINTF and VCMDQ Functions */
@@ -1077,6 +1098,9 @@ static size_t tegra241_vintf_get_vcmdq_size(struct iommufd_viommu *viommu,
 static int tegra241_vcmdq_hw_init_user(struct tegra241_vcmdq *vcmdq)
 {
 	char header[64];
+
+	/* Reset VCMDQ */
+	tegra241_vcmdq_hw_deinit(vcmdq);
 
 	/* Configure the vcmdq only; User space does the enabling */
 	writeq_relaxed(vcmdq->cmdq.q.q_base, REG_VCMDQ_PAGE1(vcmdq, BASE));
@@ -1186,13 +1210,15 @@ static int tegra241_vintf_alloc_lvcmdq_user(struct iommufd_hw_queue *hw_queue,
 	if (ret)
 		goto unmap_lvcmdq;
 
+	/* No lockless reader of a user VINTF's lvcmdqs[]; mutex-serialized */
+	vintf->lvcmdqs[lidx] = vcmdq;
+
 	hw_queue->destroy = &tegra241_vintf_destroy_lvcmdq_user;
 	mutex_unlock(&vintf->lvcmdq_mutex);
 	return 0;
 
 unmap_lvcmdq:
 	tegra241_vcmdq_unmap_lvcmdq(vcmdq);
-	tegra241_vintf_deinit_lvcmdq(vintf, lidx);
 undepend_vcmdq:
 	if (vcmdq->prev)
 		iommufd_hw_queue_undepend(vcmdq, vcmdq->prev, core);
@@ -1208,6 +1234,7 @@ static void tegra241_cmdqv_destroy_vintf_user(struct iommufd_viommu *viommu)
 	if (vintf->mmap_offset)
 		iommufd_viommu_destroy_mmap(&vintf->vsmmu.core,
 					    vintf->mmap_offset);
+	tegra241_vintf_hw_deinit(vintf);
 	tegra241_cmdqv_remove_vintf(vintf->cmdqv, vintf->idx);
 }
 
@@ -1234,10 +1261,11 @@ static int tegra241_vintf_init_vsid(struct iommufd_vdevice *vdev)
 	u64 virt_sid = vdev->virt_id;
 	int sidx;
 
-	if (virt_sid > UINT_MAX)
+	if (virt_sid > FIELD_MAX(VINTF_SID_MATCH_VIRT_SID))
 		return -EINVAL;
 
-	WARN_ON_ONCE(master->num_streams != 1);
+	if (master->num_streams != 1)
+		return -EOPNOTSUPP;
 
 	/* Find an empty pair of SID_REPLACE and SID_MATCH */
 	sidx = ida_alloc_max(&vintf->sids, vintf->cmdqv->num_sids_per_vintf - 1,
@@ -1246,7 +1274,9 @@ static int tegra241_vintf_init_vsid(struct iommufd_vdevice *vdev)
 		return sidx;
 
 	writel(stream->id, REG_VINTF(vintf, SID_REPLACE(sidx)));
-	writel(virt_sid << 1 | 0x1, REG_VINTF(vintf, SID_MATCH(sidx)));
+	writel(FIELD_PREP(VINTF_SID_MATCH_VIRT_SID, virt_sid) |
+		       VINTF_SID_MATCH_ENABLE,
+	       REG_VINTF(vintf, SID_MATCH(sidx)));
 	dev_dbg(vintf->cmdqv->dev,
 		"VINTF%u: allocated SID_REPLACE%d for pSID=%x, vSID=%x\n",
 		vintf->idx, sidx, stream->id, (u32)virt_sid);

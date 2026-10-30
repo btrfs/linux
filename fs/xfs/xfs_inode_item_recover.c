@@ -3,7 +3,7 @@
  * Copyright (c) 2000-2006 Silicon Graphics, Inc.
  * All Rights Reserved.
  */
-#include "xfs.h"
+#include "xfs_platform.h"
 #include "xfs_fs.h"
 #include "xfs_shared.h"
 #include "xfs_format.h"
@@ -99,7 +99,7 @@ xfs_recover_inode_owner_change(
 	if (in_f->ilf_fields & XFS_ILOG_DOWNER) {
 		ASSERT(in_f->ilf_fields & XFS_ILOG_DBROOT);
 		error = xfs_bmbt_change_owner(NULL, ip, XFS_DATA_FORK,
-					      ip->i_ino, buffer_list);
+					      I_INO(ip), buffer_list);
 		if (error)
 			goto out_free_ip;
 	}
@@ -107,7 +107,7 @@ xfs_recover_inode_owner_change(
 	if (in_f->ilf_fields & XFS_ILOG_AOWNER) {
 		ASSERT(in_f->ilf_fields & XFS_ILOG_ABROOT);
 		error = xfs_bmbt_change_owner(NULL, ip, XFS_ATTR_FORK,
-					      ip->i_ino, buffer_list);
+					      I_INO(ip), buffer_list);
 		if (error)
 			goto out_free_ip;
 	}
@@ -329,8 +329,8 @@ xlog_recover_inode_commit_pass2(
 	if (item->ri_buf[0].iov_len == sizeof(struct xfs_inode_log_format)) {
 		in_f = item->ri_buf[0].iov_base;
 	} else {
-		in_f = kmalloc(sizeof(struct xfs_inode_log_format),
-				GFP_KERNEL | __GFP_NOFAIL);
+		in_f = kmalloc_obj(struct xfs_inode_log_format,
+				   GFP_KERNEL | __GFP_NOFAIL);
 		need_free = 1;
 		error = xfs_inode_item_format_convert(&item->ri_buf[0], in_f);
 		if (error)
@@ -586,7 +586,6 @@ out_owner_change:
 	}
 
 	ASSERT(bp->b_mount == mp);
-	bp->b_flags |= _XBF_LOGRECOVERY;
 	xfs_buf_delwri_queue(bp, buffer_list);
 
 out_release:

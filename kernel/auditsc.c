@@ -150,7 +150,7 @@ static const struct audit_nfcfgop_tab audit_nfcfgs[] = {
 
 static int audit_match_perm(struct audit_context *ctx, int mask)
 {
-	unsigned n;
+	unsigned int n;
 
 	if (unlikely(!ctx))
 		return 0;
@@ -255,7 +255,7 @@ static int grow_tree_refs(struct audit_context *ctx)
 {
 	struct audit_tree_refs *p = ctx->trees;
 
-	ctx->trees = kzalloc(sizeof(struct audit_tree_refs), GFP_KERNEL);
+	ctx->trees = kzalloc_obj(struct audit_tree_refs);
 	if (!ctx->trees) {
 		ctx->trees = p;
 		return 0;
@@ -886,7 +886,7 @@ static int audit_filter_inode_name(struct task_struct *tsk,
 				   struct audit_names *n,
 				   struct audit_context *ctx)
 {
-	int h = audit_hash_ino((u32)n->ino);
+	int h = audit_hash_ino(n->ino);
 	struct list_head *list = &audit_inode_hash[h];
 
 	return __audit_filter_op(tsk, ctx, list, n, ctx->major);
@@ -1032,7 +1032,7 @@ static inline struct audit_context *audit_alloc_context(enum audit_state state)
 {
 	struct audit_context *context;
 
-	context = kzalloc(sizeof(*context), GFP_KERNEL);
+	context = kzalloc_obj(*context);
 	if (!context)
 		return NULL;
 	context->context = AUDIT_CTX_UNUSED;
@@ -1534,7 +1534,7 @@ static void audit_log_name(struct audit_context *context, struct audit_names *n,
 		audit_log_format(ab, " name=(null)");
 
 	if (n->ino != AUDIT_INO_UNSET)
-		audit_log_format(ab, " inode=%lu dev=%02x:%02x mode=%#ho ouid=%u ogid=%u rdev=%02x:%02x",
+		audit_log_format(ab, " inode=%llu dev=%02x:%02x mode=%#ho ouid=%u ogid=%u rdev=%02x:%02x",
 				 n->ino,
 				 MAJOR(n->dev),
 				 MINOR(n->dev),
@@ -2153,7 +2153,7 @@ static struct audit_names *audit_alloc_name(struct audit_context *context,
 		aname = &context->preallocated_names[context->name_count];
 		memset(aname, 0, sizeof(*aname));
 	} else {
-		aname = kzalloc(sizeof(*aname), GFP_NOFS);
+		aname = kzalloc_obj(*aname, GFP_NOFS);
 		if (!aname)
 			return NULL;
 		aname->should_free = true;
@@ -2167,29 +2167,6 @@ static struct audit_names *audit_alloc_name(struct audit_context *context,
 	if (!context->pwd.dentry)
 		get_fs_pwd(current->fs, &context->pwd);
 	return aname;
-}
-
-/**
- * __audit_reusename - fill out filename with info from existing entry
- * @uptr: userland ptr to pathname
- *
- * Search the audit_names list for the current audit context. If there is an
- * existing entry with a matching "uptr" then return the filename
- * associated with that audit_name. If not, return NULL.
- */
-struct filename *
-__audit_reusename(const __user char *uptr)
-{
-	struct audit_context *context = audit_context();
-	struct audit_names *n;
-
-	list_for_each_entry(n, &context->names_list, list) {
-		if (!n->name)
-			continue;
-		if (n->name->uptr == uptr)
-			return refname(n->name);
-	}
-	return NULL;
 }
 
 /**
@@ -2214,7 +2191,7 @@ void __audit_getname(struct filename *name)
 	n->name = name;
 	n->name_len = AUDIT_NAME_FULL;
 	name->aname = n;
-	refname(name);
+	name->refcnt++;
 }
 
 static inline int audit_copy_fcaps(struct audit_names *name,
@@ -2346,7 +2323,7 @@ out_alloc:
 		return;
 	if (name) {
 		n->name = name;
-		refname(name);
+		name->refcnt++;
 	}
 
 out:
@@ -2416,41 +2393,36 @@ void __audit_inode_child(struct inode *parent,
 	if (inode)
 		handle_one(inode);
 
-	/* look for a parent entry first */
-	list_for_each_entry(n, &context->names_list, list) {
-		if (!n->name ||
-		    (n->type != AUDIT_TYPE_PARENT &&
-		     n->type != AUDIT_TYPE_UNKNOWN))
-			continue;
-
-		if (n->ino == parent->i_ino && n->dev == parent->i_sb->s_dev &&
-		    !audit_compare_dname_path(dname,
-					      n->name->name, n->name_len)) {
-			if (n->type == AUDIT_TYPE_UNKNOWN)
-				n->type = AUDIT_TYPE_PARENT;
-			found_parent = n;
-			break;
-		}
-	}
-
-	cond_resched();
-
-	/* is there a matching child entry? */
 	list_for_each_entry(n, &context->names_list, list) {
 		/* can only match entries that have a name */
-		if (!n->name ||
-		    (n->type != type && n->type != AUDIT_TYPE_UNKNOWN))
+		if (!n->name)
 			continue;
 
-		if (!strcmp(dname->name, n->name->name) ||
-		    !audit_compare_dname_path(dname, n->name->name,
+		/* look for a parent entry first */
+		if (!found_parent &&
+		    (n->type == AUDIT_TYPE_PARENT || n->type == AUDIT_TYPE_UNKNOWN) &&
+		    (n->ino == parent->i_ino && n->dev == parent->i_sb->s_dev &&
+		     !audit_compare_dname_path(dname, n->name->name, n->name_len))) {
+			n->type = AUDIT_TYPE_PARENT;
+			found_parent = n;
+			if (found_child)
+				break;
+			continue;
+		}
+
+		/* is there a matching child entry? */
+		if (!found_child &&
+		    (n->type == type || n->type == AUDIT_TYPE_UNKNOWN) &&
+		    (!strcmp(dname->name, n->name->name) ||
+		     !audit_compare_dname_path(dname, n->name->name,
 						found_parent ?
 						found_parent->name_len :
-						AUDIT_NAME_FULL)) {
+						AUDIT_NAME_FULL))) {
 			if (n->type == AUDIT_TYPE_UNKNOWN)
 				n->type = type;
 			found_child = n;
-			break;
+			if (found_parent)
+				break;
 		}
 	}
 
@@ -2473,7 +2445,7 @@ void __audit_inode_child(struct inode *parent,
 		if (found_parent) {
 			found_child->name = found_parent->name;
 			found_child->name_len = AUDIT_NAME_FULL;
-			refname(found_child->name);
+			found_child->name->refcnt++;
 		}
 	}
 
@@ -2678,7 +2650,7 @@ int __audit_sockaddr(int len, void *a)
 	struct audit_context *context = audit_context();
 
 	if (!context->sockaddr) {
-		void *p = kmalloc(sizeof(struct sockaddr_storage), GFP_KERNEL);
+		void *p = kmalloc_obj(struct sockaddr_storage);
 
 		if (!p)
 			return -ENOMEM;
@@ -2732,7 +2704,7 @@ int audit_signal_info_syscall(struct task_struct *t)
 
 	axp = (void *)ctx->aux_pids;
 	if (!axp || axp->pid_count == AUDIT_AUX_PIDS) {
-		axp = kzalloc(sizeof(*axp), GFP_ATOMIC);
+		axp = kzalloc_obj(*axp, GFP_ATOMIC);
 		if (!axp)
 			return -ENOMEM;
 
@@ -2740,7 +2712,8 @@ int audit_signal_info_syscall(struct task_struct *t)
 		axp->d.next = ctx->aux_pids;
 		ctx->aux_pids = (void *)axp;
 	}
-	BUG_ON(axp->pid_count >= AUDIT_AUX_PIDS);
+	if (WARN_ON_ONCE(axp->pid_count >= AUDIT_AUX_PIDS))
+		return -EINVAL;
 
 	axp->target_pid[axp->pid_count] = task_tgid_nr(t);
 	axp->target_auid[axp->pid_count] = audit_get_loginuid(t);
@@ -2771,7 +2744,7 @@ int __audit_log_bprm_fcaps(struct linux_binprm *bprm,
 	struct audit_context *context = audit_context();
 	struct cpu_vfs_cap_data vcaps;
 
-	ax = kmalloc(sizeof(*ax), GFP_KERNEL);
+	ax = kmalloc_obj(*ax);
 	if (!ax)
 		return -ENOMEM;
 
@@ -2814,7 +2787,7 @@ void __audit_log_capset(const struct cred *new, const struct cred *old)
 
 	context->capset.pid = task_tgid_nr(current);
 	context->capset.cap.effective   = new->cap_effective;
-	context->capset.cap.inheritable = new->cap_effective;
+	context->capset.cap.inheritable = new->cap_inheritable;
 	context->capset.cap.permitted   = new->cap_permitted;
 	context->capset.cap.ambient     = new->cap_ambient;
 	context->type = AUDIT_CAPSET;

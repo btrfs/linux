@@ -22,6 +22,7 @@
 #include <linux/initrd.h>
 #include <linux/security.h>
 #include <linux/kmemleak.h>
+#include <asm/fixmap.h>
 #include "internal.h"
 
 #ifdef CONFIG_ACPI_CUSTOM_DSDT
@@ -408,7 +409,7 @@ static const char table_sigs[][ACPI_NAMESEG_SIZE] __nonstring_array __initconst 
 	ACPI_SIG_PSDT, ACPI_SIG_RSDT, ACPI_SIG_XSDT, ACPI_SIG_SSDT,
 	ACPI_SIG_IORT, ACPI_SIG_NFIT, ACPI_SIG_HMAT, ACPI_SIG_PPTT,
 	ACPI_SIG_NHLT, ACPI_SIG_AEST, ACPI_SIG_CEDT, ACPI_SIG_AGDI,
-	ACPI_SIG_NBFT, ACPI_SIG_SWFT};
+	ACPI_SIG_NBFT, ACPI_SIG_SWFT, ACPI_SIG_MPAM};
 
 #define ACPI_HEADER_SIZE sizeof(struct acpi_table_header)
 

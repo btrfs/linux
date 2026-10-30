@@ -21,13 +21,14 @@ by free_netdev(). This is required to handle the pathological case cleanly
 alloc_netdev_mqs() / alloc_netdev() reserve extra space for driver
 private data which gets freed when the network device is freed. If
 separately allocated data is attached to the network device
-(netdev_priv()) then it is up to the module exit handler to free that.
+(extra pointers stored in the device private struct) then it is up
+to the module exit handler to free that.
 
 There are two groups of APIs for registering struct net_device.
 First group can be used in normal contexts where ``rtnl_lock`` is not already
 held: register_netdev(), unregister_netdev().
 Second group can be used when ``rtnl_lock`` is already held:
-register_netdevice(), unregister_netdevice(), free_netdevice().
+register_netdevice(), unregister_netdevice(), free_netdev().
 
 Simple drivers
 --------------
@@ -58,6 +59,7 @@ the register_netdev(), and unregister_netdev() functions:
       goto err_undo;
 
     /* net_device is visible to the user! */
+    return 0;
 
   err_undo:
     /* ... undo the device setup ... */
@@ -73,14 +75,14 @@ the register_netdev(), and unregister_netdev() functions:
 
 Note that after calling register_netdev() the device is visible in the system.
 Users can open it and start sending / receiving traffic immediately,
-or run any other callback, so all initialization must be done prior to
+or run any other callback, so all initialization must be **complete** prior to
 registration.
 
 unregister_netdev() closes the device and waits for all users to be done
 with it. The memory of struct net_device itself may still be referenced
 by sysfs but all operations on that device will fail.
 
-free_netdev() can be called after unregister_netdev() returns on when
+free_netdev() can be called after unregister_netdev() returns or when
 register_netdev() failed.
 
 Device management under RTNL
@@ -157,7 +159,7 @@ register_netdevice() fails. The callback may be invoked with or without
 There is no explicit constructor callback, driver "constructs" the private
 netdev state after allocating it and before registration.
 
-Setting struct net_device.needs_free_netdev makes core call free_netdevice()
+Setting struct net_device.needs_free_netdev makes core call free_netdev()
 automatically after unregister_netdevice() when all references to the device
 are gone. It only takes effect after a successful call to register_netdevice()
 so if register_netdevice() fails driver is responsible for calling
@@ -256,7 +258,7 @@ ndo_eth_ioctl:
 	lock if the driver implements queue management or shaper API.
 	Context: process
 
-ndo_get_stats:
+ndo_get_stats / ndo_get_stats64:
 	Synchronization: RCU (can be called concurrently with the stats
 	update path).
 	Context: atomic (can't sleep under RCU)
@@ -264,12 +266,9 @@ ndo_get_stats:
 ndo_start_xmit:
 	Synchronization: __netif_tx_lock spinlock.
 
-	When the driver sets dev->lltx this will be
-	called without holding netif_tx_lock. In this case the driver
-	has to lock by itself when needed.
-	The locking there should also properly protect against
-	set_rx_mode. WARNING: use of dev->lltx is deprecated.
-	Don't use it for new drivers.
+	When the driver sets dev->lltx this will be called without holding
+	netif_tx_lock. dev->lltx is meant for software drivers only, since
+	they often have no per-queue state.
 
 	Context: Process with BHs disabled or BH (timer),
 		 will be called with interrupts disabled by netconsole.
@@ -289,12 +288,29 @@ ndo_tx_timeout:
 ndo_set_rx_mode:
 	Synchronization: netif_addr_lock spinlock.
 	Context: BHs disabled
+	Notes: Deprecated in favor of ndo_set_rx_mode_async which runs
+	in process context.
+
+ndo_set_rx_mode_async:
+	Synchronization: rtnl_lock() semaphore. In addition, netdev instance
+	lock if the driver implements queue management or shaper API.
+	Context: process (from a work queue)
+	Notes: Async version of ndo_set_rx_mode which runs in process
+	context. Receives snapshots of the unicast and multicast address lists.
+
+ndo_change_rx_flags:
+	Synchronization: rtnl_lock() semaphore. In addition, netdev instance
+	lock if the driver implements queue management or shaper API.
 
 ndo_setup_tc:
-	``TC_SETUP_BLOCK`` and ``TC_SETUP_FT`` are running under NFT locks
-	(i.e. no ``rtnl_lock`` and no device instance lock). The rest of
-	``tc_setup_type`` types run under netdev instance lock if the driver
+	Locking depends on ``tc_setup_type``. For most types the callback
+	is invoked under ``rtnl_lock`` and netdev instance lock if the driver
 	implements queue management or shaper API.
+
+	For ``TC_SETUP_BLOCK`` and ``TC_SETUP_FT`` ``rtnl_lock`` may or
+	may not be held, and the netdev instance lock is not held.
+	``TC_SETUP_BLOCK`` runs under ``block->cb_lock`` and ``TC_SETUP_FT``
+	runs under ``flowtable->flow_block_lock``.
 
 Most ndo callbacks not specified in the list above are running
 under ``rtnl_lock``. In addition, netdev instance lock is taken as well if
@@ -329,11 +345,13 @@ by setting ``request_ops_lock`` to true. Code comments and docs refer
 to drivers which have ops called under the instance lock as "ops locked".
 See also the documentation of the ``lock`` member of struct net_device.
 
-In the future, there will be an option for individual
-drivers to opt out of using ``rtnl_lock`` and instead perform their control
-operations directly under the netdev instance lock.
+There is also a case of taking two per-netdev locks in sequence when netdev
+queues are leased, that is, the netdev-scope lock is taken for both the
+virtual and the physical device. To prevent deadlocks, the virtual device's
+lock must always be acquired before the physical device's (see
+``netdev_nl_queue_create_doit``).
 
-Devices drivers are encouraged to rely on the instance lock where possible.
+Device drivers are encouraged to rely on the instance lock where possible.
 
 For the (mostly software) drivers that need to interact with the core stack,
 there are two sets of interfaces: ``dev_xxx``/``netdev_xxx`` and ``netif_xxx``
@@ -353,9 +371,16 @@ the instance lock.
 struct ethtool_ops
 ------------------
 
-Similarly to ``ndos`` the instance lock is only held for select drivers.
-For "ops locked" drivers all ethtool ops without exceptions should
-be called under the instance lock.
+For non-"ops locked" drivers ethtool_ops are executed under ``rtnl_lock``.
+
+For "ops locked" drivers, ``ethtool_ops``, unlike ``ndos``, run under
+the instance lock **only**. Drivers may request that ``rtnl_lock``
+is held around specific operations (both SET and GET) by setting
+appropriate bits in ``ethtool_ops::op_needs_rtnl`` (if the necessary
+``ETHTOOL_OP_NEEDS_RTNL_*`` bit doesn't exist, just add it).
+Commonly used core helpers which force drivers to selectively opt-in to
+``rtnl_lock`` protection include ``netdev_update_features()``,
+``netif_set_real_num_tx_queues()``, and phylink helpers.
 
 struct netdev_stat_ops
 ----------------------
@@ -393,11 +418,19 @@ The following netdev notifiers are always run under the instance lock:
 For devices with locked ops, currently only the following notifiers are
 running under the lock:
 * ``NETDEV_CHANGE``
+* ``NETDEV_CHANGENAME``
 * ``NETDEV_REGISTER``
 * ``NETDEV_UP``
+* ``NETDEV_DOWN``
+* ``NETDEV_GOING_DOWN``
 
 The following notifiers are running without the lock:
 * ``NETDEV_UNREGISTER``
+
+Many SW devices (uppers) catch their lower's ``NETDEV_UNREGISTER``
+events and may interact with them via ``dev_*()`` handlers, which take
+the instance lock. Until we convert these devices to ``netif_*()`` variants,
+``NETDEV_UNREGISTER`` stays unlocked.
 
 There are no clear expectations for the remaining notifiers. Notifiers not on
 the list may run with or without the instance lock, potentially even invoking
@@ -406,6 +439,8 @@ The goal is to eventually ensure that all (or most, with a few documented
 exceptions) notifiers run under the instance lock. Please extend this
 documentation whenever you make explicit assumption about lock being held
 from a notifier.
+
+Drivers **must not** generate nested notifications of the ops-locked types.
 
 NETDEV_INTERNAL symbol namespace
 ================================

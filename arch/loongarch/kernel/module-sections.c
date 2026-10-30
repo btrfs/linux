@@ -62,16 +62,14 @@ Elf_Addr module_emit_plt_entry(struct module *mod, Elf_Shdr *sechdrs, Elf_Addr v
 	return (Elf_Addr)&plt[nr];
 }
 
-#define cmp_3way(a, b)  ((a) < (b) ? -1 : (a) > (b))
-
 static int compare_rela(const void *x, const void *y)
 {
 	int ret;
 	const Elf_Rela *rela_x = x, *rela_y = y;
 
-	ret = cmp_3way(rela_x->r_info, rela_y->r_info);
+	ret = cmp_int(rela_x->r_info, rela_y->r_info);
 	if (ret == 0)
-		ret = cmp_3way(rela_x->r_addend, rela_y->r_addend);
+		ret = cmp_int(rela_x->r_addend, rela_y->r_addend);
 
 	return ret;
 }
@@ -93,6 +91,7 @@ static void count_max_entries(Elf_Rela *relas, int num,
 			(*plts)++;
 			break;
 		case R_LARCH_GOT_PC_HI20:
+		case R_LARCH_GOT_PCADD_HI20:
 			(*gots)++;
 			break;
 		default:

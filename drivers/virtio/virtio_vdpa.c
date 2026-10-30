@@ -80,7 +80,7 @@ static void virtio_vdpa_set_status(struct virtio_device *vdev, u8 status)
 {
 	struct vdpa_device *vdpa = vd_get_vdpa(vdev);
 
-	return vdpa_set_status(vdpa, status);
+	vdpa_set_status(vdpa, status);
 }
 
 static void virtio_vdpa_reset(struct virtio_device *vdev)
@@ -287,7 +287,7 @@ create_affinity_masks(unsigned int nvecs, struct irq_affinity *affd)
 	if (!affvecs)
 		return NULL;
 
-	masks = kcalloc(nvecs, sizeof(*masks), GFP_KERNEL);
+	masks = kzalloc_objs(*masks, nvecs);
 	if (!masks)
 		return NULL;
 
@@ -352,7 +352,7 @@ static int virtio_vdpa_find_vqs(struct virtio_device *vdev, unsigned int nvqs,
 			continue;
 		}
 
-		vqs[i] = virtio_vdpa_setup_vq(vdev, queue_idx++, vqi->callback,
+		vqs[i] = virtio_vdpa_setup_vq(vdev, queue_idx, vqi->callback,
 					      vqi->name, vqi->ctx);
 		if (IS_ERR(vqs[i])) {
 			err = PTR_ERR(vqs[i]);
@@ -360,7 +360,8 @@ static int virtio_vdpa_find_vqs(struct virtio_device *vdev, unsigned int nvqs,
 		}
 
 		if (has_affinity)
-			ops->set_vq_affinity(vdpa, i, &masks[i]);
+			ops->set_vq_affinity(vdpa, queue_idx, &masks[i]);
+		queue_idx++;
 	}
 
 	cb.callback = virtio_vdpa_config_cb;
@@ -462,7 +463,7 @@ static int virtio_vdpa_probe(struct vdpa_device *vdpa)
 	struct virtio_vdpa_device *vd_dev, *reg_dev = NULL;
 	int ret = -EINVAL;
 
-	vd_dev = kzalloc(sizeof(*vd_dev), GFP_KERNEL);
+	vd_dev = kzalloc_obj(*vd_dev);
 	if (!vd_dev)
 		return -ENOMEM;
 

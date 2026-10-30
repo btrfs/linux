@@ -402,8 +402,6 @@ enum drm_hdmi_broadcast_rgb {
 
 const char *
 drm_hdmi_connector_get_broadcast_rgb_name(enum drm_hdmi_broadcast_rgb broadcast_rgb);
-const char *
-drm_hdmi_connector_get_output_format_name(enum hdmi_colorspace fmt);
 
 /**
  * struct drm_monitor_range_info - Panel's Monitor range in EDID for
@@ -557,6 +555,102 @@ enum drm_colorspace {
 };
 
 /**
+ * enum drm_output_color_format - Output Color Format
+ *
+ * This enum is a consolidated color format list supported by
+ * connectors. It's only ever really been used for HDMI and DP so far,
+ * so it's not exhaustive and can be extended to represent other formats
+ * in the future.
+ *
+ *
+ * @DRM_OUTPUT_COLOR_FORMAT_RGB444:
+ *   RGB output format
+ * @DRM_OUTPUT_COLOR_FORMAT_YCBCR444:
+ *   YCbCr 4:4:4 output format (ie. not subsampled)
+ * @DRM_OUTPUT_COLOR_FORMAT_YCBCR422:
+ *   YCbCr 4:2:2 output format (ie. with horizontal subsampling)
+ * @DRM_OUTPUT_COLOR_FORMAT_YCBCR420:
+ *   YCbCr 4:2:0 output format (ie. with horizontal and vertical subsampling)
+ * @DRM_OUTPUT_COLOR_FORMAT_COUNT:
+ *   Number of valid output color format values in this enum
+ */
+enum drm_output_color_format {
+	DRM_OUTPUT_COLOR_FORMAT_RGB444 = 0,
+	DRM_OUTPUT_COLOR_FORMAT_YCBCR444,
+	DRM_OUTPUT_COLOR_FORMAT_YCBCR422,
+	DRM_OUTPUT_COLOR_FORMAT_YCBCR420,
+	DRM_OUTPUT_COLOR_FORMAT_COUNT,
+};
+
+/**
+ * enum drm_connector_color_format - Connector Color Format Request
+ *
+ * This enum, unlike &enum drm_output_color_format, is used to specify requests
+ * for a specific color format on a connector through the DRM "color format"
+ * property. The difference is that it has an "AUTO" value to specify that
+ * no specific choice has been made.
+ */
+enum drm_connector_color_format {
+	/**
+	 * @DRM_CONNECTOR_COLOR_FORMAT_AUTO: The driver or display protocol
+	 * helpers should pick a suitable color format. All implementations of a
+	 * specific display protocol must behave the same way with "AUTO", but
+	 * different display protocols do not necessarily have the same "AUTO"
+	 * semantics.
+	 *
+	 * For HDMI, "AUTO" picks RGB, but falls back to YCbCr 4:2:0 if the
+	 * bandwidth required for full-scale RGB is not available, or the mode
+	 * is YCbCr 4:2:0-only, as long as the mode and output both support
+	 * YCbCr 4:2:0.
+	 *
+	 * For display protocols other than HDMI, the recursive bridge chain
+	 * format selection picks the first chain of bridge formats that works,
+	 * as has already been the case before the introduction of the "color
+	 * format" property. Non-HDMI bridges should therefore either sort their
+	 * bus output formats by preference, or agree on a unified auto format
+	 * selection logic that's implemented in a common state helper (like
+	 * how HDMI does it).
+	 */
+	DRM_CONNECTOR_COLOR_FORMAT_AUTO = 0,
+
+	/**
+	 * @DRM_CONNECTOR_COLOR_FORMAT_RGB444: RGB output format. The
+	 * quantization range depends on the value of the "Broadcast RGB"
+	 * property if it is present on the connector.
+	 */
+	DRM_CONNECTOR_COLOR_FORMAT_RGB444,
+
+	/**
+	 * @DRM_CONNECTOR_COLOR_FORMAT_YCBCR444: YCbCr 4:4:4 output format (ie.
+	 * not subsampled). Quantization range is "Limited" by default.
+	 */
+	DRM_CONNECTOR_COLOR_FORMAT_YCBCR444,
+
+	/**
+	 * @DRM_CONNECTOR_COLOR_FORMAT_YCBCR422: YCbCr 4:2:2 output format (ie.
+	 * with horizontal subsampling). Quantization range is "Limited" by
+	 * default.
+	 */
+	DRM_CONNECTOR_COLOR_FORMAT_YCBCR422,
+
+	/**
+	 * @DRM_CONNECTOR_COLOR_FORMAT_YCBCR420: YCbCr 4:2:0 output format (ie.
+	 * with horizontal and vertical subsampling). Quantization range is
+	 * "Limited" by default.
+	 */
+	DRM_CONNECTOR_COLOR_FORMAT_YCBCR420,
+
+	/**
+	 * @DRM_CONNECTOR_COLOR_FORMAT_COUNT: Number of valid connector color
+	 * format values in this enum
+	 */
+	DRM_CONNECTOR_COLOR_FORMAT_COUNT,
+};
+
+const char *
+drm_hdmi_connector_get_output_format_name(enum drm_output_color_format fmt);
+
+/**
  * enum drm_bus_flags - bus_flags info for &drm_display_info
  *
  * This enum defines signal polarities and clock edge information for signals on
@@ -668,6 +762,39 @@ enum drm_bus_flags {
 };
 
 /**
+ * struct drm_amd_vsdb_info - AMD-specific VSDB information
+ *
+ * This structure holds information parsed from the AMD Vendor-Specific Data
+ * Block (VSDB) version 3.
+ */
+struct drm_amd_vsdb_info {
+	/**
+	 * @version: Version of the Vendor-Specific Data Block (VSDB)
+	 */
+	u8 version;
+
+	/**
+	 * @replay_mode: Panel Replay supported
+	 */
+	bool replay_mode;
+
+	/**
+	 * @panel_type: Panel technology type
+	 */
+	u8 panel_type;
+
+	/**
+	 * @luminance_range1: Luminance for max back light
+	 */
+	struct drm_luminance_range_info luminance_range1;
+
+	/**
+	 * @luminance_range2: Luminance for min back light
+	 */
+	struct drm_luminance_range_info luminance_range2;
+};
+
+/**
  * struct drm_display_info - runtime data about the connected sink
  *
  * Describes a given display (e.g. CRT or flat panel) and its limitations. For
@@ -699,11 +826,6 @@ struct drm_display_info {
 	 */
 	enum subpixel_order subpixel_order;
 
-#define DRM_COLOR_FORMAT_RGB444		(1<<0)
-#define DRM_COLOR_FORMAT_YCBCR444	(1<<1)
-#define DRM_COLOR_FORMAT_YCBCR422	(1<<2)
-#define DRM_COLOR_FORMAT_YCBCR420	(1<<3)
-
 	/**
 	 * @panel_orientation: Read only connector property for built-in panels,
 	 * indicating the orientation of the panel vs the device's casing.
@@ -714,10 +836,11 @@ struct drm_display_info {
 	int panel_orientation;
 
 	/**
-	 * @color_formats: HDMI Color formats, selects between RGB and YCrCb
-	 * modes. Used DRM_COLOR_FORMAT\_ defines, which are _not_ the same ones
-	 * as used to describe the pixel format in framebuffers, and also don't
-	 * match the formats in @bus_formats which are shared with v4l.
+	 * @color_formats: HDMI Color formats, selects between RGB and
+	 * YCbCr modes. Uses a bitmask of DRM_OUTPUT_COLOR_FORMAT\_
+	 * defines, which are _not_ the same ones as used to describe
+	 * the pixel format in framebuffers, and also don't match the
+	 * formats in @bus_formats which are shared with v4l.
 	 */
 	u32 color_formats;
 
@@ -861,6 +984,17 @@ struct drm_display_info {
 	 * Defaults to CEC_PHYS_ADDR_INVALID (0xffff).
 	 */
 	u16 source_physical_address;
+
+	/**
+	 * @amd_vsdb: AMD-specific VSDB information.
+	 */
+	struct drm_amd_vsdb_info amd_vsdb;
+
+	/**
+	 * @panel_type: Panel type from DisplayID Display Parameters
+	 * Data Block (tag 0x21). Uses DRM_MODE_PANEL_TYPE_* constants.
+	 */
+	u8 panel_type;
 };
 
 int drm_display_info_set_bus_formats(struct drm_display_info *info,
@@ -991,7 +1125,7 @@ struct drm_connector_hdmi_state {
 	/**
 	 * @output_format: Pixel format to output in.
 	 */
-	enum hdmi_colorspace output_format;
+	enum drm_output_color_format output_format;
 
 	/**
 	 * @tmds_char_rate: TMDS Character Rate, in Hz.
@@ -1038,8 +1172,8 @@ struct drm_connector_state {
 	 */
 	enum drm_link_status link_status;
 
-	/** @state: backpointer to global drm_atomic_state */
-	struct drm_atomic_state *state;
+	/** @state: backpointer to global drm_atomic_commit */
+	struct drm_atomic_commit *state;
 
 	/**
 	 * @commit: Tracks the pending commit to prevent use-after-free conditions.
@@ -1106,6 +1240,13 @@ struct drm_connector_state {
 	 * to wider color gamuts like BT2020.
 	 */
 	enum drm_colorspace colorspace;
+
+	/**
+	 * @color_format: State variable for Connector property to request
+	 * color format change on Sink. This is most commonly used to switch
+	 * between RGB to YUV and vice-versa.
+	 */
+	enum drm_connector_color_format color_format;
 
 	/**
 	 * @writeback_job: Writeback job for writeback connectors
@@ -1222,6 +1363,45 @@ struct drm_connector_cec_funcs {
 };
 
 /**
+ * struct drm_connector_infoframe_funcs - InfoFrame-related functions
+ */
+struct drm_connector_infoframe_funcs {
+	/**
+	 * @clear_infoframe:
+	 *
+	 * This callback is invoked through
+	 * @drm_atomic_helper_connector_hdmi_update_infoframes during a
+	 * commit to clear the infoframes into the hardware. It will be
+	 * called once for each frame type to be disabled.
+	 *
+	 * The @clear_infoframe callback is mandatory for AVI and HDMI-VS
+	 * InfoFrame types.
+	 *
+	 * Returns:
+	 * 0 on success, a negative error code otherwise
+	 */
+	int (*clear_infoframe)(struct drm_connector *connector);
+
+	/**
+	 * @write_infoframe:
+	 *
+	 * This callback is invoked through
+	 * @drm_atomic_helper_connector_hdmi_update_infoframes during a
+	 * commit to program the infoframes into the hardware. It will
+	 * be called for every updated infoframe type.
+	 *
+	 * The @write_infoframe callback is mandatory for AVI and HDMI-VS
+	 * InfoFrame types.
+	 *
+	 * Returns:
+	 * 0 on success, a negative error code otherwise
+	 */
+	int (*write_infoframe)(struct drm_connector *connector,
+			       const u8 *buffer, size_t len);
+
+};
+
+/**
  * struct drm_connector_hdmi_funcs - drm_hdmi_connector control functions
  */
 struct drm_connector_hdmi_funcs {
@@ -1245,41 +1425,6 @@ struct drm_connector_hdmi_funcs {
 				unsigned long long tmds_rate);
 
 	/**
-	 * @clear_infoframe:
-	 *
-	 * This callback is invoked through
-	 * @drm_atomic_helper_connector_hdmi_update_infoframes during a
-	 * commit to clear the infoframes into the hardware. It will be
-	 * called multiple times, once for every disabled infoframe
-	 * type.
-	 *
-	 * The @clear_infoframe callback is optional.
-	 *
-	 * Returns:
-	 * 0 on success, a negative error code otherwise
-	 */
-	int (*clear_infoframe)(struct drm_connector *connector,
-			       enum hdmi_infoframe_type type);
-
-	/**
-	 * @write_infoframe:
-	 *
-	 * This callback is invoked through
-	 * @drm_atomic_helper_connector_hdmi_update_infoframes during a
-	 * commit to program the infoframes into the hardware. It will
-	 * be called multiple times, once for every updated infoframe
-	 * type.
-	 *
-	 * The @write_infoframe callback is mandatory.
-	 *
-	 * Returns:
-	 * 0 on success, a negative error code otherwise
-	 */
-	int (*write_infoframe)(struct drm_connector *connector,
-			       enum hdmi_infoframe_type type,
-			       const u8 *buffer, size_t len);
-
-	/**
 	 * @read_edid:
 	 *
 	 * This callback is used by the framework as a replacement for reading
@@ -1293,6 +1438,47 @@ struct drm_connector_hdmi_funcs {
 	 * Valid EDID on success, NULL in case of failure.
 	 */
 	const struct drm_edid *(*read_edid)(struct drm_connector *connector);
+
+	/**
+	 * @avi:
+	 *
+	 * Set of callbacks for handling the AVI InfoFrame. These callbacks are
+	 * mandatory.
+	 */
+	struct drm_connector_infoframe_funcs avi;
+
+	/**
+	 * @hdmi:
+	 *
+	 * Set of callbacks for handling the HDMI Vendor-Specific InfoFrame.
+	 * These callbacks are mandatory.
+	 */
+	struct drm_connector_infoframe_funcs hdmi;
+
+	/**
+	 * @audio:
+	 *
+	 * Set of callbacks for handling the Audio InfoFrame. These callbacks
+	 * are optional, but they are required for drivers which use
+	 * drm_atomic_helper_connector_hdmi_update_audio_infoframe().
+	 */
+	struct drm_connector_infoframe_funcs audio;
+
+	/**
+	 * @hdr_drm:
+	 *
+	 * Set of callbacks for handling the HDR DRM InfoFrame. These callbacks
+	 * are mandatory if HDR output is to be supported.
+	 */
+	struct drm_connector_infoframe_funcs hdr_drm;
+
+	/**
+	 * @spd:
+	 *
+	 * Set of callbacks for handling the SPD InfoFrame. These callbacks are
+	 * optional.
+	 */
+	struct drm_connector_infoframe_funcs spd;
 };
 
 /**
@@ -1467,6 +1653,22 @@ struct drm_connector_funcs {
 	void (*destroy)(struct drm_connector *connector);
 
 	/**
+	 * @atomic_create_state:
+	 *
+	 * Allocate a pristine, initialized, state for the connector
+	 * object and return it. This callback must have no side
+	 * effects: in particular, the returned state must not be
+	 * assigned to the object's state pointer and it must not affect
+	 * the hardware state.
+	 *
+	 * RETURNS:
+	 *
+	 * A new, pristine, connector state instance or an error pointer
+	 * on failure.
+	 */
+	struct drm_connector_state *(*atomic_create_state)(struct drm_connector *connector);
+
+	/**
 	 * @atomic_duplicate_state:
 	 *
 	 * Duplicate the current atomic state for this connector and return it.
@@ -1607,6 +1809,16 @@ struct drm_connector_funcs {
 	 * Allows connectors to create connector-specific debugfs files.
 	 */
 	void (*debugfs_init)(struct drm_connector *connector, struct dentry *root);
+
+	/**
+	 * @color_format:
+	 *
+	 * Allows connectors to return a connector color format other than
+	 * @conn_state.color_format for purposes of e.g. display protocol
+	 * specific helper logic having already mapped it to an output format.
+	 */
+	enum drm_connector_color_format (*color_format)(
+		const struct drm_connector_state *conn_state);
 };
 
 /**
@@ -1834,7 +2046,7 @@ struct drm_connector_hdmi {
 	unsigned char product[DRM_CONNECTOR_HDMI_PRODUCT_LEN] __nonstring;
 
 	/**
-	 * @supported_formats: Bitmask of @hdmi_colorspace
+	 * @supported_formats: Bitmask of @drm_output_color_format
 	 * supported by the controller.
 	 */
 	unsigned long supported_formats;
@@ -2061,6 +2273,12 @@ struct drm_connector {
 	struct drm_property *colorspace_property;
 
 	/**
+	 * @color_format_property: Connector property to set the suitable
+	 * color format supported by the sink.
+	 */
+	struct drm_property *color_format_property;
+
+	/**
 	 * @path_blob_ptr:
 	 *
 	 * DRM blob property data for the DP MST path property. This should only
@@ -2159,7 +2377,10 @@ struct drm_connector {
 	 */
 	struct mutex edid_override_mutex;
 
-	/** @epoch_counter: used to detect any other changes in connector, besides status */
+	/**
+	 * @epoch_counter: Used to detect changes in connector. Increased when
+	 * the connector, including its status, is changed.
+	 */
 	u64 epoch_counter;
 
 	/**
@@ -2239,7 +2460,7 @@ struct drm_connector {
 	 *
 	 * This is protected by &drm_mode_config.connection_mutex. Note that
 	 * nonblocking atomic commits access the current connector state without
-	 * taking locks. Either by going through the &struct drm_atomic_state
+	 * taking locks. Either by going through the &struct drm_atomic_commit
 	 * pointers, see for_each_oldnew_connector_in_state(),
 	 * for_each_old_connector_in_state() and
 	 * for_each_new_connector_in_state(). Or through careful ordering of
@@ -2417,6 +2638,8 @@ drm_connector_is_unregistered(struct drm_connector *connector)
 
 void drm_connector_oob_hotplug_event(struct fwnode_handle *connector_fwnode,
 				     enum drm_connector_status status);
+enum drm_connector_color_format
+drm_connector_get_color_format(const struct drm_connector_state *conn_state);
 const char *drm_get_connector_type_name(unsigned int connector_type);
 const char *drm_get_connector_status_name(enum drm_connector_status status);
 const char *drm_get_subpixel_order_name(enum subpixel_order order);
@@ -2448,9 +2671,10 @@ int drm_connector_attach_scaling_mode_property(struct drm_connector *connector,
 					       u32 scaling_mode_mask);
 int drm_connector_attach_vrr_capable_property(
 		struct drm_connector *connector);
+void drm_connector_attach_panel_type_property(struct drm_connector *connector);
 int drm_connector_attach_broadcast_rgb_property(struct drm_connector *connector);
 int drm_connector_attach_colorspace_property(struct drm_connector *connector);
-int drm_connector_attach_hdr_output_metadata_property(struct drm_connector *connector);
+void drm_connector_attach_hdr_output_metadata_property(struct drm_connector *connector);
 bool drm_connector_atomic_hdr_metadata_equal(struct drm_connector_state *old_state,
 					     struct drm_connector_state *new_state);
 int drm_mode_create_aspect_ratio_property(struct drm_device *dev);
@@ -2502,13 +2726,13 @@ struct drm_tile_group {
 	struct kref refcount;
 	struct drm_device *dev;
 	int id;
-	u8 group_data[8];
+	u8 group_data[9];
 };
 
 struct drm_tile_group *drm_mode_create_tile_group(struct drm_device *dev,
-						  const char topology[8]);
+						  const char topology_id[9]);
 struct drm_tile_group *drm_mode_get_tile_group(struct drm_device *dev,
-					       const char topology[8]);
+					       const char topology_id[9]);
 void drm_mode_put_tile_group(struct drm_device *dev,
 			     struct drm_tile_group *tg);
 
@@ -2541,6 +2765,9 @@ void drm_connector_list_iter_end(struct drm_connector_list_iter *iter);
 bool drm_connector_has_possible_encoder(struct drm_connector *connector,
 					struct drm_encoder *encoder);
 const char *drm_get_colorspace_name(enum drm_colorspace colorspace);
+
+int drm_connector_attach_color_format_property(struct drm_connector *connector,
+					       unsigned long supported_color_formats);
 
 /**
  * drm_for_each_connector_iter - connector_list iterator macro

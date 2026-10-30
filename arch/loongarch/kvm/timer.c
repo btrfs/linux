@@ -30,8 +30,7 @@ enum hrtimer_restart kvm_swtimer_wakeup(struct hrtimer *timer)
 	struct kvm_vcpu *vcpu;
 
 	vcpu = container_of(timer, struct kvm_vcpu, arch.swtimer);
-	kvm_queue_irq(vcpu, INT_TI);
-	rcuwait_wake_up(&vcpu->wait);
+	kvm_vcpu_wake_up(vcpu);
 
 	return HRTIMER_NORESTART;
 }
@@ -96,15 +95,21 @@ void kvm_restore_timer(struct kvm_vcpu *vcpu)
 		 * and set CSR TVAL with -1
 		 */
 		write_gcsr_timertick(0);
-		__delay(2); /* Wait cycles until timer interrupt injected */
 
 		/*
 		 * Writing CSR_TINTCLR_TI to LOONGARCH_CSR_TINTCLR will clear
 		 * timer interrupt, and CSR TVAL keeps unchanged with -1, it
 		 * avoids spurious timer interrupt
 		 */
-		if (!(estat & CPU_TIMER))
+		if (!(estat & CPU_TIMER)) {
+			__delay(2); /* Wait cycles until timer interrupt injected */
+
+			/* Write TVAL with max value if no TI shot */
+			estat = kvm_read_hw_gcsr(LOONGARCH_CSR_ESTAT);
+			if (!(estat & CPU_TIMER))
+				write_gcsr_timertick(CSR_TCFG_VAL);
 			gcsr_write(CSR_TINTCLR_TI, LOONGARCH_CSR_TINTCLR);
+		}
 		return;
 	}
 
@@ -114,10 +119,24 @@ void kvm_restore_timer(struct kvm_vcpu *vcpu)
 	delta = 0;
 	now = ktime_get();
 	expire = vcpu->arch.expire;
+	if (!expire) {
+		/*
+		 * vcpu->arch.expire is host-internal and is not migrated,
+		 * so it is 0 after migration. Reload the remaining countdown
+		 * from the migrated TVAL. This covers both one-shot and
+		 * periodic timers.
+		 */
+		if (ticks < cfg)
+			delta = tick_to_ns(vcpu, ticks);
+		expire = ktime_add_ns(now, delta);
+	}
+
 	if (ktime_before(now, expire))
 		delta = ktime_to_tick(vcpu, ktime_sub(expire, now));
 	else if (cfg & CSR_TCFG_PERIOD) {
 		period = cfg & CSR_TCFG_VAL;
+		if (!period)
+			period = 1;
 		delta = ktime_to_tick(vcpu, ktime_sub(now, expire));
 		delta = period - (delta % period);
 

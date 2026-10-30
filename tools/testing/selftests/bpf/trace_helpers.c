@@ -24,12 +24,6 @@
 #define TRACEFS_PIPE	"/sys/kernel/tracing/trace_pipe"
 #define DEBUGFS_PIPE	"/sys/kernel/debug/tracing/trace_pipe"
 
-struct ksyms {
-	struct ksym *syms;
-	size_t sym_cap;
-	size_t sym_cnt;
-};
-
 static struct ksyms *ksyms;
 static pthread_mutex_t ksyms_mutex = PTHREAD_MUTEX_INITIALIZER;
 
@@ -53,6 +47,8 @@ void free_kallsyms_local(struct ksyms *ksyms)
 
 	if (!ksyms)
 		return;
+
+	free(ksyms->filtered_syms);
 
 	if (!ksyms->syms) {
 		free(ksyms);
@@ -550,9 +546,10 @@ static const char * const trace_blacklist[] = {
 	"__rcu_read_lock",
 	"__rcu_read_unlock",
 	"bpf_get_numa_node_id",
+	"___migrate_enable",
 };
 
-static bool skip_entry(char *name)
+bool is_unsafe_function(const char *name)
 {
 	int i;
 
@@ -610,7 +607,7 @@ static int search_kallsyms_compare(const void *p1, const struct ksym *p2)
 	return compare_name(p1, p2->name);
 }
 
-int bpf_get_ksyms(char ***symsp, size_t *cntp, bool kernel)
+int bpf_get_ksyms(struct ksyms **ksymsp, bool kernel)
 {
 	size_t cap = 0, cnt = 0;
 	char *name = NULL, *ksym_name, **syms = NULL;
@@ -637,8 +634,10 @@ int bpf_get_ksyms(char ***symsp, size_t *cntp, bool kernel)
 	else
 		f = fopen("/sys/kernel/debug/tracing/available_filter_functions", "r");
 
-	if (!f)
+	if (!f) {
+		free_kallsyms_local(ksyms);
 		return -EINVAL;
+	}
 
 	map = hashmap__new(symbol_hash, symbol_equal, NULL);
 	if (IS_ERR(map)) {
@@ -653,7 +652,7 @@ int bpf_get_ksyms(char ***symsp, size_t *cntp, bool kernel)
 		free(name);
 		if (sscanf(buf, "%ms$*[^\n]\n", &name) != 1)
 			continue;
-		if (skip_entry(name))
+		if (is_unsafe_function(name))
 			continue;
 
 		ks = search_kallsyms_custom_local(ksyms, name, search_kallsyms_compare);
@@ -679,15 +678,18 @@ int bpf_get_ksyms(char ***symsp, size_t *cntp, bool kernel)
 		syms[cnt++] = ksym_name;
 	}
 
-	*symsp = syms;
-	*cntp = cnt;
+	ksyms->filtered_syms = syms;
+	ksyms->filtered_cnt = cnt;
+	*ksymsp = ksyms;
 
 error:
 	free(name);
 	fclose(f);
 	hashmap__free(map);
-	if (err)
+	if (err) {
 		free(syms);
+		free_kallsyms_local(ksyms);
+	}
 	return err;
 }
 
@@ -727,7 +729,7 @@ int bpf_get_addrs(unsigned long **addrsp, size_t *cntp, bool kernel)
 		free(name);
 		if (sscanf(buf, "%p %ms$*[^\n]\n", &addr, &name) != 2)
 			continue;
-		if (skip_entry(name))
+		if (is_unsafe_function(name))
 			continue;
 
 		if (cnt == max_cnt) {

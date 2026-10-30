@@ -15,6 +15,7 @@
 #include <linux/ethtool.h>
 #include <linux/types.h>
 #include <linux/device.h>
+#include <linux/bvec.h>
 #include <linux/dma-mapping.h>
 #include <linux/kref.h>
 #include <linux/list.h>
@@ -43,6 +44,8 @@
 #include <uapi/rdma/rdma_user_ioctl.h>
 #include <uapi/rdma/ib_user_ioctl_verbs.h>
 #include <linux/pci-tph.h>
+#include <rdma/frmr_pools.h>
+#include <linux/dma-buf.h>
 
 #define IB_FW_VERSION_NAME_MAX	ETHTOOL_FWVERS_LEN
 
@@ -272,6 +275,7 @@ enum ib_device_cap_flags {
 	IB_DEVICE_FLUSH_GLOBAL = IB_UVERBS_DEVICE_FLUSH_GLOBAL,
 	IB_DEVICE_FLUSH_PERSISTENT = IB_UVERBS_DEVICE_FLUSH_PERSISTENT,
 	IB_DEVICE_ATOMIC_WRITE = IB_UVERBS_DEVICE_ATOMIC_WRITE,
+	IB_DEVICE_CC_DMA_BOUNCE = IB_UVERBS_DEVICE_CC_DMA_BOUNCE,
 };
 
 enum ib_kernel_cap_flags {
@@ -403,36 +407,36 @@ struct ib_device_attr {
 	u32			vendor_id;
 	u32			vendor_part_id;
 	u32			hw_ver;
-	int			max_qp;
-	int			max_qp_wr;
+	u32			max_qp;
+	u32			max_qp_wr;
 	u64			device_cap_flags;
 	u64			kernel_cap_flags;
-	int			max_send_sge;
-	int			max_recv_sge;
-	int			max_sge_rd;
-	int			max_cq;
-	int			max_cqe;
-	int			max_mr;
-	int			max_pd;
-	int			max_qp_rd_atom;
-	int			max_ee_rd_atom;
-	int			max_res_rd_atom;
-	int			max_qp_init_rd_atom;
-	int			max_ee_init_rd_atom;
+	u32			max_send_sge;
+	u32			max_recv_sge;
+	u32			max_sge_rd;
+	u32			max_cq;
+	u32			max_cqe;
+	u32			max_mr;
+	u32			max_pd;
+	u32			max_qp_rd_atom;
+	u32			max_ee_rd_atom;
+	u32			max_res_rd_atom;
+	u32			max_qp_init_rd_atom;
+	u32			max_ee_init_rd_atom;
 	enum ib_atomic_cap	atomic_cap;
 	enum ib_atomic_cap	masked_atomic_cap;
-	int			max_ee;
-	int			max_rdd;
-	int			max_mw;
-	int			max_raw_ipv6_qp;
-	int			max_raw_ethy_qp;
-	int			max_mcast_grp;
-	int			max_mcast_qp_attach;
-	int			max_total_mcast_qp_attach;
-	int			max_ah;
-	int			max_srq;
-	int			max_srq_wr;
-	int			max_srq_sge;
+	u32			max_ee;
+	u32			max_rdd;
+	u32			max_mw;
+	u32			max_raw_ipv6_qp;
+	u32			max_raw_ethy_qp;
+	u32			max_mcast_grp;
+	u32			max_mcast_qp_attach;
+	u32			max_total_mcast_qp_attach;
+	u32			max_ah;
+	u32			max_srq;
+	u32			max_srq_wr;
+	u32			max_srq_sge;
 	unsigned int		max_fast_reg_page_list_len;
 	unsigned int		max_pi_fast_reg_page_list_len;
 	u16			max_pkeys;
@@ -586,10 +590,10 @@ enum ib_stat_flag {
 };
 
 /**
- * struct rdma_stat_desc
- * @name - The name of the counter
- * @flags - Flags of the counter; For example, IB_STAT_FLAG_OPTIONAL
- * @priv - Driver private information; Core code should not use
+ * struct rdma_stat_desc - description of one rdma stat/counter
+ * @name: The name of the counter
+ * @flags: Flags of the counter; For example, IB_STAT_FLAG_OPTIONAL
+ * @priv: Driver private information; Core code should not use
  */
 struct rdma_stat_desc {
 	const char *name;
@@ -598,24 +602,24 @@ struct rdma_stat_desc {
 };
 
 /**
- * struct rdma_hw_stats
- * @lock - Mutex to protect parallel write access to lifespan and values
+ * struct rdma_hw_stats - collection of hardware stats and their management
+ * @lock: Mutex to protect parallel write access to lifespan and values
  *    of counters, which are 64bits and not guaranteed to be written
  *    atomicaly on 32bits systems.
- * @timestamp - Used by the core code to track when the last update was
- * @lifespan - Used by the core code to determine how old the counters
+ * @timestamp: Used by the core code to track when the last update was
+ * @lifespan: Used by the core code to determine how old the counters
  *   should be before being updated again.  Stored in jiffies, defaults
  *   to 10 milliseconds, drivers can override the default be specifying
  *   their own value during their allocation routine.
- * @descs - Array of pointers to static descriptors used for the counters
+ * @descs: Array of pointers to static descriptors used for the counters
  *   in directory.
- * @is_disabled - A bitmap to indicate each counter is currently disabled
+ * @is_disabled: A bitmap to indicate each counter is currently disabled
  *   or not.
- * @num_counters - How many hardware counters there are.  If name is
+ * @num_counters: How many hardware counters there are.  If name is
  *   shorter than this number, a kernel oops will result.  Driver authors
  *   are encouraged to leave BUILD_BUG_ON(ARRAY_SIZE(@name) < num_counters)
  *   in their code to prevent this.
- * @value - Array of u64 counters that are accessed by the sysfs code and
+ * @value: Array of u64 counters that are accessed by the sysfs code and
  *   filled in by the drivers get_stats routine
  */
 struct rdma_hw_stats {
@@ -764,6 +768,7 @@ enum ib_event_type {
 	IB_EVENT_CLIENT_REREGISTER,
 	IB_EVENT_GID_CHANGE,
 	IB_EVENT_WQ_FATAL,
+	IB_EVENT_DEVICE_SPEED_CHANGE,
 };
 
 const char *__attribute_const__ ib_event_msg(enum ib_event_type event);
@@ -859,6 +864,7 @@ enum ib_rate {
 	IB_RATE_400_GBPS = 21,
 	IB_RATE_600_GBPS = 22,
 	IB_RATE_800_GBPS = 23,
+	IB_RATE_1600_GBPS = 25,
 };
 
 /**
@@ -876,6 +882,20 @@ __attribute_const__ int ib_rate_to_mult(enum ib_rate rate);
  */
 __attribute_const__ int ib_rate_to_mbps(enum ib_rate rate);
 
+struct ib_port_speed_info {
+	const char *str;
+	int rate;	/* in deci-Gb/sec (100 MBps units) */
+};
+
+/**
+ * ib_port_attr_to_speed_info - Convert port attributes to speed information
+ * @attr: Port attributes containing active_speed and active_width
+ * @speed_info: Speed information to return
+ *
+ * Returns 0 on success, -EINVAL on error.
+ */
+int ib_port_attr_to_speed_info(struct ib_port_attr *attr,
+			       struct ib_port_speed_info *speed_info);
 
 /**
  * enum ib_mr_type - memory region type
@@ -1558,6 +1578,93 @@ struct ib_uobject {
 	const struct uverbs_api_object *uapi_object;
 };
 
+/**
+ * struct ib_udata - Driver request/response data from userspace
+ * @inbuf: Pointer to request data from userspace
+ * @outbuf: Pointer to response buffer in userspace
+ * @inlen: Length of request data
+ * @outlen: Length of response buffer
+ *
+ * struct ib_udata is used to hold the driver data request and response
+ * structures defined in the uapi. They follow these rules for forwards and
+ * backwards compatibility:
+ *
+ * 1) Userspace can provide a longer request so long as the trailing part the
+ *    kernel doesn't understand is all zeros.
+ *
+ *    This provides a degree of safety if userspace wrongly tries to use a new
+ *    feature the kernel does not understand with some non-zero value.
+ *
+ *    It allows a simpler rdma-core implementation because the library can
+ *    simply always use the latest structs for the request, even if they are
+ *    bigger. It simply has to avoid using the new members if they are not
+ *    supported/required.
+ *
+ * 2) Userspace can provide a shorter request; the kernel will zero-pad it out
+ *    to fill the storage. The newer kernel should understand that older
+ *    userspace will provide 0 to new fields. The kernel has three options to
+ *    enable new request fields:
+ *
+ *    - Input comp_mask that says the field is supported
+ *    - Look for non-zero values
+ *    - Check if the udata->inlen size covers the field
+ *
+ *    This also corrects any bugs related to not filling in request structures
+ *    as the new helper always fully writes to the struct.
+ *
+ * 3) Userspace can provide a shorter or longer response struct. If shorter,
+ *    the kernel reply is truncated. The kernel should be designed to not write
+ *    to new reply fields unless userspace has affirmatively requested them.
+ *
+ *    If the user buffer is longer, the kernel will zero-fill it.
+ *
+ *    Userspace has three options to enable new response fields:
+ *
+ *    - Output comp_mask that says the field is supported
+ *    - Look for non-zero values
+ *    - Infer the output must be valid because the request contents demand it
+ *      and old kernels will fail the request
+ *
+ * The following helper functions implement these semantics:
+ *
+ * ib_copy_validate_udata_in() - Checks the minimum length, and zero trailing::
+ *
+ *     struct driver_create_cq_req req;
+ *     int err;
+ *
+ *     err = ib_copy_validate_udata_in(udata, req, end_member);
+ *     if (err)
+ *         return err;
+ *
+ * The third argument specifies the last member of the struct in the first
+ * kernel version that introduced it, establishing the minimum required size.
+ *
+ * ib_copy_validate_udata_in_cm() - The above but also validate a
+ * comp_mask member only has supported bits set::
+ *
+ *     err = ib_copy_validate_udata_in_cm(udata, req, first_version_last_member,
+ *                                        DRIVER_CREATE_CQ_MASK_FEATURE_A |
+ *                                        DRIVER_CREATE_CQ_MASK_FEATURE_B);
+ *
+ * ib_respond_udata() - Implements the response rules::
+ *
+ *     struct driver_create_cq_resp resp = {};
+ *
+ *     resp.some_field = value;
+ *     return ib_respond_udata(udata, resp);
+ *
+ * ib_is_udata_in_empty() - Used instead of ib_copy_validate_udata_in() if the
+ * driver does not have a request structure::
+ *
+ *     ret = ib_is_udata_in_empty(udata);
+ *     if (ret)
+ *         return ret;
+ *
+ * Similarly ib_respond_empty_udata() is used instead of ib_respond_udata() if
+ * the driver does not have a response structure::
+ *
+ *    return ib_respond_empty_udata(udata);
+ */
 struct ib_udata {
 	const void __user *inbuf;
 	void __user *outbuf;
@@ -1637,6 +1744,42 @@ struct ib_cq {
 	 * Implementation details of the RDMA core, don't use in drivers:
 	 */
 	struct rdma_restrack_entry res;
+};
+
+enum ib_qp_attach_comp_cntr_op {
+	IB_QP_ATTACH_COMP_CNTR_OP_SEND = IB_UVERBS_QP_ATTACH_COMP_CNTR_OP_SEND,
+	IB_QP_ATTACH_COMP_CNTR_OP_RECV = IB_UVERBS_QP_ATTACH_COMP_CNTR_OP_RECV,
+	IB_QP_ATTACH_COMP_CNTR_OP_RDMA_READ = IB_UVERBS_QP_ATTACH_COMP_CNTR_OP_RDMA_READ,
+	IB_QP_ATTACH_COMP_CNTR_OP_REMOTE_RDMA_READ = IB_UVERBS_QP_ATTACH_COMP_CNTR_OP_REMOTE_RDMA_READ,
+	IB_QP_ATTACH_COMP_CNTR_OP_RDMA_WRITE = IB_UVERBS_QP_ATTACH_COMP_CNTR_OP_RDMA_WRITE,
+	IB_QP_ATTACH_COMP_CNTR_OP_REMOTE_RDMA_WRITE = IB_UVERBS_QP_ATTACH_COMP_CNTR_OP_REMOTE_RDMA_WRITE,
+};
+
+struct ib_comp_cntr_caps {
+	u64 max_value;
+	u32 max_counters;
+	u32 supported_qp_attach_ops; /* Bitmask of enum ib_qp_attach_comp_cntr_op */
+};
+
+struct ib_comp_cntr {
+	struct ib_device *device;
+	struct ib_uobject *uobject;
+	atomic_t usecnt;
+	struct rdma_restrack_entry res;
+};
+
+enum ib_comp_cntr_entry {
+	IB_COMP_CNTR_ENTRY_COMP = IB_UVERBS_COMP_CNTR_ENTRY_COMP,
+	IB_COMP_CNTR_ENTRY_ERR = IB_UVERBS_COMP_CNTR_ENTRY_ERR,
+};
+
+enum ib_comp_cntr_modify_op {
+	IB_COMP_CNTR_MODIFY_OP_SET = IB_UVERBS_COMP_CNTR_MODIFY_OP_SET,
+	IB_COMP_CNTR_MODIFY_OP_INC = IB_UVERBS_COMP_CNTR_MODIFY_OP_INC,
+};
+
+struct ib_qp_attach_comp_cntr_attr {
+	u32 op_mask; /* Bitmask of enum ib_qp_attach_comp_cntr_op */
 };
 
 struct ib_srq {
@@ -1809,6 +1952,8 @@ struct ib_qp {
 	struct completion	srq_completion;
 	struct ib_xrcd	       *xrcd; /* XRC TGT QPs only */
 	struct list_head	xrcd_list;
+	struct xarray		comp_cntrs; /* op_mask -> comp_cntr */
+	u32			comp_cntr_op_mask;
 
 	/* count times opened, mcast attaches, flow attaches */
 	atomic_t		usecnt;
@@ -1870,6 +2015,11 @@ struct ib_dmah {
 
 struct ib_mr {
 	struct ib_device  *device;
+	/*
+	 * Due to IB_MR_REREG_PD pd is not a fixed pointer and can change. For a
+	 * user MR, this value should only be read from a system call that holds
+	 * the uobject lock, or the driver should disable in-place REREG_PD.
+	 */
 	struct ib_pd	  *pd;
 	u32		   lkey;
 	u32		   rkey;
@@ -1886,6 +2036,11 @@ struct ib_mr {
 	struct ib_dm      *dm;
 	struct ib_sig_attrs *sig_attrs; /* only for IB_MR_TYPE_INTEGRITY MRs */
 	struct ib_dmah *dmah;
+	struct {
+		struct ib_frmr_pool *pool;
+		struct ib_frmr_key key;
+		u32 handle;
+	} frmr;
 	/*
 	 * Implementation details of the RDMA core, don't use in drivers:
 	 */
@@ -2249,7 +2404,6 @@ struct ib_port_data {
 
 /* rdma netdev type - specifies protocol type */
 enum rdma_netdev_t {
-	RDMA_NETDEV_OPA_VNIC,
 	RDMA_NETDEV_IPOIB,
 };
 
@@ -2263,11 +2417,6 @@ struct rdma_netdev {
 	u32		   port_num;
 	int                mtu;
 
-	/*
-	 * cleanup function must be specified.
-	 * FIXME: This is only used for OPA_VNIC and that usage should be
-	 * removed too.
-	 */
 	void (*free_rdma_netdev)(struct net_device *netdev);
 
 	/* control functions */
@@ -2347,6 +2496,9 @@ struct rdma_user_mmap_entry {
 	unsigned long start_pgoff;
 	size_t npages;
 	bool driver_removed;
+	/* protects access to dmabufs */
+	struct mutex dmabufs_lock;
+	struct list_head dmabufs;
 };
 
 /* Return the offset (in bytes) the user should pass to libc's mmap() */
@@ -2366,6 +2518,12 @@ struct ib_device_ops {
 	enum rdma_driver_id driver_id;
 	u32 uverbs_abi_ver;
 	unsigned int uverbs_no_driver_id_binding:1;
+	/*
+	 * Indicates the driver checks every op accepting a udata for the
+	 * correct size on input and always handles the output using the udata
+	 * helpers.
+	 */
+	unsigned int uverbs_robust_udata:1;
 
 	/*
 	 * NOTE: New drivers should not make use of device_group; instead new
@@ -2398,14 +2556,14 @@ struct ib_device_ops {
 	int (*modify_device)(struct ib_device *device, int device_modify_mask,
 			     struct ib_device_modify *device_modify);
 	void (*get_dev_fw_str)(struct ib_device *device, char *str);
-	const struct cpumask *(*get_vector_affinity)(struct ib_device *ibdev,
-						     int comp_vector);
 	int (*query_port)(struct ib_device *device, u32 port_num,
 			  struct ib_port_attr *port_attr);
+	int (*query_port_speed)(struct ib_device *device, u32 port_num,
+				u64 *speed);
 	int (*modify_port)(struct ib_device *device, u32 port_num,
 			   int port_modify_mask,
 			   struct ib_port_modify *port_modify);
-	/**
+	/*
 	 * The following mandatory functions are used only at device
 	 * registration.  Keep functions such as these at the end of this
 	 * structure to avoid cache line misses when accessing struct ib_device
@@ -2415,7 +2573,7 @@ struct ib_device_ops {
 				  struct ib_port_immutable *immutable);
 	enum rdma_link_layer (*get_link_layer)(struct ib_device *device,
 					       u32 port_num);
-	/**
+	/*
 	 * When calling get_netdev, the HW vendor's driver should return the
 	 * net device of device @device at port @port_num or NULL if such
 	 * a net device doesn't exist. The vendor driver should call dev_hold
@@ -2425,7 +2583,7 @@ struct ib_device_ops {
 	 */
 	struct net_device *(*get_netdev)(struct ib_device *device,
 					 u32 port_num);
-	/**
+	/*
 	 * rdma netdev operation
 	 *
 	 * Driver implementing alloc_rdma_netdev or rdma_netdev_get_params
@@ -2439,14 +2597,14 @@ struct ib_device_ops {
 	int (*rdma_netdev_get_params)(struct ib_device *device, u32 port_num,
 				      enum rdma_netdev_t type,
 				      struct rdma_netdev_alloc_params *params);
-	/**
+	/*
 	 * query_gid should be return GID value for @device, when @port_num
 	 * link layer is either IB or iWarp. It is no-op if @port_num port
 	 * is RoCE link layer.
 	 */
 	int (*query_gid)(struct ib_device *device, u32 port_num, int index,
 			 union ib_gid *gid);
-	/**
+	/*
 	 * When calling add_gid, the HW vendor's driver should add the gid
 	 * of device of port at gid index available at @attr. Meta-info of
 	 * that gid (for example, the network device related to this gid) is
@@ -2460,7 +2618,7 @@ struct ib_device_ops {
 	 * roce_gid_table is used.
 	 */
 	int (*add_gid)(const struct ib_gid_attr *attr, void **context);
-	/**
+	/*
 	 * When calling del_gid, the HW vendor's driver should delete the
 	 * gid of device @device at gid index gid_index of port port_num
 	 * available in @attr.
@@ -2475,13 +2633,18 @@ struct ib_device_ops {
 			      struct ib_udata *udata);
 	void (*dealloc_ucontext)(struct ib_ucontext *context);
 	int (*mmap)(struct ib_ucontext *context, struct vm_area_struct *vma);
-	/**
+	/*
 	 * This will be called once refcount of an entry in mmap_xa reaches
 	 * zero. The type of the memory that was mapped may differ between
 	 * entries and is opaque to the rdma_user_mmap interface.
 	 * Therefore needs to be implemented by the driver in mmap_free.
 	 */
 	void (*mmap_free)(struct rdma_user_mmap_entry *entry);
+	int (*mmap_get_pfns)(struct rdma_user_mmap_entry *entry,
+			     struct phys_vec *phys_vec,
+			     struct p2pdma_provider **provider);
+	struct rdma_user_mmap_entry *(*pgoff_to_mmap_entry)(struct ib_ucontext *ucontext,
+							    off_t pg_off);
 	void (*disassociate_ucontext)(struct ib_ucontext *ibcontext);
 	int (*alloc_pd)(struct ib_pd *pd, struct ib_udata *udata);
 	int (*dealloc_pd)(struct ib_pd *pd, struct ib_udata *udata);
@@ -2504,27 +2667,38 @@ struct ib_device_ops {
 			 struct ib_udata *udata);
 	int (*modify_qp)(struct ib_qp *qp, struct ib_qp_attr *qp_attr,
 			 int qp_attr_mask, struct ib_udata *udata);
+	int (*qp_attach_comp_cntr)(struct ib_qp *qp, struct ib_comp_cntr *cc,
+				   struct ib_qp_attach_comp_cntr_attr *attr);
 	int (*query_qp)(struct ib_qp *qp, struct ib_qp_attr *qp_attr,
 			int qp_attr_mask, struct ib_qp_init_attr *qp_init_attr);
 	int (*destroy_qp)(struct ib_qp *qp, struct ib_udata *udata);
 	int (*create_cq)(struct ib_cq *cq, const struct ib_cq_init_attr *attr,
 			 struct uverbs_attr_bundle *attrs);
-	int (*create_cq_umem)(struct ib_cq *cq,
+	int (*create_user_cq)(struct ib_cq *cq,
 			      const struct ib_cq_init_attr *attr,
-			      struct ib_umem *umem,
 			      struct uverbs_attr_bundle *attrs);
 	int (*modify_cq)(struct ib_cq *cq, u16 cq_count, u16 cq_period);
 	int (*destroy_cq)(struct ib_cq *cq, struct ib_udata *udata);
-	int (*resize_cq)(struct ib_cq *cq, int cqe, struct ib_udata *udata);
-	/**
+	int (*resize_user_cq)(struct ib_cq *cq, unsigned int cqe,
+			      struct ib_udata *udata);
+	/*
 	 * pre_destroy_cq - Prevent a cq from generating any new work
 	 * completions, but not free any kernel resources
 	 */
 	int (*pre_destroy_cq)(struct ib_cq *cq);
-	/**
+	/*
 	 * post_destroy_cq - Free all kernel resources
 	 */
 	void (*post_destroy_cq)(struct ib_cq *cq);
+	int (*create_comp_cntr)(struct ib_comp_cntr *cc,
+				struct uverbs_attr_bundle *attrs);
+	int (*destroy_comp_cntr)(struct ib_comp_cntr *cc);
+	int (*modify_comp_cntr)(struct ib_comp_cntr *cc, enum ib_comp_cntr_entry entry,
+				enum ib_comp_cntr_modify_op op, u64 value);
+	int (*read_comp_cntr)(struct ib_comp_cntr *cc, enum ib_comp_cntr_entry entry, u64 *value);
+	int (*query_comp_cntr_caps)(struct ib_device *dev,
+				    struct ib_comp_cntr_caps *caps,
+				    struct uverbs_attr_bundle *attrs);
 	struct ib_mr *(*get_dma_mr)(struct ib_pd *pd, int mr_access_flags);
 	struct ib_mr *(*reg_user_mr)(struct ib_pd *pd, u64 start, u64 length,
 				     u64 virt_addr, int mr_access_flags,
@@ -2615,7 +2789,7 @@ struct ib_device_ops {
 			    struct scatterlist *meta_sg, int meta_sg_nents,
 			    unsigned int *meta_sg_offset);
 
-	/**
+	/*
 	 * alloc_hw_[device,port]_stats - Allocate a struct rdma_hw_stats and
 	 *   fill in the driver initialized data.  The struct is kfree()'ed by
 	 *   the sysfs core when the device is removed.  A lifespan of -1 in the
@@ -2624,7 +2798,7 @@ struct ib_device_ops {
 	struct rdma_hw_stats *(*alloc_hw_device_stats)(struct ib_device *device);
 	struct rdma_hw_stats *(*alloc_hw_port_stats)(struct ib_device *device,
 						     u32 port_num);
-	/**
+	/*
 	 * get_hw_stats - Fill in the counter value(s) in the stats struct.
 	 * @index - The index in the value array we wish to have updated, or
 	 *   num_counters if we want all stats updated
@@ -2639,14 +2813,14 @@ struct ib_device_ops {
 	int (*get_hw_stats)(struct ib_device *device,
 			    struct rdma_hw_stats *stats, u32 port, int index);
 
-	/**
+	/*
 	 * modify_hw_stat - Modify the counter configuration
 	 * @enable: true/false when enable/disable a counter
 	 * Return codes - 0 on success or error code otherwise.
 	 */
 	int (*modify_hw_stat)(struct ib_device *device, u32 port,
 			      unsigned int counter_index, bool enable);
-	/**
+	/*
 	 * Allows rdma drivers to add their own restrack attributes.
 	 */
 	int (*fill_res_mr_entry)(struct sk_buff *msg, struct ib_mr *ibmr);
@@ -2682,39 +2856,39 @@ struct ib_device_ops {
 			 u8 pdata_len);
 	int (*iw_create_listen)(struct iw_cm_id *cm_id, int backlog);
 	int (*iw_destroy_listen)(struct iw_cm_id *cm_id);
-	/**
+	/*
 	 * counter_bind_qp - Bind a QP to a counter.
 	 * @counter - The counter to be bound. If counter->id is zero then
 	 *   the driver needs to allocate a new counter and set counter->id
 	 */
 	int (*counter_bind_qp)(struct rdma_counter *counter, struct ib_qp *qp,
 			       u32 port);
-	/**
+	/*
 	 * counter_unbind_qp - Unbind the qp from the dynamically-allocated
 	 *   counter and bind it onto the default one
 	 */
 	int (*counter_unbind_qp)(struct ib_qp *qp, u32 port);
-	/**
+	/*
 	 * counter_dealloc -De-allocate the hw counter
 	 */
 	int (*counter_dealloc)(struct rdma_counter *counter);
-	/**
+	/*
 	 * counter_alloc_stats - Allocate a struct rdma_hw_stats and fill in
 	 * the driver initialized data.
 	 */
 	struct rdma_hw_stats *(*counter_alloc_stats)(
 		struct rdma_counter *counter);
-	/**
+	/*
 	 * counter_update_stats - Query the stats value of this counter
 	 */
 	int (*counter_update_stats)(struct rdma_counter *counter);
 
-	/**
+	/*
 	 * counter_init - Initialize the driver specific rdma counter struct.
 	 */
 	void (*counter_init)(struct rdma_counter *counter);
 
-	/**
+	/*
 	 * Allows rdma drivers to add their own restrack attributes
 	 * dumped via 'rdma stat' iproute2 command.
 	 */
@@ -2730,25 +2904,25 @@ struct ib_device_ops {
 	 */
 	int (*get_numa_node)(struct ib_device *dev);
 
-	/**
+	/*
 	 * add_sub_dev - Add a sub IB device
 	 */
 	struct ib_device *(*add_sub_dev)(struct ib_device *parent,
 					 enum rdma_nl_dev_type type,
 					 const char *name);
 
-	/**
+	/*
 	 * del_sub_dev - Delete a sub IB device
 	 */
 	void (*del_sub_dev)(struct ib_device *sub_dev);
 
-	/**
+	/*
 	 * ufile_cleanup - Attempt to cleanup ubojects HW resources inside
 	 * the ufile.
 	 */
 	void (*ufile_hw_cleanup)(struct ib_uverbs_file *ufile);
 
-	/**
+	/*
 	 * report_port_event - Drivers need to implement this if they have
 	 * some private stuff to handle when link status changes.
 	 */
@@ -2758,6 +2932,7 @@ struct ib_device_ops {
 	DECLARE_RDMA_OBJ_SIZE(ib_ah);
 	DECLARE_RDMA_OBJ_SIZE(ib_counters);
 	DECLARE_RDMA_OBJ_SIZE(ib_cq);
+	DECLARE_RDMA_OBJ_SIZE(ib_comp_cntr);
 	DECLARE_RDMA_OBJ_SIZE(ib_dmah);
 	DECLARE_RDMA_OBJ_SIZE(ib_mw);
 	DECLARE_RDMA_OBJ_SIZE(ib_pd);
@@ -2831,6 +3006,8 @@ struct ib_device {
 	u16                          kverbs_provider:1;
 	/* CQ adaptive moderation (RDMA DIM) */
 	u16                          use_cq_dim:1;
+	/* CoCo guest with DMA bounce buffering required */
+	u16                          cc_dma_bounce:1;
 	u8                           node_type;
 	u32			     phys_port_cnt;
 	struct ib_device_attr        attrs;
@@ -2879,6 +3056,8 @@ struct ib_device {
 	struct list_head subdev_list;
 
 	enum rdma_nl_name_assign_type name_assign_type;
+
+	struct ib_frmr_pools *frmr_pools;
 };
 
 static inline void *rdma_zalloc_obj(struct ib_device *dev, size_t size,
@@ -2931,22 +3110,6 @@ struct ib_client {
 	u8 no_kverbs_req:1;
 };
 
-/*
- * IB block DMA iterator
- *
- * Iterates the DMA-mapped SGL in contiguous memory blocks aligned
- * to a HW supported page size.
- */
-struct ib_block_iter {
-	/* internal states */
-	struct scatterlist *__sg;	/* sg holding the current aligned block */
-	dma_addr_t __dma_addr;		/* unaligned DMA address of this block */
-	size_t __sg_numblocks;		/* ib_umem_num_dma_blocks() */
-	unsigned int __sg_nents;	/* number of SG entries */
-	unsigned int __sg_advance;	/* number of bytes to advance in sg in next step */
-	unsigned int __pg_bit;		/* alignment of current block */
-};
-
 struct ib_device *_ib_alloc_device(size_t size, struct net *net);
 #define ib_alloc_device(drv_struct, member)                                    \
 	container_of(_ib_alloc_device(sizeof(struct drv_struct) +              \
@@ -2975,38 +3138,6 @@ void ib_unregister_device_queued(struct ib_device *ib_dev);
 int ib_register_client   (struct ib_client *client);
 void ib_unregister_client(struct ib_client *client);
 
-void __rdma_block_iter_start(struct ib_block_iter *biter,
-			     struct scatterlist *sglist,
-			     unsigned int nents,
-			     unsigned long pgsz);
-bool __rdma_block_iter_next(struct ib_block_iter *biter);
-
-/**
- * rdma_block_iter_dma_address - get the aligned dma address of the current
- * block held by the block iterator.
- * @biter: block iterator holding the memory block
- */
-static inline dma_addr_t
-rdma_block_iter_dma_address(struct ib_block_iter *biter)
-{
-	return biter->__dma_addr & ~(BIT_ULL(biter->__pg_bit) - 1);
-}
-
-/**
- * rdma_for_each_block - iterate over contiguous memory blocks of the sg list
- * @sglist: sglist to iterate over
- * @biter: block iterator holding the memory block
- * @nents: maximum number of sg entries to iterate over
- * @pgsz: best HW supported page size to use
- *
- * Callers may use rdma_block_iter_dma_address() to get each
- * blocks aligned DMA address.
- */
-#define rdma_for_each_block(sglist, biter, nents, pgsz)		\
-	for (__rdma_block_iter_start(biter, sglist, nents,	\
-				     pgsz);			\
-	     __rdma_block_iter_next(biter);)
-
 /**
  * ib_get_client_data - Get IB client context
  * @device:Device to get context for
@@ -3027,6 +3158,7 @@ void  ib_set_client_data(struct ib_device *device, struct ib_client *client,
 void ib_set_device_ops(struct ib_device *device,
 		       const struct ib_device_ops *ops);
 
+#if IS_ENABLED(CONFIG_INFINIBAND_USER_ACCESS)
 int rdma_user_mmap_io(struct ib_ucontext *ucontext, struct vm_area_struct *vma,
 		      unsigned long pfn, unsigned long size, pgprot_t prot,
 		      struct rdma_user_mmap_entry *entry);
@@ -3038,13 +3170,7 @@ int rdma_user_mmap_entry_insert_range(struct ib_ucontext *ucontext,
 				      size_t length, u32 min_pgoff,
 				      u32 max_pgoff);
 
-#if IS_ENABLED(CONFIG_INFINIBAND_USER_ACCESS)
 void rdma_user_mmap_disassociate(struct ib_device *device);
-#else
-static inline void rdma_user_mmap_disassociate(struct ib_device *device)
-{
-}
-#endif
 
 static inline int
 rdma_user_mmap_entry_insert_exact(struct ib_ucontext *ucontext,
@@ -3064,6 +3190,66 @@ rdma_user_mmap_entry_get(struct ib_ucontext *ucontext,
 void rdma_user_mmap_entry_put(struct rdma_user_mmap_entry *entry);
 
 void rdma_user_mmap_entry_remove(struct rdma_user_mmap_entry *entry);
+#else
+static inline int rdma_user_mmap_io(struct ib_ucontext *ucontext,
+				    struct vm_area_struct *vma,
+				    unsigned long pfn, unsigned long size,
+				    pgprot_t prot,
+				    struct rdma_user_mmap_entry *entry)
+{
+	return -EINVAL;
+}
+
+static inline int
+rdma_user_mmap_entry_insert(struct ib_ucontext *ucontext,
+			    struct rdma_user_mmap_entry *entry, size_t length)
+{
+	return -EINVAL;
+}
+
+static inline int
+rdma_user_mmap_entry_insert_range(struct ib_ucontext *ucontext,
+				  struct rdma_user_mmap_entry *entry,
+				  size_t length, u32 min_pgoff, u32 max_pgoff)
+{
+	return -EINVAL;
+}
+
+static inline void rdma_user_mmap_disassociate(struct ib_device *device)
+{
+}
+
+static inline int
+rdma_user_mmap_entry_insert_exact(struct ib_ucontext *ucontext,
+				  struct rdma_user_mmap_entry *entry,
+				  size_t length, u32 pgoff)
+{
+	return -EINVAL;
+}
+
+static inline struct rdma_user_mmap_entry *
+rdma_user_mmap_entry_get_pgoff(struct ib_ucontext *ucontext,
+			       unsigned long pgoff)
+{
+	return NULL;
+}
+
+static inline struct rdma_user_mmap_entry *
+rdma_user_mmap_entry_get(struct ib_ucontext *ucontext,
+			 struct vm_area_struct *vma)
+{
+	return NULL;
+}
+
+static inline void rdma_user_mmap_entry_put(struct rdma_user_mmap_entry *entry)
+{
+}
+
+static inline void
+rdma_user_mmap_entry_remove(struct rdma_user_mmap_entry *entry)
+{
+}
+#endif
 
 static inline int ib_copy_from_udata(void *dest, struct ib_udata *udata, size_t len)
 {
@@ -3157,8 +3343,8 @@ static inline u32 rdma_start_port(const struct ib_device *device)
 
 /**
  * rdma_for_each_port - Iterate over all valid port numbers of the IB device
- * @device - The struct ib_device * to iterate over
- * @iter - The unsigned int to store the port number
+ * @device: The struct ib_device * to iterate over
+ * @iter: The unsigned int to store the port number
  */
 #define rdma_for_each_port(device, iter)                                       \
 	for (iter = rdma_start_port(device +				       \
@@ -3524,7 +3710,7 @@ static inline bool rdma_core_cap_opa_port(struct ib_device *device,
 /**
  * rdma_mtu_enum_to_int - Return the mtu of the port as an integer value.
  * @device: Device
- * @port_num: Port number
+ * @port: Port number
  * @mtu: enum value of MTU
  *
  * Return the MTU size supported by the port as an integer value. Will return
@@ -3542,7 +3728,7 @@ static inline int rdma_mtu_enum_to_int(struct ib_device *device, u32 port,
 /**
  * rdma_mtu_from_attr - Return the mtu of the port from the port attribute.
  * @device: Device
- * @port_num: Port number
+ * @port: Port number
  * @attr: port attribute
  *
  * Return the MTU size supported by the port as an integer value.
@@ -3919,7 +4105,7 @@ static inline int ib_destroy_qp(struct ib_qp *qp)
 
 /**
  * ib_open_qp - Obtain a reference to an existing sharable QP.
- * @xrcd - XRC domain
+ * @xrcd: XRC domain
  * @qp_open_attr: Attributes identifying the QP to open.
  *
  * Returns a reference to a sharable QP.
@@ -4029,15 +4215,6 @@ struct ib_cq *__ib_create_cq(struct ib_device *device,
 			     const char *caller);
 #define ib_create_cq(device, cmp_hndlr, evt_hndlr, cq_ctxt, cq_attr) \
 	__ib_create_cq((device), (cmp_hndlr), (evt_hndlr), (cq_ctxt), (cq_attr), KBUILD_MODNAME)
-
-/**
- * ib_resize_cq - Modifies the capacity of the CQ.
- * @cq: The CQ to resize.
- * @cqe: The minimum size of the CQ.
- *
- * Users can examine the cq structure to determine the actual CQ size.
- */
-int ib_resize_cq(struct ib_cq *cq, int cqe);
 
 /**
  * rdma_set_cq_moderation - Modifies moderation params of the CQ
@@ -4248,6 +4425,47 @@ static inline void ib_dma_unmap_page(struct ib_device *dev,
 		dma_unmap_page(dev->dma_device, addr, size, direction);
 }
 
+/**
+ * ib_dma_map_bvec - Map a bio_vec to DMA address
+ * @dev: The device for which the dma_addr is to be created
+ * @bvec: The bio_vec to map
+ * @direction: The direction of the DMA
+ *
+ * Returns a DMA address for the bio_vec. The caller must check the
+ * result with ib_dma_mapping_error() before use; a failed mapping
+ * must not be passed to ib_dma_unmap_bvec().
+ *
+ * For software RDMA devices (rxe, siw), returns a virtual address
+ * and no actual DMA mapping occurs.
+ */
+static inline u64 ib_dma_map_bvec(struct ib_device *dev,
+				  struct bio_vec *bvec,
+				  enum dma_data_direction direction)
+{
+	if (ib_uses_virt_dma(dev))
+		return (uintptr_t)bvec_virt(bvec);
+	return dma_map_phys(dev->dma_device, bvec_phys(bvec),
+			    bvec->bv_len, direction, 0);
+}
+
+/**
+ * ib_dma_unmap_bvec - Unmap a bio_vec DMA mapping
+ * @dev: The device for which the DMA address was created
+ * @addr: The DMA address returned by ib_dma_map_bvec()
+ * @size: The size of the region in bytes
+ * @direction: The direction of the DMA
+ *
+ * Releases a DMA mapping created by ib_dma_map_bvec(). For software
+ * RDMA devices this is a no-op since no actual mapping occurred.
+ */
+static inline void ib_dma_unmap_bvec(struct ib_device *dev,
+				     u64 addr, size_t size,
+				     enum dma_data_direction direction)
+{
+	if (!ib_uses_virt_dma(dev))
+		dma_unmap_phys(dev->dma_device, addr, size, direction, 0);
+}
+
 int ib_dma_virt_map_sg(struct ib_device *dev, struct scatterlist *sg, int nents);
 static inline int ib_dma_map_sg_attrs(struct ib_device *dev,
 				      struct scatterlist *sg, int nents,
@@ -4273,9 +4491,9 @@ static inline void ib_dma_unmap_sg_attrs(struct ib_device *dev,
 /**
  * ib_dma_map_sgtable_attrs - Map a scatter/gather table to DMA addresses
  * @dev: The device for which the DMA addresses are to be created
- * @sg: The sg_table object describing the buffer
+ * @sgt: The sg_table object describing the buffer
  * @direction: The direction of the DMA
- * @attrs: Optional DMA attributes for the map operation
+ * @dma_attrs: Optional DMA attributes for the map operation
  */
 static inline int ib_dma_map_sgtable_attrs(struct ib_device *dev,
 					   struct sg_table *sgt,
@@ -4419,8 +4637,8 @@ struct ib_mr *ib_alloc_mr_integrity(struct ib_pd *pd,
 /**
  * ib_update_fast_reg_key - updates the key portion of the fast_reg MR
  *   R_Key and L_Key.
- * @mr - struct ib_mr pointer to be updated.
- * @newkey - new key to be used.
+ * @mr: struct ib_mr pointer to be updated.
+ * @newkey: new key to be used.
  */
 static inline void ib_update_fast_reg_key(struct ib_mr *mr, u8 newkey)
 {
@@ -4431,7 +4649,7 @@ static inline void ib_update_fast_reg_key(struct ib_mr *mr, u8 newkey)
 /**
  * ib_inc_rkey - increments the key portion of the given rkey. Can be used
  * for calculating a new rkey for type 2 memory windows.
- * @rkey - the rkey to increment.
+ * @rkey: the rkey to increment.
  */
 static inline u32 ib_inc_rkey(u32 rkey)
 {
@@ -4525,7 +4743,7 @@ int ib_check_mr_status(struct ib_mr *mr, u32 check_mask,
 
 /**
  * ib_device_try_get: Hold a registration lock
- * device: The device to lock
+ * @dev: The device to lock
  *
  * A device under an active registration lock cannot become unregistered. It
  * is only possible to obtain a registration lock on a device that is fully
@@ -4544,8 +4762,6 @@ static inline bool ib_device_try_get(struct ib_device *dev)
 void ib_device_put(struct ib_device *device);
 struct ib_device *ib_device_get_by_netdev(struct net_device *ndev,
 					  enum rdma_driver_id driver_id);
-struct ib_device *ib_device_get_by_name(const char *name,
-					enum rdma_driver_id driver_id);
 struct net_device *ib_get_net_dev_by_params(struct ib_device *dev, u32 port,
 					    u16 pkey, const union ib_gid *gid,
 					    const struct sockaddr *addr);
@@ -4808,31 +5024,10 @@ static inline __be16 ib_lid_be16(u32 lid)
 }
 
 /**
- * ib_get_vector_affinity - Get the affinity mappings of a given completion
- *   vector
- * @device:         the rdma device
- * @comp_vector:    index of completion vector
- *
- * Returns NULL on failure, otherwise a corresponding cpu map of the
- * completion vector (returns all-cpus map if the device driver doesn't
- * implement get_vector_affinity).
- */
-static inline const struct cpumask *
-ib_get_vector_affinity(struct ib_device *device, int comp_vector)
-{
-	if (comp_vector < 0 || comp_vector >= device->num_comp_vectors ||
-	    !device->ops.get_vector_affinity)
-		return NULL;
-
-	return device->ops.get_vector_affinity(device, comp_vector);
-
-}
-
-/**
  * rdma_roce_rescan_device - Rescan all of the network devices in the system
  * and add their gids, as needed, to the relevant RoCE devices.
  *
- * @device:         the rdma device
+ * @ibdev:         the rdma device
  */
 void rdma_roce_rescan_device(struct ib_device *ibdev);
 void rdma_roce_rescan_port(struct ib_device *ib_dev, u32 port);
@@ -4885,7 +5080,7 @@ static inline struct ib_device *rdma_device_to_ibdev(struct device *device)
 
 /**
  * ibdev_to_node - return the NUMA node for a given ib_device
- * @dev:	device to get the NUMA node for.
+ * @ibdev:	device to get the NUMA node for.
  */
 static inline int ibdev_to_node(struct ib_device *ibdev)
 {
@@ -4923,6 +5118,7 @@ static inline struct net *rdma_dev_net(struct ib_device *device)
 /**
  * rdma_flow_label_to_udp_sport - generate a RoCE v2 UDP src port value based
  *                               on the flow_label
+ * @fl: flow_label value
  *
  * This function will convert the 20 bit flow_label input to a valid RoCE v2
  * UDP src port 14 bit value. All RoCE V2 drivers should use this same

@@ -6,6 +6,7 @@
  * Copyright (c) 2007, MontaVista Software, Inc. <source@mvista.com>
  */
 
+#include <linux/cleanup.h>
 #include <linux/gpio/driver.h>
 #include <linux/errno.h>
 #include <linux/kernel.h>
@@ -109,6 +110,22 @@ davinci_direction_out(struct gpio_chip *chip, unsigned offset, int value)
 	return __davinci_direction(chip, offset, true, value);
 }
 
+static int davinci_get_direction(struct gpio_chip *chip, unsigned int offset)
+{
+	struct davinci_gpio_controller *d = gpiochip_get_data(chip);
+	struct davinci_gpio_regs __iomem *g;
+	u32 mask = __gpio_mask(offset), val;
+	int bank = offset / 32;
+
+	g = d->regs[bank];
+
+	guard(spinlock_irqsave)(&d->lock);
+
+	val = readl_relaxed(&g->dir);
+
+	return (val & mask) ? GPIO_LINE_DIRECTION_IN : GPIO_LINE_DIRECTION_OUT;
+}
+
 /*
  * Read the pin's value (works even if it's set up as output);
  * returns zero/nonzero.
@@ -203,6 +220,7 @@ static int davinci_gpio_probe(struct platform_device *pdev)
 	chips->chip.get = davinci_gpio_get;
 	chips->chip.direction_output = davinci_direction_out;
 	chips->chip.set = davinci_gpio_set;
+	chips->chip.get_direction = davinci_get_direction;
 
 	chips->chip.ngpio = ngpio;
 	chips->chip.base = -1;
@@ -267,9 +285,9 @@ static void gpio_irq_unmask(struct irq_data *d)
 
 	gpiochip_enable_irq(&chips->chip, hwirq);
 
-	status &= IRQ_TYPE_EDGE_FALLING | IRQ_TYPE_EDGE_RISING;
+	status &= IRQ_TYPE_EDGE_BOTH;
 	if (!status)
-		status = IRQ_TYPE_EDGE_FALLING | IRQ_TYPE_EDGE_RISING;
+		status = IRQ_TYPE_EDGE_BOTH;
 
 	if (status & IRQ_TYPE_EDGE_FALLING)
 		writel_relaxed(mask, &g->set_falling);
@@ -279,7 +297,7 @@ static void gpio_irq_unmask(struct irq_data *d)
 
 static int gpio_irq_type(struct irq_data *d, unsigned trigger)
 {
-	if (trigger & ~(IRQ_TYPE_EDGE_FALLING | IRQ_TYPE_EDGE_RISING))
+	if (trigger & ~IRQ_TYPE_EDGE_BOTH)
 		return -EINVAL;
 
 	return 0;
@@ -382,7 +400,7 @@ static int gpio_irq_type_unbanked(struct irq_data *data, unsigned trigger)
 
 	mask = __gpio_mask(i);
 
-	if (trigger & ~(IRQ_TYPE_EDGE_FALLING | IRQ_TYPE_EDGE_RISING))
+	if (trigger & ~IRQ_TYPE_EDGE_BOTH)
 		return -EINVAL;
 
 	writel_relaxed(mask, (trigger & IRQ_TYPE_EDGE_FALLING)
@@ -550,8 +568,10 @@ static int davinci_gpio_irq_setup(struct platform_device *pdev)
 				       sizeof(struct
 					      davinci_gpio_irq_data),
 					      GFP_KERNEL);
-		if (!irqdata)
+		if (!irqdata) {
+			irq_domain_remove(chips->irq_domain);
 			return -ENOMEM;
+		}
 
 		irqdata->regs = g;
 		irqdata->bank_num = bank;

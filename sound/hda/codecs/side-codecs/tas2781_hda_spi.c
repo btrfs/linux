@@ -2,7 +2,7 @@
 //
 // TAS2781 HDA SPI driver
 //
-// Copyright 2024 - 2025 Texas Instruments, Inc.
+// Copyright 2024 - 2026 Texas Instruments, Inc.
 //
 // Author: Baojun Xu <baojun.xu@ti.com>
 
@@ -14,7 +14,6 @@
 #include <linux/crc32.h>
 #include <linux/efi.h>
 #include <linux/firmware.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
 #include <linux/pm_runtime.h>
@@ -41,9 +40,6 @@
 #define TASDEVICE_RANGE_MAX_SIZE	(256 * 128)
 #define TASDEVICE_WIN_LEN		128
 #define TAS2781_SPI_MAX_FREQ		(4 * HZ_PER_MHZ)
-/* Flag of calibration registers address. */
-#define TASDEVICE_CALIBRATION_REG_ADDRESS	BIT(7)
-#define TASDEV_UEFI_CALI_REG_ADDR_FLG	BIT(7)
 
 /* System Reset Check Register */
 #define TAS2781_REG_CLK_CONFIG		TASDEVICE_REG(0x0, 0x0, 0x5c)
@@ -135,10 +131,18 @@ static int tasdevice_spi_dev_update_bits(struct tasdevice_priv *tas_priv,
 	int ret, val;
 
 	/*
-	 * In our TAS2781 SPI mode, read/write was masked in last bit of
-	 * address, it cause regmap_update_bits() not work as expected.
+	 * In TAS2781 SPI mode, when accessing non-book-zero or page numbers
+	 * greater than 1 in book 0, an additional byte must be read. The
+	 * first byte in such cases is a dummy byte and should be ignored.
 	 */
-	ret = tasdevice_dev_read(tas_priv, chn, reg, &val);
+	if ((TASDEVICE_BOOK_ID(reg) > 0) || (TASDEVICE_PAGE_ID(reg) > 1)) {
+		unsigned char buf[2];
+
+		ret = tasdevice_dev_bulk_read(tas_priv, chn, reg, buf, 2);
+		val = buf[1];
+	} else {
+		ret = tasdevice_dev_read(tas_priv, chn, reg, &val);
+	}
 	if (ret < 0) {
 		dev_err(tas_priv->dev, "%s, E=%d\n", __func__, ret);
 		return ret;
@@ -185,15 +189,15 @@ static void tas2781_spi_reset(struct tasdevice_priv *tas_dev)
 		gpiod_set_value_cansleep(tas_dev->reset, 0);
 		fsleep(800);
 		gpiod_set_value_cansleep(tas_dev->reset, 1);
-	} else {
-		ret = tasdevice_dev_write(tas_dev, tas_dev->index,
-			TASDEVICE_REG_SWRESET, TASDEVICE_REG_SWRESET_RESET);
-		if (ret < 0) {
-			dev_err(tas_dev->dev, "dev sw-reset fail, %d\n", ret);
-			return;
-		}
-		fsleep(1000);
 	}
+
+	ret = tasdevice_dev_write(tas_dev, tas_dev->index,
+		TASDEVICE_REG_SWRESET, TASDEVICE_REG_SWRESET_RESET);
+	if (ret < 0) {
+		dev_err(tas_dev->dev, "dev sw-reset fail, %d\n", ret);
+		return;
+	}
+	fsleep(1000);
 }
 
 static int tascodec_spi_init(struct tasdevice_priv *tas_priv,
@@ -324,7 +328,6 @@ static int tas2781_read_acpi(struct tas2781_hda *tas_hda,
 {
 	struct tasdevice_priv *p = tas_hda->priv;
 	struct acpi_device *adev;
-	struct device *physdev;
 	u32 values[HDA_MAX_COMPONENTS];
 	const char *property;
 	size_t nval;
@@ -337,8 +340,12 @@ static int tas2781_read_acpi(struct tas2781_hda *tas_hda,
 	}
 
 	strscpy(p->dev_name, hid, sizeof(p->dev_name));
-	physdev = get_device(acpi_get_first_physical_node(adev));
+
+	struct device *physdev __free(put_device) =
+		get_device(acpi_get_first_physical_node(adev));
 	acpi_dev_put(adev);
+	if (!physdev)
+		return -ENODEV;
 
 	property = "ti,dev-index";
 	ret = device_property_count_u32(physdev, property);
@@ -375,14 +382,11 @@ static int tas2781_read_acpi(struct tas2781_hda *tas_hda,
 			goto err;
 		}
 	}
-	put_device(physdev);
 
 	return 0;
+
 err:
 	dev_err(p->dev, "read acpi error, ret: %d\n", ret);
-	put_device(physdev);
-	acpi_dev_put(adev);
-
 	return ret;
 }
 
@@ -395,11 +399,11 @@ static void tas2781_hda_playback_hook(struct device *dev, int action)
 		pm_runtime_get_sync(dev);
 		guard(mutex)(&tas_priv->codec_lock);
 		if (tas_priv->fw_state == TASDEVICE_DSP_FW_ALL_OK)
-			tasdevice_tuning_switch(tas_hda->priv, 0);
+			tasdevice_tuning_switch(tas_hda->priv, 0, false);
 	} else if (action == HDA_GEN_PCM_ACT_CLOSE) {
 		guard(mutex)(&tas_priv->codec_lock);
 		if (tas_priv->fw_state == TASDEVICE_DSP_FW_ALL_OK)
-			tasdevice_tuning_switch(tas_priv, 1);
+			tasdevice_tuning_switch(tas_priv, 1, false);
 		pm_runtime_put_autosuspend(dev);
 	}
 }
@@ -588,7 +592,7 @@ static int tas2781_hda_spi_snd_ctls(struct tas2781_hda *h)
 		return rc;
 	}
 	i++;
-	snprintf(name, sizeof(name), "Froce Speaker-%d FW Load", p->index);
+	snprintf(name, sizeof(name), "Force Speaker-%d FW Load", p->index);
 	tas2781_snd_ctls[i].name = name;
 	h_priv->snd_ctls[i] = snd_ctl_new1(&tas2781_snd_ctls[i], p);
 	rc = snd_ctl_add(c->card, h_priv->snd_ctls[i]);
@@ -634,9 +638,9 @@ static void tasdev_fw_ready(const struct firmware *fmw, void *context)
 	struct tasdevice_priv *tas_priv = context;
 	struct tas2781_hda *tas_hda = dev_get_drvdata(tas_priv->dev);
 	struct hda_codec *codec = tas_priv->codec;
-	int ret, val;
+	int ret;
 
-	pm_runtime_get_sync(tas_priv->dev);
+	guard(pm_runtime_active_auto)(tas_priv->dev);
 	guard(mutex)(&tas_priv->codec_lock);
 
 	ret = tasdevice_rca_parser(tas_priv, fmw);
@@ -673,20 +677,14 @@ static void tasdev_fw_ready(const struct firmware *fmw, void *context)
 	tas_priv->rcabin.profile_cfg_id = 0;
 
 	tas_priv->fw_state = TASDEVICE_DSP_FW_ALL_OK;
-	ret = tasdevice_spi_dev_read(tas_priv, tas_priv->index,
-		TAS2781_REG_CLK_CONFIG, &val);
-	if (ret < 0)
-		goto out;
 
-	if (val == TAS2781_REG_CLK_CONFIG_RESET) {
-		ret = tasdevice_prmg_load(tas_priv, 0);
-		if (ret < 0) {
-			dev_err(tas_priv->dev, "FW download failed = %d\n",
-				ret);
-			goto out;
-		}
-		tas_priv->fw_state = TASDEVICE_DSP_FW_ALL_OK;
+	ret = tasdevice_prmg_load(tas_priv, 0);
+	if (ret < 0) {
+		dev_err(tas_priv->dev, "FW download failed = %d\n", ret);
+		goto out;
 	}
+	tas_priv->fw_state = TASDEVICE_DSP_FW_ALL_OK;
+
 	if (tas_priv->fmw->nr_programs > 0)
 		tas_priv->tasdevice[tas_priv->index].cur_prog = 0;
 	if (tas_priv->fmw->nr_configurations > 0)
@@ -699,7 +697,6 @@ static void tasdev_fw_ready(const struct firmware *fmw, void *context)
 	tas2781_save_calibration(tas_hda);
 out:
 	release_firmware(fmw);
-	pm_runtime_put_autosuspend(tas_hda->priv->dev);
 }
 
 static int tas2781_hda_bind(struct device *dev, struct device *master,
@@ -720,7 +717,7 @@ static int tas2781_hda_bind(struct device *dev, struct device *master,
 
 	codec = parent->codec;
 
-	pm_runtime_get_sync(dev);
+	guard(pm_runtime_active_auto)(dev);
 
 	comp->dev = dev;
 
@@ -731,7 +728,8 @@ static int tas2781_hda_bind(struct device *dev, struct device *master,
 	if (!ret)
 		comp->playback_hook = tas2781_hda_playback_hook;
 
-	pm_runtime_put_autosuspend(dev);
+	/* Only HP Laptop support SPI-based TAS2781 */
+	tas_hda->catlog_id = HP;
 
 	return ret;
 }
@@ -750,6 +748,9 @@ static void tas2781_hda_unbind(struct device *dev, struct device *master,
 		memset(comp->name, 0, sizeof(comp->name));
 		comp->playback_hook = NULL;
 	}
+
+	request_firmware_nowait_cancel(tas_priv->dev, tas_priv,
+				       tasdev_fw_ready);
 
 	tas2781_hda_remove_controls(tas_hda);
 
@@ -797,6 +798,7 @@ static int tas2781_hda_spi_probe(struct spi_device *spi)
 	}
 	if (strstr(dev_name(&spi->dev), "TXNW2781")) {
 		device_name = "TXNW2781";
+		tas_hda->priv->chip_id = TAS2781;
 	} else {
 		dev_err(tas_priv->dev, "Unmatched spi dev %s\n",
 			dev_name(&spi->dev));
@@ -845,7 +847,7 @@ static int tas2781_runtime_suspend(struct device *dev)
 
 	if (tas_priv->fw_state == TASDEVICE_DSP_FW_ALL_OK
 		&& tas_priv->playback_started)
-		tasdevice_tuning_switch(tas_priv, 1);
+		tasdevice_tuning_switch(tas_priv, 1, false);
 
 	tas_priv->tasdevice[tas_priv->index].cur_book = -1;
 	tas_priv->tasdevice[tas_priv->index].cur_conf = -1;
@@ -862,7 +864,7 @@ static int tas2781_runtime_resume(struct device *dev)
 
 	if (tas_priv->fw_state == TASDEVICE_DSP_FW_ALL_OK
 		&& tas_priv->playback_started)
-		tasdevice_tuning_switch(tas_priv, 0);
+		tasdevice_tuning_switch(tas_priv, 0, false);
 
 	return 0;
 }
@@ -880,7 +882,7 @@ static int tas2781_system_suspend(struct device *dev)
 	/* Shutdown chip before system suspend */
 	if (tas_priv->fw_state == TASDEVICE_DSP_FW_ALL_OK
 		&& tas_priv->playback_started)
-		tasdevice_tuning_switch(tas_priv, 1);
+		tasdevice_tuning_switch(tas_priv, 1, false);
 
 	return 0;
 }
@@ -915,7 +917,7 @@ static int tas2781_system_resume(struct device *dev)
 		tas_priv->fw_state = TASDEVICE_DSP_FW_ALL_OK;
 
 		if (tas_priv->playback_started)
-			tasdevice_tuning_switch(tas_priv, 0);
+			tasdevice_tuning_switch(tas_priv, 0, false);
 	}
 
 	return ret;

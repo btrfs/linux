@@ -3,7 +3,7 @@
  * Copyright (c) 2000-2005 Silicon Graphics, Inc.
  * All Rights Reserved.
  */
-#include "xfs.h"
+#include "xfs_platform.h"
 #include "xfs_fs.h"
 #include "xfs_shared.h"
 #include "xfs_format.h"
@@ -37,10 +37,15 @@
 #include "xfs_ioctl.h"
 #include "xfs_xattr.h"
 #include "xfs_rtbitmap.h"
+#include "xfs_rtrmap_btree.h"
 #include "xfs_file.h"
 #include "xfs_exchrange.h"
 #include "xfs_handle.h"
 #include "xfs_rtgroup.h"
+#include "xfs_healthmon.h"
+#include "xfs_verify_media.h"
+#include "xfs_zone_priv.h"
+#include "xfs_zone_alloc.h"
 
 #include <linux/mount.h>
 #include <linux/fileattr.h>
@@ -404,6 +409,26 @@ xfs_ioc_ag_geometry(
 	return 0;
 }
 
+static void
+xfs_rtgroup_report_write_pointer(
+	struct xfs_rtgroup	*rtg,
+	struct xfs_rtgroup_geometry *rgeo)
+{
+	xfs_rtgroup_lock(rtg, XFS_RTGLOCK_RMAP);
+	if (rtg->rtg_open_zone) {
+		rgeo->rg_writepointer = rtg->rtg_open_zone->oz_allocated;
+	} else {
+		xfs_rgblock_t	highest_rgbno = xfs_rtrmap_highest_rgbno(rtg);
+
+		if (highest_rgbno == NULLRGBLOCK)
+			rgeo->rg_writepointer = 0;
+		else
+			rgeo->rg_writepointer = highest_rgbno + 1;
+	}
+	xfs_rtgroup_unlock(rtg, XFS_RTGLOCK_RMAP);
+	rgeo->rg_flags |= XFS_RTGROUP_GEOM_WRITEPOINTER;
+}
+
 STATIC int
 xfs_ioc_rtgroup_geometry(
 	struct xfs_mount	*mp,
@@ -427,13 +452,16 @@ xfs_ioc_rtgroup_geometry(
 		return -EINVAL;
 
 	error = xfs_rtgroup_get_geometry(rtg, &rgeo);
-	xfs_rtgroup_put(rtg);
 	if (error)
-		return error;
+		goto out_put_rtg;
+	if (xfs_has_zoned(mp))
+		xfs_rtgroup_report_write_pointer(rtg, &rgeo);
 
 	if (copy_to_user(arg, &rgeo, sizeof(rgeo)))
-		return -EFAULT;
-	return 0;
+		error = -EFAULT;
+out_put_rtg:
+	xfs_rtgroup_put(rtg);
+	return error;
 }
 
 /*
@@ -496,7 +524,7 @@ xfs_ioc_fsgetxattra(
 	xfs_inode_t		*ip,
 	void			__user *arg)
 {
-	struct file_kattr	fa;
+	struct file_kattr	fa = {};
 
 	xfs_ilock(ip, XFS_ILOCK_SHARED);
 	xfs_fill_fsxattr(ip, XFS_ATTR_FORK, &fa);
@@ -619,7 +647,7 @@ xfs_ioctl_setattr_get_trans(
 		goto out_error;
 
 	error = xfs_trans_alloc_ichange(ip, NULL, NULL, pdqp,
-			has_capability_noaudit(current, CAP_FOWNER), &tp);
+			capable_noaudit(CAP_FOWNER), &tp);
 	if (error)
 		goto out_error;
 
@@ -734,9 +762,23 @@ xfs_fileattr_set(
 	trace_xfs_ioctl_setattr(ip);
 
 	if (!fa->fsx_valid) {
-		if (fa->flags & ~(FS_IMMUTABLE_FL | FS_APPEND_FL |
-				  FS_NOATIME_FL | FS_NODUMP_FL |
-				  FS_SYNC_FL | FS_DAX_FL | FS_PROJINHERIT_FL))
+		unsigned int allowed = FS_IMMUTABLE_FL | FS_APPEND_FL |
+				       FS_NOATIME_FL | FS_NODUMP_FL |
+				       FS_SYNC_FL | FS_DAX_FL |
+				       FS_PROJINHERIT_FL;
+
+		/*
+		 * FS_CASEFOLD_FL reflects the ASCIICI superblock feature,
+		 * a read-only property. Accept it as a no-op so chattr's
+		 * RMW round-trip succeeds; reject any attempt to enable
+		 * it on a non-ASCIICI filesystem. xfs_flags2diflags()
+		 * has no clause for CASEFOLD, so the bit is dropped from
+		 * the on-disk diflags regardless.
+		 */
+		if (xfs_has_asciici(mp))
+			allowed |= FS_CASEFOLD_FL;
+
+		if (fa->flags & ~allowed)
 			return -EOPNOTSUPP;
 	}
 
@@ -894,7 +936,7 @@ xfs_ioc_getbmap(
 	if (bmx.bmv_count >= INT_MAX / recsize)
 		return -ENOMEM;
 
-	buf = kvcalloc(bmx.bmv_count, sizeof(*buf), GFP_KERNEL);
+	buf = kvzalloc_objs(*buf, bmx.bmv_count);
 	if (!buf)
 		return -ENOMEM;
 
@@ -963,7 +1005,7 @@ xfs_ioc_swapext(
 	if (ip->i_mount != tip->i_mount)
 		return -EINVAL;
 
-	if (ip->i_ino == tip->i_ino)
+	if (I_INO(ip) == I_INO(tip))
 		return -EINVAL;
 
 	if (xfs_is_shutdown(ip->i_mount))
@@ -1408,10 +1450,8 @@ xfs_file_ioctl(
 
 		trace_xfs_ioc_free_eofblocks(mp, &icw, _RET_IP_);
 
-		sb_start_write(mp->m_super);
-		error = xfs_blockgc_free_space(mp, &icw);
-		sb_end_write(mp->m_super);
-		return error;
+		guard(super_write)(mp->m_super);
+		return xfs_blockgc_free_space(mp, &icw);
 	}
 
 	case XFS_IOC_EXCHANGE_RANGE:
@@ -1420,6 +1460,11 @@ xfs_file_ioctl(
 		return xfs_ioc_start_commit(filp, arg);
 	case XFS_IOC_COMMIT_RANGE:
 		return xfs_ioc_commit_range(filp, arg);
+
+	case XFS_IOC_HEALTH_MONITOR:
+		return xfs_ioc_health_monitor(filp, arg);
+	case XFS_IOC_VERIFY_MEDIA:
+		return xfs_ioc_verify_media(filp, arg);
 
 	default:
 		return -ENOTTY;

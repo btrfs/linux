@@ -79,10 +79,11 @@ static void vdpasim_blk_buffer_unlock(struct vdpasim_blk *blk)
 static bool vdpasim_blk_check_range(struct vdpasim *vdpasim, u64 start_sector,
 				    u64 num_sectors, u64 max_sectors)
 {
-	if (start_sector > VDPASIM_BLK_CAPACITY) {
+	if (start_sector >= VDPASIM_BLK_CAPACITY) {
 		dev_dbg(&vdpasim->vdpa.dev,
 			"starting sector exceeds the capacity - start: 0x%llx capacity: 0x%x\n",
 			start_sector, VDPASIM_BLK_CAPACITY);
+		return false;
 	}
 
 	if (num_sectors > max_sectors) {
@@ -397,14 +398,7 @@ static void vdpasim_blk_free(struct vdpasim *vdpasim)
 		kvfree(blk->buffer);
 }
 
-static void vdpasim_blk_mgmtdev_release(struct device *dev)
-{
-}
-
-static struct device vdpasim_blk_mgmtdev = {
-	.init_name = "vdpasim_blk",
-	.release = vdpasim_blk_mgmtdev_release,
-};
+static struct device *vdpasim_blk_mgmtdev;
 
 static int vdpasim_blk_dev_add(struct vdpa_mgmt_dev *mdev, const char *name,
 			       const struct vdpa_dev_set_config *config)
@@ -475,7 +469,6 @@ static struct virtio_device_id id_table[] = {
 };
 
 static struct vdpa_mgmt_dev mgmt_dev = {
-	.device = &vdpasim_blk_mgmtdev,
 	.id_table = id_table,
 	.ops = &vdpasim_blk_mgmtdev_ops,
 };
@@ -484,12 +477,11 @@ static int __init vdpasim_blk_init(void)
 {
 	int ret;
 
-	ret = device_register(&vdpasim_blk_mgmtdev);
-	if (ret) {
-		put_device(&vdpasim_blk_mgmtdev);
-		return ret;
-	}
+	vdpasim_blk_mgmtdev = root_device_register("vdpasim_blk");
+	if (IS_ERR(vdpasim_blk_mgmtdev))
+		return PTR_ERR(vdpasim_blk_mgmtdev);
 
+	mgmt_dev.device = vdpasim_blk_mgmtdev;
 	ret = vdpa_mgmtdev_register(&mgmt_dev);
 	if (ret)
 		goto parent_err;
@@ -507,7 +499,8 @@ static int __init vdpasim_blk_init(void)
 mgmt_dev_err:
 	vdpa_mgmtdev_unregister(&mgmt_dev);
 parent_err:
-	device_unregister(&vdpasim_blk_mgmtdev);
+	root_device_unregister(vdpasim_blk_mgmtdev);
+
 	return ret;
 }
 
@@ -515,7 +508,7 @@ static void __exit vdpasim_blk_exit(void)
 {
 	kvfree(shared_buffer);
 	vdpa_mgmtdev_unregister(&mgmt_dev);
-	device_unregister(&vdpasim_blk_mgmtdev);
+	root_device_unregister(vdpasim_blk_mgmtdev);
 }
 
 module_init(vdpasim_blk_init)

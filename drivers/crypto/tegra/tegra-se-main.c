@@ -8,7 +8,6 @@
 #include <linux/dma-mapping.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
-#include <linux/mod_devicetable.h>
 
 #include <crypto/engine.h>
 
@@ -47,16 +46,16 @@ tegra_se_cmdbuf_pin(struct device *dev, struct host1x_bo *bo, enum dma_data_dire
 	struct host1x_bo_mapping *map;
 	int err;
 
-	map = kzalloc(sizeof(*map), GFP_KERNEL);
+	map = kzalloc_obj(*map);
 	if (!map)
 		return ERR_PTR(-ENOMEM);
 
 	kref_init(&map->ref);
-	map->bo = host1x_bo_get(bo);
+	map->bo = bo;
 	map->direction = direction;
 	map->dev = dev;
 
-	map->sgt = kzalloc(sizeof(*map->sgt), GFP_KERNEL);
+	map->sgt = kzalloc_obj(*map->sgt);
 	if (!map->sgt) {
 		err = -ENOMEM;
 		goto free;
@@ -93,7 +92,6 @@ static void tegra_se_cmdbuf_unpin(struct host1x_bo_mapping *map)
 	dma_unmap_sgtable(map->dev, map->sgt, map->direction, 0);
 	sg_free_table(map->sgt);
 	kfree(map->sgt);
-	host1x_bo_put(map->bo);
 
 	kfree(map);
 }
@@ -123,7 +121,7 @@ static struct tegra_se_cmdbuf *tegra_se_host1x_bo_alloc(struct tegra_se *se, ssi
 	struct tegra_se_cmdbuf *cmdbuf;
 	struct device *dev = se->dev->parent;
 
-	cmdbuf = kzalloc(sizeof(*cmdbuf), GFP_KERNEL);
+	cmdbuf = kzalloc_obj(*cmdbuf);
 	if (!cmdbuf)
 		return NULL;
 
@@ -180,7 +178,7 @@ int tegra_se_host1x_submit(struct tegra_se *se, struct tegra_se_cmdbuf *cmdbuf, 
 				 MAX_SCHEDULE_TIMEOUT, NULL);
 	if (ret) {
 		dev_err(se->dev, "host1x job timed out\n");
-		return ret;
+		goto job_put;
 	}
 
 	host1x_job_put(job);
@@ -401,11 +399,9 @@ static int tegra_se_host1x_probe(struct host1x_device *dev)
 	return host1x_device_init(dev);
 }
 
-static int tegra_se_host1x_remove(struct host1x_device *dev)
+static void tegra_se_host1x_remove(struct host1x_device *dev)
 {
 	host1x_device_exit(dev);
-
-	return 0;
 }
 
 static struct host1x_driver tegra_se_host1x_driver = {

@@ -5,11 +5,10 @@
  */
 #include <linux/dma-mapping.h>
 #include <linux/interrupt.h>
+#include <linux/string.h>
 #include <crypto/gcm.h>
 #include <crypto/authenc.h>
 #include <crypto/internal/aead.h>
-#include <crypto/internal/des.h>
-#include <crypto/sha1.h>
 #include <crypto/sha2.h>
 #include <crypto/scatterwalk.h>
 #include "aead.h"
@@ -35,7 +34,6 @@ static void qce_aead_done(void *data)
 	u32 status;
 	unsigned int totallen;
 	unsigned char tag[SHA256_DIGEST_SIZE] = {0};
-	int ret = 0;
 
 	diff_dst = (req->src != req->dst) ? true : false;
 	dir_src = diff_dst ? DMA_TO_DEVICE : DMA_BIDIRECTIONAL;
@@ -79,8 +77,7 @@ static void qce_aead_done(void *data)
 	} else if (!IS_CCM(rctx->flags)) {
 		totallen = req->cryptlen + req->assoclen - ctx->authsize;
 		scatterwalk_map_and_copy(tag, req->src, totallen, ctx->authsize, 0);
-		ret = memcmp(result_buf->auth_iv, tag, ctx->authsize);
-		if (ret) {
+		if (memcmp(result_buf->auth_iv, tag, ctx->authsize)) {
 			pr_err("Bad message error\n");
 			error = -EBADMSG;
 		}
@@ -144,16 +141,12 @@ qce_aead_prepare_dst_buf(struct aead_request *req)
 
 		sg = qce_sgtable_add(&rctx->dst_tbl, &rctx->adata_sg,
 				     rctx->assoclen);
-		if (IS_ERR(sg)) {
-			ret = PTR_ERR(sg);
+		if (IS_ERR(sg))
 			goto dst_tbl_free;
-		}
 		/* dst buffer */
 		sg = qce_sgtable_add(&rctx->dst_tbl, msg_sg, rctx->cryptlen);
-		if (IS_ERR(sg)) {
-			ret = PTR_ERR(sg);
+		if (IS_ERR(sg))
 			goto dst_tbl_free;
-		}
 		totallen = rctx->cryptlen + rctx->assoclen;
 	} else {
 		if (totallen) {
@@ -203,7 +196,7 @@ qce_aead_ccm_prepare_buf_assoclen(struct aead_request *req)
 	/* Get the msg */
 	msg_sg = scatterwalk_ffwd(__sg, req->src, req->assoclen);
 
-	rctx->adata = kzalloc((ALIGN(assoclen, 16) + MAX_CCM_ADATA_HEADER_LEN) *
+	rctx->adata = kzalloc(ALIGN(assoclen + MAX_CCM_ADATA_HEADER_LEN, 16) *
 			       sizeof(unsigned char), GFP_ATOMIC);
 	if (!rctx->adata)
 		return -ENOMEM;
@@ -597,7 +590,6 @@ static int qce_aead_setkey(struct crypto_aead *tfm, const u8 *key, unsigned int 
 	struct qce_aead_ctx *ctx = crypto_aead_ctx(tfm);
 	struct crypto_authenc_keys authenc_keys;
 	unsigned long flags = to_aead_tmpl(tfm)->alg_flags;
-	u32 _key[6];
 	int err;
 
 	err = crypto_authenc_extractkeys(&authenc_keys, key, keylen);
@@ -608,26 +600,7 @@ static int qce_aead_setkey(struct crypto_aead *tfm, const u8 *key, unsigned int 
 	    authenc_keys.authkeylen > QCE_MAX_KEY_SIZE)
 		return -EINVAL;
 
-	if (IS_DES(flags)) {
-		err = verify_aead_des_key(tfm, authenc_keys.enckey, authenc_keys.enckeylen);
-		if (err)
-			return err;
-	} else if (IS_3DES(flags)) {
-		err = verify_aead_des3_key(tfm, authenc_keys.enckey, authenc_keys.enckeylen);
-		if (err)
-			return err;
-		/*
-		 * The crypto engine does not support any two keys
-		 * being the same for triple des algorithms. The
-		 * verify_skcipher_des3_key does not check for all the
-		 * below conditions. Schedule fallback in this case.
-		 */
-		memcpy(_key, authenc_keys.enckey, DES3_EDE_KEY_SIZE);
-		if (!((_key[0] ^ _key[2]) | (_key[1] ^ _key[3])) ||
-		    !((_key[2] ^ _key[4]) | (_key[3] ^ _key[5])) ||
-		    !((_key[0] ^ _key[4]) | (_key[1] ^ _key[5])))
-			ctx->need_fallback = true;
-	} else if (IS_AES(flags)) {
+	if (IS_AES(flags)) {
 		/* No random key sizes */
 		if (authenc_keys.enckeylen != AES_KEYSIZE_128 &&
 		    authenc_keys.enckeylen != AES_KEYSIZE_192 &&
@@ -642,8 +615,8 @@ static int qce_aead_setkey(struct crypto_aead *tfm, const u8 *key, unsigned int 
 
 	memcpy(ctx->enc_key, authenc_keys.enckey, authenc_keys.enckeylen);
 
-	memset(ctx->auth_key, 0, sizeof(ctx->auth_key));
-	memcpy(ctx->auth_key, authenc_keys.authkey, authenc_keys.authkeylen);
+	memcpy_and_pad(ctx->auth_key, sizeof(ctx->auth_key),
+		       authenc_keys.authkey, authenc_keys.authkeylen, 0);
 
 	return crypto_aead_setkey(ctx->fallback, key, keylen);
 }
@@ -699,38 +672,6 @@ struct qce_aead_def {
 
 static const struct qce_aead_def aead_def[] = {
 	{
-		.flags          = QCE_ALG_DES | QCE_MODE_CBC | QCE_HASH_SHA1_HMAC,
-		.name           = "authenc(hmac(sha1),cbc(des))",
-		.drv_name       = "authenc-hmac-sha1-cbc-des-qce",
-		.blocksize      = DES_BLOCK_SIZE,
-		.ivsize         = DES_BLOCK_SIZE,
-		.maxauthsize	= SHA1_DIGEST_SIZE,
-	},
-	{
-		.flags          = QCE_ALG_3DES | QCE_MODE_CBC | QCE_HASH_SHA1_HMAC,
-		.name           = "authenc(hmac(sha1),cbc(des3_ede))",
-		.drv_name       = "authenc-hmac-sha1-cbc-3des-qce",
-		.blocksize      = DES3_EDE_BLOCK_SIZE,
-		.ivsize         = DES3_EDE_BLOCK_SIZE,
-		.maxauthsize	= SHA1_DIGEST_SIZE,
-	},
-	{
-		.flags          = QCE_ALG_DES | QCE_MODE_CBC | QCE_HASH_SHA256_HMAC,
-		.name           = "authenc(hmac(sha256),cbc(des))",
-		.drv_name       = "authenc-hmac-sha256-cbc-des-qce",
-		.blocksize      = DES_BLOCK_SIZE,
-		.ivsize         = DES_BLOCK_SIZE,
-		.maxauthsize	= SHA256_DIGEST_SIZE,
-	},
-	{
-		.flags          = QCE_ALG_3DES | QCE_MODE_CBC | QCE_HASH_SHA256_HMAC,
-		.name           = "authenc(hmac(sha256),cbc(des3_ede))",
-		.drv_name       = "authenc-hmac-sha256-cbc-3des-qce",
-		.blocksize      = DES3_EDE_BLOCK_SIZE,
-		.ivsize         = DES3_EDE_BLOCK_SIZE,
-		.maxauthsize	= SHA256_DIGEST_SIZE,
-	},
-	{
 		.flags          =  QCE_ALG_AES | QCE_MODE_CBC | QCE_HASH_SHA256_HMAC,
 		.name           = "authenc(hmac(sha256),cbc(aes))",
 		.drv_name       = "authenc-hmac-sha256-cbc-aes-qce",
@@ -762,15 +703,14 @@ static int qce_aead_register_one(const struct qce_aead_def *def, struct qce_devi
 	struct aead_alg *alg;
 	int ret;
 
-	tmpl = kzalloc(sizeof(*tmpl), GFP_KERNEL);
+	tmpl = kzalloc_obj(*tmpl);
 	if (!tmpl)
 		return -ENOMEM;
 
 	alg = &tmpl->alg.aead;
 
-	snprintf(alg->base.cra_name, CRYPTO_MAX_ALG_NAME, "%s", def->name);
-	snprintf(alg->base.cra_driver_name, CRYPTO_MAX_ALG_NAME, "%s",
-		 def->drv_name);
+	strscpy(alg->base.cra_name, def->name);
+	strscpy(alg->base.cra_driver_name, def->drv_name);
 
 	alg->base.cra_blocksize		= def->blocksize;
 	alg->chunksize			= def->chunksize;

@@ -204,7 +204,7 @@ int amdgpu_display_crtc_page_flip_target(struct drm_crtc *crtc,
 	u64 tiling_flags;
 	int i, r;
 
-	work = kzalloc(sizeof(*work), GFP_KERNEL);
+	work = kzalloc_obj(*work);
 	if (work == NULL)
 		return -ENOMEM;
 
@@ -332,8 +332,6 @@ int amdgpu_display_crtc_set_config(struct drm_mode_set *set,
 		if (crtc->enabled)
 			active = true;
 
-	pm_runtime_mark_last_busy(dev->dev);
-
 	adev = drm_to_adev(dev);
 	/* if we have active crtcs and we don't have a power ref,
 	 * take the current one
@@ -417,15 +415,15 @@ void amdgpu_display_print_display_setup(struct drm_device *dev)
 	int i = 0;
 
 	drm_connector_list_iter_begin(dev, &iter);
-	DRM_INFO("AMDGPU Display Connectors\n");
+	drm_info(dev, "AMDGPU Display Connectors\n");
 	drm_for_each_connector_iter(connector, &iter) {
 		amdgpu_connector = to_amdgpu_connector(connector);
-		DRM_INFO("Connector %d:\n", i);
-		DRM_INFO("  %s\n", connector->name);
+		drm_info(dev, "Connector %d:\n", i);
+		drm_info(dev, "  %s\n", connector->name);
 		if (amdgpu_connector->hpd.hpd != AMDGPU_HPD_NONE)
-			DRM_INFO("  %s\n", hpd_names[amdgpu_connector->hpd.hpd]);
+			drm_info(dev, "  %s\n", hpd_names[amdgpu_connector->hpd.hpd]);
 		if (amdgpu_connector->ddc_bus) {
-			DRM_INFO("  DDC: 0x%x 0x%x 0x%x 0x%x 0x%x 0x%x 0x%x 0x%x\n",
+			drm_info(dev, "  DDC: 0x%x 0x%x 0x%x 0x%x 0x%x 0x%x 0x%x 0x%x\n",
 				 amdgpu_connector->ddc_bus->rec.mask_clk_reg,
 				 amdgpu_connector->ddc_bus->rec.mask_data_reg,
 				 amdgpu_connector->ddc_bus->rec.a_clk_reg,
@@ -435,11 +433,11 @@ void amdgpu_display_print_display_setup(struct drm_device *dev)
 				 amdgpu_connector->ddc_bus->rec.y_clk_reg,
 				 amdgpu_connector->ddc_bus->rec.y_data_reg);
 			if (amdgpu_connector->router.ddc_valid)
-				DRM_INFO("  DDC Router 0x%x/0x%x\n",
+				drm_info(dev, "  DDC Router 0x%x/0x%x\n",
 					 amdgpu_connector->router.ddc_mux_control_pin,
 					 amdgpu_connector->router.ddc_mux_state);
 			if (amdgpu_connector->router.cd_valid)
-				DRM_INFO("  Clock/Data Router 0x%x/0x%x\n",
+				drm_info(dev, "  Clock/Data Router 0x%x/0x%x\n",
 					 amdgpu_connector->router.cd_mux_control_pin,
 					 amdgpu_connector->router.cd_mux_state);
 		} else {
@@ -449,35 +447,35 @@ void amdgpu_display_print_display_setup(struct drm_device *dev)
 			    connector->connector_type == DRM_MODE_CONNECTOR_DVIA ||
 			    connector->connector_type == DRM_MODE_CONNECTOR_HDMIA ||
 			    connector->connector_type == DRM_MODE_CONNECTOR_HDMIB)
-				DRM_INFO("  DDC: no ddc bus - possible BIOS bug - please report to xorg-driver-ati@lists.x.org\n");
+				drm_info(dev, "  DDC: no ddc bus - possible BIOS bug - please report to xorg-driver-ati@lists.x.org\n");
 		}
-		DRM_INFO("  Encoders:\n");
+		drm_info(dev, "  Encoders:\n");
 		list_for_each_entry(encoder, &dev->mode_config.encoder_list, head) {
 			amdgpu_encoder = to_amdgpu_encoder(encoder);
 			devices = amdgpu_encoder->devices & amdgpu_connector->devices;
 			if (devices) {
 				if (devices & ATOM_DEVICE_CRT1_SUPPORT)
-					DRM_INFO("    CRT1: %s\n", encoder_names[amdgpu_encoder->encoder_id]);
+					drm_info(dev, "    CRT1: %s\n", encoder_names[amdgpu_encoder->encoder_id]);
 				if (devices & ATOM_DEVICE_CRT2_SUPPORT)
-					DRM_INFO("    CRT2: %s\n", encoder_names[amdgpu_encoder->encoder_id]);
+					drm_info(dev, "    CRT2: %s\n", encoder_names[amdgpu_encoder->encoder_id]);
 				if (devices & ATOM_DEVICE_LCD1_SUPPORT)
-					DRM_INFO("    LCD1: %s\n", encoder_names[amdgpu_encoder->encoder_id]);
+					drm_info(dev, "    LCD1: %s\n", encoder_names[amdgpu_encoder->encoder_id]);
 				if (devices & ATOM_DEVICE_DFP1_SUPPORT)
-					DRM_INFO("    DFP1: %s\n", encoder_names[amdgpu_encoder->encoder_id]);
+					drm_info(dev, "    DFP1: %s\n", encoder_names[amdgpu_encoder->encoder_id]);
 				if (devices & ATOM_DEVICE_DFP2_SUPPORT)
-					DRM_INFO("    DFP2: %s\n", encoder_names[amdgpu_encoder->encoder_id]);
+					drm_info(dev, "    DFP2: %s\n", encoder_names[amdgpu_encoder->encoder_id]);
 				if (devices & ATOM_DEVICE_DFP3_SUPPORT)
-					DRM_INFO("    DFP3: %s\n", encoder_names[amdgpu_encoder->encoder_id]);
+					drm_info(dev, "    DFP3: %s\n", encoder_names[amdgpu_encoder->encoder_id]);
 				if (devices & ATOM_DEVICE_DFP4_SUPPORT)
-					DRM_INFO("    DFP4: %s\n", encoder_names[amdgpu_encoder->encoder_id]);
+					drm_info(dev, "    DFP4: %s\n", encoder_names[amdgpu_encoder->encoder_id]);
 				if (devices & ATOM_DEVICE_DFP5_SUPPORT)
-					DRM_INFO("    DFP5: %s\n", encoder_names[amdgpu_encoder->encoder_id]);
+					drm_info(dev, "    DFP5: %s\n", encoder_names[amdgpu_encoder->encoder_id]);
 				if (devices & ATOM_DEVICE_DFP6_SUPPORT)
-					DRM_INFO("    DFP6: %s\n", encoder_names[amdgpu_encoder->encoder_id]);
+					drm_info(dev, "    DFP6: %s\n", encoder_names[amdgpu_encoder->encoder_id]);
 				if (devices & ATOM_DEVICE_TV1_SUPPORT)
-					DRM_INFO("    TV1: %s\n", encoder_names[amdgpu_encoder->encoder_id]);
+					drm_info(dev, "    TV1: %s\n", encoder_names[amdgpu_encoder->encoder_id]);
 				if (devices & ATOM_DEVICE_CV_SUPPORT)
-					DRM_INFO("    CV: %s\n", encoder_names[amdgpu_encoder->encoder_id]);
+					drm_info(dev, "    CV: %s\n", encoder_names[amdgpu_encoder->encoder_id]);
 			}
 		}
 		i++;
@@ -748,7 +746,7 @@ static int convert_tiling_flags_to_modifier_gfx12(struct amdgpu_framebuffer *afb
 	return 0;
 }
 
-static int convert_tiling_flags_to_modifier(struct amdgpu_framebuffer *afb)
+static int convert_tiling_flags_to_modifier_gfx9(struct amdgpu_framebuffer *afb)
 {
 	struct amdgpu_device *adev = drm_to_adev(afb->base.dev);
 	uint64_t modifier = 0;
@@ -942,25 +940,85 @@ static int convert_tiling_flags_to_modifier(struct amdgpu_framebuffer *afb)
 	return 0;
 }
 
-/* Mirrors the is_displayable check in radeonsi's gfx6_compute_surface */
+static int convert_tiling_flags_to_modifier_gfx6(struct amdgpu_framebuffer *afb)
+{
+	const uint32_t array_mode = AMDGPU_TILING_GET(afb->tiling_flags, ARRAY_MODE);
+	const uint32_t pipe_config = AMDGPU_TILING_GET(afb->tiling_flags, PIPE_CONFIG);
+	const uint32_t tile_split = AMDGPU_TILING_GET(afb->tiling_flags, TILE_SPLIT);
+	const uint32_t micro_tile_mode = AMDGPU_TILING_GET(afb->tiling_flags, MICRO_TILE_MODE);
+	const uint32_t bank_width = AMDGPU_TILING_GET(afb->tiling_flags, BANK_WIDTH);
+	const uint32_t bank_height = AMDGPU_TILING_GET(afb->tiling_flags, BANK_HEIGHT);
+	const uint32_t macro_tile_aspect = AMDGPU_TILING_GET(afb->tiling_flags, MACRO_TILE_ASPECT);
+	const uint32_t num_banks = AMDGPU_TILING_GET(afb->tiling_flags, NUM_BANKS);
+	struct amdgpu_device *adev = drm_to_adev(afb->base.dev);
+	uint64_t modifier = 0;
+
+	switch (array_mode) {
+	case DC_ARRAY_LINEAR_GENERAL:
+	case DC_ARRAY_LINEAR_ALLIGNED:
+		modifier = DRM_FORMAT_MOD_LINEAR;
+		break;
+
+	case DC_ARRAY_2D_TILED_THIN1:
+		/* Macro tiled modes only */
+		modifier |=
+			AMD_FMT_MOD_SET(PIPE_CONFIG, pipe_config) |
+			AMD_FMT_MOD_SET(TILE_SPLIT, tile_split) |
+			AMD_FMT_MOD_SET(BANK_WIDTH, bank_width) |
+			AMD_FMT_MOD_SET(BANK_HEIGHT, bank_height) |
+			AMD_FMT_MOD_SET(MACRO_TILE_ASPECT, macro_tile_aspect) |
+			AMD_FMT_MOD_SET(NUM_BANKS, num_banks);
+		fallthrough;
+
+	case DC_ARRAY_1D_TILED_THIN1:
+		/* Micro and macro tiled modes */
+		modifier |=
+			AMD_FMT_MOD |
+			AMD_FMT_MOD_SET(TILE_VERSION, AMD_FMT_MOD_TILE_VER_GFX6) |
+			AMD_FMT_MOD_SET(TILE, array_mode) |
+			AMD_FMT_MOD_SET(MICROTILE, micro_tile_mode);
+		break;
+
+	default:
+		drm_dbg_kms(&adev->ddev, "array mode 0x%x not supported\n", array_mode);
+		return -EINVAL;
+	}
+
+	afb->base.modifier = modifier;
+	afb->base.flags |= DRM_MODE_FB_MODIFIERS;
+	return 0;
+}
+
 static int check_tiling_flags_gfx6(struct amdgpu_framebuffer *afb)
 {
-	u64 micro_tile_mode;
+	const u64 array_mode = AMDGPU_TILING_GET(afb->tiling_flags, ARRAY_MODE);
+	const u64 micro_tile_mode = AMDGPU_TILING_GET(afb->tiling_flags, MICRO_TILE_MODE);
 
-	if (AMDGPU_TILING_GET(afb->tiling_flags, ARRAY_MODE) == 1) /* LINEAR_ALIGNED */
+	/* LINEAR_GENERAL, LINEAR_ALIGNED */
+	if (array_mode == 0 || array_mode == 1)
 		return 0;
 
-	micro_tile_mode = AMDGPU_TILING_GET(afb->tiling_flags, MICRO_TILE_MODE);
-	switch (micro_tile_mode) {
-	case 0: /* DISPLAY */
-	case 3: /* RENDER */
-		return 0;
-	default:
+	/* 1D_TILED_THIN1, 2D_TILED_THIN1 */
+	if (array_mode != 2 && array_mode != 4) {
+		drm_dbg_kms(afb->base.dev,
+			    "Array mode %llu not supported for scanout\n",
+			    array_mode);
+		return -EINVAL;
+	}
+
+	/*
+	 * For now, only allow DISPLAY micro tile mode.
+	 * THIN, DEPTH and THICK modes are not displayable.
+	 * ROTATED has never been supported by Linux or Mesa.
+	 */
+	if (micro_tile_mode != 0) {
 		drm_dbg_kms(afb->base.dev,
 			    "Micro tile mode %llu not supported for scanout\n",
 			    micro_tile_mode);
 		return -EINVAL;
 	}
+
+	return 0;
 }
 
 static void get_block_dimensions(unsigned int block_log2, unsigned int cpp,
@@ -1055,6 +1113,85 @@ static int amdgpu_display_verify_plane(struct amdgpu_framebuffer *rfb, int plane
 	return 0;
 }
 
+static int amdgpu_display_verify_sizes_gfx6(struct drm_device *dev,
+					    const u64 modifier,
+					    unsigned int *out_block_width,
+					    unsigned int *out_block_height)
+{
+	const u32 display_micro_tile_pitch = 32; /* required by DCE */
+	const u32 micro_tile_width = 8;
+	const u32 micro_tile_height = 8;
+	const u32 micro_tile_mode = AMD_FMT_MOD_GET(MICROTILE, modifier);
+	const u32 array_mode = AMD_FMT_MOD_GET(TILE, modifier);
+	u32 num_banks, bank_width, bank_height, pipe_config, macro_tile_aspect;
+	u32 num_pipes;
+
+	if (AMD_FMT_MOD_GET(DCC, modifier)) {
+		drm_dbg_kms(dev, "DCC is not displayable on GFX6-8\n");
+		return -EINVAL;
+	}
+	if (array_mode != AMD_FMT_MOD_TILE_GFX6_1D_TILED_THIN1 &&
+	    array_mode != AMD_FMT_MOD_TILE_GFX6_2D_TILED_THIN1) {
+		drm_dbg_kms(dev, "Array mode %u not supported for scanout\n", array_mode);
+		return -EINVAL;
+	}
+	if (micro_tile_mode != AMD_FMT_MOD_MICROTILE_DISPLAY) {
+		drm_dbg_kms(dev, "Microtile mode %u not supported for scanout\n", micro_tile_mode);
+		return -EINVAL;
+	}
+
+	num_banks = 2 << AMD_FMT_MOD_GET(NUM_BANKS, modifier);
+	bank_width = 1 << AMD_FMT_MOD_GET(BANK_WIDTH, modifier);
+	bank_height = 1 << AMD_FMT_MOD_GET(BANK_HEIGHT, modifier);
+	pipe_config = AMD_FMT_MOD_GET(PIPE_CONFIG, modifier);
+	macro_tile_aspect = 1 << AMD_FMT_MOD_GET(MACRO_TILE_ASPECT, modifier);
+
+	switch (pipe_config) {
+	case AMD_FMT_MOD_PIPE_CONFIG_P16_32x32_8x16:
+	case AMD_FMT_MOD_PIPE_CONFIG_P16_32x32_16x16:
+		num_pipes = 16;
+		break;
+
+	case AMD_FMT_MOD_PIPE_CONFIG_P8_16x16_8x16:
+	case AMD_FMT_MOD_PIPE_CONFIG_P8_16x32_8x16:
+	case AMD_FMT_MOD_PIPE_CONFIG_P8_32x32_8x16:
+	case AMD_FMT_MOD_PIPE_CONFIG_P8_16x32_16x16:
+	case AMD_FMT_MOD_PIPE_CONFIG_P8_32x32_16x16:
+	case AMD_FMT_MOD_PIPE_CONFIG_P8_32x32_16x32:
+	case AMD_FMT_MOD_PIPE_CONFIG_P8_32x64_32x32:
+		num_pipes = 8;
+		break;
+
+	case AMD_FMT_MOD_PIPE_CONFIG_P4_8x16:
+	case AMD_FMT_MOD_PIPE_CONFIG_P4_16x16:
+	case AMD_FMT_MOD_PIPE_CONFIG_P4_16x32:
+	case AMD_FMT_MOD_PIPE_CONFIG_P4_32x32:
+		num_pipes = 4;
+		break;
+
+	case AMD_FMT_MOD_PIPE_CONFIG_P2:
+		num_pipes = 2;
+		break;
+
+	default:
+		drm_dbg_kms(dev, "Pipe config %u invalid\n", pipe_config);
+		return -EINVAL;
+	}
+
+	/* For reference, see SiLib::InitEquationTable() in addrlib */
+	if (array_mode < AMD_FMT_MOD_TILE_GFX6_2D_TILED_THIN1) {
+		*out_block_width = display_micro_tile_pitch;
+		*out_block_height = micro_tile_height;
+	} else {
+		/* Assume non-PRT macro tiling modes */
+		*out_block_width = num_pipes * micro_tile_width *
+				   bank_width * macro_tile_aspect;
+		*out_block_height = micro_tile_height * bank_height *
+				    num_banks / macro_tile_aspect;
+	}
+
+	return 0;
+}
 
 static int amdgpu_display_verify_sizes(struct amdgpu_framebuffer *rfb)
 {
@@ -1095,7 +1232,7 @@ static int amdgpu_display_verify_sizes(struct amdgpu_framebuffer *rfb)
 
 			get_block_dimensions(block_size_log2, format_info->cpp[i],
 					     &block_width, &block_height);
-		} else {
+		} else if (AMD_FMT_MOD_GET(TILE_VERSION, modifier) >= AMD_FMT_MOD_TILE_VER_GFX9) {
 			int swizzle = AMD_FMT_MOD_GET(TILE, modifier);
 
 			switch ((swizzle & ~3) + 1) {
@@ -1122,6 +1259,18 @@ static int amdgpu_display_verify_sizes(struct amdgpu_framebuffer *rfb)
 
 			get_block_dimensions(block_size_log2, format_info->cpp[i],
 					     &block_width, &block_height);
+		} else if (AMD_FMT_MOD_GET(TILE_VERSION, modifier) == AMD_FMT_MOD_TILE_VER_GFX6) {
+			ret = amdgpu_display_verify_sizes_gfx6(rfb->base.dev, modifier,
+							       &block_width, &block_height);
+			if (ret)
+				return ret;
+
+			/* amdgpu_display_verify_plane() assumes the block size is a power of 2 */
+			WARN_ON(!is_power_of_2(block_width));
+			WARN_ON(!is_power_of_2(block_height));
+			WARN_ON(!is_power_of_2(format_info->cpp[i]));
+
+			block_size_log2 = ilog2(block_width * block_height * format_info->cpp[i]);
 		}
 
 		ret = amdgpu_display_verify_plane(rfb, i, format_info,
@@ -1273,8 +1422,10 @@ static int amdgpu_display_framebuffer_init(struct drm_device *dev,
 	    !(rfb->base.flags & DRM_MODE_FB_MODIFIERS)) {
 		if (amdgpu_ip_version(adev, GC_HWIP, 0) >= IP_VERSION(12, 0, 0))
 			ret = convert_tiling_flags_to_modifier_gfx12(rfb);
+		else if (amdgpu_ip_version(adev, GC_HWIP, 0) >= IP_VERSION(9, 0, 0))
+			ret = convert_tiling_flags_to_modifier_gfx9(rfb);
 		else
-			ret = convert_tiling_flags_to_modifier(rfb);
+			ret = convert_tiling_flags_to_modifier_gfx6(rfb);
 
 		if (ret) {
 			drm_dbg_kms(dev, "Failed to convert tiling flags 0x%llX to a modifier",
@@ -1325,7 +1476,7 @@ amdgpu_display_user_framebuffer_create(struct drm_device *dev,
 		return ERR_PTR(-EINVAL);
 	}
 
-	amdgpu_fb = kzalloc(sizeof(*amdgpu_fb), GFP_KERNEL);
+	amdgpu_fb = kzalloc_obj(*amdgpu_fb);
 	if (amdgpu_fb == NULL) {
 		drm_gem_object_put(obj);
 		return ERR_PTR(-ENOMEM);
@@ -1364,6 +1515,64 @@ static const struct drm_prop_enum_list amdgpu_dither_enum_list[] = {
 	{ AMDGPU_FMT_DITHER_DISABLE, "off" },
 	{ AMDGPU_FMT_DITHER_ENABLE, "on" },
 };
+
+/**
+ * DOC: property for adaptive backlight modulation
+ *
+ * The 'adaptive backlight modulation' property is used for the compositor to
+ * directly control the adaptive backlight modulation power savings feature
+ * that is part of DCN hardware.
+ *
+ * The property will be attached specifically to eDP panels that support it.
+ *
+ * The property is by default set to 'sysfs' to allow the sysfs file 'panel_power_savings'
+ * to be able to control it.
+ * If set to 'off' the compositor will ensure it stays off.
+ * The other values 'min', 'bias min', 'bias max', and 'max' will control the
+ * intensity of the power savings.
+ *
+ * Modifying this value can have implications on color accuracy, so tread
+ * carefully.
+ */
+static int amdgpu_display_setup_abm_prop(struct amdgpu_device *adev)
+{
+	const struct drm_prop_enum_list props[] = {
+		{ ABM_SYSFS_CONTROL, "sysfs" },
+		{ ABM_LEVEL_OFF, "off" },
+		{ ABM_LEVEL_MIN, "min" },
+		{ ABM_LEVEL_BIAS_MIN, "bias min" },
+		{ ABM_LEVEL_BIAS_MAX, "bias max" },
+		{ ABM_LEVEL_MAX, "max" },
+	};
+	struct drm_property *prop;
+	int i;
+
+	if (!adev->dc_enabled)
+		return 0;
+
+	prop = drm_property_create(adev_to_drm(adev), DRM_MODE_PROP_ENUM,
+				"adaptive backlight modulation",
+				6);
+	if (!prop)
+		return -ENOMEM;
+
+	for (i = 0; i < ARRAY_SIZE(props); i++) {
+		int ret;
+
+		ret = drm_property_add_enum(prop, props[i].type,
+						props[i].name);
+
+		if (ret) {
+			drm_property_destroy(adev_to_drm(adev), prop);
+
+			return ret;
+		}
+	}
+
+	adev->mode_info.abm_level_property = prop;
+
+	return 0;
+}
 
 int amdgpu_display_modeset_create_props(struct amdgpu_device *adev)
 {
@@ -1411,7 +1620,7 @@ int amdgpu_display_modeset_create_props(struct amdgpu_device *adev)
 					 "dither",
 					 amdgpu_dither_enum_list, sz);
 
-	return 0;
+	return amdgpu_display_setup_abm_prop(adev);
 }
 
 void amdgpu_display_update_priority(struct amdgpu_device *adev)
@@ -1682,21 +1891,6 @@ bool amdgpu_crtc_get_scanout_position(struct drm_crtc *crtc,
 						  stime, etime, mode);
 }
 
-static bool
-amdgpu_display_robj_is_fb(struct amdgpu_device *adev, struct amdgpu_bo *robj)
-{
-	struct drm_device *dev = adev_to_drm(adev);
-	struct drm_fb_helper *fb_helper = dev->fb_helper;
-
-	if (!fb_helper || !fb_helper->buffer)
-		return false;
-
-	if (gem_to_amdgpu_bo(fb_helper->buffer->gem) != robj)
-		return false;
-
-	return true;
-}
-
 int amdgpu_display_suspend_helper(struct amdgpu_device *adev)
 {
 	struct drm_device *dev = adev_to_drm(adev);
@@ -1719,7 +1913,6 @@ int amdgpu_display_suspend_helper(struct amdgpu_device *adev)
 	list_for_each_entry(crtc, &dev->mode_config.crtc_list, head) {
 		struct amdgpu_crtc *amdgpu_crtc = to_amdgpu_crtc(crtc);
 		struct drm_framebuffer *fb = crtc->primary->fb;
-		struct amdgpu_bo *robj;
 
 		if (amdgpu_crtc->cursor_bo && !adev->enable_virtual_display) {
 			struct amdgpu_bo *aobj = gem_to_amdgpu_bo(amdgpu_crtc->cursor_bo);
@@ -1734,8 +1927,9 @@ int amdgpu_display_suspend_helper(struct amdgpu_device *adev)
 		if (!fb || !fb->obj[0])
 			continue;
 
-		robj = gem_to_amdgpu_bo(fb->obj[0]);
-		if (!amdgpu_display_robj_is_fb(adev, robj)) {
+		if (!drm_fb_helper_gem_is_fb(dev->fb_helper, fb->obj[0])) {
+			struct amdgpu_bo *robj = gem_to_amdgpu_bo(fb->obj[0]);
+
 			r = amdgpu_bo_reserve(robj, true);
 			if (r == 0) {
 				amdgpu_bo_unpin(robj);
@@ -1824,7 +2018,12 @@ int amdgpu_display_get_scanout_buffer(struct drm_plane *plane,
 				      struct drm_scanout_buffer *sb)
 {
 	struct amdgpu_bo *abo;
-	struct drm_framebuffer *fb = plane->state->fb;
+	struct drm_framebuffer *fb;
+
+	if (drm_drv_uses_atomic_modeset(plane->dev))
+		fb = plane->state->fb;
+	else
+		fb = plane->fb;
 
 	if (!fb)
 		return -EINVAL;

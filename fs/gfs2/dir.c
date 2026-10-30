@@ -1505,15 +1505,13 @@ static void gfs2_dir_readahead(struct inode *inode, unsigned hsize, u32 index,
 		if (trylock_buffer(bh)) {
 			if (buffer_uptodate(bh)) {
 				unlock_buffer(bh);
-				brelse(bh);
-				continue;
+			} else {
+				bh_submit(bh, REQ_OP_READ | REQ_RAHEAD |
+						REQ_META | REQ_PRIO,
+						bh_end_read);
 			}
-			bh->b_end_io = end_buffer_read_sync;
-			submit_bh(REQ_OP_READ | REQ_RAHEAD | REQ_META |
-				  REQ_PRIO, bh);
-			continue;
 		}
-		brelse(bh);
+		put_bh(bh);
 	}
 }
 
@@ -1593,7 +1591,7 @@ int gfs2_dir_read(struct inode *inode, struct dir_context *ctx,
 
 	error = -ENOMEM;
 	/* 96 is max number of dirents which can be stuffed into an inode */
-	darr = kmalloc_array(96, sizeof(struct gfs2_dirent *), GFP_NOFS);
+	darr = kmalloc_objs(struct gfs2_dirent *, 96, GFP_NOFS);
 	if (darr) {
 		g.pdent = (const struct gfs2_dirent **)darr;
 		g.offset = 0;

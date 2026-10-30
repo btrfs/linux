@@ -5,7 +5,9 @@
  * Author: Vitor Soares <vitor.soares@synopsys.com>
  */
 
+#include <linux/bitfield.h>
 #include <linux/bitops.h>
+#include <linux/cleanup.h>
 #include <linux/clk.h>
 #include <linux/completion.h>
 #include <linux/err.h>
@@ -204,12 +206,23 @@
 #define EXTENDED_CAPABILITY		0xe8
 #define SLAVE_CONFIG			0xec
 
+#define DYN_ADDR_LO_MASK GENMASK(4, 0)
+#define DYN_ADDR_HI_MASK GENMASK(6, 5)
+#define IBI_SIR_BIT_MOD 32       /* 32-bit vector */
+
+#define DW_I3C_DEV_NACK_RETRY_CNT_MAX	0x3
+#define DEV_ADDR_TABLE_DEV_NACK_RETRY_MASK   GENMASK(30, 29)
+#define DEV_ADDR_TABLE_DYNAMIC_MASK		GENMASK(23, 16)
+#define DEV_ADDR_TABLE_STATIC_MASK		GENMASK(6, 0)
 #define DEV_ADDR_TABLE_IBI_MDB		BIT(12)
 #define DEV_ADDR_TABLE_SIR_REJECT	BIT(13)
+#define DEV_ADDR_TABLE_DEV_NACK_RETRY_CNT(x) \
+	FIELD_PREP(DEV_ADDR_TABLE_DEV_NACK_RETRY_MASK, (x))
 #define DEV_ADDR_TABLE_LEGACY_I2C_DEV	BIT(31)
-#define DEV_ADDR_TABLE_DYNAMIC_ADDR(x)	(((x) << 16) & GENMASK(23, 16))
-#define DEV_ADDR_TABLE_STATIC_ADDR(x)	((x) & GENMASK(6, 0))
+#define DEV_ADDR_TABLE_DYNAMIC_ADDR(x) FIELD_PREP(DEV_ADDR_TABLE_DYNAMIC_MASK, x)
+#define DEV_ADDR_TABLE_STATIC_ADDR(x) FIELD_PREP(DEV_ADDR_TABLE_STATIC_MASK, x)
 #define DEV_ADDR_TABLE_LOC(start, idx)	((start) + ((idx) << 2))
+#define DEV_ADDR_TABLE_GET_DYNAMIC_ADDR(x) FIELD_GET(DEV_ADDR_TABLE_DYNAMIC_MASK, x)
 
 #define I3C_BUS_SDR1_SCL_RATE		8000000
 #define I3C_BUS_SDR2_SCL_RATE		6000000
@@ -228,15 +241,17 @@
 
 /* List of quirks */
 #define AMD_I3C_OD_PP_TIMING		BIT(1)
+#define DW_I3C_DISABLE_RUNTIME_PM_QUIRK	BIT(2)
+#define DW_I3C_ACPI_SKIP_CLK_RST	BIT(3)
 
 struct dw_i3c_cmd {
 	u32 cmd_lo;
 	u32 cmd_hi;
 	u16 tx_len;
-	const void *tx_buf;
 	u16 rx_len;
-	void *rx_buf;
 	u8 error;
+	const void *tx_buf;
+	void *rx_buf;
 };
 
 struct dw_i3c_xfer {
@@ -251,6 +266,18 @@ struct dw_i3c_i2c_dev_data {
 	u8 index;
 	struct i3c_generic_ibi_pool *ibi_pool;
 };
+
+struct dw_i3c_drvdata {
+	u32 flags;
+};
+
+static inline u32 get_ibi_sir_bit_index(u8 addr)
+{
+	u32 lo = FIELD_GET(DYN_ADDR_LO_MASK, addr);
+	u32 hi = FIELD_GET(DYN_ADDR_HI_MASK, addr);
+
+	return (lo + hi) % IBI_SIR_BIT_MOD;
+}
 
 static bool dw_i3c_master_supports_ccc_cmd(struct i3c_master_controller *m,
 					   const struct i3c_ccc_cmd *cmd)
@@ -283,6 +310,8 @@ static bool dw_i3c_master_supports_ccc_cmd(struct i3c_master_controller *m,
 	case I3C_CCC_GETSTATUS:
 	case I3C_CCC_GETMXDS:
 	case I3C_CCC_GETHDRCAP:
+	case I3C_CCC_SETAASA:
+	case I3C_CCC_VENDOR(0, true): /* SETHID */
 		return true;
 	default:
 		return false;
@@ -357,7 +386,7 @@ dw_i3c_master_alloc_xfer(struct dw_i3c_master *master, unsigned int ncmds)
 {
 	struct dw_i3c_xfer *xfer;
 
-	xfer = kzalloc(struct_size(xfer, cmds, ncmds), GFP_KERNEL);
+	xfer = kzalloc_flex(*xfer, cmds, ncmds);
 	if (!xfer)
 		return NULL;
 
@@ -366,11 +395,6 @@ dw_i3c_master_alloc_xfer(struct dw_i3c_master *master, unsigned int ncmds)
 	xfer->ret = -ETIMEDOUT;
 
 	return xfer;
-}
-
-static void dw_i3c_master_free_xfer(struct dw_i3c_xfer *xfer)
-{
-	kfree(xfer);
 }
 
 static void dw_i3c_master_start_xfer_locked(struct dw_i3c_master *master)
@@ -404,17 +428,14 @@ static void dw_i3c_master_start_xfer_locked(struct dw_i3c_master *master)
 static void dw_i3c_master_enqueue_xfer(struct dw_i3c_master *master,
 				       struct dw_i3c_xfer *xfer)
 {
-	unsigned long flags;
-
 	init_completion(&xfer->comp);
-	spin_lock_irqsave(&master->xferqueue.lock, flags);
+	guard(spinlock_irqsave)(&master->xferqueue.lock);
 	if (master->xferqueue.cur) {
 		list_add_tail(&xfer->node, &master->xferqueue.list);
 	} else {
 		master->xferqueue.cur = xfer;
 		dw_i3c_master_start_xfer_locked(master);
 	}
-	spin_unlock_irqrestore(&master->xferqueue.lock, flags);
 }
 
 static void dw_i3c_master_dequeue_xfer_locked(struct dw_i3c_master *master,
@@ -439,11 +460,8 @@ static void dw_i3c_master_dequeue_xfer_locked(struct dw_i3c_master *master,
 static void dw_i3c_master_dequeue_xfer(struct dw_i3c_master *master,
 				       struct dw_i3c_xfer *xfer)
 {
-	unsigned long flags;
-
-	spin_lock_irqsave(&master->xferqueue.lock, flags);
+	guard(spinlock_irqsave)(&master->xferqueue.lock);
 	dw_i3c_master_dequeue_xfer_locked(master, xfer);
-	spin_unlock_irqrestore(&master->xferqueue.lock, flags);
 }
 
 static void dw_i3c_master_end_xfer_locked(struct dw_i3c_master *master, u32 isr)
@@ -478,6 +496,7 @@ static void dw_i3c_master_end_xfer_locked(struct dw_i3c_master *master, u32 isr)
 			break;
 		case RESPONSE_ERROR_PARITY:
 		case RESPONSE_ERROR_IBA_NACK:
+		case RESPONSE_ERROR_ADDRESS_NACK:
 		case RESPONSE_ERROR_TRANSF_ABORT:
 		case RESPONSE_ERROR_CRC:
 		case RESPONSE_ERROR_FRAME:
@@ -487,7 +506,6 @@ static void dw_i3c_master_end_xfer_locked(struct dw_i3c_master *master, u32 isr)
 			ret = -ENOSPC;
 			break;
 		case RESPONSE_ERROR_I2C_W_NACK_ERR:
-		case RESPONSE_ERROR_ADDRESS_NACK:
 		default:
 			ret = -EINVAL;
 			break;
@@ -539,13 +557,35 @@ static void dw_i3c_master_set_intr_regs(struct dw_i3c_master *master)
 	writel(IBI_REQ_REJECT_ALL, master->regs + IBI_MR_REQ_REJECT);
 }
 
+static unsigned long dw_i3c_master_get_core_rate(struct dw_i3c_master *master)
+{
+	unsigned int core_rate_prop;
+
+	if (master->core_clk)
+		return clk_get_rate(master->core_clk);
+
+	if (device_property_read_u32(master->dev, "clock-frequency", &core_rate_prop)) {
+		dev_err(master->dev, "missing clock-frequency property\n");
+		return 0;
+	}
+
+	return core_rate_prop;
+}
+
+static void amd_configure_od_pp_quirk(struct dw_i3c_master *master)
+{
+	master->i3c_od_timing = AMD_I3C_OD_TIMING;
+	master->i3c_od_timing_normal = AMD_I3C_OD_TIMING;
+	master->i3c_pp_timing = AMD_I3C_PP_TIMING;
+}
+
 static int dw_i3c_clk_cfg(struct dw_i3c_master *master)
 {
 	unsigned long core_rate, core_period;
 	u32 scl_timing;
 	u8 hcnt, lcnt;
 
-	core_rate = clk_get_rate(master->core_clk);
+	core_rate = dw_i3c_master_get_core_rate(master);
 	if (!core_rate)
 		return -EINVAL;
 
@@ -577,6 +617,18 @@ static int dw_i3c_clk_cfg(struct dw_i3c_master *master)
 	scl_timing = SCL_I3C_TIMING_HCNT(hcnt) | SCL_I3C_TIMING_LCNT(lcnt);
 	writel(scl_timing, master->regs + SCL_I3C_OD_TIMING);
 	master->i3c_od_timing = scl_timing;
+	master->i3c_od_timing_normal = scl_timing;
+
+	/*
+	 * AMD legacy platforms need fixed OD/PP timings. Cache them as the
+	 * normal OD baseline so set_speed(NORMAL) restores AMD values, and
+	 * set_speed(SLOW) can stretch HCNT while keeping the AMD LCNT.
+	 */
+	if (master->quirks & AMD_I3C_OD_PP_TIMING) {
+		amd_configure_od_pp_quirk(master);
+		writel(master->i3c_pp_timing, master->regs + SCL_I3C_PP_TIMING);
+		writel(master->i3c_od_timing, master->regs + SCL_I3C_OD_TIMING);
+	}
 
 	lcnt = DIV_ROUND_UP(core_rate, I3C_BUS_SDR1_SCL_RATE) - hcnt;
 	scl_timing = SCL_EXT_LCNT_1(lcnt);
@@ -598,7 +650,7 @@ static int dw_i2c_clk_cfg(struct dw_i3c_master *master)
 	u16 hcnt, lcnt;
 	u32 scl_timing;
 
-	core_rate = clk_get_rate(master->core_clk);
+	core_rate = dw_i3c_master_get_core_rate(master);
 	if (!core_rate)
 		return -EINVAL;
 
@@ -693,12 +745,28 @@ static void dw_i3c_master_bus_cleanup(struct i3c_master_controller *m)
 	dw_i3c_master_disable(master);
 }
 
+static enum i3c_error_code dw_i3c_ccc_map_err(u8 dw_err)
+{
+	switch (dw_err) {
+	case RESPONSE_ERROR_IBA_NACK:
+		return I3C_ERROR_M2;
+	case RESPONSE_ERROR_CRC:
+	case RESPONSE_ERROR_PARITY:
+	case RESPONSE_ERROR_FRAME:
+	case RESPONSE_ERROR_TRANSF_ABORT:
+		return I3C_ERROR_M0;
+	default:
+		return I3C_ERROR_UNKNOWN;
+	}
+}
+
 static int dw_i3c_ccc_set(struct dw_i3c_master *master,
 			  struct i3c_ccc_cmd *ccc)
 {
-	struct dw_i3c_xfer *xfer;
 	struct dw_i3c_cmd *cmd;
 	int ret, pos = 0;
+
+	ccc->err = I3C_ERROR_UNKNOWN;
 
 	if (ccc->id & I3C_CCC_DIRECT) {
 		pos = dw_i3c_master_get_addr_pos(master, ccc->dests[0].addr);
@@ -706,7 +774,7 @@ static int dw_i3c_ccc_set(struct dw_i3c_master *master,
 			return pos;
 	}
 
-	xfer = dw_i3c_master_alloc_xfer(master, 1);
+	struct dw_i3c_xfer *xfer __free(kfree) = dw_i3c_master_alloc_xfer(master, 1);
 	if (!xfer)
 		return -ENOMEM;
 
@@ -728,25 +796,24 @@ static int dw_i3c_ccc_set(struct dw_i3c_master *master,
 		dw_i3c_master_dequeue_xfer(master, xfer);
 
 	ret = xfer->ret;
-	if (xfer->cmds[0].error == RESPONSE_ERROR_IBA_NACK)
-		ccc->err = I3C_ERROR_M2;
-
-	dw_i3c_master_free_xfer(xfer);
+	cmd = &xfer->cmds[0];
+	ccc->err = dw_i3c_ccc_map_err(cmd->error);
 
 	return ret;
 }
 
 static int dw_i3c_ccc_get(struct dw_i3c_master *master, struct i3c_ccc_cmd *ccc)
 {
-	struct dw_i3c_xfer *xfer;
 	struct dw_i3c_cmd *cmd;
 	int ret, pos;
+
+	ccc->err = I3C_ERROR_UNKNOWN;
 
 	pos = dw_i3c_master_get_addr_pos(master, ccc->dests[0].addr);
 	if (pos < 0)
 		return pos;
 
-	xfer = dw_i3c_master_alloc_xfer(master, 1);
+	struct dw_i3c_xfer *xfer __free(kfree) = dw_i3c_master_alloc_xfer(master, 1);
 	if (!xfer)
 		return -ENOMEM;
 
@@ -769,17 +836,12 @@ static int dw_i3c_ccc_get(struct dw_i3c_master *master, struct i3c_ccc_cmd *ccc)
 		dw_i3c_master_dequeue_xfer(master, xfer);
 
 	ret = xfer->ret;
-	if (xfer->cmds[0].error == RESPONSE_ERROR_IBA_NACK)
-		ccc->err = I3C_ERROR_M2;
-	dw_i3c_master_free_xfer(xfer);
+	cmd = &xfer->cmds[0];
+	ccc->err = dw_i3c_ccc_map_err(cmd->error);
+	if (!ret)
+		ccc->dests[0].payload.actual_len = cmd->rx_len;
 
 	return ret;
-}
-
-static void amd_configure_od_pp_quirk(struct dw_i3c_master *master)
-{
-	master->i3c_od_timing = AMD_I3C_OD_TIMING;
-	master->i3c_pp_timing = AMD_I3C_PP_TIMING;
 }
 
 static int dw_i3c_master_send_ccc_cmd(struct i3c_master_controller *m,
@@ -790,13 +852,6 @@ static int dw_i3c_master_send_ccc_cmd(struct i3c_master_controller *m,
 
 	if (ccc->id == I3C_CCC_ENTDAA)
 		return -EINVAL;
-
-	/* AMD platform specific OD and PP timings */
-	if (master->quirks & AMD_I3C_OD_PP_TIMING) {
-		amd_configure_od_pp_quirk(master);
-		writel(master->i3c_pp_timing, master->regs + SCL_I3C_PP_TIMING);
-		writel(master->i3c_od_timing, master->regs + SCL_I3C_OD_TIMING);
-	}
 
 	ret = pm_runtime_resume_and_get(master->dev);
 	if (ret < 0) {
@@ -818,11 +873,14 @@ static int dw_i3c_master_send_ccc_cmd(struct i3c_master_controller *m,
 static int dw_i3c_master_daa(struct i3c_master_controller *m)
 {
 	struct dw_i3c_master *master = to_dw_i3c_master(m);
-	struct dw_i3c_xfer *xfer;
 	struct dw_i3c_cmd *cmd;
 	u32 olddevs, newdevs;
 	u8 last_addr = 0;
 	int ret, pos;
+
+	struct dw_i3c_xfer *xfer __free(kfree) = dw_i3c_master_alloc_xfer(master, 1);
+	if (!xfer)
+		return -ENOMEM;
 
 	ret = pm_runtime_resume_and_get(master->dev);
 	if (ret < 0) {
@@ -857,20 +915,14 @@ static int dw_i3c_master_daa(struct i3c_master_controller *m)
 		ret = 0;
 	}
 
-	xfer = dw_i3c_master_alloc_xfer(master, 1);
-	if (!xfer) {
-		ret = -ENOMEM;
-		goto rpm_out;
-	}
-
 	pos = dw_i3c_master_get_free_pos(master);
 	if (pos < 0) {
-		dw_i3c_master_free_xfer(xfer);
 		ret = pos;
 		goto rpm_out;
 	}
 	cmd = &xfer->cmds[0];
-	cmd->cmd_hi = 0x1;
+	cmd->rx_len = master->maxdevs;
+	cmd->cmd_hi = COMMAND_PORT_TRANSFER_ARG;
 	cmd->cmd_lo = COMMAND_PORT_DEV_COUNT(master->maxdevs - pos) |
 		      COMMAND_PORT_DEV_INDEX(pos) |
 		      COMMAND_PORT_CMD(I3C_CCC_ENTDAA) |
@@ -882,7 +934,15 @@ static int dw_i3c_master_daa(struct i3c_master_controller *m)
 	if (!wait_for_completion_timeout(&xfer->comp, XFER_TIMEOUT))
 		dw_i3c_master_dequeue_xfer(master, xfer);
 
-	newdevs = GENMASK(master->maxdevs - cmd->rx_len - 1, 0);
+	/*
+	 * cmd->rx_len holds the number of addresses ENTDAA left unassigned.
+	 * On an empty bus rx_len == maxdevs, so avoid GENMASK(-1, 0).
+	 */
+	if (cmd->rx_len >= master->maxdevs)
+		newdevs = 0;
+	else
+		newdevs = GENMASK(master->maxdevs - cmd->rx_len - 1, 0);
+
 	newdevs &= ~olddevs;
 
 	for (pos = 0; pos < master->maxdevs; pos++) {
@@ -890,22 +950,19 @@ static int dw_i3c_master_daa(struct i3c_master_controller *m)
 			i3c_master_add_i3c_dev_locked(m, master->devs[pos].addr);
 	}
 
-	dw_i3c_master_free_xfer(xfer);
-
 rpm_out:
 	pm_runtime_put_autosuspend(master->dev);
 	return ret;
 }
 
-static int dw_i3c_master_priv_xfers(struct i3c_dev_desc *dev,
-				    struct i3c_priv_xfer *i3c_xfers,
-				    int i3c_nxfers)
+static int dw_i3c_master_i3c_xfers(struct i3c_dev_desc *dev,
+				   struct i3c_xfer *i3c_xfers,
+				   int i3c_nxfers, enum i3c_xfer_mode mode)
 {
 	struct dw_i3c_i2c_dev_data *data = i3c_dev_get_master_data(dev);
 	struct i3c_master_controller *m = i3c_dev_get_master(dev);
 	struct dw_i3c_master *master = to_dw_i3c_master(m);
 	unsigned int nrxwords = 0, ntxwords = 0;
-	struct dw_i3c_xfer *xfer;
 	int i, ret = 0;
 
 	if (!i3c_nxfers)
@@ -925,7 +982,7 @@ static int dw_i3c_master_priv_xfers(struct i3c_dev_desc *dev,
 	    nrxwords > master->caps.datafifodepth)
 		return -EOPNOTSUPP;
 
-	xfer = dw_i3c_master_alloc_xfer(master, i3c_nxfers);
+	struct dw_i3c_xfer *xfer __free(kfree) = dw_i3c_master_alloc_xfer(master, i3c_nxfers);
 	if (!xfer)
 		return -ENOMEM;
 
@@ -976,7 +1033,6 @@ static int dw_i3c_master_priv_xfers(struct i3c_dev_desc *dev,
 	}
 
 	ret = xfer->ret;
-	dw_i3c_master_free_xfer(xfer);
 
 	pm_runtime_put_autosuspend(master->dev);
 	return ret;
@@ -1005,7 +1061,7 @@ static int dw_i3c_master_reattach_i3c_dev(struct i3c_dev_desc *dev,
 		master->free_pos &= ~BIT(pos);
 	}
 
-	writel(DEV_ADDR_TABLE_DYNAMIC_ADDR(dev->info.dyn_addr),
+	writel(DEV_ADDR_TABLE_DYNAMIC_ADDR(dev->info.dyn_addr) | DEV_ADDR_TABLE_SIR_REJECT,
 	       master->regs +
 	       DEV_ADDR_TABLE_LOC(master->datstartaddr, data->index));
 
@@ -1025,7 +1081,7 @@ static int dw_i3c_master_attach_i3c_dev(struct i3c_dev_desc *dev)
 	if (pos < 0)
 		return pos;
 
-	data = kzalloc(sizeof(*data), GFP_KERNEL);
+	data = kzalloc_obj(*data);
 	if (!data)
 		return -ENOMEM;
 
@@ -1034,7 +1090,7 @@ static int dw_i3c_master_attach_i3c_dev(struct i3c_dev_desc *dev)
 	master->free_pos &= ~BIT(pos);
 	i3c_dev_set_master_data(dev, data);
 
-	writel(DEV_ADDR_TABLE_DYNAMIC_ADDR(master->devs[pos].addr),
+	writel(DEV_ADDR_TABLE_DYNAMIC_ADDR(master->devs[pos].addr) | DEV_ADDR_TABLE_SIR_REJECT,
 	       master->regs +
 	       DEV_ADDR_TABLE_LOC(master->datstartaddr, data->index));
 
@@ -1065,7 +1121,6 @@ static int dw_i3c_master_i2c_xfers(struct i2c_dev_desc *dev,
 	struct i3c_master_controller *m = i2c_dev_get_master(dev);
 	struct dw_i3c_master *master = to_dw_i3c_master(m);
 	unsigned int nrxwords = 0, ntxwords = 0;
-	struct dw_i3c_xfer *xfer;
 	int i, ret = 0;
 
 	if (!i2c_nxfers)
@@ -1085,7 +1140,7 @@ static int dw_i3c_master_i2c_xfers(struct i2c_dev_desc *dev,
 	    nrxwords > master->caps.datafifodepth)
 		return -EOPNOTSUPP;
 
-	xfer = dw_i3c_master_alloc_xfer(master, i2c_nxfers);
+	struct dw_i3c_xfer *xfer __free(kfree) = dw_i3c_master_alloc_xfer(master, i2c_nxfers);
 	if (!xfer)
 		return -ENOMEM;
 
@@ -1125,7 +1180,6 @@ static int dw_i3c_master_i2c_xfers(struct i2c_dev_desc *dev,
 		dw_i3c_master_dequeue_xfer(master, xfer);
 
 	ret = xfer->ret;
-	dw_i3c_master_free_xfer(xfer);
 
 	pm_runtime_put_autosuspend(master->dev);
 	return ret;
@@ -1142,7 +1196,7 @@ static int dw_i3c_master_attach_i2c_dev(struct i2c_dev_desc *dev)
 	if (pos < 0)
 		return pos;
 
-	data = kzalloc(sizeof(*data), GFP_KERNEL);
+	data = kzalloc_obj(*data);
 	if (!data)
 		return -ENOMEM;
 
@@ -1182,15 +1236,13 @@ static int dw_i3c_master_request_ibi(struct i3c_dev_desc *dev,
 	struct dw_i3c_i2c_dev_data *data = i3c_dev_get_master_data(dev);
 	struct i3c_master_controller *m = i3c_dev_get_master(dev);
 	struct dw_i3c_master *master = to_dw_i3c_master(m);
-	unsigned long flags;
 
 	data->ibi_pool = i3c_generic_ibi_alloc_pool(dev, req);
 	if (IS_ERR(data->ibi_pool))
 		return PTR_ERR(data->ibi_pool);
 
-	spin_lock_irqsave(&master->devs_lock, flags);
+	guard(spinlock_irqsave)(&master->devs_lock);
 	master->devs[data->index].ibi_dev = dev;
-	spin_unlock_irqrestore(&master->devs_lock, flags);
 
 	return 0;
 }
@@ -1200,11 +1252,10 @@ static void dw_i3c_master_free_ibi(struct i3c_dev_desc *dev)
 	struct dw_i3c_i2c_dev_data *data = i3c_dev_get_master_data(dev);
 	struct i3c_master_controller *m = i3c_dev_get_master(dev);
 	struct dw_i3c_master *master = to_dw_i3c_master(m);
-	unsigned long flags;
 
-	spin_lock_irqsave(&master->devs_lock, flags);
-	master->devs[data->index].ibi_dev = NULL;
-	spin_unlock_irqrestore(&master->devs_lock, flags);
+	scoped_guard(spinlock_irqsave, &master->devs_lock) {
+		master->devs[data->index].ibi_dev = NULL;
+	}
 
 	i3c_generic_ibi_free_pool(data->ibi_pool);
 	data->ibi_pool = NULL;
@@ -1231,14 +1282,21 @@ static void dw_i3c_master_set_sir_enabled(struct dw_i3c_master *master,
 					  struct i3c_dev_desc *dev,
 					  u8 idx, bool enable)
 {
-	unsigned long flags;
 	u32 dat_entry, reg;
 	bool global;
+	u8 dynamic_addr;
 
 	dat_entry = DEV_ADDR_TABLE_LOC(master->datstartaddr, idx);
 
-	spin_lock_irqsave(&master->devs_lock, flags);
+	guard(spinlock_irqsave)(&master->devs_lock);
 	reg = readl(master->regs + dat_entry);
+	dynamic_addr = DEV_ADDR_TABLE_GET_DYNAMIC_ADDR(reg);
+
+	if (!dynamic_addr)
+		dev_warn(master->dev,
+			 "<%s> unassigned slave device, dynamic addr:%x\n",
+			 __func__, dynamic_addr);
+
 	if (enable) {
 		reg &= ~DEV_ADDR_TABLE_SIR_REJECT;
 		if (dev->info.bcr & I3C_BCR_IBI_PAYLOAD)
@@ -1251,20 +1309,17 @@ static void dw_i3c_master_set_sir_enabled(struct dw_i3c_master *master,
 
 	if (enable) {
 		global = (master->sir_rej_mask == IBI_REQ_REJECT_ALL);
-		master->sir_rej_mask &= ~BIT(idx);
+		master->sir_rej_mask &= ~BIT(get_ibi_sir_bit_index(dynamic_addr));
 	} else {
 		bool hj_rejected = !!(readl(master->regs + DEVICE_CTRL) & DEV_CTRL_HOT_JOIN_NACK);
 
-		master->sir_rej_mask |= BIT(idx);
+		master->sir_rej_mask |= BIT(get_ibi_sir_bit_index(dynamic_addr));
 		global = (master->sir_rej_mask == IBI_REQ_REJECT_ALL) && hj_rejected;
 	}
 	writel(master->sir_rej_mask, master->regs + IBI_SIR_REQ_REJECT);
 
 	if (global)
 		dw_i3c_master_enable_sir_signal(master, enable);
-
-
-	spin_unlock_irqrestore(&master->devs_lock, flags);
 }
 
 static int dw_i3c_master_enable_hotjoin(struct i3c_master_controller *m)
@@ -1365,7 +1420,6 @@ static void dw_i3c_master_handle_ibi_sir(struct dw_i3c_master *master,
 	struct dw_i3c_i2c_dev_data *data;
 	struct i3c_ibi_slot *slot;
 	struct i3c_dev_desc *dev;
-	unsigned long flags;
 	u8 addr, len;
 	int idx;
 
@@ -1383,7 +1437,7 @@ static void dw_i3c_master_handle_ibi_sir(struct dw_i3c_master *master,
 	 * a new platform op to validate it.
 	 */
 
-	spin_lock_irqsave(&master->devs_lock, flags);
+	guard(spinlock_irqsave)(&master->devs_lock);
 	idx = dw_i3c_master_get_addr_pos(master, addr);
 	if (idx < 0) {
 		dev_dbg_ratelimited(&master->base.dev,
@@ -1419,14 +1473,10 @@ static void dw_i3c_master_handle_ibi_sir(struct dw_i3c_master *master,
 	}
 	i3c_master_queue_ibi(dev, slot);
 
-	spin_unlock_irqrestore(&master->devs_lock, flags);
-
 	return;
 
 err_drain:
 	dw_i3c_master_drain_ibi_queue(master, len);
-
-	spin_unlock_irqrestore(&master->devs_lock, flags);
 }
 
 /* "ibis": referring to In-Band Interrupts, and not
@@ -1439,7 +1489,11 @@ static void dw_i3c_master_irq_handle_ibis(struct dw_i3c_master *master)
 	u32 reg;
 
 	reg = readl(master->regs + QUEUE_STATUS_LEVEL);
-	n_ibis = QUEUE_STATUS_IBI_STATUS_CNT(reg);
+	if (master->has_ibi_data)
+		n_ibis = QUEUE_STATUS_IBI_STATUS_CNT(reg);
+	else
+		n_ibis = QUEUE_STATUS_IBI_BUF_BLR(reg);
+
 	if (!n_ibis)
 		return;
 
@@ -1449,7 +1503,7 @@ static void dw_i3c_master_irq_handle_ibis(struct dw_i3c_master *master)
 		if (IBI_TYPE_SIRQ(reg)) {
 			dw_i3c_master_handle_ibi_sir(master, reg);
 		} else if (IBI_TYPE_HJ(reg)) {
-			queue_work(master->base.wq, &master->hj_work);
+			i3c_master_queue_hotjoin(&master->base);
 		} else {
 			len = IBI_QUEUE_STATUS_DATA_LEN(reg);
 			dev_info(&master->base.dev,
@@ -1484,6 +1538,84 @@ static irqreturn_t dw_i3c_master_irq_handler(int irq, void *dev_id)
 	return IRQ_HANDLED;
 }
 
+static int dw_i3c_master_set_speed(struct i3c_master_controller *m,
+				   enum i3c_open_drain_speed speed)
+{
+	struct dw_i3c_master *master = to_dw_i3c_master(m);
+	unsigned long core_rate;
+	u32 scl_timing, od_hcnt;
+	u8 lcnt;
+
+	PM_RUNTIME_ACQUIRE_AUTOSUSPEND(master->dev, pm);
+	if (PM_RUNTIME_ACQUIRE_ERR(&pm))
+		return -ENXIO;
+
+	switch (speed) {
+	case I3C_OPEN_DRAIN_SLOW_SPEED:
+		core_rate = dw_i3c_master_get_core_rate(master);
+		if (!core_rate)
+			return -EINVAL;
+
+		lcnt = SCL_I3C_TIMING_LCNT(master->i3c_od_timing_normal);
+		od_hcnt = DIV_ROUND_UP_ULL((u64)I3C_BUS_THIGH_INIT_OD_MIN_NS *
+					  core_rate, NSEC_PER_SEC) - 1;
+		if (od_hcnt < SCL_I3C_TIMING_CNT_MIN)
+			od_hcnt = SCL_I3C_TIMING_CNT_MIN;
+		else if (od_hcnt > U8_MAX)
+			od_hcnt = U8_MAX;
+		scl_timing = SCL_I3C_TIMING_HCNT(od_hcnt) |
+			     SCL_I3C_TIMING_LCNT(lcnt);
+		writel(scl_timing, master->regs + SCL_I3C_OD_TIMING);
+		master->i3c_od_timing = scl_timing;
+		break;
+
+	case I3C_OPEN_DRAIN_NORMAL_SPEED:
+		writel(master->i3c_od_timing_normal,
+		       master->regs + SCL_I3C_OD_TIMING);
+		master->i3c_od_timing = master->i3c_od_timing_normal;
+		break;
+
+	default:
+		return -EINVAL;
+	}
+
+	return 0;
+}
+
+static int dw_i3c_master_set_dev_nack_retry(struct i3c_master_controller *m,
+					    unsigned int dev_nack_retry_cnt)
+{
+	struct dw_i3c_master *master = to_dw_i3c_master(m);
+	u32 reg;
+	int i;
+
+	if (dev_nack_retry_cnt > DW_I3C_DEV_NACK_RETRY_CNT_MAX) {
+		dev_err(&master->base.dev,
+			"Value %u exceeds maximum %d\n",
+			dev_nack_retry_cnt, DW_I3C_DEV_NACK_RETRY_CNT_MAX);
+		return -ERANGE;
+	}
+
+	/*
+	 * Update DAT entries for all currently attached devices.
+	 * We directly iterate through the master's device array.
+	 */
+	for (i = 0; i < master->maxdevs; i++) {
+		/* Skip free/empty slots */
+		if (master->free_pos & BIT(i))
+			continue;
+
+		reg = readl(master->regs +
+				DEV_ADDR_TABLE_LOC(master->datstartaddr, i));
+		reg &= ~DEV_ADDR_TABLE_DEV_NACK_RETRY_MASK;
+		reg |= DEV_ADDR_TABLE_DEV_NACK_RETRY_CNT(dev_nack_retry_cnt);
+		writel(reg, master->regs +
+			DEV_ADDR_TABLE_LOC(master->datstartaddr, i));
+	}
+
+	return 0;
+}
+
 static const struct i3c_master_controller_ops dw_mipi_i3c_ops = {
 	.bus_init = dw_i3c_master_bus_init,
 	.bus_cleanup = dw_i3c_master_bus_cleanup,
@@ -1493,7 +1625,7 @@ static const struct i3c_master_controller_ops dw_mipi_i3c_ops = {
 	.do_daa = dw_i3c_master_daa,
 	.supports_ccc_cmd = dw_i3c_master_supports_ccc_cmd,
 	.send_ccc_cmd = dw_i3c_master_send_ccc_cmd,
-	.priv_xfers = dw_i3c_master_priv_xfers,
+	.i3c_xfers = dw_i3c_master_i3c_xfers,
 	.attach_i2c_dev = dw_i3c_master_attach_i2c_dev,
 	.detach_i2c_dev = dw_i3c_master_detach_i2c_dev,
 	.i2c_xfers = dw_i3c_master_i2c_xfers,
@@ -1504,6 +1636,8 @@ static const struct i3c_master_controller_ops dw_mipi_i3c_ops = {
 	.recycle_ibi_slot = dw_i3c_master_recycle_ibi_slot,
 	.enable_hotjoin = dw_i3c_master_enable_hotjoin,
 	.disable_hotjoin = dw_i3c_master_disable_hotjoin,
+	.set_speed = dw_i3c_master_set_speed,
+	.set_dev_nack_retry = dw_i3c_master_set_dev_nack_retry,
 };
 
 /* default platform ops implementations */
@@ -1523,45 +1657,54 @@ static const struct dw_i3c_platform_ops dw_i3c_platform_ops_default = {
 	.set_dat_ibi = dw_i3c_platform_set_dat_ibi_nop,
 };
 
-static void dw_i3c_hj_work(struct work_struct *work)
-{
-	struct dw_i3c_master *master =
-		container_of(work, typeof(*master), hj_work);
-
-	i3c_master_do_daa(&master->base);
-}
-
 int dw_i3c_common_probe(struct dw_i3c_master *master,
 			struct platform_device *pdev)
 {
 	int ret, irq;
+	u32 thld_ctrl;
+	const struct dw_i3c_drvdata *drvdata;
+	unsigned long quirks = 0;
 
 	if (!master->platform_ops)
 		master->platform_ops = &dw_i3c_platform_ops_default;
 
 	master->dev = &pdev->dev;
 
+	if (has_acpi_companion(&pdev->dev)) {
+		quirks = (unsigned long)device_get_match_data(&pdev->dev);
+	} else if (pdev->dev.of_node) {
+		drvdata = device_get_match_data(&pdev->dev);
+		if (drvdata)
+			quirks = drvdata->flags;
+	}
+	master->quirks = quirks;
+
 	master->regs = devm_platform_ioremap_resource(pdev, 0);
 	if (IS_ERR(master->regs))
 		return PTR_ERR(master->regs);
 
-	master->core_clk = devm_clk_get_enabled(&pdev->dev, NULL);
+	master->core_clk = devm_clk_get_optional_enabled(&pdev->dev, NULL);
 	if (IS_ERR(master->core_clk))
 		return PTR_ERR(master->core_clk);
 
-	master->pclk = devm_clk_get_optional_enabled(&pdev->dev, "pclk");
+	if (!master->core_clk && !(master->quirks & DW_I3C_ACPI_SKIP_CLK_RST)) {
+		dev_err(&pdev->dev, "missing core clock\n");
+		return -EINVAL;
+	}
+
+	master->pclk = devm_clk_get_optional_enabled(&pdev->dev, "apb");
 	if (IS_ERR(master->pclk))
 		return PTR_ERR(master->pclk);
 
-	master->core_rst = devm_reset_control_get_optional_exclusive(&pdev->dev,
-								    "core_rst");
+	master->core_rst = devm_reset_control_get_optional_exclusive_deasserted(&pdev->dev,
+										NULL);
 	if (IS_ERR(master->core_rst))
 		return PTR_ERR(master->core_rst);
 
-	reset_control_deassert(master->core_rst);
-
 	spin_lock_init(&master->xferqueue.lock);
 	INIT_LIST_HEAD(&master->xferqueue.list);
+
+	spin_lock_init(&master->devs_lock);
 
 	writel(INTR_ALL, master->regs + INTR_STATUS);
 	irq = platform_get_irq(pdev, 0);
@@ -1569,7 +1712,7 @@ int dw_i3c_common_probe(struct dw_i3c_master *master,
 			       dw_i3c_master_irq_handler, 0,
 			       dev_name(&pdev->dev), master);
 	if (ret)
-		goto err_assert_rst;
+		return ret;
 
 	platform_set_drvdata(pdev, master);
 
@@ -1590,9 +1733,25 @@ int dw_i3c_common_probe(struct dw_i3c_master *master,
 	master->maxdevs = ret >> 16;
 	master->free_pos = GENMASK(master->maxdevs - 1, 0);
 
-	master->quirks = (unsigned long)device_get_match_data(&pdev->dev);
+	/*
+	 * Detect IBI data capability (IC_HAS_IBI_DATA): write a non-zero value
+	 * to IBI_DATA_THLD and read back. On controllers like Versalnet
+	 * the field is hardwired to 0 and the write is ignored. Restore the
+	 * original register value after detection.
+	 */
+	thld_ctrl = readl(master->regs + QUEUE_THLD_CTRL);
+	ret = thld_ctrl | QUEUE_THLD_CTRL_IBI_DATA(2);
+	writel(ret, master->regs + QUEUE_THLD_CTRL);
+	ret = readl(master->regs + QUEUE_THLD_CTRL);
+	if (ret & QUEUE_THLD_CTRL_IBI_DATA_MASK)
+		master->has_ibi_data = true;
+	writel(thld_ctrl, master->regs + QUEUE_THLD_CTRL);
 
-	INIT_WORK(&master->hj_work, dw_i3c_hj_work);
+	/* Keep controller enabled by preventing runtime suspend */
+	if (master->quirks & DW_I3C_DISABLE_RUNTIME_PM_QUIRK)
+		pm_runtime_get_noresume(&pdev->dev);
+
+	device_set_of_node_from_dev(&master->base.i2c.dev, &pdev->dev);
 	ret = i3c_master_register(&master->base, &pdev->dev,
 				  &dw_mipi_i3c_ops, false);
 	if (ret)
@@ -1601,12 +1760,11 @@ int dw_i3c_common_probe(struct dw_i3c_master *master,
 	return 0;
 
 err_disable_pm:
+	if (master->quirks & DW_I3C_DISABLE_RUNTIME_PM_QUIRK)
+		pm_runtime_put_noidle(&pdev->dev);
 	pm_runtime_disable(&pdev->dev);
 	pm_runtime_set_suspended(&pdev->dev);
 	pm_runtime_dont_use_autosuspend(&pdev->dev);
-
-err_assert_rst:
-	reset_control_assert(master->core_rst);
 
 	return ret;
 }
@@ -1614,8 +1772,11 @@ EXPORT_SYMBOL_GPL(dw_i3c_common_probe);
 
 void dw_i3c_common_remove(struct dw_i3c_master *master)
 {
-	cancel_work_sync(&master->hj_work);
 	i3c_master_unregister(&master->base);
+
+	/* Balance pm_runtime_get_noresume() from probe() */
+	if (master->quirks & DW_I3C_DISABLE_RUNTIME_PM_QUIRK)
+		pm_runtime_put_noidle(master->dev);
 
 	pm_runtime_disable(master->dev);
 	pm_runtime_set_suspended(master->dev);
@@ -1654,11 +1815,16 @@ static void dw_i3c_master_restore_addrs(struct dw_i3c_master *master)
 		if (master->free_pos & BIT(pos))
 			continue;
 
-		if (master->devs[pos].is_i2c_addr)
-			reg_val = DEV_ADDR_TABLE_LEGACY_I2C_DEV |
+		reg_val = readl(master->regs + DEV_ADDR_TABLE_LOC(master->datstartaddr, pos));
+
+		if (master->devs[pos].is_i2c_addr) {
+			reg_val &= ~DEV_ADDR_TABLE_STATIC_MASK;
+			reg_val |= DEV_ADDR_TABLE_LEGACY_I2C_DEV |
 			       DEV_ADDR_TABLE_STATIC_ADDR(master->devs[pos].addr);
-		else
-			reg_val = DEV_ADDR_TABLE_DYNAMIC_ADDR(master->devs[pos].addr);
+		} else {
+			reg_val &= ~DEV_ADDR_TABLE_DYNAMIC_MASK;
+			reg_val |= DEV_ADDR_TABLE_DYNAMIC_ADDR(master->devs[pos].addr);
+		}
 
 		writel(reg_val, master->regs + DEV_ADDR_TABLE_LOC(master->datstartaddr, pos));
 	}
@@ -1666,10 +1832,7 @@ static void dw_i3c_master_restore_addrs(struct dw_i3c_master *master)
 
 static void dw_i3c_master_restore_timing_regs(struct dw_i3c_master *master)
 {
-	/* AMD platform specific OD and PP timings */
-	if (master->quirks & AMD_I3C_OD_PP_TIMING)
-		amd_configure_od_pp_quirk(master);
-
+	/* Preserve cached OD timing; it may be the SLOW setting from set_speed(). */
 	writel(master->i3c_pp_timing, master->regs + SCL_I3C_PP_TIMING);
 	writel(master->bus_free_timing, master->regs + BUS_FREE_TIMING);
 	writel(master->i3c_od_timing, master->regs + SCL_I3C_OD_TIMING);
@@ -1750,8 +1913,6 @@ static void dw_i3c_shutdown(struct platform_device *pdev)
 		return;
 	}
 
-	cancel_work_sync(&master->hj_work);
-
 	/* Disable interrupts */
 	writel((u32)~INTR_ALL, master->regs + INTR_STATUS_EN);
 	writel((u32)~INTR_ALL, master->regs + INTR_SIGNAL_EN);
@@ -1759,17 +1920,25 @@ static void dw_i3c_shutdown(struct platform_device *pdev)
 	pm_runtime_put_autosuspend(master->dev);
 }
 
+static const struct dw_i3c_drvdata altr_agilex5_drvdata = {
+	.flags = DW_I3C_DISABLE_RUNTIME_PM_QUIRK,
+};
+
 static const struct of_device_id dw_i3c_master_of_match[] = {
 	{ .compatible = "snps,dw-i3c-master-1.00a", },
+	{ .compatible = "altr,agilex5-dw-i3c-master",
+	  .data = &altr_agilex5_drvdata,
+	},
 	{},
 };
 MODULE_DEVICE_TABLE(of, dw_i3c_master_of_match);
 
-static const struct acpi_device_id amd_i3c_device_match[] = {
+static const struct acpi_device_id dw_i3c_master_acpi_match[] = {
 	{ "AMDI0015", AMD_I3C_OD_PP_TIMING },
+	{ "NVDA2018", DW_I3C_ACPI_SKIP_CLK_RST },
 	{ }
 };
-MODULE_DEVICE_TABLE(acpi, amd_i3c_device_match);
+MODULE_DEVICE_TABLE(acpi, dw_i3c_master_acpi_match);
 
 static struct platform_driver dw_i3c_driver = {
 	.probe = dw_i3c_probe,
@@ -1778,7 +1947,7 @@ static struct platform_driver dw_i3c_driver = {
 	.driver = {
 		.name = "dw-i3c-master",
 		.of_match_table = dw_i3c_master_of_match,
-		.acpi_match_table = amd_i3c_device_match,
+		.acpi_match_table = dw_i3c_master_acpi_match,
 		.pm = &dw_i3c_pm_ops,
 	},
 };

@@ -80,7 +80,7 @@ static int card_probe(struct pnp_card *card, struct pnp_card_driver *drv)
 	if (!id)
 		return 0;
 
-	clink = kzalloc(sizeof(*clink), GFP_KERNEL);
+	clink = kzalloc_obj(*clink);
 	if (!clink)
 		return 0;
 	clink->card = card;
@@ -108,7 +108,7 @@ static struct pnp_id *pnp_add_card_id(struct pnp_card *card, char *id)
 {
 	struct pnp_id *dev_id, *ptr;
 
-	dev_id = kzalloc(sizeof(struct pnp_id), GFP_KERNEL);
+	dev_id = kzalloc_obj(struct pnp_id);
 	if (!dev_id)
 		return NULL;
 
@@ -159,7 +159,7 @@ struct pnp_card *pnp_alloc_card(struct pnp_protocol *protocol, int id, char *pnp
 	struct pnp_card *card;
 	struct pnp_id *dev_id;
 
-	card = kzalloc(sizeof(struct pnp_card), GFP_KERNEL);
+	card = kzalloc_obj(struct pnp_card);
 	if (!card)
 		return NULL;
 
@@ -254,9 +254,16 @@ int pnp_add_card(struct pnp_card *card)
 	/* we wait until now to add devices in order to ensure the drivers
 	 * will be able to use all of the related devices on the card
 	 * without waiting an unreasonable length of time */
-	list_for_each(pos, &card->devices) {
+	list_for_each_safe(pos, temp, &card->devices) {
 		struct pnp_dev *dev = card_to_pnp_dev(pos);
-		__pnp_add_device(dev);
+		error = __pnp_add_device(dev);
+		if (error) {
+			mutex_lock(&pnp_lock);
+			list_del(&dev->card_list);
+			dev->card = NULL;
+			mutex_unlock(&pnp_lock);
+			put_device(&dev->dev);
+		}
 	}
 
 	/* match with card drivers */

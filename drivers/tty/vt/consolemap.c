@@ -539,7 +539,7 @@ static int con_allocate_new(struct vc_data *vc)
 {
 	struct uni_pagedict *new, *old = *vc->uni_pagedict_loc;
 
-	new = kzalloc(sizeof(*new), GFP_KERNEL);
+	new = kzalloc_obj(*new);
 	if (!new)
 		return -ENOMEM;
 
@@ -776,7 +776,8 @@ int con_get_unimap(struct vc_data *vc, ushort ct, ushort __user *uct,
 	struct uni_pagedict *dict;
 	unsigned int d, r, g;
 
-	struct unipair *unilist __free(kvfree) = kvmalloc_array(ct, sizeof(*unilist), GFP_KERNEL);
+	struct unipair *unilist __free(kvfree) = kvmalloc_objs(*unilist, ct,
+							       GFP_KERNEL);
 	if (!unilist)
 		return -ENOMEM;
 

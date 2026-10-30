@@ -188,8 +188,7 @@ static int byt_rt5651_prepare_and_enable_pll1(struct snd_soc_dai *codec_dai,
 static int platform_clock_control(struct snd_soc_dapm_widget *w,
 				  struct snd_kcontrol *k, int  event)
 {
-	struct snd_soc_dapm_context *dapm = w->dapm;
-	struct snd_soc_card *card = dapm->card;
+	struct snd_soc_card *card = snd_soc_dapm_to_card(w->dapm);
 	struct snd_soc_dai *codec_dai;
 	struct byt_rt5651_private *priv = snd_soc_card_get_drvdata(card);
 	int ret;
@@ -206,10 +205,12 @@ static int platform_clock_control(struct snd_soc_dapm_widget *w,
 	if (SND_SOC_DAPM_EVENT_ON(event)) {
 		ret = clk_prepare_enable(priv->mclk);
 		if (ret < 0) {
-			dev_err(card->dev, "could not configure MCLK state");
+			dev_err(card->dev, "could not configure MCLK state: %d\n", ret);
 			return ret;
 		}
 		ret = byt_rt5651_prepare_and_enable_pll1(codec_dai, 48000, 50);
+		if (ret < 0)
+			clk_disable_unprepare(priv->mclk);
 	} else {
 		/*
 		 * Set codec clock source to internal clock before
@@ -234,7 +235,7 @@ static int platform_clock_control(struct snd_soc_dapm_widget *w,
 static int rt5651_ext_amp_power_event(struct snd_soc_dapm_widget *w,
 	struct snd_kcontrol *kcontrol, int event)
 {
-	struct snd_soc_card *card = w->dapm->card;
+	struct snd_soc_card *card = snd_soc_dapm_to_card(w->dapm);
 	struct byt_rt5651_private *priv = snd_soc_card_get_drvdata(card);
 
 	if (SND_SOC_DAPM_EVENT_ON(event))
@@ -410,6 +411,23 @@ static const struct dmi_system_id byt_rt5651_quirk_table[] = {
 					BYT_RT5651_MONO_SPEAKER),
 	},
 	{
+		/* Chuwi Hi8 (CWI513) with a BIOS using generic DMI strings */
+		.callback = byt_rt5651_quirk_cb,
+		.matches = {
+			DMI_MATCH(DMI_BOARD_VENDOR, "Hampoo"),
+			DMI_MATCH(DMI_BOARD_NAME, "Cherry Trail CR"),
+			/* Above matches are too generic, add bios-date match */
+			DMI_MATCH(DMI_BIOS_DATE, "05/21/2016"),
+		},
+		.driver_data = (void *)(BYT_RT5651_MCLK_EN |
+					BYT_RT5651_JD1_1 |
+					BYT_RT5651_OVCD_TH_2000UA |
+					BYT_RT5651_OVCD_SF_1P0 |
+					BYT_RT5651_IN2_MAP |
+					BYT_RT5651_HP_LR_SWAPPED |
+					BYT_RT5651_MONO_SPEAKER),
+	},
+	{
 		/* Chuwi Vi8 Plus (CWI519) */
 		.callback = byt_rt5651_quirk_cb,
 		.matches = {
@@ -579,6 +597,7 @@ static int byt_rt5651_add_codec_device_props(struct device *i2c_dev,
 static int byt_rt5651_init(struct snd_soc_pcm_runtime *runtime)
 {
 	struct snd_soc_card *card = runtime->card;
+	struct snd_soc_dapm_context *dapm = snd_soc_card_to_dapm(card);
 	struct snd_soc_component *codec = snd_soc_rtd_to_codec(runtime, 0)->component;
 	struct byt_rt5651_private *priv = snd_soc_card_get_drvdata(card);
 	const struct snd_soc_dapm_route *custom_map;
@@ -586,7 +605,7 @@ static int byt_rt5651_init(struct snd_soc_pcm_runtime *runtime)
 	int report;
 	int ret;
 
-	card->dapm.idle_bias = false;
+	snd_soc_dapm_set_idle_bias(dapm, false);
 
 	/* Start with RC clk for jack-detect (we disable MCLK below) */
 	if (byt_rt5651_quirk & BYT_RT5651_MCLK_EN)
@@ -610,24 +629,24 @@ static int byt_rt5651_init(struct snd_soc_pcm_runtime *runtime)
 		custom_map = byt_rt5651_intmic_dmic_map;
 		num_routes = ARRAY_SIZE(byt_rt5651_intmic_dmic_map);
 	}
-	ret = snd_soc_dapm_add_routes(&card->dapm, custom_map, num_routes);
+	ret = snd_soc_dapm_add_routes(dapm, custom_map, num_routes);
 	if (ret)
 		return ret;
 
 	if (byt_rt5651_quirk & BYT_RT5651_SSP2_AIF2) {
-		ret = snd_soc_dapm_add_routes(&card->dapm,
+		ret = snd_soc_dapm_add_routes(dapm,
 					byt_rt5651_ssp2_aif2_map,
 					ARRAY_SIZE(byt_rt5651_ssp2_aif2_map));
 	} else if (byt_rt5651_quirk & BYT_RT5651_SSP0_AIF1) {
-		ret = snd_soc_dapm_add_routes(&card->dapm,
+		ret = snd_soc_dapm_add_routes(dapm,
 					byt_rt5651_ssp0_aif1_map,
 					ARRAY_SIZE(byt_rt5651_ssp0_aif1_map));
 	} else if (byt_rt5651_quirk & BYT_RT5651_SSP0_AIF2) {
-		ret = snd_soc_dapm_add_routes(&card->dapm,
+		ret = snd_soc_dapm_add_routes(dapm,
 					byt_rt5651_ssp0_aif2_map,
 					ARRAY_SIZE(byt_rt5651_ssp0_aif2_map));
 	} else {
-		ret = snd_soc_dapm_add_routes(&card->dapm,
+		ret = snd_soc_dapm_add_routes(dapm,
 					byt_rt5651_ssp2_aif1_map,
 					ARRAY_SIZE(byt_rt5651_ssp2_aif1_map));
 	}

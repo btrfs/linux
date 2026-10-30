@@ -23,6 +23,7 @@
 #include <linux/of.h>
 #include <linux/regmap.h>
 #include <linux/dma-mapping.h>
+#include <linux/reset.h>
 
 #include "vhub.h"
 
@@ -77,7 +78,7 @@ struct usb_request *ast_vhub_alloc_request(struct usb_ep *u_ep,
 {
 	struct ast_vhub_req *req;
 
-	req = kzalloc(sizeof(*req), gfp_flags);
+	req = kzalloc_obj(*req, gfp_flags);
 	if (!req)
 		return NULL;
 	return &req->req;
@@ -266,6 +267,9 @@ static void ast_vhub_remove(struct platform_device *pdev)
 	for (i = 0; i < vhub->max_ports; i++)
 		ast_vhub_del_dev(&vhub->ports[i].dev);
 
+	/* Final drain; the worker takes vhub->lock, so stay outside of it */
+	cancel_work_sync(&vhub->wake_work);
+
 	spin_lock_irqsave(&vhub->lock, flags);
 
 	/* Mask & ack all interrupts  */
@@ -279,6 +283,8 @@ static void ast_vhub_remove(struct platform_device *pdev)
 
 	if (vhub->clk)
 		clk_disable_unprepare(vhub->clk);
+
+	reset_control_assert(vhub->rst);
 
 	spin_unlock_irqrestore(&vhub->lock, flags);
 
@@ -294,6 +300,7 @@ static void ast_vhub_remove(struct platform_device *pdev)
 static int ast_vhub_probe(struct platform_device *pdev)
 {
 	enum usb_device_speed max_speed;
+	const u64 *dma_mask_ptr;
 	struct ast_vhub *vhub;
 	struct resource *res;
 	int i, rc = 0;
@@ -324,6 +331,7 @@ static int ast_vhub_probe(struct platform_device *pdev)
 		return -ENOMEM;
 
 	spin_lock_init(&vhub->lock);
+	INIT_WORK(&vhub->wake_work, ast_vhub_wake_work);
 	vhub->pdev = pdev;
 	vhub->port_irq_mask = GENMASK(VHUB_IRQ_DEV1_BIT + vhub->max_ports - 1,
 				      VHUB_IRQ_DEV1_BIT);
@@ -348,6 +356,16 @@ static int ast_vhub_probe(struct platform_device *pdev)
 		goto err;
 	}
 
+	vhub->rst = devm_reset_control_get_optional_shared(&pdev->dev, NULL);
+	if (IS_ERR(vhub->rst)) {
+		rc = PTR_ERR(vhub->rst);
+		goto err;
+	}
+
+	rc = reset_control_deassert(vhub->rst);
+	if (rc)
+		goto err;
+
 	/* Check if we need to limit the HW to USB1 */
 	max_speed = usb_get_maximum_speed(&pdev->dev);
 	if (max_speed != USB_SPEED_UNKNOWN && max_speed < USB_SPEED_HIGH)
@@ -370,6 +388,12 @@ static int ast_vhub_probe(struct platform_device *pdev)
 		goto err;
 	}
 
+	dma_mask_ptr = (u64 *)of_device_get_match_data(&pdev->dev);
+	if (dma_mask_ptr) {
+		rc = dma_coerce_mask_and_coherent(&pdev->dev, *dma_mask_ptr);
+		if (rc)
+			goto err;
+	}
 	/*
 	 * Allocate DMA buffers for all EP0s in one chunk,
 	 * one per port and one for the vHub itself
@@ -412,15 +436,25 @@ static int ast_vhub_probe(struct platform_device *pdev)
 	return rc;
 }
 
+static const u64 dma_mask_32 =	DMA_BIT_MASK(32);
+static const u64 dma_mask_64 =	DMA_BIT_MASK(64);
+
 static const struct of_device_id ast_vhub_dt_ids[] = {
 	{
 		.compatible = "aspeed,ast2400-usb-vhub",
+		.data = &dma_mask_32,
 	},
 	{
 		.compatible = "aspeed,ast2500-usb-vhub",
+		.data = &dma_mask_32,
 	},
 	{
 		.compatible = "aspeed,ast2600-usb-vhub",
+		.data = &dma_mask_32,
+	},
+	{
+		.compatible = "aspeed,ast2700-usb-vhub",
+		.data = &dma_mask_64,
 	},
 	{ }
 };

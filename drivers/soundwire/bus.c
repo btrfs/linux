@@ -3,7 +3,6 @@
 
 #include <linux/acpi.h>
 #include <linux/delay.h>
-#include <linux/mod_devicetable.h>
 #include <linux/pm_runtime.h>
 #include <linux/soundwire/sdw_registers.h>
 #include <linux/soundwire/sdw.h>
@@ -817,8 +816,11 @@ bool is_clock_scaling_supported_by_slave(struct sdw_slave *slave)
 	/*
 	 * Dynamic scaling is a defined by SDCA. However, some devices expose the class ID but
 	 * can't support dynamic scaling. We might need a quirk to handle such devices.
+	 * The clock base and scale registers themselves are SoundWire 1.2, so a device
+	 * may implement them without setting the class field; the driver says so with
+	 * clock_reg_supported.
 	 */
-	return slave->id.class_id;
+	return slave->id.class_id || slave->prop.clock_reg_supported;
 }
 EXPORT_SYMBOL(is_clock_scaling_supported_by_slave);
 
@@ -1385,7 +1387,7 @@ static int sdw_slave_set_frequency(struct sdw_slave *slave)
 	 * DisCo property to discover support for the scaling registers
 	 * from platform firmware.
 	 */
-	if (!slave->id.class_id && !slave->prop.clock_reg_supported)
+	if (!is_clock_scaling_supported_by_slave(slave))
 		return 0;
 
 	scale_index = sdw_slave_get_scale_index(slave, &base);
@@ -1899,8 +1901,8 @@ int sdw_handle_slave_status(struct sdw_bus *bus,
 
 		if (status[i] == SDW_SLAVE_UNATTACHED &&
 		    slave->status != SDW_SLAVE_UNATTACHED) {
-			dev_warn(&slave->dev, "Slave %d state check1: UNATTACHED, status was %d\n",
-				 i, slave->status);
+			dev_dbg(&slave->dev, "Slave %d state check1: UNATTACHED, status was %d\n",
+			i, slave->status);
 			sdw_modify_slave_status(slave, SDW_SLAVE_UNATTACHED);
 
 			/* Ensure driver knows that peripheral unattached */
@@ -1951,13 +1953,17 @@ int sdw_handle_slave_status(struct sdw_bus *bus,
 			if (slave->status == SDW_SLAVE_UNATTACHED)
 				break;
 
-			dev_warn(&slave->dev, "Slave %d state check2: UNATTACHED, status was %d\n",
-				 i, slave->status);
+			dev_dbg(&slave->dev, "Slave %d state check2: UNATTACHED, status was %d\n",
+			i, slave->status);
 
 			sdw_modify_slave_status(slave, SDW_SLAVE_UNATTACHED);
 			break;
 
 		case SDW_SLAVE_ALERT:
+			if (slave->status != SDW_SLAVE_ATTACHED &&
+			    slave->status != SDW_SLAVE_ALERT)
+				continue;
+
 			ret = sdw_handle_slave_alerts(slave);
 			if (ret < 0)
 				dev_err(&slave->dev,
@@ -2052,8 +2058,14 @@ EXPORT_SYMBOL(sdw_clear_slave_status);
 
 int sdw_bpt_send_async(struct sdw_bus *bus, struct sdw_slave *slave, struct sdw_bpt_msg *msg)
 {
-	if (msg->len > SDW_BPT_MSG_MAX_BYTES) {
-		dev_err(bus->dev, "Invalid BPT message length %d\n", msg->len);
+	int len = 0;
+	int i;
+
+	for (i = 0; i < msg->sections; i++)
+		len += msg->sec[i].len;
+
+	if (len > SDW_BPT_MSG_MAX_BYTES) {
+		dev_err(bus->dev, "Invalid BPT message length %d\n", len);
 		return -EINVAL;
 	}
 

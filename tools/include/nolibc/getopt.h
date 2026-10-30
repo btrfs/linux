@@ -71,14 +71,14 @@ int getopt(int argc, char * const argv[], const char *optstring)
 		d = optstring[i++];
 	} while (d && d != c);
 
-	if (d != c || c == ':') {
+	if (!d || d != c || c == ':') {
 		optopt = c;
 		if (optstring[0] != ':' && opterr)
 			fprintf(stderr, "%s: unrecognized option: %c\n", argv[0], *optchar);
 		return '?';
 	}
 	if (optstring[i] == ':') {
-		optarg = 0;
+		optarg = NULL;
 		if (optstring[i + 1] != ':' || __optpos) {
 			optarg = argv[optind++];
 			if (__optpos)

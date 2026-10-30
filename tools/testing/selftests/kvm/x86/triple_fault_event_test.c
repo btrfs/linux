@@ -21,9 +21,6 @@ static void l2_guest_code(void)
 		     : : [port] "d" (ARBITRARY_IO_PORT) : "rax");
 }
 
-#define L2_GUEST_STACK_SIZE 64
-unsigned long l2_guest_stack[L2_GUEST_STACK_SIZE];
-
 void l1_guest_code_vmx(struct vmx_pages *vmx)
 {
 
@@ -31,8 +28,7 @@ void l1_guest_code_vmx(struct vmx_pages *vmx)
 	GUEST_ASSERT(prepare_for_vmx_operation(vmx));
 	GUEST_ASSERT(load_vmcs(vmx));
 
-	prepare_vmcs(vmx, l2_guest_code,
-		     &l2_guest_stack[L2_GUEST_STACK_SIZE]);
+	prepare_vmcs(vmx, l2_guest_code);
 
 	GUEST_ASSERT(!vmlaunch());
 	/* L2 should triple fault after a triple fault event injected. */
@@ -44,8 +40,7 @@ void l1_guest_code_svm(struct svm_test_data *svm)
 {
 	struct vmcb *vmcb = svm->vmcb;
 
-	generic_svm_setup(svm, l2_guest_code,
-			&l2_guest_stack[L2_GUEST_STACK_SIZE]);
+	generic_svm_setup(svm, l2_guest_code);
 
 	/* don't intercept shutdown to test the case of SVM allowing to do so */
 	vmcb->control.intercept &= ~(BIT(INTERCEPT_SHUTDOWN));
@@ -72,13 +67,13 @@ int main(void)
 
 
 	if (has_vmx) {
-		vm_vaddr_t vmx_pages_gva;
+		gva_t vmx_pages_gva;
 
 		vm = vm_create_with_one_vcpu(&vcpu, l1_guest_code_vmx);
 		vcpu_alloc_vmx(vm, &vmx_pages_gva);
 		vcpu_args_set(vcpu, 1, vmx_pages_gva);
 	} else {
-		vm_vaddr_t svm_gva;
+		gva_t svm_gva;
 
 		vm = vm_create_with_one_vcpu(&vcpu, l1_guest_code_svm);
 		vcpu_alloc_svm(vm, &svm_gva);

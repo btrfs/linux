@@ -36,6 +36,7 @@
 #include "cikd.h"
 #include "atom.h"
 #include "amd_pcie.h"
+#include "amdgpu_video_codecs.h"
 
 #include "cik.h"
 #include "gmc_v7_0.h"
@@ -154,11 +155,11 @@ static u32 cik_pcie_rreg(struct amdgpu_device *adev, u32 reg)
 	unsigned long flags;
 	u32 r;
 
-	spin_lock_irqsave(&adev->pcie_idx_lock, flags);
+	spin_lock_irqsave(&adev->reg.pcie.lock, flags);
 	WREG32(mmPCIE_INDEX, reg);
 	(void)RREG32(mmPCIE_INDEX);
 	r = RREG32(mmPCIE_DATA);
-	spin_unlock_irqrestore(&adev->pcie_idx_lock, flags);
+	spin_unlock_irqrestore(&adev->reg.pcie.lock, flags);
 	return r;
 }
 
@@ -166,12 +167,12 @@ static void cik_pcie_wreg(struct amdgpu_device *adev, u32 reg, u32 v)
 {
 	unsigned long flags;
 
-	spin_lock_irqsave(&adev->pcie_idx_lock, flags);
+	spin_lock_irqsave(&adev->reg.pcie.lock, flags);
 	WREG32(mmPCIE_INDEX, reg);
 	(void)RREG32(mmPCIE_INDEX);
 	WREG32(mmPCIE_DATA, v);
 	(void)RREG32(mmPCIE_DATA);
-	spin_unlock_irqrestore(&adev->pcie_idx_lock, flags);
+	spin_unlock_irqrestore(&adev->reg.pcie.lock, flags);
 }
 
 static u32 cik_smc_rreg(struct amdgpu_device *adev, u32 reg)
@@ -179,10 +180,10 @@ static u32 cik_smc_rreg(struct amdgpu_device *adev, u32 reg)
 	unsigned long flags;
 	u32 r;
 
-	spin_lock_irqsave(&adev->smc_idx_lock, flags);
+	spin_lock_irqsave(&adev->reg.smc.lock, flags);
 	WREG32(mmSMC_IND_INDEX_0, (reg));
 	r = RREG32(mmSMC_IND_DATA_0);
-	spin_unlock_irqrestore(&adev->smc_idx_lock, flags);
+	spin_unlock_irqrestore(&adev->reg.smc.lock, flags);
 	return r;
 }
 
@@ -190,10 +191,10 @@ static void cik_smc_wreg(struct amdgpu_device *adev, u32 reg, u32 v)
 {
 	unsigned long flags;
 
-	spin_lock_irqsave(&adev->smc_idx_lock, flags);
+	spin_lock_irqsave(&adev->reg.smc.lock, flags);
 	WREG32(mmSMC_IND_INDEX_0, (reg));
 	WREG32(mmSMC_IND_DATA_0, (v));
-	spin_unlock_irqrestore(&adev->smc_idx_lock, flags);
+	spin_unlock_irqrestore(&adev->reg.smc.lock, flags);
 }
 
 static u32 cik_uvd_ctx_rreg(struct amdgpu_device *adev, u32 reg)
@@ -201,10 +202,10 @@ static u32 cik_uvd_ctx_rreg(struct amdgpu_device *adev, u32 reg)
 	unsigned long flags;
 	u32 r;
 
-	spin_lock_irqsave(&adev->uvd_ctx_idx_lock, flags);
+	spin_lock_irqsave(&adev->reg.uvd_ctx.lock, flags);
 	WREG32(mmUVD_CTX_INDEX, ((reg) & 0x1ff));
 	r = RREG32(mmUVD_CTX_DATA);
-	spin_unlock_irqrestore(&adev->uvd_ctx_idx_lock, flags);
+	spin_unlock_irqrestore(&adev->reg.uvd_ctx.lock, flags);
 	return r;
 }
 
@@ -212,10 +213,10 @@ static void cik_uvd_ctx_wreg(struct amdgpu_device *adev, u32 reg, u32 v)
 {
 	unsigned long flags;
 
-	spin_lock_irqsave(&adev->uvd_ctx_idx_lock, flags);
+	spin_lock_irqsave(&adev->reg.uvd_ctx.lock, flags);
 	WREG32(mmUVD_CTX_INDEX, ((reg) & 0x1ff));
 	WREG32(mmUVD_CTX_DATA, (v));
-	spin_unlock_irqrestore(&adev->uvd_ctx_idx_lock, flags);
+	spin_unlock_irqrestore(&adev->reg.uvd_ctx.lock, flags);
 }
 
 static u32 cik_didt_rreg(struct amdgpu_device *adev, u32 reg)
@@ -223,10 +224,10 @@ static u32 cik_didt_rreg(struct amdgpu_device *adev, u32 reg)
 	unsigned long flags;
 	u32 r;
 
-	spin_lock_irqsave(&adev->didt_idx_lock, flags);
+	spin_lock_irqsave(&adev->reg.didt.lock, flags);
 	WREG32(mmDIDT_IND_INDEX, (reg));
 	r = RREG32(mmDIDT_IND_DATA);
-	spin_unlock_irqrestore(&adev->didt_idx_lock, flags);
+	spin_unlock_irqrestore(&adev->reg.didt.lock, flags);
 	return r;
 }
 
@@ -234,10 +235,10 @@ static void cik_didt_wreg(struct amdgpu_device *adev, u32 reg, u32 v)
 {
 	unsigned long flags;
 
-	spin_lock_irqsave(&adev->didt_idx_lock, flags);
+	spin_lock_irqsave(&adev->reg.didt.lock, flags);
 	WREG32(mmDIDT_IND_INDEX, (reg));
 	WREG32(mmDIDT_IND_DATA, (v));
-	spin_unlock_irqrestore(&adev->didt_idx_lock, flags);
+	spin_unlock_irqrestore(&adev->reg.didt.lock, flags);
 }
 
 static const u32 bonaire_golden_spm_registers[] =
@@ -1027,7 +1028,7 @@ static bool cik_read_bios_from_rom(struct amdgpu_device *adev,
 	dw_ptr = (u32 *)bios;
 	length_dw = ALIGN(length_bytes, 4) / 4;
 	/* take the smc lock since we are using the smc index */
-	spin_lock_irqsave(&adev->smc_idx_lock, flags);
+	spin_lock_irqsave(&adev->reg.smc.lock, flags);
 	/* set rom index to 0 */
 	WREG32(mmSMC_IND_INDEX_0, ixROM_INDEX);
 	WREG32(mmSMC_IND_DATA_0, 0);
@@ -1035,7 +1036,7 @@ static bool cik_read_bios_from_rom(struct amdgpu_device *adev,
 	WREG32(mmSMC_IND_INDEX_0, ixROM_DATA);
 	for (i = 0; i < length_dw; i++)
 		dw_ptr[i] = RREG32(mmSMC_IND_DATA_0);
-	spin_unlock_irqrestore(&adev->smc_idx_lock, flags);
+	spin_unlock_irqrestore(&adev->reg.smc.lock, flags);
 
 	return true;
 }
@@ -1552,16 +1553,16 @@ static void cik_pcie_gen3_enable(struct amdgpu_device *adev)
 		PCIE_LC_SPEED_CNTL__LC_CURRENT_DATA_RATE__SHIFT;
 	if (adev->pm.pcie_gen_mask & CAIL_PCIE_LINK_SPEED_SUPPORT_GEN3) {
 		if (current_data_rate == 2) {
-			DRM_INFO("PCIE gen 3 link speeds already enabled\n");
+			drm_info(adev_to_drm(adev), "PCIE gen 3 link speeds already enabled\n");
 			return;
 		}
-		DRM_INFO("enabling PCIE gen 3 link speeds, disable with amdgpu.pcie_gen2=0\n");
+		drm_info(adev_to_drm(adev), "enabling PCIE gen 3 link speeds, disable with amdgpu.pcie_gen2=0\n");
 	} else if (adev->pm.pcie_gen_mask & CAIL_PCIE_LINK_SPEED_SUPPORT_GEN2) {
 		if (current_data_rate == 1) {
-			DRM_INFO("PCIE gen 2 link speeds already enabled\n");
+			drm_info(adev_to_drm(adev), "PCIE gen 2 link speeds already enabled\n");
 			return;
 		}
-		DRM_INFO("enabling PCIE gen 2 link speeds, disable with amdgpu.pcie_gen2=0\n");
+		drm_info(adev_to_drm(adev), "enabling PCIE gen 2 link speeds, disable with amdgpu.pcie_gen2=0\n");
 	}
 
 	if (!pci_is_pcie(root) || !pci_is_pcie(adev->pdev))
@@ -1876,12 +1877,6 @@ static void cik_invalidate_hdp(struct amdgpu_device *adev,
 	}
 }
 
-static bool cik_need_full_reset(struct amdgpu_device *adev)
-{
-	/* change this when we support soft reset */
-	return true;
-}
-
 static void cik_get_pcie_usage(struct amdgpu_device *adev, uint64_t *count0,
 			       uint64_t *count1)
 {
@@ -1957,10 +1952,6 @@ static uint64_t cik_get_pcie_replay_count(struct amdgpu_device *adev)
 	return (nak_r + nak_g);
 }
 
-static void cik_pre_asic_init(struct amdgpu_device *adev)
-{
-}
-
 static const struct amdgpu_asic_funcs cik_asic_funcs =
 {
 	.read_disabled_bios = &cik_read_disabled_bios,
@@ -1975,13 +1966,11 @@ static const struct amdgpu_asic_funcs cik_asic_funcs =
 	.get_config_memsize = &cik_get_config_memsize,
 	.flush_hdp = &cik_flush_hdp,
 	.invalidate_hdp = &cik_invalidate_hdp,
-	.need_full_reset = &cik_need_full_reset,
 	.init_doorbell_index = &legacy_doorbell_index_init,
 	.get_pcie_usage = &cik_get_pcie_usage,
 	.need_reset_on_init = &cik_need_reset_on_init,
 	.get_pcie_replay_count = &cik_get_pcie_replay_count,
 	.supports_baco = &cik_asic_supports_baco,
-	.pre_asic_init = &cik_pre_asic_init,
 	.query_video_codecs = &cik_query_video_codecs,
 };
 
@@ -1989,14 +1978,14 @@ static int cik_common_early_init(struct amdgpu_ip_block *ip_block)
 {
 	struct amdgpu_device *adev = ip_block->adev;
 
-	adev->smc_rreg = &cik_smc_rreg;
-	adev->smc_wreg = &cik_smc_wreg;
-	adev->pcie_rreg = &cik_pcie_rreg;
-	adev->pcie_wreg = &cik_pcie_wreg;
-	adev->uvd_ctx_rreg = &cik_uvd_ctx_rreg;
-	adev->uvd_ctx_wreg = &cik_uvd_ctx_wreg;
-	adev->didt_rreg = &cik_didt_rreg;
-	adev->didt_wreg = &cik_didt_wreg;
+	adev->reg.smc.rreg = cik_smc_rreg;
+	adev->reg.smc.wreg = cik_smc_wreg;
+	adev->reg.pcie.rreg = &cik_pcie_rreg;
+	adev->reg.pcie.wreg = &cik_pcie_wreg;
+	adev->reg.uvd_ctx.rreg = &cik_uvd_ctx_rreg;
+	adev->reg.uvd_ctx.wreg = &cik_uvd_ctx_wreg;
+	adev->reg.didt.rreg = &cik_didt_rreg;
+	adev->reg.didt.wreg = &cik_didt_wreg;
 
 	adev->asic_funcs = &cik_asic_funcs;
 

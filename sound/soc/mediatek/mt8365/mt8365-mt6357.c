@@ -9,7 +9,6 @@
 #include <linux/array_size.h>
 #include <linux/dev_printk.h>
 #include <linux/err.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/pinctrl/consumer.h>
 #include <linux/platform_device.h>
@@ -71,7 +70,8 @@ static const struct snd_soc_dapm_route mt8365_mt6357_routes[] = {
 static int mt8365_mt6357_int_adda_startup(struct snd_pcm_substream *substream)
 {
 	struct snd_soc_pcm_runtime *rtd = substream->private_data;
-	struct mt8365_mt6357_priv *priv = snd_soc_card_get_drvdata(rtd->card);
+	struct mtk_soc_card_data *soc_card_data = snd_soc_card_get_drvdata(rtd->card);
+	struct mt8365_mt6357_priv *priv = soc_card_data->mach_priv;
 	int ret = 0;
 
 	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK) {
@@ -102,7 +102,8 @@ static int mt8365_mt6357_int_adda_startup(struct snd_pcm_substream *substream)
 static void mt8365_mt6357_int_adda_shutdown(struct snd_pcm_substream *substream)
 {
 	struct snd_soc_pcm_runtime *rtd = substream->private_data;
-	struct mt8365_mt6357_priv *priv = snd_soc_card_get_drvdata(rtd->card);
+	struct mtk_soc_card_data *soc_card_data = snd_soc_card_get_drvdata(rtd->card);
+	struct mt8365_mt6357_priv *priv = soc_card_data->mach_priv;
 	int ret = 0;
 
 	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK) {
@@ -246,27 +247,28 @@ static struct snd_soc_dai_link mt8365_mt6357_dais[] = {
 
 static int mt8365_mt6357_gpio_probe(struct snd_soc_card *card)
 {
-	struct mt8365_mt6357_priv *priv = snd_soc_card_get_drvdata(card);
+	struct mtk_soc_card_data *soc_card_data = snd_soc_card_get_drvdata(card);
+	struct mt8365_mt6357_priv *priv = soc_card_data->mach_priv;
+	struct device *dev = card->dev;
 	int ret, i;
 
-	priv->pinctrl = devm_pinctrl_get(card->dev);
+	priv->pinctrl = devm_pinctrl_get(dev);
 	if (IS_ERR(priv->pinctrl)) {
 		ret = PTR_ERR(priv->pinctrl);
-		return dev_err_probe(card->dev, ret,
-				     "Failed to get pinctrl\n");
+		return dev_err_probe(dev, ret, "Failed to get pinctrl\n");
 	}
 
 	for (i = PIN_STATE_DEFAULT ; i < PIN_STATE_MAX ; i++) {
 		priv->pin_states[i] = pinctrl_lookup_state(priv->pinctrl,
 							   mt8365_mt6357_pin_str[i]);
 		if (IS_ERR(priv->pin_states[i])) {
-			dev_info(card->dev, "No pin state for %s\n",
+			dev_info(dev, "No pin state for %s\n",
 				 mt8365_mt6357_pin_str[i]);
 		} else {
 			ret = pinctrl_select_state(priv->pinctrl,
 						   priv->pin_states[i]);
 			if (ret) {
-				dev_err_probe(card->dev, ret,
+				dev_err_probe(dev, ret,
 					      "Failed to select pin state %s\n",
 					      mt8365_mt6357_pin_str[i]);
 				return ret;
@@ -295,7 +297,6 @@ static int mt8365_mt6357_dev_probe(struct mtk_soc_card_data *soc_card_data, bool
 	struct mt8365_mt6357_priv *mach_priv;
 	int ret;
 
-	card->dev = dev;
 	ret = parse_dai_link_info(card);
 	if (ret)
 		goto err;

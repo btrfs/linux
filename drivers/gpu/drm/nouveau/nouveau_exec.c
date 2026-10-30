@@ -219,7 +219,7 @@ nouveau_exec_job_init(struct nouveau_exec_job **pjob,
 		}
 	}
 
-	job = *pjob = kzalloc(sizeof(*job), GFP_KERNEL);
+	job = *pjob = kzalloc_obj(*job);
 	if (!job)
 		return -ENOMEM;
 
@@ -331,10 +331,10 @@ nouveau_exec_ucopy(struct nouveau_exec_job_args *args,
 
 	return 0;
 
-err_free_pushs:
-	u_free(args->push.s);
 err_free_ins:
 	u_free(args->in_sync.s);
+err_free_pushs:
+	u_free(args->push.s);
 	return ret;
 }
 

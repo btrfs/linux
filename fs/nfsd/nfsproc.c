@@ -33,7 +33,7 @@ static __be32 nfsd_map_status(__be32 status)
 		break;
 	case nfserr_symlink:
 	case nfserr_wrong_type:
-		status = nfserr_inval;
+		status = nfserr_io;
 		break;
 	}
 	return status;
@@ -82,6 +82,7 @@ nfsd_proc_setattr(struct svc_rqst *rqstp)
 		.na_iattr	= iap,
 	};
 	struct svc_fh *fhp;
+	int hosterr;
 
 	dprintk("nfsd: SETATTR  %s, valid=%x, size=%ld\n",
 		SVCFH_fmt(&argp->fh),
@@ -116,6 +117,12 @@ nfsd_proc_setattr(struct svc_rqst *rqstp)
 		resp->status = fh_verify(rqstp, fhp, 0, NFSD_MAY_NOP);
 		if (resp->status != nfs_ok)
 			goto out;
+
+		hosterr = fh_want_write(fhp);
+		if (hosterr) {
+			resp->status = nfserrno(hosterr);
+			goto out;
+		}
 
 		if (delta < 0)
 			delta = -delta;
@@ -298,7 +305,7 @@ nfsd_proc_create(struct svc_rqst *rqstp)
 	/* Check for NFSD_MAY_WRITE in nfsd_create if necessary */
 
 	resp->status = nfserr_exist;
-	if (isdotent(argp->name, argp->len))
+	if (name_is_dot_dotdot(argp->name, argp->len))
 		goto done;
 	hosterr = fh_want_write(dirfhp);
 	if (hosterr) {
@@ -306,18 +313,16 @@ nfsd_proc_create(struct svc_rqst *rqstp)
 		goto done;
 	}
 
-	inode_lock_nested(dirfhp->fh_dentry->d_inode, I_MUTEX_PARENT);
-	dchild = lookup_one(&nop_mnt_idmap, &QSTR_LEN(argp->name, argp->len),
-			    dirfhp->fh_dentry);
+	dchild = start_creating(&nop_mnt_idmap, dirfhp->fh_dentry,
+				&QSTR_LEN(argp->name, argp->len));
 	if (IS_ERR(dchild)) {
 		resp->status = nfserrno(PTR_ERR(dchild));
-		goto out_unlock;
+		goto out_write;
 	}
 	fh_init(newfhp, NFS_FHSIZE);
 	resp->status = fh_compose(newfhp, dirfhp->fh_export, dchild, dirfhp);
 	if (!resp->status && d_really_is_negative(dchild))
 		resp->status = nfserr_noent;
-	dput(dchild);
 	if (resp->status) {
 		if (resp->status != nfserr_noent)
 			goto out_unlock;
@@ -409,6 +414,9 @@ nfsd_proc_create(struct svc_rqst *rqstp)
 		/* File doesn't exist. Create it and set attrs */
 		resp->status = nfsd_create_locked(rqstp, dirfhp, &attrs, type,
 						  rdev, newfhp);
+		/* nfsd_create_locked() unlocked the parent */
+		dput(dchild);
+		goto out_write;
 	} else if (type == S_IFREG) {
 		dprintk("nfsd:   existing %s, valid=%x, size=%ld\n",
 			argp->name, attr->ia_valid, (long) attr->ia_size);
@@ -423,7 +431,8 @@ nfsd_proc_create(struct svc_rqst *rqstp)
 	}
 
 out_unlock:
-	inode_unlock(dirfhp->fh_dentry->d_inode);
+	end_creating(dchild);
+out_write:
 	fh_drop_write(dirfhp);
 done:
 	fh_put(dirfhp);
@@ -836,13 +845,10 @@ static const struct svc_procedure nfsd_procedures2[18] = {
 	},
 };
 
-static DEFINE_PER_CPU_ALIGNED(unsigned long,
-			      nfsd_count2[ARRAY_SIZE(nfsd_procedures2)]);
 const struct svc_version nfsd_version2 = {
 	.vs_vers	= 2,
 	.vs_nproc	= ARRAY_SIZE(nfsd_procedures2),
 	.vs_proc	= nfsd_procedures2,
-	.vs_count	= nfsd_count2,
 	.vs_dispatch	= nfsd_dispatch,
 	.vs_xdrsize	= NFS2_SVC_XDRSIZE,
 };

@@ -919,7 +919,7 @@ static struct mtk_pin_soc mt7986a_data = {
 	.nfuncs = ARRAY_SIZE(mt7986_functions),
 	.eint_hw = &mt7986a_eint_hw,
 	.gpio_m = 0,
-	.ies_present = false,
+	.ies_present = true,
 	.base_names = mt7986_pinctrl_register_base_names,
 	.nbase_names = ARRAY_SIZE(mt7986_pinctrl_register_base_names),
 	.bias_disable_set = mtk_pinconf_bias_disable_set,
@@ -945,7 +945,7 @@ static struct mtk_pin_soc mt7986b_data = {
 	.nfuncs = ARRAY_SIZE(mt7986_functions),
 	.eint_hw = &mt7986b_eint_hw,
 	.gpio_m = 0,
-	.ies_present = false,
+	.ies_present = true,
 	.base_names = mt7986_pinctrl_register_base_names,
 	.nbase_names = ARRAY_SIZE(mt7986_pinctrl_register_base_names),
 	.bias_disable_set = mtk_pinconf_bias_disable_set,
@@ -965,11 +965,13 @@ static const struct of_device_id mt7986a_pinctrl_of_match[] = {
 	{.compatible = "mediatek,mt7986a-pinctrl",},
 	{}
 };
+MODULE_DEVICE_TABLE(of, mt7986a_pinctrl_of_match);
 
 static const struct of_device_id mt7986b_pinctrl_of_match[] = {
 	{.compatible = "mediatek,mt7986b-pinctrl",},
 	{}
 };
+MODULE_DEVICE_TABLE(of, mt7986b_pinctrl_of_match);
 
 static int mt7986a_pinctrl_probe(struct platform_device *pdev)
 {
@@ -997,15 +999,18 @@ static struct platform_driver mt7986b_pinctrl_driver = {
 	.probe = mt7986b_pinctrl_probe,
 };
 
-static int __init mt7986a_pinctrl_init(void)
-{
-	return platform_driver_register(&mt7986a_pinctrl_driver);
-}
+static struct platform_driver * const mt7986_pinctrl_drivers[] = {
+	&mt7986a_pinctrl_driver,
+	&mt7986b_pinctrl_driver,
+};
 
-static int __init mt7986b_pinctrl_init(void)
+static int __init mt7986_pinctrl_init(void)
 {
-	return platform_driver_register(&mt7986b_pinctrl_driver);
+	return platform_register_drivers(mt7986_pinctrl_drivers,
+					 ARRAY_SIZE(mt7986_pinctrl_drivers));
 }
+arch_initcall(mt7986_pinctrl_init);
 
-arch_initcall(mt7986a_pinctrl_init);
-arch_initcall(mt7986b_pinctrl_init);
+MODULE_DESCRIPTION("MediaTek MT7986 Pinctrl Driver");
+MODULE_LICENSE("GPL v2");
+MODULE_IMPORT_NS("MTK_PINCTRL");

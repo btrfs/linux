@@ -864,7 +864,7 @@ static int snd_ymfpci_playback_open_1(struct snd_pcm_substream *substream)
 	if (err < 0)
 		return err;
 
-	ypcm = kzalloc(sizeof(*ypcm), GFP_KERNEL);
+	ypcm = kzalloc_obj(*ypcm);
 	if (ypcm == NULL)
 		return -ENOMEM;
 	ypcm->chip = chip;
@@ -990,7 +990,7 @@ static int snd_ymfpci_capture_open(struct snd_pcm_substream *substream,
 	if (err < 0)
 		return err;
 
-	ypcm = kzalloc(sizeof(*ypcm), GFP_KERNEL);
+	ypcm = kzalloc_obj(*ypcm);
 	if (ypcm == NULL)
 		return -ENOMEM;
 	ypcm->chip = chip;
@@ -1781,16 +1781,22 @@ int snd_ymfpci_mixer(struct snd_ymfpci *chip, int rear_switch)
 	if (snd_BUG_ON(!chip->pcm_spdif))
 		return -ENXIO;
 	kctl = snd_ctl_new1(&snd_ymfpci_spdif_default, chip);
+	if (!kctl)
+		return -ENOMEM;
 	kctl->id.device = chip->pcm_spdif->device;
 	err = snd_ctl_add(chip->card, kctl);
 	if (err < 0)
 		return err;
 	kctl = snd_ctl_new1(&snd_ymfpci_spdif_mask, chip);
+	if (!kctl)
+		return -ENOMEM;
 	kctl->id.device = chip->pcm_spdif->device;
 	err = snd_ctl_add(chip->card, kctl);
 	if (err < 0)
 		return err;
 	kctl = snd_ctl_new1(&snd_ymfpci_spdif_stream, chip);
+	if (!kctl)
+		return -ENOMEM;
 	kctl->id.device = chip->pcm_spdif->device;
 	err = snd_ctl_add(chip->card, kctl);
 	if (err < 0)

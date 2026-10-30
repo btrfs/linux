@@ -3,7 +3,7 @@
  * Copyright (C) 2019 - 2021
  *
  * Richard van Schagen <vschagen@icloud.com>
- * Christian Marangi <ansuelsmth@gmail.com
+ * Christian Marangi <ansuelsmth@gmail.com>
  */
 #ifndef _EIP93_MAIN_H_
 #define _EIP93_MAIN_H_
@@ -92,17 +92,6 @@
 						    EIP93_HASH_SHA224 | \
 						    EIP93_HASH_SHA256))
 
-/**
- * struct eip93_device - crypto engine device structure
- */
-struct eip93_device {
-	void __iomem		*base;
-	struct device		*dev;
-	struct clk		*clk;
-	int			irq;
-	struct eip93_ring		*ring;
-};
-
 struct eip93_desc_ring {
 	void			*base;
 	void			*base_end;
@@ -129,6 +118,17 @@ struct eip93_ring {
 	/* aync idr */
 	spinlock_t			idr_lock;
 	struct idr			crypto_async_idr;
+};
+
+/**
+ * struct eip93_device - crypto engine device structure
+ */
+struct eip93_device {
+	void __iomem		*base;
+	struct device		*dev;
+	struct clk		*clk;
+	int			irq;
+	struct eip93_ring	ring[];
 };
 
 enum eip93_alg_type {

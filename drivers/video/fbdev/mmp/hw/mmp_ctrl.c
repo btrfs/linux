@@ -402,7 +402,7 @@ static int path_init(struct mmphw_path_plat *path_plat,
 	dev_info(ctrl->dev, "%s: %s\n", __func__, config->name);
 
 	/* init driver data */
-	path_info = kzalloc(sizeof(*path_info), GFP_KERNEL);
+	path_info = kzalloc_obj(*path_info);
 	if (!path_info)
 		return 0;
 
@@ -505,8 +505,6 @@ static int mmphw_probe(struct platform_device *pdev)
 	ret = devm_request_irq(ctrl->dev, ctrl->irq, ctrl_handle_irq,
 		IRQF_SHARED, "lcd_controller", ctrl);
 	if (ret < 0) {
-		dev_err(ctrl->dev, "%s unable to request IRQ %d\n",
-				__func__, ctrl->irq);
 		ret = -ENXIO;
 		goto failed;
 	}

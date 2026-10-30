@@ -21,6 +21,9 @@
 #define REF_CLOCK_100MHz		(100 * HZ_PER_MHZ)
 
 /* RK3528 COMBO PHY REG */
+#define RK3528_PHYREG5				0x14
+#define RK3528_PHYREG5_GATE_TX_PCK_SEL		BIT(3)
+#define RK3528_PHYREG5_GATE_TX_PCK_DLY_PLL_OFF	BIT(3)
 #define RK3528_PHYREG6				0x18
 #define RK3528_PHYREG6_PLL_KVCO			GENMASK(12, 10)
 #define RK3528_PHYREG6_PLL_KVCO_VALUE		0x2
@@ -103,6 +106,10 @@
 #define RK3568_PHYREG18				0x44
 #define RK3568_PHYREG18_PLL_LOOP		0x32
 
+#define RK3568_PHYREG30				0x74
+#define RK3568_PHYREG30_GATE_TX_PCK_SEL         BIT(7)
+#define RK3568_PHYREG30_GATE_TX_PCK_DLY_PLL_OFF BIT(7)
+
 #define RK3568_PHYREG32				0x7C
 #define RK3568_PHYREG32_SSC_MASK		GENMASK(7, 4)
 #define RK3568_PHYREG32_SSC_DIR_MASK		GENMASK(5, 4)
@@ -114,6 +121,7 @@
 #define RK3568_PHYREG32_SSC_OFFSET_500PPM	1
 
 #define RK3568_PHYREG33				0x80
+#define RK3568_PHYREG33_PLL_SSC_CTRL		BIT(5)
 #define RK3568_PHYREG33_PLL_KVCO_MASK		GENMASK(4, 2)
 #define RK3568_PHYREG33_PLL_KVCO_SHIFT		2
 #define RK3568_PHYREG33_PLL_KVCO_VALUE		2
@@ -439,6 +447,74 @@ static int rockchip_combphy_probe(struct platform_device *pdev)
 	return PTR_ERR_OR_ZERO(phy_provider);
 }
 
+static void rk_combphy_common_cfg_ssc(struct rockchip_combphy_priv *priv, unsigned long rate)
+{
+	struct device_node *np = priv->dev->of_node;
+	u32 val;
+
+	/* Set SSC downward spread spectrum for PCIe and USB3 */
+	if (priv->type == PHY_TYPE_PCIE || priv->type == PHY_TYPE_USB3) {
+		val = FIELD_PREP(RK3568_PHYREG32_SSC_MASK, RK3568_PHYREG32_SSC_DOWNWARD);
+		rockchip_combphy_updatel(priv, RK3568_PHYREG32_SSC_MASK, val, RK3568_PHYREG32);
+	}
+
+	/* Set SSC downward spread spectrum +500ppm for SATA in 100MHz */
+	if (priv->type == PHY_TYPE_SATA && rate == REF_CLOCK_100MHz) {
+		val = FIELD_PREP(RK3568_PHYREG32_SSC_DIR_MASK,
+				 RK3568_PHYREG32_SSC_DOWNWARD);
+		val |= FIELD_PREP(RK3568_PHYREG32_SSC_OFFSET_MASK,
+				  RK3568_PHYREG32_SSC_OFFSET_500PPM);
+		rockchip_combphy_updatel(priv, RK3568_PHYREG32_SSC_MASK, val,
+					 RK3568_PHYREG32);
+	}
+
+	if (!priv->enable_ssc)
+		return;
+
+	/* Enable SSC */
+	val = readl(priv->mmio + RK3568_PHYREG8);
+	val |= RK3568_PHYREG8_SSC_EN;
+	writel(val, priv->mmio + RK3568_PHYREG8);
+
+	/* Some SoCs need tuning PCIe SSC instead of default configuration in 24MHz */
+	if (!of_device_is_compatible(np, "rockchip,rk3588-naneng-combphy") &&
+	    !of_device_is_compatible(np, "rockchip,rk3576-naneng-combphy"))
+		return;
+
+	/* PLL control SSC module period should be set if need tuning */
+	val = readl(priv->mmio + RK3568_PHYREG33);
+	val |= RK3568_PHYREG33_PLL_SSC_CTRL;
+	writel(val, priv->mmio + RK3568_PHYREG33);
+
+	if (priv->type == PHY_TYPE_PCIE && rate == REF_CLOCK_24MHz) {
+		/* Set PLL loop divider */
+		writel(0x00, priv->mmio + RK3576_PHYREG17);
+		writel(RK3568_PHYREG18_PLL_LOOP, priv->mmio + RK3568_PHYREG18);
+
+		/* Set up rx_pck invert and rx msb to disable */
+		writel(0x00, priv->mmio + RK3588_PHYREG27);
+
+		/*
+		 * Set up SU adjust signal:
+		 * su_trim[7:0],   PLL KVCO adjust bits[2:0] to min
+		 * su_trim[15:8],  PLL LPF R1 adujst bits[9:7]=3'b101
+		 * su_trim[23:16], CKRCV adjust
+		 * su_trim[31:24], CKDRV adjust
+		 */
+		writel(0x90, priv->mmio + RK3568_PHYREG11);
+		writel(0x02, priv->mmio + RK3568_PHYREG12);
+		writel(0x08, priv->mmio + RK3568_PHYREG13);
+		writel(0x57, priv->mmio + RK3568_PHYREG14);
+		writel(0x40, priv->mmio + RK3568_PHYREG15);
+
+		writel(RK3568_PHYREG16_SSC_CNT_VALUE, priv->mmio + RK3568_PHYREG16);
+
+		val = FIELD_PREP(RK3568_PHYREG33_PLL_KVCO_MASK,
+				 RK3576_PHYREG33_PLL_KVCO_VALUE);
+		writel(val, priv->mmio + RK3568_PHYREG33);
+	}
+}
+
 static int rk3528_combphy_cfg(struct rockchip_combphy_priv *priv)
 {
 	const struct rockchip_combphy_grfcfg *cfg = priv->cfg->grfcfg;
@@ -504,6 +580,10 @@ static int rk3528_combphy_cfg(struct rockchip_combphy_priv *priv)
 	case REF_CLOCK_100MHz:
 		rockchip_combphy_param_write(priv->phy_grf, &cfg->pipe_clk_100m, true);
 		if (priv->type == PHY_TYPE_PCIE) {
+			/* Gate_tx_pck_sel length select for L1ss support */
+			rockchip_combphy_updatel(priv, RK3528_PHYREG5_GATE_TX_PCK_SEL,
+						 RK3528_PHYREG5_GATE_TX_PCK_DLY_PLL_OFF, RK3528_PHYREG5);
+
 			/* PLL KVCO tuning fine */
 			val = FIELD_PREP(RK3528_PHYREG6_PLL_KVCO, RK3528_PHYREG6_PLL_KVCO_VALUE);
 			rockchip_combphy_updatel(priv, RK3528_PHYREG6_PLL_KVCO, val,
@@ -518,7 +598,7 @@ static int rk3528_combphy_cfg(struct rockchip_combphy_priv *priv)
 		return -EINVAL;
 	}
 
-	if (device_property_read_bool(priv->dev, "rockchip,ext-refclk")) {
+	if (priv->ext_refclk) {
 		rockchip_combphy_param_write(priv->phy_grf, &cfg->pipe_clk_ext, true);
 
 		if (priv->type == PHY_TYPE_PCIE && rate == REF_CLOCK_100MHz) {
@@ -543,11 +623,9 @@ static int rk3528_combphy_cfg(struct rockchip_combphy_priv *priv)
 		}
 	}
 
-	if (priv->type == PHY_TYPE_PCIE) {
-		if (device_property_read_bool(priv->dev, "rockchip,enable-ssc"))
-			rockchip_combphy_updatel(priv, RK3528_PHYREG40_SSC_EN,
-						 RK3528_PHYREG40_SSC_EN, RK3528_PHYREG40);
-	}
+	if (priv->type == PHY_TYPE_PCIE && priv->enable_ssc)
+		rockchip_combphy_updatel(priv, RK3528_PHYREG40_SSC_EN,
+					 RK3528_PHYREG40_SSC_EN, RK3528_PHYREG40);
 
 	return 0;
 }
@@ -571,7 +649,7 @@ static const struct rockchip_combphy_grfcfg rk3528_combphy_grfcfgs = {
 	.con2_for_pcie		= { 0x0008, 15, 0, 0x00, 0x101 },
 	.con3_for_pcie		= { 0x000c, 15, 0, 0x00, 0x0200 },
 	/* pipe-grf */
-	.u3otg0_port_en         = { 0x0044, 15, 0, 0x0181, 0x1100 },
+	.u3otg0_port_en		= { 0x0044, 15, 0, 0x0181, 0x1100 },
 };
 
 static const struct rockchip_combphy_cfg rk3528_combphy_cfgs = {
@@ -591,21 +669,12 @@ static int rk3562_combphy_cfg(struct rockchip_combphy_priv *priv)
 
 	switch (priv->type) {
 	case PHY_TYPE_PCIE:
-		/* Set SSC downward spread spectrum */
-		val = RK3568_PHYREG32_SSC_DOWNWARD << RK3568_PHYREG32_SSC_DIR_SHIFT;
-		rockchip_combphy_updatel(priv, RK3568_PHYREG32_SSC_MASK, val, RK3568_PHYREG32);
-
 		rockchip_combphy_param_write(priv->phy_grf, &cfg->con0_for_pcie, true);
 		rockchip_combphy_param_write(priv->phy_grf, &cfg->con1_for_pcie, true);
 		rockchip_combphy_param_write(priv->phy_grf, &cfg->con2_for_pcie, true);
 		rockchip_combphy_param_write(priv->phy_grf, &cfg->con3_for_pcie, true);
 		break;
 	case PHY_TYPE_USB3:
-		/* Set SSC downward spread spectrum */
-		val = RK3568_PHYREG32_SSC_DOWNWARD << RK3568_PHYREG32_SSC_DIR_SHIFT;
-		rockchip_combphy_updatel(priv, RK3568_PHYREG32_SSC_MASK, val,
-					 RK3568_PHYREG32);
-
 		/* Enable adaptive CTLE for USB3.0 Rx */
 		rockchip_combphy_updatel(priv, RK3568_PHYREG15_CTLE_EN,
 					 RK3568_PHYREG15_CTLE_EN, RK3568_PHYREG15);
@@ -657,6 +726,10 @@ static int rk3562_combphy_cfg(struct rockchip_combphy_priv *priv)
 	case REF_CLOCK_100MHz:
 		rockchip_combphy_param_write(priv->phy_grf, &cfg->pipe_clk_100m, true);
 		if (priv->type == PHY_TYPE_PCIE) {
+			/* Gate_tx_pck_sel length select for L1ss support */
+			rockchip_combphy_updatel(priv, RK3568_PHYREG30_GATE_TX_PCK_SEL,
+						 RK3568_PHYREG30_GATE_TX_PCK_DLY_PLL_OFF,
+						 RK3568_PHYREG30);
 			/* PLL KVCO tuning fine */
 			val = FIELD_PREP(RK3568_PHYREG33_PLL_KVCO_MASK,
 					 RK3568_PHYREG33_PLL_KVCO_VALUE);
@@ -693,11 +766,7 @@ static int rk3562_combphy_cfg(struct rockchip_combphy_priv *priv)
 		}
 	}
 
-	if (priv->enable_ssc) {
-		val = readl(priv->mmio + RK3568_PHYREG8);
-		val |= RK3568_PHYREG8_SSC_EN;
-		writel(val, priv->mmio + RK3568_PHYREG8);
-	}
+	rk_combphy_common_cfg_ssc(priv, rate);
 
 	return 0;
 }
@@ -742,11 +811,6 @@ static int rk3568_combphy_cfg(struct rockchip_combphy_priv *priv)
 
 	switch (priv->type) {
 	case PHY_TYPE_PCIE:
-		/* Set SSC downward spread spectrum. */
-		val = RK3568_PHYREG32_SSC_DOWNWARD << RK3568_PHYREG32_SSC_DIR_SHIFT;
-
-		rockchip_combphy_updatel(priv, RK3568_PHYREG32_SSC_MASK, val, RK3568_PHYREG32);
-
 		rockchip_combphy_param_write(priv->phy_grf, &cfg->con0_for_pcie, true);
 		rockchip_combphy_param_write(priv->phy_grf, &cfg->con1_for_pcie, true);
 		rockchip_combphy_param_write(priv->phy_grf, &cfg->con2_for_pcie, true);
@@ -754,10 +818,6 @@ static int rk3568_combphy_cfg(struct rockchip_combphy_priv *priv)
 		break;
 
 	case PHY_TYPE_USB3:
-		/* Set SSC downward spread spectrum. */
-		val = RK3568_PHYREG32_SSC_DOWNWARD << RK3568_PHYREG32_SSC_DIR_SHIFT,
-		rockchip_combphy_updatel(priv, RK3568_PHYREG32_SSC_MASK, val, RK3568_PHYREG32);
-
 		/* Enable adaptive CTLE for USB3.0 Rx. */
 		val = readl(priv->mmio + RK3568_PHYREG15);
 		val |= RK3568_PHYREG15_CTLE_EN;
@@ -867,13 +927,6 @@ static int rk3568_combphy_cfg(struct rockchip_combphy_priv *priv)
 
 			writel(RK3568_PHYREG18_PLL_LOOP, priv->mmio + RK3568_PHYREG18);
 			writel(RK3568_PHYREG11_SU_TRIM_0_7, priv->mmio + RK3568_PHYREG11);
-		} else if (priv->type == PHY_TYPE_SATA) {
-			/* downward spread spectrum +500ppm */
-			val = RK3568_PHYREG32_SSC_DOWNWARD << RK3568_PHYREG32_SSC_DIR_SHIFT;
-			val |= RK3568_PHYREG32_SSC_OFFSET_500PPM <<
-			       RK3568_PHYREG32_SSC_OFFSET_SHIFT;
-			rockchip_combphy_updatel(priv, RK3568_PHYREG32_SSC_MASK, val,
-						 RK3568_PHYREG32);
 		}
 		break;
 
@@ -896,11 +949,7 @@ static int rk3568_combphy_cfg(struct rockchip_combphy_priv *priv)
 		}
 	}
 
-	if (priv->enable_ssc) {
-		val = readl(priv->mmio + RK3568_PHYREG8);
-		val |= RK3568_PHYREG8_SSC_EN;
-		writel(val, priv->mmio + RK3568_PHYREG8);
-	}
+	rk_combphy_common_cfg_ssc(priv, rate);
 
 	return 0;
 }
@@ -959,10 +1008,6 @@ static int rk3576_combphy_cfg(struct rockchip_combphy_priv *priv)
 
 	switch (priv->type) {
 	case PHY_TYPE_PCIE:
-		/* Set SSC downward spread spectrum */
-		val = FIELD_PREP(RK3568_PHYREG32_SSC_MASK, RK3568_PHYREG32_SSC_DOWNWARD);
-		rockchip_combphy_updatel(priv, RK3568_PHYREG32_SSC_MASK, val, RK3568_PHYREG32);
-
 		rockchip_combphy_param_write(priv->phy_grf, &cfg->con0_for_pcie, true);
 		rockchip_combphy_param_write(priv->phy_grf, &cfg->con1_for_pcie, true);
 		rockchip_combphy_param_write(priv->phy_grf, &cfg->con2_for_pcie, true);
@@ -970,10 +1015,6 @@ static int rk3576_combphy_cfg(struct rockchip_combphy_priv *priv)
 		break;
 
 	case PHY_TYPE_USB3:
-		/* Set SSC downward spread spectrum */
-		val = FIELD_PREP(RK3568_PHYREG32_SSC_MASK, RK3568_PHYREG32_SSC_DOWNWARD);
-		rockchip_combphy_updatel(priv, RK3568_PHYREG32_SSC_MASK, val, RK3568_PHYREG32);
-
 		/* Enable adaptive CTLE for USB3.0 Rx */
 		val = readl(priv->mmio + RK3568_PHYREG15);
 		val |= RK3568_PHYREG15_CTLE_EN;
@@ -1097,14 +1138,6 @@ static int rk3576_combphy_cfg(struct rockchip_combphy_priv *priv)
 			writel(0x88, priv->mmio + RK3568_PHYREG13);
 			writel(0x56, priv->mmio + RK3568_PHYREG14);
 		} else if (priv->type == PHY_TYPE_SATA) {
-			/* downward spread spectrum +500ppm */
-			val = FIELD_PREP(RK3568_PHYREG32_SSC_DIR_MASK,
-					 RK3568_PHYREG32_SSC_DOWNWARD);
-			val |= FIELD_PREP(RK3568_PHYREG32_SSC_OFFSET_MASK,
-					  RK3568_PHYREG32_SSC_OFFSET_500PPM);
-			rockchip_combphy_updatel(priv, RK3568_PHYREG32_SSC_MASK, val,
-						 RK3568_PHYREG32);
-
 			/* ssc ppm adjust to 3500ppm */
 			rockchip_combphy_updatel(priv, RK3576_PHYREG10_SSC_PCM_MASK,
 						 RK3576_PHYREG10_SSC_PCM_3500PPM,
@@ -1143,39 +1176,7 @@ static int rk3576_combphy_cfg(struct rockchip_combphy_priv *priv)
 		}
 	}
 
-	if (priv->enable_ssc) {
-		val = readl(priv->mmio + RK3568_PHYREG8);
-		val |= RK3568_PHYREG8_SSC_EN;
-		writel(val, priv->mmio + RK3568_PHYREG8);
-
-		if (priv->type == PHY_TYPE_PCIE && rate == REF_CLOCK_24MHz) {
-			/* Set PLL loop divider */
-			writel(0x00, priv->mmio + RK3576_PHYREG17);
-			writel(RK3568_PHYREG18_PLL_LOOP, priv->mmio + RK3568_PHYREG18);
-
-			/* Set up rx_pck invert and rx msb to disable */
-			writel(0x00, priv->mmio + RK3588_PHYREG27);
-
-			/*
-			 * Set up SU adjust signal:
-			 * su_trim[7:0],   PLL KVCO adjust bits[2:0] to min
-			 * su_trim[15:8],  PLL LPF R1 adujst bits[9:7]=3'b101
-			 * su_trim[23:16], CKRCV adjust
-			 * su_trim[31:24], CKDRV adjust
-			 */
-			writel(0x90, priv->mmio + RK3568_PHYREG11);
-			writel(0x02, priv->mmio + RK3568_PHYREG12);
-			writel(0x08, priv->mmio + RK3568_PHYREG13);
-			writel(0x57, priv->mmio + RK3568_PHYREG14);
-			writel(0x40, priv->mmio + RK3568_PHYREG15);
-
-			writel(RK3568_PHYREG16_SSC_CNT_VALUE, priv->mmio + RK3568_PHYREG16);
-
-			val = FIELD_PREP(RK3568_PHYREG33_PLL_KVCO_MASK,
-					 RK3576_PHYREG33_PLL_KVCO_VALUE);
-			writel(val, priv->mmio + RK3568_PHYREG33);
-		}
-	}
+	rk_combphy_common_cfg_ssc(priv, rate);
 
 	return 0;
 }
@@ -1242,10 +1243,6 @@ static int rk3588_combphy_cfg(struct rockchip_combphy_priv *priv)
 		}
 		break;
 	case PHY_TYPE_USB3:
-		/* Set SSC downward spread spectrum */
-		val = RK3568_PHYREG32_SSC_DOWNWARD << RK3568_PHYREG32_SSC_DIR_SHIFT;
-		rockchip_combphy_updatel(priv, RK3568_PHYREG32_SSC_MASK, val, RK3568_PHYREG32);
-
 		/* Enable adaptive CTLE for USB3.0 Rx. */
 		val = readl(priv->mmio + RK3568_PHYREG15);
 		val |= RK3568_PHYREG15_CTLE_EN;
@@ -1330,13 +1327,6 @@ static int rk3588_combphy_cfg(struct rockchip_combphy_priv *priv)
 
 			/* Set up su_trim:  */
 			writel(RK3568_PHYREG11_SU_TRIM_0_7, priv->mmio + RK3568_PHYREG11);
-		} else if (priv->type == PHY_TYPE_SATA) {
-			/* downward spread spectrum +500ppm */
-			val = RK3568_PHYREG32_SSC_DOWNWARD << RK3568_PHYREG32_SSC_DIR_SHIFT;
-			val |= RK3568_PHYREG32_SSC_OFFSET_500PPM <<
-			       RK3568_PHYREG32_SSC_OFFSET_SHIFT;
-			rockchip_combphy_updatel(priv, RK3568_PHYREG32_SSC_MASK, val,
-						 RK3568_PHYREG32);
 		}
 		break;
 	default:
@@ -1358,11 +1348,7 @@ static int rk3588_combphy_cfg(struct rockchip_combphy_priv *priv)
 		}
 	}
 
-	if (priv->enable_ssc) {
-		val = readl(priv->mmio + RK3568_PHYREG8);
-		val |= RK3568_PHYREG8_SSC_EN;
-		writel(val, priv->mmio + RK3568_PHYREG8);
-	}
+	rk_combphy_common_cfg_ssc(priv, rate);
 
 	return 0;
 }

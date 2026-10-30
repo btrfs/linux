@@ -48,7 +48,8 @@ Terminology
 * **VMA locks** - The VMA lock is at VMA granularity (of course) which behaves
   as a read/write semaphore in practice. A VMA read lock is obtained via
   :c:func:`!lock_vma_under_rcu` (and unlocked via :c:func:`!vma_end_read`) and a
-  write lock via :c:func:`!vma_start_write` (all VMA write locks are unlocked
+  write lock via vma_start_write() or vma_start_write_killable()
+  (all VMA write locks are unlocked
   automatically when the mmap write lock is released). To take a VMA write lock
   you **must** have already acquired an :c:func:`!mmap_write_lock`.
 * **rmap locks** - When trying to access VMAs through the reverse mapping via a
@@ -582,7 +583,7 @@ To access PTE-level page tables, a helper like :c:func:`!pte_offset_map_lock` or
 :c:func:`!pte_offset_map` can be used depending on stability requirements.
 These map the page table into kernel memory if required, take the RCU lock, and
 depending on variant, may also look up or acquire the PTE lock.
-See the comment on :c:func:`!__pte_offset_map_lock`.
+See the comment on :c:func:`!pte_offset_map_lock`.
 
 Atomicity
 ^^^^^^^^^
@@ -666,7 +667,7 @@ must be released via :c:func:`!pte_unmap_unlock`.
 .. note:: There are some variants on this, such as
    :c:func:`!pte_offset_map_rw_nolock` when we know we hold the PTE stable but
    for brevity we do not explore this.  See the comment for
-   :c:func:`!__pte_offset_map_lock` for more details.
+   :c:func:`!pte_offset_map_lock` for more details.
 
 When modifying data in ranges we typically only wish to allocate higher page
 tables as necessary, using these locks to avoid races or overwriting anything,
@@ -685,7 +686,7 @@ At the leaf page table, that is the PTE, we can't entirely rely on this pattern
 as we have separate PMD and PTE locks and a THP collapse for instance might have
 eliminated the PMD entry as well as the PTE from under us.
 
-This is why :c:func:`!__pte_offset_map_lock` locklessly retrieves the PMD entry
+This is why :c:func:`!pte_offset_map_lock` locklessly retrieves the PMD entry
 for the PTE, carefully checking it is as expected, before acquiring the
 PTE-specific lock, and then *again* checking that the PMD entry is as expected.
 
@@ -723,7 +724,7 @@ the zap and the invocation of :c:func:`!free_pgtables`.
 
 Since it is assumed that all such steps have been taken, page table entries are
 cleared without page table locks (in the :c:func:`!pgd_clear`, :c:func:`!p4d_clear`,
-:c:func:`!pud_clear`, and :c:func:`!pmd_clear` functions.
+:c:func:`!pud_clear`, and :c:func:`!pmd_clear` functions).
 
 .. note:: It is possible for leaf page tables to be torn down independent of
           the page tables above it as is done by
@@ -774,7 +775,7 @@ lock, releasing or downgrading the mmap write lock also releases the VMA write
 lock so there is no :c:func:`!vma_end_write` function.
 
 Note that when write-locking a VMA lock, the :c:member:`!vma.vm_refcnt` is temporarily
-modified so that readers can detect the presense of a writer. The reference counter is
+modified so that readers can detect the presence of a writer. The reference counter is
 restored once the vma sequence number used for serialisation is updated.
 
 This ensures the semantics we require - VMA write locks provide exclusive write
@@ -907,3 +908,9 @@ Stack expansion
 Stack expansion throws up additional complexities in that we cannot permit there
 to be racing page faults, as a result we invoke :c:func:`!vma_start_write` to
 prevent this in :c:func:`!expand_downwards` or :c:func:`!expand_upwards`.
+
+------------------------
+Functions and structures
+------------------------
+
+.. kernel-doc:: include/linux/mmap_lock.h

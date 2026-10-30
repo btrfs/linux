@@ -6,7 +6,7 @@
  * Copyright 2007-2008	Johannes Berg <johannes@sipsolutions.net>
  * Copyright 2013-2014  Intel Mobile Communications GmbH
  * Copyright 2015-2017	Intel Deutschland GmbH
- * Copyright 2018-2020, 2022-2025  Intel Corporation
+ * Copyright 2018-2020, 2022-2026  Intel Corporation
  */
 
 #include <crypto/utils.h>
@@ -150,11 +150,14 @@ static int ieee80211_key_enable_hw_accel(struct ieee80211_key *key)
 	sta = key->sta;
 
 	/*
-	 * If this is a per-STA GTK, check if it
-	 * is supported; if not, return.
+	 * Allow installation of a per-STA GTK if per-STA GTK is supported
+	 * by the driver or the interface is a NAN Data interface (as
+	 * per-station GTKs are required to be supported if secure NAN is
+	 * supported).
 	 */
 	if (sta && !(key->conf.flags & IEEE80211_KEY_FLAG_PAIRWISE) &&
-	    !ieee80211_hw_check(&key->local->hw, SUPPORTS_PER_STA_GTK))
+	    !(ieee80211_hw_check(&key->local->hw, SUPPORTS_PER_STA_GTK) ||
+	      sdata->vif.type == NL80211_IFTYPE_NAN_DATA))
 		goto out_unsupported;
 
 	if (sta && !sta->uploaded)
@@ -690,10 +693,9 @@ ieee80211_key_alloc(u32 cipher, int idx, size_t key_len,
 		 * Initialize AES key state here as an optimization so that
 		 * it does not need to be initialized for every packet.
 		 */
-		key->u.aes_cmac.tfm =
-			ieee80211_aes_cmac_key_setup(key_data, key_len);
-		if (IS_ERR(key->u.aes_cmac.tfm)) {
-			err = PTR_ERR(key->u.aes_cmac.tfm);
+		err = aes_cmac_preparekey(&key->u.aes_cmac.key, key_data,
+					  key_len);
+		if (err) {
 			kfree(key);
 			return ERR_PTR(err);
 		}
@@ -749,10 +751,6 @@ static void ieee80211_key_free_common(struct ieee80211_key *key)
 	case WLAN_CIPHER_SUITE_CCMP:
 	case WLAN_CIPHER_SUITE_CCMP_256:
 		ieee80211_aes_key_free(key->u.ccmp.tfm);
-		break;
-	case WLAN_CIPHER_SUITE_AES_CMAC:
-	case WLAN_CIPHER_SUITE_BIP_CMAC_256:
-		ieee80211_aes_cmac_key_free(key->u.aes_cmac.tfm);
 		break;
 	case WLAN_CIPHER_SUITE_BIP_GMAC_128:
 	case WLAN_CIPHER_SUITE_BIP_GMAC_256:
@@ -872,11 +870,16 @@ int ieee80211_key_link(struct ieee80211_key *key,
 		alt_key = wiphy_dereference(sdata->local->hw.wiphy,
 					    sta->ptk[idx ^ 1]);
 
-		/* The rekey code assumes that the old and new key are using
+		/*
+		 * The rekey code assumes that the old and new key are using
 		 * the same cipher. Enforce the assumption for pairwise keys.
+		 * NAN Data interfaces are exempt: Wi-Fi Aware v4.0 section 7.4
+		 * requires upgrading the ND-TKSA when a new NDP negotiates a
+		 * stronger cipher suite.
 		 */
-		if ((alt_key && alt_key->conf.cipher != key->conf.cipher) ||
-		    (old_key && old_key->conf.cipher != key->conf.cipher)) {
+		if (sdata->vif.type != NL80211_IFTYPE_NAN_DATA &&
+		    ((alt_key && alt_key->conf.cipher != key->conf.cipher) ||
+		     (old_key && old_key->conf.cipher != key->conf.cipher))) {
 			ret = -EOPNOTSUPP;
 			goto out;
 		}
@@ -987,7 +990,8 @@ void ieee80211_reenable_keys(struct ieee80211_sub_if_data *sdata)
 
 	if (ieee80211_sdata_running(sdata)) {
 		list_for_each_entry(key, &sdata->key_list, list) {
-			increment_tailroom_need_count(sdata);
+			if (!(key->flags & KEY_FLAG_TAINTED))
+				increment_tailroom_need_count(sdata);
 			ieee80211_key_enable_hw_accel(key);
 		}
 	}

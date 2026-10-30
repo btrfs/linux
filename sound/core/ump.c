@@ -166,7 +166,7 @@ int snd_ump_endpoint_new(struct snd_card *card, char *id, int device,
 	if (input && output)
 		info_flags |= SNDRV_RAWMIDI_INFO_DUPLEX;
 
-	ump = kzalloc(sizeof(*ump), GFP_KERNEL);
+	ump = kzalloc_obj(*ump);
 	if (!ump)
 		return -ENOMEM;
 	INIT_LIST_HEAD(&ump->block_list);
@@ -408,7 +408,7 @@ int snd_ump_block_new(struct snd_ump_endpoint *ump, unsigned int blk,
 	if (snd_ump_get_block(ump, blk))
 		return -EBUSY;
 
-	fb = kzalloc(sizeof(*fb), GFP_KERNEL);
+	fb = kzalloc_obj(*fb);
 	if (!fb)
 		return -ENOMEM;
 
@@ -1157,10 +1157,11 @@ static int snd_ump_legacy_open(struct snd_rawmidi_substream *substream)
 		return -ENODEV;
 	if (dir == SNDRV_RAWMIDI_STREAM_OUTPUT) {
 		if (!ump->legacy_out_opens) {
-			err = snd_rawmidi_kernel_open(&ump->core, 0,
-						      SNDRV_RAWMIDI_LFLG_OUTPUT |
-						      SNDRV_RAWMIDI_LFLG_APPEND,
-						      &ump->legacy_out_rfile);
+			err = snd_rawmidi_kernel_open_nested(&ump->core, 0,
+							     SNDRV_RAWMIDI_LFLG_OUTPUT |
+							     SNDRV_RAWMIDI_LFLG_APPEND,
+							     &ump->legacy_out_rfile,
+							     SINGLE_DEPTH_NESTING);
 			if (err < 0)
 				return err;
 		}
@@ -1183,7 +1184,8 @@ static int snd_ump_legacy_close(struct snd_rawmidi_substream *substream)
 		ump->legacy_substreams[dir][group] = NULL;
 	if (dir == SNDRV_RAWMIDI_STREAM_OUTPUT) {
 		if (!--ump->legacy_out_opens)
-			snd_rawmidi_kernel_release(&ump->legacy_out_rfile);
+			snd_rawmidi_kernel_release_nested(&ump->legacy_out_rfile,
+							  SINGLE_DEPTH_NESTING);
 	}
 	return 0;
 }
@@ -1333,6 +1335,8 @@ static void update_legacy_names(struct snd_ump_endpoint *ump)
 {
 	struct snd_rawmidi *rmidi = ump->legacy_rmidi;
 
+	if (!rmidi)
+		return;
 	update_legacy_substreams(ump, rmidi, SNDRV_RAWMIDI_STREAM_INPUT);
 	update_legacy_substreams(ump, rmidi, SNDRV_RAWMIDI_STREAM_OUTPUT);
 }
@@ -1341,6 +1345,8 @@ static void ump_legacy_set_rawmidi_name(struct snd_ump_endpoint *ump)
 {
 	struct snd_rawmidi *rmidi = ump->legacy_rmidi;
 
+	if (!rmidi)
+		return;
 	snprintf(rmidi->name, sizeof(rmidi->name), "%.68s (MIDI 1.0)",
 		 ump->core.name);
 }
@@ -1352,8 +1358,7 @@ int snd_ump_attach_legacy_rawmidi(struct snd_ump_endpoint *ump,
 	bool input, output;
 	int err, num;
 
-	ump->out_cvts = kcalloc(SNDRV_UMP_MAX_GROUPS,
-				sizeof(*ump->out_cvts), GFP_KERNEL);
+	ump->out_cvts = kzalloc_objs(*ump->out_cvts, SNDRV_UMP_MAX_GROUPS);
 	if (!ump->out_cvts)
 		return -ENOMEM;
 
@@ -1366,6 +1371,7 @@ int snd_ump_attach_legacy_rawmidi(struct snd_ump_endpoint *ump,
 			      &rmidi);
 	if (err < 0) {
 		kfree(ump->out_cvts);
+		ump->out_cvts = NULL;
 		return err;
 	}
 

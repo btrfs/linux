@@ -22,8 +22,7 @@ static bool p2p_enabled(struct dma_buf_test_params *params)
 
 static bool is_dynamic(struct dma_buf_test_params *params)
 {
-	return IS_ENABLED(CONFIG_DMABUF_MOVE_NOTIFY) && params->attach_ops &&
-		params->attach_ops->move_notify;
+	return params->attach_ops && params->attach_ops->invalidate_mappings;
 }
 
 static void check_residency(struct kunit *test, struct xe_bo *exported,
@@ -31,6 +30,7 @@ static void check_residency(struct kunit *test, struct xe_bo *exported,
 			    struct drm_exec *exec)
 {
 	struct dma_buf_test_params *params = to_dma_buf_test_params(test->priv);
+	struct dma_buf_attachment *attach;
 	u32 mem_type;
 	int ret;
 
@@ -46,7 +46,7 @@ static void check_residency(struct kunit *test, struct xe_bo *exported,
 		mem_type = XE_PL_TT;
 	else if (params->force_different_devices && !is_dynamic(params) &&
 		 (params->mem_mask & XE_BO_FLAG_SYSTEM))
-		/* Pin migrated to TT */
+		/* Pin migrated to TT on non-dynamic attachments. */
 		mem_type = XE_PL_TT;
 
 	if (!xe_bo_is_mem_type(exported, mem_type)) {
@@ -59,7 +59,7 @@ static void check_residency(struct kunit *test, struct xe_bo *exported,
 
 	/*
 	 * Evict exporter. Evicting the exported bo will
-	 * evict also the imported bo through the move_notify() functionality if
+	 * evict also the imported bo through the invalidate_mappings() functionality if
 	 * importer is on a different device. If they're on the same device,
 	 * the exporter and the importer should be the same bo.
 	 */
@@ -87,6 +87,18 @@ static void check_residency(struct kunit *test, struct xe_bo *exported,
 	}
 
 	KUNIT_EXPECT_TRUE(test, xe_bo_is_mem_type(exported, mem_type));
+
+	/* Check that we can pin without migrating. */
+	attach = list_first_entry_or_null(&dmabuf->attachments, typeof(*attach), node);
+	if (attach) {
+		int err = dma_buf_pin(attach);
+
+		if (!err) {
+			KUNIT_EXPECT_TRUE(test, xe_bo_is_mem_type(exported, mem_type));
+			dma_buf_unpin(attach);
+		}
+		KUNIT_EXPECT_EQ(test, err, 0);
+	}
 
 	if (params->force_different_devices)
 		KUNIT_EXPECT_TRUE(test, xe_bo_is_mem_type(imported, XE_PL_TT));
@@ -150,7 +162,7 @@ static void xe_test_dmabuf_import_same_driver(struct xe_device *xe)
 			xe_bo_lock(import_bo, false);
 			err = xe_bo_validate(import_bo, NULL, false, exec);
 
-			/* Pinning in VRAM is not allowed. */
+			/* Pinning in VRAM is not allowed for non-dynamic attachments */
 			if (!is_dynamic(params) &&
 			    params->force_different_devices &&
 			    !(params->mem_mask & XE_BO_FLAG_SYSTEM))
@@ -185,7 +197,7 @@ out:
 
 static const struct dma_buf_attach_ops nop2p_attach_ops = {
 	.allow_peer2peer = false,
-	.move_notify = xe_dma_buf_move_notify
+	.invalidate_mappings = xe_dma_buf_move_notify
 };
 
 /*
@@ -253,7 +265,7 @@ static int dma_buf_run_device(struct xe_device *xe)
 	const struct dma_buf_test_params *params;
 	struct kunit *test = kunit_get_current_test();
 
-	xe_pm_runtime_get(xe);
+	guard(xe_pm_runtime)(xe);
 	for (params = test_params; params->mem_mask; ++params) {
 		struct dma_buf_test_params p = *params;
 
@@ -261,7 +273,6 @@ static int dma_buf_run_device(struct xe_device *xe)
 		test->priv = &p;
 		xe_test_dmabuf_import_same_driver(xe);
 	}
-	xe_pm_runtime_put(xe);
 
 	/* A non-zero return would halt iteration over driver devices */
 	return 0;

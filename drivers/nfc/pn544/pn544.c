@@ -377,10 +377,9 @@ static int pn544_hci_start_poll(struct nfc_hci_dev *hdev,
 		return r;
 
 	if ((im_protocols | tm_protocols) & NFC_PROTO_NFC_DEP_MASK) {
-		hdev->gb = nfc_get_local_general_bytes(hdev->ndev,
-							&hdev->gb_len);
-		pr_debug("generate local bytes %p\n", hdev->gb);
-		if (hdev->gb == NULL || hdev->gb_len == 0) {
+		nfc_get_local_general_bytes(hdev->ndev, hdev->gb,
+					    sizeof(hdev->gb), &hdev->gb_len);
+		if (hdev->gb_len == 0) {
 			im_protocols &= ~NFC_PROTO_NFC_DEP_MASK;
 			tm_protocols &= ~NFC_PROTO_NFC_DEP_MASK;
 		}
@@ -910,7 +909,7 @@ int pn544_hci_probe(void *phy_id, const struct nfc_phy_ops *phy_ops,
 	struct nfc_hci_init_data init_data;
 	int r;
 
-	info = kzalloc(sizeof(struct pn544_hci_info), GFP_KERNEL);
+	info = kzalloc_obj(struct pn544_hci_info);
 	if (!info) {
 		r = -ENOMEM;
 		goto err_info_alloc;

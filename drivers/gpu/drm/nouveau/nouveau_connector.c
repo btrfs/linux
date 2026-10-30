@@ -232,7 +232,7 @@ nouveau_conn_atomic_duplicate_state(struct drm_connector *connector)
 {
 	struct nouveau_conn_atom *armc = nouveau_conn_atom(connector->state);
 	struct nouveau_conn_atom *asyc;
-	if (!(asyc = kmalloc(sizeof(*asyc), GFP_KERNEL)))
+	if (!(asyc = kmalloc_obj(*asyc)))
 		return NULL;
 	__drm_atomic_helper_connector_duplicate_state(connector, &asyc->state);
 	asyc->dither = armc->dither;
@@ -249,7 +249,7 @@ nouveau_conn_reset(struct drm_connector *connector)
 	struct nouveau_conn_atom *asyc;
 
 	if (drm_drv_uses_atomic_modeset(connector->dev)) {
-		if (WARN_ON(!(asyc = kzalloc(sizeof(*asyc), GFP_KERNEL))))
+		if (WARN_ON(!(asyc = kzalloc_obj(*asyc))))
 			return;
 
 		if (connector->state)
@@ -600,8 +600,11 @@ nouveau_connector_detect(struct drm_connector *connector, bool force)
 				new_edid = drm_get_edid(connector, nv_encoder->i2c);
 		} else {
 			ret = nvif_outp_edid_get(&nv_encoder->outp, (u8 **)&new_edid);
-			if (ret < 0)
+			if (ret < 0) {
+				pm_runtime_mark_last_busy(dev->dev);
+				pm_runtime_put_autosuspend(dev->dev);
 				return connector_status_disconnected;
+			}
 		}
 
 		nouveau_connector_set_edid(nv_connector, new_edid);
@@ -1132,7 +1135,7 @@ nouveau_connector_best_encoder(struct drm_connector *connector)
 }
 
 static int
-nouveau_connector_atomic_check(struct drm_connector *connector, struct drm_atomic_state *state)
+nouveau_connector_atomic_check(struct drm_connector *connector, struct drm_atomic_commit *state)
 {
 	struct nouveau_connector *nv_conn = nouveau_connector(connector);
 	struct drm_connector_state *conn_state =
@@ -1230,6 +1233,9 @@ nouveau_connector_aux_xfer(struct drm_dp_aux *obj, struct drm_dp_aux_msg *msg)
 	u8 size = msg->size;
 	int ret;
 
+	if (pm_runtime_suspended(nv_connector->base.dev->dev))
+		return -EBUSY;
+
 	nv_encoder = find_encoder(&nv_connector->base, DCB_OUTPUT_DP);
 	if (!nv_encoder)
 		return -ENODEV;
@@ -1298,7 +1304,7 @@ nouveau_connector_create(struct drm_device *dev, int index)
 	}
 	drm_connector_list_iter_end(&conn_iter);
 
-	nv_connector = kzalloc(sizeof(*nv_connector), GFP_KERNEL);
+	nv_connector = kzalloc_obj(*nv_connector);
 	if (!nv_connector)
 		return ERR_PTR(-ENOMEM);
 

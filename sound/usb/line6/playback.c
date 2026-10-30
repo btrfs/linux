@@ -182,6 +182,13 @@ static int submit_audio_out_urb(struct snd_line6_pcm *line6pcm)
 
 		fsize *= bytes_per_frame;
 
+		if (fsize > line6pcm->max_packet_size_out) {
+			dev_err(line6pcm->line6->ifcdev,
+				"playback packet too large: %d > %d\n",
+				fsize, line6pcm->max_packet_size_out);
+			return -EMSGSIZE;
+		}
+
 		fout->offset = urb_size;
 		fout->length = fsize;
 		urb_size += fsize;
@@ -404,8 +411,7 @@ int line6_create_audio_out_urbs(struct snd_line6_pcm *line6pcm)
 	struct usb_line6 *line6 = line6pcm->line6;
 	int i;
 
-	line6pcm->out.urbs = kcalloc(line6->iso_buffers, sizeof(struct urb *),
-				     GFP_KERNEL);
+	line6pcm->out.urbs = kzalloc_objs(struct urb *, line6->iso_buffers);
 	if (line6pcm->out.urbs == NULL)
 		return -ENOMEM;
 

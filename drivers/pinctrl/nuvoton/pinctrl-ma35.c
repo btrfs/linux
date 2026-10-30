@@ -81,10 +81,6 @@
 #define MVOLT_1800			0
 #define MVOLT_3300			1
 
-/* Non-constant mask variant of FIELD_GET() and FIELD_PREP() */
-#define field_get(_mask, _reg)	(((_reg) & (_mask)) >> (ffs(_mask) - 1))
-#define field_prep(_mask, _val)	(((_val) << (ffs(_mask) - 1)) & (_mask))
-
 static const char * const gpio_group_name[] = {
 	"gpioa", "gpiob", "gpioc", "gpiod", "gpioe", "gpiof", "gpiog",
 	"gpioh", "gpioi", "gpioj", "gpiok", "gpiol", "gpiom", "gpion",
@@ -206,7 +202,7 @@ static int ma35_pinctrl_dt_node_to_map_func(struct pinctrl_dev *pctldev,
 	}
 
 	map_num += grp->grp.npins;
-	new_map = kcalloc(map_num, sizeof(*new_map), GFP_KERNEL);
+	new_map = kzalloc_objs(*new_map, map_num);
 	if (!new_map)
 		return -ENOMEM;
 
@@ -1018,7 +1014,8 @@ static int ma35_pinctrl_parse_groups(struct fwnode_handle *fwnode, struct group_
 	grp->data = pin;
 
 	for (i = 0, j = 0; i < count; i += 3, j++) {
-		pin->offset = elems[i] * MA35_MFP_REG_SZ_PER_BANK + MA35_MFP_REG_BASE;
+		pin->offset = elems[i] * MA35_MFP_REG_SZ_PER_BANK + MA35_MFP_REG_BASE +
+			      (elems[i + 1] >= 8 ? 4 : 0);
 		pin->shift = (elems[i + 1] * MA35_MFP_BITS_PER_PORT) % 32;
 		pin->muxval = elems[i + 2];
 		pin->configs = configs;

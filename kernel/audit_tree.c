@@ -33,7 +33,7 @@ struct audit_chunk {
 	struct audit_node {
 		struct list_head list;
 		struct audit_tree *owner;
-		unsigned index;		/* index; upper bit indicates 'will prune' */
+		unsigned int index;	/* index; upper bit indicates 'will prune' */
 	} owners[] __counted_by(count);
 };
 
@@ -96,7 +96,7 @@ static struct audit_tree *alloc_tree(const char *s)
 	size_t sz;
 
 	sz = strlen(s) + 1;
-	tree = kmalloc(struct_size(tree, pathname, sz), GFP_KERNEL);
+	tree = kmalloc_flex(*tree, pathname, sz);
 	if (tree) {
 		refcount_set(&tree->count, 1);
 		tree->goner = 0;
@@ -192,7 +192,7 @@ static struct audit_chunk *alloc_chunk(int count)
 	struct audit_chunk *chunk;
 	int i;
 
-	chunk = kzalloc(struct_size(chunk, owners, count), GFP_KERNEL);
+	chunk = kzalloc_flex(*chunk, owners, count);
 	if (!chunk)
 		return NULL;
 
@@ -545,21 +545,37 @@ static void kill_rules(struct audit_context *context, struct audit_tree *tree)
 {
 	struct audit_krule *rule, *next;
 	struct audit_entry *entry;
+	bool need_sync = false;
+
+	list_for_each_entry_safe(rule, next, &tree->rules, rlist) {
+		entry = container_of(rule, struct audit_entry, rule);
+
+		if (rule->tree) {
+			/* not a half-baked one */
+			audit_tree_log_remove_rule(context, rule);
+			rule->tree = NULL;
+			list_del_rcu(&entry->list);
+			list_del(&entry->rule.list);
+			if (entry->rule.exe)
+				need_sync = true;
+		} else {
+			list_del_init(&rule->rlist);
+		}
+	}
+
+	if (list_empty(&tree->rules))
+		return;
+
+	if (need_sync)
+		synchronize_rcu();
 
 	list_for_each_entry_safe(rule, next, &tree->rules, rlist) {
 		entry = container_of(rule, struct audit_entry, rule);
 
 		list_del_init(&rule->rlist);
-		if (rule->tree) {
-			/* not a half-baked one */
-			audit_tree_log_remove_rule(context, rule);
-			if (entry->rule.exe)
-				audit_remove_mark(entry->rule.exe);
-			rule->tree = NULL;
-			list_del_rcu(&entry->list);
-			list_del(&entry->rule.list);
-			call_rcu(&entry->rcu, audit_free_rule_rcu);
-		}
+		if (entry->rule.exe)
+			audit_remove_mark(entry->rule.exe);
+		call_rcu(&entry->rcu, audit_free_rule_rcu);
 	}
 }
 

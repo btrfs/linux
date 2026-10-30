@@ -335,13 +335,30 @@ int cn20k_rvu_mbox_init(struct rvu *rvu, int type, int ndevs)
 	return rvu_alloc_mbox_memory(rvu, type, ndevs, MBOX_SIZE);
 }
 
+void cn20k_free_mbox_memory_type(struct rvu *rvu, int type)
+{
+	if (!is_cn20k(rvu->pdev) || !rvu->ng_rvu)
+		return;
+
+	switch (type) {
+	case TYPE_AFPF:
+		qmem_free(rvu->dev, rvu->ng_rvu->pf_mbox_addr);
+		rvu->ng_rvu->pf_mbox_addr = NULL;
+		break;
+	case TYPE_AFVF:
+		qmem_free(rvu->dev, rvu->ng_rvu->vf_mbox_addr);
+		rvu->ng_rvu->vf_mbox_addr = NULL;
+		break;
+	}
+}
+
 void cn20k_free_mbox_memory(struct rvu *rvu)
 {
 	if (!is_cn20k(rvu->pdev))
 		return;
 
-	qmem_free(rvu->dev, rvu->ng_rvu->pf_mbox_addr);
-	qmem_free(rvu->dev, rvu->ng_rvu->vf_mbox_addr);
+	cn20k_free_mbox_memory_type(rvu, TYPE_AFPF);
+	cn20k_free_mbox_memory_type(rvu, TYPE_AFVF);
 }
 
 void cn20k_rvu_disable_afvf_intr(struct rvu *rvu, int vfs)
@@ -397,6 +414,12 @@ int rvu_alloc_cint_qint_mem(struct rvu *rvu, struct rvu_pfvf *pfvf,
 	if (is_rvu_otx2(rvu) || is_cn20k(rvu->pdev))
 		return 0;
 
+	/* sanity check */
+	cfg = rvu_read64(rvu, BLKADDR_RVUM, RVU_PRIV_PFX_NIXX_CFG(0) |
+			 (RVU_AFPF << 16));
+	if (!cfg)
+		return 0;
+
 	ctx_cfg = rvu_read64(rvu, blkaddr, NIX_AF_CONST3);
 	/* Alloc memory for CQINT's HW contexts */
 	cfg = rvu_read64(rvu, blkaddr, NIX_AF_CONST2);
@@ -419,6 +442,17 @@ int rvu_alloc_cint_qint_mem(struct rvu *rvu, struct rvu_pfvf *pfvf,
 
 	rvu_write64(rvu, blkaddr, NIX_AF_LFX_QINTS_BASE(nixlf),
 		    (u64)pfvf->nix_qints_ctx->iova);
+
+	rvu_write64(rvu, BLKADDR_NIX0, RVU_AF_BAR2_SEL, RVU_AF_BAR2_PFID);
+	rvu_write64(rvu, BLKADDR_NIX0,
+		    AF_BAR2_ALIASX(0, NIX_GINT_INT_W1S), ALTAF_RDY);
+	/* wait for ack */
+	err = rvu_poll_reg(rvu, BLKADDR_NIX0,
+			   AF_BAR2_ALIASX(0, NIX_GINT_INT), ALTAF_RDY, true);
+	if (err)
+		rvu->altaf_ready = false;
+	else
+		rvu->altaf_ready = true;
 
 	return 0;
 }

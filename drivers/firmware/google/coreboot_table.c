@@ -13,13 +13,26 @@
 #include <linux/err.h>
 #include <linux/init.h>
 #include <linux/io.h>
+#include <linux/ioport.h>
 #include <linux/kernel.h>
+#include <linux/device-id/coreboot.h>
+#include <linux/mm.h>
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/platform_device.h>
 #include <linux/slab.h>
 
 #include "coreboot_table.h"
+
+/* Coreboot table header structure */
+struct coreboot_table_header {
+	char signature[4];
+	u32 header_bytes;
+	u32 header_checksum;
+	u32 table_bytes;
+	u32 table_checksum;
+	u32 table_entries;
+};
 
 #define CB_DEV(d) container_of(d, struct coreboot_device, dev)
 #define CB_DRV(d) container_of_const(d, struct coreboot_driver, drv)
@@ -101,22 +114,29 @@ void coreboot_driver_unregister(struct coreboot_driver *driver)
 }
 EXPORT_SYMBOL(coreboot_driver_unregister);
 
-static int coreboot_table_populate(struct device *dev, void *ptr)
+static int coreboot_table_populate(struct device *dev, void *ptr, resource_size_t len)
 {
 	int i, ret;
 	void *ptr_entry;
 	struct coreboot_device *device;
 	struct coreboot_table_entry *entry;
 	struct coreboot_table_header *header = ptr;
+	void *ptr_end;
 
+	ptr_end = ptr + len;
 	ptr_entry = ptr + header->header_bytes;
-	for (i = 0; i < header->table_entries; i++) {
+	for (i = 0; i < header->table_entries; i++, ptr_entry += entry->size) {
+		if (ptr_entry + sizeof(*entry) > ptr_end)
+			return -EINVAL;
 		entry = ptr_entry;
 
 		if (entry->size < sizeof(*entry)) {
 			dev_warn(dev, "coreboot table entry too small!\n");
 			return -EINVAL;
 		}
+
+		if (ptr_entry + entry->size > ptr_end)
+			return -EINVAL;
 
 		device = kzalloc(sizeof(device->dev) + entry->size, GFP_KERNEL);
 		if (!device)
@@ -129,6 +149,26 @@ static int coreboot_table_populate(struct device *dev, void *ptr)
 
 		switch (device->entry.tag) {
 		case LB_TAG_CBMEM_ENTRY:
+			/*
+			 * Skip entries that are not exclusively System RAM or
+			 * Reserved memory.
+			 * On ARM64, no-map regions are filtered out as they are
+			 * IORESOURCE_MEM (see request_standard_resources() in
+			 * arch/arm64/kernel/setup.c).
+			 * On x86, CBMEM often resides in standard reserved regions
+			 * (IORES_DESC_RESERVED).
+			 */
+			if (region_intersects(device->cbmem_entry.address,
+					      device->cbmem_entry.entry_size,
+					      IORESOURCE_SYSTEM_RAM,
+					      IORES_DESC_NONE) != REGION_INTERSECTS &&
+			    region_intersects(device->cbmem_entry.address,
+					      device->cbmem_entry.entry_size,
+					      IORESOURCE_MEM,
+					      IORES_DESC_RESERVED) != REGION_INTERSECTS) {
+				kfree(device);
+				continue;
+			}
 			dev_set_name(&device->dev, "cbmem-%08x",
 				     device->cbmem_entry.id);
 			break;
@@ -139,11 +179,9 @@ static int coreboot_table_populate(struct device *dev, void *ptr)
 
 		ret = device_register(&device->dev);
 		if (ret) {
+			dev_warn(dev, "failed to register coreboot device: %d\n", ret);
 			put_device(&device->dev);
-			return ret;
 		}
-
-		ptr_entry += entry->size;
 	}
 
 	return 0;
@@ -152,6 +190,7 @@ static int coreboot_table_populate(struct device *dev, void *ptr)
 static int coreboot_table_probe(struct platform_device *pdev)
 {
 	resource_size_t len;
+	resource_size_t table_span;
 	struct coreboot_table_header *header;
 	struct resource *res;
 	struct device *dev = &pdev->dev;
@@ -163,7 +202,7 @@ static int coreboot_table_probe(struct platform_device *pdev)
 		return -EINVAL;
 
 	len = resource_size(res);
-	if (!res->start || !len)
+	if (!res->start || len < sizeof(*header))
 		return -EINVAL;
 
 	/* Check just the header first to make sure things are sane */
@@ -171,19 +210,27 @@ static int coreboot_table_probe(struct platform_device *pdev)
 	if (!header)
 		return -ENOMEM;
 
-	len = header->header_bytes + header->table_bytes;
 	ret = strncmp(header->signature, "LBIO", sizeof(header->signature));
+
+	if (!ret &&
+	    (header->header_bytes < sizeof(*header) ||
+	     check_add_overflow((resource_size_t)header->header_bytes,
+				(resource_size_t)header->table_bytes,
+				&table_span) ||
+	     table_span > len))
+		ret = -EINVAL;
+
 	memunmap(header);
 	if (ret) {
 		dev_warn(dev, "coreboot table missing or corrupt!\n");
 		return -ENODEV;
 	}
 
-	ptr = memremap(res->start, len, MEMREMAP_WB);
+	ptr = memremap(res->start, table_span, MEMREMAP_WB);
 	if (!ptr)
 		return -ENOMEM;
 
-	ret = coreboot_table_populate(dev, ptr);
+	ret = coreboot_table_populate(dev, ptr, table_span);
 
 	memunmap(ptr);
 
@@ -251,7 +298,7 @@ static void __exit coreboot_table_driver_exit(void)
 	bus_unregister(&coreboot_bus_type);
 }
 
-module_init(coreboot_table_driver_init);
+subsys_initcall(coreboot_table_driver_init);
 module_exit(coreboot_table_driver_exit);
 
 MODULE_AUTHOR("Google, Inc.");

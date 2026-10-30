@@ -38,6 +38,7 @@
 #include <linux/vga_switcheroo.h>
 
 #include <drm/clients/drm_client_setup.h>
+#include <drm/intel/display_parent_interface.h>
 #include <drm/drm_crtc.h>
 #include <drm/drm_crtc_helper.h>
 #include <drm/drm_fb_helper.h>
@@ -47,21 +48,19 @@
 #include <drm/drm_managed.h>
 #include <drm/drm_print.h>
 
-#include "i915_vma.h"
 #include "intel_bo.h"
 #include "intel_display_core.h"
 #include "intel_display_rpm.h"
 #include "intel_display_types.h"
 #include "intel_fb.h"
-#include "intel_fb_pin.h"
 #include "intel_fbdev.h"
-#include "intel_fbdev_fb.h"
 #include "intel_frontbuffer.h"
+#include "intel_parent.h"
+#include "intel_plane.h"
 
 struct intel_fbdev {
 	struct intel_framebuffer *fb;
 	struct i915_vma *vma;
-	unsigned long vma_flags;
 };
 
 static struct intel_fbdev *to_intel_fbdev(struct drm_fb_helper *fb_helper)
@@ -133,6 +132,7 @@ static int intel_fbdev_mmap(struct fb_info *info, struct vm_area_struct *vma)
 static void intel_fbdev_fb_destroy(struct fb_info *info)
 {
 	struct drm_fb_helper *fb_helper = info->par;
+	struct intel_display *display = to_intel_display(fb_helper->client.dev);
 	struct intel_fbdev *ifbdev = to_intel_fbdev(fb_helper);
 
 	drm_fb_helper_fini(fb_helper);
@@ -142,12 +142,10 @@ static void intel_fbdev_fb_destroy(struct fb_info *info)
 	 * the info->screen_base mmaping. Leaking the VMA is simpler than
 	 * trying to rectify all the possible error paths leading here.
 	 */
-	intel_fb_unpin_vma(ifbdev->vma, ifbdev->vma_flags);
+	intel_parent_fb_pin_ggtt_unpin(display, ifbdev->vma, -1);
 	drm_framebuffer_remove(fb_helper->fb);
 
 	drm_client_release(&fb_helper->client);
-	drm_fb_helper_unprepare(fb_helper);
-	kfree(fb_helper);
 }
 
 __diag_push();
@@ -207,39 +205,122 @@ static const struct drm_fb_helper_funcs intel_fb_helper_funcs = {
 	.fb_set_suspend = intelfb_set_suspend,
 };
 
+static void intel_fbdev_fill_mode_cmd(struct intel_display *display,
+				      struct drm_fb_helper_surface_size *sizes,
+				      struct drm_mode_fb_cmd2 *mode_cmd)
+{
+	/* we don't do packed 24bpp */
+	if (sizes->surface_bpp == 24)
+		sizes->surface_bpp = 32;
+
+	mode_cmd->flags = DRM_MODE_FB_MODIFIERS;
+	mode_cmd->width = sizes->surface_width;
+	mode_cmd->height = sizes->surface_height;
+
+	mode_cmd->pitches[0] = intel_bo_fbdev_pitch_align(display, mode_cmd->width * DIV_ROUND_UP(sizes->surface_bpp, 8));
+	mode_cmd->pixel_format = drm_mode_legacy_fb_format(sizes->surface_bpp,
+							   sizes->surface_depth);
+	mode_cmd->modifier[0] = DRM_FORMAT_MOD_LINEAR;
+}
+
+static struct intel_framebuffer *
+__intel_fbdev_fb_alloc(struct intel_display *display,
+		       struct drm_fb_helper_surface_size *sizes)
+{
+	struct drm_mode_fb_cmd2 mode_cmd = {};
+	struct drm_framebuffer *fb;
+	struct drm_gem_object *obj;
+	int size;
+
+	intel_fbdev_fill_mode_cmd(display, sizes, &mode_cmd);
+
+	size = mode_cmd.pitches[0] * mode_cmd.height;
+	size = PAGE_ALIGN(size);
+
+	obj = intel_bo_fbdev_create(display, size);
+	if (IS_ERR(obj)) {
+		fb = ERR_CAST(obj);
+		goto err;
+	}
+
+	fb = intel_framebuffer_create(obj,
+				      drm_get_format_info(display->drm,
+							  mode_cmd.pixel_format,
+							  mode_cmd.modifier[0]),
+				      &mode_cmd);
+	if (IS_ERR(fb)) {
+		intel_bo_fbdev_destroy(obj);
+		goto err;
+	}
+
+	drm_gem_object_put(obj);
+
+	return to_intel_framebuffer(fb);
+
+err:
+	return ERR_CAST(fb);
+
+}
+
+static bool bios_fb_ok(const struct intel_framebuffer *fb,
+		       const struct drm_fb_helper_surface_size *sizes)
+{
+	struct intel_display *display = to_intel_display(fb->base.dev);
+	int width = fb->base.width;
+	int height = fb->base.height;
+	int depth = fb->base.format->depth;
+	int bpp = fb->base.format->cpp[0] * 8;
+
+	if (sizes->fb_width > width || sizes->fb_height > height) {
+		drm_dbg_kms(display->drm,
+			    "BIOS fb too small (%dx%d), we require (%dx%d), releasing it\n",
+			    width, height, sizes->fb_width, sizes->fb_height);
+		return false;
+	}
+
+	if (sizes->surface_depth != depth || sizes->surface_bpp != bpp) {
+		drm_dbg_kms(display->drm,
+			    "BIOS fb using wrong depth/bpp (%d/%d), we require (%d/%d), releasing it\n",
+			    depth, bpp, sizes->surface_depth, sizes->surface_bpp);
+		return false;
+	}
+
+	return true;
+}
+
 int intel_fbdev_driver_fbdev_probe(struct drm_fb_helper *helper,
 				   struct drm_fb_helper_surface_size *sizes)
 {
 	struct intel_display *display = to_intel_display(helper->dev);
 	struct intel_fbdev *ifbdev = to_intel_fbdev(helper);
+	struct intel_fb_pin_params pin_params = {};
 	struct intel_framebuffer *fb = ifbdev->fb;
+	struct fb_info *info = helper->info;
 	struct ref_tracker *wakeref;
-	struct fb_info *info;
 	struct i915_vma *vma;
-	unsigned long flags = 0;
 	bool prealloc = false;
 	struct drm_gem_object *obj;
+	u32 offset;
 	int ret;
 
 	ifbdev->fb = NULL;
 
-	if (fb &&
-	    (sizes->fb_width > fb->base.width ||
-	     sizes->fb_height > fb->base.height)) {
-		drm_dbg_kms(display->drm,
-			    "BIOS fb too small (%dx%d), we require (%dx%d),"
-			    " releasing it\n",
-			    fb->base.width, fb->base.height,
-			    sizes->fb_width, sizes->fb_height);
+	if (fb && !bios_fb_ok(fb, sizes)) {
 		drm_framebuffer_put(&fb->base);
 		fb = NULL;
 	}
+
+	wakeref = intel_display_rpm_get(display);
+
 	if (!fb || drm_WARN_ON(display->drm, !intel_fb_bo(&fb->base))) {
 		drm_dbg_kms(display->drm,
 			    "no BIOS fb, allocating a new one\n");
-		fb = intel_fbdev_fb_alloc(helper, sizes);
-		if (IS_ERR(fb))
-			return PTR_ERR(fb);
+
+		fb = __intel_fbdev_fb_alloc(display, sizes);
+		if (IS_ERR(fb)) {
+			ret = PTR_ERR(fb);
+			goto out_unlock;
+		}
 	} else {
 		drm_dbg_kms(display->drm, "re-using BIOS fb\n");
 		prealloc = true;
@@ -247,37 +328,30 @@ int intel_fbdev_driver_fbdev_probe(struct drm_fb_helper *helper,
 		sizes->fb_height = fb->base.height;
 	}
 
-	wakeref = intel_display_rpm_get(display);
+	obj = intel_fb_bo(&fb->base);
 
 	/* Pin the GGTT vma for our access via info->screen_base.
 	 * This also validates that any existing fb inherited from the
 	 * BIOS is suitable for own access.
 	 */
-	vma = intel_fb_pin_to_ggtt(&fb->base, &fb->normal_view.gtt,
-				   fb->min_alignment, 0,
-				   intel_fb_view_vtd_guard(&fb->base, &fb->normal_view,
-							   DRM_MODE_ROTATE_0),
-				   false, &flags);
-	if (IS_ERR(vma)) {
-		ret = PTR_ERR(vma);
-		goto out_unlock;
-	}
+	pin_params.view = &fb->normal_view.gtt;
+	pin_params.alignment = fb->min_alignment;
+	pin_params.vtd_guard = intel_fb_view_vtd_guard(&fb->base,
+						       &fb->normal_view,
+						       DRM_MODE_ROTATE_0);
+	pin_params.needs_low_address = intel_plane_needs_low_address(display);
 
-	info = drm_fb_helper_alloc_info(helper);
-	if (IS_ERR(info)) {
-		drm_err(display->drm, "Failed to allocate fb_info (%pe)\n", info);
-		ret = PTR_ERR(info);
-		goto out_unpin;
-	}
+	ret = intel_parent_fb_pin_ggtt_pin(display, obj, &pin_params,
+					   &vma, &offset, NULL);
+	if (ret)
+		goto out_unlock;
 
 	helper->funcs = &intel_fb_helper_funcs;
 	helper->fb = &fb->base;
 
 	info->fbops = &intelfb_ops;
 
-	obj = intel_fb_bo(&fb->base);
-
-	ret = intel_fbdev_fb_fill_info(display, info, obj, vma);
+	ret = intel_bo_fbdev_fill_info(obj, info, vma);
 	if (ret)
 		goto out_unpin;
 
@@ -292,19 +366,16 @@ int intel_fbdev_driver_fbdev_probe(struct drm_fb_helper *helper,
 
 	/* Use default scratch pixmap (info->pixmap.flags = FB_PIXMAP_SYSTEM) */
 
-	drm_dbg_kms(display->drm, "allocated %dx%d fb: 0x%08x\n",
-		    fb->base.width, fb->base.height,
-		    i915_ggtt_offset(vma));
+	drm_dbg_kms(display->drm, "allocated %dx%d fb\n", fb->base.width, fb->base.height);
 	ifbdev->fb = fb;
 	ifbdev->vma = vma;
-	ifbdev->vma_flags = flags;
 
 	intel_display_rpm_put(display, wakeref);
 
 	return 0;
 
 out_unpin:
-	intel_fb_unpin_vma(vma, flags);
+	intel_parent_fb_pin_ggtt_unpin(display, vma, -1);
 out_unlock:
 	intel_display_rpm_put(display, wakeref);
 
@@ -328,7 +399,7 @@ static bool intel_fbdev_init_bios(struct intel_display *display,
 	unsigned int max_size = 0;
 
 	/* Find the largest fb */
-	for_each_intel_crtc(display->drm, crtc) {
+	for_each_intel_crtc(display, crtc) {
 		struct intel_crtc_state *crtc_state =
 			to_intel_crtc_state(crtc->base.state);
 		struct intel_plane *plane =
@@ -367,7 +438,7 @@ static bool intel_fbdev_init_bios(struct intel_display *display,
 	}
 
 	/* Now make sure all the pipes will fit into it */
-	for_each_intel_crtc(display->drm, crtc) {
+	for_each_intel_crtc(display, crtc) {
 		struct intel_crtc_state *crtc_state =
 			to_intel_crtc_state(crtc->base.state);
 		struct intel_plane *plane =
@@ -437,7 +508,7 @@ static bool intel_fbdev_init_bios(struct intel_display *display,
 	drm_framebuffer_get(&ifbdev->fb->base);
 
 	/* Final pass to check if any active pipes don't have fbs */
-	for_each_intel_crtc(display->drm, crtc) {
+	for_each_intel_crtc(display, crtc) {
 		struct intel_crtc_state *crtc_state =
 			to_intel_crtc_state(crtc->base.state);
 		struct intel_plane *plane =
@@ -508,12 +579,9 @@ struct intel_framebuffer *intel_fbdev_framebuffer(struct intel_fbdev *fbdev)
 	return fbdev->fb;
 }
 
-struct i915_vma *intel_fbdev_vma_pointer(struct intel_fbdev *fbdev)
+void intel_fbdev_get_map(struct intel_display *display, struct iosys_map *map)
 {
-	return fbdev ? fbdev->vma : NULL;
-}
+	struct intel_fbdev *fbdev = display->fbdev.fbdev;
 
-void intel_fbdev_get_map(struct intel_fbdev *fbdev, struct iosys_map *map)
-{
-	intel_fb_get_map(fbdev->vma, map);
+	intel_parent_fb_pin_get_map(display, fbdev->vma, map);
 }

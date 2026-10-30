@@ -1265,7 +1265,7 @@ static int hellcreek_devlink_region_vlan_snapshot(struct devlink *dl,
 	struct hellcreek *hellcreek = ds->priv;
 	int i;
 
-	table = kcalloc(VLAN_N_VID, sizeof(*entry), GFP_KERNEL);
+	table = kzalloc_objs(*entry, VLAN_N_VID);
 	if (!table)
 		return -ENOMEM;
 
@@ -1293,7 +1293,7 @@ static int hellcreek_devlink_region_fdb_snapshot(struct devlink *dl,
 	struct hellcreek *hellcreek = ds->priv;
 	size_t i;
 
-	table = kcalloc(hellcreek->fdb_entries, sizeof(*entry), GFP_KERNEL);
+	table = kzalloc_objs(*entry, hellcreek->fdb_entries);
 	if (!table)
 		return -ENOMEM;
 
@@ -1926,31 +1926,29 @@ static const struct dsa_switch_ops hellcreek_ds_ops = {
 	.port_vlan_filtering   = hellcreek_vlan_filtering,
 	.setup		       = hellcreek_setup,
 	.teardown	       = hellcreek_teardown,
+	.port_hsr_join	       = dsa_port_simple_hsr_join,
+	.port_hsr_leave	       = dsa_port_simple_hsr_leave,
 };
 
 static int hellcreek_probe(struct platform_device *pdev)
 {
+	const struct hellcreek_platform_data *data;
 	struct device *dev = &pdev->dev;
 	struct hellcreek *hellcreek;
 	struct resource *res;
 	int ret, i;
 
-	hellcreek = devm_kzalloc(dev, sizeof(*hellcreek), GFP_KERNEL);
+	data = of_device_get_match_data(dev);
+	hellcreek = devm_kzalloc(dev, struct_size(hellcreek, ports, data->num_ports), GFP_KERNEL);
 	if (!hellcreek)
 		return -ENOMEM;
+
+	hellcreek->pdata = data;
 
 	hellcreek->vidmbrcfg = devm_kcalloc(dev, VLAN_N_VID,
 					    sizeof(*hellcreek->vidmbrcfg),
 					    GFP_KERNEL);
 	if (!hellcreek->vidmbrcfg)
-		return -ENOMEM;
-
-	hellcreek->pdata = of_device_get_match_data(dev);
-
-	hellcreek->ports = devm_kcalloc(dev, hellcreek->pdata->num_ports,
-					sizeof(*hellcreek->ports),
-					GFP_KERNEL);
-	if (!hellcreek->ports)
 		return -ENOMEM;
 
 	for (i = 0; i < hellcreek->pdata->num_ports; ++i) {

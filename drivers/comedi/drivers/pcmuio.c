@@ -362,12 +362,15 @@ static irqreturn_t pcmuio_interrupt(int irq, void *d)
 	struct pcmuio_private *devpriv = dev->private;
 	int handled = 0;
 
+	if (!dev->attached)
+		return IRQ_NONE;
+
 	if (irq == dev->irq)
 		handled += pcmuio_handle_asic_interrupt(dev, 0);
 	if (irq == devpriv->irq2)
 		handled += pcmuio_handle_asic_interrupt(dev, 1);
 
-	return handled ? IRQ_HANDLED : IRQ_NONE;
+	return IRQ_RETVAL(handled);
 }
 
 /* chip->spinlock is already locked */
@@ -521,11 +524,12 @@ static int pcmuio_attach(struct comedi_device *dev, struct comedi_devconfig *it)
 	const struct pcmuio_board *board = dev->board_ptr;
 	struct comedi_subdevice *s;
 	struct pcmuio_private *devpriv;
+	unsigned int io_len = board->num_asics * PCMUIO_ASIC_IOSIZE;
 	int ret;
 	int i;
 
-	ret = comedi_request_region(dev, it->options[0],
-				    board->num_asics * PCMUIO_ASIC_IOSIZE);
+	ret = comedi_check_request_region(dev, it->options[0], io_len,
+					  0, 0xffff, io_len);
 	if (ret)
 		return ret;
 

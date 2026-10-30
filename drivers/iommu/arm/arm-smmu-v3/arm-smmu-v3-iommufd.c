@@ -23,7 +23,7 @@ void *arm_smmu_hw_info(struct device *dev, u32 *length,
 		return impl_ops->hw_info(master->smmu, length, type);
 	}
 
-	info = kzalloc(sizeof(*info), GFP_KERNEL);
+	info = kzalloc_obj(*info);
 	if (!info)
 		return ERR_PTR(-ENOMEM);
 
@@ -32,6 +32,9 @@ void *arm_smmu_hw_info(struct device *dev, u32 *length,
 		info->idr[i] = readl_relaxed(base_idr + i);
 	info->iidr = readl_relaxed(master->smmu->base + ARM_SMMU_IIDR);
 	info->aidr = readl_relaxed(master->smmu->base + ARM_SMMU_AIDR);
+
+	if (arm_smmu_erratum_repeat_tlbi_cfgi())
+		info->flags |= IOMMU_HW_INFO_ARM_SMMUV3_ERRATA_REPEAT_TLBI_CFGI;
 
 	*length = sizeof(*info);
 	*type = IOMMU_HW_INFO_TYPE_ARM_SMMUV3;
@@ -99,6 +102,8 @@ static void arm_smmu_make_nested_domain_ste(
 int arm_smmu_attach_prepare_vmaster(struct arm_smmu_attach_state *state,
 				    struct arm_smmu_nested_domain *nested_domain)
 {
+	unsigned int cfg =
+		FIELD_GET(STRTAB_STE_0_CFG, le64_to_cpu(nested_domain->ste[0]));
 	struct arm_smmu_vmaster *vmaster;
 	unsigned long vsid;
 	int ret;
@@ -107,10 +112,19 @@ int arm_smmu_attach_prepare_vmaster(struct arm_smmu_attach_state *state,
 
 	ret = iommufd_viommu_get_vdev_id(&nested_domain->vsmmu->core,
 					 state->master->dev, &vsid);
-	if (ret)
+	/*
+	 * Attaching to a translate nested domain must allocate a vDEVICE prior,
+	 * as CD/ATS invalidations and vevents require a vSID to work properly.
+	 * A abort/bypass domain is allowed to attach w/o vmaster for GBPA case.
+	 */
+	if (ret) {
+		if (cfg == STRTAB_STE_0_CFG_ABORT ||
+		    cfg == STRTAB_STE_0_CFG_BYPASS)
+			return 0;
 		return ret;
+	}
 
-	vmaster = kzalloc(sizeof(*vmaster), GFP_KERNEL);
+	vmaster = kzalloc_obj(*vmaster);
 	if (!vmaster)
 		return -ENOMEM;
 	vmaster->vsmmu = nested_domain->vsmmu;
@@ -138,14 +152,15 @@ void arm_smmu_master_clear_vmaster(struct arm_smmu_master *master)
 }
 
 static int arm_smmu_attach_dev_nested(struct iommu_domain *domain,
-				      struct device *dev)
+				      struct device *dev,
+				      struct iommu_domain *old_domain)
 {
 	struct arm_smmu_nested_domain *nested_domain =
 		to_smmu_nested_domain(domain);
 	struct arm_smmu_master *master = dev_iommu_priv_get(dev);
 	struct arm_smmu_attach_state state = {
 		.master = master,
-		.old_domain = iommu_get_domain_for_dev(dev),
+		.old_domain = old_domain,
 		.ssid = IOMMU_NO_PASID,
 	};
 	struct arm_smmu_ste ste;
@@ -165,7 +180,9 @@ static int arm_smmu_attach_dev_nested(struct iommu_domain *domain,
 	 * config bit here base this off the EATS value in the STE. If the EATS
 	 * is set then the VM must generate ATC flushes.
 	 */
-	state.disable_ats = !nested_domain->enable_ats;
+	if (FIELD_GET(STRTAB_STE_0_CFG, le64_to_cpu(nested_domain->ste[0])) ==
+	    STRTAB_STE_0_CFG_S1_TRANS)
+		state.disable_ats = !nested_domain->enable_ats;
 	ret = arm_smmu_attach_prepare(&state, domain);
 	if (ret) {
 		mutex_unlock(&arm_smmu_asid_lock);
@@ -247,7 +264,7 @@ arm_vsmmu_alloc_domain_nested(struct iommufd_viommu *viommu, u32 flags,
 	if (ret)
 		return ERR_PTR(ret);
 
-	nested_domain = kzalloc(sizeof(*nested_domain), GFP_KERNEL_ACCOUNT);
+	nested_domain = kzalloc_obj(*nested_domain, GFP_KERNEL_ACCOUNT);
 	if (!nested_domain)
 		return ERR_PTR(-ENOMEM);
 
@@ -283,10 +300,24 @@ unlock:
 	return ret;
 }
 
+static int arm_vsmmu_vdevice_init(struct iommufd_vdevice *vdev)
+{
+	struct device *dev = iommufd_vdevice_to_device(vdev);
+	struct arm_smmu_master *master = dev_iommu_priv_get(dev);
+
+	/*
+	 * arm_vsmmu_vsid_to_sid() maps a vSID to master->streams[0] alone, so
+	 * more streams would leave the rest stale and none reads out of bounds.
+	 */
+	if (master->num_streams != 1)
+		return -EOPNOTSUPP;
+	return 0;
+}
+
 /* This is basically iommu_viommu_arm_smmuv3_invalidate in u64 for conversion */
 struct arm_vsmmu_invalidation_cmd {
 	union {
-		u64 cmd[2];
+		struct arm_smmu_cmd cmd;
 		struct iommu_viommu_arm_smmuv3_invalidate ucmd;
 	};
 };
@@ -302,32 +333,32 @@ static int arm_vsmmu_convert_user_cmd(struct arm_vsmmu *vsmmu,
 				      struct arm_vsmmu_invalidation_cmd *cmd)
 {
 	/* Commands are le64 stored in u64 */
-	cmd->cmd[0] = le64_to_cpu(cmd->ucmd.cmd[0]);
-	cmd->cmd[1] = le64_to_cpu(cmd->ucmd.cmd[1]);
+	cmd->cmd.data[0] = le64_to_cpu(cmd->ucmd.cmd[0]);
+	cmd->cmd.data[1] = le64_to_cpu(cmd->ucmd.cmd[1]);
 
-	switch (cmd->cmd[0] & CMDQ_0_OP) {
+	switch (cmd->cmd.data[0] & CMDQ_0_OP) {
 	case CMDQ_OP_TLBI_NSNH_ALL:
 		/* Convert to NH_ALL */
-		cmd->cmd[0] = CMDQ_OP_TLBI_NH_ALL |
+		cmd->cmd.data[0] = CMDQ_OP_TLBI_NH_ALL |
 			      FIELD_PREP(CMDQ_TLBI_0_VMID, vsmmu->vmid);
-		cmd->cmd[1] = 0;
+		cmd->cmd.data[1] = 0;
 		break;
 	case CMDQ_OP_TLBI_NH_VA:
 	case CMDQ_OP_TLBI_NH_VAA:
 	case CMDQ_OP_TLBI_NH_ALL:
 	case CMDQ_OP_TLBI_NH_ASID:
-		cmd->cmd[0] &= ~CMDQ_TLBI_0_VMID;
-		cmd->cmd[0] |= FIELD_PREP(CMDQ_TLBI_0_VMID, vsmmu->vmid);
+		cmd->cmd.data[0] &= ~CMDQ_TLBI_0_VMID;
+		cmd->cmd.data[0] |= FIELD_PREP(CMDQ_TLBI_0_VMID, vsmmu->vmid);
 		break;
 	case CMDQ_OP_ATC_INV:
 	case CMDQ_OP_CFGI_CD:
 	case CMDQ_OP_CFGI_CD_ALL: {
-		u32 sid, vsid = FIELD_GET(CMDQ_CFGI_0_SID, cmd->cmd[0]);
+		u32 sid, vsid = FIELD_GET(CMDQ_CFGI_0_SID, cmd->cmd.data[0]);
 
 		if (arm_vsmmu_vsid_to_sid(vsmmu, vsid, &sid))
 			return -EIO;
-		cmd->cmd[0] &= ~CMDQ_CFGI_0_SID;
-		cmd->cmd[0] |= FIELD_PREP(CMDQ_CFGI_0_SID, sid);
+		cmd->cmd.data[0] &= ~CMDQ_CFGI_0_SID;
+		cmd->cmd.data[0] |= FIELD_PREP(CMDQ_CFGI_0_SID, sid);
 		break;
 	}
 	default:
@@ -347,7 +378,7 @@ int arm_vsmmu_cache_invalidate(struct iommufd_viommu *viommu,
 	struct arm_vsmmu_invalidation_cmd *end;
 	int ret;
 
-	cmds = kcalloc(array->entry_num, sizeof(*cmds), GFP_KERNEL);
+	cmds = kzalloc_objs(*cmds, array->entry_num);
 	if (!cmds)
 		return -ENOMEM;
 	cur = cmds;
@@ -372,8 +403,8 @@ int arm_vsmmu_cache_invalidate(struct iommufd_viommu *viommu,
 			continue;
 
 		/* FIXME always uses the main cmdq rather than trying to group by type */
-		ret = arm_smmu_cmdq_issue_cmdlist(smmu, &smmu->cmdq, last->cmd,
-						  cur - last, true);
+		ret = __arm_smmu_cmdq_issue_cmdlist(smmu, &smmu->cmdq, &last->cmd,
+						    cur - last, true);
 		if (ret) {
 			cur--;
 			goto out;
@@ -389,6 +420,7 @@ out:
 static const struct iommufd_viommu_ops arm_vsmmu_ops = {
 	.alloc_domain_nested = arm_vsmmu_alloc_domain_nested,
 	.cache_invalidate = arm_vsmmu_cache_invalidate,
+	.vdevice_init = arm_vsmmu_vdevice_init,
 };
 
 size_t arm_smmu_get_viommu_size(struct device *dev,

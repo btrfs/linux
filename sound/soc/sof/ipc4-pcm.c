@@ -476,8 +476,8 @@ static int sof_ipc4_trigger_pipelines(struct snd_soc_component *component,
 	}
 
 	/* allocate memory for the pipeline data */
-	trigger_list = kzalloc(struct_size(trigger_list, pipeline_instance_ids,
-					   pipeline_list->count), GFP_KERNEL);
+	trigger_list = kzalloc_flex(*trigger_list, pipeline_instance_ids,
+				    pipeline_list->count);
 	if (!trigger_list)
 		return -ENOMEM;
 
@@ -487,7 +487,7 @@ static int sof_ipc4_trigger_pipelines(struct snd_soc_component *component,
 		return -ENOMEM;
 	}
 
-	mutex_lock(&ipc4_data->pipeline_state_mutex);
+	guard(mutex)(&ipc4_data->pipeline_state_mutex);
 
 	/*
 	 * IPC4 requires pipelines to be triggered in order starting at the sink and
@@ -528,7 +528,19 @@ static int sof_ipc4_trigger_pipelines(struct snd_soc_component *component,
 	ret = sof_ipc4_set_multi_pipeline_state(sdev, SOF_IPC4_PIPE_PAUSED, trigger_list);
 	if (ret < 0) {
 		spcm_err(spcm, substream->stream, "failed to pause all pipelines\n");
-		goto free;
+		/*
+		 * workaround: if the firmware is crashed or the IPC timed out
+		 * while setting the pipeline state we must ignore the error
+		 * code and proceed to set adjust the local pipeline states.
+		 *
+		 * If the firmware is crashed we will not send IPC messages
+		 * and we are going to see errors printed, but the state of the
+		 * widgets will be correct for the next boot.
+		 */
+		if (sdev->fw_state != SOF_FW_CRASHED && ret != -ETIMEDOUT)
+			goto free;
+
+		ret = 0;
 	}
 
 	/* update PAUSED state for all pipelines just triggered */
@@ -560,14 +572,15 @@ skip_pause_transition:
 			 "failed to set final state %d for all pipelines\n",
 			 state);
 		/*
-		 * workaround: if the firmware is crashed while setting the
-		 * pipelines to reset state we must ignore the error code and
-		 * reset it to 0.
-		 * Since the firmware is crashed we will not send IPC messages
+		 * workaround: if the firmware is crashed or the IPC timed out
+		 * while setting the pipeline state we must ignore the error
+		 * code and proceed to set adjust the local pipeline states.
+		 *
+		 * If the firmware is crashed we will not send IPC messages
 		 * and we are going to see errors printed, but the state of the
 		 * widgets will be correct for the next boot.
 		 */
-		if (sdev->fw_state != SOF_FW_CRASHED || state != SOF_IPC4_PIPE_RESET)
+		if (sdev->fw_state != SOF_FW_CRASHED && ret != -ETIMEDOUT)
 			goto free;
 
 		ret = 0;
@@ -580,7 +593,6 @@ skip_pause_transition:
 	}
 
 free:
-	mutex_unlock(&ipc4_data->pipeline_state_mutex);
 	kfree(trigger_list);
 	kfree(pipe_priority);
 	return ret;
@@ -932,15 +944,14 @@ static int sof_ipc4_pcm_setup(struct snd_sof_dev *sdev, struct snd_sof_pcm *spcm
 		pipeline_list = &spcm->stream[stream].pipeline_list;
 
 		/* allocate memory for max number of pipeline IDs */
-		pipeline_list->pipelines = kcalloc(ipc4_data->max_num_pipelines,
-						   sizeof(*pipeline_list->pipelines),
-						   GFP_KERNEL);
+		pipeline_list->pipelines = kzalloc_objs(*pipeline_list->pipelines,
+							ipc4_data->max_num_pipelines);
 		if (!pipeline_list->pipelines) {
 			sof_ipc4_pcm_free(sdev, spcm);
 			return -ENOMEM;
 		}
 
-		stream_priv = kzalloc(sizeof(*stream_priv), GFP_KERNEL);
+		stream_priv = kzalloc_obj(*stream_priv);
 		if (!stream_priv) {
 			sof_ipc4_pcm_free(sdev, spcm);
 			return -ENOMEM;
@@ -952,7 +963,7 @@ static int sof_ipc4_pcm_setup(struct snd_sof_dev *sdev, struct snd_sof_pcm *spcm
 		if (!support_info || stream == SNDRV_PCM_STREAM_CAPTURE)
 			continue;
 
-		time_info = kzalloc(sizeof(*time_info), GFP_KERNEL);
+		time_info = kzalloc_obj(*time_info);
 		if (!time_info) {
 			sof_ipc4_pcm_free(sdev, spcm);
 			return -ENOMEM;

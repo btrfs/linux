@@ -2,7 +2,6 @@
 #ifndef _LINUX_TYPES_H
 #define _LINUX_TYPES_H
 
-#define __EXPORTED_HEADERS__
 #include <uapi/linux/types.h>
 
 #ifndef __ASSEMBLY__
@@ -50,6 +49,7 @@ typedef __kernel_old_gid_t	old_gid_t;
 
 #if defined(__GNUC__)
 typedef __kernel_loff_t		loff_t;
+typedef __kernel_uoff_t		uoff_t;
 #endif
 
 /*
@@ -163,12 +163,19 @@ typedef u32 dma_addr_t;
 typedef unsigned int __bitwise gfp_t;
 typedef unsigned int __bitwise slab_flags_t;
 typedef unsigned int __bitwise fmode_t;
+typedef unsigned int __bitwise blk_mode_t;
+typedef unsigned int __bitwise fop_flags_t;
 
 #ifdef CONFIG_PHYS_ADDR_T_64BIT
 typedef u64 phys_addr_t;
 #else
 typedef u32 phys_addr_t;
 #endif
+
+struct phys_vec {
+	phys_addr_t	paddr;
+	size_t		len;
+};
 
 typedef phys_addr_t resource_size_t;
 
@@ -179,7 +186,7 @@ typedef phys_addr_t resource_size_t;
 typedef unsigned long irq_hw_number_t;
 
 typedef struct {
-	int counter;
+	int __aligned(sizeof(int)) counter;
 } atomic_t;
 
 #define ATOMIC_INIT(i) { (i) }
@@ -219,6 +226,12 @@ struct ustat {
 	char			f_fpack[6];
 };
 
+struct kcov_common_handle_id {
+#ifdef CONFIG_KCOV
+	u64 val;
+#endif
+};
+
 /**
  * struct callback_head - callback structure for use with RCU and task_work
  * @next: next update requests in a list
@@ -234,7 +247,7 @@ struct ustat {
  *
  * This guarantee is important for few reasons:
  *  - future call_rcu_lazy() will make use of lower bits in the pointer;
- *  - the structure shares storage space in struct page with @compound_head,
+ *  - the structure shares storage space in struct page with @compound_info,
  *    which encode PageTail() in bit 0. The guarantee is needed to avoid
  *    false-positive PageTail().
  */
@@ -243,6 +256,16 @@ struct callback_head {
 	void (*func)(struct callback_head *head);
 } __attribute__((aligned(sizeof(void *))));
 #define rcu_head callback_head
+
+#ifdef CONFIG_KVFREE_RCU_BATCHED
+struct kvfree_rcu_head {
+	struct kvfree_rcu_head *next;
+};
+#else
+struct kvfree_rcu_head {
+	struct rcu_head head;
+};
+#endif
 
 typedef void (*rcu_callback_t)(struct rcu_head *head);
 typedef void (*call_rcu_func_t)(struct rcu_head *head, rcu_callback_t func);

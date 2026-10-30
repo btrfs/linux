@@ -153,21 +153,6 @@ nouveau_name(struct drm_device *dev)
 		return nouveau_platform_name(to_platform_device(dev->dev));
 }
 
-static inline bool
-nouveau_cli_work_ready(struct dma_fence *fence)
-{
-	bool ret = true;
-
-	spin_lock_irq(fence->lock);
-	if (!dma_fence_is_signaled_locked(fence))
-		ret = false;
-	spin_unlock_irq(fence->lock);
-
-	if (ret == true)
-		dma_fence_put(fence);
-	return ret;
-}
-
 static void
 nouveau_cli_work(struct work_struct *w)
 {
@@ -175,9 +160,25 @@ nouveau_cli_work(struct work_struct *w)
 	struct nouveau_cli_work *work, *wtmp;
 	mutex_lock(&cli->lock);
 	list_for_each_entry_safe(work, wtmp, &cli->worker, head) {
-		if (!work->fence || nouveau_cli_work_ready(work->fence)) {
+		struct dma_fence *fence = work->fence;
+
+		if (!fence || dma_fence_is_signaled(fence)) {
+			if (fence) {
+				unsigned long flags;
+
+				/*
+				 * Because fence can still be in the process of
+				 * processing the callback list, and the
+				 * callback references the work we are about to
+				 * free, we need to sync with the callback
+				 * processing before freeing the work.
+				 */
+				dma_fence_lock_irqsave(fence, flags);
+				dma_fence_unlock_irqrestore(fence, flags);
+			}
 			list_del(&work->head);
 			work->func(work);
+			dma_fence_put(fence);
 		}
 	}
 	mutex_unlock(&cli->lock);
@@ -584,6 +585,7 @@ nouveau_drm_device_fini(struct nouveau_drm *drm)
 	if (nouveau_pmops_runtime()) {
 		pm_runtime_get_sync(dev->dev);
 		pm_runtime_forbid(dev->dev);
+		pm_runtime_dont_use_autosuspend(dev->dev);
 	}
 
 	nouveau_led_fini(dev);
@@ -631,7 +633,7 @@ nouveau_drm_device_init(struct nouveau_drm *drm)
 	struct drm_device *dev = drm->dev;
 	int ret;
 
-	drm->sched_wq = alloc_workqueue("nouveau_sched_wq_shared", 0,
+	drm->sched_wq = alloc_workqueue("nouveau_sched_wq_shared", WQ_PERCPU,
 					WQ_MAX_ACTIVE);
 	if (!drm->sched_wq)
 		return -ENOMEM;
@@ -739,7 +741,7 @@ nouveau_drm_device_new(const struct drm_driver *drm_driver, struct device *paren
 	struct nouveau_drm *drm;
 	int ret;
 
-	drm = kzalloc(sizeof(*drm), GFP_KERNEL);
+	drm = kzalloc_obj(*drm);
 	if (!drm)
 		return ERR_PTR(-ENOMEM);
 
@@ -874,7 +876,7 @@ static int nouveau_drm_probe(struct pci_dev *pdev,
 	/* Remove conflicting drivers (vesafb, efifb etc). */
 	ret = aperture_remove_conflicting_pci_devices(pdev, driver_pci.name);
 	if (ret)
-		return ret;
+		goto fail_nvkm;
 
 	pci_set_master(pdev);
 
@@ -983,7 +985,7 @@ nouveau_do_suspend(struct nouveau_drm *drm, bool runtime)
 	}
 
 	NV_DEBUG(drm, "suspending object tree...\n");
-	ret = nvif_client_suspend(&drm->_client);
+	ret = nvif_client_suspend(&drm->_client, runtime);
 	if (ret)
 		goto fail_client;
 
@@ -1079,6 +1081,37 @@ nouveau_pmops_resume(struct device *dev)
 	return ret;
 }
 
+static void
+nouveau_drm_shutdown(struct pci_dev *pdev)
+{
+	struct nouveau_drm *drm = pci_get_drvdata(pdev);
+	int ret;
+
+	if (!drm)
+		return;
+
+	if (drm->dev->switch_power_state == DRM_SWITCH_POWER_OFF ||
+	    drm->dev->switch_power_state == DRM_SWITCH_POWER_DYNAMIC_OFF)
+		return;
+
+	ret = nouveau_do_suspend(drm, false);
+	if (ret)
+		NV_ERROR(drm, "shutdown suspend failed with: %d\n", ret);
+
+	pci_save_state(pdev);
+	pci_disable_device(pdev);
+	pci_set_power_state(pdev, PCI_D3hot);
+	/*
+	 *  This is just to give the pci power transition time to settle
+	 *  before an immediate kexec jump. it’s mirroring the existing
+	 *  nouveau_pmops_suspend() behavior, which already does
+	 *  udelay(200) right after pci_set_power_state(..., pci_d3hot). In
+	 *  ->shutdown() we’re allowed to sleep, so I used usleep_range()
+	 *  instead of a busy-wait udelay().
+	 */
+	usleep_range(200, 400);
+}
+
 static int
 nouveau_pmops_freeze(struct device *dev)
 {
@@ -1116,10 +1149,23 @@ nouveau_pmops_runtime_suspend(struct device *dev)
 {
 	struct pci_dev *pdev = to_pci_dev(dev);
 	struct nouveau_drm *drm = pci_get_drvdata(pdev);
+	struct nvif_device *nvif = &drm->client.device;
 	int ret;
 
 	if (!nouveau_pmops_runtime()) {
 		pm_runtime_forbid(dev);
+		return -EBUSY;
+	}
+
+	// Check if the GPU itself is ready for runtime suspend, otherwise mark as busy and check
+	// again in a bit.
+	ret = nvif_device_gcx_ready(nvif);
+	if (ret < 0) {
+		NV_ERROR(drm, "Failed to query GCX readiness (returned %d)\n", ret);
+		return -EBUSY;
+	} else if (!(ret & NV_DEVICE_GCOFF_READY)) {
+		NV_DEBUG(drm, "GPU isn't ready for suspend yet, delaying...\n");
+		pm_runtime_mark_last_busy(dev);
 		return -EBUSY;
 	}
 
@@ -1177,7 +1223,6 @@ nouveau_pmops_runtime_idle(struct device *dev)
 		return -EBUSY;
 	}
 
-	pm_runtime_mark_last_busy(dev);
 	pm_runtime_autosuspend(dev);
 	/* we don't want the main rpm_idle to call suspend - we want to autosuspend */
 	return 1;
@@ -1203,7 +1248,7 @@ nouveau_drm_open(struct drm_device *dev, struct drm_file *fpriv)
 		 current->comm, pid_nr(rcu_dereference(fpriv->pid)));
 	rcu_read_unlock();
 
-	if (!(cli = kzalloc(sizeof(*cli), GFP_KERNEL))) {
+	if (!(cli = kzalloc_obj(*cli))) {
 		ret = -ENOMEM;
 		goto done;
 	}
@@ -1219,10 +1264,8 @@ nouveau_drm_open(struct drm_device *dev, struct drm_file *fpriv)
 	mutex_unlock(&drm->clients_lock);
 
 done:
-	if (ret && cli) {
-		nouveau_cli_fini(cli);
+	if (ret && cli)
 		kfree(cli);
-	}
 
 	pm_runtime_mark_last_busy(dev->dev);
 	pm_runtime_put_autosuspend(dev->dev);
@@ -1272,6 +1315,7 @@ nouveau_ioctls[] = {
 	DRM_IOCTL_DEF_DRV(NOUVEAU_GROBJ_ALLOC, nouveau_abi16_ioctl_grobj_alloc, DRM_RENDER_ALLOW),
 	DRM_IOCTL_DEF_DRV(NOUVEAU_NOTIFIEROBJ_ALLOC, nouveau_abi16_ioctl_notifierobj_alloc, DRM_RENDER_ALLOW),
 	DRM_IOCTL_DEF_DRV(NOUVEAU_GPUOBJ_FREE, nouveau_abi16_ioctl_gpuobj_free, DRM_RENDER_ALLOW),
+	DRM_IOCTL_DEF_DRV(NOUVEAU_GET_ZCULL_INFO, nouveau_abi16_ioctl_get_zcull_info, DRM_RENDER_ALLOW),
 	DRM_IOCTL_DEF_DRV(NOUVEAU_SVM_INIT, nouveau_svmm_init, DRM_RENDER_ALLOW),
 	DRM_IOCTL_DEF_DRV(NOUVEAU_SVM_BIND, nouveau_svmm_bind, DRM_RENDER_ALLOW),
 	DRM_IOCTL_DEF_DRV(NOUVEAU_GEM_NEW, nouveau_gem_ioctl_new, DRM_RENDER_ALLOW),
@@ -1331,7 +1375,6 @@ static struct drm_driver
 driver_stub = {
 	.driver_features = DRIVER_GEM |
 			   DRIVER_SYNCOBJ | DRIVER_SYNCOBJ_TIMELINE |
-			   DRIVER_GEM_GPUVA |
 			   DRIVER_MODESET |
 			   DRIVER_RENDER,
 	.open = nouveau_drm_open,
@@ -1408,6 +1451,7 @@ nouveau_drm_pci_driver = {
 	.id_table = nouveau_drm_pci_table,
 	.probe = nouveau_drm_probe,
 	.remove = nouveau_drm_remove,
+	.shutdown = nouveau_drm_shutdown,
 	.driver.pm = &nouveau_pm_ops,
 };
 
